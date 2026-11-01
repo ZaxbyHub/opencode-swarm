@@ -226,11 +226,14 @@ describe('file-locks — stale owner substrate (#2967 plan 05 v8 §1.4)', () => 
 
 		seedOwnerLock(lck, makePayload({ ownerPid: deadPid }));
 		expect(breakDeadOwner(lck)).toBe('broken');
+		// The one break probes liveness twice (read-only pre-validation +
+		// the final pre-unlink recheck — review round-2 hardening).
+		expect(killCalls).toBe(2);
 		// A second dead-owner generation on the SAME target inside the
 		// cooldown window: classified 'live' with no probe, no event.
 		seedOwnerLock(lck, makePayload({ ownerPid: deadPid, nonce: 'second' }));
 		expect(breakDeadOwner(lck)).toBe('live');
-		expect(killCalls).toBe(1);
+		expect(killCalls).toBe(2);
 		expect(
 			(await fx.readBreakEvents(dir)).filter((e) => e.store === 'evidence'),
 		).toHaveLength(1);
@@ -384,10 +387,11 @@ describe('file-locks — stale owner substrate (#2967 plan 05 v8 §1.4)', () => 
 			lck,
 			makePayload({ nonce: 'foreign', ownerPid: deadPid }),
 		);
-		expect(await releaseLaneLocks(dir, 'lane-14')).toBe(1);
-		// Meta bookkeeping removed, but the foreign lock was NOT unlinked
-		// (self-release fence mismatch; fenced breaker TTL-bound).
-		expect(fs.existsSync(metaPath)).toBe(false);
+		// Feedback PRR-005: the fence refuses (foreign generation), and the
+		// meta sidecar is RETAINED — bookkeeping for the still-held live
+		// `.lck` — instead of orphaning a lock with zero bookkeeping.
+		expect(await releaseLaneLocks(dir, 'lane-14')).toBe(0);
+		expect(fs.existsSync(metaPath)).toBe(true);
 		expect(fs.existsSync(lck)).toBe(true);
 		expect(fs.readFileSync(lck, 'utf-8')).toBe(foreignRaw);
 	}, 20_000);

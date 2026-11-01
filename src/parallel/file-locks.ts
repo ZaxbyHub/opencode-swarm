@@ -149,8 +149,15 @@ function markerPathFor(ownerLockPath: string): string {
  *  foreign process, which starts seconds+ apart), so a small tolerance keeps
  *  the fence exact where it matters while immune to quantization drift. The
  *  identity-fence release itself (releaseOwnerLock) compares the file payload
- *  against the acquire-time triple — byte-stable, no drift exposure. */
-const START_BOUND_TOLERANCE_MS = 5;
+ *  against the acquire-time triple — byte-stable, no drift exposure.
+ *  Feedback PRR-005: the lane-release fence compares meta.startBoundMs
+ *  (sampled at lane-acquire time) with a freshly recomputed bound, and a
+ *  lane can outlive its acquire by minutes — quantization drift across a
+ *  wall-clock-second boundary is ±2-4 ms, so 5 ms misfenced OUR OWN
+ *  generation, leaked the `.lck` and orphaned a live-pid lock for process
+ *  lifetime. 250 ms keeps second-scale discrimination (a recycled-pid
+ *  foreign process starts seconds+ apart) with a wide margin. */
+const START_BOUND_TOLERANCE_MS = 250;
 
 /** Legacy sentinel path resolution (pre-#2967 substrate). Kept byte-identical
  *  for the legacy probe and cleanup; new code never creates these. */
@@ -187,15 +194,19 @@ function existingLegacySentinels(
 	const candidates = [
 		crypto.createHash('sha256').update(pathForHash).digest('hex'),
 	];
+	// Era-A base64 alias forms. Feedback PRR-012: a win32 path with case
+	// variance has TWO alias forms (the verbatim path AND the lowercased
+	// hash input — getLockFilePath probes both), but only the verbatim form
+	// was probed here, so a legacy lock keyed under the lowercased alias
+	// stayed invisible to the exclusion probe on win32 uppercase paths.
 	if (process.platform === 'win32' && normalized !== pathForHash) {
 		candidates.push(
 			Buffer.from(normalized).toString('base64').replace(/[/+=]/g, '_'),
 		);
-	} else {
-		candidates.push(
-			Buffer.from(pathForHash).toString('base64').replace(/[/+=]/g, '_'),
-		);
 	}
+	candidates.push(
+		Buffer.from(pathForHash).toString('base64').replace(/[/+=]/g, '_'),
+	);
 	const found: string[] = [];
 	for (const c of candidates) {
 		const p = path.join(directory, LOCKS_DIR, `${c}.lock`);
@@ -210,6 +221,13 @@ function existingLegacySentinels(
  */
 function getMetaPath(lockPath: string): string {
 	return `${lockPath.replace(/\.(lock|lck)$/, '')}.meta`;
+}
+
+/** True when the sibling meta names a lane (feedback PRR-026 telemetry
+ *  discriminator: 'lane' vs 'generic' for cleanup/release-time breaks). */
+function hasLaneMeta(lockPath: string): boolean {
+	const meta = readMetaFile(getMetaPath(lockPath));
+	return meta !== null && typeof meta.laneId === 'string' && meta.laneId !== '';
 }
 
 // ---------------------------------------------------------------------------
@@ -233,7 +251,22 @@ function parseOwnerPayload(raw: string | null): OwnerLockPayload | null {
 	if (raw === null || raw.length === 0) return null;
 	try {
 		const parsed = JSON.parse(raw) as OwnerLockPayload;
-		if (parsed?.v !== 1 || !Number.isSafeInteger(parsed.ownerPid)) {
+		// Strict shape validation (feedback PRR-016 + posted-review invalid-PID
+		// finding): a payload with a non-positive pid or garbage in ANY
+		// identity field is ownerless — TTL-only. Without this, ownerPid 0/-1
+		// reads as a valid owner that isPidAlive then classifies dead, letting
+		// a FRESH malformed lock be broken before its TTL.
+		if (
+			parsed?.v !== 1 ||
+			!Number.isSafeInteger(parsed.ownerPid) ||
+			parsed.ownerPid <= 0 ||
+			typeof parsed.nonce !== 'string' ||
+			parsed.nonce.length === 0 ||
+			!Number.isFinite(parsed.startBoundMs) ||
+			!Number.isFinite(parsed.acquiredAtMs) ||
+			typeof parsed.agent !== 'string' ||
+			typeof parsed.taskId !== 'string'
+		) {
 			return null;
 		}
 		return parsed;
@@ -433,8 +466,10 @@ export interface StaleLockBreakOptions {
 	 *  unparsable/ownerless lock past its mtime TTL (AC4's TTL-only legacy
 	 *  semantics, routed through the same serialized protocol). */
 	class: 'dead-owner' | 'ttl-cleanup';
-	/** Telemetry discriminator for the one bounded event. */
-	store: 'evidence' | 'events';
+	/** Telemetry discriminator for the one bounded event. 'lane' marks lane
+	 *  release/cleanup breaks; 'generic' marks the plain-path acquire probe
+	 *  (PRR-002) and meta-less cleanup sweeps. */
+	store: 'evidence' | 'events' | 'lane' | 'generic';
 }
 
 function removeOwnMarker(markerPath: string, nonce: string): void {
@@ -448,14 +483,41 @@ function removeOwnMarker(markerPath: string, nonce: string): void {
 	}
 }
 
-/** Fenced liveness break. Callers: withEvidenceLock (first contention) and
- *  the events-store lock loop. Every property below is load-bearing and was
- *  adversarially derived across eight plan-critic rounds — see the trace's
- *  06-critic-review.md before changing anything:
- *  - cooldown pre-marks BEFORE any mutation;
+/** Sync sleep for the bounded takeover retry (this breaker is a sync API).
+ *  Atomics.wait blocks the thread without a busy loop; falls back to a
+ *  bounded spin on runtimes without SharedArrayBuffer. */
+function breakSyncSleep(ms: number): void {
+	try {
+		Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+	} catch {
+		const start = Date.now();
+		while (Date.now() - start < ms) {
+			/* bounded spin */
+		}
+	}
+}
+
+/** Fenced liveness break. Callers: withEvidenceLock (first contention), the
+ *  events-store lock loop, and the plain-path acquire probe (PRR-002).
+ *  Every property below is load-bearing and was adversarially derived across
+ *  eight plan-critic rounds, then revised in the PR #3533 feedback round —
+ *  see the trace's 06-critic-review.md before changing anything:
+ *  - cooldown marks only when a break ATTEMPT commits (after the break
+ *    right is secured) — read-only 'live'/'unknown' verdicts never consume
+ *    the budget (feedback PRR-003 + review Finding 1: pre-marking made a
+ *    live verdict suppress re-probe for the whole LOCK_TIMEOUT_MS,
+ *    re-creating the TTL wedge this substrate exists to remove); the one
+ *    disclosed exception is the mutation-adjacent pid-reuse 'live' after
+ *    the record, inside the marker window (report-only corner);
  *  - a LIVE pid is NEVER broken — no time window exists that says otherwise;
- *  - marker takeover = atomic rename AND (age > MARKER_STALE_MS) AND the
- *    recorded breaker provably dead — a live breaker blocks indefinitely;
+ *  - marker takeover = atomic rename (bounded retry — Windows EPERM/EBUSY,
+ *    feedback PRR-013) AND (age > MARKER_STALE_MS) AND the recorded breaker
+ *    provably dead — a live breaker blocks indefinitely;
+ *  - an UNPARSABLE existing marker is never taken over — it belongs to a
+ *    breaker mid-publish (posted-review HIGH); markers are published
+ *    atomically via unique-candidate + no-replace link, so a complete
+ *    marker is always parseable and an incomplete one is an orphan the
+ *    aged sweep collects;
  *  - the lock payload is re-read for byte-identity between takeover and
  *    unlink, so a successor that arrived mid-protocol aborts the break;
  *  - all failures fail closed to 'unknown' (legacy TTL-only behaviour). */
@@ -465,82 +527,142 @@ export function breakStaleLockIfOwnerDead(
 ): StaleLockBreakResult {
 	const now = _internals.now();
 	if (opts.deadlineMs !== undefined && opts.deadlineMs <= 0) return 'unknown';
-	// 1. Cooldown pre-mark FIRST (before any mutation).
+	// 1. Cooldown admission — bounds MUTATION attempts (takeover/publish/
+	//    unlink), never read-only verdicts.
 	if (!cooldownAllows(ownerLockPath, now)) return 'live';
-	recordBreakAttempt(ownerLockPath, now);
+
+	// 2. Payload pre-validation — READ-ONLY, before any marker or cooldown
+	//    mutation. Every 'live'/'unknown' verdict here returns WITHOUT
+	//    consuming the budget (review Finding 1: the old order published the
+	//    marker first, so a live-owner verdict on the evidence wrapper's
+	//    common path still consumed the cooldown — the exact PRR-003 stall).
+	//    The byte-identity re-read after publication remains the successor
+	//    guard; validating first cannot strand a breaker: an owner that dies
+	//    (or a payload that changes) between pre-validation and unlink
+	//    simply re-probes on the next attempt.
+	const rawBefore = readOwnerPayload(ownerLockPath);
+	const parsedBefore = parseOwnerPayload(rawBefore);
+	if (opts.class === 'dead-owner') {
+		if (parsedBefore === null) return 'unknown'; // legacy shape: TTL-only
+		if (isPidAlive(parsedBefore.ownerPid)) return 'live';
+	} else {
+		// ttl-cleanup: ownerless allowed, but only past the mtime TTL.
+		if (parsedBefore !== null && isPidAlive(parsedBefore.ownerPid)) {
+			return 'live';
+		}
+		try {
+			const mtimeMs = fs.statSync(ownerLockPath).mtimeMs;
+			if (_internals.now() - mtimeMs <= LOCK_TIMEOUT_MS) return 'unknown';
+		} catch {
+			return 'unknown';
+		}
+	}
+	if (opts.deadlineMs !== undefined && opts.deadlineMs < 1500) {
+		return 'unknown';
+	}
 
 	const markerPath = markerPathFor(ownerLockPath);
-	// 2. Marker acquisition — rename-based atomic single taker. (The plan's
-	//    "re-loop" arms both collapse to immediate back-offs here — a lost
-	//    create reads the winner's marker on the NEXT break attempt via the
-	//    cooldown window, so a retry loop would only re-race it.)
 	const nonce = newNonce();
+	// 2. Marker acquisition — rename-based atomic single taker over an aged,
+	//    dead-breaker marker. (The plan's "re-loop" arms both collapse to
+	//    immediate back-offs here — a lost takeover reads the winner's
+	//    marker on the NEXT break attempt via the cooldown window, so a
+	//    longer retry loop would only re-race it.)
 	if (fs.existsSync(markerPath)) {
 		const marker = readMarker(markerPath);
-		if (marker !== null) {
-			if (isPidAlive(marker.breakerPid)) return 'live';
-			if (_internals.now() - marker.createdAtMs <= MARKER_STALE_MS) {
-				// Dead breaker, marker not yet aged: leave it for aging.
-				return 'unknown';
-			}
+		if (marker === null) {
+			// Incompletely-published or corrupt marker: NEVER take over —
+			// a mid-write marker belongs to a LIVE breaker under the
+			// atomic-publish protocol (the old wx-then-write window let a
+			// second breaker read half a marker and steal the break right;
+			// posted-review HIGH). Fail safe; the aged sweep collects it.
+			return 'unknown';
+		}
+		if (isPidAlive(marker.breakerPid)) return 'live';
+		if (_internals.now() - marker.createdAtMs <= MARKER_STALE_MS) {
+			// Dead breaker, marker not yet aged: leave it for aging.
+			return 'unknown';
 		}
 		// Stale marker of a provably-dead breaker: take it over via an
-		// atomic rename. Exactly one contender can win the rename.
+		// atomic rename, bounded retry (Windows AV/finder EPERM/EBUSY
+		// holds; feedback PRR-013). Exactly one contender can win.
 		const takePath = `${markerPath}.take.${nonce}`;
-		try {
-			fs.renameSync(markerPath, takePath);
-		} catch {
-			return 'unknown'; // someone else took/replaced it — fail safe
+		let took = false;
+		for (const delay of [0, 25, 50, 100]) {
+			if (delay > 0) breakSyncSleep(delay);
+			try {
+				fs.renameSync(markerPath, takePath);
+				took = true;
+				break;
+			} catch (err) {
+				if ((err as NodeJS.ErrnoException).code === 'ENOENT') break;
+				/* EPERM/EBUSY: retry */
+			}
 		}
+		if (!took) return 'unknown'; // someone else took/replaced it — fail safe
 		try {
 			fs.unlinkSync(takePath);
 		} catch {
 			/* ignore */
 		}
-		// fall through to create OUR marker
+		// fall through to publish OUR marker
 	}
+	// 3. Publish OUR marker ATOMICALLY: write a uniquely-named candidate
+	//    completely, then hardlink it into the marker path (no-replace on
+	//    POSIX and Windows). A reader therefore either sees the complete
+	//    marker or nothing — never half of one.
+	const candPath = `${markerPath}.cand.${nonce}`;
 	const ourMarker: MarkerPayload = {
 		v: 1,
 		breakerPid: process.pid,
 		nonce,
 		createdAtMs: _internals.now(),
 	};
+	let published = false;
 	try {
-		const mfd = fs.openSync(markerPath, 'wx');
-		fs.writeSync(mfd, JSON.stringify(ourMarker), 0, 'utf-8');
-		fs.closeSync(mfd);
+		const cfd = rawOpenSync(candPath, 'wx');
+		try {
+			rawWriteSync(cfd, JSON.stringify(ourMarker), 0, 'utf-8');
+		} finally {
+			rawCloseSync(cfd);
+		}
+		try {
+			fs.linkSync(candPath, markerPath);
+			published = true;
+		} catch {
+			// EEXIST — another breaker published first. Back off.
+		}
 	} catch {
-		// Another breaker won creation — back off.
-		return 'live';
+		/* candidate create/write failed */
 	}
+	try {
+		fs.unlinkSync(candPath);
+	} catch {
+		/* ignore */
+	}
+	if (!published) return 'live';
+	// 4. We hold the break right — record the cooldown budget NOW, before
+	//    the unlink (a real mutation is committed from here). All live/
+	//    unknown verdicts already returned during read-only pre-validation,
+	//    so the budget is only ever consumed by an actual break attempt.
+	recordBreakAttempt(ownerLockPath, _internals.now());
 	// From here on we hold the break right; never return without cleanup.
 	let result: StaleLockBreakResult = 'unknown';
 	try {
-		// 3. Payload + class validation.
-		const rawBefore = readOwnerPayload(ownerLockPath);
-		if (opts.class === 'dead-owner') {
-			const parsed = parseOwnerPayload(rawBefore);
-			if (parsed === null) return 'unknown'; // legacy shape: TTL-only
-			if (isPidAlive(parsed.ownerPid)) return 'live';
-		} else {
-			// ttl-cleanup: ownerless allowed, but only past the mtime TTL.
-			const parsed = parseOwnerPayload(rawBefore);
-			if (parsed !== null && isPidAlive(parsed.ownerPid)) return 'live';
-			try {
-				const mtimeMs = fs.statSync(ownerLockPath).mtimeMs;
-				if (_internals.now() - mtimeMs <= LOCK_TIMEOUT_MS) return 'unknown';
-			} catch {
-				return 'unknown';
-			}
-		}
-		if (opts.deadlineMs !== undefined && opts.deadlineMs < 1500) {
-			return 'unknown';
-		}
-		// 4. Byte-identity re-read: a successor arriving mid-protocol
+		// 5. Byte-identity re-read: a successor arriving mid-protocol
 		//    changes the payload and aborts the break.
 		const rawAfter = readOwnerPayload(ownerLockPath);
 		if (rawAfter !== rawBefore) return 'unknown';
-		// 5. Break (we are THE taker; successors self-release against our
+		// 6. Liveness re-check at the last possible moment (review round-2
+		//    nit): pre-validation is separated from the unlink by the marker
+		//    protocol, so a pid-reuse resurrection inside that window must
+		//    not be broken. Byte-identity guarantees parsedBefore describes
+		//    the CURRENT payload, so the verdict rides the same read.
+		//    Mutation-adjacent: the budget is already recorded.
+		if (parsedBefore !== null && isPidAlive(parsedBefore.ownerPid)) {
+			return 'live';
+		}
+		// 7. Break (we are THE taker; successors self-release against our
 		//    fresh marker and cannot complete acquire past it). Dropping the
 		//    acquire record keeps the identity fence closed for the
 		//    successor generation.
@@ -584,8 +706,15 @@ export async function tryAcquireLock(
 	filePath: string,
 	agent: string,
 	taskId: string,
+	opts?: {
+		/** Telemetry store discriminator for the in-path dead-owner breaker
+		 *  probe (feedback PRR-002). Callers with their own attribution
+		 *  (evidence) pass it through; every other target reports 'generic'. */
+		breakStore?: StaleLockBreakOptions['store'];
+	},
 ): Promise<
-	{ acquired: true; lock: FileLock } | { acquired: false; existing?: FileLock }
+	| { acquired: true; lock: FileLock; brokeStale?: boolean }
+	| { acquired: false; existing?: FileLock }
 > {
 	// normalizedTarget/getOwnerLockPath throw synchronously for traversal —
 	// keep that behaviour.
@@ -596,6 +725,7 @@ export async function tryAcquireLock(
 	}
 
 	const backoffs = [10, 20, 40, 80, 160];
+	let brokeStale = false;
 	for (let attempt = 0; attempt < 5; attempt += 1) {
 		const result = acquireOwnerLockOnce(ownerLockPath, agent, taskId);
 		if (result.acquired && result.payload) {
@@ -635,9 +765,31 @@ export async function tryAcquireLock(
 					releaseOwnerLock(ownerLockPath, payload);
 				},
 			};
-			return { acquired: true, lock };
+			return { acquired: true, lock, brokeStale };
 		}
 		if (attempt < 4) {
+			// #2967 feedback PRR-002: contention on ANY target class gets a
+			// stale-recovery route. Base (proper-lockfile) self-healed every
+			// lock target via the acquire-path stale window; this PR's fenced
+			// breaker was wired only to evidence/events, leaving a dead owner's
+			// `.lck` wedging plan/save/close targets permanently. Probe the
+			// payload: a parsable dead-owner payload runs the fenced breaker
+			// once (never-break-live-pid holds; the cooldown bounds mutation to
+			// one attempt per target per LOCK_TIMEOUT_MS). Ownerless/foreign
+			// payloads keep TTL-only semantics here — 'ttl-cleanup' on the
+			// acquire path would let a plain mtime age break a lock whose
+			// holder is merely slow, so the aged sweep stays the only route.
+			const parsed = parseOwnerPayload(readOwnerPayload(ownerLockPath));
+			if (parsed !== null && !isPidAlive(parsed.ownerPid)) {
+				if (
+					breakStaleLockIfOwnerDead(ownerLockPath, {
+						class: 'dead-owner',
+						store: opts?.breakStore ?? 'generic',
+					}) === 'broken'
+				) {
+					brokeStale = true;
+				}
+			}
 			await new Promise((resolve) =>
 				setTimeout(resolve, backoffs[attempt] ?? 500),
 			);
@@ -731,11 +883,35 @@ export function cleanupExpiredLocks(directory: string): number {
 					if (
 						breakStaleLockIfOwnerDead(lockPath, {
 							class: 'ttl-cleanup',
-							store: 'evidence',
+							// Feedback PRR-026: the lane release/cleanup sweep and
+							// the plain evidence path were both reported as
+							// 'evidence' — a lane crash and an evidence break were
+							// indistinguishable in telemetry. The sibling meta
+							// carries lane identity.
+							store: hasLaneMeta(lockPath) ? 'lane' : 'generic',
 						}) === 'broken'
 					) {
 						cleaned++;
 					}
+				}
+			} catch {
+				/* already removed */
+			}
+			continue;
+		}
+
+		// Feedback PRR-006/014: break markers and takeover residue are swept
+		// once aged past MARKER_STALE_MS. A LIVE breaker removes its own
+		// marker in the protocol's finally — a marker this old is either a
+		// dead breaker's (takeover handles it) or a crash orphan (nothing
+		// else ever will). Without this, a planted/recycled marker or a
+		// crash between rename and unlink wedges acquisition forever.
+		if (file.includes('.breaking') || file.includes('.take.')) {
+			try {
+				const stat = fs.statSync(lockPath);
+				if (Date.now() - stat.mtimeMs > MARKER_STALE_MS) {
+					fs.unlinkSync(lockPath);
+					cleaned++;
 				}
 			} catch {
 				/* already removed */
@@ -793,23 +969,52 @@ export function listActiveLocks(directory: string): FileLock[] {
 				const payload = parseOwnerPayload(readOwnerPayload(lockPath));
 				const stat = fs.statSync(lockPath);
 				if (payload !== null && isPidAlive(payload.ownerPid)) {
+					// Feedback PRR-001: lane identity lives in the sibling .meta
+					// sidecar — project originalPath/laneId so the lean lane
+					// gates (phase-ready/task-completion) see held lane locks.
+					// Plain-path locks have no meta and keep the hash-path
+					// identity. Additionally, a live lane lock whose meta names
+					// OUR pid is released below (the self-release fence); the
+					// wx lock itself is already gone there, so only foreign
+					// holders reach this projection.
+					const meta = readMetaFile(getMetaPath(lockPath));
+					const laneMeta =
+						meta !== null &&
+						typeof meta.laneId === 'string' &&
+						meta.laneId !== ''
+							? meta
+							: null;
 					locks.push({
-						filePath: lockPath, // identity is the hash name; meta carries the original path for lanes
+						filePath: laneMeta?.originalPath ? laneMeta.originalPath : lockPath,
 						agent: payload.agent,
 						taskId: payload.taskId,
 						timestamp: new Date(payload.acquiredAtMs).toISOString(),
 						expiresAt: Number.MAX_SAFE_INTEGER,
+						laneId: laneMeta !== null ? laneMeta.laneId : undefined,
 					});
 					continue;
 				}
 				// Dead-owner or ownerless: mtime TTL governs listing.
 				if (now - stat.mtimeMs <= LOCK_TIMEOUT_MS) {
+					// Feedback PRR-001: crashed lane holders list here (dead
+					// pid) — project the sibling .meta so the lean lane gates
+					// still see laneId/originalPath and fire their backstop.
+					const deadMeta = readMetaFile(getMetaPath(lockPath));
+					const deadLaneMeta =
+						deadMeta !== null &&
+						typeof deadMeta.laneId === 'string' &&
+						deadMeta.laneId !== ''
+							? deadMeta
+							: null;
 					locks.push({
-						filePath: lockPath,
+						filePath: deadLaneMeta?.originalPath
+							? deadLaneMeta.originalPath
+							: lockPath,
 						agent: 'unknown',
 						taskId: 'unknown',
 						timestamp: new Date(stat.mtimeMs).toISOString(),
 						expiresAt: stat.mtimeMs + LOCK_TIMEOUT_MS,
+						laneId: deadLaneMeta !== null ? deadLaneMeta.laneId : undefined,
 					});
 				}
 				continue;
@@ -980,6 +1185,18 @@ export async function acquireLaneLocks(
  * a FOREIGN pid are only removed when that pid is provably dead, via the
  * same fenced breaker — a live foreign lane holder is never force-released
  * (#2967: no unconditional lock-file unlink exists anywhere).
+ *
+ * Feedback PRR-005: the `.meta` sidecar is unlinked ONLY when the `.lck` is
+ * actually released or removed — a refused fence (live foreign holder)
+ * keeps the meta as the lane's bookkeeping so releaseLaneLocks can retry
+ * later, instead of orphaning a live `.lck` with zero bookkeeping.
+ * Feedback PRR-007 (reworked per review Finding 2): a pre-upgrade legacy
+ * lane pairing (`.lock` sentinel beside the meta) is only dropped when its
+ * `<sentinel>.lock` dir lock is ALREADY GONE — a live-ish legacy dir lock
+ * (cross-process unlock is impossible and no liveness probe exists for dir
+ * locks) keeps its meta untouched and counts 0, so the Era-A holder's own
+ * release and the legacy TTL sweep own the artifact and the mutual-
+ * exclusion probe keeps seeing the sentinel while a holder may be live.
  */
 export async function releaseLaneLocks(
 	directory: string,
@@ -1000,10 +1217,50 @@ export async function releaseLaneLocks(
 		const meta = readMetaFile(metaPath);
 		if (!meta || meta.laneId !== laneId) continue;
 
-		// New-substrate lane lock: `<stem>.lck` beside this `<stem>.meta`.
-		const lckPath = metaPath.replace(/\.meta$/, '.lck');
+		const stem = metaPath.replace(/\.meta$/, '');
 
 		try {
+			// Feedback PRR-007 (reworked per review Finding 2): pre-upgrade
+			// legacy lane pairing — a `.lock` sentinel beside this meta (no
+			// `.lck`). The real exclusion artifact is the `<sentinel>.lock`
+			// DIRECTORY: cross-process lockfile.unlock always throws
+			// ENOTACQUIRED and no liveness probe exists for dir locks, so the
+			// dir lock is NEVER unlinked here — while it exists we keep the
+			// meta as bookkeeping and count 0 (the Era-A holder's own release
+			// and the legacy TTL sweep own the artifact). Only a bare sentinel
+			// (dir lock already gone — released or swept) is stale bookkeeping
+			// and gets dropped with its meta. This preserves the no-
+			// unconditional-unlink invariant; the mutual-exclusion probe
+			// (existingLegacySentinels) keeps seeing the sentinel while a
+			// legacy holder may still be live.
+			const legacyPath = `${stem}.lock`;
+			const lckPath = `${stem}.lck`;
+			if (!fs.existsSync(lckPath) && fs.existsSync(legacyPath)) {
+				if (fs.existsSync(`${legacyPath}.lock`)) {
+					// Live-ish legacy dir lock: leave everything for its owner —
+					// the acquire probe's stale window steals a crashed dir on
+					// the next acquisition of that target, and the bare-sentinel
+					// branch below drops the residue once the dir is gone.
+					// (An orphaned meta can persist until then: cleanupExpiredLocks
+					// has no production caller and the doctor lists locks, not
+					// metas — disclosed residue, bounded at 3 small files.)
+					continue;
+				}
+				try {
+					fs.unlinkSync(legacyPath);
+				} catch {
+					/* ignore */
+				}
+				try {
+					fs.unlinkSync(metaPath);
+				} catch {
+					/* ignore */
+				}
+				releasedCount++;
+				continue;
+			}
+
+			let released = false;
 			if (fs.existsSync(lckPath)) {
 				const payload = parseOwnerPayload(readOwnerPayload(lckPath));
 				if (
@@ -1014,22 +1271,33 @@ export async function releaseLaneLocks(
 				) {
 					// Ours: identity-fenced self-release.
 					releaseOwnerLock(lckPath, payload);
+					released = !fs.existsSync(lckPath);
 				} else {
 					// Foreign or unknown generation: fenced breaker validates
 					// liveness (dead-only removal, mtime-TTL bounded).
-					breakStaleLockIfOwnerDead(lckPath, {
-						class: 'ttl-cleanup',
-						store: 'evidence',
-					});
+					released =
+						breakStaleLockIfOwnerDead(lckPath, {
+							class: 'ttl-cleanup',
+							store: 'lane',
+						}) === 'broken';
 				}
+			} else {
+				// No `.lck` artifact: already gone (e.g. crashed before the
+				// wx create, or swept) — the meta alone is stale bookkeeping.
+				released = true;
 			}
-			// The meta sidecar is OUR lane's bookkeeping — remove it.
-			try {
-				fs.unlinkSync(metaPath);
-			} catch {
-				/* ignore */
+			// Feedback PRR-005: drop the meta ONLY when the lock is actually
+			// gone — a refused fence (live foreign holder) keeps the meta so
+			// a later releaseLaneLocks can retry, and no live `.lck` is left
+			// orphaned without bookkeeping.
+			if (released) {
+				try {
+					fs.unlinkSync(metaPath);
+				} catch {
+					/* ignore */
+				}
+				releasedCount++;
 			}
-			releasedCount++;
 		} catch {
 			/* Best-effort: continue with other locks */
 		}

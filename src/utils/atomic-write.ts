@@ -324,7 +324,7 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 			'src/hooks/skill-usage-log.ts:1165',
 			'src/hooks/skill-usage-log.ts:1675',
 			'src/hooks/skill-usage-pending.ts:817',
-			'src/parallel/file-locks.ts:870',
+			'src/parallel/file-locks.ts:1075',
 			'src/plan/ledger.ts:607',
 			'src/plan/ledger.ts:1808',
 		],
@@ -784,9 +784,10 @@ function syncSleep(ms: number): void {
 export function renameSyncWithRetry(
 	tempPath: string,
 	targetPath: string,
+	delays: readonly number[] = RENAME_RETRY_DELAYS_MS,
 ): void {
 	let lastError: unknown;
-	for (let attempt = 0; attempt <= RENAME_RETRY_DELAYS_MS.length; attempt++) {
+	for (let attempt = 0; attempt <= delays.length; attempt++) {
 		try {
 			_internals.renameSync(tempPath, targetPath);
 			return;
@@ -794,26 +795,8 @@ export function renameSyncWithRetry(
 			lastError = err;
 			const code = (err as NodeJS.ErrnoException)?.code;
 			if (!code || !RETRYABLE_RENAME_CODES.has(code)) throw err;
-			if (attempt < RENAME_RETRY_DELAYS_MS.length) {
-				syncSleep(RENAME_RETRY_DELAYS_MS[attempt]);
-			}
-		}
-	}
-	throw lastError;
-}
-
-function renameWithRetry(tempPath: string, targetPath: string): void {
-	let lastError: unknown;
-	for (let attempt = 0; attempt <= RENAME_RETRY_DELAYS_MS.length; attempt++) {
-		try {
-			_internals.renameSync(tempPath, targetPath);
-			return;
-		} catch (err) {
-			lastError = err;
-			const code = (err as NodeJS.ErrnoException)?.code;
-			if (!code || !RETRYABLE_RENAME_CODES.has(code)) throw err;
-			if (attempt < RENAME_RETRY_DELAYS_MS.length) {
-				syncSleep(RENAME_RETRY_DELAYS_MS[attempt]);
+			if (attempt < delays.length) {
+				syncSleep(delays[attempt] ?? 0);
 			}
 		}
 	}
@@ -881,7 +864,7 @@ function writeAtomicSync(
 			} finally {
 				fs.closeSync(fd);
 			}
-			renameWithRetry(tempPath, resolvedTarget);
+			renameSyncWithRetry(tempPath, resolvedTarget);
 		} finally {
 			// Exact finally cleanup of THIS invocation's temp only (no-op after a
 			// successful rename — ENOENT is swallowed).

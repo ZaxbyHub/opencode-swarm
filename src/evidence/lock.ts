@@ -121,15 +121,34 @@ export async function withEvidenceLock<T>(
 	let lastBreakWasConfirmed = false;
 
 	while (true) {
-		const result = await tryAcquireLock(directory, evidencePath, agent, taskId);
+		const result = await tryAcquireLock(
+			directory,
+			evidencePath,
+			agent,
+			taskId,
+			{
+				// The evidence path owns its own stale-recovery attribution (the
+				// wrapper's breaker below reports store 'evidence'); the in-path
+				// dead-owner probe (PRR-002) reports the same discriminator so the
+				// break event is not misattributed to 'generic' when the probe
+				// wins the race to a dead owner's artifact.
+				breakStore: 'evidence',
+			},
+		);
 
 		if (result.acquired) {
 			const lock = result.lock;
-			// #2967: emit stale_recovered ONLY after the fenced breaker
-			// actually confirmed a dead-owner break. Plain success-after-
-			// contention (a live holder releasing between retries) is not
-			// evidence of stale recovery.
-			if (attempt > 0 && lastBreakWasConfirmed) {
+			// #2967 (emit gate corrected per feedback PRR-010): emit
+			// stale_recovered whenever a dead-owner break is confirmed — by
+			// the wrapper's own breaker call (below) OR by the acquire path's
+			// in-contention probe (PRR-002), which reports its break via
+			// `brokeStale` so the event cannot be suppressed on the primary
+			// recovery path. Plain success-after-contention (a live holder
+			// releasing between retries) is NOT evidence of stale recovery.
+			if (result.brokeStale) {
+				lastBreakWasConfirmed = true;
+			}
+			if (lastBreakWasConfirmed) {
 				emit('evidence_lock_stale_recovered', {
 					directory,
 					evidencePath,
@@ -170,12 +189,15 @@ export async function withEvidenceLock<T>(
 			);
 		}
 
-		// tryAcquireLock returns { acquired: false } on contention. #2967: on
-		// the FIRST contention only, run the fenced liveness breaker once —
-		// a provably-dead owner's lock is broken bounded (ms-scale) with one
-		// audited telemetry event and a per-target cooldown; a LIVE owner is
+		// tryAcquireLock returns { acquired: false } on contention. #2967:
+		// every contention iteration re-probes the fenced liveness breaker —
+		// its read-only verdicts consume no cooldown budget (review Finding 1
+		// fix), so an owner dying mid-wait is picked up on the next attempt
+		// instead of stalling the full deadline budget. A provably-dead
+		// owner's lock is broken bounded (ms-scale) with one audited
+		// telemetry event and a per-target mutation cooldown; a LIVE owner is
 		// never touched and we fall through to the normal backoff below.
-		if (attempt === 0) {
+		{
 			const ownerLockPath = getEvidenceOwnerLockPath(directory, evidencePath);
 			const payloadRaw = readEvidenceOwnerPayload(ownerLockPath);
 			const breakResult = breakStaleLockIfOwnerDead(ownerLockPath, {

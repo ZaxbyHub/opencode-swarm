@@ -202,7 +202,7 @@ those inputs before this change.
 ## 5. The 67-entry catalog
 
 Source: `src/observability/catalog.ts`. Exactly 67 entries = the 38 pre-existing members of
-`TelemetryEvent` (`src/telemetry.ts:27-210`) plus `agent_conflict_detected`
+`TelemetryEvent` (`src/telemetry.ts:27-211`) plus `agent_conflict_detected`
 (emitted in production via a force-cast past the type system before #2029)
 plus `close_archive_result` (issue #2030 — the structured close/archive
 result event) plus `knowledge_receipt_transition` (issue #2031, the bounded
@@ -636,7 +636,7 @@ Category `evidence`, severity `info`, privacy **`sensitive`** (carries
 
 #### evidence_lock_contended
 Category `evidence`, severity `notice`, privacy `sensitive`. Producer
-`src/evidence/lock.ts:129`. Consumers: none — owner **#2047**. Retention:
+`src/evidence/lock.ts:152`. Consumers: none — owner **#2047**. Retention:
 **#2036**. Required workflow IDs: `taskId`. Forbidden workflow IDs:
 `hostSessionId`.
 
@@ -896,15 +896,17 @@ the same figures synchronously.
 
 #### store_lock_stale_broken
 Category `lifecycle`, severity `notice`, privacy `operational`. Producer
-`src/parallel/file-locks.ts:523` (`breakStaleLockIfOwnerDead`, the fenced
-liveness breaker shared by the evidence and events lock stores; issue #2967).
-Emitted exactly once per ACTUAL stale-lock break — after the marker-fenced
-takeover, the payload byte-identity re-read, and the confirmed unlink — never
-on a live-owner backoff or a fail-closed `'unknown'`. Consumers: none — owner
-**#2047**. Retention: **#2036**. No workflow ID is required: the break is
-store-level and holds no session/task correlation. The payload is strictly
-identifier-free — `store` (`evidence` | `events`) and `ageMs`; no paths, no
-pids, no session identity — so `operational` is the truthful privacy class.
+`src/parallel/file-locks.ts:682` (`breakStaleLockIfOwnerDead`, the fenced
+liveness breaker shared by the evidence lock, the events store, the plain
+acquire path's dead-owner probe, and the lane release/cleanup sweeps; issue
+#2967). Emitted exactly once per ACTUAL stale-lock break — after the
+marker-fenced takeover, the payload byte-identity re-read, and the confirmed
+unlink — never on a live-owner backoff or a fail-closed `'unknown'`.
+Consumers: none — owner **#2047**. Retention: **#2036**. No workflow ID is
+required: the break is store-level and holds no session/task correlation. The
+payload is strictly identifier-free — `store` (`evidence` | `events` | `lane`
+| `generic`) and `ageMs`; no paths, no pids, no session identity — so
+`operational` is the truthful privacy class.
 
 #### learning_health_alarm
 Category `lifecycle`, severity `warning`, privacy `operational`. Producer

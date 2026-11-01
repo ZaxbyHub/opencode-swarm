@@ -499,12 +499,10 @@ describe('lane-based file locks', () => {
 			const expiredLocks = locks.filter((l) => l.filePath === 'expired.ts');
 			expect(expiredLocks).toHaveLength(0);
 
-			// Valid lock should appear — #2967 adaptation: the lane lock's
-			// listing identity is its `.lck` artifact path (payload
-			// projection), not the original relative path.
-			const validLocks = locks.filter(
-				(l) => l.filePath === getOwnerLockPath(tmpDir, 'valid.ts'),
-			);
+			// Valid lock should appear — feedback PRR-001: the .meta sidecar's
+			// lane identity is projected again, so the lane lock lists under
+			// its ORIGINAL relative path (matching the legacy shape).
+			const validLocks = locks.filter((l) => l.filePath === 'valid.ts');
 			expect(validLocks).toHaveLength(1);
 
 			await releaseLaneLocks(tmpDir, 'valid-lane');
@@ -555,12 +553,9 @@ describe('lane-based file locks', () => {
 			const noMetaLocks = locks.filter((l) => l.filePath === 'no-meta.lock');
 			expect(noMetaLocks).toHaveLength(0);
 
-			// Fresh lock should appear — #2967 adaptation: the lane lock's
-			// listing identity is its `.lck` artifact path (payload
-			// projection), not the original relative path.
-			const freshLocks = locks.filter(
-				(l) => l.filePath === getOwnerLockPath(tmpDir, 'fresh.ts'),
-			);
+			// Fresh lock should appear — feedback PRR-001: lane identity is
+			// projected from the .meta again (original relative path).
+			const freshLocks = locks.filter((l) => l.filePath === 'fresh.ts');
 			expect(freshLocks).toHaveLength(1);
 
 			await releaseLaneLocks(tmpDir, 'fresh-lane');
@@ -775,14 +770,12 @@ describe('lane-based file locks', () => {
 				't',
 				's',
 			);
-			// #2967 adaptation: the lane locks are the `.lck` artifacts of
-			// exactly those three targets (payload projection carries agent +
-			// taskId; the laneId lives in the .meta sidecar).
+			// Feedback PRR-001: lane locks list under their ORIGINAL relative
+			// paths (projected from the .meta sidecar) with the payload's
+			// agent/taskId.
 			const locks = listActiveLocks(tmpDir).filter((l) => l.agent === 'a');
 			const paths = locks.map((l) => l.filePath);
-			const expected = ['z.ts', 'a.ts', 'm.ts'].map((f) =>
-				getOwnerLockPath(tmpDir, f),
-			);
+			const expected = ['z.ts', 'a.ts', 'm.ts'];
 			expect(paths.sort()).toEqual(expected.sort());
 			await releaseLaneLocks(tmpDir, 'order-lane');
 		});

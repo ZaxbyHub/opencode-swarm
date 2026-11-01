@@ -62,13 +62,19 @@ describe('full-auto state write resilience (#2969, SIB3-1)', () => {
 
 	test('permanent rename failure throws AND unlinks the temp file', () => {
 		const dir = canonicalMkdtemp('fa-write-2969-');
-		fullAutoInternals.renameWithRetry = (() => {
+		// Feedback PRR-019: the terminal arm drives the REAL shared retry
+		// helper to exhaustion through the atomic-write fs seam (the old
+		// site-seam stub never executed the helper's throw-after-budget
+		// contract). The full default schedule (385 ms of sync sleeps) is
+		// fine on this non-emit path.
+		atomicWriteInternals.renameSync = (() => {
 			const err = new Error(
 				'EBUSY (test): permanent',
 			) as never as NodeJS.ErrnoException;
 			(err as { code?: string }).code = 'EBUSY';
 			throw err;
-		}) as typeof realSiteRename;
+		}) as typeof realRename;
+		fullAutoInternals.renameWithRetry = realSiteRename;
 
 		expect(() =>
 			fullAutoInternals.writePersisted(dir, persistedFixture()),
@@ -77,6 +83,9 @@ describe('full-auto state write resilience (#2969, SIB3-1)', () => {
 		// persist (the .bak best-effort may exist when a canonical did, but a
 		// fresh dir has no canonical, so nothing else may remain).
 		expect(tmpArtifacts(dir)).toEqual([]);
+		// Feedback PRR-020: the no-clobber invariant is ASSERTED — the failed
+		// persist must not have (non-atomically) placed a canonical file.
+		expect(existsSync(join(swarmDir(dir), STATE_FILE))).toBe(false);
 		expect(existsSync(join(swarmDir(dir), `${STATE_FILE}.bak`))).toBe(false);
 	});
 

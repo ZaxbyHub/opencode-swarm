@@ -929,7 +929,7 @@ cells.
 | Plan ledger append (`.swarm/plan-ledger.jsonl`, `file_shadow`) | A published ledger is never partially written; losing the very last rename on power loss is tolerated (the prior canonical file is intact) | **ON** — `writeFileFsyncedThenRename` (`src/plan/ledger.ts`); the containing-directory fsync is deliberately omitted (see that function's comment) |
 | Events append (`.swarm/events.jsonl`) | Append-only event stream; a torn tail is *tolerated and detected* (`events_torn_tail` above) | **OFF** — plain append through the core-events seam |
 | Full-Auto state (`.swarm/full-auto-state.json`) | Durable fail-closed control state; a crash mid-write must not truncate the canonical file | **ON** — `tmp → fsync → rename` (`src/full-auto/state.ts`; pre-existing) |
-| Plan projections (`plan.json` / `plan.md`) | Derived from the authoritative ledger; rebuildable by replay on hash mismatch | **OFF** — atomic temp+rename without fsync |
+| Plan projections (`plan.json` / `plan.md`) | Derived from the authoritative ledger; rebuildable by replay on hash mismatch | **ON** — the canonical writer fsyncs the temp before rename (`src/utils/atomic-write.ts`), and the plan.json rebuild path fsyncs explicitly (`src/plan/manager.ts:2387`) |
 | OTLP spool + state (`src/observability/otlp-exporter.ts`) | Best-effort telemetry; write failures preserve replay and are accounted per record | **OFF** — rename-retry without fsync |
 
 **Rule — flipping any class to fsync-on requires a Windows cold-filesystem

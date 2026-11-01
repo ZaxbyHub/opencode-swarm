@@ -237,7 +237,7 @@ function defineEntry(kind: string, input: CatalogEntryInput): CatalogEntry {
  * Producer lines were derived by reading the emit call sites, not by memory:
  * the convenience helpers live at `src/telemetry.ts:597-1218`, the six "dark"
  * kinds (documented at `src/telemetry.ts:44` as "emitted but no live parallel
- * paths") at `src/evidence/lock.ts:86,94,129`, `src/plan/manager.ts:337,1724`
+ * paths") at `src/evidence/lock.ts:86,94,152`, `src/plan/manager.ts:337,1724`
  * and `src/plan/ledger.ts:681`, and the force-cast kind at
  * `src/hooks/conflict-resolution.ts:73`.
  */
@@ -924,7 +924,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			severity: 'info',
 			// Carries `directory` and `evidencePath` — absolute paths.
 			privacyClass: 'sensitive',
-			producer: 'src/evidence/lock.ts:142',
+			producer: 'src/evidence/lock.ts:161',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_PLAN_EVIDENCE_RETENTION,
@@ -938,7 +938,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'evidence',
 			severity: 'notice',
 			privacyClass: 'sensitive',
-			producer: 'src/evidence/lock.ts:196',
+			producer: 'src/evidence/lock.ts:218',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_PLAN_EVIDENCE_RETENTION,
@@ -952,7 +952,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'evidence',
 			severity: 'notice',
 			privacyClass: 'sensitive',
-			producer: 'src/evidence/lock.ts:133',
+			producer: 'src/evidence/lock.ts:152',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_PLAN_EVIDENCE_RETENTION,
@@ -1300,7 +1300,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'lifecycle',
 			severity: 'notice',
 			privacyClass: 'operational',
-			producer: 'src/parallel/file-locks.ts:560',
+			producer: 'src/parallel/file-locks.ts:682',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_PLAN_EVIDENCE_RETENTION,

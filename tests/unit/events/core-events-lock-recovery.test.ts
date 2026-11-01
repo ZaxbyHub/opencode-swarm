@@ -118,8 +118,10 @@ describe('core-events store lock recovery (#2967)', () => {
 			appendCoreEventSync(dir, probeEvent('cooldown-second')),
 		).toThrow(CORE_EVENT_LOCKED);
 
-		// Deterministic cooldown block => exactly one probe (spec bound 2).
-		expect(killCalls).toBe(1);
+		// The one break probes liveness twice (read-only pre-validation +
+		// the final pre-unlink recheck); the cooldown-blocked contention
+		// adds none (spec bound still 2 probes per break attempt).
+		expect(killCalls).toBe(2);
 		expect(
 			(await fx.readBreakEvents(dir)).filter((e) => e.store === 'events'),
 		).toHaveLength(1);

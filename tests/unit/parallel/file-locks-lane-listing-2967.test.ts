@@ -1,10 +1,12 @@
 // #2967 lane listing contract (Group 6, relocated from
 // file-locks-lane.test.ts for FR-006: the parent is a grandfathered
 // over-cap file that may not grow). Lane locks ride the wx owner-payload
-// substrate — listActiveLocks projects the PAYLOAD (artifact path +
-// agent/taskId + live heartbeat); the laneId and original path are carried
-// by the .meta sidecar.
-import { beforeEach, describe, expect, it } from 'bun:test';
+// substrate — listActiveLocks projects the PAYLOAD (agent/taskId + live
+// heartbeat) AND the sibling .meta sidecar (laneId + originalPath), so the
+// lean lane gates (phase-ready / task-completion) can gate on lane identity
+// again (feedback PRR-001). AFTER-EACH CLEANUP (feedback PRR-030b): this
+// suite leaked its temp trees — dispose every scratch tree in afterEach.
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
@@ -21,8 +23,12 @@ beforeEach(() => {
 	tmpDir = canonicalMkdtemp('lane-listing-2967-');
 });
 
+afterEach(() => {
+	fs.rmSync(tmpDir, { recursive: true, force: true });
+});
+
 describe('Group 6: listActiveLocks with metadata (#2967 payload projection)', () => {
-	it('lists lane locks via the .lck payload projection; rich lane identity lives in the .meta sidecar', async () => {
+	it('lists lane locks with laneId + originalPath projected from the .meta sidecar (feedback PRR-001)', async () => {
 		const files = ['real-path-a.ts', 'real-path-b.ts'];
 		await acquireLaneLocks(
 			tmpDir,
@@ -40,10 +46,14 @@ describe('Group 6: listActiveLocks with metadata (#2967 payload projection)', ()
 		);
 		expect(richLocks).toHaveLength(2);
 
-		const expectedPaths = files.map((f) => getOwnerLockPath(tmpDir, f));
+		// The lean lane gates filter on lock.laneId — the sidecar's laneId
+		// and the ORIGINAL relative path are both projected now (the meta
+		// stores the caller-relative name acquireLaneLocks received).
+		const expectedPaths = [...files].sort();
 		const listedPaths = richLocks.map((l) => l.filePath).sort();
-		expect(listedPaths).toEqual(expectedPaths.sort());
+		expect(listedPaths).toEqual(expectedPaths);
 		for (const lock of richLocks) {
+			expect(lock.laneId).toBe('rich-lane');
 			// Live owner heartbeat: active with no expiry horizon.
 			expect(lock.expiresAt).toBe(Number.MAX_SAFE_INTEGER);
 		}

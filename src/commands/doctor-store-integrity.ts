@@ -46,10 +46,26 @@ const MAX_LISTED = 20;
 /** Bounded `.swarm` walk budget for the file categories (entries / depth). */
 const MAX_SCAN_ENTRIES = 2000;
 const MAX_SCAN_DEPTH = 8;
-/** Torn-tail probes read at most this many bytes from the end of a JSONL file. */
-const TAIL_READ_BYTES = 64 * 1024;
+/** Torn-tail probes read at most this many bytes from the end of a JSONL
+ *  file. Feedback PRR-015: the events store's legal max line is 256 KiB
+ *  (MAX_EVENT_SIZE, src/events/core-events.ts) — a 64 KiB window reported a
+ *  healthy store's full-size tail line as torn (false positive). The window
+ *  must exceed the largest legal line, plus newline/UTF-8 slack. */
+const TAIL_READ_BYTES = 288 * 1024;
 /** Per-member row cap for the memory divergence comparison. */
 const MAX_MEMBER_LINES = 20_000;
+/** Feedback PRR-022: whole-file member reads are bounded — this is the
+ *  per-file byte cap behind the row cap (a member file larger than this is
+ *  read truncated; the parse loop's existing 20k-line cap already governs
+ *  semantics, so truncation only tightens the bound, never falsifies it). */
+const MAX_MEMBER_FILE_BYTES = 4 * 1024 * 1024;
+/** Feedback PRR-022: stale-locks walk entry cap (a poisoned locks/ dir with
+ *  millions of entries cannot turn the doctor into an unbounded walk; the
+ *  substrate sweep and residue scanner use the same bounded-walk discipline). */
+const MAX_LOCK_ENTRIES = 1000;
+/** Feedback PRR-017: a lock/marker artifact bigger than this is foreign —
+ *  payloads and markers are sub-KiB JSON; anything larger is not parsed. */
+const MAX_LOCK_ARTIFACT_BYTES = 64 * 1024;
 const BAK_SUFFIX = '.bak';
 
 interface CategoryReport {
@@ -67,11 +83,14 @@ interface WalkResult {
 	truncated: boolean;
 }
 
-/** readdir-sourced names may carry adversarial characters — neutralize
- *  backticks (markdown code-span breakout) exactly like the residue
- *  inventory renderer (src/services/swarm-residue.ts) does. */
+/** readdir-sourced names may carry adversarial characters — strip C0/DEL
+ *  control chars first (feedback PRR-018: backtick-only neutralization let
+ *  `\n` + forged rows through into the report — the same class doctor.ts's
+ *  own sanitizer strips), then neutralize backticks (markdown code-span
+ *  breakout) exactly like the residue inventory renderer
+ *  (src/services/swarm-residue.ts) does. */
 function safeName(s: string): string {
-	return s.replace(/`/g, "'");
+	return s.replace(/[\p{Cc}]/gu, '').replace(/`/g, "'");
 }
 
 /**
@@ -306,14 +325,22 @@ function bakCategory(swarmRoot: string, walk: WalkResult): CategoryReport {
 // ---------------------------------------------------------------------------
 
 /** Mirror of the substrate's payload validation (parseOwnerPayload in
- *  src/parallel/file-locks.ts): a REAL owner pid, or null when the payload
- *  is absent/unparsable/ownerless. */
+ *  src/parallel/file-locks.ts): a REAL owner pid from a v1 payload, or null
+ *  when the payload is absent/unparsable/non-v1/ownerless. Feedback PRR-011:
+ *  the mirror previously accepted non-v1 payloads as live-owner candidates,
+ *  contradicting the substrate (which breaks non-v1 past TTL) and making the
+ *  report-only class wrong for malformed-payload locks. */
 function parseOwnerPid(raw: string | null): number | null {
 	if (raw === null || raw.length === 0) return null;
 	try {
-		const parsed = JSON.parse(raw) as { ownerPid?: unknown };
+		const parsed = JSON.parse(raw) as { v?: unknown; ownerPid?: unknown };
 		const pid = parsed?.ownerPid;
-		if (typeof pid === 'number' && Number.isSafeInteger(pid) && pid > 0) {
+		if (
+			parsed?.v === 1 &&
+			typeof pid === 'number' &&
+			Number.isSafeInteger(pid) &&
+			pid > 0
+		) {
 			return pid;
 		}
 		return null;
@@ -338,44 +365,73 @@ function isPidDead(pid: number): boolean {
 function checkStaleLocks(swarmRoot: string, now: number): CategoryReport {
 	const report: CategoryReport = { count: 0, listed: [], reportOnly: [] };
 	const locksDir = path.join(swarmRoot, 'locks');
+	// Feedback PRR-004: `.swarm/events.lock` sits OUTSIDE the locks/ dir —
+	// the doctor's promised report-only surface did not exist for the events
+	// store's lock artifact. Classify it (and its break marker) here.
+	const eventsLockPath = path.join(swarmRoot, 'events.lock');
+	classifyLockArtifact(
+		report,
+		now,
+		eventsLockPath,
+		'events.lock',
+		/* isDir */ false,
+	);
+	const eventsMarkerPath = `${eventsLockPath}.breaking`;
+	if (
+		fs.existsSync(eventsMarkerPath) &&
+		!fs.lstatSync(eventsMarkerPath).isSymbolicLink()
+	) {
+		report.count += 1;
+		report.listed.push(
+			`\`events.lock.breaking\` (break marker present — live breaker protocol state or crash orphan)`,
+		);
+	}
 	let dirents: fs.Dirent[];
 	try {
 		dirents = fs.readdirSync(locksDir, { withFileTypes: true });
 	} catch {
 		return report; // absent locks dir = 0 (the common case)
 	}
+	let scanned = 0;
 	for (const dirent of dirents) {
+		if (++scanned > MAX_LOCK_ENTRIES) {
+			report.note = truncatedNote();
+			break;
+		}
 		const abs = path.join(locksDir, dirent.name);
 		const rel = `locks/${dirent.name}`;
+		// Feedback PRR-017: never follow symlinks out of `.swarm` — the
+		// residue scanner's refusal discipline (repo convention; an attacker-
+		// planted symlink must not redirect the report's reads).
+		if (dirent.isSymbolicLink()) continue;
 		try {
 			if (dirent.name.endsWith('.lck') && !dirent.isDirectory()) {
-				if (now - fs.statSync(abs).mtimeMs <= LOCK_TIMEOUT_MS) continue;
-				const ownerPid = parseOwnerPid(readOwnerLockPayload(abs));
-				if (ownerPid !== null && !isPidDead(ownerPid)) {
-					// REPORT-ONLY sub-class (plan 05 v8 §1.1, r6-#2): a live owner
-					// pid may be the PID-reuse corner. Never auto-removed; manual
-					// recovery; automatic recovery resumes when the pid exits.
-					report.reportOnly?.push(
-						`\`${safeName(rel)}\` (report-only: live owner pid — manual recovery; never auto-removed)`,
-					);
-					continue;
-				}
-				report.count += 1;
-				report.listed.push(
-					ownerPid === null
-						? `\`${safeName(rel)}\` (unparsable owner payload, past TTL)`
-						: `\`${safeName(rel)}\` (owner pid ${ownerPid} dead, past TTL)`,
-				);
+				classifyLockArtifact(report, now, abs, rel, /* isDir */ false);
 			} else if (
 				dirent.name.endsWith('.lock.lock') &&
 				dirent.isDirectory() &&
 				!dirent.isSymbolicLink()
 			) {
-				// Legacy proper-lockfile directory artifact (pre-#2967 substrate).
+				// Legacy proper-lockfile dir artifact (pre-#2967 substrate).
+				classifyLockArtifact(report, now, abs, rel, /* isDir */ true);
+			} else if (
+				(dirent.name.includes('.breaking') || dirent.name.includes('.take.')) &&
+				!dirent.isDirectory()
+			) {
+				// Feedback PRR-006/014 (doctor side): break markers and takeover
+				// residue are listed (presence itself is diagnostic; the
+				// substrate sweep owns removal past 60s).
+				report.count += 1;
+				report.listed.push(
+					`\`${safeName(rel)}\` (break marker/takeover residue present)`,
+				);
+			} else if (dirent.name.endsWith('.lock') && !dirent.isDirectory()) {
+				// Legacy sentinel FILE (`.lock`): listed when past TTL (the
+				// substrate's isLocked legacy fallback covers these).
 				if (now - fs.statSync(abs).mtimeMs <= LOCK_TIMEOUT_MS) continue;
 				report.count += 1;
 				report.listed.push(
-					`\`${safeName(rel)}\` (legacy proper-lockfile dir, past TTL)`,
+					`\`${safeName(rel)}\` (legacy sentinel file, past TTL)`,
 				);
 			}
 		} catch {
@@ -383,6 +439,54 @@ function checkStaleLocks(swarmRoot: string, now: number): CategoryReport {
 		}
 	}
 	return report;
+}
+
+/** Shared classifier for `.lck` and legacy `.lock.lock` dir artifacts.
+ *  Feedback PRR-017/022: bounded stat + bounded read (a foreign oversized
+ *  artifact is listed, not parsed). */
+function classifyLockArtifact(
+	report: CategoryReport,
+	now: number,
+	abs: string,
+	rel: string,
+	isDir: boolean,
+): void {
+	try {
+		const stat = fs.statSync(abs);
+		if (now - stat.mtimeMs <= LOCK_TIMEOUT_MS) return;
+		if (stat.size > MAX_LOCK_ARTIFACT_BYTES) {
+			report.count += 1;
+			report.listed.push(
+				`\`${safeName(rel)}\` (${stat.size} bytes — oversized foreign artifact, past TTL)`,
+			);
+			return;
+		}
+		if (isDir) {
+			report.count += 1;
+			report.listed.push(
+				`\`${safeName(rel)}\` (legacy proper-lockfile dir, past TTL)`,
+			);
+			return;
+		}
+		const ownerPid = parseOwnerPid(readOwnerLockPayload(abs));
+		if (ownerPid !== null && !isPidDead(ownerPid)) {
+			// REPORT-ONLY sub-class (plan 05 v8 §1.1, r6-#2): a live owner
+			// pid may be the PID-reuse corner. Never auto-removed; manual
+			// recovery; automatic recovery resumes when the pid exits.
+			report.reportOnly?.push(
+				`\`${safeName(rel)}\` (report-only: live owner pid — manual recovery; never auto-removed)`,
+			);
+			return;
+		}
+		report.count += 1;
+		report.listed.push(
+			ownerPid === null
+				? `\`${safeName(rel)}\` (unparsable owner payload, past TTL)`
+				: `\`${safeName(rel)}\` (owner pid ${ownerPid} dead, past TTL)`,
+		);
+	} catch {
+		/* per-entry fs errors are not integrity signals — skip the entry */
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -404,7 +508,21 @@ function effectiveRowsByRecency(
 	const out: MemberRows = { by: new Map(), truncated: false };
 	let content: string;
 	try {
-		content = fs.readFileSync(absPath, 'utf-8');
+		// Feedback PRR-022: bound the whole-file read (the report's own
+		// plan-durability doc claims bounded reads; a huge member file must
+		// not balloon memory). The first MAX_MEMBER_FILE_BYTES carry far more
+		// than the 20k-row parse cap, so semantics are unchanged for legal
+		// stores; oversized ones now report truncated.
+		const stat = fs.statSync(absPath);
+		const len = Math.min(stat.size, MAX_MEMBER_FILE_BYTES);
+		const fd = fs.openSync(absPath, 'r');
+		try {
+			const buf = Buffer.alloc(len);
+			const read = fs.readSync(fd, buf, 0, len, 0);
+			content = buf.toString('utf-8', 0, read);
+		} finally {
+			fs.closeSync(fd);
+		}
 	} catch {
 		return out; // absent member file = no rows on that side
 	}

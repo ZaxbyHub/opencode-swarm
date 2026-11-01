@@ -146,7 +146,17 @@ export function createLockFixture(): LockFixture {
 		if (pid === undefined) return;
 		process.kill(pid, 'SIGKILL');
 		if (child.exitCode === null && child.signalCode === null) {
-			await new Promise<void>((r) => child.once('exit', () => r()));
+			// Feedback PRR-024: bound the exit await — SIGKILL cannot be
+			// ignored, so a non-exit here means the event was missed (or the
+			// pid left the process table before the listener attached); the
+			// liveness wait below is the authoritative check.
+			await new Promise<void>((r) => {
+				const t = setTimeout(r, 10_000);
+				child.once('exit', () => {
+					clearTimeout(t);
+					r();
+				});
+			});
 		}
 		await waitUntil(
 			() => {

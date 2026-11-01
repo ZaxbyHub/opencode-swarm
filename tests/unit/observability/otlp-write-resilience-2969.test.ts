@@ -107,9 +107,14 @@ describe('otlp exporter write resilience (#2969, SIB3-2)', () => {
 			dir,
 			testExportConfig(NEVER_COLLECTOR, { batchSize: 8 }),
 		);
-		otlpInternals.renameWithRetry = (() => {
+		// Feedback PRR-019: drive the REAL shared retry helper to exhaustion
+		// through the atomic-write fs seam (a stub on the site seam skipped
+		// the helper's throw-after-budget contract entirely — a mutant that
+		// swallows the terminal error passed everything). PRR-023's capped
+		// OTLP schedule keeps this arm fast (~85 ms of sync sleeps).
+		atomicWriteInternals.renameSync = (() => {
 			throw ebusy();
-		}) as typeof realOtlpRename;
+		}) as typeof realAtomicRename;
 
 		const { emit } = await import('../../../src/telemetry.js');
 		// The public boundary must never throw for a spool write failure.
@@ -121,8 +126,10 @@ describe('otlp exporter write resilience (#2969, SIB3-2)', () => {
 		expect(health?.dropped['write_retry_exhausted']).toBe(1);
 		expect(health?.dropped['listener_error'] ?? 0).toBe(0);
 		expect(health?.lastErrorCategory).toBe('write_retry_exhausted');
-		// No canonical spool file was (non-atomically) clobbered into place
-		// and no tmp residue survives the terminal failure.
+		// Feedback PRR-020: the stated no-clobber invariant is ASSERTED —
+		// no canonical spool file was (non-atomically) placed, and no tmp
+		// residue survives the terminal failure.
+		expect(existsSync(spoolPathOf(dir))).toBe(false);
 		expect(spoolDirEntries(dir).filter((n) => n.includes('.tmp-'))).toEqual([]);
 	}, 20_000);
 

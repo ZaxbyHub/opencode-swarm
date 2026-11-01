@@ -23,6 +23,7 @@ import {
 	readdirSync,
 	readFileSync,
 	readlinkSync,
+	symlinkSync,
 	utimesSync,
 	writeFileSync,
 } from 'node:fs';
@@ -269,6 +270,90 @@ describe('handleDoctorCommand --integrity (issue #2969)', () => {
 		expect(out).toContain('integrity_issues_total: 0');
 		// The live-owner lock itself is untouched — never auto-removed.
 		expect(existsSync(liveLck)).toBe(true);
+	});
+
+	test('events.lock + break markers are classified (feedback PRR-004/006)', async () => {
+		// Dead-pid events.lock past TTL → actionable.
+		const eventsLock = write(
+			'events.lock',
+			JSON.stringify({
+				v: 1,
+				nonce: 'e',
+				ownerPid: 999_999_999,
+				startBoundMs: 0,
+				agent: 'a',
+				taskId: 't',
+				acquiredAtMs: 1,
+			}),
+		);
+		backdate(eventsLock);
+		// events.lock.breaking marker → listed.
+		write('events.lock.breaking', 'x');
+		// Aged planted marker in locks/ → listed.
+		const locksDir = path.join(swarmDir, 'locks');
+		mkdirSync(locksDir, { recursive: true });
+		const marker = path.join(locksDir, 'dead.lck.breaking');
+		writeFileSync(marker, 'x', 'utf-8');
+		await handleDoctorCommand(projectDir, []); // prime receipt bootstrap
+		const out = await handleDoctorCommand(projectDir, ['--integrity']);
+		expect(out).toContain('`events.lock` (owner pid 999999999 dead, past TTL)');
+		expect(out).toContain('`events.lock.breaking` (break marker present');
+		expect(out).toContain('`locks/dead.lck.breaking` (break marker');
+		// events.lock actionable (1) + marker listed (1) + locks marker (1).
+		expect(out).toContain('- stale_locks: 3');
+	});
+
+	test('non-v1 payload is ownerless, never report-only-live (feedback PRR-011)', async () => {
+		const locksDir = path.join(swarmDir, 'locks');
+		mkdirSync(locksDir, { recursive: true });
+		const lck = path.join(locksDir, 'legacy.lck');
+		// No `v` field — mirrors the substrate's ownerless classification.
+		writeFileSync(
+			lck,
+			JSON.stringify({
+				nonce: 'x',
+				ownerPid: process.pid,
+				startBoundMs: 0,
+				agent: 'a',
+				taskId: 't',
+				acquiredAtMs: 1,
+			}),
+			'utf-8',
+		);
+		backdate(lck);
+		await handleDoctorCommand(projectDir, []); // prime receipt bootstrap
+		const out = await handleDoctorCommand(projectDir, ['--integrity']);
+		expect(out).toContain('- stale_locks: 1');
+		expect(out).toContain('(unparsable owner payload, past TTL)');
+		expect(out).not.toContain('report-only: live owner pid');
+	});
+
+	test('oversized foreign lock artifact is listed, not parsed (feedback PRR-022)', async () => {
+		const locksDir = path.join(swarmDir, 'locks');
+		mkdirSync(locksDir, { recursive: true });
+		const big = path.join(locksDir, 'huge.lck');
+		writeFileSync(big, 'x'.repeat(65 * 1024), 'utf-8');
+		backdate(big);
+		await handleDoctorCommand(projectDir, []); // prime receipt bootstrap
+		const out = await handleDoctorCommand(projectDir, ['--integrity']);
+		expect(out).toContain('bytes — oversized foreign artifact, past TTL)');
+		expect(out).toContain('- stale_locks: 1');
+	});
+
+	test('symlinked lock entries are skipped, never followed (feedback PRR-017)', async () => {
+		const locksDir = path.join(swarmDir, 'locks');
+		mkdirSync(locksDir, { recursive: true });
+		const targetDir = path.join(projectDir, 'outside');
+		mkdirSync(targetDir, { recursive: true });
+		writeFileSync(path.join(targetDir, 'planted.lck'), 'evil', 'utf-8');
+		// A junction (works unprivileged on Windows; symlink on POSIX).
+		symlinkSync(targetDir, path.join(locksDir, 'escape'), 'junction');
+		await handleDoctorCommand(projectDir, []); // prime receipt bootstrap
+		const out = await handleDoctorCommand(projectDir, ['--integrity']);
+		expect(out).toContain('- stale_locks: 0');
+		expect(out).not.toContain('planted');
+		// The planted target was never touched.
+		expect(existsSync(path.join(targetDir, 'planted.lck'))).toBe(true);
 	});
 });
 

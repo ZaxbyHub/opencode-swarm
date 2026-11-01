@@ -317,6 +317,15 @@ class SwarmWriteFailedError extends Error {
 	}
 }
 
+/** Retry schedule CAP for the telemetry emit path (feedback PRR-023): the
+ *  spool write runs synchronously inside emit() — the full default schedule
+ *  (10+25+50+100+200 = 385 ms of sync sleeps) blocked the emitting thread on
+ *  every transient rename failure. Telemetry must never stall its host;
+ *  the capped schedule bounds a record's worst-case sync block at ~85 ms
+ *  and terminal failure still throws (write class preserved, counting at
+ *  the record-owning boundary). */
+const OTLP_RENAME_RETRY_DELAYS_MS = [10, 25, 50] as const;
+
 /** Atomic tmp+rename write for spool/state files (Windows-safe).
  *  #2969 (SIB3-2): the rename rides the shared bounded-retry helper; the old
  *  non-atomic direct-write fallback (a canonical-file clobber worse than a
@@ -331,7 +340,7 @@ function atomicWrite(
 	const tmp = `${path}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
 	writeFileSync(tmp, contents, 'utf8');
 	try {
-		_internals.renameWithRetry(tmp, path);
+		_internals.renameWithRetry(tmp, path, OTLP_RENAME_RETRY_DELAYS_MS);
 	} catch (err) {
 		try {
 			if (existsSync(tmp)) unlinkSync(tmp);
@@ -487,7 +496,11 @@ export const _internals: {
 	fetch: OtlpFetch;
 	sleep: (ms: number) => Promise<void>;
 	now: () => number;
-	renameWithRetry: (fromPath: string, toPath: string) => void;
+	renameWithRetry: (
+		fromPath: string,
+		toPath: string,
+		delays?: readonly number[],
+	) => void;
 } = {
 	fetch: (input, init) => fetch(input as RequestInfo, init),
 	sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
