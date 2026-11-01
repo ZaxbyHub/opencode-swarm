@@ -1,8 +1,18 @@
+/**
+ * GitHub/GitLab PR helpers via `gh` / `glab` spawns.
+ *
+ * Forgejo: no GitHub GraphQL — prefer `repo` / `fj` for forge operations.
+ * `ghExec` applies `forge.gh_forgejo` env overrides only when that bridge is
+ * explicitly enabled (`on` or matching `auto` remote); default is off.
+ */
 import * as child_process from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { z } from 'zod';
 import { mergeEnvForChild } from '../utils/bun-compat';
+import {
+	resolveForgejoGhEnvOverrides,
+} from '../utils/forgejo-gh-env.js';
 import { resolveGhExecutable } from '../utils/gh-executable.js';
 import { resolveGitExecutable } from '../utils/git-executable.js';
 import { resolveGlabExecutable } from '../utils/glab-executable.js';
@@ -86,14 +96,16 @@ export function ghExec(args: string[], cwd: string): string {
 	// 'gh' fallback is its own terminal outcome (probe/caching live in
 	// src/utils/gh-executable.ts).
 	const ghBinary = _internals.resolveGhExecutable();
+	const forgejoGhEnv = resolveForgejoGhEnvOverrides(cwd);
 	for (let attempt = 0; attempt < MAX_TRANSIENT_RETRIES; attempt++) {
-		const result = child_process.spawnSync(ghBinary, args, {
+		const result = __spawnSyncSeam.spawnSync(ghBinary, args, {
 			cwd,
 			encoding: 'utf-8',
 			timeout: GIT_TIMEOUT_MS,
-			windowsHide: true,
 			maxBuffer: MAX_OUTPUT_BYTES,
+			windowsHide: true,
 			stdio: ['ignore', 'pipe', 'pipe'],
+			envOverrides: forgejoGhEnv ?? undefined,
 		});
 
 		if (result.error) {
@@ -116,11 +128,13 @@ export function ghExec(args: string[], cwd: string): string {
 		}
 
 		if (result.status !== 0) {
-			throw new Error(
-				result.stderr || result.stdout || `gh exited with ${result.status}`,
-			);
+			const reason =
+				(result.stderr as string) ||
+				(result.stdout as string) ||
+				`gh exited with ${result.status}`;
+			throw new Error(reason);
 		}
-		return result.stdout;
+		return result.stdout as string;
 	}
 
 	// Should not reach here; loop exits via return or throw

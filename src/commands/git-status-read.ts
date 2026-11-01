@@ -31,6 +31,7 @@ import {
 	classifySpawnFailure,
 } from '../utils/bun-compat';
 import { resolveGitExecutableAsync } from '../utils/git-executable';
+import { findRepoRoot, repoVcsReadArgs, runRepo } from '../vcs/repo-facade';
 
 export type GitStatusReadResult =
 	| { ok: true; stdout: string }
@@ -367,6 +368,18 @@ export async function readGitStatusAsync(
 	const timeoutMs = opts?.timeoutMs ?? GIT_READ_DEFAULT_TIMEOUT_MS;
 	const maxBufferBytes =
 		opts?.maxBufferBytes ?? GIT_READ_DEFAULT_MAX_BUFFER_BYTES;
+	const repoRoot = findRepoRoot(cwd);
+	const mirrored = repoRoot ? repoVcsReadArgs(args) : null;
+	if (repoRoot && mirrored) {
+		const ran = await runRepo(repoRoot, mirrored);
+		if (ran.exitCode === 0) return { ok: true, stdout: ran.stdout };
+		return {
+			ok: false,
+			code: null,
+			status: ran.exitCode,
+			stderrTail: stderrTail(ran.stderr),
+		};
+	}
 	const first = await gitStatusReadInternals.readOnce(
 		args,
 		cwd,

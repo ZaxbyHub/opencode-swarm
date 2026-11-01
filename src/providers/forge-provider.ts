@@ -39,7 +39,13 @@ import {
 	isPrivateHost,
 } from './host-guards.js';
 
-export type ForgeProviderId = 'github' | 'gitlab';
+export type ForgeProviderId = 'github' | 'gitlab' | 'forgejo';
+
+/** Canonical fleet Forgejo host (CentralCloud). */
+export const FLEET_FORGEJO_HOST = 'git.centralcloud.net';
+
+const FORGEJO_PULLS_PATH = /^\/(.+)\/([^/]+)\/pulls\/(\d+)\/?$/;
+const FORGEJO_ISSUES_PATH = /^\/(.+)\/([^/]+)\/issues\/(\d+)\/?$/;
 
 /** Canonical web host, lowercase (e.g. 'github.com', 'gitlab.internal.example.com'). */
 export interface ForgeContext {
@@ -60,13 +66,43 @@ export interface ForgeResourceRef extends ForgeContext {
 
 export interface ProviderSelectionInput {
 	config?: {
-		provider?: 'github' | 'gitlab' | 'auto';
+		provider?: 'github' | 'gitlab' | 'forgejo' | 'auto';
 		/** camelCase form (frozen-check binding). */
 		baseUrl?: string;
 		/** snake_case form — the plugin config schema key (`forge.base_url`). */
 		base_url?: string;
+		/** Extra Forgejo/Gitea fleet hosts (future federation); not public SaaS defaults. */
+		forgejo_hosts?: string[];
 	};
 	remotes: string[];
+}
+
+export function normalizeForgejoHost(host: string): string {
+	return host.trim().toLowerCase();
+}
+
+/** Fleet forge plus configured extras (self-hosted Gitea/Forgejo only). */
+export function isForgejoIndicatingHost(
+	host: string,
+	extraHosts: readonly string[] = [],
+): boolean {
+	const lower = normalizeForgejoHost(host);
+	if (lower === FLEET_FORGEJO_HOST) return true;
+	for (const entry of extraHosts) {
+		if (normalizeForgejoHost(entry) === lower) return true;
+	}
+	return false;
+}
+
+function isConfiguredForgejoHost(
+	host: string,
+	configured?: ForgeContext,
+): boolean {
+	return (
+		configured !== undefined &&
+		configured.provider === 'forgejo' &&
+		host === configured.host
+	);
 }
 
 export type ProviderSelection =
@@ -137,6 +173,16 @@ export function detectForgeFromUrl(
 		}
 		if (isGitLabIndicatingHost(host)) {
 			return { provider: 'gitlab', host };
+		}
+		if (
+			configured &&
+			configured.provider === 'forgejo' &&
+			host === configured.host
+		) {
+			return { provider: 'forgejo', host };
+		}
+		if (isForgejoIndicatingHost(host)) {
+			return { provider: 'forgejo', host };
 		}
 		if (
 			configured &&
@@ -249,6 +295,22 @@ export function matchForgeResourceUrl(
 		return { provider: 'gitlab', host, owner: m[1], repo: m[2], number };
 	}
 
+	if (
+		isForgejoIndicatingHost(host) ||
+		isConfiguredForgejoHost(host, configured)
+	) {
+		const pattern =
+			resource === 'pull' ? FORGEJO_PULLS_PATH : FORGEJO_ISSUES_PATH;
+		const m = parsed.pathname.match(pattern);
+		if (!m) return null;
+		if (containsControlCharacters(m[1]) || containsControlCharacters(m[2])) {
+			return null;
+		}
+		const number = Number.parseInt(m[3], 10);
+		if (!Number.isSafeInteger(number) || number <= 0) return null;
+		return { provider: 'forgejo', host, owner: m[1], repo: m[2], number };
+	}
+
 	return null;
 }
 
@@ -259,14 +321,17 @@ export function matchForgeResourceUrl(
  * url-security's legacy `parseGitRemoteUrl` path fallback (kept for GHE/proxy
  * bare-number resolution), this function never guesses a provider.
  */
-export function parseForgeRemoteUrl(remoteUrl: string): ForgeRemote | null {
+export function parseForgeRemoteUrl(
+	remoteUrl: string,
+	extraForgejoHosts: readonly string[] = [],
+): ForgeRemote | null {
 	const https = remoteUrl.match(/^https:\/\/([^/]+)\/(.+?)(?:\.git)?\/?$/i);
 	if (https) {
-		return remotePathResult(https[1], https[2]);
+		return remotePathResult(https[1], https[2], extraForgejoHosts);
 	}
 	const ssh = remoteUrl.match(/^git@([^:/]+):(.+?)(?:\.git)?$/i);
 	if (ssh) {
-		return remotePathResult(ssh[1], ssh[2]);
+		return remotePathResult(ssh[1], ssh[2], extraForgejoHosts);
 	}
 	return null;
 }
@@ -274,10 +339,16 @@ export function parseForgeRemoteUrl(remoteUrl: string): ForgeRemote | null {
 function remotePathResult(
 	rawHost: string,
 	projectPath: string,
+	extraForgejoHosts: readonly string[] = [],
 ): ForgeRemote | null {
 	const host = rawHost.toLowerCase();
 	if (!host || hasNonAsciiHostname(host) || hasPunycodeLabel(host)) return null;
-	if (!isGitLabIndicatingHost(host) && host !== GITHUB_CANONICAL_HOST) {
+	if (host === GITHUB_CANONICAL_HOST) {
+		// fall through to segment parse below with github provider
+	} else if (
+		!isGitLabIndicatingHost(host) &&
+		!isForgejoIndicatingHost(host, extraForgejoHosts)
+	) {
 		return null;
 	}
 	const segments = projectPath.split('/').filter((s) => s.length > 0);
@@ -288,12 +359,13 @@ function remotePathResult(
 	if (containsControlCharacters(owner) || containsControlCharacters(repo)) {
 		return null;
 	}
-	return {
-		provider: host === GITHUB_CANONICAL_HOST ? 'github' : 'gitlab',
-		host,
-		owner,
-		repo,
-	};
+	if (host === GITHUB_CANONICAL_HOST) {
+		return { provider: 'github', host, owner, repo };
+	}
+	if (isForgejoIndicatingHost(host, extraForgejoHosts)) {
+		return { provider: 'forgejo', host, owner, repo };
+	}
+	return { provider: 'gitlab', host, owner, repo };
 }
 
 /** Build the canonical PR/MR URL for a provider context. */
@@ -303,6 +375,9 @@ export function buildPrUrl(
 	repo: string,
 	number: number,
 ): string {
+	if (ctx.provider === 'forgejo') {
+		return `https://${ctx.host}/${owner}/${repo}/pulls/${number}`;
+	}
 	if (ctx.provider === 'gitlab') {
 		return `https://${ctx.host}/${owner}/${repo}/-/merge_requests/${number}`;
 	}
@@ -318,6 +393,9 @@ export function buildIssueUrl(
 ): string {
 	if (ctx.provider === 'gitlab') {
 		return `https://${ctx.host}/${owner}/${repo}/-/issues/${number}`;
+	}
+	if (ctx.provider === 'forgejo') {
+		return `https://${ctx.host}/${owner}/${repo}/issues/${number}`;
 	}
 	return `https://github.com/${owner}/${repo}/issues/${number}`;
 }
@@ -369,6 +447,17 @@ export function canonicalForgePrUrl(
 			return `${host}/${m[1].toLowerCase()}/${m[2].toLowerCase()}/-/merge_requests/${number}`;
 		}
 
+		if (
+			isForgejoIndicatingHost(host) ||
+			isConfiguredForgejoHost(host, configured)
+		) {
+			const m = url.pathname.match(FORGEJO_PULLS_PATH);
+			if (!m) return null;
+			const number = Number(m[3]);
+			if (!Number.isSafeInteger(number) || number <= 0) return null;
+			return `${host}/${m[1].toLowerCase()}/${m[2].toLowerCase()}/pulls/${number}`;
+		}
+
 		return null;
 	} catch {
 		return null;
@@ -384,7 +473,7 @@ export function canonicalForgePrUrl(
 export function getProviderCapabilities(
 	provider: ForgeProviderId,
 ): ForgeCapabilities {
-	if (provider === 'gitlab') {
+	if (provider === 'gitlab' || provider === 'forgejo') {
 		return {
 			statusCheckRollup: false,
 			reviewDecision: false,
@@ -409,7 +498,13 @@ export function getProviderCapabilities(
  */
 export function resolveForgeContextFromPluginConfig(
 	pluginConfig:
-		| { forge?: { provider?: string; base_url?: string } }
+		| {
+				forge?: {
+					provider?: string;
+					base_url?: string;
+					forgejo_hosts?: string[];
+				};
+		  }
 		| undefined,
 	remotes: string[],
 ): ForgeContext | null {
@@ -418,11 +513,16 @@ export function resolveForgeContextFromPluginConfig(
 	const provider =
 		forge.provider === 'github' ||
 		forge.provider === 'gitlab' ||
+		forge.provider === 'forgejo' ||
 		forge.provider === 'auto'
 			? forge.provider
 			: undefined;
 	const selection = resolveProviderSelection({
-		config: { provider, baseUrl: forge.base_url },
+		config: {
+			provider,
+			baseUrl: forge.base_url,
+			forgejo_hosts: forge.forgejo_hosts,
+		},
 		remotes,
 	});
 	return selection.ok ? selection.context : null;
@@ -430,6 +530,21 @@ export function resolveForgeContextFromPluginConfig(
 
 function invalidBaseUrlError(reason: string): string {
 	return `Invalid forge.base_url (${reason}) — provider config rejected; base_url must be an HTTPS URL on a public, ASCII host and is never a trust whitelist.`;
+}
+
+/** When `provider: auto`, infer forge vs gitlab from a validated base_url host. */
+function inferProviderFromBaseUrlHost(
+	host: string,
+	extraForgejoHosts: readonly string[],
+): ForgeProviderId {
+	if (isForgejoIndicatingHost(host, extraForgejoHosts)) {
+		return 'forgejo';
+	}
+	if (isGitLabIndicatingHost(host)) {
+		return 'gitlab';
+	}
+	// Generic self-hosted declaration (issue #2733): base_url alone declares GitLab.
+	return 'gitlab';
 }
 
 /**
@@ -505,30 +620,81 @@ export function resolveProviderSelection(
 		};
 	}
 
+	const extraForgejoHosts = input.config?.forgejo_hosts ?? [];
+
 	if (baseUrlHost !== undefined) {
-		return { ok: true, context: { provider: 'gitlab', host: baseUrlHost } };
+		if (provider === 'forgejo') {
+			return {
+				ok: true,
+				context: { provider: 'forgejo', host: baseUrlHost },
+			};
+		}
+		if (provider === 'gitlab') {
+			return {
+				ok: true,
+				context: { provider: 'gitlab', host: baseUrlHost },
+			};
+		}
+		return {
+			ok: true,
+			context: {
+				provider: inferProviderFromBaseUrlHost(baseUrlHost, extraForgejoHosts),
+				host: baseUrlHost,
+			},
+		};
 	}
 
-	// No baseUrl: the host must come from a unanimously GitLab-indicating
-	// remote set (explicit gitlab), or from unanimous auto-detection (auto).
+	// No baseUrl: the host must come from a unanimous remote set (explicit
+	// provider) or from unanimous auto-detection (auto).
 	const gitlabHosts = new Set<string>();
+	const forgejoHosts = new Set<string>();
 	let sawGithub = false;
 	let sawUnrecognized = false;
 	for (const remote of remotes) {
-		const parsed = parseForgeRemoteUrl(remote);
+		const parsed = parseForgeRemoteUrl(remote, extraForgejoHosts);
 		if (!parsed) {
 			sawUnrecognized = true;
 			continue;
 		}
 		if (parsed.provider === 'github') {
 			sawGithub = true;
+		} else if (parsed.provider === 'forgejo') {
+			forgejoHosts.add(parsed.host);
 		} else {
 			gitlabHosts.add(parsed.host);
 		}
 	}
 
+	const mixedNonGithub =
+		(sawGithub && (gitlabHosts.size > 0 || forgejoHosts.size > 0)) ||
+		(gitlabHosts.size > 0 && forgejoHosts.size > 0);
+
+	if (provider === 'forgejo') {
+		if (
+			forgejoHosts.size === 1 &&
+			!sawGithub &&
+			!sawUnrecognized &&
+			gitlabHosts.size === 0
+		) {
+			return {
+				ok: true,
+				context: { provider: 'forgejo', host: [...forgejoHosts][0] as string },
+			};
+		}
+		return {
+			ok: false,
+			error:
+				'Provider config incomplete: forge.provider is "forgejo" but no forge.base_url is set and the git remotes do not unanimously indicate a single Forgejo host — set forge.base_url (e.g. https://git.centralcloud.net) or forgejo_hosts in config.',
+		};
+	}
+
 	if (provider === 'gitlab') {
-		if (gitlabHosts.size === 1 && !sawGithub && !sawUnrecognized) {
+		if (
+			gitlabHosts.size === 1 &&
+			!sawGithub &&
+			!sawUnrecognized &&
+			forgejoHosts.size === 0
+		) {
 			return {
 				ok: true,
 				context: { provider: 'gitlab', host: [...gitlabHosts][0] as string },
@@ -542,11 +708,11 @@ export function resolveProviderSelection(
 	}
 
 	// auto
-	if (sawGithub && gitlabHosts.size > 0) {
+	if (mixedNonGithub) {
 		return {
 			ok: false,
 			error:
-				'Provider selection ambiguous: git remotes indicate both GitHub and GitLab — set forge.provider (and forge.base_url for self-hosted GitLab) explicitly in config.',
+				'Provider selection ambiguous: git remotes indicate more than one forge provider or host class — set forge.provider (and forge.base_url for self-hosted GitLab or Forgejo) explicitly in config.',
 		};
 	}
 	if (sawUnrecognized) {
@@ -560,6 +726,19 @@ export function resolveProviderSelection(
 		return {
 			ok: true,
 			context: { provider: 'github', host: GITHUB_CANONICAL_HOST },
+		};
+	}
+	if (forgejoHosts.size === 1) {
+		return {
+			ok: true,
+			context: { provider: 'forgejo', host: [...forgejoHosts][0] as string },
+		};
+	}
+	if (forgejoHosts.size > 1) {
+		return {
+			ok: false,
+			error:
+				'Provider selection ambiguous: git remotes indicate multiple different Forgejo hosts — set forge.provider and forge.base_url explicitly in config.',
 		};
 	}
 	if (gitlabHosts.size === 1) {

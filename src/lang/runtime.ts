@@ -1,12 +1,48 @@
 import { existsSync, statSync } from 'node:fs';
 import * as path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { Parser as ParserType } from 'web-tree-sitter';
-// Note: Language must be imported as both type and value for runtime loading
-// TreeSitterParser is imported to use Language.load()
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-import { Language, Parser as TreeSitterParser } from 'web-tree-sitter';
 import { withTimeout } from '../utils/timeout';
+
+type WebTreeSitter = typeof import('web-tree-sitter');
+
+/**
+ * OpenCode loads this plugin from dist/index.js and does not resolve a bare
+ * `web-tree-sitter` specifier against the plugin's node_modules. Import the
+ * package file directly so grammar use can still load it.
+ */
+export function webTreeSitterModuleUrl(startDir: string): string {
+	let dir = startDir;
+	for (let depth = 0; depth < 6; depth += 1) {
+		const candidate = path.join(
+			dir,
+			'node_modules',
+			'web-tree-sitter',
+			'tree-sitter.js',
+		);
+		if (existsSync(candidate)) return pathToFileURL(candidate).href;
+		const parent = path.dirname(dir);
+		if (parent === dir) break;
+		dir = parent;
+	}
+	return 'web-tree-sitter';
+}
+
+/**
+ * Grammar parsing is optional. Keep this import dynamic so plugin startup
+ * does not resolve `web-tree-sitter` when the host never loads grammars.
+ */
+let webTreeSitterPromise: Promise<WebTreeSitter> | null = null;
+export function loadWebTreeSitter(): Promise<WebTreeSitter> {
+	if (!webTreeSitterPromise) {
+		const specifier = webTreeSitterModuleUrl(_internals.getModuleDir());
+		webTreeSitterPromise = import(specifier).catch((error: unknown) => {
+			webTreeSitterPromise = null;
+			throw error;
+		});
+	}
+	return webTreeSitterPromise;
+}
 
 // Re-export Parser type for consumers
 export type Parser = ParserType;
@@ -56,7 +92,10 @@ let treeSitterInitPromise: Promise<void> | null = null;
  * mock.module leakage. Restore the original reference in afterEach.
  */
 export const _internals = {
-	parserInit: TreeSitterParser.init as (opts?: {
+	parserInit: (async (opts?: { locateFile: (scriptName: string) => string }) => {
+		const { Parser } = await loadWebTreeSitter();
+		return Parser.init(opts);
+	}) as (opts?: {
 		locateFile: (scriptName: string) => string;
 	}) => Promise<void>,
 	getModuleDir: () => path.dirname(fileURLToPath(import.meta.url)),
@@ -216,6 +255,7 @@ export async function loadGrammar(languageId: string): Promise<ParserType> {
 	const loadPromise = (async (): Promise<ParserType> => {
 		// Initialize tree-sitter WASM runtime
 		await initTreeSitter();
+		const { Parser: TreeSitterParser, Language } = await loadWebTreeSitter();
 
 		// Initialize parser
 		const parser = new TreeSitterParser();

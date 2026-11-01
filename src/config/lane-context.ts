@@ -51,6 +51,7 @@ import {
 	sameProjectRoot,
 } from '../utils/canonical-root.js';
 import { matchSwarmLaneBranch, matchSwarmLanePath } from './swarm-branch';
+import { readRepoLaneContext } from '../vcs/repo-facade';
 
 /**
  * A resolved swarm worktree lane.
@@ -505,6 +506,17 @@ function attemptDetection(
 	io: { failed: boolean },
 ): LaneContext | null {
 	try {
+		// Engine lanes from `repo lane create` are jj workspaces. They have no
+		// linked `.git` file and do not live under `.swarm-worktrees`. The marker
+		// written at provision time is the ownership signal.
+		const marked = readRepoLaneContext(resolved);
+		if (marked) {
+			return {
+				lanePath: marked.lanePath,
+				parentProjectPath: marked.parentProjectPath,
+			};
+		}
+
 		// Signal 1 (required): find the nearest ancestor (including `resolved`
 		// itself) that is a real LINKED git worktree. A main working tree has a
 		// `.git` DIRECTORY, not a file, and is never a lane.

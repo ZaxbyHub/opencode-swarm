@@ -33,6 +33,7 @@ import {
 	createSkillImproverLLMDelegate,
 	type SkillImproverLLMDelegate,
 } from '../hooks/skill-improver-llm-factory';
+import { forgeIssueCreateRoutingHint } from '../providers/forge-publication.js';
 import {
 	normalizeComplianceVerdict,
 	readSkillUsageEntriesTail,
@@ -983,6 +984,7 @@ export function buildActionMenu(
  */
 export function buildActionProposals(
 	data: SessionReflectionData,
+	directory?: string,
 ): ReflectionActionProposal[] {
 	// Defensive defaults: tests and older callers may construct partial data.
 	const contradictionCandidates = data.contradictionCandidates ?? [];
@@ -1001,7 +1003,7 @@ export function buildActionProposals(
 			kind: 'file_issue',
 			label: `FILE issue: "Gate ${gf.gate} rejected on task ${gf.taskId}" (repro verified)`,
 			detail: `Gate ${gf.gate} rejected ${gf.count}x on task ${gf.taskId}. Repro evidence: gate-fail verdict.`,
-			routing: 'gh issue create',
+			routing: forgeIssueCreateRoutingHint(directory),
 		});
 	}
 	for (const p of data.toolProblems.slice(0, 2)) {
@@ -1010,7 +1012,7 @@ export function buildActionProposals(
 				kind: 'file_issue',
 				label: `FILE issue: "Tool ${p.tool} failing ${Math.round(p.failureRate * 100)}%" (repro verified)`,
 				detail: `Tool ${p.tool}: ${p.failureCount}/${p.totalCalls} failures (${Math.round(p.failureRate * 100)}%).`,
-				routing: 'gh issue create',
+				routing: forgeIssueCreateRoutingHint(directory),
 			});
 		}
 	}
@@ -1255,7 +1257,7 @@ export async function runSessionReflection(
 	// hasSignals check) so the "0 captured; N deduped" / NOOP line appears
 	// even in a clean session.
 	const signalsReport = buildSignalsBlock(data);
-	const actionProposals = buildActionProposals(data);
+	const actionProposals = buildActionProposals(data, input.directory);
 
 	const delegate =
 		input.delegate ??

@@ -180,7 +180,7 @@ describe('session-reflection #2077 — buildActionMenu', () => {
 				kind: 'file_issue',
 				label: 'FILE issue',
 				detail: 'd',
-				routing: 'gh issue create',
+				routing: 'repo issue create --title "<title>" [--body "<body>"]',
 			},
 		];
 		const menu = buildActionMenu(proposals, true);

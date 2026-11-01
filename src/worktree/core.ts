@@ -24,6 +24,13 @@ import { log } from '../utils';
 import { bunSpawn } from '../utils/bun-compat';
 import { resolveGitExecutable } from '../utils/git-executable.js';
 import {
+	findRepoRoot,
+	laneNameFromSwarmId,
+	parseRepoLaneCreateStdout,
+	runRepoLaneCreate,
+	writeRepoLaneMarker,
+} from '../vcs/repo-facade';
+import {
 	assertSettlementArtifactsRemovable,
 	withSettlementArtifactLifecycle,
 } from './settlement-artifact-lifecycle';
@@ -697,6 +704,50 @@ export async function provisionWorktree(
 		};
 	}
 
+	const repoRoot = findRepoRoot(directory);
+	if (repoRoot) {
+		const laneName = laneNameFromSwarmId(sessionId, id);
+		if (!laneName) {
+			return {
+				error: `repo lane create refused the lane name for session "${sessionId}" id "${id}"`,
+			};
+		}
+		const objective = `${options.purpose} ${id}`
+			.replace(/\s+/g, ' ')
+			.trim()
+			.slice(0, 200);
+		const created = await runRepoLaneCreate(repoRoot, laneName, objective);
+		if (created.exitCode !== 0) {
+			const detail =
+				created.stderr.trim() ||
+				created.stdout.trim() ||
+				`exit ${created.exitCode}`;
+			return { error: `repo lane create failed: ${detail}` };
+		}
+		const parsed = parseRepoLaneCreateStdout(created.stdout);
+		if (!parsed) {
+			return { error: 'repo lane create returned no path' };
+		}
+		try {
+			writeRepoLaneMarker(parsed.path, {
+				parentProjectPath: repoRoot,
+				sessionId,
+				id,
+			});
+		} catch (error) {
+			const detail = error instanceof Error ? error.message : String(error);
+			return { error: `repo lane marker write failed: ${detail}` };
+		}
+		return finishProvisionedLane(
+			parsed.path,
+			branchName,
+			directory,
+			id,
+			sessionId,
+			options,
+		);
+	}
+
 	// Resolve worktree path: explicit config or DD-6 default
 	let worktreePath = path.resolve(
 		resolveWorktreeBaseDir(directory, options.worktreeDir),
@@ -966,6 +1017,24 @@ export async function provisionWorktree(
 		};
 	}
 
+	return finishProvisionedLane(
+		worktreePath,
+		branchName,
+		directory,
+		id,
+		sessionId,
+		options,
+	);
+}
+
+async function finishProvisionedLane(
+	worktreePath: string,
+	branchName: string,
+	directory: string,
+	id: string,
+	sessionId: string,
+	options: WorktreeOptions,
+): Promise<WorktreeProvisionResult> {
 	// Dependency preparation per depsStrategy (FR-101 / SC-101..SC-103)
 	// 'skip' (default): no preparation — caller may emit advisory if task gates include test/build.
 	// 'copy': recursive copy of host node_modules into lane (real files, not symlink).

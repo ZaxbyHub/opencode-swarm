@@ -18,7 +18,11 @@
 
 import { subscribe } from '../background/pr-subscriptions.js';
 import type { PrMonitorConfig } from '../config/schema.js';
-import { buildPrUrl, detectForgeFromUrl } from '../providers/forge-provider.js';
+import {
+	buildPrUrl,
+	detectForgeFromUrl,
+	FLEET_FORGEJO_HOST,
+} from '../providers/forge-provider.js';
 import { log } from '../utils';
 import { getStoredInputArgs } from './guardrails/stored-input-args';
 import { normalizeToolNameLowerCase } from './normalize-tool-name';
@@ -37,6 +41,11 @@ const PR_URL_PATTERN =
  */
 const MR_URL_PATTERN =
 	/https:\/\/(gitlab\.com|gitlab\.[A-Za-z0-9.-]+)\/([A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*)\/([A-Za-z0-9_.-]+)\/-\/merge_requests\/(\d+)/;
+
+/** Fleet Forgejo pull URL (`repo pr create` / `fj pr create` output). */
+const FORGEJO_PULL_URL_PATTERN = new RegExp(
+	`https://${FLEET_FORGEJO_HOST.replace(/\./g, '\\.')}/([A-Za-z0-9_.-]+(?:\\/[A-Za-z0-9_.-]+)*)\\/([A-Za-z0-9_.-]+)\\/pulls\\/(\\d+)`,
+);
 
 export interface PrAutoSubscribeHook {
 	toolAfter: (
@@ -84,6 +93,24 @@ export function extractPrUrl(
 			prNumber,
 			prUrl: buildPrUrl(
 				{ provider: 'github', host: 'github.com' },
+				owner,
+				repo,
+				prNumber,
+			),
+		};
+	}
+
+	const fjMatch = FORGEJO_PULL_URL_PATTERN.exec(slice);
+	if (fjMatch) {
+		const owner = fjMatch[1];
+		const repo = fjMatch[2];
+		const prNumber = Number.parseInt(fjMatch[3], 10);
+		if (!Number.isSafeInteger(prNumber) || prNumber <= 0) return null;
+		return {
+			repoFullName: `${owner}/${repo}`,
+			prNumber,
+			prUrl: buildPrUrl(
+				{ provider: 'forgejo', host: FLEET_FORGEJO_HOST },
 				owner,
 				repo,
 				prNumber,

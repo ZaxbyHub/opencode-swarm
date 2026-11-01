@@ -497,7 +497,7 @@ export function computeNextMode(
 	return {
 		nextMode: null,
 		directive:
-			'All implementation phases are complete. Compose commit-pr to publish the PR. Read .swarm/issue-reference.json for Closes #N. After the PR is created/updated, call record_issue_publication (with the issue number, PR number, URL, and HEAD sha) so this trace reaches its terminal published state — the trace is NOT complete until publication is confirmed.',
+			'All implementation phases are complete. Compose commit-pr to publish the PR (Engine worktrees: repo pr create — do not use gh against Forgejo). Read .swarm/issue-reference.json for Closes #N. After the PR is created/updated, call record_issue_publication with the issue number, PR number, canonical Forgejo URL (https://git.centralcloud.net/<owner>/<repo>/pulls/<N>), and HEAD sha — the trace is NOT complete until publication is confirmed.',
 		nextLastTransition: 'EXECUTE_TO_COMMIT',
 		nextStatus: 'publication_handoff',
 	};

@@ -4,7 +4,9 @@ import {
 	buildPrUrl,
 	canonicalForgePrUrl,
 	detectForgeFromUrl,
+	FLEET_FORGEJO_HOST,
 	getProviderCapabilities,
+	matchForgeResourceUrl,
 	type ProviderSelection,
 	parseForgeRemoteUrl,
 	resolveProviderSelection,
@@ -114,6 +116,32 @@ describe('parseForgeRemoteUrl (#2733 AC3)', () => {
 			parseForgeRemoteUrl('https://git.company.example.net/team/proj.git'),
 		).toBeNull();
 	});
+
+	test('forgejo fleet host https remote', () => {
+		expect(
+			parseForgeRemoteUrl(
+				'https://git.centralcloud.net/singularity/singularity-engine.git',
+			),
+		).toEqual({
+			provider: 'forgejo',
+			host: FLEET_FORGEJO_HOST,
+			owner: 'singularity',
+			repo: 'singularity-engine',
+		});
+	});
+
+	test('forgejo fleet host ssh scp-style remote', () => {
+		expect(
+			parseForgeRemoteUrl(
+				'git@git.centralcloud.net:singularity/singularity-engine.git',
+			),
+		).toEqual({
+			provider: 'forgejo',
+			host: FLEET_FORGEJO_HOST,
+			owner: 'singularity',
+			repo: 'singularity-engine',
+		});
+	});
 });
 
 // -- C3: buildPrUrl / buildIssueUrl ------------------------------------------
@@ -161,6 +189,63 @@ describe('buildPrUrl / buildIssueUrl (#2733 AC3)', () => {
 				3,
 			),
 		).toBe('https://gitlab.acme.test/ops/infra/app/-/issues/3');
+	});
+
+	test('buildPrUrl: forgejo pulls shape (fleet host)', () => {
+		expect(
+			buildPrUrl(
+				{ provider: 'forgejo', host: FLEET_FORGEJO_HOST },
+				'singularity',
+				'singularity-engine',
+				42,
+			),
+		).toBe(
+			'https://git.centralcloud.net/singularity/singularity-engine/pulls/42',
+		);
+	});
+
+	test('buildIssueUrl: forgejo issue shape (host from context)', () => {
+		expect(
+			buildIssueUrl(
+				{ provider: 'forgejo', host: FLEET_FORGEJO_HOST },
+				'singularity',
+				'singularity-engine',
+				7,
+			),
+		).toBe(
+			'https://git.centralcloud.net/singularity/singularity-engine/issues/7',
+		);
+	});
+});
+
+describe('matchForgeResourceUrl (forgejo fleet host)', () => {
+	const pullUrl =
+		'https://git.centralcloud.net/singularity/singularity-engine/pulls/42';
+	const issueUrl =
+		'https://git.centralcloud.net/singularity/singularity-engine/issues/99';
+
+	test('pull resource on forgejo host', () => {
+		expect(matchForgeResourceUrl(pullUrl, 'pull')).toEqual({
+			provider: 'forgejo',
+			host: FLEET_FORGEJO_HOST,
+			owner: 'singularity',
+			repo: 'singularity-engine',
+			number: 42,
+		});
+	});
+
+	test('issues resource on forgejo host', () => {
+		expect(matchForgeResourceUrl(issueUrl, 'issues')).toEqual({
+			provider: 'forgejo',
+			host: FLEET_FORGEJO_HOST,
+			owner: 'singularity',
+			repo: 'singularity-engine',
+			number: 99,
+		});
+	});
+
+	test('pull matcher rejects forgejo issue path', () => {
+		expect(matchForgeResourceUrl(issueUrl, 'pull')).toBeNull();
 	});
 });
 
@@ -429,6 +514,49 @@ describe('canonicalForgePrUrl (#2733 AC7)', () => {
 		expect(built).toBe('https://gitlab.com/acme/app/-/merge_requests/155');
 		expect(canonicalForgePrUrl(built)).toBe(
 			'gitlab.com/acme/app/-/merge_requests/155',
+		);
+	});
+
+	test('forgejo fleet pull URL → canonical pulls form', () => {
+		expect(
+			canonicalForgePrUrl(
+				'https://git.centralcloud.net/singularity/singularity-engine/pulls/42',
+			),
+		).toBe(
+			'git.centralcloud.net/singularity/singularity-engine/pulls/42',
+		);
+	});
+
+	test('forgejo case + trailing slash normalized', () => {
+		expect(
+			canonicalForgePrUrl(
+				'https://Git.CentralCloud.NET/Singularity/Singularity-Engine/pulls/42/',
+			),
+		).toBe(
+			'git.centralcloud.net/singularity/singularity-engine/pulls/42',
+		);
+	});
+
+	test('forgejo issues path is not a PR URL → null', () => {
+		expect(
+			canonicalForgePrUrl(
+				'https://git.centralcloud.net/singularity/singularity-engine/issues/7',
+			),
+		).toBeNull();
+	});
+
+	test('buildPrUrl forgejo output round-trips through the canonicalizer', () => {
+		const built = buildPrUrl(
+			{ provider: 'forgejo', host: FLEET_FORGEJO_HOST },
+			'singularity',
+			'singularity-engine',
+			42,
+		);
+		expect(built).toBe(
+			'https://git.centralcloud.net/singularity/singularity-engine/pulls/42',
+		);
+		expect(canonicalForgePrUrl(built)).toBe(
+			'git.centralcloud.net/singularity/singularity-engine/pulls/42',
 		);
 	});
 });

@@ -541,13 +541,12 @@ export async function extractFileSymbols(
 				// catch, so its own finally is the only reliable cleanup.
 				try {
 					// Lazy-init the Query constructor on first call (off the module-init path).
+					const { loadGrammar: loadGrammarDynamic, loadWebTreeSitter } =
+						await import('./runtime.js');
 					if (!_QueryCtor) {
-						const wts = await import('web-tree-sitter');
+						const wts = await loadWebTreeSitter();
 						_QueryCtor = wts.Query;
 					}
-					const { loadGrammar: loadGrammarDynamic } = await import(
-						'./runtime.js'
-					);
 					const parser = await loadGrammarDynamic(grammarId);
 					treeRef.value = parser.parse(source);
 					if (!treeRef.value) return null;

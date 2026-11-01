@@ -1,10 +1,12 @@
 import { extname } from 'node:path';
-import { Query, type QueryMatch, type Tree } from 'web-tree-sitter';
+import type { Query, QueryMatch, Tree } from 'web-tree-sitter';
+
+type QueryConstructor = typeof import('web-tree-sitter').Query;
 import {
 	getLanguageForExtension,
 	type LanguageDefinition,
 } from '../lang/registry.js';
-import { loadGrammar } from '../lang/runtime.js';
+import { loadGrammar, loadWebTreeSitter } from '../lang/runtime.js';
 import * as logger from '../utils/logger.js';
 
 export interface ASTChange {
@@ -215,9 +217,10 @@ export async function computeASTDiff(
 			};
 		}
 
-		// Extract symbols from both trees
-		const oldSymbols = extractSymbols(oldTree, language);
-		const newSymbols = extractSymbols(newTree, language);
+		// Query is loaded only for an actual AST diff, never at plugin startup.
+		const { Query } = await loadWebTreeSitter();
+		const oldSymbols = extractSymbols(oldTree, language, Query);
+		const newSymbols = extractSymbols(newTree, language, Query);
 
 		// Compare and generate changes
 		const changes = compareSymbols(oldSymbols, newSymbols);
@@ -264,6 +267,7 @@ interface SymbolInfo {
 function extractSymbols(
 	tree: Tree,
 	language: LanguageDefinition,
+	QueryImpl: QueryConstructor,
 ): SymbolInfo[] {
 	const symbols: SymbolInfo[] = [];
 	const queryStr = QUERIES[language.id];
@@ -279,7 +283,7 @@ function extractSymbols(
 			return symbols;
 		}
 
-		const query = new Query(lang, queryStr);
+		const query = new QueryImpl(lang, queryStr);
 		const matches = query.matches(tree.rootNode);
 
 		for (const match of matches) {

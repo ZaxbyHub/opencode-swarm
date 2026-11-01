@@ -1914,10 +1914,12 @@ export const ForgeConfigSchema = z.object({
 	/**
 	 * Forge provider selection for the PR/issue command surface (issue #2733).
 	 * 'auto' (default) derives the provider from the git remote; explicit
-	 * 'github' or 'gitlab' overrides auto-detection. Ambiguous remotes fail
-	 * closed and require an explicit selection.
+	 * 'github', 'gitlab', or 'forgejo' overrides auto-detection. Ambiguous
+	 * remotes fail closed and require an explicit selection.
 	 */
-	provider: z.enum(['github', 'gitlab', 'auto']).default('auto'),
+	provider: z
+		.enum(['github', 'gitlab', 'forgejo', 'auto'])
+		.default('auto'),
 	/**
 	 * GitLab instance base URL override for self-hosted instances (e.g.
 	 * https://gitlab.example.com). NOT a trust whitelist: the value passes
@@ -1926,9 +1928,72 @@ export const ForgeConfigSchema = z.object({
 	 * GitLab; combining it with provider 'github' is a configuration error.
 	 */
 	base_url: z.string().url().optional(),
+	/**
+	 * Extra fleet Forgejo/Gitea hosts for auto-detection and URL
+	 * canonicalization (self-hosted fleet only — not public SaaS defaults such
+	 * as codeberg.org).
+	 */
+	forgejo_hosts: z.array(z.string().min(1)).optional(),
+	/**
+	 * Optional bridge injecting `GH_HOST` + Forgejo token (same sources as
+	 * `fj`) for real `gh` child processes. Prefer Engine `repo` / `fj` on
+	 * Forgejo; direct `gh` against Forgejo fails for many subcommands without
+	 * federated GitHub sync and GraphQL parity. Default `off`.
+	 */
+	gh_forgejo: z
+		.object({
+			enabled: z.enum(['auto', 'on', 'off']).default('off'),
+			host: z.string().min(1).default('git.centralcloud.net'),
+		})
+		.optional(),
 });
 
 export type ForgeConfig = z.infer<typeof ForgeConfigSchema>;
+
+const RepoLifecycleActionSchema = z.enum([
+	'lane_push',
+	'pr_create',
+	'issue_create',
+	'issue_close',
+	'lane_publish',
+]);
+
+const RepoLifecycleWhenSchema = z.union([
+	z.string().min(1),
+	z.object({
+		engine: z.boolean().optional(),
+		event: z
+			.enum(['land_lane', 'file_issue', 'close_issue', 'integrate_lane'])
+			.optional(),
+	}),
+]);
+
+export const RepoLifecycleRuleSchema = z.object({
+	id: z.string().optional(),
+	when: RepoLifecycleWhenSchema,
+	do: z.array(RepoLifecycleActionSchema).min(1),
+});
+
+export const RepoLifecycleConfigSchema = z.object({
+	/** Protected integration target for `repo pr create --base`. */
+	pr_base: z.string().min(1).default('main'),
+	/**
+	 * Declarative automation: structured `when` or CEL-shaped strings
+	 * (`engine_repo`, `event`, `==`, `&&`, `||`, parentheses).
+	 */
+	automation: z.array(RepoLifecycleRuleSchema).optional(),
+});
+
+export const RepoConfigSchema = z.object({
+	lifecycle: RepoLifecycleConfigSchema.optional(),
+	/**
+	 * When an Engine root is detected, map `gh issue|pr …` to `repo issue|pr …`
+	 * (Forgejo via the repository facade). `auto` enables on Engine repos only.
+	 */
+	gh_bridge: z.enum(['auto', 'on', 'off']).default('auto'),
+});
+
+export type RepoConfig = z.infer<typeof RepoConfigSchema>;
 
 export const MemoryConfigSchema = z.object({
 	/** Enable Swarm memory tools and local memory storage. Default: false. */
@@ -4276,7 +4341,11 @@ export const PluginConfigSchema = z.object({
 	// Optional with safe defaults: absent = 'auto' provider detection; GitHub
 	// behavior is unchanged when the section is omitted.
 	forge: ForgeConfigSchema.optional().describe(
-		'Forge provider (GitHub/GitLab) selection for PR/issue workflows (issue #2733). Ambiguous git remotes (mixed providers, unrecognized self-hosted hosts, or no remote) fail closed and require an explicit selection; forge.base_url passes through the same HTTPS-only / non-private / ASCII-host guards as every forge URL and is never a trust whitelist; combining base_url with provider "github" is rejected as a configuration conflict.',
+		'Forge provider (GitHub/GitLab/Forgejo) selection for PR/issue workflows (issue #2733). Ambiguous git remotes (mixed providers, unrecognized self-hosted hosts, or no remote) fail closed and require an explicit selection; forge.base_url passes through the same HTTPS-only / non-private / ASCII-host guards as every forge URL and is never a trust whitelist; combining base_url with provider "github" is rejected as a configuration conflict; forge.forgejo_hosts lists extra fleet Forgejo/Gitea hosts (not Codeberg-style public defaults); forge.gh_forgejo defaults to off — use repo/fj on Forgejo instead of expecting gh to work without federated sync.',
+	),
+
+	repo: RepoConfigSchema.optional().describe(
+		'Engine repository facade lifecycle: declarative repo CLI automation (repo pr/issue/lane publish) with CEL-shaped when rules on Engine roots.',
 	),
 
 	// Remote OTLP/OpenInference observability export (issue #2485). Opt-in;

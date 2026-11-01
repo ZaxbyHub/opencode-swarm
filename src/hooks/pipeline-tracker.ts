@@ -44,15 +44,18 @@ export function buildPhaseReminder(phaseNumber: number | null): string {
 1. ANALYZE → Identify domains, create initial spec
 2. SME_CONSULTATION → Delegate to @sme (one domain per call, max 3 calls)
 3. COLLATE → Synthesize SME outputs into unified spec
-4. CODE → Delegate to @coder
-5. QA_REVIEW → Delegate to @reviewer (specify CHECK dimensions)
-6. TRIAGE → Review feedback: APPROVED | REVISION_NEEDED | BLOCKED
-7. TEST → If approved, delegate to @test_engineer
+4. CODE → One task per @coder. When a parallel profile is active and file scopes do not overlap, dispatch those coders together.
+5. STAGE_B → For each completed coder task, dispatch @reviewer and @test_engineer together.
+6. ADVISORY → Dispatch read-only lanes (explorer, sme, researcher, critic) together with dispatch_lanes_async. Do not wait between them.
+7. WAIT → Wait for that task's reviewer and test_engineer verdicts before marking the task complete. Other disjoint coders and advisory lanes may stay in flight.
+8. TRIAGE → Review feedback: APPROVED | REVISION_NEEDED | BLOCKED
 
 DELEGATION RULES:
+- Many subagents may run in one wave: a Stage B pair, disjoint parallel coders, and an advisory lane batch.
 - SME: ONE domain per call (serial), max 3 per phase
+- One task per coder call. Never batch two objectives into one coder.
 - Reviewer: Specify CHECK dimensions relevant to the change
-- Always wait for response before next delegation
+- Stage B: dispatch @reviewer and @test_engineer together for the same completed coder task, then wait for both verdicts of that task
 
 ${complianceHeader}
 - Reviewer delegation is MANDATORY for every coder task.

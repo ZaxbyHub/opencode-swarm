@@ -398,6 +398,9 @@ export const CONFIG_CONSUMERS: Record<
 			'src/providers/forge-provider.ts:resolveForgeContextFromPluginConfig',
 		],
 	},
+	repo: {
+		consumers: ['src/vcs/repo-lifecycle.ts:loadLifecycleRules'],
+	},
 	observability: {
 		consumers: [
 			'src/index.ts:initializeOpenCodeSwarm',

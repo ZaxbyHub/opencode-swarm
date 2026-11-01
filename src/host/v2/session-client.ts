@@ -178,10 +178,170 @@ export function recordV2SessionErrorFromEnvelope(
 	}
 }
 
+/**
+ * Host session domain captured when the shim is installed. context_status
+ * reads `session.context` through this binding. The shim still does not
+ * expose `session.messages` — dispatch-lanes treats that method as the v1
+ * lane-transcript client and must keep seeing it absent (AC7).
+ */
+let activeV2SessionDomain: V2PluginContext['session'] | undefined;
+
 /** Drop all shim-held state (v2 cleanup path; bounded residue documented in the trace). */
 export function clearV2SessionClientState(): void {
 	placeholderSessions.clear();
 	sessionErrors.clear();
+	activeV2SessionDomain = undefined;
+}
+
+export interface V2ContextStatusMessage {
+	info: {
+		role: string;
+		agent?: string;
+		sessionID?: string;
+		modelID?: string;
+		providerID?: string;
+		tokens?: {
+			input: number;
+			cache: { read: number; write: number };
+		};
+	};
+	parts: Array<{ type: string; text?: string }>;
+}
+
+function finiteToken(value: unknown): number | undefined {
+	return typeof value === 'number' && Number.isFinite(value) && value >= 0
+		? value
+		: undefined;
+}
+
+/** Map one v2 `session.context` entry onto the v1 `{ info, parts }` message. */
+export function mapV2ContextEntryToContextMessage(
+	entry: unknown,
+): V2ContextStatusMessage | null {
+	if (!entry || typeof entry !== 'object') return null;
+	const record = entry as {
+		info?: unknown;
+		parts?: unknown;
+		content?: unknown;
+		text?: unknown;
+		role?: unknown;
+		type?: unknown;
+		agent?: unknown;
+		sessionID?: unknown;
+		modelID?: unknown;
+		providerID?: unknown;
+		model?: { id?: unknown; providerID?: unknown };
+		tokens?: { input?: unknown; cache?: { read?: unknown; write?: unknown } };
+	};
+	if (record.info && typeof record.info === 'object' && Array.isArray(record.parts)) {
+		return record as V2ContextStatusMessage;
+	}
+	if (record.type === 'idle') return null;
+
+	const role =
+		record.role === 'assistant' ||
+		record.role === 'user' ||
+		record.role === 'system'
+			? record.role
+			: typeof record.type === 'string' && record.type.includes('assistant')
+				? 'assistant'
+				: typeof record.type === 'string' && record.type.includes('user')
+					? 'user'
+					: typeof record.role === 'string'
+						? record.role
+						: 'user';
+
+	let parts: Array<{ type: string; text?: string }>;
+	if (Array.isArray(record.parts)) {
+		parts = record.parts.flatMap((part) => {
+			if (!part || typeof part !== 'object') return [];
+			const block = part as { type?: unknown; text?: unknown };
+			return [
+				{
+					type: typeof block.type === 'string' ? block.type : 'text',
+					...(typeof block.text === 'string' ? { text: block.text } : {}),
+				},
+			];
+		});
+	} else if (Array.isArray(record.content)) {
+		parts = record.content.flatMap((part) => {
+			if (!part || typeof part !== 'object') return [];
+			const block = part as { type?: unknown; text?: unknown };
+			return [
+				{
+					type: typeof block.type === 'string' ? block.type : 'text',
+					...(typeof block.text === 'string' ? { text: block.text } : {}),
+				},
+			];
+		});
+	} else if (typeof record.text === 'string') {
+		parts = [{ type: 'text', text: record.text }];
+	} else {
+		parts = [];
+	}
+
+	const modelID =
+		typeof record.model?.id === 'string'
+			? record.model.id
+			: typeof record.modelID === 'string'
+				? record.modelID
+				: undefined;
+	const providerID =
+		typeof record.model?.providerID === 'string'
+			? record.model.providerID
+			: typeof record.providerID === 'string'
+				? record.providerID
+				: undefined;
+	const input = finiteToken(record.tokens?.input);
+	const cacheRead = finiteToken(record.tokens?.cache?.read);
+	const cacheWrite = finiteToken(record.tokens?.cache?.write);
+
+	return {
+		info: {
+			role,
+			...(typeof record.agent === 'string' ? { agent: record.agent } : {}),
+			...(typeof record.sessionID === 'string'
+				? { sessionID: record.sessionID }
+				: {}),
+			...(modelID !== undefined ? { modelID } : {}),
+			...(providerID !== undefined ? { providerID } : {}),
+			...(input !== undefined &&
+			cacheRead !== undefined &&
+			cacheWrite !== undefined
+				? { tokens: { input, cache: { read: cacheRead, write: cacheWrite } } }
+				: {}),
+		},
+		parts,
+	};
+}
+
+/**
+ * Read the active session's v2 context as context_status messages.
+ * Returns null when this process has no v2 session domain or the host call fails.
+ */
+export function readV2SessionContextMessages(
+	sessionID: string,
+	limit = 100,
+): Promise<V2ContextStatusMessage[] | null> {
+	const domain = activeV2SessionDomain;
+	if (!domain || typeof domain.context !== 'function') {
+		return Promise.resolve(null);
+	}
+	const resolved = resolveSessionId(sessionID);
+	if (resolved === undefined) return Promise.resolve([]);
+	return domain
+		.context({ sessionID: resolved })
+		.then((entries) => {
+			const list = Array.isArray(entries) ? entries : [];
+			const mapped = list.flatMap((entry) => {
+				const message = mapV2ContextEntryToContextMessage(entry);
+				return message ? [message] : [];
+			});
+			return typeof limit === 'number' && limit >= 0
+				? mapped.slice(-limit)
+				: mapped;
+		})
+		.catch(() => null);
 }
 
 /**
@@ -736,6 +896,7 @@ export function createV2SessionClient(
 	] as const) {
 		if (typeof session[member] !== 'function') return undefined;
 	}
+	activeV2SessionDomain = session;
 	const client = {
 		session: {
 			create: (args: {

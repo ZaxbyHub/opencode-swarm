@@ -24,6 +24,8 @@ import {
 	isSpawnCwdUnreadable,
 } from '../utils/git-binary-missing-error';
 import { resolveGitExecutable } from '../utils/git-executable.js';
+import { findRepoRoot } from '../vcs/repo-facade';
+import { repoFacadeLandLane } from '../vcs/repo-lifecycle';
 import { autoCommitDirty, cleanUntrackedFiles } from './core';
 import {
 	assertSettlementArtifactsRemovable,
@@ -1393,6 +1395,16 @@ export async function mergeLaneBranch(
 	/** Epic v2 C3: explicit merge-commit message (see `DirtyMergeOptions`). */
 	commitMessage?: string,
 ): Promise<MergeSuccess | MergeConflict | MergeFailure> {
+	if (findRepoRoot(primaryDir)) {
+		const facade = await repoFacadeLandLane(
+			primaryDir,
+			branchName,
+			strategy,
+			commitMessage,
+		);
+		if ('error' in facade) return { error: facade.error };
+		return { merged: true, strategy: facade.strategy };
+	}
 	let result: GitResult;
 
 	switch (strategy) {

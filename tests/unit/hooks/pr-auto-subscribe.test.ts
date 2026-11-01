@@ -125,6 +125,18 @@ describe('extractPrUrl', () => {
 		expect(extractPrUrl('https://gitlab.com/acme/app/-/issues/12')).toBeNull();
 	});
 
+	test('extracts fleet Forgejo pulls URL', () => {
+		const info = extractPrUrl(
+			'https://git.centralcloud.net/singularity/singularity-engine/pulls/42',
+		);
+		expect(info).toEqual({
+			repoFullName: 'singularity/singularity-engine',
+			prNumber: 42,
+			prUrl:
+				'https://git.centralcloud.net/singularity/singularity-engine/pulls/42',
+		});
+	});
+
 	test('ignores a URL beyond the 64KB scan bound', () => {
 		const padded = `${'x'.repeat(65 * 1024)}\nhttps://github.com/owner/repo/pull/9`;
 		expect(extractPrUrl(padded)).toBeNull();

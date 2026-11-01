@@ -3132,7 +3132,7 @@
       }
     },
     "forge": {
-      "description": "Forge provider (GitHub/GitLab) selection for PR/issue workflows (issue #2733). Ambiguous git remotes (mixed providers, unrecognized self-hosted hosts, or no remote) fail closed and require an explicit selection; forge.base_url passes through the same HTTPS-only / non-private / ASCII-host guards as every forge URL and is never a trust whitelist; combining base_url with provider \"github\" is rejected as a configuration conflict.",
+      "description": "Forge provider (GitHub/GitLab/Forgejo) selection for PR/issue workflows (issue #2733). Ambiguous git remotes (mixed providers, unrecognized self-hosted hosts, or no remote) fail closed and require an explicit selection; forge.base_url passes through the same HTTPS-only / non-private / ASCII-host guards as every forge URL and is never a trust whitelist; combining base_url with provider \"github\" is rejected as a configuration conflict; forge.forgejo_hosts lists extra fleet Forgejo/Gitea hosts (not Codeberg-style public defaults); forge.gh_forgejo defaults to off — use repo/fj on Forgejo instead of expecting gh to work without federated sync.",
       "type": "object",
       "properties": {
         "provider": {
@@ -3141,12 +3141,118 @@
           "enum": [
             "github",
             "gitlab",
+            "forgejo",
             "auto"
           ]
         },
         "base_url": {
           "type": "string",
           "format": "uri"
+        },
+        "forgejo_hosts": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "gh_forgejo": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "default": "off",
+              "type": "string",
+              "enum": [
+                "auto",
+                "on",
+                "off"
+              ]
+            },
+            "host": {
+              "default": "git.centralcloud.net",
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      }
+    },
+    "repo": {
+      "description": "Engine repository facade lifecycle: declarative repo CLI automation (repo pr/issue/lane publish) with CEL-shaped when rules on Engine roots.",
+      "type": "object",
+      "properties": {
+        "lifecycle": {
+          "type": "object",
+          "properties": {
+            "pr_base": {
+              "default": "main",
+              "type": "string",
+              "minLength": 1
+            },
+            "automation": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "when": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "engine": {
+                            "type": "boolean"
+                          },
+                          "event": {
+                            "type": "string",
+                            "enum": [
+                              "land_lane",
+                              "file_issue",
+                              "close_issue",
+                              "integrate_lane"
+                            ]
+                          }
+                        }
+                      }
+                    ]
+                  },
+                  "do": {
+                    "minItems": 1,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "enum": [
+                        "lane_push",
+                        "pr_create",
+                        "issue_create",
+                        "issue_close",
+                        "lane_publish"
+                      ]
+                    }
+                  }
+                },
+                "required": [
+                  "when",
+                  "do"
+                ]
+              }
+            }
+          }
+        },
+        "gh_bridge": {
+          "default": "auto",
+          "type": "string",
+          "enum": [
+            "auto",
+            "on",
+            "off"
+          ]
         }
       }
     },

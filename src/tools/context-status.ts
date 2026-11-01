@@ -4,8 +4,10 @@
  * Read-only tool that reports current context-window headroom for the active
  * session. Returns both the measured usage and the `usageSource`
  * (`provider` prompt accounting when available, otherwise `estimated`).
- * Derives messages from the runtime session context (via
- * `swarmState.opencodeClient.session.messages`) and resolves thresholds from
+ * Derives messages from the runtime session context. v1 uses
+ * `swarmState.opencodeClient.session.messages`. v2 does not expose that
+ * method; it reads `session.context` through `readV2SessionContextMessages`.
+ * Resolves thresholds from
  * the plugin config, mirroring the active `createContextBudgetHandler` hook's
  * behavior exactly — including strict `>` boundary semantics (exact threshold
  * values do NOT trigger a warning).
@@ -26,6 +28,7 @@ import {
 	type ModelLimitSource,
 	resolveModelLimit,
 } from '../hooks/model-limits';
+import { readV2SessionContextMessages } from '../host/v2/session-client';
 import {
 	getLiveContextModelIdentity,
 	getLiveContextWindow,
@@ -113,16 +116,29 @@ export const _internals: {
 } = {
 	loadPluginConfig,
 	fetchSessionMessages: async (sessionID, directory, limit = 100) => {
-		if (!swarmState.opencodeClient?.session) return null;
-		try {
-			const result = await swarmState.opencodeClient.session.messages({
-				path: { id: sessionID },
-				query: { directory, limit },
-			});
-			return (result.data as ContextMessage[]) ?? null;
-		} catch {
-			return null;
+		const session = swarmState.opencodeClient?.session as
+			| {
+					messages?: (args: {
+						path: { id: string };
+						query: { directory: string; limit?: number };
+					}) => Promise<{ data?: ContextMessage[] | null }>;
+			  }
+			| undefined;
+		if (session && typeof session.messages === 'function') {
+			try {
+				const result = await session.messages({
+					path: { id: sessionID },
+					query: { directory, limit },
+				});
+				return (result.data as ContextMessage[]) ?? null;
+			} catch {
+				return null;
+			}
 		}
+		return (await readV2SessionContextMessages(
+			sessionID,
+			limit,
+		)) as ContextMessage[] | null;
 	},
 };
 
