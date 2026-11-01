@@ -4,7 +4,7 @@ description: Run a graph-guided, tool-augmented PR review using context packing,
 disable-model-invocation: true
 metadata:
   audience: swarm-plugin
-  swarm-contract-digest: "f5ba7766c5fc"
+  swarm-contract-digest: "7567be2cf5f2"
 ---
 
 # /swarm-pr-review
