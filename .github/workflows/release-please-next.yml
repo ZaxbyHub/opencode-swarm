@@ -211,11 +211,14 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Derive lockstep release tags (fail closed on partial bumps)
+        env:
+          PATHS_RELEASED: ${{ needs.release-please.outputs.paths_released }}
         run: |
           set -euo pipefail
           node scripts/release-notes-fragments.mjs lockstep-tags > /tmp/rp-out.txt
           head -1 /tmp/rp-out.txt > /tmp/rp-version.txt
           tail -n +2 /tmp/rp-out.txt > /tmp/rp-taglist.txt
+          echo "release-please paths_released (corroboration): ${PATHS_RELEASED:-<unset>}"
           echo "Releasing $(cat /tmp/rp-version.txt) for tags:"
           cat /tmp/rp-taglist.txt
 
