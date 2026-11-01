@@ -313,7 +313,7 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 		parsesTarget: false,
 		producers: [
 			'src/tools/checkpoint.ts:224',
-			'src/full-auto/state.ts:638',
+			'src/full-auto/state.ts:',
 			'src/context-map/persistence.ts:135',
 			'src/context-map/capsule-persistence.ts:111',
 			'src/test-impact/history-store.ts:297',
@@ -324,7 +324,7 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 			'src/hooks/skill-usage-log.ts:1165',
 			'src/hooks/skill-usage-log.ts:1675',
 			'src/hooks/skill-usage-pending.ts:817',
-			'src/parallel/file-locks.ts:857',
+			'src/parallel/file-locks.ts:870',
 			'src/plan/ledger.ts:607',
 			'src/plan/ledger.ts:1808',
 		],
