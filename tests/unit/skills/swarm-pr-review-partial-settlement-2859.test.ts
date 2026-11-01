@@ -6,7 +6,7 @@ import { join } from 'node:path';
  * Issue #2859 (F0): the PARTIAL-settlement recovery path is documented in the
  * canonical swarm-pr-review skill. The `.claude`/`.agents` entries are thin
  * adapter shims by design (src/config/skill-mirrors.ts), so the guidance lives
- * in the `.opencode` canonical only. The canonical is pinned at 1692
+ * in the `.opencode` canonical only. The canonical is pinned at 1705
  * lines by the progressive-disclosure ratchet; this suite anchors the section
  * so it cannot be silently relocated or dropped.
  */
@@ -47,8 +47,8 @@ describe('swarm-pr-review PARTIAL-settlement recovery guidance (issue #2859 F0)'
 		expect(section).toContain('not a deadlock');
 	});
 
-	test('the canonical stays at or below the 1692-line ratchet baseline', () => {
+	test('the canonical stays at or below the 1705-line ratchet baseline', () => {
 		const lines = content.trimEnd().split(/\r?\n/).length;
-		expect(lines).toBeLessThanOrEqual(1692);
+		expect(lines).toBeLessThanOrEqual(1705);
 	});
 });

@@ -12,3 +12,5 @@ Skill behavior clarification only — orchestrators following the installed cond
 ## Migration notes
 
 None required. Installed copies that carry a generic-agent critic routing note should be corrected to the pinned-first policy (the canonical paragraph is the reference wording).
+
+The canonical grows by 14 lines (1692 -> 1705), so the progressive-disclosure ratchet baselines pinning `.opencode/skills/swarm-pr-review/SKILL.md` are bumped to 1705 in `tests/unit/skills/progressive-disclosure-ratchet.test.ts` and `tests/unit/skills/swarm-pr-review-partial-settlement-2859.test.ts`. The paragraph is binding policy that installed copies must carry inline, so it stays in the canonical rather than moving into `references/`; the standing issue-#2131 disclosure debt for this skill grows by the same 14 lines.

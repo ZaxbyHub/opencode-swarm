@@ -22,7 +22,7 @@ import { join } from 'node:path';
 const ROOT = process.cwd();
 
 const ENTRY_SKILL_BASELINES: Record<string, number> = {
-	'.opencode/skills/swarm-pr-review/SKILL.md': 1692,
+	'.opencode/skills/swarm-pr-review/SKILL.md': 1705,
 	'.opencode/skills/swarm-pr-feedback/SKILL.md': 797,
 	'.opencode/skills/writing-tests/SKILL.md': 424,
 	'.opencode/skills/issue-tracer/SKILL.md': 196,
