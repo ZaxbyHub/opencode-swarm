@@ -48,7 +48,7 @@ export function assertInternalsRestored(): void {
 			IMPORT_TIME_INTERNALS[key]
 		) {
 			throw new Error(
-				`safe-test-dir internals-restoration guard: _internals.${key} differs from its import-time value — a test swapped this seam member without restoring it, leaking its semantics to every later consumer in this process`,
+				`safe-test-dir internals-restoration guard: _internals.${key} differs from its import-time value — a test swapped this seam member without restoring it, leaking its semantics to every later consumer in this process. The guard fires once per bun test PROCESS (not per file): re-run candidate files individually (bun test <file>) to bisect the leaker`,
 			);
 		}
 	}

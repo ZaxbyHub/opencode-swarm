@@ -98,16 +98,18 @@ describe('clean-stage admission deadline behavior (3260-B)', () => {
 		fs.writeFileSync(path.join(swarmDir, 'plan.json'), '{}');
 		fs.writeFileSync(path.join(swarmDir, 'plan-ledger.jsonl'), '');
 
-		// Injected clock: starts in-budget; the unlink stub flips it past
-		// the deadline AFTER the first artifact is admitted, so the NEXT
-		// admission check trips.
+		// Injected clock: starts in-budget and advances 150 ms per admitted
+		// artifact. FB-3 (PR-review): the step size must let the ENV VALUE
+		// (100 ms) trip while the DEFAULT (60 s) never could - a clock that
+		// jumps past any threshold would pass with the env read swapped for
+		// the constant, leaving the override unpinned.
 		let nowValue = 0;
 		_internals.now = () => nowValue;
 		const unlinked: string[] = [];
 		_internals.unlinkActiveStateFileWithRetry = (async (filePath: string) => {
 			unlinked.push(filePath);
 			await fs.promises.unlink(filePath);
-			nowValue = 1_000_000;
+			nowValue += 150;
 		}) as typeof _internals.unlinkActiveStateFileWithRetry;
 
 		try {

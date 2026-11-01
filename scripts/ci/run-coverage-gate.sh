@@ -149,19 +149,31 @@ if [ -L .swarm ] || { [ -e .swarm ] && [ ! -d .swarm ]; }; then
 	exit 1
 fi
 # #3260-E: record whether THIS invocation created .swarm itself (fresh
-# checkout); the exit trap below removes the gate directory always and the
-# .swarm parent only when we created it AND it is empty (content written by
-# the test run itself stays visible, exactly as a bare `bun test` would
-# have left it).
+# checkout); the exit trap below removes the gate directory and the .swarm
+# parent only when we created them (content written by the test run itself
+# stays visible, exactly as a bare `bun test` would have left it). A
+# PRE-EXISTING .swarm/coverage-gate is NOT ours to destroy: the trap removes
+# only the manifest this run staged (FB-1, PR-review: an unconditional
+# rm -rf treats pre-existing directory content as disposable).
 gate_created_swarm=0
 if [ ! -d .swarm ]; then
 	gate_created_swarm=1
+fi
+gate_gate_dir_preexisting=0
+if [ -d .swarm/coverage-gate ]; then
+	gate_gate_dir_preexisting=1
 fi
 gate_cleanup() {
 	# Best-effort only: cleanup failures must never mask the gate's real exit
 	# status (no `exit` inside the trap; every rm is error-guarded).
 	if [ -d .swarm/coverage-gate ]; then
-		rm -rf .swarm/coverage-gate 2>/dev/null || true
+		if [ "$gate_gate_dir_preexisting" -eq 1 ]; then
+			# Not created by this invocation: remove only the manifest we
+			# staged, never pre-existing content.
+			rm -f ".swarm/coverage-gate/shard-${shard_index:-all}-expected-files.txt" 2>/dev/null || true
+		else
+			rm -rf .swarm/coverage-gate 2>/dev/null || true
+		fi
 	fi
 	if [ "$gate_created_swarm" -eq 1 ] && [ -d .swarm ]; then
 		rmdir .swarm 2>/dev/null || true
