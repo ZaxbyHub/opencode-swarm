@@ -101,6 +101,13 @@ describe('gate: paren-led POSIX rm and PowerShell Remove-Item (class sweep)', ()
 			gate('(Remove-Item ../../outside -Recurse)', 'shell'),
 		).resolves.toMatch(ANY_BLOCK);
 	});
+	// #3530 critic C3: pin the arm MESSAGE — the paren-tolerant anchor must
+	// land the segment in the recursive-delete arm, not a generic block.
+	test('(Remove-Item <oos> -Recurse) names the delete target', async () => {
+		await expect(
+			gate('(Remove-Item ../../outside -Recurse)', 'shell'),
+		).resolves.toMatch(/Recursive delete target/);
+	});
 	test('no-paren rm -rf control stays BLOCKED', async () => {
 		await expect(gate('rm -rf ../../outside')).resolves.toMatch(ANY_BLOCK);
 	});

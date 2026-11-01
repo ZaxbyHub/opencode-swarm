@@ -106,6 +106,21 @@ describe('gate: quoted procsub operands (real toolBefore, coder scope src/)', ()
 			ANY_WRITE_BLOCK,
 		);
 	});
+	// #3530 critic C2: the sibling form discriminates the fix — at base the
+	// clean sibling write cleared the parse-error backstop and the torn
+	// target escaped with the whole stage unflagged.
+	test('clean sibling does not mask a torn redirect target', async () => {
+		await expect(
+			gate('true >(cat > src/ok); true >(cat > "../../outside t.txt")'),
+		).resolves.toMatch(ANY_WRITE_BLOCK);
+	});
+	// #3530 critic D4: one procsub carrying both a fragment target and a
+	// clean write — the multi-redirect withdrawal must name the stage.
+	test('single procsub with fragment + clean write is DENIED', async () => {
+		await expect(
+			gate('true >(cat > ../../src/"f" && cat > src/ok)'),
+		).resolves.toMatch(ANY_WRITE_BLOCK);
+	});
 });
 
 describe('resolved shape: withdrawn fallback writes null out (fail-closed)', () => {

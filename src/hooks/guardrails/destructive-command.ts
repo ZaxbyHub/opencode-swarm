@@ -514,20 +514,26 @@ export function dcExtractRecursiveRmTargets(segment: string): string[] | null {
 	// #3518 P-5 (class, final-critic round 1): tolerate leading
 	// open-parens/braces — a parenthesized segment runs the same rm in a
 	// POSIX subshell, whether the paren GLUES to the verb (`(rm`) or stands
-	// alone (`( rm`). Drop standalone delimiter tokens, then strip a glued
-	// prefix from what remains; a token that normalizes empty fails closed.
+	// alone (`( rm`). Index-based scan (parallel-review A5: token.shift() in
+	// a while loop is quadratic on Node for delimiter-flooded segments —
+	// 160k tokens ~24s; an index cursor is linear) — drop standalone
+	// delimiter tokens, then strip a glued prefix from what remains.
+	let start = 0;
 	while (
-		tokens.length > 0 &&
-		tokens[0] !== undefined &&
-		/^[({\s]*$/.test(tokens[0]) &&
-		tokens[0].length > 0
+		start < tokens.length &&
+		tokens[start] !== undefined &&
+		tokens[start].length > 0 &&
+		/^[({\s]*$/.test(tokens[start])
 	) {
-		tokens.shift();
+		start += 1;
 	}
-	if (tokens.length > 0 && tokens[0] !== undefined) {
-		tokens[0] = tokens[0].replace(/^[({\s]+/, '');
+	if (start < tokens.length && tokens[start] !== undefined) {
+		tokens[start] = tokens[start].replace(/^[({\s]+/, '');
 	}
-	if (tokens.length < 2 || tokens[0] !== 'rm') return null;
+	const verbTokens = tokens.slice(start);
+	if (verbTokens.length < 2 || verbTokens[0] !== 'rm') return null;
+	tokens.length = 0;
+	tokens.push(...verbTokens);
 
 	// PRR-010: a trailing `)`/`}` stays glued to the LAST operand of a
 	// parenthesized segment (`(rm -rf dist)` extracted `dist)`), so strip
