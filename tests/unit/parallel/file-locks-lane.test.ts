@@ -7,7 +7,6 @@ import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { freezeClock } from '../../helpers/test-clock';
 import type { LockMetadata } from '../../../src/parallel/file-locks';
 import {
 	_internals,
@@ -16,6 +15,7 @@ import {
 	listActiveLocks,
 	releaseLaneLocks,
 } from '../../../src/parallel/file-locks';
+import { freezeClock } from '../../helpers/test-clock';
 
 describe('lane-based file locks', () => {
 	let tmpDir: string;

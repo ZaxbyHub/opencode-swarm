@@ -263,33 +263,6 @@ function withoutEmptyDirectoryRemoval(write: WriteTarget): WriteTarget {
 	return rest;
 }
 
-/**
- * Issue #3450 (PR #3456 review F-2): the dedupe key is blind to the working
- * directory a write runs in and to options that change its meaning, so two
- * writes with the same key can be different targets (`rmdir a; cd ../o &&
- * rmdir a`) or different operations (`rmdir a; rmdir -p a`). When a key
- * collision involves a write tagged `emptyDirectoryRemoval`, the kept write
- * is DEMOTED (tag removed) so the ordinary declared-scope check applies to it
- * — fail-closed, the pre-exemption behaviour. Once demoted the kept write is
- * identical to any untagged write it collided with, so keeping one is enough.
- * First occurrence wins and order is preserved, exactly as before.
- */
-function dedupeWriteTargets(writes: readonly WriteTarget[]): WriteTarget[] {
-	const keptIndex = new Map<string, number>();
-	const kept: WriteTarget[] = [];
-	for (const write of writes) {
-		const key = buildDedupeKey(write.category, write.operator, write.path);
-		const index = keptIndex.get(key);
-		if (index === undefined) {
-			keptIndex.set(key, kept.length);
-			kept.push(write);
-			continue;
-		}
-		kept[index] = withoutEmptyDirectoryRemoval(kept[index]);
-	}
-	return kept;
-}
-
 // ---------------------------------------------------------------------------
 // Operator token → category mapping
 // ---------------------------------------------------------------------------
