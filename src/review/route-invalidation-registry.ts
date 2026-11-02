@@ -37,6 +37,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { redactPath } from '../hooks/guardrails/audit-log.js';
 import * as logger from '../utils/logger.js';
 
 export const MAX_LIVE_CALLS_PER_SESSION = 256;
@@ -133,9 +134,10 @@ function warnCapacityRefusal(
 	probe: 'calls' | 'sessions' | 'directories',
 ): void {
 	// Loud by design (AGENTS.md invariant 8): a silent capacity miss would let
-	// the next dispatch through unprotected. No raw paths — the directory is
-	// operator-relevant project state, bounded like every other field.
-	const boundedDirectory = directory.slice(0, 120);
+	// the next dispatch through unprotected. The directory is operator-relevant
+	// project state, bounded and home-path redacted like every other warn
+	// surface (#3516 item 11 posture).
+	const boundedDirectory = redactPath(directory).slice(0, 120);
 	logger.criticalWarn(
 		`[route-invalidation-registry] refusing to record ${operation} for call ${callID.slice(0, 64)} (session ${sessionId.slice(0, 64)}, dir ${boundedDirectory}): registry bound reached (${describeCapacityBound(
 			probe,

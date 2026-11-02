@@ -3543,6 +3543,13 @@ export const _internals = {
 	 * tasks in the same loop still settle.
 	 */
 	enforcePersistedReviewRouteReceiptAtSettlement: enforcePersistedReviewRouteReceipt,
+	/**
+	 * #3516 item 12 (AC12): the routing block's receipt persists route
+	 * through this seam so tests can observe THAT a persist was attempted and
+	 * WHAT it threw (distinguishing attempted-and-threw from never-attempted)
+	 * instead of asserting a constant empty receipt directory.
+	 */
+	persistReviewRouteReceiptAtDispatch: persistReviewRouteReceipt,
 	/** Epic v2 C4: wave-only coder admission + the wave's parallel/isolation policy. */
 	resolveEpicDispatchPolicy,
 	resolveEpicPrFeedbackConflict,
@@ -4863,7 +4870,7 @@ export function createDelegationGateHook(
 						sessionId: input.sessionID,
 						taskId: routeTaskId,
 					});
-					await persistReviewRouteReceipt({
+					await _internals.persistReviewRouteReceiptAtDispatch({
 						projectRoot: directory,
 						receipt: pendingRoute,
 					});
@@ -4879,7 +4886,7 @@ export function createDelegationGateHook(
 							sessionId: input.sessionID,
 							taskId: routeTaskId,
 						});
-						await persistReviewRouteReceipt({
+						await _internals.persistReviewRouteReceiptAtDispatch({
 							projectRoot: directory,
 							receipt: routerError,
 						});
@@ -4910,7 +4917,7 @@ export function createDelegationGateHook(
 								(_, index) => `${routeTaskId}:test_engineer:${index + 1}`,
 							),
 						});
-						await persistReviewRouteReceipt({
+						await _internals.persistReviewRouteReceiptAtDispatch({
 							projectRoot: directory,
 							receipt: routeReceipt,
 						});
@@ -4992,7 +4999,7 @@ export function createDelegationGateHook(
 						detail,
 					});
 					try {
-						await persistReviewRouteReceipt({
+						await _internals.persistReviewRouteReceiptAtDispatch({
 							projectRoot: directory,
 							receipt: routerError,
 						});

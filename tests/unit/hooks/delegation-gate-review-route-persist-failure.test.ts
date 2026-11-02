@@ -1,92 +1,127 @@
 /**
- * Issue #3380: a reviewer/test_engineer dispatch whose route-receipt
- * PERSISTENCE fails must not silently skip the dispatch-time gates below the
- * routing block (ACCEPTANCE for coder/reviewer, TASK_GATE_AGENTS).
+ * Issue #3380 suite, restructured for #3509/#3516 (selector: 'restructure').
  *
  * Persist failures are forced deterministically on every matrix OS: a real
  * `.swarm` directory with `.swarm/pr-review` as a plain FILE (plan.json stays
- * readable). Every `.swarm` READ under that fixture stays well-formed
- * (ENOENT-tolerated readers return null on both platforms), so the ONLY fault
- * is the receipt parent mkdir inside persistReviewRouteReceipt — before
- * `routeDispatchStarted` is set, identically on Windows and POSIX. (The
- * first-draft `.swarm`-as-FILE shape was platform-divergent: POSIX ENOTDIR on
- * earlier reads vs Windows ENOENT — see the #3502 review, PRR-002.)
+ * readable), so the ONLY fault is the receipt parent mkdir — before
+ * `routeDispatchStarted` is set, identically on Windows and POSIX.
  *
- * Stage-B advancement stays fail-closed on the missing receipt under the
- * default `review_routing.enforce_receipts: true`. The settlement-layer proof
- * lives in the enforcement describe below: with the route-required marker set
- * and no receipt on disk, enforcePersistedReviewRouteReceipt (the exact
- * settlement entry point) refuses advancement; with `enforce_receipts: false`
- * it returns canAdvance:true (the documented config-rollback shape).
+ * Honest claims scope (AC17): the legs prove the persist-side symmetry for
+ * the fault classes they drive (mkdir-under-file, EISDIR, corrupt gate
+ * state); POSIX ENOTDIR end-to-end is pinned per-task in
+ * review-route-enotdir-3509.test.ts; the pre-v1 `legacy_unrouted` carve-out
+ * is unchanged and disclosed in the release fragment.
+ *
  *
  * Env isolation: createIsolatedTestEnv redirects the hive/app-data roots the
- * route-receipt MAC secret lives under (LOCALAPPDATA / XDG data) so the
- * tests neither read nor write the developer's real app-data.
+ * route-receipt MAC secret lives under (never the developer's real app-data).
  */
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { PluginConfig } from '../../../src/config';
+import { closeAllProjectDbs } from '../../../src/db/project-db';
 import {
 	_internals,
 	createDelegationGateHook,
 } from '../../../src/hooks/delegation-gate';
+import { resolveHiveDataDir } from '../../../src/knowledge/hive-paths';
+import { workflowGateStatePath } from '../../../src/pr-review/persistence';
+import {
+	isRouteBlockedForSettlement,
+	recordRouteInvalidation,
+} from '../../../src/review/route-invalidation-registry';
 import { enforcePersistedReviewRouteReceipt } from '../../../src/review/routing-enforcement';
 import {
+	advanceTaskState,
 	ensureAgentSession,
+	getTaskState,
 	markStageBRouteRequired,
 	recordModifiedFilesForTask,
 	resetSwarmState,
 	swarmState,
 } from '../../../src/state';
+import { transitionTaskWorkflowEvidence } from '../../../src/gate-evidence';
 import { createIsolatedTestEnv } from '../../helpers/isolated-test-env.js';
 import { canonicalMkdtemp, removeTreeWithRetry } from '../../helpers/tmpdir';
 
+const SESSION = 'sess-3380';
+
 function makeConfig(): PluginConfig {
-	return {
-		hooks: { delegation_gate: true },
-	} as unknown as PluginConfig;
+	return { hooks: { delegation_gate: true } } as unknown as PluginConfig;
 }
 
-function writePlan(dir: string): void {
-	const plan = {
-		schema_version: '1.0.0',
-		title: 'Route persist failure fixture',
-		swarm: 'test',
-		current_phase: 1,
-		phases: [
-			{
-				id: 1,
-				name: 'Implementation',
-				status: 'in_progress',
-				tasks: [
-					{
-						id: '1.1',
+function writePlan(dir: string, taskIds = ['1.1']): void {
+	fs.writeFileSync(
+		path.join(dir, '.swarm', 'plan.json'),
+		JSON.stringify({
+			schema_version: '1.0.0',
+			title: 'Route persist failure fixture',
+			swarm: 'test',
+			current_phase: 1,
+			phases: [
+				{
+					id: 1,
+					name: 'Implementation',
+					status: 'in_progress',
+					tasks: taskIds.map((id) => ({
+						id,
 						phase: 1,
 						status: 'pending',
 						size: 'small',
 						description: 'Exercise the gates',
 						depends: [],
 						files_touched: ['src/foo.ts'],
-					},
-				],
-			},
-		],
-	};
-	fs.writeFileSync(path.join(dir, '.swarm', 'plan.json'), JSON.stringify(plan));
+					})),
+				},
+			],
+		}),
+	);
 }
 
-/**
- * Shared fixture: a REAL `.swarm` directory whose `.swarm/pr-review` is a
- * plain FILE. Every `.swarm` read stays well-formed (ENOENT → null on every
- * platform); the receipt parent mkdir is the single fault. plan.json is
- * written when the legs need a plan workflow (test_engineer / route-success).
- */
-function gateDir(options: {
-	persistFails: boolean;
-	withPlan?: boolean;
-}): string {
+const reviewerArgs = (taskId: string) => ({
+	subagent_type: 'reviewer',
+	prompt: `TASK: ${taskId} review the change\nACCEPTANCE: FR-001 the diff satisfies the requirement`,
+});
+
+const reviewed = (taskId: string) =>
+	`[REVIEWED] | task-${taskId} | APPROVED | persist-failure fixture`;
+
+function receiptJsonFiles(dir: string): string[] {
+	const receiptsDir = path.join(dir, '.swarm', 'pr-review', 'route-receipts');
+	if (!fs.existsSync(receiptsDir)) return [];
+	return fs.readdirSync(receiptsDir).filter((name) => name.endsWith('.json'));
+}
+
+/** Break future persists WITHOUT deleting on-disk receipts (secret → dir). */
+function breakSecret(): void {
+	const secretPath = path.join(resolveHiveDataDir(), 'review-route-receipts.key');
+	fs.rmSync(secretPath, { force: true });
+	fs.mkdirSync(secretPath, { recursive: true });
+}
+
+let isolatedEnv: ReturnType<typeof createIsolatedTestEnv> | undefined;
+const dirs: string[] = [];
+
+beforeEach(() => {
+	isolatedEnv = createIsolatedTestEnv();
+	resetSwarmState();
+});
+
+afterEach(() => {
+	resetSwarmState();
+	for (const dir of dirs.splice(0)) {
+		closeAllProjectDbs();
+		removeTreeWithRetry(dir);
+	}
+	isolatedEnv?.cleanup();
+	isolatedEnv = undefined;
+});
+
+/** Persist-failure fixture: `.swarm/pr-review` as a plain FILE. */
+function gateDir(options: { persistFails: boolean; withPlan?: boolean }): string {
 	const dir = canonicalMkdtemp('route-persist-3380-');
+	dirs.push(dir);
 	fs.mkdirSync(path.join(dir, '.swarm'), { recursive: true });
 	fs.mkdirSync(path.join(dir, '.opencode'), { recursive: true });
 	if (options.withPlan) writePlan(dir);
@@ -96,105 +131,45 @@ function gateDir(options: {
 	return dir;
 }
 
-/** Route receipts land at `<dir>/.swarm/pr-review/route-receipts/*.json`. */
-function receiptJsonFiles(dir: string): string[] {
-	const receiptsDir = path.join(dir, '.swarm', 'pr-review', 'route-receipts');
-	if (!fs.existsSync(receiptsDir)) return [];
-	return fs.readdirSync(receiptsDir).filter((name) => name.endsWith('.json'));
+/** Single hook instance across dispatches (production topology). */
+const makeHook = (dir: string) => createDelegationGateHook(makeConfig(), dir);
+
+async function dispatch(
+	dir: string,
+	sessionID: string,
+	args: { subagent_type: string; prompt: string; task_id?: string },
+	callID = 'call-1',
+	hook = makeHook(dir),
+): Promise<unknown> {
+	ensureAgentSession(sessionID, 'architect', dir);
+	return hook.toolBefore({ tool: 'Task', sessionID, callID }, { args });
 }
 
 describe('review/test_engineer route-receipt persist failure (#3380)', () => {
-	let isolatedEnv: ReturnType<typeof createIsolatedTestEnv> | undefined;
-	const dirs: string[] = [];
-
-	beforeEach(() => {
-		isolatedEnv = createIsolatedTestEnv();
-		resetSwarmState();
-	});
-
-	afterEach(() => {
-		resetSwarmState();
-		for (const dir of dirs.splice(0)) {
-			// removeTreeWithRetry absorbs the Windows EBUSY/EPERM class (#3502
-			// review PRR-016: bare rmSync leaked fixture handles on teardown).
-			removeTreeWithRetry(dir);
-		}
-		isolatedEnv?.cleanup();
-		isolatedEnv = undefined;
-	});
-
-	function dispatch(
-		dir: string,
-		sessionID: string,
-		args: { subagent_type: string; prompt: string },
-		callID = 'call-1',
-	): Promise<unknown> {
-		const hooks = createDelegationGateHook(makeConfig(), dir);
-		// Created WITH the project directory so the session shape matches
-		// production (disk rehydration registered; the PR-review re-entry
-		// rehydration guard at the TASK_GATE block is exercised for real).
-		ensureAgentSession(sessionID, 'architect', dir);
-		return hooks.toolBefore({ tool: 'Task', sessionID, callID }, { args });
-	}
-
-	it('reviewer without ACCEPTANCE is still rejected when receipt persistence fails', async () => {
+	it('reviewer ACCEPTANCE fall-through: refused without ACCEPTANCE, resolved with it — and the writable control persists', async () => {
 		const dir = gateDir({ persistFails: true });
-		dirs.push(dir);
 		await expect(
-			dispatch(dir, 'sess-rf-reviewer', {
-				subagent_type: 'reviewer',
-				prompt: 'TASK: review it',
-			}),
+			dispatch(dir, 'sess-rf-reviewer', { subagent_type: 'reviewer', prompt: 'TASK: review it' }),
 		).rejects.toThrow('ACCEPTANCE_FIELD_REQUIRED');
-		// The persist failure is REAL: no receipt reached disk (PRR-003).
 		expect(receiptJsonFiles(dir)).toEqual([]);
-	});
-
-	it('reviewer with ACCEPTANCE resolves when receipt persistence fails (gates ran; failure asserted by receipt absence)', async () => {
-		const dir = gateDir({ persistFails: true });
-		dirs.push(dir);
 		await expect(
 			dispatch(dir, 'sess-rf-reviewer-ok', {
 				subagent_type: 'reviewer',
-				prompt:
-					'TASK: review it\nACCEPTANCE: FR-001 the diff satisfies the requirement',
+				prompt: 'TASK: review it\nACCEPTANCE: FR-001 the diff satisfies the requirement',
 			}),
 		).resolves.toBeUndefined();
-		// Companion to the no-ACCEPTANCE leg: together they prove the ACCEPTANCE
-		// gate RAN on the persist-failure path (gate ran + passed here, refused
-		// there) — and the missing receipt directory proves persistence failed.
 		expect(receiptJsonFiles(dir)).toEqual([]);
-	});
-
-	it('reviewer without ACCEPTANCE rejects on the writable control fixture (persist OK; receipt persisted)', async () => {
-		const dir = gateDir({ persistFails: false });
-		dirs.push(dir);
+		// Writable control (persist OK): the same refusal STILL persists a
+		// receipt — proving the receipt path itself is healthy.
+		const ctl = gateDir({ persistFails: false });
 		await expect(
-			dispatch(dir, 'sess-rf-ctl', {
-				subagent_type: 'reviewer',
-				prompt: 'TASK: review it',
-			}),
+			dispatch(ctl, 'sess-rf-ctl', { subagent_type: 'reviewer', prompt: 'TASK: review it' }),
 		).rejects.toThrow('ACCEPTANCE_FIELD_REQUIRED');
-		// The control proves the receipt path is writable and the persist RAN.
-		expect(receiptJsonFiles(dir).length).toBeGreaterThan(0);
+		expect(receiptJsonFiles(ctl).length).toBeGreaterThan(0);
 	});
 
-	it('reviewer with ACCEPTANCE resolves on the writable control fixture (persist OK; receipt persisted)', async () => {
-		const dir = gateDir({ persistFails: false });
-		dirs.push(dir);
-		await expect(
-			dispatch(dir, 'sess-rf-ctl-ok', {
-				subagent_type: 'reviewer',
-				prompt:
-					'TASK: review it\nACCEPTANCE: FR-001 the diff satisfies the requirement',
-			}),
-		).resolves.toBeUndefined();
-		expect(receiptJsonFiles(dir).length).toBeGreaterThan(0);
-	});
-
-	it('test_engineer under a plan workflow is still TASK-gate refused when persistence fails', async () => {
+	it('test_engineer under a plan workflow is still TASK-gate refused when persistence fails (control persists)', async () => {
 		const dir = gateDir({ persistFails: true, withPlan: true });
-		dirs.push(dir);
 		await expect(
 			dispatch(dir, 'sess-rf-te', {
 				subagent_type: 'test_engineer',
@@ -202,117 +177,272 @@ describe('review/test_engineer route-receipt persist failure (#3380)', () => {
 			}),
 		).rejects.toThrow('TASK_WORKFLOW_STAGE_A_REQUIRED');
 		expect(receiptJsonFiles(dir)).toEqual([]);
-	});
-
-	it('test_engineer control (persist OK) refuses with the same exact TASK gate class', async () => {
-		const dir = gateDir({ persistFails: false, withPlan: true });
-		dirs.push(dir);
+		const ctl = gateDir({ persistFails: false, withPlan: true });
 		await expect(
-			dispatch(dir, 'sess-rf-te-ctl', {
+			dispatch(ctl, 'sess-rf-te-ctl', {
 				subagent_type: 'test_engineer',
 				prompt: 'TASK: 1.1 verify the change',
 			}),
 		).rejects.toThrow('TASK_WORKFLOW_STAGE_A_REQUIRED');
-		expect(receiptJsonFiles(dir).length).toBeGreaterThan(0);
+		expect(receiptJsonFiles(ctl).length).toBeGreaterThan(0);
 	});
 
 	it('route SUCCESS persists a real route receipt (kind review_route_receipt) for a task-attributed reviewer dispatch', async () => {
-		// The fragment's route-success claim, made real: with attributed files
-		// for task 1.1 the routing block runs routeReviewForChanges and
-		// persists an ACTUAL route receipt — assertable by kind, not the
-		// NO_CHANGED_FILES router error the bare-control legs produce. The
-		// dispatch is then TASK-gate refused (task 1.1 is idle/pre-check),
-		// proving the receipt path and the TASK gate both execute.
 		const dir = gateDir({ persistFails: false, withPlan: true });
-		dirs.push(dir);
 		const sessionID = 'sess-rf-route-ok';
 		ensureAgentSession(sessionID, 'architect', dir);
-		const session = swarmState.agentSessions.get(sessionID);
-		expect(session).toBeDefined();
-		recordModifiedFilesForTask(session!, '1.1', ['src/foo.ts'], dir);
+		recordModifiedFilesForTask(
+			swarmState.agentSessions.get(sessionID)!,
+			'1.1',
+			['src/foo.ts'],
+			dir,
+		);
 		await expect(
-			dispatch(dir, sessionID, {
-				subagent_type: 'reviewer',
-				prompt:
-					'TASK: 1.1 review the change\nACCEPTANCE: FR-001 the diff satisfies the requirement',
-			}),
+			dispatch(dir, sessionID, reviewerArgs('1.1')),
 		).rejects.toThrow('TASK_WORKFLOW_');
 		const receipts = receiptJsonFiles(dir);
 		expect(receipts.length).toBeGreaterThan(0);
 		const receipt = JSON.parse(
 			fs.readFileSync(
 				path.join(dir, '.swarm', 'pr-review', 'route-receipts', receipts[0]!),
-				'utf-8',
+				'utf8',
 			),
 		) as { kind?: string };
 		expect(receipt.kind).toBe('review_route_receipt');
 	});
 
-	it('a failed persist invalidates THIS dispatch so a prior disk receipt cannot authorize it (#3502 PRR-007)', async () => {
+	it('a failed persist invalidates THIS dispatch; the call fault marker persists until whole-call retirement (#3502 PRR-007, #3509 semantics)', async () => {
 		const dir = gateDir({ persistFails: false, withPlan: true });
-		dirs.push(dir);
 		const sessionID = 'sess-rs';
 		ensureAgentSession(sessionID, 'architect', dir);
-		const session = swarmState.agentSessions.get(sessionID);
-		expect(session).toBeDefined();
-		recordModifiedFilesForTask(session!, '1.1', ['src/foo.ts'], dir);
-		const args = {
-			subagent_type: 'reviewer',
-			prompt:
-				'TASK: 1.1 review the change\nACCEPTANCE: FR-001 the diff satisfies the requirement',
-		};
-		// Dispatch 1 (call-r1): persist OK — a route receipt lands on disk.
-		await expect(dispatch(dir, sessionID, args, 'call-r1')).rejects.toThrow(
+		recordModifiedFilesForTask(
+			swarmState.agentSessions.get(sessionID)!,
+			'1.1',
+			['src/foo.ts'],
+			dir,
+		);
+		const hook = makeHook(dir);
+		const args = reviewerArgs('1.1');
+		await expect(dispatch(dir, sessionID, args, 'call-r1', hook)).rejects.toThrow(
 			'TASK_WORKFLOW_',
 		);
 		expect(receiptJsonFiles(dir).length).toBeGreaterThan(0);
-		// Break ONLY the receipt path: the prior receipt stays on disk (the
-		// stale-authority surface), but every new persist now fails.
-		fs.rmSync(path.join(dir, '.swarm', 'pr-review'), {
-			recursive: true,
-			force: true,
-		});
-		fs.writeFileSync(path.join(dir, '.swarm', 'pr-review'), 'not a directory');
-		// Dispatch 2 (call-r2): persist fails; the routing failure is recorded
-		// for THIS callID so the disk receipt cannot authorize its settlement.
-		await expect(dispatch(dir, sessionID, args, 'call-r2')).rejects.toThrow(
+		// Corrected fixture (AC12): break ONLY the secret — the prior
+		// receipt STAYS ON DISK (the old rmSync deleted it).
+		breakSecret();
+		await expect(dispatch(dir, sessionID, args, 'call-r2', hook)).rejects.toThrow(
 			'TASK_WORKFLOW_',
 		);
 		const probe = _internals.routeInvalidationProbe;
 		expect(probe).toBeInstanceOf(Function);
+		// The task key consult blocks (callFault + task key recorded).
 		expect(probe!('call-r2', sessionID, '1.1')).toBe(true);
-		// Consumed on read: a later healthy dispatch re-routes normally.
-		expect(probe!('call-r2', sessionID, '1.1')).toBe(false);
-		// The unrelated dispatch was never invalidated.
+		// #3509 semantics: the whole-call fault marker is NOT consumed per
+		// task — blocked until whole-call retirement.
+		expect(probe!('call-r2', sessionID, '1.1')).toBe(true);
+		// Unrelated dispatch never invalidated; the prior receipt survived.
 		expect(probe!('call-r1', sessionID, '1.1')).toBe(false);
+		expect(receiptJsonFiles(dir).length).toBeGreaterThan(0);
+	});
+});
+
+describe('restructure — #3509/#3516 legs on the persist-failure fixture', () => {
+	it('d1: corrupt gate state refuses the dispatch fail-closed at the wrapper (BLOCKED rethrow; admitted at base)', async () => {
+		const dir = gateDir({ persistFails: true });
+		fs.rmSync(path.join(dir, '.swarm', 'pr-review'), { force: true });
+		fs.mkdirSync(path.dirname(workflowGateStatePath(dir, 'sess-d1')), {
+			recursive: true,
+		});
+		fs.writeFileSync(workflowGateStatePath(dir, 'sess-d1'), 'not json {{{');
+		// No task id anywhere: at base this dispatch was ADMITTED (the blanket
+		// catch swallowed the corruption refusal); post-fix the wrapper
+		// rethrows the BLOCKED refusal fail-closed.
+		await expect(
+			dispatch(dir, 'sess-d1', {
+				subagent_type: 'reviewer',
+				prompt:
+					'Review the staged change end to end.\nACCEPTANCE: FR-001 the review covers the requirement',
+			}),
+		).rejects.toThrow(/BLOCKED:|TASK_WORKFLOW_STAGE_A_REQUIRED/);
+	});
+
+	it('d2: a pre-assignment routing fault records the whole-call fault marker', async () => {
+		const dir = gateDir({ persistFails: false, withPlan: true });
+		await prepareTask(dir, '1.1', 'sess-d2');
+		const hook = makeHook(dir);
+		// EISDIR on the gate state faults the routing block's RAW read BEFORE
+		// routedTaskId is assigned; the wrapper degrades the TASK_GATE read.
+		fs.mkdirSync(workflowGateStatePath(dir, 'sess-d2'), { recursive: true });
+		await hook.toolBefore(
+			{ tool: 'Task', sessionID: 'sess-d2', callID: 'call-d2' },
+			{ args: reviewerArgs('1.1') },
+		);
+		expect(
+			isRouteBlockedForSettlement(dir, 'call-d2', 'sess-d2', '1.1'),
+		).toBe(true);
+		// Per-key consumption in the same leg: a matched task key blocks
+		// exactly once while sibling keys stay armed (the base per-hook map
+		// deleted the whole entry on first consult).
+		recordRouteInvalidation(dir, 'sess-d2', 'call-d2k', '1.1');
+		recordRouteInvalidation(dir, 'sess-d2', 'call-d2k', '1.2');
+		expect(isRouteBlockedForSettlement(dir, 'call-d2k', 'sess-d2', '1.1')).toBe(true);
+		expect(isRouteBlockedForSettlement(dir, 'call-d2k', 'sess-d2', '1.1')).toBe(false);
+		expect(isRouteBlockedForSettlement(dir, 'call-d2k', 'sess-d2', '1.2')).toBe(true);
+	});
+
+	it('d3: the persist attempt is observable through the _internals seam (attempted-and-threw vs never-attempted)', async () => {
+		const dir = gateDir({ persistFails: true });
+		const attempts: Array<{ kind?: string; error?: string }> = [];
+		const realPersist = _internals.persistReviewRouteReceiptAtDispatch;
+		_internals.persistReviewRouteReceiptAtDispatch = (async (input: {
+			receipt: { kind: string };
+		}) => {
+			try {
+				const result = await realPersist(input);
+				attempts.push({ kind: input.receipt.kind });
+				return result;
+			} catch (error) {
+				attempts.push({
+					kind: input.receipt.kind,
+					error: error instanceof Error ? error.message : String(error),
+				});
+				throw error;
+			}
+		}) as typeof realPersist;
+		try {
+			await dispatch(
+				dir,
+				'sess-d3',
+				{
+					subagent_type: 'reviewer',
+					prompt: 'TASK: review it\nACCEPTANCE: FR-001 the diff satisfies the requirement',
+				},
+				'call-d3a',
+			);
+			// Attempted AND threw (not a constant empty receipt directory).
+			expect(attempts.length).toBeGreaterThan(0);
+			expect(attempts[0]!.kind).toBe('review_route_pending');
+			expect(attempts[0]!.error).toBeTruthy();
+			attempts.length = 0;
+			// A non-reviewer dispatch never enters the routing block: NO
+			// persist attempt is recorded. (Its ACCEPTANCE refusal is
+			// orthogonal — the point is no persist was attempted.)
+			await dispatch(
+				dir,
+				'sess-d3',
+				{ subagent_type: 'coder', prompt: 'TASK: implement it' },
+				'call-d3b',
+			).catch(() => undefined);
+			expect(attempts).toEqual([]);
+		} finally {
+			_internals.persistReviewRouteReceiptAtDispatch = realPersist;
+		}
+	});
+
+	it('d5: the corrected stale-receipt fixture keeps the prior full receipt on disk while the new persist fails', async () => {
+		const dir = gateDir({ persistFails: false, withPlan: true });
+		const sessionID = 'sess-d5';
+		ensureAgentSession(sessionID, 'architect', dir);
+		recordModifiedFilesForTask(
+			swarmState.agentSessions.get(sessionID)!,
+			'1.1',
+			['src/foo.ts'],
+			dir,
+		);
+		await expect(
+			dispatch(dir, sessionID, reviewerArgs('1.1'), 'call-d5a'),
+		).rejects.toThrow('TASK_WORKFLOW_');
+		const before = receiptJsonFiles(dir);
+		expect(before.length).toBeGreaterThan(0);
+		breakSecret();
+		await expect(
+			dispatch(dir, sessionID, reviewerArgs('1.1'), 'call-d5b'),
+		).rejects.toThrow('TASK_WORKFLOW_');
+		// The same receipt is still on disk after the failed persist, and
+		// the failed dispatch carries its invalidation marker.
+		expect(receiptJsonFiles(dir)).toEqual(before);
+		expect(isRouteBlockedForSettlement(dir, 'call-d5b', sessionID, '1.1')).toBe(true);
+	});
+
+	it('d6: a faulted multi-task dispatch is blocked for BOTH verdict tasks in both settlement orders', async () => {
+		for (const order of ['1.1-first', '1.2-first'] as const) {
+			const dir = gateDir({ persistFails: false, withPlan: true });
+			writePlan(dir, ['1.1', '1.2']);
+			const sessionID = 'sess-d6';
+			await prepareTask(dir, '1.1', sessionID);
+			await prepareTask(dir, '1.2', sessionID);
+			const hook = makeHook(dir);
+			fs.mkdirSync(workflowGateStatePath(dir, sessionID), { recursive: true });
+			const args = {
+				subagent_type: 'reviewer',
+				task_id: '1.1',
+				prompt: `TASK: 1.1 and 1.2 review the changes\nACCEPTANCE: FR-001 the diff satisfies the requirement`,
+			};
+			await hook.toolBefore(
+				{ tool: 'Task', sessionID, callID: 'call-d6' },
+				{ args },
+			);
+			const verdict =
+				order === '1.1-first'
+					? `${reviewed('1.1')}\n${reviewed('1.2')}`
+					: `${reviewed('1.2')}\n${reviewed('1.1')}`;
+			await hook.toolAfter(
+				{ tool: 'tool.execute.Task', sessionID, callID: 'call-d6', args },
+				{ text: verdict },
+			);
+			const session = swarmState.agentSessions.get(sessionID)!;
+			expect(getTaskState(session, '1.1')).toBe('pre_check_passed');
+			expect(getTaskState(session, '1.2')).toBe('pre_check_passed');
+			// Retired only after the WHOLE call's settlement invocation.
+			expect(isRouteBlockedForSettlement(dir, 'call-d6', sessionID, '1.1')).toBe(
+				false,
+			);
+			resetSwarmState();
+		}
+	});
+
+	it('d7: a denied call retires its invalidation marker (no settlement will ever consult it)', async () => {
+		const dir = gateDir({ persistFails: false, withPlan: true });
+		await prepareTask(dir, '1.1', 'sess-d7');
+		const hook = makeHook(dir);
+		fs.mkdirSync(workflowGateStatePath(dir, 'sess-d7'), { recursive: true });
+		await hook.toolBefore(
+			{ tool: 'Task', sessionID: 'sess-d7', callID: 'call-d7' },
+			{ args: reviewerArgs('1.1') },
+		);
+		expect(isRouteBlockedForSettlement(dir, 'call-d7', 'sess-d7', '1.1')).toBe(true);
+		await hook.abortDeniedSettlementForCall('call-d7', 'sess-d7');
+		expect(isRouteBlockedForSettlement(dir, 'call-d7', 'sess-d7', '1.1')).toBe(false);
+	});
+
+	it('p: healthy real toolAfter settlement — a receipt-persisted dispatch settles and advances (PRESERVING)', async () => {
+		const dir = gateDir({ persistFails: false, withPlan: true });
+		const sessionID = 'sess-p-healthy';
+		await prepareTask(dir, '1.1', sessionID);
+		const hook = makeHook(dir);
+		await hook.toolBefore(
+			{ tool: 'Task', sessionID, callID: 'call-p1' },
+			{ args: reviewerArgs('1.1') },
+		);
+		await hook.toolAfter(
+			{
+				tool: 'tool.execute.Task',
+				sessionID,
+				callID: 'call-p1',
+				args: reviewerArgs('1.1'),
+			},
+			{ text: reviewed('1.1') },
+		);
+		const session = swarmState.agentSessions.get(sessionID)!;
+		expect(getTaskState(session, '1.1')).toBe('reviewer_run');
 	});
 });
 
 describe('Stage-B advancement fails closed on the missing receipt (#3380 / plan F3 proof)', () => {
-	let isolatedEnv: ReturnType<typeof createIsolatedTestEnv> | undefined;
-	let dir: string;
-
-	beforeEach(() => {
-		isolatedEnv = createIsolatedTestEnv();
-		resetSwarmState();
-		dir = canonicalMkdtemp('route-proof-3380-');
-		fs.mkdirSync(path.join(dir, '.swarm'), { recursive: true });
-		fs.mkdirSync(path.join(dir, '.opencode'), { recursive: true });
-	});
-
-	afterEach(() => {
-		resetSwarmState();
-		removeTreeWithRetry(dir);
-		isolatedEnv?.cleanup();
-		isolatedEnv = undefined;
-	});
-
 	it('with the route-required marker set and no receipt on disk, the settlement entry point refuses advancement under the default enforcement', () => {
+		const dir = gateDir({ persistFails: false });
 		const sessionID = 'sess-proof';
 		const session = ensureAgentSession(sessionID, 'architect', dir);
-		// The exact state a persist-failure dispatch leaves: route-required
-		// marker set (markStageBRouteRequired ran before the persist), no
-		// receipt on disk (the persist threw).
 		markStageBRouteRequired(session, '1.1');
 		const result = enforcePersistedReviewRouteReceipt({
 			projectRoot: dir,
@@ -320,8 +450,7 @@ describe('Stage-B advancement fails closed on the missing receipt (#3380 / plan 
 			taskId: '1.1',
 			receipts: [],
 			enforcementEnabled: true,
-			// Marker set ⇒ the settlement's legacyUnrouted escape is false.
-			legacyUnrouted: !markStageBRouteRequiredMarkerSet(session, '1.1'),
+			legacyUnrouted: !session.stageBRouteRequiredTasks.has('1.1'),
 			requireEvidenceBindings: true,
 			requireCompleteEvidence: false,
 		});
@@ -329,6 +458,7 @@ describe('Stage-B advancement fails closed on the missing receipt (#3380 / plan 
 	});
 
 	it('with enforce_receipts disabled the receipt gate is the documented rollback surface', () => {
+		const dir = gateDir({ persistFails: false });
 		const sessionID = 'sess-proof-disabled';
 		const session = ensureAgentSession(sessionID, 'architect', dir);
 		markStageBRouteRequired(session, '1.1');
@@ -347,9 +477,21 @@ describe('Stage-B advancement fails closed on the missing receipt (#3380 / plan 
 	});
 });
 
-function markStageBRouteRequiredMarkerSet(
-	session: ReturnType<typeof ensureAgentSession>,
-	taskId: string,
-): boolean {
-	return session.stageBRouteRequiredTasks.has(taskId);
+/** Stage-A evidence + session view so taskId is Stage-B eligible. */
+async function prepareTask(dir: string, taskId: string, sessionID = SESSION): Promise<void> {
+	ensureAgentSession(sessionID, 'architect', dir);
+	await transitionTaskWorkflowEvidence(dir, taskId, {
+		type: 'accepted_mutation',
+		agentType: 'coder',
+		expectedGeneration: 0,
+		transitionId: `coder:${taskId}`,
+	});
+	await transitionTaskWorkflowEvidence(dir, taskId, {
+		type: 'stage_a_passed',
+		expectedGeneration: 1,
+		transitionId: `stage-a:${taskId}`,
+	});
+	const session = swarmState.agentSessions.get(sessionID)!;
+	advanceTaskState(session, taskId, 'coder_delegated');
+	advanceTaskState(session, taskId, 'pre_check_passed');
 }
