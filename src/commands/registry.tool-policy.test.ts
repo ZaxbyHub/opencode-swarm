@@ -86,6 +86,7 @@ describe('toolPolicy classification snapshot — no regression', () => {
 		'harness-opt plan',
 		'harness-opt status',
 		'harness-opt history',
+		'receipt', // #2968/#2970: portable verification receipts (emission + verify, toolPolicy 'agent')
 	]);
 
 	const EXPECTED_RESTRICTED = new Set<string>([

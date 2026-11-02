@@ -6079,6 +6079,11 @@ function applySwarmRegistrationTables(
 			template: '/swarm evidence $ARGUMENTS',
 			description: 'Use /swarm evidence to view evidence bundles and summaries',
 		},
+		'swarm-receipt': {
+			template: '/swarm receipt $ARGUMENTS',
+			description:
+				'Use /swarm receipt to emit or verify portable verification receipts (task|phase <id> [--export] | --verify <bundle>)',
+		},
 		'swarm-handoff': {
 			template: '/swarm handoff',
 			description:
