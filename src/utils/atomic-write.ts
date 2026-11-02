@@ -193,6 +193,7 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 			'src/summaries/store.ts (pre-#2035; migrated-to=src/summaries/store.ts:writeRawSidecar)',
 			'src/retention/jsonl-cap.ts:213',
 			'src/services/skill-changelog.ts:58',
+			'src/evidence/receipt-store.ts:273',
 		],
 		note: 'background lane/delegation stores keep bounded-retry rename semantics wired into their callers (#2034/#2276 delivery contracts); migration candidates for a follow-up but grammars registered',
 	},
@@ -417,6 +418,10 @@ export const WRITER_CLASSIFICATION: Readonly<
 	'src/hooks/guardrails/shell-audit-store.ts': 'registered-bespoke',
 	'src/evidence/documents-retention.ts': 'registered-bespoke',
 	'src/evidence/manager.ts': 'registered-bespoke',
+	// #2968: verification-receipt export bundle staging dir —
+	// `.${bundleName}.tmp-${pid}-${ts}` (target-suffix-tmp-dash grammar);
+	// receipt artifacts themselves go through writeImmutableArtifact
+	'src/evidence/receipt-store.ts': 'registered-bespoke',
 	'src/full-auto/state.ts': 'registered-bespoke',
 	'src/hooks/delegation-gate/worktree-merge-status.ts': 'registered-bespoke',
 	'src/hooks/delegation-gate/worktree-provisioning-owner.ts': 'migrated',

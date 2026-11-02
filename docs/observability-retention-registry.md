@@ -361,7 +361,7 @@ per row.
 | `review-receipts` | .swarm/review-receipts/{YYYY-MM-DD}-{id}.json + index.json | governed-content | one small file per review receipt; retention sweep review-receipts 30 d + keep-newest-1000; index read capped MAX_RECEIPTS_READ 1000 (global) | indexed: manifest lookup + per-file reads; index read ≤1000 newest | untouched by close — the 30 d / newest-1000 sweep owns the reap | not a defect — #2483 |
 
 
-### Category 5 — Plan durability, evidence bundles, council (15 rows)
+### Category 5 — Plan durability, evidence bundles, council (16 rows)
 
 | Row id | Path grammar | State class | Write limit (scope) | Read bound | Close policy | Disposition → owner |
 |---|---|---|---|---|---|---|
