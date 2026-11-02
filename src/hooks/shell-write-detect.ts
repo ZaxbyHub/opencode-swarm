@@ -3392,13 +3392,23 @@ function detectArchiveExtract(cmd: unknown): WriteTarget[] {
  * then selects candidate basenames itself (executed proof, plan critic
  * round 2), so no static target can be trusted.
  */
-// #3120 4.5 review round 1: git GLOBAL options ahead of a subcommand
-// (`git -C . apply`, `git --no-pager checkout …`, `git -c k=v …`) do not
-// change the write semantics, and execution wrappers (`env git …`,
-// `command git …`) resolve through detectorCommandPartsFromWords. Returns
-// the wrapper-consumed words with the git global options skipped, so the
-// subcommand sits at index 0.
-function gitSubcommandWords(cmd: unknown): { leaf: string; words: string[] } {
+// #3120 4.5 review rounds 1-2: git GLOBAL options ahead of a subcommand
+// (`git -C . apply`, `git --no-pager checkout …`, `git -c k=v …`, `git -p
+// apply …`) do not change the write semantics, and execution wrappers
+// (`env git …`, `command git …`) resolve through
+// detectorCommandPartsFromWords. Returns the wrapper-consumed words with the
+// git global options skipped, so the subcommand sits at index 0.
+//
+// DEFAULT-DENY (4.5 round 2): any OTHER `-`-prefixed token ahead of the
+// subcommand sets `unresolvedPrefix` — real git errors on unknown global
+// options BEFORE running anything ("unknown switch"), so a command with an
+// unrecognized pre-subcommand token never legitimately executes; the write
+// detectors fail it closed instead of guessing at the subcommand.
+function gitSubcommandWords(cmd: unknown): {
+	leaf: string;
+	words: string[];
+	unresolvedPrefix: boolean;
+} {
 	const parts = detectorCommandPartsFromWords(
 		getCommandName(cmd),
 		getSuffixWords(cmd),
@@ -3412,6 +3422,7 @@ function gitSubcommandWords(cmd: unknown): { leaf: string; words: string[] } {
 		'--namespace',
 		'--exec-path',
 		'--super-prefix',
+		'--config-env',
 	]);
 	const gitFlagGlobals = new Set([
 		'--no-pager',
@@ -3422,10 +3433,20 @@ function gitSubcommandWords(cmd: unknown): { leaf: string; words: string[] } {
 		'--no-replace-objects',
 		'--noglob-pathspecs',
 		'--icase-pathspecs',
+		'--no-advice',
+		'--no-lazy-fetch',
+		'--no-renames',
+		'--textconv',
+		'--no-textconv',
 	]);
 	let cursor = 0;
+	let unresolvedPrefix = false;
 	while (cursor < suffixWords.length) {
 		const token = suffixWords[cursor];
+		if (token === '-p' || token === '-P') {
+			cursor += 1;
+			continue;
+		}
 		if (gitFlagGlobals.has(token)) {
 			cursor += 1;
 			continue;
@@ -3437,9 +3458,18 @@ function gitSubcommandWords(cmd: unknown): { leaf: string; words: string[] } {
 			cursor += token.includes('=') ? 1 : 2;
 			continue;
 		}
+		if (token.startsWith('-')) {
+			// Unrecognized global: git itself would refuse to run — fail
+			// closed rather than misresolve the subcommand.
+			unresolvedPrefix = true;
+		}
 		break;
 	}
-	return { leaf: parts.leaf, words: suffixWords.slice(cursor) };
+	return {
+		leaf: parts.leaf,
+		words: suffixWords.slice(cursor),
+		unresolvedPrefix,
+	};
 }
 
 function detectPatchApply(cmd: unknown): WriteTarget[] {
@@ -3447,6 +3477,17 @@ function detectPatchApply(cmd: unknown): WriteTarget[] {
 	const resolved = gitSubcommandWords(cmd);
 	const leaf = resolved.leaf;
 	if (leaf !== 'git' && leaf !== 'patch') return results;
+	if (leaf === 'git' && resolved.unresolvedPrefix) {
+		// #3120 4.5 round 2: unrecognized git global options — the command
+		// cannot legitimately run; never authorize it blind. (GNU patch has
+		// no global-option prefix grammar, so the check is git-only.)
+		results.push({
+			category: 'patch_apply',
+			operator: 'git (unrecognized global options)',
+			path: null,
+		});
+		return results;
+	}
 	const suffixWords =
 		leaf === 'git'
 			? resolved.words
@@ -3620,8 +3661,21 @@ function detectGitDestructive(cmd: unknown): WriteTarget[] {
 	// #3120 4.5 review round 1: wrapper- and git-global-option-aware
 	// subcommand resolution (`env git checkout …`, `git -C . checkout …`
 	// are the same write as the bare subcommand form).
-	const { leaf, words: suffixWords } = gitSubcommandWords(cmd);
+	const gitResolution = gitSubcommandWords(cmd);
+	const leaf = gitResolution.leaf;
+	const suffixWords = gitResolution.words;
 	if (leaf !== GIT_COMMAND) return [];
+	if (gitResolution.unresolvedPrefix) {
+		// #3120 4.5 round 2: unrecognized git global options — the command
+		// cannot legitimately run; fail closed.
+		return [
+			{
+				category: 'git_destructive',
+				operator: 'git (unrecognized global options)',
+				path: null,
+			},
+		];
+	}
 	if (suffixWords.length === 0) return [];
 
 	const first = suffixWords[0].toLowerCase();

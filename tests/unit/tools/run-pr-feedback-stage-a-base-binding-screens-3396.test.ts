@@ -473,7 +473,7 @@ describe('Compound screen + lifecycle hooks (#3396 S2/S3)', () => {
 // not smuggle redirects, separators, or substitution into the trusted tail
 // (executed reviewer probes), and the git apply detector must survive git
 // global options and execution wrappers.
-describe('echo-tail smuggling matrix + wrapper-aware patch detection (4.5 round 1)', () => {
+describe('echo-tail smuggling matrix (4.5 round 1)', () => {
 	beforeEach(async () => {
 		await activateWorkflow(SESSION);
 		await declareVerifiedFeedbackLane();

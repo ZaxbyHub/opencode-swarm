@@ -354,3 +354,55 @@ describe('patch detection across git global options and wrappers (4.5 round 1)',
 		expect(analysis.hasWrites).toBe(false);
 	});
 });
+
+// #3120 4.5 review round 2: documented git globals (-p/-P/--no-advice/
+// --no-lazy-fetch/--config-env=) must not hide the write subcommand, and any
+// UNRECOGNIZED global fails closed (git itself refuses unknown globals
+// before running anything, so a valid command never carries one).
+describe('git global options default-deny (4.5 round 2)', () => {
+	test('git -p apply is detected (pager global)', () => {
+		const analysis = detectPosixWrites('git -p apply fix.patch');
+		expect(analysis.hasWrites).toBe(true);
+		const patch = analysis.writes.find((w) => w.category === 'patch_apply');
+		expect(patch?.patchSources).toEqual(['fix.patch']);
+	});
+
+	test('git -P apply is detected', () => {
+		expect(detectPosixWrites('git -P apply fix.patch').hasWrites).toBe(true);
+	});
+
+	test('git --no-advice apply is detected', () => {
+		expect(detectPosixWrites('git --no-advice apply fix.patch').hasWrites).toBe(
+			true,
+		);
+	});
+
+	test('git --config-env=core.autocrlf=X apply is detected', () => {
+		expect(
+			detectPosixWrites('git --config-env=core.autocrlf=X apply fix.patch')
+				.hasWrites,
+		).toBe(true);
+	});
+
+	test('git -p checkout main -- src/x.ts is detected by the destructive arm', () => {
+		const analysis = detectPosixWrites('git -p checkout main -- src/x.ts');
+		expect(analysis.hasWrites).toBe(true);
+	});
+
+	test('unrecognized git global fails closed with no patch sources', () => {
+		const analysis = detectPosixWrites(
+			'git --definitely-not-real apply fix.patch',
+		);
+		expect(analysis.hasWrites).toBe(true);
+		const patch = analysis.writes.find((w) => w.category === 'patch_apply');
+		expect(patch?.patchSources ?? []).toHaveLength(0);
+	});
+
+	test('git -p status stays undetected (harmless subcommand)', () => {
+		expect(detectPosixWrites('git -p status').hasWrites).toBe(false);
+	});
+
+	test('git -C . status still stays undetected', () => {
+		expect(detectPosixWrites('git -C . status').hasWrites).toBe(false);
+	});
+});
