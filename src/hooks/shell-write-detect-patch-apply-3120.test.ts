@@ -389,13 +389,32 @@ describe('git global options default-deny (4.5 round 2)', () => {
 		expect(analysis.hasWrites).toBe(true);
 	});
 
-	test('unrecognized git global fails closed with no patch sources', () => {
+	test('unrecognized git global fails closed with a null-path patch write', () => {
 		const analysis = detectPosixWrites(
 			'git --definitely-not-real apply fix.patch',
 		);
 		expect(analysis.hasWrites).toBe(true);
+		// 4.5 round 3: assert the patch_apply arm ITSELF (the round-2 shape
+		// `patch?.patchSources ?? []` was vacuous when the arm was removed).
 		const patch = analysis.writes.find((w) => w.category === 'patch_apply');
+		expect(patch).toBeDefined();
+		expect(patch?.path).toBeNull();
+		expect(patch?.operator).toBe('git (unrecognized global options)');
 		expect(patch?.patchSources ?? []).toHaveLength(0);
+	});
+
+	test('informational globals stay undetected (4.5 round 3)', () => {
+		for (const cmd of [
+			'git --version',
+			'git -v',
+			'git -h',
+			'git --html-path',
+			'git --man-path',
+			'git --info-path',
+			'git --glob-pathspecs status --porcelain',
+		]) {
+			expect(detectPosixWrites(cmd).hasWrites).toBe(false);
+		}
 	});
 
 	test('git -p status stays undetected (harmless subcommand)', () => {

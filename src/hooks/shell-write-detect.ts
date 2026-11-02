@@ -3399,11 +3399,13 @@ function detectArchiveExtract(cmd: unknown): WriteTarget[] {
 // detectorCommandPartsFromWords. Returns the wrapper-consumed words with the
 // git global options skipped, so the subcommand sits at index 0.
 //
-// DEFAULT-DENY (4.5 round 2): any OTHER `-`-prefixed token ahead of the
-// subcommand sets `unresolvedPrefix` — real git errors on unknown global
-// options BEFORE running anything ("unknown switch"), so a command with an
-// unrecognized pre-subcommand token never legitimately executes; the write
-// detectors fail it closed instead of guessing at the subcommand.
+// DEFAULT-DENY (4.5 rounds 2-3): any OTHER `-`-prefixed token ahead of the
+// subcommand sets `unresolvedPrefix`. Every documented global is in the
+// skip sets; a token outside them is undocumented in `git --help`, and the
+// executed round-3 probes showed undocumented tokens split into exactly two
+// classes — accepted informational spellings (now allowlisted) and tokens
+// git itself rejects with exit 129 before running anything — so failing
+// closed on the residue carries no legitimate-workflow cost.
 function gitSubcommandWords(cmd: unknown): {
 	leaf: string;
 	words: string[];
@@ -3435,15 +3437,20 @@ function gitSubcommandWords(cmd: unknown): {
 		'--icase-pathspecs',
 		'--no-advice',
 		'--no-lazy-fetch',
-		'--no-renames',
-		'--textconv',
-		'--no-textconv',
+		'--glob-pathspecs',
+		// Informational/terminating globals (4.5 round 3): git accepts these
+		// ahead of a subcommand and exits 0 without running anything.
+		'--version',
+		'--help',
+		'--html-path',
+		'--man-path',
+		'--info-path',
 	]);
 	let cursor = 0;
 	let unresolvedPrefix = false;
 	while (cursor < suffixWords.length) {
 		const token = suffixWords[cursor];
-		if (token === '-p' || token === '-P') {
+		if (token === '-p' || token === '-P' || token === '-v' || token === '-h') {
 			cursor += 1;
 			continue;
 		}
