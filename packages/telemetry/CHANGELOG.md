@@ -1,5 +1,12 @@
 # Changelog
 
+## [8.0.2-beta.0](https://github.com/ZaxbyHub/opencode-swarm/compare/telemetry-v8.0.0-beta.0...telemetry-v8.0.2-beta.0) (2026-11-02)
+
+
+### Miscellaneous Chores
+
+* **telemetry:** Synchronize opencode-swarm versions
+
 ## [8.0.0-beta.0](https://github.com/zaxbysauce/opencode-swarm/compare/v7.0.0-beta.0...v8.0.0-beta.0) (2026-03-16)
 
 

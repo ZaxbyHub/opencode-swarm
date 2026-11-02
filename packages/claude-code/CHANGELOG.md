@@ -1,5 +1,20 @@
 # Changelog
 
+## [8.0.2-beta.0](https://github.com/ZaxbyHub/opencode-swarm/compare/claude-code-v8.0.1-beta.0...claude-code-v8.0.2-beta.0) (2026-11-02)
+
+
+### Bug Fixes
+
+* **packaging,plugin:** publishable internal deps + dual-shape plugin export ([f72b4fd](https://github.com/ZaxbyHub/opencode-swarm/commit/f72b4fd1d458b50959febc3b081723cc0d613860))
+* **packaging,plugin:** publishable internal deps + dual-shape plugin export (8.x next line) ([38b9d18](https://github.com/ZaxbyHub/opencode-swarm/commit/38b9d18645c76995f3e15f42c36a64faf2b0ff75))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @opencode-swarm/core bumped from 8.0.0-beta.0 to 8.0.2-beta.0
+
 ## [8.0.1-beta.0](https://github.com/zaxbysauce/opencode-swarm/compare/v8.0.0-beta.0...v8.0.1-beta.0) (2026-03-16)
 
 
