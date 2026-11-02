@@ -1,5 +1,21 @@
 # Changelog
 
+## [7.200.17](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.200.16...v7.200.17) (2026-11-01)
+
+
+### Bug Fixes
+
+* **guardrails,knowledge:** close shell write-gate escape classes [#3518](https://github.com/ZaxbyHub/opencode-swarm/issues/3518) and knowledge family migration recency [#3521](https://github.com/ZaxbyHub/opencode-swarm/issues/3521) ([e876ddc](https://github.com/ZaxbyHub/opencode-swarm/commit/e876ddc33ee26ce7b72b4f20508ba5e73c7b6d4f))
+* **guardrails,knowledge:** reviewer round-1 blockers — gate-skip landing model, live rendering, PS explain parity ([3f08cfe](https://github.com/ZaxbyHub/opencode-swarm/commit/3f08cfef82877afa5b9c128533009412615b6036))
+* **guardrails:** rm extractor index-cursor scan + C2/C3 discriminating legs ([a746c29](https://github.com/ZaxbyHub/opencode-swarm/commit/a746c299d5aa676f5dbe3ffa4f171a22210cb4aa))
+* **locks,atomic-write:** stale store locks recover on restart + crash-consistency ratchet ([#2967](https://github.com/ZaxbyHub/opencode-swarm/issues/2967) [#2969](https://github.com/ZaxbyHub/opencode-swarm/issues/2969)) ([122772b](https://github.com/ZaxbyHub/opencode-swarm/commit/122772bf0f6d5095d7a180bf976e4af897974659))
+* **locks:** feedback round — plain-path stale self-heal, atomic break markers, meta-aware lane bookkeeping, doctor events.lock coverage ([a7f2061](https://github.com/ZaxbyHub/opencode-swarm/commit/a7f2061ca7ef625d7f1d7fc75b662d2438dbe73a))
+* **skills:** bind the swarm-pr-review critic dispatch to the harness's pinned cross-model critic ([dce7b78](https://github.com/ZaxbyHub/opencode-swarm/commit/dce7b78357d1ca0224047958ac7e5002aa90eae8))
+* **skills:** bind the swarm-pr-review critic dispatch to the harness's pinned cross-model critic ([8391210](https://github.com/ZaxbyHub/opencode-swarm/commit/83912105302c9017b90b4400222d2d2ffb04a39c))
+* **skills:** close the same-family gap in the Phase 8 critic role binding (feedback round F-001..F-007) ([69e05aa](https://github.com/ZaxbyHub/opencode-swarm/commit/69e05aad6e6790ea2af3523e08f9724e75c0e666))
+* **skills:** reviewer round 2 — APPROVE_WITH_NOTES row condition, unexposed-identity rule, pin header-clause binding, fragment/body precision ([0a13b42](https://github.com/ZaxbyHub/opencode-swarm/commit/0a13b424881ebacd3d3ba2d47ba6c2768f58acf1))
+* **skills:** reviewer-round fixes — exhaustive gate slot, Hard Rule 14 exception, identity-not-exposed rule, verdict-table condition, pin binding ([7f35f1b](https://github.com/ZaxbyHub/opencode-swarm/commit/7f35f1b8d07a135dc12d0528ab5149264698ef91))
+
 ## [7.200.16](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.200.15...v7.200.16) (2026-11-01)
 
 
