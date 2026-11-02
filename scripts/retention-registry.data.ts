@@ -2217,7 +2217,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			'src/evidence/receipt-store.ts writeExportBundle — staged .tmp dir, per-copy digest verification, atomic rename publication, full cleanup on any failure',
 		],
 		readerCitations: [
-			'src/evidence/receipt.ts readNewestPhaseReport — bounded directory scan, exact filename grammar, async',
+			'src/evidence/receipt.ts readNewestPhaseReport — bounded directory scan, exact filename grammar, sync',
 			'src/evidence/receipt.ts hashReceiptArtifact — O_NOFOLLOW + fstat identity/mutation checks, sync',
 			'src/evidence/receipt-verify.ts verifyReceiptBundle — pure two-root read (receipt.json + artifacts/), zero writes, sync',
 		],
