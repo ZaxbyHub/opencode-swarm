@@ -169,7 +169,12 @@ export function verifyReceiptBundle(
 		// /private/tmp, junctioned scratch dirs) fail the lexical containment
 		// check against the realpathed root. Symlinked ANCESTORS of the bundle
 		// are legitimate; only links INSIDE the bundle may escape, and the
-		// component walk + leaf realpath below catch those.
+		// component walk + leaf realpath below catch those. Product decision
+		// (review round 3, question): the artifact ROOT itself is one of the
+		// two caller-supplied verify roots; reaching it through a symlinked
+		// path is the caller's route to the bundle (macOS /tmp, junctioned
+		// scratch dirs) and stays LEGAL — only links strictly INSIDE the two
+		// roots can escape.
 		const rootResolved = fs.realpathSync(input.artifactRoot);
 		const resolved = path.resolve(rootResolved, ...segments);
 		const relative = path.relative(rootResolved, resolved);

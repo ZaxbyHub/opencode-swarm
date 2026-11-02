@@ -167,10 +167,14 @@ describe('receipt hardening (review round 1)', () => {
 				fs.existsSync(path.join(results[0].bundleDir, 'receipt.json')),
 			).toBe(true);
 			const exportDir = path.join(dir, '.swarm', 'plan-export');
-			const published = fs
-				.readdirSync(exportDir)
-				.filter((n) => n.startsWith('receipt-phase-1') && !n.startsWith('.'));
-			expect(published).toHaveLength(1); // no stray staging leftovers
+			// R3-F1 (review round 3): count EVERYTHING — the earlier
+			// `.startsWith('.')` filter hid exactly the staging leftovers this
+			// test claims to rule out. Exactly the one published bundle may
+			// remain; loser staging dirs must be cleaned on the idempotent path.
+			const entries = fs.readdirSync(exportDir);
+			expect(entries).toHaveLength(1);
+			expect(entries[0]).toMatch(/^receipt-phase-1-[0-9a-f]{12}$/);
+			expect(entries.some((n) => n.includes('.tmp-'))).toBe(false);
 		} finally {
 			fs.rmSync(dir, { recursive: true, force: true });
 		}

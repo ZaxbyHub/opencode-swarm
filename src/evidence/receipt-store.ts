@@ -334,8 +334,10 @@ export async function writeExportBundle(
 			// the SAME receipt can win the rename; the loser's rename then
 			// fails over the just-published identical bundle. That race is
 			// idempotent by design — return the published bundle instead of
-			// throwing (staging is cleaned below as usual).
+			// throwing. R3-F1 (round 3): the loser's staging dir must still be
+			// cleaned (an early return here skips the outer catch's cleanup).
 			if (fs.existsSync(finalDir)) {
+				cleanup();
 				return {
 					bundleDir: finalDir,
 					receiptPath: path.join(finalDir, 'receipt.json'),
