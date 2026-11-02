@@ -482,7 +482,7 @@ describe('destructive command guard - .swarm path protection (sections 16-21)', 
 			);
 		});
 
-		test('rsync --remove-source-files /tmp/ /dest/ → ALLOWED (no .swarm path)', async () => {
+		test('rsync --remove-source-files /tmp/ /dest/ → BLOCKED as a write outside the workspace (#3120)', async () => {
 			const config = defaultConfig();
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
 			const input = makeBashInput(
@@ -490,7 +490,7 @@ describe('destructive command guard - .swarm path protection (sections 16-21)', 
 				'rsync --remove-source-files /tmp/ /dest/',
 			);
 			const output = makeBashOutput('rsync --remove-source-files /tmp/ /dest/');
-			await expect(hooks.toolBefore(input, output)).resolves.toBeUndefined();
+			await expect(hooks.toolBefore(input, output)).rejects.toThrow();
 		});
 
 		test('tar --remove-files -czf backup.tar.gz .swarm/evidence/ → BLOCKED', async () => {
@@ -1171,7 +1171,7 @@ describe('destructive command guard - .swarm path protection (sections 16-21)', 
 			await expect(hooks.toolBefore(input, output)).resolves.toBeUndefined();
 		});
 
-		test('rsync --remove-source-files .swarm/ /tmp/ allowed when block_destructive_commands is false', async () => {
+		test('rsync --remove-source-files .swarm/ /tmp/ blocked as a workspace write even when block_destructive_commands is false (#3120)', async () => {
 			const config = defaultConfig({ block_destructive_commands: false });
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
 			const input = makeBashInput(
@@ -1181,7 +1181,7 @@ describe('destructive command guard - .swarm path protection (sections 16-21)', 
 			const output = makeBashOutput(
 				'rsync --remove-source-files .swarm/ /tmp/',
 			);
-			await expect(hooks.toolBefore(input, output)).resolves.toBeUndefined();
+			await expect(hooks.toolBefore(input, output)).rejects.toThrow();
 		});
 	});
 });

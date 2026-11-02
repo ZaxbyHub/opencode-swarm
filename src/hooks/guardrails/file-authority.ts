@@ -1325,7 +1325,7 @@ export function checkFileAuthorityWithRules(
 			code: 'AUTHORITY_VERIFIER_CONFIG',
 			layer: 'protected-path',
 			rule: `verifier-config:${matchedVerifier}`,
-			detail: `Path blocked (glob ${matchedVerifier}): verifier-owned configuration is protected for every agent role (#3120)`,
+			detail: `Path blocked (glob ${matchedVerifier}): verifier-owned configuration in the config zone is protected for every agent role (#3120)`,
 		});
 	}
 	// Canonical non-writing capabilities are immutable hard policy. User config

@@ -64,11 +64,16 @@ describe('Native agent write-authority pass-through via toolBefore (issue #559)'
 		const hooks = createGuardrailsHooks(TEST_DIR, undefined, cfg());
 		startAgentSession(sid, 'build');
 
-		// Must not throw — was previously blocked with "Unknown agent: build"
-		await hooks.toolBefore(
-			{ tool: 'write', sessionID: sid, callID: 'call-1' },
-			{ args: { filePath: 'eslint.config.mts', content: '' } },
-		);
+		// #3120: eslint.config.* is a built-in verifier-config glob, now
+		// denied for EVERY role (including native build). The #559 contract
+		// that still holds: the block is the authority verifier-config deny,
+		// never "Unknown agent: build".
+		await expect(
+			hooks.toolBefore(
+				{ tool: 'write', sessionID: sid, callID: 'call-1' },
+				{ args: { filePath: 'eslint.config.mts', content: '' } },
+			),
+		).rejects.toThrow('AUTHORITY_VERIFIER_CONFIG');
 	});
 
 	it('plan agent write is not blocked', async () => {
