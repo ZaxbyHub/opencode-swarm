@@ -358,20 +358,21 @@ describe('route-receipt hardening legs (#3516)', () => {
 			const dir = fixture({ taskIds: ['1.1'] });
 			await prepareTask(dir, '1.1');
 			const hook = createDelegationGateHook(makeConfig(), dir);
+			// Denied call: the routing faults (EISDIR gate state, still in
+			// place for the failed-output dispatch below), then the
+			// production abort path retires the marker with the dispatch.
 			fs.mkdirSync(workflowGateStatePath(dir, SESSION), { recursive: true });
 			await before(hook, 'call-denied', reviewerArgs('1.1'));
 			expect(blocked(dir, 'call-denied', SESSION, '1.1')).toBe(true);
 			await hook.abortDeniedSettlementForCall('call-denied', SESSION);
 			expect(blocked(dir, 'call-denied', SESSION, '1.1')).toBe(false);
-			// Failed output: the settlement loop never runs for a terminal
-			// failure, and the generic toolAfter cleanup retires the marker.
-			fs.rmSync(workflowGateStatePath(dir, SESSION), {
-				recursive: true,
-				force: true,
-			});
+			// Failed output: the STILL-corrupt gate state faults this
+			// dispatch's routing the same way, so call-failed-out records its
+			// OWN callFault marker; the terminal-failure output then skips the
+			// settlement loop entirely, and the generic toolAfter cleanup must
+			// retire the marker (deleting that retirement line reddens this).
 			await before(hook, 'call-failed-out', reviewerArgs('1.1'));
-			expect(blocked(dir, 'call-x', SESSION, '1.1')).toBe(false);
-			retireRouteInvalidationsForCall(dir, SESSION, 'call-x');
+			expect(blocked(dir, 'call-failed-out', SESSION, '1.1')).toBe(true);
 			await hook.toolAfter(
 				{
 					tool: 'tool.execute.Task',
@@ -381,7 +382,7 @@ describe('route-receipt hardening legs (#3516)', () => {
 				},
 				{ status: 'failed', state: 'failed' },
 			);
-			// (call-failed-out had no marker; this leg pins the loop-skip.)
+			expect(blocked(dir, 'call-failed-out', SESSION, '1.1')).toBe(false);
 			expect(getTaskState(swarmState.agentSessions.get(SESSION)!, '1.1')).toBe(
 				'pre_check_passed',
 			);

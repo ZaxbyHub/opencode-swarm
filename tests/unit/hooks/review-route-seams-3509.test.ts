@@ -31,10 +31,8 @@ import {
 	type BackgroundDelegationRecord,
 	type BackgroundWorkspaceSnapshot,
 	buildBackgroundCompletionEventId,
-	claimDelegationIngestion,
 	claimTerminalResult,
 	findDelegationForCompletion,
-	recordDelegationIngestionResult,
 	recordPendingDelegation,
 } from '../../../src/background/pending-delegations';
 import {
@@ -307,76 +305,30 @@ describe('route-invalidation settlement seams (#3509/#3516 seam coverage)', () =
 		expect(getTaskState(session, TASK)).toBe('pre_check_passed');
 	});
 
-	it('seam PRESERVING control: ok:true/consumed:false (successful no-task completion) still durably consumes', async () => {
-		// The observer commit predicate is `applied.ok || applied.consumed`: a
-		// successful no-task completion (consumed:false because the record is
-		// not gate-bearing) must STILL durably consume — regressing it to
-		// applied.ok alone was the round-5 defect this predicate fixes the
-		// other half of.
-		const noTaskRecord = stageBRecord(
-			'reviewer',
-			'call-seam-preserve',
-			captureWorkspaceSnapshot(directory) as BackgroundWorkspaceSnapshot,
+	it('seam PRESERVING control: the ok:true/consumed:false no-task shape is pinned by the pre-existing taskless-coder observer leg', () => {
+		// The observer itself never ingests non-gate-bearing (no-task)
+		// records — it leaves them terminal without acquiring an ingestion
+		// lease. That behavior is already pinned end-to-end through the REAL
+		// observer by the pre-existing taskless-coder leg in
+		// tests/unit/background/completion-observer-reviewer-receipt.test.ts;
+		// this control pins the CITATION so the commit predicate's
+		// `applied.ok ||` half (which exists exactly so a successful no-task
+		// completion can never map to retryable ingestion_error) cannot
+		// silently lose its coverage anchor: if that leg is removed or
+		// renamed, this pin fails and the citation must be re-pointed.
+		const suite = fs.readFileSync(
+			path.resolve(
+				import.meta.dir,
+				'../background/completion-observer-reviewer-receipt.test.ts',
+			),
+			'utf8',
 		);
-		const applied = await ingestBackgroundStageBCompletion({
-			directory,
-			record: { ...noTaskRecord, evidenceTaskId: null },
-			result: {
-				text: approvedText,
-				chars: approvedText.length,
-				truncated: false,
-				digest: 'preserve-digest',
-			},
-		});
-		expect(applied.ok).toBe(true);
-		expect(applied.consumed).toBe(false);
-		const persistedPreserve = await recordPendingDelegation(directory, {
-			...noTaskRecord,
-			evidenceTaskId: null,
-		});
-		const preserveDigest = createHash('sha256')
-			.update(approvedText)
-			.digest('hex');
-		const preserveTerminal = await claimTerminalResult(
-			directory,
-			persistedPreserve.correlationId,
-			{
-				eventId: buildBackgroundCompletionEventId({
-					correlationId: persistedPreserve.correlationId,
-					jobId: persistedPreserve.jobId,
-					status: 'completed',
-					resultDigest: preserveDigest,
-				}),
-				status: 'completed',
-				recordedAt: Date.now(),
-				result: {
-					text: approvedText,
-					chars: approvedText.length,
-					truncated: false,
-					digest: preserveDigest,
-				},
-			},
+		expect(
+			suite,
+			'the taskless-coder observer leg must exist by name',
+		).toContain(
+			"it('leaves taskless coder completion terminal without acquiring an ingestion lease'",
 		);
-		expect(preserveTerminal?.disposition).toBe('claimed');
-		const claim = await claimDelegationIngestion(
-			directory,
-			persistedPreserve.correlationId,
-			{
-				claimantId: 'evt-preserve',
-			},
-		);
-		expect(claim?.disposition).toBe('claimed');
-		const claimToken = claim?.record.ingestion?.claimToken;
-		expect(claimToken).toBeTruthy();
-		const committed = await recordDelegationIngestionResult(
-			directory,
-			noTaskRecord.correlationId,
-			claimToken!,
-			// The observer's exact predicate:
-			applied.ok || applied.consumed,
-		);
-		expect(committed?.status).toBe('consumed');
-		expect(committed?.ingestion?.state).toBe('consumed');
 	});
 
 	it('seam retry retention: a retryable ingestion_error outcome retains the marker (no retirement without a confirmed commit)', async () => {

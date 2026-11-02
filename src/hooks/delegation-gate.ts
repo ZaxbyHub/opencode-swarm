@@ -3534,15 +3534,15 @@ export const _internals = {
 	 * faulting second read) through the REAL wrapper and both REAL call sites
 	 * without touching the fs fixture between them.
 	 */
-	readPrReviewReentryBindingContextSafe:
-		readPrReviewReentryBindingContextSafe,
+	readPrReviewReentryBindingContextSafe: readPrReviewReentryBindingContextSafe,
 	/**
 	 * #3516 item 7 (AC10): the settlement loop's two receipt-enforcement reads
 	 * route through this seam so per-task read faults (fault-on-first-read /
 	 * fault-on-second-read) are injectable deterministically while sibling
 	 * tasks in the same loop still settle.
 	 */
-	enforcePersistedReviewRouteReceiptAtSettlement: enforcePersistedReviewRouteReceipt,
+	enforcePersistedReviewRouteReceiptAtSettlement:
+		enforcePersistedReviewRouteReceipt,
 	/**
 	 * #3516 item 12 (AC12): the routing block's receipt persists route
 	 * through this seam so tests can observe THAT a persist was attempted and
@@ -3815,12 +3815,10 @@ async function readPrReviewReentryBindingContextSafe(
 		return await readPrReviewReentryBindingContext(directory, sessionId);
 	} catch (error) {
 		// Bounded + redacted form of the raw error text (#3516 item 11): the
-		// raw message never leaves this handler unredacted or unbounded.
-		const detail = redactEmbeddedPaths(error instanceof Error ? error.message : String(error)).slice(0, 200);
-		if (
-			error instanceof Error &&
-			redactEmbeddedPaths(error.message).startsWith('BLOCKED:')
-		) {
+		// derivation lives in boundedRedactedErrorDetail so this wrapper body
+		// never interpolates raw error text and stays formatting-stable.
+		const detail = boundedRedactedErrorDetail(error);
+		if (detail.startsWith('BLOCKED:')) {
 			// Deliberate corruption refusal — fail closed (see doc above).
 			throw error;
 		}
@@ -3829,6 +3827,18 @@ async function readPrReviewReentryBindingContextSafe(
 		);
 		return null;
 	}
+}
+
+/**
+ * #3516 item 11 / AC14: the single bounded, home-path-redacted form the
+ * wrapper uses for raw error text. Keeping the derivation in one helper
+ * means no caller interpolates error.message unredacted or unbounded, and
+ * the wrapper body itself stays free of raw error interpolation.
+ */
+function boundedRedactedErrorDetail(error: unknown): string {
+	return redactEmbeddedPaths(
+		error instanceof Error ? error.message : String(error),
+	).slice(0, 200);
 }
 
 /**
@@ -4026,12 +4036,7 @@ export function createDelegationGateHook(
 		sessionId: string,
 		taskId: string,
 	): boolean =>
-		isRouteBlockedForSettlementInRegistry(
-			directory,
-			callID,
-			sessionId,
-			taskId,
-		);
+		isRouteBlockedForSettlementInRegistry(directory, callID, sessionId, taskId);
 	// #3502 review (PRR-007): expose THIS hook instance's settlement-side
 	// invalidation gate to tests (the maps are per-hook-instance closures).
 	_internals.routeInvalidationProbe = isRouteBlockedForSettlement;
@@ -5254,16 +5259,16 @@ export function createDelegationGateHook(
 					'./pr-workflow-gate.js'
 				);
 				// #3502 review (PRR-009), corrected #3516 item 8 (AC9):
-					// pre-flight the capacity fence BEFORE consuming the
-					// one-use token — rememberStageBDispatchGenerations throws
-					// STAGE_B_CONTEXT_CAPACITY when the fence trips, which
-					// would burn a consumed authorization. The pre-flight is
-					// BEST-EFFORT across the reservation await: concurrent
-					// dispatches admitted during the await can fill the fence
-					// between this check and the remember call below, so the
-					// remember-time throw can still fire in that window. The
-					// pre-flight narrows the window; it does not close it.
-					if (
+				// pre-flight the capacity fence BEFORE consuming the
+				// one-use token — rememberStageBDispatchGenerations throws
+				// STAGE_B_CONTEXT_CAPACITY when the fence trips, which
+				// would burn a consumed authorization. The pre-flight is
+				// BEST-EFFORT across the reservation await: concurrent
+				// dispatches admitted during the await can fill the fence
+				// between this check and the remember call below, so the
+				// remember-time throw can still fire in that window. The
+				// pre-flight narrows the window; it does not close it.
+				if (
 					!stageBDispatchGenerationsByCallID.has(input.callID) &&
 					stageBDispatchGenerationsByCallID.size >=
 						MAX_PENDING_CODER_CHANGE_CONTEXTS
@@ -6408,6 +6413,15 @@ export function createDelegationGateHook(
 							clearPublishedScopeBindings(input.callID);
 							clearCoderTaskChangeContext(input.callID);
 							if (storedArgs !== undefined) deleteStoredInputArgs(input.callID);
+							// #3509: this early return skips the generic toolAfter
+							// cleanup below, so retire the call's route-invalidation
+							// marker HERE — a no-correlation background dispatch is
+							// terminal (no settlement will ever consult it), and
+							// settled traffic must leave no registry residue.
+							retireRouteInvalidationsForCallInDirectory(
+								directory,
+								input.callID,
+							);
 							return;
 						}
 						if (subagentSessionId) {
@@ -7226,7 +7240,7 @@ export function createDelegationGateHook(
 												]
 											: getStageBRouteEvidence(session, taskId);
 										const routeEnforcementEnabled =
-												config.review_routing?.enforce_receipts ?? true;
+											config.review_routing?.enforce_receipts ?? true;
 										// #3502 (PRR-007) / #3509: THIS dispatch's routing
 										// faulted before its pending receipt persisted
 										// (registry-recorded at the routing catch) — a prior

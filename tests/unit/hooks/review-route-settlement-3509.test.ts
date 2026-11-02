@@ -30,6 +30,10 @@ import {
 	_internals,
 	createDelegationGateHook,
 } from '../../../src/hooks/delegation-gate';
+import {
+	activatePrWorkflow,
+	_test_exports as gateInternals,
+} from '../../../src/hooks/pr-workflow-gate';
 import { workflowGateStatePath } from '../../../src/pr-review/persistence';
 import {
 	advanceTaskState,
@@ -148,7 +152,6 @@ describe('review route settlement (#3509/#3516)', () => {
 	afterEach(() => {
 		resetSwarmState();
 		for (const dir of dirs.splice(0)) {
-			// Release project DB handles BEFORE tree removal (WAL EBUSY).
 			closeAllProjectDbs();
 			removeTreeWithRetry(dir);
 		}
@@ -182,10 +185,7 @@ describe('review route settlement (#3509/#3516)', () => {
 			await prepareTask(dir, '1.1');
 			const hook = createDelegationGateHook(makeConfig(), dir);
 			const session = swarmState.agentSessions.get(SESSION)!;
-			// Dispatch 1 (healthy) seeds the fail-open router-error receipt.
 			await before(hook, 'call-s1', reviewerArgs('1.1'));
-			// Dispatch 2 faults pre-assignment (EISDIR); the #3380 fall-through
-			// still admits it and the registry records the call fault.
 			corruptGateState(dir);
 			await before(hook, 'call-s2', reviewerArgs('1.1'));
 			expect(_internals.routeInvalidationProbe).toBeInstanceOf(Function);
@@ -193,8 +193,6 @@ describe('review route settlement (#3509/#3516)', () => {
 				_internals.routeInvalidationProbe!('call-s2', SESSION, '1.1'),
 			).toBe(true);
 			await settle(hook, 'call-s2', reviewerArgs('1.1'), reviewed('1.1'));
-			// THE assertion: the consult withheld advancement though the stale
-			// fail-open receipt would have authorized it.
 			expect(getTaskState(session, '1.1')).toBe('pre_check_passed');
 			expect(
 				session.stageBCompletion?.get('1.1')?.has('reviewer') ?? false,
@@ -210,11 +208,9 @@ describe('review route settlement (#3509/#3516)', () => {
 			corruptGateState(dir);
 			await before(hook, 'call-r2', reviewerArgs('1.1'));
 			await settle(hook, 'call-r2', reviewerArgs('1.1'), reviewed('1.1'));
-			// Retired at loop end: the whole-call fault marker is gone.
 			expect(
 				_internals.routeInvalidationProbe!('call-r2', SESSION, '1.1'),
 			).toBe(false);
-			// A later healthy dispatch settles normally through the same loop.
 			repairGateState(dir);
 			await before(hook, 'call-r3', reviewerArgs('1.1'));
 			await settle(hook, 'call-r3', reviewerArgs('1.1'), reviewed('1.1'));
@@ -255,7 +251,6 @@ describe('review route settlement (#3509/#3516)', () => {
 					},
 					{ text: reviewed('1.1') },
 				);
-				// No invalidation for this call: the arm is inert; it settles.
 				expect(getTaskState(session, '1.1')).toBe('reviewer_run');
 				expect(getStageBRouteEvidence(session, '1.1').length).toBe(1);
 				resetSwarmState();
@@ -282,8 +277,6 @@ describe('review route settlement (#3509/#3516)', () => {
 				_internals.recordStageBDispatchBindings(dir, {
 					sessionID: SESSION,
 					callID: 'call-violating',
-					// accepted_mutation bumps the generation; stage_a_passed
-					// does not — the dispatch-time generation is 1.
 					bindings: [{ taskId: '1.1', generation: 1 }],
 				});
 				const settling = createDelegationGateHook(makeConfig(enforce), dir);
@@ -321,10 +314,8 @@ describe('review route settlement (#3509/#3516)', () => {
 				parentSessionID: SESSION,
 				childSessionID: 'child-xa',
 			});
-			// Dispatch B faults pre-assignment (its OWN call marker).
 			corruptGateState(dir);
 			await before(hook, 'call-xb', reviewerArgs('1.1'));
-			// Observable: A's binding settled evidence; B is blocked.
 			await settle(hook, 'call-xa', reviewerArgs('1.1'), reviewed('1.1'));
 			expect(getTaskState(session, '1.1')).toBe('reviewer_run');
 			expect(getStageBRouteEvidence(session, '1.1').length).toBe(1);
@@ -340,8 +331,6 @@ describe('review route settlement (#3509/#3516)', () => {
 			await prepareTask(dir, '1.1');
 			const hook = createDelegationGateHook(makeConfig(), dir);
 			const session = swarmState.agentSessions.get(SESSION)!;
-			// (1) Healthy FULL receipt for dispatch M (its live binding
-			// occupies the single reviewer slot).
 			recordModifiedFilesForTask(session, '1.1', ['src/foo.ts'], dir);
 			await before(hook, 'call-ma', reviewerArgs('1.1'));
 			await hook.taskMetadata({
@@ -349,7 +338,6 @@ describe('review route settlement (#3509/#3516)', () => {
 				parentSessionID: SESSION,
 				childSessionID: 'child-ma',
 			});
-			// (2) M is denied after the routing landed, freeing its live slot.
 			await hook.abortDeniedSettlementForCall('call-ma', SESSION);
 			// (3) A sibling's routing fault records its OWN call marker (the
 			// removed task-scoped forget no longer touches the shared slot).
@@ -363,7 +351,6 @@ describe('review route settlement (#3509/#3516)', () => {
 			expect(
 				_internals.routeInvalidationProbe!('call-ma', SESSION, '1.1'),
 			).toBe(false);
-			// The faulted dispatch is denied: slot released, marker retired.
 			await hook.abortDeniedSettlementForCall('call-mf', SESSION);
 			expect(
 				_internals.routeInvalidationProbe!('call-mf', SESSION, '1.1'),
@@ -382,8 +369,6 @@ describe('review route settlement (#3509/#3516)', () => {
 				parentSessionID: SESSION,
 				childSessionID: 'child-mb',
 			});
-			// (5) The survived record was BINDABLE: N's settlement records
-			// route evidence through the slot N bound (guard-deletion reddens).
 			await settle(hook, 'call-mb', reviewerArgs('1.1'), reviewed('1.1'));
 			expect(getStageBRouteEvidence(session, '1.1').length).toBe(1);
 		});
@@ -445,6 +430,70 @@ describe('review route settlement (#3509/#3516)', () => {
 					_internals.routeInvalidationProbe!('call-kf', SESSION, '1.1'),
 				).toBe(false);
 				resetSwarmState();
+			}
+		});
+	});
+
+	describe('wrapper seam — both binding-context reads route through _internals (#3516 item 1)', () => {
+		const realReader = _internals.readPrReviewReentryBindingContextSafe;
+		afterEach(() => {
+			_internals.readPrReviewReentryBindingContextSafe = realReader;
+		});
+
+		it('wiring pin: exactly two production call sites route through the seam', () => {
+			const source = fs.readFileSync(
+				path.resolve(import.meta.dir, '../../../src/hooks/delegation-gate.ts'),
+				'utf8',
+			);
+			expect(
+				source.match(/_internals\.readPrReviewReentryBindingContextSafe\(/g),
+			).toHaveLength(2);
+		});
+
+		it('sequenced second read: a BLOCKED refusal on the post-reservation read refuses the dispatch (swallowing it admits)', async () => {
+			// Standalone re-entry arm: read #1 (healthy) yields the binding;
+			// the reservation returns false (no authorization issued); read
+			// #2 faults with the corruption refusal. At head the second call
+			// site does NOT swallow -> refused fail-closed; reverting it to
+			// .catch(() => null) admits the dispatch and reddens this leg.
+			const dir = canonicalMkdtemp('route-settle-3509-');
+			dirs.push(dir);
+			fs.mkdirSync(path.join(dir, '.swarm'), { recursive: true });
+			fs.mkdirSync(path.join(dir, '.opencode'), { recursive: true });
+			ensureAgentSession(SESSION, 'architect', dir);
+			const headSha = 'abc123003509';
+			gateInternals.resolveCurrentGitHead = () => headSha;
+			gateInternals.resolveCurrentGitHeadAsync = async () => headSha;
+			gateInternals.resolveIsWorkingTreeClean = () => true;
+			gateInternals.resolveIsWorkingTreeCleanAsync = async () => true;
+			gateInternals.resolvePrWorkflowRevisionDigest = () =>
+				'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90';
+			await activatePrWorkflow(dir, SESSION, 'PR_REVIEW', {
+				prHeadSha: headSha,
+			});
+			let reads = 0;
+			_internals.readPrReviewReentryBindingContextSafe = (async (
+				d: string,
+				sess: string,
+			) => {
+				reads += 1;
+				if (reads === 2) {
+					throw new Error('BLOCKED: gate state is not valid JSON');
+				}
+				return realReader(d, sess);
+			}) as typeof realReader;
+			const hook = createDelegationGateHook(makeConfig(), dir);
+			try {
+				await expect(
+					before(hook, 'call-seq2', {
+						subagent_type: 'reviewer',
+						prompt:
+							'Review the staged change end to end.\nACCEPTANCE: FR-001 the review covers the requirement',
+					}),
+				).rejects.toThrow('BLOCKED:');
+				expect(reads).toBe(2);
+			} finally {
+				gateInternals.resetTrackedStateCache();
 			}
 		});
 	});
