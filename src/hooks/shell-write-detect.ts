@@ -6,10 +6,24 @@
  * Used by guardrails and scope-validation hooks to catch opaque shell
  * commands that would bypass direct tool coverage.
  *
+ * DOCUMENTED BOUNDARY (#3120, issue-sanctioned "accept and document"):
+ * script-runner commands — `npm run <script>`, `bun run <script>`,
+ * `pnpm|yarn run <script>`, `node <file>` — are not treated as write vectors.
+ * Their write targets are not statically knowable (a script body
+ * can do anything), and blanket-blocking them would break every legitimate
+ * build invocation (the deliberate `node <script>` non-flag pin in
+ * shell-write-detect.test.ts and the safe-classifier listing of
+ * `npm run` reflect the same decision). What protects owner policy instead:
+ * the verifier-config file class (`.secretscanignore` et al.) is denied for
+ * EVERY agent role and independent of `guardrails.enabled` (#3120 legs 1-2),
+ * and the secretscan Stage-A gate's own accounting is fail-closed (#3107).
+ * Patch-application (`git apply` / `patch`) and directory-copy destinations
+ * (`rsync`) ARE detected — see detectPatchApply / detectRsyncWrites.
+ *
  * @module shell-write-detect
  */
 
-import { statSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import * as path from 'node:path';
 import type {
 	BashCommand,
@@ -51,7 +65,8 @@ export type WriteCategory =
 	| 'interpreter_eval'
 	| 'network_download'
 	| 'archive_extract'
-	| 'git_destructive';
+	| 'git_destructive'
+	| 'patch_apply';
 
 /**
  * A single write target detected in a shell command.
@@ -98,6 +113,21 @@ export interface WriteTarget {
 	 * cwd or at a quote-fragment path.
 	 */
 	unresolvedContext?: true;
+	/**
+	 * Present ONLY on `patch_apply` writes (#3120 LEG 3b): the literal
+	 * patch-file operands of a `git apply <patch>` / `patch [-pN] <patch>`
+	 * invocation, resolved by the gate against the write's tracked working
+	 * directory (the targets named INSIDE the patch are extracted at
+	 * authorization time — see tool-before's patch_apply branch). Empty for
+	 * stdin patches and for invocations carrying options outside the closed
+	 * supported set (both fail closed at the gate).
+	 */
+	patchSources?: string[];
+	/**
+	 * The `-p<n>` strip level the patch targets are extracted with (#3120):
+	 * `git apply` defaults to 1; explicit `-p<n>` overrides for both tools.
+	 */
+	patchStrip?: number;
 }
 
 /**
@@ -136,6 +166,15 @@ export interface ResolvedWriteTarget {
 	 * directory (#1902/#3347); absent for every other write kind.
 	 */
 	evalDirectory?: string;
+	/**
+	 * For `patch_apply` writes only: the working directory the patch
+	 * invocation runs at, tracked through subshell `cd` commands (the
+	 * starting cwd when none precedes it). The gate resolves the literal
+	 * patch-file operands against this directory before extracting the
+	 * targets named inside each patch (#3120). Absent for every other write
+	 * kind.
+	 */
+	writeContext?: string;
 }
 
 /**
@@ -3335,6 +3374,194 @@ function detectArchiveExtract(cmd: unknown): WriteTarget[] {
 }
 
 /** Detect git destructive operations: git checkout --, git restore, git reset --hard, git clean -fd. */
+/**
+ * #3120 LEG 3b: patch-application write vectors.
+ *
+ * `git apply` and GNU `patch` modify the files named INSIDE a patch, so the
+ * detector reports a `patch_apply` write carrying the literal patch-file
+ * operands (`patchSources`); the gate extracts the real targets from the
+ * patch content at authorization time (both diff endpoints, so a
+ * rename/delete of a protected preimage cannot hide behind the postimage;
+ * `/dev/null` endpoints excluded; `-p<n>` strip honored).
+ *
+ * Closed option sets (#3120 critic rounds 2-4): anything unrecognized —
+ * including target-rewriting forms (`--directory`, `-d`, `-o`, `-r`, backup
+ * options) and index-writing modes (`--cached`, `--index`, `--3way`) —
+ * yields a write with NO patch sources, which the gate fails closed.
+ * `patch` without an explicit `-p<n>` also carries no sources: GNU patch
+ * then selects candidate basenames itself (executed proof, plan critic
+ * round 2), so no static target can be trusted.
+ */
+function detectPatchApply(cmd: unknown): WriteTarget[] {
+	const results: WriteTarget[] = [];
+	const leaf = detectorCommandLeaf(cmd);
+	if (leaf !== 'git' && leaf !== 'patch') return results;
+
+	const suffixWords = getSuffixWords(cmd);
+	if (suffixWords.length === 0) return results;
+
+	const isGit = leaf === 'git';
+	if (isGit && suffixWords[0]?.toLowerCase() !== 'apply') return results;
+
+	const words = isGit ? suffixWords.slice(1) : suffixWords;
+	const GIT_APPLY_OK = /^-(?:p\d+|q|R)$|^--(?:check|quiet|stat|reverse)$/;
+	const PATCH_OK = /^--(?:batch|quiet|force)$|^-(?:s|f|q)$|^--F\d+$/;
+	const KNOWN_UNSUPPORTED = new Set([
+		'--3way',
+		'--index',
+		'--cached',
+		'--directory',
+		'--unsafe-paths',
+		'--exclude',
+		'--include',
+		'-d',
+		'-o',
+		'-r',
+		'-b',
+		'-B',
+		'-V',
+		'-Z',
+		'-T',
+		'--output',
+		'--reject-file',
+		'--backup',
+		'--suffix',
+		'--version-control',
+	]);
+
+	const sources: string[] = [];
+	let strip = isGit ? 1 : -1;
+	for (const word of words) {
+		if (word === '--') continue;
+		if (word.startsWith('-')) {
+			const pMatch = /^-p(\d+)$/.exec(word);
+			if (pMatch) {
+				strip = Number.parseInt(pMatch[1], 10);
+				continue;
+			}
+			const ok = isGit ? GIT_APPLY_OK.test(word) : PATCH_OK.test(word);
+			if (!ok || KNOWN_UNSUPPORTED.has(word)) {
+				// Unrecognized or known-unsupported (target-rewriting /
+				// index-writing) option: fail closed rather than guess.
+				results.push({
+					category: 'patch_apply',
+					operator: `${isGit ? 'git apply' : 'patch'} (unsupported option)`,
+					path: null,
+				});
+				return results;
+			}
+			continue;
+		}
+		sources.push(word);
+	}
+
+	if (isGit) {
+		// git apply: default strip level 1; patch operands are readable files.
+		results.push({
+			category: 'patch_apply',
+			operator: 'git apply',
+			path: null,
+			patchSources: sources,
+			patchStrip: strip,
+		});
+		return results;
+	}
+
+	// GNU patch: an EXPLICIT -p<n> is required for static target resolution
+	// (no `-p` selects candidate basenames dynamically — fail closed).
+	const hasExplicitP = words.some((w) => /^-p\d+$/.test(w));
+	if (!hasExplicitP) {
+		results.push({
+			category: 'patch_apply',
+			operator: 'patch (no explicit -p)',
+			path: null,
+		});
+		return results;
+	}
+	// Stdin form (`patch -p1 < fix.diff`): the input redirection names the
+	// patch file; a positional operand wins when both appear.
+	const fromStdinRedirect = getInputRedirectPaths(cmd);
+	const patchFiles = sources.length > 0 ? sources : fromStdinRedirect;
+	results.push({
+		category: 'patch_apply',
+		operator: 'patch',
+		path: null,
+		patchSources: patchFiles,
+		patchStrip: strip,
+	});
+	return results;
+}
+
+/** Input (`<`) redirection file words of a command node, literal only. */
+function getInputRedirectPaths(cmd: unknown): string[] {
+	const out: string[] = [];
+	for (const redirect of getRedirections(cmd)) {
+		if (!redirect || typeof redirect !== 'object') continue;
+		const opType = (
+			redirect as { op?: { type?: string } }
+		).op?.type?.toUpperCase();
+		if (opType !== 'LESS') continue;
+		const fileNode = (redirect as { file?: unknown }).file;
+		const text = extractRedirectPath(fileNode);
+		if (text !== null) out.push(text);
+	}
+	return out;
+}
+
+/**
+ * #3120 LEG 3c: `rsync <src>… <dest>` writes under the destination operand.
+ * The destination (last positional after flags and their values) is reported
+ * as the write target — parity with the existing `cp` last-operand treatment
+ * (directory-content enrichment is a disclosed boundary shared with cp -r).
+ */
+function detectRsyncWrites(cmd: unknown): WriteTarget[] {
+	const results: WriteTarget[] = [];
+	const leaf = detectorCommandLeaf(cmd);
+	if (leaf !== 'rsync') return results;
+	const suffixWords = getSuffixWords(cmd);
+	if (suffixWords.length === 0) return results;
+
+	const flagsWithValue = new Set([
+		'-e',
+		'--exclude-from',
+		'--include-from',
+		'--files-from',
+		'--rsync-path',
+		'--suffix',
+		'--backup-dir',
+		'--out-format',
+		'--log-file',
+		'--password-file',
+		'--chmod',
+		'--outbuf',
+		'--max-size',
+		'--min-size',
+		'--block-size',
+	]);
+	const positionals: string[] = [];
+	let skipNext = false;
+	for (const word of suffixWords) {
+		if (skipNext) {
+			skipNext = false;
+			continue;
+		}
+		if (flagsWithValue.has(word)) {
+			skipNext = true;
+			continue;
+		}
+		if (word === '--') continue;
+		if (word.startsWith('-')) continue;
+		positionals.push(word);
+	}
+	if (positionals.length < 2) {
+		// No source/destination pair (rsync errors) — nothing to authorize.
+		return results;
+	}
+	const dest = positionals[positionals.length - 1];
+	results.push({ category: 'builtin_write', operator: 'rsync', path: dest });
+	return results;
+}
+
 function detectGitDestructive(cmd: unknown): WriteTarget[] {
 	const results: WriteTarget[] = [];
 	const name = getCommandName(cmd);
@@ -3355,6 +3582,48 @@ function detectGitDestructive(cmd: unknown): WriteTarget[] {
 			const path = suffixWords[dashDashIdx + 1];
 			const op = path === '.' ? 'git checkout -- .' : 'git checkout --';
 			results.push({ category: 'git_destructive', operator: op, path });
+		} else if (dashDashIdx === -1) {
+			// #3120 LEG 3a: `git checkout <ref> <pathspec>…` (no `--`) restores
+			// the pathspec operands from the ref — a path-limited write the
+			// authority layer must judge. Branch operations (`-b`/`-B`/`--orphan`,
+			// and a lone <ref> with no pathspec) stay undetected: they are not
+			// path-limited restores.
+			const checkoutFlagsWithValue = new Set([
+				'-b',
+				'-B',
+				'-t',
+				'--track',
+				'--conflict',
+				'--orphan',
+				'--pathspec-from-file',
+				'--snapshot',
+			]);
+			const branchCreation = checkoutFlagsWithValue.has(suffixWords[1] ?? '');
+			const positionals: string[] = [];
+			let skipNext = false;
+			for (let i = 1; i < suffixWords.length; i += 1) {
+				const word = suffixWords[i];
+				if (skipNext) {
+					skipNext = false;
+					continue;
+				}
+				if (checkoutFlagsWithValue.has(word)) {
+					skipNext = true;
+					continue;
+				}
+				if (word.startsWith('-')) continue;
+				positionals.push(word);
+			}
+			if (!branchCreation && positionals.length >= 2) {
+				// First positional is the ref; the rest are pathspecs.
+				for (let i = 1; i < positionals.length; i += 1) {
+					results.push({
+						category: 'git_destructive',
+						operator: 'git checkout <ref>',
+						path: positionals[i],
+					});
+				}
+			}
 		}
 	} else if (first === 'restore') {
 		// git restore [--hard] [--force] <path>
@@ -4456,6 +4725,8 @@ export function detectPosixWrites(command: string): WriteAnalysis {
 			for (const write of detectNetworkDownloaders(cmd)) allWrites.push(write);
 			for (const write of detectArchiveExtract(cmd)) allWrites.push(write);
 			for (const write of detectGitDestructive(cmd)) allWrites.push(write);
+			for (const write of detectPatchApply(cmd)) allWrites.push(write);
+			for (const write of detectRsyncWrites(cmd)) allWrites.push(write);
 		}
 
 		// #3474: stdin-fed interpreters behind literal pipe producers
@@ -5471,6 +5742,18 @@ function collectWritesWithNodes(
 				out.push({ write: w, context: effectiveCwd });
 			}
 
+			// #3120: the patch/rsync vectors register on the resolution walk
+			// too, so a `cd` before them resolves at the tracked directory.
+			const patchWrites = detectPatchApply(node);
+			for (const w of patchWrites) {
+				out.push({ write: w, context: effectiveCwd });
+			}
+
+			const rsyncWrites = detectRsyncWrites(node);
+			for (const w of rsyncWrites) {
+				out.push({ write: w, context: effectiveCwd });
+			}
+
 			break;
 		}
 	}
@@ -5560,6 +5843,80 @@ function getWritesFromCommandRedirs(
  * @param cwd - The starting current working directory (e.g., "/home/user")
  * @returns Array of ResolvedWriteTarget with resolved absolute paths
  */
+// #3120 LEG 3b: extract the write targets a patch text names — BOTH diff
+// endpoints of every file header (`--- a/x` preimage and `+++ b/x`
+// postimage; a rename/delete mutates the preimage even when only the
+// postimage appears — plan-critic round-1 executed proof), `/dev/null`
+// excluded, with the invocation's `-p<n>` strip level applied to each
+// endpoint. Returns undefined when the text is not decodable as a unified
+// diff (no headers at all): resolution then fails closed instead of
+// guessing.
+function extractPatchTargets(
+	patchText: string,
+	strip: number,
+): string[] | undefined {
+	const targets = new Set<string>();
+	let sawHeader = false;
+	for (const rawLine of patchText.split(/\r\n|\n/)) {
+		const pre = /^--- (?:("(?:[^"\\]|\\.)+")|(\S+))/.exec(rawLine);
+		const post = /^\+\+\+ (?:("(?:[^"\\]|\\.)+")|(\S+))/.exec(rawLine);
+		const match = pre ?? post;
+		if (!match) continue;
+		sawHeader = true;
+		const raw = (match[1] ? JSON.parse(match[1]) : match[2]) as string;
+		if (raw === '/dev/null') continue;
+		const components = raw.split('/');
+		const level = Math.max(0, strip);
+		const stripped =
+			components.length > level ? components.slice(level).join('/') : raw;
+		if (stripped && stripped !== '.') targets.add(stripped);
+	}
+	return sawHeader ? [...targets] : undefined;
+}
+
+// #3120: expand a patch_apply write into one resolved write per target named
+// inside its patch files, read (bounded, 512KB — the readBoundedText posture)
+// at the write's tracked working directory. Empty sources (stdin patch /
+// unsupported option — the detector's closed set) and unreadable or
+// undecodable patches yield a single null-path entry so the live gate fails
+// closed; they are never silently allowed.
+function expandPatchApplyWrite(
+	original: WriteTarget,
+	context: string,
+): ResolvedWriteTarget[] {
+	const unresolvable: ResolvedWriteTarget = {
+		original,
+		resolvedPath: null,
+		resolved: false,
+	};
+	const sources = original.patchSources ?? [];
+	if (sources.length === 0) return [unresolvable];
+	const strip = original.patchStrip ?? 1;
+	const entries: ResolvedWriteTarget[] = [];
+	const seen = new Set<string>();
+	for (const source of sources) {
+		const patchPath = path.resolve(context, source);
+		let text: string | undefined;
+		try {
+			const st = statSync(patchPath);
+			if (st.isFile() && st.size <= 512 * 1024) {
+				text = readFileSync(patchPath, 'utf8');
+			}
+		} catch {
+			text = undefined;
+		}
+		const extracted = text ? extractPatchTargets(text, strip) : undefined;
+		if (extracted === undefined) return [unresolvable];
+		for (const target of extracted) {
+			const resolvedPath = resolvePath(target, context);
+			if (resolvedPath === null || seen.has(resolvedPath)) continue;
+			seen.add(resolvedPath);
+			entries.push({ original, resolvedPath, resolved: true });
+		}
+	}
+	return entries.length > 0 ? entries : [unresolvable];
+}
+
 export function resolveWriteTargets(
 	command: string,
 	writes: WriteTarget[],
@@ -5667,7 +6024,12 @@ export function resolveWriteTargets(
 		}
 		const map = new Map<
 			string,
-			{ resolvedPath: string | null; resolved: boolean; evalDirectory?: string }
+			{
+				resolvedPath: string | null;
+				resolved: boolean;
+				evalDirectory?: string;
+				writeContext?: string;
+			}
 		>();
 		for (const { write, context } of deduplicated) {
 			const resolvedPath = resolvePath(write.path, context);
@@ -5680,7 +6042,12 @@ export function resolveWriteTargets(
 				write.capability === true && write.category === 'interpreter_eval'
 					? context
 					: undefined;
-			map.set(key, { resolvedPath, resolved, evalDirectory });
+			// #3120: a patch_apply write's literal patch-file operands resolve
+			// at the tracked working directory; the gate reads the patches
+			// there to extract the real targets.
+			const writeContext =
+				write.category === 'patch_apply' ? context : undefined;
+			map.set(key, { resolvedPath, resolved, evalDirectory, writeContext });
 		}
 		return { map, colliding };
 	};
@@ -5704,16 +6071,31 @@ export function resolveWriteTargets(
 		const original = collidingKeys.has(key)
 			? withoutEmptyDirectoryRemoval(input)
 			: input;
+		// #3120: a patch_apply write's real targets live inside its patch
+		// files — expand them here (one resolved write per target) so the
+		// gate's authority loop judges every named path; unresolvable patches
+		// collapse to the null-path entry the gate blocks on.
+		if (original.category === 'patch_apply') {
+			const trackedContext = resolvedMap.get(key)?.writeContext;
+			return expandPatchApplyWrite(
+				original,
+				trackedContext ?? resolvedMap.get(key)?.evalDirectory ?? cwd,
+			);
+		}
 		const buildEntry = (resolved: {
 			resolvedPath: string | null;
 			resolved: boolean;
 			evalDirectory?: string;
+			writeContext?: string;
 		}) => ({
 			original,
 			resolvedPath: resolved.resolvedPath,
 			resolved: resolved.resolved,
 			...(resolved.evalDirectory !== undefined
 				? { evalDirectory: resolved.evalDirectory }
+				: {}),
+			...(resolved.writeContext !== undefined
+				? { writeContext: resolved.writeContext }
 				: {}),
 		});
 		const entries: ResolvedWriteTarget[] = [];

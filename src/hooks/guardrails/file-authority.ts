@@ -612,7 +612,10 @@ const NON_WRITING_SWARM_RULES = Object.fromEntries(
 export const DEFAULT_AGENT_AUTHORITY_RULES: Record<string, AgentRule> = {
 	// Opencode native built-in agents — pass through with no swarm write restrictions.
 	// Opencode's own permission system governs what these agents may write; the swarm
-	// authority layer must not add further constraints on top of it.
+	// authority layer must not add further constraints on top of it. EXCEPTION (#3120):
+	// built-in verifier-config globs still deny for these roles (see the
+	// AUTHORITY_VERIFIER_CONFIG check ahead of the role-policy paths) — the ignore
+	// file class is owner policy for the verification system, not a swarm capability.
 	build: {},
 	plan: {},
 	general: {},
@@ -1305,22 +1308,26 @@ export function checkFileAuthorityWithRules(
 				'unclassified agent writes to repository control state (.git/.swarm) are always protected',
 		});
 	}
-	const isSwarmRole = Object.hasOwn(AUTHORITY_ROLE_CAPABILITIES, strippedAgent);
-	if (isSwarmRole) {
-		const matchedVerifier = [
-			...BUILT_IN_VERIFIER_CONFIG_GLOBS,
-			...(options.verifierConfigPaths ?? []),
-		].find(matchesGlob);
-		if (matchedVerifier) {
-			return denyAuthority(agentName, normalizedPath, {
-				code: 'AUTHORITY_VERIFIER_CONFIG',
-				layer: 'protected-path',
-				rule: `verifier-config:${matchedVerifier}`,
-				detail: `Path blocked (glob ${matchedVerifier}): swarm roles cannot write verifier-owned configuration in the config zone`,
-			});
-		}
+	// #3120 LEG 1: verifier-config globs are owner policy for the verification
+	// system itself (the secretscan Stage-A gate trusts .secretscanignore, see
+	// #3107/PR #3116), so the deny is a property of the protected FILE CLASS,
+	// not a capability of swarm roles. It therefore applies to EVERY agent —
+	// including the OpenCode-native roles deliberately exempted from swarm
+	// write restrictions below (general/build/plan/explore carry {} rule maps)
+	// — and it stays ahead of the authorityEnabled === false allow so the
+	// other knob cannot switch it off either.
+	const matchedVerifier = [
+		...BUILT_IN_VERIFIER_CONFIG_GLOBS,
+		...(options.verifierConfigPaths ?? []),
+	].find(matchesGlob);
+	if (matchedVerifier) {
+		return denyAuthority(agentName, normalizedPath, {
+			code: 'AUTHORITY_VERIFIER_CONFIG',
+			layer: 'protected-path',
+			rule: `verifier-config:${matchedVerifier}`,
+			detail: `Path blocked (glob ${matchedVerifier}): verifier-owned configuration is protected for every agent role (#3120)`,
+		});
 	}
-
 	// Canonical non-writing capabilities are immutable hard policy. User config
 	// may further restrict direct-write roles, but cannot turn a read-only or
 	// dedicated-tool-only role into a raw writer (including prefixed roles).

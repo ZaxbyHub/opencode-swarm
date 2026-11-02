@@ -99,7 +99,7 @@ import {
 	enforceExecutionStallDenial,
 	observeExecutionStallToolCall,
 } from './execution-stall';
-import type { AgentRule } from './file-authority';
+import type { AgentRule, AuthorityDecision } from './file-authority';
 import {
 	AUTHORITY_ROLE_CAPABILITIES,
 	checkFileAuthorityWithRules,
@@ -184,6 +184,21 @@ import {
 } from './helpers';
 
 let hasWarnedSandboxUnavailable = false;
+
+// #3120 LEG 2: the verifier-config denial is owner policy for the verification
+// system itself, so it is enforced even when the optional policy switch
+// (guardrails.enabled=false / observe contexts) is off. Discriminated by the
+// deny rule prefix the file-authority layer stamps on AUTHORITY_VERIFIER_CONFIG.
+function isVerifierConfigDenial(
+	decision: unknown,
+): decision is Extract<AuthorityDecision, { allowed: false }> {
+	const candidate = decision as { allowed?: unknown; rule?: unknown };
+	return (
+		candidate?.allowed === false &&
+		typeof candidate.rule === 'string' &&
+		candidate.rule.startsWith('verifier-config:')
+	);
+}
 
 function normalizeSandboxMechanism(mechanism: string): string {
 	return mechanism.toLowerCase().replace(/[^a-z0-9]+/g, '');
@@ -1533,9 +1548,32 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				}
 			}
 
-			// No-scope agents: enforce only the universal deny list above, then
-			// preserve the prior leniency for the declared-scope authority checks.
-			if (noScopeLenient) return 'lenient';
+			// #3120 LEG 1: no-scope lenient agents (the OpenCode-native roles and
+			// scope-less swarm roles) must still hit the verifier-config deny —
+			// that deny is a property of the protected file class, not of role
+			// capability, so leniency cannot bypass it (and #3120 LEG 2 makes it
+			// fire regardless of the enforcement switch below).
+			if (noScopeLenient) {
+				const lenientAuthorityCheck = checkFileAuthorityWithRules(
+					shellWriteAgent,
+					target,
+					shellDirectory,
+					precomputedAuthorityRules,
+					{
+						declaredScope,
+						authorityEnabled: authorityConfig?.enabled,
+						universalDenyPrefixes,
+						verifierConfigPaths: authorityConfig?.verifier_config_paths,
+					},
+				);
+				if (isVerifierConfigDenial(lenientAuthorityCheck)) {
+					throw new ShellWriteBlockedError(
+						`WRITE BLOCKED: Agent "${shellWriteAgent}" is not authorised to write "${target}" (via shell). Reason: ${lenientAuthorityCheck.reason}`,
+						{ writeTarget: target, writeOperator: opts?.writeOperator },
+					);
+				}
+				return 'lenient';
+			}
 
 			const authorityCheck = checkFileAuthorityWithRules(
 				shellWriteAgent,
@@ -1549,7 +1587,10 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 					verifierConfigPaths: authorityConfig?.verifier_config_paths,
 				},
 			);
-			if (enforce && !authorityCheck.allowed) {
+			if (
+				(enforce || isVerifierConfigDenial(authorityCheck)) &&
+				!authorityCheck.allowed
+			) {
 				const evidenceEventID =
 					authorityCheck.layer === 'protected-path'
 						? recordFullAutoSevereEvidenceEvent({
@@ -1659,6 +1700,21 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 					}
 					throw new ShellWriteBlockedError(
 						`BLOCKED: ${write.original.operator} evaluates inline code whose write targets cannot be verified against the declared scope — rejecting for safety. Write files with the write/edit tools or a checked-in script, and invoke installed tools directly (e.g. \`pytest\`, \`ruff\`) instead of an inline \`python -c\` / \`node -e\` eval.`,
+						{ writeOperator: write.original.operator },
+					);
+				}
+				// #3120 LEG 3b: a patch_apply write whose RESOLUTION produced no
+				// targets — stdin patch, unsupported option (the detector's
+				// closed set), or an unreadable/undecodable patch — arrives as
+				// this null-path entry (the resolver expands named targets into
+				// ordinary resolved writes). Fail closed: never authorize blind.
+				if (
+					enforce &&
+					write.original.category === 'patch_apply' &&
+					write.resolvedPath === null
+				) {
+					throw new ShellWriteBlockedError(
+						`BLOCKED: ${write.original.operator} modifies files whose targets cannot be statically verified (stdin patch, unsupported option, or unreadable patch) — rejecting for safety. Apply the patch with an explicit patch file and supported options, or use the write/edit tools.`,
 						{ writeOperator: write.original.operator },
 					);
 				}
@@ -3356,7 +3412,11 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 							enabled: shellAuditEnabled,
 						},
 					);
-					if (!enforcePolicy) {
+					// #3120 LEG 2: verifier-config protection is owner policy for the
+					// verification system itself, so its denial fires even when the
+					// optional enforcement switch (guardrails.enabled=false) is off.
+					// Every other authority layer keeps the switchable skip.
+					if (!enforcePolicy && !isVerifierConfigDenial(authorityCheck)) {
 						continue;
 					}
 					throw new Error(

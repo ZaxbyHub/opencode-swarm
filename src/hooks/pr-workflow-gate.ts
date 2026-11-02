@@ -247,6 +247,7 @@ import { swarmState } from '../state.js';
 import { resolveGhBinary } from '../tools/gh-evidence.js';
 import { getPrWorkflowToolCapability } from '../tools/tool-metadata.js';
 import { sameProjectRoot } from '../utils/canonical-root.js';
+import { runExternalTool } from '../utils/external-tool-runner.js';
 import { log, warn } from '../utils/logger.js';
 import { withTimeout } from '../utils/timeout.js';
 import {
@@ -693,7 +694,11 @@ interface PrFeedbackStageARecord {
 	 */
 	baseRef?: string;
 	baseSha?: string;
-	baseVerification?: 'caller-asserted' | 'none';
+	baseVerification?:
+		| 'caller-asserted'
+		| 'binding-verified'
+		| 'binding-mismatch'
+		| 'none';
 	validatedAt: string;
 }
 
@@ -1135,6 +1140,35 @@ export interface PrWorkflowGateState {
 	checkoutRecovery?: PrWorkflowCheckoutRecoveryRecord;
 	/** HTTPS PR URL selected after canonical GitHub PR identity validation. */
 	prFeedbackTargetUrl?: string;
+	/**
+	 * #3396 S1: merge-base identity resolved via ONE bounded `gh pr view` at
+	 * PR_FEEDBACK activation and durably bound to the gate. Stage A compares
+	 * its caller-asserted `base_sha` against this anchor (binding-verified /
+	 * binding-mismatch); absent when resolution failed at activation — see
+	 * {@link prFeedbackBaseBindingError}.
+	 */
+	prFeedbackBaseRef?: string;
+	/** The bound base commit OID (40-hex, lowercase). #3396 S1. */
+	prFeedbackBaseSha?: string;
+	/**
+	 * Bounded, sanitized advisory recorded when base resolution failed at
+	 * activation (no gh, network failure, non-GitHub forge). Binding is
+	 * fail-open: activation itself must never wedge on it (#3396 S1b).
+	 */
+	prFeedbackBaseBindingError?: string;
+	/**
+	 * #3396 S1c: bounded marker persisted when a Stage A run received a
+	 * caller-asserted base_sha that DIFFERS from the durably bound
+	 * prFeedbackBaseSha. The run itself BLOCKS base-identical trust (the
+	 * caller provenance is ignored, identical to no-provenance), and this
+	 * marker keeps durable evidence of the mismatch on the blocked path
+	 * (blocked Stage A runs otherwise persist nothing).
+	 */
+	prFeedbackStageABaseMismatch?: {
+		expectedBaseSha: string;
+		receivedBaseSha: string;
+		at: string;
+	};
 	prFeedbackReviewHandoff?: PrFeedbackReviewHandoffRecord;
 	prFeedbackInventory?: string[];
 	/**
@@ -1412,7 +1446,9 @@ const PrFeedbackStageARecordSchema = z
 			// the tool's base_sha arg already admit 64-hex.
 			.regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/)
 			.optional(),
-		baseVerification: z.enum(['caller-asserted', 'none']).optional(),
+		baseVerification: z
+			.enum(['caller-asserted', 'binding-verified', 'binding-mismatch', 'none'])
+			.optional(),
 		validatedAt: z.string().min(1),
 	})
 	.strict();
@@ -1853,6 +1889,23 @@ const PrWorkflowGateStateSchema = z
 		prReviewHandoffRequired: z.boolean().optional(),
 		checkoutRecovery: PrWorkflowCheckoutRecoveryRecordSchema.optional(),
 		prFeedbackTargetUrl: z.string().url().max(2000).optional(),
+		// #3396 S1: durably bound PR_FEEDBACK merge base + fail-open binding
+		// advisory. Optional in both directions (older state omits them; older
+		// code ignores them through the root `.passthrough()`).
+		prFeedbackBaseRef: z.string().min(1).max(200).optional(),
+		prFeedbackBaseSha: z
+			.string()
+			.regex(/^[0-9a-f]{40}$/, 'PR_FEEDBACK base SHA must be 40-hex')
+			.optional(),
+		prFeedbackBaseBindingError: z.string().max(500).optional(),
+		// #3396 S1c: durable evidence of a Stage A base binding mismatch.
+		prFeedbackStageABaseMismatch: z
+			.object({
+				expectedBaseSha: z.string().regex(/^[0-9a-f]{40}$/),
+				receivedBaseSha: z.string().regex(/^[0-9a-f]{40}$/),
+				at: z.string().min(1).max(64),
+			})
+			.optional(),
 		prFeedbackReviewHandoff: PrFeedbackReviewHandoffRecordSchema.optional(),
 		prFeedbackInventory: z.array(z.string().min(1)).min(1).optional(),
 		// Append-only audit ledger for inventory amendments (issue #2242 R3).
@@ -1944,6 +1997,98 @@ function checkoutRecoveryRecord(
 	};
 }
 
+// #3396 S1c: persist the bounded binding-mismatch marker on a BLOCKED Stage A
+// run (blocked runs persist no receipt, so without this write the mismatch
+// would leave no durable evidence). Best-effort and fail-open by design: a
+// CAS loss or any storage error is swallowed — the run's BLOCKED outcome is
+// the enforcement; the marker is evidence, never a gate.
+export async function recordPrFeedbackBaseMismatch(
+	directory: string,
+	sessionID: string,
+	expectedBaseSha: string,
+	receivedBaseSha: string,
+): Promise<void> {
+	try {
+		await withSessionStateMutation(
+			directory,
+			normalizeSessionID(sessionID),
+			async () => {
+				const existing = await readPrWorkflowGateStateFromDisk(
+					directory,
+					normalizeSessionID(sessionID),
+				);
+				if (!existing || existing.mode !== 'PR_FEEDBACK') return;
+				await writeStateWhileLocked(directory, {
+					...existing,
+					prFeedbackStageABaseMismatch: {
+						expectedBaseSha: expectedBaseSha.toLowerCase(),
+						receivedBaseSha: receivedBaseSha.toLowerCase(),
+						at: isoNow(),
+					},
+					updatedAt: isoNow(),
+				});
+			},
+		);
+	} catch {
+		// Best-effort evidence only — never wedge the blocked path.
+	}
+}
+
+// #3396 S1: resolve the merge base of a canonical GitHub PR via ONE bounded
+// `gh pr view` (runExternalTool: array argv, explicit cwd, ignored stdin,
+// timeout, bounded streams, finally-kill — the gh-evidence precedent).
+// Returns null on ANY failure (no gh, timeout, non-zero exit, undecodable
+// output): the caller records an advisory and stays fail-open.
+async function resolvePrFeedbackBaseViaGhProduction(
+	directory: string,
+	prUrl: string,
+): Promise<{ baseRefName: string; baseRefOid: string } | null> {
+	const gh = resolveGhBinary();
+	if (!gh) return null;
+	const run = await runExternalTool({
+		executable: gh,
+		args: ['pr', 'view', prUrl, '--json', 'baseRefName,baseRefOid'],
+		cwd: directory,
+		timeoutMs: 10_000,
+		maxStdoutBytes: 64 * 1024,
+		maxStderrBytes: 16 * 1024,
+	});
+	if (run.status !== 'completed' || run.exitCode !== 0) return null;
+	try {
+		const parsed = JSON.parse(run.stdout) as {
+			baseRefName?: unknown;
+			baseRefOid?: unknown;
+		};
+		if (
+			typeof parsed.baseRefName === 'string' &&
+			parsed.baseRefName.length > 0 &&
+			parsed.baseRefName.length <= 200 &&
+			typeof parsed.baseRefOid === 'string' &&
+			/^[0-9a-f]{40}$/i.test(parsed.baseRefOid)
+		) {
+			return {
+				baseRefName: parsed.baseRefName,
+				baseRefOid: parsed.baseRefOid.toLowerCase(),
+			};
+		}
+	} catch {
+		// Undecodable output — fail-open null below.
+	}
+	return null;
+}
+
+// Bounded, sanitized binding-failure advisory text.
+function sanitizeBaseBindingError(message: string): string {
+	// Escape-free control-character strip (biome forbids control characters in
+	// regex literals): every code point below 0x20 and DEL becomes a space.
+	let sanitized = '';
+	for (const ch of message) {
+		const code = ch.codePointAt(0) ?? 32;
+		sanitized += code < 32 || code === 127 ? ' ' : ch;
+	}
+	return sanitized.trim().slice(0, 200);
+}
+
 export async function activatePrWorkflow(
 	directory: string,
 	sessionID: string,
@@ -1999,10 +2144,47 @@ export async function activatePrWorkflow(
 						);
 					}
 					if (!existingTarget) {
+						// #3396 S1: bind the merge base alongside the first
+						// target binding on re-activation (fail-open advisory
+						// on failure). Idempotent: an already-bound base is
+						// never re-resolved here.
+						let reactivationBase:
+							| {
+									prFeedbackBaseRef: string;
+									prFeedbackBaseSha: string;
+							  }
+							| { prFeedbackBaseBindingError: string }
+							| undefined;
+						if (!existing.prFeedbackBaseSha) {
+							try {
+								const resolvedBase =
+									await _test_exports.resolvePrFeedbackBaseViaGh(
+										directory,
+										options.prUrl,
+									);
+								reactivationBase = resolvedBase
+									? {
+											prFeedbackBaseRef: resolvedBase.baseRefName,
+											prFeedbackBaseSha: resolvedBase.baseRefOid,
+										}
+									: {
+											prFeedbackBaseBindingError: sanitizeBaseBindingError(
+												`PR_FEEDBACK base binding failed for ${options.prUrl}: gh pr view did not return a usable baseRefName/baseRefOid`,
+											),
+										};
+							} catch (error) {
+								reactivationBase = {
+									prFeedbackBaseBindingError: sanitizeBaseBindingError(
+										`PR_FEEDBACK base binding failed: ${error instanceof Error ? error.message : String(error)}`,
+									),
+								};
+							}
+						}
 						existing = await writeStateWhileLocked(directory, {
 							...existing,
 							prFeedbackTargetUrl: options.prUrl,
 							updatedAt: isoNow(),
+							...(reactivationBase ?? {}),
 						});
 					}
 				}
@@ -2083,6 +2265,38 @@ export async function activatePrWorkflow(
 					'BLOCKED: PR_FEEDBACK target must be a canonical GitHub PR URL',
 				);
 			}
+			// #3396 S1: durably bind the merge base at activation via ONE
+			// bounded gh pr view. Fail-open — a resolution failure records an
+			// advisory and never wedges activation; without a binding, Stage A
+			// keeps the disclosed caller-asserted floor.
+			let prFeedbackBase:
+				| { prFeedbackBaseRef: string; prFeedbackBaseSha: string }
+				| { prFeedbackBaseBindingError: string }
+				| undefined;
+			if (feedbackTargetUrl) {
+				try {
+					const resolvedBase = await _test_exports.resolvePrFeedbackBaseViaGh(
+						directory,
+						feedbackTargetUrl,
+					);
+					prFeedbackBase = resolvedBase
+						? {
+								prFeedbackBaseRef: resolvedBase.baseRefName,
+								prFeedbackBaseSha: resolvedBase.baseRefOid,
+							}
+						: {
+								prFeedbackBaseBindingError: sanitizeBaseBindingError(
+									`PR_FEEDBACK base binding failed for ${feedbackTargetUrl}: gh pr view did not return a usable baseRefName/baseRefOid`,
+								),
+							};
+				} catch (error) {
+					prFeedbackBase = {
+						prFeedbackBaseBindingError: sanitizeBaseBindingError(
+							`PR_FEEDBACK base binding failed: ${error instanceof Error ? error.message : String(error)}`,
+						),
+					};
+				}
+			}
 			const nextState: PrWorkflowGateState = {
 				schemaVersion: GATE_SCHEMA_VERSION,
 				revision: 0,
@@ -2098,6 +2312,7 @@ export async function activatePrWorkflow(
 				...(feedbackTargetUrl
 					? { prFeedbackTargetUrl: feedbackTargetUrl }
 					: {}),
+				...(prFeedbackBase ?? {}),
 			};
 			return writeStateWhileLocked(directory, nextState);
 		}),
@@ -8800,7 +9015,11 @@ export async function recordPrFeedbackStageA(
 		baseIdentity?: {
 			baseRef?: string;
 			baseSha?: string;
-			baseVerification: 'caller-asserted' | 'none';
+			baseVerification:
+				| 'caller-asserted'
+				| 'binding-verified'
+				| 'binding-mismatch'
+				| 'none';
 		};
 	} = {},
 ): Promise<PrWorkflowGateState> {
@@ -15497,6 +15716,10 @@ export const _test_exports = {
 	 * behavioural detection rather than to a null stub.
 	 */
 	resolveGhBinary,
+	// #3396 S1: overridable merge-base resolver for PR_FEEDBACK activation
+	// (production: ONE bounded `gh pr view` — see the production resolver
+	// above). Tests monkey-patch this seam exactly like the git resolvers.
+	resolvePrFeedbackBaseViaGh: resolvePrFeedbackBaseViaGhProduction,
 	// Issue #2601 (PRR-009): direct codec access so tests can pin the
 	// skillContractAdvisories schema cap independently of the append guard.
 	parseGateState: (data: unknown) => PrWorkflowGateStateSchema.safeParse(data),

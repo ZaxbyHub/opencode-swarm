@@ -20,8 +20,8 @@ import {
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const SESSION = 'stage-a-trusted-scripts-e2e';
-const HEAD = 'abc123';
-const BASE = 'def456';
+const HEAD = 'abccccccccccccccccccccccccccccccccccc123';
+const BASE = 'defffffffffffffffffffffffffffffffffff456';
 const REVISION = 'revision-1';
 let directory = '';
 let basePackageJson = '';

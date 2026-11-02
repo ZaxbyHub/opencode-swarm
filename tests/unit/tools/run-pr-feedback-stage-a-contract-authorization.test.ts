@@ -21,8 +21,8 @@ import {
 } from '../../../src/tools/run-pr-feedback-stage-a.js';
 
 const SESSION = 'stage-a-contract-authorization';
-const HEAD = 'abc123';
-const BASE = 'def456';
+const HEAD = 'abccccccccccccccccccccccccccccccccccc123';
+const BASE = 'defffffffffffffffffffffffffffffffffff456';
 const REVISION = 'revision-1';
 let directory = '';
 let baseContracts = new Map<string, string>();

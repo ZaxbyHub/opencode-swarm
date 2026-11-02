@@ -24,7 +24,7 @@ import {
 import { TOOL_NAMES } from '../../../src/tools/tool-names.js';
 
 const SESSION = 'stage-a-session';
-const HEAD = 'abc123';
+const HEAD = 'abccccccccccccccccccccccccccccccccccc123';
 const REVISION = 'revision-1';
 let directory = '';
 const originalRunner = _internals.runExternalTool;
