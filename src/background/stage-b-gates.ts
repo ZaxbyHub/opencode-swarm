@@ -20,6 +20,7 @@ import {
 	reviewerScopeCaptureToFingerprint,
 	reviewerScopeFileFingerprintsEqual,
 } from '../hooks/reviewer-scope-file-fingerprint.js';
+import { isRouteBlockedForSettlement } from '../review/route-invalidation-registry.js';
 import {
 	enforcePersistedReviewRouteReceipt,
 	type ReviewRouteEvidence,
@@ -827,6 +828,30 @@ export async function ingestBackgroundStageBCompletion(args: {
 						return true;
 					}
 				})();
+				// #3509 consult site A (ingestion admission read): this
+				// completion's dispatch faulted before its route receipt
+				// persisted — a prior receipt must not authorize the background
+				// evidence publication. BLOCK-only: consults never retire the
+				// marker; only the completion observer's confirmed consumed
+				// commit does.
+				if (
+					routeEnabled &&
+					isRouteBlockedForSettlement(
+						args.directory,
+						args.record.callID,
+						args.record.parentSessionId,
+						taskId,
+					)
+				) {
+					logger.warn(
+						`[background-stage-b] route receipt invalidated before evidence publication for ${taskId} (call ${args.record.callID})`,
+					);
+					return {
+						ok: false,
+						consumed: true,
+						reason: `route receipt invalidated before Stage-B evidence publication: this dispatch's routing faulted before its receipt persisted; a prior receipt does not authorize the background completion`,
+					};
+				}
 				const routeDecision = enforcePersistedReviewRouteReceipt({
 					projectRoot: args.directory,
 					sessionId: args.record.parentSessionId,
@@ -850,9 +875,14 @@ export async function ingestBackgroundStageBCompletion(args: {
 					logger.warn(
 						`[background-stage-b] route receipt blocked before evidence publication for ${taskId}: ${routeDecision.reason ?? 'unknown reason'}`,
 					);
+					// TERMINAL drop (round-4/5 W3): an invalidated/blocked
+					// completion cannot advance AND must not retry —
+					// consumed:true matches the terminal-negative pattern at
+					// the verdict arms above so the observer durably consumes
+					// instead of retrying forever.
 					return {
 						ok: false,
-						consumed: false,
+						consumed: true,
 						reason: `route receipt blocked before Stage-B evidence publication: ${routeDecision.reason ?? 'unknown reason'}`,
 					};
 				}
@@ -860,6 +890,25 @@ export async function ingestBackgroundStageBCompletion(args: {
 					routeEnabled &&
 					preparedRoute.route?.kind === 'review_route_receipt'
 				) {
+					// #3509 consult site B (completeness read): same call-scoped
+					// refusal before the completeness decision is recorded.
+					if (
+						isRouteBlockedForSettlement(
+							args.directory,
+							args.record.callID,
+							args.record.parentSessionId,
+							taskId,
+						)
+					) {
+						logger.warn(
+							`[background-stage-b] route receipt invalidated at completeness read for ${taskId} (call ${args.record.callID})`,
+						);
+						return {
+							ok: false,
+							consumed: true,
+							reason: `route receipt invalidated at the Stage-B completeness read: this dispatch's routing faulted before its receipt persisted`,
+						};
+					}
 					routeCompleteForPersistence = enforcePersistedReviewRouteReceipt({
 						projectRoot: args.directory,
 						sessionId: args.record.parentSessionId,
@@ -872,6 +921,39 @@ export async function ingestBackgroundStageBCompletion(args: {
 					}).canAdvance;
 				}
 			} else {
+				// #3509 consult site C (parent-unavailable recovery arm): the
+				// parent session is gone, so the registry consult is all this
+				// arm has — refuse before the durable fallback read. Gated on
+				// the same enforce_receipts config as every other consult.
+				const recoveryRouteEnabled = (() => {
+					try {
+						return (
+							loadPluginConfig(args.directory).review_routing
+								?.enforce_receipts ?? true
+						);
+					} catch {
+						return true;
+					}
+				})();
+				if (
+					recoveryRouteEnabled &&
+					isRouteBlockedForSettlement(
+						args.directory,
+						args.record.callID,
+						args.record.parentSessionId,
+						taskId,
+					)
+				) {
+					logger.warn(
+						`[background-stage-b] route receipt invalidated in parent-unavailable recovery for ${taskId} (call ${args.record.callID})`,
+					);
+					return {
+						ok: false,
+						consumed: true,
+						reason:
+							'route receipt invalidated in the parent-unavailable recovery arm: this dispatch\u2019s routing faulted before its receipt persisted',
+					};
+				}
 				const route = readReviewRouteReceiptSync({
 					projectRoot: args.directory,
 					sessionId: args.record.parentSessionId,
@@ -882,9 +964,12 @@ export async function ingestBackgroundStageBCompletion(args: {
 					route.sessionId !== args.record.parentSessionId ||
 					route.taskId !== taskId
 				) {
+					// TERMINAL drop (round-4/5 W3): the parent session is
+					// unavailable and the recovery receipt is not
+					// identity-bound — retrying reproduces the same state.
 					return {
 						ok: false,
-						consumed: false,
+						consumed: true,
 						reason:
 							'route receipt blocked before Stage-B evidence publication: parent session is unavailable and recovery receipt is not identity-bound',
 					};
@@ -1156,6 +1241,24 @@ function applyStageBStateCompletion(
 				return true;
 			}
 		})();
+		// #3509 consult site D (completion recording + advancement): keyed by
+		// this function's `callId` PARAMETER (the dispatch being completed, not
+		// args.record.callID — direct recovery callers reach this function
+		// without an ingestion record). BLOCK-only: never retires the marker.
+		if (
+			routeEnabled &&
+			isRouteBlockedForSettlement(
+				directory,
+				callId,
+				parentSessionId,
+				taskId,
+			)
+		) {
+			logger.warn(
+				`[background-stage-b] route receipt invalidated before completion recording for ${taskId} (call ${callId})`,
+			);
+			continue;
+		}
 		// First authorize and record this exact completion. A valid partial route
 		// must be durable even while sibling slots are still outstanding; only the
 		// advancement decision below requires the complete route.
@@ -1193,6 +1296,25 @@ function applyStageBStateCompletion(
 		recordStageBCompletion(session, taskId, agent);
 		const state = getTaskState(session, taskId);
 		if (state === 'tests_run' || state === 'complete') continue;
+		// #3509 consult site D2 (advancement barrier): re-consult before the
+		// tests_run advancement — the completion consult above consumed a
+		// per-task key, but the whole-call fault marker (the common routing
+		// fault shape) is only removed by retirement and must gate advancement
+		// too.
+		if (
+			routeEnabled &&
+			isRouteBlockedForSettlement(
+				directory,
+				callId,
+				parentSessionId,
+				taskId,
+			)
+		) {
+			logger.warn(
+				`[background-stage-b] route receipt invalidated before advancement for ${taskId} (call ${callId})`,
+			);
+			continue;
+		}
 		const advancementDecision = enforcePersistedReviewRouteReceipt({
 			projectRoot: directory,
 			sessionId: parentSessionId,

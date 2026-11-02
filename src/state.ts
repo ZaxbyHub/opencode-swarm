@@ -66,6 +66,7 @@ import type { EscalationTracker } from './prm/escalation.js';
 import { clearTrajectoryCache } from './prm/trajectory-store.js';
 import type { PatternMatch, PrmEpisodeState } from './prm/types.js';
 import type { ReviewRouteEvidence } from './review/routing-enforcement.js';
+import { _test_exports as routeInvalidationRegistryTestExports } from './review/route-invalidation-registry.js';
 import { clearScopeBindings } from './scope/scope-binding.js';
 import { clearScopeBindingFromDisk } from './scope/scope-persistence.js';
 import { clearAllTurnLedgers } from './services/injection-budget';
@@ -1241,6 +1242,10 @@ export function resetSwarmState(): void {
 		});
 	}
 	resetStandardWorktreeIsolationState();
+	// Issues #3509/#3516: the process-local route-invalidation registry is
+	// module-scoped bounded state — clear it with the rest so every test suite
+	// and /swarm reset-session starts from an empty registry (invariant 8).
+	routeInvalidationRegistryTestExports.reset();
 	resetRealtimeLearningNudgeState();
 	// v6.71+ Clear the council-mode disagreement warn-once memo so tests and
 	// fresh sessions observe consistent first-time warnings.

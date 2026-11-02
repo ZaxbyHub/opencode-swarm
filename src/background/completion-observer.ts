@@ -22,6 +22,7 @@ import {
 	standardWorktreeByCallID,
 } from '../hooks/delegation-gate/worktree-isolation.js';
 import { isInDeclaredScope } from '../hooks/guardrails/helpers.js';
+import { retireRouteInvalidationsForCall } from '../review/route-invalidation-registry.js';
 import {
 	discardReviewerScopeGenerationClaim,
 	discardReviewerScopeGenerationForCoderCall,
@@ -519,7 +520,23 @@ export function createBackgroundCompletionObserver(opts: {
 					}
 					const ingestionCommit = await (
 						opts.recordIngestionResult ?? recordDelegationIngestionResult
-					)(directory, record.correlationId, claimToken, applied.ok);
+					)(
+						directory,
+						record.correlationId,
+						claimToken,
+						// #3509 (round-5 observer fix): commit CONSUMED for both
+						// successful outcomes AND terminal-negative drops
+						// (ok:false, consumed:true — invalidated/blocked route,
+						// rejected/skipped verdicts). Committing success on
+						// applied.ok ALONE mapped terminal drops to
+						// ingestion_error/retryable, which would retry the
+						// refused completion forever and retain its route
+						// invalidation marker forever. Only !ok && !consumed
+						// remains retryable. An ok:true, consumed:false
+						// successful no-task completion still durably consumes
+						// per its own contract (stage-b-gates no-task return).
+						applied.ok || applied.consumed,
+					);
 					if (!ingestionCommit) {
 						logger.warn(
 							`[background] ingestion claim for ${record.correlationId} expired or was fenced before commit; retry remains pending`,
@@ -527,7 +544,7 @@ export function createBackgroundCompletionObserver(opts: {
 						return;
 					}
 					if (
-						applied.ok &&
+						(applied.ok || applied.consumed) &&
 						(ingestionCommit.status !== 'consumed' ||
 							ingestionCommit.ingestion?.state !== 'consumed' ||
 							ingestionCommit.ingestion.claimToken !== claimToken)
@@ -541,6 +558,19 @@ export function createBackgroundCompletionObserver(opts: {
 					record =
 						(await findDelegationForCompletion(directory, record.correlationId))
 							?.record ?? record;
+					if (applied.ok || applied.consumed) {
+						// #3509: the ONLY background retirement owner — the
+						// durable commit has CONFIRMED the consumed outcome
+						// (successful or terminal-negative), so the call-scoped
+						// route invalidation marker's work is done. Failed/null
+						// commits and retryable ingestion_error outcomes RETAIN
+						// the marker (a replay refuses again).
+						retireRouteInvalidationsForCall(
+							directory,
+							record.parentSessionId,
+							record.callID,
+						);
+					}
 					if (!applied.ok) {
 						await publishAdvisory(
 							directory,
