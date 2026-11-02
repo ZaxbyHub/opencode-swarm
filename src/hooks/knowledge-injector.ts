@@ -26,7 +26,6 @@ import {
 import { getRunMemorySummary } from '../services/run-memory.js';
 import {
 	clearCriticalShownIds,
-	getLiveContextWindow,
 	setCriticalShownIds,
 } from '../state.js';
 import { log, warn } from '../utils/logger.js';
@@ -1289,21 +1288,11 @@ export function createKnowledgeInjectorHook(
 				targetFromMctx,
 				targetFromMessages,
 			);
-			const { modelID, providerID } = await resolveSessionModelIdentity({
+			const { modelID, providerID, liveContextLimit } =
+				await resolveSessionModelIdentity({
 				sessionID: sessionId,
 				targetModelInfo,
 				messages: output.messages,
-			});
-			// Live `model.limit.context` relayed from the system.transform hook via
-			// session state (this hook receives messages, never a `Model`). Without
-			// it the headroom gate below measured against a stale 128000, so a
-			// session on a 200k–1M model looked out of headroom — and
-			// `recordInjectionSkip('headroom_budget')` shows this gate is already a
-			// known dark-in-production suspect. `undefined` before the first
-			// system.transform of a session; that falls back to the static rungs.
-			const liveContextLimit = getLiveContextWindow(sessionId, {
-				modelID,
-				providerID,
 			});
 			const modelLimitTokens = resolveModelLimit(
 				modelID,

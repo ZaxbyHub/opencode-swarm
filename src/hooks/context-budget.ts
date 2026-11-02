@@ -14,7 +14,6 @@ import {
 import { SUMMARIZER_EXEMPT_TOOL_NAMES } from '../config/constants';
 import { stripKnownSwarmPrefix } from '../config/schema';
 import { observeContextHeadroom } from '../health/learning-health';
-import { getLiveContextWindow } from '../state';
 import { telemetry } from '../telemetry';
 import { log, warn } from '../utils';
 import {
@@ -149,24 +148,11 @@ export function createContextBudgetHandler(
 			? parseAgentModel(configuredTargetModel)
 			: undefined;
 		const sessionID = extractSessionId(messages);
-		const { modelID, providerID } = await resolveSessionModelIdentity({
+		const { modelID, providerID, liveContextLimit } =
+			await resolveSessionModelIdentity({
 			sessionID,
 			targetModelInfo,
 			messages,
-		});
-		// The live `model.limit.context` recorded by the system.transform hook for
-		// this session. This hook only receives messages — the host hands the
-		// `Model` object to system.transform alone — so the live window has to be
-		// relayed through session state. It matters here more than anywhere else:
-		// below, `ratio >= criticalThreshold` triggers HARD PRUNING, so a
-		// denominator that is ~8x too small (the stale 128000 against a 1M window)
-		// deletes context that never needed deleting. `undefined` on the first
-		// turn of a session, before any system.transform has run for it — that
-		// degrades to the static rungs, i.e. the pre-existing behaviour, never
-		// worse.
-		const liveContextLimit = getLiveContextWindow(sessionID, {
-			modelID,
-			providerID,
 		});
 		const modelLimitResolution = resolveModelLimit(
 			modelID,

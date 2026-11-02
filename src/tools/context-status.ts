@@ -35,10 +35,7 @@ import {
 	resolveTargetModelInfoFromLatestUserAgent,
 } from '../hooks/session-model-identity';
 import { readV2SessionContextMessages } from '../host/v2/session-client';
-import {
-	getLiveContextWindow,
-	swarmState,
-} from '../state';
+import { swarmState } from '../state';
 import { createSwarmTool } from './create-tool';
 
 /**
@@ -279,20 +276,21 @@ export const context_status: ReturnType<typeof createSwarmTool> =
 				targetFromToolAgent,
 				targetFromMessages,
 			);
-			const { modelID, providerID } = await resolveSessionModelIdentity({
-				sessionID: ctx?.sessionID,
-				targetModelInfo,
-				messages,
-			});
+			const { modelID, providerID, liveContextLimit } =
+				await resolveSessionModelIdentity({
+					sessionID: ctx?.sessionID,
+					targetModelInfo,
+					messages,
+				});
 			const headroom = computeContextHeadroom(
 				messages,
 				warnThreshold,
 				criticalThreshold,
 				modelLimitsConfig,
-				// Same live window the context-budget hook enforces against.
-				// `ctx.sessionID` is the tool-side key; `undefined` before the first
-				// system.transform of the session.
-				getLiveContextWindow(ctx?.sessionID, { modelID, providerID }),
+				// Same live window the context-budget hook enforces against —
+				// bound in resolveSessionModelIdentity so provider-slug drift between
+				// transcript metadata and the host cache does not drop the denominator.
+				liveContextLimit,
 				{ modelID, providerID },
 				// #2044: scopes the model-limit health observation to this project.
 				directory,

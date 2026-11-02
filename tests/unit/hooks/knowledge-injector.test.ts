@@ -26,7 +26,7 @@ import type {
 	KnowledgeConfig,
 	MessageWithParts,
 } from '../../../src/hooks/knowledge-types.js';
-import { swarmState } from '../../../src/state';
+import { setLiveContextWindow, swarmState } from '../../../src/state';
 import { installKnowledgeReceiptAuthorityStub } from '../../helpers/knowledge-receipt-authority.js';
 
 const SESSION_ID = 'ki-test-session';
@@ -99,6 +99,21 @@ mock.module('../../../src/plan/manager.js', () => ({
 }));
 mock.module('../../../src/hooks/extractors.js', () => ({
 	extractCurrentPhaseFromPlan: mock(() => 'Phase 1: Setup'),
+	// Stubs for ESM named-import resolution (Bun mock.module replaces all exports).
+	extractCurrentPhase: () => null,
+	extractCurrentTask: () => null,
+	extractCurrentTaskFromPlan: () => null,
+	extractDecisions: () => [],
+	extractIncompleteTasks: () => [],
+	extractIncompleteTasksFromPlan: () => [],
+	extractPatterns: () => [],
+	extractPlanCursor: () => '',
+	resolvePlanCursorControls: () => ({
+		enabled: true,
+		maxTokens: 500,
+		lookaheadTasks: 3,
+	}),
+	_internals: {},
 }));
 mock.module('../../../src/config/schema.js', () => ({
 	stripKnownSwarmPrefix: mock((name: string) => {
@@ -115,6 +130,11 @@ mock.module('../../../src/services/run-memory.js', () => ({
 }));
 mock.module('../../../src/hooks/utils.js', () => ({
 	readSwarmFileAsync: mock(async () => null),
+	safeHook: (fn: unknown) => fn,
+	writeSwarmFileAsync: async () => {},
+	resolveSwarmPath: () => '',
+	validateSwarmPath: () => true,
+	estimateTokens: (text: string) => Math.ceil(text.length * 0.33),
 }));
 
 import { stripKnownSwarmPrefix } from '../../../src/config/schema.js';
@@ -577,11 +597,13 @@ describe('Context budget exhaustion', () => {
 		mockRetrieve.mockResolvedValue([makeSwarmEntry('Some lesson', 0.85)]);
 		readRejectedLessons.mockResolvedValue([]);
 		extractCurrentPhaseFromPlan.mockReturnValue('Phase 1: Setup');
+		// Host-recorded live window (messages.transform path has no Model object).
+		setLiveContextWindow(SESSION_ID, 128_000);
 	});
 
 	it('Test 7: when headroom < 300 chars, no injection', async () => {
 		const hook = createKnowledgeInjectorHook('/proj', makeConfig());
-		// MODEL_LIMIT_CHARS ≈ 387,878. Need existingChars > 387,878 - 300 = ~387,578
+		// MODEL_LIMIT_CHARS ≈ 387,878 for 128k live window. Need existingChars > 387,878 - 300.
 		const skipThreshold = Math.floor(128_000 / 0.33) - 200; // leaves ~200 chars headroom (<300)
 		const output = makeOutput('architect', skipThreshold);
 

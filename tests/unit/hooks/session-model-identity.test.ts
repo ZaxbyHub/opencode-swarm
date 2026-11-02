@@ -6,9 +6,10 @@ import {
 import type { V2PluginContext } from '../../../src/host/v2/types';
 import {
 	needsV2ModelIdentityScan,
+	reconcileSessionLiveContext,
 	resolveSessionModelIdentity,
 } from '../../../src/hooks/session-model-identity';
-import { resetSwarmState, swarmState } from '../../../src/state';
+import { resetSwarmState, setLiveContextWindow, swarmState } from '../../../src/state';
 
 function domainBase() {
 	return {
@@ -104,6 +105,38 @@ describe('session-model-identity', () => {
 		expect(identity).toEqual({
 			modelID: 'MiniMax-M3',
 			providerID: 'minimax',
+		});
+	});
+
+	test('reconcileSessionLiveContext trusts cache model when hint is provider-only', () => {
+		setLiveContextWindow('s1', 900_000, {
+			modelID: 'MiniMax-M3',
+			providerID: 'minimax-coding-plan',
+		});
+
+		const reconciled = reconcileSessionLiveContext('s1', {
+			providerID: 'minimax',
+		});
+
+		expect(reconciled.modelID).toBe('MiniMax-M3');
+		expect(reconciled.liveContextLimit).toBe(900_000);
+	});
+
+	test('reconcileSessionLiveContext drops live limit on conflicting hint modelID', () => {
+		setLiveContextWindow('s1', 900_000, {
+			modelID: 'MiniMax-M3',
+			providerID: 'minimax-coding-plan',
+		});
+
+		const reconciled = reconcileSessionLiveContext('s1', {
+			modelID: 'other-model',
+			providerID: 'minimax-coding-plan',
+		});
+
+		expect(reconciled).toEqual({
+			modelID: 'other-model',
+			providerID: 'minimax-coding-plan',
+			liveContextLimit: undefined,
 		});
 	});
 });

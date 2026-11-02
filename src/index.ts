@@ -189,6 +189,7 @@ import {
 	createKnowledgeInjectorHook,
 } from './hooks/knowledge-injector.js';
 import { materializeSystemGuidanceInPlace } from './hooks/messages-transform.js';
+import { reconcileSessionLiveContext } from './hooks/session-model-identity.js';
 import { microReflectorAfter } from './hooks/micro-reflector.js';
 import { maybeEmitNonArchitectAdvisory } from './hooks/non-architect-advisory.js';
 import { isTaskToolId, normalizeToolName } from './hooks/normalize-tool-name';
@@ -326,7 +327,6 @@ import {
 	getAgentSession,
 	getFinalPromptPressure,
 	getLiveContextModelIdentity,
-	getLiveContextWindow,
 	getPrimaryOwner,
 	getSessionBudgetPct,
 	isRegisteredSwarmSubagent,
@@ -3445,17 +3445,17 @@ async function initializeOpenCodeSwarm(
 		if (!isSessionBoundArchitect(sessionID, mctx.agent) || compactionPending)
 			return;
 
-		const identity = getLiveContextModelIdentity(sessionID);
-		const context = identity
-			? getLiveContextWindow(sessionID, identity)
-			: undefined;
-		const model = identity
-			? {
-					id: identity.modelID,
-					providerID: identity.providerID,
-					limit: context === undefined ? undefined : { context },
-				}
-			: undefined;
+		const bound = reconcileSessionLiveContext(
+			sessionID,
+			getLiveContextModelIdentity(sessionID) ?? {},
+		);
+		if (!bound.modelID && !bound.providerID) return;
+		const context = bound.liveContextLimit;
+		const model = {
+			id: bound.modelID,
+			providerID: bound.providerID,
+			limit: context === undefined ? undefined : { context },
+		};
 		const stagedOutput: {
 			deliveryBudgetReceipts: InjectionBudgetReceipt[];
 			system: string[];

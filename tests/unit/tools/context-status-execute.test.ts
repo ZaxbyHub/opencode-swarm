@@ -185,6 +185,34 @@ describe('context_status.execute', () => {
 		expect(parsed.usageSource).toBe('estimated');
 	});
 
+	it('uses host liveContextLimit when transcript provider slug differs from cache', async () => {
+		setLiveContextWindow('test-session', 900_000, {
+			modelID: 'MiniMax-M3',
+			providerID: 'minimax-coding-plan',
+		});
+		_internals.fetchSessionMessages = (async () => [
+			{
+				info: {
+					role: 'assistant',
+					providerID: 'minimax',
+					tokens: {
+						input: 450_000,
+						cache: { read: 50_000, write: 0 },
+					},
+				},
+				parts: [{ type: 'text', text: 'reply' }],
+			},
+		]) as typeof _internals.fetchSessionMessages;
+
+		const parsed = JSON.parse(
+			await context_status.execute({}, makeCtx()),
+		) as Record<string, unknown>;
+		expect(parsed.modelId).toBe('MiniMax-M3');
+		expect(parsed.modelLimitSource).toBe('host');
+		expect(parsed.fallbackActive).toBe(false);
+		expect(parsed.modelLimit).toBe(900_000);
+	});
+
 	it('does not treat an identity-less live cache entry as authoritative over assistant metadata', async () => {
 		setLiveContextWindow('test-session', 200_000);
 		_internals.fetchSessionMessages = (async () => [

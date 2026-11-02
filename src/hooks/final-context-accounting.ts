@@ -48,7 +48,6 @@ import {
 import {
 	clearFinalAccountingWarningBands,
 	getFinalAccountingWarningBand,
-	getLiveContextWindow,
 	setFinalAccountingWarningBand,
 	setFinalPromptPressure,
 } from '../state.js';
@@ -134,14 +133,11 @@ export function createFinalContextAccountingStep(
 			const targetModelInfo = configuredTargetModel
 				? parseAgentModel(configuredTargetModel)
 				: undefined;
-			const { modelID, providerID } = await resolveSessionModelIdentity({
+			const { modelID, providerID, liveContextLimit } =
+				await resolveSessionModelIdentity({
 				sessionID,
 				targetModelInfo,
 				messages,
-			});
-			const liveContextLimit = getLiveContextWindow(sessionID, {
-				modelID,
-				providerID,
 			});
 			const modelLimit = resolveModelLimit(
 				modelID,
