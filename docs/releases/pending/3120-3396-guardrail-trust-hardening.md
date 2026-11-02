@@ -46,6 +46,12 @@ named inside a patch are extracted at authorization time from the patch file
   Stage A receipt now actually PERSISTS its base identity (the pre-fix call
   passed flat option keys the record schema ignored, so even the disclosure
   never landed).
+- Directory-copy boundary (disclosed): `rsync <src>… <dest>` and `cp -r`
+  write authorization judges the DESTINATION operand only — directory
+  CONTENTS are not enumerated, so a source tree carrying a protected file
+  copies without per-file authority. This is deliberate parity with the
+  pre-existing `cp` treatment (content enrichment is a separate, larger
+  change); direct writes to protected paths remain denied on every route.
 - Base-identical **compound** scripts pass a closed plausibility screen before
   base-identity trust: the supported grammar is exclusively the non-empty
   all-`&&` chain, literal heads only, no substitution/redirection/control

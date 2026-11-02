@@ -2794,8 +2794,11 @@ export async function executeRunPrFeedbackStageA(
 				// even the caller-asserted disclosure never persisted). The
 				// verification arm reflects the activation binding: verified
 				// match, caller-asserted floor (no binding), or none (no
-				// provenance). A binding-mismatch run never reaches this call —
-				// it fails above with the mismatch marker persisted.
+				// provenance — ALSO the arm a binding-mismatch run continues
+				// into: mismatch revokes the provenance and the run proceeds as
+				// no-provenance per #3396 S1c, with the mismatch identity
+				// persisted on the gate state in prFeedbackStageABaseMismatch
+				// rather than in this receipt).
 				baseIdentity: contractBase
 					? {
 							baseRef: contractBase.baseRef,
