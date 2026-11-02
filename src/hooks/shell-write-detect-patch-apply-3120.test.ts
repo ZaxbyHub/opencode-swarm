@@ -359,7 +359,7 @@ describe('patch detection across git global options and wrappers (4.5 round 1)',
 // --no-lazy-fetch/--config-env=) must not hide the write subcommand, and any
 // UNRECOGNIZED global fails closed (git itself refuses unknown globals
 // before running anything, so a valid command never carries one).
-describe('git global options default-deny (4.5 round 2)', () => {
+describe('git global options resolution (4.5 rounds 2-4)', () => {
 	test('git -p apply is detected (pager global)', () => {
 		const analysis = detectPosixWrites('git -p apply fix.patch');
 		expect(analysis.hasWrites).toBe(true);
@@ -389,7 +389,7 @@ describe('git global options default-deny (4.5 round 2)', () => {
 		expect(analysis.hasWrites).toBe(true);
 	});
 
-	test('unrecognized git global fails closed with a null-path patch write', () => {
+	test('unresolved write subcommand behind an unknown global fails closed', () => {
 		const analysis = detectPosixWrites(
 			'git --definitely-not-real apply fix.patch',
 		);
@@ -399,7 +399,39 @@ describe('git global options default-deny (4.5 round 2)', () => {
 		const patch = analysis.writes.find((w) => w.category === 'patch_apply');
 		expect(patch).toBeDefined();
 		expect(patch?.path).toBeNull();
-		expect(patch?.operator).toBe('git (unrecognized global options)');
+		expect(patch?.operator).toBe('git (unresolved global prefix)');
+		expect(patch?.patchSources ?? []).toHaveLength(0);
+	});
+
+	test('unresolved DESTRUCTIVE subcommand behind an unknown global fails closed', () => {
+		const analysis = detectPosixWrites(
+			'git --definitely-not-real checkout main -- src/x.ts',
+		);
+		const destructive = analysis.writes.find(
+			(w) => w.category === 'git_destructive',
+		);
+		expect(destructive).toBeDefined();
+		expect(destructive?.path).toBeNull();
+	});
+
+	test('read-only subcommands behind unknown globals stay clean (round 4)', () => {
+		for (const cmd of [
+			'git --definitely-not-real status --porcelain',
+			'git --attr-source=HEAD status --porcelain',
+			'git --attr-source=HEAD log -1',
+			'git --definitely-not-real diff HEAD',
+		]) {
+			expect(detectPosixWrites(cmd).hasWrites).toBe(false);
+		}
+	});
+
+	test('write subcommand behind the unlisted attr-source global still fails closed', () => {
+		const analysis = detectPosixWrites(
+			'git --attr-source=HEAD apply fix.patch',
+		);
+		const patch = analysis.writes.find((w) => w.category === 'patch_apply');
+		expect(patch).toBeDefined();
+		expect(patch?.path).toBeNull();
 		expect(patch?.patchSources ?? []).toHaveLength(0);
 	});
 

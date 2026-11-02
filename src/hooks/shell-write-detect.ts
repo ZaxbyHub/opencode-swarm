@@ -3400,7 +3400,7 @@ function detectArchiveExtract(cmd: unknown): WriteTarget[] {
 // git global options skipped, so the subcommand sits at index 0.
 //
 // DEFAULT-DENY (4.5 rounds 2-3): any OTHER `-`-prefixed token ahead of the
-// subcommand sets `unresolvedPrefix`. Every documented global is in the
+// subcommand sets `prefixUncertain`. The skip sets cover the COMMON
 // skip sets; a token outside them is undocumented in `git --help`, and the
 // executed round-3 probes showed undocumented tokens split into exactly two
 // classes — accepted informational spellings (now allowlisted) and tokens
@@ -3409,7 +3409,7 @@ function detectArchiveExtract(cmd: unknown): WriteTarget[] {
 function gitSubcommandWords(cmd: unknown): {
 	leaf: string;
 	words: string[];
-	unresolvedPrefix: boolean;
+	prefixUncertain: boolean;
 } {
 	const parts = detectorCommandPartsFromWords(
 		getCommandName(cmd),
@@ -3447,7 +3447,7 @@ function gitSubcommandWords(cmd: unknown): {
 		'--info-path',
 	]);
 	let cursor = 0;
-	let unresolvedPrefix = false;
+	let prefixUncertain = false;
 	while (cursor < suffixWords.length) {
 		const token = suffixWords[cursor];
 		if (token === '-p' || token === '-P' || token === '-v' || token === '-h') {
@@ -3466,16 +3466,24 @@ function gitSubcommandWords(cmd: unknown): {
 			continue;
 		}
 		if (token.startsWith('-')) {
-			// Unrecognized global: git itself would refuse to run — fail
-			// closed rather than misresolve the subcommand.
-			unresolvedPrefix = true;
+			// Unrecognized global: the subcommand position is uncertain —
+			// resolve as the first non-dash token after the prefix. The
+			// write detectors fail closed on write subcommands found this
+			// way; every other subcommand stays clean.
+			prefixUncertain = true;
+			while (
+				cursor < suffixWords.length &&
+				suffixWords[cursor].startsWith('-')
+			) {
+				cursor += 1;
+			}
 		}
 		break;
 	}
 	return {
 		leaf: parts.leaf,
 		words: suffixWords.slice(cursor),
-		unresolvedPrefix,
+		prefixUncertain,
 	};
 }
 
@@ -3484,22 +3492,26 @@ function detectPatchApply(cmd: unknown): WriteTarget[] {
 	const resolved = gitSubcommandWords(cmd);
 	const leaf = resolved.leaf;
 	if (leaf !== 'git' && leaf !== 'patch') return results;
-	if (leaf === 'git' && resolved.unresolvedPrefix) {
-		// #3120 4.5 round 2: unrecognized git global options — the command
-		// cannot legitimately run; never authorize it blind. (GNU patch has
-		// no global-option prefix grammar, so the check is git-only.)
-		results.push({
-			category: 'patch_apply',
-			operator: 'git (unrecognized global options)',
-			path: null,
-		});
-		return results;
-	}
 	const suffixWords =
 		leaf === 'git'
 			? resolved.words
 			: detectorCommandPartsFromWords(getCommandName(cmd), getSuffixWords(cmd))
 					.rest;
+	if (leaf === 'git' && resolved.prefixUncertain) {
+		// #3120 4.5 rounds 2-4: a WRITE subcommand resolved through an
+		// unrecognized global prefix — the operand grammar cannot be trusted,
+		// so fail closed with no patch sources. Non-write subcommands never
+		// reach this arm (see gitSubcommandWords). GNU patch has no
+		// global-prefix grammar, so the check is git-only.
+		if (suffixWords[0]?.toLowerCase() === 'apply') {
+			results.push({
+				category: 'patch_apply',
+				operator: 'git (unresolved global prefix)',
+				path: null,
+			});
+		}
+		return results;
+	}
 	if (suffixWords.length === 0) return results;
 
 	const isGit = leaf === 'git';
@@ -3672,16 +3684,25 @@ function detectGitDestructive(cmd: unknown): WriteTarget[] {
 	const leaf = gitResolution.leaf;
 	const suffixWords = gitResolution.words;
 	if (leaf !== GIT_COMMAND) return [];
-	if (gitResolution.unresolvedPrefix) {
-		// #3120 4.5 round 2: unrecognized git global options — the command
-		// cannot legitimately run; fail closed.
-		return [
-			{
-				category: 'git_destructive',
-				operator: 'git (unrecognized global options)',
-				path: null,
-			},
-		];
+	if (gitResolution.prefixUncertain) {
+		// #3120 4.5 rounds 2-4: write subcommands behind an unrecognized
+		// global prefix fail closed; every other subcommand stays clean.
+		const uncertainFirst = suffixWords[0]?.toLowerCase() ?? '';
+		if (
+			uncertainFirst === 'checkout' ||
+			uncertainFirst === 'restore' ||
+			uncertainFirst === 'reset' ||
+			uncertainFirst === 'clean'
+		) {
+			return [
+				{
+					category: 'git_destructive',
+					operator: 'git (unresolved global prefix)',
+					path: null,
+				},
+			];
+		}
+		return [];
 	}
 	if (suffixWords.length === 0) return [];
 
