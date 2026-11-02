@@ -3399,13 +3399,18 @@ function detectArchiveExtract(cmd: unknown): WriteTarget[] {
 // detectorCommandPartsFromWords. Returns the wrapper-consumed words with the
 // git global options skipped, so the subcommand sits at index 0.
 //
-// DEFAULT-DENY (4.5 rounds 2-3): any OTHER `-`-prefixed token ahead of the
-// subcommand sets `prefixUncertain`. The skip sets cover the COMMON
-// skip sets; a token outside them is undocumented in `git --help`, and the
-// executed round-3 probes showed undocumented tokens split into exactly two
-// classes — accepted informational spellings (now allowlisted) and tokens
-// git itself rejects with exit 129 before running anything — so failing
-// closed on the residue carries no legitimate-workflow cost.
+// UNRECOGNIZED PREFIX (4.5 rounds 2-5): the skip sets cover the COMMON
+// documented globals, NOT every one git accepts (executed proofs:
+// `git --attr-source=<t> status` runs clean attached; `--attr-source HEAD
+// checkout -- f` runs clean space-form). Enumeration cannot be complete,
+// and a space-form value can swallow the subcommand position (round 5
+// fail-open), so an unlisted dash-token ahead of the subcommand sets
+// `prefixUncertain` WITHOUT advancing past it: the write detectors SCAN
+// EVERY REMAINING TOKEN for a write verb (apply/checkout/restore/reset/
+// clean) and fail closed on any hit — real write (blocked correctly) or an
+// option value (an over-block, the safe direction); no write verb anywhere
+// → the command stays clean, so read-only commands never false-block
+// behind globals we have not enumerated.
 function gitSubcommandWords(cmd: unknown): {
 	leaf: string;
 	words: string[];
@@ -3466,17 +3471,12 @@ function gitSubcommandWords(cmd: unknown): {
 			continue;
 		}
 		if (token.startsWith('-')) {
-			// Unrecognized global: the subcommand position is uncertain —
-			// resolve as the first non-dash token after the prefix. The
-			// write detectors fail closed on write subcommands found this
-			// way; every other subcommand stays clean.
+			// Unrecognized global: the subcommand position is uncertain (a
+			// space-form value could swallow it). Keep the words FROM the
+			// unknown token; the write detectors scan them all for write
+			// verbs and fail closed on any hit, while commands with no
+			// write verb stay clean.
 			prefixUncertain = true;
-			while (
-				cursor < suffixWords.length &&
-				suffixWords[cursor].startsWith('-')
-			) {
-				cursor += 1;
-			}
 		}
 		break;
 	}
@@ -3498,12 +3498,13 @@ function detectPatchApply(cmd: unknown): WriteTarget[] {
 			: detectorCommandPartsFromWords(getCommandName(cmd), getSuffixWords(cmd))
 					.rest;
 	if (leaf === 'git' && resolved.prefixUncertain) {
-		// #3120 4.5 rounds 2-4: a WRITE subcommand resolved through an
-		// unrecognized global prefix — the operand grammar cannot be trusted,
-		// so fail closed with no patch sources. Non-write subcommands never
-		// reach this arm (see gitSubcommandWords). GNU patch has no
-		// global-prefix grammar, so the check is git-only.
-		if (suffixWords[0]?.toLowerCase() === 'apply') {
+		// #3120 4.5 rounds 2-5: a write verb ANYWHERE behind an unrecognized
+		// global prefix fails closed — the operand grammar cannot be trusted
+		// (round-5 executed fail-open: `git --attr-source HEAD checkout --
+		// f` restored a file while a first-non-dash rule read HEAD as the
+		// subcommand). GNU patch has no global-prefix grammar, so the check
+		// is git-only.
+		if (suffixWords.some((w) => w.toLowerCase() === 'apply')) {
 			results.push({
 				category: 'patch_apply',
 				operator: 'git (unresolved global prefix)',
@@ -3685,15 +3686,11 @@ function detectGitDestructive(cmd: unknown): WriteTarget[] {
 	const suffixWords = gitResolution.words;
 	if (leaf !== GIT_COMMAND) return [];
 	if (gitResolution.prefixUncertain) {
-		// #3120 4.5 rounds 2-4: write subcommands behind an unrecognized
-		// global prefix fail closed; every other subcommand stays clean.
-		const uncertainFirst = suffixWords[0]?.toLowerCase() ?? '';
-		if (
-			uncertainFirst === 'checkout' ||
-			uncertainFirst === 'restore' ||
-			uncertainFirst === 'reset' ||
-			uncertainFirst === 'clean'
-		) {
+		// #3120 4.5 rounds 2-5: a write verb anywhere behind an unrecognized
+		// global prefix fails closed; no write verb → the command stays
+		// clean (read-only commands never false-block).
+		const WRITE_VERBS = new Set(['checkout', 'restore', 'reset', 'clean']);
+		if (suffixWords.some((w) => WRITE_VERBS.has(w.toLowerCase()))) {
 			return [
 				{
 					category: 'git_destructive',

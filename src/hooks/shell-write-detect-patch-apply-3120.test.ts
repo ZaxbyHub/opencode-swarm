@@ -425,6 +425,43 @@ describe('git global options resolution (4.5 rounds 2-4)', () => {
 		}
 	});
 
+	test('space-form value of an unknown global cannot swallow the write verb (round 5)', () => {
+		// Round-5 executed fail-open: `git --attr-source HEAD checkout -- f`
+		// restored a real file while HEAD was read as the subcommand.
+		const checkoutAnalysis = detectPosixWrites(
+			'git --attr-source HEAD checkout -- src/x.ts',
+		);
+		const destructive = checkoutAnalysis.writes.find(
+			(w) => w.category === 'git_destructive',
+		);
+		expect(destructive).toBeDefined();
+		expect(destructive?.path).toBeNull();
+
+		const applyAnalysis = detectPosixWrites(
+			'git --attr-source HEAD apply fix.patch',
+		);
+		const patch = applyAnalysis.writes.find(
+			(w) => w.category === 'patch_apply',
+		);
+		expect(patch).toBeDefined();
+		expect(patch?.path).toBeNull();
+		expect(patch?.patchSources ?? []).toHaveLength(0);
+	});
+
+	test('known-global + unknown-global interposition still catches the write verb', () => {
+		const analysis = detectPosixWrites(
+			'git --attr-source HEAD -C . checkout -- f.txt',
+		);
+		expect(analysis.hasWrites).toBe(true);
+	});
+
+	test('shallow-file space-form checkout fails closed (same class)', () => {
+		const analysis = detectPosixWrites(
+			'git --shallow-file /tmp/x checkout -- f.txt',
+		);
+		expect(analysis.hasWrites).toBe(true);
+	});
+
 	test('write subcommand behind the unlisted attr-source global still fails closed', () => {
 		const analysis = detectPosixWrites(
 			'git --attr-source=HEAD apply fix.patch',
