@@ -2205,6 +2205,56 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		disposition: { kind: 'not-a-defect', proof: 'Hard per-bundle caps (100 entries / 500 KiB) + age/count retention + close lifecycle (src/evidence/manager.ts:261-280,665; src/commands/close/archive-stage.ts:498-544).' },
 	},
 	{
+		id: 'verification-receipts',
+		category: 5,
+		pathGrammar:
+			'.swarm/evidence/receipts/{receipt-<task|phase>-<unitId>-<12hex>.json,.md | phase-<N>-<64hex>.json} + staged export bundles .swarm/plan-export/receipt-<kind>-<unitId>-<shorthash>/{receipt.json,receipt.md,artifacts/**}',
+		canonicalRoot: 'project-swarm',
+		writerModules: ['src/evidence/receipt-store.ts', 'src/services/receipt-service.ts'],
+		writerCitations: [
+			'src/evidence/receipt-store.ts capturePhaseGateReport — writeImmutableArtifact content-addressed write-once of the bounded PhaseGateReport at the phase-commit boundary, fail-open to phase completion',
+			'src/evidence/receipt-store.ts writeReceiptArtifact — per-unit withEvidenceLock serialization, idempotent-return for unchanged content signature, newest-8 exact-grammar retention',
+			'src/evidence/receipt-store.ts writeExportBundle — staged .tmp dir, per-copy digest verification, atomic rename publication, full cleanup on any failure',
+		],
+		readerCitations: [
+			'src/evidence/receipt.ts readNewestPhaseReport — bounded directory scan, exact filename grammar, async',
+			'src/evidence/receipt.ts hashReceiptArtifact — O_NOFOLLOW + fstat identity/mutation checks, sync',
+			'src/evidence/receipt-verify.ts verifyReceiptBundle — pure two-root read (receipt.json + artifacts/), zero writes, sync',
+		],
+		schemaVersion: 'VerificationReceipt format_version 1.0.0 (receipt.ts); PhaseGateReport schemaVersion 1 (captured verbatim)',
+		stateClass: 'governed-content',
+		privacyClass: 'mixed',
+		writeLimits: {
+			bound:
+				'receipts ≤256 KiB JSON, ≤512 artifact refs, ≤64 gate records; captured reports newest-8/phase; emitted receipts newest-8/unit; per-artifact re-hash ≤16 MiB',
+			scope: 'per-key',
+			keyspaceBound:
+				'FINITE BY THE PARENT-TREE GLOBAL LIFECYCLE, NOT by the 8-per-unit cap: keys are (kind, unitId) pairs drawn from plan tasks/phases, and .swarm/evidence (incl. receipts/) is recursively removed at close via the evidence-tree lifecycle while .swarm/plan-export bundles are removed by the plan-export clean stage (src/commands/close/constants.ts ACTIVE_STATE_DIRS_TO_CLEAN; src/commands/close/clean-stage.ts) — the same global reapers that bound the sibling evidence-bundles row. Mid-session reclamation requires /swarm close or /swarm archive, exactly as for evidence bundles.',
+			citation:
+				'src/evidence/receipt.ts MAX_RECEIPT_* constants; src/evidence/receipt-store.ts pruneRetention (MAX_RETAINED_PER_UNIT 8); src/commands/close/clean-stage.ts',
+		},
+		readBound: {
+			pattern: 'full-file',
+			bound: 'receipt ≤1 MiB read cap in verify; artifacts ≤16 MiB re-hash cap; directory scans exact-grammar filtered',
+			sync: true,
+			citation: 'src/evidence/receipt-verify.ts MAX_VERIFY_* constants; src/evidence/receipt.ts hashReceiptArtifact',
+		},
+		lockModel: 'per-unit withEvidenceLock around lookup→write→prune; writeImmutableArtifact evidence lock per artifact',
+		crashBehavior:
+			'content-addressed write-once (byte-identical re-run idempotent); export bundles staged then atomically renamed — a crashed export leaves only a .tmp-* staging dir, never a partial final bundle',
+		closePolicy: 'cleaned — rides the evidence/ tree removal (receipts subtree) and the plan-export clean stage (bundles)',
+		resetPolicy: 'not reset',
+		legacyCompatibility:
+			'none — pre-feature phases have no captured report and emit a clear no-backfill error (#2968 documented limitation)',
+		healthSignal: 'fail-open capture logs via logger.log at the phase-commit boundary',
+		owner: '#2968',
+		disposition: {
+			kind: 'retain-by-design',
+			citation:
+				'Portable verification artifacts are the #2968/#2970 deliverable: newest-8 per unit + 256 KiB/512-ref/64-gate caps + staged atomic export, under the same global close/archive reapers as the evidence tree (src/evidence/receipt-store.ts; src/evidence/receipt.ts).',
+		},
+	},
+	{
 		id: 'phase-participation',
 		category: 5,
 		pathGrammar: '.swarm/evidence/phase-participation.json (+ phase-participation-quarantine/{sha}.bin)',

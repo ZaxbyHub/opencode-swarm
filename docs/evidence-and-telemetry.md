@@ -433,3 +433,36 @@ Per-task: `hasReview`, `hasTest`, `hasApproval`, `missingEvidence[]`, `isComplet
 - [Commands Reference](commands.md) — `/swarm evidence`, `/swarm archive`, `/swarm benchmark`
 - [Architecture Deep Dive](architecture.md) — how evidence flows through the pipeline
 - [Configuration](configuration.md) — `evidence.*` keys
+
+## Verification Receipts
+
+`/swarm receipt <task|phase> <id> [--export]` (and the `receipt` tool) emit a
+portable, hash-backed record of every gate that ran for a task or phase:
+bounded gate records (id, outcome, responsible actor, evidence refs; digests
+only — never raw command output), the snapshot hashes the gates were
+evaluated against, and content-hashed artifact refs. Receipts are stored
+under `.swarm/evidence/receipts/` as JSON plus rendered Markdown;
+`--export` writes a self-contained bundle (receipt + Markdown + byte-copies
+of every cited artifact) under
+`.swarm/plan-export/receipt-<kind>-<id>-<shorthash>/`.
+
+`/swarm receipt --verify <bundle>` re-checks the receipt hash and every
+artifact digest on any machine — including a fresh clone with no `.swarm/`
+state — and exits nonzero on any mismatch with a typed failure
+(`corrupt_json`, `unsupported_format_version`, `schema_mismatch`,
+`receipt_hash_mismatch`, `missing_artifact`, `digest_mismatch`,
+`path_escape`). Verify performs zero writes and touches nothing but the
+bundle, which is what makes it PR-attachable proof.
+
+Capture is best-effort: a phase's bounded gate report is durably captured at
+the successful commit boundary, fail-open to phase completion (a receipt
+failure never fails a phase whose gates passed). Phases completed before
+this feature have no persisted report and produce a clear error — there is
+no historical backfill.
+
+Documented limitations: hash-only integrity is spoofable by a determined
+local actor (integrity against the model, not the user); receipt JSON and
+verify output are digest-only, but an exported bundle CONTAINS the cited
+evidence artifacts; absent `command`/`exit_code`/`output_digest` fields mean
+no durable producer recorded them (omitted, never reconstructed); path
+normalization is byte-exact forward-slashing without case-folding.

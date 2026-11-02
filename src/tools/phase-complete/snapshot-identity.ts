@@ -35,8 +35,34 @@ function isContained(root: string, candidate: string): boolean {
 	);
 }
 
+/**
+ * Byte-exact portable relative path (Windows separators become forward
+ * slashes; no case-folding — two paths differing only by case hash
+ * differently on every platform, including case-insensitive NTFS).
+ *
+ * Single source for the verification-receipts substrate (#2968) and its
+ * verifier (#2970): emission and verification share this normalizer by
+ * import, so the two can never drift apart.
+ */
+export function toPortableRelativePath(root: string, absolute: string): string {
+	return path.relative(root, absolute).replaceAll('\\', '/');
+}
+
+/**
+ * Derived receipt artifacts live under `.swarm/evidence/receipts/` but are
+ * REBUILDABLE projections of the gate outputs they summarize — hashing them
+ * as source evidence would make every receipt emission mutate the
+ * phase-evidence identity the gates enforce (#2968 R2, plan-critic round 1:
+ * an emitted receipt flipped `computePhaseEvidenceSnapshot` and would trip
+ * `PHASE_PREFLIGHT_STALE`). The snapshot therefore skips exactly this one
+ * top-level entry of the `.swarm/evidence` root; behavior is byte-identical
+ * when the directory does not exist.
+ */
+const SNAPSHOT_EXCLUDED_EVIDENCE_ENTRIES = new Set(['receipts']);
+
 export function computePhaseEvidenceSnapshot(directory: string): string {
 	const root = fs.realpathSync(directory);
+	const evidenceRoot = path.join(root, '.swarm', 'evidence');
 	const entries: SnapshotEntry[] = [];
 	let totalBytes = 0;
 	let visitedEntries = 0;
@@ -73,7 +99,11 @@ export function computePhaseEvidenceSnapshot(directory: string): string {
 			} finally {
 				handle.closeSync();
 			}
+			const isEvidenceRoot = absolute === evidenceRoot;
 			for (const name of names.sort(compareUtf8)) {
+				if (isEvidenceRoot && SNAPSHOT_EXCLUDED_EVIDENCE_ENTRIES.has(name)) {
+					continue;
+				}
 				visit(path.join(absolute, name));
 			}
 			return;
@@ -115,7 +145,7 @@ export function computePhaseEvidenceSnapshot(directory: string): string {
 				throw new Error('PHASE_SNAPSHOT_CONCURRENT_MUTATION');
 			}
 			entries.push({
-				path: path.relative(root, absolute).replaceAll('\\', '/'),
+				path: toPortableRelativePath(root, absolute),
 				sha256: createHash('sha256').update(bytes).digest('hex'),
 				bytes: bytes.byteLength,
 			});

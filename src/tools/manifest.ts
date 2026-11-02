@@ -106,6 +106,7 @@ import { prepare_pr_feedback_scope } from './prepare-pr-feedback-scope';
 import { prepare_pr_workflow_checkout } from './prepare-pr-workflow-checkout';
 import { quality_budget } from './quality-budget';
 import { rebind_pr_feedback_head } from './rebind-pr-feedback-head';
+import { receipt } from './receipt';
 import { record_branch_freshness } from './record-branch-freshness';
 import { record_directive_override } from './record-directive-override';
 import { record_implementation_review } from './record-implementation-review';
@@ -198,6 +199,7 @@ export const TOOL_MANIFEST = defineHandlers({
 	schema_drift: () => schema_drift,
 	todo_extract: () => todo_extract,
 	evidence_check: () => evidence_check,
+	receipt: () => receipt,
 	check_gate_status: () => check_gate_status,
 	completion_verify: () => completion_verify,
 	complete_pr_workflow: () => complete_pr_workflow,

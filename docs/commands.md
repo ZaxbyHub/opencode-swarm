@@ -611,6 +611,14 @@ Generate evidence summary with completion ratio and blockers
 
 Generates a summary showing completion ratio across all tasks, lists blockers, and identifies missing evidence.
 
+### `/swarm receipt`
+
+Emit or verify verification receipts [task|phase] <id> [--export] | --verify <bundle>
+
+**Args:** `<task|phase> <id> [--export] | --verify <bundle>`
+
+Emits a portable, hash-backed record of every gate that ran for a task or phase (JSON + Markdown under .swarm/evidence/receipts/; --export writes a PR-attachable bundle under .swarm/plan-export/). --verify re-checks every hash in a bundle on any machine (including a fresh clone) and exits nonzero on any mismatch with a typed failure (corrupt_json, unsupported_format_version, schema_mismatch, receipt_hash_mismatch, missing_artifact, digest_mismatch, path_escape).
+
 ### `/swarm archive`
 
 Archive old evidence bundles [--dry-run]

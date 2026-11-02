@@ -1220,6 +1220,7 @@ Control how tool outputs are summarized for LLM context.
 | `/swarm guardrail-log [--blocks-only]` | Read and print the guardrail decision log most-recent-first; `--blocks-only` shows only block decisions |
 | `/swarm export` | Export plan and context as portable JSON |
 | `/swarm evidence [task]` | Evidence bundles for a task or all tasks |
+| `/swarm receipt <task\|phase> <id> [--export]` / `--verify <bundle>` | Portable, hash-backed verification receipts for gates that ran; `--verify` re-checks every hash on a fresh clone |
 | `/swarm archive [--dry-run]` | Archive old evidence with retention policy |
 | `/swarm benchmark` | Performance benchmarks; optionally consume a stored gate audit with `--gate-audit-run <id>` |
 | `/swarm gate-audit` | Run the bounded 12-fixture reviewer/test/SAST/mutation/quality evaluation matrix |
