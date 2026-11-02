@@ -150,6 +150,8 @@ jobs:
               echo "Already published, skipping (force_publish retry)"
             else
               echo "::error::npm publish failed for @opencode-swarm/telemetry"
+              echo "--- npm debug log (auth/OIDC exchange detail) ---"
+              tail -n 120 /home/runner/.npm/_logs/*-debug-*.log 2>/dev/null || true
               exit 1
             fi
           fi
@@ -165,6 +167,8 @@ jobs:
               echo "Already published, skipping (force_publish retry)"
             else
               echo "::error::npm publish failed for @opencode-swarm/core"
+              echo "--- npm debug log (auth/OIDC exchange detail) ---"
+              tail -n 120 /home/runner/.npm/_logs/*-debug-*.log 2>/dev/null || true
               exit 1
             fi
           fi
@@ -180,6 +184,8 @@ jobs:
               echo "Already published, skipping (force_publish retry)"
             else
               echo "::error::npm publish failed for @opencode-swarm/claude-code"
+              echo "--- npm debug log (auth/OIDC exchange detail) ---"
+              tail -n 120 /home/runner/.npm/_logs/*-debug-*.log 2>/dev/null || true
               exit 1
             fi
           fi
@@ -195,6 +201,8 @@ jobs:
               echo "Already published, skipping (force_publish retry)"
             else
               echo "::error::npm publish failed for opencode-swarm"
+              echo "--- npm debug log (auth/OIDC exchange detail) ---"
+              tail -n 120 /home/runner/.npm/_logs/*-debug-*.log 2>/dev/null || true
               exit 1
             fi
           fi
