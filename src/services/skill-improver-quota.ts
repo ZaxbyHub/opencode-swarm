@@ -10,7 +10,7 @@
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
-import lockfile from 'proper-lockfile';
+import { acquireDirectoryWriteLock } from '../parallel/directory-write-lock.js';
 
 /**
  * Hard ceiling on how long any single quota call will wait for the
@@ -38,7 +38,7 @@ const LOCK_RETRY_OPTS = {
 } as const;
 
 async function acquireLock(dir: string): Promise<() => Promise<void>> {
-	const acquire = lockfile.lock(dir, LOCK_RETRY_OPTS);
+	const acquire = acquireDirectoryWriteLock(dir, LOCK_RETRY_OPTS);
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	const timeout = new Promise<never>((_, reject) => {
 		timer = setTimeout(() => {

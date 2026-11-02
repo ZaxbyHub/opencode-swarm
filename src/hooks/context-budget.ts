@@ -14,7 +14,7 @@ import {
 import { SUMMARIZER_EXEMPT_TOOL_NAMES } from '../config/constants';
 import { stripKnownSwarmPrefix } from '../config/schema';
 import { observeContextHeadroom } from '../health/learning-health';
-import { getLiveContextModelIdentity, getLiveContextWindow } from '../state';
+import { getLiveContextWindow } from '../state';
 import { telemetry } from '../telemetry';
 import { log, warn } from '../utils';
 import {
@@ -30,10 +30,10 @@ import {
 	type MessagePriorityType,
 } from './message-priority';
 import {
-	extractModelInfo,
 	extractSessionId,
 	resolveModelLimit,
 } from './model-limits';
+import { resolveSessionModelIdentity } from './session-model-identity';
 import { estimateTokens } from './utils';
 
 const MAX_TRACKED_SESSIONS = 256;
@@ -149,9 +149,11 @@ export function createContextBudgetHandler(
 			? parseAgentModel(configuredTargetModel)
 			: undefined;
 		const sessionID = extractSessionId(messages);
-		const liveModelInfo = getLiveContextModelIdentity(sessionID);
-		const { modelID, providerID } =
-			targetModelInfo ?? liveModelInfo ?? extractModelInfo(messages);
+		const { modelID, providerID } = await resolveSessionModelIdentity({
+			sessionID,
+			targetModelInfo,
+			messages,
+		});
 		// The live `model.limit.context` recorded by the system.transform hook for
 		// this session. This hook only receives messages — the host hands the
 		// `Model` object to system.transform alone — so the live window has to be

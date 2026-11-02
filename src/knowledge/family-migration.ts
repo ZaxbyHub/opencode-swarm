@@ -29,7 +29,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import * as path from 'node:path';
-import lockfile from 'proper-lockfile';
+import { acquireDirectoryWriteLock } from '../parallel/directory-write-lock.js';
 import { atomicWriteFile } from '../evidence/task-file.js';
 import type { CounterRollup } from '../hooks/knowledge-events.js';
 import { _internals as eventsInternals } from '../hooks/knowledge-events.js';
@@ -576,7 +576,7 @@ async function snapshotSourceFamily(
 		/* may not exist — reads return empty below */
 	}
 	try {
-		release = await lockfile.lock(storeDir, {
+		release = await acquireDirectoryWriteLock(storeDir, {
 			...MIGRATION_LOCK_RETRIES,
 			stale: MIGRATION_LOCK_STALE_MS,
 		});
@@ -625,7 +625,7 @@ export async function migrateKnowledgeFamily(
 	await mkdir(destinationDir, { recursive: true });
 	let destRelease: (() => Promise<void>) | null = null;
 	try {
-		destRelease = await lockfile.lock(destinationDir, {
+		destRelease = await acquireDirectoryWriteLock(destinationDir, {
 			...MIGRATION_LOCK_RETRIES,
 			stale: MIGRATION_LOCK_STALE_MS,
 		});

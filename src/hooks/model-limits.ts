@@ -113,28 +113,60 @@ export function extractModelInfo(messages: MessageWithParts[]): {
 		return {};
 	}
 
-	// Scan most recent assistant message for modelID and providerID
-	// Process messages in reverse order (most recent first)
+	// Scan most recent assistant messages; merge provider/model from separate rows
+	// when v2 context entries carry provider on one turn and model on another.
+	let modelID: string | undefined;
+	let providerID: string | undefined;
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const message = messages[i];
 		if (!message?.info) continue;
+		if (message.info.role !== 'assistant') continue;
 
-		// Look for assistant messages
-		if (message.info.role === 'assistant') {
-			const modelID = message.info.modelID;
-			const providerID = message.info.providerID;
-
-			// Return as soon as we find an assistant message with these fields
-			if (modelID || providerID) {
-				return {
-					...(modelID ? { modelID } : {}),
-					...(providerID ? { providerID } : {}),
-				};
-			}
+		if (!modelID && message.info.modelID) {
+			modelID = message.info.modelID;
+		}
+		if (!providerID && message.info.providerID) {
+			providerID = message.info.providerID;
+		}
+		if (modelID && providerID) {
+			return { modelID, providerID };
 		}
 	}
 
-	return {};
+	return {
+		...(modelID ? { modelID } : {}),
+		...(providerID ? { providerID } : {}),
+	};
+}
+
+/** True when at least one usable provider/model field is present. */
+export function hasUsableModelIdentity(identity?: {
+	modelID?: string;
+	providerID?: string;
+}): boolean {
+	return Boolean(identity?.modelID || identity?.providerID);
+}
+
+/**
+ * Merge provider/model fields from several sources (newest-first wins per field).
+ * Used by context_budget and context_status so an identity-less live-cache entry
+ * (`{ modelID: undefined }`, which is truthy) does not block later sources.
+ */
+export function mergeModelIdentity(
+	...sources: Array<{ modelID?: string; providerID?: string } | undefined>
+): { modelID?: string; providerID?: string } {
+	let modelID: string | undefined;
+	let providerID: string | undefined;
+	for (const source of sources) {
+		if (!source) continue;
+		if (!modelID && source.modelID) modelID = source.modelID;
+		if (!providerID && source.providerID) providerID = source.providerID;
+		if (modelID && providerID) break;
+	}
+	return {
+		...(modelID ? { modelID } : {}),
+		...(providerID ? { providerID } : {}),
+	};
 }
 
 /**
@@ -260,7 +292,7 @@ export function lookupStaticModelLimit(
  * 4. `liveContextLimit` — the host's live `model.limit.context` for this session
  * 5. `PROVIDER_CAPS[providerID]`, else a longest-prefix `NATIVE_MODEL_LIMITS`
  *    match (both known-stale; see the module header)
- * 6. `DEFAULT_MODEL_CONTEXT_TOKENS` (128000)
+ * 6. `DEFAULT_MODEL_CONTEXT_TOKENS` (256000)
  *
  * Any value that is not a finite number ≥ 1000 (untrusted rungs) / ≥ 1 (user
  * rungs) is SKIPPED, never coerced; skipped user overrides are surfaced via a
@@ -292,7 +324,7 @@ export function lookupStaticModelLimit(
  * @example
  * // Malformed live value is ignored, not divided by
  * resolveModelLimit(undefined, undefined, {}, 0)
- * // Returns: { limit: 128000, source: 'fallback', resolution: 'static_default' }
+ * // Returns: { limit: 256000, source: 'fallback', resolution: 'static_default' }
  */
 export function resolveModelLimit(
 	modelID?: string,

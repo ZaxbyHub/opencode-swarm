@@ -86,7 +86,7 @@
  * advisory (src/index.ts) and the compaction EMERGENCY tier
  * (`observation/reflection/emergency` = 40/60/80) immediately.
  */
-export const DEFAULT_MODEL_CONTEXT_TOKENS = 128000;
+export const DEFAULT_MODEL_CONTEXT_TOKENS = 256_000;
 
 /**
  * Smallest context window this module will accept from an untrusted source.
@@ -248,10 +248,20 @@ export function readModelContextLimit(model: unknown): unknown {
  */
 export function readModelIdentity(
 	model: unknown,
-	key: 'id' | 'providerID',
+	key: 'id' | 'modelID' | 'providerID',
 ): string | undefined {
 	if (typeof model !== 'object' || model === null) return undefined;
-	const value = (model as Record<string, unknown>)[key];
+	const record = model as Record<string, unknown>;
+	if (key === 'id') {
+		const id =
+			typeof record.id === 'string' && record.id.length > 0
+				? record.id
+				: typeof record.modelID === 'string' && record.modelID.length > 0
+					? record.modelID
+					: undefined;
+		return id;
+	}
+	const value = record[key];
 	return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
 

@@ -408,13 +408,11 @@ describe('hive migration & lineage gate (#1847)', () => {
 
 	describe('lock-acquire fail-safe (PRR-5)', () => {
 		it('transactHiveStore returns committed:false + diagnostics on lock failure (never hangs)', async () => {
-			// Inject a lockfile mock that always rejects acquire.
-			const origLock = _internals_hiveTxn.lockfile;
-			_internals_hiveTxn.lockfile = {
-				lock: mock(async () => {
-					throw new Error('simulated lock contention');
-				}),
-			} as unknown as typeof origLock;
+			// Inject a lock mock that always rejects acquire.
+			const origAcquire = _internals_hiveTxn.acquireDirectoryWriteLock;
+			_internals_hiveTxn.acquireDirectoryWriteLock = mock(async () => {
+				throw new Error('simulated lock contention');
+			});
 			try {
 				const result = await transactHiveStore(async () => ({
 					kind: 'commit' as const,
@@ -426,7 +424,7 @@ describe('hive migration & lineage gate (#1847)', () => {
 				expect(result.diagnostics.length).toBeGreaterThan(0);
 				expect(result.diagnostics.join(' ')).toContain('lock acquire failed');
 			} finally {
-				_internals_hiveTxn.lockfile = origLock;
+				_internals_hiveTxn.acquireDirectoryWriteLock = origAcquire;
 			}
 		});
 	});

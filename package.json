@@ -91,8 +91,8 @@
 		"LICENSE"
 	],
 	"scripts": {
-		"clean": "bun -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
-		"build": "bun run clean && bun run scripts/generate-config-schema.ts && bun run scripts/copy-grammars.ts && bun build src/index.ts --outdir dist --target node --format esm --external web-tree-sitter --minify-whitespace --minify-syntax && bun build src/cli/index.ts --outdir dist/cli --target bun --format esm --external bash-parser --splitting && bun run scripts/copy-grammars.ts --to-dist && tsc --emitDeclarationOnly",
+		"clean": "node -e \"import('node:fs').then(fs=>fs.rmSync('dist',{recursive:true,force:true}))\"",
+		"build": "node scripts/atomic-dist-build.mjs",
 		"typecheck": "tsc --noEmit",
 		"test": "bun test",
 		"lint": "biome lint .",

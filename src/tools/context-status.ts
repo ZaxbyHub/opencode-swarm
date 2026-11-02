@@ -17,6 +17,7 @@
  */
 
 import type { ToolContext } from '@opencode-ai/plugin';
+import { parseAgentModel, resolveConfiguredAgentModel } from '../config/agent-model';
 import { loadPluginConfig } from '../config';
 import type { ContextWindowSource } from '../config/context-window';
 import {
@@ -25,12 +26,16 @@ import {
 } from '../hooks/context-usage';
 import {
 	extractModelInfo,
+	mergeModelIdentity,
 	type ModelLimitSource,
 	resolveModelLimit,
 } from '../hooks/model-limits';
+import {
+	resolveSessionModelIdentity,
+	resolveTargetModelInfoFromLatestUserAgent,
+} from '../hooks/session-model-identity';
 import { readV2SessionContextMessages } from '../host/v2/session-client';
 import {
-	getLiveContextModelIdentity,
 	getLiveContextWindow,
 	swarmState,
 } from '../state';
@@ -236,7 +241,7 @@ export const context_status: ReturnType<typeof createSwarmTool> =
 	createSwarmTool({
 		allowWorkingDirectoryOverride: true,
 		description:
-			'Report current context-window headroom for the active session. Returns tokens-used, usageSource (provider|estimated), model-limit with provenance (modelLimitSource: host|override|provider_cap|native|fallback; modelLimitResolution: user_provider_model|user_model|user_default|live_model_limit|static_provider_cap|static_native|static_default; fallbackActive: true when the denominator came from a static table or the flat 128k default — treat headroom as uncertain), usage-percent, threshold-state (none|warn|critical), model name, and provider. Pure read-only — no state mutation, no warning injection. Works whether context_budget.enabled is true or false.',
+			'Report current context-window headroom for the active session. Returns tokens-used, usageSource (provider|estimated), model-limit with provenance (modelLimitSource: host|override|provider_cap|native|fallback; modelLimitResolution: user_provider_model|user_model|user_default|live_model_limit|static_provider_cap|static_native|static_default; fallbackActive: true when the denominator came from a static table or the flat 256k default — treat headroom as uncertain), usage-percent, threshold-state (none|warn|critical), model name, and provider. Pure read-only — no state mutation, no warning injection. Works whether context_budget.enabled is true or false.',
 		args: {},
 		async execute(
 			_args: unknown,
@@ -260,9 +265,25 @@ export const context_status: ReturnType<typeof createSwarmTool> =
 				}
 			}
 
-			const { modelID, providerID } =
-				getLiveContextModelIdentity(ctx?.sessionID) ??
-				extractModelInfo(messages);
+			const configuredTargetModel = ctx?.agent
+				? resolveConfiguredAgentModel(config, ctx.agent)
+				: undefined;
+			const targetFromToolAgent = configuredTargetModel
+				? parseAgentModel(configuredTargetModel)
+				: undefined;
+			const targetFromMessages = resolveTargetModelInfoFromLatestUserAgent(
+				messages,
+				(agentName) => resolveConfiguredAgentModel(config, agentName),
+			);
+			const targetModelInfo = mergeModelIdentity(
+				targetFromToolAgent,
+				targetFromMessages,
+			);
+			const { modelID, providerID } = await resolveSessionModelIdentity({
+				sessionID: ctx?.sessionID,
+				targetModelInfo,
+				messages,
+			});
 			const headroom = computeContextHeadroom(
 				messages,
 				warnThreshold,

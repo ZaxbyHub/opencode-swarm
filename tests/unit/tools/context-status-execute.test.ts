@@ -1,9 +1,12 @@
 /** Integration tests for context_status.execute. */
 
 import { afterEach, beforeEach, describe, expect, it, test } from 'bun:test';
-import { rmSync } from 'node:fs';
+import { mkdirSync, rmSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { ToolContext } from '@opencode-ai/plugin';
 import {
+	_internals as learningHealthInternals,
 	readLearningHealth,
 	resetLearningHealthForTest,
 } from '../../../src/health/learning-health';
@@ -13,6 +16,13 @@ import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const originalLoadPluginConfig = _internals.loadPluginConfig;
 const originalFetchSessionMessages = _internals.fetchSessionMessages;
+
+const pluginCheckoutRoot = path.resolve(
+	path.dirname(fileURLToPath(import.meta.url)),
+	'../../..',
+);
+const originalWriteLearningHealthArtifact =
+	learningHealthInternals.writeArtifact;
 
 function makeCtx(overrides: Partial<ToolContext> = {}): ToolContext {
 	return {
@@ -175,6 +185,24 @@ describe('context_status.execute', () => {
 		expect(parsed.usageSource).toBe('estimated');
 	});
 
+	it('does not treat an identity-less live cache entry as authoritative over assistant metadata', async () => {
+		setLiveContextWindow('test-session', 200_000);
+		_internals.fetchSessionMessages = (async () => [
+			makeMessage({
+				role: 'assistant',
+				modelID: 'MiniMax-M3',
+				providerID: 'minimax',
+				text: 'reply',
+			}),
+		]) as typeof _internals.fetchSessionMessages;
+
+		const parsed = JSON.parse(
+			await context_status.execute({}, makeCtx()),
+		) as Record<string, unknown>;
+		expect(parsed.modelId).toBe('MiniMax-M3');
+		expect(parsed.provider).toBe('minimax');
+	});
+
 	it('reports the current live identity across a first-turn handoff', async () => {
 		_internals.loadPluginConfig = (() =>
 			mockConfig({
@@ -328,40 +356,64 @@ describe('context_status.execute', () => {
 });
 
 describe('context_status.execute learning-health scoping (#2044)', () => {
-	test('a fallback resolution through execute is visible in the owning project snapshot only', async () => {
-		const ownerDir = canonicalMkdtemp('swarm-ctx-exec-lh-');
-		const otherDir = canonicalMkdtemp('swarm-ctx-exec-lh-');
-		try {
-			resetLearningHealthForTest();
-			swarmState.liveContextWindows.clear();
-			_internals.fetchSessionMessages = (async () => [
-				makeMessage({ role: 'assistant', modelID: 'mystery-model' }),
-			]) as typeof _internals.fetchSessionMessages;
-			// The tool's public signature is execute(args, ctx) — the directory
-			// rides on ctx.directory (createSwarmTool's fallback is cwd).
-			const raw = await context_status.execute(
-				{},
-				makeCtx({ directory: ownerDir, sessionID: 'sess-exec-scope' }),
-			);
-			// The tool itself must report the fallback provenance.
-			const parsed = JSON.parse(raw) as { fallbackActive?: boolean };
-			expect(parsed.fallbackActive).toBe(true);
-			const ownerSnapshot = await readLearningHealth(ownerDir);
-			expect(
-				ownerSnapshot.activeAlarms.some(
-					(a) => a.alarm === 'model_limit_fallback',
-				),
-			).toBe(true);
-			const otherSnapshot = await readLearningHealth(otherDir);
-			expect(
-				otherSnapshot.activeAlarms.some(
-					(a) => a.alarm === 'model_limit_fallback',
-				),
-			).toBe(false);
-		} finally {
-			resetLearningHealthForTest();
-			rmSync(ownerDir, { recursive: true, force: true });
-			rmSync(otherDir, { recursive: true, force: true });
-		}
+	beforeEach(() => {
+		resetLearningHealthForTest();
+		swarmState.liveContextWindows.clear();
+		_internals.loadPluginConfig = ((dir: string) => {
+			expect(dir).not.toBe(pluginCheckoutRoot);
+			return mockConfig();
+		}) as typeof _internals.loadPluginConfig;
+		_internals.fetchSessionMessages = (async () => [
+			makeMessage({
+				role: 'assistant',
+				modelID: 'mystery-model',
+				providerID: 'unknown-provider',
+			}),
+		]) as typeof _internals.fetchSessionMessages;
+		learningHealthInternals.writeArtifact = async (directory, contents) => {
+			expect(path.resolve(directory)).not.toBe(pluginCheckoutRoot);
+			return originalWriteLearningHealthArtifact(directory, contents);
+		};
 	});
+
+	afterEach(() => {
+		_internals.loadPluginConfig = originalLoadPluginConfig;
+		_internals.fetchSessionMessages = originalFetchSessionMessages;
+		learningHealthInternals.writeArtifact = originalWriteLearningHealthArtifact;
+		resetLearningHealthForTest();
+	});
+
+	test(
+		'a fallback resolution through execute is visible in the owning project snapshot only',
+		async () => {
+			const ownerDir = canonicalMkdtemp('swarm-ctx-exec-lh-');
+			const otherDir = canonicalMkdtemp('swarm-ctx-exec-lh-');
+			mkdirSync(`${ownerDir}/.swarm`, { recursive: true });
+			mkdirSync(`${otherDir}/.swarm`, { recursive: true });
+			try {
+				const raw = await context_status.execute(
+					{ working_directory: ownerDir },
+					makeCtx({ directory: ownerDir, sessionID: 'sess-exec-scope' }),
+				);
+				const parsed = JSON.parse(raw) as { fallbackActive?: boolean };
+				expect(parsed.fallbackActive).toBe(true);
+				const ownerSnapshot = await readLearningHealth(ownerDir);
+				expect(
+					ownerSnapshot.activeAlarms.some(
+						(a) => a.alarm === 'model_limit_fallback',
+					),
+				).toBe(true);
+				const otherSnapshot = await readLearningHealth(otherDir);
+				expect(
+					otherSnapshot.activeAlarms.some(
+						(a) => a.alarm === 'model_limit_fallback',
+					),
+				).toBe(false);
+			} finally {
+				rmSync(ownerDir, { recursive: true, force: true });
+				rmSync(otherDir, { recursive: true, force: true });
+			}
+		},
+		15000,
+	);
 });

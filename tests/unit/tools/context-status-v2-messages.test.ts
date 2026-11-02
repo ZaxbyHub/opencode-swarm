@@ -8,6 +8,8 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import {
 	clearV2SessionClientState,
 	createV2SessionClient,
+	readV2SessionContextMessages,
+	readV2SessionContextModelIdentity,
 } from '../../../src/host/v2/session-client';
 import type { V2PluginContext } from '../../../src/host/v2/types';
 import { resetSwarmState, swarmState } from '../../../src/state';
@@ -94,7 +96,101 @@ describe('context_status v2 session context', () => {
 		expect(messages?.[1]?.parts).toEqual([{ type: 'text', text: 'done' }]);
 	});
 
+	test('reads model.modelID shape from v2 context (OpenCode 2.x prompt model ref)', async () => {
+		const domainWithModelId = {
+			...domain(),
+			async context(input: { sessionID: string }) {
+				expect(input.sessionID).toBe('ses_live');
+				return [
+					{
+						type: 'assistant',
+						text: 'ok',
+						model: { modelID: 'MiniMax-M3', providerID: 'minimax' },
+						tokens: {
+							input: 500,
+							output: 1,
+							reasoning: 0,
+							cache: { read: 0, write: 0 },
+						},
+					},
+				];
+			},
+		};
+		const client = createV2SessionClient(ctx(domainWithModelId))!;
+		swarmState.opencodeClient = client as never;
+		const messages = await _internals.fetchSessionMessages('ses_live', '/tmp');
+		expect(messages?.[0]?.info.modelID).toBe('MiniMax-M3');
+		expect(messages?.[0]?.info.providerID).toBe('minimax');
+	});
+
 	test('returns null when no v2 session domain is installed', async () => {
 		expect(await _internals.fetchSessionMessages('ses_live', '/tmp')).toBeNull();
+	});
+
+	test('coalesces one session.context RPC for identity and messages', async () => {
+		let contextCalls = 0;
+		const session = {
+			...domain(),
+			async context(input: { sessionID: string }) {
+				contextCalls += 1;
+				expect(input.sessionID).toBe('ses_live');
+				return [
+					{
+						type: 'assistant',
+						text: 'ok',
+						tokens: {
+							input: 100,
+							output: 1,
+							reasoning: 0,
+							cache: { read: 0, write: 0 },
+						},
+					},
+					{
+						type: 'idle',
+						outcome: 'succeeded',
+						model: { id: 'MiniMax-M3', providerID: 'minimax' },
+					},
+				];
+			},
+		};
+		const client = createV2SessionClient(ctx(session))!;
+		swarmState.opencodeClient = client as never;
+		await Promise.all([
+			readV2SessionContextModelIdentity('ses_live'),
+			readV2SessionContextMessages('ses_live'),
+		]);
+		expect(contextCalls).toBe(1);
+	});
+
+	test('readV2SessionContextModelIdentity scans entries when assistant rows omit model', async () => {
+		const domainTokensOnly = {
+			...domain(),
+			async context(input: { sessionID: string }) {
+				expect(input.sessionID).toBe('ses_live');
+				return [
+					{
+						type: 'assistant',
+						text: 'ok',
+						tokens: {
+							input: 150_000,
+							output: 1,
+							reasoning: 0,
+							cache: { read: 6_000, write: 0 },
+						},
+					},
+					{
+						type: 'idle',
+						outcome: 'succeeded',
+						model: { id: 'MiniMax-M3', providerID: 'minimax' },
+					},
+				];
+			},
+		};
+		const client = createV2SessionClient(ctx(domainTokensOnly))!;
+		swarmState.opencodeClient = client as never;
+		expect(await readV2SessionContextModelIdentity('ses_live')).toEqual({
+			modelID: 'MiniMax-M3',
+			providerID: 'minimax',
+		});
 	});
 });

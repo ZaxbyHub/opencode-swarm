@@ -84,6 +84,34 @@ const MAX_RESPONSE_BODY_BYTES = 1024 * 1024;
 /** Env kill switch: forces the exporter off even when config-enabled. */
 const KILL_SWITCH_ENV = 'SWARM_OTLP_EXPORT_DISABLE';
 
+/**
+ * Merge OTLP HTTP headers from `OTEL_EXPORTER_OTLP_HEADERS` (comma-separated
+ * `Key=Value`, OTEL env var shape). Config file headers win on key collision so
+ * operators can override; env fills gaps (e.g. Basic auth staged from OpenBao
+ * without writing secrets into opencode-swarm.json).
+ */
+export function mergeOtlpExportConfigFromEnv(
+	config: OtlpExportConfig,
+): OtlpExportConfig {
+	const raw = process.env.OTEL_EXPORTER_OTLP_HEADERS?.trim();
+	if (!raw) return config;
+	const fromEnv: Record<string, string> = {};
+	for (const segment of raw.split(',')) {
+		const piece = segment.trim();
+		if (!piece) continue;
+		const eq = piece.indexOf('=');
+		if (eq <= 0) continue;
+		const key = piece.slice(0, eq).trim();
+		const value = piece.slice(eq + 1).trim();
+		if (key) fromEnv[key] = value;
+	}
+	if (Object.keys(fromEnv).length === 0) return config;
+	return {
+		...config,
+		headers: { ...fromEnv, ...(config.headers ?? {}) },
+	};
+}
+
 export interface OtlpExportConfig {
 	enabled: boolean;
 	endpoint: string;
@@ -832,20 +860,21 @@ export function registerOtlpExporter(
 		_state = null;
 		if (config.enabled !== true) return;
 		if (process.env[KILL_SWITCH_ENV] === '1') return;
-		if (endpointUrl(config) === null) return;
+		const effective = mergeOtlpExportConfigFromEnv(config);
+		if (endpointUrl(effective) === null) return;
 		_directory = directory;
-		_config = config;
+		_config = effective;
 		_state =
 			loadState(directory) ??
-			emptyState(config.convention, config.circuitCooldownMs);
-		_state.convention = config.convention;
-		_state.circuitCooldownMs = config.circuitCooldownMs;
+			emptyState(effective.convention, effective.circuitCooldownMs);
+		_state.convention = effective.convention;
+		_state.circuitCooldownMs = effective.circuitCooldownMs;
 		_listener = (_event, _data, canonical?: ObservabilityEvent) => {
 			// Fully guarded: a listener error must never propagate into
 			// emit() (the bus also guards, but the exporter owns its failure).
 			try {
 				if (canonical === undefined) return;
-				const span = buildOtlpSpan(canonical, config.convention);
+				const span = buildOtlpSpan(canonical, effective.convention);
 				if (span === null) return; // content class: no record at all
 				appendSpoolRecord({
 					v: SPOOL_RECORD_VERSION,
@@ -876,7 +905,7 @@ export function registerOtlpExporter(
 		_active = true;
 		_flushTimer = setInterval(() => {
 			void flushSingleFlight();
-		}, config.flushIntervalMs);
+		}, effective.flushIntervalMs);
 		if (typeof (_flushTimer as { unref?: () => void }).unref === 'function') {
 			(_flushTimer as { unref: () => void }).unref();
 		}

@@ -31,6 +31,7 @@
  * and write `type === 'text'` parts.
  */
 
+import { readModelIdentity } from '../../config/context-window';
 import { GUIDANCE_CARRIER_ID_PREFIX } from '../../hooks/system-guidance-carrier';
 import { log } from '../../utils';
 import { withTimeout } from '../../utils/timeout';
@@ -154,18 +155,24 @@ function hasNonTextParts(message: V2Message): boolean {
 	);
 }
 
-/** Map the v2 model ref onto the v1 {providerID, modelID} shape. */
+/** Map the v2 model ref onto the v1 hook `Model` shape (id/providerID + optional limit). */
 function toV1ModelInput(
 	model: V2SessionContextEvent['model'],
 ): Record<string, unknown> {
-	if (model && typeof model === 'object') {
-		return {
-			providerID:
-				typeof model.providerID === 'string' ? model.providerID : 'unknown',
-			modelID: typeof model.id === 'string' ? model.id : 'unknown',
-		};
+	if (!model || typeof model !== 'object') return {};
+	const modelID = readModelIdentity(model, 'id');
+	const providerID = readModelIdentity(model, 'providerID');
+	const result: Record<string, unknown> = {};
+	if (modelID) {
+		result.id = modelID;
+		result.modelID = modelID;
 	}
-	return { providerID: 'unknown', modelID: 'unknown' };
+	if (providerID) result.providerID = providerID;
+	const limit = (model as { limit?: unknown }).limit;
+	if (limit !== undefined && limit !== null && typeof limit === 'object') {
+		result.limit = limit;
+	}
+	return result;
 }
 
 /** The v2 context hook body. */

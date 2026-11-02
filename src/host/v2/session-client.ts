@@ -186,11 +186,45 @@ export function recordV2SessionErrorFromEnvelope(
  */
 let activeV2SessionDomain: V2PluginContext['session'] | undefined;
 
+/** Coalesce concurrent `session.context()` reads for one session (one messages.transform pass). */
+const v2SessionContextInflight = new Map<
+	string,
+	Promise<unknown[] | undefined>
+>();
+
+function fetchV2SessionContextEntries(
+	sessionID: string,
+): Promise<unknown[] | undefined> {
+	const domain = activeV2SessionDomain;
+	if (!domain || typeof domain.context !== 'function') {
+		return Promise.resolve(undefined);
+	}
+	const resolved = resolveSessionId(sessionID);
+	if (resolved === undefined) return Promise.resolve([]);
+	const key = String(resolved);
+	const existing = v2SessionContextInflight.get(key);
+	if (existing) return existing;
+	const pending = domain
+		.context({ sessionID: resolved })
+		.then((entries) => (Array.isArray(entries) ? entries : []))
+		.catch(() => undefined)
+		.finally(() => {
+			queueMicrotask(() => {
+				if (v2SessionContextInflight.get(key) === pending) {
+					v2SessionContextInflight.delete(key);
+				}
+			});
+		});
+	v2SessionContextInflight.set(key, pending);
+	return pending;
+}
+
 /** Drop all shim-held state (v2 cleanup path; bounded residue documented in the trace). */
 export function clearV2SessionClientState(): void {
 	placeholderSessions.clear();
 	sessionErrors.clear();
 	activeV2SessionDomain = undefined;
+	v2SessionContextInflight.clear();
 }
 
 export interface V2ContextStatusMessage {
@@ -214,6 +248,116 @@ function finiteToken(value: unknown): number | undefined {
 		: undefined;
 }
 
+/** Read provider/model ids from a v2 session.context entry (OpenCode uses both `model.id` and `model.modelID`). */
+export function readV2ContextEntryModelIds(entry: unknown): {
+	providerID?: string;
+	modelID?: string;
+} {
+	if (!entry || typeof entry !== 'object') return {};
+	const record = entry as {
+		info?: {
+			modelID?: unknown;
+			providerID?: unknown;
+			model?: { id?: unknown; modelID?: unknown; providerID?: unknown };
+		};
+		model?: { id?: unknown; modelID?: unknown; providerID?: unknown };
+		modelID?: unknown;
+		providerID?: unknown;
+	};
+	const sources = [
+		record.info,
+		record,
+	] as Array<
+		| {
+				modelID?: unknown;
+				providerID?: unknown;
+				model?: { id?: unknown; modelID?: unknown; providerID?: unknown };
+		  }
+		| undefined
+	>;
+	let modelID: string | undefined;
+	let providerID: string | undefined;
+	for (const source of sources) {
+		if (!source || typeof source !== 'object') continue;
+		const model = source.model;
+		if (!providerID) {
+			providerID =
+				typeof model?.providerID === 'string'
+					? model.providerID
+					: typeof source.providerID === 'string'
+						? source.providerID
+						: undefined;
+		}
+		if (!modelID) {
+			modelID =
+				typeof model?.id === 'string'
+					? model.id
+					: typeof model?.modelID === 'string'
+						? model.modelID
+						: typeof source.modelID === 'string'
+							? source.modelID
+							: undefined;
+		}
+	}
+	if (modelID || providerID) {
+		return {
+			...(modelID ? { modelID } : {}),
+			...(providerID ? { providerID } : {}),
+		};
+	}
+	return {};
+}
+
+/** Scan raw v2 `session.context` entries for provider/model (newest assistant-ish first). */
+export function extractModelInfoFromV2ContextEntries(
+	entries: unknown[],
+): { modelID?: string; providerID?: string } {
+	if (!Array.isArray(entries) || entries.length === 0) return {};
+	let modelID: string | undefined;
+	let providerID: string | undefined;
+	for (let i = entries.length - 1; i >= 0; i -= 1) {
+		const entry = entries[i];
+		if (!entry || typeof entry !== 'object') continue;
+		const record = entry as { type?: unknown; role?: unknown };
+		const type =
+			typeof record.type === 'string' ? record.type : undefined;
+		const role =
+			typeof record.role === 'string' ? record.role : undefined;
+		const assistantLike =
+			role === 'assistant' ||
+			type === 'assistant' ||
+			(type !== undefined && type.includes('assistant'));
+		if (!assistantLike && type !== 'idle') continue;
+		const ids = readV2ContextEntryModelIds(entry);
+		if (!modelID && ids.modelID) modelID = ids.modelID;
+		if (!providerID && ids.providerID) providerID = ids.providerID;
+		if (modelID && providerID) break;
+	}
+	if (!modelID && !providerID) {
+		for (let i = entries.length - 1; i >= 0; i -= 1) {
+			const ids = readV2ContextEntryModelIds(entries[i]);
+			if (!modelID && ids.modelID) modelID = ids.modelID;
+			if (!providerID && ids.providerID) providerID = ids.providerID;
+			if (modelID && providerID) break;
+		}
+	}
+	return {
+		...(modelID ? { modelID } : {}),
+		...(providerID ? { providerID } : {}),
+	};
+}
+
+/** Read model identity from the live v2 session.context list (no message mapping). */
+export function readV2SessionContextModelIdentity(
+	sessionID: string,
+): Promise<{ modelID?: string; providerID?: string } | undefined> {
+	return fetchV2SessionContextEntries(sessionID).then((entries) => {
+		if (entries === undefined) return undefined;
+		const merged = extractModelInfoFromV2ContextEntries(entries);
+		return merged.modelID || merged.providerID ? merged : undefined;
+	});
+}
+
 /** Map one v2 `session.context` entry onto the v1 `{ info, parts }` message. */
 export function mapV2ContextEntryToContextMessage(
 	entry: unknown,
@@ -230,11 +374,28 @@ export function mapV2ContextEntryToContextMessage(
 		sessionID?: unknown;
 		modelID?: unknown;
 		providerID?: unknown;
-		model?: { id?: unknown; providerID?: unknown };
+		model?: { id?: unknown; modelID?: unknown; providerID?: unknown };
 		tokens?: { input?: unknown; cache?: { read?: unknown; write?: unknown } };
 	};
 	if (record.info && typeof record.info === 'object' && Array.isArray(record.parts)) {
-		return record as V2ContextStatusMessage;
+		const ids = readV2ContextEntryModelIds(entry);
+		const info = record.info as V2ContextStatusMessage['info'];
+		return {
+			info: {
+				...info,
+				...(ids.modelID !== undefined
+					? { modelID: ids.modelID }
+					: info.modelID !== undefined
+						? { modelID: info.modelID }
+						: {}),
+				...(ids.providerID !== undefined
+					? { providerID: ids.providerID }
+					: info.providerID !== undefined
+						? { providerID: info.providerID }
+						: {}),
+			},
+			parts: record.parts as V2ContextStatusMessage['parts'],
+		};
 	}
 	if (record.type === 'idle') return null;
 
@@ -280,18 +441,7 @@ export function mapV2ContextEntryToContextMessage(
 		parts = [];
 	}
 
-	const modelID =
-		typeof record.model?.id === 'string'
-			? record.model.id
-			: typeof record.modelID === 'string'
-				? record.modelID
-				: undefined;
-	const providerID =
-		typeof record.model?.providerID === 'string'
-			? record.model.providerID
-			: typeof record.providerID === 'string'
-				? record.providerID
-				: undefined;
+	const { modelID, providerID } = readV2ContextEntryModelIds(record);
 	const input = finiteToken(record.tokens?.input);
 	const cacheRead = finiteToken(record.tokens?.cache?.read);
 	const cacheWrite = finiteToken(record.tokens?.cache?.write);
@@ -323,25 +473,20 @@ export function readV2SessionContextMessages(
 	sessionID: string,
 	limit = 100,
 ): Promise<V2ContextStatusMessage[] | null> {
-	const domain = activeV2SessionDomain;
-	if (!domain || typeof domain.context !== 'function') {
+	if (!activeV2SessionDomain || typeof activeV2SessionDomain.context !== 'function') {
 		return Promise.resolve(null);
 	}
-	const resolved = resolveSessionId(sessionID);
-	if (resolved === undefined) return Promise.resolve([]);
-	return domain
-		.context({ sessionID: resolved })
-		.then((entries) => {
-			const list = Array.isArray(entries) ? entries : [];
-			const mapped = list.flatMap((entry) => {
-				const message = mapV2ContextEntryToContextMessage(entry);
-				return message ? [message] : [];
-			});
-			return typeof limit === 'number' && limit >= 0
-				? mapped.slice(-limit)
-				: mapped;
-		})
-		.catch(() => null);
+	if (resolveSessionId(sessionID) === undefined) return Promise.resolve([]);
+	return fetchV2SessionContextEntries(sessionID).then((entries) => {
+		if (entries === undefined) return null;
+		const mapped = entries.flatMap((entry) => {
+			const message = mapV2ContextEntryToContextMessage(entry);
+			return message ? [message] : [];
+		});
+		return typeof limit === 'number' && limit >= 0
+			? mapped.slice(-limit)
+			: mapped;
+	});
 }
 
 /**
@@ -411,25 +556,7 @@ function entryModelIds(entry: unknown): {
 	providerID?: string;
 	modelID?: string;
 } {
-	if (!entry || typeof entry !== 'object') return {};
-	const record = entry as {
-		model?: { id?: unknown; providerID?: unknown };
-		modelID?: unknown;
-		providerID?: unknown;
-	};
-	const providerID =
-		typeof record.model?.providerID === 'string'
-			? record.model.providerID
-			: typeof record.providerID === 'string'
-				? record.providerID
-				: undefined;
-	const modelID =
-		typeof record.model?.id === 'string'
-			? record.model.id
-			: typeof record.modelID === 'string'
-				? record.modelID
-				: undefined;
-	return { providerID, modelID };
+	return readV2ContextEntryModelIds(entry);
 }
 
 function idleOutcome(entries: unknown[]): string | undefined {

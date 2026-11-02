@@ -2,7 +2,7 @@
 
 import { appendFile, mkdir } from 'node:fs/promises';
 import * as path from 'node:path';
-import lockfile from 'proper-lockfile';
+import { acquireDirectoryWriteLock } from '../parallel/directory-write-lock.js';
 import { atomicWriteFile } from '../evidence/task-file.js';
 import {
 	authorizeCuration,
@@ -934,7 +934,7 @@ export async function quarantineEntry(
 	// 4. Acquire lock FIRST, then read and write (all inside lock)
 	let release: (() => Promise<void>) | undefined;
 	try {
-		release = await lockfile.lock(swarmDir, {
+		release = await acquireDirectoryWriteLock(swarmDir, {
 			retries: { retries: 5, minTimeout: 100, maxTimeout: 500 },
 			stale: 5000,
 		});
@@ -1079,7 +1079,7 @@ export async function restoreEntry(
 	// 3. Acquire lock FIRST, then read and write (all inside lock)
 	let release: (() => Promise<void>) | undefined;
 	try {
-		release = await lockfile.lock(swarmDir, {
+		release = await acquireDirectoryWriteLock(swarmDir, {
 			retries: { retries: 5, minTimeout: 100, maxTimeout: 500 },
 			stale: 5000,
 		});
@@ -1225,7 +1225,7 @@ export async function unarchiveEntry(
 
 	let release: (() => Promise<void>) | undefined;
 	try {
-		release = await lockfile.lock(swarmDir, {
+		release = await acquireDirectoryWriteLock(swarmDir, {
 			retries: { retries: 5, minTimeout: 100, maxTimeout: 500 },
 			stale: 5000,
 		});

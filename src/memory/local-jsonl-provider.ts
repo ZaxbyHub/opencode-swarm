@@ -9,7 +9,7 @@ import {
 	writeFile,
 } from 'node:fs/promises';
 import * as path from 'node:path';
-import lockfileImport from 'proper-lockfile';
+import { acquireDirectoryWriteLock } from '../parallel/directory-write-lock.js';
 import { validateSwarmPath } from '../hooks/utils';
 import { warn } from '../utils';
 import { DEFAULT_MEMORY_CONFIG, type MemoryConfig } from './config';
@@ -87,17 +87,6 @@ type AuditOperation =
 	| 'curator_decision'
 	| 'compact'
 	| 'invalid_load';
-
-const lockfile = lockfileImport as unknown as {
-	lock: (
-		file: string,
-		options: {
-			realpath: boolean;
-			stale: number;
-			retries: { retries: number; minTimeout: number; maxTimeout: number };
-		},
-	) => Promise<() => Promise<void>>;
-};
 
 interface AuditEvent {
 	id: string;
@@ -799,7 +788,7 @@ export class LocalJsonlMemoryProvider
 	private async withOutcomeStoreLock<T>(fn: () => Promise<T>): Promise<T> {
 		const storageDirectory = path.dirname(this.pathFor('memories'));
 		await mkdir(storageDirectory, { recursive: true });
-		const release = await lockfile.lock(storageDirectory, {
+		const release = await acquireDirectoryWriteLock(storageDirectory, {
 			realpath: false,
 			stale: 10_000,
 			retries: { retries: 20, minTimeout: 25, maxTimeout: 250 },

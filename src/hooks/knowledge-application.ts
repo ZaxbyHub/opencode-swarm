@@ -9,7 +9,7 @@
 import { existsSync } from 'node:fs';
 import { appendFile, mkdir, readFile } from 'node:fs/promises';
 import * as path from 'node:path';
-import lockfile from 'proper-lockfile';
+import { acquireDirectoryWriteLock } from '../parallel/directory-write-lock.js';
 import { atomicWriteFile } from '../evidence/task-file.js';
 import { warn } from '../utils/logger.js';
 import { resolveKnowledgeStoreDir } from './knowledge-link.js';
@@ -127,7 +127,7 @@ async function appendAudit(
 	await mkdir(dirPath, { recursive: true });
 	let release: (() => Promise<void>) | undefined;
 	try {
-		release = await lockfile.lock(dirPath, {
+		release = await acquireDirectoryWriteLock(dirPath, {
 			retries: { retries: 50, minTimeout: 10, maxTimeout: 100 },
 			stale: 5000,
 		});

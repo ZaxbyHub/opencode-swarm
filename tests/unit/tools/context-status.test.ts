@@ -10,7 +10,8 @@
  */
 
 import { describe, expect, it, test } from 'bun:test';
-import { rmSync } from 'node:fs';
+import { rmSync, mkdirSync } from 'node:fs';
+import { DEFAULT_MODEL_CONTEXT_TOKENS } from '../../../src/config/schema';
 import {
 	readLearningHealth,
 	resetLearningHealthForTest,
@@ -312,11 +313,11 @@ describe('computeContextHeadroom', () => {
 		expect(result.modelLimit).toBe(128000);
 	});
 
-	it('falls back to 128000 when model/provider unknown', () => {
+	it('falls back to the flat default when model/provider unknown', () => {
 		const messages = [makeMessage({ role: 'user', text: 'test' })];
 
 		const result = computeContextHeadroom(messages);
-		expect(result.modelLimit).toBe(128000);
+		expect(result.modelLimit).toBe(DEFAULT_MODEL_CONTEXT_TOKENS);
 	});
 
 	it('does not mutate input messages', () => {

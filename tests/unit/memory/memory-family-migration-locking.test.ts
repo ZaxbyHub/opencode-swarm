@@ -11,7 +11,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import lockfile from 'proper-lockfile';
+import { acquireDirectoryWriteLock } from '../../../src/parallel/directory-write-lock.js';
 import {
 	_internals,
 	migrateMemoryFamily,
@@ -19,17 +19,17 @@ import {
 import type { VettedMemoryRoot } from '../../../src/memory/storage-root';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
-const originalLockfile = _internals.lockfile;
+const originalAcquire = _internals.acquireDirectoryWriteLock;
 
 let tmpDir: string;
 
 beforeEach(() => {
 	tmpDir = canonicalMkdtemp('swarm-migration-lock-');
-	_internals.lockfile = originalLockfile;
+	_internals.acquireDirectoryWriteLock = originalAcquire;
 });
 
 afterEach(() => {
-	_internals.lockfile = originalLockfile;
+	_internals.acquireDirectoryWriteLock = originalAcquire;
 	try {
 		fs.rmSync(tmpDir, { recursive: true, force: true });
 	} catch {
@@ -127,7 +127,7 @@ describe('memory family migration destination-lock admission', () => {
 		);
 		const destBefore = snapshotTree(dest);
 		const sourceBefore = snapshotTree(source);
-		const release = await lockfile.lock(dest, {
+		const release = await acquireDirectoryWriteLock(dest, {
 			stale: 60_000,
 			realpath: false,
 		});
@@ -163,7 +163,9 @@ describe('memory family migration destination-lock admission', () => {
 			expect(snapshotTree(source)).toEqual(sourceBefore);
 			expect(fs.existsSync(path.join(dest, 'backups'))).toBe(false);
 			// The holder's live lock was not stolen or deleted.
-			expect(fs.existsSync(`${dest}.lock`)).toBe(true);
+			expect(
+				fs.existsSync(path.join(dest, '.write-lock-anchor.lock')),
+			).toBe(true);
 		} finally {
 			await release().catch(() => {});
 		}
@@ -180,7 +182,7 @@ describe('memory family migration destination-lock admission', () => {
 		seedJsonl(source, 'memories.jsonl', ['cohort-1']);
 		const destBefore = snapshotTree(dest);
 		const sourceBefore = snapshotTree(source);
-		const release = await lockfile.lock(dest, {
+		const release = await acquireDirectoryWriteLock(dest, {
 			stale: 60_000,
 			realpath: false,
 		});
@@ -213,7 +215,9 @@ describe('memory family migration destination-lock admission', () => {
 			// memory.db check; failed admission must not litter.
 			expect(fs.existsSync(path.join(dest, 'backups'))).toBe(false);
 			// The holder's live lock was not stolen or deleted.
-			expect(fs.existsSync(`${dest}.lock`)).toBe(true);
+			expect(
+				fs.existsSync(path.join(dest, '.write-lock-anchor.lock')),
+			).toBe(true);
 		} finally {
 			await release().catch(() => {});
 		}
@@ -227,14 +231,12 @@ describe('memory family migration destination-lock admission', () => {
 		);
 		const destBefore = snapshotTree(dest);
 		const sourceBefore = snapshotTree(source);
-		_internals.lockfile = {
-			lock: () =>
-				Promise.reject(
-					Object.assign(new Error('Lock file is already being held'), {
-						code: 'ELOCKED',
-					}),
-				),
-		};
+		_internals.acquireDirectoryWriteLock = async () =>
+			Promise.reject(
+				Object.assign(new Error('Lock file is already being held'), {
+					code: 'ELOCKED',
+				}),
+			);
 		const rejection = await migrateMemoryFamily(destRoot, srcRoot).then(
 			() => undefined,
 			(err: unknown) => err,
@@ -254,12 +256,10 @@ describe('memory family migration destination-lock admission', () => {
 			['src-1'],
 		);
 		const destBefore = snapshotTree(dest);
-		_internals.lockfile = {
-			lock: () =>
-				Promise.reject(
-					Object.assign(new Error('permission denied'), { code: 'EACCES' }),
-				),
-		};
+		_internals.acquireDirectoryWriteLock = async () =>
+			Promise.reject(
+				Object.assign(new Error('permission denied'), { code: 'EACCES' }),
+			);
 		const rejection = await migrateMemoryFamily(destRoot, srcRoot).then(
 			() => undefined,
 			(err: unknown) => err,
@@ -313,7 +313,7 @@ describe('memory family migration destination-lock admission', () => {
 			['dest-1'],
 			['src-1'],
 		);
-		const release = await lockfile.lock(dest, {
+		const release = await acquireDirectoryWriteLock(dest, {
 			stale: 60_000,
 			realpath: false,
 		});

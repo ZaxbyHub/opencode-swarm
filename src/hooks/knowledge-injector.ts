@@ -13,6 +13,8 @@ import {
 	DIRECTIVE_COMPLIANCE_HARD_CHAR_CAP,
 	parseDirectivesToVerifyBlock,
 } from '../agents/reviewer-directive-compliance.js';
+import { parseAgentModel, resolveConfiguredAgentModel } from '../config/agent-model.js';
+import { loadPluginConfig } from '../config/index.js';
 import { stripKnownSwarmPrefix } from '../config/schema.js';
 import { getCurrentTaskId, loadPlan } from '../plan/manager.js';
 import {
@@ -24,7 +26,6 @@ import {
 import { getRunMemorySummary } from '../services/run-memory.js';
 import {
 	clearCriticalShownIds,
-	getLiveContextModelIdentity,
 	getLiveContextWindow,
 	setCriticalShownIds,
 } from '../state.js';
@@ -65,7 +66,11 @@ import type {
 	RejectedLesson,
 } from './knowledge-types.js';
 import { isActiveStatus } from './knowledge-types.js';
-import { extractModelInfo, resolveModelLimit } from './model-limits.js';
+import { resolveModelLimit, mergeModelIdentity } from './model-limits.js';
+import {
+	resolveSessionModelIdentity,
+	resolveTargetModelInfoFromLatestUserAgent,
+} from './session-model-identity.js';
 import { readPhaseDirectivesToVerify } from './phase-directives.js';
 import { searchKnowledge } from './search-knowledge.js';
 import {
@@ -1270,9 +1275,25 @@ export function createKnowledgeInjectorHook(
 			// Budget-residual check (BACM-style: evaluate headroom before appending)
 			// Uses the canonical estimator's inverse (estimateCharsForTokens) — the
 			// single sanctioned char/token conversion (issue #1616/#2107).
-			const liveModelInfo = getLiveContextModelIdentity(sessionId);
-			const { modelID, providerID } =
-				liveModelInfo ?? extractModelInfo(output.messages);
+			const pluginConfig = loadPluginConfig(directory);
+			const targetFromMctx = mctx.agent
+				? parseAgentModel(
+						resolveConfiguredAgentModel(pluginConfig, mctx.agent) ?? '',
+					)
+				: undefined;
+			const targetFromMessages = resolveTargetModelInfoFromLatestUserAgent(
+				output.messages,
+				(agentName) => resolveConfiguredAgentModel(pluginConfig, agentName),
+			);
+			const targetModelInfo = mergeModelIdentity(
+				targetFromMctx,
+				targetFromMessages,
+			);
+			const { modelID, providerID } = await resolveSessionModelIdentity({
+				sessionID: sessionId,
+				targetModelInfo,
+				messages: output.messages,
+			});
 			// Live `model.limit.context` relayed from the system.transform hook via
 			// session state (this hook receives messages, never a `Model`). Without
 			// it the headroom gate below measured against a stale 128000, so a

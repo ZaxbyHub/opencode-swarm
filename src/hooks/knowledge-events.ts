@@ -26,7 +26,7 @@ import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { appendFile, mkdir, readFile, stat } from 'node:fs/promises';
 import * as path from 'node:path';
-import lockfile from 'proper-lockfile';
+import { acquireDirectoryWriteLock } from '../parallel/directory-write-lock.js';
 import { atomicWriteFile } from '../evidence/task-file.js';
 import { resolveHiveEventsPath as resolveHiveEventsPathImpl } from '../knowledge/hive-paths.js';
 import { canonicalRootKey } from '../utils/canonical-root.js';
@@ -404,7 +404,7 @@ export async function appendKnowledgeEventsBatch(
 	await mkdir(dirPath, { recursive: true });
 	let release: (() => Promise<void>) | undefined;
 	try {
-		release = await lockfile.lock(dirPath, {
+		release = await acquireDirectoryWriteLock(dirPath, {
 			retries: { retries: 200, minTimeout: 10, maxTimeout: 100 },
 		});
 		await appendFile(
@@ -495,7 +495,7 @@ export async function appendHiveKnowledgeEvent(
 	await mkdir(dirPath, { recursive: true });
 	let release: (() => Promise<void>) | undefined;
 	try {
-		release = await lockfile.lock(dirPath, {
+		release = await acquireDirectoryWriteLock(dirPath, {
 			retries: { retries: 200, minTimeout: 10, maxTimeout: 100 },
 			// #1847 F-008: MUST match transactHiveStore's stale (5s). This writer
 			// locks the SAME hive data directory; an asymmetric (longer) stale

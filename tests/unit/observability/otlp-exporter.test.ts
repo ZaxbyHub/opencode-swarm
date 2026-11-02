@@ -27,6 +27,7 @@ import {
 	readOtlpExporterHealth,
 	registerOtlpExporter,
 	resetOtlpExporterForTesting,
+	mergeOtlpExportConfigFromEnv,
 } from '../../../src/observability/otlp-exporter.js';
 import {
 	initTelemetry,
@@ -346,4 +347,37 @@ describe('transport happy path (real loopback collector)', () => {
 		expect(health?.spoolRecords).toBe(0);
 		expect(health?.dropped['partial_rejected'] ?? 0).toBe(2);
 	}, 20_000);
+});
+
+describe('mergeOtlpExportConfigFromEnv', () => {
+	test('fills headers from OTEL_EXPORTER_OTLP_HEADERS when config omits them', () => {
+		const prev = process.env.OTEL_EXPORTER_OTLP_HEADERS;
+		process.env.OTEL_EXPORTER_OTLP_HEADERS =
+			'Authorization=Basic dGVzdDpzZWNyZXQ=';
+		try {
+			const merged = mergeOtlpExportConfigFromEnv({
+				...testExportConfig('https://collector.test'),
+				headers: undefined,
+			});
+			expect(merged.headers?.Authorization).toBe('Basic dGVzdDpzZWNyZXQ=');
+		} finally {
+			if (prev === undefined) delete process.env.OTEL_EXPORTER_OTLP_HEADERS;
+			else process.env.OTEL_EXPORTER_OTLP_HEADERS = prev;
+		}
+	});
+
+	test('config headers override env on key collision', () => {
+		const prev = process.env.OTEL_EXPORTER_OTLP_HEADERS;
+		process.env.OTEL_EXPORTER_OTLP_HEADERS = 'Authorization=Basic env';
+		try {
+			const merged = mergeOtlpExportConfigFromEnv({
+				...testExportConfig('https://collector.test'),
+				headers: { Authorization: 'Basic config' },
+			});
+			expect(merged.headers?.Authorization).toBe('Basic config');
+		} finally {
+			if (prev === undefined) delete process.env.OTEL_EXPORTER_OTLP_HEADERS;
+			else process.env.OTEL_EXPORTER_OTLP_HEADERS = prev;
+		}
+	});
 });

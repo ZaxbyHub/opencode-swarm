@@ -29,7 +29,7 @@ import {
 	writeFile,
 } from 'node:fs/promises';
 import * as path from 'node:path';
-import lockfile from 'proper-lockfile';
+import { acquireDirectoryWriteLock } from '../parallel/directory-write-lock.js';
 import { validateSwarmPath } from '../hooks/utils.js';
 
 export const SYNONYM_MAP_FILENAME = 'synonym-map.json';
@@ -414,7 +414,7 @@ export async function rebuildSynonymMap(
 	await mkdir(dir, { recursive: true });
 	let release: (() => Promise<void>) | null = null;
 	try {
-		release = await lockfile.lock(dir, {
+		release = await acquireDirectoryWriteLock(dir, {
 			retries: { retries: 5, minTimeout: 100, maxTimeout: 500 },
 			stale: 5000,
 		});

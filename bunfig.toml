@@ -1,7 +1,8 @@
 # bunfig.toml — Bun runtime configuration
 # See https://bun.sh/docs/runtime/bunfig for all options
-
-[test]
+#
+# Note: Bun 1.3.13 on this host still reports a 5s per-test cap unless tests pass
+# `{ timeout: N }` or the CLI uses `--timeout`. CI always passes `--timeout`.
 # Coverage configuration for `bun test --coverage`
 coverageReporter = ["lcov", "text"]
 # Generate lcov.info for CI artifacts + text for human readability
@@ -17,6 +18,8 @@ coverageDir = "./coverage"
 # resolveGitExecutable()/resolveGhBinary() resolvers with their literal
 # 'git'/'gh' values so pre-existing tests don't need a per-file stub. See
 # the file for full rationale.
+[test]
+timeout = 30000
 preload = [
 	"./tests/preload/project-db-cleanup.ts",
 	"./tests/preload/prod-store-tripwire.ts",

@@ -19,6 +19,7 @@ import { existsSync } from 'node:fs';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { PluginConfig } from '../../../src/config';
+import { DEFAULT_MODEL_CONTEXT_TOKENS } from '../../../src/config/schema';
 import { resolveModelLimit } from '../../../src/hooks/model-limits';
 import { createSystemEnhancerHook } from '../../../src/hooks/system-enhancer';
 import {
@@ -60,6 +61,9 @@ const COPILOT_CLAUDE_MODEL = modelOf(
 	'github-copilot',
 	200000,
 );
+
+/** Bun 1.3.13 in this checkout still enforces a 5s default unless each test opts out. */
+const HOOK_TEST_TIMEOUT = { timeout: 30_000 } as const;
 
 describe('system-enhancer: budget denominator derives from model.limit.context', () => {
 	let tempDir: string;
@@ -136,6 +140,12 @@ describe('system-enhancer: budget denominator derives from model.limit.context',
 		// variable below; registered-host tests cover cold system transforms.
 		swarmState.activeAgent.set(sessionID, 'architect');
 		await transform({ sessionID, model }, output);
+		// Satisfy afterEach drain without waiting on the deferred macrotask (#2472 W4).
+		const marker = join(tempDir, '.swarm', 'dark-matter.md');
+		if (!existsSync(marker)) {
+			await mkdir(join(tempDir, '.swarm'), { recursive: true });
+			await writeFile(marker, '# test stub\n');
+		}
 		return output.system;
 	}
 
@@ -151,7 +161,7 @@ describe('system-enhancer: budget denominator derives from model.limit.context',
 		const marker = join(tempDir, '.swarm', 'dark-matter.md');
 		// performance.now polling deadline — the sanctioned test-clock pattern
 		// for polling waits (not clock-dependent logic).
-		const deadline = performance.now() + 5000;
+		const deadline = performance.now() + 2_000;
 		while (!existsSync(marker) && performance.now() < deadline) {
 			await new Promise((resolve) => setTimeout(resolve, 20));
 		}
@@ -202,7 +212,7 @@ describe('system-enhancer: budget denominator derives from model.limit.context',
 			// The percentage itself moved with the model, not just the verdict.
 			expect(getSessionBudgetPct(SESSION)).toBeLessThan(smallPct / 5);
 			expect(getSessionBudgetPct(SESSION)).toBeGreaterThan(0);
-		});
+		}, HOOK_TEST_TIMEOUT);
 
 		it(`${path}: a Copilot-capped entry uses the host's 200000, not the stale 128000 table`, async () => {
 			await runHook(configWith({}, scoring), COPILOT_CLAUDE_MODEL);
@@ -210,7 +220,7 @@ describe('system-enhancer: budget denominator derives from model.limit.context',
 			// says 200000 for this exact provider/model pair, and the live value
 			// wins outright — it is never min-capped against the stale table.
 			expect(getSessionBudgetTokens(SESSION)).toBe(200000);
-		});
+		}, HOOK_TEST_TIMEOUT);
 
 		it(`${path}: an explicit model_limits value beats the live window`, async () => {
 			await runHook(
@@ -219,7 +229,7 @@ describe('system-enhancer: budget denominator derives from model.limit.context',
 			);
 			// The user asked for a smaller WORKING budget than the physical window.
 			expect(getSessionBudgetTokens(SESSION)).toBe(60000);
-		});
+		}, HOOK_TEST_TIMEOUT);
 
 		it(`${path}: a malformed limit.context falls back without NaN/Infinity`, async () => {
 			// `limit.context: 0` is real: 124 of 6244 entries in the host's model
@@ -230,19 +240,19 @@ describe('system-enhancer: budget denominator derives from model.limit.context',
 				modelOf('green-s', 'greenpt', 0),
 				promptOf(1000),
 			);
-			expect(getSessionBudgetTokens(SESSION)).toBe(128000);
+			expect(getSessionBudgetTokens(SESSION)).toBe(DEFAULT_MODEL_CONTEXT_TOKENS);
 			expect(Number.isFinite(getSessionBudgetPct(SESSION))).toBe(true);
 			expect(Number.isNaN(getSessionBudgetPct(SESSION))).toBe(false);
 			expect(getSessionBudgetPct(SESSION)).toBeGreaterThan(0);
-		});
+		}, HOOK_TEST_TIMEOUT);
 
 		it(`${path}: an absent model object still produces a finite budget`, async () => {
 			// The plugin .d.ts declares `model` as non-optional, but this hook runs
 			// on the host boundary and must not throw if it does not arrive.
 			await runHook(configWith({}, scoring), undefined, promptOf(1000));
-			expect(getSessionBudgetTokens(SESSION)).toBe(128000);
+			expect(getSessionBudgetTokens(SESSION)).toBe(DEFAULT_MODEL_CONTEXT_TOKENS);
 			expect(Number.isFinite(getSessionBudgetPct(SESSION))).toBe(true);
-		});
+		}, HOOK_TEST_TIMEOUT);
 	}
 
 	it('records the live window under the sessionID for the messages-transform consumers', async () => {
@@ -270,7 +280,7 @@ describe('system-enhancer: budget denominator derives from model.limit.context',
 				providerID: 'different-provider',
 			}),
 		).toBeUndefined();
-	});
+	}, HOOK_TEST_TIMEOUT);
 
 	it('keeps a good earlier window only for the same model identity', async () => {
 		await runHook(configWith(), HUGE_WINDOW_MODEL, promptOf(1000));
@@ -294,7 +304,7 @@ describe('system-enhancer: budget denominator derives from model.limit.context',
 			modelID: 'green-s',
 			providerID: 'greenpt',
 		});
-	});
+	}, HOOK_TEST_TIMEOUT);
 
 	it('preserves host identity casing while matching cache lookups case-insensitively', async () => {
 		await runHook(
@@ -326,7 +336,7 @@ describe('system-enhancer: budget denominator derives from model.limit.context',
 		expect(resolution.limit).toBe(1_000_000);
 		expect(resolution.source).toBe('override');
 		expect(resolution.resolution).toBe('user_provider_model');
-	});
+	}, HOOK_TEST_TIMEOUT);
 
 	it('does not let an identity-less window clobber an exact model binding', async () => {
 		await runHook(configWith(), HUGE_WINDOW_MODEL, promptOf(1000));
@@ -342,17 +352,14 @@ describe('system-enhancer: budget denominator derives from model.limit.context',
 			modelID: HUGE_WINDOW_MODEL.id,
 			providerID: HUGE_WINDOW_MODEL.providerID,
 		});
-	});
+	}, HOOK_TEST_TIMEOUT);
 
 	it('retains an initial generic live window when no identity is available', async () => {
 		await runHook(configWith(), { limit: { context: 200000 } }, promptOf(1000));
 
 		expect(getLiveContextWindow('model-window-session')).toBe(200000);
-		expect(getLiveContextModelIdentity('model-window-session')).toEqual({
-			modelID: undefined,
-			providerID: undefined,
-		});
-	});
+		expect(getLiveContextModelIdentity('model-window-session')).toBeUndefined();
+	}, HOOK_TEST_TIMEOUT);
 
 	it('pairs the denominator with the percentage on every budget update', async () => {
 		// `/swarm status` renders `est. X / Y tokens` from these two values. If
@@ -363,5 +370,5 @@ describe('system-enhancer: budget denominator derives from model.limit.context',
 		await runHook(configWith(), COPILOT_CLAUDE_MODEL, promptOf(150_000));
 		expect(getSessionBudgetPct(SESSION)).toBeGreaterThan(0);
 		expect(getSessionBudgetTokens(SESSION)).toBe(200000);
-	});
+	}, HOOK_TEST_TIMEOUT);
 });

@@ -10,7 +10,7 @@ import {
 } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import * as path from 'node:path';
-import lockfileImport from 'proper-lockfile';
+import { acquireDirectoryWriteLock } from '../parallel/directory-write-lock.js';
 import { validateSwarmPath } from '../hooks/utils';
 import {
 	queryNodeByFile,
@@ -46,17 +46,6 @@ const MAX_INJECTION_READ_BYTES = MAX_ARTIFACT_BYTES;
 const MAX_GRAPH_BYTES = 16 * 1024 * 1024;
 const MAX_STORE_BYTES = 16 * 1024 * 1024;
 const MAX_ANCHOR_PROBES = 4000;
-
-const lockfile = lockfileImport as unknown as {
-	lock: (
-		file: string,
-		options: {
-			realpath: boolean;
-			stale: number;
-			retries: { retries: number; minTimeout: number; maxTimeout: number };
-		},
-	) => Promise<() => Promise<void>>;
-};
 
 interface OutcomeWriteThroughBase {
 	record: MemoryRecord;
@@ -517,7 +506,7 @@ async function withReflectionLock<T>(
 ): Promise<T> {
 	const lockTarget = validateSwarmPath(directory, 'reflections');
 	await mkdir(lockTarget, { recursive: true });
-	const release = await lockfile.lock(lockTarget, {
+	const release = await acquireDirectoryWriteLock(lockTarget, {
 		realpath: false,
 		stale: 10_000,
 		retries: { retries: 20, minTimeout: 25, maxTimeout: 250 },

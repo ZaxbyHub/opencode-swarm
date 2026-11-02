@@ -41,6 +41,7 @@ import type { KnowledgeEntryBase } from '../hooks/knowledge-types.js';
 import { isActiveStatus } from '../hooks/knowledge-types.js';
 import * as logger from '../utils/logger.js';
 import { resolveCohortId } from './cohort-identity.js';
+import { acquireDirectoryWriteLock } from '../parallel/directory-write-lock.js';
 
 const CURSOR_FILENAME = 'curation-cursor.json';
 const DEFAULT_BATCH_SIZE = 500;
@@ -177,7 +178,6 @@ export async function claimNextScanBatch(
 	// cursor claims against all knowledge I/O. This prevents two concurrent
 	// cohort postmortems from both reading the same cursor position and claiming
 	// the same batch. The read+select+advance happens in ONE locked section.
-	const lockfile = (await import('proper-lockfile')).default;
 	const storeDir = _internals.resolveKnowledgeStoreDir(directory);
 	let batch: KnowledgeEntryBase[] = [];
 	let generation = 1;
@@ -186,7 +186,7 @@ export async function claimNextScanBatch(
 
 	let release: (() => Promise<void>) | undefined;
 	try {
-		release = await lockfile.lock(storeDir, {
+		release = await acquireDirectoryWriteLock(storeDir, {
 			retries: { retries: 5, minTimeout: 100, maxTimeout: 500 },
 			stale: 5000,
 		});

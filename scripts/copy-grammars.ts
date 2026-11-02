@@ -23,7 +23,8 @@ const SOURCE_DIR = join(
 	'wasm',
 );
 const TARGET_DIR = join(PROJECT_ROOT, 'src', 'lang', 'grammars');
-const DIST_TARGET_DIR = join(PROJECT_ROOT, 'dist', 'lang', 'grammars');
+const distRoot = process.env.SWARM_BUILD_DIST?.trim() || 'dist';
+const DIST_TARGET_DIR = join(PROJECT_ROOT, distRoot, 'lang', 'grammars');
 
 /**
  * Vendored grammar WASM files committed directly to src/lang/grammars/.

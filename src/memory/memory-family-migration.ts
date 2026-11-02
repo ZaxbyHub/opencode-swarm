@@ -38,6 +38,7 @@ import { copyFileSync, existsSync, readFileSync, unlinkSync } from 'node:fs';
 import { mkdir, rename } from 'node:fs/promises';
 import * as path from 'node:path';
 import lockfileImport from 'proper-lockfile';
+import { acquireDirectoryWriteLock } from '../parallel/directory-write-lock.js';
 import { atomicWriteFile } from '../evidence/task-file.js';
 import {
 	MIGRATION_LOCK_RETRIES,
@@ -899,7 +900,7 @@ export async function migrateMemoryFamily(
 	await mkdir(destStoragePath, { recursive: true });
 	let destRelease: (() => Promise<void>) | null = null;
 	try {
-		destRelease = await _internals.lockfile.lock(destStoragePath, {
+		destRelease = await _internals.acquireDirectoryWriteLock(destStoragePath, {
 			...MIGRATION_LOCK_RETRIES,
 			stale: MIGRATION_LOCK_STALE_MS,
 			// Same identity as the JSONL provider's lock on this directory
@@ -1097,5 +1098,6 @@ export const _internals = {
 	stageSqliteDb,
 	mergeStagedSqlite,
 	countRowsSafe,
+	acquireDirectoryWriteLock,
 	lockfile,
 };

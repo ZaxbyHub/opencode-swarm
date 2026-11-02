@@ -4652,7 +4652,10 @@ export function getLiveContextModelIdentity(
 	if (!sessionID) return undefined;
 	const cached = swarmState.liveContextWindows.get(sessionID);
 	if (!cached) return undefined;
-	return { modelID: cached.modelID, providerID: cached.providerID };
+	const modelID = trimLiveContextIdentity(cached.modelID);
+	const providerID = trimLiveContextIdentity(cached.providerID);
+	if (!modelID && !providerID) return undefined;
+	return { modelID, providerID };
 }
 
 function evictOldestLiveContextWindow(

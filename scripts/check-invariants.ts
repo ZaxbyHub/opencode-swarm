@@ -1774,7 +1774,12 @@ export function checkMigrationLockAdmission(repoRoot: string): CheckResult {
 		let acquireMatches = 0;
 		for (let i = 0; i < lines.length; i++) {
 			if (!/destRelease\s*=\s*await\s/.test(lines[i])) continue;
-			if (!/\.lock\(/.test(lines[i]) && !/\.lock\(/.test(lines[i + 1] ?? '')) {
+			if (
+				!/\.lock\(/.test(lines[i]) &&
+				!/\.lock\(/.test(lines[i + 1] ?? '') &&
+				!/acquireDirectoryWriteLock\(/.test(lines[i]) &&
+				!/acquireDirectoryWriteLock\(/.test(lines[i + 1] ?? '')
+			) {
 				continue;
 			}
 			acquireMatches++;

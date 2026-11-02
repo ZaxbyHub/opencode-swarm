@@ -1,11 +1,11 @@
 /** Core storage layer for the opencode-swarm v6.17 two-tier knowledge system. */
 
 import { createHash } from 'node:crypto';
-import { existsSync, realpathSync } from 'node:fs';
+import { existsSync, realpathSync, writeFileSync } from 'node:fs';
 import { appendFile, mkdir, readFile } from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import lockfile from 'proper-lockfile';
+import { acquireDirectoryWriteLock } from '../parallel/directory-write-lock.js';
 import { atomicWriteFile } from '../evidence/task-file.js';
 import {
 	resolveHiveDataDir,
@@ -339,10 +339,7 @@ export async function appendRetractionRecord(
 	// appendCappedJsonl (append + crash-atomic FIFO compaction, issue #2483).
 	let release: (() => Promise<void>) | null = null;
 	try {
-		release = await lockfile.lock(dir, {
-			retries: { retries: 5, minTimeout: 100, maxTimeout: 500 },
-			stale: 5000,
-		});
+		release = await acquireDirectoryWriteLock(dir);
 		await appendCappedJsonl(filePath, JSON.stringify(record), {
 			maxEntries: resolveRetentionCap(
 				'MAX_RETRACTION_RECORDS',
@@ -567,10 +564,7 @@ export async function appendKnowledge<T>(
 
 	let release: (() => Promise<void>) | null = null;
 	try {
-		release = await lockfile.lock(dir, {
-			retries: { retries: 5, minTimeout: 100, maxTimeout: 500 },
-			stale: 5000,
-		});
+		release = await acquireDirectoryWriteLock(dir);
 		// #1821 Lane 0b: normalize at the write boundary — see
 		// normalizeEntryArraysForWrite for the exact coverage this does and
 		// does not give.
@@ -604,10 +598,7 @@ export async function rewriteKnowledge<T>(
 
 	let release: (() => Promise<void>) | null = null;
 	try {
-		release = await lockfile.lock(dir, {
-			retries: { retries: 5, minTimeout: 100, maxTimeout: 500 },
-			stale: 5000,
-		});
+		release = await acquireDirectoryWriteLock(dir);
 		// #1821 Lane 0b: rewriteKnowledge is the third store write path
 		// (knowledge-migrator, knowledge-curator cap/sweep, system-enhancer) and
 		// would otherwise be a hole in the structural guardrail.
@@ -647,10 +638,7 @@ export async function transactFile<T>(
 
 	let release: (() => Promise<void>) | null = null;
 	try {
-		release = await lockfile.lock(dir, {
-			retries: { retries: 5, minTimeout: 100, maxTimeout: 500 },
-			stale: 5000,
-		});
+		release = await acquireDirectoryWriteLock(dir);
 		const data = await read(filePath);
 		const result = mutate(data);
 		if (result === null) return false;
@@ -1639,10 +1627,7 @@ async function applyConfidenceDeltas(
 	try {
 		const dir = path.dirname(filePath);
 		await mkdir(dir, { recursive: true });
-		release = await lockfile.lock(dir, {
-			retries: { retries: 5, minTimeout: 100, maxTimeout: 500 },
-			stale: 5000,
-		});
+		release = await acquireDirectoryWriteLock(dir);
 
 		const entries = await readKnowledge<KnowledgeEntryBase>(filePath);
 		if (entries.length === 0) return [];

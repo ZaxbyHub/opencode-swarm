@@ -48,7 +48,6 @@ import {
 import {
 	clearFinalAccountingWarningBands,
 	getFinalAccountingWarningBand,
-	getLiveContextModelIdentity,
 	getLiveContextWindow,
 	setFinalAccountingWarningBand,
 	setFinalPromptPressure,
@@ -57,10 +56,10 @@ import { log } from '../utils/logger.js';
 import { computeContextUsage } from './context-usage.js';
 import type { MessageWithParts } from './knowledge-types.js';
 import {
-	extractModelInfo,
 	extractSessionId,
 	resolveModelLimit,
 } from './model-limits.js';
+import { resolveSessionModelIdentity } from './session-model-identity.js';
 import { isGuidanceCarrier } from './system-guidance-carrier.js';
 import { estimateTokens } from './utils.js';
 
@@ -135,9 +134,11 @@ export function createFinalContextAccountingStep(
 			const targetModelInfo = configuredTargetModel
 				? parseAgentModel(configuredTargetModel)
 				: undefined;
-			const liveModelInfo = getLiveContextModelIdentity(sessionID);
-			const { modelID, providerID } =
-				targetModelInfo ?? liveModelInfo ?? extractModelInfo(messages);
+			const { modelID, providerID } = await resolveSessionModelIdentity({
+				sessionID,
+				targetModelInfo,
+				messages,
+			});
 			const liveContextLimit = getLiveContextWindow(sessionID, {
 				modelID,
 				providerID,

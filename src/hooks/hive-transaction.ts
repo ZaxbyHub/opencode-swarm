@@ -38,6 +38,7 @@
 import { appendFile, mkdir, realpath } from 'node:fs/promises';
 import * as path from 'node:path';
 import lockfile from 'proper-lockfile';
+import { acquireDirectoryWriteLock } from '../parallel/directory-write-lock.js';
 import { atomicWriteFile } from '../evidence/task-file.js';
 import {
 	resolveHiveDataDir,
@@ -188,7 +189,7 @@ export async function transactHiveStore<T>(
 	let release: (() => Promise<void>) | null = null;
 	try {
 		try {
-			release = await _internals.lockfile.lock(dataDir, {
+			release = await _internals.acquireDirectoryWriteLock(dataDir, {
 				...HIVE_LOCK_RETRIES,
 				stale: HIVE_LOCK_STALE_MS,
 			});
@@ -418,6 +419,7 @@ export const HIVE_TXN_LOCK_STALE_MS = HIVE_LOCK_STALE_MS;
  * across test files in Bun's shared runner.
  */
 export const _internals = {
+	acquireDirectoryWriteLock,
 	lockfile,
 	readKnowledge,
 	atomicWriteFile,
