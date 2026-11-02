@@ -128,8 +128,10 @@ describe('receipt verify (#2970)', () => {
 				path.join(bundleDir, 'receipt.json'),
 			);
 			expect(fileForm.ok).toBe(true);
+			// F4 (implementation review): compare the TWO forms, not a value to
+			// itself — both surfaces must agree on the checked artifact count.
 			expect(
-				(dirForm.result as { checked: { artifacts: number } }).checked
+				(fileForm.result as { checked: { artifacts: number } }).checked
 					.artifacts,
 			).toBe(
 				(dirForm.result as { checked: { artifacts: number } }).checked
@@ -388,7 +390,46 @@ describe('receipt verify (#2970)', () => {
 		}
 	});
 
-	test('fail-closed: a symlinked artifact is a path escape (parent-link escape)', async () => {
+	test('fail-closed: a symlinked PARENT directory is a path escape (junction probe, review F1)', async () => {
+		const dir = makeProject();
+		try {
+			const bundleDir = toFreshClone(await buildExportedBundle(dir));
+			// Outside-the-bundle directory with a real, correctly-hashed file.
+			const outside = path.join(path.dirname(bundleDir), 'outside-store');
+			fs.mkdirSync(outside, { recursive: true });
+			const evilBytes = Buffer.from('evil-but-correctly-hashed\n');
+			fs.writeFileSync(path.join(outside, 'evil.txt'), evilBytes);
+			// artifacts/link -> outside: a junction on Windows (no privilege
+			// needed) / a directory symlink on POSIX. lstat on the LEAF cannot
+			// see it — the parent-component walk must.
+			fs.symlinkSync(
+				outside,
+				path.join(bundleDir, 'artifacts', 'link'),
+				'junction',
+			);
+			const { record } = readReceipt(bundleDir);
+			(
+				record.artifacts as Array<{
+					path: string;
+					sha256: string;
+					bytes: number;
+				}>
+			).push({
+				path: 'link/evil.txt',
+				sha256: createHash('sha256').update(evilBytes).digest('hex'),
+				bytes: evilBytes.byteLength,
+			});
+			rehash(record);
+			writeReceipt(bundleDir, record);
+			const outcome = await executeReceiptVerify(bundleDir);
+			expect(outcome.ok).toBe(false);
+			expect(JSON.stringify(outcome.result)).toContain('path_escape');
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test('fail-closed: a leaf symlinked artifact is a path escape', async () => {
 		const dir = makeProject();
 		try {
 			const bundleDir = toFreshClone(await buildExportedBundle(dir));

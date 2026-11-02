@@ -122,19 +122,16 @@ describe('receipt capture integration (#2968)', () => {
 			const snapEntry = report.entries.find(
 				(entry: { id: string }) => entry.id === 'snapshot_identity',
 			);
-			// The persisted capture is the commit-boundary report. In this fixture
-			// phase_complete writes evidence state between the first collection
-			// (preflightReport, carried by the response) and the commit collection
-			// (commitPreflight, what we capture) — so when the two hashes differ,
-			// the persisted hash differing from the response's proves the capture
-			// is NOT the stale first collection. (Phase 4.5's mutation probe
-			// switches the capture target to preflightReport and must flip this
-			// relationship / the capture's content.)
-			if (report.reportHash === result.gate_report.reportHash) {
-				// Legitimate when the mid-flow write is absent: then all three
-				// collections saw identical state and either target captures the
-				// same bytes. Still assert the refs are well-formed below.
-			}
+			// F3 (implementation review): DISCRIMINATE the capture target. In
+			// this fixture phase_complete writes evidence state (the phase-close
+			// intent ledger) between the first collection (preflightReport,
+			// carried by the response) and the commit collection
+			// (commitPreflight) — deterministically changing the snapshot hash.
+			// The persisted capture must therefore hash DIFFERENTLY from the
+			// response's first collection: capturing the stale first
+			// collection instead (reviewer mutant) makes these equal and this
+			// assertion RED.
+			expect(report.reportHash).not.toBe(result.gate_report.reportHash);
 			for (const prefix of ['plan-structure:', 'policy:', 'phase-evidence:']) {
 				expect(
 					snapEntry.evidenceRefs.some(

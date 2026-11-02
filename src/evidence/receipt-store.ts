@@ -2,8 +2,8 @@ import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { PhaseGateReport } from '../tools/phase-complete/preflight-report';
-import { assertProjectRoot } from '../utils/project-boundary';
 import { renameSyncWithRetry } from '../utils/atomic-write';
+import { assertProjectRoot } from '../utils/project-boundary';
 import { writeImmutableArtifact } from './immutable-store';
 import { withEvidenceLock } from './lock';
 import {
@@ -89,7 +89,15 @@ export async function capturePhaseGateReport(
 	);
 }
 
-/** Newest-8 retention over an exact filename grammar; never leaves the receipts dir. */
+/**
+ * Newest-8 retention over an exact filename grammar; never leaves the
+ * receipts dir. Each STEM counts once toward the cap and carries both its
+ * files: pruning a stem removes its `.json` AND its rendered `.md` sibling
+ * (implementation-review F2 — a json-only filter let Markdown siblings grow
+ * without bound). Symlinked entries are never counted and never deleted;
+ * mtime ties and future mtimes are still prunable (these are our own
+ * derived artifacts; a documented divergence from pruneDirectory).
+ */
 async function pruneRetention(
 	directory: string,
 	grammar: RegExp,
@@ -102,32 +110,41 @@ async function pruneRetention(
 	} catch {
 		return;
 	}
-	const candidates = names
-		.filter((name) => grammar.test(name))
-		.filter((name) => name.endsWith('.json'))
-		.filter((name) => name !== `${justWrittenStem}.json`)
-		.map((name) => {
-			const full = path.join(dir, name);
-			const stat = fs.lstatSync(full);
-			return { name, full, mtime: stat.mtimeMs, isFile: stat.isFile() };
-		})
-		.filter((entry) => entry.isFile);
-	candidates.sort((left, right) =>
+	interface Stem {
+		stem: string;
+		mtime: number;
+		files: string[];
+	}
+	const stems = new Map<string, Stem>();
+	for (const name of names) {
+		if (!grammar.test(name)) continue;
+		const stem = name.replace(/\.(json|md)$/, '');
+		// Exclude the just-written STEM entirely (both its files): the +1 in
+		// the excess arithmetic below accounts for it, and its .md sibling
+		// must not re-add it to the candidate set (off-by-one, review F2).
+		if (stem === justWrittenStem) continue;
+		const full = path.join(dir, name);
+		const stat = fs.lstatSync(full);
+		if (!stat.isFile()) continue;
+		const entry = stems.get(stem) ?? { stem, mtime: 0, files: [] };
+		entry.files.push(full);
+		entry.mtime = Math.max(entry.mtime, stat.mtimeMs);
+		stems.set(stem, entry);
+	}
+	const ordered = [...stems.values()].sort((left, right) =>
 		right.mtime === left.mtime
-			? right.name.localeCompare(left.name)
+			? right.stem.localeCompare(left.stem)
 			: right.mtime - left.mtime,
 	);
-	// mtime ties and FUTURE mtimes are still prunable here: these are our own
-	// derived artifacts (a documented divergence from pruneDirectory, which
-	// skips future-dated entries to protect foreign files). Symlinked entries
-	// are never counted and never deleted.
-	const excess = candidates.length + 1 - MAX_RETAINED_PER_UNIT;
+	const excess = ordered.length + 1 - MAX_RETAINED_PER_UNIT;
 	for (let index = 0; index < excess; index += 1) {
-		const target = candidates[candidates.length - 1 - index].full;
-		if (!target.startsWith(dir + path.sep)) {
-			throw new Error(`RECEIPT_RETENTION_ESCAPE: ${target}`);
+		const stem = ordered[ordered.length - 1 - index];
+		for (const target of stem.files) {
+			if (!target.startsWith(dir + path.sep)) {
+				throw new Error(`RECEIPT_RETENTION_ESCAPE: ${target}`);
+			}
+			fs.unlinkSync(target);
 		}
-		fs.unlinkSync(target);
 	}
 }
 

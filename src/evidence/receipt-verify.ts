@@ -164,7 +164,7 @@ export function verifyReceiptBundle(
 			continue;
 		}
 		const resolved = path.resolve(input.artifactRoot, ...segments);
-		const rootResolved = path.resolve(input.artifactRoot);
+		const rootResolved = fs.realpathSync(input.artifactRoot);
 		const relative = path.relative(rootResolved, resolved);
 		if (
 			relative === '' ||
@@ -172,6 +172,58 @@ export function verifyReceiptBundle(
 			relative.startsWith(`..${path.sep}`) ||
 			path.isAbsolute(relative)
 		) {
+			failures.push({ kind: 'path_escape', path: artifact.path });
+			continue;
+		}
+		// F1 (implementation review): a symlink/junction at a PARENT component
+		// is invisible to lstat on the leaf. Walk every component under the
+		// real bundle root and reject symbolic links at any level, then require
+		// the fully-resolved real path to stay inside the root — the verifier
+		// must never read outside the two roots it was given. A missing FINAL
+		// component is a missing ARTIFACT, not an escape; a missing/symlinked
+		// INTERMEDIATE directory is an escape.
+		let cursor = rootResolved;
+		let parentEscape = false;
+		let leafMissing = false;
+		for (let index = 0; index < segments.length; index += 1) {
+			cursor = path.join(cursor, segments[index]);
+			let componentStat: fs.Stats;
+			try {
+				componentStat = fs.lstatSync(cursor);
+			} catch {
+				if (index === segments.length - 1) {
+					leafMissing = true;
+				} else {
+					parentEscape = true;
+				}
+				break;
+			}
+			if (componentStat.isSymbolicLink()) {
+				parentEscape = true;
+				break;
+			}
+		}
+		if (leafMissing) {
+			failures.push({ kind: 'missing_artifact', path: artifact.path });
+			continue;
+		}
+		if (!parentEscape) {
+			try {
+				const realResolved = fs.realpathSync(resolved);
+				const realRelative = path.relative(rootResolved, realResolved);
+				if (
+					realRelative === '' ||
+					realRelative === '..' ||
+					realRelative.startsWith(`..${path.sep}`) ||
+					path.isAbsolute(realRelative)
+				) {
+					parentEscape = true;
+				}
+			} catch {
+				parentEscape = true;
+			}
+		}
+		if (parentEscape) {
 			failures.push({ kind: 'path_escape', path: artifact.path });
 			continue;
 		}
