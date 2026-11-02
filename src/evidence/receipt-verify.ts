@@ -163,8 +163,15 @@ export function verifyReceiptBundle(
 			failures.push({ kind: 'path_escape', path: artifact.path });
 			continue;
 		}
-		const resolved = path.resolve(input.artifactRoot, ...segments);
+		// R2-F1 (implementation review round 2): derive the candidate from the
+		// REALPATHED root. Resolving against the lexical artifactRoot made
+		// every bundle reached through a symlinked path prefix (macOS /tmp →
+		// /private/tmp, junctioned scratch dirs) fail the lexical containment
+		// check against the realpathed root. Symlinked ANCESTORS of the bundle
+		// are legitimate; only links INSIDE the bundle may escape, and the
+		// component walk + leaf realpath below catch those.
 		const rootResolved = fs.realpathSync(input.artifactRoot);
+		const resolved = path.resolve(rootResolved, ...segments);
 		const relative = path.relative(rootResolved, resolved);
 		if (
 			relative === '' ||

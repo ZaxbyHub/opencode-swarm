@@ -105,27 +105,37 @@ describe('receipt hardening (review round 1)', () => {
 		}
 	});
 
-	test('parallel changed-content emission stays serialized and within retention', async () => {
+	test('parallel changed-content emission stays serialized and within retention (R2-F2)', async () => {
 		const dir = makeDir('receipt-par2-');
 		try {
 			await seedReport(dir);
-			// Vary the underlying evidence so each emission builds different content.
+			// R2-F2 (review round 2): vary an artifact the builder actually
+			// re-hashes (spec.md) per emission — the earlier extra-*.json
+			// fixture was never read, so content never changed.
 			const writers = Array.from({ length: 10 }, (_unused, index) => {
 				fs.writeFileSync(
-					path.join(dir, '.swarm', 'evidence', `extra-${index}.json`),
-					JSON.stringify({ i: index }),
+					path.join(dir, '.swarm', 'spec.md'),
+					`# Spec parallel-${index}\n`,
 				);
-				return executeReceiptEmission(dir, 'phase', '1', false).catch(
-					() => null,
-				);
+				return executeReceiptEmission(dir, 'phase', '1', false);
 			});
-			await Promise.all(writers);
+			const results = await Promise.all(writers);
+			// Every emission SUCCEEDED (serialized under the per-unit lock) and
+			// produced DISTINCT content — no two emission hashes equal.
+			const hashes = new Set(results.map((r) => r.receipt_hash));
+			expect(hashes.size).toBe(10);
 			const names = fs
 				.readdirSync(path.join(dir, '.swarm', 'evidence', 'receipts'))
-				.filter((n) => n.startsWith('receipt-phase-1'));
-			// Every emission produced a VALID receipt; retention caps the unit.
-			expect(names.length).toBeLessThanOrEqual(16); // <=8 json + <=8 md
-			for (const name of names.filter((n) => n.endsWith('.json'))) {
+				.filter((n) => /^receipt-phase-1-[0-9a-f]{12}\.(json|md)$/.test(n));
+			const json = names.filter((n) => n.endsWith('.json'));
+			const md = names.filter((n) => n.endsWith('.md'));
+			expect(json).toHaveLength(8); // retention capped the unit mid-race
+			expect(md).toHaveLength(8);
+			const stems = new Set(json.map((n) => n.replace(/\.json$/, '')));
+			for (const name of md) {
+				expect(stems.has(name.replace(/\.md$/, ''))).toBe(true);
+			}
+			for (const name of json) {
 				expect(() =>
 					JSON.parse(
 						fs.readFileSync(
@@ -135,6 +145,59 @@ describe('receipt hardening (review round 1)', () => {
 					),
 				).not.toThrow();
 			}
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test('concurrent same-content export is idempotent: every caller gets the published bundle (R2-F3)', async () => {
+		const dir = makeDir('receipt-par3-');
+		try {
+			await seedReport(dir);
+			const receipt = await buildVerificationReceipt(dir, 'phase', '1');
+			const markdown = renderReceiptMarkdown(receipt);
+			const results = await Promise.all([
+				writeExportBundle(dir, receipt, markdown),
+				writeExportBundle(dir, receipt, markdown),
+				writeExportBundle(dir, receipt, markdown),
+			]);
+			const dirs = new Set(results.map((r) => r.bundleDir));
+			expect(dirs.size).toBe(1);
+			expect(
+				fs.existsSync(path.join(results[0].bundleDir, 'receipt.json')),
+			).toBe(true);
+			const exportDir = path.join(dir, '.swarm', 'plan-export');
+			const published = fs
+				.readdirSync(exportDir)
+				.filter((n) => n.startsWith('receipt-phase-1') && !n.startsWith('.'));
+			expect(published).toHaveLength(1); // no stray staging leftovers
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test('verify stays green through a symlinked path to an untampered bundle (R2-F1)', async () => {
+		const dir = makeDir('receipt-link-');
+		try {
+			await seedReport(dir);
+			const receipt = await buildVerificationReceipt(dir, 'phase', '1');
+			const bundle = await writeExportBundle(
+				dir,
+				receipt,
+				renderReceiptMarkdown(receipt),
+			);
+			// macOS /tmp→/private/tmp analog: reach the SAME bundle through a
+			// directory junction alias of its parent.
+			const aliasParent = path.join(
+				path.dirname(bundle.bundleDir),
+				'alias-parent',
+			);
+			fs.symlinkSync(path.dirname(bundle.bundleDir), aliasParent, 'junction');
+			const viaLink = await executeReceiptVerify(
+				path.join(aliasParent, path.basename(bundle.bundleDir)),
+			);
+			expect(viaLink.ok).toBe(true);
+			expect(viaLink.summary).toContain('receipt verify OK');
 		} finally {
 			fs.rmSync(dir, { recursive: true, force: true });
 		}

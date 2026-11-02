@@ -327,7 +327,24 @@ export async function writeExportBundle(
 				);
 			}
 		}
-		renameSyncWithRetry(staging, finalDir);
+		try {
+			renameSyncWithRetry(staging, finalDir);
+		} catch (renameError) {
+			// R2-F3 (implementation review round 2): a concurrent export of
+			// the SAME receipt can win the rename; the loser's rename then
+			// fails over the just-published identical bundle. That race is
+			// idempotent by design — return the published bundle instead of
+			// throwing (staging is cleaned below as usual).
+			if (fs.existsSync(finalDir)) {
+				return {
+					bundleDir: finalDir,
+					receiptPath: path.join(finalDir, 'receipt.json'),
+					markdownPath: path.join(finalDir, 'receipt.md'),
+					artifactCount: receipt.artifacts.length,
+				};
+			}
+			throw renameError;
+		}
 	} catch (error) {
 		cleanup();
 		throw error;
