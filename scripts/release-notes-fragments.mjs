@@ -185,6 +185,10 @@ export function filterPendingFragmentPaths(files) {
 	if (!Array.isArray(files)) return [];
 	const out = [];
 	for (const entry of files) {
+		// Main-line #3519 parity (review Z-F3): a DELETED entry is a
+		// consumed fragment's removal record, not a content candidate.
+		const changeType = typeof entry === 'object' && typeof entry.changeType === 'string' ? entry.changeType.toLowerCase() : '';
+		if (changeType === 'deleted' || changeType === 'removed') continue;
 		const filePath = typeof entry === 'string' ? entry : entry?.path;
 		if (typeof filePath !== 'string' || filePath.length === 0) continue;
 		const posix = filePath.replace(/\\/g, '/');
@@ -320,8 +324,12 @@ function resolveCommitShasToPrNumbers(shas, logFn) {
 	for (const sha of shas) {
 		const res = tryGhJson(['api', '--paginate', '--slurp', `repos/${repoSlug}/commits/${sha}/pulls`]);
 		if (!res.ok || !Array.isArray(res.value)) {
-			logFn(`skip SHA ${sha.slice(0, 7)} — API lookup failed`);
-			continue;
+			// Fail closed on provenance lookup failure (review Z-F2): an
+			// empty result from a silently-failed lookup would drop the
+			// commit's fragments from the notes with green CI.
+			throw new Error(
+				`incomplete release provenance: commit ${sha.slice(0, 7)} lookup failed: ${res.err instanceof Error ? res.err.message : String(res.err)}`,
+			);
 		}
 		const prs = res.value.flat();
 		for (const n of selectValidPrNumbers(prs)) {
@@ -368,11 +376,33 @@ export function resolveAllCandidates(strippedBody, logFn) {
  * .git/config holding the job token) would be a disclosure channel.
  * Throws on any violation; returns the resolved absolute path.
  */
-function guardFragmentPath(repoRoot, relativePath) {
+/** Exported for unit tests (reparse-point ancestry / containment legs). */
+export function guardFragmentPath(repoRoot, relativePath) {
 	const resolvedRoot = path.resolve(repoRoot);
 	const resolvedTarget = path.resolve(repoRoot, relativePath);
 	if (resolvedTarget !== resolvedRoot && !resolvedTarget.startsWith(resolvedRoot + path.sep)) {
 		throw new Error(`fragment escapes the repository root: ${relativePath}`);
+	}
+	// Walk the EXISTING components from the root and reject any reparse
+	// point (symlink or junction) in the ancestry: the final-component
+	// lstat alone cannot see an intermediate junction that redirects an
+	// ancestor directory outside the repository (review Z-F1; main-line
+	// assertSafeDirectoryChain parity).
+	const relativeInside = path.relative(resolvedRoot, resolvedTarget);
+	const segments = relativeInside.split(path.sep).filter((segment) => segment !== '' && segment !== '.');
+	let cursor = resolvedRoot;
+	for (const segment of segments) {
+		cursor = path.join(cursor, segment);
+		let ancestorStat;
+		try {
+			ancestorStat = lstatSync(cursor);
+		} catch (error) {
+			if (error.code === 'ENOENT') break;
+			throw error;
+		}
+		if (ancestorStat.isSymbolicLink()) {
+			throw new Error(`unsafe release fragment path (reparse point in ancestry): ${relativePath}`);
+		}
 	}
 	const stat = lstatSync(resolvedTarget);
 	if (!stat.isFile() || stat.isSymbolicLink()) {
@@ -401,8 +431,16 @@ function readFragmentFromWorkspace(repoRoot, relativePath) {
 
 function verifyPr(num) {
 	const res = tryGhJson(['pr', 'view', String(num), '--json', 'number,files']);
-	if (!res.ok) return null;
-	return res.value;
+	if (res.ok) return res.value;
+	// A genuinely-absent PR reference (an issue number in the release body)
+	// is normal; a TRANSIENT gh failure (rate limit, timeout) must fail
+	// closed instead of silently dropping the candidate's fragments
+	// (review Z-F2).
+	const stderr = String(res.err?.stderr ?? '');
+	if (/could not resolve to a pull request|no pull request/i.test(stderr)) {
+		return { kind: 'non-pr' };
+	}
+	throw new Error(`candidate lookup failed for PR #${num}: ${res.err instanceof Error ? res.err.message : String(res.err)}`);
 }
 
 export function collectFragmentsForPrs(candidates, repoRoot, logFn, options = {}) {
@@ -414,6 +452,10 @@ export function collectFragmentsForPrs(candidates, repoRoot, logFn, options = {}
 	const seenPaths = new Set();
 	for (const num of candidates) {
 		const pr = verifyCandidate(num);
+		if (pr?.kind === 'non-pr') {
+			logFn(`skip #${num} — reference is an issue, not a PR`);
+			continue;
+		}
 		if (!pr || !Array.isArray(pr.files)) {
 			if (requireComplete) {
 				throw new Error(`incomplete release provenance: failed to resolve candidate PR #${num}`);

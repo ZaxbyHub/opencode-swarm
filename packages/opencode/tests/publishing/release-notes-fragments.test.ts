@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
-import { readFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
+import os from 'node:os';
 import path from 'node:path';
 // @ts-expect-error — .mjs script with no .d.ts; runtime imports are fine.
 import {
@@ -13,6 +14,7 @@ import {
 	extractCandidatePrNumbers,
 	extractChangelogSection,
 	filterPendingFragmentPaths,
+	guardFragmentPath,
 	matchesConsecutiveSubsequence,
 	planFragmentDeletions,
 	readLockstepVersion,
@@ -238,6 +240,68 @@ describe('release-notes-fragments — cleanup deletion planner (consume-and-remo
 		const plain = mk('Simple fragment.\n');
 		const plainPlan = planFragmentDeletions(upsertReleaseNotesBlock('rel', plain.content), [plain], () => plain.content);
 		expect(plainPlan.deletable.length).toBe(1);
+	});
+
+	test('guardFragmentPath rejects an intermediate junction in the ancestry (review Z-F1)', () => {
+		// Real reparse-point fixture: an intermediate junction on the path
+		// redirects an ancestor OUTSIDE the repo root while every lexical
+		// check passes (containment prefix + final-component regular file).
+		if (process.platform === 'win32') {
+			const outside = mkdtempSync(path.join(os.tmpdir(), 'guard-outside-'));
+			writeFileSync(path.join(outside, 'secret.txt'), 'OUTSIDE-MARKER');
+			const root = mkdtempSync(path.join(os.tmpdir(), 'guard-root-'));
+			const pending = path.join(root, 'pending');
+			mkdirSync(pending, { recursive: true });
+			symlinkSync(outside, path.join(pending, 'junction'), 'junction');
+			try {
+				expect(() => guardFragmentPath(root, path.join('pending', 'junction', 'secret.txt'))).toThrow(/reparse point in ancestry/);
+			} finally {
+				// Remove the junction NON-recursively first: recursive rmSync on
+				// a junction fails with EFAULT on Windows (kernel quirk), and
+				// rmdir on the reparse point never touches the target.
+				rmdirSync(path.join(pending, 'junction'));
+				rmSync(outside, { recursive: true, force: true, maxRetries: 3 });
+				rmSync(root, { recursive: true, force: true, maxRetries: 3 });
+			}
+		} else {
+			// POSIX: same shape via a real directory symlink (unprivileged).
+			const outside = mkdtempSync(path.join(os.tmpdir(), 'guard-outside-'));
+			writeFileSync(path.join(outside, 'secret.txt'), 'OUTSIDE-MARKER');
+			const root = mkdtempSync(path.join(os.tmpdir(), 'guard-root-'));
+			const pending = path.join(root, 'pending');
+			mkdirSync(pending, { recursive: true });
+			try {
+				symlinkSync(outside, path.join(pending, 'link'));
+				expect(() => guardFragmentPath(root, path.join('pending', 'link', 'secret.txt'))).toThrow(/reparse point in ancestry/);
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== 'EPERM') throw error;
+				console.log('skip: symlink creation not permitted on this host');
+			} finally {
+				try {
+					rmSync(path.join(pending, 'link'), { force: true, maxRetries: 3 });
+				} catch {
+					// unlink of a symlink dir may need rmdir on some hosts
+				}
+				rmSync(outside, { recursive: true, force: true, maxRetries: 3 });
+				rmSync(root, { recursive: true, force: true, maxRetries: 3 });
+			}
+		}
+		// Containment escape still rejected (lexical .. traversal).
+		expect(() => guardFragmentPath(mkdtempSync(path.join(os.tmpdir(), 'guard-lex-')), 'docs/../../escape.md')).toThrow(/escapes the repository root/);
+	});
+
+	test('filterPendingFragmentPaths skips DELETED entries (consumed-fragment records are not content candidates, review Z-F3)', () => {
+		const files = [
+			{ path: 'docs/releases/pending/kept.md', changeType: 'added' },
+			{ path: 'docs/releases/pending/consumed.md', changeType: 'deleted' },
+			{ path: 'docs/releases/pending/removed.md', changeType: 'removed' },
+			{ path: 'docs/releases/pending/upper.md', changeType: 'DELETED' },
+			{ path: 'docs/releases/pending/plain.md' },
+		];
+		expect(filterPendingFragmentPaths(files)).toEqual([
+			'docs/releases/pending/kept.md',
+			'docs/releases/pending/plain.md',
+		]);
 	});
 
 	test('matchesConsecutiveSubsequence elementwise semantics', () => {
