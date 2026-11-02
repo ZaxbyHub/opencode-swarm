@@ -1,5 +1,16 @@
 name: release-please-next
 
+# Serialize the whole workflow: two overlapping runs (two quick release-PR
+# merges, or push + dispatch) would otherwise publish concurrently, and npm
+# dist-tags are last-writer-wins — the loser can leave `next` pointing at
+# the older of two published versions (#3229 AC2). cancel-in-progress: false
+# protects the IN-PROGRESS run; note GitHub still CANCELS a PENDING run when
+# a newer one queues, so a force_publish recovery dispatch can be dropped by
+# a concurrent push — the operator's recovery is to re-dispatch.
+concurrency:
+  group: release-please-next
+  cancel-in-progress: false
+
 on:
   push:
     branches: [next]
@@ -18,7 +29,7 @@ jobs:
       pull-requests: write
     outputs:
       releases_created: ${{ steps.rp.outputs.releases_created }}
-      tag_name: ${{ steps.rp.outputs.tag_name }}
+      paths_released: ${{ steps.rp.outputs.paths_released }}
     steps:
       - uses: googleapis/release-please-action@16a9c90856f42705d54a6fda1823352bdc62cf38 # v4
         id: rp
@@ -26,15 +37,64 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           target-branch: next
 
+  # Enrich the open release-please PR's body with the pending fragments of
+  # the PRs it includes. Runs after EVERY successful release-please run —
+  # a single run can both cut a release AND open/update the next pending
+  # release PR, so gating on `releases_created` would skip exactly that
+  # case and leave the pending PR without its custom-release-notes block.
+  # Independent of publishing (a publish failure must not strand notes).
+  update-release-pr:
+    needs: [release-please]
+    if: ${{ always() && needs.release-please.result == 'success' }}
+    runs-on: ubuntu-latest
+    # Serialize body read-modify-write: two runs each read the body,
+    # recompute notes, then `gh pr edit` — last writer would silently win.
+    concurrency:
+      group: update-pr-notes-next
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          # The scripts read PR-author-controlled fragment paths; never leave
+          # the job token persisted in .git/config for them to reach.
+          persist-credentials: false
+
+      - name: Aggregate pending release-note fragments into the release PR body
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: node scripts/release-notes-fragments.mjs update-pr
+
+  # Ref guard (#3229 AC3): fail the publish job BEFORE any npm publish
+  # executes when the run is not from refs/heads/next. Uses the runner's
+  # default GITHUB_REF env (no expression interpolation into shell text).
+  # Preserves the documented recovery: an explicit workflow_dispatch with
+  # force_publish=true FROM next has GITHUB_REF=refs/heads/next, and
+  # "Re-run failed jobs" replays the original event's ref.
   publish-npm-next:
-    needs: release-please
+    needs: [release-please]
     if: ${{ needs.release-please.outputs.releases_created == 'true' || inputs.force_publish == true }}
     runs-on: ubuntu-latest
     environment: npm
     permissions:
       contents: read
       id-token: write
+    env:
+      # Expression values reach the scripts through env: only (#3229 AC1) —
+      # direct ${{ }} interpolation into run: text is the injection pattern
+      # GitHub's own hardening guide forbids.
+      FORCE_PUBLISH: ${{ inputs.force_publish }}
     steps:
+      - name: Refuse publishes from refs other than next
+        run: |
+          if [ "$GITHUB_REF" != "refs/heads/next" ]; then
+            echo "::error::publish refused: GITHUB_REF=$GITHUB_REF is not refs/heads/next"
+            exit 1
+          fi
+
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: ${{ github.sha }}
@@ -63,6 +123,12 @@ jobs:
       - name: Build all packages
         run: bun run build
 
+      # Rollback for a BAD release (operator runbook): retag the npm dist-tag
+      # (`npm dist-tag add <pkg>@<good> next`) and `npm deprecate` the bad
+      # version - a published beta cannot be unpublished once installers
+      # reference it, so the retag + deprecate pair is the recovery. The
+      # maintainer runbook in the PR body carries the full sequence.
+      #
       # Publish steps fail closed (issue #3150): `set -eo pipefail` propagates
       # npm's exit status through tee, and any publish failure fails the job.
       # The historical `... | tee; grep -q 'E403|already exists' && echo || cat`
@@ -80,7 +146,7 @@ jobs:
           set -eo pipefail
           cd packages/telemetry
           if ! npm publish --tag next --access public 2>&1 | tee /tmp/pub.log; then
-            if [ "${{ inputs.force_publish }}" = "true" ] && grep -q 'cannot publish over the previously published versions\|already exists' /tmp/pub.log; then
+            if [ "$FORCE_PUBLISH" = "true" ] && grep -q 'cannot publish over the previously published versions\|already exists' /tmp/pub.log; then
               echo "Already published, skipping (force_publish retry)"
             else
               echo "::error::npm publish failed for @opencode-swarm/telemetry"
@@ -95,7 +161,7 @@ jobs:
           set -eo pipefail
           cd packages/core
           if ! npm publish --tag next --access public 2>&1 | tee /tmp/pub.log; then
-            if [ "${{ inputs.force_publish }}" = "true" ] && grep -q 'cannot publish over the previously published versions\|already exists' /tmp/pub.log; then
+            if [ "$FORCE_PUBLISH" = "true" ] && grep -q 'cannot publish over the previously published versions\|already exists' /tmp/pub.log; then
               echo "Already published, skipping (force_publish retry)"
             else
               echo "::error::npm publish failed for @opencode-swarm/core"
@@ -110,7 +176,7 @@ jobs:
           set -eo pipefail
           cd packages/claude-code
           if ! npm publish --tag next --access public 2>&1 | tee /tmp/pub.log; then
-            if [ "${{ inputs.force_publish }}" = "true" ] && grep -q 'cannot publish over the previously published versions\|already exists' /tmp/pub.log; then
+            if [ "$FORCE_PUBLISH" = "true" ] && grep -q 'cannot publish over the previously published versions\|already exists' /tmp/pub.log; then
               echo "Already published, skipping (force_publish retry)"
             else
               echo "::error::npm publish failed for @opencode-swarm/claude-code"
@@ -125,7 +191,7 @@ jobs:
           set -eo pipefail
           cd packages/opencode
           if ! npm publish --tag next --access public 2>&1 | tee /tmp/pub.log; then
-            if [ "${{ inputs.force_publish }}" = "true" ] && grep -q 'cannot publish over the previously published versions\|already exists' /tmp/pub.log; then
+            if [ "$FORCE_PUBLISH" = "true" ] && grep -q 'cannot publish over the previously published versions\|already exists' /tmp/pub.log; then
               echo "Already published, skipping (force_publish retry)"
             else
               echo "::error::npm publish failed for opencode-swarm"
@@ -134,3 +200,162 @@ jobs:
           fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  # Keep the GitHub Release bodies in sync after tags. Depends on
+  # release-please ONLY (never on publish success — a failed publish must
+  # not strand the release notes). Tag derivation is fail-closed on
+  # lockstep: all four manifest versions must be identical before any tag
+  # is derived (#3229 review round 2).
+  update-release-body:
+    needs: [release-please]
+    if: ${{ always() && needs.release-please.result == 'success' && needs.release-please.outputs.releases_created == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      # gh release view/edit needs contents write; fragment discovery READS
+      # PR metadata (`gh pr view --json files`, `commits/{sha}/pulls`) — with
+      # a scoped permissions block every unspecified scope is NONE, so
+      # pull-requests: read must be granted explicitly or verifyPr swallows
+      # 403s and the step silently no-ops (review round 2). Mirrors the
+      # main-line counterpart (release-and-publish.yml update-release-notes).
+      contents: write
+      pull-requests: read
+    steps:
+      - name: Refuse runs from refs other than next
+        run: |
+          if [ "$GITHUB_REF" != "refs/heads/next" ]; then
+            echo "::error::release-body update refused: GITHUB_REF=$GITHUB_REF is not refs/heads/next"
+            exit 1
+          fi
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Derive lockstep release tags (fail closed on partial bumps)
+        env:
+          PATHS_RELEASED: ${{ needs.release-please.outputs.paths_released }}
+        run: |
+          set -euo pipefail
+          node scripts/release-notes-fragments.mjs lockstep-tags > /tmp/rp-out.txt
+          head -1 /tmp/rp-out.txt > /tmp/rp-version.txt
+          tail -n +2 /tmp/rp-out.txt > /tmp/rp-taglist.txt
+          echo "release-please paths_released (corroboration): ${PATHS_RELEASED:-<unset>}"
+          echo "Releasing $(cat /tmp/rp-version.txt) for tags:"
+          cat /tmp/rp-taglist.txt
+
+      - name: Update GitHub Release bodies with pending fragments
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          status=0
+          while IFS= read -r tag; do
+            echo "=== $tag ==="
+            TAG_NAME="$tag" node scripts/release-notes-fragments.mjs update-release || status=1
+          done < /tmp/rp-taglist.txt
+          exit "$status"
+
+  # Consume-and-remove (#3228 AC3): delete exactly the fragments the
+  # release published, on a cleanup branch + PR (main-line semantics).
+  # Runs only after the release bodies were successfully updated; a
+  # failing cleanup can never block a release.
+  cleanup-fragments:
+    needs: [update-release-body]
+    if: ${{ always() && needs.update-release-body.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Refuse runs from refs other than next
+        run: |
+          if [ "$GITHUB_REF" != "refs/heads/next" ]; then
+            echo "::error::cleanup refused: GITHUB_REF=$GITHUB_REF is not refs/heads/next"
+            exit 1
+          fi
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          # The release merge SHA is the deletion anchor: fragment bytes are
+          # hashed from THIS tree, so the SAME-RUN integrity leg pins what
+          # was published. Note the honest limit: a fragment edited on
+          # `next` AFTER the release commit is invisible to this checkout,
+          # so the cleanup PR deletes the released version and the edit
+          # surfaces as a delete/modify conflict on merge — the maintainer
+          # resolves it in the edit's favor (the script's content oracle
+          # cannot see post-release edits from a pinned checkout).
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          # Scripts here read PR-author-controlled fragment paths; do not
+          # leave the job token in .git/config. Push auth comes from
+          # `gh auth setup-git` below (GH_TOKEN-based, not a persisted
+          # checkout credential).
+          persist-credentials: false
+
+      - name: Consume release-note fragments (delete published ones, PR the removal)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          node scripts/release-notes-fragments.mjs lockstep-tags > /tmp/rp-out.txt
+          version="$(head -1 /tmp/rp-out.txt)"
+          tail -n +2 /tmp/rp-out.txt > /tmp/rp-taglist.txt
+          : > /tmp/delete-list.txt
+          status=0
+          while IFS= read -r tag; do
+            echo "=== cleanup $tag ==="
+            TAG_NAME="$tag" CLEANUP_PLAN_FILE=/tmp/delete-list.append \
+              node scripts/release-notes-fragments.mjs cleanup || status=1
+            if [ -f /tmp/delete-list.append ]; then
+              cat /tmp/delete-list.append >> /tmp/delete-list.txt
+              rm -f /tmp/delete-list.append
+            fi
+          done < /tmp/rp-taglist.txt
+          [ "$status" -eq 0 ] || exit 1
+          if [ ! -s /tmp/delete-list.txt ]; then
+            echo "No fragments to delete — done"
+            exit 0
+          fi
+          sort -u /tmp/delete-list.txt > /tmp/delete-unique.txt
+          echo "Fragments to consume (delete):"
+          cat /tmp/delete-unique.txt
+          branch="chore/next-release-fragments-$version"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          # Branch-identity validation before any overwrite (review PRR-019):
+          # if a same-named branch already exists on the remote, refuse
+          # unless it is one of OUR cleanup branches (subject pin).
+          remote_sha="$(git ls-remote origin "refs/heads/$branch" | cut -f1)"
+          if [ -n "$remote_sha" ]; then
+            git fetch --quiet origin "refs/heads/$branch"
+            subject="$(git log -1 --format=%s "refs/remotes/origin/$branch")"
+            case "$subject" in
+              "chore(release): consume release-note fragments"*|"chore(release): consume release-note fragments"*) ;;
+              *) echo "::error::refusing to overwrite foreign branch $branch (head subject: $subject)"; exit 1 ;;
+            esac
+          fi
+          git checkout -B "$branch"
+          while IFS= read -r frag; do
+            git rm "$frag"
+          done < /tmp/delete-unique.txt
+          git commit -m "chore(release): consume release-note fragments for $version"
+          # Push auth without a persisted checkout credential: configure
+          # git to authenticate through gh with GH_TOKEN.
+          gh auth setup-git
+          if [ -n "$remote_sha" ]; then
+            git push --force-with-lease="refs/heads/$branch:$remote_sha" origin "$branch"
+          else
+            git push origin "$branch"
+          fi
+          body="Deletes the pending release-note fragments consumed by release $version (published verbatim in the GitHub Release bodies). Auto-generated by the release-please-next workflow. MAINTAINER: verify the deletion list above before merging - the diff must touch only docs/releases/pending/."
+          existing="$(gh pr list --head "$branch" --base next --json number --limit 1)"
+          if [ "$existing" = "[]" ]; then
+            gh pr create --base next --head "$branch" \
+              --title "chore(release): consume release-note fragments for $version" \
+              --body "$body"
+          else
+            number="$(printf '%s' "$existing" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const a=JSON.parse(d);process.stdout.write(String(a[0]?.number??""))})')"
+            gh pr edit "$number" --title "chore(release): consume release-note fragments for $version" --body "$body"
+          fi

@@ -18,6 +18,12 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          # Full history: the release-please config guard's ancestry /
+          # no-breaking-commit legs verify the bootstrap bound and need
+          # the merge base (a shallow checkout skips them honestly -
+          # review PRR-015 - which would leave the bound CI-unverified).
+          fetch-depth: 0
       - uses: oven-sh/setup-bun@3d267786b128fe76c2f16a390aa2448b815359f3 # v2
         with:
           bun-version: latest
