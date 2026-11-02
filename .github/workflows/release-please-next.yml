@@ -123,6 +123,12 @@ jobs:
       - name: Build all packages
         run: bun run build
 
+      # Rollback for a BAD release (operator runbook): retag the npm dist-tag
+      # (`npm dist-tag add <pkg>@<good> next`) and `npm deprecate` the bad
+      # version - a published beta cannot be unpublished once installers
+      # reference it, so the retag + deprecate pair is the recovery. The
+      # maintainer runbook in the PR body carries the full sequence.
+      #
       # Publish steps fail closed (issue #3150): `set -eo pipefail` propagates
       # npm's exit status through tee, and any publish failure fails the job.
       # The historical `... | tee; grep -q 'E403|already exists' && echo || cat`

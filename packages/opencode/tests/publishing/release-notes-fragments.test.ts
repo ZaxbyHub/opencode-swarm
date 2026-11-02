@@ -12,6 +12,7 @@ import {
 	combineRenderedFragments,
 	customReleaseNotesPayload,
 	extractCandidatePrNumbers,
+	classifyCandidateRecord,
 	extractChangelogSection,
 	filterPendingFragmentPaths,
 	guardFragmentPath,
@@ -311,6 +312,19 @@ describe('release-notes-fragments — cleanup deletion planner (consume-and-remo
 		expect(matchesConsecutiveSubsequence([], ['x'])).toBe(false);
 	});
 
+	test('classifyCandidateRecord: PR / issue / malformed (review FC-10 - gh-version-independent classification)', () => {
+		// The issues API answers for both; only PRs carry the pull_request
+		// object. Classification must NOT depend on gh's stderr text (which
+		// differs across gh versions: "Could not resolve to a PullRequest"
+		// has no spaces, and Z-F2's regex missed it - the regex would have
+		// thrown on the issue references in THIS repo's own release bodies).
+		expect(classifyCandidateRecord({ number: 1, pull_request: { url: 'https://example/pull/1' } })).toBe('pr');
+		expect(classifyCandidateRecord({ number: 3150 })).toBe('non-pr');
+		expect(classifyCandidateRecord({ number: 3151, pull_request: null })).toBe('non-pr');
+		expect(classifyCandidateRecord(null)).toBe(null);
+		expect(classifyCandidateRecord('garbage')).toBe(null);
+	});
+
 	test('extractChangelogSection scopes to the tagged version (review PRR-011)', () => {
 		const changelog = [
 			'# Changelog',
@@ -342,14 +356,18 @@ describe('release-notes-fragments — cleanup deletion planner (consume-and-remo
 		expect(configComponents).toEqual([...COMPONENTS].sort());
 	});
 
-	test('the pending fragment on this branch survives the planner (nothing references it yet)', () => {
-		// Sanity for AC8: the real pending fragment exists and no release
-		// body references it, so a cleanup run against today's state deletes
-		// nothing.
-		const fragmentPath = 'docs/releases/pending/3150-8x-next-release-enablement.md';
-		const content = readFileSync(path.join(REPO_ROOT, fragmentPath), 'utf8');
-		const entries = [{ prNumber: 3220, filePath: fragmentPath, content, sha256: sha256Of(content) }];
+	test('a pending fragment unrelated to any release body survives the planner (inline fixture, review FC-12)', () => {
+		// Inline fixture (NOT the live pending fragment): the first cleanup
+		// PR deletes docs/releases/pending/3150-8x-*.md once the healing
+		// release ships, so this suite must never read that file.
+		const fragmentPath = 'docs/releases/pending/fixture-3150-planner-survival.md';
+		const content = 'Fixture fragment body (not a real pending file).';
+		const entries = [{ prNumber: 3150, filePath: fragmentPath, content, sha256: sha256Of(content) }];
 		const plan = planFragmentDeletions('some unrelated release body', entries, () => content);
 		expect(plan.deletable).toEqual([]);
+		// The planner is body-driven, never file-identity-driven: a fragment
+		// at any path whose content is absent from the body is retained.
+		const plan2 = planFragmentDeletions('unrelated body', entries, () => content);
+		expect(plan2.retained.length).toBe(1);
 	});
 });

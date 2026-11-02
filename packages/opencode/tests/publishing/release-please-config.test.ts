@@ -152,7 +152,7 @@ describe('release-please config (issue #3150 release enablement)', () => {
 		// nothing). The trailer leg therefore sees hyphen-form footers.
 		const trailers = Bun.spawnSync(
 			['git', '-C', REPO_ROOT, 'log', '--format=%H|%-(trailers:key=BREAKING-CHANGE,valueonly)', `${REQUIRED_BOOTSTRAP_SHA}..HEAD`],
-			{ stdout: 'pipe', stderr: 'ignore' },
+			{ stdout: 'pipe', stderr: 'ignore', timeout: 30_000 },
 		);
 		expect(trailers.exitCode).toBe(0);
 		const trailerBreaking = trailers.stdout.toString().split('\n').filter((line) => {
@@ -167,7 +167,7 @@ describe('release-please config (issue #3150 release enablement)', () => {
 		// NUL cannot travel in an argv string).
 		const bodies = Bun.spawnSync(
 			['git', '-C', REPO_ROOT, 'log', '--format=%H%x1e%B%x1e', `${REQUIRED_BOOTSTRAP_SHA}..HEAD`],
-			{ stdout: 'pipe', stderr: 'ignore' },
+			{ stdout: 'pipe', stderr: 'ignore', timeout: 30_000 },
 		);
 		expect(bodies.exitCode).toBe(0);
 		// Framing: `%H%x1e%B%x1e` emits sha + RS + body + RS per commit, so
@@ -226,7 +226,7 @@ describe('breaking-commit body-scan leg is self-verifying (#3229 R2)', () => {
 			// every runner image.
 			const res = Bun.spawnSync(
 				['git', '-C', REPO_ROOT, '-c', 'user.name=issue-tracer-probe', '-c', 'user.email=probe@example.invalid', 'commit-tree', treeSha, '-p', 'HEAD', '-m', message],
-				{ stdout: 'pipe', stderr: 'ignore' },
+				{ stdout: 'pipe', stderr: 'ignore', timeout: 30_000 },
 			);
 			expect(res.exitCode).toBe(0);
 			return res.stdout.toString().trim();
@@ -236,7 +236,7 @@ describe('breaking-commit body-scan leg is self-verifying (#3229 R2)', () => {
 		const trailerValue = (sha: string, key: string): string => {
 			const res = Bun.spawnSync(
 				['git', '-C', REPO_ROOT, 'log', '-1', `--format=%(trailers:key=${key},valueonly)`, sha],
-				{ stdout: 'pipe', stderr: 'ignore' },
+				{ stdout: 'pipe', stderr: 'ignore', timeout: 30_000 },
 			);
 			return res.stdout.toString().trim();
 		};

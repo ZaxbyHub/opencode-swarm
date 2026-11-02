@@ -53,6 +53,7 @@ export const FRAGMENT_SEPARATOR = '\n\n---\n\n';
 
 export const MAX_RELEASE_CANDIDATES = 1_000;
 export const MAX_CHANGELOG_FALLBACK_BYTES = 2 * 1024 * 1024;
+export const MAX_FALLBACK_CANDIDATES = 50;
 export const MAX_FRAGMENT_ENTRIES = 5_000;
 export const MAX_FRAGMENT_BYTES = 256 * 1024;
 export const MAX_PR_DIGITS = 7;
@@ -429,18 +430,37 @@ function readFragmentFromWorkspace(repoRoot, relativePath) {
 	return { content, sha256: sha256(content) };
 }
 
+/**
+ * Classify an issues-API record (pure; exported for unit tests). An issue
+ * reference in a release body is NORMAL (this repo's own healing-release
+ * body references #3150/#3151/#3228/#3229), so classification must NOT
+ * depend on gh's error text - which varies across gh versions and
+ * misclassified issues with review Z-F2's regex (review FC-10; main-line
+ * parity: classify via the issues API's pull_request field).
+ * Returns 'pr' | 'non-pr' | null (null = malformed record -> caller throws).
+ */
+export function classifyCandidateRecord(record) {
+	if (!record || typeof record !== 'object') return null;
+	return record.pull_request ? 'pr' : 'non-pr';
+}
+
 function verifyPr(num) {
-	const res = tryGhJson(['pr', 'view', String(num), '--json', 'number,files']);
-	if (res.ok) return res.value;
-	// A genuinely-absent PR reference (an issue number in the release body)
-	// is normal; a TRANSIENT gh failure (rate limit, timeout) must fail
-	// closed instead of silently dropping the candidate's fragments
-	// (review Z-F2).
-	const stderr = String(res.err?.stderr ?? '');
-	if (/could not resolve to a pull request|no pull request/i.test(stderr)) {
+	// Classification probe: the issues API answers for both issues and PRs
+	// and carries a pull_request object only for PRs.
+	const issuesRes = tryGhJson(['api', `repos/${process.env.GITHUB_REPOSITORY ?? ''}/issues/${num}`]);
+	if (!issuesRes.ok) {
+		throw new Error(`candidate lookup failed for PR #${num}: ${issuesRes.err instanceof Error ? issuesRes.err.message : String(issuesRes.err)}`);
+	}
+	const kind = classifyCandidateRecord(issuesRes.value);
+	if (kind !== 'pr') {
 		return { kind: 'non-pr' };
 	}
-	throw new Error(`candidate lookup failed for PR #${num}: ${res.err instanceof Error ? res.err.message : String(res.err)}`);
+	// It is a PR: fetch its changed files for fragment selection.
+	const prRes = tryGhJson(['pr', 'view', String(num), '--json', 'number,files']);
+	if (!prRes.ok) {
+		throw new Error(`candidate file lookup failed for PR #${num}: ${prRes.err instanceof Error ? prRes.err.message : String(prRes.err)}`);
+	}
+	return prRes.value;
 }
 
 export function collectFragmentsForPrs(candidates, repoRoot, logFn, options = {}) {
@@ -658,6 +678,10 @@ async function modeUpdateRelease(logFn) {
 			const section = extractChangelogSection(readFileSync(changelogPath, 'utf8'), parsedTag.version);
 			if (section !== '') {
 				allCandidates = resolveAllCandidates(section, logFn);
+				if (allCandidates.length > MAX_FALLBACK_CANDIDATES) {
+					logFn(`CHANGELOG fallback clamped ${allCandidates.length} -> ${MAX_FALLBACK_CANDIDATES} candidates (main parity)`);
+					allCandidates = allCandidates.slice(0, MAX_FALLBACK_CANDIDATES);
+				}
 				if (allCandidates.length > 0) {
 					logFn(`resolved ${allCandidates.length} candidate PR(s) from ${parsedTag.component} CHANGELOG section ${parsedTag.version}`);
 				}
@@ -787,6 +811,10 @@ async function modeCleanup(logFn) {
 			const section = extractChangelogSection(readFileSync(changelogPath, 'utf8'), parsedTag.version);
 			if (section !== '') {
 				allCandidates = resolveAllCandidates(section, logFn);
+				if (allCandidates.length > MAX_FALLBACK_CANDIDATES) {
+					logFn(`CHANGELOG fallback clamped ${allCandidates.length} -> ${MAX_FALLBACK_CANDIDATES} candidates (main parity)`);
+					allCandidates = allCandidates.slice(0, MAX_FALLBACK_CANDIDATES);
+				}
 				if (allCandidates.length > 0) {
 					logFn(`resolved ${allCandidates.length} candidate PR(s) from ${parsedTag.component} CHANGELOG section ${parsedTag.version}`);
 				}
