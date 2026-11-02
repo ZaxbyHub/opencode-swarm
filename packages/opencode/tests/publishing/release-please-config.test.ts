@@ -57,7 +57,7 @@ function loadConfig(): Record<string, unknown> {
 function gitExitCode(args: string[]): number | undefined {
 	// NOTE: Bun.spawnSync THROWS (ENOENT) when the binary is absent; a throw
 	// here is a real environment failure, not a skip condition.
-	return Bun.spawnSync(['git', '-C', REPO_ROOT, ...args], { stdout: 'ignore', stderr: 'ignore' }).exitCode;
+	return Bun.spawnSync(['git', '-C', REPO_ROOT, ...args], { stdout: 'ignore', stderr: 'ignore', timeout: 30_000 }).exitCode;
 }
 
 describe('release-please config (issue #3150 release enablement)', () => {
@@ -129,6 +129,7 @@ describe('release-please config (issue #3150 release enablement)', () => {
 		const shallow = Bun.spawnSync(['git', '-C', REPO_ROOT, 'rev-parse', '--is-shallow-repository'], {
 			stdout: 'pipe',
 			stderr: 'ignore',
+			timeout: 30_000,
 		});
 		if (shallow.exitCode === 0 && shallow.stdout.toString().trim() === 'true') {
 			console.log(`skip: shallow checkout cannot verify the ancestry of ${REQUIRED_BOOTSTRAP_SHA.slice(0, 8)} - run in a full clone to exercise this leg`);
@@ -188,6 +189,7 @@ describe('release-please config (issue #3150 release enablement)', () => {
 		const subjects = Bun.spawnSync(['git', '-C', REPO_ROOT, 'log', '--format=%s', `${REQUIRED_BOOTSTRAP_SHA}..HEAD`], {
 			stdout: 'pipe',
 			stderr: 'ignore',
+			timeout: 30_000,
 		});
 		expect(subjects.exitCode).toBe(0);
 		const bangBreaking = subjects.stdout.toString().split('\n').filter((line) => /^[a-zA-Z]+(\([^)]*\))?!:/.test(line));
@@ -216,7 +218,7 @@ describe('breaking-commit body-scan leg is self-verifying (#3229 R2)', () => {
 		// created, no working-tree impact) carry one footer spelling each —
 		// the executed proof that the trailer leg alone is insufficient and
 		// the body-scan leg is load-bearing.
-		const tree = Bun.spawnSync(['git', '-C', REPO_ROOT, 'rev-parse', 'HEAD^{tree}'], { stdout: 'pipe', stderr: 'ignore' });
+		const tree = Bun.spawnSync(['git', '-C', REPO_ROOT, 'rev-parse', 'HEAD^{tree}'], { stdout: 'pipe', stderr: 'ignore', timeout: 30_000 });
 		expect(tree.exitCode).toBe(0);
 		const treeSha = tree.stdout.toString().trim();
 		const commitWithMessage = (message: string): string => {
