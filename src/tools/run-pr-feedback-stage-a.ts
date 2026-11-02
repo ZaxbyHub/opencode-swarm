@@ -979,7 +979,7 @@ function hasDangerousCompoundSegment(scriptText: string): boolean {
 		current += ch;
 	}
 	segments.push(current);
-	const isSegmentSafe = (rawSegment: string): boolean => {
+	const isSegmentSafe = (rawSegment: string, exemptHead = false): boolean => {
 		const trimmed = rawSegment.trim();
 		if (trimmed.length === 0) return false;
 		if (/[&|;(){}<>\r\n]/.test(trimmed)) return false;
@@ -1003,7 +1003,10 @@ function hasDangerousCompoundSegment(scriptText: string): boolean {
 		if (/[$\\'"~*?]/.test(head)) return false;
 		const headLower = head.toLowerCase();
 		if (COMPOUND_REFUSED_HEADS.has(headLower)) return false;
-		if (BLOCKED_EXECUTABLES.has(headLower)) return false;
+		// `exemptHead` is used ONLY for the terminal echo/printf allowance
+		// (rule 4): every other axis — metacharacters, literal head,
+		// mutating/eval/override flags — still applies to the tail.
+		if (!exemptHead && BLOCKED_EXECUTABLES.has(headLower)) return false;
 		const args = tokens.slice(headIndex + 1);
 		if (args.some((arg) => MUTATING_ARGUMENT.test(arg))) return false;
 		if (
@@ -1024,14 +1027,19 @@ function hasDangerousCompoundSegment(scriptText: string): boolean {
 		}
 		return true;
 	};
-	// Rule 4: terminal echo/printf allowance inside the all-&& chain.
+	// Rule 4: terminal echo/printf allowance inside the all-&& chain. The
+	// tail must FIRST pass the same metacharacter/literal screens as every
+	// other segment (4.5 review round 1: `echo done > .secretscanignore` and
+	// `echo done; curl …` must refuse — an exempt HEAD never exempts a
+	// redirect/separator smuggled into the tail).
 	const lastRaw = segments[segments.length - 1] ?? '';
 	const lastTrimmed = lastRaw.trim();
 	const lastHead = (lastTrimmed.match(/[^\s]+/) ?? [''])[0];
 	const lastIsExemptTail =
 		(lastHead === 'echo' || lastHead === 'printf') &&
 		!/[$\\'"~*?]/.test(lastHead) &&
-		!/^[A-Za-z_][A-Za-z0-9_]*=/.test(lastTrimmed);
+		!/^[A-Za-z_][A-Za-z0-9_]*=/.test(lastTrimmed) &&
+		isSegmentSafe(lastRaw, true);
 	const evaluated = lastIsExemptTail ? segments.slice(0, -1) : segments;
 	if (evaluated.length === 0) {
 		// Zero non-exempt segments (`echo one && echo two`): no validation
@@ -2293,12 +2301,13 @@ export async function executeRunPrFeedbackStageA(
 				} catch {
 					// Best-effort evidence; the revocation below is the gate.
 				}
-				// Ignore the caller provenance: base-identical trust decisions
-				// must not consume a base the activation binding contradicts.
+				// #3396 S1c: ignore the caller provenance — the run CONTINUES
+				// with exactly the no-provenance behavior (trusted
+				// base-identical scripts unavailable; a run that needs them
+				// fails through the ordinary opaque-script path, and a run
+				// that needs none still succeeds). Persisting the mismatch
+				// marker above keeps durable evidence either way.
 				contractBase = undefined;
-				return failure(
-					`Stage A base_sha ${''} contradicts the durably bound PR_FEEDBACK merge base — caller provenance is ignored (trusted base-identical scripts are unavailable for this run). Re-run Stage A with the bound merge base, or re-activate PR_FEEDBACK against the current PR`,
-				);
 			}
 		}
 	}

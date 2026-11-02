@@ -3392,17 +3392,70 @@ function detectArchiveExtract(cmd: unknown): WriteTarget[] {
  * then selects candidate basenames itself (executed proof, plan critic
  * round 2), so no static target can be trusted.
  */
+// #3120 4.5 review round 1: git GLOBAL options ahead of a subcommand
+// (`git -C . apply`, `git --no-pager checkout …`, `git -c k=v …`) do not
+// change the write semantics, and execution wrappers (`env git …`,
+// `command git …`) resolve through detectorCommandPartsFromWords. Returns
+// the wrapper-consumed words with the git global options skipped, so the
+// subcommand sits at index 0.
+function gitSubcommandWords(cmd: unknown): { leaf: string; words: string[] } {
+	const parts = detectorCommandPartsFromWords(
+		getCommandName(cmd),
+		getSuffixWords(cmd),
+	);
+	const suffixWords = parts.rest;
+	const gitGlobalsWithValue = new Set([
+		'-C',
+		'-c',
+		'--git-dir',
+		'--work-tree',
+		'--namespace',
+		'--exec-path',
+		'--super-prefix',
+	]);
+	const gitFlagGlobals = new Set([
+		'--no-pager',
+		'--paginate',
+		'--bare',
+		'--literal-pathspecs',
+		'--no-optional-locks',
+		'--no-replace-objects',
+		'--noglob-pathspecs',
+		'--icase-pathspecs',
+	]);
+	let cursor = 0;
+	while (cursor < suffixWords.length) {
+		const token = suffixWords[cursor];
+		if (gitFlagGlobals.has(token)) {
+			cursor += 1;
+			continue;
+		}
+		const valueGlobal = [...gitGlobalsWithValue].find(
+			(g) => token === g || token.startsWith(`${g}=`),
+		);
+		if (valueGlobal) {
+			cursor += token.includes('=') ? 1 : 2;
+			continue;
+		}
+		break;
+	}
+	return { leaf: parts.leaf, words: suffixWords.slice(cursor) };
+}
+
 function detectPatchApply(cmd: unknown): WriteTarget[] {
 	const results: WriteTarget[] = [];
-	const leaf = detectorCommandLeaf(cmd);
+	const resolved = gitSubcommandWords(cmd);
+	const leaf = resolved.leaf;
 	if (leaf !== 'git' && leaf !== 'patch') return results;
-
-	const suffixWords = getSuffixWords(cmd);
+	const suffixWords =
+		leaf === 'git'
+			? resolved.words
+			: detectorCommandPartsFromWords(getCommandName(cmd), getSuffixWords(cmd))
+					.rest;
 	if (suffixWords.length === 0) return results;
 
 	const isGit = leaf === 'git';
 	if (isGit && suffixWords[0]?.toLowerCase() !== 'apply') return results;
-
 	const words = isGit ? suffixWords.slice(1) : suffixWords;
 	const GIT_APPLY_OK = /^-(?:p\d+|q|R)$|^--(?:check|quiet|stat|reverse)$/;
 	const PATCH_OK = /^--(?:batch|quiet|force)$|^-(?:s|f|q)$|^--F\d+$/;
@@ -3564,13 +3617,11 @@ function detectRsyncWrites(cmd: unknown): WriteTarget[] {
 
 function detectGitDestructive(cmd: unknown): WriteTarget[] {
 	const results: WriteTarget[] = [];
-	const name = getCommandName(cmd);
-	if (!name) return results;
-
-	const lowerName = name.toLowerCase();
-	if (lowerName !== GIT_COMMAND) return [];
-
-	const suffixWords = getSuffixWords(cmd);
+	// #3120 4.5 review round 1: wrapper- and git-global-option-aware
+	// subcommand resolution (`env git checkout …`, `git -C . checkout …`
+	// are the same write as the bare subcommand form).
+	const { leaf, words: suffixWords } = gitSubcommandWords(cmd);
+	if (leaf !== GIT_COMMAND) return [];
 	if (suffixWords.length === 0) return [];
 
 	const first = suffixWords[0].toLowerCase();

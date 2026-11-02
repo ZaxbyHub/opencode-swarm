@@ -313,3 +313,44 @@ describe('resolveWriteTargets — checkout and rsync target resolution', () => {
 		}
 	});
 });
+
+// #3120 4.5 review round 1: git GLOBAL options and execution wrappers must
+// not hide the apply subcommand from the patch detector.
+describe('patch detection across git global options and wrappers (4.5 round 1)', () => {
+	test('git -C . apply is detected with sources', () => {
+		const analysis = detectPosixWrites('git -C . apply fix.patch');
+		expect(analysis.hasWrites).toBe(true);
+		const patch = analysis.writes.find((w) => w.category === 'patch_apply');
+		expect(patch?.operator).toBe('git apply');
+		expect(patch?.patchSources).toEqual(['fix.patch']);
+	});
+
+	test('git --no-pager apply is detected', () => {
+		const analysis = detectPosixWrites('git --no-pager apply fix.patch');
+		expect(analysis.hasWrites).toBe(true);
+	});
+
+	test('git -c core.autocrlf=false apply is detected', () => {
+		const analysis = detectPosixWrites(
+			'git -c core.autocrlf=false apply fix.patch',
+		);
+		expect(analysis.hasWrites).toBe(true);
+	});
+
+	test('env git apply is detected (execution wrapper)', () => {
+		const analysis = detectPosixWrites('env git apply fix.patch');
+		expect(analysis.hasWrites).toBe(true);
+		const patch = analysis.writes.find((w) => w.category === 'patch_apply');
+		expect(patch?.patchSources).toEqual(['fix.patch']);
+	});
+
+	test('git -C . checkout main -- src/x.ts still detected by the destructive arm', () => {
+		const analysis = detectPosixWrites('git -C . checkout main -- src/x.ts');
+		expect(analysis.hasWrites).toBe(true);
+	});
+
+	test('plain git -C . status stays undetected', () => {
+		const analysis = detectPosixWrites('git -C . status');
+		expect(analysis.hasWrites).toBe(false);
+	});
+});

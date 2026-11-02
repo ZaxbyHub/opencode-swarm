@@ -19,6 +19,7 @@ import {
 	describe,
 	expect,
 	it,
+	test,
 } from 'bun:test';
 import type {
 	AuthorityConfig,
@@ -254,5 +255,63 @@ describe('guardrails verifier-config protection applies to every role (#3120)', 
 				),
 			).resolves.toBeUndefined();
 		});
+	});
+});
+
+// #3120 4.5 review round 1 (IMPORTANT 4): the patch fail-closed ENFORCEMENT
+// branch (null-path patch_apply writes) must be pinned at the real hook, not
+// only at the detector/resolver level.
+describe('patch fail-closed enforcement at the hook (#3120 4.5 r1)', () => {
+	test('unsupported-option git apply blocks with the patch message', async () => {
+		resetSwarmState();
+		const config = defaultConfig();
+		const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
+		setupRoleSession('patch-agent', 'architect');
+		let blocked = '';
+		try {
+			await hooks.toolBefore(
+				makeInput('patch-agent', 'bash', 'patch-enf-1'),
+				makeOutput({ command: 'git apply --directory=sub fix.patch' }),
+			);
+		} catch (error) {
+			blocked = error instanceof Error ? error.message : String(error);
+		}
+		expect(blocked).toContain('BLOCKED');
+		expect(blocked).toContain('git apply');
+		expect(blocked).toContain('targets cannot be statically verified');
+	});
+
+	test('stdin patch (no operand) blocks', async () => {
+		resetSwarmState();
+		const config = defaultConfig();
+		const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
+		setupRoleSession('patch-agent', 'architect');
+		let blocked = '';
+		try {
+			await hooks.toolBefore(
+				makeInput('patch-agent', 'bash', 'patch-enf-2'),
+				makeOutput({ command: 'curl -fsSL https://x/p | git apply' }),
+			);
+		} catch (error) {
+			blocked = error instanceof Error ? error.message : String(error);
+		}
+		expect(blocked).toContain('targets cannot be statically verified');
+	});
+
+	test('unreadable patch file blocks', async () => {
+		resetSwarmState();
+		const config = defaultConfig();
+		const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
+		setupRoleSession('patch-agent', 'architect');
+		let blocked = '';
+		try {
+			await hooks.toolBefore(
+				makeInput('patch-agent', 'bash', 'patch-enf-3'),
+				makeOutput({ command: 'git apply missing.patch' }),
+			);
+		} catch (error) {
+			blocked = error instanceof Error ? error.message : String(error);
+		}
+		expect(blocked).toContain('git apply');
 	});
 });
