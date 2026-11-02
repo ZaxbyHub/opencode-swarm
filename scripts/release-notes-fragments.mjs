@@ -38,7 +38,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { appendFileSync, existsSync, readFileSync } from 'node:fs';
+import { appendFileSync, existsSync, lstatSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -52,6 +52,7 @@ export const FRAGMENT_DIR = 'docs/releases/pending';
 export const FRAGMENT_SEPARATOR = '\n\n---\n\n';
 
 export const MAX_RELEASE_CANDIDATES = 1_000;
+export const MAX_CHANGELOG_FALLBACK_BYTES = 2 * 1024 * 1024;
 export const MAX_FRAGMENT_ENTRIES = 5_000;
 export const MAX_FRAGMENT_BYTES = 256 * 1024;
 export const MAX_PR_DIGITS = 7;
@@ -193,7 +194,10 @@ export function filterPendingFragmentPaths(files) {
 		// (PR authors control their file paths) and this path is later
 		// resolved against the repo root for reading.
 		if (posix.split('/').includes('..')) continue;
-		if (posix.includes('\0')) continue;
+		// Full control-character range (main-line parity): a NUL-only
+		// check lets an embedded newline survive and later split the
+		// newline-delimited cleanup plan into unrelated paths.
+		if (/[^\x20-\x7e]/.test(posix)) continue;
 		if (posix.startsWith('/')) continue;
 		if (/^[A-Za-z]:/.test(posix)) continue;
 		out.push(posix);
@@ -286,6 +290,11 @@ export function upsertReleaseNotesBlock(body, combined) {
 	return `${block}\n\n${original}`;
 }
 
+/** Exported (test-only) pure digest helper used by the deletion planner. */
+export function sha256Hex(value) {
+	return sha256(value);
+}
+
 function sha256(value) {
 	return createHash('sha256').update(value).digest('hex');
 }
@@ -350,14 +359,43 @@ export function resolveAllCandidates(strippedBody, logFn) {
 // -----------------------------------------------------------------------------
 // Fragment collection (per included PR's OWN files, main-line semantics).
 // -----------------------------------------------------------------------------
+/**
+ * Containment + regular-file guard for a pending-fragment path (main-line
+ * parity: containedPendingPath + safeRepositoryFilePath). PR-authored
+ * paths are attacker-controllable: a path that escapes the repository root
+ * or names a symlink must never be followed - the fragment bytes are
+ * published verbatim into release bodies, so a symlink (e.g. to
+ * .git/config holding the job token) would be a disclosure channel.
+ * Throws on any violation; returns the resolved absolute path.
+ */
+function guardFragmentPath(repoRoot, relativePath) {
+	const resolvedRoot = path.resolve(repoRoot);
+	const resolvedTarget = path.resolve(repoRoot, relativePath);
+	if (resolvedTarget !== resolvedRoot && !resolvedTarget.startsWith(resolvedRoot + path.sep)) {
+		throw new Error(`fragment escapes the repository root: ${relativePath}`);
+	}
+	const stat = lstatSync(resolvedTarget);
+	if (!stat.isFile() || stat.isSymbolicLink()) {
+		throw new Error(`unsafe release fragment (not a regular file): ${relativePath}`);
+	}
+	return resolvedTarget;
+}
+
 function readFragmentFromWorkspace(repoRoot, relativePath) {
-	const absolute = path.join(repoRoot, relativePath);
-	if (!existsSync(absolute)) return null;
-	const bytes = readFileSync(absolute);
-	if (bytes.length > MAX_FRAGMENT_BYTES) {
+	let absolute;
+	try {
+		absolute = guardFragmentPath(repoRoot, relativePath);
+	} catch (error) {
+		if (error.code === 'ENOENT') return null;
+		throw error;
+	}
+	// Bounded read: cap BEFORE slurping (main-line readBoundedFragmentBytes
+	// parity) so an oversized target cannot be read into memory whole.
+	const size = lstatSync(absolute).size;
+	if (size > MAX_FRAGMENT_BYTES) {
 		throw new Error(`fragment exceeds byte cap: ${relativePath}`);
 	}
-	const content = bytes.toString('utf8');
+	const content = readFileSync(absolute, 'utf8');
 	return { content, sha256: sha256(content) };
 }
 
@@ -371,12 +409,15 @@ export function collectFragmentsForPrs(candidates, repoRoot, logFn, options = {}
 	if (!Array.isArray(candidates) || candidates.length > MAX_RELEASE_CANDIDATES) {
 		throw new Error('release candidate PR cap exceeded');
 	}
-	const { verifyCandidate = verifyPr, readFragment = readFragmentFromWorkspace } = options;
+	const { verifyCandidate = verifyPr, readFragment = readFragmentFromWorkspace, requireComplete = false } = options;
 	const entries = [];
 	const seenPaths = new Set();
 	for (const num of candidates) {
 		const pr = verifyCandidate(num);
 		if (!pr || !Array.isArray(pr.files)) {
+			if (requireComplete) {
+				throw new Error(`incomplete release provenance: failed to resolve candidate PR #${num}`);
+			}
 			logFn(`skip #${num} — not a PR or no files`);
 			continue;
 		}
@@ -390,6 +431,9 @@ export function collectFragmentsForPrs(candidates, repoRoot, logFn, options = {}
 			seenPaths.add(fp);
 			const fragment = readFragment(repoRoot, fp);
 			if (fragment === null) {
+				if (requireComplete) {
+					throw new Error(`incomplete release provenance: fragment ${fp} referenced by #${num} is unavailable`);
+				}
 				logFn(`fragment ${fp} referenced by #${num} not found in workspace`);
 				continue;
 			}
@@ -419,7 +463,13 @@ async function modeUpdatePr(logFn) {
 		'--limit',
 		'5',
 	]);
-	if (!prList.ok || !Array.isArray(prList.value) || prList.value.length === 0) {
+	if (!prList.ok) {
+		// Fail closed on a lookup FAILURE (rate limit, timeout, auth): a
+		// silent exit 0 would leave the release PR un-enriched with green CI.
+		logFn(`gh pr list failed: ${prList.err instanceof Error ? prList.err.message : String(prList.err)}`);
+		return 1;
+	}
+	if (!Array.isArray(prList.value) || prList.value.length === 0) {
 		logFn('No autorelease PR found — exiting 0');
 		return 0;
 	}
@@ -432,7 +482,11 @@ async function modeUpdatePr(logFn) {
 	// the block. Always re-fetches the CURRENT body per attempt.
 	for (let attempt = 1; attempt <= 2; attempt += 1) {
 		const bodyRes = tryGhJson(['pr', 'view', String(releasePr.number), '--json', 'body']);
-		const body = bodyRes.ok ? (bodyRes.value?.body ?? '') : '';
+		if (!bodyRes.ok) {
+			logFn(`gh pr view failed for #${releasePr.number}: ${bodyRes.err instanceof Error ? bodyRes.err.message : String(bodyRes.err)}`);
+			return 1;
+		}
+		const body = bodyRes.value?.body ?? '';
 		const strippedBody = stripCustomReleaseNotesBlock(body);
 		const allCandidates = resolveAllCandidates(strippedBody, logFn);
 		if (allCandidates.length === 0) {
@@ -447,21 +501,65 @@ async function modeUpdatePr(logFn) {
 		}
 		const combined = combineRenderedFragments(entries);
 		const newBody = upsertReleaseNotesBlock(body, combined);
+		let edited = false;
 		if (newBody !== body) {
 			ghInput(['pr', 'edit', String(releasePr.number), '--body-file', '-'], newBody);
+			edited = true;
 			logFn(`Updated release PR #${releasePr.number} with ${entries.length} fragment(s)`);
 		} else {
 			logFn('Release PR body already up to date');
 		}
-		// Verify the block survived a potential concurrent regeneration.
-		await sleep(settleDelayMs);
-		const afterRes = tryGhJson(['pr', 'view', String(releasePr.number), '--json', 'body']);
-		const afterBody = afterRes.ok ? (afterRes.value?.body ?? '') : '';
+		// Verify the block survived. The settle delay applies only after an
+		// actual edit (a no-op pass verifies immediately). A FAILED verify
+		// read (API error) is not a clobber: retry the READ with a short
+		// backoff instead of conflating it with the missing-block path.
+		if (edited) {
+			await sleep(settleDelayMs);
+		}
+		let afterBody = null;
+		for (let readAttempt = 1; readAttempt <= 3; readAttempt += 1) {
+			const afterRes = tryGhJson(['pr', 'view', String(releasePr.number), '--json', 'body']);
+			if (afterRes.ok) {
+				afterBody = afterRes.value?.body ?? '';
+				break;
+			}
+			if (readAttempt < 3) {
+				await sleep(2000);
+			}
+		}
+		if (afterBody === null) {
+			logFn(`verify read failed after retries for #${releasePr.number} — failing closed`);
+			return 1;
+		}
 		if (customReleaseNotesPayload(afterBody) !== null) return 0;
 		logFn(`marker block missing after edit (attempt ${attempt}) — retrying`);
 	}
-	logFn('marker block did not survive after retries — giving up (non-fatal; next run retries)');
-	return 0;
+	logFn('marker block did not survive after retries — failing closed (fix the body and re-run)');
+	return 1;
+}
+
+/**
+ * Extract exactly this tag's section from a release-please CHANGELOG.md
+ * (main-line parity: version-scoped fallback + byte cap instead of
+ * scanning the whole file, which drags every historical PR into the
+ * candidate set). The heading is `## [<version>]` optionally followed by
+ * a compare link; the section runs to the next `## [` heading or EOF,
+ * capped at MAX_CHANGELOG_FALLBACK_BYTES. Returns '' when the version
+ * has no section. Exported for unit tests.
+ */
+export function extractChangelogSection(changelogText, version) {
+	if (typeof changelogText !== 'string' || typeof version !== 'string' || version.length === 0) return '';
+	const escaped = version.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+	const headingRe = new RegExp(`^## \\[${escaped}\\]`, 'm');
+	const match = headingRe.exec(changelogText);
+	if (!match) return '';
+	const rest = changelogText.slice(match.index);
+	const bodyStart = rest.indexOf('\n');
+	if (bodyStart === -1) return '';
+	const afterHeading = rest.slice(bodyStart + 1);
+	const nextHeading = afterHeading.search(/^## \[/m);
+	const section = nextHeading === -1 ? afterHeading : afterHeading.slice(0, nextHeading);
+	return section.slice(0, MAX_CHANGELOG_FALLBACK_BYTES);
 }
 
 // -----------------------------------------------------------------------------
@@ -487,16 +585,27 @@ async function modeUpdateRelease(logFn) {
 	const repoRoot = resolveRepoRoot();
 	const rel = tryGhJson(['release', 'view', tagName, '--json', 'body,tagName']);
 	if (!rel.ok) {
-		logFn(`Release ${tagName} not found — exiting 0`);
-		return 0;
+		// Distinguish a genuinely missing release (expected during a
+		// recovery dispatch) from a TRANSIENT gh failure (rate limit,
+		// timeout): the latter must fail closed, not silently skip the
+		// release-body update.
+		const stderr = String(rel.err?.stderr ?? '');
+		if (/not found/i.test(stderr)) {
+			logFn(`Release ${tagName} not found — exiting 0`);
+			return 0;
+		}
+		logFn(`gh release view failed for ${tagName}: ${rel.err instanceof Error ? rel.err.message : String(rel.err)}`);
+		return 1;
 	}
 	const releaseBody = rel.value.body || '';
 	const strippedBody = stripCustomReleaseNotesBlock(releaseBody);
 	let allCandidates = resolveAllCandidates(strippedBody, logFn);
 
 	// Fallback for an EMPTY release body (release-please has been observed
-	// creating those): the component's own CHANGELOG.md carries the version
-	// section with /commit/<40-hex> links.
+	// creating those): the component's own CHANGELOG.md carries the tagged
+	// VERSION's section with /commit/<40-hex> links. Version-scoped with a
+	// byte cap (main parity) — a whole-file scan would drag every
+	// historical PR into the candidate set.
 	if (allCandidates.length === 0) {
 		const changelogPath = path.join(
 			repoRoot,
@@ -504,15 +613,17 @@ async function modeUpdateRelease(logFn) {
 			'CHANGELOG.md',
 		);
 		if (existsSync(changelogPath)) {
-			const section = readFileSync(changelogPath, 'utf8');
-			allCandidates = resolveAllCandidates(section, logFn);
-			if (allCandidates.length > 0) {
-				logFn(`resolved ${allCandidates.length} candidate PR(s) from ${parsedTag.component} CHANGELOG fallback`);
+			const section = extractChangelogSection(readFileSync(changelogPath, 'utf8'), parsedTag.version);
+			if (section !== '') {
+				allCandidates = resolveAllCandidates(section, logFn);
+				if (allCandidates.length > 0) {
+					logFn(`resolved ${allCandidates.length} candidate PR(s) from ${parsedTag.component} CHANGELOG section ${parsedTag.version}`);
+				}
 			}
 		}
 	}
 	logFn(`collecting fragments for ${allCandidates.length} candidate PR(s)`);
-	const entries = collectFragmentsForPrs(allCandidates, repoRoot, logFn);
+	const entries = collectFragmentsForPrs(allCandidates, repoRoot, logFn, { requireComplete: true });
 	if (entries.length === 0) {
 		logFn('No pending fragments found across referenced PRs — exiting 0');
 		return 0;
@@ -553,12 +664,21 @@ export function planFragmentDeletions(publishedBody, entries, readCurrentBytes) 
 			retained: entries.map((e) => ({ entry: e, reason: 'no marker block in published body' })),
 		};
 	}
-	const publishedParts = payload.split(FRAGMENT_SEPARATOR);
+	const publishedParts = payload.split(FRAGMENT_SEPARATOR).map((part) => part.trim());
 	const deletable = [];
 	const retained = [];
 	for (const entry of entries) {
-		const rendered = renderFragmentBody(entry.content).replace(/\s+$/, '');
-		if (rendered === '' || !publishedParts.includes(rendered)) {
+		// Compose the EXPECTED published form exactly the way the writer
+		// does (renderFragmentBody, marker neutralization, trailing-trim)
+		// and require a consecutive-subsequence match on trimmed parts: a
+		// fragment CONTAINING a markdown horizontal rule spans consecutive
+		// payload parts, the writer trims the joined string (so the first
+		// part loses leading whitespace), and a fragment quoting the marker
+		// literal arrives neutralized. Plain membership fails all three
+		// shapes and strands the fragment forever (review PRR-005).
+		const rendered = neutralizeMarkers(renderFragmentBody(entry.content)).replace(/\s+$/, '');
+		const expectedParts = rendered.split(FRAGMENT_SEPARATOR).map((part) => part.trim()).filter((part) => part !== '');
+		if (expectedParts.length === 0 || !matchesConsecutiveSubsequence(publishedParts, expectedParts)) {
 			retained.push({ entry, reason: 'rendered content not present in published body' });
 			continue;
 		}
@@ -570,6 +690,22 @@ export function planFragmentDeletions(publishedBody, entries, readCurrentBytes) 
 		deletable.push(entry);
 	}
 	return { deletable, retained };
+}
+
+/**
+ * True when `needle` appears in `haystack` as a CONSECUTIVE run of
+ * elements (elementwise equality). Pure; exported for unit tests.
+ */
+export function matchesConsecutiveSubsequence(haystack, needle) {
+	if (!Array.isArray(haystack) || !Array.isArray(needle) || needle.length === 0) return false;
+	if (needle.length > haystack.length) return false;
+	outer: for (let start = 0; start + needle.length <= haystack.length; start += 1) {
+		for (let offset = 0; offset < needle.length; offset += 1) {
+			if (haystack[start + offset] !== needle[offset]) continue outer;
+		}
+		return true;
+	}
+	return false;
 }
 
 async function modeCleanup(logFn) {
@@ -586,24 +722,54 @@ async function modeCleanup(logFn) {
 	const repoRoot = resolveRepoRoot();
 	const rel = tryGhJson(['release', 'view', tagName, '--json', 'body,tagName']);
 	if (!rel.ok) {
-		logFn(`Release ${tagName} not found — exiting 0`);
-		return 0;
+		const stderr = String(rel.err?.stderr ?? '');
+		if (/not found/i.test(stderr)) {
+			logFn(`Release ${tagName} not found — exiting 0`);
+			return 0;
+		}
+		logFn(`gh release view failed for ${tagName}: ${rel.err instanceof Error ? rel.err.message : String(rel.err)}`);
+		return 1;
 	}
 	const strippedBody = stripCustomReleaseNotesBlock(rel.value.body || '');
-	const allCandidates = resolveAllCandidates(strippedBody, logFn);
+	let allCandidates = resolveAllCandidates(strippedBody, logFn);
+	// Same CHANGELOG fallback as update-release: an empty-body release
+	// publishes fragments through the fallback, so cleanup must resolve the
+	// same candidate set or nothing is ever consumed (review PRR-006).
+	if (allCandidates.length === 0) {
+		const changelogPath = path.join(
+			repoRoot,
+			COMPONENT_PATHS[parsedTag.component] ?? 'packages',
+			'CHANGELOG.md',
+		);
+		if (existsSync(changelogPath)) {
+			const section = extractChangelogSection(readFileSync(changelogPath, 'utf8'), parsedTag.version);
+			if (section !== '') {
+				allCandidates = resolveAllCandidates(section, logFn);
+				if (allCandidates.length > 0) {
+					logFn(`resolved ${allCandidates.length} candidate PR(s) from ${parsedTag.component} CHANGELOG section ${parsedTag.version}`);
+				}
+			}
+		}
+	}
 	if (allCandidates.length === 0) {
 		logFn('No PR references in release body — nothing to clean up');
 		return 0;
 	}
-	const entries = collectFragmentsForPrs(allCandidates, repoRoot, logFn);
+	const entries = collectFragmentsForPrs(allCandidates, repoRoot, logFn, { requireComplete: true });
 	if (entries.length === 0) {
 		logFn('No pending fragments referenced by this release — nothing to clean up');
 		return 0;
 	}
 	const plan = planFragmentDeletions(rel.value.body || '', entries, (filePath) => {
-		const absolute = path.join(repoRoot, filePath);
-		if (!existsSync(absolute)) return null;
-		return readFileSync(absolute, 'utf8');
+		// Same containment/regular-file guard as collection (review PRR-002):
+		// the hash comparison reads attacker-controllable paths too.
+		try {
+			const absolute = guardFragmentPath(repoRoot, filePath);
+			return readFileSync(absolute, 'utf8');
+		} catch (error) {
+			if (error.code === 'ENOENT') return null;
+			throw error;
+		}
 	});
 	for (const r of plan.retained) {
 		logFn(`RETAIN ${r.entry.filePath}: ${r.reason}`);

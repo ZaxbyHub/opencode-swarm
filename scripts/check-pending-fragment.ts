@@ -90,12 +90,13 @@ function decodeList(buffer: Buffer, format: PathsFormat): string[] {
 	}
 }
 
-function parseArgs(args: string[]): ParsedArgs {
-	const parsed: ParsedArgs = {
+function parseArgs(args: string[]): ParsedArgs & { formatExplicit: boolean } {
+	const parsed: ParsedArgs & { formatExplicit: boolean } = {
 		format: 'newline',
 		changedFile: null,
 		addedFile: null,
 		addedInline: [],
+		formatExplicit: false,
 	};
 	let i = 0;
 	while (i < args.length) {
@@ -103,6 +104,7 @@ function parseArgs(args: string[]): ParsedArgs {
 		if (arg === '--paths-format') {
 			if (i + 1 >= args.length) usage('--paths-format requires a value');
 			parsed.format = parseFormat(args[i + 1]);
+			parsed.formatExplicit = true;
 			i += 2;
 		} else if (arg === '--changed-file') {
 			if (i + 1 >= args.length) usage('--changed-file requires a value');
@@ -133,6 +135,12 @@ function parseArgs(args: string[]): ParsedArgs {
 
 function printRequirement(args: string[]): number {
 	const parsed = parseArgs(args);
+	// Fail closed when file lists are supplied without an explicit framing
+	// (main-line parity): an implicit newline default would mis-decode a
+	// NUL-framed list into one garbage path and read as `required=false`.
+	if ((parsed.changedFile !== null || parsed.addedFile !== null) && !parsed.formatExplicit) {
+		usage('--paths-format is required when a file list is supplied (an implicit framing can mis-decode the transport)');
+	}
 	let changedBuffer: Buffer;
 	try {
 		changedBuffer = parsed.changedFile

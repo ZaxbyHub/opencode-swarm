@@ -131,6 +131,13 @@ describe('check-pending-fragment CLI (--print-requirement transports)', () => {
 		expect(result.code).toBe(0);
 	});
 
+	test('a file list without --paths-format is unusable (exit 2), never a silent mis-decode (review PRR-016)', () => {
+		const changed = writeList('changed-nofmt.nul', 'packages/opencode/src/x.ts\0');
+		const added = writeList('added-nofmt.jsonl', '');
+		const result = runGate(['--changed-file', changed, '--added-file', added]);
+		expect(result.code).toBe(2);
+	});
+
 	test('garbage jsonl line is unusable (exit 2), never a silent empty list', () => {
 		const changed = writeList('changed4.jsonl', 'not-json{\n');
 		const added = writeList('added4.jsonl', '');

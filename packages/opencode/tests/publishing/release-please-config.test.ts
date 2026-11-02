@@ -170,14 +170,18 @@ describe('release-please config (issue #3150 release enablement)', () => {
 			{ stdout: 'pipe', stderr: 'ignore' },
 		);
 		expect(bodies.exitCode).toBe(0);
+		// Framing: `%H%x1e%B%x1e` emits sha + RS + body + RS per commit, so
+		// the split yields sha/body PAIRS at even/odd indices (review
+		// PRR-014: the old single-sequence loop misattributed the body as
+		// the identifier; detection was unaffected, triage was not).
 		const bodyBreaking: string[] = [];
-		for (const record of bodies.stdout.toString().split('')) {
-			const trimmed = record.trim();
-			if (trimmed === '') continue;
-			const sep = trimmed.indexOf('');
-			const sha = (sep === -1 ? trimmed : trimmed.slice(0, sep)).trim();
-			if (/^BREAKING[ -]CHANGE:/m.test(trimmed)) {
-				bodyBreaking.push(sha);
+		const records = bodies.stdout.toString().split('');
+		for (let i = 0; i + 1 < records.length; i += 2) {
+			const sha = records[i].trim();
+			const body = records[i + 1];
+			if (sha === '') continue;
+			if (/^BREAKING[ -]CHANGE:/m.test(body)) {
+				bodyBreaking.push(sha.slice(0, 12));
 			}
 		}
 		expect(bodyBreaking, `commits with a space/hyphen-form BREAKING CHANGE footer after the bound: ${bodyBreaking.join('; ')}`).toEqual([]);

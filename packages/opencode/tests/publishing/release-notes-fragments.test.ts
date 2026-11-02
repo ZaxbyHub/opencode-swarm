@@ -11,7 +11,9 @@ import {
 	combineRenderedFragments,
 	customReleaseNotesPayload,
 	extractCandidatePrNumbers,
+	extractChangelogSection,
 	filterPendingFragmentPaths,
+	matchesConsecutiveSubsequence,
 	planFragmentDeletions,
 	readLockstepVersion,
 	renderFragmentBody,
@@ -56,6 +58,10 @@ describe('release-notes-fragments (8.x port, issue #3228) — pure helpers', () 
 		expect(filterPendingFragmentPaths(null)).toEqual([]);
 		expect(filterPendingFragmentPaths([{ path: '/abs/path.md' }])).toEqual([]);
 		expect(filterPendingFragmentPaths([{ path: 'C:/x/y.md' }])).toEqual([]);
+		// Control characters (incl. an embedded newline) are rejected: they
+		// would split the newline-delimited cleanup plan into unrelated
+		// paths (review PRR-007).
+		expect(filterPendingFragmentPaths([{ path: 'docs/releases/pending/a.md\nREADME.md' }])).toEqual([]);
 	});
 
 	test('upsertReleaseNotesBlock is idempotent and absorbs nested markers', () => {
@@ -204,6 +210,72 @@ describe('release-notes-fragments — cleanup deletion planner (consume-and-remo
 		const plan = planFragmentDeletions(publishedBody, entries, () => null);
 		expect(plan.deletable).toEqual([]);
 		expect(plan.retained[0]?.reason).toContain('same-run integrity');
+	});
+
+	test('planner oracle matches the writer: HR, marker-literal, and leading-blank fragments are DELETABLE (review PRR-005)', () => {
+		const mk = (content: string) => ({
+			prNumber: 1,
+			filePath: 'docs/releases/pending/shape.md',
+			content,
+			sha256: sha256Of(content),
+		});
+		// A fragment containing a markdown horizontal rule spans consecutive
+		// payload parts after the writer joins on the separator.
+		const hr = mk('Part one\n\n---\n\nPart two\n');
+		const hrPlan = planFragmentDeletions(upsertReleaseNotesBlock('rel', hr.content), [hr], () => hr.content);
+		expect(hrPlan.deletable.length).toBe(1);
+		// A fragment quoting the marker literal arrives neutralized in the
+		// published body; the planner must neutralize its expectation too.
+		const marker = mk('Use <!-- custom-release-notes:start --> carefully.\n');
+		const markerPlan = planFragmentDeletions(upsertReleaseNotesBlock('rel', marker.content), [marker], () => marker.content);
+		expect(markerPlan.deletable.length).toBe(1);
+		// The first (only) fragment loses leading blank lines when the
+		// writer trims the joined string; trim()-on-both-sides absorbs it.
+		const blank = mk('\nFix the thing.\n');
+		const blankPlan = planFragmentDeletions(upsertReleaseNotesBlock('rel', blank.content), [blank], () => blank.content);
+		expect(blankPlan.deletable.length).toBe(1);
+		// Plain fragments still match.
+		const plain = mk('Simple fragment.\n');
+		const plainPlan = planFragmentDeletions(upsertReleaseNotesBlock('rel', plain.content), [plain], () => plain.content);
+		expect(plainPlan.deletable.length).toBe(1);
+	});
+
+	test('matchesConsecutiveSubsequence elementwise semantics', () => {
+		expect(matchesConsecutiveSubsequence(['a', 'b', 'c'], ['b', 'c'])).toBe(true);
+		expect(matchesConsecutiveSubsequence(['a', 'b', 'c'], ['b', 'a'])).toBe(false);
+		expect(matchesConsecutiveSubsequence(['a'], ['a', 'b'])).toBe(false);
+		expect(matchesConsecutiveSubsequence([], ['x'])).toBe(false);
+	});
+
+	test('extractChangelogSection scopes to the tagged version (review PRR-011)', () => {
+		const changelog = [
+			'# Changelog',
+			'',
+			'## [8.0.2-beta.0](https://example/compare/x)',
+			'',
+			'* new fix (#10)',
+			'',
+			'## [8.0.1-beta.0](https://example/compare/y)',
+			'',
+			'* old fix (#11)',
+			'',
+		].join('\n');
+		const section = extractChangelogSection(changelog, '8.0.2-beta.0');
+		expect(section).toContain('#10');
+		expect(section).not.toContain('#11');
+		// Absent version -> empty (no whole-file fallback).
+		expect(extractChangelogSection(changelog, '9.9.9')).toBe('');
+	});
+
+	test('config package set is consistent with the script COMPONENTS (review PRR-018)', () => {
+		const cfg = JSON.parse(readFileSync(path.join(REPO_ROOT, 'release-please-config.json'), 'utf8')) as {
+			packages?: Record<string, { component?: string }>;
+		};
+		const configComponents = Object.values(cfg.packages ?? {})
+			.map((entry) => entry.component)
+			.filter((component): component is string => typeof component === 'string')
+			.sort();
+		expect(configComponents).toEqual([...COMPONENTS].sort());
 	});
 
 	test('the pending fragment on this branch survives the planner (nothing references it yet)', () => {
