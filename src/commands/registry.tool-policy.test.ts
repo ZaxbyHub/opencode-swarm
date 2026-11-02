@@ -6,8 +6,6 @@ import {
 	SWARM_COMMAND_TOOL_ALLOWLIST,
 } from './tool-policy.js';
 
-// ── Helper ───────────────────────────────────────────────────────────────────
-
 function cmd(name: string): CommandEntry {
 	return COMMAND_REGISTRY[
 		name as keyof typeof COMMAND_REGISTRY
