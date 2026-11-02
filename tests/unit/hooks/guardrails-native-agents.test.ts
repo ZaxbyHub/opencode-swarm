@@ -59,15 +59,11 @@ describe('Native agent write-authority pass-through via toolBefore (issue #559)'
 		resetSwarmState();
 	});
 
-	it('build agent write is not blocked (exact repro: issue #559)', async () => {
+	it('build agent writing eslint.config.mts is denied as verifier config (#3120 supersedes #559)', async () => {
 		const sid = 'native-build-session';
 		const hooks = createGuardrailsHooks(TEST_DIR, undefined, cfg());
 		startAgentSession(sid, 'build');
 
-		// #3120: eslint.config.* is a built-in verifier-config glob, now
-		// denied for EVERY role (including native build). The #559 contract
-		// that still holds: the block is the authority verifier-config deny,
-		// never "Unknown agent: build".
 		await expect(
 			hooks.toolBefore(
 				{ tool: 'write', sessionID: sid, callID: 'call-1' },
