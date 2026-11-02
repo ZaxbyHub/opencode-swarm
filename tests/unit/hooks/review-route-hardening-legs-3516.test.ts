@@ -1,24 +1,16 @@
 /**
- * Issue #3516 — route-receipt hardening legs (C11/C15/C16 + AC14 runtime
- * redaction). Selector groups (frozen -t filters):
- *  - 'capacity-preflight': the PRR-009 capacity pre-flights (best-effort
- *    across the reservation await) and the empty-binding skip — each pinned by
- *    a leg whose corresponding deletion reddens the suite.
- *  - 'fifo-consumption': registry semantics — per-key consumption, NO
- *    eviction (a full bound refuses the dispatch fail-closed while every
- *    prior marker stays consultable), whole-call retirement (settlement loop
- *    end, denied calls, failed outputs), background retention across
- *    retryable/failed commits, container cleanup, resetSwarmState isolation.
- *  - 'sibling-clobber': the rememberReviewRoute kind-monotonicity
- *    interleaving (the C6 mechanism; the AC6 forget-deletion wording is
- *    reconciled to this substitution — see the release fragment).
+ * Issue #3516 — route-receipt hardening legs (C11/C15/C16 + AC14 redaction).
+ * Selector groups (frozen -t filters):
+ *  - 'capacity-preflight': the PRR-009 pre-flights + empty-binding skip.
+ *  - 'fifo-consumption': per-key consumption, no eviction (a full bound
+ *    refuses fail-closed), whole-call retirement, cleanup, reset isolation.
+ *  - 'sibling-clobber': the rememberReviewRoute monotonicity interleaving.
+ *
  *
  * Env isolation: createIsolatedTestEnv redirects the hive/app-data roots the
- * route-receipt MAC secret lives under. Claims about cross-platform fault
- * classes are scoped to what these legs actually drive (persist-side Windows
- * + POSIX via the plain-file `.swarm/pr-review` fixture and EISDIR gate
- * state); the pre-v1 `legacy_unrouted` carve-out is disclosed in the release
- * fragment, not exercised here.
+ * route-receipt MAC secret lives under. Cross-platform claims are scoped to
+ * the fault classes these legs drive (plain-file `.swarm/pr-review`, EISDIR
+ * gate state); the `legacy_unrouted` carve-out is disclosed in the fragment.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
@@ -26,26 +18,27 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { PluginConfig } from '../../../src/config';
 import { closeAllProjectDbs } from '../../../src/db/project-db';
+import { transitionTaskWorkflowEvidence } from '../../../src/gate-evidence';
 import {
 	_internals,
 	createDelegationGateHook,
 } from '../../../src/hooks/delegation-gate';
 import {
-	_test_exports as gateInternals,
 	activatePrWorkflow,
+	_test_exports as gateInternals,
 	reserveActivePrReviewReentryAuthorization,
 } from '../../../src/hooks/pr-workflow-gate';
 import { issuePrReviewReentryAuthorization } from '../../../src/pr-review/authorization';
 import { workflowGateStatePath } from '../../../src/pr-review/persistence';
 import {
+	isRouteBlockedForSettlement,
 	MAX_LIVE_CALLS_PER_SESSION,
 	MAX_LIVE_DIRECTORIES,
 	MAX_LIVE_SESSIONS_PER_DIRECTORY,
 	recordRouteFault,
 	recordRouteInvalidation,
-	retireRouteInvalidationsForCall,
 	_test_exports as registryInternals,
-	isRouteBlockedForSettlement,
+	retireRouteInvalidationsForCall,
 } from '../../../src/review/route-invalidation-registry';
 import {
 	advanceTaskState,
@@ -56,7 +49,6 @@ import {
 	resetSwarmState,
 	swarmState,
 } from '../../../src/state';
-import { transitionTaskWorkflowEvidence } from '../../../src/gate-evidence';
 import { createIsolatedTestEnv } from '../../helpers/isolated-test-env.js';
 import { canonicalMkdtemp, removeTreeWithRetry } from '../../helpers/tmpdir';
 
@@ -69,7 +61,7 @@ function makeConfig(): PluginConfig {
 	return { hooks: { delegation_gate: true } } as unknown as PluginConfig;
 }
 
-function writePlan(dir: string, taskIds: string[]): void {
+const writePlan = (dir: string, taskIds: string[]): void => {
 	fs.writeFileSync(
 		path.join(dir, '.swarm', 'plan.json'),
 		JSON.stringify({
@@ -95,7 +87,7 @@ function writePlan(dir: string, taskIds: string[]): void {
 			],
 		}),
 	);
-}
+};
 
 const reviewerArgs = (taskId: string) => ({
 	subagent_type: 'reviewer',
@@ -105,18 +97,36 @@ const reviewerArgs = (taskId: string) => ({
 const reviewed = (taskId: string) =>
 	`[REVIEWED] | task-${taskId} | APPROVED | hardening fixture`;
 
+const blocked = (dir: string, call: string, session: string, task: string) =>
+	isRouteBlockedForSettlement(dir, call, session, task);
+
+const before = (
+	hook: ReturnType<typeof createDelegationGateHook>,
+	callID: string,
+	args: Record<string, unknown>,
+): Promise<void> =>
+	hook.toolBefore({ tool: 'Task', sessionID: SESSION, callID }, { args });
+const settle = (
+	hook: ReturnType<typeof createDelegationGateHook>,
+	callID: string,
+	args: Record<string, unknown>,
+	text: string,
+): Promise<void> =>
+	hook.toolAfter(
+		{ tool: 'tool.execute.Task', sessionID: SESSION, callID, args },
+		{ text },
+	);
+
 async function prepareTask(dir: string, taskId: string): Promise<void> {
-	await transitionTaskWorkflowEvidence(dir, taskId, {
-		type: 'accepted_mutation',
-		agentType: 'coder',
-		expectedGeneration: 0,
-		transitionId: `coder:${taskId}`,
-	});
-	await transitionTaskWorkflowEvidence(dir, taskId, {
-		type: 'stage_a_passed',
-		expectedGeneration: 1,
-		transitionId: `stage-a:${taskId}`,
-	});
+	const t = (type: 'accepted_mutation' | 'stage_a_passed', gen: number) =>
+		transitionTaskWorkflowEvidence(dir, taskId, {
+			type,
+			...(type === 'accepted_mutation' ? { agentType: 'coder' as const } : {}),
+			expectedGeneration: gen,
+			transitionId: `${type.split('_')[0]}:${taskId}`,
+		});
+	await t('accepted_mutation', 0);
+	await t('stage_a_passed', 1);
 	const session = swarmState.agentSessions.get(SESSION)!;
 	advanceTaskState(session, taskId, 'coder_delegated');
 	advanceTaskState(session, taskId, 'pre_check_passed');
@@ -158,14 +168,17 @@ describe('route-receipt hardening legs (#3516)', () => {
 		isolatedEnv = undefined;
 	});
 
-	function fixture(options: { taskIds?: string[]; persistFails?: boolean } = {}) {
+	function fixture(o: { taskIds?: string[]; persistFails?: boolean } = {}) {
 		const dir = canonicalMkdtemp('route-harden-3516-');
 		dirs.push(dir);
 		fs.mkdirSync(path.join(dir, '.swarm'), { recursive: true });
 		fs.mkdirSync(path.join(dir, '.opencode'), { recursive: true });
-		if (options.taskIds) writePlan(dir, options.taskIds);
-		if (options.persistFails) {
-			fs.writeFileSync(path.join(dir, '.swarm', 'pr-review'), 'not a directory');
+		if (o.taskIds) writePlan(dir, o.taskIds);
+		if (o.persistFails) {
+			fs.writeFileSync(
+				path.join(dir, '.swarm', 'pr-review'),
+				'not a directory',
+			);
 		}
 		ensureAgentSession(SESSION, 'architect', dir);
 		return dir;
@@ -178,9 +191,7 @@ describe('route-receipt hardening legs (#3516)', () => {
 		 * plus a live one-use authorization drives the resolved-task re-entry
 		 * arm, whose consumed path remembers an EMPTY generations map.
 		 */
-		async function seedReentryArm(
-			dir: string,
-		): Promise<void> {
+		async function seedReentryArm(dir: string): Promise<void> {
 			await transitionTaskWorkflowEvidence(dir, '1.1', {
 				type: 'accepted_mutation',
 				agentType: 'coder',
@@ -203,10 +214,6 @@ describe('route-receipt hardening legs (#3516)', () => {
 		}
 
 		it('a re-entry dispatch with no bound tasks resolves without a false binding-write warning', async () => {
-			// The consumed re-entry arm runs with EMPTY generations, and the
-			// empty-binding skip must keep the durable-twin writer from
-			// emitting a vacuous "binding write FAILED" CRITICAL-WARN
-			// (PRR-011). Deleting the skip reddens this.
 			const dir = fixture();
 			await seedReentryArm(dir);
 			const hook = createDelegationGateHook(makeConfig(), dir);
@@ -236,34 +243,23 @@ describe('route-receipt hardening legs (#3516)', () => {
 		it('a full generation fence refuses the next re-entry dispatch BEFORE the one-use token is consumed', async () => {
 			const dir = fixture({ taskIds: ['1.1', '2.2'] });
 			await prepareTask(dir, '2.2');
-			// Break the receipt persist path so the FILL dispatches are fast
-			// (each routing catch records its fault and the #3380 fall-through
-			// still binds the eligible task's generation — no receipt writes).
-			fs.writeFileSync(path.join(dir, '.swarm', 'pr-review'), 'not a directory');
+			fs.writeFileSync(
+				path.join(dir, '.swarm', 'pr-review'),
+				'not a directory',
+			);
 			const hook = createDelegationGateHook(makeConfig(), dir);
 			const originalRecord = _internals.recordStageBDispatchBindings;
 			_internals.recordStageBDispatchBindings = () => true;
 			try {
 				for (let index = 0; index < 128; index += 1) {
-					await hook.toolBefore(
-						{
-							tool: 'Task',
-							sessionID: SESSION,
-							callID: `call-fill-${index}`,
-						},
-						{ args: reviewerArgs('2.2') },
-					);
+					await before(hook, `call-fill-${index}`, reviewerArgs('2.2'));
 				}
 			} finally {
 				_internals.recordStageBDispatchBindings = originalRecord;
 			}
-			// Repair the receipt path, then arm the resolved-task re-entry
-			// dispatch (pre-Stage-A 1.1 + live one-use authorization).
+			// Repair the receipt path, then arm the re-entry dispatch.
 			fs.rmSync(path.join(dir, '.swarm', 'pr-review'), { force: true });
 			await seedReentryArm(dir);
-			// The pre-flight fires STAGE_B_CONTEXT_CAPACITY BEFORE the
-			// reservation; deleting the pre-flight reddens the token assertion
-			// below (the remember-time throw would burn the consumed token).
 			await expect(
 				hook.toolBefore(
 					{ tool: 'Task', sessionID: SESSION, callID: 'call-capped' },
@@ -289,52 +285,37 @@ describe('route-receipt hardening legs (#3516)', () => {
 	describe('fifo-consumption — registry markers are per-key, never evicted, and retire at terminal outcomes', () => {
 		it('per-key consumption: a matched task key blocks exactly once; other keys and calls are untouched', () => {
 			const dir = fixture();
-			expect(
-				recordRouteInvalidation(dir, SESSION, 'call-k1', '1.1'),
-			).toBe(true);
+			expect(recordRouteInvalidation(dir, SESSION, 'call-k1', '1.1')).toBe(
+				true,
+			);
 			expect(recordRouteInvalidation(dir, SESSION, 'call-k1', '1.2')).toBe(
 				true,
 			);
-			expect(isRouteBlockedForSettlement(dir, 'call-k1', SESSION, '1.1')).toBe(
-				true,
-			);
+			expect(blocked(dir, 'call-k1', SESSION, '1.1')).toBe(true);
 			// Consumed per matched key only — the second consult of 1.1 is free,
 			// 1.2 still blocks, and no other call is affected.
-			expect(isRouteBlockedForSettlement(dir, 'call-k1', SESSION, '1.1')).toBe(
-				false,
-			);
-			expect(isRouteBlockedForSettlement(dir, 'call-k1', SESSION, '1.2')).toBe(
-				true,
-			);
-			expect(isRouteBlockedForSettlement(dir, 'call-k2', SESSION, '1.1')).toBe(
-				false,
-			);
+			expect(blocked(dir, 'call-k1', SESSION, '1.1')).toBe(false);
+			expect(blocked(dir, 'call-k1', SESSION, '1.2')).toBe(true);
+			expect(blocked(dir, 'call-k2', SESSION, '1.1')).toBe(false);
 		});
 
-		it('a full call bound refuses the dispatch fail-closed (ROUTE_INVALIDATION_CAPACITY) while every prior marker stays consultable', async () => {
+		it('a full call bound refuses the dispatch (ROUTE_INVALIDATION_CAPACITY) with every prior marker consultable', async () => {
 			const dir = fixture({ taskIds: ['1.1'], persistFails: true });
-			// Two unconsumed task-key markers plus a full bound of fault records.
+			// Two unconsumed task-key markers plus a full bound of faults.
 			expect(recordRouteInvalidation(dir, SESSION, 'call-live-a', '1.1')).toBe(
 				true,
 			);
 			expect(recordRouteInvalidation(dir, SESSION, 'call-live-b', '1.2')).toBe(
 				true,
 			);
-			for (
-				let index = 0;
-				index < MAX_LIVE_CALLS_PER_SESSION - 2;
-				index += 1
-			) {
-				expect(
-					recordRouteFault(dir, SESSION, `call-fill-${index}`),
-				).toBe(true);
+			for (let index = 0; index < MAX_LIVE_CALLS_PER_SESSION - 2; index += 1) {
+				expect(recordRouteFault(dir, SESSION, `call-fill-${index}`)).toBe(true);
 			}
 			const hook = createDelegationGateHook(makeConfig(), dir);
 			const warnCapture = captureCriticalWarn();
 			try {
-				// The routing persist faults (plain-file fixture), the registry
-				// refuses the new marker at capacity, and the dispatch is
-				// REJECTED fail-closed — never silently admitted unprotected.
+				// The registry refuses the new marker at capacity and the
+				// dispatch is REJECTED fail-closed.
 				await expect(
 					hook.toolBefore(
 						{ tool: 'Task', sessionID: SESSION, callID: 'call-over-cap' },
@@ -344,22 +325,18 @@ describe('route-receipt hardening legs (#3516)', () => {
 			} finally {
 				warnCapture.restore();
 			}
-			// NO eviction: the prior markers are all still consultable, and the
-			// refusal was loud (criticalWarn names the bound).
-			expect(isRouteBlockedForSettlement(dir, 'call-live-a', SESSION, '1.1')).toBe(
-				true,
+			// NO eviction: prior markers stay consultable.
+			expect(blocked(dir, 'call-live-a', SESSION, '1.1')).toBe(true);
+			expect(blocked(dir, 'call-live-b', SESSION, '1.2')).toBe(true);
+			const capacityLine = warnCapture.lines.find(
+				(line) =>
+					line.includes('route-invalidation-registry') &&
+					line.includes(
+						`MAX_LIVE_CALLS_PER_SESSION=${MAX_LIVE_CALLS_PER_SESSION}`,
+					),
 			);
-			expect(isRouteBlockedForSettlement(dir, 'call-live-b', SESSION, '1.2')).toBe(
-				true,
-			);
-			expect(
-				warnCapture.lines.some(
-					(line) =>
-						line.includes('CRITICAL-WARN') &&
-						line.includes('route-invalidation-registry') &&
-						line.includes(`MAX_LIVE_CALLS_PER_SESSION=${MAX_LIVE_CALLS_PER_SESSION}`),
-				),
-			).toBe(true);
+			expect(capacityLine).toBeDefined();
+			expect(capacityLine!.includes('CRITICAL-WARN')).toBe(true);
 		});
 
 		it('cap-plus-one at the session and directory bounds fails closed without eviction', () => {
@@ -369,7 +346,6 @@ describe('route-receipt hardening legs (#3516)', () => {
 			}
 			expect(recordRouteFault(dir, 'sess-over', 'call-s')).toBe(false);
 			expect(recordRouteFault(dir, 'sess-0', 'call-s2')).toBe(true);
-			// The main dir already occupies one directory slot; fill to the cap.
 			for (let index = 0; index < MAX_LIVE_DIRECTORIES - 1; index += 1) {
 				expect(recordRouteFault(`${dir}-d${index}`, SESSION, 'call-d')).toBe(
 					true,
@@ -378,37 +354,23 @@ describe('route-receipt hardening legs (#3516)', () => {
 			expect(recordRouteFault(`${dir}-d-over`, SESSION, 'call-d')).toBe(false);
 		});
 
-		it('whole-call retirement: a denied call and a failed-output call both retire their marker', async () => {
+		it('whole-call retirement: denied and failed-output calls retire their marker', async () => {
 			const dir = fixture({ taskIds: ['1.1'] });
 			await prepareTask(dir, '1.1');
 			const hook = createDelegationGateHook(makeConfig(), dir);
-			// Denied call: the routing faults (EISDIR gate state), then the
-			// production abort path retires the marker with the dispatch.
 			fs.mkdirSync(workflowGateStatePath(dir, SESSION), { recursive: true });
-			await hook.toolBefore(
-				{ tool: 'Task', sessionID: SESSION, callID: 'call-denied' },
-				{ args: reviewerArgs('1.1') },
-			);
-			expect(
-				isRouteBlockedForSettlement(dir, 'call-denied', SESSION, '1.1'),
-			).toBe(true);
+			await before(hook, 'call-denied', reviewerArgs('1.1'));
+			expect(blocked(dir, 'call-denied', SESSION, '1.1')).toBe(true);
 			await hook.abortDeniedSettlementForCall('call-denied', SESSION);
-			expect(
-				isRouteBlockedForSettlement(dir, 'call-denied', SESSION, '1.1'),
-			).toBe(false);
+			expect(blocked(dir, 'call-denied', SESSION, '1.1')).toBe(false);
 			// Failed output: the settlement loop never runs for a terminal
 			// failure, and the generic toolAfter cleanup retires the marker.
 			fs.rmSync(workflowGateStatePath(dir, SESSION), {
 				recursive: true,
 				force: true,
 			});
-			await hook.toolBefore(
-				{ tool: 'Task', sessionID: SESSION, callID: 'call-failed-out' },
-				{ args: reviewerArgs('1.1') },
-			);
-			expect(
-				isRouteBlockedForSettlement(dir, 'call-x', SESSION, '1.1'),
-			).toBe(false);
+			await before(hook, 'call-failed-out', reviewerArgs('1.1'));
+			expect(blocked(dir, 'call-x', SESSION, '1.1')).toBe(false);
 			retireRouteInvalidationsForCall(dir, SESSION, 'call-x');
 			await hook.toolAfter(
 				{
@@ -419,8 +381,7 @@ describe('route-receipt hardening legs (#3516)', () => {
 				},
 				{ status: 'failed', state: 'failed' },
 			);
-			// (call-failed-out had no marker — the cleanup path is exercised by
-			// the call-x retirement above; this leg pins the loop-skip shape.)
+			// (call-failed-out had no marker; this leg pins the loop-skip.)
 			expect(getTaskState(swarmState.agentSessions.get(SESSION)!, '1.1')).toBe(
 				'pre_check_passed',
 			);
@@ -436,24 +397,19 @@ describe('route-receipt hardening legs (#3516)', () => {
 			expect(registryInternals.size()).toBe(0);
 			expect(recordRouteFault(dir, SESSION, 'call-reset')).toBe(true);
 			resetSwarmState();
-			expect(isRouteBlockedForSettlement(dir, 'call-reset', SESSION, '1.1')).toBe(
-				false,
-			);
+			expect(blocked(dir, 'call-reset', SESSION, '1.1')).toBe(false);
 			expect(registryInternals.size()).toBe(0);
 		});
 	});
 
 	describe('sibling-clobber — kind-monotonicity keeps a live full receipt bindable', () => {
-		it('a sibling non-full remember cannot clobber a healthy full record (the later dispatch binds and settles on it)', async () => {
+		it('a sibling non-full remember cannot clobber a healthy full record', async () => {
 			const dir = fixture({ taskIds: ['1.1'] });
 			await prepareTask(dir, '1.1');
 			const hook = createDelegationGateHook(makeConfig(), dir);
 			const session = swarmState.agentSessions.get(SESSION)!;
 			recordModifiedFilesForTask(session, '1.1', ['src/foo.ts'], dir);
-			await hook.toolBefore(
-				{ tool: 'Task', sessionID: SESSION, callID: 'call-full' },
-				{ args: reviewerArgs('1.1') },
-			);
+			await before(hook, 'call-full', reviewerArgs('1.1'));
 			await hook.taskMetadata({
 				callID: 'call-full',
 				parentSessionID: SESSION,
@@ -462,13 +418,9 @@ describe('route-receipt hardening legs (#3516)', () => {
 			// Free the live slot (production denial path) so the sibling's own
 			// dispatch-time binding is observable.
 			await hook.abortDeniedSettlementForCall('call-full', SESSION);
-			// The sibling's routing remembers PENDING then ROUTER-ERROR records
-			// under its own callID — both resisted against the FULL record.
+			// The sibling's PENDING/ROUTER-ERROR remembers are both resisted.
 			session.modifiedFilesByTask.set('1.1', []);
-			await hook.toolBefore(
-				{ tool: 'Task', sessionID: SESSION, callID: 'call-sibling' },
-				{ args: reviewerArgs('1.1') },
-			);
+			await before(hook, 'call-sibling', reviewerArgs('1.1'));
 			await hook.taskMetadata({
 				callID: 'call-sibling',
 				parentSessionID: SESSION,
@@ -490,26 +442,20 @@ describe('route-receipt hardening legs (#3516)', () => {
 		});
 
 		it('runtime warn channel: the degraded wrapper warn is on the operator channel and bounded (AC14 runtime half)', async () => {
-			// EISDIR on the gate state: a genuine fs fault the wrapper degrades
-			// (not a BLOCKED refusal). At base this warn was debug-gated
-			// (logger.warn behind OPENCODE_SWARM_DEBUG) and unbounded — both
-			// defects are pinned here by the runtime shape.
+			// EISDIR: a genuine fs fault the wrapper degrades. At base the
+			// warn was debug-gated and unbounded — both pinned by the shape.
 			const dir = fixture({ taskIds: ['1.1'] });
 			await prepareTask(dir, '1.1');
 			const hook = createDelegationGateHook(makeConfig(), dir);
 			fs.mkdirSync(workflowGateStatePath(dir, SESSION), { recursive: true });
 			const warnCapture = captureCriticalWarn();
 			try {
-				await hook.toolBefore(
-					{ tool: 'Task', sessionID: SESSION, callID: 'call-redact' },
-					{ args: reviewerArgs('1.1') },
-				);
+				await before(hook, 'call-redact', reviewerArgs('1.1'));
 			} finally {
 				warnCapture.restore();
 			}
-			const line = warnCapture.lines.find(
-				(candidate) =>
-					candidate.includes('PR-review re-entry binding context unreadable'),
+			const line = warnCapture.lines.find((candidate) =>
+				candidate.includes('PR-review re-entry binding context unreadable'),
 			);
 			expect(line).toBeDefined();
 			expect(line!.includes('CRITICAL-WARN')).toBe(true);
@@ -519,7 +465,7 @@ describe('route-receipt hardening legs (#3516)', () => {
 		it('runtime redaction: the registry capacity warn redacts the project path while naming the bound (AC14 redaction half)', () => {
 			const dir = fixture();
 			for (let index = 0; index < MAX_LIVE_CALLS_PER_SESSION; index += 1) {
-				expect(recordRouteFault(dir, SESSION, `call-f-${index}`)).toBe(true);
+				recordRouteFault(dir, SESSION, `call-f-${index}`);
 			}
 			const warnCapture = captureCriticalWarn();
 			try {
@@ -536,10 +482,9 @@ describe('route-receipt hardening legs (#3516)', () => {
 			);
 			expect(line).toBeDefined();
 			expect(line!.includes('CRITICAL-WARN')).toBe(true);
-			// The project path never appears raw when the fixture root is under
-			// a redactable home profile (Windows/macOS temp dirs are; POSIX
-			// /tmp fixtures are not — the assertion is scoped to what this leg
-			// actually proves, per the honest-claims header).
+			// The project path never appears raw when the fixture root is
+			// under a redactable home profile (Windows/macOS temp dirs are;
+			// POSIX /tmp fixtures are not — scoped to what this proves).
 			const redactableRoot = /^(\/home\/|\/Users\/|[A-Za-z]:\\Users\\)/.test(
 				dir,
 			);

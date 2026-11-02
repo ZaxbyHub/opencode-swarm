@@ -20,10 +20,15 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { PluginConfig } from '../../../src/config';
 import { closeAllProjectDbs } from '../../../src/db/project-db';
+import { transitionTaskWorkflowEvidence } from '../../../src/gate-evidence';
 import {
 	_internals,
 	createDelegationGateHook,
 } from '../../../src/hooks/delegation-gate';
+import {
+	buildReviewRouteRouterError,
+	persistReviewRouteReceipt,
+} from '../../../src/review/routing-enforcement';
 import {
 	advanceTaskState,
 	ensureAgentSession,
@@ -32,11 +37,6 @@ import {
 	resetSwarmState,
 	swarmState,
 } from '../../../src/state';
-import { transitionTaskWorkflowEvidence } from '../../../src/gate-evidence';
-import {
-	buildReviewRouteRouterError,
-	persistReviewRouteReceipt,
-} from '../../../src/review/routing-enforcement';
 import { createIsolatedTestEnv } from '../../helpers/isolated-test-env.js';
 import { canonicalMkdtemp, removeTreeWithRetry } from '../../helpers/tmpdir';
 
@@ -45,8 +45,7 @@ const FAULTED = '1.1';
 const SIBLING = '1.2';
 
 /** The real enforcement read, restored in afterEach. */
-const realEnforce =
-	_internals.enforcePersistedReviewRouteReceiptAtSettlement;
+const realEnforce = _internals.enforcePersistedReviewRouteReceiptAtSettlement;
 
 let isolatedEnv: ReturnType<typeof createIsolatedTestEnv> | undefined;
 const dirs: string[] = [];
@@ -129,8 +128,7 @@ async function seedSiblingReceipt(dir: string): Promise<void> {
 	});
 }
 
-const setDispatchPrompt =
-	`TASK: ${FAULTED} and ${SIBLING} review the changes\nACCEPTANCE: FR-001 the diff satisfies the requirement`;
+const setDispatchPrompt = `TASK: ${FAULTED} and ${SIBLING} review the changes\nACCEPTANCE: FR-001 the diff satisfies the requirement`;
 
 const reviewed = (taskId: string) =>
 	`[REVIEWED] | task-${taskId} | APPROVED | enotdir fixture`;
@@ -141,9 +139,9 @@ const reviewed = (taskId: string) =>
  */
 function injectFault(readIndex: 1 | 2): void {
 	const seen = new Map<string, number>();
-	_internals.enforcePersistedReviewRouteReceiptAtSettlement = ((
-		args: { taskId?: string },
-	) => {
+	_internals.enforcePersistedReviewRouteReceiptAtSettlement = ((args: {
+		taskId?: string;
+	}) => {
 		const key = args.taskId ?? '(none)';
 		const next = (seen.get(key) ?? 0) + 1;
 		seen.set(key, next);
@@ -178,7 +176,13 @@ describe('route-receipt read-fault isolation (#3516 item 7 / AC10)', () => {
 		);
 		await hook.toolBefore(
 			{ tool: 'Task', sessionID: SESSION, callID: 'call-e1' },
-			{ args: { subagent_type: 'reviewer', task_id: FAULTED, prompt: setDispatchPrompt } },
+			{
+				args: {
+					subagent_type: 'reviewer',
+					task_id: FAULTED,
+					prompt: setDispatchPrompt,
+				},
+			},
 		);
 		await hook.taskMetadata({
 			callID: 'call-e1',
@@ -191,7 +195,11 @@ describe('route-receipt read-fault isolation (#3516 item 7 / AC10)', () => {
 				tool: 'tool.execute.Task',
 				sessionID: SESSION,
 				callID: 'call-e1',
-				args: { subagent_type: 'reviewer', task_id: FAULTED, prompt: setDispatchPrompt },
+				args: {
+					subagent_type: 'reviewer',
+					task_id: FAULTED,
+					prompt: setDispatchPrompt,
+				},
 			},
 			{ text: `${reviewed(FAULTED)}\n${reviewed(SIBLING)}` },
 		);
@@ -226,7 +234,13 @@ describe('route-receipt read-fault isolation (#3516 item 7 / AC10)', () => {
 		);
 		await hook.toolBefore(
 			{ tool: 'Task', sessionID: SESSION, callID: 'call-e2' },
-			{ args: { subagent_type: 'reviewer', task_id: FAULTED, prompt: setDispatchPrompt } },
+			{
+				args: {
+					subagent_type: 'reviewer',
+					task_id: FAULTED,
+					prompt: setDispatchPrompt,
+				},
+			},
 		);
 		await hook.taskMetadata({
 			callID: 'call-e2',
@@ -239,7 +253,11 @@ describe('route-receipt read-fault isolation (#3516 item 7 / AC10)', () => {
 				tool: 'tool.execute.Task',
 				sessionID: SESSION,
 				callID: 'call-e2',
-				args: { subagent_type: 'reviewer', task_id: FAULTED, prompt: setDispatchPrompt },
+				args: {
+					subagent_type: 'reviewer',
+					task_id: FAULTED,
+					prompt: setDispatchPrompt,
+				},
 			},
 			{ text: `${reviewed(FAULTED)}\n${reviewed(SIBLING)}` },
 		);

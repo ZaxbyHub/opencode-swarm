@@ -1247,12 +1247,7 @@ function applyStageBStateCompletion(
 		// without an ingestion record). BLOCK-only: never retires the marker.
 		if (
 			routeEnabled &&
-			isRouteBlockedForSettlement(
-				directory,
-				callId,
-				parentSessionId,
-				taskId,
-			)
+			isRouteBlockedForSettlement(directory, callId, parentSessionId, taskId)
 		) {
 			logger.warn(
 				`[background-stage-b] route receipt invalidated before completion recording for ${taskId} (call ${callId})`,
@@ -1303,12 +1298,7 @@ function applyStageBStateCompletion(
 		// too.
 		if (
 			routeEnabled &&
-			isRouteBlockedForSettlement(
-				directory,
-				callId,
-				parentSessionId,
-				taskId,
-			)
+			isRouteBlockedForSettlement(directory, callId, parentSessionId, taskId)
 		) {
 			logger.warn(
 				`[background-stage-b] route receipt invalidated before advancement for ${taskId} (call ${callId})`,

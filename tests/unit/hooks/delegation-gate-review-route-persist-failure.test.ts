@@ -3,14 +3,13 @@
  *
  * Persist failures are forced deterministically on every matrix OS: a real
  * `.swarm` directory with `.swarm/pr-review` as a plain FILE (plan.json stays
- * readable), so the ONLY fault is the receipt parent mkdir — before
+ * readable), so the only fault is the receipt parent mkdir, before
  * `routeDispatchStarted` is set, identically on Windows and POSIX.
  *
  * Honest claims scope (AC17): the legs prove the persist-side symmetry for
  * the fault classes they drive (mkdir-under-file, EISDIR, corrupt gate
- * state); POSIX ENOTDIR end-to-end is pinned per-task in
- * review-route-enotdir-3509.test.ts; the pre-v1 `legacy_unrouted` carve-out
- * is unchanged and disclosed in the release fragment.
+ * state); POSIX ENOTDIR is pinned per-task in review-route-enotdir-3509;
+ * the pre-v1 `legacy_unrouted` carve-out is disclosed in the fragment.
  *
  *
  * Env isolation: createIsolatedTestEnv redirects the hive/app-data roots the
@@ -21,6 +20,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { PluginConfig } from '../../../src/config';
 import { closeAllProjectDbs } from '../../../src/db/project-db';
+import { transitionTaskWorkflowEvidence } from '../../../src/gate-evidence';
 import {
 	_internals,
 	createDelegationGateHook,
@@ -41,7 +41,6 @@ import {
 	resetSwarmState,
 	swarmState,
 } from '../../../src/state';
-import { transitionTaskWorkflowEvidence } from '../../../src/gate-evidence';
 import { createIsolatedTestEnv } from '../../helpers/isolated-test-env.js';
 import { canonicalMkdtemp, removeTreeWithRetry } from '../../helpers/tmpdir';
 
@@ -51,7 +50,7 @@ function makeConfig(): PluginConfig {
 	return { hooks: { delegation_gate: true } } as unknown as PluginConfig;
 }
 
-function writePlan(dir: string, taskIds = ['1.1']): void {
+const writePlan = (dir: string, taskIds = ['1.1']): void => {
 	fs.writeFileSync(
 		path.join(dir, '.swarm', 'plan.json'),
 		JSON.stringify({
@@ -77,7 +76,7 @@ function writePlan(dir: string, taskIds = ['1.1']): void {
 			],
 		}),
 	);
-}
+};
 
 const reviewerArgs = (taskId: string) => ({
 	subagent_type: 'reviewer',
@@ -95,7 +94,10 @@ function receiptJsonFiles(dir: string): string[] {
 
 /** Break future persists WITHOUT deleting on-disk receipts (secret → dir). */
 function breakSecret(): void {
-	const secretPath = path.join(resolveHiveDataDir(), 'review-route-receipts.key');
+	const secretPath = path.join(
+		resolveHiveDataDir(),
+		'review-route-receipts.key',
+	);
 	fs.rmSync(secretPath, { force: true });
 	fs.mkdirSync(secretPath, { recursive: true });
 }
@@ -119,13 +121,18 @@ afterEach(() => {
 });
 
 /** Persist-failure fixture: `.swarm/pr-review` as a plain FILE. */
-function gateDir(options: { persistFails: boolean; withPlan?: boolean }): string {
+function gateDir(o: {
+	persistFails: boolean;
+	withPlan?: boolean;
+	withPlanTaskIds?: string[];
+}): string {
 	const dir = canonicalMkdtemp('route-persist-3380-');
 	dirs.push(dir);
 	fs.mkdirSync(path.join(dir, '.swarm'), { recursive: true });
 	fs.mkdirSync(path.join(dir, '.opencode'), { recursive: true });
-	if (options.withPlan) writePlan(dir);
-	if (options.persistFails) {
+	if (o.withPlanTaskIds) writePlan(dir, o.withPlanTaskIds);
+	else if (o.withPlan) writePlan(dir);
+	if (o.persistFails) {
 		fs.writeFileSync(path.join(dir, '.swarm', 'pr-review'), 'not a directory');
 	}
 	return dir;
@@ -145,17 +152,43 @@ async function dispatch(
 	return hook.toolBefore({ tool: 'Task', sessionID, callID }, { args });
 }
 
+/** Seed a full route receipt for (sessionID, 1.1) via an attributed dispatch. */
+async function seedFullReceipt(
+	dir: string,
+	sessionID: string,
+	callID: string,
+	hook = makeHook(dir),
+): Promise<void> {
+	ensureAgentSession(sessionID, 'architect', dir);
+	recordModifiedFilesForTask(
+		swarmState.agentSessions.get(sessionID)!,
+		'1.1',
+		['src/foo.ts'],
+		dir,
+	);
+	await expect(
+		hook.toolBefore(
+			{ tool: 'Task', sessionID, callID },
+			{ args: reviewerArgs('1.1') },
+		),
+	).rejects.toThrow('TASK_WORKFLOW_');
+}
+
 describe('review/test_engineer route-receipt persist failure (#3380)', () => {
 	it('reviewer ACCEPTANCE fall-through: refused without ACCEPTANCE, resolved with it — and the writable control persists', async () => {
 		const dir = gateDir({ persistFails: true });
 		await expect(
-			dispatch(dir, 'sess-rf-reviewer', { subagent_type: 'reviewer', prompt: 'TASK: review it' }),
+			dispatch(dir, 'sess-rf-reviewer', {
+				subagent_type: 'reviewer',
+				prompt: 'TASK: review it',
+			}),
 		).rejects.toThrow('ACCEPTANCE_FIELD_REQUIRED');
 		expect(receiptJsonFiles(dir)).toEqual([]);
 		await expect(
 			dispatch(dir, 'sess-rf-reviewer-ok', {
 				subagent_type: 'reviewer',
-				prompt: 'TASK: review it\nACCEPTANCE: FR-001 the diff satisfies the requirement',
+				prompt:
+					'TASK: review it\nACCEPTANCE: FR-001 the diff satisfies the requirement',
 			}),
 		).resolves.toBeUndefined();
 		expect(receiptJsonFiles(dir)).toEqual([]);
@@ -163,7 +196,10 @@ describe('review/test_engineer route-receipt persist failure (#3380)', () => {
 		// receipt — proving the receipt path itself is healthy.
 		const ctl = gateDir({ persistFails: false });
 		await expect(
-			dispatch(ctl, 'sess-rf-ctl', { subagent_type: 'reviewer', prompt: 'TASK: review it' }),
+			dispatch(ctl, 'sess-rf-ctl', {
+				subagent_type: 'reviewer',
+				prompt: 'TASK: review it',
+			}),
 		).rejects.toThrow('ACCEPTANCE_FIELD_REQUIRED');
 		expect(receiptJsonFiles(ctl).length).toBeGreaterThan(0);
 	});
@@ -190,16 +226,7 @@ describe('review/test_engineer route-receipt persist failure (#3380)', () => {
 	it('route SUCCESS persists a real route receipt (kind review_route_receipt) for a task-attributed reviewer dispatch', async () => {
 		const dir = gateDir({ persistFails: false, withPlan: true });
 		const sessionID = 'sess-rf-route-ok';
-		ensureAgentSession(sessionID, 'architect', dir);
-		recordModifiedFilesForTask(
-			swarmState.agentSessions.get(sessionID)!,
-			'1.1',
-			['src/foo.ts'],
-			dir,
-		);
-		await expect(
-			dispatch(dir, sessionID, reviewerArgs('1.1')),
-		).rejects.toThrow('TASK_WORKFLOW_');
+		await seedFullReceipt(dir, sessionID, 'call-route-ok');
 		const receipts = receiptJsonFiles(dir);
 		expect(receipts.length).toBeGreaterThan(0);
 		const receipt = JSON.parse(
@@ -214,31 +241,18 @@ describe('review/test_engineer route-receipt persist failure (#3380)', () => {
 	it('a failed persist invalidates THIS dispatch; the call fault marker persists until whole-call retirement (#3502 PRR-007, #3509 semantics)', async () => {
 		const dir = gateDir({ persistFails: false, withPlan: true });
 		const sessionID = 'sess-rs';
-		ensureAgentSession(sessionID, 'architect', dir);
-		recordModifiedFilesForTask(
-			swarmState.agentSessions.get(sessionID)!,
-			'1.1',
-			['src/foo.ts'],
-			dir,
-		);
 		const hook = makeHook(dir);
 		const args = reviewerArgs('1.1');
-		await expect(dispatch(dir, sessionID, args, 'call-r1', hook)).rejects.toThrow(
-			'TASK_WORKFLOW_',
-		);
+		await seedFullReceipt(dir, sessionID, 'call-r1', hook);
 		expect(receiptJsonFiles(dir).length).toBeGreaterThan(0);
-		// Corrected fixture (AC12): break ONLY the secret — the prior
-		// receipt STAYS ON DISK (the old rmSync deleted it).
 		breakSecret();
-		await expect(dispatch(dir, sessionID, args, 'call-r2', hook)).rejects.toThrow(
-			'TASK_WORKFLOW_',
-		);
+		await expect(
+			dispatch(dir, sessionID, args, 'call-r2', hook),
+		).rejects.toThrow('TASK_WORKFLOW_');
 		const probe = _internals.routeInvalidationProbe;
 		expect(probe).toBeInstanceOf(Function);
 		// The task key consult blocks (callFault + task key recorded).
 		expect(probe!('call-r2', sessionID, '1.1')).toBe(true);
-		// #3509 semantics: the whole-call fault marker is NOT consumed per
-		// task — blocked until whole-call retirement.
 		expect(probe!('call-r2', sessionID, '1.1')).toBe(true);
 		// Unrelated dispatch never invalidated; the prior receipt survived.
 		expect(probe!('call-r1', sessionID, '1.1')).toBe(false);
@@ -254,9 +268,6 @@ describe('restructure — #3509/#3516 legs on the persist-failure fixture', () =
 			recursive: true,
 		});
 		fs.writeFileSync(workflowGateStatePath(dir, 'sess-d1'), 'not json {{{');
-		// No task id anywhere: at base this dispatch was ADMITTED (the blanket
-		// catch swallowed the corruption refusal); post-fix the wrapper
-		// rethrows the BLOCKED refusal fail-closed.
 		await expect(
 			dispatch(dir, 'sess-d1', {
 				subagent_type: 'reviewer',
@@ -270,24 +281,25 @@ describe('restructure — #3509/#3516 legs on the persist-failure fixture', () =
 		const dir = gateDir({ persistFails: false, withPlan: true });
 		await prepareTask(dir, '1.1', 'sess-d2');
 		const hook = makeHook(dir);
-		// EISDIR on the gate state faults the routing block's RAW read BEFORE
-		// routedTaskId is assigned; the wrapper degrades the TASK_GATE read.
 		fs.mkdirSync(workflowGateStatePath(dir, 'sess-d2'), { recursive: true });
 		await hook.toolBefore(
 			{ tool: 'Task', sessionID: 'sess-d2', callID: 'call-d2' },
 			{ args: reviewerArgs('1.1') },
 		);
-		expect(
-			isRouteBlockedForSettlement(dir, 'call-d2', 'sess-d2', '1.1'),
-		).toBe(true);
-		// Per-key consumption in the same leg: a matched task key blocks
-		// exactly once while sibling keys stay armed (the base per-hook map
-		// deleted the whole entry on first consult).
+		expect(isRouteBlockedForSettlement(dir, 'call-d2', 'sess-d2', '1.1')).toBe(
+			true,
+		);
 		recordRouteInvalidation(dir, 'sess-d2', 'call-d2k', '1.1');
 		recordRouteInvalidation(dir, 'sess-d2', 'call-d2k', '1.2');
-		expect(isRouteBlockedForSettlement(dir, 'call-d2k', 'sess-d2', '1.1')).toBe(true);
-		expect(isRouteBlockedForSettlement(dir, 'call-d2k', 'sess-d2', '1.1')).toBe(false);
-		expect(isRouteBlockedForSettlement(dir, 'call-d2k', 'sess-d2', '1.2')).toBe(true);
+		expect(isRouteBlockedForSettlement(dir, 'call-d2k', 'sess-d2', '1.1')).toBe(
+			true,
+		);
+		expect(isRouteBlockedForSettlement(dir, 'call-d2k', 'sess-d2', '1.1')).toBe(
+			false,
+		);
+		expect(isRouteBlockedForSettlement(dir, 'call-d2k', 'sess-d2', '1.2')).toBe(
+			true,
+		);
 	});
 
 	it('d3: the persist attempt is observable through the _internals seam (attempted-and-threw vs never-attempted)', async () => {
@@ -315,11 +327,11 @@ describe('restructure — #3509/#3516 legs on the persist-failure fixture', () =
 				'sess-d3',
 				{
 					subagent_type: 'reviewer',
-					prompt: 'TASK: review it\nACCEPTANCE: FR-001 the diff satisfies the requirement',
+					prompt:
+						'TASK: review it\nACCEPTANCE: FR-001 the diff satisfies the requirement',
 				},
 				'call-d3a',
 			);
-			// Attempted AND threw (not a constant empty receipt directory).
 			expect(attempts.length).toBeGreaterThan(0);
 			expect(attempts[0]!.kind).toBe('review_route_pending');
 			expect(attempts[0]!.error).toBeTruthy();
@@ -342,32 +354,25 @@ describe('restructure — #3509/#3516 legs on the persist-failure fixture', () =
 	it('d5: the corrected stale-receipt fixture keeps the prior full receipt on disk while the new persist fails', async () => {
 		const dir = gateDir({ persistFails: false, withPlan: true });
 		const sessionID = 'sess-d5';
-		ensureAgentSession(sessionID, 'architect', dir);
-		recordModifiedFilesForTask(
-			swarmState.agentSessions.get(sessionID)!,
-			'1.1',
-			['src/foo.ts'],
-			dir,
-		);
-		await expect(
-			dispatch(dir, sessionID, reviewerArgs('1.1'), 'call-d5a'),
-		).rejects.toThrow('TASK_WORKFLOW_');
+		await seedFullReceipt(dir, sessionID, 'call-d5a');
 		const before = receiptJsonFiles(dir);
 		expect(before.length).toBeGreaterThan(0);
 		breakSecret();
 		await expect(
 			dispatch(dir, sessionID, reviewerArgs('1.1'), 'call-d5b'),
 		).rejects.toThrow('TASK_WORKFLOW_');
-		// The same receipt is still on disk after the failed persist, and
-		// the failed dispatch carries its invalidation marker.
 		expect(receiptJsonFiles(dir)).toEqual(before);
-		expect(isRouteBlockedForSettlement(dir, 'call-d5b', sessionID, '1.1')).toBe(true);
+		expect(isRouteBlockedForSettlement(dir, 'call-d5b', sessionID, '1.1')).toBe(
+			true,
+		);
 	});
 
 	it('d6: a faulted multi-task dispatch is blocked for BOTH verdict tasks in both settlement orders', async () => {
 		for (const order of ['1.1-first', '1.2-first'] as const) {
-			const dir = gateDir({ persistFails: false, withPlan: true });
-			writePlan(dir, ['1.1', '1.2']);
+			const dir = gateDir({
+				persistFails: false,
+				withPlanTaskIds: ['1.1', '1.2'],
+			});
 			const sessionID = 'sess-d6';
 			await prepareTask(dir, '1.1', sessionID);
 			await prepareTask(dir, '1.2', sessionID);
@@ -393,10 +398,9 @@ describe('restructure — #3509/#3516 legs on the persist-failure fixture', () =
 			const session = swarmState.agentSessions.get(sessionID)!;
 			expect(getTaskState(session, '1.1')).toBe('pre_check_passed');
 			expect(getTaskState(session, '1.2')).toBe('pre_check_passed');
-			// Retired only after the WHOLE call's settlement invocation.
-			expect(isRouteBlockedForSettlement(dir, 'call-d6', sessionID, '1.1')).toBe(
-				false,
-			);
+			expect(
+				isRouteBlockedForSettlement(dir, 'call-d6', sessionID, '1.1'),
+			).toBe(false);
 			resetSwarmState();
 		}
 	});
@@ -410,9 +414,13 @@ describe('restructure — #3509/#3516 legs on the persist-failure fixture', () =
 			{ tool: 'Task', sessionID: 'sess-d7', callID: 'call-d7' },
 			{ args: reviewerArgs('1.1') },
 		);
-		expect(isRouteBlockedForSettlement(dir, 'call-d7', 'sess-d7', '1.1')).toBe(true);
+		expect(isRouteBlockedForSettlement(dir, 'call-d7', 'sess-d7', '1.1')).toBe(
+			true,
+		);
 		await hook.abortDeniedSettlementForCall('call-d7', 'sess-d7');
-		expect(isRouteBlockedForSettlement(dir, 'call-d7', 'sess-d7', '1.1')).toBe(false);
+		expect(isRouteBlockedForSettlement(dir, 'call-d7', 'sess-d7', '1.1')).toBe(
+			false,
+		);
 	});
 
 	it('p: healthy real toolAfter settlement — a receipt-persisted dispatch settles and advances (PRESERVING)', async () => {
@@ -439,46 +447,36 @@ describe('restructure — #3509/#3516 legs on the persist-failure fixture', () =
 });
 
 describe('Stage-B advancement fails closed on the missing receipt (#3380 / plan F3 proof)', () => {
-	it('with the route-required marker set and no receipt on disk, the settlement entry point refuses advancement under the default enforcement', () => {
-		const dir = gateDir({ persistFails: false });
-		const sessionID = 'sess-proof';
-		const session = ensureAgentSession(sessionID, 'architect', dir);
-		markStageBRouteRequired(session, '1.1');
-		const result = enforcePersistedReviewRouteReceipt({
-			projectRoot: dir,
-			sessionId: sessionID,
-			taskId: '1.1',
-			receipts: [],
-			enforcementEnabled: true,
-			legacyUnrouted: !session.stageBRouteRequiredTasks.has('1.1'),
-			requireEvidenceBindings: true,
-			requireCompleteEvidence: false,
-		});
-		expect(result.canAdvance).toBe(false);
-	});
-
-	it('with enforce_receipts disabled the receipt gate is the documented rollback surface', () => {
-		const dir = gateDir({ persistFails: false });
-		const sessionID = 'sess-proof-disabled';
-		const session = ensureAgentSession(sessionID, 'architect', dir);
-		markStageBRouteRequired(session, '1.1');
-		const result = enforcePersistedReviewRouteReceipt({
-			projectRoot: dir,
-			sessionId: sessionID,
-			taskId: '1.1',
-			receipts: [],
-			enforcementEnabled: false,
-			legacyUnrouted: false,
-			requireEvidenceBindings: true,
-			requireCompleteEvidence: false,
-		});
-		expect(result.canAdvance).toBe(true);
-		expect(result.mode).toBe('disabled');
+	it('fails closed on the missing receipt under default enforcement; enforce_receipts:false is the documented rollback', () => {
+		for (const enforce of [true, false]) {
+			const dir = gateDir({ persistFails: false });
+			const sessionID = enforce ? 'sess-proof' : 'sess-proof-off';
+			const session = ensureAgentSession(sessionID, 'architect', dir);
+			markStageBRouteRequired(session, '1.1');
+			const result = enforcePersistedReviewRouteReceipt({
+				projectRoot: dir,
+				sessionId: sessionID,
+				taskId: '1.1',
+				receipts: [],
+				enforcementEnabled: enforce,
+				legacyUnrouted: enforce
+					? !session.stageBRouteRequiredTasks.has('1.1')
+					: false,
+				requireEvidenceBindings: true,
+				requireCompleteEvidence: false,
+			});
+			expect(result.canAdvance).toBe(!enforce);
+			if (!enforce) expect(result.mode).toBe('disabled');
+		}
 	});
 });
 
 /** Stage-A evidence + session view so taskId is Stage-B eligible. */
-async function prepareTask(dir: string, taskId: string, sessionID = SESSION): Promise<void> {
+async function prepareTask(
+	dir: string,
+	taskId: string,
+	sessionID = SESSION,
+): Promise<void> {
 	ensureAgentSession(sessionID, 'architect', dir);
 	await transitionTaskWorkflowEvidence(dir, taskId, {
 		type: 'accepted_mutation',

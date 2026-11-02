@@ -271,9 +271,8 @@ export const _test_exports = {
 	},
 	callCount(directory: string, sessionId: string): number {
 		return (
-			registryByDirectory
-				.get(canonicalDirectory(directory))
-				?.get(sessionId)?.size ?? 0
+			registryByDirectory.get(canonicalDirectory(directory))?.get(sessionId)
+				?.size ?? 0
 		);
 	},
 };

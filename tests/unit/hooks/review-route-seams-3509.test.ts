@@ -42,6 +42,8 @@ import {
 	ingestBackgroundStageBCompletion,
 } from '../../../src/background/stage-b-gates';
 import { captureWorkspaceSnapshot } from '../../../src/background/workspace-snapshot';
+import { closeAllProjectDbs } from '../../../src/db/project-db';
+import { transitionTaskWorkflowEvidence } from '../../../src/gate-evidence';
 import {
 	isRouteBlockedForSettlement,
 	recordRouteFault,
@@ -55,8 +57,6 @@ import {
 	startAgentSession,
 	swarmState,
 } from '../../../src/state';
-import { transitionTaskWorkflowEvidence } from '../../../src/gate-evidence';
-import { closeAllProjectDbs } from '../../../src/db/project-db';
 import { createIsolatedTestEnv } from '../../helpers/isolated-test-env.js';
 import { canonicalMkdtemp, removeTreeWithRetry } from '../../helpers/tmpdir';
 
@@ -143,7 +143,10 @@ async function ingest(
 			captureWorkspaceSnapshot(directory) as BackgroundWorkspaceSnapshot,
 		),
 		result: {
-			text: role === 'reviewer' ? approvedText : `[TESTED] | task-${TASK} | PASS | x`,
+			text:
+				role === 'reviewer'
+					? approvedText
+					: `[TESTED] | task-${TASK} | PASS | x`,
 			chars: 64,
 			truncated: false,
 			digest: 'seam-digest',
@@ -222,9 +225,9 @@ describe('route-invalidation settlement seams (#3509/#3516 seam coverage)', () =
 		);
 		const session = swarmState.agentSessions.get(PARENT)!;
 		expect(getTaskState(session, TASK)).toBe('pre_check_passed');
-		expect(
-			session.stageBCompletion?.get(TASK)?.has('reviewer') ?? false,
-		).toBe(false);
+		expect(session.stageBCompletion?.get(TASK)?.has('reviewer') ?? false).toBe(
+			false,
+		);
 	});
 
 	it('seam wiring: the completeness-read consult (B) and the advancement re-check (D2) exist at the source level', () => {
@@ -232,10 +235,7 @@ describe('route-invalidation settlement seams (#3509/#3516 seam coverage)', () =
 		// share state with their predecessors (a blocked A/D1 returns first),
 		// so their presence is pinned as a wiring fact, not a behavioral leg.
 		const source = fs.readFileSync(
-			path.resolve(
-				import.meta.dir,
-				'../../../src/background/stage-b-gates.ts',
-			),
+			path.resolve(import.meta.dir, '../../../src/background/stage-b-gates.ts'),
 			'utf8',
 		);
 		const occurrences = source.match(/isRouteBlockedForSettlement\(/g);
@@ -252,17 +252,26 @@ describe('route-invalidation settlement seams (#3509/#3516 seam coverage)', () =
 		);
 		await recordPendingDelegation(directory, record);
 		const digest = createHash('sha256').update(approvedText).digest('hex');
-		const terminalClaim = await claimTerminalResult(directory, record.correlationId, {
-			eventId: buildBackgroundCompletionEventId({
-				correlationId: record.correlationId,
-				jobId: record.jobId,
+		const terminalClaim = await claimTerminalResult(
+			directory,
+			record.correlationId,
+			{
+				eventId: buildBackgroundCompletionEventId({
+					correlationId: record.correlationId,
+					jobId: record.jobId,
+					status: 'completed',
+					resultDigest: digest,
+				}),
 				status: 'completed',
-				resultDigest: digest,
-			}),
-			status: 'completed',
-			recordedAt: Date.now(),
-			result: { text: approvedText, chars: approvedText.length, truncated: false, digest },
-		});
+				recordedAt: Date.now(),
+				result: {
+					text: approvedText,
+					chars: approvedText.length,
+					truncated: false,
+					digest,
+				},
+			},
+		);
 		expect(terminalClaim?.disposition).toBe('claimed');
 		const observer = createBackgroundCompletionObserver({
 			config: { enabled: true },
@@ -290,9 +299,9 @@ describe('route-invalidation settlement seams (#3509/#3516 seam coverage)', () =
 		expect(settled?.record.status).toBe('consumed');
 		expect(settled?.record.ingestion?.state).toBe('consumed');
 		expect(settled?.record.ingestion?.claimToken).toBeTruthy();
-		expect(
-			isRouteBlockedForSettlement(directory, CALL, PARENT, TASK),
-		).toBe(false);
+		expect(isRouteBlockedForSettlement(directory, CALL, PARENT, TASK)).toBe(
+			false,
+		);
 		// And nothing advanced: the invalid route withheld the completion.
 		const session = swarmState.agentSessions.get(PARENT)!;
 		expect(getTaskState(session, TASK)).toBe('pre_check_passed');
@@ -325,7 +334,9 @@ describe('route-invalidation settlement seams (#3509/#3516 seam coverage)', () =
 			...noTaskRecord,
 			evidenceTaskId: null,
 		});
-		const preserveDigest = createHash('sha256').update(approvedText).digest('hex');
+		const preserveDigest = createHash('sha256')
+			.update(approvedText)
+			.digest('hex');
 		const preserveTerminal = await claimTerminalResult(
 			directory,
 			persistedPreserve.correlationId,
@@ -347,9 +358,13 @@ describe('route-invalidation settlement seams (#3509/#3516 seam coverage)', () =
 			},
 		);
 		expect(preserveTerminal?.disposition).toBe('claimed');
-		const claim = await claimDelegationIngestion(directory, persistedPreserve.correlationId, {
-			claimantId: 'evt-preserve',
-		});
+		const claim = await claimDelegationIngestion(
+			directory,
+			persistedPreserve.correlationId,
+			{
+				claimantId: 'evt-preserve',
+			},
+		);
 		expect(claim?.disposition).toBe('claimed');
 		const claimToken = claim?.record.ingestion?.claimToken;
 		expect(claimToken).toBeTruthy();
