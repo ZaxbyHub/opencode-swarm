@@ -226,7 +226,7 @@ export const TOOL_METADATA = {
 	// (tests/unit/tools/tool-names.adversarial.test.ts).
 	receipt: {
 		description:
-			'emit a portable verification receipt (JSON + Markdown) recording every gate that ran for a task or phase, with content hashes and snapshot hashes; export writes a self-contained bundle under .swarm/plan-export/ and --verify re-checks every hash in a bundle on any machine, exiting nonzero on any mismatch',
+			'emit a portable verification receipt (JSON + Markdown) recording the durably recorded gate outcomes for a task or phase, with content hashes and snapshot hashes; export writes a self-contained bundle under .swarm/plan-export/ and --verify re-checks every recorded hash in a bundle on any machine, exiting nonzero on any mismatch',
 		agents: ['architect', 'reviewer', 'critic_finding_validator'],
 	},
 	completion_verify: {

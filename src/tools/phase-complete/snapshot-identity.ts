@@ -57,8 +57,15 @@ export function toPortableRelativePath(root: string, absolute: string): string {
  * `PHASE_PREFLIGHT_STALE`). The snapshot therefore skips exactly this one
  * top-level entry of the `.swarm/evidence` root; behavior is byte-identical
  * when the directory does not exist.
+ *
+ * FB-008 (#2968 swarm-pr-review): exported as the single source of truth for
+ * "derived, non-task top-level entries of `.swarm/evidence`" — the evidence
+ * task-ID listing (`listEvidenceTaskIds`, consumed by `/swarm doctor`'s
+ * Orphaned-Evidence check) must treat the SAME entries as reserved, or every
+ * project that completes a phase gets a false "Orphaned Evidence [receipts]"
+ * red on its primary health surface.
  */
-const SNAPSHOT_EXCLUDED_EVIDENCE_ENTRIES = new Set(['receipts']);
+export const SNAPSHOT_EXCLUDED_EVIDENCE_ENTRIES = new Set(['receipts']);
 
 export function computePhaseEvidenceSnapshot(directory: string): string {
 	const root = fs.realpathSync(directory);

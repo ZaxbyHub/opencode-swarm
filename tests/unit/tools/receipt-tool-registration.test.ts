@@ -25,7 +25,7 @@ describe('receipt tool registration (five-part completion, #2968/#2970)', () => 
 	});
 
 	test('the barrel sees tools.receipt and the description mirrors metadata', () => {
-		expect(typeof (tools as Record<string, unknown>).receipt).toBeDefined();
+		expect((tools as Record<string, unknown>).receipt).toBeDefined();
 		expect(TOOL_DESCRIPTIONS.receipt).toContain('verification receipt');
 	});
 

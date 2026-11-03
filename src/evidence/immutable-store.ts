@@ -87,6 +87,12 @@ export type WriteImmutableArtifactOptions<T> = {
 	isEquivalent?: (existing: T, desired: T) => boolean;
 	/** Builds the store-specific error thrown on a conflict. */
 	conflictError: (conflict: ImmutableArtifactConflict) => Error;
+	/**
+	 * Optional lock budget overriding the 60 s default (PRR-019: fail-open
+	 * capture runs while the plan lock is held and must not stall the gate
+	 * for a full minute under contention).
+	 */
+	lockTimeoutMs?: number;
 };
 
 /**
@@ -135,5 +141,6 @@ export async function writeImmutableArtifact<T>(
 			await atomicWriteFile(options.filePath, desired);
 			return options.value;
 		},
+		options.lockTimeoutMs,
 	);
 }

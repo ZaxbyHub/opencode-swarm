@@ -199,8 +199,10 @@ export const TOOL_MANIFEST = defineHandlers({
 	schema_drift: () => schema_drift,
 	todo_extract: () => todo_extract,
 	evidence_check: () => evidence_check,
-	receipt: () => receipt,
 	check_gate_status: () => check_gate_status,
+	// #2968/#2970: placed after check_gate_status to mirror the pinned
+	// evidence_check -> check_gate_status TOOL_NAMES adjacency (PRR-023).
+	receipt: () => receipt,
 	completion_verify: () => completion_verify,
 	complete_pr_workflow: () => complete_pr_workflow,
 	abort_pr_workflow: () => abort_pr_workflow,

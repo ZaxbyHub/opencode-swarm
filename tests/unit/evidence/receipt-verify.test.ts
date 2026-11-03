@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
@@ -77,13 +77,24 @@ async function buildExportedBundle(dir: string): Promise<string> {
 }
 
 /** Copy a bundle into a bare scratch dir with no .swarm/ anywhere (fresh clone). */
+const freshCloneParents: string[] = [];
 function toFreshClone(bundleDir: string): string {
 	const fresh = canonicalMkdtemp('receipt-fresh-clone-');
+	freshCloneParents.push(fresh);
 	fs.cpSync(bundleDir, path.join(fresh, path.basename(bundleDir)), {
 		recursive: true,
 	});
 	return path.join(fresh, path.basename(bundleDir));
 }
+
+// PRR-030: the mkdtemp PARENT (and everything copied under it) is removed
+// after each test — previously only the returned bundle dir was cleaned and
+// the parent leaked into os.tmpdir.
+afterEach(() => {
+	for (const parent of freshCloneParents.splice(0)) {
+		fs.rmSync(parent, { recursive: true, force: true });
+	}
+});
 
 function listTree(dir: string): Set<string> {
 	const out = new Set<string>();

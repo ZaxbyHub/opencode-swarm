@@ -42,12 +42,25 @@ export interface ReceiptEmissionOutcome {
 	already_frozen: boolean;
 }
 
-/** Resolve a user-supplied verify target to {receiptFile, artifactRoot}. */
-export function resolveVerifyTarget(target: string): {
-	receiptFile: string;
-	artifactRoot: string;
-} {
-	const absolute = path.resolve(target);
+/**
+ * Resolve a user-supplied verify target to {receiptFile, artifactRoot}.
+ * Relative targets resolve against `baseDir` when provided — the TOOL arm
+ * passes `ctx.directory` (PRR-021 / AGENTS.md invariant 4: tools must not
+ * resolve user paths against `process.cwd()`); the CLI arm keeps the
+ * conventional process-cwd resolution. Empty/whitespace targets are refused
+ * (FB-016: `path.resolve('')` would silently verify the CWD itself).
+ */
+export function resolveVerifyTarget(
+	target: string,
+	baseDir?: string,
+): { receiptFile: string; artifactRoot: string } {
+	if (target.trim() === '') {
+		throw new Error('RECEIPT_VERIFY_TARGET_EMPTY: provide a bundle path');
+	}
+	const absolute =
+		baseDir !== undefined
+			? path.resolve(baseDir, target)
+			: path.resolve(target);
 	const stat = fs.existsSync(absolute) ? fs.statSync(absolute) : null;
 	if (stat?.isDirectory()) {
 		const receiptFile = path.join(absolute, 'receipt.json');
@@ -61,8 +74,9 @@ export function resolveVerifyTarget(target: string): {
 
 export async function executeReceiptVerify(
 	target: string,
+	baseDir?: string,
 ): Promise<{ ok: boolean; summary: string; result: unknown }> {
-	const { receiptFile, artifactRoot } = resolveVerifyTarget(target);
+	const { receiptFile, artifactRoot } = resolveVerifyTarget(target, baseDir);
 	const result = verifyReceiptBundle({ receiptFile, artifactRoot });
 	return {
 		ok: result.ok,
@@ -110,9 +124,19 @@ export async function handleReceiptCommand(
 ): Promise<string | CommandFailure> {
 	if (args[0] === '--verify') {
 		const target = args[1];
-		if (!target) {
+		// FB-007: the verify arm must not silently swallow trailing
+		// emission-only arguments (`--export`, stray tokens) the way the
+		// emission arm already rejects.
+		if (!target || args.length > 2) {
 			return {
-				text: 'receipt --verify requires a bundle directory or receipt.json path',
+				text: 'receipt --verify requires EXACTLY one bundle directory or receipt.json path',
+				ok: false,
+				exitCode: 1,
+			};
+		}
+		if (target.trim() === '') {
+			return {
+				text: 'receipt --verify target must not be empty',
 				ok: false,
 				exitCode: 1,
 			};

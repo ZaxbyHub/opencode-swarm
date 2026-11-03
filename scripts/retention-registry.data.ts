@@ -2179,11 +2179,11 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/evidence/manager.ts', 'src/tools/write-retro.ts', 'src/tools/sbom-generate.ts', 'src/summaries/manager.ts'],
 		writerCitations: [
-			'src/evidence/manager.ts:193 saveEvidence — withEvidenceLock, bundle trim MAX_BUNDLE_ENTRIES 100 (:261-265), EVINENCE_MAX_JSON_BYTES 500 KiB, temp+rename :286-296',
-			'src/evidence/manager.ts:665 archiveEvidence — retention maxAgeDays 30 / maxBundles 10 defaults (src/commands/close/archive-stage.ts:498-544)',
+			'src/evidence/manager.ts:194 saveEvidence — withEvidenceLock, bundle trim MAX_BUNDLE_ENTRIES 100 (:261-265), EVINENCE_MAX_JSON_BYTES 500 KiB, temp+rename :286-296',
+			'src/evidence/manager.ts:688 archiveEvidence — retention maxAgeDays 30 / maxBundles 10 defaults (src/commands/close/archive-stage.ts:498-544)',
 			'src/summaries/manager.ts:132 storeSummary — atomic (summaries row below owns lifecycle)',
 		],
-		readerCitations: ['src/evidence/manager.ts:387 loadEvidence — full-file Zod-validated with legacy migration, async; :515 listEvidenceTaskIds — directory list'],
+		readerCitations: ['src/evidence/manager.ts:388 loadEvidence — full-file Zod-validated with legacy migration, async; :516 listEvidenceTaskIds — directory list'],
 		schemaVersion: 'EvidenceBundle schema_version; legacy flat retrospective migrated in place (:319-480)',
 		stateClass: 'governed-content',
 		privacyClass: 'content',
@@ -2229,7 +2229,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 				'receipts ≤256 KiB JSON, ≤512 artifact refs, ≤64 gate records; captured reports newest-8/phase; emitted receipts newest-8/unit; per-artifact re-hash ≤16 MiB',
 			scope: 'per-key',
 			keyspaceBound:
-				'FINITE BY THE PARENT-TREE GLOBAL LIFECYCLE, NOT by the 8-per-unit cap: keys are (kind, unitId) pairs drawn from plan tasks/phases, and .swarm/evidence (incl. receipts/) is recursively removed at close via the evidence-tree lifecycle while .swarm/plan-export bundles are removed by the plan-export clean stage (src/commands/close/constants.ts ACTIVE_STATE_DIRS_TO_CLEAN; src/commands/close/clean-stage.ts) — the same global reapers that bound the sibling evidence-bundles row. Mid-session reclamation requires /swarm close or /swarm archive, exactly as for evidence bundles.',
+				'FINITE BY THE PARENT-TREE GLOBAL LIFECYCLE, NOT by the 8-per-unit cap: keys are (kind, unitId) pairs drawn from plan tasks/phases, and .swarm/evidence (incl. receipts/) is recursively removed at close via the evidence-tree lifecycle while .swarm/plan-export bundles AND crashed-export .receipt-….tmp-* staging trees are removed by the close plan-export receipt-bundle grammar sweep (src/commands/close/clean-stage.ts, FB-003) — the same global reapers that bound the sibling evidence-bundles row. Mid-session reclamation requires /swarm close or /swarm archive, exactly as for evidence bundles.',
 			citation:
 				'src/evidence/receipt.ts MAX_RECEIPT_* constants; src/evidence/receipt-store.ts pruneRetention (MAX_RETAINED_PER_UNIT 8); src/commands/close/clean-stage.ts',
 		},

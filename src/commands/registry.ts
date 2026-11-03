@@ -1257,10 +1257,10 @@ export const COMMAND_REGISTRY = {
 	receipt: {
 		handler: (ctx) => handleReceiptCommand(ctx.directory, ctx.args),
 		description:
-			'Emit or verify verification receipts [task|phase] <id> [--export] | --verify <bundle>',
+			'Emit or verify verification receipts <task|phase> <id> [--export] | --verify <bundle>',
 		args: '<task|phase> <id> [--export] | --verify <bundle>',
 		details:
-			'Emits a portable, hash-backed record of every gate that ran for a task or phase (JSON + Markdown under .swarm/evidence/receipts/; --export writes a PR-attachable bundle under .swarm/plan-export/). --verify re-checks every hash in a bundle on any machine (including a fresh clone) and exits nonzero on any mismatch with a typed failure (corrupt_json, unsupported_format_version, schema_mismatch, receipt_hash_mismatch, missing_artifact, digest_mismatch, path_escape).',
+			'Emits a portable, hash-backed record of the durably recorded gate outcomes for a task or phase (JSON + Markdown under .swarm/evidence/receipts/; --export writes a PR-attachable bundle under .swarm/plan-export/, reaped at close). --verify re-checks every recorded hash in a bundle on any machine (including a fresh clone) and exits nonzero on any mismatch with a typed failure (corrupt_json, unsupported_format_version, schema_mismatch, receipt_hash_mismatch, missing_artifact, digest_mismatch, path_escape).',
 		category: 'utility',
 		toolPolicy: 'agent',
 	},

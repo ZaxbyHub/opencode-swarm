@@ -25,6 +25,24 @@ import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 const REPO_ROOT = path.resolve(import.meta.dir, '..', '..', '..');
 
+/** TI-002 (swarm-pr-review): an arm that cannot execute on this host must
+ * read as a SKIP, never as a silent-passing early-return (the Windows
+ * without developer mode file-symlink class). */
+function fileSymlinksAllowed(): boolean {
+	const probe = canonicalMkdtemp('receipt-symlink-capability-');
+	try {
+		const target = path.join(probe, 'target.txt');
+		fs.writeFileSync(target, 'x');
+		fs.symlinkSync(target, path.join(probe, 'link.txt'));
+		return true;
+	} catch {
+		return false;
+	} finally {
+		fs.rmSync(probe, { recursive: true, force: true });
+	}
+}
+const FILE_SYMLINKS_ALLOWED = fileSymlinksAllowed();
+
 function makeProject(): string {
 	const dir = canonicalMkdtemp('receipt-verify-fc-');
 	fs.mkdirSync(path.join(dir, '.git'), { recursive: true });
@@ -316,38 +334,35 @@ describe('receipt verify fail-closed family (#2970)', () => {
 		}
 	});
 
-	test('fail-closed: a leaf symlinked artifact is a path escape', async () => {
-		const dir = makeProject();
-		try {
-			const bundleDir = toFreshClone(await buildExportedBundle(dir));
-			const { record } = readReceipt(bundleDir);
-			const artifacts = record.artifacts as Array<{ path: string }>;
-			const firstPath = artifacts[0].path;
-			const target = path.join(bundleDir, 'artifacts', ...firstPath.split('/'));
-			const linkPath = `${target}.link`;
+	test.skipIf(!FILE_SYMLINKS_ALLOWED)(
+		'fail-closed: a leaf symlinked artifact is a path escape',
+		async () => {
+			const dir = makeProject();
 			try {
-				fs.symlinkSync(target, linkPath);
-			} catch (error) {
-				if ((error as NodeJS.ErrnoException).code === 'EPERM') {
-					// Windows without developer mode refuses file symlinks; the
-					// POSIX CI legs and privileged Windows hosts execute this.
-					return;
-				}
-				throw error;
+				const bundleDir = toFreshClone(await buildExportedBundle(dir));
+				const { record } = readReceipt(bundleDir);
+				const artifacts = record.artifacts as Array<{ path: string }>;
+				const firstPath = artifacts[0].path;
+				const target = path.join(
+					bundleDir,
+					'artifacts',
+					...firstPath.split('/'),
+				);
+				fs.symlinkSync(target, `${target}.link`);
+				artifacts.push({
+					path: `${firstPath}.link`,
+					sha256: 'e'.repeat(64),
+					bytes: 1,
+				});
+				rehash(record);
+				writeReceipt(bundleDir, record);
+				const outcome = await executeReceiptVerify(bundleDir);
+				expect(JSON.stringify(outcome.result)).toContain('path_escape');
+			} finally {
+				fs.rmSync(dir, { recursive: true, force: true });
 			}
-			artifacts.push({
-				path: `${firstPath}.link`,
-				sha256: 'e'.repeat(64),
-				bytes: 1,
-			});
-			rehash(record);
-			writeReceipt(bundleDir, record);
-			const outcome = await executeReceiptVerify(bundleDir);
-			expect(JSON.stringify(outcome.result)).toContain('path_escape');
-		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
-		}
-	});
+		},
+	);
 
 	test('fail-closed: unknown added field flips receipt_hash (raw-object hashing)', async () => {
 		const dir = makeProject();

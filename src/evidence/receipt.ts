@@ -5,6 +5,8 @@ import { z } from 'zod';
 import packageJson from '../../package.json' with { type: 'json' };
 import type { EvidenceBundle } from '../config/evidence-schema';
 import { readTaskEvidence } from '../gate-evidence';
+import type { PhaseGateEntry } from '../tools/phase-complete/preflight-report';
+import { stableReportHash } from '../tools/phase-complete/preflight-report';
 import { toPortableRelativePath } from '../tools/phase-complete/snapshot-identity';
 import { loadEvidence } from './manager';
 
@@ -14,8 +16,13 @@ import { loadEvidence } from './manager';
  * A receipt is a portable, hash-backed record of every gate that ran for a
  * task or phase: bounded gate records, the snapshot hashes the gates were
  * evaluated against, and content-hashed artifact refs. Receipts provide
- * integrity AGAINST THE MODEL (an agent cannot undetectably claim a gate
- * passed); they are not protection against a determined local actor.
+ * integrity AGAINST THE MODEL for lazy falsification (an agent cannot edit
+ * persisted gate state under an unchanged digest and claim a gate passed —
+ * report digests are RE-DERIVED from stored bytes at build time and from
+ * the bundled copy at verify time, FB-004); a forger willing to recompute
+ * every digest consistently needs an out-of-band capture-time anchor, which
+ * is out of scope here, and a determined local actor is out of scope by
+ * design (see the release notes' limitations).
  *
  * Field names here are the frozen #2970 contract — `format_version`,
  * `receipt_hash`, `artifacts[].path/sha256/bytes`,
@@ -31,7 +38,7 @@ export const RECEIPT_FORMAT_VERSION = '1.0.0';
 export const MAX_RECEIPT_ARTIFACTS = 512;
 export const MAX_RECEIPT_GATES = 64;
 export const MAX_RECEIPT_JSON_BYTES = 256 * 1024;
-const MAX_RECEIPT_ARTIFACT_BYTES = 16 * 1024 * 1024;
+export const MAX_RECEIPT_ARTIFACT_BYTES = 16 * 1024 * 1024;
 
 export const ReceiptArtifactRefSchema = z.object({
 	path: z.string().min(1),
@@ -127,6 +134,49 @@ interface HashedArtifact {
 }
 
 /**
+ * Walk every component from the REAL project root down to `absolute` (which
+ * must be built from that same real root) and reject symbolic links at any
+ * level. Missing trailing components are OK (callers create them next);
+ * everything that exists on the chain must not be a link. This is the
+ * write-side mirror of the read-side symlink rejections (#2968 review
+ * FB-001/PRR-004): `assertSwarmContainedTarget` is documented as scoped to
+ * the CONTAINED canonical writer's local-process threat model, while the
+ * receipt feature names the MODEL as its adversary — and the model plants
+ * links with same-user power — so both link classes (symlink, junction)
+ * must be rejected on receipt-family write destinations and artifact
+ * sources alike.
+ */
+export function assertNoSymlinkComponents(
+	root: string,
+	absolute: string,
+	makeError: (offender: string) => Error,
+): void {
+	const relative = path.relative(root, absolute);
+	if (
+		relative === '' ||
+		relative === '..' ||
+		relative.startsWith(`..${path.sep}`) ||
+		path.isAbsolute(relative)
+	) {
+		throw makeError(absolute);
+	}
+	let cursor = root;
+	for (const segment of relative.split(path.sep)) {
+		if (segment === '') continue;
+		cursor = path.join(cursor, segment);
+		let stat: fs.Stats;
+		try {
+			stat = fs.lstatSync(cursor);
+		} catch (error) {
+			const code = (error as NodeJS.ErrnoException).code;
+			if (code === 'ENOENT' || code === 'ENOTDIR') return;
+			throw error;
+		}
+		if (stat.isSymbolicLink()) throw makeError(cursor);
+	}
+}
+
+/**
  * Bounded, symlink-rejecting artifact re-hash (the snapshot-identity safety
  * pattern, read-side): O_NOFOLLOW open, fstat identity/mutation checks,
  * byte/entry caps. Returns the portable ref plus the absolute path so the
@@ -147,6 +197,16 @@ export function hashReceiptArtifact(
 	) {
 		throw new Error(`RECEIPT_ARTIFACT_PATH_ESCAPE: ${relative}`);
 	}
+	// PRR-004 (review round 2 batch): O_NOFOLLOW is undefined on win32, so the
+	// leaf-open guard is inert there, and even on POSIX it protects only the
+	// FINAL component. Walk every parent component first and reject links at
+	// any level (junctions included) — a symlinked parent would redirect the
+	// hashed bytes away from the object the receipt claims to cite.
+	assertNoSymlinkComponents(
+		root,
+		absolute,
+		(offender) => new Error(`RECEIPT_ARTIFACT_UNSAFE_PATH: ${offender}`),
+	);
 	let stat: fs.Stats;
 	try {
 		stat = fs.lstatSync(absolute);
@@ -235,8 +295,16 @@ export function readNewestPhaseReport(
 		.map((name) => {
 			const full = path.join(receiptsDir, name);
 			const stat = fs.lstatSync(full);
+			// FB-004: a persisted report is read by pathname — reject links and
+			// non-regular entries so a planted symlink cannot redirect the read
+			// out of the receipts dir.
+			if (stat.isSymbolicLink() || !stat.isFile()) return null;
 			return { name, full, mtime: stat.mtimeMs };
 		})
+		.filter(
+			(entry): entry is { name: string; full: string; mtime: number } =>
+				entry !== null,
+		)
 		.sort((left, right) =>
 			right.mtime === left.mtime
 				? right.name.localeCompare(left.name)
@@ -244,12 +312,20 @@ export function readNewestPhaseReport(
 		);
 	for (const candidate of candidates) {
 		try {
+			const stemHash = candidate.name.match(
+				/^phase-\d+-([0-9a-f]{64})\.json$/,
+			)?.[1];
+			if (!stemHash) continue;
 			const parsed = JSON.parse(
 				fs.readFileSync(candidate.full, 'utf8'),
 			) as PersistedPhaseReport;
 			if (
 				Array.isArray(parsed?.entries) &&
-				typeof parsed?.reportHash === 'string'
+				typeof parsed?.reportHash === 'string' &&
+				// FB-004: the content-addressed filename must AGREE with the
+				// self-declared digest — a planted report whose name hashes one
+				// thing and whose body declares another is not a capture.
+				parsed.reportHash === stemHash
 			) {
 				return parsed;
 			}
@@ -300,7 +376,22 @@ export async function buildVerificationReceipt(
 		const report = readNewestPhaseReport(root, phaseNumber);
 		if (!report) {
 			throw new Error(
-				`RECEIPT_NO_PERSISTED_REPORT: phase ${phaseNumber} has no captured gate report (pre-feature phases are not backfilled; run phase_complete again to capture)`,
+				`RECEIPT_NO_PERSISTED_REPORT: phase ${phaseNumber} has no captured gate report (reports are captured exactly once, at the plan-commit boundary — phases completed before #2968, in plan-free mode, or whose capture failed have no backfillable report; re-running phase_complete for an already-complete phase will not produce one)`,
+			);
+		}
+		// FB-004 (swarm-pr-review PRR-005): the persisted report is a
+		// model-writable file — re-derive its content digest instead of
+		// trusting the self-declared field. An edited-entry report (lazy
+		// not_applicable→pass laundering) is refused here and re-checked at
+		// verify time over the bundled copy.
+		if (
+			stableReportHash(
+				report.phase,
+				report.entries as unknown as PhaseGateEntry[],
+			) !== report.reportHash
+		) {
+			throw new Error(
+				`RECEIPT_REPORT_HASH_MISMATCH: phase ${phaseNumber} stored gate report digest does not match its content`,
 			);
 		}
 		reportHash = report.reportHash;
@@ -454,14 +545,19 @@ export function renderReceiptMarkdown(receipt: VerificationReceipt): string {
 		'',
 		'## Gates',
 		'',
-		'| gate | outcome | command | exit_code | output_digest |',
-		'|---|---|---|---|---|',
+		// PRR-022: only columns the durable producers actually populate are
+		// rendered — command/exit_code/output_digest remain forward-compatible
+		// schema fields (omitted unless a durable producer recorded them) but
+		// rendering them as permanently-empty columns misrepresented the
+		// receipt as richer than the durable record.
+		'| gate | outcome | code | actor |',
+		'|---|---|---|---|',
 	];
 	for (const gate of receipt.gates) {
 		lines.push(
-			`| ${gate.gate_id} | ${gate.outcome} | ${gate.command ?? '—'} | ${
-				gate.exit_code ?? '—'
-			} | ${gate.output_digest ?? '—'} |`,
+			`| ${gate.gate_id} | ${gate.outcome} | ${gate.code ?? '—'} | ${
+				gate.responsible_actor
+			} |`,
 		);
 	}
 	lines.push(

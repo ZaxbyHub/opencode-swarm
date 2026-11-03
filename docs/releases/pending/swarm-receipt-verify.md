@@ -2,7 +2,7 @@
 issue: 2970
 ---
 
-# `/swarm receipt --verify`: machine-checkable gate proof on any machine (#2970, Workstream J slot J23)
+# `/swarm receipt --verify`: machine-checkable internal-consistency check for gate receipts on any machine (#2970, Workstream J slot J23)
 
 `/swarm receipt --verify <bundle>` re-checks every hash in an exported
 receipt bundle on any machine — including a fresh clone with no `.swarm/`
@@ -11,15 +11,22 @@ state — and exits nonzero on any mismatch with a typed failure:
 `receipt_hash_mismatch`, `missing_artifact`, `digest_mismatch`, or
 `path_escape`. The verify path is a pure function of the bundle's two roots
 (receipt.json + artifacts/): no `.swarm/` reads, no config, no locks, zero
-writes, and no child processes — which is exactly what makes an attached
-bundle reviewer-checkable proof instead of an agent's claim. The same
+writes, and no child processes — which lets a reviewer mechanically reject
+any bundle whose contents disagree with their own recorded hashes. It is
+internal-consistency proof, not external attestation: a forger who
+recomputes every digest consistently is only stopped by an out-of-band
+capture-time anchor (a documented follow-up), and lazy edits that leave a
+stale digest are caught because gate-report digests are RE-DERIVED from
+the bundled bytes at verify time (FB-004). The same
 classifier serves the `receipt` tool, so the tool's `ok` field and the
 CLI's exit code can never disagree.
 
 Path normalization and canonical hashing are imported from the emission
-side (single source), so a receipt emitted on Windows separators verifies
-unchanged anywhere; `receipt_hash` covers the raw parsed object, so an
-unknown added field flips verification instead of being silently dropped.
+side (single source via `toPortableRelativePath` and the shared
+canonicalizer), so a receipt emitted on Windows separators verifies
+unchanged anywhere; `receipt_hash` covers the raw parsed object minus
+`receipt_hash` itself, so an unknown added field flips verification
+instead of being silently dropped.
 The `--verify` arm accepts a bundle directory or a `receipt.json` path.
 
 Documented limitations (inherited from the substrate): verify proves the

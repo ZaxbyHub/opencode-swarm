@@ -87,10 +87,28 @@ describe('receipt schema and canonical hashing', () => {
 		);
 	});
 
-	test('receipt_hash excludes itself: recomputing over the parsed receipt minus receipt_hash reproduces it', () => {
+	test('receipt_hash excludes itself: an INDEPENDENTLY computed canonical digest reproduces it (PRR-026: not a same-helper self-comparison)', () => {
 		const receipt = makeReceipt();
 		const { receipt_hash: _hash, ...rest } = receipt;
-		expect(computeReceiptHash(rest)).toBe(receipt.receipt_hash);
+		// Independent path (test-local canonicalization + hashing) so a
+		// constant-function mutant of computeReceiptHash cannot pass this.
+		const sortDeep = (value: unknown): unknown => {
+			if (Array.isArray(value)) return value.map(sortDeep);
+			if (value !== null && typeof value === 'object') {
+				return Object.fromEntries(
+					Object.entries(value as Record<string, unknown>)
+						.sort(([left], [right]) =>
+							left < right ? -1 : left > right ? 1 : 0,
+						)
+						.map(([key, inner]) => [key, sortDeep(inner)]),
+				);
+			}
+			return value;
+		};
+		const independent = createHash('sha256')
+			.update(JSON.stringify(sortDeep(rest)))
+			.digest('hex');
+		expect(independent).toBe(receipt.receipt_hash);
 	});
 
 	test('raw-object hashing: an unknown added field changes receipt_hash (no silent Zod strip)', () => {

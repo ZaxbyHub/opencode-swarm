@@ -1,8 +1,14 @@
 import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import type { PhaseGateEntry } from '../tools/phase-complete/preflight-report';
+import { stableReportHash } from '../tools/phase-complete/preflight-report';
+import { toPortableRelativePath } from '../tools/phase-complete/snapshot-identity';
 import {
 	computeReceiptHash,
+	MAX_RECEIPT_ARTIFACT_BYTES,
+	MAX_RECEIPT_ARTIFACTS,
+	MAX_RECEIPT_GATES,
 	RECEIPT_FORMAT_VERSION,
 	VerificationReceiptSchema,
 } from './receipt';
@@ -17,10 +23,12 @@ import {
  * makes an exported bundle PR-attachable: any reviewer with a fresh clone
  * can re-check every hash with nothing but the bundle.
  *
- * Path normalization is shared with emission BY IMPORT
- * (`computeReceiptHash` / canonical serialization from `receipt.ts`, whose
- * artifact paths are produced by the snapshot-identity normalizer), so
- * emission and verification cannot drift apart.
+ * Path normalization and canonical hashing are shared with emission BY
+ * IMPORT (`computeReceiptHash` / canonical serialization from `receipt.ts`;
+ * every path comparison here goes through the SAME
+ * `toPortableRelativePath` normalizer from `snapshot-identity.ts` that
+ * produces artifact paths at emission), so emission and verification cannot
+ * drift apart (#2970 design step 5 / review FB-010).
  *
  * Invariant-3 conditional (AGENTS.md): if verification is EVER extended to
  * re-execute cited commands, every child-process invocation must follow the
@@ -120,16 +128,50 @@ export function verifyReceiptBundle(
 		});
 	}
 
-	const schemaResult = VerificationReceiptSchema.safeParse(parsed);
-	if (!schemaResult.success) {
+	const schemaResult = (() => {
+		try {
+			return VerificationReceiptSchema.safeParse(parsed);
+		} catch {
+			// FB-006: hostile nesting can make even the schema pass recurse
+			// unboundedly; a thrown error is a typed failure, never an
+			// uncaught RangeError escaping the documented taxonomy.
+			return null;
+		}
+	})();
+	if (!schemaResult || !schemaResult.success) {
 		return fail('schema_mismatch', { path: input.receiptFile });
+	}
+	// FB-006 (review PRR-009): the emitter's structural bounds must be
+	// enforced HERE too — a foreign receipt under the 1 MiB read cap
+	// otherwise names thousands of artifacts and forces unbounded
+	// synchronous hashing on the verify path.
+	if (
+		schemaResult.data.artifacts.length > MAX_RECEIPT_ARTIFACTS ||
+		schemaResult.data.gates.length > MAX_RECEIPT_GATES
+	) {
+		return fail('schema_mismatch', { path: input.receiptFile });
+	}
+	let claimedBytesTotal = 0;
+	for (const artifact of schemaResult.data.artifacts) {
+		claimedBytesTotal += artifact.bytes;
+		if (claimedBytesTotal > MAX_RECEIPT_ARTIFACT_BYTES) {
+			return fail('schema_mismatch', { path: input.receiptFile });
+		}
 	}
 
 	// Receipt hash covers the RAW parsed object (minus itself) — never a
 	// schema-stripped value — so unknown added fields flip this check.
 	const { receipt_hash: recordedHashRaw, ...rest } = record;
 	const recordedHash = recordedHashRaw as string;
-	if (computeReceiptHash(rest) !== recordedHash) {
+	let recomputedHash: string;
+	try {
+		recomputedHash = computeReceiptHash(rest);
+	} catch {
+		// FB-006: deep unknown-field nesting overflows the canonicalizer —
+		// typed failure, not an escaping RangeError.
+		return fail('corrupt_json', { path: input.receiptFile });
+	}
+	if (recomputedHash !== recordedHash) {
 		return fail('receipt_hash_mismatch', {
 			path: input.receiptFile,
 			expected: recordedHash,
@@ -146,6 +188,18 @@ export function verifyReceiptBundle(
 		// handled per-artifact below as missing
 	}
 	if (!artifactRootStat?.isDirectory() && artifacts.length > 0) {
+		return fail('missing_artifact', { path: input.artifactRoot });
+	}
+	// FB-006: the root realpath is a syscall that can throw (vanishing tree)
+	// — resolve it ONCE, fail-closed, instead of an uncaught error escaping
+	// the taxonomy mid-loop.
+	let rootResolved: string;
+	try {
+		rootResolved = fs.realpathSync(input.artifactRoot);
+	} catch {
+		return fail('missing_artifact', { path: input.artifactRoot });
+	}
+	if (!rootResolved) {
 		return fail('missing_artifact', { path: input.artifactRoot });
 	}
 	for (const artifact of artifacts) {
@@ -175,13 +229,16 @@ export function verifyReceiptBundle(
 		// path is the caller's route to the bundle (macOS /tmp, junctioned
 		// scratch dirs) and stays LEGAL — only links strictly INSIDE the two
 		// roots can escape.
-		const rootResolved = fs.realpathSync(input.artifactRoot);
+		// FB-010 (#2970 step 5): the containment comparison goes through the
+		// SAME portable-path normalizer that produces artifact paths at
+		// emission, so the two sides cannot drift.
 		const resolved = path.resolve(rootResolved, ...segments);
-		const relative = path.relative(rootResolved, resolved);
+		const relative = toPortableRelativePath(rootResolved, resolved);
 		if (
 			relative === '' ||
+			relative === '.' ||
 			relative === '..' ||
-			relative.startsWith(`..${path.sep}`) ||
+			relative.startsWith('../') ||
 			path.isAbsolute(relative)
 		) {
 			failures.push({ kind: 'path_escape', path: artifact.path });
@@ -191,9 +248,10 @@ export function verifyReceiptBundle(
 		// is invisible to lstat on the leaf. Walk every component under the
 		// real bundle root and reject symbolic links at any level, then require
 		// the fully-resolved real path to stay inside the root — the verifier
-		// must never read outside the two roots it was given. A missing FINAL
-		// component is a missing ARTIFACT, not an escape; a missing/symlinked
-		// INTERMEDIATE directory is an escape.
+		// must never read outside the two roots it was given. Anything MISSING
+		// on the chain (final or intermediate) is an incomplete bundle →
+		// missing_artifact (CS-003: it is not evidence of tampering); only a
+		// symlink anywhere on the chain is a path escape.
 		let cursor = rootResolved;
 		let parentEscape = false;
 		let leafMissing = false;
@@ -202,8 +260,9 @@ export function verifyReceiptBundle(
 			let componentStat: fs.Stats;
 			try {
 				componentStat = fs.lstatSync(cursor);
-			} catch {
-				if (index === segments.length - 1) {
+			} catch (error) {
+				const code = (error as NodeJS.ErrnoException).code;
+				if (code === 'ENOENT' || code === 'ENOTDIR') {
 					leafMissing = true;
 				} else {
 					parentEscape = true;
@@ -222,11 +281,12 @@ export function verifyReceiptBundle(
 		if (!parentEscape) {
 			try {
 				const realResolved = fs.realpathSync(resolved);
-				const realRelative = path.relative(rootResolved, realResolved);
+				const realRelative = toPortableRelativePath(rootResolved, realResolved);
 				if (
 					realRelative === '' ||
+					realRelative === '.' ||
 					realRelative === '..' ||
-					realRelative.startsWith(`..${path.sep}`) ||
+					realRelative.startsWith('../') ||
 					path.isAbsolute(realRelative)
 				) {
 					parentEscape = true;
@@ -242,12 +302,8 @@ export function verifyReceiptBundle(
 		let stat: fs.Stats;
 		try {
 			stat = fs.lstatSync(resolved);
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code === 'EACCES') {
-				failures.push({ kind: 'missing_artifact', path: artifact.path });
-			} else {
-				failures.push({ kind: 'missing_artifact', path: artifact.path });
-			}
+		} catch {
+			failures.push({ kind: 'missing_artifact', path: artifact.path });
 			continue;
 		}
 		if (stat.isSymbolicLink()) {
@@ -258,16 +314,63 @@ export function verifyReceiptBundle(
 			failures.push({ kind: 'missing_artifact', path: artifact.path });
 			continue;
 		}
-		if (stat.size > MAX_VERIFY_ARTIFACT_BYTES) {
-			failures.push({ kind: 'digest_mismatch', path: artifact.path });
+		// PRR-009 companion: reject a size that disagrees with the claim
+		// BEFORE reading — combined with the pre-loop aggregate bound this
+		// caps total verify-side IO at the emitted budget.
+		if (
+			stat.size !== artifact.bytes ||
+			stat.size > MAX_RECEIPT_ARTIFACT_BYTES
+		) {
+			failures.push({
+				kind: 'digest_mismatch',
+				path: artifact.path,
+				expected: `${artifact.bytes} bytes`,
+				actual: `${stat.size} bytes`,
+			});
 			continue;
 		}
 		let bytes: Buffer;
+		// PRR-002 (review round 2 batch): pin the exact inode that passed the
+		// walk — open once with O_NOFOLLOW (where available) and fstat-verify
+		// identity + stability around the read, mirroring the emitter's
+		// hashReceiptArtifact, so a concurrent in-bundle swap cannot redirect
+		// or resize the bytes that get hashed.
+		let descriptor: number | null = null;
 		try {
-			bytes = fs.readFileSync(resolved);
+			descriptor = fs.openSync(
+				resolved,
+				fs.constants.O_RDONLY |
+					((fs.constants as { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0),
+			);
+			const opened = fs.fstatSync(descriptor);
+			if (
+				!opened.isFile() ||
+				opened.dev !== stat.dev ||
+				opened.ino !== stat.ino ||
+				opened.size !== stat.size
+			) {
+				failures.push({ kind: 'path_escape', path: artifact.path });
+				continue;
+			}
+			bytes = fs.readFileSync(descriptor);
+			const after = fs.fstatSync(descriptor);
+			if (
+				after.size !== opened.size ||
+				after.mtimeMs !== opened.mtimeMs ||
+				after.ctimeMs !== opened.ctimeMs
+			) {
+				failures.push({
+					kind: 'digest_mismatch',
+					path: artifact.path,
+					actual: 'concurrent-mutation',
+				});
+				continue;
+			}
 		} catch {
 			failures.push({ kind: 'missing_artifact', path: artifact.path });
 			continue;
+		} finally {
+			if (descriptor !== null) fs.closeSync(descriptor);
 		}
 		const actual = createHash('sha256').update(bytes).digest('hex');
 		artifactsChecked += 1;
@@ -278,6 +381,46 @@ export function verifyReceiptBundle(
 				expected: artifact.sha256,
 				actual,
 			});
+			continue;
+		}
+		// FB-004 (swarm-pr-review PRR-005): the bundled phase gate report is
+		// RE-DERIVED, not trusted — entries edited under a stale reportHash
+		// (the lazy not_applicable→pass laundering path) fail here exactly as
+		// they fail at build time.
+		const reportMatch = artifact.path.match(
+			/^\.swarm\/evidence\/receipts\/phase-(\d+)-([0-9a-f]{64})\.json$/,
+		);
+		if (reportMatch && schemaResult.data.report_hash) {
+			let derived: string | null = null;
+			try {
+				const stored = JSON.parse(bytes.toString('utf8')) as {
+					phase?: number;
+					entries?: unknown;
+					reportHash?: string;
+				};
+				if (
+					typeof stored.phase === 'number' &&
+					Array.isArray(stored.entries) &&
+					typeof stored.reportHash === 'string' &&
+					stored.reportHash === reportMatch[2] &&
+					reportMatch[2] === schemaResult.data.report_hash
+				) {
+					derived = stableReportHash(
+						stored.phase,
+						stored.entries as PhaseGateEntry[],
+					);
+				}
+			} catch {
+				derived = null;
+			}
+			if (derived !== schemaResult.data.report_hash) {
+				failures.push({
+					kind: 'digest_mismatch',
+					path: artifact.path,
+					expected: schemaResult.data.report_hash,
+					actual: derived ?? 'un-derivable',
+				});
+			}
 		}
 	}
 
@@ -296,12 +439,15 @@ export function formatReceiptVerifySummary(
 	if (result.ok) {
 		return `receipt verify OK: ${bundle} (format ${RECEIPT_FORMAT_VERSION}, ${result.checked.artifacts} artifacts, receipt hash verified)`;
 	}
-	const lines = result.failures.map(
-		(failure) =>
-			`- ${failure.kind}${failure.path ? `: ${failure.path}` : ''}${
-				failure.expected ? ` (expected ${failure.expected}` : ''
-			}${failure.actual ? `, actual ${failure.actual})` : failure.expected ? ')' : ''}`,
-	);
+	const lines = result.failures.map((failure) => {
+		const details: string[] = [];
+		if (failure.expected !== undefined)
+			details.push(`expected ${failure.expected}`);
+		if (failure.actual !== undefined) details.push(`actual ${failure.actual}`);
+		return `- ${failure.kind}${failure.path ? `: ${failure.path}` : ''}${
+			details.length > 0 ? ` (${details.join(', ')})` : ''
+		}`;
+	});
 	return `receipt verify FAILED: ${bundle}\n${lines.join('\n')}`;
 }
 

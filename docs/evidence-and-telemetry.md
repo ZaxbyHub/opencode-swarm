@@ -437,10 +437,13 @@ Per-task: `hasReview`, `hasTest`, `hasApproval`, `missingEvidence[]`, `isComplet
 ## Verification Receipts
 
 `/swarm receipt <task|phase> <id> [--export]` (and the `receipt` tool) emit a
-portable, hash-backed record of every gate that ran for a task or phase:
-bounded gate records (id, outcome, responsible actor, evidence refs; digests
-only — never raw command output), the snapshot hashes the gates were
-evaluated against, and content-hashed artifact refs. Receipts are stored
+portable, hash-backed record of the durably recorded gate outcomes for a
+task or phase: bounded gate records (id, outcome, code, responsible actor,
+evidence refs — never raw command output), the snapshot hashes the gates
+were evaluated against, and content-hashed artifact refs. A gate that ran
+but left no durable record is absent from the receipt (nothing is
+reconstructed), so the receipt attests the durable state, not an
+execution trace. Receipts are stored
 under `.swarm/evidence/receipts/` as JSON plus rendered Markdown;
 `--export` writes a self-contained bundle (receipt + Markdown + byte-copies
 of every cited artifact) under
@@ -452,7 +455,11 @@ state — and exits nonzero on any mismatch with a typed failure
 (`corrupt_json`, `unsupported_format_version`, `schema_mismatch`,
 `receipt_hash_mismatch`, `missing_artifact`, `digest_mismatch`,
 `path_escape`). Verify performs zero writes and touches nothing but the
-bundle, which is what makes it PR-attachable proof.
+bundle. This is internal-consistency proof (contents vs their own recorded
+hashes, with persisted gate-report digests RE-DERIVED from the bundled
+bytes, FB-004) that reviewers can attach to a PR — not external
+attestation: a forger who recomputes every digest consistently needs an
+out-of-band capture-time anchor, a documented follow-up.
 
 Capture is best-effort: a phase's bounded gate report is durably captured at
 the successful commit boundary, fail-open to phase completion (a receipt
@@ -461,8 +468,13 @@ this feature have no persisted report and produce a clear error — there is
 no historical backfill.
 
 Documented limitations: hash-only integrity is spoofable by a determined
-local actor (integrity against the model, not the user); receipt JSON and
-verify output are digest-only, but an exported bundle CONTAINS the cited
-evidence artifacts; absent `command`/`exit_code`/`output_digest` fields mean
+local actor or a recomputing model (integrity against the model covers
+lazy falsification — stale digests are detected by re-derivation — not
+full recomputation); receipt JSON and verify output carry digests and
+identifiers (gate id, outcome, code, actor, relative paths) but never raw
+command output, while an exported bundle CONTAINS the cited evidence
+artifacts bytes; absent `command`/`exit_code`/`output_digest` fields mean
 no durable producer recorded them (omitted, never reconstructed); path
-normalization is byte-exact forward-slashing without case-folding.
+normalization is byte-exact forward-slashing without case-folding;
+exported plan-export bundles are reaped at `/swarm close` (the retention
+registry's keyspaceBound reaper for the `verification-receipts` stream).
