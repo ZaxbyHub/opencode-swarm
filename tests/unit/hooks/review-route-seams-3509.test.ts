@@ -89,12 +89,12 @@ function stageBRecord(
 	// sweeps delegations whose timestamps look eons stale (epoch-1 fixtures
 	// were reconciled away before the ingestion leg could run).
 	// Literal timestamps (check:test-clock): these fields ARE read by the
-	// code under test — completion-observer's trusted-terminal maintenance
-	// folds terminalResult.recordedAt into updatedAt — but this fixture's
-	// updatedAt is current, so the literal recordedAt value is benign on the
-	// exercised paths (the 30-minute stale sweep is not engaged here). A
-	// literal avoids the clock-helper import for a value that never changes
-	// an assertion.
+	// code under test — claimTerminalResult folds terminalResult.recordedAt
+	// into updatedAt — but the fixture's status is `completed`, which is
+	// outside the stale sweep's sweepable set (pending/running/
+	// ingestion_error), so the stale literal value never engages a sweep on
+	// the exercised paths and no assertion depends on it. A literal avoids
+	// the clock-helper import for a value that never changes an assertion.
 	const now = 1_769_984_000_000;
 	// The observer resolves completions BY correlation id, so the fixture
 	// uses the subagent session id AS the correlation id (the shape the

@@ -50,8 +50,10 @@ Issues #3509 and #3516 (collated trace `3509-3516-route-receipt-hardening`).
   flips mid-dispatch. realpathSync does not canonicalize filename case on
   every runtime (Bun/Windows preserves input case), so two DIFFERENT
   spellings of one root can key differently; production always passes a
-  single spelling (`bootstrapRoot`). Degenerate (non-string) directories
-  share one sentinel key and never throw.
+  single spelling (`bootstrapRoot`); the memo holds at most 64 spellings
+  (FIFO), and a record's key stays stable for as long as its spelling stays
+  memoized. Degenerate (non-string) directories share one sentinel key (and
+  therefore one capacity bucket) and never throw.
 - **Loud capacity semantics.** The registry never evicts: at
   `MAX_LIVE_CALLS_PER_SESSION=256`, `MAX_LIVE_SESSIONS_PER_DIRECTORY=128`, or
   `MAX_LIVE_DIRECTORIES=64` the RECORD operation fails, `criticalWarn` names
