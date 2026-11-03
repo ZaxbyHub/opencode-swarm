@@ -443,7 +443,24 @@ evidence refs — never raw command output), the snapshot hashes the gates
 were evaluated against, and content-hashed artifact refs. A gate that ran
 but left no durable record is absent from the receipt (nothing is
 reconstructed), so the receipt attests the durable state, not an
-execution trace. Receipts are stored
+execution trace. Task-kind gate outcomes derive from the durable entry via
+the shared `src/evidence/gate-outcome.ts` derivation (#3560):
+verdict-bearing records reflect the recorded verdict (`APPROVE`→`pass`,
+`REJECT`→`block`, `CONCERNS`→`pass`+`code` — durable CONCERNS is the
+task-level advisory form; an unrecognized verdict→`error`, so future verdict
+vocabulary can only degrade toward scrutiny, never improve to pass), while
+presence-only records (pre_check/reviewer/test_engineer/critic family)
+attest pass-on-presence honestly by producer contract — those writers
+record only on positive settlement and failure DELETES the key. The
+limitation that follows: absence cannot distinguish "gate never ran" from
+"gate ran and failed (record deleted)"; failure detail lives in
+`workflow.lastOutcome`/`retryHistory` (capped, lossy) and is intentionally
+not derived into gate rows. An empty `gates` map yields a `task_evidence`
+row with `not_applicable` — or `pass`+`code:'no_mutation_settlement'` when
+durable read-only settlement proof exists — never a fabricated pass. The
+evidence-summary bridge shares the same derivation (a durable REJECT is
+`fail`, advisory CONCERNS `warn`), so no surface re-flattens the record.
+Receipts are stored
 under `.swarm/evidence/receipts/` as JSON plus rendered Markdown;
 `--export` writes a self-contained bundle (receipt + Markdown + byte-copies
 of every cited artifact) under
