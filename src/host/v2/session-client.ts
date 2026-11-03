@@ -28,12 +28,12 @@
  *     verified (echo, `get` fallback, bounded re-read after the move) with a
  *     remove-and-fail-closed guard; a host whose parented create already
  *     honours the location is never moved. The requested `parentID` is also
- *     REMEMBERED plugin-side and overlaid onto `get` results — now redundant
- *     with the host-recorded parent, retained as a fallback for host
- *     projections that omit it (it can only ever restate the parent the create
- *     sent) so `prWorkflowSessionResolver`'s first-hop controller resolution
- *     (`pr-workflow-session-resolver.ts`) and `lookupParentSessionIDForTaskRoute`
- *     stay v1-faithful. A real id is returned — the native `subagent` tool
+ *     REMEMBERED plugin-side and written onto every `get` result for the
+ *     eager record, unconditionally (whatever the host reported). It restates
+ *     the parent the create sent, so it is redundant with the host-recorded
+ *     parent; it is kept so `prWorkflowSessionResolver`'s first-hop
+ *     controller resolution (`pr-workflow-session-resolver.ts`) and
+ *     `lookupParentSessionIDForTaskRoute` stay v1-faithful. A real id is returned — the native `subagent` tool
  *     resumes it by id (Phase 0 C7). Unverifiable parent placement still fails
  *     closed with the Phase 2 typed error (live-verification item), and
  *     same-directory/parentless creates keep the deferred placeholder (the real
@@ -142,6 +142,8 @@ export const _internals = {
 	laneConfirmBudgetMs: 5_000,
 	laneMoveTimeoutMs: 10_000,
 	laneMoveSettleMs: 10_000,
+	/** Cleanup budget for the eager-create compensation removes (PRR-001). */
+	eagerCleanupTimeoutMs: 10_000,
 };
 
 interface PlaceholderRecord {
@@ -846,13 +848,14 @@ export function createV2SessionClient(
 				const id = args?.path?.id;
 				const stash = placeholderSessions.get(id);
 				// #3169 Phase 3: overlay the REMEMBERED parentID for eager records.
-				// Eager lane sessions are now created WITH that parentID, so the
-				// host normally reports the same value; the overlay is kept as a
-				// fallback for host projections that omit `parentID` (it can only
-				// restate the parent the create sent), keeping
+				// The overlay is unconditional: it replaces whatever `parentID` the
+				// host reported (or supplies it when absent). Eager lane sessions
+				// are created WITH that parentID, so it restates the host-recorded
+				// parent and is redundant with it; it is kept so
 				// `prWorkflowSessionResolver`'s first-hop controller resolution and
-				// `lookupParentSessionIDForTaskRoute` v1-faithful. Non-eager records
-				// and foreign ids pass through.
+				// `lookupParentSessionIDForTaskRoute` stay v1-faithful even when a
+				// host projection omits `parentID`. Non-eager records and foreign
+				// ids pass through.
 				const overlayParentID =
 					stash?.eager === true && typeof stash.parentID === 'string'
 						? stash.parentID
@@ -903,9 +906,6 @@ function boundPathForMessage(path: string | undefined): string {
 	return `${path.slice(0, MAX_PATH_IN_MESSAGE_CHARS)}… (truncated)`;
 }
 
-/** Cleanup budget for the eager-create compensation removes (PRR-001). */
-const EAGER_CLEANUP_TIMEOUT_MS = 10_000;
-
 /**
  * PRR-001/PRR-007/PRR-010: one bounded, outcome-reporting removal helper for the
  * eager arm. The placement-compensation removes used to be bare
@@ -919,12 +919,13 @@ async function deferredV2SessionRemoveEager(
 	ctx: V2PluginContext,
 	sessionID: string,
 ): Promise<{ ok: boolean; reason?: string }> {
+	const cleanupTimeoutMs = _internals.eagerCleanupTimeoutMs;
 	try {
 		await withTimeout(
 			ctx.session.remove({ sessionID }),
-			EAGER_CLEANUP_TIMEOUT_MS,
+			cleanupTimeoutMs,
 			new Error(
-				`v2 session-client: eager cleanup of session ${sessionID} exceeded ${EAGER_CLEANUP_TIMEOUT_MS}ms`,
+				`v2 session-client: eager cleanup of session ${sessionID} exceeded ${cleanupTimeoutMs}ms`,
 			),
 		);
 		return { ok: true };

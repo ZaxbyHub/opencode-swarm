@@ -25,7 +25,6 @@
  * `_internals` seam (restored in afterEach); temp paths via canonicalMkdtemp.
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { rmSync } from 'node:fs';
 import {
 	_internals,
 	clearV2SessionClientState,
@@ -33,6 +32,7 @@ import {
 } from '../../../../src/host/v2/session-client';
 import type { V2PluginContext } from '../../../../src/host/v2/types';
 import { resetSwarmState } from '../../../../src/state';
+import { safeRmAllRecursive } from '../../../helpers/safe-test-dir';
 import { canonicalMkdtemp } from '../../../helpers/tmpdir';
 
 const PARENT = 'ses_parent';
@@ -218,8 +218,7 @@ describe('v2 session-client eager lane: parented create + move', () => {
 
 	afterEach(() => {
 		Object.assign(_internals, defaults);
-		rmSync(parentDir, { recursive: true, force: true });
-		rmSync(laneDir, { recursive: true, force: true });
+		safeRmAllRecursive([parentDir, laneDir]);
 	});
 
 	test('2.1.x host: create carries parentID, then move, then get confirms the lane (order pinned)', async () => {
@@ -356,8 +355,7 @@ describe('location-switched timeline entry vs the eager prompt translation', () 
 	});
 
 	afterEach(() => {
-		rmSync(parentDir, { recursive: true, force: true });
-		rmSync(laneDir, { recursive: true, force: true });
+		safeRmAllRecursive([parentDir, laneDir]);
 	});
 
 	// The live entry shape is not captured, so both plausible shapes are pinned:

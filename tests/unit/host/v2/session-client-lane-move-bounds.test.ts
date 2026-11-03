@@ -18,7 +18,6 @@
  * `_internals` seam (restored in afterEach); temp paths via canonicalMkdtemp.
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { rmSync } from 'node:fs';
 import {
 	_internals,
 	clearV2SessionClientState,
@@ -26,6 +25,7 @@ import {
 } from '../../../../src/host/v2/session-client';
 import type { V2PluginContext } from '../../../../src/host/v2/types';
 import { resetSwarmState } from '../../../../src/state';
+import { safeRmAllRecursive } from '../../../helpers/safe-test-dir';
 import { canonicalMkdtemp } from '../../../helpers/tmpdir';
 
 const PARENT = 'ses_parent';
@@ -42,6 +42,8 @@ type Behaviour = {
 		| { kind: 'never' }
 		| { kind: 'late'; afterMs: number; reject?: boolean };
 	onMoveCalled?: () => void;
+	/** How `remove` behaves (default: resolves). */
+	remove?: 'ok' | 'reject' | 'never';
 	controller?: AbortController;
 };
 
@@ -99,8 +101,13 @@ function makeHost(parentDir: string, laneDir: string, b: Behaviour = {}) {
 				}, mode.afterMs);
 			});
 		},
-		async remove() {
+		remove(): Promise<void> {
 			log.push('remove');
+			if (b.remove === 'reject') {
+				return Promise.reject(new Error('host refused removal'));
+			}
+			if (b.remove === 'never') return new Promise(() => {});
+			return Promise.resolve();
 		},
 		async prompt() {
 			return {};
@@ -140,6 +147,7 @@ type CreateResult = {
 	error?: {
 		message?: string;
 		sessionID?: string;
+		cleanupFailed?: boolean;
 		cleanupUnconfirmed?: boolean;
 	};
 };
@@ -188,8 +196,7 @@ describe('eager lane placement: bounded reads and serialised move compensation',
 
 	afterEach(() => {
 		Object.assign(_internals, defaults);
-		rmSync(parentDir, { recursive: true, force: true });
-		rmSync(laneDir, { recursive: true, force: true });
+		safeRmAllRecursive([parentDir, laneDir]);
 	});
 
 	test('F1: a confirmation get that never settles ends in removal and a typed error', async () => {
@@ -297,4 +304,76 @@ describe('eager lane placement: bounded reads and serialised move compensation',
 		expect(result.error?.message).toContain('aborted');
 		expect(host.log.at(-1)).toBe('remove');
 	});
+});
+
+describe('eager lane placement: cleanup-failure reporting', () => {
+	let parentDir: string;
+	let laneDir: string;
+	const defaults = { ..._internals };
+
+	beforeEach(() => {
+		resetSwarmState();
+		clearV2SessionClientState();
+		parentDir = canonicalMkdtemp('swarm-v2-cleanup-parent-');
+		laneDir = canonicalMkdtemp('swarm-v2-cleanup-lane-');
+		_internals.laneMoveTimeoutMs = 60_000;
+		_internals.laneMoveSettleMs = 500;
+	});
+
+	afterEach(() => {
+		Object.assign(_internals, defaults);
+		safeRmAllRecursive([parentDir, laneDir]);
+	});
+
+	const expectCleanupFailed = (result: CreateResult) => {
+		expect(result.data).toBeNull();
+		expect(result.error?.sessionID).toBe(LANE_ID);
+		expect(result.error?.cleanupFailed).toBe(true);
+		expect(result.error?.message).toContain(LANE_ID);
+		expect(result.error?.message).not.toContain('was removed');
+		// A failed removal is reported as failed, not as merely unconfirmed.
+		expect(result.error?.cleanupUnconfirmed).toBeUndefined();
+	};
+
+	test('abort during the move + a rejected removal reports cleanupFailed', async () => {
+		const controller = new AbortController();
+		const host = makeHost(parentDir, laneDir, {
+			move: { kind: 'late', afterMs: 20 },
+			onMoveCalled: () => setTimeout(() => controller.abort(), 1),
+			remove: 'reject',
+		});
+		const result = await createLane(
+			parentDir,
+			laneDir,
+			host.domain,
+			controller.signal,
+		);
+		expectCleanupFailed(result);
+		expect(result.error?.message).toContain('aborted');
+		expect(result.error?.message).toContain('host refused removal');
+	});
+
+	test('a rejected move + a rejected removal reports cleanupFailed', async () => {
+		const host = makeHost(parentDir, laneDir, {
+			move: { kind: 'late', afterMs: 1, reject: true },
+			remove: 'reject',
+		});
+		const result = await createLane(parentDir, laneDir, host.domain);
+		expectCleanupFailed(result);
+		expect(result.error?.message).toContain('late move refusal');
+		expect(result.error?.message).toContain('host refused removal');
+	});
+
+	test('a removal that never settles is bounded by the cleanup timeout and reported as failed', async () => {
+		// The default 10 s cleanup budget would outlive this test's 2 s
+		// timeout; the seam shrinks it.
+		_internals.eagerCleanupTimeoutMs = 30;
+		const host = makeHost(parentDir, laneDir, {
+			move: { kind: 'late', afterMs: 1, reject: true },
+			remove: 'never',
+		});
+		const result = await createLane(parentDir, laneDir, host.domain);
+		expectCleanupFailed(result);
+		expect(result.error?.message).toContain('exceeded 30ms');
+	}, 2_000);
 });
