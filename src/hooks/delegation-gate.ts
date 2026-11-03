@@ -7317,15 +7317,21 @@ export function createDelegationGateHook(
 												);
 										} catch (err) {
 											if (!isEnoentLikeRouteReadFault(err)) {
+												// PRR-004 (review pr3553-20261103): the fault text
+												// carries absolute receipt paths — bound and redact
+												// it like every other operator/model-visible fault
+												// detail (same helper the safe wrapper uses).
+												const readFaultDetail =
+													boundedRedactedErrorDetail(err);
 												logger.warn(
-													`[delegation-gate] Stage B route receipt read fault for ${taskId}: ${err instanceof Error ? err.message : String(err)}`,
+													`[delegation-gate] Stage B route receipt read fault for ${taskId}: ${readFaultDetail}`,
 												);
 												warnStageBSettlementDropped(session, {
 													taskId,
 													agent: targetAgent,
 													callID: input.callID,
 													reasonClass: 'route_read_fault',
-													detail: `route receipt read faulted: ${err instanceof Error ? err.message : String(err)}`,
+													detail: `route receipt read faulted: ${readFaultDetail}`,
 													drops: stageBSettlementDrops,
 												});
 												continue;
@@ -7371,15 +7377,18 @@ export function createDelegationGateHook(
 													);
 											} catch (err) {
 												if (!isEnoentLikeRouteReadFault(err)) {
+													// PRR-004: bound+redact, matching the read twin.
+													const completenessFaultDetail =
+														boundedRedactedErrorDetail(err);
 													logger.warn(
-														`[delegation-gate] Stage B route completeness read fault for ${taskId}: ${err instanceof Error ? err.message : String(err)}`,
+														`[delegation-gate] Stage B route completeness read fault for ${taskId}: ${completenessFaultDetail}`,
 													);
 													warnStageBSettlementDropped(session, {
 														taskId,
 														agent: targetAgent,
 														callID: input.callID,
 														reasonClass: 'route_read_fault',
-														detail: `route completeness read faulted: ${err instanceof Error ? err.message : String(err)}`,
+														detail: `route completeness read faulted: ${completenessFaultDetail}`,
 														drops: stageBSettlementDrops,
 													});
 													continue;

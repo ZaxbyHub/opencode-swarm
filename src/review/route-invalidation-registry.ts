@@ -9,8 +9,11 @@
  * foreground settlement loop, the background ingestion gates, and the
  * completion observer — consults it before authorizing advancement.
  *
- * Storage is keyed by canonical project directory (realpath, with a resolve
- * fallback for not-yet-existing roots) → sessionID → callID. A call's record
+ * Storage is keyed by a canonical project directory key (see
+ * {@link canonicalDirectory}: realpath when it resolves, else a
+ * `lexical:`-prefixed resolve, MEMOIZED PER INPUT SPELLING so record, consult,
+ * and retirement always derive the same key; degenerate inputs share one
+ * sentinel key and never throw) → sessionID → callID. A call's record
  * carries:
  *   - `callFault`: the WHOLE dispatch's routing failed pre-persist. It is NOT
  *     consumed per task — every verdict task of the call is blocked — and is
@@ -56,17 +59,53 @@ const registryByDirectory = new Map<
 >();
 
 /**
- * Canonical directory key. `fs.realpathSync` canonicalizes junctions/case
- * (a bare `path.resolve` does not — two spellings of one root must share one
- * registry entry); a not-yet-existing root falls back to resolve so a fault
- * recorded between mkdir and first realpath still keys consistently.
+ * Degenerate-directory sentinel: hook construction tolerates a non-string
+ * directory (`initDurableStatusPath` early-returns), and the adversarial
+ * contract (src/hooks/delegation-gate.plan-fallback-security.test.ts)
+ * requires degenerate inputs never crash toolBefore/toolAfter. All operations
+ * for such a directory share this ONE key, so record/consult/retire stay
+ * mutually consistent and capacity accounting still bounds them.
  */
+const DEGENERATE_DIRECTORY_KEY = '\u0000route-invalidation:degenerate-directory';
+
+/**
+ * Directory keys are MEMOIZED PER INPUT SPELLING, first computation wins
+ * (PRR-002): recomputing per operation let realpath succeed on one side and
+ * fail on the other (not-yet-existing root, transient Windows EPERM/EBUSY),
+ * storing the marker under a lexical key but consulting under a realpath key
+ * — a silent fail-open consult plus a slot leak (junction probe, review
+ * pr3553-20261003). realpathSync does NOT canonicalize filename case on every
+ * runtime (Bun/Windows preserves input case), so two spellings of one root
+ * can still key differently; production always passes a single spelling
+ * (`bootstrapRoot`), and per-spelling memoization keeps every operation for
+ * that spelling mutually consistent.
+ */
+const MAX_MEMOIZED_DIRECTORY_KEYS = 64;
+const directoryKeyBySpelling = new Map<string, string>();
+
 function canonicalDirectory(directory: string): string {
-	try {
-		return fs.realpathSync(directory);
-	} catch {
-		return path.resolve(directory);
+	if (typeof directory !== 'string' || directory.length === 0) {
+		return DEGENERATE_DIRECTORY_KEY;
 	}
+	const memoized = directoryKeyBySpelling.get(directory);
+	if (memoized !== undefined) return memoized;
+	let key: string;
+	try {
+		key = fs.realpathSync(directory);
+	} catch {
+		// First-computation-wins: freeze the lexical key for this spelling so a
+		// realpath that starts succeeding mid-dispatch cannot flip the key
+		// between record and consult/retire. The `lexical:` prefix keeps a
+		// fallback key from colliding with any realpath-derived key.
+		key = `lexical:${path.resolve(directory)}`;
+	}
+	directoryKeyBySpelling.set(directory, key);
+	while (directoryKeyBySpelling.size > MAX_MEMOIZED_DIRECTORY_KEYS) {
+		const oldest = directoryKeyBySpelling.keys().next().value;
+		if (oldest === undefined) break;
+		directoryKeyBySpelling.delete(oldest);
+	}
+	return key;
 }
 
 function describeCapacityBound(
@@ -261,6 +300,7 @@ export function retireRouteInvalidationsForCallInDirectory(
 export const _test_exports = {
 	reset(): void {
 		registryByDirectory.clear();
+		directoryKeyBySpelling.clear();
 	},
 	/** Read-only size probes for capacity assertions. */
 	size(): number {
@@ -268,11 +308,5 @@ export const _test_exports = {
 	},
 	sessionCount(directory: string): number {
 		return registryByDirectory.get(canonicalDirectory(directory))?.size ?? 0;
-	},
-	callCount(directory: string, sessionId: string): number {
-		return (
-			registryByDirectory.get(canonicalDirectory(directory))?.get(sessionId)
-				?.size ?? 0
-		);
 	},
 };

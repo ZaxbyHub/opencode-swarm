@@ -33,12 +33,25 @@ Issues #3509 and #3516 (collated trace `3509-3516-route-receipt-hardening`).
   ENOTDIR beneath a file-ancestor, corruption refusals) drops THAT task with
   the new `route_read_fault` drop class while sibling tasks in the same
   settlement still settle.
-- **Sibling-clobber window closed.** `rememberReviewRoute` stamps the writer
-  callID and enforces kind-monotonicity: a PENDING or router-error record from
-  one callID can no longer overwrite a live FULL receipt written by a
-  different callID. The dead task-scoped `forgetReviewRoute` is removed (it
-  was a no-op at its only call site — the failed dispatch never remembered a
-  record; see the erratum fragment).
+- **In-memory sibling-clobber window closed.** `rememberReviewRoute` stamps
+  the writer callID and enforces kind-monotonicity: a PENDING or router-error
+  record from one callID can no longer overwrite a live FULL receipt written
+  by a different callID IN THE IN-MEMORY route projection. Scope note: the
+  DURABLE per-(session, task) receipt file is still a single shared file, and
+  a concurrent sibling dispatch's pending write can transiently replace a
+  live full receipt on disk (settlement in that window fail-closes with
+  ROUTE_RECEIPT_PENDING). That durable sharing predates this PR and is
+  unchanged by it. The dead task-scoped `forgetReviewRoute` is removed (it
+  never removed the failed dispatch's own record; see the erratum fragment).
+- **Canonical directory keying.** Registry keys are MEMOIZED PER INPUT
+  SPELLING (first computation wins: realpath when it resolves, else a
+  `lexical:`-prefixed resolve), so record, consult, and retirement always
+  derive the same key for the same spelling even when realpath availability
+  flips mid-dispatch. realpathSync does not canonicalize filename case on
+  every runtime (Bun/Windows preserves input case), so two DIFFERENT
+  spellings of one root can key differently; production always passes a
+  single spelling (`bootstrapRoot`). Degenerate (non-string) directories
+  share one sentinel key and never throw.
 - **Loud capacity semantics.** The registry never evicts: at
   `MAX_LIVE_CALLS_PER_SESSION=256`, `MAX_LIVE_SESSIONS_PER_DIRECTORY=128`, or
   `MAX_LIVE_DIRECTORIES=64` the RECORD operation fails, `criticalWarn` names
@@ -59,10 +72,15 @@ Issues #3509 and #3516 (collated trace `3509-3516-route-receipt-hardening`).
   consult with; its route enforcement is unchanged and the residual is
   disclosed here rather than plumbed through (callID plumbing was evaluated
   and rejected as a design change out of proportion to the advisory surface).
-- **`legacy_unrouted` carve-out.** Tasks whose durable task-gate requirements
-  predate route receipts (a legacy receipts chain with no route binding)
-  remain authorized under the pre-v1 `legacy_unrouted` path. The new
-  invalidation consults do not change that carve-out.
+- **`legacy_unrouted` carve-out (scoped).** Tasks whose durable task-gate
+  requirements predate route receipts (a legacy receipts chain with no route
+  binding) remain authorized under the pre-v1 `legacy_unrouted` path when
+  their dispatch routes and persists normally. One narrowing is intentional:
+  the new invalidation consults run BEFORE the legacy determination, so a
+  dispatch whose OWN routing faulted is refused even if its task would
+  otherwise qualify as legacy-unrouted (the faulted dispatch must not settle
+  on any prior authority — the #3509 property). Untouched legacy tasks keep
+  the carve-out unchanged.
 - **AC6 monotonicity substitution.** Issue #3516's AC6 wording ("forget
   deletion reddens") is reconciled to the shipped design: the forget is
   removed as DEAD code, and the live protection is the remember-monotonicity

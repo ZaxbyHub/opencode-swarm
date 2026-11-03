@@ -381,40 +381,40 @@ describe('route-receipt hardening legs (#3516)', () => {
 		});
 	});
 
-	it('sibling-clobber guard rails runtime redaction (behavioral): the REAL wrapper degrades a long home-path fault to a bounded, redacted warn', async () => {
-		// AC14's behavioral half, which the frozen source-scan probe
-		// cannot see (the derivation lives in the helper, outside its
-		// region): drive the REAL wrapper through the inner-reader seam
-		// with a crafted fault whose message embeds a home path plus
-		// >200 chars of padding, then assert the degraded warn is
-		// capped and redacted.
-		const dir = fixture();
-		const realInner = _internals.readPrReviewReentryBindingContextInner;
-		const realWrapper = _internals.readPrReviewReentryBindingContextSafe;
-		const homePath = 'C:\\Users\\brett\\project\\thing\\src';
-		const message = `EBUSY: resource locked, read '${homePath}\\deep' ${'p'.repeat(180)}ENDMARKER`;
-		_internals.readPrReviewReentryBindingContextInner = (async () => {
-			throw new Error(message);
-		}) as typeof realInner;
-		const warnCapture = captureCriticalWarn();
-		try {
-			expect(await realWrapper(dir, SESSION)).toBeNull();
-		} finally {
-			_internals.readPrReviewReentryBindingContextInner = realInner;
-			warnCapture.restore();
-		}
-		const line = warnCapture.lines.find((candidate) =>
-			candidate.includes('PR-review re-entry binding context unreadable'),
-		);
-		expect(line).toBeDefined();
-		expect(line!.includes('CRITICAL-WARN')).toBe(true);
-		// Bounded: the 200-char cap truncates the tail marker.
-		expect(line!.includes('ENDMARKER')).toBe(false);
-		// Redacted: the home-profile prefix never appears raw.
-		expect(line!.includes('C:\\Users\\brett')).toBe(false);
-		expect(line!.includes('~\\')).toBe(true);
-	});
 	describe('sibling-clobber — kind-monotonicity keeps a live full receipt bindable', () => {
+		it('sibling-clobber guard rails runtime redaction (behavioral): the REAL wrapper degrades a long home-path fault to a bounded, redacted warn', async () => {
+			// AC14's behavioral half, which the frozen source-scan probe
+			// cannot see (the derivation lives in the helper, outside its
+			// region): drive the REAL wrapper through the inner-reader seam
+			// with a crafted fault whose message embeds a home path plus
+			// >200 chars of padding, then assert the degraded warn is
+			// capped and redacted.
+			const dir = fixture();
+			const realInner = _internals.readPrReviewReentryBindingContextInner;
+			const realWrapper = _internals.readPrReviewReentryBindingContextSafe;
+			const homePath = 'C:\\Users\\brett\\project\\thing\\src';
+			const message = `EBUSY: resource locked, read '${homePath}\\deep' ${'p'.repeat(180)}ENDMARKER`;
+			_internals.readPrReviewReentryBindingContextInner = (async () => {
+				throw new Error(message);
+			}) as typeof realInner;
+			const warnCapture = captureCriticalWarn();
+			try {
+				expect(await realWrapper(dir, SESSION)).toBeNull();
+			} finally {
+				_internals.readPrReviewReentryBindingContextInner = realInner;
+				warnCapture.restore();
+			}
+			const line = warnCapture.lines.find((candidate) =>
+				candidate.includes('PR-review re-entry binding context unreadable'),
+			);
+			expect(line).toBeDefined();
+			expect(line!.includes('CRITICAL-WARN')).toBe(true);
+			// Bounded: the 200-char cap truncates the tail marker.
+			expect(line!.includes('ENDMARKER')).toBe(false);
+			// Redacted: the home-profile prefix never appears raw.
+			expect(line!.includes('C:\\Users\\brett')).toBe(false);
+			expect(line!.includes('~\\')).toBe(true);
+		});
 		it('a sibling non-full remember cannot clobber a healthy full record', async () => {
 			const dir = fixture({ taskIds: ['1.1'] });
 			await prepareTask(dir, '1.1');

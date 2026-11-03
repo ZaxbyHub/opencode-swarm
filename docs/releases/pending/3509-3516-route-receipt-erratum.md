@@ -51,8 +51,11 @@ re-verified by the 3509-3516 trace at `bf65b6efb`) is corrected below.
    before v7.200.11 was published; the sentence read as if the sibling work
    were still pending. It is deleted here.
 
-The capacity pre-flight and empty-binding-skip claims in the same fragment
-were accurate as written but unpinned (each was deletable with the suite
-green); the follow-up PR pins both with legs whose removal reddens the suite,
-and restates the pre-flight as best-effort across the reservation await (the
-fragment's implied guarantee does not hold in that window).
+The empty-binding-skip claim in the same fragment was accurate as written but
+unpinned (deletable with the suite green); the follow-up PR pins it with a
+leg whose removal reddens the suite. The capacity pre-flight claim ("a
+capacity refusal can no longer burn the token") was overstated — the follow-up
+PR pins the pre-flight with its own leg AND restates it as best-effort across
+the reservation await: a concurrent dispatch admitted during the await can
+still trip the remember-time capacity throw and burn the consumed token in
+that window (the pre-flight narrows the window; it does not close it).

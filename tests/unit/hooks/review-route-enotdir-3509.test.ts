@@ -146,8 +146,12 @@ function injectFault(readIndex: 1 | 2): void {
 		const next = (seen.get(key) ?? 0) + 1;
 		seen.set(key, next);
 		if (key === FAULTED && next === readIndex) {
+			// PRR-004 pin: the injected fault carries a REALISTIC absolute
+			// home path plus >200 chars of padding so the drop advisory is
+			// asserted bounded AND redacted below (the pre-fix code
+			// interpolated err.message raw into the settlement advisory).
 			const error = new Error(
-				`ENOTDIR: not a directory, scandir '<redacted>/route-receipts/${key}.json'`,
+				`ENOTDIR: not a directory, scandir 'C:\\Users\\brett\\proj\\.swarm\\pr-review\\route-receipts\\${key}.json' ${'p'.repeat(180)}ENDMARKER`,
 			);
 			(error as NodeJS.ErrnoException).code = 'ENOTDIR';
 			throw error;
@@ -213,6 +217,15 @@ describe('route-receipt read-fault isolation (#3516 item 7 / AC10)', () => {
 		expect(
 			session.stageBCompletion?.get(SIBLING)?.has('reviewer') ?? false,
 		).toBe(true);
+		// PRR-004 behavioral pin: the route_read_fault drop advisory must be
+		// bounded AND redacted (boundedRedactedErrorDetail), never raw.
+		const faultAdvisory = (session.pendingAdvisoryMessages ?? []).find(
+			(m) => m.includes('route receipt read faulted'),
+		);
+		expect(faultAdvisory).toBeDefined();
+		expect(faultAdvisory!.includes('C:\\Users\\brett')).toBe(false);
+		expect(faultAdvisory!.includes('~\\')).toBe(true);
+		expect(faultAdvisory!.includes('ENDMARKER')).toBe(false);
 	});
 
 	it('enotdir fault on the SECOND read (completeness) drops only the faulted task; the sibling still settles', async () => {
