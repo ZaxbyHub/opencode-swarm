@@ -135,6 +135,7 @@ import { handlePrUnsubscribeCommand } from './pr-unsubscribe.js';
 import { handlePreflightCommand } from './preflight.js';
 import { handlePromoteCommand } from './promote.js';
 import { handleQaGatesCommand } from './qa-gates.js';
+import { handleReceiptCommand } from './receipt.js';
 import { handleRecoverCommand } from './recover.js';
 import { handleReportCommand } from './report.js';
 import { handleResetCommand } from './reset.js';
@@ -1250,6 +1251,16 @@ export const COMMAND_REGISTRY = {
 		args: '<taskId>',
 		details:
 			'Displays review results, test verdicts, and other evidence bundles for the given task ID (e.g., "2.1").',
+		category: 'utility',
+		toolPolicy: 'agent',
+	},
+	receipt: {
+		handler: (ctx) => handleReceiptCommand(ctx.directory, ctx.args),
+		description:
+			'Emit or verify verification receipts <task|phase> <id> [--export] | --verify <bundle>',
+		args: '<task|phase> <id> [--export] | --verify <bundle>',
+		details:
+			'Emits a portable, hash-backed record of the durably recorded gate outcomes for a task or phase (JSON + Markdown under .swarm/evidence/receipts/; --export writes a PR-attachable bundle under .swarm/plan-export/, reaped at close). --verify re-checks every recorded hash in a bundle on any machine (including a fresh clone) and exits nonzero on any mismatch with a typed failure (corrupt_json, unsupported_format_version, schema_mismatch, receipt_hash_mismatch, missing_artifact, digest_mismatch, path_escape).',
 		category: 'utility',
 		toolPolicy: 'agent',
 	},

@@ -361,7 +361,7 @@ per row.
 | `review-receipts` | .swarm/review-receipts/{YYYY-MM-DD}-{id}.json + index.json | governed-content | one small file per review receipt; retention sweep review-receipts 30 d + keep-newest-1000; index read capped MAX_RECEIPTS_READ 1000 (global) | indexed: manifest lookup + per-file reads; index read ≤1000 newest | untouched by close — the 30 d / newest-1000 sweep owns the reap | not a defect — #2483 |
 
 
-### Category 5 — Plan durability, evidence bundles, council (15 rows)
+### Category 5 — Plan durability, evidence bundles, council (16 rows)
 
 | Row id | Path grammar | State class | Write limit (scope) | Read bound | Close policy | Disposition → owner |
 |---|---|---|---|---|---|---|
@@ -369,6 +369,7 @@ per row.
 | `plan-projections` | .swarm/plan.json + .swarm/plan.md | derived-rebuildable | single rewritten files derived from the ledger (rebuildable by replay) (global) | full-file: single plan document | archived+cleaned (plan.json/plan.md in both close list… | not a defect — this-gate |
 | `plan-checkpoints-exports` | .swarm/plan-export/SWARM_PLAN.{json,md} (+ legacy .swarm/SWARM_PLAN.*… | governed-content | bounded export set; checkpoints.json FIFO 20 default (checkpoint.max_retention) (global) | full-file: single checkpoint document / ≤20-entry log | archived + removed from all three locations (`src/commands/close/clean-stage.ts:254-279`) | not a defect — this-gate |
 | `evidence-bundles` | .swarm/evidence/{taskId}/evidence.json | governed-content | ≤100 entries + ≤500 KiB per bundle; retention 30 d / 10 bundles; evidence/ close-scoped (per-key) | full-file: ≤500 KiB per bundle by write-side enforcement | cleaned — evidence/ dir lifecycle (after retention arc… | not a defect — this-gate |
+| `verification-receipts` | .swarm/evidence/receipts/** + .swarm/plan-export/receipt-*/** | governed-content | newest-8 per unit/phase, ≤256 KiB receipt, ≤512 refs, ≤64 gates, staged atomic export (per-key; keyspace bounded by the close evidence-tree lifecycle + the close-only plan-export receipt-bundle sweep) | full-file: ≤1 MiB verify read, ≤16 MiB re-hash | cleaned — evidence/ tree + plan-export sweep (both at /swarm close; archive does not touch plan-export) | retain by design — #2968 |
 | `phase-participation` | .swarm/evidence/phase-participation.json (+ phase-participation-quara… | authoritative | MAX_PHASE_PARTICIPATION_BYTES 256 KiB (:36); PENDING ≤128; RECEIPTS ≤128 (:37-38); quaran… (global) | full-file: ≤256 KiB by write-side trim | cleaned — evidence/ dir lifecycle | not a defect — this-gate; direct-file exemption (#2036) |
 | `council-round-state-attempts` | .swarm/council/round-state/{token}.json + .swarm/council/attempts/{to… | authoritative | MAX_ROUND 10 (:18); audit-tail read ≤256 KiB; council/ dir archived+cleaned at close (per-key; keyspace finite by close + finite token domain) | line-bounded: ≤256 KiB audit tail | cleaned — council/ dir lifecycle | retain by design — #2046/#2483; direct-file exemption (#2046) |
 | `council-criteria` | .swarm/council/{safeId(taskId)}.json | governed-content | one criteria file per task; council/ dir close-scoped (per-key) | indexed: single JSON per task | cleaned — council/ dir lifecycle | not a defect — this-gate |

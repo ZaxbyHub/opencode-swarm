@@ -2179,11 +2179,11 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/evidence/manager.ts', 'src/tools/write-retro.ts', 'src/tools/sbom-generate.ts', 'src/summaries/manager.ts'],
 		writerCitations: [
-			'src/evidence/manager.ts:193 saveEvidence — withEvidenceLock, bundle trim MAX_BUNDLE_ENTRIES 100 (:261-265), EVINENCE_MAX_JSON_BYTES 500 KiB, temp+rename :286-296',
-			'src/evidence/manager.ts:665 archiveEvidence — retention maxAgeDays 30 / maxBundles 10 defaults (src/commands/close/archive-stage.ts:498-544)',
+			'src/evidence/manager.ts:194 saveEvidence — withEvidenceLock, bundle trim MAX_BUNDLE_ENTRIES 100 (:261-265), EVINENCE_MAX_JSON_BYTES 500 KiB, temp+rename :286-296',
+			'src/evidence/manager.ts:688 archiveEvidence — retention maxAgeDays 30 / maxBundles 10 defaults (src/commands/close/archive-stage.ts:498-544)',
 			'src/summaries/manager.ts:132 storeSummary — atomic (summaries row below owns lifecycle)',
 		],
-		readerCitations: ['src/evidence/manager.ts:387 loadEvidence — full-file Zod-validated with legacy migration, async; :515 listEvidenceTaskIds — directory list'],
+		readerCitations: ['src/evidence/manager.ts:388 loadEvidence — full-file Zod-validated with legacy migration, async; :516 listEvidenceTaskIds — directory list'],
 		schemaVersion: 'EvidenceBundle schema_version; legacy flat retrospective migrated in place (:319-480)',
 		stateClass: 'governed-content',
 		privacyClass: 'content',
@@ -2203,6 +2203,56 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		healthSignal: 'n/a',
 		owner: 'this-gate',
 		disposition: { kind: 'not-a-defect', proof: 'Hard per-bundle caps (100 entries / 500 KiB) + age/count retention + close lifecycle (src/evidence/manager.ts:261-280,665; src/commands/close/archive-stage.ts:498-544).' },
+	},
+	{
+		id: 'verification-receipts',
+		category: 5,
+		pathGrammar:
+			'.swarm/evidence/receipts/{receipt-<task|phase>-<unitId>-<12hex>.json,.md | phase-<N>-<64hex>.json} + staged export bundles .swarm/plan-export/receipt-<kind>-<unitId>-<shorthash>/{receipt.json,receipt.md,artifacts/**}',
+		canonicalRoot: 'project-swarm',
+		writerModules: ['src/evidence/receipt-store.ts', 'src/services/receipt-service.ts'],
+		writerCitations: [
+			'src/evidence/receipt-store.ts capturePhaseGateReport — writeImmutableArtifact content-addressed write-once of the bounded PhaseGateReport at the phase-commit boundary, fail-open to phase completion',
+			'src/evidence/receipt-store.ts writeReceiptArtifact — per-unit withEvidenceLock serialization, idempotent-return for unchanged content signature, newest-8 exact-grammar retention',
+			'src/evidence/receipt-store.ts writeExportBundle — staged .tmp dir, per-copy digest verification, atomic rename publication, full cleanup on any failure',
+		],
+		readerCitations: [
+			'src/evidence/receipt.ts readNewestPhaseReport — bounded directory scan, exact filename grammar, sync',
+			'src/evidence/receipt.ts hashReceiptArtifact — O_NOFOLLOW + fstat identity/mutation checks, sync',
+			'src/evidence/receipt-verify.ts verifyReceiptBundle — pure two-root read (receipt.json + artifacts/), zero writes, sync',
+		],
+		schemaVersion: 'VerificationReceipt format_version 1.0.0 (receipt.ts); PhaseGateReport schemaVersion 1 (captured verbatim)',
+		stateClass: 'governed-content',
+		privacyClass: 'mixed',
+		writeLimits: {
+			bound:
+				'receipts ≤256 KiB JSON, ≤512 artifact refs, ≤64 gate records; captured reports newest-8/phase; emitted receipts newest-8/unit; per-artifact re-hash ≤16 MiB',
+			scope: 'per-key',
+			keyspaceBound:
+				'FINITE BY THE PARENT-TREE GLOBAL LIFECYCLE, NOT by the 8-per-unit cap: keys are (kind, unitId) pairs drawn from plan tasks/phases, and .swarm/evidence (incl. receipts/) is recursively removed at close via the evidence-tree lifecycle while .swarm/plan-export bundles AND crashed-export .receipt-….tmp-* staging trees are removed by the close plan-export receipt-bundle grammar sweep (src/commands/close/clean-stage.ts, FB-003) — the same global reapers that bound the sibling evidence-bundles row. Mid-session reclamation requires /swarm close — the plan-export receipt-bundle sweep runs ONLY in the close clean stage (/swarm archive reaps the evidence tree, not plan-export).',
+			citation:
+				'src/evidence/receipt.ts MAX_RECEIPT_* constants; src/evidence/receipt-store.ts pruneRetention (MAX_RETAINED_PER_UNIT 8); src/commands/close/clean-stage.ts',
+		},
+		readBound: {
+			pattern: 'full-file',
+			bound: 'receipt ≤1 MiB read cap in verify; artifacts ≤16 MiB re-hash cap; directory scans exact-grammar filtered',
+			sync: true,
+			citation: 'src/evidence/receipt-verify.ts MAX_VERIFY_* constants; src/evidence/receipt.ts hashReceiptArtifact',
+		},
+		lockModel: 'per-unit withEvidenceLock around lookup→write→prune; writeImmutableArtifact evidence lock per artifact',
+		crashBehavior:
+			'content-addressed write-once (byte-identical re-run idempotent); export bundles staged then atomically renamed — a crashed export leaves only a .tmp-* staging dir, never a partial final bundle',
+		closePolicy: 'cleaned — rides the evidence/ tree removal (receipts subtree) and the plan-export clean stage (bundles)',
+		resetPolicy: 'not reset',
+		legacyCompatibility:
+			'none — pre-feature phases have no captured report and emit a clear no-backfill error (#2968 documented limitation)',
+		healthSignal: 'fail-open capture logs via logger.log at the phase-commit boundary',
+		owner: '#2968',
+		disposition: {
+			kind: 'retain-by-design',
+			citation:
+				'Portable verification artifacts are the #2968/#2970 deliverable: newest-8 per unit + 256 KiB/512-ref/64-gate caps + staged atomic export, reclaimed at close by the evidence-tree lifecycle and the close plan-export receipt-bundle sweep (src/evidence/receipt-store.ts; src/evidence/receipt.ts; src/commands/close/clean-stage.ts).',
+		},
 	},
 	{
 		id: 'phase-participation',
