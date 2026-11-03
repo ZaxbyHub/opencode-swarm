@@ -78,10 +78,10 @@ describe('issue #2840 — allowedPrReviewReportVerdicts call-site wiring ratchet
 			// auto-fix/issue-3340-pr-review-gate-side-critic-adm-b42a37)
 			// shifted the gate lines +78; same five call sites, live grep
 			// values.
-			'src/hooks/pr-workflow-gate.ts:12667', // readPrReviewFinalFindingPolicyForReport
-			'src/hooks/pr-workflow-gate.ts:14799', // dispatchCoverageFinalization message formatting
-			'src/hooks/pr-workflow-gate.ts:15265', // completion preflight
-			'src/hooks/pr-workflow-gate.ts:15306', // completion post-ladder finding-policy check
+			'src/hooks/pr-workflow-gate.ts:12855', // readPrReviewFinalFindingPolicyForReport
+			'src/hooks/pr-workflow-gate.ts:14987', // dispatchCoverageFinalization message formatting
+			'src/hooks/pr-workflow-gate.ts:15453', // completion preflight
+			'src/hooks/pr-workflow-gate.ts:15494', // completion post-ladder finding-policy check
 			'src/pr-review/completion.ts:2044', // readPrReviewTerminalCoverageForReport
 		]);
 	});
