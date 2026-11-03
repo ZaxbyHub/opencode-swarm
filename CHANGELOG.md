@@ -1,5 +1,14 @@
 # Changelog
 
+## [7.201.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.201.0...v7.201.1) (2026-11-03)
+
+
+### Bug Fixes
+
+* **review:** close swarm-pr-review findings PRR-001/002/004/006/007/009/011/012/013 ([#3509](https://github.com/ZaxbyHub/opencode-swarm/issues/3509)/[#3516](https://github.com/ZaxbyHub/opencode-swarm/issues/3516)) ([54084b4](https://github.com/ZaxbyHub/opencode-swarm/commit/54084b443e8fb169357d2c9f6d96015ca23d9b27))
+* **review:** rename memo parameter to rawSpelling (check:path-identity) — the memo deliberately keys by caller input spelling, not canonical project identity ([6146ab3](https://github.com/ZaxbyHub/opencode-swarm/commit/6146ab3737d011a38dc4548f1215790cba776370))
+* **review:** route-receipt authorization hardening — call-scoped invalidation, fail-closed wrapper, seam consults ([#3509](https://github.com/ZaxbyHub/opencode-swarm/issues/3509), [#3516](https://github.com/ZaxbyHub/opencode-swarm/issues/3516)) ([723efca](https://github.com/ZaxbyHub/opencode-swarm/commit/723efcaad993a9582f1a2abf9084c1eb084f788a))
+
 ## [7.201.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.200.17...v7.201.0) (2026-11-03)
 
 
