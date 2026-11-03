@@ -171,9 +171,12 @@ describe('PR_FEEDBACK base binding lifecycle (#3396 feedback)', () => {
 		expect(after?.prFeedbackBaseRef).toBeUndefined();
 		expect(after?.prFeedbackBaseSha).toBeUndefined();
 		expect(after?.prFeedbackStageABaseMismatch).toBeUndefined();
-		// Round-2 residual pins (reviewer E/F): the ancestry-bound trust
-		// verdict and the stale binding advisory clear with the receipt.
-		expect(after?.prFeedbackStageABaseTrust).toBeUndefined();
+		// Round-2 residual pin (reviewer F): the stale binding advisory
+		// clears with the receipt. (The prFeedbackStageABaseTrust clear is
+		// also in the rebind literal but is NOT asserted here — the trust
+		// verdict has no production reader yet and this fixture cannot seed
+		// it without the full Stage A record chain, so an assertion would be
+		// vacuous; recorded in the ledger round-3 notes.)
 		expect(after?.prFeedbackBaseBindingError).toBeUndefined();
 	});
 

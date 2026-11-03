@@ -6067,26 +6067,36 @@ function extractPatchTargets(
 		// timestamp, so capture the tab-free run, not \S+ (space paths).
 		if (rawLine.startsWith('diff --git ')) {
 			sawHeader = true;
-			// #3396 feedback (reviewer F7 + round-2 R2-1): git quotes ONLY
-			// paths with non-ASCII/special bytes — a path with ordinary
-			// spaces stays UNQUOTED on this line (`diff --git a/new file.txt
-			// b/new file.txt`), so the unquoted form splits on the ` b/`
-			// boundary (git's own parse order; lazy a-side, greedy b-side).
-			// The quoted form is matched explicitly and both endpoints run
-			// through the same fail-closed unquoter as the other arms.
-			const quoted =
+			// #3396 feedback (reviewer F7, rounds 2-3): git quotes EACH name
+			// independently. Under the default core.quotePath=true a rename
+			// crossing the ASCII↔non-ASCII boundary emits a MIXED header
+			// (`diff --git "a/caf\303\251.txt" b/plain.txt` — round-3 R3-1,
+			// executed real-git probe), and space paths stay unquoted
+			// entirely (`diff --git a/new file.txt b/new file.txt` — round-2
+			// R2-1). All four quoting combinations parse: split on the
+			// ` b/` boundary (git's parse order; lazy a-side, greedy
+			// b-side) and unquote each side only when quoted; undecodable
+			// quoted forms fail closed.
+			const bothQuoted =
 				/^diff --git ("(?:[^"\\]|\\.)*") ("(?:[^"\\]|\\.)*")$/.exec(rawLine);
+			const aQuoted = /^diff --git ("(?:[^"\\]|\\.)*") (b\/.*)$/.exec(rawLine);
+			const bQuoted = /^diff --git (a\/.+?) ("(?:[^"\\]|\\.)*")$/.exec(rawLine);
 			const plain = /^diff --git a\/(.+?) b\/(.+)$/.exec(rawLine);
-			const aEndpoint = quoted
-				? unquoteGitPath(quoted[1])
-				: plain
-					? `a/${plain[1]}`
-					: undefined;
-			const bEndpoint = quoted
-				? unquoteGitPath(quoted[2])
-				: plain
-					? `b/${plain[2]}`
-					: undefined;
+			let aEndpoint: string | undefined;
+			let bEndpoint: string | undefined;
+			if (bothQuoted) {
+				aEndpoint = unquoteGitPath(bothQuoted[1]);
+				bEndpoint = unquoteGitPath(bothQuoted[2]);
+			} else if (aQuoted) {
+				aEndpoint = unquoteGitPath(aQuoted[1]);
+				bEndpoint = aQuoted[2];
+			} else if (bQuoted) {
+				aEndpoint = bQuoted[1];
+				bEndpoint = unquoteGitPath(bQuoted[2]);
+			} else {
+				aEndpoint = plain ? `a/${plain[1]}` : undefined;
+				bEndpoint = plain ? `b/${plain[2]}` : undefined;
+			}
 			if (aEndpoint === undefined || bEndpoint === undefined) return undefined;
 			if (addEndpoint(aEndpoint)) return undefined;
 			if (addEndpoint(bEndpoint)) return undefined;

@@ -156,6 +156,39 @@ describe('patch/rsync extraction hardening (#3396 feedback PRR-011/012, review F
 		}
 	});
 
+	test('mixed quoted/unquoted diff --git headers stay judged (round-3 R3-1)', () => {
+		const root = canonicalMkdtemp('swd3396-mixedquote-');
+		try {
+			// git's default core.quotePath=true quotes EACH name independently,
+			// so a rename crossing the ASCII↔non-ASCII boundary emits a MIXED
+			// header (executed real-git probe). Rename-only sections make the
+			// diff --git arm the only judge of these endpoints.
+			const mixedPatch = [
+				'diff --git "a/caf\\303\\251.txt" b/caf_to_plain.txt',
+				'similarity index 100%',
+				'rename from "caf\\303\\251.txt"',
+				'rename to caf_to_plain.txt',
+				'diff --git a/space file.txt "b/space to caf\\303\\251.txt"',
+				'similarity index 100%',
+				'rename from space file.txt',
+				'rename to "space to caf\\303\\251.txt"',
+				'',
+			].join('\n');
+			writeFileSync(path.join(root, 'fix.patch'), mixedPatch);
+			const command = 'git apply fix.patch';
+			const analysis = detectPosixWrites(command);
+			const result = resolveWriteTargets(command, analysis.writes, root);
+			const paths = result.map((r) => r.resolvedPath);
+			expect(paths).toContain(path.join(root, 'café.txt'));
+			expect(paths).toContain(path.join(root, 'caf_to_plain.txt'));
+			expect(paths).toContain(path.join(root, 'space file.txt'));
+			expect(paths).toContain(path.join(root, 'space to café.txt'));
+			expect(result.every((r) => r.resolved === true)).toBe(true);
+		} finally {
+			removeTreeWithRetry(root);
+		}
+	});
+
 	test('rsync filter values do not hijack operand positions (PRR-011)', () => {
 		// One real operand + a space-form filter: rsync with a single path
 		// argument only LISTS (no copy) — pre-fix the filter value became a
