@@ -1,5 +1,4 @@
 import { describe, expect, test } from 'bun:test';
-import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
@@ -15,199 +14,26 @@ import {
 	writeExportBundle,
 	writeReceiptArtifact,
 } from '../../../src/evidence/receipt-store';
-import { verifyReceiptBundle } from '../../../src/evidence/receipt-verify';
-import {
-	handleReceiptCommand,
-	resolveVerifyTarget,
-} from '../../../src/services/receipt-service';
 import { stableReportHash } from '../../../src/tools/phase-complete/preflight-report';
-import { receipt as receiptTool } from '../../../src/tools/receipt';
-import { canonicalMkdtemp } from '../../helpers/tmpdir';
+import {
+	makeDir,
+	passEntry,
+	STATIC_TIME,
+	seedAndReceipt,
+} from '../../helpers/receipt-review-fixtures';
 
 /**
- * swarm-pr-feedback round-2 legs (swarm-pr-review PR #3550): re-derivation
- * of the persisted gate-report digest (FB-004), idempotent-adoption
- * re-validation + Markdown healing (FB-005), verify-side budgets and typed
- * taxonomy for hostile structure (FB-006), strict invocation shapes and
- * ctx.directory resolution (FB-007/016/021), prune ENOENT tolerance
+ * swarm-pr-feedback round-2 legs (swarm-pr-review PR #3550): idempotent-
+ * adoption re-validation + Markdown healing (FB-005), prune ENOENT tolerance
  * (FB-009), retention survivor IDENTITY (FB-012), pre-copy size gating
- * (FB-017), newline-inclusive byte bound (FB-018), bounded capture lock
- * (PRR-019), and the shared-normalizer import contract (FB-010).
+ * (PRR-017), newline-inclusive byte bound (FB-018), bounded capture lock
+ * (PRR-019). The report-digest re-derivation legs (FB-004) and the shared-
+ * normalizer import contract (FB-010) live in receipt-report-integrity
+ * .test.ts (FR-006 split); shared fixtures in tests/helpers/
+ * receipt-review-fixtures.ts.
  */
 
-const STATIC_TIME = '2026-11-02T00:00:00.000Z';
-
-function makeDir(prefix: string): string {
-	const dir = canonicalMkdtemp(prefix);
-	fs.mkdirSync(path.join(dir, '.git'), { recursive: true });
-	fs.mkdirSync(path.join(dir, '.swarm', 'evidence'), { recursive: true });
-	return dir;
-}
-
-function reportBytes(
-	phase: number,
-	entries: Array<Record<string, unknown>>,
-): { reportHash: string; file: string; payload: string } {
-	const reportHash = stableReportHash(phase, entries as never);
-	return {
-		reportHash,
-		file: `phase-${phase}-${reportHash}.json`,
-		payload: JSON.stringify({
-			schemaVersion: 1,
-			phase,
-			outcome: 'pass',
-			reportHash,
-			entries,
-		}),
-	};
-}
-
-function passEntry(id = 'gate_a'): Record<string, unknown> {
-	return {
-		id,
-		code: 'OK',
-		outcome: 'pass',
-		evidenceRefs: [],
-		responsibleActor: 'architect',
-		agentsDispatched: [],
-		agentsMissing: [],
-		warnings: [],
-	};
-}
-
-function naEntry(id = 'gate_b'): Record<string, unknown> {
-	return { ...passEntry(id), outcome: 'not_applicable' };
-}
-
-async function seedAndReceipt(
-	dir: string,
-	entries: Array<Record<string, unknown>>,
-): Promise<VerificationReceipt> {
-	fs.writeFileSync(path.join(dir, '.swarm', 'spec.md'), '# Spec\nFR text\n');
-	const { reportHash, file, payload } = reportBytes(1, entries);
-	const receipts = path.join(dir, '.swarm', 'evidence', 'receipts');
-	fs.mkdirSync(receipts, { recursive: true });
-	fs.writeFileSync(path.join(receipts, file), payload);
-	return buildVerificationReceipt(dir, 'phase', '1');
-}
-
 describe('receipt review round 2', () => {
-	test('FB-004 build: edited gate entries under a stale reportHash are refused', async () => {
-		const dir = makeDir('r2-fb004-build-');
-		try {
-			// Filename + embedded reportHash agree with the ORIGINAL entries;
-			// the on-disk entries were then flipped not_applicable→pass.
-			const honest = [naEntry()];
-			const { reportHash, file } = reportBytes(1, honest);
-			const receipts = path.join(dir, '.swarm', 'evidence', 'receipts');
-			fs.mkdirSync(receipts, { recursive: true });
-			fs.writeFileSync(
-				path.join(receipts, file),
-				JSON.stringify({
-					schemaVersion: 1,
-					phase: 1,
-					outcome: 'pass',
-					reportHash,
-					entries: [passEntry()], // LAUNDERED
-				}),
-			);
-			fs.writeFileSync(path.join(dir, '.swarm', 'spec.md'), '# Spec\n');
-			await expect(buildVerificationReceipt(dir, 'phase', '1')).rejects.toThrow(
-				'RECEIPT_REPORT_HASH_MISMATCH',
-			);
-		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
-		}
-	});
-
-	test('FB-004 read: a report whose name disagrees with its embedded digest is not a capture', async () => {
-		const dir = makeDir('r2-fb004-stem-');
-		try {
-			const receipts = path.join(dir, '.swarm', 'evidence', 'receipts');
-			fs.mkdirSync(receipts, { recursive: true });
-			const entries = [passEntry()];
-			const real = stableReportHash(1, entries as never);
-			fs.writeFileSync(
-				path.join(receipts, `phase-1-${'f'.repeat(64)}.json`),
-				JSON.stringify({
-					schemaVersion: 1,
-					phase: 1,
-					outcome: 'pass',
-					reportHash: real,
-					entries,
-				}),
-			);
-			fs.writeFileSync(path.join(dir, '.swarm', 'spec.md'), '# Spec\n');
-			await expect(buildVerificationReceipt(dir, 'phase', '1')).rejects.toThrow(
-				'RECEIPT_NO_PERSISTED_REPORT',
-			);
-		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
-		}
-	});
-
-	test('FB-004 verify: a self-consistent forger of the bundled report is caught by digest RE-DERIVATION', async () => {
-		const dir = makeDir('r2-fb004-verify-');
-		try {
-			await seedAndReceipt(dir, [naEntry()]);
-			const receipt = await buildVerificationReceipt(dir, 'phase', '1');
-			const bundle = await writeExportBundle(dir, receipt, '# md\n');
-			// Forge: flip the bundled report's not_applicable→pass AND fix the
-			// embedded digest AND recompute the receipt's artifact sha AND the
-			// receipt_hash — everything except the receipt's ORIGINAL
-			// report_hash, which still attests the genuine digest.
-			const reportRel = receipt.artifacts.find((a) =>
-				a.path.includes('phase-1-'),
-			);
-			expect(reportRel).toBeDefined();
-			const reportPath = path.join(
-				bundle.bundleDir,
-				'artifacts',
-				...reportRel!.path.split('/'),
-			);
-			const stored = JSON.parse(fs.readFileSync(reportPath, 'utf8')) as {
-				entries: Array<Record<string, unknown>>;
-				reportHash: string;
-			};
-			stored.entries = [passEntry()];
-			stored.reportHash = stableReportHash(1, stored.entries as never);
-			const forgedBytes = Buffer.from(JSON.stringify(stored), 'utf8');
-			fs.writeFileSync(reportPath, forgedBytes);
-			const receiptFile = path.join(bundle.bundleDir, 'receipt.json');
-			const record = JSON.parse(fs.readFileSync(receiptFile, 'utf8')) as Record<
-				string,
-				unknown
-			>;
-			(record.artifacts as Array<Record<string, unknown>>).forEach(
-				(artifact) => {
-					if (artifact.path === reportRel!.path) {
-						artifact.sha256 = createHash('sha256')
-							.update(forgedBytes)
-							.digest('hex');
-						artifact.bytes = forgedBytes.byteLength;
-					}
-				},
-			);
-			const { receipt_hash: _drop, ...rest } = record;
-			record.receipt_hash = computeReceiptHash(rest);
-			fs.writeFileSync(receiptFile, `${JSON.stringify(record, null, 2)}\n`);
-			const result = verifyReceiptBundle({
-				receiptFile,
-				artifactRoot: path.join(bundle.bundleDir, 'artifacts'),
-			});
-			expect(result.ok).toBe(false);
-			expect(
-				result.failures.some(
-					(f) =>
-						f.kind === 'digest_mismatch' && f.expected === receipt.report_hash,
-				),
-				`expected report-digest re-derivation failure, got ${JSON.stringify(result.failures)}`,
-			).toBe(true);
-		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
-		}
-	});
-
 	test('FB-005: a tampered-hash persisted receipt is never adopted as frozen', async () => {
 		const dir = makeDir('r2-fb005-tamper-');
 		try {
@@ -379,8 +205,8 @@ describe('receipt review round 2', () => {
 		}
 	});
 
-	test('FB-017: a source grown since emission is rejected BEFORE copying', async () => {
-		const dir = makeDir('r2-fb017-grow-');
+	test('PRR-017: a source grown since emission is rejected BEFORE copying', async () => {
+		const dir = makeDir('r2-prr017-grow-');
 		try {
 			// snapshot_identity refs make spec.md a cited artifact — the one
 			// the growth tamper targets.
@@ -494,19 +320,5 @@ describe('receipt review round 2', () => {
 			storeInternals.writeImmutableArtifact = original;
 			fs.rmSync(dir, { recursive: true, force: true });
 		}
-	});
-
-	test('FB-010: the verifier imports the SHARED normalizer (issue #2970 step 5 import contract)', () => {
-		const source = fs.readFileSync(
-			path.join(import.meta.dir, '../../../src/evidence/receipt-verify.ts'),
-			'utf8',
-		);
-		expect(source).toContain(
-			"from '../tools/phase-complete/snapshot-identity'",
-		);
-		expect(source).toContain('toPortableRelativePath(');
-		// Containment comparisons go through the normalizer, not ad-hoc
-		// path.relative against the real root.
-		expect(source).not.toContain('path.relative(rootResolved');
 	});
 });

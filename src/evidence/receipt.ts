@@ -13,11 +13,12 @@ import { loadEvidence } from './manager';
 /**
  * Verification receipts (#2968, Workstream J slot J22).
  *
- * A receipt is a portable, hash-backed record of every gate that ran for a
- * task or phase: bounded gate records, the snapshot hashes the gates were
- * evaluated against, and content-hashed artifact refs. Receipts provide
- * integrity AGAINST THE MODEL for lazy falsification (an agent cannot edit
- * persisted gate state under an unchanged digest and claim a gate passed —
+ * A receipt is a portable, hash-backed record of the durably recorded gate
+ * outcomes for a task or phase: bounded gate records, the snapshot hashes the
+ * gates were evaluated against, and content-hashed artifact refs. A gate that
+ * ran without a durable record is absent (nothing is reconstructed). Receipts
+ * provide integrity AGAINST THE MODEL for lazy falsification (an agent cannot
+ * edit persisted gate state under an unchanged digest and claim a gate passed —
  * report digests are RE-DERIVED from stored bytes at build time and from
  * the bundled copy at verify time, FB-004); a forger willing to recompute
  * every digest consistently needs an out-of-band capture-time anchor, which

@@ -383,7 +383,7 @@ function isContained(root: string, candidate: string): boolean {
  * partial bundle must never look attachable). Idempotent: an existing bundle
  * dir at the final path is kept as-is. Every destination and every source
  * chain is link-validated against the REAL root (FB-001/FB-002), and each
- * source is size-gated BEFORE copying (FB-017: a source that grew since
+ * source is size-gated BEFORE copying (PRR-017: a source that grew since
  * emission is rejected without being buffered whole).
  */
 export async function writeExportBundle(
@@ -457,7 +457,7 @@ export async function writeExportBundle(
 				(offender) =>
 					new Error(`RECEIPT_BUNDLE_ARTIFACT_PATH_ESCAPE: ${offender}`),
 			);
-			// FB-017: size-gate BEFORE copying/buffering — a source grown
+			// PRR-017: size-gate BEFORE copying/buffering — a source grown
 			// since emission must be rejected, not copied whole and rejected
 			// afterwards.
 			let sourceStat: fs.Stats;

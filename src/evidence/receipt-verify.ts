@@ -21,7 +21,8 @@ import {
  * `.swarm/` state, no config, no plan, takes no locks, performs ZERO
  * filesystem writes, and launches no child processes. That purity is what
  * makes an exported bundle PR-attachable: any reviewer with a fresh clone
- * can re-check every hash with nothing but the bundle.
+ * can re-check every recorded hash (receipt hash, artifact digests, and the
+ * re-derived report digest) with nothing but the bundle.
  *
  * Path normalization and canonical hashing are shared with emission BY
  * IMPORT (`computeReceiptHash` / canonical serialization from `receipt.ts`;

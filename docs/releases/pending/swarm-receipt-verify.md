@@ -4,8 +4,9 @@ issue: 2970
 
 # `/swarm receipt --verify`: machine-checkable internal-consistency check for gate receipts on any machine (#2970, Workstream J slot J23)
 
-`/swarm receipt --verify <bundle>` re-checks every hash in an exported
-receipt bundle on any machine — including a fresh clone with no `.swarm/`
+`/swarm receipt --verify <bundle>` re-checks every recorded hash (receipt
+hash, artifact digests, and the bundled gate report's re-derived digest) in
+an exported receipt bundle on any machine — including a fresh clone with no `.swarm/`
 state — and exits nonzero on any mismatch with a typed failure:
 `corrupt_json`, `unsupported_format_version`, `schema_mismatch`,
 `receipt_hash_mismatch`, `missing_artifact`, `digest_mismatch`, or
