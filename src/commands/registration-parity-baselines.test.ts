@@ -147,6 +147,9 @@ describe('Command registration parity — classification baselines', () => {
 				'harness-opt plan',
 				'harness-opt status',
 				'harness-opt history',
+				// #2968: verification receipts — emission/verify is an
+				// agent-appropriate diagnostic (toolPolicy 'agent').
+				'receipt',
 			]),
 			// Aliases that inherit a human-only/restricted canonical target (so
 			// the Bash CLI guardrail blocks the alias/dash form too — see
@@ -238,6 +241,8 @@ describe('Command registration parity — classification baselines', () => {
 				'harness-opt run',
 				'harness-opt compare',
 				'harness-opt stop',
+				// #2968: receipt carries toolPolicy 'agent'.
+				'receipt',
 			]),
 			noArgs: new Set(['pr status', 'lanes', 'context-map stats']),
 		};

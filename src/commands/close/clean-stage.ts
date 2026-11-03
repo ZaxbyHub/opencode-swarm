@@ -37,6 +37,120 @@ export function resolveCleanStageDeadlineMs(): number {
 		: CLEAN_STAGE_DEADLINE_MS;
 }
 
+/**
+ * FB-003 (#2968 swarm-pr-review): reap exported verification-receipt
+ * bundles from `.swarm/plan-export/` — published
+ * `receipt-<kind>-<unitId>-<12hex>/` directories (each holding receipt.json,
+ * receipt.md and BYTE-COPIES of every cited artifact) and crashed-export
+ * staging trees `.(receipt-...).tmp-<pid>-<ts>`. The retention registry's
+ * `verification-receipts` row cites this sweep as its keyspaceBound reaper;
+ * without it every distinct export would accumulate byte-copies forever.
+ * Deletion is grammar-gated (never a prefix sweep); the traversed chain
+ * (`.swarm` → `plan-export`) is containment-validated FIRST and a link on
+ * it aborts the sweep (preserving everything, warning instead); a
+ * bundle-shaped name that is itself a symlink is preserved with a warning,
+ * never deleted through; and removal retries the documented Windows
+ * EBUSY/EPERM class.
+ */
+export async function reapPlanExportReceiptBundles(
+	directory: string,
+	warn: (message: string) => void,
+): Promise<number> {
+	let removed = 0;
+	const planExportDir = path.join(directory, '.swarm', 'plan-export');
+	// FB-001/FB-003 (review round 2): before enumerating/removing, prove the
+	// `.swarm` → `plan-export` chain we are about to traverse is REAL and
+	// contained under the resolved project root. A model-planted junction at
+	// `.swarm` or `.swarm/plan-export` would otherwise make `readdir`/`rm`
+	// delete byte-copies OUTSIDE the project while the entries look like
+	// receipt bundles. Each existing component must be a non-symlink
+	// directory; the final component additionally must not itself be a link.
+	let contained = false;
+	try {
+		const root = await fs.realpath(directory);
+		let cursor = root;
+		contained = true;
+		for (const segment of ['.swarm', 'plan-export']) {
+			cursor = path.join(cursor, segment);
+			let stat: Awaited<ReturnType<typeof fs.lstat>>;
+			try {
+				stat = await fs.lstat(cursor);
+			} catch (err: unknown) {
+				const code = (err as NodeJS.ErrnoException)?.code;
+				if (code === 'ENOENT' || code === 'ENOTDIR') {
+					contained = false; // nothing to reap on a missing/blocked chain
+					break;
+				}
+				throw err;
+			}
+			if (stat.isSymbolicLink() || !stat.isDirectory()) {
+				warn(
+					`Refusing to traverse link/non-directory plan-export ancestor: ${cursor}`,
+				);
+				contained = false;
+				break;
+			}
+		}
+		if (contained && (await fs.realpath(planExportDir)) !== cursor) {
+			// Defensive: the fully-resolved target must be the chain we walked.
+			warn(`plan-export resolves outside the walked chain: ${planExportDir}`);
+			contained = false;
+		}
+	} catch (err: unknown) {
+		const code = (err as NodeJS.ErrnoException)?.code;
+		if (code !== 'ENOENT') {
+			warn(
+				`Receipt-bundle reaper containment check failed: ${err instanceof Error ? err.message : String(err)}`,
+			);
+		}
+		contained = false;
+	}
+	if (!contained) return 0;
+	try {
+		for (const entry of await fs.readdir(planExportDir)) {
+			if (
+				!/^receipt-(task|phase)-[A-Za-z0-9._-]+-[0-9a-f]{12}$/.test(entry) &&
+				!/^\.(receipt-(task|phase)-[A-Za-z0-9._-]+-[0-9a-f]{12})\.tmp-\d+-\d+$/.test(
+					entry,
+				)
+			) {
+				continue;
+			}
+			const target = path.join(planExportDir, entry);
+			try {
+				const stat = await fs.lstat(target);
+				if (stat.isSymbolicLink()) {
+					warn(
+						`Preserved bundle-shaped symlink at plan-export entry (never deleted through): ${entry}`,
+					);
+					continue;
+				}
+				if (!stat.isDirectory()) continue;
+				await fs.rm(target, {
+					recursive: true,
+					force: true,
+					maxRetries: 4,
+					retryDelay: 25,
+				});
+				removed += 1;
+			} catch (err: unknown) {
+				if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+					warn(
+						`Failed to remove receipt bundle ${target}: ${err instanceof Error ? err.message : String(err)}`,
+					);
+				}
+			}
+		}
+	} catch (err: unknown) {
+		if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+			warn(
+				`Failed to read ${planExportDir} for receipt-bundle cleanup: ${err instanceof Error ? err.message : String(err)}`,
+			);
+		}
+	}
+	return removed;
+}
+
 export async function runCleanStage(
 	ctx: CloseStageContext,
 ): Promise<CleanStageResult> {
@@ -324,6 +438,15 @@ export async function runCleanStage(
 		}
 	}
 
+	// FB-003 (#2968 swarm-pr-review): exported receipt bundles (see
+	// reapPlanExportReceiptBundles below) — close is the lifecycle point the
+	// retention registry's keyspaceBound premise for the verification-receipts
+	// stream cites as its reaper.
+	const receiptBundlesRemoved = await reapPlanExportReceiptBundles(
+		ctx.directory,
+		(message) => ctx.warnings.push(message),
+	);
+
 	// Atomic-write residue (issue #2035): discover candidates by REGISTERED
 	// temp grammars (never substring heuristics), QUARANTINE verified stale
 	// residue — a recoverable, manifest-backed move; automatic destructive
@@ -434,6 +557,7 @@ export async function runCleanStage(
 		cleanedFiles,
 		configBackupsRemoved,
 		swarmPlanFilesRemoved,
+		receiptBundlesRemoved,
 		residueQuarantined,
 		residuePreserved,
 	};

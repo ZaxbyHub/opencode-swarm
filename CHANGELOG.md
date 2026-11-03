@@ -1,5 +1,25 @@
 # Changelog
 
+## [7.201.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.200.17...v7.201.0) (2026-11-03)
+
+
+### Features
+
+* **evidence:** verification receipts substrate + /swarm receipt --verify ([#2968](https://github.com/ZaxbyHub/opencode-swarm/issues/2968), [#2970](https://github.com/ZaxbyHub/opencode-swarm/issues/2970)) ([f132282](https://github.com/ZaxbyHub/opencode-swarm/commit/f132282d6d5d9d4b2a740b580d3efb81c5cafc72))
+* **evidence:** verification receipts substrate + /swarm receipt --verify ([#2968](https://github.com/ZaxbyHub/opencode-swarm/issues/2968), [#2970](https://github.com/ZaxbyHub/opencode-swarm/issues/2970)) ([1b4aa02](https://github.com/ZaxbyHub/opencode-swarm/commit/1b4aa0253997cb8c6097086382fb52253e2aad3a))
+
+
+### Bug Fixes
+
+* **commands:** register the swarm-receipt TUI shortcut + registration baseline pins ([#2968](https://github.com/ZaxbyHub/opencode-swarm/issues/2968), [#2970](https://github.com/ZaxbyHub/opencode-swarm/issues/2970)) ([77a08e5](https://github.com/ZaxbyHub/opencode-swarm/commit/77a08e5084ae964a56efe01af8e51cdbb42c87c1))
+* **evidence:** review round-1 hardening for verification receipts ([#2968](https://github.com/ZaxbyHub/opencode-swarm/issues/2968), [#2970](https://github.com/ZaxbyHub/opencode-swarm/issues/2970)) ([d1c0c77](https://github.com/ZaxbyHub/opencode-swarm/commit/d1c0c77b1c671f5f02e3e749ee74548d99302187))
+* **evidence:** review round-2 fixes for verification receipts ([#2968](https://github.com/ZaxbyHub/opencode-swarm/issues/2968), [#2970](https://github.com/ZaxbyHub/opencode-swarm/issues/2970)) ([e8791f3](https://github.com/ZaxbyHub/opencode-swarm/commit/e8791f34e08da4eeb0ba6139177456979c39c0fc))
+* **evidence:** review round-3 fix — idempotent export cleans its staging dir ([#2968](https://github.com/ZaxbyHub/opencode-swarm/issues/2968), [#2970](https://github.com/ZaxbyHub/opencode-swarm/issues/2970)) ([bb60e85](https://github.com/ZaxbyHub/opencode-swarm/commit/bb60e85ec48132c04d9d7b8e18cdf6a105d68e5f))
+* **evidence:** reviewer round-2 corrections — in-lock revalidation, reaper containment, purity oracle, registry truth ([#2968](https://github.com/ZaxbyHub/opencode-swarm/issues/2968), [#2970](https://github.com/ZaxbyHub/opencode-swarm/issues/2970)) ([71d01d8](https://github.com/ZaxbyHub/opencode-swarm/commit/71d01d8858dbb2170f657f63f03b24f5933703bc))
+* **evidence:** same-tick destination validation inside the atomic writer ([#2968](https://github.com/ZaxbyHub/opencode-swarm/issues/2968), [#2970](https://github.com/ZaxbyHub/opencode-swarm/issues/2970)) ([af207ff](https://github.com/ZaxbyHub/opencode-swarm/commit/af207ffc7cf32e1a053bfe0cc19064fbb9994dee))
+* **evidence:** swarm-pr-feedback round — close all 16 blocking review findings ([#2968](https://github.com/ZaxbyHub/opencode-swarm/issues/2968), [#2970](https://github.com/ZaxbyHub/opencode-swarm/issues/2970)) ([6c6d48e](https://github.com/ZaxbyHub/opencode-swarm/commit/6c6d48ef0e467d2713d17653498d0c24803d1574))
+* **tools:** complete the receipt registration across the remaining ratchets ([#2968](https://github.com/ZaxbyHub/opencode-swarm/issues/2968), [#2970](https://github.com/ZaxbyHub/opencode-swarm/issues/2970)) ([c2ccc0e](https://github.com/ZaxbyHub/opencode-swarm/commit/c2ccc0e63a4f7e01559a34520d3209b622d165b9))
+
 ## [7.200.17](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.200.16...v7.200.17) (2026-11-01)
 
 

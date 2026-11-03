@@ -137,8 +137,8 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 			'src/review/evidence.ts:179',
 			'src/turbo/lean/evidence.ts:182',
 			'src/summaries/manager.ts:163',
-			'src/evidence/manager.ts:288',
-			'src/evidence/manager.ts:456',
+			'src/evidence/manager.ts:289',
+			'src/evidence/manager.ts:457',
 			'src/tools/sast-baseline.ts:199',
 			'src/tools/repo-graph/storage.ts:543',
 			'src/memory/reflection-service.ts (pre-#2035; migrated-to=src/memory/reflection-service.ts:atomicWrite)',
@@ -193,6 +193,7 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 			'src/summaries/store.ts (pre-#2035; migrated-to=src/summaries/store.ts:writeRawSidecar)',
 			'src/retention/jsonl-cap.ts:213',
 			'src/services/skill-changelog.ts:58',
+			'src/evidence/receipt-store.ts:414',
 		],
 		note: 'background lane/delegation stores keep bounded-retry rename semantics wired into their callers (#2034/#2276 delivery contracts); migration candidates for a follow-up but grammars registered',
 	},
@@ -417,6 +418,10 @@ export const WRITER_CLASSIFICATION: Readonly<
 	'src/hooks/guardrails/shell-audit-store.ts': 'registered-bespoke',
 	'src/evidence/documents-retention.ts': 'registered-bespoke',
 	'src/evidence/manager.ts': 'registered-bespoke',
+	// #2968: verification-receipt export bundle staging dir —
+	// `.${bundleName}.tmp-${pid}-${ts}` (target-suffix-tmp-dash grammar);
+	// receipt artifacts themselves go through writeImmutableArtifact
+	'src/evidence/receipt-store.ts': 'registered-bespoke',
 	'src/full-auto/state.ts': 'registered-bespoke',
 	'src/hooks/delegation-gate/worktree-merge-status.ts': 'registered-bespoke',
 	'src/hooks/delegation-gate/worktree-provisioning-owner.ts': 'migrated',
@@ -724,6 +729,15 @@ export interface AtomicWriteOptions {
 	 * so the bound itself is testable without allocating 256 MiB.
 	 */
 	readonly maxBytes?: number;
+	/**
+	 * Same-tick destination validation (swarm-pr-feedback PR #3550 FB-001
+	 * round 3): invoked AFTER the writer's event-loop yield and IMMEDIATELY
+	 * before the synchronous temp-write/rename sequence. A caller that
+	 * pre-validated its destination still has an in-process interleaving
+	 * window at the writer's `setImmediate`; running the check here — same
+	 * tick as the mutation syscalls — closes it.
+	 */
+	readonly validateTarget?: () => void;
 }
 
 /**
@@ -950,5 +964,11 @@ export async function atomicWriteFileAnyRoot(
 	options?: AtomicWriteOptions,
 ): Promise<void> {
 	await new Promise<void>((resolve) => setImmediate(resolve));
+	// FB-001 (review round 3): run the destination validator on the SAME tick
+	// as the synchronous write, after the writer's event-loop yield — no
+	// awaitable boundary remains between "chain verified link-free" and the
+	// temp-write/rename syscalls, so an in-process task that plants a junction
+	// during the yield is caught here rather than writing through it.
+	options?.validateTarget?.();
 	writeAtomicSync(targetPath, content, { ...options, contained: false });
 }

@@ -372,7 +372,7 @@ describe('swarm-subcommand-parity', () => {
 		// 121 → 127: /swarm harness-opt family added for the governed HarnessOpt
 		// capstone (issue #2503), documented in .claude/skills/swarm/SKILL.md.
 		// 127 → 128: /swarm harness-opt compare added (reviewer revision).
-		expect(expectedCommands.size).toBe(129); // #3422: +attest
+		expect(expectedCommands.size).toBe(130); // #2968: +receipt
 
 		console.info(
 			`[swarm-subcommand-parity] skill documented commands (raw): ${skillRawCommands.length}`,

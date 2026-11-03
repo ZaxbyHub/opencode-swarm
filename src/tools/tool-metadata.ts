@@ -221,6 +221,14 @@ export const TOOL_METADATA = {
 		description: 'check the gate status of a specific task',
 		agents: ['architect', 'critic_oversight'],
 	},
+	// #2968/#2970: placed AFTER check_gate_status — the evidence_check →
+	// check_gate_status adjacency in TOOL_NAMES is a pinned ordering invariant
+	// (tests/unit/tools/tool-names.adversarial.test.ts).
+	receipt: {
+		description:
+			'emit a portable verification receipt (JSON + Markdown) recording the durably recorded gate outcomes for a task or phase, with content hashes and snapshot hashes; export writes a self-contained bundle under .swarm/plan-export/ and --verify re-checks every recorded hash in a bundle on any machine, exiting nonzero on any mismatch',
+		agents: ['architect', 'reviewer', 'critic_finding_validator'],
+	},
 	completion_verify: {
 		description: 'verify completed tasks have required evidence',
 		agents: ['architect', 'critic_oversight'],
