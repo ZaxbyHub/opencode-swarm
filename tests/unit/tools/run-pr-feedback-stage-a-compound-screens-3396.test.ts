@@ -431,6 +431,23 @@ describe('Compound screen + lifecycle hooks (#3396 S2/S3)', () => {
 		const result = await runStageA(stageAChecks());
 		expect(result.success).toBe(true);
 	});
+
+	test('prettier/prepare are NOT implicit lifecycle hooks (Copilot-3)', async () => {
+		// Pre-fix a PR-added `prettier` script got the lifecycle-hook refusal
+		// (its name merely STARTS with pre); the stripped stem must actually
+		// match a Stage A category, so these stay ordinary explicit scripts.
+		await writeManifest(
+			{
+				build: 'custom-build && echo done',
+				prettier: 'prettier --write .',
+				prepare: 'echo done',
+			},
+			{ build: 'custom-build && echo done' },
+		);
+		const result = await runStageA(stageAChecks());
+		expect(result.success).toBe(true);
+		expect(result.message ?? '').not.toContain('lifecycle');
+	});
 });
 
 // #3120/#3396 4.5 review round 1: the terminal echo/printf allowance must

@@ -2084,7 +2084,11 @@ export const _internals = {
 async function resolvePrFeedbackBaseViaGhProduction(
 	directory: string,
 	prUrl: string,
-): Promise<{ baseRefName: string; baseRefOid: string } | null> {
+): Promise<{
+	baseRefName: string;
+	baseRefOid: string;
+	headRefOid?: string;
+} | null> {
 	const gh = _internals.resolveGhBinary();
 	if (!gh) return null;
 	const run = await _internals.runExternalTool({
@@ -2130,6 +2134,11 @@ async function resolvePrFeedbackBaseViaGhProduction(
 				return {
 					baseRefName: parsed.baseRefName,
 					baseRefOid: mergeBase.toLowerCase(),
+					// #3396 feedback (reviewer F5): carried so apply sites can
+					// skip an anchor computed for a DIFFERENT PR head than the
+					// one currently bound (pre-lock resolution races a head
+					// move).
+					headRefOid: parsed.headRefOid.toLowerCase(),
 				};
 			}
 		}
@@ -2149,6 +2158,20 @@ function sanitizeBaseBindingError(message: string): string {
 		sanitized += code < 32 || code === 127 ? ' ' : ch;
 	}
 	return sanitized.trim().slice(0, 200);
+}
+
+// #3396 feedback (reviewer F5): the pre-lock resolution races a concurrent
+// head move (gh + merge-base run without the checkout lock). An anchor
+// computed for a DIFFERENT PR head than the one bound/being bound must not
+// be applied — skip the binding (unbound → the next matching re-activation
+// re-resolves; Stage A keeps the disclosed caller-asserted floor meanwhile).
+// Unknown on either side applies without head validation.
+function resolvedBaseHeadMatches(
+	resolvedHead: string | undefined,
+	boundHead: string | undefined,
+): boolean {
+	if (resolvedHead === undefined || boundHead === undefined) return true;
+	return resolvedHead.toLowerCase() === boundHead.toLowerCase();
 }
 
 export async function activatePrWorkflow(
@@ -2180,16 +2203,26 @@ export async function activatePrWorkflow(
 	// Checkout restoration must be atomic against a new gate in any session,
 	// not only against reactivation of the restoring session. Every activation
 	// therefore takes the project checkout lock before its one session lock.
-	// #3396 feedback (PRR-013): resolvePrFeedbackBaseViaGh shells out to `gh pr
-	// view` — an unbounded network subprocess. Holding the project checkout
-	// mutation lock across it would stall every other session's gate mutations
-	// for the call's full latency, so the base is resolved BEFORE the locks
-	// are taken, against this pre-lock state sample. The locked region below
-	// applies the result only when the base is still unbound there — a
-	// concurrent activation that binds the base first wins, and its anchor is
-	// what Stage A's receipts verify against.
+	// #3396 feedback (PRR-013, reviewer F1): resolvePrFeedbackBaseViaGh shells
+	// out to `gh pr view` — an unbounded network subprocess. Holding the
+	// project checkout mutation lock across it would stall every other
+	// session's gate mutations for the call's full latency, so the base is
+	// resolved BEFORE the locks on BOTH the create path (no gate yet) and an
+	// unbound re-activation, against this pre-lock state sample. The locked
+	// region below applies the result only when the base is still unbound
+	// there — a concurrent activation that binds the base first wins.
+	// #3396 feedback (reviewer F5): the resolution races a concurrent head
+	// move (gh + merge-base run without the checkout lock), so the resolved
+	// head identity is carried through and the apply sites skip an anchor
+	// computed for a DIFFERENT PR head than the one bound/being bound — an
+	// unbound base is re-resolved by the next matching re-activation.
 	let baseBindingResolution:
-		| { kind: 'resolved'; baseRefName: string; baseRefOid: string }
+		| {
+				kind: 'resolved';
+				baseRefName: string;
+				baseRefOid: string;
+				headRefOid?: string;
+		  }
 		| { kind: 'binding-error'; message: string }
 		| undefined;
 	const prUrlForBaseBinding =
@@ -2197,14 +2230,14 @@ export async function activatePrWorkflow(
 	const baseBindingNeeded =
 		mode === 'PR_FEEDBACK' &&
 		prUrlForBaseBinding !== undefined &&
-		initiallyActive?.mode === mode &&
-		!initiallyActive.prFeedbackBaseSha;
+		(initiallyActive === null ||
+			(initiallyActive.mode === mode && !initiallyActive.prFeedbackBaseSha));
 	if (baseBindingNeeded) {
 		const requestedTargetPreLock = canonicalGitHubPrUrl(
 			prUrlForBaseBinding,
 			options.forge,
 		);
-		const existingTargetPreLock = initiallyActive.prFeedbackTargetUrl
+		const existingTargetPreLock = initiallyActive?.prFeedbackTargetUrl
 			? canonicalGitHubPrUrl(initiallyActive.prFeedbackTargetUrl, options.forge)
 			: null;
 		if (
@@ -2223,11 +2256,12 @@ export async function activatePrWorkflow(
 							kind: 'resolved',
 							baseRefName: resolvedBasePreLock.baseRefName,
 							baseRefOid: resolvedBasePreLock.baseRefOid,
+							headRefOid: resolvedBasePreLock.headRefOid,
 						}
 					: {
 							kind: 'binding-error',
 							message: sanitizeBaseBindingError(
-								`PR_FEEDBACK base binding failed for ${prUrlForBaseBinding}: gh pr view did not return a usable baseRefName/baseRefOid`,
+								`PR_FEEDBACK base binding failed for ${prUrlForBaseBinding}: gh pr view did not return a usable baseRefName/merge base`,
 							),
 						};
 			} catch (error) {
@@ -2285,7 +2319,17 @@ export async function activatePrWorkflow(
 						  }
 						| { prFeedbackBaseBindingError: string }
 						| undefined;
-					if (!existing.prFeedbackBaseSha && baseBindingResolution) {
+					if (
+						!existing.prFeedbackBaseSha &&
+						baseBindingResolution &&
+						// #3396 feedback (reviewer F5): skip an anchor computed for
+						// a different PR head than the one bound here.
+						(baseBindingResolution.kind !== 'resolved' ||
+							resolvedBaseHeadMatches(
+								baseBindingResolution.headRefOid,
+								existing.prHeadSha,
+							))
+					) {
 						reactivationBase =
 							baseBindingResolution.kind === 'resolved'
 								? {
@@ -2385,37 +2429,35 @@ export async function activatePrWorkflow(
 					'BLOCKED: PR_FEEDBACK target must be a canonical GitHub PR URL',
 				);
 			}
-			// #3396 S1: durably bind the merge base at activation via ONE
-			// bounded gh pr view. Fail-open — a resolution failure records an
-			// advisory and never wedges activation; without a binding, Stage A
-			// keeps the disclosed caller-asserted floor.
+			// #3396 S1: durably bind the merge base at activation. Fail-open —
+			// a resolution failure records an advisory and never wedges
+			// activation; without a binding, Stage A keeps the disclosed
+			// caller-asserted floor. #3396 feedback (PRR-013, reviewer F1):
+			// the gh subprocess ran BEFORE the locks (baseBindingResolution,
+			// computed above for this create path); nothing network-bound is
+			// awaited here. #3396 feedback (reviewer F5): an anchor computed
+			// for a different PR head than the one being bound is skipped —
+			// the next matching re-activation re-resolves.
 			let prFeedbackBase:
 				| { prFeedbackBaseRef: string; prFeedbackBaseSha: string }
 				| { prFeedbackBaseBindingError: string }
 				| undefined;
-			if (feedbackTargetUrl) {
-				try {
-					const resolvedBase = await _test_exports.resolvePrFeedbackBaseViaGh(
-						directory,
-						feedbackTargetUrl,
-					);
-					prFeedbackBase = resolvedBase
+			if (feedbackTargetUrl && baseBindingResolution) {
+				prFeedbackBase =
+					baseBindingResolution.kind === 'resolved' &&
+					resolvedBaseHeadMatches(
+						baseBindingResolution.headRefOid,
+						options.prHeadSha,
+					)
 						? {
-								prFeedbackBaseRef: resolvedBase.baseRefName,
-								prFeedbackBaseSha: resolvedBase.baseRefOid,
+								prFeedbackBaseRef: baseBindingResolution.baseRefName,
+								prFeedbackBaseSha: baseBindingResolution.baseRefOid,
 							}
-						: {
-								prFeedbackBaseBindingError: sanitizeBaseBindingError(
-									`PR_FEEDBACK base binding failed for ${feedbackTargetUrl}: gh pr view did not return a usable baseRefName/baseRefOid`,
-								),
-							};
-				} catch (error) {
-					prFeedbackBase = {
-						prFeedbackBaseBindingError: sanitizeBaseBindingError(
-							`PR_FEEDBACK base binding failed: ${error instanceof Error ? error.message : String(error)}`,
-						),
-					};
-				}
+						: baseBindingResolution.kind === 'binding-error'
+							? {
+									prFeedbackBaseBindingError: baseBindingResolution.message,
+								}
+							: undefined;
 			}
 			const nextState: PrWorkflowGateState = {
 				schemaVersion: GATE_SCHEMA_VERSION,
@@ -5868,8 +5910,15 @@ export async function rebindPrFeedbackHead(
 			// are ancestry-bound too — a rebind moves the head, so the stale
 			// anchor would false-mismatch every post-rebind Stage A run and
 			// the stale marker would survive into the repaired state.
+			// #3396 feedback (reviewer F6): the root-level trust verdict is
+			// written by the same recordPrFeedbackStageA call as the receipt
+			// above, so it clears with it; the stale binding advisory goes
+			// too (the next matching re-activation re-resolves the cleared
+			// base and a success writes a fresh verdict/advisory anyway).
 			prFeedbackBaseRef: undefined,
 			prFeedbackBaseSha: undefined,
+			prFeedbackBaseBindingError: undefined,
+			prFeedbackStageABaseTrust: undefined,
 			prFeedbackStageABaseMismatch: undefined,
 			// Issue #3316 (D5): a consumed scope must never authorize writes
 			// against the rebound ancestry — clear it exactly like invalidation

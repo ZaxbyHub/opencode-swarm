@@ -5995,33 +5995,42 @@ function unquoteGitPath(quoted: string): string | undefined {
 		return undefined;
 	}
 	const inner = quoted.slice(1, -1);
-	let out = '';
+	// #3396 feedback (reviewer F7): git quotes emit octal escapes per BYTE of
+	// the path's UTF-8 encoding, so escapes accumulate into a byte buffer that
+	// is decoded once as UTF-8 — a Latin-1 per-escape decode turns `\303\251`
+	// (é) into mojibake and misses the file being written. Undecodable
+	// sequences fail closed (undefined).
+	const bytes: number[] = [];
 	for (let i = 0; i < inner.length; i += 1) {
 		const ch = inner[i];
 		if (ch !== '\\') {
-			out += ch;
+			for (const b of Buffer.from(ch, 'utf8')) bytes.push(b);
 			continue;
 		}
 		const next = inner[i + 1];
 		if (next === '\\' || next === '"') {
-			out += next;
+			for (const b of Buffer.from(next, 'utf8')) bytes.push(b);
 			i += 1;
 			continue;
 		}
 		const octal = /^([0-7]{1,3})/.exec(inner.slice(i + 1));
 		if (octal) {
-			out += String.fromCharCode(Number.parseInt(octal[1], 8));
+			const value = Number.parseInt(octal[1], 8);
+			if (value > 0xff) return undefined;
+			bytes.push(value);
 			i += octal[1].length;
 			continue;
 		}
 		if (next === 't' || next === 'n' || next === 'r') {
-			out += next === 't' ? '\t' : next === 'n' ? '\n' : '\r';
+			bytes.push(next === 't' ? 0x09 : next === 'n' ? 0x0a : 0x0d);
 			i += 1;
 			continue;
 		}
 		return undefined;
 	}
-	return out;
+	const decoded = Buffer.from(bytes).toString('utf8');
+	if (decoded.includes('\uFFFD')) return undefined;
+	return decoded;
 }
 
 // Strip the -p<n> prefix from one diff endpoint. Over-deep strip (level >=
@@ -6058,12 +6067,19 @@ function extractPatchTargets(
 		// timestamp, so capture the tab-free run, not \S+ (space paths).
 		if (rawLine.startsWith('diff --git ')) {
 			sawHeader = true;
-			const both = /^diff --git (?:"?a\/(.+?)"?) (?:"?b\/(.+?)"?)$/.exec(
-				rawLine,
-			);
-			if (!both) return undefined;
-			if (addEndpoint(`a/${both[1]}`)) return undefined;
-			if (addEndpoint(`b/${both[2]}`)) return undefined;
+			// #3396 feedback (reviewer F7): git QUOTES paths with spaces or
+			// non-ASCII bytes on the diff --git line, so match the quoted form
+			// explicitly and run it through the same fail-closed unquoter as
+			// the ---/+++/rename arms; the unquoted form never contains
+			// spaces. Unresolvable captures fail closed.
+			const quoted =
+				/^diff --git ("(?:[^"\\]|\\.)*") ("(?:[^"\\]|\\.)*")$/.exec(rawLine);
+			const plain = /^diff --git (\S+) (\S+)$/.exec(rawLine);
+			const a = quoted ? unquoteGitPath(quoted[1]) : (plain?.[1] as string);
+			const b = quoted ? unquoteGitPath(quoted[2]) : (plain?.[2] as string);
+			if (a === undefined || b === undefined) return undefined;
+			if (addEndpoint(a)) return undefined;
+			if (addEndpoint(b)) return undefined;
 			continue;
 		}
 		if (

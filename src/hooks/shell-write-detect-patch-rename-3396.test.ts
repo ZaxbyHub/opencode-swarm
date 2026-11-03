@@ -84,3 +84,87 @@ describe('resolveWriteTargets — rename-only patch sections (#3396 PRR-002)', (
 		}
 	});
 });
+
+describe('patch/rsync extraction hardening (#3396 feedback PRR-011/012, review F7)', () => {
+	test('quoted octal header paths decode as UTF-8 bytes, not Latin-1 (F7)', () => {
+		const root = canonicalMkdtemp('swd3396-octal-');
+		try {
+			// `caf\303\251.txt` is the UTF-8 byte encoding of `café.txt`.
+			const octalPatch = [
+				'diff --git "a/caf\\303\\251.txt" "b/caf\\303\\251.txt"',
+				'--- "a/caf\\303\\251.txt"',
+				'+++ "b/caf\\303\\251.txt"',
+				'@@ -1 +1 @@',
+				'-old',
+				'+new',
+				'',
+			].join('\n');
+			writeFileSync(path.join(root, 'fix.patch'), octalPatch);
+			const command = 'git apply fix.patch';
+			const analysis = detectPosixWrites(command);
+			const result = resolveWriteTargets(command, analysis.writes, root);
+			const paths = result.map((r) => r.resolvedPath);
+			expect(paths).toContain(path.join(root, 'café.txt'));
+			expect(result.every((r) => r.resolved === true)).toBe(true);
+		} finally {
+			removeTreeWithRetry(root);
+		}
+	});
+
+	test('quoted space paths on the diff --git line are judged (PRR-012)', () => {
+		const root = canonicalMkdtemp('swd3396-space-');
+		try {
+			const spacePatch = [
+				'diff --git "a/my file.txt" "b/my file.txt"',
+				'--- "a/my file.txt"',
+				'+++ "b/my file.txt"',
+				'@@ -1 +1 @@',
+				'-old',
+				'+new',
+				'',
+			].join('\n');
+			writeFileSync(path.join(root, 'fix.patch'), spacePatch);
+			const command = 'git apply fix.patch';
+			const analysis = detectPosixWrites(command);
+			const result = resolveWriteTargets(command, analysis.writes, root);
+			const paths = result.map((r) => r.resolvedPath);
+			expect(paths).toContain(path.join(root, 'my file.txt'));
+			expect(result.every((r) => r.resolved === true)).toBe(true);
+		} finally {
+			removeTreeWithRetry(root);
+		}
+	});
+
+	test('an over-deep -p strip fails closed with unresolved targets (PRR-012)', () => {
+		const root = canonicalMkdtemp('swd3396-deep-');
+		try {
+			writeFileSync(path.join(root, 'fix.patch'), MIXED_RENAME_PATCH);
+			// -p5 strips 5 components from 2-component paths: git apply would
+			// write nothing (or error) — there is no real target, so the
+			// resolver must NOT hand back a resolved path.
+			const command = 'patch -p5 < fix.patch';
+			const analysis = detectPosixWrites(command);
+			const result = resolveWriteTargets(command, analysis.writes, root);
+			expect(
+				result.some((r) => r.resolved === true && r.resolvedPath !== null),
+			).toBe(false);
+		} finally {
+			removeTreeWithRetry(root);
+		}
+	});
+
+	test('rsync filter values do not hijack operand positions (PRR-011)', () => {
+		// One real operand + a space-form filter: rsync with a single path
+		// argument only LISTS (no copy) — pre-fix the filter value became a
+		// positional and the source was judged as a destination.
+		const listing = detectPosixWrites('rsync --exclude x src/');
+		expect(listing.writes).toHaveLength(0);
+
+		// Normal two-operand form: the destination is still the judged
+		// target and the filter pattern is not.
+		const copy = detectPosixWrites('rsync -a --filter "- .git/" src/ dest/');
+		const paths = copy.writes.map((w) => w.path);
+		expect(paths).toContain('dest/');
+		expect(paths).not.toContain('.git/');
+	});
+});

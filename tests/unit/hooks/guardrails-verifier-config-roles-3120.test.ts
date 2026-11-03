@@ -172,6 +172,22 @@ describe('guardrails verifier-config protection applies to every role (#3120)', 
 				),
 			).rejects.toThrow(/WRITE BLOCKED.*AUTHORITY_VERIFIER_CONFIG/);
 		});
+
+		// #3396 feedback (PRR-015): a lenient-branch (noScopeLenient role)
+		// verifier denial records the same severe evidence event the enforced
+		// path always records — the shell denial message carries its bounded
+		// event id (pre-fix this arm threw WITHOUT the suffix).
+		it('lenient shell denial carries the severe evidence event id', async () => {
+			const hooks = createGuardrailsHooks(TEST_DIR, undefined, defaultConfig());
+			setupRoleSession('test-session', 'general');
+
+			await expect(
+				hooks.toolBefore(
+					makeInput('test-session', 'bash', 'call-bash-evidence'),
+					makeOutput({ command: 'echo x > .secretscanignore' }),
+				),
+			).rejects.toThrow(/Evidence event: /);
+		});
 	});
 
 	// -------------------------------------------------------------------------

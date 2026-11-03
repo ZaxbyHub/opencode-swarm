@@ -489,9 +489,7 @@ describe('destructive command guard', () => {
 					'rsync -av --delete src/ plugins',
 				);
 				const output = makeBashOutput('rsync -av --delete src/ plugins');
-				// #3396 feedback (PRR-016): message-matched against the executed
-				// probe — the --delete guard's own message fires (with an active
-				// scope the same command is ALLOWED, see the sibling pin).
+				// PRR-016: message-matched (executed probe; with scope it is ALLOWED).
 				await expect(hooks.toolBefore(input, output)).rejects.toThrow(
 					/"rsync --delete" detected/,
 				);

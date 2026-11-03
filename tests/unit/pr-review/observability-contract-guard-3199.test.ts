@@ -266,7 +266,7 @@ test('the durable-wins merge sources fields from the legacy import when no coord
 	).toBe(true);
 });
 
-test('registry ratchet: the codec binding registers exactly the three observability fields', () => {
+test('registry ratchet: the codec binding registers exactly the four observability fields', () => {
 	const source = readFileSync(
 		join(process.cwd(), 'src', 'hooks', 'pr-workflow-gate.ts'),
 		'utf8',
