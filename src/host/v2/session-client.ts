@@ -118,16 +118,30 @@ const ERROR_RECHECK_DELAY_MS = 50;
 const SIGNAL_LESS_WAIT_CAP_MS = 10 * 60 * 1000;
 
 /**
- * Lane-move confirmation pacing (DI seam, invariant 7: tests shrink the poll
- * instead of waiting on real time). `session.move` is applied host-side at a
- * session boundary, so the eager lane create re-reads the session until it
- * reports the lane directory. Live probe on OpenCode 2.1.4: an idle session
- * reported the new directory 0.04–0.34 s after `move`; 40 × 50 ms (~2 s, plus
- * each `get` round-trip) leaves several-fold headroom while staying bounded.
+ * Lane placement bounds (DI seam, invariant 7: tests shrink these instead of
+ * waiting on real time). `session.move` is applied host-side at a session
+ * boundary, so the eager lane create re-reads the session until it reports
+ * the lane directory. Live probe on OpenCode 2.1.4: an idle session reported
+ * the new directory 0.04–0.34 s after `move`.
+ *
+ *  - every placement `get` is capped at `laneReadTimeoutMs` (and raced
+ *    against the caller's signal);
+ *  - the confirmation poll runs at most `laneMovePollAttempts` reads spaced
+ *    `laneMovePollDelayMs` apart, inside a `laneConfirmBudgetMs` deadline;
+ *  - `session.move` is capped at `laneMoveTimeoutMs` (and raced against the
+ *    caller's signal); after a move timeout or abort, removal waits at most
+ *    `laneMoveSettleMs` for the still-pending move to settle.
+ *
+ * Worst case before the (separately bounded) removal: one verification read
+ * (1 s) + move (10 s) + settle wait (10 s) + confirmation (5 s).
  */
 export const _internals = {
 	laneMovePollAttempts: 40,
 	laneMovePollDelayMs: 50,
+	laneReadTimeoutMs: 1_000,
+	laneConfirmBudgetMs: 5_000,
+	laneMoveTimeoutMs: 10_000,
+	laneMoveSettleMs: 10_000,
 };
 
 interface PlaceholderRecord {
@@ -922,28 +936,88 @@ async function deferredV2SessionRemoveEager(
 	}
 }
 
-/** Bound for the lane `session.move` call itself (the relocation is then polled). */
-const LANE_MOVE_TIMEOUT_MS = 10_000;
+/** Outcome of a host call raced against a deadline and the caller's signal. */
+type BoundedCall<T> =
+	| { kind: 'settled'; value: T }
+	| { kind: 'rejected'; error: unknown }
+	| { kind: 'timeout' }
+	| { kind: 'aborted' };
 
-/** A session's reported `location.directory`; undefined when unverifiable. */
+/**
+ * Race a host call against `ms` (via `withTimeout`) and, when given, the
+ * caller's signal. Host session calls take no AbortSignal (the vendored
+ * `V2SessionDomain` inputs carry none), so this only stops WAITING: the
+ * underlying call may still complete. Settlement handlers are attached to
+ * `promise` up front, so a late rejection is never unhandled.
+ */
+async function deferredV2SessionBoundedCall<T>(
+	promise: Promise<T>,
+	ms: number,
+	signal?: AbortSignal,
+): Promise<BoundedCall<T>> {
+	const settled: Promise<BoundedCall<T>> = promise.then(
+		(value) => ({ kind: 'settled', value }),
+		(error: unknown) => ({ kind: 'rejected', error }),
+	);
+	if (signal?.aborted) return { kind: 'aborted' };
+	let onAbort: (() => void) | undefined;
+	const aborted = new Promise<BoundedCall<T>>((resolve) => {
+		onAbort = () => resolve({ kind: 'aborted' });
+		signal?.addEventListener('abort', onAbort, { once: true });
+	});
+	const timedOut = new Error('v2 session-client: bounded host call timed out');
+	try {
+		return await withTimeout(Promise.race([settled, aborted]), ms, timedOut);
+	} catch (error) {
+		if (error === timedOut) return { kind: 'timeout' };
+		throw error;
+	} finally {
+		if (onAbort !== undefined) signal?.removeEventListener('abort', onAbort);
+	}
+}
+
+/**
+ * A session's reported `location.directory` (undefined when the host reports
+ * none or rejects). The read is bounded: a `get` that outlives `ms` or the
+ * caller's signal is a terminal placement failure (`timeout` / `aborted`).
+ */
 async function deferredV2SessionReadDirectory(
 	ctx: V2PluginContext,
 	sessionID: string,
-): Promise<string | undefined> {
-	const info = await ctx.session.get({ sessionID }).catch(() => undefined);
+	signal: AbortSignal | undefined,
+	ms: number = _internals.laneReadTimeoutMs,
+): Promise<{ directory?: string; terminal?: 'timeout' | 'aborted' }> {
+	const read = await deferredV2SessionBoundedCall(
+		ctx.session.get({ sessionID }),
+		ms,
+		signal,
+	);
+	if (read.kind === 'timeout' || read.kind === 'aborted') {
+		return { terminal: read.kind };
+	}
+	if (read.kind === 'rejected') return {};
 	// Non-parenthesized on purpose: a `const x = (` cast-assignment matches
 	// the C6 scanner's function-binding regex and resets its function tracker
 	// mid-function, mis-attributing later awaits (dual-shape-parity.test.ts
 	// C6 gate). Keep cast bindings off a leading `(` in this file.
-	const reported = info as { location?: { directory?: unknown } } | undefined;
+	const reported = read.value as
+		| { location?: { directory?: unknown } }
+		| undefined;
 	return typeof reported?.location?.directory === 'string'
-		? reported.location.directory
-		: undefined;
+		? { directory: reported.location.directory }
+		: {};
 }
 
 type LaneMoveOutcome =
 	| { ok: true; landed: string }
-	| { ok: false; aborted: boolean; reason?: string; landed?: string };
+	| {
+			ok: false;
+			aborted: boolean;
+			reason?: string;
+			landed?: string;
+			/** The move was still pending when the bounded settle wait ended. */
+			moveUnsettled?: boolean;
+	  };
 
 /**
  * Relocate a freshly created, parented lane session into its worktree and
@@ -970,35 +1044,79 @@ async function deferredV2SessionMoveIntoLane(
 			reason: 'the host session domain has no session.move',
 		};
 	}
-	try {
-		// `delivery` is deliberately omitted: it only sequences a move against
-		// an in-flight run (`steer` interrupts it, `queue` waits for it), and
-		// this session was created by the caller a moment ago and has never
-		// been prompted, so there is nothing to sequence against. The live 2.1.4
-		// probe relocated an idle session identically with `delivery` omitted,
-		// `steer` and `queue`, and the vendored `move` input type
-		// (src/host/v2/types.ts) pins no delivery value.
-		await withTimeout(
-			ctx.session.move({ sessionID, directory }),
-			LANE_MOVE_TIMEOUT_MS,
-			new Error(`session.move exceeded ${LANE_MOVE_TIMEOUT_MS}ms`),
-		);
-	} catch (error) {
+	// `delivery` is deliberately omitted: it only sequences a move against
+	// an in-flight run (`steer` interrupts it, `queue` waits for it), and
+	// this session was created by the caller a moment ago and has never
+	// been prompted, so there is nothing to sequence against. The live 2.1.4
+	// probe relocated an idle session identically with `delivery` omitted,
+	// `steer` and `queue`, and the vendored `move` input type
+	// (src/host/v2/types.ts) pins no delivery value — nor an abort signal, so
+	// a timed-out or aborted move cannot be cancelled host-side.
+	const pendingMove = ctx.session.move({ sessionID, directory });
+	const moveTimeoutMs = _internals.laneMoveTimeoutMs;
+	const moved = await deferredV2SessionBoundedCall(
+		pendingMove,
+		moveTimeoutMs,
+		signal,
+	);
+	if (moved.kind === 'rejected') {
 		return {
 			ok: false,
 			aborted: false,
 			reason: `session.move failed: ${
-				error instanceof Error ? error.message : String(error)
+				moved.error instanceof Error ? moved.error.message : String(moved.error)
 			}`,
+		};
+	}
+	if (moved.kind === 'timeout' || moved.kind === 'aborted') {
+		// Serialise compensation with the uncancellable move: the caller removes
+		// the session next, and a removal racing a still-pending relocation
+		// could leave the host to apply the move afterwards. Wait (bounded) for
+		// the move to settle; if it does not, report the removal as unconfirmed.
+		const late = await deferredV2SessionBoundedCall(
+			pendingMove,
+			_internals.laneMoveSettleMs,
+		);
+		return {
+			ok: false,
+			aborted: moved.kind === 'aborted',
+			...(moved.kind === 'timeout'
+				? { reason: `session.move exceeded ${moveTimeoutMs}ms` }
+				: {}),
+			...(late.kind === 'timeout' ? { moveUnsettled: true } : {}),
 		};
 	}
 	let observed: string | undefined;
 	const attempts = _internals.laneMovePollAttempts;
+	const deadline = Date.now() + _internals.laneConfirmBudgetMs;
 	for (let attempt = 0; attempt < attempts; attempt += 1) {
-		if (signal?.aborted) return { ok: false, aborted: true, landed: observed };
-		observed = await deferredV2SessionReadDirectory(ctx, sessionID);
-		if (observed !== undefined && sameDirectoryLexical(observed, directory)) {
-			return { ok: true, landed: observed };
+		const remaining = deadline - Date.now();
+		if (remaining <= 0) break;
+		const read = await deferredV2SessionReadDirectory(
+			ctx,
+			sessionID,
+			signal,
+			Math.min(_internals.laneReadTimeoutMs, remaining),
+		);
+		// Re-check AFTER the read: an abort that lands while the final read is
+		// pending must not be reported as a successful placement.
+		if (read.terminal === 'aborted' || signal?.aborted) {
+			return { ok: false, aborted: true, landed: observed };
+		}
+		if (read.terminal === 'timeout') {
+			return {
+				ok: false,
+				aborted: false,
+				reason: 'a placement read timed out',
+				landed: observed,
+			};
+		}
+		observed = read.directory;
+		if (
+			read.directory !== undefined &&
+			sameDirectoryLexical(read.directory, directory)
+		) {
+			return { ok: true, landed: read.directory };
 		}
 		if (attempt < attempts - 1) {
 			await new Promise((resolve) =>
@@ -1018,6 +1136,7 @@ async function deferredV2SessionMoveIntoLane(
 async function deferredV2SessionEagerAbortCompensation(
 	ctx: V2PluginContext,
 	realId: string,
+	moveUnsettled = false,
 ): Promise<{ data: null; error: unknown }> {
 	const compensated = await deferredV2SessionRemoveEager(ctx, realId);
 	if (!compensated.ok) {
@@ -1034,10 +1153,23 @@ async function deferredV2SessionEagerAbortCompensation(
 				compensated.ok
 					? 'the created session was removed'
 					: `removing session ${realId} also failed (${compensated.reason ?? 'unknown error'}) — remove it manually`
-			}`,
+			}${moveUnsettledNote(realId, moveUnsettled && compensated.ok)}`,
 			...(compensated.ok ? {} : { sessionID: realId, cleanupFailed: true }),
+			...(moveUnsettled && compensated.ok
+				? { sessionID: realId, cleanupUnconfirmed: true }
+				: {}),
 		},
 	};
+}
+
+/**
+ * #3558 review F2: a removal issued while the uncancellable `session.move` was
+ * still pending is not proven final — the host might still apply the move.
+ */
+function moveUnsettledNote(realId: string, unsettled: boolean): string {
+	return unsettled
+		? `; session.move had not settled within ${_internals.laneMoveSettleMs}ms, so the removal of session ${realId} is unconfirmed — verify it is gone before retrying`
+		: '';
 }
 
 /**
@@ -1107,12 +1239,27 @@ async function deferredV2SessionCreateEager(
 	if (signal?.aborted) {
 		return deferredV2SessionEagerAbortCompensation(ctx, realId);
 	}
-	let landed: string | undefined =
-		typeof createdRecord.location?.directory === 'string'
-			? createdRecord.location.directory
-			: await deferredV2SessionReadDirectory(ctx, realId);
-	let moveFailure: string | undefined;
-	if (landed === undefined || !sameDirectoryLexical(landed, directory)) {
+	let landed: string | undefined;
+	let placementFailure: string | undefined;
+	let moveUnsettled = false;
+	if (typeof createdRecord.location?.directory === 'string') {
+		landed = createdRecord.location.directory;
+	} else {
+		// #3558 review F1: the verification read is bounded like every other
+		// placement read; a timeout is terminal (no move is attempted).
+		const read = await deferredV2SessionReadDirectory(ctx, realId, signal);
+		if (read.terminal === 'aborted') {
+			return deferredV2SessionEagerAbortCompensation(ctx, realId);
+		}
+		if (read.terminal === 'timeout') {
+			placementFailure = 'the placement read timed out';
+		}
+		landed = read.directory;
+	}
+	if (
+		placementFailure === undefined &&
+		(landed === undefined || !sameDirectoryLexical(landed, directory))
+	) {
 		const moved = await deferredV2SessionMoveIntoLane(
 			ctx,
 			realId,
@@ -1122,14 +1269,22 @@ async function deferredV2SessionCreateEager(
 		if (moved.ok) {
 			landed = moved.landed;
 		} else if (moved.aborted) {
-			return deferredV2SessionEagerAbortCompensation(ctx, realId);
+			return deferredV2SessionEagerAbortCompensation(
+				ctx,
+				realId,
+				moved.moveUnsettled === true,
+			);
 		} else {
 			landed = moved.landed ?? landed;
-			moveFailure = moved.reason;
+			moveUnsettled = moved.moveUnsettled === true;
+			placementFailure =
+				moved.reason === undefined
+					? undefined
+					: `moving it into the lane failed (${boundPathForMessage(moved.reason)})`;
 		}
 	}
 	if (
-		moveFailure !== undefined ||
+		placementFailure !== undefined ||
 		landed === undefined ||
 		!sameDirectoryLexical(landed, directory)
 	) {
@@ -1143,15 +1298,16 @@ async function deferredV2SessionCreateEager(
 				message: `v2 session-client: eager lane create landed in ${boundPathForMessage(
 					landed,
 				)}, not the requested ${boundPathForMessage(directory)}${
-					moveFailure !== undefined
-						? `; moving it into the lane failed (${boundPathForMessage(moveFailure)})`
-						: ''
+					placementFailure !== undefined ? `; ${placementFailure}` : ''
 				} (#3169 Phase 3 placement guard; Phase 0 C1)${
 					removed.ok
 						? ''
 						: `; cleanup of session ${realId} also failed (${removed.reason ?? 'unknown error'}) — remove it before retrying`
-				}`,
+				}${moveUnsettledNote(realId, moveUnsettled && removed.ok)}`,
 				...(removed.ok ? {} : { sessionID: realId, cleanupFailed: true }),
+				...(moveUnsettled && removed.ok
+					? { sessionID: realId, cleanupUnconfirmed: true }
+					: {}),
 			},
 		};
 	}
