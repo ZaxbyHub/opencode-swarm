@@ -208,6 +208,108 @@ describe('receipt write-sink containment (FB-001/FB-002/PRR-004)', () => {
 		}
 	});
 
+	test('FB-001 round 3: a setImmediate swapper cannot land emission bytes outside (same-tick validator)', async () => {
+		const dir = makeDir('receipt-swap-emit-');
+		const outside = canonicalMkdtemp('receipt-swap-out-');
+		try {
+			fs.writeFileSync(
+				path.join(dir, '.swarm', 'evidence', '1.1.json'),
+				JSON.stringify({
+					taskId: '1.1',
+					gates: { g: { sessionId: 's', timestamp: STATIC_TIME, agent: 'a' } },
+				}),
+			);
+			const receipt = await buildVerificationReceipt(dir, 'task', '1.1');
+			const receiptsPath = path.join(dir, '.swarm', 'evidence', 'receipts');
+			let swapped = false;
+			const swap = (): void => {
+				if (swapped) return;
+				let stat: fs.Stats | null = null;
+				try {
+					stat = fs.lstatSync(receiptsPath);
+				} catch {
+					stat = null;
+				}
+				if (stat && !stat.isSymbolicLink()) {
+					fs.rmSync(receiptsPath, { recursive: true, force: true });
+					fs.symlinkSync(outside, receiptsPath, 'junction');
+					swapped = true;
+					return;
+				}
+				setImmediate(swap);
+			};
+			setImmediate(swap);
+			await expect(writeReceiptArtifact(dir, receipt)).rejects.toThrow(
+				'RECEIPT_WRITE_PATH_ESCAPE',
+			);
+			// The swapper MUST have fired (non-vacuous): it polls every tick
+			// from the emitter's first mkdir, and each write validates on the
+			// same tick as its syscall — so the swap always precedes the next
+			// validator (setImmediate FIFO ordering).
+			expect(swapped).toBe(true);
+			expect(fs.readdirSync(outside)).toEqual([]);
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+			fs.rmSync(outside, { recursive: true, force: true });
+		}
+	});
+
+	test('FB-001 round 3: the same swapper cannot land capture bytes outside (validateDestination in-writer)', async () => {
+		const dir = makeDir('receipt-swap-cap-');
+		const outside = canonicalMkdtemp('receipt-swap-out2-');
+		try {
+			fs.writeFileSync(path.join(dir, '.swarm', 'spec.md'), '# Spec\n');
+			const entries = [
+				{
+					id: 'g',
+					code: 'OK',
+					outcome: 'pass',
+					evidenceRefs: [],
+					responsibleActor: 'architect',
+					agentsDispatched: [],
+					agentsMissing: [],
+					warnings: [],
+				},
+			];
+			const report = {
+				schemaVersion: 1,
+				phase: 1,
+				outcome: 'pass',
+				reportHash: createHash('sha256')
+					.update(JSON.stringify({ schemaVersion: 1, phase: 1, entries }))
+					.digest('hex'),
+				entries,
+			};
+			const receiptsPath = path.join(dir, '.swarm', 'evidence', 'receipts');
+			let swapped = false;
+			const swap = (): void => {
+				if (swapped) return;
+				let stat: fs.Stats | null = null;
+				try {
+					stat = fs.lstatSync(receiptsPath);
+				} catch {
+					stat = null;
+				}
+				if (stat && !stat.isSymbolicLink()) {
+					fs.rmSync(receiptsPath, { recursive: true, force: true });
+					fs.symlinkSync(outside, receiptsPath, 'junction');
+					swapped = true;
+					return;
+				}
+				setImmediate(swap);
+			};
+			setImmediate(swap);
+			await expect(
+				capturePhaseGateReport(dir, report as never),
+			).rejects.toThrow('RECEIPT_WRITE_PATH_ESCAPE');
+			expect(swapped).toBe(true);
+			expect(fs.readdirSync(outside)).toEqual([]);
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+			fs.rmSync(outside, { recursive: true, force: true });
+		}
+	});
+
 	test('FB-002: --export SUCCEEDS through a junctioned project root (realpath/lexical asymmetry closed)', async () => {
 		const real = makeDir('receipt-junc-real-');
 		const linkParent = canonicalMkdtemp('receipt-junc-link-');

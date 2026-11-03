@@ -318,8 +318,12 @@ export async function writeReceiptArtifact(
 						// "exists and matches the receipt") — covers both the
 						// missing orphan AND a drifted sibling, so adoption never
 						// returns an md_path whose content disagrees with the
-						// frozen JSON.
-						await atomicWriteFile(adoptedMdPath, rendered);
+						// frozen JSON. The validator runs same-tick with the
+						// write (FB-001 round 3) — the heal awaits, so the chain
+						// must be re-proven immediately before the syscall.
+						await atomicWriteFile(adoptedMdPath, rendered, () =>
+							assertContainedWriteTarget(root, adoptedMdPath),
+						);
 					}
 					return {
 						receipt: existing,
@@ -335,9 +339,15 @@ export async function writeReceiptArtifact(
 			// FB-005 ordering: Markdown FIRST, JSON as the commit marker — a
 			// crash between the two leaves an orphaned `.md` (invisible to the
 			// signature scan) instead of a JSON that later masquerades as a
-			// complete pair.
-			await atomicWriteFile(mdPath, renderReceiptMarkdown(receipt));
-			await atomicWriteFile(jsonPath, jsonPayload);
+			// complete pair. FB-001 (round 3): each write re-proves the chain
+			// same-tick with its own syscall (the awaited writer yields), so a
+			// junction planted mid-loop cannot redirect bytes outside the root.
+			await atomicWriteFile(mdPath, renderReceiptMarkdown(receipt), () =>
+				assertContainedWriteTarget(root, mdPath),
+			);
+			await atomicWriteFile(jsonPath, jsonPayload, () =>
+				assertContainedWriteTarget(root, jsonPath),
+			);
 			await pruneRetention(
 				root,
 				unitFileGrammar(receipt.kind, receipt.unit_id),

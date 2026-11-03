@@ -153,7 +153,15 @@ export async function writeImmutableArtifact<T>(
 					filePath: options.filePath,
 				});
 			}
-			await atomicWriteFile(options.filePath, desired);
+			// FB-001 (review round 3): pass the caller's destination validator
+			// to the writer so the containment walk runs on the SAME tick as
+			// the temp-write/rename, after the writer's event-loop yield —
+			// closing the in-process interleaving window entirely.
+			await atomicWriteFile(
+				options.filePath,
+				desired,
+				options.validateDestination,
+			);
 			return options.value;
 		},
 		options.lockTimeoutMs,
