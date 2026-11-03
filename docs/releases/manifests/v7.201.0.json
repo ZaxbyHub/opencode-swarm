@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.201.0",
+  "tagCommit": "9253664cd557dd982f509850a47a301322a79584",
+  "targetCommitish": "9253664cd557dd982f509850a47a301322a79584",
+  "releaseBodySha256": "812d4802a3f838302b53bcde6abf9b0cc2ac0850708d2d0ed0a8b8adbf6f652e",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/swarm-receipt-verify.md",
+      "sha256": "b282e57a0239d18abe7b21df0fa49eb50e8c11ddb14dc251ff774a0bc2f013ca"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/verification-receipts-substrate.md",
+      "sha256": "51b7b04a46a6ae2350c6ba18e3e26d1e7ec551f08f8f7ce7d63acb4018f79fc0"
+    }
+  ]
+}
