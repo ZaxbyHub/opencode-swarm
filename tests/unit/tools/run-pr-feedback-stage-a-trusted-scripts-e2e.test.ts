@@ -17,11 +17,11 @@ import {
 	_internals,
 	executeRunPrFeedbackStageA,
 } from '../../../src/tools/run-pr-feedback-stage-a.js';
-import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
+import { canonicalMkdtemp, removeTreeWithRetry } from '../../helpers/tmpdir.js';
 
 const SESSION = 'stage-a-trusted-scripts-e2e';
-const HEAD = 'abc123';
-const BASE = 'def456';
+const HEAD = 'abccccccccccccccccccccccccccccccccccc123';
+const BASE = 'defffffffffffffffffffffffffffffffffff456';
 const REVISION = 'revision-1';
 let directory = '';
 let basePackageJson = '';
@@ -185,7 +185,10 @@ afterEach(async () => {
 	gateInternals.resolveRemoteRefsContainingHeadAsync =
 		originalRemoteRefsContainingHeadAsync;
 	gateInternals.resetTrackedStateCache();
-	await fs.rm(directory, { recursive: true, force: true });
+	// #3120 4.5 review round 1: the plain fs.rm teardown is the known Windows
+	// EBUSY class (lingering sqlite handles from the booted gate); the repo's
+	// bounded retry keeps the PRESERVING check deterministic.
+	removeTreeWithRetry(directory);
 });
 
 /**

@@ -14,7 +14,7 @@
  *     returns no budget window.
  * Consequences observable through the registered hooks:
  *   - the session's plan identity is lost ('architect' instead of 'plan'),
- *   - a write of biome.json through the registered `tool.execute.before`
+ *   - a write of app.config.toml through the registered `tool.execute.before`
  *     throws `WRITE BLOCKED: Agent "architect" ...` (architect authority
  *     rules block the config zone), and
  *   - the resolved invocation identity is architect, not the seeded plan
@@ -68,7 +68,7 @@ afterAll(() => {
 });
 
 describe('issue #3320 AC6 — v2 prompt path preserves the native plan identity', () => {
-	test('RED at base, GREEN after the fix — driving the v2 prompt keeps activeAgent "plan", allows the biome.json write, and opens no architect invocation', async () => {
+	test('RED at base, GREEN after the fix — driving the v2 prompt keeps activeAgent "plan", allows the app.config.toml write, and opens no architect invocation', async () => {
 		booted ??= await bootSwarmPluginHost(directory, { version_check: false });
 		const sessionID = 'v2-prompt-plan-session';
 
@@ -115,13 +115,13 @@ describe('issue #3320 AC6 — v2 prompt path preserves the native plan identity'
 		//     does NOT throw. Base defect: the rewritten architect identity
 		//     hits the architect authority rules (config zone) and the hook
 		//     rejects with `WRITE BLOCKED: Agent "architect" is not authorised
-		//     to write "biome.json"`; the plan agent's native pass-through
+		//     to write it`; the plan agent's native pass-through
 		//     rules allow it.
 		let writeError: unknown;
 		try {
 			await booted.hooks['tool.execute.before'](
 				{ tool: 'write', sessionID, callID: 'call-biome-write' },
-				{ args: { path: 'biome.json', content: '{}' } },
+				{ args: { path: 'app.config.toml', content: '' } },
 			);
 		} catch (error) {
 			writeError = error;

@@ -958,6 +958,7 @@ async function importLegacyPrWorkflowGateStateIfNeeded<
 function withDurableObservabilityFields<S extends PrWorkflowPersistedStateBase>(
 	incoming: S,
 	current: S | null,
+	clearFields?: readonly string[],
 ): S {
 	if (!current || observabilityFieldNames.length === 0) return incoming;
 	const merged: Record<string, unknown> = {
@@ -968,9 +969,13 @@ function withDurableObservabilityFields<S extends PrWorkflowPersistedStateBase>(
 		current.workflowInstanceId !== undefined &&
 		current.workflowInstanceId !== incoming.workflowInstanceId;
 	for (const field of observabilityFieldNames) {
-		if (instanceReplaced) delete merged[field];
-		else if (durable[field] !== undefined) merged[field] = durable[field];
-		else delete merged[field];
+		if (instanceReplaced || clearFields?.includes(field) === true) {
+			delete merged[field];
+		} else if (durable[field] !== undefined) {
+			merged[field] = durable[field];
+		} else {
+			delete merged[field];
+		}
 	}
 	return merged as S;
 }
@@ -1015,7 +1020,18 @@ async function persistStateRowWhileLocked<
 	directory: string,
 	validated: S,
 	bumpRevision: boolean,
-	options: { replaceWorkflowInstanceId?: string } = {},
+	options: {
+		replaceWorkflowInstanceId?: string;
+		/**
+		 * #3396 feedback (PRR-009): deliberate in-place reset of registered
+		 * observability fields (e.g. the ancestry-bound binding-mismatch
+		 * marker cleared by a head rebind). A cleared field is DELETED from
+		 * the merged payload instead of being restored from the durable row —
+		 * same class of deliberate reset as `replaceWorkflowInstanceId`, but
+		 * scoped per field so append-only journals are never wiped.
+		 */
+		clearObservabilityFields?: readonly string[];
+	} = {},
 ): Promise<S> {
 	const bound = requireCodec() as PrReviewStateCodec<S>;
 	let currentAuthoritative = readPrWorkflowGateStateCoordinationRow<S>(
@@ -1035,7 +1051,11 @@ async function persistStateRowWhileLocked<
 	}
 	let effective = validated;
 	if (bumpRevision) {
-		effective = withDurableObservabilityFields(validated, current);
+		effective = withDurableObservabilityFields(
+			validated,
+			current,
+			options.clearObservabilityFields,
+		);
 	} else {
 		enforceObservabilityOnlyMutation(validated, current);
 	}
@@ -1089,7 +1109,11 @@ export async function writeStateWhileLocked<
 >(
 	directory: string,
 	state: S,
-	options: { replaceWorkflowInstanceId?: string } = {},
+	options: {
+		replaceWorkflowInstanceId?: string;
+		/** #3396 feedback (PRR-009): deliberate per-field observability reset. */
+		clearObservabilityFields?: readonly string[];
+	} = {},
 ): Promise<S> {
 	const bound = requireCodec() as PrReviewStateCodec<S>;
 	const validated = bound.parse(state);

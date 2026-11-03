@@ -9,11 +9,11 @@
  * OpenCode agent session (e.g. the built-in `plan` agent), a subsequent
  * user turn that carries no agent field therefore silently converts the
  * session into an 'architect' session — which then blocks writes to
- * ordinary config files (biome.json lives in the architect-blocked config
+ * ordinary config files (app.config.toml lives in the architect-blocked config
  * zone, while native agents carry no swarm write restrictions).
  *
  * This test is RED at base and GREEN after the fix: at base, after the
- * agent-less chat.message, activeAgent reads 'architect' and the biome.json
+ * agent-less chat.message, activeAgent reads 'architect' and the app.config.toml
  * write rejects with `WRITE BLOCKED: Agent "architect" is not authorised to
  * write`.
  */
@@ -81,10 +81,13 @@ describe('native agent identity survives an agent-less chat.message (#3320 AC17)
 		expect(swarmState.activeAgent.get(sessionID)).not.toBe(ORCHESTRATOR_NAME);
 
 		// RED at base: the write rejects because the rewritten 'architect'
-		// identity blocks the config zone (biome.json).
+		// identity blocks the config zone. #3120 moved biome.json under the
+		// verifier-config deny for EVERY role, so the identity probe uses a
+		// config-zone file OUTSIDE the verifier glob set: a preserved native
+		// plan identity may still write it, a flipped architect may not.
 		await booted.hooks['tool.execute.before'](
 			{ tool: 'write', sessionID, callID: 'write-biome-3320' },
-			{ args: { filePath: 'biome.json', content: '{}' } },
+			{ args: { filePath: 'app.config.toml', content: '' } },
 		);
 	});
 });

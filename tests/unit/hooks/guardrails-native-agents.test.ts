@@ -59,16 +59,17 @@ describe('Native agent write-authority pass-through via toolBefore (issue #559)'
 		resetSwarmState();
 	});
 
-	it('build agent write is not blocked (exact repro: issue #559)', async () => {
+	it('build agent writing eslint.config.mts is denied as verifier config (#3120 supersedes #559)', async () => {
 		const sid = 'native-build-session';
 		const hooks = createGuardrailsHooks(TEST_DIR, undefined, cfg());
 		startAgentSession(sid, 'build');
 
-		// Must not throw — was previously blocked with "Unknown agent: build"
-		await hooks.toolBefore(
-			{ tool: 'write', sessionID: sid, callID: 'call-1' },
-			{ args: { filePath: 'eslint.config.mts', content: '' } },
-		);
+		await expect(
+			hooks.toolBefore(
+				{ tool: 'write', sessionID: sid, callID: 'call-1' },
+				{ args: { filePath: 'eslint.config.mts', content: '' } },
+			),
+		).rejects.toThrow('AUTHORITY_VERIFIER_CONFIG');
 	});
 
 	it('plan agent write is not blocked', async () => {

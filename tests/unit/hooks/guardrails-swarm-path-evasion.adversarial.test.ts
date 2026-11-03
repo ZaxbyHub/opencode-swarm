@@ -62,9 +62,7 @@ describe('guardrails adversarial - .swarm path evasion (sections 16-21)', () => 
 		startAgentSession('test-session', 'coder');
 	});
 
-	// ============================================================
-	// Category 1: Shell Escaping / Character Substitution
-	// ============================================================
+	// ==== Category 1: Shell Escaping / Character Substitution ====
 	describe('Category 1: Shell escaping / character substitution', () => {
 		// Broken commands - should NOT block (not security issues since they're broken)
 		describe('Broken command fragmentation (not mv - should not block)', () => {
@@ -312,11 +310,9 @@ describe('guardrails adversarial - .swarm path evasion (sections 16-21)', () => 
 		});
 	});
 
-	// ============================================================
-	// Category 6: Archive Tools with Delete-Source Flags
-	// ============================================================
+	// ==== Category 6: Archive Tools with Delete-Source Flags ====
 	describe('Category 6: Archive tools with delete-source flags', () => {
-		test('rsync --remove-source-files .swarm/data/ /tmp/backup/ → BLOCKED', async () => {
+		test('rsync --remove-source-files .swarm/data/ /tmp/backup/ → BLOCKED (archive invariant)', async () => {
 			const config = defaultConfig();
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
 			const input = makeBashInput(
@@ -326,10 +322,12 @@ describe('guardrails adversarial - .swarm path evasion (sections 16-21)', () => 
 			const output = makeBashOutput(
 				'rsync --remove-source-files .swarm/data/ /tmp/backup/',
 			);
-			await expect(hooks.toolBefore(input, output)).rejects.toThrow(/BLOCKED/);
+			await expect(hooks.toolBefore(input, output)).rejects.toThrow(
+				/archive with source deletion under \.swarm\/ is not allowed/,
+			);
 		});
 
-		test('rsync --remove-source-files /tmp/ .swarm/evidence/ → BLOCKED', async () => {
+		test('rsync --remove-source-files /tmp/ .swarm/evidence/ → BLOCKED (archive invariant)', async () => {
 			const config = defaultConfig();
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
 			const input = makeBashInput(
@@ -339,7 +337,9 @@ describe('guardrails adversarial - .swarm path evasion (sections 16-21)', () => 
 			const output = makeBashOutput(
 				'rsync --remove-source-files /tmp/ .swarm/evidence/',
 			);
-			await expect(hooks.toolBefore(input, output)).rejects.toThrow(/BLOCKED/);
+			await expect(hooks.toolBefore(input, output)).rejects.toThrow(
+				/archive with source deletion under \.swarm\/ is not allowed/,
+			);
 		});
 
 		test('tar --remove-files -czf backup.tar.gz .swarm/evidence/ → BLOCKED', async () => {
@@ -511,7 +511,7 @@ describe('guardrails adversarial - .swarm path evasion (sections 16-21)', () => 
 			await expectScopeBlocked(hooks.toolBefore(input, output));
 		});
 
-		test('rsync --remove-source-files .swarm/ /tmp/ → ALLOWED when block_destructive_commands=false', async () => {
+		test('rsync --remove-source-files .swarm/ /tmp/ → BLOCKED as a workspace write even when block_destructive_commands=false (#3120)', async () => {
 			const config = defaultConfig({ block_destructive_commands: false });
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
 			const input = makeBashInput(
@@ -521,7 +521,7 @@ describe('guardrails adversarial - .swarm path evasion (sections 16-21)', () => 
 			const output = makeBashOutput(
 				'rsync --remove-source-files .swarm/ /tmp/',
 			);
-			await expect(hooks.toolBefore(input, output)).resolves.toBeUndefined();
+			await expect(hooks.toolBefore(input, output)).rejects.toThrow();
 		});
 
 		test('tar --remove-files -czf backup.tar.gz .swarm/ → ALLOWED when block_destructive_commands=false', async () => {
@@ -599,7 +599,7 @@ describe('guardrails adversarial - .swarm path evasion (sections 16-21)', () => 
 			await expectScopeBlocked(hooks.toolBefore(input, output));
 		});
 
-		test('rsync -av /tmp/ .swarm/backup/ → ALLOWED (no --delete flag)', async () => {
+		test('rsync -av /tmp/ .swarm/backup/ → BLOCKED as a workspace write (no --delete flag; #3120)', async () => {
 			const config = defaultConfig();
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
 			const input = makeBashInput(
@@ -607,7 +607,7 @@ describe('guardrails adversarial - .swarm path evasion (sections 16-21)', () => 
 				'rsync -av /tmp/ .swarm/backup/',
 			);
 			const output = makeBashOutput('rsync -av /tmp/ .swarm/backup/');
-			await expect(hooks.toolBefore(input, output)).resolves.toBeUndefined();
+			await expect(hooks.toolBefore(input, output)).rejects.toThrow();
 		});
 	});
 
