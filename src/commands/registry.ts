@@ -1262,6 +1262,15 @@ export const COMMAND_REGISTRY = {
 		details:
 			'Emits a portable, hash-backed record of the durably recorded gate outcomes for a task or phase (JSON + Markdown under .swarm/evidence/receipts/; --export writes a PR-attachable bundle under .swarm/plan-export/, reaped at close). --verify re-checks every recorded hash in a bundle on any machine (including a fresh clone) and exits nonzero on any mismatch with a typed failure (corrupt_json, unsupported_format_version, schema_mismatch, receipt_hash_mismatch, missing_artifact, digest_mismatch, path_escape).',
 		category: 'utility',
+		// Intentional asymmetry (PR #3550 disposition, critic-reviewed): the
+		// command is agent-reachable while the receipt TOOL's agents list
+		// (src/tools/tool-metadata.ts) names only architect/reviewer/
+		// critic_finding_validator. Receipt truth derives entirely from durable
+		// state, so broader call-path reachability cannot mint unearned gate
+		// passes — and stamping an emitter identity would be equally forgeable.
+		// Do not align these downward (or add an emitter field) without first
+		// deciding emitter authority and the out-of-band report anchor
+		// (trigger: the first consumer that gates on receipt authenticity).
 		toolPolicy: 'agent',
 	},
 	'evidence summary': {
