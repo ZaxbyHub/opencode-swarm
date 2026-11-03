@@ -7321,8 +7321,7 @@ export function createDelegationGateHook(
 												// carries absolute receipt paths — bound and redact
 												// it like every other operator/model-visible fault
 												// detail (same helper the safe wrapper uses).
-												const readFaultDetail =
-													boundedRedactedErrorDetail(err);
+												const readFaultDetail = boundedRedactedErrorDetail(err);
 												logger.warn(
 													`[delegation-gate] Stage B route receipt read fault for ${taskId}: ${readFaultDetail}`,
 												);

@@ -66,7 +66,8 @@ const registryByDirectory = new Map<
  * for such a directory share this ONE key, so record/consult/retire stay
  * mutually consistent and capacity accounting still bounds them.
  */
-const DEGENERATE_DIRECTORY_KEY = '\u0000route-invalidation:degenerate-directory';
+const DEGENERATE_DIRECTORY_KEY =
+	'\u0000route-invalidation:degenerate-directory';
 
 /**
  * Directory keys are MEMOIZED PER INPUT SPELLING, first computation wins

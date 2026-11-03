@@ -219,8 +219,8 @@ describe('route-receipt read-fault isolation (#3516 item 7 / AC10)', () => {
 		).toBe(true);
 		// PRR-004 behavioral pin: the route_read_fault drop advisory must be
 		// bounded AND redacted (boundedRedactedErrorDetail), never raw.
-		const faultAdvisory = (session.pendingAdvisoryMessages ?? []).find(
-			(m) => m.includes('route receipt read faulted'),
+		const faultAdvisory = (session.pendingAdvisoryMessages ?? []).find((m) =>
+			m.includes('route receipt read faulted'),
 		);
 		expect(faultAdvisory).toBeDefined();
 		expect(faultAdvisory!.includes('C:\\Users\\brett')).toBe(false);
