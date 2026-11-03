@@ -6067,19 +6067,29 @@ function extractPatchTargets(
 		// timestamp, so capture the tab-free run, not \S+ (space paths).
 		if (rawLine.startsWith('diff --git ')) {
 			sawHeader = true;
-			// #3396 feedback (reviewer F7): git QUOTES paths with spaces or
-			// non-ASCII bytes on the diff --git line, so match the quoted form
-			// explicitly and run it through the same fail-closed unquoter as
-			// the ---/+++/rename arms; the unquoted form never contains
-			// spaces. Unresolvable captures fail closed.
+			// #3396 feedback (reviewer F7 + round-2 R2-1): git quotes ONLY
+			// paths with non-ASCII/special bytes — a path with ordinary
+			// spaces stays UNQUOTED on this line (`diff --git a/new file.txt
+			// b/new file.txt`), so the unquoted form splits on the ` b/`
+			// boundary (git's own parse order; lazy a-side, greedy b-side).
+			// The quoted form is matched explicitly and both endpoints run
+			// through the same fail-closed unquoter as the other arms.
 			const quoted =
 				/^diff --git ("(?:[^"\\]|\\.)*") ("(?:[^"\\]|\\.)*")$/.exec(rawLine);
-			const plain = /^diff --git (\S+) (\S+)$/.exec(rawLine);
-			const a = quoted ? unquoteGitPath(quoted[1]) : (plain?.[1] as string);
-			const b = quoted ? unquoteGitPath(quoted[2]) : (plain?.[2] as string);
-			if (a === undefined || b === undefined) return undefined;
-			if (addEndpoint(a)) return undefined;
-			if (addEndpoint(b)) return undefined;
+			const plain = /^diff --git a\/(.+?) b\/(.+)$/.exec(rawLine);
+			const aEndpoint = quoted
+				? unquoteGitPath(quoted[1])
+				: plain
+					? `a/${plain[1]}`
+					: undefined;
+			const bEndpoint = quoted
+				? unquoteGitPath(quoted[2])
+				: plain
+					? `b/${plain[2]}`
+					: undefined;
+			if (aEndpoint === undefined || bEndpoint === undefined) return undefined;
+			if (addEndpoint(aEndpoint)) return undefined;
+			if (addEndpoint(bEndpoint)) return undefined;
 			continue;
 		}
 		if (

@@ -111,13 +111,16 @@ describe('patch/rsync extraction hardening (#3396 feedback PRR-011/012, review F
 		}
 	});
 
-	test('quoted space paths on the diff --git line are judged (PRR-012)', () => {
+	test('real git space-path headers stay judged (PRR-012, round-2 R2-1)', () => {
 		const root = canonicalMkdtemp('swd3396-space-');
 		try {
+			// git quotes ONLY non-ASCII/special paths — a space path stays
+			// UNQUOTED on the diff --git line (executed real-git probe), so
+			// this is the production form the parser must keep judging.
 			const spacePatch = [
-				'diff --git "a/my file.txt" "b/my file.txt"',
-				'--- "a/my file.txt"',
-				'+++ "b/my file.txt"',
+				'diff --git a/my file.txt b/my file.txt',
+				'--- a/my file.txt',
+				'+++ b/my file.txt',
 				'@@ -1 +1 @@',
 				'-old',
 				'+new',

@@ -27,7 +27,7 @@ const PR_URL = 'https://github.com/ZaxbyHub/opencode-swarm/pull/1234';
 
 let directory = '';
 /** What the stubbed `gh` subprocess returns this leg. */
-let ghOutcome: 'ok' | 'fail' = 'ok';
+let ghOutcome: 'ok' | 'fail' | 'other-head' = 'ok';
 /** The HEAD the stubbed git seams report (moves to NEW_HEAD for the rebind). */
 let currentHead = HEAD;
 
@@ -90,7 +90,7 @@ beforeEach(() => {
 				stdout: JSON.stringify({
 					baseRefName: 'main',
 					baseRefOid: BASE_TIP,
-					headRefOid: HEAD,
+					headRefOid: ghOutcome === 'other-head' ? NEW_HEAD : HEAD,
 				}),
 				stderr: '',
 				stdoutTruncated: false,
@@ -171,5 +171,47 @@ describe('PR_FEEDBACK base binding lifecycle (#3396 feedback)', () => {
 		expect(after?.prFeedbackBaseRef).toBeUndefined();
 		expect(after?.prFeedbackBaseSha).toBeUndefined();
 		expect(after?.prFeedbackStageABaseMismatch).toBeUndefined();
+		// Round-2 residual pins (reviewer E/F): the ancestry-bound trust
+		// verdict and the stale binding advisory clear with the receipt.
+		expect(after?.prFeedbackStageABaseTrust).toBeUndefined();
+		expect(after?.prFeedbackBaseBindingError).toBeUndefined();
+	});
+
+	test('an anchor computed for a different PR head is skipped (review F5)', async () => {
+		// The pre-lock resolution races a head move: when gh reports a head
+		// that differs from the head being bound, the anchor must NOT be
+		// applied (pre-fix of the guard this test pins, resolvedBaseHeadMatches
+		// returning true unconditionally bound a stale-base anchor).
+		ghOutcome = 'other-head';
+		await activatePrWorkflow(directory, SESSION, 'PR_FEEDBACK', {
+			prUrl: PR_URL,
+			prHeadSha: HEAD,
+		});
+		const skipped = await readPrWorkflowGateState(directory, SESSION);
+		expect(skipped?.prFeedbackBaseSha).toBeUndefined();
+		expect(skipped?.prFeedbackBaseRef).toBeUndefined();
+
+		// A matching head resolves and binds normally.
+		ghOutcome = 'ok';
+		await activatePrWorkflow(directory, SESSION, 'PR_FEEDBACK', {
+			prUrl: PR_URL,
+		});
+		const healed = await readPrWorkflowGateState(directory, SESSION);
+		expect(healed?.prFeedbackBaseSha).toBe(MERGE_BASE);
+	});
+
+	test('rebind clears a stale binding advisory (review F6)', async () => {
+		ghOutcome = 'fail';
+		await activatePrWorkflow(directory, SESSION, 'PR_FEEDBACK', {
+			prUrl: PR_URL,
+			prHeadSha: HEAD,
+		});
+		const failed = await readPrWorkflowGateState(directory, SESSION);
+		expect(typeof failed?.prFeedbackBaseBindingError === 'string').toBe(true);
+
+		currentHead = NEW_HEAD;
+		await rebindPrFeedbackHead(directory, SESSION, NEW_HEAD);
+		const after = await readPrWorkflowGateState(directory, SESSION);
+		expect(after?.prFeedbackBaseBindingError).toBeUndefined();
 	});
 });
