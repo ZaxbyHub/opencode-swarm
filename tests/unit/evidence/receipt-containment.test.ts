@@ -222,8 +222,9 @@ describe('receipt write-sink containment (FB-001/FB-002/PRR-004)', () => {
 			const receipt = await buildVerificationReceipt(dir, 'task', '1.1');
 			const receiptsPath = path.join(dir, '.swarm', 'evidence', 'receipts');
 			let swapped = false;
+			let stopPolling = false;
 			const swap = (): void => {
-				if (swapped) return;
+				if (swapped || stopPolling) return;
 				let stat: fs.Stats | null = null;
 				try {
 					stat = fs.lstatSync(receiptsPath);
@@ -239,9 +240,13 @@ describe('receipt write-sink containment (FB-001/FB-002/PRR-004)', () => {
 				setImmediate(swap);
 			};
 			setImmediate(swap);
-			await expect(writeReceiptArtifact(dir, receipt)).rejects.toThrow(
-				'RECEIPT_WRITE_PATH_ESCAPE',
-			);
+			try {
+				await expect(writeReceiptArtifact(dir, receipt)).rejects.toThrow(
+					'RECEIPT_WRITE_PATH_ESCAPE',
+				);
+			} finally {
+				stopPolling = true;
+			}
 			// The swapper MUST have fired (non-vacuous): it polls every tick
 			// from the emitter's first mkdir, and each write validates on the
 			// same tick as its syscall — so the swap always precedes the next
@@ -282,8 +287,9 @@ describe('receipt write-sink containment (FB-001/FB-002/PRR-004)', () => {
 			};
 			const receiptsPath = path.join(dir, '.swarm', 'evidence', 'receipts');
 			let swapped = false;
+			let stopPolling = false;
 			const swap = (): void => {
-				if (swapped) return;
+				if (swapped || stopPolling) return;
 				let stat: fs.Stats | null = null;
 				try {
 					stat = fs.lstatSync(receiptsPath);
@@ -299,9 +305,13 @@ describe('receipt write-sink containment (FB-001/FB-002/PRR-004)', () => {
 				setImmediate(swap);
 			};
 			setImmediate(swap);
-			await expect(
-				capturePhaseGateReport(dir, report as never),
-			).rejects.toThrow('RECEIPT_WRITE_PATH_ESCAPE');
+			try {
+				await expect(
+					capturePhaseGateReport(dir, report as never),
+				).rejects.toThrow('RECEIPT_WRITE_PATH_ESCAPE');
+			} finally {
+				stopPolling = true;
+			}
 			expect(swapped).toBe(true);
 			expect(fs.readdirSync(outside)).toEqual([]);
 		} finally {
