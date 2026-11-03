@@ -257,21 +257,15 @@ describe('route-receipt hardening legs (#3516)', () => {
 			} finally {
 				_internals.recordStageBDispatchBindings = originalRecord;
 			}
-			// Repair the receipt path, then arm the re-entry dispatch.
 			fs.rmSync(path.join(dir, '.swarm', 'pr-review'), { force: true });
 			await seedReentryArm(dir);
 			await expect(
-				hook.toolBefore(
-					{ tool: 'Task', sessionID: SESSION, callID: 'call-capped' },
-					{
-						args: {
-							subagent_type: 'reviewer',
-							task_id: '1.1',
-							prompt:
-								'TASK: 1.1\nACCEPTANCE: Verify the exact task and report a bound positive verdict.',
-						},
-					},
-				),
+				before(hook, 'call-capped', {
+					subagent_type: 'reviewer',
+					task_id: '1.1',
+					prompt:
+						'TASK: 1.1\nACCEPTANCE: Verify the exact task and report a bound positive verdict.',
+				}),
 			).rejects.toThrow('STAGE_B_CONTEXT_CAPACITY');
 			const token = await reserveActivePrReviewReentryAuthorization(
 				dir,
@@ -285,15 +279,9 @@ describe('route-receipt hardening legs (#3516)', () => {
 	describe('fifo-consumption — registry markers are per-key, never evicted, and retire at terminal outcomes', () => {
 		it('per-key consumption: a matched task key blocks exactly once; other keys and calls are untouched', () => {
 			const dir = fixture();
-			expect(recordRouteInvalidation(dir, SESSION, 'call-k1', '1.1')).toBe(
-				true,
-			);
-			expect(recordRouteInvalidation(dir, SESSION, 'call-k1', '1.2')).toBe(
-				true,
-			);
+			recordRouteInvalidation(dir, SESSION, 'call-k1', '1.1');
+			recordRouteInvalidation(dir, SESSION, 'call-k1', '1.2');
 			expect(blocked(dir, 'call-k1', SESSION, '1.1')).toBe(true);
-			// Consumed per matched key only — the second consult of 1.1 is free,
-			// 1.2 still blocks, and no other call is affected.
 			expect(blocked(dir, 'call-k1', SESSION, '1.1')).toBe(false);
 			expect(blocked(dir, 'call-k1', SESSION, '1.2')).toBe(true);
 			expect(blocked(dir, 'call-k2', SESSION, '1.1')).toBe(false);
@@ -301,7 +289,6 @@ describe('route-receipt hardening legs (#3516)', () => {
 
 		it('a full call bound refuses the dispatch (ROUTE_INVALIDATION_CAPACITY) with every prior marker consultable', async () => {
 			const dir = fixture({ taskIds: ['1.1'], persistFails: true });
-			// Two unconsumed task-key markers plus a full bound of faults.
 			expect(recordRouteInvalidation(dir, SESSION, 'call-live-a', '1.1')).toBe(
 				true,
 			);
@@ -317,15 +304,11 @@ describe('route-receipt hardening legs (#3516)', () => {
 				// The registry refuses the new marker at capacity and the
 				// dispatch is REJECTED fail-closed.
 				await expect(
-					hook.toolBefore(
-						{ tool: 'Task', sessionID: SESSION, callID: 'call-over-cap' },
-						{ args: reviewerArgs('1.1') },
-					),
+					before(hook, 'call-over-cap', reviewerArgs('1.1')),
 				).rejects.toThrow('ROUTE_INVALIDATION_CAPACITY');
 			} finally {
 				warnCapture.restore();
 			}
-			// NO eviction: prior markers stay consultable.
 			expect(blocked(dir, 'call-live-a', SESSION, '1.1')).toBe(true);
 			expect(blocked(dir, 'call-live-b', SESSION, '1.2')).toBe(true);
 			const capacityLine = warnCapture.lines.find(
@@ -358,19 +341,14 @@ describe('route-receipt hardening legs (#3516)', () => {
 			const dir = fixture({ taskIds: ['1.1'] });
 			await prepareTask(dir, '1.1');
 			const hook = createDelegationGateHook(makeConfig(), dir);
-			// Denied call: the routing faults (EISDIR gate state, still in
-			// place for the failed-output dispatch below), then the
-			// production abort path retires the marker with the dispatch.
 			fs.mkdirSync(workflowGateStatePath(dir, SESSION), { recursive: true });
 			await before(hook, 'call-denied', reviewerArgs('1.1'));
 			expect(blocked(dir, 'call-denied', SESSION, '1.1')).toBe(true);
 			await hook.abortDeniedSettlementForCall('call-denied', SESSION);
 			expect(blocked(dir, 'call-denied', SESSION, '1.1')).toBe(false);
-			// Failed output: the STILL-corrupt gate state faults this
-			// dispatch's routing the same way, so call-failed-out records its
-			// OWN callFault marker; the terminal-failure output then skips the
-			// settlement loop entirely, and the generic toolAfter cleanup must
-			// retire the marker (deleting that retirement line reddens this).
+			// Failed output: same corrupt state -> own callFault marker;
+			// the terminal output skips the settlement loop and the generic
+			// cleanup retires it (deleting that line reddens this leg).
 			await before(hook, 'call-failed-out', reviewerArgs('1.1'));
 			expect(blocked(dir, 'call-failed-out', SESSION, '1.1')).toBe(true);
 			await hook.toolAfter(
@@ -403,6 +381,39 @@ describe('route-receipt hardening legs (#3516)', () => {
 		});
 	});
 
+	it('runtime redaction (behavioral): the REAL wrapper degrades a long home-path fault to a bounded, redacted warn', async () => {
+		// AC14's behavioral half, which the frozen source-scan probe
+		// cannot see (the derivation lives in the helper, outside its
+		// region): drive the REAL wrapper through the inner-reader seam
+		// with a crafted fault whose message embeds a home path plus
+		// >200 chars of padding, then assert the degraded warn is
+		// capped and redacted.
+		const dir = fixture();
+		const realInner = _internals.readPrReviewReentryBindingContextInner;
+		const realWrapper = _internals.readPrReviewReentryBindingContextSafe;
+		const homePath = 'C:\\Users\\brett\\project\\thing\\src';
+		const message = `EBUSY: resource locked, read '${homePath}\\deep' ${'p'.repeat(180)}ENDMARKER`;
+		_internals.readPrReviewReentryBindingContextInner = (async () => {
+			throw new Error(message);
+		}) as typeof realInner;
+		const warnCapture = captureCriticalWarn();
+		try {
+			expect(await realWrapper(dir, SESSION)).toBeNull();
+		} finally {
+			_internals.readPrReviewReentryBindingContextInner = realInner;
+			warnCapture.restore();
+		}
+		const line = warnCapture.lines.find((candidate) =>
+			candidate.includes('PR-review re-entry binding context unreadable'),
+		);
+		expect(line).toBeDefined();
+		expect(line!.includes('CRITICAL-WARN')).toBe(true);
+		// Bounded: the 200-char cap truncates the tail marker.
+		expect(line!.includes('ENDMARKER')).toBe(false);
+		// Redacted: the home-profile prefix never appears raw.
+		expect(line!.includes('C:\\Users\\brett')).toBe(false);
+		expect(line!.includes('~\\')).toBe(true);
+	});
 	describe('sibling-clobber — kind-monotonicity keeps a live full receipt bindable', () => {
 		it('a sibling non-full remember cannot clobber a healthy full record', async () => {
 			const dir = fixture({ taskIds: ['1.1'] });
@@ -416,10 +427,8 @@ describe('route-receipt hardening legs (#3516)', () => {
 				parentSessionID: SESSION,
 				childSessionID: 'child-full',
 			});
-			// Free the live slot (production denial path) so the sibling's own
-			// dispatch-time binding is observable.
+			// Free the live slot so the sibling's binding is observable.
 			await hook.abortDeniedSettlementForCall('call-full', SESSION);
-			// The sibling's PENDING/ROUTER-ERROR remembers are both resisted.
 			session.modifiedFilesByTask.set('1.1', []);
 			await before(hook, 'call-sibling', reviewerArgs('1.1'));
 			await hook.taskMetadata({
@@ -436,15 +445,10 @@ describe('route-receipt hardening legs (#3516)', () => {
 				},
 				{ text: reviewed('1.1') },
 			);
-			// Bound on the SURVIVED full record: route evidence recorded.
-			// Deleting the monotonicity guard reddens this (the sibling would
-			// bind nothing and settle without route evidence).
 			expect(getStageBRouteEvidence(session, '1.1').length).toBe(1);
 		});
 
 		it('runtime warn channel: the degraded wrapper warn is on the operator channel and bounded (AC14 runtime half)', async () => {
-			// EISDIR: a genuine fs fault the wrapper degrades. At base the
-			// warn was debug-gated and unbounded — both pinned by the shape.
 			const dir = fixture({ taskIds: ['1.1'] });
 			await prepareTask(dir, '1.1');
 			const hook = createDelegationGateHook(makeConfig(), dir);
@@ -483,9 +487,6 @@ describe('route-receipt hardening legs (#3516)', () => {
 			);
 			expect(line).toBeDefined();
 			expect(line!.includes('CRITICAL-WARN')).toBe(true);
-			// The project path never appears raw when the fixture root is
-			// under a redactable home profile (Windows/macOS temp dirs are;
-			// POSIX /tmp fixtures are not — scoped to what this proves).
 			const redactableRoot = /^(\/home\/|\/Users\/|[A-Za-z]:\\Users\\)/.test(
 				dir,
 			);

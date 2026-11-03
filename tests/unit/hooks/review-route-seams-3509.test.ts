@@ -40,8 +40,11 @@ import {
 	ingestBackgroundStageBCompletion,
 } from '../../../src/background/stage-b-gates';
 import { captureWorkspaceSnapshot } from '../../../src/background/workspace-snapshot';
+import type { PluginConfig } from '../../../src/config';
 import { closeAllProjectDbs } from '../../../src/db/project-db';
 import { transitionTaskWorkflowEvidence } from '../../../src/gate-evidence';
+import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
+import { workflowGateStatePath } from '../../../src/pr-review/persistence';
 import {
 	isRouteBlockedForSettlement,
 	recordRouteFault,
@@ -306,28 +309,27 @@ describe('route-invalidation settlement seams (#3509/#3516 seam coverage)', () =
 	});
 
 	it('seam PRESERVING control: the ok:true/consumed:false no-task shape is pinned by the pre-existing taskless-coder observer leg', () => {
-		// The observer itself never ingests non-gate-bearing (no-task)
-		// records — it leaves them terminal without acquiring an ingestion
-		// lease. That behavior is already pinned end-to-end through the REAL
-		// observer by the pre-existing taskless-coder leg in
-		// tests/unit/background/completion-observer-reviewer-receipt.test.ts;
-		// this control pins the CITATION so the commit predicate's
-		// `applied.ok ||` half (which exists exactly so a successful no-task
-		// completion can never map to retryable ingestion_error) cannot
-		// silently lose its coverage anchor: if that leg is removed or
-		// renamed, this pin fails and the citation must be re-pointed.
+		// The ok:true/consumed:false mapping anchor is the pre-existing
+		// taskless-coder leg in
+		// tests/unit/background/completion-observer-coder.test.ts, which
+		// durably consumes a taskless (no Stage-B) completion through the
+		// REAL observer (status 'consumed', ingestion.state 'consumed') —
+		// exactly the outcome the commit predicate's `applied.ok ||` half
+		// must preserve. This control pins the CITATION: if that leg is
+		// removed or renamed, this pin fails and the citation must be
+		// re-pointed.
 		const suite = fs.readFileSync(
 			path.resolve(
 				import.meta.dir,
-				'../background/completion-observer-reviewer-receipt.test.ts',
+				'../background/completion-observer-coder.test.ts',
 			),
 			'utf8',
 		);
 		expect(
 			suite,
-			'the taskless-coder observer leg must exist by name',
+			'the taskless-consumption observer leg must exist by name',
 		).toContain(
-			"it('leaves taskless coder completion terminal without acquiring an ingestion lease'",
+			"test('taskless completion is durably consumed once without Stage B mutation'",
 		);
 	});
 
@@ -359,6 +361,45 @@ describe('route-invalidation settlement seams (#3509/#3516 seam coverage)', () =
 		expect(isRouteBlockedForSettlement(directory, CALL, PARENT, TASK)).toBe(
 			true,
 		);
+	});
+
+	it('seam foreground retirement owner: a background dispatch with NO correlation id retires its marker at the early return', async () => {
+		// The no-correlation early return in toolAfter skips the generic
+		// cleanup, so without an explicit retirement there the call's route
+		// invalidation marker would outlive a terminal dispatch. The
+		// dispatch's routing faults (EISDIR gate state) to record the
+		// marker; the completion output carries neither a correlation id
+		// nor a running placeholder, driving the early return.
+		fs.mkdirSync(workflowGateStatePath(directory, PARENT), { recursive: true });
+		const config = {
+			hooks: { delegation_gate: true, background_subagents: true },
+		} as unknown as PluginConfig;
+		const hook = createDelegationGateHook(config, directory);
+		const args = {
+			subagent_type: 'reviewer',
+			background: true,
+			prompt:
+				'Review the staged change end to end.\nACCEPTANCE: FR-001 the review covers the requirement',
+		};
+		await hook.toolBefore(
+			{ tool: 'Task', sessionID: PARENT, callID: 'call-nocorr' },
+			{ args },
+		);
+		expect(
+			isRouteBlockedForSettlement(directory, 'call-nocorr', PARENT, '1.1'),
+		).toBe(true);
+		await hook.toolAfter(
+			{
+				tool: 'tool.execute.Task',
+				sessionID: PARENT,
+				callID: 'call-nocorr',
+				args,
+			},
+			{ text: 'plain completion text with no task envelope ids' },
+		);
+		expect(
+			isRouteBlockedForSettlement(directory, 'call-nocorr', PARENT, '1.1'),
+		).toBe(false);
 	});
 
 	it('seam narrowed-contract pin: update-task-status carries no invalidation consult (no callID surface) and the residual is disclosed in the release fragment', () => {

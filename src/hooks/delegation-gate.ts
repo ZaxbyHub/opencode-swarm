@@ -3536,6 +3536,13 @@ export const _internals = {
 	 */
 	readPrReviewReentryBindingContextSafe: readPrReviewReentryBindingContextSafe,
 	/**
+	 * #3516 item 11 (AC14): the wrapper's inner binding-context read, exposed
+	 * so tests can drive the REAL wrapper's degrade path (catch -> bounded,
+	 * redacted criticalWarn) with crafted faults, including long home-path
+	 * messages the frozen source-scan probe cannot see.
+	 */
+	readPrReviewReentryBindingContextInner: readPrReviewReentryBindingContext,
+	/**
 	 * #3516 item 7 (AC10): the settlement loop's two receipt-enforcement reads
 	 * route through this seam so per-task read faults (fault-on-first-read /
 	 * fault-on-second-read) are injectable deterministically while sibling
@@ -3812,12 +3819,17 @@ async function readPrReviewReentryBindingContextSafe(
 	sessionId: string,
 ): Promise<Awaited<ReturnType<typeof readPrReviewReentryBindingContext>>> {
 	try {
-		return await readPrReviewReentryBindingContext(directory, sessionId);
+		return await _internals.readPrReviewReentryBindingContextInner(
+			directory,
+			sessionId,
+		);
 	} catch (error) {
 		// Bounded + redacted form of the raw error text (#3516 item 11): the
 		// derivation lives in boundedRedactedErrorDetail so this wrapper body
 		// never interpolates raw error text and stays formatting-stable.
 		const detail = boundedRedactedErrorDetail(error);
+		// Note: the prefix check runs on the coerced form, so a non-Error
+		// throw whose String() starts with BLOCKED: also rethrows (fail-closed).
 		if (detail.startsWith('BLOCKED:')) {
 			// Deliberate corruption refusal — fail closed (see doc above).
 			throw error;
