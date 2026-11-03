@@ -2229,7 +2229,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 				'receipts ≤256 KiB JSON, ≤512 artifact refs, ≤64 gate records; captured reports newest-8/phase; emitted receipts newest-8/unit; per-artifact re-hash ≤16 MiB',
 			scope: 'per-key',
 			keyspaceBound:
-				'FINITE BY THE PARENT-TREE GLOBAL LIFECYCLE, NOT by the 8-per-unit cap: keys are (kind, unitId) pairs drawn from plan tasks/phases, and .swarm/evidence (incl. receipts/) is recursively removed at close via the evidence-tree lifecycle while .swarm/plan-export bundles AND crashed-export .receipt-….tmp-* staging trees are removed by the close plan-export receipt-bundle grammar sweep (src/commands/close/clean-stage.ts, FB-003) — the same global reapers that bound the sibling evidence-bundles row. Mid-session reclamation requires /swarm close or /swarm archive, exactly as for evidence bundles.',
+				'FINITE BY THE PARENT-TREE GLOBAL LIFECYCLE, NOT by the 8-per-unit cap: keys are (kind, unitId) pairs drawn from plan tasks/phases, and .swarm/evidence (incl. receipts/) is recursively removed at close via the evidence-tree lifecycle while .swarm/plan-export bundles AND crashed-export .receipt-….tmp-* staging trees are removed by the close plan-export receipt-bundle grammar sweep (src/commands/close/clean-stage.ts, FB-003) — the same global reapers that bound the sibling evidence-bundles row. Mid-session reclamation requires /swarm close — the plan-export receipt-bundle sweep runs ONLY in the close clean stage (/swarm archive reaps the evidence tree, not plan-export).',
 			citation:
 				'src/evidence/receipt.ts MAX_RECEIPT_* constants; src/evidence/receipt-store.ts pruneRetention (MAX_RETAINED_PER_UNIT 8); src/commands/close/clean-stage.ts',
 		},
@@ -2251,7 +2251,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		disposition: {
 			kind: 'retain-by-design',
 			citation:
-				'Portable verification artifacts are the #2968/#2970 deliverable: newest-8 per unit + 256 KiB/512-ref/64-gate caps + staged atomic export, under the same global close/archive reapers as the evidence tree (src/evidence/receipt-store.ts; src/evidence/receipt.ts).',
+				'Portable verification artifacts are the #2968/#2970 deliverable: newest-8 per unit + 256 KiB/512-ref/64-gate caps + staged atomic export, reclaimed at close by the evidence-tree lifecycle and the close plan-export receipt-bundle sweep (src/evidence/receipt-store.ts; src/evidence/receipt.ts; src/commands/close/clean-stage.ts).',
 		},
 	},
 	{

@@ -160,6 +160,54 @@ describe('receipt write-sink containment (FB-001/FB-002/PRR-004)', () => {
 		}
 	});
 
+	test('FB-001 round 2: a junction planted DURING the lock wait is rejected by the in-critical-section re-validation', async () => {
+		const dir = makeDir('receipt-junc-toctou-');
+		const outside = canonicalMkdtemp('receipt-junc-out5-');
+		try {
+			// Seed a task receipt fixture (evidence/1.1.json with gates).
+			fs.writeFileSync(
+				path.join(dir, '.swarm', 'evidence', '1.1.json'),
+				JSON.stringify({
+					taskId: '1.1',
+					gates: { g: { sessionId: 's', timestamp: STATIC_TIME, agent: 'a' } },
+				}),
+			);
+			const receipt = await buildVerificationReceipt(dir, 'task', '1.1');
+			// Hold the exact unit lock the emission needs, from another writer.
+			const { withEvidenceLock } = await import('../../../src/evidence/lock');
+			let release!: () => void;
+			const gate = new Promise<void>((resolve) => {
+				release = resolve;
+			});
+			const holder = withEvidenceLock(
+				fs.realpathSync(dir),
+				path.posix.join('evidence', 'receipts', 'unit-task-1.1.lock'),
+				'architect',
+				'holder',
+				async () => {
+					await gate;
+					return 1;
+				},
+			);
+			// Let the holder acquire the lock file.
+			await new Promise((resolve) => setTimeout(resolve, 250));
+			const writing = writeReceiptArtifact(dir, receipt);
+			await new Promise((resolve) => setTimeout(resolve, 250));
+			// Swap the (real, already-validated) receipts dir for a junction
+			// while the emission waits on the lock.
+			const receiptsPath = path.join(dir, '.swarm', 'evidence', 'receipts');
+			fs.rmSync(receiptsPath, { recursive: true, force: true });
+			junction(outside, receiptsPath);
+			release();
+			await holder;
+			await expect(writing).rejects.toThrow('RECEIPT_WRITE_PATH_ESCAPE');
+			expect(fs.readdirSync(outside)).toEqual([]);
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+			fs.rmSync(outside, { recursive: true, force: true });
+		}
+	});
+
 	test('FB-002: --export SUCCEEDS through a junctioned project root (realpath/lexical asymmetry closed)', async () => {
 		const real = makeDir('receipt-junc-real-');
 		const linkParent = canonicalMkdtemp('receipt-junc-link-');

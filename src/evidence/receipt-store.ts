@@ -126,6 +126,10 @@ export async function capturePhaseGateReport(
 		// PRR-019: the capture runs while the plan lock is held; a contended
 		// evidence lock must not stall phase_complete for the 60 s default.
 		lockTimeoutMs: 10_000,
+		// FB-001 (review round 2): re-run the destination-chain walk INSIDE the
+		// lock (writeImmutableArtifact invokes this before mkdir/write), so a
+		// junction planted during the lock wait cannot redirect the capture.
+		validateDestination: () => assertContainedWriteTarget(root, filePath),
 	});
 	await pruneRetention(
 		root,
@@ -259,6 +263,13 @@ export async function writeReceiptArtifact(
 		'architect',
 		`receipt-${receipt.kind}-${receipt.unit_id}`,
 		async () => {
+			// FB-001 (review round 2): the pre-lock walk is invalidated by the
+			// await boundary of lock acquisition — re-validate both destination
+			// chains as the FIRST statement inside the critical section, so a
+			// junction planted while this writer waited for the unit lock is
+			// rejected before mkdir/heal/write touches it.
+			assertContainedWriteTarget(root, jsonPath);
+			assertContainedWriteTarget(root, mdPath);
 			const signature = receiptContentSignature(receipt);
 			for (const name of fs.existsSync(receiptsDir(root))
 				? fs.readdirSync(receiptsDir(root))
@@ -293,19 +304,22 @@ export async function writeReceiptArtifact(
 					}
 					if (receiptContentSignature(existing) !== signature) continue;
 					const adoptedMdPath = candidatePath.replace(/\.json$/, '.md');
-					let mdOk = false;
+					const rendered = renderReceiptMarkdown(existing);
+					let mdMatches = false;
 					try {
-						mdOk = fs.lstatSync(adoptedMdPath).isFile();
+						mdMatches =
+							fs.lstatSync(adoptedMdPath).isFile() &&
+							fs.readFileSync(adoptedMdPath, 'utf8') === rendered;
 					} catch {
-						mdOk = false;
+						mdMatches = false;
 					}
-					if (!mdOk) {
-						// Heal the rendered sibling (FB-005) rather than
-						// reporting a path to a missing file.
-						await atomicWriteFile(
-							adoptedMdPath,
-							renderReceiptMarkdown(existing),
-						);
+					if (!mdMatches) {
+						// Heal the rendered sibling (FB-005 / posted R1-M2:
+						// "exists and matches the receipt") — covers both the
+						// missing orphan AND a drifted sibling, so adoption never
+						// returns an md_path whose content disagrees with the
+						// frozen JSON.
+						await atomicWriteFile(adoptedMdPath, rendered);
 					}
 					return {
 						receipt: existing,
@@ -472,6 +486,13 @@ export async function writeExportBundle(
 			}
 		}
 		try {
+			// FB-001 (review round 2): the copy loop awaits per artifact, so a
+			// junction can be planted under exportRoot/finalDir mid-loop.
+			// Re-validate the publication chain immediately before the atomic
+			// rename, so publication can never land through a planted link.
+			assertContainedWriteTarget(root, exportRoot);
+			assertContainedWriteTarget(root, finalDir);
+			assertContainedWriteTarget(root, staging);
 			renameSyncWithRetry(staging, finalDir);
 		} catch (renameError) {
 			// R2-F3 (implementation review round 2): a concurrent export of

@@ -93,6 +93,15 @@ export type WriteImmutableArtifactOptions<T> = {
 	 * for a full minute under contention).
 	 */
 	lockTimeoutMs?: number;
+	/**
+	 * Optional lock-time destination re-validation (swarm-pr-feedback round 2,
+	 * FB-001): invoked INSIDE the evidence lock immediately before the
+	 * read-compare-write, after the last await boundary. A caller that
+	 * pre-validated its destination chain still has a window between that
+	 * check and lock acquisition — a symlink/junction planted during the wait
+	 * must be caught here, not only before.
+	 */
+	validateDestination?: () => void;
 };
 
 /**
@@ -107,13 +116,19 @@ export async function writeImmutableArtifact<T>(
 	options: WriteImmutableArtifactOptions<T>,
 ): Promise<T> {
 	assertProjectRoot(options.directory);
-	await mkdir(path.dirname(options.filePath), { recursive: true });
 	return withEvidenceLock(
 		options.directory,
 		options.relativeLockPath,
 		options.agent,
 		options.taskId,
 		async () => {
+			// FB-001 (review round 2): both the destination re-validation and
+			// the parent-directory creation run INSIDE the critical section —
+			// nothing awaitable separates "chain verified link-free" from the
+			// mkdir/write syscalls, so a junction planted while this writer
+			// waited for the lock is rejected before it can redirect bytes.
+			options.validateDestination?.();
+			await mkdir(path.dirname(options.filePath), { recursive: true });
 			const desired = options.serialize(options.value);
 			const existing = await readOptionalFile(options.filePath);
 			if (existing !== undefined) {

@@ -97,9 +97,27 @@ afterEach(() => {
 });
 
 function listTree(dir: string): Set<string> {
+	// FB-017 (swarm-pr-review): entries carry a content digest, not just the
+	// path name — a write that preserves the path set (in-place rewrite) or
+	// deletes a file is then detectable, closing the name-only evasion.
 	const out = new Set<string>();
 	for (const entry of fs.readdirSync(dir, { recursive: true }) as string[]) {
-		out.add(entry.replaceAll('\\', '/'));
+		const normalized = entry.replaceAll('\\', '/');
+		const full = path.join(dir, entry);
+		let digest = '<dir>';
+		try {
+			const stat = fs.lstatSync(full);
+			if (stat.isFile()) {
+				digest = createHash('sha256')
+					.update(fs.readFileSync(full))
+					.digest('hex');
+			} else if (stat.isSymbolicLink()) {
+				digest = `<link:${fs.readlinkSync(full)}>`;
+			}
+		} catch {
+			digest = '<unreadable>';
+		}
+		out.add(`${normalized} @@ ${digest}`);
 	}
 	return out;
 }
@@ -251,7 +269,10 @@ describe('receipt verify (#2970)', () => {
 			const outcome = await executeReceiptVerify(bundleDir);
 			expect(outcome.ok).toBe(true);
 			const after = listTree(path.dirname(bundleDir));
-			expect([...after].filter((entry) => !before.has(entry))).toHaveLength(0);
+			// FB-017: full content-hash tree equality — additions, deletions,
+			// in-place rewrites (same path set) and symlink swaps all fail
+			// this, where the old name-only filter detected none of them.
+			expect([...after].sort()).toEqual([...before].sort());
 			// Fresh-clone purity: the bundle needs no repo-local state — the
 			// fresh root contains ONLY the bundle (the .swarm/ paths INSIDE
 			// artifacts/ are the bundle's own portable content, by design).

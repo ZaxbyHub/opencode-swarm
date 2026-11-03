@@ -86,13 +86,59 @@ describe('close plan-export receipt-bundle reaper (FB-003)', () => {
 			);
 			expect(removed).toBe(0);
 			expect(fs.existsSync(path.join(outside, 'precious.txt'))).toBe(true);
-			expect(warnings.some((w) => w.includes('Preserved symlinked'))).toBe(
-				true,
-			);
+			expect(
+				warnings.some((w) => w.includes('Preserved bundle-shaped symlink')),
+			).toBe(true);
 		} finally {
 			fs.rmSync(dir, { recursive: true, force: true });
 			fs.rmSync(outside, { recursive: true, force: true });
 		}
+	});
+
+	test('a junction planted AT .swarm/plan-export aborts the sweep; nothing outside is deleted', async () => {
+		const dir = makeExportDir();
+		const outside = canonicalMkdtemp('receipt-reaper-parent-');
+		const warnings: string[] = [];
+		try {
+			// The model plants a junction over plan-export during the session;
+			// close must refuse to traverse it, not reap through to outside.
+			fs.rmSync(path.join(dir, '.swarm', 'plan-export'), {
+				recursive: true,
+				force: true,
+			});
+			const victim = path.join(outside, 'receipt-phase-1-000000000000');
+			fs.mkdirSync(victim, { recursive: true });
+			fs.writeFileSync(path.join(victim, 'receipt.json'), '{}');
+			fs.symlinkSync(
+				outside,
+				path.join(dir, '.swarm', 'plan-export'),
+				'junction',
+			);
+			const removed = await reapPlanExportReceiptBundles(dir, (m) =>
+				warnings.push(m),
+			);
+			expect(removed).toBe(0);
+			expect(fs.existsSync(path.join(victim, 'receipt.json'))).toBe(true);
+			expect(
+				warnings.some((w) => w.includes('Refusing to traverse')),
+				JSON.stringify(warnings),
+			).toBe(true);
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+			fs.rmSync(outside, { recursive: true, force: true });
+		}
+	});
+
+	test('runCleanStage wires the reaper (source pin: deleting the call must go red)', () => {
+		const source = fs.readFileSync(
+			path.join(import.meta.dir, '../../../src/commands/close/clean-stage.ts'),
+			'utf8',
+		);
+		const runStageStart = source.indexOf('export async function runCleanStage');
+		expect(runStageStart).toBeGreaterThan(-1);
+		expect(source.slice(runStageStart)).toContain(
+			'reapPlanExportReceiptBundles(',
+		);
 	});
 
 	test('absent plan-export directory is a silent no-op', async () => {

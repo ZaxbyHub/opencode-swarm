@@ -45,9 +45,12 @@ export function resolveCleanStageDeadlineMs(): number {
  * staging trees `.(receipt-...).tmp-<pid>-<ts>`. The retention registry's
  * `verification-receipts` row cites this sweep as its keyspaceBound reaper;
  * without it every distinct export would accumulate byte-copies forever.
- * Deletion is grammar-gated (never a prefix sweep), never follows links
- * (a symlinked entry is preserved with a warning), and retries the
- * documented Windows EBUSY/EPERM class.
+ * Deletion is grammar-gated (never a prefix sweep); the traversed chain
+ * (`.swarm` → `plan-export`) is containment-validated FIRST and a link on
+ * it aborts the sweep (preserving everything, warning instead); a
+ * bundle-shaped name that is itself a symlink is preserved with a warning,
+ * never deleted through; and removal retries the documented Windows
+ * EBUSY/EPERM class.
  */
 export async function reapPlanExportReceiptBundles(
 	directory: string,
@@ -55,6 +58,54 @@ export async function reapPlanExportReceiptBundles(
 ): Promise<number> {
 	let removed = 0;
 	const planExportDir = path.join(directory, '.swarm', 'plan-export');
+	// FB-001/FB-003 (review round 2): before enumerating/removing, prove the
+	// `.swarm` → `plan-export` chain we are about to traverse is REAL and
+	// contained under the resolved project root. A model-planted junction at
+	// `.swarm` or `.swarm/plan-export` would otherwise make `readdir`/`rm`
+	// delete byte-copies OUTSIDE the project while the entries look like
+	// receipt bundles. Each existing component must be a non-symlink
+	// directory; the final component additionally must not itself be a link.
+	let contained = false;
+	try {
+		const root = await fs.realpath(directory);
+		let cursor = root;
+		contained = true;
+		for (const segment of ['.swarm', 'plan-export']) {
+			cursor = path.join(cursor, segment);
+			let stat: Awaited<ReturnType<typeof fs.lstat>>;
+			try {
+				stat = await fs.lstat(cursor);
+			} catch (err: unknown) {
+				const code = (err as NodeJS.ErrnoException)?.code;
+				if (code === 'ENOENT' || code === 'ENOTDIR') {
+					contained = false; // nothing to reap on a missing/blocked chain
+					break;
+				}
+				throw err;
+			}
+			if (stat.isSymbolicLink() || !stat.isDirectory()) {
+				warn(
+					`Refusing to traverse link/non-directory plan-export ancestor: ${cursor}`,
+				);
+				contained = false;
+				break;
+			}
+		}
+		if (contained && (await fs.realpath(planExportDir)) !== cursor) {
+			// Defensive: the fully-resolved target must be the chain we walked.
+			warn(`plan-export resolves outside the walked chain: ${planExportDir}`);
+			contained = false;
+		}
+	} catch (err: unknown) {
+		const code = (err as NodeJS.ErrnoException)?.code;
+		if (code !== 'ENOENT') {
+			warn(
+				`Receipt-bundle reaper containment check failed: ${err instanceof Error ? err.message : String(err)}`,
+			);
+		}
+		contained = false;
+	}
+	if (!contained) return 0;
 	try {
 		for (const entry of await fs.readdir(planExportDir)) {
 			if (
@@ -70,7 +121,7 @@ export async function reapPlanExportReceiptBundles(
 				const stat = await fs.lstat(target);
 				if (stat.isSymbolicLink()) {
 					warn(
-						`Preserved symlinked plan-export entry (not a receipt bundle): ${entry}`,
+						`Preserved bundle-shaped symlink at plan-export entry (never deleted through): ${entry}`,
 					);
 					continue;
 				}

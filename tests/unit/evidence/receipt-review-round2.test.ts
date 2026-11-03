@@ -263,6 +263,32 @@ describe('receipt review round 2', () => {
 		}
 	});
 
+	test('FB-005 round 2: adoption heals a DRIFTED markdown sibling, not only a missing one', async () => {
+		const dir = makeDir('r2-fb005-drift-');
+		try {
+			await seedAndReceipt(dir, [passEntry()]);
+			const first = await buildVerificationReceipt(dir, 'phase', '1');
+			await writeReceiptArtifact(dir, first);
+			const receipts = path.join(dir, '.swarm', 'evidence', 'receipts');
+			const stem = `receipt-phase-1-${first.receipt_hash.slice(0, 12)}`;
+			fs.writeFileSync(
+				path.join(receipts, `${stem}.md`),
+				'CORRUPTED MARKDOWN CONTENT',
+			);
+			const rebuilt = await buildVerificationReceipt(dir, 'phase', '1');
+			const again = await writeReceiptArtifact(dir, rebuilt);
+			expect(again.alreadyFrozen).toBe(true);
+			expect(fs.readFileSync(again.mdPath, 'utf8')).not.toBe(
+				'CORRUPTED MARKDOWN CONTENT',
+			);
+			expect(fs.readFileSync(again.mdPath, 'utf8')).toContain(
+				'# Verification receipt',
+			);
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	test('FB-009: prune survives an entry vanishing mid-enumeration', async () => {
 		const dir = makeDir('r2-fb009-prune-');
 		try {

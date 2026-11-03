@@ -62,7 +62,6 @@ export interface ReceiptVerifyResult {
 }
 
 const MAX_VERIFY_RECEIPT_BYTES = 1024 * 1024;
-const MAX_VERIFY_ARTIFACT_BYTES = 16 * 1024 * 1024;
 
 export interface ReceiptVerifyInput {
 	/** Absolute path to the bundle's receipt.json. */

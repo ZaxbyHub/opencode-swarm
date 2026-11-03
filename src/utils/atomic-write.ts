@@ -193,7 +193,7 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 			'src/summaries/store.ts (pre-#2035; migrated-to=src/summaries/store.ts:writeRawSidecar)',
 			'src/retention/jsonl-cap.ts:213',
 			'src/services/skill-changelog.ts:58',
-			'src/evidence/receipt-store.ts:390',
+			'src/evidence/receipt-store.ts:404',
 		],
 		note: 'background lane/delegation stores keep bounded-retry rename semantics wired into their callers (#2034/#2276 delivery contracts); migration candidates for a follow-up but grammars registered',
 	},
