@@ -22,7 +22,9 @@
  *     parent's directory (Phase 0 C1: parented children inherit the parent's
  *     directory and ignore the requested one). Phase 3 originally created the
  *     lane session parentless, because a parentless create honoured
- *     `location.directory` on 2.0.x; OpenCode 2.1's native `subagent` tool
+ *     `location.directory` on 2.0.x (where `session.move` also exists — a
+ *     host-API probe on 2.0.26 confirms parented create + move places the
+ *     session; no version gate is applied); OpenCode 2.1's native `subagent` tool
  *     refuses to resume a session whose host-side `parentID` is not the calling
  *     session, so a parentless lane could never be resumed. Placement is
  *     verified (echo, `get` fallback, bounded re-read after the move) with a
@@ -77,9 +79,14 @@
  * plugin-created sessions, permission vocabulary honor, `context()` entry
  * shapes, `wait` on failed prompts, `get(parent).location` availability,
  * lane subagent resume + parentID overlay — LVD-1..LVD-4) with the owning
- * follow-up on #3169. The create-then-move semantics (parent's directory on a
- * parented create, `move` relocating while preserving `parentID`) were
- * verified by a live probe against OpenCode 2.1.4.
+ * follow-up on #3169. LVD-1 (lane subagent resume) status, #3558: verified
+ * live end to end (isolated coder dispatch resumed through the parented
+ * create + move) in an A/B on OpenCode 2.1.4, repeated on 2.2.5; placement
+ * semantics (a parented create ignores a foreign `location`; `move` relocates
+ * and keeps `parentID`) verified at host-API level on 2.0.26, where the A/B
+ * also passes (the unpatched parentless lane fails with the same error, the
+ * patched build resumes it). Not verified: Epic mode, parallel multi-lane
+ * dispatch.
  *
  * C6 await convention: every `await` lives inside a `deferredV2Session*`
  * function declaration or `const deferredV2SessionX = async (` binding — the
@@ -132,8 +139,11 @@ const SIGNAL_LESS_WAIT_CAP_MS = 10 * 60 * 1000;
  *    caller's signal); after a move timeout or abort, removal waits at most
  *    `laneMoveSettleMs` for the still-pending move to settle.
  *
- * Worst case before the (separately bounded) removal: one verification read
- * (1 s) + move (10 s) + settle wait (10 s) + confirmation (5 s).
+ * Worst case before the (separately bounded, `eagerCleanupTimeoutMs`)
+ * removal: one verification read (1 s) + move (10 s) + EITHER the settle wait
+ * (10 s, only after a move timeout/abort) OR the confirmation poll (about 5 s,
+ * only after a successful move) — about 21 s. The settle wait and the
+ * confirmation poll never both run.
  */
 export const _internals = {
 	laneMovePollAttempts: 40,
@@ -937,6 +947,31 @@ async function deferredV2SessionRemoveEager(
 	}
 }
 
+/**
+ * #3558 review round 3: start a host session call so that a synchronous throw
+ * or a non-promise return (both outside the `V2SessionDomain` contract)
+ * becomes a rejected promise instead of escaping the caller — every placement
+ * failure then reaches the `{data:null,error}` envelope and the removal
+ * compensation. Synchronous by design (no await; C6 scan).
+ */
+function startV2HostCall<T>(invoke: () => Promise<T>): Promise<T> {
+	try {
+		const returned: unknown = invoke();
+		if (
+			returned !== null &&
+			(typeof returned === 'object' || typeof returned === 'function') &&
+			typeof (returned as { then?: unknown }).then === 'function'
+		) {
+			return Promise.resolve(returned as PromiseLike<T>);
+		}
+		return Promise.reject(
+			new TypeError('the host session call returned a non-promise value'),
+		);
+	} catch (error) {
+		return Promise.reject(error);
+	}
+}
+
 /** Outcome of a host call raced against a deadline and the caller's signal. */
 type BoundedCall<T> =
 	| { kind: 'settled'; value: T }
@@ -966,7 +1001,9 @@ async function deferredV2SessionBoundedCall<T>(
 		onAbort = () => resolve({ kind: 'aborted' });
 		signal?.addEventListener('abort', onAbort, { once: true });
 	});
-	const timedOut = new Error('v2 session-client: bounded host call timed out');
+	const timedOut = new Error(
+		'v2 session-client: bounded host call exceeded its time budget',
+	);
 	try {
 		return await withTimeout(Promise.race([settled, aborted]), ms, timedOut);
 	} catch (error) {
@@ -989,7 +1026,7 @@ async function deferredV2SessionReadDirectory(
 	ms: number = _internals.laneReadTimeoutMs,
 ): Promise<{ directory?: string; terminal?: 'timeout' | 'aborted' }> {
 	const read = await deferredV2SessionBoundedCall(
-		ctx.session.get({ sessionID }),
+		startV2HostCall(() => ctx.session.get({ sessionID })),
 		ms,
 		signal,
 	);
@@ -1053,7 +1090,9 @@ async function deferredV2SessionMoveIntoLane(
 	// `steer` and `queue`, and the vendored `move` input type
 	// (src/host/v2/types.ts) pins no delivery value — nor an abort signal, so
 	// a timed-out or aborted move cannot be cancelled host-side.
-	const pendingMove = ctx.session.move({ sessionID, directory });
+	const pendingMove = startV2HostCall(() =>
+		ctx.session.move({ sessionID, directory }),
+	);
 	const moveTimeoutMs = _internals.laneMoveTimeoutMs;
 	const moved = await deferredV2SessionBoundedCall(
 		pendingMove,
@@ -1108,7 +1147,7 @@ async function deferredV2SessionMoveIntoLane(
 			return {
 				ok: false,
 				aborted: false,
-				reason: 'a placement read timed out',
+				reason: 'a placement read exceeded its time budget',
 				landed: observed,
 			};
 		}
@@ -1156,6 +1195,7 @@ async function deferredV2SessionEagerAbortCompensation(
 					: `removing session ${realId} also failed (${compensated.reason ?? 'unknown error'}) — remove it manually`
 			}${moveUnsettledNote(realId, moveUnsettled && compensated.ok)}`,
 			...(compensated.ok ? {} : { sessionID: realId, cleanupFailed: true }),
+			// Informational: see moveUnsettledNote (no programmatic consumer).
 			...(moveUnsettled && compensated.ok
 				? { sessionID: realId, cleanupUnconfirmed: true }
 				: {}),
@@ -1168,6 +1208,12 @@ async function deferredV2SessionEagerAbortCompensation(
  * still pending is not proven final — the host might still apply the move.
  */
 function moveUnsettledNote(realId: string, unsettled: boolean): string {
+	// Informational only (#3558 round 3): `cleanupUnconfirmed` and this text
+	// reach the architect inside the STANDARD_WORKTREE_SESSION_CREATE_FAILED
+	// message; the lane is removed regardless and nothing consumes the flag
+	// programmatically (`cleanupFailed` follows the same pattern at base).
+	// Durations stay glued to `ms` so a value such as 500 never forms a
+	// standalone status-like token for the dispatch-lanes transient classifier.
 	return unsettled
 		? `; session.move had not settled within ${_internals.laneMoveSettleMs}ms, so the removal of session ${realId} is unconfirmed — verify it is gone before retrying`
 		: '';
@@ -1253,7 +1299,7 @@ async function deferredV2SessionCreateEager(
 			return deferredV2SessionEagerAbortCompensation(ctx, realId);
 		}
 		if (read.terminal === 'timeout') {
-			placementFailure = 'the placement read timed out';
+			placementFailure = 'the placement read exceeded its time budget';
 		}
 		landed = read.directory;
 	}
@@ -1306,6 +1352,7 @@ async function deferredV2SessionCreateEager(
 						: `; cleanup of session ${realId} also failed (${removed.reason ?? 'unknown error'}) — remove it before retrying`
 				}${moveUnsettledNote(realId, moveUnsettled && removed.ok)}`,
 				...(removed.ok ? {} : { sessionID: realId, cleanupFailed: true }),
+				// Informational: see moveUnsettledNote (no programmatic consumer).
 				...(moveUnsettled && removed.ok
 					? { sessionID: realId, cleanupUnconfirmed: true }
 					: {}),

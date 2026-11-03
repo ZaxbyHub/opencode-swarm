@@ -40,7 +40,13 @@ type Behaviour = {
 	move?:
 		| { kind: 'now' }
 		| { kind: 'never' }
-		| { kind: 'late'; afterMs: number; reject?: boolean };
+		| {
+				kind: 'late';
+				afterMs: number;
+				reject?: boolean;
+				/** The exact rejection reason (defaults to a fresh Error). */
+				rejectWith?: Error;
+		  };
 	onMoveCalled?: () => void;
 	/** How `remove` behaves (default: resolves). */
 	remove?: 'ok' | 'reject' | 'never';
@@ -93,7 +99,8 @@ function makeHost(parentDir: string, laneDir: string, b: Behaviour = {}) {
 			return new Promise((resolve, reject) => {
 				setTimeout(() => {
 					log.push('move-settled');
-					if (mode.reject) reject(new Error('late move refusal'));
+					if (mode.reject)
+						reject(mode.rejectWith ?? new Error('late move refusal'));
 					else {
 						moved = true;
 						resolve();
@@ -204,7 +211,7 @@ describe('eager lane placement: bounded reads and serialised move compensation',
 		const result = await createLane(parentDir, laneDir, host.domain);
 		expect(result.data).toBeNull();
 		expect(result.error?.message).toContain('#3169 Phase 3 placement guard');
-		expect(result.error?.message).toContain('timed out');
+		expect(result.error?.message).toContain('exceeded its time budget');
 		expect(host.log).toContain('remove');
 	});
 
@@ -215,7 +222,7 @@ describe('eager lane placement: bounded reads and serialised move compensation',
 		});
 		const result = await createLane(parentDir, laneDir, host.domain);
 		expect(result.data).toBeNull();
-		expect(result.error?.message).toContain('timed out');
+		expect(result.error?.message).toContain('exceeded its time budget');
 		expect(host.log).not.toContain('move');
 		expect(host.log.at(-1)).toBe('remove');
 	});
@@ -235,12 +242,20 @@ describe('eager lane placement: bounded reads and serialised move compensation',
 	});
 
 	test('F2: a late move rejection after the timeout is not an unhandled rejection', async () => {
+		// Robust in the shared test process: only THIS test's rejection reason
+		// counts; unrelated process-level rejections are ignored.
+		const lateRefusal = new Error('late move refusal (unhandled probe)');
 		const unhandled: unknown[] = [];
 		const onUnhandled = (reason: unknown) => unhandled.push(reason);
 		process.on('unhandledRejection', onUnhandled);
 		try {
 			const host = makeHost(parentDir, laneDir, {
-				move: { kind: 'late', afterMs: 40, reject: true },
+				move: {
+					kind: 'late',
+					afterMs: 40,
+					reject: true,
+					rejectWith: lateRefusal,
+				},
 			});
 			const result = await createLane(parentDir, laneDir, host.domain);
 			expect(result.data).toBeNull();
@@ -248,7 +263,7 @@ describe('eager lane placement: bounded reads and serialised move compensation',
 				host.log.indexOf('move-settled'),
 			);
 			await new Promise((resolve) => setTimeout(resolve, 20));
-			expect(unhandled).toEqual([]);
+			expect(unhandled.some((reason) => reason === lateRefusal)).toBe(false);
 		} finally {
 			process.off('unhandledRejection', onUnhandled);
 		}
@@ -288,7 +303,7 @@ describe('eager lane placement: bounded reads and serialised move compensation',
 		expect(host.log.at(-1)).toBe('remove');
 	}, 2_000);
 
-	test('F3: an abort that lands during the final read returns compensation, not success', async () => {
+	test('F3: an abort raised synchronously inside the get call is consumed by the pre-check and returns compensation', async () => {
 		const controller = new AbortController();
 		const host = makeHost(parentDir, laneDir, {
 			laneGet: 'abort-then-lane',

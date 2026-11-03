@@ -46,7 +46,11 @@ interface HostSession {
 }
 
 interface FakeHostOptions {
-	/** 2.0.x-style host: a parented create honours `location`. */
+	/**
+	 * Hypothetical/later host shape: a parented create honours `location`.
+	 * (OpenCode 2.0.26 and 2.1.x do NOT: the child lands in the parent's
+	 * directory.)
+	 */
 	parentedCreateHonoursLocation?: boolean;
 	/** Number of `get` polls that still report the old directory after a move. */
 	moveLagPolls?: number;
@@ -269,7 +273,7 @@ describe('v2 session-client eager lane: parented create + move', () => {
 		expect(ops(host.calls)).not.toContain('remove');
 	});
 
-	test('a host whose parented create honours location (2.0.x shape) skips the move', async () => {
+	test('a host whose parented create honours location (hypothetical shape) skips the move', async () => {
 		const host = makeFakeHost(parentDir, {
 			parentedCreateHonoursLocation: true,
 		});
