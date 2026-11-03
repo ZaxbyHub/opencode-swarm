@@ -31,7 +31,10 @@ closed because GNU patch then picks basenames itself), `git checkout <ref>
 vectors and authorized per-target through the cd-tracking resolver. Targets
 named inside a patch are extracted at authorization time from the patch file
 (bounded read): tab- and space-prefixed `---/+++` headers, C-style octal
-escapes (`\ooo`) in header paths (unknown escapes fail closed), pure
+escapes (`\ooo` — accumulated as bytes and decoded once as UTF-8; unknown
+escapes and undecodable sequences fail closed), all four quoted/unquoted
+`diff --git` header combinations (git quotes each name independently
+under its default `core.quotePath=true`), pure
 rename sections (`rename from`/`rename to` — no `---/+++` lines), and
 rename/delete endpoints that only exist as section headers. Patch targets
 are judged under BOTH landings (git apply is patch-root-relative, GNU patch

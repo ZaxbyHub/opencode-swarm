@@ -9,6 +9,14 @@ import {
 } from '../../../src/hooks/pr-workflow-gate.js';
 import { canonicalMkdtemp, removeTreeWithRetry } from '../../helpers/tmpdir.js';
 
+// Explicit 20s per-test timeout (final-critic round: bun's 5s default flaked
+// 1-in-5 batch runs on Windows — these suites do full activation + real git +
+// checkout-lock work whose latency spikes ~6x under batch load; a timed-out
+// test's orphaned async work also races the afterEach teardown, so the
+// timeout prevents the cascade, not just the red).
+const t20 = (name: string, fn: () => Promise<void> | void) =>
+	test(name, fn, 20_000);
+
 /**
  * #3396 feedback pins over the PR_FEEDBACK base binding lifecycle (the
  * PRR-006/007/009 fix round): the production `gh pr view` resolver's success
@@ -98,7 +106,7 @@ beforeEach(() => {
 			};
 		},
 	);
-});
+}, 20_000);
 
 afterEach(() => {
 	gateSeams.runExternalTool = originalRunExternalTool;
@@ -115,95 +123,107 @@ afterEach(() => {
 	gateInternals.resolveRemoteRefsContainingHeadAsync = originalRemoteRefsAsync;
 	gateInternals.resetTrackedStateCache();
 	removeTreeWithRetry(directory);
-});
+}, 20_000);
 
 describe('PR_FEEDBACK base binding lifecycle (#3396 feedback)', () => {
-	test('resolver success path binds the computed merge base, not the base tip (PRR-001/007)', async () => {
-		await activatePrWorkflow(directory, SESSION, 'PR_FEEDBACK', {
-			prUrl: PR_URL,
-		});
-		const state = await readPrWorkflowGateState(directory, SESSION);
-		expect(state?.prFeedbackBaseRef).toBe('main');
-		expect(state?.prFeedbackBaseSha).toBe(MERGE_BASE);
-		expect(state?.prFeedbackBaseSha).not.toBe(BASE_TIP);
-		expect(state?.prFeedbackBaseBindingError).toBeUndefined();
-	});
+	t20(
+		'resolver success path binds the computed merge base, not the base tip (PRR-001/007)',
+		async () => {
+			await activatePrWorkflow(directory, SESSION, 'PR_FEEDBACK', {
+				prUrl: PR_URL,
+			});
+			const state = await readPrWorkflowGateState(directory, SESSION);
+			expect(state?.prFeedbackBaseRef).toBe('main');
+			expect(state?.prFeedbackBaseSha).toBe(MERGE_BASE);
+			expect(state?.prFeedbackBaseSha).not.toBe(BASE_TIP);
+			expect(state?.prFeedbackBaseBindingError).toBeUndefined();
+		},
+	);
 
-	test('a failed binding retries on the next re-activation and clears the advisory (PRR-006)', async () => {
-		ghOutcome = 'fail';
-		await activatePrWorkflow(directory, SESSION, 'PR_FEEDBACK', {
-			prUrl: PR_URL,
-		});
-		const failed = await readPrWorkflowGateState(directory, SESSION);
-		expect(failed?.prFeedbackBaseSha).toBeUndefined();
-		expect(typeof failed?.prFeedbackBaseBindingError === 'string').toBe(true);
+	t20(
+		'a failed binding retries on the next re-activation and clears the advisory (PRR-006)',
+		async () => {
+			ghOutcome = 'fail';
+			await activatePrWorkflow(directory, SESSION, 'PR_FEEDBACK', {
+				prUrl: PR_URL,
+			});
+			const failed = await readPrWorkflowGateState(directory, SESSION);
+			expect(failed?.prFeedbackBaseSha).toBeUndefined();
+			expect(typeof failed?.prFeedbackBaseBindingError === 'string').toBe(true);
 
-		// Re-activation with the gh failure healed: the unbound base MUST
-		// resolve (the pre-fix code never retried once the target was bound)
-		// and the stale advisory must be cleared.
-		ghOutcome = 'ok';
-		await activatePrWorkflow(directory, SESSION, 'PR_FEEDBACK', {
-			prUrl: PR_URL,
-		});
-		const healed = await readPrWorkflowGateState(directory, SESSION);
-		expect(healed?.prFeedbackBaseSha).toBe(MERGE_BASE);
-		expect(healed?.prFeedbackBaseBindingError).toBeUndefined();
-	});
+			// Re-activation with the gh failure healed: the unbound base MUST
+			// resolve (the pre-fix code never retried once the target was bound)
+			// and the stale advisory must be cleared.
+			ghOutcome = 'ok';
+			await activatePrWorkflow(directory, SESSION, 'PR_FEEDBACK', {
+				prUrl: PR_URL,
+			});
+			const healed = await readPrWorkflowGateState(directory, SESSION);
+			expect(healed?.prFeedbackBaseSha).toBe(MERGE_BASE);
+			expect(healed?.prFeedbackBaseBindingError).toBeUndefined();
+		},
+	);
 
-	test('rebind clears the base anchor and mismatch marker (PRR-009)', async () => {
-		await activatePrWorkflow(directory, SESSION, 'PR_FEEDBACK', {
-			prUrl: PR_URL,
-			prHeadSha: HEAD,
-		});
-		await recordPrFeedbackBaseMismatch(
-			directory,
-			SESSION,
-			'e'.repeat(40),
-			MERGE_BASE,
-		);
-		const before = await readPrWorkflowGateState(directory, SESSION);
-		expect(before?.prFeedbackStageABaseMismatch).toBeDefined();
+	t20(
+		'rebind clears the base anchor and mismatch marker (PRR-009)',
+		async () => {
+			await activatePrWorkflow(directory, SESSION, 'PR_FEEDBACK', {
+				prUrl: PR_URL,
+				prHeadSha: HEAD,
+			});
+			await recordPrFeedbackBaseMismatch(
+				directory,
+				SESSION,
+				'e'.repeat(40),
+				MERGE_BASE,
+			);
+			const before = await readPrWorkflowGateState(directory, SESSION);
+			expect(before?.prFeedbackStageABaseMismatch).toBeDefined();
 
-		currentHead = NEW_HEAD;
-		await rebindPrFeedbackHead(directory, SESSION, NEW_HEAD);
-		const after = await readPrWorkflowGateState(directory, SESSION);
-		expect(after?.prHeadSha).toBe(NEW_HEAD);
-		expect(after?.prFeedbackBaseRef).toBeUndefined();
-		expect(after?.prFeedbackBaseSha).toBeUndefined();
-		expect(after?.prFeedbackStageABaseMismatch).toBeUndefined();
-		// Round-2 residual pin (reviewer F): the stale binding advisory
-		// clears with the receipt. (The prFeedbackStageABaseTrust clear is
-		// also in the rebind literal but is NOT asserted here — the trust
-		// verdict has no production reader yet and this fixture cannot seed
-		// it without the full Stage A record chain, so an assertion would be
-		// vacuous.)
-		expect(after?.prFeedbackBaseBindingError).toBeUndefined();
-	});
+			currentHead = NEW_HEAD;
+			await rebindPrFeedbackHead(directory, SESSION, NEW_HEAD);
+			const after = await readPrWorkflowGateState(directory, SESSION);
+			expect(after?.prHeadSha).toBe(NEW_HEAD);
+			expect(after?.prFeedbackBaseRef).toBeUndefined();
+			expect(after?.prFeedbackBaseSha).toBeUndefined();
+			expect(after?.prFeedbackStageABaseMismatch).toBeUndefined();
+			// Round-2 residual pin (reviewer F): the stale binding advisory
+			// clears with the receipt. (The prFeedbackStageABaseTrust clear is
+			// also in the rebind literal but is NOT asserted here — the trust
+			// verdict has no production reader yet and this fixture cannot seed
+			// it without the full Stage A record chain, so an assertion would be
+			// vacuous.)
+			expect(after?.prFeedbackBaseBindingError).toBeUndefined();
+		},
+	);
 
-	test('an anchor computed for a different PR head is skipped (review F5)', async () => {
-		// The pre-lock resolution races a head move: when gh reports a head
-		// that differs from the head being bound, the anchor must NOT be
-		// applied (pre-fix of the guard this test pins, resolvedBaseHeadMatches
-		// returning true unconditionally bound a stale-base anchor).
-		ghOutcome = 'other-head';
-		await activatePrWorkflow(directory, SESSION, 'PR_FEEDBACK', {
-			prUrl: PR_URL,
-			prHeadSha: HEAD,
-		});
-		const skipped = await readPrWorkflowGateState(directory, SESSION);
-		expect(skipped?.prFeedbackBaseSha).toBeUndefined();
-		expect(skipped?.prFeedbackBaseRef).toBeUndefined();
+	t20(
+		'an anchor computed for a different PR head is skipped (review F5)',
+		async () => {
+			// The pre-lock resolution races a head move: when gh reports a head
+			// that differs from the head being bound, the anchor must NOT be
+			// applied (pre-fix of the guard this test pins, resolvedBaseHeadMatches
+			// returning true unconditionally bound a stale-base anchor).
+			ghOutcome = 'other-head';
+			await activatePrWorkflow(directory, SESSION, 'PR_FEEDBACK', {
+				prUrl: PR_URL,
+				prHeadSha: HEAD,
+			});
+			const skipped = await readPrWorkflowGateState(directory, SESSION);
+			expect(skipped?.prFeedbackBaseSha).toBeUndefined();
+			expect(skipped?.prFeedbackBaseRef).toBeUndefined();
 
-		// A matching head resolves and binds normally.
-		ghOutcome = 'ok';
-		await activatePrWorkflow(directory, SESSION, 'PR_FEEDBACK', {
-			prUrl: PR_URL,
-		});
-		const healed = await readPrWorkflowGateState(directory, SESSION);
-		expect(healed?.prFeedbackBaseSha).toBe(MERGE_BASE);
-	});
+			// A matching head resolves and binds normally.
+			ghOutcome = 'ok';
+			await activatePrWorkflow(directory, SESSION, 'PR_FEEDBACK', {
+				prUrl: PR_URL,
+			});
+			const healed = await readPrWorkflowGateState(directory, SESSION);
+			expect(healed?.prFeedbackBaseSha).toBe(MERGE_BASE);
+		},
+	);
 
-	test('rebind clears a stale binding advisory (review F6)', async () => {
+	t20('rebind clears a stale binding advisory (review F6)', async () => {
 		ghOutcome = 'fail';
 		await activatePrWorkflow(directory, SESSION, 'PR_FEEDBACK', {
 			prUrl: PR_URL,

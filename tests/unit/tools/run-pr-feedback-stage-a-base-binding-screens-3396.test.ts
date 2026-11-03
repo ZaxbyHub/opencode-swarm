@@ -19,6 +19,14 @@ import {
 } from '../../../src/tools/run-pr-feedback-stage-a.js';
 import { canonicalMkdtemp, removeTreeWithRetry } from '../../helpers/tmpdir.js';
 
+// Explicit 20s per-test timeout (final-critic round: bun's 5s default flaked
+// 1-in-5 batch runs on Windows — these suites do full activation + real git +
+// checkout-lock work whose latency spikes ~6x under batch load; a timed-out
+// test's orphaned async work also races the afterEach teardown, so the
+// timeout prevents the cascade, not just the red).
+const t20 = (name: string, fn: () => Promise<void> | void) =>
+	test(name, fn, 20_000);
+
 /**
  * Issue #3396 Stage A trust hardening: D7 (durable merge-base binding at
  * PR_FEEDBACK activation), D8 (compound-script plausibility screen), D9
@@ -136,7 +144,7 @@ beforeEach(async () => {
 		stdoutTruncated: false,
 		stderrTruncated: false,
 	}));
-});
+}, 20_000);
 
 afterEach(async () => {
 	_internals.runExternalTool = originalRunner;
@@ -167,7 +175,7 @@ afterEach(async () => {
 	// #3396 feedback (PRR-017): retrying teardown — raw fs.rm on Windows
 	// can hit EBUSY/EPERM from AV/indexer scans and leave a leaked tree.
 	removeTreeWithRetry(directory);
-});
+}, 20_000);
 
 async function activateWorkflow(sessionID: string, prUrl?: string) {
 	await activatePrWorkflow(
@@ -288,7 +296,7 @@ async function runStageA(checks: Array<Record<string, unknown>>) {
 }
 
 describe('PR_FEEDBACK base binding at activation (#3396 S1)', () => {
-	test('binds the gh-resolved merge base onto the gate state', async () => {
+	t20('binds the gh-resolved merge base onto the gate state', async () => {
 		baseResolution = { kind: 'ok', ref: 'main', oid: A40 };
 		await activateWorkflow(SESSION, PR_URL);
 		const state = await readPrWorkflowGateState(directory, SESSION);
@@ -298,70 +306,82 @@ describe('PR_FEEDBACK base binding at activation (#3396 S1)', () => {
 		expect(state?.prFeedbackBaseBindingError).toBeUndefined();
 	});
 
-	test('resolver failure is fail-open: fresh activation succeeds with an advisory', async () => {
-		baseResolution = { kind: 'throw' };
-		await activateWorkflow(THROW_SESSION, PR_URL);
-		const state = await readPrWorkflowGateState(directory, THROW_SESSION);
-		expect(state?.mode).toBe('PR_FEEDBACK');
-		expect(state?.prFeedbackTargetUrl).toBe(PR_URL);
-		expect(state?.prFeedbackBaseRef).toBeUndefined();
-		expect(state?.prFeedbackBaseSha).toBeUndefined();
-		const advisory = state?.prFeedbackBaseBindingError;
-		expect(typeof advisory === 'string' && advisory.length > 0).toBe(true);
-	});
+	t20(
+		'resolver failure is fail-open: fresh activation succeeds with an advisory',
+		async () => {
+			baseResolution = { kind: 'throw' };
+			await activateWorkflow(THROW_SESSION, PR_URL);
+			const state = await readPrWorkflowGateState(directory, THROW_SESSION);
+			expect(state?.mode).toBe('PR_FEEDBACK');
+			expect(state?.prFeedbackTargetUrl).toBe(PR_URL);
+			expect(state?.prFeedbackBaseRef).toBeUndefined();
+			expect(state?.prFeedbackBaseSha).toBeUndefined();
+			const advisory = state?.prFeedbackBaseBindingError;
+			expect(typeof advisory === 'string' && advisory.length > 0).toBe(true);
+		},
+	);
 });
 
 describe('Stage A binding verification arms (#3396 S1c)', () => {
-	test('bound base matching base_sha marks the run binding-verified', async () => {
-		baseResolution = { kind: 'ok', ref: 'main', oid: BASE };
-		await activateWorkflow(SESSION, PR_URL);
-		await declareVerifiedFeedbackLane();
-		await writeManifest({ build: 'custom-build && echo done' });
-		const result = await runStageA(stageAChecks());
-		expect(result.success).toBe(true);
-		const state = await readPrWorkflowGateState(directory, SESSION);
-		const stageA = state?.prFeedbackStageA;
-		// #3396 feedback (PRR-004): the strict child stays on the BASE
-		// two-value enum (rollback-safe floor: binding-verified maps to the
-		// caller-asserted floor); the 4-value verdict rides the root-level
-		// passthrough-safe prFeedbackStageABaseTrust.
-		expect(stageA?.baseVerification).toBe('caller-asserted');
-		expect(state?.prFeedbackStageABaseTrust).toBe('binding-verified');
-		expect(stageA?.baseRef).toBe('origin/main');
-		expect(stageA?.baseSha).toBe(BASE);
-	});
+	t20(
+		'bound base matching base_sha marks the run binding-verified',
+		async () => {
+			baseResolution = { kind: 'ok', ref: 'main', oid: BASE };
+			await activateWorkflow(SESSION, PR_URL);
+			await declareVerifiedFeedbackLane();
+			await writeManifest({ build: 'custom-build && echo done' });
+			const result = await runStageA(stageAChecks());
+			expect(result.success).toBe(true);
+			const state = await readPrWorkflowGateState(directory, SESSION);
+			const stageA = state?.prFeedbackStageA;
+			// #3396 feedback (PRR-004): the strict child stays on the BASE
+			// two-value enum (rollback-safe floor: binding-verified maps to the
+			// caller-asserted floor); the 4-value verdict rides the root-level
+			// passthrough-safe prFeedbackStageABaseTrust.
+			expect(stageA?.baseVerification).toBe('caller-asserted');
+			expect(state?.prFeedbackStageABaseTrust).toBe('binding-verified');
+			expect(stageA?.baseRef).toBe('origin/main');
+			expect(stageA?.baseSha).toBe(BASE);
+		},
+	);
 
-	test('bound base differing from base_sha blocks the run and records the mismatch', async () => {
-		baseResolution = { kind: 'ok', ref: 'main', oid: OTHER_BASE };
-		await activateWorkflow(SESSION, PR_URL);
-		await declareVerifiedFeedbackLane();
-		await writeManifest({ build: 'custom-build && echo done' });
-		const result = await runStageA(stageAChecks());
-		// #3396 S1c per the issue's own contract: the caller provenance is
-		// IGNORED (identical to no-provenance) — the run CONTINUES, and this
-		// fixture needs trusted base-identical scripts, so it fails through
-		// the ordinary opaque-script path (4.5 round 1 aligned the code with
-		// the EARS text; a whole-run hard failure was over-strict).
-		expect(result.success).toBe(false);
-		expect(result.message ?? '').toContain('opaque package script');
-		const state = await readPrWorkflowGateState(directory, SESSION);
-		expect(state?.prFeedbackStageABaseMismatch).toMatchObject({
-			expectedBaseSha: OTHER_BASE,
-			receivedBaseSha: BASE,
-		});
-		// The blocked run persisted no Stage A receipt at all.
-		expect(state?.prFeedbackStageA).toBeUndefined();
-	});
+	t20(
+		'bound base differing from base_sha blocks the run and records the mismatch',
+		async () => {
+			baseResolution = { kind: 'ok', ref: 'main', oid: OTHER_BASE };
+			await activateWorkflow(SESSION, PR_URL);
+			await declareVerifiedFeedbackLane();
+			await writeManifest({ build: 'custom-build && echo done' });
+			const result = await runStageA(stageAChecks());
+			// #3396 S1c per the issue's own contract: the caller provenance is
+			// IGNORED (identical to no-provenance) — the run CONTINUES, and this
+			// fixture needs trusted base-identical scripts, so it fails through
+			// the ordinary opaque-script path (4.5 round 1 aligned the code with
+			// the EARS text; a whole-run hard failure was over-strict).
+			expect(result.success).toBe(false);
+			expect(result.message ?? '').toContain('opaque package script');
+			const state = await readPrWorkflowGateState(directory, SESSION);
+			expect(state?.prFeedbackStageABaseMismatch).toMatchObject({
+				expectedBaseSha: OTHER_BASE,
+				receivedBaseSha: BASE,
+			});
+			// The blocked run persisted no Stage A receipt at all.
+			expect(state?.prFeedbackStageA).toBeUndefined();
+		},
+	);
 
-	test('no binding (activation without prUrl) keeps the caller-asserted floor', async () => {
-		await activateWorkflow(SESSION);
-		await declareVerifiedFeedbackLane();
-		await writeManifest({ build: 'custom-build && echo done' });
-		const result = await runStageA(stageAChecks());
-		expect(result.success).toBe(true);
-		const state = await readPrWorkflowGateState(directory, SESSION);
-		const stageA = state?.prFeedbackStageA;
-		expect(stageA?.baseVerification).toBe('caller-asserted');
-		expect(state?.prFeedbackStageABaseTrust).toBe('caller-asserted');
-	});
+	t20(
+		'no binding (activation without prUrl) keeps the caller-asserted floor',
+		async () => {
+			await activateWorkflow(SESSION);
+			await declareVerifiedFeedbackLane();
+			await writeManifest({ build: 'custom-build && echo done' });
+			const result = await runStageA(stageAChecks());
+			expect(result.success).toBe(true);
+			const state = await readPrWorkflowGateState(directory, SESSION);
+			const stageA = state?.prFeedbackStageA;
+			expect(stageA?.baseVerification).toBe('caller-asserted');
+			expect(state?.prFeedbackStageABaseTrust).toBe('caller-asserted');
+		},
+	);
 });
