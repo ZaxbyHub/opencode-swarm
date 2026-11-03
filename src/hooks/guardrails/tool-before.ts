@@ -1567,8 +1567,23 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 					},
 				);
 				if (isVerifierConfigDenial(lenientAuthorityCheck)) {
+					// #3396 feedback (PRR-015): a verifier-config denial is
+					// layer 'protected-path' by construction, so the lenient
+					// branch is the one path to that layer that skipped the
+					// severe evidence event the enforced path always records —
+					// mirror it here (event id appended to the message the
+					// same way).
+					const evidenceEventID =
+						lenientAuthorityCheck.layer === 'protected-path'
+							? recordFullAutoSevereEvidenceEvent({
+									sessionID,
+									childSessionID: sessionID,
+									category: 'protected_state_mutation',
+									paths: [target],
+								})
+							: undefined;
 					throw new ShellWriteBlockedError(
-						`WRITE BLOCKED: Agent "${shellWriteAgent}" is not authorised to write "${target}" (via shell). Reason: ${lenientAuthorityCheck.reason}`,
+						`WRITE BLOCKED: Agent "${shellWriteAgent}" is not authorised to write "${target}" (via shell). Reason: ${lenientAuthorityCheck.reason}${evidenceEventID ? ` Evidence event: ${evidenceEventID}.` : ''}`,
 						{ writeTarget: target, writeOperator: opts?.writeOperator },
 					);
 				}

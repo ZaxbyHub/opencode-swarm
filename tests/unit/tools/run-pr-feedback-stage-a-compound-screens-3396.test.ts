@@ -22,7 +22,7 @@ import {
 	_internals,
 	executeRunPrFeedbackStageA,
 } from '../../../src/tools/run-pr-feedback-stage-a.js';
-import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
+import { canonicalMkdtemp, removeTreeWithRetry } from '../../helpers/tmpdir.js';
 
 /**
  * Issue #3396 Stage A trust hardening: D7 (durable merge-base binding at
@@ -169,7 +169,9 @@ afterEach(async () => {
 	gateInternals.resolvePrFeedbackBaseViaGh = originalResolveBase;
 	gateInternals.resetTrackedStateCache();
 	baseResolution = { kind: 'null' };
-	await fs.rm(directory, { recursive: true, force: true });
+	// #3396 feedback (PRR-017): retrying teardown — raw fs.rm on Windows
+	// can hit EBUSY/EPERM from AV/indexer scans and leave a leaked tree.
+	removeTreeWithRetry(directory);
 });
 
 async function activateWorkflow(sessionID: string, prUrl?: string) {
@@ -398,6 +400,36 @@ describe('Compound screen + lifecycle hooks (#3396 S2/S3)', () => {
 		expect(rejected.message ?? '').toContain(
 			'directly selects the lifecycle hook "prebuild"',
 		);
+	});
+
+	test('a base-identical SOLE echo hook body is trusted (PRR-010 sole-echo floor)', async () => {
+		// Pre-fix the zero-non-exempt-segment arm refused EVERY all-echo
+		// script, so the canonical npm announcement hook body
+		// (`prebuild: "echo done"`, byte-identical at base) tripped the
+		// plausibility screen and lost its trusted base-identical path.
+		await writeManifest(
+			{
+				build: 'custom-build && echo done',
+				prebuild: 'echo done',
+			},
+			{
+				build: 'custom-build && echo done',
+				prebuild: 'echo done',
+			},
+		);
+		const result = await runStageA(stageAChecks());
+		expect(result.success).toBe(true);
+	});
+
+	test('grep -w in a trailing segment is not misread as a PM override flag (PRR-010)', async () => {
+		// Pre-fix the workspace/cwd override axis applied to EVERY segment,
+		// so `grep -w` (whole-word match) was refused as an `npm -w`-style
+		// override; the axis is now scoped to package-manager heads.
+		await writeManifest({
+			build: 'custom-build && grep -w pattern src/kept.txt && echo done',
+		});
+		const result = await runStageA(stageAChecks());
+		expect(result.success).toBe(true);
 	});
 });
 

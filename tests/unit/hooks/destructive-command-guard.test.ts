@@ -481,7 +481,7 @@ describe('destructive command guard', () => {
 				await expect(hooks.toolBefore(input, output)).resolves.toBeUndefined();
 			});
 
-			test('rsync --delete without scope → BLOCKED', async () => {
+			test('rsync --delete without scope → BLOCKED by the scope-gated --delete guard', async () => {
 				const config = defaultConfig();
 				const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
 				const input = makeBashInput(
@@ -489,8 +489,11 @@ describe('destructive command guard', () => {
 					'rsync -av --delete src/ plugins',
 				);
 				const output = makeBashOutput('rsync -av --delete src/ plugins');
+				// #3396 feedback (PRR-016): message-matched against the executed
+				// probe — the --delete guard's own message fires (with an active
+				// scope the same command is ALLOWED, see the sibling pin).
 				await expect(hooks.toolBefore(input, output)).rejects.toThrow(
-					/BLOCKED/,
+					/"rsync --delete" detected/,
 				);
 			});
 		});

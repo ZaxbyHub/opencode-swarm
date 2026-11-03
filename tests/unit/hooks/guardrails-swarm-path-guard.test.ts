@@ -46,9 +46,7 @@ describe('destructive command guard - .swarm path protection (sections 16-21)', 
 	});
 	afterEach(() => rmSync(TEST_DIR, { recursive: true, force: true }));
 
-	// ============================================================
-	// Section 16: POSIX mv targeting .swarm/ paths
-	// ============================================================
+	// ==== Section 16: POSIX mv targeting .swarm/ paths ====
 	describe('Section 16: POSIX mv targeting .swarm/ paths', () => {
 		test('mv .swarm/evidence/file.json /tmp/ → BLOCKED', async () => {
 			const config = defaultConfig();
@@ -316,9 +314,7 @@ describe('destructive command guard - .swarm path protection (sections 16-21)', 
 		);
 	});
 
-	// ============================================================
-	// Section 19: Non-recursive rm targeting .swarm/ paths
-	// ============================================================
+	// ==== Section 19: Non-recursive rm targeting .swarm/ paths ====
 	describe('Section 19: Non-recursive rm targeting .swarm/ paths', () => {
 		test('rm .swarm/evidence/4.1.json → BLOCKED (non-recursive)', async () => {
 			const config = defaultConfig();
@@ -380,9 +376,7 @@ describe('destructive command guard - .swarm path protection (sections 16-21)', 
 		});
 	});
 
-	// ============================================================
-	// Section 20: cp + rm chain detection (copy-then-delete bypass)
-	// ============================================================
+	// ==== Section 20: cp + rm chain detection (copy-then-delete bypass) ====
 	describe('Section 20: cp + rm chain targeting .swarm/ paths', () => {
 		test('cp .swarm/evidence/file.json /tmp/ && rm .swarm/evidence/file.json → BLOCKED', async () => {
 			const config = defaultConfig();
@@ -482,7 +476,7 @@ describe('destructive command guard - .swarm path protection (sections 16-21)', 
 			);
 		});
 
-		test('rsync --remove-source-files /tmp/ /dest/ → BLOCKED as a write outside the workspace (#3120)', async () => {
+		test('rsync --remove-source-files /tmp/ /dest/ → BLOCKED as a write outside the workspace (#3120; write-gate containment)', async () => {
 			const config = defaultConfig();
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
 			const input = makeBashInput(
@@ -490,7 +484,10 @@ describe('destructive command guard - .swarm path protection (sections 16-21)', 
 				'rsync --remove-source-files /tmp/ /dest/',
 			);
 			const output = makeBashOutput('rsync --remove-source-files /tmp/ /dest/');
-			await expect(hooks.toolBefore(input, output)).rejects.toThrow();
+			// PRR-016: message-matched (executed probe); see the title.
+			await expect(hooks.toolBefore(input, output)).rejects.toThrow(
+				/AUTHORITY_ROOT_ESCAPE/,
+			);
 		});
 
 		test('tar --remove-files -czf backup.tar.gz .swarm/evidence/ → BLOCKED', async () => {
@@ -1171,7 +1168,7 @@ describe('destructive command guard - .swarm path protection (sections 16-21)', 
 			await expect(hooks.toolBefore(input, output)).resolves.toBeUndefined();
 		});
 
-		test('rsync --remove-source-files .swarm/ /tmp/ blocked as a workspace write even when block_destructive_commands is false (#3120)', async () => {
+		test('rsync --remove-source-files .swarm/ /tmp/ blocked as a workspace write even when block_destructive_commands is false (#3120; write-gate containment)', async () => {
 			const config = defaultConfig({ block_destructive_commands: false });
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
 			const input = makeBashInput(
@@ -1181,7 +1178,10 @@ describe('destructive command guard - .swarm path protection (sections 16-21)', 
 			const output = makeBashOutput(
 				'rsync --remove-source-files .swarm/ /tmp/',
 			);
-			await expect(hooks.toolBefore(input, output)).rejects.toThrow();
+			// PRR-016: message-matched (executed probe); see the title.
+			await expect(hooks.toolBefore(input, output)).rejects.toThrow(
+				/AUTHORITY_ROOT_ESCAPE/,
+			);
 		});
 	});
 });

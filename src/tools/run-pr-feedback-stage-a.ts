@@ -873,8 +873,24 @@ function isPlausibleReproductionCommand(
 // #3396 S3: true when the script NAME is an implicit lifecycle hook (pre*/post*
 // around a category stem) rather than an explicit category script.
 function isLifecycleHookScriptName(scriptName: string): boolean {
-	const stripped = scriptName.replace(/^(?:pre|post)(?=.)/i, '');
-	return stripped !== scriptName;
+	// Copilot feedback: a name that merely STARTS with pre/post (`prettier`,
+	// `prepare`) is NOT an implicit lifecycle hook, and a bare category name
+	// (`build`) is the PRIMARY script, not a hook. Lifecycle = at least one
+	// pre/post prefix was stripped AND the remaining stem matches a Stage A
+	// category (`pretest` -> `test`).
+	const originalName = scriptName;
+	let stripped = scriptName.replace(/^(?:pre|post)(?=.)/i, '');
+	while (stripped !== scriptName) {
+		scriptName = stripped;
+		stripped = scriptName.replace(/^(?:pre|post)(?=.)/i, '');
+	}
+	return (
+		stripped !== originalName &&
+		(categoryMatchesScriptName('build', stripped) ||
+			categoryMatchesScriptName('typecheck', stripped) ||
+			categoryMatchesScriptName('lint', stripped) ||
+			categoryMatchesScriptName('reproduction', stripped))
+	);
 }
 
 // Shell reserved words / control / terminating / wrapper builtins that either
@@ -1017,11 +1033,16 @@ function hasDangerousCompoundSegment(scriptText: string): boolean {
 		) {
 			return false;
 		}
+		// #3396 feedback (PRR-010): the workspace/cwd override axis is a
+		// PACKAGE-MANAGER contract (`npm -C`, `pnpm --filter`, …) — applied
+		// to every segment it falsely refused ordinary tools sharing the
+		// short flags (`grep -w`, `grep -F`, `tar -C`).
 		if (
-			args.some((arg) =>
+			['npm', 'pnpm', 'yarn', 'bun', 'npx'].includes(headLower) &&
+			(args.some((arg) =>
 				/^(?:--(?:cwd|filter|prefix|workspace)(?:=|$)|-[CFw](?:$|=))/.test(arg),
 			) ||
-			(headLower === 'yarn' && args.includes('workspace'))
+				(headLower === 'yarn' && args.includes('workspace')))
 		) {
 			return false;
 		}
@@ -1042,9 +1063,11 @@ function hasDangerousCompoundSegment(scriptText: string): boolean {
 		isSegmentSafe(lastRaw, true);
 	const evaluated = lastIsExemptTail ? segments.slice(0, -1) : segments;
 	if (evaluated.length === 0) {
-		// Zero non-exempt segments (`echo one && echo two`): no validation
-		// segment at all — refuse.
-		return true;
+		// Zero non-exempt segments. A SOLE echo/printf segment (`pretest:
+		// "echo done"`, the canonical npm announcement hook) is safe — the
+		// whole script is the exempt tail. A MULTI-segment all-echo chain
+		// (`echo one && echo two`) still refuses: no validation segment.
+		return segments.length !== 1;
 	}
 	return evaluated.some((segment) => !isSegmentSafe(segment));
 }
@@ -2044,19 +2067,26 @@ function discoverApplicableStageAObligations(
 						if (isLifecycleHookScriptName(script)) {
 							if (authorizingValidator) continue;
 							if (typeof commandText !== 'string') continue;
+							const hookBaseIdentical = isBaseIdenticalRepositoryScript(
+								canonicalRoot,
+								candidateRoot,
+								script,
+								commandText,
+								contractBase,
+							);
 							if (
-								isBaseIdenticalRepositoryScript(
-									canonicalRoot,
-									candidateRoot,
-									script,
-									commandText,
-									contractBase,
-								) &&
+								hookBaseIdentical &&
 								!hasDangerousCompoundSegment(commandText)
 							) {
 								continue;
 							}
-							discoveryOverflow = `Stage A lifecycle hook ${path.relative(canonicalRoot, candidateRoot).replaceAll('\\', '/') || '.'}/package.json#${script} was added or modified by this PR — npm executes it implicitly around its primary script. Keep the hook byte-identical to the immutable merge base, authorize a .pr-validation.json validator that is already byte-identical there, or remove the hook change from this PR`;
+							// #3396 feedback (PRR-010): a base-identical hook
+							// that trips the plausibility screen must NOT be
+							// told it "was added or modified by this PR" —
+							// name the actual cause.
+							discoveryOverflow = hookBaseIdentical
+								? `Stage A lifecycle hook ${path.relative(canonicalRoot, candidateRoot).replaceAll('\\', '/') || '.'}/package.json#${script} is byte-identical to the immutable merge base but its body trips the Stage A plausibility screen (substitution, redirection, control grammar, or blocked executables) — simplify the hook body or authorize a .pr-validation.json validator that is already byte-identical there`
+								: `Stage A lifecycle hook ${path.relative(canonicalRoot, candidateRoot).replaceAll('\\', '/') || '.'}/package.json#${script} was added or modified by this PR — npm executes it implicitly around its primary script. Keep the hook byte-identical to the immutable merge base, authorize a .pr-validation.json validator that is already byte-identical there, or remove the hook change from this PR`;
 							continue;
 						}
 						if (!declaredCommand) {
@@ -2803,9 +2833,22 @@ export async function executeRunPrFeedbackStageA(
 					? {
 							baseRef: contractBase.baseRef,
 							baseSha: contractBase.baseSha,
-							baseVerification,
+							// #3396 feedback (PRR-004): the strict child keeps
+							// the BASE two-value enum (rollback-safe floor);
+							// the 4-value verdict rides the root-level
+							// passthrough-safe prFeedbackStageABaseTrust.
+							baseVerification:
+								baseVerification === 'binding-verified'
+									? 'caller-asserted'
+									: baseVerification === 'binding-mismatch'
+										? 'none'
+										: baseVerification,
+							baseTrust: baseVerification,
 						}
-					: { baseVerification: 'none' as const },
+					: {
+							baseVerification: 'none' as const,
+							baseTrust: 'none' as const,
+						},
 			},
 		);
 		// Success: do NOT persist full output. A successful Stage A run has no

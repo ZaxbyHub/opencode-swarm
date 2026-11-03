@@ -3651,6 +3651,11 @@ function detectRsyncWrites(cmd: unknown): WriteTarget[] {
 		'--max-size',
 		'--min-size',
 		'--block-size',
+		// #3120 4.5 review round: filter options take a separate value; an
+		// unlisted trailing filter was previously judged as the destination.
+		'--exclude',
+		'--include',
+		'--filter',
 	]);
 	const positionals: string[] = [];
 	let skipNext = false;
@@ -5981,25 +5986,114 @@ function getWritesFromCommandRedirs(
 // endpoint. Returns undefined when the text is not decodable as a unified
 // diff (no headers at all): resolution then fails closed instead of
 // guessing.
+// Unquote a git C-style quoted path ("caf\303\251.txt"): handles the
+// escapes git itself emits (\\, \", and \ooo octal) plus the common
+// whitespace forms; ANY other escape fails closed (undefined) rather than
+// guessing. Returns undefined for non-quoted input shapes it cannot verify.
+function unquoteGitPath(quoted: string): string | undefined {
+	if (quoted.length < 2 || !quoted.startsWith('"') || !quoted.endsWith('"')) {
+		return undefined;
+	}
+	const inner = quoted.slice(1, -1);
+	let out = '';
+	for (let i = 0; i < inner.length; i += 1) {
+		const ch = inner[i];
+		if (ch !== '\\') {
+			out += ch;
+			continue;
+		}
+		const next = inner[i + 1];
+		if (next === '\\' || next === '"') {
+			out += next;
+			i += 1;
+			continue;
+		}
+		const octal = /^([0-7]{1,3})/.exec(inner.slice(i + 1));
+		if (octal) {
+			out += String.fromCharCode(Number.parseInt(octal[1], 8));
+			i += octal[1].length;
+			continue;
+		}
+		if (next === 't' || next === 'n' || next === 'r') {
+			out += next === 't' ? '\t' : next === 'n' ? '\n' : '\r';
+			i += 1;
+			continue;
+		}
+		return undefined;
+	}
+	return out;
+}
+
+// Strip the -p<n> prefix from one diff endpoint. Over-deep strip (level >=
+// component count) fails closed: git apply would error or write nothing, so
+// there is no real target to authorize.
+function stripPatchEndpoint(raw: string, strip: number): string | undefined {
+	if (raw === '/dev/null') return undefined;
+	const components = raw.split('/');
+	const level = Math.max(0, strip);
+	if (components.length <= level) return undefined;
+	const stripped = components.slice(level).join('/');
+	return stripped && stripped !== '.' ? stripped : undefined;
+}
+
 function extractPatchTargets(
 	patchText: string,
 	strip: number,
 ): string[] | undefined {
 	const targets = new Set<string>();
 	let sawHeader = false;
+	const addEndpoint = (raw: string): boolean => {
+		const stripped = stripPatchEndpoint(raw, strip);
+		// undefined: /dev/null (no target) OR over-deep strip (fail closed).
+		if (stripped === undefined) return raw !== '/dev/null';
+		if (stripped) targets.add(stripped);
+		return false;
+	};
 	for (const rawLine of patchText.split(/\r\n|\n/)) {
-		const pre = /^--- (?:("(?:[^"\\]|\\.)+")|(\S+))/.exec(rawLine);
-		const post = /^\+\+\+ (?:("(?:[^"\\]|\\.)+")|(\S+))/.exec(rawLine);
+		// #3120 4.5 rounds: git rename/copy sections carry their paths on
+		// `diff --git a/X b/Y` and `rename from/to` lines with NO ---/+++
+		// headers, so a mixed patch's rename destination must be judged too
+		// (executed bypass: rename into .secretscanignore created the file
+		// unjudged). Header paths are tab-terminated when git appends a
+		// timestamp, so capture the tab-free run, not \S+ (space paths).
+		if (rawLine.startsWith('diff --git ')) {
+			sawHeader = true;
+			const both = /^diff --git (?:"?a\/(.+?)"?) (?:"?b\/(.+?)"?)$/.exec(
+				rawLine,
+			);
+			if (!both) return undefined;
+			if (addEndpoint(`a/${both[1]}`)) return undefined;
+			if (addEndpoint(`b/${both[2]}`)) return undefined;
+			continue;
+		}
+		if (
+			rawLine.startsWith('rename from ') ||
+			rawLine.startsWith('rename to ')
+		) {
+			sawHeader = true;
+			const word =
+				/^(?:rename (?:from|to)) (?:("(?:[^"\\]|\\.)+")|([^\t].*?))(?:\t.*)?$/.exec(
+					rawLine,
+				);
+			if (!word) return undefined;
+			const raw = word[1] ? unquoteGitPath(word[1]) : (word[2] as string);
+			if (raw === undefined) return undefined;
+			// rename lines are repo-root-relative already; never re-strip.
+			if (raw && raw !== '.') targets.add(raw);
+			continue;
+		}
+		const pre = /^--- (?:("(?:[^"\\]|\\.)+")|([^\t].*?))(?:\t.*)?$/.exec(
+			rawLine,
+		);
+		const post = /^\+\+\+ (?:("(?:[^"\\]|\\.)+")|([^\t].*?))(?:\t.*)?$/.exec(
+			rawLine,
+		);
 		const match = pre ?? post;
 		if (!match) continue;
 		sawHeader = true;
-		const raw = (match[1] ? JSON.parse(match[1]) : match[2]) as string;
-		if (raw === '/dev/null') continue;
-		const components = raw.split('/');
-		const level = Math.max(0, strip);
-		const stripped =
-			components.length > level ? components.slice(level).join('/') : raw;
-		if (stripped && stripped !== '.') targets.add(stripped);
+		const raw = match[1] ? unquoteGitPath(match[1]) : (match[2] as string);
+		if (raw === undefined) return undefined;
+		if (addEndpoint(raw)) return undefined;
 	}
 	return sawHeader ? [...targets] : undefined;
 }
@@ -6013,6 +6107,7 @@ function extractPatchTargets(
 function expandPatchApplyWrite(
 	original: WriteTarget,
 	context: string,
+	rootDir: string,
 ): ResolvedWriteTarget[] {
 	const unresolvable: ResolvedWriteTarget = {
 		original,
@@ -6038,10 +6133,17 @@ function expandPatchApplyWrite(
 		const extracted = text ? extractPatchTargets(text, strip) : undefined;
 		if (extracted === undefined) return [unresolvable];
 		for (const target of extracted) {
-			const resolvedPath = resolvePath(target, context);
-			if (resolvedPath === null || seen.has(resolvedPath)) continue;
-			seen.add(resolvedPath);
-			entries.push({ original, resolvedPath, resolved: true });
+			// #3120 4.5 review round: `git apply` resolves patch-internal
+			// paths work-tree-ROOT-relative (silently ignoring paths that do
+			// not carry the cwd prefix) while GNU `patch` is cwd-relative.
+			// Judge BOTH landings — dual emission is the same fail-safe
+			// direction the pessimistic map uses for cd-ambiguous writes.
+			for (const landing of new Set([context, rootDir])) {
+				const resolvedPath = resolvePath(target, landing);
+				if (resolvedPath === null || seen.has(resolvedPath)) continue;
+				seen.add(resolvedPath);
+				entries.push({ original, resolvedPath, resolved: true });
+			}
 		}
 	}
 	return entries.length > 0 ? entries : [unresolvable];
@@ -6210,6 +6312,7 @@ export function resolveWriteTargets(
 			return expandPatchApplyWrite(
 				original,
 				trackedContext ?? resolvedMap.get(key)?.evalDirectory ?? cwd,
+				cwd,
 			);
 		}
 		const buildEntry = (resolved: {

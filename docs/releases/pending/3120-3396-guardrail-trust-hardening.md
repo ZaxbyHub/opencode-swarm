@@ -30,22 +30,38 @@ closed because GNU patch then picks basenames itself), `git checkout <ref>
 <pathspec>…` (no `--`), and `rsync <src>… <dest>` are now detected as write
 vectors and authorized per-target through the cd-tracking resolver. Targets
 named inside a patch are extracted at authorization time from the patch file
-(bounded read); unreadable/undecodable patches and stdin patches block.
+(bounded read): tab- and space-prefixed `---/+++` headers, C-style octal
+escapes (`\ooo`) in header paths (unknown escapes fail closed), pure
+rename sections (`rename from`/`rename to` — no `---/+++` lines), and
+rename/delete endpoints that only exist as section headers. Patch targets
+are judged under BOTH landings (git apply is patch-root-relative, GNU patch
+is cwd-relative), and `rsync` also flags `--exclude`/`--include`/`--filter`
+arguments as write paths. Unreadable/undecodable patches and stdin patches
+block.
 
 ## PR_FEEDBACK: durably bound merge base + Stage A trust screens (#3396)
 
 - PR_FEEDBACK activation resolves the merge base via ONE bounded `gh pr view`
   and durably binds `prFeedbackBaseRef/Sha` in gate state (fail-open: a
   resolution failure records `prFeedbackBaseBindingError` and never wedges
-  activation). Stage A verifies its caller-asserted `base_sha` against the
-  binding: matching runs record `baseVerification: 'binding-verified'`; a
+  activation; a failed binding is retried on the next matching re-activation
+  and a successful re-resolution clears the stale advisory). The bound value
+  is the real merge base (`git merge-base base_ref pr_head_sha`), not the
+  base-branch tip, so callers whose base advanced keep trusted provenance.
+  The `gh` subprocess runs BEFORE the checkout/session mutation locks so the
+  network call never stalls concurrent gate mutations. Stage A verifies its
+  caller-asserted `base_sha` against the binding: matching runs carry the
+  root-level `prFeedbackStageABaseTrust: 'binding-verified'` verdict; a
   differing base ignores the caller provenance entirely (trusted
   base-identical scripts unavailable — identical to no-provenance) and
-  persists a bounded `prFeedbackStageABaseMismatch` marker on the blocked
-  path. With no binding, the disclosed `caller-asserted` floor stays. The
-  Stage A receipt now actually PERSISTS its base identity (the pre-fix call
-  passed flat option keys the record schema ignored, so even the disclosure
-  never landed).
+  persists a bounded `prFeedbackStageABaseMismatch` marker (durable-wins
+  evidence, appended without advancing the gate revision, cleared by a head
+  rebind). The receipt's strict child keeps the BASE two-value trust floor
+  (rollback-safe: the 4-value verdict rides the passthrough-safe root field
+  older binaries ignore). With no binding, the disclosed `caller-asserted`
+  floor stays. The Stage A receipt now actually PERSISTS its base identity
+  (the pre-fix call passed flat option keys the record schema ignored, so
+  even the disclosure never landed).
 - Directory-copy boundary (disclosed): `rsync <src>… <dest>` and `cp -r`
   write authorization judges the DESTINATION operand only — directory
   CONTENTS are not enumerated, so a source tree carrying a protected file

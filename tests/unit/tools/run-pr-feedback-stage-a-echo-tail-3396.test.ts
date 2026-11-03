@@ -4,6 +4,7 @@
 // each split file stays independently runnable.
 
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { storeLaneOutput } from '../../../src/background/lane-output-store.js';
@@ -22,7 +23,7 @@ import {
 	_internals,
 	executeRunPrFeedbackStageA,
 } from '../../../src/tools/run-pr-feedback-stage-a.js';
-import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
+import { canonicalMkdtemp, removeTreeWithRetry } from '../../helpers/tmpdir.js';
 
 /**
  * Issue #3396 Stage A trust hardening: D7 (durable merge-base binding at
@@ -169,7 +170,9 @@ afterEach(async () => {
 	gateInternals.resolvePrFeedbackBaseViaGh = originalResolveBase;
 	gateInternals.resetTrackedStateCache();
 	baseResolution = { kind: 'null' };
-	await fs.rm(directory, { recursive: true, force: true });
+	// #3396 feedback (PRR-017): retrying teardown — raw fs.rm on Windows
+	// can hit EBUSY/EPERM from AV/indexer scans and leave a leaked tree.
+	removeTreeWithRetry(directory);
 });
 
 async function activateWorkflow(sessionID: string, prUrl?: string) {
@@ -328,10 +331,22 @@ describe('echo-tail smuggling matrix (4.5 round 1)', () => {
 	});
 
 	test('this repository real build script shape stays trusted', async () => {
-		await writeManifest({
-			build:
-				'bun run clean && bun run scripts/generate-config-schema.ts && bun build src/index.ts --outdir dist',
-		});
+		// #3396 feedback (PRR-021): read the REAL package.json#build so this
+		// pin exercises the repository's actual 7-segment build chain — a
+		// fabricated shorter script let the trusted decision pass on a shape
+		// production never runs.
+		const realBuild = (
+			JSON.parse(
+				readFileSync(
+					new URL('../../../package.json', import.meta.url),
+					'utf-8',
+				),
+			) as { scripts?: Record<string, string> }
+		).scripts?.build;
+		expect(typeof realBuild === 'string' && realBuild.includes('&&')).toBe(
+			true,
+		);
+		await writeManifest({ build: realBuild as string });
 		const result = await runStageA(stageAChecks());
 		expect(result.success).toBe(true);
 	});

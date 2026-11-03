@@ -272,17 +272,21 @@ test('registry ratchet: the codec binding registers exactly the three observabil
 		'utf8',
 	);
 	const matches = source.match(
-		/\[\s*'prReviewSubmitRejections',\s*'prReviewVerdictRejections',\s*'skillContractAdvisories',?\s*\]/g,
+		/\[\s*'prReviewSubmitRejections',(?:\s|\/\/[^\n]*)*'prReviewVerdictRejections',(?:\s|\/\/[^\n]*)*'skillContractAdvisories',(?:\s|\/\/[^\n]*)*'prFeedbackStageABaseMismatch',?\s*\]/g,
 	);
-	// Exactly one binding site carrying exactly these three names in order —
+	// Exactly one binding site carrying exactly these names in order —
 	// adding, removing, or renaming a registered field must force this
 	// ratchet to be revisited (the durable-wins merge and the append contract
-	// are keyed on this list).
+	// are keyed on this list). #3396 feedback (PRR-014): the binding-mismatch
+	// marker joined as the fourth observability field — evidence written
+	// concurrently with Stage A state transitions, durable-wins against
+	// stale-snapshot clobbering, appendable without advancing the revision.
 	expect(matches).toHaveLength(1);
 	const names = matches![0]!.match(/'[A-Za-z0-9]+'/g) ?? [];
 	expect(names).toEqual([
 		"'prReviewSubmitRejections'",
 		"'prReviewVerdictRejections'",
 		"'skillContractAdvisories'",
+		"'prFeedbackStageABaseMismatch'",
 	]);
 });

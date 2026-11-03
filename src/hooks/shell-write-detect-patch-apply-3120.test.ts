@@ -204,14 +204,14 @@ describe('resolveWriteTargets — patch-content target extraction (#3120)', () =
 			const analysis = detectPosixWrites(command);
 			const result = resolveWriteTargets(command, analysis.writes, root);
 
+			// #3120 4.5 feedback: dual landing — `git apply` resolves
+			// patch paths work-tree-ROOT-relative while GNU patch is
+			// cwd-relative, so BOTH landings are judged (fail-safe).
 			const paths = result.map((r) => r.resolvedPath);
+			expect(paths).toContain(path.join(root, 'src', 'one.txt'));
+			expect(paths).toContain(path.join(root, 'src', 'two.txt'));
 			expect(paths).toContain(path.join(root, 'sub', 'src', 'one.txt'));
 			expect(paths).toContain(path.join(root, 'sub', 'src', 'two.txt'));
-			for (const resolved of result) {
-				expect(resolved.resolvedPath?.startsWith(path.join(root, 'sub'))).toBe(
-					true,
-				);
-			}
 		} finally {
 			removeTreeWithRetry(root);
 		}

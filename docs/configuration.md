@@ -1359,9 +1359,11 @@ lifecycle bookkeeping stays active in BOTH modes (AGENTS.md invariant 9):
   1 MB (1,000,000 bytes) are rejected (`WRITE BLOCKED: Patch payload exceeds
   1 MB`) because authority cannot be verified for an unbounded write set.
 - Verifier-config protection is ALSO unconditional (#3120): writes to the
-  built-in verifier-config globs (`**/.secretscanignore`, `**/tsconfig*.json`,
-  `**/biome.json(c)`, `**/.eslintrc*`, `eslint.config.*`, `**/.prettierrc*`,
-  `prettier.config.*`, `**/oxlintrc*`, `**/.golangci*` — plus configured
+  built-in verifier-config globs (`**/oxlintrc*`, `**/.oxlintrc*`,
+  `**/.eslintrc*`, `**/eslint.config.*`, `**/.prettierrc*`,
+  `**/prettier.config.*`, `**/biome.json`, `**/biome.jsonc`,
+  `**/tsconfig*.json`, `**/.secretscanignore`, `**/.golangci*` — the exact
+  `BUILT_IN_VERIFIER_CONFIG_GLOBS` set, plus configured
   `authority.verifier_config_paths`) are denied for EVERY agent role,
   including the OpenCode-native roles otherwise exempt from swarm write
   restrictions, and the denial fires even with `guardrails.enabled: false`.

@@ -17,7 +17,7 @@ import {
 	_internals,
 	executeRunPrFeedbackStageA,
 } from '../../../src/tools/run-pr-feedback-stage-a.js';
-import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
+import { canonicalMkdtemp, removeTreeWithRetry } from '../../helpers/tmpdir.js';
 
 /**
  * Issue #3396 Stage A trust hardening: D7 (durable merge-base binding at
@@ -164,7 +164,9 @@ afterEach(async () => {
 	gateInternals.resolvePrFeedbackBaseViaGh = originalResolveBase;
 	gateInternals.resetTrackedStateCache();
 	baseResolution = { kind: 'null' };
-	await fs.rm(directory, { recursive: true, force: true });
+	// #3396 feedback (PRR-017): retrying teardown — raw fs.rm on Windows
+	// can hit EBUSY/EPERM from AV/indexer scans and leave a leaked tree.
+	removeTreeWithRetry(directory);
 });
 
 async function activateWorkflow(sessionID: string, prUrl?: string) {
@@ -317,9 +319,14 @@ describe('Stage A binding verification arms (#3396 S1c)', () => {
 		await writeManifest({ build: 'custom-build && echo done' });
 		const result = await runStageA(stageAChecks());
 		expect(result.success).toBe(true);
-		const stageA = (await readPrWorkflowGateState(directory, SESSION))
-			?.prFeedbackStageA;
-		expect(stageA?.baseVerification).toBe('binding-verified');
+		const state = await readPrWorkflowGateState(directory, SESSION);
+		const stageA = state?.prFeedbackStageA;
+		// #3396 feedback (PRR-004): the strict child stays on the BASE
+		// two-value enum (rollback-safe floor: binding-verified maps to the
+		// caller-asserted floor); the 4-value verdict rides the root-level
+		// passthrough-safe prFeedbackStageABaseTrust.
+		expect(stageA?.baseVerification).toBe('caller-asserted');
+		expect(state?.prFeedbackStageABaseTrust).toBe('binding-verified');
 		expect(stageA?.baseRef).toBe('origin/main');
 		expect(stageA?.baseSha).toBe(BASE);
 	});
@@ -352,8 +359,9 @@ describe('Stage A binding verification arms (#3396 S1c)', () => {
 		await writeManifest({ build: 'custom-build && echo done' });
 		const result = await runStageA(stageAChecks());
 		expect(result.success).toBe(true);
-		const stageA = (await readPrWorkflowGateState(directory, SESSION))
-			?.prFeedbackStageA;
+		const state = await readPrWorkflowGateState(directory, SESSION);
+		const stageA = state?.prFeedbackStageA;
 		expect(stageA?.baseVerification).toBe('caller-asserted');
+		expect(state?.prFeedbackStageABaseTrust).toBe('caller-asserted');
 	});
 });
