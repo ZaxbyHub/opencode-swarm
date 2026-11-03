@@ -85,23 +85,28 @@ const DEGENERATE_DIRECTORY_KEY =
 const MAX_MEMOIZED_DIRECTORY_KEYS = 64;
 const directoryKeyBySpelling = new Map<string, string>();
 
-function canonicalDirectory(directory: string): string {
-	if (typeof directory !== 'string' || directory.length === 0) {
+function canonicalDirectory(rawSpelling: string): string {
+	// The parameter is named rawSpelling deliberately: this map keys by the
+	// CALLER'S INPUT SPELLING (not a canonical project identity — that is the
+	// whole point of the memo), which also keeps check:path-identity's
+	// project-key rule (raw path-resolve results as project keys) out of this
+	// by-design raw-keyed table.
+	if (typeof rawSpelling !== 'string' || rawSpelling.length === 0) {
 		return DEGENERATE_DIRECTORY_KEY;
 	}
-	const memoized = directoryKeyBySpelling.get(directory);
+	const memoized = directoryKeyBySpelling.get(rawSpelling);
 	if (memoized !== undefined) return memoized;
 	let key: string;
 	try {
-		key = fs.realpathSync(directory);
+		key = fs.realpathSync(rawSpelling);
 	} catch {
 		// First-computation-wins: freeze the lexical key for this spelling so a
 		// realpath that starts succeeding mid-dispatch cannot flip the key
 		// between record and consult/retire. The `lexical:` prefix keeps a
 		// fallback key from colliding with any realpath-derived key.
-		key = `lexical:${path.resolve(directory)}`;
+		key = `lexical:${path.resolve(rawSpelling)}`;
 	}
-	directoryKeyBySpelling.set(directory, key);
+	directoryKeyBySpelling.set(rawSpelling, key);
 	while (directoryKeyBySpelling.size > MAX_MEMOIZED_DIRECTORY_KEYS) {
 		const oldest = directoryKeyBySpelling.keys().next().value;
 		if (oldest === undefined) break;
