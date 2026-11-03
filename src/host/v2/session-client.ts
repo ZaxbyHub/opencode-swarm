@@ -17,19 +17,27 @@
  *     BEFORE creating anything. Phase 3: a CONFIRMED parent-directory divergence
  *     (the worktree-isolation lane shape — a lane worktree directory always
  *     differs from the parent's project root) now takes the EAGER path: a REAL
- *     parentless host session created immediately in the requested directory
- *     (Phase 0 C1: parented children inherit the parent's directory; parentless
- *     creates honor the requested one), placement verified post-create (echo,
- *     `get` fallback) with a remove-and-fail-closed guard, and the requested
- *     `parentID` REMEMBERED plugin-side and overlaid onto `get` results so
- *     `prWorkflowSessionResolver`'s first-hop controller resolution
+ *     PARENTED host session created immediately, then relocated into the
+ *     requested directory with `session.move` when the host placed it in the
+ *     parent's directory (Phase 0 C1: parented children inherit the parent's
+ *     directory and ignore the requested one). Phase 3 originally created the
+ *     lane session parentless, because a parentless create honoured
+ *     `location.directory` on 2.0.x; OpenCode 2.1's native `subagent` tool
+ *     refuses to resume a session whose host-side `parentID` is not the calling
+ *     session, so a parentless lane could never be resumed. Placement is
+ *     verified (echo, `get` fallback, bounded re-read after the move) with a
+ *     remove-and-fail-closed guard; a host whose parented create already
+ *     honours the location is never moved. The requested `parentID` is also
+ *     REMEMBERED plugin-side and overlaid onto `get` results — now redundant
+ *     with the host-recorded parent, retained as a fallback for host
+ *     projections that omit it (it can only ever restate the parent the create
+ *     sent) so `prWorkflowSessionResolver`'s first-hop controller resolution
  *     (`pr-workflow-session-resolver.ts`) and `lookupParentSessionIDForTaskRoute`
- *     stay v1-faithful for parentless lane children (the host-side link is what
- *     the v2 host cannot carry here). A real id is returned — the native
- *     `subagent` tool resumes it by id (Phase 0 C7). Unverifiable parent
- *     placement still fails closed with the Phase 2 typed error (live-verification
- *     item), and same-directory/parentless creates keep the deferred placeholder
- *     (the real create there must carry prompt-time options — permissions are
+ *     stay v1-faithful. A real id is returned — the native `subagent` tool
+ *     resumes it by id (Phase 0 C7). Unverifiable parent placement still fails
+ *     closed with the Phase 2 typed error (live-verification item), and
+ *     same-directory/parentless creates keep the deferred placeholder (the real
+ *     create there must carry prompt-time options — permissions are
  *     create-time-only on v2).
  *   - `prompt({path:{id}, body:{agent,model?,system?,tools,parts}, signal?})`
  *     emulates the v1 BLOCKING call over three arms keyed on the registry:
@@ -68,8 +76,10 @@
  * rests on are recorded as deferrals in the trace (context-hook firing for
  * plugin-created sessions, permission vocabulary honor, `context()` entry
  * shapes, `wait` on failed prompts, `get(parent).location` availability,
- * parentless subagent resume + parentID overlay — LVD-1..LVD-4) with the owning
- * follow-up on #3169.
+ * lane subagent resume + parentID overlay — LVD-1..LVD-4) with the owning
+ * follow-up on #3169. The create-then-move semantics (parent's directory on a
+ * parented create, `move` relocating while preserving `parentID`) were
+ * verified by a live probe against OpenCode 2.1.4.
  *
  * C6 await convention: every `await` lives inside a `deferredV2Session*`
  * function declaration or `const deferredV2SessionX = async (` binding — the
@@ -107,6 +117,19 @@ const ERROR_RECHECK_DELAY_MS = 50;
  */
 const SIGNAL_LESS_WAIT_CAP_MS = 10 * 60 * 1000;
 
+/**
+ * Lane-move confirmation pacing (DI seam, invariant 7: tests shrink the poll
+ * instead of waiting on real time). `session.move` is applied host-side at a
+ * session boundary, so the eager lane create re-reads the session until it
+ * reports the lane directory. Live probe on OpenCode 2.1.4: an idle session
+ * reported the new directory 0.04–0.34 s after `move`; 40 × 50 ms (~2 s, plus
+ * each `get` round-trip) leaves several-fold headroom while staying bounded.
+ */
+export const _internals = {
+	laneMovePollAttempts: 40,
+	laneMovePollDelayMs: 50,
+};
+
 interface PlaceholderRecord {
 	parentID?: string;
 	title?: string;
@@ -114,7 +137,7 @@ interface PlaceholderRecord {
 	realId?: string;
 	/**
 	 * #3169 Phase 3: this record represents an EAGERLY created REAL host session
-	 * (parentless lane placement) rather than a deferred placeholder — prompt
+	 * (parented, moved lane placement) rather than a deferred placeholder — prompt
 	 * routing keys on this flag, never on `realId` presence (a prompted
 	 * placeholder also has `realId` bound; the PRR-002 retire logic applies to
 	 * non-eager records only).
@@ -364,7 +387,12 @@ function classifyContextEntries(entries: unknown[]): ContextClassification {
 	const texts = assistantEntries
 		.map(entryText)
 		.filter((text): text is string => typeof text === 'string');
-	const outcome = idleOutcome(entries);
+	// Final-turn idle only: a moved lane session carries a host `idle`
+	// (outcome succeeded) right after its `location-switched` entry and before
+	// the first user message (live 2.1.4 / 2.2.5 timelines). Reading the last
+	// idle over the whole list would let that pre-prompt marker turn a turn
+	// that produced no idle of its own into an empty success.
+	const outcome = idleOutcome(finalTurn);
 	return {
 		outcome,
 		texts,
@@ -803,11 +831,14 @@ export function createV2SessionClient(
 			}): Promise<{ data: unknown; error?: unknown }> => {
 				const id = args?.path?.id;
 				const stash = placeholderSessions.get(id);
-				// #3169 Phase 3: overlay the REMEMBERED parentID for eager records —
-				// the host session is parentless by design (lane placement), and the
-				// plugin-side link keeps `prWorkflowSessionResolver`'s first-hop
-				// controller resolution and `lookupParentSessionIDForTaskRoute`
-				// v1-faithful. Non-eager records and foreign ids pass through.
+				// #3169 Phase 3: overlay the REMEMBERED parentID for eager records.
+				// Eager lane sessions are now created WITH that parentID, so the
+				// host normally reports the same value; the overlay is kept as a
+				// fallback for host projections that omit `parentID` (it can only
+				// restate the parent the create sent), keeping
+				// `prWorkflowSessionResolver`'s first-hop controller resolution and
+				// `lookupParentSessionIDForTaskRoute` v1-faithful. Non-eager records
+				// and foreign ids pass through.
 				const overlayParentID =
 					stash?.eager === true && typeof stash.parentID === 'string'
 						? stash.parentID
@@ -891,20 +922,141 @@ async function deferredV2SessionRemoveEager(
 	}
 }
 
+/** Bound for the lane `session.move` call itself (the relocation is then polled). */
+const LANE_MOVE_TIMEOUT_MS = 10_000;
+
+/** A session's reported `location.directory`; undefined when unverifiable. */
+async function deferredV2SessionReadDirectory(
+	ctx: V2PluginContext,
+	sessionID: string,
+): Promise<string | undefined> {
+	const info = await ctx.session.get({ sessionID }).catch(() => undefined);
+	// Non-parenthesized on purpose: a `const x = (` cast-assignment matches
+	// the C6 scanner's function-binding regex and resets its function tracker
+	// mid-function, mis-attributing later awaits (dual-shape-parity.test.ts
+	// C6 gate). Keep cast bindings off a leading `(` in this file.
+	const reported = info as { location?: { directory?: unknown } } | undefined;
+	return typeof reported?.location?.directory === 'string'
+		? reported.location.directory
+		: undefined;
+}
+
+type LaneMoveOutcome =
+	| { ok: true; landed: string }
+	| { ok: false; aborted: boolean; reason?: string; landed?: string };
+
 /**
- * #3169 Phase 3 — the EAGER parentless lane create (confirmed divergence only).
+ * Relocate a freshly created, parented lane session into its worktree and
+ * confirm the host applied it. OpenCode 2.1.x derives a parented child's
+ * location from its parent (a `location` passed to create is ignored), and
+ * `session.move` is the host's supported way to change a session's
+ * directory: live probe on 2.1.4 — the moved session keeps its `parentID` and
+ * `projectID`, reports the lane directory within 0.04–0.34 s, and its shell
+ * commands then run with the lane as cwd. The move is applied asynchronously,
+ * so the session is re-read (bounded by `_internals`) until it reports the
+ * lane directory; the last observed directory is returned on timeout so the
+ * caller's typed error names where the session actually is.
+ */
+async function deferredV2SessionMoveIntoLane(
+	ctx: V2PluginContext,
+	sessionID: string,
+	directory: string,
+	signal: AbortSignal | undefined,
+): Promise<LaneMoveOutcome> {
+	if (typeof ctx.session.move !== 'function') {
+		return {
+			ok: false,
+			aborted: false,
+			reason: 'the host session domain has no session.move',
+		};
+	}
+	try {
+		// `delivery` is deliberately omitted: it only sequences a move against
+		// an in-flight run (`steer` interrupts it, `queue` waits for it), and
+		// this session was created by the caller a moment ago and has never
+		// been prompted, so there is nothing to sequence against. The live 2.1.4
+		// probe relocated an idle session identically with `delivery` omitted,
+		// `steer` and `queue`, and the vendored `move` input type
+		// (src/host/v2/types.ts) pins no delivery value.
+		await withTimeout(
+			ctx.session.move({ sessionID, directory }),
+			LANE_MOVE_TIMEOUT_MS,
+			new Error(`session.move exceeded ${LANE_MOVE_TIMEOUT_MS}ms`),
+		);
+	} catch (error) {
+		return {
+			ok: false,
+			aborted: false,
+			reason: `session.move failed: ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		};
+	}
+	let observed: string | undefined;
+	const attempts = _internals.laneMovePollAttempts;
+	for (let attempt = 0; attempt < attempts; attempt += 1) {
+		if (signal?.aborted) return { ok: false, aborted: true, landed: observed };
+		observed = await deferredV2SessionReadDirectory(ctx, sessionID);
+		if (observed !== undefined && sameDirectoryLexical(observed, directory)) {
+			return { ok: true, landed: observed };
+		}
+		if (attempt < attempts - 1) {
+			await new Promise((resolve) =>
+				setTimeout(resolve, _internals.laneMovePollDelayMs),
+			);
+		}
+	}
+	return { ok: false, aborted: false, landed: observed };
+}
+
+/**
+ * PRR-007: the caller's abort/timeout can land while the eager create is
+ * still in flight (its cleanup keys on the RESOLVED id, so an abandoned
+ * create would otherwise leave a live session nobody holds the id for).
+ * Remove what was created and refuse.
+ */
+async function deferredV2SessionEagerAbortCompensation(
+	ctx: V2PluginContext,
+	realId: string,
+): Promise<{ data: null; error: unknown }> {
+	const compensated = await deferredV2SessionRemoveEager(ctx, realId);
+	if (!compensated.ok) {
+		// Report the truth: the compensation itself failed, so the session may
+		// still be alive and the caller needs the id to clean it up.
+		log('v2 session-client: aborted eager create compensation failed', {
+			reason: compensated.reason,
+		});
+	}
+	return {
+		data: null,
+		error: {
+			message: `v2 session-client: eager lane create aborted by the caller; ${
+				compensated.ok
+					? 'the created session was removed'
+					: `removing session ${realId} also failed (${compensated.reason ?? 'unknown error'}) — remove it manually`
+			}`,
+			...(compensated.ok ? {} : { sessionID: realId, cleanupFailed: true }),
+		},
+	};
+}
+
+/**
+ * #3169 Phase 3 — the EAGER lane create (confirmed divergence only).
  *
- * Creates a REAL host session immediately — WITHOUT `parentID` (Phase 0 C1: a
- * parented child inherits the parent's directory and ignores the requested
- * one; a parentless create honors it) and WITHOUT permissions (lane coders
- * need full tools; the read-only map is a dispatcher-only concept). Placement
- * is the entire point, so it is REQUIRED: echoed `location.directory` must
- * match lexically; a silent create falls back to `get`; mismatch or
- * unverifiable removes the session and fails closed (the consumer's existing
+ * Creates a REAL host session immediately WITH `parentID` — the host records
+ * the true parent, which OpenCode 2.1.x's native `subagent` tool requires
+ * before it resumes the session ("Session X is not a child of the current
+ * session") — and WITHOUT permissions (lane coders need full tools; the
+ * read-only map is a dispatcher-only concept). Placement is the entire point,
+ * so it is REQUIRED: when the created session does not already report the
+ * lane directory (echo, else `get`), it is relocated with `session.move` and
+ * re-read until it does. A host whose parented create already honours the
+ * requested `location` therefore never sees a move. Any failure (move
+ * rejected or unavailable, relocation never observed, caller abort) removes
+ * the session and fails closed (the consumer's existing
  * `STANDARD_WORKTREE_SESSION_CREATE_FAILED` degradation runs unchanged). The
- * requested `parentID` is remembered plugin-side and overlaid onto `get`
- * results, keeping `prWorkflowSessionResolver`'s first-hop controller
- * resolution v1-faithful for parentless lane children.
+ * requested `parentID` is also remembered plugin-side for the `get` overlay
+ * (see the client's `get`).
  */
 async function deferredV2SessionCreateEager(
 	ctx: V2PluginContext,
@@ -918,7 +1070,12 @@ async function deferredV2SessionCreateEager(
 	// `get` arm says the same).
 	let created: unknown;
 	try {
+		// `location` is still sent: OpenCode 2.1.x ignores it for a parented
+		// create (the child lands in the parent's directory and is moved
+		// below), while a host that honours it places the child directly and
+		// the move is skipped.
 		created = await ctx.session.create({
+			parentID,
 			...(title !== undefined ? { title } : {}),
 			location: { directory },
 		});
@@ -947,50 +1104,35 @@ async function deferredV2SessionCreateEager(
 			},
 		};
 	}
-	// PRR-007: the caller's abort/timeout can land while the host create is
-	// still in flight (its cleanup keys on the RESOLVED id, so an abandoned
-	// create would otherwise leave a live parentless session nobody holds the
-	// id for). Compensate here: remove what we just created and refuse.
 	if (signal?.aborted) {
-		const compensated = await deferredV2SessionRemoveEager(ctx, realId);
-		if (!compensated.ok) {
-			// Report the truth: the compensation itself failed, so the session may
-			// still be alive and the caller needs the id to clean it up.
-			log('v2 session-client: aborted eager create compensation failed', {
-				reason: compensated.reason,
-			});
-		}
-		return {
-			data: null,
-			error: {
-				message: `v2 session-client: eager lane create aborted by the caller; ${
-					compensated.ok
-						? 'the created session was removed'
-						: `removing session ${realId} also failed (${compensated.reason ?? 'unknown error'}) — remove it manually`
-				}`,
-				...(compensated.ok ? {} : { sessionID: realId, cleanupFailed: true }),
-			},
-		};
+		return deferredV2SessionEagerAbortCompensation(ctx, realId);
 	}
 	let landed: string | undefined =
 		typeof createdRecord.location?.directory === 'string'
 			? createdRecord.location.directory
-			: undefined;
-	if (landed === undefined) {
-		const info = await ctx.session
-			.get({ sessionID: realId })
-			.catch(() => undefined);
-		// Non-parenthesized on purpose: a `const x = (` cast-assignment matches
-		// the C6 scanner's function-binding regex and resets its function tracker
-		// mid-function, mis-attributing later awaits (dual-shape-parity.test.ts
-		// C6 gate). Keep cast bindings off a leading `(` in this file.
-		const reported = info as { location?: { directory?: unknown } } | undefined;
-		landed =
-			typeof reported?.location?.directory === 'string'
-				? reported.location.directory
-				: undefined;
-	}
+			: await deferredV2SessionReadDirectory(ctx, realId);
+	let moveFailure: string | undefined;
 	if (landed === undefined || !sameDirectoryLexical(landed, directory)) {
+		const moved = await deferredV2SessionMoveIntoLane(
+			ctx,
+			realId,
+			directory,
+			signal,
+		);
+		if (moved.ok) {
+			landed = moved.landed;
+		} else if (moved.aborted) {
+			return deferredV2SessionEagerAbortCompensation(ctx, realId);
+		} else {
+			landed = moved.landed ?? landed;
+			moveFailure = moved.reason;
+		}
+	}
+	if (
+		moveFailure !== undefined ||
+		landed === undefined ||
+		!sameDirectoryLexical(landed, directory)
+	) {
 		// PRR-010: surface a FAILED removal in the typed envelope rather than
 		// swallowing it — a mis-placed live session holding the lane's swarm.db
 		// WAL is the #2599 hazard, and the caller needs the id to retry teardown.
@@ -1000,9 +1142,11 @@ async function deferredV2SessionCreateEager(
 			error: {
 				message: `v2 session-client: eager lane create landed in ${boundPathForMessage(
 					landed,
-				)}, not the requested ${boundPathForMessage(
-					directory,
-				)} (#3169 Phase 3 placement guard; Phase 0 C1)${
+				)}, not the requested ${boundPathForMessage(directory)}${
+					moveFailure !== undefined
+						? `; moving it into the lane failed (${boundPathForMessage(moveFailure)})`
+						: ''
+				} (#3169 Phase 3 placement guard; Phase 0 C1)${
 					removed.ok
 						? ''
 						: `; cleanup of session ${realId} also failed (${removed.reason ?? 'unknown error'}) — remove it before retrying`
@@ -1058,18 +1202,18 @@ async function deferredV2SessionCreate(
 		if (!sameDirectoryLexical(parentDirectory, directory)) {
 			// #3169 Phase 3: a CONFIRMED divergence is the worktree-isolation lane
 			// shape (a lane worktree directory always differs from the parent's
-			// project root). The Phase 2 refusal becomes an EAGER parentless real
-			// create — placement-verified, with the requested parentID remembered
-			// plugin-side for the `get` overlay (the discriminator, its flip list,
-			// and the disclosed deltas live in the trace's approved plan).
+			// project root). The Phase 2 refusal becomes an EAGER parented real
+			// create moved into the requested directory — placement-verified,
+			// with the requested parentID also remembered plugin-side for the
+			// `get` overlay (the discriminator, its flip list, and the disclosed
+			// deltas live in the trace's approved plan).
 			//
 			// PRR-008 (disclosed, not narrowed): the discriminator is DIVERGENCE
 			// ONLY — any in-plugin caller whose parent session lives elsewhere
 			// reaches this arm. That includes factory-from-lane callers (e.g. a
-			// lane coder invoking the knowledge-curator delegate), which land a
-			// parentless session in the project root and therefore lose the
-			// child-of-parent TUI nesting those factories rely on. The session is
-			// ephemeral and caller-deleted, so the effect is transient; narrowing
+			// lane coder invoking the knowledge-curator delegate), whose session
+			// is created as the lane's child and then moved into the project
+			// root. The session is ephemeral and caller-deleted; narrowing
 			// the arm to registered lanes would need a lane-registry lookup on the
 			// create path (deferred to Phase 4 with the registry-residue work).
 			return deferredV2SessionCreateEager(
@@ -1094,7 +1238,7 @@ async function deferredV2SessionCreate(
 }
 
 /**
- * #3169 Phase 3 — the full-treatment prompt for an EAGER (real, parentless
+ * #3169 Phase 3 — the full-treatment prompt for an EAGER (real, parented
  * lane) session. No create (the session exists); agent/model arrive via
  * `switchAgent`/`switchModel` (feature-detected — a partial host degrades to
  * skipping the switch, disclosed in the header), the per-session `context`
