@@ -90,11 +90,12 @@ function stageBRecord(
 	// were reconciled away before the ingestion leg could run).
 	// Literal timestamps (check:test-clock): these fields ARE read by the
 	// code under test — claimTerminalResult folds terminalResult.recordedAt
-	// into updatedAt — but the fixture's status is `completed`, which is
-	// outside the stale sweep's sweepable set (pending/running/
-	// ingestion_error), so the stale literal value never engages a sweep on
-	// the exercised paths and no assertion depends on it. A literal avoids
-	// the clock-helper import for a value that never changes an assertion.
+	// into updatedAt. The observer leg's record is persisted via
+	// recordPendingDelegation with FRESH stamps (status `pending`), so the
+	// stale-sweep inequality (now - updatedAt <= timeoutMs) keeps it safe on
+	// the exercised paths regardless of the literal recordedAt value; no
+	// assertion depends on it. A literal avoids the clock-helper import for
+	// a value that never changes an assertion.
 	const now = 1_769_984_000_000;
 	// The observer resolves completions BY correlation id, so the fixture
 	// uses the subagent session id AS the correlation id (the shape the
@@ -184,6 +185,11 @@ afterEach(() => {
 	isolatedEnv = undefined;
 });
 
+// KNOWN FLAKE (disclosed): the background observer leg below spawns real git
+// subprocesses; its wall time varies ~2.5-13.5s under host load and it has
+// flaked once under post-batch load (deterministic green on rerun — 3/3
+// clean isolated reruns at the feedback-fix head). CI runs one file per
+// process, which does not reproduce the batch-load shape.
 describe('route-invalidation settlement seams (#3509/#3516 seam coverage)', () => {
 	it('seam A (ingestion admission): the consult terminal-drops the completion before any evidence is published', async () => {
 		await prepareTask();

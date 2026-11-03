@@ -52,7 +52,7 @@ Issues #3509 and #3516 (collated trace `3509-3516-route-receipt-hardening`).
   spellings of one root can key differently; production always passes a
   single spelling (`bootstrapRoot`); the memo holds at most 64 spellings
   (FIFO), and a record's key stays stable for as long as its spelling stays
-  memoized. Degenerate (non-string) directories share one sentinel key (and
+  memoized. Degenerate (non-string or empty) directories share one sentinel key (and
   therefore one capacity bucket) and never throw.
 - **Loud capacity semantics.** The registry never evicts: at
   `MAX_LIVE_CALLS_PER_SESSION=256`, `MAX_LIVE_SESSIONS_PER_DIRECTORY=128`, or

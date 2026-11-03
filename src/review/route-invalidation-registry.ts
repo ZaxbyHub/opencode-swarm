@@ -63,8 +63,9 @@ const registryByDirectory = new Map<
  * directory (`initDurableStatusPath` early-returns), and the adversarial
  * contract (src/hooks/delegation-gate.plan-fallback-security.test.ts)
  * requires degenerate inputs never crash toolBefore/toolAfter. All operations
- * for such a directory share this ONE key, so record/consult/retire stay
- * mutually consistent and capacity accounting still bounds them.
+ * for such a directory (non-string OR empty) share this ONE key, so
+ * record/consult/retire stay mutually consistent and capacity accounting
+ * still bounds them.
  */
 const DEGENERATE_DIRECTORY_KEY =
 	'\u0000route-invalidation:degenerate-directory';
