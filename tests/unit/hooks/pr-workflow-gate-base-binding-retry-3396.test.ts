@@ -176,7 +176,7 @@ describe('PR_FEEDBACK base binding lifecycle (#3396 feedback)', () => {
 		// also in the rebind literal but is NOT asserted here — the trust
 		// verdict has no production reader yet and this fixture cannot seed
 		// it without the full Stage A record chain, so an assertion would be
-		// vacuous; recorded in the ledger round-3 notes.)
+		// vacuous.)
 		expect(after?.prFeedbackBaseBindingError).toBeUndefined();
 	});
 
