@@ -88,7 +88,9 @@ function stageBRecord(
 	// Realistic timestamps: the observer's trusted-terminal maintenance pass
 	// sweeps delegations whose timestamps look eons stale (epoch-1 fixtures
 	// were reconciled away before the ingestion leg could run).
-	const now = Date.now();
+	// Literal timestamps: inert fixture fields, never parsed by the code under
+	// test (the clock-helper import is unnecessary for literal fixtures).
+	const now = 1_769_984_000_000;
 	// The observer resolves completions BY correlation id, so the fixture
 	// uses the subagent session id AS the correlation id (the shape the
 	// trusted envelope carries).
@@ -264,7 +266,7 @@ describe('route-invalidation settlement seams (#3509/#3516 seam coverage)', () =
 					resultDigest: digest,
 				}),
 				status: 'completed',
-				recordedAt: Date.now(),
+				recordedAt: 1_769_984_000_000, // literal: inert fixture timestamp
 				result: {
 					text: approvedText,
 					chars: approvedText.length,
