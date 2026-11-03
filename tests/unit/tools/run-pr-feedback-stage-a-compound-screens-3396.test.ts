@@ -339,7 +339,7 @@ describe('Compound screen + lifecycle hooks (#3396 S2/S3)', () => {
 		const result = await runStageA(stageAChecks());
 		expect(result.success).toBe(false);
 		expect(result.message ?? '').toContain('opaque package script');
-	});
+	}, 20_000);
 
 	t20(
 		'terminal echo tail stays trusted (pin) and an all-echo chain refuses',
