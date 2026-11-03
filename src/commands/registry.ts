@@ -1265,12 +1265,16 @@ export const COMMAND_REGISTRY = {
 		// Intentional asymmetry (PR #3550 disposition, critic-reviewed): the
 		// command is agent-reachable while the receipt TOOL's agents list
 		// (src/tools/tool-metadata.ts) names only architect/reviewer/
-		// critic_finding_validator. Receipt truth derives entirely from durable
-		// state, so broader call-path reachability cannot mint unearned gate
-		// passes — and stamping an emitter identity would be equally forgeable.
-		// Do not align these downward (or add an emitter field) without first
-		// deciding emitter authority and the out-of-band report anchor
-		// (trigger: the first consumer that gates on receipt authenticity).
+		// critic_finding_validator. Receipt content derives solely from
+		// durable state plus emitter constants — the caller cannot influence
+		// what a receipt attests — so broader call-path reachability cannot
+		// forge content, and stamping an emitter identity would be equally
+		// forgeable without an attestation key. Do not narrow the tool's
+		// agents list or the command's toolPolicy (or add an emitter field)
+		// without first deciding emitter authority and the out-of-band
+		// report anchor (trigger: the first consumer that gates on receipt
+		// authenticity). Known attestation gaps tracked separately:
+		// task-arm outcome fidelity — issue #3560.
 		toolPolicy: 'agent',
 	},
 	'evidence summary': {
