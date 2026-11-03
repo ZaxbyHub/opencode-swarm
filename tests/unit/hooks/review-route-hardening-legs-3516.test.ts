@@ -381,7 +381,7 @@ describe('route-receipt hardening legs (#3516)', () => {
 		});
 	});
 
-	it('runtime redaction (behavioral): the REAL wrapper degrades a long home-path fault to a bounded, redacted warn', async () => {
+	it('sibling-clobber guard rails runtime redaction (behavioral): the REAL wrapper degrades a long home-path fault to a bounded, redacted warn', async () => {
 		// AC14's behavioral half, which the frozen source-scan probe
 		// cannot see (the derivation lives in the helper, outside its
 		// region): drive the REAL wrapper through the inner-reader seam
