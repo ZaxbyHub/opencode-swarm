@@ -145,7 +145,12 @@ C9, C12–C15 stay GREEN.
   emitters" now holds by construction in the POSIX grammar. POSIX-scoped
   with the Windows detectors carved out (a literal PowerShell/cmd `{a,b}`
   filename keeps its literal handling); a QUOTED brace word is exempt
-  (the W8 engine's own raw-scan proves it would not expand).
+  (the W8 engine's own raw-scan proves it would not expand). The refusal
+  is WHOLESALE for non-engine'd brace destination words — a benign
+  in-scope one (`gunzip -d src/{a,b}.gz`) also fails closed as dynamic —
+  while engine'd sites keep their per-branch admits; and (final corner)
+  a same-text QUOTED twin no longer exempts the unquoted word's write
+  (`git checkout main -- src/{a,../esc} 'src/{a,../esc}'` denies).
 - (Advisory, disclosed with follow-up issue #3569 — NOT fixed here, out of
   closure scope:) wrapper-prefixed tee/dd operand windows can bleed the
   wrapper's word consumption into the operand position —

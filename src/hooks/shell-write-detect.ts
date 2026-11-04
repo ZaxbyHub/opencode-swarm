@@ -7203,13 +7203,17 @@ export function detectPosixWrites(command: string): WriteAnalysis {
 		// denies, fail-closed. POSIX-scoped BY CONSTRUCTION — this pass
 		// lives in detectPosixWrites; detectWindowsWrites never sees it, so
 		// a literal PowerShell/cmd `{a,b}` filename keeps its literal
-		// handling (the preferred carve-out). QUOTE-AWARE: a word whose RAW
-		// slice shows braces the W8 engine itself would NOT expand (quoted
-		// or escaped — expandBraceRaw returns 'none') is a literal brace
-		// filename, exempt; a word the engine WOULD expand is an unquoted
-		// brace word, refused. Engine'd sites emit brace-free branch texts,
-		// so the chokepoint is a no-op for them.
-		const quotedBraceLiterals = new Set<string>();
+		// handling (the preferred carve-out). QUOTE-AWARE: only a word whose
+		// RAW slice the W8 engine itself WOULD expand seeds the refusal set;
+		// a PURE-quoted literal brace filename never does, so it keeps its
+		// literal path by construction. #3491 final corner (round 5): NO
+		// same-text shadow exemption — when a command carries BOTH the
+		// unquoted and the quoted spelling of one brace text, the unquoted
+		// word's write still refuses (the quoted twin must not launder it).
+		// Refusal is wholesale for non-engine'd brace destination words:
+		// benign in-scope ones (gunzip -d src/{a,b}.gz) fail closed too
+		// (fragment Known-edges); engine'd sites emit brace-free branch
+		// texts, so the chokepoint is a no-op for them.
 		const unquotedBraceTexts = new Set<string>();
 		for (const leaf of leafCommands) {
 			const leafSuffix = (leaf as BashCommand).suffix;
@@ -7220,9 +7224,7 @@ export function detectPosixWrites(command: string): WriteAnalysis {
 				const text = wordText(node);
 				if (raw === undefined || text === null) continue;
 				if (!BRACE_EXPANSION.test(text)) continue;
-				if (expandBraceRaw(raw).kind === 'none') {
-					quotedBraceLiterals.add(text);
-				} else {
+				if (expandBraceRaw(raw).kind !== 'none') {
 					unquotedBraceTexts.add(text);
 				}
 			}
@@ -7233,8 +7235,7 @@ export function detectPosixWrites(command: string): WriteAnalysis {
 				if (
 					write.path !== null &&
 					BRACE_EXPANSION.test(write.path) &&
-					unquotedBraceTexts.has(write.path) &&
-					!quotedBraceLiterals.has(write.path)
+					unquotedBraceTexts.has(write.path)
 				) {
 					allWrites[w] = {
 						...write,

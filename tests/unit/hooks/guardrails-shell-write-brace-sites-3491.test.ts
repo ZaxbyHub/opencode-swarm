@@ -302,3 +302,38 @@ describe('closure round 4: the isDynamicPath brace chokepoint (X series)', () =>
 		expect(tee).toEqual(['src/a', 'src/b']);
 	});
 });
+
+describe('final corner: no same-text shadow exemption at the chokepoint', () => {
+	// A command carrying BOTH the unquoted and the quoted spelling of one
+	// brace text must still refuse the unquoted word's write — the quoted
+	// twin must not launder it. Pure-quoted literals stay literal by
+	// construction (they never seed the refusal set).
+	test("git checkout main -- src/{a,../esc} 'src/{a,../esc}' → DENIED", async () => {
+		const got = await gate(
+			"git checkout main -- src/{a,../esc} 'src/{a,../esc}'",
+		);
+		expect(got.verdict).toBe('DENIED');
+		expect(got.detail).toMatch(/dynamic path target|BLOCKED/);
+	});
+
+	test("gunzip -d src/{a,../esc}.gz 'src/{a,../esc}.gz' → DENIED", async () => {
+		const got = await gate("gunzip -d src/{a,../esc}.gz 'src/{a,../esc}.gz'");
+		expect(got.verdict).toBe('DENIED');
+		expect(got.detail).toMatch(/dynamic path target|BLOCKED/);
+	});
+
+	test('Q1 PIN: pure-quoted redirect literal in scope ADMITS', async () => {
+		const got = await gate("cd src && echo x > '{a,b}'");
+		expect(got.verdict).toBe('ADMITTED');
+	});
+
+	test('Q2 PIN: pure-quoted tee literal in scope ADMITS', async () => {
+		const got = await gate("cd src && tee '{a,b}' < /dev/null");
+		expect(got.verdict).toBe('ADMITTED');
+	});
+
+	test('Q3 PIN: pure-quoted in-place operand ADMITS', async () => {
+		const got = await gate("cd src && sed -i s/a/b/ '{a,b}'");
+		expect(got.verdict).toBe('ADMITTED');
+	});
+});
