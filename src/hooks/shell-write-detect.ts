@@ -115,6 +115,18 @@ export interface WriteTarget {
 	 */
 	unresolvedContext?: true;
 	/**
+	 * #3491 W8 (final-critic advisory): the user's SOURCE word for a
+	 * brace-refused dynamic write — a write whose `{…}` destination is a
+	 * real expansion this model refuses to enumerate (nested, over-cap,
+	 * empty alternative, alpha/signed/zero-padded/stepped sequence, or any
+	 * branch carrying a `$`/command-substitution expansion). The write
+	 * itself carries `path: null` (the gate's dynamic-target block denies
+	 * it); this field lets that denial message render what the user
+	 * actually typed (`src/{a..e}`) instead of a brace-substituted branch
+	 * text the shell never received verbatim. Never set on any other write.
+	 */
+	dynamicSourceWord?: string;
+	/**
 	 * Present ONLY on `patch_apply` writes (#3120 LEG 3b): the literal
 	 * patch-file operands of a `git apply <patch>` / `patch [-pN] <patch>`
 	 * invocation, resolved by the gate against the write's tracked working
@@ -1388,6 +1400,7 @@ function fallbackBraceTargets(
 			operator,
 			path: null,
 			unresolvedContext: true,
+			dynamicSourceWord: token,
 		});
 		return true;
 	}
@@ -1460,7 +1473,8 @@ function detectBuiltinWritesFromString(cmd: string): WriteTarget[] {
 			if (name === 'truncate' && !endOfOptions && isNumeric(token)) continue;
 			// #3491 W8: brace regions in the RAW token expand (quote-aware —
 			// a quoted `'{a,b}'` operand stays literal); a refused
-			// real-expansion shape withdraws fail-closed.
+			// real-expansion shape withdraws fail-closed, rendering the
+			// SOURCE token in the dynamic denial.
 			const expansion = expandBraceRaw(token);
 			if (expansion.kind === 'dynamic') {
 				writes.push({
@@ -1468,6 +1482,7 @@ function detectBuiltinWritesFromString(cmd: string): WriteTarget[] {
 					operator: name,
 					path: null,
 					unresolvedContext: true,
+					dynamicSourceWord: token,
 				});
 				continue;
 			}
@@ -1509,6 +1524,7 @@ function detectBuiltinWritesFromString(cmd: string): WriteTarget[] {
 						operator: name,
 						path: null,
 						unresolvedContext: true,
+						dynamicSourceWord: tokens[i],
 					},
 				];
 			}
@@ -1891,6 +1907,16 @@ function expandBraceRaw(raw: string): BraceDestinationExpansion {
 		}
 	};
 	build(0, dequotedLiterals[0]);
+	// Final-critic advisory: a branch carrying a dynamic expansion (`$VAR`,
+	// `$(…)`, a backtick substitution, `%VAR%`, a leading `~`) makes the
+	// word's whole filename set unknowable — bash expands every branch and
+	// writes whichever the substitution yields. The word refuses as a whole
+	// (one null-path dynamic write rendering the SOURCE word) instead of
+	// emitting the non-dynamic siblings and a brace-substituted dynamic
+	// branch the user never typed verbatim.
+	if (branches.some((branch) => isDynamicPath(branch))) {
+		return { kind: 'dynamic' };
+	}
 	return { kind: 'branches', branches };
 }
 
@@ -2506,9 +2532,26 @@ function getSuffixNodes(cmd: unknown): unknown[] {
  * Emit one builtin destination write, brace-expanded (#3491 W8): every
  * branch of an unquoted `{a,b}`/`{1..3}` region becomes its own write
  * target; a real-but-refused expansion shape (nested, over-cap, empty
- * alternative, alpha/signed/zero-padded sequence) emits a single null-path
- * write the gate's dynamic-target block denies (fail-closed). `rawSkip`
- * drops a brace-free literal prefix before scanning (`dd of=`).
+ * alternative, alpha/signed/zero-padded/stepped sequence, or any branch
+ * carrying a dynamic expansion) emits the caller's `dynamic()` write — a
+ * single null-path write carrying the user's SOURCE word
+ * (`dynamicSourceWord`) that the gate's dynamic-target block denies
+ * (fail-closed). `rawSkip` drops a brace-free literal prefix before
+ * scanning (`dd of=`).
+ *
+ * PER-SITE bash semantics (final-critic GT, executed bash 5.x — the choice
+ * is documented per site because the branches' write behavior differs):
+ * - `tee` positionals, `truncate`/`rmdir` operands: bash writes EVERY
+ *   expanded operand — the per-branch emission is bash-EXACT.
+ * - `cp`/`mv`/`install`/`ln` destination: a ≥2-branch destination makes the
+ *   command fail ("target is not a directory", no write). The per-branch
+ *   emission is a deliberate conservative over-approximation: it denies
+ *   when any branch escapes and admits when every branch is in scope (a
+ *   superset of bash's no-write), rather than modeling the refusal.
+ * - `dd of=`: bash keeps only the LAST expanded `of=` operand — which can
+ *   itself be the escaping branch (GT: `dd of=src/{a,../ddesc}` writes the
+ *   OUTSIDE file). Emitting every branch is the same conservative
+ *   superset: it always covers the branch bash actually writes.
  */
 function pushExpandedDestination(
 	out: WriteTarget[],
@@ -2516,6 +2559,7 @@ function pushExpandedDestination(
 	text: string,
 	rawSkip: number,
 	emit: (path: string) => WriteTarget | null,
+	dynamic: () => WriteTarget,
 ): void {
 	const rawBase =
 		node && typeof node === 'object'
@@ -2523,8 +2567,11 @@ function pushExpandedDestination(
 			: undefined;
 	const expansion = expandBraceRaw((rawBase ?? text).slice(rawSkip));
 	if (expansion.kind === 'dynamic') {
-		const scaffold = emit('');
-		if (scaffold !== null) out.push({ ...scaffold, path: null });
+		// Unconditional (final-critic F-1): the refusal write must be
+		// emitted whatever `emit('')` would do with an empty path — the
+		// tee/dd closures return null for falsy paths, and dropping the
+		// scaffold here admitted commands whose branches bash writes.
+		out.push(dynamic());
 		return;
 	}
 	if (expansion.kind === 'none') {
@@ -2920,9 +2967,20 @@ function isNumeric(s: string): boolean {
  * redirect site (getWritesFromRedirectNode) so both walks emit the same
  * expanded branch set — the dedupe keys pair and every branch resolves at
  * its tracked context. A destination whose brace shape is a real-but-refused
- * expansion emits a single null-path write: the gate's existing
- * dynamic-target block denies it (fail-closed), because bash writes more
- * files than any literal reading of the word.
+ * expansion emits a single null-path write carrying the SOURCE word
+ * (`dynamicSourceWord`): the gate's existing dynamic-target block denies it
+ * (fail-closed), because bash writes more files than any literal reading of
+ * the word.
+ *
+ * Final-critic F-2 ground truth (executed bash 5.x): a redirect operand
+ * expanding to MULTIPLE words is an "ambiguous redirect" — bash writes
+ * NOTHING (`echo x > src/{a,b}` → rc=1, no file; same inside procsub
+ * bodies); a SINGLE-branch expansion (`f{1..1}`) is one word and writes.
+ * This site keeps the conservative over-approximation on purpose: emit
+ * every branch as a judged write (deny when any branch escapes, admit when
+ * all are in scope — a superset of bash's no-write) rather than modeling
+ * the refusal, so a shape that could write is never admitted because the
+ * model believed the shell would reject it.
  */
 function redirectWriteTargets(
 	fileNode: unknown,
@@ -2934,7 +2992,14 @@ function redirectWriteTargets(
 			? ({ kind: 'none' } as BraceDestinationExpansion)
 			: expandBraceDestinations(fileNode, path);
 	if (expansion.kind === 'dynamic') {
-		return [{ category: 'redirect', operator: opLabel, path: null }];
+		return [
+			{
+				category: 'redirect',
+				operator: opLabel,
+				path: null,
+				...(path !== null ? { dynamicSourceWord: path } : {}),
+			},
+		];
 	}
 	const targets = expansion.kind === 'branches' ? expansion.branches : [path];
 	const out: WriteTarget[] = [];
@@ -3077,11 +3142,27 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 			const word = suffixWords[w];
 			if (!word.startsWith('of=')) continue;
 			// #3491 W8: brace regions in the `of=` VALUE expand — `dd
-			// of='src/{a,../x}'` writes both branch files.
-			pushExpandedDestination(results, suffixNodes[w], word, 3, (path) =>
-				path && !isNullDevice(path)
-					? { category: 'builtin_write', operator: 'dd of=', path }
-					: null,
+			// of='src/{a,../x}'` writes both branch files. Bash keeps only
+			// the LAST expanded `of=` (final-critic GT), which can itself be
+			// the escaping branch — emitting every branch is the conservative
+			// superset that always covers it.
+			pushExpandedDestination(
+				results,
+				suffixNodes[w],
+				word,
+				3,
+				(path) =>
+					path && !isNullDevice(path)
+						? { category: 'builtin_write', operator: 'dd of=', path }
+						: null,
+				// F-1: the refusal write is UNCONDITIONAL — emit('') returns
+				// null here (falsy-path test) and must not gate it.
+				() => ({
+					category: 'builtin_write',
+					operator: 'dd of=',
+					path: null,
+					dynamicSourceWord: word,
+				}),
 			);
 		}
 		return results;
@@ -3102,11 +3183,24 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 			}
 			if (!pastDoubleDash && word.startsWith('-')) continue;
 			// #3491 W8: a braced positional expands — `tee src/{a,../../x}`
-			// writes every branch.
-			pushExpandedDestination(results, suffixNodes[w], word, 0, (path) =>
-				path && !isNullDevice(path)
-					? { category: 'builtin_write', operator: 'tee', path }
-					: null,
+			// writes every branch (bash-EXACT multi-write, final-critic GT).
+			pushExpandedDestination(
+				results,
+				suffixNodes[w],
+				word,
+				0,
+				(path) =>
+					path && !isNullDevice(path)
+						? { category: 'builtin_write', operator: 'tee', path }
+						: null,
+				// F-1: the refusal write is UNCONDITIONAL — emit('') returns
+				// null here (falsy-path test) and must not gate it.
+				() => ({
+					category: 'builtin_write',
+					operator: 'tee',
+					path: null,
+					dynamicSourceWord: word,
+				}),
 			);
 		}
 		return results;
@@ -3174,12 +3268,25 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 			// (coreutils): the numeric size exclusion applies only to the
 			// pre-`--` option region (#3512 final-critic residual).
 			if (endOfOptions || (!word.startsWith('-') && !isNumeric(word))) {
-				// #3491 W8: a braced operand expands to one write per branch.
-				pushExpandedDestination(results, suffixNodes[w], word, 0, (path) => ({
-					category: 'builtin_write',
-					operator: 'truncate',
-					path,
-				}));
+				// #3491 W8: a braced operand expands to one write per branch
+				// (truncate FILE... truncates EVERY operand — bash-EXACT).
+				pushExpandedDestination(
+					results,
+					suffixNodes[w],
+					word,
+					0,
+					(path) => ({
+						category: 'builtin_write',
+						operator: 'truncate',
+						path,
+					}),
+					() => ({
+						category: 'builtin_write',
+						operator: 'truncate',
+						path: null,
+						dynamicSourceWord: word,
+					}),
+				);
 			}
 		}
 	} else if (lowerName === 'rmdir') {
@@ -3200,13 +3307,26 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 			}
 			if (endOfOptions || !word.startsWith('-')) {
 				// #3491 W8: a braced operand expands to one write per branch
-				// (no branch ever carries the emptyDirectoryRemoval tag — a
-				// braced operand is not a bare literal).
-				pushExpandedDestination(results, suffixNodes[w], word, 0, (path) => ({
-					category: 'builtin_write',
-					operator: dedupeOperator,
-					path,
-				}));
+				// (rmdir dir... removes EVERY operand — bash-EXACT; no branch
+				// ever carries the emptyDirectoryRemoval tag — a braced
+				// operand is not a bare literal).
+				pushExpandedDestination(
+					results,
+					suffixNodes[w],
+					word,
+					0,
+					(path) => ({
+						category: 'builtin_write',
+						operator: dedupeOperator,
+						path,
+					}),
+					() => ({
+						category: 'builtin_write',
+						operator: dedupeOperator,
+						path: null,
+						dynamicSourceWord: word,
+					}),
+				);
 			}
 		}
 	} else {
@@ -3214,13 +3334,28 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 		for (let i = suffixWords.length - 1; i >= 0; i--) {
 			const word = suffixWords[i];
 			if (!word.startsWith('-')) {
-				// #3491 W8: a braced destination expands — `cp a src/{x,y}`
-				// writes through every branch bash hands the command.
-				pushExpandedDestination(results, suffixNodes[i], word, 0, (path) => ({
-					category: 'builtin_write',
-					operator: dedupeOperator,
-					path,
-				}));
+				// #3491 W8: a braced destination expands. Bash REFUSES a
+				// ≥2-branch cp/mv destination ("target is not a directory",
+				// no write — final-critic GT); emitting every branch is the
+				// deliberate conservative over-approximation (deny when any
+				// branch escapes, admit when all are in scope).
+				pushExpandedDestination(
+					results,
+					suffixNodes[i],
+					word,
+					0,
+					(path) => ({
+						category: 'builtin_write',
+						operator: dedupeOperator,
+						path,
+					}),
+					() => ({
+						category: 'builtin_write',
+						operator: dedupeOperator,
+						path: null,
+						dynamicSourceWord: word,
+					}),
+				);
 				break;
 			}
 		}

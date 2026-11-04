@@ -1817,9 +1817,16 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				// skips this write target; the aggregate lease candidate below
 				// is not remembered (targets must be provable, issue #2664).
 				if (enforce) {
+					// #3491 W8 final-critic advisory: for a brace-refused
+					// dynamic write the message renders the user's SOURCE
+					// word (`src/{a..e}`, `src/{a,$(echo b)}`) — the branch
+					// text the expansion would substitute was never typed
+					// verbatim.
+					const dynamicTargetLabel =
+						write.original.path ?? write.original.dynamicSourceWord;
 					throw new ShellWriteBlockedError(
 						`BLOCKED: bash/shell write to a dynamic path target${
-							write.original.path ? ` "${write.original.path}"` : ''
+							dynamicTargetLabel ? ` "${dynamicTargetLabel}"` : ''
 						} that cannot be statically resolved (shell variable or command substitution) — rejecting for safety.`,
 						{ writeOperator: write.original.operator },
 					);

@@ -120,7 +120,12 @@ describe('gate: the traversal branch is judged (C7 family)', () => {
 	test('tee src/{a,b} in scope ADMITS (C7 control)', async () => {
 		await expectAdmitted('echo x | tee src/{a,b}');
 	});
-	test('redirect src/{a,../../x} DENIES', async () => {
+	test('redirect src/{a,../../x} DENIES (bash: ambiguous redirect, no write — conservative over-approximation)', async () => {
+		// Final-critic F-2 GT: a multi-branch redirect operand is an
+		// "ambiguous redirect" in bash (rc=1, NOTHING written). The model
+		// judges every branch instead of modeling the refusal: deny when any
+		// branch escapes (this leg), admit when all are in scope — a
+		// superset of bash's no-write, never fail-open.
 		await expectDenied('echo x > src/{a,../../x}');
 	});
 	test('redirect src/{a,b} ADMITS', async () => {
@@ -129,32 +134,118 @@ describe('gate: the traversal branch is judged (C7 family)', () => {
 });
 
 describe('gate: destination families (redirect, tee, dd of=, builtins)', () => {
-	test('dd of=src/{a,../esc} DENIES; of=src/{a,b} ADMITS', async () => {
+	// Final-critic F-2 ground truth (executed bash 5.x) — per-site semantics:
+	// - REDIRECT multi-branch is an "ambiguous redirect" (rc=1, NO write;
+	//   `echo x > src/f{1..1}` single-branch DOES write). This suite keeps
+	//   the conservative over-approximation: judge every branch (deny when
+	//   any escapes, admit when all are in scope — a superset of bash's
+	//   no-write).
+	// - cp/mv multi-branch destination fails "target is not a directory"
+	//   (NO write). Same conservative over-approximation here.
+	// - dd of= keeps only the LAST expanded of= — which can itself be the
+	//   escaping branch (GT: `dd of=src/{a,../ddesc}` writes the OUTSIDE
+	//   file); emitting every branch is the superset that always covers it.
+	// - tee/truncate/rmdir are bash-EXACT multi-write commands.
+	test('redirect single-branch f{1..1} writes exactly one file (bash-exact)', async () => {
+		expect(pathsOf('echo x > src/f{1..1}')).toEqual(['src/f1']);
+		await expectAdmitted('echo x > src/f{1..1}');
+	});
+	test('dd of=src/{a,../esc} DENIES (bash writes the LAST of= — it can be the escaper); of=src/{a,b} ADMITS', async () => {
 		await expectDenied('dd if=a of=src/{a,../esc.txt}');
 		await expectAdmitted('dd if=a of=src/{a,b}');
 	});
-	test('cp destination expands — cp f src/{x,../../esc} DENIES', async () => {
+	test('cp destination expands — cp f src/{x,../../esc} DENIES (bash: target not a directory — conservative)', async () => {
 		await expectDenied('cp f src/{x,../../esc}');
 	});
 	test('cp destination in scope ADMITS', async () => {
 		await expectAdmitted('cp f src/{x,y}');
 	});
-	test('truncate operands expand — {a,../esc}/f DENIES', async () => {
+	test('truncate operands expand — {a,../esc}/f DENIES (bash-exact multi-write)', async () => {
 		await expectDenied('truncate -s 0 src/{a,../esc.txt}');
 		await expectAdmitted('truncate -s 0 src/{a,b}');
 	});
-	test('rmdir operands expand — src/{a,../../x} DENIES', async () => {
+	test('rmdir operands expand — src/{a,../../x} DENIES (bash-exact multi-operand)', async () => {
 		await expectDenied('rmdir src/{a,../../x}');
 	});
-	test('mv destination expands — mv a src/{x,../esc} DENIES', async () => {
+	test('mv destination expands — mv a src/{x,../esc} DENIES (bash: target not a directory — conservative)', async () => {
 		await expectDenied('mv a src/{x,../esc.txt}');
 	});
 	test('procsub-body brace operand expands through the fallback channel', async () => {
+		// Final-critic F-2 GT: the body redirect is itself an "ambiguous
+		// redirect" in bash (nothing written); the per-branch fallback
+		// emission is the same conservative over-approximation as the AST
+		// redirect site.
 		expect(pathsOf('tee >(cat > src/{a,../../x})')).toEqual([
 			'src/a',
 			'src/../../x',
 		]);
 		await expectDenied('tee >(cat > src/{a,../../x})');
+	});
+});
+
+describe('gate: dynamic refusal is wired at EVERY destination site (final-critic F-1)', () => {
+	// F-1 regression class: the tee-positional and dd-of= closures returned
+	// null for the empty-path scaffold, so refused brace shapes emitted ZERO
+	// writes there and the gate ADMITTED while bash writes the branches
+	// (executed GT: `tee src/{a..e}` writes src/a..src/e; a 9-alternative
+	// list with ../x writes the escaping branch outside the workspace). The
+	// refusal write is now unconditional at every site and carries the
+	// user's SOURCE word for the denial message.
+	test('detector: every refused class at the tee site emits exactly one null-path write', () => {
+		for (const cmd of [
+			'echo x | tee src/{a..e}',
+			'echo x | tee src/{a,b}/{c,d}/{e,f}',
+			'echo x | tee src/{a,b,c,d,e,f,g,h,../../x}',
+			'echo x | tee src/{a,,../../x}',
+		]) {
+			const writes = detectPosixWrites(cmd).writes;
+			expect(`${cmd} -> ${JSON.stringify(writes.map((w) => w.path))}`).toBe(
+				`${cmd} -> [null]`,
+			);
+			expect(writes[0].dynamicSourceWord).toBeTypeOf('string');
+		}
+	});
+	test('detector: every refused class at the dd of= site emits exactly one null-path write', () => {
+		for (const cmd of [
+			'dd if=a of=src/{a..e}',
+			'dd if=a of=src/{a,b}/{c,d}/{e,f}',
+			'dd if=a of=src/{a,b,c,d,e,f,g,h,../esc}',
+			'dd if=a of=src/{a,,../esc}',
+		]) {
+			const writes = detectPosixWrites(cmd).writes;
+			expect(`${cmd} -> ${JSON.stringify(writes.map((w) => w.path))}`).toBe(
+				`${cmd} -> [null]`,
+			);
+		}
+	});
+	test.each([
+		['echo x | tee src/{a,b}/{c,d}/{e,f}', '3 regions'],
+		[
+			'echo x | tee src/{a,b}/{c,d}/{e,../../x}',
+			'3 regions with an escaping branch',
+		],
+		[
+			'echo x | tee src/{a,b,c,d,e,f,g,h,../../x}',
+			'9-alternative list with an escaper',
+		],
+		['echo x | tee src/{a..e}', 'alpha sequence'],
+		['echo x | tee src/{a,,../../x}', 'empty alternative'],
+		['dd if=a of=src/{a,b}/{c,d}/{e,f}', 'dd 3 regions'],
+		['dd if=a of=src/{a..e}', 'dd alpha sequence'],
+		['dd if=a of=src/{a,b,c,d,e,f,g,h,../esc}', 'dd 9-alternative list'],
+		['dd if=a of=src/{a,,../esc}', 'dd empty alternative'],
+	])('%s DENIES as a dynamic target (%s)', async (command) => {
+		await expectDenied(command, /dynamic path target/);
+	});
+	test('a mixed dynamic branch refuses the whole word and renders the SOURCE word', async () => {
+		const writes = detectPosixWrites('echo x > src/{a,$(echo b)}').writes;
+		expect(writes).toHaveLength(1);
+		expect(writes[0].path).toBeNull();
+		expect(writes[0].dynamicSourceWord).toBe('src/{a,$(echo b)}');
+		await expectDenied(
+			'echo x > src/{a,$(echo b)}',
+			/"src\/\{a,\$\(echo b\)\}"/,
+		);
 	});
 });
 

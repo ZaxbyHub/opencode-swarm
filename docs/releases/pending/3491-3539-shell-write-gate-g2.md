@@ -58,13 +58,32 @@
   the write DYNAMIC: a null-path write the gate's existing dynamic-target
   block denies (fail-closed). The procsub-body fallback channel shares
   the engine, so `tee >(cat > src/{a,../../x})` enumerates its branches
-  too.
+  too. Final-critic round: the dynamic refusal is wired UNCONDITIONALLY at
+  every destination site (the tee/dd closures' empty-path test previously
+  discarded the refusal write — a fail-open that admitted
+  `tee src/{a,b}/{c,d}/{e,../../../x}` while bash writes the escaping
+  branch), a word with ANY dynamic branch (`src/{a,$(echo b)}`) refuses
+  as a whole, and the dynamic-target denial renders the user's SOURCE
+  word (`dynamicSourceWord`) instead of brace-substituted branch text.
 
 ## Known edges
 
 - A brace expansion in a destination served by detectors outside this
-  workstream's site list (curl `-o`, sed `-i` operands) still reads
-  literally today — those sites arrive with their own grammar work.
+  workstream's site list (curl `-o`, sed `-i` operands) is a FAIL-OPEN
+  residue: the operand still reads literally today, while real bash
+  expands it and writes the escaping branch when the target directory
+  exists. Those sites arrive with their own grammar work (PR-3).
+- Per-site multi-branch semantics are ground-truthed and deliberately
+  OVER-APPROXIMATED where bash refuses (final-critic F-2, executed GT):
+  a multi-branch REDIRECT operand is an "ambiguous redirect" (rc=1, no
+  write; a single-branch `f{1..1}` writes), a ≥2-branch cp/mv destination
+  fails "target is not a directory" (no write), and `dd of=` keeps only
+  the LAST expanded operand — which can itself be the escaping branch
+  (`dd of=src/{a,../ddesc}` writes the outside file). The model judges
+  EVERY branch at these sites instead of modeling the refusals: deny when
+  any branch escapes, admit when all are in scope — a superset of what
+  bash writes, never fail-open. tee/truncate/rmdir are bash-exact
+  multi-write commands.
 - `> >(cat > f)`-style redirect-into-procsub relies on the placeholder's
   sink-device exemption; a procsub operand in a `cp`/`truncate`
   destination position emits a bogus `/dev/null` write (fail-closed deny)
@@ -98,15 +117,17 @@
   and C14 (write suites: dual-resolution-3530, rmdir-scope-cwd,
   env-flags-3343 — 155 tests) stay green. PR-1 checks C1/C2/C5/C12
   re-run green at this head (built on the G1 branch).
-- New suites: `guardrails-shell-write-procsub-outer-3539` (35 legs: C9
+- New suites: `guardrails-shell-write-procsub-outer-3539` (43 legs: C9
   families, orderings both ways, quoted outer operands, outer builtins,
   fd-dup exclusion, the residual-context discriminator, inner-cd
   withdrawal, `bash -c` payload non-overlap, malformed-residual blocks,
+  operator-boundary shapes, the here-string over-block pin,
   admit/block controls, detector-level residual + placeholder pins,
-  explain parity) and `guardrails-shell-write-brace-3491` (39 legs: C7
-  families, destination families, quoted/escaped ground truth, Cartesian
-  regions, duplicate branches, dynamic-class denials, tracked-cd resolver
-  pairing, explain parity).
+  explain parity) and `guardrails-shell-write-brace-3491` (52 legs: C7
+  families, destination families with per-site bash ground truth,
+  quoted/escaped ground truth, Cartesian regions, duplicate branches,
+  dynamic-class denials wired at EVERY destination site, tracked-cd
+  resolver pairing, explain parity).
 - Battery: the full `guardrails-shell-write-*`, `destructive-command-*`,
   `shell-write-detect-*`, co-located `src/hooks/shell-write-detect*`, and
   explain-service suites pass per-file; typecheck, pinned biome, and

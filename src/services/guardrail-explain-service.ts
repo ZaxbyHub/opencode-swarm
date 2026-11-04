@@ -903,9 +903,13 @@ export async function handleGuardrailExplain(
 					// Every other null-path write (a withdrawn/dynamic redirect
 					// or builtin target, a patch_apply that produced no
 					// targets) fails closed exactly like the gate's
-					// dynamic-path-target rejection.
+					// dynamic-path-target rejection. #3491 W8 final-critic
+					// advisory: a brace-refused write renders the user's
+					// SOURCE word, matching the gate's message.
 					decision = 'block';
-					firingRule = `dynamic_target: write target${write.original.path ? ` "${write.original.path}"` : ''} cannot be statically resolved (dynamic path or withdrawn directory state) — rejecting for safety`;
+					const explainDynamicLabel =
+						write.original.path ?? write.original.dynamicSourceWord;
+					firingRule = `dynamic_target: write target${explainDynamicLabel ? ` "${explainDynamicLabel}"` : ''} cannot be statically resolved (dynamic path or withdrawn directory state) — rejecting for safety`;
 					break;
 				}
 			}
