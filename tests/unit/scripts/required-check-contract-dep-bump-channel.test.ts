@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
 	DEPENDENCY_BUMP_BRANCH_PREFIX,
@@ -7,10 +7,8 @@ import {
 	dependencyBumpBranchProvenanceOk,
 	dependencyBumpCommitProvenanceOk,
 	dependencyBumpOwnerScopeOk,
-	deriveDependencyBumpAutomation,
 	deriveReleaseAutomation,
 	evaluateReleaseOwnership,
-	main,
 	mergeGroupDependencyBumpProvenance,
 } from '../../../scripts/check-required-check-contract';
 // Frozen acceptance surface (C1/C2/C3) for the dependency-bump channel arm (.agents/issue-traces/3501-3285-3527-dep-bump-channel/05-fix-plan.md).
@@ -36,7 +34,6 @@ import {
 	trailerMessage,
 } from '../../helpers/dep-bump-channel-fixtures';
 import { safeRmRecursive } from '../../helpers/safe-test-dir';
-import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 function buildChannelPullRequestFixture(
 	variant: 'authorized' | 'human-second-commit',
