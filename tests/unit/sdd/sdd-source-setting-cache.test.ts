@@ -49,7 +49,9 @@ function resetSddSourceCacheIfPresent(): void {
 		}
 	).resetSddSourceCache;
 	if (typeof reset !== 'function') {
-		throw new Error('_internals.resetSddSourceCache is missing (seam deleted?)');
+		throw new Error(
+			'_internals.resetSddSourceCache is missing (seam deleted?)',
+		);
 	}
 	reset();
 }
