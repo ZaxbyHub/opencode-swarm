@@ -154,6 +154,41 @@ describe('W2 gate: dynamic DIR operands never serialize (v4 constraint 4)', () =
 		const got = await gate('env -C $DIR true');
 		expect(got.verdict).toBe('ADMITTED');
 	});
+
+	// Review round 1 (F-1): the withdrawal must be UNCONDITIONAL. The first
+	// round's withdrawal form was a synthetic `cd -`, which LANDS at OLDPWD
+	// when a prior cd/pushd established one — `cd src; env -C '$D' …` then
+	// resolved the wrapped writes at the OLDPWD landing and ADMITTED
+	// (fail-open). The form now uses a synthetic dynamic operand the walk can
+	// never resolve, independent of any modeled prevCwd.
+	test("cd src; env -C '$D' withdraws the wrapped writes (no OLDPWD landing)", async () => {
+		const got = await gate(`cd src; env -C '$D' sh -c 'echo x > src/f'`);
+		expect(got.verdict).toBe('DENIED');
+		expect(got.message).toMatch(WITHDRAWAL);
+	});
+
+	test("pushd src; env -C '$D' withdraws the wrapped writes (no stack landing)", async () => {
+		const got = await gate(`pushd src; env -C '$D' sh -c 'echo x > src/f'`);
+		expect(got.verdict).toBe('DENIED');
+		expect(got.message).toMatch(WITHDRAWAL);
+	});
+
+	test("OLDPWD landing oracle: cd src; env -C '$D' … echo x > f denies WITH the withdrawal class", async () => {
+		// `f` (no src/ prefix) is the leg the first round's `cd -` form
+		// resolved at OLDPWD (ws) — it denied as a scope violation on the
+		// <ws>/f landing instead of the withdrawal, proving the landing.
+		const got = await gate(`cd src; env -C '$D' sh -c 'echo x > f'`);
+		expect(got.verdict).toBe('DENIED');
+		expect(got.message).toMatch(WITHDRAWAL);
+	});
+
+	test("destructive arm: cd src; env -C '$D' rm -rf dist denies on the sentinel", async () => {
+		const got = await gate(`cd src; env -C '$D' sh -c 'rm -rf dist'`, true);
+		expect(got.verdict).toBe('DENIED');
+		expect(got.message).toMatch(
+			/Recursive delete target "\.\.\/__swarm_unresolved_chdir__\/dist"/,
+		);
+	});
 });
 
 describe('W2 gate: nested chdir wrappers compose as nested subshells (group 4)', () => {
@@ -215,5 +250,18 @@ describe('W2 gate: destructive segments evaluate at the evolving child cwd (grou
 		expect(got.message).toMatch(
 			/Recursive delete target "\.\.\/__swarm_unresolved_chdir__\/dist"/,
 		);
+	});
+
+	// Review round 1 (F-2): the child-cwd context is keyed per OCCURRENCE.
+	// The first round keyed it by segment TEXT with first-wins, so both
+	// `rm -rf dist` occurrences inherited the FIRST segment's src context and
+	// the escaping `env -C ..` occurrence was ADMITTED.
+	test('env -C src rm -rf dist; env -C .. rm -rf dist — the second occurrence denies', async () => {
+		const got = await gate(
+			'env -C src rm -rf dist; env -C .. rm -rf dist',
+			true,
+		);
+		expect(got.verdict).toBe('DENIED');
+		expect(got.message).toMatch(/Recursive delete target "..\/dist"/);
 	});
 });

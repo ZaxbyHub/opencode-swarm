@@ -741,38 +741,43 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		// directory mutation the W1 word-form rules cannot represent)
 		// relocates to an escaping sentinel — any destructive pattern then
 		// denies (fail-closed).
+		// #3491 W2 fix-round-1 (F-2): the child-cwd context is keyed per
+		// OCCURRENCE, never per segment TEXT — `env -C src rm -rf dist;
+		// env -C .. rm -rf dist` yields two `rm -rf dist` occurrences with
+		// DIFFERENT child cwds; a text-keyed first-wins map applied the first
+		// occurrence's context to both and ADMITTED the escaping second one.
+		// Each (segment, context) pair is evaluated once; occurrences from
+		// the raw/legacy unwrap lists carry a null context (base behavior),
+		// and every expanded entry carries its own evolving context.
 		const expandedSegments = dcExpandDestructiveSegments(command, cwd);
-		const segmentContexts = new Map<string, 'uncertain' | { base: string }>();
-		for (const entry of expandedSegments) {
-			if (
-				entry.segment &&
-				entry.resolveFrom !== null &&
-				!segmentContexts.has(entry.segment)
-			) {
-				segmentContexts.set(
-					entry.segment,
-					entry.resolveFrom === 'uncertain'
-						? 'uncertain'
-						: { base: entry.resolveFrom },
-				);
-			}
-		}
-		const relocate = (seg: string, targets: string[]): string[] => {
-			const context = segmentContexts.get(seg);
-			if (context === undefined) return targets;
-			const resolveFrom = context === 'uncertain' ? 'uncertain' : context.base;
-			return targets.map((t) =>
-				dcRelocateDestructiveTarget(t, resolveFrom, cwd),
-			);
+		const segmentOccurrences: Array<{
+			segment: string;
+			resolveFrom: string | 'uncertain' | null;
+		}> = [];
+		const seenOccurrences = new Set<string>();
+		const pushSegmentOccurrence = (
+			segment: string,
+			resolveFrom: string | 'uncertain' | null,
+		): void => {
+			if (segment.length === 0) return;
+			const key = `${resolveFrom ?? ''}\u0000${segment}`;
+			if (seenOccurrences.has(key)) return;
+			seenOccurrences.add(key);
+			segmentOccurrences.push({ segment, resolveFrom });
 		};
-		const allSegments = [
-			...new Set([
-				...outerSegments,
-				...innerSegments,
-				...perSegmentUnwrapped,
-				...expandedSegments.map((e) => e.segment),
-			]),
-		].filter((s) => s.length > 0);
+		for (const segment of outerSegments) pushSegmentOccurrence(segment, null);
+		for (const segment of innerSegments) pushSegmentOccurrence(segment, null);
+		for (const segment of perSegmentUnwrapped)
+			pushSegmentOccurrence(segment, null);
+		for (const entry of expandedSegments)
+			pushSegmentOccurrence(entry.segment, entry.resolveFrom);
+		const relocate = (
+			resolveFrom: string | 'uncertain' | null,
+			targets: string[],
+		): string[] =>
+			resolveFrom === null
+				? targets
+				: targets.map((t) => dcRelocateDestructiveTarget(t, resolveFrom, cwd));
 
 		// Cross-segment shell variable assignments (issue #2033 review): later
 		// segments referencing $NAME are resolved against assignments harvested
@@ -780,8 +785,8 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		// $CMD` cannot dodge the swarm-CLI-bypass probe below.
 		const swarmShellVars = new Map<string, string>();
 
-		for (const segment of allSegments) {
-			const seg = segment.trim();
+		for (const occurrence of segmentOccurrences) {
+			const seg = occurrence.segment.trim();
 			if (!seg) continue;
 
 			// Harvest shell variable assignments (quoted values may contain
@@ -807,7 +812,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			const rmTargets = dcExtractRecursiveRmTargets(seg);
 			if (rmTargets) {
 				const decision = dcEvaluateRecursiveDeleteTargets({
-					targets: relocate(seg, rmTargets),
+					targets: relocate(occurrence.resolveFrom, rmTargets),
 					cwd,
 					verifiedScope,
 				});
@@ -846,7 +851,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 						);
 					}
 					const decision = dcEvaluateRecursiveDeleteTargets({
-						targets: relocate(seg, parsed.targets),
+						targets: relocate(occurrence.resolveFrom, parsed.targets),
 						cwd,
 						verifiedScope,
 					});
@@ -876,7 +881,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 						);
 					}
 					const decision = dcEvaluateRecursiveDeleteTargets({
-						targets: relocate(seg, parsed.targets),
+						targets: relocate(occurrence.resolveFrom, parsed.targets),
 						cwd,
 						verifiedScope,
 					});
@@ -903,7 +908,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				const targets = dcExtractPowerShellTargets(seg);
 				if (targets.length > 0) {
 					const decision = dcEvaluateRecursiveDeleteTargets({
-						targets: relocate(seg, targets),
+						targets: relocate(occurrence.resolveFrom, targets),
 						cwd,
 						verifiedScope,
 					});
@@ -1465,8 +1470,10 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		// the parent cwd (bash-true: env/sudo chdir applies only to the
 		// wrapped exec). Non-chdir segments keep the legacy unwrap. A static
 		// DIR that is empty or contains NUL fails closed; a dynamic DIR
-		// rewrites to the withdrawal form ( cd - && inner ) whose inner
-		// writes the resolver withdraws.
+		// rewrites to the withdrawal form ( cd '<synthetic dynamic operand>'
+		// && inner ) whose inner writes the resolver withdraws
+		// UNCONDITIONALLY (fix-round-1 F-1: `cd -` used to land at a modeled
+		// OLDPWD after a prior cd/pushd and fail open).
 		const preprocessed = dcPreprocessWrappers(command);
 		if (enforce && preprocessed.failClosed) {
 			throw new Error(

@@ -44,6 +44,24 @@ describe('issue #3491 explain/enforcement shell-write parity', () => {
 		expect(explained).toMatch(/\| *Decision *\| *block */i);
 	});
 
+	// Review round 1 (F-3): explain must mirror the gate's
+	// withdrawal/dynamic-target deny — a null-path write is a BLOCK, not a
+	// category. These legs answered allow before the mirror while the gate
+	// denied every one of them (the resolvedWrites loop treated them as a
+	// write category only).
+	test.each([
+		['cd -; echo x > f'],
+		["env -C '$D' sh -c 'echo x > src/f'"],
+		['popd; echo x > src/f'],
+	])('%s explains as block (withdrawn/dynamic write target)', async (command) => {
+		const explained = await handleGuardrailExplain(workspace(), [
+			'--scope',
+			'src/',
+			...command.split(' '),
+		]);
+		expect(explained).toMatch(/\| *Decision *\| *block */i);
+	});
+
 	test.each([
 		['sh -c "mkdir -p src && echo x > src/a"'],
 		['env -C .. true'],

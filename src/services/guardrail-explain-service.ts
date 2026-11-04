@@ -201,39 +201,46 @@ function evaluateDestructiveDecision(
 	// live destructive arm uses — chdir-bearing wrapper segments relocate
 	// their rm/rmdir/del targets from the child cwd to session-root-relative
 	// forms; an unresolvable context lands on the escaping sentinel.
+	// #3491 W2 fix-round-1 (F-2) parity: the context is keyed per OCCURRENCE,
+	// never per segment TEXT — `env -C src rm -rf dist; env -C .. rm -rf
+	// dist` yields two `rm -rf dist` occurrences with DIFFERENT child cwds;
+	// a text-keyed first-wins map applied the first occurrence's context to
+	// both and answered allow for the escaping second one. Each (segment,
+	// context) pair is evaluated once; occurrences from the raw/legacy
+	// unwrap lists carry a null context (base behavior), and every expanded
+	// entry carries its own evolving context.
 	const expandedSegments = dcExpandDestructiveSegments(command, cwd);
-	const segmentContexts = new Map<string, 'uncertain' | { base: string }>();
-	for (const entry of expandedSegments) {
-		if (
-			entry.segment &&
-			entry.resolveFrom !== null &&
-			!segmentContexts.has(entry.segment)
-		) {
-			segmentContexts.set(
-				entry.segment,
-				entry.resolveFrom === 'uncertain'
-					? 'uncertain'
-					: { base: entry.resolveFrom },
-			);
-		}
-	}
-	const relocate = (seg: string, targets: string[]): string[] => {
-		const context = segmentContexts.get(seg);
-		if (context === undefined) return targets;
-		const resolveFrom = context === 'uncertain' ? 'uncertain' : context.base;
-		return targets.map((t) => dcRelocateDestructiveTarget(t, resolveFrom, cwd));
+	const segmentOccurrences: Array<{
+		segment: string;
+		resolveFrom: string | 'uncertain' | null;
+	}> = [];
+	const seenOccurrences = new Set<string>();
+	const pushSegmentOccurrence = (
+		segment: string,
+		resolveFrom: string | 'uncertain' | null,
+	): void => {
+		if (segment.length === 0) return;
+		const key = `${resolveFrom ?? ''}\u0000${segment}`;
+		if (seenOccurrences.has(key)) return;
+		seenOccurrences.add(key);
+		segmentOccurrences.push({ segment, resolveFrom });
 	};
-	const allSegments = [
-		...new Set([
-			...outerSegments,
-			...innerSegments,
-			...perSegmentUnwrapped,
-			...expandedSegments.map((e) => e.segment),
-		]),
-	].filter((s) => s.length > 0);
+	for (const segment of outerSegments) pushSegmentOccurrence(segment, null);
+	for (const segment of innerSegments) pushSegmentOccurrence(segment, null);
+	for (const segment of perSegmentUnwrapped)
+		pushSegmentOccurrence(segment, null);
+	for (const entry of expandedSegments)
+		pushSegmentOccurrence(entry.segment, entry.resolveFrom);
+	const relocate = (
+		resolveFrom: string | 'uncertain' | null,
+		targets: string[],
+	): string[] =>
+		resolveFrom === null
+			? targets
+			: targets.map((t) => dcRelocateDestructiveTarget(t, resolveFrom, cwd));
 
-	for (const segment of allSegments) {
-		const seg = segment.trim();
+	for (const occurrence of segmentOccurrences) {
+		const seg = occurrence.segment.trim();
 		if (!seg) continue;
 
 		// Junction/symlink creation with out-of-cwd target
@@ -250,7 +257,7 @@ function evaluateDestructiveDecision(
 		const targets = dcExtractRecursiveRmTargets(seg);
 		if (targets) {
 			const targetDecision = dcEvaluateRecursiveDeleteTargets({
-				targets: relocate(seg, targets),
+				targets: relocate(occurrence.resolveFrom, targets),
 				cwd,
 			});
 			if (!targetDecision.allowed) {
@@ -278,7 +285,7 @@ function evaluateDestructiveDecision(
 					};
 				}
 				const targetDecision = dcEvaluateRecursiveDeleteTargets({
-					targets: relocate(seg, parsed.targets),
+					targets: relocate(occurrence.resolveFrom, parsed.targets),
 					cwd,
 				});
 				if (!targetDecision.allowed) {
@@ -305,7 +312,7 @@ function evaluateDestructiveDecision(
 					};
 				}
 				const targetDecision = dcEvaluateRecursiveDeleteTargets({
-					targets: relocate(seg, parsed.targets),
+					targets: relocate(occurrence.resolveFrom, parsed.targets),
 					cwd,
 				});
 				if (!targetDecision.allowed) {
@@ -331,7 +338,7 @@ function evaluateDestructiveDecision(
 			const targets = dcExtractPowerShellTargets(seg);
 			if (targets.length > 0) {
 				const targetDecision = dcEvaluateRecursiveDeleteTargets({
-					targets: relocate(seg, targets),
+					targets: relocate(occurrence.resolveFrom, targets),
 					cwd,
 				});
 				if (!targetDecision.allowed) {
@@ -850,7 +857,52 @@ export async function handleGuardrailExplain(
 					}
 					writeCategories.add(write.original.category);
 				} else {
-					writeCategories.add(write.original.category);
+					// #3491 fix-round-1 (F-3) parity: mirror the gate's
+					// null-path decision tree instead of treating the write as
+					// a category only — explain used to answer allow for
+					// inputs the gate blocks on EVERY withdrawal class
+					// (`cd -; echo x > f`, uncertain env -C DIR, `popd; …`).
+					// The gate skips exactly one null-path shape: the bare
+					// here-doc marker (`<< EOF` feeds stdin, not a file).
+					if (
+						write.original.category === 'here_doc' &&
+						write.original.path === null
+					) {
+						writeCategories.add(write.original.category);
+						continue;
+					}
+					if (write.original.category === 'interpreter_eval') {
+						// The gate's #3347/#1902 scope-gated routing for the
+						// inspectable capability class: agents WITH a declared
+						// scope authorize the eval's (cd-tracked) working
+						// directory as the target. A WITHDRAWN eval
+						// (#3491 W1 `unresolved`) never routes — the walk could
+						// not stand behind any working directory.
+						if (
+							write.original.capability === true &&
+							write.unresolved !== true &&
+							scopeEntries.length > 0
+						) {
+							const evalTarget = write.evalDirectory ?? directory;
+							if (!isInDeclaredScope(evalTarget, scopeEntries, directory)) {
+								decision = 'block';
+								firingRule = `scope_violation: write outside declared scope: ${redactPath(evalTarget)}`;
+								break;
+							}
+							writeCategories.add(write.original.category);
+							continue;
+						}
+						decision = 'block';
+						firingRule = `inline_eval: ${write.original.operator} evaluates inline code whose write targets cannot be verified against the declared scope — rejecting for safety`;
+						break;
+					}
+					// Every other null-path write (a withdrawn/dynamic redirect
+					// or builtin target, a patch_apply that produced no
+					// targets) fails closed exactly like the gate's
+					// dynamic-path-target rejection.
+					decision = 'block';
+					firingRule = `dynamic_target: write target${write.original.path ? ` "${write.original.path}"` : ''} cannot be statically resolved (dynamic path or withdrawn directory state) — rejecting for safety`;
+					break;
 				}
 			}
 		}

@@ -780,6 +780,18 @@ function matchSudoChdir(words: string[]): DcChdirMatch {
 }
 
 /**
+ * The withdrawal-form synthetic cd operand (#3491 W2, fix-round-1 F-1): a
+ * single-quoted word the directory-state walk classifies as a DYNAMIC cd
+ * operand (`isDynamicPath` — it contains `$…`), so the walk withdraws
+ * UNCONDITIONALLY. The first round used `cd -`, whose withdrawal depended on
+ * no prior cd having modeled OLDPWD — a preceding `cd src`/`pushd src` made
+ * the synthetic `cd -` LAND at OLDPWD and resolve the wrapped writes there
+ * (fail-open). Never a real directory: this text exists only inside the
+ * generated detection command.
+ */
+const DC_UNRESOLVED_CHDIR_OPERAND = '$__swarm_unresolved_chdir';
+
+/**
  * The additive structured wrapper-preprocessing result (#3491 W2): the
  * detection command with every chdir-bearing wrapper segment rewritten as a
  * CORRECTLY QUOTED subshell `( cd -- 'DIR' && <re-unwrapped inner> )`, and
@@ -788,8 +800,9 @@ function matchSudoChdir(words: string[]): DcChdirMatch {
  * bash-true for env/sudo child cwd: the wrapped command's writes resolve
  * under the child directory while following siblings stay at the parent
  * directory. A dynamic DIR is never serialized — the segment rewrites to
- * the withdrawal form `( cd - && <inner> )`, and the resolver's `cd -` with
- * no modeled prior directory withdraws every inner write (fail-closed).
+ * the withdrawal form `( cd '<DC_UNRESOLVED_CHDIR_OPERAND>' && <inner> )`,
+ * whose synthetic dynamic operand withdraws every inner write
+ * UNCONDITIONALLY (fail-closed, independent of any modeled prevCwd).
  * Nested chdir wrappers compose as nested subshells, so relative child
  * cwds resolve against the parent child cwd.
  */
@@ -836,7 +849,7 @@ function preprocessWrapperText(
 				};
 	if (match.kind === 'uncertain') {
 		return {
-			text: `( cd - && ${inner.text} )`,
+			text: `( cd ${shSingleQuote(DC_UNRESOLVED_CHDIR_OPERAND)} && ${inner.text} )`,
 			rewrote: true,
 			uncertain: true,
 			failClosed: inner.failClosed,

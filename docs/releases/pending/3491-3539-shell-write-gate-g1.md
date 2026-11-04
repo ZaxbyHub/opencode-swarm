@@ -42,6 +42,18 @@
   concatenation (`'\''`) no longer defeat the unwrap, and words after the
   payload ($0/$1…) are never scanned as commands (#3491 AC5/AC7).
 
+- **Review round 1 hardening** (`destructive-command.ts`, `tool-before.ts`,
+  `guardrail-explain-service.ts`): the uncertain-DIR withdrawal form uses a
+  synthetic dynamic cd operand, so it withdraws UNCONDITIONALLY — the first
+  round's synthetic `cd -` landed at a modeled `OLDPWD` after a preceding
+  `cd`/`pushd` and admitted the wrapped writes. The destructive arm's
+  child-cwd context is keyed per OCCURRENCE instead of per segment text
+  (first-wins text keying let `env -C src rm -rf dist; env -C .. rm -rf
+  dist` inherit the first occurrence's in-scope context). `/swarm guardrail
+  explain` mirrors the gate's null-path decision tree — withdrawn/dynamic
+  write targets answer block, and inspectable evals route through their
+  tracked working directory exactly like the gate.
+
 ## Known edges
 
 - `pushd ±N`, `pushd -n`, `popd ±N`, `;&`/`;;&` case fall-through, and
@@ -54,6 +66,11 @@
 - The `env -C`/`sudo -D` rewrite consults the existing env-flag grammar;
   deeper launcher option tables (sudo `-u`, `time -o`, nice) arrive with the
   G3 launcher workstream (#3491 AC3/AC4 residuals).
+- A same-directory `cd` deliberately does not refresh `OLDPWD` in the model
+  (bash does): keeping the state stable avoids spurious control-flow
+  divergence, and the omission is conservative/fail-closed. A `CDPATH=`
+  reassignment on the line does not yet withdraw CDPATH-eligible `cd`
+  operands (review round 1 non-blocking note).
 
 ## Verification
 
