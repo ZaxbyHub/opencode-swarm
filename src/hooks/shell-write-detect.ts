@@ -3380,6 +3380,15 @@ function detectLauncherWrites(cmd: unknown): WriteTarget[] {
 	const firstName = getCommandName(cmd);
 	if (!firstName) return results;
 	const suffix = getSuffixWords(cmd);
+	// Suffix NODES carry the raw word slices the W8 engine needs (the
+	// #3491 closure round-3 terminal literal-emitter site: launcher_write
+	// destinations route through pushExpandedDestination like every other
+	// destination family).
+	const suffixNodes = (
+		Array.isArray((cmd as BashCommand).suffix)
+			? ((cmd as BashCommand).suffix as unknown[])
+			: []
+	).filter((s) => wordText(s) !== null);
 	// The FIRST word keeps its raw spelling (keyword-suppression routing);
 	// deeper chain words are only available dequoted.
 	const firstRaw = rawCommandName(cmd) ?? undefined;
@@ -3392,25 +3401,58 @@ function detectLauncherWrites(cmd: unknown): WriteTarget[] {
 		if (base === 'sudo' || base === 'time') {
 			const walk = walkLauncherOptions(name, suffix.slice(cursor), nameRaw);
 			if (walk?.kind === 'edit') {
+				// sudo -e operands are EDIT TARGETS (write-class) — each one
+				// expands per-branch (bash hands sudo every expanded word);
+				// refusal classes land on the unconditional dynamic() path.
 				for (let t = cursor + walk.editStartIndex; t < suffix.length; t++) {
 					const operand = suffix[t];
 					if (operand === undefined || operand === '') continue;
-					results.push({
-						category: 'launcher_write',
-						operator: 'sudo -e',
-						path: operand,
-					});
+					pushExpandedDestination(
+						results,
+						suffixNodes[t],
+						operand,
+						0,
+						(path) => ({
+							category: 'launcher_write',
+							operator: 'sudo -e',
+							path,
+						}),
+						() => ({
+							category: 'launcher_write',
+							operator: 'sudo -e',
+							path: null,
+							dynamicSourceWord: operand,
+						}),
+					);
 				}
 			} else if (
 				walk?.kind === 'inner' &&
 				walk.timeOutputFile !== undefined &&
 				walk.timeOutputFile !== ''
 			) {
-				results.push({
-					category: 'launcher_write',
-					operator: 'time -o',
-					path: walk.timeOutputFile,
-				});
+				// GNU time -o FILE: the timing-report destination expands
+				// per-branch too — the glued -osrc/{a,../esc} is two -o
+				// spellings with getopt FILE-option last-wins (the same
+				// rationale the wget site accepted). The walk returns the
+				// dequoted tail only; the engine judges it on that text
+				// (quoted-brace false expansion is the deny direction).
+				pushExpandedDestination(
+					results,
+					undefined,
+					walk.timeOutputFile,
+					0,
+					(path) => ({
+						category: 'launcher_write',
+						operator: 'time -o',
+						path,
+					}),
+					() => ({
+						category: 'launcher_write',
+						operator: 'time -o',
+						path: null,
+						dynamicSourceWord: walk.timeOutputFile as string,
+					}),
+				);
 			}
 			return results; // launcher heads never nest another launcher
 		}

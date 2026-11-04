@@ -205,3 +205,48 @@ describe('closure round 2: wget -O / scp brace destinations', () => {
 		expect(paths('scp f src/{a,../esc}')).toEqual(['src/{a,../esc}']);
 	});
 });
+
+describe('closure round 3: launcher_write brace destinations (the terminal literal-emitter site)', () => {
+	// detectLauncherWrites pushed sudo -e edit targets and GNU time -o
+	// report paths as LITERAL words — the last unbacked emitter. Both now
+	// route through the W8 engine; the bare-keyword `time` spelling keeps
+	// its bash-true pin (the glued word IS the timed command, nothing runs).
+	test('/usr/bin/time -osrc/{a,../esc} true → DENIED (per-branch)', async () => {
+		const got = await gate('/usr/bin/time -osrc/{a,../esc} true');
+		expect(got.verdict).toBe('DENIED');
+		expect(got.detail).toMatch(ANY_WRITE_BLOCK);
+	});
+
+	test(String.raw`\time -osrc/{a,../esc} true → DENIED (quoted keyword = GNU grammar)`, async () => {
+		const got = await gate(String.raw`\time -osrc/{a,../esc} true`);
+		expect(got.verdict).toBe('DENIED');
+		expect(got.detail).toMatch(ANY_WRITE_BLOCK);
+	});
+
+	test('sudo -e src/{a,../esc} → DENIED (edit targets are write-class)', async () => {
+		const got = await gate('sudo -e src/{a,../esc}');
+		expect(got.verdict).toBe('DENIED');
+		expect(got.detail).toMatch(ANY_WRITE_BLOCK);
+	});
+
+	test('in-scope control: cd src && sudo -e {a,b} ADMITS', async () => {
+		const got = await gate('cd src && sudo -e {a,b}');
+		expect(got.verdict).toBe('ADMITTED');
+	});
+
+	test('PIN: bare-keyword time -osrc/{a,../esc} true ADMITS (the word is the timed command)', async () => {
+		const got = await gate('time -osrc/{a,../esc} true');
+		expect(got.verdict).toBe('ADMITTED');
+	});
+
+	test('detector pins: launcher_write per-branch emission', () => {
+		const paths = (c: string) =>
+			detectPosixWrites(c).writes.map((w) => w.path ?? w.dynamicSourceWord);
+		expect(paths('/usr/bin/time -osrc/{a,../esc} true')).toEqual([
+			'src/a',
+			'src/../esc',
+		]);
+		expect(paths('sudo -e src/{a,../esc}')).toEqual(['src/a', 'src/../esc']);
+		expect(paths('time -osrc/{a,../esc} true')).toEqual([]);
+	});
+});

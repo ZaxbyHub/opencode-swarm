@@ -133,6 +133,10 @@ C9, C12–C15 stay GREEN.
   refused as a dynamic write instead of emitted literally (a multi-source
   scp writes the escaping branch when it names an existing directory;
   `isDynamicPath` has no brace check — #3491's own root-cause line).
+  (Closure round 3:) the launcher_write family joined the engine too —
+  `sudo -e` edit targets and GNU `time -o` report paths (the last
+  unbacked literal emitters) now expand per-branch, with the bare-keyword
+  `time -o…{…}` spelling keeping its bash-true no-write pin.
 - (Advisory, disclosed with follow-up issue #3569 — NOT fixed here, out of
   closure scope:) wrapper-prefixed tee/dd operand windows can bleed the
   wrapper's word consumption into the operand position —
