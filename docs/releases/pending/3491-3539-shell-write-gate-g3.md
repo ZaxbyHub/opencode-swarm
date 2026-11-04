@@ -103,11 +103,13 @@ C9, C12–C15 stay GREEN.
   allowed at the workspace root; re-pinned deliberately in the in-place suites.
 - A deno global flag that takes an argument before the subcommand
   (`deno --config x eval CODE`) is not modeled; disclosed rather than guessed.
-  (Closure round F-2:) an UNKNOWN argument-less flag immediately before
-  `eval` (`deno --no-prompt eval CODE`, `deno --unstable-kv eval CODE`) now
-  classifies deny-on-uncertainty — the W3 pattern, no flag-set enumeration;
-  an unknown flag whose NEXT word is not `eval` may be flag-taking and keeps
-  the disclosed no-classification disposition.
+  (Closure round F-2 + round 2:) a leading DASH-WORD RUN that reaches `eval`
+  (`deno --no-prompt eval CODE`, `deno --no-prompt --unstable-kv eval CODE`,
+  `deno --unstable-kv --no-check eval CODE`, mixing known and unknown
+  argument-less flags) classifies deny-on-uncertainty — the W3 pattern, no
+  flag-set enumeration; a NON-DASH word inside the run is a flag argument
+  (`deno --config x eval CODE`), the subcommand position is unknowable, and
+  the disclosed no-classification disposition stands.
 - (Closure round F-4:) `cmd /k` selects the win32 authority exactly like
   `cmd /c` (the payload executes; the shell merely stays open) — the strip
   prefix always modeled `/[ck]`, and the declaration/builtin-prefix
@@ -121,6 +123,16 @@ C9, C12–C15 stay GREEN.
   sed/perl/awk `-i` operands (every expanded operand is edited); for the
   spaced curl form real curl treats the second branch as a URL, so the
   per-branch emission is the deliberately fail-closed direction.
+  (Closure round 2:) wget's `-O` destination shares the same engine and the
+  same spaced-form over-approx (the glued `-Osrc/{a,../esc}` is bash-true:
+  two `-O` spellings, GNU getopt FILE-option semantics keep the LAST — the
+  escaping branch can win; wget(1) doc-sourced, no wget binary on this
+  host). scp's brace-shaped destination word — and ANY literal destination
+  emission in the network-downloader family — passes a class-closing
+  backstop: an UNQUOTED brace list that did not go through the W8 engine is
+  refused as a dynamic write instead of emitted literally (a multi-source
+  scp writes the escaping branch when it names an existing directory;
+  `isDynamicPath` has no brace check — #3491's own root-cause line).
 - (Advisory, disclosed with follow-up issue #3569 — NOT fixed here, out of
   closure scope:) wrapper-prefixed tee/dd operand windows can bleed the
   wrapper's word consumption into the operand position —
@@ -147,7 +159,10 @@ C9, C12–C15 stay GREEN.
   legs in `guardrails-shell-write-interpreter-flags-3491.test.ts`;
   colon-glued write-arm PS legs in `destructive-command-verb-and-ps-3539.test.ts`;
   `cmd /k` legs (bare + path-qualified + in-scope admit) in
-  `destructive-command-windows-3491-cmdk.test.ts`.
+  `destructive-command-windows-3491-cmdk.test.ts`. Closure round 2 added the
+  wget/scp brace destinations to the `brace-sites` suite (glued `-O`
+  escaping deny, spaced in-scope admit, scp backstop refusal, plain control,
+  detector pins) and the deno dash-run legs to the interpreter suite.
 - Deliberate re-pins: `shell-write-detect-null-device.test.ts` (perl glued
   cluster evalToo rows), `guardrails-shell-write-inplace-unknown-option.test.ts`,
   `guardrails-shell-write-inplace-escapes.test.ts`,

@@ -343,3 +343,35 @@ describe('W7 closure F-2: deno unknown argument-less flags before eval', () => {
 		expect(evals[0]?.capability).toBe(true);
 	});
 });
+
+describe('W7 closure round 2: deno dash-word run before eval', () => {
+	test.each([
+		['deno --no-prompt --unstable-kv eval'],
+		['deno --unstable-kv --no-check eval'],
+		['deno --no-prompt -q eval'],
+	])('%s "<write>" → DENIED (every word up to eval is argument-less)', async (_prefix) => {
+		const got = await gate(`${_prefix} "Deno.writeTextFileSync('../x','y')"`);
+		expect(got.verdict).toBe('DENIED');
+		expect(got.message).toMatch(ANY_BLOCK);
+	});
+
+	test('PIN: a non-dash word inside the run is a flag argument — stays disclosed', async () => {
+		const got = await gate('deno --config x eval "1"');
+		expect(got.verdict).toBe('ADMITTED');
+	});
+
+	test('PIN: script/lint carve-outs unaffected', async () => {
+		const run = await gate('deno run script.ts');
+		expect(run.verdict).toBe('ADMITTED');
+		const version = await gate('deno --version');
+		expect(version.verdict).toBe('ADMITTED');
+	});
+
+	test('detector pin: the dash-run classifies a capability eval', () => {
+		const evals = detectPosixWrites(
+			`deno --no-prompt --unstable-kv eval "Deno.writeTextFileSync('../x','y')"`,
+		).writes.filter((w) => w.category === 'interpreter_eval');
+		expect(evals.length).toBe(1);
+		expect(evals[0]?.capability).toBe(true);
+	});
+});

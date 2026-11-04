@@ -168,3 +168,40 @@ describe('closure F-1 detector pins: per-branch emission', () => {
 		}
 	});
 });
+
+describe('closure round 2: wget -O / scp brace destinations', () => {
+	// wget(1) doc-sourced (no wget binary on this host): the GLUED form
+	// expands to two -O spellings and GNU getopt FILE-option semantics keep
+	// the LAST — which can be the escaping branch; per-branch emission
+	// covers it. The SPACED form's second branch is a URL (curl-parity
+	// over-approx, disclosed). scp's brace-shaped dest word hits the
+	// class-closing backstop: a literal destination emission is refused.
+	test('wget -Osrc/{a,../esc} url → DENIED (glued: two -O spellings, last wins)', async () => {
+		const got = await gate('wget -Osrc/{a,../esc} url');
+		expect(got.verdict).toBe('DENIED');
+		expect(got.detail).toMatch(ANY_WRITE_BLOCK);
+	});
+
+	test('wget -O src/{a,b} url in scope → ADMITTED (spaced curl-parity over-approx)', async () => {
+		const got = await gate('wget -O src/{a,b} url');
+		expect(got.verdict).toBe('ADMITTED');
+	});
+
+	test('scp f src/{a,../esc} → DENIED (backstop refusal names the source word)', async () => {
+		const got = await gate('scp f src/{a,../esc}');
+		expect(got.verdict).toBe('DENIED');
+		expect(got.detail).toMatch(/src\/\{a,\.\.\/esc\}/);
+	});
+
+	test('control: wget -O src/a url plain destination unchanged', async () => {
+		const got = await gate('wget -O src/a url');
+		expect(got.verdict).toBe('ADMITTED');
+	});
+
+	test('detector pins: wget per-branch, scp refusal', () => {
+		const paths = (c: string) =>
+			detectPosixWrites(c).writes.map((w) => w.path ?? w.dynamicSourceWord);
+		expect(paths('wget -Osrc/{a,../esc} url')).toEqual(['src/a', 'src/../esc']);
+		expect(paths('scp f src/{a,../esc}')).toEqual(['src/{a,../esc}']);
+	});
+});

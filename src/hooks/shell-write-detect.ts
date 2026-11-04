@@ -5300,14 +5300,16 @@ function detectInterpreterEval(cmd: unknown): WriteTarget[] {
 		// script.ts` is a script-file run (carve-out parity with `python
 		// script.py`); the `deno run -` stdin shape classifies in
 		// classifyPipeStdinEval. A small set of documented argument-less
-		// GLOBAL flags may precede the subcommand. #3491 closure F-2: an
-		// UNKNOWN leading flag whose NEXT word is `eval` (the arg-less shape
-		// `deno --no-prompt eval CODE`, `deno --unstable-kv eval CODE`) is
-		// deny-on-uncertainty — the W3 pattern, no flag-set enumeration: the
-		// subcommand is `eval` whatever the flag means, so the command
-		// classifies as an eval. An unknown flag whose next word is NOT
-		// `eval` may be flag-taking (`deno --config x eval CODE`) and keeps
-		// the disclosed no-classification disposition (fragment Known-edges).
+		// GLOBAL flags may precede the subcommand. #3491 closure F-2 +
+		// closure round 2: a leading DASH-WORD RUN that reaches `eval`
+		// (`deno --no-prompt eval CODE`, `deno --no-prompt --unstable-kv
+		// eval CODE`, `deno --unstable-kv --no-check eval CODE`) is
+		// deny-on-uncertainty — the W3 pattern, no flag-set enumeration:
+		// every word up to the subcommand is argument-less, so the
+		// subcommand is `eval` whatever the unknown flags mean. A NON-DASH
+		// word inside the run is a flag argument (`deno --config x eval
+		// CODE`): the subcommand position is unknowable and the disclosed
+		// no-classification disposition stands (fragment Known-edges).
 		const words = [name, ...suffixWords];
 		const interpreterIndex = canonicalInterpreterAt(words);
 		const args =
@@ -5321,9 +5323,23 @@ function detectInterpreterEval(cmd: unknown): WriteTarget[] {
 		}
 		const headWord = args[sub];
 		if (headWord !== 'eval') {
-			const isArglessUnknownEval =
-				headWord?.startsWith('-') && args[sub + 1] === 'eval';
-			if (!isArglessUnknownEval) return results;
+			let evalThroughDashRun = false;
+			if (headWord?.startsWith('-')) {
+				let sawUnknownFlag = false;
+				for (let j = sub; j < args.length; j += 1) {
+					const runWord = args[j];
+					if (runWord === 'eval') {
+						evalThroughDashRun = sawUnknownFlag;
+						break;
+					}
+					// A non-dash word ends the run: it is some flag's argument,
+					// the subcommand position is unknowable — keep the disclosed
+					// no-classification disposition.
+					if (runWord === undefined || !runWord.startsWith('-')) break;
+					if (!DENO_GLOBAL_ARGLESS_FLAGS.has(runWord)) sawUnknownFlag = true;
+				}
+			}
+			if (!evalThroughDashRun) return results;
 		}
 	} else if (CLUSTER_GRAMMAR_CANONICALS.has(canonical)) {
 		const words = [name, ...suffixWords];
@@ -5374,17 +5390,21 @@ function detectNetworkDownloaders(cmd: unknown): WriteTarget[] {
 	const suffixWords = getSuffixWords(cmd);
 	// #3491 closure F-1: curl's -o/--output destination routes through the
 	// W8 brace engine (per-branch emission; refusal → dynamic). The suffix
-	// NODES carry the raw word slices the engine needs.
+	// NODES carry the raw word slices the engine needs. #3491 closure round
+	// 2: wget's -O destination shares the emitter (curl parity), and every
+	// LITERAL destination emission in this family passes the brace-list
+	// backstop below.
 	const suffixNodes = (
 		Array.isArray((cmd as BashCommand).suffix)
 			? ((cmd as BashCommand).suffix as unknown[])
 			: []
 	).filter((s) => wordText(s) !== null);
-	const curlOutputEmit = (
+	const downloadOutputEmit = (
 		out: WriteTarget[],
 		node: unknown,
 		text: string,
 		rawSkip: number,
+		operator: string,
 	): void => {
 		pushExpandedDestination(
 			out,
@@ -5393,16 +5413,38 @@ function detectNetworkDownloaders(cmd: unknown): WriteTarget[] {
 			rawSkip,
 			(path) => ({
 				category: 'network_download',
-				operator: 'curl -o',
+				operator,
 				path,
 			}),
 			() => ({
 				category: 'network_download',
-				operator: 'curl -o',
+				operator,
 				path: null,
 				dynamicSourceWord: text,
 			}),
 		);
+	};
+	// #3491 closure round 2 — the class-closing backstop: a destination word
+	// carrying an UNQUOTED brace list that did not pass through the W8
+	// engine must NEVER be emitted as a literal (isDynamicPath has no brace
+	// check — #3491's own root-cause line). Emit the dynamic() refusal
+	// instead: a null-path write whose dynamicSourceWord is the source word.
+	const pushLiteralDestination = (
+		out: WriteTarget[],
+		node: unknown,
+		word: string,
+		operator: string,
+	): void => {
+		if (hasUnquotedBraceExpansion(node, word)) {
+			out.push({
+				category: 'network_download',
+				operator,
+				path: null,
+				dynamicSourceWord: word,
+			});
+			return;
+		}
+		out.push({ category: 'network_download', operator, path: word });
 	};
 
 	if (lowerName === 'curl') {
@@ -5411,52 +5453,54 @@ function detectNetworkDownloaders(cmd: unknown): WriteTarget[] {
 			if (word === '-o' && i + 1 < suffixWords.length) {
 				const path = suffixWords[i + 1];
 				if (!path.startsWith('-')) {
-					curlOutputEmit(results, suffixNodes[i + 1], path, 0);
+					downloadOutputEmit(results, suffixNodes[i + 1], path, 0, 'curl -o');
 				}
 			} else if (word.startsWith('-o') && word.length > 2) {
-				curlOutputEmit(results, suffixNodes[i], word, 2);
+				downloadOutputEmit(results, suffixNodes[i], word, 2, 'curl -o');
 			} else if (word === '--output' && i + 1 < suffixWords.length) {
 				const path = suffixWords[i + 1];
 				if (!path.startsWith('-')) {
-					curlOutputEmit(results, suffixNodes[i + 1], path, 0);
+					downloadOutputEmit(results, suffixNodes[i + 1], path, 0, 'curl -o');
 				}
 			} else if (word.startsWith('--output=') && word.length > 9) {
-				curlOutputEmit(results, suffixNodes[i], word, 9);
+				downloadOutputEmit(results, suffixNodes[i], word, 9, 'curl -o');
 			}
 		}
 	} else if (lowerName === 'wget') {
+		// #3491 closure round 2: wget -O routes through the engine like curl.
+		// The GLUED form expands to two -O spellings (bash ground truth) and
+		// GNU getopt FILE-option semantics keep the LAST — which can be the
+		// escaping branch (wget(1), doc-sourced: no wget binary on this
+		// host); per-branch emission covers it. The SPACED form's second
+		// branch is a URL in real wget (curl-parity over-approx, disclosed).
 		for (let i = 0; i < suffixWords.length; i++) {
 			const word = suffixWords[i];
 			if (word === '-O' && i + 1 < suffixWords.length) {
 				const path = suffixWords[i + 1];
 				if (!path.startsWith('-')) {
-					results.push({
-						category: 'network_download',
-						operator: 'wget -O',
-						path,
-					});
+					downloadOutputEmit(results, suffixNodes[i + 1], path, 0, 'wget -O');
 				}
 			} else if (word.startsWith('-O') && word.length > 2) {
-				results.push({
-					category: 'network_download',
-					operator: 'wget -O',
-					path: word.slice(2),
-				});
+				downloadOutputEmit(results, suffixNodes[i], word, 2, 'wget -O');
 			}
 		}
 	} else if (lowerName === 'scp') {
-		// scp user@host:path local_path — flag the last path-like argument
+		// scp user@host:path local_path — flag the last path-like argument.
+		// #3491 closure round 2: a BRACE-SHAPED word is destination-shaped
+		// too (bash expands it into multiple operands — a multi-source scp
+		// writes the escaping branch when it names an existing directory),
+		// and the backstop turns it into the refusal instead of a literal.
 		for (let i = suffixWords.length - 1; i >= 0; i--) {
 			const word = suffixWords[i];
+			if (word.startsWith('-')) continue;
+			const braceShaped = hasUnquotedBraceExpansion(suffixNodes[i], word);
 			if (
-				!word.startsWith('-') &&
-				(word.includes(':') || word.startsWith('/') || word.startsWith('.'))
+				braceShaped ||
+				word.includes(':') ||
+				word.startsWith('/') ||
+				word.startsWith('.')
 			) {
-				results.push({
-					category: 'network_download',
-					operator: 'scp',
-					path: word,
-				});
+				pushLiteralDestination(results, suffixNodes[i], word, 'scp');
 				break;
 			}
 		}
