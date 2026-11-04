@@ -1,0 +1,170 @@
+/**
+ * #3491 closure F-1 shipped suite (AC9, the ABSORB record 08a:55-60 named
+ * PR-3 as owner): the sed/perl/awk `-i` in-place operands and curl's
+ * `-o`/`--output` destinations route through the W8 brace engine. Sibling of
+ * guardrails-shell-write-brace-3491.test.ts (which sits at the FR-006 cap
+ * after its own closure legs).
+ *
+ * Bash expands `src/{a,../esc}` into per-command operands: sed/awk `-i` edit
+ * EVERY one (executed ground truth), and the glued curl form
+ * `-osrc/{a,../esc}` produces two `-o` flags (both written). The spaced curl
+ * form treats the second branch as a URL in real curl — per-branch emission
+ * is the deliberately fail-closed direction there (disclosed in the g3
+ * fragment's Known edges).
+ */
+import { afterAll, beforeEach, describe, expect, test } from 'bun:test';
+import { mkdirSync } from 'node:fs';
+import * as path from 'node:path';
+import type { GuardrailsConfig } from '../../../src/config/schema';
+import { createGuardrailsHooks } from '../../../src/hooks/guardrails';
+import { detectPosixWrites } from '../../../src/hooks/shell-write-detect';
+import { resetSwarmState, startAgentSession } from '../../../src/state';
+import { installActiveScopeBinding } from '../../helpers/active-scope-binding';
+import { canonicalMkdtemp, removeTreeWithRetry } from '../../helpers/tmpdir';
+
+const created: string[] = [];
+let counter = 0;
+afterAll(() => {
+	for (const dir of created.splice(0)) removeTreeWithRetry(dir);
+});
+
+function config(): GuardrailsConfig {
+	return {
+		enabled: true,
+		max_tool_calls: 200,
+		max_duration_minutes: 30,
+		idle_timeout_minutes: 60,
+		max_repetitions: 10,
+		max_consecutive_errors: 5,
+		warning_threshold: 0.75,
+		profiles: undefined,
+	};
+}
+
+const ANY_WRITE_BLOCK = /^(WRITE )?BLOCKED/;
+
+async function gate(
+	command: string,
+): Promise<{ verdict: 'ADMITTED' | 'DENIED'; detail: string }> {
+	const ws = canonicalMkdtemp('f1sites-ws-');
+	created.push(ws);
+	mkdirSync(path.join(ws, 'src'), { recursive: true });
+	const sessionID = `f1s-${++counter}`;
+	const callID = `f1s-call-${counter}`;
+	startAgentSession(sessionID, 'coder');
+	installActiveScopeBinding({
+		directory: ws,
+		childSessionId: sessionID,
+		taskId: '1.1',
+		files: ['src/'],
+		dispatchCallId: callID,
+	});
+	const hooks = createGuardrailsHooks(ws, undefined, config());
+	try {
+		await hooks.toolBefore(
+			{ tool: 'bash', sessionID, callID },
+			{ args: { command } },
+		);
+		return { verdict: 'ADMITTED', detail: '' };
+	} catch (error) {
+		return {
+			verdict: 'DENIED',
+			detail: (error as Error).message.split('\n')[0],
+		};
+	} finally {
+		resetSwarmState();
+	}
+}
+
+beforeEach(() => {
+	resetSwarmState();
+});
+
+describe('closure F-1: sed -i brace destinations', () => {
+	// The gate deny names the RESOLVED escaping branch (path prefix can
+	// exceed a detail slice, so the class is asserted at the gate and the
+	// branch naming at the detector level below).
+	test('escaping branch denies at the gate', async () => {
+		const got = await gate('sed -i s/a/b/ src/{a,../esc}');
+		expect(got.verdict).toBe('DENIED');
+		expect(got.detail).toMatch(ANY_WRITE_BLOCK);
+	});
+	test('in-scope {a,b} admits', async () => {
+		const got = await gate('sed -i s/a/b/ src/{a,b}');
+		expect(got.verdict).toBe('ADMITTED');
+	});
+	test('refusal class denies (dynamic branch)', async () => {
+		const got = await gate('sed -i s/a/b/ src/{a,$(echo esc)}');
+		expect(got.verdict).toBe('DENIED');
+		expect(got.detail).toMatch(/dynamic|BLOCKED/);
+	});
+});
+
+describe('closure F-1: awk -i inplace brace destinations', () => {
+	test('escaping branch denies at the gate', async () => {
+		const got = await gate("awk -i inplace '{print}' src/{a,../esc}");
+		expect(got.verdict).toBe('DENIED');
+		expect(got.detail).toMatch(ANY_WRITE_BLOCK);
+	});
+	test('in-scope {a,b} admits', async () => {
+		const got = await gate("awk -i inplace '{print}' src/{a,b}");
+		expect(got.verdict).toBe('ADMITTED');
+	});
+	test('refusal class denies (numeric range over-cap)', async () => {
+		const got = await gate("awk -i inplace '{print}' src/{a..i}");
+		expect(got.verdict).toBe('DENIED');
+		expect(got.detail).toMatch(/dynamic|BLOCKED/);
+	});
+});
+
+describe('closure F-1: curl -o brace destinations', () => {
+	test('escaping branch denies at the gate', async () => {
+		const got = await gate('curl -o src/{a,../esc} url');
+		expect(got.verdict).toBe('DENIED');
+		expect(got.detail).toMatch(ANY_WRITE_BLOCK);
+	});
+	test('glued -osrc/{a,../esc} (two -o flags in real curl) denies', async () => {
+		const got = await gate('curl -osrc/{a,../esc} url');
+		expect(got.verdict).toBe('DENIED');
+		expect(got.detail).toMatch(ANY_WRITE_BLOCK);
+	});
+	test('--output= glued form denies on the escaping branch', async () => {
+		const got = await gate('curl --output=src/{a,../esc} url');
+		expect(got.verdict).toBe('DENIED');
+		expect(got.detail).toMatch(ANY_WRITE_BLOCK);
+	});
+	test('in-scope {a,b} admits', async () => {
+		const got = await gate('curl -o src/{a,b} url');
+		expect(got.verdict).toBe('ADMITTED');
+	});
+	test('refusal class denies (dynamic branch)', async () => {
+		const got = await gate('curl -o src/{a,$(echo esc)} url');
+		expect(got.verdict).toBe('DENIED');
+		expect(got.detail).toMatch(/dynamic|BLOCKED/);
+	});
+});
+
+describe('closure F-1 detector pins: per-branch emission', () => {
+	const paths = (c: string) =>
+		detectPosixWrites(c).writes.map((w) => w.path ?? w.dynamicSourceWord);
+	test.each([
+		['sed -i s/a/b/ src/{a,../esc}', ['src/a', 'src/../esc']],
+		["awk -i inplace '{print}' src/{a,../esc}", ['src/a', 'src/../esc']],
+		['curl -o src/{a,../esc} url', ['src/a', 'src/../esc']],
+		['curl -osrc/{a,../esc} url', ['src/a', 'src/../esc']],
+		['curl --output=src/{a,../esc} url', ['src/a', 'src/../esc']],
+	])('%s emits both branches', (command, expected) => {
+		expect(paths(command)).toEqual(expected);
+	});
+	test.each([
+		['sed -i s/a/b/ src/{a,$(echo esc)}'],
+		['curl -o src/{a,$(echo esc)} url'],
+	])('%s refuses as one dynamic write naming the SOURCE word', (command) => {
+		const writes = detectPosixWrites(command).writes;
+		expect(writes.length).toBeGreaterThan(0);
+		for (const w of writes) {
+			expect(w.path).toBeNull();
+			expect(w.dynamicSourceWord).toBeDefined();
+		}
+	});
+});

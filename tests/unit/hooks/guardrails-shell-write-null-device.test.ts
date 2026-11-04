@@ -458,6 +458,10 @@ describe('guardrails shell writes: sed script and suffix placement', () => {
 		);
 	});
 
+	// #3491 closure F-1 re-pin: the operand expands per-branch, so the deny
+	// names the first OUT-OF-SCOPE branch — `1d` resolves at the workspace
+	// root, outside a coder scoped to src/ (the literal `outside/v}` spelling
+	// no longer appears; the escaping ../../outside/v branch is reported too).
 	it('scoped coder: a brace word in the script slot is rejected', async () => {
 		const hooks = createGuardrailsHooks(TEST_DIR, undefined, config());
 		coderWithScope('coder-script-slot', ['src/']);
@@ -467,10 +471,13 @@ describe('guardrails shell writes: sed script and suffix placement', () => {
 				output('sed -i {1d,../../outside/v} src/a.ts'),
 			),
 		).rejects.toThrow(
-			/^WRITE BLOCKED \[shell-write-scope\]: SCOPE_VIOLATION: shell write target "[^"]*outside[\\/]v\}" is outside the active scope/,
+			/^WRITE BLOCKED \[shell-write-scope\]: SCOPE_VIOLATION: shell write target "[^"]*\\1d" is outside the active scope/,
 		);
 	});
 
+	// #3491 closure F-1 re-pin: the branches resolve outside the workspace
+	// root, so the authority's ROOT_ESCAPE class fires naming the expanded
+	// branch (previously the literal brace word was named).
 	it('scoped coder: a brace-expansion word after -i is rejected', async () => {
 		const hooks = createGuardrailsHooks(TEST_DIR, undefined, config());
 		coderWithScope('coder-brace-word', ['src/']);
@@ -480,7 +487,7 @@ describe('guardrails shell writes: sed script and suffix placement', () => {
 				output("sed -i '' s-x-/{..,a}/{..,b}/outside/victimH-1 src/a.ts -n"),
 			),
 		).rejects.toThrow(
-			/^WRITE BLOCKED \[shell-write-scope\]: SCOPE_VIOLATION: shell write target "[^"]*victimH-1" is outside the active scope/,
+			/BLOCKED: .*"[^"]*outside[\\/]victimH-1".*AUTHORITY_ROOT_ESCAPE/,
 		);
 	});
 

@@ -31,9 +31,15 @@ const CMD_SWITCH = String.raw`\/[a-z](?::(?:on|off))?`;
  */
 const CMD_BINARY = String.raw`(?:cmd|(?:[A-Za-z]:)?(?:[\\/][^\s\\/]*)*[\\/]cmd)(?:\.exe)?`;
 
-/** Statement-position cmd /c declaration (switch-tolerant). */
+/**
+ * Statement-position cmd /c or /k declaration (switch-tolerant). #3539
+ * closure F-4: /k parity — `cmd /k copy a b` executes the payload and KEEPS
+ * the shell open (executed ground truth: the copy happens), so the win32
+ * authority must select for it exactly as for /c; the strip prefix below
+ * already modeled `\/[ck]`.
+ */
 export const CMD_WRAPPER_DECLARATION = new RegExp(
-	String.raw`(?:^|[;|&\n])\s*${CMD_BINARY}\s+(?:${CMD_SWITCH}\s+)*\/c(?:\s|$)`,
+	String.raw`(?:^|[;|&\n])\s*${CMD_BINARY}\s+(?:${CMD_SWITCH}\s+)*\/[ck](?:\s|$)`,
 	'i',
 );
 
@@ -68,7 +74,7 @@ export function declaresWindowsWrapperLoose(command: string): boolean {
  * detected like bare `cmd /c copy a b`.
  */
 export const CMD_BUILTIN_PREFIX = new RegExp(
-	String.raw`(?:(?:^|\s)(?:if\s+(?:not\s+)?exist\s+(?:"[^"]*"|\S+)\s+)|(?:^|[;|&\n])\s*${CMD_BINARY}\s+(?:${CMD_SWITCH}\s+)*\/c\s+|(?:^|\s)(?:call|start)\s+)*`,
+	String.raw`(?:(?:^|\s)(?:if\s+(?:not\s+)?exist\s+(?:"[^"]*"|\S+)\s+)|(?:^|[;|&\n])\s*${CMD_BINARY}\s+(?:${CMD_SWITCH}\s+)*\/[ck]\s+|(?:^|\s)(?:call|start)\s+)*`,
 	'i',
 );
 

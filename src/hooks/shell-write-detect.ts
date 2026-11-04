@@ -4680,12 +4680,29 @@ function detectInplaceEdit(cmd: unknown): WriteTarget[] {
 		// one would let any other edited file (`sed -i -e 1d '../{a}' src/a.ts`,
 		// `perl -i -pe X src/a.ts /etc/passwd`) escape the check. A non-file awk
 		// operand (`var=val`) is reported too (fail-safe over-report).
-		for (const { word } of candidates) {
-			results.push({
-				category: 'inplace_edit',
-				operator: `${lowerName} -i`,
-				path: word,
-			});
+		// #3491 closure F-1 (AC9, the ABSORB record 08a:55-60): each
+		// destination word routes through the W8 brace engine — bash expands
+		// `sed -i s/a/b/ src/{a,../esc}` into TWO file operands and sed edits
+		// EVERY one (ground truth), so per-branch emission is bash-exact;
+		// refusal classes land on the existing unconditional dynamic() path.
+		for (const { word, i } of candidates) {
+			pushExpandedDestination(
+				results,
+				i >= 0 ? suffixNodes[i] : undefined,
+				word,
+				0,
+				(path) => ({
+					category: 'inplace_edit',
+					operator: `${lowerName} -i`,
+					path,
+				}),
+				() => ({
+					category: 'inplace_edit',
+					operator: `${lowerName} -i`,
+					path: null,
+					dynamicSourceWord: word,
+				}),
+			);
 		}
 	}
 
@@ -5283,9 +5300,14 @@ function detectInterpreterEval(cmd: unknown): WriteTarget[] {
 		// script.ts` is a script-file run (carve-out parity with `python
 		// script.py`); the `deno run -` stdin shape classifies in
 		// classifyPipeStdinEval. A small set of documented argument-less
-		// GLOBAL flags may precede the subcommand; a flag-taking global
-		// prefix is deliberately NOT skipped (unknown-shape: no
-		// classification, disclosed known-edge).
+		// GLOBAL flags may precede the subcommand. #3491 closure F-2: an
+		// UNKNOWN leading flag whose NEXT word is `eval` (the arg-less shape
+		// `deno --no-prompt eval CODE`, `deno --unstable-kv eval CODE`) is
+		// deny-on-uncertainty — the W3 pattern, no flag-set enumeration: the
+		// subcommand is `eval` whatever the flag means, so the command
+		// classifies as an eval. An unknown flag whose next word is NOT
+		// `eval` may be flag-taking (`deno --config x eval CODE`) and keeps
+		// the disclosed no-classification disposition (fragment Known-edges).
 		const words = [name, ...suffixWords];
 		const interpreterIndex = canonicalInterpreterAt(words);
 		const args =
@@ -5297,7 +5319,12 @@ function detectInterpreterEval(cmd: unknown): WriteTarget[] {
 		) {
 			sub += 1;
 		}
-		if (args[sub] !== 'eval') return results;
+		const headWord = args[sub];
+		if (headWord !== 'eval') {
+			const isArglessUnknownEval =
+				headWord?.startsWith('-') && args[sub + 1] === 'eval';
+			if (!isArglessUnknownEval) return results;
+		}
 	} else if (CLUSTER_GRAMMAR_CANONICALS.has(canonical)) {
 		const words = [name, ...suffixWords];
 		const interpreterIndex = canonicalInterpreterAt(words);
@@ -5345,6 +5372,38 @@ function detectNetworkDownloaders(cmd: unknown): WriteTarget[] {
 	if (!lowerName) return [];
 
 	const suffixWords = getSuffixWords(cmd);
+	// #3491 closure F-1: curl's -o/--output destination routes through the
+	// W8 brace engine (per-branch emission; refusal → dynamic). The suffix
+	// NODES carry the raw word slices the engine needs.
+	const suffixNodes = (
+		Array.isArray((cmd as BashCommand).suffix)
+			? ((cmd as BashCommand).suffix as unknown[])
+			: []
+	).filter((s) => wordText(s) !== null);
+	const curlOutputEmit = (
+		out: WriteTarget[],
+		node: unknown,
+		text: string,
+		rawSkip: number,
+	): void => {
+		pushExpandedDestination(
+			out,
+			node,
+			text,
+			rawSkip,
+			(path) => ({
+				category: 'network_download',
+				operator: 'curl -o',
+				path,
+			}),
+			() => ({
+				category: 'network_download',
+				operator: 'curl -o',
+				path: null,
+				dynamicSourceWord: text,
+			}),
+		);
+	};
 
 	if (lowerName === 'curl') {
 		for (let i = 0; i < suffixWords.length; i++) {
@@ -5352,18 +5411,17 @@ function detectNetworkDownloaders(cmd: unknown): WriteTarget[] {
 			if (word === '-o' && i + 1 < suffixWords.length) {
 				const path = suffixWords[i + 1];
 				if (!path.startsWith('-')) {
-					results.push({
-						category: 'network_download',
-						operator: 'curl -o',
-						path,
-					});
+					curlOutputEmit(results, suffixNodes[i + 1], path, 0);
 				}
 			} else if (word.startsWith('-o') && word.length > 2) {
-				results.push({
-					category: 'network_download',
-					operator: 'curl -o',
-					path: word.slice(2),
-				});
+				curlOutputEmit(results, suffixNodes[i], word, 2);
+			} else if (word === '--output' && i + 1 < suffixWords.length) {
+				const path = suffixWords[i + 1];
+				if (!path.startsWith('-')) {
+					curlOutputEmit(results, suffixNodes[i + 1], path, 0);
+				}
+			} else if (word.startsWith('--output=') && word.length > 9) {
+				curlOutputEmit(results, suffixNodes[i], word, 9);
 			}
 		}
 	} else if (lowerName === 'wget') {
@@ -6342,7 +6400,19 @@ function detectPowerShellWrites(command: string): WriteTarget[] {
 				path: path || null,
 			}));
 		}
-		if (/(?:-Path|-FilePath|-LiteralPath)(?:\s|$)/i.test(rest)) {
+		// #3539 closure F-3: colon-glued `-Path:Value` binds identically in
+		// real PowerShell 5.1 (executed ground truth: Set-Content -Path:f
+		// writes f) — the left keeps value-taking semantics, the right IS
+		// the value, so the write arm reads the SAME target the spaced form
+		// names instead of falling through to the content positional.
+		const pathFlagGluedMatch = rest.match(
+			/-(?:Path|FilePath|LiteralPath):((?:"[^"]*"|'[^']*'|[^,\s]+))/i,
+		);
+		if (pathFlagGluedMatch) {
+			const path = pathFlagGluedMatch[1].replace(/^(["'])|(["'])$/g, '');
+			return [{ category: 'redirect', operator: cmdletName, path }];
+		}
+		if (/(?:-Path|-FilePath|-LiteralPath)(?:\s|:|$)/i.test(rest)) {
 			return [{ category: 'redirect', operator: cmdletName, path: null }];
 		}
 
@@ -6421,9 +6491,32 @@ function detectPowerShellWrites(command: string): WriteTarget[] {
 			'-Debug',
 		]);
 		const parts = rest.match(/(?:[^\s"-]+|"[^"]*"|'[^']*'|-[^\s]+)/g) ?? [];
+		// #3539 closure F-3: lowercase views for the colon-glued comparison
+		// (PowerShell flags are case-insensitive).
+		const flagTakingValueLower = new Set(
+			[...flagTakingValue].map((f) => f.toLowerCase()),
+		);
 		let i = 0;
 		while (i < parts.length) {
 			const part = parts[i];
+			// #3539 closure F-3: colon-glued `-Path:Value` (real PowerShell
+			// binds it; executed ground truth) — the left keeps value-taking
+			// semantics and the right IS the value. Only FLAG tokens split
+			// (a value like C:\x never starts with '-').
+			const colonAt = part.startsWith('-') ? part.indexOf(':') : -1;
+			if (colonAt !== -1) {
+				const head = part.slice(0, colonAt).toLowerCase();
+				const glued = part.slice(colonAt + 1).replace(/^["']|["']$/g, '');
+				if (flagTakingValueLower.has(head)) {
+					if (glued) tokens.push(glued);
+					i++;
+					continue;
+				}
+				// Any other flag-shaped token (switch or unknown) consumes
+				// nothing further.
+				i++;
+				continue;
+			}
 			if (flagTakingValue.has(part) && i + 1 < parts.length) {
 				// Flag takes value — capture the value as a potential path
 				const value = parts[i + 1];
@@ -6485,19 +6578,30 @@ function detectPowerShellWrites(command: string): WriteTarget[] {
 		let positional: string | null = null;
 		for (let i = 0; i < tokens.length; i += 1) {
 			const token = tokens[i];
-			const flag = token.toLowerCase();
+			let flag = token.toLowerCase();
+			let gluedValue: string | null = null;
+			// #3539 closure F-3: colon-glued `-Path:Value` (real PowerShell
+			// binds it; executed ground truth) — the left keeps value-taking
+			// semantics, the right IS the value. Only FLAG tokens split.
+			if (token.startsWith('-')) {
+				const colonAt = token.indexOf(':');
+				if (colonAt !== -1) {
+					flag = token.slice(0, colonAt).toLowerCase();
+					gluedValue = unquote(token.slice(colonAt + 1));
+				}
+			}
 			if (PATH_FLAGS.has(flag)) {
-				pathValue = unquote(tokens[i + 1] ?? '');
-				i += 1;
+				pathValue = gluedValue ?? unquote(tokens[i + 1] ?? '');
+				if (gluedValue === null) i += 1;
 				continue;
 			}
 			if (flag === '-name') {
-				nameValue = unquote(tokens[i + 1] ?? '');
-				i += 1;
+				nameValue = gluedValue ?? unquote(tokens[i + 1] ?? '');
+				if (gluedValue === null) i += 1;
 				continue;
 			}
 			if (VALUE_FLAGS.has(flag)) {
-				i += 1; // consume the value; it is never a target
+				if (gluedValue === null) i += 1; // consume the value; never a target
 				continue;
 			}
 			if (SWITCH_FLAGS.has(flag)) continue;

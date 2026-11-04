@@ -103,6 +103,30 @@ C9, C12–C15 stay GREEN.
   allowed at the workspace root; re-pinned deliberately in the in-place suites.
 - A deno global flag that takes an argument before the subcommand
   (`deno --config x eval CODE`) is not modeled; disclosed rather than guessed.
+  (Closure round F-2:) an UNKNOWN argument-less flag immediately before
+  `eval` (`deno --no-prompt eval CODE`, `deno --unstable-kv eval CODE`) now
+  classifies deny-on-uncertainty — the W3 pattern, no flag-set enumeration;
+  an unknown flag whose NEXT word is not `eval` may be flag-taking and keeps
+  the disclosed no-classification disposition.
+- (Closure round F-4:) `cmd /k` selects the win32 authority exactly like
+  `cmd /c` (the payload executes; the shell merely stays open) — the strip
+  prefix always modeled `/[ck]`, and the declaration/builtin-prefix
+  predicates now match it too.
+- (Closure round, curl nuance:) the SPACED `curl -o src/{a,../esc} url`
+  spelling emits one write target per branch — bash-true for the GLUED
+  `-osrc/{a,../esc}` form (two `-o` flags, both written) and for
+  sed/perl/awk `-i` operands (every expanded operand is edited); for the
+  spaced curl form real curl treats the second branch as a URL, so the
+  per-branch emission is the deliberately fail-closed direction.
+- (Advisory, disclosed with follow-up issue #3569 — NOT fixed here, out of
+  closure scope:) wrapper-prefixed tee/dd operand windows can bleed the
+  wrapper's word consumption into the operand position —
+  `sudo -D src tee a` fabricates a `ws\tee` target because the tee/dd
+  branches read `getSuffixWords` instead of the wrapper hop's `rest`
+  (fail-closed over-block; in-scope direct-write positives through chdir
+  wrappers are unproven). Issue #3569 tracks the operand-window fix; the
+  nested-alternating-quote `sh -c` finding is tracked in a separate issue
+  filed by the reviewer.
 - nohup.out creation stays stdout-tty-gated and out of static reach — disclosed,
   not modeled.
 
@@ -114,6 +138,13 @@ C9, C12–C15 stay GREEN.
   `guardrails-shell-write-launcher-depth-3491.test.ts` (13 tests: compound
   depth laundering, quoted time, explain parity); W3 legs added to
   `guardrails-shell-write-launcher-env-3491.test.ts` (80 tests total).
+- Closure round: brace-site legs (sed/awk/curl: escaping branch, in-scope
+  admit, refusal class) in `guardrails-shell-write-brace-sites-3491.test.ts`
+  (sibling of `brace-3491`, which sits at the FR-006 cap); deno uncertainty
+  legs in `guardrails-shell-write-interpreter-flags-3491.test.ts`;
+  colon-glued write-arm PS legs in `destructive-command-verb-and-ps-3539.test.ts`;
+  `cmd /k` legs (bare + path-qualified + in-scope admit) in
+  `destructive-command-windows-3491-cmdk.test.ts`.
 - Deliberate re-pins: `shell-write-detect-null-device.test.ts` (perl glued
   cluster evalToo rows), `guardrails-shell-write-inplace-unknown-option.test.ts`,
   `guardrails-shell-write-inplace-escapes.test.ts`,

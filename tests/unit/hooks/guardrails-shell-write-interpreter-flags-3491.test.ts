@@ -300,3 +300,46 @@ describe('W7 detector-level classification pins (detectPosixWrites)', () => {
 		expect(evalWrites(command).length).toBe(0);
 	});
 });
+
+describe('W7 closure F-2: deno unknown argument-less flags before eval', () => {
+	test('deno --no-prompt eval "<write>" → DENIED (deny-on-uncertainty)', async () => {
+		const got = await gate(
+			`deno --no-prompt eval "Deno.writeTextFileSync('../x','y')"`,
+		);
+		expect(got.verdict).toBe('DENIED');
+		expect(got.message).toMatch(ANY_BLOCK);
+	});
+
+	test('deno --unstable-kv eval "<write>" → DENIED', async () => {
+		const got = await gate(
+			`deno --unstable-kv eval "Deno.writeTextFileSync('../x','y')"`,
+		);
+		expect(got.verdict).toBe('DENIED');
+		expect(got.message).toMatch(ANY_BLOCK);
+	});
+
+	test('control: deno -q eval still classifies (known flag skipped)', async () => {
+		const got = await gate(`deno -q eval "Deno.writeTextFileSync('../x','y')"`);
+		expect(got.verdict).toBe('DENIED');
+	});
+
+	test('control: the arg-taking disclosure case stays unclassified (disclosed)', async () => {
+		const got = await gate('deno --config x eval "1"');
+		expect(got.verdict).toBe('ADMITTED');
+	});
+
+	test('in-scope cwd admits through an unknown arg-less flag', async () => {
+		const got = await gate(
+			`cd src && deno --no-prompt eval "Deno.writeTextFileSync('ok','y')"`,
+		);
+		expect(got.verdict).toBe('ADMITTED');
+	});
+
+	test('detector pin: --no-prompt eval classifies a capability eval', () => {
+		const evals = detectPosixWrites(
+			`deno --no-prompt eval "Deno.writeTextFileSync('../x','y')"`,
+		).writes.filter((w) => w.category === 'interpreter_eval');
+		expect(evals.length).toBe(1);
+		expect(evals[0]?.capability).toBe(true);
+	});
+});

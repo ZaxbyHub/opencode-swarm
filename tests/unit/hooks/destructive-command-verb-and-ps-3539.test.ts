@@ -23,6 +23,7 @@ import {
 	dcExtractPowerShellTargets,
 	dcNormalizeVerbWord,
 } from '../../../src/hooks/guardrails/destructive-command';
+import { detectWindowsWrites } from '../../../src/hooks/shell-write-detect';
 import { handleGuardrailExplain } from '../../../src/services/guardrail-explain-service';
 import { resetSwarmState, startAgentSession } from '../../../src/state';
 import { installActiveScopeBinding } from '../../helpers/active-scope-binding';
@@ -301,5 +302,67 @@ describe('W6 path-qualified cmd.exe wrapper authority (RC-8)', () => {
 			...'C:\\Windows\\System32\\cmd.exe /c copy a src\\b'.split(' '),
 		]);
 		expect(explained).toMatch(/\| *Decision *\| *allow */i);
+	});
+});
+
+describe('closure F-3: write-arm PowerShell colon-glued parameters', () => {
+	// The write arm's extractors must bind `-Param:Value` like the spaced
+	// form (real PowerShell 5.1 binds it; executed ground truth).
+	test('Remove-Item -LiteralPath colon-glued → DENIED (write arm sees the target)', async () => {
+		const got = await gate(String.raw`Remove-Item -LiteralPath:..\x`);
+		expect(got.verdict).toBe('DENIED');
+		expect(got.message).toMatch(/BLOCKED/);
+	});
+
+	test('Set-Content -Path colon-glued → DENIED (the PATH is the target, not the content)', async () => {
+		const got = await gate(String.raw`Set-Content -Path:..\x src/a`);
+		expect(got.verdict).toBe('DENIED');
+		expect(got.message).toMatch(/BLOCKED/);
+	});
+
+	test('gate equivalence: colon-glued and spaced deny with the same class', async () => {
+		const glued = await gate(String.raw`Set-Content -Path:..\x src/a`);
+		const spaced = await gate(String.raw`Set-Content -Path ..\x src/a`);
+		expect(glued.verdict).toBe('DENIED');
+		expect(spaced.verdict).toBe('DENIED');
+		// The deny class is identical — the write arm treats the two
+		// spellings as the same command.
+		expect(glued.message.split(':')[0]).toBe(spaced.message.split(':')[0]);
+	});
+
+	test('detector pin: colon ≡ spaced for Set-Content -Path', () => {
+		const glued = detectWindowsWrites(
+			String.raw`Set-Content -Path:..\x src/a`,
+			'powershell',
+		);
+		const spaced = detectWindowsWrites(
+			String.raw`Set-Content -Path ..\x src/a`,
+			'powershell',
+		);
+		expect(glued.hasWrites).toBe(true);
+		expect(spaced.hasWrites).toBe(true);
+		expect(JSON.stringify(glued.writes)).toBe(JSON.stringify(spaced.writes));
+	});
+
+	test('detector pin: colon ≡ spaced for Remove-Item -LiteralPath', () => {
+		const glued = detectWindowsWrites(
+			String.raw`Remove-Item -LiteralPath:..\x`,
+			'powershell',
+		);
+		const spaced = detectWindowsWrites(
+			String.raw`Remove-Item -LiteralPath ..\x`,
+			'powershell',
+		);
+		expect(glued.hasWrites).toBe(true);
+		expect(JSON.stringify(glued.writes)).toBe(JSON.stringify(spaced.writes));
+	});
+
+	test('detector pin: New-Item -Path:v binds the glued value', () => {
+		const writes = detectWindowsWrites(
+			String.raw`New-Item -Path:..\x -Name n`,
+			'powershell',
+		).writes;
+		expect(writes.length).toBeGreaterThan(0);
+		expect(writes[0]?.path).toBe(String.raw`..\x/n`);
 	});
 });

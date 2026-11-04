@@ -870,16 +870,18 @@ export function dcAnalyzeLauncherUncertainty(command: string): {
 			head.raw,
 		);
 		if (walk === null) continue;
+		// #3491 closure F-5(d): `head` is an offset-splitter entry — render
+		// its WORD, not the object (the critic's `[object Object]` defect).
 		if (walk.kind === 'interactive') {
 			return {
 				deny: true,
-				reason: `BLOCKED: launcher "${head}" opens an interactive shell (-i/-s) that cannot be statically inspected`,
+				reason: `BLOCKED: launcher "${head.word}" opens an interactive shell (-i/-s) that cannot be statically inspected`,
 			};
 		}
 		if (walk.kind === 'uncertain' && walk.tailIndex < words.length - 1) {
 			return {
 				deny: true,
-				reason: `BLOCKED: launcher "${head}" carries an unrecognized option — every remaining word is a potential execution tail (deny-on-uncertainty)`,
+				reason: `BLOCKED: launcher "${head.word}" carries an unrecognized option — every remaining word is a potential execution tail (deny-on-uncertainty)`,
 			};
 		}
 	}
