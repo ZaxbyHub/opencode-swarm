@@ -458,10 +458,7 @@ describe('guardrails shell writes: sed script and suffix placement', () => {
 		);
 	});
 
-	// #3491 closure F-1 re-pin: the operand expands per-branch, so the deny
-	// names the first OUT-OF-SCOPE branch — `1d` resolves at the workspace
-	// root, outside a coder scoped to src/ (the literal `outside/v}` spelling
-	// no longer appears; the escaping ../../outside/v branch is reported too).
+	// #3491 closure F-1 re-pin: per-branch (deny names `1d` at the root).
 	it('scoped coder: a brace word in the script slot is rejected', async () => {
 		const hooks = createGuardrailsHooks(TEST_DIR, undefined, config());
 		coderWithScope('coder-script-slot', ['src/']);
@@ -475,9 +472,6 @@ describe('guardrails shell writes: sed script and suffix placement', () => {
 		);
 	});
 
-	// #3491 closure F-1 re-pin: the branches resolve outside the workspace
-	// root, so the authority's ROOT_ESCAPE class fires naming the expanded
-	// branch (previously the literal brace word was named).
 	it('scoped coder: a brace-expansion word after -i is rejected', async () => {
 		const hooks = createGuardrailsHooks(TEST_DIR, undefined, config());
 		coderWithScope('coder-brace-word', ['src/']);

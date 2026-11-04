@@ -111,7 +111,10 @@ C9, C12–C15 stay GREEN.
 - (Closure round F-4:) `cmd /k` selects the win32 authority exactly like
   `cmd /c` (the payload executes; the shell merely stays open) — the strip
   prefix always modeled `/[ck]`, and the declaration/builtin-prefix
-  predicates now match it too.
+  predicates now match it too. BOTH slash spellings are covered: the MSYS
+  double-slash form (`cmd //k`, `cmd //c`, and the switch run before them)
+  selects the same authority — Git Bash translates `//k` to `/k` when
+  spawning the native binary (executed ground truth).
 - (Closure round, curl nuance:) the SPACED `curl -o src/{a,../esc} url`
   spelling emits one write target per branch — bash-true for the GLUED
   `-osrc/{a,../esc}` form (two `-o` flags, both written) and for

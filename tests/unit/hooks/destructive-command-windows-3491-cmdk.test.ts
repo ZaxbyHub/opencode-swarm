@@ -108,4 +108,31 @@ describe('closure F-4: cmd /k selects the win32 authority (#3539)', () => {
 		const got = await gate('cmd /c copy a ..\\x');
 		expect(got.verdict).toBe('DENIED');
 	});
+
+	// #3491 publication condition: the MSYS double-slash spelling — Git Bash
+	// translates `cmd //k "…"` to `/k` when spawning the native binary
+	// (executed ground truth: `cmd //k "copy a b"` copies), so the win32
+	// authority selects for both spellings.
+	test('cmd //k copy a ..\\x → DENIED (MSYS double-slash)', async () => {
+		const got = await gate('cmd //k copy a ..\\x');
+		expect(got.verdict).toBe('DENIED');
+		expect(got.message).toMatch(/^WRITE BLOCKED/);
+	});
+
+	test('cmd //c copy a ..\\x → DENIED (MSYS double-slash /c)', async () => {
+		const got = await gate('cmd //c copy a ..\\x');
+		expect(got.verdict).toBe('DENIED');
+		expect(got.message).toMatch(/^WRITE BLOCKED/);
+	});
+
+	test('cmd //k copy a src\\b → ADMITTED (in-scope, no over-block)', async () => {
+		const got = await gate('cmd //k copy a src\\b');
+		expect(got.verdict).toBe('ADMITTED');
+	});
+
+	test('path-qualified C:\\Windows\\System32\\cmd.exe //k copy a ..\\x → DENIED', async () => {
+		const got = await gate('C:\\Windows\\System32\\cmd.exe //k copy a ..\\x');
+		expect(got.verdict).toBe('DENIED');
+		expect(got.message).toMatch(/^WRITE BLOCKED/);
+	});
 });
