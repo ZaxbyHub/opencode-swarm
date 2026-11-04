@@ -4,13 +4,17 @@ import * as path from 'node:path';
 import { z } from 'zod';
 import packageJson from '../../package.json' with { type: 'json' };
 import type { EvidenceBundle } from '../config/evidence-schema';
-import { readTaskEvidence } from '../gate-evidence';
+import {
+	isDurableNoMutationSettlement,
+	readTaskEvidence,
+} from '../gate-evidence';
 import type { PhaseGateEntry } from '../tools/phase-complete/preflight-report';
 import { stableReportHash } from '../tools/phase-complete/preflight-report';
 import { toPortableRelativePath } from '../tools/phase-complete/snapshot-identity';
 import {
 	deriveDurableTaskGate,
 	deriveTaskEvidenceSynthesis,
+	markdownTableCell,
 } from './gate-outcome';
 import { loadEvidence } from './manager';
 
@@ -479,11 +483,13 @@ export async function buildVerificationReceipt(
 			});
 		}
 		if (gates.length === 0) {
-			// #3560 AC5: no fabricated pass — a settled read-only task
-			// (durable workflow.noMutationSettlement) is pass-bearing with
-			// the proof in `code`; anything else is not_applicable.
+			// #3560 AC5 (FB-002): no fabricated pass — only the platform's
+			// canonical read-only-settlement predicate (authoritative
+			// generation-0 idle/complete workflow with a bound proof) may make
+			// the synthesized row pass-bearing; a blocked/closed workflow that
+			// merely retains the marker yields not_applicable, not a pass.
 			const synthesized = deriveTaskEvidenceSynthesis(
-				(evidence as unknown as { workflow?: unknown }).workflow,
+				isDurableNoMutationSettlement(evidence),
 			);
 			gates.push({
 				gate_id: 'task_evidence',
@@ -578,10 +584,15 @@ export function renderReceiptMarkdown(receipt: VerificationReceipt): string {
 		'|---|---|---|---|',
 	];
 	for (const gate of receipt.gates) {
+		// FB-003: durable-derived text is markdown-cell-escaped so a verdict /
+		// actor / gate id carrying `|` or newlines cannot forge a row in the
+		// human/export attestation that is absent from the hash-bound JSON.
 		lines.push(
-			`| ${gate.gate_id} | ${gate.outcome} | ${gate.code ?? '—'} | ${
-				gate.responsible_actor
-			} |`,
+			`| ${markdownTableCell(gate.gate_id)} | ${markdownTableCell(
+				gate.outcome,
+			)} | ${markdownTableCell(gate.code ?? '—')} | ${markdownTableCell(
+				gate.responsible_actor,
+			)} |`,
 		);
 	}
 	lines.push(
@@ -592,7 +603,12 @@ export function renderReceiptMarkdown(receipt: VerificationReceipt): string {
 		'|---|---|---|',
 	);
 	for (const artifact of receipt.artifacts) {
-		lines.push(`| ${artifact.path} | ${artifact.bytes} | ${artifact.sha256} |`);
+		// FB-003: same class as the gates table — the path is durable-derived.
+		lines.push(
+			`| ${markdownTableCell(artifact.path)} | ${artifact.bytes} | ${
+				artifact.sha256
+			} |`,
+		);
 	}
 	lines.push(
 		'',

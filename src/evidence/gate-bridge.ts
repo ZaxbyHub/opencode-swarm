@@ -8,7 +8,10 @@ import {
 	TASK_WORKFLOW_SCHEMA_MARKER,
 	type TaskEvidence,
 } from '../gate-evidence.js';
-import { evidenceVerdictForDurableGate } from './gate-outcome';
+import {
+	evidenceSummaryForDurableGate,
+	markdownTableCell,
+} from './gate-outcome';
 
 type SyntheticGateEvidenceType = 'review' | 'test' | 'approval';
 
@@ -166,18 +169,27 @@ function gateEvidenceToEntry(
 		return null;
 	}
 
-	// #3560: the durable record decides the verdict — a council REJECT must
-	// not be flattened to pass here any more than in the receipt task arm.
-	// Shared derivation (gate-outcome) keeps both surfaces identical.
-	const verdict: Evidence['verdict'] =
-		evidenceVerdictForDurableGate(gateRecord);
+	// #3560 AC7 (FB-004): the durable record decides the verdict — a council
+	// REJECT must be REPORTED as REJECT (and stay distinguishable from a
+	// malformed verdict), never collapsed to a generic 'fail'/'pass'. Shared
+	// derivation (gate-outcome) keeps this surface identical to the receipt.
+	const summary = evidenceSummaryForDurableGate(gateRecord);
+	const reported = summary.recordedVerdict ?? summary.verdict;
 	const base = {
 		task_id: taskId,
 		timestamp: gateRecord.timestamp,
 		agent: gateRecord.agent || gate,
-		verdict,
-		summary: `Gate evidence recorded by ${gate} (derived from durable record: ${verdict})`,
-		metadata: { source: 'durable_gate_evidence', gate },
+		verdict: summary.verdict as Evidence['verdict'],
+		summary: markdownTableCell(
+			`Gate evidence recorded by ${gate} (derived from durable record: ${reported})`,
+		),
+		metadata: {
+			source: 'durable_gate_evidence',
+			gate,
+			...(summary.recordedVerdict !== undefined
+				? { durable_verdict: summary.recordedVerdict }
+				: {}),
+		},
 	};
 
 	if (type === 'review') {

@@ -951,6 +951,22 @@ function isNoMutationSettlementMetadata(
 }
 
 /**
+ * Public accessor for the canonical read-only-settlement proof predicate
+ * (#3560): a task's empty gate set is a legitimate settled read-only state
+ * ONLY when the durable workflow is authoritative generation-0 idle/complete
+ * with a bound `noMutationSettlement` proof. Receipt/summary surfaces MUST
+ * use this single definition rather than re-checking the field's presence —
+ * a `blocked`/`closed` workflow can preserve the marker through later
+ * transitions, and bare truthiness would then fabricate a pass the platform
+ * itself refuses to grant.
+ */
+export function isDurableNoMutationSettlement(
+	evidence: TaskEvidence | null | undefined,
+): boolean {
+	return isNoMutationSettlementMetadata(getTaskWorkflowSnapshot(evidence));
+}
+
+/**
  * Derive the single evidence-backed gate set used by both completion and the
  * read-only status tool. Empty required gates are meaningful only when the
  * exact generation-0 no-mutation settlement proof is present; otherwise
