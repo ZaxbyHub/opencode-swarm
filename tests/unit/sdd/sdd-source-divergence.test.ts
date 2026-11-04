@@ -92,8 +92,9 @@ describe('#3354 AC5: the SDD resolver ignores a project config the full loader d
 		// win the selection. At base the resolver reports 'speckit' from the
 		// very file the validated loader threw away.
 		const selection = resolveSddSourceSelection(projDir);
-		// PRR-004: pin the exact post-fix value — a silently-unresolving
-		// resolver (undefined) must not satisfy this leg.
+		// PRR-004: pin the exact post-fix value (undefined) so a resolver that
+		// returns a WRONG provider — or any other non-undefined drift — fails
+		// this leg instead of only missing the base value.
 		expect(selection?.source).toBeUndefined();
 	});
 
@@ -230,8 +231,9 @@ describe('#3354 AC5: the SDD resolver ignores a project config the full loader d
 		);
 
 		const selection = resolveSddSourceSelection(projDir);
-		// PRR-004: pin the exact post-fix value — a silently-unresolving
-		// resolver (undefined) must not satisfy this leg.
+		// PRR-004: pin the exact post-fix value (undefined) so a resolver that
+		// returns a WRONG provider — or any other non-undefined drift — fails
+		// this leg instead of only missing the base value.
 		expect(selection?.source).toBeUndefined();
 	});
 
