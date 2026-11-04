@@ -1344,11 +1344,23 @@ describe('Config Doctor Service', () => {
 
 	describe('getConfigPaths', () => {
 		it('should return correct config paths', () => {
-			const { userConfigPath, projectConfigPath } = getConfigPaths(tempDir);
+			// #3355: the bunfig sdd-selection preload neutralizes ambient
+			// XDG_CONFIG_HOME for the process; this test asserts the default
+			// .config layout, so pin XDG explicitly (the suite's own
+			// isolation convention) instead of relying on ambient state.
+			const savedXdg = process.env.XDG_CONFIG_HOME;
+			const pinnedXdg = path.join(tempDir, '.config');
+			process.env.XDG_CONFIG_HOME = pinnedXdg;
+			try {
+				const { userConfigPath, projectConfigPath } = getConfigPaths(tempDir);
 
-			expect(userConfigPath).toContain('.config');
-			expect(userConfigPath).toContain('opencode');
-			expect(projectConfigPath).toContain('.opencode');
+				expect(userConfigPath).toContain('.config');
+				expect(userConfigPath).toContain('opencode');
+				expect(projectConfigPath).toContain('.opencode');
+			} finally {
+				if (savedXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+				else process.env.XDG_CONFIG_HOME = savedXdg;
+			}
 		});
 	});
 
