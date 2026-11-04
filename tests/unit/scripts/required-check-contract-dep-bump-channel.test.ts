@@ -163,6 +163,13 @@ function buildOwnerScopeFixture() {
 		writeFileSync(join(root, 'package.json'), text);
 		return commitWorktree(root, 'scope leg', false);
 	};
+	// Final-critic r2: the laundering leg must be PROVENANCE-CLEAN — a
+	// bot-authored commit carrying the full trailer set over the version-field
+	// delta, so the ONLY conjunct that can deny it is dependencyScope.
+	const botScopeLeg = (text: string): string => {
+		writeFileSync(join(root, 'package.json'), text);
+		return commitWorktree(root, trailerMessage(DEP_BUMP_TRAILERS), true);
+	};
 	const legs = {
 		versionField: scopeLeg(withBase({ version: '7.0.1' })),
 		scriptsMap: scopeLeg(withBase({ scripts: { build: 'bun run typecheck' } })),
@@ -177,6 +184,7 @@ function buildOwnerScopeFixture() {
 			withBase({ dependencies: { zod: { version: '4.6.7' } } }),
 		),
 		legitDelta: scopeLeg(channelPackageJson(true)),
+		botLaunderingVersionField: botScopeLeg(withBase({ version: '7.0.1' })),
 	};
 	return { root, base, legs };
 }
@@ -236,17 +244,25 @@ describe('spoof bounds (C2 spoof)', () => {
 		).toBe(false);
 	});
 
-	test('main() end-to-end laundering: bot PR with an out-of-scope package.json delta exits 1', () => {
-		// Final-critic r1: a channel-shaped PR whose package.json launders the
-		// version field must be denied by the scope conjunct inside main()'s
-		// composition, not only by the helper in isolation.
+	test('main() end-to-end laundering: provenance-clean bot PR with an out-of-scope delta exits 1', () => {
+		// Final-critic r2: the head commit is bot-authored with the FULL
+		// trailer set (provenance-clean — asserted first so the isolation is
+		// self-proving), so the ONLY conjunct that can deny this PR is the
+		// dependencyScope path inside main()'s composition.
 		const fixture = buildOwnerScopeFixture();
 		try {
+			const laundering = fixture.legs.botLaunderingVersionField;
+			expect(
+				dependencyBumpCommitProvenanceOk(fixture.root, laundering).ok,
+			).toBe(true);
+			expect(
+				dependencyBumpOwnerScopeOk(fixture.root, fixture.base, laundering),
+			).toBe(false);
 			const result = runReleaseOwnerMain(
 				fixture.root,
 				'pull_request',
 				BOT_NAME,
-				pullRequestPayload(fixture.base, fixture.legs.versionField),
+				pullRequestPayload(fixture.base, laundering),
 			);
 			expect(result.exit).toBe(1);
 		} finally {
