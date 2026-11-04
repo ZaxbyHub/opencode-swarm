@@ -3142,36 +3142,46 @@ function collectPipeStdinEvals(node: unknown, out: WriteTarget[]): void {
 }
 
 /**
- * #3491 W4 fix-round-2/3/4: the sh-family invocation-flag walk (shared by
+ * #3491 W4 fix-round-2..5: the sh-family invocation-flag walk (shared by
  * detectInterpreterEval here and the dc shell-wrapper extractor in
  * destructive-command.ts — both consume QUOTE-REMOVED word lists). The final
  * critic ground-truthed that `-c` was only recognized as the FIRST token
  * after the shell name: `sh -xc 'echo x > ../x'`, `bash -lc`, `dash -xc`,
  * `env sh -xc`, `/bin/sh -xc` all ADMITTED while real bash executes the
- * payload. The walk follows the sh getopt grammar instead:
+ * payload. The walk follows the sh getopt grammar instead, complete over
+ * four dimensions (all ground-truthed on bash 5.3.9):
  *
- * - Short flags may be CLUSTERED (`-xc`, `-lc`, `-eo`, `-ceu`); every member
- *   letter must be KNOWN — argument-less members walk on, arg-taking members
- *   are counted.
- * - The NEXT-WORD rule (#3491 W4 fix-round-4, generalized from round 3's
- *   c-only rule): an arg-taking member's argument ALWAYS comes from the
- *   next standalone word AFTER the cluster, in order — the cluster tail is
- *   NEVER an argument (ground truth, bash 5.3.9: `bash -oc pipefail 'code'`
- *   runs the code — o→pipefail, c→payload; `bash -ceu 'code'` runs the
- *   code; `bash -opipefail -c 'code'` is rc=2 — o took the next word `-c`
- *   as its optname). `c`'s next word is the inline payload (argv[2]); words
- *   after it are $0/$1… and are never scanned; `o`/`O`'s next word is an
- *   optname (dash-led or empty ⇒ bash errors ⇒ 'uncertain').
- * - A cluster carrying TWO OR MORE arg-taking members (`-oc`, `-co`, `-cc`)
- *   and any UNKNOWN member letter are deny-on-uncertainty ('uncertain') —
- *   as is the tail-glued `-c'code'` spelling, which is rc=1 invalid bash
- *   (its glued text lands as extra member letters).
- * - The `+` toggle form takes arguments the same way, with only `o`/`O`
- *   arg-taking (`+oc …` has no valid `c` spelling in a + cluster).
- * - Known long flags: bash's argument-less invocation set plus the two
- *   arg-taking rcfile spellings (spaced next-word form and `=value`-glued).
- * - `--` (and a lone `-`) ends option parsing; a non-flag word is the
- *   script-file operand — no inline payload exists in either shape.
+ * 1. WHICH letters are options: short flags may be CLUSTERED (`-xc`, `-lc`,
+ *    `-eo`, `-ceu`); every member letter must be KNOWN — argument-less
+ *    members walk on, arg-taking members are counted. A cluster carrying
+ *    TWO OR MORE arg-taking members (`-oc`, `-co`, `-cc`) or any unknown
+ *    letter is deny-on-uncertainty — as is the tail-glued `-c'code'`
+ *    spelling (rc=1 invalid bash; the glued text lands as member letters).
+ * 2. WHERE arg-taking members draw arguments: o/O take the next standalone
+ *    word VERBATIM as their optname (dash-led/empty ⇒ bash errors rc=2 ⇒
+ *    'uncertain'; `bash -oc pipefail 'code'` runs the code — o→pipefail;
+ *    `bash -opipefail -c 'code'` is rc=2 — o took `-c` as its optname).
+ *    The cluster tail is NEVER an argument.
+ * 3. WHICH word `c` selects (fix-round-5): `c` does NOT grab the next word
+ *    verbatim — option parsing CONTINUES past it, and the command string is
+ *    the FIRST NON-OPTION word (`bash -c '-e' 'echo x > t1'` rc=0 executes
+ *    the second word; `bash -c -x 'code'` runs with xtrace; `bash -c -c
+ *    'code'` and `bash -c '-c' 'code'` run the code — a repeated c just
+ *    re-flags; `bash -c -o pipefail 'code'`, `bash -c +o pipefail 'code'`
+ *    run the code). A pending c with NO non-option word is 'uncertain'
+ *    (bash: -c requires an argument). Words after the payload are $0/$1…
+ *    and are never scanned.
+ * 4. `--` handling: `--` (and a lone `-`) ends option parsing (`sh -c --
+ *    'code'` runs; `bash -c - 'code'` runs). With a pending c the FIRST
+ *    operand after the terminator is the command string, flag-shaped or
+ *    not (`bash -c -- '-e' 'code'` is rc=127 — bash ran '-e'); without one
+ *    it is the script-file operand.
+ *
+ * Long flags are recognized only BEFORE short-option parsing starts (bash's
+ * own usage line: "[GNU long option] [option] …"): after a short/+ cluster
+ * or terminator, a `--word` is a short cluster whose leading '-' letter is
+ * invalid — bash errors rc=2 (`bash -c --rcfile /dev/null 'code'`) ⇒
+ * 'uncertain'.
  *
  * Any token the walk cannot classify yields 'uncertain' — consumers must
  * fail closed on it, never admit (deny-on-uncertainty).
@@ -3244,11 +3254,29 @@ export function walkShellCommandFlags(
 	words: readonly string[],
 ): ShellCommandFlagWalk {
 	let i = 0;
+	// #3491 W4 fix-round-5: a seen `c` option does not grab a word — it marks
+	// that the command string is the FIRST NON-OPTION word, found wherever
+	// option parsing ends (after further option words, or at the `--`/`-`
+	// terminator). Long flags are recognized only before short parsing starts.
+	let payloadPending = false;
+	let shortParsingStarted = false;
 	while (i < words.length) {
 		const token = words[i];
 		if (token === undefined) break;
-		if (token === '--' || token === '-') return { kind: 'script' };
-		if (token.startsWith('--')) {
+		if (token === '--' || token === '-') {
+			// The terminator ends option parsing; every remaining word is an
+			// operand. With a pending c the FIRST one is the command string,
+			// flag-shaped or not; without one it is the script-file operand.
+			if (payloadPending) {
+				const payload = words[i + 1];
+				return payload === undefined
+					? { kind: 'uncertain' }
+					: { kind: 'payload', payload };
+			}
+			return { kind: 'script' };
+		}
+		if (token.startsWith('--') && !shortParsingStarted) {
+			// Long-option phase (bash's usage: "[GNU long option] [option] …").
 			const eq = token.indexOf('=');
 			const head = eq === -1 ? token : token.slice(0, eq);
 			if (SHELL_ARG_TAKING_LONG_FLAGS.has(head)) {
@@ -3267,14 +3295,13 @@ export function walkShellCommandFlags(
 			}
 			return { kind: 'uncertain' };
 		}
-		if (token.startsWith('-') && token.length > 1) {
-			// #3491 W4 fix-round-4: the NEXT-WORD rule applies to EVERY
-			// arg-taking member (c = payload, o/O = optname) — the tail is
-			// never an argument. A cluster sharing two or more arg-taking
-			// members (`-oc`, `-co`) has a decidable-but-risky word ordering
-			// and an unknown member has unknowable arity — both
-			// deny-on-uncertainty. This subsumes the round-3 c-only rule.
-			const scan = scanShellOptionCluster(token.slice(1), ['c', 'o', 'O']);
+		if ((token.startsWith('-') || token.startsWith('+')) && token.length > 1) {
+			// Short/+ cluster phase. A `--word` that lands here (short parsing
+			// already started) carries an invalid '-' member letter — bash
+			// errors rc=2 — deny-on-uncertainty via the scan's unknown path.
+			shortParsingStarted = true;
+			const argTaking = token.startsWith('-') ? ['c', 'o', 'O'] : ['o', 'O'];
+			const scan = scanShellOptionCluster(token.slice(1), argTaking);
 			if (scan.kind === 'unknown' || scan.kind === 'multi') {
 				return { kind: 'uncertain' };
 			}
@@ -3282,26 +3309,15 @@ export function walkShellCommandFlags(
 				i += 1;
 				continue;
 			}
-			const arg = words[i + 1];
-			if (arg === undefined) return { kind: 'uncertain' };
-			if (scan.member === 'c') return { kind: 'payload', payload: arg };
-			// o / O optname: a dash-led or empty word is not a valid option
-			// name — bash errors there (rc=2), so deny-on-uncertainty.
-			if (arg === '' || arg.startsWith('-')) return { kind: 'uncertain' };
-			i += 2;
-			continue;
-		}
-		if (token.startsWith('+') && token.length > 1) {
-			// The + toggle form: only o/O take an argument here (`+oc …` has
-			// no valid c spelling in a + cluster — 'c' is unknown here).
-			const scan = scanShellOptionCluster(token.slice(1), ['o', 'O']);
-			if (scan.kind === 'unknown' || scan.kind === 'multi') {
-				return { kind: 'uncertain' };
-			}
-			if (scan.kind === 'none') {
+			if (scan.member === 'c') {
+				// Dimension 3: option parsing CONTINUES past c; the payload is
+				// the first non-option word (a repeated c just re-flags).
+				payloadPending = true;
 				i += 1;
 				continue;
 			}
+			// o / O optname, next standalone word VERBATIM: a dash-led or
+			// empty word is not a valid option name — bash errors rc=2 there.
 			const optname = words[i + 1];
 			if (optname === undefined || optname === '' || optname.startsWith('-')) {
 				return { kind: 'uncertain' };
@@ -3309,11 +3325,14 @@ export function walkShellCommandFlags(
 			i += 2;
 			continue;
 		}
-		// A non-flag word: the script-file operand (or a $0 after -c, but the
-		// -c case already returned). No inline payload in this invocation.
+		// A non-option word: with a pending c it is the command string (the
+		// first non-option word); otherwise it is the script-file operand.
+		if (payloadPending) return { kind: 'payload', payload: token };
 		return { kind: 'script' };
 	}
-	return { kind: 'script' };
+	// A pending c with no non-option word: bash rejects (-c requires an
+	// argument) — deny-on-uncertainty.
+	return payloadPending ? { kind: 'uncertain' } : { kind: 'script' };
 }
 
 /**

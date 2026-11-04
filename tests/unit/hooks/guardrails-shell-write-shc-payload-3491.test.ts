@@ -355,6 +355,98 @@ describe('W4 gate: next-word args for o/O clusters (fix-round 4)', () => {
 	});
 });
 
+// Final-critic fix-round 5: c's payload WORD-SELECTION is bash-true — the
+// walk used to take the word after the -c cluster VERBATIM, but bash
+// CONTINUES option parsing past -c and the command string is the FIRST
+// NON-OPTION word. Ground truth (critic + re-verified locally on bash
+// 5.3.9, markers + rc): `bash -c '-e' 'echo x > t1'` rc=0 executes the
+// second word; `bash -c -x '…'` and `bash -x -c '-e' '…'` execute;
+// `sh -c -- '…'` executes; `bash -c - '…'` / `-e - '…'` execute;
+// `bash -c -o pipefail '…'`, `bash -c +o pipefail '…'`, `bash -c -c '…'`,
+// `bash -c '-c' '…'` execute; after `--` the first operand IS the command
+// string even when flag-shaped (`bash -c -- '-e' 'code'` rc=127 ran '-e');
+// long flags after short parsing started ERROR rc=2. The verbatim rule
+// admitted every executing shape below by analyzing the option word
+// instead of the payload.
+describe('W4 gate: c selects the first non-option word (fix-round 5)', () => {
+	test("bash -c '-e' 'echo x > ../x' denies (flag-shaped word is an option)", async () => {
+		const got = await gate(`bash -c '-e' 'echo x > ../x'`);
+		expect(got.verdict).toBe('DENIED');
+		expect(got.message).toMatch(ANY_WRITE_BLOCK);
+		expect(got.message).toMatch(/\.\.[\\/]x/);
+	});
+
+	test("bash -x -c '-e' 'echo x > ../x' denies", async () => {
+		const got = await gate(`bash -x -c '-e' 'echo x > ../x'`);
+		expect(got.verdict).toBe('DENIED');
+		expect(got.message).toMatch(ANY_WRITE_BLOCK);
+	});
+
+	test("bash -c -x 'echo x > ../x' denies (options continue past -c)", async () => {
+		const got = await gate(`bash -c -x 'echo x > ../x'`);
+		expect(got.verdict).toBe('DENIED');
+		expect(got.message).toMatch(ANY_WRITE_BLOCK);
+	});
+
+	test("sh -c -- 'echo x > ../x' denies (-- hands the operand to the payload)", async () => {
+		const got = await gate(`sh -c -- 'echo x > ../x'`);
+		expect(got.verdict).toBe('DENIED');
+		expect(got.message).toMatch(ANY_WRITE_BLOCK);
+	});
+
+	test("sh -c -- 'rm -rf ../../outside' denies (destructive arm)", async () => {
+		const got = await gate(`sh -c -- 'rm -rf ../../outside'`, true);
+		expect(got.verdict).toBe('DENIED');
+		expect(got.message).toMatch(ANY_DESTRUCTIVE_BLOCK);
+	});
+
+	test("bash -c -o pipefail 'echo x > ../x' denies (o cluster after c)", async () => {
+		const got = await gate(`bash -c -o pipefail 'echo x > ../x'`);
+		expect(got.verdict).toBe('DENIED');
+		expect(got.message).toMatch(ANY_WRITE_BLOCK);
+	});
+
+	test("bash -c - 'echo x > ../x' denies (lone - ends option parsing)", async () => {
+		const got = await gate(`bash -c - 'echo x > ../x'`);
+		expect(got.verdict).toBe('DENIED');
+		expect(got.message).toMatch(ANY_WRITE_BLOCK);
+	});
+
+	test("bash -c +o pipefail 'echo x > ../x' denies (+ toggle after c)", async () => {
+		const got = await gate(`bash -c +o pipefail 'echo x > ../x'`);
+		expect(got.verdict).toBe('DENIED');
+		expect(got.message).toMatch(ANY_WRITE_BLOCK);
+	});
+
+	test("bash -c -c 'echo x > ../x' denies (repeated c re-flags)", async () => {
+		const got = await gate(`bash -c -c 'echo x > ../x'`);
+		expect(got.verdict).toBe('DENIED');
+		expect(got.message).toMatch(ANY_WRITE_BLOCK);
+	});
+
+	test("bash -c '-c' 'echo x > ../x' denies (flag-shaped c word)", async () => {
+		const got = await gate(`bash -c '-c' 'echo x > ../x'`);
+		expect(got.verdict).toBe('DENIED');
+		expect(got.message).toMatch(ANY_WRITE_BLOCK);
+	});
+
+	test("bash -c --rcfile /dev/null 'echo x > src/ok' denies (long after short parsing is rc=2 bash)", async () => {
+		// bash errors ("bash: --: invalid option" rc=2 — long options are
+		// only valid before short parsing starts); deny-on-uncertainty is
+		// the bash-true conservative answer.
+		const got = await gate(`bash -c --rcfile /dev/null 'echo x > src/ok'`);
+		expect(got.verdict).toBe('DENIED');
+	});
+
+	test("bash -c '-e' 'echo x > src/ok' admits — right by extraction, not by accident", async () => {
+		// The verbatim walk admitted this by analyzing '-e' (benign); the
+		// payload 'echo x > src/ok' was never seen. Extraction of the first
+		// non-option word now analyzes the real in-scope payload.
+		const got = await gate(`bash -c '-e' 'echo x > src/ok'`);
+		expect(got.verdict).toBe('ADMITTED');
+	});
+});
+
 describe('W4 gate: clean-payload controls stay pinned (C5)', () => {
 	test("sh -c 'echo x > ../x' stays denied", async () => {
 		const got = await gate("sh -c 'echo x > ../x'");

@@ -56,27 +56,36 @@
   tracked working directory exactly like the gate.
 
 - **sh-family flag-cluster payloads** (`src/hooks/shell-write-detect.ts`,
-  `src/hooks/guardrails/destructive-command.ts`; final-critic rounds 2–4):
-  the covered grammar is bash-true — argument assignment is NEXT-WORD-IN-
-  ORDER across ALL arg-taking members, not just c-first ordering: every
-  arg-taking letter (`c` payload, `o`/`O` optname, short or `+` toggle
-  cluster) draws its argument from the next standalone word after the
-  cluster, and cluster tails are always MORE option letters (`sh -xc`,
-  `bash -lc`, `bash -ceu`, `bash -eo pipefail -c`, `bash -oc pipefail
-  'code'` — ground truth: bash 5.x assigns o→pipefail, c→payload). One
+  `src/hooks/guardrails/destructive-command.ts`; final-critic rounds 2–5):
+  the covered grammar is bash-true, complete over four dimensions —
+  [which letters are options] (clusters like `-xc`/`-ceu`; unknown letters
+  are deny-on-uncertainty), [where arg-taking members draw arguments]
+  (`o`/`O` take the next standalone word VERBATIM as their optname —
+  `bash -eo pipefail -c …`, `bash -oc pipefail 'code'` — and a dash-led
+  optname is erroring bash rc=2; cluster tails are always MORE option
+  letters), [which word `c` selects] (`c` does NOT grab the next word
+  verbatim: option parsing CONTINUES past it and the command string is the
+  FIRST NON-OPTION word — `bash -c '-e' 'code'`, `bash -c -x 'code'`,
+  `bash -c -o pipefail 'code'`, `bash -c -c 'code'` all execute the last
+  word), and [`--` handling] (`--` and a lone `-` end option parsing; with
+  a pending `c` the FIRST operand after the terminator is the command
+  string, flag-shaped or not — `sh -c -- 'code'` runs; without one it is
+  the script-file operand). Long flags are recognized only before
+  short-option parsing starts (bash's "[GNU long option] [option]" order;
+  `bash -c --rcfile F 'code'` errors rc=2 ⇒ deny-on-uncertainty). One
   shared invocation-flag walk feeds BOTH the dc wrapper extractor (heads
   may be path-qualified: `/bin/sh`) and `detectInterpreterEval`'s
   shell-family matcher. The earlier anchored `-c`-first spellings, the
-  round-2 tail-as-payload rule, and the round-3 o-branch tail-eating rule
-  all ADMITTED cluster forms while real bash executes the payload; the
-  anchored form also over-blocked benign multi-flag in-scope spellings. A
-  script-file operand or `--` carries no payload; the tail-glued `-c'code'`
-  and `-opipefail` spellings are invalid/erroring bash and, like an unknown
-  flag of unknowable arity or a cluster sharing two or more arg-taking
-  members (`-oc`, `-co`), are deny-on-uncertainty (the eval classifier
-  fires, the wrapper never unwraps). Long `--rcfile`/`--init-file` keep the
-  spaced next-word form (and the gate-tolerated `=value` gluing).
-  Python/perl/ruby cluster handling is untouched (W7/PR-3).
+  round-2 tail-as-payload rule, the round-3 o-branch tail-eating rule, and
+  the round-4/5 verbatim-word rules all ADMITTED executing forms while
+  real bash runs the payload; the anchored form also over-blocked benign
+  multi-flag in-scope spellings. The tail-glued `-c'code'` and
+  `-opipefail` spellings, unknown flags, a pending `-c` with no operand,
+  and clusters sharing two or more arg-taking members (`-oc`, `-co`) are
+  deny-on-uncertainty (the eval classifier fires, the wrapper never
+  unwraps). Long `--rcfile`/`--init-file` keep the spaced next-word form
+  (and the gate-tolerated `=value` gluing, valid only in the leading long
+  phase). Python/perl/ruby cluster handling is untouched (W7/PR-3).
 
 ## Known edges
 
