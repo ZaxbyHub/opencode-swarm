@@ -245,28 +245,38 @@ describe('spoof bounds (C2 spoof)', () => {
 	});
 
 	test('main() end-to-end laundering: provenance-clean bot PR with an out-of-scope delta exits 1', () => {
-		// Final-critic r2: the head commit is bot-authored with the FULL
-		// trailer set (provenance-clean — asserted first so the isolation is
-		// self-proving), so the ONLY conjunct that can deny this PR is the
-		// dependencyScope path inside main()'s composition.
-		const fixture = buildOwnerScopeFixture();
+		// Final-critic r2/r3: a DEDICATED fixture — fresh repo, exactly ONE
+		// bot-authored commit with the FULL trailer set over the version-field
+		// delta — so branch provenance (count === 1) AND commit provenance
+		// (bot + trailers) both pass by construction (asserted first: the
+		// isolation is self-proving), leaving dependencyScope as the ONLY
+		// conjunct that can deny this PR inside main()'s composition.
+		const { root, base } = initChannelRepo('dep-bump-launder-');
 		try {
-			const laundering = fixture.legs.botLaunderingVersionField;
-			expect(
-				dependencyBumpCommitProvenanceOk(fixture.root, laundering).ok,
-			).toBe(true);
-			expect(
-				dependencyBumpOwnerScopeOk(fixture.root, fixture.base, laundering),
-			).toBe(false);
+			writeFileSync(
+				join(root, 'package.json'),
+				`${JSON.stringify({ ...JSON.parse(BASE_PACKAGE_JSON), version: '7.0.1' }, null, 2)}
+`,
+			);
+			const laundering = commitWorktree(
+				root,
+				trailerMessage(DEP_BUMP_TRAILERS),
+				true,
+			);
+			expect(dependencyBumpBranchProvenanceOk(root, base, laundering).ok).toBe(
+				true,
+			);
+			expect(dependencyBumpCommitProvenanceOk(root, laundering).ok).toBe(true);
+			expect(dependencyBumpOwnerScopeOk(root, base, laundering)).toBe(false);
 			const result = runReleaseOwnerMain(
-				fixture.root,
+				root,
 				'pull_request',
 				BOT_NAME,
-				pullRequestPayload(fixture.base, laundering),
+				pullRequestPayload(base, laundering),
 			);
 			expect(result.exit).toBe(1);
 		} finally {
-			safeRmRecursive(fixture.root);
+			safeRmRecursive(root);
 		}
 	}, 30_000);
 
