@@ -239,7 +239,6 @@ jobs:
         run: |
           set -euo pipefail
           mapfile -t DIRTY < <(git status --porcelain | awk '{print $NF}')
-          EXPECTED_LIST="$(git status --porcelain >/dev/null 2>&1; true)"
           # Re-derive the expected set exactly as the pre-verify gate did.
           EXPECTED=('package.json' 'bun.lock')
           if [[ -n "$PIN_SPECS" ]]; then
@@ -253,9 +252,18 @@ jobs:
           for path in "${DIRTY[@]}"; do
             [[ " ${EXPECTED[*]} " == *" $path "* ]] || { echo "::error::unexpected dirty path after verify: $path"; exit 1; }
           done
+          # An unchanged allowed output never stages (git adds no diff for
+          # it), so the staged set equals the DIRTY INTERSECTION of the
+          # allowlist — never the full allowlist. Mandatory outputs
+          # (package.json + bun.lock) must both be present: a dispatch that
+          # changes neither is vacuous.
+          mapfile -t ACTUAL_ALLOWED_DIRTY < <(comm -12 <(printf '%s\n' "${DIRTY[@]}" | sort -u) <(printf '%s\n' "${EXPECTED[@]}"))
+          [[ ${#ACTUAL_ALLOWED_DIRTY[@]} -ge 1 ]] || { echo "::error::no dispatch outputs changed"; exit 1; }
+          [[ " ${ACTUAL_ALLOWED_DIRTY[*]} " == *" package.json "* ]] || { echo "::error::package.json missing from the dispatch outputs"; exit 1; }
+          [[ " ${ACTUAL_ALLOWED_DIRTY[*]} " == *" bun.lock "* ]] || { echo "::error::bun.lock missing from the dispatch outputs"; exit 1; }
           git add -- "${EXPECTED[@]}"
-          STAGED="$(git diff --cached --name-only)"
-          [[ "$STAGED" == "$(printf '%s\n' "${EXPECTED[@]}")" ]] || { echo "::error::staged set differs from the declared allowlist"; exit 1; }
+          STAGED="$(git diff --cached --name-only | sort)"
+          [[ "$STAGED" == "$(printf '%s\n' "${ACTUAL_ALLOWED_DIRTY[@]}")" ]] || { echo "::error::staged set differs from the actual allowed dirty set"; exit 1; }
           if git status --porcelain | grep -v '^[MARD] ' >/dev/null 2>&1; then
             echo "::error::unstaged or untracked paths remain outside the staged set"; exit 1
           fi

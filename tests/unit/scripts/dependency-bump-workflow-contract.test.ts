@@ -297,6 +297,29 @@ describe('dependency-bump workflow contract (frozen check C7, trace 3501-3285-35
 		expect(staging).toBeLessThan(cachedDiff);
 	});
 
+	test('staging equality uses the dirty intersection of the allowlist, not the full allowlist (plan-critic r4)', () => {
+		// An unchanged allowed output (e.g. docs/configuration.md when a regen
+		// leaves it byte-identical) never stages, so full-allowlist equality
+		// rejects the intended commit. The gate must compute the INTERSECTION
+		// of the dirty set with the allowlist, compare the cached set against
+		// THAT, and separately require the mandatory outputs.
+		const text = script();
+		const intersection = text.indexOf('ACTUAL_ALLOWED_DIRTY');
+		const comm = text.indexOf('comm -12');
+		const staging = text.indexOf('git add --');
+		const cachedComparison = text.indexOf(
+			'staged set differs from the actual allowed dirty set',
+		);
+		expect(intersection).toBeGreaterThanOrEqual(0);
+		expect(comm).toBeGreaterThan(intersection);
+		expect(comm).toBeLessThan(staging);
+		expect(cachedComparison).toBeGreaterThan(staging);
+		// Mandatory dispatch outputs: package.json and bun.lock must both be
+		// present in the actual allowed dirty set (a vacuous dispatch denies).
+		expect(text).toContain('package.json missing from the dispatch outputs');
+		expect(text).toContain('bun.lock missing from the dispatch outputs');
+	});
+
 	test('push/PR transport: GH_TOKEN from secrets.GITHUB_TOKEN, gh auth setup-git, --force-with-lease over refs/heads/, gh pr create with both --base main and --head', () => {
 		const prStepIndex = stepIndexContaining('gh pr create');
 		expect(prStepIndex).toBeGreaterThanOrEqual(0);
