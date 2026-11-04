@@ -39,14 +39,19 @@ function writeProject(content: string): string {
 	return abs;
 }
 
-/** Defensively reset the post-fix sdd-source cache via the `_internals` seam
- * (optional-chained: absent at base, required once the cache exists). */
+/** Reset the post-fix sdd-source cache via the `_internals` seam. The seam is
+ * mandatory now — deleting it from the loader must fail this suite (bot-minor
+ * 5: an optional-chained call would let the seam be deleted vacuously). */
 function resetSddSourceCacheIfPresent(): void {
-	(
+	const reset = (
 		_internals as {
 			resetSddSourceCache?: () => void;
 		}
-	).resetSddSourceCache?.();
+	).resetSddSourceCache;
+	if (typeof reset !== 'function') {
+		throw new Error('_internals.resetSddSourceCache is missing (seam deleted?)');
+	}
+	reset();
 }
 
 beforeEach(() => {
