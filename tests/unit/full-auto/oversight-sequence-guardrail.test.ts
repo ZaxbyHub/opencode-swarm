@@ -62,6 +62,8 @@ const CLASSIFIED: Record<string, string> = {
 		'ordering: v2SetupOwnerCounter sequences per-setup owner tokens for the v2 adapter state registries (rebuild source, quiet, model-apply surface); the token is process-scoped only — never persisted, never crosses a restart',
 	'src/host/v2/session-client.ts':
 		'ordering: placeholderCounter sequences placeholder minting; the v2shim-<n>-<random> ids ARE persisted by v2 callers (dispatch_lanes writes them as background-delegations correlationId/subagentSessionId), but durable uniqueness across restarts comes from the random suffix, never the counter — the host-minted session id is tracked only in the in-session placeholder map',
+	'src/config/loader.ts':
+		'metrics: rawConfigReadAttempts (config-path read-attempt observability for the #3354 non-regular-file guard — pure gauge, never persisted, never feeds identity; reset via _internals in tests)',
 	'src/telemetry.ts': 'metrics: _emitCount (emit budget telemetry)',
 	'src/index.ts':
 		'metrics: instanceExitCleanupCounter / serverInitInvocations (init telemetry)',

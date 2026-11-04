@@ -13,7 +13,7 @@ This protocol is loaded on demand by the architect runtime. The architect prompt
 ### MODE: CLARIFY-SPEC
 Activates when: `/swarm sdd status` reports a **single resolved EFFECTIVE spec** (non-null) AND it contains `[NEEDS CLARIFICATION]` markers; OR user says "clarify", "refine spec", "review spec", or "/swarm clarify" is invoked; OR architect transitions from MODE: SPECIFY or MODE: BRAINSTORM with open markers.
 
-`/swarm sdd status` reflects `readEffectiveSpecSync`, which returns **null** (NO effective spec) for: no sources at all, multiple competing sources (e.g. `openspec/` AND `.specify/`), multi-feature Spec-Kit without a selected feature, or any other unresolvable state. CLARIFY-SPEC does NOT activate in these null cases — tell the user: "No resolved effective spec exists. Disambiguate with `/swarm sdd project --source <source>` or `--feature <feature>`, or run `/swarm specify` to generate one first." and stop.
+`/swarm sdd status` reflects `readEffectiveSpecSync`, which returns **null** (NO effective spec) for: no sources at all, multiple competing sources (e.g. `openspec/` AND `.specify/`), multi-feature Spec-Kit without a selected feature, or any other unresolvable state. CLARIFY-SPEC does NOT activate in these null cases — tell the user: "No resolved effective spec exists. Disambiguate with `/swarm sdd project --source <source>` (or set `SWARM_SDD_SOURCE` / `sdd.source` in the config — the flag wins over the env var, which wins over the config) or `--feature <feature>`, or run `/swarm specify` to generate one first." and stop.
 
 CONSTRAINT: CLARIFY-SPEC must NEVER create a spec. Always consult `/swarm sdd status` to determine the effective spec source before proceeding.
 
