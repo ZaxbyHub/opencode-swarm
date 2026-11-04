@@ -62,6 +62,14 @@ const rootEscape = (role: string, path: string) =>
 
 // Each allowed form, paired with the same script editing a file outside the
 // root (rejected), so the allowed rows cannot pass by allowing everything.
+// #3491 W7 re-pin: the perl cluster rows (`-i -pe '…'`) moved to
+// EVAL_BLOCKED_FORMS — the W7 cluster grammar decomposes `-pe` into an eval
+// member whose inline code real perl executes, so the command now carries an
+// interpreter_eval write that #3347 routing judges at the eval's cwd
+// (workspace root here) exactly like `python -c`; the sed/awk rows keep the
+// C-escape allow coverage, and the escape handling of the perl forms stays
+// pinned by the blocked rows below (the in-place operand must still extract
+// cleanly) plus the eval block.
 const ESCAPE_FORMS = [
 	String.raw`sed -i -e 's/\t/ /g'`,
 	String.raw`sed -i -e 's/\r$//'`,
@@ -69,15 +77,18 @@ const ESCAPE_FORMS = [
 	String.raw`sed -i -e "s/\t/ /"`,
 	String.raw`sed -i --expression 's/\t//'`,
 	String.raw`sed -i -e 's/\x41/A/'`,
-	String.raw`perl -i -pe 's/\t/ /g'`,
-	String.raw`perl -i -pe 's/\r//'`,
-	String.raw`perl -i -pe 's/\n//'`,
 	String.raw`awk -i inplace -e '{gsub(/\t/," ")}1'`,
 	String.raw`awk -i inplace -v OFS='\t' '{$1=$1}1'`,
 	String.raw`awk -i inplace -F '\t' '{print $2}'`,
 	String.raw`awk -i inplace -F "\t" '{print $2}'`,
 	String.raw`awk -i inplace -F '[\t ]' '{print}'`,
 	"echo 😀; sed -i -e 's/a*/b/'",
+];
+
+const EVAL_BLOCKED_FORMS = [
+	String.raw`perl -i -pe 's/\t/ /g'`,
+	String.raw`perl -i -pe 's/\r//'`,
+	String.raw`perl -i -pe 's/\n//'`,
 ];
 
 describe('guardrails shell writes: quoted C escapes in in-place scripts', () => {
@@ -109,6 +120,26 @@ describe('guardrails shell writes: quoted C escapes in in-place scripts', () => 
 		await expect(
 			hooks.toolBefore(bashInput(id), output(`${form} src/a.ts ../v`)),
 		).rejects.toThrow(rootEscape(role, String.raw`[\\/]v`));
+	});
+
+	// #3491 W7: the perl cluster forms now carry an interpreter_eval write
+	// (see the re-pin note above ESCAPE_FORMS) — the eval routes at the
+	// command's cwd like `python -c`, blocking for both the scope-less
+	// architect and a coder scoped to src/ while the eval runs at the root.
+	it.each(
+		EVAL_BLOCKED_FORMS.flatMap((form) => [
+			['architect', form, false] as const,
+			['coder', form, true] as const,
+		]),
+	)('%s: %s src/a.ts is blocked (inline eval class)', async (role, form, scoped) => {
+		const hooks = createGuardrailsHooks(TEST_DIR, undefined, config());
+		const id = session(role, scoped);
+		// The scope-less architect gets the eval blanket block; the scoped
+		// coder's eval routes at the (out-of-scope) working directory and
+		// denies with the SCOPE_VIOLATION shape.
+		await expect(
+			hooks.toolBefore(bashInput(id), output(`${form} src/a.ts`)),
+		).rejects.toThrow(/BLOCKED: perl \[eval\]|SCOPE_VIOLATION/);
 	});
 
 	// A glob in a sed script-file argument splits into the script file and

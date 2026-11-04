@@ -474,7 +474,7 @@ const AWK_LONG_SWITCHES = new Set([
 	'--help',
 ]);
 
-/** Interpreters that accept inline code via -c / -e / -p / -r flags (NOT -m, which runs an installed module — see detectInterpreterEval). */
+/** Interpreters that accept inline code via -c / -e / -p / -r flags (NOT -m, which runs an installed module — see detectInterpreterEval). deno (#3491 W7) evaluates ONLY at subcommand position (`deno eval CODE`). */
 const INTERPRETER_EVAL_COMMANDS = new Set([
 	'python',
 	'python3',
@@ -490,6 +490,7 @@ const INTERPRETER_EVAL_COMMANDS = new Set([
 	'dash',
 	'zsh',
 	'ksh',
+	'deno',
 	'eval',
 ]);
 
@@ -4678,11 +4679,21 @@ function classifyPipeStdinEvalAt(
 	// or flag form (carve-out). #3485 (PRR-006): the shape check must use the
 	// WRAPPER-CONSUMED token tail — the raw suffix of `env python` still holds
 	// the wrapper word and would defeat the wrapper-aware leaf lookup above.
+	// #3491 W7: deno's stdin shape is `run -` (`deno run -` reads the module
+	// from stdin; source: deno CLI docs — explicit disposition per the plan
+	// critic, this IS a stdin-eval shape).
 	const { leaf: _leaf, rest } = detectorCommandPartsFromWords(
 		getCommandName(last),
 		getSuffixWords(last),
 	);
-	if (!(rest.length === 0 || (rest.length === 1 && rest[0] === '-'))) {
+	const stdinShapeOk =
+		rest.length === 0 ||
+		(rest.length === 1 && rest[0] === '-') ||
+		(canonical === 'deno' &&
+			rest.length === 2 &&
+			rest[0] === 'run' &&
+			rest[1] === '-');
+	if (!stdinShapeOk) {
 		return null;
 	}
 	// A stdin redirect on the interpreter overrides the pipe (`< file`,
@@ -4951,6 +4962,190 @@ export function walkShellCommandFlags(
 	return payloadPending ? { kind: 'uncertain' } : { kind: 'script' };
 }
 
+// ============================================================================
+// Per-interpreter eval cluster grammars (#3491 W7)
+// ============================================================================
+
+/**
+ * One interpreter's short-option cluster grammar for inline-eval detection
+ * (#3491 W7). Members are grouped by arity exactly as the interpreter's own
+ * getopt consumes them:
+ * - `argless` — flag members that take no argument.
+ * - `argTakingNext` — the FIRST such member in a token either is last (its
+ *   argument is the FOLLOWING word, consumed verbatim — dash-led or not) or
+ *   swallows the token TAIL as its attached argument.
+ * - `optionalAttachedOnly` — members whose optional argument rides ONLY
+ *   inside the token (`perl -d:Name`, `-i.bak`, `-0777`); as the last member
+ *   with no tail they consume NO next word.
+ * - `evalMembers` — the members whose argument is INLINE CODE (python c;
+ *   perl e/E per perlrun; ruby e — n/p are loop PREFIXES, not eval).
+ * - `leadingVersionSelector` — the py(1) launcher accepts one leading
+ *   `-3`/`-3.12` version selector before python's own options.
+ *
+ * An UNKNOWN member is benign no-run, not deny-on-uncertainty: every one of
+ * these interpreters rejects the whole invocation with "unknown option"
+ * (ground-truthed locally on python 3.11 / perl 5.36; ruby(1) documents the
+ * same behavior for invalid options) — nothing executes, so classifying an
+ * eval would fabricate a block of a command that never ran.
+ */
+interface InterpreterClusterGrammar {
+	argless: ReadonlySet<string>;
+	argTakingNext: ReadonlySet<string>;
+	optionalAttachedOnly: ReadonlySet<string>;
+	evalMembers: ReadonlySet<string>;
+	longArgless?: ReadonlySet<string>;
+	leadingVersionSelector?: boolean;
+}
+
+/**
+ * python(1) (3.11 manual, verified by execution): argless b B d E i I O q s
+ * S u v V x; -c CODE (eval); -W/-X consume their argument (glued or next);
+ * -m runs an INSTALLED module — deliberately NOT eval (issue #1902);
+ * --check-hash-based-pycs=OPT takes an argument; --help/--version are
+ * argument-less. The py(1) launcher (Windows) prepends one version selector.
+ */
+const PYTHON_CLUSTER_GRAMMAR: InterpreterClusterGrammar = {
+	argless: new Set([...'bBdEiIOqsSuVvx']),
+	argTakingNext: new Set([...'cWXm']),
+	optionalAttachedOnly: new Set(),
+	evalMembers: new Set([...'c']),
+	longArgless: new Set(['--help', '--version', '--check-hash-based-pycs']),
+	leadingVersionSelector: true,
+};
+
+/**
+ * perlrun (perl 5.36, verified by execution): argless a c h l n p s S t T u
+ * U v w W X; e/E take their program GLUED or as the NEXT word (eval);
+ * F/I/m/M likewise consume the next word; d/D/V/0/i/x/C carry optional
+ * ATTACHED-only arguments (`-d:Name`, `-i.bak`); `--` ends options.
+ */
+const PERL_CLUSTER_GRAMMAR: InterpreterClusterGrammar = {
+	argless: new Set([...'achlnpsStUv', ...'wWX']),
+	argTakingNext: new Set([...'eEFImM']),
+	optionalAttachedOnly: new Set([...'dDV0ixC']),
+	evalMembers: new Set([...'eE']),
+};
+
+/**
+ * ruby(1) (doc-sourced; ruby is not installed on this host): argless a c l
+ * n p s S v w; e takes its program glued or next (eval); F/I/r/E consume
+ * their argument; W/0/i/x carry optional attached arguments; -r REQUIRES a
+ * library (not eval); -E selects an ENCODING (not eval — unlike perl's -E).
+ */
+const RUBY_CLUSTER_GRAMMAR: InterpreterClusterGrammar = {
+	argless: new Set([...'aclnpsSvw']),
+	argTakingNext: new Set([...'eFIrE']),
+	optionalAttachedOnly: new Set([...'W0ix']),
+	evalMembers: new Set([...'e']),
+};
+
+/**
+ * deno global flags that may precede a subcommand WITHOUT an argument
+ * (deno CLI docs; `deno help`): -q/--quiet, --unstable, --no-check,
+ * --check, --no-config, --no-remote, --no-lock, --cached-only, -h/--help,
+ * --version.
+ */
+const DENO_GLOBAL_ARGLESS_FLAGS = new Set([
+	'-q',
+	'--quiet',
+	'--unstable',
+	'--no-check',
+	'--check',
+	'--no-config',
+	'--no-remote',
+	'--no-lock',
+	'--cached-only',
+	'-h',
+	'--help',
+	'--version',
+]);
+
+/**
+ * Scan an interpreter's argument words for an inline-code eval member
+ * (#3491 W7). Returns true when the invocation evaluates inline code.
+ */
+function scanInterpreterEvalCluster(
+	grammar: InterpreterClusterGrammar,
+	words: readonly string[],
+): boolean {
+	let i = 0;
+	if (grammar.leadingVersionSelector && /^-\d(\.\d+)?$/.test(words[0] ?? '')) {
+		i += 1;
+	}
+	while (i < words.length) {
+		const token = words[i];
+		if (token === undefined) break;
+		if (token === '--' || token === '-') {
+			// End of the interpreter's options: a script file or argv follows —
+			// the eval member's code word was already consumed with its flag.
+			return false;
+		}
+		if (token.startsWith('--')) {
+			const head = token.split('=')[0] ?? token;
+			if (grammar.argTakingNext.has(head.slice(2) ?? '')) {
+				// Long arg-taking member: glued `--flag=ARG` or spaced.
+				if (token.includes('=')) {
+					i += 1;
+					continue;
+				}
+				i += 2; // flag + its argument word
+				continue;
+			}
+			if (grammar.longArgless?.has(token) || grammar.longArgless?.has(head)) {
+				i += 1;
+				continue;
+			}
+			// Unknown long option: the interpreter errors out and nothing runs.
+			return false;
+		}
+		if (token.startsWith('-') && token.length > 1) {
+			const members = token.slice(1);
+			let sawEval = false;
+			let resolved: 'argless' | 'next' | 'attached' | 'unknown' = 'argless';
+			for (let m = 0; m < members.length; m++) {
+				const ch = members[m];
+				if (ch === undefined) break;
+				if (grammar.argTakingNext.has(ch)) {
+					resolved = m === members.length - 1 ? 'next' : 'attached';
+					sawEval = grammar.evalMembers.has(ch);
+					break;
+				}
+				if (grammar.optionalAttachedOnly.has(ch)) {
+					// Optional attached-only member. Two tail shapes (perl 5.36
+					// ground truth): `-0` consumes ONLY its attached octal DIGIT
+					// run and later chars are MORE members (`-0777pe1` = -0 777,
+					// -p, -e '1' — eval); every other member (`-i.bak`, `-d:Name`,
+					// `-CSD`) consumes the WHOLE token tail, and as the final
+					// member it consumes nothing further.
+					resolved = 'argless';
+					if (ch === '0') {
+						while (
+							m + 1 < members.length &&
+							/[0-7]/.test(members[m + 1] ?? '')
+						) {
+							m += 1;
+						}
+						continue;
+					}
+					if (m !== members.length - 1) break; // tail consumed
+					continue;
+				}
+				if (grammar.argless.has(ch)) continue;
+				resolved = 'unknown';
+				break;
+			}
+			if (resolved === 'unknown') return false; // unknown option: nothing runs
+			if (sawEval) return true;
+			i += 1;
+			if (resolved === 'next') i += 1; // the argument word
+			continue;
+		}
+		// First non-option word: the script-file operand.
+		return false;
+	}
+	return false;
+}
+
 /**
  * Detect interpreter eval: python -c, node -e, bun -e, ruby -e, perl -e, php -r.
  * These are flagged as potential write effects because inline code can write files.
@@ -4971,27 +5166,9 @@ function detectInterpreterEval(cmd: unknown): WriteTarget[] {
 	const suffixWords = getSuffixWords(cmd);
 
 	const evalFlags: Record<string, string[]> = {
-		// `python -m <module>` runs an INSTALLED module as a program — e.g.
-		// `python -m pytest`, `python -m ruff`, `python -m build`. It is equivalent
-		// to invoking that tool directly (`pytest`, `ruff`) and is NOT arbitrary
-		// inline code, so it is deliberately excluded here. Only true inline-code
-		// eval flags (-c / -e / -p / -r / …) are treated as write effects with an
-		// unverifiable target. Treating `-m` as eval hard-blocked every
-		// `python -m pytest`/`ruff` (even the swarm's own test_runner-generated
-		// commands) with a misleading "unresolvable path target" error. (issue #1902)
-		python: ['-c'],
-		python3: ['-c'],
-		python2: ['-c'],
 		node: ['-e', '-p', '-pe'],
 		bun: ['-e', '-p', '-pe'],
-		ruby: ['-e'],
-		perl: ['-e', '-E'],
 		php: ['-r', '-R', '-F'],
-		bash: ['-c'],
-		sh: ['-c'],
-		dash: ['-c'],
-		zsh: ['-c'],
-		ksh: ['-c'],
 	};
 	if (canonical === 'eval') {
 		results.push({
@@ -5019,6 +5196,18 @@ function detectInterpreterEval(cmd: unknown): WriteTarget[] {
 		'zsh',
 		'ksh',
 	]);
+	// #3491 W7: python/perl/ruby decompose their getopt CLUSTERS through
+	// per-interpreter grammars (see scanInterpreterEvalCluster) — `python
+	// -Bc CODE`, `perl -pe CODE`, `ruby -ne CODE` run inline code that the
+	// positional matcher below never saw.
+	const CLUSTER_GRAMMAR_CANONICALS = new Set([
+		'python',
+		'python3',
+		'python2',
+		'py',
+		'perl',
+		'ruby',
+	]);
 	if (SHELL_FLAG_WALK_CANONICALS.has(canonical)) {
 		const words = [name, ...suffixWords];
 		const interpreterIndex = canonicalInterpreterAt(words);
@@ -5026,6 +5215,41 @@ function detectInterpreterEval(cmd: unknown): WriteTarget[] {
 			interpreterIndex >= 0 ? words.slice(interpreterIndex + 1) : suffixWords;
 		const walk = walkShellCommandFlags(shellArgs);
 		if (walk.kind === 'script') return results;
+	} else if (canonical === 'deno') {
+		// #3491 W7: deno evaluates ONLY at subcommand position — `deno eval
+		// CODE` (and `deno eval -p CODE`; flags after the subcommand do not
+		// remove the eval). NO --eval alias exists (source: deno CLI docs,
+		// `deno help eval`; deno is not installed on this host). `deno run
+		// script.ts` is a script-file run (carve-out parity with `python
+		// script.py`); the `deno run -` stdin shape classifies in
+		// classifyPipeStdinEval. A small set of documented argument-less
+		// GLOBAL flags may precede the subcommand; a flag-taking global
+		// prefix is deliberately NOT skipped (unknown-shape: no
+		// classification, disclosed known-edge).
+		const words = [name, ...suffixWords];
+		const interpreterIndex = canonicalInterpreterAt(words);
+		const args =
+			interpreterIndex >= 0 ? words.slice(interpreterIndex + 1) : suffixWords;
+		let sub = 0;
+		while (
+			sub < args.length &&
+			DENO_GLOBAL_ARGLESS_FLAGS.has(args[sub] ?? '')
+		) {
+			sub += 1;
+		}
+		if (args[sub] !== 'eval') return results;
+	} else if (CLUSTER_GRAMMAR_CANONICALS.has(canonical)) {
+		const words = [name, ...suffixWords];
+		const interpreterIndex = canonicalInterpreterAt(words);
+		const args =
+			interpreterIndex >= 0 ? words.slice(interpreterIndex + 1) : suffixWords;
+		const grammar =
+			canonical === 'perl'
+				? PERL_CLUSTER_GRAMMAR
+				: canonical === 'ruby'
+					? RUBY_CLUSTER_GRAMMAR
+					: PYTHON_CLUSTER_GRAMMAR;
+		if (!scanInterpreterEvalCluster(grammar, args)) return results;
 	} else {
 		const relevantFlags = evalFlags[canonical] ?? [];
 		// Match exact flag (-c), equals-glued (-c=CODE), or directly-glued (-cCODE / -c'code')

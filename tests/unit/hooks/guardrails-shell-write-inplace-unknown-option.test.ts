@@ -66,14 +66,22 @@ const UNMODELLED_ROWS: Array<[string, string]> = [
 ];
 const UNMODELLED = UNMODELLED_ROWS.map(([command]) => command);
 
+// #3491 W7 re-pin: the perl CLUSTER rows (`-i -pe`, `-i.bak -ne`) moved from
+// MODELLED to the blocked set — the W7 per-interpreter cluster grammar
+// decomposes them into an eval member whose inline code real perl executes
+// (`-pe 's/a/b/'` runs s/a/b/ per line; perl 5.36 ground truth), so the
+// command now carries an interpreter_eval write alongside the in-place
+// report. #3347 routing then judges the eval's cwd exactly like `python -c`:
+// denied for a scope-less architect and for a coder scoped to src/ while the
+// eval runs at the workspace root (cd src first admits). These rows pinned
+// the pre-W7 positional matcher's fail-open (RC-3); the frozen C8 check pins
+// `perl -pe CODE` as a denied eval.
 const MODELLED = [
 	"sed -i -E -e 's/a/b/' src/a.ts",
 	"sed -i 's/a/b/' src/a.ts",
 	'sed -n -i p src/a.ts',
 	"sed --posix -i 's/a/b/' src/a.ts",
 	'sed -l 5 -i 1d src/a.ts',
-	"perl -i -pe 's/a/b/' src/a.ts",
-	"perl -i.bak -ne 'print' src/a.ts",
 	"awk -i inplace -v x=1 '{print}' src/a.ts",
 	'awk -i inplace -f p.awk src/a.ts',
 ];
