@@ -137,6 +137,15 @@ C9, C12–C15 stay GREEN.
   `sudo -e` edit targets and GNU `time -o` report paths (the last
   unbacked literal emitters) now expand per-branch, with the bare-keyword
   `time -o…{…}` spelling keeping its bash-true no-write pin.
+  (Closure round 4 — the structural terminal rung:) the isDynamicPath
+  brace chokepoint landed: ANY POSIX-detected write whose literal path
+  still carries an unquoted brace-list region (archive-decompress, rsync,
+  git checkout/restore, and every future emitter) is refused as a dynamic
+  write at the detectPosixWrites pass — "zero unbacked literal destination
+  emitters" now holds by construction in the POSIX grammar. POSIX-scoped
+  with the Windows detectors carved out (a literal PowerShell/cmd `{a,b}`
+  filename keeps its literal handling); a QUOTED brace word is exempt
+  (the W8 engine's own raw-scan proves it would not expand).
 - (Advisory, disclosed with follow-up issue #3569 — NOT fixed here, out of
   closure scope:) wrapper-prefixed tee/dd operand windows can bleed the
   wrapper's word consumption into the operand position —

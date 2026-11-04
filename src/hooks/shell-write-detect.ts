@@ -7190,6 +7190,60 @@ export function detectPosixWrites(command: string): WriteAnalysis {
 		// `[eval stdin]` operator never collides with the leaf pass's
 		// `[eval]` operator.
 		collectPipeStdinEvals(ast as BashNode, allWrites);
+
+		// #3491 closure round 4 — the isDynamicPath class-closing CHOKEPOINT
+		// (the issue's own root-cause line: "isDynamicPath has no brace
+		// check"). A POSIX-detected write whose literal path still carries a
+		// brace-list region never went through the W8 engine — bash would
+		// have expanded an UNQUOTED brace word before the tool ever saw it,
+		// so a surviving brace region means the emitter read the word
+		// literally (archive-decompress, rsync, git checkout/restore, and
+		// any future site). Refuse it as a dynamic write (null path +
+		// dynamicSourceWord) instead of emitting the literal: the gate
+		// denies, fail-closed. POSIX-scoped BY CONSTRUCTION — this pass
+		// lives in detectPosixWrites; detectWindowsWrites never sees it, so
+		// a literal PowerShell/cmd `{a,b}` filename keeps its literal
+		// handling (the preferred carve-out). QUOTE-AWARE: a word whose RAW
+		// slice shows braces the W8 engine itself would NOT expand (quoted
+		// or escaped — expandBraceRaw returns 'none') is a literal brace
+		// filename, exempt; a word the engine WOULD expand is an unquoted
+		// brace word, refused. Engine'd sites emit brace-free branch texts,
+		// so the chokepoint is a no-op for them.
+		const quotedBraceLiterals = new Set<string>();
+		const unquotedBraceTexts = new Set<string>();
+		for (const leaf of leafCommands) {
+			const leafSuffix = (leaf as BashCommand).suffix;
+			if (!Array.isArray(leafSuffix)) continue;
+			for (const node of leafSuffix) {
+				if (!isBashWord(node)) continue;
+				const raw = RAW_WORD_TEXT.get(node);
+				const text = wordText(node);
+				if (raw === undefined || text === null) continue;
+				if (!BRACE_EXPANSION.test(text)) continue;
+				if (expandBraceRaw(raw).kind === 'none') {
+					quotedBraceLiterals.add(text);
+				} else {
+					unquotedBraceTexts.add(text);
+				}
+			}
+		}
+		if (unquotedBraceTexts.size > 0) {
+			for (let w = 0; w < allWrites.length; w++) {
+				const write = allWrites[w];
+				if (
+					write.path !== null &&
+					BRACE_EXPANSION.test(write.path) &&
+					unquotedBraceTexts.has(write.path) &&
+					!quotedBraceLiterals.has(write.path)
+				) {
+					allWrites[w] = {
+						...write,
+						path: null,
+						dynamicSourceWord: write.path,
+					};
+				}
+			}
+		}
 	}
 
 	// #3539 W5 (RC-5): on a parse failure, first try to MASK every balanced

@@ -250,3 +250,55 @@ describe('closure round 3: launcher_write brace destinations (the terminal liter
 		expect(paths('time -osrc/{a,../esc} true')).toEqual([]);
 	});
 });
+
+describe('closure round 4: the isDynamicPath brace chokepoint (X series)', () => {
+	// The class-closing structural rung: any POSIX-detected write whose
+	// literal path still carries an UNQUOTED brace-list region never went
+	// through the W8 engine — refused as dynamic at the detectPosixWrites
+	// chokepoint. "Zero unbacked literal destination emitters" is now true
+	// by construction in the POSIX grammar.
+	test.each([
+		['gunzip -d src/{a,../esc}.gz'],
+		['gzip -d src/{a,../esc}.gz'],
+		['rsync -a x src/{a,../esc}'],
+		['git checkout main -- src/{a,../esc}'],
+		['git restore --hard -- src/{a,../esc}'],
+	])('%s → DENIED (chokepoint refusal)', async (command) => {
+		const got = await gate(command);
+		expect(got.verdict).toBe('DENIED');
+		expect(got.detail).toMatch(/dynamic path target|BLOCKED/);
+	});
+
+	test.each([
+		['gunzip -d ../esc.gz'],
+		['rsync -a x ../esc'],
+		['git checkout main -- ../esc'],
+	])('plain-escape control still DENIED: %s', async (command) => {
+		const got = await gate(command);
+		expect(got.verdict).toBe('DENIED');
+	});
+
+	test.each([
+		['gunzip -d src/a.gz'],
+		['rsync -a x src/b'],
+	])('in-scope plain control still ADMITS: %s', async (command) => {
+		const got = await gate(command);
+		expect(got.verdict).toBe('ADMITTED');
+	});
+
+	test('chokepoint detector pins: refusal shape', () => {
+		const writes = detectPosixWrites('gunzip -d src/{a,../esc}.gz').writes;
+		expect(writes.length).toBeGreaterThan(0);
+		for (const w of writes) {
+			expect(w.path).toBeNull();
+			expect(w.dynamicSourceWord).toBe('src/{a,../esc}.gz');
+		}
+	});
+
+	test('chokepoint carve-outs: quoted literal + engine sites untouched', () => {
+		const quoted = detectPosixWrites("cd src && echo x > '{a,b}'").writes;
+		expect(quoted.some((w) => w.path === '{a,b}')).toBe(true);
+		const tee = detectPosixWrites('tee src/{a,b}').writes.map((w) => w.path);
+		expect(tee).toEqual(['src/a', 'src/b']);
+	});
+});
