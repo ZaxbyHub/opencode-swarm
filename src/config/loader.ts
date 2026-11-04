@@ -10,6 +10,7 @@ import {
 	migrateLegacyEpicConfig,
 } from '../epic/config.js';
 import { advisoryWarn } from '../services/warning-buffer.js';
+import { canonicalRootKeyLexical } from '../utils/canonical-root.js';
 import { GIT_BINARY_ENV_VAR } from '../utils/git-executable.js';
 import { sanitizeMalformedValues } from './sanitize-malformed-values';
 import {
@@ -64,7 +65,31 @@ let legacyEpicConfigWarned = false;
 const gatesAdvisorySignatures = new Set<string>();
 const MAX_GATES_ADVISORY_SIGNATURES = 64;
 
+/**
+ * Issue #3354 (AC5, plan D3 v4): while a `silent` config-pipeline run is in
+ * flight (the SDD source read delegates acceptance to
+ * `buildConfigWithMeta`), the loader suppresses BOTH diagnostic channels AND
+ * their dedup-state mutations — a silent read must not arm a dedup signature
+ * that later suppresses a real loader warning. Synchronous region only
+ * (`readSddSourceSetting` is sync); restored in `finally`.
+ */
+let loaderDiagnosticsSilenced = false;
+
+/**
+ * Issue #3354 (AC4, plan D2): counts ATTEMPTED opens (`readFileSync`/
+ * `readFile` calls) of config paths. Exposed via `_internals` so the
+ * non-regular-file contract ("never even open it") is testable
+ * platform-independently. Reset via `_internals` in tests.
+ */
+let rawConfigReadAttempts = 0;
+
+function loaderWarn(message: string, data?: unknown): void {
+	if (loaderDiagnosticsSilenced) return;
+	advisoryWarn(message, data);
+}
+
 function gatesAdvisoryWarn(message: string, data?: unknown): void {
+	if (loaderDiagnosticsSilenced) return;
 	if (gatesAdvisorySignatures.has(message)) return;
 	if (gatesAdvisorySignatures.size >= MAX_GATES_ADVISORY_SIGNATURES) {
 		gatesAdvisorySignatures.clear();
@@ -72,6 +97,19 @@ function gatesAdvisoryWarn(message: string, data?: unknown): void {
 	gatesAdvisorySignatures.add(message);
 	advisoryWarn(message, data);
 }
+
+/**
+ * Issue #3354 (AC6, plan D4): mtime+size-keyed cache of the derived
+ * `SddSourceSetting` per resolved directory. Freshness contract: mtime+size
+ * IS the invalidation signal (the same model build tools use) — a content
+ * change that preserves mtime is intentionally outside the freshness model.
+ * Bounded FIFO per session-state invariant 8. Reset via `_internals in tests.
+ */
+const sddSourceSettingCache = new Map<
+	string,
+	{ key: string; value: SddSourceSetting }
+>();
+const MAX_SDD_SOURCE_CACHE_ENTRIES = 64;
 
 export const _internals = {
 	resetUnknownTopLevelKeyWarning(): void {
@@ -85,6 +123,15 @@ export const _internals = {
 	},
 	resetGatesAdvisoryDedup(): void {
 		gatesAdvisorySignatures.clear();
+	},
+	resetSddSourceCache(): void {
+		sddSourceSettingCache.clear();
+	},
+	getRawConfigReadAttempts(): number {
+		return rawConfigReadAttempts;
+	},
+	resetRawConfigReadAttempts(): void {
+		rawConfigReadAttempts = 0;
 	},
 };
 
@@ -113,9 +160,22 @@ function loadRawConfigFromPath(
 	fileExisted: boolean;
 	hadError: boolean;
 } {
-	const warn = silent ? () => undefined : advisoryWarn;
+	const warn = silent ? () => undefined : loaderWarn;
 	try {
 		const stats = fs.statSync(configPath);
+		// Issue #3354 (AC4, plan D2): a non-regular file (FIFO, device,
+		// directory) at a config path is never opened — on POSIX `readFileSync`
+		// on a FIFO blocks the caller inside open(), and the SDD source read
+		// runs on gate/preflight paths that cannot hang. Classification stays
+		// fail-secure for the full loader (hadError), the same as an unreadable
+		// file, but no open is ever attempted.
+		if (!stats.isFile()) {
+			warn(`[opencode-swarm] Config path is not a regular file: ${configPath}`);
+			warn(
+				'[opencode-swarm] ⚠️ SECURITY: Config path is not a regular file. Falling back to safe defaults with guardrails ENABLED.',
+			);
+			return { config: null, fileExisted: true, hadError: true };
+		}
 		if (stats.size > MAX_CONFIG_FILE_BYTES) {
 			warn(
 				`[opencode-swarm] Config file too large (max 100 KB): ${configPath}`,
@@ -126,6 +186,7 @@ function loadRawConfigFromPath(
 			return { config: null, fileExisted: true, hadError: true };
 		}
 
+		rawConfigReadAttempts += 1;
 		const content = fs.readFileSync(configPath, 'utf-8');
 		// TOCTOU guard: re-check size after read (file may have grown between statSync and readFileSync)
 		if (content.length > MAX_CONFIG_FILE_BYTES) {
@@ -219,7 +280,7 @@ function migratePresetsConfig(
 			delete migrated.preset;
 			delete migrated.presets;
 			delete migrated.swarm_mode;
-			advisoryWarn(
+			loaderWarn(
 				'[opencode-swarm] Migrated v6.12 presets config to agents format. Consider updating your opencode-swarm.json.',
 			);
 			return migrated;
@@ -247,7 +308,7 @@ function migratePresetsConfig(
 		for (const key of dormantLegacyKeys) {
 			delete cleaned[key];
 		}
-		advisoryWarn(
+		loaderWarn(
 			`[opencode-swarm] Ignored legacy v6.12 config key(s): ${dormantLegacyKeys.join(', ')}. The agents block takes precedence — consider removing them from your opencode-swarm.json.`,
 		);
 		return cleaned;
@@ -277,11 +338,11 @@ function sanitizeExternalSkillsConfig(raw: Record<string, unknown>): {
 			strippedKeys: [],
 		};
 	}
-	advisoryWarn(
+	loaderWarn(
 		'[opencode-swarm] external_skills config validation failed:',
 		formatZodIssues(esResult.error),
 	);
-	advisoryWarn(
+	loaderWarn(
 		'[opencode-swarm] External skills curation disabled due to invalid config. Fix the external_skills section to enable it.',
 	);
 	const cleaned = { ...raw };
@@ -515,6 +576,13 @@ export type ConfigBuildResult = {
 	 * whole config fell back to defaults.
 	 */
 	rawGates?: Record<string, Record<string, unknown>>;
+	/**
+	 * Issue #3354 (AC5, plan D3 v4): which config file supplied the accepted
+	 * `sdd.source`, tracked INSIDE the pipeline (after the dangerous-merge
+	 * refusal decision) rather than inferred from raw-key presence. Undefined
+	 * when no source survived acceptance.
+	 */
+	sddSourceOrigin?: 'project' | 'user';
 };
 
 /**
@@ -620,7 +688,7 @@ function enforceGitBinaryProvenance(
 	// (including "both absent"), there is nothing to refuse.
 	if (Object.is(exposedBinary, userBinary)) return mergedRaw;
 
-	advisoryWarn(
+	loaderWarn(
 		`[opencode-swarm] ⚠️ SECURITY: Ignoring "git.binary" supplied by the project config (.opencode/${CONFIG_FILENAME}). ` +
 			'That file lives inside the repository, so it is untrusted content, and "git.binary" selects the executable this plugin spawns for every git command. ' +
 			`Set it in your user config (<config dir>/opencode/${CONFIG_FILENAME}) or the ${GIT_BINARY_ENV_VAR} environment variable instead.`,
@@ -674,7 +742,75 @@ function enforceGitBinaryProvenance(
  * Returns `ConfigBuildResult` so callers that need metadata (e.g.
  * `loadPluginConfigWithMeta[Async]`) have it without a second file-read.
  */
+/**
+ * Issue #3105 (plan D1): the `full_auto.locked` administrative hard-off is a
+ * property of the loader's OUTPUT, not of one input path. Every recovery
+ * branch of the core rebuilds a config from a different input (user-only,
+ * schema defaults); this wrapper re-applies the raw-level OR-merge to the
+ * FINAL result so no recovery branch can hand back a silently unlocked
+ * config. Recovery metadata (recovery/removedKeys/warnings) is untouched;
+ * only the config payload gains `full_auto.locked: true` when either raw
+ * config carried the lock.
+ */
+function preserveFullAutoLock<T extends ConfigBuildResult>(
+	result: T,
+	rawUserConfig: Record<string, unknown> | null,
+	rawProjectConfig: Record<string, unknown> | null,
+): T {
+	if (
+		!rawFullAutoLocked(rawUserConfig) &&
+		!rawFullAutoLocked(rawProjectConfig)
+	) {
+		return result;
+	}
+	const current = result.config as Record<string, unknown>;
+	const fa =
+		current.full_auto &&
+		typeof current.full_auto === 'object' &&
+		!Array.isArray(current.full_auto)
+			? (current.full_auto as Record<string, unknown>)
+			: {};
+	const config = PluginConfigSchema.parse({
+		...current,
+		full_auto: { ...fa, locked: true },
+	});
+	return { ...result, config };
+}
+
 function buildConfigWithMeta(
+	rawUserConfig: Record<string, unknown> | null,
+	rawProjectConfig: Record<string, unknown> | null,
+	loadedFromFile: boolean,
+	configHadErrors: boolean,
+	opts: { silent?: boolean } = {},
+): ConfigBuildResult {
+	const core = opts.silent
+		? (() => {
+				const prev = loaderDiagnosticsSilenced;
+				loaderDiagnosticsSilenced = true;
+				try {
+					return buildConfigWithMetaCore(
+						rawUserConfig,
+						rawProjectConfig,
+						loadedFromFile,
+						configHadErrors,
+					);
+				} finally {
+					loaderDiagnosticsSilenced = prev;
+				}
+			})()
+		: buildConfigWithMetaCore(
+				rawUserConfig,
+				rawProjectConfig,
+				loadedFromFile,
+				configHadErrors,
+			);
+	// Issue #3105 (plan D1): one choke point for the lock-preservation
+	// contract — every Core recovery return passes through here.
+	return preserveFullAutoLock(core, rawUserConfig, rawProjectConfig);
+}
+
+function buildConfigWithMetaCore(
 	rawUserConfig: Record<string, unknown> | null,
 	rawProjectConfig: Record<string, unknown> | null,
 	loadedFromFile: boolean,
@@ -699,15 +835,37 @@ function buildConfigWithMeta(
 		if (rawProjectConfig) {
 			rawProjectConfig = migrateLegacyEpicConfig(rawProjectConfig);
 		}
-		if (!legacyEpicConfigWarned) {
+		// #3354 D3 v4: a silent pipeline run must not arm the dedup flag.
+		if (!loaderDiagnosticsSilenced && !legacyEpicConfigWarned) {
 			legacyEpicConfigWarned = true;
-			advisoryWarn(LEGACY_EPIC_CONFIG_WARNING);
+			loaderWarn(LEGACY_EPIC_CONFIG_WARNING);
 		}
 	}
 
 	// 1. Deep-merge raw objects before Zod parsing so Zod defaults never
 	//    override explicit user values.
 	let mergedRaw: Record<string, unknown> = rawUserConfig ?? {};
+	// #3354 D3 v4: pipeline-tracked provenance — the sdd.source origin must
+	// reflect the SURVIVING project overlay, so the dangerous-merge refusal
+	// below flips this flag before any origin is derived.
+	let projectOverlayRefused = false;
+	const ownSddSource = (raw: Record<string, unknown> | null): boolean => {
+		const sdd = raw?.sdd;
+		return (
+			!!sdd &&
+			typeof sdd === 'object' &&
+			!Array.isArray(sdd) &&
+			typeof (sdd as Record<string, unknown>).source === 'string'
+		);
+	};
+	const mergedSddOrigin = (): 'project' | 'user' | undefined =>
+		!projectOverlayRefused && ownSddSource(rawProjectConfig)
+			? 'project'
+			: ownSddSource(rawUserConfig)
+				? 'user'
+				: undefined;
+	const userOnlySddOrigin = (): 'user' | undefined =>
+		ownSddSource(rawUserConfig) ? 'user' : undefined;
 	if (rawProjectConfig) {
 		// Issue #2476 AC2 (source issue #2264): a repo-supplied project config
 		// carrying __proto__/constructor/prototype at any depth is a hostile
@@ -723,7 +881,8 @@ function buildConfigWithMeta(
 			>;
 		} catch (err) {
 			if (err instanceof DangerousMergeKeyError) {
-				advisoryWarn(
+				projectOverlayRefused = true;
+				loaderWarn(
 					`[opencode-swarm] ⚠️ SECURITY: Ignoring the entire project config (.opencode/${CONFIG_FILENAME}): ` +
 						`it carries the dangerous key "${err.key}" at "${err.path}", a prototype-pollution payload. ` +
 						'Continuing with user-level configuration only.',
@@ -804,9 +963,10 @@ function buildConfigWithMeta(
 	);
 	if (unknownTopLevel.length > 0) {
 		const signature = unknownTopLevel.join('\u0000');
-		if (signature !== lastUnknownTopLevelSig) {
+		// #3354 D3 v4: silent runs skip the dedup-signature write entirely.
+		if (signature !== lastUnknownTopLevelSig && !loaderDiagnosticsSilenced) {
 			lastUnknownTopLevelSig = signature;
-			advisoryWarn(
+			loaderWarn(
 				`[opencode-swarm] Ignored ${unknownTopLevel.length} unknown top-level config key(s): ${unknownTopLevel.join(', ')}. These keys have no effect — see docs/configuration.md (Top-level configuration keys) for the valid key list.`,
 			);
 		}
@@ -818,9 +978,10 @@ function buildConfigWithMeta(
 	//     dedup contract); `/swarm config doctor` reports them as well.
 	if (retiredEpicKeys.length > 0) {
 		const signature = retiredEpicKeys.join('\u0000');
-		if (signature !== lastRetiredEpicKeysSig) {
+		// #3354 D3 v4: silent runs skip the dedup-signature write entirely.
+		if (signature !== lastRetiredEpicKeysSig && !loaderDiagnosticsSilenced) {
 			lastRetiredEpicKeysSig = signature;
-			advisoryWarn(
+			loaderWarn(
 				`[opencode-swarm] Ignored ${retiredEpicKeys.length} retired Epic config key(s): ${retiredEpicKeys.join(', ')}. They have no effect (the rest of the Epic block is kept) — remove them; see docs/configuration.md (Epic Mode).${retiredEpicKeys
 					.map((key) => retiredEpicKeyReplacement(key))
 					.filter((hint): hint is string => hint !== undefined)
@@ -845,7 +1006,7 @@ function buildConfigWithMeta(
 	if (firstResult.success) {
 		const config = secure(firstResult.data);
 		if (loadedFromFile && configHadErrors) {
-			advisoryWarn(
+			loaderWarn(
 				'[opencode-swarm] ⚠️ SECURITY: Falling back to conservative defaults with guardrails ENABLED. Fix the config file to restore custom configuration.',
 			);
 			return {
@@ -854,6 +1015,7 @@ function buildConfigWithMeta(
 				removedKeys: [...gatesStripped],
 				warnings: [],
 				rawGates,
+				sddSourceOrigin: mergedSddOrigin(),
 			};
 		}
 		return {
@@ -862,6 +1024,7 @@ function buildConfigWithMeta(
 			removedKeys: [...gatesStripped],
 			warnings: [],
 			rawGates,
+			sddSourceOrigin: mergedSddOrigin(),
 		};
 	}
 
@@ -875,7 +1038,7 @@ function buildConfigWithMeta(
 	if (removed.length > 0) {
 		const recovered = PluginConfigSchema.safeParse(cleaned);
 		if (recovered.success) {
-			advisoryWarn(
+			loaderWarn(
 				`[opencode-swarm] Ignored ${removed.length} unrecognized config key(s): ${removed.join(', ')}. The rest of your configuration was preserved. Fix or remove these keys.`,
 			);
 			return {
@@ -884,6 +1047,7 @@ function buildConfigWithMeta(
 				removedKeys: [...gatesStripped, ...removed],
 				warnings: [],
 				rawGates,
+				sddSourceOrigin: mergedSddOrigin(),
 			};
 		}
 	}
@@ -912,7 +1076,7 @@ function buildConfigWithMeta(
 				: userPresetMigrated;
 		const userParseResult = PluginConfigSchema.safeParse(userPresetReady);
 		if (userParseResult.success) {
-			advisoryWarn(
+			loaderWarn(
 				'[opencode-swarm] Project config ignored due to validation errors. Using user config.',
 			);
 			return {
@@ -923,6 +1087,7 @@ function buildConfigWithMeta(
 					'Project config ignored due to validation errors; using user config.',
 				],
 				rawGates: userRawGates,
+				sddSourceOrigin: userOnlySddOrigin(),
 			};
 		}
 		// Last targeted attempt: strip unrecognized keys from user config too.
@@ -934,7 +1099,7 @@ function buildConfigWithMeta(
 			const userRecovered = PluginConfigSchema.safeParse(userStripped.cleaned);
 			if (userRecovered.success) {
 				const userRemoved = annotateEpicKeys(userStripped.removed);
-				advisoryWarn(
+				loaderWarn(
 					`[opencode-swarm] Project config ignored; also ignored ${userRemoved.length} unrecognized user-config key(s): ${userRemoved.join(', ')}.`,
 				);
 				return {
@@ -945,6 +1110,7 @@ function buildConfigWithMeta(
 						'Project config ignored due to validation errors; using user config.',
 					],
 					rawGates: userRawGates,
+					sddSourceOrigin: userOnlySddOrigin(),
 				};
 			}
 		}
@@ -1002,7 +1168,7 @@ function buildConfigWithMeta(
 					// otherwise the "rest of your configuration was preserved"
 					// message would be misleading on the safeParse-failure path
 					// that falls through to step 8 (which discards everything).
-					advisoryWarn(
+					loaderWarn(
 						`[opencode-swarm] Ignored ${removedKeys.length} invalid or unrecognized config key(s): ${removedKeys.join(', ')}. The rest of your configuration was preserved. Fix or remove these keys.`,
 					);
 					return {
@@ -1011,6 +1177,7 @@ function buildConfigWithMeta(
 						removedKeys,
 						warnings: [],
 						rawGates,
+						sddSourceOrigin: mergedSddOrigin(),
 					};
 				}
 			}
@@ -1022,16 +1189,16 @@ function buildConfigWithMeta(
 		stripUnrecognizedKeys(mergedRaw, firstResult.error).removed,
 	);
 	if (offending.length > 0) {
-		advisoryWarn(
+		loaderWarn(
 			`[opencode-swarm] Merged config validation failed. Unrecognized key(s): ${offending.join(', ')}.`,
 		);
 	} else {
-		advisoryWarn(
+		loaderWarn(
 			'[opencode-swarm] Merged config validation failed:',
 			formatZodIssues(firstResult.error),
 		);
 	}
-	advisoryWarn(
+	loaderWarn(
 		'[opencode-swarm] ⚠️ SECURITY: Falling back to conservative defaults with guardrails ENABLED. Fix the config file to restore custom configuration.',
 	);
 	return {
@@ -1041,6 +1208,7 @@ function buildConfigWithMeta(
 		warnings: [
 			'Config failed validation; using safe defaults with guardrails enabled.',
 		],
+		sddSourceOrigin: mergedSddOrigin(),
 	};
 }
 
@@ -1096,46 +1264,110 @@ export interface SddSourceSetting {
  * (`~/.config/opencode/opencode-swarm.json`, then
  * `<directory>/.opencode/opencode-swarm.json`; project takes precedence).
  *
- * This is the lightweight sibling of {@link loadPluginConfig} for the SDD
- * resolver, which runs on gate/preflight paths and must not pay for a full
- * schema parse of the whole config. It reuses `loadRawConfigFromPath`, so it
- * inherits the loader's 100 KB size cap, BOM stripping, TOCTOU re-check and
- * parsing (file-level diagnostics stay with the full loader: this read is silent) instead of re-implementing a weaker raw read.
+ * Issue #3354 (AC5, plan D3 v4): the SETTING IS DERIVED FROM THE REAL LOADER
+ * PIPELINE — `buildConfigWithMeta` runs in silent diagnostics mode (no
+ * buffered warnings, no dedup-state mutation) and the returned
+ * `config.sdd.source` + pipeline-tracked `sddSourceOrigin` are the answer.
+ * This removes the historical divergence where a project config the validated
+ * loader DISCARDED (user_only / guardrails_defaults recovery, dangerous-merge
+ * refusal) still steered spec-source selection through this raw read, while
+ * every acceptance the full loader performs (stripped-key recovery, legacy
+ * Epic migration, malformed-value sanitization, merge-dependent healing)
+ * keeps supplying its source.
+ *
+ * Issue #3354 (AC4, plan D2): non-regular files at either config path are
+ * never opened. Issue #3354 (AC6, plan D4): results are cached per resolved
+ * directory keyed by the two files' mtime+size — the documented freshness
+ * contract (a content change preserving mtime is intentionally invisible
+ * until the next real mtime change). Bounded (64 entries, FIFO); reset via
+ * `_internals.resetSddSourceCache()` in tests. Raw reads happen only on a
+ * cache miss, for the `rejected` display channel, and stay silent.
  */
 export function readSddSourceSetting(directory: string): SddSourceSetting {
-	const candidates = [
-		['project', path.join(directory, '.opencode', CONFIG_FILENAME)],
-		['user', path.join(getUserConfigDir(), 'opencode', CONFIG_FILENAME)],
-	] as const;
+	const projectPath = path.join(directory, '.opencode', CONFIG_FILENAME);
+	const userPath = path.join(getUserConfigDir(), 'opencode', CONFIG_FILENAME);
+	// The key carries the resolved user path too: XDG_CONFIG_HOME could change
+	// within one process (tests do), and two directories must not share a
+	// value recorded under a different user-config path (impl-review Q1).
+	const cacheKey = `${userPath}|${configStatKey(projectPath)}|${configStatKey(userPath)}`;
+	const dirKey = canonicalRootKeyLexical(directory);
+	const cached = sddSourceSettingCache.get(dirKey);
+	if (cached && cached.key === cacheKey) return cached.value;
+
+	// Raw reads (silent, D2-guarded) feed BOTH the rejected display channel
+	// and the delegated acceptance call below — one read per path.
+	const projectRead = loadRawConfigFromPath(projectPath, true);
+	const userRead = loadRawConfigFromPath(userPath, true);
 	let rejected: SddSourceSetting['rejected'];
-	for (const [origin, configPath] of candidates) {
-		const { config } = loadRawConfigFromPath(configPath, true);
-		const sdd = config?.sdd;
-		if (typeof sdd !== 'object' || sdd === null || Array.isArray(sdd)) {
-			if (sdd !== undefined) {
+	for (const [configPath, read] of [
+		[projectPath, projectRead],
+		[userPath, userRead],
+	] as const) {
+		const sdd = read.config?.sdd;
+		if (typeof sdd === 'object' && sdd !== null && !Array.isArray(sdd)) {
+			const raw = (sdd as Record<string, unknown>).source;
+			if (raw === undefined) continue;
+			if (
+				typeof raw !== 'string' ||
+				!(SDD_SOURCES as readonly string[]).includes(raw)
+			) {
 				rejected ??= {
-					value: describeRejectedSddValue(sdd),
+					value: describeRejectedSddValue(raw),
 					configPath,
-					field: 'sdd',
+					field: 'sdd.source',
 				};
 			}
 			continue;
 		}
-		const raw = (sdd as Record<string, unknown>).source;
-		if (raw === undefined) continue;
-		if (
-			typeof raw === 'string' &&
-			(SDD_SOURCES as readonly string[]).includes(raw)
-		) {
-			return { source: raw as SddSource, origin, rejected };
+		if (sdd !== undefined) {
+			rejected ??= {
+				value: describeRejectedSddValue(sdd),
+				configPath,
+				field: 'sdd',
+			};
 		}
-		rejected ??= {
-			value: describeRejectedSddValue(raw),
-			configPath,
-			field: 'sdd.source',
-		};
 	}
-	return { source: undefined, rejected };
+
+	// Delegated acceptance: the REAL two-file pipeline, silent (no warnings,
+	// no dedup arming). The accepted config's sdd.source is the answer; the
+	// pipeline-tracked origin says which surviving file supplied it.
+	const built = buildConfigWithMeta(
+		userRead.config,
+		projectRead.config,
+		projectRead.fileExisted || userRead.fileExisted,
+		projectRead.hadError || userRead.hadError,
+		{ silent: true },
+	);
+	const source = (built.config as { sdd?: { source?: SddSource } }).sdd?.source;
+	const value: SddSourceSetting =
+		source !== undefined
+			? { source, origin: built.sddSourceOrigin, rejected }
+			: { source: undefined, rejected };
+
+	// Bounded FIFO insert (invariant 8: session state must have an eviction).
+	if (
+		sddSourceSettingCache.size >= MAX_SDD_SOURCE_CACHE_ENTRIES &&
+		!sddSourceSettingCache.has(dirKey)
+	) {
+		const oldest = sddSourceSettingCache.keys().next().value;
+		if (oldest !== undefined) sddSourceSettingCache.delete(oldest);
+	}
+	sddSourceSettingCache.set(dirKey, { key: cacheKey, value });
+	return value;
+}
+
+/** mtime+size identity of a config path, or 'absent' when it does not exist.
+ * stat is never followed by an open here — a FIFO at the path cannot hang.
+ * mtimeMs is floored to whole milliseconds: a faithful `utimesSync(atime,
+ * mtime)` restore truncates sub-millisecond precision, and that must not
+ * fabricate a freshness change the operator did not make. */
+function configStatKey(configPath: string): string {
+	try {
+		const st = fs.statSync(configPath);
+		return `${Math.floor(st.mtimeMs)}:${st.size}`;
+	} catch {
+		return 'absent';
+	}
 }
 
 function describeRejectedSddValue(value: unknown): string {
@@ -1270,21 +1502,32 @@ async function loadRawConfigFromPathAsync(configPath: string): Promise<{
 }> {
 	try {
 		const stats = await fsPromises.stat(configPath);
+		// Issue #3354 (AC4, plan D2): async twin of the non-regular-file guard.
+		if (!stats.isFile()) {
+			loaderWarn(
+				`[opencode-swarm] Config path is not a regular file: ${configPath}`,
+			);
+			loaderWarn(
+				'[opencode-swarm] ⚠️ SECURITY: Config path is not a regular file. Falling back to safe defaults with guardrails ENABLED.',
+			);
+			return { config: null, fileExisted: true, hadError: true };
+		}
 		if (stats.size > MAX_CONFIG_FILE_BYTES) {
-			advisoryWarn(
+			loaderWarn(
 				`[opencode-swarm] Config file too large (max 100 KB): ${configPath}`,
 			);
-			advisoryWarn(
+			loaderWarn(
 				'[opencode-swarm] ⚠️ SECURITY: Config file exceeds size limit. Falling back to safe defaults with guardrails ENABLED.',
 			);
 			return { config: null, fileExisted: true, hadError: true };
 		}
+		rawConfigReadAttempts += 1;
 		const content = await fsPromises.readFile(configPath, 'utf-8');
 		if (content.length > MAX_CONFIG_FILE_BYTES) {
-			advisoryWarn(
+			loaderWarn(
 				`[opencode-swarm] Config file too large after read (max 100 KB): ${configPath}`,
 			);
-			advisoryWarn(
+			loaderWarn(
 				'[opencode-swarm] ⚠️ SECURITY: Config file exceeds size limit. Falling back to safe defaults with guardrails ENABLED.',
 			);
 			return { config: null, fileExisted: true, hadError: true };
@@ -1299,10 +1542,10 @@ async function loadRawConfigFromPathAsync(configPath: string): Promise<{
 			rawConfig === null ||
 			Array.isArray(rawConfig)
 		) {
-			advisoryWarn(
+			loaderWarn(
 				`[opencode-swarm] Invalid config at ${configPath}: expected an object`,
 			);
-			advisoryWarn(
+			loaderWarn(
 				'[opencode-swarm] ⚠️ SECURITY: Config format invalid. Falling back to safe defaults with guardrails ENABLED.',
 			);
 			return { config: null, fileExisted: true, hadError: true };
@@ -1317,7 +1560,7 @@ async function loadRawConfigFromPathAsync(configPath: string): Promise<{
 		if (code === 'ENOENT') {
 			return { config: null, fileExisted: false, hadError: false };
 		}
-		advisoryWarn(
+		loaderWarn(
 			`[opencode-swarm] Failed to load config from ${configPath}:`,
 			error instanceof Error ? error.message : String(error),
 		);
@@ -1385,7 +1628,7 @@ export function loadAgentPrompt(agentName: string): {
 		try {
 			result.prompt = fs.readFileSync(promptPath, 'utf-8');
 		} catch (error) {
-			advisoryWarn(
+			loaderWarn(
 				`[opencode-swarm] Error reading prompt file ${promptPath}:`,
 				error instanceof Error ? error.message : String(error),
 			);
@@ -1398,7 +1641,7 @@ export function loadAgentPrompt(agentName: string): {
 		try {
 			result.appendPrompt = fs.readFileSync(appendPromptPath, 'utf-8');
 		} catch (error) {
-			advisoryWarn(
+			loaderWarn(
 				`[opencode-swarm] Error reading append prompt ${appendPromptPath}:`,
 				error instanceof Error ? error.message : String(error),
 			);
