@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.201.2",
+  "tagCommit": "d71e5aea9ca45d2b0b7c68c068886a3d4992af48",
+  "targetCommitish": "d71e5aea9ca45d2b0b7c68c068886a3d4992af48",
+  "releaseBodySha256": "24bdffa536ffd28a17a5246e047d4ce8f2db7b391f5c7b9e801f098ee4acbdc6",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 3,
+      "path": "docs/releases/pending/3105-3354-3355-3356-config-loader-sdd-hardening.md",
+      "sha256": "8f288e0584210b3be33ec4fdf738625ed1ecaf357939d17d99d297ed8f43bcd5"
+    },
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/3120-3396-guardrail-trust-hardening.md",
+      "sha256": "2146f945969211bdddc661cfac0381cf28782ed0e75232abf36587b569426095"
+    },
+    {
+      "prNumber": null,
+      "order": 2,
+      "path": "docs/releases/pending/receipt-task-outcome-fidelity.md",
+      "sha256": "57eb969fea82420f9fb516fbeefe7e94f66c6065dd565fb51607d7d4553eecf9"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/v2-lane-session-parent-move.md",
+      "sha256": "9240f3c925e6bde4cd75f423f2d5e7468af8558d5327e40a578de6fb13b0908b"
+    }
+  ]
+}
