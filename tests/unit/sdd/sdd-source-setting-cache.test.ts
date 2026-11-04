@@ -86,8 +86,18 @@ describe('#3354 AC6: unchanged config files are not re-read (mtime-keyed cache)'
 			JSON.stringify({ sdd: { source: 'speckit' } }) + ' ',
 		);
 
+		(
+			_internals as { resetRawConfigReadAttempts?: () => void }
+		).resetRawConfigReadAttempts?.();
 		const r1 = readSddSourceSetting(projDir);
 		expect(r1.source).toBe('speckit');
+		// B2-M2/PRR-002: the counter must be LIVE (the first call reads the files)
+		// so the no-re-read assertion below actually discriminates.
+		expect(
+			(
+				_internals as { getRawConfigReadAttempts?: () => number }
+			).getRawConfigReadAttempts?.(),
+		).toBeGreaterThan(0);
 
 		// Same byte length, new content, mtime (and atime) pinned to the
 		// previously stat'ed values: an mtime+size-keyed cache must keep r1's
@@ -102,8 +112,18 @@ describe('#3354 AC6: unchanged config files are not re-read (mtime-keyed cache)'
 		expect(fs.statSync(cfgPath).size).toBe(st.size);
 		fs.utimesSync(cfgPath, st.atime, st.mtime);
 
+		const readsAfterFirst =
+			(
+				_internals as { getRawConfigReadAttempts?: () => number }
+			).getRawConfigReadAttempts?.() ?? 0;
 		const r2 = readSddSourceSetting(projDir);
 		expect(r2.source).toBe(r1.source);
+		// AC6 directly observed: the unchanged second call does not re-read.
+		expect(
+			(
+				_internals as { getRawConfigReadAttempts?: () => number }
+			).getRawConfigReadAttempts?.(),
+		).toBe(readsAfterFirst);
 
 		// A strictly later mtime (original + 5 s, so coarse-granularity
 		// filesystems cannot fold it back onto the preserved timestamp) must
@@ -166,5 +186,40 @@ describe('#3354 AC6: unchanged config files are not re-read (mtime-keyed cache)'
 		process.env.XDG_CONFIG_HOME = xdgEmpty;
 		const fromEmpty = readSddSourceSetting(projDir);
 		expect(fromEmpty.source).toBeUndefined();
+	});
+
+	test('PRR-001: the 64-entry FIFO bound actually evicts (oldest directory re-reads)', () => {
+		const counter = _internals as {
+			resetRawConfigReadAttempts?: () => void;
+			getRawConfigReadAttempts?: () => number;
+		};
+		// 65 distinct project roots, each with a distinct config: the first
+		// root must be evicted by the time the 65th is cached, observable as a
+		// re-read (counter increase) while the most-recent root stays cached.
+		const roots: string[] = [];
+		for (let i = 0; i < 65; i += 1) {
+			const dir = path.join(tempDir, `fifo-${String(i).padStart(2, '0')}`);
+			fs.mkdirSync(path.join(dir, '.opencode'), { recursive: true });
+			fs.writeFileSync(
+				path.join(dir, '.opencode', 'opencode-swarm.json'),
+				JSON.stringify({ sdd: { source: 'speckit' } }),
+				'utf-8',
+			);
+			roots.push(dir);
+		}
+		counter.resetRawConfigReadAttempts?.();
+		const baseline = counter.getRawConfigReadAttempts?.() ?? 0;
+		for (const dir of roots) readSddSourceSetting(dir);
+		const afterAll = counter.getRawConfigReadAttempts?.() ?? 0;
+		// All 65 roots missed (1 read each — this fixture has no user config,
+		// so only the project file is read per root).
+		expect(afterAll).toBeGreaterThan(baseline + 64);
+		// Warm: the most recent root does not re-read.
+		const warmMark = counter.getRawConfigReadAttempts?.() ?? 0;
+		readSddSourceSetting(roots[64]);
+		expect(counter.getRawConfigReadAttempts?.() ?? 0).toBe(warmMark);
+		// Evicted: root 0 (oldest) re-reads after the cache wrapped past it.
+		readSddSourceSetting(roots[0]);
+		expect(counter.getRawConfigReadAttempts?.() ?? 0).toBeGreaterThan(warmMark);
 	});
 });

@@ -92,7 +92,9 @@ describe('#3354 AC5: the SDD resolver ignores a project config the full loader d
 		// win the selection. At base the resolver reports 'speckit' from the
 		// very file the validated loader threw away.
 		const selection = resolveSddSourceSelection(projDir);
-		expect(selection?.source).not.toBe('speckit');
+		// PRR-004: pin the exact post-fix value — a silently-unresolving
+		// resolver (undefined) must not satisfy this leg.
+		expect(selection?.source).toBeUndefined();
 	});
 
 	test('preserving leg (critic round-1 finding 1): a stripped_keys-RECOVERED project config keeps supplying sdd.source', () => {
@@ -228,7 +230,9 @@ describe('#3354 AC5: the SDD resolver ignores a project config the full loader d
 		);
 
 		const selection = resolveSddSourceSelection(projDir);
-		expect(selection?.source).not.toBe('speckit');
+		// PRR-004: pin the exact post-fix value — a silently-unresolving
+		// resolver (undefined) must not satisfy this leg.
+		expect(selection?.source).toBeUndefined();
 	});
 
 	test('no-new-warnings leg (critic round-2 MINOR): readSddSourceSetting is diagnostic-free', () => {

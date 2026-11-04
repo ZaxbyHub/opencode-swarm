@@ -184,7 +184,6 @@ describe('Config Doctor Service', () => {
 			expect(result.findings[0]!.id).toBe('out-of-bounds-retry-limit');
 			expect(result.findings[0]!.proposedFix?.value).toBe(10);
 		});
-
 		it('should detect unknown swarm agents', () => {
 			const config = createTestConfigObj({
 				swarms: {
@@ -203,7 +202,6 @@ describe('Config Doctor Service', () => {
 				true,
 			);
 		});
-
 		it('should detect when swarms is a non-object type', () => {
 			// When swarms is set to a non-object value, the doctor should emit
 			// a type-mismatch finding (consistent with pipeline/gates/other
@@ -224,7 +222,6 @@ describe('Config Doctor Service', () => {
 				`'swarms' must emit a finding when set to a non-object value (got string)`,
 			).toBeGreaterThan(0);
 		});
-
 		it('should surface invalid raw gates subsection after loader sanitization', () => {
 			createTestConfig(tempDir, {
 				max_iterations: 7,
@@ -1341,10 +1338,13 @@ describe('Config Doctor Service', () => {
 			const savedXdg = process.env.XDG_CONFIG_HOME;
 			process.env.XDG_CONFIG_HOME = path.join(tempDir, '.config');
 			try {
+				// PRR-003
 				const { userConfigPath, projectConfigPath } = getConfigPaths(tempDir);
-				expect(userConfigPath).toContain('.config');
-				expect(userConfigPath).toContain('opencode');
+				expect(userConfigPath).toContain('opencode'); // pinned branch
 				expect(projectConfigPath).toContain('.opencode');
+				// PRR-003: the XDG-UNSET homedir default still lands in .config.
+				delete process.env.XDG_CONFIG_HOME;
+				expect(getConfigPaths(tempDir).userConfigPath).toContain('.config');
 			} finally {
 				if (savedXdg === undefined) delete process.env.XDG_CONFIG_HOME;
 				else process.env.XDG_CONFIG_HOME = savedXdg;

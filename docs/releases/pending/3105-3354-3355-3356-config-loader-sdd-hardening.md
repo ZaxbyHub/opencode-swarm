@@ -25,7 +25,9 @@
 - **SDD source reads are cached per directory keyed by the config files' mtime+size** (#3354):
   unchanged files are no longer re-read on every gate call. The freshness contract is
   intentional: mtime+size is the invalidation signal (the model build tools use); a content
-  change that preserves both is invisible until the next real mtime change. Bounded
+  change that preserves both is invisible until the next real mtime change — within that
+  window the resolver can briefly serve the previous source while the full loader already
+  accepts the new one; the divergence self-corrects at the next real mtime change. Bounded
   (64 directories, FIFO).
 - **Host user configs no longer leak into test suites** (#3355). The bun test preload now
   neutralizes `XDG_CONFIG_HOME` unconditionally (the original value is stashed in

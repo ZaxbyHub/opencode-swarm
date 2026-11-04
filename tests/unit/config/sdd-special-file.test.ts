@@ -88,11 +88,26 @@ afterEach(() => {
 
 describe('#3354 AC4: non-regular files at config paths are never opened', () => {
 	test('leg 1 (all platforms): a DIRECTORY at the project config path is not opened — no EISDIR read error, load still fail-secure', () => {
+		// Liveness positive control (PRR-002): the counter counts a REAL
+		// regular-file read — otherwise the zero assertion below could pass
+		// vacuously with a counter that never counts.
+		const liveDir = path.join(tempDir, 'project-live');
+		fs.mkdirSync(path.join(liveDir, '.opencode'), { recursive: true });
+		fs.writeFileSync(
+			path.join(liveDir, '.opencode', 'opencode-swarm.json'),
+			JSON.stringify({}),
+			'utf-8',
+		);
+		_internals.resetRawConfigReadAttempts?.();
+		loadPluginConfigWithMeta(liveDir);
+		expect(_internals.getRawConfigReadAttempts?.() ?? 0).toBeGreaterThan(0);
+
 		const projDir = path.join(tempDir, 'project');
 		const cfgPath = path.join(projDir, '.opencode', 'opencode-swarm.json');
 		fs.mkdirSync(cfgPath, { recursive: true }); // cfgPath is a DIRECTORY
 		expect(fs.statSync(cfgPath).isDirectory()).toBe(true);
 
+		_internals.resetRawConfigReadAttempts?.();
 		const meta = loadPluginConfigWithMeta(projDir);
 		const warnings = [...getDeferredWarnings()];
 
@@ -122,7 +137,10 @@ describe('#3354 AC4: non-regular files at config paths are never opened', () => 
 		const cfgPath = path.join(projDir, '.opencode', 'opencode-swarm.json');
 		fs.mkdirSync(cfgPath, { recursive: true });
 
+		_internals.resetRawConfigReadAttempts?.();
 		const meta = await loadPluginConfigWithMetaAsync(projDir);
+		// B3-M2: the async no-open claim is observed through the same counter.
+		expect(_internals.getRawConfigReadAttempts?.() ?? 0).toBe(0);
 		const warnings = [...getDeferredWarnings()];
 		expect(warnings.filter((w) => w.includes('EISDIR'))).toEqual([]);
 		expect(meta.configHadErrors).toBe(true);
@@ -145,6 +163,9 @@ describe('#3354 AC4: non-regular files at config paths are never opened', () => 
 
 		attempts.resetRawConfigReadAttempts?.();
 		loadPluginConfigWithMeta(projDir);
+		expect(attempts.getRawConfigReadAttempts?.()).toBe(0);
+		// And the SDD read on the same directory stays at zero too.
+		readSddSourceSetting(projDir);
 		expect(attempts.getRawConfigReadAttempts?.()).toBe(0);
 	});
 

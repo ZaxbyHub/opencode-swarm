@@ -92,6 +92,11 @@ describe('#3105 full_auto.locked must survive every loader recovery branch', () 
 
 		const meta = loadPluginConfigWithMeta(projectDir());
 		expect(meta.recovery).toBe('user_only');
+		// B3-M1: assert the lock DIRECTLY — the configHadErrors arm of the helper
+		// below is a fail-closed alternative, not a substitute for preservation.
+		expect(
+			(meta.config as { full_auto?: { locked?: boolean } }).full_auto?.locked,
+		).toBe(true);
 		expect(lockPreservedOrErrored(meta)).toBe(true);
 		// Critic round-1 finding 3: valid NON-lock user settings must survive the
 		// lock-preservation overlay byte-identically.
@@ -110,6 +115,10 @@ describe('#3105 full_auto.locked must survive every loader recovery branch', () 
 		const meta = loadPluginConfigWithMeta(projectDir());
 		expect(meta.recovery).toBe('user_only');
 		expect(meta.removedKeys).toContain('checkpoint.totallyBogusKey');
+		// B3-M1: direct lock assertion (see leg a).
+		expect(
+			(meta.config as { full_auto?: { locked?: boolean } }).full_auto?.locked,
+		).toBe(true);
 		expect(lockPreservedOrErrored(meta)).toBe(true);
 	});
 
@@ -119,6 +128,10 @@ describe('#3105 full_auto.locked must survive every loader recovery branch', () 
 
 		const meta = loadPluginConfigWithMeta(projectDir());
 		expect(meta.recovery).toBe('guardrails_defaults');
+		// B3-M1: direct lock assertion (see leg a).
+		expect(
+			(meta.config as { full_auto?: { locked?: boolean } }).full_auto?.locked,
+		).toBe(true);
 		expect(lockPreservedOrErrored(meta)).toBe(true);
 	});
 
@@ -162,6 +175,19 @@ describe('#3105 full_auto.locked must survive every loader recovery branch', () 
 
 		const meta = loadPluginConfigWithMeta(projectDir());
 		expect(meta.recovery).toBe('stripped_keys');
+		expect(
+			(meta.config as { full_auto?: { locked?: boolean } }).full_auto?.locked,
+		).toBe(true);
+		expect(lockPreservedOrErrored(meta)).toBe(true);
+	});
+
+	test('(h) B2-M1: a VALID user-level lock survives user_only recovery when the project config is the invalid side', () => {
+		writeProject(JSON.stringify({ full_auto: { locked: true, mode: 123 } }));
+		writeUser(JSON.stringify({ full_auto: { locked: true } }));
+
+		const meta = loadPluginConfigWithMeta(projectDir());
+		expect(meta.recovery).toBe('user_only');
+		expect(meta.configHadErrors).toBe(false);
 		expect(
 			(meta.config as { full_auto?: { locked?: boolean } }).full_auto?.locked,
 		).toBe(true);
