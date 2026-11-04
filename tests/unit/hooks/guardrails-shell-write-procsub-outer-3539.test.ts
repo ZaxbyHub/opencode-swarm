@@ -207,12 +207,70 @@ describe('gate: malformed residuals stay blocked (fail-closed)', () => {
 		await expectDenied('tee >(cat > src/ok', /failed to parse/);
 	});
 	test('a quoted procsub is a literal operand (parse OK), judged as a path', async () => {
-		// `tee '>(cat > src/ok)'` writes a file literally named `>(cat > src/ok)`
-		// at the workspace root — outside scope src/ — so it DENIES as a write.
+		// `tee '>(cat > src/ok)'` hands tee a file literally NAMED
+		// `>(cat > src/ok)`. That name contains `/`, its intermediate
+		// directories do not exist, so real bash's open fails ENOENT and
+		// nothing is written — the DENY is the conservative reading of the
+		// static path (it resolves outside scope src/), not a claim that a
+		// write lands anywhere.
 		await expectDenied("tee '>(cat > src/ok)'", /^WRITE BLOCKED/);
 	});
 	test('a comment procsub never masks and never blocks', async () => {
 		await expectAdmitted('true # >(cat > ../esc.txt)');
+	});
+});
+
+describe('gate: operator boundaries — <<( / >>( are bash errors, >>>( runs (review round 1)', () => {
+	// Ground truth (executed bash 5.x, recorded in the trace): bash lexes
+	// redirect operators with maximal munch, and only a `>`/`<` that STANDS
+	// ALONE before `(` introduces a process substitution.
+	test('cat <<(echo hi) is a parse error block (bash rc=2: heredoc + `(`)', async () => {
+		await expectDenied('cat <<(echo hi)', /failed to parse/);
+	});
+	test('cat >>(echo hi) is a parse error block (bash rc=2: append + `(`)', async () => {
+		await expectDenied('cat >>(echo hi)', /failed to parse/);
+	});
+	test('cat <<<(echo hi) is a parse error block (bash rc=2: here-string + `(`)', async () => {
+		await expectDenied('cat <<<(echo hi)', /failed to parse/);
+	});
+	test('cat >>>(cat > src/ok) is analyzed in scope — `>>` then a glued >(…): bash runs the body', () => {
+		// Detector-level pin (gate-level admits of exotic shapes depend on
+		// the host sandbox arm, whose weak-PowerShell wrapper is unreliable
+		// without the native Windows runner — same caveat as the `cat <(ls)`
+		// leg above). The trailing `>` stands alone before `(`, so the span
+		// masks; the `>>` append lands on the /dev/null placeholder
+		// (sink-exempt) and the inner src/ok write is judged in scope —
+		// an ADMIT at the write gate.
+		const analysis = detectPosixWrites('cat >>>(cat > src/ok)');
+		expect(analysis.parseError).toBeUndefined();
+		expect(analysis.residualCommand).toBe('cat >>/dev/null');
+		expect(analysis.writes.map((w) => w.path)).toEqual(['src/ok']);
+	});
+	test('cat >>>(cat > ../esc.txt) DENIES — the body bash runs is judged', async () => {
+		await expectDenied('cat >>>(cat > ../esc.txt)', /^WRITE BLOCKED/);
+	});
+	test('cat ><(cat > src/f) is analyzed in scope — `>` then <(…): redirect-to-procsub runs', () => {
+		// Detector-level for the same host-sandbox reason; the write gate
+		// admits: the `<(…)` span masks behind the bare `>` redirect.
+		const analysis = detectPosixWrites('cat ><(cat > src/f)');
+		expect(analysis.parseError).toBeUndefined();
+		expect(analysis.writes.map((w) => w.path)).toEqual(['src/f']);
+	});
+	test('an &>-shaped procsub is a parse error block (bash rc=2: `&>` + `(`)', async () => {
+		await expectDenied('cat &>(echo hi)', /failed to parse/);
+	});
+
+	// The `<<<` + procsub OVER-BLOCK class, pinned deliberately: real bash
+	// runs the body (`echo hi | tee >(cat > f) <<< g` writes f — executed
+	// ground truth), but the masked residual still contains `<<< hi`, which
+	// bash-parser cannot parse, so the line keeps the fail-closed
+	// parse-error block. Improving this means teaching the residual parse
+	// here-strings — a deliberate future change, not a silent drift.
+	test('procsub + here-string keeps the parse-error block (residual defeats bash-parser)', async () => {
+		await expectDenied(
+			'tee >(cat > src/f) <<< hi; echo x > src/f',
+			/failed to parse/,
+		);
 	});
 });
 

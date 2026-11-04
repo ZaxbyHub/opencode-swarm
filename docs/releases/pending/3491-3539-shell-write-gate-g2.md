@@ -69,8 +69,13 @@
   sink-device exemption; a procsub operand in a `cp`/`truncate`
   destination position emits a bogus `/dev/null` write (fail-closed deny)
   rather than modeling the pipe.
-- `<<(x)`/`>>(x)`/`>&(x)`/`> (x)` are genuine bash syntax errors: they
-  keep the parse-error block (never masked), matching real bash rc=2.
+- Operator boundaries follow bash's greedy redirect lexing (executed
+  ground truth): `<<(x)`, `>>(x)`, `<<<(x)`, `<>(x)`, `>&(x)`, `<&(x)`,
+  `>|(x)` and `&>(x)`/`&>>(x)` are operator + `(` — genuine bash syntax
+  errors (rc=2, nothing runs) that keep the parse-error block (never
+  masked), while `>>>(x)` is `>>` + a glued `>(x)` whose body bash RUNS
+  (masked and analyzed, like `><(x)` = `>` + `<(x)` and the escaped-`&`
+  midword `\&>(x)`). A spaced `> (x)` never masks.
 - An unbalanced procsub span or a masked residual that still fails to
   parse hard-blocks the line even when the legacy fallback found writes —
   deliberate fail-closed supersedure of the old partial-clear behavior

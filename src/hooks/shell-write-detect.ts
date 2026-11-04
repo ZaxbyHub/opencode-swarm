@@ -1112,16 +1112,53 @@ interface MaskedProcSubSpan {
 const PROC_SUB_PLACEHOLDER = '/dev/null';
 
 /**
+ * The length of the bash redirect operator starting at `raw[start]` (a `<`
+ * or `>`), by maximal munch: `<<<` (here-string), `<<-`, `<<`, `>>`, `<>`,
+ * `>&`, `<&`, `>|` are multi-character operators; a bare `>`/`<` is length
+ * 1. `>>>` is NOT an operator — bash lexes `>>` then a separate `>` — which
+ * is exactly why `>>>(cmd)` masks its `>(…)` span while `>>(cmd)` masks
+ * nothing (#3539 W5 review round 1; boundaries verified by executed bash
+ * 5.x ground truth).
+ */
+function bashRedirectOperatorLength(raw: string, start: number): number {
+	const c = raw[start];
+	const next = raw[start + 1] ?? '';
+	if (c === '<') {
+		if (next === '<') {
+			const third = raw[start + 2] ?? '';
+			if (third === '<' || third === '-') return 3;
+			return 2;
+		}
+		if (next === '>' || next === '&') return 2;
+		return 1;
+	}
+	if (next === '>' || next === '&' || next === '|') return 2;
+	return 1;
+}
+
+/**
  * Mask every UNQUOTED, UNESCAPED, balanced `>(…)`/`<(…)` span of a
  * parse-failing POSIX command (#3539 W5; RC-5).
  *
  * The scanner is quote-aware (single/double quotes, backslash escapes with
  * the bash double-quote escape set) and comment-aware (a `#` at a word start
  * begins a comment; `>(` inside a comment or quotes is never masked — real
- * bash does not run it). Only GLUED `>(` / `<(` spans mask (bash reads
- * `> (x)`, `>>(x)`, `<<(`, `>&(` as syntax errors, verified against bash 5.x:
- * masking those would fabricate a parse the real shell rejects). Parenthesis
- * nesting inside the span is counted.
+ * bash does not run it).
+ *
+ * OPERATOR BOUNDARIES (#3539 W5 review round 1): a process substitution is
+ * introduced only by a `>` or `<` that STANDS ALONE as an operator
+ * immediately before `(`. The scanner consumes each redirect operator with
+ * bash's maximal munch before deciding, so (all executed-verified against
+ * bash 5.x): `<<(x)`, `>>(x)`, `<<<(x)`, `<>(x)`, `>&(x)`, `<&(x)`, `>|(x)`
+ * and `&>(x)`/`&>>(x)` are operator + `(` — genuine bash syntax errors
+ * (rc=2, nothing runs) that keep the fail-closed parse-error block (no span
+ * masks, so the line still fails to parse), while `>>>(x)` is `>>` plus a
+ * glued `>(x)` whose body bash RUNS (the span masks and is analyzed), and
+ * `><(x)` is `>` plus `<(x)` (redirect-to-procsub; the span masks). An
+ * escaped `\&` before `>(x)` is word content, not the `&>` operator — the
+ * backslash branch consumed it before the `>` is considered, so
+ * `\&>(cmd)` masks too. A spaced `> (x)` never masks (not glued).
+ * Parenthesis nesting inside a masked span is counted.
  *
  * Returns null — masking FAILED, the caller keeps the fail-closed
  * parseError — when any unquoted procsub span is unbalanced, when the scan
@@ -1176,11 +1213,26 @@ function maskProcSubSpans(
 			i = newline === -1 ? command.length : newline;
 			continue;
 		}
-		if ((ch === '>' || ch === '<') && command[i + 1] === '(') {
-			// Only a glued `>(`/`<(` is a process substitution. `>>`/`<<`/
-			// `>&`/`<>`/`>|` operators consume the character pair first, so
-			// a following `(` belongs to their operand word (a bash syntax
-			// error the residual parse must keep failing on, not a mask).
+		// `&>` / `&>>` (redirect both streams) is one bash operator: the `>`
+		// belongs to it, so a `(` after it is operator + `(` — a syntax
+		// error, never a procsub. An ESCAPED `\&` never reaches here (the
+		// backslash branch consumed the pair), so `\&>(cmd)` still masks.
+		if (ch === '&' && command[i + 1] === '>') {
+			i += command[i + 2] === '>' ? 3 : 2;
+			continue;
+		}
+		if (ch === '>' || ch === '<') {
+			// Operator-boundary aware (#3539 W5 review round 1): consume the
+			// maximal redirect operator first; only a LENGTH-1 operator
+			// glued to `(` introduces a process substitution. This keeps
+			// `<<(`/`>>(`/`<<<(`/`<>`/`>&`/`>|` + `(` unmasked (bash rc=2)
+			// while `>>>(` still masks its trailing `>(…)` and `><(` masks
+			// its `<(…)`.
+			const opLength = bashRedirectOperatorLength(command, i);
+			if (opLength !== 1 || command[i + 1] !== '(') {
+				i += opLength;
+				continue;
+			}
 			const op: '>' | '<' = ch === '>' ? '>' : '<';
 			const bodyStart = i + 2;
 			let depth = 1;
