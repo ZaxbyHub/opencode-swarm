@@ -141,13 +141,14 @@ function dispatchInputs(): Record<string, WorkflowInput> {
 
 /**
  * PINNED SUBSTRING (C7 verify gate): `VERIFY_FILES` — the env name that
- * carries inputs.verify. The verify step must reject an empty (or out-of-band
- * 1..8) list BEFORE the per-file loop runs; the guard is pinned as a line
- * that ties VERIFY_FILES to an emptiness/count-bound check. Removing exactly
- * this guard is mutation probe M8, which must fail this suite.
+ * carries inputs.verify. The verify step must reject an empty list BEFORE the
+ * per-file loop runs; the guard pins the LOWER bound (`-lt 1`) explicitly on
+ * the VERIFY_FILES line — the upper bound alone is insufficient (an OR-shaped
+ * emptiness-or-cap pin survived mutation probe M8; the strengthening requires
+ * the emptiness arm specifically). Removing the emptiness bound is M8, which
+ * must fail this suite.
  */
-const VERIFY_EMPTY_GUARD =
-	/VERIFY_FILES[^\n]*(?:-z\b|empty|-eq 0|== 0|-lt 1|-gt 8)|(?:-z\b|empty)[^\n]*VERIFY_FILES/i;
+const VERIFY_EMPTY_GUARD = /VERIFY_FILES[^\n]*-lt 1/i;
 
 describe('dependency-bump workflow contract (frozen check C7, trace 3501-3285-3527)', () => {
 	test('trigger surface: workflow_dispatch only — no pull_request, push, schedule, issues, pull_request_target, or workflow_run keys', () => {

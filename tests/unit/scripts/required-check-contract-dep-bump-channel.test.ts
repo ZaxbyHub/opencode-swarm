@@ -209,12 +209,21 @@ function buildBranchProvenanceFixture() {
 		trailerMessage(DEP_BUMP_TRAILERS.slice(0, 3)),
 		true,
 	);
+	// Mutation M3 closes here: a commit missing the CHANNEL trailer
+	// specifically (every other trailer present) must be denied.
+	const missingChannelTrailer = leg(
+		trailerMessage(
+			DEP_BUMP_TRAILERS.filter((line) => !line.startsWith('X-Dep-Bump-Channel:')),
+		),
+		true,
+	);
 	return {
 		root,
 		base,
 		validBot,
 		humanSecond,
 		missingTrailer,
+		missingChannelTrailer,
 		bothAdvisoryAndReason,
 		noAdvisoryOrReason,
 	};
@@ -396,6 +405,7 @@ describe('spoof bounds (C2 spoof)', () => {
 			expect(branchOk(fixture.humanSecond)).toBe(false);
 			expect(branchOk(fixture.base)).toBe(false);
 			expect(commitOk(fixture.missingTrailer)).toBe(false);
+			expect(commitOk(fixture.missingChannelTrailer)).toBe(false);
 			expect(commitOk(fixture.bothAdvisoryAndReason)).toBe(false);
 			expect(commitOk(fixture.noAdvisoryOrReason)).toBe(false);
 		} finally {
