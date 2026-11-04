@@ -1701,8 +1701,13 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 					// capability against (#3347 AC3 keeps the eval-block pins
 					// green; widening for orchestrator roles is the issue's open
 					// maintainer decision).
+					// #3491 W1: a WITHDRAWN eval (unresolved marker - the
+					// directory-state walk could not stand behind any working
+					// directory) denies BEFORE the routing above and before any
+					// evalDirectory ?? shellDirectory fallback.
 					if (
 						write.original.capability === true &&
+						write.unresolved !== true &&
 						(isImmutableNonWriter ||
 							(declaredScope !== null &&
 								declaredScope !== undefined &&
