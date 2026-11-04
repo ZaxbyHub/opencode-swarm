@@ -229,7 +229,10 @@ describe('dependency-bump workflow contract (frozen check C7, trace 3501-3285-35
 		const identity = stepIndexContaining(
 			'41898282+github-actions[bot]@users.noreply.github.com',
 		);
-		const commit = stepIndexContaining('git commit');
+		// The commit step builds a COMMIT_ARGS array (impl-review blocker 1
+		// removed the literal 'git commit' text); the argv construction is the
+		// commit site and the identity must precede it.
+		const commit = stepIndexContaining('COMMIT_ARGS=(commit -m');
 		expect(switchBranch).toBeGreaterThanOrEqual(0);
 		expect(add).toBeGreaterThanOrEqual(0);
 		expect(identity).toBeGreaterThanOrEqual(0);
