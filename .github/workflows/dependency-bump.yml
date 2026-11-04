@@ -1,0 +1,324 @@
+name: Dependency bump channel
+
+# Issue #3285 / #3501 route (a): the guard-sanctioned dependency-bump channel.
+# A maintainer-initiated workflow_dispatch produces exactly one
+# github-actions[bot]-authored commit on a `dep-bump--<pkg>--<hash8>` branch
+# and opens the PR through which package.json may legally change. The
+# release-owner guard authorizes that PR under the
+# DEPENDENCY_BUMP_AUTOMATION_EXCEPTION arm (scripts/check-required-check-contract.ts).
+# Decision record: https://github.com/ZaxbyHub/opencode-swarm/issues/3501#issuecomment-6637732864
+#
+# Security posture: dispatch inputs NEVER interpolate into run: blocks — they
+# travel through env: and are quoted as "$VAR". Every checkout carries
+# persist-credentials: false; push/PR auth is set up explicitly in the final
+# step with the job token.
+on:
+  workflow_dispatch:
+    inputs:
+      package:
+        description: 'Package to bump (npm name)'
+        required: true
+        type: string
+      version:
+        description: 'Version specifier to install (e.g. 4.6.7 or ^4.9.0)'
+        required: true
+        type: string
+      advisory:
+        description: 'GHSA id or advisory URL (exactly one of advisory/reason)'
+        required: false
+        type: string
+      reason:
+        description: 'Non-security justification (exactly one of advisory/reason)'
+        required: false
+        type: string
+      dependency_kind:
+        description: 'Which dependency map the package belongs to'
+        required: false
+        default: 'dependencies'
+        type: choice
+        options:
+          - dependencies
+          - devDependencies
+      save_exact:
+        description: 'Pin the exact version (no caret range)'
+        required: false
+        default: false
+        type: boolean
+      pin_specs:
+        description: 'JSON array (<=6) of {file,from,to} literal pin replacements'
+        required: false
+        default: ''
+        type: string
+      regen:
+        description: 'Repository regeneration to run after the bump'
+        required: false
+        default: 'none'
+        type: choice
+        options:
+          - none
+          - generate-config-schema
+      verify:
+        description: 'Comma list (1..8) of tracked tests/**.test.ts files to run fail-closed'
+        required: true
+        type: string
+      note:
+        description: 'Free-form note for the PR body'
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  dependency-bump:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PACKAGE: ${{ inputs.package }}
+      VERSION: ${{ inputs.version }}
+      ADVISORY: ${{ inputs.advisory }}
+      REASON: ${{ inputs.reason }}
+      DEPENDENCY_KIND: ${{ inputs.dependency_kind }}
+      SAVE_EXACT: ${{ inputs.save_exact }}
+      PIN_SPECS: ${{ inputs.pin_specs }}
+      REGEN: ${{ inputs.regen }}
+      VERIFY: ${{ inputs.verify }}
+      NOTE: ${{ inputs.note }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.3.13"
+
+      - name: Validate inputs fail-closed
+        shell: bash
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$1"; exit 1; }
+          [[ "$PACKAGE" =~ ^[a-z0-9@/._~-]+$ ]] || fail "package charset rejected"
+          [[ "$VERSION" =~ ^[a-zA-Z0-9.^~+*-]+$ ]] || fail "version charset rejected"
+          if [[ -n "$ADVISORY" && -n "$REASON" ]]; then fail "advisory and reason are mutually exclusive"; fi
+          if [[ -z "$ADVISORY" && -z "$REASON" ]]; then fail "exactly one of advisory or reason is required"; fi
+          [[ "${#ADVISORY}" -le 200 && "${#REASON}" -le 200 ]] || fail "advisory/reason too long"
+          if printf '%s' "$ADVISORY$REASON" | LC_ALL=C grep -q $'[\r\n]'; then fail "advisory/reason must not contain CR/LF"; fi
+          [[ "$DEPENDENCY_KIND" == "dependencies" || "$DEPENDENCY_KIND" == "devDependencies" ]] || fail "dependency_kind rejected"
+          if [[ -n "$PIN_SPECS" ]]; then
+            [[ "${#PIN_SPECS}" -le 8192 ]] || fail "pin_specs exceeds the 8 KiB bound"
+            node -e '
+              const specs = JSON.parse(process.env.PIN_SPECS ?? "");
+              if (!Array.isArray(specs) || specs.length < 1 || specs.length > 6) process.exit(1);
+              const pathRe = /^(tests|src|scripts|docs)\/[A-Za-z0-9_.\/-]+$/;
+              for (const spec of specs) {
+                if (typeof spec !== "object" || spec === null) process.exit(1);
+                for (const field of ["file", "from", "to"]) {
+                  if (typeof spec[field] !== "string") process.exit(1);
+                }
+                if (spec.file.length === 0 || spec.from.length === 0) process.exit(1);
+                if (!pathRe.test(spec.file) || spec.file.includes("..")) process.exit(1);
+              }
+            ' || fail "pin_specs must be a JSON array of <=6 {file,from,to} with valid contained paths"
+          fi
+          # verify list: non-empty, <=8 tracked test files (VERIFY_FILES guard —
+          # an empty or over-cap list refuses to run anything).
+          IFS=',' read -r -a VERIFY_FILES <<< "$VERIFY"
+          [[ ${#VERIFY_FILES[@]} -ge 1 && ${#VERIFY_FILES[@]} -le 8 ]] || fail "verify must list 1..8 files"
+          if [[ "$REGEN" == "generate-config-schema" ]]; then
+            VERIFY_FILES+=("tests/unit/scripts/generate-config-schema.test.ts")
+          fi
+          mapfile -t VERIFY_FILES < <(printf '%s\n' "${VERIFY_FILES[@]}" | sed 's/[[:space:]]//g' | awk 'NF' | sort -u)
+          [[ ${#VERIFY_FILES[@]} -ge 1 && ${#VERIFY_FILES[@]} -le 8 ]] || fail "deduped verify must stay within 1..8 files"
+          for f in "${VERIFY_FILES[@]}"; do
+            [[ "$f" =~ ^tests/[A-Za-z0-9_./-]+[.]test[.]ts$ ]] || fail "verify path rejected: $f"
+            git ls-files --error-unmatch "$f" >/dev/null 2>&1 || fail "verify file not tracked: $f"
+          done
+          printf '%s\n' "${VERIFY_FILES[@]}" > "$RUNNER_TEMP/verify-files.txt"
+          # branch identity: dep-bump--<sanitized-pkg>--<hash8 of the canonical request>
+          CANONICAL="$PACKAGE|$VERSION|$DEPENDENCY_KIND|$SAVE_EXACT"
+          HASH8="$(printf '%s' "$CANONICAL" | sha256sum | cut -c1-8)"
+          SANITIZED="$(printf '%s' "$PACKAGE" | tr -c 'a-z0-9' '-' | sed 's/-$//')"
+          BRANCH="dep-bump--${SANITIZED}--${HASH8}"
+          git check-ref-format --branch "refs/heads/$BRANCH" || fail "branch name rejected"
+          printf '%s' "$BRANCH" > "$RUNNER_TEMP/branch.txt"
+
+      - name: Configure bot identity and create the channel branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          BRANCH="$(cat "$RUNNER_TEMP/branch.txt")"
+          git switch -C "$BRANCH"
+
+      - name: Apply the dependency bump
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun install --frozen-lockfile
+          ADD_ARGS=()
+          if [[ "$SAVE_EXACT" == "true" ]]; then ADD_ARGS+=("--exact"); fi
+          if [[ "$DEPENDENCY_KIND" == "devDependencies" ]]; then ADD_ARGS+=("-d"); fi
+          bun add --ignore-scripts "$PACKAGE@$VERSION" "${ADD_ARGS[@]}"
+          # Re-resolve so nested stale lockfile resolutions (duplicate zod
+          # copies etc.) dedupe against the new root pin; harmless otherwise.
+          bun install --force
+          # The consistency gate runs LAST: the final dependency mutation is
+          # always followed by a frozen install.
+          bun install --frozen-lockfile
+
+      - name: Apply pin replacements
+        if: ${{ env.PIN_SPECS != '' }}
+        shell: bash
+        env:
+          PIN_SPECS: ${{ inputs.pin_specs }}
+        run: |
+          set -euo pipefail
+          node scripts/apply-dep-bump-pins.mjs
+
+      - name: Regenerate repository artifacts
+        if: ${{ env.REGEN == 'generate-config-schema' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun run scripts/generate-config-schema.ts
+
+      - name: Complete-diff allowlist gate (pre-verify)
+        shell: bash
+        run: |
+          set -euo pipefail
+          BRANCH="$(cat "$RUNNER_TEMP/branch.txt")"
+          EXPECTED=('package.json' 'bun.lock')
+          if [[ -n "$PIN_SPECS" ]]; then
+            mapfile -t PIN_FILES < <(node -e 'for (const s of JSON.parse(process.env.PIN_SPECS ?? "[]")) console.log(s.file);')
+            EXPECTED+=("${PIN_FILES[@]}")
+          fi
+          if [[ "$REGEN" == "generate-config-schema" ]]; then
+            EXPECTED+=('opencode-swarm.schema.json' 'docs/configuration.md')
+          fi
+          mapfile -t EXPECTED < <(printf '%s\n' "${EXPECTED[@]}" | awk 'NF' | sort -u)
+          mapfile -t DIRTY < <(git status --porcelain | awk '{print $NF}')
+          for path in "${DIRTY[@]}"; do
+            [[ " ${EXPECTED[*]} " == *" $path "* ]] || { echo "::error::unexpected dirty path: $path"; exit 1; }
+          done
+
+      - name: Verify fail-closed (per-file, non-empty)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The empty-list guard lives on THIS step: if the verify list is
+          # empty or over-cap the loop refuses to run anything (an empty run
+          # must never read as a passing verification).
+          mapfile -t VERIFY_FILES < "$RUNNER_TEMP/verify-files.txt"
+          if [[ ${#VERIFY_FILES[@]} -lt 1 || ${#VERIFY_FILES[@]} -gt 8 ]]; then
+            echo "::error::verify list must carry 1..8 files (got ${#VERIFY_FILES[@]})"
+            exit 1
+          fi
+          for file in "${VERIFY_FILES[@]}"; do
+            echo "verifying $file"
+            bun --smol test "$file" --timeout 30000
+          done
+
+      - name: Typecheck source-affecting dispatches
+        if: ${{ env.PIN_SPECS != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if node -e 'process.exit(JSON.parse(process.env.PIN_SPECS ?? "[]").some((s) => s.file.startsWith("src/")) ? 0 : 1)'; then
+            bun run typecheck
+          else
+            echo "no src/ pin specs; skipping typecheck"
+          fi
+
+      - name: Complete-diff allowlist gate (post-verify) and explicit staging
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t DIRTY < <(git status --porcelain | awk '{print $NF}')
+          EXPECTED_LIST="$(git status --porcelain >/dev/null 2>&1; true)"
+          # Re-derive the expected set exactly as the pre-verify gate did.
+          EXPECTED=('package.json' 'bun.lock')
+          if [[ -n "$PIN_SPECS" ]]; then
+            mapfile -t PIN_FILES < <(node -e 'for (const s of JSON.parse(process.env.PIN_SPECS ?? "[]")) console.log(s.file);')
+            EXPECTED+=("${PIN_FILES[@]}")
+          fi
+          if [[ "$REGEN" == "generate-config-schema" ]]; then
+            EXPECTED+=('opencode-swarm.schema.json' 'docs/configuration.md')
+          fi
+          mapfile -t EXPECTED < <(printf '%s\n' "${EXPECTED[@]}" | awk 'NF' | sort -u)
+          for path in "${DIRTY[@]}"; do
+            [[ " ${EXPECTED[*]} " == *" $path "* ]] || { echo "::error::unexpected dirty path after verify: $path"; exit 1; }
+          done
+          git add -- "${EXPECTED[@]}"
+          STAGED="$(git diff --cached --name-only)"
+          [[ "$STAGED" == "$(printf '%s\n' "${EXPECTED[@]}")" ]] || { echo "::error::staged set differs from the declared allowlist"; exit 1; }
+          if git status --porcelain | grep -v '^[MARD] ' >/dev/null 2>&1; then
+            echo "::error::unstaged or untracked paths remain outside the staged set"; exit 1
+          fi
+
+      - name: Commit the channel bump
+        shell: bash
+        run: |
+          set -euo pipefail
+          TRAILERS=("X-Dep-Bump-Channel: dependency-bump" "X-Dep-Bump-Package: $PACKAGE" "X-Dep-Bump-Version: $VERSION")
+          if [[ -n "$ADVISORY" ]]; then TRAILERS+=("X-Dep-Bump-Advisory: $ADVISORY"); else TRAILERS+=("X-Dep-Bump-Reason: $REASON"); fi
+          git commit -m "chore(deps): bump $PACKAGE to $VERSION" $(printf -- '-m "%s" ' "${TRAILERS[@]}")
+
+      - name: Push and open (or refresh) the channel PR
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          BRANCH="$(cat "$RUNNER_TEMP/branch.txt")"
+          gh auth setup-git
+          # Resolve any existing PR for this branch BEFORE pushing; a query
+          # failure (other than not-found) fails the job.
+          set +e
+          PR_JSON="$(gh pr view "$BRANCH" --json state,baseRefName,headRepositoryOwner,headRefOid,url 2>"$RUNNER_TEMP/prview.err")"
+          VIEW_RC=$?
+          set -e
+          EXISTING_SHA=""
+          if [[ $VIEW_RC -eq 0 ]]; then
+            STATE="$(printf '%s' "$PR_JSON" | node -e 'let d="";process.stdin.on("data",(c)=>d+=c).on("end",()=>console.log(JSON.parse(d).state))')"
+            BASE_REF="$(printf '%s' "$PR_JSON" | node -e 'let d="";process.stdin.on("data",(c)=>d+=c).on("end",()=>console.log(JSON.parse(d).baseRefName))')"
+            OWNER="$(printf '%s' "$PR_JSON" | node -e 'let d="";process.stdin.on("data",(c)=>d+=c).on("end",()=>console.log(JSON.parse(d).headRepositoryOwner.login))')"
+            EXISTING_SHA="$(printf '%s' "$PR_JSON" | node -e 'let d="";process.stdin.on("data",(c)=>d+=c).on("end",()=>console.log(JSON.parse(d).headRefOid))')"
+            [[ "$STATE" == "OPEN" && "$BASE_REF" == "main" && "$OWNER" == "ZaxbyHub" ]] || { echo "::error::existing PR for $BRANCH is not an open same-repo main-based PR"; exit 1; }
+            git show -s --format=%B "$EXISTING_SHA" | grep -q '^X-Dep-Bump-Channel: dependency-bump$' || { echo "::error::existing PR head lacks the channel trailer"; exit 1; }
+            git show -s --format=%B "$EXISTING_SHA" | grep -q "^X-Dep-Bump-Package: $PACKAGE$" || { echo "::error::existing PR head names a different package"; exit 1; }
+            git show -s --format=%B "$EXISTING_SHA" | grep -q "^X-Dep-Bump-Version: $VERSION$" || { echo "::error::existing PR head names a different version"; exit 1; }
+          elif grep -q 'no pull requests found' "$RUNNER_TEMP/prview.err"; then
+            echo "no existing PR for $BRANCH; creating"
+          else
+            cat "$RUNNER_TEMP/prview.err" >&2; echo "::error::gh pr view failed for a reason other than not-found"; exit 1
+          fi
+          if [[ -n "$EXISTING_SHA" ]]; then
+            git push --force-with-lease="refs/heads/$BRANCH:$EXISTING_SHA" origin "HEAD:refs/heads/$BRANCH"
+          else
+            git push --force-with-lease="refs/heads/$BRANCH:" origin "HEAD:refs/heads/$BRANCH"
+          fi
+          BODY_FILE="$RUNNER_TEMP/pr-body.md"
+          {
+            echo "## Dependency-bump channel dispatch"
+            echo
+            if [[ -n "$ADVISORY" ]]; then echo "Advisory: $ADVISORY"; else echo "Reason: $REASON"; fi
+            echo "Package: \`$PACKAGE@$VERSION\` ($DEPENDENCY_KIND)"
+            [[ -n "$NOTE" ]] && { echo; echo "$NOTE"; }
+            echo
+            echo "Changed files: $(git diff --name-only origin/main...HEAD | tr '\n' ' ')"
+            echo "Verified: $(tr '\n' ' ' < "$RUNNER_TEMP/verify-files.txt")"
+            echo
+            echo "Authorization: #3501 AC3 route (a) — https://github.com/ZaxbyHub/opencode-swarm/issues/3501#issuecomment-6637732864"
+            echo
+            echo "NOTE: the pull_request CI runs for this bot PR start in action_required (GITHUB_TOKEN-triggered); a write user must approve the run before checks report. Queue only after the approved pull_request-event CI, PR Standards, and drift checks are green."
+          } > "$BODY_FILE"
+          if [[ -n "$EXISTING_SHA" ]]; then
+            gh pr edit "$BRANCH" --body-file "$BODY_FILE"
+          else
+            gh pr create --base main --head "$BRANCH" --title "chore(deps): bump $PACKAGE to $VERSION" --body-file "$BODY_FILE"
+          fi
