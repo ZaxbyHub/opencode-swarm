@@ -986,6 +986,12 @@ function analyzeProcSubInnerStages(innerCommand: string): WriteTarget[] {
 		// when both > and >> patterns could match the same input.
 		const appendMatch = stage.match(/^\s*(.*?)\s*>>(\s*)(\S+)\s*$/);
 		if (appendMatch) {
+			// #3491 W8: a braced redirect target expands before dequoting —
+			// a quoted `'{a,b}'` stays literal (expandBraceRaw is
+			// quote-aware on the RAW token), an unquoted region emits one
+			// write per branch, a refused real-expansion shape withdraws.
+			const braceTargets = fallbackBraceTargets(appendMatch[3], '>>', results);
+			if (braceTargets) continue;
 			const path = dequoteFallbackOperand(appendMatch[3]);
 			if (path === null) {
 				// #3530 PRR-006(a): withdraw, never drop — the resolver
@@ -1007,6 +1013,8 @@ function analyzeProcSubInnerStages(innerCommand: string): WriteTarget[] {
 			// Only check > if >> did not match (negative lookahead alternative)
 			const writeMatch = stage.match(/^\s*(.*?)\s*>(?!>)(\s*)(\S+)\s*$/);
 			if (writeMatch) {
+				const braceTargets = fallbackBraceTargets(writeMatch[3], '>', results);
+				if (braceTargets) continue;
 				const path = dequoteFallbackOperand(writeMatch[3]);
 				if (path === null) {
 					// #3530 PRR-006(a): withdraw, never drop (see above).
@@ -1308,6 +1316,38 @@ function stageHasQuoteFragment(tokens: string[]): boolean {
 }
 
 /**
+ * #3491 W8, fallback channel: expand a RAW fallback token's brace regions
+ * into `out` redirect writes. Returns true when the expansion engine
+ * handled the token (branches emitted, or a refused real-expansion shape
+ * withdrawn) and the caller must skip its legacy dequote path; false when
+ * the token holds no expansion (caller proceeds unchanged). The engine is
+ * quote-aware on the raw token, so a quoted `'{a,b}'` target stays literal.
+ */
+function fallbackBraceTargets(
+	token: string,
+	operator: string,
+	out: WriteTarget[],
+): boolean {
+	const expansion = expandBraceRaw(token);
+	if (expansion.kind === 'none') return false;
+	if (expansion.kind === 'dynamic') {
+		out.push({
+			category: 'redirect',
+			operator,
+			path: null,
+			unresolvedContext: true,
+		});
+		return true;
+	}
+	for (const branch of expansion.branches) {
+		if (!isNullDevice(branch)) {
+			out.push({ category: 'redirect', operator, path: branch });
+		}
+	}
+	return true;
+}
+
+/**
  * Detect builtin writes from a simple command string (used for process substitution inner commands).
  * Parses the command string without going through bash-parser.
  *
@@ -1366,6 +1406,29 @@ function detectBuiltinWritesFromString(cmd: string): WriteTarget[] {
 			}
 			if (!endOfOptions && token.startsWith('-')) continue;
 			if (name === 'truncate' && !endOfOptions && isNumeric(token)) continue;
+			// #3491 W8: brace regions in the RAW token expand (quote-aware —
+			// a quoted `'{a,b}'` operand stays literal); a refused
+			// real-expansion shape withdraws fail-closed.
+			const expansion = expandBraceRaw(token);
+			if (expansion.kind === 'dynamic') {
+				writes.push({
+					category: 'builtin_write',
+					operator: name,
+					path: null,
+					unresolvedContext: true,
+				});
+				continue;
+			}
+			if (expansion.kind === 'branches') {
+				for (const branch of expansion.branches) {
+					writes.push({
+						category: 'builtin_write',
+						operator: name,
+						path: branch,
+					});
+				}
+				continue;
+			}
 			const operand = dequoteFallbackOperand(token);
 			if (operand === null) {
 				// Fragment/unbalanced quoting: the real operand is unrecoverable.
@@ -1384,6 +1447,26 @@ function detectBuiltinWritesFromString(cmd: string): WriteTarget[] {
 	// Last non-flag argument is the destination
 	for (let i = tokens.length - 1; i >= 1; i--) {
 		if (!tokens[i].startsWith('-')) {
+			// #3491 W8: same brace expansion as the AST branch's
+			// last-operand site (quote-aware on the RAW token).
+			const expansion = expandBraceRaw(tokens[i]);
+			if (expansion.kind === 'dynamic') {
+				return [
+					{
+						category: 'builtin_write',
+						operator: name,
+						path: null,
+						unresolvedContext: true,
+					},
+				];
+			}
+			if (expansion.kind === 'branches') {
+				return expansion.branches.map((branch) => ({
+					category: 'builtin_write' as const,
+					operator: name,
+					path: branch,
+				}));
+			}
 			const operand = dequoteFallbackOperand(tokens[i]);
 			if (operand === null) {
 				return [
@@ -1606,6 +1689,352 @@ const PARSER_CHAR_ESCAPES: Record<string, string> = {
 	f: '\f',
 	v: '\v',
 };
+
+// ---------------------------------------------------------------------------
+// #3491 W8 — brace-expanded write destinations (RC-9)
+// ---------------------------------------------------------------------------
+
+/** The outcome of expanding one write-destination word's brace regions. */
+type BraceDestinationExpansion =
+	| { kind: 'none' }
+	| { kind: 'branches'; branches: string[] }
+	| { kind: 'dynamic' };
+
+/** At most this many regions multiply per destination word (plan cap). */
+const BRANCH_REGION_CAP = 2;
+/** At most this many expanded branches per destination word (plan cap). */
+const BRANCH_TOTAL_CAP = 8;
+
+/**
+ * A pure-decimal sequence endpoint without zero padding: `0`, `3`, `12`.
+ * Bash zero-pads `{01..03}` and expands signed `{-1..2}` — both are REAL
+ * expansions this model refuses (dynamic), never literals.
+ */
+const PLAIN_SEQUENCE_ENDPOINT = /^(?:0|[1-9][0-9]*)$/;
+/** A single alpha endpoint — bash expands `{a..c}`; refused here (dynamic). */
+const SINGLE_ALPHA_ENDPOINT = /^[A-Za-z]$/;
+
+/**
+ * Expand the unquoted brace regions of one WRITE DESTINATION word (#3491
+ * W8, RC-9): comma lists (`{a,b}`) and plain numeric ranges (`{1..3}`),
+ * Cartesian across at most {@link BRANCH_REGION_CAP} regions and at most
+ * {@link BRANCH_TOTAL_CAP} branches — each branch is emitted as its own
+ * destination so the scope gate judges every file bash writes.
+ *
+ * Ground truth (bash 5.x, executed probes in the issue trace): quoted or
+ * backslash-escaped braces/commas never expand (`'{a,b}'`, `"\{a,b\}"`,
+ * `{a\,b}` stay literal — kind 'none'); a `{…}` with an unquoted comma is a
+ * LIST and the `..` inside an alternative is literal (`{1..3,x}` → `1..3`,
+ * `x`); a `{…}` without a comma is a SEQUENCE only when both endpoints are
+ * integers or single letters, else bash keeps it literal (`{a..}`, `{..3}`,
+ * `{ab..cd}`, `{a..1}` → literal); a `$` immediately before `{` starts a
+ * parameter expansion (`${a,b}` is not a brace region).
+ *
+ * Every REAL expansion this model cannot enumerate exactly — nested braces,
+ * empty alternatives (`{a,,b}`), alpha or signed or zero-padded or stepped
+ * sequences, over-cap shapes — is 'dynamic': the caller reclassifies the
+ * write so the gate fails closed on it, because bash writes MORE files than
+ * any literal reading of the word.
+ *
+ * `word` supplies the trusted raw source text (quote-aware; falls back to
+ * `text` when the node or its raw slice is missing — the parser drops
+ * quotes, so that fallback can only over-expand, never miss an expansion).
+ */
+function expandBraceDestinations(
+	word: unknown,
+	text: string,
+): BraceDestinationExpansion {
+	const raw =
+		word && typeof word === 'object'
+			? (RAW_WORD_TEXT.get(word as object) ?? text)
+			: text;
+	return expandBraceRaw(raw);
+}
+
+/** The raw-text engine shared by the AST sites and the fallback sites. */
+function expandBraceRaw(raw: string): BraceDestinationExpansion {
+	// Segments: literal pieces (kept raw for later dequoting) and regions.
+	const literals: string[] = [];
+	const regions: Array<{ alternatives: string[]; count: number }> = [];
+	let cursor = 0;
+	let i = 0;
+	let state: 'none' | 'single' | 'double' = 'none';
+	while (i < raw.length) {
+		const ch = raw[i];
+		if (state === 'single') {
+			if (ch === "'") state = 'none';
+			i++;
+			continue;
+		}
+		if (state === 'double') {
+			if (ch === '\\') {
+				i += 2;
+				continue;
+			}
+			if (ch === '"') state = 'none';
+			i++;
+			continue;
+		}
+		if (ch === '\\') {
+			i += 2;
+			continue;
+		}
+		if (ch === "'" || ch === '"') {
+			state = ch === "'" ? 'single' : 'double';
+			i++;
+			continue;
+		}
+		if (ch === '$' && raw[i + 1] === '{') {
+			// Parameter expansion: `${a,b}` is not a brace region. Skip to
+			// its closing unquoted `}` (the content stays literal); an
+			// unterminated one is an anomaly the caller must not expand.
+			const close = scanToUnquotedClose(raw, i + 2, '}');
+			if (close === -1) return { kind: 'dynamic' };
+			i = close + 1;
+			continue;
+		}
+		if (ch === '{') {
+			const region = parseBraceRegion(raw, i);
+			if (region === 'ambiguous') return { kind: 'dynamic' };
+			if (region !== null) {
+				literals.push(raw.slice(cursor, i));
+				regions.push(region);
+				i = region.end + 1;
+				cursor = i;
+				continue;
+			}
+			// Not a region: bash keeps the brace literal. Continue after
+			// the `{` so its content is still scanned (an inner real region
+			// like `x{a{b,c}` keeps working).
+			i++;
+			continue;
+		}
+		i++;
+	}
+	if (regions.length === 0) return { kind: 'none' };
+	literals.push(raw.slice(cursor));
+	if (regions.length > BRANCH_REGION_CAP) return { kind: 'dynamic' };
+	let total = 1;
+	for (const region of regions) {
+		total *= region.count;
+		if (total > BRANCH_TOTAL_CAP) return { kind: 'dynamic' };
+	}
+	// Assemble: Cartesian product in bash order, each literal piece and each
+	// alternative dequoted exactly like bash quote removal (no C-escape
+	// decoding — the branch is the operand text the shell passes on).
+	const dequotedLiterals = literals.map((piece) => scanQuoting(piece).dequoted);
+	const branches: string[] = [];
+	const build = (index: number, prefix: string): void => {
+		if (index === regions.length) {
+			branches.push(prefix);
+			return;
+		}
+		for (const alternative of regions[index].alternatives) {
+			build(
+				index + 1,
+				prefix +
+					scanQuoting(alternative).dequoted +
+					dequotedLiterals[index + 1],
+			);
+		}
+	};
+	build(0, dequotedLiterals[0]);
+	return { kind: 'branches', branches };
+}
+
+/**
+ * Index of the next unquoted, unescaped `closer` at or after `from`, or -1.
+ * Tracks single/double quotes and backslash escapes (the bash double-quote
+ * escape set).
+ */
+function scanToUnquotedClose(
+	raw: string,
+	from: number,
+	closer: string,
+): number {
+	let state: 'none' | 'single' | 'double' = 'none';
+	for (let i = from; i < raw.length; i++) {
+		const ch = raw[i];
+		if (state === 'single') {
+			if (ch === "'") state = 'none';
+			continue;
+		}
+		if (state === 'double') {
+			if (ch === '\\') {
+				i++;
+				continue;
+			}
+			if (ch === '"') state = 'none';
+			continue;
+		}
+		if (ch === '\\') {
+			i++;
+			continue;
+		}
+		if (ch === "'") state = 'single';
+		else if (ch === '"') state = 'double';
+		else if (ch === closer) return i;
+	}
+	return -1;
+}
+
+/**
+ * Parse one brace region starting at `raw[start] === '{'`.
+ *
+ * Returns null when bash keeps this `{…}` LITERAL (no unquoted comma and no
+ * bash-valid sequence: `{a}`, `{a..}`, `{..3}`, `{ab..cd}`, `{a..1}`), a
+ * region record for a comma list or plain numeric range, or 'ambiguous' for
+ * a REAL expansion this model refuses to enumerate (nested unquoted braces,
+ * empty alternatives, alpha/signed/zero-padded/stepped sequences) — the
+ * caller must classify the whole write dynamic, fail-closed.
+ */
+function parseBraceRegion(
+	raw: string,
+	start: number,
+): { alternatives: string[]; count: number; end: number } | null | 'ambiguous' {
+	// Find the matching `}` with nesting awareness: a nested unquoted `{`
+	// inside is a real expansion shape this model refuses.
+	let depth = 1;
+	let j = start + 1;
+	let state: 'none' | 'single' | 'double' = 'none';
+	let close = -1;
+	while (j < raw.length) {
+		const ch = raw[j];
+		if (state === 'single') {
+			if (ch === "'") state = 'none';
+			j++;
+			continue;
+		}
+		if (state === 'double') {
+			if (ch === '\\') {
+				j += 2;
+				continue;
+			}
+			if (ch === '"') state = 'none';
+			j++;
+			continue;
+		}
+		if (ch === '\\') {
+			j += 2;
+			continue;
+		}
+		if (ch === "'") {
+			state = 'single';
+			j++;
+			continue;
+		}
+		if (ch === '"') {
+			state = 'double';
+			j++;
+			continue;
+		}
+		if (ch === '$' && raw[j + 1] === '{') {
+			const paramClose = scanToUnquotedClose(raw, j + 2, '}');
+			if (paramClose === -1) return 'ambiguous';
+			j = paramClose + 1;
+			continue;
+		}
+		if (ch === '{') return 'ambiguous'; // nested brace region
+		if (ch === '}') {
+			depth--;
+			if (depth === 0) {
+				close = j;
+				break;
+			}
+		}
+		j++;
+	}
+	if (close === -1) return null; // no `}`: bash keeps the `{` literal
+	const content = raw.slice(start + 1, close);
+
+	// Split on UNQUOTED commas (a comma list). A quoted or escaped comma
+	// (`{a\,b}`, `{"a,b"}`) is not a separator and the shape stays
+	// literal/sequence. Alternatives keep their RAW text; the assembler's
+	// scanQuoting dequotes them exactly once.
+	const alternatives: string[] = [];
+	let altStart = 0;
+	let k = 0;
+	let altState: 'none' | 'single' | 'double' = 'none';
+	let sawUnquotedComma = false;
+	while (k < content.length) {
+		const ch = content[k];
+		if (altState === 'single') {
+			if (ch === "'") altState = 'none';
+			k++;
+			continue;
+		}
+		if (altState === 'double') {
+			if (ch === '\\') {
+				k += 2;
+				continue;
+			}
+			if (ch === '"') altState = 'none';
+			k++;
+			continue;
+		}
+		if (ch === '\\') {
+			k += 2;
+			continue;
+		}
+		if (ch === "'" || ch === '"') {
+			altState = ch === "'" ? 'single' : 'double';
+			k++;
+			continue;
+		}
+		if (ch === '$' && content[k + 1] === '{') {
+			const paramClose = scanToUnquotedClose(content, k + 2, '}');
+			if (paramClose === -1) return 'ambiguous';
+			k = paramClose + 1;
+			continue;
+		}
+		if (ch === ',') {
+			sawUnquotedComma = true;
+			if (k === altStart) return 'ambiguous'; // empty alternative: refuse
+			alternatives.push(content.slice(altStart, k));
+			altStart = k + 1;
+			k++;
+			continue;
+		}
+		k++;
+	}
+	if (altState !== 'none') return 'ambiguous'; // unterminated quote inside
+	if (sawUnquotedComma) {
+		if (altStart === content.length) return 'ambiguous'; // trailing empty
+		alternatives.push(content.slice(altStart));
+		return { alternatives, count: alternatives.length, end: close };
+	}
+
+	// No comma: a sequence only when both endpoints are integers or both are
+	// single letters (bash's rule). Anything else is a literal `{…}`.
+	const parts = content.split('..');
+	const isPlain = (s: string): boolean => PLAIN_SEQUENCE_ENDPOINT.test(s);
+	const isIntegerLike = (s: string): boolean => /^[+-]?[0-9]+$/.test(s);
+	const isSingleAlpha = (s: string): boolean => SINGLE_ALPHA_ENDPOINT.test(s);
+	if (parts.length >= 2 && parts[0] !== '' && parts[1] !== '') {
+		const [lo, hi] = parts;
+		if (parts.length === 2 && isPlain(lo) && isPlain(hi)) {
+			const loN = Number.parseInt(lo, 10);
+			const hiN = Number.parseInt(hi, 10);
+			const count = Math.abs(hiN - loN) + 1;
+			const step = loN <= hiN ? 1 : -1;
+			const seq: string[] = [];
+			for (let n = loN; seq.length < count; n += step) seq.push(String(n));
+			return { alternatives: seq, count, end: close };
+		}
+		// Real bash expansions this model refuses: zero-padded or signed
+		// integers (`{01..3}`, `{-1..2}`), single letters (`{a..c}`), step
+		// syntax (`{1..9..2}`) — bash writes more files than any literal
+		// reading, so the caller classifies the write dynamic (fail-closed).
+		if (
+			(isIntegerLike(lo) && isIntegerLike(hi)) ||
+			(isSingleAlpha(lo) && isSingleAlpha(hi))
+		) {
+			return 'ambiguous';
+		}
+	}
+	// `{a}`, `{a..}`, `{..3}`, `{..}`, `{ab..cd}`, `{a..1}`: bash literal.
+	return null;
+}
 
 /**
  * The C escapes bash-parser 0.5.0 decodes inside a quoted word, as measured
@@ -2005,6 +2434,59 @@ function getSuffixWords(cmd: unknown): string[] {
 }
 
 /**
+ * The suffix WORD NODES index-aligned with {@link getSuffixWords} (#3491
+ * W8): destination expansion needs the node's raw source slice to tell a
+ * quoted `'{a,b}'` (literal) from an unquoted region (a real expansion).
+ */
+function getSuffixNodes(cmd: unknown): unknown[] {
+	if (!cmd || typeof cmd !== 'object') return [];
+	const c = cmd as BashCommand;
+	const suffix = c.suffix;
+	if (!Array.isArray(suffix)) return [];
+	const nodes: unknown[] = [];
+	for (const s of suffix) {
+		if (wordText(s) !== null) nodes.push(s);
+	}
+	return nodes;
+}
+
+/**
+ * Emit one builtin destination write, brace-expanded (#3491 W8): every
+ * branch of an unquoted `{a,b}`/`{1..3}` region becomes its own write
+ * target; a real-but-refused expansion shape (nested, over-cap, empty
+ * alternative, alpha/signed/zero-padded sequence) emits a single null-path
+ * write the gate's dynamic-target block denies (fail-closed). `rawSkip`
+ * drops a brace-free literal prefix before scanning (`dd of=`).
+ */
+function pushExpandedDestination(
+	out: WriteTarget[],
+	node: unknown,
+	text: string,
+	rawSkip: number,
+	emit: (path: string) => WriteTarget | null,
+): void {
+	const rawBase =
+		node && typeof node === 'object'
+			? RAW_WORD_TEXT.get(node as object)
+			: undefined;
+	const expansion = expandBraceRaw((rawBase ?? text).slice(rawSkip));
+	if (expansion.kind === 'dynamic') {
+		const scaffold = emit('');
+		if (scaffold !== null) out.push({ ...scaffold, path: null });
+		return;
+	}
+	if (expansion.kind === 'none') {
+		const target = emit(text.slice(rawSkip));
+		if (target !== null) out.push(target);
+		return;
+	}
+	for (const branch of expansion.branches) {
+		const target = emit(branch);
+		if (target !== null) out.push(target);
+	}
+}
+
+/**
  * Canonical detector command model (#3474): classify write-vector commands
  * through their canonical spelling so versioned (`curl8.5`, `bzip2.5`),
  * path-qualified (`/usr/bin/curl`), and execution-wrapper-prefixed
@@ -2380,6 +2862,46 @@ function isNumeric(s: string): boolean {
 	return /^\d+$/.test(s);
 }
 
+/**
+ * The redirect write targets of one redirect node, brace-aware (#3491 W8).
+ * Shared by the detection walk (detectRedirects) and the resolver walk's
+ * redirect site (getWritesFromRedirectNode) so both walks emit the same
+ * expanded branch set — the dedupe keys pair and every branch resolves at
+ * its tracked context. A destination whose brace shape is a real-but-refused
+ * expansion emits a single null-path write: the gate's existing
+ * dynamic-target block denies it (fail-closed), because bash writes more
+ * files than any literal reading of the word.
+ */
+function redirectWriteTargets(
+	fileNode: unknown,
+	path: string | null,
+	opLabel: string,
+): WriteTarget[] {
+	const expansion =
+		path === null
+			? ({ kind: 'none' } as BraceDestinationExpansion)
+			: expandBraceDestinations(fileNode, path);
+	if (expansion.kind === 'dynamic') {
+		return [{ category: 'redirect', operator: opLabel, path: null }];
+	}
+	const targets = expansion.kind === 'branches' ? expansion.branches : [path];
+	const out: WriteTarget[] = [];
+	for (const target of targets) {
+		if (target !== null) {
+			// A branch IS the post-expansion operand text, so the plain sink
+			// check is exact (an expanded `/dev/null` branch is the device
+			// path bash passes). The unexpanded path keeps the stricter
+			// raw-source check (parser escape decoding).
+			if (expansion.kind === 'branches' && isNullDevice(target)) continue;
+			if (expansion.kind === 'none' && isNullDeviceWord(fileNode, target)) {
+				continue;
+			}
+		}
+		out.push({ category: 'redirect', operator: opLabel, path: target });
+	}
+	return out;
+}
+
 /** `>&1` copies an output descriptor and `>&-` closes one; neither names a file. */
 function isNonFileGreatAndTarget(path: string | null): boolean {
 	return path !== null && (isNumeric(path) || path === '-');
@@ -2423,12 +2945,11 @@ function detectRedirects(cmd: unknown): WriteTarget[] {
 			REDIRECT_WRITE_TOKENS.has(opType) ||
 			(REDIRECT_GREATAND_TOKENS.has(opType) && !isNonFileGreatAndTarget(path))
 		) {
-			// A redirect into a sink device discards its data; it is not a write
-			// target, exactly as `tee /dev/null` is not. Without this, `2>/dev/null`
-			// reached the authority layer as a write to /dev/null and was rejected
-			// as a workspace root escape.
-			if (path !== null && isNullDeviceWord(fileNode, path)) continue;
-			results.push({ category: 'redirect', operator: opLabel, path });
+			// #3491 W8: brace-expanded destinations emit one write per branch
+			// (a sink-device branch — quoted or expanded — is not a target).
+			for (const write of redirectWriteTargets(fileNode, path, opLabel)) {
+				results.push(write);
+			}
 		} else if (REDIRECT_HERE_TOKENS.has(opType)) {
 			results.push({ category: 'here_doc', operator: opLabel, path });
 		}
@@ -2499,13 +3020,17 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 	// dd with of= flag
 	if (lowerName === 'dd') {
 		const suffixWords = getSuffixWords(cmd);
-		for (const word of suffixWords) {
-			if (word.startsWith('of=')) {
-				const path = word.slice(3);
-				if (path && !isNullDevice(path)) {
-					results.push({ category: 'builtin_write', operator: 'dd of=', path });
-				}
-			}
+		const suffixNodes = getSuffixNodes(cmd);
+		for (let w = 0; w < suffixWords.length; w++) {
+			const word = suffixWords[w];
+			if (!word.startsWith('of=')) continue;
+			// #3491 W8: brace regions in the `of=` VALUE expand — `dd
+			// of='src/{a,../x}'` writes both branch files.
+			pushExpandedDestination(results, suffixNodes[w], word, 3, (path) =>
+				path && !isNullDevice(path)
+					? { category: 'builtin_write', operator: 'dd of=', path }
+					: null,
+			);
 		}
 		return results;
 	}
@@ -2515,20 +3040,22 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 	// start with '-' (e.g. tee -- -dashed-filename).
 	if (lowerName === 'tee') {
 		const suffixWords = getSuffixWords(cmd);
+		const suffixNodes = getSuffixNodes(cmd);
 		let pastDoubleDash = false;
-		for (const word of suffixWords) {
+		for (let w = 0; w < suffixWords.length; w++) {
+			const word = suffixWords[w];
 			if (word === '--') {
 				pastDoubleDash = true;
 				continue;
 			}
 			if (!pastDoubleDash && word.startsWith('-')) continue;
-			if (word && !isNullDevice(word)) {
-				results.push({
-					category: 'builtin_write',
-					operator: 'tee',
-					path: word,
-				});
-			}
+			// #3491 W8: a braced positional expands — `tee src/{a,../../x}`
+			// writes every branch.
+			pushExpandedDestination(results, suffixNodes[w], word, 0, (path) =>
+				path && !isNullDevice(path)
+					? { category: 'builtin_write', operator: 'tee', path }
+					: null,
+			);
 		}
 		return results;
 	}
@@ -2555,6 +3082,7 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 	}
 
 	const suffixWords = getSuffixWords(cmd);
+	const suffixNodes = getSuffixNodes(cmd);
 
 	// A quoted, backslash-escaped or expanded operand (`"a"`, `a\b`, `$D`)
 	// never keeps this tag: detectPosixWrites withdraws it from any line that
@@ -2584,7 +3112,8 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 		// reported too — an over-report (fail-closed), matching the pre-#3503
 		// first-word behavior for that shape.
 		let endOfOptions = false;
-		for (const word of suffixWords) {
+		for (let w = 0; w < suffixWords.length; w++) {
+			const word = suffixWords[w];
 			if (!endOfOptions && word === '--') {
 				endOfOptions = true;
 				continue;
@@ -2593,11 +3122,12 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 			// (coreutils): the numeric size exclusion applies only to the
 			// pre-`--` option region (#3512 final-critic residual).
 			if (endOfOptions || (!word.startsWith('-') && !isNumeric(word))) {
-				results.push({
+				// #3491 W8: a braced operand expands to one write per branch.
+				pushExpandedDestination(results, suffixNodes[w], word, 0, (path) => ({
 					category: 'builtin_write',
 					operator: 'truncate',
-					path: word,
-				});
+					path,
+				}));
 			}
 		}
 	} else if (lowerName === 'rmdir') {
@@ -2610,17 +3140,21 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 		// `-`-prefixed word after it is a path, not a flag (#3512 review P-6;
 		// the tee branch models the same convention).
 		let endOfOptions = false;
-		for (const word of suffixWords) {
+		for (let w = 0; w < suffixWords.length; w++) {
+			const word = suffixWords[w];
 			if (!endOfOptions && word === '--') {
 				endOfOptions = true;
 				continue;
 			}
 			if (endOfOptions || !word.startsWith('-')) {
-				results.push({
+				// #3491 W8: a braced operand expands to one write per branch
+				// (no branch ever carries the emptyDirectoryRemoval tag — a
+				// braced operand is not a bare literal).
+				pushExpandedDestination(results, suffixNodes[w], word, 0, (path) => ({
 					category: 'builtin_write',
 					operator: dedupeOperator,
-					path: word,
-				});
+					path,
+				}));
 			}
 		}
 	} else {
@@ -2628,11 +3162,13 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 		for (let i = suffixWords.length - 1; i >= 0; i--) {
 			const word = suffixWords[i];
 			if (!word.startsWith('-')) {
-				results.push({
+				// #3491 W8: a braced destination expands — `cp a src/{x,y}`
+				// writes through every branch bash hands the command.
+				pushExpandedDestination(results, suffixNodes[i], word, 0, (path) => ({
 					category: 'builtin_write',
 					operator: dedupeOperator,
-					path: word,
-				});
+					path,
+				}));
 				break;
 			}
 		}
@@ -6703,8 +7239,10 @@ function getWritesFromRedirectNode(
 		// resolve it against the POSIX cd tracker's context, which for a
 		// Windows cwd is a mangled path that can sit on another drive; left
 		// out, it falls back to the caller's cwd like any unmatched write.
-		if (path !== null && isNullDevice(path)) return [];
-		return [{ category: 'redirect', operator: opLabel, path }];
+		// #3491 W8: brace-aware emission identical to the detection walk's
+		// (redirectWriteTargets — which also drops sink-device branches) so
+		// the branch sets pair across the walks.
+		return redirectWriteTargets(fileNode, path, opLabel);
 	} else if (REDIRECT_HERE_TOKENS.has(opType)) {
 		return [{ category: 'here_doc', operator: opLabel, path }];
 	}
