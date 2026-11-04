@@ -98,6 +98,7 @@ import {
 	dcParseWindowsRecursiveDelete,
 	dcPreprocessWrappers,
 	dcRelocateDestructiveTarget,
+	dcSegmentVerbMatch,
 	dcSplitSegments,
 	dcUnwrapWrappers,
 	dcUnwrapWrappersBounded,
@@ -861,12 +862,13 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			// unparenthesized one (POSIX subshell), and the delimiter-aware
 			// classifier already fires on it; only these live arms were
 			// segment-start-anchored, leaving the reversed wedge.
-			const rmdirSwitchVerb = /^(?:[({\s])*(?:rmdir|rd)(?:\.exe)?\s*/i.exec(
-				seg,
-			);
+			// #3539 W6: the verb word matches through dcNormalizeVerbWord —
+			// `\rmdir`, `"rd"`, `/bin/rmdir`, `C:\Windows\system32\rmdir.exe`
+			// all resolve to the cmdlet; `./rmdir` stays project-local.
+			const rmdirSwitchVerb = dcSegmentVerbMatch(seg, ['rmdir', 'rd']);
 			if (rmdirSwitchVerb) {
 				const parsed = dcParseWindowsRecursiveDelete(
-					seg.slice(rmdirSwitchVerb[0].length),
+					rmdirSwitchVerb.rest.replace(/^\s+/, ''),
 				);
 				if (parsed.fires) {
 					if (parsed.targets.length === 0) {
@@ -893,10 +895,11 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			// recursion switch with no operand fails closed like the rmdir
 			// arm.
 			// #3518 P-5: same leading paren/whitespace tolerance as the rd arm.
-			const delSwitchVerb = /^(?:[({\s])*del(?:\.exe)?\s*/i.exec(seg);
+			// #3539 W6: normalized verb word (dcSegmentVerbMatch).
+			const delSwitchVerb = dcSegmentVerbMatch(seg, ['del']);
 			if (delSwitchVerb) {
 				const parsed = dcParseWindowsRecursiveDelete(
-					seg.slice(delSwitchVerb[0].length),
+					delSwitchVerb.rest.replace(/^\s+/, ''),
 				);
 				if (parsed.fires) {
 					if (parsed.targets.length === 0) {
@@ -922,15 +925,24 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			// same token-vs-substring class as the cmd.exe /s fix (#3495).
 			// #3518 P-5 (class): leading open-parens/whitespace tolerated so a
 			// parenthesized `(Remove-Item x -Recurse)` segment reaches the arm.
+			// #3539 W6: the verb word matches through dcNormalizeVerbWord
+			// (`"ri" -Recurse …`, `/bin/rm -Recurse …` reach the arm); the
+			// `\s-…` switch test applies to the words AFTER the verb.
+			const psRecurseVerb = dcSegmentVerbMatch(seg, [
+				'remove-item',
+				'ri',
+				'rm',
+				'rmdir',
+				'del',
+				'erase',
+				'rd',
+			]);
 			if (
-				/^(?:[({\s])*(?:Remove-Item|ri|rm|rmdir|del|erase|rd).*\s-[Rr]ecurse/i.test(
-					seg,
-				) ||
-				/^(?:[({\s])*(?:Remove-Item|ri|rm|rmdir|del|erase|rd).*\s-[Rr]/i.test(
-					seg,
-				)
+				psRecurseVerb &&
+				(/\s-[Rr]ecurse\b/i.test(psRecurseVerb.rest) ||
+					/\s-[Rr]\b/i.test(psRecurseVerb.rest))
 			) {
-			const targets = dcExtractPowerShellTargets(seg);
+				const targets = dcExtractPowerShellTargets(seg);
 				if (targets.length > 0) {
 					const decision = dcEvaluateRecursiveDeleteTargets({
 						targets: relocate(occurrence.resolveFrom, targets),
@@ -964,9 +976,15 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			// publication protocol (commit-pr) mandates for fork/rebase flows. This
 			// matches full-auto/policy.ts, which already exempts it. Bare `--force`
 			// and `-f` remain blocked. (#1692)
-			const worktreeRemoveMatch = /^git\s+worktree\s+remove\s+(.+)$/i.exec(seg);
-			if (worktreeRemoveMatch) {
-				const rawArgs = worktreeRemoveMatch[1]
+			// #3539 W6: the git verb word is normalized (`\git`, `"git"`,
+			// `/usr/bin/git`); the subcommand words `worktree remove` are then
+			// matched on the remainder like the original anchored regex.
+			const gitVerbHead = dcSegmentVerbMatch(seg, ['git']);
+			const worktreeRemoveRest = gitVerbHead
+				? /^\s*worktree\s+remove\s+(.+)$/i.exec(gitVerbHead.rest)
+				: null;
+			if (worktreeRemoveRest) {
+				const rawArgs = worktreeRemoveRest[1]
 					.trim()
 					.split(/\s+/)
 					.filter(Boolean);
@@ -1023,9 +1041,14 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				}
 			}
 
-			// rsync mirror / sync with delete
-			if (/^rsync.*--delete(?:-after|-before|-during|-delay)?/.test(seg)) {
-				const rsyncArgs = seg.split(/\s+/).slice(1);
+			// rsync mirror / sync with delete (#3539 W6: normalized verb word,
+			// case-sensitive as the original anchored regex was)
+			const rsyncVerbHead = dcSegmentVerbMatch(seg, ['rsync'], false);
+			if (
+				rsyncVerbHead &&
+				/--delete(?:-after|-before|-during|-delay)?\b/.test(rsyncVerbHead.rest)
+			) {
+				const rsyncArgs = rsyncVerbHead.rest.trim().split(/\s+/);
 				const rsyncTarget = rsyncArgs
 					.filter((a) => !a.startsWith('-') && !a.includes('@'))
 					.pop();
@@ -1042,51 +1065,59 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				}
 			}
 
-			// POSIX mv targeting .swarm/ paths
-			if (/^\?mv\s/i.test(seg)) {
-				const mvMatch = seg.match(/^\?mv\s+(.+)$/i);
-				if (mvMatch) {
-					const argsStr = mvMatch[1].replace(/["']/g, '');
-					if (/\.swarm(?:[\/\s]|$)/.test(argsStr)) {
-						throwDestructiveBlock(
-							'swarm path move',
-							`BLOCKED: "mv" targeting .swarm/ detected — move operations under .swarm/ are not allowed from shell commands`,
-						);
-					}
+			// POSIX mv targeting .swarm/ paths (#3539 W6: normalized verb word)
+			const mvVerbHead = dcSegmentVerbMatch(seg, ['mv']);
+			if (mvVerbHead) {
+				const argsStr = mvVerbHead.rest.replace(/["']/g, '');
+				if (/\.swarm(?:[\x5c/\s]|$)/.test(argsStr)) {
+					throwDestructiveBlock(
+						'swarm path move',
+						`BLOCKED: "mv" targeting .swarm/ detected — move operations under .swarm/ are not allowed from shell commands`,
+					);
 				}
 			}
 
-			// Windows cmd move/ren targeting .swarm\ paths
-			if (/^\?(?:move|ren)(?:\.exe)?\s/i.test(seg)) {
-				const moveMatch = seg.match(/^\?(?:move|ren)(?:\.exe)?\s+(.+)$/i);
-				if (moveMatch) {
-					const argsStr = moveMatch[1].replace(/["']/g, '');
-					if (/\.swarm(?:[\/\s]|$)/i.test(argsStr)) {
-						throwDestructiveBlock(
-							'move/rename',
-							`BLOCKED: "move" or "ren" targeting .swarm/ detected — move/rename operations under .swarm/ are not allowed from shell commands`,
-						);
-					}
+			// Windows cmd move/ren targeting .swarm\ paths (#3539 W6:
+			// normalized verb word, .exe tolerated)
+			const moveVerbHead = dcSegmentVerbMatch(seg, ['move', 'ren']);
+			if (moveVerbHead) {
+				const argsStr = moveVerbHead.rest.replace(/["']/g, '');
+				if (/\.swarm(?:[\x5c/\s]|$)/i.test(argsStr)) {
+					throwDestructiveBlock(
+						'move/rename',
+						`BLOCKED: "move" or "ren" targeting .swarm/ detected — move/rename operations under .swarm/ are not allowed from shell commands`,
+					);
 				}
 			}
 
-			// PowerShell Move-Item/Rename-Item targeting .swarm/ paths
-			if (
-				/^\?(?:Move-Item|Rename-Item|move|mi|mv|ren|rni).*\.swarm(?:[\/\s]|$)/i.test(
-					seg,
-				)
-			) {
+			// PowerShell Move-Item/Rename-Item targeting .swarm/ paths (#3539
+			// W6: normalized verb word; the .swarm test spans the whole
+			// segment as before)
+			const psMoveVerbHead = dcSegmentVerbMatch(seg, [
+				'move-item',
+				'rename-item',
+				'move',
+				'mi',
+				'mv',
+				'ren',
+				'rni',
+			]);
+			if (psMoveVerbHead && /\.swarm(?:[\x5c/\s]|$)/i.test(seg)) {
 				throwDestructiveBlock(
 					'move/rename',
 					`BLOCKED: PowerShell Move-Item or Rename-Item targeting .swarm/ detected — move/rename operations under .swarm/ are not allowed from shell commands`,
 				);
 			}
 
-			// Non-recursive rm targeting .swarm/ paths
+			// Non-recursive rm targeting .swarm/ paths (#3539 W6: normalized
+			// verb word — `\rm`, `"rm"`, `/bin/rm` reach the arm)
+			const rmSwarmVerbHead = dcSegmentVerbMatch(seg, ['rm']);
 			if (
-				/^\?rm/i.test(seg) &&
-				!/^\?rm\s+(?:-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)/i.test(seg) &&
-				/\.swarm(?:[\/\s]|$)/i.test(seg)
+				rmSwarmVerbHead &&
+				!/^\s+-[a-zA-Z]*[rR][a-zA-Z]*\b|^\s+--recursive\b/i.test(
+					rmSwarmVerbHead.rest,
+				) &&
+				/\.swarm(?:[\x5c/\s]|$)/i.test(seg)
 			) {
 				throwDestructiveBlock(
 					'swarm path delete',

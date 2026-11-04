@@ -315,6 +315,85 @@ export function dcExtractShellDashCPayload(rest: string): string | null {
 }
 
 // ============================================================================
+// Verb-word normalization (#3539 W6)
+// ============================================================================
+
+/**
+ * Normalize ONE command word to the verb name bash/PowerShell would resolve
+ * (#3539 W6 / RC-6): matched-quote removal plus backslash-escape removal for
+ * POSIX spellings (`\rm`, `"rm"`, `'\''rm'`-style), and basename extraction
+ * ONLY for ABSOLUTE path-qualified spellings — win32 spellings (drive letter
+ * or backslash separator, e.g. `C:\Windows\system32\rmdir.exe`,
+ * `C:/Windows/system32/rmdir.exe`) case-INSENSITIVE with an optional
+ * extension; POSIX forward-slash absolutes (`/bin/rm`) case-SENSITIVE
+ * (`/bin/RM` stays unmatched). RELATIVE spellings (`./rm`, `../rm`) are NOT
+ * normalized — they name project-local programs, not the system verbs.
+ *
+ * Order matters: a win32 absolute spelling is detected BEFORE backslash
+ * dequoting (a drive-led word's backslashes are path separators, not bash
+ * escapes — dequoting first would collapse `C:\Windows` to `C:Windows`).
+ */
+export function dcNormalizeVerbWord(word: string): string {
+	let w = word;
+	// Strip up to two matched surrounding quote pairs (`"rm"`, `"'\''rm'"'`).
+	for (let i = 0; i < 2; i++) {
+		if (
+			w.length >= 2 &&
+			((w.startsWith("'") && w.endsWith("'")) ||
+				(w.startsWith('"') && w.endsWith('"')))
+		) {
+			w = w.slice(1, -1);
+			continue;
+		}
+		break;
+	}
+	if (/^([A-Za-z]:[\\/]|\\\\)/.test(w) || w.startsWith('\\')) {
+		// Win32 absolute (drive-led, UNC, or backslash-root): separators are
+		// literal, comparison case-insensitive, `.exe` optional.
+		const base = w.split(/[\\/]/).filter(Boolean).pop() ?? w;
+		return base.replace(/\.[Ee][Xx][Ee]$/, '').toLowerCase();
+	}
+	if (w.startsWith('/')) {
+		// POSIX absolute: case-SENSITIVE basename (no extension stripping —
+		// `rm.exe` on POSIX is a different file).
+		return w.split('/').filter(Boolean).pop() ?? w;
+	}
+	// Bare or relative: POSIX backslash-escape removal only (`\rm` → `rm`).
+	return w.replace(/\\(.)/g, '$1');
+}
+
+/**
+ * Match a segment's leading verb word against a lowercase verb list
+ * (#3539 W6): tolerant of the #3518 P-5 leading paren/whitespace forms, the
+ * verb compared through {@link dcNormalizeVerbWord}. Returns the normalized
+ * verb and the remainder of the segment (starting after the raw verb word).
+ */
+export function dcSegmentVerbMatch(
+	segment: string,
+	verbs: readonly string[],
+	caseInsensitive = true,
+): { verb: string; rest: string } | null {
+	const lead = /^(?:[({\s])*/.exec(segment);
+	const start = lead ? lead[0].length : 0;
+	const wordMatch = /\S+/.exec(segment.slice(start));
+	if (!wordMatch) return null;
+	const raw = wordMatch[0];
+	if (!raw) return null;
+	const verb = dcNormalizeVerbWord(raw);
+	let cmp = caseInsensitive ? verb.toLowerCase() : verb;
+	if (!cmp) return null;
+	if (!verbs.includes(cmp)) {
+		// The cmd.exe gate arms historically matched an optional `.exe`
+		// suffix (`rmdir(?:\.exe)?`); keep that for BARE spellings (absolute
+		// spellings already lost the extension in dcNormalizeVerbWord).
+		const stripped = cmp.replace(/\.[Ee][Xx][Ee]$/, '');
+		if (!stripped || !verbs.includes(stripped)) return null;
+		cmp = stripped;
+	}
+	return { verb: cmp, rest: segment.slice(start + raw.length) };
+}
+
+// ============================================================================
 // Destructive-command functions
 // ============================================================================
 
@@ -1358,7 +1437,17 @@ export function dcExtractRecursiveRmTargets(segment: string): string[] | null {
 		tokens[start] = tokens[start].replace(/^[({\s]+/, '');
 	}
 	const verbTokens = tokens.slice(start);
-	if (verbTokens.length < 2 || verbTokens[0] !== 'rm') return null;
+	// #3539 W6 (RC-6): the verb is the command word bash actually resolves —
+	// quote-removed / escape-decoded / basename-normalized for ABSOLUTE
+	// path-qualified spellings (`\rm`, `"rm"`, `/bin/rm`,
+	// `C:\Windows\system32\rm.exe`); `./rm` stays a project-local program.
+	// Case-sensitive (POSIX `rm`): `RM` and `/bin/RM` do not match.
+	if (
+		verbTokens.length < 2 ||
+		dcNormalizeVerbWord(verbTokens[0] ?? '') !== 'rm'
+	) {
+		return null;
+	}
 	tokens.length = 0;
 	tokens.push(...verbTokens);
 
@@ -1370,7 +1459,11 @@ export function dcExtractRecursiveRmTargets(segment: string): string[] | null {
 	for (let i = 1; i < tokens.length; i += 1) {
 		tokens[i] = tokens[i].replace(/[)}]+$/, '');
 	}
-	if (tokens.length < 2 || tokens[0] !== 'rm') return null;
+	const delimStripped = tokens.filter((t) => t.length > 0);
+	tokens.length = 0;
+	tokens.push(...delimStripped);
+	if (tokens.length < 2 || dcNormalizeVerbWord(tokens[0] ?? '') !== 'rm')
+		return null;
 
 	let destructive = false;
 	let index = 1;
@@ -1745,11 +1838,12 @@ export function dcCheckJunctionCreation(
 	segment: string,
 	cwd: string,
 ): string | null {
-	// mklink /J or /D (cmd.exe)
-	const mklinkMatch =
-		/^mklink(?:\.exe)?\s+\/[JjDd]\s+"?([^"\s]+)"?\s+"?([^"\s]+)"?/i.exec(
-			segment,
-		);
+	// mklink /J or /D (cmd.exe) — #3539 W6: normalized verb word (`\mklink`,
+	// `"mklink"`, `C:\Windows\system32\mklink.exe` reach the arm).
+	const mklinkHead = dcSegmentVerbMatch(segment, ['mklink']);
+	const mklinkMatch = mklinkHead
+		? /^\s*\/[JjDd]\s+"?([^"\s]+)"?\s+"?([^"\s]+)"?/.exec(mklinkHead.rest)
+		: null;
 	if (mklinkMatch) {
 		const target = mklinkMatch[2].trim();
 		if (!dcHasUnresolvableVars(target)) {
@@ -1784,10 +1878,13 @@ export function dcCheckJunctionCreation(
 
 	// ln -s <target> (POSIX symlink; block if target resolves outside cwd)
 	// Both absolute and relative targets are checked: ln -s ../sensitive dist escapes cwd.
-	const lnMatch =
-		/^ln\s+(?:-[sfnv]*s[sfnv]*|-s)\s+"?([^"\s]+)"?(?:\s+"?[^"\s]+"?)?\s*$/.exec(
-			segment,
-		);
+	// #3539 W6: normalized verb word (`\ln`, `"ln"`, `/bin/ln` reach the arm).
+	const lnHead = dcSegmentVerbMatch(segment, ['ln'], false);
+	const lnMatch = lnHead
+		? /^\s+(?:-[sfnv]*s[sfnv]*|-s)\s+"?([^"\s]+)"?(?:\s+"?[^"\s]+"?)?\s*$/.exec(
+				lnHead.rest,
+			)
+		: null;
 	if (lnMatch) {
 		const target = lnMatch[1].trim();
 		if (!dcHasUnresolvableVars(target)) {
@@ -1827,20 +1924,36 @@ export function dcIsWindowsSwitchCluster(token: string): boolean {
 /**
  * Extract candidate target paths from a destructive PowerShell command.
  * Handles both `Remove-Item <path> -Recurse` and `Remove-Item -Recurse <path>` orderings.
+ *
+ * #3539 W6 (RC-7): the parameter walk is INDEX-BASED (the old loop consumed
+ * tokens through a for-of while looking the SAME token up again with
+ * `tokens.indexOf(tok)` — a repeated `-Path` bound its value to the FIRST
+ * occurrence's index, so every repeat after the first dropped its target)
+ * and colon-glued `-Param:Value` parameters split (`-Path:/etc` is ONE
+ * token real PowerShell 5.1 binds as flag+value; the left side keeps its
+ * value-taking semantics and the right side IS the value). The verb word is
+ * matched through dcNormalizeVerbWord (quoted/escaped/path-qualified
+ * spellings resolve to the cmdlet).
  */
 export function dcExtractPowerShellTargets(segment: string): string[] {
-	// Strip the leading verb. #3518 P-5 (class): leading open-parens/whitespace
-	// tolerated — `(Remove-Item x -Recurse)` runs the same cmdlet.
-	const verbMatch =
-		/^(?:[({\s])*(?:Remove-Item|ri|rm|rmdir|del|erase|rd)\s+/i.exec(segment);
-	if (!verbMatch) return [];
-	const rest = segment.slice(verbMatch[0].length);
+	const stripQuotes = (p: string): string => p.replace(/^["']|["']$/g, '');
+	const head = dcSegmentVerbMatch(segment, [
+		'remove-item',
+		'ri',
+		'rm',
+		'rmdir',
+		'del',
+		'erase',
+		'rd',
+	]);
+	if (!head) return [];
 
 	// Tokenize remainder; quoted strings count as one token
-	const tokens: string[] = rest.match(/"[^"]*"|'[^']*'|[^\s]+/g) ?? [];
+	const tokens: string[] = head.rest.match(/"[^"]*"|'[^']*'|[^\s]+/g) ?? [];
 
 	const targets: string[] = [];
-	// Flags that consume the next token as a value
+	// Flags that consume a VALUE (space-separated next token, or the glued
+	// colon right side).
 	const valueFlags = new Set([
 		'-literalpath',
 		'-path',
@@ -1849,30 +1962,62 @@ export function dcExtractPowerShellTargets(segment: string): string[] {
 		'-exclude',
 		'-lp', // alias for -LiteralPath in PS 7+
 	]);
-	let skipNext = false;
-	for (const tok of tokens) {
-		if (skipNext) {
-			skipNext = false;
+	// Boolean switch parameters whose glued right side is an expression
+	// (`-Recurse:$true`), never a path — dropped, not extracted.
+	const switchFlags = new Set([
+		'-recurse',
+		'-force',
+		'-confirm',
+		'-whatif',
+		'-passthru',
+		'-verbose',
+		'-debug',
+		'-hidden',
+		'-erroraction',
+		'-warningaction',
+		'-informationaction',
+	]);
+	for (let i = 0; i < tokens.length; i++) {
+		const tok = tokens[i];
+		if (tok === undefined) break;
+		if (!tok.startsWith('-')) {
+			// Non-flag positional argument → path target
+			const cleaned = stripQuotes(tok);
+			if (cleaned) targets.push(cleaned);
 			continue;
 		}
-		if (tok.startsWith('-')) {
-			// Switch-like flags: -Recurse, -Force, -ErrorAction, -WhatIf etc.
-			if (valueFlags.has(tok.toLowerCase())) {
-				skipNext = true; // next token is the flag's value (a path) — capture it
-				// Don't push here; the *next* token IS the target path
-				// Re-enter loop with skipNext=false to capture it
-				const idx = tokens.indexOf(tok);
-				if (idx !== -1 && idx + 1 < tokens.length) {
-					const val = tokens[idx + 1].replace(/^["']|["']$/g, '');
-					if (val) targets.push(val);
-					skipNext = true; // skip the value token on next iteration
-				}
+		// Colon-glued `-Param:Value` split: the left keeps its flag
+		// semantics, the right is the bound value.
+		let flagName = tok.toLowerCase();
+		let gluedValue: string | null = null;
+		const colon = tok.indexOf(':');
+		if (colon !== -1) {
+			flagName = tok.slice(0, colon).toLowerCase();
+			gluedValue = tok.slice(colon + 1);
+		}
+		if (valueFlags.has(flagName)) {
+			if (gluedValue !== null) {
+				const val = stripQuotes(gluedValue);
+				if (val) targets.push(val);
+				continue;
 			}
-			// else: plain switch flag like -Recurse, -Force — skip
-		} else {
-			// Non-flag positional argument → path target
-			const cleaned = tok.replace(/^["']|["']$/g, '');
-			if (cleaned) targets.push(cleaned);
+			const next = tokens[i + 1];
+			if (next !== undefined) {
+				const val = stripQuotes(next);
+				if (val) targets.push(val);
+				i++; // the value token is consumed
+			}
+			continue;
+		}
+		if (switchFlags.has(flagName)) {
+			// A glued boolean expression (-Recurse:$true) is not a path.
+			continue;
+		}
+		// Unknown flag: a glued right side extracts fail-closed (parity with
+		// the space-separated positional push); a spaced next word falls
+		// through to the positional branch on the next iteration.
+		if (gluedValue !== null && gluedValue !== '') {
+			targets.push(stripQuotes(gluedValue));
 		}
 	}
 	return targets;
