@@ -56,22 +56,27 @@
   tracked working directory exactly like the gate.
 
 - **sh-family flag-cluster payloads** (`src/hooks/shell-write-detect.ts`,
-  `src/hooks/guardrails/destructive-command.ts`; final-critic rounds 2–3):
-  the covered grammar is bash-true — `c` in an option cluster selects the
-  payload from the NEXT standalone word (`sh -xc`, `bash -lc`, `sh -uc`,
-  and c-not-last clusters like `bash -ceu`/`bash -cx`, where the tail
-  letters parse as MORE options), and `-c` after other arg-consuming flags
-  (`bash -eo pipefail -c`) is honored the same way — through one shared
-  invocation-flag walk used by BOTH the dc wrapper extractor (heads may be
-  path-qualified: `/bin/sh`) and `detectInterpreterEval`'s shell-family
-  matcher. The earlier anchored `-c`-first spellings, and the round-2 walk's
-  tail-as-payload rule, ADMITTED cluster forms while real bash executes the
-  payload; the anchored form also over-blocked benign multi-flag in-scope
-  spellings. A script-file operand or `--` carries no payload; the
-  tail-glued `-c'code'` spelling is invalid bash and, like an unknown flag
-  of unknowable arity or a second arg-taking member after `c` in one
-  cluster, is deny-on-uncertainty (the eval classifier fires, the wrapper
-  never unwraps). Python/perl/ruby cluster handling is untouched (W7/PR-3).
+  `src/hooks/guardrails/destructive-command.ts`; final-critic rounds 2–4):
+  the covered grammar is bash-true — argument assignment is NEXT-WORD-IN-
+  ORDER across ALL arg-taking members, not just c-first ordering: every
+  arg-taking letter (`c` payload, `o`/`O` optname, short or `+` toggle
+  cluster) draws its argument from the next standalone word after the
+  cluster, and cluster tails are always MORE option letters (`sh -xc`,
+  `bash -lc`, `bash -ceu`, `bash -eo pipefail -c`, `bash -oc pipefail
+  'code'` — ground truth: bash 5.x assigns o→pipefail, c→payload). One
+  shared invocation-flag walk feeds BOTH the dc wrapper extractor (heads
+  may be path-qualified: `/bin/sh`) and `detectInterpreterEval`'s
+  shell-family matcher. The earlier anchored `-c`-first spellings, the
+  round-2 tail-as-payload rule, and the round-3 o-branch tail-eating rule
+  all ADMITTED cluster forms while real bash executes the payload; the
+  anchored form also over-blocked benign multi-flag in-scope spellings. A
+  script-file operand or `--` carries no payload; the tail-glued `-c'code'`
+  and `-opipefail` spellings are invalid/erroring bash and, like an unknown
+  flag of unknowable arity or a cluster sharing two or more arg-taking
+  members (`-oc`, `-co`), are deny-on-uncertainty (the eval classifier
+  fires, the wrapper never unwraps). Long `--rcfile`/`--init-file` keep the
+  spaced next-word form (and the gate-tolerated `=value` gluing).
+  Python/perl/ruby cluster handling is untouched (W7/PR-3).
 
 ## Known edges
 

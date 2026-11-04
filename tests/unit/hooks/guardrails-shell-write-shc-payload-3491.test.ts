@@ -292,6 +292,69 @@ describe('W4 gate: c-not-last clusters — payload is the NEXT word (fix-round 3
 	});
 });
 
+// Final-critic fix-round 4: the round-3 tail-vs-next-word fallacy persisted
+// in the o/O branches — `optname = tail || nextWord`. Ground truth (critic +
+// re-verified locally on bash 5.3.9): `bash -oc pipefail 'echo x > g1'`
+// rc=0 EXECUTES (args ride the next standalone words in order: o→pipefail,
+// c→payload); `bash +oc pipefail 'code'` same; `bash -opipefail -c 'code'`
+// rc=2 — the glued letters parse as options and o took the next word `-c`
+// as its optname. The tail-eating o made both executing shapes ADMIT (o ate
+// the tail 'c', 'pipefail' then read as a script word — no eval, no
+// payload). The next-word rule now governs EVERY arg-taking member.
+describe('W4 gate: next-word args for o/O clusters (fix-round 4)', () => {
+	test("bash -oc pipefail 'echo x > ../x' denies (o and c share the cluster)", async () => {
+		const got = await gate(`bash -oc pipefail 'echo x > ../x'`);
+		expect(got.verdict).toBe('DENIED');
+	});
+
+	test("bash +oc pipefail 'echo x > ../x' denies (+ toggle form)", async () => {
+		const got = await gate(`bash +oc pipefail 'echo x > ../x'`);
+		expect(got.verdict).toBe('DENIED');
+	});
+
+	test("bash -opipefail -c 'echo x > ../x' denies via uncertain (glued o arg is rc=2 bash)", async () => {
+		// bash errors (o took `-c` as its next-word optname); the walk
+		// classifies the dash-led optname uncertain and the eval classifier
+		// routes/denies — the payload is never trusted to a glued tail.
+		const got = await gate(`bash -opipefail -c 'echo x > ../x'`);
+		expect(got.verdict).toBe('DENIED');
+		expect(got.message).toMatch(
+			/WRITE BLOCKED|SCOPE_VIOLATION|evaluates inline code/,
+		);
+	});
+
+	test("bash -co pipefail 'echo x > ../x' stays denied (multi-arg-taking cluster)", async () => {
+		const got = await gate(`bash -co pipefail 'echo x > ../x'`);
+		expect(got.verdict).toBe('DENIED');
+	});
+
+	test("sh -xc 'echo x > ../x' (c-last) still denies", async () => {
+		const got = await gate(`sh -xc 'echo x > ../x'`);
+		expect(got.verdict).toBe('DENIED');
+		expect(got.message).toMatch(ANY_WRITE_BLOCK);
+	});
+
+	test("sh -c 'echo x > src/ok' admits (plain spelling control)", async () => {
+		const got = await gate(`sh -c 'echo x > src/ok'`);
+		expect(got.verdict).toBe('ADMITTED');
+	});
+
+	test("bash -eo pipefail -c 'echo x > src/ok' admits (spaced o arg)", async () => {
+		const got = await gate(`bash -eo pipefail -c 'echo x > src/ok'`);
+		expect(got.verdict).toBe('ADMITTED');
+	});
+
+	test("bash --rcfile /dev/null -c 'echo x > src/ok' admits (spaced long arg)", async () => {
+		const got = await gate(`bash --rcfile /dev/null -c 'echo x > src/ok'`);
+		expect(got.verdict).toBe('ADMITTED');
+	});
+
+	test("bash --rcfile=/dev/null -cx 'echo x > src/ok' admits (=value long, c-not-last cluster)", async () => {
+		const got = await gate(`bash --rcfile=/dev/null -cx 'echo x > src/ok'`);
+		expect(got.verdict).toBe('ADMITTED');
+	});
+});
+
 describe('W4 gate: clean-payload controls stay pinned (C5)', () => {
 	test("sh -c 'echo x > ../x' stays denied", async () => {
 		const got = await gate("sh -c 'echo x > ../x'");

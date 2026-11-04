@@ -478,21 +478,23 @@ export function dcStripOneWrapper(cmd: string): string | null {
 	// write inside it).
 	// #3491 W4: the payload is the single quote-removed word the `-c` flag
 	// selects (sh's argv[2] contract — the NEXT STANDALONE WORD after the
-	// option cluster; the tail letters after a mid-cluster `c` parse as MORE
-	// OPTIONS, and bash has NO tail-glued payload spelling — `bash -c'code'`
-	// is rc=1 invalid option, fix-round-3 ground truth), extracted by the
-	// shared tokenizer — a trailing positional (`sh -c 'payload' sh`) and
-	// same-kind quote concatenation (`'\''`) used to defeat the anchored
-	// regex and hide every write inside the payload. Words after the payload
-	// are $0/$1… and are NEVER scanned as commands.
-	// #3491 W4 fix-round-2: `-c` is honored as a CLUSTER member (`sh -xc`,
+	// option cluster; the tail letters are MORE OPTIONS, and bash has NO
+	// tail-glued payload spelling — `bash -c'code'` is rc=1 invalid option,
+	// fix-round-3 ground truth), extracted by the shared tokenizer — a
+	// trailing positional (`sh -c 'payload' sh`) and same-kind quote
+	// concatenation (`'\''`) used to defeat the anchored regex and hide
+	// every write inside the payload. Words after the payload are $0/$1…
+	// and are NEVER scanned as commands.
+	// #3491 W4 fix-round-2/4: `-c` is honored as a CLUSTER member (`sh -xc`,
 	// `bash -lc`, `dash -xc`, `bash -ceu`) or after other arg-consuming flags
-	// (`bash -eo pipefail -c`) — via the shared walkShellCommandFlags walk,
-	// and the head may be path-qualified (`/bin/sh`). The old anchored
-	// `-c`-first regex ADMITTED every cluster spelling while real bash
-	// executes the payload (final critic, ground-truthed). An 'uncertain'
-	// walk (unknown flag, unknowable arity, ambiguous cluster) keeps the RAW
-	// text — no wrapper layer hides the spelling from the detector, and
+	// (`bash -eo pipefail -c`, `bash -oc pipefail 'code'` — every arg-taking
+	// member draws its argument from the next standalone word IN ORDER) —
+	// via the shared walkShellCommandFlags walk, and the head may be
+	// path-qualified (`/bin/sh`). The old anchored `-c`-first regex ADMITTED
+	// every cluster spelling while real bash executes the payload (final
+	// critic, ground-truthed). An 'uncertain' walk (unknown flag, glued
+	// argument, ambiguous multi-arg-taking cluster) keeps the RAW text — no
+	// wrapper layer hides the spelling from the detector, and
 	// detectInterpreterEval fires on the same uncertainty. A 'script'
 	// outcome (script-file operand or `--`) is not a payload wrapper and
 	// falls through to the remaining unwrap rules.
