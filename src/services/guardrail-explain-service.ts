@@ -824,7 +824,11 @@ export async function handleGuardrailExplain(
 				'parse_error: write detection failed to parse command — rejecting for safety';
 		} else if (analysis.hasWrites) {
 			const resolvedWrites = resolveWriteTargets(
-				detectionCommand,
+				// #3539 W5 parity: the gate resolves against the procsub
+				// masking residual when the analysis carries one; explain
+				// must share the same resolution text or it answers allow
+				// for outer writes the gate blocks under tracked cd context.
+				analysis.residualCommand ?? detectionCommand,
 				analysis.writes,
 				directory,
 			);

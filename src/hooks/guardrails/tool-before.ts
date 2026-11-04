@@ -1588,7 +1588,13 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		const shellDirectory = sessionWorkspaceDirectory(sessionID);
 
 		const resolvedWrites = resolveWriteTargets(
-			detectionCommand,
+			// #3539 W5: when the analysis came through the procsub-masking
+			// path, its surviving outer writes live in the RESIDUAL command —
+			// re-parse THAT for cwd tracking so `cd …; tee >(…); echo x > f`
+			// resolves the outer write under the tracked post-cd context
+			// (the discriminator from the approved plan; the inner writes
+			// are already withdrawn or resolve at the starting cwd).
+			analysis.residualCommand ?? detectionCommand,
 			analysis.writes,
 			shellDirectory,
 		);

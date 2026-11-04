@@ -141,6 +141,18 @@ export interface WriteAnalysis {
 	hasWrites: boolean;
 	/** Whether the command could not be parsed (fail-closed). */
 	parseError?: boolean;
+	/**
+	 * #3539 W5: present ONLY when the command's process-substitution spans
+	 * were masked and the RESIDUAL (the command with every unquoted
+	 * `>(…)`/`<(…)` span replaced by a token-preserving placeholder) parsed
+	 * clean. It is the text the resolver must re-parse for cwd tracking: the
+	 * surviving OUTER writes resolve under the tracked directory context of
+	 * the residual, while the masked INNER writes are withdrawn
+	 * (`unresolvedContext`) whenever their body or outer prefix carries a
+	 * directory change. Absent for every parse that did not go through the
+	 * masking path (including the legacy no-mask fallback).
+	 */
+	residualCommand?: string;
 }
 
 /**
@@ -305,6 +317,10 @@ export function mergeWriteAnalyses(
 		writes,
 		hasWrites: writes.length > 0 || primary.hasWrites || additional.hasWrites,
 		parseError: primary.parseError,
+		// #3539 W5: the residual channel is additive and POSIX-only (the
+		// Windows detectors never mask), so the primary's residual — when
+		// present — is the one the gate/explain resolver must use.
+		residualCommand: primary.residualCommand,
 	};
 }
 
@@ -926,11 +942,117 @@ export function isPowerShellReadOnlyPipeline(command: string): boolean {
 // ---------------------------------------------------------------------------
 
 /**
+ * Analyze one process-substitution inner body for writes, pipeline stage by
+ * pipeline stage (#3539 W5). This is the SAME per-stage scan the legacy
+ * parse-failure fallback ran inline; it is shared verbatim by the legacy
+ * whole-command regex path and by the W5 masked-span path so both emit
+ * identical writes for the same body text.
+ */
+function analyzeProcSubInnerStages(innerCommand: string): WriteTarget[] {
+	const results: WriteTarget[] = [];
+	const stages = innerCommand.split('|').map((s) => s.trim());
+	for (const stage of stages) {
+		// #3530 PRR-006 (critic D4): a stage carrying MULTIPLE redirect
+		// operators (`cat > ../../src/"f" && cat > src/ok`) is torn by the
+		// lazy `>` regex — only the LAST target is captured and the earlier
+		// (out-of-scope, quoted-fragment) target is invisible. Any
+		// multi-redirect stage is unresolvable: withdraw it fail-closed
+		// (the quoted-span normalization keeps `2>&1`-style tokens and
+		// honest `=>`-style tokens out of the count).
+		const qStage = stage.replace(/"[^"]*"|'[^']*'/g, 'Q');
+		const redirectCount = qStage.match(/(?<![->=>])>(?!>)/g)?.length ?? 0;
+		if (redirectCount >= 2) {
+			results.push({
+				category: 'redirect',
+				operator: '>',
+				path: null,
+				unresolvedContext: true,
+			});
+			continue;
+		}
+
+		// Detect builtin writes (cp, mv, etc.) in the inner POSIX command.
+		// Note: detectPowerShellWrites is not used here because the inner command
+		// of a process substitution is POSIX bash, not PowerShell.
+		const builtinWrites = detectBuiltinWritesFromString(stage);
+		// Plain loop (not spread-push): an adversarial operand count must
+		// not hit the engine's spread-arity limit (#3512 review N-2; the
+		// throw would be fail-closed, but the bound is not ours to lean on).
+		for (const write of builtinWrites) {
+			results.push(write);
+		}
+
+		// Detect redirections in the stage: check >> first to avoid double-matching
+		// when both > and >> patterns could match the same input.
+		const appendMatch = stage.match(/^\s*(.*?)\s*>>(\s*)(\S+)\s*$/);
+		if (appendMatch) {
+			const path = dequoteFallbackOperand(appendMatch[3]);
+			if (path === null) {
+				// #3530 PRR-006(a): withdraw, never drop — the resolver
+				// nulls an unresolvedContext write so the gate denies it.
+				// A bare `continue` here silently removed the write from
+				// the analysis (fail-open with a sibling in-scope write).
+				results.push({
+					category: 'redirect',
+					operator: '>>',
+					path: null,
+					unresolvedContext: true,
+				});
+				continue;
+			}
+			if (path && !isNullDevice(path)) {
+				results.push({ category: 'redirect', operator: '>>', path });
+			}
+		} else {
+			// Only check > if >> did not match (negative lookahead alternative)
+			const writeMatch = stage.match(/^\s*(.*?)\s*>(?!>)(\s*)(\S+)\s*$/);
+			if (writeMatch) {
+				const path = dequoteFallbackOperand(writeMatch[3]);
+				if (path === null) {
+					// #3530 PRR-006(a): withdraw, never drop (see above).
+					results.push({
+						category: 'redirect',
+						operator: '>',
+						path: null,
+						unresolvedContext: true,
+					});
+					continue;
+				}
+				if (path && !isNullDevice(path)) {
+					results.push({ category: 'redirect', operator: '>', path });
+				}
+			} else if (
+				/>/.test(stage.replace(/"[^"]*"|'[^']*'/g, 'Q')) &&
+				!/^\s*\w+(\s+-{1,2}[\w-]+)*\s*$/.test(stage)
+			) {
+				// #3530 PRR-006(b): neither redirect regex matched but the
+				// stage still carries a `>` operator — the (\S+) capture
+				// cannot span a quoted-with-whitespace target, so the
+				// operand is unrecoverable. Withdraw (fail-closed) instead
+				// of emitting nothing; the guard keeps flag-only/benign
+				// stages clean.
+				results.push({
+					category: 'redirect',
+					operator: '>',
+					path: null,
+					unresolvedContext: true,
+				});
+			}
+		}
+	}
+	return results;
+}
+
+/**
  * Detect process substitution writes using regex when bash-parser fails.
  * Process substitution: >(command) creates implicit writes, <(command) is read-only.
  *
  * bash-parser does not support process substitution syntax, so we use regex to
  * extract and analyze >(...) patterns when the main parse fails.
+ *
+ * #3539 W5: this legacy whole-command regex stays ONLY for the no-mask
+ * fallback path (masking failed or found nothing); the masked-span path
+ * analyzes each balanced span body through the shared per-stage scan.
  */
 function detectProcessSubstitutionWrites(command: string): WriteTarget[] {
 	const results: WriteTarget[] = [];
@@ -945,101 +1067,192 @@ function detectProcessSubstitutionWrites(command: string): WriteTarget[] {
 		const innerCommand = match[1].trim();
 		if (!innerCommand) continue;
 
-		// Recursively analyze the inner command for writes.
-		// Use a minimal parse: split by | to get pipeline stages and analyze each.
-		const stages = innerCommand.split('|').map((s) => s.trim());
-		for (const stage of stages) {
-			// #3530 PRR-006 (critic D4): a stage carrying MULTIPLE redirect
-			// operators (`cat > ../../src/"f" && cat > src/ok`) is torn by the
-			// lazy `>` regex — only the LAST target is captured and the earlier
-			// (out-of-scope, quoted-fragment) target is invisible. Any
-			// multi-redirect stage is unresolvable: withdraw it fail-closed
-			// (the quoted-span normalization keeps `2>&1`-style tokens and
-			// honest `=>`-style tokens out of the count).
-			const qStage = stage.replace(/"[^"]*"|'[^']*'/g, 'Q');
-			const redirectCount = qStage.match(/(?<![->=>])>(?!>)/g)?.length ?? 0;
-			if (redirectCount >= 2) {
-				results.push({
-					category: 'redirect',
-					operator: '>',
-					path: null,
-					unresolvedContext: true,
-				});
-				continue;
-			}
-
-			// Detect builtin writes (cp, mv, etc.) in the inner POSIX command.
-			// Note: detectPowerShellWrites is not used here because the inner command
-			// of a process substitution is POSIX bash, not PowerShell.
-			const builtinWrites = detectBuiltinWritesFromString(stage);
-			// Plain loop (not spread-push): an adversarial operand count must
-			// not hit the engine's spread-arity limit (#3512 review N-2; the
-			// throw would be fail-closed, but the bound is not ours to lean on).
-			for (const write of builtinWrites) {
-				results.push(write);
-			}
-
-			// Detect redirections in the stage: check >> first to avoid double-matching
-			// when both > and >> patterns could match the same input.
-			const appendMatch = stage.match(/^\s*(.*?)\s*>>(\s*)(\S+)\s*$/);
-			if (appendMatch) {
-				const path = dequoteFallbackOperand(appendMatch[3]);
-				if (path === null) {
-					// #3530 PRR-006(a): withdraw, never drop — the resolver
-					// nulls an unresolvedContext write so the gate denies it.
-					// A bare `continue` here silently removed the write from
-					// the analysis (fail-open with a sibling in-scope write).
-					results.push({
-						category: 'redirect',
-						operator: '>>',
-						path: null,
-						unresolvedContext: true,
-					});
-					continue;
-				}
-				if (path && !isNullDevice(path)) {
-					results.push({ category: 'redirect', operator: '>>', path });
-				}
-			} else {
-				// Only check > if >> did not match (negative lookahead alternative)
-				const writeMatch = stage.match(/^\s*(.*?)\s*>(?!>)(\s*)(\S+)\s*$/);
-				if (writeMatch) {
-					const path = dequoteFallbackOperand(writeMatch[3]);
-					if (path === null) {
-						// #3530 PRR-006(a): withdraw, never drop (see above).
-						results.push({
-							category: 'redirect',
-							operator: '>',
-							path: null,
-							unresolvedContext: true,
-						});
-						continue;
-					}
-					if (path && !isNullDevice(path)) {
-						results.push({ category: 'redirect', operator: '>', path });
-					}
-				} else if (
-					/>/.test(stage.replace(/"[^"]*"|'[^']*'/g, 'Q')) &&
-					!/^\s*\w+(\s+-{1,2}[\w-]+)*\s*$/.test(stage)
-				) {
-					// #3530 PRR-006(b): neither redirect regex matched but the
-					// stage still carries a `>` operator — the (\S+) capture
-					// cannot span a quoted-with-whitespace target, so the
-					// operand is unrecoverable. Withdraw (fail-closed) instead
-					// of emitting nothing; the guard keeps flag-only/benign
-					// stages clean.
-					results.push({
-						category: 'redirect',
-						operator: '>',
-						path: null,
-						unresolvedContext: true,
-					});
-				}
-			}
+		for (const write of analyzeProcSubInnerStages(innerCommand)) {
+			results.push(write);
 		}
 	}
 
 	return results;
+}
+
+/**
+ * One masked process-substitution span (#3539 W5): the `>`/`<` operator, the
+ * span body (the text between the parentheses), and where the placeholder
+ * begins in the RESIDUAL string (the outer-prefix cd test reads the residual
+ * up to this index).
+ */
+interface MaskedProcSubSpan {
+	op: '>' | '<';
+	body: string;
+	residualPlaceholderStart: number;
+}
+
+/**
+ * The placeholder that replaces a masked process-substitution span in the
+ * residual (#3539 W5). It is a token-preserving bare word — the residual
+ * tokenizes exactly like the original except the span is one inert operand —
+ * and it is the one string the detector ALREADY treats as a non-target in
+ * every destination position through the existing sink-device exemption:
+ * `tee PLACEHOLDER` (detectBuiltinWrites isNullDevice), `> PLACEHOLDER`
+ * (isNullDeviceWord in the detection walk, isNullDevice in the resolver
+ * walk), `dd of=PLACEHOLDER`. That suppression is metadata the detectors
+ * already apply to the literal device path — no new string matching, and a
+ * real user operand can never be suppressed by a placeholder collision: a
+ * genuine `/dev/null` operand was already a non-target before W5, and every
+ * other operand text passes through untouched.
+ */
+const PROC_SUB_PLACEHOLDER = '/dev/null';
+
+/**
+ * Mask every UNQUOTED, UNESCAPED, balanced `>(…)`/`<(…)` span of a
+ * parse-failing POSIX command (#3539 W5; RC-5).
+ *
+ * The scanner is quote-aware (single/double quotes, backslash escapes with
+ * the bash double-quote escape set) and comment-aware (a `#` at a word start
+ * begins a comment; `>(` inside a comment or quotes is never masked — real
+ * bash does not run it). Only GLUED `>(` / `<(` spans mask (bash reads
+ * `> (x)`, `>>(x)`, `<<(`, `>&(` as syntax errors, verified against bash 5.x:
+ * masking those would fabricate a parse the real shell rejects). Parenthesis
+ * nesting inside the span is counted.
+ *
+ * Returns null — masking FAILED, the caller keeps the fail-closed
+ * parseError — when any unquoted procsub span is unbalanced, when the scan
+ * hits an ambiguity (an unterminated quote), or when no span was maskable at
+ * all. Otherwise returns the residual text plus one record per masked span.
+ */
+function maskProcSubSpans(
+	command: string,
+): { residual: string; spans: MaskedProcSubSpan[] } | null {
+	const spans: MaskedProcSubSpan[] = [];
+	const parts: string[] = [];
+	let cursor = 0; // start of the pending unmasked slice
+	let i = 0;
+	let state: 'none' | 'single' | 'double' = 'none';
+	const atWordStart = (idx: number): boolean =>
+		idx === 0 || /[\s;|&()<>]/.test(command[idx - 1] ?? '');
+
+	while (i < command.length) {
+		const ch = command[i];
+		if (state === 'single') {
+			if (ch === "'") state = 'none';
+			i++;
+			continue;
+		}
+		if (state === 'double') {
+			if (ch === '\\') {
+				i += 2;
+				continue;
+			}
+			if (ch === '"') state = 'none';
+			i++;
+			continue;
+		}
+		if (ch === '\\') {
+			i += 2;
+			continue;
+		}
+		if (ch === "'") {
+			state = 'single';
+			i++;
+			continue;
+		}
+		if (ch === '"') {
+			state = 'double';
+			i++;
+			continue;
+		}
+		// A `#` at a word start begins a comment: nothing inside it runs, so
+		// a `>(` there is never masked and the comment is copied verbatim.
+		if (ch === '#' && atWordStart(i)) {
+			const newline = command.indexOf('\n', i);
+			i = newline === -1 ? command.length : newline;
+			continue;
+		}
+		if ((ch === '>' || ch === '<') && command[i + 1] === '(') {
+			// Only a glued `>(`/`<(` is a process substitution. `>>`/`<<`/
+			// `>&`/`<>`/`>|` operators consume the character pair first, so
+			// a following `(` belongs to their operand word (a bash syntax
+			// error the residual parse must keep failing on, not a mask).
+			const op: '>' | '<' = ch === '>' ? '>' : '<';
+			const bodyStart = i + 2;
+			let depth = 1;
+			let j = bodyStart;
+			let bodyState: 'none' | 'single' | 'double' = 'none';
+			let closedAt = -1;
+			while (j < command.length) {
+				const c = command[j];
+				if (bodyState === 'single') {
+					if (c === "'") bodyState = 'none';
+					j++;
+					continue;
+				}
+				if (bodyState === 'double') {
+					if (c === '\\') {
+						j += 2;
+						continue;
+					}
+					if (c === '"') bodyState = 'none';
+					j++;
+					continue;
+				}
+				if (c === '\\') {
+					j += 2;
+					continue;
+				}
+				if (c === "'") {
+					bodyState = 'single';
+					j++;
+					continue;
+				}
+				if (c === '"') {
+					bodyState = 'double';
+					j++;
+					continue;
+				}
+				if (c === '(') depth++;
+				else if (c === ')') {
+					depth--;
+					if (depth === 0) {
+						closedAt = j;
+						break;
+					}
+				}
+				j++;
+			}
+			if (closedAt === -1) return null; // unbalanced span: fail-closed
+			parts.push(command.slice(cursor, i));
+			const residualPlaceholderStart = parts.join('').length;
+			parts.push(PROC_SUB_PLACEHOLDER);
+			spans.push({
+				op,
+				body: command.slice(bodyStart, closedAt),
+				residualPlaceholderStart,
+			});
+			i = closedAt + 1;
+			cursor = i;
+			continue;
+		}
+		i++;
+	}
+	if (state !== 'none') return null; // unterminated quote: ambiguous
+	if (spans.length === 0) return null; // nothing maskable
+	parts.push(command.slice(cursor));
+	return { residual: parts.join(''), spans };
+}
+
+/**
+ * The #3518 P-3 cd-context word scan (W1 form: bare cd / pushd / popd word
+ * alternatives, word-boundary anchored), applied to a PREFIX of the residual
+ * — the text before a masked span's placeholder. A directory-selection word
+ * before the span moves the span body's execution context off the starting
+ * cwd; the static model withdraws the span's inner writes instead of
+ * guessing the landing (#3539 W5, v4 constraint 6). Over-matching (a `cd`
+ * inside a string the prefix cut mid-quote) withdraws: fail-closed.
+ */
+const PROCSUB_CD_CONTEXT = /(^|[^\w\\])(?:cd|pushd|popd)\b/;
+
+function procsubContextWithdraws(prefix: string, body: string): boolean {
+	return PROCSUB_CD_CONTEXT.test(prefix) || PROCSUB_CD_CONTEXT.test(body);
 }
 
 /**
@@ -5091,36 +5304,88 @@ export function detectPosixWrites(command: string): WriteAnalysis {
 		collectPipeStdinEvals(ast as BashNode, allWrites);
 	}
 
-	// If parse failed, try regex-based process substitution detection.
-	// This catches commands like `tee >(cat > file.txt)` which bash-parser cannot parse.
+	// #3539 W5 (RC-5): on a parse failure, first try to MASK every balanced
+	// unquoted `>(…)`/`<(…)` span and parse the RESIDUAL. When that fully
+	// succeeds (≥1 span masked, residual parses clean, every masked body
+	// analyzed below, no ambiguity), the OUTER writes come from the normal
+	// AST detectors on the residual — the laundered second write of the
+	// partial-detector era is visible again — and the residual is returned
+	// as `residualCommand` so the gate's resolver tracks cd context for
+	// those outer writes. The masked INNER writes come from the shared
+	// per-stage scan on each span body; they resolve at the starting cwd
+	// unless their body or outer prefix carries a directory change, in
+	// which case they withdraw (`unresolvedContext`, v4 constraint 6).
+	// Anything less than full success keeps the fail-closed parseError —
+	// now unconditionally (a partial-detector find no longer clears it).
+	let forceParseError = false;
+	let residualCommand: string | undefined;
 	if (parseFailed) {
-		const procSubWrites = detectProcessSubstitutionWrites(command);
-		// #3518 P-3: the fallback has no AST, so a `cd` earlier in the same
-		// line cannot move its tracked context — every write it emits would
-		// silently resolve at the STARTING cwd while real bash writes at the
-		// post-cd directory. Withdraw such writes (`unresolvedContext`) so the
-		// resolver nulls them and the gate denies, fail-closed. The scan is a
-		// local text check (no cross-module import): any `;`/`&&`/`||`/newline
-		// separated region whose first word is `cd` with an operand.
-		// #3530 PRR-005: a word boundary, not a separator class — `then cd`,
-		// `do cd`, `{ cd`, `! cd` forms are equally cd-context on a
-		// parse-failing line, and `pushd` changes the directory too.
-		// #3491 W1: bare `cd` (HOME landing), `popd`, and bare `pushd` (stack
-		// swap) change the directory with NO operand — the alternatives are
-		// word-boundary anchored so every directory-selection verb withdraws
-		// its line's fallback writes.
-		// Over-withdraw direction is fail-closed and bounded to parse-failing
-		// (process-substitution) lines whose text merely mentions a
-		// `cd|pushd|popd` word.
-		const cdContext = /(^|[^\w\\])(?:cd|pushd|popd)\b/.test(command);
-		// Plain loop (not spread-push): adversarial operand counts must not
-		// hit the engine's spread-arity limit (#3512 review N-2).
-		for (const write of procSubWrites) {
-			allWrites.push(
-				cdContext && write.unresolvedContext !== true
-					? { ...write, unresolvedContext: true }
-					: write,
-			);
+		const masked = maskProcSubSpans(command);
+		let maskedOk = false;
+		if (masked !== null) {
+			// The residual carries no unquoted procsub span (every one was
+			// masked), so this recursion cannot re-enter the masking branch;
+			// a residual that still fails to parse keeps the parseError.
+			const residualAnalysis = detectPosixWrites(masked.residual);
+			if (residualAnalysis.parseError !== true) {
+				maskedOk = true;
+				// Outer writes: the normal AST detector result on the
+				// residual. Placeholders are inert `/dev/null` operands —
+				// suppressed by the existing sink-device exemption inside
+				// BOTH the detection and resolver walks, so nothing is
+				// removed post-hoc and occurrence numbering is unaffected
+				// (v4 constraint 7).
+				for (const write of residualAnalysis.writes) {
+					allWrites.push(write);
+				}
+				// Inner writes: the shared per-stage scan per masked body —
+				// for BOTH operators (`<(cat > f)` runs its body too). A
+				// body or outer prefix with a directory-selection word
+				// withdraws every write of that span (fail-closed): the
+				// body's landing is not statically knowable.
+				for (const span of masked.spans) {
+					const withdraw = procsubContextWithdraws(
+						masked.residual.slice(0, span.residualPlaceholderStart),
+						span.body,
+					);
+					for (const write of analyzeProcSubInnerStages(span.body)) {
+						allWrites.push(
+							withdraw && write.unresolvedContext !== true
+								? { ...write, unresolvedContext: true }
+								: write,
+						);
+					}
+				}
+				residualCommand = masked.residual;
+			}
+		}
+		if (maskedOk) {
+			parseFailed = false;
+		} else {
+			// Legacy no-mask fallback: whole-command regex scan only. Its
+			// partial success NEVER clears the parse error anymore — that
+			// clearing was the RC-5 laundering defect. Every write it finds
+			// is still emitted (a cd-context line withdraws them, #3518 P-3)
+			// so the analysis stays informative, but the gate rejects the
+			// line on the parse error regardless.
+			forceParseError = true;
+			const procSubWrites = detectProcessSubstitutionWrites(command);
+			// #3518 P-3: the fallback has no AST, so a `cd` earlier in the
+			// same line cannot move its tracked context — every write it
+			// emits would silently resolve at the STARTING cwd while real
+			// bash writes at the post-cd directory. Withdraw such writes
+			// (`unresolvedContext`) so the resolver nulls them and the gate
+			// denies, fail-closed.
+			const cdContext = PROCSUB_CD_CONTEXT.test(command);
+			// Plain loop (not spread-push): adversarial operand counts must
+			// not hit the engine's spread-arity limit (#3512 review N-2).
+			for (const write of procSubWrites) {
+				allWrites.push(
+					cdContext && write.unresolvedContext !== true
+						? { ...write, unresolvedContext: true }
+						: write,
+				);
+			}
 		}
 	}
 
@@ -5188,7 +5453,13 @@ export function detectPosixWrites(command: string): WriteAnalysis {
 	return {
 		writes,
 		hasWrites: writes.length > 0,
-		parseError: parseFailed && writes.length === 0 ? true : undefined,
+		// #3539 W5: the legacy fallback's parseError is now unconditional —
+		// a partial-detector find no longer clears the fail-closed flag.
+		parseError:
+			forceParseError || (parseFailed && writes.length === 0)
+				? true
+				: undefined,
+		residualCommand,
 	};
 }
 
