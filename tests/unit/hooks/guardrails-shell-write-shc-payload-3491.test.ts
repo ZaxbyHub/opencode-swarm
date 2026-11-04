@@ -229,6 +229,69 @@ describe('W4 gate: sh-family flag-cluster payload spellings (fix-round 2)', () =
 	});
 });
 
+// Final-critic fix-round 3: bash-true next-word rule. The round-2 walk
+// returned the CLUSTER TAIL after a mid-cluster `c` as the payload; real
+// bash parses the tail letters as MORE OPTIONS and takes the payload from
+// the NEXT standalone word (critic ground truth with isolated markers,
+// re-verified locally on bash 5.3.9: `bash -ceu 'echo x > m1'` rc=0 creates
+// m1; `bash -c'code'` glued is rc=1 invalid option). The tail rule made
+// every c-not-last spelling below ADMIT — the extracted "payload" was a
+// letter or two while the real payload went unscanned.
+describe('W4 gate: c-not-last clusters — payload is the NEXT word (fix-round 3)', () => {
+	test("bash -cx 'echo x > ../x' denies (tail letters are options)", async () => {
+		const got = await gate(`bash -cx 'echo x > ../x'`);
+		expect(got.verdict).toBe('DENIED');
+		expect(got.message).toMatch(ANY_WRITE_BLOCK);
+		expect(got.message).toMatch(/\.\.[\\/]x/);
+	});
+
+	test("bash -ceu 'echo x > ../x' denies (critic ground-truth shape)", async () => {
+		const got = await gate(`bash -ceu 'echo x > ../x'`);
+		expect(got.verdict).toBe('DENIED');
+		expect(got.message).toMatch(ANY_WRITE_BLOCK);
+	});
+
+	test("sh -ceu 'echo x > ../x' denies", async () => {
+		const got = await gate(`sh -ceu 'echo x > ../x'`);
+		expect(got.verdict).toBe('DENIED');
+		expect(got.message).toMatch(ANY_WRITE_BLOCK);
+	});
+
+	test("bash -ecu 'echo x > ../x' denies", async () => {
+		const got = await gate(`bash -ecu 'echo x > ../x'`);
+		expect(got.verdict).toBe('DENIED');
+		expect(got.message).toMatch(ANY_WRITE_BLOCK);
+	});
+
+	test("bash -cv 'echo x > ../x' denies", async () => {
+		const got = await gate(`bash -cv 'echo x > ../x'`);
+		expect(got.verdict).toBe('DENIED');
+		expect(got.message).toMatch(ANY_WRITE_BLOCK);
+	});
+
+	test("sh -cx 'rm -rf ../../outside' denies (destructive arm, payload extracted)", async () => {
+		const got = await gate(`sh -cx 'rm -rf ../../outside'`, true);
+		expect(got.verdict).toBe('DENIED');
+		expect(got.message).toMatch(ANY_DESTRUCTIVE_BLOCK);
+	});
+
+	test("sudo -D .. sh -cx 'echo x > f' denies through the chdir wrapper", async () => {
+		// The W2 subshell rewrite wraps the unwrapped inner; with the tail
+		// rule the inner "payload" was just `x` and the real write hid.
+		const got = await gate(`sudo -D .. sh -cx 'echo x > f'`);
+		expect(got.verdict).toBe('DENIED');
+		expect(got.message).toMatch(ANY_WRITE_BLOCK);
+		expect(got.message).toMatch(/\.\.[\\/]f/);
+	});
+
+	test("sh -c'echo x > ../x' (tail-glued, invalid bash) stays denied — uncertain class", async () => {
+		// bash rejects the glued spelling (rc=1 invalid option); the walk
+		// classifies it uncertain and the eval classifier routes/denies.
+		const got = await gate(`sh -c'echo x > ../x'`);
+		expect(got.verdict).toBe('DENIED');
+	});
+});
+
 describe('W4 gate: clean-payload controls stay pinned (C5)', () => {
 	test("sh -c 'echo x > ../x' stays denied", async () => {
 		const got = await gate("sh -c 'echo x > ../x'");

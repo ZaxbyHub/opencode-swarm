@@ -3142,7 +3142,7 @@ function collectPipeStdinEvals(node: unknown, out: WriteTarget[]): void {
 }
 
 /**
- * #3491 W4 fix-round-2: the sh-family invocation-flag walk (shared by
+ * #3491 W4 fix-round-2/3: the sh-family invocation-flag walk (shared by
  * detectInterpreterEval here and the dc shell-wrapper extractor in
  * destructive-command.ts — both consume QUOTE-REMOVED word lists). The final
  * critic ground-truthed that `-c` was only recognized as the FIRST token
@@ -3152,9 +3152,17 @@ function collectPipeStdinEvals(node: unknown, out: WriteTarget[]): void {
  *
  * - Short flags may be CLUSTERED (`-xc`, `-lc`, `-eo`); argument-less
  *   members walk on, arg-taking members consume their argument.
- * - Arg-taking members: `c` (the inline payload — argv[2]), `o`/`O` (an
- *   optname, in-cluster tail or next word; a dash-led or empty optname is
- *   undecidable), and the `+o`/`+O` forms.
+ * - `c` selects the inline payload (argv[2]) from the NEXT STANDALONE WORD
+ *   after the option cluster — bash-true (fix-round-3 ground truth, bash
+ *   5.x): the letters after a mid-cluster `c` parse as MORE OPTIONS
+ *   (`bash -ceu 'code'` runs the code), and bash has NO tail-glued payload
+ *   spelling (`bash -c'code'` is rc=1 invalid option — classified
+ *   'uncertain', deny-on-uncertainty). Tail letters are validated as known
+ *   argument-less members; a SECOND arg-taking member after `c` in one
+ *   cluster (`-cc`, `-co`) is an undecidable arg-vs-payload boundary ⇒
+ *   'uncertain'. Words after the payload are $0/$1… and are never scanned.
+ * - Arg-taking members: `o`/`O` (an optname, in-cluster tail or next word; a
+ *   dash-led or empty optname is undecidable), and the `+o`/`+O` forms.
  * - Known long flags: bash's argument-less invocation set plus the two
  *   arg-taking rcfile spellings (spaced and `=value`-glued).
  * - `--` (and a lone `-`) ends option parsing; a non-flag word is the
@@ -3223,10 +3231,28 @@ export function walkShellCommandFlags(
 				const ch = members[j];
 				if (ch === undefined) break;
 				if (ch === 'c') {
-					// The payload rides the cluster tail (`-cecho hi`) or the
-					// NEXT word (`-xc 'echo hi'`); words after it are $0/$1…
-					const tail = members.slice(j + 1);
-					if (tail.length > 0) return { kind: 'payload', payload: tail };
+					// #3491 W4 fix-round-3 (critic ground truth, bash 5.x,
+					// re-verified locally): the payload is the NEXT STANDALONE
+					// word after the option cluster — the remaining tail letters
+					// parse as MORE OPTIONS (`bash -ceu 'code'` runs the code).
+					// Validate the tail before extracting: a second arg-taking
+					// member after `c` in the same cluster (`-cc`, `-co`) is an
+					// undecidable arg-vs-payload boundary, any unknown member is
+					// unknowable-arity, and bash has NO tail-glued payload
+					// spelling (`bash -c'code'` is rc=1 invalid option — the
+					// glued text lands here as tail letters) — all 'uncertain'
+					// (deny-on-uncertainty), never a tail extraction.
+					for (let k = j + 1; k < members.length; k++) {
+						const tailMember = members[k];
+						if (
+							tailMember === 'c' ||
+							tailMember === 'o' ||
+							tailMember === 'O' ||
+							!SHELL_ARGLESS_SHORT_FLAGS.has(tailMember)
+						) {
+							return { kind: 'uncertain' };
+						}
+					}
 					const next = words[i + 1];
 					if (next === undefined) return { kind: 'uncertain' };
 					return { kind: 'payload', payload: next };
