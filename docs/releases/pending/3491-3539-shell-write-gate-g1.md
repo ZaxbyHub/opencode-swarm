@@ -36,8 +36,9 @@
   `/swarm guardrail explain` shares the same preprocessing (#3491 AC2/AC4).
 
 - **Shared `sh -c` payload extractor** (`src/hooks/guardrails/destructive-command.ts`):
-  the payload is the single quote-removed word immediately after `-c` (sh's
-  argv[2] contract), extracted by a quote-aware tokenizer shared with the W2
+  the payload is the single quote-removed word the `-c` flag selects (sh's
+  argv[2] contract: the word after the flag token, or the attached cluster
+  tail `-c'code'`), extracted by a quote-aware tokenizer shared with the W2
   serializer. Trailing positionals (`sh -c 'payload' sh`) and same-kind quote
   concatenation (`'\''`) no longer defeat the unwrap, and words after the
   payload ($0/$1…) are never scanned as commands (#3491 AC5/AC7).
@@ -54,6 +55,20 @@
   write targets answer block, and inspectable evals route through their
   tracked working directory exactly like the gate.
 
+- **sh-family flag-cluster payloads** (`src/hooks/shell-write-detect.ts`,
+  `src/hooks/guardrails/destructive-command.ts`; final-critic round): `-c` is
+  honored wherever the sh getopt grammar puts it — as a CLUSTER member
+  (`sh -xc`, `bash -lc`, `dash -xc`, `bash -ic`, `bash -ec`, `sh -uc`) or
+  after other arg-consuming flags (`bash -eo pipefail -c`) — through one
+  shared invocation-flag walk used by BOTH the dc wrapper extractor (heads
+  may be path-qualified: `/bin/sh`) and `detectInterpreterEval`'s
+  shell-family matcher. The anchored `-c`-first spellings previously
+  ADMITTED cluster forms while real bash executes the payload, and
+  over-blocked benign multi-flag in-scope forms the same way. A script-file
+  operand or `--` carries no payload; an unknown flag of unknowable arity is
+  deny-on-uncertainty (the eval classifier fires, the wrapper never
+  unwraps). Python/perl/ruby cluster handling is untouched (W7/PR-3).
+
 ## Known edges
 
 - `pushd ±N`, `pushd -n`, `popd ±N`, `;&`/`;;&` case fall-through, and
@@ -65,7 +80,10 @@
   unaffected.
 - The `env -C`/`sudo -D` rewrite consults the existing env-flag grammar;
   deeper launcher option tables (sudo `-u`, `time -o`, nice) arrive with the
-  G3 launcher workstream (#3491 AC3/AC4 residuals).
+  G3 launcher workstream (PR-3; #3491 AC3/AC4 residuals).
+- Process-substitution masking and brace-expansion write destinations are
+  the PR-2 workstream's deferred set (not yet in the extractor's disclosed
+  grammar).
 - A same-directory `cd` deliberately does not refresh `OLDPWD` in the model
   (bash does): keeping the state stable avoids spurious control-flow
   divergence, and the omission is conservative/fail-closed. A `CDPATH=`
@@ -79,5 +97,6 @@
   C13 (fixed cd family) and C14 (write suites) stay green.
 - New suites: `guardrails-shell-write-cd-word-forms-3491`,
   `guardrails-shell-write-launcher-env-3491`,
-  `guardrails-shell-write-shc-payload-3491`, and
+  `guardrails-shell-write-shc-payload-3491` (plain, trailing-positional,
+  quote-concat, and flag-cluster payload spellings), and
   `guardrail-explain-shell-write-parity-3491` (explain/gate parity).

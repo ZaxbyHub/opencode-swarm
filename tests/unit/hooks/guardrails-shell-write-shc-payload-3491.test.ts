@@ -182,6 +182,53 @@ describe('W4 gate: positionals are never scanned as commands (group 3)', () => {
 	});
 });
 
+// Final-critic round (fix-round 2): `-c` is honored wherever the sh getopt
+// grammar puts it — as a CLUSTER member (`-xc`, `-lc`) or after other
+// arg-consuming flags (`-eo pipefail -c`) — in both the dc extractor and
+// detectInterpreterEval's shell-family matcher. The anchored `-c`-first
+// regex ADMITTED every cluster spelling below while real bash executes the
+// payload (critic ground-truthed file creation in a scratch ws); the same
+// root cause over-blocked the benign multi-flag in-scope spellings.
+describe('W4 gate: sh-family flag-cluster payload spellings (fix-round 2)', () => {
+	test("sh -xc 'echo x > ../x' denies the cluster-member payload write", async () => {
+		const got = await gate(`sh -xc 'echo x > ../x'`);
+		expect(got.verdict).toBe('DENIED');
+		expect(got.message).toMatch(ANY_WRITE_BLOCK);
+		expect(got.message).toMatch(/\.\.[\\/]x/);
+	});
+
+	test("bash -lc 'rm -rf ../../outside' denies (destructive arm, payload extracted)", async () => {
+		const got = await gate(`bash -lc 'rm -rf ../../outside'`, true);
+		expect(got.verdict).toBe('DENIED');
+		expect(got.message).toMatch(ANY_DESTRUCTIVE_BLOCK);
+	});
+
+	test("env sh -xc 'echo x > ../x' denies through the env unwrap", async () => {
+		const got = await gate(`env sh -xc 'echo x > ../x'`);
+		expect(got.verdict).toBe('DENIED');
+		expect(got.message).toMatch(ANY_WRITE_BLOCK);
+	});
+
+	test("/bin/sh -xc 'echo x > ../x' denies the path-qualified cluster form", async () => {
+		const got = await gate(`/bin/sh -xc 'echo x > ../x'`);
+		expect(got.verdict).toBe('DENIED');
+		expect(got.message).toMatch(ANY_WRITE_BLOCK);
+	});
+
+	test("sh -xc 'echo x > src/ok' admits — the in-scope cluster payload control", async () => {
+		const got = await gate(`sh -xc 'echo x > src/ok'`);
+		expect(got.verdict).toBe('ADMITTED');
+	});
+
+	test("bash -eo pipefail -c 'echo x > src/ok' admits — multi-flag in-scope payload (over-block fixed)", async () => {
+		// The eval classifier routed this at the cwd (out of scope src/)
+		// because the extractor never reached the -c payload; extraction now
+		// analyzes the payload's own in-scope write like the plain spelling.
+		const got = await gate(`bash -eo pipefail -c 'echo x > src/ok'`);
+		expect(got.verdict).toBe('ADMITTED');
+	});
+});
+
 describe('W4 gate: clean-payload controls stay pinned (C5)', () => {
 	test("sh -c 'echo x > ../x' stays denied", async () => {
 		const got = await gate("sh -c 'echo x > ../x'");

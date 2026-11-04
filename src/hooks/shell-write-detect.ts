@@ -269,8 +269,9 @@ export function mergeWriteAnalyses(
 		);
 	};
 	// A key collision that involves an emptyDirectoryRemoval write demotes the
-	// kept write (see dedupeWriteTargets): the two readings may be different
-	// targets or operations, so neither keeps the bare-rmdir exemption.
+	// kept write (issue #3450 / PR #3456 review F-2): the two readings may be
+	// different targets or operations, so neither keeps the bare-rmdir
+	// exemption.
 	const keptIndex = new Map<string, number>();
 	const writes: WriteTarget[] = [];
 	const demoteKept = (key: string): void => {
@@ -323,33 +324,6 @@ function withoutEmptyDirectoryRemoval(write: WriteTarget): WriteTarget {
 	if (write.emptyDirectoryRemoval !== true) return write;
 	const { emptyDirectoryRemoval: _dropped, ...rest } = write;
 	return rest;
-}
-
-/**
- * Issue #3450 (PR #3456 review F-2): the dedupe key is blind to the working
- * directory a write runs in and to options that change its meaning, so two
- * writes with the same key can be different targets (`rmdir a; cd ../o &&
- * rmdir a`) or different operations (`rmdir a; rmdir -p a`). When a key
- * collision involves a write tagged `emptyDirectoryRemoval`, the kept write
- * is DEMOTED (tag removed) so the ordinary declared-scope check applies to it
- * — fail-closed, the pre-exemption behaviour. Once demoted the kept write is
- * identical to any untagged write it collided with, so keeping one is enough.
- * First occurrence wins and order is preserved, exactly as before.
- */
-function dedupeWriteTargets(writes: readonly WriteTarget[]): WriteTarget[] {
-	const keptIndex = new Map<string, number>();
-	const kept: WriteTarget[] = [];
-	for (const write of writes) {
-		const key = buildDedupeKey(write.category, write.operator, write.path);
-		const index = keptIndex.get(key);
-		if (index === undefined) {
-			keptIndex.set(key, kept.length);
-			kept.push(write);
-			continue;
-		}
-		kept[index] = withoutEmptyDirectoryRemoval(kept[index]);
-	}
-	return kept;
 }
 
 // ---------------------------------------------------------------------------
@@ -1684,20 +1658,25 @@ function envFlagConsumesNextWord(token: string): boolean {
 	return ENV_FLAGS_WITH_ARG.has(token);
 }
 
-function canonicalInterpreterName(cmd: unknown): string | null {
-	const name = getCommandName(cmd);
-	if (!name) return null;
-	const words = [name, ...getSuffixWords(cmd)];
+/**
+ * Walk the transparent wrapper chain (env/command/exec + their own flags)
+ * over `[commandName, ...suffixWords]` and return the index of the
+ * INTERPRETER word, or -1 when a wrapper has no program word (#3491 W4
+ * fix-round-2: extracted from canonicalInterpreterName so the shell-family
+ * flag walk can start at the interpreter's own arguments).
+ *
+ * The cursor only moves forward, so `command env python -c` advances
+ * name→env→python instead of re-reading the first suffix word on every hop
+ * (the round-1 critic chain bug). No hop cap: every iteration consumes at
+ * least the wrapper word, so the cursor bound alone terminates the loop
+ * (impl-review r3 finding 4 — a fixed cap re-opened a depth-N+1 bypass for
+ * no safety benefit).
+ */
+function canonicalInterpreterAt(words: string[]): number {
 	let i = 0;
-	// Walk the transparent wrapper chain. The cursor only moves forward, so
-	// `command env python -c` advances name→env→python instead of re-reading
-	// the first suffix word on every hop (the round-1 critic chain bug). No
-	// hop cap: every iteration consumes at least the wrapper word, so the
-	// cursor bound alone terminates the loop (impl-review r3 finding 4 — a
-	// fixed cap re-opened a depth-N+1 bypass for no safety benefit).
 	for (let hop = 0; hop < words.length; hop++) {
 		const base = basenameAnySep(words[i] ?? '');
-		if (base !== 'env' && base !== 'command' && base !== 'exec') break;
+		if (base !== 'env' && base !== 'command' && base !== 'exec') return i;
 		i += 1; // consume the wrapper word
 		if (base === 'env') {
 			while (i < words.length) {
@@ -1736,8 +1715,17 @@ function canonicalInterpreterName(cmd: unknown): string | null {
 				break;
 			}
 		}
-		if (i >= words.length) return null; // wrapper with no program word
+		if (i >= words.length) return -1; // wrapper with no program word
 	}
+	return i;
+}
+
+function canonicalInterpreterName(cmd: unknown): string | null {
+	const name = getCommandName(cmd);
+	if (!name) return null;
+	const words = [name, ...getSuffixWords(cmd)];
+	const i = canonicalInterpreterAt(words);
+	if (i < 0) return null;
 	const word = words[i];
 	if (word === undefined) return null;
 	const full = basenameAnySep(word);
@@ -3154,6 +3142,138 @@ function collectPipeStdinEvals(node: unknown, out: WriteTarget[]): void {
 }
 
 /**
+ * #3491 W4 fix-round-2: the sh-family invocation-flag walk (shared by
+ * detectInterpreterEval here and the dc shell-wrapper extractor in
+ * destructive-command.ts — both consume QUOTE-REMOVED word lists). The final
+ * critic ground-truthed that `-c` was only recognized as the FIRST token
+ * after the shell name: `sh -xc 'echo x > ../x'`, `bash -lc`, `dash -xc`,
+ * `env sh -xc`, `/bin/sh -xc` all ADMITTED while real bash executes the
+ * payload. The walk follows the sh getopt grammar instead:
+ *
+ * - Short flags may be CLUSTERED (`-xc`, `-lc`, `-eo`); argument-less
+ *   members walk on, arg-taking members consume their argument.
+ * - Arg-taking members: `c` (the inline payload — argv[2]), `o`/`O` (an
+ *   optname, in-cluster tail or next word; a dash-led or empty optname is
+ *   undecidable), and the `+o`/`+O` forms.
+ * - Known long flags: bash's argument-less invocation set plus the two
+ *   arg-taking rcfile spellings (spaced and `=value`-glued).
+ * - `--` (and a lone `-`) ends option parsing; a non-flag word is the
+ *   script-file operand — no inline payload exists in either shape.
+ *
+ * Any token the walk cannot classify (an unknown short/long flag whose arity
+ * is unknowable) yields 'uncertain' — consumers must fail closed on it,
+ * never admit (deny-on-uncertainty).
+ */
+export type ShellCommandFlagWalk =
+	| { kind: 'payload'; payload: string }
+	| { kind: 'script' }
+	| { kind: 'uncertain' };
+
+/** Argument-less short flag members (sh/bash/dash/zsh/ksh invocation union). */
+const SHELL_ARGLESS_SHORT_FLAGS = new Set([...'abefhiklmnprsuvxBCDEHVP']);
+/** bash argument-less long invocation flags (dash/zsh share the common ones). */
+const SHELL_ARGLESS_LONG_FLAGS = new Set([
+	'--debugger',
+	'--dump-po-strings',
+	'--dump-strings',
+	'--help',
+	'--login',
+	'--noediting',
+	'--noprofile',
+	'--norc',
+	'--posix',
+	'--restricted',
+	'--verbose',
+	'--version',
+]);
+/** bash arg-taking long invocation flags (`--init-file FILE`, `--rcfile FILE`). */
+const SHELL_ARG_TAKING_LONG_FLAGS = new Set(['--init-file', '--rcfile']);
+
+export function walkShellCommandFlags(
+	words: readonly string[],
+): ShellCommandFlagWalk {
+	let i = 0;
+	while (i < words.length) {
+		const token = words[i];
+		if (token === undefined) break;
+		if (token === '--' || token === '-') return { kind: 'script' };
+		if (token.startsWith('--')) {
+			const eq = token.indexOf('=');
+			const head = eq === -1 ? token : token.slice(0, eq);
+			if (SHELL_ARG_TAKING_LONG_FLAGS.has(head)) {
+				if (eq === -1) {
+					const arg = words[i + 1];
+					if (arg === undefined) return { kind: 'uncertain' };
+					i += 2;
+				} else {
+					i += 1;
+				}
+				continue;
+			}
+			if (SHELL_ARGLESS_LONG_FLAGS.has(head)) {
+				i += 1;
+				continue;
+			}
+			return { kind: 'uncertain' };
+		}
+		if (token.startsWith('-') && token.length > 1) {
+			const members = token.slice(1);
+			let consumedSeparateArg = false;
+			for (let j = 0; j < members.length; j++) {
+				const ch = members[j];
+				if (ch === undefined) break;
+				if (ch === 'c') {
+					// The payload rides the cluster tail (`-cecho hi`) or the
+					// NEXT word (`-xc 'echo hi'`); words after it are $0/$1…
+					const tail = members.slice(j + 1);
+					if (tail.length > 0) return { kind: 'payload', payload: tail };
+					const next = words[i + 1];
+					if (next === undefined) return { kind: 'uncertain' };
+					return { kind: 'payload', payload: next };
+				}
+				if (ch === 'o' || ch === 'O') {
+					// The optname rides the tail (`-opipefail`) or the next
+					// word (`-o pipefail`); a dash-led or empty one is not a
+					// valid option name and the walk cannot decide.
+					const tail = members.slice(j + 1);
+					const optname = tail.length > 0 ? tail : words[i + 1];
+					if (
+						optname === undefined ||
+						optname === '' ||
+						optname.startsWith('-')
+					) {
+						return { kind: 'uncertain' };
+					}
+					consumedSeparateArg = tail.length === 0;
+					break;
+				}
+				if (!SHELL_ARGLESS_SHORT_FLAGS.has(ch)) {
+					return { kind: 'uncertain' };
+				}
+			}
+			i += consumedSeparateArg ? 2 : 1;
+			continue;
+		}
+		if (token.startsWith('+') && token.length > 1) {
+			const members = token.slice(1);
+			const ch = members[0];
+			if (ch !== 'o' && ch !== 'O') return { kind: 'uncertain' };
+			const tail = members.slice(1);
+			const optname = tail.length > 0 ? tail : words[i + 1];
+			if (optname === undefined || optname === '' || optname.startsWith('-')) {
+				return { kind: 'uncertain' };
+			}
+			i += tail.length > 0 ? 1 : 2;
+			continue;
+		}
+		// A non-flag word: the script-file operand (or a $0 after -c, but the
+		// -c case already returned). No inline payload in this invocation.
+		return { kind: 'script' };
+	}
+	return { kind: 'script' };
+}
+
+/**
  * Detect interpreter eval: python -c, node -e, bun -e, ruby -e, perl -e, php -r.
  * These are flagged as potential write effects because inline code can write files.
  */
@@ -3205,15 +3325,41 @@ function detectInterpreterEval(cmd: unknown): WriteTarget[] {
 		return results;
 	}
 
-	const relevantFlags = evalFlags[canonical] ?? [];
-	// Match exact flag (-c), equals-glued (-c=CODE), or directly-glued (-cCODE / -c'code')
-	const hasEvalFlag = suffixWords.some((word) =>
-		relevantFlags.some(
-			(f) => word === f || (word.startsWith(f) && word.length > f.length),
-		),
-	);
-
-	if (!hasEvalFlag) return [];
+	// #3491 W4 fix-round-2: the SHELL family classifies through the shared
+	// invocation-flag walk (walkShellCommandFlags) — `-c` may be a CLUSTER
+	// member (`bash -lc 'code'`) or follow other arg-consuming flags
+	// (`bash -eo pipefail -c 'code'`), and only the words AFTER the
+	// interpreter verb (through the env/command/exec wrapper chain) are its
+	// own arguments. A 'script' outcome (a script-file operand, or `--`)
+	// carries no inline payload; an 'uncertain' outcome (an unknown flag of
+	// unknowable arity) is deny-on-uncertainty — it classifies as an eval so
+	// the gate routes or denies, never admits. Python/perl/ruby and the
+	// other interpreters keep the positional flag matcher below (their
+	// cluster grammar is the W7/PR-3 workstream — deliberately untouched).
+	const SHELL_FLAG_WALK_CANONICALS = new Set([
+		'bash',
+		'sh',
+		'dash',
+		'zsh',
+		'ksh',
+	]);
+	if (SHELL_FLAG_WALK_CANONICALS.has(canonical)) {
+		const words = [name, ...suffixWords];
+		const interpreterIndex = canonicalInterpreterAt(words);
+		const shellArgs =
+			interpreterIndex >= 0 ? words.slice(interpreterIndex + 1) : suffixWords;
+		const walk = walkShellCommandFlags(shellArgs);
+		if (walk.kind === 'script') return results;
+	} else {
+		const relevantFlags = evalFlags[canonical] ?? [];
+		// Match exact flag (-c), equals-glued (-c=CODE), or directly-glued (-cCODE / -c'code')
+		const hasEvalFlag = suffixWords.some((word) =>
+			relevantFlags.some(
+				(f) => word === f || (word.startsWith(f) && word.length > f.length),
+			),
+		);
+		if (!hasEvalFlag) return results;
+	}
 
 	// Interpreter eval is a write effect even without a specific file target.
 	// capability marks the inspectable inline-code class the gate routes
