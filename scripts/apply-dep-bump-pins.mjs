@@ -35,7 +35,7 @@ function fail(message) {
 function parseSpecs() {
 	const raw = process.env.PIN_SPECS ?? '';
 	if (raw.length === 0) fail('PIN_SPECS is empty');
-	if (raw.length > MAX_PIN_SPECS_BYTES) fail('PIN_SPECS exceeds the 8 KiB bound');
+	if (Buffer.byteLength(raw, 'utf8') > MAX_PIN_SPECS_BYTES) fail('PIN_SPECS exceeds the 8 KiB bound');
 	let parsed;
 	try {
 		parsed = JSON.parse(raw);

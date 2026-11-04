@@ -13,106 +13,30 @@ import {
 	main,
 	mergeGroupDependencyBumpProvenance,
 } from '../../../scripts/check-required-check-contract';
+// Frozen acceptance surface (C1/C2/C3) for the dependency-bump channel arm (.agents/issue-traces/3501-3285-3527-dep-bump-channel/05-fix-plan.md).
+// Stateless helpers live in tests/helpers/dep-bump-channel-fixtures.ts (FR-006 split; every test leg stays in this frozen path).
+import {
+	BASE_PACKAGE_JSON,
+	BOT_NAME,
+	botGit,
+	CHANNEL_BRANCH,
+	channelPackageJson,
+	commitWorktree,
+	DEP_BUMP_TRAILERS,
+	dep,
+	git,
+	initChannelRepo,
+	MERGE_SUBJECT,
+	MISSING_VERSION_TRAILERS,
+	PIN_TEST_FILE,
+	pullRequestPayload,
+	RELEASE_MERGE_SUBJECT,
+	REPO,
+	runReleaseOwnerMain,
+	trailerMessage,
+} from '../../helpers/dep-bump-channel-fixtures';
 import { safeRmRecursive } from '../../helpers/safe-test-dir';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
-
-// Frozen acceptance surface (C1/C2/C3) for the dependency-bump channel arm (.agents/issue-traces/3501-3285-3527-dep-bump-channel/05-fix-plan.md).
-const BOT_NAME = 'github-actions[bot]';
-const BOT_EMAIL = '41898282+github-actions[bot]@users.noreply.github.com';
-const REPO = 'ZaxbyHub/opencode-swarm';
-const CHANNEL_BRANCH = 'dep-bump--zod--abcd1234';
-const MERGE_SUBJECT = `Merge pull request #3580 from ZaxbyHub/${CHANNEL_BRANCH}`;
-const RELEASE_MERGE_SUBJECT =
-	'Merge pull request #1 from ZaxbyHub/release-please--branches--main';
-const PIN_TEST_FILE = 'tests/unit/scripts/generate-config-schema.test.ts';
-const DEP_BUMP_TRAILERS = [
-	'X-Dep-Bump-Channel: dependency-bump',
-	'X-Dep-Bump-Package: zod',
-	'X-Dep-Bump-Version: 4.6.7',
-	'X-Dep-Bump-Advisory: GHSA-mrhx-c7xc-m3w5',
-];
-const MISSING_VERSION_TRAILERS = DEP_BUMP_TRAILERS.filter(
-	(line) => !line.startsWith('X-Dep-Bump-Version:'),
-);
-const BASE_PACKAGE_JSON = `${JSON.stringify(
-	{
-		version: '7.0.0',
-		meta: null,
-		scripts: { build: 'bun run build' },
-		dependencies: { zod: '4.3.6' },
-		devDependencies: { typescript: '5.9.2' },
-	},
-	null,
-	2,
-)}\n`;
-
-function git(cwd: string, ...args: string[]): string {
-	const proc = Bun.spawnSync({
-		cmd: ['git', ...args],
-		cwd,
-		stdin: 'ignore',
-		stdout: 'pipe',
-		stderr: 'pipe',
-		timeout: 30_000,
-	});
-	if (proc.exitCode !== 0) {
-		throw new Error(`git ${args.join(' ')} failed: ${proc.stderr.toString()}`);
-	}
-	return proc.stdout.toString().trim();
-}
-
-const BOT_IDENTITY = [
-	'-c',
-	`user.name=${BOT_NAME}`,
-	'-c',
-	`user.email=${BOT_EMAIL}`,
-];
-function botGit(cwd: string, ...args: string[]): string {
-	return git(cwd, ...BOT_IDENTITY, ...args);
-}
-
-function trailerMessage(trailers: string[]): string {
-	return ['chore(deps): bump zod to 4.6.7', '', ...trailers].join('\n');
-}
-
-/** The legitimate channel delta: zod 4.3.6 -> 4.6.7 (+ fast-check declared). */
-function channelPackageJson(fastCheck: boolean): string {
-	const parsed = JSON.parse(BASE_PACKAGE_JSON) as {
-		dependencies: Record<string, string>;
-		devDependencies: Record<string, string>;
-	};
-	parsed.dependencies = { zod: '4.6.7' };
-	if (fastCheck) {
-		parsed.devDependencies = {
-			...parsed.devDependencies,
-			'fast-check': '^4.9.0',
-		};
-	}
-	return `${JSON.stringify(parsed, null, 2)}\n`;
-}
-
-function initChannelRepo(prefix: string, options: { pinFiles?: boolean } = {}) {
-	const root = canonicalMkdtemp(prefix);
-	git(root, 'init', '-q', '-b', 'main');
-	git(root, 'config', 'user.email', 'test@example.com');
-	git(root, 'config', 'user.name', 'Test');
-	writeFileSync(join(root, 'package.json'), BASE_PACKAGE_JSON);
-	writeFileSync(join(root, 'bun.lock'), '// lockfileVersion: 1\n');
-	if (options.pinFiles) {
-		mkdirSync(join(root, 'tests', 'unit', 'scripts'), { recursive: true });
-		writeFileSync(join(root, PIN_TEST_FILE), '// pinned to zod 4.3.6\n');
-	}
-	git(root, 'add', '.');
-	git(root, 'commit', '-q', '-m', 'base');
-	return { root, base: git(root, 'rev-parse', 'HEAD') };
-}
-
-function commitWorktree(root: string, message: string, bot = false): string {
-	git(root, 'add', '-A');
-	const run = bot ? botGit : git;
-	run(root, 'commit', '-q', '-m', message);
-	return git(root, 'rev-parse', 'HEAD');
-}
 
 function buildChannelPullRequestFixture(
 	variant: 'authorized' | 'human-second-commit',
@@ -209,11 +133,12 @@ function buildBranchProvenanceFixture() {
 		trailerMessage(DEP_BUMP_TRAILERS.slice(0, 3)),
 		true,
 	);
-	// Mutation M3 closes here: a commit missing the CHANNEL trailer
-	// specifically (every other trailer present) must be denied.
+	// Mutation M3 closes here: a commit missing the CHANNEL trailer specifically must be denied.
 	const missingChannelTrailer = leg(
 		trailerMessage(
-			DEP_BUMP_TRAILERS.filter((line) => !line.startsWith('X-Dep-Bump-Channel:')),
+			DEP_BUMP_TRAILERS.filter(
+				(line) => !line.startsWith('X-Dep-Bump-Channel:'),
+			),
 		),
 		true,
 	);
@@ -257,65 +182,6 @@ function buildOwnerScopeFixture() {
 		legitDelta: scopeLeg(channelPackageJson(true)),
 	};
 	return { root, base, legs };
-}
-
-type DepBumpInput = Parameters<typeof deriveDependencyBumpAutomation>[0];
-
-function dep(input: Partial<DepBumpInput>): boolean {
-	return deriveDependencyBumpAutomation({
-		event: 'pull_request',
-		actor: BOT_NAME,
-		bumpBranch: CHANNEL_BRANCH,
-		trustedProvenance: true,
-		commitProvenance: true,
-		dependencyScope: true,
-		...input,
-	});
-}
-
-function pullRequestPayload(base: string, head: string) {
-	return {
-		pull_request: {
-			base: { sha: base },
-			head: { sha: head, ref: CHANNEL_BRANCH, repo: { full_name: REPO } },
-			user: { login: BOT_NAME },
-		},
-	};
-}
-
-function runReleaseOwnerMain(
-	root: string,
-	eventName: string,
-	actor: string,
-	payload: Record<string, unknown>,
-): { exit: number; stdout: string } {
-	const eventPath = join(root, 'event.json');
-	writeFileSync(eventPath, JSON.stringify(payload));
-	const updates = {
-		GITHUB_EVENT_NAME: eventName,
-		GITHUB_ACTOR: actor,
-		GITHUB_REPOSITORY: REPO,
-		GITHUB_EVENT_PATH: eventPath,
-	};
-	const previous = Object.fromEntries(
-		Object.keys(updates).map((key) => [key, process.env[key]]),
-	);
-	Object.assign(process.env, updates);
-	const lines: string[] = [];
-	const originalLog = console.log;
-	console.log = (...args: unknown[]) => {
-		lines.push(args.map(String).join(' '));
-	};
-	try {
-		return { exit: main(['--release-owner'], root), stdout: lines.join('\n') };
-	} finally {
-		console.log = originalLog;
-		for (const key of Object.keys(updates)) {
-			const value = previous[key];
-			if (value === undefined) delete process.env[key];
-			else process.env[key] = value;
-		}
-	}
 }
 
 describe('channel authorization arm (C1)', () => {

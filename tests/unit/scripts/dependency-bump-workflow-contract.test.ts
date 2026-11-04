@@ -333,6 +333,22 @@ describe('dependency-bump workflow contract (frozen check C7, trace 3501-3285-35
 		expect(run).toContain('--head');
 	});
 
+	test('commit argv is built as an array, never command-substitution quoting (impl-review blocker 1)', () => {
+		// Command-substitution output is NOT re-parsed for quotes: a
+		// $(printf -- '-m "%s"') form splits each trailer into two tokens and
+		// embeds literal quotes, so the commit fails and the guard's
+		// ^X-Dep-Bump-Channel: dependency-bump$ trailer match breaks — every
+		// dispatch would die here. Pin the argv-array shape.
+		const text = script();
+		const commitStep = text.indexOf('COMMIT_ARGS=(commit -m');
+		expect(commitStep).toBeGreaterThanOrEqual(0);
+		expect(text).toContain('COMMIT_ARGS+=(-m "$trailer")');
+		expect(text).toContain('git "${COMMIT_ARGS[@]}"');
+		for (const forbidden of ["$(printf -- '-m", '$(printf %-m']) {
+			expect(text).not.toContain(forbidden);
+		}
+	});
+
 	test('no raw input interpolation: run blocks never embed ${{ inputs.* }} or ${{ github.event.* }} expressions, and GH_TOKEN maps only from secrets.GITHUB_TOKEN', () => {
 		const offenders: string[] = [];
 		for (const step of steps()) {

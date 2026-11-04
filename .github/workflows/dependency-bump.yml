@@ -89,6 +89,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: main
           fetch-depth: 0
           persist-credentials: false
 
@@ -106,10 +107,10 @@ jobs:
           if [[ -n "$ADVISORY" && -n "$REASON" ]]; then fail "advisory and reason are mutually exclusive"; fi
           if [[ -z "$ADVISORY" && -z "$REASON" ]]; then fail "exactly one of advisory or reason is required"; fi
           [[ "${#ADVISORY}" -le 200 && "${#REASON}" -le 200 ]] || fail "advisory/reason too long"
-          if printf '%s' "$ADVISORY$REASON" | LC_ALL=C grep -q $'[\r\n]'; then fail "advisory/reason must not contain CR/LF"; fi
+          case "$ADVISORY$REASON" in *$'\r'*|*$'\n'*) fail "advisory/reason must not contain CR/LF";; esac
           [[ "$DEPENDENCY_KIND" == "dependencies" || "$DEPENDENCY_KIND" == "devDependencies" ]] || fail "dependency_kind rejected"
           if [[ -n "$PIN_SPECS" ]]; then
-            [[ "${#PIN_SPECS}" -le 8192 ]] || fail "pin_specs exceeds the 8 KiB bound"
+            [[ "$(printf '%s' "$PIN_SPECS" | wc -c)" -le 8192 ]] || fail "pin_specs exceeds the 8 KiB bound"
             node -e '
               const specs = JSON.parse(process.env.PIN_SPECS ?? "");
               if (!Array.isArray(specs) || specs.length < 1 || specs.length > 6) process.exit(1);
@@ -143,7 +144,7 @@ jobs:
           HASH8="$(printf '%s' "$CANONICAL" | sha256sum | cut -c1-8)"
           SANITIZED="$(printf '%s' "$PACKAGE" | tr -c 'a-z0-9' '-' | sed 's/-$//')"
           BRANCH="dep-bump--${SANITIZED}--${HASH8}"
-          git check-ref-format --branch "refs/heads/$BRANCH" || fail "branch name rejected"
+          git check-ref-format --branch "$BRANCH" || fail "branch name rejected"
           printf '%s' "$BRANCH" > "$RUNNER_TEMP/branch.txt"
 
       - name: Configure bot identity and create the channel branch
@@ -272,9 +273,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Build the argv as an array: command-substitution quoting is NOT
+          # re-parsed by bash, so a $(printf '-m "%s"') form would split each
+          # trailer into two tokens and embed literal quotes that break the
+          # guard's ^X-Dep-Bump-Channel: dependency-bump$ trailer match.
           TRAILERS=("X-Dep-Bump-Channel: dependency-bump" "X-Dep-Bump-Package: $PACKAGE" "X-Dep-Bump-Version: $VERSION")
           if [[ -n "$ADVISORY" ]]; then TRAILERS+=("X-Dep-Bump-Advisory: $ADVISORY"); else TRAILERS+=("X-Dep-Bump-Reason: $REASON"); fi
-          git commit -m "chore(deps): bump $PACKAGE to $VERSION" $(printf -- '-m "%s" ' "${TRAILERS[@]}")
+          COMMIT_ARGS=(commit -m "chore(deps): bump $PACKAGE to $VERSION")
+          for trailer in "${TRAILERS[@]}"; do
+            COMMIT_ARGS+=(-m "$trailer")
+          done
+          git "${COMMIT_ARGS[@]}"
 
       - name: Push and open (or refresh) the channel PR
         shell: bash
@@ -297,9 +306,9 @@ jobs:
             OWNER="$(printf '%s' "$PR_JSON" | node -e 'let d="";process.stdin.on("data",(c)=>d+=c).on("end",()=>console.log(JSON.parse(d).headRepositoryOwner.login))')"
             EXISTING_SHA="$(printf '%s' "$PR_JSON" | node -e 'let d="";process.stdin.on("data",(c)=>d+=c).on("end",()=>console.log(JSON.parse(d).headRefOid))')"
             [[ "$STATE" == "OPEN" && "$BASE_REF" == "main" && "$OWNER" == "ZaxbyHub" ]] || { echo "::error::existing PR for $BRANCH is not an open same-repo main-based PR"; exit 1; }
-            git show -s --format=%B "$EXISTING_SHA" | grep -q '^X-Dep-Bump-Channel: dependency-bump$' || { echo "::error::existing PR head lacks the channel trailer"; exit 1; }
-            git show -s --format=%B "$EXISTING_SHA" | grep -q "^X-Dep-Bump-Package: $PACKAGE$" || { echo "::error::existing PR head names a different package"; exit 1; }
-            git show -s --format=%B "$EXISTING_SHA" | grep -q "^X-Dep-Bump-Version: $VERSION$" || { echo "::error::existing PR head names a different version"; exit 1; }
+            git show -s --format=%B "$EXISTING_SHA" | grep -Fqx 'X-Dep-Bump-Channel: dependency-bump' || { echo "::error::existing PR head lacks the channel trailer"; exit 1; }
+            git show -s --format=%B "$EXISTING_SHA" | grep -Fqx "X-Dep-Bump-Package: $PACKAGE" || { echo "::error::existing PR head names a different package"; exit 1; }
+            git show -s --format=%B "$EXISTING_SHA" | grep -Fqx "X-Dep-Bump-Version: $VERSION" || { echo "::error::existing PR head names a different version"; exit 1; }
           elif grep -q 'no pull requests found' "$RUNNER_TEMP/prview.err"; then
             echo "no existing PR for $BRANCH; creating"
           else
