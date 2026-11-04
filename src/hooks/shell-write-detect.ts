@@ -67,7 +67,8 @@ export type WriteCategory =
 	| 'network_download'
 	| 'archive_extract'
 	| 'git_destructive'
-	| 'patch_apply';
+	| 'patch_apply'
+	| 'launcher_write';
 
 /**
  * A single write target detected in a shell command.
@@ -165,6 +166,14 @@ export interface WriteAnalysis {
 	 * masking path (including the legacy no-mask fallback).
 	 */
 	residualCommand?: string;
+	/**
+	 * #3491 W3: true when any leaf command's wrapper-chain walk exceeded the
+	 * paranoid absolute bound (DETECTOR_UNWRAP_PARANOID_BOUND, 64) — a
+	 * machine-generated depth chain the model refuses to inspect. The gate
+	 * and the explain mirror consult this BEFORE every no-write early return
+	 * and fail closed on it.
+	 */
+	unwrapDepthExceeded?: boolean;
 }
 
 /**
@@ -237,7 +246,11 @@ export function mergeWriteAnalyses(
 	additionalIsAuthoritative = true,
 	wrapperDeclared = false,
 ): WriteAnalysis {
-	if (additional.writes.length === 0 && !additional.hasWrites) {
+	if (
+		additional.writes.length === 0 &&
+		!additional.hasWrites &&
+		!additional.unwrapDepthExceeded
+	) {
 		return primary;
 	}
 	// #3099 round-4 Critical 2: when BOTH grammars claim the same construct
@@ -333,6 +346,11 @@ export function mergeWriteAnalyses(
 		// Windows detectors never mask), so the primary's residual — when
 		// present — is the one the gate/explain resolver must use.
 		residualCommand: primary.residualCommand,
+		// #3491 W3: the depth-exceeded flag is fail-closed on EITHER side —
+		// a Windows-only reading of a depth-abuse chain must not launder the
+		// POSIX side's refusal to inspect.
+		unwrapDepthExceeded:
+			primary.unwrapDepthExceeded || additional.unwrapDepthExceeded,
 	};
 }
 
@@ -2585,6 +2603,464 @@ function pushExpandedDestination(
 	}
 }
 
+// ============================================================================
+// Per-manual launcher option grammar (#3491 W3)
+// ============================================================================
+
+/**
+ * Outcome of walking ONE launcher's own option region over the words that
+ * follow the launcher word (#3491 W3). Single source of truth for BOTH the
+ * destructive arm's wrapper strip (destructive-command.ts consumes
+ * {@link walkLauncherOptions} through the shared word list) and the write
+ * arm's leaf walk (`detectorCommandPartsFromWords` delegates here).
+ *
+ * - `inner`: an execution tail exists — the wrapped command starts at
+ *   `innerIndex` (0-based into the words the walk received). `timeOutputFile`
+ *   carries the GNU `-o FILE` timing-report destination when present (an
+ *   ADDITIONAL write target, emitted by detectLauncherWrites).
+ * - `benign`: nothing executes (query modes, option-only invocations,
+ *   `--help`). The caller must NOT unwrap and must not deny.
+ * - `edit`: `sudo -e` — the operands from `editStartIndex` are EDIT TARGETS
+ *   (write-class), not an execution tail.
+ * - `interactive`: `sudo -i`/`-s` with no command word — an interactive root
+ *   shell. The gate denies (fail-closed; the plan round-2 mode boundary).
+ * - `uncertain`: an unknown option cluster with remaining words — "every
+ *   remaining word is a potential execution tail" from `tailIndex`
+ *   (deny-on-uncertainty; `tailIndex` beyond the last word means benign).
+ */
+export type LauncherWalkOutcome =
+	| {
+			kind: 'inner';
+			innerIndex: number;
+			timeOutputFile?: string;
+			/** sudo -D/--chdir operand (first wins) — the W2 chdir composition. */
+			sudoChdir?: string;
+	  }
+	| { kind: 'benign' }
+	| { kind: 'edit'; editStartIndex: number }
+	| { kind: 'interactive' }
+	| { kind: 'uncertain'; tailIndex: number };
+
+/**
+ * sudo(8) (1.9.x) short-option members, grouped by the mode table of
+ * 05-fix-plan W3 (doc-sourced; the Windows host's sudo 1.0.1 prints no
+ * option list — "Sudo is disabled" — so the binding source is the manual):
+ * - argument-less execution options (transparent, skippable):
+ *   -E --preserve-env, -n --non-interactive, -b --background, -B --bell,
+ *   -A --askpass, -H --set-home, -P --preserve-groups, -S --stdin,
+ *   -k --reset-timestamp (the tail still executes after a timestamp reset).
+ * - query modes (non-execution; -l is documented with an optional [command]
+ *   it only LISTS for): -l --list, -v --validate, -V --version,
+ *   -K --remove-timestamp, -L --list-defaults.
+ * - interactive modes: -i --login, -s --shell.
+ * - edit mode: -e --edit (operands are edit targets — write-class).
+ * - argument-taking (each consumes one argument; -D is the chdir option the
+ *   W2 structured transform handles, -R chroots and keeps executing):
+ *   -u --user, -g --group, -p --prompt, -r --role, -t --type (the task's
+ *   binding arg-taking set), plus -C --close-from, -T --command-timeout,
+ *   -U --other-user, -D --chdir, -R --chroot per sudo(8).
+ * - `-h` is deliberately UNKNOWN: sudo(8) documents both `-h, --help` and
+ *   `-h host` (the -l/run synopses), and the host form EXECUTES the command
+ *   on another machine — deny-on-uncertainty is the only safe reading.
+ */
+const SUDO_ARGLESS_EXEC_CHARS = new Set([...'EnBbBAHPSk']);
+const SUDO_QUERY_CHARS = new Set([...'lvVKL']);
+const SUDO_INTERACTIVE_CHARS = new Set([...'is']);
+const SUDO_ARG_TAKING_SHORT = new Set([...'ugprtCTUDR']);
+const SUDO_LONG_ARGLESS_EXEC = new Set([
+	'--preserve-env',
+	'--non-interactive',
+	'--background',
+	'--bell',
+	'--askpass',
+	'--set-home',
+	'--preserve-groups',
+	'--stdin',
+	'--reset-timestamp',
+]);
+const SUDO_LONG_QUERY = new Set([
+	'--list',
+	'--validate',
+	'--version',
+	'--remove-timestamp',
+	'--list-defaults',
+	'--help',
+]);
+const SUDO_LONG_INTERACTIVE = new Set(['--login', '--shell']);
+const SUDO_LONG_ARG_TAKING = [
+	'--user',
+	'--group',
+	'--prompt',
+	'--role',
+	'--type',
+	'--close-from',
+	'--command-timeout',
+	'--other-user',
+	'--chdir',
+	'--chroot',
+];
+
+/**
+ * GNU time(1) (1.9) options for the ABSOLUTE-path spelling; the bare `time`
+ * word is the bash KEYWORD, which accepts only POSIX `-p` (ground-truthed on
+ * bash 5.3.9: `time -v cmd` runs the COMMAND `-v` — an unrecognized dash word
+ * IS the timed command word). GNU binary options (doc-sourced from GNU time
+ * 1.9, `info time`): -p/--portability, -v/--verbose, -q/--quiet, -i/--idle,
+ * -h/--help, -V/--version (all argument-less); -a/--append (argument-less,
+ * only modifies -o); -f FORMAT/--format=FORMAT and -o FILE/--output=FILE
+ * (argument-taking; -o names the timing-report WRITE target).
+ */
+const TIME_GNU_ARGLESS_CHARS = new Set([...'pvqhiVa']);
+const TIME_GNU_ARG_TAKING_CHARS = new Set([...'fo']);
+const TIME_GNU_LONG_ARGLESS = new Set([
+	'--portability',
+	'--verbose',
+	'--quiet',
+	'--idle',
+	'--help',
+	'--version',
+	'--append',
+]);
+const TIME_GNU_LONG_ARG_TAKING = ['--format', '--output'];
+
+/** Absolute-path spelling: drive letter or leading separator (either slash). */
+function isAbsolutePathSpelling(word: string): boolean {
+	return /^([A-Za-z]:[\\/]|[\\/])/.test(word);
+}
+
+/**
+ * Walk one launcher's option region (#3491 W3). `launcherWord` is the RAW
+ * spelling (case preserved — the `time` keyword-vs-GNU-binary distinction is
+ * by spelling: absolute path ⇒ GNU binary grammar, bare word ⇒ bash keyword);
+ * `words` are the words AFTER the launcher word (quote-removed). Returns null
+ * when the launcher word is not one of sudo/time/nice/nohup.
+ */
+export function walkLauncherOptions(
+	launcherWord: string,
+	words: readonly string[],
+): LauncherWalkOutcome | null {
+	const base = basenameAnySep(launcherWord);
+	if (base === 'sudo') return walkSudoOptions(words);
+	if (base === 'time')
+		return isAbsolutePathSpelling(launcherWord)
+			? walkGnuTimeOptions(words)
+			: walkKeywordTimeOptions(words);
+	if (base === 'nice') return walkNiceOptions(words);
+	if (base === 'nohup') return walkNohupOptions(words);
+	return null;
+}
+
+/** Whether `token` is a glued `--flag=value` spelling of a long flag. */
+function splitGluedLong(
+	token: string,
+): { head: string; value: string | null } | null {
+	if (!token.startsWith('--') || token.length < 4) return null;
+	const eq = token.indexOf('=');
+	if (eq === -1) return { head: token, value: null };
+	if (eq < 3) return null; // `--=x` nonsense
+	return { head: token.slice(0, eq), value: token.slice(eq + 1) };
+}
+
+/**
+ * Long-option arg-taking match: exact membership, or a glued `--flag=value`,
+ * or (GNU getopt) an UNAMBIGUOUS prefix abbreviation of length ≥ 3 — the
+ * same rule envFlagConsumesNextWord applies for env. `flag` names the
+ * matched canonical flag so callers can distinguish --output from --format.
+ */
+function longFlagTakesArg(
+	token: string,
+	argTaking: readonly string[],
+): {
+	takes: boolean;
+	glued: boolean;
+	value: string | null;
+	flag: string | null;
+} {
+	for (const flag of argTaking) {
+		if (token === flag) return { takes: true, glued: false, value: null, flag };
+	}
+	const glued = splitGluedLong(token);
+	if (glued && argTaking.includes(glued.head))
+		return { takes: true, glued: true, value: glued.value, flag: glued.head };
+	const matches = argTaking.filter((flag) => flag.startsWith(token));
+	if (token.length >= 3 && matches.length === 1) {
+		return { takes: true, glued: false, value: null, flag: matches[0] ?? null };
+	}
+	return { takes: false, glued: false, value: null, flag: null };
+}
+
+function walkSudoOptions(words: readonly string[]): LauncherWalkOutcome {
+	let i = 0;
+	let edit = false;
+	let interactive = false;
+	let listMode = false;
+	let queryOther = false;
+	let chdirDir: string | undefined;
+	while (i < words.length) {
+		const token = words[i];
+		if (token === undefined) break;
+		if (token === '--') {
+			// End of sudo's options; the wrapped command follows.
+			return i + 1 < words.length
+				? {
+						kind: 'inner',
+						innerIndex: i + 1,
+						...(chdirDir !== undefined ? { sudoChdir: chdirDir } : {}),
+					}
+				: { kind: 'benign' };
+		}
+		if (token.startsWith('--') && token.length > 2) {
+			const arg = longFlagTakesArg(token, SUDO_LONG_ARG_TAKING);
+			if (arg.takes) {
+				if (arg.glued) {
+					if (arg.flag === '--chdir' && chdirDir === undefined)
+						chdirDir = arg.value ?? undefined;
+					i += 1;
+					continue;
+				}
+				if (i + 1 >= words.length) return { kind: 'benign' };
+				if (arg.flag === '--chdir' && chdirDir === undefined)
+					chdirDir = words[i + 1];
+				i += 2;
+				continue;
+			}
+			if (SUDO_LONG_ARGLESS_EXEC.has(token)) {
+				i += 1;
+				continue;
+			}
+			if (SUDO_LONG_QUERY.has(token)) {
+				listMode = listMode || token === '--list';
+				queryOther = queryOther || token !== '--list';
+				i += 1;
+				continue;
+			}
+			if (SUDO_LONG_INTERACTIVE.has(token)) {
+				interactive = true;
+				i += 1;
+				continue;
+			}
+			if (token === '--edit') {
+				edit = true;
+				i += 1;
+				continue;
+			}
+			return { kind: 'uncertain', tailIndex: i + 1 };
+		}
+		if (token.startsWith('-') && token.length > 1) {
+			// Short cluster, getopt left-to-right: the FIRST arg-taking member
+			// either is last (argument = next word) or swallows the token tail.
+			const members = token.slice(1);
+			let consumedNext = false;
+			let mode: 'none' | 'arg' = 'none';
+			let argMember = '';
+			let argTail = '';
+			let unknown = false;
+			for (let m = 0; m < members.length; m++) {
+				const ch = members[m];
+				if (ch === undefined) break;
+				if (SUDO_ARG_TAKING_SHORT.has(ch)) {
+					mode = 'arg';
+					argMember = ch;
+					if (m === members.length - 1) {
+						consumedNext = true;
+					} else {
+						argTail = members.slice(m + 1);
+					}
+					break;
+				}
+				if (SUDO_ARGLESS_EXEC_CHARS.has(ch)) continue;
+				if (SUDO_QUERY_CHARS.has(ch)) {
+					listMode = listMode || ch === 'l';
+					queryOther = queryOther || ch !== 'l';
+					continue;
+				}
+				if (SUDO_INTERACTIVE_CHARS.has(ch)) {
+					interactive = true;
+					continue;
+				}
+				if (ch === 'e') {
+					edit = true;
+					continue;
+				}
+				unknown = true;
+				break;
+			}
+			if (unknown) return { kind: 'uncertain', tailIndex: i + 1 };
+			i += 1;
+			if (mode === 'arg') {
+				if (consumedNext) {
+					if (i >= words.length) return { kind: 'benign' };
+					if (argMember === 'D' && chdirDir === undefined) chdirDir = words[i];
+					i += 1; // the argument word
+				} else if (argMember === 'D' && chdirDir === undefined) {
+					chdirDir = argTail;
+				}
+			}
+			continue;
+		}
+		// First non-option word.
+		if (edit) return { kind: 'edit', editStartIndex: i };
+		if (listMode) return { kind: 'benign' }; // -l [command]: lists privileges, never executes
+		if (queryOther)
+			// -v/-V/-K/-L with a trailing command: sudo(8)'s synopsis gives
+			// these modes no command operand — deny-on-uncertainty.
+			return { kind: 'uncertain', tailIndex: i };
+		return {
+			kind: 'inner',
+			innerIndex: i,
+			...(chdirDir !== undefined ? { sudoChdir: chdirDir } : {}),
+		};
+	}
+	if (edit) return { kind: 'benign' }; // -e with no operand: usage error, nothing runs
+	if (listMode) return { kind: 'benign' };
+	// Options only: -i/-s alone is an INTERACTIVE root shell (deny); the
+	// query modes alone never execute; bare execution options alone make
+	// sudo report a usage error and run nothing.
+	return interactive ? { kind: 'interactive' } : { kind: 'benign' };
+}
+
+function walkKeywordTimeOptions(words: readonly string[]): LauncherWalkOutcome {
+	// bash keyword (ground truth, bash 5.3.9): ONLY -p exists; any other dash
+	// word IS the command word of the timed pipeline (`time -v cmd` → "command
+	// not found: -v"). The keyword has no `--`.
+	let i = 0;
+	while (i < words.length && words[i] === '-p') i++;
+	return i < words.length
+		? { kind: 'inner', innerIndex: i }
+		: { kind: 'benign' };
+}
+
+function walkGnuTimeOptions(words: readonly string[]): LauncherWalkOutcome {
+	let i = 0;
+	let timeOutputFile: string | undefined;
+	while (i < words.length) {
+		const token = words[i];
+		if (token === undefined) break;
+		if (token === '--') {
+			return i + 1 < words.length
+				? { kind: 'inner', innerIndex: i + 1, timeOutputFile }
+				: { kind: 'benign' };
+		}
+		if (token.startsWith('--') && token.length > 2) {
+			const arg = longFlagTakesArg(token, TIME_GNU_LONG_ARG_TAKING);
+			if (arg.takes) {
+				if (arg.glued) {
+					if (arg.flag === '--output' && arg.value !== null)
+						timeOutputFile = arg.value;
+					i += 1;
+					continue;
+				}
+				if (i + 1 >= words.length) return { kind: 'benign' };
+				if (arg.flag === '--output') timeOutputFile = words[i + 1];
+				i += 2;
+				continue;
+			}
+			if (TIME_GNU_LONG_ARGLESS.has(token)) {
+				i += 1;
+				continue;
+			}
+			return { kind: 'uncertain', tailIndex: i + 1 };
+		}
+		if (token.startsWith('-') && token.length > 1) {
+			const members = token.slice(1);
+			let outputFlag = false;
+			let consumedNext = false;
+			let mode: 'none' | 'arg' = 'none';
+			let unknown = false;
+			for (let m = 0; m < members.length; m++) {
+				const ch = members[m];
+				if (ch === undefined) break;
+				if (TIME_GNU_ARG_TAKING_CHARS.has(ch)) {
+					mode = 'arg';
+					outputFlag = ch === 'o';
+					if (m === members.length - 1) consumedNext = true;
+					// Attached tail is the argument (glued `-oFILE` / `-fFMT`).
+					if (!consumedNext && outputFlag)
+						timeOutputFile = members.slice(m + 1);
+					break;
+				}
+				if (TIME_GNU_ARGLESS_CHARS.has(ch)) continue;
+				unknown = true;
+				break;
+			}
+			if (unknown) return { kind: 'uncertain', tailIndex: i + 1 };
+			i += 1;
+			if (mode === 'arg' && consumedNext) {
+				if (i >= words.length) return { kind: 'benign' };
+				if (outputFlag) timeOutputFile = words[i];
+				i += 1;
+			}
+			continue;
+		}
+		return {
+			kind: 'inner',
+			innerIndex: i,
+			...(timeOutputFile !== undefined ? { timeOutputFile } : {}),
+		};
+	}
+	// Options with no command: GNU time reports "missing command" and runs
+	// nothing (rc 1) — benign.
+	return { kind: 'benign' };
+}
+
+function walkNiceOptions(words: readonly string[]): LauncherWalkOutcome {
+	let i = 0;
+	while (i < words.length) {
+		const token = words[i];
+		if (token === undefined) break;
+		if (token === '--')
+			return i + 1 < words.length
+				? { kind: 'inner', innerIndex: i + 1 }
+				: { kind: 'benign' };
+		if (token === '--help' || token === '--version') return { kind: 'benign' };
+		// GNU nice(1): -n N / --adjustment=N / --adjustment N, plus the legacy
+		// ATTACHED adjustment spelling `-N` / `+N` (ground-truthed: `nice -10
+		// cmd` adjusts by 10 and runs cmd).
+		if (token === '-n' || token === '--adjustment') {
+			if (i + 1 >= words.length) return { kind: 'benign' };
+			i += 2;
+			continue;
+		}
+		if (/^--adjustment=/.test(token)) {
+			i += 1;
+			continue;
+		}
+		if (/^-n\d+$/.test(token) || /^[-+]\d+$/.test(token)) {
+			i += 1;
+			continue;
+		}
+		if (token.startsWith('-') && token.length > 1) {
+			return { kind: 'uncertain', tailIndex: i + 1 };
+		}
+		return { kind: 'inner', innerIndex: i };
+	}
+	// No operands: prints the current niceness (read-only).
+	return { kind: 'benign' };
+}
+
+function walkNohupOptions(words: readonly string[]): LauncherWalkOutcome {
+	// GNU nohup(1) takes NO options (ground-truthed --help output); bare and
+	// `--` are transparent. nohup.out creation is stdout-tty-gated and outside
+	// static reach — DISCLOSED, not modeled. Any other dash-led word is
+	// treated as deny-on-uncertainty (the plan's binding; real nohup would
+	// exec a program literally named `-x`).
+	const i = 0;
+	while (i < words.length) {
+		const token = words[i];
+		if (token === undefined) break;
+		if (token === '--')
+			return i + 1 < words.length
+				? { kind: 'inner', innerIndex: i + 1 }
+				: { kind: 'benign' };
+		if (token === '--help' || token === '--version') return { kind: 'benign' };
+		if (token.startsWith('-') && token.length > 1) {
+			return { kind: 'uncertain', tailIndex: i + 1 };
+		}
+		return { kind: 'inner', innerIndex: i };
+	}
+	return { kind: 'benign' };
+}
+
 /**
  * Canonical detector command model (#3474): classify write-vector commands
  * through their canonical spelling so versioned (`curl8.5`, `bzip2.5`),
@@ -2647,23 +3123,62 @@ function detectorCommandLeafFromWords(
 	return detectorCommandPartsFromWords(cmdName, suffix).leaf;
 }
 
-function detectorCommandPartsFromWords(
+/**
+ * Paranoid absolute bound for the wrapper-chain walk (#3491 W3): every loop
+ * iteration consumes at least one word, so the cursor alone terminates the
+ * loop (no fixed cap re-opens a depth-N+1 bypass — the hop-8 cap let
+ * `command`x14 hide a write). 64 stands in for "absurdly nested but
+ * machine-generatable"; exceedance FAILS CLOSED through the additive
+ * `unwrapDepthExceeded` analysis flag the gate and explain consult before
+ * every no-write early return.
+ */
+export const DETECTOR_UNWRAP_PARANOID_BOUND = 64;
+
+interface DetectorCommandParts {
+	leaf: string;
+	rest: string[];
+	rawLeaf: string;
+	depthExceeded: boolean;
+}
+
+function detectorCommandPartsFromWordsBounded(
 	cmdName: string | null | undefined,
 	suffix: string[],
-): { leaf: string; rest: string[]; rawLeaf: string } {
+): DetectorCommandParts {
 	let name = cmdName;
-	if (!name) return { leaf: '', rest: suffix, rawLeaf: '' };
+	if (!name)
+		return { leaf: '', rest: suffix, rawLeaf: '', depthExceeded: false };
 	let cursor = 0;
-	for (let hop = 0; hop < 8; hop++) {
+	for (let hop = 0; ; hop++) {
+		if (hop >= DETECTOR_UNWRAP_PARANOID_BOUND) {
+			// Paranoid bound exceeded: the wrapper chain is machine-generated
+			// depth abuse. Report it so consumers fail closed (the flag is the
+			// channel; the leaf is the last resolved name).
+			return {
+				leaf: basenameAnySep(name),
+				rest: suffix.slice(cursor),
+				rawLeaf: basenameAnySepCase(name),
+				depthExceeded: true,
+			};
+		}
 		const base = basenameAnySep(name);
 		const rawBase = basenameAnySepCase(name);
 		if (
 			base !== 'env' &&
 			base !== 'command' &&
 			base !== 'builtin' &&
-			base !== 'exec'
+			base !== 'exec' &&
+			base !== 'sudo' &&
+			base !== 'time' &&
+			base !== 'nice' &&
+			base !== 'nohup'
 		) {
-			return { leaf: base, rest: suffix.slice(cursor), rawLeaf: rawBase };
+			return {
+				leaf: base,
+				rest: suffix.slice(cursor),
+				rawLeaf: rawBase,
+				depthExceeded: false,
+			};
 		}
 		// Consume the wrapper's own tokens before the wrapped command name.
 		if (base === 'env') {
@@ -2685,7 +3200,12 @@ function detectorCommandPartsFromWords(
 			while (cursor < suffix.length && suffix[cursor] === '-p') cursor++;
 			if (cursor < suffix.length && isQueryFlag(suffix[cursor])) {
 				// Query form (`command -v NAME …`): never an execution wrapper.
-				return { leaf: base, rest: suffix.slice(cursor), rawLeaf: rawBase };
+				return {
+					leaf: base,
+					rest: suffix.slice(cursor),
+					rawLeaf: rawBase,
+					depthExceeded: false,
+				};
 			}
 			if (cursor < suffix.length && suffix[cursor] === '--') cursor++;
 		} else if (base === 'builtin') {
@@ -2696,7 +3216,12 @@ function detectorCommandPartsFromWords(
 			if (cursor < suffix.length) {
 				const wrapped = basenameAnySep(suffix[cursor]);
 				if (!BASH_BUILTIN_COMMANDS.has(wrapped))
-					return { leaf: base, rest: suffix.slice(cursor), rawLeaf: rawBase };
+					return {
+						leaf: base,
+						rest: suffix.slice(cursor),
+						rawLeaf: rawBase,
+						depthExceeded: false,
+					};
 			}
 			if (cursor < suffix.length && suffix[cursor] === '--') cursor++;
 		} else if (base === 'exec') {
@@ -2708,20 +3233,175 @@ function detectorCommandPartsFromWords(
 			if (cursor < suffix.length && /^-[cl]{2,}$/.test(suffix[cursor]))
 				cursor++;
 			if (cursor < suffix.length && suffix[cursor] === '--') cursor++;
+		} else {
+			// #3491 W3: sudo/time/nice/nohup unwrap through the shared
+			// per-manual launcher table (walkLauncherOptions).
+			const walk = walkLauncherOptions(name, suffix.slice(cursor));
+			if (walk === null || walk.kind === 'benign') {
+				// Benign/query forms execute nothing: stay at the launcher leaf
+				// (no set member — no detection), the deny channels handle the
+				// rest.
+				return {
+					leaf: base,
+					rest: suffix.slice(cursor),
+					rawLeaf: rawBase,
+					depthExceeded: false,
+				};
+			}
+			if (walk.kind === 'edit' || walk.kind === 'interactive') {
+				// sudo -e operands are WRITE targets emitted by
+				// detectLauncherWrites; sudo -i/-s alone is denied through the
+				// launcher-uncertainty channel. No execution leaf here.
+				return {
+					leaf: base,
+					rest: suffix.slice(cursor),
+					rawLeaf: rawBase,
+					depthExceeded: false,
+				};
+			}
+			// inner / uncertain-with-tail: the potential execution tail starts
+			// at the walked index (every remaining word is a potential tail on
+			// uncertainty — deny-on-uncertainty DIRECTION: classify more). The
+			// common tail below advances name/cursor onto the tail word.
+			const tailIndex =
+				walk.kind === 'inner' ? walk.innerIndex : walk.tailIndex;
+			const next = cursor + tailIndex;
+			if (next >= suffix.length)
+				return {
+					leaf: base,
+					rest: suffix.slice(cursor),
+					rawLeaf: rawBase,
+					depthExceeded: false,
+				};
+			cursor = next;
 		}
 		if (cursor >= suffix.length)
-			return { leaf: base, rest: suffix.slice(cursor), rawLeaf: rawBase };
+			return {
+				leaf: base,
+				rest: suffix.slice(cursor),
+				rawLeaf: rawBase,
+				depthExceeded: false,
+			};
 		// Advance to the wrapped command's name word.
 		name = suffix[cursor];
 		cursor++;
 		if (!name)
-			return { leaf: base, rest: suffix.slice(cursor - 1), rawLeaf: rawBase };
+			return {
+				leaf: base,
+				rest: suffix.slice(cursor - 1),
+				rawLeaf: rawBase,
+				depthExceeded: false,
+			};
 	}
-	return {
-		leaf: basenameAnySep(name),
-		rest: suffix.slice(cursor),
-		rawLeaf: basenameAnySepCase(name),
-	};
+}
+
+function detectorCommandPartsFromWords(
+	cmdName: string | null | undefined,
+	suffix: string[],
+): { leaf: string; rest: string[]; rawLeaf: string } {
+	const { leaf, rest, rawLeaf } = detectorCommandPartsFromWordsBounded(
+		cmdName,
+		suffix,
+	);
+	return { leaf, rest, rawLeaf };
+}
+
+/**
+ * #3491 W3: launcher-owned WRITE targets — the two launcher options that
+ * write files by themselves:
+ *   - `sudo -e FILE…` / `sudo --edit FILE…`: the operands are EDIT TARGETS
+ *     (sudo(8); the editor runs as root against each file).
+ *   - GNU `time -o FILE` (`/usr/bin/time` absolute spelling, --output=FILE
+ *     and glued/spaced/abbreviated forms per the shared walk): the timing
+ *     report is written to FILE (an ADDITIONAL write target beside whatever
+ *     the timed command does; `-a` only switches it to append).
+ * The chain walk mirrors the wrapper consumption grammar (env/command/
+ * builtin/exec prefixes may precede the launcher) so `env FOO=1 sudo -e f`
+ * emits the same targets.
+ */
+function detectLauncherWrites(cmd: unknown): WriteTarget[] {
+	const results: WriteTarget[] = [];
+	const firstName = getCommandName(cmd);
+	if (!firstName) return results;
+	const suffix = getSuffixWords(cmd);
+	let name: string | null = firstName;
+	let cursor = 0;
+	for (let hop = 0; hop < DETECTOR_UNWRAP_PARANOID_BOUND; hop++) {
+		if (!name) return results;
+		const base = basenameAnySep(name);
+		if (base === 'sudo' || base === 'time') {
+			const walk = walkLauncherOptions(name, suffix.slice(cursor));
+			if (walk?.kind === 'edit') {
+				for (let t = cursor + walk.editStartIndex; t < suffix.length; t++) {
+					const operand = suffix[t];
+					if (operand === undefined || operand === '') continue;
+					results.push({
+						category: 'launcher_write',
+						operator: 'sudo -e',
+						path: operand,
+					});
+				}
+			} else if (
+				walk?.kind === 'inner' &&
+				walk.timeOutputFile !== undefined &&
+				walk.timeOutputFile !== ''
+			) {
+				results.push({
+					category: 'launcher_write',
+					operator: 'time -o',
+					path: walk.timeOutputFile,
+				});
+			}
+			return results; // launcher heads never nest another launcher
+		}
+		if (
+			base !== 'env' &&
+			base !== 'command' &&
+			base !== 'builtin' &&
+			base !== 'exec'
+		) {
+			return results;
+		}
+		// Consume the transparent wrapper's own tokens (same grammar as the
+		// bounded leaf walk) and advance to the wrapped word.
+		if (base === 'env') {
+			while (cursor < suffix.length) {
+				const token = suffix[cursor];
+				if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(token)) {
+					cursor++;
+					continue;
+				}
+				if (token.startsWith('-') && token !== '-') {
+					cursor++;
+					if (envFlagConsumesNextWord(token) && cursor < suffix.length)
+						cursor++;
+					continue;
+				}
+				break;
+			}
+		} else if (base === 'command') {
+			while (cursor < suffix.length && suffix[cursor] === '-p') cursor++;
+			if (cursor < suffix.length && isQueryFlag(suffix[cursor])) return results;
+			if (cursor < suffix.length && suffix[cursor] === '--') cursor++;
+		} else if (base === 'builtin') {
+			if (cursor < suffix.length) {
+				const wrapped = basenameAnySep(suffix[cursor]);
+				if (!BASH_BUILTIN_COMMANDS.has(wrapped)) return results;
+			}
+			if (cursor < suffix.length && suffix[cursor] === '--') cursor++;
+		} else {
+			while (cursor < suffix.length && /^-[cl]$/.test(suffix[cursor])) cursor++;
+			if (cursor < suffix.length && suffix[cursor] === '-a') cursor += 2;
+			if (cursor < suffix.length && /^-a\S+$/.test(suffix[cursor])) cursor++;
+			if (cursor < suffix.length && /^-[cl]{2,}$/.test(suffix[cursor]))
+				cursor++;
+			if (cursor < suffix.length && suffix[cursor] === '--') cursor++;
+		}
+		if (cursor >= suffix.length) return results;
+		name = suffix[cursor] ?? null;
+		cursor++;
+	}
+	return results;
 }
 
 /**
@@ -4331,9 +5011,7 @@ function detectInterpreterEval(cmd: unknown): WriteTarget[] {
 	// own arguments. A 'script' outcome (a script-file operand, or `--`)
 	// carries no inline payload; an 'uncertain' outcome (an unknown flag of
 	// unknowable arity) is deny-on-uncertainty — it classifies as an eval so
-	// the gate routes or denies, never admits. Python/perl/ruby and the
-	// other interpreters keep the positional flag matcher below (their
-	// cluster grammar is the W7/PR-3 workstream — deliberately untouched).
+	// the gate routes or denies, never admits.
 	const SHELL_FLAG_WALK_CANONICALS = new Set([
 		'bash',
 		'sh',
@@ -5996,6 +6674,10 @@ export function detectPosixWrites(command: string): WriteAnalysis {
 	// Stays false (no empty-directory-removal tag survives) unless the parsed
 	// command is proven cwd-neutral below.
 	let cwdNeutral = false;
+	// #3491 W3: any leaf whose wrapper chain exceeds the paranoid bound fails
+	// closed through the additive analysis flag (consumed by the gate and
+	// explain before every no-write early return).
+	let unwrapDepthExceeded = false;
 
 	if (!parseFailed && ast && typeof ast === 'object') {
 		const leafCommands: BashNode[] = [];
@@ -6011,11 +6693,20 @@ export function detectPosixWrites(command: string): WriteAnalysis {
 			for (const write of detectBuiltinWrites(cmd)) allWrites.push(write);
 			for (const write of detectInplaceEdit(cmd)) allWrites.push(write);
 			for (const write of detectInterpreterEval(cmd)) allWrites.push(write);
+			for (const write of detectLauncherWrites(cmd)) allWrites.push(write);
 			for (const write of detectNetworkDownloaders(cmd)) allWrites.push(write);
 			for (const write of detectArchiveExtract(cmd)) allWrites.push(write);
 			for (const write of detectGitDestructive(cmd)) allWrites.push(write);
 			for (const write of detectPatchApply(cmd)) allWrites.push(write);
 			for (const write of detectRsyncWrites(cmd)) allWrites.push(write);
+			if (
+				detectorCommandPartsFromWordsBounded(
+					getCommandName(cmd),
+					getSuffixWords(cmd),
+				).depthExceeded
+			) {
+				unwrapDepthExceeded = true;
+			}
 		}
 
 		// #3474: stdin-fed interpreters behind literal pipe producers
@@ -6052,6 +6743,8 @@ export function detectPosixWrites(command: string): WriteAnalysis {
 			const residualAnalysis = detectPosixWrites(masked.residual);
 			if (residualAnalysis.parseError !== true) {
 				maskedOk = true;
+				unwrapDepthExceeded =
+					unwrapDepthExceeded || residualAnalysis.unwrapDepthExceeded === true;
 				// Outer writes: the normal AST detector result on the
 				// residual. Placeholders are inert `/dev/null` operands —
 				// suppressed by the existing sink-device exemption inside
@@ -6183,6 +6876,7 @@ export function detectPosixWrites(command: string): WriteAnalysis {
 				? true
 				: undefined,
 		residualCommand,
+		unwrapDepthExceeded: unwrapDepthExceeded || undefined,
 	};
 }
 
@@ -7342,6 +8036,13 @@ function collectWritesWithNodes(
 
 			const interpreterWrites = detectInterpreterEval(node);
 			for (const w of interpreterWrites) {
+				pushWriteWithState(out, w, state);
+			}
+
+			// #3491 W3: launcher-owned write targets (sudo -e operands, GNU
+			// time -o FILE) resolve at their per-occurrence tracked cwd too.
+			const launcherWrites = detectLauncherWrites(node);
+			for (const w of launcherWrites) {
 				pushWriteWithState(out, w, state);
 			}
 

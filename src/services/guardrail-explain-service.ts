@@ -3,6 +3,7 @@ import { HUMAN_ONLY_SWARM_COMMANDS } from '../commands/tool-policy.js';
 import { classifyFile, type FileZone } from '../context/zone-classifier.js';
 import { redactPath } from '../hooks/guardrails/audit-log.js';
 import {
+	dcAnalyzeLauncherUncertainty,
 	dcCheckJunctionCreation,
 	dcEvaluateRecursiveDeleteTargets,
 	dcExpandDestructiveSegments,
@@ -14,6 +15,7 @@ import {
 	dcRelocateDestructiveTarget,
 	dcSplitSegments,
 	dcUnwrapWrappers,
+	dcUnwrapWrappersBounded,
 } from '../hooks/guardrails/destructive-command.js';
 import { checkFileAuthority } from '../hooks/guardrails/file-authority.js';
 import {
@@ -193,7 +195,21 @@ function evaluateDestructiveDecision(
 
 	const command = dcNormalizeCommand(rawCommand);
 
-	const unwrapped = dcUnwrapWrappers(command);
+	// #3491 W3 parity: deny-on-uncertainty launcher shapes and the paranoid
+	// unwrap-depth bound mirror the live destructive arm's early denies.
+	const launcherUncertainty = dcAnalyzeLauncherUncertainty(command);
+	if (launcherUncertainty.deny) {
+		return { decision: 'block', firingRule: launcherUncertainty.reason };
+	}
+	const boundedUnwrap = dcUnwrapWrappersBounded(command);
+	if (boundedUnwrap.depthExceeded) {
+		return {
+			decision: 'block',
+			firingRule:
+				'BLOCKED: shell wrapper nesting exceeds the inspection bound — rejecting for safety',
+		};
+	}
+	const unwrapped = boundedUnwrap.command;
 	const outerSegments = dcSplitSegments(command);
 	const innerSegments = dcSplitSegments(unwrapped);
 	const perSegmentUnwrapped = outerSegments.map((s) => dcUnwrapWrappers(s));
@@ -822,6 +838,18 @@ export async function handleGuardrailExplain(
 			decision = 'block';
 			firingRule =
 				'parse_error: write detection failed to parse command — rejecting for safety';
+		} else if (analysis.unwrapDepthExceeded) {
+			// #3491 W3 (v4 constraint 8) parity: consulted BEFORE the no-write
+			// early return — depth abuse denies in explain exactly as in the
+			// gate.
+			decision = 'block';
+			firingRule =
+				'unwrap_depth: shell wrapper nesting exceeds the inspection bound — rejecting for safety';
+		} else if (dcAnalyzeLauncherUncertainty(shellCommand).deny) {
+			// #3491 W3 parity: deny-on-uncertainty launcher shapes.
+			decision = 'block';
+			firingRule =
+				'launcher_uncertainty: unrecognized launcher option with a potential execution tail';
 		} else if (analysis.hasWrites) {
 			const resolvedWrites = resolveWriteTargets(
 				// #3539 W5 parity: the gate resolves against the procsub

@@ -19,6 +19,7 @@ import * as path from 'node:path';
 import { CMD_STRIP_PREFIX, PS_STRIP_PREFIX } from '../shell-executor-context';
 import {
 	BASH_BUILTIN_COMMANDS,
+	walkLauncherOptions,
 	walkShellCommandFlags,
 } from '../shell-write-detect';
 import { dcIsSwitchClusterText } from './cmd-delete-grammar';
@@ -27,8 +28,16 @@ import { dcIsSwitchClusterText } from './cmd-delete-grammar';
 // Destructive-command constants
 // ============================================================================
 
-/** Maximum recursion depth for wrapper unwrapping */
-const DC_MAX_UNWRAP_DEPTH = 5;
+/**
+ * Paranoid absolute bound for the string unwrap chain (#3491 W3). The old
+ * fixed DC_MAX_UNWRAP_DEPTH=5 stopped SILENTLY with the verb unreached
+ * (`sudo`x6 admitted a wrapped `rm -rf`); the loop is now cursor-bounded
+ * (every iteration strips at least the wrapper word) with this absolute
+ * backstop, whose exceedance FAILS CLOSED through
+ * {@link dcUnwrapWrappersBounded}'s additive depthExceeded flag (consulted
+ * by the gate and the explain mirror before every no-write early return).
+ */
+export const DC_UNWRAP_PARANOID_BOUND = 64;
 
 /**
  * Expanded safe-target allowlist for recursive delete operations.
@@ -184,6 +193,88 @@ export function shellSplitWords(input: string): string[] {
 	}
 	pushWord();
 	return words;
+}
+
+/**
+ * Offset-aware sibling of {@link shellSplitWords} (#3491 W3): each word
+ * carries the index where it starts in the RAW input. The launcher strip
+ * must return the RAW TAIL SLICE — not a re-serialized quote-removed word
+ * list — because quote removal is lossy for Windows grammar analysis
+ * (`C:\target` dequotes to `C:target` in bash, but the destructive arm
+ * judges the raw text under the cmd.exe grammar where the backslash form is
+ * the real target spelling).
+ */
+export function shellSplitWordsWithOffsets(
+	input: string,
+): Array<{ word: string; start: number }> {
+	const out: Array<{ word: string; start: number }> = [];
+	let current = '';
+	let hasWord = false;
+	let wordStart = -1;
+	const pushWord = () => {
+		if (hasWord) {
+			out.push({ word: current, start: wordStart });
+			current = '';
+			hasWord = false;
+		}
+	};
+	let i = 0;
+	while (i < input.length) {
+		const ch = input[i];
+		if (ch === "'") {
+			if (!hasWord) wordStart = i;
+			hasWord = true;
+			i += 1;
+			while (i < input.length && input[i] !== "'") {
+				current += input[i];
+				i += 1;
+			}
+			i += 1;
+			continue;
+		}
+		if (ch === '"') {
+			if (!hasWord) wordStart = i;
+			hasWord = true;
+			i += 1;
+			while (i < input.length && input[i] !== '"') {
+				if (
+					input[i] === '\\' &&
+					i + 1 < input.length &&
+					'"\\$`'.includes(input[i + 1])
+				) {
+					current += input[i + 1];
+					i += 2;
+					continue;
+				}
+				current += input[i];
+				i += 1;
+			}
+			i += 1;
+			continue;
+		}
+		if (ch === '\\') {
+			if (!hasWord) wordStart = i;
+			hasWord = true;
+			if (i + 1 < input.length) {
+				current += input[i + 1];
+				i += 2;
+				continue;
+			}
+			i += 1;
+			continue;
+		}
+		if (/\s/.test(ch)) {
+			pushWord();
+			i += 1;
+			continue;
+		}
+		if (!hasWord) wordStart = i;
+		current += ch;
+		hasWord = true;
+		i += 1;
+	}
+	pushWord();
+	return out;
 }
 
 /**
@@ -533,8 +624,15 @@ export function dcStripOneWrapper(cmd: string): string | null {
 	const evalMatch = /^eval\s+(.+)$/is.exec(t);
 	if (evalMatch) return evalMatch[1].replace(/^["']|["']$/g, '').trim();
 
-	// sudo / env VAR=val / time / nohup / nice -n N: strip leading word + optional args
-	// Case-insensitive: SUDO, TIME, NOHUP are valid in encoded/obfuscated commands.
+	// sudo / env VAR=val / time / nohup / nice: strip the leading word plus
+	// the launcher's OWN option region (#3491 W3 — per-manual grammar from
+	// the shared walkLauncherOptions table; the old bare-word regexes left
+	// option words in verb position: `sudo -u root rmdir …` analyzed `-u`).
+	// Case-insensitive: SUDO, TIME, NOHUP, NICE are valid spellings. Benign
+	// query forms (sudo -l/-v/-V, bare-option no-run shapes) return null —
+	// no unwrap, nothing executes; deny-on-uncertainty shapes return the
+	// potential execution tail so every detector sees it (the gate ALSO
+	// denies through dcAnalyzeLauncherUncertainty).
 	// #3343: the env strip must consume env's OWN flags before the payload —
 	// argument-less flags (-i, --ignore-environment, any short flag), arg-taking
 	// flags WITH their separate argument (-u/-U/-C/-S/--split-string + one
@@ -551,12 +649,11 @@ export function dcStripOneWrapper(cmd: string): string | null {
 	// execution-only rule the detector-level canonical walk applies.
 	const launcherInner = dcStripExecutionLauncher(t);
 	const prefixMatch =
-		/^(?:sudo|time|nohup)\s+(.+)$/is.exec(t) ??
+		dcStripLauncherWrapper(t) ??
 		envPrefix.exec(t) ??
 		(launcherInner !== null && launcherInner !== ''
 			? [t, launcherInner]
-			: null) ??
-		/^nice\s+(?:-n\s+\d+\s+)?(.+)$/is.exec(t);
+			: null);
 	if (prefixMatch) return prefixMatch[1].trim();
 
 	// WSL cross-OS bridge: wsl -e ... / wsl -- ... / wsl.exe -e ...
@@ -586,17 +683,113 @@ export function dcStripOneWrapper(cmd: string): string | null {
 }
 
 /**
- * Recursively unwrap all shell wrappers up to DC_MAX_UNWRAP_DEPTH.
- * Returns the innermost unwrapped command.
+ * Strip one launcher wrapper layer (#3491 W3) through the shared per-manual
+ * option table (walkLauncherOptions): sudo(8)/time (bash-keyword vs GNU
+ * binary by spelling)/nice/nohup. Returns `[original, inner]` (regex-match
+ * shape) when an execution tail exists — on deny-on-uncertainty the tail is
+ * the REMAINING words after the unknown option ("every remaining word is a
+ * potential execution tail") — and null for benign/query forms (sudo -l/-v/
+ * -V alone, option-only no-run shapes, sudo -e whose operands are
+ * write-class, not an execution tail).
  */
-export function dcUnwrapWrappers(cmd: string): string {
+function dcStripLauncherWrapper(t: string): [string, string] | null {
+	// Offset-aware split: the returned tail is the RAW text slice from the
+	// first execution-tail word — byte-identical to the legacy regex's `(.+)`
+	// capture, so Windows backslash spellings survive to the cmd/PS grammar
+	// arms (quote-removed re-serialization would mangle `C:\target`).
+	const words = shellSplitWordsWithOffsets(t);
+	const first = words[0];
+	if (first === undefined) return null;
+	const walk = walkLauncherOptions(
+		first.word,
+		words.slice(1).map((w) => w.word),
+	);
+	if (walk === null) return null;
+	if (walk.kind === 'inner') {
+		if (walk.timeOutputFile !== undefined) {
+			// GNU time -o FILE: unwrapping to the tail would ERASE the
+			// timing-report write target from the preprocessed text. Keep the
+			// segment whole — the write arm's detectLauncherWrites emits the
+			// target from this exact spelling, and its leaf walk sees through
+			// the launcher options to the timed command anyway.
+			return null;
+		}
+		const tail = words[1 + walk.innerIndex];
+		if (tail === undefined) return null;
+		return [t, t.slice(tail.start).trim()];
+	}
+	if (walk.kind === 'uncertain') {
+		const tail = words[1 + walk.tailIndex];
+		if (tail === undefined) return null;
+		return [t, t.slice(tail.start).trim()];
+	}
+	return null;
+}
+
+/**
+ * Recursively unwrap all shell wrappers (#3491 W3): cursor-bounded loop (no
+ * fixed cap — every iteration consumes at least the wrapper word, so `sudo`x6
+ * and `command`x14 reach their verbs) with the paranoid absolute bound
+ * {@link DC_UNWRAP_PARANOID_BOUND}, whose exceedance is reported through the
+ * additive `depthExceeded` flag the gate and explain consult BEFORE any
+ * no-write early return (fail closed). The legacy string signature is kept
+ * for every existing caller.
+ */
+export function dcUnwrapWrappersBounded(cmd: string): {
+	command: string;
+	depthExceeded: boolean;
+} {
 	let current = cmd.trim();
-	for (let depth = 0; depth < DC_MAX_UNWRAP_DEPTH; depth++) {
+	for (let depth = 0; ; depth++) {
+		if (depth >= DC_UNWRAP_PARANOID_BOUND) {
+			return { command: current, depthExceeded: true };
+		}
 		const inner = dcStripOneWrapper(current);
 		if (inner === null || inner === current) break;
 		current = inner.trim();
 	}
-	return current;
+	return { command: current, depthExceeded: false };
+}
+
+/**
+ * Legacy string form of {@link dcUnwrapWrappersBounded} (depth flag dropped).
+ */
+export function dcUnwrapWrappers(cmd: string): string {
+	return dcUnwrapWrappersBounded(cmd).command;
+}
+
+/**
+ * Deny-on-uncertainty report for launcher segments (#3491 W3): any segment
+ * whose sudo/time/nice/nohup option region contains an UNKNOWN option with a
+ * remaining execution tail, or an interactive `sudo -i`/`-s` with no command
+ * word. The gate (destructive arm AND write path) and the explain mirror
+ * consult this and deny — the advisory alone was ruled insufficient by the
+ * plan critic; the recorded decision is deny-on-uncertainty.
+ */
+export function dcAnalyzeLauncherUncertainty(command: string): {
+	deny: boolean;
+	reason: string;
+} {
+	for (const segment of dcSplitSegments(command)) {
+		const words = shellSplitWords(segment);
+		const head = words[0];
+		if (head === undefined) continue;
+		const walk = walkLauncherOptions(head, words.slice(1));
+		if (walk === null) continue;
+		if (walk.kind === 'interactive') {
+			return {
+				deny: true,
+				reason: `BLOCKED: launcher "${head}" opens an interactive shell (-i/-s) that cannot be statically inspected`,
+			};
+		}
+		if (walk.kind === 'uncertain' && walk.tailIndex < words.length - 1) {
+			return {
+				deny: true,
+				reason: `BLOCKED: launcher "${head}" carries an unrecognized option — every remaining word is a potential execution tail (deny-on-uncertainty)`,
+			};
+		}
+	}
+	return { deny: false, reason: '' };
 }
 
 // ============================================================================
@@ -780,34 +973,18 @@ function matchEnvChdir(words: string[]): DcChdirMatch {
 }
 
 function matchSudoChdir(words: string[]): DcChdirMatch {
-	let cursor = 1;
-	let dir: string | undefined;
-	while (cursor < words.length) {
-		const token = words[cursor];
-		if (token === undefined) break;
-		if (token === '-D' || token === '--chdir') {
-			const arg = words[cursor + 1];
-			if (arg === undefined) return { kind: 'failClosed' };
-			if (dir === undefined) dir = arg;
-			cursor += 2;
-			continue;
-		}
-		const glued = /^--chdir=(.*)$/.exec(token);
-		if (glued) {
-			if (dir === undefined) dir = glued[1];
-			cursor += 1;
-			continue;
-		}
-		if (token.startsWith('-') && token !== '-') {
-			// Unknown sudo option: its arity is W3's launcher table — bail to
-			// the legacy unwrap instead of guessing.
-			return null;
-		}
-		break; // the command word
-	}
+	// #3491 W3: the sudo walk now models the FULL option table
+	// (walkLauncherOptions) — every other option (-u/-g/-p/-E/…) is consumed
+	// with the right arity while -D/--chdir is captured, instead of bailing
+	// to the legacy unwrap on the first non-chdir option.
+	const head = words[0];
+	if (head === undefined) return null;
+	const walk = walkLauncherOptions(head, words.slice(1));
+	if (walk === null || walk.kind !== 'inner') return null;
+	const dir = walk.sudoChdir;
 	if (dir === undefined) return null;
 	if (dir === '' || dir.includes('\0')) return { kind: 'failClosed' };
-	const rest = words.slice(cursor);
+	const rest = words.slice(1 + walk.innerIndex);
 	if (rest.length === 0) {
 		// -D with no command: nothing runs.
 		return null;
@@ -1193,9 +1370,6 @@ export function dcExtractRecursiveRmTargets(segment: string): string[] | null {
 	for (let i = 1; i < tokens.length; i += 1) {
 		tokens[i] = tokens[i].replace(/[)}]+$/, '');
 	}
-	const delimStripped = tokens.filter((t) => t.length > 0);
-	tokens.length = 0;
-	tokens.push(...delimStripped);
 	if (tokens.length < 2 || tokens[0] !== 'rm') return null;
 
 	let destructive = false;
@@ -1655,8 +1829,8 @@ export function dcIsWindowsSwitchCluster(token: string): boolean {
  * Handles both `Remove-Item <path> -Recurse` and `Remove-Item -Recurse <path>` orderings.
  */
 export function dcExtractPowerShellTargets(segment: string): string[] {
-	// Strip the leading verb. #3518 P-5 (class): leading open-parens/
-	// whitespace tolerated — `(Remove-Item x -Recurse)` runs the same cmdlet.
+	// Strip the leading verb. #3518 P-5 (class): leading open-parens/whitespace
+	// tolerated — `(Remove-Item x -Recurse)` runs the same cmdlet.
 	const verbMatch =
 		/^(?:[({\s])*(?:Remove-Item|ri|rm|rmdir|del|erase|rd)\s+/i.exec(segment);
 	if (!verbMatch) return [];
