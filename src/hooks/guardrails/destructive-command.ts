@@ -470,18 +470,21 @@ export function dcStripOneWrapper(cmd: string): string | null {
 	}
 
 	// bash/sh/zsh -c "inner" — case-insensitive for consistency with other wrappers.
-		// bash/sh/zsh -c "inner" - case-insensitive for consistency with other wrappers.
 	// #3475: single-quoted payloads unwrap identically to double-quoted ones
 	// (a `'...'`-quoted -c argument used to survive unwrapped, hiding every
-	// write inside it). Inner quotes of the OTHER kind survive by construction;
-	// the lazy third alternative keeps the historical unquoted-payload path.
-	const shellMatch =
-		/^(?:bash|sh|zsh|dash|fish)(?:\.exe)?\s+-c\s+(?:"([^"]*)"|'([^']*)'|"?(.*?)"?)\s*$/is.exec(
-			t,
-		);
+	// write inside it).
+	// #3491 W4: the payload is the single quote-removed word immediately
+	// after `-c` (sh's argv[2] contract), extracted by the shared tokenizer —
+	// a trailing positional (`sh -c 'payload' sh`) and same-kind quote
+	// concatenation (`'\''`) used to defeat the anchored regex and hide every
+	// write inside the payload. Words after the payload are $0/$1… and are
+	// NEVER scanned as commands.
+	const shellMatch = /^(?:bash|sh|zsh|dash|fish)(?:\.exe)?\s+-c\s+(.+)$/is.exec(
+		t,
+	);
 	if (shellMatch) {
-		const inner = shellMatch[1] ?? shellMatch[2] ?? shellMatch[3];
-		return inner.trim();
+		const payload = dcExtractShellDashCPayload(shellMatch[1]);
+		if (payload !== null && payload.trim() !== '') return payload;
 	}
 
 	// eval 'inner' / eval "inner" / eval inner — the POSIX builtin executes its

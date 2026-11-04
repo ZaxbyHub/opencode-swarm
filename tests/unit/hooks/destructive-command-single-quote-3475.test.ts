@@ -82,11 +82,13 @@ describe('dcStripOneWrapper: single-quoted -c payloads unwrap cleanly (#3475)', 
 		expect(dcUnwrapWrappers('sh -c "rmdir ../zz"')).toBe('rmdir ../zz');
 	});
 
-	// Round-2 pin (green at base and post-fix): the unquoted payload fallback
-	// keeps working — no quotes around the payload means the whole remainder
-	// after `-c` is the inner command, unchanged.
-	it('keeps the unquoted fallback: sh -c echo hi unwraps to echo hi', () => {
-		expect(dcStripOneWrapper('sh -c echo hi')).toBe('echo hi');
+	// Round-2 pin (re-pinned by #3491 W4): the payload is the single
+	// quote-removed word immediately after `-c` (sh's argv[2] contract) — real
+	// `sh -c echo hi` runs only `echo` (`hi` becomes $0 inside the payload's
+	// interpreter). The base behavior of taking the whole remainder re-opened
+	// the positional-scanning evasion class W4 closes (C5).
+	it('keeps the unquoted fallback: sh -c echo hi unwraps to echo (argv[2] contract)', () => {
+		expect(dcStripOneWrapper('sh -c echo hi')).toBe('echo');
 	});
 });
 
