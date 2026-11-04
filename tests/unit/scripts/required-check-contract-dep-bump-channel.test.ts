@@ -223,7 +223,36 @@ describe('spoof bounds (C2 spoof)', () => {
 		expect(dep({ actor: 'contributor' })).toBe(false);
 		expect(dep({ trustedProvenance: false })).toBe(false);
 		expect(dep({ commitProvenance: false })).toBe(false);
+		// Final-critic r1: the dependencyScope conjunct must be pinned at the
+		// COMPOSITION seam, not only at the helper — neutralizing it in
+		// deriveDependencyBumpAutomation used to leave this whole suite green.
+		expect(dep({ dependencyScope: false })).toBe(false);
+		expect(
+			dep({
+				event: 'merge_group',
+				dependencyScope: false,
+				headCommitSubject: MERGE_SUBJECT,
+			}),
+		).toBe(false);
 	});
+
+	test('main() end-to-end laundering: bot PR with an out-of-scope package.json delta exits 1', () => {
+		// Final-critic r1: a channel-shaped PR whose package.json launders the
+		// version field must be denied by the scope conjunct inside main()'s
+		// composition, not only by the helper in isolation.
+		const fixture = buildOwnerScopeFixture();
+		try {
+			const result = runReleaseOwnerMain(
+				fixture.root,
+				'pull_request',
+				BOT_NAME,
+				pullRequestPayload(fixture.base, fixture.legs.versionField),
+			);
+			expect(result.exit).toBe(1);
+		} finally {
+			safeRmRecursive(fixture.root);
+		}
+	}, 30_000);
 
 	test('out-of-scope package.json deltas deny the dependency scope (git fixtures)', () => {
 		const fixture = buildOwnerScopeFixture();
