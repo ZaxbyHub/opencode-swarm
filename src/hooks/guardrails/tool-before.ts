@@ -100,7 +100,6 @@ import {
 	dcRelocateDestructiveTarget,
 	dcSegmentVerbMatch,
 	dcSplitSegments,
-	dcUnwrapWrappers,
 	dcUnwrapWrappersBounded,
 } from './destructive-command';
 import {
@@ -757,7 +756,22 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		// --- Split compound command into segments ---
 		const outerSegments = dcSplitSegments(command);
 		const innerSegments = dcSplitSegments(unwrapped);
-		const perSegmentUnwrapped = outerSegments.map((s) => dcUnwrapWrappers(s));
+		const perSegmentBounded = outerSegments.map((s) =>
+			dcUnwrapWrappersBounded(s),
+		);
+		// #3491 W3 review (REQUIRED): the WHOLE-command chain stops at the
+		// FIRST non-wrapper segment, so a compound `echo ok; sudo×65 rm …`
+		// never reaches the deep chain — consult the bound PER SEGMENT and
+		// fail closed before any segment evaluation.
+		for (const bounded of perSegmentBounded) {
+			if (bounded.depthExceeded) {
+				throwDestructiveBlock(
+					'wrapper unwrap depth',
+					`BLOCKED: shell wrapper nesting exceeds the inspection bound (${DC_UNWRAP_PARANOID_BOUND}) — rejecting for safety`,
+				);
+			}
+		}
+		const perSegmentUnwrapped = perSegmentBounded.map((b) => b.command);
 		// #3491 W2: chdir-bearing wrapper segments expand with an EVOLVING
 		// per-segment directory context — the wrapped command's rm/rmdir/del
 		// targets are RELOCATED from the child cwd (and the tracked evolution
@@ -1534,6 +1548,15 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		const detectionCommand = didUnwrap ? preprocessed.command : command;
 
 		let analysis = didUnwrap ? detect(detectionCommand) : primaryAnalysis;
+		// #3491 W3 review (REQUIRED): the substituted analysis runs on the
+		// PREPROCESSED text, whose per-segment unwrap already consumed up to
+		// the bound — the ORIGINAL analysis's depth refusal must survive the
+		// substitution or a compound `echo ok; sudo×65 rm …` launders the
+		// flag through the "no writes detected" early return. OR it through,
+		// mirroring mergeWriteAnalyses.
+		if (didUnwrap && primaryAnalysis.unwrapDepthExceeded) {
+			analysis = { ...analysis, unwrapDepthExceeded: true };
+		}
 		// #3485 (PRR-006 + EXT-2 M2): the unwrapped detection command can
 		// LOSE writes the original analysis saw — dcSplitSegments erases pipe
 		// context (a pipeline-internal wrapper's `[eval stdin]` entry) and an

@@ -14,7 +14,6 @@ import {
 	dcPreprocessWrappers,
 	dcRelocateDestructiveTarget,
 	dcSplitSegments,
-	dcUnwrapWrappers,
 	dcUnwrapWrappersBounded,
 } from '../hooks/guardrails/destructive-command.js';
 import { checkFileAuthority } from '../hooks/guardrails/file-authority.js';
@@ -212,7 +211,22 @@ function evaluateDestructiveDecision(
 	const unwrapped = boundedUnwrap.command;
 	const outerSegments = dcSplitSegments(command);
 	const innerSegments = dcSplitSegments(unwrapped);
-	const perSegmentUnwrapped = outerSegments.map((s) => dcUnwrapWrappers(s));
+	const perSegmentBounded = outerSegments.map((s) =>
+		dcUnwrapWrappersBounded(s),
+	);
+	// #3491 W3 review (REQUIRED) parity: the per-segment depth consult — the
+	// whole-command chain stops at the first non-wrapper segment, so a
+	// compound depth chain must deny here exactly as the live arm denies.
+	for (const bounded of perSegmentBounded) {
+		if (bounded.depthExceeded) {
+			return {
+				decision: 'block',
+				firingRule:
+					'BLOCKED: shell wrapper nesting exceeds the inspection bound — rejecting for safety',
+			};
+		}
+	}
+	const perSegmentUnwrapped = perSegmentBounded.map((b) => b.command);
 	// #3491 W2 parity: the same evolving per-segment directory context the
 	// live destructive arm uses — chdir-bearing wrapper segments relocate
 	// their rm/rmdir/del targets from the child cwd to session-root-relative
@@ -838,10 +852,17 @@ export async function handleGuardrailExplain(
 			decision = 'block';
 			firingRule =
 				'parse_error: write detection failed to parse command — rejecting for safety';
-		} else if (analysis.unwrapDepthExceeded) {
+		} else if (
+			analysis.unwrapDepthExceeded ||
+			rawPosix.unwrapDepthExceeded ||
+			rawAnalysis.unwrapDepthExceeded
+		) {
 			// #3491 W3 (v4 constraint 8) parity: consulted BEFORE the no-write
 			// early return — depth abuse denies in explain exactly as in the
-			// gate.
+			// gate. #3491 W3 review (REQUIRED): the RAW analyses' depth
+			// refusal (original command text) must survive the preprocessing
+			// substitution — a compound depth chain launders the detection
+			// command's flag exactly as it laundered the gate's.
 			decision = 'block';
 			firingRule =
 				'unwrap_depth: shell wrapper nesting exceeds the inspection bound — rejecting for safety';

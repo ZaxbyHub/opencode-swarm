@@ -87,6 +87,15 @@ C9, C12–C15 stay GREEN.
 - Deny-on-uncertainty (W3) can false-positive exotic-but-benign launcher
   spellings (`sudo -h host cmd`-style undocumented forms); accepted deliberately
   (fail-closed default).
+- Quoted/escaped `time` spellings (`\time`, `'time'`, `"time"`) suppress the
+  bash keyword (ground truth: bash PATH-resolves a program instead), so the
+  GNU-binary grammar governs them — `\time -o FILE cmd` emits the
+  timing-report write target (review advisory 1).
+- A trailing `.exe` is stripped from normalized rm-family verbs, so the bare
+  `rm.exe` and the POSIX-absolute `/bin/rm.exe` match `rm` — Git Bash resolves
+  them to the same program (ground truth); the POSIX strip is an over-match in
+  the deny direction, deliberately accepted (review advisory 2). `/bin/RM`
+  stays unmatched (POSIX case-sensitivity).
 - Perl cluster forms (`perl -i -pe '…'`, `perl -ne`) now carry an
   `interpreter_eval` write alongside their in-place report, so they route like
   `python -c`: denied for a scope-less architect and for a scoped coder while
@@ -100,9 +109,11 @@ C9, C12–C15 stay GREEN.
 ## Test evidence
 
 - New suites `tests/unit/hooks/guardrails-shell-write-interpreter-flags-3491.test.ts`
-  (46 tests) and `tests/unit/hooks/destructive-command-verb-and-ps-3539.test.ts`
-  (47 tests); W3 legs added to `guardrails-shell-write-launcher-env-3491.test.ts`
-  (80 tests total).
+  (46 tests), `tests/unit/hooks/destructive-command-verb-and-ps-3539.test.ts`
+  (50 tests), and the review-round sibling
+  `guardrails-shell-write-launcher-depth-3491.test.ts` (13 tests: compound
+  depth laundering, quoted time, explain parity); W3 legs added to
+  `guardrails-shell-write-launcher-env-3491.test.ts` (80 tests total).
 - Deliberate re-pins: `shell-write-detect-null-device.test.ts` (perl glued
   cluster evalToo rows), `guardrails-shell-write-inplace-unknown-option.test.ts`,
   `guardrails-shell-write-inplace-escapes.test.ts`,

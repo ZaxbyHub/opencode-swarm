@@ -103,6 +103,12 @@ describe('W6 verb spelling matrix (rm recursion arm, destructive config)', () =>
 		['/bin/rm -rf ../../outside'],
 		['C:\\Windows\\system32\\rm.EXE -rf ../../outside'],
 		['C:/Windows/system32/rm.exe -rf ../../outside'],
+		// #3539 review advisory 2: on Git Bash the bare `rm.exe` IS rm
+		// (ground truth: `rm.exe FILE` deletes); `/bin/rm.exe` matching rm is
+		// the same over-match in the deny direction.
+		['rm.exe -rf ../../outside'],
+		['rm.EXE -rf ../../outside'],
+		['/bin/rm.exe -rf ../../outside'],
 	])('%s → DENIED (normalized verb)', async (command) => {
 		const got = await gate(command, true);
 		expect(got.verdict).toBe('DENIED');

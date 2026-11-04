@@ -206,14 +206,18 @@ export function shellSplitWords(input: string): string[] {
  */
 export function shellSplitWordsWithOffsets(
 	input: string,
-): Array<{ word: string; start: number }> {
-	const out: Array<{ word: string; start: number }> = [];
+): Array<{ word: string; start: number; raw: string }> {
+	const out: Array<{ word: string; start: number; raw: string }> = [];
 	let current = '';
 	let hasWord = false;
 	let wordStart = -1;
-	const pushWord = () => {
+	const pushWord = (rawEnd: number) => {
 		if (hasWord) {
-			out.push({ word: current, start: wordStart });
+			out.push({
+				word: current,
+				start: wordStart,
+				raw: input.slice(wordStart, rawEnd),
+			});
 			current = '';
 			hasWord = false;
 		}
@@ -264,7 +268,7 @@ export function shellSplitWordsWithOffsets(
 			continue;
 		}
 		if (/\s/.test(ch)) {
-			pushWord();
+			pushWord(i);
 			i += 1;
 			continue;
 		}
@@ -273,7 +277,7 @@ export function shellSplitWordsWithOffsets(
 		hasWord = true;
 		i += 1;
 	}
-	pushWord();
+	pushWord(input.length);
 	return out;
 }
 
@@ -384,8 +388,14 @@ export function dcSegmentVerbMatch(
 	if (!cmp) return null;
 	if (!verbs.includes(cmp)) {
 		// The cmd.exe gate arms historically matched an optional `.exe`
-		// suffix (`rmdir(?:\.exe)?`); keep that for BARE spellings (absolute
-		// spellings already lost the extension in dcNormalizeVerbWord).
+		// suffix (`rmdir(?:\.exe)?`); keep that for BARE spellings — Git Bash
+		// resolves `del.exe`/`rm.exe` to the same programs (ground truth:
+		// `rm.exe FILE` deletes). The strip also applies to POSIX-absolute
+		// basenames (`/bin/rm.exe` → `rm`): dcNormalizeVerbWord strips the
+		// extension only for WIN32 absolutes, so this fallback re-adds it
+		// for the POSIX spellings — an over-match in the DENY direction,
+		// deliberately accepted (comment and code agree per the #3539
+		// review).
 		const stripped = cmp.replace(/\.[Ee][Xx][Ee]$/, '');
 		if (!stripped || !verbs.includes(stripped)) return null;
 		cmp = stripped;
@@ -782,6 +792,7 @@ function dcStripLauncherWrapper(t: string): [string, string] | null {
 	const walk = walkLauncherOptions(
 		first.word,
 		words.slice(1).map((w) => w.word),
+		first.raw,
 	);
 	if (walk === null) return null;
 	if (walk.kind === 'inner') {
@@ -850,10 +861,14 @@ export function dcAnalyzeLauncherUncertainty(command: string): {
 	reason: string;
 } {
 	for (const segment of dcSplitSegments(command)) {
-		const words = shellSplitWords(segment);
+		const words = shellSplitWordsWithOffsets(segment);
 		const head = words[0];
 		if (head === undefined) continue;
-		const walk = walkLauncherOptions(head, words.slice(1));
+		const walk = walkLauncherOptions(
+			head.word,
+			words.slice(1).map((w) => w.word),
+			head.raw,
+		);
 		if (walk === null) continue;
 		if (walk.kind === 'interactive') {
 			return {
@@ -1442,10 +1457,16 @@ export function dcExtractRecursiveRmTargets(segment: string): string[] | null {
 	// path-qualified spellings (`\rm`, `"rm"`, `/bin/rm`,
 	// `C:\Windows\system32\rm.exe`); `./rm` stays a project-local program.
 	// Case-sensitive (POSIX `rm`): `RM` and `/bin/RM` do not match.
-	if (
-		verbTokens.length < 2 ||
-		dcNormalizeVerbWord(verbTokens[0] ?? '') !== 'rm'
-	) {
+	// #3539 W6 review advisory 2: a trailing `.exe` (case-insensitive) is
+	// stripped from the normalized verb — on Git Bash the bare `rm.exe` IS rm
+	// (ground truth: `rm.exe FILE` deletes), and `/bin/rm.exe` matching rm is
+	// the same over-match in the deny direction; `RM.exe` / `/bin/RM.exe`
+	// keep their case and stay unmatched.
+	const normalizedRmVerb = dcNormalizeVerbWord(verbTokens[0] ?? '').replace(
+		/\.[Ee][Xx][Ee]$/,
+		'',
+	);
+	if (verbTokens.length < 2 || normalizedRmVerb !== 'rm') {
 		return null;
 	}
 	tokens.length = 0;
@@ -1462,7 +1483,10 @@ export function dcExtractRecursiveRmTargets(segment: string): string[] | null {
 	const delimStripped = tokens.filter((t) => t.length > 0);
 	tokens.length = 0;
 	tokens.push(...delimStripped);
-	if (tokens.length < 2 || dcNormalizeVerbWord(tokens[0] ?? '') !== 'rm')
+	if (
+		tokens.length < 2 ||
+		dcNormalizeVerbWord(tokens[0] ?? '').replace(/\.[Ee][Xx][Ee]$/, '') !== 'rm'
+	)
 		return null;
 
 	let destructive = false;

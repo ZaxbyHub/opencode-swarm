@@ -2730,22 +2730,59 @@ function isAbsolutePathSpelling(word: string): boolean {
 }
 
 /**
- * Walk one launcher's option region (#3491 W3). `launcherWord` is the RAW
- * spelling (case preserved — the `time` keyword-vs-GNU-binary distinction is
- * by spelling: absolute path ⇒ GNU binary grammar, bare word ⇒ bash keyword);
- * `words` are the words AFTER the launcher word (quote-removed). Returns null
- * when the launcher word is not one of sudo/time/nice/nohup.
+ * Whether a raw launcher spelling QUOTED or ESCAPED the bare word
+ * (#3491 W3 review advisory 1): bash recognizes reserved WORDS like the
+ * `time` keyword only in their unquoted, unescaped spelling — `\time`,
+ * `'time'`, `"time"` suppress the keyword and PATH-resolve a program instead
+ * (ground truth on bash 5.3.9: `\time -p true` → "time: command not found"),
+ * so the GNU-binary grammar governs those spellings. True when `raw` differs
+ * from the dequoted `word` and equals it after stripping ONE leading
+ * backslash or ONE matched quote pair.
+ */
+function isKeywordSuppressedSpelling(raw: string, word: string): boolean {
+	if (raw === word) return false;
+	let s = raw;
+	if (
+		s.length >= 2 &&
+		((s.startsWith("'") && s.endsWith("'")) ||
+			(s.startsWith('"') && s.endsWith('"')))
+	) {
+		s = s.slice(1, -1);
+	} else if (s.startsWith('\\')) {
+		s = s.slice(1);
+	} else {
+		return false;
+	}
+	return s === word;
+}
+
+/**
+ * Walk one launcher's option region (#3491 W3). `launcherWord` is the
+ * QUOTE-REMOVED word (case preserved — the `time` keyword-vs-GNU-binary
+ * distinction is by spelling: an absolute path OR a keyword-suppressing
+ * quoted/escaped spelling selects the GNU binary grammar, the bare word is
+ * the bash keyword); `rawLauncherWord` carries the pre-quote-removal
+ * spelling when the caller can see it (the DC offset splitter and the AST
+ * raw-word map). `words` are the words AFTER the launcher word
+ * (quote-removed). Returns null when the launcher word is not one of
+ * sudo/time/nice/nohup.
  */
 export function walkLauncherOptions(
 	launcherWord: string,
 	words: readonly string[],
+	rawLauncherWord?: string,
 ): LauncherWalkOutcome | null {
 	const base = basenameAnySep(launcherWord);
 	if (base === 'sudo') return walkSudoOptions(words);
-	if (base === 'time')
-		return isAbsolutePathSpelling(launcherWord)
+	if (base === 'time') {
+		const binaryGrammar =
+			isAbsolutePathSpelling(launcherWord) ||
+			(rawLauncherWord !== undefined &&
+				isKeywordSuppressedSpelling(rawLauncherWord, launcherWord));
+		return binaryGrammar
 			? walkGnuTimeOptions(words)
 			: walkKeywordTimeOptions(words);
+	}
 	if (base === 'nice') return walkNiceOptions(words);
 	if (base === 'nohup') return walkNohupOptions(words);
 	return null;
@@ -3320,18 +3357,40 @@ function detectorCommandPartsFromWords(
  * builtin/exec prefixes may precede the launcher) so `env FOO=1 sudo -e f`
  * emits the same targets.
  */
+/**
+ * Raw (quote-preserving) text of a command's NAME word when the AST carries
+ * it (annotateRawWordText populates RAW_WORD_TEXT for Word nodes, including
+ * the name node): `\time`/`'time'` are distinguishable from the bare keyword
+ * spelling here, routing the launcher grammar (#3491 W3 review advisory 1).
+ * Null when the raw slice is unavailable — callers then keep the dequoted
+ * spelling only.
+ */
+function rawCommandName(cmd: unknown): string | null {
+	if (!cmd || typeof cmd !== 'object') return null;
+	const name = (cmd as BashCommand).name;
+	if (name && typeof name === 'object') {
+		const raw = RAW_WORD_TEXT.get(name);
+		if (raw !== undefined) return raw;
+	}
+	return null;
+}
+
 function detectLauncherWrites(cmd: unknown): WriteTarget[] {
 	const results: WriteTarget[] = [];
 	const firstName = getCommandName(cmd);
 	if (!firstName) return results;
 	const suffix = getSuffixWords(cmd);
+	// The FIRST word keeps its raw spelling (keyword-suppression routing);
+	// deeper chain words are only available dequoted.
+	const firstRaw = rawCommandName(cmd) ?? undefined;
 	let name: string | null = firstName;
+	let nameRaw = firstRaw;
 	let cursor = 0;
 	for (let hop = 0; hop < DETECTOR_UNWRAP_PARANOID_BOUND; hop++) {
 		if (!name) return results;
 		const base = basenameAnySep(name);
 		if (base === 'sudo' || base === 'time') {
-			const walk = walkLauncherOptions(name, suffix.slice(cursor));
+			const walk = walkLauncherOptions(name, suffix.slice(cursor), nameRaw);
 			if (walk?.kind === 'edit') {
 				for (let t = cursor + walk.editStartIndex; t < suffix.length; t++) {
 					const operand = suffix[t];
@@ -3400,6 +3459,7 @@ function detectLauncherWrites(cmd: unknown): WriteTarget[] {
 		}
 		if (cursor >= suffix.length) return results;
 		name = suffix[cursor] ?? null;
+		nameRaw = undefined; // deeper chain words carry no raw spelling
 		cursor++;
 	}
 	return results;
