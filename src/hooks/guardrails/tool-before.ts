@@ -88,10 +88,13 @@ import { appendGuardrailDecision } from './audit-log';
 import {
 	dcCheckJunctionCreation,
 	dcEvaluateRecursiveDeleteTargets,
+	dcExpandDestructiveSegments,
 	dcExtractPowerShellTargets,
 	dcExtractRecursiveRmTargets,
 	dcNormalizeCommand,
 	dcParseWindowsRecursiveDelete,
+	dcPreprocessWrappers,
+	dcRelocateDestructiveTarget,
 	dcSplitSegments,
 	dcUnwrapWrappers,
 } from './destructive-command';
@@ -729,9 +732,47 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		const outerSegments = dcSplitSegments(command);
 		const innerSegments = dcSplitSegments(unwrapped);
 		const perSegmentUnwrapped = outerSegments.map((s) => dcUnwrapWrappers(s));
+		// #3491 W2: chdir-bearing wrapper segments expand with an EVOLVING
+		// per-segment directory context — the wrapped command's rm/rmdir/del
+		// targets are RELOCATED from the child cwd (and the tracked evolution
+		// of any inner cd) to session-root-relative forms, so containment and
+		// safe-artifact judgment happen against the real workspace. An
+		// unresolvable context (dynamic/expansion DIR operand, or an inner
+		// directory mutation the W1 word-form rules cannot represent)
+		// relocates to an escaping sentinel — any destructive pattern then
+		// denies (fail-closed).
+		const expandedSegments = dcExpandDestructiveSegments(command, cwd);
+		const segmentContexts = new Map<string, 'uncertain' | { base: string }>();
+		for (const entry of expandedSegments) {
+			if (
+				entry.segment &&
+				entry.resolveFrom !== null &&
+				!segmentContexts.has(entry.segment)
+			) {
+				segmentContexts.set(
+					entry.segment,
+					entry.resolveFrom === 'uncertain'
+						? 'uncertain'
+						: { base: entry.resolveFrom },
+				);
+			}
+		}
+		const relocate = (seg: string, targets: string[]): string[] => {
+			const context = segmentContexts.get(seg);
+			if (context === undefined) return targets;
+			const resolveFrom = context === 'uncertain' ? 'uncertain' : context.base;
+			return targets.map((t) =>
+				dcRelocateDestructiveTarget(t, resolveFrom, cwd),
+			);
+		};
 		const allSegments = [
-			...new Set([...outerSegments, ...innerSegments, ...perSegmentUnwrapped]),
-		];
+			...new Set([
+				...outerSegments,
+				...innerSegments,
+				...perSegmentUnwrapped,
+				...expandedSegments.map((e) => e.segment),
+			]),
+		].filter((s) => s.length > 0);
 
 		// Cross-segment shell variable assignments (issue #2033 review): later
 		// segments referencing $NAME are resolved against assignments harvested
@@ -766,7 +807,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			const rmTargets = dcExtractRecursiveRmTargets(seg);
 			if (rmTargets) {
 				const decision = dcEvaluateRecursiveDeleteTargets({
-					targets: rmTargets,
+					targets: relocate(seg, rmTargets),
 					cwd,
 					verifiedScope,
 				});
@@ -805,7 +846,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 						);
 					}
 					const decision = dcEvaluateRecursiveDeleteTargets({
-						targets: parsed.targets,
+						targets: relocate(seg, parsed.targets),
 						cwd,
 						verifiedScope,
 					});
@@ -835,7 +876,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 						);
 					}
 					const decision = dcEvaluateRecursiveDeleteTargets({
-						targets: parsed.targets,
+						targets: relocate(seg, parsed.targets),
 						cwd,
 						verifiedScope,
 					});
@@ -862,7 +903,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				const targets = dcExtractPowerShellTargets(seg);
 				if (targets.length > 0) {
 					const decision = dcEvaluateRecursiveDeleteTargets({
-						targets,
+						targets: relocate(seg, targets),
 						cwd,
 						verifiedScope,
 					});
@@ -1416,12 +1457,24 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		// form when an actual unwrap occurred, so normal (unwrapped) commands are
 		// analyzed byte-for-byte as before. Detection and resolveWriteTargets must
 		// use the SAME string (resolveWriteTargets re-parses it for cwd tracking).
-		const commandSegments = dcSplitSegments(command);
-		const unwrappedSegments = commandSegments.map((s) => dcUnwrapWrappers(s));
-		const didUnwrap = commandSegments.some(
-			(s, i) => unwrappedSegments[i] !== s,
-		);
-		const detectionCommand = didUnwrap ? unwrappedSegments.join('\n') : command;
+		// #3491 W2: the preprocessing first REWRITES chdir-bearing wrapper
+		// segments (env -C DIR / env -S with a -C in the split argv /
+		// sudo -D DIR) as correctly-quoted subshells
+		// ( cd -- 'DIR' && <re-unwrapped inner> ), so the wrapped command's
+		// writes resolve under the child cwd while following siblings stay at
+		// the parent cwd (bash-true: env/sudo chdir applies only to the
+		// wrapped exec). Non-chdir segments keep the legacy unwrap. A static
+		// DIR that is empty or contains NUL fails closed; a dynamic DIR
+		// rewrites to the withdrawal form ( cd - && inner ) whose inner
+		// writes the resolver withdraws.
+		const preprocessed = dcPreprocessWrappers(command);
+		if (enforce && preprocessed.failClosed) {
+			throw new Error(
+				`BLOCKED: bash write detection failed to parse command — rejecting for safety`,
+			);
+		}
+		const didUnwrap = preprocessed.changed;
+		const detectionCommand = didUnwrap ? preprocessed.command : command;
 
 		let analysis = didUnwrap ? detect(detectionCommand) : primaryAnalysis;
 		// #3485 (PRR-006 + EXT-2 M2): the unwrapped detection command can
@@ -1456,7 +1509,14 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			// gluing its own `2>&1 | tail` after it) must not hard-reject a
 			// command the shell parses fine — fall back to the ORIGINAL
 			// command's analysis, which is what actually runs.
-			if (analysis.parseError && !primaryAnalysis.parseError) {
+			// #3491 W2: a REWROTE preprocess (generated subshell text) never
+			// falls back — a generated-parse failure fails closed instead of
+			// silently returning to the untransformed analysis.
+			if (
+				analysis.parseError &&
+				!primaryAnalysis.parseError &&
+				!preprocessed.rewrote
+			) {
 				analysis = primaryAnalysis;
 			}
 		}
@@ -1701,10 +1761,10 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 					// capability against (#3347 AC3 keeps the eval-block pins
 					// green; widening for orchestrator roles is the issue's open
 					// maintainer decision).
-					// #3491 W1: a WITHDRAWN eval (unresolved marker - the
+					// #3491 W1: a WITHDRAWN eval (unresolved marker — the
 					// directory-state walk could not stand behind any working
 					// directory) denies BEFORE the routing above and before any
-					// evalDirectory ?? shellDirectory fallback.
+					// `evalDirectory ?? shellDirectory` fallback.
 					if (
 						write.original.capability === true &&
 						write.unresolved !== true &&

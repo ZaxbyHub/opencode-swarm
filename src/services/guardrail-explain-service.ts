@@ -5,10 +5,13 @@ import { redactPath } from '../hooks/guardrails/audit-log.js';
 import {
 	dcCheckJunctionCreation,
 	dcEvaluateRecursiveDeleteTargets,
+	dcExpandDestructiveSegments,
 	dcExtractPowerShellTargets,
 	dcExtractRecursiveRmTargets,
 	dcNormalizeCommand,
 	dcParseWindowsRecursiveDelete,
+	dcPreprocessWrappers,
+	dcRelocateDestructiveTarget,
 	dcSplitSegments,
 	dcUnwrapWrappers,
 } from '../hooks/guardrails/destructive-command.js';
@@ -194,9 +197,40 @@ function evaluateDestructiveDecision(
 	const outerSegments = dcSplitSegments(command);
 	const innerSegments = dcSplitSegments(unwrapped);
 	const perSegmentUnwrapped = outerSegments.map((s) => dcUnwrapWrappers(s));
+	// #3491 W2 parity: the same evolving per-segment directory context the
+	// live destructive arm uses — chdir-bearing wrapper segments relocate
+	// their rm/rmdir/del targets from the child cwd to session-root-relative
+	// forms; an unresolvable context lands on the escaping sentinel.
+	const expandedSegments = dcExpandDestructiveSegments(command, cwd);
+	const segmentContexts = new Map<string, 'uncertain' | { base: string }>();
+	for (const entry of expandedSegments) {
+		if (
+			entry.segment &&
+			entry.resolveFrom !== null &&
+			!segmentContexts.has(entry.segment)
+		) {
+			segmentContexts.set(
+				entry.segment,
+				entry.resolveFrom === 'uncertain'
+					? 'uncertain'
+					: { base: entry.resolveFrom },
+			);
+		}
+	}
+	const relocate = (seg: string, targets: string[]): string[] => {
+		const context = segmentContexts.get(seg);
+		if (context === undefined) return targets;
+		const resolveFrom = context === 'uncertain' ? 'uncertain' : context.base;
+		return targets.map((t) => dcRelocateDestructiveTarget(t, resolveFrom, cwd));
+	};
 	const allSegments = [
-		...new Set([...outerSegments, ...innerSegments, ...perSegmentUnwrapped]),
-	];
+		...new Set([
+			...outerSegments,
+			...innerSegments,
+			...perSegmentUnwrapped,
+			...expandedSegments.map((e) => e.segment),
+		]),
+	].filter((s) => s.length > 0);
 
 	for (const segment of allSegments) {
 		const seg = segment.trim();
@@ -215,7 +249,10 @@ function evaluateDestructiveDecision(
 		// enforcement on stacked flags, long options, quoting, or multi-targets.
 		const targets = dcExtractRecursiveRmTargets(seg);
 		if (targets) {
-			const targetDecision = dcEvaluateRecursiveDeleteTargets({ targets, cwd });
+			const targetDecision = dcEvaluateRecursiveDeleteTargets({
+				targets: relocate(seg, targets),
+				cwd,
+			});
 			if (!targetDecision.allowed) {
 				return {
 					decision: 'block',
@@ -241,7 +278,7 @@ function evaluateDestructiveDecision(
 					};
 				}
 				const targetDecision = dcEvaluateRecursiveDeleteTargets({
-					targets: parsed.targets,
+					targets: relocate(seg, parsed.targets),
 					cwd,
 				});
 				if (!targetDecision.allowed) {
@@ -268,7 +305,7 @@ function evaluateDestructiveDecision(
 					};
 				}
 				const targetDecision = dcEvaluateRecursiveDeleteTargets({
-					targets: parsed.targets,
+					targets: relocate(seg, parsed.targets),
 					cwd,
 				});
 				if (!targetDecision.allowed) {
@@ -294,7 +331,7 @@ function evaluateDestructiveDecision(
 			const targets = dcExtractPowerShellTargets(seg);
 			if (targets.length > 0) {
 				const targetDecision = dcEvaluateRecursiveDeleteTargets({
-					targets,
+					targets: relocate(seg, targets),
 					cwd,
 				});
 				if (!targetDecision.allowed) {
@@ -690,12 +727,19 @@ export async function handleGuardrailExplain(
 	// wrapper flag below stay computed from the raw command, exactly like the
 	// gate; detection and target resolution use the same normalized string,
 	// because resolveWriteTargets re-parses it for cwd tracking.
-	const commandSegments = dcSplitSegments(shellCommand);
-	const unwrappedSegments = commandSegments.map((s) => dcUnwrapWrappers(s));
-	const didUnwrap = commandSegments.some((s, i) => unwrappedSegments[i] !== s);
-	const detectionCommand = didUnwrap
-		? unwrappedSegments.join('\n')
-		: shellCommand;
+	// #3491 W2 parity: explain shares the gate's chdir-wrapper preprocessing —
+	// chdir-bearing wrapper segments (env -C / env -S / sudo -D) rewrite as
+	// correctly-quoted subshells so the wrapped writes resolve under the child
+	// cwd. A fail-closed DIR (empty/NUL static operand) blocks here exactly
+	// like the gate's parse-error rejection.
+	const preprocessed = dcPreprocessWrappers(shellCommand);
+	if (preprocessed.failClosed) {
+		decision = 'block';
+		firingRule =
+			'parse_error: write detection failed to parse command — rejecting for safety';
+	}
+	const didUnwrap = preprocessed.changed;
+	const detectionCommand = didUnwrap ? preprocessed.command : shellCommand;
 
 	if (decision === 'allow') {
 		const detected = resolveShellType(shellCommand) as

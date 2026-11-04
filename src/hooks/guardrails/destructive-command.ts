@@ -104,6 +104,123 @@ const DC_REMOTE_PREFIXES: readonly string[] = [
 ];
 
 // ============================================================================
+// Shared shell word machinery (#3491 W2/W4)
+// ============================================================================
+
+/**
+ * Quote-aware shell word splitter with bash quote-removal (#3491 W4): splits
+ * on unquoted whitespace and returns each word's quote-removed text. Single
+ * quotes are fully literal; double quotes honor backslash escapes;
+ * backslash outside quotes escapes the next character; adjacent quoted and
+ * unquoted spans CONCATENATE into one word (`'a'\''b'` is one word, not
+ * three — the same-kind quote-concat shape that defeated the old
+ * positional-blind payload regex). An unterminated quote extends the current
+ * word to the end of the input (the conservative reading).
+ */
+export function shellSplitWords(input: string): string[] {
+	const words: string[] = [];
+	let current = '';
+	let hasWord = false;
+	const pushWord = () => {
+		if (hasWord) {
+			words.push(current);
+			current = '';
+			hasWord = false;
+		}
+	};
+	let i = 0;
+	while (i < input.length) {
+		const ch = input[i];
+		if (ch === "'") {
+			hasWord = true;
+			i += 1;
+			while (i < input.length && input[i] !== "'") {
+				current += input[i];
+				i += 1;
+			}
+			i += 1; // closing quote (or end of input)
+			continue;
+		}
+		if (ch === '"') {
+			hasWord = true;
+			i += 1;
+			while (i < input.length && input[i] !== '"') {
+				if (
+					input[i] === '\\' &&
+					i + 1 < input.length &&
+					'"\\$`'.includes(input[i + 1])
+				) {
+					current += input[i + 1];
+					i += 2;
+					continue;
+				}
+				current += input[i];
+				i += 1;
+			}
+			i += 1;
+			continue;
+		}
+		if (ch === '\\') {
+			hasWord = true;
+			if (i + 1 < input.length) {
+				current += input[i + 1];
+				i += 2;
+				continue;
+			}
+			i += 1;
+			continue;
+		}
+		if (/\s/.test(ch)) {
+			pushWord();
+			i += 1;
+			continue;
+		}
+		current += ch;
+		hasWord = true;
+		i += 1;
+	}
+	pushWord();
+	return words;
+}
+
+/**
+ * Serialize one word for safe re-emission into a generated shell command:
+ * POSIX single-quote serialization (every `'` becomes `'\''`), so a DIR
+ * operand containing spaces, `#`, quotes, or any other metacharacter
+ * round-trips as the SAME single word the shell originally parsed
+ * (#3491 W2).
+ */
+export function shSingleQuote(word: string): string {
+	return `'${word.replace(/'/g, `'\\''`)}'`;
+}
+
+/** Serialize a word list back into one safe shell command string. */
+function shSerializeWords(words: string[]): string {
+	// Words without any shell metacharacter round-trip unquoted; everything
+	// else (spaces, quotes, globs, expansions, redirection characters) is
+	// single-quoted. Keeping plain words bare preserves the wrapper-verb
+	// spellings (`sh -c`, `rm -rf`) for the legacy re-unwrap pass.
+	return words
+		.map((w) => (/^[A-Za-z0-9_@%+=:,./-]+$/.test(w) ? w : shSingleQuote(w)))
+		.join(' ');
+}
+
+/**
+ * The shared `sh -c` payload extractor (#3491 W4): the payload is the single
+ * quote-removed word immediately after the `-c` flag (sh's argv[2] contract).
+ * Following words become `$0`, `$1`, … INSIDE the payload's interpreter and
+ * are NEVER scanned as commands — the extractor returns the payload word
+ * alone. Same-kind quote concatenation collapses at quote-removal because
+ * the tokenizer consumes the concatenation, not a raw-quote rescan.
+ * Returns null when no payload word exists.
+ */
+export function dcExtractShellDashCPayload(rest: string): string | null {
+	const words = shellSplitWords(rest);
+	if (words.length === 0) return null;
+	return words[0];
+}
+
+// ============================================================================
 // Destructive-command functions
 // ============================================================================
 
@@ -353,6 +470,7 @@ export function dcStripOneWrapper(cmd: string): string | null {
 	}
 
 	// bash/sh/zsh -c "inner" — case-insensitive for consistency with other wrappers.
+		// bash/sh/zsh -c "inner" - case-insensitive for consistency with other wrappers.
 	// #3475: single-quoted payloads unwrap identically to double-quoted ones
 	// (a `'...'`-quoted -c argument used to survive unwrapped, hiding every
 	// write inside it). Inner quotes of the OTHER kind survive by construction;
@@ -437,6 +555,483 @@ export function dcUnwrapWrappers(cmd: string): string {
 		current = inner.trim();
 	}
 	return current;
+}
+
+// ============================================================================
+// Child-scoped chdir wrapper transform (#3491 W2)
+// ============================================================================
+
+/** Rewrite/nesting bound for the chdir transform (mirrors DC_MAX_UNWRAP_DEPTH). */
+const DC_CHDIR_REWRITE_MAX_DEPTH = 5;
+
+/** env short flags whose argument may ride INSIDE the token (`-Cdir`). */
+const ENV_SHORT_ARG_CHARS = new Set(['u', 'U', 'C', 'S', 'a', 'P']);
+
+/**
+ * A chdir-bearing wrapper segment match (#3491 W2): `env [-flags] -C DIR
+ * cmd…` (including the GNU `-S`/`--split-string` form whose split argv
+ * carries a `-C`) or `sudo [-D DIR | --chdir DIR | --chdir=DIR] cmd…`.
+ *
+ * - `static`: DIR is a literal, serializable directory; `innerWords` are the
+ *   quote-removed words of the wrapped command.
+ * - `uncertain`: DIR is expansion-bearing or dynamic ($VAR, ${…}, ~,
+ *   backticks, $(…), globs, %VAR%) — NEVER serialized; the caller withdraws.
+ * - `failClosed`: DIR is empty or contains NUL, or the wrapper shape is too
+ *   ambiguous to model — the caller fails closed.
+ * - null: not a chdir-bearing wrapper segment (legacy unwrap path).
+ */
+type DcChdirMatch =
+	| { kind: 'static'; dir: string; innerWords: string[] }
+	| { kind: 'uncertain'; innerWords: string[] }
+	| { kind: 'failClosed' }
+	| null;
+
+/** Word starts with `~` or holds any expansion/glob construct. */
+function dcIsDynamicChdirOperand(dir: string): boolean {
+	if (dir.startsWith('~')) return true;
+	if (/[$`]/.test(dir)) return true;
+	if (/[*?[\]]/.test(dir)) return true;
+	if (/%[^%\s]+%/.test(dir)) return true;
+	return false;
+}
+
+/** Basename of a possibly path-qualified, possibly .exe-suffixed spelling. */
+function basenameAnySepLike(word: string): string {
+	const base = word.split(/[\\/]/).pop() ?? word;
+	return base.replace(/\.exe$/i, '').toLowerCase();
+}
+
+/**
+ * Match one chdir-bearing env/sudo wrapper segment. The env walk mirrors the
+ * envPrefix/envFlag grammar: VAR=VALUE assignments, argument-less flags,
+ * arg-taking flags with their separate argument, attached `-C<dir>` /
+ * `--chdir=<dir>` spellings, and the `-S`/`--split-string` payload whose
+ * GNU-split argv is scanned for the chdir. The sudo walk models ONLY the
+ * -D/--chdir chdir options — any other dash option bails to null (its arity
+ * table is the W3 launcher workstream).
+ */
+function matchChdirWrapperSegment(segment: string): DcChdirMatch {
+	const trimmed = segment.trim();
+	if (trimmed === '') return null;
+	const words = shellSplitWords(trimmed);
+	if (words.length === 0) return null;
+	const head = basenameAnySepLike(words[0]);
+	if (head === 'env') return matchEnvChdir(words);
+	if (head === 'sudo') return matchSudoChdir(words);
+	return null;
+}
+
+function matchEnvChdir(words: string[]): DcChdirMatch {
+	let cursor = 1;
+	let dir: string | undefined;
+	while (cursor < words.length) {
+		const token = words[cursor];
+		if (token === undefined) break;
+		if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(token)) {
+			cursor += 1;
+			continue;
+		}
+		if (token.startsWith('--')) {
+			if (token === '--chdir') {
+				const arg = words[cursor + 1];
+				if (arg === undefined) return { kind: 'failClosed' };
+				dir = arg;
+				cursor += 2;
+				continue;
+			}
+			const glued = /^--chdir=(.*)$/.exec(token);
+			if (glued) {
+				dir = glued[1];
+				cursor += 1;
+				continue;
+			}
+			if (token === '--split-string') {
+				const arg = words[cursor + 1];
+				if (arg === undefined) return { kind: 'failClosed' };
+				// GNU env splits the payload into argv and processes those as
+				// its own arguments in place of the option.
+				const splitWords = shellSplitWords(arg);
+				if (splitWords.some((w) => w === '--split-string' || w === '-S')) {
+					return { kind: 'failClosed' };
+				}
+				const merged = [...splitWords, ...words.slice(cursor + 2)];
+				return matchEnvChdir(['env', ...merged]);
+			}
+			// Other long flags: arg-taking when unambiguously abbreviating one
+			// (mirrors envFlagConsumesNextWord); otherwise argument-less.
+			const argTaking = [
+				'--unset',
+				'--chdir',
+				'--split-string',
+				'--argv0',
+				'--env0-from',
+			];
+			const unambiguous = argTaking.filter((flag) => flag.startsWith(token));
+			if (token.length >= 3 && unambiguous.length === 1) {
+				cursor += 2;
+				continue;
+			}
+			cursor += 1;
+			continue;
+		}
+		if (token.startsWith('-') && token !== '-') {
+			if (token === '-C') {
+				const arg = words[cursor + 1];
+				if (arg === undefined) return { kind: 'failClosed' };
+				dir = arg;
+				cursor += 2;
+				continue;
+			}
+			const glued = /^-C(.+)$/.exec(token);
+			if (glued) {
+				dir = glued[1];
+				cursor += 1;
+				continue;
+			}
+			const chars = token.slice(1).split('');
+			const firstArgIndex = chars.findIndex((c) => ENV_SHORT_ARG_CHARS.has(c));
+			if (
+				firstArgIndex !== -1 &&
+				chars.slice(0, firstArgIndex).every((c) => 'i0vVh'.includes(c))
+			) {
+				// Cluster whose FIRST arg-taking member either is last (its
+				// argument is the NEXT word) or swallows the token's tail.
+				if (firstArgIndex === chars.length - 1) {
+					const arg = words[cursor + 1];
+					if (arg === undefined) return { kind: 'failClosed' };
+					if (chars[firstArgIndex] === 'S') {
+						// GNU env splits the -S payload into argv and processes
+						// those as its own arguments in place of the option.
+						const splitWords = shellSplitWords(arg);
+						if (splitWords.some((w) => w === '--split-string' || w === '-S')) {
+							return { kind: 'failClosed' };
+						}
+						const merged = [...splitWords, ...words.slice(cursor + 2)];
+						return matchEnvChdir(['env', ...merged]);
+					}
+					if (chars[firstArgIndex] === 'C') dir = arg;
+					cursor += 2;
+					continue;
+				}
+				if (chars[firstArgIndex] === 'C') {
+					dir = chars.slice(firstArgIndex + 1).join('');
+				}
+				cursor += 1;
+				continue;
+			}
+			cursor += 1;
+			continue;
+		}
+		break; // the command word
+	}
+	const rest = words.slice(cursor);
+	if (dir === undefined) return null;
+	if (dir === '' || dir.includes('\0')) return { kind: 'failClosed' };
+	if (rest.length === 0) {
+		// Chdir with no command: nothing runs — not a wrapper to rewrite.
+		return null;
+	}
+	if (dcIsDynamicChdirOperand(dir)) {
+		return { kind: 'uncertain', innerWords: rest };
+	}
+	return { kind: 'static', dir, innerWords: rest };
+}
+
+function matchSudoChdir(words: string[]): DcChdirMatch {
+	let cursor = 1;
+	let dir: string | undefined;
+	while (cursor < words.length) {
+		const token = words[cursor];
+		if (token === undefined) break;
+		if (token === '-D' || token === '--chdir') {
+			const arg = words[cursor + 1];
+			if (arg === undefined) return { kind: 'failClosed' };
+			if (dir === undefined) dir = arg;
+			cursor += 2;
+			continue;
+		}
+		const glued = /^--chdir=(.*)$/.exec(token);
+		if (glued) {
+			if (dir === undefined) dir = glued[1];
+			cursor += 1;
+			continue;
+		}
+		if (token.startsWith('-') && token !== '-') {
+			// Unknown sudo option: its arity is W3's launcher table — bail to
+			// the legacy unwrap instead of guessing.
+			return null;
+		}
+		break; // the command word
+	}
+	if (dir === undefined) return null;
+	if (dir === '' || dir.includes('\0')) return { kind: 'failClosed' };
+	const rest = words.slice(cursor);
+	if (rest.length === 0) {
+		// -D with no command: nothing runs.
+		return null;
+	}
+	if (dcIsDynamicChdirOperand(dir)) {
+		return { kind: 'uncertain', innerWords: rest };
+	}
+	return { kind: 'static', dir, innerWords: rest };
+}
+
+/**
+ * The additive structured wrapper-preprocessing result (#3491 W2): the
+ * detection command with every chdir-bearing wrapper segment rewritten as a
+ * CORRECTLY QUOTED subshell `( cd -- 'DIR' && <re-unwrapped inner> )`, and
+ * every other wrapper segment unwrapped exactly as the legacy
+ * `dcSplitSegments`+`dcUnwrapWrappers` pipeline did. The subshell form is
+ * bash-true for env/sudo child cwd: the wrapped command's writes resolve
+ * under the child directory while following siblings stay at the parent
+ * directory. A dynamic DIR is never serialized — the segment rewrites to
+ * the withdrawal form `( cd - && <inner> )`, and the resolver's `cd -` with
+ * no modeled prior directory withdraws every inner write (fail-closed).
+ * Nested chdir wrappers compose as nested subshells, so relative child
+ * cwds resolve against the parent child cwd.
+ */
+export interface DcWrapperPreprocess {
+	/** Preprocessed command (segments joined by '\n' when anything changed). */
+	command: string;
+	/** True when any segment was rewritten or unwrapped (the didUnwrap flag). */
+	changed: boolean;
+	/** True when at least one chdir subshell rewrite happened. */
+	rewrote: boolean;
+	/** True when a rewrite used the withdrawal form (dynamic DIR). */
+	uncertain: boolean;
+	/** True when a static DIR was empty/NUL or the shape was unmodellable. */
+	failClosed: boolean;
+}
+
+function preprocessWrapperText(
+	text: string,
+	depth: number,
+): {
+	text: string;
+	rewrote: boolean;
+	uncertain: boolean;
+	failClosed: boolean;
+} | null {
+	if (depth >= DC_CHDIR_REWRITE_MAX_DEPTH) {
+		return { text, rewrote: false, uncertain: false, failClosed: true };
+	}
+	const match = matchChdirWrapperSegment(text);
+	if (match === null) return null;
+	if (match.kind === 'failClosed') {
+		return { text, rewrote: false, uncertain: false, failClosed: true };
+	}
+	const innerRaw = shSerializeWords(match.innerWords);
+	const nested = preprocessWrapperText(innerRaw, depth + 1);
+	const inner =
+		nested !== null
+			? nested
+			: {
+					text: dcUnwrapWrappers(innerRaw),
+					rewrote: false,
+					uncertain: false,
+					failClosed: false,
+				};
+	if (match.kind === 'uncertain') {
+		return {
+			text: `( cd - && ${inner.text} )`,
+			rewrote: true,
+			uncertain: true,
+			failClosed: inner.failClosed,
+		};
+	}
+	return {
+		text: `( cd -- ${shSingleQuote(match.dir)} && ${inner.text} )`,
+		rewrote: true,
+		uncertain: inner.uncertain,
+		failClosed: inner.failClosed,
+	};
+}
+
+/**
+ * Preprocess a command for write-path detection (#3491 W2). Segment order is
+ * preserved; only changed commands differ from the input.
+ */
+export function dcPreprocessWrappers(command: string): DcWrapperPreprocess {
+	const segments = dcSplitSegments(command);
+	const processed: string[] = [];
+	let changed = false;
+	let rewrote = false;
+	let uncertain = false;
+	let failClosed = false;
+	for (const segment of segments) {
+		const result = preprocessWrapperText(segment, 0);
+		if (result === null) {
+			const unwrapped = dcUnwrapWrappers(segment);
+			if (unwrapped !== segment) changed = true;
+			processed.push(unwrapped);
+			continue;
+		}
+		changed = true;
+		rewrote = rewrote || result.rewrote;
+		uncertain = uncertain || result.uncertain;
+		failClosed = failClosed || result.failClosed;
+		processed.push(result.text);
+	}
+	if (!changed) {
+		return {
+			command,
+			changed: false,
+			rewrote: false,
+			uncertain: false,
+			failClosed: false,
+		};
+	}
+	return {
+		command: processed.join('\n'),
+		changed: true,
+		rewrote,
+		uncertain,
+		failClosed,
+	};
+}
+
+/** One destructive-arm segment with its evolving directory context. */
+export interface DcDestructiveSegmentContext {
+	segment: string;
+	/**
+	 * The absolute directory this segment's path operands resolve against.
+	 * null: the session workspace directory (base behavior).
+	 * 'uncertain': the child cwd is unresolvable (dynamic/expansion DIR or an
+	 * unrepresentable inner mutation) — relocate targets to the escaping
+	 * sentinel so any destructive pattern denies (fail-closed).
+	 */
+	resolveFrom: string | 'uncertain' | null;
+}
+
+/** The escaping sentinel for uncertain child cwds (never inside a workspace). */
+const DC_UNRESOLVED_CHDIR_SENTINEL = '../__swarm_unresolved_chdir__';
+
+/**
+ * Relocate one destructive target operand from a wrapper's child cwd to a
+ * session-root-relative form (#3491 W2), so the shared delete evaluator
+ * (which resolves AND contains against the session root) judges the target
+ * where the wrapped command actually runs. Escaping landings keep their
+ * `../…` form and deny as outside-workspace; an uncertain cwd lands every
+ * target on the sentinel (outside any workspace).
+ */
+export function dcRelocateDestructiveTarget(
+	target: string,
+	resolveFrom: string | 'uncertain' | null,
+	sessionRoot: string,
+): string {
+	if (resolveFrom === null) return target;
+	if (resolveFrom === 'uncertain') {
+		return `${DC_UNRESOLVED_CHDIR_SENTINEL}/${target.replace(/^[./\\]+/, '')}`;
+	}
+	const absolute = path.resolve(resolveFrom, target);
+	const relative = path.relative(path.resolve(sessionRoot), absolute);
+	if (relative === '') return '.';
+	return relative.replace(/\\/g, '/');
+}
+
+/**
+ * Evolve a text-level directory context across one sub-segment of a
+ * rewritten wrapper's inner command (#3491 W2): literal cd/pushd operands
+ * move the context; every word form the W1 AST rules resolve specially
+ * (bare cd, `~`, `cd -`, dynamic operands, popd, stack forms) degrades to
+ * 'uncertain' — deny-on-uncertainty is the sanctioned direction for
+ * destructive evaluation.
+ */
+function evolveTextDirectoryCwd(
+	subSegment: string,
+	cwd: string,
+): string | 'uncertain' {
+	const words = shellSplitWords(subSegment);
+	if (words.length === 0) return cwd;
+	const head = words[0];
+	if (head !== 'cd' && head !== 'pushd' && head !== 'popd') return cwd;
+	const operand = words[1];
+	if (operand === undefined || operand === '-' || operand.startsWith('-')) {
+		return 'uncertain';
+	}
+	if (operand.startsWith('~') || dcIsDynamicChdirOperand(operand)) {
+		return 'uncertain';
+	}
+	return path.resolve(cwd, operand);
+}
+
+function expandChdirInnerSegments(
+	innerText: string,
+	resolveFrom: string | 'uncertain',
+	out: DcDestructiveSegmentContext[],
+): void {
+	if (resolveFrom === 'uncertain') {
+		// The context is already unresolvable: every sub-segment evaluates on
+		// the sentinel.
+		for (const sub of dcSplitSegments(dcUnwrapWrappers(innerText))) {
+			out.push({ segment: sub, resolveFrom: 'uncertain' });
+		}
+		return;
+	}
+	const nested = matchChdirWrapperSegment(innerText);
+	if (nested !== null) {
+		if (nested.kind !== 'static') {
+			// failClosed and uncertain nested wrappers both degrade the whole
+			// inner context to the sentinel (failClosed carries no words).
+			const innerWords = nested.kind === 'uncertain' ? nested.innerWords : [];
+			expandChdirInnerSegments(shSerializeWords(innerWords), 'uncertain', out);
+			return;
+		}
+		// Relative child cwds compose against the parent child cwd.
+		expandChdirInnerSegments(
+			shSerializeWords(nested.innerWords),
+			path.resolve(resolveFrom, nested.dir),
+			out,
+		);
+		return;
+	}
+	let current: string | 'uncertain' = resolveFrom;
+	for (const sub of dcSplitSegments(dcUnwrapWrappers(innerText))) {
+		out.push({ segment: sub, resolveFrom: current });
+		current = evolveTextDirectoryCwd(sub, current);
+	}
+}
+
+/**
+ * Expand a command's chdir-bearing wrapper segments into destructive-arm
+ * segments carrying an EVOLVING per-segment directory context (#3491 W2):
+ * the wrapped command's rm/rmdir/del targets are relocated from the CHILD
+ * cwd (and from the tracked evolution of any inner cd) to session-root
+ * relative forms, so containment and safe-artifact judgment happen against
+ * the real workspace. An unresolvable context (dynamic/expansion DIR, or an
+ * inner directory mutation the W1 word-form rules cannot represent)
+ * relocates to the escaping sentinel — any destructive pattern then denies.
+ */
+export function dcExpandDestructiveSegments(
+	command: string,
+	baseCwd: string,
+): DcDestructiveSegmentContext[] {
+	const out: DcDestructiveSegmentContext[] = [];
+	for (const segment of dcSplitSegments(command)) {
+		const match = matchChdirWrapperSegment(segment);
+		if (match === null) {
+			out.push({ segment, resolveFrom: null });
+			continue;
+		}
+		if (match.kind === 'failClosed') {
+			out.push({ segment: '', resolveFrom: 'uncertain' });
+			continue;
+		}
+		if (match.kind === 'uncertain') {
+			expandChdirInnerSegments(
+				shSerializeWords(match.innerWords),
+				'uncertain',
+				out,
+			);
+			continue;
+		}
+		expandChdirInnerSegments(
+			shSerializeWords(match.innerWords),
+			path.resolve(baseCwd, match.dir),
+			out,
+		);
+	}
+	return out;
 }
 
 /**
