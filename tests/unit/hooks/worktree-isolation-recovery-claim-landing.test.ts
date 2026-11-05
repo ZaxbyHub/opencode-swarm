@@ -203,6 +203,11 @@ describe('recovery-claim landing shape', () => {
 			expect(result.strategy).toBe('squash-unstaged');
 			// no new commit on HEAD; lane bytes unstaged in the primary tree
 			expect(await git(fx.primary, 'rev-parse', 'HEAD')).toBe(fx.headBefore);
+			// #3494 claim 5 (was INFERENCE): the preserved source ref RETAINS the
+			// lane commit — the unstaged bytes stay recognizable through it
+			expect(await git(fx.primary, 'rev-parse', 'lane')).toBe(
+				fx.coords.sourceHeadOid,
+			);
 			const status = await git(fx.primary, 'status', '--porcelain');
 			expect(status).toContain('lane.txt');
 			expect(

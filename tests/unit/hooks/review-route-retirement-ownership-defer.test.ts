@@ -27,7 +27,12 @@ import {
 	recordRouteFault,
 	_test_exports as registryTest,
 } from '../../../src/review/route-invalidation-registry';
-import { ensureAgentSession, resetSwarmState } from '../../../src/state';
+import {
+	ensureAgentSession,
+	resetSwarmState,
+	swarmState,
+} from '../../../src/state';
+import { writeApprovedPlan } from '../../helpers/approved-plan.js';
 import { createIsolatedTestEnv } from '../../helpers/isolated-test-env.js';
 import { canonicalMkdtemp, removeTreeWithRetry } from '../../helpers/tmpdir.js';
 
@@ -242,6 +247,110 @@ describe('observer-deferred ownership — consumable record classes defer, termi
 		});
 	}
 
+	it('two overlapping deferring toolAfter calls each keep their own defer (concurrency)', async () => {
+		const env = createIsolatedTestEnv();
+		try {
+			const leg = await newLeg();
+			const origRecord = _internals.recordPendingDelegationForBackground;
+			try {
+				const hook = createDelegationGateHook(
+					{
+						hooks: { delegation_gate: true, background_subagents: true },
+						worktree: { policy: 'disabled' },
+					} as never,
+					leg.directory,
+				);
+				expect(recordRouteFault(leg.directory, SESSION, 'call-ov-a')).toBe(
+					true,
+				);
+				expect(recordRouteFault(leg.directory, SESSION, 'call-ov-b')).toBe(
+					true,
+				);
+				// Controlled suspension for call A (released after B completes).
+				let resolveA!: () => void;
+				const suspendA = new Promise<void>((r) => {
+					resolveA = r;
+				});
+				_internals.recordPendingDelegationForBackground = (async () => ({
+					status: 'recorded',
+					record: durableRecord('pending', '1.1'),
+				})) as never;
+				// Call A is a background CODER dispatch (holds a reservation, so it
+				// reaches the AWAITED bindBackgroundCoderReservationForDispatch
+				// seam AFTER the defer decision); that seam suspends A there while
+				// call B (a reviewer) runs to completion and also defers. With
+				// single-slot defer semantics B's set overwrites A's signal and
+				// A's finally flushes A's observer-owned marker early; the
+				// per-call set keeps both.
+				const origBind = _internals.bindBackgroundCoderReservationForDispatch;
+				_internals.bindBackgroundCoderReservationForDispatch = (async () => {
+					await suspendA;
+					return { bound: true } as never;
+				}) as never;
+				await writeApprovedPlan(leg.directory, [
+					{ id: '1.1', files: ['src/foo.ts'] },
+				]);
+				const sessionOv = swarmState.agentSessions.get(SESSION)!;
+				sessionOv.currentTaskId = '1.1';
+				sessionOv.lastCoderDelegationTaskId = '1.1';
+				const coderArgs = {
+					subagent_type: 'coder',
+					background: true,
+					task_id: '1.1',
+					prompt:
+						'TASK: 1.1\nFILE: src/foo.ts\nACCEPTANCE: feature is implemented and tested',
+				};
+				await hook.toolBefore(
+					{ tool: 'Task', sessionID: SESSION, callID: 'call-ov-a' },
+					{ args: coderArgs },
+				);
+				const a = hook.toolAfter(
+					{
+						tool: 'tool.execute.Task',
+						sessionID: SESSION,
+						callID: 'call-ov-a',
+						args: coderArgs,
+					},
+					runningOutput('bg-ov-a'),
+				);
+				// give A time to defer and reach the suspended bind seam
+				await new Promise((resolve) => setTimeout(resolve, 80));
+				const reviewerArgsOv = {
+					subagent_type: 'reviewer',
+					prompt:
+						'TASK: 1.1 review the change ACCEPTANCE: FR-001 the diff satisfies the requirement',
+				};
+				const b = hook.toolAfter(
+					{
+						tool: 'tool.execute.Task',
+						sessionID: SESSION,
+						callID: 'call-ov-b',
+						args: reviewerArgsOv,
+					},
+					runningOutput('bg-ov-b'),
+				);
+				await b;
+				_internals.bindBackgroundCoderReservationForDispatch = origBind;
+				expect(
+					registryTest.hasObligation(leg.directory, SESSION, 'call-ov-b'),
+				).toBe(true);
+				// release A; its defer must SURVIVE B's completed finally
+				resolveA();
+				await a;
+				expect(
+					registryTest.hasObligation(leg.directory, SESSION, 'call-ov-a'),
+				).toBe(true);
+				expect(registryTest.size()).toBe(1);
+				expect(registryTest.sessionCount(leg.directory)).toBe(1);
+			} finally {
+				_internals.recordPendingDelegationForBackground = origRecord;
+				leg.cleanup();
+			}
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it('background subagents disabled: running output never defers (no observer record exists)', async () => {
 		const env = createIsolatedTestEnv();
 		try {
@@ -275,7 +384,7 @@ describe('sweep and observer discharge', () => {
 	it('the pending-record stale sweep discharges the swept call obligation', async () => {
 		const env = createIsolatedTestEnv();
 		try {
-			const leg = await newLeg(['1.1'], true);
+			const leg = await newLeg();
 			try {
 				await recordPendingDelegation(leg.directory, {
 					correlationId: 'child-sweep',
@@ -308,7 +417,7 @@ describe('sweep and observer discharge', () => {
 	it('the completion observer terminal arm flushes the obligation at arm entry', async () => {
 		const env = createIsolatedTestEnv();
 		try {
-			const leg = await newLeg(['1.1'], true);
+			const leg = await newLeg();
 			try {
 				await recordPendingDelegation(leg.directory, {
 					correlationId: 'child-err',

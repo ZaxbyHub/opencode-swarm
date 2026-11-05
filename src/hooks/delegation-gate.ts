@@ -6201,13 +6201,14 @@ export function createDelegationGateHook(
 	};
 
 	// toolAfter: resets qaSkip fields and advances task states based on delegation type
-	// #3564: per-call defer signal for the structural retirement backstop.
-	// The background block below sets this to the deferring callID when (and
-	// only when) the call's marker ownership transfers to the completion
-	// observer: a durable correlation record that is live, gate-bearing, and
-	// observer-consumable. Every other exit path flushes in toolAfter's
-	// finally. Call-scoped by identity comparison, cleared on every toolAfter.
-	let routeRetirementDeferredCallID: string | null = null;
+	// #3564: per-call defer signals for the structural retirement backstop.
+	// The background block below adds a callID when (and only when) that
+	// call's marker ownership transfers to the completion observer: a durable
+	// correlation record that is live, gate-bearing, and observer-consumable.
+	// Every other exit path flushes in toolAfter's finally, which consumes its
+	// OWN call's entry — a Set, not a slot, so concurrently-deferring calls can
+	// never overwrite one another's signals.
+	const deferredRouteRetirements = new Set<string>();
 	// Uses stored input args from guardrails when available, falls back to delegationChains
 	const toolAfterInner = async (
 		input: {
@@ -6632,7 +6633,7 @@ export function createDelegationGateHook(
 									recordForOwnership?.status === 'ingestion_error';
 								const gateBearing = recordForOwnership?.evidenceTaskId != null;
 								if (consumable && gateBearing) {
-									routeRetirementDeferredCallID = input.callID;
+									deferredRouteRetirements.add(input.callID);
 								}
 							}
 							if (!backgroundCorrelationConflict && !backgroundRecordDurable) {
@@ -8080,10 +8081,10 @@ export function createDelegationGateHook(
 		try {
 			await toolAfterInner(input, _output);
 		} finally {
-			const deferred = routeRetirementDeferredCallID === input.callID;
-			// Identity-guarded clear: a concurrent toolAfter for a different
-			// call must never erase this call's defer signal (and vice versa).
-			if (deferred) routeRetirementDeferredCallID = null;
+			// Consume THIS call's own entry only: a deferred call's finally
+			// leaves its marker to the completion observer; every other exit
+			// flushes. Concurrent calls each consume their own entry.
+			const deferred = deferredRouteRetirements.delete(input.callID);
 			if (!deferred) {
 				flushRouteRetirementObligation(
 					directory,
