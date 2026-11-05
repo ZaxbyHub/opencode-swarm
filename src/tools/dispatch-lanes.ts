@@ -6999,7 +6999,7 @@ function applyPrWorkflowPromptContract(
 					? ('reviewer' as const)
 					: ('critic' as const);
 			const markerPipeAnywhere = new RegExp(
-				'\\[' + prReviewVerdictTemplateToken.slice(1, -1) + '\\][^\\S\\n]*\\|',
+				`\\[${prReviewVerdictTemplateToken.slice(1, -1)}\\][^\\S\\n]*\\|`,
 			);
 			const operatorChannels: Array<[string, string]> = [
 				['lane prompt', lane.prompt],

@@ -16,17 +16,22 @@ import {
 	listActiveLocks,
 	releaseLaneLocks,
 } from '../../../src/parallel/file-locks';
+import { freezeClock } from '../../helpers/test-clock';
 
 describe('lane-based file locks', () => {
 	let tmpDir: string;
+	let restoreClock: (() => void) | undefined;
 	// Capture the original at suite scope — before any test can modify it
 	const originalWriteFile = _internals.writeFile;
 
 	beforeEach(() => {
 		tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lane-locks-test-'));
+		restoreClock = freezeClock({ fixedNow: 1_700_000_000_000 });
 	});
 
 	afterEach(async () => {
+		restoreClock?.();
+		restoreClock = undefined;
 		// Always restore _internals.writeFile — no matter which path the test took
 		_internals.writeFile = originalWriteFile;
 		// Release any lingering proper-lockfile locks before removing the directory
