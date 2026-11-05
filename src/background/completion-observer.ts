@@ -140,6 +140,8 @@ const observerInternals = {
 	transferCoderSettlementToBackground,
 	markLegacyCoderSettlementTransferPending,
 	updateCoderSettlement,
+	/** Classification pin surface (#3564 r4): the settle-arm flush predicate. */
+	isSettleCoderTerminalByFence,
 	sleep: (milliseconds: number) =>
 		new Promise<void>((resolve) => setTimeout(resolve, milliseconds)),
 };
@@ -472,6 +474,23 @@ export function createBackgroundCompletionObserver(opts: {
 				const settled = await settleCoder(directory, record, terminal.eventId);
 				record = settled.record;
 				if (!settled.ok) {
+					// #3577 (PRR-003), outcome-aware (#3564 final-critic r3): flush
+					// ONLY the settleCoder exits that are terminal-by-ingestion-
+					// fence — see isSettleCoderTerminalByFence. Every other ok:false
+					// exit ('settlement claim failed', 'settlement persistence
+					// failed', 'durable reconciliation will retry', handoff/manual-
+					// recovery outcomes) leaves the claim resumable or an explicit
+					// replay scheduled, so the obligation is RETAINED for the later
+					// delivery that will settle and consume it (#3509 replay
+					// retention). Unknown outcomes retain (fail-safe: stranded
+					// occupancy is inert; an early flush is the PRR-004 class).
+					if (isSettleCoderTerminalByFence(settled.outcome)) {
+						flushRouteRetirementObligation(
+							directory,
+							record.parentSessionId,
+							record.callID,
+						);
+					}
 					await publishAdvisory(
 						directory,
 						record,
@@ -504,6 +523,19 @@ export function createBackgroundCompletionObserver(opts: {
 					await appendDelegationTransition(directory, record.correlationId, {
 						status: 'stale',
 					});
+					// #3577 (PRR-003): a 'stale' record is durably terminal —
+					// claimDelegationIngestion refuses it and no replay can
+					// re-drive it — so the call's route-invalidation marker can
+					// never serve its replay-refusal purpose again. Flush the
+					// retirement obligation instead of stranding marker + dead
+					// occupancy (the #3509 replay-retention contract applies to
+					// the FAILED-COMMIT arms below, which stay re-drivable; this
+					// arm does not).
+					flushRouteRetirementObligation(
+						directory,
+						record.parentSessionId,
+						record.callID,
+					);
 					discardScopeForRecord(record);
 					await publishAdvisory(directory, record, terminal.eventId, 'stale');
 					return;
@@ -1280,6 +1312,37 @@ function isExactWorktreeSettlementUpdate(
 	);
 }
 
+/**
+ * True when a settleCoder ok:false outcome is terminal-by-ingestion-fence:
+ * the record was durably flipped 'stale' (shared-root HEAD/PR-head drift or
+ * attribution failure) or its settlement was durably 'preserved' — claim
+ * disposition preserved, and the worktree identity-mismatch / attribution /
+ * merge-refusal sites, each of which PERSISTS state 'preserved' before
+ * returning. Both statuses are refused by claimDelegationIngestion and their
+ * recovery is operator-only (/swarm recover), never a replay, so the
+ * route-invalidation obligation can never be consumed and must flush.
+ * 'stale: no coder baseline' is included because its exit is deterministic
+ * (immutable closed-summary provenance cannot re-materialize a merge path),
+ * so observer consumption is unreachable either way.
+ *
+ * Everything else is re-drivable and RETAINS the obligation: transient
+ * 'settlement claim failed' / 'settlement persistence failed' keep the claim
+ * resumable, finishPublishedCoderWorktree's 'durable reconciliation will
+ * retry' schedules an explicit replay, and the settleCoder tracking recheck
+ * returns 'worktree settlement retry pending: tracked identity changed'
+ * WITHOUT persisting 'preserved' (transient race — the 'retry pending'
+ * string keeps it in the retain class). Manual-recovery and handoff outcomes
+ * retain too (fail-safe — stranded occupancy is inert, an early flush is the
+ * PRR-004 class where a stale prior receipt authorizes publication).
+ */
+function isSettleCoderTerminalByFence(outcome: string): boolean {
+	return (
+		outcome === 'settlement preserved' ||
+		outcome.startsWith('worktree settlement preserved') ||
+		outcome.startsWith('stale:')
+	);
+}
+
 async function settleCoder(
 	directory: string,
 	record: BackgroundDelegationRecord,
@@ -1464,10 +1527,16 @@ async function settleCoder(
 		...(descriptor.worktreeDir ? { worktree_dir: descriptor.worktreeDir } : {}),
 	};
 	if (!worktreeTrackingMatches(descriptor))
+		// RETAIN-class, not preserved: this is the second tracking recheck after
+		// an async gap (the first passed) — a concurrent-tracking race a later
+		// replay can pass. Nothing was persisted 'preserved' here, so the record
+		// stays resumable 'settling' (claimCoderSettlement 'resume') — matching
+		// finishPublishedCoderWorktree's identical recheck, which returns the
+		// retry-class failure('tracked identity changed').
 		return {
 			ok: false,
 			record,
-			outcome: 'worktree settlement preserved: tracked identity changed',
+			outcome: 'worktree settlement retry pending: tracked identity changed',
 		};
 	trackAwaitingWorktree(descriptor);
 	let handoffFailure: string | undefined;

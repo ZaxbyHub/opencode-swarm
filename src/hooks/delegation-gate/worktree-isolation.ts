@@ -3364,8 +3364,10 @@ export async function finishStandardWorktreeDispatch(
 					coordinates,
 					// Same mapping as the reconciliation path (merge.ts): a
 					// 'merge' recovery without a commit landing lands
-					// squash-unstaged — never a merge commit — and an epic/caller
-					// commit landing lands as a commit with that message.
+					// squash-unstaged — never a merge commit. A landing decision
+					// supplies the commit landing; only an EPIC landing carries a
+					// message (settlement.commitLanding is a boolean — a caller
+					// landing without an epic is a plain `git merge --no-edit`).
 					claimLanding
 						? { landingCommitMessage: epicLanding?.landingCommitMessage }
 						: { landUnstaged: true },
@@ -3464,9 +3466,12 @@ export async function finishStandardWorktreeDispatch(
 			// Clean merge supersedes any earlier failure for this task so a
 			// successful re-dispatch re-enables Rule 2's marker commit.
 			// #2508: key retention on the RESULT strategy — never on
-			// dispatch.mergeStrategy (the legacy dispatch value 'merge' also
-			// covers committed recovery merges, which must keep deleting the
-			// branch so the recovery-claim finalize path stays reachable).
+			// dispatch.mergeStrategy. A retained lane branch is ordinary
+			// user-work backup (the unstaged bytes are only recognisable via
+			// it); it is NOT merge-back recovery state, so a retained branch
+			// must not keep the recovery-claim finalize path unreachable
+			// (#3577 PRR-001 — the claim settle below keys the authority
+			// terminal on the settlement outcome, not on branch retention).
 			const cleanupResult = await cleanupStandardWorktreeForCallId(
 				resolvedCallID,
 				'success',
@@ -3484,7 +3489,21 @@ export async function finishStandardWorktreeDispatch(
 					rawToken: dispatch.recoveryClaim.rawToken,
 					settlement: dispatch.recoveryClaim.settlement,
 				};
-				if (cleanupResult.removedWorktree && cleanupResult.cleanedBranch) {
+				// #3577 (PRR-001): the authority terminal keys on the SETTLEMENT
+				// OUTCOME — a landed merge-back finalizes the exact claim even
+				// when #2508 retention deliberately kept the lane branch as
+				// user-work backup (a retained ref is not merge-back recovery
+				// state; keying finalize on branch deletion left every default
+				// squash-unstaged claim landing 'preserved' forever). The
+				// authority stays preserved only when cleanup could not
+				// complete — a failed worktree removal, or a non-squash
+				// landing whose branch deletion failed — so the stuck
+				// cleanup stays recoverable, exactly as before.
+				const landedCleanly =
+					cleanupResult.removedWorktree &&
+					(cleanupResult.cleanedBranch ||
+						mergeResult.strategy === 'squash-unstaged');
+				if (landedCleanly) {
 					const finalized = _internals.finalizeWorktreeRecoveryAuthority(
 						directory,
 						request,

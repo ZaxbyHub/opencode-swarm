@@ -6420,7 +6420,19 @@ export async function promoteDelegationFallback(
 					await fs.promises.unlink(fallbackPath(directory, correlationId));
 				} catch (err) {
 					if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
-						return null;
+						// #3577 (PRR-004): the record IS durably appended to the
+						// primary ledger at this point — the promotion succeeded;
+						// only the best-effort artifact cleanup failed. Returning
+						// null here made the completion observer flush the call's
+						// route-invalidation marker for a LIVE pending record
+						// (skipping its Stage-B route consult on a later
+						// delivery). The stale artifact file is inert: reads
+						// prefer the primary ledger, and a later promote attempt
+						// with the same identity resolves `current` from the
+						// primary and re-unlinks.
+						logger.warn(
+							`[background] fallback artifact for ${correlationId} could not be unlinked after promotion; the stale artifact is inert (primary record is authoritative)`,
+						);
 					}
 				}
 				return { source: 'primary' as const, record: promoted };

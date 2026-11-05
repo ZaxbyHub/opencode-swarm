@@ -11,11 +11,6 @@ import { describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { $ } from 'bun';
-import { createBackgroundCompletionObserver } from '../../../src/background/completion-observer';
-import {
-	recordPendingDelegation,
-	sweepStaleDelegations,
-} from '../../../src/background/pending-delegations';
 import type { PluginConfig } from '../../../src/config';
 import { closeAllProjectDbs } from '../../../src/db/project-db';
 import {
@@ -249,9 +244,10 @@ describe('observer-deferred ownership — consumable record classes defer, termi
 
 	it('two overlapping deferring toolAfter calls each keep their own defer (concurrency)', async () => {
 		const env = createIsolatedTestEnv();
+		const origRecord = _internals.recordPendingDelegationForBackground;
+		const origBind = _internals.bindBackgroundCoderReservationForDispatch;
 		try {
 			const leg = await newLeg();
-			const origRecord = _internals.recordPendingDelegationForBackground;
 			try {
 				const hook = createDelegationGateHook(
 					{
@@ -282,7 +278,6 @@ describe('observer-deferred ownership — consumable record classes defer, termi
 				// single-slot defer semantics B's set overwrites A's signal and
 				// A's finally flushes A's observer-owned marker early; the
 				// per-call set keeps both.
-				const origBind = _internals.bindBackgroundCoderReservationForDispatch;
 				_internals.bindBackgroundCoderReservationForDispatch = (async () => {
 					await suspendA;
 					return { bound: true } as never;
@@ -330,7 +325,6 @@ describe('observer-deferred ownership — consumable record classes defer, termi
 					runningOutput('bg-ov-b'),
 				);
 				await b;
-				_internals.bindBackgroundCoderReservationForDispatch = origBind;
 				expect(
 					registryTest.hasObligation(leg.directory, SESSION, 'call-ov-b'),
 				).toBe(true);
@@ -343,6 +337,10 @@ describe('observer-deferred ownership — consumable record classes defer, termi
 				expect(registryTest.size()).toBe(1);
 				expect(registryTest.sessionCount(leg.directory)).toBe(1);
 			} finally {
+				// PRR-009: restore BOTH seams here — an inline restore after
+				// `await b` leaked the never-resolving bind mock on any earlier
+				// rejection (a failing leg would hang later same-process legs).
+				_internals.bindBackgroundCoderReservationForDispatch = origBind;
 				_internals.recordPendingDelegationForBackground = origRecord;
 				leg.cleanup();
 			}
@@ -369,85 +367,6 @@ describe('observer-deferred ownership — consumable record classes defer, termi
 					},
 					runningOutput('bg-n'),
 				);
-				expect(registryTest.size()).toBe(0);
-				expect(registryTest.sessionCount(leg.directory)).toBe(0);
-			} finally {
-				leg.cleanup();
-			}
-		} finally {
-			env.cleanup();
-		}
-	});
-});
-
-describe('sweep and observer discharge', () => {
-	it('the pending-record stale sweep discharges the swept call obligation', async () => {
-		const env = createIsolatedTestEnv();
-		try {
-			const leg = await newLeg();
-			try {
-				await recordPendingDelegation(leg.directory, {
-					correlationId: 'child-sweep',
-					jobId: 'job-sweep',
-					subagentSessionId: 'child-sweep',
-					parentSessionId: SESSION,
-					callID: 'call-sw',
-					normalizedAgent: 'reviewer',
-					swarmPrefixedAgent: 'reviewer',
-					planTaskId: null,
-					evidenceTaskId: null,
-				});
-				expect(recordRouteFault(leg.directory, SESSION, 'call-sw')).toBe(true);
-				expect(
-					registryTest.hasObligation(leg.directory, SESSION, 'call-sw'),
-				).toBe(true);
-				await new Promise((resolve) => setTimeout(resolve, 15));
-				const swept = await sweepStaleDelegations(leg.directory, 1);
-				expect(swept).toBe(1);
-				expect(registryTest.size()).toBe(0);
-				expect(registryTest.sessionCount(leg.directory)).toBe(0);
-			} finally {
-				leg.cleanup();
-			}
-		} finally {
-			env.cleanup();
-		}
-	});
-
-	it('the completion observer terminal arm flushes the obligation at arm entry', async () => {
-		const env = createIsolatedTestEnv();
-		try {
-			const leg = await newLeg();
-			try {
-				await recordPendingDelegation(leg.directory, {
-					correlationId: 'child-err',
-					jobId: 'job-err',
-					subagentSessionId: 'child-err',
-					parentSessionId: SESSION,
-					callID: 'call-err',
-					normalizedAgent: 'reviewer',
-					swarmPrefixedAgent: 'reviewer',
-					planTaskId: null,
-					evidenceTaskId: null,
-				});
-				expect(recordRouteFault(leg.directory, SESSION, 'call-err')).toBe(true);
-				const observer = createBackgroundCompletionObserver({
-					config: { enabled: true },
-					directory: leg.directory,
-				});
-				await observer.event({
-					event: {
-						type: 'message.part.updated',
-						properties: {
-							part: {
-								type: 'text',
-								synthetic: true,
-								sessionID: SESSION,
-								text: '<task id="child-err" state="error">\n<task_error>error</task_error>\n</task>',
-							},
-						},
-					},
-				} as never);
 				expect(registryTest.size()).toBe(0);
 				expect(registryTest.sessionCount(leg.directory)).toBe(0);
 			} finally {

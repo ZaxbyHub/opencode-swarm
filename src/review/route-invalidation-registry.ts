@@ -23,14 +23,19 @@
  *     multi-key record blocks each named task exactly once.
  *
  * Lifetime: a record lives only from fault to terminal outcome. It is RETIRED
- * (deleted entirely, with empty session/directory containers pruned) at
- * exactly two owner families: (i) the FOREGROUND toolAfter settlement loop end
- * plus its terminal cleanup paths (denied calls, failed outputs — see
- * delegation-gate.ts), and (ii) the BACKGROUND completion observer's
- * post-commit confirmation (the only background retirement owner; consults in
- * stage-b-gates BLOCK but never retire). There is deliberately NO sessionEnded
- * pruning (sessionEnded also fires for session.idle; records are bounded by
- * retirement and the loud caps below, not by session lifetime).
+ * (deleted entirely, with empty session/directory containers pruned) through
+ * structurally guaranteed owners (#3564): every admitted record carries a
+ * retirement obligation, every retirement path discharges it, and the
+ * FOREGROUND toolAfter finally flushes whatever remains unless the call's
+ * ownership was deliberately deferred to the BACKGROUND completion observer
+ * (a durable, consumable, gate-bearing record). Background ownership ends at
+ * the observer's post-commit confirmation, the pending-record stale-sweep
+ * discharge (a swept record can never consult again), or the observer's
+ * terminal/promotion-failure arms; a marker DELIBERATELY retained after a
+ * failed ingestion commit (#3509 replay-refusal) keeps waiting for its
+ * replay. There is deliberately NO sessionEnded pruning (sessionEnded also
+ * fires for session.idle; records are bounded by retirement and the loud caps
+ * below, not by session lifetime).
  *
  * Capacity is FAIL-CLOSED, never evictive: when a bound is full the RECORD
  * operation returns false and the caller refuses the dispatch
