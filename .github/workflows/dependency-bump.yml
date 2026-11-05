@@ -168,17 +168,22 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          bun install --frozen-lockfile
+          # Root lifecycle scripts (prepare: bun run build) are suppressed on
+          # EVERY install in this phase: bun runs the root prepare on plain
+          # `bun install` even under --frozen-lockfile, and mid-phase installs
+          # run before the pin that fixes the post-bump typecheck, so an
+          # unsuppressed prepare fails the job on source-affecting bumps.
+          bun install --ignore-scripts --frozen-lockfile
           ADD_ARGS=()
           if [[ "$SAVE_EXACT" == "true" ]]; then ADD_ARGS+=("--exact"); fi
           if [[ "$DEPENDENCY_KIND" == "devDependencies" ]]; then ADD_ARGS+=("-d"); fi
           bun add --ignore-scripts "$PACKAGE@$VERSION" "${ADD_ARGS[@]}"
           # Re-resolve so nested stale lockfile resolutions (duplicate zod
           # copies etc.) dedupe against the new root pin; harmless otherwise.
-          bun install --force
+          bun install --ignore-scripts --force
           # The consistency gate runs LAST: the final dependency mutation is
           # always followed by a frozen install.
-          bun install --frozen-lockfile
+          bun install --ignore-scripts --frozen-lockfile
 
       - name: Apply pin replacements
         if: ${{ env.PIN_SPECS != '' }}
