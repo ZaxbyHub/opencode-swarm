@@ -1475,7 +1475,7 @@ export const COMMAND_REGISTRY = {
 			'Manage OpenSpec-compatible SDD artifacts and effective spec projection',
 		args: 'status|validate|project [--json] [--change <id>] [--dry-run] [--source <provider>] [--feature <id>|all] [--overwrite]',
 		details:
-			'Parent command for spec-driven development artifacts. Use sdd status to inspect .swarm/spec.md plus openspec/ artifacts, sdd validate to validate OpenSpec-compatible deltas, and sdd project to materialize the effective spec into .swarm/spec.md for planning. Spec-Kit: sdd project projects ALL features with feature-scoped ids (featureId/FR-nnn) when several exist; --feature <id> selects one (v1 bare-id output); --feature all is the explicit multi-feature alias (project only).',
+			'Parent command for spec-driven development artifacts. Use sdd status to inspect .swarm/spec.md plus openspec/ artifacts, sdd validate to validate OpenSpec-compatible deltas, and sdd project to materialize the effective spec into .swarm/spec.md for planning. Spec-Kit: sdd project projects ALL features with feature-scoped ids (featureId/FR-nnn) when several exist; --feature <id> selects one (v1 bare-id output); --feature all is the explicit multi-feature alias (project only). Provider selection precedence: --source <provider> beats SWARM_SDD_SOURCE, which beats sdd.source in the config (.opencode/opencode-swarm.json or the user config), which beats auto-detection; a selection from any non-flag source is final and /swarm sdd status reports where it came from.',
 		category: 'utility',
 		toolPolicy: 'agent',
 	},
