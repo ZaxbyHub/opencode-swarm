@@ -58,7 +58,7 @@ on:
           - none
           - generate-config-schema
       verify:
-        description: 'Comma list (1..8) of tracked tests/**.test.ts files to run fail-closed'
+        description: 'Comma list (max 8) of tracked tests/**.test.ts files; regen auto-adds the schema suite, so list at most 7 others with regen'
         required: true
         type: string
       note:
@@ -70,6 +70,12 @@ on:
 permissions:
   contents: write
   pull-requests: write
+
+# Serialize same-tuple dispatches (the push/PR path is a read-modify-write
+# on a branch whose identity is a pure function of package|version|kind|exact).
+concurrency:
+  group: dep-bump-\${{ inputs.package }}-\${{ inputs.version }}-\${{ inputs.dependency_kind }}-\${{ inputs.save_exact }}
+  cancel-in-progress: false
 
 jobs:
   dependency-bump:
@@ -102,7 +108,7 @@ jobs:
         run: |
           set -euo pipefail
           fail() { echo "::error::$1"; exit 1; }
-          [[ "$PACKAGE" =~ ^[a-z0-9@/._~-]+$ ]] || fail "package charset rejected"
+          [[ "$PACKAGE" =~ ^[a-z@][a-z0-9@/._~-]*$ ]] || fail "package charset rejected"
           [[ "$VERSION" =~ ^[a-zA-Z0-9.^~+*-]+$ ]] || fail "version charset rejected"
           if [[ -n "$ADVISORY" && -n "$REASON" ]]; then fail "advisory and reason are mutually exclusive"; fi
           if [[ -z "$ADVISORY" && -z "$REASON" ]]; then fail "exactly one of advisory or reason is required"; fi
@@ -122,8 +128,10 @@ jobs:
                 }
                 if (spec.file.length === 0 || spec.from.length === 0) process.exit(1);
                 if (!pathRe.test(spec.file) || spec.file.includes("..")) process.exit(1);
+                if (spec.file === "scripts/check-required-check-contract.ts") process.exit(1);
+                if (spec.file === "tests/unit/scripts/required-check-contract-dep-bump-channel.test.ts") process.exit(1);
               }
-            ' || fail "pin_specs must be a JSON array of <=6 {file,from,to} with valid contained paths"
+            ' || fail "pin_specs must be a JSON array of <=6 {file,from,to} with valid contained paths (guard sources not pinnable)"
           fi
           # verify list: non-empty, <=8 tracked test files (VERIFY_FILES guard —
           # an empty or over-cap list refuses to run anything).
@@ -133,7 +141,7 @@ jobs:
             VERIFY_FILES+=("tests/unit/scripts/generate-config-schema.test.ts")
           fi
           mapfile -t VERIFY_FILES < <(printf '%s\n' "${VERIFY_FILES[@]}" | sed 's/[[:space:]]//g' | awk 'NF' | sort -u)
-          [[ ${#VERIFY_FILES[@]} -ge 1 && ${#VERIFY_FILES[@]} -le 8 ]] || fail "deduped verify must stay within 1..8 files"
+          [[ ${#VERIFY_FILES[@]} -ge 1 && ${#VERIFY_FILES[@]} -le 8 ]] || fail "deduped verify must stay within 1..8 files (regen auto-adds tests/unit/scripts/generate-config-schema.test.ts — list at most 7 others with regen)"
           for f in "${VERIFY_FILES[@]}"; do
             [[ "$f" =~ ^tests/[A-Za-z0-9_./-]+[.]test[.]ts$ ]] || fail "verify path rejected: $f"
             git ls-files --error-unmatch "$f" >/dev/null 2>&1 || fail "verify file not tracked: $f"
@@ -293,6 +301,13 @@ jobs:
           set -euo pipefail
           BRANCH="$(cat "$RUNNER_TEMP/branch.txt")"
           gh auth setup-git
+          # Fetch the channel branch's remote state so the push lease can bind
+          # to the ACTUAL remote SHA: an expect-absent lease on a branch that
+          # already exists (a previous dispatch's `gh pr create` failed after
+          # the push succeeded) rejects forever and wedges the canonical
+          # tuple behind a manual remote-branch deletion.
+          git fetch --quiet origin "refs/heads/$BRANCH" 2>"$RUNNER_TEMP/fetch.err" || true
+          REMOTE_SHA="$(git rev-parse --verify --quiet "refs/remotes/origin/$BRANCH" || true)"
           # Resolve any existing PR for this branch BEFORE pushing; a query
           # failure (other than not-found) fails the job.
           set +e
@@ -305,6 +320,15 @@ jobs:
             BASE_REF="$(printf '%s' "$PR_JSON" | node -e 'let d="";process.stdin.on("data",(c)=>d+=c).on("end",()=>console.log(JSON.parse(d).baseRefName))')"
             OWNER="$(printf '%s' "$PR_JSON" | node -e 'let d="";process.stdin.on("data",(c)=>d+=c).on("end",()=>console.log(JSON.parse(d).headRepositoryOwner.login))')"
             EXISTING_SHA="$(printf '%s' "$PR_JSON" | node -e 'let d="";process.stdin.on("data",(c)=>d+=c).on("end",()=>console.log(JSON.parse(d).headRefOid))')"
+            # gh pr view <branch> resolves merged and closed PRs too: a
+            # non-open state means this canonical request was already
+            # delivered or superseded — fail with the remedy, never re-create.
+            if [[ "$STATE" == "MERGED" ]]; then
+              echo "::error::this request was already delivered: the channel PR for $BRANCH is merged. To re-dispatch, delete refs/heads/$BRANCH on the remote (or dispatch a different version)."; exit 1
+            fi
+            if [[ "$STATE" == "CLOSED" ]]; then
+              echo "::error::the channel PR for $BRANCH was closed without merging (superseded). To re-dispatch, delete refs/heads/$BRANCH on the remote and dispatch again."; exit 1
+            fi
             [[ "$STATE" == "OPEN" && "$BASE_REF" == "main" && "$OWNER" == "ZaxbyHub" ]] || { echo "::error::existing PR for $BRANCH is not an open same-repo main-based PR"; exit 1; }
             git show -s --format=%B "$EXISTING_SHA" | grep -Fqx 'X-Dep-Bump-Channel: dependency-bump' || { echo "::error::existing PR head lacks the channel trailer"; exit 1; }
             git show -s --format=%B "$EXISTING_SHA" | grep -Fqx "X-Dep-Bump-Package: $PACKAGE" || { echo "::error::existing PR head names a different package"; exit 1; }
@@ -316,6 +340,11 @@ jobs:
           fi
           if [[ -n "$EXISTING_SHA" ]]; then
             git push --force-with-lease="refs/heads/$BRANCH:$EXISTING_SHA" origin "HEAD:refs/heads/$BRANCH"
+          elif [[ -n "$REMOTE_SHA" ]]; then
+            # Branch exists without an open PR (previous create failed):
+            # lease against the actual remote state instead of requiring
+            # absence, so the retry replaces the stranded branch cleanly.
+            git push --force-with-lease="refs/heads/$BRANCH:$REMOTE_SHA" origin "HEAD:refs/heads/$BRANCH"
           else
             git push --force-with-lease="refs/heads/$BRANCH:" origin "HEAD:refs/heads/$BRANCH"
           fi

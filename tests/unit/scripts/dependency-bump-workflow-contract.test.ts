@@ -209,6 +209,18 @@ describe('dependency-bump workflow contract (frozen check C7, trace 3501-3285-35
 		expect(timeout as number).toBeGreaterThan(0);
 	});
 
+	test('concurrency: same-tuple dispatches serialize (per-request group, never cancel-in-progress)', () => {
+		// The push/PR path is a read-modify-write over a branch whose identity
+		// is a pure function of package|version|kind|exact — two simultaneous
+		// dispatches must queue instead of racing it.
+		const text = requireText();
+		const group = text.indexOf('concurrency:');
+		expect(group).toBeGreaterThanOrEqual(0);
+		expect(text).toContain('cancel-in-progress: false');
+		const jobStart = text.indexOf('jobs:');
+		expect(group).toBeLessThan(jobStart);
+	});
+
 	test('every actions/checkout step carries persist-credentials: false', () => {
 		const offenders: string[] = [];
 		let checkoutCount = 0;

@@ -187,10 +187,19 @@ describe('apply-dep-bump-pins (dependency-bump channel helper)', () => {
 				{ file: 'tests/../tests/crlf-target.md', from: 'version one', to: 'x' },
 			]);
 			expect(traversal.exit).toBe(1);
+			// C4: the out-of-tree target must be TRACKED so the denial comes
+			// from the allowlist regex (not the tracked check) — assert the
+			// message so a PIN_FILE_RE widening mutant dies.
+			writeFileSync(
+				join(fixture.root, 'package.json'),
+				'{"name": "fixture"}\n',
+			);
+			spawnSync('git', ['add', 'package.json'], { cwd: fixture.root });
 			const outside = fixture.run([
-				{ file: 'package.json', from: 'a', to: 'b' },
+				{ file: 'package.json', from: 'fixture', to: 'x' },
 			]);
 			expect(outside.exit).toBe(1);
+			expect(outside.stderr).toContain('pin spec file rejected');
 		} finally {
 			safeRmRecursive(fixture.root);
 		}
@@ -202,15 +211,26 @@ describe('apply-dep-bump-pins (dependency-bump channel helper)', () => {
 			expect(fixture.run('not json').exit).toBe(1);
 			expect(fixture.run('{"file":"x"}').exit).toBe(1);
 			expect(fixture.run([]).exit).toBe(1);
+			// C5: the 7-entry leg uses MATCHING needles so the count bound (not
+			// the zero-match check) is what denies.
 			expect(
 				fixture.run(
 					Array.from({ length: 7 }, () => ({
 						file: 'tests/pins-target.txt',
-						from: 'a',
-						to: 'b',
+						from: 'version one',
+						to: 'x',
 					})),
 				).exit,
 			).toBe(1);
+			expect(
+				fixture.run(
+					Array.from({ length: 7 }, () => ({
+						file: 'tests/pins-target.txt',
+						from: 'version one',
+						to: 'x',
+					})),
+				).stderr,
+			).toContain('must be an array of 1..');
 			expect(
 				fixture.run([{ file: 'tests/pins-target.txt', from: '', to: 'b' }])
 					.exit,
@@ -225,6 +245,38 @@ describe('apply-dep-bump-pins (dependency-bump channel helper)', () => {
 					{ file: 'tests/pins-target.txt', from: oversized, to: 'b' },
 				]).exit,
 			).toBe(1);
+			// C5: byte-bound leg with a MATCHING needle so the 8 KiB bound
+			// denies before the zero-match check would.
+			const padded = fixture.run([
+				{
+					file: 'tests/pins-target.txt',
+					from: 'version one',
+					to: `x${'y'.repeat(8300)}`,
+				},
+			]);
+			expect(padded.exit).toBe(1);
+			expect(padded.stderr).toContain('8 KiB bound');
+			// Guard sources are not channel-pinnable (PRR-005).
+			const guardSource = fixture.run([
+				{
+					file: 'scripts/check-required-check-contract.ts',
+					from: 'a',
+					to: 'b',
+				},
+			]);
+			expect(guardSource.exit).toBe(1);
+			expect(guardSource.stderr).toContain('not channel-pinnable');
+			// CR/LF in from/to is rejected (would mix EOL styles in the target).
+			const crlfFrom = fixture.run([
+				{ file: 'tests/pins-target.txt', from: 'version one\nsecond', to: 'x' },
+			]);
+			expect(crlfFrom.exit).toBe(1);
+			expect(crlfFrom.stderr).toContain('must not contain CR/LF');
+			const crlfTo = fixture.run([
+				{ file: 'tests/pins-target.txt', from: 'version one', to: 'x\nsecond' },
+			]);
+			expect(crlfTo.exit).toBe(1);
+			expect(crlfTo.stderr).toContain('must not contain CR/LF');
 		} finally {
 			safeRmRecursive(fixture.root);
 		}

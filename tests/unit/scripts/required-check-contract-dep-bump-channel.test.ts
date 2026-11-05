@@ -17,6 +17,10 @@ import {
 	BASE_PACKAGE_JSON,
 	BOT_NAME,
 	botGit,
+	buildBranchProvenanceFixtureInner,
+	buildMergeFixture,
+	buildMergeFixtureInner,
+	buildOwnerScopeFixtureInner,
 	CHANNEL_BRANCH,
 	channelPackageJson,
 	commitWorktree,
@@ -25,9 +29,12 @@ import {
 	git,
 	initChannelRepo,
 	MERGE_SUBJECT,
+	type MergeVariant,
+	MISSING_PACKAGE_TRAILERS,
 	MISSING_VERSION_TRAILERS,
 	PIN_TEST_FILE,
 	pullRequestPayload,
+	REASON_ONLY_TRAILERS,
 	RELEASE_MERGE_SUBJECT,
 	REPO,
 	runReleaseOwnerMain,
@@ -46,53 +53,10 @@ function buildChannelPullRequestFixture(
 	if (variant === 'authorized') {
 		return { root, base, head: botHead };
 	}
-	// Dep-map-only human delta so ONLY commit provenance fails (M7's kill).
+	// Dep-map-only human delta so commit provenance fails FIRST (M7's kill: the two-commit shape also trips the exact-one-count bound, so the tip check is the conjunct under test here, not the only denial).
 	writeFileSync(join(root, 'package.json'), channelPackageJson(true));
 	const humanHead = commitWorktree(root, 'human: declare fast-check');
 	return { root, base, head: humanHead };
-}
-
-type MergeVariant =
-	| 'valid'
-	| 'release-subject'
-	| 'human-parent'
-	| 'missing-trailer'
-	| 'zero-commit';
-
-function buildMergeFixture(variant: MergeVariant) {
-	const { root, base } = initChannelRepo('dep-bump-mg-');
-	if (variant === 'zero-commit') {
-		// Empty PR side: parents[1] == base (decoy first parent), so the range base..parents[1] is empty.
-		writeFileSync(join(root, 'bun.lock'), '// lockfileVersion: 1 // decoy\n');
-		const decoy = commitWorktree(root, 'main moves on');
-		return {
-			root,
-			base,
-			mergeSha: botGit(
-				root,
-				'commit-tree',
-				`${decoy}^{tree}`,
-				'-p',
-				decoy,
-				'-p',
-				base,
-				'-m',
-				MERGE_SUBJECT,
-			),
-		};
-	}
-	git(root, 'checkout', '-q', '-b', CHANNEL_BRANCH);
-	writeFileSync(join(root, 'package.json'), channelPackageJson(true));
-	const trailers =
-		variant === 'missing-trailer'
-			? MISSING_VERSION_TRAILERS
-			: DEP_BUMP_TRAILERS;
-	commitWorktree(root, trailerMessage(trailers), variant !== 'human-parent');
-	git(root, 'checkout', '-q', 'main');
-	const subject =
-		variant === 'release-subject' ? RELEASE_MERGE_SUBJECT : MERGE_SUBJECT;
-	botGit(root, 'merge', '--no-ff', '-m', subject, CHANNEL_BRANCH);
-	return { root, base, mergeSha: git(root, 'rev-parse', 'HEAD') };
 }
 
 function expectMergeProvenance(variant: MergeVariant, expected: boolean): void {
@@ -112,81 +76,25 @@ function expectMergeProvenance(variant: MergeVariant, expected: boolean): void {
 }
 
 function buildBranchProvenanceFixture() {
-	const { root, base } = initChannelRepo('dep-bump-prov-');
-	let legCount = 0;
-	const leg = (message: string, bot: boolean): string => {
-		legCount += 1;
-		writeFileSync(join(root, 'bun.lock'), `// leg ${legCount}\n`);
-		return commitWorktree(root, message, bot);
-	};
-	const validBot = leg(trailerMessage(DEP_BUMP_TRAILERS), true);
-	const humanSecond = leg('human: update lockfile', false);
-	const missingTrailer = leg(trailerMessage(MISSING_VERSION_TRAILERS), true);
-	const bothAdvisoryAndReason = leg(
-		trailerMessage([...DEP_BUMP_TRAILERS, 'X-Dep-Bump-Reason: manual bump']),
-		true,
-	);
-	const noAdvisoryOrReason = leg(
-		trailerMessage(DEP_BUMP_TRAILERS.slice(0, 3)),
-		true,
-	);
-	// Mutation M3 closes here: a commit missing the CHANNEL trailer specifically must be denied.
-	const missingChannelTrailer = leg(
-		trailerMessage(
-			DEP_BUMP_TRAILERS.filter(
-				(line) => !line.startsWith('X-Dep-Bump-Channel:'),
-			),
-		),
-		true,
-	);
-	return {
-		root,
-		base,
-		validBot,
-		humanSecond,
-		missingTrailer,
-		missingChannelTrailer,
-		bothAdvisoryAndReason,
-		noAdvisoryOrReason,
-	};
+	const created = initChannelRepo('dep-bump-prov-');
+	const { root, base } = created;
+	try {
+		return buildBranchProvenanceFixtureInner(root, base);
+	} catch (error) {
+		safeRmRecursive(root);
+		throw error;
+	}
 }
 
 function buildOwnerScopeFixture() {
-	const { root, base } = initChannelRepo('dep-bump-scope-');
-	const withBase = (overrides: Record<string, unknown>): string =>
-		`${JSON.stringify(
-			{ ...JSON.parse(BASE_PACKAGE_JSON), ...overrides },
-			null,
-			2,
-		)}\n`;
-	const scopeLeg = (text: string): string => {
-		writeFileSync(join(root, 'package.json'), text);
-		return commitWorktree(root, 'scope leg', false);
-	};
-	// Final-critic r2: the laundering leg must be PROVENANCE-CLEAN — a
-	// bot-authored commit carrying the full trailer set over the version-field
-	// delta, so the ONLY conjunct that can deny it is dependencyScope.
-	const botScopeLeg = (text: string): string => {
-		writeFileSync(join(root, 'package.json'), text);
-		return commitWorktree(root, trailerMessage(DEP_BUMP_TRAILERS), true);
-	};
-	const legs = {
-		versionField: scopeLeg(withBase({ version: '7.0.1' })),
-		scriptsMap: scopeLeg(withBase({ scripts: { build: 'bun run typecheck' } })),
-		newTopLevelKey: scopeLeg(withBase({ private: true })),
-		// JSON.stringify(Infinity) === 'null', so plain stringify equality
-		// would accept this non-dependency delta; the type compare must not.
-		infinityVsNull: scopeLeg(
-			BASE_PACKAGE_JSON.replace('"meta": null', '"meta": 1e400'),
-		),
-		depMapAsArray: scopeLeg(withBase({ dependencies: ['zod@4.6.7'] })),
-		depEntryNonString: scopeLeg(
-			withBase({ dependencies: { zod: { version: '4.6.7' } } }),
-		),
-		legitDelta: scopeLeg(channelPackageJson(true)),
-		botLaunderingVersionField: botScopeLeg(withBase({ version: '7.0.1' })),
-	};
-	return { root, base, legs };
+	const created = initChannelRepo('dep-bump-scope-');
+	const { root, base } = created;
+	try {
+		return buildOwnerScopeFixtureInner(root, base);
+	} catch (error) {
+		safeRmRecursive(root);
+		throw error;
+	}
 }
 
 describe('channel authorization arm (C1)', () => {
@@ -226,6 +134,43 @@ describe('channel authorization arm (C1)', () => {
 	});
 });
 
+describe('per-field commit identity (F-12a)', () => {
+	const identityCases = [
+		['author name', 'user.name', 'human'],
+		['author email', 'user.email', 'human@example.com'],
+		['committer name', 'committer.name', 'human'],
+		['committer email', 'committer.email', 'human@example.com'],
+	] as const;
+	for (const [label, configKey, humanValue] of identityCases) {
+		test(`commit provenance denies when only ${label} is not the bot identity`, () => {
+			const { root } = initChannelRepo('dep-bump-ident-');
+			try {
+				writeFileSync(
+					join(root, 'package.json'),
+					`${JSON.stringify({ ...JSON.parse(BASE_PACKAGE_JSON), dependencies: { zod: '4.6.7' } }, null, 2)}\n`,
+				);
+				writeFileSync(join(root, 'bun.lock'), '// identity leg\n');
+				git(root, 'add', '-A');
+				git(
+					root,
+					'-c',
+					'commit.gpgsign=false',
+					'-c',
+					`${configKey}=${humanValue}`,
+					'commit',
+					'-qm',
+					trailerMessage(DEP_BUMP_TRAILERS),
+				);
+				const head = git(root, 'rev-parse', 'HEAD');
+				const verdict = dependencyBumpCommitProvenanceOk(root, head);
+				expect(verdict.ok).toBe(false);
+			} finally {
+				safeRmRecursive(root);
+			}
+		}, 30_000);
+	}
+});
+
 describe('spoof bounds (C2 spoof)', () => {
 	test('human actors on dep-bump-- branches and missing provenance are denied', () => {
 		expect(dep({ actor: 'contributor' })).toBe(false);
@@ -243,6 +188,56 @@ describe('spoof bounds (C2 spoof)', () => {
 			}),
 		).toBe(false);
 	});
+
+	test('main() merge_group with a human second parent exits 1 (C2 wiring)', () => {
+		const fixture = buildMergeFixture('human-parent');
+		try {
+			const result = runReleaseOwnerMain(
+				fixture.root,
+				'merge_group',
+				BOT_NAME,
+				{ merge_group: { base_sha: fixture.base, head_sha: fixture.mergeSha } },
+			);
+			expect(result.exit).toBe(1);
+		} finally {
+			safeRmRecursive(fixture.root);
+		}
+	}, 60_000);
+
+	test('main() pull_request payload binding: foreign head repo AND non-bot PR user each exit 1 (C3)', () => {
+		// The payload binding is a TWO-conjunct expression (headRepository ===
+		// repository && headUser === bot). Each half must deny INDEPENDENTLY —
+		// a leg that mutates both at once survives a half-expression mutant.
+		const fixture = buildChannelPullRequestFixture('authorized');
+		const foreignRepo = JSON.parse(
+			JSON.stringify(pullRequestPayload(fixture.base, fixture.head)),
+		);
+		foreignRepo.pull_request.head.repo.full_name = 'evil/fork';
+		const foreignUser = JSON.parse(
+			JSON.stringify(pullRequestPayload(fixture.base, fixture.head)),
+		);
+		foreignUser.pull_request.user.login = 'someone';
+		try {
+			const repoResult = runReleaseOwnerMain(
+				fixture.root,
+				'pull_request',
+				BOT_NAME,
+				foreignRepo,
+			);
+			expect(repoResult.exit).toBe(1);
+			expect(repoResult.stdout).not.toContain('EXCEPTION');
+			const userResult = runReleaseOwnerMain(
+				fixture.root,
+				'pull_request',
+				BOT_NAME,
+				foreignUser,
+			);
+			expect(userResult.exit).toBe(1);
+			expect(userResult.stdout).not.toContain('EXCEPTION');
+		} finally {
+			safeRmRecursive(fixture.root);
+		}
+	}, 60_000);
 
 	test('main() end-to-end laundering: provenance-clean bot PR with an out-of-scope delta exits 1', () => {
 		// Final-critic r2/r3: a DEDICATED fixture — fresh repo, exactly ONE
@@ -320,9 +315,15 @@ describe('spoof bounds (C2 spoof)', () => {
 		try {
 			expect(branchOk(fixture.validBot)).toBe(true);
 			expect(commitOk(fixture.validBot)).toBe(true);
+			// Reason-only positive: the advisory XOR reason accepts either arm.
+			expect(commitOk(fixture.reasonOnly)).toBe(true);
 			expect(branchOk(fixture.humanSecond)).toBe(false);
+			// C1: two commits with a VALID bot tip — only the exact-one-count
+			// bound denies (the tip check alone would accept under the mutant).
+			expect(branchOk(fixture.botTipOverHuman)).toBe(false);
 			expect(branchOk(fixture.base)).toBe(false);
 			expect(commitOk(fixture.missingTrailer)).toBe(false);
+			expect(commitOk(fixture.missingPackageTrailer)).toBe(false);
 			expect(commitOk(fixture.missingChannelTrailer)).toBe(false);
 			expect(commitOk(fixture.bothAdvisoryAndReason)).toBe(false);
 			expect(commitOk(fixture.noAdvisoryOrReason)).toBe(false);

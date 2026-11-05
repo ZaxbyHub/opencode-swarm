@@ -308,7 +308,7 @@ jobs:
             fi
             parent_sha="$(git rev-parse "$remote_sha^")"
             if ! git merge-base --is-ancestor "$parent_sha" HEAD; then
-              echo "::error::Cleanup branch parent is not in current main history: $branch"
+              echo "::error::Cleanup branch parent is not an ancestor of the checked-out release commit ($TAG_NAME): $branch"
               exit 1
             fi
             branch_changed_paths="$(git diff --name-only "$parent_sha" "$remote_sha")"

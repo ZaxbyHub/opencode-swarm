@@ -4,6 +4,7 @@ import {
 	deriveDependencyBumpAutomation,
 	main,
 } from '../../scripts/check-required-check-contract';
+import { safeRmRecursive } from './safe-test-dir';
 import { canonicalMkdtemp } from './tmpdir';
 
 // Shared fixtures for the dependency-bump channel contract suites (trace
@@ -30,6 +31,15 @@ export const DEP_BUMP_TRAILERS = [
 export const MISSING_VERSION_TRAILERS = DEP_BUMP_TRAILERS.filter(
 	(l) => !l.startsWith('X-Dep-Bump-Version:'),
 );
+export const MISSING_PACKAGE_TRAILERS = DEP_BUMP_TRAILERS.filter(
+	(l) => !l.startsWith('X-Dep-Bump-Package:'),
+);
+export const REASON_ONLY_TRAILERS = [
+	'X-Dep-Bump-Channel: dependency-bump',
+	'X-Dep-Bump-Package: zod',
+	'X-Dep-Bump-Version: 4.6.7',
+	'X-Dep-Bump-Reason: declare fast-check as a direct devDependency',
+];
 const BASE_PACKAGE_DOC = {
 	version: '7.0.0',
 	meta: null,
@@ -143,7 +153,7 @@ export function runReleaseOwnerMain(
 	eventName: string,
 	actor: string,
 	payload: Record<string, unknown>,
-): { exit: number; stdout: string } {
+): { exit: number; stdout: string; stderr: string } {
 	const eventPath = join(root, 'event.json');
 	writeFileSync(eventPath, JSON.stringify(payload));
 	const updates = {
@@ -157,14 +167,24 @@ export function runReleaseOwnerMain(
 	);
 	Object.assign(process.env, updates);
 	const lines: string[] = [];
+	const errors: string[] = [];
 	const originalLog = console.log;
+	const originalError = console.error;
 	console.log = (...args: unknown[]) => {
 		lines.push(args.map(String).join(' '));
 	};
+	console.error = (...args: unknown[]) => {
+		errors.push(args.map(String).join(' '));
+	};
 	try {
-		return { exit: main(['--release-owner'], root), stdout: lines.join('\n') };
+		return {
+			exit: main(['--release-owner'], root),
+			stdout: lines.join('\n'),
+			stderr: errors.join('\n'),
+		};
 	} finally {
 		console.log = originalLog;
+		console.error = originalError;
 		for (const [key, value] of Object.entries(previous)) {
 			if (value === undefined) {
 				delete process.env[key];
@@ -173,4 +193,142 @@ export function runReleaseOwnerMain(
 			}
 		}
 	}
+}
+
+type MergeVariant =
+	| 'valid'
+	| 'release-subject'
+	| 'human-parent'
+	| 'missing-trailer'
+	| 'zero-commit';
+
+export function buildMergeFixture(variant: MergeVariant) {
+	const created = initChannelRepo('dep-bump-mg-');
+	const { root, base } = created;
+	try {
+		return buildMergeFixtureInner(root, base, variant);
+	} catch (error) {
+		safeRmRecursive(root);
+		throw error;
+	}
+}
+
+export function buildMergeFixtureInner(
+	root: string,
+	base: string,
+	variant: MergeVariant,
+) {
+	if (variant === 'zero-commit') {
+		// Empty PR side: parents[1] == base (decoy first parent), so the range base..parents[1] is empty.
+		writeFileSync(join(root, 'bun.lock'), '// lockfileVersion: 1 // decoy\n');
+		const decoy = commitWorktree(root, 'main moves on');
+		return {
+			root,
+			base,
+			mergeSha: botGit(
+				root,
+				'commit-tree',
+				`${decoy}^{tree}`,
+				'-p',
+				decoy,
+				'-p',
+				base,
+				'-m',
+				MERGE_SUBJECT,
+			),
+		};
+	}
+	git(root, 'checkout', '-q', '-b', CHANNEL_BRANCH);
+	writeFileSync(join(root, 'package.json'), channelPackageJson(true));
+	const trailers =
+		variant === 'missing-trailer'
+			? MISSING_VERSION_TRAILERS
+			: DEP_BUMP_TRAILERS;
+	commitWorktree(root, trailerMessage(trailers), variant !== 'human-parent');
+	git(root, 'checkout', '-q', 'main');
+	const subject =
+		variant === 'release-subject' ? RELEASE_MERGE_SUBJECT : MERGE_SUBJECT;
+	botGit(root, 'merge', '--no-ff', '-m', subject, CHANNEL_BRANCH);
+	return { root, base, mergeSha: git(root, 'rev-parse', 'HEAD') };
+}
+
+export function buildBranchProvenanceFixtureInner(root: string, base: string) {
+	let legCount = 0;
+	const leg = (message: string, bot: boolean): string => {
+		legCount += 1;
+		writeFileSync(join(root, 'bun.lock'), `// leg ${legCount}\n`);
+		return commitWorktree(root, message, bot);
+	};
+	const validBot = leg(trailerMessage(DEP_BUMP_TRAILERS), true);
+	const humanSecond = leg('human: update lockfile', false);
+	// C1: human interior UNDER a valid bot tip — only the exact-one-count
+	// bound denies this shape (the tip check alone would accept).
+	const humanInterior = leg('human: interior change', false);
+	const botTipOverHuman = leg(trailerMessage(DEP_BUMP_TRAILERS), true);
+	const missingTrailer = leg(trailerMessage(MISSING_VERSION_TRAILERS), true);
+	const missingPackageTrailer = leg(
+		trailerMessage(MISSING_PACKAGE_TRAILERS),
+		true,
+	);
+	const reasonOnly = leg(trailerMessage(REASON_ONLY_TRAILERS), true);
+	const bothAdvisoryAndReason = leg(
+		trailerMessage([...DEP_BUMP_TRAILERS, 'X-Dep-Bump-Reason: manual bump']),
+		true,
+	);
+	const noAdvisoryOrReason = leg(
+		trailerMessage(DEP_BUMP_TRAILERS.slice(0, 3)),
+		true,
+	);
+	// Mutation M3 closes here: a commit missing the CHANNEL trailer specifically must be denied.
+	const missingChannelTrailer = leg(
+		trailerMessage(
+			DEP_BUMP_TRAILERS.filter(
+				(line) => !line.startsWith('X-Dep-Bump-Channel:'),
+			),
+		),
+		true,
+	);
+	return {
+		root,
+		base,
+		validBot,
+		humanSecond,
+		humanInterior,
+		botTipOverHuman,
+		missingTrailer,
+		missingPackageTrailer,
+		reasonOnly,
+		missingChannelTrailer,
+		bothAdvisoryAndReason,
+		noAdvisoryOrReason,
+	};
+}
+
+export function buildOwnerScopeFixtureInner(root: string, base: string) {
+	const withBase = (overrides: Record<string, unknown>): string =>
+		`${JSON.stringify(
+			{ ...JSON.parse(BASE_PACKAGE_JSON), ...overrides },
+			null,
+			2,
+		)}\n`;
+	const scopeLeg = (text: string): string => {
+		writeFileSync(join(root, 'package.json'), text);
+		return commitWorktree(root, 'scope leg', false);
+	};
+	const legs = {
+		versionField: scopeLeg(withBase({ version: '7.0.1' })),
+		scriptsMap: scopeLeg(withBase({ scripts: { build: 'bun run typecheck' } })),
+		newTopLevelKey: scopeLeg(withBase({ private: true })),
+		// JSON.stringify(Infinity) === 'null', so plain stringify equality
+		// would accept this non-dependency delta; the type compare must not.
+		infinityVsNull: scopeLeg(
+			BASE_PACKAGE_JSON.replace('"meta": null', '"meta": 1e400'),
+		),
+		depMapAsArray: scopeLeg(withBase({ dependencies: ['zod@4.6.7'] })),
+		depEntryNonString: scopeLeg(
+			withBase({ dependencies: { zod: { version: '4.6.7' } } }),
+		),
+		legitDelta: scopeLeg(channelPackageJson(true)),
+	};
+	return { root, base, legs };
 }
