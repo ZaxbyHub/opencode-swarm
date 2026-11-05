@@ -278,6 +278,15 @@ export function createBackgroundCompletionObserver(opts: {
 						logger.warn(
 							`[background] fallback promotion failed for ${envelope.sessionId}; terminal work remains preserved`,
 						);
+						// #3564: promotion failed — the fallback artifact stays
+						// unpromoted (fallbacks are not swept), so this return would
+						// otherwise leave a deferred marker with no remaining
+						// retirement owner. Flush the exact obligation here.
+						flushRouteRetirementObligation(
+							directory,
+							pending.parentSessionId,
+							pending.callID,
+						);
 						return;
 					}
 					pending = promoted.record;

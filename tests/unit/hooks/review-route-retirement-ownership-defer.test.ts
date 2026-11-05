@@ -11,6 +11,11 @@ import { describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { $ } from 'bun';
+import { createBackgroundCompletionObserver } from '../../../src/background/completion-observer';
+import {
+	recordPendingDelegation,
+	sweepStaleDelegations,
+} from '../../../src/background/pending-delegations';
 import type { PluginConfig } from '../../../src/config';
 import { closeAllProjectDbs } from '../../../src/db/project-db';
 import {
@@ -161,12 +166,20 @@ const deferMatrix: Array<{
 		fallback: durableRecord('pending', '1.1'),
 		shouldDefer: true,
 	},
+	{
+		name: 'failed primary with NULL-evidence fallback does NOT defer (not observer-settleable)',
+		primary: 'failed',
+		record: null,
+		fallback: durableRecord('pending', null),
+		shouldDefer: false,
+	},
 ];
 
 describe('observer-deferred ownership — consumable record classes defer, terminal classes flush', () => {
 	for (const row of deferMatrix) {
 		it(row.name, async () => {
-			await createIsolatedTestEnv(async () => {
+			const env = createIsolatedTestEnv();
+			try {
 				const leg = await newLeg();
 				const origRecord = _internals.recordPendingDelegationForBackground;
 				const origFallback = _internals.writeDelegationFallbackForBackground;
@@ -182,8 +195,19 @@ describe('observer-deferred ownership — consumable record classes defer, termi
 						status: row.primary,
 						record: row.record,
 					})) as never;
+					// The production seam returns the fallback ARTIFACT
+					// ({schemaVersion, correlationId, createdAt, record}), and the
+					// ownership predicate reads artifact.record — wrap the row's
+					// record so the seam stays shape-faithful.
 					_internals.writeDelegationFallbackForBackground = (async () =>
-						row.fallback ?? null) as never;
+						row.fallback
+							? {
+									schemaVersion: 1 as const,
+									correlationId: 'corr-defer',
+									createdAt: 1,
+									record: row.fallback,
+								}
+							: null) as never;
 					await hook.toolAfter(
 						{
 							tool: 'tool.execute.Task',
@@ -212,12 +236,15 @@ describe('observer-deferred ownership — consumable record classes defer, termi
 					_internals.writeDelegationFallbackForBackground = origFallback;
 					leg.cleanup();
 				}
-			});
+			} finally {
+				env.cleanup();
+			}
 		});
 	}
 
 	it('background subagents disabled: running output never defers (no observer record exists)', async () => {
-		await createIsolatedTestEnv(async () => {
+		const env = createIsolatedTestEnv();
+		try {
 			const leg = await newLeg();
 			try {
 				const hook = createDelegationGateHook(makeConfig(false), leg.directory);
@@ -238,6 +265,87 @@ describe('observer-deferred ownership — consumable record classes defer, termi
 			} finally {
 				leg.cleanup();
 			}
-		});
+		} finally {
+			env.cleanup();
+		}
+	});
+});
+
+describe('sweep and observer discharge', () => {
+	it('the pending-record stale sweep discharges the swept call obligation', async () => {
+		const env = createIsolatedTestEnv();
+		try {
+			const leg = await newLeg(['1.1'], true);
+			try {
+				await recordPendingDelegation(leg.directory, {
+					correlationId: 'child-sweep',
+					jobId: 'job-sweep',
+					subagentSessionId: 'child-sweep',
+					parentSessionId: SESSION,
+					callID: 'call-sw',
+					normalizedAgent: 'reviewer',
+					swarmPrefixedAgent: 'reviewer',
+					planTaskId: null,
+					evidenceTaskId: null,
+				});
+				expect(recordRouteFault(leg.directory, SESSION, 'call-sw')).toBe(true);
+				expect(
+					registryTest.hasObligation(leg.directory, SESSION, 'call-sw'),
+				).toBe(true);
+				await new Promise((resolve) => setTimeout(resolve, 15));
+				const swept = await sweepStaleDelegations(leg.directory, 1);
+				expect(swept).toBe(1);
+				expect(registryTest.size()).toBe(0);
+				expect(registryTest.sessionCount(leg.directory)).toBe(0);
+			} finally {
+				leg.cleanup();
+			}
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it('the completion observer terminal arm flushes the obligation at arm entry', async () => {
+		const env = createIsolatedTestEnv();
+		try {
+			const leg = await newLeg(['1.1'], true);
+			try {
+				await recordPendingDelegation(leg.directory, {
+					correlationId: 'child-err',
+					jobId: 'job-err',
+					subagentSessionId: 'child-err',
+					parentSessionId: SESSION,
+					callID: 'call-err',
+					normalizedAgent: 'reviewer',
+					swarmPrefixedAgent: 'reviewer',
+					planTaskId: null,
+					evidenceTaskId: null,
+				});
+				expect(recordRouteFault(leg.directory, SESSION, 'call-err')).toBe(true);
+				const observer = createBackgroundCompletionObserver({
+					config: { enabled: true },
+					directory: leg.directory,
+				});
+				await observer.event({
+					event: {
+						type: 'message.part.updated',
+						properties: {
+							part: {
+								type: 'text',
+								synthetic: true,
+								sessionID: SESSION,
+								text: '<task id="child-err" state="error">\n<task_error>error</task_error>\n</task>',
+							},
+						},
+					},
+				} as never);
+				expect(registryTest.size()).toBe(0);
+				expect(registryTest.sessionCount(leg.directory)).toBe(0);
+			} finally {
+				leg.cleanup();
+			}
+		} finally {
+			env.cleanup();
+		}
 	});
 });

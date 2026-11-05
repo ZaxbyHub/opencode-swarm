@@ -2,10 +2,12 @@
  * Issue #3564 — route-invalidation marker retirement ownership. Selector
  * groups: 'legacy-site' (fault-injection per retirement site),
  * 'capacity-message' (capacity refusal distinguishes leaked vs live),
- * default (leak classes, interleaving, observer-deferred ownership, lifecycle).
- * Harness: real createDelegationGateHook toolBefore/toolAfter (3509-suite shape).
+ * default (leak classes, interleaving, sweep/observer discharge, lifecycle).
+ * Harness: real createDelegationGateHook toolBefore/toolAfter (3509-suite
+ * shape). Env contract: createIsolatedTestEnv() takes NO callback — capture
+ * the returned env and clean up in finally.
  */
-import { afterAll, afterEach, describe, expect, it } from 'bun:test';
+import { afterEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { $ } from 'bun';
@@ -18,7 +20,6 @@ import {
 } from '../../../src/hooks/delegation-gate';
 import { workflowGateStatePath } from '../../../src/pr-review/persistence';
 import {
-	isRouteBlockedForSettlement,
 	recordRouteFault,
 	_test_exports as registryTest,
 	retireRouteInvalidationsForCall,
@@ -100,18 +101,14 @@ const newLeg = async (taskIds: string[], git = false): Promise<Leg> => {
 		cleanup: () => {
 			registryTest.reset();
 			resetSwarmState();
-			closeAllProjectDbSafe();
+			try {
+				closeAllProjectDbs();
+			} catch {
+				/* best-effort teardown */
+			}
 			removeTreeWithRetry(directory);
 		},
 	};
-};
-
-const closeAllProjectDbSafe = (): void => {
-	try {
-		closeAllProjectDbs();
-	} catch {
-		/* best-effort teardown */
-	}
 };
 
 const prepareTask = async (dir: string, taskId: string): Promise<void> => {
@@ -149,15 +146,9 @@ const runningOutput = (id: string) => ({
 	metadata: { background: true, jobId: `job-${id}` },
 });
 
-const residue = (dir: string): { size: number; sessionCount: number } => ({
-	size: registryTest.size(),
-	sessionCount: registryTest.sessionCount(dir),
-});
-
 const assertZeroResidue = (dir: string): void => {
-	const r = residue(dir);
-	expect(r.size).toBe(0);
-	expect(r.sessionCount).toBe(0);
+	expect(registryTest.size()).toBe(0);
+	expect(registryTest.sessionCount(dir)).toBe(0);
 };
 
 const before = async (
@@ -180,28 +171,14 @@ const settle = async (
 	);
 };
 
-/** A durable pending-delegation record with the given status/evidenceTaskId. */
-const durableRecord = (status: string, evidenceTaskId: string | null) =>
-	({
-		status,
-		evidenceTaskId,
-		parentSessionId: SESSION,
-		callID: 'call-defer',
-		normalizedAgent: 'reviewer',
-	}) as never;
-
-let envRestore: (() => void) | undefined;
-afterAll(() => {
-	envRestore?.();
-});
 afterEach(() => {
-	// seams are snapshotted+restored per-test below; this is the outer guard
 	registryTest.reset();
 });
 
 describe('structural retirement ownership — leak classes and interleaving', () => {
 	it('class (a) correlation-store failure retires via the toolAfter finally', async () => {
-		await createIsolatedTestEnv(async () => {
+		const env = createIsolatedTestEnv();
+		try {
 			const leg = await newLeg(['1.1'], true);
 			const orig = _internals.recordPendingDelegationForBackground;
 			try {
@@ -221,11 +198,14 @@ describe('structural retirement ownership — leak classes and interleaving', ()
 				_internals.recordPendingDelegationForBackground = orig;
 				leg.cleanup();
 			}
-		});
+		} finally {
+			env.cleanup();
+		}
 	});
 
 	it('class (b) unparseable running placeholder retires via the toolAfter finally', async () => {
-		await createIsolatedTestEnv(async () => {
+		const env = createIsolatedTestEnv();
+		try {
 			const leg = await newLeg(['1.1'], true);
 			try {
 				const hook = createDelegationGateHook(makeConfig(true), leg.directory);
@@ -238,11 +218,14 @@ describe('structural retirement ownership — leak classes and interleaving', ()
 			} finally {
 				leg.cleanup();
 			}
-		});
+		} finally {
+			env.cleanup();
+		}
 	});
 
 	it('class (c) empty-sessionID early return retires via the toolAfter finally', async () => {
-		await createIsolatedTestEnv(async () => {
+		const env = createIsolatedTestEnv();
+		try {
 			const leg = await newLeg(['1.1']);
 			try {
 				const hook = createDelegationGateHook(makeConfig(false), leg.directory);
@@ -260,11 +243,14 @@ describe('structural retirement ownership — leak classes and interleaving', ()
 			} finally {
 				leg.cleanup();
 			}
-		});
+		} finally {
+			env.cleanup();
+		}
 	});
 
 	it('stale-sweep/late-toolAfter interleaving retires via the toolAfter finally (real toolBefore record)', async () => {
-		await createIsolatedTestEnv(async () => {
+		const env = createIsolatedTestEnv();
+		try {
 			const leg = await newLeg(['1.1']);
 			try {
 				await prepareTask(leg.directory, '1.1');
@@ -283,11 +269,14 @@ describe('structural retirement ownership — leak classes and interleaving', ()
 			} finally {
 				leg.cleanup();
 			}
-		});
+		} finally {
+			env.cleanup();
+		}
 	});
 
-	it('clean settlement control: a settled call still retires exactly once', async () => {
-		await createIsolatedTestEnv(async () => {
+	it('clean settlement control: a settled call retires exactly once', async () => {
+		const env = createIsolatedTestEnv();
+		try {
 			const leg = await newLeg(['1.1']);
 			try {
 				await prepareTask(leg.directory, '1.1');
@@ -302,13 +291,16 @@ describe('structural retirement ownership — leak classes and interleaving', ()
 			} finally {
 				leg.cleanup();
 			}
-		});
+		} finally {
+			env.cleanup();
+		}
 	});
 });
 
 describe('legacy-site fault injection', () => {
 	it('generic cleanup site: epic-residue seam throw still retires the marker', async () => {
-		await createIsolatedTestEnv(async () => {
+		const env = createIsolatedTestEnv();
+		try {
 			const leg = await newLeg(['1.1']);
 			const origSentinel = _internals.epicSentinelExists;
 			const origResidue = _internals.commitEpicResidueAfterDelegation;
@@ -334,11 +326,14 @@ describe('legacy-site fault injection', () => {
 				_internals.commitEpicResidueAfterDelegation = origResidue;
 				leg.cleanup();
 			}
-		});
+		} finally {
+			env.cleanup();
+		}
 	});
 
 	it('no-correlation early-return site: reservation-release seam throw still retires', async () => {
-		await createIsolatedTestEnv(async () => {
+		const env = createIsolatedTestEnv();
+		try {
 			const leg = await newLeg(['1.1'], true);
 			const orig = _internals.releaseBackgroundCoderReservationForDispatch;
 			try {
@@ -381,19 +376,21 @@ describe('legacy-site fault injection', () => {
 				_internals.releaseBackgroundCoderReservationForDispatch = orig;
 				leg.cleanup();
 			}
-		});
+		} finally {
+			env.cleanup();
+		}
 	});
 });
 
 describe('capacity-message', () => {
 	it('distinguishes leaked-terminal-call occupancy from live-call occupancy', async () => {
-		await createIsolatedTestEnv(async () => {
+		const env = createIsolatedTestEnv();
+		try {
 			const leg = await newLeg(['1.1']);
 			try {
 				await prepareTask(leg.directory, '1.1');
 				const hook = createDelegationGateHook(makeConfig(false), leg.directory);
 				await before(hook, 'call-cap-h', reviewerArgs('1.1'));
-				// Fill the session bound with live markers via the production API.
 				for (let i = 0; i < 256; i++) {
 					expect(
 						recordRouteFault(leg.directory, SESSION, `call-fill-${i}`),
@@ -415,12 +412,14 @@ describe('capacity-message', () => {
 			} finally {
 				leg.cleanup();
 			}
-		});
+		} finally {
+			env.cleanup();
+		}
 	});
 });
 
 describe('registry obligation lifecycle', () => {
-	it('reset clears obligations with the registry (the /swarm close remedy)', async () => {
+	it('reset clears obligations with the registry (the /swarm close remedy)', () => {
 		expect(recordRouteFault('/tmp/own-3564-x', SESSION, 'call-r')).toBe(true);
 		expect(
 			registryTest.hasObligation('/tmp/own-3564-x', SESSION, 'call-r'),

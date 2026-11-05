@@ -425,12 +425,6 @@ export const _test_exports = {
 		return registryByDirectory.get(canonicalDirectory(directory))?.size ?? 0;
 	},
 	/** #3564: read-only obligation probes for structural-ownership assertions. */
-	obligationSessionCount(directory: string): number {
-		return (
-			retirementObligationsByDirectory.get(canonicalDirectory(directory))
-				?.size ?? 0
-		);
-	},
 	hasObligation(
 		directory: string,
 		sessionId: string | undefined,

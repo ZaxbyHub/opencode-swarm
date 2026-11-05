@@ -6560,6 +6560,15 @@ export function createDelegationGateHook(
 									pendingInput,
 									{ staleTimeoutMs: backgroundPendingTimeoutMs },
 								);
+							// #3564: the fallback artifact's record (when the primary write
+							// failed) — the observer-ownership decision below must apply the
+							// SAME consumable/gate-bearing checks to it as to a primary record
+							// (a null-evidence fallback is NOT observer-settleable).
+							let fallbackRecord: Awaited<
+								ReturnType<
+									typeof _internals.writeDelegationFallbackForBackground
+								>
+							> = null;
 							backgroundRecordDurable =
 								primaryOutcome.status === 'recorded' ||
 								primaryOutcome.status === 'duplicate';
@@ -6586,11 +6595,12 @@ export function createDelegationGateHook(
 									`BACKGROUND DELEGATION CORRELATION CONFLICT: ${subagentType} (${subagentSessionId}) collided with a different durable launch owner (parent=${primaryOutcome.record.parentSessionId}, call=${primaryOutcome.record.callID}, agent=${primaryOutcome.record.swarmPrefixedAgent}, task=${primaryOutcome.record.planTaskId ?? 'none'}). Inspect that existing owner and reconcile it before continuing. ${worktreeStatus} ${reservationStatus} No fallback owner was written and no reservation was bound. Do not abort, delete, or re-dispatch this correlation until reconciliation is complete. Do not advance task ${evidenceTaskId ?? 'unknown'} until the collision is resolved.`,
 								);
 							} else if (primaryOutcome.status === 'failed') {
-								backgroundRecordDurable =
-									(await _internals.writeDelegationFallbackForBackground(
+								fallbackRecord =
+									await _internals.writeDelegationFallbackForBackground(
 										directory,
 										pendingInput,
-									)) !== null;
+									);
+								backgroundRecordDurable = fallbackRecord !== null;
 								if (backgroundRecordDurable) {
 									logger.warn(
 										`[delegation-gate] background delegation ${subagentSessionId} persisted to the independent fallback artifact after the primary ledger write failed`,
@@ -6613,17 +6623,14 @@ export function createDelegationGateHook(
 							if (backgroundRecordDurable) {
 								const recordForOwnership =
 									primaryOutcome.status === 'failed'
-										? null // fallback path: freshly written pending record
+										? fallbackRecord?.record
 										: primaryOutcome.record;
 								const consumable =
-									primaryOutcome.status === 'failed' ||
 									recordForOwnership?.status === 'pending' ||
 									recordForOwnership?.status === 'running' ||
 									recordForOwnership?.status === 'completed' ||
 									recordForOwnership?.status === 'ingestion_error';
-								const gateBearing =
-									primaryOutcome.status === 'failed' ||
-									recordForOwnership?.evidenceTaskId != null;
+								const gateBearing = recordForOwnership?.evidenceTaskId != null;
 								if (consumable && gateBearing) {
 									routeRetirementDeferredCallID = input.callID;
 								}
@@ -8074,7 +8081,9 @@ export function createDelegationGateHook(
 			await toolAfterInner(input, _output);
 		} finally {
 			const deferred = routeRetirementDeferredCallID === input.callID;
-			routeRetirementDeferredCallID = null;
+			// Identity-guarded clear: a concurrent toolAfter for a different
+			// call must never erase this call's defer signal (and vice versa).
+			if (deferred) routeRetirementDeferredCallID = null;
 			if (!deferred) {
 				flushRouteRetirementObligation(
 					directory,
