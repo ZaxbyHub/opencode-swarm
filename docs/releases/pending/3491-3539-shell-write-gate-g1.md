@@ -103,9 +103,8 @@
   and the execute-from-pre-left outcomes; disagreement withdraws). The old
   skip-only model admitted `cd nope/sub || cd ../..; write` while bash ran
   the right branch; the new model over-denies `cmd || cd x; write` where the
-  left is likely to succeed — fail-closed by design. When the tracked walk
-  PROVES the left operand is a directory command that failed (complete state
-  unchanged), the right operand's landing is adopted as deterministic.
+  left is likely to succeed — fail-closed by design (both candidates walk,
+  and disagreement withdraws; no candidate adoption is claimed).
 - A function CALL whose body contains a directory transition withdraws later
   writes (#3567 feedback P-F5: bash runs the body in the current shell at
   CALL time, so the call-time landing is unknowable from the definition). A
@@ -132,9 +131,16 @@
 - A shell-family launcher whose flag cluster the walk cannot model
   (`bash -oc pipefail 'payload'` — ground truth: the payload executes)
   denies outright (#3567 feedback PRR-003) instead of leaving the payload
-  uninspectable. A multi-statement `sh -c` payload's tail statements are
-  judged under an uncertain child-cwd context (#3567 feedback P-B: the
-  payload's inner `cd` re-bases them above the session cwd).
+  uninspectable. EVERY multi-statement `sh -c` payload's statements (the
+  head statement included, even when the payload contains no `cd`) are
+  judged under an uncertain child-cwd context (#3567 feedback P-B: an
+  inner `cd` re-bases later statements above the session cwd — the
+  fail-closed price of not tracking child cwds is the over-block of
+  no-cd multi-statement payloads; single-statement payloads keep exact
+  judgment). A same-directory `pushd` does not grow the directory stack
+  in the model (bash pushes a duplicate entry), so a `popd` after a
+  same-dir `pushd` can withdraw where bash returns to the same directory
+  — deny-direction, disclosed.
 - Denial MESSAGE classes: shapes the #3567 feedback fixes route through the
   fail-closed withdrawal or wrapper-walk channels now deny with the
   withdrawal (`dynamic path target …`) or parse-failure message instead of

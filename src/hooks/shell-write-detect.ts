@@ -5940,39 +5940,91 @@ function bashFunctionBodyHasDirectoryTransition(node: unknown): boolean {
  * shell at CALL time, so a call to a transition-bearing function withdraws
  * (the call-time landing is unknowable from the definition). A call that
  * textually precedes its definition is a bash runtime error — withdrawal
- * stays fail-closed there too.
+ * stays fail-closed there too. The table CLOSES OVER the call graph
+ * (reviewer revision): a body that CALLS another defined function inherits
+ * that function's transition status transitively (`g(){ cd ..; }; f(){ g;
+ * }; f` must withdraw like the direct call).
  */
 function collectFunctionTransitions(
 	node: unknown,
 	into: Map<string, boolean>,
 ): void {
-	if (!node || typeof node !== 'object') return;
-	const n = node as Record<string, unknown>;
-	if (n.type === 'Function') {
-		// bash-parser's Function name is a Word node OR a plain string
-		// (BashFunction.name: BashWord | string) — accept both shapes.
-		const rawName = n.name;
-		const nameText =
-			typeof rawName === 'string'
-				? rawName
-				: typeof rawName === 'object' &&
-						rawName !== null &&
-						typeof (rawName as Record<string, unknown>).text === 'string'
-					? (rawName as Record<string, unknown>).text
-					: undefined;
-		if (typeof nameText === 'string' && nameText !== '' && n.body) {
-			into.set(nameText, bashFunctionBodyHasDirectoryTransition(n.body));
-		}
-	}
-	for (const value of Object.values(n)) {
-		if (Array.isArray(value)) {
-			for (const item of value) {
-				collectFunctionTransitions(item, into);
+	const direct = new Map<string, boolean>();
+	const calls = new Map<string, string[]>();
+	const walk = (n: unknown): void => {
+		if (!n || typeof n !== 'object') return;
+		const rec = n as Record<string, unknown>;
+		if (rec.type === 'Function') {
+			const rawName = rec.name;
+			const nameText =
+				typeof rawName === 'string'
+					? rawName
+					: typeof rawName === 'object' &&
+							rawName !== null &&
+							typeof (rawName as Record<string, unknown>).text === 'string'
+						? (rawName as Record<string, unknown>).text
+						: undefined;
+			if (typeof nameText === 'string' && nameText !== '' && rec.body) {
+				direct.set(nameText, bashFunctionBodyHasDirectoryTransition(rec.body));
+				calls.set(nameText, bashFunctionBodyCallNames(rec.body));
 			}
-		} else if (value && typeof value === 'object') {
-			collectFunctionTransitions(value, into);
+		}
+		for (const value of Object.values(rec)) {
+			if (Array.isArray(value)) {
+				for (const item of value) walk(item);
+			} else if (value && typeof value === 'object') {
+				walk(value);
+			}
+		}
+	};
+	walk(node);
+	// Fixpoint closure over the call graph (bounded by the table size).
+	let changed = true;
+	while (changed) {
+		changed = false;
+		for (const [name, isDirect] of direct) {
+			if (isDirect || into.get(name) === true) continue;
+			const callees = calls.get(name) ?? [];
+			const transitive = callees.some(
+				(callee) => direct.get(callee) === true || into.get(callee) === true,
+			);
+			if (transitive) {
+				into.set(name, true);
+				changed = true;
+			}
 		}
 	}
+	for (const [name, isDirect] of direct) {
+		if (isDirect && into.get(name) !== true) into.set(name, true);
+	}
+}
+
+/** Command words a function body invokes (for the call-graph closure). */
+function bashFunctionBodyCallNames(node: unknown): string[] {
+	const names: string[] = [];
+	const walk = (n: unknown): void => {
+		if (!n || typeof n !== 'object') return;
+		const rec = n as Record<string, unknown>;
+		if (
+			(rec.type === 'SimpleCommand' || rec.type === 'Command') &&
+			rec.name !== null &&
+			typeof rec.name === 'object'
+		) {
+			const name = rec.name as Record<string, unknown>;
+			if (typeof name.text === 'string' && name.text !== '') {
+				names.push(name.text);
+			}
+		}
+		for (const value of Object.values(rec)) {
+			if (Array.isArray(value)) {
+				for (const item of value) walk(item);
+			} else if (value && typeof value === 'object') {
+				walk(value);
+			}
+		}
+	};
+	walk(node);
+	return names;
 }
 
 function collectWritesWithNodes(

@@ -648,13 +648,30 @@ function matchChdirWrapperSegment(segment: string): DcChdirMatch {
 	// wrapper walk would consume `$(git` as a literal DIR and serialize a
 	// mangled rewrite the parser then rejects. Fail closed instead — the
 	// operand is dynamic and the existing uncertain channel is stricter.
-	if (words.some((w) => w.startsWith('$('))) {
+	// Reviewer revision: fail closed ONLY for a mangled `$(`-headed word in
+	// the FLAG REGION (before the first plain word) — a substitution in the
+	// WRAPPED COMMAND's own arguments (`env -C src echo $(date) > out`) is
+	// ordinary shell and must keep flowing (the hoisted redirect resolves it).
+	const head = basenameAnySepLike(words[0]);
+	if (head !== 'env' && head !== 'sudo') return null;
+	// Flag-region scan runs ONLY for wrapper heads — the nested re-walk of a
+	// rewritten payload must never see this check (a $() argument there is
+	// ordinary shell).
+	const firstPlainWord = (() => {
+		for (let idx = 1; idx < words.length; idx += 1) {
+			const w = words[idx] as string;
+			if (w.startsWith('-')) continue;
+			if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(w)) continue;
+			if (w.startsWith('$(')) continue;
+			return idx;
+		}
+		return words.length;
+	})();
+	if (words.slice(1, firstPlainWord).some((w) => w.startsWith('$('))) {
 		return { kind: 'failClosed' };
 	}
-	const head = basenameAnySepLike(words[0]);
 	if (head === 'env') return matchEnvChdir(words);
-	if (head === 'sudo') return matchSudoChdir(words);
-	return null;
+	return matchSudoChdir(words);
 }
 
 function matchEnvChdir(words: string[]): DcChdirMatch {
@@ -907,10 +924,20 @@ function preprocessWrapperText(
 	const hoistedRedirects: string[] = [];
 	{
 		const words = match.innerWords;
+		// File-target redirect operators (fd-prefixed N>/N>>, clobber >|,
+		// stdout+stderr &>/&>>, read-write <>, and the plain >/>> pair). An
+		// fd-DUPLICATION target (2>&1) is not a file and stays inside — bash
+		// dups the descriptor, nothing is written.
+		const FILE_REDIRECT_OP = /^(?:\d*(?:>|>>|>\|)|<>|&>|&>>)$/;
+		const FD_DUP_TARGET = /^&\d+$/;
 		let i = 0;
 		while (i < words.length) {
 			const w = words[i] as string;
-			if ((w === '>' || w === '>>') && i + 1 < words.length) {
+			if (
+				FILE_REDIRECT_OP.test(w) &&
+				i + 1 < words.length &&
+				!FD_DUP_TARGET.test(words[i + 1] as string)
+			) {
 				hoistedRedirects.push(`${w} ${shSingleQuote(words[i + 1] as string)}`);
 				i += 2;
 				continue;
@@ -1191,11 +1218,6 @@ export function dcSplitSegments(cmd: string): string[] {
 		// character, so `echo '; rm -rf ../dist; echo '` desynced into one
 		// phantom quoted segment and the destructive arm never saw the rm.
 		if (!inSingleQuote && ch === '\\' && next !== undefined) {
-			current += ch + next;
-			i += 1;
-			continue;
-		}
-		if (inDoubleQuote && ch === '\\' && (next === '"' || next === '\\')) {
 			current += ch + next;
 			i += 1;
 			continue;

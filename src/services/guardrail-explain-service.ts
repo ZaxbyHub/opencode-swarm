@@ -15,7 +15,10 @@ import {
 	dcSplitSegments,
 	dcUnwrapWrappers,
 } from '../hooks/guardrails/destructive-command.js';
-import { checkFileAuthority } from '../hooks/guardrails/file-authority.js';
+import {
+	AUTHORITY_ROLE_CAPABILITIES,
+	checkFileAuthority,
+} from '../hooks/guardrails/file-authority.js';
 import {
 	isInDeclaredScope,
 	redactShellCommand,
@@ -902,10 +905,24 @@ export async function handleGuardrailExplain(
 						// directory as the target. A WITHDRAWN eval
 						// (#3491 W1 `unresolved`) never routes — the walk could
 						// not stand behind any working directory.
+						// #3567 review PRR-010 (revision): mirror the gate's
+						// routing gate (tool-before.ts) — a routed eval needs a
+						// REAL declared scope (the defaulted `scopeEntries`
+						// cannot fabricate one) or an immutable non-writer role.
+						// The bare `scopeEntries.length > 0` let an architect
+						// explain-ALLOW an eval the gate blocks.
+						const hasRealDeclaredScope = scope != null && scope.length > 0;
+						const roleCapability =
+							AUTHORITY_ROLE_CAPABILITIES[
+								agent as keyof typeof AUTHORITY_ROLE_CAPABILITIES
+							];
+						const isImmutableNonWriter =
+							roleCapability === 'read-only' ||
+							roleCapability === 'dedicated-tool-only';
 						if (
 							write.original.capability === true &&
 							write.unresolved !== true &&
-							scopeEntries.length > 0
+							(isImmutableNonWriter || hasRealDeclaredScope)
 						) {
 							const evalTarget = write.evalDirectory ?? directory;
 							// #3567 review PRR-010: mirror the gate's FULL

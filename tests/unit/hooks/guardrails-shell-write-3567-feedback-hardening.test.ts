@@ -198,15 +198,22 @@ describe('3567 feedback: shell flag-cluster deny (PRR-003)', () => {
 }, 120_000);
 
 describe('3567 feedback: multi-statement payload isolation (P-B)', () => {
-	test("bash -c 'cd ..; rm -rf x' cannot judge x at the session cwd", async () => {
-		const got = await gate("bash -c 'cd ..; rm -rf x'");
+	test("bash -c 'cd ..; rm -rf dist' relocates the allowlisted target to the sentinel", async () => {
+		// dist alone is an allowlisted build artifact judged at the session
+		// cwd, so this leg FAILS if the isolation channel is removed.
+		const got = await gate("bash -c 'cd ..; rm -rf dist'");
 		expect(got.verdict).toBe('DENIED');
-		expect(got.message).toMatch(ANY_BLOCK);
+		expect(got.message).toMatch(/__swarm_unresolved_chdir__/);
 	}, 120_000);
-}, 120_000);
+
+	test('control: a single-statement payload keeps exact judgment', async () => {
+		const got = await gate("sh -c 'rm -rf dist'");
+		expect(got.verdict).toBe('ADMITTED');
+	}, 120_000);
+});
 
 describe('3567 feedback: || both-outcome model (PRR-012)', () => {
-	test('a provable left-failure cd makes the right landing deterministic', async () => {
+	test('a provable left-failure cd denies the sibling via the divergence channel', async () => {
 		const got = await gate('cd nope/sub || cd ../..; echo x > src/f.ts');
 		expect(got.verdict).toBe('DENIED');
 		expect(got.message).toMatch(/src\/f\.ts/);
@@ -255,3 +262,46 @@ describe('3567 feedback: env abbreviation chdir capture (P-R1)', () => {
 		expect(got.verdict).toBe('DENIED');
 	}, 120_000);
 }, 120_000);
+
+describe('3567 feedback: reviewer-round additions', () => {
+	test('fd redirect 2> after a cd hoists (deny at the bash-true landing)', async () => {
+		const got = await gate('cd ../outside && env -C src echo x 2> src/err.txt');
+		expect(got.verdict).toBe('DENIED');
+		expect(got.message).toMatch(/err\.txt/);
+	}, 120_000);
+
+	test('amp redirect &> after a cd hoists', async () => {
+		const got = await gate(
+			'cd ../outside && env -C src echo x &> src/both.txt',
+		);
+		expect(got.verdict).toBe('DENIED');
+		expect(got.message).toMatch(/both\.txt/);
+	}, 120_000);
+
+	test('fd-dup 2>&1 stays judged inside (no file target)', async () => {
+		const got = await gate('cd ../outside && env -C src echo x 2>&1 > src/f');
+		expect(got.verdict).toBe('DENIED');
+		// The fd-dup token itself serializes quoted; the deny may surface
+		// through the rewritten command's parse-failure channel — the pinned
+		// contract is the rejection verdict.
+		expect(got.message).toMatch(/src\/f|failed to parse command/);
+	}, 120_000);
+
+	test('transitive function call withdraws (call-graph closure)', async () => {
+		const got = await gate('g() { cd ..; }; f() { g; }; f; echo x > src/f.ts');
+		expect(got.verdict).toBe('DENIED');
+		expect(got.message).toMatch(WITHDRAWAL);
+	}, 120_000);
+
+	test('control: $(date) in the wrapped ARGUMENTS keeps flowing (P-F3 scope)', async () => {
+		const got = await gate('env -C src echo $(date) > src/f');
+		expect(got.verdict).toBe('ADMITTED');
+	}, 120_000);
+
+	test('pushd stack overflow (33 entries) withdraws', async () => {
+		const cmd = `${Array.from({ length: 33 }, (_, i) => `pushd d${i}`).join('; ')}; echo x > src/f`;
+		const got = await gate(cmd);
+		expect(got.verdict).toBe('DENIED');
+		expect(got.message).toMatch(WITHDRAWAL);
+	}, 120_000);
+});
