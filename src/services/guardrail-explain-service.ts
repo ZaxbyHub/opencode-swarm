@@ -783,7 +783,7 @@ export async function handleGuardrailExplain(
 		// guardrail-explain-service-accuracy.test.ts.
 		const wrapperDeclaredHere = declaresWindowsWrapperLoose(shellCommand);
 		const posix = detectPosixWrites(detectionCommand);
-		const analysis =
+		let analysis =
 			authority === null
 				? posix
 				: mergeWriteAnalyses(
@@ -792,6 +792,30 @@ export async function handleGuardrailExplain(
 						true,
 						wrapperDeclaredHere,
 					);
+		// #3567 review P-R2: mirror the gate's union-back (tool-before.ts):
+		// the rewritten command can LOSE writes the original analysis saw, so
+		// every non-eval-artifact original write unions back into the explain
+		// analysis — without it explain answered allow for
+		// `env -C src echo hi > /tmp/x` (hoist-less shapes) where the gate
+		// unions the redirect back and denies.
+		if (didUnwrap) {
+			const primaryAnalysis = detectPosixWrites(shellCommand);
+			const regained = primaryAnalysis.writes.filter(
+				(w) =>
+					!(
+						w.category === 'interpreter_eval' &&
+						w.path === null &&
+						!w.operator.endsWith('[eval stdin]')
+					),
+			);
+			if (regained.length > 0) {
+				analysis = {
+					...analysis,
+					writes: [...analysis.writes, ...regained],
+					hasWrites: analysis.hasWrites || regained.length > 0,
+				};
+			}
+		}
 
 		// The gate runs its fail-closed parse gate on the ORIGINAL command as
 		// well as the unwrapped form (tool-before.ts): a wrapper must not
@@ -884,6 +908,24 @@ export async function handleGuardrailExplain(
 							scopeEntries.length > 0
 						) {
 							const evalTarget = write.evalDirectory ?? directory;
+							// #3567 review PRR-010: mirror the gate's FULL
+							// decision tail (universal-deny prefixes and the
+							// file-authority layer) before the declared-scope
+							// check — the bare scope-only branch let architect
+							// identities explain-ALLOW evaluations the gate
+							// blocks (scopeEntries is never empty here).
+							const authorityDecision = checkFileAuthority(
+								agent,
+								path.resolve(directory, evalTarget),
+								directory,
+								undefined,
+								{ declaredScope: scope != null ? [scope] : null },
+							);
+							if (authorityDecision.allowed !== true) {
+								decision = 'block';
+								firingRule = `file_authority: ${authorityDecision.reason ?? 'path not authorized'}`;
+								break;
+							}
 							if (!isInDeclaredScope(evalTarget, scopeEntries, directory)) {
 								decision = 'block';
 								firingRule = `scope_violation: write outside declared scope: ${redactPath(evalTarget)}`;
@@ -901,7 +943,9 @@ export async function handleGuardrailExplain(
 					// targets) fails closed exactly like the gate's
 					// dynamic-path-target rejection.
 					decision = 'block';
-					firingRule = `dynamic_target: write target${write.original.path ? ` "${write.original.path}"` : ''} cannot be statically resolved (dynamic path or withdrawn directory state) — rejecting for safety`;
+					// #3567 review PRR-015: redact the raw dynamic source word
+					// like every sibling firing rule.
+					firingRule = `dynamic_target: write target${write.original.path ? ` "${redactPath(write.original.path)}"` : ''} cannot be statically resolved (dynamic path or withdrawn directory state) — rejecting for safety`;
 					break;
 				}
 			}
