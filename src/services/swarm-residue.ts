@@ -745,9 +745,13 @@ export function formatResidueInventoryLines(
 			...e.reasons,
 		].filter(Boolean);
 		// relPath comes from readdir and may contain adversarial characters —
+		// strip C0/DEL control chars first (issue #3542: backtick-only
+		// neutralization let `\n`-injected forged rows and ESC terminal
+		// pollution through — the same class PR #3533 fixed in
+		// src/commands/doctor-store-integrity.ts's `safeName`), then
 		// neutralize backticks (markdown code-span breakout) the same way
 		// src/commands/doctor.ts sanitizes untrusted strings.
-		const safeRel = e.relPath.replace(/`/g, "'");
+		const safeRel = e.relPath.replace(/[\p{Cc}]/gu, '').replace(/`/g, "'");
 		lines.push(
 			`  - \`${safeRel}\` [${e.grammarId}] → ${e.proposedAction === 'quarantine' ? 'would quarantine' : 'preserve'} (${flags.join(', ')})`,
 		);
