@@ -3329,6 +3329,23 @@ export async function finishStandardWorktreeDispatch(
 					message: 'Claimed recovery lane is missing immutable Git coordinates',
 				};
 			}
+			// #3494: resolve the landing intent BEFORE provenance construction
+			// and onBeforeMerge — a dirty-index epic refusal must fail preserved
+			// without the provenance callback having fired (the same
+			// resolve-before-merge ordering as the non-claim arm above).
+			const epicLanding =
+				settlement.commitLanding === undefined
+					? _internals.epicCommitLandingFor(directory, dispatch.planTaskId)
+					: undefined;
+			if (epicLanding && 'refused' in epicLanding) {
+				return {
+					failed: true as const,
+					stage: epicLanding.stage,
+					message: epicLanding.message,
+				};
+			}
+			const claimLanding =
+				settlement.commitLanding ?? epicLanding?.commitLanding;
 			const provenance: MergeOperationProvenance = {
 				operationId:
 					settlement.operationId ??
@@ -3345,6 +3362,13 @@ export async function finishStandardWorktreeDispatch(
 				await _internals.recoverMergeBackFromImmutableCoordinates(
 					directory,
 					coordinates,
+					// Same mapping as the reconciliation path (merge.ts): a
+					// 'merge' recovery without a commit landing lands
+					// squash-unstaged — never a merge commit — and an epic/caller
+					// commit landing lands as a commit with that message.
+					claimLanding
+						? { landingCommitMessage: epicLanding?.landingCommitMessage }
+						: { landUnstaged: true },
 				);
 			if ('merged' in recovered && recovered.merged) {
 				if (recovered.sourceCommitOrder && recovered.rewrittenCommitOrder) {

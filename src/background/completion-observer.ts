@@ -22,7 +22,10 @@ import {
 	standardWorktreeByCallID,
 } from '../hooks/delegation-gate/worktree-isolation.js';
 import { isInDeclaredScope } from '../hooks/guardrails/helpers.js';
-import { retireRouteInvalidationsForCall } from '../review/route-invalidation-registry.js';
+import {
+	flushRouteRetirementObligation,
+	retireRouteInvalidationsForCall,
+} from '../review/route-invalidation-registry.js';
 import {
 	discardReviewerScopeGenerationClaim,
 	discardReviewerScopeGenerationForCoderCall,
@@ -339,6 +342,17 @@ export function createBackgroundCompletionObserver(opts: {
 			let legacyTransferPending = false;
 			let legacyTransferRequiresManualRecovery = false;
 			if (terminal.status !== 'completed') {
+				// #3564: this arm owns the terminal cleanup of a claimed
+				// error/cancelled/stale outcome — none of which ever reach the
+				// consumption/retirement region below — so flush the call's
+				// route-invalidation retirement obligation at arm entry, before
+				// any early return (including the duplicate non-coder return).
+				// Idempotent: no-op when no obligation exists.
+				flushRouteRetirementObligation(
+					directory,
+					record.parentSessionId,
+					record.callID,
+				);
 				if (isDuplicate && record.normalizedAgent !== 'coder') {
 					// Non-coder failure cleanup has no durable sub-transition to resume.
 					return;

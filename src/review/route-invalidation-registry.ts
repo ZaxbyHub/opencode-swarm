@@ -59,6 +59,95 @@ const registryByDirectory = new Map<
 >();
 
 /**
+ * #3564: retirement obligations — the structural half of marker lifecycle.
+ * Every ADMITTED call record carries a retirement obligation from birth
+ * (registered at ensureCallRecord admission, after every capacity refusal);
+ * every retirement path discharges it unconditionally (even when the marker is
+ * already gone); flushRouteRetirementObligation is the toolAfter-level
+ * backstop that makes leaving a recorded marker with no reachable retirement
+ * owner impossible. The index mirrors the registry's own
+ * directory→session→callID identity (never a bare callID) and is structurally
+ * bounded by the registry itself: obligations exist only for admitted records
+ * and are deleted by every retirement path, so the index can never outgrow the
+ * capped registry (no eviction, matching the never-evictive capacity posture).
+ */
+const retirementObligationsByDirectory = new Map<
+	string,
+	Map<string, Set<string>>
+>();
+
+function registerRetirementObligation(
+	directory: string,
+	sessionId: string,
+	callID: string,
+): void {
+	const key = canonicalDirectory(directory);
+	let sessions = retirementObligationsByDirectory.get(key);
+	if (!sessions) {
+		sessions = new Map();
+		retirementObligationsByDirectory.set(key, sessions);
+	}
+	let calls = sessions.get(sessionId);
+	if (!calls) {
+		calls = new Set();
+		sessions.set(sessionId, calls);
+	}
+	calls.add(callID);
+}
+
+function dischargeRetirementObligation(
+	directory: string,
+	sessionId: string | undefined,
+	callID: string,
+): void {
+	const key = canonicalDirectory(directory);
+	if (sessionId !== undefined) {
+		const calls = retirementObligationsByDirectory.get(key)?.get(sessionId);
+		if (!calls) return;
+		calls.delete(callID);
+		if (calls.size === 0)
+			retirementObligationsByDirectory.get(key)?.delete(sessionId);
+		if ((retirementObligationsByDirectory.get(key)?.size ?? 0) === 0)
+			retirementObligationsByDirectory.delete(key);
+		return;
+	}
+	// Session-agnostic sweep (mirrors retireRouteInvalidationsForCallInDirectory).
+	const sessions = retirementObligationsByDirectory.get(key);
+	if (!sessions) return;
+	for (const [sid, calls] of sessions) {
+		calls.delete(callID);
+		if (calls.size === 0) sessions.delete(sid);
+	}
+	if (sessions.size === 0) retirementObligationsByDirectory.delete(key);
+}
+
+/**
+ * #3564 structural backstop: if the call's marker still carries an
+ * outstanding retirement obligation, retire it now (session-keyed when the
+ * session is known, session-agnostic directory sweep otherwise) and discharge
+ * the obligation. Idempotent no-op when the obligation is already discharged.
+ */
+export function flushRouteRetirementObligation(
+	directory: string,
+	sessionId: string | undefined,
+	callID: string,
+): void {
+	const key = canonicalDirectory(directory);
+	const hasObligation =
+		sessionId !== undefined
+			? retirementObligationsByDirectory.get(key)?.get(sessionId)?.has(callID)
+			: [...(retirementObligationsByDirectory.get(key)?.values() ?? [])].some(
+					(calls) => calls.has(callID),
+				);
+	if (!hasObligation) return;
+	if (sessionId !== undefined) {
+		retireRouteInvalidationsForCall(directory, sessionId, callID);
+	} else {
+		retireRouteInvalidationsForCallInDirectory(directory, callID);
+	}
+}
+
+/**
  * Degenerate-directory sentinel: hook construction tolerates a non-string
  * directory (`initDurableStatusPath` early-returns), and the adversarial
  * contract (src/hooks/delegation-gate.plan-fallback-security.test.ts)
@@ -155,6 +244,10 @@ function ensureCallRecord(
 		record = { taskKeys: new Set<string>(), callFault: false };
 		calls.set(callID, record);
 	}
+	// #3564: admission succeeded — the call's marker now carries its retirement
+	// obligation from birth (registered only here, after every capacity
+	// refusal, so a refused record never creates one).
+	registerRetirementObligation(directory, sessionId, callID);
 	return record;
 }
 
@@ -276,12 +369,22 @@ export function retireRouteInvalidationsForCall(
 ): void {
 	const key = canonicalDirectory(directory);
 	const sessions = registryByDirectory.get(key);
-	if (!sessions) return;
+	if (!sessions) {
+		// #3564: discharge unconditionally — a late or double retirement must
+		// never leave a stale obligation behind just because the marker is
+		// already gone.
+		dischargeRetirementObligation(directory, sessionId, callID);
+		return;
+	}
 	const calls = sessions.get(sessionId);
-	if (!calls) return;
+	if (!calls) {
+		dischargeRetirementObligation(directory, sessionId, callID);
+		return;
+	}
 	calls.delete(callID);
 	if (calls.size === 0) sessions.delete(sessionId);
 	if (sessions.size === 0) registryByDirectory.delete(key);
+	dischargeRetirementObligation(directory, sessionId, callID);
 }
 
 /**
@@ -295,12 +398,16 @@ export function retireRouteInvalidationsForCallInDirectory(
 ): void {
 	const key = canonicalDirectory(directory);
 	const sessions = registryByDirectory.get(key);
-	if (!sessions) return;
+	if (!sessions) {
+		dischargeRetirementObligation(directory, undefined, callID);
+		return;
+	}
 	for (const [sessionId, calls] of sessions) {
 		calls.delete(callID);
 		if (calls.size === 0) sessions.delete(sessionId);
 	}
 	if (sessions.size === 0) registryByDirectory.delete(key);
+	dischargeRetirementObligation(directory, undefined, callID);
 }
 
 /** Test-only: drop the entire registry (also wired into resetSwarmState). */
@@ -308,6 +415,7 @@ export const _test_exports = {
 	reset(): void {
 		registryByDirectory.clear();
 		directoryKeyBySpelling.clear();
+		retirementObligationsByDirectory.clear();
 	},
 	/** Read-only size probes for capacity assertions. */
 	size(): number {
@@ -315,5 +423,26 @@ export const _test_exports = {
 	},
 	sessionCount(directory: string): number {
 		return registryByDirectory.get(canonicalDirectory(directory))?.size ?? 0;
+	},
+	/** #3564: read-only obligation probes for structural-ownership assertions. */
+	obligationSessionCount(directory: string): number {
+		return (
+			retirementObligationsByDirectory.get(canonicalDirectory(directory))
+				?.size ?? 0
+		);
+	},
+	hasObligation(
+		directory: string,
+		sessionId: string | undefined,
+		callID: string,
+	): boolean {
+		const sessions = retirementObligationsByDirectory.get(
+			canonicalDirectory(directory),
+		);
+		if (!sessions) return false;
+		if (sessionId !== undefined)
+			return sessions.get(sessionId)?.has(callID) ?? false;
+		for (const calls of sessions.values()) if (calls.has(callID)) return true;
+		return false;
 	},
 };

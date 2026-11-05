@@ -67,6 +67,7 @@ import {
 	readPrWorkflowGateStateFromDisk,
 } from '../pr-review/persistence.js';
 import { readVerdictSettlementReceipt } from '../pr-review/verdict-settlement.js';
+import { flushRouteRetirementObligation } from '../review/route-invalidation-registry.js';
 import { telemetry } from '../telemetry.js';
 import { bunWrite } from '../utils/bun-compat.js';
 import {
@@ -5906,6 +5907,17 @@ function sweepStaleLocked(
 			result: livenessResult,
 			terminalResult: staleTerminal,
 		});
+		// #3564: the sweep just moved the record to a durable terminal status —
+		// its route-invalidation marker (if any) can never be consulted again
+		// (claimTerminalResult refuses non-pending/running; claimDelegationIngestion
+		// refuses swept terminal status), so discharge the retirement obligation
+		// now instead of letting dead occupancy accumulate toward the capacity
+		// wedge. Idempotent: no-op when no obligation exists.
+		flushRouteRetirementObligation(
+			directory,
+			record.parentSessionId,
+			record.callID,
+		);
 		// #2482 / #2244: the sweep just moved an open record to a durable
 		// terminal status WITHOUT the claim path emitting the terminal event
 		// — by definition its `delegation_begin` is unpaired. Emit the
