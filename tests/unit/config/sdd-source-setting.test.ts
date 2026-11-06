@@ -171,6 +171,19 @@ describe('readSddSourceSetting', () => {
 		});
 	});
 
+	test('NOTE-1 mirror: a valid PROJECT source wins while an invalid USER value is still reported', () => {
+		writeProject(JSON.stringify({ sdd: { source: 'speckit' } }));
+		const userCfg = writeUser(JSON.stringify({ sdd: { source: 'Bogus' } }));
+		const s = readSddSourceSetting(tempDir);
+		expect(s.source).toBe('speckit');
+		expect(s.origin).toBe('project');
+		expect(s.rejected).toEqual({
+			value: 'Bogus',
+			configPath: userCfg,
+			field: 'sdd.source',
+		});
+	});
+
 	test('malformed JSON, oversize file: no throw, no source', () => {
 		writeProject('{ not json');
 		expect(() => readSddSourceSetting(tempDir)).not.toThrow();
