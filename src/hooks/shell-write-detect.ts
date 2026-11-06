@@ -3200,7 +3200,25 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 		const suffixNodes = getSuffixNodes(cmd);
 		for (let w = 0; w < suffixWords.length; w++) {
 			const word = suffixWords[w];
-			if (!word.startsWith('of=')) continue;
+			// Reviewer F-f (pre-existing, exposed by the F-02 hardening): a
+			// quoted `of=` word carrying an expansion (`"of=$D/src/f"`)
+			// failed the raw startsWith gate and emitted nothing — bash
+			// writes through the expanded value. Emit the dynamic refusal
+			// for the expansion-bearing spelling.
+			const outerQ = /^(['"])(.*)$/.exec(word);
+			const bare = outerQ !== null ? (outerQ[2] ?? '') : word;
+			const ofWord = bare.startsWith('of=') ? bare : word;
+			if (!ofWord.startsWith('of=')) continue;
+			if (isDynamicPath(ofWord.slice(3))) {
+				results.push({
+					category: 'builtin_write',
+					operator: 'dd of=',
+					path: null,
+					unresolvedContext: true,
+					dynamicSourceWord: ofWord,
+				});
+				continue;
+			}
 			// #3491 W8: brace regions in the `of=` VALUE expand — `dd
 			// of='src/{a,../x}'` writes both branch files. Bash keeps only
 			// the LAST expanded `of=` (final-critic GT), which can itself be
@@ -3322,14 +3340,39 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 		let endOfOptions = false;
 		// Transparent prefixes (command/exec) leave their own name in the
 		// suffix words — skip everything up to and including the leaf verb
-		// so the wrapper/verb words are never judged as operands.
+		// (basename match: path-qualified leaves like /usr/bin/touch) so the
+		// wrapper/verb words are never judged as operands.
 		let start = 0;
-		const verbIndex = suffixWords.indexOf('touch');
-		if (verbIndex !== -1) start = verbIndex + 1;
+		for (let w = 0; w < suffixWords.length; w++) {
+			if (basenameAnySep(suffixWords[w] ?? '') === 'touch') {
+				start = w + 1;
+				break;
+			}
+		}
 		for (let w = start; w < suffixWords.length; w++) {
 			const word = suffixWords[w];
 			if (!endOfOptions && word === '--') {
 				endOfOptions = true;
+				continue;
+			}
+			// Reviewer F-a: -d/-t/-r (short, separate value) and the long
+			// --date/--reference/--time forms consume the NEXT word as the
+			// value — a date string or reference file must not be judged as
+			// a write target.
+			if (
+				!endOfOptions &&
+				/^-[^-]*[dtr]$/.test(word) &&
+				w + 1 < suffixWords.length
+			) {
+				w += 1;
+				continue;
+			}
+			if (
+				!endOfOptions &&
+				/^(--date|--reference|--time)$/.test(word) &&
+				w + 1 < suffixWords.length
+			) {
+				w += 1;
 				continue;
 			}
 			if (endOfOptions || !word.startsWith('-')) {
@@ -3452,12 +3495,17 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 				dest = suffixWords[w + 1] ?? null;
 			} else if (flagWord.startsWith('--target-directory=')) {
 				dest = flagWord.slice('--target-directory='.length);
-			} else if (
-				/^-[A-Za-z]*t[^=]*$/.test(flagWord) &&
-				flagWord !== '-t' &&
-				w + 1 < suffixWords.length
-			) {
-				dest = suffixWords[w + 1] ?? null;
+			} else if (flagWord.startsWith('-') && !flagWord.startsWith('--')) {
+				// Reviewer F-d: GNU cp accepts the ATTACHED short value
+				// (`-t../../esc`) — when `t` is NOT the final cluster char the
+				// value rides inside the token; when `t` IS final the value is
+				// the next word (the `-vt` cluster form).
+				const tIdx = flagWord.indexOf('t', 1);
+				if (tIdx === flagWord.length - 1 && w + 1 < suffixWords.length) {
+					dest = suffixWords[w + 1] ?? null;
+				} else if (tIdx !== -1 && tIdx < flagWord.length - 1) {
+					dest = flagWord.slice(tIdx + 1);
+				}
 			}
 			if (dest !== null && dest !== '') {
 				pushExpandedDestination(
@@ -6111,9 +6159,23 @@ export function detectInteractiveSession(
  * @param command - A POSIX shell command string
  * @returns WriteAnalysis with array of detected write targets; hasWrites is false when array is empty
  */
-export function detectPosixWrites(command: string): WriteAnalysis {
+export function detectPosixWrites(
+	command: string,
+	procsubRecursionDepth = 0,
+): WriteAnalysis {
 	if (!command || typeof command !== 'string') {
 		return { writes: [], hasWrites: false };
+	}
+	// Reviewer F-b: the procsub body recursion re-masks/re-parses its
+	// remaining body per level (super-linear in nesting depth — 28KB at
+	// 4000 levels measured 17.4s vs 6ms base). Beyond the bound the nested
+	// content fails CLOSED (the caller marks body writes unresolved).
+	if (procsubRecursionDepth > 8) {
+		return {
+			writes: [],
+			hasWrites: false,
+			parseError: true,
+		};
 	}
 	if (unsafeShellCommandTextReason(command)) {
 		return {
@@ -6232,7 +6294,10 @@ export function detectPosixWrites(command: string): WriteAnalysis {
 					// body that fails to parse leaves every write unresolved
 					// (fail-closed), and the read-only `<(ls)` admit is
 					// preserved because a write-free body emits nothing.
-					const bodyAnalysis = detectPosixWrites(span.body);
+					const bodyAnalysis = detectPosixWrites(
+						span.body,
+						procsubRecursionDepth + 1,
+					);
 					for (const write of bodyAnalysis.writes) {
 						allWrites.push(
 							(withdraw || bodyAnalysis.parseError === true) &&

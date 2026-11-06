@@ -33,6 +33,7 @@ import {
 	resetSwarmState,
 	startAgentSession,
 } from '../../../src/state';
+import { evaluateScopeValidate } from '../../../src/tools/scope-validate';
 import { installActiveScopeBinding } from '../../helpers/active-scope-binding';
 import { canonicalMkdtemp, removeTreeWithRetry } from '../../helpers/tmpdir';
 
@@ -92,6 +93,9 @@ async function gate(command: string): Promise<Verdict> {
 }
 
 const ANY_BLOCK = /(?:WRITE )?BLOCKED/i;
+const wsRoot = canonicalMkdtemp('fb3568-root-');
+created.push(wsRoot);
+mkdirSync(path.join(wsRoot, 'src'), { recursive: true });
 
 describe('3568 feedback: masked procsub body family (PRR-001 / F-01)', () => {
 	test.each([
@@ -123,6 +127,42 @@ describe('3568 feedback: masked procsub body family (PRR-001 / F-01)', () => {
 		expect((await gate('touch src/ok.txt')).verdict).toBe('ADMITTED');
 		expect((await gate('touch ../../esc')).verdict).toBe('DENIED');
 	}, 120_000);
+
+	test('touch option values are not write targets (reviewer F-a)', () => {
+		for (const cmd of [
+			'touch -d 2024-01-01 src/ok.txt',
+			'touch -t 202401010000 src/ok.txt',
+			'touch -r ref.txt src/ok.txt',
+			'command /usr/bin/touch src/ok.txt',
+		]) {
+			const r = detectPosixWrites(cmd);
+			expect(r.writes.map((w) => w.path)).toEqual(['src/ok.txt']);
+		}
+	});
+
+	test('cp -t attached spelling denies (reviewer F-d)', async () => {
+		const r = detectPosixWrites('cp -t../../esc src/a');
+		expect(r.writes.map((w) => w.path)).toContain('../../esc');
+		const got = await gate('cp -t../../esc src/a');
+		expect(got.verdict).toBe('DENIED');
+	}, 120_000);
+
+	test('nested-span depth cap keeps cost bounded (reviewer F-b)', () => {
+		const deep =
+			Array.from({ length: 1000 }, () => 'cat <(').join('') +
+			'echo hi > src/f' +
+			Array.from({ length: 1000 }, () => ')').join('');
+		const t0 = performance.now();
+		void detectPosixWrites(deep);
+		expect(performance.now() - t0).toBeLessThan(2000);
+	});
+
+	test('unquoted dd of=$VAR emits the dynamic refusal (reviewer F-f)', () => {
+		const r = detectPosixWrites('dd of=$D/src/f if=/dev/null');
+		expect(r.writes.length).toBe(1);
+		expect(r.writes[0]?.path).toBeNull();
+		expect(r.writes[0]?.unresolvedContext).toBe(true);
+	});
 });
 
 describe('3568 feedback: quoted brace token (F-02)', () => {
@@ -189,9 +229,37 @@ describe('3568 feedback: cp -t destination (PRR-009)', () => {
 });
 
 describe('3568 feedback: scope_validate residual parity (PRR-008)', () => {
-	test('the advisory resolves the masked residual like the gate', async () => {
-		// The live gate denies this shape (the residual's cd-tracked landing
-		// escapes); scope-validate must not answer ALLOWED on the raw text.
+	test('evaluateScopeValidate resolves the masked residual (ROOT_ESCAPE)', () => {
+		// The pin calls the TOOL directly — a gate-leg cross-check cannot
+		// detect a scope-validate revert to raw-text resolution (reviewer
+		// round 2, PRR-008).
+		// fail() throws the typed error carrying the code (not a result
+		// object) — the ROOT_ESCAPE denial is a throw.
+		expect(() =>
+			evaluateScopeValidate(
+				{
+					command: 'cd .. && echo hi > out.txt; true <(true)',
+					shell: 'posix',
+					scope_files: ['src/'],
+				},
+				wsRoot,
+			),
+		).toThrow(/ROOT_ESCAPE/);
+	});
+
+	test('control: an in-scope write stays allowed', () => {
+		const result = evaluateScopeValidate(
+			{
+				command: 'echo hi > src/ok.txt',
+				shell: 'posix',
+				scope_files: ['src/'],
+			},
+			wsRoot,
+		);
+		expect(result.allowed).toBe(true);
+	});
+
+	test('the live gate denies the same shape (cross-check)', async () => {
 		const gateResult = await gate('cd .. && echo hi > out.txt; true <(true)');
 		expect(gateResult.verdict).toBe('DENIED');
 	});

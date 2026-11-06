@@ -129,7 +129,25 @@
 - Numeric brace ranges refuse BEFORE materialization (#3568 PRR-006 —
   the sequence was built first and only then cap-checked: `{1..100000000}`
   cost GB-scale RSS and a 20-digit endpoint never terminated; both now
-  classify dynamic in milliseconds).
+  classify dynamic in milliseconds). The procsub body recursion is DEPTH-
+  BOUNDED (8 levels; reviewer F-b — nested re-masking was super-linear:
+  28KB at 4000 levels measured 17.4s vs 6ms base) and fails closed past
+  the bound.
+- `/swarm guardrail explain` does NOT mirror the destructive-arm sentinel
+  relocation for procsub span bodies (reviewer F-c): the live gate denies
+  `true <(rm -rf .swarm)` via the body's uncertain-context relocation,
+  while explain can answer allow for the same shape (the write-scope
+  mirror blocks the body's WRITE verbs; the destructive relocation is
+  gate-only). `scope_validate` DOES deny the shape (DESTRUCTIVE_COMMAND).
+  Disclosed asymmetry — the gate is the enforcement surface.
+- touch option VALUES (`-d/-t/-r` short-with-separate-arg and the long
+  `--date/--reference/--time` forms) are consumed, not judged as targets;
+  path-qualified leaves (`command /usr/bin/touch x`) locate the verb by
+  basename. `cp -tDEST` (attached short value) is modeled alongside the
+  spaced and `=` forms. An UNQUOTED `dd of=$VAR` emits the dynamic
+  refusal; a QUOTED `of=$VAR` expansion remains invisible (pre-existing
+  at base — the quote wrapper defeats both the word gate and the
+  expansion detection; disclosed).
 
 ## Verification
 
