@@ -9,9 +9,8 @@
  * gate, so these rows pin that sharing against drift.
  */
 import { afterEach, describe, expect, test } from 'bun:test';
-import * as fs from 'node:fs';
 import { handleGuardrailExplain } from '../../../src/services/guardrail-explain-service';
-import { canonicalMkdtemp } from '../../helpers/tmpdir';
+import { canonicalMkdtemp, removeTreeWithRetry } from '../../helpers/tmpdir';
 
 const roots: string[] = [];
 
@@ -23,7 +22,7 @@ function workspace(): string {
 
 afterEach(() => {
 	for (const root of roots.splice(0)) {
-		fs.rmSync(root, { recursive: true, force: true });
+		removeTreeWithRetry(root);
 	}
 });
 
@@ -60,6 +59,18 @@ describe('issue #3491 explain/enforcement shell-write parity', () => {
 			...command.split(' '),
 		]);
 		expect(explained).toMatch(/\| *Decision *\| *block */i);
+	});
+
+	test.each([
+		['cd src && bash -oc pipefail rm -rf ../../outside'],
+	])('%s explains as block (shell flag-cluster deny-on-uncertainty parity)', async (command) => {
+		const explained = await handleGuardrailExplain(workspace(), [
+			'--scope',
+			'src/',
+			...command.split(' '),
+		]);
+		expect(explained).toMatch(/\| *Decision *\| *block */i);
+		expect(explained).toMatch(/flag cluster/);
 	});
 
 	test.each([

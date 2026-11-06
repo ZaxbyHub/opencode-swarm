@@ -12,10 +12,14 @@ import {
 	dcParseWindowsRecursiveDelete,
 	dcPreprocessWrappers,
 	dcRelocateDestructiveTarget,
+	dcShellFlagClusterUncertain,
 	dcSplitSegments,
 	dcUnwrapWrappers,
 } from '../hooks/guardrails/destructive-command.js';
-import { checkFileAuthority } from '../hooks/guardrails/file-authority.js';
+import {
+	AUTHORITY_ROLE_CAPABILITIES,
+	checkFileAuthority,
+} from '../hooks/guardrails/file-authority.js';
 import {
 	isInDeclaredScope,
 	redactShellCommand,
@@ -745,6 +749,15 @@ export async function handleGuardrailExplain(
 		firingRule =
 			'parse_error: write detection failed to parse command — rejecting for safety';
 	}
+	// #3567 final-critic round: mirror the gate's shell flag-cluster
+	// deny-on-uncertainty channel (tool-before.ts) — without it explain
+	// answered allow for `bash -oc pipefail 'rm -rf …'` shapes the gate
+	// blocks.
+	const uncertainCluster = dcShellFlagClusterUncertain(shellCommand);
+	if (uncertainCluster !== null) {
+		decision = 'block';
+		firingRule = `inline_eval: shell interpreter invocation "${uncertainCluster}" carries a flag cluster the guard cannot statically model (unknown option or glued argument) — deny-on-uncertainty`;
+	}
 	const didUnwrap = preprocessed.changed;
 	const detectionCommand = didUnwrap ? preprocessed.command : shellCommand;
 
@@ -783,7 +796,7 @@ export async function handleGuardrailExplain(
 		// guardrail-explain-service-accuracy.test.ts.
 		const wrapperDeclaredHere = declaresWindowsWrapperLoose(shellCommand);
 		const posix = detectPosixWrites(detectionCommand);
-		const analysis =
+		let analysis =
 			authority === null
 				? posix
 				: mergeWriteAnalyses(
@@ -792,6 +805,30 @@ export async function handleGuardrailExplain(
 						true,
 						wrapperDeclaredHere,
 					);
+		// #3567 review P-R2: mirror the gate's union-back (tool-before.ts):
+		// the rewritten command can LOSE writes the original analysis saw, so
+		// every non-eval-artifact original write unions back into the explain
+		// analysis — without it explain answered allow for
+		// `env -C src echo hi > /tmp/x` (hoist-less shapes) where the gate
+		// unions the redirect back and denies.
+		if (didUnwrap) {
+			const primaryAnalysis = detectPosixWrites(shellCommand);
+			const regained = primaryAnalysis.writes.filter(
+				(w) =>
+					!(
+						w.category === 'interpreter_eval' &&
+						w.path === null &&
+						!w.operator.endsWith('[eval stdin]')
+					),
+			);
+			if (regained.length > 0) {
+				analysis = {
+					...analysis,
+					writes: [...analysis.writes, ...regained],
+					hasWrites: analysis.hasWrites || regained.length > 0,
+				};
+			}
+		}
 
 		// The gate runs its fail-closed parse gate on the ORIGINAL command as
 		// well as the unwrapped form (tool-before.ts): a wrapper must not
@@ -882,12 +919,44 @@ export async function handleGuardrailExplain(
 						// directory as the target. A WITHDRAWN eval
 						// (#3491 W1 `unresolved`) never routes — the walk could
 						// not stand behind any working directory.
+						// #3567 review PRR-010 (revision): mirror the gate's
+						// routing gate (tool-before.ts) — a routed eval needs a
+						// REAL declared scope (the defaulted `scopeEntries`
+						// cannot fabricate one) or an immutable non-writer role.
+						// The bare `scopeEntries.length > 0` let an architect
+						// explain-ALLOW an eval the gate blocks.
+						const hasRealDeclaredScope = scope != null && scope.length > 0;
+						const roleCapability =
+							AUTHORITY_ROLE_CAPABILITIES[
+								agent as keyof typeof AUTHORITY_ROLE_CAPABILITIES
+							];
+						const isImmutableNonWriter =
+							roleCapability === 'read-only' ||
+							roleCapability === 'dedicated-tool-only';
 						if (
 							write.original.capability === true &&
 							write.unresolved !== true &&
-							scopeEntries.length > 0
+							(isImmutableNonWriter || hasRealDeclaredScope)
 						) {
 							const evalTarget = write.evalDirectory ?? directory;
+							// #3567 review PRR-010: mirror the gate's FULL
+							// decision tail (universal-deny prefixes and the
+							// file-authority layer) before the declared-scope
+							// check — the bare scope-only branch let architect
+							// identities explain-ALLOW evaluations the gate
+							// blocks (scopeEntries is never empty here).
+							const authorityDecision = checkFileAuthority(
+								agent,
+								path.resolve(directory, evalTarget),
+								directory,
+								undefined,
+								{ declaredScope: scope != null ? [scope] : null },
+							);
+							if (authorityDecision.allowed !== true) {
+								decision = 'block';
+								firingRule = `file_authority: ${authorityDecision.reason ?? 'path not authorized'}`;
+								break;
+							}
 							if (!isInDeclaredScope(evalTarget, scopeEntries, directory)) {
 								decision = 'block';
 								firingRule = `scope_violation: write outside declared scope: ${redactPath(evalTarget)}`;
@@ -909,7 +978,10 @@ export async function handleGuardrailExplain(
 					decision = 'block';
 					const explainDynamicLabel =
 						write.original.path ?? write.original.dynamicSourceWord;
-					firingRule = `dynamic_target: write target${explainDynamicLabel ? ` "${explainDynamicLabel}"` : ''} cannot be statically resolved (dynamic path or withdrawn directory state) — rejecting for safety`;
+					// UNION of the g1 fix (PRR-015 redact) and the g2 label
+					// selection (dynamicSourceWord fallback): redact whichever
+					// word renders.
+					firingRule = `dynamic_target: write target${explainDynamicLabel ? ` "${redactPath(explainDynamicLabel)}"` : ''} cannot be statically resolved (dynamic path or withdrawn directory state) — rejecting for safety`;
 					break;
 				}
 			}

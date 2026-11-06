@@ -14,8 +14,9 @@
   the real operand. Conditionals carry both outcomes explicitly: pipelines
   run components on isolated state copies with post-pipeline withdrawal,
   `if`/`case` branch copies diverge over the COMPLETE state (cwd + prevCwd +
-  dirStack) and withdraw, loops accept only a full-state fixpoint, and
-  function bodies walk a discarded copy. Withdrawn writes reach the gate as
+  dirStack + withdrawal flag — #3567 feedback PRR-001) and withdraw, loops
+  accept only a full-state fixpoint, and function bodies walk a discarded
+  copy that inherits (never zeroes) the context withdrawal. Withdrawn writes reach the gate as
   `resolvedPath: null` with an additive `unresolved` marker; a withdrawn
   capability eval denies before any `evalDirectory` fallback (#3491 AC1/AC3,
   #3539 AC1/AC5).
@@ -93,28 +94,76 @@
   `cd`/`cd -` with reassigned `HOME=`/`OLDPWD=` fail closed (withdrawal) by
   design — inherited shell state is unavailable statically.
 - Control-flow bodies whose directory landings diverge over the complete
-  state (e.g. `if …; then cd x; fi` without `else`) withdraw later writes
-  instead of fabricating a merge; benign in-scope writes inside the body are
-  unaffected.
-- The `env -C`/`sudo -D` rewrite consults the existing env-flag grammar;
-  deeper launcher option tables (sudo `-u`, `time -o`, nice) arrive with the
-  G3 launcher workstream (PR-3; #3491 AC3/AC4 residuals).
+  state — now INCLUDING the withdrawal flag (#3567 feedback PRR-001: a
+  withdrawn branch is divergence) — withdraw later writes instead of
+  fabricating a merge; benign in-scope writes inside the body are unaffected.
+- A `||` chain whose LEFT operand is not a statically-provable failed
+  directory command and whose RIGHT branch moves directories now withdraws
+  later writes (#3567 feedback PRR-012: the chain models both the skipped
+  and the execute-from-pre-left outcomes; disagreement withdraws). The old
+  skip-only model admitted `cd nope/sub || cd ../..; write` while bash ran
+  the right branch; the new model over-denies `cmd || cd x; write` where the
+  left is likely to succeed — fail-closed by design (both candidates walk,
+  and disagreement withdraws; no candidate adoption is claimed).
+- A function CALL whose body contains a directory transition withdraws later
+  writes (#3567 feedback P-F5: bash runs the body in the current shell at
+  CALL time, so the call-time landing is unknowable from the definition). A
+  function definition no longer zeroes an inherited withdrawal either
+  (PRR-002): body writes inherit the definition-context withdrawal.
+- Same-directory `cd`/`pushd` now refresh `prevCwd` exactly like bash
+  refreshes `OLDPWD` (#3567 feedback PRR-006: `cd ..; cd .; cd -` lands at
+  the workspace parent, where bash lands it). A `CDPATH=` reassignment on
+  the line still does not withdraw CDPATH-eligible `cd` operands.
+- The `env -C`/`sudo -D` rewrite consults the existing env-flag grammar,
+  extended to GNU abbreviation spellings (`--ch=DIR`, `--c DIR`) so the
+  chdir is captured (#3567 feedback P-R1). `env -S 'payload'` is NOT yet
+  modeled as a re-parsed command: the strip consumes the payload as flag
+  arguments, so `env -S 'rm -rf …'` / `env -S 'sh -c "… > …"'` remain
+  under-detected (base behavior; the payload-routing fix lands with the G3
+  launcher workstream — disclosed, not silently assumed). Deeper launcher
+  option tables (sudo `-u`, glued `-D..` arity, `time -o`, nice) arrive
+  with G3 (PR-3; #3491 AC3/AC4 residuals).
 - Process-substitution masking and brace-expansion write destinations are
   the PR-2 workstream's deferred set (not yet in the extractor's disclosed
-  grammar).
-- A same-directory `cd` deliberately does not refresh `OLDPWD` in the model
-  (bash does): keeping the state stable avoids spurious control-flow
-  divergence, and the omission is conservative/fail-closed. A `CDPATH=`
-  reassignment on the line does not yet withdraw CDPATH-eligible `cd`
-  operands (review round 1 non-blocking note).
+  grammar); an unquoted `$(...)` operand to a chdir wrapper now FAILS the
+  rewrite closed (#3567 feedback P-F3) instead of serializing a mangled
+  operand, and those commands deny via the parse-failure channel.
+- A shell-family launcher whose flag cluster the walk cannot model
+  (`bash -oc pipefail 'payload'` — ground truth: the payload executes)
+  denies outright (#3567 feedback PRR-003) instead of leaving the payload
+  uninspectable. A shell `-c` payload's statements are SPLICED AS A
+  PARENTHESIZED SUBSHELL (#3567 final-critic round): the payload's inner
+  `cd` can no longer move the parent walk state (`bash -c 'cd src'; echo x
+  > f` judges f at the session cwd, bash-true), and payload-internal
+  writes judge at the child cwd exactly like bash. On the DESTRUCTIVE arm
+  the payload's statements additionally relocate to the uncertain
+  sentinel (an inner `cd` re-bases later statements above the session
+  cwd) — the fail-closed price is the over-block of no-cd
+  multi-statement payloads on that arm. A same-directory `pushd` does not
+  grow the directory stack in the model (bash pushes a duplicate entry),
+  so a `popd` after a same-dir `pushd` can withdraw where bash returns to
+  the same directory — deny-direction, disclosed.
+- Denial MESSAGE classes: shapes the #3567 feedback fixes route through the
+  fail-closed withdrawal or wrapper-walk channels now deny with the
+  withdrawal (`dynamic path target …`) or parse-failure message instead of
+  the older single-landing scope message; the verdict (reject) is unchanged
+  and the affected pins were re-pinned with the wider class alternations.
 
 ## Verification
 
 - Frozen checks from the trace: C1 (cd word forms), C2 (env -C/-S), C5
   (sh -c payloads), C12 (pushd in control flow) all pass; preserving checks
-  C13 (fixed cd family) and C14 (write suites) stay green.
+  C13 (fixed cd family) and C14 (write suites) stay green. (The trace's
+  repro harness lives in the git-excluded `.agents/issue-traces/` scratch
+  tree, not the published package; the shipped assertions are the in-repo
+  suites below.)
 - New suites: `guardrails-shell-write-cd-word-forms-3491`,
   `guardrails-shell-write-launcher-env-3491`,
   `guardrails-shell-write-shc-payload-3491` (plain, trailing-positional,
   quote-concat, and flag-cluster payload spellings), and
-  `guardrail-explain-shell-write-parity-3491` (explain/gate parity).
+  `guardrail-explain-shell-write-parity-3491` (explain/gate parity), plus
+  `guardrails-shell-write-3567-feedback-hardening` — the #3567 feedback
+  pins (withdrawal propagation per construct, function seam, prevCwd
+  refresh, redirect hoist, `$()` fail-closed, flag-cluster deny, payload
+  isolation, both-outcome `||`, resolution precedence, backslash segment
+  split, env abbreviation capture).
