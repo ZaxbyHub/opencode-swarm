@@ -8,12 +8,17 @@ bounded-and-redacted helper (`sanitizeDiagnosticText(redactPath(target), 320)`),
 interpolation at all four throw sites (universal deny prefix, lenient verifier-config, enforced
 authority, and the non-shell file_write door — agent names are bounded there too).
 
-The file-authority denial **reason** now folds home/profile prefixes (`/home/<name>`,
-`/Users/<name>`, `C:\Users\<name>`, UNC shares) to `~` before the path reaches operator- and
-provider-bound transcripts. The fold is derived from the original input before workspace
-relativization, so a `/home/<name>/...` target no longer discloses the profile name in either
-the absolute or the `../../home/<name>` relative form. Ordinary non-home paths are preserved by
-design (over-redaction is pinned against).
+The file-authority denial **reason** keeps its workspace-relative display and folds
+home/profile segments under two rules: an absolute path (`/home/<name>/...`,
+`/Users/<name>/...`, `C:\Users\<name>\...`, UNC shares) folds via the shared `redactPath`, and
+an ESCAPING relative path (one starting `../`, provably outside the workspace) folds its
+`home/<name>` / `Users/<name>` segment to `~` — so a `/home/<name>/...` target no longer
+discloses the profile name in either the absolute or the `../../home/<name>` relative form.
+Ordinary in-workspace relative paths and non-home absolutes render unchanged (over-redaction
+is pinned against). Known bound: when the workspace sits under one profile and the target
+under a SIBLING profile, the relative display's common-ancestor prefix already dropped the
+`Users` segment, so the sibling account name remains in the reason (the message's target slot
+is still folded); the escaping fold is also case-sensitive (`Users` but not `users`).
 
 Diagnostic-only change: the structured data channels keep their pre-change behavior
 (`ShellWriteBlockedError.writeTarget` stays exact; audit rows keep persisting their existing
