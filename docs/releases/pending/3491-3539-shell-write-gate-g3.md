@@ -264,14 +264,19 @@ C9, C12–C15 stay GREEN.
   the escaping twin denies). Remaining disclosed residual (emission-level,
   deny-direction net): a launcher nested TWO levels deep (`nice sudo time
   -o x true`) loses the inner `-o` EMISSION — the walk recurses one
-  nesting level only — but the escaping shapes still deny at the gate via
-  the unwrap/N-03 net while the in-scope twin admits; tracked in the PR's
-  follow-up issue filed at closeout.
+  nesting level only — but the escaping time-o shapes still deny at the
+  gate via the unwrap/N-03 net while the in-scope twin admits. The same
+  recursion limit ALSO drops the interactive/uncertain deny decisions at
+  depth 2: a nested command-less sudo (`sudo sudo -i`,
+  `sudo FOO=bar sudo -i`, `nice sudo -i`) admits while parse_args.c opens
+  the interactive root shell (verified pre-existing fail-open) — both the
+  emission loss and the nested-interactive deny drop are to be tracked in
+  a follow-up issue filed at closeout.
 - (Implied-shell note:) the command-less-sudo deny models sudo's
   parse_args.c semantics as ground-truthed by the reviewer on a sudo host;
   this host has no sudo binary, so the modeling rests on that citation
   plus the gate's own `sudo -i` parity — flagged for a sudo-bearing
-  verification pass in a follow-up issue filed at closeout (which also tracks the `sudo -i`/`-s` quoted-payload shell-join family and the `sudo -D -e` chdir edit-target gap).
+  verification pass in a follow-up issue filed at closeout (which also tracks the `sudo -i`/`-s` quoted-payload shell-join family, the `sudo -D -e` chdir edit-target gap, and the nested-launcher interactive/uncertain deny drop described above).
 - nohup.out creation stays stdout-tty-gated and out of static reach — disclosed,
   not modeled.
 
@@ -299,16 +304,17 @@ C9, C12–C15 stay GREEN.
   `guardrails-shell-write-inplace-operands.test.ts` (perl in-place cluster rows
   moved from allowed to eval-blocked).
 - Feedback round: `tests/unit/hooks/guardrails-shell-write-3572-feedback-hardening.test.ts`
-  (38 tests: N-01 `sudo -e --` edit survival with in-scope admit control, N-02
+  (41 tests: N-01 `sudo -e --` edit survival with in-scope admit control, N-02
   timed-tail deny + cd-tracked admit, N-03 escaping-download emission +
   gate deny + admit, N-29 env -S tee detection + nested -S and expansion
   payload refusals + destructive deny, wrapper-prefixed tee leaf offset with
   admit/deny controls, N-25 uncertainty through transparent heads, N-26
   sanitized hostile launcher word, N-13 perl cluster gate pin, N-06 deno
-  stdin flag run, N-16 scope_validate channel parity, the delta round
+  stdin flag run, N-16 scope_validate channel parity, the delta rounds
   (quote-grouped env -S splice, glued split-string, paranoid-bound
   transparent heads, declared-wrapper dynamic-refusal carriers, segment-
-  contextual timed tail, explain verb parity), and the critic round
-  (launcher-nested GNU `time -o`, the implied command-less-sudo root
-  shell)) and
+  contextual timed tail, explain verb parity, launcher-nested GNU
+  `time -o`, the implied command-less-sudo root shell, the `--` sentinel
+  walk decisions, the sudo -D chdir composition, and the VAR=value
+  assignment resume)) and
   `shell-write-detect-perl-cluster-n12.test.ts` (2 detector pins).
