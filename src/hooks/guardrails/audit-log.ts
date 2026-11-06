@@ -352,55 +352,14 @@ export function hashRedactedCommand(redacted: string): string {
 }
 
 /**
- * Best-effort path redaction for audit logs.
- *
- * Replaces leading home/profile segments with a tilde placeholder so
- * absolute paths do not leak user-specific directory names (POSIX
- * `/home/<name>`, macOS `/Users/<name>`, Windows drive profiles
- * `C:\Users\<name>` case-insensitive, and UNC profile shares).
- *
- * This is intentionally minimal on non-home paths — ordinary project paths
- * are diagnostic content and are preserved (over-redaction guards pin it).
+ * Path redaction moved to src/scope/path-identity.ts (#3587) so the
+ * file-authority reason builder can fold home/profile prefixes without
+ * importing the audit subsystem; re-exported here so every existing
+ * importer keeps its source shape.
  */
-export function redactPath(filePath: string): string {
-	// Non-strings can never be safely redacted — coerce to the empty string
-	// instead of passing them through (issue #2040 reviewer round R2: the old
-	// passthrough let an unredacted non-string value reach disk silently).
-	if (typeof filePath !== 'string') return '';
-	if (filePath.length === 0) return filePath;
-
-	// POSIX home: /home/<name>/... -> ~/...
-	const rawPosixHomeMatch = filePath.match(/^(\/home\/[^/]+)(\/.*)$/);
-	if (rawPosixHomeMatch) {
-		return `~${rawPosixHomeMatch[2]}`;
-	}
-
-	// macOS home: /Users/<name>/... -> ~/... (parity with redactShellCommand)
-	const rawMacHomeMatch = filePath.match(/^(\/Users\/[^/]+)(\/.*)$/);
-	if (rawMacHomeMatch) {
-		return `~${rawMacHomeMatch[2]}`;
-	}
-
-	const normalized = path.normalize(filePath);
-
-	// Windows user profile (drive letter case-insensitive): c:\Users\<name>\... -> ~\<rest>\...
-	const windowsHomeMatch = normalized.match(
-		/^([A-Za-z]:\\[Uu][Ss][Ee][Rr][Ss]\\[^\\]+)(\\.*)$/i,
-	);
-	if (windowsHomeMatch) {
-		return `~\\${windowsHomeMatch[2]}`;
-	}
-
-	// Windows UNC profile/share path: \\server\share\user\... -> ~\share\user\...
-	const uncHomeMatch = normalized.match(
-		/^\\\\[^\\]+\\([^\\]+)\\([^\\]+)(\\.*)$/,
-	);
-	if (uncHomeMatch) {
-		return `~\\${uncHomeMatch[1]}\\${uncHomeMatch[2]}${uncHomeMatch[3]}`;
-	}
-
-	return normalized;
-}
+import { redactPath } from '../../scope/path-identity.js';
+// Re-export for existing importers (source-compatible move, #3587).
+export { redactPath };
 
 function redactEmbeddedPaths(text: string): string {
 	return text

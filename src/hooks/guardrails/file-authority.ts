@@ -30,6 +30,7 @@ import {
 	isPathWithinDeclaredScope,
 	type PathFlavor,
 	pathIdentitiesEqual,
+	redactPath,
 	sanitizeDiagnosticText,
 	unsafePathTextReason,
 } from '../../scope/path-identity';
@@ -974,7 +975,13 @@ export interface AuthorityEvaluationOptions {
 type DenyDecisionInput = Omit<
 	Extract<AuthorityDecision, { allowed: false }>,
 	'allowed' | 'reason' | 'path' | 'agent'
-> & { detail: string };
+> & {
+	detail: string;
+	// #3587: display-only path for the REASON render. Derived from the original
+	// caller input (pre-`path.relative`) so home/profile prefixes fold to `~`;
+	// `path`/safePath (the structured AuthorityDecision data channel) is untouched.
+	displayPath?: string;
+};
 
 function denyAuthority(
 	agent: string,
@@ -984,6 +991,15 @@ function denyAuthority(
 	const safeAgent = sanitizeDiagnosticText(agent, 96);
 	const safePath = sanitizeDiagnosticText(normalizedPath, 320);
 	const safeDetail = sanitizeDiagnosticText(input.detail, 640);
+	// #3587: the REASON's path slot renders the display-only value —
+	// sanitizeDiagnosticText(redactPath(...)) of the ORIGINAL input, so an
+	// absolute home/profile path folds to `~` before it reaches operator- and
+	// provider-bound transcripts. The structured `path` field (consumed by
+	// scope-guard and the audit channel) keeps its pre-change sanitized value.
+	const safeReasonPath = sanitizeDiagnosticText(
+		redactPath(input.displayPath ?? normalizedPath),
+		320,
+	);
 	return {
 		allowed: false,
 		code: input.code,
@@ -992,7 +1008,7 @@ function denyAuthority(
 		path: safePath,
 		agent: safeAgent,
 		reason: sanitizeDiagnosticText(
-			`${input.code}: Path blocked: ${safeDetail} [agent=${safeAgent}; path=${safePath}]`,
+			`${input.code}: Path blocked: ${safeDetail} [agent=${safeAgent}; path=${safeReasonPath}]`,
 			1024,
 		),
 		recovery: input.recovery,
@@ -1189,6 +1205,7 @@ export function checkFileAuthorityWithRules(
 
 		if (!matchedWorktree) {
 			return denyAuthority(agentName, normalizedPath, {
+				displayPath: filePath,
 				code: 'AUTHORITY_ROOT_ESCAPE',
 				layer: 'containment',
 				rule: 'same-filesystem-root',
@@ -1198,6 +1215,7 @@ export function checkFileAuthorityWithRules(
 		const plantedLink = findPlantedLinkBelow(matchedWorktree);
 		if (plantedLink) {
 			return denyAuthority(agentName, normalizedPath, {
+				displayPath: filePath,
 				code: 'AUTHORITY_ROOT_ESCAPE',
 				layer: 'containment',
 				rule: 'workspace-containment',
@@ -1210,6 +1228,7 @@ export function checkFileAuthorityWithRules(
 
 		if (!matchedWorktree) {
 			return denyAuthority(agentName, normalizedPath, {
+				displayPath: filePath,
 				code: 'AUTHORITY_ROOT_ESCAPE',
 				layer: 'containment',
 				rule: 'workspace-containment',
@@ -1219,6 +1238,7 @@ export function checkFileAuthorityWithRules(
 		const plantedLink = findPlantedLinkBelow(matchedWorktree);
 		if (plantedLink) {
 			return denyAuthority(agentName, normalizedPath, {
+				displayPath: filePath,
 				code: 'AUTHORITY_ROOT_ESCAPE',
 				layer: 'containment',
 				rule: 'workspace-containment',
@@ -1244,6 +1264,7 @@ export function checkFileAuthorityWithRules(
 		classifiedRules ?? (unclassifiedWhileDisabled ? {} : undefined);
 	if (!rules) {
 		return denyAuthority(agentName, normalizedPath, {
+			displayPath: filePath,
 			code: 'AUTHORITY_UNKNOWN_AGENT',
 			layer: 'role-capability',
 			rule: 'known-agent-role',
@@ -1265,6 +1286,7 @@ export function checkFileAuthorityWithRules(
 			matchesAuthorityDenyPrefix(normalizedPath, prefix, effectiveDir, flavor)
 		) {
 			return denyAuthority(agentName, normalizedPath, {
+				displayPath: filePath,
 				code: 'AUTHORITY_UNIVERSAL_DENY',
 				layer: 'universal-deny',
 				rule: `universal:${prefix}`,
@@ -1282,6 +1304,7 @@ export function checkFileAuthorityWithRules(
 		})
 	) {
 		return denyAuthority(agentName, normalizedPath, {
+			displayPath: filePath,
 			code: 'AUTHORITY_PROTECTED_PATH',
 			layer: 'protected-path',
 			rule: 'coder-control-state-protection',
@@ -1301,6 +1324,7 @@ export function checkFileAuthorityWithRules(
 		})
 	) {
 		return denyAuthority(agentName, normalizedPath, {
+			displayPath: filePath,
 			code: 'AUTHORITY_PROTECTED_PATH',
 			layer: 'protected-path',
 			rule: 'unclassified-agent-control-state-protection',
@@ -1322,6 +1346,7 @@ export function checkFileAuthorityWithRules(
 	].find(matchesGlob);
 	if (matchedVerifier) {
 		return denyAuthority(agentName, normalizedPath, {
+			displayPath: filePath,
 			code: 'AUTHORITY_VERIFIER_CONFIG',
 			layer: 'protected-path',
 			rule: `verifier-config:${matchedVerifier}`,
@@ -1338,6 +1363,7 @@ export function checkFileAuthorityWithRules(
 		canonicalCapability === 'dedicated-tool-only'
 	) {
 		return denyAuthority(agentName, normalizedPath, {
+			displayPath: filePath,
 			code: 'AUTHORITY_ROLE_READ_ONLY',
 			layer: 'role-capability',
 			rule: `role-capability:${canonicalCapability}`,
@@ -1351,6 +1377,7 @@ export function checkFileAuthorityWithRules(
 	// Configurable readOnly only narrows roles that otherwise have write ability.
 	if (rules.readOnly) {
 		return denyAuthority(agentName, normalizedPath, {
+			displayPath: filePath,
 			code: 'AUTHORITY_ROLE_READ_ONLY',
 			layer: 'role-capability',
 			rule: 'role-policy:read-only',
@@ -1397,6 +1424,7 @@ export function checkFileAuthorityWithRules(
 		for (const blocked of rules.blockedExact) {
 			if (pathIdentitiesEqual(normalizedPath, blocked, flavor)) {
 				return denyAuthority(agentName, normalizedPath, {
+					displayPath: filePath,
 					code: 'AUTHORITY_POLICY_DENY',
 					layer: 'role-policy',
 					rule: `blockedExact:${blocked}`,
@@ -1412,6 +1440,7 @@ export function checkFileAuthorityWithRules(
 		for (const glob of rules.blockedGlobs) {
 			if (matchesGlob(glob)) {
 				return denyAuthority(agentName, normalizedPath, {
+					displayPath: filePath,
 					code: 'AUTHORITY_POLICY_DENY',
 					layer: 'role-policy',
 					rule: `blockedGlob:${glob}`,
@@ -1444,6 +1473,7 @@ export function checkFileAuthorityWithRules(
 		const { zone } = classifyFile(normalizedPath);
 		if (rules.blockedZones.includes(zone)) {
 			return denyAuthority(agentName, normalizedPath, {
+				displayPath: filePath,
 				code: 'AUTHORITY_POLICY_DENY',
 				layer: 'role-policy',
 				rule: `blockedZone:${zone}`,
@@ -1501,6 +1531,7 @@ export function checkFileAuthorityWithRules(
 		for (const prefix of rules.blockedPrefix) {
 			if (matchesPathPrefix(normalizedPath, prefix)) {
 				return denyAuthority(agentName, normalizedPath, {
+					displayPath: filePath,
 					code: 'AUTHORITY_POLICY_DENY',
 					layer: 'role-policy',
 					rule: `blockedPrefix:${prefix}`,
@@ -1520,6 +1551,7 @@ export function checkFileAuthorityWithRules(
 		);
 		if (!isAllowed) {
 			return denyAuthority(agentName, normalizedPath, {
+				displayPath: filePath,
 				code: 'AUTHORITY_POLICY_DENY',
 				layer: 'role-policy',
 				rule: 'allowedPrefix',
@@ -1529,6 +1561,7 @@ export function checkFileAuthorityWithRules(
 		}
 	} else if (rules.allowedPrefix != null && rules.allowedPrefix.length === 0) {
 		return denyAuthority(agentName, normalizedPath, {
+			displayPath: filePath,
 			code: 'AUTHORITY_POLICY_DENY',
 			layer: 'role-policy',
 			rule: 'allowedPrefix:empty',
