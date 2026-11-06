@@ -19,6 +19,7 @@ import * as path from 'node:path';
 import { CMD_STRIP_PREFIX, PS_STRIP_PREFIX } from '../shell-executor-context';
 import {
 	BASH_BUILTIN_COMMANDS,
+	expandBraceRaw,
 	walkLauncherOptions,
 	walkShellCommandFlags,
 } from '../shell-write-detect';
@@ -435,10 +436,56 @@ export function dcNormalizeCommand(cmd: string): string {
 
 	// Step 4: quote-splicing evasion e.g. r""m""dir or R''e''m''o''v''e''-''I''t''e''m
 	// Collapse both doubled double-quotes and doubled single-quotes (PS single-quote splice).
-	s = s.replace(/""/g, '');
-	s = s.replace(/''/g, '');
+	// #3570: a pair whose FIRST quote is backslash-ESCAPED can never be an
+	// empty-string splice — in POSIX shell an odd-length backslash run before
+	// a quote means the quote is a literal (escaped) character, so the pair is
+	// part of the standard '\'' embed-a-quote idiom (close, escaped quote,
+	// reopen). Collapsing such pairs corrupted nested `sh -c` chains: the
+	// splice '\'' degraded to '\' and the downstream unwrap truncated the
+	// payload to its first word (executed probe: `sh -c 'sh -c "sh -c
+	// '\''rm -rf ../../outside'\''"'` normalized to a bare `rm` and admitted
+	// through the real gate while real bash executed the full payload). An
+	// EVEN-length backslash run (e.g. \\'' — escaped backslash, then a real
+	// empty pair) still collapses. This step runs on raw pre-parse text, so
+	// the parity rule is the correct state-independent discriminator here.
+	s = collapseUnescapedQuotePairs(s, '"');
+	s = collapseUnescapedQuotePairs(s, "'");
 
 	return s;
+}
+
+/**
+ * #3570: collapse adjacent `qq` pairs EXCEPT pairs whose first quote is
+ * preceded by an odd number of consecutive backslashes (an escaped literal
+ * quote — the `'\''` splice family). Implemented with an index-walking
+ * replacer instead of a variable-length lookbehind (engine-portable).
+ */
+function collapseUnescapedQuotePairs(s: string, quote: string): string {
+	let out = '';
+	let i = 0;
+	while (i < s.length) {
+		if (s[i] === quote && s[i + 1] === quote) {
+			// Count the backslash run immediately before this pair's first quote.
+			let run = 0;
+			let j = i - 1;
+			while (j >= 0 && s[j] === '\\') {
+				run += 1;
+				j -= 1;
+			}
+			if (run % 2 === 1) {
+				// Escaped quote — keep both characters verbatim.
+				out += s[i] + (s[i + 1] ?? '');
+				i += 2;
+				continue;
+			}
+			// Real empty-string splice — drop the pair.
+			i += 2;
+			continue;
+		}
+		out += s[i];
+		i += 1;
+	}
+	return out;
 }
 
 /**
@@ -817,6 +864,60 @@ function dcStripLauncherWrapper(t: string): [string, string] | null {
 }
 
 /**
+ * Count consecutive `sh -c` shell layers in a command chain (#3570) using
+ * WORD-RECURSING extraction: every level's payload is the quote-removed
+ * word the `-c` flag selects, so same-kind quote concatenation and
+ * alternating quote kinds cannot degrade the count across levels the way
+ * the iterative text unwrap does. Returns the layer count (the withdrawal
+ * decision itself compares the iterative product's token shape, not this
+ * walk's payload).
+ */
+function dcShellChainAnalysis(text: string): {
+	layers: number;
+} {
+	let layers = 0;
+	let cur = text.trim();
+	for (let hop = 0; hop < 8; hop++) {
+		// Tokenize the WHOLE current level first: the head may itself be
+		// quoted (`'sh'`) and a raw-span payload always is — matching on the
+		// quote-removed word keeps the count faithful at every level.
+		const toks = shellSplitWordsWithOffsets(cur);
+		if (toks.length === 0) break;
+		const headTok = toks[0];
+		if (
+			!headTok ||
+			!['bash', 'sh', 'zsh', 'dash'].includes(basenameAnySepLike(headTok.word))
+		) {
+			break;
+		}
+		const walk = walkShellCommandFlags(toks.slice(1).map((t) => t.word));
+		if (walk.kind !== 'payload' || walk.payload.trim() === '') break;
+		// Map the payload word back to its token (first whose quote-removed
+		// word equals the payload — the walk selects the first non-option
+		// word, so index order preserves the mapping) and recurse on the
+		// WORD: a nested chain rides inside ONE quoted argument, so the next
+		// level's `sh -c` head is visible only after quote removal. Re-parse
+		// degradation can only UNDERCOUNT layers (degraded text stops looking
+		// shell-shaped), which falls through to the unwrap's own verdicts —
+		// it can never over-deny.
+		const tok = toks.slice(1).find((t) => t.word === walk.payload);
+		if (!tok) break;
+		layers += 1;
+		cur = tok.word;
+	}
+	return { layers };
+}
+
+/** #3570: three or more nested `sh -c` layers is the withdrawal-review
+ * threshold — such a chain withdraws fail-closed only when its iterative
+ * unwrap product collapses to a SINGLE TOKEN (the truncation signature);
+ * multi-token products keep their normal verdicts (levels 1-2 always
+ * do). */
+const DC_SH_C_WITHDRAW_LAYERS = 3;
+/** Human-readable label for the withdrawal threshold (deny message). */
+export const DC_SH_C_WITHDRAW_LAYERS_LABEL = '3';
+
+/**
  * Recursively unwrap all shell wrappers (#3491 W3): cursor-bounded loop (no
  * fixed cap — every iteration consumes at least the wrapper word, so `sudo`x6
  * and `command`x14 reach their verbs) with the paranoid absolute bound
@@ -824,21 +925,55 @@ function dcStripLauncherWrapper(t: string): [string, string] | null {
  * additive `depthExceeded` flag the gate and explain consult BEFORE any
  * no-write early return (fail closed). The legacy string signature is kept
  * for every existing caller.
+ *
+ * #3570 (4.5 r3 narrowing): a chain nesting >= 3 `sh -c` layers withdraws
+ * ONLY on the truncation signature — the iterative unwrap's product
+ * collapsed to a single token (`shCWithdrawal: true`; same-kind and
+ * 4-level quote structures degrade this way). Multi-token products keep
+ * normal verdicts: escaping payloads reach the verb arms and deny naming
+ * the real target, and in-scope 3-level writes ADMIT. Levels 1-2 are
+ * untouched.
  */
 export function dcUnwrapWrappersBounded(cmd: string): {
 	command: string;
 	depthExceeded: boolean;
+	shCWithdrawal?: boolean;
+} {
+	const chain = dcShellChainAnalysis(cmd);
+	const iterative = dcUnwrapWrappersIterative(cmd);
+	if (iterative.boundExceeded) {
+		return { command: iterative.command, depthExceeded: true };
+	}
+	if (
+		chain.layers >= DC_SH_C_WITHDRAW_LAYERS &&
+		!iterative.command.trim().includes(' ')
+	) {
+		// 4.5 r2 narrowing (reviewer-proven): withdraw ONLY the truncation
+		// signature — the iterative product collapsed to a SINGLE token
+		// while a real multi-word payload hides inside the chain. Chains
+		// whose iterative product kept their tokens keep normal verdicts:
+		// escaping payloads reach the verb arms (deny on the real target)
+		// and in-scope 3-level writes ADMIT.
+		return { command: cmd.trim(), depthExceeded: true, shCWithdrawal: true };
+	}
+	return { command: iterative.command, depthExceeded: false };
+}
+
+/** The legacy iterative unwrap loop (paranoid bound reported, no sh-c logic). */
+function dcUnwrapWrappersIterative(cmd: string): {
+	command: string;
+	boundExceeded: boolean;
 } {
 	let current = cmd.trim();
 	for (let depth = 0; ; depth++) {
 		if (depth >= DC_UNWRAP_PARANOID_BOUND) {
-			return { command: current, depthExceeded: true };
+			return { command: current, boundExceeded: true };
 		}
 		const inner = dcStripOneWrapper(current);
 		if (inner === null || inner === current) break;
 		current = inner.trim();
 	}
-	return { command: current, depthExceeded: false };
+	return { command: current, boundExceeded: false };
 }
 
 /**
@@ -1474,13 +1609,18 @@ export function dcExtractRecursiveRmTargets(segment: string): string[] | null {
 	tokens.length = 0;
 	tokens.push(...verbTokens);
 
-	// PRR-010: a trailing `)`/`}` stays glued to the LAST operand of a
+	// PRR-010: a trailing `)` stays glued to the LAST operand of a
 	// parenthesized segment (`(rm -rf dist)` extracted `dist)`), so strip
-	// trailing close delimiters and drop standalone delimiter tokens — the
-	// allowlisted safe form `(rm -rf dist)` must extract `dist`, and the
+	// trailing close-paren delimiters and drop standalone delimiter tokens —
+	// the allowlisted safe form `(rm -rf dist)` must extract `dist`, and the
 	// blocked reason for `(rm -rf ../../outside)` must name the real target.
+	// #3569 residual 1: `}` is NOT stripped — a trailing brace is
+	// brace-expansion syntax (`rm -f src/{a,../esc}` used to extract the
+	// mangled `src/{a,../esc`) and must survive to the expansion step below;
+	// a stray unmatched `}` is a literal filename character for bash and
+	// judging it verbatim is the faithful behavior.
 	for (let i = 1; i < tokens.length; i += 1) {
-		tokens[i] = tokens[i].replace(/[)}]+$/, '');
+		tokens[i] = tokens[i].replace(/[)]+$/, '');
 	}
 	const delimStripped = tokens.filter((t) => t.length > 0);
 	tokens.length = 0;
@@ -1505,11 +1645,40 @@ export function dcExtractRecursiveRmTargets(segment: string): string[] | null {
 			destructive = true;
 		}
 	}
-	if (!destructive) return null;
+	// #3569 residual 1: a target word carrying an unquoted brace region is
+	// destructive REGARDLESS of the recursive/forced flag state — real bash
+	// expands `src/{a,../esc}` and deletes BOTH branches (no -r/-f needed),
+	// and the flagless spelling is exactly the reported evasion. A flagless
+	// rm with only literal single targets keeps today's behavior (a
+	// different, separately-tracked coverage class).
+	if (!destructive) {
+		const braceBorne = tokens
+			.slice(index)
+			.some((t) => expandBraceRaw(t).kind !== 'none');
+		if (!braceBorne) return null;
+	}
 
-	return tokens
-		.slice(index)
-		.map((target) => target.replace(/^(["'])|(["'])$/g, ''));
+	// #3569 residual 1 + W8 parity: expand brace regions on the target words
+	// (ALL branches — the conservative superset; an escaping branch denies).
+	// A dynamic/refused expansion (nested braces, ranges beyond the cap,
+	// expansion-bearing branches) withdraws fail-closed: the synthetic
+	// non-allowlisted marker target denies deterministically instead of
+	// admitting an unknowable filename set.
+	const out: string[] = [];
+	for (const target of tokens.slice(index)) {
+		// #3569 4.5 review: expand on the RAW token — expandBraceRaw is
+		// quote-aware, so a QUOTED brace (`rm -f 'src/{a,b}'`) stays LITERAL
+		// (bash-true); dequoting first wrongly expanded quoted literals.
+		const expansion = expandBraceRaw(target);
+		if (expansion.kind === 'branches') {
+			out.push(...expansion.branches);
+		} else if (expansion.kind === 'dynamic') {
+			out.push(`__swarm_brace_refusal__/${target}`);
+		} else {
+			out.push(target.replace(/^(["'])|(["'])$/g, ''));
+		}
+	}
+	return out;
 }
 
 /**

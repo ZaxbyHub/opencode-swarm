@@ -9,6 +9,7 @@
 
 import path from 'node:path';
 import { z } from 'zod';
+import { dcPreprocessWrappers } from '../hooks/guardrails/destructive-command';
 import {
 	checkFileAuthority,
 	checkWriteTargetForSymlink,
@@ -163,9 +164,62 @@ export function evaluateScopeValidate(
 	) {
 		fail('DESTRUCTIVE_COMMAND', 'destructive command intent is not permitted');
 	}
-	const analysis = detectWrites(args);
+	// #3569 core: route posix commands through the SAME canonical wrapper
+	// preprocessing the write gate and the explain service use
+	// (dcPreprocessWrappers — chdir-bearing wrapper segments rewrite to
+	// `( cd -- 'DIR' && inner )` so the wrapped command's writes resolve at
+	// the child cwd). Without this, scope_validate resolved a wrapped
+	// `tee`/`dd` operand at the parent cwd and diverged from the gate.
+	const preprocessed =
+		args.shell === 'posix' ? dcPreprocessWrappers(args.command) : null;
+	if (preprocessed?.failClosed) {
+		fail('UNPARSEABLE_COMMAND', 'command could not be parsed safely');
+	}
+	const detectionCommand =
+		preprocessed?.changed && !preprocessed.failClosed
+			? preprocessed.command
+			: args.command;
+	const detectArgs: ScopeValidateArgs =
+		detectionCommand === args.command
+			? args
+			: { ...args, command: detectionCommand };
+	let analysis = detectWrites(detectArgs);
 	if (analysis.parseError) {
 		fail('UNPARSEABLE_COMMAND', 'command could not be parsed safely');
+	}
+	// #3569 4.5 r4 (reviewer Important): the gate compensates for the
+	// preprocessor serializing brace words QUOTED (the preprocessed text
+	// loses the expansion) by unioning the RAW analysis back (PRR-006
+	// filter). scope_validate must union too or it ALLOWS wrapper+brace
+	// shapes the gate denies (env -C src sed -i {s/a/b/,../../outside} y).
+	if (detectionCommand !== args.command) {
+		const rawAnalysis = detectWrites(args);
+		if (!rawAnalysis.parseError) {
+			const seen = new Set(
+				analysis.writes.map(
+					(w) => `${w.category}\u0000${w.operator}\u0000${w.path ?? ''}`,
+				),
+			);
+			const regained = rawAnalysis.writes.filter(
+				(w) =>
+					!(
+						w.category === 'interpreter_eval' &&
+						w.path === null &&
+						!w.operator.endsWith('[eval stdin]')
+					) &&
+					// Dedupe against the preprocessed analysis (the gate's
+					// duplicate keys collapse downstream; sv renders the
+					// target list, so collapse here).
+					!seen.has(`${w.category}\u0000${w.operator}\u0000${w.path ?? ''}`),
+			);
+			if (regained.length > 0) {
+				analysis = {
+					...analysis,
+					writes: [...analysis.writes, ...regained],
+					hasWrites: analysis.hasWrites || regained.length > 0,
+				};
+			}
+		}
 	}
 	if (!analysis.hasWrites) {
 		return {
@@ -176,8 +230,10 @@ export function evaluateScopeValidate(
 		};
 	}
 
+	// Detection and resolution must use the SAME string (the resolver
+	// re-parses it for cwd tracking — the gate's own contract).
 	const resolved = resolveWriteTargets(
-		args.command,
+		detectionCommand,
 		analysis.writes,
 		directory,
 	);

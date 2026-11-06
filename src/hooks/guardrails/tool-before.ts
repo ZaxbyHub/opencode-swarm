@@ -78,6 +78,7 @@ import {
 	isPowerShellReadOnlyPipeline,
 	isPowerShellShaped,
 	mergeWriteAnalyses,
+	procSubSpanBodies,
 	resolveWriteTargets,
 	type WriteAnalysis,
 } from '../shell-write-detect';
@@ -87,6 +88,7 @@ import {
 } from '../write-target-resolver';
 import { appendGuardrailDecision } from './audit-log';
 import {
+	DC_SH_C_WITHDRAW_LAYERS_LABEL,
 	DC_UNWRAP_PARANOID_BOUND,
 	dcAnalyzeLauncherUncertainty,
 	dcCheckJunctionCreation,
@@ -748,7 +750,9 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		if (boundedUnwrap.depthExceeded) {
 			throwDestructiveBlock(
 				'wrapper unwrap depth',
-				`BLOCKED: shell wrapper nesting exceeds the inspection bound (${DC_UNWRAP_PARANOID_BOUND}) — rejecting for safety`,
+				boundedUnwrap.shCWithdrawal === true
+					? `BLOCKED: shell chain nests ${DC_SH_C_WITHDRAW_LAYERS_LABEL} or more sh -c layers whose quote structure cannot be re-parsed faithfully — denying for safety (deny-on-uncertainty; #3570)`
+					: `BLOCKED: shell wrapper nesting exceeds the inspection bound (${DC_UNWRAP_PARANOID_BOUND}) — rejecting for safety`,
 			);
 		}
 		const unwrapped = boundedUnwrap.command;
@@ -767,7 +771,9 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			if (bounded.depthExceeded) {
 				throwDestructiveBlock(
 					'wrapper unwrap depth',
-					`BLOCKED: shell wrapper nesting exceeds the inspection bound (${DC_UNWRAP_PARANOID_BOUND}) — rejecting for safety`,
+					bounded.shCWithdrawal === true
+						? `BLOCKED: shell chain nests ${DC_SH_C_WITHDRAW_LAYERS_LABEL} or more sh -c layers whose quote structure cannot be re-parsed faithfully — denying for safety (deny-on-uncertainty; #3570)`
+						: `BLOCKED: shell wrapper nesting exceeds the inspection bound (${DC_UNWRAP_PARANOID_BOUND}) — rejecting for safety`,
 				);
 			}
 		}
@@ -811,6 +817,41 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			pushSegmentOccurrence(segment, null);
 		for (const entry of expandedSegments)
 			pushSegmentOccurrence(entry.segment, entry.resolveFrom);
+		// #3569 residual 3: process-substitution span bodies (`>(…)`, `<(…)`)
+		// run their own command text at a verb position the segment-head-
+		// anchored destructive extractors never see (`tee >(rm -rf ../esc)`
+		// admitted at the stacked base). Each body's split segments are
+		// pushed with an uncertain child-cwd context — a subshell inherits
+		// the tracked cwd, which the destructive relocation model cannot
+		// track through a procsub — so any destructive verb in a body
+		// relocates to the escaping sentinel (fail-closed). This restores
+		// the #3568 review F-01 push the g3 restructure dropped, for BOTH
+		// operators.
+		for (const body of procSubSpanBodies(command)) {
+			for (const sub of dcSplitSegments(body)) {
+				pushSegmentOccurrence(sub, 'uncertain');
+				// #3569 4.5 review Critical 2: a body verb may sit behind a
+				// launcher (`command rm …`) or chdir wrapper (`env -C .. rm…`,
+				// `sudo -D .. rm…`) the raw segment push never unwraps — push
+				// the bounded-unwrap product and the chdir-expanded entries
+				// too, all with the uncertain child-cwd context.
+				const unwrappedBody = dcUnwrapWrappersBounded(sub);
+				if (unwrappedBody.depthExceeded) {
+					throwDestructiveBlock(
+						'wrapper unwrap depth',
+						unwrappedBody.shCWithdrawal === true
+							? `BLOCKED: shell chain nests ${DC_SH_C_WITHDRAW_LAYERS_LABEL} or more sh -c layers whose quote structure cannot be re-parsed faithfully — denying for safety (deny-on-uncertainty; #3570)`
+							: `BLOCKED: shell wrapper nesting exceeds the inspection bound (${DC_UNWRAP_PARANOID_BOUND}) — rejecting for safety`,
+					);
+				}
+				if (unwrappedBody.command !== sub) {
+					pushSegmentOccurrence(unwrappedBody.command, 'uncertain');
+				}
+			}
+			for (const entry of dcExpandDestructiveSegments(body, cwd)) {
+				pushSegmentOccurrence(entry.segment, 'uncertain');
+			}
+		}
 		const relocate = (
 			resolveFrom: string | 'uncertain' | null,
 			targets: string[],
@@ -1555,6 +1596,14 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		// flag through the "no writes detected" early return. OR it through,
 		// mirroring mergeWriteAnalyses.
 		if (didUnwrap && primaryAnalysis.unwrapDepthExceeded) {
+			analysis = { ...analysis, unwrapDepthExceeded: true };
+		}
+		// #3570: a chain nesting >= 3 `sh -c` layers withdraws fail-closed —
+		// the iterative text unwrap degrades same-kind and 4-level quote
+		// structures (a `'\''` splice in a quote-removed payload re-parses as
+		// a delimiter at the next level), so the WRITE arm must refuse such
+		// chains too, not only the destructive arm's bounded unwrap.
+		if (dcUnwrapWrappersBounded(command).depthExceeded) {
 			analysis = { ...analysis, unwrapDepthExceeded: true };
 		}
 		// #3485 (PRR-006 + EXT-2 M2): the unwrapped detection command can

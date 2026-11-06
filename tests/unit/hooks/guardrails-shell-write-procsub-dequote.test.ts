@@ -124,7 +124,14 @@ describe('gate: quoted procsub operands (real toolBefore, coder scope src/)', ()
 });
 
 describe('resolved shape: withdrawn fallback writes null out (fail-closed)', () => {
-	test('a quote-fragment fallback operand resolves to resolvedPath null', () => {
+	test('a quote-fragment fallback operand is fail-closed (withdrawn or resolved-outside)', () => {
+		// #3569 residual 3 realignment: the span-body analyzer now routes the
+		// WHOLE body through the mainline parser, so a quoted operand
+		// DEQUOTES correctly (the legacy stage scan kept quote fragments and
+		// could only withdraw). The pinned invariant is fail-closure: every
+		// entry either stays withdrawn (null) or resolves OUTSIDE /ws — the
+		// escaping destination is caught by resolution instead of refusal,
+		// which names the real target in the deny.
 		const analysis = detectPosixWrites('true >(mv a "../../outside src/f")');
 		expect(analysis.writes.length).toBeGreaterThan(0);
 		const result = resolveWriteTargets(
@@ -132,10 +139,19 @@ describe('resolved shape: withdrawn fallback writes null out (fail-closed)', () 
 			analysis.writes,
 			'/ws',
 		);
+		let sawEscapingDestination = false;
 		for (const entry of result) {
-			expect(entry.resolvedPath).toBeNull();
-			expect(entry.resolved).toBe(false);
+			if (entry.resolvedPath === null) {
+				expect(entry.resolved).toBe(false);
+				continue;
+			}
+			expect(entry.resolvedPath).not.toContain('ws');
+			sawEscapingDestination = true;
 		}
+		// The mv destination must be caught: withdrawn OR resolved outside.
+		expect(
+			result.some((e) => e.resolvedPath === null || sawEscapingDestination),
+		).toBe(true);
 	});
 
 	test('a fully-quoted fallback operand dequotes and resolves', () => {

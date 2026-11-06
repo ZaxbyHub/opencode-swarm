@@ -34,6 +34,7 @@ import {
 	isPowerShellReadOnlyPipeline,
 	isPowerShellShaped,
 	mergeWriteAnalyses,
+	procSubSpanBodies,
 	resolveWriteTargets,
 } from '../hooks/shell-write-detect.js';
 import {
@@ -205,7 +206,9 @@ function evaluateDestructiveDecision(
 		return {
 			decision: 'block',
 			firingRule:
-				'BLOCKED: shell wrapper nesting exceeds the inspection bound — rejecting for safety',
+				boundedUnwrap.shCWithdrawal === true
+					? 'BLOCKED: shell chain nests 3 or more sh -c layers whose quote structure cannot be re-parsed faithfully — denying for safety (deny-on-uncertainty; #3570)'
+					: 'BLOCKED: shell wrapper nesting exceeds the inspection bound — rejecting for safety',
 		};
 	}
 	const unwrapped = boundedUnwrap.command;
@@ -222,7 +225,9 @@ function evaluateDestructiveDecision(
 			return {
 				decision: 'block',
 				firingRule:
-					'BLOCKED: shell wrapper nesting exceeds the inspection bound — rejecting for safety',
+					bounded.shCWithdrawal === true
+						? 'BLOCKED: shell chain nests 3 or more sh -c layers whose quote structure cannot be re-parsed faithfully — denying for safety (deny-on-uncertainty; #3570)'
+						: 'BLOCKED: shell wrapper nesting exceeds the inspection bound — rejecting for safety',
 			};
 		}
 	}
@@ -261,6 +266,24 @@ function evaluateDestructiveDecision(
 		pushSegmentOccurrence(segment, null);
 	for (const entry of expandedSegments)
 		pushSegmentOccurrence(entry.segment, entry.resolveFrom);
+	// #3569 residual 3: process-substitution span bodies execute their own
+	// command text — push each body's split segments with an uncertain
+	// child-cwd context (the #3568 review F-01 shape; restores parity with
+	// the gate's destructive pipeline, both `>` and `<` operators).
+	for (const body of procSubSpanBodies(command)) {
+		for (const sub of dcSplitSegments(body)) {
+			pushSegmentOccurrence(sub, 'uncertain');
+			// #3569 4.5 review Critical 2 (explain parity): unwrap launcher/
+			// chdir-wrapped body verbs before the push.
+			const unwrappedBody = dcUnwrapWrappersBounded(sub);
+			if (unwrappedBody.command !== sub) {
+				pushSegmentOccurrence(unwrappedBody.command, 'uncertain');
+			}
+		}
+		for (const entry of dcExpandDestructiveSegments(body, cwd)) {
+			pushSegmentOccurrence(entry.segment, 'uncertain');
+		}
+	}
 	const relocate = (
 		resolveFrom: string | 'uncertain' | null,
 		targets: string[],
@@ -813,7 +836,7 @@ export async function handleGuardrailExplain(
 		// guardrail-explain-service-accuracy.test.ts.
 		const wrapperDeclaredHere = declaresWindowsWrapperLoose(shellCommand);
 		const posix = detectPosixWrites(detectionCommand);
-		const analysis =
+		let analysis =
 			authority === null
 				? posix
 				: mergeWriteAnalyses(
@@ -871,7 +894,31 @@ export async function handleGuardrailExplain(
 			decision = 'block';
 			firingRule =
 				'launcher_uncertainty: unrecognized launcher option with a potential execution tail';
-		} else if (analysis.hasWrites) {
+		} else {
+			// #3569 4.5 r4 (reviewer Important): the gate compensates for the
+			// preprocessor serializing brace words QUOTED (the preprocessed
+			// text loses the expansion) by unioning the RAW analysis's writes
+			// back (PRR-006 filter). Explain must union too or it renders
+			// allow for wrapper+brace shapes the gate denies.
+			if (didUnwrap && !rawAnalysis.parseError) {
+				const regained = rawAnalysis.writes.filter(
+					(w) =>
+						!(
+							w.category === 'interpreter_eval' &&
+							w.path === null &&
+							!w.operator.endsWith('[eval stdin]')
+						),
+				);
+				if (regained.length > 0) {
+					analysis = {
+						...analysis,
+						writes: [...analysis.writes, ...regained],
+						hasWrites: true,
+					};
+				}
+			}
+		}
+		if (decision === 'allow' && analysis.hasWrites) {
 			const resolvedWrites = resolveWriteTargets(
 				// #3539 W5 parity: the gate resolves against the procsub
 				// masking residual when the analysis carries one; explain
