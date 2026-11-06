@@ -463,9 +463,9 @@ describe('dependency-bump workflow contract (frozen check C7, trace 3501-3285-35
 		const text = script();
 		// PINNED GUARD: the numeric gate itself (message-presence assertions
 		// pass under a deleted guard), and the write step's own condition.
-		expect(text).toContain('[[ "$ISSUE" =~ ^[0-9]+$ ]]');
+		expect(text).toContain('[[ "$ISSUE" =~ ^[1-9][0-9]*$ ]]');
 		expect(text).toContain(
-			'issue must be a numeric GitHub issue number (required: every dispatch diffs package.json, a user-visible surface)',
+			'issue must be a positive GitHub issue number (required: every dispatch diffs package.json, a user-visible surface)',
 		);
 
 		const fragmentStep = stepIndexContaining('docs/releases/pending');
@@ -477,9 +477,21 @@ describe('dependency-bump workflow contract (frozen check C7, trace 3501-3285-35
 				step.run.includes('unexpected dirty path'),
 		);
 		expect(firstGate).toBeGreaterThan(fragmentStep);
-		// The write step references the handoff file twice and EACH allowlist
-		// gate must re-read it (a gate without the entry admits an unexpected
-		// fragment path; an unlisted fragment fails the complete-diff gate).
-		expect(allIndices(text, 'fragment.txt').length).toBeGreaterThanOrEqual(4);
+		// EXACT count: the write step's handoff pointer (1), EACH gate's
+		// [[ -f ]] read and EXPECTED entry (2+2), and the existing-PR
+		// refusal's own read (2). A loose >=4 bound passed with the
+		// write-step pointer renamed (micro-lane mutation), so the total is
+		// pinned exactly and each consumer is pinned individually.
+		expect(allIndices(text, 'fragment.txt').length).toBe(7);
+		const gateRuns = steps()
+			.map((step) => (typeof step.run === 'string' ? step.run : ''))
+			.filter((run) => run.includes('unexpected dirty path'));
+		expect(gateRuns.length).toBe(2);
+		for (const run of gateRuns) expect(run).toContain('fragment.txt');
+		// The generated fragment carries a Why section (contributing.md
+		// fragment contract) and the existing-PR refresh path refuses a
+		// changed-issue re-dispatch (trailers do not bind issue).
+		expect(text).toContain("echo '## Why'");
+		expect(text).toContain('existing PR head binds issue');
 	});
 });

@@ -118,7 +118,7 @@ jobs:
           if [[ -n "$ADVISORY" && -n "$REASON" ]]; then fail "advisory and reason are mutually exclusive"; fi
           if [[ -z "$ADVISORY" && -z "$REASON" ]]; then fail "exactly one of advisory or reason is required"; fi
           [[ "${#ADVISORY}" -le 200 && "${#REASON}" -le 200 ]] || fail "advisory/reason too long"
-          [[ "$ISSUE" =~ ^[0-9]+$ ]] || fail "issue must be a numeric GitHub issue number (required: every dispatch diffs package.json, a user-visible surface)"
+          [[ "$ISSUE" =~ ^[1-9][0-9]*$ ]] || fail "issue must be a positive GitHub issue number (required: every dispatch diffs package.json, a user-visible surface)"
           case "$ADVISORY$REASON" in *$'\r'*|*$'\n'*) fail "advisory/reason must not contain CR/LF";; esac
           [[ "$DEPENDENCY_KIND" == "dependencies" || "$DEPENDENCY_KIND" == "devDependencies" ]] || fail "dependency_kind rejected"
           if [[ -n "$PIN_SPECS" ]]; then
@@ -230,6 +230,9 @@ jobs:
             echo
             echo "- Bumps ${PACKAGE} to ${VERSION} in package.json/bun.lock (${DEPENDENCY_KIND}, save-exact: ${SAVE_EXACT}; advisory/reason provenance rides the commit trailers and the PR body)."
             echo "- Source-level companions and regen artifacts ride the same bot commit as bounded pin specs."
+            echo '## Why'
+            echo
+            echo "- Delivered through the dependency-bump channel; advisory/reason provenance rides the commit trailers and the PR body, and source-level companions ride bounded pin specs."
           } > "$FRAGMENT"
           printf '%s' "$FRAGMENT" > "$RUNNER_TEMP/fragment.txt"
 
@@ -376,6 +379,19 @@ jobs:
             git show -s --format=%B "$EXISTING_SHA" | grep -Fqx 'X-Dep-Bump-Channel: dependency-bump' || { echo "::error::existing PR head lacks the channel trailer"; exit 1; }
             git show -s --format=%B "$EXISTING_SHA" | grep -Fqx "X-Dep-Bump-Package: $PACKAGE" || { echo "::error::existing PR head names a different package"; exit 1; }
             git show -s --format=%B "$EXISTING_SHA" | grep -Fqx "X-Dep-Bump-Version: $VERSION" || { echo "::error::existing PR head names a different version"; exit 1; }
+            # The issue number is request metadata, not a trailer: a re-dispatch
+            # of the same tuple with a CHANGED issue would otherwise silently
+            # rewrite the release-fragment frontmatter on the refreshed PR.
+            # Refuse when the existing head binds a different issue; a head
+            # without a fragment (pre-fragment-support dispatch) may still be
+            # refreshed to gain one.
+            if [[ -f "$RUNNER_TEMP/fragment.txt" ]]; then
+              FRAGMENT_PATH="$(cat "$RUNNER_TEMP/fragment.txt")"
+              EXISTING_ISSUE="$(git show "$EXISTING_SHA:$FRAGMENT_PATH" 2>/dev/null | sed -n 's/^issue: //p')"
+              if [[ -n "$EXISTING_ISSUE" && "$EXISTING_ISSUE" != "$ISSUE" ]]; then
+                echo "::error::existing PR head binds issue $EXISTING_ISSUE but this dispatch names $ISSUE. To re-issue under a different issue, delete refs/heads/$BRANCH, close the existing PR, then dispatch again."; exit 1
+              fi
+            fi
           elif grep -q 'no pull requests found' "$RUNNER_TEMP/prview.err"; then
             echo "no existing PR for $BRANCH; creating"
           else
