@@ -2914,12 +2914,44 @@ function longFlagTakesArg(
 	return { takes: false, glued: false, value: null, flag: null };
 }
 
+/**
+ * #3572 delta-critic: ONE launcher nesting another (`sudo time -o FILE
+ * cmd`) — sudo/nice/nohup EXEC the inner command directly (no shell), so a
+ * `time` inner word IS the GNU binary regardless of spelling; walk its
+ * option grammar for the `-o` outcome, adjusting the inner index past the
+ * nested launcher word. Returns null when the inner word is not `time` or
+ * the GNU walk finds no timed tail (plain `sudo time true` keeps the
+ * original outcome).
+ */
+function nestedTimeTail(
+	words: readonly string[],
+	innerIndex: number,
+): { innerIndex: number; timeOutputFile: string } | null {
+	if (basenameAnySep(words[innerIndex] ?? '') !== 'time') return null;
+	const gnu = walkGnuTimeOptions(words.slice(innerIndex + 1));
+	if (
+		gnu.kind !== 'inner' ||
+		gnu.timeOutputFile === undefined ||
+		gnu.timeOutputFile === ''
+	) {
+		return null;
+	}
+	return {
+		innerIndex: innerIndex + 1 + gnu.innerIndex,
+		timeOutputFile: gnu.timeOutputFile,
+	};
+}
+
 function walkSudoOptions(words: readonly string[]): LauncherWalkOutcome {
 	let i = 0;
 	let edit = false;
 	let interactive = false;
 	let listMode = false;
 	let queryOther = false;
+	// #3572 delta-critic: `-k` alone (credential reset) is the documented
+	// no-command NO-OP; any other execution option implies the root shell.
+	let resetOnly = true;
+	let execOrResetSeen = false;
 	let chdirDir: string | undefined;
 	while (i < words.length) {
 		const token = words[i];
@@ -2958,6 +2990,8 @@ function walkSudoOptions(words: readonly string[]): LauncherWalkOutcome {
 				continue;
 			}
 			if (SUDO_LONG_ARGLESS_EXEC.has(token)) {
+				execOrResetSeen = true;
+				if (token !== '--reset-timestamp') resetOnly = false;
 				i += 1;
 				continue;
 			}
@@ -3001,7 +3035,11 @@ function walkSudoOptions(words: readonly string[]): LauncherWalkOutcome {
 					}
 					break;
 				}
-				if (SUDO_ARGLESS_EXEC_CHARS.has(ch)) continue;
+				if (SUDO_ARGLESS_EXEC_CHARS.has(ch)) {
+					execOrResetSeen = true;
+					if (ch !== 'k') resetOnly = false;
+					continue;
+				}
 				if (SUDO_QUERY_CHARS.has(ch)) {
 					listMode = listMode || ch === 'l';
 					queryOther = queryOther || ch !== 'l';
@@ -3038,6 +3076,17 @@ function walkSudoOptions(words: readonly string[]): LauncherWalkOutcome {
 			// -v/-V/-K/-L with a trailing command: sudo(8)'s synopsis gives
 			// these modes no command operand — deny-on-uncertainty.
 			return { kind: 'uncertain', tailIndex: i };
+		// #3572 delta-critic: a nested `time` inner word is the GNU binary
+		// (sudo execs directly, no shell) — surface its -o outcome.
+		const nested = nestedTimeTail(words, i);
+		if (nested !== null) {
+			return {
+				kind: 'inner',
+				innerIndex: nested.innerIndex,
+				timeOutputFile: nested.timeOutputFile,
+				...(chdirDir !== undefined ? { sudoChdir: chdirDir } : {}),
+			};
+		}
 		return {
 			kind: 'inner',
 			innerIndex: i,
@@ -3046,10 +3095,18 @@ function walkSudoOptions(words: readonly string[]): LauncherWalkOutcome {
 	}
 	if (edit) return { kind: 'benign' }; // -e with no operand: usage error, nothing runs
 	if (listMode) return { kind: 'benign' };
-	// Options only: -i/-s alone is an INTERACTIVE root shell (deny); the
-	// query modes alone never execute; bare execution options alone make
-	// sudo report a usage error and run nothing.
-	return interactive ? { kind: 'interactive' } : { kind: 'benign' };
+	if (queryOther) return { kind: 'benign' }; // -v/-V/-K alone: never executes
+	// `-k` alone (seen, nothing else): the documented no-command no-op.
+	// An explicit -i/-s beside it still opens the shell (after the reset).
+	if (resetOnly && execOrResetSeen && !interactive) {
+		return { kind: 'benign' };
+	}
+	// #3572 delta-critic: a command-less sudo with no query/reset mode is
+	// the IMPLIED INTERACTIVE ROOT SHELL (sudo parse_args.c ground truth —
+	// the same NewArgc==0 branch the fragment's N-23 disclosure cites), so
+	// it denies exactly like the explicit `sudo -i`; bare execution options
+	// alone (`sudo -n`) imply the root shell under parse_args.c too — deny.
+	return { kind: 'interactive' };
 }
 
 function walkKeywordTimeOptions(words: readonly string[]): LauncherWalkOutcome {
@@ -3165,6 +3222,16 @@ function walkNiceOptions(words: readonly string[]): LauncherWalkOutcome {
 		if (token.startsWith('-') && token.length > 1) {
 			return { kind: 'uncertain', tailIndex: i + 1 };
 		}
+		// #3572 delta-critic: a nested `time` inner word is the GNU binary
+		// (nice execs directly, no shell) — surface its -o outcome.
+		const nested = nestedTimeTail(words, i);
+		if (nested !== null) {
+			return {
+				kind: 'inner',
+				innerIndex: nested.innerIndex,
+				timeOutputFile: nested.timeOutputFile,
+			};
+		}
 		return { kind: 'inner', innerIndex: i };
 	}
 	// No operands: prints the current niceness (read-only).
@@ -3188,6 +3255,16 @@ function walkNohupOptions(words: readonly string[]): LauncherWalkOutcome {
 		if (token === '--help' || token === '--version') return { kind: 'benign' };
 		if (token.startsWith('-') && token.length > 1) {
 			return { kind: 'uncertain', tailIndex: i + 1 };
+		}
+		// #3572 delta-critic: a nested `time` inner word is the GNU binary
+		// (nohup execs directly, no shell) — surface its -o outcome.
+		const nested = nestedTimeTail(words, i);
+		if (nested !== null) {
+			return {
+				kind: 'inner',
+				innerIndex: nested.innerIndex,
+				timeOutputFile: nested.timeOutputFile,
+			};
 		}
 		return { kind: 'inner', innerIndex: i };
 	}
@@ -3493,7 +3570,15 @@ function detectLauncherWrites(cmd: unknown): WriteTarget[] {
 	for (let hop = 0; hop < DETECTOR_UNWRAP_PARANOID_BOUND; hop++) {
 		if (!name) return results;
 		const base = basenameAnySep(name);
-		if (base === 'sudo' || base === 'time') {
+		// #3572 delta-critic: nice/nohup carry nested-time outcomes too (the
+		// walks surface a nested GNU `time -o`); include them in the
+		// launcher-write emission gate.
+		if (
+			base === 'sudo' ||
+			base === 'time' ||
+			base === 'nice' ||
+			base === 'nohup'
+		) {
 			const walk = walkLauncherOptions(name, suffix.slice(cursor), nameRaw);
 			if (walk?.kind === 'edit') {
 				// sudo -e operands are EDIT TARGETS (write-class) — each one

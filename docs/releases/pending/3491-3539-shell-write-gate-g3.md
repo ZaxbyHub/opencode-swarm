@@ -19,9 +19,13 @@ the destructive strip, the write-arm leaf walk, and the resolver walk:
   `-l` (with or without a command — it only lists) and the other query modes are
   benign; `-e/--edit` operands are EDIT TARGETS emitted as write-class
   `launcher_write` targets; `-i/-s` with no command opens an interactive root
-  shell and DENIES; `-h` and any unknown option cluster ⇒ "every remaining word
+  shell and DENIES; a command-less sudo with NO query/reset mode is the
+  implied interactive root shell (parse_args.c ground truth) and denies
+  like `-i`, while `sudo -k`/-v/-l stay benign (documented no-command
+  no-ops); `-h` and any unknown option cluster ⇒ "every remaining word
   is a potential execution tail" ⇒ deny-on-uncertainty at the gate (benign when
-  no tail remains).
+  no tail remains — a shape that leaves no words to inspect, e.g. after the
+  query/reset exclusions above).
 - `time` by SPELLING: the bare word is the bash KEYWORD (only `-p`; ground
   truth bash 5.3.9 — an unrecognized dash word IS the timed command, so
   `time -v cmd` runs nothing); an absolute-path spelling selects the GNU binary
@@ -75,7 +79,7 @@ out-of-scope write denies.
 
 **Feedback round (PR #3572 review N-items).** Nine review defects closed with
 their pins in `guardrails-shell-write-3572-feedback-hardening.test.ts`
-(24 tests) and the relocated `shell-write-detect-perl-cluster-n12.test.ts`:
+(34 tests) and the relocated `shell-write-detect-perl-cluster-n12.test.ts`:
 
 - **N-01**: an accumulated sudo `-e`/`--edit` now survives the getopt `--`
   sentinel — `sudo -e -- FILE` was classified inner (no write target at all);
@@ -99,10 +103,11 @@ their pins in `guardrails-shell-write-3572-feedback-hardening.test.ts`
   words — the bare-space join destroyed the `sh -c "script"` quote grouping)
   re-enters the FULL detector family (the string-level scanner's leaf gate
   missed the special-cased tee/dd/env verbs, so `env -S 'tee src/ok.txt'`
-  was write-free); a payload whose analysis yields only a null-path eval
-  capability (`env -S 'sh -c "…"'`, `env -S 'python -c …'`) converts to the
-  unconditional dynamic refusal (the merge's union-back drops bare eval
-  markers); nested `-S` (spaced or GLUED `--split-string=VALUE`), expansion-
+  was write-free); a payload whose analysis yields ONLY a null-path eval
+  capability (`env -S 'sh -c "…"'` — the merge's union-back drops bare eval
+  markers) converts to the unconditional dynamic refusal, while payload
+  interpreters that carry their own writes (`env -S 'python -c …'`) keep
+  bare-twin verdict parity through the normal eval scope check; nested `-S` (spaced or GLUED `--split-string=VALUE`), expansion-
   bearing payload words, and a second `-S` in the original argv emit the
   same refusal; the glued `--split-string=VALUE` spelling is recognized by
   the destructive strip too. Completion: the wrapper-prefixed tee branch
@@ -242,20 +247,22 @@ C9, C12–C15 stay GREEN.
   leaf word). The remaining #3569 scope — direct-write POSITIVE modeling
   through chdir wrappers (`sudo -D src tee a` writes src/a relative to the
   chdir) and the dd branch — stays tracked there.
-- (Feedback-round residual, disclosed — NOT fixed here:) a launcher nested
-  INSIDE another launcher loses its own option grammar — `sudo time -o x
-  cmd`, `nohup time -o x cmd`, and the bash-keyword-outer
-  `time 'time' -o x cmd` spelling lose the inner `-o` write emission and the
-  timed-tail destructive push (the hop loop treats launcher heads as
-  terminal, "launcher heads never nest another launcher"). Verified
-  fail-open by probe; filed as the priority item of the PR's follow-up
-  issue.
-- (Feedback-round residual, disclosed — NOT fixed here, verify-first:)
-  bare `sudo` with a piped stdin (`echo 'cmd' | sudo`, review N-23) — the
-  reviewer ground-truthed sudo's parse_args.c as an implied interactive
-  root shell, but the shape is not denied by this gate and could not be
-  re-verified on a sudo-bearing host during the round; filed in the
-  follow-up issue with a verify-first note.
+- (Launcher nesting:) ONE launcher nesting GNU `time -o FILE cmd` is now
+  modeled — sudo/nice/nohup exec the inner command directly (no shell), so
+  a nested `time` word walks the GNU grammar and surfaces `-o`
+  (delta-critic round; `sudo time -o ../../esc true` denies,
+  `sudo time -o src/ok.txt true` admits). A command-less sudo with no
+  query/reset mode is the IMPLIED INTERACTIVE ROOT SHELL (parse_args.c
+  ground truth) and denies like the explicit `sudo -i`; `sudo -k`/-v/-l
+  stay admitted (documented no-command no-ops). Remaining disclosed
+  residual: a launcher nested TWO levels deep (`nice sudo time -o x true`)
+  still loses the inner `-o` emission — the walk recurses one nesting
+  level only; tracked in the PR's follow-up issue.
+- (Implied-shell note:) the command-less-sudo deny models sudo's
+  parse_args.c semantics as ground-truthed by the reviewer on a sudo host;
+  this host has no sudo binary, so the modeling rests on that citation
+  plus the gate's own `sudo -i` parity — flagged for a sudo-bearing
+  verification pass in the follow-up issue.
 - nohup.out creation stays stdout-tty-gated and out of static reach — disclosed,
   not modeled.
 
@@ -289,5 +296,10 @@ C9, C12–C15 stay GREEN.
   payload refusals + destructive deny, wrapper-prefixed tee leaf offset with
   admit/deny controls, N-25 uncertainty through transparent heads, N-26
   sanitized hostile launcher word, N-13 perl cluster gate pin, N-06 deno
-  stdin flag run, N-16 scope_validate channel parity) and
+  stdin flag run, N-16 scope_validate channel parity, the delta round
+  (quote-grouped env -S splice, glued split-string, paranoid-bound
+  transparent heads, declared-wrapper dynamic-refusal carriers, segment-
+  contextual timed tail, explain verb parity), and the critic round
+  (launcher-nested GNU `time -o`, the implied command-less-sudo root
+  shell)) and
   `shell-write-detect-perl-cluster-n12.test.ts` (2 detector pins).

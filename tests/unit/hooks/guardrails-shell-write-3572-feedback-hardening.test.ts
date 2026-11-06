@@ -334,3 +334,32 @@ describe('3572 feedback delta round (reviewer gate findings)', () => {
 		expect(r.writes.map((w) => w.path)).toContain('src/ok.txt');
 	});
 });
+
+describe('3572 delta round 2 (critic findings: nested time + implied root shell)', () => {
+	test('gate: launcher-nested GNU time -o denies the escaping report (sudo/nohup/nice)', async () => {
+		expect((await gate('sudo time -o ../../esc true')).verdict).toBe('DENIED');
+		expect((await gate('nohup time -o ../../esc true')).verdict).toBe('DENIED');
+		expect((await gate('nice time -o ../../esc true')).verdict).toBe('DENIED');
+	}, 120_000);
+
+	test('gate: launcher-nested time -o in scope admits', async () => {
+		expect((await gate('sudo time -o src/ok.txt true')).verdict).toBe(
+			'ADMITTED',
+		);
+	}, 120_000);
+
+	test('gate: bare command-less sudo is the implied interactive root shell', async () => {
+		// parse_args.c ground truth (the fragment's own N-23 citation): a
+		// command-less sudo with no query mode launches the root shell.
+		expect((await gate('sudo')).verdict).toBe('DENIED');
+		expect((await gate("echo 'rm -rf /important' | sudo")).verdict).toBe(
+			'DENIED',
+		);
+	}, 120_000);
+
+	test('gate: the documented no-command no-op modes stay admitted', async () => {
+		expect((await gate('sudo -k')).verdict).toBe('ADMITTED');
+		expect((await gate('sudo -v')).verdict).toBe('ADMITTED');
+		expect((await gate('sudo -l')).verdict).toBe('ADMITTED');
+	}, 120_000);
+});
