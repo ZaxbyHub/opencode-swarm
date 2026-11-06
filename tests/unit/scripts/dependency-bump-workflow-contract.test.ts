@@ -441,4 +441,36 @@ describe('dependency-bump workflow contract (frozen check C7, trace 3501-3285-35
 	test('approval runbook: the workflow records the action_required state for GITHUB_TOKEN-triggered CI runs', () => {
 		expect(requireText()).toContain('action_required');
 	});
+
+	test('release-fragment support: optional issue input, numeric validation, fragment-write step before the gates, and both allowlist gates expect it', () => {
+		// Live dispatch evidence (PR #3582 quality round): package.json and
+		// src/ pins trip the quality pending-fragment gate, which has no
+		// bot-author exemption — a user-visible bump without a fragment is
+		// undeliverable, so the bot commit must carry its own fragment.
+		const dispatch = requireWorkflow()['on']?.workflow_dispatch as
+			| { inputs?: Record<string, WorkflowInput> }
+			| undefined;
+		expect(dispatch?.inputs?.issue?.type).toBe('string');
+		expect(dispatch?.inputs?.issue?.required).toBe(false);
+		const env = onlyJob().env ?? {};
+		expect(env.ISSUE).toBe('${{ inputs.issue }}');
+
+		const text = script();
+		expect(text).toContain(
+			'issue must be empty or a numeric GitHub issue number',
+		);
+
+		const fragmentStep = stepIndexContaining('docs/releases/pending');
+		expect(fragmentStep).toBeGreaterThanOrEqual(0);
+		const firstGate = steps().findIndex(
+			(step) =>
+				typeof step.run === 'string' &&
+				step.run.includes('unexpected dirty path'),
+		);
+		expect(firstGate).toBeGreaterThan(fragmentStep);
+		// The write step references the handoff file twice and EACH allowlist
+		// gate must re-read it (a gate without the entry admits an unexpected
+		// fragment path; an unlisted fragment fails the complete-diff gate).
+		expect(allIndices(text, 'fragment.txt').length).toBeGreaterThanOrEqual(4);
+	});
 });

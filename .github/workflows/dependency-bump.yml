@@ -66,6 +66,11 @@ on:
         required: false
         default: ''
         type: string
+      issue:
+        description: 'GitHub issue number for the release fragment frontmatter (user-visible bumps — package.json/src changes trip the pending-fragment gate — must set this)'
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: write
@@ -92,6 +97,7 @@ jobs:
       REGEN: ${{ inputs.regen }}
       VERIFY: ${{ inputs.verify }}
       NOTE: ${{ inputs.note }}
+      ISSUE: ${{ inputs.issue }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -113,6 +119,7 @@ jobs:
           if [[ -n "$ADVISORY" && -n "$REASON" ]]; then fail "advisory and reason are mutually exclusive"; fi
           if [[ -z "$ADVISORY" && -z "$REASON" ]]; then fail "exactly one of advisory or reason is required"; fi
           [[ "${#ADVISORY}" -le 200 && "${#REASON}" -le 200 ]] || fail "advisory/reason too long"
+          [[ -z "$ISSUE" || "$ISSUE" =~ ^[0-9]+$ ]] || fail "issue must be empty or a numeric GitHub issue number"
           case "$ADVISORY$REASON" in *$'\r'*|*$'\n'*) fail "advisory/reason must not contain CR/LF";; esac
           [[ "$DEPENDENCY_KIND" == "dependencies" || "$DEPENDENCY_KIND" == "devDependencies" ]] || fail "dependency_kind rejected"
           if [[ -n "$PIN_SPECS" ]]; then
@@ -201,6 +208,32 @@ jobs:
           set -euo pipefail
           bun run scripts/generate-config-schema.ts
 
+      - name: Write the release fragment
+        if: ${{ env.ISSUE != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # User-visible bumps (package.json / src pins) trip the quality job's
+          # pending-fragment gate, so the bot commit carries its own fragment.
+          # The slug is sanitized independently of the branch sanitizer so
+          # scoped names (@scope/pkg) cannot produce a path with a slash.
+          SLUG_PKG="$(printf '%s' "$PACKAGE" | sed 's/[^a-zA-Z0-9._-]/-/g')"
+          FRAGMENT="docs/releases/pending/dep-bump-${SLUG_PKG}-${VERSION}.md"
+          mkdir -p docs/releases/pending
+          {
+            echo '---'
+            echo "issue: ${ISSUE}"
+            echo '---'
+            echo
+            echo "# Bump ${PACKAGE} to ${VERSION}"
+            echo
+            echo '## What'
+            echo
+            echo "- Bumps ${PACKAGE} to ${VERSION} in package.json/bun.lock (${DEPENDENCY_KIND}, save-exact: ${SAVE_EXACT}; advisory/reason provenance rides the commit trailers and the PR body)."
+            echo "- Source-level companions and regen artifacts ride the same bot commit as bounded pin specs."
+          } > "$FRAGMENT"
+          printf '%s' "$FRAGMENT" > "$RUNNER_TEMP/fragment.txt"
+
       - name: Complete-diff allowlist gate (pre-verify)
         shell: bash
         run: |
@@ -213,6 +246,9 @@ jobs:
           fi
           if [[ "$REGEN" == "generate-config-schema" ]]; then
             EXPECTED+=('opencode-swarm.schema.json' 'docs/configuration.md')
+          fi
+          if [[ -f "$RUNNER_TEMP/fragment.txt" ]]; then
+            EXPECTED+=("$(cat "$RUNNER_TEMP/fragment.txt")")
           fi
           mapfile -t EXPECTED < <(printf '%s\n' "${EXPECTED[@]}" | awk 'NF' | sort -u)
           mapfile -t DIRTY < <(git status --porcelain | awk '{print $NF}')
@@ -261,6 +297,9 @@ jobs:
           fi
           if [[ "$REGEN" == "generate-config-schema" ]]; then
             EXPECTED+=('opencode-swarm.schema.json' 'docs/configuration.md')
+          fi
+          if [[ -f "$RUNNER_TEMP/fragment.txt" ]]; then
+            EXPECTED+=("$(cat "$RUNNER_TEMP/fragment.txt")")
           fi
           mapfile -t EXPECTED < <(printf '%s\n' "${EXPECTED[@]}" | awk 'NF' | sort -u)
           for path in "${DIRTY[@]}"; do
