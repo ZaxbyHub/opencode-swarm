@@ -230,6 +230,7 @@ jobs:
             echo
             echo "- Bumps ${PACKAGE} to ${VERSION} in package.json/bun.lock (${DEPENDENCY_KIND}, save-exact: ${SAVE_EXACT}; advisory/reason provenance rides the commit trailers and the PR body)."
             echo "- Source-level companions and regen artifacts ride the same bot commit as bounded pin specs."
+            echo
             echo '## Why'
             echo
             echo "- Delivered through the dependency-bump channel; advisory/reason provenance rides the commit trailers and the PR body, and source-level companions ride bounded pin specs."
@@ -385,9 +386,12 @@ jobs:
             # Refuse when the existing head binds a different issue; a head
             # without a fragment (pre-fragment-support dispatch) may still be
             # refreshed to gain one.
-            if [[ -f "$RUNNER_TEMP/fragment.txt" ]]; then
-              FRAGMENT_PATH="$(cat "$RUNNER_TEMP/fragment.txt")"
-              EXISTING_ISSUE="$(git show "$EXISTING_SHA:$FRAGMENT_PATH" 2>/dev/null | sed -n 's/^issue: //p')"
+            FRAGMENT_PATH="$(cat "$RUNNER_TEMP/fragment.txt")"
+            if [[ -n "$FRAGMENT_PATH" ]]; then
+              # The || true keeps pipefail from killing this step when the
+              # existing head has no fragment yet (pre-fragment dispatch, e.g.
+              # the live refresh case): absence must read as unbound, not fatal.
+              EXISTING_ISSUE="$( { git show "$EXISTING_SHA:$FRAGMENT_PATH" 2>/dev/null || true; } | sed -n 's/^issue: //p')"
               if [[ -n "$EXISTING_ISSUE" && "$EXISTING_ISSUE" != "$ISSUE" ]]; then
                 echo "::error::existing PR head binds issue $EXISTING_ISSUE but this dispatch names $ISSUE. To re-issue under a different issue, delete refs/heads/$BRANCH, close the existing PR, then dispatch again."; exit 1
               fi
