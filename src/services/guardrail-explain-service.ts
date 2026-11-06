@@ -3,18 +3,21 @@ import { HUMAN_ONLY_SWARM_COMMANDS } from '../commands/tool-policy.js';
 import { classifyFile, type FileZone } from '../context/zone-classifier.js';
 import { redactPath } from '../hooks/guardrails/audit-log.js';
 import {
+	dcAnalyzeLauncherUncertainty,
 	dcCheckJunctionCreation,
 	dcEvaluateRecursiveDeleteTargets,
 	dcExpandDestructiveSegments,
 	dcExtractPowerShellTargets,
 	dcExtractRecursiveRmTargets,
+	dcLauncherTimedTail,
 	dcNormalizeCommand,
 	dcParseWindowsRecursiveDelete,
 	dcPreprocessWrappers,
 	dcRelocateDestructiveTarget,
+	dcSegmentVerbMatch,
 	dcShellFlagClusterUncertain,
 	dcSplitSegments,
-	dcUnwrapWrappers,
+	dcUnwrapWrappersBounded,
 } from '../hooks/guardrails/destructive-command.js';
 import {
 	AUTHORITY_ROLE_CAPABILITIES,
@@ -198,10 +201,39 @@ function evaluateDestructiveDecision(
 
 	const command = dcNormalizeCommand(rawCommand);
 
-	const unwrapped = dcUnwrapWrappers(command);
+	// #3491 W3 parity: deny-on-uncertainty launcher shapes and the paranoid
+	// unwrap-depth bound mirror the live destructive arm's early denies.
+	const launcherUncertainty = dcAnalyzeLauncherUncertainty(command);
+	if (launcherUncertainty.deny) {
+		return { decision: 'block', firingRule: launcherUncertainty.reason };
+	}
+	const boundedUnwrap = dcUnwrapWrappersBounded(command);
+	if (boundedUnwrap.depthExceeded) {
+		return {
+			decision: 'block',
+			firingRule:
+				'BLOCKED: shell wrapper nesting exceeds the inspection bound — rejecting for safety',
+		};
+	}
+	const unwrapped = boundedUnwrap.command;
 	const outerSegments = dcSplitSegments(command);
 	const innerSegments = dcSplitSegments(unwrapped);
-	const perSegmentUnwrapped = outerSegments.map((s) => dcUnwrapWrappers(s));
+	const perSegmentBounded = outerSegments.map((s) =>
+		dcUnwrapWrappersBounded(s),
+	);
+	// #3491 W3 review (REQUIRED) parity: the per-segment depth consult — the
+	// whole-command chain stops at the first non-wrapper segment, so a
+	// compound depth chain must deny here exactly as the live arm denies.
+	for (const bounded of perSegmentBounded) {
+		if (bounded.depthExceeded) {
+			return {
+				decision: 'block',
+				firingRule:
+					'BLOCKED: shell wrapper nesting exceeds the inspection bound — rejecting for safety',
+			};
+		}
+	}
+	const perSegmentUnwrapped = perSegmentBounded.map((b) => b.command);
 	// #3491 W2 parity: the same evolving per-segment directory context the
 	// live destructive arm uses — chdir-bearing wrapper segments relocate
 	// their rm/rmdir/del targets from the child cwd to session-root-relative
@@ -236,6 +268,18 @@ function evaluateDestructiveDecision(
 		pushSegmentOccurrence(segment, null);
 	for (const entry of expandedSegments)
 		pushSegmentOccurrence(entry.segment, entry.resolveFrom);
+	// #3572 N-02 parity: the GNU `time -o FILE` timed tail is judged with the
+	// SEGMENT's own directory context exactly like the live gate's push (time
+	// runs its command in the current shell — no cwd ambiguity), so explain
+	// cannot answer allow for a command the gate blocks.
+	for (const segment of outerSegments) {
+		const tail = dcLauncherTimedTail(segment);
+		if (tail !== null) {
+			for (const sub of dcSplitSegments(tail)) {
+				pushSegmentOccurrence(sub, null);
+			}
+		}
+	}
 	const relocate = (
 		resolveFrom: string | 'uncertain' | null,
 		targets: string[],
@@ -332,13 +376,24 @@ function evaluateDestructiveDecision(
 		// PowerShell: Remove-Item / aliases with -Recurse — whitespace-delimited
 		// switch tokens, mirroring the gate (a `-r` substring inside a path
 		// operand like `rm some-r/x` is a plain delete; issue #3495 class).
+		// #3572 review N-27 parity: the verb word matches through
+		// dcSegmentVerbMatch exactly like the gate's arm — the W6 path-qualified
+		// normalization (`/bin/RM -R /outside/x`, `"ri" -Recurse …`) fired in
+		// the gate while this anchored regex missed it and explain answered
+		// allow for a command the gate blocks.
+		const explainPsVerb = dcSegmentVerbMatch(seg, [
+			'remove-item',
+			'ri',
+			'rm',
+			'rmdir',
+			'del',
+			'erase',
+			'rd',
+		]);
 		if (
-			/^(?:[({\s])*(?:Remove-Item|ri|rm|rmdir|del|erase|rd)\b.*\s-[Rr]ecurse\b/i.test(
-				seg,
-			) ||
-			/^(?:[({\s])*(?:Remove-Item|ri|rm|rmdir|del|erase|rd)\b.*\s-[Rr]\b/i.test(
-				seg,
-			)
+			explainPsVerb &&
+			(/\s-[Rr]ecurse\b/i.test(explainPsVerb.rest) ||
+				/\s-[Rr]\b/i.test(explainPsVerb.rest))
 		) {
 			const targets = dcExtractPowerShellTargets(seg);
 			if (targets.length > 0) {
@@ -860,6 +915,25 @@ export async function handleGuardrailExplain(
 			decision = 'block';
 			firingRule =
 				'parse_error: write detection failed to parse command — rejecting for safety';
+		} else if (
+			analysis.unwrapDepthExceeded ||
+			rawPosix.unwrapDepthExceeded ||
+			rawAnalysis.unwrapDepthExceeded
+		) {
+			// #3491 W3 (v4 constraint 8) parity: consulted BEFORE the no-write
+			// early return — depth abuse denies in explain exactly as in the
+			// gate. #3491 W3 review (REQUIRED): the RAW analyses' depth
+			// refusal (original command text) must survive the preprocessing
+			// substitution — a compound depth chain launders the detection
+			// command's flag exactly as it laundered the gate's.
+			decision = 'block';
+			firingRule =
+				'unwrap_depth: shell wrapper nesting exceeds the inspection bound — rejecting for safety';
+		} else if (dcAnalyzeLauncherUncertainty(shellCommand).deny) {
+			// #3491 W3 parity: deny-on-uncertainty launcher shapes.
+			decision = 'block';
+			firingRule =
+				'launcher_uncertainty: unrecognized launcher option with a potential execution tail';
 		} else if (analysis.hasWrites) {
 			const resolvedWrites = resolveWriteTargets(
 				// #3539 W5 parity: the gate resolves against the procsub

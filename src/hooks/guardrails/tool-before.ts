@@ -71,6 +71,7 @@ import {
 	hostShellGrammarFamily,
 } from '../shell-executor-context';
 import {
+	DETECTOR_UNWRAP_PARANOID_BOUND,
 	dcProcSubSpanBodies,
 	detectInteractiveSession,
 	detectPosixWrites,
@@ -87,19 +88,23 @@ import {
 } from '../write-target-resolver';
 import { appendGuardrailDecision, redactPath } from './audit-log';
 import {
+	DC_UNWRAP_PARANOID_BOUND,
+	dcAnalyzeLauncherUncertainty,
 	dcCheckJunctionCreation,
 	dcEvaluateRecursiveDeleteTargets,
 	dcExpandDestructiveSegments,
 	dcExtractPowerShellTargets,
 	dcExtractRecursiveRmTargets,
+	dcLauncherTimedTail,
 	dcNormalizeCommand,
 	dcParseWindowsRecursiveDelete,
 	dcPreprocessWrappers,
 	dcRelocateDestructiveTarget,
+	dcSegmentVerbMatch,
 	dcShellFlagClusterUncertain,
 	dcShellPayloadRunsIsolated,
 	dcSplitSegments,
-	dcUnwrapWrappers,
+	dcUnwrapWrappersBounded,
 } from './destructive-command';
 import {
 	enforceExecutionStallDenial,
@@ -728,13 +733,49 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		// --- Normalize the top-level command (NFKC + evasion collapse) ---
 		const command = dcNormalizeCommand(rawCommand);
 
-		// --- Unwrap all shell wrappers to the innermost command ---
-		const unwrapped = dcUnwrapWrappers(command);
+		// #3491 W3: deny-on-uncertainty for launcher segments — an unknown
+		// launcher option with a remaining execution tail, or an interactive
+		// `sudo -i`/`-s` with no command, is denied outright (the recorded
+		// plan decision; the advisory alone was ruled insufficient).
+		const launcherUncertainty = dcAnalyzeLauncherUncertainty(command);
+		if (launcherUncertainty.deny) {
+			throwDestructiveBlock(
+				'launcher option uncertainty',
+				launcherUncertainty.reason,
+			);
+		}
+
+		// --- Unwrap all shell wrappers to the innermost command (#3491 W3:
+		// cursor-bounded with a paranoid absolute bound — exceedance fails
+		// closed instead of stopping silently with the verb unreached) ---
+		const boundedUnwrap = dcUnwrapWrappersBounded(command);
+		if (boundedUnwrap.depthExceeded) {
+			throwDestructiveBlock(
+				'wrapper unwrap depth',
+				`BLOCKED: shell wrapper nesting exceeds the inspection bound (${DC_UNWRAP_PARANOID_BOUND}) — rejecting for safety`,
+			);
+		}
+		const unwrapped = boundedUnwrap.command;
 
 		// --- Split compound command into segments ---
 		const outerSegments = dcSplitSegments(command);
 		const innerSegments = dcSplitSegments(unwrapped);
-		const perSegmentUnwrapped = outerSegments.map((s) => dcUnwrapWrappers(s));
+		const perSegmentBounded = outerSegments.map((s) =>
+			dcUnwrapWrappersBounded(s),
+		);
+		// #3491 W3 review (REQUIRED): the WHOLE-command chain stops at the
+		// FIRST non-wrapper segment, so a compound `echo ok; sudo×65 rm …`
+		// never reaches the deep chain — consult the bound PER SEGMENT and
+		// fail closed before any segment evaluation.
+		for (const bounded of perSegmentBounded) {
+			if (bounded.depthExceeded) {
+				throwDestructiveBlock(
+					'wrapper unwrap depth',
+					`BLOCKED: shell wrapper nesting exceeds the inspection bound (${DC_UNWRAP_PARANOID_BOUND}) — rejecting for safety`,
+				);
+			}
+		}
+		const perSegmentUnwrapped = perSegmentBounded.map((b) => b.command);
 		// #3491 W2: chdir-bearing wrapper segments expand with an EVOLVING
 		// per-segment directory context — the wrapped command's rm/rmdir/del
 		// targets are RELOCATED from the child cwd (and the tracked evolution
@@ -799,6 +840,23 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		for (const body of dcProcSubSpanBodies(command)) {
 			for (const sub of dcSplitSegments(body)) {
 				pushSegmentOccurrence(sub, 'uncertain');
+			}
+		}
+		// #3572 review N-02: a GNU `time -o FILE` segment stays WHOLE on the
+		// strip side (unwrapping would erase the cd-tracking context that
+		// resolves the -o target), so the timed command text never reaches a
+		// verb-anchored destructive arm. The timed tail is pushed as an extra
+		// occurrence with the SEGMENT's own directory context — `time` runs
+		// its command in the current shell (no cwd ambiguity), so the tracked
+		// relocation judges it exactly like the bare twin (`cd src && time -o
+		// r.txt rm -rf build` admits the in-scope delete; `/usr/bin/time -o
+		// report rm -rf ../outside` still denies).
+		for (const segment of outerSegments) {
+			const tail = dcLauncherTimedTail(segment);
+			if (tail !== null) {
+				for (const sub of dcSplitSegments(tail)) {
+					pushSegmentOccurrence(sub, null);
+				}
 			}
 		}
 		// #3567 review PRR-003: a shell-family launcher whose flag cluster the
@@ -878,12 +936,13 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			// unparenthesized one (POSIX subshell), and the delimiter-aware
 			// classifier already fires on it; only these live arms were
 			// segment-start-anchored, leaving the reversed wedge.
-			const rmdirSwitchVerb = /^(?:[({\s])*(?:rmdir|rd)(?:\.exe)?\s*/i.exec(
-				seg,
-			);
+			// #3539 W6: the verb word matches through dcNormalizeVerbWord —
+			// `\rmdir`, `"rd"`, `/bin/rmdir`, `C:\Windows\system32\rmdir.exe`
+			// all resolve to the cmdlet; `./rmdir` stays project-local.
+			const rmdirSwitchVerb = dcSegmentVerbMatch(seg, ['rmdir', 'rd']);
 			if (rmdirSwitchVerb) {
 				const parsed = dcParseWindowsRecursiveDelete(
-					seg.slice(rmdirSwitchVerb[0].length),
+					rmdirSwitchVerb.rest.replace(/^\s+/, ''),
 				);
 				if (parsed.fires) {
 					if (parsed.targets.length === 0) {
@@ -910,10 +969,11 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			// recursion switch with no operand fails closed like the rmdir
 			// arm.
 			// #3518 P-5: same leading paren/whitespace tolerance as the rd arm.
-			const delSwitchVerb = /^(?:[({\s])*del(?:\.exe)?\s*/i.exec(seg);
+			// #3539 W6: normalized verb word (dcSegmentVerbMatch).
+			const delSwitchVerb = dcSegmentVerbMatch(seg, ['del']);
 			if (delSwitchVerb) {
 				const parsed = dcParseWindowsRecursiveDelete(
-					seg.slice(delSwitchVerb[0].length),
+					delSwitchVerb.rest.replace(/^\s+/, ''),
 				);
 				if (parsed.fires) {
 					if (parsed.targets.length === 0) {
@@ -939,13 +999,22 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			// same token-vs-substring class as the cmd.exe /s fix (#3495).
 			// #3518 P-5 (class): leading open-parens/whitespace tolerated so a
 			// parenthesized `(Remove-Item x -Recurse)` segment reaches the arm.
+			// #3539 W6: the verb word matches through dcNormalizeVerbWord
+			// (`"ri" -Recurse …`, `/bin/rm -Recurse …` reach the arm); the
+			// `\s-…` switch test applies to the words AFTER the verb.
+			const psRecurseVerb = dcSegmentVerbMatch(seg, [
+				'remove-item',
+				'ri',
+				'rm',
+				'rmdir',
+				'del',
+				'erase',
+				'rd',
+			]);
 			if (
-				/^(?:[({\s])*(?:Remove-Item|ri|rm|rmdir|del|erase|rd)\b.*\s-[Rr]ecurse\b/i.test(
-					seg,
-				) ||
-				/^(?:[({\s])*(?:Remove-Item|ri|rm|rmdir|del|erase|rd)\b.*\s-[Rr]\b/i.test(
-					seg,
-				)
+				psRecurseVerb &&
+				(/\s-[Rr]ecurse\b/i.test(psRecurseVerb.rest) ||
+					/\s-[Rr]\b/i.test(psRecurseVerb.rest))
 			) {
 				const targets = dcExtractPowerShellTargets(seg);
 				if (targets.length > 0) {
@@ -981,15 +1050,15 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			// publication protocol (commit-pr) mandates for fork/rebase flows. This
 			// matches full-auto/policy.ts, which already exempts it. Bare `--force`
 			// and `-f` remain blocked. (#1692)
-			// git worktree remove --force: scope-exempt when the target resolves inside
-			// the swarm-managed worktree base directory or a coder's declared scope.
-			// Mirrors the rsync --delete scopeExempt pattern below. Unlike rsync, this
-			// call path often runs with no declared coder scope (orchestrator/cleanup),
-			// so the swarm worktree base directory is also a trusted root — see
-			// isPathUnderSwarmWorktreeBase in src/worktree/core.ts.
-			const worktreeRemoveMatch = /^git\s+worktree\s+remove\s+(.+)$/i.exec(seg);
-			if (worktreeRemoveMatch) {
-				const rawArgs = worktreeRemoveMatch[1]
+			// #3539 W6: the git verb word is normalized (`\git`, `"git"`,
+			// `/usr/bin/git`); the subcommand words `worktree remove` are then
+			// matched on the remainder like the original anchored regex.
+			const gitVerbHead = dcSegmentVerbMatch(seg, ['git']);
+			const worktreeRemoveRest = gitVerbHead
+				? /^\s*worktree\s+remove\s+(.+)$/i.exec(gitVerbHead.rest)
+				: null;
+			if (worktreeRemoveRest) {
+				const rawArgs = worktreeRemoveRest[1]
 					.trim()
 					.split(/\s+/)
 					.filter(Boolean);
@@ -1046,9 +1115,14 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				}
 			}
 
-			// rsync mirror / sync with delete
-			if (/^rsync\b.*--delete(?:-after|-before|-during|-delay)?\b/.test(seg)) {
-				const rsyncArgs = seg.split(/\s+/).slice(1);
+			// rsync mirror / sync with delete (#3539 W6: normalized verb word,
+			// case-sensitive as the original anchored regex was)
+			const rsyncVerbHead = dcSegmentVerbMatch(seg, ['rsync'], false);
+			if (
+				rsyncVerbHead &&
+				/--delete(?:-after|-before|-during|-delay)?\b/.test(rsyncVerbHead.rest)
+			) {
+				const rsyncArgs = rsyncVerbHead.rest.trim().split(/\s+/);
 				const rsyncTarget = rsyncArgs
 					.filter((a) => !a.startsWith('-') && !a.includes('@'))
 					.pop();
@@ -1065,50 +1139,58 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				}
 			}
 
-			// POSIX mv targeting .swarm/ paths
-			if (/^\\?mv\s/i.test(seg)) {
-				const mvMatch = seg.match(/^\\?mv\s+(.+)$/i);
-				if (mvMatch) {
-					const argsStr = mvMatch[1].replace(/["']/g, '');
-					if (/\.swarm(?:[\x5c/\s]|$)/.test(argsStr)) {
-						throwDestructiveBlock(
-							'swarm path move',
-							`BLOCKED: "mv" targeting .swarm/ detected — move operations under .swarm/ are not allowed from shell commands`,
-						);
-					}
+			// POSIX mv targeting .swarm/ paths (#3539 W6: normalized verb word)
+			const mvVerbHead = dcSegmentVerbMatch(seg, ['mv']);
+			if (mvVerbHead) {
+				const argsStr = mvVerbHead.rest.replace(/["']/g, '');
+				if (/\.swarm(?:[\x5c/\s]|$)/.test(argsStr)) {
+					throwDestructiveBlock(
+						'swarm path move',
+						`BLOCKED: "mv" targeting .swarm/ detected — move operations under .swarm/ are not allowed from shell commands`,
+					);
 				}
 			}
 
-			// Windows cmd move/ren targeting .swarm\ paths
-			if (/^\\?(?:move|ren)(?:\.exe)?\s/i.test(seg)) {
-				const moveMatch = seg.match(/^\\?(?:move|ren)(?:\.exe)?\s+(.+)$/i);
-				if (moveMatch) {
-					const argsStr = moveMatch[1].replace(/["']/g, '');
-					if (/\.swarm(?:[\x5c/\s]|$)/i.test(argsStr)) {
-						throwDestructiveBlock(
-							'move/rename',
-							`BLOCKED: "move" or "ren" targeting .swarm/ detected — move/rename operations under .swarm/ are not allowed from shell commands`,
-						);
-					}
+			// Windows cmd move/ren targeting .swarm\ paths (#3539 W6:
+			// normalized verb word, .exe tolerated)
+			const moveVerbHead = dcSegmentVerbMatch(seg, ['move', 'ren']);
+			if (moveVerbHead) {
+				const argsStr = moveVerbHead.rest.replace(/["']/g, '');
+				if (/\.swarm(?:[\x5c/\s]|$)/i.test(argsStr)) {
+					throwDestructiveBlock(
+						'move/rename',
+						`BLOCKED: "move" or "ren" targeting .swarm/ detected — move/rename operations under .swarm/ are not allowed from shell commands`,
+					);
 				}
 			}
 
-			// PowerShell Move-Item/Rename-Item targeting .swarm/ paths
-			if (
-				/^\\?(?:Move-Item|Rename-Item|move|mi|mv|ren|rni)\b.*\.swarm(?:[\x5c/\s]|$)/i.test(
-					seg,
-				)
-			) {
+			// PowerShell Move-Item/Rename-Item targeting .swarm/ paths (#3539
+			// W6: normalized verb word; the .swarm test spans the whole
+			// segment as before)
+			const psMoveVerbHead = dcSegmentVerbMatch(seg, [
+				'move-item',
+				'rename-item',
+				'move',
+				'mi',
+				'mv',
+				'ren',
+				'rni',
+			]);
+			if (psMoveVerbHead && /\.swarm(?:[\x5c/\s]|$)/i.test(seg)) {
 				throwDestructiveBlock(
 					'move/rename',
 					`BLOCKED: PowerShell Move-Item or Rename-Item targeting .swarm/ detected — move/rename operations under .swarm/ are not allowed from shell commands`,
 				);
 			}
 
-			// Non-recursive rm targeting .swarm/ paths
+			// Non-recursive rm targeting .swarm/ paths (#3539 W6: normalized
+			// verb word — `\rm`, `"rm"`, `/bin/rm` reach the arm)
+			const rmSwarmVerbHead = dcSegmentVerbMatch(seg, ['rm']);
 			if (
-				/^\\?rm\b/i.test(seg) &&
-				!/^\\?rm\s+(?:-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)\b/i.test(seg) &&
+				rmSwarmVerbHead &&
+				!/^\s+-[a-zA-Z]*[rR][a-zA-Z]*\b|^\s+--recursive\b/i.test(
+					rmSwarmVerbHead.rest,
+				) &&
 				/\.swarm(?:[\x5c/\s]|$)/i.test(seg)
 			) {
 				throwDestructiveBlock(
@@ -1526,6 +1608,15 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		const detectionCommand = didUnwrap ? preprocessed.command : command;
 
 		let analysis = didUnwrap ? detect(detectionCommand) : primaryAnalysis;
+		// #3491 W3 review (REQUIRED): the substituted analysis runs on the
+		// PREPROCESSED text, whose per-segment unwrap already consumed up to
+		// the bound — the ORIGINAL analysis's depth refusal must survive the
+		// substitution or a compound `echo ok; sudo×65 rm …` launders the
+		// flag through the "no writes detected" early return. OR it through,
+		// mirroring mergeWriteAnalyses.
+		if (didUnwrap && primaryAnalysis.unwrapDepthExceeded) {
+			analysis = { ...analysis, unwrapDepthExceeded: true };
+		}
 		// #3485 (PRR-006 + EXT-2 M2): the unwrapped detection command can
 		// LOSE writes the original analysis saw — dcSplitSegments erases pipe
 		// context (a pipeline-internal wrapper's `[eval stdin]` entry) and an
@@ -1582,6 +1673,24 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		) {
 			throw new Error(
 				`BLOCKED: bash write detection failed to parse command — rejecting for safety`,
+			);
+		}
+
+		// #3491 W3 (v4 constraint 8): the depth flag is consulted BEFORE every
+		// no-write early return — a wrapper chain beyond the paranoid bound
+		// must deny, never fall through the "no writes detected" exit.
+		if (enforce && analysis.unwrapDepthExceeded) {
+			throw new Error(
+				`BLOCKED: shell wrapper nesting exceeds the inspection bound (${DETECTOR_UNWRAP_PARANOID_BOUND}) — rejecting for safety`,
+			);
+		}
+		// #3491 W3: deny-on-uncertainty launcher shapes on the write path too
+		// (an unknown launcher option hides the execution tail from every
+		// detector — the uncertainty analysis denies where detection cannot).
+		const writePathLauncherUncertainty = dcAnalyzeLauncherUncertainty(command);
+		if (enforce && writePathLauncherUncertainty.deny) {
+			throw new Error(
+				`BLOCKED: ${writePathLauncherUncertainty.reason.slice('BLOCKED: '.length)}`,
 			);
 		}
 

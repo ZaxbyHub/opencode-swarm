@@ -53,9 +53,11 @@ rows('G14/16/17 quoted glob in file-taking option stays conservative', [
 	["sed -i -nf '*' f", ['*', 'f']],
 	["awk -i inplace -f '*.awk' f", ['*.awk', 'f']],
 ]);
+// #3491 closure F-1 re-pin: per-branch emission — bash expands {1..3} into
+// the files 1, 2 and 3, and sed edits every one.
 rows('B4 range brace', [
-	['sed -i {1..3} f', ['{1..3}', 'f']],
-	['sed -i -e {1..3} f', ['{1..3}', 'f']],
+	['sed -i {1..3} f', ['1', '2', '3', 'f']],
+	['sed -i -e {1..3} f', ['1', '2', '3', 'f']],
 ]);
 rows('SN1 node/word alignment with a redirect before the option arg', [
 	['sed -i >/dev/null -e ../*.x f', ['../*.x', 'f']],
