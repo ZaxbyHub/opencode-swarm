@@ -258,10 +258,14 @@ describe('dependency-bump workflow contract (frozen check C7, trace 3501-3285-35
 
 	test('dependency phase order: first frozen install < bun add < bun install --force < LAST frozen install (consistency gate runs last)', () => {
 		const text = script();
-		const firstFrozen = text.indexOf('bun install --frozen-lockfile');
+		const firstFrozen = text.indexOf(
+			'bun install --ignore-scripts --frozen-lockfile',
+		);
 		const add = text.indexOf('bun add ');
-		const firstForce = text.indexOf('bun install --force');
-		const lastFrozen = text.lastIndexOf('bun install --frozen-lockfile');
+		const firstForce = text.indexOf('bun install --ignore-scripts --force');
+		const lastFrozen = text.lastIndexOf(
+			'bun install --ignore-scripts --frozen-lockfile',
+		);
 		expect(firstFrozen).toBeGreaterThanOrEqual(0);
 		expect(add).toBeGreaterThanOrEqual(0);
 		expect(firstForce).toBeGreaterThanOrEqual(0);
@@ -272,6 +276,26 @@ describe('dependency-bump workflow contract (frozen check C7, trace 3501-3285-35
 		expect(add).toBeLessThan(firstForce);
 		expect(firstForce).toBeLessThan(lastFrozen);
 		expect(lastFrozen).toBeGreaterThan(firstFrozen);
+	});
+
+	test('root lifecycle scripts are suppressed on EVERY dependency-phase bun invocation (prepare: bun run build)', () => {
+		// Live dispatch evidence (run 42048068309): bun runs the ROOT prepare
+		// on plain `bun install` (even under --frozen-lockfile) despite
+		// --ignore-scripts on `bun add` alone, and the mid-phase installs run
+		// BEFORE the pin that fixes the post-bump typecheck — so an
+		// unsuppressed prepare failed the zod bump with the predicted
+		// server.ts:136 TS2322 before pins could apply. Pin the flag on every
+		// bun invocation in this step; the explicit typecheck step later in
+		// the workflow is the authoritative post-pin gate.
+		const depStep = steps()[stepIndexContaining('bun add ')];
+		expect(depStep?.run).toBeDefined();
+		const bunLines = (depStep?.run ?? '')
+			.split('\n')
+			.filter((line) => /^\s*bun (install|add) /.test(line));
+		expect(bunLines.length).toBeGreaterThanOrEqual(4);
+		for (const line of bunLines) {
+			expect(line).toContain('--ignore-scripts');
+		}
 	});
 
 	test('verify gate: per-file bun --smol test runs before the push step and gh pr create, and an empty verify list is rejected before use', () => {
