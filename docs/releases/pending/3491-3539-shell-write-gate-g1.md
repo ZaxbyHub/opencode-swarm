@@ -131,16 +131,18 @@
 - A shell-family launcher whose flag cluster the walk cannot model
   (`bash -oc pipefail 'payload'` — ground truth: the payload executes)
   denies outright (#3567 feedback PRR-003) instead of leaving the payload
-  uninspectable. EVERY multi-statement `sh -c` payload's statements (the
-  head statement included, even when the payload contains no `cd`) are
-  judged under an uncertain child-cwd context (#3567 feedback P-B: an
-  inner `cd` re-bases later statements above the session cwd — the
-  fail-closed price of not tracking child cwds is the over-block of
-  no-cd multi-statement payloads; single-statement payloads keep exact
-  judgment). A same-directory `pushd` does not grow the directory stack
-  in the model (bash pushes a duplicate entry), so a `popd` after a
-  same-dir `pushd` can withdraw where bash returns to the same directory
-  — deny-direction, disclosed.
+  uninspectable. A shell `-c` payload's statements are SPLICED AS A
+  PARENTHESIZED SUBSHELL (#3567 final-critic round): the payload's inner
+  `cd` can no longer move the parent walk state (`bash -c 'cd src'; echo x
+  > f` judges f at the session cwd, bash-true), and payload-internal
+  writes judge at the child cwd exactly like bash. On the DESTRUCTIVE arm
+  the payload's statements additionally relocate to the uncertain
+  sentinel (an inner `cd` re-bases later statements above the session
+  cwd) — the fail-closed price is the over-block of no-cd
+  multi-statement payloads on that arm. A same-directory `pushd` does not
+  grow the directory stack in the model (bash pushes a duplicate entry),
+  so a `popd` after a same-dir `pushd` can withdraw where bash returns to
+  the same directory — deny-direction, disclosed.
 - Denial MESSAGE classes: shapes the #3567 feedback fixes route through the
   fail-closed withdrawal or wrapper-walk channels now deny with the
   withdrawal (`dynamic path target …`) or parse-failure message instead of

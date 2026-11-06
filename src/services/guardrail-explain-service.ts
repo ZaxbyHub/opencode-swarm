@@ -12,6 +12,7 @@ import {
 	dcParseWindowsRecursiveDelete,
 	dcPreprocessWrappers,
 	dcRelocateDestructiveTarget,
+	dcShellFlagClusterUncertain,
 	dcSplitSegments,
 	dcUnwrapWrappers,
 } from '../hooks/guardrails/destructive-command.js';
@@ -747,6 +748,15 @@ export async function handleGuardrailExplain(
 		decision = 'block';
 		firingRule =
 			'parse_error: write detection failed to parse command — rejecting for safety';
+	}
+	// #3567 final-critic round: mirror the gate's shell flag-cluster
+	// deny-on-uncertainty channel (tool-before.ts) — without it explain
+	// answered allow for `bash -oc pipefail 'rm -rf …'` shapes the gate
+	// blocks.
+	const uncertainCluster = dcShellFlagClusterUncertain(shellCommand);
+	if (uncertainCluster !== null) {
+		decision = 'block';
+		firingRule = `inline_eval: shell interpreter invocation "${uncertainCluster}" carries a flag cluster the guard cannot statically model (unknown option or glued argument) — deny-on-uncertainty`;
 	}
 	const didUnwrap = preprocessed.changed;
 	const detectionCommand = didUnwrap ? preprocessed.command : shellCommand;

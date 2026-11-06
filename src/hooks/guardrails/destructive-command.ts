@@ -662,12 +662,19 @@ function matchChdirWrapperSegment(segment: string): DcChdirMatch {
 			const w = words[idx] as string;
 			if (w.startsWith('-')) continue;
 			if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(w)) continue;
-			if (w.startsWith('$(')) continue;
+			if (w.startsWith('$(') || w.startsWith('`')) continue;
 			return idx;
 		}
 		return words.length;
 	})();
-	if (words.slice(1, firstPlainWord).some((w) => w.startsWith('$('))) {
+	// Backticks mangle the same way $() fragments do (the tokenizer consumes
+	// the backtick as a quote char), so a backtick-headed flag-region word
+	// fails closed alongside the $() case (final-critic round).
+	if (
+		words
+			.slice(1, firstPlainWord)
+			.some((w) => w.startsWith('$(') || w.startsWith('`'))
+	) {
 		return { kind: 'failClosed' };
 	}
 	if (head === 'env') return matchEnvChdir(words);
@@ -990,7 +997,32 @@ export function dcPreprocessWrappers(command: string): DcWrapperPreprocess {
 		const result = preprocessWrapperText(segment, 0);
 		if (result === null) {
 			const unwrapped = dcUnwrapWrappers(segment);
-			if (unwrapped !== segment) changed = true;
+			if (unwrapped !== segment) {
+				changed = true;
+				// Final-critic round (P-B write path): the payload of a shell
+				// -c wrapper runs in a CHILD shell — splice it as a
+				// parenthesized subshell so its inner `cd` cannot move the
+				// parent walk state (`bash -c 'cd src'; echo x > f` must
+				// resolve f at the session cwd, never at src).
+				const headM = /^(\S+)\s+([\s\S]+)$/.exec(segment);
+				const base = headM ? basenameAnySepLike(headM[1] as string) : '';
+				const shellPayloadBase =
+					base === 'bash' ||
+					base === 'sh' ||
+					base === 'zsh' ||
+					base === 'dash' ||
+					base === 'ksh' ||
+					base.startsWith('ksh');
+				if (
+					shellPayloadBase &&
+					headM &&
+					walkShellCommandFlags(shellSplitWords(headM[2] as string)).kind ===
+						'payload'
+				) {
+					processed.push(`( ${unwrapped} )`);
+					continue;
+				}
+			}
 			processed.push(unwrapped);
 			continue;
 		}
@@ -1234,6 +1266,15 @@ export function dcSplitSegments(cmd: string): string[] {
 		}
 
 		if (!inDoubleQuote && !inSingleQuote) {
+			// A `|` preceded by `>` is the CLOBBER redirect `>|`, not a pipe —
+			// splitting there desynced the wrapper rewrite (`( … )` + bare
+			// `src/f`) and admitted the out-of-workspace write at the session
+			// cwd (final-critic round). No manual i bump: the loop's own i++
+			// must stay the only advance or the following space is swallowed.
+			if (ch === '|' && cmd[i - 1] === '>') {
+				current += ch;
+				continue;
+			}
 			// Check for && or ||
 			if ((ch === '&' && next === '&') || (ch === '|' && next === '|')) {
 				segments.push(current.trim());
@@ -1280,12 +1321,26 @@ export function dcSplitSegments(cmd: string): string[] {
  */
 export function dcShellFlagClusterUncertain(command: string): string | null {
 	for (const segment of dcSplitSegments(command)) {
-		const head = /^(\S+)\s+([\s\S]+)$/.exec(segment);
+		// Transparent execution prefixes do not change the payload semantics
+		// (`env bash -oc …` still runs the payload) — unwrap them before the
+		// head check or the deny channel is one spelling away from bypass.
+		let text = segment;
+		for (let i = 0; i < 8; i += 1) {
+			const m = /^(?:command|exec|env)\s+/i.exec(text);
+			if (!m) break;
+			text = text.slice(m[0].length);
+		}
+		const head = /^(\S+)\s+([\s\S]+)$/.exec(text);
 		if (!head) continue;
 		const base = basenameAnySepLike(head[1] as string);
-		if (base !== 'bash' && base !== 'sh' && base !== 'zsh' && base !== 'dash') {
-			continue;
-		}
+		const isShellFamily =
+			base === 'bash' ||
+			base === 'sh' ||
+			base === 'zsh' ||
+			base === 'dash' ||
+			base === 'ksh' ||
+			base.startsWith('ksh');
+		if (!isShellFamily) continue;
 		const walk = walkShellCommandFlags(shellSplitWords(head[2] as string));
 		if (walk.kind === 'uncertain') return segment;
 	}

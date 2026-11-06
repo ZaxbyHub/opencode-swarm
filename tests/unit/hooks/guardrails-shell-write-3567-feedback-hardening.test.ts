@@ -293,6 +293,37 @@ describe('3567 feedback: reviewer-round additions', () => {
 		expect(got.message).toMatch(WITHDRAWAL);
 	}, 120_000);
 
+	test('write-path P-B: the payload cd cannot move the parent walk (scope src/)', async () => {
+		const got = await gate("bash -c 'cd src'; echo x > f", ['src/']);
+		expect(got.verdict).toBe('DENIED');
+	}, 120_000);
+
+	test('control: payload-internal write at the child cwd admits', async () => {
+		const got = await gate("bash -c 'cd src; echo x > f'", ['src/']);
+		expect(got.verdict).toBe('ADMITTED');
+	}, 120_000);
+
+	test('clobber redirect >| after a cd hoists', async () => {
+		const got = await gate('cd ../outside && env -C src echo x >| src/f');
+		expect(got.verdict).toBe('DENIED');
+		expect(got.message).toMatch(/src\/f/);
+	}, 120_000);
+
+	test('ksh uncertain cluster denies', async () => {
+		const got = await gate("ksh -oc pipefail 'rm -rf ../../outside'");
+		expect(got.verdict).toBe('DENIED');
+	}, 120_000);
+
+	test('env-prefixed uncertain cluster denies', async () => {
+		const got = await gate("env bash -oc pipefail 'rm -rf ../../outside'");
+		expect(got.verdict).toBe('DENIED');
+	}, 120_000);
+
+	test('backtick chdir operand fails closed', async () => {
+		const got = await gate("env -C `echo src` sh -c 'echo x > ../f'");
+		expect(got.verdict).toBe('DENIED');
+	}, 120_000);
+
 	test('control: $(date) in the wrapped ARGUMENTS keeps flowing (P-F3 scope)', async () => {
 		const got = await gate('env -C src echo $(date) > src/f');
 		expect(got.verdict).toBe('ADMITTED');

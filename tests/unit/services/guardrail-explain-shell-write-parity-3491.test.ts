@@ -62,6 +62,18 @@ describe('issue #3491 explain/enforcement shell-write parity', () => {
 	});
 
 	test.each([
+		['cd src && bash -oc pipefail rm -rf ../../outside'],
+	])('%s explains as block (shell flag-cluster deny-on-uncertainty parity)', async (command) => {
+		const explained = await handleGuardrailExplain(workspace(), [
+			'--scope',
+			'src/',
+			...command.split(' '),
+		]);
+		expect(explained).toMatch(/\| *Decision *\| *block */i);
+		expect(explained).toMatch(/flag cluster/);
+	});
+
+	test.each([
 		['sh -c "mkdir -p src && echo x > src/a"'],
 		['env -C .. true'],
 	])('%s explains as allow (no escaping write)', async (command) => {
