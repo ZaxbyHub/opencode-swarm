@@ -237,7 +237,9 @@ describe('same-interpreter multi-occurrence preservation (#3347)', () => {
 				makeBashInput('occ-5'),
 				makeOutput(`echo x > $(pwd)/out.txt`),
 			),
-		).rejects.toThrow(/dynamic path target|cannot be statically resolved/);
+		).rejects.toThrow(
+			/dynamic path target|cannot be statically resolved|failed to parse command/,
+		);
 	});
 
 	it('keeps the merged-analysis path occurrence-aware: a Windows-detected write in the compound does not collapse the out-of-scope second eval', async () => {

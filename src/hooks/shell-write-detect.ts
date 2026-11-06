@@ -24,6 +24,7 @@
  */
 
 import { readFileSync, statSync } from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import type {
 	BashCommand,
@@ -175,6 +176,15 @@ export interface ResolvedWriteTarget {
 	 * kind.
 	 */
 	writeContext?: string;
+	/**
+	 * #3491 W1: present when the write was WITHDRAWN by the directory-state
+	 * walk (an unresolvable cd/pushd/popd word form, a dynamic cd operand, or
+	 * control-flow divergence over the complete state). Distinct from an
+	 * ordinary null-path eval: a withdrawn write must be denied outright, and
+	 * a withdrawn capability eval must NOT route through its tracked working
+	 * directory — there is none the model can stand behind.
+	 */
+	unresolved?: true;
 }
 
 /**
@@ -259,8 +269,9 @@ export function mergeWriteAnalyses(
 		);
 	};
 	// A key collision that involves an emptyDirectoryRemoval write demotes the
-	// kept write (see dedupeWriteTargets): the two readings may be different
-	// targets or operations, so neither keeps the bare-rmdir exemption.
+	// kept write (issue #3450 / PR #3456 review F-2): the two readings may be
+	// different targets or operations, so neither keeps the bare-rmdir
+	// exemption.
 	const keptIndex = new Map<string, number>();
 	const writes: WriteTarget[] = [];
 	const demoteKept = (key: string): void => {
@@ -313,33 +324,6 @@ function withoutEmptyDirectoryRemoval(write: WriteTarget): WriteTarget {
 	if (write.emptyDirectoryRemoval !== true) return write;
 	const { emptyDirectoryRemoval: _dropped, ...rest } = write;
 	return rest;
-}
-
-/**
- * Issue #3450 (PR #3456 review F-2): the dedupe key is blind to the working
- * directory a write runs in and to options that change its meaning, so two
- * writes with the same key can be different targets (`rmdir a; cd ../o &&
- * rmdir a`) or different operations (`rmdir a; rmdir -p a`). When a key
- * collision involves a write tagged `emptyDirectoryRemoval`, the kept write
- * is DEMOTED (tag removed) so the ordinary declared-scope check applies to it
- * — fail-closed, the pre-exemption behaviour. Once demoted the kept write is
- * identical to any untagged write it collided with, so keeping one is enough.
- * First occurrence wins and order is preserved, exactly as before.
- */
-function dedupeWriteTargets(writes: readonly WriteTarget[]): WriteTarget[] {
-	const keptIndex = new Map<string, number>();
-	const kept: WriteTarget[] = [];
-	for (const write of writes) {
-		const key = buildDedupeKey(write.category, write.operator, write.path);
-		const index = keptIndex.get(key);
-		if (index === undefined) {
-			keptIndex.set(key, kept.length);
-			kept.push(write);
-			continue;
-		}
-		kept[index] = withoutEmptyDirectoryRemoval(kept[index]);
-	}
-	return kept;
 }
 
 // ---------------------------------------------------------------------------
@@ -1674,20 +1658,25 @@ function envFlagConsumesNextWord(token: string): boolean {
 	return ENV_FLAGS_WITH_ARG.has(token);
 }
 
-function canonicalInterpreterName(cmd: unknown): string | null {
-	const name = getCommandName(cmd);
-	if (!name) return null;
-	const words = [name, ...getSuffixWords(cmd)];
+/**
+ * Walk the transparent wrapper chain (env/command/exec + their own flags)
+ * over `[commandName, ...suffixWords]` and return the index of the
+ * INTERPRETER word, or -1 when a wrapper has no program word (#3491 W4
+ * fix-round-2: extracted from canonicalInterpreterName so the shell-family
+ * flag walk can start at the interpreter's own arguments).
+ *
+ * The cursor only moves forward, so `command env python -c` advances
+ * name→env→python instead of re-reading the first suffix word on every hop
+ * (the round-1 critic chain bug). No hop cap: every iteration consumes at
+ * least the wrapper word, so the cursor bound alone terminates the loop
+ * (impl-review r3 finding 4 — a fixed cap re-opened a depth-N+1 bypass for
+ * no safety benefit).
+ */
+function canonicalInterpreterAt(words: string[]): number {
 	let i = 0;
-	// Walk the transparent wrapper chain. The cursor only moves forward, so
-	// `command env python -c` advances name→env→python instead of re-reading
-	// the first suffix word on every hop (the round-1 critic chain bug). No
-	// hop cap: every iteration consumes at least the wrapper word, so the
-	// cursor bound alone terminates the loop (impl-review r3 finding 4 — a
-	// fixed cap re-opened a depth-N+1 bypass for no safety benefit).
 	for (let hop = 0; hop < words.length; hop++) {
 		const base = basenameAnySep(words[i] ?? '');
-		if (base !== 'env' && base !== 'command' && base !== 'exec') break;
+		if (base !== 'env' && base !== 'command' && base !== 'exec') return i;
 		i += 1; // consume the wrapper word
 		if (base === 'env') {
 			while (i < words.length) {
@@ -1726,8 +1715,17 @@ function canonicalInterpreterName(cmd: unknown): string | null {
 				break;
 			}
 		}
-		if (i >= words.length) return null; // wrapper with no program word
+		if (i >= words.length) return -1; // wrapper with no program word
 	}
+	return i;
+}
+
+function canonicalInterpreterName(cmd: unknown): string | null {
+	const name = getCommandName(cmd);
+	if (!name) return null;
+	const words = [name, ...getSuffixWords(cmd)];
+	const i = canonicalInterpreterAt(words);
+	if (i < 0) return null;
 	const word = words[i];
 	if (word === undefined) return null;
 	const full = basenameAnySep(word);
@@ -3144,6 +3142,200 @@ function collectPipeStdinEvals(node: unknown, out: WriteTarget[]): void {
 }
 
 /**
+ * #3491 W4 fix-round-2..5: the sh-family invocation-flag walk (shared by
+ * detectInterpreterEval here and the dc shell-wrapper extractor in
+ * destructive-command.ts — both consume QUOTE-REMOVED word lists). The final
+ * critic ground-truthed that `-c` was only recognized as the FIRST token
+ * after the shell name: `sh -xc 'echo x > ../x'`, `bash -lc`, `dash -xc`,
+ * `env sh -xc`, `/bin/sh -xc` all ADMITTED while real bash executes the
+ * payload. The walk follows the sh getopt grammar instead, complete over
+ * four dimensions (all ground-truthed on bash 5.3.9):
+ *
+ * 1. WHICH letters are options: short flags may be CLUSTERED (`-xc`, `-lc`,
+ *    `-eo`, `-ceu`); every member letter must be KNOWN — argument-less
+ *    members walk on, arg-taking members are counted. A cluster carrying
+ *    TWO OR MORE arg-taking members (`-oc`, `-co`, `-cc`) or any unknown
+ *    letter is deny-on-uncertainty — as is the tail-glued `-c'code'`
+ *    spelling (rc=1 invalid bash; the glued text lands as member letters).
+ * 2. WHERE arg-taking members draw arguments: o/O take the next standalone
+ *    word VERBATIM as their optname (dash-led/empty ⇒ bash errors rc=2 ⇒
+ *    'uncertain'; `bash -oc pipefail 'code'` runs the code — o→pipefail;
+ *    `bash -opipefail -c 'code'` is rc=2 — o took `-c` as its optname).
+ *    The cluster tail is NEVER an argument.
+ * 3. WHICH word `c` selects (fix-round-5): `c` does NOT grab the next word
+ *    verbatim — option parsing CONTINUES past it, and the command string is
+ *    the FIRST NON-OPTION word (`bash -c '-e' 'echo x > t1'` rc=0 executes
+ *    the second word; `bash -c -x 'code'` runs with xtrace; `bash -c -c
+ *    'code'` and `bash -c '-c' 'code'` run the code — a repeated c just
+ *    re-flags; `bash -c -o pipefail 'code'`, `bash -c +o pipefail 'code'`
+ *    run the code). A pending c with NO non-option word is 'uncertain'
+ *    (bash: -c requires an argument). Words after the payload are $0/$1…
+ *    and are never scanned.
+ * 4. `--` handling: `--` (and a lone `-`) ends option parsing (`sh -c --
+ *    'code'` runs; `bash -c - 'code'` runs). With a pending c the FIRST
+ *    operand after the terminator is the command string, flag-shaped or
+ *    not (`bash -c -- '-e' 'code'` is rc=127 — bash ran '-e'); without one
+ *    it is the script-file operand.
+ *
+ * Long flags are recognized only BEFORE short-option parsing starts (bash's
+ * own usage line: "[GNU long option] [option] …"): after a short/+ cluster
+ * or terminator, a `--word` is a short cluster whose leading '-' letter is
+ * invalid — bash errors rc=2 (`bash -c --rcfile /dev/null 'code'`) ⇒
+ * 'uncertain'.
+ *
+ * Any token the walk cannot classify yields 'uncertain' — consumers must
+ * fail closed on it, never admit (deny-on-uncertainty).
+ */
+export type ShellCommandFlagWalk =
+	| { kind: 'payload'; payload: string }
+	| { kind: 'script' }
+	| { kind: 'uncertain' };
+
+/** Argument-less short flag members (sh/bash/dash/zsh/ksh invocation union;
+ * covers bash 5.x's `-abefhkmnptuvxBCEHPT` + invocation-only `-ilrsD`). */
+const SHELL_ARGLESS_SHORT_FLAGS = new Set([...'abefhiklmnprstuvxBCDEHPTV']);
+/** bash argument-less long invocation flags (dash/zsh share the common ones;
+ * enumerated from bash 5.x's own usage dump). */
+const SHELL_ARGLESS_LONG_FLAGS = new Set([
+	'--debug',
+	'--debugger',
+	'--dump-po-strings',
+	'--dump-strings',
+	'--help',
+	'--login',
+	'--noediting',
+	'--noprofile',
+	'--norc',
+	'--posix',
+	'--pretty-print',
+	'--protected',
+	'--restricted',
+	'--verbose',
+	'--version',
+	'--wordexp',
+]);
+/** bash arg-taking long invocation flags (`--init-file FILE`, `--rcfile FILE`). */
+const SHELL_ARG_TAKING_LONG_FLAGS = new Set(['--init-file', '--rcfile']);
+
+/**
+ * Scan one option cluster's member letters (#3491 W4 fix-round-4): every
+ * member must be a KNOWN option letter — argument-less members walk on,
+ * argument-taking members are COUNTED. The cluster tail is NEVER an
+ * argument: bash assigns every arg-taking letter's argument from the
+ * FOLLOWING standalone words in order (ground truth, re-verified locally on
+ * bash 5.3.9: `bash -oc pipefail 'code'` runs the code — o→pipefail,
+ * c→payload; `bash -opipefail -c 'code'` is rc=2 — the glued letters parsed
+ * as options and o took the next word `-c` as its optname).
+ */
+function scanShellOptionCluster(
+	members: string,
+	argTaking: readonly string[],
+):
+	| { kind: 'none' }
+	| { kind: 'single'; member: string }
+	| { kind: 'multi' }
+	| { kind: 'unknown' } {
+	let count = 0;
+	let member = '';
+	for (const ch of members) {
+		if (argTaking.includes(ch)) {
+			count += 1;
+			member = ch;
+			continue;
+		}
+		if (!SHELL_ARGLESS_SHORT_FLAGS.has(ch)) return { kind: 'unknown' };
+	}
+	if (count === 0) return { kind: 'none' };
+	if (count > 1) return { kind: 'multi' };
+	return { kind: 'single', member };
+}
+
+export function walkShellCommandFlags(
+	words: readonly string[],
+): ShellCommandFlagWalk {
+	let i = 0;
+	// #3491 W4 fix-round-5: a seen `c` option does not grab a word — it marks
+	// that the command string is the FIRST NON-OPTION word, found wherever
+	// option parsing ends (after further option words, or at the `--`/`-`
+	// terminator). Long flags are recognized only before short parsing starts.
+	let payloadPending = false;
+	let shortParsingStarted = false;
+	while (i < words.length) {
+		const token = words[i];
+		if (token === undefined) break;
+		if (token === '--' || token === '-') {
+			// The terminator ends option parsing; every remaining word is an
+			// operand. With a pending c the FIRST one is the command string,
+			// flag-shaped or not; without one it is the script-file operand.
+			if (payloadPending) {
+				const payload = words[i + 1];
+				return payload === undefined
+					? { kind: 'uncertain' }
+					: { kind: 'payload', payload };
+			}
+			return { kind: 'script' };
+		}
+		if (token.startsWith('--') && !shortParsingStarted) {
+			// Long-option phase (bash's usage: "[GNU long option] [option] …").
+			const eq = token.indexOf('=');
+			const head = eq === -1 ? token : token.slice(0, eq);
+			if (SHELL_ARG_TAKING_LONG_FLAGS.has(head)) {
+				if (eq === -1) {
+					const arg = words[i + 1];
+					if (arg === undefined) return { kind: 'uncertain' };
+					i += 2;
+				} else {
+					i += 1;
+				}
+				continue;
+			}
+			if (SHELL_ARGLESS_LONG_FLAGS.has(head)) {
+				i += 1;
+				continue;
+			}
+			return { kind: 'uncertain' };
+		}
+		if ((token.startsWith('-') || token.startsWith('+')) && token.length > 1) {
+			// Short/+ cluster phase. A `--word` that lands here (short parsing
+			// already started) carries an invalid '-' member letter — bash
+			// errors rc=2 — deny-on-uncertainty via the scan's unknown path.
+			shortParsingStarted = true;
+			const argTaking = token.startsWith('-') ? ['c', 'o', 'O'] : ['o', 'O'];
+			const scan = scanShellOptionCluster(token.slice(1), argTaking);
+			if (scan.kind === 'unknown' || scan.kind === 'multi') {
+				return { kind: 'uncertain' };
+			}
+			if (scan.kind === 'none') {
+				i += 1;
+				continue;
+			}
+			if (scan.member === 'c') {
+				// Dimension 3: option parsing CONTINUES past c; the payload is
+				// the first non-option word (a repeated c just re-flags).
+				payloadPending = true;
+				i += 1;
+				continue;
+			}
+			// o / O optname, next standalone word VERBATIM: a dash-led or
+			// empty word is not a valid option name — bash errors rc=2 there.
+			const optname = words[i + 1];
+			if (optname === undefined || optname === '' || optname.startsWith('-')) {
+				return { kind: 'uncertain' };
+			}
+			i += 2;
+			continue;
+		}
+		// A non-option word: with a pending c it is the command string (the
+		// first non-option word); otherwise it is the script-file operand.
+		if (payloadPending) return { kind: 'payload', payload: token };
+		return { kind: 'script' };
+	}
+	// A pending c with no non-option word: bash rejects (-c requires an
+	// argument) — deny-on-uncertainty.
+	return payloadPending ? { kind: 'uncertain' } : { kind: 'script' };
+}
+
+/**
  * Detect interpreter eval: python -c, node -e, bun -e, ruby -e, perl -e, php -r.
  * These are flagged as potential write effects because inline code can write files.
  */
@@ -3195,15 +3387,41 @@ function detectInterpreterEval(cmd: unknown): WriteTarget[] {
 		return results;
 	}
 
-	const relevantFlags = evalFlags[canonical] ?? [];
-	// Match exact flag (-c), equals-glued (-c=CODE), or directly-glued (-cCODE / -c'code')
-	const hasEvalFlag = suffixWords.some((word) =>
-		relevantFlags.some(
-			(f) => word === f || (word.startsWith(f) && word.length > f.length),
-		),
-	);
-
-	if (!hasEvalFlag) return [];
+	// #3491 W4 fix-round-2: the SHELL family classifies through the shared
+	// invocation-flag walk (walkShellCommandFlags) — `-c` may be a CLUSTER
+	// member (`bash -lc 'code'`) or follow other arg-consuming flags
+	// (`bash -eo pipefail -c 'code'`), and only the words AFTER the
+	// interpreter verb (through the env/command/exec wrapper chain) are its
+	// own arguments. A 'script' outcome (a script-file operand, or `--`)
+	// carries no inline payload; an 'uncertain' outcome (an unknown flag of
+	// unknowable arity) is deny-on-uncertainty — it classifies as an eval so
+	// the gate routes or denies, never admits. Python/perl/ruby and the
+	// other interpreters keep the positional flag matcher below (their
+	// cluster grammar is the W7/PR-3 workstream — deliberately untouched).
+	const SHELL_FLAG_WALK_CANONICALS = new Set([
+		'bash',
+		'sh',
+		'dash',
+		'zsh',
+		'ksh',
+	]);
+	if (SHELL_FLAG_WALK_CANONICALS.has(canonical)) {
+		const words = [name, ...suffixWords];
+		const interpreterIndex = canonicalInterpreterAt(words);
+		const shellArgs =
+			interpreterIndex >= 0 ? words.slice(interpreterIndex + 1) : suffixWords;
+		const walk = walkShellCommandFlags(shellArgs);
+		if (walk.kind === 'script') return results;
+	} else {
+		const relevantFlags = evalFlags[canonical] ?? [];
+		// Match exact flag (-c), equals-glued (-c=CODE), or directly-glued (-cCODE / -c'code')
+		const hasEvalFlag = suffixWords.some((word) =>
+			relevantFlags.some(
+				(f) => word === f || (word.startsWith(f) && word.length > f.length),
+			),
+		);
+		if (!hasEvalFlag) return results;
+	}
 
 	// Interpreter eval is a write effect even without a specific file target.
 	// capability marks the inspectable inline-code class the gate routes
@@ -4887,10 +5105,14 @@ export function detectPosixWrites(command: string): WriteAnalysis {
 		// #3530 PRR-005: a word boundary, not a separator class — `then cd`,
 		// `do cd`, `{ cd`, `! cd` forms are equally cd-context on a
 		// parse-failing line, and `pushd` changes the directory too.
+		// #3491 W1: bare `cd` (HOME landing), `popd`, and bare `pushd` (stack
+		// swap) change the directory with NO operand — the alternatives are
+		// word-boundary anchored so every directory-selection verb withdraws
+		// its line's fallback writes.
 		// Over-withdraw direction is fail-closed and bounded to parse-failing
 		// (process-substitution) lines whose text merely mentions a
-		// `cd|pushd <token>` word.
-		const cdContext = /(^|[^\w\\])(?:cd|pushd)\s+\S+/.test(command);
+		// `cd|pushd|popd` word.
+		const cdContext = /(^|[^\w\\])(?:cd|pushd|popd)\b/.test(command);
 		// Plain loop (not spread-push): adversarial operand counts must not
 		// hit the engine's spread-arity limit (#3512 review N-2).
 		for (const write of procSubWrites) {
@@ -5334,9 +5556,87 @@ function resolvePath(pathText: string | null, cwd: string): string | null {
 }
 
 /**
- * Check if a node is a Command or SimpleCommand with name 'cd' and extract its target.
+ * #3491 W1: the sole directory-state model threaded through both resolution
+ * walks (tracked and pessimistic). It carries everything a shell keeps for
+ * directory selection — the current directory, the previous directory
+ * (`cd -`), and the pushd stack — plus the walk's withdrawal flag. A
+ * transition the static model cannot resolve (dynamic cd operand, `cd -`
+ * with no modeled prior, HOME/OLDPWD reassignment, stack misuse, control-flow
+ * divergence over the COMPLETE state) sets `withdrawn`, and every write the
+ * walk collects afterwards is marked `unresolvedContext` (the proven #3518
+ * P-3 fail-closed channel: the resolver nulls it and the gate denies).
  */
-function getCdTarget(cmd: unknown): string | null {
+interface DirectoryState {
+	cwd: string;
+	prevCwd: string | null;
+	dirStack: string[];
+	withdrawn: boolean;
+	/** Text-level per-command facts (evaluated once per walk on the raw line). */
+	homeReassigned: boolean;
+	oldpwdReassigned: boolean;
+}
+
+function cloneDirectoryState(state: DirectoryState): DirectoryState {
+	return {
+		cwd: state.cwd,
+		prevCwd: state.prevCwd,
+		dirStack: [...state.dirStack],
+		withdrawn: state.withdrawn,
+		homeReassigned: state.homeReassigned,
+		oldpwdReassigned: state.oldpwdReassigned,
+	};
+}
+
+/**
+ * Divergence comparison over the COMPLETE directory state (v4 constraint 3):
+ * cwd, prevCwd, the pushd stack AND the withdrawal flag must all agree for
+ * two candidate outcomes to merge; any disagreement is a divergence the walk
+ * cannot enumerate. (#3567 review PRR-001: a withdrawn candidate has NOT
+ * "already failed closed where it was collected" for LATER siblings — the
+ * If/Case/loop merges used this equality to treat a withdrawn-only branch as
+ * a no-op, so a dynamic `cd $D` inside a branch never propagated the
+ * withdrawal to writes that follow the construct. Withdrawal is divergence.)
+ */
+function directoryStatesEqual(a: DirectoryState, b: DirectoryState): boolean {
+	if (a.withdrawn !== b.withdrawn) return false;
+	if (a.cwd !== b.cwd || a.prevCwd !== b.prevCwd) return false;
+	if (a.dirStack.length !== b.dirStack.length) return false;
+	for (let i = 0; i < a.dirStack.length; i += 1) {
+		if (a.dirStack[i] !== b.dirStack[i]) return false;
+	}
+	return true;
+}
+
+/** Adopt another state's complete directory selection into `target`. */
+function adoptDirectoryState(
+	target: DirectoryState,
+	source: DirectoryState,
+): void {
+	target.cwd = source.cwd;
+	target.prevCwd = source.prevCwd;
+	target.dirStack = [...source.dirStack];
+	target.withdrawn = target.withdrawn || source.withdrawn;
+}
+
+/**
+ * A parsed directory-selection command: cd/pushd/popd with its first operand
+ * word (quote-removed text) or null when the verb carries no operand.
+ */
+interface DirectoryCommand {
+	verb: 'cd' | 'pushd' | 'popd';
+	operand: string | null;
+}
+
+/**
+ * Parse a Command/SimpleCommand node as a cd/pushd/popd invocation.
+ *
+ * `cd` skips its option words (`-L`, `-P`, either cluster order, `--`) before
+ * the operand — the positive word forms `cd -P src` / `cd -- src` track their
+ * real landing instead of the historical accident of resolving a directory
+ * literally named `-P`. `pushd`/`popd` take no transparent options here; any
+ * dash word stays the operand and is classified (and withdrawn) downstream.
+ */
+function parseDirectoryCommand(cmd: unknown): DirectoryCommand | null {
 	if (!cmd || typeof cmd !== 'object') return null;
 	const c = cmd as BashCommand;
 	if (c.type !== 'SimpleCommand' && c.type !== 'Command') return null;
@@ -5345,18 +5645,215 @@ function getCdTarget(cmd: unknown): string | null {
 	const n = name as BashWord;
 	if (n.type !== 'Word') return null;
 	const text = n.text;
-	if (text !== 'cd') return null;
-	// Get the first suffix word (the directory target)
+	if (text !== 'cd' && text !== 'pushd' && text !== 'popd') return null;
 	const suffix = c.suffix;
-	if (!Array.isArray(suffix) || suffix.length === 0) return null;
-	const first = suffix[0];
-	if (!first || typeof first !== 'object') return null;
-	const firstWord = first as BashWord;
-	if (firstWord.type !== 'Word') return null;
-	const target = firstWord.text;
-	// Ignore special cd targets
-	if (target === '-' || target === '~' || target === '~' + '/') return null;
-	return target;
+	if (!Array.isArray(suffix)) return { verb: text, operand: null };
+	let index = 0;
+	if (text === 'cd') {
+		while (index < suffix.length) {
+			const word = suffix[index];
+			if (!isBashWord(word)) break;
+			const wordText = word.text;
+			if (wordText === '--') {
+				index += 1;
+				break;
+			}
+			if (/^-[LP]+$/.test(wordText)) {
+				index += 1;
+				continue;
+			}
+			break;
+		}
+	}
+	for (let i = index; i < suffix.length; i += 1) {
+		const word = suffix[i];
+		if (!isBashWord(word)) continue;
+		return { verb: text, operand: word.text };
+	}
+	return { verb: text, operand: null };
+}
+
+/**
+ * Move the state to an absolute landing under the mode's proof rules and
+ * update prevCwd exactly like the shell (only a directory change that
+ * actually happened updates OLDPWD). Returns true when the cwd moved.
+ */
+function landDirectoryState(
+	state: DirectoryState,
+	landing: string,
+	cdMode: 'gate' | 'gate-skip' | 'succeed',
+): boolean {
+	if (cdMode === 'gate') {
+		let isDirectory = false;
+		try {
+			isDirectory =
+				statSync(landing, { throwIfNoEntry: false })?.isDirectory() === true;
+		} catch {
+			isDirectory = false;
+		}
+		if (!isDirectory) return false;
+	}
+	if (landing === state.cwd) {
+		// #3567 review PRR-006: bash still refreshes OLDPWD when `cd` lands on
+		// the CURRENT directory (`cd .` from /a makes OLDPWD=/a, so a later
+		// `cd -` returns to /a — not to whatever OLDPWD held before). The old
+		// early-return skipped that refresh, so `cd ..; cd .; cd -` modeled a
+		// stale previous directory and judged the following write at a landing
+		// bash never used. Same-directory cd/pushd/popd now model the refresh.
+		state.prevCwd = state.cwd;
+		return false;
+	}
+	state.prevCwd = state.cwd;
+	state.cwd = landing;
+	return true;
+}
+
+/** The shell's HOME landing for bare `cd` / `cd ~` / `cd ~/x` (#3491 W1). */
+function homeLanding(rest: string): string {
+	const home = os.homedir();
+	if (rest === '') return home;
+	const resolved = resolvePath(rest, home);
+	return resolved === null ? path.join(home, rest) : resolved;
+}
+
+/**
+ * Apply one directory-selection command to the walk state (#3491 W1).
+ * Returns true when the node WAS a cd/pushd/popd (the caller then skips the
+ * ordinary command walk — cd itself produces no writes).
+ *
+ * Word forms:
+ * - bare `cd`, `cd ~`, `cd ~/x`: land at $HOME — unless the raw line
+ *   reassigns HOME (any segment or a command prefix), which is withdrawn
+ *   (inherited-$HOME truth is unavailable statically).
+ * - `cd -`: land at prevCwd; prevCwd === null (no modeled prior cd, including
+ *   a line that reassigns OLDPWD) ⇒ withdraw.
+ * - dynamic operand ($VAR, $(…), backticks): WITHDRAW — the historical
+ *   literal-append could land inside a broad declared scope (fail-open, plan
+ *   critic r2/r3).
+ * - `pushd <dir>`: push current onto dirStack (cap 32; overflow withdraws)
+ *   with cd semantics for the operand; bare `pushd` swaps the top two;
+ *   `pushd ±N` / `pushd -n` / any option word withdraws.
+ * - `popd`: pop to the restored cwd (prevCwd updates like every
+ *   directory-changing op); empty stack or `popd ±N` / `-n` withdraws.
+ */
+function applyDirectoryTransition(
+	state: DirectoryState,
+	cmd: unknown,
+	cdMode: 'gate' | 'gate-skip' | 'succeed',
+): boolean {
+	const parsed = parseDirectoryCommand(cmd);
+	if (!parsed) return false;
+	// 'gate-skip' (the tracked walk inside a conditional right branch): model
+	// the SKIP landing — the command never ran, so it neither moves the state
+	// nor withdraws it (#3485 PRR-001 skip contract).
+	if (cdMode === 'gate-skip') return true;
+	const operand = parsed.operand;
+	if (parsed.verb === 'popd') {
+		if (operand !== null) {
+			state.withdrawn = true;
+			return true;
+		}
+		if (state.dirStack.length < 1) {
+			state.withdrawn = true;
+			return true;
+		}
+		const restored = state.dirStack.shift();
+		if (restored === undefined) {
+			state.withdrawn = true;
+			return true;
+		}
+		state.prevCwd = state.cwd;
+		state.cwd = restored;
+		return true;
+	}
+	if (parsed.verb === 'pushd') {
+		if (operand === null) {
+			// Bare pushd: exchange the current directory with the stack top.
+			if (state.dirStack.length < 1) {
+				state.withdrawn = true;
+				return true;
+			}
+			const oldCwd = state.cwd;
+			state.cwd = state.dirStack[0];
+			state.dirStack[0] = oldCwd;
+			state.prevCwd = oldCwd;
+			return true;
+		}
+		if (/^[+-]\d+$/.test(operand) || operand.startsWith('-')) {
+			// pushd ±N rotates the stack; pushd -n pushes without cd — neither
+			// is modeled ⇒ withdraw (fail-closed).
+			state.withdrawn = true;
+			return true;
+		}
+		if (operand === '-' || isDynamicPath(operand)) {
+			state.withdrawn = true;
+			return true;
+		}
+		let landing: string | null;
+		let isTilde = false;
+		if (operand === '~' || operand.startsWith('~/')) {
+			if (state.homeReassigned) {
+				state.withdrawn = true;
+				return true;
+			}
+			landing = homeLanding(operand === '~' ? '' : operand.slice(2));
+			isTilde = true;
+		} else {
+			landing = resolvePath(operand, state.cwd);
+		}
+		if (landing === null) {
+			state.withdrawn = true;
+			return true;
+		}
+		if (cdMode === 'succeed' && !isTilde) {
+			landing = resolveBashCdTarget(operand, state.cwd, landing);
+		}
+		const oldCwd = state.cwd;
+		if (landDirectoryState(state, landing, cdMode)) {
+			if (state.dirStack.length >= 32) {
+				state.withdrawn = true;
+				return true;
+			}
+			state.dirStack.unshift(oldCwd);
+		}
+		return true;
+	}
+	// cd
+	if (operand === null || operand === '~' || operand.startsWith('~/')) {
+		if (state.homeReassigned) {
+			state.withdrawn = true;
+			return true;
+		}
+		landDirectoryState(
+			state,
+			homeLanding(operand === null || operand === '~' ? '' : operand.slice(2)),
+			cdMode,
+		);
+		return true;
+	}
+	if (operand === '-') {
+		if (state.prevCwd === null || state.oldpwdReassigned) {
+			state.withdrawn = true;
+			return true;
+		}
+		landDirectoryState(state, state.prevCwd, cdMode);
+		return true;
+	}
+	if (isDynamicPath(operand)) {
+		state.withdrawn = true;
+		return true;
+	}
+	const resolved = resolvePath(operand, state.cwd);
+	if (resolved === null) {
+		state.withdrawn = true;
+		return true;
+	}
+	const landing =
+		cdMode === 'succeed'
+			? resolveBashCdTarget(operand, state.cwd, resolved)
+			: resolved;
+	landDirectoryState(state, landing, cdMode);
+	return true;
 }
 
 /**
@@ -5375,55 +5872,13 @@ interface WriteWithNode {
  * as `collectLeafCommands` so we can match writes by position.
  */
 /**
- * Shared cd-tracking core for both walker cd sites (#3530 feedback). Returns
- * true when the tracked cwd was moved.
- *
- * - 'gate' mode (tracked walk): move ONLY when analysis can prove the target is
- *   an existing directory (a cd that cannot succeed must not move the tracked
- *   cwd — #3518 P-2). An unprovable cd keeps the current cwd; the caller's
- *   pessimistic walk ('succeed' mode) supplies the success landing, and the
- *   gate requires both landings to pass, so ambiguity fails closed without
- *   filesystem truth at execution time (mkdir-then-cd, win32 drive-phantom
- *   paths, stat error classes).
- * - 'succeed' mode (pessimistic walk): track the directory bash WOULD select if
- *   the cd succeeds — Git Bash MSYS drive mapping for `/x/...` spellings
- *   (plain win32 resolution maps `/e/a` to the CURRENT drive, not drive E:),
- *   then the ordinary analyzer resolution.
+ * Shared cd-tracking landing core for literal operands (#3530 feedback,
+ * folded into applyDirectoryTransition): 'gate' mode moves ONLY when analysis
+ * can prove the target is an existing directory (#3518 P-2); 'succeed' mode
+ * tracks the directory bash WOULD select — Git Bash MSYS drive mapping for
+ * `/x/...` spellings (plain win32 resolution maps `/e/a` to the CURRENT
+ * drive, not drive E:), then the ordinary analyzer resolution.
  */
-function applyCdTracking(
-	cwdStack: string[],
-	cdTarget: string,
-	cdMode: 'gate' | 'gate-skip' | 'succeed',
-): boolean {
-	const current = cwdStack[0] ?? '/';
-	// 'gate-skip' (the tracked walk inside a conditional right branch):
-	// model the SKIP landing — bash never runs this cd when the left operand
-	// fails, so following siblings resolve at the pre-branch cwd (#3485
-	// PRR-001 skip contract: `false && cd src; write` lands at the root).
-	if (cdMode === 'gate-skip') return false;
-	const resolvedTarget = resolvePath(cdTarget, current);
-	if (resolvedTarget === null) {
-		// Dynamic target ($VAR/$(cmd)): keep the historical literal-append
-		// (lands outside any declared scope — conservative) in both modes.
-		cwdStack[0] = path.posix.resolve(current, cdTarget);
-		return true;
-	}
-	if (cdMode === 'succeed') {
-		cwdStack[0] = resolveBashCdTarget(cdTarget, current, resolvedTarget);
-		return true;
-	}
-	let isDirectory = false;
-	try {
-		isDirectory =
-			statSync(resolvedTarget, { throwIfNoEntry: false })?.isDirectory() ===
-			true;
-	} catch {
-		isDirectory = false;
-	}
-	if (!isDirectory) return false;
-	cwdStack[0] = resolvedTarget;
-	return true;
-}
 
 /**
  * The directory Git Bash would select for a cd target — the pessimistic
@@ -5445,39 +5900,178 @@ function resolveBashCdTarget(
 	return analyzerResolved || path.posix.resolve(current, cdTarget);
 }
 
+/**
+ * Bash-truth (#3567 review P-F5): a function CALL executes its body in the
+ * CURRENT shell, so the body's relative directory transitions land relative
+ * to the CALL-TIME cwd — which the definition-time walk cannot know. A call
+ * to a function whose body contains any cd/pushd/popd therefore withdraws
+ * (fail-closed). The table is built once per walk from the command's own
+ * Function-definition nodes.
+ */
+function bashFunctionBodyHasDirectoryTransition(node: unknown): boolean {
+	if (!node || typeof node !== 'object') return false;
+	const n = node as Record<string, unknown>;
+	if (
+		(n.type === 'SimpleCommand' || n.type === 'Command') &&
+		n.name !== null &&
+		typeof n.name === 'object'
+	) {
+		const name = n.name as Record<string, unknown>;
+		if (name.type === 'Word' && typeof name.text === 'string') {
+			const text = name.text;
+			if (text === 'cd' || text === 'pushd' || text === 'popd') return true;
+		}
+	}
+	for (const value of Object.values(n)) {
+		if (Array.isArray(value)) {
+			for (const item of value) {
+				if (bashFunctionBodyHasDirectoryTransition(item)) return true;
+			}
+		} else if (value && typeof value === 'object') {
+			if (bashFunctionBodyHasDirectoryTransition(value)) return true;
+		}
+	}
+	return false;
+}
+
+/**
+ * Pre-build the function-name → body-has-directory-transition table from a
+ * command AST (#3567 review P-F5). Bash runs a function body in the CURRENT
+ * shell at CALL time, so a call to a transition-bearing function withdraws
+ * (the call-time landing is unknowable from the definition). A call that
+ * textually precedes its definition is a bash runtime error — withdrawal
+ * stays fail-closed there too. The table CLOSES OVER the call graph
+ * (reviewer revision): a body that CALLS another defined function inherits
+ * that function's transition status transitively (`g(){ cd ..; }; f(){ g;
+ * }; f` must withdraw like the direct call).
+ */
+function collectFunctionTransitions(
+	node: unknown,
+	into: Map<string, boolean>,
+): void {
+	const direct = new Map<string, boolean>();
+	const calls = new Map<string, string[]>();
+	const walk = (n: unknown): void => {
+		if (!n || typeof n !== 'object') return;
+		const rec = n as Record<string, unknown>;
+		if (rec.type === 'Function') {
+			const rawName = rec.name;
+			const nameText =
+				typeof rawName === 'string'
+					? rawName
+					: typeof rawName === 'object' &&
+							rawName !== null &&
+							typeof (rawName as Record<string, unknown>).text === 'string'
+						? (rawName as Record<string, unknown>).text
+						: undefined;
+			if (typeof nameText === 'string' && nameText !== '' && rec.body) {
+				direct.set(nameText, bashFunctionBodyHasDirectoryTransition(rec.body));
+				calls.set(nameText, bashFunctionBodyCallNames(rec.body));
+			}
+		}
+		for (const value of Object.values(rec)) {
+			if (Array.isArray(value)) {
+				for (const item of value) walk(item);
+			} else if (value && typeof value === 'object') {
+				walk(value);
+			}
+		}
+	};
+	walk(node);
+	// Fixpoint closure over the call graph (bounded by the table size).
+	let changed = true;
+	while (changed) {
+		changed = false;
+		for (const [name, isDirect] of direct) {
+			if (isDirect || into.get(name) === true) continue;
+			const callees = calls.get(name) ?? [];
+			const transitive = callees.some(
+				(callee) => direct.get(callee) === true || into.get(callee) === true,
+			);
+			if (transitive) {
+				into.set(name, true);
+				changed = true;
+			}
+		}
+	}
+	for (const [name, isDirect] of direct) {
+		if (isDirect && into.get(name) !== true) into.set(name, true);
+	}
+}
+
+/** Command words a function body invokes (for the call-graph closure). */
+function bashFunctionBodyCallNames(node: unknown): string[] {
+	const names: string[] = [];
+	const walk = (n: unknown): void => {
+		if (!n || typeof n !== 'object') return;
+		const rec = n as Record<string, unknown>;
+		if (
+			(rec.type === 'SimpleCommand' || rec.type === 'Command') &&
+			rec.name !== null &&
+			typeof rec.name === 'object'
+		) {
+			const name = rec.name as Record<string, unknown>;
+			if (typeof name.text === 'string' && name.text !== '') {
+				names.push(name.text);
+			}
+		}
+		for (const value of Object.values(rec)) {
+			if (Array.isArray(value)) {
+				for (const item of value) walk(item);
+			} else if (value && typeof value === 'object') {
+				walk(value);
+			}
+		}
+	};
+	walk(node);
+	return names;
+}
+
 function collectWritesWithNodes(
 	node: BashNode,
 	out: WriteWithNode[],
-	cwdStack: string[],
+	state: DirectoryState,
 	andSharedStack = true,
 	cdMode: 'gate' | 'gate-skip' | 'succeed' = 'gate',
+	functionsTable: Map<string, boolean>,
 ): void {
 	if (!node || typeof node !== 'object') return;
 
 	// #3485 (PRR-004): a $(...) substitution body executes at the CURRENT
-	// working directory — descend with the same context (and the same
-	// stack-sharing mode) so writes/evals inside it pair with their true
-	// location instead of falling back to the starting cwd. Handled before
-	// the typed switch: bash-parser's node union does not declare this type.
+	// working directory — descend so writes/evals inside it pair with their
+	// true location instead of falling back to the starting cwd. #3491 W1
+	// (v4 constraint): the body runs in a SUBSHELL, so it descends on a
+	// deep COPY of the state — its directory mutations must not leak to the
+	// parent (bash-true), while its writes still resolve at the entry cwd.
+	// Handled before the typed switch: bash-parser's node union does not
+	// declare this type.
 	if ((node as unknown as { type?: unknown }).type === 'CommandExpansion') {
 		const inner = (node as unknown as { commandAST?: unknown }).commandAST;
 		if (inner)
 			collectWritesWithNodes(
 				inner as BashNode,
 				out,
-				cwdStack,
+				cloneDirectoryState(state),
 				andSharedStack,
 				cdMode,
+
+				functionsTable,
 			);
 		return;
 	}
 
 	switch (node.type) {
 		case 'Script': {
-			const _globalCwd = cwdStack[0] ?? '/';
 			if (Array.isArray(node.commands)) {
 				for (const cmd of node.commands) {
-					collectWritesWithNodes(cmd, out, cwdStack, andSharedStack, cdMode);
+					collectWritesWithNodes(
+						cmd,
+						out,
+						state,
+						andSharedStack,
+						cdMode,
+						functionsTable,
+					);
 				}
 			}
 			break;
@@ -5485,71 +6079,59 @@ function collectWritesWithNodes(
 
 		case 'Subshell': {
 			// POSIX subshell: (...) spawns a child shell process. Any cd inside only
-			// affects the child's cwd — the parent's cwdStack is unchanged.
-			const effectiveCwd = cwdStack[0] ?? '/';
-
+			// affects the child's cwd — the parent state is unchanged (#3491 W1:
+			// the WHOLE state object is copied, not just the cwd — prevCwd and the
+			// pushd stack are child-local too).
 			// Collect writes from the subshell's redirections (if redirect is ON the subshell)
 			const subshellRedirs = node.redirections;
 			if (Array.isArray(subshellRedirs)) {
 				for (const redirect of subshellRedirs) {
 					const writesFromRedirect = getWritesFromRedirectNode(
 						redirect,
-						effectiveCwd,
+						state.cwd,
 					);
 					for (const w of writesFromRedirect) {
-						out.push({ write: w, context: effectiveCwd });
+						pushWriteWithState(out, w, state);
 					}
 				}
 			}
 
-			// Recurse into the subshell's list with a COPY of the stack so
+			// Recurse into the subshell's list with a COPY of the state so
 			// cd mutations inside the subshell do not leak to the parent.
 			if (node.list) {
-				const subStack = [...cwdStack];
 				collectWritesWithNodes(
 					node.list,
 					out,
-					subStack,
+					cloneDirectoryState(state),
 					andSharedStack,
 					cdMode,
+
+					functionsTable,
 				);
 			}
 			break;
 		}
 
 		case 'CompoundList': {
-			// Process each command in sequence, updating context as we go
+			// Process each command in sequence, updating the state as we go.
 			if (Array.isArray(node.commands)) {
-				// Track the current stack across iterations; starts as cwdStack,
-				// but after a cd mutation, subsequent commands must use the mutated stack
-				const currentStack = cwdStack;
 				for (const cmd of node.commands) {
-					// Check for cd command to update context
-					const cdTarget = getCdTarget(cmd);
-					if (cdTarget) {
-						// Resolve relative cd target against current effective cwd.
-						// Apply the mutation ONCE here and do NOT recurse into the
-						// cd command: the Command case applies cd again, so
-						// recursing double-applies it and resolves later sibling
-						// writes against a path the shell never writes (#3099
-						// round-4 Critical 3). cd itself produces no writes.
-						// Windows-safe resolution (#3347 plan r3): a native
-						// backslash cwd must not flow through path.posix.resolve.
-						// resolvePath handles both separators; a dynamic cd
-						// target ($VAR/$(cmd)) resolves to null and falls back
-						// to the historical literal-append, which lands outside
-						// any declared scope (conservative).
-						applyCdTracking(currentStack, cdTarget, cdMode);
-					} else {
-						// Use the current (possibly mutated) stack so cd changes propagate
-						collectWritesWithNodes(
-							cmd,
-							out,
-							currentStack,
-							andSharedStack,
-							cdMode,
-						);
-					}
+					// Apply the directory transition ONCE here and do NOT recurse
+					// into a cd/pushd/popd command: the Command case applies it
+					// again, so recursing double-applies it and resolves later
+					// sibling writes against a path the shell never writes
+					// (#3099 round-4 Critical 3). cd/pushd/popd themselves
+					// produce no writes.
+					if (applyDirectoryTransition(state, cmd, cdMode)) continue;
+					// Use the current (possibly mutated) state so cd changes propagate
+					collectWritesWithNodes(
+						cmd,
+						out,
+						state,
+						andSharedStack,
+						cdMode,
+						functionsTable,
+					);
 				}
 			}
 			break;
@@ -5558,81 +6140,152 @@ function collectWritesWithNodes(
 		case 'Sequence': {
 			if (Array.isArray(node.commands)) {
 				for (const cmd of node.commands) {
-					collectWritesWithNodes(cmd, out, cwdStack, andSharedStack, cdMode);
+					collectWritesWithNodes(
+						cmd,
+						out,
+						state,
+						andSharedStack,
+						cdMode,
+						functionsTable,
+					);
 				}
 			}
 			break;
 		}
 
 		case 'Pipeline': {
+			// #3491 W1 (v4 constraint 2): pipeline components run as child
+			// processes of a noninteractive shell — they descend on ISOLATED
+			// state copies, so a component's cd can never mutate the parent
+			// state. The parent state is preserved across the pipeline; when
+			// any component DID mutate its copy's directory selection, the
+			// real shell's post-pipeline cwd is unknowable (each component's
+			// cwd change is lost in its child process, but the line also
+			// cannot be proven equivalent to no-change) — belt-and-braces:
+			// withdraw later writes.
 			if (Array.isArray(node.commands)) {
+				let componentMutatedDirectory = false;
 				for (const cmd of node.commands) {
-					collectWritesWithNodes(cmd, out, cwdStack, andSharedStack, cdMode);
+					const componentState = cloneDirectoryState(state);
+					collectWritesWithNodes(
+						cmd,
+						out,
+						componentState,
+						andSharedStack,
+						cdMode,
+
+						functionsTable,
+					);
+					if (!directoryStatesEqual(componentState, state)) {
+						componentMutatedDirectory = true;
+					}
+				}
+				if (componentMutatedDirectory) {
+					state.withdrawn = true;
 				}
 				// #3474: the stdin-eval write belongs to the pipeline as a
 				// whole; emitted after the children so both walkers list the
 				// pipe-evals in the same relative order.
 				const pipeEval = classifyPipeStdinEval(node);
-				if (pipeEval)
-					out.push({ write: pipeEval, context: cwdStack[0] ?? '/' });
+				if (pipeEval) pushWriteWithState(out, pipeEval, state);
 			}
 			break;
 		}
 
 		case 'LogicalExpression': {
-			// LogicalExpression (&& or ||) — same semantics as And/Or
-			// Process left first (may modify cwd via cd)
-			// IMPORTANT: Use cwdStack directly, not a copy, so cd mutations propagate
-			// #3474: for `&&` the right branch joins the SHARED stack — a chain's
+			// LogicalExpression (&& or ||) — same semantics as And/Or.
+			// #3491 W1 (v4 constraint 1): each operator carries BOTH outcomes
+			// explicitly — left-success/right-executed AND
+			// left-failure/right-skip — via the dual walk: the TRACKED pass
+			// models the SKIP landing (right branch on gate-skip, cds
+			// unapplied), the PESSIMISTIC pass models the EXECUTION landing
+			// (right branch on its own state copy with succeed, then adopted).
+			// A write after the chain resolves under EVERY candidate post-chain
+			// state (the gate requires every emitted entry to pass).
+			//
+			// #3474: for `&&` the tracked pass joins the SHARED state — a chain's
 			// middle `cd` (left-associative: And(a, And(b, c)) walks b on a fresh
-			// discarded stack) previously never reached c's resolution, so
+			// discarded state) previously never reached c's resolution, so
 			// `cd src && cd .. && echo x > escape.txt` resolved the target at src
 			// (in scope) and admitted an out-of-scope write. For `||` the right
 			// branch may be SKIPPED (left succeeded) while later siblings still
-			// run, so applying a skipped `cd` would be a NEW fail-open
-			// (plan-critic r2 B4) — `||` keeps the fresh-[leftContext] behavior.
+			// run, so the right branch always walks a COPY (a skipped `cd` must
+			// never reach later siblings — plan-critic r2 B4).
 			const andChain =
-				(node as unknown as { op?: string }).op === 'and' ||
-				(node as unknown as { type?: string }).type === 'And';
+				(node as unknown as { op?: string }).op === 'and' &&
+				(node as unknown as { type?: string }).type !== 'Or';
+			const isOr =
+				(node as unknown as { op?: string }).op === 'or' ||
+				(node as unknown as { type?: string }).type === 'Or';
+			// #3567 review PRR-012: `||` has TWO bash outcomes — left SUCCEEDED
+			// (right skipped) and left FAILED (right executes from the PRE-LEFT
+			// state, left's directory effects rolled back). Capture the pre-left
+			// state before the left walk so the right branch can be modeled on
+			// both candidates.
+			const preLeft = isOr ? cloneDirectoryState(state) : null;
 			if (node.left) {
 				collectWritesWithNodes(
 					node.left,
 					out,
-					cwdStack,
+					state,
 					andSharedStack,
 					cdMode,
+					functionsTable,
 				);
-				// Capture the context AFTER left has been processed (cd may have modified it)
-				const leftContext = cwdStack[0] ?? '/';
+				// Capture the COMPLETE state AFTER left has been processed (cd may
+				// have modified it).
+				const leftState = cloneDirectoryState(state);
 				// Process right with potentially updated context from left
 				if (node.right) {
-					// #3485 (PRR-001): the TRACKED pass shares the stack for && so a
-					// succeeding chain's cd moves later siblings; the PESSIMISTIC
-					// pass (andSharedStack=false) gives the right branch a fresh
-					// stack — a left operand that FAILS at runtime skips the right
-					// branch entirely, so its cd must never reach later siblings
-					// (`false && cd src; write` admitted an out-of-scope write when
-					// the skipped cd was applied to the resolution).
-					const rightStack =
-						andChain && andSharedStack ? cwdStack : [leftContext];
-					// #3530 dual-resolution: the right branch of a conditional is
-					// AMBIGUOUS — gate mode models the SKIP landing (cds in the
-					// branch unapplied: `false && cd src; write` lands at the
-					// root), succeed mode models the EXECUTION landing (cds
-					// applied + propagated: `mkdir x && cd x` leaves the shell in
-					// x for later siblings). resolveWriteTargets emits both
-					// landings when they diverge and the gate requires every
-					// entry to pass.
 					const rightCdMode = cdMode === 'succeed' ? 'succeed' : 'gate-skip';
-					collectWritesWithNodes(
-						node.right,
-						out,
-						rightStack,
-						andSharedStack,
-						rightCdMode,
-					);
-					if (cdMode === 'succeed' && rightStack !== cwdStack) {
-						cwdStack[0] = rightStack[0] ?? leftContext;
+					if (andChain && andSharedStack) {
+						collectWritesWithNodes(
+							node.right,
+							out,
+							state,
+							andSharedStack,
+							rightCdMode,
+							functionsTable,
+						);
+					} else if (isOr) {
+						// Two candidates: RIGHT SKIPPED (left succeeded — later
+						// siblings keep the post-left state, the #3485 skip
+						// contract) and RIGHT EXECUTES from the pre-left state
+						// with the current pass's cd mode (left failed — bash
+						// only runs the right operand when the left one failed,
+						// so left's cds never applied). Agreement over the
+						// complete state (incl. withdrawal) adopts the common
+						// landing; disagreement withdraws (v4 constraint 3).
+						const skipState = cloneDirectoryState(leftState);
+						const execState = cloneDirectoryState(preLeft!);
+						collectWritesWithNodes(
+							node.right,
+							out,
+							execState,
+							andSharedStack,
+							cdMode,
+
+							functionsTable,
+						);
+						if (directoryStatesEqual(skipState, execState)) {
+							adoptDirectoryState(state, execState);
+						} else {
+							state.withdrawn = true;
+						}
+					} else {
+						collectWritesWithNodes(
+							node.right,
+							out,
+							leftState,
+							andSharedStack,
+							rightCdMode,
+							functionsTable,
+						);
+						// #3530 dual-resolution: adopt the EXECUTION landing (and its
+						// withdrawal flag) into the pessimistic walk's state.
+						if (cdMode === 'succeed') {
+							adoptDirectoryState(state, leftState);
+						}
 					}
 				}
 			}
@@ -5641,152 +6294,65 @@ function collectWritesWithNodes(
 
 		case 'And':
 		case 'Or': {
-			// Process left first (may modify cwd via cd)
-			// IMPORTANT: Use cwdStack directly, not a copy, so cd mutations propagate
-			// #3474: And shares the stack (see LogicalExpression); Or keeps the
-			// fresh stack (a skipped || branch's cd must not move later siblings).
+			// #3474: And shares the state (see LogicalExpression); Or keeps the
+			// fresh state (a skipped || branch's cd must not move later siblings).
+			const isOrType = node.type === 'Or';
+			const preLeftType = isOrType ? cloneDirectoryState(state) : null;
 			if (node.left) {
 				collectWritesWithNodes(
 					node.left,
 					out,
-					cwdStack,
+					state,
 					andSharedStack,
 					cdMode,
+					functionsTable,
 				);
-				const leftContext = cwdStack[0] ?? '/';
-				// Process right with potentially updated context from left
+				const leftState = cloneDirectoryState(state);
 				if (node.right) {
-					const rightStack =
-						node.type === 'And' && andSharedStack ? cwdStack : [leftContext];
 					const rightCdMode = cdMode === 'succeed' ? 'succeed' : 'gate-skip';
-					collectWritesWithNodes(
-						node.right,
-						out,
-						rightStack,
-						andSharedStack,
-						rightCdMode,
-					);
-					if (cdMode === 'succeed' && rightStack !== cwdStack) {
-						cwdStack[0] = rightStack[0] ?? leftContext;
-					}
-				}
-			}
-			break;
-		}
-
-		// Issue #3099 R4: mirror the clause cases added to collectLeafCommands.
-		// These bodies run in the CURRENT shell, so they share cwdStack (cd
-		// propagates, exactly as CompoundList above) — only Subshell copies.
-		// The compound node's own redirections are read explicitly (the leaf
-		// walker pushes the node for detectRedirects; this walker's out holds
-		// write+context pairs, so it emits them at the same traversal position).
-		case 'If': {
-			const effectiveCwd = cwdStack[0] ?? '/';
-			if (Array.isArray(node.redirections)) {
-				for (const redirect of node.redirections) {
-					for (const w of getWritesFromRedirectNode(redirect, effectiveCwd)) {
-						out.push({ write: w, context: effectiveCwd });
-					}
-				}
-			}
-			// Bodies MAY never run; base never visited them, so their cd never
-			// moved a later write. Copy per body: detection added, propagation
-			// kept at base semantics (review round 3).
-			for (const body of [node.clause, node.then, node.else]) {
-				if (body) {
-					const bodyStack = [...cwdStack];
-					collectWritesWithNodes(body, out, bodyStack, andSharedStack, cdMode);
-					// #3530: 'succeed' mode models the body as executed — its
-					// landing cwd persists to following siblings (PRR-004).
-					if (cdMode === 'succeed') {
-						cwdStack[0] = bodyStack[0] ?? cwdStack[0];
-					}
-				}
-			}
-			break;
-		}
-
-		case 'While':
-		case 'Until': {
-			const effectiveCwd = cwdStack[0] ?? '/';
-			if (Array.isArray(node.redirections)) {
-				for (const redirect of node.redirections) {
-					for (const w of getWritesFromRedirectNode(redirect, effectiveCwd)) {
-						out.push({ write: w, context: effectiveCwd });
-					}
-				}
-			}
-			if (node.clause) {
-				const clauseStack = [...cwdStack];
-				collectWritesWithNodes(
-					node.clause,
-					out,
-					clauseStack,
-					andSharedStack,
-					cdMode,
-				);
-				// #3530: 'succeed' mode models the body as executed — its
-				// landing cwd persists to following siblings (PRR-004).
-				if (cdMode === 'succeed') {
-					cwdStack[0] = clauseStack[0] ?? cwdStack[0];
-				}
-			}
-			if (node.do) {
-				const doStack = [...cwdStack];
-				collectWritesWithNodes(node.do, out, doStack, andSharedStack, cdMode);
-				// #3530: 'succeed' mode models the body as executed — its
-				// landing cwd persists to following siblings (PRR-004).
-				if (cdMode === 'succeed') {
-					cwdStack[0] = doStack[0] ?? cwdStack[0];
-				}
-			}
-			break;
-		}
-
-		case 'For': {
-			const effectiveCwd = cwdStack[0] ?? '/';
-			if (Array.isArray(node.redirections)) {
-				for (const redirect of node.redirections) {
-					for (const w of getWritesFromRedirectNode(redirect, effectiveCwd)) {
-						out.push({ write: w, context: effectiveCwd });
-					}
-				}
-			}
-			if (node.do) {
-				const doStack = [...cwdStack];
-				collectWritesWithNodes(node.do, out, doStack, andSharedStack, cdMode);
-				// #3530: 'succeed' mode models the body as executed — its
-				// landing cwd persists to following siblings (PRR-004).
-				if (cdMode === 'succeed') {
-					cwdStack[0] = doStack[0] ?? cwdStack[0];
-				}
-			}
-			break;
-		}
-
-		case 'Case': {
-			const effectiveCwd = cwdStack[0] ?? '/';
-			if (Array.isArray(node.redirections)) {
-				for (const redirect of node.redirections) {
-					for (const w of getWritesFromRedirectNode(redirect, effectiveCwd)) {
-						out.push({ write: w, context: effectiveCwd });
-					}
-				}
-			}
-			if (Array.isArray(node.cases)) {
-				for (const entry of node.cases) {
-					if (entry?.body) {
-						const bodyStack = [...cwdStack];
+					if (node.type === 'And' && andSharedStack) {
 						collectWritesWithNodes(
-							entry.body,
+							node.right,
 							out,
-							bodyStack,
+							state,
+							andSharedStack,
+							rightCdMode,
+							functionsTable,
+						);
+					} else if (isOrType) {
+						// #3567 review PRR-012: two bash outcomes for `||` — right
+						// SKIPPED (left succeeded, post-left state) and right
+						// EXECUTES from the PRE-LEFT state (left failed, its cds
+						// rolled back). Agreement adopts the common landing;
+						// disagreement withdraws (see the LogicalExpression arm
+						// for the full contract).
+						const skipState = cloneDirectoryState(leftState);
+						const execState = cloneDirectoryState(preLeftType!);
+						collectWritesWithNodes(
+							node.right,
+							out,
+							execState,
 							andSharedStack,
 							cdMode,
+
+							functionsTable,
 						);
-						// #3530: 'succeed' mode models the body as executed (PRR-004).
+						if (directoryStatesEqual(skipState, execState)) {
+							adoptDirectoryState(state, execState);
+						} else {
+							state.withdrawn = true;
+						}
+					} else {
+						collectWritesWithNodes(
+							node.right,
+							out,
+							leftState,
+							andSharedStack,
+							rightCdMode,
+							functionsTable,
+						);
 						if (cdMode === 'succeed') {
-							cwdStack[0] = bodyStack[0] ?? cwdStack[0];
+							adoptDirectoryState(state, leftState);
 						}
 					}
 				}
@@ -5794,104 +6360,344 @@ function collectWritesWithNodes(
 			break;
 		}
 
-		case 'Function': {
-			const effectiveCwd = cwdStack[0] ?? '/';
+		// Issue #3099 R4: mirror the clause cases added to collectLeafCommands.
+		// These bodies run in the CURRENT shell, so their writes share the walk
+		// state — only Subshell (and, per #3491 W1, CommandExpansion and
+		// pipeline components) isolate. The compound node's own redirections
+		// are read explicitly (the leaf walker pushes the node for
+		// detectRedirects; this walker's out holds write+context pairs, so it
+		// emits them at the same traversal position).
+		//
+		// #3491 W1 (v3 item 3 + v4 constraint 3): control-flow bodies walk on
+		// per-branch COPIES; the post-construct state is the conservative merge
+		// — divergence over the COMPLETE state (cwd+prevCwd+dirStack) WITHDRAWS
+		// later writes instead of fabricating a merge. If-without-else gains
+		// the implicit no-body outcome; Case gains the no-match outcome.
+		case 'If': {
 			if (Array.isArray(node.redirections)) {
 				for (const redirect of node.redirections) {
-					for (const w of getWritesFromRedirectNode(redirect, effectiveCwd)) {
-						out.push({ write: w, context: effectiveCwd });
+					for (const w of getWritesFromRedirectNode(redirect, state.cwd)) {
+						pushWriteWithState(out, w, state);
+					}
+				}
+			}
+			// The clause runs exactly once, in the current shell — its directory
+			// effects persist to the branch bodies and past the if.
+			if (node.clause) {
+				collectWritesWithNodes(
+					node.clause,
+					out,
+					state,
+					andSharedStack,
+					cdMode,
+					functionsTable,
+				);
+			}
+			// then/else each descend on a COPY from the post-clause state.
+			const outcomes: DirectoryState[] = [];
+			if (node.then) {
+				const thenState = cloneDirectoryState(state);
+				collectWritesWithNodes(
+					node.then,
+					out,
+					thenState,
+					andSharedStack,
+					cdMode,
+
+					functionsTable,
+				);
+				outcomes.push(thenState);
+			}
+			if (node.else) {
+				const elseState = cloneDirectoryState(state);
+				collectWritesWithNodes(
+					node.else,
+					out,
+					elseState,
+					andSharedStack,
+					cdMode,
+
+					functionsTable,
+				);
+				outcomes.push(elseState);
+			}
+			// Implicit no-body outcome ONLY when else is absent (#3567 review
+			// PRR-011): with an else clause, bash runs exactly one of the two
+			// bodies — the unconditional no-body push fabricated a third
+			// outcome that made determinate post-if writes (`if true; then cd
+			// src; else cd src; fi; echo x > src/f`) diverge and over-deny.
+			if (!node.else) {
+				outcomes.push(cloneDirectoryState(state));
+			}
+			if (
+				outcomes.every((candidate) => directoryStatesEqual(candidate, state))
+			) {
+				break;
+			}
+			if (
+				outcomes.every((candidate) =>
+					directoryStatesEqual(candidate, outcomes[0]),
+				)
+			) {
+				adoptDirectoryState(state, outcomes[0]);
+				break;
+			}
+			state.withdrawn = true;
+			break;
+		}
+
+		case 'While':
+		case 'Until': {
+			if (Array.isArray(node.redirections)) {
+				for (const redirect of node.redirections) {
+					for (const w of getWritesFromRedirectNode(redirect, state.cwd)) {
+						pushWriteWithState(out, w, state);
+					}
+				}
+			}
+			// The clause runs (at least once) in the current shell — walk its
+			// effects on the parent state so body writes pair with the true
+			// first-iteration context.
+			if (node.clause) {
+				collectWritesWithNodes(
+					node.clause,
+					out,
+					state,
+					andSharedStack,
+					cdMode,
+					functionsTable,
+				);
+			}
+			if (node.do) {
+				// One full body iteration on a COPY: the loop's post-state is
+				// accepted ONLY on a full-state fixpoint (one-iteration landing
+				// equals the entry state — idempotent across iterations);
+				// anything else withdraws (v4 constraint 3).
+				const bodyState = cloneDirectoryState(state);
+				collectWritesWithNodes(
+					node.do,
+					out,
+					bodyState,
+					andSharedStack,
+					cdMode,
+					functionsTable,
+				);
+				if (!directoryStatesEqual(bodyState, state)) {
+					state.withdrawn = true;
+				}
+			}
+			break;
+		}
+
+		case 'For': {
+			if (Array.isArray(node.redirections)) {
+				for (const redirect of node.redirections) {
+					for (const w of getWritesFromRedirectNode(redirect, state.cwd)) {
+						pushWriteWithState(out, w, state);
+					}
+				}
+			}
+			if (node.do) {
+				// Same fixpoint contract as While/Until (v4 constraint 3).
+				const bodyState = cloneDirectoryState(state);
+				collectWritesWithNodes(
+					node.do,
+					out,
+					bodyState,
+					andSharedStack,
+					cdMode,
+					functionsTable,
+				);
+				if (!directoryStatesEqual(bodyState, state)) {
+					state.withdrawn = true;
+				}
+			}
+			break;
+		}
+
+		case 'Case': {
+			if (Array.isArray(node.redirections)) {
+				for (const redirect of node.redirections) {
+					for (const w of getWritesFromRedirectNode(redirect, state.cwd)) {
+						pushWriteWithState(out, w, state);
+					}
+				}
+			}
+			// Each branch descends on a copy of the clause-entry state; the
+			// no-match outcome keeps the entry state. `;&`/`;;&` fall-through
+			// never reaches this walker — bash-parser fails to parse those
+			// forms, so the parse-failure fallback (fail-closed) governs them.
+			const outcomes: DirectoryState[] = [cloneDirectoryState(state)];
+			if (Array.isArray(node.cases)) {
+				for (const entry of node.cases) {
+					if (entry?.body) {
+						const bodyState = cloneDirectoryState(state);
+						collectWritesWithNodes(
+							entry.body,
+							out,
+							bodyState,
+							andSharedStack,
+							cdMode,
+
+							functionsTable,
+						);
+						outcomes.push(bodyState);
+					}
+				}
+			}
+			if (
+				outcomes.every((candidate) => directoryStatesEqual(candidate, state))
+			) {
+				break;
+			}
+			if (
+				outcomes.every((candidate) =>
+					directoryStatesEqual(candidate, outcomes[0]),
+				)
+			) {
+				adoptDirectoryState(state, outcomes[0]);
+				break;
+			}
+			state.withdrawn = true;
+			break;
+		}
+
+		case 'Function': {
+			if (Array.isArray(node.redirections)) {
+				for (const redirect of node.redirections) {
+					for (const w of getWritesFromRedirectNode(redirect, state.cwd)) {
+						pushWriteWithState(out, w, state);
 					}
 				}
 			}
 			if (node.body) {
-				const bodyStack = [...cwdStack];
+				// A function DEFINITION does not execute the body — walk it on a
+				// DISCARDED copy so its writes stay visible while none of its
+				// directory effects (or withdrawals) propagate (v3 item 3).
+				// #3567 review PRR-002: the discarded copy previously ZEROED the
+				// inherited withdrawal — a dynamic `cd $V` before the definition
+				// let the body's writes collect as RESOLVED at the definition-
+				// time cwd, while bash runs the body at CALL time (cd $V unset ⇒
+				// bare-cd HOME), outside every modeled landing. The copy now
+				// inherits the flag, so body writes carry unresolvedContext.
+				const bodyState = cloneDirectoryState(state);
 				collectWritesWithNodes(
 					node.body,
 					out,
-					bodyStack,
+					bodyState,
 					andSharedStack,
 					cdMode,
+					functionsTable,
 				);
-				// #3530: 'succeed' mode models the body as executed — its
-				// landing cwd persists to following siblings (PRR-004).
-				if (cdMode === 'succeed') {
-					cwdStack[0] = bodyStack[0] ?? cwdStack[0];
-				}
 			}
 			break;
 		}
 
 		case 'Command':
 		case 'SimpleCommand': {
-			const effectiveCwd = cwdStack[0] ?? '/';
+			// #3567 review P-F5: a CALL to a function whose body contains a
+			// directory transition executes that body in the CURRENT shell at
+			// call time — the call-time landing is unknowable at the walk, so
+			// the call withdraws (fail-closed). Own redirects still collect at
+			// the current state (bash truth).
+			const fnNameNode = (node as unknown as { name?: unknown }).name as
+				| Record<string, unknown>
+				| string
+				| undefined;
+			const fnNameText =
+				typeof fnNameNode === 'string'
+					? fnNameNode
+					: typeof fnNameNode?.text === 'string'
+						? fnNameNode.text
+						: undefined;
+			if (fnNameText !== undefined && functionsTable.get(fnNameText) === true) {
+				state.withdrawn = true;
+			}
 
-			// Check for cd command
-			const cdTarget = getCdTarget(node);
-			if (cdTarget) {
-				// #3530: mode-aware cd tracking via the shared helper. The
-				// tracked walk ('gate') treats an unprovable cd as failed; the
-				// pessimistic walk ('succeed') tracks the bash-true success
-				// landing. Both landings reach the gate through the existing
-				// tracked/pessimistic divergence, and the gate requires EVERY
-				// entry to pass — ambiguity denies without filesystem truth at
-				// execution time (mkdir-then-cd, win32 drive-phantom paths,
-				// stat error classes).
-				applyCdTracking(cwdStack, cdTarget, cdMode);
+			// Directory-selection commands (cd/pushd/popd, all word forms):
+			// apply the transition and stop — they produce no writes. #3530:
+			// the tracked walk ('gate') treats an unprovable cd as failed; the
+			// pessimistic walk ('succeed') tracks the bash-true success landing;
+			// #3491 W1: the unresolvable word forms WITHDRAW instead of
+			// guessing. Both landings reach the gate through the existing
+			// tracked/pessimistic divergence, and the gate requires EVERY entry
+			// to pass.
+			if (applyDirectoryTransition(state, node, cdMode)) {
 				return;
 			}
 
 			// Collect writes from this command's redirections
-			const writesFromRedirs = getWritesFromCommandRedirs(node, effectiveCwd);
+			const writesFromRedirs = getWritesFromCommandRedirs(node, state.cwd);
 			for (const w of writesFromRedirs) {
-				out.push({ write: w, context: effectiveCwd });
+				pushWriteWithState(out, w, state);
 			}
 
 			// Collect writes from builtin commands, inplace editors, etc.
 			const builtinWrites = detectBuiltinWrites(node);
 			for (const w of builtinWrites) {
-				out.push({ write: w, context: effectiveCwd });
+				pushWriteWithState(out, w, state);
 			}
 
 			const inplaceWrites = detectInplaceEdit(node);
 			for (const w of inplaceWrites) {
-				out.push({ write: w, context: effectiveCwd });
+				pushWriteWithState(out, w, state);
 			}
 
 			const interpreterWrites = detectInterpreterEval(node);
 			for (const w of interpreterWrites) {
-				out.push({ write: w, context: effectiveCwd });
+				pushWriteWithState(out, w, state);
 			}
 
 			const networkWrites = detectNetworkDownloaders(node);
 			for (const w of networkWrites) {
-				out.push({ write: w, context: effectiveCwd });
+				pushWriteWithState(out, w, state);
 			}
 
 			const archiveWrites = detectArchiveExtract(node);
 			for (const w of archiveWrites) {
-				out.push({ write: w, context: effectiveCwd });
+				pushWriteWithState(out, w, state);
 			}
 
 			const gitWrites = detectGitDestructive(node);
 			for (const w of gitWrites) {
-				out.push({ write: w, context: effectiveCwd });
+				pushWriteWithState(out, w, state);
 			}
 
 			// #3120: the patch/rsync vectors register on the resolution walk
 			// too, so a `cd` before them resolves at the tracked directory.
 			const patchWrites = detectPatchApply(node);
 			for (const w of patchWrites) {
-				out.push({ write: w, context: effectiveCwd });
+				pushWriteWithState(out, w, state);
 			}
 
 			const rsyncWrites = detectRsyncWrites(node);
 			for (const w of rsyncWrites) {
-				out.push({ write: w, context: effectiveCwd });
+				pushWriteWithState(out, w, state);
 			}
 
 			break;
 		}
 	}
+}
+
+/**
+ * Push one collected write with its walk state's context (#3491 W1): once the
+ * state has withdrawn (an unresolvable directory transition upstream), every
+ * later write the walk collects is marked `unresolvedContext` — the resolver
+ * nulls it and the gate denies (fail-closed).
+ */
+function pushWriteWithState(
+	out: WriteWithNode[],
+	write: WriteTarget,
+	state: DirectoryState,
+): void {
+	out.push({
+		write:
+			state.withdrawn && write.unresolvedContext !== true
+				? { ...write, unresolvedContext: true }
+				: write,
+		context: state.cwd,
+	});
 }
 
 /**
@@ -6234,26 +7040,58 @@ export function resolveWriteTargets(
 	}
 
 	// Walk the AST and collect writes WITH their context nodes, in order —
-	// twice (PRR-001/#3485): the TRACKED pass shares the cwd stack through &&
-	// right branches (a succeeding chain's cd moves later siblings), and the
-	// PESSIMISTIC pass walks with base semantics (fresh stack per && right
-	// branch) because a left operand that FAILS at runtime skips the right
-	// branch entirely, so its cd never executes. A write whose two
-	// resolutions diverge is emitted once per resolution; the gate requires
+	// twice (PRR-001/#3485): the TRACKED pass shares the directory state
+	// through && right branches (a succeeding chain's cd moves later
+	// siblings), and the PESSIMISTIC pass walks with base semantics (fresh
+	// state per && right branch) because a left operand that FAILS at runtime
+	// skips the right branch entirely, so its cd never executes. A write whose
+	// two resolutions diverge is emitted once per resolution; the gate requires
 	// EVERY entry to pass, so a shape that could land at either location is
 	// admitted only when both landings are authorized.
-	const cwdStack = [cwd];
+	// #3491 W1: both walks thread the sole DirectoryState model (cwd, prevCwd,
+	// pushd stack, withdrawal flag). The HOME/OLDPWD reassignment facts are
+	// text-level per-line checks — inherited $HOME/$OLDPWD truth is
+	// unavailable statically, so a line that reassigns either withdraws the
+	// word forms that depend on it (bare cd / cd ~ / cd -).
+	const homeReassigned = /(^|[\s;(&|])HOME=/.test(command);
+	const oldpwdReassigned = /(^|[\s;(&|])OLDPWD=/.test(command);
+	// #3567 review P-F5: pre-build the function-transition table for this
+	// command so function CALLS withdraw when their body moves directories.
+	const functionsTable = new Map<string, boolean>();
+	collectFunctionTransitions(ast, functionsTable);
 	const trackedNodes: WriteWithNode[] = [];
-	collectWritesWithNodes(ast as BashNode, trackedNodes, cwdStack, true, 'gate');
-	// A fresh stack: the tracked walk MUTATES the array it is given (cd writes
-	// cwdStack[0] in place), so the pessimistic pass must not inherit it.
+	collectWritesWithNodes(
+		ast as BashNode,
+		trackedNodes,
+		{
+			cwd,
+			prevCwd: null,
+			dirStack: [],
+			withdrawn: false,
+			homeReassigned,
+			oldpwdReassigned,
+		},
+		true,
+		'gate',
+		functionsTable,
+	);
+	// A fresh state: the tracked walk MUTATES the state it is given, so the
+	// pessimistic pass must not inherit it.
 	const pessimisticNodes: WriteWithNode[] = [];
 	collectWritesWithNodes(
 		ast as BashNode,
 		pessimisticNodes,
-		[cwd],
+		{
+			cwd,
+			prevCwd: null,
+			dirStack: [],
+			withdrawn: false,
+			homeReassigned,
+			oldpwdReassigned,
+		},
 		false,
 		'succeed',
+		functionsTable,
 	);
 
 	// Deduplicate walks the same way detectPosixWrites does — including the
@@ -6297,17 +7135,27 @@ export function resolveWriteTargets(
 				resolved: boolean;
 				evalDirectory?: string;
 				writeContext?: string;
+				unresolved?: true;
 			}
 		>();
 		for (const { write, context } of deduplicated) {
-			const resolvedPath = resolvePath(write.path, context);
-			const resolved = write.path !== null && !isDynamicPath(write.path);
+			// #3491 W1: a withdrawn (unresolvedContext) write nulls out on
+			// EVERY return path — the live gate rejects on resolvedPath ===
+			// null (fail-closed), never on a fragment or the starting cwd.
+			const unresolved = write.unresolvedContext === true;
+			const resolvedPath = unresolved ? null : resolvePath(write.path, context);
+			const resolved =
+				!unresolved && write.path !== null && !isDynamicPath(write.path);
 			const key = buildDedupeKey(write.category, write.operator, write.path);
 			// A capability eval has no static target; the working directory it
 			// runs at (tracked through any `cd`) IS what the gate authorizes
-			// against (#1902/#3347).
+			// against (#1902/#3347). An UNRESOLVED capability eval carries no
+			// evalDirectory at all — the gate must deny it BEFORE any
+			// `evalDirectory ?? shellDirectory` fallback (#3491 W1 wiring).
 			const evalDirectory =
-				write.capability === true && write.category === 'interpreter_eval'
+				write.capability === true &&
+				write.category === 'interpreter_eval' &&
+				!unresolved
 					? context
 					: undefined;
 			// #3120: a patch_apply write's literal patch-file operands resolve
@@ -6315,7 +7163,13 @@ export function resolveWriteTargets(
 			// there to extract the real targets.
 			const writeContext =
 				write.category === 'patch_apply' ? context : undefined;
-			map.set(key, { resolvedPath, resolved, evalDirectory, writeContext });
+			map.set(key, {
+				resolvedPath,
+				resolved,
+				evalDirectory,
+				writeContext,
+				...(unresolved ? { unresolved: true } : {}),
+			});
 		}
 		return { map, colliding };
 	};
@@ -6356,7 +7210,8 @@ export function resolveWriteTargets(
 			resolved: boolean;
 			evalDirectory?: string;
 			writeContext?: string;
-		}) => ({
+			unresolved?: true;
+		}): ResolvedWriteTarget => ({
 			original,
 			resolvedPath: resolved.resolvedPath,
 			resolved: resolved.resolved,
@@ -6366,6 +7221,7 @@ export function resolveWriteTargets(
 			...(resolved.writeContext !== undefined
 				? { writeContext: resolved.writeContext }
 				: {}),
+			...(resolved.unresolved === true ? { unresolved: true } : {}),
 		});
 		const entries: ResolvedWriteTarget[] = [];
 		const tracked = resolvedMap.get(key);

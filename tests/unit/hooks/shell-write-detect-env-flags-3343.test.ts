@@ -170,7 +170,12 @@ describe('gate-level env-flag eval rejection (#3343 end-to-end)', () => {
 					{ args: { command } },
 				),
 			).rejects.toThrow(
-				/outside the active scope|SCOPE_VIOLATION|evaluates inline code/,
+				// #3491 W2 re-pin (message class only): `env --chdir /tmp …` now
+				// rewrites to a child-scoped subshell, so the eval routes at
+				// /tmp and rejects through file authority (ROOT_ESCAPE) instead
+				// of the session-root scope violation. The pinned verdict
+				// (reject) is unchanged.
+				/outside the active scope|SCOPE_VIOLATION|evaluates inline code|not authorised/,
 			);
 		}
 	});

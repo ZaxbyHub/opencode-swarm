@@ -5,14 +5,21 @@ import { redactPath } from '../hooks/guardrails/audit-log.js';
 import {
 	dcCheckJunctionCreation,
 	dcEvaluateRecursiveDeleteTargets,
+	dcExpandDestructiveSegments,
 	dcExtractPowerShellTargets,
 	dcExtractRecursiveRmTargets,
 	dcNormalizeCommand,
 	dcParseWindowsRecursiveDelete,
+	dcPreprocessWrappers,
+	dcRelocateDestructiveTarget,
+	dcShellFlagClusterUncertain,
 	dcSplitSegments,
 	dcUnwrapWrappers,
 } from '../hooks/guardrails/destructive-command.js';
-import { checkFileAuthority } from '../hooks/guardrails/file-authority.js';
+import {
+	AUTHORITY_ROLE_CAPABILITIES,
+	checkFileAuthority,
+} from '../hooks/guardrails/file-authority.js';
 import {
 	isInDeclaredScope,
 	redactShellCommand,
@@ -194,12 +201,50 @@ function evaluateDestructiveDecision(
 	const outerSegments = dcSplitSegments(command);
 	const innerSegments = dcSplitSegments(unwrapped);
 	const perSegmentUnwrapped = outerSegments.map((s) => dcUnwrapWrappers(s));
-	const allSegments = [
-		...new Set([...outerSegments, ...innerSegments, ...perSegmentUnwrapped]),
-	];
+	// #3491 W2 parity: the same evolving per-segment directory context the
+	// live destructive arm uses — chdir-bearing wrapper segments relocate
+	// their rm/rmdir/del targets from the child cwd to session-root-relative
+	// forms; an unresolvable context lands on the escaping sentinel.
+	// #3491 W2 fix-round-1 (F-2) parity: the context is keyed per OCCURRENCE,
+	// never per segment TEXT — `env -C src rm -rf dist; env -C .. rm -rf
+	// dist` yields two `rm -rf dist` occurrences with DIFFERENT child cwds;
+	// a text-keyed first-wins map applied the first occurrence's context to
+	// both and answered allow for the escaping second one. Each (segment,
+	// context) pair is evaluated once; occurrences from the raw/legacy
+	// unwrap lists carry a null context (base behavior), and every expanded
+	// entry carries its own evolving context.
+	const expandedSegments = dcExpandDestructiveSegments(command, cwd);
+	const segmentOccurrences: Array<{
+		segment: string;
+		resolveFrom: string | 'uncertain' | null;
+	}> = [];
+	const seenOccurrences = new Set<string>();
+	const pushSegmentOccurrence = (
+		segment: string,
+		resolveFrom: string | 'uncertain' | null,
+	): void => {
+		if (segment.length === 0) return;
+		const key = `${resolveFrom ?? ''}\u0000${segment}`;
+		if (seenOccurrences.has(key)) return;
+		seenOccurrences.add(key);
+		segmentOccurrences.push({ segment, resolveFrom });
+	};
+	for (const segment of outerSegments) pushSegmentOccurrence(segment, null);
+	for (const segment of innerSegments) pushSegmentOccurrence(segment, null);
+	for (const segment of perSegmentUnwrapped)
+		pushSegmentOccurrence(segment, null);
+	for (const entry of expandedSegments)
+		pushSegmentOccurrence(entry.segment, entry.resolveFrom);
+	const relocate = (
+		resolveFrom: string | 'uncertain' | null,
+		targets: string[],
+	): string[] =>
+		resolveFrom === null
+			? targets
+			: targets.map((t) => dcRelocateDestructiveTarget(t, resolveFrom, cwd));
 
-	for (const segment of allSegments) {
-		const seg = segment.trim();
+	for (const occurrence of segmentOccurrences) {
+		const seg = occurrence.segment.trim();
 		if (!seg) continue;
 
 		// Junction/symlink creation with out-of-cwd target
@@ -215,7 +260,10 @@ function evaluateDestructiveDecision(
 		// enforcement on stacked flags, long options, quoting, or multi-targets.
 		const targets = dcExtractRecursiveRmTargets(seg);
 		if (targets) {
-			const targetDecision = dcEvaluateRecursiveDeleteTargets({ targets, cwd });
+			const targetDecision = dcEvaluateRecursiveDeleteTargets({
+				targets: relocate(occurrence.resolveFrom, targets),
+				cwd,
+			});
 			if (!targetDecision.allowed) {
 				return {
 					decision: 'block',
@@ -241,7 +289,7 @@ function evaluateDestructiveDecision(
 					};
 				}
 				const targetDecision = dcEvaluateRecursiveDeleteTargets({
-					targets: parsed.targets,
+					targets: relocate(occurrence.resolveFrom, parsed.targets),
 					cwd,
 				});
 				if (!targetDecision.allowed) {
@@ -268,7 +316,7 @@ function evaluateDestructiveDecision(
 					};
 				}
 				const targetDecision = dcEvaluateRecursiveDeleteTargets({
-					targets: parsed.targets,
+					targets: relocate(occurrence.resolveFrom, parsed.targets),
 					cwd,
 				});
 				if (!targetDecision.allowed) {
@@ -294,7 +342,7 @@ function evaluateDestructiveDecision(
 			const targets = dcExtractPowerShellTargets(seg);
 			if (targets.length > 0) {
 				const targetDecision = dcEvaluateRecursiveDeleteTargets({
-					targets,
+					targets: relocate(occurrence.resolveFrom, targets),
 					cwd,
 				});
 				if (!targetDecision.allowed) {
@@ -690,12 +738,28 @@ export async function handleGuardrailExplain(
 	// wrapper flag below stay computed from the raw command, exactly like the
 	// gate; detection and target resolution use the same normalized string,
 	// because resolveWriteTargets re-parses it for cwd tracking.
-	const commandSegments = dcSplitSegments(shellCommand);
-	const unwrappedSegments = commandSegments.map((s) => dcUnwrapWrappers(s));
-	const didUnwrap = commandSegments.some((s, i) => unwrappedSegments[i] !== s);
-	const detectionCommand = didUnwrap
-		? unwrappedSegments.join('\n')
-		: shellCommand;
+	// #3491 W2 parity: explain shares the gate's chdir-wrapper preprocessing —
+	// chdir-bearing wrapper segments (env -C / env -S / sudo -D) rewrite as
+	// correctly-quoted subshells so the wrapped writes resolve under the child
+	// cwd. A fail-closed DIR (empty/NUL static operand) blocks here exactly
+	// like the gate's parse-error rejection.
+	const preprocessed = dcPreprocessWrappers(shellCommand);
+	if (preprocessed.failClosed) {
+		decision = 'block';
+		firingRule =
+			'parse_error: write detection failed to parse command — rejecting for safety';
+	}
+	// #3567 final-critic round: mirror the gate's shell flag-cluster
+	// deny-on-uncertainty channel (tool-before.ts) — without it explain
+	// answered allow for `bash -oc pipefail 'rm -rf …'` shapes the gate
+	// blocks.
+	const uncertainCluster = dcShellFlagClusterUncertain(shellCommand);
+	if (uncertainCluster !== null) {
+		decision = 'block';
+		firingRule = `inline_eval: shell interpreter invocation "${uncertainCluster}" carries a flag cluster the guard cannot statically model (unknown option or glued argument) — deny-on-uncertainty`;
+	}
+	const didUnwrap = preprocessed.changed;
+	const detectionCommand = didUnwrap ? preprocessed.command : shellCommand;
 
 	if (decision === 'allow') {
 		const detected = resolveShellType(shellCommand) as
@@ -732,7 +796,7 @@ export async function handleGuardrailExplain(
 		// guardrail-explain-service-accuracy.test.ts.
 		const wrapperDeclaredHere = declaresWindowsWrapperLoose(shellCommand);
 		const posix = detectPosixWrites(detectionCommand);
-		const analysis =
+		let analysis =
 			authority === null
 				? posix
 				: mergeWriteAnalyses(
@@ -741,6 +805,30 @@ export async function handleGuardrailExplain(
 						true,
 						wrapperDeclaredHere,
 					);
+		// #3567 review P-R2: mirror the gate's union-back (tool-before.ts):
+		// the rewritten command can LOSE writes the original analysis saw, so
+		// every non-eval-artifact original write unions back into the explain
+		// analysis — without it explain answered allow for
+		// `env -C src echo hi > /tmp/x` (hoist-less shapes) where the gate
+		// unions the redirect back and denies.
+		if (didUnwrap) {
+			const primaryAnalysis = detectPosixWrites(shellCommand);
+			const regained = primaryAnalysis.writes.filter(
+				(w) =>
+					!(
+						w.category === 'interpreter_eval' &&
+						w.path === null &&
+						!w.operator.endsWith('[eval stdin]')
+					),
+			);
+			if (regained.length > 0) {
+				analysis = {
+					...analysis,
+					writes: [...analysis.writes, ...regained],
+					hasWrites: analysis.hasWrites || regained.length > 0,
+				};
+			}
+		}
 
 		// The gate runs its fail-closed parse gate on the ORIGINAL command as
 		// well as the unwrapped form (tool-before.ts): a wrapper must not
@@ -806,7 +894,86 @@ export async function handleGuardrailExplain(
 					}
 					writeCategories.add(write.original.category);
 				} else {
-					writeCategories.add(write.original.category);
+					// #3491 fix-round-1 (F-3) parity: mirror the gate's
+					// null-path decision tree instead of treating the write as
+					// a category only — explain used to answer allow for
+					// inputs the gate blocks on EVERY withdrawal class
+					// (`cd -; echo x > f`, uncertain env -C DIR, `popd; …`).
+					// The gate skips exactly one null-path shape: the bare
+					// here-doc marker (`<< EOF` feeds stdin, not a file).
+					if (
+						write.original.category === 'here_doc' &&
+						write.original.path === null
+					) {
+						writeCategories.add(write.original.category);
+						continue;
+					}
+					if (write.original.category === 'interpreter_eval') {
+						// The gate's #3347/#1902 scope-gated routing for the
+						// inspectable capability class: agents WITH a declared
+						// scope authorize the eval's (cd-tracked) working
+						// directory as the target. A WITHDRAWN eval
+						// (#3491 W1 `unresolved`) never routes — the walk could
+						// not stand behind any working directory.
+						// #3567 review PRR-010 (revision): mirror the gate's
+						// routing gate (tool-before.ts) — a routed eval needs a
+						// REAL declared scope (the defaulted `scopeEntries`
+						// cannot fabricate one) or an immutable non-writer role.
+						// The bare `scopeEntries.length > 0` let an architect
+						// explain-ALLOW an eval the gate blocks.
+						const hasRealDeclaredScope = scope != null && scope.length > 0;
+						const roleCapability =
+							AUTHORITY_ROLE_CAPABILITIES[
+								agent as keyof typeof AUTHORITY_ROLE_CAPABILITIES
+							];
+						const isImmutableNonWriter =
+							roleCapability === 'read-only' ||
+							roleCapability === 'dedicated-tool-only';
+						if (
+							write.original.capability === true &&
+							write.unresolved !== true &&
+							(isImmutableNonWriter || hasRealDeclaredScope)
+						) {
+							const evalTarget = write.evalDirectory ?? directory;
+							// #3567 review PRR-010: mirror the gate's FULL
+							// decision tail (universal-deny prefixes and the
+							// file-authority layer) before the declared-scope
+							// check — the bare scope-only branch let architect
+							// identities explain-ALLOW evaluations the gate
+							// blocks (scopeEntries is never empty here).
+							const authorityDecision = checkFileAuthority(
+								agent,
+								path.resolve(directory, evalTarget),
+								directory,
+								undefined,
+								{ declaredScope: scope != null ? [scope] : null },
+							);
+							if (authorityDecision.allowed !== true) {
+								decision = 'block';
+								firingRule = `file_authority: ${authorityDecision.reason ?? 'path not authorized'}`;
+								break;
+							}
+							if (!isInDeclaredScope(evalTarget, scopeEntries, directory)) {
+								decision = 'block';
+								firingRule = `scope_violation: write outside declared scope: ${redactPath(evalTarget)}`;
+								break;
+							}
+							writeCategories.add(write.original.category);
+							continue;
+						}
+						decision = 'block';
+						firingRule = `inline_eval: ${write.original.operator} evaluates inline code whose write targets cannot be verified against the declared scope — rejecting for safety`;
+						break;
+					}
+					// Every other null-path write (a withdrawn/dynamic redirect
+					// or builtin target, a patch_apply that produced no
+					// targets) fails closed exactly like the gate's
+					// dynamic-path-target rejection.
+					decision = 'block';
+					// #3567 review PRR-015: redact the raw dynamic source word
+					// like every sibling firing rule.
+					firingRule = `dynamic_target: write target${write.original.path ? ` "${redactPath(write.original.path)}"` : ''} cannot be statically resolved (dynamic path or withdrawn directory state) — rejecting for safety`;
+					break;
 				}
 			}
 		}
