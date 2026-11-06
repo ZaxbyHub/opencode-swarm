@@ -1074,7 +1074,7 @@ async function persistStateRowWhileLocked<
 		// reset by instance replacement or a field clear, and never regressed
 		// by a stale snapshot. Only the append branch below advances it.
 		const carriedGeneration = current?.observabilityRevision;
-		const mergedGenerationRow = {
+		const mergedGenerationRow: Record<string, unknown> = {
 			...(effective as unknown as Record<string, unknown>),
 		};
 		if (carriedGeneration !== undefined) {
