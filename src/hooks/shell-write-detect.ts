@@ -322,7 +322,20 @@ export function mergeWriteAnalyses(
 		if (supplementary.writes.includes(write)) {
 			if (wrapperDeclared) {
 				const construct = `${write.category}|${write.operator}`;
-				if (authorityConstructs.has(construct)) continue;
+				// #3572 review (delta, N-07 correction): a null-path or
+				// DYNAMIC-BEARING supplementary write is a fail-closed refusal
+				// carrier, not an unescape artifact — dropping it under a
+				// declared wrapper admitted `cmd /k echo hi ; echo y >
+				// src/$(echo ../../esc)` (the `;` statement runs under bash)
+				// while the plain twin denied. Path-bearing static duplicates
+				// still collapse to the authority reading.
+				if (
+					authorityConstructs.has(construct) &&
+					write.path !== null &&
+					!isDynamicPath(write.path)
+				) {
+					continue;
+				}
 			} else {
 				if (authorityKeys.has(key)) {
 					demoteKept(key);
@@ -4114,9 +4127,24 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 		const suffixWords = getSuffixWords(cmd);
 		for (let w = 0; w < suffixWords.length; w++) {
 			const word = suffixWords[w] ?? '';
-			if (word !== '-S' && word !== '--split-string') continue;
-			const payload = suffixWords[w + 1];
+			// #3572 review (delta): GNU getopt also accepts the GLUED long form
+			// `--split-string=VALUE` — the payload rode in the flag token and
+			// was silently consumed as an env argument.
+			const gluedSplit =
+				word.startsWith('--split-string=') && word.length > 15
+					? word.slice('--split-string='.length)
+					: undefined;
+			if (
+				word !== '-S' &&
+				word !== '--split-string' &&
+				gluedSplit === undefined
+			)
+				continue;
+			const payload = gluedSplit ?? suffixWords[w + 1];
 			if (payload === undefined || payload.trim() === '') break;
+			// Glued form: the payload is INSIDE the token (no next word).
+			const glued = gluedSplit !== undefined;
+			const postStart = glued ? w + 1 : w + 2;
 			const splitWords: string[] = [];
 			{
 				let cur = '';
@@ -4169,7 +4197,12 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 				pushW();
 			}
 			if (
-				splitWords.some((x: string) => x === '-S' || x === '--split-string')
+				splitWords.some(
+					(x: string) =>
+						x === '-S' ||
+						x === '--split-string' ||
+						x.startsWith('--split-string='),
+				)
 			) {
 				// Nested split-string: the payload re-parses again at execution
 				// time and the reconstruction cannot model it — emit the
@@ -4189,8 +4222,13 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 			const dynamicPayload =
 				splitWords.some((x: string) => isDynamicPath(x)) ||
 				suffixWords
-					.slice(w + 2)
-					.some((x) => x === '-S' || x === '--split-string');
+					.slice(postStart)
+					.some(
+						(x) =>
+							x === '-S' ||
+							x === '--split-string' ||
+							x.startsWith('--split-string='),
+					);
 			if (dynamicPayload) {
 				results.push({
 					category: 'redirect',
@@ -4204,15 +4242,40 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 			// spliced payload words + the post words) and re-enter the FULL
 			// detector family: the string-level scanner's leaf gate misses the
 			// special-cased tee/dd/env verbs, so a `env -S 'tee …'` payload
-			// was classified write-free.
+			// was classified write-free. Payload words are re-SERIALIZED with
+			// quote grouping intact (the review Critical: a bare-space join
+			// destroyed the `sh -c "script"` grouping the shell-wrapper walk
+			// depends on).
+			const shQuotePayload = (word: string): string =>
+				`'${word.replace(/'/g, `'\\''`)}'`;
+			const serializedPayload = splitWords
+				.map((word) =>
+					/^[A-Za-z0-9_@%+=:,./-]+$/.test(word) ? word : shQuotePayload(word),
+				)
+				.join(' ');
 			const reconstructed = [
 				'env',
 				...suffixWords.slice(0, w),
-				...splitWords,
-				...suffixWords.slice(w + 2),
+				serializedPayload,
+				...suffixWords.slice(postStart),
 			].join(' ');
 			for (const write of detectPosixWrites(reconstructed).writes) {
-				results.push(write);
+				// The union-back merge drops unwrapped-twin interpreter_eval
+				// capability markers (they would false-block safe
+				// `bash -c "echo hello"` re-classifications) — but HERE the
+				// marker is the ONLY signal the payload exists, so convert it
+				// to the unconditional dynamic refusal, which survives every
+				// merge filter and denies fail-closed.
+				if (write.category === 'interpreter_eval' && write.path === null) {
+					results.push({
+						category: 'redirect',
+						operator: 'env -S',
+						path: null,
+						unresolvedContext: true,
+					});
+				} else {
+					results.push(write);
+				}
 			}
 			return results;
 		}

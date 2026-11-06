@@ -73,19 +73,21 @@ shared by the gate, the detectors, and the explain mirror, so a path-qualified
 `C:\Windows\System32\cmd.exe /c copy a ..\x` selects the win32 authority and its
 out-of-scope write denies.
 
-**Feedback round (PR #3572 review N-items).** Four review defects closed with
-their pins in `guardrails-shell-write-3572-feedback-hardening.test.ts`:
+**Feedback round (PR #3572 review N-items).** Nine review defects closed with
+their pins in `guardrails-shell-write-3572-feedback-hardening.test.ts`
+(24 tests) and the relocated `shell-write-detect-perl-cluster-n12.test.ts`:
 
 - **N-01**: an accumulated sudo `-e`/`--edit` now survives the getopt `--`
   sentinel — `sudo -e -- FILE` was classified inner (no write target at all);
   the edit outcome is checked BEFORE the generic inner return.
 - **N-02**: a GNU `time -o FILE` segment stays WHOLE on the strip side
   (unwrapping to the timed tail erased the cd-tracking context that resolves
-  the -o target — `cd src && /usr/bin/time -o ok.txt true` resolved ok.txt at
-  the workspace root and denied a legitimate in-scope write). The timed
-  command is instead surfaced to the destructive arms by the new
-  `dcLauncherTimedTail` helper, which the gate pushes as an 'uncertain'
-  occurrence — `rm` in a timed tail still denies via the escaping sentinel.
+  the -o target). The timed command is surfaced to the destructive arms by
+  the new `dcLauncherTimedTail` helper: the gate AND the explain mirror push
+  the timed tail as an occurrence with the SEGMENT's own directory context —
+  `time` runs its command in the current shell, so `cd src && time -o r.txt
+  rm -rf build` judges the in-scope delete like the bare twin, and
+  `/usr/bin/time -o report rm -rf ../outside` still denies.
 - **N-03**: keyword-suppression must be PROVEN by a defined raw spelling;
   when the leaf walk cannot supply one (dequoted chain words), the GNU
   grammar wins — deny-direction (an over-approximated launcher_write, never
@@ -93,15 +95,47 @@ their pins in `guardrails-shell-write-3572-feedback-hardening.test.ts`:
   (`'time' -o src/report curl -o ../outside url`) now emits the escaping
   download.
 - **N-29**: GNU env `-S/--split-string` re-parses its payload as a command
-  line — the reconstructed argv (`env` + pre-flags + spliced payload words)
+  line. The reconstructed argv (`env` + pre-flags + RE-SERIALIZED payload
+  words — the bare-space join destroyed the `sh -c "script"` quote grouping)
   re-enters the FULL detector family (the string-level scanner's leaf gate
   missed the special-cased tee/dd/env verbs, so `env -S 'tee src/ok.txt'`
-  was write-free); nested `-S`, expansion-bearing payload words, and a
-  second `-S` in the original argv emit the unconditional dynamic refusal.
-  Completion: the wrapper-prefixed tee branch now starts at the RESOLVED
-  leaf word (`env tee src/ok.txt` fabricated the verb word itself as an
-  in-scope write target — the tee half of #3569's operand-window advisory;
-  the chdir-wrapper direct-write modeling stays tracked there).
+  was write-free); a payload whose analysis yields only a null-path eval
+  capability (`env -S 'sh -c "…"'`, `env -S 'python -c …'`) converts to the
+  unconditional dynamic refusal (the merge's union-back drops bare eval
+  markers); nested `-S` (spaced or GLUED `--split-string=VALUE`), expansion-
+  bearing payload words, and a second `-S` in the original argv emit the
+  same refusal; the glued `--split-string=VALUE` spelling is recognized by
+  the destructive strip too. Completion: the wrapper-prefixed tee branch
+  starts at the RESOLVED leaf word (`env tee src/ok.txt` fabricated the verb
+  word itself as an in-scope write target — the tee half of #3569's
+  operand-window advisory; the chdir-wrapper direct-write modeling stays
+  tracked there).
+- **N-06**: `deno run` with argument-less flags between `run` and the stdin
+  `-` keeps the stdin-eval shape — the write-capable allow-all form
+  (`deno run -A -`) was inverted against the bare form.
+- **N-13**: gate-level pin for the `perl -i.bak -ne` cluster eval; the
+  deleted reference-suite rows are described truthfully (removed, re-pinned
+  at the detector level — not "moved to a blocked set").
+- **N-16**: `scope_validate` consults the launcher deny-on-uncertainty
+  channel and the paranoid-bound depth flag like the live gate — for every
+  shell grammar (the gate applies both channels before grammar dispatch).
+- **N-25**: the launcher uncertainty channel sees through the transparent
+  `env`/`command`/`builtin`/`exec` heads it strips elsewhere
+  (`env -i sudo -i` denied like its bare twin), bounded by the shared
+  paranoid unwrap bound.
+- **N-26**: the launcher deny reason sanitizes the untrusted launcher word
+  (control characters neutralized, length bounded).
+- N-07 (follow-up to the round): a null-path supplementary write survives a
+  declared-wrapper construct collision — the dropped dynamic refusals were
+  fail-open (`cmd /k echo hi ; echo y > src/$(echo ../../esc)` admitted
+  while the plain twin denied). Path-bearing duplicates still collapse.
+- N-27 (follow-up): the explain mirror's PowerShell recurse arm matches the
+  verb through `dcSegmentVerbMatch` exactly like the gate — the W6
+  path-qualified case normalization (`/bin/RM -R …`) had split the surfaces.
+- Re-pins: N-28 (`cmd /k` declaration intent), N-12 (perl cluster writes,
+  relocated to a sibling file for the FR-006 ratchet), N-14 (the vacuous
+  `/dynamic|BLOCKED/` assertions tightened), N-11 (the win32-only separator
+  pin made platform-agnostic).
 
 ## Why
 
@@ -125,11 +159,13 @@ C9, C12–C15 stay GREEN.
   `rm.exe` and the POSIX-absolute `/bin/rm.exe` match `rm` — Git Bash resolves
   them to the same program (ground truth); the POSIX strip is an over-match in
   the deny direction, deliberately accepted (review advisory 2). Verb
-  normalization DISAGREES by arm on case: the WRITE arm stays POSIX
-  case-sensitive (`/bin/RM` never matches the write-path verb table), while
-  the DESTRUCTIVE arm's `dcSegmentVerbMatch` normalizes case-insensitively —
-  `/bin/RM` over-matches `rm` there, deny direction, deliberately accepted
-  (review advisory 2 + #3572 N-19).
+  basename extraction normalizes case in BOTH arms (executed ground truth,
+  #3572 N-19): the write arm matches `/bin/MV`, `/bin/CP`, `/bin/LN`,
+  `/bin/TOUCH`, `/bin/SED -i` (deny direction — an absolute path-qualified
+  POSIX verb is treated as the resolved program), and `/bin/RM` never
+  matches the write-arm verb table only because `rm` itself is not a
+  write-arm verb (the destructive arms catch it case-insensitively); the
+  POSIX-relative `./rm`/`../rm` stay project-local.
 - Perl cluster forms (`perl -i -pe '…'`, `perl -ne`) now carry an
   `interpreter_eval` write alongside their in-place report, so they route like
   `python -c`: denied for a scope-less architect and for a scoped coder while
@@ -184,11 +220,13 @@ C9, C12–C15 stay GREEN.
   write at the detectPosixWrites pass — "zero unbacked literal destination
   emitters" now holds by construction in the POSIX grammar — scoped
   honestly (#3572 N-20): the construction covers emitters that reach the
-  W8 engine or the isDynamicPath chokepoint; a GLUED long-flag destination
-  whose flag grammar the engine does not walk (`tar --file=src/{a,b}.tar
-  cf`) still lands on the chokepoint only as a whole-word REFUSAL (deny
-  direction, the same wholesale class as `gunzip -d src/{a,b}.gz`), not a
-  per-branch expansion. POSIX-scoped
+  W8 engine or the isDynamicPath chokepoint. Known edge inside that bound
+  (disclosed, deny-direction gap): a GLUED long-flag destination whose
+  flag grammar no extractor walks is a KNOWN UNDETECTED site —
+  `tar -x --file=src/{a,b}.tar` emits the literal (admitted when
+  in-scope), `tar --file=…` at a non-extraction position is undetected
+  entirely, and only the SHORT-flag extraction spelling
+  (`tar -xf src/{a,b}.tar`) reaches the chokepoint refusal. POSIX-scoped
   with the Windows detectors carved out (a literal PowerShell/cmd `{a,b}`
   filename keeps its literal handling); a QUOTED brace word is exempt
   (the W8 engine's own raw-scan proves it would not expand). The refusal
@@ -212,6 +250,12 @@ C9, C12–C15 stay GREEN.
   terminal, "launcher heads never nest another launcher"). Verified
   fail-open by probe; filed as the priority item of the PR's follow-up
   issue.
+- (Feedback-round residual, disclosed — NOT fixed here, verify-first:)
+  bare `sudo` with a piped stdin (`echo 'cmd' | sudo`, review N-23) — the
+  reviewer ground-truthed sudo's parse_args.c as an implied interactive
+  root shell, but the shape is not denied by this gate and could not be
+  re-verified on a sudo-bearing host during the round; filed in the
+  follow-up issue with a verify-first note.
 - nohup.out creation stays stdout-tty-gated and out of static reach — disclosed,
   not modeled.
 
@@ -239,8 +283,11 @@ C9, C12–C15 stay GREEN.
   `guardrails-shell-write-inplace-operands.test.ts` (perl in-place cluster rows
   moved from allowed to eval-blocked).
 - Feedback round: `tests/unit/hooks/guardrails-shell-write-3572-feedback-hardening.test.ts`
-  (17 tests: N-01 `sudo -e --` edit survival with in-scope admit control, N-02
+  (24 tests: N-01 `sudo -e --` edit survival with in-scope admit control, N-02
   timed-tail deny + cd-tracked admit, N-03 escaping-download emission +
-  gate deny + admit, N-29 env -S tee/cp-class detection + nested -S and
-  expansion payload refusals + destructive deny, wrapper-prefixed tee leaf
-  offset with admit/deny controls).
+  gate deny + admit, N-29 env -S tee detection + nested -S and expansion
+  payload refusals + destructive deny, wrapper-prefixed tee leaf offset with
+  admit/deny controls, N-25 uncertainty through transparent heads, N-26
+  sanitized hostile launcher word, N-13 perl cluster gate pin, N-06 deno
+  stdin flag run, N-16 scope_validate channel parity) and
+  `shell-write-detect-perl-cluster-n12.test.ts` (2 detector pins).

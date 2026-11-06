@@ -120,13 +120,12 @@
   the line still does not withdraw CDPATH-eligible `cd` operands.
 - The `env -C`/`sudo -D` rewrite consults the existing env-flag grammar,
   extended to GNU abbreviation spellings (`--ch=DIR`, `--c DIR`) so the
-  chdir is captured (#3567 feedback P-R1). `env -S 'payload'` is NOT yet
-  modeled as a re-parsed command: the strip consumes the payload as flag
-  arguments, so `env -S 'rm -rf …'` / `env -S 'sh -c "… > …"'` remain
-  under-detected (base behavior; the payload-routing fix lands with the G3
-  launcher workstream — disclosed, not silently assumed). Deeper launcher
-  option tables (sudo `-u`, glued `-D..` arity, `time -o`, nice) arrive
-  with G3 (PR-3; #3491 AC3/AC4 residuals).
+  chdir is captured (#3567 feedback P-R1). `env -S 'payload'` was NOT
+  modeled here as a re-parsed command — that landed in the G3 round (the
+  payload now routes through the destructive and write arms; the G3
+  fragment is the operative description, amended in its feedback round).
+  Deeper launcher option tables (sudo `-u`, glued `-D..` arity, `time -o`,
+  nice) arrive with G3 (#3491 AC3/AC4 residuals).
 - Process-substitution masking and brace-expansion write destinations were
   the PR-2 workstream's deferred set and HAVE SINCE LANDED (the G2/G3
   masked-procsub detector family and the W8 brace engine — the G2/G3

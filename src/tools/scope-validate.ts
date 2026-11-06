@@ -196,24 +196,24 @@ export function evaluateScopeValidate(
 	}
 	// #3572 review N-16: the live gate consults the launcher deny-on-
 	// uncertainty channel and the paranoid-bound depth flag BEFORE its no-
-	// write early return; the tool header claims live-guardrail parity, so
-	// both fail closed here too.
-	if (args.shell === 'posix') {
-		const uncertainty = dcAnalyzeLauncherUncertainty(args.command);
-		if (uncertainty.deny) {
-			fail(
-				'UNPARSEABLE_COMMAND',
-				uncertainty.reason ||
-					'launcher option uncertainty — command could not be verified safely',
-			);
-		}
-		const bounded = dcUnwrapWrappersBounded(args.command);
-		if (bounded.depthExceeded) {
-			fail(
-				'UNPARSEABLE_COMMAND',
-				'shell wrapper nesting exceeds the inspection bound — command could not be verified safely',
-			);
-		}
+	// write early return and BEFORE grammar dispatch, so parity requires both
+	// channels for EVERY shell grammar (the reviewer's cmd/powershell
+	// question: the live gate denies `sudo -i` on the raw command regardless
+	// of the detected grammar).
+	const uncertainty = dcAnalyzeLauncherUncertainty(args.command);
+	if (uncertainty.deny) {
+		fail(
+			'UNPARSEABLE_COMMAND',
+			uncertainty.reason ||
+				'launcher option uncertainty — command could not be verified safely',
+		);
+	}
+	const bounded = dcUnwrapWrappersBounded(args.command);
+	if (bounded.depthExceeded) {
+		fail(
+			'UNPARSEABLE_COMMAND',
+			'shell wrapper nesting exceeds the inspection bound — command could not be verified safely',
+		);
 	}
 	if (!analysis.hasWrites) {
 		return {

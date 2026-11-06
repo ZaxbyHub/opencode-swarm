@@ -846,14 +846,16 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		// strip side (unwrapping would erase the cd-tracking context that
 		// resolves the -o target), so the timed command text never reaches a
 		// verb-anchored destructive arm. The timed tail is pushed as an extra
-		// 'uncertain' occurrence — any destructive verb in it relocates to the
-		// escaping sentinel (fail-closed) without touching the write arm's
-		// cd-tracked resolution.
+		// occurrence with the SEGMENT's own directory context — `time` runs
+		// its command in the current shell (no cwd ambiguity), so the tracked
+		// relocation judges it exactly like the bare twin (`cd src && time -o
+		// r.txt rm -rf build` admits the in-scope delete; `/usr/bin/time -o
+		// report rm -rf ../outside` still denies).
 		for (const segment of outerSegments) {
 			const tail = dcLauncherTimedTail(segment);
 			if (tail !== null) {
 				for (const sub of dcSplitSegments(tail)) {
-					pushSegmentOccurrence(sub, 'uncertain');
+					pushSegmentOccurrence(sub, null);
 				}
 			}
 		}

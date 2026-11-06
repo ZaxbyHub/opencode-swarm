@@ -208,14 +208,18 @@ describe('3572 feedback: uncertainty channel + deny-reason hygiene (N-13/N-25/N-
 	}, 120_000);
 
 	test('deny reason sanitizes a hostile launcher word (N-26)', async () => {
-		const hostile = `sudo -h ${'x'.repeat(400)}\u0007cmd`;
-		const got = await gate(hostile);
+		// The hostile bytes ride the INTERPOLATED launcher word (a path-
+		// qualified spelling whose basename is sudo) — the reviewer's delta:
+		// a tail-word variant is never interpolated and the pin passes
+		// pre-fix (vacuous).
+		const hostileWord = `/${'x'.repeat(400)}\u0007/sudo`;
+		const got = await gate(`${hostileWord} -h cmd`);
 		expect(got.verdict).toBe('DENIED');
 		expect(got.message.length).toBeLessThan(400);
 		expect(got.message).not.toContain('\u0007');
 	}, 120_000);
 
-	test('gate: perl -i.bak -ne is a denied eval for a scope-less architect (N-13)', async () => {
+	test('gate: perl -i.bak -ne is a denied eval for a coder scoped to src/ (N-13)', async () => {
 		const got = await gate("perl -i.bak -ne 'print if /x/' src/a.ts");
 		expect(got.verdict).toBe('DENIED');
 		expect(got.message).toMatch(/BLOCKED/);
@@ -273,5 +277,60 @@ describe('3572 feedback: scope_validate channel parity (N-16)', () => {
 			wsRoot,
 		);
 		expect(result.allowed).toBe(true);
+	});
+});
+
+describe('3572 feedback delta round (reviewer gate findings)', () => {
+	test('gate: env -S shell-wrapper payload denies (quote grouping preserved)', async () => {
+		// The bare-space join destroyed the sh -c script grouping — the
+		// payload was invisible to both arms and the command admitted while
+		// its unwrapped twin denied.
+		expect((await gate(`env -S 'sh -c "rm -rf /important"'`)).verdict).toBe(
+			'DENIED',
+		);
+		expect((await gate(`env -S 'bash -c "tee ../../esc"'`)).verdict).toBe(
+			'DENIED',
+		);
+	}, 120_000);
+
+	test('gate: glued --split-string=VALUE payload denies', async () => {
+		expect((await gate(`env --split-string='rm -rf /important'`)).verdict).toBe(
+			'DENIED',
+		);
+		expect((await gate(`env --split-string='tee ../../esc'`)).verdict).toBe(
+			'DENIED',
+		);
+	}, 120_000);
+
+	test('gate: the transparent-head uncertainty bound is the paranoid bound', async () => {
+		// env x9 + sudo -i was admitted when the hop bound was 8.
+		const deep = Array.from({ length: 9 }, () => 'env').join(' ');
+		const got = await gate(`${deep} sudo -i`);
+		expect(got.verdict).toBe('DENIED');
+		expect(got.message).toMatch(/interactive shell/);
+	}, 120_000);
+
+	test('gate: declared-wrapper dynamic refusal survives the construct drop (N-07 correction)', async () => {
+		// The `;` statement runs under bash; the plain twin denies on the
+		// dynamic path and the declared-wrapper twin must deny too.
+		const plain = await gate('echo hi ; echo y > src/$(echo ../../esc)');
+		expect(plain.verdict).toBe('DENIED');
+		const wrapped = await gate(
+			'cmd /k echo hi ; echo y > src/$(echo ../../esc)',
+		);
+		expect(wrapped.verdict).toBe('DENIED');
+	}, 120_000);
+
+	test('gate: an in-scope timed delete judges at the tracked cwd (N-02 correction)', async () => {
+		// The timed tail carries the segment context (time runs its command
+		// in the current shell) — the bare twin admits and so must this.
+		expect(
+			(await gate('cd src && /usr/bin/time -o r.txt rm -rf build')).verdict,
+		).toBe('ADMITTED');
+	}, 120_000);
+
+	test('detector: direct-verb env -S payloads still classify (delta regression)', () => {
+		const r = detectPosixWrites("env -S 'tee src/ok.txt'");
+		expect(r.writes.map((w) => w.path)).toContain('src/ok.txt');
 	});
 });

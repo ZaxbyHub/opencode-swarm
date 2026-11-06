@@ -9,10 +9,12 @@ import {
 	dcExpandDestructiveSegments,
 	dcExtractPowerShellTargets,
 	dcExtractRecursiveRmTargets,
+	dcLauncherTimedTail,
 	dcNormalizeCommand,
 	dcParseWindowsRecursiveDelete,
 	dcPreprocessWrappers,
 	dcRelocateDestructiveTarget,
+	dcSegmentVerbMatch,
 	dcShellFlagClusterUncertain,
 	dcSplitSegments,
 	dcUnwrapWrappersBounded,
@@ -266,6 +268,18 @@ function evaluateDestructiveDecision(
 		pushSegmentOccurrence(segment, null);
 	for (const entry of expandedSegments)
 		pushSegmentOccurrence(entry.segment, entry.resolveFrom);
+	// #3572 N-02 parity: the GNU `time -o FILE` timed tail is judged with the
+	// SEGMENT's own directory context exactly like the live gate's push (time
+	// runs its command in the current shell — no cwd ambiguity), so explain
+	// cannot answer allow for a command the gate blocks.
+	for (const segment of outerSegments) {
+		const tail = dcLauncherTimedTail(segment);
+		if (tail !== null) {
+			for (const sub of dcSplitSegments(tail)) {
+				pushSegmentOccurrence(sub, null);
+			}
+		}
+	}
 	const relocate = (
 		resolveFrom: string | 'uncertain' | null,
 		targets: string[],
@@ -362,13 +376,24 @@ function evaluateDestructiveDecision(
 		// PowerShell: Remove-Item / aliases with -Recurse — whitespace-delimited
 		// switch tokens, mirroring the gate (a `-r` substring inside a path
 		// operand like `rm some-r/x` is a plain delete; issue #3495 class).
+		// #3572 review N-27 parity: the verb word matches through
+		// dcSegmentVerbMatch exactly like the gate's arm — the W6 path-qualified
+		// normalization (`/bin/RM -R /outside/x`, `"ri" -Recurse …`) fired in
+		// the gate while this anchored regex missed it and explain answered
+		// allow for a command the gate blocks.
+		const explainPsVerb = dcSegmentVerbMatch(seg, [
+			'remove-item',
+			'ri',
+			'rm',
+			'rmdir',
+			'del',
+			'erase',
+			'rd',
+		]);
 		if (
-			/^(?:[({\s])*(?:Remove-Item|ri|rm|rmdir|del|erase|rd)\b.*\s-[Rr]ecurse\b/i.test(
-				seg,
-			) ||
-			/^(?:[({\s])*(?:Remove-Item|ri|rm|rmdir|del|erase|rd)\b.*\s-[Rr]\b/i.test(
-				seg,
-			)
+			explainPsVerb &&
+			(/\s-[Rr]ecurse\b/i.test(explainPsVerb.rest) ||
+				/\s-[Rr]\b/i.test(explainPsVerb.rest))
 		) {
 			const targets = dcExtractPowerShellTargets(seg);
 			if (targets.length > 0) {

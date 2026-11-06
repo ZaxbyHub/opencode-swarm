@@ -736,14 +736,40 @@ export function dcStripOneWrapper(cmd: string): string | null {
 				cursor += 1;
 				continue;
 			}
-			if (token === '-S' || token === '--split-string') {
-				const payload = envWords[cursor + 1];
+			// #3572 review (delta): the GLUED `--split-string=VALUE` long form
+			// is GNU-getopt-legal and was silently consumed as an env flag.
+			const gluedSplit =
+				token.startsWith('--split-string=') && token.length > 15
+					? token.slice('--split-string='.length)
+					: undefined;
+			if (
+				token === '-S' ||
+				token === '--split-string' ||
+				gluedSplit !== undefined
+			) {
+				const payload = gluedSplit ?? envWords[cursor + 1];
 				if (payload === undefined) break;
 				const splitWords = shellSplitWords(payload);
-				if (splitWords.some((x) => x === '-S' || x === '--split-string')) {
+				if (
+					splitWords.some(
+						(x) =>
+							x === '-S' ||
+							x === '--split-string' ||
+							x.startsWith('--split-string='),
+					)
+				) {
 					break; // nested split-string: keep the raw text (fail closed)
 				}
-				envWords.splice(cursor, 2, ...splitWords);
+				if (gluedSplit !== undefined) {
+					// The payload is INSIDE the token: splice the serialized
+					// words and drop only the flag token itself.
+					envWords.splice(cursor, 1, shSerializeWords(splitWords));
+				} else {
+					// Review Critical: a bare-space join destroyed the
+					// `sh -c "script"` quote grouping the shell-wrapper walk
+					// depends on — splice the serialized form instead.
+					envWords.splice(cursor, 2, shSerializeWords(splitWords));
+				}
 				spliced = true;
 				// Do NOT advance cursor: the spliced payload words are
 				// re-examined in place (the payload may itself start with
@@ -938,7 +964,11 @@ export function dcAnalyzeLauncherUncertainty(command: string): {
 		// — `env -i sudo -i` skipped the channel while its bare twin denied.
 		// Unwrap only those transparent heads (bounded), then walk.
 		let seg = segment;
-		for (let hop = 0; hop < 8; hop += 1) {
+		// #3572 review (delta): the hop bound is the shared paranoid unwrap
+		// bound — 8 transparent heads were machine-generatable and left
+		// `env`×9 + `sudo -i` admitted; beyond this bound the shared
+		// dcUnwrapWrappersBounded depthExceeded channel denies anyway.
+		for (let hop = 0; hop < DC_UNWRAP_PARANOID_BOUND; hop += 1) {
 			const probe = shellSplitWordsWithOffsets(seg);
 			const probeHead = probe[0];
 			if (probeHead === undefined) break;
