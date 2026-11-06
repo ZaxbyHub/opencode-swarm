@@ -45,6 +45,7 @@ interface WorkflowInput {
 
 interface WorkflowStep {
 	name?: string;
+	if?: string;
 	uses?: string;
 	run?: string;
 	with?: Record<string, unknown>;
@@ -440,5 +441,58 @@ describe('dependency-bump workflow contract (frozen check C7, trace 3501-3285-35
 
 	test('approval runbook: the workflow records the action_required state for GITHUB_TOKEN-triggered CI runs', () => {
 		expect(requireText()).toContain('action_required');
+	});
+
+	test('release-fragment support: required issue input, pinned numeric guard, fragment-write step gated and ordered before the gates, and both allowlist gates expect it', () => {
+		// Live dispatch evidence (PR #3582 quality round): package.json and
+		// src/ pins trip the quality pending-fragment gate, which has no
+		// bot-author exemption — a user-visible bump without a fragment is
+		// undeliverable, so the bot commit must carry its own fragment.
+		// package.json is a MANDATORY dirty output of every dispatch, so the
+		// gate fires on EVERY dispatch and the input is required (an optional
+		// input lets an operator forget it: the channel goes green and the PR
+		// fails CI later — exactly the #3582 wasted round).
+		const dispatch = requireWorkflow()['on']?.workflow_dispatch as
+			| { inputs?: Record<string, WorkflowInput> }
+			| undefined;
+		expect(dispatch?.inputs?.issue?.type).toBe('string');
+		expect(dispatch?.inputs?.issue?.required).toBe(true);
+		const env = onlyJob().env ?? {};
+		expect(env.ISSUE).toBe('${{ inputs.issue }}');
+
+		const text = script();
+		// PINNED GUARD: the numeric gate itself (message-presence assertions
+		// pass under a deleted guard), and the write step's own condition.
+		expect(text).toContain('[[ "$ISSUE" =~ ^[1-9][0-9]*$ ]]');
+		expect(text).toContain(
+			'issue must be a positive GitHub issue number (required: every dispatch diffs package.json, a user-visible surface)',
+		);
+
+		const fragmentStep = stepIndexContaining('docs/releases/pending');
+		expect(fragmentStep).toBeGreaterThanOrEqual(0);
+		expect(steps()[fragmentStep]?.if).toBe("${{ env.ISSUE != '' }}");
+		const firstGate = steps().findIndex(
+			(step) =>
+				typeof step.run === 'string' &&
+				step.run.includes('unexpected dirty path'),
+		);
+		expect(firstGate).toBeGreaterThan(fragmentStep);
+		// EXACT count (write pointer 1 + each gate's read/entry 2+2 + refusal
+		// read 1): a loose >=4 bound passed with the pointer renamed. The
+		// refusal's git-show extraction must carry the pipefail-tolerant
+		// || true form (a bare git show exits 128 for a fragment-less head
+		// and set -e would kill the refresh step; reviewer NEW-1).
+		expect(allIndices(text, 'fragment.txt').length).toBe(6);
+		expect(text).toContain('|| true; } | sed -n');
+		const gateRuns = steps()
+			.map((step) => (typeof step.run === 'string' ? step.run : ''))
+			.filter((run) => run.includes('unexpected dirty path'));
+		expect(gateRuns.length).toBe(2);
+		for (const run of gateRuns) expect(run).toContain('fragment.txt');
+		// The generated fragment carries a Why section (contributing.md
+		// fragment contract) and the existing-PR refresh path refuses a
+		// changed-issue re-dispatch (trailers do not bind issue).
+		expect(text).toContain("echo '## Why'");
+		expect(text).toContain('existing PR head binds issue');
 	});
 });
