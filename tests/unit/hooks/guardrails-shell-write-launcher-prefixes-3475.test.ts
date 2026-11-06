@@ -195,9 +195,21 @@ describe('gate: launcher-prefixed write commands (#3475)', () => {
 		'command',
 		'builtin',
 		'exec',
-	])('parity: %s touch ../zz stays admitted exactly like plain touch', async (prefix) => {
-		await expect(runAsCoder(`${prefix} touch ../zz`)).resolves.toBeUndefined();
-		await expect(runAsCoder('touch ../zz')).resolves.toBeUndefined();
+	])('parity: %s touch ../zz verdict matches bash (#3568 touch modeling)', async (prefix) => {
+		// #3568 F-01: touch is now a modeled write builtin. `command`/`exec`
+		// are transparent wrappers — bash runs touch, so the escaping target
+		// denies through BOTH the prefixed and the plain spelling. `builtin`
+		// is the deliberate exception (#3485 PRR-015): bash ERRORS on a
+		// non-builtin wrapped name and runs nothing, so the admit is correct
+		// (the leaf walk refuses to unwrap it).
+		if (prefix === 'builtin') {
+			await expect(
+				runAsCoder(`${prefix} touch ../zz`),
+			).resolves.toBeUndefined();
+			return;
+		}
+		await expect(runAsCoder(`${prefix} touch ../zz`)).rejects.toThrow();
+		await expect(runAsCoder('touch ../zz')).rejects.toThrow();
 	});
 
 	it.each([

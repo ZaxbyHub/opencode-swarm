@@ -443,7 +443,38 @@ evidence refs — never raw command output), the snapshot hashes the gates
 were evaluated against, and content-hashed artifact refs. A gate that ran
 but left no durable record is absent from the receipt (nothing is
 reconstructed), so the receipt attests the durable state, not an
-execution trace. Receipts are stored
+execution trace. Task-kind gate outcomes derive from the durable entry via
+the shared `src/evidence/gate-outcome.ts` derivation (#3560):
+verdict-bearing records reflect the recorded verdict (`APPROVE`→`pass`,
+`REJECT`→`block`, `CONCERNS`→`pass`+`code` — durable CONCERNS is the
+task-level advisory form; a PRESENT verdict that is not one of those
+recognized strings — including a non-string value — yields `error`, so a
+malformed or future-vocabulary verdict can only degrade toward scrutiny,
+never improve to pass), while
+presence-only records (pre_check/reviewer/test_engineer/critic family)
+attest pass-on-presence honestly by producer contract — those writers
+record only on positive settlement and failure DELETES the key. The
+limitation that follows: absence cannot distinguish "gate never ran" from
+"gate ran and failed (record deleted)"; failure detail lives in
+`workflow.lastOutcome`/`retryHistory` (capped, lossy) and is intentionally
+not derived into gate rows. An empty `gates` map yields a `task_evidence`
+row with `not_applicable` — or `pass`+`code:'no_mutation_settlement'` ONLY
+when the canonical `isDurableNoMutationSettlement` predicate holds
+(authoritative generation-0 idle/complete workflow with a bound proof); a
+marker merely retained through a blocked/closed transition does not
+qualify — never a fabricated pass. The evidence-summary bridge shares the
+same derivation and reports the RECORDED verdict (`rejected`/`approved`/
+`warn`/`fail`/`pass`, with the recorded token in the entry summary and
+`durable_verdict` metadata), so a REJECT stays distinguishable from a
+malformed verdict and no surface collapses a durable failure into a pass.
+Receipt outcome rows attest the RECORDED verdict only — council quorum
+adequacy, identity-digest validity, and workflow freshness are adjudicated
+by the task-completion gate and the state-rehydration path, so a record the
+platform would refuse still renders as its recorded verdict (#3561
+disclosure). Every dynamic cell of the rendered receipt Markdown is
+escaped (`|`, CR/LF) so durable bytes cannot forge a table row absent from
+the hash-bound receipt.json (#3561 FB-003).
+Receipts are stored
 under `.swarm/evidence/receipts/` as JSON plus rendered Markdown;
 `--export` writes a self-contained bundle (receipt + Markdown + byte-copies
 of every cited artifact) under

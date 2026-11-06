@@ -57,6 +57,10 @@ describe('getPluginCachePaths', () => {
 
 	test('on linux returns all four XDG paths and no platform-specific paths', () => {
 		setPlatform('linux');
+		// #3355: the bunfig sdd-selection preload sets XDG_CONFIG_HOME for the
+		// whole process; these platform-layout tests describe the XDG-UNSET
+		// world, so pin it explicitly rather than relying on ambient state.
+		delete process.env.XDG_CONFIG_HOME;
 		const paths = getPluginCachePaths();
 		expect(paths.length).toBe(4);
 		// No darwin or win32 paths
@@ -225,6 +229,8 @@ describe('getPluginLockFilePaths', () => {
 
 	test('on linux returns exactly 3 XDG/legacy lock paths', () => {
 		setPlatform('linux');
+		// #3355: pin the XDG-UNSET world (see the cache-paths test above).
+		delete process.env.XDG_CONFIG_HOME;
 		const paths = getPluginLockFilePaths();
 		expect(paths.length).toBe(3);
 		// Should include bun.lock, bun.lockb, package-lock.json

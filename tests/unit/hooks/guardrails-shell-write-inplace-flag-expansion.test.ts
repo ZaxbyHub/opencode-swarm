@@ -94,7 +94,10 @@ describe('guardrails shell writes: an expansion in the sed -i flag word', () => 
 				output(`X='1d /etc/passwd'; sed -i -n "$(: "'")"$X src/f.ts`),
 			),
 		).rejects.toThrow(
-			/^BLOCKED: bash\/shell write to a dynamic path target ""\$\(: "'"\)"\$X" that cannot be statically resolved/,
+			// P-F3 fail-closed: the split-mangled $() fragment now trips the
+			// wrapper-walk fail-closed channel (parse-failure rejection)
+			// instead of the dynamic-path channel; the verdict is unchanged.
+			/^BLOCKED: (?:bash\/shell write to a dynamic path target|bash write detection failed to parse command)/,
 		);
 	});
 

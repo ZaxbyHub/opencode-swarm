@@ -83,9 +83,32 @@ function fail(code: string, message: string): never {
 	throw new ScopeValidationError(code, message);
 }
 
-function detectWrites(args: ScopeValidateArgs) {
-	if (args.shell === 'posix') return detectPosixWrites(args.command);
-	return detectWindowsWrites(args.command, args.shell);
+function detectWrites(args: ScopeValidateArgs): {
+	analysis: ReturnType<typeof detectPosixWrites>;
+	command: string;
+} {
+	// #3568 review PRR-008 (+#3568 handoff item 2): the masked process-
+	// substitution residual is the command text whose writes the live gate
+	// resolves — `cd .. && echo hi > out.txt; true <(true)` parses CLEAN on
+	// the raw text after masking, so the gate denies on the RESIDUAL's
+	// cd-tracked landing while a raw-text resolution here answered ALLOWED
+	// where the tool header claims live-guardrail parity. Resolve on the
+	// residual when the POSIX analysis carries one, exactly like the gate's
+	// detectionCommand substitution.
+	if (args.shell !== 'posix') {
+		return {
+			analysis: detectWindowsWrites(args.command, args.shell),
+			command: args.command,
+		};
+	}
+	const analysis = detectPosixWrites(args.command);
+	return {
+		analysis,
+		command:
+			analysis.residualCommand !== undefined
+				? analysis.residualCommand
+				: args.command,
+	};
 }
 
 /**
@@ -163,7 +186,7 @@ export function evaluateScopeValidate(
 	) {
 		fail('DESTRUCTIVE_COMMAND', 'destructive command intent is not permitted');
 	}
-	const analysis = detectWrites(args);
+	const { analysis, command } = detectWrites(args);
 	if (analysis.parseError) {
 		fail('UNPARSEABLE_COMMAND', 'command could not be parsed safely');
 	}
@@ -176,11 +199,7 @@ export function evaluateScopeValidate(
 		};
 	}
 
-	const resolved = resolveWriteTargets(
-		args.command,
-		analysis.writes,
-		directory,
-	);
+	const resolved = resolveWriteTargets(command, analysis.writes, directory);
 	const targets: ScopeValidateTarget[] = [];
 	for (const target of resolved) {
 		if (!target.resolved || !target.resolvedPath) {

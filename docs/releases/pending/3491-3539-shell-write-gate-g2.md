@@ -16,8 +16,11 @@
   token-preserving `/dev/null` placeholder, and parses the RESIDUAL with
   bash-parser. When the residual parses clean the OUTER writes come from
   the normal AST detectors on it, the masked INNER writes come from the
-  shared per-stage scan on each span body (`<(cat > f)` bodies analyzed
-  too), and the analysis returns the residual as `residualCommand` — the
+  FULL detector family run on each span body (#3568 feedback PRR-001 — the
+  original per-stage scan recognized only the builtin set plus simple
+  redirects, letting tee/dd/curl/sed -i/python/rsync/archive and nested
+  `<(` bodies through), and the analysis returns the residual as
+  `residualCommand` — the
   gate and `/swarm guardrail explain` resolve surviving writes against
   the RESIDUAL, so `cd ..; tee >(cat > src/ok); echo x > src/f` resolves
   the outer write at the tracked post-cd directory and denies. The
@@ -28,7 +31,8 @@
   (`unresolvedContext`, the proven #3518 P-3 channel) whenever their body
   OR the residual prefix before the span carries a directory-selection
   word (`cd|pushd|popd` — `tee >(cd ..; cat > src/f)` denies; a `cd` after
-  the span does not withdraw). Anything short of full success — zero
+  the span does not withdraw; the backslash-escaped verb spelling
+  `\cd ..` withdraws too — #3568 F-04). Anything short of full success — zero
   maskable spans, an unbalanced/ambiguous span, an unparseable residual —
   keeps the parseError UNCONDITIONALLY: the legacy whole-command regex
   fallback still emits its writes for observability, but its partial
@@ -112,6 +116,43 @@
   PowerShell wrapper without the native Windows runner rejects some
   shapes — an environment behavior outside this gate, pinned
   detector-level in the shipped suite).
+- Procsub span BODIES are pushed to the destructive arm with an UNCERTAIN
+  child-cwd context (#3568 F-01: a body `rm -rf …` sits at the body's own
+  verb position), so any destructive verb inside a procsub body relocates
+  to the escaping sentinel — an over-block for benign destructive-in-procsub
+  shapes, disclosed (fail-closed).
+- `touch` is now a modeled write builtin (every operand; #3568 F-01 — the
+  operand loop was previously invisible to both walks, admitting
+  `touch ../../esc` at base too), and `cp -t DEST` emits DEST as a write
+  target alongside the last-operand destination (#3568 PRR-009 — bash
+  writes DEST/<basename>).
+- A FULLY-quoted brace token (`dd "of=../../src/{a,b}"`) no longer
+  mis-slices across its quote wrapper (#3568 F-02): the braces stay
+  literal (bash truth) and the whole literal path is the judged write.
+- Numeric brace ranges refuse BEFORE materialization (#3568 PRR-006 —
+  the sequence was built first and only then cap-checked: `{1..100000000}`
+  cost GB-scale RSS and a 20-digit endpoint never terminated; both now
+  classify dynamic in milliseconds). The procsub body recursion is DEPTH-
+  BOUNDED (8 levels; reviewer F-b — nested re-masking was super-linear:
+  28KB at 4000 levels measured 17.4s vs 6ms base) and fails closed past
+  the bound (a depth-cap body surfaces as a null-path unresolved write —
+  delta-critic round: the cap originally dropped the nested write
+  entirely, reopening the F-01 class at depth 9).
+- `/swarm guardrail explain` does NOT mirror the destructive-arm sentinel
+  relocation for procsub span bodies (reviewer F-c): the live gate denies
+  `true <(rm -rf .swarm)` via the body's uncertain-context relocation,
+  while explain can answer allow for the same shape (the write-scope
+  mirror blocks the body's WRITE verbs; the destructive relocation is
+  gate-only). `scope_validate` DOES deny the shape (DESTRUCTIVE_COMMAND).
+  Disclosed asymmetry — the gate is the enforcement surface.
+- touch option VALUES (`-d/-t/-r` short-with-separate-arg and the long
+  `--date/--reference/--time` forms) are consumed, not judged as targets;
+  path-qualified leaves (`command /usr/bin/touch x`) locate the verb by
+  basename. `cp -tDEST` (attached short value) is modeled alongside the
+  spaced and `=` forms. An UNQUOTED `dd of=$VAR` emits the dynamic
+  refusal; a QUOTED `of=$VAR` expansion remains invisible (pre-existing
+  at base — the quote wrapper defeats both the word gate and the
+  expansion detection; disclosed).
 
 ## Verification
 

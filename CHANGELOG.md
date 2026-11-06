@@ -1,5 +1,17 @@
 # Changelog
 
+## [7.201.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.201.1...v7.201.2) (2026-11-04)
+
+
+### Bug Fixes
+
+* **config:** preserve full_auto.locked across loader recovery and harden sdd source reads ([a442b42](https://github.com/ZaxbyHub/opencode-swarm/commit/a442b4261f314a3742e2d65327455001a13bf145))
+* **config:** preserve full_auto.locked across loader recovery and harden sdd source reads ([ddebce5](https://github.com/ZaxbyHub/opencode-swarm/commit/ddebce5cff1abfa543173eef3de1c1d380a6a162))
+* **evidence:** derive task receipt outcomes from the durable record ([2a6effd](https://github.com/ZaxbyHub/opencode-swarm/commit/2a6effd7c91b0c8d0754d07b9310e5439179bbac))
+* **evidence:** fail closed on malformed verdicts, canonical settlement proof, md-escaped attestations ([#3561](https://github.com/ZaxbyHub/opencode-swarm/issues/3561) review round) ([0d8c240](https://github.com/ZaxbyHub/opencode-swarm/commit/0d8c240ea4d7a43590de22459dd25b7bf1b0df63))
+* **guardrails,pr-feedback:** verifier-config protection for every role + PR_FEEDBACK base binding ([#3120](https://github.com/ZaxbyHub/opencode-swarm/issues/3120), [#3396](https://github.com/ZaxbyHub/opencode-swarm/issues/3396)) ([feb02e4](https://github.com/ZaxbyHub/opencode-swarm/commit/feb02e46824ef3ad2df09ab17766fffba80fb78d))
+* **host/v2:** create lane sessions parented and move them into the worktree ([#3558](https://github.com/ZaxbyHub/opencode-swarm/issues/3558)) ([5008106](https://github.com/ZaxbyHub/opencode-swarm/commit/5008106acadb275956e6d27018550ad6bf3e2ba5))
+
 ## [7.201.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.201.0...v7.201.1) (2026-11-03)
 
 

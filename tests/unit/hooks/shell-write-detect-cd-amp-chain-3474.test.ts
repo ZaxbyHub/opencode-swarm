@@ -116,6 +116,11 @@ describe('gate: cd chains track every cd under && like under ; (#3474)', () => {
 		const workspaceSrc = `${path.basename(TEST_DIR)}/src`;
 		await expect(
 			runAsCoder(`cd .. || cd ${workspaceSrc} && echo x > escape.txt`),
-		).rejects.toThrow(/^WRITE BLOCKED(?: \[shell-write-scope\])?: /);
+			// PRR-012 both-outcome model: the || divergence withdraws the
+			// sibling write (null-path denial) instead of the old
+			// single-landing scope check — verdict unchanged (rejected).
+		).rejects.toThrow(
+			/^WRITE BLOCKED(?: \[shell-write-scope\])?: |^BLOCKED: bash\/shell write to a dynamic path target/,
+		);
 	});
 });

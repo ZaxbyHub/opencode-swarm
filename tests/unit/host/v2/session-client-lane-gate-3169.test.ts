@@ -5,15 +5,16 @@
  *
  * Drives the REAL `precreateStandardWorktreeSession` with
  * `swarmState.opencodeClient` set to `createV2SessionClient(fakeCtx)` — a
- * divergent-directory lane create therefore flows through the eager parentless
+ * divergent-directory lane create therefore flows through the eager lane
  * arm — with `provisionWorktree` stubbed via the module's `_internals` seam
  * (the lane provisioning machinery itself is pinned by the
  * delegation-gate-worktree-isolation suites). Pins the AC4 clauses a shim-level
  * test cannot see: the Task `task_id` rewrite stores the REAL lane session id,
  * an `isolationRequired` dispatch does NOT throw
  * (`EPIC_ISOLATION_DEGRADED` is the wrap of a precreate rejection), no
- * degradation reason is recorded, and the host create carries no parentID with
- * the lane directory as its location.
+ * degradation reason is recorded, and the host create carries the real
+ * parentID (OpenCode 2.1.x's native `subagent` resume requires it) with the
+ * lane directory as its location.
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
@@ -45,7 +46,11 @@ function makeFakeSessionDomain(parentDirectory: string, laneDirectory: string) {
 			calls.push({ op: 'hook', arg: undefined });
 			return { dispose: async () => {} };
 		},
-		async create(input: { title?: string; location?: { directory: string } }) {
+		async create(input: {
+			parentID?: string;
+			title?: string;
+			location?: { directory: string };
+		}) {
 			calls.push({ op: 'create', arg: input });
 			return { id: 'ses_gate_lane', location: { directory: laneDirectory } };
 		},
@@ -204,7 +209,7 @@ describe('gate precreate through the v2 session-client shim (#3169 Phase 3)', ()
 			parentID?: string;
 			location?: { directory: string };
 		};
-		expect(createArg.parentID).toBeUndefined();
+		expect(createArg.parentID).toBe(PARENT);
 		expect(createArg.location?.directory).toBe(laneDirectory);
 		// The lane prompt context (worktree_lane_context) is prepended in place.
 		expect(typeof outputArgs.prompt).toBe('string');

@@ -72,6 +72,7 @@ import {
 } from '../shell-executor-context';
 import {
 	DETECTOR_UNWRAP_PARANOID_BOUND,
+	dcProcSubSpanBodies,
 	detectInteractiveSession,
 	detectPosixWrites,
 	detectWindowsWrites,
@@ -85,7 +86,7 @@ import {
 	PATCH_PAYLOAD_KEYS,
 	resolveWriteTargets as resolveFileWriteTargets,
 } from '../write-target-resolver';
-import { appendGuardrailDecision } from './audit-log';
+import { appendGuardrailDecision, redactPath } from './audit-log';
 import {
 	DC_UNWRAP_PARANOID_BOUND,
 	dcAnalyzeLauncherUncertainty,
@@ -99,6 +100,8 @@ import {
 	dcPreprocessWrappers,
 	dcRelocateDestructiveTarget,
 	dcSegmentVerbMatch,
+	dcShellFlagClusterUncertain,
+	dcShellPayloadRunsIsolated,
 	dcSplitSegments,
 	dcUnwrapWrappersBounded,
 } from './destructive-command';
@@ -811,6 +814,45 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			pushSegmentOccurrence(segment, null);
 		for (const entry of expandedSegments)
 			pushSegmentOccurrence(entry.segment, entry.resolveFrom);
+		// #3567 review P-B: a MULTI-statement `sh -c` payload runs in a child
+		// shell whose inner `cd` re-bases every LATER payload statement on a
+		// directory the parent-sequence model cannot track (`bash -c 'cd ..;
+		// rm -rf x'` deletes the PARENT's parent). Such payload segments are
+		// pushed with an uncertain child-cwd context so their destructive
+		// targets relocate to the escaping sentinel (fail-closed).
+		for (let i = 0; i < outerSegments.length; i += 1) {
+			const seg = outerSegments[i] as string;
+			if (!dcShellPayloadRunsIsolated(seg)) continue;
+			const unwrappedSeg = perSegmentUnwrapped[i] ?? seg;
+			for (const sub of dcSplitSegments(unwrappedSeg)) {
+				pushSegmentOccurrence(sub, 'uncertain');
+			}
+		}
+		// #3568 review F-01: process-substitution span bodies run their own
+		// command text at a verb position the segment-head-anchored
+		// destructive extractors never see (`true <(rm -rf .swarm)` base
+		// parse-denied; the masked path made the body invisible). Each body
+		// segment is pushed with an uncertain context — a subshell inherits
+		// the tracked cwd, which the destructive relocation model cannot
+		// track through a procsub — so any destructive verb in a body
+		// relocates to the escaping sentinel (fail-closed).
+		for (const body of dcProcSubSpanBodies(command)) {
+			for (const sub of dcSplitSegments(body)) {
+				pushSegmentOccurrence(sub, 'uncertain');
+			}
+		}
+		// #3567 review PRR-003: a shell-family launcher whose flag cluster the
+		// W4 walk cannot model (`bash -oc pipefail 'rm -rf …'` — ground truth:
+		// the payload EXECUTES) leaves the payload invisible to every
+		// verb-anchored destructive arm. Deny on that uncertainty instead of
+		// admitting an uninspectable tail.
+		const uncertainCluster = dcShellFlagClusterUncertain(command);
+		if (uncertainCluster !== null) {
+			throwDestructiveBlock(
+				'shell flag cluster',
+				`BLOCKED: shell interpreter invocation "${uncertainCluster}" carries a flag cluster the guard cannot statically model (unknown option or glued argument) — deny-on-uncertainty.`,
+			);
+		}
 		const relocate = (
 			resolveFrom: string | 'uncertain' | null,
 			targets: string[],
@@ -1804,7 +1846,12 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 					isEmptyDirectoryRemovalWithinWorkspace(target, shellDirectory)
 				)
 			) {
-				const safeTarget = sanitizeDiagnosticText(target, 320);
+				// #3567 review PRR-014: the thrown denial reaches operator and
+				// provider-bound transcripts — render the resolved target with
+				// the same home-redaction class the audit row applies (the W1
+				// HOME-landing targets put absolute user-profile paths here;
+				// sanitizeDiagnosticText alone never redacts them).
+				const safeTarget = sanitizeDiagnosticText(redactPath(target), 320);
 				const scopeSummary = declaredScope
 					.slice(0, 10)
 					.map((entry) => sanitizeDiagnosticText(entry, 160))
@@ -1913,8 +1960,13 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 					// word (`src/{a..e}`, `src/{a,$(echo b)}`) — the branch
 					// text the expansion would substitute was never typed
 					// verbatim.
-					const dynamicTargetLabel =
-						write.original.path ?? write.original.dynamicSourceWord;
+					// #3568 review F-10: the user's SOURCE word is untrusted
+					// text — sanitize control characters and bound its length
+					// before it reaches the operator-facing denial.
+					const dynamicTargetLabel = sanitizeDiagnosticText(
+						write.original.path ?? write.original.dynamicSourceWord ?? '',
+						160,
+					);
 					throw new ShellWriteBlockedError(
 						`BLOCKED: bash/shell write to a dynamic path target${
 							dynamicTargetLabel ? ` "${dynamicTargetLabel}"` : ''
@@ -3322,7 +3374,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 						rawMessage,
 					);
 
-				const candidate =
+				const rawCandidate =
 					extracted != null
 						? (extracted[1] ??
 							extracted[2] ??
@@ -3331,6 +3383,10 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 							extracted[5] ??
 							extracted[6])
 						: null;
+				// #3567 review P-R5: strip the quoting the regex fallback can
+				// carry into the audit row (`> "$V:src/ok.ts"` recorded
+				// `src/ok.ts"`) before persisting the extracted target.
+				const candidate = rawCandidate?.replace(/^['"]+|['"]+$/g, '');
 
 				if (candidate && candidate.length > 0 && candidate.length < 200) {
 					return candidate;

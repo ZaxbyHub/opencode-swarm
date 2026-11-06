@@ -224,6 +224,15 @@ export const TOOL_METADATA = {
 	// #2968/#2970: placed AFTER check_gate_status — the evidence_check →
 	// check_gate_status adjacency in TOOL_NAMES is a pinned ordering invariant
 	// (tests/unit/tools/tool-names.adversarial.test.ts).
+	// The agents list below is an INTENT statement (who should emit receipts).
+	// The receipt command's toolPolicy:'agent' (src/commands/registry.ts)
+	// intentionally keeps invocation reachable by every agent, coder included:
+	// receipt content derives solely from durable state plus emitter
+	// constants, so the call path cannot forge what a receipt attests
+	// (PR #3550 disposition, critic-reviewed; task-arm outcome fidelity is
+	// tracked separately at issue #3560). Do not align the two surfaces
+	// without first deciding emitter authority and the out-of-band report
+	// anchor — see the paired registry.ts comment.
 	receipt: {
 		description:
 			'emit a portable verification receipt (JSON + Markdown) recording the durably recorded gate outcomes for a task or phase, with content hashes and snapshot hashes; export writes a self-contained bundle under .swarm/plan-export/ and --verify re-checks every recorded hash in a bundle on any machine, exiting nonzero on any mismatch',
