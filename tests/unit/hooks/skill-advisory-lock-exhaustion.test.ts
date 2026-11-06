@@ -35,20 +35,20 @@ import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { closeAllProjectDbs } from '../../../src/db/project-db.js';
 import {
-	_test_exports as gateInternals,
 	appendPrWorkflowSkillContractAdvisories,
+	_test_exports as gateInternals,
 	prWorkflowSessionFileStem,
 	readPrWorkflowGateState,
 } from '../../../src/hooks/pr-workflow-gate.js';
 import {
-	_internals as responseGateInternals,
 	createPrWorkflowResponseGate,
+	_internals as responseGateInternals,
 } from '../../../src/hooks/pr-workflow-response-gate.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 import {
 	idleEventFor,
 	writeStateWithRevision,
 } from './pr-workflow-response-gate-test-helpers.js';
-import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const NOW = '2026-11-06T00:00:00.000Z';
 
