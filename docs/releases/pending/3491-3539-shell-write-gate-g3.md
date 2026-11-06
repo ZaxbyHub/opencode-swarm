@@ -79,7 +79,7 @@ out-of-scope write denies.
 
 **Feedback round (PR #3572 review N-items).** Nine review defects closed with
 their pins in `guardrails-shell-write-3572-feedback-hardening.test.ts`
-(34 tests) and the relocated `shell-write-detect-perl-cluster-n12.test.ts`:
+(41 tests) and the relocated `shell-write-detect-perl-cluster-n12.test.ts`:
 
 - **N-01**: an accumulated sudo `-e`/`--edit` now survives the getopt `--`
   sentinel — `sudo -e -- FILE` was classified inner (no write target at all);
@@ -266,12 +266,12 @@ C9, C12–C15 stay GREEN.
   -o x true`) loses the inner `-o` EMISSION — the walk recurses one
   nesting level only — but the escaping shapes still deny at the gate via
   the unwrap/N-03 net while the in-scope twin admits; tracked in the PR's
-  follow-up issue.
+  follow-up issue filed at closeout.
 - (Implied-shell note:) the command-less-sudo deny models sudo's
   parse_args.c semantics as ground-truthed by the reviewer on a sudo host;
   this host has no sudo binary, so the modeling rests on that citation
   plus the gate's own `sudo -i` parity — flagged for a sudo-bearing
-  verification pass in the follow-up issue.
+  verification pass in a follow-up issue filed at closeout (which also tracks the `sudo -i`/`-s` quoted-payload shell-join family and the `sudo -D -e` chdir edit-target gap).
 - nohup.out creation stays stdout-tty-gated and out of static reach — disclosed,
   not modeled.
 

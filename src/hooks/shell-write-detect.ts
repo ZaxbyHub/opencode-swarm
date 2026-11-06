@@ -2988,38 +2988,25 @@ function walkSudoOptions(words: readonly string[]): LauncherWalkOutcome {
 				return { kind: 'interactive' };
 			}
 			if (listMode) return { kind: 'benign' };
-			if (queryOther)
-				return { kind: 'uncertain', tailIndex: i + 1 };
-			// parse_args.c consumes leading VAR=value as environment settings;
-			// assignments-only after `--` is still argc==0 → implied shell.
-			let j = i + 1;
-			while (
-				j < words.length &&
-				/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[j] ?? '')
-			) {
-				j += 1;
-			}
-			if (j >= words.length) {
-				if (resetOnly && execOrResetSeen && !interactive) {
-					return { kind: 'benign' };
-				}
-				return { kind: 'interactive' };
-			}
+			if (queryOther) return { kind: 'uncertain', tailIndex: i + 1 };
+			// #3572 delta review: parse_args.c BLOCKS env consumption after
+			// the sentinel (got_end_of_args) — post-`--` VAR=value words are
+			// the literal command, so no assignment scan here.
 			// #3572 delta-critic: the nested GNU `time` lookup runs on the
 			// post-`--` word exactly like the non-sentinel path.
-			const nested = nestedTimeTail(words, j);
+			const nested = nestedTimeTail(words, i + 1);
 			if (nested !== null) {
 				return {
 					kind: 'inner',
 					innerIndex: nested.innerIndex,
 					timeOutputFile: nested.timeOutputFile,
-					chdirTailIndex: j,
+					chdirTailIndex: i + 1,
 					...(chdirDir !== undefined ? { sudoChdir: chdirDir } : {}),
 				};
 			}
 			return {
 				kind: 'inner',
-				innerIndex: j,
+				innerIndex: i + 1,
 				...(chdirDir !== undefined ? { sudoChdir: chdirDir } : {}),
 			};
 		}
@@ -3118,44 +3105,55 @@ function walkSudoOptions(words: readonly string[]): LauncherWalkOutcome {
 			}
 			continue;
 		}
-		// First non-option word.
+		// First non-option word. parse_args.c consumes VAR=value words as
+		// environment settings and RESUMES getopt after each ("crank optind
+		// and resume getopt" — the post-assignment word may be an option or
+		// `--`), so an assignment here resumes the option loop; a real
+		// command word returns the walk outcome.
 		if (edit) return { kind: 'edit', editStartIndex: i };
 		if (listMode) return { kind: 'benign' }; // -l [command]: lists privileges, never executes
 		if (queryOther)
 			// -v/-V/-K/-L with a trailing command: sudo(8)'s synopsis gives
 			// these modes no command operand — deny-on-uncertainty.
 			return { kind: 'uncertain', tailIndex: i };
-		// parse_args.c consumes leading VAR=value words as environment
-		// settings; assignments-only leaves argc==0 → implied interactive
-		// root shell (same decision as bare command-less sudo).
-		let j = i;
-		while (
-			j < words.length &&
-			/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[j] ?? '')
-		) {
-			j += 1;
-		}
-		if (j >= words.length) {
-			if (resetOnly && execOrResetSeen && !interactive) {
-				return { kind: 'benign' };
+		const firstWord = words[i] ?? '';
+		if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(firstWord)) {
+			let j = i;
+			while (
+				j < words.length &&
+				/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[j] ?? '')
+			) {
+				j += 1;
 			}
-			return { kind: 'interactive' };
+			if (j >= words.length) {
+				// Assignments-only leaves argc==0 → the implied interactive
+				// root shell (same decision as bare command-less sudo).
+				if (resetOnly && execOrResetSeen && !interactive) {
+					return { kind: 'benign' };
+				}
+				return { kind: 'interactive' };
+			}
+			// #3572 delta review: assignments are interspersed with options
+			// (parse_args.c:284) — resume the option walk instead of
+			// treating the next word as the command.
+			i = j;
+			continue;
 		}
 		// #3572 delta-critic: a nested `time` inner word is the GNU binary
 		// (sudo execs directly, no shell) — surface its -o outcome.
-		const nested = nestedTimeTail(words, j);
+		const nested = nestedTimeTail(words, i);
 		if (nested !== null) {
 			return {
 				kind: 'inner',
 				innerIndex: nested.innerIndex,
 				timeOutputFile: nested.timeOutputFile,
-				chdirTailIndex: j,
+				chdirTailIndex: i,
 				...(chdirDir !== undefined ? { sudoChdir: chdirDir } : {}),
 			};
 		}
 		return {
 			kind: 'inner',
-			innerIndex: j,
+			innerIndex: i,
 			...(chdirDir !== undefined ? { sudoChdir: chdirDir } : {}),
 		};
 	}

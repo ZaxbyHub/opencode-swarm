@@ -1306,7 +1306,7 @@ function matchSudoChdir(words: string[]): DcChdirMatch {
 			kind: 'static',
 			dir,
 			innerWords: rest,
-			chdirInnerText: `'${rest[0]}' ${shSerializeWords(rest.slice(1))}`,
+			chdirInnerText: `${shSingleQuote(rest[0])} ${shSerializeWords(rest.slice(1))}`,
 		};
 	}
 	return { kind: 'static', dir, innerWords: rest };

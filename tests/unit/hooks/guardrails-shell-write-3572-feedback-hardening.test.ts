@@ -404,3 +404,38 @@ describe('3572 delta round 3 (the -- sentinel + sudo -D chdir composition)', () 
 		);
 	}, 120_000);
 });
+
+describe('3572 delta round 4 (assignment resume — parse_args.c env interspersing)', () => {
+	test('gate: assignments resume the option walk before options/--', async () => {
+		for (const cmd of [
+			'sudo FOO=bar --',
+			'sudo FOO=bar -i',
+			'sudo FOO=bar -E',
+			'sudo FOO=bar -u root',
+			'sudo FOO=bar -D src',
+		]) {
+			expect((await gate(cmd)).verdict).toBe('DENIED');
+		}
+	}, 120_000);
+
+	test('gate: destructive tails after assignments deny', async () => {
+		for (const cmd of [
+			'sudo FOO=bar -- rm -rf ../x',
+			'sudo FOO=bar -i rm -rf ../x',
+			'sudo FOO=bar -E rm -rf ../x',
+			'sudo FOO=bar -D src rm -rf ../x',
+		]) {
+			expect((await gate(cmd)).verdict).toBe('DENIED');
+		}
+	}, 120_000);
+
+	test('gate: benign assignment spellings stay admitted', async () => {
+		expect((await gate('sudo FOO=bar -- true')).verdict).toBe('ADMITTED');
+		expect((await gate('sudo FOO=bar -E true')).verdict).toBe('ADMITTED');
+		expect((await gate('sudo FOO=bar -k')).verdict).toBe('ADMITTED');
+		expect((await gate('sudo FOO=bar -v')).verdict).toBe('ADMITTED');
+		// Post-sentinel VAR=value is the literal command word
+		// (parse_args.c got_end_of_args blocks env consumption).
+		expect((await gate('sudo -- FOO=bar')).verdict).toBe('ADMITTED');
+	}, 120_000);
+});
