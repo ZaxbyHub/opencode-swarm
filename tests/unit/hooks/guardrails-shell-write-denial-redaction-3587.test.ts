@@ -240,7 +240,7 @@ describe('3587 reason channel folds home/profile paths (file-authority)', () => 
 			);
 			expect(decision.allowed).toBe(false);
 			if (!decision.allowed) {
-				expect(decision.reason).toContain('path=~/secret.txt');
+				expect(decision.reason).toContain('~/secret.txt');
 				expect(decision.reason.includes('/home/alice')).toBe(false);
 				expect(decision.reason.includes('../../home/alice')).toBe(false);
 				expect(decision.path).toBe('../../home/alice/secret.txt');
@@ -248,19 +248,43 @@ describe('3587 reason channel folds home/profile paths (file-authority)', () => 
 		},
 	);
 
-	test('non-home cross-root control: preserved, bounded, never tilde-folded', () => {
+	test.skipIf(process.platform !== 'win32')(
+		'non-home cross-root control: preserved, bounded, never tilde-folded',
+		() => {
+			// Z: is only a DIFFERENT ROOT on Windows; on POSIX it is a relative
+			// filename inside the workspace (allowed), so the control is
+			// win32-gated like the same-root leg.
+			const decision = checkFileAuthority(
+				'coder',
+				'Z:/elsewhere/x.txt',
+				process.cwd(),
+				undefined,
+				{ declaredScope: ['src/'] },
+			);
+			expect(decision.allowed).toBe(false);
+			if (!decision.allowed) {
+				// redactPath intentionally preserves ordinary non-home absolutes.
+				expect(decision.reason).toContain('path=Z:');
+				expect(decision.reason.includes('path=~')).toBe(false);
+			}
+		},
+	);
+
+	test('relative escaping input keeps the workspace-relative reason shape', () => {
+		// The pre-change display for RELATIVE inputs (the W4-pinned
+		// behavior): the reason carries the normalized relative form, never
+		// an absolute render, so ../shape assertions keep matching.
 		const decision = checkFileAuthority(
 			'coder',
-			'Z:/elsewhere/x.txt',
+			'../x',
 			process.cwd(),
 			undefined,
 			{ declaredScope: ['src/'] },
 		);
 		expect(decision.allowed).toBe(false);
 		if (!decision.allowed) {
-			// redactPath intentionally preserves ordinary non-home absolutes.
-			expect(decision.reason).toContain('path=Z:');
-			expect(decision.reason.includes('path=~')).toBe(false);
+			expect(decision.reason).toMatch(/\.\.[\\/]x/);
+			expect(decision.reason.includes('~')).toBe(false);
 		}
 	});
 });
