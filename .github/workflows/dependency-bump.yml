@@ -67,9 +67,8 @@ on:
         default: ''
         type: string
       issue:
-        description: 'GitHub issue number for the release fragment frontmatter (user-visible bumps — package.json/src changes trip the pending-fragment gate — must set this)'
-        required: false
-        default: ''
+        description: 'GitHub issue number for the release fragment frontmatter. Required: every dispatch diffs package.json, which is a user-visible surface, so the quality pending-fragment gate fires on every dispatch.'
+        required: true
         type: string
 
 permissions:
@@ -119,7 +118,7 @@ jobs:
           if [[ -n "$ADVISORY" && -n "$REASON" ]]; then fail "advisory and reason are mutually exclusive"; fi
           if [[ -z "$ADVISORY" && -z "$REASON" ]]; then fail "exactly one of advisory or reason is required"; fi
           [[ "${#ADVISORY}" -le 200 && "${#REASON}" -le 200 ]] || fail "advisory/reason too long"
-          [[ -z "$ISSUE" || "$ISSUE" =~ ^[0-9]+$ ]] || fail "issue must be empty or a numeric GitHub issue number"
+          [[ "$ISSUE" =~ ^[0-9]+$ ]] || fail "issue must be a numeric GitHub issue number (required: every dispatch diffs package.json, a user-visible surface)"
           case "$ADVISORY$REASON" in *$'\r'*|*$'\n'*) fail "advisory/reason must not contain CR/LF";; esac
           [[ "$DEPENDENCY_KIND" == "dependencies" || "$DEPENDENCY_KIND" == "devDependencies" ]] || fail "dependency_kind rejected"
           if [[ -n "$PIN_SPECS" ]]; then

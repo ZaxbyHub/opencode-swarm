@@ -45,6 +45,7 @@ interface WorkflowInput {
 
 interface WorkflowStep {
 	name?: string;
+	if?: string;
 	uses?: string;
 	run?: string;
 	with?: Record<string, unknown>;
@@ -442,26 +443,34 @@ describe('dependency-bump workflow contract (frozen check C7, trace 3501-3285-35
 		expect(requireText()).toContain('action_required');
 	});
 
-	test('release-fragment support: optional issue input, numeric validation, fragment-write step before the gates, and both allowlist gates expect it', () => {
+	test('release-fragment support: required issue input, pinned numeric guard, fragment-write step gated and ordered before the gates, and both allowlist gates expect it', () => {
 		// Live dispatch evidence (PR #3582 quality round): package.json and
 		// src/ pins trip the quality pending-fragment gate, which has no
 		// bot-author exemption — a user-visible bump without a fragment is
 		// undeliverable, so the bot commit must carry its own fragment.
+		// package.json is a MANDATORY dirty output of every dispatch, so the
+		// gate fires on EVERY dispatch and the input is required (an optional
+		// input lets an operator forget it: the channel goes green and the PR
+		// fails CI later — exactly the #3582 wasted round).
 		const dispatch = requireWorkflow()['on']?.workflow_dispatch as
 			| { inputs?: Record<string, WorkflowInput> }
 			| undefined;
 		expect(dispatch?.inputs?.issue?.type).toBe('string');
-		expect(dispatch?.inputs?.issue?.required).toBe(false);
+		expect(dispatch?.inputs?.issue?.required).toBe(true);
 		const env = onlyJob().env ?? {};
 		expect(env.ISSUE).toBe('${{ inputs.issue }}');
 
 		const text = script();
+		// PINNED GUARD: the numeric gate itself (message-presence assertions
+		// pass under a deleted guard), and the write step's own condition.
+		expect(text).toContain('[[ "$ISSUE" =~ ^[0-9]+$ ]]');
 		expect(text).toContain(
-			'issue must be empty or a numeric GitHub issue number',
+			'issue must be a numeric GitHub issue number (required: every dispatch diffs package.json, a user-visible surface)',
 		);
 
 		const fragmentStep = stepIndexContaining('docs/releases/pending');
 		expect(fragmentStep).toBeGreaterThanOrEqual(0);
+		expect(steps()[fragmentStep]?.if).toBe("${{ env.ISSUE != '' }}");
 		const firstGate = steps().findIndex(
 			(step) =>
 				typeof step.run === 'string' &&
