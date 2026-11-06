@@ -3205,8 +3205,14 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 			// failed the raw startsWith gate and emitted nothing — bash
 			// writes through the expanded value. Emit the dynamic refusal
 			// for the expansion-bearing spelling.
-			const outerQ = /^(['"])(.*)$/.exec(word);
-			const bare = outerQ !== null ? (outerQ[2] ?? '') : word;
+			let bare = word;
+			if (
+				bare.length >= 2 &&
+				((bare.startsWith("'") && bare.endsWith("'")) ||
+					(bare.startsWith('"') && bare.endsWith('"')))
+			) {
+				bare = bare.slice(1, -1);
+			}
 			const ofWord = bare.startsWith('of=') ? bare : word;
 			if (!ofWord.startsWith('of=')) continue;
 			if (isDynamicPath(ofWord.slice(3))) {
