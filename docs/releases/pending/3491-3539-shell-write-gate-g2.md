@@ -132,7 +132,9 @@
   classify dynamic in milliseconds). The procsub body recursion is DEPTH-
   BOUNDED (8 levels; reviewer F-b — nested re-masking was super-linear:
   28KB at 4000 levels measured 17.4s vs 6ms base) and fails closed past
-  the bound.
+  the bound (a depth-cap body surfaces as a null-path unresolved write —
+  delta-critic round: the cap originally dropped the nested write
+  entirely, reopening the F-01 class at depth 9).
 - `/swarm guardrail explain` does NOT mirror the destructive-arm sentinel
   relocation for procsub span bodies (reviewer F-c): the live gate denies
   `true <(rm -rf .swarm)` via the body's uncertain-context relocation,

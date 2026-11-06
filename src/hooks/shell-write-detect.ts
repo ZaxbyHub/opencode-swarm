@@ -6298,6 +6298,24 @@ export function detectPosixWrites(
 						span.body,
 						procsubRecursionDepth + 1,
 					);
+					// Reviewer delta (Critical): the depth cap returns
+					// {writes:[], parseError:true} — consulting the flag only
+					// over body WRITES dropped it wholesale when the list was
+					// empty, so a depth-9 nested escaping write escaped the
+					// gate entirely. An empty body analysis past the cap is
+					// the fail-closed signal itself: emit the null-path write.
+					if (
+						bodyAnalysis.parseError === true &&
+						bodyAnalysis.writes.length === 0
+					) {
+						allWrites.push({
+							category: 'redirect',
+							operator: '>',
+							path: null,
+							unresolvedContext: true,
+							dynamicSourceWord: span.body.slice(0, 80),
+						});
+					}
 					for (const write of bodyAnalysis.writes) {
 						allWrites.push(
 							(withdraw || bodyAnalysis.parseError === true) &&

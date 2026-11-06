@@ -157,6 +157,22 @@ describe('3568 feedback: masked procsub body family (PRR-001 / F-01)', () => {
 		expect(performance.now() - t0).toBeLessThan(2000);
 	});
 
+	test('depth-9 nested escaping write FAILS CLOSED (delta Critical)', async () => {
+		// Past the depth bound the nested content must surface as a
+		// null-path write (not vanish): detector emits the null path and
+		// the gate denies the escaping body write.
+		const body = 'echo hi > ../../esc';
+		const cmd =
+			Array.from({ length: 9 }, () => 'cat <(').join('') +
+			body +
+			Array.from({ length: 9 }, () => ')').join('');
+		const r = detectPosixWrites(cmd);
+		const nullWrite = r.writes.find((w) => w.path === null);
+		expect(nullWrite).toBeDefined();
+		const got = await gate(cmd);
+		expect(got.verdict).toBe('DENIED');
+	}, 120_000);
+
 	test('unquoted dd of=$VAR emits the dynamic refusal (reviewer F-f)', () => {
 		const r = detectPosixWrites('dd of=$D/src/f if=/dev/null');
 		expect(r.writes.length).toBe(1);
