@@ -458,10 +458,7 @@ describe('guardrails shell writes: sed script and suffix placement', () => {
 		);
 	});
 
-	// #3491 closure F-1 re-pin: per-branch (deny names `1d` at the root).
-	// #3572 review N-11: the branch path ends in a separator + `1d` on every
-	// platform — the Windows-only `\\1d` spelling left the POSIX render
-	// (`<ws>/1d`) unable to match and the ubuntu shard red.
+	// #3491 closure F-1 re-pin; #3572 N-11: separator-agnostic (POSIX render).
 	it('scoped coder: a brace word in the script slot is rejected', async () => {
 		const hooks = createGuardrailsHooks(TEST_DIR, undefined, config());
 		coderWithScope('coder-script-slot', ['src/']);
@@ -474,7 +471,6 @@ describe('guardrails shell writes: sed script and suffix placement', () => {
 			/^WRITE BLOCKED \[shell-write-scope\]: SCOPE_VIOLATION: shell write target "[^"]*[\\/]+1d" is outside the active scope/,
 		);
 	});
-
 	it('scoped coder: a brace-expansion word after -i is rejected', async () => {
 		const hooks = createGuardrailsHooks(TEST_DIR, undefined, config());
 		coderWithScope('coder-brace-word', ['src/']);
