@@ -39,6 +39,7 @@ import {
 	mergeWriteAnalyses,
 	resolveWriteTargets,
 } from '../hooks/shell-write-detect.js';
+import { sanitizeDiagnosticText } from '../scope/path-identity.js';
 import {
 	classifyCommand,
 	getSharedClassifierGuardrailBlock,
@@ -861,7 +862,11 @@ export async function handleGuardrailExplain(
 				'parse_error: write detection failed to parse command — rejecting for safety';
 		} else if (analysis.hasWrites) {
 			const resolvedWrites = resolveWriteTargets(
-				detectionCommand,
+				// #3539 W5 parity: the gate resolves against the procsub
+				// masking residual when the analysis carries one; explain
+				// must share the same resolution text or it answers allow
+				// for outer writes the gate blocks under tracked cd context.
+				analysis.residualCommand ?? detectionCommand,
 				analysis.writes,
 				directory,
 			);
@@ -968,11 +973,20 @@ export async function handleGuardrailExplain(
 					// Every other null-path write (a withdrawn/dynamic redirect
 					// or builtin target, a patch_apply that produced no
 					// targets) fails closed exactly like the gate's
-					// dynamic-path-target rejection.
+					// dynamic-path-target rejection. #3491 W8 final-critic
+					// advisory: a brace-refused write renders the user's
+					// SOURCE word, matching the gate's message.
 					decision = 'block';
-					// #3567 review PRR-015: redact the raw dynamic source word
-					// like every sibling firing rule.
-					firingRule = `dynamic_target: write target${write.original.path ? ` "${redactPath(write.original.path)}"` : ''} cannot be statically resolved (dynamic path or withdrawn directory state) — rejecting for safety`;
+					// #3568 review F-10: sanitize + bound the untrusted source
+					// word (parity with the gate's render).
+					const explainDynamicLabel = sanitizeDiagnosticText(
+						write.original.path ?? write.original.dynamicSourceWord ?? '',
+						160,
+					);
+					// UNION of the g1 fix (PRR-015 redact) and the g2 label
+					// selection (dynamicSourceWord fallback): redact whichever
+					// word renders.
+					firingRule = `dynamic_target: write target${explainDynamicLabel ? ` "${redactPath(explainDynamicLabel)}"` : ''} cannot be statically resolved (dynamic path or withdrawn directory state) — rejecting for safety`;
 					break;
 				}
 			}

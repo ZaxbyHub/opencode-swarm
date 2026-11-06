@@ -115,6 +115,18 @@ export interface WriteTarget {
 	 */
 	unresolvedContext?: true;
 	/**
+	 * #3491 W8 (final-critic advisory): the user's SOURCE word for a
+	 * brace-refused dynamic write — a write whose `{…}` destination is a
+	 * real expansion this model refuses to enumerate (nested, over-cap,
+	 * empty alternative, alpha/signed/zero-padded/stepped sequence, or any
+	 * branch carrying a `$`/command-substitution expansion). The write
+	 * itself carries `path: null` (the gate's dynamic-target block denies
+	 * it); this field lets that denial message render what the user
+	 * actually typed (`src/{a..e}`) instead of a brace-substituted branch
+	 * text the shell never received verbatim. Never set on any other write.
+	 */
+	dynamicSourceWord?: string;
+	/**
 	 * Present ONLY on `patch_apply` writes (#3120 LEG 3b): the literal
 	 * patch-file operands of a `git apply <patch>` / `patch [-pN] <patch>`
 	 * invocation, resolved by the gate against the write's tracked working
@@ -141,6 +153,18 @@ export interface WriteAnalysis {
 	hasWrites: boolean;
 	/** Whether the command could not be parsed (fail-closed). */
 	parseError?: boolean;
+	/**
+	 * #3539 W5: present ONLY when the command's process-substitution spans
+	 * were masked and the RESIDUAL (the command with every unquoted
+	 * `>(…)`/`<(…)` span replaced by a token-preserving placeholder) parsed
+	 * clean. It is the text the resolver must re-parse for cwd tracking: the
+	 * surviving OUTER writes resolve under the tracked directory context of
+	 * the residual, while the masked INNER writes are withdrawn
+	 * (`unresolvedContext`) whenever their body or outer prefix carries a
+	 * directory change. Absent for every parse that did not go through the
+	 * masking path (including the legacy no-mask fallback).
+	 */
+	residualCommand?: string;
 }
 
 /**
@@ -305,6 +329,10 @@ export function mergeWriteAnalyses(
 		writes,
 		hasWrites: writes.length > 0 || primary.hasWrites || additional.hasWrites,
 		parseError: primary.parseError,
+		// #3539 W5: the residual channel is additive and POSIX-only (the
+		// Windows detectors never mask), so the primary's residual — when
+		// present — is the one the gate/explain resolver must use.
+		residualCommand: primary.residualCommand,
 	};
 }
 
@@ -364,6 +392,11 @@ const BUILTIN_WRITE_COMMANDS = new Set([
 	'truncate',
 	'unlink',
 	'rmdir',
+	// #3568 parallel-review F-01: touch CREATES each named file (or updates
+	// its mtime) — every operand is a filesystem write and was previously
+	// invisible to both walks (`touch ../../esc` admitted at base too; the
+	// procsub-body form inherited the same hole).
+	'touch',
 ]);
 
 /**
@@ -926,11 +959,125 @@ export function isPowerShellReadOnlyPipeline(command: string): boolean {
 // ---------------------------------------------------------------------------
 
 /**
+ * Analyze one process-substitution inner body for writes, pipeline stage by
+ * pipeline stage (#3539 W5). This is the SAME per-stage scan the legacy
+ * parse-failure fallback ran inline; it is shared verbatim by the legacy
+ * whole-command regex path and by the W5 masked-span path so both emit
+ * identical writes for the same body text.
+ */
+function analyzeProcSubInnerStages(innerCommand: string): WriteTarget[] {
+	const results: WriteTarget[] = [];
+	const stages = innerCommand.split('|').map((s) => s.trim());
+	for (const stage of stages) {
+		// #3530 PRR-006 (critic D4): a stage carrying MULTIPLE redirect
+		// operators (`cat > ../../src/"f" && cat > src/ok`) is torn by the
+		// lazy `>` regex — only the LAST target is captured and the earlier
+		// (out-of-scope, quoted-fragment) target is invisible. Any
+		// multi-redirect stage is unresolvable: withdraw it fail-closed
+		// (the quoted-span normalization keeps `2>&1`-style tokens and
+		// honest `=>`-style tokens out of the count).
+		const qStage = stage.replace(/"[^"]*"|'[^']*'/g, 'Q');
+		const redirectCount = qStage.match(/(?<![->=>])>(?!>)/g)?.length ?? 0;
+		if (redirectCount >= 2) {
+			results.push({
+				category: 'redirect',
+				operator: '>',
+				path: null,
+				unresolvedContext: true,
+			});
+			continue;
+		}
+
+		// Detect builtin writes (cp, mv, etc.) in the inner POSIX command.
+		// Note: detectPowerShellWrites is not used here because the inner command
+		// of a process substitution is POSIX bash, not PowerShell.
+		const builtinWrites = detectBuiltinWritesFromString(stage);
+		// Plain loop (not spread-push): an adversarial operand count must
+		// not hit the engine's spread-arity limit (#3512 review N-2; the
+		// throw would be fail-closed, but the bound is not ours to lean on).
+		for (const write of builtinWrites) {
+			results.push(write);
+		}
+
+		// Detect redirections in the stage: check >> first to avoid double-matching
+		// when both > and >> patterns could match the same input.
+		const appendMatch = stage.match(/^\s*(.*?)\s*>>(\s*)(\S+)\s*$/);
+		if (appendMatch) {
+			// #3491 W8: a braced redirect target expands before dequoting —
+			// a quoted `'{a,b}'` stays literal (expandBraceRaw is
+			// quote-aware on the RAW token), an unquoted region emits one
+			// write per branch, a refused real-expansion shape withdraws.
+			const braceTargets = fallbackBraceTargets(appendMatch[3], '>>', results);
+			if (braceTargets) continue;
+			const path = dequoteFallbackOperand(appendMatch[3]);
+			if (path === null) {
+				// #3530 PRR-006(a): withdraw, never drop — the resolver
+				// nulls an unresolvedContext write so the gate denies it.
+				// A bare `continue` here silently removed the write from
+				// the analysis (fail-open with a sibling in-scope write).
+				results.push({
+					category: 'redirect',
+					operator: '>>',
+					path: null,
+					unresolvedContext: true,
+				});
+				continue;
+			}
+			if (path && !isNullDevice(path)) {
+				results.push({ category: 'redirect', operator: '>>', path });
+			}
+		} else {
+			// Only check > if >> did not match (negative lookahead alternative)
+			const writeMatch = stage.match(/^\s*(.*?)\s*>(?!>)(\s*)(\S+)\s*$/);
+			if (writeMatch) {
+				const braceTargets = fallbackBraceTargets(writeMatch[3], '>', results);
+				if (braceTargets) continue;
+				const path = dequoteFallbackOperand(writeMatch[3]);
+				if (path === null) {
+					// #3530 PRR-006(a): withdraw, never drop (see above).
+					results.push({
+						category: 'redirect',
+						operator: '>',
+						path: null,
+						unresolvedContext: true,
+					});
+					continue;
+				}
+				if (path && !isNullDevice(path)) {
+					results.push({ category: 'redirect', operator: '>', path });
+				}
+			} else if (
+				/>/.test(stage.replace(/"[^"]*"|'[^']*'/g, 'Q')) &&
+				!/^\s*\w+(\s+-{1,2}[\w-]+)*\s*$/.test(stage)
+			) {
+				// #3530 PRR-006(b): neither redirect regex matched but the
+				// stage still carries a `>` operator — the (\S+) capture
+				// cannot span a quoted-with-whitespace target, so the
+				// operand is unrecoverable. Withdraw (fail-closed) instead
+				// of emitting nothing; the guard keeps flag-only/benign
+				// stages clean.
+				results.push({
+					category: 'redirect',
+					operator: '>',
+					path: null,
+					unresolvedContext: true,
+				});
+			}
+		}
+	}
+	return results;
+}
+
+/**
  * Detect process substitution writes using regex when bash-parser fails.
  * Process substitution: >(command) creates implicit writes, <(command) is read-only.
  *
  * bash-parser does not support process substitution syntax, so we use regex to
  * extract and analyze >(...) patterns when the main parse fails.
+ *
+ * #3539 W5: this legacy whole-command regex stays ONLY for the no-mask
+ * fallback path (masking failed or found nothing); the masked-span path
+ * analyzes each balanced span body through the shared per-stage scan.
  */
 function detectProcessSubstitutionWrites(command: string): WriteTarget[] {
 	const results: WriteTarget[] = [];
@@ -945,101 +1092,272 @@ function detectProcessSubstitutionWrites(command: string): WriteTarget[] {
 		const innerCommand = match[1].trim();
 		if (!innerCommand) continue;
 
-		// Recursively analyze the inner command for writes.
-		// Use a minimal parse: split by | to get pipeline stages and analyze each.
-		const stages = innerCommand.split('|').map((s) => s.trim());
-		for (const stage of stages) {
-			// #3530 PRR-006 (critic D4): a stage carrying MULTIPLE redirect
-			// operators (`cat > ../../src/"f" && cat > src/ok`) is torn by the
-			// lazy `>` regex — only the LAST target is captured and the earlier
-			// (out-of-scope, quoted-fragment) target is invisible. Any
-			// multi-redirect stage is unresolvable: withdraw it fail-closed
-			// (the quoted-span normalization keeps `2>&1`-style tokens and
-			// honest `=>`-style tokens out of the count).
-			const qStage = stage.replace(/"[^"]*"|'[^']*'/g, 'Q');
-			const redirectCount = qStage.match(/(?<![->=>])>(?!>)/g)?.length ?? 0;
-			if (redirectCount >= 2) {
-				results.push({
-					category: 'redirect',
-					operator: '>',
-					path: null,
-					unresolvedContext: true,
-				});
-				continue;
-			}
-
-			// Detect builtin writes (cp, mv, etc.) in the inner POSIX command.
-			// Note: detectPowerShellWrites is not used here because the inner command
-			// of a process substitution is POSIX bash, not PowerShell.
-			const builtinWrites = detectBuiltinWritesFromString(stage);
-			// Plain loop (not spread-push): an adversarial operand count must
-			// not hit the engine's spread-arity limit (#3512 review N-2; the
-			// throw would be fail-closed, but the bound is not ours to lean on).
-			for (const write of builtinWrites) {
-				results.push(write);
-			}
-
-			// Detect redirections in the stage: check >> first to avoid double-matching
-			// when both > and >> patterns could match the same input.
-			const appendMatch = stage.match(/^\s*(.*?)\s*>>(\s*)(\S+)\s*$/);
-			if (appendMatch) {
-				const path = dequoteFallbackOperand(appendMatch[3]);
-				if (path === null) {
-					// #3530 PRR-006(a): withdraw, never drop — the resolver
-					// nulls an unresolvedContext write so the gate denies it.
-					// A bare `continue` here silently removed the write from
-					// the analysis (fail-open with a sibling in-scope write).
-					results.push({
-						category: 'redirect',
-						operator: '>>',
-						path: null,
-						unresolvedContext: true,
-					});
-					continue;
-				}
-				if (path && !isNullDevice(path)) {
-					results.push({ category: 'redirect', operator: '>>', path });
-				}
-			} else {
-				// Only check > if >> did not match (negative lookahead alternative)
-				const writeMatch = stage.match(/^\s*(.*?)\s*>(?!>)(\s*)(\S+)\s*$/);
-				if (writeMatch) {
-					const path = dequoteFallbackOperand(writeMatch[3]);
-					if (path === null) {
-						// #3530 PRR-006(a): withdraw, never drop (see above).
-						results.push({
-							category: 'redirect',
-							operator: '>',
-							path: null,
-							unresolvedContext: true,
-						});
-						continue;
-					}
-					if (path && !isNullDevice(path)) {
-						results.push({ category: 'redirect', operator: '>', path });
-					}
-				} else if (
-					/>/.test(stage.replace(/"[^"]*"|'[^']*'/g, 'Q')) &&
-					!/^\s*\w+(\s+-{1,2}[\w-]+)*\s*$/.test(stage)
-				) {
-					// #3530 PRR-006(b): neither redirect regex matched but the
-					// stage still carries a `>` operator — the (\S+) capture
-					// cannot span a quoted-with-whitespace target, so the
-					// operand is unrecoverable. Withdraw (fail-closed) instead
-					// of emitting nothing; the guard keeps flag-only/benign
-					// stages clean.
-					results.push({
-						category: 'redirect',
-						operator: '>',
-						path: null,
-						unresolvedContext: true,
-					});
-				}
-			}
+		for (const write of analyzeProcSubInnerStages(innerCommand)) {
+			results.push(write);
 		}
 	}
 
 	return results;
+}
+
+/**
+ * One masked process-substitution span (#3539 W5): the `>`/`<` operator, the
+ * span body (the text between the parentheses), and where the placeholder
+ * begins in the RESIDUAL string (the outer-prefix cd test reads the residual
+ * up to this index).
+ */
+interface MaskedProcSubSpan {
+	op: '>' | '<';
+	body: string;
+	residualPlaceholderStart: number;
+}
+
+/**
+ * #3568 review F-01: the command bodies of every masked process-substitution
+ * span (`<(...)` / `>(...)`), for the destructive arm's verb-anchored
+ * extractors — a body `rm -rf …` / `dd of=…` sits at the body's own verb
+ * position, never at the outer segment head, so the destructive arms cannot
+ * see it without this list. Returns an empty array when the command carries
+ * no process substitution. The caller relocates targets from these bodies
+ * with an uncertain context (a subshell inherits the tracked cwd; the
+ * destructive relocation model cannot track it through a procsub).
+ */
+export function dcProcSubSpanBodies(command: string): string[] {
+	const masked = maskProcSubSpans(command);
+	return masked !== null ? masked.spans.map((s) => s.body) : [];
+}
+
+/**
+ * The placeholder that replaces a masked process-substitution span in the
+ * residual (#3539 W5). It is a token-preserving bare word — the residual
+ * tokenizes exactly like the original except the span is one inert operand —
+ * and it is the one string the detector ALREADY treats as a non-target in
+ * every destination position through the existing sink-device exemption:
+ * `tee PLACEHOLDER` (detectBuiltinWrites isNullDevice), `> PLACEHOLDER`
+ * (isNullDeviceWord in the detection walk, isNullDevice in the resolver
+ * walk), `dd of=PLACEHOLDER`. That suppression is metadata the detectors
+ * already apply to the literal device path — no new string matching, and a
+ * real user operand can never be suppressed by a placeholder collision: a
+ * genuine `/dev/null` operand was already a non-target before W5, and every
+ * other operand text passes through untouched.
+ */
+const PROC_SUB_PLACEHOLDER = '/dev/null';
+
+/**
+ * The length of the bash redirect operator starting at `raw[start]` (a `<`
+ * or `>`), by maximal munch: `<<<` (here-string), `<<-`, `<<`, `>>`, `<>`,
+ * `>&`, `<&`, `>|` are multi-character operators; a bare `>`/`<` is length
+ * 1. `>>>` is NOT an operator — bash lexes `>>` then a separate `>` — which
+ * is exactly why `>>>(cmd)` masks its `>(…)` span while `>>(cmd)` masks
+ * nothing (#3539 W5 review round 1; boundaries verified by executed bash
+ * 5.x ground truth).
+ */
+function bashRedirectOperatorLength(raw: string, start: number): number {
+	const c = raw[start];
+	const next = raw[start + 1] ?? '';
+	if (c === '<') {
+		if (next === '<') {
+			const third = raw[start + 2] ?? '';
+			if (third === '<' || third === '-') return 3;
+			return 2;
+		}
+		if (next === '>' || next === '&') return 2;
+		return 1;
+	}
+	if (next === '>' || next === '&' || next === '|') return 2;
+	return 1;
+}
+
+/**
+ * Mask every UNQUOTED, UNESCAPED, balanced `>(…)`/`<(…)` span of a
+ * parse-failing POSIX command (#3539 W5; RC-5).
+ *
+ * The scanner is quote-aware (single/double quotes, backslash escapes with
+ * the bash double-quote escape set) and comment-aware (a `#` at a word start
+ * begins a comment; `>(` inside a comment or quotes is never masked — real
+ * bash does not run it).
+ *
+ * OPERATOR BOUNDARIES (#3539 W5 review round 1): a process substitution is
+ * introduced only by a `>` or `<` that STANDS ALONE as an operator
+ * immediately before `(`. The scanner consumes each redirect operator with
+ * bash's maximal munch before deciding, so (all executed-verified against
+ * bash 5.x): `<<(x)`, `>>(x)`, `<<<(x)`, `<>(x)`, `>&(x)`, `<&(x)`, `>|(x)`
+ * and `&>(x)`/`&>>(x)` are operator + `(` — genuine bash syntax errors
+ * (rc=2, nothing runs) that keep the fail-closed parse-error block (no span
+ * masks, so the line still fails to parse), while `>>>(x)` is `>>` plus a
+ * glued `>(x)` whose body bash RUNS (the span masks and is analyzed), and
+ * `><(x)` is `>` plus `<(x)` (redirect-to-procsub; the span masks). An
+ * escaped `\&` before `>(x)` is word content, not the `&>` operator — the
+ * backslash branch consumed it before the `>` is considered, so
+ * `\&>(cmd)` masks too. A spaced `> (x)` never masks (not glued).
+ * Parenthesis nesting inside a masked span is counted.
+ *
+ * Returns null — masking FAILED, the caller keeps the fail-closed
+ * parseError — when any unquoted procsub span is unbalanced, when the scan
+ * hits an ambiguity (an unterminated quote), or when no span was maskable at
+ * all. Otherwise returns the residual text plus one record per masked span.
+ */
+function maskProcSubSpans(
+	command: string,
+): { residual: string; spans: MaskedProcSubSpan[] } | null {
+	const spans: MaskedProcSubSpan[] = [];
+	const parts: string[] = [];
+	let maskedLength = 0; // running residual length (#3568 PRR-005)
+	let cursor = 0; // start of the pending unmasked slice
+	let i = 0;
+	let state: 'none' | 'single' | 'double' = 'none';
+	const atWordStart = (idx: number): boolean =>
+		idx === 0 || /[\s;|&()<>]/.test(command[idx - 1] ?? '');
+
+	while (i < command.length) {
+		const ch = command[i];
+		if (state === 'single') {
+			if (ch === "'") state = 'none';
+			i++;
+			continue;
+		}
+		if (state === 'double') {
+			if (ch === '\\') {
+				i += 2;
+				continue;
+			}
+			if (ch === '"') state = 'none';
+			i++;
+			continue;
+		}
+		if (ch === '\\') {
+			i += 2;
+			continue;
+		}
+		if (ch === "'") {
+			state = 'single';
+			i++;
+			continue;
+		}
+		if (ch === '"') {
+			state = 'double';
+			i++;
+			continue;
+		}
+		// A `#` at a word start begins a comment: nothing inside it runs, so
+		// a `>(` there is never masked and the comment is copied verbatim.
+		if (ch === '#' && atWordStart(i)) {
+			const newline = command.indexOf('\n', i);
+			i = newline === -1 ? command.length : newline;
+			continue;
+		}
+		// `&>` / `&>>` (redirect both streams) is one bash operator: the `>`
+		// belongs to it, so a `(` after it is operator + `(` — a syntax
+		// error, never a procsub. An ESCAPED `\&` never reaches here (the
+		// backslash branch consumed the pair), so `\&>(cmd)` still masks.
+		if (ch === '&' && command[i + 1] === '>') {
+			i += command[i + 2] === '>' ? 3 : 2;
+			continue;
+		}
+		if (ch === '>' || ch === '<') {
+			// Operator-boundary aware (#3539 W5 review round 1): consume the
+			// maximal redirect operator first; only a LENGTH-1 operator
+			// glued to `(` introduces a process substitution. This keeps
+			// `<<(`/`>>(`/`<<<(`/`<>`/`>&`/`>|` + `(` unmasked (bash rc=2)
+			// while `>>>(` still masks its trailing `>(…)` and `><(` masks
+			// its `<(…)`.
+			const opLength = bashRedirectOperatorLength(command, i);
+			if (opLength !== 1 || command[i + 1] !== '(') {
+				i += opLength;
+				continue;
+			}
+			const op: '>' | '<' = ch === '>' ? '>' : '<';
+			const bodyStart = i + 2;
+			let depth = 1;
+			let j = bodyStart;
+			let bodyState: 'none' | 'single' | 'double' = 'none';
+			let closedAt = -1;
+			while (j < command.length) {
+				const c = command[j];
+				if (bodyState === 'single') {
+					if (c === "'") bodyState = 'none';
+					j++;
+					continue;
+				}
+				if (bodyState === 'double') {
+					if (c === '\\') {
+						j += 2;
+						continue;
+					}
+					if (c === '"') bodyState = 'none';
+					j++;
+					continue;
+				}
+				if (c === '\\') {
+					j += 2;
+					continue;
+				}
+				if (c === "'") {
+					bodyState = 'single';
+					j++;
+					continue;
+				}
+				if (c === '"') {
+					bodyState = 'double';
+					j++;
+					continue;
+				}
+				if (c === '(') depth++;
+				else if (c === ')') {
+					depth--;
+					if (depth === 0) {
+						closedAt = j;
+						break;
+					}
+				}
+				j++;
+			}
+			if (closedAt === -1) return null; // unbalanced span: fail-closed
+			parts.push(command.slice(cursor, i));
+			// #3568 review PRR-005: a running-length counter replaces the
+			// per-span parts.join('') — join is O(total) per span, making a
+			// span-dense command quadratic (21.3s at 300KB, lane-measured);
+			// the counter keeps the walk linear.
+			maskedLength += i - cursor;
+			const residualPlaceholderStart = maskedLength;
+			parts.push(PROC_SUB_PLACEHOLDER);
+			spans.push({
+				op,
+				body: command.slice(bodyStart, closedAt),
+				residualPlaceholderStart,
+			});
+			maskedLength += PROC_SUB_PLACEHOLDER.length;
+			i = closedAt + 1;
+			cursor = i;
+			continue;
+		}
+		i++;
+	}
+	if (state !== 'none') return null; // unterminated quote: ambiguous
+	if (spans.length === 0) return null; // nothing maskable
+	parts.push(command.slice(cursor));
+	return { residual: parts.join(''), spans };
+}
+
+/**
+ * The #3518 P-3 cd-context word scan (W1 form: bare cd / pushd / popd word
+ * alternatives, word-boundary anchored), applied to a PREFIX of the residual
+ * — the text before a masked span's placeholder. A directory-selection word
+ * before the span moves the span body's execution context off the starting
+ * cwd; the static model withdraws the span's inner writes instead of
+ * guessing the landing (#3539 W5, v4 constraint 6). Over-matching (a `cd`
+ * inside a string the prefix cut mid-quote) withdraws: fail-closed.
+ */
+// #3568 parallel-review F-04: a BACKSLASH-PREFIXED verb (`\cd ..`) is a
+// quoted-word spelling bash executes exactly like the bare verb — the
+// character class below deliberately excludes a preceding backslash (to
+// keep `dir\cd`-style word tails out), so the escaped-verb spelling gets
+// its own alternative anchored after a non-word character or line start.
+const PROCSUB_CD_CONTEXT =
+	/(^|[^\w\\])(?:cd|pushd|popd)\b|(^|[^\w\\])\\(?:cd|pushd|popd)\b/;
+
+function procsubContextWithdraws(prefix: string, body: string): boolean {
+	return PROCSUB_CD_CONTEXT.test(prefix) || PROCSUB_CD_CONTEXT.test(body);
 }
 
 /**
@@ -1095,6 +1413,39 @@ function stageHasQuoteFragment(tokens: string[]): boolean {
 }
 
 /**
+ * #3491 W8, fallback channel: expand a RAW fallback token's brace regions
+ * into `out` redirect writes. Returns true when the expansion engine
+ * handled the token (branches emitted, or a refused real-expansion shape
+ * withdrawn) and the caller must skip its legacy dequote path; false when
+ * the token holds no expansion (caller proceeds unchanged). The engine is
+ * quote-aware on the raw token, so a quoted `'{a,b}'` target stays literal.
+ */
+function fallbackBraceTargets(
+	token: string,
+	operator: string,
+	out: WriteTarget[],
+): boolean {
+	const expansion = expandBraceRaw(token);
+	if (expansion.kind === 'none') return false;
+	if (expansion.kind === 'dynamic') {
+		out.push({
+			category: 'redirect',
+			operator,
+			path: null,
+			unresolvedContext: true,
+			dynamicSourceWord: token,
+		});
+		return true;
+	}
+	for (const branch of expansion.branches) {
+		if (!isNullDevice(branch)) {
+			out.push({ category: 'redirect', operator, path: branch });
+		}
+	}
+	return true;
+}
+
+/**
  * Detect builtin writes from a simple command string (used for process substitution inner commands).
  * Parses the command string without going through bash-parser.
  *
@@ -1139,7 +1490,7 @@ function detectBuiltinWritesFromString(cmd: string): WriteTarget[] {
 	if (name === 'rmdir' && dcParseWindowsRecursiveDelete(cmd).fires) {
 		return [];
 	}
-	if (name === 'rmdir' || name === 'truncate') {
+	if (name === 'rmdir' || name === 'truncate' || name === 'touch') {
 		// Same per-command operand semantics as the AST branch, including the
 		// `--` end-of-options convention (#3512 review P-6): a `-`-prefixed
 		// word after `--` is a path, not a flag.
@@ -1153,6 +1504,31 @@ function detectBuiltinWritesFromString(cmd: string): WriteTarget[] {
 			}
 			if (!endOfOptions && token.startsWith('-')) continue;
 			if (name === 'truncate' && !endOfOptions && isNumeric(token)) continue;
+			// #3491 W8: brace regions in the RAW token expand (quote-aware —
+			// a quoted `'{a,b}'` operand stays literal); a refused
+			// real-expansion shape withdraws fail-closed, rendering the
+			// SOURCE token in the dynamic denial.
+			const expansion = expandBraceRaw(token);
+			if (expansion.kind === 'dynamic') {
+				writes.push({
+					category: 'builtin_write',
+					operator: name,
+					path: null,
+					unresolvedContext: true,
+					dynamicSourceWord: token,
+				});
+				continue;
+			}
+			if (expansion.kind === 'branches') {
+				for (const branch of expansion.branches) {
+					writes.push({
+						category: 'builtin_write',
+						operator: name,
+						path: branch,
+					});
+				}
+				continue;
+			}
 			const operand = dequoteFallbackOperand(token);
 			if (operand === null) {
 				// Fragment/unbalanced quoting: the real operand is unrecoverable.
@@ -1171,6 +1547,27 @@ function detectBuiltinWritesFromString(cmd: string): WriteTarget[] {
 	// Last non-flag argument is the destination
 	for (let i = tokens.length - 1; i >= 1; i--) {
 		if (!tokens[i].startsWith('-')) {
+			// #3491 W8: same brace expansion as the AST branch's
+			// last-operand site (quote-aware on the RAW token).
+			const expansion = expandBraceRaw(tokens[i]);
+			if (expansion.kind === 'dynamic') {
+				return [
+					{
+						category: 'builtin_write',
+						operator: name,
+						path: null,
+						unresolvedContext: true,
+						dynamicSourceWord: tokens[i],
+					},
+				];
+			}
+			if (expansion.kind === 'branches') {
+				return expansion.branches.map((branch) => ({
+					category: 'builtin_write' as const,
+					operator: name,
+					path: branch,
+				}));
+			}
 			const operand = dequoteFallbackOperand(tokens[i]);
 			if (operand === null) {
 				return [
@@ -1393,6 +1790,375 @@ const PARSER_CHAR_ESCAPES: Record<string, string> = {
 	f: '\f',
 	v: '\v',
 };
+
+// ---------------------------------------------------------------------------
+// #3491 W8 — brace-expanded write destinations (RC-9)
+// ---------------------------------------------------------------------------
+
+/** The outcome of expanding one write-destination word's brace regions. */
+type BraceDestinationExpansion =
+	| { kind: 'none' }
+	| { kind: 'branches'; branches: string[] }
+	| { kind: 'dynamic' };
+
+/** At most this many regions multiply per destination word (plan cap). */
+const BRANCH_REGION_CAP = 2;
+/** At most this many expanded branches per destination word (plan cap). */
+const BRANCH_TOTAL_CAP = 8;
+
+/**
+ * A pure-decimal sequence endpoint without zero padding: `0`, `3`, `12`.
+ * Bash zero-pads `{01..03}` and expands signed `{-1..2}` — both are REAL
+ * expansions this model refuses (dynamic), never literals.
+ */
+const PLAIN_SEQUENCE_ENDPOINT = /^(?:0|[1-9][0-9]*)$/;
+/** A single alpha endpoint — bash expands `{a..c}`; refused here (dynamic). */
+const SINGLE_ALPHA_ENDPOINT = /^[A-Za-z]$/;
+
+/**
+ * Expand the unquoted brace regions of one WRITE DESTINATION word (#3491
+ * W8, RC-9): comma lists (`{a,b}`) and plain numeric ranges (`{1..3}`),
+ * Cartesian across at most {@link BRANCH_REGION_CAP} regions and at most
+ * {@link BRANCH_TOTAL_CAP} branches — each branch is emitted as its own
+ * destination so the scope gate judges every file bash writes.
+ *
+ * Ground truth (bash 5.x, executed probes in the issue trace): quoted or
+ * backslash-escaped braces/commas never expand (`'{a,b}'`, `"\{a,b\}"`,
+ * `{a\,b}` stay literal — kind 'none'); a `{…}` with an unquoted comma is a
+ * LIST and the `..` inside an alternative is literal (`{1..3,x}` → `1..3`,
+ * `x`); a `{…}` without a comma is a SEQUENCE only when both endpoints are
+ * integers or single letters, else bash keeps it literal (`{a..}`, `{..3}`,
+ * `{ab..cd}`, `{a..1}` → literal); a `$` immediately before `{` starts a
+ * parameter expansion (`${a,b}` is not a brace region).
+ *
+ * Every REAL expansion this model cannot enumerate exactly — nested braces,
+ * empty alternatives (`{a,,b}`), alpha or signed or zero-padded or stepped
+ * sequences, over-cap shapes — is 'dynamic': the caller reclassifies the
+ * write so the gate fails closed on it, because bash writes MORE files than
+ * any literal reading of the word.
+ *
+ * `word` supplies the trusted raw source text (quote-aware; falls back to
+ * `text` when the node or its raw slice is missing — the parser drops
+ * quotes, so that fallback can only over-expand, never miss an expansion).
+ */
+function expandBraceDestinations(
+	word: unknown,
+	text: string,
+): BraceDestinationExpansion {
+	const raw =
+		word && typeof word === 'object'
+			? (RAW_WORD_TEXT.get(word as object) ?? text)
+			: text;
+	return expandBraceRaw(raw);
+}
+
+/** The raw-text engine shared by the AST sites and the fallback sites. */
+function expandBraceRaw(raw: string): BraceDestinationExpansion {
+	// Segments: literal pieces (kept raw for later dequoting) and regions.
+	const literals: string[] = [];
+	const regions: Array<{ alternatives: string[]; count: number }> = [];
+	let cursor = 0;
+	let i = 0;
+	let state: 'none' | 'single' | 'double' = 'none';
+	while (i < raw.length) {
+		const ch = raw[i];
+		if (state === 'single') {
+			if (ch === "'") state = 'none';
+			i++;
+			continue;
+		}
+		if (state === 'double') {
+			if (ch === '\\') {
+				i += 2;
+				continue;
+			}
+			if (ch === '"') state = 'none';
+			i++;
+			continue;
+		}
+		if (ch === '\\') {
+			i += 2;
+			continue;
+		}
+		if (ch === "'" || ch === '"') {
+			state = ch === "'" ? 'single' : 'double';
+			i++;
+			continue;
+		}
+		if (ch === '$' && raw[i + 1] === '{') {
+			// Parameter expansion: `${a,b}` is not a brace region. Skip to
+			// its closing unquoted `}` (the content stays literal); an
+			// unterminated one is an anomaly the caller must not expand.
+			const close = scanToUnquotedClose(raw, i + 2, '}');
+			if (close === -1) return { kind: 'dynamic' };
+			i = close + 1;
+			continue;
+		}
+		if (ch === '{') {
+			const region = parseBraceRegion(raw, i);
+			if (region === 'ambiguous') return { kind: 'dynamic' };
+			if (region !== null) {
+				literals.push(raw.slice(cursor, i));
+				regions.push(region);
+				i = region.end + 1;
+				cursor = i;
+				continue;
+			}
+			// Not a region: bash keeps the brace literal. Continue after
+			// the `{` so its content is still scanned (an inner real region
+			// like `x{a{b,c}` keeps working).
+			i++;
+			continue;
+		}
+		i++;
+	}
+	if (regions.length === 0) return { kind: 'none' };
+	literals.push(raw.slice(cursor));
+	if (regions.length > BRANCH_REGION_CAP) return { kind: 'dynamic' };
+	let total = 1;
+	for (const region of regions) {
+		total *= region.count;
+		if (total > BRANCH_TOTAL_CAP) return { kind: 'dynamic' };
+	}
+	// Assemble: Cartesian product in bash order, each literal piece and each
+	// alternative dequoted exactly like bash quote removal (no C-escape
+	// decoding — the branch is the operand text the shell passes on).
+	const dequotedLiterals = literals.map((piece) => scanQuoting(piece).dequoted);
+	const branches: string[] = [];
+	const build = (index: number, prefix: string): void => {
+		if (index === regions.length) {
+			branches.push(prefix);
+			return;
+		}
+		for (const alternative of regions[index].alternatives) {
+			build(
+				index + 1,
+				prefix +
+					scanQuoting(alternative).dequoted +
+					dequotedLiterals[index + 1],
+			);
+		}
+	};
+	build(0, dequotedLiterals[0]);
+	// Final-critic advisory: a branch carrying a dynamic expansion (`$VAR`,
+	// `$(…)`, a backtick substitution, `%VAR%`, a leading `~`) makes the
+	// word's whole filename set unknowable — bash expands every branch and
+	// writes whichever the substitution yields. The word refuses as a whole
+	// (one null-path dynamic write rendering the SOURCE word) instead of
+	// emitting the non-dynamic siblings and a brace-substituted dynamic
+	// branch the user never typed verbatim.
+	if (branches.some((branch) => isDynamicPath(branch))) {
+		return { kind: 'dynamic' };
+	}
+	return { kind: 'branches', branches };
+}
+
+/**
+ * Index of the next unquoted, unescaped `closer` at or after `from`, or -1.
+ * Tracks single/double quotes and backslash escapes (the bash double-quote
+ * escape set).
+ */
+function scanToUnquotedClose(
+	raw: string,
+	from: number,
+	closer: string,
+): number {
+	let state: 'none' | 'single' | 'double' = 'none';
+	for (let i = from; i < raw.length; i++) {
+		const ch = raw[i];
+		if (state === 'single') {
+			if (ch === "'") state = 'none';
+			continue;
+		}
+		if (state === 'double') {
+			if (ch === '\\') {
+				i++;
+				continue;
+			}
+			if (ch === '"') state = 'none';
+			continue;
+		}
+		if (ch === '\\') {
+			i++;
+			continue;
+		}
+		if (ch === "'") state = 'single';
+		else if (ch === '"') state = 'double';
+		else if (ch === closer) return i;
+	}
+	return -1;
+}
+
+/**
+ * Parse one brace region starting at `raw[start] === '{'`.
+ *
+ * Returns null when bash keeps this `{…}` LITERAL (no unquoted comma and no
+ * bash-valid sequence: `{a}`, `{a..}`, `{..3}`, `{ab..cd}`, `{a..1}`), a
+ * region record for a comma list or plain numeric range, or 'ambiguous' for
+ * a REAL expansion this model refuses to enumerate (nested unquoted braces,
+ * empty alternatives, alpha/signed/zero-padded/stepped sequences) — the
+ * caller must classify the whole write dynamic, fail-closed.
+ */
+function parseBraceRegion(
+	raw: string,
+	start: number,
+): { alternatives: string[]; count: number; end: number } | null | 'ambiguous' {
+	// Find the matching `}` with nesting awareness: a nested unquoted `{`
+	// inside is a real expansion shape this model refuses.
+	let depth = 1;
+	let j = start + 1;
+	let state: 'none' | 'single' | 'double' = 'none';
+	let close = -1;
+	while (j < raw.length) {
+		const ch = raw[j];
+		if (state === 'single') {
+			if (ch === "'") state = 'none';
+			j++;
+			continue;
+		}
+		if (state === 'double') {
+			if (ch === '\\') {
+				j += 2;
+				continue;
+			}
+			if (ch === '"') state = 'none';
+			j++;
+			continue;
+		}
+		if (ch === '\\') {
+			j += 2;
+			continue;
+		}
+		if (ch === "'") {
+			state = 'single';
+			j++;
+			continue;
+		}
+		if (ch === '"') {
+			state = 'double';
+			j++;
+			continue;
+		}
+		if (ch === '$' && raw[j + 1] === '{') {
+			const paramClose = scanToUnquotedClose(raw, j + 2, '}');
+			if (paramClose === -1) return 'ambiguous';
+			j = paramClose + 1;
+			continue;
+		}
+		if (ch === '{') return 'ambiguous'; // nested brace region
+		if (ch === '}') {
+			depth--;
+			if (depth === 0) {
+				close = j;
+				break;
+			}
+		}
+		j++;
+	}
+	if (close === -1) return null; // no `}`: bash keeps the `{` literal
+	const content = raw.slice(start + 1, close);
+
+	// Split on UNQUOTED commas (a comma list). A quoted or escaped comma
+	// (`{a\,b}`, `{"a,b"}`) is not a separator and the shape stays
+	// literal/sequence. Alternatives keep their RAW text; the assembler's
+	// scanQuoting dequotes them exactly once.
+	const alternatives: string[] = [];
+	let altStart = 0;
+	let k = 0;
+	let altState: 'none' | 'single' | 'double' = 'none';
+	let sawUnquotedComma = false;
+	while (k < content.length) {
+		const ch = content[k];
+		if (altState === 'single') {
+			if (ch === "'") altState = 'none';
+			k++;
+			continue;
+		}
+		if (altState === 'double') {
+			if (ch === '\\') {
+				k += 2;
+				continue;
+			}
+			if (ch === '"') altState = 'none';
+			k++;
+			continue;
+		}
+		if (ch === '\\') {
+			k += 2;
+			continue;
+		}
+		if (ch === "'" || ch === '"') {
+			altState = ch === "'" ? 'single' : 'double';
+			k++;
+			continue;
+		}
+		if (ch === '$' && content[k + 1] === '{') {
+			const paramClose = scanToUnquotedClose(content, k + 2, '}');
+			if (paramClose === -1) return 'ambiguous';
+			k = paramClose + 1;
+			continue;
+		}
+		if (ch === ',') {
+			sawUnquotedComma = true;
+			if (k === altStart) return 'ambiguous'; // empty alternative: refuse
+			alternatives.push(content.slice(altStart, k));
+			altStart = k + 1;
+			k++;
+			continue;
+		}
+		k++;
+	}
+	if (altState !== 'none') return 'ambiguous'; // unterminated quote inside
+	if (sawUnquotedComma) {
+		if (altStart === content.length) return 'ambiguous'; // trailing empty
+		alternatives.push(content.slice(altStart));
+		return { alternatives, count: alternatives.length, end: close };
+	}
+
+	// No comma: a sequence only when both endpoints are integers or both are
+	// single letters (bash's rule). Anything else is a literal `{…}`.
+	const parts = content.split('..');
+	const isPlain = (s: string): boolean => PLAIN_SEQUENCE_ENDPOINT.test(s);
+	const isIntegerLike = (s: string): boolean => /^[+-]?[0-9]+$/.test(s);
+	const isSingleAlpha = (s: string): boolean => SINGLE_ALPHA_ENDPOINT.test(s);
+	if (parts.length >= 2 && parts[0] !== '' && parts[1] !== '') {
+		const [lo, hi] = parts;
+		if (parts.length === 2 && isPlain(lo) && isPlain(hi)) {
+			const loN = Number.parseInt(lo, 10);
+			const hiN = Number.parseInt(hi, 10);
+			const count = Math.abs(hiN - loN) + 1;
+			// #3568 review PRR-006: refuse BEFORE materializing the sequence —
+			// the old code built `count` strings first and only then hit the
+			// branch caps, so `{1..100000000}` allocated 1e8 strings (6.2GB
+			// RSS at 3e7, lane-measured) and a 20-digit endpoint looped
+			// without terminating. Past the total cap (or past the safe
+			// integer range, where the loop cannot terminate) the region is
+			// refused dynamic exactly like the post-cap classification.
+			if (count > BRANCH_TOTAL_CAP || !Number.isSafeInteger(count)) {
+				// The caller classifies 'ambiguous' as dynamic (fail-closed)
+				// — the exact post-cap classification, reached WITHOUT
+				// materializing the sequence.
+				return 'ambiguous';
+			}
+			const step = loN <= hiN ? 1 : -1;
+			const seq: string[] = [];
+			for (let n = loN; seq.length < count; n += step) seq.push(String(n));
+			return { alternatives: seq, count, end: close };
+		}
+		// Real bash expansions this model refuses: zero-padded or signed
+		// integers (`{01..3}`, `{-1..2}`), single letters (`{a..c}`), step
+		// syntax (`{1..9..2}`) — bash writes more files than any literal
+		// reading, so the caller classifies the write dynamic (fail-closed).
+		if (
+			(isIntegerLike(lo) && isIntegerLike(hi)) ||
+			(isSingleAlpha(lo) && isSingleAlpha(hi))
+		) {
+			return 'ambiguous';
+		}
+	}
+	// `{a}`, `{a..}`, `{..3}`, `{..}`, `{ab..cd}`, `{a..1}`: bash literal.
+	return null;
+}
 
 /**
  * The C escapes bash-parser 0.5.0 decodes inside a quoted word, as measured
@@ -1792,6 +2558,94 @@ function getSuffixWords(cmd: unknown): string[] {
 }
 
 /**
+ * The suffix WORD NODES index-aligned with {@link getSuffixWords} (#3491
+ * W8): destination expansion needs the node's raw source slice to tell a
+ * quoted `'{a,b}'` (literal) from an unquoted region (a real expansion).
+ */
+function getSuffixNodes(cmd: unknown): unknown[] {
+	if (!cmd || typeof cmd !== 'object') return [];
+	const c = cmd as BashCommand;
+	const suffix = c.suffix;
+	if (!Array.isArray(suffix)) return [];
+	const nodes: unknown[] = [];
+	for (const s of suffix) {
+		if (wordText(s) !== null) nodes.push(s);
+	}
+	return nodes;
+}
+
+/**
+ * Emit one builtin destination write, brace-expanded (#3491 W8): every
+ * branch of an unquoted `{a,b}`/`{1..3}` region becomes its own write
+ * target; a real-but-refused expansion shape (nested, over-cap, empty
+ * alternative, alpha/signed/zero-padded/stepped sequence, or any branch
+ * carrying a dynamic expansion) emits the caller's `dynamic()` write — a
+ * single null-path write carrying the user's SOURCE word
+ * (`dynamicSourceWord`) that the gate's dynamic-target block denies
+ * (fail-closed). `rawSkip` drops a brace-free literal prefix before
+ * scanning (`dd of=`).
+ *
+ * PER-SITE bash semantics (final-critic GT, executed bash 5.x — the choice
+ * is documented per site because the branches' write behavior differs):
+ * - `tee` positionals, `truncate`/`rmdir` operands: bash writes EVERY
+ *   expanded operand — the per-branch emission is bash-EXACT.
+ * - `cp`/`mv`/`install`/`ln` destination: a ≥2-branch destination makes the
+ *   command fail ("target is not a directory", no write). The per-branch
+ *   emission is a deliberate conservative over-approximation: it denies
+ *   when any branch escapes and admits when every branch is in scope (a
+ *   superset of bash's no-write), rather than modeling the refusal.
+ * - `dd of=`: bash keeps only the LAST expanded `of=` operand — which can
+ *   itself be the escaping branch (GT: `dd of=src/{a,../ddesc}` writes the
+ *   OUTSIDE file). Emitting every branch is the same conservative
+ *   superset: it always covers the branch bash actually writes.
+ */
+function pushExpandedDestination(
+	out: WriteTarget[],
+	node: unknown,
+	text: string,
+	rawSkip: number,
+	emit: (path: string) => WriteTarget | null,
+	dynamic: () => WriteTarget,
+): void {
+	const rawBase =
+		node && typeof node === 'object'
+			? RAW_WORD_TEXT.get(node as object)
+			: undefined;
+	// #3568 parallel-review F-02: the word text at this site can retain its
+	// quote wrapper (`"of=../../src/{a,b}"`), and a fully-quoted token never
+	// brace-expands (bash keeps the braces literal). Strip a matching outer
+	// wrapper first — the literal path slices the DEQUOTED text at rawSkip,
+	// and a quoted token takes the no-expansion branch — while a raw token
+	// without an outer wrapper keeps the quote-aware engine path.
+	const outerQuoted =
+		/^(['"])(.*)\1$/.exec(text) ??
+		(rawBase !== undefined ? /^(['"])(.*)\1$/.exec(rawBase) : null);
+	const dequoted = outerQuoted !== null ? (outerQuoted[2] ?? '') : text;
+	const fullyQuoted = outerQuoted !== null;
+	const rawText = fullyQuoted ? dequoted : (rawBase ?? text);
+	const expansion = fullyQuoted
+		? ({ kind: 'none' } as const)
+		: expandBraceRaw(rawText.slice(rawSkip));
+	if (expansion.kind === 'dynamic') {
+		// Unconditional (final-critic F-1): the refusal write must be
+		// emitted whatever `emit('')` would do with an empty path — the
+		// tee/dd closures return null for falsy paths, and dropping the
+		// scaffold here admitted commands whose branches bash writes.
+		out.push(dynamic());
+		return;
+	}
+	if (expansion.kind === 'none') {
+		const target = emit(dequoted.slice(rawSkip));
+		if (target !== null) out.push(target);
+		return;
+	}
+	for (const branch of expansion.branches) {
+		const target = emit(branch);
+		if (target !== null) out.push(target);
+	}
+}
+
+/**
  * Canonical detector command model (#3474): classify write-vector commands
  * through their canonical spelling so versioned (`curl8.5`, `bzip2.5`),
  * path-qualified (`/usr/bin/curl`), and execution-wrapper-prefixed
@@ -2167,6 +3021,64 @@ function isNumeric(s: string): boolean {
 	return /^\d+$/.test(s);
 }
 
+/**
+ * The redirect write targets of one redirect node, brace-aware (#3491 W8).
+ * Shared by the detection walk (detectRedirects) and the resolver walk's
+ * redirect site (getWritesFromRedirectNode) so both walks emit the same
+ * expanded branch set — the dedupe keys pair and every branch resolves at
+ * its tracked context. A destination whose brace shape is a real-but-refused
+ * expansion emits a single null-path write carrying the SOURCE word
+ * (`dynamicSourceWord`): the gate's existing dynamic-target block denies it
+ * (fail-closed), because bash writes more files than any literal reading of
+ * the word.
+ *
+ * Final-critic F-2 ground truth (executed bash 5.x): a redirect operand
+ * expanding to MULTIPLE words is an "ambiguous redirect" — bash writes
+ * NOTHING (`echo x > src/{a,b}` → rc=1, no file; same inside procsub
+ * bodies); a SINGLE-branch expansion (`f{1..1}`) is one word and writes.
+ * This site keeps the conservative over-approximation on purpose: emit
+ * every branch as a judged write (deny when any branch escapes, admit when
+ * all are in scope — a superset of bash's no-write) rather than modeling
+ * the refusal, so a shape that could write is never admitted because the
+ * model believed the shell would reject it.
+ */
+function redirectWriteTargets(
+	fileNode: unknown,
+	path: string | null,
+	opLabel: string,
+): WriteTarget[] {
+	const expansion =
+		path === null
+			? ({ kind: 'none' } as BraceDestinationExpansion)
+			: expandBraceDestinations(fileNode, path);
+	if (expansion.kind === 'dynamic') {
+		return [
+			{
+				category: 'redirect',
+				operator: opLabel,
+				path: null,
+				...(path !== null ? { dynamicSourceWord: path } : {}),
+			},
+		];
+	}
+	const targets = expansion.kind === 'branches' ? expansion.branches : [path];
+	const out: WriteTarget[] = [];
+	for (const target of targets) {
+		if (target !== null) {
+			// A branch IS the post-expansion operand text, so the plain sink
+			// check is exact (an expanded `/dev/null` branch is the device
+			// path bash passes). The unexpanded path keeps the stricter
+			// raw-source check (parser escape decoding).
+			if (expansion.kind === 'branches' && isNullDevice(target)) continue;
+			if (expansion.kind === 'none' && isNullDeviceWord(fileNode, target)) {
+				continue;
+			}
+		}
+		out.push({ category: 'redirect', operator: opLabel, path: target });
+	}
+	return out;
+}
+
 /** `>&1` copies an output descriptor and `>&-` closes one; neither names a file. */
 function isNonFileGreatAndTarget(path: string | null): boolean {
 	return path !== null && (isNumeric(path) || path === '-');
@@ -2210,12 +3122,11 @@ function detectRedirects(cmd: unknown): WriteTarget[] {
 			REDIRECT_WRITE_TOKENS.has(opType) ||
 			(REDIRECT_GREATAND_TOKENS.has(opType) && !isNonFileGreatAndTarget(path))
 		) {
-			// A redirect into a sink device discards its data; it is not a write
-			// target, exactly as `tee /dev/null` is not. Without this, `2>/dev/null`
-			// reached the authority layer as a write to /dev/null and was rejected
-			// as a workspace root escape.
-			if (path !== null && isNullDeviceWord(fileNode, path)) continue;
-			results.push({ category: 'redirect', operator: opLabel, path });
+			// #3491 W8: brace-expanded destinations emit one write per branch
+			// (a sink-device branch — quoted or expanded — is not a target).
+			for (const write of redirectWriteTargets(fileNode, path, opLabel)) {
+				results.push(write);
+			}
 		} else if (REDIRECT_HERE_TOKENS.has(opType)) {
 			results.push({ category: 'here_doc', operator: opLabel, path });
 		}
@@ -2286,13 +3197,57 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 	// dd with of= flag
 	if (lowerName === 'dd') {
 		const suffixWords = getSuffixWords(cmd);
-		for (const word of suffixWords) {
-			if (word.startsWith('of=')) {
-				const path = word.slice(3);
-				if (path && !isNullDevice(path)) {
-					results.push({ category: 'builtin_write', operator: 'dd of=', path });
-				}
+		const suffixNodes = getSuffixNodes(cmd);
+		for (let w = 0; w < suffixWords.length; w++) {
+			const word = suffixWords[w];
+			// Reviewer F-f (pre-existing, exposed by the F-02 hardening): a
+			// quoted `of=` word carrying an expansion (`"of=$D/src/f"`)
+			// failed the raw startsWith gate and emitted nothing — bash
+			// writes through the expanded value. Emit the dynamic refusal
+			// for the expansion-bearing spelling.
+			let bare = word;
+			if (
+				bare.length >= 2 &&
+				((bare.startsWith("'") && bare.endsWith("'")) ||
+					(bare.startsWith('"') && bare.endsWith('"')))
+			) {
+				bare = bare.slice(1, -1);
 			}
+			const ofWord = bare.startsWith('of=') ? bare : word;
+			if (!ofWord.startsWith('of=')) continue;
+			if (isDynamicPath(ofWord.slice(3))) {
+				results.push({
+					category: 'builtin_write',
+					operator: 'dd of=',
+					path: null,
+					unresolvedContext: true,
+					dynamicSourceWord: ofWord,
+				});
+				continue;
+			}
+			// #3491 W8: brace regions in the `of=` VALUE expand — `dd
+			// of='src/{a,../x}'` writes both branch files. Bash keeps only
+			// the LAST expanded `of=` (final-critic GT), which can itself be
+			// the escaping branch — emitting every branch is the conservative
+			// superset that always covers it.
+			pushExpandedDestination(
+				results,
+				suffixNodes[w],
+				word,
+				3,
+				(path) =>
+					path && !isNullDevice(path)
+						? { category: 'builtin_write', operator: 'dd of=', path }
+						: null,
+				// F-1: the refusal write is UNCONDITIONAL — emit('') returns
+				// null here (falsy-path test) and must not gate it.
+				() => ({
+					category: 'builtin_write',
+					operator: 'dd of=',
+					path: null,
+					dynamicSourceWord: word,
+				}),
+			);
 		}
 		return results;
 	}
@@ -2302,20 +3257,35 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 	// start with '-' (e.g. tee -- -dashed-filename).
 	if (lowerName === 'tee') {
 		const suffixWords = getSuffixWords(cmd);
+		const suffixNodes = getSuffixNodes(cmd);
 		let pastDoubleDash = false;
-		for (const word of suffixWords) {
+		for (let w = 0; w < suffixWords.length; w++) {
+			const word = suffixWords[w];
 			if (word === '--') {
 				pastDoubleDash = true;
 				continue;
 			}
 			if (!pastDoubleDash && word.startsWith('-')) continue;
-			if (word && !isNullDevice(word)) {
-				results.push({
+			// #3491 W8: a braced positional expands — `tee src/{a,../../x}`
+			// writes every branch (bash-EXACT multi-write, final-critic GT).
+			pushExpandedDestination(
+				results,
+				suffixNodes[w],
+				word,
+				0,
+				(path) =>
+					path && !isNullDevice(path)
+						? { category: 'builtin_write', operator: 'tee', path }
+						: null,
+				// F-1: the refusal write is UNCONDITIONAL — emit('') returns
+				// null here (falsy-path test) and must not gate it.
+				() => ({
 					category: 'builtin_write',
 					operator: 'tee',
-					path: word,
-				});
-			}
+					path: null,
+					dynamicSourceWord: word,
+				}),
+			);
 		}
 		return results;
 	}
@@ -2342,6 +3312,7 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 	}
 
 	const suffixWords = getSuffixWords(cmd);
+	const suffixNodes = getSuffixNodes(cmd);
 
 	// A quoted, backslash-escaped or expanded operand (`"a"`, `a\b`, `$D`)
 	// never keeps this tag: detectPosixWrites withdraws it from any line that
@@ -2363,6 +3334,76 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 		return results;
 	}
 
+	if (lowerName === 'touch') {
+		// #3568 parallel-review F-01: POSIX `touch FILE...` creates/updates
+		// EVERY named operand — each non-flag operand is a write. touch's
+		// option vocabulary is date/reference flags whose values consume the
+		// next word only in their long `--TIME=` glued forms; short clusters
+		// (`-c`, `-acm`) never take a separate value word, so a plain
+		// startsWith('-') skip is the conservative operand scan (an
+		// option-shaped PATH after `--` is honored via the same convention
+		// as truncate/rmdir).
+		let endOfOptions = false;
+		// Transparent prefixes (command/exec) leave their own name in the
+		// suffix words — skip everything up to and including the leaf verb
+		// (basename match: path-qualified leaves like /usr/bin/touch) so the
+		// wrapper/verb words are never judged as operands.
+		let start = 0;
+		for (let w = 0; w < suffixWords.length; w++) {
+			if (basenameAnySep(suffixWords[w] ?? '') === 'touch') {
+				start = w + 1;
+				break;
+			}
+		}
+		for (let w = start; w < suffixWords.length; w++) {
+			const word = suffixWords[w];
+			if (!endOfOptions && word === '--') {
+				endOfOptions = true;
+				continue;
+			}
+			// Reviewer F-a: -d/-t/-r (short, separate value) and the long
+			// --date/--reference/--time forms consume the NEXT word as the
+			// value — a date string or reference file must not be judged as
+			// a write target.
+			if (
+				!endOfOptions &&
+				/^-[^-]*[dtr]$/.test(word) &&
+				w + 1 < suffixWords.length
+			) {
+				w += 1;
+				continue;
+			}
+			if (
+				!endOfOptions &&
+				/^(--date|--reference|--time)$/.test(word) &&
+				w + 1 < suffixWords.length
+			) {
+				w += 1;
+				continue;
+			}
+			if (endOfOptions || !word.startsWith('-')) {
+				pushExpandedDestination(
+					results,
+					suffixNodes[w],
+					word,
+					0,
+					(path) => ({
+						category: 'builtin_write',
+						operator: dedupeOperator,
+						path,
+					}),
+					() => ({
+						category: 'builtin_write',
+						operator: dedupeOperator,
+						path: null,
+						dynamicSourceWord: word,
+					}),
+				);
+			}
+		}
+		return results;
+	}
+
 	if (lowerName === 'truncate') {
 		// POSIX `truncate FILE...` truncates EVERY named file (#3503): report
 		// each non-flag, non-size operand — the old first-word-and-break loop
@@ -2371,7 +3412,8 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 		// reported too — an over-report (fail-closed), matching the pre-#3503
 		// first-word behavior for that shape.
 		let endOfOptions = false;
-		for (const word of suffixWords) {
+		for (let w = 0; w < suffixWords.length; w++) {
+			const word = suffixWords[w];
 			if (!endOfOptions && word === '--') {
 				endOfOptions = true;
 				continue;
@@ -2380,11 +3422,25 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 			// (coreutils): the numeric size exclusion applies only to the
 			// pre-`--` option region (#3512 final-critic residual).
 			if (endOfOptions || (!word.startsWith('-') && !isNumeric(word))) {
-				results.push({
-					category: 'builtin_write',
-					operator: 'truncate',
-					path: word,
-				});
+				// #3491 W8: a braced operand expands to one write per branch
+				// (truncate FILE... truncates EVERY operand — bash-EXACT).
+				pushExpandedDestination(
+					results,
+					suffixNodes[w],
+					word,
+					0,
+					(path) => ({
+						category: 'builtin_write',
+						operator: 'truncate',
+						path,
+					}),
+					() => ({
+						category: 'builtin_write',
+						operator: 'truncate',
+						path: null,
+						dynamicSourceWord: word,
+					}),
+				);
 			}
 		}
 	} else if (lowerName === 'rmdir') {
@@ -2397,29 +3453,112 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 		// `-`-prefixed word after it is a path, not a flag (#3512 review P-6;
 		// the tee branch models the same convention).
 		let endOfOptions = false;
-		for (const word of suffixWords) {
+		for (let w = 0; w < suffixWords.length; w++) {
+			const word = suffixWords[w];
 			if (!endOfOptions && word === '--') {
 				endOfOptions = true;
 				continue;
 			}
 			if (endOfOptions || !word.startsWith('-')) {
-				results.push({
-					category: 'builtin_write',
-					operator: dedupeOperator,
-					path: word,
-				});
+				// #3491 W8: a braced operand expands to one write per branch
+				// (rmdir dir... removes EVERY operand — bash-EXACT; no branch
+				// ever carries the emptyDirectoryRemoval tag — a braced
+				// operand is not a bare literal).
+				pushExpandedDestination(
+					results,
+					suffixNodes[w],
+					word,
+					0,
+					(path) => ({
+						category: 'builtin_write',
+						operator: dedupeOperator,
+						path,
+					}),
+					() => ({
+						category: 'builtin_write',
+						operator: dedupeOperator,
+						path: null,
+						dynamicSourceWord: word,
+					}),
+				);
 			}
 		}
 	} else {
+		// #3568 review PRR-009: `-t DEST` / `--target-directory=DEST` moves
+		// the DESTINATION to the flag's value — every operand is a SOURCE
+		// and bash writes DEST/<basename>. The old last-operand rule judged
+		// `cp -t ../../esc src/a` on `src/a` (in scope) while bash wrote
+		// outside. Emit DEST as a write too (a conservative superset: bash
+		// writes DEST/<basename>, which is inside DEST, so the containment
+		// verdict is the same).
+		for (let w = 0; w < suffixWords.length; w++) {
+			const flagWord = suffixWords[w] ?? '';
+			let dest: string | null = null;
+			if (
+				(flagWord === '-t' || flagWord === '--target-directory') &&
+				w + 1 < suffixWords.length
+			) {
+				dest = suffixWords[w + 1] ?? null;
+			} else if (flagWord.startsWith('--target-directory=')) {
+				dest = flagWord.slice('--target-directory='.length);
+			} else if (flagWord.startsWith('-') && !flagWord.startsWith('--')) {
+				// Reviewer F-d: GNU cp accepts the ATTACHED short value
+				// (`-t../../esc`) — when `t` is NOT the final cluster char the
+				// value rides inside the token; when `t` IS final the value is
+				// the next word (the `-vt` cluster form).
+				const tIdx = flagWord.indexOf('t', 1);
+				if (tIdx === flagWord.length - 1 && w + 1 < suffixWords.length) {
+					dest = suffixWords[w + 1] ?? null;
+				} else if (tIdx !== -1 && tIdx < flagWord.length - 1) {
+					dest = flagWord.slice(tIdx + 1);
+				}
+			}
+			if (dest !== null && dest !== '') {
+				pushExpandedDestination(
+					results,
+					suffixNodes[w + 1] ?? suffixNodes[w],
+					dest,
+					0,
+					(path) => ({
+						category: 'builtin_write',
+						operator: dedupeOperator,
+						path,
+					}),
+					() => ({
+						category: 'builtin_write',
+						operator: dedupeOperator,
+						path: null,
+						dynamicSourceWord: dest ?? flagWord,
+					}),
+				);
+			}
+		}
 		// cp, mv, install, ln — last non-flag argument is the destination (written file)
 		for (let i = suffixWords.length - 1; i >= 0; i--) {
 			const word = suffixWords[i];
 			if (!word.startsWith('-')) {
-				results.push({
-					category: 'builtin_write',
-					operator: dedupeOperator,
-					path: word,
-				});
+				// #3491 W8: a braced destination expands. Bash REFUSES a
+				// ≥2-branch cp/mv destination ("target is not a directory",
+				// no write — final-critic GT); emitting every branch is the
+				// deliberate conservative over-approximation (deny when any
+				// branch escapes, admit when all are in scope).
+				pushExpandedDestination(
+					results,
+					suffixNodes[i],
+					word,
+					0,
+					(path) => ({
+						category: 'builtin_write',
+						operator: dedupeOperator,
+						path,
+					}),
+					() => ({
+						category: 'builtin_write',
+						operator: dedupeOperator,
+						path: null,
+						dynamicSourceWord: word,
+					}),
+				);
 				break;
 			}
 		}
@@ -5026,9 +6165,23 @@ export function detectInteractiveSession(
  * @param command - A POSIX shell command string
  * @returns WriteAnalysis with array of detected write targets; hasWrites is false when array is empty
  */
-export function detectPosixWrites(command: string): WriteAnalysis {
+export function detectPosixWrites(
+	command: string,
+	procsubRecursionDepth = 0,
+): WriteAnalysis {
 	if (!command || typeof command !== 'string') {
 		return { writes: [], hasWrites: false };
+	}
+	// Reviewer F-b: the procsub body recursion re-masks/re-parses its
+	// remaining body per level (super-linear in nesting depth — 28KB at
+	// 4000 levels measured 17.4s vs 6ms base). Beyond the bound the nested
+	// content fails CLOSED (the caller marks body writes unresolved).
+	if (procsubRecursionDepth > 8) {
+		return {
+			writes: [],
+			hasWrites: false,
+			parseError: true,
+		};
 	}
 	if (unsafeShellCommandTextReason(command)) {
 		return {
@@ -5091,36 +6244,123 @@ export function detectPosixWrites(command: string): WriteAnalysis {
 		collectPipeStdinEvals(ast as BashNode, allWrites);
 	}
 
-	// If parse failed, try regex-based process substitution detection.
-	// This catches commands like `tee >(cat > file.txt)` which bash-parser cannot parse.
+	// #3539 W5 (RC-5): on a parse failure, first try to MASK every balanced
+	// unquoted `>(…)`/`<(…)` span and parse the RESIDUAL. When that fully
+	// succeeds (≥1 span masked, residual parses clean, every masked body
+	// analyzed below, no ambiguity), the OUTER writes come from the normal
+	// AST detectors on the residual — the laundered second write of the
+	// partial-detector era is visible again — and the residual is returned
+	// as `residualCommand` so the gate's resolver tracks cd context for
+	// those outer writes. The masked INNER writes come from the shared
+	// per-stage scan on each span body; they resolve at the starting cwd
+	// unless their body or outer prefix carries a directory change, in
+	// which case they withdraw (`unresolvedContext`, v4 constraint 6).
+	// Anything less than full success keeps the fail-closed parseError —
+	// now unconditionally (a partial-detector find no longer clears it).
+	let forceParseError = false;
+	let residualCommand: string | undefined;
 	if (parseFailed) {
-		const procSubWrites = detectProcessSubstitutionWrites(command);
-		// #3518 P-3: the fallback has no AST, so a `cd` earlier in the same
-		// line cannot move its tracked context — every write it emits would
-		// silently resolve at the STARTING cwd while real bash writes at the
-		// post-cd directory. Withdraw such writes (`unresolvedContext`) so the
-		// resolver nulls them and the gate denies, fail-closed. The scan is a
-		// local text check (no cross-module import): any `;`/`&&`/`||`/newline
-		// separated region whose first word is `cd` with an operand.
-		// #3530 PRR-005: a word boundary, not a separator class — `then cd`,
-		// `do cd`, `{ cd`, `! cd` forms are equally cd-context on a
-		// parse-failing line, and `pushd` changes the directory too.
-		// #3491 W1: bare `cd` (HOME landing), `popd`, and bare `pushd` (stack
-		// swap) change the directory with NO operand — the alternatives are
-		// word-boundary anchored so every directory-selection verb withdraws
-		// its line's fallback writes.
-		// Over-withdraw direction is fail-closed and bounded to parse-failing
-		// (process-substitution) lines whose text merely mentions a
-		// `cd|pushd|popd` word.
-		const cdContext = /(^|[^\w\\])(?:cd|pushd|popd)\b/.test(command);
-		// Plain loop (not spread-push): adversarial operand counts must not
-		// hit the engine's spread-arity limit (#3512 review N-2).
-		for (const write of procSubWrites) {
-			allWrites.push(
-				cdContext && write.unresolvedContext !== true
-					? { ...write, unresolvedContext: true }
-					: write,
-			);
+		const masked = maskProcSubSpans(command);
+		let maskedOk = false;
+		if (masked !== null) {
+			// The residual carries no unquoted procsub span (every one was
+			// masked), so this recursion cannot re-enter the masking branch;
+			// a residual that still fails to parse keeps the parseError.
+			const residualAnalysis = detectPosixWrites(masked.residual);
+			if (residualAnalysis.parseError !== true) {
+				maskedOk = true;
+				// Outer writes: the normal AST detector result on the
+				// residual. Placeholders are inert `/dev/null` operands —
+				// suppressed by the existing sink-device exemption inside
+				// BOTH the detection and resolver walks, so nothing is
+				// removed post-hoc and occurrence numbering is unaffected
+				// (v4 constraint 7).
+				for (const write of residualAnalysis.writes) {
+					allWrites.push(write);
+				}
+				// Inner writes: the shared per-stage scan per masked body —
+				// for BOTH operators (`<(cat > f)` runs its body too). A
+				// body or outer prefix with a directory-selection word
+				// withdraws every write of that span (fail-closed): the
+				// body's landing is not statically knowable.
+				for (const span of masked.spans) {
+					const withdraw = procsubContextWithdraws(
+						masked.residual.slice(0, span.residualPlaceholderStart),
+						span.body,
+					);
+					// #3568 review PRR-001 (parallel-review F-01): the
+					// per-stage scan recognised only the builtin set plus
+					// simple redirects, so tee/dd/curl/sed -i/python/rsync/
+					// archive bodies and nested `<(` spans were invisible and
+					// the span admitted while base parse-denied it. The body
+					// is an inner POSIX command line — run the FULL detector
+					// family on it (the recursion's own masking handles
+					// nested spans, closing PRR-003's nested-`<(` hiding;
+					// `;`-torn and `&&`-joined operands parse natively). A
+					// body that fails to parse leaves every write unresolved
+					// (fail-closed), and the read-only `<(ls)` admit is
+					// preserved because a write-free body emits nothing.
+					const bodyAnalysis = detectPosixWrites(
+						span.body,
+						procsubRecursionDepth + 1,
+					);
+					// Reviewer delta (Critical): the depth cap returns
+					// {writes:[], parseError:true} — consulting the flag only
+					// over body WRITES dropped it wholesale when the list was
+					// empty, so a depth-9 nested escaping write escaped the
+					// gate entirely. An empty body analysis past the cap is
+					// the fail-closed signal itself: emit the null-path write.
+					if (
+						bodyAnalysis.parseError === true &&
+						bodyAnalysis.writes.length === 0
+					) {
+						allWrites.push({
+							category: 'redirect',
+							operator: '>',
+							path: null,
+							unresolvedContext: true,
+							dynamicSourceWord: span.body.slice(0, 80),
+						});
+					}
+					for (const write of bodyAnalysis.writes) {
+						allWrites.push(
+							(withdraw || bodyAnalysis.parseError === true) &&
+								write.unresolvedContext !== true
+								? { ...write, unresolvedContext: true }
+								: write,
+						);
+					}
+				}
+				residualCommand = masked.residual;
+			}
+		}
+		if (maskedOk) {
+			parseFailed = false;
+		} else {
+			// Legacy no-mask fallback: whole-command regex scan only. Its
+			// partial success NEVER clears the parse error anymore — that
+			// clearing was the RC-5 laundering defect. Every write it finds
+			// is still emitted (a cd-context line withdraws them, #3518 P-3)
+			// so the analysis stays informative, but the gate rejects the
+			// line on the parse error regardless.
+			forceParseError = true;
+			const procSubWrites = detectProcessSubstitutionWrites(command);
+			// #3518 P-3: the fallback has no AST, so a `cd` earlier in the
+			// same line cannot move its tracked context — every write it
+			// emits would silently resolve at the STARTING cwd while real
+			// bash writes at the post-cd directory. Withdraw such writes
+			// (`unresolvedContext`) so the resolver nulls them and the gate
+			// denies, fail-closed.
+			const cdContext = PROCSUB_CD_CONTEXT.test(command);
+			// Plain loop (not spread-push): adversarial operand counts must
+			// not hit the engine's spread-arity limit (#3512 review N-2).
+			for (const write of procSubWrites) {
+				allWrites.push(
+					cdContext && write.unresolvedContext !== true
+						? { ...write, unresolvedContext: true }
+						: write,
+				);
+			}
 		}
 	}
 
@@ -5188,7 +6428,13 @@ export function detectPosixWrites(command: string): WriteAnalysis {
 	return {
 		writes,
 		hasWrites: writes.length > 0,
-		parseError: parseFailed && writes.length === 0 ? true : undefined,
+		// #3539 W5: the legacy fallback's parseError is now unconditional —
+		// a partial-detector find no longer clears the fail-closed flag.
+		parseError:
+			forceParseError || (parseFailed && writes.length === 0)
+				? true
+				: undefined,
+		residualCommand,
 	};
 }
 
@@ -6729,8 +7975,10 @@ function getWritesFromRedirectNode(
 		// resolve it against the POSIX cd tracker's context, which for a
 		// Windows cwd is a mangled path that can sit on another drive; left
 		// out, it falls back to the caller's cwd like any unmatched write.
-		if (path !== null && isNullDevice(path)) return [];
-		return [{ category: 'redirect', operator: opLabel, path }];
+		// #3491 W8: brace-aware emission identical to the detection walk's
+		// (redirectWriteTargets — which also drops sink-device branches) so
+		// the branch sets pair across the walks.
+		return redirectWriteTargets(fileNode, path, opLabel);
 	} else if (REDIRECT_HERE_TOKENS.has(opType)) {
 		return [{ category: 'here_doc', operator: opLabel, path }];
 	}
