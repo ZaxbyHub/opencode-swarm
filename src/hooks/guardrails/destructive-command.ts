@@ -1040,7 +1040,19 @@ const ENV_SHORT_ARG_CHARS = new Set(['u', 'U', 'C', 'S', 'a', 'P']);
  * - null: not a chdir-bearing wrapper segment (legacy unwrap path).
  */
 type DcChdirMatch =
-	| { kind: 'static'; dir: string; innerWords: string[] }
+	| {
+			kind: 'static';
+			dir: string;
+			innerWords: string[];
+			/**
+			 * #3572 delta: the pre-serialized inner subshell text when the
+			 * first inner word must keep a NON-PLAIN spelling (the nested
+			 * GNU `time` word is emitted quoted so the re-detection selects
+			 * the binary grammar instead of the bash keyword) — shSerializeWords
+			 * would double-escape it.
+			 */
+			chdirInnerText?: string;
+	  }
 	| { kind: 'uncertain'; innerWords: string[] }
 	| { kind: 'failClosed' }
 	| null;
@@ -1267,13 +1279,35 @@ function matchSudoChdir(words: string[]): DcChdirMatch {
 	const dir = walk.sudoChdir;
 	if (dir === undefined) return null;
 	if (dir === '' || dir.includes('\0')) return { kind: 'failClosed' };
-	const rest = words.slice(1 + walk.innerIndex);
+	// #3572 delta: a NESTED GNU `time -o` outcome carries chdirTailIndex —
+	// the word index the rewritten subshell must slice from (the `time`
+	// word, keeping the timed launcher and its -o operand INSIDE the child
+	// cwd); the plain innerIndex points past it at the timed command, which
+	// dropped the -o write from the rewrite and falsely denied
+	// `sudo -D src time -o ok.txt true`.
+	const rest = words.slice(1 + (walk.chdirTailIndex ?? walk.innerIndex));
 	if (rest.length === 0) {
 		// -D with no command: nothing runs.
 		return null;
 	}
 	if (dcIsDynamicChdirOperand(dir)) {
 		return { kind: 'uncertain', innerWords: rest };
+	}
+	if (walk.chdirTailIndex !== undefined) {
+		// The nested time word is bash-QUOTED in the rewritten subshell: a
+		// bare `time` at the subshell pipeline start would re-enter the
+		// bash-KEYWORD grammar (-o is not a keyword flag) and the -o write
+		// would vanish from the re-detection (the union-back then regained
+		// the root-resolved emission and falsely denied). Quoted spellings
+		// select the GNU grammar (N-03 raw-spelling routing). The inner text
+		// is built here because shSerializeWords would double-escape the
+		// already-quoted word.
+		return {
+			kind: 'static',
+			dir,
+			innerWords: rest,
+			chdirInnerText: `'${rest[0]}' ${shSerializeWords(rest.slice(1))}`,
+		};
 	}
 	return { kind: 'static', dir, innerWords: rest };
 }
@@ -1368,7 +1402,14 @@ function preprocessWrapperText(
 			i += 1;
 		}
 	}
-	const innerRaw = shSerializeWords(payloadWords);
+	// #3572 delta: a nested GNU `time` inner word carries a PRE-SERIALIZED
+	// inner text (the word is quoted so both the re-detection and the
+	// legacy unwrap select the GNU grammar — bare `time` at the subshell
+	// pipeline start re-enters the keyword grammar and the unwrap consumes
+	// `-o FILE` as the timed command, dropping the write from the rewrite).
+	const chdirInnerText =
+		match.kind === 'static' ? match.chdirInnerText : undefined;
+	const innerRaw = chdirInnerText ?? shSerializeWords(payloadWords);
 	const nested = preprocessWrapperText(innerRaw, depth + 1);
 	const inner =
 		nested !== null
@@ -1635,7 +1676,7 @@ export function dcExpandDestructiveSegments(
 			continue;
 		}
 		expandChdirInnerSegments(
-			shSerializeWords(match.innerWords),
+			match.chdirInnerText ?? shSerializeWords(match.innerWords),
 			path.resolve(baseCwd, match.dir),
 			out,
 		);

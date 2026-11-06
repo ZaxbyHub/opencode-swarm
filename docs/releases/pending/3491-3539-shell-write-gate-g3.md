@@ -254,10 +254,19 @@ C9, C12–C15 stay GREEN.
   `sudo time -o src/ok.txt true` admits). A command-less sudo with no
   query/reset mode is the IMPLIED INTERACTIVE ROOT SHELL (parse_args.c
   ground truth) and denies like the explicit `sudo -i`; `sudo -k`/-v/-l
-  stay admitted (documented no-command no-ops). Remaining disclosed
-  residual: a launcher nested TWO levels deep (`nice sudo time -o x true`)
-  still loses the inner `-o` emission — the walk recurses one nesting
-  level only; tracked in the PR's follow-up issue.
+  stay admitted (documented no-command no-ops). The getopt `--` sentinel
+  applies the same walk decisions (round-3 pins: `sudo --`, `sudo -i --`,
+  `sudo FOO=bar` are the implied interactive root shell and deny;
+  `sudo -k --`/-v stay benign; `sudo -- time -o …` walks the nested GNU
+  grammar). `sudo -D DIR` composes with the nested `time -o` — the
+  rewritten child subshell keeps the `time` word QUOTED so the re-detection
+  selects the binary grammar (`sudo -D src time -o ok.txt true` admits,
+  the escaping twin denies). Remaining disclosed residual (emission-level,
+  deny-direction net): a launcher nested TWO levels deep (`nice sudo time
+  -o x true`) loses the inner `-o` EMISSION — the walk recurses one
+  nesting level only — but the escaping shapes still deny at the gate via
+  the unwrap/N-03 net while the in-scope twin admits; tracked in the PR's
+  follow-up issue.
 - (Implied-shell note:) the command-less-sudo deny models sudo's
   parse_args.c semantics as ground-truthed by the reviewer on a sudo host;
   this host has no sudo binary, so the modeling rests on that citation
@@ -269,8 +278,8 @@ C9, C12–C15 stay GREEN.
 ## Test evidence
 
 - New suites `tests/unit/hooks/guardrails-shell-write-interpreter-flags-3491.test.ts`
-  (46 tests), `tests/unit/hooks/destructive-command-verb-and-ps-3539.test.ts`
-  (50 tests), and the review-round sibling
+  (58 tests), `tests/unit/hooks/destructive-command-verb-and-ps-3539.test.ts`
+  (56 tests), and the review-round sibling
   `guardrails-shell-write-launcher-depth-3491.test.ts` (13 tests: compound
   depth laundering, quoted time, explain parity); W3 legs added to
   `guardrails-shell-write-launcher-env-3491.test.ts` (80 tests total).
@@ -290,7 +299,7 @@ C9, C12–C15 stay GREEN.
   `guardrails-shell-write-inplace-operands.test.ts` (perl in-place cluster rows
   moved from allowed to eval-blocked).
 - Feedback round: `tests/unit/hooks/guardrails-shell-write-3572-feedback-hardening.test.ts`
-  (24 tests: N-01 `sudo -e --` edit survival with in-scope admit control, N-02
+  (38 tests: N-01 `sudo -e --` edit survival with in-scope admit control, N-02
   timed-tail deny + cd-tracked admit, N-03 escaping-download emission +
   gate deny + admit, N-29 env -S tee detection + nested -S and expansion
   payload refusals + destructive deny, wrapper-prefixed tee leaf offset with

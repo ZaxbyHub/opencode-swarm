@@ -363,3 +363,44 @@ describe('3572 delta round 2 (critic findings: nested time + implied root shell)
 		expect((await gate('sudo -l')).verdict).toBe('ADMITTED');
 	}, 120_000);
 });
+
+describe('3572 delta round 3 (the -- sentinel + sudo -D chdir composition)', () => {
+	test('gate: the -- sentinel cannot bypass the implied/interactive sudo deny', async () => {
+		for (const cmd of ['sudo --', 'sudo -i --', 'sudo -E --', 'sudo FOO=bar']) {
+			expect((await gate(cmd)).verdict).toBe('DENIED');
+		}
+		expect((await gate('echo x | sudo --')).verdict).toBe('DENIED');
+	}, 120_000);
+
+	test('gate: -- sentinel query/reset carve-outs and assignments stay admitted', async () => {
+		expect((await gate('sudo -k --')).verdict).toBe('ADMITTED');
+		expect((await gate('sudo -v --')).verdict).toBe('ADMITTED');
+		expect((await gate('sudo FOO=bar true')).verdict).toBe('ADMITTED');
+	}, 120_000);
+
+	test('gate: the -- sentinel cannot bypass the nested GNU time -o', async () => {
+		expect((await gate('sudo -- time -o ../../esc true')).verdict).toBe(
+			'DENIED',
+		);
+		expect((await gate('nice -- time -o ../../esc true')).verdict).toBe(
+			'DENIED',
+		);
+		expect((await gate('nohup -- time -o ../../esc true')).verdict).toBe(
+			'DENIED',
+		);
+		expect((await gate('sudo -- time -o src/ok.txt true')).verdict).toBe(
+			'ADMITTED',
+		);
+	}, 120_000);
+
+	test('gate: sudo -D composes with the nested time -o (both directions)', async () => {
+		// The rewritten subshell keeps the quoted `time` word inside the
+		// child cwd — the in-scope report admits, the escaping twin denies.
+		expect((await gate('sudo -D src time -o ok.txt true')).verdict).toBe(
+			'ADMITTED',
+		);
+		expect((await gate('sudo -D src time -o ../../esc true')).verdict).toBe(
+			'DENIED',
+		);
+	}, 120_000);
+});

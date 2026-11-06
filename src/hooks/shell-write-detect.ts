@@ -2717,6 +2717,14 @@ export type LauncherWalkOutcome =
 			timeOutputFile?: string;
 			/** sudo -D/--chdir operand (first wins) — the W2 chdir composition. */
 			sudoChdir?: string;
+			/**
+			 * #3572 delta: for a NESTED GNU `time -o` outcome under sudo, the
+			 * word index matchSudoChdir should slice `rest` from (the nested
+			 * `time` word, so the rewritten subshell keeps the timed launcher
+			 * and its -o operand inside the child cwd) — the plain innerIndex
+			 * points past it at the timed command.
+			 */
+			chdirTailIndex?: number;
 	  }
 	| { kind: 'benign' }
 	| { kind: 'edit'; editStartIndex: number }
@@ -2966,13 +2974,54 @@ function walkSudoOptions(words: readonly string[]): LauncherWalkOutcome {
 					? { kind: 'edit', editStartIndex: i + 1 }
 					: { kind: 'benign' };
 			}
-			return i + 1 < words.length
-				? {
-						kind: 'inner',
-						innerIndex: i + 1,
-						...(chdirDir !== undefined ? { sudoChdir: chdirDir } : {}),
-					}
-				: { kind: 'benign' };
+			if (i + 1 >= words.length) {
+				// #3572 delta-critic: a command-less `sudo --` is getopt-
+				// identical to bare sudo (the `--` tokens stay in argv, so
+				// parse_args.c still reaches argc==0 and fires the implied
+				// interactive root shell) — the SAME end-of-walk decision
+				// applies, with the query/reset carve-outs.
+				if (listMode) return { kind: 'benign' };
+				if (queryOther) return { kind: 'benign' };
+				if (resetOnly && execOrResetSeen && !interactive) {
+					return { kind: 'benign' };
+				}
+				return { kind: 'interactive' };
+			}
+			if (listMode) return { kind: 'benign' };
+			if (queryOther)
+				return { kind: 'uncertain', tailIndex: i + 1 };
+			// parse_args.c consumes leading VAR=value as environment settings;
+			// assignments-only after `--` is still argc==0 → implied shell.
+			let j = i + 1;
+			while (
+				j < words.length &&
+				/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[j] ?? '')
+			) {
+				j += 1;
+			}
+			if (j >= words.length) {
+				if (resetOnly && execOrResetSeen && !interactive) {
+					return { kind: 'benign' };
+				}
+				return { kind: 'interactive' };
+			}
+			// #3572 delta-critic: the nested GNU `time` lookup runs on the
+			// post-`--` word exactly like the non-sentinel path.
+			const nested = nestedTimeTail(words, j);
+			if (nested !== null) {
+				return {
+					kind: 'inner',
+					innerIndex: nested.innerIndex,
+					timeOutputFile: nested.timeOutputFile,
+					chdirTailIndex: j,
+					...(chdirDir !== undefined ? { sudoChdir: chdirDir } : {}),
+				};
+			}
+			return {
+				kind: 'inner',
+				innerIndex: j,
+				...(chdirDir !== undefined ? { sudoChdir: chdirDir } : {}),
+			};
 		}
 		if (token.startsWith('--') && token.length > 2) {
 			const arg = longFlagTakesArg(token, SUDO_LONG_ARG_TAKING);
@@ -3076,20 +3125,37 @@ function walkSudoOptions(words: readonly string[]): LauncherWalkOutcome {
 			// -v/-V/-K/-L with a trailing command: sudo(8)'s synopsis gives
 			// these modes no command operand — deny-on-uncertainty.
 			return { kind: 'uncertain', tailIndex: i };
+		// parse_args.c consumes leading VAR=value words as environment
+		// settings; assignments-only leaves argc==0 → implied interactive
+		// root shell (same decision as bare command-less sudo).
+		let j = i;
+		while (
+			j < words.length &&
+			/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[j] ?? '')
+		) {
+			j += 1;
+		}
+		if (j >= words.length) {
+			if (resetOnly && execOrResetSeen && !interactive) {
+				return { kind: 'benign' };
+			}
+			return { kind: 'interactive' };
+		}
 		// #3572 delta-critic: a nested `time` inner word is the GNU binary
 		// (sudo execs directly, no shell) — surface its -o outcome.
-		const nested = nestedTimeTail(words, i);
+		const nested = nestedTimeTail(words, j);
 		if (nested !== null) {
 			return {
 				kind: 'inner',
 				innerIndex: nested.innerIndex,
 				timeOutputFile: nested.timeOutputFile,
+				chdirTailIndex: j,
 				...(chdirDir !== undefined ? { sudoChdir: chdirDir } : {}),
 			};
 		}
 		return {
 			kind: 'inner',
-			innerIndex: i,
+			innerIndex: j,
 			...(chdirDir !== undefined ? { sudoChdir: chdirDir } : {}),
 		};
 	}
@@ -3198,10 +3264,21 @@ function walkNiceOptions(words: readonly string[]): LauncherWalkOutcome {
 	while (i < words.length) {
 		const token = words[i];
 		if (token === undefined) break;
-		if (token === '--')
-			return i + 1 < words.length
-				? { kind: 'inner', innerIndex: i + 1 }
-				: { kind: 'benign' };
+		if (token === '--') {
+			if (i + 1 >= words.length) return { kind: 'benign' };
+			// #3572 delta-critic: the nested GNU `time` lookup runs on the
+			// post-`--` word exactly like the non-sentinel path (sudo/nice/nohup
+			// exec the inner command directly — `--` does not stop it).
+			const nested = nestedTimeTail(words, i + 1);
+			if (nested !== null) {
+				return {
+					kind: 'inner',
+					innerIndex: nested.innerIndex,
+					timeOutputFile: nested.timeOutputFile,
+				};
+			}
+			return { kind: 'inner', innerIndex: i + 1 };
+		}
 		if (token === '--help' || token === '--version') return { kind: 'benign' };
 		// GNU nice(1): -n N / --adjustment=N / --adjustment N, plus the legacy
 		// ATTACHED adjustment spelling `-N` / `+N` (ground-truthed: `nice -10
@@ -3248,10 +3325,21 @@ function walkNohupOptions(words: readonly string[]): LauncherWalkOutcome {
 	while (i < words.length) {
 		const token = words[i];
 		if (token === undefined) break;
-		if (token === '--')
-			return i + 1 < words.length
-				? { kind: 'inner', innerIndex: i + 1 }
-				: { kind: 'benign' };
+		if (token === '--') {
+			if (i + 1 >= words.length) return { kind: 'benign' };
+			// #3572 delta-critic: the nested GNU `time` lookup runs on the
+			// post-`--` word exactly like the non-sentinel path (sudo/nice/nohup
+			// exec the inner command directly — `--` does not stop it).
+			const nested = nestedTimeTail(words, i + 1);
+			if (nested !== null) {
+				return {
+					kind: 'inner',
+					innerIndex: nested.innerIndex,
+					timeOutputFile: nested.timeOutputFile,
+				};
+			}
+			return { kind: 'inner', innerIndex: i + 1 };
+		}
 		if (token === '--help' || token === '--version') return { kind: 'benign' };
 		if (token.startsWith('-') && token.length > 1) {
 			return { kind: 'uncertain', tailIndex: i + 1 };
