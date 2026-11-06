@@ -477,12 +477,13 @@ describe('dependency-bump workflow contract (frozen check C7, trace 3501-3285-35
 				step.run.includes('unexpected dirty path'),
 		);
 		expect(firstGate).toBeGreaterThan(fragmentStep);
-		// EXACT count: the write step's handoff pointer (1), EACH gate's
-		// [[ -f ]] read and EXPECTED entry (2+2), and the existing-PR
-		// refusal's own read (2). A loose >=4 bound passed with the
-		// write-step pointer renamed (micro-lane mutation), so the total is
-		// pinned exactly and each consumer is pinned individually.
-		expect(allIndices(text, 'fragment.txt').length).toBe(7);
+		// EXACT count (write pointer 1 + each gate's read/entry 2+2 + refusal
+		// read 1): a loose >=4 bound passed with the pointer renamed. The
+		// refusal's git-show extraction must carry the pipefail-tolerant
+		// || true form (a bare git show exits 128 for a fragment-less head
+		// and set -e would kill the refresh step; reviewer NEW-1).
+		expect(allIndices(text, 'fragment.txt').length).toBe(6);
+		expect(text).toContain('|| true; } | sed -n');
 		const gateRuns = steps()
 			.map((step) => (typeof step.run === 'string' ? step.run : ''))
 			.filter((run) => run.includes('unexpected dirty path'));
