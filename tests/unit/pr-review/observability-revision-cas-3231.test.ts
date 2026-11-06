@@ -174,32 +174,66 @@ test('(c) instance replacement carries the generation forward; new-instance appe
 	const session = 'session-3231-replace';
 	seedGateState(directory, session, { workflowInstanceId: 'inst-a' });
 	await readPrWorkflowGateState(directory, session);
-	await appendFresh(directory, session); // generation 1
 
-	// Replace the workflow instance (the sanctioned replacement write).
-	const before = await readPrWorkflowGateStateFromDisk(directory, session);
+	// Snapshot BEFORE the append: the replacement write below must carry the
+	// generation DURABLE-WINS even though this stale snapshot lacks it (this
+	// is the dedicated-carry pin — a carry sourced from the incoming
+	// snapshot would reset the generation here).
+	const stale = await readPrWorkflowGateStateFromDisk(directory, session);
+	expect(stale).not.toBeNull();
+	expect(stale?.observabilityRevision).toBeUndefined();
+
+	await appendFresh(directory, session); // generation 0 -> 1, revision stays 0
+
+	// Replace the workflow instance FROM THE STALE (pre-append) snapshot —
+	// the revision CAS admits it (appends never bump the revision), so only
+	// the durable-wins carry keeps the generation.
 	const replaced = await writeStateWhileLocked(
 		directory,
-		{ ...before!, workflowInstanceId: 'inst-b' },
+		{ ...stale!, workflowInstanceId: 'inst-b' },
 		{ replaceWorkflowInstanceId: 'inst-a' },
 	);
+	expect(replaced.revision).toBe(1);
 	expect(replaced.observabilityRevision).toBe(1);
 
-	// A fresh-read append in the NEW instance is accepted (3 -> … not reset).
+	// An append from the OLD-INSTANCE snapshot is rejected (stale revision
+	// AND stale instance id).
+	let oldInstanceError: unknown = null;
+	await withSessionStateMutation(directory, session, async () => {
+		try {
+			await appendObservabilityStateWhileLocked(directory, {
+				...stale!,
+				prReviewSubmitRejections: [
+					{
+						childSessionId: 'child-old-instance',
+						at: AT_MS,
+						message: 'old-instance snapshot',
+					},
+				],
+				updatedAt: NOW,
+			});
+		} catch (error) {
+			oldInstanceError = error;
+		}
+	});
+	expect(oldInstanceError).toBeInstanceOf(Error);
+	expect((oldInstanceError as Error).message.startsWith('BLOCKED')).toBe(true);
+
+	// A fresh-read append in the NEW instance is accepted (2, not reset).
 	await appendFresh(directory, session);
 	const after = await readPrWorkflowGateState(directory, session);
 	expect(after?.observabilityRevision).toBe(2);
 
 	// Legacy shape: a row with NO workflowInstanceId replaced by one WITH an
-	// id also carries the generation (no reset through the undefined path).
+	// id also carries the generation from a stale (pre-append) snapshot.
 	const directory2 = freshProject('replace-legacy');
 	const session2 = 'session-3231-replace-legacy';
 	seedGateState(directory2, session2);
 	await readPrWorkflowGateState(directory2, session2);
+	const stale2 = await readPrWorkflowGateStateFromDisk(directory2, session2);
 	await appendFresh(directory2, session2);
-	const before2 = await readPrWorkflowGateStateFromDisk(directory2, session2);
 	const replaced2 = await writeStateWhileLocked(directory2, {
-		...before2!,
+		...stale2!,
 		workflowInstanceId: 'inst-first',
 	});
 	expect(replaced2.observabilityRevision).toBe(1);
@@ -248,6 +282,13 @@ test('(g) clearObservabilityFields preserves the generation and older appends st
 	const session = 'session-3231-clear';
 	seedGateState(directory, session);
 	await readPrWorkflowGateState(directory, session);
+
+	// Snapshot BEFORE the append: the clear-write below must carry the
+	// generation DURABLE-WINS even though this stale snapshot lacks it (the
+	// dedicated-carry pin — an incoming-snapshot carry would reset it here).
+	const stale = await readPrWorkflowGateStateFromDisk(directory, session);
+	expect(stale?.observabilityRevision).toBeUndefined();
+
 	await appendPrWorkflowSkillContractAdvisories(directory, session, [
 		'advisory to be cleared',
 	]);
@@ -255,11 +296,13 @@ test('(g) clearObservabilityFields preserves the generation and older appends st
 	expect(state?.observabilityRevision).toBe(1);
 	const generationBeforeClear = state?.observabilityRevision;
 
-	// Deliberate evidence reset (#3396 PRR-009 shape) on a state write.
-	const before = await readPrWorkflowGateStateFromDisk(directory, session);
+	// Deliberate evidence reset (#3396 PRR-009 shape) on a state write FROM
+	// THE STALE (pre-append) snapshot — the revision CAS admits it (appends
+	// never bump the revision), so only the durable-wins carry keeps the
+	// generation while the advisory field itself is cleared.
 	await writeStateWhileLocked(
 		directory,
-		{ ...before!, updatedAt: NOW },
+		{ ...stale!, updatedAt: NOW },
 		{ clearObservabilityFields: ['skillContractAdvisories'] },
 	);
 	state = await readPrWorkflowGateState(directory, session);
@@ -272,7 +315,7 @@ test('(g) clearObservabilityFields preserves the generation and older appends st
 	await withSessionStateMutation(directory, session, async () => {
 		try {
 			await appendObservabilityStateWhileLocked(directory, {
-				...before!,
+				...stale!,
 				skillContractAdvisories: ['resurrected from a stale snapshot'],
 				updatedAt: NOW,
 			});
@@ -286,6 +329,53 @@ test('(g) clearObservabilityFields preserves the generation and older appends st
 		(await readPrWorkflowGateState(directory, session))
 			?.skillContractAdvisories ?? [],
 	).toHaveLength(0);
+});
+
+test('(e) a same-field interleave is rejected and the first append survives', async () => {
+	const directory = freshProject('samefield');
+	const session = 'session-3231-samefield';
+	seedGateState(directory, session);
+	await readPrWorkflowGateState(directory, session);
+
+	// B snapshots BEFORE A's append; both appends touch the SAME field.
+	const staleB = await readPrWorkflowGateStateFromDisk(directory, session);
+	expect(staleB?.skillContractAdvisories ?? []).toHaveLength(0);
+
+	// A: a legitimate advisory append (generation 0 -> 1).
+	await appendPrWorkflowSkillContractAdvisories(directory, session, [
+		'A: same-field advisory that must survive',
+	]);
+	expect(
+		(await readPrWorkflowGateState(directory, session))
+			?.skillContractAdvisories ?? [],
+	).toContain('A: same-field advisory that must survive');
+
+	// B: an advisory append built from the STALE snapshot — same field, same
+	// state revision, stale generation. It must be BLOCKED (not silently
+	// merged and not overwriting A's entry), and A must survive. Uses the
+	// public no-bump append API with the advisory field set, mirroring the
+	// advisory writer's own locked call shape.
+	let staleError: unknown = null;
+	await withSessionStateMutation(directory, session, async () => {
+		try {
+			await appendObservabilityStateWhileLocked(directory, {
+				...staleB!,
+				skillContractAdvisories: ['B: stale same-field advisory'],
+				updatedAt: NOW,
+			});
+		} catch (error) {
+			staleError = error;
+		}
+	});
+	expect(staleError).toBeInstanceOf(Error);
+	expect((staleError as Error).message.startsWith('BLOCKED')).toBe(true);
+
+	const final = await readPrWorkflowGateState(directory, session);
+	expect(final?.skillContractAdvisories ?? []).toEqual([
+		'A: same-field advisory that must survive',
+	]);
+	expect(final?.observabilityRevision).toBe(1);
+	expect(final?.revision).toBe(0);
 });
 
 test('(i) a generation mismatch rejects with the exact concurrent-change message (the dedicated CAS owns it)', async () => {
