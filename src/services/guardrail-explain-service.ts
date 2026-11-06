@@ -39,6 +39,7 @@ import {
 	mergeWriteAnalyses,
 	resolveWriteTargets,
 } from '../hooks/shell-write-detect.js';
+import { sanitizeDiagnosticText } from '../scope/path-identity.js';
 import {
 	classifyCommand,
 	getSharedClassifierGuardrailBlock,
@@ -976,8 +977,12 @@ export async function handleGuardrailExplain(
 					// advisory: a brace-refused write renders the user's
 					// SOURCE word, matching the gate's message.
 					decision = 'block';
-					const explainDynamicLabel =
-						write.original.path ?? write.original.dynamicSourceWord;
+					// #3568 review F-10: sanitize + bound the untrusted source
+					// word (parity with the gate's render).
+					const explainDynamicLabel = sanitizeDiagnosticText(
+						write.original.path ?? write.original.dynamicSourceWord ?? '',
+						160,
+					);
 					// UNION of the g1 fix (PRR-015 redact) and the g2 label
 					// selection (dynamicSourceWord fallback): redact whichever
 					// word renders.

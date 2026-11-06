@@ -124,7 +124,13 @@ describe('gate: quoted procsub operands (real toolBefore, coder scope src/)', ()
 });
 
 describe('resolved shape: withdrawn fallback writes null out (fail-closed)', () => {
-	test('a quote-fragment fallback operand resolves to resolvedPath null', () => {
+	test('a quoted-whitespace procsub body target resolves EXACTLY (#3568 PRR-001)', () => {
+		// The per-stage scan could not capture a quoted-with-whitespace
+		// operand and withdrew it (resolvedPath null); the body-family
+		// recursion parses the body natively, so the mv destination
+		// resolves to its REAL path — a strictly stronger judgment (the
+		// gate denies it on containment/scope instead of a null-path
+		// deny). Re-pinned from the null contract at the #3568 round.
 		const analysis = detectPosixWrites('true >(mv a "../../outside src/f")');
 		expect(analysis.writes.length).toBeGreaterThan(0);
 		const result = resolveWriteTargets(
@@ -133,8 +139,8 @@ describe('resolved shape: withdrawn fallback writes null out (fail-closed)', () 
 			'/ws',
 		);
 		for (const entry of result) {
-			expect(entry.resolvedPath).toBeNull();
-			expect(entry.resolved).toBe(false);
+			expect(entry.resolved).toBe(true);
+			expect(entry.resolvedPath).toBe('/outside src/f');
 		}
 	});
 

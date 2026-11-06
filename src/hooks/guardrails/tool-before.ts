@@ -71,6 +71,7 @@ import {
 	hostShellGrammarFamily,
 } from '../shell-executor-context';
 import {
+	dcProcSubSpanBodies,
 	detectInteractiveSession,
 	detectPosixWrites,
 	detectWindowsWrites,
@@ -784,6 +785,19 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			if (!dcShellPayloadRunsIsolated(seg)) continue;
 			const unwrappedSeg = perSegmentUnwrapped[i] ?? seg;
 			for (const sub of dcSplitSegments(unwrappedSeg)) {
+				pushSegmentOccurrence(sub, 'uncertain');
+			}
+		}
+		// #3568 review F-01: process-substitution span bodies run their own
+		// command text at a verb position the segment-head-anchored
+		// destructive extractors never see (`true <(rm -rf .swarm)` base
+		// parse-denied; the masked path made the body invisible). Each body
+		// segment is pushed with an uncertain context — a subshell inherits
+		// the tracked cwd, which the destructive relocation model cannot
+		// track through a procsub — so any destructive verb in a body
+		// relocates to the escaping sentinel (fail-closed).
+		for (const body of dcProcSubSpanBodies(command)) {
+			for (const sub of dcSplitSegments(body)) {
 				pushSegmentOccurrence(sub, 'uncertain');
 			}
 		}
@@ -1855,8 +1869,13 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 					// word (`src/{a..e}`, `src/{a,$(echo b)}`) — the branch
 					// text the expansion would substitute was never typed
 					// verbatim.
-					const dynamicTargetLabel =
-						write.original.path ?? write.original.dynamicSourceWord;
+					// #3568 review F-10: the user's SOURCE word is untrusted
+					// text — sanitize control characters and bound its length
+					// before it reaches the operator-facing denial.
+					const dynamicTargetLabel = sanitizeDiagnosticText(
+						write.original.path ?? write.original.dynamicSourceWord ?? '',
+						160,
+					);
 					throw new ShellWriteBlockedError(
 						`BLOCKED: bash/shell write to a dynamic path target${
 							dynamicTargetLabel ? ` "${dynamicTargetLabel}"` : ''
