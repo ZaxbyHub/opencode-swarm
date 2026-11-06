@@ -297,16 +297,6 @@ describe('in-place editing', () => {
 		]);
 	});
 
-	test('perl -i edits file in place', () => {
-		// #3572 N-12 re-pin: the W7 cluster grammar additionally classifies
-		// `-pe` as an interpreter_eval capability (the -p loop wraps the -e
-		// code) — both writes are emitted.
-		expectWrites('perl -i -pe "s/foo/bar/" data.csv', [
-			{ category: 'inplace_edit', operator: 'perl -i', path: 'data.csv' },
-			evalWrite('perl [eval]'),
-		]);
-	});
-
 	test('awk -i inplace edits file in place', () => {
 		expectWrites('awk -i inplace "{print $1}" records.txt', [
 			{ category: 'inplace_edit', operator: 'awk -i', path: 'records.txt' },
@@ -319,9 +309,8 @@ describe('in-place editing', () => {
 	});
 
 	test('perl -pe (no -i) evaluates inline code — capability write', () => {
-		// #3572 N-12 re-pin: the W7 cluster grammar classifies `-pe` as an
-		// interpreter_eval (the -p loop runs the -e/-payload code), so the
-		// shape is no longer write-free.
+		// #3572 N-12 re-pin relocated (FR-006 ratchet): see
+		// shell-write-detect-perl-cluster-n12.test.ts for the W7 pins.
 		const result = detectPosixWrites('perl -pe "print" file.txt');
 		expect(result.hasWrites).toBe(true);
 		expect(result.writes).toEqual([evalWrite('perl [eval]')]);
