@@ -278,6 +278,15 @@ export interface PrWorkflowPersistedStateBase {
 	revision: number;
 	sessionID: string;
 	workflowInstanceId?: string;
+	/**
+	 * #3231: append-generation CAS machinery (like `revision`, owned by this
+	 * module — NOT a registered observability field). The no-bump append
+	 * path advances it on every accepted append and rejects a payload whose
+	 * generation differs from the durable row's; every state-machine write
+	 * carries it durable-wins. Optional both ways: older rows omit it, older
+	 * binaries pass it through untouched.
+	 */
+	observabilityRevision?: number;
 }
 
 export interface PrReviewStateCodec<S extends PrWorkflowPersistedStateBase> {
@@ -996,6 +1005,9 @@ function enforceObservabilityOnlyMutation<
 	// owns stale-generation reporting ("changed concurrently; reload").
 	skip.add('updatedAt');
 	skip.add('revision');
+	// #3231: the append generation is excluded for the same reason — its own
+	// CAS in `persistStateRowWhileLocked` owns stale-generation reporting.
+	skip.add('observabilityRevision');
 	const keys = new Set([...Object.keys(incoming), ...Object.keys(durable)]);
 	for (const key of keys) {
 		if (skip.has(key)) continue;
@@ -1056,8 +1068,39 @@ async function persistStateRowWhileLocked<
 			current,
 			options.clearObservabilityFields,
 		);
+		// #3231: the append generation is CAS machinery owned by this module
+		// (NOT a registered observability field), so every state-machine
+		// write carries it DURABLE-WINS via this dedicated statement — never
+		// reset by instance replacement or a field clear, and never regressed
+		// by a stale snapshot. Only the append branch below advances it.
+		const carriedGeneration = current?.observabilityRevision;
+		const mergedGenerationRow: Record<string, unknown> = {
+			...(effective as unknown as Record<string, unknown>),
+		};
+		if (carriedGeneration !== undefined) {
+			mergedGenerationRow.observabilityRevision = carriedGeneration;
+		} else {
+			delete mergedGenerationRow.observabilityRevision;
+		}
+		effective = mergedGenerationRow as S;
 	} else {
 		enforceObservabilityOnlyMutation(validated, current);
+		// #3231: appends never advance the state `revision` (#3199), so the
+		// revision CAS below is blind to interleaved appends at the same
+		// revision. The append generation closes that hole: reject a payload
+		// built from a snapshot whose generation differs from the durable
+		// row's, then advance the generation on write. Legacy rows (no field
+		// yet) read as generation 0 on both sides.
+		const durableAppendGeneration = current?.observabilityRevision ?? 0;
+		if ((validated.observabilityRevision ?? 0) !== durableAppendGeneration) {
+			throw new Error(
+				'BLOCKED: PR workflow gate state changed concurrently; reload the active session state before retrying',
+			);
+		}
+		effective = {
+			...(validated as unknown as Record<string, unknown>),
+			observabilityRevision: durableAppendGeneration + 1,
+		} as S;
 	}
 	if (
 		current ? current.revision !== validated.revision : validated.revision !== 0
