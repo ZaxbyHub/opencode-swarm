@@ -28,7 +28,6 @@
  */
 
 import { createHash } from 'node:crypto';
-import * as path from 'node:path';
 
 import { log } from '../../utils/logger';
 import { redactShellCommand } from './helpers';

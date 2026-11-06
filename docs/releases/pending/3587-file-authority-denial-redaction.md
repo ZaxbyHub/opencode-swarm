@@ -15,9 +15,10 @@ relativization, so a `/home/<name>/...` target no longer discloses the profile n
 the absolute or the `../../home/<name>` relative form. Ordinary non-home paths are preserved by
 design (over-redaction is pinned against).
 
-Diagnostic-only change: the structured data channels (`ShellWriteBlockedError.writeTarget`,
-audit rows) keep their exact values; message shape is unchanged, so downstream message-parsing
-and the pinned denial suites are unaffected.
+Diagnostic-only change: the structured data channels keep their pre-change behavior
+(`ShellWriteBlockedError.writeTarget` stays exact; audit rows keep persisting their existing
+redacted-and-truncated form); message shape is unchanged, so downstream message-parsing and
+the pinned denial suites are unaffected.
 
 ## Why
 
