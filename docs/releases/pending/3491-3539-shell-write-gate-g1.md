@@ -86,7 +86,11 @@
   deny-on-uncertainty (the eval classifier fires, the wrapper never
   unwraps). Long `--rcfile`/`--init-file` keep the spaced next-word form
   (and the gate-tolerated `=value` gluing, valid only in the leading long
-  phase). Python/perl/ruby cluster handling is untouched (W7/PR-3).
+  phase). Python/perl/ruby cluster handling is untouched here — the W7
+  per-interpreter cluster grammar (delivered in the G3 PR, not "PR-3")
+  replaces this enumeration for those interpreters (`perl -i -pe`,
+  `perl -i.bak -ne` now carry an interpreter_eval write alongside the
+  in-place report; the G3 fragment is the operative description).
 
 ## Known edges
 
@@ -123,9 +127,11 @@
   launcher workstream — disclosed, not silently assumed). Deeper launcher
   option tables (sudo `-u`, glued `-D..` arity, `time -o`, nice) arrive
   with G3 (PR-3; #3491 AC3/AC4 residuals).
-- Process-substitution masking and brace-expansion write destinations are
-  the PR-2 workstream's deferred set (not yet in the extractor's disclosed
-  grammar); an unquoted `$(...)` operand to a chdir wrapper now FAILS the
+- Process-substitution masking and brace-expansion write destinations were
+  the PR-2 workstream's deferred set and HAVE SINCE LANDED (the G2/G3
+  masked-procsub detector family and the W8 brace engine — the G2/G3
+  fragments are the operative descriptions). What remains true at this
+  fragment: an unquoted `$(...)` operand to a chdir wrapper FAILS the
   rewrite closed (#3567 feedback P-F3) instead of serializing a mangled
   operand, and those commands deny via the parse-failure channel.
 - A shell-family launcher whose flag cluster the walk cannot model

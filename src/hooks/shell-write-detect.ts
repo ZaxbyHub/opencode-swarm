@@ -2654,7 +2654,15 @@ function pushExpandedDestination(
 		return;
 	}
 	if (expansion.kind === 'none') {
-		const target = emit(dequoted.slice(rawSkip));
+		// F-02 scoping (final): the mis-slice only bites when rawSkip>0
+		// crosses the quote wrapper (dd of=); rawSkip=0 sites (inplace
+		// editors, tee) keep the quote-wrapped emission the resolver and the
+		// shipped pins expect.
+		const target = emit(
+			fullyQuoted && rawSkip > 0
+				? dequoted.slice(rawSkip)
+				: text.slice(rawSkip),
+		);
 		if (target !== null) out.push(target);
 		return;
 	}
@@ -2835,10 +2843,16 @@ export function walkLauncherOptions(
 	const base = basenameAnySep(launcherWord);
 	if (base === 'sudo') return walkSudoOptions(words);
 	if (base === 'time') {
+		// #3572 N-03: keyword-suppression must be PROVEN by a defined raw
+		// spelling — when the caller cannot supply one (dequoted chain words
+		// in the leaf walk), the GNU binary grammar wins. The GNU grammar
+		// detects the `-o` write target where the keyword grammar emits
+		// nothing, so the unresolved case is deny-direction (an
+		// over-approximated launcher_write, never a lost one).
 		const binaryGrammar =
 			isAbsolutePathSpelling(launcherWord) ||
-			(rawLauncherWord !== undefined &&
-				isKeywordSuppressedSpelling(rawLauncherWord, launcherWord));
+			rawLauncherWord === undefined ||
+			isKeywordSuppressedSpelling(rawLauncherWord, launcherWord);
 		return binaryGrammar
 			? walkGnuTimeOptions(words)
 			: walkKeywordTimeOptions(words);
@@ -2899,6 +2913,14 @@ function walkSudoOptions(words: readonly string[]): LauncherWalkOutcome {
 		if (token === undefined) break;
 		if (token === '--') {
 			// End of sudo's options; the wrapped command follows.
+			// #3572 N-01: an accumulated `-e`/`--edit` survives `--` — the
+			// edit outcome must be checked BEFORE the generic inner return
+			// or `sudo -e -- FILE` loses its write classification entirely.
+			if (edit) {
+				return i + 1 < words.length
+					? { kind: 'edit', editStartIndex: i + 1 }
+					: { kind: 'benign' };
+			}
 			return i + 1 < words.length
 				? {
 						kind: 'inner',
@@ -3967,7 +3989,7 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 	const leaf = detectorCommandLeaf(cmd);
 	const lowerName =
 		detectorSetMember(leaf, BUILTIN_WRITE_COMMANDS) ??
-		(leaf === 'dd' || leaf === 'tee' ? leaf : null);
+		(leaf === 'dd' || leaf === 'tee' || leaf === 'env' ? leaf : null);
 	if (!lowerName) return results;
 
 	// #3485 (PRR-008): dedupe on the RESOLVED real command as spelled — not
@@ -4041,8 +4063,18 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 	if (lowerName === 'tee') {
 		const suffixWords = getSuffixWords(cmd);
 		const suffixNodes = getSuffixNodes(cmd);
+		// #3572 N-29 completion: the loop starts at the RESOLVED leaf word,
+		// not suffix[0] — a wrapper prefix (`env tee src/f`, `command tee
+		// src/f`) emitted the VERB word itself as a bogus in-scope write
+		// target, falsely denying legitimate in-scope tee writes (the
+		// env -S reconstruction reaches this path directly).
+		const teeRest = detectorCommandPartsFromWords(
+			getCommandName(cmd),
+			suffixWords,
+		).rest;
+		const teeStart = Math.max(0, suffixWords.length - teeRest.length);
 		let pastDoubleDash = false;
-		for (let w = 0; w < suffixWords.length; w++) {
+		for (let w = teeStart; w < suffixWords.length; w++) {
 			const word = suffixWords[w];
 			if (word === '--') {
 				pastDoubleDash = true;
@@ -4071,6 +4103,119 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 			);
 		}
 		return results;
+	}
+
+	if (lowerName === 'env') {
+		// #3572 N-29: GNU env -S/--split-string RE-PARSES its payload as a
+		// command line (argv split) — `env -S 'rm -rf /important'` RUNS the
+		// payload. The words after -S are the effective command: run the
+		// full builtin-write scan on the reconstructed line (recursive; the
+		// payload may itself carry another env/wrapper).
+		const suffixWords = getSuffixWords(cmd);
+		for (let w = 0; w < suffixWords.length; w++) {
+			const word = suffixWords[w] ?? '';
+			if (word !== '-S' && word !== '--split-string') continue;
+			const payload = suffixWords[w + 1];
+			if (payload === undefined || payload.trim() === '') break;
+			const splitWords: string[] = [];
+			{
+				let cur = '';
+				let hasWord = false;
+				const pushW = () => {
+					if (hasWord) {
+						splitWords.push(cur);
+						cur = '';
+						hasWord = false;
+					}
+				};
+				let si = 0;
+				while (si < payload.length) {
+					const c = payload[si];
+					if (c === "'") {
+						hasWord = true;
+						si += 1;
+						while (si < payload.length && payload[si] !== "'") {
+							cur += payload[si];
+							si += 1;
+						}
+						si += 1;
+						continue;
+					}
+					if (c === '"') {
+						hasWord = true;
+						si += 1;
+						while (si < payload.length && payload[si] !== '"') {
+							cur += payload[si];
+							si += 1;
+						}
+						si += 1;
+						continue;
+					}
+					if (c === '\\' && si + 1 < payload.length) {
+						cur += payload[si + 1];
+						si += 2;
+						hasWord = true;
+						continue;
+					}
+					if (/\s/.test(c)) {
+						pushW();
+						si += 1;
+						continue;
+					}
+					cur += c;
+					hasWord = true;
+					si += 1;
+				}
+				pushW();
+			}
+			if (
+				splitWords.some((x: string) => x === '-S' || x === '--split-string')
+			) {
+				// Nested split-string: the payload re-parses again at execution
+				// time and the reconstruction cannot model it — emit the
+				// unconditional dynamic refusal (null path) so the gate DENIES
+				// instead of silently classifying the command as write-free.
+				results.push({
+					category: 'redirect',
+					operator: 'env -S',
+					path: null,
+					unresolvedContext: true,
+				});
+				return results;
+			}
+			// The argv re-parse expands payload words at execution time; a
+			// second -S in the ORIGINAL argv splices after this one and is
+			// equally beyond the model. Both are the unconditional refusal.
+			const dynamicPayload =
+				splitWords.some((x: string) => isDynamicPath(x)) ||
+				suffixWords
+					.slice(w + 2)
+					.some((x) => x === '-S' || x === '--split-string');
+			if (dynamicPayload) {
+				results.push({
+					category: 'redirect',
+					operator: 'env -S',
+					path: null,
+					unresolvedContext: true,
+				});
+				return results;
+			}
+			// Reconstruct the effective env argv (`env` + the pre-flags + the
+			// spliced payload words + the post words) and re-enter the FULL
+			// detector family: the string-level scanner's leaf gate misses the
+			// special-cased tee/dd/env verbs, so a `env -S 'tee …'` payload
+			// was classified write-free.
+			const reconstructed = [
+				'env',
+				...suffixWords.slice(0, w),
+				...splitWords,
+				...suffixWords.slice(w + 2),
+			].join(' ');
+			for (const write of detectPosixWrites(reconstructed).writes) {
+				results.push(write);
+			}
+			return results;
+		}
 	}
 
 	if (!BUILTIN_WRITE_COMMANDS.has(lowerName)) return results;
@@ -5012,9 +5157,16 @@ function classifyPipeStdinEvalAt(
 		rest.length === 0 ||
 		(rest.length === 1 && rest[0] === '-') ||
 		(canonical === 'deno' &&
-			rest.length === 2 &&
+			rest.length >= 2 &&
 			rest[0] === 'run' &&
-			rest[1] === '-');
+			rest[rest.length - 1] === '-' &&
+			// #3572 review N-06: argument-less run flags between `run` and the
+			// stdin `-` (`deno run -A -` — the write-capable allow-all form)
+			// are the SAME stdin-eval shape; each dash word is argument-less
+			// by the disclosed carve-out (a value-taking flag puts a non-dash
+			// word in the walk, which fails this check and keeps the disclosed
+			// no-classification disposition for that spelling).
+			rest.slice(1, -1).every((word) => word.startsWith('-')));
 	if (!stdinShapeOk) {
 		return null;
 	}

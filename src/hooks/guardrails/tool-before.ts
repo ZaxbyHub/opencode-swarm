@@ -95,6 +95,7 @@ import {
 	dcExpandDestructiveSegments,
 	dcExtractPowerShellTargets,
 	dcExtractRecursiveRmTargets,
+	dcLauncherTimedTail,
 	dcNormalizeCommand,
 	dcParseWindowsRecursiveDelete,
 	dcPreprocessWrappers,
@@ -839,6 +840,21 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		for (const body of dcProcSubSpanBodies(command)) {
 			for (const sub of dcSplitSegments(body)) {
 				pushSegmentOccurrence(sub, 'uncertain');
+			}
+		}
+		// #3572 review N-02: a GNU `time -o FILE` segment stays WHOLE on the
+		// strip side (unwrapping would erase the cd-tracking context that
+		// resolves the -o target), so the timed command text never reaches a
+		// verb-anchored destructive arm. The timed tail is pushed as an extra
+		// 'uncertain' occurrence — any destructive verb in it relocates to the
+		// escaping sentinel (fail-closed) without touching the write arm's
+		// cd-tracked resolution.
+		for (const segment of outerSegments) {
+			const tail = dcLauncherTimedTail(segment);
+			if (tail !== null) {
+				for (const sub of dcSplitSegments(tail)) {
+					pushSegmentOccurrence(sub, 'uncertain');
+				}
 			}
 		}
 		// #3567 review PRR-003: a shell-family launcher whose flag cluster the

@@ -73,6 +73,36 @@ shared by the gate, the detectors, and the explain mirror, so a path-qualified
 `C:\Windows\System32\cmd.exe /c copy a ..\x` selects the win32 authority and its
 out-of-scope write denies.
 
+**Feedback round (PR #3572 review N-items).** Four review defects closed with
+their pins in `guardrails-shell-write-3572-feedback-hardening.test.ts`:
+
+- **N-01**: an accumulated sudo `-e`/`--edit` now survives the getopt `--`
+  sentinel — `sudo -e -- FILE` was classified inner (no write target at all);
+  the edit outcome is checked BEFORE the generic inner return.
+- **N-02**: a GNU `time -o FILE` segment stays WHOLE on the strip side
+  (unwrapping to the timed tail erased the cd-tracking context that resolves
+  the -o target — `cd src && /usr/bin/time -o ok.txt true` resolved ok.txt at
+  the workspace root and denied a legitimate in-scope write). The timed
+  command is instead surfaced to the destructive arms by the new
+  `dcLauncherTimedTail` helper, which the gate pushes as an 'uncertain'
+  occurrence — `rm` in a timed tail still denies via the escaping sentinel.
+- **N-03**: keyword-suppression must be PROVEN by a defined raw spelling;
+  when the leaf walk cannot supply one (dequoted chain words), the GNU
+  grammar wins — deny-direction (an over-approximated launcher_write, never
+  a lost one). The exact review trigger
+  (`'time' -o src/report curl -o ../outside url`) now emits the escaping
+  download.
+- **N-29**: GNU env `-S/--split-string` re-parses its payload as a command
+  line — the reconstructed argv (`env` + pre-flags + spliced payload words)
+  re-enters the FULL detector family (the string-level scanner's leaf gate
+  missed the special-cased tee/dd/env verbs, so `env -S 'tee src/ok.txt'`
+  was write-free); nested `-S`, expansion-bearing payload words, and a
+  second `-S` in the original argv emit the unconditional dynamic refusal.
+  Completion: the wrapper-prefixed tee branch now starts at the RESOLVED
+  leaf word (`env tee src/ok.txt` fabricated the verb word itself as an
+  in-scope write target — the tee half of #3569's operand-window advisory;
+  the chdir-wrapper direct-write modeling stays tracked there).
+
 ## Why
 
 Issues #3491 and #3539 catalogued fail-open divergences between the static shell
@@ -94,8 +124,12 @@ C9, C12–C15 stay GREEN.
 - A trailing `.exe` is stripped from normalized rm-family verbs, so the bare
   `rm.exe` and the POSIX-absolute `/bin/rm.exe` match `rm` — Git Bash resolves
   them to the same program (ground truth); the POSIX strip is an over-match in
-  the deny direction, deliberately accepted (review advisory 2). `/bin/RM`
-  stays unmatched (POSIX case-sensitivity).
+  the deny direction, deliberately accepted (review advisory 2). Verb
+  normalization DISAGREES by arm on case: the WRITE arm stays POSIX
+  case-sensitive (`/bin/RM` never matches the write-path verb table), while
+  the DESTRUCTIVE arm's `dcSegmentVerbMatch` normalizes case-insensitively —
+  `/bin/RM` over-matches `rm` there, deny direction, deliberately accepted
+  (review advisory 2 + #3572 N-19).
 - Perl cluster forms (`perl -i -pe '…'`, `perl -ne`) now carry an
   `interpreter_eval` write alongside their in-place report, so they route like
   `python -c`: denied for a scope-less architect and for a scoped coder while
@@ -103,13 +137,19 @@ C9, C12–C15 stay GREEN.
   allowed at the workspace root; re-pinned deliberately in the in-place suites.
 - A deno global flag that takes an argument before the subcommand
   (`deno --config x eval CODE`) is not modeled; disclosed rather than guessed.
-  (Closure round F-2 + round 2:) a leading DASH-WORD RUN that reaches `eval`
+  (Closure round F-2 + round 2, wording corrected #3572 N-18:) a leading
+  DASH-WORD RUN of argument-less global flags before the subcommand is
+  TRANSPARENT — `eval` after it classifies `interpreter_eval`
   (`deno --no-prompt eval CODE`, `deno --no-prompt --unstable-kv eval CODE`,
   `deno --unstable-kv --no-check eval CODE`, mixing known and unknown
-  argument-less flags) classifies deny-on-uncertainty — the W3 pattern, no
-  flag-set enumeration; a NON-DASH word inside the run is a flag argument
-  (`deno --config x eval CODE`), the subcommand position is unknowable, and
-  the disclosed no-classification disposition stands.
+  argument-less flags; executed ground truth: `interpreter_eval` fires),
+  not a W3 uncertainty denial. A NON-DASH word inside the run is a flag
+  argument (`deno --config x eval CODE`), the subcommand position is
+  unknowable, and the disclosed no-classification disposition stands. The
+  same transparency governs the stdin run shape: `deno run -A -` (any
+  argument-less flag run between `run` and the stdin `-`) classifies
+  `deno [eval stdin]` (#3572 N-06 — the write-capable allow-all form was
+  inverted against the bare form).
 - (Closure round F-4:) `cmd /k` selects the win32 authority exactly like
   `cmd /c` (the payload executes; the shell merely stays open) — the strip
   prefix always modeled `/[ck]`, and the declaration/builtin-prefix
@@ -142,7 +182,13 @@ C9, C12–C15 stay GREEN.
   still carries an unquoted brace-list region (archive-decompress, rsync,
   git checkout/restore, and every future emitter) is refused as a dynamic
   write at the detectPosixWrites pass — "zero unbacked literal destination
-  emitters" now holds by construction in the POSIX grammar. POSIX-scoped
+  emitters" now holds by construction in the POSIX grammar — scoped
+  honestly (#3572 N-20): the construction covers emitters that reach the
+  W8 engine or the isDynamicPath chokepoint; a GLUED long-flag destination
+  whose flag grammar the engine does not walk (`tar --file=src/{a,b}.tar
+  cf`) still lands on the chokepoint only as a whole-word REFUSAL (deny
+  direction, the same wholesale class as `gunzip -d src/{a,b}.gz`), not a
+  per-branch expansion. POSIX-scoped
   with the Windows detectors carved out (a literal PowerShell/cmd `{a,b}`
   filename keeps its literal handling); a QUOTED brace word is exempt
   (the W8 engine's own raw-scan proves it would not expand). The refusal
@@ -151,15 +197,21 @@ C9, C12–C15 stay GREEN.
   while engine'd sites keep their per-branch admits; and (final corner)
   a same-text QUOTED twin no longer exempts the unquoted word's write
   (`git checkout main -- src/{a,../esc} 'src/{a,../esc}'` denies).
-- (Advisory, disclosed with follow-up issue #3569 — NOT fixed here, out of
-  closure scope:) wrapper-prefixed tee/dd operand windows can bleed the
-  wrapper's word consumption into the operand position —
-  `sudo -D src tee a` fabricates a `ws\tee` target because the tee/dd
-  branches read `getSuffixWords` instead of the wrapper hop's `rest`
-  (fail-closed over-block; in-scope direct-write positives through chdir
-  wrappers are unproven). Issue #3569 tracks the operand-window fix; the
-  nested-alternating-quote `sh -c` finding is tracked in a separate issue
-  filed by the reviewer.
+- (Advisory, PARTIALLY closed by the feedback round:) the tee half of
+  #3569's operand-window advisory is fixed — wrapper-prefixed tee
+  (`env tee src/f`, `command tee src/f`) no longer fabricates the verb word
+  itself as an in-scope write target (the tee branch starts at the resolved
+  leaf word). The remaining #3569 scope — direct-write POSITIVE modeling
+  through chdir wrappers (`sudo -D src tee a` writes src/a relative to the
+  chdir) and the dd branch — stays tracked there.
+- (Feedback-round residual, disclosed — NOT fixed here:) a launcher nested
+  INSIDE another launcher loses its own option grammar — `sudo time -o x
+  cmd`, `nohup time -o x cmd`, and the bash-keyword-outer
+  `time 'time' -o x cmd` spelling lose the inner `-o` write emission and the
+  timed-tail destructive push (the hop loop treats launcher heads as
+  terminal, "launcher heads never nest another launcher"). Verified
+  fail-open by probe; filed as the priority item of the PR's follow-up
+  issue.
 - nohup.out creation stays stdout-tty-gated and out of static reach — disclosed,
   not modeled.
 
@@ -186,3 +238,9 @@ C9, C12–C15 stay GREEN.
   `guardrails-shell-write-inplace-escapes.test.ts`,
   `guardrails-shell-write-inplace-operands.test.ts` (perl in-place cluster rows
   moved from allowed to eval-blocked).
+- Feedback round: `tests/unit/hooks/guardrails-shell-write-3572-feedback-hardening.test.ts`
+  (17 tests: N-01 `sudo -e --` edit survival with in-scope admit control, N-02
+  timed-tail deny + cd-tracked admit, N-03 escaping-download emission +
+  gate deny + admit, N-29 env -S tee/cp-class detection + nested -S and
+  expansion payload refusals + destructive deny, wrapper-prefixed tee leaf
+  offset with admit/deny controls).
