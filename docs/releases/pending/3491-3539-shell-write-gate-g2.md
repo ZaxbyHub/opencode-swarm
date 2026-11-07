@@ -73,10 +73,13 @@
 ## Known edges
 
 - A brace expansion in a destination served by detectors outside this
-  workstream's site list (curl `-o`, sed `-i` operands) is a FAIL-OPEN
-  residue: the operand still reads literally today, while real bash
-  expands it and writes the escaping branch when the target directory
-  exists. Those sites arrive with their own grammar work (PR-3).
+  workstream's site list (curl `-o`, sed `-i` operands) was a FAIL-OPEN
+  residue while this PR shipped: the operand read literally, while real
+  bash expands it and writes the escaping branch when the target directory
+  exists. PR-3 (the g3 closure round) LANDED those site grammars — the
+  sed/perl/awk `-i` in-place operands and curl's `-o`/`--output`
+  destinations now route through this same brace engine, so the residue is
+  closed there.
 - Per-site multi-branch semantics are ground-truthed and deliberately
   OVER-APPROXIMATED where bash refuses (final-critic F-2, executed GT):
   a multi-branch REDIRECT operand is an "ambiguous redirect" (rc=1, no

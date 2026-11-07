@@ -265,3 +265,236 @@ describe('W2 gate: destructive segments evaluate at the evolving child cwd (grou
 		expect(got.message).toMatch(/Recursive delete target "..\/dist"/);
 	});
 });
+
+// ---------------------------------------------------------------------------
+// W3 (#3491): per-manual launcher option grammar + fail-closed depth caps.
+// The old strip handled only BARE `sudo|time|nohup` and `nice -n N`, so an
+// option-bearing launcher left the option word in verb position and the
+// identical wrapped command ADMITTED (RC-2b).
+// ---------------------------------------------------------------------------
+
+describe('W3 gate: sudo option grammar (sudo(8) mode table)', () => {
+	test.each([
+		['sudo -u root rmdir ../x'],
+		['sudo -g wheel rmdir ../x'],
+		['sudo -p "[pass]" rmdir ../x'],
+		['sudo -E rmdir ../x'],
+		['sudo -n rmdir ../x'],
+		['sudo -b rmdir ../x'],
+		['sudo -B rmdir ../x'],
+		['sudo -u root -E -n rmdir ../x'],
+		['sudo --user=root rmdir ../x'],
+		['sudo -- rmdir ../x'],
+	])('%s → DENIED (options consumed, tail inspected)', async (command) => {
+		const got = await gate(command, true);
+		expect(got.verdict).toBe('DENIED');
+		expect(got.message).toMatch(/BLOCKED/);
+	});
+
+	test.each([
+		['sudo -l'],
+		['sudo -v'],
+		['sudo -V'],
+		['sudo -l rmdir ../x'], // -l [command] LISTS privileges for it — never executes
+		['sudo -K'],
+	])('%s → ADMITTED (non-execution query modes)', async (command) => {
+		const got = await gate(command, true);
+		expect(got.verdict).toBe('ADMITTED');
+	});
+
+	test.each([
+		['sudo -i'],
+		['sudo -s'],
+		['sudo --login'],
+		['sudo --shell'],
+	])('%s → DENIED (interactive root shell, no inspectable command)', async (command) => {
+		const got = await gate(command, true);
+		expect(got.verdict).toBe('DENIED');
+		expect(got.message).toMatch(/interactive shell/);
+	});
+
+	test('sudo -i rmdir ../x → DENIED (a tail through the login shell is executed)', async () => {
+		const got = await gate('sudo -i rmdir ../x', true);
+		expect(got.verdict).toBe('DENIED');
+		expect(got.message).toMatch(/BLOCKED/);
+	});
+
+	test('sudo -e edit target outside the scope → DENIED (edit operands are write-class)', async () => {
+		const got = await gate('sudo -e ../secret.txt');
+		expect(got.verdict).toBe('DENIED');
+		expect(got.message).toMatch(ANY_WRITE_BLOCK);
+	});
+
+	test('sudo -e in-scope edit target admits', async () => {
+		const got = await gate('cd src && sudo -e ok.txt');
+		expect(got.verdict).toBe('ADMITTED');
+	});
+
+	test.each([
+		['sudo -z rmdir ../x'],
+		['sudo -h host rmdir ../x'],
+		['sudo --wat rmdir ../x'],
+	])('%s → DENIED (unknown option: every remaining word is a potential execution tail)', async (command) => {
+		const got = await gate(command, true);
+		expect(got.verdict).toBe('DENIED');
+	});
+
+	test('sudo -z alone → ADMITTED (unknown option with no tail: sudo errors, nothing runs)', async () => {
+		const got = await gate('sudo -z', true);
+		expect(got.verdict).toBe('ADMITTED');
+	});
+
+	test('sudo -u root -D .. composes: options before the chdir, tail escapes', async () => {
+		const got = await gate('sudo -u root -D .. rm -rf dist', true);
+		expect(got.verdict).toBe('DENIED');
+		expect(got.message).toMatch(/Recursive delete target "..\/dist"/);
+	});
+
+	test('control: sudo rm -rf node_modules stays admitted (safe artifact)', async () => {
+		const got = await gate('sudo rm -rf node_modules', true);
+		expect(got.verdict).toBe('ADMITTED');
+	});
+});
+
+describe('W3 gate: time keyword vs GNU binary (spelling-selected grammar)', () => {
+	test.each([
+		['time -p rmdir ../x'],
+		['time rmdir ../x'],
+		['/usr/bin/time -p rmdir ../x'],
+		['/usr/bin/time -v rmdir ../x'],
+		['/usr/bin/time -f %e rmdir ../x'],
+	])('%s → DENIED (the timed command is inspected)', async (command) => {
+		const got = await gate(command, true);
+		expect(got.verdict).toBe('DENIED');
+		expect(got.message).toMatch(/BLOCKED/);
+	});
+
+	test('time -o FILE writes the timing report (ADDITIONAL write target)', async () => {
+		const got = await gate('/usr/bin/time -o ../report.txt true');
+		expect(got.verdict).toBe('DENIED');
+		expect(got.message).toMatch(ANY_WRITE_BLOCK);
+	});
+
+	test('time -a -o FILE append variant is still a write target', async () => {
+		const got = await gate('/usr/bin/time -a -o ../report.txt true');
+		expect(got.verdict).toBe('DENIED');
+		expect(got.message).toMatch(ANY_WRITE_BLOCK);
+	});
+
+	test('time --output=FILE glued long form', async () => {
+		const got = await gate('/usr/bin/time --output=../report.txt true');
+		expect(got.verdict).toBe('DENIED');
+		expect(got.message).toMatch(ANY_WRITE_BLOCK);
+	});
+
+	test('time -o in scope admits (report at src/ok.txt)', async () => {
+		const got = await gate('cd src && /usr/bin/time -o ok.txt true');
+		expect(got.verdict).toBe('ADMITTED');
+	});
+
+	test('bash keyword `time -v cmd`: -v IS the command word (nothing runs) — admits', async () => {
+		const got = await gate('time -v true', true);
+		expect(got.verdict).toBe('ADMITTED');
+	});
+
+	test('control: external time -v true with benign tail admits', async () => {
+		const got = await gate('/usr/bin/time -v true', true);
+		expect(got.verdict).toBe('ADMITTED');
+	});
+});
+
+describe('W3 gate: nice / nohup option grammar', () => {
+	test.each([
+		['nice -n 5 rmdir ../x'],
+		['nice -10 rmdir ../x'],
+		['nice --adjustment=5 rmdir ../x'],
+		['nice -n5 rmdir ../x'],
+		['nice -- rmdir ../x'],
+	])('%s → DENIED (adjustment consumed, tail inspected)', async (command) => {
+		const got = await gate(command, true);
+		expect(got.verdict).toBe('DENIED');
+		expect(got.message).toMatch(/BLOCKED/);
+	});
+
+	test.each([
+		['nice'],
+		['nice --help'],
+		['nice -n 5'],
+	])('%s → ADMITTED (no command runs)', async (command) => {
+		const got = await gate(command, true);
+		expect(got.verdict).toBe('ADMITTED');
+	});
+
+	test('nice -z rmdir ../x → DENIED (unknown option, potential tail)', async () => {
+		const got = await gate('nice -z rmdir ../x', true);
+		expect(got.verdict).toBe('DENIED');
+	});
+
+	test('nohup rm -rf node_modules stays admitted (safe artifact through the wrapper)', async () => {
+		const got = await gate('nohup rm -rf node_modules', true);
+		expect(got.verdict).toBe('ADMITTED');
+	});
+
+	test('nohup -- rm -rf ../../outside → DENIED (transparent --)', async () => {
+		const got = await gate('nohup -- rm -rf ../../outside', true);
+		expect(got.verdict).toBe('DENIED');
+	});
+
+	test('nohup -x cmd → DENIED (deny-on-uncertainty for dash-led non-option words)', async () => {
+		const got = await gate('nohup -x true', true);
+		expect(got.verdict).toBe('DENIED');
+	});
+});
+
+describe('W3 gate: fail-closed depth caps (RC-2b, C4 family)', () => {
+	test('sudo x6 + rm -rf → DENIED (cursor-bounded unwrap reaches the verb)', async () => {
+		const got = await gate(
+			'sudo sudo sudo sudo sudo sudo rm -rf ../../outside',
+			true,
+		);
+		expect(got.verdict).toBe('DENIED');
+		expect(got.message).toMatch(/Recursive delete/);
+	});
+
+	test('command x14 + rm -rf → DENIED', async () => {
+		const got = await gate(
+			`${'command '.repeat(14)}rm -rf ../../outside`,
+			true,
+		);
+		expect(got.verdict).toBe('DENIED');
+		expect(got.message).toMatch(/Recursive delete/);
+	});
+
+	test('paranoid bound: sudo x70 + benign tail → DENIED through the depth channel', async () => {
+		const got = await gate(`${'sudo '.repeat(70)}echo hi`, true);
+		expect(got.verdict).toBe('DENIED');
+		expect(got.message).toMatch(/inspection bound/);
+	});
+
+	test('write arm paranoid bound: env x70 + python -c → DENIED (unwrapDepthExceeded)', async () => {
+		const got = await gate(`${'env '.repeat(70)}python -c "open('../x','w')"`);
+		expect(got.verdict).toBe('DENIED');
+		expect(got.message).toMatch(/inspection bound/);
+	});
+
+	test('control: env x3 + python -c still classifies normally (deny on scope)', async () => {
+		const got = await gate(`env env env python -c "open('../x','w')"`);
+		expect(got.verdict).toBe('DENIED');
+		expect(got.message).toMatch(ANY_WRITE_BLOCK);
+	});
+});
+
+describe('sudo -e -- FILE: edit mode survives the end-of-options terminator (PR3590 automation review)', () => {
+	test.each([
+		'sudo -e -- ../../secret',
+		'sudo --edit -- ../../secret',
+	])('%s DENIES (edit target emitted, not an execution tail)', async (cmd) => {
+		const got = await gate(cmd);
+		expect(got.verdict).toBe('DENIED');
+		expect(got.message).toMatch(/secret/);
+	});
+	test('sudo -e -- src/ok.txt ADMITS (in-scope control)', async () => {
+		const got = await gate('sudo -e -- src/ok.txt');
+		expect(got.verdict).toBe('ADMITTED');
+	});
+});
