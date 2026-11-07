@@ -1236,6 +1236,9 @@ export interface PrWorkflowGateState {
 	 */
 	prFeedbackRebindCount?: number;
 	prFeedbackScopes?: PrFeedbackScopeDeclarationRecord[];
+	// #3231: append-generation CAS machinery — mirrored from the zod schema
+	// (schema keys must stay a subset of this interface).
+	observabilityRevision?: number;
 }
 
 const GATE_SCHEMA_VERSION = 1 as const;
@@ -1978,6 +1981,15 @@ const PrWorkflowGateStateSchema = z
 			.array(PrFeedbackScopeDeclarationRecordSchema)
 			.max(MAX_WORKFLOW_BATCHES)
 			.optional(),
+		// #3231: append-generation CAS machinery (see
+		// `appendObservabilityStateWhileLocked` in src/pr-review/persistence.ts).
+		// Optional both ways: older state omits it, and older code passes it
+		// through the root `.passthrough()` below without deleting it. NOT a
+		// registered observability field — the four-name registry ratchet in
+		// tests/unit/pr-review/observability-contract-guard-3199.test.ts pins
+		// the durable-wins list, and this field is owned by the persistence
+		// CAS itself.
+		observabilityRevision: z.number().int().nonnegative().optional(),
 	})
 	// .passthrough(), not .strict(): this state is written unconditionally on
 	// every PR_REVIEW/PR_FEEDBACK session and persists across process
@@ -2499,8 +2511,14 @@ export async function appendPrWorkflowSkillContractAdvisories(
 	if (advisories.length === 0) return;
 	const normalizedSessionID = normalizeSessionID(sessionID);
 	if (!normalizedSessionID) return;
-	await withSessionStateMutation(directory, normalizedSessionID, async () => {
-		try {
+	// Issue #3232: the fail-open boundary must cover lock acquisition too.
+	// withSessionStateMutation acquires the session-state mutation lock
+	// BEFORE the callback runs, so a try placed inside the callback lets the
+	// acquire loop's BLOCKED throw (lock exhaustion) escape the function and
+	// abort the wake evaluation that called it. Same shape as the three
+	// sibling observability writers below.
+	try {
+		await withSessionStateMutation(directory, normalizedSessionID, async () => {
 			const existing = await readPrWorkflowGateStateFromDisk(
 				directory,
 				normalizedSessionID,
@@ -2521,10 +2539,10 @@ export async function appendPrWorkflowSkillContractAdvisories(
 				skillContractAdvisories: merged,
 				updatedAt: isoNow(),
 			});
-		} catch {
-			// Fail-open: see the doc comment above.
-		}
-	});
+		});
+	} catch {
+		// Fail-open: see the doc comment above.
+	}
 }
 
 export async function readPrWorkflowGateState(
