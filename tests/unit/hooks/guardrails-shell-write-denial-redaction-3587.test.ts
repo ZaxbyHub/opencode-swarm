@@ -9,6 +9,7 @@
  */
 import { afterAll, describe, expect, test } from 'bun:test';
 import { mkdirSync, readFileSync } from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import type { GuardrailsConfig } from '../../../src/config/schema';
 import { createGuardrailsHooks } from '../../../src/hooks/guardrails';
@@ -216,6 +217,24 @@ describe('3587 four denial doors render bounded, redacted targets', () => {
 		expect(render.length).toBeLessThanOrEqual(320);
 		expect(got.message.includes(RUN_320)).toBe(false);
 	}, 30_000);
+
+	test('shell door renders the RESOLVED target with the runtime profile folded', async () => {
+		// Shell doors render the resolved absolute: its leading runtime
+		// profile folds; an interior caller-supplied home/<name> segment
+		// beyond it is a disclosed bound (fragment Known bounds).
+		const ws = wsFixture();
+		const got = await gateShell(ws, 'printf x > ../../home/alice/x.txt', {
+			scope: ['src/'],
+		});
+		expect(got.verdict).toBe('DENIED');
+		const render = DENIAL_SHAPE.exec(got.message)?.[1] ?? '';
+		expect(render.length).toBeGreaterThan(0);
+		const home = os.homedir();
+		if (ws.startsWith(home)) {
+			expect(render.includes(path.basename(home))).toBe(false);
+			expect(render.startsWith('~')).toBe(true);
+		}
+	}, 30_000);
 });
 
 describe('3587 reason channel folds home/profile paths (file-authority)', () => {
@@ -233,6 +252,36 @@ describe('3587 reason channel folds home/profile paths (file-authority)', () => 
 			expect(decision.reason.includes('/home/alice')).toBe(false);
 			// Structured channel keeps the sanitized pre-change form.
 			expect(decision.path).toBe('/home/alice/aw?ful.txt');
+		}
+	});
+
+	test.each([
+		'./../home/alice/aw\u0001ful.txt',
+		'src/../../home/alice/aw\u0001ful.txt',
+	])('invalid-path arm: non-canonical escaping %p folds (normalized probe)', (t) => {
+		const decision = checkFileAuthority('coder', t, process.cwd(), undefined, {
+			declaredScope: ['src/'],
+		});
+		expect(decision.allowed).toBe(false);
+		if (!decision.allowed) {
+			expect(decision.reason).toContain('path=../~/aw?ful.txt');
+			expect(decision.reason.includes('alice')).toBe(false);
+		}
+	});
+
+	test('Windows-profile slash form folds in the reason on every host', () => {
+		// Lexical classification: no platform gate (pre-fix this leaked the
+		// account name on POSIX hosts, where C:/ is not path-absolute).
+		const decision = checkFileAuthority(
+			'coder',
+			'C:/Users/alice/s\u0001.txt',
+			process.cwd(),
+			undefined,
+			{ declaredScope: ['src/'] },
+		);
+		expect(decision.allowed).toBe(false);
+		if (!decision.allowed) {
+			expect(decision.reason.includes('alice')).toBe(false);
 		}
 	});
 
@@ -310,9 +359,9 @@ describe('3587 renderDenialTarget shipped representations (_internals seam)', ()
 		expect(render('/Users/alice/x.txt')).toBe('~/x.txt');
 	});
 	test.skipIf(process.platform !== 'win32')(
-		'Windows profile folds to the shipped two-separator form',
+		'Windows profile folds to a single-separator form (double separator fixed)',
 		() => {
-			expect(render('C:\\Users\\alice\\x.txt')).toBe('~\\\\x.txt');
+			expect(render('C:\\Users\\alice\\x.txt')).toBe('~\\x.txt');
 		},
 	);
 	test.skipIf(process.platform !== 'win32')(

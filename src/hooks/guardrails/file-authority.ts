@@ -999,11 +999,17 @@ function denyAuthority(
 	// is slash-normalized first — otherwise `..\Users\<name>\…` shapes dodge
 	// both fold branches (#3587 review round).
 	const displaySource = normalizedPath.replace(/\\/g, '/');
-	let reasonDisplay = displaySource;
-	if (path.isAbsolute(displaySource)) {
-		reasonDisplay = redactPath(displaySource);
-	} else if (displaySource.startsWith('../')) {
-		reasonDisplay = displaySource.replace(
+	// #3587 review round: the escaping probe runs on the NORMALIZED form so
+	// non-canonical spellings (`./..`, `src/../..`) share the message
+	// channel's fold decision — same-class disagreement, killed in the
+	// helper first.
+	const escapingProbe = path.posix.normalize(displaySource);
+	// Non-escaping displays always route through the LEXICAL redactPath
+	// (identity on non-profile shapes), so a Windows-profile spelling folds
+	// even on POSIX hosts where `C:/…` is not path-absolute.
+	let reasonDisplay = redactPath(displaySource);
+	if (escapingProbe.startsWith('../')) {
+		reasonDisplay = escapingProbe.replace(
 			/(^|\/)(?:home|Users)\/[^/]+/g,
 			'$1~',
 		);

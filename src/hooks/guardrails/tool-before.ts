@@ -293,13 +293,14 @@ export class ShellWriteBlockedError extends Error {
  */
 export const renderDenialTarget = (target: string): string => {
 	// #3587 review round: match denyAuthority's escaping-relative home fold so
-	// the message and reason channels of one denial agree on escaping-relative
-	// shapes in EITHER separator flavor (`../home/<name>/…` and
-	// `..\Users\<name>\…` — redactPath's absolute branch already folds
-	// absolute profile prefixes; a relative target folds only when its
-	// normalized form starts with `../`, proving it leaves the workspace —
-	// `./../…` and `src/../../…` spellings normalize the same way the reason
-	// channel's path.relative display does).
+	// the message and reason channels agree for OPERAND-shaped targets (the
+	// non-shell door) in EITHER separator flavor (`../home/<name>/…` and
+	// `..\Users\<name>\…`). Absolute targets — including the shell doors'
+	// resolved paths — fold only their leading profile via the lexical
+	// redactPath; a relative target folds only when its normalized form
+	// starts with `../`, proving it leaves the workspace (`./../…` and
+	// `src/../../…` spellings normalize the same way the reason channel's
+	// path.relative display does).
 	const normalized = path.isAbsolute(target)
 		? target
 		: path.posix.normalize(target.replace(/\\/g, '/'));

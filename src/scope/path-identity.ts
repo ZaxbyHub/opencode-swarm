@@ -153,35 +153,55 @@ export function redactPath(filePath: string): string {
 	if (typeof filePath !== 'string') return '';
 	if (filePath.length === 0) return filePath;
 
-	// POSIX home: /home/<name>/... -> ~/...
-	const rawPosixHomeMatch = filePath.match(/^(\/home\/[^/]+)(\/.*)$/);
-	if (rawPosixHomeMatch) {
-		return `~${rawPosixHomeMatch[2]}`;
+	// #3587 review round: profile classification is LEXICAL on a canonical
+	// slash-normalized form, so (a) normalization-created home shapes
+	// (`/tmp/../home/<name>/x`) fold, (b) the exact profile root folds
+	// (trailing component optional), and (c) Windows-drive and UNC forms fold
+	// in either separator flavor on ANY host — matchability no longer depends
+	// on the host path module's flavor. A redacted output keeps the input's
+	// separator flavor (and the old Windows branch's `~\\rest` double
+	// separator is gone); a NON-profile path returns the exact pre-change
+	// host-normalized form, so audit/log shapes for ordinary paths do not
+	// drift.
+	const hadBackslash = filePath.includes('\\');
+	const slashForm = filePath.replace(/\\/g, '/');
+	// posix.normalize collapses a leading `//`, so keep the UNC root marker
+	// out of normalization and re-attach it.
+	const normalized = /^\/\/[^/]/.test(slashForm)
+		? `/${path.posix.normalize(slashForm.slice(1))}`
+		: path.posix.normalize(slashForm);
+
+	// POSIX/mac home (root or descendant): /home/<name>[/<rest>] -> ~/<rest>
+	const homeMatch = normalized.match(/^\/(?:home|Users)\/[^/]+((?:\/.*)?)$/);
+	if (homeMatch) {
+		return renderRedacted(`~${homeMatch[1] ?? ''}`, hadBackslash);
 	}
 
-	// macOS home: /Users/<name>/... -> ~/... (parity with redactShellCommand)
-	const rawMacHomeMatch = filePath.match(/^(\/Users\/[^/]+)(\/.*)$/);
-	if (rawMacHomeMatch) {
-		return `~${rawMacHomeMatch[2]}`;
-	}
-
-	const normalized = path.normalize(filePath);
-
-	// Windows user profile (drive letter case-insensitive): c:\Users\<name>\... -> ~\<rest>\...
-	const windowsHomeMatch = normalized.match(
-		/^([A-Za-z]:\\[Uu][Ss][Ee][Rr][Ss]\\[^\\]+)(\\.*)$/i,
+	// Windows profile in either flavor (case-insensitive Users):
+	// <drive>:/(Users|home)/<name>[/<rest>] -> ~/<rest>
+	const driveMatch = normalized.match(
+		/^[A-Za-z]:\/(?:[Uu][Ss][Ee][Rr][Ss]|home)\/[^/]+((?:\/.*)?)$/i,
 	);
-	if (windowsHomeMatch) {
-		return `~\\${windowsHomeMatch[2]}`;
+	if (driveMatch) {
+		return renderRedacted(`~${driveMatch[1] ?? ''}`, hadBackslash);
 	}
 
-	// Windows UNC profile/share path: \\server\share\user\... -> ~\share\user\...
-	const uncHomeMatch = normalized.match(
-		/^\\\\[^\\]+\\([^\\]+)\\([^\\]+)(\\.*)$/,
-	);
-	if (uncHomeMatch) {
-		return `~\\${uncHomeMatch[1]}\\${uncHomeMatch[2]}${uncHomeMatch[3]}`;
+	// Windows UNC: //<server>/<share>/<name>[/<rest>] -> ~\<share>\<name>\<rest>
+	// (server folded, per the F-004 contract; a profile-shaped share folds the
+	// account segment too: \\server\Users\alice\x -> ~\x).
+	const uncMatch = normalized.match(/^\/\/[^/]+\/([^/]+)\/([^/]+)((?:\/.*)?)$/);
+	if (uncMatch) {
+		const [, share, name, rest = ''] = uncMatch;
+		if (share === 'Users' || share === 'home') {
+			return renderRedacted(`~${rest}`, hadBackslash);
+		}
+		return renderRedacted(`~/${share}/${name}${rest}`, hadBackslash);
 	}
 
-	return normalized;
+	return path.normalize(filePath);
+}
+
+/** Emit a folded path in the input's separator flavor. */
+function renderRedacted(display: string, hadBackslash: boolean): string {
+	return hadBackslash ? display.replace(/\//g, '\\') : display;
 }
