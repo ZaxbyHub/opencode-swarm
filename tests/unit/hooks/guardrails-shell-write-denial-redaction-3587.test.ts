@@ -352,6 +352,17 @@ describe('3587 renderDenialTarget shipped representations (_internals seam)', ()
 			expect(out.includes('Users')).toBe(false);
 		},
 	);
+	test.each([
+		'./../home/alice/x.txt',
+		'src/../../home/alice/x.txt',
+	])('non-canonical escaping spelling %p folds like the reason channel', (t) => {
+		const out = render(t);
+		expect(out).toMatch(/^\.\.[\\/]~[\\/]x\.txt$/);
+		expect(/alice/.test(out)).toBe(false);
+	});
+	test('in-workspace dotted relative renders verbatim (no normalization leak)', () => {
+		expect(render('./src/x.txt')).toBe(redactPath('./src/x.txt'));
+	});
 });
 
 describe('3587 structured data channels keep exact values', () => {

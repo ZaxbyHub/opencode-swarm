@@ -15,8 +15,10 @@ home/profile segments under two rules: an absolute path (`/home/<name>/...`,
 an ESCAPING relative path (one starting `../`, provably outside the workspace) folds its
 `home/<name>` / `Users/<name>` segment to `~` — so a `/home/<name>/...` target no longer
 discloses the profile name in either the absolute or the `../../home/<name>` relative form.
-The denial message's target slot applies the same escaping-relative fold, so the message and
-reason channels of one denial agree. Ordinary in-workspace relative paths and non-home
+The denial message's target slot applies the same escaping-relative fold (deciding "escaping"
+on the normalized form, so `./../home/<name>/…`, `src/../../home/<name>/…`, and win32
+`..\Users\<name>\…` spellings fold too), so the message and reason channels of one denial
+agree. Ordinary in-workspace relative paths and non-home
 absolutes render unchanged (over-redaction is pinned against). Known bounds: when the
 workspace sits under one profile and the target under a SIBLING profile, the relative
 display's common-ancestor prefix already dropped the `Users` segment, so the sibling account

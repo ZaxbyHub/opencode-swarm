@@ -296,13 +296,15 @@ export const renderDenialTarget = (target: string): string => {
 	// the message and reason channels of one denial agree on escaping-relative
 	// shapes in EITHER separator flavor (`../home/<name>/…` and
 	// `..\Users\<name>\…` — redactPath's absolute branch already folds
-	// absolute profile prefixes; a relative target folds only when the `..`
-	// prefix proves it leaves the workspace).
-	const escaping = target.startsWith('../') || target.startsWith('..\\');
-	const display = escaping
+	// absolute profile prefixes; a relative target folds only when its
+	// normalized form starts with `../`, proving it leaves the workspace —
+	// `./../…` and `src/../../…` spellings normalize the same way the reason
+	// channel's path.relative display does).
+	const normalized = path.isAbsolute(target)
 		? target
-				.replace(/\\/g, '/')
-				.replace(/(^|\/)(?:home|Users)\/[^/]+/g, '$1~')
+		: path.posix.normalize(target.replace(/\\/g, '/'));
+	const display = normalized.startsWith('../')
+		? normalized.replace(/(^|\/)(?:home|Users)\/[^/]+/g, '$1~')
 		: target;
 	return sanitizeDiagnosticText(redactPath(display), 320);
 };
