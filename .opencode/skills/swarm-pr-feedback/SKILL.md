@@ -5,7 +5,7 @@ description: >
   Use when addressing pasted PR feedback, GitHub review comments or threads,
   requested changes, CI/check failures, merge conflicts, stale PR branches, or
   PR follow-up work that must close all known issues without dropping findings,
-  then drive the PR to green CI, merge, and memory closeout. Supports
+  then drive the PR to green CI, merge, session retrospective, and memory closeout. Supports
   multi-round bot reviews (a new bot review after every push) via the
   iterative pattern documented in the body. Stage A
   (structural pre-checks) and Stage B (reviewer + test_engineer) gates and the

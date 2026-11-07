@@ -1,8 +1,8 @@
-## swarm-pr-feedback drives a PR to merge; new session-retrospective skill
+# swarm-pr-feedback drives a PR to merge; new session-retrospective skill
 
 `swarm-pr-feedback` used to stop once known feedback was closed. Driving CI, merging, and reviewing the session each needed a separate instruction every session. Run on a PR, the skill now carries the PR through to the end.
 
-### Drive to merge (new `references/drive-to-merge.md`)
+## Drive to merge (new `references/drive-to-merge.md`)
 - **Intake.** The run takes this session's own review findings and every PR comment with findings, and runs the existing Stage A → Stage B → closeout gates.
 - **Dispositions.** It plans every unfixed item's disposition before the closeout gate and publishes the dispositions only after the push is verified.
 - **CI to green, within a budget:**
@@ -22,7 +22,7 @@
 
   "Fixes only" skips CI and the merge; "don't merge" skips only the merge. Runs started by a PR-monitor wake keep their triage scope.
 
-### Follow-up dispositions
+## Follow-up dispositions
 - `references/followup-dispositions.md` now states two rules explicitly:
   - anything the PR introduced is fixed in the PR;
   - a verified, consequential defect is never closed on the agent's own judgment.
@@ -30,7 +30,7 @@
 - Every ASK item, follow-up proposal, Improvement, and enhancement idea goes through its own critic call before it reaches the user, and the critic's verdict travels with the question. The closeout critic gate does not count as that call.
 - A reviewer's severity label (`nit`, `non-blocking`) never replaces verification.
 
-### New `session-retrospective` skill
+## New `session-retrospective` skill
 - An evidence-based retrospective of the whole session, reconstructed from the harness's own history:
   - Claude Code transcript JSONL;
   - ZCode `~/.zcode/cli/db/db.sqlite`, read-only;
@@ -44,10 +44,10 @@
 - Every proposal is critic-adjudicated before the user sees it. Analysis only.
 - It lives at `.claude/skills/session-retrospective/` with an `.agents/skills` adapter, so ZCode, Codex, Claude Code, and OpenCode load it in this repository.
 
-### swarm-ci-monitor
+## swarm-ci-monitor
 - Step 4a no longer tells agents to omit the merge-strategy flag on every base. A non-interactive `gh pr merge` refuses without one on a direct-merge base, so the step now requires the repository's allowed method there.
 
-### Surfaces
+## Surfaces
 - Both references, the canonical skill and its two adapters.
 - The new skill and its adapter, classified `agents-only` in `src/config/skill-mirrors.ts`; the editing-skills guide now says such skills need that entry.
 - `swarm-ci-monitor`.

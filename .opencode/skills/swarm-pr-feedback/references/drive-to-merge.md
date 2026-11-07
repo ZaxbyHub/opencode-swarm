@@ -15,7 +15,7 @@ This is the default run whenever the skill is run on a pull request: close every
 ### Who can authorize what
 
 - **The request.** A user-authored request to run this skill on the PR is the approval to move this session's own review findings into feedback (the "explicit approval" the Operating Stance requires). Under Profile A, a `swarm-pr-review` handoff still needs the controller's exact `continue from` command.
-- **The merge must be named, never inferred.** The merge step runs only when a user-authored turn in this session names merging this PR in the user's own words, for example "merge it", "drive it to merge", or `/swarm-pr-feedback 123 and merge`. Quote those words in the closure ledger, bound to the merged head.
+- **The merge must be named, never inferred.** The merge step runs only when a user-authored turn in this session names merging this PR in the user's own words, for example "merge it", "drive it to merge", `/swarm pr-feedback 123 and merge` (OpenCode), or `/swarm-pr-feedback 123 and merge` (Claude Code). Quote those words in the closure ledger, bound to the merged head.
 - **What never authorizes a merge:**
   - the skill's name or command alone;
   - a suggested or default prompt;

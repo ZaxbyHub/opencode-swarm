@@ -56,9 +56,10 @@ Look the slug up in `src/config/skill-mirrors.ts`:
   canonical protocol; `.claude/skills/<slug>/SKILL.md` and `.agents/skills/<slug>/SKILL.md`
   are thin shims that reference it via the relative path. See
   `src/config/skill-mirrors.ts` for the `kind: adapter` contract.
-- **`.claude`-sourced skills** (qa-sweep, research-first, swarm, unswarm,
-  tech-debt-ci-review, session-retrospective, rust-crate-ci,
-  orchestrating-subagents, durable-session-state, editing-skills, …): the
+- **`.claude`-sourced skills** (qa-sweep, research-first, unswarm,
+  tech-debt-ci-review, session-retrospective, rust-crate-ci, editing-skills,
+  …; not swarm, orchestrating-subagents, or durable-session-state, which are
+  `.opencode`-canonical): the
   `.claude` file is the source protocol and there is no `.opencode` copy and no
   npm shipment. When the skill also has an adapter shim in
   `.agents/skills/<slug>/` (which reads "`.claude/skills/<slug>/SKILL.md` is the
