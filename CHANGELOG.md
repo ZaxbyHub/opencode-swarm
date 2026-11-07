@@ -1,5 +1,15 @@
 # Changelog
 
+## [7.202.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.202.1...v7.202.2) (2026-11-07)
+
+
+### Bug Fixes
+
+* Follow-up from PR [#3533](https://github.com/ZaxbyHub/opencode-swarm/issues/3533): neutralize control characters in swarm-residue inventory names ([#3542](https://github.com/ZaxbyHub/opencode-swarm/issues/3542)) ([274bd21](https://github.com/ZaxbyHub/opencode-swarm/commit/274bd21c5d8b8a63e85b0364c00e9a57cbad830b))
+* **pr-review:** feedback round — interface parity for observabilityRevision, guardrail positive controls, incoming-generation carry leg, fragment precision ([c0b26ae](https://github.com/ZaxbyHub/opencode-swarm/commit/c0b26aed9d0ee1d348e886cbdedc44abc0fd1663))
+* **pr-review:** make the advisory append fail-open under lock exhaustion and give observability appends their own CAS generation ([5d8b760](https://github.com/ZaxbyHub/opencode-swarm/commit/5d8b760f49545c2331d40e4da6f4022da0200f74))
+* **services:** [#3580](https://github.com/ZaxbyHub/opencode-swarm/issues/3580) review round — scope fragment claims truthfully, strengthen pins ([2bf2a6b](https://github.com/ZaxbyHub/opencode-swarm/commit/2bf2a6bd3ef6cf055f880867cb3b930a595bf1f7))
+
 ## [7.202.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.202.0...v7.202.1) (2026-11-07)
 
 
