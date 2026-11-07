@@ -1097,9 +1097,21 @@ async function persistStateRowWhileLocked<
 				'BLOCKED: PR workflow gate state changed concurrently; reload the active session state before retrying',
 			);
 		}
+		// 3593-R4: fail closed at the safe-integer ceiling instead of letting
+		// +1 overflow past it — at the ceiling a silently stable generation
+		// would compare equal on every fresh read and re-open the same-revision
+		// hole this CAS exists to close. Unreachable in practice (it would take
+		// ~9 quadrillion appends on one session row); a hand-tampered durable
+		// row is the only path, and appends are refused rather than degraded.
+		const nextAppendGeneration = durableAppendGeneration + 1;
+		if (nextAppendGeneration > Number.MAX_SAFE_INTEGER) {
+			throw new Error(
+				'BLOCKED: PR workflow gate observability generation is exhausted at the safe-integer ceiling; the durable row requires a manual generation reset before further appends',
+			);
+		}
 		effective = {
 			...(validated as unknown as Record<string, unknown>),
-			observabilityRevision: durableAppendGeneration + 1,
+			observabilityRevision: nextAppendGeneration,
 		} as S;
 	}
 	if (
