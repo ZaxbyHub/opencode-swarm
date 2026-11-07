@@ -23,7 +23,9 @@ absolutes render unchanged (over-redaction is pinned against). Known bounds: whe
 workspace sits under one profile and the target under a SIBLING profile, the relative
 display's common-ancestor prefix already dropped the `Users` segment, so the sibling account
 name remains in the reason (the message's target slot is still folded); the escaping fold is
-case-sensitive (`Users` but not `users`); the lstat-failed / symlink-junction ancestor denial
+case-sensitive (`Users` but not `users`); a drive-relative win32 spelling
+(`C:..\Users\<name>\…`, no separator after the drive) is not recognized as
+escaping and renders raw in the message channel; the lstat-failed / symlink-junction ancestor denial
 arms still render the raw ancestor path; and a `/home//<name>/...` double-slash shape dodges
 the POSIX home regex (all pre-existing in the shared redaction helpers and tracked for a
 follow-up).
