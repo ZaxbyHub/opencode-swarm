@@ -17,6 +17,7 @@ import { dirname, join } from 'node:path';
 import { closeAllProjectDbs } from '../../../src/db/project-db.js';
 import {
 	appendPrWorkflowSkillContractAdvisories,
+	type PrWorkflowGateState,
 	prWorkflowSessionFileStem,
 	readPrWorkflowGateState,
 } from '../../../src/hooks/pr-workflow-gate.js';
@@ -75,7 +76,8 @@ function seedGateState(
 /** The production append shape: fresh read under the lock, then append. */
 async function appendFresh(directory: string, session: string): Promise<void> {
 	await withSessionStateMutation(directory, session, async () => {
-		const fresh = await readPrWorkflowGateStateFromDisk(directory, session);
+		const fresh: PrWorkflowGateState | null =
+			await readPrWorkflowGateStateFromDisk(directory, session);
 		if (!fresh) throw new Error('cas suite: durable row vanished');
 		await appendObservabilityStateWhileLocked(directory, {
 			...fresh,
@@ -128,7 +130,8 @@ test('(b) a stale state-machine write cannot regress the generation and a stale 
 	await readPrWorkflowGateState(directory, session);
 
 	// Snapshot BEFORE the append (state-machine write input).
-	const stale = await readPrWorkflowGateStateFromDisk(directory, session);
+	const stale: PrWorkflowGateState | null =
+		await readPrWorkflowGateStateFromDisk(directory, session);
 	expect(stale).not.toBeNull();
 
 	await appendFresh(directory, session); // generation 0 -> 1, revision stays 0
@@ -142,6 +145,18 @@ test('(b) a stale state-machine write cannot regress the generation and a stale 
 	});
 	expect(written.revision).toBe(1);
 	expect(written.observabilityRevision).toBe(1);
+
+	// 3593-R3: an incoming payload that CARRIES a now-stale generation must
+	// also lose to the durable value. Advance to generation 2, then write
+	// from the gen-1 row produced above — a prefer-incoming carry would
+	// regress 2 -> 1 here; durable-wins must persist 2.
+	await appendFresh(directory, session); // generation 1 -> 2, revision stays 1
+	const writtenFromStaleGeneration = await writeStateWhileLocked(directory, {
+		...written,
+		updatedAt: NOW,
+	});
+	expect(writtenFromStaleGeneration.revision).toBe(2);
+	expect(writtenFromStaleGeneration.observabilityRevision).toBe(2);
 
 	// A stale append (payload generation 0 vs durable 1) is still rejected.
 	let staleAppendError: unknown = null;
@@ -166,7 +181,7 @@ test('(b) a stale state-machine write cannot regress the generation and a stale 
 	expect((staleAppendError as Error).message.startsWith('BLOCKED')).toBe(true);
 
 	const final = await readPrWorkflowGateState(directory, session);
-	expect(final?.observabilityRevision).toBe(1);
+	expect(final?.observabilityRevision).toBe(2);
 });
 
 test('(c) instance replacement carries the generation forward; new-instance appends are accepted', async () => {
@@ -179,7 +194,8 @@ test('(c) instance replacement carries the generation forward; new-instance appe
 	// generation DURABLE-WINS even though this stale snapshot lacks it (this
 	// is the dedicated-carry pin — a carry sourced from the incoming
 	// snapshot would reset the generation here).
-	const stale = await readPrWorkflowGateStateFromDisk(directory, session);
+	const stale: PrWorkflowGateState | null =
+		await readPrWorkflowGateStateFromDisk(directory, session);
 	expect(stale).not.toBeNull();
 	expect(stale?.observabilityRevision).toBeUndefined();
 
@@ -230,7 +246,8 @@ test('(c) instance replacement carries the generation forward; new-instance appe
 	const session2 = 'session-3231-replace-legacy';
 	seedGateState(directory2, session2);
 	await readPrWorkflowGateState(directory2, session2);
-	const stale2 = await readPrWorkflowGateStateFromDisk(directory2, session2);
+	const stale2: PrWorkflowGateState | null =
+		await readPrWorkflowGateStateFromDisk(directory2, session2);
 	await appendFresh(directory2, session2);
 	const replaced2 = await writeStateWhileLocked(directory2, {
 		...stale2!,
@@ -286,7 +303,8 @@ test('(g) clearObservabilityFields preserves the generation and older appends st
 	// Snapshot BEFORE the append: the clear-write below must carry the
 	// generation DURABLE-WINS even though this stale snapshot lacks it (the
 	// dedicated-carry pin — an incoming-snapshot carry would reset it here).
-	const stale = await readPrWorkflowGateStateFromDisk(directory, session);
+	const stale: PrWorkflowGateState | null =
+		await readPrWorkflowGateStateFromDisk(directory, session);
 	expect(stale?.observabilityRevision).toBeUndefined();
 
 	await appendPrWorkflowSkillContractAdvisories(directory, session, [
@@ -338,7 +356,8 @@ test('(e) a same-field interleave is rejected and the first append survives', as
 	await readPrWorkflowGateState(directory, session);
 
 	// B snapshots BEFORE A's append; both appends touch the SAME field.
-	const staleB = await readPrWorkflowGateStateFromDisk(directory, session);
+	const staleB: PrWorkflowGateState | null =
+		await readPrWorkflowGateStateFromDisk(directory, session);
 	expect(staleB?.skillContractAdvisories ?? []).toHaveLength(0);
 
 	// A: a legitimate advisory append (generation 0 -> 1).
@@ -385,7 +404,8 @@ test('(i) a generation mismatch rejects with the exact concurrent-change message
 	await readPrWorkflowGateState(directory, session);
 	await appendFresh(directory, session); // generation 1
 
-	const fresh = await readPrWorkflowGateStateFromDisk(directory, session);
+	const fresh: PrWorkflowGateState | null =
+		await readPrWorkflowGateStateFromDisk(directory, session);
 	expect(fresh?.observabilityRevision).toBe(1);
 	let message = '';
 	await withSessionStateMutation(directory, session, async () => {

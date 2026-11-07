@@ -33,7 +33,10 @@ base-mismatch marker), closing #3232 and the remaining scope of #3231.
   forward unchanged (never reset by a workflow-instance replacement or a
   deliberate observability-field clear, never regressed by a stale snapshot).
   The previously-delivered field-diff guard and required codec binding from
-  #3231 (PR #3226's feedback round) are unchanged.
+  #3231 (PR #3226's feedback round) still enforce the registered observability
+  fields exactly as before; the new append generation is deliberately not a
+  registered field — the guard skips it because its own CAS owns
+  stale-generation reporting.
 
 ## Why
 

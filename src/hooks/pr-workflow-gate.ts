@@ -1236,6 +1236,9 @@ export interface PrWorkflowGateState {
 	 */
 	prFeedbackRebindCount?: number;
 	prFeedbackScopes?: PrFeedbackScopeDeclarationRecord[];
+	// #3231: append-generation CAS machinery — mirrored from the zod schema
+	// (schema keys must stay a subset of this interface).
+	observabilityRevision?: number;
 }
 
 const GATE_SCHEMA_VERSION = 1 as const;

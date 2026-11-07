@@ -24,6 +24,7 @@ import { recordPendingDelegationDetailed } from '../../../src/background/pending
 import { closeAllProjectDbs } from '../../../src/db/project-db.js';
 import {
 	appendPrWorkflowSkillContractAdvisories,
+	_test_exports as gateInternals,
 	prWorkflowSessionFileStem,
 	readPrWorkflowGateState,
 	recordPrFeedbackBaseMismatch,
@@ -35,6 +36,28 @@ import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 const NOW = '2026-11-06T00:00:00.000Z';
 /** Inert planted-lock timestamp (liveness reclamation is pid-keyed). */
 const PLANTED_LOCK_CREATED_AT_MS = 1_762_387_200_000;
+/**
+ * STATE_MUTATION_LOCK_MAX_ATTEMPTS in src/pr-review/persistence.ts (not
+ * exported). The acquire loop performs exactly one isProcessAlive check per
+ * failed attempt, so 50 checks = one fully-exhausted acquire loop. Each leg
+ * asserts this count as its POSITIVE CONTROL (PRR-002): a regression that
+ * returns the writer before the lock (e.g. a mode/record pre-check moved
+ * ahead of withSessionStateMutation) drops the count to 0 and fails the leg
+ * instead of passing vacuously.
+ */
+const STATE_MUTATION_LOCK_MAX_ATTEMPTS = 50;
+
+const originalIsProcessAlive = gateInternals.isProcessAlive;
+let liveOwnerProbeCount = 0;
+
+/** Install the counting liveness seam for one leg (restored in afterEach). */
+function countLiveOwnerProbes(): void {
+	liveOwnerProbeCount = 0;
+	gateInternals.isProcessAlive = (pid: number) => {
+		if (pid === process.pid) liveOwnerProbeCount += 1;
+		return originalIsProcessAlive(pid);
+	};
+}
 
 const tempDirs: string[] = [];
 
@@ -83,6 +106,7 @@ function plantLiveLock(directory: string, session: string): void {
 }
 
 afterEach(() => {
+	gateInternals.isProcessAlive = originalIsProcessAlive;
 	closeAllProjectDbs();
 	for (const directory of tempDirs.splice(0)) {
 		try {
@@ -97,12 +121,15 @@ test('fail-open under lock exhaustion: skill-contract advisory append (the #3232
 	const directory = freshProject('advisory', 'PR_REVIEW');
 	const session = 'advisory-session';
 	await readPrWorkflowGateState(directory, session);
+	countLiveOwnerProbes();
 	plantLiveLock(directory, session);
 	await expect(
 		appendPrWorkflowSkillContractAdvisories(directory, session, [
 			'class-guardrail advisory',
 		]),
 	).resolves.toBeUndefined();
+	// Positive control (PRR-002): the contended lock path was actually reached.
+	expect(liveOwnerProbeCount).toBe(STATE_MUTATION_LOCK_MAX_ATTEMPTS);
 	const after = await readPrWorkflowGateState(directory, session);
 	expect(after?.revision).toBe(3);
 	expect(after?.observabilityRevision).toBeUndefined();
@@ -115,6 +142,7 @@ test('fail-open under lock exhaustion: PR_FEEDBACK base-mismatch marker writer',
 	const directory = freshProject('basemismatch', 'PR_FEEDBACK');
 	const session = 'basemismatch-session';
 	await readPrWorkflowGateState(directory, session);
+	countLiveOwnerProbes();
 	plantLiveLock(directory, session);
 	await expect(
 		recordPrFeedbackBaseMismatch(
@@ -124,6 +152,8 @@ test('fail-open under lock exhaustion: PR_FEEDBACK base-mismatch marker writer',
 			`${'c'.repeat(40)}`,
 		),
 	).resolves.toBeUndefined();
+	// Positive control (PRR-002): the contended lock path was actually reached.
+	expect(liveOwnerProbeCount).toBe(STATE_MUTATION_LOCK_MAX_ATTEMPTS);
 	const after = await readPrWorkflowGateState(directory, session);
 	expect(after?.revision).toBe(3);
 	expect(after?.observabilityRevision).toBeUndefined();
@@ -153,7 +183,6 @@ test('fail-open under lock exhaustion: submit-rejection journal writer', async (
 		mode: 'swarm-pr-review:base',
 		workflowLane: 'correctness-state',
 		prReviewLegacyTranscriptCompatibility: false,
-		promptHash: null,
 		workspace: {
 			directory,
 			gitHead: 'head-3232',
@@ -163,10 +192,14 @@ test('fail-open under lock exhaustion: submit-rejection journal writer', async (
 		},
 	});
 	expect(outcome.status).toBe('recorded');
+	countLiveOwnerProbes();
 	plantLiveLock(directory, session);
 	await expect(
 		recordPrReviewSubmitRejection(directory, 'child-3232', 'rejection message'),
 	).resolves.toBeUndefined();
+	// Positive control (PRR-002): the contended lock path was actually reached
+	// (a pre-lock mode/record-gate regression drops the count to 0).
+	expect(liveOwnerProbeCount).toBe(STATE_MUTATION_LOCK_MAX_ATTEMPTS);
 	const after = await readPrWorkflowGateState(directory, session);
 	expect(after?.revision).toBe(3);
 	expect(after?.observabilityRevision).toBeUndefined();
@@ -181,12 +214,15 @@ test('fail-open under lock exhaustion: verdict-rejection journal writer', async 
 	const directory = freshProject('verdictrej', 'PR_REVIEW');
 	const session = 'verdictrej-session';
 	await readPrWorkflowGateState(directory, session);
+	countLiveOwnerProbes();
 	plantLiveLock(directory, session);
 	await expect(
 		recordPrReviewVerdictRejection(directory, session, 'verdict rejection', {
 			laneId: 'lane-3232',
 		}),
 	).resolves.toBeUndefined();
+	// Positive control (PRR-002): the contended lock path was actually reached.
+	expect(liveOwnerProbeCount).toBe(STATE_MUTATION_LOCK_MAX_ATTEMPTS);
 	const after = await readPrWorkflowGateState(directory, session);
 	expect(after?.revision).toBe(3);
 	expect(after?.observabilityRevision).toBeUndefined();
