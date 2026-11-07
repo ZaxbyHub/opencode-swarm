@@ -66,16 +66,18 @@ const UNMODELLED_ROWS: Array<[string, string]> = [
 ];
 const UNMODELLED = UNMODELLED_ROWS.map(([command]) => command);
 
-// #3491 W7 re-pin: the perl CLUSTER rows (`-i -pe`, `-i.bak -ne`) moved from
-// MODELLED to the blocked set — the W7 per-interpreter cluster grammar
-// decomposes them into an eval member whose inline code real perl executes
-// (`-pe 's/a/b/'` runs s/a/b/ per line; perl 5.36 ground truth), so the
-// command now carries an interpreter_eval write alongside the in-place
-// report. #3347 routing then judges the eval's cwd exactly like `python -c`:
-// denied for a scope-less architect and for a coder scoped to src/ while the
-// eval runs at the workspace root (cd src first admits). These rows pinned
-// the pre-W7 positional matcher's fail-open (RC-3); the frozen C8 check pins
-// `perl -pe CODE` as a denied eval.
+// #3491 W7: the perl CLUSTER rows (`-i -pe`, `-i.bak -ne`) were REMOVED from
+// this file (they pinned the pre-W7 positional matcher's fail-open, RC-3) and
+// re-pinned at the detector level in `src/hooks/shell-write-detect.test.ts`:
+// the W7 per-interpreter cluster grammar decomposes them into an eval member
+// whose inline code real perl executes (`-pe 's/a/b/'` runs s/a/b/ per line;
+// perl 5.36 ground truth), so the command now carries an interpreter_eval
+// write alongside the in-place report. #3347 routing then judges the eval's
+// cwd exactly like `python -c`: denied for a scope-less architect and for a
+// coder scoped to src/ while the eval runs at the workspace root (cd src
+// first admits). The frozen C8 check pins `perl -pe CODE` as a denied eval;
+// the `perl -i.bak -ne` gate-level pin lives in the #3572 feedback-hardening
+// suite.
 const MODELLED = [
 	"sed -i -E -e 's/a/b/' src/a.ts",
 	"sed -i 's/a/b/' src/a.ts",

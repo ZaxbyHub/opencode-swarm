@@ -458,7 +458,7 @@ describe('guardrails shell writes: sed script and suffix placement', () => {
 		);
 	});
 
-	// #3491 closure F-1 re-pin: per-branch (deny names `1d` at the root).
+	// #3491 closure F-1 re-pin; #3572 N-11: separator-agnostic (POSIX render).
 	it('scoped coder: a brace word in the script slot is rejected', async () => {
 		const hooks = createGuardrailsHooks(TEST_DIR, undefined, config());
 		coderWithScope('coder-script-slot', ['src/']);
@@ -468,10 +468,9 @@ describe('guardrails shell writes: sed script and suffix placement', () => {
 				output('sed -i {1d,../../outside/v} src/a.ts'),
 			),
 		).rejects.toThrow(
-			/^WRITE BLOCKED \[shell-write-scope\]: SCOPE_VIOLATION: shell write target "[^"]*\\1d" is outside the active scope/,
+			/^WRITE BLOCKED \[shell-write-scope\]: SCOPE_VIOLATION: shell write target "[^"]*[\\/]+1d" is outside the active scope/,
 		);
 	});
-
 	it('scoped coder: a brace-expansion word after -i is rejected', async () => {
 		const hooks = createGuardrailsHooks(TEST_DIR, undefined, config());
 		coderWithScope('coder-brace-word', ['src/']);

@@ -96,7 +96,7 @@ describe('closure F-1: sed -i brace destinations', () => {
 	test('refusal class denies (dynamic branch)', async () => {
 		const got = await gate('sed -i s/a/b/ src/{a,$(echo esc)}');
 		expect(got.verdict).toBe('DENIED');
-		expect(got.detail).toMatch(/dynamic|BLOCKED/);
+		expect(got.detail).toMatch(/dynamic/);
 	});
 });
 
@@ -113,7 +113,7 @@ describe('closure F-1: awk -i inplace brace destinations', () => {
 	test('refusal class denies (numeric range over-cap)', async () => {
 		const got = await gate("awk -i inplace '{print}' src/{a..i}");
 		expect(got.verdict).toBe('DENIED');
-		expect(got.detail).toMatch(/dynamic|BLOCKED/);
+		expect(got.detail).toMatch(/dynamic/);
 	});
 });
 
@@ -140,7 +140,7 @@ describe('closure F-1: curl -o brace destinations', () => {
 	test('refusal class denies (dynamic branch)', async () => {
 		const got = await gate('curl -o src/{a,$(echo esc)} url');
 		expect(got.verdict).toBe('DENIED');
-		expect(got.detail).toMatch(/dynamic|BLOCKED/);
+		expect(got.detail).toMatch(/dynamic/);
 	});
 });
 

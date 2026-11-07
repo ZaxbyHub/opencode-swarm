@@ -322,7 +322,20 @@ export function mergeWriteAnalyses(
 		if (supplementary.writes.includes(write)) {
 			if (wrapperDeclared) {
 				const construct = `${write.category}|${write.operator}`;
-				if (authorityConstructs.has(construct)) continue;
+				// #3572 review (delta, N-07 correction): a null-path or
+				// DYNAMIC-BEARING supplementary write is a fail-closed refusal
+				// carrier, not an unescape artifact — dropping it under a
+				// declared wrapper admitted `cmd /k echo hi ; echo y >
+				// src/$(echo ../../esc)` (the `;` statement runs under bash)
+				// while the plain twin denied. Path-bearing static duplicates
+				// still collapse to the authority reading.
+				if (
+					authorityConstructs.has(construct) &&
+					write.path !== null &&
+					!isDynamicPath(write.path)
+				) {
+					continue;
+				}
 			} else {
 				if (authorityKeys.has(key)) {
 					demoteKept(key);
@@ -2378,7 +2391,15 @@ function pushExpandedDestination(
 		return;
 	}
 	if (expansion.kind === 'none') {
-		const target = emit(dequoted.slice(rawSkip));
+		// F-02 scoping (final): the mis-slice only bites when rawSkip>0
+		// crosses the quote wrapper (dd of=); rawSkip=0 sites (inplace
+		// editors, tee) keep the quote-wrapped emission the resolver and the
+		// shipped pins expect.
+		const target = emit(
+			fullyQuoted && rawSkip > 0
+				? dequoted.slice(rawSkip)
+				: text.slice(rawSkip),
+		);
 		if (target !== null) out.push(target);
 		return;
 	}
@@ -2420,6 +2441,14 @@ export type LauncherWalkOutcome =
 			timeOutputFile?: string;
 			/** sudo -D/--chdir operand (first wins) — the W2 chdir composition. */
 			sudoChdir?: string;
+			/**
+			 * #3572 delta: for a NESTED GNU `time -o` outcome under sudo, the
+			 * word index matchSudoChdir should slice `rest` from (the nested
+			 * `time` word, so the rewritten subshell keeps the timed launcher
+			 * and its -o operand inside the child cwd) — the plain innerIndex
+			 * points past it at the timed command.
+			 */
+			chdirTailIndex?: number;
 	  }
 	| { kind: 'benign' }
 	| { kind: 'edit'; editStartIndex: number }
@@ -2559,10 +2588,16 @@ export function walkLauncherOptions(
 	const base = basenameAnySep(launcherWord);
 	if (base === 'sudo') return walkSudoOptions(words);
 	if (base === 'time') {
+		// #3572 N-03: keyword-suppression must be PROVEN by a defined raw
+		// spelling — when the caller cannot supply one (dequoted chain words
+		// in the leaf walk), the GNU binary grammar wins. The GNU grammar
+		// detects the `-o` write target where the keyword grammar emits
+		// nothing, so the unresolved case is deny-direction (an
+		// over-approximated launcher_write, never a lost one).
 		const binaryGrammar =
 			isAbsolutePathSpelling(launcherWord) ||
-			(rawLauncherWord !== undefined &&
-				isKeywordSuppressedSpelling(rawLauncherWord, launcherWord));
+			rawLauncherWord === undefined ||
+			isKeywordSuppressedSpelling(rawLauncherWord, launcherWord);
 		return binaryGrammar
 			? walkGnuTimeOptions(words)
 			: walkKeywordTimeOptions(words);
@@ -2611,32 +2646,93 @@ function longFlagTakesArg(
 	return { takes: false, glued: false, value: null, flag: null };
 }
 
+/**
+ * #3572 delta-critic: ONE launcher nesting another (`sudo time -o FILE
+ * cmd`) — sudo/nice/nohup EXEC the inner command directly (no shell), so a
+ * `time` inner word IS the GNU binary regardless of spelling; walk its
+ * option grammar for the `-o` outcome, adjusting the inner index past the
+ * nested launcher word. Returns null when the inner word is not `time` or
+ * the GNU walk finds no timed tail (plain `sudo time true` keeps the
+ * original outcome).
+ */
+function nestedTimeTail(
+	words: readonly string[],
+	innerIndex: number,
+): { innerIndex: number; timeOutputFile: string } | null {
+	if (basenameAnySep(words[innerIndex] ?? '') !== 'time') return null;
+	const gnu = walkGnuTimeOptions(words.slice(innerIndex + 1));
+	if (
+		gnu.kind !== 'inner' ||
+		gnu.timeOutputFile === undefined ||
+		gnu.timeOutputFile === ''
+	) {
+		return null;
+	}
+	return {
+		innerIndex: innerIndex + 1 + gnu.innerIndex,
+		timeOutputFile: gnu.timeOutputFile,
+	};
+}
+
 function walkSudoOptions(words: readonly string[]): LauncherWalkOutcome {
 	let i = 0;
 	let edit = false;
 	let interactive = false;
 	let listMode = false;
 	let queryOther = false;
+	// #3572 delta-critic: `-k` alone (credential reset) is the documented
+	// no-command NO-OP; any other execution option implies the root shell.
+	let resetOnly = true;
+	let execOrResetSeen = false;
 	let chdirDir: string | undefined;
 	while (i < words.length) {
 		const token = words[i];
 		if (token === undefined) break;
 		if (token === '--') {
-			// End of sudo's options; the wrapped command follows. #3590
-			// feedback (automation review): getopt flags must survive '--' —
-			// `sudo -e -- FILE` still selects EDIT mode, so the operand after
-			// the terminator is an EDIT TARGET, not an execution tail (the
-			// spaced twin `sudo -e FILE` denies while this spelling admitted).
+			// End of sudo's options; the wrapped command follows.
+			// #3572 N-01: an accumulated `-e`/`--edit` survives `--` — the
+			// edit outcome must be checked BEFORE the generic inner return
+			// or `sudo -e -- FILE` loses its write classification entirely.
 			if (edit) {
-				return { kind: 'edit', editStartIndex: i + 1 };
+				return i + 1 < words.length
+					? { kind: 'edit', editStartIndex: i + 1 }
+					: { kind: 'benign' };
 			}
-			return i + 1 < words.length
-				? {
-						kind: 'inner',
-						innerIndex: i + 1,
-						...(chdirDir !== undefined ? { sudoChdir: chdirDir } : {}),
-					}
-				: { kind: 'benign' };
+			if (i + 1 >= words.length) {
+				// #3572 delta-critic: a command-less `sudo --` is getopt-
+				// identical to bare sudo (the `--` tokens stay in argv, so
+				// parse_args.c still reaches argc==0 and fires the implied
+				// interactive root shell) — the SAME end-of-walk decision
+				// applies, with the query/reset carve-outs.
+				if (listMode) return { kind: 'benign' };
+				if (queryOther) return { kind: 'benign' };
+				if (resetOnly && execOrResetSeen && !interactive) {
+					return { kind: 'benign' };
+				}
+				return { kind: 'interactive' };
+			}
+			if (listMode) return { kind: 'benign' };
+			if (queryOther) return { kind: 'uncertain', tailIndex: i + 1 };
+			// #3572 delta review: parse_args.c BLOCKS env consumption after
+			// the sentinel (got_end_of_args) — post-`--` VAR=value words are
+			// the literal command, so no assignment scan here.
+			// #3572 delta-critic: the nested GNU `time` lookup runs on the
+			// post-`--` word exactly like the non-sentinel path.
+			const nested = nestedTimeTail(words, i + 1);
+			if (nested !== null) {
+				return {
+					kind: 'inner',
+					innerIndex: nested.innerIndex,
+					timeOutputFile: nested.timeOutputFile,
+					chdirTailIndex: i + 1,
+					...(chdirDir !== undefined ? { sudoChdir: chdirDir } : {}),
+				};
+			}
+			return {
+				kind: 'inner',
+				innerIndex: i + 1,
+				...(chdirDir !== undefined ? { sudoChdir: chdirDir } : {}),
+			};
 		}
 		if (token.startsWith('--') && token.length > 2) {
 			const arg = longFlagTakesArg(token, SUDO_LONG_ARG_TAKING);
@@ -2654,6 +2750,8 @@ function walkSudoOptions(words: readonly string[]): LauncherWalkOutcome {
 				continue;
 			}
 			if (SUDO_LONG_ARGLESS_EXEC.has(token)) {
+				execOrResetSeen = true;
+				if (token !== '--reset-timestamp') resetOnly = false;
 				i += 1;
 				continue;
 			}
@@ -2697,7 +2795,11 @@ function walkSudoOptions(words: readonly string[]): LauncherWalkOutcome {
 					}
 					break;
 				}
-				if (SUDO_ARGLESS_EXEC_CHARS.has(ch)) continue;
+				if (SUDO_ARGLESS_EXEC_CHARS.has(ch)) {
+					execOrResetSeen = true;
+					if (ch !== 'k') resetOnly = false;
+					continue;
+				}
 				if (SUDO_QUERY_CHARS.has(ch)) {
 					listMode = listMode || ch === 'l';
 					queryOther = queryOther || ch !== 'l';
@@ -2727,13 +2829,52 @@ function walkSudoOptions(words: readonly string[]): LauncherWalkOutcome {
 			}
 			continue;
 		}
-		// First non-option word.
+		// First non-option word. parse_args.c consumes VAR=value words as
+		// environment settings and RESUMES getopt after each ("crank optind
+		// and resume getopt" — the post-assignment word may be an option or
+		// `--`), so an assignment here resumes the option loop; a real
+		// command word returns the walk outcome.
 		if (edit) return { kind: 'edit', editStartIndex: i };
 		if (listMode) return { kind: 'benign' }; // -l [command]: lists privileges, never executes
 		if (queryOther)
 			// -v/-V/-K/-L with a trailing command: sudo(8)'s synopsis gives
 			// these modes no command operand — deny-on-uncertainty.
 			return { kind: 'uncertain', tailIndex: i };
+		const firstWord = words[i] ?? '';
+		if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(firstWord)) {
+			let j = i;
+			while (
+				j < words.length &&
+				/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[j] ?? '')
+			) {
+				j += 1;
+			}
+			if (j >= words.length) {
+				// Assignments-only leaves argc==0 → the implied interactive
+				// root shell (same decision as bare command-less sudo).
+				if (resetOnly && execOrResetSeen && !interactive) {
+					return { kind: 'benign' };
+				}
+				return { kind: 'interactive' };
+			}
+			// #3572 delta review: assignments are interspersed with options
+			// (parse_args.c:284) — resume the option walk instead of
+			// treating the next word as the command.
+			i = j;
+			continue;
+		}
+		// #3572 delta-critic: a nested `time` inner word is the GNU binary
+		// (sudo execs directly, no shell) — surface its -o outcome.
+		const nested = nestedTimeTail(words, i);
+		if (nested !== null) {
+			return {
+				kind: 'inner',
+				innerIndex: nested.innerIndex,
+				timeOutputFile: nested.timeOutputFile,
+				chdirTailIndex: i,
+				...(chdirDir !== undefined ? { sudoChdir: chdirDir } : {}),
+			};
+		}
 		return {
 			kind: 'inner',
 			innerIndex: i,
@@ -2742,10 +2883,18 @@ function walkSudoOptions(words: readonly string[]): LauncherWalkOutcome {
 	}
 	if (edit) return { kind: 'benign' }; // -e with no operand: usage error, nothing runs
 	if (listMode) return { kind: 'benign' };
-	// Options only: -i/-s alone is an INTERACTIVE root shell (deny); the
-	// query modes alone never execute; bare execution options alone make
-	// sudo report a usage error and run nothing.
-	return interactive ? { kind: 'interactive' } : { kind: 'benign' };
+	if (queryOther) return { kind: 'benign' }; // -v/-V/-K alone: never executes
+	// `-k` alone (seen, nothing else): the documented no-command no-op.
+	// An explicit -i/-s beside it still opens the shell (after the reset).
+	if (resetOnly && execOrResetSeen && !interactive) {
+		return { kind: 'benign' };
+	}
+	// #3572 delta-critic: a command-less sudo with no query/reset mode is
+	// the IMPLIED INTERACTIVE ROOT SHELL (sudo parse_args.c ground truth —
+	// the same NewArgc==0 branch the fragment's N-23 disclosure cites), so
+	// it denies exactly like the explicit `sudo -i`; bare execution options
+	// alone (`sudo -n`) imply the root shell under parse_args.c too — deny.
+	return { kind: 'interactive' };
 }
 
 function walkKeywordTimeOptions(words: readonly string[]): LauncherWalkOutcome {
@@ -2837,10 +2986,21 @@ function walkNiceOptions(words: readonly string[]): LauncherWalkOutcome {
 	while (i < words.length) {
 		const token = words[i];
 		if (token === undefined) break;
-		if (token === '--')
-			return i + 1 < words.length
-				? { kind: 'inner', innerIndex: i + 1 }
-				: { kind: 'benign' };
+		if (token === '--') {
+			if (i + 1 >= words.length) return { kind: 'benign' };
+			// #3572 delta-critic: the nested GNU `time` lookup runs on the
+			// post-`--` word exactly like the non-sentinel path (sudo/nice/nohup
+			// exec the inner command directly — `--` does not stop it).
+			const nested = nestedTimeTail(words, i + 1);
+			if (nested !== null) {
+				return {
+					kind: 'inner',
+					innerIndex: nested.innerIndex,
+					timeOutputFile: nested.timeOutputFile,
+				};
+			}
+			return { kind: 'inner', innerIndex: i + 1 };
+		}
 		if (token === '--help' || token === '--version') return { kind: 'benign' };
 		// GNU nice(1): -n N / --adjustment=N / --adjustment N, plus the legacy
 		// ATTACHED adjustment spelling `-N` / `+N` (ground-truthed: `nice -10
@@ -2861,6 +3021,16 @@ function walkNiceOptions(words: readonly string[]): LauncherWalkOutcome {
 		if (token.startsWith('-') && token.length > 1) {
 			return { kind: 'uncertain', tailIndex: i + 1 };
 		}
+		// #3572 delta-critic: a nested `time` inner word is the GNU binary
+		// (nice execs directly, no shell) — surface its -o outcome.
+		const nested = nestedTimeTail(words, i);
+		if (nested !== null) {
+			return {
+				kind: 'inner',
+				innerIndex: nested.innerIndex,
+				timeOutputFile: nested.timeOutputFile,
+			};
+		}
 		return { kind: 'inner', innerIndex: i };
 	}
 	// No operands: prints the current niceness (read-only).
@@ -2877,13 +3047,34 @@ function walkNohupOptions(words: readonly string[]): LauncherWalkOutcome {
 	while (i < words.length) {
 		const token = words[i];
 		if (token === undefined) break;
-		if (token === '--')
-			return i + 1 < words.length
-				? { kind: 'inner', innerIndex: i + 1 }
-				: { kind: 'benign' };
+		if (token === '--') {
+			if (i + 1 >= words.length) return { kind: 'benign' };
+			// #3572 delta-critic: the nested GNU `time` lookup runs on the
+			// post-`--` word exactly like the non-sentinel path (sudo/nice/nohup
+			// exec the inner command directly — `--` does not stop it).
+			const nested = nestedTimeTail(words, i + 1);
+			if (nested !== null) {
+				return {
+					kind: 'inner',
+					innerIndex: nested.innerIndex,
+					timeOutputFile: nested.timeOutputFile,
+				};
+			}
+			return { kind: 'inner', innerIndex: i + 1 };
+		}
 		if (token === '--help' || token === '--version') return { kind: 'benign' };
 		if (token.startsWith('-') && token.length > 1) {
 			return { kind: 'uncertain', tailIndex: i + 1 };
+		}
+		// #3572 delta-critic: a nested `time` inner word is the GNU binary
+		// (nohup execs directly, no shell) — surface its -o outcome.
+		const nested = nestedTimeTail(words, i);
+		if (nested !== null) {
+			return {
+				kind: 'inner',
+				innerIndex: nested.innerIndex,
+				timeOutputFile: nested.timeOutputFile,
+			};
 		}
 		return { kind: 'inner', innerIndex: i };
 	}
@@ -3189,7 +3380,15 @@ function detectLauncherWrites(cmd: unknown): WriteTarget[] {
 	for (let hop = 0; hop < DETECTOR_UNWRAP_PARANOID_BOUND; hop++) {
 		if (!name) return results;
 		const base = basenameAnySep(name);
-		if (base === 'sudo' || base === 'time') {
+		// #3572 delta-critic: nice/nohup carry nested-time outcomes too (the
+		// walks surface a nested GNU `time -o`); include them in the
+		// launcher-write emission gate.
+		if (
+			base === 'sudo' ||
+			base === 'time' ||
+			base === 'nice' ||
+			base === 'nohup'
+		) {
 			const walk = walkLauncherOptions(name, suffix.slice(cursor), nameRaw);
 			if (walk?.kind === 'edit') {
 				// sudo -e operands are EDIT TARGETS (write-class) — each one
@@ -3698,7 +3897,7 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 	const leaf = detectorCommandLeaf(cmd);
 	const lowerName =
 		detectorSetMember(leaf, BUILTIN_WRITE_COMMANDS) ??
-		(leaf === 'dd' || leaf === 'tee' ? leaf : null);
+		(leaf === 'dd' || leaf === 'tee' || leaf === 'env' ? leaf : null);
 	if (!lowerName) return results;
 
 	// #3485 (PRR-008): dedupe on the RESOLVED real command as spelled — not
@@ -3842,8 +4041,13 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 			});
 			return results;
 		}
+		// #3572 N-29 completion (merged): the wrapper-consumed window above
+		// already starts the operand slice at the RESOLVED leaf word, so the
+		// loop begins at 0 of the sliced arrays (N-29's bogus verb-word
+		// target cannot occur).
+		const teeStart = 0;
 		let pastDoubleDash = false;
-		for (let w = 0; w < suffixWords.length; w++) {
+		for (let w = teeStart; w < suffixWords.length; w++) {
 			const word = suffixWords[w];
 			if (word === '--') {
 				pastDoubleDash = true;
@@ -3875,6 +4079,169 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 			);
 		}
 		return results;
+	}
+
+	if (lowerName === 'env') {
+		// #3572 N-29: GNU env -S/--split-string RE-PARSES its payload as a
+		// command line (argv split) — `env -S 'rm -rf /important'` RUNS the
+		// payload. The words after -S are the effective command: run the
+		// full builtin-write scan on the reconstructed line (recursive; the
+		// payload may itself carry another env/wrapper).
+		const suffixWords = getSuffixWords(cmd);
+		for (let w = 0; w < suffixWords.length; w++) {
+			const word = suffixWords[w] ?? '';
+			// #3572 review (delta): GNU getopt also accepts the GLUED long form
+			// `--split-string=VALUE` — the payload rode in the flag token and
+			// was silently consumed as an env argument.
+			const gluedSplit =
+				word.startsWith('--split-string=') && word.length > 15
+					? word.slice('--split-string='.length)
+					: undefined;
+			if (
+				word !== '-S' &&
+				word !== '--split-string' &&
+				gluedSplit === undefined
+			)
+				continue;
+			const payload = gluedSplit ?? suffixWords[w + 1];
+			if (payload === undefined || payload.trim() === '') break;
+			// Glued form: the payload is INSIDE the token (no next word).
+			const glued = gluedSplit !== undefined;
+			const postStart = glued ? w + 1 : w + 2;
+			const splitWords: string[] = [];
+			{
+				let cur = '';
+				let hasWord = false;
+				const pushW = () => {
+					if (hasWord) {
+						splitWords.push(cur);
+						cur = '';
+						hasWord = false;
+					}
+				};
+				let si = 0;
+				while (si < payload.length) {
+					const c = payload[si];
+					if (c === "'") {
+						hasWord = true;
+						si += 1;
+						while (si < payload.length && payload[si] !== "'") {
+							cur += payload[si];
+							si += 1;
+						}
+						si += 1;
+						continue;
+					}
+					if (c === '"') {
+						hasWord = true;
+						si += 1;
+						while (si < payload.length && payload[si] !== '"') {
+							cur += payload[si];
+							si += 1;
+						}
+						si += 1;
+						continue;
+					}
+					if (c === '\\' && si + 1 < payload.length) {
+						cur += payload[si + 1];
+						si += 2;
+						hasWord = true;
+						continue;
+					}
+					if (/\s/.test(c)) {
+						pushW();
+						si += 1;
+						continue;
+					}
+					cur += c;
+					hasWord = true;
+					si += 1;
+				}
+				pushW();
+			}
+			if (
+				splitWords.some(
+					(x: string) =>
+						x === '-S' ||
+						x === '--split-string' ||
+						x.startsWith('--split-string='),
+				)
+			) {
+				// Nested split-string: the payload re-parses again at execution
+				// time and the reconstruction cannot model it — emit the
+				// unconditional dynamic refusal (null path) so the gate DENIES
+				// instead of silently classifying the command as write-free.
+				results.push({
+					category: 'redirect',
+					operator: 'env -S',
+					path: null,
+					unresolvedContext: true,
+				});
+				return results;
+			}
+			// The argv re-parse expands payload words at execution time; a
+			// second -S in the ORIGINAL argv splices after this one and is
+			// equally beyond the model. Both are the unconditional refusal.
+			const dynamicPayload =
+				splitWords.some((x: string) => isDynamicPath(x)) ||
+				suffixWords
+					.slice(postStart)
+					.some(
+						(x) =>
+							x === '-S' ||
+							x === '--split-string' ||
+							x.startsWith('--split-string='),
+					);
+			if (dynamicPayload) {
+				results.push({
+					category: 'redirect',
+					operator: 'env -S',
+					path: null,
+					unresolvedContext: true,
+				});
+				return results;
+			}
+			// Reconstruct the effective env argv (`env` + the pre-flags + the
+			// spliced payload words + the post words) and re-enter the FULL
+			// detector family: the string-level scanner's leaf gate misses the
+			// special-cased tee/dd/env verbs, so a `env -S 'tee …'` payload
+			// was classified write-free. Payload words are re-SERIALIZED with
+			// quote grouping intact (the review Critical: a bare-space join
+			// destroyed the `sh -c "script"` grouping the shell-wrapper walk
+			// depends on).
+			const shQuotePayload = (word: string): string =>
+				`'${word.replace(/'/g, `'\\''`)}'`;
+			const serializedPayload = splitWords
+				.map((word) =>
+					/^[A-Za-z0-9_@%+=:,./-]+$/.test(word) ? word : shQuotePayload(word),
+				)
+				.join(' ');
+			const reconstructed = [
+				'env',
+				...suffixWords.slice(0, w),
+				serializedPayload,
+				...suffixWords.slice(postStart),
+			].join(' ');
+			for (const write of detectPosixWrites(reconstructed).writes) {
+				// The union-back merge drops unwrapped-twin interpreter_eval
+				// capability markers (they would false-block safe
+				// `bash -c "echo hello"` re-classifications) — but HERE the
+				// marker is the ONLY signal the payload exists, so convert it
+				// to the unconditional dynamic refusal, which survives every
+				// merge filter and denies fail-closed.
+				if (write.category === 'interpreter_eval' && write.path === null) {
+					results.push({
+						category: 'redirect',
+						operator: 'env -S',
+						path: null,
+						unresolvedContext: true,
+					});
+				} else {
+					results.push(write);
+				}
+			}
+			return results;
+		}
 	}
 
 	if (!BUILTIN_WRITE_COMMANDS.has(lowerName)) return results;
@@ -4876,9 +5243,16 @@ function classifyPipeStdinEvalAt(
 		rest.length === 0 ||
 		(rest.length === 1 && rest[0] === '-') ||
 		(canonical === 'deno' &&
-			rest.length === 2 &&
+			rest.length >= 2 &&
 			rest[0] === 'run' &&
-			rest[1] === '-');
+			rest[rest.length - 1] === '-' &&
+			// #3572 review N-06: argument-less run flags between `run` and the
+			// stdin `-` (`deno run -A -` — the write-capable allow-all form)
+			// are the SAME stdin-eval shape; each dash word is argument-less
+			// by the disclosed carve-out (a value-taking flag puts a non-dash
+			// word in the walk, which fails this check and keeps the disclosed
+			// no-classification disposition for that spelling).
+			rest.slice(1, -1).every((word) => word.startsWith('-')));
 	if (!stdinShapeOk) {
 		return null;
 	}
