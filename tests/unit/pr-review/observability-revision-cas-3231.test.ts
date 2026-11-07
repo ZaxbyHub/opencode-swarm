@@ -158,7 +158,8 @@ test('(b) a stale state-machine write cannot regress the generation and a stale 
 	expect(writtenFromStaleGeneration.revision).toBe(2);
 	expect(writtenFromStaleGeneration.observabilityRevision).toBe(2);
 
-	// A stale append (payload generation 0 vs durable 1) is still rejected.
+	// A stale append (payload generation absent=0 vs durable 2) is still
+	// rejected — the kill-net for CAS-drop/regress mutants.
 	let staleAppendError: unknown = null;
 	await withSessionStateMutation(directory, session, async () => {
 		try {
