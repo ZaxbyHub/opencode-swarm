@@ -88,4 +88,54 @@ describe('formatResidueInventoryLines control-char entry names (#3542)', () => {
 		// The untouched name rides inside the template's code span verbatim.
 		expect(detail).toContain(`\`${name}\``);
 	});
+
+	test('control bytes inside a directory component are stripped too (multi-segment relPath)', () => {
+		// The reachable LF vector is a DIRECTORY component: basenames cannot
+		// carry LF (the grammar regexes' "." excludes line terminators), but
+		// nothing grammar-checks directory names, so relPath = dir + "/" +
+		// basename can carry one. A basename-only sanitizer mutant passes
+		// single-segment fixtures — this leg kills it.
+		const relPath = `dir\nwith-lf/a.tmp.${'a'.repeat(32)}.tmp`;
+		const lines = formatResidueInventoryLines(inventoryWithNames([relPath]));
+		const detail = lines.find((l) =>
+			l.includes('[target-suffix-tmp-num-alnum]'),
+		);
+		expect(detail).toBeDefined();
+		expect(detail?.includes('\n')).toBe(false);
+		expect(CONTROL_BYTE.test(detail ?? '')).toBe(false);
+	});
+
+	test('rendered output is pinned exactly (strip, not placeholder or escape)', () => {
+		// Exact-string pin: a placeholder-instead-of-strip mutant, an
+		// escape-instead-of-strip mutant, or an over-strip beyond Cc would
+		// all fail this equality. The ESC byte is removed but the literal
+		// "[2K" sequence text it introduced survives the strip.
+		const name = `a\nb\x1b[2Kc\x7fd${NEL}.tmp`;
+		const lines = formatResidueInventoryLines(inventoryWithNames([name]));
+		const detail = lines.find((l) =>
+			l.includes('[target-suffix-tmp-num-alnum]'),
+		);
+		expect(detail).toBeDefined();
+		expect(detail).toBe(
+			`  - \`ab[2Kcd.tmp\` [target-suffix-tmp-num-alnum] → would quarantine (1h old, untracked, stale)`,
+		);
+	});
+
+	test('control characters outside the fixture set are stripped (Cc class, not a list)', () => {
+		// VT (U+000B) and CSI (U+009F) are Cc members absent from the other
+		// fixtures — a sanitizer hardcoded to the fixture's character list
+		// fails here while the class-based strip passes.
+		const name = `vt\u000bx${'b'.repeat(32)}.tmp`;
+		const csi = `csi\u009fx${'c'.repeat(32)}.tmp`;
+		const lines = formatResidueInventoryLines(inventoryWithNames([name, csi]));
+		for (const line of lines) {
+			expect(CONTROL_BYTE.test(line)).toBe(false);
+		}
+		const details = lines.filter((l) =>
+			l.includes('[target-suffix-tmp-num-alnum]'),
+		);
+		expect(details).toHaveLength(2);
+		expect(details[0]).toContain('vtx');
+		expect(details[1]).toContain('csix');
+	});
 });
