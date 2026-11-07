@@ -63,10 +63,12 @@ the user has already reviewed and approved; nothing auto-invokes it.
 - **Merge MCP tooling is new surface area.** There is no prior
   `mcp__github__merge_pull_request` reference in the repo. The adapter
   verifies availability via `ToolSearch` first and falls back to
-  `gh pr merge` (no merge-strategy flag) via bash.
-- **No hardcoded merge strategy.** The skill deliberately does not pass
-  `--squash` (or any strategy flag) to `gh pr merge`, because a required
-  GitHub merge queue accepts no strategy flag and enqueues instead of merging
-  directly. The skill handles both the immediate-merge and queued-merge
-  outcomes explicitly (see Step 4 in the canonical); it does not assume this
-  repo's actual configuration.
+  `gh pr merge` via bash.
+- **No hardcoded merge strategy.** The skill never assumes `--squash`. On a
+  merge-queue base it passes no strategy flag: the queue accepts none and
+  enqueues instead of merging directly. On a direct-merge base, a
+  non-interactive `gh pr merge` refuses without a method, so the skill passes
+  the method the repository contract names, or the single method the repository
+  allows, and asks when several are allowed. The skill handles both the
+  immediate-merge and queued-merge outcomes explicitly (see Step 4 in the
+  canonical); it does not assume this repo's actual configuration.

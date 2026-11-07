@@ -3,9 +3,11 @@
 This file is the routing rule for every closure-ledger item the PR does not fix. It is the swarm-pr-feedback form of `contributing.md` "Filing follow-up issues". Dispositions are planned in the closure ledger before the reviewer and critic closeout gate, which reviews them. They are executed during Publishing And Communication, after the push is verified.
 
 Nothing is silently dropped.
-- A `CONFIRMED` or `PARTIAL` item is fixed or disproved before Stage A. It never reaches this table.
+- **Fix in this PR** anything this PR introduced: a `CONFIRMED` or `PARTIAL` item is fixed or disproved before Stage A and never reaches this table. A small pre-existing item inside the PR's files is fixed here only with the user's go-ahead (gate 4 below).
 - A `DISPROVED` item needs no disposition.
 - Every `PRE_EXISTING`, `NEEDS_MORE_EVIDENCE`, or `NEEDS_USER_DECISION` item gets exactly one disposition in the closure ledger.
+- A reviewer's severity label (`nit`, `non-blocking`, `suggestion`, `(blocking)`) is a claim like any other. It never replaces verification, and a non-blocking label never exempts a PR-introduced defect from being fixed.
+- **Never close a verified, consequential defect on your own judgment.** It is fixed, `ABSORB`ed, `FILE`d, or `ASK`ed, never `RECORD`ed alone.
 
 | Disposition | Use when | What you write |
 |---|---|---|
@@ -15,6 +17,28 @@ Nothing is silently dropped.
 | `ASK` | It needs a product or maintainer decision, it fails only gate 3, or it is an Improvement item awaiting approval | A question to the user. Nothing is filed until they answer. |
 
 `ASK` takes precedence over fixing in the PR when the fix itself needs a product or compatibility decision. `ABSORB` takes precedence over `RECORD` when an open issue already covers the item.
+
+In practice `FILE` means Priority items plus items the user approved. Every other item that passes the gate is an Improvement, which is an `ASK`.
+
+## Critic review before the user sees it
+
+Before any `ASK` item, follow-up proposal, Improvement, or enhancement idea reaches the user, and before any Priority `FILE` item is filed, an independent critic adjudicates it. The critic may kill, downgrade, reframe, split, or endorse each item. Its verdict and one-line rationale travel with the question, and the user decides with the critic's input in hand, never on a bare ask.
+
+- **Who the critic is.** The first available of:
+  - the swarm's critic agent where the harness defines one (for example `swarm-critic` in ZCode, or the prefixed `<swarm>_critic` in OpenCode);
+  - another independent critic agent the harness defines (for example a user-level `critic` agent in Claude Code);
+  - a fresh-context subagent briefed as an adversarial critic.
+
+  On a single-context run (Profile C), use a strictly separated critic pass, and disclose in the closure ledger that its independence was procedural.
+- **A separate call, always.** The adjudication is its own critic call, and its subject is the ASK, follow-up, Improvement, and enhancement items themselves.
+  - The closeout critic gate never substitutes for it: that gate judges the diff and its per-item closure (APPROVE / NEEDS_REVISION / BLOCKED), not whether each item should be filed, asked, or dropped.
+  - One call per batch of items is fine.
+  - Items that appear later (CI cycles, new review rounds, after the merge) need their own call before they are presented.
+  - Under Profile A, make the call outside the controller's ordered gate lanes. If the active gate blocks direct dispatch, make it after `complete_pr_workflow` clears the gate.
+- **Failure.** If the critic is unavailable after a bounded retry, say so next to each item. Never present the item as critic-reviewed.
+- **Priority items.**
+  - A critic kill or downgrade of a Priority `FILE` item turns it into an `ASK` for the user.
+  - When the critic is unavailable, the Priority item is still filed, with that fact stated in the issue and the ledger.
 
 ## Necessity gate
 
@@ -46,7 +70,7 @@ Nothing is silently dropped.
 ## Tiers
 
 - **Priority.** A wedge, fail-open gate, security, or data-loss item. File it during Publishing And Communication, after the push is verified.
-- **Improvement.** Passes the gate but is not Priority. Present these as a proposed list in the final response to the user, and file them only after the user approves.
+- **Improvement.** Passes the gate but is not Priority. Present these as a proposed list in the final response to the user, each with the critic's verdict, and file them only after the user approves.
 
 ## Findings about how the round was conducted
 

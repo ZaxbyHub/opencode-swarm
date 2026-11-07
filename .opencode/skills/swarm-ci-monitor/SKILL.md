@@ -10,15 +10,16 @@ description: >
 disable-model-invocation: true
 metadata:
   audience: swarm-plugin
-  swarm-contract-digest: c1572cc54760
+  swarm-contract-digest: "5bf88d54837e"
 ---
 
 # Swarm CI Monitor
 
 Drives a reviewed-and-approved PR to a merged state by monitoring its CI,
 exhaustively researching every failure, fixing it end-to-end, and iterating
-until all required checks are green — then merging via `gh pr merge` with no
-merge-strategy flag, so it works correctly whether the base branch merges
+until all required checks are green — then merging via `gh pr merge`, with no
+merge-strategy flag on a merge-queue base and the repository's allowed method
+on a direct base, so it works correctly whether the base branch merges
 directly or requires a merge queue (see Step 4).
 
 This is **not** a fresh review skill and **not** a PR-creation skill. It is the
@@ -258,14 +259,20 @@ run it in addition to, never instead of, Step 3.
 gh pr merge <N>
 ```
 
-- **No merge-strategy flag.** Do not pass `--squash`, `--merge`, or
-  `--rebase`. Per `gh pr merge --help`: "When targeting a branch that requires
-  a merge queue, no merge strategy is required" — this skill must work
-  correctly whether or not the base branch requires a merge queue, so let
-  branch protection determine the method rather than assuming squash.
-  `contributing.md`'s merge-queue/merge-commit guidance may describe a different (or
-  stale) configuration for a given deployment of this repo; do not assume it
-  applies without checking the actual outcome below.
+- **Merge-strategy flag only where the base needs one.** On a base that
+  requires a merge queue, pass no `--squash`, `--merge`, or `--rebase`. Per
+  `gh pr merge --help`: "When targeting a branch that requires a merge queue,
+  no merge strategy is required", and the queue determines the method. On a
+  direct-merge base, a non-interactive `gh pr merge` refuses without a method:
+  - pass the method the repository contract names;
+  - otherwise pass the only one `gh repo view --json
+    mergeCommitAllowed,squashMergeAllowed,rebaseMergeAllowed` reports as
+    allowed;
+  - when several are allowed and none is named, ask the user. Never guess.
+
+  `contributing.md`'s merge-queue/merge-commit guidance may describe a
+  different (or stale) configuration for a given deployment of this repo; do
+  not assume it applies without checking the actual outcome below.
 - **No `--admin`.** Never bypass required checks, review, or a merge queue.
   If branch protection does not permit the invoking user to bypass, `--admin`
   simply fails — do not use it as a workaround for a stuck merge.
@@ -370,8 +377,8 @@ Ignore these thoughts; they are shortcuts that cause broken merges:
 - **commit-pr**: owns the commit/push discipline. This skill composes it for
   every push inside the loop.
 - **swarm-pr-subscribe**: owns background PR monitoring and event triage. This
-  skill is the explicit, user-invoked, merge-terminated path; it does not
-  depend on the background poller.
+  skill is an explicit, user-invoked, merge-terminated path (swarm-pr-feedback's
+  drive-to-merge run is the other); it does not depend on the background poller.
 - **swarm-pr-review** / **swarm-pr-feedback**: own review and known-feedback
   resolution. This skill assumes that work is already done (Step 1 gate 2).
 - **durable-session-state**: owns persisting state across context compaction.

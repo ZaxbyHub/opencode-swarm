@@ -1193,7 +1193,7 @@ HARD CONSTRAINTS (apply regardless of skill load success):
 - Do NOT invoke this mode's merge path without the user having named the PR explicitly — no auto-discovery.
 - Verify \`reviewDecision: APPROVED\` before entering the fix loop; abort with "human review not complete" if not. (GitHub-only; GitLab: \`glab api\`, never fabricate.)
 - Verify \`mergeable: MERGEABLE\` and an acceptable \`mergeStateStatus\` before entering the fix loop; do not bypass these gates even under time pressure.
-- Never use \`--admin\`, a forced merge strategy, or \`--delete-branch\` — let branch protection determine the merge method.
+- Never use \`--admin\` or \`--delete-branch\`; strategy flag only on a direct base (contract-named or only allowed method, else ask).
 - Re-verify review approval and mergeable state immediately before every merge attempt (Step 3 of the loaded skill) — a check that was green earlier is not sufficient.
 - Confirm the merge via the local git object DB (Step 4b), not only the GitHub API response, before reporting success.
 - Hard-stop at 5 fix-push cycles; escalate to the user rather than exceeding the budget.
