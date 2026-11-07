@@ -1,5 +1,14 @@
 # Changelog
 
+## [7.202.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.202.0...v7.202.1) (2026-11-07)
+
+
+### Bug Fixes
+
+* **guardrails:** PR [#3590](https://github.com/ZaxbyHub/opencode-swarm/issues/3590) feedback round — PRR-001 marker deny, sudo -e -- edit mode, scp drive-relative, explain/sv parity, post-merge reconciliation ([6bf0253](https://github.com/ZaxbyHub/opencode-swarm/commit/6bf0253770cf5c899f09f8c25f7254d9a7f3637f))
+* **guardrails:** shell write-gate detector residuals round 4 — nested sh-c withdrawal, wrapper-consumed tee/dd windows, rm brace expansion, scp destination grammar, full-body procsub spans ([91cf444](https://github.com/ZaxbyHub/opencode-swarm/commit/91cf444ac00c3e91cbdcc1e69297a3c9bc925027))
+* **guardrails:** shell write-gate detector residuals round 4 — nested sh-c withdrawal, wrapper-consumed tee/dd windows, rm brace expansion, scp destination grammar, full-body procsub spans (closes [#3569](https://github.com/ZaxbyHub/opencode-swarm/issues/3569) [#3570](https://github.com/ZaxbyHub/opencode-swarm/issues/3570)) ([c73a228](https://github.com/ZaxbyHub/opencode-swarm/commit/c73a2283394e88db621c6f18e99564e98ec73fcd))
+
 ## [7.202.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.201.2...v7.202.0) (2026-11-06)
 
 
