@@ -192,7 +192,8 @@ export function redactPath(filePath: string): string {
 	const uncMatch = normalized.match(/^\/\/[^/]+\/([^/]+)\/([^/]+)((?:\/.*)?)$/);
 	if (uncMatch) {
 		const [, share, name, rest = ''] = uncMatch;
-		if (share === 'Users' || share === 'home') {
+		// Windows share naming is case-insensitive.
+		if (/^(?:users|home)$/i.test(share)) {
 			return renderRedacted(`~${rest}`, hadBackslash);
 		}
 		return renderRedacted(`~/${share}/${name}${rest}`, hadBackslash);

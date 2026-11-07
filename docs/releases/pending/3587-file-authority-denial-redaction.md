@@ -27,7 +27,8 @@ the message and reason agree. The three SHELL doors render the RESOLVED absolute
 leading runtime profile folds, but an interior caller-supplied `home/<name>` segment beyond it
 stays visible in the message while the reason folds it (folding interior segments of resolved
 paths would over-redact legitimate in-workspace denial targets). Ordinary in-workspace relative
-paths and non-home absolutes render unchanged (over-redaction is pinned against).
+paths and non-home absolutes render structurally unchanged — through `redactPath`'s
+host-normalized form, as before (over-redaction is pinned against).
 
 Known bounds: when the workspace sits under one profile and the target under a SIBLING profile,
 the relative display's common-ancestor prefix already dropped the `Users` segment, so the

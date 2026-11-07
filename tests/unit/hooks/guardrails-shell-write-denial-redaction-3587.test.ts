@@ -409,20 +409,17 @@ describe('3587 renderDenialTarget shipped representations (_internals seam)', ()
 		expect(out).toMatch(/^\.\.[\\/]~[\\/]x\.txt$/);
 		expect(/alice/.test(out)).toBe(false);
 	});
-	test(
-		'in-workspace home-named segment stays unfolded (fold branch gated on escaping)',
-		() => {
-			// Discriminating for the escaping gate: 'docs/home/alice' is NOT
-			// escaping after normalization, so the fold must not fire even
-			// though the path carries a home/<name> segment. (A dotted benign
-			// relative is observationally identical through redactPath's own
-			// normalize — see the shipped helper — so it pins nothing here.)
-			expect(render('docs/home/alice/x.txt')).toBe(
-				redactPath('docs/home/alice/x.txt'),
-			);
-			expect(render('docs/home/alice/x.txt').includes('~')).toBe(false);
-		},
-	);
+	test('in-workspace home-named segment stays unfolded (fold branch gated on escaping)', () => {
+		// Discriminating for the escaping gate: 'docs/home/alice' is NOT
+		// escaping after normalization, so the fold must not fire even
+		// though the path carries a home/<name> segment. (A dotted benign
+		// relative is observationally identical through redactPath's own
+		// normalize — see the shipped helper — so it pins nothing here.)
+		expect(render('docs/home/alice/x.txt')).toBe(
+			redactPath('docs/home/alice/x.txt'),
+		);
+		expect(render('docs/home/alice/x.txt').includes('~')).toBe(false);
+	});
 });
 
 describe('3587 structured data channels keep exact values', () => {

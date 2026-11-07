@@ -1005,8 +1005,9 @@ function denyAuthority(
 	// helper first.
 	const escapingProbe = path.posix.normalize(displaySource);
 	// Non-escaping displays always route through the LEXICAL redactPath
-	// (identity on non-profile shapes), so a Windows-profile spelling folds
-	// even on POSIX hosts where `C:/…` is not path-absolute.
+	// (pre-change host-normalized form on non-profile shapes), so a
+	// Windows-profile spelling folds even on POSIX hosts where `C:/…` is not
+	// path-absolute.
 	let reasonDisplay = redactPath(displaySource);
 	if (escapingProbe.startsWith('../')) {
 		reasonDisplay = escapingProbe.replace(

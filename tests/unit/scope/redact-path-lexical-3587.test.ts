@@ -42,6 +42,8 @@ describe('3587 redactPath: Windows forms fold on every host, flavor kept', () =>
 		['C:\\Users\\alice\\file', '~\\file'],
 		['//server/Users/alice/file', '~/file'],
 		['\\\\server\\Users\\alice\\file', '~\\file'],
+		// Share naming is case-insensitive (Windows convention).
+		['\\\\server\\users\\alice\\file', '~\\file'],
 		// F-004 contract (server folded, share/name kept) in both flavors.
 		['\\\\server\\share\\user\\file', '~\\share\\user\\file'],
 		['//server/share/user/file', '~/share/user/file'],
