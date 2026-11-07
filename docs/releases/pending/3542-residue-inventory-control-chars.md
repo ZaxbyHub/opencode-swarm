@@ -11,8 +11,9 @@ close dry-run report render through this one shared renderer. A new pinning
 test, `tests/unit/services/swarm-residue-control-char-names.test.ts`, covers
 `\n` row-injection, ESC terminal-pollution, DEL, NEL, a control byte inside a
 directory component of a multi-segment path, VT (U+000B), and CSI (U+009F)
-names, and pins the exact rendered output for both a crafted name and an
-ordinary name (no over-stripping).
+names, pins the exact rendered output for a crafted name (and the verbatim
+name span for an ordinary name), and asserts the directory component survives
+rendering (no over-stripping).
 
 ## Why
 

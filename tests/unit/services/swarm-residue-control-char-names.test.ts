@@ -103,6 +103,9 @@ describe('formatResidueInventoryLines control-char entry names (#3542)', () => {
 		expect(detail).toBeDefined();
 		expect(detail?.includes('\n')).toBe(false);
 		expect(CONTROL_BYTE.test(detail ?? '')).toBe(false);
+		// The directory component survives in the rendered path (a
+		// basename-only RENDERER that drops the directory fails here too).
+		expect(detail).toContain('dirwith-lf/');
 	});
 
 	test('rendered output is pinned exactly (strip, not placeholder or escape)', () => {
