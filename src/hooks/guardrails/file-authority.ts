@@ -994,12 +994,16 @@ function denyAuthority(
 	// not a workspace dir name) folds that segment to ~. Ordinary relative
 	// and non-home absolute paths render unchanged. The structured `path`
 	// field (consumed by scope-guard and the audit channel) keeps its
-	// pre-change sanitized value.
-	let reasonDisplay = normalizedPath;
-	if (path.isAbsolute(normalizedPath)) {
-		reasonDisplay = redactPath(normalizedPath);
-	} else if (normalizedPath.startsWith('../')) {
-		reasonDisplay = normalizedPath.replace(
+	// pre-change sanitized value. The invalid-path arm passes the RAW caller
+	// input (pre-normalization, backslashes on win32), so the display source
+	// is slash-normalized first — otherwise `..\Users\<name>\…` shapes dodge
+	// both fold branches (#3587 review round).
+	const displaySource = normalizedPath.replace(/\\/g, '/');
+	let reasonDisplay = displaySource;
+	if (path.isAbsolute(displaySource)) {
+		reasonDisplay = redactPath(displaySource);
+	} else if (displaySource.startsWith('../')) {
+		reasonDisplay = displaySource.replace(
 			/(^|\/)(?:home|Users)\/[^/]+/g,
 			'$1~',
 		);

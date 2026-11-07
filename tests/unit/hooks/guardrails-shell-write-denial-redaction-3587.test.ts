@@ -151,6 +151,11 @@ describe('3587 four denial doors render bounded, redacted targets', () => {
 		});
 		expect(got.verdict).toBe('DENIED');
 		const render = DENIAL_SHAPE.exec(got.message)?.[1] ?? '';
+		// The capture is non-empty — a message-shape regression that empties
+		// or drops the quoted slot fails here (the production extractor's
+		// [^"]+ requires one-or-more; the suite regex is intentionally
+		// [^"]* so the empty case is observable and asserted away).
+		expect(render.length).toBeGreaterThan(0);
 		expect(render.length).toBeLessThanOrEqual(320);
 		expect(got.message.includes(RUN_320)).toBe(false);
 		if (process.platform === 'win32') {
@@ -166,6 +171,7 @@ describe('3587 four denial doors render bounded, redacted targets', () => {
 		const got = await gateWrite(ws, `.git/${longName}`);
 		expect(got.verdict).toBe('DENIED');
 		const render = DENIAL_SHAPE.exec(got.message)?.[1] ?? '';
+		expect(render.length).toBeGreaterThan(0);
 		expect(render.length).toBeLessThanOrEqual(320);
 		expect(got.message.includes(RUN_320)).toBe(false);
 	}, 30_000);
@@ -242,8 +248,11 @@ describe('3587 reason channel folds home/profile paths (file-authority)', () => 
 			if (!decision.allowed) {
 				expect(decision.reason).toContain('~/secret.txt');
 				expect(decision.reason.includes('/home/alice')).toBe(false);
-				expect(decision.reason.includes('../../home/alice')).toBe(false);
-				expect(decision.path).toBe('../../home/alice/secret.txt');
+				// Depth-independent: the structured path keeps the host-relative
+				// form whose ../ count equals the checkout depth below the drive
+				// root (2 on this repo's local root, 3 on the GitHub Windows
+				// checkout) — pin the shape, never a depth literal.
+				expect(decision.path).toMatch(/^(\.\.\/)+home\/alice\/secret\.txt$/);
 			}
 		},
 	);

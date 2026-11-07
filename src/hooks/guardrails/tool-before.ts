@@ -291,8 +291,17 @@ export class ShellWriteBlockedError extends Error {
  * (`ShellWriteBlockedError.writeTarget`, audit rows) keep exact values; only
  * the operator-facing MESSAGE interior changes.
  */
-export const renderDenialTarget = (target: string): string =>
-	sanitizeDiagnosticText(redactPath(target), 320);
+export const renderDenialTarget = (target: string): string => {
+	// #3587 review round: match denyAuthority's escaping-relative home fold so
+	// the message and reason channels of one denial agree on
+	// `../home/<name>/…` shapes (redactPath's absolute branch already folds
+	// absolute profile prefixes; a relative target folds only when the `../`
+	// prefix proves it leaves the workspace).
+	const display = target.startsWith('../')
+		? target.replace(/(^|\/)(?:home|Users)\/[^/]+/g, '$1~')
+		: target;
+	return sanitizeDiagnosticText(redactPath(display), 320);
+};
 
 /** Test seam for the denial-render helper (read-only usage in suites). */
 export const _internals = { renderDenialTarget };
