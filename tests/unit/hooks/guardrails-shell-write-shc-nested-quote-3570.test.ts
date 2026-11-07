@@ -117,24 +117,28 @@ describe('layer counting + withdrawal (4.5 r2 narrowing)', () => {
 });
 
 describe('gate verdicts', () => {
+	// PRR-011: each DENY leg pins its full reason — the alt-quote/space-
+	// separated shapes extract faithfully and deny via the recursive-delete
+	// arm ("Recursive delete target ... traversal"); the same-kind/4-level
+	// shapes truncate and deny via the distinct sh-c withdrawal message.
 	test('3-level alternating-quote rm chain DENIES', async () => {
-		expect(
-			await gate(`sh -c 'sh -c "sh -c ${Q}rm -rf ../../outside${Q}"'`),
-		).not.toBe('ADMITTED');
+		const got = await gate(
+			`sh -c 'sh -c "sh -c ${Q}rm -rf ../../outside${Q}"'`,
+		);
+		expect(got).toContain('BLOCKED');
+		expect(got).toContain('Recursive delete target');
 	});
-	test('3-level same-kind chain DENIES', async () => {
-		expect(
-			await gate(
-				`sh -c 'sh -c ${Q}sh -c ${Q}${Q}rm -rf ../../outside${Q}${Q}${Q}'`,
-			),
-		).not.toBe('ADMITTED');
+	test('3-level same-kind chain DENIES via the withdrawal message', async () => {
+		const got = await gate(
+			`sh -c 'sh -c ${Q}sh -c ${Q}${Q}rm -rf ../../outside${Q}${Q}${Q}'`,
+		);
+		expect(got).toContain('shell chain nests 3 or more sh -c layers');
 	});
-	test('4-level alternating chain DENIES', async () => {
-		expect(
-			await gate(
-				`sh -c 'sh -c "sh -c ${Q}sh -c ${Q}"rm -rf ../../outside"${Q}"'`,
-			),
-		).not.toBe('ADMITTED');
+	test('4-level alternating chain DENIES via the withdrawal message', async () => {
+		const got = await gate(
+			`sh -c 'sh -c "sh -c ${Q}sh -c ${Q}"rm -rf ../../outside"${Q}"'`,
+		);
+		expect(got).toContain('shell chain nests 3 or more sh -c layers');
 	});
 	test('levels 1 and 2 keep their DENY', async () => {
 		expect(await gate(`sh -c 'rm -rf ../../outside'`)).toContain('BLOCKED');
@@ -144,5 +148,24 @@ describe('gate verdicts', () => {
 	});
 	test('2-level in-scope write keeps ADMITTING (anti-over-block boundary)', async () => {
 		expect(await gate(`sh -c "sh -c 'tee src/f'"`)).toBe('ADMITTED');
+	});
+});
+
+describe('withdrawal deny messages (PRR-011)', () => {
+	test('whole-command withdrawal emits the distinct sh-c message', async () => {
+		// A TRUNCATING (same-kind) chain — its iterative unwrap collapses to
+		// a single token, so the withdrawal fires (the alt-quote shape
+		// extracts faithfully and denies via the recursive-delete arm
+		// instead; the withdrawal message legs below pin the distinct reason).
+		const got = await gate(
+			`sh -c 'sh -c ${Q}sh -c ${Q}${Q}rm -rf ../../outside${Q}${Q}${Q}'`,
+		);
+		expect(got).toContain('shell chain nests 3 or more sh -c layers');
+	});
+	test('compound command whose SECOND segment triggers the withdrawal', async () => {
+		const got = await gate(
+			`echo ok && sh -c 'sh -c ${Q}sh -c ${Q}${Q}rm -rf ../../outside${Q}${Q}${Q}'`,
+		);
+		expect(got).toContain('shell chain nests 3 or more sh -c layers');
 	});
 });

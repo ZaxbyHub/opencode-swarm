@@ -209,8 +209,10 @@ export function evaluateScopeValidate(
 		preprocessedCommand === args.command
 			? args
 			: { ...args, command: preprocessedCommand };
-	const { analysis, command: residualCommand } = detectWrites(detectArgs);
+	const { analysis: preAnalysis, command: residualCommand } =
+		detectWrites(detectArgs);
 	const detectionCommand = residualCommand;
+	let analysis = preAnalysis;
 	if (analysis.parseError) {
 		fail('UNPARSEABLE_COMMAND', 'command could not be parsed safely');
 	}
@@ -220,33 +222,48 @@ export function evaluateScopeValidate(
 	// filter). scope_validate must union too or it ALLOWS wrapper+brace
 	// shapes the gate denies (env -C src sed -i {s/a/b/,../../outside} y).
 	if (detectionCommand !== args.command) {
-		const rawAnalysis = detectWrites(args);
-		if (!rawAnalysis.parseError) {
-			const seen = new Set(
-				analysis.writes.map(
-					(w) => `${w.category}\u0000${w.operator}\u0000${w.path ?? ''}`,
-				),
-			);
-			const regained = rawAnalysis.writes.filter(
-				(w) =>
-					!(
-						w.category === 'interpreter_eval' &&
-						w.path === null &&
-						!w.operator.endsWith('[eval stdin]')
-					) &&
-					// Dedupe against the preprocessed analysis (the gate's
-					// duplicate keys collapse downstream; sv renders the
-					// target list, so collapse here).
-					!seen.has(`${w.category}\u0000${w.operator}\u0000${w.path ?? ''}`),
-			);
-			if (regained.length > 0) {
-				analysis = {
-					...analysis,
-					writes: [...analysis.writes, ...regained],
-					hasWrites: analysis.hasWrites || regained.length > 0,
-				};
-			}
+		const { analysis: rawAnalysis } = detectWrites(args);
+		const seen = new Set(
+			analysis.writes.map(
+				(w) => `${w.category}\u0000${w.operator}\u0000${w.path ?? ''}`,
+			),
+		);
+		const regained = rawAnalysis.writes.filter(
+			(w) =>
+				!(
+					w.category === 'interpreter_eval' &&
+					w.path === null &&
+					!w.operator.endsWith('[eval stdin]')
+				) &&
+				// Dedupe against the preprocessed analysis (the gate's
+				// duplicate keys collapse downstream; sv renders the
+				// target list, so collapse here).
+				!seen.has(`${w.category}\u0000${w.operator}\u0000${w.path ?? ''}`),
+		);
+		if (regained.length > 0) {
+			analysis = {
+				...analysis,
+				writes: [...analysis.writes, ...regained],
+				hasWrites: analysis.hasWrites || regained.length > 0,
+			};
 		}
+		// #3590 feedback (copilot review): the RAW analysis's depth refusal
+		// must survive the union (mirror tool-before's mergeWriteAnalyses
+		// OR) — a wrapper chain the bound cannot inspect never reports safe
+		// here.
+		if (rawAnalysis.unwrapDepthExceeded) {
+			analysis = { ...analysis, unwrapDepthExceeded: true };
+		}
+	}
+	// #3590 feedback (copilot review): fail-closed BEFORE the no-writes
+	// early return — the detector sets this flag precisely so consumers
+	// refuse an uninspectable wrapper chain even when it yields zero
+	// writes (parity with tool-before).
+	if (analysis.unwrapDepthExceeded) {
+		fail(
+			'UNPARSEABLE_COMMAND',
+			'shell wrapper nesting exceeds the inspection bound — rejecting for safety',
+		);
 	}
 	if (!analysis.hasWrites) {
 		return {

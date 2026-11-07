@@ -1088,21 +1088,6 @@ interface MaskedProcSubSpan {
 }
 
 /**
- * #3568 review F-01: the command bodies of every masked process-substitution
- * span (`<(...)` / `>(...)`), for the destructive arm's verb-anchored
- * extractors — a body `rm -rf …` / `dd of=…` sits at the body's own verb
- * position, never at the outer segment head, so the destructive arms cannot
- * see it without this list. Returns an empty array when the command carries
- * no process substitution. The caller relocates targets from these bodies
- * with an uncertain context (a subshell inherits the tracked cwd; the
- * destructive relocation model cannot track it through a procsub).
- */
-export function dcProcSubSpanBodies(command: string): string[] {
-	const masked = maskProcSubSpans(command);
-	return masked !== null ? masked.spans.map((s) => s.body) : [];
-}
-
-/**
  * The placeholder that replaces a masked process-substitution span in the
  * residual (#3539 W5). It is a token-preserving bare word — the residual
  * tokenizes exactly like the original except the span is one inert operand —
@@ -2356,20 +2341,28 @@ function pushExpandedDestination(
 	rawSkip: number,
 	emit: (path: string) => WriteTarget | null,
 	dynamic: () => WriteTarget,
+	/** #3590 merge reconciliation: only the dd/tee W8 sites (whose `of=` /
+	 * positional word is the ANCHOR token main's F-02 strip was written for)
+	 * pass true. The inplace/launcher call sites feed parser-preserved
+	 * quoted words whose branch contract reports the RAW word verbatim —
+	 * stripping there dequoted operands the branch pins expect quoted
+	 * (18 frozen-battery failures). */
+	stripOuterQuote = false,
 ): void {
 	const rawBase =
 		node && typeof node === 'object'
 			? RAW_WORD_TEXT.get(node as object)
 			: undefined;
-	// #3568 parallel-review F-02: the word text at this site can retain its
-	// quote wrapper (`"of=../../src/{a,b}"`), and a fully-quoted token never
-	// brace-expands (bash keeps the braces literal). Strip a matching outer
-	// wrapper first — the literal path slices the DEQUOTED text at rawSkip,
-	// and a quoted token takes the no-expansion branch — while a raw token
-	// without an outer wrapper keeps the quote-aware engine path.
-	const outerQuoted =
-		/^(['"])(.*)\1$/.exec(text) ??
-		(rawBase !== undefined ? /^(['"])(.*)\1$/.exec(rawBase) : null);
+	// #3568 parallel-review F-02 (opt-in): the dd/tee word text can retain
+	// its quote wrapper (`"of=../../src/{a,b}"`), and a fully-quoted token
+	// never brace-expands (bash keeps the braces literal). Strip a matching
+	// outer wrapper first — the literal path slices the DEQUOTED text at
+	// rawSkip, and a quoted token takes the no-expansion branch — while a
+	// raw token without an outer wrapper keeps the quote-aware engine path.
+	const outerQuoted = stripOuterQuote
+		? (/^(['"])(.*)\1$/.exec(text) ??
+			(rawBase !== undefined ? /^(['"])(.*)\1$/.exec(rawBase) : null))
+		: null;
 	const dequoted = outerQuoted !== null ? (outerQuoted[2] ?? '') : text;
 	const fullyQuoted = outerQuoted !== null;
 	const rawText = fullyQuoted ? dequoted : (rawBase ?? text);
@@ -2629,7 +2622,14 @@ function walkSudoOptions(words: readonly string[]): LauncherWalkOutcome {
 		const token = words[i];
 		if (token === undefined) break;
 		if (token === '--') {
-			// End of sudo's options; the wrapped command follows.
+			// End of sudo's options; the wrapped command follows. #3590
+			// feedback (automation review): getopt flags must survive '--' —
+			// `sudo -e -- FILE` still selects EDIT mode, so the operand after
+			// the terminator is an EDIT TARGET, not an execution tail (the
+			// spaced twin `sudo -e FILE` denies while this spelling admitted).
+			if (edit) {
+				return { kind: 'edit', editStartIndex: i + 1 };
+			}
 			return i + 1 < words.length
 				? {
 						kind: 'inner',
@@ -3798,6 +3798,9 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 					path: null,
 					dynamicSourceWord: word,
 				}),
+				// #3568 F-02 opt-in: the of= word is the anchor token the
+				// strip was written for.
+				true,
 			);
 		}
 		return results;
@@ -3866,6 +3869,9 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 					path: null,
 					dynamicSourceWord: word,
 				}),
+				// #3568 F-02 opt-in: the positional word is the anchor token
+				// the strip was written for.
+				true,
 			);
 		}
 		return results;
@@ -5679,10 +5685,17 @@ function detectNetworkDownloaders(cmd: unknown): WriteTarget[] {
 				} else {
 					const colonAt = last.word.indexOf(':');
 					const slashAt = last.word.indexOf('/');
+					// #3590 PRR-004 (feedback round): a drive-RELATIVE
+					// spelling (`C:dest`, no separator after the colon) is a
+					// Windows LOCAL destination — the drive-letter guard
+					// covers both the separated and bare-colon forms so the
+					// word is never silently classified remote (fail-closed:
+					// a spurious local target over-blocks, a dropped one
+					// hides the write).
 					const isRemote =
 						colonAt !== -1 &&
 						(slashAt === -1 || colonAt < slashAt) &&
-						!/^[A-Za-z]:[\\/]/.test(last.word);
+						!/^[A-Za-z]:/.test(last.word);
 					if (!isRemote) {
 						// Local destination — the write target (catches plain
 						// relative spellings like `src/../esc` the old

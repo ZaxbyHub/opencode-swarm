@@ -129,16 +129,27 @@ describe('boundedness', () => {
 			'ADMITTED',
 		);
 	});
-	test('span-dense input stays linear (wall-clock bound)', () => {
-		const dense = `true ${'>(gunzip -d ../esc.gz) '.repeat(12000)}`;
-		const t0 = Date.now();
-		detectPosixWrites(dense);
-		const ms = Date.now() - t0;
-		// ~280KB of spans. The pre-fix per-span parts.join('').length was
-		// QUADRATIC (21.3s at 300KB, lane-measured) and the fix is linear:
-		// the discriminating bound sits at half the quadratic baseline so a
-		// regression back to quadratic blows through it while normal
-		// host-load variance does not.
-		expect(ms).toBeLessThan(10500);
-	});
+	test('span-dense masking scales LINEARLY (doubling ratio, PR3590 critic)', () => {
+		// Scaling-ratio bound measured at the MASKING ENTRY POINT
+		// (procSubSpanBodies -> maskProcSubSpans) — timing the full detector
+		// is dominated by the linear per-span body analysis and cannot
+		// discriminate (delta re-gate: mutant total ratio ~2.0). Isolated,
+		// the masking walk is linear when fixed (~2x on doubling) and
+		// quadratic under the pre-fix per-span join (~3.6-4.7x); the 3x
+		// ceiling separates the curves host-independently.
+		const run = (spans: number): number => {
+			const dense = `true ${'>(gunzip -d ../esc.gz) '.repeat(spans)}`;
+			const t0 = performance.now();
+			procSubSpanBodies(dense);
+			return performance.now() - t0;
+		};
+		let ratioSum = 0;
+		const RUNS = 3;
+		for (let r = 0; r < RUNS; r++) {
+			const tHalf = run(6000);
+			const tFull = run(12000);
+			ratioSum += tFull / Math.max(tHalf, 0.001);
+		}
+		expect(ratioSum / RUNS).toBeLessThan(3);
+	}, 30000);
 });

@@ -138,15 +138,16 @@ describe('resolved shape: withdrawn fallback writes null out (fail-closed)', () 
 			analysis.writes,
 			'/ws',
 		);
-		let sawEscapingDestination = false;
+		expect(result.length).toBeGreaterThan(0);
 		for (const entry of result) {
+			// #3568 PRR-001 exact-resolution pin (main) + FB-COP-003 prefix
+			// form: the body recursion resolves the quoted-whitespace operand
+			// to its REAL path — no withdrawn (null) entries remain.
 			expect(entry.resolved).toBe(true);
-			expect(entry.resolvedPath).toBe('/outside src/f');
+			expect(
+				entry.resolvedPath?.startsWith('/ws/') ? null : entry.resolvedPath,
+			).toBe('/outside src/f');
 		}
-		// The mv destination must be caught: withdrawn OR resolved outside.
-		expect(
-			result.some((e) => e.resolvedPath === null || sawEscapingDestination),
-		).toBe(true);
 	});
 
 	test('a fully-quoted fallback operand dequotes and resolves', () => {

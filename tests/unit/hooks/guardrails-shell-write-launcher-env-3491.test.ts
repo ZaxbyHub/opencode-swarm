@@ -483,3 +483,18 @@ describe('W3 gate: fail-closed depth caps (RC-2b, C4 family)', () => {
 		expect(got.message).toMatch(ANY_WRITE_BLOCK);
 	});
 });
+
+describe('sudo -e -- FILE: edit mode survives the end-of-options terminator (PR3590 automation review)', () => {
+	test.each([
+		'sudo -e -- ../../secret',
+		'sudo --edit -- ../../secret',
+	])('%s DENIES (edit target emitted, not an execution tail)', async (cmd) => {
+		const got = await gate(cmd);
+		expect(got.verdict).toBe('DENIED');
+		expect(got.message).toMatch(/secret/);
+	});
+	test('sudo -e -- src/ok.txt ADMITS (in-scope control)', async () => {
+		const got = await gate('sudo -e -- src/ok.txt');
+		expect(got.verdict).toBe('ADMITTED');
+	});
+});

@@ -819,11 +819,11 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			pushSegmentOccurrence(segment, null);
 		for (const entry of expandedSegments)
 			pushSegmentOccurrence(entry.segment, entry.resolveFrom);
-# PR3590 merge: union of both pipelines — this delta's span-body push
-# (unwrap + depth consult + chdir expansion, both operators) and main's
-# #3567 P-B isolated-payload push + #3568 F-01 span push + flag-cluster
-# check. pushSegmentOccurrence dedupes identical (context, segment) keys,
-# so overlapping pushes collapse safely.
+		// PR3590 merge: union of both pipelines — this delta's span-body push
+		// (unwrap + depth consult + chdir expansion, both operators) and main's
+		// #3567 P-B isolated-payload push + #3568 F-01 span push + flag-cluster
+		// check. pushSegmentOccurrence dedupes identical (context, segment)
+		// keys, so overlapping pushes collapse safely.
 		// #3569 residual 3: process-substitution span bodies (`>(…)`, `<(…)`)
 		// run their own command text at a verb position the segment-head-
 		// anchored destructive extractors never see (`tee >(rm -rf ../esc)`
@@ -870,14 +870,6 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			if (!dcShellPayloadRunsIsolated(seg)) continue;
 			const unwrappedSeg = perSegmentUnwrapped[i] ?? seg;
 			for (const sub of dcSplitSegments(unwrappedSeg)) {
-				pushSegmentOccurrence(sub, 'uncertain');
-			}
-		}
-		// #3568 review F-01 (main): the destructive-side span push — kept
-		// alongside the delta's richer push above; duplicate occurrences
-		// collapse in pushSegmentOccurrence.
-		for (const body of dcProcSubSpanBodies(command)) {
-			for (const sub of dcSplitSegments(body)) {
 				pushSegmentOccurrence(sub, 'uncertain');
 			}
 		}

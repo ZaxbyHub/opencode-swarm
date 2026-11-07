@@ -896,7 +896,7 @@ function dcShellChainAnalysis(text: string): {
 
 /** #3570: three or more nested `sh -c` layers is the withdrawal-review
  * threshold — such a chain withdraws fail-closed only when its iterative
- * unwrap product collapses to a SINGLE TOKEN (the truncation signature);
+ * unwrap product contains NO LITERAL SPACE (the truncation signature);
  * multi-token products keep their normal verdicts (levels 1-2 always
  * do). */
 const DC_SH_C_WITHDRAW_LAYERS = 3;
@@ -914,7 +914,7 @@ export const DC_SH_C_WITHDRAW_LAYERS_LABEL = '3';
  *
  * #3570 (4.5 r3 narrowing): a chain nesting >= 3 `sh -c` layers withdraws
  * ONLY on the truncation signature — the iterative unwrap's product
- * collapsed to a single token (`shCWithdrawal: true`; same-kind and
+ * contains no literal space (`shCWithdrawal: true`; same-kind and
  * 4-level quote structures degrade this way). Multi-token products keep
  * normal verdicts: escaping payloads reach the verb arms and deny naming
  * the real target, and in-scope 3-level writes ADMIT. Levels 1-2 are
@@ -1877,9 +1877,11 @@ export function dcExtractRecursiveRmTargets(segment: string): string[] | null {
 	// #3569 residual 1 + W8 parity: expand brace regions on the target words
 	// (ALL branches — the conservative superset; an escaping branch denies).
 	// A dynamic/refused expansion (nested braces, ranges beyond the cap,
-	// expansion-bearing branches) withdraws fail-closed: the synthetic
-	// non-allowlisted marker target denies deterministically instead of
-	// admitting an unknowable filename set.
+	// expansion-bearing branches) withdraws fail-closed via the synthetic
+	// marker target — dcEvaluateRecursiveDeleteTargets rejects the marker
+	// prefix UNCONDITIONALLY (PRR-001: evaluated as an ordinary path it was
+	// scope-contingent, admitting workspace-escaping deletes under a
+	// marker-covering scope).
 	const out: string[] = [];
 	for (const target of tokens.slice(index)) {
 		// #3569 4.5 review: expand on the RAW token — expandBraceRaw is
@@ -2133,6 +2135,26 @@ export function dcEvaluateRecursiveDeleteTargets(input: {
 			code: 'DESTRUCTIVE_TARGET_INVALID',
 			reason: commonBlock,
 		};
+	}
+
+	// #3590 feedback (PRR-001, swarm-pr-review + 2-pass critic): the
+	// synthetic refusal marker from the brace-expansion refusal path is a
+	// SIGNAL, never a real filename — but evaluated as an ordinary
+	// workspace-relative target its token basename passed DC_SAFE_TARGETS
+	// and a scope entry covering the marker prefix passed containment, so
+	// `rm -rf {a..c}/node_modules` was ADMITTED (base denied; real bash
+	// deletes workspace-escaping directories) with the audit trail showing
+	// only the synthetic token. Reject the prefix UNCONDITIONALLY, before
+	// scope/basename evaluation — fail closed regardless of scope.
+	for (const target of input.targets) {
+		if (target.includes('__swarm_brace_refusal__/')) {
+			return {
+				allowed: false,
+				code: 'DESTRUCTIVE_TARGET_INVALID',
+				reason:
+					'BLOCKED: Recursive delete target carries an unresolvable brace expansion (refused dynamically, not a resolvable filename).',
+			};
+		}
 	}
 
 	const normalizedTargets: string[] = [];

@@ -3,6 +3,8 @@ title: Shell write-gate detector residuals round 4
 issue: "3569, 3570"
 ---
 
+# Shell write-gate detector residuals round 4
+
 ## What
 
 Five shell write-gate detector fixes, collated from #3569 + #3570 (the
@@ -13,15 +15,19 @@ Five shell write-gate detector fixes, collated from #3569 + #3570 (the
    `'\''` embed-a-quote splice, so 3+-level chains truncated to the bare verb
    and admitted `rm -rf ../../outside` payloads that real bash executes. The
    collapse now skips backslash-escaped pairs, and a chain nesting >= 3
-   `sh -c` layers withdraws fail-closed when — and only when — its iterative
-   unwrap collapses to a single token (the truncation signature): escaping
-   multi-token payloads reach the verb arms and deny naming the real target,
-   and in-scope 3-level writes keep admitting (levels 1-2 always unchanged).
+   `sh -c` layers withdraws fail-closed when its iterative unwrap product
+   contains NO SPACE (the truncation signature — a tab/newline-separated
+   payload also withdraws): escaping space-separated payloads reach the verb
+   arms and deny naming the real target, and in-scope 3-level writes keep
+   admitting (levels 1-2 always unchanged).
 2. **Wrapper-prefixed `tee`/`dd` resolve their real operands (#3569).** The
    tee/dd operand windows now read the wrapper-consumed token tail, and
-   `scope_validate` routes through the same canonical wrapper-chdir
-   preprocessing the gate uses — `sudo -D src tee a` / `env -C src tee ok.txt`
-   admit with exactly `[<ws>/src/a]` instead of denying on fabricated
+   `scope_validate` routes through the same canonical wrapper preprocessing
+   the gate uses (including the `timeout`/`stdbuf`/quote unwrap, which the
+   advisory previously skipped — commands behind those prefixes can flip
+   from allowed to denied) and unions the raw analysis back, mirroring the
+   gate — `sudo -D src tee a` / `env -C src tee ok.txt` admit with exactly
+   `[<ws>/src/a]` instead of denying on fabricated
    `ws\tee` targets; escaping operands deny naming the real path.
 3. **Destructive rm targets expand brace regions (#3569).** `rm
    src/{a,../esc}` denied nothing at base (flagless shapes never reached the
@@ -51,11 +57,12 @@ three residual admissions folded into #3569's comments.
 
 ## Known edges
 
-- Chains nesting >= 3 `sh -c` layers WHOSE ITERATIVE UNWRAP COLLAPSES TO A
-  SINGLE TOKEN deny fail-closed even when the hidden payload is in scope —
-  no textual re-parse can recover the lost words at that depth; multi-token
-  chains (including in-scope 3-level writes) keep their normal verdicts,
-  pinned by tests.
+- Chains nesting >= 3 `sh -c` layers whose iterative unwrap product
+  contains NO SPACE deny fail-closed even when the payload is in scope —
+  the degraded text cannot be re-quoted faithfully at that depth (a
+  tab/newline-separated payload also withdraws); multi-token (space-
+  separated) chains including in-scope 3-level writes keep their normal
+  verdicts, pinned by tests.
 - Wrapper-prefixed brace operands over-block conservatively: `env -C src
   tee {a,b}` denies (the brace's first branch word is emitted as a target
   and resolves at the parent cwd) even when every expanded branch would

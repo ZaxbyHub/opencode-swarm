@@ -9,7 +9,10 @@
  * or over-cap expansions withdraw fail-closed to the refusal marker.
  */
 import { beforeEach, describe, expect, test } from 'bun:test';
-import { dcExtractRecursiveRmTargets } from '../../../src/hooks/guardrails/destructive-command';
+import {
+	dcEvaluateRecursiveDeleteTargets,
+	dcExtractRecursiveRmTargets,
+} from '../../../src/hooks/guardrails/destructive-command';
 import { expandBraceRaw } from '../../../src/hooks/shell-write-detect';
 import { resetSwarmState } from '../../../src/state';
 
@@ -55,9 +58,11 @@ describe('engine: bounded expansion (pre-allocation cap)', () => {
 		});
 	});
 	test('adversarial huge numeric range refuses DYNAMICALLY (no materialization)', () => {
-		const t0 = Date.now();
+		// Measured with performance.now: the test-clock helper pins Date.now,
+		// which would make a Date.now-elapsed bound vacuous (always 0).
+		const t0 = performance.now();
 		const got = expandBraceRaw('src/{1..30000000}');
-		const ms = Date.now() - t0;
+		const ms = performance.now() - t0;
 		expect(got.kind).toBe('dynamic');
 		// The pre-allocation guard must refuse in bounded time — the
 		// pre-fix engine materialized ~30M strings (measured ~2.2 GB).
@@ -81,5 +86,27 @@ describe('quoted braces stay literal (4.5 review)', () => {
 		expect(dcExtractRecursiveRmTargets(`rm -f ${DQ}src/{a,b}${DQ}`)).toEqual([
 			'src/{a,b}',
 		]);
+	});
+});
+
+describe('refusal marker is a signal, never a filename (PRR-001)', () => {
+	test('extractor emits the marker for dynamic expansions', () => {
+		const got = dcExtractRecursiveRmTargets('rm -rf {a..c}/node_modules');
+		expect(got?.some((t) => t.startsWith('__swarm_brace_refusal__/'))).toBe(
+			true,
+		);
+	});
+	test('evaluateRecursiveDeleteTargets rejects the marker prefix regardless of scope', () => {
+		const decision = dcEvaluateRecursiveDeleteTargets({
+			targets: ['__swarm_brace_refusal__/{a..c}/node_modules'],
+			cwd: '/ws',
+			verifiedScope: {
+				bindingId: 'b1',
+				generationId: 'g1',
+				files: ['__swarm_brace_refusal__'],
+			},
+		});
+		expect(decision.allowed).toBe(false);
+		expect(decision.code).toBe('DESTRUCTIVE_TARGET_INVALID');
 	});
 });

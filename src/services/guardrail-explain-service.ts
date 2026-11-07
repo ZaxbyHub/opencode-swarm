@@ -279,8 +279,20 @@ function evaluateDestructiveDecision(
 		for (const sub of dcSplitSegments(body)) {
 			pushSegmentOccurrence(sub, 'uncertain');
 			// #3569 4.5 review Critical 2 (explain parity): unwrap launcher/
-			// chdir-wrapped body verbs before the push.
+			// chdir-wrapped body verbs before the push. #3590 PRR-009: the
+			// gate REFUSES on the same bodies when their unwrap exceeds the
+			// bound — mirror that refusal so explain cannot content-evaluate
+			// a span body the gate rejects (wsl/cmd wrapper families).
 			const unwrappedBody = dcUnwrapWrappersBounded(sub);
+			if (unwrappedBody.depthExceeded) {
+				return {
+					decision: 'block',
+					firingRule:
+						unwrappedBody.shCWithdrawal === true
+							? 'destructive_block: BLOCKED: shell chain nests 3 or more sh -c layers whose quote structure cannot be re-parsed faithfully — denying for safety (deny-on-uncertainty; #3570)'
+							: 'destructive_block: BLOCKED: shell wrapper nesting exceeds the inspection bound — rejecting for safety',
+				};
+			}
 			if (unwrappedBody.command !== sub) {
 				pushSegmentOccurrence(unwrappedBody.command, 'uncertain');
 			}

@@ -123,9 +123,12 @@ shell write-scope gate unwraps launcher prefixes (`command`, `builtin`,
 `exec`, `timeout`, `stdbuf`) and single-quoted `sh -c` / `bash -c` payloads
 before its checks, so those forms receive the same scope decision as the
 unwrapped spelling. This advisory applies the detectors directly: it
-canonicalizes `command`/`builtin`/`exec`/`env`-wrapped spellings, but it
-does NOT run the gate's `timeout`/`stdbuf`/quote unwrap, so for those two
-prefixes it can be MORE permissive than the live gate (#3474/#3475).
+canonicalizes `command`/`builtin`/`exec`/`env`-wrapped spellings and, since
+PR #3590, routes through the same wrapper preprocessing as the live gate —
+including the `timeout`/`stdbuf` unwrap and single-quoted `sh -c`/`bash -c`
+payload unwrap — so those prefixes receive the SAME decision as the gate
+(previously it did not run that unwrap and could be more permissive for
+them; #3474/#3475).
 
 ### `knowledge_add` (available only under both write gates)
 

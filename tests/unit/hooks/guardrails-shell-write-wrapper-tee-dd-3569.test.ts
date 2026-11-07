@@ -288,3 +288,51 @@ describe('awk program slot satisfies on expanding words (4.5 r5)', () => {
 		expect(await gate('awk -i inplace {src,src/a} src/y')).toBe('ADMITTED');
 	});
 });
+
+describe('feedback-round pins (PR3590 review)', () => {
+	test('scp C:dest (drive-relative) is a LOCAL destination (PRR-004)', () => {
+		const paths = (c: string) =>
+			detectPosixWrites(c).writes.map((w) => w.path ?? w.dynamicSourceWord);
+		expect(paths('scp src C:dest')).toEqual(['C:dest']);
+		expect(paths('scp src C:/dest')).toEqual(['C:/dest']);
+		expect(paths('scp f host:x')).toEqual([]);
+	});
+	test('generic builtin-write window depthExceeded withdrawal fires (PRR-007)', () => {
+		const writes = detectPosixWrites(
+			`${'sudo '.repeat(64)}cp a ../../esc`,
+		).writes;
+		expect(writes).toEqual([
+			{
+				category: 'builtin_write',
+				operator: 'cp',
+				path: null,
+				unresolvedContext: true,
+			},
+		]);
+	});
+});
+
+describe('scope_validate depth fail-closed (copilot review)', () => {
+	test('a wrapper chain beyond the inspection bound never reports safe', () => {
+		const ws = canonicalMkdtemp('wtd3569-depth-');
+		created.push(ws);
+		mkdirSync(path.join(ws, 'src'), { recursive: true });
+		for (const command of [
+			`${'env -C src '.repeat(70)}tee a`,
+			`${'env -C src '.repeat(70)}python -c 'pass'`,
+		]) {
+			let threw: unknown = null;
+			try {
+				evaluateScopeValidate(
+					{ command, shell: 'posix', scope_files: ['src/'] },
+					ws,
+				);
+			} catch (error) {
+				threw = error;
+			}
+			// Either the bound refusal or the parse-fail refusal — never an
+			// allow for an uninspectable chain.
+			expect((threw as Error)?.message).toBeTruthy();
+		}
+	});
+});
