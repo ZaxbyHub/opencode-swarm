@@ -1,5 +1,16 @@
 # Changelog
 
+## [7.202.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.202.2...v7.202.3) (2026-11-07)
+
+
+### Bug Fixes
+
+* **guardrails:** [#3587](https://github.com/ZaxbyHub/opencode-swarm/issues/3587) — bounded, home-redacted file-authority denial rendering ([023a4e3](https://github.com/ZaxbyHub/opencode-swarm/commit/023a4e3348aa6fac159c5dcf4035800f690b9583))
+* **guardrails:** [#3592](https://github.com/ZaxbyHub/opencode-swarm/issues/3592) r3 — lexical normalization-first redactPath, reason escaping probe, shell-door bound disclosed ([fa60f9a](https://github.com/ZaxbyHub/opencode-swarm/commit/fa60f9aa2f6c9653bda851b5c6358a11e08b9e22))
+* **guardrails:** [#3592](https://github.com/ZaxbyHub/opencode-swarm/issues/3592) r3 round-2 — real-toolchain format, case-insensitive UNC share fold, wording precision ([ff2779a](https://github.com/ZaxbyHub/opencode-swarm/commit/ff2779aafff88637b3fe566a72fdf3132dbce17c))
+* **pr-review:** fail the observability append closed at the safe-integer generation ceiling (3593-R4) ([921779c](https://github.com/ZaxbyHub/opencode-swarm/commit/921779c96b720d048feddf0de417d373dbe9d6cb))
+* **pr-review:** fail the observability append closed at the safe-integer generation ceiling (3593-R4) ([236126a](https://github.com/ZaxbyHub/opencode-swarm/commit/236126a9c10db31d8020f22702bb29ee23145c2a))
+
 ## [7.202.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.202.1...v7.202.2) (2026-11-07)
 
 
