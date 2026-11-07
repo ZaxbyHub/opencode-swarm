@@ -1,5 +1,50 @@
 # Changelog
 
+## [7.202.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.201.2...v7.202.0) (2026-11-06)
+
+
+### Features
+
+* **ci:** dependency-bump channel writes its own release fragment (issue input) ([a02fdcd](https://github.com/ZaxbyHub/opencode-swarm/commit/a02fdcd8ad840f9ea50060d803f7d4ec1d02b49d))
+* **ci:** dependency-bump channel writes its own release fragment (issue input) ([bf30400](https://github.com/ZaxbyHub/opencode-swarm/commit/bf304008047e8733c3456baebb1e2788a8441f0d))
+* **release:** dependency-bump channel + release-pipeline integrity ([#3501](https://github.com/ZaxbyHub/opencode-swarm/issues/3501) [#3285](https://github.com/ZaxbyHub/opencode-swarm/issues/3285) [#3527](https://github.com/ZaxbyHub/opencode-swarm/issues/3527)) ([7095bc1](https://github.com/ZaxbyHub/opencode-swarm/commit/7095bc160794c07c69dfa53c8cf26f5c79cf5526))
+
+
+### Bug Fixes
+
+* **ci:** make the dep-bump issue input required and mutation-pin the fragment guards (PRR-001/PRR-002, self-review) ([8a6e5b9](https://github.com/ZaxbyHub/opencode-swarm/commit/8a6e5b9d0b468d87535d9fe4656e9f0a062ac08b))
+* **ci:** review round PRR-003..007 — positivity guard, Why section, changed-issue refusal, exact handoff pin, fragment wording ([55d6e91](https://github.com/ZaxbyHub/opencode-swarm/commit/55d6e91fb30011937c904536faebd8301b090c93))
+* **ci:** reviewer NEW-1 — pipefail-tolerant fragment-issue extraction + nits ([cc347bf](https://github.com/ZaxbyHub/opencode-swarm/commit/cc347bfa6af0f970dd22df0cff20e341931a1005))
+* **ci:** suppress root lifecycle scripts on every dependency-bump install ([ed5d7e1](https://github.com/ZaxbyHub/opencode-swarm/commit/ed5d7e149ca2c511173829d6f417b5747a85cc0f))
+* **ci:** suppress root lifecycle scripts on every dependency-bump install (live dispatch 42048068309) ([161b5c3](https://github.com/ZaxbyHub/opencode-swarm/commit/161b5c3b0e60f938866fa4db4fae4c85bb4f5844))
+* **delegation:** feedback round — claim-settle finalize-on-landed, outcome-aware settle flush, promotion no-null-after-append (review pr3577-20261105) ([af70ed7](https://github.com/ZaxbyHub/opencode-swarm/commit/af70ed7a31e1e373981b8592089fed0ca0f66267))
+* **delegation:** per-call defer Set for route-invalidation retirement (final-critic r1) + concurrency regression leg ([af7d7c9](https://github.com/ZaxbyHub/opencode-swarm/commit/af7d7c9c489c2fec8202bb45c2d28df0bca510ea))
+* **delegation:** remediate 4.5 review — real env contract in ownership suites, fallback artifact gate-bearing check, observer promotion-failure flush ([0b64eb9](https://github.com/ZaxbyHub/opencode-swarm/commit/0b64eb96b6a7fe9c9748e6eb5a13a0c24cf17d5d))
+* **delegation:** structural route-invalidation retirement ownership + recovery-claim landing shape ([#3564](https://github.com/ZaxbyHub/opencode-swarm/issues/3564) [#3494](https://github.com/ZaxbyHub/opencode-swarm/issues/3494)) ([a1a6108](https://github.com/ZaxbyHub/opencode-swarm/commit/a1a61085acced347087e853e6549315ddebe9043))
+* **delegation:** structural route-invalidation retirement ownership + recovery-claim landing shape ([#3564](https://github.com/ZaxbyHub/opencode-swarm/issues/3564) [#3494](https://github.com/ZaxbyHub/opencode-swarm/issues/3494)) ([34c2067](https://github.com/ZaxbyHub/opencode-swarm/commit/34c2067648a4d2b82bfe27e1afe4ac76510be00c))
+* **guardrails:** close the [#3567](https://github.com/ZaxbyHub/opencode-swarm/issues/3567) review round — withdrawn-state propagation, bash-true wrapper redirects, fail-closed uncertainty channels ([384db39](https://github.com/ZaxbyHub/opencode-swarm/commit/384db39ad96fe85ab60ad63a678f61f6b3e71d20))
+* **guardrails:** close the [#3568](https://github.com/ZaxbyHub/opencode-swarm/issues/3568) review round — full procsub-body detection, bash-true quoted operands, fail-closed pre-caps ([ff7c2f4](https://github.com/ZaxbyHub/opencode-swarm/commit/ff7c2f47929f733c77c706fb85f78e03907dfd94))
+* **guardrails:** depth cap fails CLOSED — delta-critic Critical on [#3568](https://github.com/ZaxbyHub/opencode-swarm/issues/3568) ([ca7bf1c](https://github.com/ZaxbyHub/opencode-swarm/commit/ca7bf1c45e21c7dcf885bc2616ea639f77ec7a21))
+* **guardrails:** final-critic round for [#3567](https://github.com/ZaxbyHub/opencode-swarm/issues/3567) — write-path payload isolation, clobber redirect, explain parity for the cluster channel ([a99b56b](https://github.com/ZaxbyHub/opencode-swarm/commit/a99b56bad349ba87e303776fe39fadc27ded0125))
+* **guardrails:** repair the SOH-corrupted dd-of quote-strip regex (CI quality gate) ([a987f8c](https://github.com/ZaxbyHub/opencode-swarm/commit/a987f8c3ca6c420f6e5836c9d89b0254b4bf2b24))
+* **guardrails:** reviewer-revision round for [#3567](https://github.com/ZaxbyHub/opencode-swarm/issues/3567) feedback — fd redirect hoist, transitive call closure, explain routing parity ([c8d95f2](https://github.com/ZaxbyHub/opencode-swarm/commit/c8d95f2e248176031fbcc1275e4ac324d358c45a))
+* **guardrails:** reviewer-revision round for [#3568](https://github.com/ZaxbyHub/opencode-swarm/issues/3568) — touch options, attached cp -t, depth bound, dd dynamic ([f3ce461](https://github.com/ZaxbyHub/opencode-swarm/commit/f3ce46194e112dd79eeb36fcfc422f39804abe60))
+* **guardrails:** shell write-gate hardening PR 1/3 — directory state, child-scoped wrapper chdir, sh -c payload extraction ([#3491](https://github.com/ZaxbyHub/opencode-swarm/issues/3491) [#3539](https://github.com/ZaxbyHub/opencode-swarm/issues/3539)) ([4be1ebc](https://github.com/ZaxbyHub/opencode-swarm/commit/4be1ebcd2745a3e04cf82ed1ad403c056c20cfb8))
+* **guardrails:** shell write-gate hardening PR 2/3 — procsub masking + residual resolution, brace destinations ([#3491](https://github.com/ZaxbyHub/opencode-swarm/issues/3491) [#3539](https://github.com/ZaxbyHub/opencode-swarm/issues/3539)) ([47cd317](https://github.com/ZaxbyHub/opencode-swarm/commit/47cd31756bdd24d731dad842c09dcaaf2a409309))
+* **release:** swarm-pr-feedback closure — channel hardening + test-strength (PRR-001..009) ([60dab9f](https://github.com/ZaxbyHub/opencode-swarm/commit/60dab9f9bc9ddc8ba54038f269badf7cf3ba0ccb))
+
+## [7.201.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.201.1...v7.201.2) (2026-11-04)
+
+
+### Bug Fixes
+
+* **config:** preserve full_auto.locked across loader recovery and harden sdd source reads ([a442b42](https://github.com/ZaxbyHub/opencode-swarm/commit/a442b4261f314a3742e2d65327455001a13bf145))
+* **config:** preserve full_auto.locked across loader recovery and harden sdd source reads ([ddebce5](https://github.com/ZaxbyHub/opencode-swarm/commit/ddebce5cff1abfa543173eef3de1c1d380a6a162))
+* **evidence:** derive task receipt outcomes from the durable record ([2a6effd](https://github.com/ZaxbyHub/opencode-swarm/commit/2a6effd7c91b0c8d0754d07b9310e5439179bbac))
+* **evidence:** fail closed on malformed verdicts, canonical settlement proof, md-escaped attestations ([#3561](https://github.com/ZaxbyHub/opencode-swarm/issues/3561) review round) ([0d8c240](https://github.com/ZaxbyHub/opencode-swarm/commit/0d8c240ea4d7a43590de22459dd25b7bf1b0df63))
+* **guardrails,pr-feedback:** verifier-config protection for every role + PR_FEEDBACK base binding ([#3120](https://github.com/ZaxbyHub/opencode-swarm/issues/3120), [#3396](https://github.com/ZaxbyHub/opencode-swarm/issues/3396)) ([feb02e4](https://github.com/ZaxbyHub/opencode-swarm/commit/feb02e46824ef3ad2df09ab17766fffba80fb78d))
+* **host/v2:** create lane sessions parented and move them into the worktree ([#3558](https://github.com/ZaxbyHub/opencode-swarm/issues/3558)) ([5008106](https://github.com/ZaxbyHub/opencode-swarm/commit/5008106acadb275956e6d27018550ad6bf3e2ba5))
+
 ## [7.201.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.201.0...v7.201.1) (2026-11-03)
 
 

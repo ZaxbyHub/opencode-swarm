@@ -83,6 +83,7 @@ import {
 import { derivePlanId } from '../plan/utils.js';
 import { resetPrmSessionState } from '../prm/index.js';
 import {
+	flushRouteRetirementObligation,
 	isRouteBlockedForSettlement as isRouteBlockedForSettlementInRegistry,
 	recordRouteFault,
 	recordRouteInvalidation,
@@ -5002,8 +5003,12 @@ export function createDelegationGateHook(
 						// capacity bound and refused the record (the registry
 						// already emitted criticalWarn naming the bound). An
 						// unprotected dispatch is worse than a refused one.
+						// #3564: the message distinguishes the two occupancy kinds
+						// an operator can be facing — live calls (settled by
+						// working the lanes) vs leaked markers whose calls
+						// already ended (terminal; only a reset clears them).
 						throw new Error(
-							`ROUTE_INVALIDATION_CAPACITY: refusing ${targetAgent} dispatch — its routing faulted before the route receipt persisted and the invalidation registry is at capacity, so the dispatch cannot be admitted without its settlement-protection marker (no marker was evicted; settle or retire live calls, or restart the plugin, to clear the bound)`,
+							`ROUTE_INVALIDATION_CAPACITY: refusing ${targetAgent} dispatch — its routing faulted before the route receipt persisted and the invalidation registry is at capacity, so the dispatch cannot be admitted without its settlement-protection marker (no marker was evicted). Occupancy can mix LIVE calls (settle or retire them) with LEAKED markers whose calls already ended — orphaned terminal markers cannot be settled; restart the plugin or run /swarm close to clear the bound`,
 						);
 					}
 				} else {
@@ -6196,8 +6201,16 @@ export function createDelegationGateHook(
 	};
 
 	// toolAfter: resets qaSkip fields and advances task states based on delegation type
+	// #3564: per-call defer signals for the structural retirement backstop.
+	// The background block below adds a callID when (and only when) that
+	// call's marker ownership transfers to the completion observer: a durable
+	// correlation record that is live, gate-bearing, and observer-consumable.
+	// Every other exit path flushes in toolAfter's finally, which consumes its
+	// OWN call's entry — a Set, not a slot, so concurrently-deferring calls can
+	// never overwrite one another's signals.
+	const deferredRouteRetirements = new Set<string>();
 	// Uses stored input args from guardrails when available, falls back to delegationChains
-	const toolAfter = async (
+	const toolAfterInner = async (
 		input: {
 			tool: string;
 			sessionID: string;
@@ -6548,6 +6561,15 @@ export function createDelegationGateHook(
 									pendingInput,
 									{ staleTimeoutMs: backgroundPendingTimeoutMs },
 								);
+							// #3564: the fallback artifact's record (when the primary write
+							// failed) — the observer-ownership decision below must apply the
+							// SAME consumable/gate-bearing checks to it as to a primary record
+							// (a null-evidence fallback is NOT observer-settleable).
+							let fallbackRecord: Awaited<
+								ReturnType<
+									typeof _internals.writeDelegationFallbackForBackground
+								>
+							> = null;
 							backgroundRecordDurable =
 								primaryOutcome.status === 'recorded' ||
 								primaryOutcome.status === 'duplicate';
@@ -6574,15 +6596,44 @@ export function createDelegationGateHook(
 									`BACKGROUND DELEGATION CORRELATION CONFLICT: ${subagentType} (${subagentSessionId}) collided with a different durable launch owner (parent=${primaryOutcome.record.parentSessionId}, call=${primaryOutcome.record.callID}, agent=${primaryOutcome.record.swarmPrefixedAgent}, task=${primaryOutcome.record.planTaskId ?? 'none'}). Inspect that existing owner and reconcile it before continuing. ${worktreeStatus} ${reservationStatus} No fallback owner was written and no reservation was bound. Do not abort, delete, or re-dispatch this correlation until reconciliation is complete. Do not advance task ${evidenceTaskId ?? 'unknown'} until the collision is resolved.`,
 								);
 							} else if (primaryOutcome.status === 'failed') {
-								backgroundRecordDurable =
-									(await _internals.writeDelegationFallbackForBackground(
+								fallbackRecord =
+									await _internals.writeDelegationFallbackForBackground(
 										directory,
 										pendingInput,
-									)) !== null;
+									);
+								backgroundRecordDurable = fallbackRecord !== null;
 								if (backgroundRecordDurable) {
 									logger.warn(
 										`[delegation-gate] background delegation ${subagentSessionId} persisted to the independent fallback artifact after the primary ledger write failed`,
 									);
+								}
+							}
+							// #3564: observer-ownership decision for the call's
+							// route-invalidation marker. Defer retirement to the
+							// completion observer ONLY when a durable correlation
+							// record exists that is live, gate-bearing, and
+							// observer-consumable (the exact classes the observer's
+							// retire-on-confirmed-consumed and the pending-record
+							// stale sweep now own end-to-end). Output-running shape
+							// is deliberately NOT part of this decision: a
+							// terminal-output background dispatch with a live
+							// durable record is consumed by the observer too.
+							// Recorded/duplicate consult the existing record's
+							// status; a failed primary consults the fallback
+							// record (freshly written, hence pending).
+							if (backgroundRecordDurable) {
+								const recordForOwnership =
+									primaryOutcome.status === 'failed'
+										? fallbackRecord?.record
+										: primaryOutcome.record;
+								const consumable =
+									recordForOwnership?.status === 'pending' ||
+									recordForOwnership?.status === 'running' ||
+									recordForOwnership?.status === 'completed' ||
+									recordForOwnership?.status === 'ingestion_error';
+								const gateBearing = recordForOwnership?.evidenceTaskId != null;
+								if (consumable && gateBearing) {
+									deferredRouteRetirements.add(input.callID);
 								}
 							}
 							if (!backgroundCorrelationConflict && !backgroundRecordDurable) {
@@ -8007,6 +8058,39 @@ export function createDelegationGateHook(
 						`coder:${input.callID}`,
 					);
 				}
+			}
+		}
+	};
+
+	// #3564: structural retirement backstop. toolAfterInner keeps its original
+	// body; this wrapper guarantees every recorded route-invalidation marker
+	// either had a retirement owner run (the legacy sites discharge the
+	// obligation inside the registry retire functions) or its ownership was
+	// deliberately deferred to the completion observer — no early return,
+	// catch arm, or non-registry throw between record and retirement can
+	// leave the marker with no reachable retirement owner.
+	const toolAfter = async (
+		input: {
+			tool: string;
+			sessionID: string;
+			callID: string;
+			args?: Record<string, unknown>;
+		},
+		_output: unknown,
+	): Promise<void> => {
+		try {
+			await toolAfterInner(input, _output);
+		} finally {
+			// Consume THIS call's own entry only: a deferred call's finally
+			// leaves its marker to the completion observer; every other exit
+			// flushes. Concurrent calls each consume their own entry.
+			const deferred = deferredRouteRetirements.delete(input.callID);
+			if (!deferred) {
+				flushRouteRetirementObligation(
+					directory,
+					input.sessionID || undefined,
+					input.callID,
+				);
 			}
 		}
 	};

@@ -15,6 +15,7 @@
  */
 
 import * as fsSync from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { CMD_STRIP_PREFIX, PS_STRIP_PREFIX } from '../shell-executor-context';
 import {
@@ -302,21 +303,6 @@ function shSerializeWords(words: string[]): string {
 	return words
 		.map((w) => (/^[A-Za-z0-9_@%+=:,./-]+$/.test(w) ? w : shSingleQuote(w)))
 		.join(' ');
-}
-
-/**
- * The shared `sh -c` payload extractor (#3491 W4): the payload is the single
- * quote-removed word immediately after the `-c` flag (sh's argv[2] contract).
- * Following words become `$0`, `$1`, … INSIDE the payload's interpreter and
- * are NEVER scanned as commands — the extractor returns the payload word
- * alone. Same-kind quote concatenation collapses at quote-removal because
- * the tokenizer consumes the concatenation, not a raw-quote rescan.
- * Returns null when no payload word exists.
- */
-export function dcExtractShellDashCPayload(rest: string): string | null {
-	const words = shellSplitWords(rest);
-	if (words.length === 0) return null;
-	return words[0];
 }
 
 // ============================================================================
@@ -1081,10 +1067,42 @@ function matchChdirWrapperSegment(segment: string): DcChdirMatch {
 	if (trimmed === '') return null;
 	const words = shellSplitWords(trimmed);
 	if (words.length === 0) return null;
+	// #3567 review P-F3: an unquoted $(...) command substitution SPLITS into
+	// fragments (the quote-removal tokenizer is not a shell grammar), so the
+	// wrapper walk would consume `$(git` as a literal DIR and serialize a
+	// mangled rewrite the parser then rejects. Fail closed instead — the
+	// operand is dynamic and the existing uncertain channel is stricter.
+	// Reviewer revision: fail closed ONLY for a mangled `$(`-headed word in
+	// the FLAG REGION (before the first plain word) — a substitution in the
+	// WRAPPED COMMAND's own arguments (`env -C src echo $(date) > out`) is
+	// ordinary shell and must keep flowing (the hoisted redirect resolves it).
 	const head = basenameAnySepLike(words[0]);
+	if (head !== 'env' && head !== 'sudo') return null;
+	// Flag-region scan runs ONLY for wrapper heads — the nested re-walk of a
+	// rewritten payload must never see this check (a $() argument there is
+	// ordinary shell).
+	const firstPlainWord = (() => {
+		for (let idx = 1; idx < words.length; idx += 1) {
+			const w = words[idx] as string;
+			if (w.startsWith('-')) continue;
+			if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(w)) continue;
+			if (w.startsWith('$(') || w.startsWith('`')) continue;
+			return idx;
+		}
+		return words.length;
+	})();
+	// Backticks mangle the same way $() fragments do (the tokenizer consumes
+	// the backtick as a quote char), so a backtick-headed flag-region word
+	// fails closed alongside the $() case (final-critic round).
+	if (
+		words
+			.slice(1, firstPlainWord)
+			.some((w) => w.startsWith('$(') || w.startsWith('`'))
+	) {
+		return { kind: 'failClosed' };
+	}
 	if (head === 'env') return matchEnvChdir(words);
-	if (head === 'sudo') return matchSudoChdir(words);
-	return null;
+	return matchSudoChdir(words);
 }
 
 function matchEnvChdir(words: string[]): DcChdirMatch {
@@ -1132,8 +1150,35 @@ function matchEnvChdir(words: string[]): DcChdirMatch {
 				'--argv0',
 				'--env0-from',
 			];
+			// #3567 review P-R1: GNU env resolves abbreviations (`--c`,
+			// `--ch`, `--chd`…) and accepts a GLUED value (`--ch=DIR`); the
+			// old walk consumed both shapes without capturing the directory,
+			// so `env --ch src cmd` chdir'd outside the model.
+			const eq = token.indexOf('=');
+			if (eq > 2) {
+				const abbrev = `--${token.slice(2, eq)}`;
+				const gluedMatch = argTaking.filter((flag) => flag.startsWith(abbrev));
+				if (
+					abbrev.length >= 3 &&
+					gluedMatch.length === 1 &&
+					gluedMatch[0] === '--chdir'
+				) {
+					dir = token.slice(eq + 1);
+					cursor += 1;
+					continue;
+				}
+				if (abbrev.length >= 3 && gluedMatch.length === 1) {
+					cursor += 1;
+					continue;
+				}
+			}
 			const unambiguous = argTaking.filter((flag) => flag.startsWith(token));
 			if (token.length >= 3 && unambiguous.length === 1) {
+				if (unambiguous[0] === '--chdir') {
+					const arg = words[cursor + 1];
+					if (arg === undefined) return { kind: 'failClosed' };
+					dir = arg;
+				}
 				cursor += 2;
 				continue;
 			}
@@ -1283,7 +1328,40 @@ function preprocessWrapperText(
 	if (match.kind === 'failClosed') {
 		return { text, rewrote: false, uncertain: false, failClosed: true };
 	}
-	const innerRaw = shSerializeWords(match.innerWords);
+	// #3567 review PRR-008: bash opens a wrapper segment's OWN redirects in
+	// the PARENT cwd (`env -C src echo x > f` writes f at the wrapper's
+	// caller directory), but serializing the payload as words quoted the
+	// `>` operator so the redirect vanished from the rewritten AST and the
+	// union-back restored it resolved at the starting cwd. Hoist top-level
+	// `>` / `>>` word pairs OUT of the subshell so the rewritten command
+	// carries the redirect where bash applies it (the tracked cwd).
+	const payloadWords: string[] = [];
+	const hoistedRedirects: string[] = [];
+	{
+		const words = match.innerWords;
+		// File-target redirect operators (fd-prefixed N>/N>>, clobber >|,
+		// stdout+stderr &>/&>>, read-write <>, and the plain >/>> pair). An
+		// fd-DUPLICATION target (2>&1) is not a file and stays inside — bash
+		// dups the descriptor, nothing is written.
+		const FILE_REDIRECT_OP = /^(?:\d*(?:>|>>|>\|)|<>|&>|&>>)$/;
+		const FD_DUP_TARGET = /^&\d+$/;
+		let i = 0;
+		while (i < words.length) {
+			const w = words[i] as string;
+			if (
+				FILE_REDIRECT_OP.test(w) &&
+				i + 1 < words.length &&
+				!FD_DUP_TARGET.test(words[i + 1] as string)
+			) {
+				hoistedRedirects.push(`${w} ${shSingleQuote(words[i + 1] as string)}`);
+				i += 2;
+				continue;
+			}
+			payloadWords.push(w);
+			i += 1;
+		}
+	}
+	const innerRaw = shSerializeWords(payloadWords);
 	const nested = preprocessWrapperText(innerRaw, depth + 1);
 	const inner =
 		nested !== null
@@ -1294,16 +1372,18 @@ function preprocessWrapperText(
 					uncertain: false,
 					failClosed: false,
 				};
+	const hoistSuffix =
+		hoistedRedirects.length > 0 ? ` ${hoistedRedirects.join(' ')}` : '';
 	if (match.kind === 'uncertain') {
 		return {
-			text: `( cd ${shSingleQuote(DC_UNRESOLVED_CHDIR_OPERAND)} && ${inner.text} )`,
+			text: `( cd ${shSingleQuote(DC_UNRESOLVED_CHDIR_OPERAND)} && ${inner.text} )${hoistSuffix}`,
 			rewrote: true,
 			uncertain: true,
 			failClosed: inner.failClosed,
 		};
 	}
 	return {
-		text: `( cd -- ${shSingleQuote(match.dir)} && ${inner.text} )`,
+		text: `( cd -- ${shSingleQuote(match.dir)} && ${inner.text} )${hoistSuffix}`,
 		rewrote: true,
 		uncertain: inner.uncertain,
 		failClosed: inner.failClosed,
@@ -1325,7 +1405,32 @@ export function dcPreprocessWrappers(command: string): DcWrapperPreprocess {
 		const result = preprocessWrapperText(segment, 0);
 		if (result === null) {
 			const unwrapped = dcUnwrapWrappers(segment);
-			if (unwrapped !== segment) changed = true;
+			if (unwrapped !== segment) {
+				changed = true;
+				// Final-critic round (P-B write path): the payload of a shell
+				// -c wrapper runs in a CHILD shell — splice it as a
+				// parenthesized subshell so its inner `cd` cannot move the
+				// parent walk state (`bash -c 'cd src'; echo x > f` must
+				// resolve f at the session cwd, never at src).
+				const headM = /^(\S+)\s+([\s\S]+)$/.exec(segment);
+				const base = headM ? basenameAnySepLike(headM[1] as string) : '';
+				const shellPayloadBase =
+					base === 'bash' ||
+					base === 'sh' ||
+					base === 'zsh' ||
+					base === 'dash' ||
+					base === 'ksh' ||
+					base.startsWith('ksh');
+				if (
+					shellPayloadBase &&
+					headM &&
+					walkShellCommandFlags(shellSplitWords(headM[2] as string)).kind ===
+						'payload'
+				) {
+					processed.push(`( ${unwrapped} )`);
+					continue;
+				}
+			}
 			processed.push(unwrapped);
 			continue;
 		}
@@ -1404,6 +1509,12 @@ function evolveTextDirectoryCwd(
 	subSegment: string,
 	cwd: string,
 ): string | 'uncertain' {
+	// #3567 review PRR-005: the 'uncertain' marker is a STATE, never a
+	// directory — the old code let `path.resolve('uncertain', operand)`
+	// fabricate a real directory named "uncertain" and silently re-admit
+	// writes after an unresolvable cd. Stickiness keeps every later segment
+	// on the sentinel (fail-closed).
+	if (cwd === 'uncertain') return 'uncertain';
 	const words = shellSplitWords(subSegment);
 	if (words.length === 0) return cwd;
 	const head = words[0];
@@ -1412,7 +1523,16 @@ function evolveTextDirectoryCwd(
 	if (operand === undefined || operand === '-' || operand.startsWith('-')) {
 		return 'uncertain';
 	}
-	if (operand.startsWith('~') || dcIsDynamicChdirOperand(operand)) {
+	if (operand === '~' || operand.startsWith('~/')) {
+		// #3567 review PRR-009: align the destructive-arm text model with the
+		// W1 word-form grammar — `~`/`~/x` resolve to the same HOME landing
+		// the write arm tracks instead of degrading to uncertain (the
+		// over-block made wrapped destructive commands deny while the write
+		// arm admitted the identical shape).
+		const home = os.homedir();
+		return path.resolve(home, operand === '~' ? '' : operand.slice(2));
+	}
+	if (dcIsDynamicChdirOperand(operand)) {
 		return 'uncertain';
 	}
 	return path.resolve(cwd, operand);
@@ -1422,7 +1542,20 @@ function expandChdirInnerSegments(
 	innerText: string,
 	resolveFrom: string | 'uncertain',
 	out: DcDestructiveSegmentContext[],
+	depth = 0,
 ): void {
+	// #3567 review PRR-004: bound the nested-wrapper recursion (the sibling
+	// write path caps at DC_CHDIR_REWRITE_MAX_DEPTH); the old unbounded
+	// expansion re-tokenized per level and measured 11s at 5,000 nested
+	// `env -C` hops — a hot-path availability hazard. Past the cap the
+	// remaining text degrades to the escaping sentinel (fail-closed).
+	if (depth > DC_CHDIR_REWRITE_MAX_DEPTH) {
+		out.push({
+			segment: dcUnwrapWrappers(innerText),
+			resolveFrom: 'uncertain',
+		});
+		return;
+	}
 	if (resolveFrom === 'uncertain') {
 		// The context is already unresolvable: every sub-segment evaluates on
 		// the sentinel.
@@ -1437,7 +1570,12 @@ function expandChdirInnerSegments(
 			// failClosed and uncertain nested wrappers both degrade the whole
 			// inner context to the sentinel (failClosed carries no words).
 			const innerWords = nested.kind === 'uncertain' ? nested.innerWords : [];
-			expandChdirInnerSegments(shSerializeWords(innerWords), 'uncertain', out);
+			expandChdirInnerSegments(
+				shSerializeWords(innerWords),
+				'uncertain',
+				out,
+				depth + 1,
+			);
 			return;
 		}
 		// Relative child cwds compose against the parent child cwd.
@@ -1445,6 +1583,7 @@ function expandChdirInnerSegments(
 			shSerializeWords(nested.innerWords),
 			path.resolve(resolveFrom, nested.dir),
 			out,
+			depth + 1,
 		);
 		return;
 	}
@@ -1513,6 +1652,16 @@ export function dcSplitSegments(cmd: string): string[] {
 		const ch = cmd[i];
 		const next = cmd[i + 1];
 
+		// #3567 review P-A (backslash-quote desync): bash honors backslash
+		// escapes OUTSIDE single quotes, and before `"` / `\` inside double
+		// quotes — the old scanner toggled quote state on the escaped
+		// character, so `echo '; rm -rf ../dist; echo '` desynced into one
+		// phantom quoted segment and the destructive arm never saw the rm.
+		if (!inSingleQuote && ch === '\\' && next !== undefined) {
+			current += ch + next;
+			i += 1;
+			continue;
+		}
 		if (ch === '"' && !inSingleQuote) {
 			inDoubleQuote = !inDoubleQuote;
 			current += ch;
@@ -1525,6 +1674,15 @@ export function dcSplitSegments(cmd: string): string[] {
 		}
 
 		if (!inDoubleQuote && !inSingleQuote) {
+			// A `|` preceded by `>` is the CLOBBER redirect `>|`, not a pipe —
+			// splitting there desynced the wrapper rewrite (`( … )` + bare
+			// `src/f`) and admitted the out-of-workspace write at the session
+			// cwd (final-critic round). No manual i bump: the loop's own i++
+			// must stay the only advance or the following space is swallowed.
+			if (ch === '|' && cmd[i - 1] === '>') {
+				current += ch;
+				continue;
+			}
 			// Check for && or ||
 			if ((ch === '&' && next === '&') || (ch === '|' && next === '|')) {
 				segments.push(current.trim());
@@ -1558,6 +1716,64 @@ export function dcSplitSegments(cmd: string): string[] {
 	}
 	if (current.trim()) segments.push(current.trim());
 	return segments.filter((s) => s.length > 0);
+}
+
+/**
+ * #3567 review PRR-003: report the first segment whose shell-family launcher
+ * (`bash`/`sh`/`zsh`/`dash`, path-qualified spellings included) carries a
+ * flag cluster the W4 walk cannot model. Ground truth: `bash -oc pipefail
+ * 'payload'` EXECUTES the payload (the option cluster does not disable it),
+ * but the uncertain walk leaves the payload invisible to every verb-anchored
+ * destructive arm — the gate now denies on that uncertainty instead of
+ * admitting an uninspectable tail. Returns null when no segment is affected.
+ */
+export function dcShellFlagClusterUncertain(command: string): string | null {
+	for (const segment of dcSplitSegments(command)) {
+		// Transparent execution prefixes do not change the payload semantics
+		// (`env bash -oc …` still runs the payload) — unwrap them before the
+		// head check or the deny channel is one spelling away from bypass.
+		let text = segment;
+		for (let i = 0; i < 8; i += 1) {
+			const m = /^(?:command|exec|env)\s+/i.exec(text);
+			if (!m) break;
+			text = text.slice(m[0].length);
+		}
+		const head = /^(\S+)\s+([\s\S]+)$/.exec(text);
+		if (!head) continue;
+		const base = basenameAnySepLike(head[1] as string);
+		const isShellFamily =
+			base === 'bash' ||
+			base === 'sh' ||
+			base === 'zsh' ||
+			base === 'dash' ||
+			base === 'ksh' ||
+			base.startsWith('ksh');
+		if (!isShellFamily) continue;
+		const walk = walkShellCommandFlags(shellSplitWords(head[2] as string));
+		if (walk.kind === 'uncertain') return segment;
+	}
+	return null;
+}
+
+/**
+ * #3567 review P-B: a MULTI-statement `sh -c` payload runs in a child shell
+ * whose inner `cd` re-bases every LATER payload statement on a directory the
+ * destructive arm cannot track (`bash -c 'cd ..; rm -rf x'` deletes the
+ * PARENT's parent — the spliced-into-parent model judged `x` at the session
+ * cwd). Returns true when the segment is a shell-family `-c` invocation
+ * whose payload splits into more than one statement; its segments must be
+ * evaluated with an uncertain child-cwd context (fail-closed).
+ */
+export function dcShellPayloadRunsIsolated(segment: string): boolean {
+	const head = /^(\S+)\s+([\s\S]+)$/.exec(segment);
+	if (!head) return false;
+	const base = basenameAnySepLike(head[1] as string);
+	if (base !== 'bash' && base !== 'sh' && base !== 'zsh' && base !== 'dash') {
+		return false;
+	}
+	const walk = walkShellCommandFlags(shellSplitWords(head[2] as string));
+	if (walk.kind !== 'payload' || walk.payload.trim() === '') return false;
+	return dcSplitSegments(walk.payload).length > 1;
 }
 
 /**

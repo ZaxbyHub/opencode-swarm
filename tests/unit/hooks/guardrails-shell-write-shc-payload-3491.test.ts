@@ -18,7 +18,6 @@ import * as path from 'node:path';
 import type { GuardrailsConfig } from '../../../src/config/schema';
 import { createGuardrailsHooks } from '../../../src/hooks/guardrails';
 import {
-	dcExtractShellDashCPayload,
 	dcStripOneWrapper,
 	dcUnwrapWrappers,
 	shellSplitWords,
@@ -120,15 +119,6 @@ describe('W4 unit: quote-aware tokenizer and payload extractor', () => {
 		expect(shellSplitWords(serialized)).toEqual(["src # 'quot'"]);
 	});
 
-	test('payload = the first quote-removed word after -c', () => {
-		expect(dcExtractShellDashCPayload(`'cp a ../x' sh`)).toBe('cp a ../x');
-		expect(dcExtractShellDashCPayload(`"mkdir -p src && echo x > src/a"`)).toBe(
-			'mkdir -p src && echo x > src/a',
-		);
-		expect(dcExtractShellDashCPayload(`echo`)).toBe('echo');
-		expect(dcExtractShellDashCPayload(``)).toBeNull();
-	});
-
 	test('dcUnwrapWrappers uses the extractor for trailing positionals', () => {
 		expect(dcUnwrapWrappers("sh -c 'cp a ../x' sh")).toBe('cp a ../x');
 	});
@@ -176,8 +166,7 @@ describe('W4 gate: positionals are never scanned as commands (group 3)', () => {
 		expect(got.verdict).toBe('ADMITTED');
 	});
 
-	test('unit: the extractor never returns positional words', () => {
-		expect(dcExtractShellDashCPayload(`'echo hi' cp a ../x`)).toBe('echo hi');
+	test('unit: the wrapper strip never returns positional words', () => {
 		expect(dcStripOneWrapper(`sh -c 'echo hi' cp a ../x`)).toBe('echo hi');
 	});
 });
@@ -319,7 +308,7 @@ describe('W4 gate: next-word args for o/O clusters (fix-round 4)', () => {
 		const got = await gate(`bash -opipefail -c 'echo x > ../x'`);
 		expect(got.verdict).toBe('DENIED');
 		expect(got.message).toMatch(
-			/WRITE BLOCKED|SCOPE_VIOLATION|evaluates inline code/,
+			/WRITE BLOCKED|SCOPE_VIOLATION|evaluates inline code|flag cluster the guard cannot statically model/,
 		);
 	});
 

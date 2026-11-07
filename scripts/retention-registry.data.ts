@@ -494,16 +494,16 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			'src/hooks/pr-workflow-gate.ts',
 		],
 		writerCitations: [
-			'src/background/pending-delegations.ts:3272 appendRecord — SQLite coordination event+state transaction with post-commit JSON projection',
-			'src/background/pending-delegations.ts:1541 writeDurableFileSync — fsync+rename-with-retry for legacy checkpoint/manifest/rolled-tail compatibility',
+			'src/background/pending-delegations.ts:3273 appendRecord — SQLite coordination event+state transaction with post-commit JSON projection',
+			'src/background/pending-delegations.ts:1542 writeDurableFileSync — fsync+rename-with-retry for legacy checkpoint/manifest/rolled-tail compatibility',
 		],
 		readerCitations: [
-			'src/background/pending-delegations.ts:3161 readDelegations — SQLite authority with bounded legacy compatibility, sync',
-			'src/background/pending-delegations.ts:3176 scanDelegationsForRecovery — strict, fails closed',
+			'src/background/pending-delegations.ts:3162 readDelegations — SQLite authority with bounded legacy compatibility, sync',
+			'src/background/pending-delegations.ts:3177 scanDelegationsForRecovery — strict, fails closed',
 			'pr-workflow-session-resolver / pr-workflow-gate / init-orphan-recovery / delegation-gate worktree-collision-ownership — via readDelegations',
 		],
 		schemaVersion:
-			'RecordSchema schemaVersion 1|2|3|4; checkpoint/manifest literal 1 (:1431,:1452,:1462)',
+			'RecordSchema schemaVersion 1|2|3|4; checkpoint/manifest literal 1 (:1432,:1453,:1463)',
 		stateClass: 'authoritative',
 		privacyClass: 'metadata',
 		directFileExemption: {
@@ -511,19 +511,19 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			reviewedIssue: 2034,
 		},
 		writeLimits: {
-			bound: 'compaction high-water 1 MiB / low 256 KiB (:132-133); MAX_RECOVERY_LEDGER_BYTES 4 MiB (delegation-health.ts:35); MAX_CHECKPOINT_BYTES 2 MiB / 2048 records (:135,:139); TOMBSTONE_MIN_AGE 72 h (:150)',
+			bound: 'compaction high-water 1 MiB / low 256 KiB (:133-134); MAX_RECOVERY_LEDGER_BYTES 4 MiB (delegation-health.ts:35); MAX_CHECKPOINT_BYTES 2 MiB / 2048 records (:136,:140); TOMBSTONE_MIN_AGE 72 h (:151)',
 			scope: 'global',
-			citation: 'src/background/pending-delegations.ts:132-150; src/background/delegation-health.ts:35 (#2034)',
+			citation: 'src/background/pending-delegations.ts:133-151; src/background/delegation-health.ts:35 (#2034)',
 		},
 		readBound: {
 			pattern: 'indexed (checkpoint+tail) with full-fold fallback',
 			bound: 'legacy/tail reads hard-bounded at 4 MiB (MAX_RECOVERY_LEDGER_BYTES)',
 			sync: true,
-			citation: 'src/background/pending-delegations.ts:118-123,1985',
+			citation: 'src/background/pending-delegations.ts:119-124,1986',
 		},
-		lockModel: 'withEvidenceLock agent=background on every mutation (:176-179); reads lock-free',
+		lockModel: 'withEvidenceLock agent=background on every mutation (:177-180); reads lock-free',
 		crashBehavior:
-			'torn append tolerated by lenient fold, strict recovery fails closed; manifest-gated checkpoint publication — checkpoint without manifest ignored (:1713-1725)',
+			'torn append tolerated by lenient fold, strict recovery fails closed; manifest-gated checkpoint publication — checkpoint without manifest ignored (:1714-1726)',
 		closePolicy: 'archived-only — ARCHIVE_ARTIFACTS (src/commands/close/constants.ts:75-77); deliberately NOT cleaned (cross-session store; compaction is the bounded-retention mechanism, src/commands/close/constants.ts:70-78 docblock)',
 		closeArrayMembership: {
 			'background-delegations.jsonl': 'archive-only',
@@ -532,13 +532,13 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		},
 		resetPolicy: 'reset/reset-session do not delete',
 		legacyCompatibility:
-			'legacy checkpoint/ledger is validated and imported once into SQLite, then cold-archived with JSON retained as a compatibility projection (:1985)',
+			'legacy checkpoint/ledger is validated and imported once into SQLite, then cold-archived with JSON retained as a compatibility projection (:1986)',
 		issue2487Legacy: { path: '.swarm/background-delegations.jsonl (+ checkpoint and manifest)', sourceFile: 'src/background/pending-delegations.ts', tokens: ['BACKGROUND_DELEGATIONS_FILE', 'loadLegacyLedger', 'ensureDelegationCoordinationImported'], readers: ['src/background/pending-delegations.ts:loadLegacyLedger', 'src/background/pending-delegations.ts:ensureDelegationCoordinationImported'], writers: ['src/background/pending-delegations.ts:BACKGROUND_DELEGATIONS_FILE'] },
 		healthSignal: 'delegation-health artifact + #2034 recovery observations',
 		owner: '#2034 (merged)',
 		disposition: {
 			kind: 'not-a-defect',
-			proof: 'Bounded by the #2034 checkpoint/tail compaction contract: 1 MiB high-water global trigger, 4 MiB hard recovery bound, 2 MiB/2048-record checkpoint validation, 72 h tombstone floor (src/background/pending-delegations.ts:132-150; src/background/delegation-health.ts:35).',
+			proof: 'Bounded by the #2034 checkpoint/tail compaction contract: 1 MiB high-water global trigger, 4 MiB hard recovery bound, 2 MiB/2048-record checkpoint validation, 72 h tombstone floor (src/background/pending-delegations.ts:133-151; src/background/delegation-health.ts:35).',
 		},
 	},
 	{
@@ -609,12 +609,12 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/background/pending-delegations.ts'],
 		writerCitations: [
-			'src/background/pending-delegations.ts:6205 writeDelegationFallback / :6256 removeDelegationFallback',
-			'src/background/pending-delegations.ts:6707 writeBackgroundCoderReservations',
+			'src/background/pending-delegations.ts:6217 writeDelegationFallback / :6268 removeDelegationFallback',
+			'src/background/pending-delegations.ts:6731 writeBackgroundCoderReservations',
 		],
 		readerCitations: [
-			'src/background/pending-delegations.ts:6060 readDelegationFallback / :6072 listDelegationFallbacks / :6106 scanDelegationFallbacksForRecovery',
-			'src/background/pending-delegations.ts:6685 scanBackgroundCoderReservationsForAdmission',
+			'src/background/pending-delegations.ts:6072 readDelegationFallback / :6084 listDelegationFallbacks / :6118 scanDelegationFallbacksForRecovery',
+			'src/background/pending-delegations.ts:6709 scanBackgroundCoderReservationsForAdmission',
 		],
 		schemaVersion: 'fallback schemaVersion 1 (:1041)',
 		stateClass: 'authoritative',
@@ -1799,14 +1799,14 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/gate-evidence.ts', 'src/council/council-evidence-writer.ts'],
 		writerCitations: [
-			'src/gate-evidence.ts:1758 transitionTaskWorkflowEvidence / :1936 recordGateEvidence / :2031 recordAgentDispatch — locked read-modify-write, atomic write',
+			'src/gate-evidence.ts:1774 transitionTaskWorkflowEvidence / :1952 recordGateEvidence / :2047 recordAgentDispatch — locked read-modify-write, atomic write',
 			'src/council/council-evidence-writer.ts:96 writeCouncilEvidence — gates.council section under withTaskEvidenceLock',
 		],
 		readerCitations: [
-			'src/gate-evidence.ts:2075 readTaskEvidence — FULL-FILE fail-open, async; :2151 readTaskEvidenceRaw — strict, sync',
+			'src/gate-evidence.ts:2091 readTaskEvidence — FULL-FILE fail-open, async; :2167 readTaskEvidenceRaw — strict, sync',
 			'src/council/council-evidence-writer.ts:207 hasCouncilEvidenceAttempt',
 		],
-		schemaVersion: 'workflow WAL states; unrecognized states degrade to null (documented :1183-1188)',
+		schemaVersion: 'workflow WAL states; unrecognized states degrade to null (documented :1199-1204)',
 		stateClass: 'authoritative',
 		privacyClass: 'mixed',
 		directFileExemption: {
@@ -1817,10 +1817,10 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			bound: 'retryHistory ≤3 (schema :347); per-task file; evidence/ archived+cleaned at close',
 			scope: 'per-key',
 			keyspaceBound:
-			'FINITE BY REAPER, not by key domain: one key per taskId — a flat .swarm/evidence/{taskId}.json (src/gate-evidence.ts:1545 getEvidencePath) whose taskId is only shape-validated (src/validation/task-id.ts:69-114), so the domain is open. The GLOBAL deleter is the same one the task-evidence-trajectory row cites: "evidence" is in ACTIVE_STATE_DIRS_TO_CLEAN (src/commands/close/constants.ts:253-269) and the close clean loop recursively removes the whole tree (src/commands/close/clean-stage.ts:176-190), taking every {taskId}.json with it. Note the per-file retryHistory ≤3 cap is NOT the keyspace bound — it caps one key\'s history and says nothing about how many keys exist. CAVEAT: archive-first-gated (src/commands/close/clean-stage.ts:176-185) and untouched by /swarm reset and /swarm reset-session, so an unclosed session holds one file per distinct taskId.',
+			'FINITE BY REAPER, not by key domain: one key per taskId — a flat .swarm/evidence/{taskId}.json (src/gate-evidence.ts:1561 getEvidencePath) whose taskId is only shape-validated (src/validation/task-id.ts:69-114), so the domain is open. The GLOBAL deleter is the same one the task-evidence-trajectory row cites: "evidence" is in ACTIVE_STATE_DIRS_TO_CLEAN (src/commands/close/constants.ts:253-269) and the close clean loop recursively removes the whole tree (src/commands/close/clean-stage.ts:176-190), taking every {taskId}.json with it. Note the per-file retryHistory ≤3 cap is NOT the keyspace bound — it caps one key\'s history and says nothing about how many keys exist. CAVEAT: archive-first-gated (src/commands/close/clean-stage.ts:176-185) and untouched by /swarm reset and /swarm reset-session, so an unclosed session holds one file per distinct taskId.',
 			citation: 'src/gate-evidence.ts:347; src/commands/close/constants.ts:253-269 ACTIVE_STATE_DIRS_TO_CLEAN',
 		},
-		readBound: { pattern: 'full-file', bound: 'single per-task JSON', sync: true, citation: 'src/gate-evidence.ts:1196-1224' },
+		readBound: { pattern: 'full-file', bound: 'single per-task JSON', sync: true, citation: 'src/gate-evidence.ts:1212-1240' },
 		lockModel: 'withTaskEvidenceLock (evidence/{taskId}.json key) — proper-lockfile, 60 s timeout, backoff+jitter',
 		crashBehavior: 'atomic write; WAL PREPARED fencing (assertTaskEvidenceWriteAllowed :152)',
 		closePolicy: 'cleaned — evidence/ dir lifecycle',

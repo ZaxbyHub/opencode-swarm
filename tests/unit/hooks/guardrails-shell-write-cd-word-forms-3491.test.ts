@@ -219,7 +219,13 @@ describe('W1 gate: dual-outcome conditionals and pipelines (v4 constraints 1–2
 	test('false || cd .. — the executed-landing candidate denies the sibling', async () => {
 		const got = await gate('false || cd ..; echo x > src/f.ts');
 		expect(got.verdict).toBe('DENIED');
-		expect(got.message).toMatch(ANY_WRITE_BLOCK);
+		// #3567 review PRR-012 fix: the ||-chain now models BOTH outcomes
+		// (right skipped on left success, right EXECUTING from the pre-left
+		// state on left failure). With `false` the left cannot prove a
+		// directory command, so the two candidates diverge and the sibling
+		// write withdraws (null-path denial) instead of resolving at a
+		// post-left landing the model can no longer claim.
+		expect(got.message).toMatch(WITHDRAWAL);
 		expect(got.message).toMatch(/src\/f\.ts/);
 	});
 
