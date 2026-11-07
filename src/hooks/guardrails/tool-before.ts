@@ -293,12 +293,16 @@ export class ShellWriteBlockedError extends Error {
  */
 export const renderDenialTarget = (target: string): string => {
 	// #3587 review round: match denyAuthority's escaping-relative home fold so
-	// the message and reason channels of one denial agree on
-	// `../home/<name>/…` shapes (redactPath's absolute branch already folds
-	// absolute profile prefixes; a relative target folds only when the `../`
+	// the message and reason channels of one denial agree on escaping-relative
+	// shapes in EITHER separator flavor (`../home/<name>/…` and
+	// `..\Users\<name>\…` — redactPath's absolute branch already folds
+	// absolute profile prefixes; a relative target folds only when the `..`
 	// prefix proves it leaves the workspace).
-	const display = target.startsWith('../')
-		? target.replace(/(^|\/)(?:home|Users)\/[^/]+/g, '$1~')
+	const escaping = target.startsWith('../') || target.startsWith('..\\');
+	const display = escaping
+		? target
+				.replace(/\\/g, '/')
+				.replace(/(^|\/)(?:home|Users)\/[^/]+/g, '$1~')
 		: target;
 	return sanitizeDiagnosticText(redactPath(display), 320);
 };

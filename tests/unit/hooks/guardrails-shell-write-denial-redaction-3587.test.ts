@@ -189,6 +189,7 @@ describe('3587 four denial doors render bounded, redacted targets', () => {
 		expect(got.verdict).toBe('DENIED');
 		expect(got.message.includes('universal deny prefix')).toBe(true);
 		const render = DENIAL_SHAPE.exec(got.message)?.[1] ?? '';
+		expect(render.length).toBeGreaterThan(0);
 		expect(render.length).toBeLessThanOrEqual(320);
 		expect(got.message.includes(RUN_320)).toBe(false);
 	}, 30_000);
@@ -211,6 +212,7 @@ describe('3587 four denial doors render bounded, redacted targets', () => {
 		expect(got.verdict).toBe('DENIED');
 		expect(got.message.includes('verifier-owned configuration')).toBe(true);
 		const render = DENIAL_SHAPE.exec(got.message)?.[1] ?? '';
+		expect(render.length).toBeGreaterThan(0);
 		expect(render.length).toBeLessThanOrEqual(320);
 		expect(got.message.includes(RUN_320)).toBe(false);
 	}, 30_000);
@@ -334,6 +336,22 @@ describe('3587 renderDenialTarget shipped representations (_internals seam)', ()
 	test('benign bare filename renders verbatim (no over-redaction)', () => {
 		expect(render('plainname24chars.txt')).toBe('plainname24chars.txt');
 	});
+	test('escaping-relative slash form folds the home segment (message/reason agree)', () => {
+		const out = render('../home/alice/x.txt');
+		expect(out).toMatch(/^\.\.[\\/]~[\\/]x\.txt$/);
+		expect(out.includes('home/alice')).toBe(false);
+	});
+	test.skipIf(process.platform !== 'win32')(
+		'escaping-relative raw win32 backslash form folds too (Users segment gone)',
+		() => {
+			// The non-shell door passes the raw caller string through, so the
+			// native win32 escaping form must fold exactly like the slash form
+			// (the reason channel slash-normalizes; the message must agree).
+			const out = render('..\\Users\\alice\\x.txt');
+			expect(out).toMatch(/^\.\.[\\/]~[\\/]x\.txt$/);
+			expect(out.includes('Users')).toBe(false);
+		},
+	);
 });
 
 describe('3587 structured data channels keep exact values', () => {
