@@ -10,7 +10,7 @@ description: >
 disable-model-invocation: true
 metadata:
   audience: swarm-plugin
-  swarm-contract-digest: "b1a77bb68cf9"
+  swarm-contract-digest: "9d4e5cf10c36"
 ---
 
 # Swarm CI Monitor
@@ -257,8 +257,10 @@ run it in addition to, never instead of, Step 3.
 ### 4a. Execute the merge
 
 ```
-gh pr merge <N> --match-head-commit <SHA>                            # merge-queue base
-gh pr merge <N> --match-head-commit <SHA> --merge|--squash|--rebase  # direct base: one method
+gh pr merge <N> --match-head-commit <SHA>           # merge-queue base: no method flag
+gh pr merge <N> --match-head-commit <SHA> --merge   # direct base, when merge commits are the method
+gh pr merge <N> --match-head-commit <SHA> --squash  # direct base, when squash is the method
+gh pr merge <N> --match-head-commit <SHA> --rebase  # direct base, when rebase is the method
 ```
 
 Tell the two bases apart with this command (it works in bash and PowerShell; take

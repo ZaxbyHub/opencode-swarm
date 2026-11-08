@@ -356,12 +356,19 @@ describe('pointers that make the workflow reachable', () => {
 
 	test('swarm-ci-monitor Step 4a shows both merge forms and the detection call', () => {
 		const step = section(read(CI_MONITOR), '### 4a. Execute the merge');
-		expect(step).toContain(
-			'gh pr merge <N> --match-head-commit <SHA>                            # merge-queue base',
+		expect(step).toMatch(
+			/^gh pr merge <N> --match-head-commit <SHA>\s+# merge-queue base: no method flag$/m,
 		);
-		expect(step).toContain(
-			'gh pr merge <N> --match-head-commit <SHA> --merge|--squash|--rebase',
-		);
+		for (const method of ['--merge', '--squash', '--rebase']) {
+			expect(step).toMatch(
+				new RegExp(
+					`^gh pr merge <N> --match-head-commit <SHA> ${method}\\s+# direct base, when `,
+					'm',
+				),
+			);
+		}
+		// Every command line must be copy-pasteable: no pipe-joined alternatives.
+		expect(step).not.toMatch(/--(merge|squash|rebase)\|/);
 		expect(step).toContain(
 			'- **`--match-head-commit <SHA>` always.** Pass the head SHA Step 3 recorded',
 		);
