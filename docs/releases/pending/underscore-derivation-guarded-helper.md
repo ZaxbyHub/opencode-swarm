@@ -69,5 +69,8 @@ issue: 3331
   `.slice(0, a.length - b.length - 1)` in both operand orders
   (#3617 review PRR-002 — the claim is scoped to exactly these shapes), each
   in any legal whitespace / optional-chaining spelling (`x . replace (…)`,
-  `x.replace?.(…)`, `split('_')?.[0]`); computed member access and regexes
-  held in variables are out of scope.
+  `x.replace?.(…)`, `split('_')?.[0]`). Only whitespace and optional-chaining
+  spelling variants are covered; other spellings — e.g. comments between
+  tokens, template or escaped literals, non-canonical numeric literals, regex
+  flags, extra arguments, computed member access, regexes held in variables —
+  are out of scope.
