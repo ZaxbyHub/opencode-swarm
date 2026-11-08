@@ -74,6 +74,7 @@ import {
 	SkillPropagationConfigSchema,
 	SummaryConfigSchema,
 	stripKnownSwarmPrefix,
+	deriveSwarmIdentity,
 	WatchdogConfigSchema,
 } from './config/schema';
 import { createRoleFilterSystemHook } from './context/role-filter.js';
@@ -3966,6 +3967,7 @@ async function initializeOpenCodeSwarm(
 						route
 							? (swarmState.activeAgent.get(childSessionID) ??
 									swarmState.agentSessions.get(childSessionID)?.agentName ??
+									route.agentName ??
 									route.role)
 							: (resolveSessionChatAgent(childSessionID) ??
 									swarmState.activeAgent.get(childSessionID) ??
@@ -4009,10 +4011,25 @@ async function initializeOpenCodeSwarm(
 								typeof chainModel === 'string' &&
 								chainModel.length > 0
 							) {
-								void applyV2AgentModelOverride(
-									routeModel.exactAgentName,
-									chainModel,
+								// #3331: the advance arm may resolve the chain from
+								// a RAW name whose spelling is not a roster key
+								// (e.g. `code-coder` with the roster keyed by
+								// `coder`, or a case variant). The v2 editor is
+								// create-or-update, so applying an unregistered
+								// spelling would mint a phantom agent. Resolve the
+								// REGISTERED key and apply that (never the raw
+								// spelling after a case-insensitive match).
+								const registeredName = Object.keys(agents).find(
+									(name) =>
+										name.toLowerCase() ===
+										routeModel.exactAgentName.trim().toLowerCase(),
 								);
+								if (registeredName) {
+									void applyV2AgentModelOverride(
+										registeredName,
+										chainModel,
+									);
+								}
 							}
 						}
 					} else if (
@@ -4799,7 +4816,18 @@ async function initializeOpenCodeSwarm(
 						callID: input.callID,
 						role: stripKnownSwarmPrefix(toolBeforeArgs.subagent_type),
 						actionDigest: actionIdentity.digest,
-						swarmID: actionIdentity.swarm ?? undefined,
+						// #3330/#3331: the route's swarm id comes from the shared
+						// guarded derivation (fail-closed to the default swarm for
+						// malformed doubled-separator names), NOT from the action
+						// digest's trim+lowercase canonicalization (hashed into
+						// digests only, never a swarm id after this change).
+						// agentName preserves the RAW dispatched name so the
+						// session.error advance arm resolves the same identity the
+						// chat boundary sees.
+						swarmID:
+							deriveSwarmIdentity(toolBeforeArgs.subagent_type).swarmID ??
+							undefined,
+						agentName: toolBeforeArgs.subagent_type,
 					});
 				}
 

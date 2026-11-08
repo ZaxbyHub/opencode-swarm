@@ -150,6 +150,61 @@ export function stripKnownSwarmPrefix(agentName: string): string {
 	return getCanonicalAgentRole(agentName);
 }
 
+/** Resolved agent-name identity: the canonical role plus the derived swarm id. */
+export interface SwarmIdentity {
+	/** Canonical lowercase role (a `getCanonicalAgentRole` result). */
+	readonly role: string;
+	/**
+	 * Derived swarm id, or `undefined` for the default swarm. Only a real
+	 * `<swarmId>_<role>` suffix slices an id; the slice is RAW-case (so
+	 * case-carrying ids like `Case_coder` -> `Case` survive), and a sliced id
+	 * containing an underscore can never match a configured swarm (schema:
+	 * swarm ids must not contain underscores) and fails closed to `undefined`.
+	 */
+	readonly swarmID: string | undefined;
+}
+
+/**
+ * THE shared guarded derivation of an agent name's (role, swarm id) pair
+ * (issues #3330/#3331/#3322 — the #2960/#3324 defect class). Every caller that
+ * needs a swarm id from an agent name must route through here instead of
+ * reimplementing a first-underscore split or an unguarded length-delta slice.
+ *
+ * Semantics (the guarded #3324 shape, enforced by
+ * tests/unit/guardrails/agent-name-derivation-census.test.ts and pinned by
+ * tests/unit/agents/agent-name-swarm-id.test.ts):
+ * - `role = getCanonicalAgentRole(agentName)` — case-insensitive, longest
+ *   canonical-role suffix wins, separators `_`, `-` and space all derive the
+ *   role.
+ * - The id is sliced ONLY when the name ends with `_<role>` (case-insensitive
+ *   match, RAW slice) and has at least one character before the separator.
+ * - Hyphen/space separators derive the role but never slice an id
+ *   (`code-coder` -> `{ coder, undefined }`); a case variant with no prefix
+ *   (`Coder` -> `{ coder, undefined }`) and an underscore role with no prefix
+ *   (`test_engineer` -> `{ test_engineer, undefined }`) resolve the default
+ *   swarm; a doubled separator (`local__coder` -> sliced id `local_`) fails
+ *   closed to `undefined` because no configured swarm key may contain `_`.
+ */
+export function deriveSwarmIdentity(agentName: string): SwarmIdentity {
+	const role = getCanonicalAgentRole(agentName);
+	if (!agentName || role === agentName) {
+		return { role: agentName ? role : agentName, swarmID: undefined };
+	}
+	const lowerName = agentName.toLowerCase();
+	const lowerRole = role.toLowerCase();
+	if (
+		lowerRole.length > 0 &&
+		lowerName.length > lowerRole.length + 1 &&
+		lowerName.endsWith(`_${lowerRole}`)
+	) {
+		const sliced = agentName.slice(0, agentName.length - role.length - 1);
+		if (sliced.length > 0 && !sliced.includes('_')) {
+			return { role, swarmID: sliced };
+		}
+	}
+	return { role, swarmID: undefined };
+}
+
 // Per-agent extended-reasoning block. Mirrors the OpenCode SDK's
 // `reasoning` field on AgentConfig (e.g. Anthropic Claude reasoning effort).
 // This is distinct from the swarm-plugin's own `variant` field: `variant` is
