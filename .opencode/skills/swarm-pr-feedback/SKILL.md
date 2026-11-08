@@ -13,7 +13,7 @@ description: >
   this process.
 metadata:
   audience: swarm-plugin
-  swarm-contract-digest: "8203f1cc3a20"
+  swarm-contract-digest: "6fd746bdfe22"
 ---
 
 # Swarm PR Feedback
@@ -641,23 +641,30 @@ alone does not satisfy it.
   the reviewer, dispatched after the reviewer returns APPROVE) → APPROVE /
   NEEDS_REVISION / BLOCKED per item. The critic challenges: is every feedback
   item actually resolved — including items posted after the ledger was built
-  (it fetches every PR comment and review fresh and reconciles each external
-  finding against the ledger, #3607)? Any requirement drift, weak evidence,
-  missing sibling-file checks, stale approvals, anything unwired or deferred?
+  (it fetches all three surfaces fresh — issue comments, inline review
+  comments, and reviews, see `references/intake-surfaces.md` — and reconciles
+  each external finding against the ledger, #3607)? Any requirement drift,
+  weak evidence, missing sibling-file checks, stale approvals, anything
+  unwired or deferred?
 
 Address every NEEDS_REVISION / BLOCKED item, re-review with the reviewer if the
 critic surfaces correctness issues, then re-critic. **Any edit after the
 reviewer's or critic's approval invalidates that approval** — re-run the
 affected gate on the current diff before publishing. Before dispatching the
-final critic, publish the closure ledger as a PR comment bound to the reviewed
-head SHA and fetch time; the critic reconciles it against its own fresh fetch —
-an input to verify, never a substitute for the fetch (#3607).
+final critic, record the closure ledger in the durable session task-gates
+artifact (bound to the reviewed head SHA and fetch time); the critic
+reconciles it against its own fresh fetch — an input to verify, never a
+substitute for the fetch (#3607). Publish the ledger as a PR comment only
+after the reviewed commit is pushed and the remote head verified (see
+Publishing And Communication): under Profile A the workflow gate blocks PR
+comments until all four ordered phases settle, and the B/C publication
+invariants forbid any comment/body write before the verified push.
 
 Open the runtime's session task-gates artifact (durable-session-state
-guidance, e.g. `tasks/<slug>/gates.md`) at ROUND START and append every
-reviewer and critic verdict (with HEAD/diff) as it lands, so a compaction or
-handoff re-enters from disk. `.swarm/` is the plugin's runtime state — never
-write task artifacts there.
+guidance; on ZCode `.zcode/session/tasks/<slug>/gates.md`, the harness's own
+session task workspace elsewhere — never the repo root and never
+`.swarm/`) at ROUND START and append every reviewer and critic verdict (with
+HEAD/diff) as it lands, so a compaction or handoff re-enters from disk.
 
 ### Post-publish verification (mandatory after the PR is pushed)
 
