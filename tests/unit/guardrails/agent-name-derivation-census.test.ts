@@ -14,9 +14,11 @@
  * review PRR-002): naive agent-name splitting via .replace(/^[^_]+_/, ''),
  * the retired .match(/^([^_]+)_/) helper body, .split('_')[0] / .at(0), and
  * direct .slice/.substring(0, a.length - b.length - 1) arithmetic in both
- * operand orders. Every predicate tolerates legal whitespace between the
- * member name and its call parenthesis (`x.replace (…)`), pinned by the
- * predicate self-test below (#3617 hermes review). Generic .slice(0, -n) truncation and two-operand
+ * operand orders. Every predicate matches its shape in any legal whitespace /
+ * optional-chaining spelling (`x . replace (…)`, `x.replace?.(…)`,
+ * `split('_')?.[0]`), pinned by the predicate self-test below (#3617 hermes +
+ * delta review). Computed member access and regexes held in variables are
+ * out of scope. Generic .slice(0, -n) truncation and two-operand
  * a.length - b.length (no -1) slices are NOT agent-name-specific shapes and
  * are deliberately NOT predicates (35+ non-derivation hits at head); the
  * known residual derivation sites using those shapes are recorded in the PR
@@ -54,14 +56,29 @@ const ALLOWLIST: Readonly<Record<string, string>> = {
 	'src/hooks/incremental-verify.ts': 'base-compat trigger arm (PRR-005)',
 };
 
+// Spelling tolerance (#3617 hermes + delta review): every member call is
+// matched in any LEGAL whitespace / optional-chaining spelling — whitespace
+// around the access dot and before the call paren, `?.` member access, and
+// `?.(` optional calls. Computed access (`name['replace'](…)`) and a regex
+// held in a variable are out of scope (indirection, not the literal shape).
+const ACCESS = String.raw`\s*(?:\?\.|\.)\s*`;
+const CALL = String.raw`\s*(?:\?\.)?\s*\(`;
+const member = (name: string): string => `${ACCESS}${name}${CALL}`;
+// An identifier chain ending in `.length` (`name.length`, `a?.b .length`).
+const LEN = String.raw`[\w$]+(?:${ACCESS}[\w$]+)*?${ACCESS}length`;
+
 // P1: naive first-underscore extraction in ANY of the shapes the class has
 // actually used: the legacy .replace(/^[^_]+_/, ''), the retired
 // .match(/^([^_]+)_/) helper body, and the idiomatic .split('_')[0] / .at(0).
+// The replace alternation must stay FIRST: its quote group is backreference 1.
 const NAIVE_FIRST_UNDERSCORE = new RegExp(
 	[
-		/\.replace\s*\(\s*\/\^\[\^_\]\+_\/\s*,\s*(['"])\1\s*\)/.source,
-		/\.match\s*\(\s*\/\^\(\[\^_\]\+\)_\/\s*\)/.source,
-		/\.split\s*\(\s*['"]_['"]\s*\)\s*(\[\s*0\s*\]|\.at\s*\(\s*0\s*\))/.source,
+		member('replace') + String.raw`\s*\/\^\[\^_\]\+_\/\s*,\s*(['"])\1\s*\)`,
+		member('match') + String.raw`\s*\/\^\(\[\^_\]\+\)_\/\s*\)`,
+		member('split') +
+			String.raw`\s*['"]_['"]\s*\)\s*(?:(?:\?\.)?\s*\[\s*0\s*\]|` +
+			member('at') +
+			String.raw`\s*0\s*\))`,
 	].join('|'),
 );
 
@@ -71,10 +88,10 @@ const NAIVE_FIRST_UNDERSCORE = new RegExp(
 // whitespace normalization).
 const LENGTH_DELTA_SLICE = new RegExp(
 	[
-		/\.(?:slice|substring)\s*\(\s*0\s*,\s*[A-Za-z0-9_$.]+\.length\s*-\s*[A-Za-z0-9_$.]+\.length\s*-\s*1\s*,?\s*\)/
-			.source,
-		/\.(?:slice|substring)\s*\(\s*0\s*,\s*[A-Za-z0-9_$.]+\.length\s*-\s*1\s*-\s*[A-Za-z0-9_$.]+\.length\s*,?\s*\)/
-			.source,
+		member('(?:slice|substring)') +
+			String.raw`\s*0\s*,\s*${LEN}\s*-\s*${LEN}\s*-\s*1\s*,?\s*\)`,
+		member('(?:slice|substring)') +
+			String.raw`\s*0\s*,\s*${LEN}\s*-\s*1\s*-\s*${LEN}\s*,?\s*\)`,
 	].join('|'),
 );
 
@@ -116,16 +133,27 @@ describe('agent-name derivation census (issue #3330 recurrence guardrail)', () =
 		expect(flagged).toEqual([]);
 	}, 30_000);
 
-	test('predicates flag every enforced shape, including whitespace before the call paren', () => {
+	test('predicates flag every enforced shape in any legal whitespace / optional-chaining spelling', () => {
 		const flaggedNaive = [
 			"name.replace(/^[^_]+_/, '')",
 			"name.replace (/^[^_]+_/, '')",
+			"name . replace(/^[^_]+_/, '')",
+			"name.replace?.(/^[^_]+_/, '')",
+			"name?.replace?.(/^[^_]+_/, '')",
 			'name.match(/^([^_]+)_/)',
 			'name.match (/^([^_]+)_/)',
+			'name . match(/^([^_]+)_/)',
+			'name.match?.(/^([^_]+)_/)',
 			"name.split('_')[0]",
 			"name.split ( '_' ) [0]",
+			"name . split('_')[0]",
+			"name.split?.('_')[0]",
+			"name.split('_')?.[0]",
 			"name.split('_').at(0)",
 			"name.split ('_').at (0)",
+			"name.split('_') . at(0)",
+			"name.split('_')?.at(0)",
+			"name.split('_').at?.(0)",
 		];
 		for (const sample of flaggedNaive) {
 			expect([sample, NAIVE_FIRST_UNDERSCORE.test(sample)]).toEqual([
@@ -136,15 +164,31 @@ describe('agent-name derivation census (issue #3330 recurrence guardrail)', () =
 		const flaggedSlice = [
 			'name.slice(0, name.length - role.length - 1)',
 			'name.slice (0, name.length - role.length - 1)',
+			'name . slice(0, name.length - role.length - 1)',
+			'name.slice?.(0, name.length - role.length - 1)',
 			'name.substring (0, name.length - 1 - role.length)',
+			'name.substring?.(0, name.length - 1 - role.length)',
+			'name.slice(0, name .length - role. length - 1)',
+			'a.b.slice(0, a?.b.length - role.length - 1)',
 		];
 		for (const sample of flaggedSlice) {
 			expect([sample, LENGTH_DELTA_SLICE.test(sample)]).toEqual([sample, true]);
 		}
 		// Not agent-name derivations: generic truncation stays unflagged.
-		for (const sample of ['text.slice(0, -1)', "name.split('-')[0]"]) {
-			expect(NAIVE_FIRST_UNDERSCORE.test(sample)).toBe(false);
-			expect(LENGTH_DELTA_SLICE.test(sample)).toBe(false);
+		for (const sample of [
+			'text.slice(0, -1)',
+			"name.split('-')[0]",
+			'name.slice(0, name.length - role.length)',
+			"name.split('_')[1]",
+		]) {
+			expect([sample, NAIVE_FIRST_UNDERSCORE.test(sample)]).toEqual([
+				sample,
+				false,
+			]);
+			expect([sample, LENGTH_DELTA_SLICE.test(sample)]).toEqual([
+				sample,
+				false,
+			]);
 		}
 	});
 

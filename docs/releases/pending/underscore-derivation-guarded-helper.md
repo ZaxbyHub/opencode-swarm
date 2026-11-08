@@ -67,4 +67,7 @@ issue: 3331
   allowlist: `.replace(/^[^_]+_/, '')`, the retired
   `.match(/^([^_]+)_/)` helper form, `.split('_')[0]`/`.at(0)`, and
   `.slice(0, a.length - b.length - 1)` in both operand orders
-  (#3617 review PRR-002 — the claim is scoped to exactly these shapes).
+  (#3617 review PRR-002 — the claim is scoped to exactly these shapes), each
+  in any legal whitespace / optional-chaining spelling (`x . replace (…)`,
+  `x.replace?.(…)`, `split('_')?.[0]`); computed member access and regexes
+  held in variables are out of scope.
