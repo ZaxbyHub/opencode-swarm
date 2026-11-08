@@ -2033,13 +2033,10 @@ async function initializeOpenCodeSwarm(
 		// prefix that cannot exist — the fail-closed direction. (Base's naive
 		// split happened to yield the valid `local` here; that is an accident
 		// of splitting on the FIRST underscore, not a contract.)
-		const slicedSwarmID =
-			role !== trimmedAgentName &&
-			trimmedAgentName.toLowerCase().endsWith(`_${role}`)
-				? trimmedAgentName.slice(0, trimmedAgentName.length - role.length - 1)
-				: undefined;
-		const swarmID =
-			slicedSwarmID && !slicedSwarmID.includes('_') ? slicedSwarmID : undefined;
+		// #3330: the guarded derivation lives in one shared helper
+		// (deriveSwarmIdentity) — this site keeps the exact #3324 semantics
+		// without carrying its own copy of the guard.
+		const { swarmID } = deriveSwarmIdentity(trimmedAgentName);
 		const swarmAgents = getSwarmAgents(swarmID);
 		return {
 			exactAgentName: trimmedAgentName,
