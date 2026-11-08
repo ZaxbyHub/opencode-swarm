@@ -521,7 +521,7 @@ Runs a type-checking or linting command after the coder agent completes.
 | `enabled` | boolean | `true` | Enable/disable the hook |
 | `command` | `string \| string[] \| null` | `null` | Override auto-detected command. String is split on spaces. Array bypasses splitting for commands with special arguments. |
 | `timeoutMs` | number | `30000` | Timeout in milliseconds (1000–300000) |
-| `triggerAgents` | string[] | `["coder"]` | Which agent names trigger the hook |
+| `triggerAgents` | string[] | `["coder"]` | Which agent names trigger the hook | An entry matches when the dispatched subagent name equals it exactly, equals its canonical role (suffix derivation), or equals its pre-7.204 first-token form (compatibility).
 
 **Auto-detection order**: TypeScript → Go → Rust → Python → C#. Python emits a `SKIPPED` advisory if no command is set.
 
