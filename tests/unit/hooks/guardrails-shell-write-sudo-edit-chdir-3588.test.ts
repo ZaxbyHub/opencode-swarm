@@ -112,6 +112,25 @@ describe('#3588 Fix 5: -D/--chdir carries onto edit outcomes (gate)', () => {
 		expect(got.verdict).toBe('DENIED');
 	}, 30_000);
 
+	// PR #3615 feedback PRR-015 (Copilot): a TILDE-leading operand must NOT
+	// be joined under the chdir — path.join would bury the `~` inside an
+	// in-scope literal (`src/~/shadow`) and admit a real $HOME-relative
+	// sudoedit target. Unqualified, the raw `~`-leading operand is flagged
+	// dynamic and fails closed.
+	test.each([
+		["cd src; sudo -D src -e '~/shadow'", /dynamic/i],
+		['sudo -D src -e ~/shadow', /dynamic/i],
+		["sudo -D src -e '~root/x'", /dynamic/i],
+	])(
+		'%s → DENY (tilde operand stays unqualified/dynamic)',
+		async (command, pattern) => {
+			const got = await gate(command);
+			expect(got.verdict).toBe('DENIED');
+			expect(got.message).toMatch(pattern);
+		},
+		30_000,
+	);
+
 	test('drive-qualified absolute is emitted unchanged (Windows spelling)', () => {
 		const analysis = detectPosixWrites('sudo -D src -e C:/Windows/x.txt');
 		const paths = analysis.writes

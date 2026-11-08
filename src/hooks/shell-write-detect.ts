@@ -2708,7 +2708,12 @@ function interactiveTailDeniesOnRejoin(
 		if (word === undefined) break;
 		// Whitespace or an operator/quote character the re-joined string
 		// would read unquoted (a leading `#` starts a comment there too).
-		if (/[\s;|&<>()`'"]/.test(word) || word.startsWith('#')) return true;
+		// PR #3615 feedback PRR-001: `$`, `{`, `}`, `,` are also rejoin-
+		// dangerous — parameter/brace expansion synthesizes word separators
+		// and operators at runtime (`touch${IFS}esc.txt`, `{rm,-rf,../outside}`)
+		// with NO literal operator in the word, so any expansion-bearing or
+		// brace-bearing tail word is unjudgeable here and fails closed.
+		if (/[\s;|&<>()`'"${},]/.test(word) || word.startsWith('#')) return true;
 	}
 	return false;
 }
@@ -3459,11 +3464,19 @@ function detectLauncherWrites(cmd: unknown): WriteTarget[] {
 				// `sudo -D src -e /etc/passwd` while real sudoedit ignores -D
 				// for absolute paths. The qualification lives INSIDE the
 				// expanded-branch emitter so brace behavior stays per-branch.
+				// PR #3615 feedback PRR-015 (Copilot): TILDE-leading operands
+				// are also emitted unchanged — joining would bury the leading
+				// `~` inside the chdir (`src/~/shadow`), hiding it from the
+				// dynamic-path marker and admitting an out-of-workspace
+				// sudoedit target as a literal in-scope path; unqualified,
+				// the raw `~`-leading operand is flagged dynamic (fail
+				// closed), matching sudo's home-relative sudoedit semantics.
 				const sudoChdir = walk.sudoChdir;
 				const qualifyChdir = (operandPath: string): string =>
 					sudoChdir !== undefined &&
 					operandPath !== '' &&
-					!isAbsolutePathSpelling(operandPath)
+					!isAbsolutePathSpelling(operandPath) &&
+					!operandPath.startsWith('~')
 						? path.join(sudoChdir, operandPath)
 						: operandPath;
 				// sudo -e operands are EDIT TARGETS (write-class) — each one
@@ -4003,22 +4016,43 @@ export function parseRmOptionTokens(tokens: readonly string[]): {
 	destructive: boolean;
 	targetIndices: number[];
 } {
+	// PR #3615 feedback PRR-002: the two feeds carry different token
+	// representations — the detector arm passes quote-removed AST words while
+	// dcExtractRecursiveRmTargets passes quote-preserving raw segments — so a
+	// quoted destructive flag (`rm "-rf" ../../outside`) was classified as an
+	// option by one layer and a target by the other, and the detector's
+	// emit-nothing hand-off left the shape owned by no layer (it also defeated
+	// the protected-.git, filesystem-root, and allowlist guards). Normalize
+	// ONE pair of matching surrounding quotes (what bash quote removal would
+	// strip) before every option/target classification so both layers see the
+	// same word.
+	const stripQuotes = (token: string): string => {
+		if (
+			token.length >= 2 &&
+			((token.startsWith('"') && token.endsWith('"')) ||
+				(token.startsWith("'") && token.endsWith("'")))
+		) {
+			return token.slice(1, -1);
+		}
+		return token;
+	};
 	// Pass 1: option tokens anywhere before `--`, classified.
 	let destructive = false;
 	let separatorIndex = tokens.length;
 	for (let i = 0; i < tokens.length; i += 1) {
 		const token = tokens[i];
 		if (token === undefined) break;
-		if (token === '--') {
+		const bare = stripQuotes(token);
+		if (bare === '--') {
 			separatorIndex = i;
 			break;
 		}
-		if (!token.startsWith('-') || token === '-') continue;
-		if (token === '--recursive' || token === '--force') {
+		if (!bare.startsWith('-') || bare === '-') continue;
+		if (bare === '--recursive' || bare === '--force') {
 			destructive = true;
 			continue;
 		}
-		if (!token.startsWith('--') && /[rRfF]/.test(token.slice(1))) {
+		if (!bare.startsWith('--') && /[rRfF]/.test(bare.slice(1))) {
 			destructive = true;
 		}
 	}
@@ -4028,12 +4062,13 @@ export function parseRmOptionTokens(tokens: readonly string[]): {
 	for (let i = 0; i < tokens.length; i += 1) {
 		const token = tokens[i];
 		if (token === undefined) break;
+		const bare = stripQuotes(token);
 		if (i === separatorIndex) continue;
 		if (
 			i < separatorIndex &&
-			token.startsWith('-') &&
-			token !== '-' &&
-			token !== '--'
+			bare.startsWith('-') &&
+			bare !== '-' &&
+			bare !== '--'
 		) {
 			continue;
 		}
@@ -9811,6 +9846,12 @@ function forWordListIsSingleLiteralWord(node: unknown): boolean {
 	if (Array.isArray(expansion) && expansion.length > 0) return false;
 	const text = (word as { text?: unknown }).text;
 	if (typeof text !== 'string' || text === '') return false;
+	// PR #3615 feedback PRR-004: hasUnquotedBraceExpansion runs a quadratic
+	// regex over the raw word text, and a for-list word is attacker-controlled
+	// command text on the per-call hot path — cap the length and treat an
+	// oversized word as expansion-bearing (denies the exemption, fail closed)
+	// instead of feeding it to the quadratic scan.
+	if (text.length > 4096) return false;
 	// `!` anywhere (history expansion multiplies words when histexpand is on)
 	// and `~` anywhere (tilde expansion) both disqualify — conservative on
 	// the exemption, which is the deny direction.

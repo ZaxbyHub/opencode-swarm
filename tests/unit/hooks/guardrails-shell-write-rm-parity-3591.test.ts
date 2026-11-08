@@ -92,8 +92,14 @@ function svVerdict(root: string, command: string): 'allow' | 'deny' {
 			root,
 		);
 		return result.allowed ? 'allow' : 'deny';
-	} catch {
-		return 'deny';
+	} catch (error) {
+		// PR #3615 feedback PRR-010: only a genuine scope-validate REJECTION
+		// counts as a deny — a thrown ROOT_ESCAPE/SCOPE violation is
+		// evaluateScopeValidate's deny channel, but any unrelated error must
+		// fail the leg loudly instead of masquerading as a deny verdict.
+		const message = (error as Error).message ?? '';
+		if (/ROOT_ESCAPE|SCOPE|DESTRUCTIVE/i.test(message)) return 'deny';
+		throw error;
 	}
 }
 

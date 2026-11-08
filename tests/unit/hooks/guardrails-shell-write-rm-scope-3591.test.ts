@@ -102,6 +102,32 @@ describe('#3591 Fix 6 shared two-pass parse (parseRmOptionTokens)', () => {
 		expect(p.targetIndices).toEqual([0, 2]);
 	});
 
+	// PR #3615 feedback PRR-002: the DC extractor feed carries quote-
+	// preserving tokens; the shared parse must classify a quoted flag
+	// identically to its quote-removed twin (bash strips the quotes, so
+	// `rm "-rf" x` IS `rm -rf x`).
+	test('QUOTED destructive flag: classified identically (PRR-002)', () => {
+		expect(parseRmOptionTokens(['"-rf"', '../../outside']).destructive).toBe(
+			true,
+		);
+		expect(parseRmOptionTokens(["'-rf'", '../../outside']).destructive).toBe(
+			true,
+		);
+		expect(
+			parseRmOptionTokens(['"--recursive"', '../../outside']).destructive,
+		).toBe(true);
+		expect(
+			parseRmOptionTokens(['foo', '"-f"', '../../outside']).destructive,
+		).toBe(true);
+		// A quoted option is consumed, not extracted as a target.
+		const p = parseRmOptionTokens(['"-rf"', '../../outside']);
+		expect(p.targetIndices).toEqual([1]);
+		// Quoted non-destructive options are consumed too.
+		const v = parseRmOptionTokens(['"-v"', 'src/temp.ts']);
+		expect(v.destructive).toBe(false);
+		expect(v.targetIndices).toEqual([1]);
+	});
+
 	test('non-destructive flags anywhere: not destructive, consumed', () => {
 		const p = parseRmOptionTokens(['a', '-v', '-i', 'b']);
 		expect(p.destructive).toBe(false);
@@ -288,12 +314,21 @@ describe('#3591 re-pins relocated from guardrails-swarm-path-evasion.adversarial
 			...config(),
 			block_destructive_commands: false,
 		});
-		await expect(
-			hooks.toolBefore(
+		let message = '';
+		try {
+			await hooks.toolBefore(
 				{ tool: 'bash', sessionID: SESSION, callID: 'r2' },
 				{ args: { command: 'rm .swarm/file' } },
-			),
-		).rejects.toThrow(/SCOPE_NOT_DECLARED|WRITE BLOCKED|^BLOCKED: /);
+			);
+		} catch (error) {
+			message = (error as Error).message;
+		}
+		// PR #3615 feedback PRR-010 (hermes Minor): pin the EXACT layer —
+		// the write-authorization SCOPE_NOT_DECLARED denial, and NOT the
+		// destructive arm's .swarm message (block_destructive_commands is
+		// false here, so that arm cannot own the operand).
+		expect(message).toMatch(/SCOPE_NOT_DECLARED/);
+		expect(message).not.toMatch(/targeting \.swarm/);
 	});
 });
 
@@ -326,6 +361,29 @@ describe('#3591 Fix 6 gate verdicts (coder, scope src/)', () => {
 		expect(got.verdict).toBe('DENIED');
 		expect(got.message).toContain('../../outside');
 	}, 30_000);
+
+	// PR #3615 feedback PRR-002: quoted destructive flags reach neither the
+	// detector's emit-nothing hand-off nor the extractor's quote-preserving
+	// option scan — every guard the unquoted twins hit must fire here too.
+	test.each([
+		['rm "-rf" ../../outside', /traversal|outside/i],
+		["rm '-rf' ../../outside", /traversal|outside/i],
+		['rm "-f" ../../outside', /traversal|outside/i],
+		['rm "--recursive" ../../outside', /traversal|outside/i],
+		['rm "-rf" .git', /\.git/i],
+		['rm "-rf" /', /filesystem root/i],
+		['rm "-rf" src', /allowlisted/i],
+		['rm "-rf" -- .git', /\.git/i],
+		['rm "-rf" ~', /allowlisted/i],
+	])(
+		'%s → DENY (quoted destructive flag)',
+		async (command, pattern) => {
+			const got = await gate(command);
+			expect(got.verdict).toBe('DENIED');
+			expect(got.message).toMatch(pattern);
+		},
+		30_000,
+	);
 
 	test('rmdir brace escape still denies (AC12 preserved)', async () => {
 		const got = await gate('rmdir src/{a,../esc}');

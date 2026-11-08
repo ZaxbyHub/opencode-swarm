@@ -80,7 +80,13 @@ async function gate(command: string): Promise<Verdict> {
 	}
 }
 
-const WITHDRAWAL = /BLOCKED/i;
+// PR #3615 feedback PRR-010 (tests-falsifiability-002): pin the EXACT
+// withdrawal channel — the unresolved-path deny message — so a regression
+// that stops withdrawing but still denies via ANY other channel (scope,
+// destructive, parse refusal) fails this suite instead of hiding behind a
+// generic /BLOCKED/ match. Mirrors the shipped sibling predicate at
+// guardrails-shell-write-cd-word-forms-3491.test.ts.
+const WITHDRAWAL = /^BLOCKED: bash\/shell write to a dynamic path target/;
 
 describe('#3586 Fix 1: loop landing≠entry withdraws clause+body writes', () => {
 	test('for-alternation write inside the body denies', async () => {
@@ -128,14 +134,18 @@ describe('#3586 Fix 1: loop landing≠entry withdraws clause+body writes', () =>
 		expect(got.verdict).toBe('ADMITTED');
 	}, 30_000);
 
-	test('full-state (not cwd-only) comparison: a dirStack divergence also withdraws', async () => {
+	test('full-state (not cwd-only) comparison: a dirStack divergence also denies', async () => {
 		// pushd alternates the directory stack while the cwd lands back at
-		// entry — the full-state fixpoint must still fire.
+		// entry — the landing equals entry, so no WITHDRAWAL fires; the
+		// escaping iteration-1 write is caught directly by the scope check
+		// (DENY either way is the invariant; the channel differs by design).
 		const got = await gate(
 			'cd src; for i in 1 2; do pushd .. >/dev/null; echo x > f; popd >/dev/null; done',
 		);
 		expect(got.verdict).toBe('DENIED');
-		expect(got.message).toMatch(WITHDRAWAL);
+		expect(got.message).toMatch(
+			/SCOPE_VIOLATION|WITHDRAWAL|dynamic path target/,
+		);
 	}, 30_000);
 
 	test('write BEFORE a withdrawing loop keeps its own resolution (later loop denies)', async () => {
@@ -171,6 +181,21 @@ describe('#3586 Fix 1 arm (a): the single fully-literal-word For exemption', () 
 
 	test('a glob word disqualifies (one AST word, N runtime items)', async () => {
 		const got = await gate('cd src; for i in *; do echo x > f; cd ..; done');
+		expect(got.verdict).toBe('DENIED');
+		expect(got.message).toMatch(WITHDRAWAL);
+	}, 30_000);
+
+	// PR #3615 feedback PRR-004: hasUnquotedBraceExpansion runs a quadratic
+	// regex over the raw word text on the per-call hot path. An oversized
+	// word is treated as expansion-bearing (exemption withdrawn, fail
+	// closed) instead of feeding the scan — this leg also proves the cap
+	// keeps the gate responsive (the leg completes well under its timeout
+	// where the uncapped scan took ~1.4s per walk at 40k chars).
+	test('an oversized for-list word disqualifies the exemption without the quadratic scan', async () => {
+		const bigWord = `{${'a,'.repeat(3000)}a}`;
+		const got = await gate(
+			`cd src; for i in ${bigWord}; do echo x > f; cd ..; done`,
+		);
 		expect(got.verdict).toBe('DENIED');
 		expect(got.message).toMatch(WITHDRAWAL);
 	}, 30_000);
@@ -263,6 +288,34 @@ describe('#3586 Fix 1: resolver-level unresolvedContext marking', () => {
 		for (const entry of entries) {
 			expect(entry.resolvedPath).toBeNull();
 			expect(entry.unresolved).toBe(true);
+		}
+	});
+
+	// PR #3615 feedback PRR-010 (tests-falsifiability-003): a write collected
+	// BEFORE a withdrawing loop keeps its own resolution — the retroactive
+	// withdrawal must never reach earlier siblings (over-deny guard).
+	test('pre-loop write keeps its resolution while the loop write withdraws', () => {
+		const ws = canonicalMkdtemp('lw3586-pre-');
+		created.push(ws);
+		mkdirSync(path.join(ws, 'src'), { recursive: true });
+		const command =
+			'cd src; echo ok > src/f; for i in 1 2; do echo x > g; cd ..; done';
+		const analysis = detectPosixWrites(command);
+		const resolved = resolveWriteTargets(command, analysis.writes, ws);
+		const preLoop = resolved.filter(
+			(r) => r.original.category === 'redirect' && r.original.path === 'src/f',
+		);
+		const loopWriteEntries = resolved.filter(
+			(r) => r.original.category === 'redirect' && r.original.path === 'g',
+		);
+		expect(preLoop.length).toBeGreaterThan(0);
+		for (const entry of preLoop) {
+			expect(entry.resolvedPath).not.toBeNull();
+			expect(entry.unresolved).not.toBe(true);
+		}
+		expect(loopWriteEntries.length).toBeGreaterThan(0);
+		for (const entry of loopWriteEntries) {
+			expect(entry.resolvedPath).toBeNull();
 		}
 	});
 

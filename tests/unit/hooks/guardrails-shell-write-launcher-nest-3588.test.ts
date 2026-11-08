@@ -184,6 +184,14 @@ describe('#3588 Fix 4: joined compound payloads under -i/-s deny', () => {
 		["sudo -i -- echo 'x > ../esc'", /interactive shell/i],
 		['sudo -i "echo `touch ../esc`"', /interactive shell/i],
 		["sudo -s sh -c 'echo x > ../esc'", /interactive shell/i],
+		// PR #3615 feedback PRR-001: parameter/brace expansion synthesizes
+		// word separators at runtime with NO literal operator in the word.
+		["sudo -i 'touch${IFS}esc.txt'", /interactive shell/i],
+		["sudo -i 'rm${IFS}-rf${IFS}../outside'", /interactive shell/i],
+		["sudo -s 'touch${IFS}esc.txt'", /interactive shell/i],
+		["sudo -i '{rm,-rf,../outside}'", /interactive shell/i],
+		["sudo -i '{touch,esc.txt}'", /interactive shell/i],
+		['sudo -i "rm${IFS}-rf${IFS}src/ok.txt"', /interactive shell/i],
 	])(
 		'%s denies',
 		async (command, pattern) => {
