@@ -13,7 +13,7 @@ description: >
   this process.
 metadata:
   audience: swarm-plugin
-  swarm-contract-digest: "6fd746bdfe22"
+  swarm-contract-digest: "b66e779a6a54"
 ---
 
 # Swarm PR Feedback
@@ -655,16 +655,17 @@ final critic, record the closure ledger in the durable session task-gates
 artifact (bound to the reviewed head SHA and fetch time); the critic
 reconciles it against its own fresh fetch — an input to verify, never a
 substitute for the fetch (#3607). Publish the ledger as a PR comment only
-after the reviewed commit is pushed and the remote head verified (see
-Publishing And Communication): under Profile A the workflow gate blocks PR
-comments until all four ordered phases settle, and the B/C publication
-invariants forbid any comment/body write before the verified push.
+after the reviewed commit is pushed and the remote head verified: under
+Profile A the gate blocks PR comments until all four phases settle and
+`complete_pr_workflow` arms the push; the B/C invariants likewise forbid
+comment/body writes before the verified push.
 
 Open the runtime's session task-gates artifact (durable-session-state
-guidance; on ZCode `.zcode/session/tasks/<slug>/gates.md`, the harness's own
-session task workspace elsewhere — never the repo root and never
-`.swarm/`) at ROUND START and append every reviewer and critic verdict (with
-HEAD/diff) as it lands, so a compaction or handoff re-enters from disk.
+guidance; on ZCode `.zcode/session/tasks/<slug>/gates.md` — never repo root,
+never `.swarm/`) at ROUND START — before any PR_FEEDBACK gate binding or
+after the verification lanes settle (the gate blocks writes in between) —
+and append every reviewer/critic verdict (with HEAD/diff) as it lands, so
+compaction or handoff re-enters from disk.
 
 ### Post-publish verification (mandatory after the PR is pushed)
 

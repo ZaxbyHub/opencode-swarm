@@ -125,7 +125,10 @@ describe('swarm-pr-feedback mechanical gates', () => {
 		expect(text).toContain('Publish the ledger as a PR comment only');
 		expect(text).toContain('after the reviewed commit is pushed');
 		expect(text).toContain('.zcode/session/tasks/<slug>/gates.md');
-		expect(text).not.toContain('publish the closure ledger as a PR comment');
+		// Case-insensitive: a capital-P reintroduction must also fail.
+		expect(text.toLowerCase()).not.toContain(
+			'publish the closure ledger as a pr comment',
+		);
 	});
 
 	test('#3607 round contract: intake-surfaces reference carries the re-fetch procedure and queue traps', () => {
