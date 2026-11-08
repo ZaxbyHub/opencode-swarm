@@ -11,7 +11,7 @@
  * - negative: a dispatched agent that matches NO trigger entry runs nothing
  *   (a gate-removal mutant — "every dispatch triggers a typecheck" — fails
  *   this leg);
- * - compat (PRR-005/F-01): a pre-#3330 naive first-token trigger entry
+ * - compat (PRR-005/F-01): a pre-#3330 naive prefix-stripped trigger entry
  *   ('custom' for dispatched 'acme_custom') keeps firing;
  * - raw-arm pin: a trigger entry spelled exactly as dispatched but distinct
  *   from the canonical role ('code-coder' -> canonical 'coder') keeps firing
@@ -86,7 +86,7 @@ describe('incremental-verify trigger gate — negative and compat legs (#3617)',
 		expect(await drive('reviewer')).toBe(false);
 	});
 
-	test('compat (PRR-005/F-01): pre-#3330 naive first-token entries keep firing', async () => {
+	test('compat (PRR-005/F-01): pre-#3330 naive prefix-stripped entries keep firing', async () => {
 		// Base replaced 'acme_custom' with 'custom'; configs listing that
 		// non-canonical form must keep working after the canonical swap.
 		makeHook(['custom']);

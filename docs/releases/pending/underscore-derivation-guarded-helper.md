@@ -32,8 +32,8 @@ issue: 3331
   shared suffix-based extractor instead of a naive first-underscore split, so
   `test_engineer` and double-prefixed forms (`mega_local_test_engineer`) match
   configured trigger agents instead of only the accidental raw-name arm.
-- Compatibility (#3617 review PRR-005/F-01): the pre-#3330 first-token form is
-  kept as an explicit third matching leg, so pre-upgrade `triggerAgents`
+- Compatibility (#3617 review PRR-005/F-01): the pre-#3330 prefix-stripped form
+  (the text after the first underscore) is kept as an explicit third matching leg, so pre-upgrade `triggerAgents`
   entries that only matched the naive split (`custom` for dispatched
   `acme_custom`, `oversight` for `critic_oversight`) keep firing.
 
