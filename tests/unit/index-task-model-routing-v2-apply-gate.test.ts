@@ -327,11 +327,38 @@ describe('index task-model routing — v2 apply gate + route swarm-id derivation
 		const plugin = await bootPlugin(directory);
 		const calls: EditorCall[] = [];
 		registerV2AgentTransformSurface(fakeCtx(calls));
-		await dispatchAndAdvance(plugin, 'call-collide', 'CASE_CODER');
-		// 'CASE_CODER' exact-matches nothing but case-insensitively matches BOTH
-		// 'Case_coder' and 'case_coder' — the ambiguity skip must refuse the
-		// sticky write entirely instead of silently writing whichever key
-		// hashed first (executed wrong-target probe at review time).
+		const advisories: string[] = [];
+		const originalLog = console.log;
+		const previousDebug = process.env.OPENCODE_SWARM_DEBUG;
+		process.env.OPENCODE_SWARM_DEBUG = '1';
+		console.log = (...args: unknown[]) => {
+			advisories.push(args.map(String).join(' '));
+		};
+		try {
+			// 'Case_CODER' derives swarm id 'Case' (a REAL swarm, so the chain
+			// resolves and the advance is accepted), exact-matches no roster key,
+			// and case-insensitively matches BOTH 'Case_coder' and 'case_coder'.
+			// (A name whose derived swarm id resolves nothing — e.g. 'CASE_CODER'
+			// — never advances and would pin the skip vacuously.)
+			await dispatchAndAdvance(plugin, 'call-collide', 'Case_CODER');
+		} finally {
+			console.log = originalLog;
+			if (previousDebug === undefined) {
+				delete process.env.OPENCODE_SWARM_DEBUG;
+			} else {
+				process.env.OPENCODE_SWARM_DEBUG = previousDebug;
+			}
+		}
+		// Reachability: the ambiguity branch itself must have fired.
+		expect(
+			advisories.some((line) =>
+				line.includes(
+					'v2 model apply skipped: registered roster keys collide case-insensitively for Case_CODER',
+				),
+			),
+		).toBe(true);
+		// The ambiguity skip must refuse the sticky write entirely instead of
+		// silently writing whichever key hashed first.
 		expect(calls.filter((call) => call.kind === 'update')).toEqual([]);
 		expect(calls.map((call) => call.name)).not.toContain('Case_coder');
 		expect(calls.map((call) => call.name)).not.toContain('case_coder');
