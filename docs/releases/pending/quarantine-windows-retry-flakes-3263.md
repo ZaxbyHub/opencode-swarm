@@ -14,6 +14,11 @@ issue: 3263
 - Updated the windows ledger `STATUS:` header from 8 to 10 active entries.
 - Added no entries to `scripts/ci/quarantined-tests.txt` or
   `scripts/ci/quarantined-tests-macos.txt`.
+- Added `tests/unit/scripts/ci/ci-yml-quarantine-3263.test.ts`, pinning
+  both windows-ledger entries (active-entry presence, windows-only
+  scoping, on-disk existence, Check 7 `OWNER`/`EXPIRY` metadata, and the
+  `STATUS:` 8→10 header count) plus the no-entry disposition of the five
+  root-fixed files (they must stay out of every ledger).
 
 ## Why
 
