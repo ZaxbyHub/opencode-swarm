@@ -4042,6 +4042,14 @@ async function initializeOpenCodeSwarm(
 									log(
 										`v2 model apply skipped: registered roster keys collide case-insensitively for ${sanitizeDiagnosticScope(routeModel.exactAgentName)}`,
 									);
+								} else {
+									// #3617 review F-02: an unregistered spelling
+									// skips the v2 apply observably (the advance
+									// itself remains recorded; v1 surfaces apply
+									// it at the next chat boundary).
+									log(
+										`v2 model apply skipped: no registered roster key for ${sanitizeDiagnosticScope(routeModel.exactAgentName)} (init-time roster snapshot)`,
+									);
 								}
 							}
 						}

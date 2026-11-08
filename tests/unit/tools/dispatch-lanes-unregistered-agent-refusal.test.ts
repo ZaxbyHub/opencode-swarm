@@ -142,9 +142,8 @@ describe('issue #2614 — unregistered lane agents are refused at dispatch time'
 			'mega_architect',
 			'mega_explorer',
 		];
-		// The DEFAULT swarm resolves a coder entry — without the prefixed-
-		// unresolvable arm this would launch against the default-swarm model
-		// under an agent name the host does not have (base refused it).
+		// End-to-end registry refusal coverage; the F-05 ARM itself is pinned
+		// by the deep-gate leg below (only startAsyncLanePrompt reaches it).
 		createAgents({
 			agents: { coder: { model: 'default/coder-model' } },
 		} as PluginConfig);
@@ -338,5 +337,72 @@ describe('issue #2614 — unregistered lane agents are refused at dispatch time'
 		);
 		expect(terminalError).toContain('refusing to launch');
 		fs.rmSync(directory, { recursive: true, force: true });
+	});
+
+	test('F-05 deep gate: prefixed-unresolvable agent refuses even with a default-swarm entry', async () => {
+		const directory = makeTempDir();
+		let promptAsyncCalled = false;
+		const ops = {
+			create: async () => ({
+				data: { id: 'session-3617-f05' },
+				error: undefined,
+			}),
+			promptAsync: async () => {
+				promptAsyncCalled = true;
+				return { data: {}, error: undefined };
+			},
+			delete: async () => undefined,
+		} as never as SessionOps;
+		_internals.getGeneratedAgentNames = () => [
+			'mega_architect',
+			'mega_explorer',
+		];
+		// The DEFAULT swarm resolves a coder entry — without the F-05
+		// prefixedUnresolvable arm, 'acme-prod-coder' (whose swarm id no
+		// longer resolves) would LAUNCH against the default-swarm model
+		// under an agent name the host does not have. This direct deep-gate
+		// call is the only surface that reaches the arm (the shallow execute
+		// leg is refused earlier by validateLaneAgent's registry check).
+		createAgents({
+			agents: { coder: { model: 'default/coder-model' } },
+		} as PluginConfig);
+
+		try {
+			await recordPendingDelegation(directory, {
+				correlationId: 'session-3617-f05',
+				jobId: null,
+				subagentSessionId: 'session-3617-f05',
+				parentSessionId: 'parent-3617-f05',
+				callID: 'call-3617-f05',
+				normalizedAgent: 'coder',
+				swarmPrefixedAgent: 'acme-prod-coder',
+				planTaskId: null,
+				evidenceTaskId: null,
+				mode: 'swarm-pr-review:base',
+			});
+			await _test_exports.startAsyncLanePrompt({
+				session: ops,
+				directory,
+				sessionId: 'session-3617-f05',
+				lane: {
+					id: 'lane-f05',
+					agent: 'acme-prod-coder',
+					prompt: 'probe',
+				} as never,
+				timeoutMs: 5_000,
+			});
+			expect(promptAsyncCalled).toBe(false);
+			const read = findByCorrelationIdDetailed(directory, 'session-3617-f05');
+			expect(read.status).not.toBe('uncertain');
+			const settled = read.value;
+			expect(settled).toBeDefined();
+			expect(settled?.status).toBe('error');
+			const terminalError = String(
+				settled?.terminalResult?.result.error ?? settled?.result?.error ?? '',
+			);
+			expect(terminalError).toContain('refusing to launch');
+		} finally {
+			fs.rmSync(directory, { recursive: true, force: true });
+		}
 	});
 });
