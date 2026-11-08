@@ -199,6 +199,36 @@ async function dispatchAndAdvance(
 	});
 }
 
+/**
+ * Runs `fn` with the debug-gated logger enabled and returns the lines it
+ * wrote. Skip legs assert their diagnostic FIRED so a regression that stops
+ * the advance from reaching the apply gate cannot pass vacuously (zero
+ * editor updates is trivially true when nothing advanced).
+ */
+async function captureDebugLog(fn: () => Promise<void>): Promise<string[]> {
+	const lines: string[] = [];
+	const originalLog = console.log;
+	const previousDebug = process.env.OPENCODE_SWARM_DEBUG;
+	process.env.OPENCODE_SWARM_DEBUG = '1';
+	console.log = (...args: unknown[]) => {
+		lines.push(args.map(String).join(' '));
+	};
+	try {
+		await fn();
+	} finally {
+		console.log = originalLog;
+		if (previousDebug === undefined) {
+			delete process.env.OPENCODE_SWARM_DEBUG;
+		} else {
+			process.env.OPENCODE_SWARM_DEBUG = previousDebug;
+		}
+	}
+	return lines;
+}
+
+const NO_KEY_SKIP =
+	'v2 model apply skipped: no registered roster key for code-coder';
+
 describe('index task-model routing — v2 apply gate + route swarm-id derivation (#3331)', () => {
 	let directory = '';
 	let previousXdg: string | undefined;
@@ -232,7 +262,11 @@ describe('index task-model routing — v2 apply gate + route swarm-id derivation
 		const plugin = await bootPlugin(directory);
 		const calls: EditorCall[] = [];
 		registerV2AgentTransformSurface(fakeCtx(calls));
-		await dispatchAndAdvance(plugin, 'call-hyphen', 'code-coder');
+		const lines = await captureDebugLog(() =>
+			dispatchAndAdvance(plugin, 'call-hyphen', 'code-coder'),
+		);
+		// Reachability: the advance reached the routed apply gate and skipped.
+		expect(lines.some((line) => line.includes(NO_KEY_SKIP))).toBe(true);
 		// The raw name matches no roster key: the apply is SKIPPED entirely —
 		// create-or-update must never see an unregistered spelling.
 		expect(calls.filter((call) => call.kind === 'update')).toEqual([]);
@@ -250,19 +284,23 @@ describe('index task-model routing — v2 apply gate + route swarm-id derivation
 		// No Task dispatch: the child's identity comes from the chat boundary's
 		// recorded agent only (the no-route arm). Hyphen spelling is
 		// unregistered -> skip; case variant resolves the roster key 'coder'.
-		await plugin['chat.message']?.(
-			{ sessionID: CHILD_SESSION, agent: 'code-coder' } as never,
-			{} as never,
-		);
-		await plugin.event?.({
-			event: {
-				type: 'session.error',
-				properties: {
-					sessionID: CHILD_SESSION,
-					error: { message: '429 rate_limit_exceeded: quota exhausted' },
+		const lines = await captureDebugLog(async () => {
+			await plugin['chat.message']?.(
+				{ sessionID: CHILD_SESSION, agent: 'code-coder' } as never,
+				{} as never,
+			);
+			await plugin.event?.({
+				event: {
+					type: 'session.error',
+					properties: {
+						sessionID: CHILD_SESSION,
+						error: { message: '429 rate_limit_exceeded: quota exhausted' },
+					},
 				},
-			},
+			});
 		});
+		// Reachability: the no-route arm reached its apply gate and skipped.
+		expect(lines.some((line) => line.includes(NO_KEY_SKIP))).toBe(true);
 		expect(calls.filter((call) => call.kind === 'update')).toEqual([]);
 		expect(calls.map((call) => call.name)).not.toContain('code-coder');
 
@@ -327,28 +365,14 @@ describe('index task-model routing — v2 apply gate + route swarm-id derivation
 		const plugin = await bootPlugin(directory);
 		const calls: EditorCall[] = [];
 		registerV2AgentTransformSurface(fakeCtx(calls));
-		const advisories: string[] = [];
-		const originalLog = console.log;
-		const previousDebug = process.env.OPENCODE_SWARM_DEBUG;
-		process.env.OPENCODE_SWARM_DEBUG = '1';
-		console.log = (...args: unknown[]) => {
-			advisories.push(args.map(String).join(' '));
-		};
-		try {
-			// 'Case_CODER' derives swarm id 'Case' (a REAL swarm, so the chain
-			// resolves and the advance is accepted), exact-matches no roster key,
-			// and case-insensitively matches BOTH 'Case_coder' and 'case_coder'.
-			// (A name whose derived swarm id resolves nothing — e.g. 'CASE_CODER'
-			// — never advances and would pin the skip vacuously.)
-			await dispatchAndAdvance(plugin, 'call-collide', 'Case_CODER');
-		} finally {
-			console.log = originalLog;
-			if (previousDebug === undefined) {
-				delete process.env.OPENCODE_SWARM_DEBUG;
-			} else {
-				process.env.OPENCODE_SWARM_DEBUG = previousDebug;
-			}
-		}
+		// 'Case_CODER' derives swarm id 'Case' (a REAL swarm, so the chain
+		// resolves and the advance is accepted), exact-matches no roster key,
+		// and case-insensitively matches BOTH 'Case_coder' and 'case_coder'.
+		// (A name whose derived swarm id resolves nothing — e.g. 'CASE_CODER'
+		// — never advances and would pin the skip vacuously.)
+		const advisories = await captureDebugLog(() =>
+			dispatchAndAdvance(plugin, 'call-collide', 'Case_CODER'),
+		);
 		// Reachability: the ambiguity branch itself must have fired.
 		expect(
 			advisories.some((line) =>
