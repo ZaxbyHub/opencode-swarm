@@ -88,4 +88,73 @@ describe('swarm-pr-feedback mechanical gates', () => {
 			expect(source).not.toContain('Task-tool dispatch as the final fallback');
 		});
 	}
+
+	// #3607 round-contract pins: the AC2/AC5 checks in the issue demand that a
+	// deletion of the new contract text FAILS the skills suite (the digest-stamp
+	// test alone is self-consistent and would pass after a delete + restamp).
+	// Prose needles are matched against whitespace-normalized text so markdown
+	// line wraps cannot mask a real deletion.
+	test('#3607 round contract: external-comment intake and critic enumeration are pinned', () => {
+		const text = read(CANONICAL).replace(/\s+/g, ' ');
+		expect(text).toContain('Re-fetch at every round boundary');
+		expect(text).toContain('re-fetch issue comments, inline review');
+		expect(text).toContain('before the closeout gate');
+		expect(text).toContain(
+			'references/intake-surfaces.md` (## Round-boundary re-fetch)',
+		);
+		expect(text).toContain('a delta approval is invalid');
+		expect(text).toContain('while unreviewed external feedback exists');
+		expect(text).toContain('fetches all three surfaces fresh');
+		expect(text).toContain(
+			'reconciles each external finding against the ledger',
+		);
+		expect(text).toContain(
+			'references/intake-surfaces.md` (## What counts as feedback or findings)',
+		);
+	});
+
+	test('#3607 round contract: durable pre-critic ledger and post-push publication are pinned', () => {
+		const text = read(CANONICAL).replace(/\s+/g, ' ');
+		// The pre-critic artifact is the DURABLE task-gates ledger, not a PR
+		// comment: PR-comment publication is gated until the push in every
+		// profile (pr-workflow-gate classifies gh pr comment as publication).
+		expect(text).toContain(
+			'record the closure ledger in the durable session task-gates',
+		);
+		expect(text).toContain('bound to the reviewed head SHA and fetch time');
+		expect(text).toContain('Publish the ledger as a PR comment only');
+		expect(text).toContain('after the reviewed commit is pushed');
+		expect(text).toContain('.zcode/session/tasks/<slug>/gates.md');
+		// Case-insensitive: a capital-P reintroduction must also fail.
+		expect(text.toLowerCase()).not.toContain(
+			'publish the closure ledger as a pr comment',
+		);
+	});
+
+	test('#3607 round contract: intake-surfaces reference carries the re-fetch procedure and queue traps', () => {
+		const intake = read(
+			'.opencode/skills/swarm-pr-feedback/references/intake-surfaces.md',
+		);
+		expect(intake).toContain('## Round-boundary re-fetch');
+		expect(intake).toContain('issues/<n>/comments --paginate');
+		expect(intake).toContain('pulls/<n>/comments --paginate');
+		expect(intake).toContain('pulls/<n>/reviews --paginate');
+		expect(intake).toContain('## What counts as feedback or findings');
+		expect(intake).toContain('## Merge-queue wait poll loop');
+		// Second-confirmation trap: a single null read is UNKNOWN, never eviction.
+		expect(intake).toContain('nulls=$((nulls + 1))');
+		expect(intake).toContain('-ge 2');
+		expect(intake).toContain('gh pr merge <N> --auto');
+		expect(intake).not.toContain('--auto --merge');
+		expect(intake).toContain('untrusted data');
+		// Error discrimination (#3611 hermes follow-up): a failed or error-bearing
+		// query is state-unknown and NEVER increments the null counter; the merge
+		// exit requires mergedAt non-null, not state alone.
+		expect(intake).toContain('grc=$?');
+		expect(intake).toContain('grep -q \'"errors"\'');
+		expect(intake).toContain('state unknown, counter held');
+		expect(intake).toContain('pullRequest missing from response');
+		expect(intake).toContain('[ -n "$mergedAt" ]');
+		expect(intake).not.toContain('Gate on state==MERGED + mergedAt');
+	});
 });

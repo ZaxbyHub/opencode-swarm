@@ -1,5 +1,35 @@
 # Changelog
 
+## [7.202.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.202.2...v7.202.3) (2026-11-07)
+
+
+### Bug Fixes
+
+* **guardrails:** [#3587](https://github.com/ZaxbyHub/opencode-swarm/issues/3587) — bounded, home-redacted file-authority denial rendering ([023a4e3](https://github.com/ZaxbyHub/opencode-swarm/commit/023a4e3348aa6fac159c5dcf4035800f690b9583))
+* **guardrails:** [#3592](https://github.com/ZaxbyHub/opencode-swarm/issues/3592) r3 — lexical normalization-first redactPath, reason escaping probe, shell-door bound disclosed ([fa60f9a](https://github.com/ZaxbyHub/opencode-swarm/commit/fa60f9aa2f6c9653bda851b5c6358a11e08b9e22))
+* **guardrails:** [#3592](https://github.com/ZaxbyHub/opencode-swarm/issues/3592) r3 round-2 — real-toolchain format, case-insensitive UNC share fold, wording precision ([ff2779a](https://github.com/ZaxbyHub/opencode-swarm/commit/ff2779aafff88637b3fe566a72fdf3132dbce17c))
+* **pr-review:** fail the observability append closed at the safe-integer generation ceiling (3593-R4) ([921779c](https://github.com/ZaxbyHub/opencode-swarm/commit/921779c96b720d048feddf0de417d373dbe9d6cb))
+* **pr-review:** fail the observability append closed at the safe-integer generation ceiling (3593-R4) ([236126a](https://github.com/ZaxbyHub/opencode-swarm/commit/236126a9c10db31d8020f22702bb29ee23145c2a))
+
+## [7.202.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.202.1...v7.202.2) (2026-11-07)
+
+
+### Bug Fixes
+
+* Follow-up from PR [#3533](https://github.com/ZaxbyHub/opencode-swarm/issues/3533): neutralize control characters in swarm-residue inventory names ([#3542](https://github.com/ZaxbyHub/opencode-swarm/issues/3542)) ([274bd21](https://github.com/ZaxbyHub/opencode-swarm/commit/274bd21c5d8b8a63e85b0364c00e9a57cbad830b))
+* **pr-review:** feedback round — interface parity for observabilityRevision, guardrail positive controls, incoming-generation carry leg, fragment precision ([c0b26ae](https://github.com/ZaxbyHub/opencode-swarm/commit/c0b26aed9d0ee1d348e886cbdedc44abc0fd1663))
+* **pr-review:** make the advisory append fail-open under lock exhaustion and give observability appends their own CAS generation ([5d8b760](https://github.com/ZaxbyHub/opencode-swarm/commit/5d8b760f49545c2331d40e4da6f4022da0200f74))
+* **services:** [#3580](https://github.com/ZaxbyHub/opencode-swarm/issues/3580) review round — scope fragment claims truthfully, strengthen pins ([2bf2a6b](https://github.com/ZaxbyHub/opencode-swarm/commit/2bf2a6bd3ef6cf055f880867cb3b930a595bf1f7))
+
+## [7.202.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.202.0...v7.202.1) (2026-11-07)
+
+
+### Bug Fixes
+
+* **guardrails:** PR [#3590](https://github.com/ZaxbyHub/opencode-swarm/issues/3590) feedback round — PRR-001 marker deny, sudo -e -- edit mode, scp drive-relative, explain/sv parity, post-merge reconciliation ([6bf0253](https://github.com/ZaxbyHub/opencode-swarm/commit/6bf0253770cf5c899f09f8c25f7254d9a7f3637f))
+* **guardrails:** shell write-gate detector residuals round 4 — nested sh-c withdrawal, wrapper-consumed tee/dd windows, rm brace expansion, scp destination grammar, full-body procsub spans ([91cf444](https://github.com/ZaxbyHub/opencode-swarm/commit/91cf444ac00c3e91cbdcc1e69297a3c9bc925027))
+* **guardrails:** shell write-gate detector residuals round 4 — nested sh-c withdrawal, wrapper-consumed tee/dd windows, rm brace expansion, scp destination grammar, full-body procsub spans (closes [#3569](https://github.com/ZaxbyHub/opencode-swarm/issues/3569) [#3570](https://github.com/ZaxbyHub/opencode-swarm/issues/3570)) ([c73a228](https://github.com/ZaxbyHub/opencode-swarm/commit/c73a2283394e88db621c6f18e99564e98ec73fcd))
+
 ## [7.202.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.201.2...v7.202.0) (2026-11-06)
 
 

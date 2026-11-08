@@ -290,6 +290,35 @@ export class ShellWriteBlockedError extends Error {
 	}
 }
 
+/**
+ * #3587: bounded, home-redacted rendering for untrusted denial-message text
+ * (the :1763 sibling-site spec, promoted to the shared helper for every
+ * `is not authorised to write` throw). Structured data channels
+ * (`ShellWriteBlockedError.writeTarget`, audit rows) keep exact values; only
+ * the operator-facing MESSAGE interior changes.
+ */
+export const renderDenialTarget = (target: string): string => {
+	// #3587 review round: match denyAuthority's escaping-relative home fold so
+	// the message and reason channels agree for OPERAND-shaped targets (the
+	// non-shell door) in EITHER separator flavor (`../home/<name>/…` and
+	// `..\Users\<name>\…`). Absolute targets — including the shell doors'
+	// resolved paths — fold only their leading profile via the lexical
+	// redactPath; a relative target folds only when its normalized form
+	// starts with `../`, proving it leaves the workspace (`./../…` and
+	// `src/../../…` spellings normalize the same way the reason channel's
+	// path.relative display does).
+	const normalized = path.isAbsolute(target)
+		? target
+		: path.posix.normalize(target.replace(/\\/g, '/'));
+	const display = normalized.startsWith('../')
+		? normalized.replace(/(^|\/)(?:home|Users)\/[^/]+/g, '$1~')
+		: target;
+	return sanitizeDiagnosticText(redactPath(display), 320);
+};
+
+/** Test seam for the denial-render helper (read-only usage in suites). */
+export const _internals = { renderDenialTarget };
+
 function throwDestructiveBlock(
 	destructiveCategory: string,
 	message: string,
@@ -1805,7 +1834,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				for (const prefix of universalDenyPrefixes) {
 					if (matchesAuthorityDenyPrefix(target, prefix, shellDirectory)) {
 						throw new ShellWriteBlockedError(
-							`WRITE BLOCKED: Agent "${shellWriteAgent}" is not authorised to write "${target}" (via shell). Reason: Path is under universal deny prefix "${prefix}"`,
+							`WRITE BLOCKED: Agent "${shellWriteAgent}" is not authorised to write "${renderDenialTarget(target)}" (via shell). Reason: Path is under universal deny prefix "${sanitizeDiagnosticText(prefix, 160)}"`,
 							{ writeTarget: target, writeOperator: opts?.writeOperator },
 						);
 					}
@@ -1847,7 +1876,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 								})
 							: undefined;
 					throw new ShellWriteBlockedError(
-						`WRITE BLOCKED: Agent "${shellWriteAgent}" is not authorised to write "${target}" (via shell). Reason: ${lenientAuthorityCheck.reason}${evidenceEventID ? ` Evidence event: ${evidenceEventID}.` : ''}`,
+						`WRITE BLOCKED: Agent "${shellWriteAgent}" is not authorised to write "${renderDenialTarget(target)}" (via shell). Reason: ${lenientAuthorityCheck.reason}${evidenceEventID ? ` Evidence event: ${evidenceEventID}.` : ''}`,
 						{ writeTarget: target, writeOperator: opts?.writeOperator },
 					);
 				}
@@ -1880,7 +1909,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 							})
 						: undefined;
 				throw new ShellWriteBlockedError(
-					`WRITE BLOCKED: Agent "${shellWriteAgent}" is not authorised to write "${target}" (via shell). Reason: ${authorityCheck.reason}${evidenceEventID ? ` Evidence event: ${evidenceEventID}.` : ''}`,
+					`WRITE BLOCKED: Agent "${shellWriteAgent}" is not authorised to write "${renderDenialTarget(target)}" (via shell). Reason: ${authorityCheck.reason}${evidenceEventID ? ` Evidence event: ${evidenceEventID}.` : ''}`,
 					{ writeTarget: target, writeOperator: opts?.writeOperator },
 				);
 			}
@@ -3725,7 +3754,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 						continue;
 					}
 					throw new Error(
-						`WRITE BLOCKED: Agent "${agentName}" is not authorised to write "${targetPath}". Reason: ${authorityCheck.reason}${evidenceEventID ? ` Evidence event: ${evidenceEventID}.` : ''}`,
+						`WRITE BLOCKED: Agent "${sanitizeDiagnosticText(agentName, 96)}" is not authorised to write "${renderDenialTarget(targetPath)}". Reason: ${authorityCheck.reason}${evidenceEventID ? ` Evidence event: ${evidenceEventID}.` : ''}`,
 					);
 				}
 
