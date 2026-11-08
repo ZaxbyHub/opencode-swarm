@@ -204,7 +204,9 @@ describe('trace-check.sh phase 3 rebind chain', () => {
 		);
 		const result = run(worktree, ['phase', '3', '--slug', 'issue-1']);
 		expect(result.code).toBe(0);
-		expect(result.out).toContain('OK artifact-identity-plan-critic-rebind-chain');
+		expect(result.out).toContain(
+			'OK artifact-identity-plan-critic-rebind-chain',
+		);
 	}, 60_000);
 
 	test('phase 3 without the rebind row still FAILS with both known FAILs', () => {
@@ -238,6 +240,8 @@ describe('trace-check.sh phase 4.5 stays strict under rebind rows', () => {
 		);
 		const result = run(worktree, ['phase', '4.5', '--slug', 'issue-1']);
 		expect(result.code).toBe(1);
-		expect(result.out).toContain('FAIL artifact-identity-implementation-review');
+		expect(result.out).toContain(
+			'FAIL artifact-identity-implementation-review',
+		);
 	}, 60_000);
 });
