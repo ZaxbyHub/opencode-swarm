@@ -9497,6 +9497,18 @@ function collectWritesWithNodes(
 			// withdrawal flag AT PUSH TIME, and iteration 2+ runs at landing
 			// directories the single modeled pass never enumerated.
 			const sliceStart = out.length;
+			// #3586 Fix 1, review round 4.5 finding 2: the fixpoint compares
+			// against the loop's ENTRY state, snapshotted BEFORE the clause
+			// walk — the clause re-executes every iteration in the current
+			// shell, so a clause-resident cd drifts the per-iteration starting
+			// directory in a way a body-vs-post-clause comparison can never
+			// see (`cd src/sub; i=0; while cd ..; [ "$i" -lt 2 ]; do
+			// i=$((i+1)); echo x > f; done` — the body is idempotent against
+			// the POST-clause state, yet real bash writes src/sub/f and then
+			// the escaping workspace-root f). One full iteration = clause AND
+			// body; the landing must equal the PRE-clause entry for
+			// idempotence.
+			const entryState = cloneDirectoryState(state);
 			// The clause runs (at least once) in the current shell — walk its
 			// effects on the parent state so body writes pair with the true
 			// first-iteration context.
@@ -9513,9 +9525,10 @@ function collectWritesWithNodes(
 			}
 			if (node.do) {
 				// One full body iteration on a COPY: the loop's post-state is
-				// accepted ONLY on a full-state fixpoint (one-iteration landing
-				// equals the entry state — idempotent across iterations);
-				// anything else withdraws (v4 constraint 3).
+				// accepted ONLY on a full-state fixpoint (one full iteration —
+				// clause AND body — lands back at the loop's PRE-clause entry
+				// state, idempotent across iterations); anything else
+				// withdraws (v4 constraint 3).
 				const bodyState = cloneDirectoryState(state);
 				collectWritesWithNodes(
 					node.do,
@@ -9526,7 +9539,7 @@ function collectWritesWithNodes(
 					functionsTable,
 					familyDynamic,
 				);
-				if (!directoryStatesEqual(bodyState, state)) {
+				if (!directoryStatesEqual(bodyState, entryState)) {
 					state.withdrawn = true;
 					// #3586 Fix 1 (END-STATE after 14 plan-critic rounds): the
 					// landing ≠ the entry state, so the single modeled pass did

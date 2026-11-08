@@ -236,6 +236,59 @@ describe('#3591 Fix 6a detector rm arm', () => {
 	});
 });
 
+describe('#3591 re-pins relocated from guardrails-swarm-path-evasion.adversarial', () => {
+	// The evasion suite's two `rm` rows flipped when Fix 6a made a
+	// non-recursive rm's operands write targets (AC10 policy: scope
+	// containment modeled on unlink). The FR-006 ratchet forbids growing the
+	// 852-line evasion file, so the full rationale and the strengthened
+	// assertions live HERE; the evasion rows keep compact re-pinned
+	// expectations pointing at this block.
+	//
+	// Rationale: a scope-LESS coder session performing `rm src/temp.ts` is
+	// now denied SCOPE_NOT_DECLARED — EXACTLY like `echo x > src/f`,
+	// `unlink src/temp.ts`, or any other write-capable command under
+	// invariant 9 (the reviewer verified the identical flip for unlink in
+	// the same fixture class). The rows' original intent still holds: the
+	// `.swarm` guard does NOT fire on a non-.swarm path, and disabling the
+	// destructive arm no longer leaves a flagless `rm .swarm/file`
+	// unchecked — the write-authorization layer owns it. The in-scope ALLOW
+	// with a declared scope is pinned above and in -rm-parity-3591.
+	const SESSION = 'evasion-repin-session';
+
+	test('rm src/temp.ts (scope-less coder): SCOPE_NOT_DECLARED, no .swarm message', async () => {
+		const ws = canonicalMkdtemp('rm3591-repin-');
+		created.push(ws);
+		mkdirSync(path.join(ws, 'src'), { recursive: true });
+		resetSwarmState();
+		startAgentSession(SESSION, 'coder');
+		const hooks = createGuardrailsHooks(ws, undefined, config());
+		await expect(
+			hooks.toolBefore(
+				{ tool: 'bash', sessionID: SESSION, callID: 'r1' },
+				{ args: { command: 'rm src/temp.ts' } },
+			),
+		).rejects.toThrow(/SCOPE_NOT_DECLARED/);
+	});
+
+	test('rm .swarm/file (block_destructive_commands=false): write-layer scope block', async () => {
+		const ws = canonicalMkdtemp('rm3591-repin-');
+		created.push(ws);
+		mkdirSync(path.join(ws, 'src'), { recursive: true });
+		resetSwarmState();
+		startAgentSession(SESSION, 'coder');
+		const hooks = createGuardrailsHooks(ws, undefined, {
+			...config(),
+			block_destructive_commands: false,
+		});
+		await expect(
+			hooks.toolBefore(
+				{ tool: 'bash', sessionID: SESSION, callID: 'r2' },
+				{ args: { command: 'rm .swarm/file' } },
+			),
+		).rejects.toThrow(/SCOPE_NOT_DECLARED|WRITE BLOCKED|^BLOCKED: /);
+	});
+});
+
 describe('#3591 Fix 6 gate verdicts (coder, scope src/)', () => {
 	test.each([
 		'rm ../esc',
