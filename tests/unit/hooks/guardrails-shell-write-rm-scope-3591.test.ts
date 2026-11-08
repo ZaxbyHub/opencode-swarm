@@ -103,9 +103,6 @@ describe('#3591 Fix 6 shared two-pass parse (parseRmOptionTokens)', () => {
 		expect(p.targetIndices).toEqual([0, 2]);
 	});
 
-	// PR #3615 feedback PRR-002: the DC extractor feed carries quote-
-	// preserving tokens; the shared parse must classify a quoted flag
-	// identically to its quote-removed twin (bash strips the quotes, so
 	// PR #3615 feedback PRR-002: the DC feed is decoded at the boundary
 	// (dcDecodeShellWord in destructive-command.ts), so parseRmOptionTokens
 	// always receives the quote-removed / escape-decoded words bash hands rm.

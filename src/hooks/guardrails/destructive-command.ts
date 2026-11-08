@@ -331,10 +331,13 @@ function shSerializeWords(words: string[]): string {
  * actually hands the executable — matching quote pairs removed (single
  * quotes literal-inner, double quotes honoring backslash escapes) and
  * backslash escapes honored outside quotes — so the DC extractor's
- * quote-PRESERVING token feed classifies identically to the detector's
- * quote-removed AST-word feed. Brace-expansion characters survive decoding
- * (bash expands them after this point, and the brace-borne check below
- * needs them intact).
+ * quote-PRESERVING token feed classifies options/targets identically to the
+ * detector's quote-removed AST-word feed. The decoded word is for OPTION
+ * CLASSIFICATION ONLY: brace handling (braceBorne / expandBraceRaw) stays
+ * on the RAW token, whose quote/escape context is what #3569 4.5 review
+ * pinned (a QUOTED brace `rm -f 'src/{a,b}'` stays literal because bash
+ * quote removal hides the braces from expansion before the braces are
+ * ever seen).
  */
 export function dcDecodeShellWord(token: string): string {
 	let out = '';
@@ -2122,18 +2125,23 @@ export function dcExtractRecursiveRmTargets(segment: string): string[] | null {
 
 	// PR #3615 feedback PRR-002 (delta round): decode the operand/option
 	// tokens into the words bash hands rm — matching quote pairs removed and
-	// backslash escapes honored — so this feed classifies identically to the
-	// detector's quote-removed AST words. Before this decode, a quoted
-	// destructive flag (`rm "-rf" x`, `rm '-rf' x`) was an option to the
-	// detector and a target to this extractor (no layer owned it: the
-	// protected-.git, filesystem-root, and allowlist guards were all
-	// defeated), and an escape-decoded flag (`rm \-rf x`) was invisible here
-	// while the detector saw the decoded option (recursive deletes admitted
-	// outside the declared scope). The verb word stays normalized through
+	// backslash escapes honored — SOLELY for the option/target
+	// classification. The DECODED array feeds parseRmOptionTokens so a
+	// quoted destructive flag (`rm "-rf" x`, `rm '-rf' x`) and an
+	// escape-decoded one (`rm \-rf x`) classify identically to the
+	// detector's quote-removed AST words (previously: an option to the
+	// detector, a target to this extractor — no layer owned the shape and
+	// the protected-.git, filesystem-root, and allowlist guards were all
+	// defeated). The RAW tokens stay authoritative for brace handling:
+	// expandBraceRaw is quote-aware (#3569 4.5 review — a QUOTED brace
+	// `rm -f 'src/{a,b}'` stays literal because bash quote-removal hides
+	// the braces from expansion), and decoding first would destroy that
+	// context (delta-review round 2: benign quoted in-scope literal deletes
+	// flipped ADMIT → DENY). The verb word stays normalized through
 	// dcNormalizeVerbWord (basename/.exe handling) above.
-	for (let i = 1; i < tokens.length; i += 1) {
-		tokens[i] = dcDecodeShellWord(tokens[i]);
-	}
+	const decodedTokens = tokens.map((token) =>
+		token === undefined ? token : dcDecodeShellWord(token),
+	);
 
 	// #3591 ABSORB (Fix 6b): GNU getopt permutation — options may appear
 	// AFTER operands, so the old leading-token-only flag read missed
@@ -2145,7 +2153,7 @@ export function dcExtractRecursiveRmTargets(segment: string): string[] | null {
 	// target. A late-flag rm is therefore treated as recursive
 	// (fail-closed). No POSIXLY_CORRECT detection (fail-closed per the
 	// #3591 ABSORB decision).
-	const rmParse = parseRmOptionTokens(tokens.slice(1));
+	const rmParse = parseRmOptionTokens(decodedTokens.slice(1));
 	const destructive = rmParse.destructive;
 	const rmTargetTokens = rmParse.targetIndices.map(
 		(idx) => tokens[idx + 1] ?? '',
