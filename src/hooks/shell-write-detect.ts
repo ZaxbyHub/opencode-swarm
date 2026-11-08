@@ -4016,43 +4016,31 @@ export function parseRmOptionTokens(tokens: readonly string[]): {
 	destructive: boolean;
 	targetIndices: number[];
 } {
-	// PR #3615 feedback PRR-002: the two feeds carry different token
-	// representations — the detector arm passes quote-removed AST words while
-	// dcExtractRecursiveRmTargets passes quote-preserving raw segments — so a
-	// quoted destructive flag (`rm "-rf" ../../outside`) was classified as an
-	// option by one layer and a target by the other, and the detector's
-	// emit-nothing hand-off left the shape owned by no layer (it also defeated
-	// the protected-.git, filesystem-root, and allowlist guards). Normalize
-	// ONE pair of matching surrounding quotes (what bash quote removal would
-	// strip) before every option/target classification so both layers see the
-	// same word.
-	const stripQuotes = (token: string): string => {
-		if (
-			token.length >= 2 &&
-			((token.startsWith('"') && token.endsWith('"')) ||
-				(token.startsWith("'") && token.endsWith("'")))
-		) {
-			return token.slice(1, -1);
-		}
-		return token;
-	};
+	// PR #3615 feedback PRR-002: both feeds into this parse are the
+	// quote-removed / escape-decoded words bash hands rm — the detector arm
+	// passes AST words (bash-parser quote removal) and dcExtractRecursiveRmTargets
+	// decodes its raw segment tokens at the boundary (dcDecodeShellWord). A
+	// quoted destructive flag (`rm "-rf" ../../outside`) and an escape-decoded
+	// one (`rm \-rf ../outside`) therefore classify identically on both
+	// layers; a word whose LITERAL text still starts with a dash here is a
+	// real option, and a word still carrying quote characters is a real
+	// filename character (bash quote removal is already done upstream).
 	// Pass 1: option tokens anywhere before `--`, classified.
 	let destructive = false;
 	let separatorIndex = tokens.length;
 	for (let i = 0; i < tokens.length; i += 1) {
 		const token = tokens[i];
 		if (token === undefined) break;
-		const bare = stripQuotes(token);
-		if (bare === '--') {
+		if (token === '--') {
 			separatorIndex = i;
 			break;
 		}
-		if (!bare.startsWith('-') || bare === '-') continue;
-		if (bare === '--recursive' || bare === '--force') {
+		if (!token.startsWith('-') || token === '-') continue;
+		if (token === '--recursive' || token === '--force') {
 			destructive = true;
 			continue;
 		}
-		if (!bare.startsWith('--') && /[rRfF]/.test(bare.slice(1))) {
+		if (!token.startsWith('--') && /[rRfF]/.test(token.slice(1))) {
 			destructive = true;
 		}
 	}
@@ -4062,13 +4050,12 @@ export function parseRmOptionTokens(tokens: readonly string[]): {
 	for (let i = 0; i < tokens.length; i += 1) {
 		const token = tokens[i];
 		if (token === undefined) break;
-		const bare = stripQuotes(token);
 		if (i === separatorIndex) continue;
 		if (
 			i < separatorIndex &&
-			bare.startsWith('-') &&
-			bare !== '-' &&
-			bare !== '--'
+			token.startsWith('-') &&
+			token !== '-' &&
+			token !== '--'
 		) {
 			continue;
 		}

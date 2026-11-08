@@ -326,6 +326,66 @@ function shSerializeWords(words: string[]): string {
  * dequoting (a drive-led word's backslashes are path separators, not bash
  * escapes — dequoting first would collapse `C:\Windows` to `C:Windows`).
  */
+/**
+ * PR #3615 feedback PRR-002: decode ONE raw segment token into the word bash
+ * actually hands the executable — matching quote pairs removed (single
+ * quotes literal-inner, double quotes honoring backslash escapes) and
+ * backslash escapes honored outside quotes — so the DC extractor's
+ * quote-PRESERVING token feed classifies identically to the detector's
+ * quote-removed AST-word feed. Brace-expansion characters survive decoding
+ * (bash expands them after this point, and the brace-borne check below
+ * needs them intact).
+ */
+export function dcDecodeShellWord(token: string): string {
+	let out = '';
+	let i = 0;
+	while (i < token.length) {
+		const ch = token[i];
+		if (ch === "'") {
+			// Single quotes: everything to the closing quote is literal.
+			const end = token.indexOf("'", i + 1);
+			if (end === -1) {
+				out += token.slice(i + 1);
+				break;
+			}
+			out += token.slice(i + 1, end);
+			i = end + 1;
+			continue;
+		}
+		if (ch === '"') {
+			// Double quotes: backslash escapes only $ ` " \ newline.
+			i += 1;
+			while (i < token.length) {
+				const c = token[i];
+				if (
+					c === '\\' &&
+					i + 1 < token.length &&
+					'$`"\\\n'.includes(token[i + 1])
+				) {
+					out += token[i + 1];
+					i += 2;
+					continue;
+				}
+				if (c === '"') {
+					i += 1;
+					break;
+				}
+				out += c;
+				i += 1;
+			}
+			continue;
+		}
+		if (ch === '\\' && i + 1 < token.length) {
+			out += token[i + 1];
+			i += 2;
+			continue;
+		}
+		out += ch;
+		i += 1;
+	}
+	return out;
+}
+
 export function dcNormalizeVerbWord(word: string): string {
 	let w = word;
 	// Strip up to two matched surrounding quote pairs (`"rm"`, `"'\''rm'"'`).
@@ -2059,6 +2119,21 @@ export function dcExtractRecursiveRmTargets(segment: string): string[] | null {
 		dcNormalizeVerbWord(tokens[0] ?? '').replace(/\.[Ee][Xx][Ee]$/, '') !== 'rm'
 	)
 		return null;
+
+	// PR #3615 feedback PRR-002 (delta round): decode the operand/option
+	// tokens into the words bash hands rm — matching quote pairs removed and
+	// backslash escapes honored — so this feed classifies identically to the
+	// detector's quote-removed AST words. Before this decode, a quoted
+	// destructive flag (`rm "-rf" x`, `rm '-rf' x`) was an option to the
+	// detector and a target to this extractor (no layer owned it: the
+	// protected-.git, filesystem-root, and allowlist guards were all
+	// defeated), and an escape-decoded flag (`rm \-rf x`) was invisible here
+	// while the detector saw the decoded option (recursive deletes admitted
+	// outside the declared scope). The verb word stays normalized through
+	// dcNormalizeVerbWord (basename/.exe handling) above.
+	for (let i = 1; i < tokens.length; i += 1) {
+		tokens[i] = dcDecodeShellWord(tokens[i]);
+	}
 
 	// #3591 ABSORB (Fix 6b): GNU getopt permutation — options may appear
 	// AFTER operands, so the old leading-token-only flag read missed
