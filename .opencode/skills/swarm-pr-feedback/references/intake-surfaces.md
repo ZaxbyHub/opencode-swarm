@@ -189,7 +189,7 @@ for i in $(seq 1 60); do
   fi
   if [ "$q" = "null" ] && [ "$st" = "OPEN" ]; then
     nulls=$((nulls + 1))   # one transient null is UNKNOWN (autoMergeRequest flickers null)
-    [ "$nulls" -ge 2 ] && { echo "ENTRY-GONE: verify removed_from_merge_queue on the issue timeline, then re-enqueue with gh pr merge <N> --auto"; exit 2; }
+    [ "$nulls" -ge 2 ] && { echo "ENTRY-GONE: verify removed_from_merge_queue on the issue timeline, then re-enqueue with gh pr merge <N> --repo <owner>/<repo> --match-head-commit <SHA>"; exit 2; }
   else
     nulls=0
   fi
@@ -198,7 +198,8 @@ exit 3
 ```
 
 Traps encoded: state==MERGED **with a non-null mergedAt** is the only reliable
-merge signal; `gh pr merge --auto` prints only the informational strategy line
+merge signal; a re-enqueue reuses the bound, head-matched merge command (never a
+bare `--auto` that skips `--match-head-commit`); `gh pr merge --auto` prints only the informational strategy line
 and takes no strategy flag on a queue branch (branch protection decides the
 method) — verify enrollment via the GraphQL entry; a first null entry read is
 UNKNOWN, not eviction — exit only after a second consecutive null from
