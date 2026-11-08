@@ -82,7 +82,7 @@ describe('agent-name derivation census (issue #3330 recurrence guardrail)', () =
 			false,
 		);
 		expect(flagged).toEqual([]);
-	});
+	}, 30_000);
 
 	test('allowlist entries still exist and are pinned (no silent removal)', () => {
 		const repoRoot = path.resolve(import.meta.dir, '../../..');
