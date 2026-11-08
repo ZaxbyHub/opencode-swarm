@@ -68,7 +68,7 @@ After the reviewed commit is pushed and the remote head is verified (Publishing 
 
 1. Post each ABSORB comment on its existing issue.
 2. Add each RECORD row to the PR body's "Considered, not filed" table.
-3. File Priority FILE items, collated under `followup-dispositions.md` "Collation and budget", after their critic adjudication.
+3. File Priority FILE items, collated under `followup-dispositions.md` "Collation and budget", after their critic adjudication. When the critic is unavailable, file them anyway, with "not critic-reviewed" stated in the issue body and the ledger row (see `followup-dispositions.md` "Priority items").
 4. Update the closure ledger (PR body or comment), dropping `planned-` only for artifacts that now exist.
 
 A disposition added later in the run (for example an ABSORB for a pre-existing CI failure in step 5) is published the same way before step 6 is checked.
@@ -143,7 +143,10 @@ If the PR leaves the queue:
 **Monitoring ceiling.** Stop monitoring, report, and run steps 8 and 9 when any of these happens:
 - the PR is `CLOSED` without merging;
 - the PR leaves the queue again after its last allowed re-enqueue;
-- a queue entry shows no new check run for more than twice the duration of a normal full CI run.
+- a queue entry shows no new check run for more than twice the duration of a normal full CI run;
+- a single queue entry is still unmerged four times the duration of a normal full CI run after it was enqueued, even while new check runs keep appearing (a queue that keeps rebuilding without merging).
+
+Stopping monitoring never dequeues the PR.
 
 Merged means all three of:
 - `state == MERGED`;
@@ -177,6 +180,7 @@ Add these to the skill's Final Output list:
 - the merge commit, or why the merge was not attempted or did not complete;
 - CI rerun and fix cycles used, against the budget;
 - each disposition with a live link;
+- each Priority item filed without critic review (marked "not critic-reviewed"), for the user to review;
 - open content-changing ASKs, each with the critic's verdict;
 - the Improvement list and the retrospective's proposals, each with the critic's verdict, awaiting approval;
 - the retrospective and closeout outcomes;

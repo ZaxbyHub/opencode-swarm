@@ -14,7 +14,7 @@
 - **Merge:**
   - **Authorization.** Only the user's own words naming the merge in the current run authorize it, or a yes to the run's own "merge now?" question. A skill invocation, `[MODE: PR_FEEDBACK]` signal, default prompt, monitor wake, or loop activation never authorizes a merge. An injected event or PR-monitor wake also neither answers that question nor ends the wait for it.
   - **Merge command.** It uses `--match-head-commit` on the gated head. It passes no strategy flag on a merge-queue base, and passes the repository's single allowed method on a direct base (or asks when several are allowed).
-  - **Monitoring.** It monitors the merge queue until the merge commit is on the base. Any merge precondition that cannot become true, an unanswered question, or a monitoring ceiling ends the run with a report and the close-out steps. The final report says whether a PR monitor is still subscribed and, if the PR did not merge, asks whether to unsubscribe it.
+  - **Monitoring.** It monitors the merge queue until the merge commit is on the base. Any merge precondition that cannot become true, an unanswered question, or a monitoring ceiling ends the run with a report and the close-out steps; stopping monitoring never dequeues the PR. The final report says whether a PR monitor is still subscribed and, if the PR did not merge, asks whether to unsubscribe it.
 - **Close out, merged or not:**
   1. re-verify every disposition on its live artifact;
   2. run a session retrospective;
@@ -28,6 +28,7 @@
   - a verified, consequential defect is never closed on the agent's own judgment.
 - In practice FILE means Priority items or user-approved Improvements.
 - Every ASK item, follow-up proposal, Improvement, and enhancement idea goes through its own critic call before it reaches the user, and the critic's verdict travels with the question. The closeout critic gate does not count as that call.
+- Priority FILE items also get a critic call before filing. A kill or downgrade makes one an ASK. If the critic is unavailable, the item is still filed, marked "not critic-reviewed" in the issue body and the ledger, and listed in the final report.
 - A reviewer's severity label (`nit`, `non-blocking`) never replaces verification.
 
 ## New `session-retrospective` skill

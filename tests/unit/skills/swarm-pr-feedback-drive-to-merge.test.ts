@@ -258,7 +258,7 @@ describe('drive-to-merge: sequence rules', () => {
 			'When several are allowed and the contract names none, ask the user; never guess.',
 		);
 		expect(merge).toContain(
-			'- a queue entry shows no new check run for more than twice the duration of a normal full CI run.',
+			'- a queue entry shows no new check run for more than twice the duration of a normal full CI run;',
 		);
 		expect(merge).toContain('re-enqueue at most 3 times in total');
 		expect(merge).toContain(

@@ -22,7 +22,7 @@ In practice `FILE` means Priority items plus items the user approved. Every othe
 
 ## Critic review before the user sees it
 
-Before any `ASK` item, follow-up proposal, Improvement, or enhancement idea reaches the user, and before any Priority `FILE` item is filed, an independent critic adjudicates it. The critic may kill, downgrade, reframe, split, or endorse each item. Its verdict and one-line rationale travel with the question, and the user decides with the critic's input in hand, never on a bare ask.
+Before any `ASK` item, follow-up proposal, Improvement, or enhancement idea reaches the user, and before any Priority `FILE` item is filed, an independent critic adjudicates it (for a Priority item whose critic is unavailable, see "Priority items" below). The critic may kill, downgrade, reframe, split, or endorse each item. Its verdict and one-line rationale travel with the question, and the user decides with the critic's input in hand, never on a bare ask.
 
 - **Who the critic is.** The first available of:
   - the swarm's critic agent where the harness defines one (for example `swarm-critic` in ZCode, or the prefixed `<swarm>_critic` in OpenCode);
@@ -39,7 +39,7 @@ Before any `ASK` item, follow-up proposal, Improvement, or enhancement idea reac
 - **Failure.** If the critic is unavailable after a bounded retry, say so next to each item. Never present the item as critic-reviewed.
 - **Priority items.**
   - A critic kill or downgrade of a Priority `FILE` item turns it into an `ASK` for the user.
-  - When the critic is unavailable, the Priority item is still filed, with that fact stated in the issue and the ledger.
+  - When the critic is unavailable, the Priority item is still filed: it is already verified (gate 1), and holding it as an `ASK` that may go unanswered would drop a verified wedge, fail-open, security, or data-loss defect. State "not critic-reviewed" next to the item in the issue body and in its ledger row (a note, not a GitHub label), and list it in the final report for the user to review.
 
 ## Necessity gate
 
