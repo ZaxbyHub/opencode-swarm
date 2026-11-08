@@ -147,5 +147,14 @@ describe('swarm-pr-feedback mechanical gates', () => {
 		expect(intake).toContain('gh pr merge <N> --auto');
 		expect(intake).not.toContain('--auto --merge');
 		expect(intake).toContain('untrusted data');
+		// Error discrimination (#3611 hermes follow-up): a failed or error-bearing
+		// query is state-unknown and NEVER increments the null counter; the merge
+		// exit requires mergedAt non-null, not state alone.
+		expect(intake).toContain('grc=$?');
+		expect(intake).toContain('grep -q \'"errors"\'');
+		expect(intake).toContain('state unknown, counter held');
+		expect(intake).toContain('pullRequest missing from response');
+		expect(intake).toContain('[ -n "$mergedAt" ]');
+		expect(intake).not.toContain('Gate on state==MERGED + mergedAt');
 	});
 });

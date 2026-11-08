@@ -162,17 +162,31 @@ Copy this template instead of re-deriving the monitor each merge watch (#3607
 retrospective; encodes the repo's known queue traps):
 
 ```bash
-# Exit 0 merged | 2 entry-gone-while-open (only after 2 consecutive null reads) | 3 budget out.
+# Exit 0 merged | 2 entry-gone-while-open (only after 2 consecutive null reads
+# from SUCCESSFUL queries) | 3 budget out.
 nulls=0
 for i in $(seq 1 60); do
   sleep 150
   v=$(gh pr view <N> --repo <owner>/<repo> --json state,mergedAt,mergeCommit --jq '"\(.state)|\(.mergedAt)|\(.mergeCommit.oid)"')
   st=${v%%|*}
-  [ "$st" = "MERGED" ] && { echo "MERGED: $v"; exit 0; }
-  q=$(gh api graphql -f query='{repository(owner:"<owner>",name:"<repo>"){pullRequest(number:<N>){mergeQueueEntry{position state}}}}' \
-      -q '.data.repository.pullRequest.mergeQueueEntry')
+  mergedAt=$(printf '%s' "$v" | cut -d'|' -f2)
+  # Gate on state==MERGED AND mergedAt non-null (state alone is trusted only
+  # together with the merge timestamp), NEVER mergeStateStatus (lags UNKNOWN).
+  if [ "$st" = "MERGED" ] && [ -n "$mergedAt" ] && [ "$mergedAt" != "null" ]; then
+    echo "MERGED: $v"; exit 0
+  fi
+  resp=$(gh api graphql -f query='{repository(owner:"<owner>",name:"<repo>"){pullRequest(number:<N>){mergeQueueEntry{position state}}}}' 2>/dev/null)
+  grc=$?
+  if [ "$grc" -ne 0 ] || printf '%s' "$resp" | grep -q '"errors"'; then
+    echo "poll$i: $v | queue: QUERY-FAILED (transport or GraphQL errors) — state unknown, counter held"
+    continue   # a failed query is NEVER eviction evidence
+  fi
+  pr=$(printf '%s' "$resp" | jq -r '.data.repository.pullRequest.number // empty')
+  q=$(printf '%s' "$resp" | jq -r '.data.repository.pullRequest.mergeQueueEntry // "null"')
   echo "poll$i: $v | queue: $q"
-  # Gate on state==MERGED + mergedAt, NEVER mergeStateStatus (lags at UNKNOWN).
+  if [ -z "$pr" ]; then
+    echo "poll$i: pullRequest missing from response — state unknown, counter held"; continue
+  fi
   if [ "$q" = "null" ] && [ "$st" = "OPEN" ]; then
     nulls=$((nulls + 1))   # one transient null is UNKNOWN (autoMergeRequest flickers null)
     [ "$nulls" -ge 2 ] && { echo "ENTRY-GONE: verify removed_from_merge_queue on the issue timeline, then re-enqueue with gh pr merge <N> --auto"; exit 2; }
@@ -183,9 +197,11 @@ done
 exit 3
 ```
 
-Traps encoded: mergedAt+mergeCommit is the only reliable merge signal;
-`gh pr merge --auto` prints only the informational strategy line and takes no
-strategy flag on a queue branch (branch protection decides the method) —
-verify enrollment via the GraphQL entry; a first null entry read is UNKNOWN,
-not eviction — exit only after a second consecutive null (optionally
-corroborated by a removed_from_merge_queue timeline event), then re-enqueue.
+Traps encoded: state==MERGED **with a non-null mergedAt** is the only reliable
+merge signal; `gh pr merge --auto` prints only the informational strategy line
+and takes no strategy flag on a queue branch (branch protection decides the
+method) — verify enrollment via the GraphQL entry; a first null entry read is
+UNKNOWN, not eviction — exit only after a second consecutive null from
+SUCCESSFUL queries (transport failures and GraphQL `errors` responses are
+state-unknown and never increment the counter; optionally corroborate with a
+removed_from_merge_queue timeline event), then re-enqueue.
