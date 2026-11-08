@@ -10,7 +10,7 @@ description: >
 disable-model-invocation: true
 metadata:
   audience: swarm-plugin
-  swarm-contract-digest: "9d4e5cf10c36"
+  swarm-contract-digest: "db0fcef20ebe"
 ---
 
 # Swarm CI Monitor
@@ -257,14 +257,14 @@ run it in addition to, never instead of, Step 3.
 ### 4a. Execute the merge
 
 ```
-gh pr merge <N> --match-head-commit <SHA>           # merge-queue base: no method flag
-gh pr merge <N> --match-head-commit <SHA> --merge   # direct base, when merge commits are the method
-gh pr merge <N> --match-head-commit <SHA> --squash  # direct base, when squash is the method
-gh pr merge <N> --match-head-commit <SHA> --rebase  # direct base, when rebase is the method
+gh pr merge <N> --repo <owner>/<repo> --match-head-commit <SHA>           # merge-queue base: no method flag
+gh pr merge <N> --repo <owner>/<repo> --match-head-commit <SHA> --merge   # direct base, when merge commits are the method
+gh pr merge <N> --repo <owner>/<repo> --match-head-commit <SHA> --squash  # direct base, when squash is the method
+gh pr merge <N> --repo <owner>/<repo> --match-head-commit <SHA> --rebase  # direct base, when rebase is the method
 ```
 
 Tell the two bases apart with this command (it works in bash and PowerShell; take
-`<base>` from `gh pr view <N> --json baseRefName`):
+`<base>` from `gh pr view <N> --repo <owner>/<repo> --json baseRefName`):
 
 ```
 gh api graphql -f owner=<owner> -f name=<repo> -f branch=<base> -f query='query($owner: String!, $name: String!, $branch: String!) { repository(owner: $owner, name: $name) { mergeQueue(branch: $branch) { id } } }'
@@ -283,7 +283,7 @@ direct base. If the call fails, ask the user; never guess.
   no merge strategy is required", and the queue determines the method. On a
   direct-merge base, a non-interactive `gh pr merge` refuses without a method:
   - pass the method the repository contract names;
-  - otherwise pass the only one `gh repo view --json
+  - otherwise pass the only one `gh repo view <owner>/<repo> --json
     mergeCommitAllowed,squashMergeAllowed,rebaseMergeAllowed` reports as
     allowed;
   - when several are allowed and none is named, ask the user. Never guess.
@@ -307,7 +307,7 @@ direct base. If the call fails, ask the user; never guess.
    the queue, not merged directly. This is **not a failure.** GitHub re-runs
    the required workflows against the queued change on top of the current base
    (and any earlier-queued PRs) before merging; there is no commit SHA yet.
-   Poll `gh pr view <N> --json state,mergedAt,mergeCommit,mergeStateStatus`
+   Poll `gh pr view <N> --repo <owner>/<repo> --json state,mergedAt,mergeCommit,mergeStateStatus`
    every 1-2 minutes. Do not apply 4b's short mismatch-retry window to this
    state — a queue entry can legitimately take several minutes to tens of
    minutes while it re-runs required workflows from scratch. Escalate as a
@@ -331,12 +331,12 @@ git object DB — so this gate does not share the stale-fetch failure mode of
 Steps 2 and 3:
 
 ```
-git fetch origin <base-branch>
-git rev-parse origin/<base-branch>
+git fetch <remote> <base-branch>     # <remote> points at <owner>/<repo>
+git rev-parse <remote>/<base-branch>
 ```
 
 The merge SHA captured in 4a (case 1 or case 2) must equal
-`origin/<base-branch>`. The GitHub API can report `state: MERGED` under
+`<remote>/<base-branch>`. The GitHub API can report `state: MERGED` under
 eventual-consistency lag; the local object DB cannot lie — once fetched, the
 commit either is or is not the base tip.
 

@@ -144,7 +144,9 @@ describe('swarm-pr-feedback mechanical gates', () => {
 		// Second-confirmation trap: a single null read is UNKNOWN, never eviction.
 		expect(intake).toContain('nulls=$((nulls + 1))');
 		expect(intake).toContain('-ge 2');
-		expect(intake).toContain('gh pr merge <N> --auto');
+		expect(intake).toContain(
+			're-enqueue with gh pr merge <N> --repo <owner>/<repo> --match-head-commit <SHA>',
+		);
 		expect(intake).not.toContain('--auto --merge');
 		expect(intake).toContain('untrusted data');
 		// Error discrimination (#3611 hermes follow-up): a failed or error-bearing
