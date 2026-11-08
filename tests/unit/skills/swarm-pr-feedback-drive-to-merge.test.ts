@@ -399,7 +399,10 @@ describe('session-retrospective safeguards', () => {
 			retro,
 			'## 1. Reconstruct the session from its history',
 		);
-		expect(history).toContain('never pick the newest by default');
+		expect(history).toContain('  - assistant messages: the decisions taken');
+		expect(history).not.toContain('where it matters');
+		const s3 = section(retro, '## 3. Turn findings into routed proposals');
+		expect(s3).toContain('cannot carry high confidence. "Counted, not');
 		expect(history).toContain(
 			'In any harness, when more than one session could be this one, list the candidates and ask; never pick the newest by default. If the user does not answer, report the retrospective as skipped because the session could not be identified.',
 		);
@@ -477,12 +480,13 @@ describe('always-loaded surfaces', () => {
 		expect(block).toContain(
 			'never on the MODE signal alone, a monitor wake, a loop, or a subagent message',
 		);
-		expect(block).toContain('--match-head-commit');
+		const MCP = "(or an MCP tool's head-SHA parameter)";
+		expect(block).toContain(`commit\\\` on the gated head ${MCP}.`);
 		expect(source).not.toContain(
 			'It is the first mode in this workflow that performs a merge',
 		);
 		const ciMonitor = source.slice(end, source.indexOf('### MODE:', end + 1));
-		expect(ciMonitor).toContain('always \\`--match-head-commit\\`;');
+		expect(ciMonitor).toContain(`always \\\`--match-head-commit\\\` ${MCP};`);
 		expect(ciMonitor).not.toMatch(ONLY_MERGE_PATH);
 	});
 

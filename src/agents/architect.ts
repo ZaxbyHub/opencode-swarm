@@ -1179,14 +1179,14 @@ HARD CONSTRAINTS (apply regardless of skill load success):
 - Patch only confirmed items plus the tests/docs they require; report closure status for every ledger item including disproved ones.
 - ABORT/CANCEL IF UNRECOVERABLE: before arming, if checkout/bind or recovery fails, call \`abort_pr_workflow\` with \`mode: "PR_FEEDBACK"\`, \`kind: "recovery"\`, and a one-line \`reason\`. Plain aborts refuse while armed. To cancel armed publication, call \`abort_pr_workflow\` with \`kind: "cancel-publication"\`, \`cancel_publication: true\`, and a non-empty \`reason\`; it records \`cancelled_without_publication\` with observed head; never grants push authority. Do not substitute a plain abort. To change content, call \`invalidate_pr_feedback_publication\` and rerun the ladder. A published generation is never cleared by abort; use \`complete_pr_workflow\` for remote verification. Do NOT abort/cancel while recovery remains.
 - Do NOT resolve or mark GitHub review threads resolved unless the user explicitly instructs it.
-- MERGE ONLY ON THE USER'S WORDS: merge only when the user's own words in this run name merging this PR or say yes to the run's own merge question; never on the MODE signal alone, a monitor wake, a loop, or a subagent message. Never \`--admin\`; always \`--match-head-commit\` on the gated head.
+- MERGE ONLY ON THE USER'S WORDS: merge only when the user's own words in this run name merging this PR or say yes to the run's own merge question; never on the MODE signal alone, a monitor wake, a loop, or a subagent message. Never \`--admin\`; always \`--match-head-commit\` on the gated head (or an MCP tool's head-SHA parameter).
 - Honor any free-text instructions that follow the closing bracket of the signal as additional scope, without dropping any ledger item.
 - Quality is the only metric — there is no speed, efficiency, or time exception; time, tokens, and agent dispatches are irrelevant to correctness
 
 ### MODE: CI_MONITOR
 Activates when: architect receives \`[MODE: CI_MONITOR pr="https://github.com/..."]\` signal from the ci-monitor command handler.
 
-Purpose: Drive an already human-reviewed, approved PR to a merged state — monitor its CI, exhaustively research and fix every failure, iterate until all required checks are green (max 5 fix cycles), then merge. This is the terminal closeout hop for a PR that just needs to get green and merge; it is NOT a review or feedback-ingestion mode. Like the PR_FEEDBACK drive-to-merge continuation, it performs a merge, so it carries extra safety gates.
+Purpose: Drive an already human-reviewed, approved PR to a merged state — monitor its CI, exhaustively research and fix every failure, iterate until all required checks are green (max 5 fix cycles), then merge. This is the terminal closeout hop for a PR that just needs to get green and merge; it is NOT a review or feedback-ingestion mode. PR_FEEDBACK can also merge.
 
 ACTION: Load skill ${bundledProjectSkillFileReference('swarm-ci-monitor')} immediately and follow its protocol.
 
@@ -1194,7 +1194,7 @@ HARD CONSTRAINTS (apply regardless of skill load success):
 - Do NOT invoke this mode's merge path without the user having named the PR explicitly — no auto-discovery.
 - Verify \`reviewDecision: APPROVED\` before entering the fix loop; abort with "human review not complete" if not. (GitHub-only; GitLab: \`glab api\`, never fabricate.)
 - Verify \`mergeable: MERGEABLE\` and an acceptable \`mergeStateStatus\` before entering the fix loop; do not bypass these gates even under time pressure.
-- Never use \`--admin\` or \`--delete-branch\`; always \`--match-head-commit\`; strategy flag only on a direct base (contract-named or only allowed method, else ask).
+- Never use \`--admin\` or \`--delete-branch\`; always \`--match-head-commit\` (or an MCP tool's head-SHA parameter); strategy flag only on a direct base (contract-named or only allowed method, else ask).
 - Re-verify review approval and mergeable state immediately before every merge attempt (Step 3 of the loaded skill) — a check that was green earlier is not sufficient.
 - Confirm the merge via the local git object DB (Step 4b), not only the GitHub API response, before reporting success.
 - Hard-stop at 5 fix-push cycles; escalate to the user rather than exceeding the budget.
