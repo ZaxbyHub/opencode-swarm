@@ -103,12 +103,19 @@ describe('#3022 v2 setup + advance wiring (source contract)', () => {
 	test('both index.ts session.error advance arms apply the advanced model on v2', () => {
 		const calls = indexSrc.match(/void applyV2AgentModelOverride\(/g) ?? [];
 		expect(calls.length).toBe(2);
-		// Both call sites key on the exact registered agent name.
+		// #3331: both call sites resolve the REGISTERED roster key
+		// (case-insensitive) and skip when unregistered — never the raw
+		// exactAgentName spelling, which the create-or-update editor would
+		// mint as a phantom agent.
 		expect(
-			indexSrc.match(
-				/applyV2AgentModelOverride\(\n\s+routeModel\.exactAgentName,/g,
-			)?.length,
+			indexSrc.match(/const registeredName = Object\.keys\(agents\)\.find\(/g)
+				?.length,
 		).toBe(2);
+		expect(
+			indexSrc.match(/void applyV2AgentModelOverride\((?:\n\s+)?registeredName,/g)
+				?.length,
+		).toBe(2);
+		expect(indexSrc.match(/routeModel\.exactAgentName,/g)?.length ?? 0).toBe(0);
 	});
 
 	test('index.ts injects the fresh-tables builder into the v2 setup deps (PRR-046)', () => {

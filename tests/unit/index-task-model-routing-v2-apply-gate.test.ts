@@ -228,6 +228,53 @@ describe('index task-model routing — v2 apply gate + route swarm-id derivation
 		expect(calls.map((call) => call.name)).not.toContain('code-coder');
 	});
 
+	test('no-route advance (primary session, no Task dispatch) applies the same gate', async () => {
+		writeAgentsConfig(directory, {
+			coder: { model: PRIMARY_MODEL, fallback_models: [FALLBACK_MODEL] },
+		});
+		writePlan(directory);
+		const plugin = await bootPlugin(directory);
+		const calls: EditorCall[] = [];
+		registerV2AgentTransformSurface(fakeCtx(calls));
+		// No Task dispatch: the child's identity comes from the chat boundary's
+		// recorded agent only (the no-route arm). Hyphen spelling is
+		// unregistered -> skip; case variant resolves the roster key 'coder'.
+		await plugin['chat.message']?.(
+			{ sessionID: CHILD_SESSION, agent: 'code-coder' } as never,
+			{} as never,
+		);
+		await plugin.event?.({
+			event: {
+				type: 'session.error',
+				properties: {
+					sessionID: CHILD_SESSION,
+					error: { message: '429 rate_limit_exceeded: quota exhausted' },
+				},
+			},
+		});
+		expect(calls.filter((call) => call.kind === 'update')).toEqual([]);
+		expect(calls.map((call) => call.name)).not.toContain('code-coder');
+
+		calls.length = 0;
+		await plugin['chat.message']?.(
+			{ sessionID: 'child-session-2', agent: 'Coder' } as never,
+			{} as never,
+		);
+		await plugin.event?.({
+			event: {
+				type: 'session.error',
+				properties: {
+					sessionID: 'child-session-2',
+					error: { message: '429 rate_limit_exceeded: quota exhausted' },
+				},
+			},
+		});
+		const updates = calls.filter((call) => call.kind === 'update');
+		expect(updates.length).toBe(1);
+		expect(updates[0]?.name).toBe('coder');
+		expect(calls.map((call) => call.name)).not.toContain('Coder');
+	});
+
 	test('case-variant advance updates only the registered spelling', async () => {
 		writeAgentsConfig(directory, {
 			coder: { model: PRIMARY_MODEL, fallback_models: [FALLBACK_MODEL] },

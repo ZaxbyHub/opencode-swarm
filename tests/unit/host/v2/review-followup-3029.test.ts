@@ -212,9 +212,13 @@ describe('#3029 review round 2 — sticky gate + normalized modelString call-sit
 			'const chainModel = routedAdvance.modelString;',
 		);
 		expect(chainAt).toBeGreaterThan(-1);
-		const window = source.slice(chainAt, chainAt + 400);
-		expect(window).toContain('void applyV2AgentModelOverride(');
-		expect(window).toContain('routeModel.exactAgentName');
-		expect(window).toContain('chainModel,');
+		// #3331: the routed arm resolves the registered roster key inside the
+		// same sticky-apply block (the gate sits between chainModel and the
+		// call), so the window spans to the apply invocation.
+		const applyAt = source.indexOf('void applyV2AgentModelOverride(', chainAt);
+		expect(applyAt).toBeGreaterThan(chainAt);
+		const window = source.slice(chainAt, applyAt + 80);
+		expect(window).toContain('registeredName');
+		expect(window).toContain('chainModel');
 	});
 });
