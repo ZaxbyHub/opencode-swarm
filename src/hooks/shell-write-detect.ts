@@ -9504,7 +9504,7 @@ function collectWritesWithNodes(
 			// directory in a way a body-vs-post-clause comparison can never
 			// see (`cd src/sub; i=0; while cd ..; [ "$i" -lt 2 ]; do
 			// i=$((i+1)); echo x > f; done` — the body is idempotent against
-			// the POST-clause state, yet real bash writes src/sub/f and then
+			// the POST-clause state, yet real bash writes src/f and then
 			// the escaping workspace-root f). One full iteration = clause AND
 			// body; the landing must equal the PRE-clause entry for
 			// idempotence.

@@ -21,7 +21,7 @@ the shell semantics did.
    withdrawn fail-closed. The comparison basis is the PRE-clause entry
    state, so a `cd` living in the re-executing clause drifts too:
    `cd src/sub; i=0; while cd ..; [ "$i" -lt 2 ]; do i=$((i+1)); echo x >
-   f; done` (real bash writes `src/sub/f` and then the escaping
+   f; done` (real bash writes `src/f` and then the escaping
    workspace-root `f`) now denies. Net-zero loop bodies (no net `cd`)
    keep admitting. The only exemption is a `for` whose word list is a
    single fully-literal word (no glob, brace, tilde, `!` or expansion) in

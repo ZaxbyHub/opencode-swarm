@@ -262,12 +262,20 @@ describe('#3591 re-pins relocated from guardrails-swarm-path-evasion.adversarial
 		resetSwarmState();
 		startAgentSession(SESSION, 'coder');
 		const hooks = createGuardrailsHooks(ws, undefined, config());
-		await expect(
-			hooks.toolBefore(
+		let message = '';
+		try {
+			await hooks.toolBefore(
 				{ tool: 'bash', sessionID: SESSION, callID: 'r1' },
 				{ args: { command: 'rm src/temp.ts' } },
-			),
-		).rejects.toThrow(/SCOPE_NOT_DECLARED/);
+			);
+		} catch (error) {
+			message = (error as Error).message;
+		}
+		// Denied by the write-authorization layer…
+		expect(message).toMatch(/SCOPE_NOT_DECLARED/);
+		// …and independently NOT by the destructive arm's .swarm guard (the
+		// original row's intent: a non-.swarm path never trips that arm).
+		expect(message).not.toMatch(/targeting \.swarm/);
 	});
 
 	test('rm .swarm/file (block_destructive_commands=false): write-layer scope block', async () => {

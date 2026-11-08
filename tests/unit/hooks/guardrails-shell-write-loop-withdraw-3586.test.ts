@@ -112,7 +112,7 @@ describe('#3586 Fix 1: loop landing≠entry withdraws clause+body writes', () =>
 		// Reviewer-executed shape: the cd lives in the while CLAUSE, which
 		// re-executes every iteration — the body is idempotent against the
 		// POST-clause state (the pre-4.5 comparison basis), so the drift
-		// never fired and the gate admitted while real bash writes src/sub/f
+		// never fired and the gate admitted while real bash writes src/f
 		// (iteration 1) and then the escaping workspace-root f (iteration 2).
 		// The fixpoint now compares the body landing against the PRE-clause
 		// ENTRY state (pinned as frozen C1 leg clause-cd-drift).
