@@ -4025,6 +4025,10 @@ export function parseRmOptionTokens(tokens: readonly string[]): {
 	// layers; a word whose LITERAL text still starts with a dash here is a
 	// real option, and a word still carrying quote characters is a real
 	// filename character (bash quote removal is already done upstream).
+	// Fidelity bound: the boundary decode covers pair quotes and backslash
+	// escapes only — ANSI-C `$'…'` / locale `$"…"` words are NOT decoded
+	// (bash-parser rejects them, so the write gate's parse-error deny is
+	// the backstop for those spellings).
 	// Pass 1: option tokens anywhere before `--`, classified.
 	let destructive = false;
 	let separatorIndex = tokens.length;

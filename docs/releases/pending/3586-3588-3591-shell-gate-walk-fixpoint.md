@@ -102,9 +102,11 @@ branch is checked) — no change needed.
   operands keep admitting. This also covers flagless `rm .swarm/file` when
   `block_destructive_commands` is disabled — the write-authorization layer
   owns the operand, not the destructive arm. (FORCED/recursive `rm` shapes
-  under `block_destructive_commands: false` are intentionally unchanged:
-  that configuration explicitly opts out of destructive-command blocking,
-  the same opt-out the previous release shipped.)
+  under `block_destructive_commands: false` are unchanged, and no layer
+  judges them: the destructive gate is switched off, and the write
+  detector hands destructive rm shapes to that gate instead of emitting
+  their operands as writes — so `rm -rf ../outside` admits in that
+  configuration. Pre-existing; see Residuals.)
 
 ## Supersedes
 
@@ -115,7 +117,22 @@ item 6 above closes it, so that residual no longer applies.
 ## Residuals (disclosed)
 
 - GNU long-option abbreviations (`rm --rec`, `--forc`) are not recognized as
-  recursive/forced (exact-match only; pre-existing).
+  recursive/forced (exact-match only; pre-existing). The surfaces also
+  disagree on them: `rm --rec src` is admitted by the gate and by
+  `explain`, but `scope_validate` reports `DESTRUCTIVE_COMMAND`.
+- `sudo -i` changes to the target user's home directory before running the
+  command (sudo(8); verified with sudo 1.9.15p5: `cd /tmp/ws && sudo -i tee
+  src/ok.txt` writes `/root/src/ok.txt`). The gate resolves the relative
+  target at the workspace cwd, so `sudo -i tee src/ok.txt` admits while the
+  real write lands under the target home, as that user. `sudo -s` keeps the
+  cwd and is resolved correctly. Pre-existing, not changed here.
+- Forced/recursive `rm` under `block_destructive_commands: false` is judged
+  by no layer (see Behavior changes, item 6 note). Pre-existing.
+- The brace-expansion regex scan is length-capped only at the `for`
+  word-list position. The sed picker, `curl -o` destination and `scp`
+  destination checks still scan unbounded words (a 40k-char unclosed-brace
+  `curl -o` operand costs about 1.5 s per walk, and several stack).
+  Pre-existing.
 - Launch-environment sanitization (`BASH_ENV` / `BASH_FUNC_*` scrubbing at
   the shell-spawn layer) is not in scope; the loop withdrawal is the
   command-text-level mitigation.
