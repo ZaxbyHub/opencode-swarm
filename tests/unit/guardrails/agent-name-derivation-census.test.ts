@@ -69,8 +69,10 @@ const NAIVE_FIRST_UNDERSCORE = new RegExp(
 // whitespace normalization).
 const LENGTH_DELTA_SLICE = new RegExp(
 	[
-		/\.(?:slice|substring)\(\s*0\s*,\s*[A-Za-z0-9_$.]+\.length\s*-\s*[A-Za-z0-9_$.]+\.length\s*-\s*1\s*,?\s*\)/.source,
-		/\.(?:slice|substring)\(\s*0\s*,\s*[A-Za-z0-9_$.]+\.length\s*-\s*1\s*-\s*[A-Za-z0-9_$.]+\.length\s*,?\s*\)/.source,
+		/\.(?:slice|substring)\(\s*0\s*,\s*[A-Za-z0-9_$.]+\.length\s*-\s*[A-Za-z0-9_$.]+\.length\s*-\s*1\s*,?\s*\)/
+			.source,
+		/\.(?:slice|substring)\(\s*0\s*,\s*[A-Za-z0-9_$.]+\.length\s*-\s*1\s*-\s*[A-Za-z0-9_$.]+\.length\s*,?\s*\)/
+			.source,
 	].join('|'),
 );
 

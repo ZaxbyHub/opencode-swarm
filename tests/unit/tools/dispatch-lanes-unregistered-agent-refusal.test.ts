@@ -29,10 +29,12 @@ import {
 	test,
 } from 'bun:test';
 import fs from 'node:fs';
+import { createAgents } from '../../../src/agents/index.js';
 import {
 	findByCorrelationIdDetailed,
 	recordPendingDelegation,
 } from '../../../src/background/pending-delegations.js';
+import type { PluginConfig } from '../../../src/config/index.js';
 import {
 	_internals,
 	_test_exports,
@@ -41,8 +43,6 @@ import {
 	type SessionOps,
 } from '../../../src/tools/dispatch-lanes.js';
 import { canonicalMkdtemp } from '../../../tests/helpers/tmpdir.js';
-import { createAgents } from '../../../src/agents/index.js';
-import type { PluginConfig } from '../../../src/config/index.js';
 
 const originalInternals = { ..._internals };
 
@@ -138,7 +138,10 @@ describe('issue #2614 — unregistered lane agents are refused at dispatch time'
 		const { ops, createCalls, promptCalls } = stubSyncOps();
 		_internals.getSessionOps = () => ops;
 		// A registry of prefixed names proves 'acme-prod-coder' is not a member.
-		_internals.getGeneratedAgentNames = () => ['mega_architect', 'mega_explorer'];
+		_internals.getGeneratedAgentNames = () => [
+			'mega_architect',
+			'mega_explorer',
+		];
 		// The DEFAULT swarm resolves a coder entry — without the prefixed-
 		// unresolvable arm this would launch against the default-swarm model
 		// under an agent name the host does not have (base refused it).
@@ -148,7 +151,9 @@ describe('issue #2614 — unregistered lane agents are refused at dispatch time'
 
 		try {
 			const result = await executeDispatchLanes(
-				{ lanes: [{ id: 'hyphen', agent: 'acme-prod-coder', prompt: 'probe' }] },
+				{
+					lanes: [{ id: 'hyphen', agent: 'acme-prod-coder', prompt: 'probe' }],
+				},
 				directory,
 				{ callerAgent: 'build' },
 			);

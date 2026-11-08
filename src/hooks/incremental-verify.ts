@@ -201,7 +201,7 @@ export function createIncrementalVerifyHook(
 			// matches neither arm below (issue #3322; the #2960 defect
 			// class). The raw-name arm stays as an explicit compatibility
 			// leg for trigger entries spelled exactly as dispatched.
-const agentName = stripKnownSwarmPrefix(subagentType);
+			const agentName = stripKnownSwarmPrefix(subagentType);
 			// Issue #3617 review PRR-005/F-01: the pre-#3330 hook matched the
 			// naive first-token form ('acme_custom' -> 'custom'), so configs
 			// listing such non-canonical trigger entries silently stopped

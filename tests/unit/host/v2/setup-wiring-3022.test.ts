@@ -103,20 +103,26 @@ describe('#3022 v2 setup + advance wiring (source contract)', () => {
 	test('both index.ts session.error advance arms apply the advanced model on v2', () => {
 		const calls = indexSrc.match(/void applyV2AgentModelOverride\(/g) ?? [];
 		expect(calls.length).toBe(2);
-		// #3331: both call sites resolve the REGISTERED roster key
-		// (case-insensitive) and skip when unregistered — never the raw
-		// exactAgentName spelling, which the create-or-update editor would
-		// mint as a phantom agent.
-		expect(
-			indexSrc.match(/const registeredName = Object\.keys\(agents\)\.find\(/g)
-				?.length,
-		).toBe(2);
+		// #3331 + #3617 PRR-001: both call sites resolve the REGISTERED roster
+		// key through the shared resolver (exact spelling first; a
+		// case-insensitive match only when unique; ambiguity refused), never
+		// the raw exactAgentName spelling — the create-or-update editor would
+		// mint a phantom or a wrong-target agent.
+		// 3 matches: 2 call sites + the shared resolver's own declaration.
+		expect(indexSrc.match(/resolveRegisteredRosterAgentKey\(/g)?.length).toBe(
+			3,
+		);
 		expect(
 			indexSrc.match(
-				/void applyV2AgentModelOverride\((?:\n\s+)?registeredName,/g,
+				/void applyV2AgentModelOverride\((?:\n\s+)?(?:routedApply|noRouteApply)\.registeredName,/g,
 			)?.length,
 		).toBe(2);
-		expect(indexSrc.match(/routeModel\.exactAgentName,/g)?.length ?? 0).toBe(0);
+		// The raw spelling may feed the RESOLVER but never the apply call.
+		expect(
+			indexSrc.match(
+				/void applyV2AgentModelOverride\(\s*routeModel\.exactAgentName/g,
+			)?.length ?? 0,
+		).toBe(0);
 	});
 
 	test('index.ts injects the fresh-tables builder into the v2 setup deps (PRR-046)', () => {

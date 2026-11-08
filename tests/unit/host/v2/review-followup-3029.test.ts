@@ -194,11 +194,16 @@ describe('#3029 review round 2 — sticky gate + normalized modelString call-sit
 			'utf-8',
 		);
 		// Arm 1 (Task-route) names the gate variable; arm 2 (no-route/primary)
-		// calls the predicate inline. Both apply only under the sticky gate.
+		// calls the predicate inline into noRouteSticky (#3617 feedback: the
+		// gate also resolves the roster key under the same sticky condition).
+		// Both apply only under their sticky gate.
 		expect(source).toContain(
 			'const stickyEligible = isStickyModelError(errorSignal);',
 		);
-		expect(source).toContain('if (isStickyModelError(errorSignal)) {');
+		expect(source).toContain(
+			'const noRouteSticky = isStickyModelError(errorSignal);',
+		);
+		expect(source).toContain('if (noRouteSticky) {');
 	});
 
 	test('the Task-route arm applies the normalized chain modelString', () => {
@@ -215,14 +220,13 @@ describe('#3029 review round 2 — sticky gate + normalized modelString call-sit
 		// #3331: the routed arm resolves the registered roster key inside the
 		// same sticky-apply block (the gate sits between chainModel and the
 		// call), so the window spans to the apply invocation.
-		const applyAt = source.indexOf('void applyV2AgentModelOverride(', chainAt);
-		expect(applyAt).toBeGreaterThan(chainAt);
-		// Pin the ACTUAL argument shape — a toContain('chainModel') here is a
-		// tautology because the window starts at a string literal containing
-		// the token (implementation-review round 3).
-		const window = source.slice(chainAt, applyAt + 120);
-		expect(window).toMatch(
-			/void applyV2AgentModelOverride\(\s*registeredName,\s*chainModel\s*\)/,
+		// Pin the ACTUAL argument shape on the WHOLE source — a window slice is
+		// fragile as the gate grows (implementation-review round 3 + #3617
+		// PRR-001 reflow), and a toContain('chainModel') would be a tautology
+		// (the anchor string contains the token). The wrong-model mutant
+		// (second arg = routeModel.primaryModel) fails this pin.
+		expect(source).toMatch(
+			/void applyV2AgentModelOverride\(\s*routedApply\.registeredName,\s*chainModel,?\s*\)/,
 		);
 	});
 });

@@ -54,7 +54,10 @@ interface EditorCall {
 
 function fakeCtx(calls: EditorCall[]): V2PluginContext {
 	const editor: V2AgentEditor = {
-		update: (name: string, mutate?: (agent: Record<string, unknown>) => void) => {
+		update: (
+			name: string,
+			mutate?: (agent: Record<string, unknown>) => void,
+		) => {
 			const captured: Record<string, unknown> = {};
 			if (mutate) mutate(captured);
 			const model = captured.model as

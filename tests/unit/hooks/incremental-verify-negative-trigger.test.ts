@@ -18,9 +18,15 @@
  *   through the raw-name arm alone.
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { createIncrementalVerifyHook, resetAdvisoryDedup } from '../../../src/hooks/incremental-verify';
+import {
+	deleteStoredInputArgs,
+	setStoredInputArgs,
+} from '../../../src/hooks/guardrails/stored-input-args';
 import type { IncrementalVerifyHook } from '../../../src/hooks/incremental-verify';
-import { deleteStoredInputArgs, setStoredInputArgs } from '../../../src/hooks/guardrails/stored-input-args';
+import {
+	createIncrementalVerifyHook,
+	resetAdvisoryDedup,
+} from '../../../src/hooks/incremental-verify';
 import { canonicalMkdtemp, removeTreeWithRetry } from '../../helpers/tmpdir';
 
 describe('incremental-verify trigger gate — negative and compat legs (#3617)', () => {
