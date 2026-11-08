@@ -201,10 +201,18 @@ export function createIncrementalVerifyHook(
 			// matches neither arm below (issue #3322; the #2960 defect
 			// class). The raw-name arm stays as an explicit compatibility
 			// leg for trigger entries spelled exactly as dispatched.
-			const agentName = stripKnownSwarmPrefix(subagentType);
+const agentName = stripKnownSwarmPrefix(subagentType);
+			// Issue #3617 review PRR-005/F-01: the pre-#3330 hook matched the
+			// naive first-token form ('acme_custom' -> 'custom'), so configs
+			// listing such non-canonical trigger entries silently stopped
+			// firing after the canonical-derivation swap. Keep that spelling
+			// as an explicit compatibility leg (naive by design, pinned by
+			// tests/unit/hooks/incremental-verify-negative-trigger.test.ts).
+			const baseCompatForm = subagentType.replace(/^[^_]+_/, '');
 			if (
 				!config.triggerAgents.includes(agentName) &&
-				!config.triggerAgents.includes(subagentType)
+				!config.triggerAgents.includes(subagentType) &&
+				!config.triggerAgents.includes(baseCompatForm)
 			) {
 				return;
 			}

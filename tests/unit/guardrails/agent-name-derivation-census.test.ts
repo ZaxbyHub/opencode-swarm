@@ -5,9 +5,20 @@
  * src/config/schema.ts), never through a per-site naive first-underscore split or
  * an unguarded length-delta slice.
  *
- * RED at base (12 flagged sites), GREEN after the fix. Predicates run over
- * WHITESPACE-NORMALIZED file text so multiline slices match, and the walk is
- * recursive over src/.
+ * RED at base (the 12 length-delta sites across 10 files, plus the retired
+ * naive .match form this guardrail now also detects), GREEN after the fix.
+ * Predicates run over WHITESPACE-NORMALIZED file text so multiline slices
+ * match, and the walk is recursive over src/.
+ *
+ * ENFORCED SHAPES — the shipped claim is exactly this set, no wider (#3617
+ * review PRR-002): naive agent-name splitting via .replace(/^[^_]+_/, ''),
+ * the retired .match(/^([^_]+)_/) helper body, .split('_')[0] / .at(0), and
+ * direct .slice/.substring(0, a.length - b.length - 1) arithmetic in both
+ * operand orders. Generic .slice(0, -n) truncation and two-operand
+ * a.length - b.length (no -1) slices are NOT agent-name-specific shapes and
+ * are deliberately NOT predicates (35+ non-derivation hits at head); the
+ * known residual derivation sites using those shapes are recorded in the PR
+ * body's Considered table instead of being allowlisted here.
  *
  * Allowlist (each entry is a derivation that deliberately does NOT use the
  * helper, with its justification):
@@ -34,17 +45,34 @@ const ALLOWLIST: Readonly<Record<string, string>> = {
 		'prefix-emptiness policy gate (round-1 F2 exception)',
 	'src/failures/action-identity.ts':
 		'invariant-9 digest canonicalization (round-2 F3 / round-3 R3-1 exception)',
+	// #3617 feedback PRR-005/F-01: the pre-#3330 trigger-matching form kept as
+	// an explicit COMPATIBILITY leg so pre-upgrade triggerAgents entries
+	// ('custom' for 'acme_custom') keep firing; deliberately naive-shaped and
+	// pinned by tests/unit/hooks/incremental-verify-negative-trigger.test.ts.
+	'src/hooks/incremental-verify.ts': 'base-compat trigger arm (PRR-005)',
 };
 
-// P1: naive first-underscore extraction, e.g. subagentType.replace(/^[^_]+_/, '')
-const NAIVE_FIRST_UNDERSCORE =
-	/\.replace\(\s*\/\^\[\^_\]\+_\/\s*,\s*(['"])\1\s*\)/;
+// P1: naive first-underscore extraction in ANY of the shapes the class has
+// actually used: the legacy .replace(/^[^_]+_/, ''), the retired
+// .match(/^([^_]+)_/) helper body, and the idiomatic .split('_')[0] / .at(0).
+const NAIVE_FIRST_UNDERSCORE = new RegExp(
+	[
+		/\.replace\(\s*\/\^\[\^_\]\+_\/\s*,\s*(['"])\1\s*\)/.source,
+		/\.match\(\s*\/\^\(\[\^_\]\+\)_\/\s*\)/.source,
+		/\.split\(['"]_['"]\)\s*(\[\s*0\s*\]|\.at\(\s*0\s*\))/.source,
+	].join('|'),
+);
 
 // P2: a DIRECT .slice(0, …)/.substring(0, …) call whose second argument is the
-// bare length-delta arithmetic X.length - Y.length - 1 (optional trailing comma
-// for prettier-wrapped multiline calls after whitespace normalization).
-const LENGTH_DELTA_SLICE =
-	/\.(?:slice|substring)\(\s*0\s*,\s*[A-Za-z0-9_$.]+\.length\s*-\s*[A-Za-z0-9_$.]+\.length\s*-\s*1\s*,?\s*\)/;
+// bare length-delta arithmetic X.length - Y.length - 1 in EITHER operand
+// order (optional trailing comma for prettier-wrapped multiline calls after
+// whitespace normalization).
+const LENGTH_DELTA_SLICE = new RegExp(
+	[
+		/\.(?:slice|substring)\(\s*0\s*,\s*[A-Za-z0-9_$.]+\.length\s*-\s*[A-Za-z0-9_$.]+\.length\s*-\s*1\s*,?\s*\)/.source,
+		/\.(?:slice|substring)\(\s*0\s*,\s*[A-Za-z0-9_$.]+\.length\s*-\s*1\s*-\s*[A-Za-z0-9_$.]+\.length\s*,?\s*\)/.source,
+	].join('|'),
+);
 
 function walk(dir: string, out: string[]): void {
 	for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {

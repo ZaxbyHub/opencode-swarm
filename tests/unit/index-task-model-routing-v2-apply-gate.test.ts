@@ -47,12 +47,20 @@ const FALLBACK_MODEL = 'prov/fb1';
 interface EditorCall {
 	kind: 'update' | 'remove';
 	name: string;
+	// PRR-003: capture the applied model via the mutate callback so a
+	// wrong-model mutant (primary instead of the advanced fallback) FAILS.
+	model?: { providerID: string; id: string };
 }
 
 function fakeCtx(calls: EditorCall[]): V2PluginContext {
 	const editor: V2AgentEditor = {
-		update: (name: string) => {
-			calls.push({ kind: 'update', name });
+		update: (name: string, mutate?: (agent: Record<string, unknown>) => void) => {
+			const captured: Record<string, unknown> = {};
+			if (mutate) mutate(captured);
+			const model = captured.model as
+				| { providerID: string; id: string }
+				| undefined;
+			calls.push({ kind: 'update', name, model });
 		},
 		remove: (name: string) => {
 			calls.push({ kind: 'remove', name });
@@ -287,7 +295,43 @@ describe('index task-model routing — v2 apply gate + route swarm-id derivation
 		const updates = calls.filter((call) => call.kind === 'update');
 		expect(updates.length).toBe(1);
 		expect(updates[0]?.name).toBe('coder');
+		// PRR-003: the applied model must be the ADVANCED fallback, not the
+		// (already-failing) primary — a wrong-model mutant fails here.
+		expect(updates[0]?.model).toEqual({ providerID: 'prov', id: 'fb1' });
 		expect(calls.map((call) => call.name)).not.toContain('Coder');
+	});
+
+	test('case-colliding roster keys refuse the v2 apply (PRR-001 ambiguity skip)', async () => {
+		writeAgentsConfig(
+			directory,
+			{ coder: { model: PRIMARY_MODEL, fallback_models: [FALLBACK_MODEL] } },
+			{
+				Case: {
+					name: 'Case',
+					agents: {
+						coder: { model: 'case/model', fallback_models: ['case/fb1'] },
+					},
+				},
+				case: {
+					name: 'case',
+					agents: {
+						coder: { model: 'lower/model', fallback_models: ['lower/fb1'] },
+					},
+				},
+			},
+		);
+		writePlan(directory);
+		const plugin = await bootPlugin(directory);
+		const calls: EditorCall[] = [];
+		registerV2AgentTransformSurface(fakeCtx(calls));
+		await dispatchAndAdvance(plugin, 'call-collide', 'CASE_CODER');
+		// 'CASE_CODER' exact-matches nothing but case-insensitively matches BOTH
+		// 'Case_coder' and 'case_coder' — the ambiguity skip must refuse the
+		// sticky write entirely instead of silently writing whichever key
+		// hashed first (executed wrong-target probe at review time).
+		expect(calls.filter((call) => call.kind === 'update')).toEqual([]);
+		expect(calls.map((call) => call.name)).not.toContain('Case_coder');
+		expect(calls.map((call) => call.name)).not.toContain('case_coder');
 	});
 
 	test('route swarmID uses the guarded derivation (fail-closed + raw case)', async () => {
@@ -324,9 +368,13 @@ describe('index task-model routing — v2 apply gate + route swarm-id derivation
 				} as never,
 			);
 		}
-		const byCall = new Map(
-			getPendingTaskModelRouteSnapshot().map((route) => [route.callID, route]),
-		);
+		const snapshot = getPendingTaskModelRouteSnapshot();
+		const byCall = new Map(snapshot.map((route) => [route.callID, route]));
+		// F-08a: the route must EXIST first — asserting a missing field on an
+		// absent route would pass vacuously under a route-drop regression.
+		expect(byCall.get('call-malformed')).toBeDefined();
+		expect(byCall.get('call-multi')).toBeDefined();
+		expect(byCall.get('call-case')).toBeDefined();
 		// Doubled separator: derived id contains an underscore -> default swarm.
 		expect(byCall.get('call-malformed')?.swarmID).toBeUndefined();
 		// Multi-token prefix: same fail-closed direction.

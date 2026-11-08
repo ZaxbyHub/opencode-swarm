@@ -19,7 +19,7 @@ import {
 } from '../../../src/models/model-override-state';
 
 const DISCARD_LINE =
-	/reseeded: live advance discarded \(chain signature changed\) scope=[^\s]+/;
+	/reseeded: live selection discarded \(chain signature changed; discardedFallbackIndex=[^)]+\) scope=[^\s]+/;
 
 describe('scoped model selection discard diagnostic (#3331 AC2)', () => {
 	let consoleLogSpy: ReturnType<typeof mock>;
@@ -32,7 +32,6 @@ describe('scoped model selection discard diagnostic (#3331 AC2)', () => {
 		process.env.OPENCODE_SWARM_DEBUG = '1';
 		originalLog = console.log;
 		consoleLogSpy = mock(() => {});
-		// biome-ignore lint/suspicious/noExplicitAny: console.log capture for the pinned-debug leg
 		(console as any).log = consoleLogSpy;
 	});
 
@@ -86,10 +85,31 @@ describe('scoped model selection discard diagnostic (#3331 AC2)', () => {
 			.map((call) => String(call[0]))
 			.filter((line) => DISCARD_LINE.test(line));
 		expect(matching.length).toBe(1);
-		// Scope identity is present (session/invocation/role), model payload is
-		// not (no model strings ride the diagnostic).
+		// Scope identity is present (session/invocation/role), the discarded
+		// index is reported (PRR-009: the entry's fallbackIndex, even 0), and
+		// no model payload rides the line.
 		expect(matching[0]).toContain('sess-diag/7//coder');
+		expect(matching[0]).toContain('discardedFallbackIndex=1');
 		expect(matching[0]).not.toContain('prov/primary');
 		expect(matching[0]).not.toContain('prov/fb1');
+	});
+
+	test('an index-0 reseed reports discardedFallbackIndex=0 (never claims a completed advance)', () => {
+		// F-06b/F-08e (#3617 review): a live entry that never advanced sits at
+		// fallbackIndex 0 — the line must report the true index instead of
+		// implying a completed fallback was discarded.
+		const chainA = normalizeModelChain('prov/primary', ['prov/fb1']);
+		resolveScopedModelSelection(scope, chainA, 1_000);
+		consoleLogSpy.mock.calls.length = 0;
+
+		const chainB = normalizeModelChain(undefined, ['prov/fb1']);
+		const after = resolveScopedModelSelection(scope, chainB, 2_000);
+		expect(after.fallbackIndex).toBe(0);
+
+		const matching = consoleLogSpy.mock.calls
+			.map((call) => String(call[0]))
+			.filter((line) => DISCARD_LINE.test(line));
+		expect(matching.length).toBe(1);
+		expect(matching[0]).toContain('discardedFallbackIndex=0');
 	});
 });

@@ -240,7 +240,10 @@ import {
 	recordDeniedToolCall,
 } from './hooks/trajectory-logger';
 import { estimateTokens } from './hooks/utils';
-import { applyV2AgentModelOverride } from './host/v2/model-apply';
+import {
+	applyV2AgentModelOverride,
+	hasV2AgentTransformSurface,
+} from './host/v2/model-apply';
 import {
 	openCodeSwarmV2Setup,
 	type V2SetupDependencies,
@@ -4023,13 +4026,22 @@ async function initializeOpenCodeSwarm(
 								// spelling would mint a phantom agent. Resolve the
 								// REGISTERED key and apply that (never the raw
 								// spelling after a case-insensitive match).
-								const registeredName = Object.keys(agents).find(
-									(name) =>
-										name.toLowerCase() ===
-										routeModel.exactAgentName.trim().toLowerCase(),
+								const routedApply = resolveRegisteredRosterAgentKey(
+									agents,
+									routeModel.exactAgentName,
 								);
-								if (registeredName) {
-									void applyV2AgentModelOverride(registeredName, chainModel);
+								if (routedApply.registeredName) {
+									void applyV2AgentModelOverride(
+										routedApply.registeredName,
+										chainModel,
+									);
+								} else if (routedApply.ambiguous) {
+									// #3617 review PRR-001: case-colliding roster
+									// keys — skip rather than silently writing
+									// whichever colliding key hashed first.
+									log(
+										`v2 model apply skipped: registered roster keys collide case-insensitively for ${sanitizeDiagnosticScope(routeModel.exactAgentName)}`,
+									);
 								}
 							}
 						}
@@ -4078,13 +4090,32 @@ async function initializeOpenCodeSwarm(
 									},
 								);
 							} else if (advanced.accepted && advanced.modelString) {
-								pushAdvisory(
-									session,
-									`MODEL FALLBACK: [primary-model-fallback:${routeModel.role}] switching ${routeModel.role} from configured primary ${routeModel.primaryModel ?? 'unknown'} to ${advanced.modelString} after a provider ${reason} error; the next message uses the fallback.`,
-									{
-										dedupeKey: `[primary-model-fallback:${routeModel.role}]`,
-									},
-								);
+								// #3617 review PRR-007: on a v2 host the sticky
+								// apply below is gated on a REGISTERED roster
+								// key — when that apply will not land, do not
+								// tell the user the model switched. On v1 the
+								// chat-boundary override applies the session
+								// fallback regardless of the roster key, so the
+								// advisory stays.
+								const noRouteSurface = hasV2AgentTransformSurface();
+								const noRouteSticky = isStickyModelError(errorSignal);
+								const noRouteApply = noRouteSticky
+									? resolveRegisteredRosterAgentKey(
+											agents,
+											routeModel.exactAgentName,
+										)
+									: {};
+								const v2ApplyLands =
+									noRouteSurface && noRouteApply.registeredName !== undefined;
+								if (!noRouteSurface || v2ApplyLands) {
+									pushAdvisory(
+										session,
+										`MODEL FALLBACK: [primary-model-fallback:${routeModel.role}] switching ${routeModel.role} from configured primary ${routeModel.primaryModel ?? 'unknown'} to ${advanced.modelString} after a provider ${reason} error; the next message uses the fallback.`,
+										{
+											dedupeKey: `[primary-model-fallback:${routeModel.role}]`,
+										},
+									);
+								}
 								// Issue #3022 (AC3): apply the advanced model on v2
 								// hosts by rewriting the REGISTERED agent's model
 								// reference (no-op on v1, where the chat-boundary
@@ -4093,20 +4124,26 @@ async function initializeOpenCodeSwarm(
 								// gate it to the sticky-appropriate error classes —
 								// retired/unavailable model or quota — never a single
 								// transient timeout/5xx.
-								if (isStickyModelError(errorSignal)) {
+								if (noRouteSticky) {
 									// #3331 (same gate as the routed arm): the
 									// editor is create-or-update — apply only
-									// through a REGISTERED roster key, never an
-									// unregistered recorded spelling.
-									const registeredName = Object.keys(agents).find(
-										(name) =>
-											name.toLowerCase() ===
-											routeModel.exactAgentName.trim().toLowerCase(),
-									);
-									if (registeredName) {
+									// through a REGISTERED roster key. #3617
+									// review PRR-001: exact key first, unique
+									// case-insensitive match second, ambiguity
+									// refused; PRR-007/F-02: a skipped apply is
+									// observable, never silent.
+									if (noRouteApply.registeredName) {
 										void applyV2AgentModelOverride(
-											registeredName,
+											noRouteApply.registeredName,
 											advanced.modelString,
+										);
+									} else if (noRouteApply.ambiguous) {
+										log(
+											`v2 model apply skipped: registered roster keys collide case-insensitively for ${sanitizeDiagnosticScope(routeModel.exactAgentName)}`,
+										);
+									} else if (noRouteSurface) {
+										log(
+											`v2 model apply skipped: no registered roster key for ${sanitizeDiagnosticScope(routeModel.exactAgentName)} (init-time roster snapshot)`,
 										);
 									}
 								}
@@ -6741,3 +6778,38 @@ export type {
 // Public declarative harness API. Callable and pure until explicitly invoked;
 // it performs no plugin-initialization work and exposes no autonomous executor.
 export { harnessMutationV1 } from './harness/public-api.js';
+
+// Issue #3617 feedback round (PRR-001): the v2 model-apply gates resolve the
+// registered roster key with an EXACT-match preference; a case-insensitive
+// match is honored only when exactly one roster key matches, and a
+// case-colliding pair ('Local' + 'local') is reported ambiguous instead of
+// silently writing the sticky override onto whichever key hashed first.
+// Module scope (hoisted): placed here so the pinned producer-citation lines
+// earlier in this file never shift.
+function resolveRegisteredRosterAgentKey(
+	agents: Record<string, unknown>,
+	exactAgentName: string,
+): { registeredName?: string; ambiguous?: true } {
+	const trimmed = exactAgentName.trim();
+	const keys = Object.keys(agents);
+	const exact = keys.find((name) => name === trimmed);
+	if (exact !== undefined) return { registeredName: exact };
+	const lower = trimmed.toLowerCase();
+	const caseMatches = keys.filter((name) => name.toLowerCase() === lower);
+	if (caseMatches.length === 1) return { registeredName: caseMatches[0] };
+	if (caseMatches.length > 1) return { ambiguous: true };
+	return {};
+}
+
+// Issue #3617 feedback round (PRR-006/PRR-010): diagnostics interpolate
+// model-derived identity strings — strip control characters (log-injection /
+// forged-line shape) and bound the length before emission.
+function sanitizeDiagnosticScope(value: string): string {
+	return Array.from(value)
+		.filter((ch) => {
+			const code = ch.codePointAt(0);
+			return code !== undefined && code > 0x1f && code !== 0x7f;
+		})
+		.join('')
+		.slice(0, 200);
+}
