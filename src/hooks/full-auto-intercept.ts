@@ -13,7 +13,10 @@ import * as fs from 'node:fs';
 import { createCriticAutonomousOversightAgent } from '../agents/critic';
 import { getSwarmAgents, resolveFallbackModel } from '../agents/index.js';
 import type { PluginConfig } from '../config';
-import { deriveSwarmIdentity, stripKnownSwarmPrefix } from '../config/schema.js';
+import {
+	deriveSwarmIdentity,
+	stripKnownSwarmPrefix,
+} from '../config/schema.js';
 import { appendCoreEventSync } from '../events/core-events.js';
 import {
 	classifyProviderFailure,

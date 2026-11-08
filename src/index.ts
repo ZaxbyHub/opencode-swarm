@@ -61,6 +61,7 @@ import {
 	AutomationConfigSchema,
 	type AutoReviewConfig,
 	DispatchProtectionConfigSchema,
+	deriveSwarmIdentity,
 	GuardrailsConfigSchema,
 	KnowledgeApplicationConfigSchema,
 	KnowledgeConfigSchema,
@@ -74,7 +75,6 @@ import {
 	SkillPropagationConfigSchema,
 	SummaryConfigSchema,
 	stripKnownSwarmPrefix,
-	deriveSwarmIdentity,
 	WatchdogConfigSchema,
 } from './config/schema';
 import { createRoleFilterSystemHook } from './context/role-filter.js';
@@ -4029,10 +4029,7 @@ async function initializeOpenCodeSwarm(
 										routeModel.exactAgentName.trim().toLowerCase(),
 								);
 								if (registeredName) {
-									void applyV2AgentModelOverride(
-										registeredName,
-										chainModel,
-									);
+									void applyV2AgentModelOverride(registeredName, chainModel);
 								}
 							}
 						}

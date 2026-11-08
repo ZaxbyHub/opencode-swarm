@@ -10,10 +10,7 @@
 import * as fsSync from 'node:fs';
 import * as path from 'node:path';
 
-import {
-	getSwarmAgents,
-	resolveFallbackModel,
-} from '../../agents/index';
+import { getSwarmAgents, resolveFallbackModel } from '../../agents/index';
 import { WRITE_TOOL_NAMES } from '../../config/constants';
 import {
 	type AuthorityConfig,

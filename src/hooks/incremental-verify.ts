@@ -9,7 +9,10 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { resolveLocalNodeTool } from '../build/command-resolution';
-import { stripKnownSwarmPrefix, type IncrementalVerifyConfig } from '../config/schema';
+import {
+	type IncrementalVerifyConfig,
+	stripKnownSwarmPrefix,
+} from '../config/schema';
 import { getStoredInputArgs } from './guardrails/stored-input-args';
 import { isTaskToolId } from './normalize-tool-name';
 import { spawnAsync } from './spawn-helper';

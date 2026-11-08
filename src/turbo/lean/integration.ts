@@ -738,8 +738,7 @@ export async function dispatchPhaseCritic(
 		config?.agentModelRegistry,
 	);
 	const legacyModelConfig = resolveLegacyCriticModelConfig(agentName, config);
-	const { role: agentBaseName, swarmID } =
-		deriveSwarmIdentity(agentName);
+	const { role: agentBaseName, swarmID } = deriveSwarmIdentity(agentName);
 	let responseText: string;
 	try {
 		const dispatched = await dispatchWithModelFallback<string>({

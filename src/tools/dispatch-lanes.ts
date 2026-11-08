@@ -72,10 +72,10 @@ import {
 import { loadPluginConfig } from '../config/loader.js';
 import {
 	DEFAULT_PR_REVIEW_RESILIENCE_CONFIG,
+	deriveSwarmIdentity,
 	isKnownCanonicalRole,
 	type PrReviewResilienceConfig,
 	resolveGeneratedAgentRole,
-	deriveSwarmIdentity,
 } from '../config/schema.js';
 import {
 	classifyProviderFailure,
