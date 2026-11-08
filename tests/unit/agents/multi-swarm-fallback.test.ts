@@ -5,7 +5,10 @@ import {
 	getSwarmAgents,
 } from '../../../src/agents';
 import type { PluginConfig } from '../../../src/config';
-import { deriveSwarmIdentity, stripKnownSwarmPrefix } from '../../../src/config/schema';
+import {
+	deriveSwarmIdentity,
+	stripKnownSwarmPrefix,
+} from '../../../src/config/schema';
 
 describe('multi-swarm fallback model resolution', () => {
 	describe('deriveSwarmIdentity (retires the naive first-underscore helper)', () => {

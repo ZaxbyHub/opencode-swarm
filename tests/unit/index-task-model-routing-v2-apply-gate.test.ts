@@ -25,11 +25,12 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { Plan } from '../../src/config/plan-schema';
-import OpenCodeSwarm from '../../src/index';
 import {
 	clearV2AgentTransformSurface,
 	registerV2AgentTransformSurface,
 } from '../../src/host/v2/model-apply';
+import type { V2AgentEditor, V2PluginContext } from '../../src/host/v2/types';
+import OpenCodeSwarm from '../../src/index';
 import {
 	getPendingTaskModelRouteSnapshot,
 	resetTaskModelRoutingStateForTests,
@@ -37,10 +38,6 @@ import {
 import { resetSwarmState } from '../../src/state';
 import { resetTelemetryForTesting } from '../../src/telemetry';
 import { canonicalMkdtemp, removeTreeWithRetry } from '../helpers/tmpdir';
-import type {
-	V2AgentEditor,
-	V2PluginContext,
-} from '../../src/host/v2/types';
 
 const PARENT_SESSION = 'parent-session';
 const CHILD_SESSION = 'child-session';
@@ -78,7 +75,13 @@ function makeProject(): string {
 function writeAgentsConfig(
 	directory: string,
 	agents: Record<string, { model: string; fallback_models: string[] }>,
-	swarms?: Record<string, { name: string; agents: Record<string, { model: string; fallback_models: string[] }> }>,
+	swarms?: Record<
+		string,
+		{
+			name: string;
+			agents: Record<string, { model: string; fallback_models: string[] }>;
+		}
+	>,
 ): void {
 	fs.mkdirSync(path.join(directory, '.opencode'), { recursive: true });
 	fs.writeFileSync(
@@ -119,7 +122,10 @@ function writePlan(directory: string): void {
 			},
 		],
 	};
-	fs.writeFileSync(path.join(directory, '.swarm', 'plan.json'), JSON.stringify(plan));
+	fs.writeFileSync(
+		path.join(directory, '.swarm', 'plan.json'),
+		JSON.stringify(plan),
+	);
 }
 
 async function bootPlugin(directory: string) {
@@ -244,7 +250,9 @@ describe('index task-model routing — v2 apply gate + route swarm-id derivation
 			{
 				Case: {
 					name: 'Case',
-					agents: { coder: { model: 'case/model', fallback_models: ['case/fb1'] } },
+					agents: {
+						coder: { model: 'case/model', fallback_models: ['case/fb1'] },
+					},
 				},
 			},
 		);

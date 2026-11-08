@@ -30,12 +30,15 @@ import * as path from 'node:path';
 
 const ALLOWLIST: Readonly<Record<string, string>> = {
 	'src/config/schema.ts': 'deriveSwarmIdentity definition itself',
-	'src/hooks/full-auto-delegation.ts': 'prefix-emptiness policy gate (round-1 F2 exception)',
-	'src/failures/action-identity.ts': 'invariant-9 digest canonicalization (round-2 F3 / round-3 R3-1 exception)',
+	'src/hooks/full-auto-delegation.ts':
+		'prefix-emptiness policy gate (round-1 F2 exception)',
+	'src/failures/action-identity.ts':
+		'invariant-9 digest canonicalization (round-2 F3 / round-3 R3-1 exception)',
 };
 
 // P1: naive first-underscore extraction, e.g. subagentType.replace(/^[^_]+_/, '')
-const NAIVE_FIRST_UNDERSCORE = /\.replace\(\s*\/\^\[\^_\]\+_\/\s*,\s*(['"])\1\s*\)/;
+const NAIVE_FIRST_UNDERSCORE =
+	/\.replace\(\s*\/\^\[\^_\]\+_\/\s*,\s*(['"])\1\s*\)/;
 
 // P2: a DIRECT .slice(0, …)/.substring(0, …) call whose second argument is the
 // bare length-delta arithmetic X.length - Y.length - 1 (optional trailing comma
@@ -75,7 +78,9 @@ describe('agent-name derivation census (issue #3330 recurrence guardrail)', () =
 		}
 		// Extractors.ts's Math.max budget arithmetic must not be flagged (it is
 		// not a direct slice call with inline delta arithmetic).
-		expect(flagged.some((f) => f.startsWith('src/hooks/extractors.ts'))).toBe(false);
+		expect(flagged.some((f) => f.startsWith('src/hooks/extractors.ts'))).toBe(
+			false,
+		);
 		expect(flagged).toEqual([]);
 	});
 
