@@ -4,17 +4,17 @@
 
 ## Drive to merge (new `references/drive-to-merge.md`)
 - **Intake.** The run takes this session's own review findings and every PR comment with findings, and runs the existing Stage A → Stage B → closeout gates.
-- **Dispositions.** It plans every unfixed item's disposition before the closeout gate and publishes the dispositions only after the push is verified.
+- **Dispositions.** It plans every unfixed item's disposition before the closeout gate. It publishes them after the push is verified, or after a verified no-change outcome, and publishes any disposition added later before it checks the merge preconditions.
 - **CI to green, within a budget:**
   - one rerun per infrastructure signature;
   - failures proven on the base branch become `PRE_EXISTING` dispositions, not PR fixes;
-  - at most 2 fix attempts per signature and 5 fix cycles per PR.
+  - at most 2 fix attempts per signature and 5 fix cycles per run, counting CI-driven and review-driven rounds alike.
 
   Under Profile A each fix is a new controller generation.
 - **Merge:**
-  - **Authorization.** Only the user's own words in the session naming the merge authorize it, or a yes to the run's own "merge now?" question. A skill invocation, `[MODE: PR_FEEDBACK]` signal, default prompt, monitor wake, or loop activation never does.
+  - **Authorization.** Only the user's own words naming the merge in the current run authorize it, or a yes to the run's own "merge now?" question. A skill invocation, `[MODE: PR_FEEDBACK]` signal, default prompt, monitor wake, or loop activation never authorizes a merge. An injected event or PR-monitor wake also neither answers that question nor ends the wait for it.
   - **Merge command.** It uses `--match-head-commit` on the gated head. It passes no strategy flag on a merge-queue base, and passes the repository's single allowed method on a direct base (or asks when several are allowed).
-  - **Monitoring.** It monitors the merge queue until the merge commit is on the base.
+  - **Monitoring.** It monitors the merge queue until the merge commit is on the base. Any merge precondition that cannot become true, an unanswered question, or a monitoring ceiling ends the run with a report and the close-out steps. The final report says whether a PR monitor is still subscribed and, if the PR did not merge, asks whether to unsubscribe it.
 - **Close out, merged or not:**
   1. re-verify every disposition on its live artifact;
   2. run a session retrospective;
@@ -45,7 +45,7 @@
 - It lives at `.claude/skills/session-retrospective/` with an `.agents/skills` adapter, so ZCode, Codex, Claude Code, and OpenCode load it in this repository.
 
 ## swarm-ci-monitor
-- Step 4a no longer tells agents to omit the merge-strategy flag on every base. A non-interactive `gh pr merge` refuses without one on a direct-merge base, so the step now requires the repository's allowed method there.
+- Step 4a no longer tells agents to omit the merge-strategy flag on every base. A non-interactive `gh pr merge` refuses without one on a direct-merge base, so the step now requires the repository's allowed method there. Step 3 records the head SHA it verified, and Step 4a always passes `--match-head-commit` with that SHA, so a commit pushed after the re-check cannot be merged unchecked.
 
 ## Surfaces
 - Both references, the canonical skill and its two adapters.

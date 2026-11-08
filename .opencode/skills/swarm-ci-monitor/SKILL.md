@@ -5,12 +5,12 @@ description: >
   researches every CI failure, fixes it end-to-end, iterates until all required
   checks are green (max 5 fix cycles), then merges. Use only after human review
   is complete and the PR is approved. Composes ci-fix-monitor for
-  failure-type-specific fix recipes. This is the first skill in the repo that
-  executes a merge — invoke it deliberately.
+  failure-type-specific fix recipes. It executes a merge (as does
+  swarm-pr-feedback's drive-to-merge run) — invoke it deliberately.
 disable-model-invocation: true
 metadata:
   audience: swarm-plugin
-  swarm-contract-digest: "5bf88d54837e"
+  swarm-contract-digest: "b1a77bb68cf9"
 ---
 
 # Swarm CI Monitor
@@ -24,8 +24,8 @@ directly or requires a merge queue (see Step 4).
 
 This is **not** a fresh review skill and **not** a PR-creation skill. It is the
 terminal closeout hop for a PR that is already approved and just needs to get
-green and merge. It is the first skill in opencode-swarm that performs a merge,
-so it carries extra safety gates.
+green and merge. It performs a merge (as does swarm-pr-feedback's drive-to-merge
+run), so it carries extra safety gates.
 
 ## Hard precondition
 
@@ -229,7 +229,8 @@ gate is Step 4b. Run this step fresh every time control reaches Step 4 —
 including after a Step 2 loop-back — never skip it because an earlier pass
 already ran once in this invocation.
 
-1. Re-fetch check runs for the **current** PR head SHA. If any required check
+1. Re-fetch check runs for the **current** PR head SHA, and record that SHA:
+   Step 4a merges only that commit. If any required check
    is stale (ran against an older SHA) → `gh run rerun --failed` for the
    transient/failed run, or wait and re-fetch at most 3× (~1 min apart); if
    still stale after that, escalate per Step 5. Never merge on a stale-green
@@ -256,9 +257,24 @@ run it in addition to, never instead of, Step 3.
 ### 4a. Execute the merge
 
 ```
-gh pr merge <N>
+gh pr merge <N> --match-head-commit <SHA>                            # merge-queue base
+gh pr merge <N> --match-head-commit <SHA> --merge|--squash|--rebase  # direct base: one method
 ```
 
+Tell the two bases apart with this command (it works in bash and PowerShell; take
+`<base>` from `gh pr view <N> --json baseRefName`):
+
+```
+gh api graphql -f owner=<owner> -f name=<repo> -f branch=<base> -f query='query($owner: String!, $name: String!, $branch: String!) { repository(owner: $owner, name: $name) { mergeQueue(branch: $branch) { id } } }'
+```
+
+A non-null `mergeQueue` means the base has a merge queue, and `null` means a
+direct base. If the call fails, ask the user; never guess.
+
+- **`--match-head-commit <SHA>` always.** Pass the head SHA Step 3 recorded, so
+  a commit pushed after the re-check cannot be merged unchecked. With an MCP
+  merge tool, pass its head-SHA parameter (for example `expectedHeadSha`); if
+  the tool has none, do not merge through it — surface the merge to the user.
 - **Merge-strategy flag only where the base needs one.** On a base that
   requires a merge queue, pass no `--squash`, `--merge`, or `--rebase`. Per
   `gh pr merge --help`: "When targeting a branch that requires a merge queue,
