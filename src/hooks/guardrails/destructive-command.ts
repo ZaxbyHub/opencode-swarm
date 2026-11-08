@@ -312,26 +312,11 @@ function shSerializeWords(words: string[]): string {
 // ============================================================================
 
 /**
- * Normalize ONE command word to the verb name bash/PowerShell would resolve
- * (#3539 W6 / RC-6): matched-quote removal plus backslash-escape removal for
- * POSIX spellings (`\rm`, `"rm"`, `'\''rm'`-style), and basename extraction
- * ONLY for ABSOLUTE path-qualified spellings — win32 spellings (drive letter
- * or backslash separator, e.g. `C:\Windows\system32\rmdir.exe`,
- * `C:/Windows/system32/rmdir.exe`) case-INSENSITIVE with an optional
- * extension; POSIX forward-slash absolutes (`/bin/rm`) case-SENSITIVE
- * (`/bin/RM` stays unmatched). RELATIVE spellings (`./rm`, `../rm`) are NOT
- * normalized — they name project-local programs, not the system verbs.
- *
- * Order matters: a win32 absolute spelling is detected BEFORE backslash
- * dequoting (a drive-led word's backslashes are path separators, not bash
- * escapes — dequoting first would collapse `C:\Windows` to `C:Windows`).
- */
-/**
  * PR #3615 feedback PRR-002: decode ONE raw segment token into the word bash
  * actually hands the executable — matching quote pairs removed (single
  * quotes literal-inner, double quotes honoring backslash escapes) and
  * backslash escapes honored outside quotes — so the DC extractor's
- * quote-PRESERVING token feed classifies options/targets identically to the
+ * quote-PRESERVING token feed classifies OPTIONS identically to the
  * detector's quote-removed AST-word feed. The decoded word is for OPTION
  * CLASSIFICATION ONLY: brace handling (braceBorne / expandBraceRaw) stays
  * on the RAW token, whose quote/escape context is what #3569 4.5 review
@@ -389,6 +374,21 @@ export function dcDecodeShellWord(token: string): string {
 	return out;
 }
 
+/**
+ * Normalize ONE command word to the verb name bash/PowerShell would resolve
+ * (#3539 W6 / RC-6): matched-quote removal plus backslash-escape removal for
+ * POSIX spellings (`\rm`, `"rm"`, `'\''rm'`-style), and basename extraction
+ * ONLY for ABSOLUTE path-qualified spellings — win32 spellings (drive letter
+ * or backslash separator, e.g. `C:\Windows\system32\rmdir.exe`,
+ * `C:/Windows/system32/rmdir.exe`) case-INSENSITIVE with an optional
+ * extension; POSIX forward-slash absolutes (`/bin/rm`) case-SENSITIVE
+ * (`/bin/RM` stays unmatched). RELATIVE spellings (`./rm`, `../rm`) are NOT
+ * normalized — they name project-local programs, not the system verbs.
+ *
+ * Order matters: a win32 absolute spelling is detected BEFORE backslash
+ * dequoting (a drive-led word's backslashes are path separators, not bash
+ * escapes — dequoting first would collapse `C:\Windows` to `C:Windows`).
+ */
 export function dcNormalizeVerbWord(word: string): string {
 	let w = word;
 	// Strip up to two matched surrounding quote pairs (`"rm"`, `"'\''rm'"'`).

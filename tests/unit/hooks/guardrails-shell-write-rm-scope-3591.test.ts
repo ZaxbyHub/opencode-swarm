@@ -385,7 +385,8 @@ describe('#3591 Fix 6 gate verdicts (coder, scope src/)', () => {
 	// PRR-002a: LITERAL-quote filenames (`'"-rf"'` — the quotes are filename
 	// characters after bash quote removal) must NOT be classified as options
 	// by the boundary decode; the detector emits both words as write targets
-	// and the scope check denies the out-of-scope sibling (base behavior).
+	// and the scope check denies the out-of-scope sibling (stricter than
+	// base, which admitted this shape — fail-closed, PR-introduced).
 	// PRR-002b: ESCAPE-DECODED flags (`\-rf`) decode to real options at the
 	// DC boundary (pre-existing recursive-delete fail-open, fixed there).
 	test.each([
