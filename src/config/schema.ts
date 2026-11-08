@@ -188,7 +188,7 @@ export interface SwarmIdentity {
 export function deriveSwarmIdentity(agentName: string): SwarmIdentity {
 	const role = getCanonicalAgentRole(agentName);
 	if (!agentName || role === agentName) {
-		return { role: agentName ? role : agentName, swarmID: undefined };
+		return { role, swarmID: undefined };
 	}
 	const lowerName = agentName.toLowerCase();
 	const lowerRole = role.toLowerCase();

@@ -4094,10 +4094,21 @@ async function initializeOpenCodeSwarm(
 								// retired/unavailable model or quota — never a single
 								// transient timeout/5xx.
 								if (isStickyModelError(errorSignal)) {
-									void applyV2AgentModelOverride(
-										routeModel.exactAgentName,
-										advanced.modelString,
+									// #3331 (same gate as the routed arm): the
+									// editor is create-or-update — apply only
+									// through a REGISTERED roster key, never an
+									// unregistered recorded spelling.
+									const registeredName = Object.keys(agents).find(
+										(name) =>
+											name.toLowerCase() ===
+											routeModel.exactAgentName.trim().toLowerCase(),
 									);
+									if (registeredName) {
+										void applyV2AgentModelOverride(
+											registeredName,
+											advanced.modelString,
+										);
+									}
 								}
 							}
 						}
@@ -4825,9 +4836,7 @@ async function initializeOpenCodeSwarm(
 						// agentName preserves the RAW dispatched name so the
 						// session.error advance arm resolves the same identity the
 						// chat boundary sees.
-						swarmID:
-							deriveSwarmIdentity(toolBeforeArgs.subagent_type).swarmID ??
-							undefined,
+						swarmID: deriveSwarmIdentity(toolBeforeArgs.subagent_type).swarmID,
 						agentName: toolBeforeArgs.subagent_type,
 					});
 				}

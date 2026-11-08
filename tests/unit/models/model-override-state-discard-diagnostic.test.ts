@@ -23,20 +23,25 @@ const DISCARD_LINE =
 
 describe('scoped model selection discard diagnostic (#3331 AC2)', () => {
 	let consoleLogSpy: ReturnType<typeof mock>;
+	let originalLog: typeof console.log;
 	let previousDebug: string | undefined;
 
 	beforeEach(() => {
 		resetScopedModelSelectionStateForTests();
 		previousDebug = process.env.OPENCODE_SWARM_DEBUG;
 		process.env.OPENCODE_SWARM_DEBUG = '1';
+		originalLog = console.log;
 		consoleLogSpy = mock(() => {});
 		// biome-ignore lint/suspicious/noExplicitAny: console.log capture for the pinned-debug leg
 		(console as any).log = consoleLogSpy;
 	});
 
 	afterEach(() => {
-		// biome-ignore lint/suspicious/noExplicitAny: restore the spied method
-		(console as any).log.mockRestore?.();
+		// Restore the ORIGINAL function — a bare mock() carries no binding to
+		// the property it was assigned to, so mockRestore() alone would leak
+		// the silenced console.log into the rest of the shared test process
+		// (implementation-review round 1 finding).
+		console.log = originalLog;
 		if (previousDebug === undefined) {
 			delete process.env.OPENCODE_SWARM_DEBUG;
 		} else {

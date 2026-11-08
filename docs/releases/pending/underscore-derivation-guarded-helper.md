@@ -1,7 +1,5 @@
 ---
 issue: 3331
-issue: 3322
-issue: 3330
 ---
 
 # One guarded derivation for agent-name identity (underscore agents, Task-route fallback, v2 apply safety)
