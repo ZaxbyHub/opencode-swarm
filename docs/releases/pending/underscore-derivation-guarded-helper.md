@@ -22,7 +22,7 @@ issue: 3331
   when UNIQUE; a case-colliding roster pair (e.g. swarms `Local` and `local`)
   skips the sticky apply with a diagnostic instead of silently writing
   whichever colliding key hashed first (#3617 review PRR-001). An unregistered
-  spelling also skips with a diagnostic, and the no-route arm's
+  spelling also skips with a diagnostic (both arms), and the no-route arm's
   "MODEL FALLBACK: switching …" advisory is no longer emitted on a v2 host
   when the apply will not land (#3617 review PRR-007).
 
