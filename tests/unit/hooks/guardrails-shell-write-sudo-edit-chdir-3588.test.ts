@@ -112,6 +112,29 @@ describe('#3588 Fix 5: -D/--chdir carries onto edit outcomes (gate)', () => {
 		expect(got.verdict).toBe('DENIED');
 	}, 30_000);
 
+	// PR #3615 review F-01: a non-literal -D value must not be joined — the
+	// `../` operand cancels the unknown directory and fabricates an in-scope
+	// literal (base denied these; the first qualification admitted them).
+	test.each([
+		['sudo -D "$D" -e ../src/shadow'],
+		['sudo --chdir="$D" -e ../src/shadow'],
+		['sudo -D $D -e ../src/shadow'],
+		['sudo -D ~ -e ../src/shadow'],
+		['sudo -D s* -e ../src/shadow'],
+	])('%s → DENY (non-literal chdir is unresolvable)', async (command) => {
+		const got = await gate(command);
+		expect(got.verdict).toBe('DENIED');
+		expect(got.message).toMatch(/dynamic/i);
+	}, 30_000);
+
+	test('a literal chdir keeps qualifying relative operands', () => {
+		const analysis = detectPosixWrites('sudo -D src -e sub/shadow');
+		const paths = analysis.writes
+			.filter((w) => w.category === 'launcher_write')
+			.map((w) => w.path);
+		expect(paths).toEqual([path.join('src', 'sub/shadow')]);
+	});
+
 	// PR #3615 feedback PRR-015 (Copilot): a TILDE-leading operand must NOT
 	// be joined under the chdir — path.join would bury the `~` inside an
 	// in-scope literal (`src/~/shadow`) and admit a real $HOME-relative

@@ -40,18 +40,20 @@ the shell semantics did.
    `sudo FOO=bar sudo -i`, `nice sudo -i` and `nice sudo -z true` were
    admitted; the launcher-uncertainty channel now re-walks nested launcher
    tails.
-4. **Quoted compound payloads under `sudo -i`/`-s` deny (#3588).**
-   `sudo -i 'echo x > ../esc'` (and `sudo -i echo 'x > ../esc'`) were
-   admitted although the login shell's `-c` re-joins and executes them.
-   Any tail word carrying whitespace, shell-operator, quote, `$`-expansion,
-   or brace/comma structure under `-i`/`-s` now denies — parameter and
-   brace expansion synthesize word separators at runtime with no literal
-   operator (`touch${IFS}esc.txt`, `{rm,-rf,../outside}`); plain multiword
-   tails (`sudo -i make build`) keep admitting.
+4. **Non-plain payload words under `sudo -i`/`-s` deny (#3588).** Any tail
+   word carrying whitespace, a shell operator, a quote, `$`, or brace/comma
+   structure now denies; plain multiword tails (`sudo -i make build`) keep
+   admitting. One shape was a verified bypass: sudo 1.9.15p5 leaves `$`
+   unescaped when it re-joins the words for the login shell's `-c`, so
+   `sudo -s 'touch$IFS/tmp/x'` creates the file. The rest
+   (`sudo -i 'echo x > ../esc'`, `${IFS}`, `{a,b}`) reach the shell as one
+   literal word on that sudo version, so those denials are conservative:
+   other sudo builds, including sudo-rs, have not been checked.
 5. **`sudo -D DIR -e FILE` resolves the edit target under DIR (#3588).**
    `cd src; sudo -D /etc -e shadow` was admitted as `src/shadow`; relative
    edit targets now resolve under the `-D`/`--chdir` directory, while
-   absolute targets are judged as written.
+   absolute targets are judged as written. A non-literal `-D` value
+   (`$D`, `~`, a glob or brace) denies relative targets as dynamic.
 6. **Plain, quoted-flag, and late-flag `rm` are scope-checked (#3591).**
    Policy decision (AC10): **scope containment, modeled on
    `unlink`/`rmdir`** — every operand of a non-recursive, non-forced `rm`
@@ -82,9 +84,9 @@ branch is checked) — no change needed.
   architects included; unchanged where write enforcement is inactive.
 - `sudo -i`/`sudo -s` with a quoted compound payload denies even when the
   payload's targets are in scope (the joined command is not statically
-  judgeable). Payload words carrying `$`-expansion or brace/comma
-  structure deny the same way — expansion synthesizes word separators at
-  runtime (`touch${IFS}esc.txt`, `{rm,-rf,../outside}`).
+  judgeable). Payload words carrying `$` or brace/comma structure deny the
+  same way. Only bare `$`-expansion is a confirmed bypass; the other
+  shapes are conservative denials (see item 4).
 - `sudo -D DIR -e /absolute/path` is judged at the absolute path (a target
   outside scope now denies). Conversely, `sudo -D src -e shadow` — denied
   at the previous emission (the operand resolved at the workspace root,
@@ -92,7 +94,15 @@ branch is checked) — no change needed.
   under the `-D` directory, inside scope. Tilde-leading operands
   (`sudo -D src -e ~/shadow`) are never joined; they fail closed as
   dynamic (real sudoedit resolves `~` to the invoker's home, outside the
-  workspace).
+  workspace). This also denies a quoted literal `"~/x"`, which the gate
+  cannot tell apart once quotes are removed.
+- Two loop and flag shapes change direction. `cd src; while cd .. && [ -z
+  "$d" ]; do cd src; echo x > f; d=1; done` was withdrawn and now admits,
+  which matches bash (the write lands in `src/f`). In-scope late-flag
+  `rm src/a.ts -f` now denies like `rm -f src/a.ts`.
+- `rm $X`, `rm "$D"/x` and `rm ~/x` now deny as dynamic targets for
+  enforced roles, and architect and other enforced-role `rm` of protected
+  paths is now checked.
 - `rm -i ../esc` (and other non-destructive flags with an out-of-scope
   operand) now denies; in-scope `rm -i` keeps working.
 - A scope-LESS coder session's non-recursive, NON-FORCED `rm` now denies
@@ -133,6 +143,13 @@ item 6 above closes it, so that residual no longer applies.
   destination checks still scan unbounded words (a 40k-char unclosed-brace
   `curl -o` operand costs about 1.5 s per walk, and several stack).
   Pre-existing.
+- `env` between launchers stops the launcher walk: `nice env time -o ../x
+  true`, `nice env sudo -i` and `sudo env sudo -i` are admitted, so the
+  nested-launcher denials in item 3 do not cover env-interposed chains.
+  Pre-existing.
+- `pushd .` is not modeled as pushing a duplicate stack entry, so `cd src;
+  pushd ../tests; pushd .; popd; echo x > f` is judged at `src/f` while
+  bash writes under `tests/`. Pre-existing.
 - Launch-environment sanitization (`BASH_ENV` / `BASH_FUNC_*` scrubbing at
   the shell-spawn layer) is not in scope; the loop withdrawal is the
   command-text-level mitigation.

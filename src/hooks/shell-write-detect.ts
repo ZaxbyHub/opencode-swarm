@@ -3471,14 +3471,22 @@ function detectLauncherWrites(cmd: unknown): WriteTarget[] {
 				// sudoedit target as a literal in-scope path; unqualified,
 				// the raw `~`-leading operand is flagged dynamic (fail
 				// closed), matching sudo's home-relative sudoedit semantics.
+				// PR #3615 review F-01: a non-literal -D value ($D, ~, glob,
+				// brace) names a directory the walk cannot know — joining lets
+				// `../` cancel it and fabricates an in-scope literal
+				// (`sudo -D "$D" -e ../src/shadow` → `src/shadow`), so operands
+				// it would qualify are withdrawn as dynamic instead.
 				const sudoChdir = walk.sudoChdir;
-				const qualifyChdir = (operandPath: string): string =>
+				const unresolvableChdir =
+					sudoChdir !== undefined &&
+					(isDynamicPath(sudoChdir) || /[*?[\]{}]/.test(sudoChdir))
+						? sudoChdir
+						: undefined;
+				const chdirQualifies = (operandPath: string): boolean =>
 					sudoChdir !== undefined &&
 					operandPath !== '' &&
 					!isAbsolutePathSpelling(operandPath) &&
-					!operandPath.startsWith('~')
-						? path.join(sudoChdir, operandPath)
-						: operandPath;
+					!operandPath.startsWith('~');
 				// sudo -e operands are EDIT TARGETS (write-class) — each one
 				// expands per-branch (bash hands sudo every expanded word);
 				// refusal classes land on the unconditional dynamic() path.
@@ -3490,11 +3498,27 @@ function detectLauncherWrites(cmd: unknown): WriteTarget[] {
 						suffixNodes[t],
 						operand,
 						0,
-						(branchPath) => ({
-							category: 'launcher_write',
-							operator: 'sudo -e',
-							path: qualifyChdir(branchPath),
-						}),
+						(branchPath) => {
+							if (
+								unresolvableChdir !== undefined &&
+								chdirQualifies(branchPath)
+							) {
+								return {
+									category: 'launcher_write',
+									operator: 'sudo -e',
+									path: null,
+									dynamicSourceWord: unresolvableChdir,
+								};
+							}
+							return {
+								category: 'launcher_write',
+								operator: 'sudo -e',
+								path:
+									sudoChdir !== undefined && chdirQualifies(branchPath)
+										? path.join(sudoChdir, branchPath)
+										: branchPath,
+							};
+						},
 						() => ({
 							category: 'launcher_write',
 							operator: 'sudo -e',

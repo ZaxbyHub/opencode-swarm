@@ -278,7 +278,7 @@ describe('W1 gate: control-flow divergence and loop fixpoint (v4 constraint 3)',
 		expect(got.message).toMatch(WITHDRAWAL);
 	});
 
-	test('control: a write INSIDE the loop body pairs with the body-internal state', async () => {
+	test('a write INSIDE a withdrawing loop body also denies', async () => {
 		// #3586 re-pin (trace 3586-3588-3591-shell-gate-walk-fixpoint, plan
 		// rev 13 END-STATE): this leg was pinned ADMIT on the assumption a
 		// direct `break` provably terminates after iteration 1. Fourteen

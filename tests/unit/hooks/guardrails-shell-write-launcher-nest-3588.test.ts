@@ -104,7 +104,7 @@ describe('#3588 Fix 2: detector hop loop crosses launcher inner tails', () => {
 		expect(paths).toContain('src/ok.txt');
 	});
 
-	test('a three-deep chain reaches the innermost -o (bound still holds)', () => {
+	test('a three-deep chain reaches the innermost -o', () => {
 		const analysis = detectPosixWrites(
 			'nice nohup sudo time -o src/ok.txt true',
 		);
@@ -184,8 +184,15 @@ describe('#3588 Fix 4: joined compound payloads under -i/-s deny', () => {
 		["sudo -i -- echo 'x > ../esc'", /interactive shell/i],
 		['sudo -i "echo `touch ../esc`"', /interactive shell/i],
 		["sudo -s sh -c 'echo x > ../esc'", /interactive shell/i],
-		// PR #3615 feedback PRR-001: parameter/brace expansion synthesizes
-		// word separators at runtime with NO literal operator in the word.
+		// PR #3615 feedback PRR-001: sudo 1.9.15p5 leaves `$` unescaped when it
+		// re-joins the words, so a bare `$IFS` really splits in the login shell
+		// (Docker: `sudo -s 'touch$IFS/tmp/w/ifs.txt'` created the file).
+		["sudo -i 'tee$IFS../esc'", /interactive shell/i],
+		["sudo -s 'touch$IFS../esc'", /interactive shell/i],
+		["sudo -s '$X'", /interactive shell/i],
+		// sudo escapes `{`, `}` and `,`, so these reach the shell literally on
+		// sudo 1.9.15p5. The deny is conservative (other sudo implementations
+		// are unverified), not a claim that the spelling executes.
 		["sudo -i 'touch${IFS}esc.txt'", /interactive shell/i],
 		["sudo -i 'rm${IFS}-rf${IFS}../outside'", /interactive shell/i],
 		["sudo -s 'touch${IFS}esc.txt'", /interactive shell/i],
