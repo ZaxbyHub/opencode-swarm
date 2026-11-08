@@ -3963,11 +3963,18 @@ async function initializeOpenCodeSwarm(
 					// would misresolve a same-turn provider error for a
 					// swarm-prefixed primary agent onto the wrong (or an empty)
 					// chain.
+					// #3331: for a routed Task child, the route's RAW dispatched
+					// name is the identity the chat boundary reports
+					// (String(input.agent) equals the subagent_type), so it is
+					// resolved FIRST — a machinery-recorded bare-role pointer
+					// (agentSessions/activeAgent) or the stripped `route.role`
+					// can resolve a DIFFERENT primary, and the resulting chain
+					// signature mismatch silently discards the advance below.
 					const routeModel = resolveTaskRouteModelChain(
 						route
-							? (swarmState.activeAgent.get(childSessionID) ??
+							? (route.agentName ??
+									swarmState.activeAgent.get(childSessionID) ??
 									swarmState.agentSessions.get(childSessionID)?.agentName ??
-									route.agentName ??
 									route.role)
 							: (resolveSessionChatAgent(childSessionID) ??
 									swarmState.activeAgent.get(childSessionID) ??
