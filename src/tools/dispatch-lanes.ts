@@ -4761,17 +4761,27 @@ async function startAsyncLanePrompt(args: {
 	const lanePrimaryModel = swarmAgents?.[baseRole]?.model;
 	const laneFallbackModels = swarmAgents?.[baseRole]?.fallback_models ?? [];
 	const registry = _internals.getGeneratedAgentNames();
-	const registryProvesUnregistered =
-		registry.length > 0 &&
-		!registry.some(
-			(name) => name.toLowerCase() === args.lane.agent.toLowerCase(),
-		);
-	if (
-		registryProvesUnregistered &&
-		!swarmAgents?.[baseRole] &&
-		!lanePrimaryModel &&
-		laneFallbackModels.length === 0
-	) {
+const registryProvesUnregistered =
+			registry.length > 0 &&
+			!registry.some(
+				(name) => name.toLowerCase() === args.lane.agent.toLowerCase(),
+			);
+		// Issue #3617 review F-05: a PREFIXED spelling whose swarm id no
+			// longer resolves (deriveSwarmIdentity fail-closed, e.g. the
+			// hyphen form 'acme-prod-coder') must refuse even when the
+			// DEFAULT swarm has a matching entry — base refused it because
+			// its derived swarm id did not exist, and launching against the
+			// default-swarm entry would run an agent name the host does not
+			// have. Bare roles (baseRole === raw) keep the legacy path.
+			const prefixedUnresolvable =
+				baseRole !== args.lane.agent && swarmID === undefined;
+			if (
+				registryProvesUnregistered &&
+				(prefixedUnresolvable ||
+					(!swarmAgents?.[baseRole] &&
+						!lanePrimaryModel &&
+						laneFallbackModels.length === 0))
+			) {
 		await appendAsyncLaneLaunchError(
 			args.directory,
 			args.session,

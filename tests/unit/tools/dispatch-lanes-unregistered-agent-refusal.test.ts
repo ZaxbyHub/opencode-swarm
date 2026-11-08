@@ -41,6 +41,8 @@ import {
 	type SessionOps,
 } from '../../../src/tools/dispatch-lanes.js';
 import { canonicalMkdtemp } from '../../../tests/helpers/tmpdir.js';
+import { createAgents } from '../../../src/agents/index.js';
+import type { PluginConfig } from '../../../src/config/index.js';
 
 const originalInternals = { ..._internals };
 
@@ -129,6 +131,35 @@ describe('issue #2614 — unregistered lane agents are refused at dispatch time'
 		expect(createCalls()).toBe(0);
 		expect(promptCalls()).toBe(0);
 		fs.rmSync(directory, { recursive: true, force: true });
+	});
+
+	test('hyphen-prefixed unresolvable agent refuses even with a default-swarm entry (#3617 F-05)', async () => {
+		const directory = makeTempDir();
+		const { ops, createCalls, promptCalls } = stubSyncOps();
+		_internals.getSessionOps = () => ops;
+		// A registry of prefixed names proves 'acme-prod-coder' is not a member.
+		_internals.getGeneratedAgentNames = () => ['mega_architect', 'mega_explorer'];
+		// The DEFAULT swarm resolves a coder entry — without the prefixed-
+		// unresolvable arm this would launch against the default-swarm model
+		// under an agent name the host does not have (base refused it).
+		createAgents({
+			agents: { coder: { model: 'default/coder-model' } },
+		} as PluginConfig);
+
+		try {
+			const result = await executeDispatchLanes(
+				{ lanes: [{ id: 'hyphen', agent: 'acme-prod-coder', prompt: 'probe' }] },
+				directory,
+				{ callerAgent: 'build' },
+			);
+			const lane = result.lane_results[0];
+			expect(lane?.status).toBe('rejected');
+			expect(lane?.error ?? '').toContain('acme-prod-coder');
+			expect(createCalls()).toBe(0);
+			expect(promptCalls()).toBe(0);
+		} finally {
+			fs.rmSync(directory, { recursive: true, force: true });
+		}
 	});
 
 	test('refusal list is bounded: first 8 registered names then ", and N more"', async () => {
