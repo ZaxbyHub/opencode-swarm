@@ -100,6 +100,15 @@ item 6 above closes it, so that residual no longer applies.
 - Writes inside command substitutions in For word-list / clause WORD
   positions are not enumerated (pre-existing; e.g. `for i in $(echo x >
   ../esc)`).
+- `/swarm guardrail explain` WITHOUT `--scope` leaves out the scope
+  dimension and shows no verified-scope marker, so it can read "allow"
+  for a command the gate denies. Example, coder with scope `src/`:
+  `rmdir src/{a,../esc}` is denied by the gate, blocked by
+  `explain --scope src/`, denied by `scope_validate`, but explain without
+  `--scope` reports "allow: no rule matched" with an unverified Resolved
+  Scope. Pre-existing (the verified-scope omission in
+  `guardrail-explain-service.ts`), not changed here; tracked as a
+  follow-up.
 - Bounded over-deny: a write AFTER an exempt single-word `for` loop
   (`cd src; for i in x; do echo x > f; cd ..; done; echo y > src/g`) is
   denied via the withdrawn post-loop state even though one iteration

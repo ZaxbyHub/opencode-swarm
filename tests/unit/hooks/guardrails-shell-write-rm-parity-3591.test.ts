@@ -169,3 +169,39 @@ describe('#3591 parity: late-flag escape — all deny, naming the escape', () =>
 		30_000,
 	);
 });
+
+describe('#3591 brace operands — three-surface agreement + the pre-existing explain-noscope divergence', () => {
+	// Final-critic round 1 disclosure: explain WITHOUT `--scope` excludes the
+	// scope dimension and omits the verified-scope marker
+	// (guardrail-explain-service.ts:341-353), so it can read "allow" for a
+	// command the gate denies. Pinned HONESTLY as the CURRENT pre-existing
+	// behavior (untouched by this PR; tracked as a follow-up): the `rm`
+	// brace shape's no-scope verdict is still block (the #3569 brace-borne
+	// extractor rule fires scope-independently), while the `rmdir` brace
+	// shape — pinned as the 03 Leg-3 split-brain row — is the exact shape
+	// that reads "allow: no rule matched" against the gate's DENY.
+	test('rm src/{a,../esc}: gate DENY, explain --scope block, scope_validate deny; explain no-scope stays block (extractor rule is scope-independent)', async () => {
+		const command = 'rm src/{a,../esc}';
+		const got = await allSurfaces(command);
+		expect(got.gate).toBe(false);
+		expect(got.explainScope).toBe('block');
+		expect(got.sv).toBe('deny');
+		// Honest current value: the brace-borne recursive-rm rule blocks even
+		// without a declared scope (no divergence on THIS shape).
+		expect(got.explainNoScope).toBe('block');
+	}, 30_000);
+
+	test('rmdir src/{a,../esc}: gate DENY, explain --scope block, scope_validate deny, explain WITHOUT --scope "allow" (pre-existing divergence, follow-up)', async () => {
+		const command = 'rmdir src/{a,../esc}';
+		const got = await allSurfaces(command);
+		expect(got.gate).toBe(false);
+		expect(got.explainScope).toBe('block');
+		expect(got.sv).toBe('deny');
+		// The pre-existing explain no-scope divergence: the scope dimension is
+		// absent, so no rule matches and the report reads "allow" with an
+		// UNVERIFIED Resolved Scope while the live gate denies the escaping
+		// branch. guardrail-explain-service.ts:341-353 omits verifiedScope
+		// here; tracked as a follow-up, NOT changed by this PR.
+		expect(got.explainNoScope).toBe('allow');
+	}, 30_000);
+});
