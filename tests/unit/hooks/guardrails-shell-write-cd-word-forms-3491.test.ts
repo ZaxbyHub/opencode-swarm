@@ -279,8 +279,21 @@ describe('W1 gate: control-flow divergence and loop fixpoint (v4 constraint 3)',
 	});
 
 	test('control: a write INSIDE the loop body pairs with the body-internal state', async () => {
+		// #3586 re-pin (trace 3586-3588-3591-shell-gate-walk-fixpoint, plan
+		// rev 13 END-STATE): this leg was pinned ADMIT on the assumption a
+		// direct `break` provably terminates after iteration 1. Fourteen
+		// plan-critic rounds proved NO command-text condition on a break is
+		// sound — the AMBIENT ENVIRONMENT redefines break outside the
+		// analyzed command (a BASH_ENV startup file or an exported
+		// BASH_FUNC_* definition: `break() { :; }` makes the loop re-iterate
+		// at the alternated cwd and write the escaping root-level f). The
+		// walk now withdraws every clause+body write on landing≠entry with
+		// exactly ONE exemption (a For with a fully-literal one-word list and
+		// no dynamic-execution family member anywhere); While loops never
+		// qualify, so this pin flips ADMIT→DENIED (conservative, fail-closed).
 		const got = await gate('while true; do cd src; echo x > f; break; done');
-		expect(got.verdict).toBe('ADMITTED');
+		expect(got.verdict).toBe('DENIED');
+		expect(got.message).toMatch(WITHDRAWAL);
 	});
 
 	test('control: a cwd-neutral loop keeps the parent state (no withdrawal)', async () => {

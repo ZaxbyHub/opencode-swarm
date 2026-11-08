@@ -22,6 +22,7 @@ import { CMD_STRIP_PREFIX, PS_STRIP_PREFIX } from '../shell-executor-context';
 import {
 	BASH_BUILTIN_COMMANDS,
 	expandBraceRaw,
+	parseRmOptionTokens,
 	walkLauncherOptions,
 	walkShellCommandFlags,
 } from '../shell-write-detect';
@@ -1123,29 +1124,58 @@ export function dcAnalyzeLauncherUncertainty(command: string): {
 		const words = shellSplitWordsWithOffsets(seg);
 		const head = words[0];
 		if (head === undefined) continue;
-		const walk = walkLauncherOptions(
-			head.word,
-			words.slice(1).map((w) => w.word),
-			head.raw,
-		);
-		if (walk === null) continue;
-		// #3491 closure F-5(d): `head` is an offset-splitter entry — render
-		// its WORD, not the object (the critic's `[object Object]` defect).
-		if (walk.kind === 'interactive') {
-			return {
-				deny: true,
-				// #3572 review N-26: the launcher word is untrusted source text —
-				// sanitize control characters and bound its length before it
-				// reaches the operator-facing denial (and the explain mirror).
-				reason: `BLOCKED: launcher "${sanitizeDiagnosticText(head.word, 160)}" opens an interactive shell (-i/-s) that cannot be statically inspected`,
-			};
-		}
-		if (walk.kind === 'uncertain' && walk.tailIndex < words.length - 1) {
-			return {
-				deny: true,
-				// #3572 review N-26: same untrusted-word channel as above.
-				reason: `BLOCKED: launcher "${sanitizeDiagnosticText(head.word, 160)}" carries an unrecognized option — every remaining word is a potential execution tail (deny-on-uncertainty)`,
-			};
+		// #3588 item 2 (Fix 3): a launcher walk whose execution tail HEADS
+		// with another launcher is re-walked in a bounded loop — mirroring the
+		// detector's hop loop (Fix 2) on the deny channel. `sudo sudo -i`,
+		// `sudo FOO=bar sudo -i`, `nice sudo -i` and `nice sudo -z true`
+		// previously stopped at the outer 'inner' outcome and never reached
+		// the inner deny. Each hop consumes at least the tail head word, so
+		// the DC_UNWRAP_PARANOID_BOUND loop is structurally terminating; a
+		// NON-launcher tail head stops the re-walk (transparent env/command/
+		// builtin/exec heads were already stripped above).
+		let hopWords = words;
+		let hopHead = head;
+		for (let hop = 0; hop < DC_UNWRAP_PARANOID_BOUND; hop += 1) {
+			const walk = walkLauncherOptions(
+				hopHead.word,
+				hopWords.slice(1).map((w) => w.word),
+				hopHead.raw,
+			);
+			if (walk === null) break;
+			// #3491 closure F-5(d): `hopHead` is an offset-splitter entry —
+			// render its WORD, not the object (the critic's `[object Object]`
+			// defect).
+			if (walk.kind === 'interactive') {
+				return {
+					deny: true,
+					// #3572 review N-26: the launcher word is untrusted source
+					// text — sanitize control characters and bound its length
+					// before it reaches the operator-facing denial (and the
+					// explain mirror).
+					reason: `BLOCKED: launcher "${sanitizeDiagnosticText(hopHead.word, 160)}" opens an interactive shell (-i/-s) that cannot be statically inspected`,
+				};
+			}
+			if (walk.kind === 'uncertain' && walk.tailIndex < hopWords.length - 1) {
+				return {
+					deny: true,
+					// #3572 review N-26: same untrusted-word channel as above.
+					reason: `BLOCKED: launcher "${sanitizeDiagnosticText(hopHead.word, 160)}" carries an unrecognized option — every remaining word is a potential execution tail (deny-on-uncertainty)`,
+				};
+			}
+			if (walk.kind !== 'inner') break;
+			const tailHead = hopWords[1 + walk.innerIndex];
+			if (tailHead === undefined) break;
+			const tailBase = basenameAnySepLike(tailHead.word);
+			if (
+				tailBase !== 'sudo' &&
+				tailBase !== 'time' &&
+				tailBase !== 'nice' &&
+				tailBase !== 'nohup'
+			) {
+				break;
+			}
+			hopWords = hopWords.slice(1 + walk.innerIndex);
+			hopHead = hopWords[0] ?? tailHead;
 		}
 	}
 	return { deny: false, reason: '' };
@@ -2030,20 +2060,21 @@ export function dcExtractRecursiveRmTargets(segment: string): string[] | null {
 	)
 		return null;
 
-	let destructive = false;
-	let index = 1;
-	for (; index < tokens.length; index++) {
-		const token = tokens[index];
-		if (token === '--') {
-			index++;
-			break;
-		}
-		if (!token.startsWith('-') || token === '-') break;
-		if (token === '--recursive' || token === '--force') destructive = true;
-		if (!token.startsWith('--') && /[rRfF]/.test(token.slice(1))) {
-			destructive = true;
-		}
-	}
+	// #3591 ABSORB (Fix 6b): GNU getopt permutation — options may appear
+	// AFTER operands, so the old leading-token-only flag read missed
+	// `rm foo -rf ../../outside` (returned null while `rm -rf foo
+	// ../../outside` extracted both targets). Two-pass parse shared with the
+	// detector's non-destructive rm arm (parseRmOptionTokens): pass 1
+	// collects ALL option tokens anywhere before `--` and classifies the
+	// recursive/forced ones; pass 2 extracts every remaining token as a
+	// target. A late-flag rm is therefore treated as recursive
+	// (fail-closed). No POSIXLY_CORRECT detection (fail-closed per the
+	// #3591 ABSORB decision).
+	const rmParse = parseRmOptionTokens(tokens.slice(1));
+	const destructive = rmParse.destructive;
+	const rmTargetTokens = rmParse.targetIndices.map(
+		(idx) => tokens[idx + 1] ?? '',
+	);
 	// #3569 residual 1: a target word carrying an unquoted brace region is
 	// destructive REGARDLESS of the recursive/forced flag state — real bash
 	// expands `src/{a,../esc}` and deletes BOTH branches (no -r/-f needed),
@@ -2051,9 +2082,9 @@ export function dcExtractRecursiveRmTargets(segment: string): string[] | null {
 	// rm with only literal single targets keeps today's behavior (a
 	// different, separately-tracked coverage class).
 	if (!destructive) {
-		const braceBorne = tokens
-			.slice(index)
-			.some((t) => expandBraceRaw(t).kind !== 'none');
+		const braceBorne = rmTargetTokens.some(
+			(t) => expandBraceRaw(t).kind !== 'none',
+		);
 		if (!braceBorne) return null;
 	}
 
@@ -2066,7 +2097,7 @@ export function dcExtractRecursiveRmTargets(segment: string): string[] | null {
 	// scope-contingent, admitting workspace-escaping deletes under a
 	// marker-covering scope).
 	const out: string[] = [];
-	for (const target of tokens.slice(index)) {
+	for (const target of rmTargetTokens) {
 		// #3569 4.5 review: expand on the RAW token — expandBraceRaw is
 		// quote-aware, so a QUOTED brace (`rm -f 'src/{a,b}'`) stays LITERAL
 		// (bash-true); dequoting first wrongly expanded quoted literals.
@@ -2340,8 +2371,23 @@ export function dcEvaluateRecursiveDeleteTargets(input: {
 		}
 	}
 
-	const normalizedTargets: string[] = [];
-	let hasNested = false;
+	// #3591 ABSORB (Fix 6c): TWO-PHASE evaluation. Phase 1 runs the
+	// pre-allowlist checks (per-target traversal/invalid, then protected
+	// .git/.swarm components, then workspace containment — the CURRENT
+	// per-target order) over EVERY target FIRST; phase 2 evaluates the
+	// allowlist and nested-scope rules over the survivors. Both
+	// `rm -rf foo ../../outside` and `rm foo -rf ../../outside` (the GNU
+	// permutation form Fix 6b now extracts) then fail phase 1 on
+	// ../../outside and the denial NAMES the escaping target instead of the
+	// first non-allowlisted operand.
+	interface PhaseOneTarget {
+		target: string;
+		safeTarget: string;
+		components: string[];
+		resolved: string;
+		relative: string;
+	}
+	const survivors: PhaseOneTarget[] = [];
 	for (const raw of input.targets) {
 		const target = raw.trim().replace(/^['"]|['"]$/g, '');
 		const safeTarget = dcSafeDiagnosticValue(target);
@@ -2392,6 +2438,12 @@ export function dcEvaluateRecursiveDeleteTargets(input: {
 			};
 		}
 
+		survivors.push({ target, safeTarget, components, resolved, relative });
+	}
+
+	const normalizedTargets: string[] = [];
+	let hasNested = false;
+	for (const { safeTarget, components, resolved, relative } of survivors) {
 		const basename = path.basename(resolved);
 		if (!DC_SAFE_TARGETS.has(basename)) {
 			return {

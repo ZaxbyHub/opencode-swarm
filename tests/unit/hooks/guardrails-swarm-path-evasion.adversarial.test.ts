@@ -241,12 +241,23 @@ describe('guardrails adversarial - .swarm path evasion (sections 16-21)', () => 
 			await expect(hooks.toolBefore(input, output)).rejects.toThrow(/BLOCKED/);
 		});
 
-		test('rm src/temp.ts → ALLOWED (non-.swarm path)', async () => {
+		test('rm src/temp.ts → not .swarm-guarded; scope-checked like any write (#3591)', async () => {
 			const config = defaultConfig();
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
 			const input = makeBashInput('test-session', 'rm src/temp.ts');
 			const output = makeBashOutput('rm src/temp.ts');
-			await expect(hooks.toolBefore(input, output)).resolves.toBeUndefined();
+			// #3591 re-pin (trace 3586-3588-3591-shell-gate-walk-fixpoint,
+			// Fix 6a / AC10 policy = scope containment modeled on unlink):
+			// a non-recursive rm's operands are now write targets, so a
+			// scope-LESS coder session is denied SCOPE_NOT_DECLARED exactly
+			// like `echo x > src/f` or `unlink src/temp.ts` (invariant 9). The
+			// row's intent — the .swarm guard does NOT fire on a non-.swarm
+			// path — still holds (no ".swarm detected" message); the in-scope
+			// ALLOW with a declared scope is pinned by
+			// guardrails-shell-write-rm-scope-3591 and -rm-parity-3591.
+			await expect(hooks.toolBefore(input, output)).rejects.toThrow(
+				/SCOPE_NOT_DECLARED/,
+			);
 		});
 
 		test('rm -rf .swarm/ → BLOCKED (recursive rm)', async () => {
@@ -467,12 +478,17 @@ describe('guardrails adversarial - .swarm path evasion (sections 16-21)', () => 
 			await expectScopeBlocked(hooks.toolBefore(input, output));
 		});
 
-		test('rm .swarm/file → ALLOWED when block_destructive_commands=false', async () => {
+		test('rm .swarm/file → scope-blocked as a write when block_destructive_commands=false (#3591)', async () => {
 			const config = defaultConfig({ block_destructive_commands: false });
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
 			const input = makeBashInput('test-session', 'rm .swarm/file');
 			const output = makeBashOutput('rm .swarm/file');
-			await expect(hooks.toolBefore(input, output)).resolves.toBeUndefined();
+			// #3591 re-pin (Fix 6a, same rationale as the cp+rm row below and
+			// the #3120 rsync rows): disabling the destructive arm no longer
+			// leaves a flagless rm unchecked — its operand is a write target
+			// judged by the write-authorization layer (here: a scope-less
+			// coder → SCOPE_NOT_DECLARED).
+			await expectScopeBlocked(hooks.toolBefore(input, output));
 		});
 
 		test('move .swarm\\file .swarm\\renamed → ALLOWED when block_destructive_commands=false', async () => {
