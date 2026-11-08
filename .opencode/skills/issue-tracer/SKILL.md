@@ -3,7 +3,7 @@ name: issue-tracer
 description: Evidence-first investigation, validation, and full resolution of issues and bugs. Use when asked to investigate, trace, root-cause, reproduce, plan, fix, resolve, close, or prepare a PR for an issue, bug report, defect, regression, failing test, crash, or confusing runtime behavior. Drives issue validation, acceptance-check-driven reproduction and fix planning, independent critic and implementation review, recurrence-class eradication, and an invariant-aware, PR-ready closure with a recorded human merge gate under a mandatory full-resolution contract that forbids partial fixes, deferred work, and unwired code.
 license: MIT
 metadata:
-  version: 3.0.0
+  version: 3.0.1
   source: .opencode/skills/issue-tracer/SKILL.md
   audience: swarm-plugin
 ---
@@ -31,7 +31,7 @@ This contract is MANDATORY and blocking in every implementation mode. Closure is
 
 ## Gate Table
 
-This table is the normative center of the protocol: `trace-check.sh` reads it, and no phase may be marked complete without its exit condition met. Identities: `reviewed-commit` = `git rev-parse HEAD`; `tree-id` = `trace-check.sh tree-id` (a `git write-tree` over the current index plus untracked files). The validator decides mechanical facts only - file presence, required headings, ledger fields, identity equality, sums, enum membership; whether a check is truly discriminating, an `--expect` regex is adequate, or a NON-EXECUTABLE reason is legitimate stays reviewer/critic judgment.
+This table is the normative center of the protocol: `trace-check.sh` reads it, and no phase may be marked complete without its exit condition met. Identities: `reviewed-commit` = `git rev-parse HEAD`; `tree-id` = `trace-check.sh tree-id` (a `git write-tree` over the current index plus untracked files). The validator decides mechanical facts only - file presence, required headings, ledger fields, identity equality, sums, enum membership; whether a check is truly discriminating, an `--expect` regex is adequate, or a NON-EXECUTABLE reason is legitimate stays reviewer/critic judgment. When an approval row's head has legitimately moved (implementation commits landing after the plan-critic approval), `trace-check.sh rebind` prints an explicit append-only rebind row for the Gates ledger; see `references/evidence-artifacts.md` ("Rebind rows") - it is bookkeeping for head drift, never a substitute for a fresh critic round when the reviewed artifact changed.
 
 | Phase | Required artifact(s) | Validator | Exit condition |
 |---|---|---|---|
