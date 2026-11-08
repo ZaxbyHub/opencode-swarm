@@ -13,7 +13,7 @@ description: >
   this process.
 metadata:
   audience: swarm-plugin
-  swarm-contract-digest: "203da214c99a"
+  swarm-contract-digest: "8f12c1815a46"
 ---
 
 # Swarm PR Feedback
@@ -299,23 +299,8 @@ Rules:
 **Before branch validation (Stage A) can begin, every PR comment that contains feedback
 or findings MUST be integrated into the total feedback ledger as a
 `FB-###` item.** This is a hard requirement, not a best-effort step.
-
-What counts as "feedback or findings":
-- A reviewer request for a code change ("please rename this", "add a test for
-  X", "this should call `_internals.foo`")
-- A reviewer claim about correctness, security, or style ("this is
-  incorrect", "X will leak")
-- A bot reviewer's findings table entries
-- A CI failure with a specific file:line root cause
-- A reviewer question that implies a code change is needed ("why is this
-  static?")
-- PR review summaries or aggregate comments
-
-What does NOT count (and is therefore not required to be a ledger item):
-- Pure acknowledgements ("LGTM", "looks good")
-- PR-level metadata changes (title, label, milestone)
-- Force-push acknowledgements
-
+What counts as feedback/findings (and what does not) is enumerated in
+`references/intake-surfaces.md` (## What counts as feedback or findings).
 Rules:
 - **No finding may be addressed outside the ledger.** If you fix something a
   reviewer mentioned, the corresponding `FB-###` item MUST be in the ledger
@@ -336,16 +321,17 @@ Rules:
   for the same finding; the earlier-round `FB-###` item is updated with the
   new evidence rather than a new item being created.
 - **Multi-round pattern continues to apply** (see "Multi-Round Bot Reviews"
-  section). A new bot round adds new `FB-###` items for findings that
-  weren't in the prior round; the prior round's items are carried forward
-  and updated with the new evidence.
+  section): new bot-round findings get new `FB-###` items; prior items carry
+  forward with the new evidence.
+- **Re-fetch at every round boundary (#3607).** Intake is not one-time:
+  re-fetch issue comments, inline review comments, and reviews at the start of
+  every fix round and again before the closeout gate — per-head bots post
+  findings against intermediate heads mid-round. Commands and bot markers:
+  `references/intake-surfaces.md` (## Round-boundary re-fetch).
 
-Rationale: silently addressing a review comment without a corresponding
-ledger item means the closure summary at the end of the run cannot
-demonstrate that every review comment was considered. The closure summary
-is the only artifact the user/maintainer reads to confirm the PR is ready
-to merge. Missing items in the ledger = missing items in the closure = a
-PR that ships with unreviewed feedback.
+Rationale: the closure summary is the only artifact the user/maintainer reads
+to confirm the PR is ready to merge; a review comment fixed or skipped without
+a ledger item is invisible there, so the PR ships with unreviewed feedback.
 
 ## Verification
 
@@ -649,22 +635,35 @@ closeout gate"); because this skill edits code, docs, release notes, or skill fi
 alone does not satisfy it.
 
 - **independent reviewer** (fresh context, separate from the Stage B reviewer)
-  → APPROVE / NEEDS_REVISION / BLOCKED per item.
+  → APPROVE / NEEDS_REVISION / BLOCKED per item; a delta approval is invalid
+  while unreviewed external feedback exists on the PR (#3607).
 - **final critic** (separate fresh context, not a continued conversation with
   the reviewer, dispatched after the reviewer returns APPROVE) → APPROVE /
-  NEEDS_REVISION / BLOCKED per item. The critic challenges: is every original
-  feedback item actually resolved? Any requirement drift, weak evidence, missing
-  sibling-file checks, stale approvals, anything unwired or silently deferred?
+  NEEDS_REVISION / BLOCKED per item. The critic challenges: is every feedback
+  item actually resolved — including items posted after the ledger was built
+  (it fetches all three surfaces fresh — issue comments, inline review
+  comments, and reviews, see `references/intake-surfaces.md` — and reconciles
+  each external finding against the ledger, #3607)? Any requirement drift,
+  weak evidence, missing sibling-file checks, stale approvals, anything
+  unwired or deferred?
 
 Address every NEEDS_REVISION / BLOCKED item, re-review with the reviewer if the
 critic surfaces correctness issues, then re-critic. **Any edit after the
 reviewer's or critic's approval invalidates that approval** — re-run the
-affected gate on the current diff before publishing.
-
-Record both closeout verdicts (reviewer + critic, with HEAD/diff) in the
-runtime's session task-gates artifact using the repository/runtime-specific
-durable-session guidance when one exists. `.swarm/` is the plugin's runtime
-state — never write task artifacts there.
+affected gate on the current diff before publishing. Before dispatching the
+final critic, record the closure ledger in the durable session task-gates
+artifact (bound to the reviewed head SHA and fetch time); the critic
+reconciles it against its own fresh fetch — an input to verify, never a
+substitute for the fetch (#3607). Publish the ledger as a PR comment only
+after the reviewed commit is pushed and the remote head verified: under
+Profile A the gate blocks PR comments until all four phases settle and
+`complete_pr_workflow` arms the push; the B/C invariants likewise forbid
+comment/body writes before the verified push. Open the same task-gates
+artifact at ROUND START — before any PR_FEEDBACK gate binding or after the
+verification lanes settle (the gate blocks writes in between) — and append
+every reviewer/critic verdict (with HEAD/diff) as it lands, so compaction or
+handoff re-enters from disk. (ZCode path: `.zcode/session/tasks/<slug>/gates.md`
+per durable-session-state — never repo root, never `.swarm/`.)
 
 ### Post-publish verification (mandatory after the PR is pushed)
 
