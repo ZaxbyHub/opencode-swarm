@@ -112,8 +112,9 @@ describe('#3022 v2 setup + advance wiring (source contract)', () => {
 				?.length,
 		).toBe(2);
 		expect(
-			indexSrc.match(/void applyV2AgentModelOverride\((?:\n\s+)?registeredName,/g)
-				?.length,
+			indexSrc.match(
+				/void applyV2AgentModelOverride\((?:\n\s+)?registeredName,/g,
+			)?.length,
 		).toBe(2);
 		expect(indexSrc.match(/routeModel\.exactAgentName,/g)?.length ?? 0).toBe(0);
 	});

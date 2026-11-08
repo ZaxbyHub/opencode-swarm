@@ -217,8 +217,12 @@ describe('#3029 review round 2 — sticky gate + normalized modelString call-sit
 		// call), so the window spans to the apply invocation.
 		const applyAt = source.indexOf('void applyV2AgentModelOverride(', chainAt);
 		expect(applyAt).toBeGreaterThan(chainAt);
-		const window = source.slice(chainAt, applyAt + 80);
-		expect(window).toContain('registeredName');
-		expect(window).toContain('chainModel');
+		// Pin the ACTUAL argument shape — a toContain('chainModel') here is a
+		// tautology because the window starts at a string literal containing
+		// the token (implementation-review round 3).
+		const window = source.slice(chainAt, applyAt + 120);
+		expect(window).toMatch(
+			/void applyV2AgentModelOverride\(\s*registeredName,\s*chainModel\s*\)/,
+		);
 	});
 });
