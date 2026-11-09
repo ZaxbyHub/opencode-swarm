@@ -89,9 +89,8 @@ import {
 	bindPrReviewTriggerLedger,
 	collectPrWorkflowPendingLaneLiveness,
 	declarePrFeedbackInventory,
-	derivePrReviewOrderUnstableItems,
+	derivePrReviewCriticDispatchInputs,
 	derivePrReviewPresentationOrder,
-	derivePrReviewReviewerSeverities,
 	describePrWorkflowRevisionDigestFailure,
 	enforcePrFeedbackVerificationOwnership,
 	enforcePrReviewBaseDimensions,
@@ -1612,17 +1611,16 @@ export async function executeDispatchLanesAsync(
 						context.sessionID,
 					);
 				} else {
-					prReviewOrderUnstableItemIds = await derivePrReviewOrderUnstableItems(
+					// #3358 AC6: one gate context and one reviewer composition feed
+					// both critic inputs (order-unstable ids, #2906; reviewer
+					// severities, #3310 — UPHELD keeps that exact rank). An empty
+					// severity map renders nothing extra.
+					const criticInputs = await derivePrReviewCriticDispatchInputs(
 						directory,
 						context.sessionID,
 					);
-					// #3310: the critic needs each assigned item's reviewer severity
-					// (UPHELD keeps that exact rank). Same read-only derivation
-					// shape as the #2906 readers; an empty map renders nothing extra.
-					const derivedSeverities = await derivePrReviewReviewerSeverities(
-						directory,
-						context.sessionID,
-					);
+					prReviewOrderUnstableItemIds = criticInputs.orderUnstableItemIds;
+					const derivedSeverities = criticInputs.reviewerSeverities;
 					if (derivedSeverities.size > 0) {
 						// Own-property lookup only: an assigned item id colliding with a
 						// prototype key must not render inherited members into the block.

@@ -19541,6 +19541,18 @@ export async function derivePrReviewOrderUnstableItems(
 		'reviewer',
 		ctx,
 	);
+	return orderUnstableItemsFromComposition(state, composition);
+}
+
+/**
+ * Shared body of `derivePrReviewOrderUnstableItems` and
+ * `derivePrReviewCriticDispatchInputs` (#3358 AC6): pure over an already
+ * composed reviewer phase, so one critic dispatch composes it once.
+ */
+function orderUnstableItemsFromComposition(
+	state: PrWorkflowGateState,
+	composition: PrReviewPhaseComposition,
+): string[] {
 	// The order-unstable ids are STAMPED AT RECORD TIME onto the CRITIC batch's
 	// coherence record (the critic record is the only writer — see
 	// recordPrReviewValidationBatch), so that stamp is the receipt-of-record
@@ -19586,11 +19598,44 @@ export async function derivePrReviewReviewerSeverities(
 		'reviewer',
 		ctx,
 	);
+	return reviewerSeveritiesFromComposition(composition);
+}
+
+function reviewerSeveritiesFromComposition(
+	composition: PrReviewPhaseComposition,
+): Map<string, string> {
 	const severities = new Map<string, string>();
 	for (const [itemId, claim] of composition.claims) {
 		severities.set(itemId, claim.severity);
 	}
 	return severities;
+}
+
+/**
+ * Issue #3358 AC6: everything a critic dispatch preflight reads from the
+ * reviewer phase, derived from ONE gate context and ONE reviewer composition.
+ * Calling the two single-purpose readers back to back composed the reviewer
+ * phase (and resolved the bounded revision digest) twice per dispatch.
+ */
+export async function derivePrReviewCriticDispatchInputs(
+	directory: string,
+	sessionID: string,
+): Promise<{
+	orderUnstableItemIds: string[];
+	reviewerSeverities: Map<string, string>;
+}> {
+	const state = await requireBoundState(directory, sessionID, 'PR_REVIEW');
+	const ctx = await createPrReviewGateContext(directory, state);
+	const composition = composePrReviewPhaseVerdicts(
+		directory,
+		state,
+		'reviewer',
+		ctx,
+	);
+	return {
+		orderUnstableItemIds: orderUnstableItemsFromComposition(state, composition),
+		reviewerSeverities: reviewerSeveritiesFromComposition(composition),
+	};
 }
 
 /**
