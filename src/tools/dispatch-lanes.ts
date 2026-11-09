@@ -6909,9 +6909,11 @@ function applyPrWorkflowPromptContract(
 		/**
 		 * Issue #3310: critic lanes only. Assigned item id -> the reviewer
 		 * severity the composed reviewer phase settled for that item, so the
-		 * critic knows the exact rank UPHELD must keep. Rendered per item on the
-		 * assigned_item_ids line (`c1 (HIGH)`); ids without an entry render
-		 * bare. An absent, undefined, or EMPTY map renders the pre-#3310
+		 * critic knows the exact rank UPHELD must keep. Rendered per item on
+		 * its own `reviewer_severity: <id>=<SEVERITY>` line while
+		 * assigned_item_ids keeps bare ids (#3358 AC8; a verbatim copy of the
+		 * old same-line decoration voided the lane). Ids without an entry get
+		 * no line. An absent, undefined, or EMPTY map renders the pre-#3310
 		 * byte-shape exactly.
 		 */
 		reviewerSeverities?: Record<string, string>;
