@@ -67,7 +67,11 @@ issue: 3331
   deliberately naive-shaped and test-pinned).
 - New census guardrail (tests/unit/guardrails/agent-name-derivation-census.test.ts)
   fails the build if any of its ENFORCED derivation shapes reappear outside the
-  allowlist: `.replace(/^[^_]+_/, '')`, the retired
+  allowlist — and inside each allowlisted file at most one occurrence per
+  shape is exempt (the justified derivation where it falls inside predicate
+  scope; action-identity's two-operand slice is deliberately out of scope and
+  pins an exact 0), each pinned by an exact per-file count, so a second
+  derivation beside an exempt one also fails: `.replace(/^[^_]+_/, '')`, the retired
   `.match(/^([^_]+)_/)` helper form, `.split('_')[0]`/`.at(0)`, and
   `.slice(0, a.length - b.length - 1)` in both operand orders
   (#3617 review PRR-002 — the claim is scoped to exactly these shapes), each

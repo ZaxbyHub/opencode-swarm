@@ -84,7 +84,7 @@ const NAIVE_FIRST_UNDERSCORE = new RegExp(
 			String.raw`\s*\/\^\[\^_\]\+_\/\s*,\s*(['"])\1\s*,?\s*\)`,
 		member('match') + String.raw`\s*\/\^\(\[\^_\]\+\)_\/\s*,?\s*\)`,
 		member('split') +
-			String.raw`\s*['"]_['"]\s*\)\s*(?:(?:\?\.)?\s*\[\s*0\s*\]|` +
+			String.raw`\s*['"]_['"]\s*,?\s*\)\s*(?:(?:\?\.)?\s*\[\s*0\s*\]|` +
 			member('at') +
 			String.raw`\s*0\s*,?\s*\))`,
 	].join('|'),
@@ -179,6 +179,8 @@ describe('agent-name derivation census (issue #3330 recurrence guardrail)', () =
 			"name.split('_').at?.(0)",
 			"name.replace (/^[^_]+_/, '',)",
 			'name . match(/^([^_]+)_/,)',
+			"name.split('_',)[0]",
+			"name.split('_').at(0,)",
 		];
 		for (const sample of flaggedNaive) {
 			expect([sample, NAIVE_FIRST_UNDERSCORE.test(sample)]).toEqual([
