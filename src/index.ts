@@ -4039,15 +4039,15 @@ async function initializeOpenCodeSwarm(
 									// #3617 review PRR-001: case-colliding roster
 									// keys — skip rather than silently writing
 									// whichever colliding key hashed first.
-									log(
+									logV2ApplySkip(
 										`v2 model apply skipped: registered roster keys collide case-insensitively for ${sanitizeDiagnosticScope(routeModel.exactAgentName)}`,
 									);
 								} else {
 									// #3617 review F-02: an unregistered spelling
 									// skips the v2 apply observably (the advance
-									// itself remains recorded; v1 surfaces apply
-									// it at the next chat boundary).
-									log(
+									// itself remains recorded; v1 hosts apply it
+									// at the chat boundary and log nothing here).
+									logV2ApplySkip(
 										`v2 model apply skipped: no registered roster key for ${sanitizeDiagnosticScope(routeModel.exactAgentName)} (init-time roster snapshot)`,
 									);
 								}
@@ -6820,4 +6820,13 @@ function sanitizeDiagnosticScope(value: string): string {
 		})
 		.join('')
 		.slice(0, 200);
+}
+
+// Issue #3617 automation review (head bb0823236): the routed arm's "v2 model
+// apply skipped" diagnostics must only fire on a v2 host — on v1 the
+// applyV2AgentModelOverride call is a no-op and the advance lands at the
+// chat.message boundary, so a skip line would misreport. The no-route arm
+// gates the same way via noRouteSurface.
+function logV2ApplySkip(message: string): void {
+	if (hasV2AgentTransformSurface()) log(message);
 }

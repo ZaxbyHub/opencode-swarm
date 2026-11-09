@@ -405,4 +405,43 @@ describe('issue #2614 — unregistered lane agents are refused at dispatch time'
 			fs.rmSync(directory, { recursive: true, force: true });
 		}
 	});
+
+	test('F-05 boundary: an EMPTY registry cannot prove the spelling unregistered, so the prefixed lane still launches (base-identical)', async () => {
+		const directory = makeTempDir();
+		let promptAsyncCalled = false;
+		const ops = {
+			create: async () => ({
+				data: { id: 'session-3617-f05-empty' },
+				error: undefined,
+			}),
+			promptAsync: async () => {
+				promptAsyncCalled = true;
+				return { data: {}, error: undefined };
+			},
+			delete: async () => undefined,
+		} as never as SessionOps;
+		// Empty registry = the documented legacy/unconfigured shape: the host
+		// roster is unknown, so neither base nor head refuses here (a forced
+		// refusal would also refuse case-variant bare roles such as 'Coder').
+		_internals.getGeneratedAgentNames = () => [];
+		createAgents({
+			agents: { coder: { model: 'default/coder-model' } },
+		} as PluginConfig);
+		try {
+			await _test_exports.startAsyncLanePrompt({
+				session: ops,
+				directory,
+				sessionId: 'session-3617-f05-empty',
+				lane: {
+					id: 'lane-f05-empty',
+					agent: 'acme-prod-coder',
+					prompt: 'probe',
+				} as never,
+				timeoutMs: 5_000,
+			});
+			expect(promptAsyncCalled).toBe(true);
+		} finally {
+			fs.rmSync(directory, { recursive: true, force: true });
+		}
+	});
 });

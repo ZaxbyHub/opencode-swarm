@@ -51,10 +51,13 @@ issue: 3331
   participation normalization uses the canonical-role derivation (compound
   roles no longer mis-derive); the route's swarm id comes from the helper
   rather than the action-digest canonicalization.
-- Lane dispatch: a prefixed agent spelling whose derived swarm id does not
-  resolve is now refused at launch even when the default swarm has a matching
-  entry — base refused these, and launching against the default-swarm entry
-  would run an agent name the host does not have (#3617 review F-05).
+- Lane dispatch: when the generated agent registry proves a prefixed agent
+  spelling unregistered and its derived swarm id does not resolve, the lane is
+  refused at launch even if the default swarm has a matching entry — base
+  refused these, and launching against the default-swarm entry would run an
+  agent name the host does not have (#3617 review F-05). An empty registry
+  cannot prove anything unregistered, so that legacy shape still launches, as
+  at base.
 - `extractSwarmIdFromAgentName` — the helper #2960 proved defective — is
   retired: no production caller, no naive-split pins. Three documented
   exceptions keep their own contracts: `full-auto-delegation.ts`

@@ -273,6 +273,33 @@ describe('index task-model routing — v2 apply gate + route swarm-id derivation
 		expect(calls.map((call) => call.name)).not.toContain('code-coder');
 	});
 
+	test('v1 host (no v2 surface): routed advance logs no v2 skip and lands at the chat boundary', async () => {
+		writeAgentsConfig(directory, {
+			coder: { model: PRIMARY_MODEL, fallback_models: [FALLBACK_MODEL] },
+		});
+		writePlan(directory);
+		const plugin = await bootPlugin(directory);
+		// No registerV2AgentTransformSurface: a v1 host.
+		const output: { message: { model?: unknown } } = { message: {} };
+		const lines = await captureDebugLog(async () => {
+			await dispatchAndAdvance(plugin, 'call-v1', 'code-coder');
+			await plugin['chat.message']?.(
+				{ sessionID: CHILD_SESSION, agent: 'code-coder' } as never,
+				output as never,
+			);
+		});
+		// The v1 apply surface is the chat boundary: the ADVANCED fallback lands
+		// there (reachability — the advance really happened)...
+		expect(output.message.model).toEqual({
+			providerID: 'prov',
+			modelID: 'fb1',
+		});
+		// ...and no misleading "v2 model apply skipped" line is emitted.
+		expect(lines.some((line) => line.includes('v2 model apply skipped'))).toBe(
+			false,
+		);
+	});
+
 	test('no-route advance (primary session, no Task dispatch) applies the same gate', async () => {
 		writeAgentsConfig(directory, {
 			coder: { model: PRIMARY_MODEL, fallback_models: [FALLBACK_MODEL] },
