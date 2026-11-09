@@ -8301,34 +8301,54 @@ function derivePrReviewOrderUnstableItemsForState(
 }
 
 /**
- * Issue #3340 AC1: the resolved-role assertion applied by
- * `recordPrReviewValidationBatch` to every lane of a critic-phase batch. Each
- * lane must declare its `agent`, and that agent's canonical role must be
- * exactly `critic` — the same rule the dispatch caller enforces (#3310).
+ * Issue #3358 AC8: the exact role set each PR_REVIEW validation phase admits.
+ * ONE table consumed by dispatch admission (dispatch-lanes.ts), the gate
+ * recorder (recordPrReviewValidationBatch), and artifact integrity — so a
+ * phase's transport row contract decides admission everywhere, never a
+ * prefix-shaped predicate. The factory council agents are the exact set
+ * src/agents/index.ts builds for council.general; a user-defined
+ * `council_*`-prefixed agent is NOT admitted to a council lane.
  */
+export const PR_REVIEW_PHASE_ADMITTED_ROLES: Readonly<
+	Record<'council' | 'reviewer' | 'critic', readonly string[]>
+> = {
+	council: ['council_generalist', 'council_skeptic', 'council_domain_expert'],
+	reviewer: ['reviewer'],
+	critic: ['critic'],
+};
+
 function assertCriticLaneAgents(
 	phase: PrReviewValidationPhase,
 	lanes: readonly PrWorkflowLaneSpec[],
 	generatedAgentNames: readonly string[] | undefined,
 ): void {
-	if (phase !== 'critic') return;
-	for (const lane of lanes) {
-		const agent = lane.agent?.trim();
-		if (!agent) {
-			throw new Error(
-				`BLOCKED: PR_REVIEW critic lane "${lane.laneId ?? lane.workflowLane ?? '(unknown)'}" must declare its agent — only the critic agent may run critic lanes, so an undeclared agent cannot be admitted`,
-			);
-		}
-		// Mirror the dispatch caller's resolution exactly when the caller
-		// supplies the generated-name registry; without one, fall back to
-		// canonical/suffix extraction so direct gate callers still fail
-		// closed on critic-family roles (they are canonical roles returned
-		// unchanged) and arbitrary non-critic names.
-		const role = resolveGeneratedAgentRoleStrict(agent, generatedAgentNames);
-		if (role !== 'critic') {
-			throw new Error(
-				`BLOCKED: PR_REVIEW critic lane "${lane.laneId ?? lane.workflowLane ?? '(unknown)'}" uses invalid role "${role}" (agent "${agent}") — PR critic lanes must use the critic agent (critic_finding_validator and other critic-family roles cannot emit [CRITIC] rows)`,
-			);
+	if (phase === 'council' || phase === 'reviewer' || phase === 'critic') {
+		const admitted = PR_REVIEW_PHASE_ADMITTED_ROLES[phase];
+		for (const lane of lanes) {
+			const agent = lane.agent?.trim();
+			if (!agent) {
+				// Critic lanes must always declare (the row contract is
+				// single-agent); a declared agent for reviewer/council is
+				// verified when present, and undeclared ones are still policed
+				// at artifact integrity by the launch-time normalizedAgent.
+				if (phase === 'critic') {
+					throw new Error(
+						`BLOCKED: PR_REVIEW ${phase} lane "${lane.laneId ?? lane.workflowLane ?? '(unknown)'}" must declare its agent — only the critic agent may run critic lanes, so an undeclared agent cannot be admitted`,
+					);
+				}
+				continue;
+			}
+			// Mirror the dispatch caller's resolution exactly when the caller
+			// supplies the generated-name registry; without one, fall back to
+			// canonical/suffix extraction so direct gate callers still fail
+			// closed on critic-family roles (they are canonical roles returned
+			// unchanged) and arbitrary non-critic names.
+			const role = resolveGeneratedAgentRoleStrict(agent, generatedAgentNames);
+			if (!admitted.includes(role)) {
+				throw new Error(
+					`BLOCKED: PR_REVIEW ${phase} lane "${lane.laneId ?? lane.workflowLane ?? '(unknown)'}" uses invalid role "${role}" (agent "${agent}") — ${phase === 'critic' ? 'PR critic lanes must use the critic agent (critic_finding_validator and other critic-family roles cannot emit [CRITIC] rows)' : `PR ${phase} lanes must use one of: ${admitted.join(', ')}`}`,
+				);
+			}
 		}
 	}
 }
@@ -20383,20 +20403,30 @@ function analyzeLaneArtifactIntegrity(args: {
 			artifact.role,
 		);
 	}
-	// Issue #3340 (issue item 2): the artifact/record pair being
-	// self-consistent is not enough — a critic-mode lane whose child record
-	// ran a NON-critic role must fail settlement. `normalizedAgent` is the
-	// resolved canonical role at launch time (not the raw prefixed name), so
-	// the exact comparison admits prefixed critic agents (`mega_critic`
-	// records `normalizedAgent: 'critic'`) while rejecting every other
-	// critic-family role.
+	// Issue #3340 (issue item 2), generalized by #3358 AC8: the
+	// artifact/record pair being self-consistent is not enough — a lane whose
+	// child record ran a role outside its phase's admitted set must fail
+	// settlement. `normalizedAgent` is the resolved canonical role at launch
+	// time (not the raw prefixed name), so the exact table lookup admits
+	// prefixed agents (`mega_critic` records `normalizedAgent: 'critic'`)
+	// while rejecting every critic-family impostor and any user-defined
+	// council_-prefixed agent on a council lane. Launch-time authority: this
+	// holds even when a direct recorder caller omitted `agent`.
+	const expectedAdmittedRole =
+		expected.mode === 'swarm-pr-review:council'
+			? PR_REVIEW_PHASE_ADMITTED_ROLES.council
+			: expected.mode === 'swarm-pr-review:reviewer'
+				? PR_REVIEW_PHASE_ADMITTED_ROLES.reviewer
+				: expected.mode === 'swarm-pr-review:critic'
+					? PR_REVIEW_PHASE_ADMITTED_ROLES.critic
+					: undefined;
 	if (
-		expected.mode === 'swarm-pr-review:critic' &&
-		record.normalizedAgent !== 'critic'
+		expectedAdmittedRole &&
+		!expectedAdmittedRole.includes(record.normalizedAgent)
 	) {
 		return failedLaneValidation(
 			'record.normalized_agent',
-			'critic',
+			expectedAdmittedRole.join('|'),
 			record.normalizedAgent || '(missing)',
 		);
 	}

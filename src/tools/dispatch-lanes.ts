@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import pLimit from 'p-limit';
 import { z } from 'zod';
+import { criticPromptProvenance } from '../agents/critic.js';
 import { getSwarmAgents } from '../agents/index.js';
 import {
 	CANDIDATE_FIELD_COUNT,
@@ -99,6 +100,7 @@ import {
 	PR_REVIEW_BASE_DIMENSION_IDS,
 	PR_REVIEW_BASE_LANE_FLOORS,
 	PR_REVIEW_MICRO_LANE_FLOORS,
+	PR_REVIEW_PHASE_ADMITTED_ROLES,
 	PR_WORKFLOW_PROBE_SKIPPED_NO_BUDGET_REASON,
 	type PrReviewDepthTier,
 	type PrReviewLaneValidationFailure,
@@ -1642,9 +1644,14 @@ export async function executeDispatchLanesAsync(
 		}
 	}
 	// Validate every controller-owned prompt before publishing gate ownership.
-	// A formatting failure must be a side-effect-free invalid request: otherwise
-	// an unlaunchable batch consumes durable workflow state and cannot be retried
-	// with the same identity.
+	// Every rejection raised BEFORE gate activation/binding — the prompt-contract
+	// formatting failures below and the PR_REVIEW phase role/launchability/
+	// critic-prompt admission hoisted into assertPrReviewPhaseLaneAdmission
+	// (#3358) — is a side-effect-free invalid request: otherwise an
+	// unlaunchable batch consumes durable workflow state and cannot be retried
+	// with the same identity. Rejections raised after activation (batch
+	// recording) are not side-effect-free, which is exactly why admission runs
+	// first.
 	const formatExplorerLanes = (input: DispatchLaneSpec[]) =>
 		applyExplorerFormatSuffix(input, {
 			failClosed: Boolean(
@@ -1721,6 +1728,21 @@ export async function executeDispatchLanesAsync(
 		}
 		lanes = formatted.lanes;
 	}
+	// #3358 AC3: the effective critic lane prompt must carry the controller
+	// suspension clause — admission verifies what the model will actually see,
+	// not only the agent name. The clause is controller-authored text, so this
+	// holds for a default AND a customPrompt critic agent.
+	if (parsed.data.mode === 'swarm-pr-review:critic') {
+		const missingClause = lanes.find(
+			(lane) => !lane.prompt.includes(CRITIC_PROTOCOL_SELECTION_CLAUSE),
+		);
+		if (missingClause) {
+			return asyncFailureResult({
+				failure_class: 'invalid_args',
+				message: `BLOCKED: PR_REVIEW critic lane "${missingClause.id}" effective prompt does not carry the PR-contract suspension clause — the controller failed to compose the critic protocol selection block`,
+			});
+		}
+	}
 	if (context.sessionID?.trim()) {
 		try {
 			let gateState = await enforcePrWorkflowDispatchLanesAsync(
@@ -1728,6 +1750,24 @@ export async function executeDispatchLanesAsync(
 				context.sessionID,
 				'dispatch_lanes_async',
 			);
+			// #3358 AC11 / #3341: PR_REVIEW phase admission runs AFTER the
+			// read-only enforcement read (so a foreign-mode gate keeps its
+			// legacy terminal error) and BEFORE activation/binding, so an
+			// invalid-role or unlaunchable lane consumes no durable workflow
+			// state. Skipped when a PR_FEEDBACK gate is active.
+			if (
+				(gateState === null || gateState.mode === 'PR_REVIEW') &&
+				(parsed.data.mode === 'swarm-pr-review:council' ||
+					parsed.data.mode === 'swarm-pr-review:reviewer' ||
+					parsed.data.mode === 'swarm-pr-review:critic')
+			) {
+				assertPrReviewPhaseLaneAdmission(
+					parsed.data.mode,
+					parsed.data.lanes,
+					context,
+					_internals.getGeneratedAgentNames(),
+				);
+			}
 			if (!gateState && parsed.data.mode?.startsWith('swarm-pr-review:')) {
 				gateState = await activatePrWorkflow(
 					directory,
@@ -1988,42 +2028,11 @@ export async function executeDispatchLanesAsync(
 						: parsed.data.mode.endsWith(':reviewer')
 							? 'reviewer'
 							: 'critic';
-					if (parsed.data.lanes.some((lane) => lane.owned_workflow_lanes)) {
-						throw new Error(
-							`BLOCKED: PR_REVIEW ${phase} lanes must not declare owned_workflow_lanes; depth-tier consolidation applies only to base and micro discovery lanes`,
-						);
-					}
-					for (const lane of parsed.data.lanes) {
-						const role = resolveGeneratedAgentRole(
-							lane.agent,
-							swarmState.generatedAgentNames,
-						);
-						if (
-							(phase === 'council' && !role.startsWith('council_')) ||
-							(phase === 'reviewer' && role !== 'reviewer') ||
-							// #3310: PR critic lanes must use the one named critic agent.
-							// Other critic-family roles (critic_finding_validator, critic_sounding_board,
-							// critic_drift_verifier, ...) carry output contracts (strict JSON,
-							// dispositions) that cannot emit [CRITIC] rows.
-							(phase === 'critic' && role !== 'critic')
-						) {
-							throw new Error(
-								`BLOCKED: PR_REVIEW ${phase} lane "${lane.id}" uses invalid role "${role || lane.agent}"${phase === 'critic' ? ' — PR critic lanes must use the critic agent (critic_finding_validator and other critic-family roles cannot emit [CRITIC] rows)' : ''}`,
-							);
-						}
-						// Issue #3311 (ghost owners): validate the agent BEFORE the
-						// validation batch is recorded. launchAsyncLane would reject
-						// this agent after the record exists, leaving an owner lane
-						// with no delegation record that N-of-M admission correctly
-						// refuses (the #3101 silence constraint) but that should
-						// never have been declared an owner at all.
-						const agentValidation = validateLaneAgent(lane.agent, context);
-						if (!agentValidation.ok) {
-							throw new Error(
-								`BLOCKED: PR_REVIEW ${phase} lane "${lane.id}" agent "${lane.agent}" is not launchable on this host: ${agentValidation.error}`,
-							);
-						}
-					}
+					// Lane admission (owned_workflow_lanes, admitted roles,
+					// launchability, critic prompt provenance) ran pre-activation in
+					// assertPrReviewPhaseLaneAdmission (#3358 AC11); the gate
+					// recorder re-asserts the declared-agent rule at the boundary
+					// that persists the batch (assertCriticLaneAgents, #3340/#3358).
 					await recordPrReviewValidationBatch(
 						directory,
 						context.sessionID,
@@ -7233,6 +7242,75 @@ function findDuplicateLaneIds(lanes: DispatchLaneSpec[]): string[] {
 		seen.add(lane.id);
 	}
 	return [...duplicates];
+}
+
+/**
+ * Issue #3358 AC8/AC11 / #3341: side-effect-free PR_REVIEW council/reviewer/
+ * critic lane admission — pure input validation over the dispatch args, run
+ * before gate activation/binding so a refused batch leaves no durable
+ * workflow state. Checks, per lane: no owned_workflow_lanes (discovery-only
+ * feature), the resolved role is in PR_REVIEW_PHASE_ADMITTED_ROLES[phase]
+ * (exact membership — never a prefix), the agent is launchable on this host
+ * (#3311 ghost owners), and, for the critic phase, that the registered critic
+ * agent was NOT registered with a custom prompt (its output contract cannot
+ * be mechanically verified to emit [CRITIC] rows).
+ */
+function assertPrReviewPhaseLaneAdmission(
+	mode: string,
+	lanes: readonly DispatchLaneSpec[],
+	context: { sessionID?: string },
+	generatedAgentNames: readonly string[],
+): void {
+	const phase = mode.endsWith(':council')
+		? 'council'
+		: mode.endsWith(':reviewer')
+			? 'reviewer'
+			: mode.endsWith(':critic')
+				? 'critic'
+				: null;
+	if (!phase) return;
+	if (lanes.some((lane) => lane.owned_workflow_lanes)) {
+		throw new Error(
+			`BLOCKED: PR_REVIEW ${phase} lanes must not declare owned_workflow_lanes; depth-tier consolidation applies only to base and micro discovery lanes`,
+		);
+	}
+	const admittedRoles = PR_REVIEW_PHASE_ADMITTED_ROLES[phase];
+	for (const lane of lanes) {
+		const role = resolveGeneratedAgentRole(lane.agent, generatedAgentNames);
+		if (!admittedRoles.includes(role)) {
+			throw new Error(
+				`BLOCKED: PR_REVIEW ${phase} lane "${lane.id}" uses invalid role "${role || lane.agent}"${phase === 'critic' ? ' — PR critic lanes must use the critic agent (critic_finding_validator and other critic-family roles cannot emit [CRITIC] rows)' : ` — PR ${phase} lanes must use one of: ${admittedRoles.join(', ')}`}`,
+			);
+		}
+		// Issue #3311 (ghost owners): validate the agent BEFORE the validation
+		// batch is recorded. launchAsyncLane would reject this agent after the
+		// record exists, leaving an owner lane with no delegation record that
+		// N-of-M admission correctly refuses (the #3101 silence constraint)
+		// but that should never have been declared an owner at all.
+		const agentValidation = validateLaneAgent(lane.agent, context);
+		if (!agentValidation.ok) {
+			throw new Error(
+				`BLOCKED: PR_REVIEW ${phase} lane "${lane.id}" agent "${lane.agent}" is not launchable on this host: ${agentValidation.error}`,
+			);
+		}
+		// #3358 AC3: PR critic lanes require the built-in critic prompt. The
+		// provenance record is captured at registration (createAgents), so
+		// this adds no filesystem I/O to the dispatch path; the registry
+		// matches names case-insensitively, so the lookup does too.
+		if (phase === 'critic') {
+			const registeredName = generatedAgentNames.find(
+				(name) => name.toLowerCase() === lane.agent.trim().toLowerCase(),
+			);
+			const provenance = registeredName
+				? criticPromptProvenance(registeredName)
+				: undefined;
+			if (provenance?.replaced || provenance?.appended) {
+				throw new Error(
+					`BLOCKED: PR_REVIEW critic lane "${lane.id}" cannot use agent "${lane.agent}" — it was registered with a custom critic prompt (${provenance.replaced ? 'replacement critic.md' : 'append critic_append.md'}); its output contract cannot be mechanically verified to emit [CRITIC] rows. Remove the custom prompt file from the opencode-swarm prompts directory and restart OpenCode, or run the review without PR critic lanes`,
+				);
+			}
+		}
+	}
 }
 
 function scheduleSessionCleanup(session: SessionOps, sessionId: string): void {
