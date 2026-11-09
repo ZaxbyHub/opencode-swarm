@@ -1,23 +1,5 @@
 # Changelog
 
-## [7.203.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.203.0...v7.203.1) (2026-11-09)
-
-
-### Bug Fixes
-
-* **3617:** census matches every enforced shape in any legal spelling ([1cdb350](https://github.com/ZaxbyHub/opencode-swarm/commit/1cdb350b581cfd4f6e09b3360ba11fdc9cb73f7b))
-* **3617:** census tolerates whitespace before call parens; compat-form wording ([a7f644d](https://github.com/ZaxbyHub/opencode-swarm/commit/a7f644debda095018c6417bf63bd0b5e870838f5))
-* **3617:** learning-health trims before the canonical-role strip ([2e236ad](https://github.com/ZaxbyHub/opencode-swarm/commit/2e236ade4c63a74a09d1687adfc233b26d0a93de))
-* **3617:** no-route collide diagnostic also v2-gated (helper comment now accurate) ([4785848](https://github.com/ZaxbyHub/opencode-swarm/commit/4785848d5b894633ee5921e55e0d59ebedaba809))
-* **3617:** route swarm id derives from the trimmed name, like the chain resolver ([8bedc1c](https://github.com/ZaxbyHub/opencode-swarm/commit/8bedc1c731e33fb3ae84a0e7083c0535889e40a1))
-* **3617:** routed v2-skip diagnostics only on v2 hosts; scope F-05 claim ([8e77ec4](https://github.com/ZaxbyHub/opencode-swarm/commit/8e77ec4ea98f125cca9372ba60ff90d41ae9ce55))
-* **3617:** shared diagnostic sanitizer drops Unicode controls and separators ([be8d024](https://github.com/ZaxbyHub/opencode-swarm/commit/be8d0244bacbb6d85f7ed3eacc99161950141d91))
-* **agents:** one guarded agent-name derivation — task-route advance identity, incremental-verify triggers, helper retirement ([#3331](https://github.com/ZaxbyHub/opencode-swarm/issues/3331), [#3322](https://github.com/ZaxbyHub/opencode-swarm/issues/3322), [#3330](https://github.com/ZaxbyHub/opencode-swarm/issues/3330)) ([a4e8056](https://github.com/ZaxbyHub/opencode-swarm/commit/a4e8056d2127ce6d603eafbb69c45ca16d04b896))
-* **guardrails:** non-literal sudo -D stops qualifying edit targets; correct sudo -i claims ([5e56c37](https://github.com/ZaxbyHub/opencode-swarm/commit/5e56c3787418279f164d8414b57e1279e1d39b57))
-* **guardrails:** relative sudo -D edit targets deny as unresolved ([1db6725](https://github.com/ZaxbyHub/opencode-swarm/commit/1db672562b99df5e75b88e4d501d540a60e14862))
-* **guardrails:** shell write-gate walk fixpoint — loop withdrawal, launcher nesting, sudo semantics, rm scope coverage ([#3586](https://github.com/ZaxbyHub/opencode-swarm/issues/3586), [#3588](https://github.com/ZaxbyHub/opencode-swarm/issues/3588), [#3591](https://github.com/ZaxbyHub/opencode-swarm/issues/3591)) ([2038011](https://github.com/ZaxbyHub/opencode-swarm/commit/2038011d12977d597d8067584055fbafa0f90787))
-* **session:** own the session state you mutate — pairing identity lifecycle + phase-monitor sessionless guard ([#3372](https://github.com/ZaxbyHub/opencode-swarm/issues/3372), [#3383](https://github.com/ZaxbyHub/opencode-swarm/issues/3383)) ([fb6c56e](https://github.com/ZaxbyHub/opencode-swarm/commit/fb6c56ec7975638b69ecc454de4c06b9aa336b82))
-
 ## [7.203.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.202.3...v7.203.0) (2026-11-08)
 
 
