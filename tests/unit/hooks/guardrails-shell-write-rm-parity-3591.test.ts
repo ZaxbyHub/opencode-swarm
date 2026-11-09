@@ -146,7 +146,10 @@ describe('#3591 parity: flagless in-scope — all surfaces allow', () => {
 		const got = await allSurfaces(command);
 		expect(got.gate).toBe(true);
 		expect(got.explainScope).toBe('allow');
-		expect(got.explainNoScope).toBe('allow');
+		// #3616 D2: a coder explain WITHOUT --scope no longer fabricates the
+		// project-root scope — the scope dimension is unevaluated and the
+		// verdict renders block (the pinned #3591 divergence is closed).
+		expect(got.explainNoScope).toBe('block');
 		expect(got.sv).toBe('allow');
 	}, 30_000);
 });
@@ -251,11 +254,9 @@ describe('#3591 brace operands — three-surface agreement + the pre-existing ex
 		expect(got.gate).toBe(false);
 		expect(got.explainScope).toBe('block');
 		expect(got.sv).toBe('deny');
-		// The pre-existing explain no-scope divergence: the scope dimension is
-		// absent, so no rule matches and the report reads "allow" with an
-		// UNVERIFIED Resolved Scope while the live gate denies the escaping
-		// branch. guardrail-explain-service.ts:341-353 omits verifiedScope
-		// here; tracked as a follow-up, NOT changed by this PR.
-		expect(got.explainNoScope).toBe('allow');
+		// #3616 D2 closed the #3591 explain no-scope divergence: a coder
+		// explain without --scope now renders block (scope-unevaluated)
+		// instead of an unverified "allow" for a gate-denied command.
+		expect(got.explainNoScope).toBe('block');
 	}, 30_000);
 });
