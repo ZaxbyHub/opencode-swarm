@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.202.1",
+  "tagCommit": "ed50f76ac1a5590ccb5316964bc2cc3baf4c549f",
+  "targetCommitish": "ed50f76ac1a5590ccb5316964bc2cc3baf4c549f",
+  "releaseBodySha256": "bf47508999a19269ee6f66e4b3b5cdd34357a3efe013454908c792251b792bd5",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/3491-3539-shell-write-gate-g1.md",
+      "sha256": "08311b2849652f82f532b05b5fa417435d5aaa72f8cadb1ae621ffc28390b010"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/3491-3539-shell-write-gate-g2.md",
+      "sha256": "15a7ba937f1c1444673231d2172fd2dce50da9e0f8ea7f03ff40ada18196af34"
+    },
+    {
+      "prNumber": null,
+      "order": 2,
+      "path": "docs/releases/pending/3491-3539-shell-write-gate-g3.md",
+      "sha256": "1af7c1f28a57a9d26b3ec6de091cc9ca4d011548c7b5ab04199ff2d3aff7a7e5"
+    },
+    {
+      "prNumber": null,
+      "order": 3,
+      "path": "docs/releases/pending/3569-3570-shell-write-gate-windows.md",
+      "sha256": "c5032c8b6ed13211266d0b8a974ec325895bdae1acc41c67ec6cca4dd7d5cf25"
+    }
+  ]
+}
