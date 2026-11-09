@@ -29,7 +29,7 @@ import {
 	test,
 } from 'bun:test';
 import fs from 'node:fs';
-import { createAgents } from '../../../src/agents/index.js';
+import { createAgents, getSwarmAgents } from '../../../src/agents/index.js';
 import {
 	findByCorrelationIdDetailed,
 	recordPendingDelegation,
@@ -46,6 +46,11 @@ import { canonicalMkdtemp } from '../../../tests/helpers/tmpdir.js';
 
 const originalInternals = { ..._internals };
 
+// The pre-file default swarm config, restored by afterEach because
+// createAgents() REPLACES the module-scoped map (CI runs one child process
+// per file; this guards locally co-run siblings).
+const DEFAULT_AGENTS = { ...getSwarmAgents() };
+
 // Workaround for Bun #32056 (mirror of dispatch-lanes.test.ts): on Windows, a
 // pending promise that leaves the event loop idle prevents bun's per-test
 // --timeout from firing. A 1s keepalive interval keeps the loop awake.
@@ -59,6 +64,7 @@ afterAll(() => {
 
 afterEach(() => {
 	Object.assign(_internals, originalInternals);
+	createAgents({ agents: DEFAULT_AGENTS } as PluginConfig);
 });
 
 function makeTempDir(): string {
@@ -443,5 +449,12 @@ describe('issue #2614 — unregistered lane agents are refused at dispatch time'
 		} finally {
 			fs.rmSync(directory, { recursive: true, force: true });
 		}
+	});
+
+	test('hermeticity: the swarm-agent map is restored after the createAgents legs', () => {
+		// Runs last (file order): the F-05 legs above installed a default-swarm
+		// coder entry via createAgents(); afterEach must have restored the
+		// pre-file default so later tests (and co-run files) see the baseline.
+		expect(getSwarmAgents()?.coder).toEqual(DEFAULT_AGENTS.coder);
 	});
 });
