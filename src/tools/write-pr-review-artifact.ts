@@ -11,6 +11,7 @@ import {
 	PrReviewFindingSchema,
 	PrReviewHandoffSchema,
 	PrReviewPartialBaseCoverageSchema,
+	PrReviewPersistedFindingRecordSchema,
 	PrReviewRunIdSchema,
 	WritePrReviewArtifactArgsSchema,
 } from '../background/pr-review-contract.js';
@@ -56,7 +57,7 @@ type PersistedFinding = Omit<
 	recorded_at: string;
 };
 
-const PersistedFindingSchema = PrReviewFindingSchema.extend({
+const PersistedFindingSchema = PrReviewPersistedFindingRecordSchema.extend({
 	boundary: z.enum(['post_explorer', 'post_reviewer', 'post_critic']),
 	pr_head_sha: z.string().regex(/^[0-9a-f]{6,64}$/i),
 	recorded_at: z.string().datetime(),

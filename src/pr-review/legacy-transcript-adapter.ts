@@ -40,8 +40,10 @@ import {
 	findByBatchIdDetailed,
 } from '../background/pending-delegations.js';
 import {
+	CONFIRMED_REVIEWER_SEVERITY_NONE_MESSAGE,
 	PR_REVIEW_DISCARDED_EXAMPLE_ITEM_ID,
 	PR_REVIEW_VERDICT_ROW_DESCRIPTORS,
+	PR_REVIEW_VERDICT_SEMANTICS_VERSION,
 	PrReviewCriticVerdictFieldsSchema,
 	PrReviewReviewerVerdictFieldsSchema,
 	type PrReviewRiskImpact,
@@ -107,6 +109,14 @@ export interface PrReviewPhaseComposition {
 	 * removal cannot change any label).
 	 */
 	orderObservingBatchIds: string[];
+	/**
+	 * Issue #3358 AC4: reviewer phase only (empty for critic). Every item id a
+	 * scanned lane answered with a well-formed row written under earlier
+	 * verdict semantics (PR_REVIEW_VERDICT_SEMANTICS_VERSION) — never claimed.
+	 * Complete and independent of the capped `diagnostics` budget; settlement
+	 * blocks with a dedicated disclosure only for the subset still unclaimed.
+	 */
+	semanticsMismatchedItemIds: string[];
 	diagnostics: string[];
 }
 
@@ -600,6 +610,7 @@ export function composePrReviewPhaseVerdicts(
 	// QUARANTINE noise only — the batch non-contribution diagnostic shares the
 	// same cap and is NOT deferred.
 	const deferredQuarantineDiagnostics: string[] = [];
+	const semanticsMismatchedItemIds = new Set<string>();
 	const satisfiedObligations = new Set<string>();
 	const scannedBatches: PrReviewTranscriptBatch[] = [];
 	// Issue #3098: formatted artifact-integrity failure per declared obligation.
@@ -709,12 +720,13 @@ export function composePrReviewPhaseVerdicts(
 				continue;
 			}
 			const declaredItems = qualified.expectedLane.reviewItemIds ?? [];
-			const { markerRows, parsed, quarantined } = parsePrReviewVerdictRows(
-				artifact.text,
-				declaredItems,
-				phase,
-				reviewerClaims,
-			);
+			const { markerRows, parsed, quarantined, semanticsMismatched } =
+				parsePrReviewVerdictRows(
+					artifact.text,
+					declaredItems,
+					phase,
+					reviewerClaims,
+				);
 			// #3310: illegal-arity rows are quarantined, not lane-voiding.
 			// ONE aggregated bounded diagnostic per lane, so a stray-row-heavy
 			// artifact cannot exhaust the shared composition-diagnostic budget
@@ -741,6 +753,19 @@ export function composePrReviewPhaseVerdicts(
 					`${phase} lane "${qualified.expectedLane.laneId}" contains an unassigned verdict row; it contributes no claims`,
 				);
 				continue;
+			}
+			// #3358 AC4: earlier-semantics rows are recorded in full on the
+			// structured field (the guarantee) plus one convenience diagnostic
+			// per lane (subject to the shared cap). Ids are controller-declared
+			// assigned ids, not model text.
+			if (semanticsMismatched.length > 0) {
+				for (const itemId of semanticsMismatched) {
+					semanticsMismatchedItemIds.add(itemId);
+				}
+				appendCompositionDiagnostic(
+					diagnostics,
+					`${phase} lane "${qualified.expectedLane.laneId}" has ${semanticsMismatched.length} verdict row(s) written under earlier verdict semantics (current: v${PR_REVIEW_VERDICT_SEMANTICS_VERSION}; CONFIRMED requires a non-NONE severity) for item ids ${semanticsMismatched.map((id) => `"${id}"`).join(', ')}; they are not re-admitted`,
+				);
 			}
 			recordOrderObservations(batch.batchId, coherence, parsed);
 			if (declaredItems.length > 0 && parsed.size === declaredItems.length) {
@@ -934,6 +959,8 @@ export function composePrReviewPhaseVerdicts(
 		// Empty for the critic phase (order observations are reviewer-only).
 		orderObservingBatchIds:
 			phase === 'reviewer' ? [...orderObservingBatchIds] : [],
+		semanticsMismatchedItemIds:
+			phase === 'reviewer' ? [...semanticsMismatchedItemIds] : [],
 		diagnostics,
 	};
 	// An exhaustive pass is a superset of the memoizable one, but it is computed
@@ -1084,6 +1111,26 @@ export function validateReviewerVerdictFields(
 }
 
 /**
+ * Issue #3358 AC4: true when a reviewer row fails the live schema ONLY
+ * because of the v1→v2 tightening (CONFIRMED with severity NONE), i.e. it is a
+ * well-formed row written under earlier verdict semantics rather than a
+ * malformed one. Such a row still never claims (fail-closed); the caller
+ * discloses it instead of dropping it silently.
+ */
+export function isReviewerRowVerdictSemanticsMismatch(
+	fields: string[],
+): boolean {
+	const parsed = PrReviewReviewerVerdictFieldsSchema.safeParse(fields);
+	if (parsed.success) return false;
+	return (
+		parsed.error.issues.length > 0 &&
+		parsed.error.issues.every(
+			(issue) => issue.message === CONFIRMED_REVIEWER_SEVERITY_NONE_MESSAGE,
+		)
+	);
+}
+
+/**
  * Digest of the FULL canonical reviewer row, not the classification/severity
  * pair a reviewer verdict projects to. Only 2 of the 12 required fields survive
  * that projection, so a tuple binding would still match a row whose evidence,
@@ -1136,6 +1183,11 @@ export function parsePrReviewVerdictRows(
 	>;
 	recoveries: IndexedVerdictRows['recoveries'];
 	quarantined: IndexedVerdictRows['quarantined'];
+	/**
+	 * #3358 AC4: declared item ids whose single row is a well-formed verdict
+	 * written under earlier (v1) verdict semantics. Never claims; disclosed.
+	 */
+	semanticsMismatched: string[];
 } {
 	const parsed = new Map<
 		string,
@@ -1150,6 +1202,7 @@ export function parsePrReviewVerdictRows(
 	const marker = phase === 'reviewer' ? '[REVIEWED]' : '[CRITIC]';
 	const { markerRows, rowsByItemId, recoveries, quarantined } =
 		indexVerdictRows(text, marker, new Set(itemIds));
+	const semanticsMismatched: string[] = [];
 	for (const itemId of itemIds) {
 		if (itemId === PR_REVIEW_DISCARDED_EXAMPLE_ITEM_ID) continue;
 		if (phase === 'reviewer') {
@@ -1163,7 +1216,17 @@ export function parsePrReviewVerdictRows(
 			// lane-output-recoverability reference).
 			const fields =
 				rows?.length === 1 ? validateReviewerVerdictFields(rows[0]) : null;
-			if (!fields) continue;
+			if (!fields) {
+				// #3358 AC4: a lone row rejected ONLY by the v1→v2 tightening is
+				// an earlier-semantics verdict — still unclaimed, but disclosed.
+				if (
+					rows?.length === 1 &&
+					isReviewerRowVerdictSemanticsMismatch(rows[0])
+				) {
+					semanticsMismatched.push(itemId);
+				}
+				continue;
+			}
 			parsed.set(itemId, {
 				classification: fields[2],
 				severity: fields[4],
@@ -1190,7 +1253,7 @@ export function parsePrReviewVerdictRows(
 			severity: verdict.severity,
 		});
 	}
-	return { markerRows, parsed, recoveries, quarantined };
+	return { markerRows, parsed, recoveries, quarantined, semanticsMismatched };
 }
 
 /** Exact assigned-row contract used by both normal and recovered collection. */

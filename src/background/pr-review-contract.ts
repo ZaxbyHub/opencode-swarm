@@ -571,7 +571,7 @@ export const PrReviewRunIdSchema = z
 		'run_id must be a safe relative identifier',
 	);
 
-export const PrReviewFindingSchema = z
+const PrReviewFindingObjectSchema = z
 	.object({
 		finding_id: z.string().trim().min(1).max(128),
 		status: z.enum(PR_REVIEW_FINDING_STATUSES),
@@ -609,26 +609,70 @@ export const PrReviewFindingSchema = z
 		 */
 		order_agreement: z.enum(['agree', 'disagree', 'single']).optional(),
 	})
-	.strict()
-	.superRefine((value, ctx) => {
-		if (value.status !== 'CONFIRMED') return;
-		if (value.risk_impact === undefined) {
-			ctx.addIssue({
-				code: 'custom',
-				path: ['risk_impact'],
-				message:
-					'is required on every newly written CONFIRMED finding (issue #2383 typed critic routing)',
-			});
-		}
-		if (value.risk_tags === undefined) {
-			ctx.addIssue({
-				code: 'custom',
-				path: ['risk_tags'],
-				message:
-					'is required on every newly written CONFIRMED finding (issue #2383 typed critic routing)',
-			});
-		}
-	});
+	.strict();
+
+type PrReviewFindingShape = z.infer<typeof PrReviewFindingObjectSchema>;
+
+function refineConfirmedRiskMetadata(
+	value: PrReviewFindingShape,
+	ctx: z.RefinementCtx,
+): void {
+	if (value.status !== 'CONFIRMED') return;
+	if (value.risk_impact === undefined) {
+		ctx.addIssue({
+			code: 'custom',
+			path: ['risk_impact'],
+			message:
+				'is required on every newly written CONFIRMED finding (issue #2383 typed critic routing)',
+		});
+	}
+	if (value.risk_tags === undefined) {
+		ctx.addIssue({
+			code: 'custom',
+			path: ['risk_tags'],
+			message:
+				'is required on every newly written CONFIRMED finding (issue #2383 typed critic routing)',
+		});
+	}
+}
+
+/**
+ * Issue #3358 AC4: the transport rejects a CONFIRMED reviewer row whose
+ * severity is NONE (#3310), so a findings record carrying that pair would
+ * persist exactly the state the transport refuses. Write boundary only — see
+ * `PrReviewPersistedFindingRecordSchema` for why readers stay tolerant.
+ */
+function refineConfirmedSeverity(
+	value: PrReviewFindingShape,
+	ctx: z.RefinementCtx,
+): void {
+	if (value.status === 'CONFIRMED' && value.severity === 'NONE') {
+		ctx.addIssue({
+			code: 'custom',
+			path: ['severity'],
+			message:
+				'CONFIRMED finding severity must not be NONE (the #3310 transport rule)',
+		});
+	}
+}
+
+/** Write contract for findings records (every write-args schema uses this). */
+export const PrReviewFindingSchema = PrReviewFindingObjectSchema.superRefine(
+	(value, ctx) => {
+		refineConfirmedRiskMetadata(value, ctx);
+		refineConfirmedSeverity(value, ctx);
+	},
+);
+
+/**
+ * Read shape for DURABLE findings records. Identical to the write contract
+ * except that it omits the #3358 CONFIRMED/NONE coherence rule: records
+ * written before that rule (the writer once defaulted an absent severity to
+ * NONE) must keep loading, and `.extend()` inherits refinements, so the
+ * persisted reader cannot be derived from `PrReviewFindingSchema`.
+ */
+export const PrReviewPersistedFindingRecordSchema =
+	PrReviewFindingObjectSchema.superRefine(refineConfirmedRiskMetadata);
 
 // Issue #2385: the predicate and its input type moved canonically to
 // `src/pr-review/critic-routing.ts` (the single-routing-authority boundary).
@@ -777,6 +821,20 @@ export function encodePrReviewRiskTagsField(
 	return [...tags].join(',');
 }
 
+/**
+ * Issue #3358 AC4: the reviewer verdict-row semantics this plugin enforces.
+ * v1 admitted a CONFIRMED row with severity NONE; v2 (#3310) rejects it. Lane
+ * artifacts persist raw text with no semantics marker (adding a field to the
+ * strict `LaneOutputArtifactSchema` would make new artifacts unreadable after
+ * a downgrade), so a v1-era row is recognized by its shape at re-parse and
+ * disclosed rather than silently dropped.
+ */
+export const PR_REVIEW_VERDICT_SEMANTICS_VERSION = 2;
+
+/** The single v1→v2 tightening; shared with the replay classifier. */
+export const CONFIRMED_REVIEWER_SEVERITY_NONE_MESSAGE =
+	'CONFIRMED reviewer severity must not be NONE';
+
 export const PrReviewReviewerVerdictFieldsSchema = z
 	.tuple([
 		z.literal('[REVIEWED]'),
@@ -805,17 +863,15 @@ export const PrReviewReviewerVerdictFieldsSchema = z
 		// #3336 in-flight replay: lane artifacts persist RAW text (no
 		// write-time row validation; validation happens at read), so a
 		// reviewer artifact written BEFORE this tightening re-parses under
-		// the live schema on every composition — the CONFIRMED+NONE row now
-		// FAILS validation, its item stays unclaimed, and the phase settles
-		// fail-closed ("items lack an authenticated verdict", forced re-run).
-		// That fail-closed replay is the documented, tested contract; a
-		// verdict-semantic version gate is deliberately out of scope here
-		// (tracked in #3358 AC3).
+		// the live schema on every composition and its item stays unclaimed
+		// (fail-closed). #3358 AC4: that loss is DISCLOSED, never silent —
+		// composition records the item in `semanticsMismatchedItemIds` and
+		// settlement names it against PR_REVIEW_VERDICT_SEMANTICS_VERSION.
 		if (fields[2] === 'CONFIRMED' && fields[4] === 'NONE') {
 			ctx.addIssue({
 				code: 'custom',
 				path: [4],
-				message: 'CONFIRMED reviewer severity must not be NONE',
+				message: CONFIRMED_REVIEWER_SEVERITY_NONE_MESSAGE,
 			});
 		}
 	});

@@ -40,6 +40,7 @@ import {
 	PR_REVIEW_BASE_DIMENSION_IDS,
 	PR_REVIEW_FINDINGS_MAX_BYTES,
 	PR_REVIEW_HANDOFF_MAX_BYTES,
+	PR_REVIEW_VERDICT_SEMANTICS_VERSION,
 	type PrReviewLaneResultEnvelope,
 	PrReviewLaneResultEnvelopeSchema,
 	type PrReviewResultReceipt,
@@ -8646,6 +8647,41 @@ export async function assertPrReviewValidationSettled(
 			if (!boundPrHeadSha) {
 				throw new Error(
 					'BLOCKED: PR_REVIEW settlement requires a bound PR head SHA',
+				);
+			}
+			// Issue #3358 AC4: an UNCLAIMED item whose lane answered with a row
+			// written under earlier verdict semantics is never N-of-M-admitted —
+			// admission would settle it as typed-dead and hide that a verdict
+			// existed but no longer validates. Claimed items with a stale extra
+			// row (a newer valid claim won) are not blocking; the structured
+			// field still discloses them.
+			const unclaimedSet = new Set(composed.unclaimed);
+			const blockingSemanticsMismatches =
+				composed.semanticsMismatchedItemIds.filter((itemId) =>
+					unclaimedSet.has(itemId),
+				);
+			if (blockingSemanticsMismatches.length > 0) {
+				const unclaimedNamed = composed.unclaimed.slice(
+					0,
+					MAX_UNCLAIMED_ITEMS_IN_MESSAGE,
+				);
+				const unclaimedOverflow =
+					composed.unclaimed.length - unclaimedNamed.length;
+				const mismatchNamed = blockingSemanticsMismatches.slice(
+					0,
+					MAX_SEMANTICS_MISMATCH_IDS_IN_MESSAGE,
+				);
+				const mismatchOverflow =
+					blockingSemanticsMismatches.length - mismatchNamed.length;
+				throw new Error(
+					`BLOCKED: PR_REVIEW ${requiredPhase} items lack an authenticated verdict from any successful lane: ${unclaimedNamed.join(', ')}` +
+						(unclaimedOverflow > 0 ? ` (+${unclaimedOverflow} more)` : '') +
+						`; items ${mismatchNamed.join(', ')}` +
+						(mismatchOverflow > 0 ? ` and ${mismatchOverflow} more` : '') +
+						` carry verdict rows written under earlier verdict semantics (current: v${PR_REVIEW_VERDICT_SEMANTICS_VERSION}; CONFIRMED requires a non-NONE severity since #3310); those rows are not re-admitted and N-of-M settlement is not attempted for them — re-dispatch those items' lanes` +
+						(composed.diagnostics.length > 0
+							? `; diagnostics: ${composed.diagnostics.join(' | ')}`
+							: ''),
 				);
 			}
 			const admission = deriveVerdictSettlementAdmission({
@@ -18754,6 +18790,13 @@ function derivePrReviewCandidateSeverities(
 
 /** Item ids named in one BLOCKED message before it degrades to a count. */
 const MAX_UNCLAIMED_ITEMS_IN_MESSAGE = 50;
+
+/**
+ * Issue #3358 AC4: earlier-semantics item ids named in the dedicated
+ * settlement clause before it degrades to "and N more"; the complete set
+ * stays on `PrReviewPhaseComposition.semanticsMismatchedItemIds`.
+ */
+const MAX_SEMANTICS_MISMATCH_IDS_IN_MESSAGE = 16;
 
 /**
  * The batches a phase composes over.
