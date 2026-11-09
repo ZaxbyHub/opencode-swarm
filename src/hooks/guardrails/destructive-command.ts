@@ -1751,7 +1751,24 @@ export function dcPreprocessWrappers(command: string): DcWrapperPreprocess {
 					walkShellCommandFlags(shellSplitWords(headM[2] as string)).kind ===
 						'payload'
 				) {
-					processed.push(`( ${unwrapped} )`);
+					// #3616 D5 (item 5): the payload itself may carry a
+					// chdir-bearing wrapper (bash -c "sudo -D /etc tee x") —
+					// recurse on the ONE-LEVEL payload (the segment's own
+					// quote-stripped argument), not on `unwrapped` (the full
+					// unwrap already discarded the sudo -D chdir).
+					// headM[2] starts at the FLAG region (-c …): strip the
+					// shell's own leading flag words, then one pair of
+					// surrounding quotes, to recover the payload command.
+					const payloadAfterFlags = (headM[2] as string)
+						.trim()
+						.replace(/^(?:-[A-Za-z]+\s+)+/, '');
+					const payloadText = /^["'](.*)["']$/.test(payloadAfterFlags)
+						? payloadAfterFlags.slice(1, -1)
+						: payloadAfterFlags;
+					const payloadResult = preprocessWrapperText(payloadText, 1);
+					const payloadInner =
+						payloadResult === null ? unwrapped : payloadResult.text;
+					processed.push(`( ${payloadInner} )`);
 					continue;
 				}
 			}
