@@ -25,7 +25,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { createCriticAutonomousOversightAgent } from '../agents/critic';
 import { getSwarmAgents, resolveFallbackModel } from '../agents/index';
-import { stripKnownSwarmPrefix } from '../config/schema';
+import { deriveSwarmIdentity } from '../config/schema';
 import { appendCoreEventSync } from '../events/core-events.js';
 import {
 	classifyProviderFailure,
@@ -456,14 +456,8 @@ export async function dispatchFullAutoOversight(
 	// The fallback index is tracked locally: the ephemeral child session has no
 	// per-role fallback state (that belongs to the parent architect session).
 	const oversightFullName = input.oversightAgentName;
-	const oversightBaseRole = stripKnownSwarmPrefix(oversightFullName);
-	const oversightSwarmId =
-		oversightBaseRole !== oversightFullName
-			? oversightFullName.slice(
-					0,
-					oversightFullName.length - oversightBaseRole.length - 1,
-				)
-			: undefined;
+	const { role: oversightBaseRole, swarmID: oversightSwarmId } =
+		deriveSwarmIdentity(oversightFullName);
 	const oversightSwarmAgents = getSwarmAgents(oversightSwarmId);
 	const oversightFallbackRole = oversightSwarmAgents?.[oversightBaseRole]
 		?.fallback_models?.length
