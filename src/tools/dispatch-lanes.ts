@@ -6924,7 +6924,45 @@ function applyPrWorkflowPromptContract(
 		};
 	}
 	const errors: string[] = [];
+	// #3358 AC7: recognize our OWN output (exactly contractCard + operator
+	// text + one trailing controller block for the current bindings) so
+	// re-applying the contract is idempotent. Recognition is an idempotence
+	// optimization, NEVER authentication: the recognized controller-owned
+	// parts are always discarded and rebuilt from the current options below,
+	// and only the extracted operator remainder is linted and reused — forged
+	// controller text cannot survive into the composed prompt.
+	const contractCardPrefix =
+		mode?.startsWith('swarm-pr-review:') === true
+			? `${buildPrReviewContractCard()}\n\n`
+			: '';
+	const CONTRACT_BLOCK_HEADER = '[CONTROLLER-BOUND PR WORKFLOW CONTRACT]';
+	const CONTRACT_BLOCK_FOOTER = '[END CONTROLLER-BOUND PR WORKFLOW CONTRACT]';
+	const stripControllerOwnedPrompt = (prompt: string): string | null => {
+		if (contractCardPrefix === '' || !prompt.startsWith(contractCardPrefix)) {
+			return null;
+		}
+		const withoutCard = prompt.slice(contractCardPrefix.length);
+		const blockStart = withoutCard.lastIndexOf(CONTRACT_BLOCK_HEADER);
+		if (blockStart < 0) return null;
+		const blockEnd = withoutCard.lastIndexOf(CONTRACT_BLOCK_FOOTER);
+		if (blockEnd < blockStart) return null;
+		const expectedEnd = blockEnd + CONTRACT_BLOCK_FOOTER.length;
+		if (expectedEnd !== withoutCard.length) return null;
+		const block = withoutCard.slice(blockStart, expectedEnd);
+		// The recognized block must bind the CURRENT options; a stale or forged
+		// block fails this and stays operator text (rejected by the lints).
+		const modeOk = block.includes(`mode: ${mode}`);
+		const headOk =
+			options.prHeadSha !== undefined &&
+			block.includes(`pr_head_sha: ${options.prHeadSha}`);
+		const digestOk =
+			options.revisionDigest !== undefined &&
+			block.includes(`revision_digest: ${options.revisionDigest}`);
+		if (!modeOk || !headOk || !digestOk) return null;
+		return withoutCard.slice(0, blockStart);
+	};
 	const contracted = lanes.map((lane) => {
+		const lanePrompt = stripControllerOwnedPrompt(lane.prompt) ?? lane.prompt;
 		const normalizedMode = classifyControllerTokenField(mode);
 		const workflowLane = classifyControllerTokenField(lane.workflow_lane ?? '');
 		const prHeadSha = classifyControllerTokenField(options.prHeadSha ?? '');
@@ -7009,7 +7047,7 @@ function applyPrWorkflowPromptContract(
 				'\\[' + prReviewVerdictTemplateToken.slice(1, -1) + '\\][^\\S\\n]*\\|',
 			);
 			const operatorChannels: Array<[string, string]> = [
-				['lane prompt', lane.prompt],
+				['lane prompt', lanePrompt],
 				['caller scope', options.callerFocus ?? ''],
 			];
 			const offending = operatorChannels.find(
@@ -7174,7 +7212,7 @@ Terminate with the required protocol action directly: no planning preamble, no r
 		const contractCard = normalizedMode.token.startsWith('swarm-pr-review:')
 			? `${buildPrReviewContractCard()}\n\n`
 			: '';
-		const prompt = `${contractCard}${lane.prompt}${contract}`;
+		const prompt = `${contractCard}${lanePrompt}${contract}`;
 		if (prompt.length > MAX_PROMPT_CHARS) {
 			errors.push(
 				`Lane "${lane.id}" prompt plus mandatory PR workflow contract is ${prompt.length} chars; max ${MAX_PROMPT_CHARS} (a repo-graph orientation block may have been prepended to common_prompt — retry with orientation: false to exclude it)`,
