@@ -344,10 +344,8 @@ describe('Check 7 integration (census + wall warning + renewal extras)', () => {
 		expect(result.messages).toContain('first hard-fail date: 2026-10-23');
 		expect(result.messages).toContain('days-to-first-wall: 20');
 		expect(
-			result.messages.indexOf(
-				result.messages.find((m) => m.includes('=== Check 7')) ?? '',
-			),
-		).toBeLessThan(result.messages.indexOf('total active: 1'));
+			result.messages.findIndex((m) => m.includes('=== Check 7')),
+		).toBeLessThan(result.messages.findIndex((m) => m === 'total active: 1'));
 	});
 
 	test('wall warning absent at 21+ days', () => {
