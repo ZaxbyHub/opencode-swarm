@@ -34,8 +34,14 @@ const SCOPE_VIOLATION =
 // root the mis-tracking left behind). Both are blocks.
 // #3485 (PRR-020): the intentional verdict classes for these legs only — a
 // session-state or wrong-layer failure must NOT satisfy a scope/cwd leg.
+// #3491 W1 re-pin (deliberate, message class only): a control-flow body whose
+// directory landing diverges over the complete state now WITHDRAWS the later
+// writes (fail-closed) instead of propagating one branch's landing — the
+// same legs reject with the withdrawal class `BLOCKED: bash/shell write to a
+// dynamic path target …` instead of a WRITE BLOCKED authority/scope message.
+// The pinned verdict (reject) is unchanged.
 const ANY_WRITE_BLOCK =
-	/^WRITE BLOCKED(?: \[shell-write-scope\])?: (?:SCOPE_VIOLATION|Agent "coder" is not authorised)/;
+	/^(?:WRITE BLOCKED(?: \[shell-write-scope\])?: (?:SCOPE_VIOLATION|Agent "coder" is not authorised)|BLOCKED: bash\/shell write to a dynamic path target|BLOCKED: bash write detection failed to parse command)/;
 const ROOT_ESCAPE =
 	/^WRITE BLOCKED(?: \[shell-write-scope\])?: Agent "coder" is not authorised to write .*AUTHORITY_ROOT_ESCAPE/;
 const WORKSPACE_DIRS = [
@@ -286,8 +292,11 @@ describe('real gate: subshell, brace group and command substitution', () => {
 	// The `$( )` characters are outside PLAIN_COMMAND_LINE, so the line now
 	// gets the ordinary declared-scope check (it was admitted before that rule).
 	it('scope-checks rmdir after a cd inside a command substitution', async () => {
+		// P-F3 fail-closed: the $() fragment can also trip the wrapper-walk
+		// fail-closed channel (parse-failure rejection) before the scope
+		// check — the verdict is unchanged (DENIED).
 		expect(await gate('coder', 'echo $(cd ../<O>); rmdir a')).toMatch(
-			SCOPE_VIOLATION,
+			/(?:WRITE BLOCKED \[shell-write-scope\]: SCOPE_VIOLATION|failed to parse command)/,
 		);
 	});
 });

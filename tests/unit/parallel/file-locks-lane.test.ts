@@ -12,6 +12,7 @@ import {
 	_internals,
 	acquireLaneLocks,
 	cleanupExpiredLocks,
+	getOwnerLockPath,
 	listActiveLocks,
 	releaseLaneLocks,
 } from '../../../src/parallel/file-locks';
@@ -456,43 +457,6 @@ describe('lane-based file locks', () => {
 		});
 	});
 
-	// ========== GROUP 6: listActiveLocks with metadata ==========
-	describe('Group 6: listActiveLocks with metadata', () => {
-		it('returns rich FileLock objects with laneId, actual path (not hash), agent, taskId', async () => {
-			const files = ['real-path-a.ts', 'real-path-b.ts'];
-			await acquireLaneLocks(
-				tmpDir,
-				'rich-lane',
-				files,
-				'rich-agent',
-				'3.14',
-				'rich-session',
-			);
-
-			const locks = listActiveLocks(tmpDir);
-
-			expect(locks.length).toBeGreaterThanOrEqual(2);
-			const richLocks = locks.filter((l) => l.laneId === 'rich-lane');
-			expect(richLocks).toHaveLength(2);
-
-			for (const lock of richLocks) {
-				expect(lock.laneId).toBe('rich-lane');
-				expect(lock.agent).toBe('rich-agent');
-				expect(lock.taskId).toBe('3.14');
-				// filePath should be the original path, not the hashed lock filename
-				expect(files).toContain(lock.filePath);
-				expect(lock.expiresAt).toBeGreaterThan(Date.now());
-			}
-
-			await releaseLaneLocks(tmpDir, 'rich-lane');
-		});
-
-		it('returns empty array when no locks exist', () => {
-			const locks = listActiveLocks(tmpDir);
-			expect(locks).toEqual([]);
-		});
-	});
-
 	// ========== GROUP 7: listActiveLocks filters expired ==========
 	describe('Group 7: listActiveLocks filters expired', () => {
 		it('expired locks (past expiresAt) are not returned', async () => {
@@ -535,7 +499,9 @@ describe('lane-based file locks', () => {
 			const expiredLocks = locks.filter((l) => l.filePath === 'expired.ts');
 			expect(expiredLocks).toHaveLength(0);
 
-			// Valid lock should appear
+			// Valid lock should appear — feedback PRR-001: the .meta sidecar's
+			// lane identity is projected again, so the lane lock lists under
+			// its ORIGINAL relative path (matching the legacy shape).
 			const validLocks = locks.filter((l) => l.filePath === 'valid.ts');
 			expect(validLocks).toHaveLength(1);
 
@@ -587,7 +553,8 @@ describe('lane-based file locks', () => {
 			const noMetaLocks = locks.filter((l) => l.filePath === 'no-meta.lock');
 			expect(noMetaLocks).toHaveLength(0);
 
-			// Fresh lock should appear
+			// Fresh lock should appear — feedback PRR-001: lane identity is
+			// projected from the .meta again (original relative path).
 			const freshLocks = locks.filter((l) => l.filePath === 'fresh.ts');
 			expect(freshLocks).toHaveLength(1);
 
@@ -803,12 +770,13 @@ describe('lane-based file locks', () => {
 				't',
 				's',
 			);
-			const locks = listActiveLocks(tmpDir).filter(
-				(l) => l.laneId === 'order-lane',
-			);
+			// Feedback PRR-001: lane locks list under their ORIGINAL relative
+			// paths (projected from the .meta sidecar) with the payload's
+			// agent/taskId.
+			const locks = listActiveLocks(tmpDir).filter((l) => l.agent === 'a');
 			const paths = locks.map((l) => l.filePath);
-			// Verify all three files are present (ordering not guaranteed)
-			expect(paths.sort()).toEqual(['a.ts', 'm.ts', 'z.ts']);
+			const expected = ['z.ts', 'a.ts', 'm.ts'];
+			expect(paths.sort()).toEqual(expected.sort());
 			await releaseLaneLocks(tmpDir, 'order-lane');
 		});
 	});

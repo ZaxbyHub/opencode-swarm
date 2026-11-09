@@ -466,6 +466,23 @@ export async function handleDoctorCommand(
 		}
 	}
 
+	// Store integrity report (issue #2969, fix plan 05 v8 §2.6). READ-ONLY
+	// crash-consistency audit of the local .swarm store; it NEVER auto-repairs
+	// anything. The flag is matched EXACTLY (args.includes) — a typo'd longer
+	// prefix such as `--integrityy` must not select it (the same flag-exactness
+	// contract as the residue flags above, pinned by
+	// tests/unit/commands/doctor-residue.test.ts PRR-024).
+	if (args.includes('--integrity')) {
+		try {
+			const { renderStoreIntegritySection } = await import(
+				'./doctor-store-integrity.js'
+			);
+			output += await renderStoreIntegritySection(directory);
+		} catch {
+			/* fail-open: the doctor must still produce its structural report */
+		}
+	}
+
 	return output;
 }
 

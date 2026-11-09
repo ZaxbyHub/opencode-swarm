@@ -12,7 +12,6 @@
  * three checks also run when the script is invoked; we focus assertions on
  * Check 4 output and the overall exit code.
  */
-
 import { afterEach, describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
@@ -35,13 +34,11 @@ const ADVISORY_PUSH_SCRIPT = path.join(
 	'scripts',
 	'check-no-raw-advisory-push.sh',
 );
-
 interface SpawnResult {
 	exitCode: number;
 	stdout: string;
 	stderr: string;
 }
-
 /**
  * Spawn check-invariants.sh in `repoDir`. The fixture's `scripts/` subtree is
  * populated by `makeRepo()` so the script resolves its own directory relative
@@ -82,7 +79,6 @@ function runScript(repoDir: string, env?: Record<string, string>): SpawnResult {
 		stderr: result.stderr || '',
 	};
 }
-
 function git(repoDir: string, ...args: string[]): void {
 	const proc = spawnSync('git', args, {
 		cwd: repoDir,
@@ -154,6 +150,12 @@ function makeRepo(baseEntries: string[]): string {
 	// .sh shim delegates to the TS owner, so fixtures need the four lists.
 	seedQuarantineListFiles(repoDir);
 	writeAllowlist(repoDir, baseEntries);
+	// Check 10 fail-close: real git repo + src/ needs the raw-write file.
+	fs.writeFileSync(
+		path.join(repoDir, 'scripts', 'raw-write-allowlist.txt'),
+		'# raw-write fixture' + '\n',
+		'utf-8',
+	);
 	// scripts/check-invariants.sh Check 1 also greps src/ for spawn — give it
 	// an empty src/ so the scan has no hits (avoids noise in output).
 	fs.mkdirSync(path.join(repoDir, 'src'), { recursive: true });
@@ -190,7 +192,6 @@ describe('check-invariants.sh Check 4 — mock.module allowlist growth ratchet',
 		expect(result.stdout).toContain('Unapproved: 0');
 		expect(result.exitCode, result.stdout + result.stderr).toBe(0);
 	});
-
 	test('growth with marker pass: HEAD adds an entry AND the matching APPROVED-NEW marker → exit 0', () => {
 		if (isWindows) return;
 		const repoDir = makeRepo(['node:fs']);
@@ -209,7 +210,6 @@ describe('check-invariants.sh Check 4 — mock.module allowlist growth ratchet',
 		expect(result.stdout).toContain('Unapproved: 0');
 		expect(result.exitCode, result.stdout + result.stderr).toBe(0);
 	});
-
 	test('growth without marker fail: HEAD adds an entry without a marker → exit 1', () => {
 		if (isWindows) return;
 		const repoDir = makeRepo(['node:fs']);

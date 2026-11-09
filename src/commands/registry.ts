@@ -135,6 +135,7 @@ import { handlePrUnsubscribeCommand } from './pr-unsubscribe.js';
 import { handlePreflightCommand } from './preflight.js';
 import { handlePromoteCommand } from './promote.js';
 import { handleQaGatesCommand } from './qa-gates.js';
+import { handleReceiptCommand } from './receipt.js';
 import { handleRecoverCommand } from './recover.js';
 import { handleReportCommand } from './report.js';
 import { handleResetCommand } from './reset.js';
@@ -1253,6 +1254,29 @@ export const COMMAND_REGISTRY = {
 		category: 'utility',
 		toolPolicy: 'agent',
 	},
+	receipt: {
+		handler: (ctx) => handleReceiptCommand(ctx.directory, ctx.args),
+		description:
+			'Emit or verify verification receipts <task|phase> <id> [--export] | --verify <bundle>',
+		args: '<task|phase> <id> [--export] | --verify <bundle>',
+		details:
+			'Emits a portable, hash-backed record of the durably recorded gate outcomes for a task or phase (JSON + Markdown under .swarm/evidence/receipts/; --export writes a PR-attachable bundle under .swarm/plan-export/, reaped at close). --verify re-checks every recorded hash in a bundle on any machine (including a fresh clone) and exits nonzero on any mismatch with a typed failure (corrupt_json, unsupported_format_version, schema_mismatch, receipt_hash_mismatch, missing_artifact, digest_mismatch, path_escape).',
+		category: 'utility',
+		// Intentional asymmetry (PR #3550 disposition, critic-reviewed): the
+		// command is agent-reachable while the receipt TOOL's agents list
+		// (src/tools/tool-metadata.ts) names only architect/reviewer/
+		// critic_finding_validator. Receipt content derives solely from
+		// durable state plus emitter constants — the caller cannot influence
+		// what a receipt attests — so broader call-path reachability cannot
+		// forge content, and stamping an emitter identity would be equally
+		// forgeable without an attestation key. Do not narrow the tool's
+		// agents list or the command's toolPolicy (or add an emitter field)
+		// without first deciding emitter authority and the out-of-band
+		// report anchor (trigger: the first consumer that gates on receipt
+		// authenticity). Known attestation gaps tracked separately:
+		// task-arm outcome fidelity — issue #3560.
+		toolPolicy: 'agent',
+	},
 	'evidence summary': {
 		handler: (ctx) => handleEvidenceSummaryCommand(ctx.directory),
 		description: 'Generate evidence summary with completion ratio and blockers',
@@ -1451,7 +1475,7 @@ export const COMMAND_REGISTRY = {
 			'Manage OpenSpec-compatible SDD artifacts and effective spec projection',
 		args: 'status|validate|project [--json] [--change <id>] [--dry-run] [--source <provider>] [--feature <id>|all] [--overwrite]',
 		details:
-			'Parent command for spec-driven development artifacts. Use sdd status to inspect .swarm/spec.md plus openspec/ artifacts, sdd validate to validate OpenSpec-compatible deltas, and sdd project to materialize the effective spec into .swarm/spec.md for planning. Spec-Kit: sdd project projects ALL features with feature-scoped ids (featureId/FR-nnn) when several exist; --feature <id> selects one (v1 bare-id output); --feature all is the explicit multi-feature alias (project only).',
+			'Parent command for spec-driven development artifacts. Use sdd status to inspect .swarm/spec.md plus openspec/ artifacts, sdd validate to validate OpenSpec-compatible deltas, and sdd project to materialize the effective spec into .swarm/spec.md for planning. Spec-Kit: sdd project projects ALL features with feature-scoped ids (featureId/FR-nnn) when several exist; --feature <id> selects one (v1 bare-id output); --feature all is the explicit multi-feature alias (project only). Provider selection precedence: --source <provider> beats SWARM_SDD_SOURCE, which beats sdd.source in the config (.opencode/opencode-swarm.json or the user config), which beats auto-detection; a selection from any non-flag source is final and /swarm sdd status reports where it came from.',
 		category: 'utility',
 		toolPolicy: 'agent',
 	},
@@ -1623,7 +1647,7 @@ export const COMMAND_REGISTRY = {
 			'Ingest and close known PR feedback (review comments, CI failures, conflicts) [pr] [instructions]',
 		args: '[url|owner/repo#N|N] [instructions...]',
 		details:
-			'Triggers MODE: PR_FEEDBACK — ingests existing pull-request feedback (review threads, requested changes, CI/check failures, merge conflicts, stale branch state, pasted notes), verifies every claim against source, clusters related problems, fixes confirmed items, validates the branch, and reports closure status for every ledger item. Distinct from /swarm pr-review, which discovers new findings. The PR reference is optional: with none, the architect builds the ledger from the current PR/branch; text after the reference is forwarded as extra instructions. Supports full GitHub URL, owner/repo#N shorthand, or bare PR number (resolved against origin).',
+			'Triggers MODE: PR_FEEDBACK — ingests existing pull-request feedback (review threads, requested changes, CI/check failures, merge conflicts, stale branch state, pasted notes), verifies every claim against source, clusters related problems, fixes confirmed items, validates the branch, and reports closure status for every ledger item. Distinct from /swarm pr-review, which discovers new findings. On a PR the default run continues to green CI and a monitored merge, then a session retrospective and the memory closeout. It merges only when your own words ask for the merge (for example "/swarm pr-feedback 123 and merge"; a question or mention never counts) or you answer yes to its merge question. "Fixes only" skips CI and the merge; "no merge" skips only the merge. The PR reference is optional: with none, the architect builds the ledger from the current PR/branch; text after the reference is forwarded as extra instructions. Supports full GitHub URL, owner/repo#N shorthand, or bare PR number (resolved against origin).',
 		category: 'agent',
 		toolPolicy: 'none',
 	},
@@ -1644,7 +1668,7 @@ export const COMMAND_REGISTRY = {
 			'Drive an already-reviewed, approved PR to green and merged (monitor CI, fix, merge) [pr]',
 		args: '<pr-url|owner/repo#N|N>',
 		details:
-			'Triggers MODE: CI_MONITOR — takes an already human-reviewed, approved PR, exhaustively researches every CI failure, fixes it end-to-end, iterates until all required checks are green (max 5 fix cycles), then merges via `gh pr merge` with no merge-strategy flag. Invoke only after human review is complete; the skill re-verifies reviewDecision: APPROVED and mergeable state before doing anything destructive. Distinct from /swarm pr-subscribe, which passively watches a PR without a merge terminal. Supports full GitHub URL, owner/repo#N shorthand, or bare PR number (resolved against origin).',
+			'Triggers MODE: CI_MONITOR — takes an already human-reviewed, approved PR, exhaustively researches every CI failure, fixes it end-to-end, iterates until all required checks are green (max 5 fix cycles), then merges via `gh pr merge` (no strategy flag on a merge-queue base; the allowed method on a direct base). Invoke only after human review is complete; the skill re-verifies reviewDecision: APPROVED and mergeable state before doing anything destructive. Distinct from /swarm pr-subscribe, which passively watches a PR without a merge terminal. Supports full GitHub URL, owner/repo#N shorthand, or bare PR number (resolved against origin).',
 		category: 'agent',
 		toolPolicy: 'none',
 	},

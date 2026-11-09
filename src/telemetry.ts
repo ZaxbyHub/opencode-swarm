@@ -207,8 +207,8 @@ export type TelemetryEvent =
 	// vocabulary ('plan_recovery' = typed PlanRecoverySupersededError path;
 	// 'coordination_fence' = any generation-fence outcome) — counts only, no
 	// paths, no session or project identity.
-	| 'plan_recovery_superseded';
-
+	| 'plan_recovery_superseded'
+	| 'store_lock_stale_broken'; // #2967: fenced stale store-lock break
 /** Stable classification for how a reviewer-gate decision was established. */
 export type ReviewerGateEvidenceKind =
 	| 'genuine'

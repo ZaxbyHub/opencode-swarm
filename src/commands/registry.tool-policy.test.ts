@@ -6,8 +6,6 @@ import {
 	SWARM_COMMAND_TOOL_ALLOWLIST,
 } from './tool-policy.js';
 
-// ── Helper ───────────────────────────────────────────────────────────────────
-
 function cmd(name: string): CommandEntry {
 	return COMMAND_REGISTRY[
 		name as keyof typeof COMMAND_REGISTRY
@@ -86,6 +84,7 @@ describe('toolPolicy classification snapshot — no regression', () => {
 		'harness-opt plan',
 		'harness-opt status',
 		'harness-opt history',
+		'receipt', // #2968/#2970: portable verification receipts (emission + verify, toolPolicy 'agent')
 	]);
 
 	const EXPECTED_RESTRICTED = new Set<string>([

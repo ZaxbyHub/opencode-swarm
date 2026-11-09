@@ -59,6 +59,12 @@ export interface FamilyMigrationCounts {
 		filename: string;
 		merged: number;
 		skipped: number;
+		/** Rows replaced by a strictly newer same-key version (PRR-015). */
+		readonly superseded?: number;
+		/** Same-key collisions with no usable recency signal (PRR-015). */
+		readonly noSignal?: number;
+		/** Destination-side duplicate rows collapsed during pre-reduction. */
+		readonly deduped?: number;
 	}>;
 }
 
@@ -119,6 +125,65 @@ function keySelectorFor(
 }
 
 /**
+ * Generic version-recency signal for a family row (#3521 D1, the #2958
+ * stale-wins class in the knowledge engine). Producers advance
+ * `updated_at` (store + unactionable) or `quarantined_at` (quarantined) on
+ * rewrite, with `revision` as the store member's numeric tiebreak. A row
+ * carrying none of these — pure append-only event logs (events, rejected,
+ * retractions, application history) — yields NO signal, and a collision on
+ * a no-signal row keeps today's destination-wins skip (an unparsable or
+ * missing timestamp is never read as epoch-0 "oldest").
+ *
+ * `preferField` (PRR-014): a member whose PRODUCER always writes a more
+ * specific event timestamp (quarantined rows carry the spread entry's
+ * `updated_at` AND their own `quarantined_at`) selects that field FIRST —
+ * otherwise the generic `updated_at` shadows the event time and a
+ * re-quarantine can never win over an older record.
+ *
+ * Far-future bound (PRR-011): a stamp more than a day in the future is
+ * no-signal (destination wins). `Date.parse` accepts any locale/format, so an
+ * unvalidated `9999-…` row would otherwise permanently replace the canonical
+ * destination row and silently disable recency propagation for its id.
+ */
+function rowRecency(
+	row: unknown,
+	preferField?: string,
+): { at: number; revision: number } | null {
+	if (!row || typeof row !== 'object') return null;
+	const o = row as Record<string, unknown>;
+	const candidates: string[] = [];
+	if (preferField !== undefined && typeof o[preferField] === 'string') {
+		candidates.push(o[preferField] as string);
+	}
+	if (typeof o.updated_at === 'string') candidates.push(o.updated_at);
+	if (typeof o.quarantined_at === 'string') {
+		candidates.push(o.quarantined_at);
+	}
+	for (const raw of candidates) {
+		const at = Date.parse(raw);
+		if (Number.isNaN(at)) continue;
+		// More than a day in the future = corrupt/hostile stamp: no signal.
+		if (at > Date.now() + 86_400_000) continue;
+		const revision =
+			typeof o.revision === 'number' && Number.isFinite(o.revision)
+				? o.revision
+				: 0;
+		return { at, revision };
+	}
+	return null;
+}
+
+/** Strictly-newer comparison; equal or older is NOT newer (null = no signal). */
+function isStrictlyNewer(
+	source: { at: number; revision: number } | null,
+	destination: { at: number; revision: number } | null,
+): boolean {
+	if (source === null || destination === null) return false;
+	if (source.at !== destination.at) return source.at > destination.at;
+	return source.revision > destination.revision;
+}
+
+/**
  * Provenance-preserving merge of the active store (`dedup-id-merge`).
  *
  * Exact-id duplicates: skip (already present). Near-duplicates (Jaccard bigram
@@ -136,15 +201,71 @@ function keySelectorFor(
 function mergeStoreEntries(
 	destination: KnowledgeEntryBase[],
 	source: KnowledgeEntryBase[],
-): { merged: KnowledgeEntryBase[]; added: number; skipped: number } {
+): {
+	merged: KnowledgeEntryBase[];
+	added: number;
+	skipped: number;
+	superseded: number;
+	noSignal: number;
+	deduped: number;
+} {
 	const result = [...destination];
-	const seenIds = new Set(result.map((e) => e.id));
+	// Within-destination duplicates: keep the effective (recency-newest) row
+	// at the first occurrence's position, so the result holds exactly one row
+	// per id (#3521 D1). No-signal duplicates keep the first occurrence.
+	// Map-based single pass (PRR-009): the previous nested scan was O(n²)
+	// INSIDE the destination-lock critical section — at cohort-store sizes the
+	// sync block could outlive MIGRATION_LOCK_STALE_MS and starve the lock's
+	// refresh timer, letting a concurrent migration stale-take the lock
+	// (two writers, lost update).
+	const indexOfId = new Map<string, number>();
+	const duplicateIndexes = new Set<number>();
+	for (let i = 0; i < result.length; i += 1) {
+		const firstIdx = indexOfId.get(result[i].id);
+		if (firstIdx === undefined) {
+			indexOfId.set(result[i].id, i);
+			continue;
+		}
+		duplicateIndexes.add(i);
+		if (isStrictlyNewer(rowRecency(result[i]), rowRecency(result[firstIdx]))) {
+			result[firstIdx] = result[i];
+		}
+	}
+	const deduped = duplicateIndexes.size;
+	if (deduped > 0) {
+		const reduced = result.filter((_, i) => !duplicateIndexes.has(i));
+		result.length = 0;
+		result.push(...reduced);
+	}
+	indexOfId.clear();
+	result.forEach((e, i) => {
+		indexOfId.set(e.id, i);
+	});
 	let added = 0;
 	let skipped = 0;
+	let superseded = 0;
+	let noSignal = 0;
 
 	for (const src of source) {
-		if (seenIds.has(src.id)) {
-			skipped++;
+		const firstIdx = indexOfId.get(src.id);
+		if (firstIdx !== undefined) {
+			// Same-id collision is a version divergence: keep the strictly newer
+			// row (source replaces in place when newer); destination-newer or
+			// equal keeps today's skip. A collision with no usable recency
+			// signal on either side keeps the destination and is counted.
+			const incumbent = result[firstIdx];
+			const srcRec = rowRecency(src);
+			const dstRec = rowRecency(incumbent);
+			if (isStrictlyNewer(srcRec, dstRec)) {
+				// Provenance-preserving replace (parallel-review MED): source
+				// fields win, destination-only fields carry over so a
+				// cohort-local annotation is not silently dropped.
+				result[firstIdx] = { ...incumbent, ...src };
+				superseded++;
+			} else {
+				skipped++;
+				if (srcRec === null || dstRec === null) noSignal++;
+			}
 			continue;
 		}
 		const dup = findNearDuplicate(src.lesson, result, DEDUP_THRESHOLD);
@@ -155,10 +276,10 @@ function mergeStoreEntries(
 			continue;
 		}
 		result.push(src);
-		seenIds.add(src.id);
+		indexOfId.set(src.id, result.length - 1);
 		added++;
 	}
-	return { merged: result, added, skipped };
+	return { merged: result, added, skipped, superseded, noSignal, deduped };
 }
 
 /**
@@ -173,24 +294,79 @@ function appendUnionById<T>(
 	destination: T[],
 	source: T[],
 	keyOf: (obj: unknown) => string | null = lineId,
-): { merged: T[]; added: number; skipped: number } {
-	const result = [...destination];
-	const seen = new Set(
-		result.map(keyOf).filter((x): x is string => x !== null),
-	);
+	recencyOf: (row: unknown) => { at: number; revision: number } | null = (
+		row,
+	) => rowRecency(row),
+): {
+	merged: T[];
+	added: number;
+	skipped: number;
+	superseded: number;
+	noSignal: number;
+	deduped: number;
+} {
+	// Pre-reduce within-side duplicates to the effective (recency-newest) row
+	// at the first occurrence's position (#3521 D1): a later newer duplicate on
+	// either side must win, byte-equal retries stay deduped, and no-signal rows
+	// keep the first occurrence. A keyless DESTINATION row is unaddressable
+	// but NOT deletable — base carried it through verbatim, and dropping it
+	// would silently lose destination data on link (4.5 review blocker 3);
+	// only keyless SOURCE rows are skipped (they can never be merged).
+	const result: T[] = [];
+	const indexOfKey = new Map<string, number>();
+	for (const row of destination) {
+		const key = keyOf(row);
+		if (key === null) {
+			result.push(row);
+			continue;
+		}
+		const firstIdx = indexOfKey.get(key);
+		if (firstIdx === undefined) {
+			indexOfKey.set(key, result.length);
+			result.push(row);
+			continue;
+		}
+		if (isStrictlyNewer(recencyOf(row), recencyOf(result[firstIdx]))) {
+			result[firstIdx] = row;
+		}
+	}
+	const deduped = destination.length - result.length;
 	let added = 0;
 	let skipped = 0;
+	let superseded = 0;
+	let noSignal = 0;
 	for (const src of source) {
 		const id = keyOf(src);
-		if (!id || seen.has(id)) {
+		if (!id) {
 			skipped++;
 			continue;
 		}
+		const firstIdx = indexOfKey.get(id);
+		if (firstIdx !== undefined) {
+			// Same-key collision on a versioned member: the strictly newer row
+			// replaces the older in place (one row survives; destination-only
+			// fields carry over — provenance-preserving), equal or
+			// destination-newer keeps today's skip; no usable recency signal
+			// keeps the destination and is counted.
+			const srcRec = recencyOf(src);
+			const dstRec = recencyOf(result[firstIdx]);
+			if (isStrictlyNewer(srcRec, dstRec)) {
+				result[firstIdx] = {
+					...(result[firstIdx] as Record<string, unknown>),
+					...(src as Record<string, unknown>),
+				} as T;
+				superseded++;
+			} else {
+				skipped++;
+				if (srcRec === null || dstRec === null) noSignal++;
+			}
+			continue;
+		}
 		result.push(src);
-		seen.add(id);
+		indexOfKey.set(id, result.length - 1);
 		added++;
 	}
-	return { merged: result, added, skipped };
+	return { merged: result, added, skipped, superseded, noSignal, deduped };
 }
 
 /**
@@ -305,14 +481,36 @@ function mergeMember(
 	member: KnowledgeFamilyMember,
 	destinationData: unknown,
 	sourceData: unknown,
-): { merged: unknown; added: number; skipped: number } {
+): {
+	merged: unknown;
+	added: number;
+	skipped: number;
+	superseded: number;
+	noSignal: number;
+	deduped: number;
+} {
+	// PRR-014: a member whose producer always writes a more specific event
+	// timestamp selects that field FIRST for recency (quarantined rows carry
+	// the spread entry's `updated_at` AND their own `quarantined_at` — the
+	// generic updated_at shadowed the quarantine instant).
+	const recencyOf =
+		member.recencyField !== undefined
+			? (row: unknown) => rowRecency(row, member.recencyField)
+			: (row: unknown) => rowRecency(row);
 	switch (member.mergeStrategy) {
 		case 'dedup-id-merge': {
 			const r = mergeStoreEntries(
 				(destinationData as KnowledgeEntryBase[]) ?? [],
 				(sourceData as KnowledgeEntryBase[]) ?? [],
 			);
-			return { merged: r.merged, added: r.added, skipped: r.skipped };
+			return {
+				merged: r.merged,
+				added: r.added,
+				skipped: r.skipped,
+				superseded: r.superseded,
+				noSignal: r.noSignal,
+				deduped: r.deduped,
+			};
 		}
 		case 'append-union':
 		case 'append-concat': {
@@ -324,18 +522,40 @@ function mergeMember(
 				(destinationData as unknown[]) ?? [],
 				(sourceData as unknown[]) ?? [],
 				keySelectorFor(member),
+				recencyOf,
 			);
-			return { merged: r.merged, added: r.added, skipped: r.skipped };
+			return {
+				merged: r.merged,
+				added: r.added,
+				skipped: r.skipped,
+				superseded: r.superseded,
+				noSignal: r.noSignal,
+				deduped: r.deduped,
+			};
 		}
 		case 'sum-counters': {
 			const r = sumCounters(
 				(destinationData as Record<string, CounterRollup>) ?? {},
 				(sourceData as Record<string, CounterRollup>) ?? {},
 			);
-			return { merged: r.merged, added: r.added, skipped: r.skipped };
+			return {
+				merged: r.merged,
+				added: r.added,
+				skipped: r.skipped,
+				superseded: 0,
+				noSignal: 0,
+				deduped: 0,
+			};
 		}
 		default:
-			return { merged: destinationData, added: 0, skipped: 0 };
+			return {
+				merged: destinationData,
+				added: 0,
+				skipped: 0,
+				superseded: 0,
+				noSignal: 0,
+				deduped: 0,
+			};
 	}
 }
 
@@ -424,6 +644,9 @@ export async function migrateKnowledgeFamily(
 		filename: string;
 		merged: number;
 		skipped: number;
+		superseded?: number;
+		noSignal?: number;
+		deduped?: number;
 	}> = [];
 	const staged: Array<{ member: KnowledgeFamilyMember; serialized: string }> =
 		[];
@@ -435,11 +658,15 @@ export async function migrateKnowledgeFamily(
 			const srcData =
 				sourceSnapshot[member.filename] ??
 				(member.mergeStrategy === 'sum-counters' ? {} : []);
-			const { merged, added, skipped } = mergeMember(member, destData, srcData);
+			const { merged, added, skipped, superseded, noSignal, deduped } =
+				mergeMember(member, destData, srcData);
 			perMember.push({
 				filename: member.filename,
 				merged: added,
 				skipped,
+				superseded,
+				noSignal,
+				deduped,
 			});
 			staged.push({ member, serialized: serialize(member, merged) });
 		}

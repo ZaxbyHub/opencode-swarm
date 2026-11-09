@@ -1,11 +1,10 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import * as fs from 'node:fs';
 import {
 	dcEvaluateRecursiveDeleteTargets,
 	dcExtractRecursiveRmTargets,
 } from '../../../src/hooks/guardrails/destructive-command';
 import { handleGuardrailExplain } from '../../../src/services/guardrail-explain-service';
-import { canonicalMkdtemp } from '../../helpers/tmpdir';
+import { canonicalMkdtemp, removeTreeWithRetry } from '../../helpers/tmpdir';
 
 const roots: string[] = [];
 
@@ -17,7 +16,7 @@ function workspace(): string {
 
 afterEach(() => {
 	for (const root of roots.splice(0)) {
-		fs.rmSync(root, { recursive: true, force: true });
+		removeTreeWithRetry(root);
 	}
 });
 

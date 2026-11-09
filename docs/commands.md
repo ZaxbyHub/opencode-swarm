@@ -161,7 +161,7 @@ Ingest and close known PR feedback (review comments, CI failures, conflicts) [pr
 
 **Args:** `[url|owner/repo#N|N] [instructions...]`
 
-Triggers MODE: PR_FEEDBACK — ingests existing pull-request feedback (review threads, requested changes, CI/check failures, merge conflicts, stale branch state, pasted notes), verifies every claim against source, clusters related problems, fixes confirmed items, validates the branch, and reports closure status for every ledger item. Distinct from /swarm pr-review, which discovers new findings. The PR reference is optional: with none, the architect builds the ledger from the current PR/branch; text after the reference is forwarded as extra instructions. Supports full GitHub URL, owner/repo#N shorthand, or bare PR number (resolved against origin).
+Triggers MODE: PR_FEEDBACK — ingests existing pull-request feedback (review threads, requested changes, CI/check failures, merge conflicts, stale branch state, pasted notes), verifies every claim against source, clusters related problems, fixes confirmed items, validates the branch, and reports closure status for every ledger item. Distinct from /swarm pr-review, which discovers new findings. On a PR the default run continues to green CI and a monitored merge, then a session retrospective and the memory closeout. It merges only when your own words ask for the merge (for example "/swarm pr-feedback 123 and merge"; a question or mention never counts) or you answer yes to its merge question. "Fixes only" skips CI and the merge; "no merge" skips only the merge. The PR reference is optional: with none, the architect builds the ledger from the current PR/branch; text after the reference is forwarded as extra instructions. Supports full GitHub URL, owner/repo#N shorthand, or bare PR number (resolved against origin).
 
 ### `/swarm ci-monitor`
 
@@ -169,7 +169,7 @@ Drive an already-reviewed, approved PR to green and merged (monitor CI, fix, mer
 
 **Args:** `<pr-url|owner/repo#N|N>`
 
-Triggers MODE: CI_MONITOR — takes an already human-reviewed, approved PR, exhaustively researches every CI failure, fixes it end-to-end, iterates until all required checks are green (max 5 fix cycles), then merges via `gh pr merge` with no merge-strategy flag. Invoke only after human review is complete; the skill re-verifies reviewDecision: APPROVED and mergeable state before doing anything destructive. Distinct from /swarm pr-subscribe, which passively watches a PR without a merge terminal. Supports full GitHub URL, owner/repo#N shorthand, or bare PR number (resolved against origin).
+Triggers MODE: CI_MONITOR — takes an already human-reviewed, approved PR, exhaustively researches every CI failure, fixes it end-to-end, iterates until all required checks are green (max 5 fix cycles), then merges via `gh pr merge` (no strategy flag on a merge-queue base; the allowed method on a direct base). Invoke only after human review is complete; the skill re-verifies reviewDecision: APPROVED and mergeable state before doing anything destructive. Distinct from /swarm pr-subscribe, which passively watches a PR without a merge terminal. Supports full GitHub URL, owner/repo#N shorthand, or bare PR number (resolved against origin).
 
 ### `/swarm pr subscribe`
 
@@ -611,6 +611,14 @@ Generate evidence summary with completion ratio and blockers
 
 Generates a summary showing completion ratio across all tasks, lists blockers, and identifies missing evidence.
 
+### `/swarm receipt`
+
+Emit or verify verification receipts <task|phase> <id> [--export] | --verify <bundle>
+
+**Args:** `<task|phase> <id> [--export] | --verify <bundle>`
+
+Emits a portable, hash-backed record of the durably recorded gate outcomes for a task or phase (JSON + Markdown under .swarm/evidence/receipts/; --export writes a PR-attachable bundle under .swarm/plan-export/, reaped at close). --verify re-checks every recorded hash in a bundle on any machine (including a fresh clone) and exits nonzero on any mismatch with a typed failure (corrupt_json, unsupported_format_version, schema_mismatch, receipt_hash_mismatch, missing_artifact, digest_mismatch, path_escape).
+
 ### `/swarm archive`
 
 Archive old evidence bundles [--dry-run]
@@ -656,7 +664,7 @@ Manage OpenSpec-compatible SDD artifacts and effective spec projection
 
 **Args:** `status|validate|project [--json] [--change <id>] [--dry-run] [--source <provider>] [--feature <id>|all] [--overwrite]`
 
-Parent command for spec-driven development artifacts. Use sdd status to inspect .swarm/spec.md plus openspec/ artifacts, sdd validate to validate OpenSpec-compatible deltas, and sdd project to materialize the effective spec into .swarm/spec.md for planning. Spec-Kit: sdd project projects ALL features with feature-scoped ids (featureId/FR-nnn) when several exist; --feature <id> selects one (v1 bare-id output); --feature all is the explicit multi-feature alias (project only).
+Parent command for spec-driven development artifacts. Use sdd status to inspect .swarm/spec.md plus openspec/ artifacts, sdd validate to validate OpenSpec-compatible deltas, and sdd project to materialize the effective spec into .swarm/spec.md for planning. Spec-Kit: sdd project projects ALL features with feature-scoped ids (featureId/FR-nnn) when several exist; --feature <id> selects one (v1 bare-id output); --feature all is the explicit multi-feature alias (project only). Provider selection precedence: --source <provider> beats SWARM_SDD_SOURCE, which beats sdd.source in the config (.opencode/opencode-swarm.json or the user config), which beats auto-detection; a selection from any non-flag source is final and /swarm sdd status reports where it came from.
 
 #### `/swarm sdd status`
 

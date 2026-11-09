@@ -10,14 +10,14 @@
  * `tool.execute.before` (src/index.ts): for ANY non-architect identity with
  * `!session.delegationActive && Date.now() - session.lastAgentEventTime >
  * 10000`, it flips `activeAgent` to 'architect' — which then blocks writes
- * to ordinary config files (biome.json lives in the architect-blocked config
+ * to ordinary config files (app.config.toml lives in the architect-blocked config
  * zone, while native agents carry no swarm write restrictions).
  *
  * This test simulates the v2 event order WITHOUT sleeping: the timer is aged
  * by direct mutation of the in-memory session state.
  *
  * RED at base, GREEN after the fix: with lastAgentEventTime aged 20 s, the
- * biome.json write rejects as `WRITE BLOCKED: Agent "architect"` and
+ * app.config.toml write rejects as `WRITE BLOCKED: Agent "architect"` and
  * activeAgent flips to 'architect'. The fresh-timer control (<10 s) passes
  * at base and proves the harness itself works.
  */
@@ -119,12 +119,12 @@ describe('v2-seeded native agent identity survives the stale-delegation revert (
 
 		// RED at base: the stale-delegation revert inside the registered
 		// tool.execute.before flips identity to ORCHESTRATOR_NAME and the
-		// guardrails write check then rejects biome.json as architect.
+		// guardrails write check then rejects app.config.toml as architect.
 		let writeError: unknown;
 		try {
 			await booted.hooks['tool.execute.before'](
 				{ tool: 'write', sessionID, callID: 'write-biome-stale-3320' },
-				{ args: { filePath: 'biome.json', content: '{}' } },
+				{ args: { filePath: 'app.config.toml', content: '{}' } },
 			);
 		} catch (err) {
 			writeError = err;
@@ -150,7 +150,7 @@ describe('v2-seeded native agent identity survives the stale-delegation revert (
 
 		await booted.hooks['tool.execute.before'](
 			{ tool: 'write', sessionID, callID: 'write-biome-fresh-3320' },
-			{ args: { filePath: 'biome.json', content: '{}' } },
+			{ args: { filePath: 'app.config.toml', content: '{}' } },
 		);
 		expect(swarmState.activeAgent.get(sessionID)).toBe('plan');
 	});

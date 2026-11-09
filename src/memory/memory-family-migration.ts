@@ -160,14 +160,23 @@ export interface MemoryFamilyMemberAudit {
  * re-stamped `reviewedAt` (`createdAt` is immutable at propose and is never a
  * recency key). Members not listed are event logs with unique ids — no
  * version recency.
+ *
+ * Exported for the doctor's read-only `--integrity` divergence report
+ * (issue #2969): row identity, versioned membership, and recency comparison
+ * must all come from THIS module so the report can never drift from the
+ * engine's own merge semantics.
  */
-const MEMBER_RECENCY_KEYS: Readonly<Record<string, readonly string[]>> = {
-	'memories.jsonl': ['updatedAt', 'updated_at'],
-	'proposals.jsonl': ['reviewedAt'],
-};
+export const MEMBER_RECENCY_KEYS: Readonly<Record<string, readonly string[]>> =
+	{
+		'memories.jsonl': ['updatedAt', 'updated_at'],
+		'proposals.jsonl': ['reviewedAt'],
+	};
 
 /** Parse a row's recency (ISO string → epoch ms) from the member's key list. */
-function rowRecency(row: unknown, keys: readonly string[]): number | undefined {
+export function rowRecency(
+	row: unknown,
+	keys: readonly string[],
+): number | undefined {
 	if (typeof row !== 'object' || row === null) return undefined;
 	const o = row as Record<string, unknown>;
 	for (const key of keys) {
@@ -180,8 +189,9 @@ function rowRecency(row: unknown, keys: readonly string[]): number | undefined {
 	return undefined;
 }
 
-/** Real string row id, or null when the row carries no id (whole-row identity). */
-function rowId(row: unknown): string | null {
+/** Real string row id, or null when the row carries no id (whole-row identity).
+ *  Exported for the doctor's `--integrity` report (see MEMBER_RECENCY_KEYS). */
+export function rowId(row: unknown): string | null {
 	if (typeof row !== 'object' || row === null) return null;
 	const o = row as Record<string, unknown>;
 	return typeof o.id === 'string' ? o.id : null;

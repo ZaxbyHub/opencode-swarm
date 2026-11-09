@@ -15,6 +15,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import lockfileImport from 'proper-lockfile';
 import { validateSwarmPath } from '../hooks/utils';
+import { renameSyncWithRetry } from '../utils/atomic-write';
 import { compositeSessionKey } from '../utils/canonical-root.js';
 import * as logger from '../utils/logger';
 import { FULL_AUTO_OVERSIGHT_EVIDENCE_FILE_RE } from './evidence-names';
@@ -668,7 +669,7 @@ function writePersisted(
 			// fsync is best-effort; OSes that don't support it shouldn't
 			// block the main path.
 		}
-		fs.renameSync(tmpPath, filePath);
+		_internals.renameWithRetry(tmpPath, filePath);
 		// Invalidate the read cache — the next read re-stats and re-parses.
 		readCache.delete(filePath);
 		// Read back the canonical file to confirm the rename succeeded and
@@ -684,6 +685,13 @@ function writePersisted(
 		logger.error(
 			`[full-auto/state] Failed to persist ${STATE_FILE} atomically: ${msg}`,
 		);
+		// #2969 (SIB3-1): never leak the temp file when the persist fails —
+		// the .bak best-effort above stays as the recovery hint.
+		try {
+			if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
+		} catch {
+			// best-effort cleanup; the next write retries with a fresh temp
+		}
 		throw new Error('Full-Auto state persistence failed');
 	}
 }
@@ -1225,9 +1233,14 @@ export const _internals: {
 	writePersisted: typeof writePersisted;
 	lockfile: StateLockFile;
 	scanOversightEvidenceSequence: typeof maxPersistedOversightEvidenceSequence;
+	/** #2969 (SIB3-1): rename goes through the shared bounded-retry helper.
+	 *  Exposed on the seam so write-resilience tests can inject transient
+	 *  EPERM/terminal failures without mocking node:fs. */
+	renameWithRetry: typeof renameSyncWithRetry;
 } = {
 	readPersisted: readPersistedForMutation,
 	writePersisted,
 	lockfile,
 	scanOversightEvidenceSequence: maxPersistedOversightEvidenceSequence,
+	renameWithRetry: renameSyncWithRetry,
 };

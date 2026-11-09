@@ -36,6 +36,7 @@ These are invoked as `/swarm <subcommand>`, NOT as bare `/subcommand`. The list 
 - `/swarm dataset export` — HUMAN-ONLY: governed deterministic dataset export (preview + confirm token; manifest with sha256 checksums)
 - `/swarm evidence` — show evidence bundles `[taskId]`
 - `/swarm evidence summary` — generate evidence summary with completion ratio and blockers
+- `/swarm receipt` — emit a portable verification receipt for a task or phase (`--export` writes a PR-attachable bundle; `--verify <bundle>` re-checks every hash and exits nonzero on mismatch)
 - `/swarm evidence-summary` — deprecated alias for `/swarm evidence summary`
 - `/swarm handoff` — prepare state for clean model switch
 - `/swarm archive` — archive old evidence bundles `[--dry-run]`

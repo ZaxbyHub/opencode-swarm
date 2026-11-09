@@ -1271,6 +1271,456 @@ export function checkDestructiveCommandRegistry(repoRoot: string): CheckResult {
 	return { messages, violations };
 }
 
+// ---------------------------------------------------------------------------
+// Check 10 (issue #2969): raw renameSync / raw rm crash-consistency ratchet
+// ---------------------------------------------------------------------------
+
+const RAW_WRITE_ALLOWLIST_REL = 'scripts/raw-write-allowlist.txt';
+/** src arm: a bare `renameSync(` call (crash-prone without the bounded retry loop). */
+const RAW_RENAME_PATTERN = /\brenameSync\s*\(/g;
+/** tests arm: raw rm forms that bypass the shared safe-dir cleanup seam. */
+const RAW_RM_PATTERN = /\brmSync\s*\(|\.rm\s*\(|\bpromises\.rm\s*\(/g;
+/** db-handle predicate: a test file whose CONTENT references a `.db` path. */
+const RAW_WRITE_DB_HANDLE_PATTERN = /\.db\b/;
+
+export interface RawWriteScanResult {
+	/** src arm: posix-relative file path -> raw renameSync site count. */
+	srcCounts: Map<string, number>;
+	/** tests arm: posix-relative file path -> raw rm site count. */
+	testsCounts: Map<string, number>;
+	srcFiles: number;
+	srcSites: number;
+	testsFiles: number;
+	testsSites: number;
+}
+
+/**
+ * Static, spawn-free live scan of both Check 10 arms. The src arm walks the
+ * src tree (.ts files, skipping *.test.ts) counting raw `renameSync(` sites;
+ * the tests arm walks tests/unit, tests/helpers and tests/integration (.ts
+ * files whose content references a `.db` path), counting raw `rmSync(`,
+ * `.rm(` and `promises.rm(` sites. NO whole-file exemptions — frozen per-file
+ * quotas only (src/utils/atomic-write.ts and tests/helpers/safe-test-dir.ts
+ * are frozen by count like everything else).
+ */
+export function scanRawWriteCounts(repoRoot: string): RawWriteScanResult {
+	const srcCounts = new Map<string, number>();
+	const testsCounts = new Map<string, number>();
+	let srcFiles = 0;
+	let srcSites = 0;
+	let testsFiles = 0;
+	let testsSites = 0;
+
+	const srcCandidates = listFiles(path.join(repoRoot, 'src'), {
+		extensions: ['.ts'],
+		excludeDirs: new Set(['node_modules', 'dist']),
+	}).filter((file) => !file.endsWith('.test.ts'));
+	for (const file of srcCandidates) {
+		const count = countPatternMatches(readText(file), RAW_RENAME_PATTERN);
+		if (count > 0) {
+			srcCounts.set(toPosixRelative(repoRoot, file), count);
+			srcFiles += 1;
+			srcSites += count;
+		}
+	}
+
+	const testsCandidates = [
+		'tests/unit',
+		'tests/helpers',
+		'tests/integration',
+	]
+		.flatMap((rel) =>
+			listFiles(path.join(repoRoot, ...rel.split('/')), {
+				extensions: ['.ts'],
+				excludeDirs: new Set(['node_modules', 'dist']),
+			}),
+		)
+		.filter((file) => RAW_WRITE_DB_HANDLE_PATTERN.test(readText(file)));
+	for (const file of testsCandidates) {
+		const count = countPatternMatches(readText(file), RAW_RM_PATTERN);
+		if (count > 0) {
+			testsCounts.set(toPosixRelative(repoRoot, file), count);
+			testsFiles += 1;
+			testsSites += count;
+		}
+	}
+
+	return {
+		srcCounts,
+		testsCounts,
+		srcFiles,
+		srcSites,
+		testsFiles,
+		testsSites,
+	};
+}
+
+export interface RawWriteAllowlist {
+	/** posix-relative path -> frozen count (only lines with count > 0 belong). */
+	entries: Map<string, number>;
+	/** `${path}: ${count}` strings from `# APPROVED-NEW:` marker lines. */
+	approvedMarkers: Set<string>;
+	/** Non-comment, non-blank lines that did not parse as `path: count`. */
+	malformedLines: string[];
+}
+
+function parseRawWriteMarkerPayload(line: string): string | null {
+	const match = line.match(/^#[ \t]*APPROVED-NEW:[ \t]*(.+?)[ \t]*$/);
+	return match?.[1] ?? null;
+}
+
+/** Parse allowlist text into entries + growth-approval markers (pure). */
+export function parseRawWriteAllowlist(text: string): RawWriteAllowlist {
+	const entries = new Map<string, number>();
+	const approvedMarkers = new Set<string>();
+	const malformedLines: string[] = [];
+	for (const rawLine of text.replace(/\r/g, '').split('\n')) {
+		const line = rawLine.trim();
+		if (line === '') continue;
+		if (line.startsWith('#')) {
+			const payload = parseRawWriteMarkerPayload(line);
+			if (payload !== null) approvedMarkers.add(payload);
+			continue;
+		}
+		const match = line.match(/^(.+?):[ \t]*(\d+)$/);
+		if (!match) {
+			malformedLines.push(line);
+			continue;
+		}
+		entries.set(match[1].trim(), Number.parseInt(match[2], 10));
+	}
+	return { entries, approvedMarkers, malformedLines };
+}
+
+export interface RawWriteGrowthEntry {
+	path: string;
+	baseCount: number;
+	headCount: number;
+}
+
+/**
+ * Pure growth comparator: entries whose head count EXCEEDS the base count in
+ * either dimension — a path absent from base (baseCount 0) or a count
+ * increase on an existing path. Shrinks and shrink-to-zero (entry removed)
+ * are clean; the ratchet is shrink-only.
+ */
+export function diffAllowlistGrowth(
+	baseText: string,
+	headText: string,
+): RawWriteGrowthEntry[] {
+	const base = parseRawWriteAllowlist(baseText).entries;
+	const head = parseRawWriteAllowlist(headText).entries;
+	const grown: RawWriteGrowthEntry[] = [];
+	for (const [path, headCount] of head) {
+		if (headCount <= 0) continue;
+		const baseCount = base.get(path) ?? 0;
+		if (headCount > baseCount) {
+			grown.push({ path, baseCount, headCount });
+		}
+	}
+	grown.sort((a, b) => a.path.localeCompare(b.path));
+	return grown;
+}
+
+/**
+ * Render the allowlist file body from a live scan (header conventions mirror
+ * scripts/mock-allowlist.txt). `# APPROVED-NEW:` marker lines already present
+ * in the existing file are preserved in place relative to their entry
+ * (flat set-membership — convention places the marker above the entry).
+ */
+export function renderRawWriteAllowlist(
+	scan: RawWriteScanResult,
+	previousMarkers: Set<string> = new Set(),
+): string {
+	const markerFor = (entry: string): string[] =>
+		previousMarkers.has(entry)
+			? [`# APPROVED-NEW: ${entry}`]
+			: [];
+	const lines: string[] = [
+		'# raw-write Allowlist — scripts/raw-write-allowlist.txt',
+		'# One entry per line: `<normalized-posix-path>: <count>` — the frozen',
+		'# per-file count of raw crash-prone write sites. Blank lines and #',
+		'# comments are ignored. Owned by Check 10 in scripts/check-invariants.ts',
+		'# (issue #2969).',
+		'#',
+		'# Arms:',
+		'#   src arm   — src/**/*.ts, skipping *.test.ts: raw `renameSync(` sites',
+		'#   tests arm — tests/{unit,helpers,integration}/**/*.ts whose content',
+		'#               references a `.db` path (db-handle predicate /\\.db\\b/):',
+		'#               raw `rmSync(` / `.rm(` / `promises.rm(` sites',
+		'#',
+		'# NO whole-file exemptions: every file is frozen by exact per-file count',
+		'# (src/utils/atomic-write.ts and tests/helpers/safe-test-dir.ts included).',
+		'# The ratchet is shrink-only: counts and paths may shrink or drop out',
+		'# freely; ANY growth — a new path or a higher count — fails Check 10',
+		'# until a growth marker approves it.',
+		'#',
+		'# To approve growth added in a PR, add a standalone marker line:',
+		'#   # APPROVED-NEW: <path>: <count>',
+		'# (path AND new count must both match the entry exactly; the marker may',
+		'# appear anywhere in this file, convention places it immediately above',
+		'# the approved entry, and regeneration preserves that placement).',
+		'# Escape hatch for a deliberate growth PR: RAW_WRITE_ENFORCE=0 (soft-warn).',
+		'#',
+		'# Regenerate after a legitimate shrink (never to paper over growth):',
+		'#   bun run scripts/check-invariants.ts --regen-raw-write-allowlist',
+		'#',
+		'# Freeze provenance (issue #2969): the issue\'s 95/49 figures are NOT',
+		'# claimed — they were not reproducible from the tree. This freeze is the',
+		'# live scan at introduction:',
+		`#   src arm:   ${scan.srcSites} raw renameSync site(s) across ${scan.srcFiles} file(s)`,
+		`#   tests arm: ${scan.testsSites} raw rm site(s) across ${scan.testsFiles} file(s)`,
+		'',
+		'# --- src arm (raw renameSync) ---',
+	];
+	for (const [rel, count] of [...scan.srcCounts.entries()].sort((a, b) =>
+		a[0].localeCompare(b[0]),
+	)) {
+		lines.push(...markerFor(`${rel}: ${count}`), `${rel}: ${count}`);
+	}
+	lines.push('', '# --- tests arm (raw rm in db-handle test files) ---');
+	for (const [rel, count] of [...scan.testsCounts.entries()].sort((a, b) =>
+		a[0].localeCompare(b[0]),
+	)) {
+		lines.push(...markerFor(`${rel}: ${count}`), `${rel}: ${count}`);
+	}
+	lines.push('');
+	return lines.join('\n');
+}
+
+export interface RawWriteRegenResult {
+	srcEntries: number;
+	testsEntries: number;
+	srcFiles: number;
+	srcSites: number;
+	testsFiles: number;
+	testsSites: number;
+}
+
+/**
+ * Regenerate scripts/raw-write-allowlist.txt from the live scan (preserving
+ * existing `# APPROVED-NEW:` markers against their entries). Returns the
+ * headline counts for the caller to print.
+ */
+export function regenRawWriteAllowlist(repoRoot: string): RawWriteRegenResult {
+	const scan = scanRawWriteCounts(repoRoot);
+	const allowlistFile = path.join(
+		repoRoot,
+		...RAW_WRITE_ALLOWLIST_REL.split('/'),
+	);
+	const previousMarkers = fs.existsSync(allowlistFile)
+		? parseRawWriteAllowlist(readText(allowlistFile)).approvedMarkers
+		: new Set<string>();
+	fs.mkdirSync(path.dirname(allowlistFile), { recursive: true });
+	fs.writeFileSync(allowlistFile, renderRawWriteAllowlist(scan, previousMarkers));
+	return {
+		srcEntries: scan.srcCounts.size,
+		testsEntries: scan.testsCounts.size,
+		srcFiles: scan.srcFiles,
+		srcSites: scan.srcSites,
+		testsFiles: scan.testsFiles,
+		testsSites: scan.testsSites,
+	};
+}
+
+function rawSiteLineNumbers(
+	content: string,
+	pattern: RegExp,
+): number[] {
+	const lines: number[] = [];
+	const split = content.split(/\r?\n/);
+	for (let i = 0; i < split.length; i += 1) {
+		const count = countPatternMatches(split[i] ?? '', new RegExp(pattern.source, 'g'));
+		for (let n = 0; n < count; n += 1) lines.push(i + 1);
+	}
+	return lines;
+}
+
+/**
+ * Check 10 (issue #2969): freeze every raw `renameSync(` site under src/ and
+ * every raw `rmSync(`/`.rm(`/`promises.rm(` site in db-handle test files at
+ * their current per-file counts (crash-consistency allowlist), then ratchet:
+ * growth in EITHER dimension (new path or higher count) requires a
+ * `# APPROVED-NEW: <path>: <count>` marker; dead entries and live counts over
+ * quota fail; shrinks are always clean. Static scans only; the single spawn
+ * is the base-branch `git show` for the growth diff (bounded by
+ * GIT_TIMEOUT_MS). `RAW_WRITE_ENFORCE=0` downgrades growth findings to
+ * soft-warns (resolveEnforce semantics). Fixture trees (no allowlist file and
+ * no src/ or no .git) skip cleanly.
+ */
+export async function checkRawWriteRatchet(
+	repoRoot: string,
+): Promise<CheckResult> {
+	const messages = [
+		'=== Check 10: raw renameSync / raw rm ratchet (crash-consistency allowlist, issue #2969) ===',
+	];
+	let violations = 0;
+	const scan = scanRawWriteCounts(repoRoot);
+	const censusLines = [
+		`allowlist entries: __ENTRIES__ (src: __SRC__, tests: __TESTS__)`,
+		`src arm: ${scan.srcFiles} file(s), ${scan.srcSites} raw renameSync site(s) | tests arm: ${scan.testsFiles} file(s), ${scan.testsSites} raw rm site(s)`,
+	];
+	const finish = (entries: number, src: number, tests: number): CheckResult => {
+		messages.push(
+			censusLines[0]
+				.replace('__ENTRIES__', String(entries))
+				.replace('__SRC__', String(src))
+				.replace('__TESTS__', String(tests)),
+			censusLines[1],
+		);
+		return { messages, violations };
+	};
+
+	const allowlistFile = path.join(
+		repoRoot,
+		...RAW_WRITE_ALLOWLIST_REL.split('/'),
+	);
+	const hasSrcDir = fs.existsSync(path.join(repoRoot, 'src'));
+	const hasGitDir = fs.existsSync(path.join(repoRoot, '.git'));
+	if (!fs.existsSync(allowlistFile)) {
+		if (!hasSrcDir || !hasGitDir) {
+			// Fixture trees (no src surface, or no git repo — e.g. the Check 5
+			// fixtures) have nothing to ratchet; mirror Check 9's clean skip.
+			messages.push('Check 10 skipped: no raw-write allowlist in this tree');
+			return finish(0, 0, 0);
+		}
+		messages.push(
+			`ERROR: ${RAW_WRITE_ALLOWLIST_REL} not found — the raw-write crash-consistency allowlist is required for Check 10.`,
+		);
+		messages.push(
+			'       Regenerate: bun run scripts/check-invariants.ts --regen-raw-write-allowlist',
+		);
+		violations += 1;
+		return finish(0, 0, 0);
+	}
+
+	const headText = readText(allowlistFile);
+	const allowlist = parseRawWriteAllowlist(headText);
+	for (const line of allowlist.malformedLines) {
+		messages.push(
+			`ERROR: malformed allowlist line (expected '<path>: <count>'): ${JSON.stringify(line)}`,
+		);
+		violations += 1;
+	}
+
+	// (a) Live counts over the frozen quota — report per excess site.
+	const arm = (
+		counts: Map<string, number>,
+		pattern: RegExp,
+		siteKind: string,
+	) => {
+		for (const [rel, live] of counts) {
+			const allowed = allowlist.entries.get(rel) ?? 0;
+			if (live <= allowed) continue;
+			const lines = rawSiteLineNumbers(
+				readText(path.join(repoRoot, ...rel.split('/'))),
+				pattern,
+			);
+			for (let site = allowed + 1; site <= live; site += 1) {
+				const at = lines[site - 1];
+				const where = at === undefined ? rel : `${rel}:${at}`;
+				messages.push(
+					`ERROR: ${where} raw ${siteKind} site ${site}/${live} exceeds the frozen quota (${allowed}) — route through the shared helper or approve the growth.`,
+				);
+				violations += 1;
+			}
+		}
+	};
+	arm(scan.srcCounts, RAW_RENAME_PATTERN, 'renameSync');
+	arm(scan.testsCounts, RAW_RM_PATTERN, 'rm');
+
+	// (b) Dead entries — allowed > 0 but the live scan finds 0 (or the path is
+	// gone). A stale-high quota (0 < live < allowed) is a non-blocking note.
+	for (const [rel, allowed] of allowlist.entries) {
+		if (allowed <= 0) {
+			messages.push(
+				`ERROR: dead allowlist entry '${rel}: 0' — zero-count entries are not written; remove the line.`,
+			);
+			violations += 1;
+			continue;
+		}
+		const live =
+			scan.srcCounts.get(rel) ?? scan.testsCounts.get(rel) ?? 0;
+		const pathExists = fs.existsSync(path.join(repoRoot, ...rel.split('/')));
+		if (live === 0 || !pathExists) {
+			messages.push(
+				`ERROR: dead allowlist entry '${rel}: ${allowed}' — the live scan finds ${live} site(s); shrink the quota (regen: --regen-raw-write-allowlist).`,
+			);
+			violations += 1;
+		} else if (live < allowed) {
+			messages.push(
+				`NOTE: ${rel} quota is stale-high (${allowed} frozen, ${live} live) — regenerate to shrink.`,
+			);
+		}
+	}
+
+	// (c) Growth ratchet vs the git base — new path OR count increase without
+	// a matching `# APPROVED-NEW:` marker. Bootstrap: a base with no
+	// allowlist file at all is introduction mode (mirrors Check 4's no-base
+	// skip).
+	let baseEntries = 0;
+	let grownCount = 0;
+	let ratchetViolations = 0;
+	const enforce = resolveEnforce(process.env.RAW_WRITE_ENFORCE);
+	if (!hasGitDir) {
+		messages.push(
+			'NOTE: no git repository — skipping the growth ratchet (non-blocking).',
+		);
+	} else {
+		const baseBranch = await resolveBaseBranch(repoRoot);
+		if (!baseBranch) {
+			messages.push(
+				'NOTE: no base branch found (no PR context) — skipping the growth ratchet (non-blocking).',
+			);
+		} else {
+			const baseShow = await runGit(
+				['show', `${baseBranch}:${RAW_WRITE_ALLOWLIST_REL}`],
+				repoRoot,
+			);
+			if (baseShow.exitCode !== 0) {
+				messages.push(
+					`NOTE: base ${baseBranch} has no raw-write allowlist — introduction mode (no growth markers required).`,
+				);
+			} else {
+				baseEntries = parseRawWriteAllowlist(baseShow.stdout).entries.size;
+				for (const growth of diffAllowlistGrowth(baseShow.stdout, headText)) {
+					grownCount += 1;
+					if (allowlist.approvedMarkers.has(`${growth.path}: ${growth.headCount}`)) {
+						continue;
+					}
+					messages.push(
+						`ERROR (ratchet): raw-write quota growth '${growth.path}: ${growth.baseCount} -> ${growth.headCount}' without approval.`,
+					);
+					messages.push(
+						`       Add a standalone marker line:  # APPROVED-NEW: ${growth.path}: ${growth.headCount}`,
+					);
+					messages.push(
+						'       OR remove the new raw site instead (route through the shared helper).',
+					);
+					ratchetViolations += 1;
+					if (enforce) {
+						violations += 1;
+					}
+				}
+			}
+		}
+	}
+	messages.push(
+		`Base entries: ${baseEntries} | Head entries: ${allowlist.entries.size} | Grown in this PR: ${grownCount} | Approved-new markers found: ${allowlist.approvedMarkers.size} | Unapproved: ${ratchetViolations}`,
+	);
+	if (ratchetViolations > 0 && !enforce) {
+		messages.push('RAW_WRITE_ENFORCE is off — soft-warn (non-blocking).');
+	}
+
+	let srcEntries = 0;
+	let testsEntries = 0;
+	for (const rel of allowlist.entries.keys()) {
+		if (rel.startsWith('src/')) srcEntries += 1;
+		else if (rel.startsWith('tests/')) testsEntries += 1;
+	}
+	return finish(allowlist.entries.size, srcEntries, testsEntries);
+}
+
 /**
  * Check 8 (issue #2577): the family-migration engines' DESTINATION lock
  * acquisition must fail closed. A catch that swallows the acquisition failure
@@ -1653,6 +2103,7 @@ export async function main(startDir: string = process.cwd()): Promise<number> {
 		}),
 		checkMigrationLockAdmission(repoRoot),
 		checkDestructiveCommandRegistry(repoRoot),
+		await checkRawWriteRatchet(repoRoot),
 	];
 
 	for (const output of outputs) {
@@ -1680,9 +2131,12 @@ export async function main(startDir: string = process.cwd()): Promise<number> {
 	console.log(
 		'            8 (family-migration destination lock admission) |',
 	);
-	console.log(
-		'            9 (destructive-command registry enumeration, #2946)',
-	);
+console.log(
+	'            9 (destructive-command registry enumeration, #2946) |',
+);
+console.log(
+	'            10 (raw-rename/raw-rm crash-consistency allowlist, #2969)',
+);
 	if (violations > 0) {
 		console.log(`${violations} invariant violation(s) found.`);
 		return 1;
@@ -1696,7 +2150,25 @@ const isDirectRun =
 	typeof process.argv[1] === 'string' &&
 	path.resolve(process.argv[1]) === path.resolve(SCRIPT_PATH);
 
-if (isDirectRun) {
+if (isDirectRun && process.argv.includes('--regen-raw-write-allowlist')) {
+	// Check 10 regen mode (issue #2969): write scripts/raw-write-allowlist.txt
+	// from the live scan and print what was written. Never also runs the gate
+	// — regenerating and enforcing in one invocation would self-heal the
+	// ratchet it is supposed to report.
+	void (async () => {
+		const repoRoot = await resolveRepoRoot(process.cwd());
+		const result = regenRawWriteAllowlist(repoRoot);
+		console.log(
+			`Wrote ${RAW_WRITE_ALLOWLIST_REL}: ${result.srcEntries + result.testsEntries} entries (src: ${result.srcEntries}, tests: ${result.testsEntries}).`,
+		);
+		console.log(
+			`src arm: ${result.srcFiles} file(s), ${result.srcSites} raw renameSync site(s) | tests arm: ${result.testsFiles} file(s), ${result.testsSites} raw rm site(s)`,
+		);
+		process.exit(0);
+	})().catch((error) => {
+		throw error;
+	});
+} else if (isDirectRun) {
 	void main()
 		.then((exitCode) => {
 			process.exit(exitCode);

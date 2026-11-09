@@ -2948,9 +2948,9 @@ describe('Opencode native agents — authority pass-through (issue #559)', () =>
 		}
 	});
 
-	it('build agent can write eslint.config.mts (exact repro from issue #559)', () => {
+	it('build agent writing eslint.config.mts is denied as verifier config (#3120 supersedes #559)', () => {
 		const result = checkFileAuthority('build', 'eslint.config.mts', tempDir);
-		expect(result.allowed).toBe(true);
+		expect(result.allowed).toBe(false);
 	});
 
 	it('build agent is not blocked with "Unknown agent" reason', () => {

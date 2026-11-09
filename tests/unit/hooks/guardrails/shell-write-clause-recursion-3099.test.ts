@@ -9,7 +9,10 @@
  * What they cover is the shapes a naive fix would newly admit, plus the
  * redirect-preservation constraint the clause recursion has to honour.
  */
+
 import { describe, expect, it } from 'bun:test';
+import { mkdirSync } from 'node:fs';
+import * as path from 'node:path';
 import {
 	detectPosixWrites,
 	detectWindowsWrites,
@@ -17,6 +20,7 @@ import {
 	isPowerShellShaped,
 	resolveWriteTargets,
 } from '../../../../src/hooks/shell-write-detect';
+import { canonicalMkdtemp } from '../../../../tests/helpers/tmpdir';
 
 const writes = (command: string) => detectPosixWrites(command).writes;
 
@@ -207,38 +211,57 @@ describe('#3099 — shell-write clause recursion and shape classification', () =
 	// must NOT move a later top-level write into scope — matching base,
 	// which never visited bodies at all. These rows pin the resolution
 	// behavior through resolveWriteTargets with cwd '/w'.
+	//
+	// #3491 W1 re-pin (deliberate, v4 constraints 3): If-without-else gains
+	// the implicit no-body outcome and loops require a full-state fixpoint,
+	// so an untaken if-branch / while-body cd now DIVERGES from the no-body
+	// outcome and WITHDRAWS the later write (resolvedPath null — fail-closed)
+	// instead of resolving at the reachable root cwd. The function-definition
+	// leg keeps its base resolution (the body walks a discarded copy), and
+	// the taken top-level cd keeps propagating.
 	// ------------------------------------------------------------------
 	describe('#3099 round 3 — unreachable-cd does not poison resolution', () => {
-		const cases: Array<[string, string, string]> = [
+		// #3518 P-2: the cd tracker stat-gates its mutation, so the fixture
+		// root and its `src` subdir really exist on the host (the historical
+		// synthetic /w cwd no longer tracks a taken cd).
+		const root = canonicalMkdtemp('swcr3099-cd-');
+		mkdirSync(path.join(root, 'src'), { recursive: true });
+		const atRoot = path.join(root, 'OUT.txt');
+		const atSrc = path.join(root, 'src', 'OUT.txt');
+		const cases: Array<[string, string, string | null]> = [
 			[
 				'untaken if-branch cd',
 				'if false; then cd src; fi; echo hi > OUT.txt',
-				'/w/OUT.txt',
+				null,
 			],
-			[
-				'function-definition cd',
-				'f() { cd src; }; echo hi > OUT.txt',
-				'/w/OUT.txt',
-			],
+			['function-definition cd', 'f() { cd src; }; echo hi > OUT.txt', atRoot],
 			[
 				'untaken while-body cd',
 				'while false; do cd src; done; echo hi > OUT.txt',
-				'/w/OUT.txt',
+				null,
 			],
 			[
 				'taken top-level cd still propagates',
 				'cd src; echo hi > OUT.txt',
-				'/w/src/OUT.txt',
+				atSrc,
 			],
 		];
 		for (const [label, command, wantPath] of cases) {
 			it(`resolves ${label} against the reachable cwd`, () => {
 				const det = detectPosixWrites(command);
-				const resolved = resolveWriteTargets(command, det.writes, '/w');
+				const resolved = resolveWriteTargets(command, det.writes, root);
+				if (wantPath === null) {
+					// #3491 W1: withdrawn — every entry nulls out (fail-closed).
+					expect(resolved.length).toBeGreaterThan(0);
+					expect(
+						resolved.every(
+							(r) => r.resolvedPath === null && r.unresolved === true,
+						),
+					).toBe(true);
+					return;
+				}
 				expect(
-					resolved.some(
-						(r) => (r.resolvedPath ?? '').replace(/\+/g, '/') === wantPath,
-					),
+					resolved.some((r) => path.resolve(r.resolvedPath ?? '') === wantPath),
 				).toBe(true);
 			});
 		}

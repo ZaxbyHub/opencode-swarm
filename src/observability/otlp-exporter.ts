@@ -49,13 +49,14 @@ import {
 	existsSync,
 	mkdirSync,
 	readFileSync,
-	renameSync,
 	statSync,
+	unlinkSync,
 	writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
 import type { TelemetryListener } from '../telemetry.js';
 import { addTelemetryListener, removeTelemetryListener } from '../telemetry.js';
+import { renameSyncWithRetry } from '../utils/atomic-write';
 import { getCatalogEntry } from './catalog.js';
 import type { ObservabilityEvent } from './envelope.js';
 import {
@@ -291,20 +292,67 @@ function noteDrop(reason: string): void {
 	_state.lastErrorAt = new Date().toISOString();
 }
 
-/** Atomic tmp+rename write for spool/state files (Windows-safe). */
-function atomicWrite(path: string, contents: string): void {
+/** Classification stamped on the rethrown error so the record-owning catch
+ *  sites count the drop ONCE under the right category (#2969, SIB3-2). */
+type SwarmWriteClass =
+	| 'spool_write_failed'
+	| 'state_write_failed'
+	| 'spool_cleanup_failed';
+
+interface ClassifiedWriteErrorOptions {
+	cause?: unknown;
+}
+
+/** Error thrown by atomicWrite on terminal (post-retry) rename failure. */
+class SwarmWriteFailedError extends Error {
+	readonly swarmWriteClass: SwarmWriteClass;
+	constructor(
+		message: string,
+		swarmWriteClass: SwarmWriteClass,
+		options?: ClassifiedWriteErrorOptions,
+	) {
+		super(message, options);
+		this.name = 'SwarmWriteFailedError';
+		this.swarmWriteClass = swarmWriteClass;
+	}
+}
+
+/** Retry schedule CAP for the telemetry emit path (feedback PRR-023): the
+ *  spool write runs synchronously inside emit() — the full default schedule
+ *  (10+25+50+100+200 = 385 ms of sync sleeps) blocked the emitting thread on
+ *  every transient rename failure. Telemetry must never stall its host;
+ *  the capped schedule bounds a record's worst-case sync block at ~85 ms
+ *  and terminal failure still throws (write class preserved, counting at
+ *  the record-owning boundary). */
+const OTLP_RENAME_RETRY_DELAYS_MS = [10, 25, 50] as const;
+
+/** Atomic tmp+rename write for spool/state files (Windows-safe).
+ *  #2969 (SIB3-2): the rename rides the shared bounded-retry helper; the old
+ *  non-atomic direct-write fallback (a canonical-file clobber worse than a
+ *  lost counter update) is GONE. On terminal failure the temp is cleaned up
+ *  and the error is rethrown carrying its write class — counting happens at
+ *  the record-owning boundary, never here. */
+function atomicWrite(
+	path: string,
+	contents: string,
+	writeClass: SwarmWriteClass,
+): void {
 	const tmp = `${path}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
 	writeFileSync(tmp, contents, 'utf8');
 	try {
-		renameSync(tmp, path);
+		_internals.renameWithRetry(tmp, path, OTLP_RENAME_RETRY_DELAYS_MS);
 	} catch (err) {
 		try {
-			if (existsSync(tmp)) writeFileSync(path, contents, 'utf8');
+			if (existsSync(tmp)) unlinkSync(tmp);
 		} catch {
-			/* fail-open */
+			/* best-effort temp cleanup */
 		}
-		const code = (err as NodeJS.ErrnoException)?.code;
-		if (code !== undefined && code !== 'EPERM' && code !== 'EBUSY') throw err;
+		const code = (err as NodeJS.ErrnoException)?.code ?? 'unknown';
+		throw new SwarmWriteFailedError(
+			`otlp atomic write failed (${writeClass}, last code ${code})`,
+			writeClass,
+			{ cause: err },
+		);
 	}
 }
 
@@ -323,9 +371,18 @@ function persistState(): void {
 	if (_directory === null || _state === null) return;
 	try {
 		mkdirSync(join(_directory, OTLP_EXPORT_SPOOL_DIR), { recursive: true });
-		atomicWrite(statePath(_directory), JSON.stringify(_state));
-	} catch {
-		// fail-open: counters continue in memory
+		atomicWrite(
+			statePath(_directory),
+			JSON.stringify(_state),
+			'state_write_failed',
+		);
+	} catch (err) {
+		// fail-open: counters continue in memory. A state write carries no
+		// records, so it counts under its own category (#2969) and never
+		// touches the record-drop counters.
+		if (err instanceof SwarmWriteFailedError) {
+			noteDrop(err.swarmWriteClass);
+		}
 	}
 }
 
@@ -338,11 +395,16 @@ function readSpoolLines(directory: string): string[] {
 	}
 }
 
-function writeSpoolLines(directory: string, lines: string[]): void {
+function writeSpoolLines(
+	directory: string,
+	lines: string[],
+	writeClass: SwarmWriteClass = 'spool_write_failed',
+): void {
 	mkdirSync(join(directory, OTLP_EXPORT_SPOOL_DIR), { recursive: true });
 	atomicWrite(
 		spoolPath(directory),
 		lines.length === 0 ? '' : `${lines.join('\n')}\n`,
+		writeClass,
 	);
 }
 
@@ -427,15 +489,23 @@ export type OtlpFetch = (
 	init?: RequestInit,
 ) => Promise<Response>;
 
-/** DI seam (repo convention): tests inject a stub collector fetch. */
+/** DI seam (repo convention): tests inject a stub collector fetch. The
+ *  rename seam (#2969) lets write-resilience tests inject transient EPERM /
+ *  terminal failures into the shared retry helper without mocking node:fs. */
 export const _internals: {
 	fetch: OtlpFetch;
 	sleep: (ms: number) => Promise<void>;
 	now: () => number;
+	renameWithRetry: (
+		fromPath: string,
+		toPath: string,
+		delays?: readonly number[],
+	) => void;
 } = {
 	fetch: (input, init) => fetch(input as RequestInfo, init),
 	sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 	now: () => Date.now(),
+	renameWithRetry: renameSyncWithRetry,
 };
 
 async function postBatch(
@@ -695,7 +765,11 @@ function removeSpoolRecords(directory: string, ids: Set<string>): void {
 			noteDrop('spool_corrupt');
 		}
 	}
-	if (changed) writeSpoolLines(directory, kept);
+	if (changed) {
+		// #2969: a cleanup-rewrite failure must NOT count as a record drop —
+		// the kept lines stay on disk for the next flush's replay.
+		writeSpoolLines(directory, kept, 'spool_cleanup_failed');
+	}
 }
 
 function flushSingleFlight(): Promise<void> {
@@ -782,8 +856,20 @@ export function registerOtlpExporter(
 				// Count AFTER a successful append so accepted never includes a
 				// record that was dropped as listener_error.
 				if (_state !== null) _state.accepted += 1;
-			} catch {
-				noteDrop('listener_error');
+			} catch (err) {
+				// #2969: count ONE drop per failed record at this (the
+				// record-owning) boundary. A terminal spool write failure is
+				// attributed to its specific write class so lastErrorCategory
+				// keeps the precise diagnosis; only genuinely unclassed
+				// listener failures fall back to the generic bucket.
+				if (
+					err instanceof SwarmWriteFailedError &&
+					err.swarmWriteClass === 'spool_write_failed'
+				) {
+					noteDrop('write_retry_exhausted');
+				} else {
+					noteDrop('listener_error');
+				}
 			}
 		};
 		addTelemetryListener(_listener);

@@ -82,6 +82,10 @@ export const CORE_EVENTS_MENTION_ALLOWLIST: Readonly<
 		reason: 'agent prompt template references the event stream name (documentation text, no I/O)',
 		cls: 'prompt-doc',
 	},
+	'src/commands/doctor-store-integrity.ts': {
+		reason: 'integrity report only (#2969): bounded read-only torn-tail probe of the last 64 KiB of events.jsonl; never reads events semantically and never appends',
+		cls: 'provenance-digest',
+	},
 	'src/commands/abort-pr-workflow.ts': {
 		reason: 'user-facing help/output strings describing where the audit trail lives (documentation text, no I/O)',
 		cls: 'prompt-doc',

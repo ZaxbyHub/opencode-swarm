@@ -28,6 +28,7 @@ import {
 	type EvaluationRetentionResult,
 } from '../evaluation/retention.js';
 import { readSwarmFileAsync, validateSwarmPath } from '../hooks/utils';
+import { SNAPSHOT_EXCLUDED_EVIDENCE_ENTRIES } from '../tools/phase-complete/snapshot-identity';
 import { warn } from '../utils';
 import { bunWrite } from '../utils/bun-compat';
 import {
@@ -536,6 +537,17 @@ export async function listEvidenceTaskIds(
 	// Filter to only valid task ID directories
 	const taskIds: string[] = [];
 	for (const entry of entries) {
+		// FB-008 (#2968): `receipts/` is a DERIVED, non-task subtree of
+		// .swarm/evidence (gate reports + receipts), created unconditionally
+		// by every phase_complete capture. Treating it as a task ID made
+		// /swarm doctor report a false "Orphaned Evidence ❌ [receipts]" in
+		// every project that ever completed a phase. This is the same
+		// reserved-name concept the phase-evidence snapshot already excludes
+		// (snapshot-identity.ts SNAPSHOT_EXCLUDED_EVIDENCE_ENTRIES) — the two
+		// consumers of the .swarm/evidence root must agree on it.
+		if (SNAPSHOT_EXCLUDED_EVIDENCE_ENTRIES.has(entry)) {
+			continue;
+		}
 		const entryPath = path.join(evidenceBasePath, entry);
 		try {
 			// Check if it's a directory

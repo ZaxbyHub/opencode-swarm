@@ -72,10 +72,10 @@ import {
 import { loadPluginConfig } from '../config/loader.js';
 import {
 	DEFAULT_PR_REVIEW_RESILIENCE_CONFIG,
+	deriveSwarmIdentity,
 	isKnownCanonicalRole,
 	type PrReviewResilienceConfig,
 	resolveGeneratedAgentRole,
-	stripKnownSwarmPrefix,
 } from '../config/schema.js';
 import {
 	classifyProviderFailure,
@@ -4630,11 +4630,7 @@ function laneConfiguredModel(
 	>,
 ): string | undefined {
 	const prefixed = record.swarmPrefixedAgent;
-	const baseRole = stripKnownSwarmPrefix(prefixed);
-	const swarmID =
-		baseRole !== prefixed
-			? prefixed.slice(0, prefixed.length - baseRole.length - 1)
-			: undefined;
+	const { role: baseRole, swarmID } = deriveSwarmIdentity(prefixed);
 	return getSwarmAgents(swarmID)?.[baseRole]?.model;
 }
 
@@ -4753,11 +4749,7 @@ async function startAsyncLanePrompt(args: {
 		}
 	}
 	const promptController = new AbortController();
-	const baseRole = stripKnownSwarmPrefix(args.lane.agent);
-	const swarmID =
-		baseRole !== args.lane.agent
-			? args.lane.agent.slice(0, args.lane.agent.length - baseRole.length - 1)
-			: undefined;
+	const { role: baseRole, swarmID } = deriveSwarmIdentity(args.lane.agent);
 	const swarmAgents = getSwarmAgents(swarmID);
 	// Issue #2614 defense-in-depth: when the generated-name registry proves the
 	// lane agent is NOT registered (non-empty registry, no member match) and the
@@ -4774,11 +4766,21 @@ async function startAsyncLanePrompt(args: {
 		!registry.some(
 			(name) => name.toLowerCase() === args.lane.agent.toLowerCase(),
 		);
+	// Issue #3617 review F-05: a PREFIXED spelling whose swarm id no
+	// longer resolves (deriveSwarmIdentity fail-closed, e.g. the
+	// hyphen form 'acme-prod-coder') must refuse even when the
+	// DEFAULT swarm has a matching entry — base refused it because
+	// its derived swarm id did not exist, and launching against the
+	// default-swarm entry would run an agent name the host does not
+	// have. Bare roles (baseRole === raw) keep the legacy path.
+	const prefixedUnresolvable =
+		baseRole !== args.lane.agent && swarmID === undefined;
 	if (
 		registryProvesUnregistered &&
-		!swarmAgents?.[baseRole] &&
-		!lanePrimaryModel &&
-		laneFallbackModels.length === 0
+		(prefixedUnresolvable ||
+			(!swarmAgents?.[baseRole] &&
+				!lanePrimaryModel &&
+				laneFallbackModels.length === 0))
 	) {
 		await appendAsyncLaneLaunchError(
 			args.directory,
@@ -5734,11 +5736,7 @@ async function runLane(
 				return null;
 			});
 		lifecycleRecordPromise = lifecycleRecordPromiseInner;
-		const baseRole = stripKnownSwarmPrefix(lane.agent);
-		const swarmID =
-			baseRole !== lane.agent
-				? lane.agent.slice(0, lane.agent.length - baseRole.length - 1)
-				: undefined;
+		const { role: baseRole, swarmID } = deriveSwarmIdentity(lane.agent);
 		const swarmAgents = getSwarmAgents(swarmID);
 		const dispatched = await dispatchWithModelFallback({
 			dispatch: async (model, context) => {

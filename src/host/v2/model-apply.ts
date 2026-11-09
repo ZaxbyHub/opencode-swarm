@@ -9,11 +9,13 @@
  * (src/host/v2/agents-commands.ts registers through the same primitive), so
  * the apply re-invokes the stored transform surface at advance time.
  *
- * KEYING CONTRACT (plan-critic round 2): the v2 AgentEditor is keyed by the
- * EXACT REGISTERED agent name (multi-swarm configs register `local_coder`
- * etc.), and `editor.update(id, fn)` is create-or-update — callers MUST pass
- * the registration key (`routeModel.exactAgentName`), never the bare
- * prefix-stripped role, or a phantom bare-name agent would be created.
+ * KEYING CONTRACT (plan-critic round 2; #3617 review PRR-001 refinement): the
+ * v2 AgentEditor is keyed by the EXACT REGISTERED agent name (multi-swarm
+ * configs register `local_coder` etc.), and `editor.update(id, fn)` is
+ * create-or-update — callers MUST pass the RESOLVED REGISTERED roster key
+ * (exact spelling first; a case-insensitive match only when unique; ambiguous
+ * case-collisions skipped), never the bare prefix-stripped role or an
+ * unverified raw spelling, or a phantom/wrong-target agent would be created.
  *
  * Everything here is fail-open: with no registered surface (v1 hosts, or a v2
  * host without the agent domain) the apply is a logged no-op.

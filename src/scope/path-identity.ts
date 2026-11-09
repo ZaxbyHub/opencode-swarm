@@ -131,3 +131,78 @@ export function sanitizeDiagnosticText(
 	if (rendered.length <= maxLength) return rendered;
 	return `${rendered.slice(0, Math.max(0, maxLength - 1))}…`;
 }
+
+/**
+ * Best-effort path redaction for diagnostics and audit logs (#3587: moved
+ * here from src/hooks/guardrails/audit-log.ts so lower-level consumers —
+ * notably the file-authority reason builder — can fold home/profile prefixes
+ * without importing the audit subsystem; audit-log re-exports it unchanged).
+ *
+ * Replaces leading home/profile segments with a tilde placeholder so absolute
+ * paths do not leak user-specific directory names (POSIX `/home/<name>`,
+ * macOS `/Users/<name>`, Windows drive profiles `C:\Users\<name>`
+ * case-insensitive, and UNC profile shares).
+ *
+ * This is intentionally minimal on non-home paths — ordinary project paths
+ * are diagnostic content and are preserved (over-redaction guards pin it).
+ */
+export function redactPath(filePath: string): string {
+	// Non-strings can never be safely redacted — coerce to the empty string
+	// instead of passing them through (issue #2040 reviewer round R2: the old
+	// passthrough let an unredacted non-string value reach disk silently).
+	if (typeof filePath !== 'string') return '';
+	if (filePath.length === 0) return filePath;
+
+	// #3587 review round: profile classification is LEXICAL on a canonical
+	// slash-normalized form, so (a) normalization-created home shapes
+	// (`/tmp/../home/<name>/x`) fold, (b) the exact profile root folds
+	// (trailing component optional), and (c) Windows-drive and UNC forms fold
+	// in either separator flavor on ANY host — matchability no longer depends
+	// on the host path module's flavor. A redacted output keeps the input's
+	// separator flavor (and the old Windows branch's `~\\rest` double
+	// separator is gone); a NON-profile path returns the exact pre-change
+	// host-normalized form, so audit/log shapes for ordinary paths do not
+	// drift.
+	const hadBackslash = filePath.includes('\\');
+	const slashForm = filePath.replace(/\\/g, '/');
+	// posix.normalize collapses a leading `//`, so keep the UNC root marker
+	// out of normalization and re-attach it.
+	const normalized = /^\/\/[^/]/.test(slashForm)
+		? `/${path.posix.normalize(slashForm.slice(1))}`
+		: path.posix.normalize(slashForm);
+
+	// POSIX/mac home (root or descendant): /home/<name>[/<rest>] -> ~/<rest>
+	const homeMatch = normalized.match(/^\/(?:home|Users)\/[^/]+((?:\/.*)?)$/);
+	if (homeMatch) {
+		return renderRedacted(`~${homeMatch[1] ?? ''}`, hadBackslash);
+	}
+
+	// Windows profile in either flavor (case-insensitive Users):
+	// <drive>:/(Users|home)/<name>[/<rest>] -> ~/<rest>
+	const driveMatch = normalized.match(
+		/^[A-Za-z]:\/(?:[Uu][Ss][Ee][Rr][Ss]|home)\/[^/]+((?:\/.*)?)$/i,
+	);
+	if (driveMatch) {
+		return renderRedacted(`~${driveMatch[1] ?? ''}`, hadBackslash);
+	}
+
+	// Windows UNC: //<server>/<share>/<name>[/<rest>] -> ~\<share>\<name>\<rest>
+	// (server folded, per the F-004 contract; a profile-shaped share folds the
+	// account segment too: \\server\Users\alice\x -> ~\x).
+	const uncMatch = normalized.match(/^\/\/[^/]+\/([^/]+)\/([^/]+)((?:\/.*)?)$/);
+	if (uncMatch) {
+		const [, share, name, rest = ''] = uncMatch;
+		// Windows share naming is case-insensitive.
+		if (/^(?:users|home)$/i.test(share)) {
+			return renderRedacted(`~${rest}`, hadBackslash);
+		}
+		return renderRedacted(`~/${share}/${name}${rest}`, hadBackslash);
+	}
+
+	return path.normalize(filePath);
+}
+
+/** Emit a folded path in the input's separator flavor. */
+function renderRedacted(display: string, hadBackslash: boolean): string {
+	return hadBackslash ? display.replace(/\//g, '\\') : display;
+}

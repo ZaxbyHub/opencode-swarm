@@ -122,9 +122,19 @@ describe('detectPosixWrites: which rmdir operands carry the tag', () => {
 		]);
 	});
 
-	it('demotes a repeated operand, with or without a cd between them', () => {
-		expect(tagged('rmdir a; rmdir a')).toEqual([['a', false]]);
-		expect(tagged('rmdir a; cd ../o && rmdir a')).toEqual([['a', false]]);
+	it('demotes EVERY occurrence of a repeated operand, with or without a cd between them', () => {
+		// #3518 P-4: duplicate occurrences survive per-occurrence (suffixed
+		// operator) so each is judged at its own cwd — and the #3456 demotion
+		// defense applies to every survivor of a colliding key (a repeated
+		// operand may run under different working directories).
+		expect(tagged('rmdir a; rmdir a')).toEqual([
+			['a', false],
+			['a', false],
+		]);
+		expect(tagged('rmdir a; cd ../o && rmdir a')).toEqual([
+			['a', false],
+			['a', false],
+		]);
 	});
 
 	it('keeps an untagged write when rmdir -p shares the operand (either order)', () => {

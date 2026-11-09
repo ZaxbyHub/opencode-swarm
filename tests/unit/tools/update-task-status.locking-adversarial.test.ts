@@ -10,7 +10,6 @@
  * 5. Concurrent lock isolation between different tasks
  * 6. Path traversal in lock file names
  */
-
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -635,9 +634,10 @@ describe('update-task-status ADVERSARIAL LOCKING security tests', () => {
 			expect(result2.acquired).toBe(true);
 
 			const locksDir = path.join(tempDir, '.swarm', 'locks');
+			// #2967: artifacts are `.lck` files.
 			const lockFiles = fs
 				.readdirSync(locksDir)
-				.filter((f) => f.endsWith('.lock'));
+				.filter((f) => f.endsWith('.lck'));
 
 			// Should have two different lock files
 			expect(lockFiles.length).toBeGreaterThanOrEqual(2);

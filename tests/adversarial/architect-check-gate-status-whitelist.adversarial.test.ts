@@ -152,7 +152,7 @@ describe('ADVERSARIAL: Architect whitelist check_gate_status', () => {
 			expect(AGENT_TOOL_MAP['test_engineer']).toEqual(expected);
 		});
 
-		it('reviewer should retain expected 22 tools', () => {
+		it('reviewer should retain expected 23 tools', () => {
 			const expected = [
 				'diff',
 				'diff_summary',
@@ -164,6 +164,8 @@ describe('ADVERSARIAL: Architect whitelist check_gate_status', () => {
 				'pre_check_batch',
 				'symbols',
 				'complexity_hotspots',
+				// #2968/#2970: portable verification receipts (emit + --verify)
+				'receipt',
 				'pkg_audit',
 				'test_runner',
 				'test_impact',

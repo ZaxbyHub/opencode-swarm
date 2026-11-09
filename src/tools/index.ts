@@ -85,6 +85,7 @@ export {
 	quality_budget,
 	qualityBudget,
 } from './quality-budget';
+export { receipt } from './receipt';
 export {
 	executeRecordDirectiveOverride,
 	record_directive_override,

@@ -172,7 +172,7 @@ its own. `swarm_internals_read_denied` records a read/glob/grep/bash call that
 targeted the installed plugin package; its `target` field is relative to the
 package root, never an absolute user path.
 
-**Parallel foundation:** `evidence_lock_acquired`, `evidence_lock_contended`, `plan_ledger_cas_retry`
+**Parallel foundation:** `evidence_lock_acquired`, `evidence_lock_contended`, `evidence_lock_stale_recovered`, `store_lock_stale_broken`, `plan_ledger_cas_retry`
 
 **PRM:** `prm_pattern_detected`, `prm_course_correction_injected`, `prm_escalation_triggered`, `prm_hard_stop`, `prm_hard_stop_delivered`, `prm_hard_stop_terminal`
 
@@ -433,3 +433,79 @@ Per-task: `hasReview`, `hasTest`, `hasApproval`, `missingEvidence[]`, `isComplet
 - [Commands Reference](commands.md) — `/swarm evidence`, `/swarm archive`, `/swarm benchmark`
 - [Architecture Deep Dive](architecture.md) — how evidence flows through the pipeline
 - [Configuration](configuration.md) — `evidence.*` keys
+
+## Verification Receipts
+
+`/swarm receipt <task|phase> <id> [--export]` (and the `receipt` tool) emit a
+portable, hash-backed record of the durably recorded gate outcomes for a
+task or phase: bounded gate records (id, outcome, code, responsible actor,
+evidence refs — never raw command output), the snapshot hashes the gates
+were evaluated against, and content-hashed artifact refs. A gate that ran
+but left no durable record is absent from the receipt (nothing is
+reconstructed), so the receipt attests the durable state, not an
+execution trace. Task-kind gate outcomes derive from the durable entry via
+the shared `src/evidence/gate-outcome.ts` derivation (#3560):
+verdict-bearing records reflect the recorded verdict (`APPROVE`→`pass`,
+`REJECT`→`block`, `CONCERNS`→`pass`+`code` — durable CONCERNS is the
+task-level advisory form; a PRESENT verdict that is not one of those
+recognized strings — including a non-string value — yields `error`, so a
+malformed or future-vocabulary verdict can only degrade toward scrutiny,
+never improve to pass), while
+presence-only records (pre_check/reviewer/test_engineer/critic family)
+attest pass-on-presence honestly by producer contract — those writers
+record only on positive settlement and failure DELETES the key. The
+limitation that follows: absence cannot distinguish "gate never ran" from
+"gate ran and failed (record deleted)"; failure detail lives in
+`workflow.lastOutcome`/`retryHistory` (capped, lossy) and is intentionally
+not derived into gate rows. An empty `gates` map yields a `task_evidence`
+row with `not_applicable` — or `pass`+`code:'no_mutation_settlement'` ONLY
+when the canonical `isDurableNoMutationSettlement` predicate holds
+(authoritative generation-0 idle/complete workflow with a bound proof); a
+marker merely retained through a blocked/closed transition does not
+qualify — never a fabricated pass. The evidence-summary bridge shares the
+same derivation and reports the RECORDED verdict (`rejected`/`approved`/
+`warn`/`fail`/`pass`, with the recorded token in the entry summary and
+`durable_verdict` metadata), so a REJECT stays distinguishable from a
+malformed verdict and no surface collapses a durable failure into a pass.
+Receipt outcome rows attest the RECORDED verdict only — council quorum
+adequacy, identity-digest validity, and workflow freshness are adjudicated
+by the task-completion gate and the state-rehydration path, so a record the
+platform would refuse still renders as its recorded verdict (#3561
+disclosure). Every dynamic cell of the rendered receipt Markdown is
+escaped (`|`, CR/LF) so durable bytes cannot forge a table row absent from
+the hash-bound receipt.json (#3561 FB-003).
+Receipts are stored
+under `.swarm/evidence/receipts/` as JSON plus rendered Markdown;
+`--export` writes a self-contained bundle (receipt + Markdown + byte-copies
+of every cited artifact) under
+`.swarm/plan-export/receipt-<kind>-<id>-<shorthash>/`.
+
+`/swarm receipt --verify <bundle>` re-checks the receipt hash and every
+artifact digest on any machine — including a fresh clone with no `.swarm/`
+state — and exits nonzero on any mismatch with a typed failure
+(`corrupt_json`, `unsupported_format_version`, `schema_mismatch`,
+`receipt_hash_mismatch`, `missing_artifact`, `digest_mismatch`,
+`path_escape`). Verify performs zero writes and touches nothing but the
+bundle. This is internal-consistency proof (contents vs their own recorded
+hashes, with persisted gate-report digests RE-DERIVED from the bundled
+bytes, FB-004) that reviewers can attach to a PR — not external
+attestation: a forger who recomputes every digest consistently needs an
+out-of-band capture-time anchor, a documented follow-up.
+
+Capture is best-effort: a phase's bounded gate report is durably captured at
+the successful commit boundary, fail-open to phase completion (a receipt
+failure never fails a phase whose gates passed). Phases completed before
+this feature have no persisted report and produce a clear error — there is
+no historical backfill.
+
+Documented limitations: hash-only integrity is spoofable by a determined
+local actor or a recomputing model (integrity against the model covers
+lazy falsification — stale digests are detected by re-derivation — not
+full recomputation); receipt JSON and verify output carry digests and
+identifiers (gate id, outcome, code, actor, relative paths) but never raw
+command output, while an exported bundle CONTAINS the cited evidence
+artifacts bytes; absent `command`/`exit_code`/`output_digest` fields mean
+no durable producer recorded them (omitted, never reconstructed); path
+normalization is byte-exact forward-slashing without case-folding;
+exported plan-export bundles are reaped at `/swarm close` (the retention
+registry's keyspaceBound reaper for the `verification-receipts` stream).
