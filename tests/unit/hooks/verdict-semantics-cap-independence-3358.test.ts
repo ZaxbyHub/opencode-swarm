@@ -41,9 +41,15 @@ const CONFIRMED_NONE_TEXT = ITEM_IDS.map(
 		`[REVIEWED] | ${itemId} | CONFIRMED | STATIC_TRACE_PROVEN | NONE | YES | file.ts:1 | rationale ${itemId} | probe ${itemId} | reviewer | UNKNOWN | `,
 ).join('\n');
 
-/** Saturate the shared composition-diagnostic budget with unrelated noise. */
+/**
+ * Saturate the shared composition-diagnostic budget (16 entries) with
+ * unrelated noise: each newer batch carries one DISTINCT unassigned verdict
+ * row, and every such lane contributes its own "contains an unassigned
+ * verdict row" diagnostic. Eighteen lanes exceed the cap, evicting the
+ * per-lane semantics convenience diagnostic from the capped channel.
+ */
 async function saturateDiagnostics(): Promise<void> {
-	for (let i = 0; i < 20; i += 1) {
+	for (let i = 0; i < 18; i += 1) {
 		const batchId = `noise-${i}`;
 		await recordPrReviewValidationBatch(
 			tempDir,
@@ -52,10 +58,8 @@ async function saturateDiagnostics(): Promise<void> {
 			lanes,
 			{ batchId, prHeadSha: HEAD_SHA },
 		);
-		// A batch whose lane declares items but produces an artifact WITHOUT
-		// rows contributes the obligation diagnostic without touching claims.
 		await persistBatch(batchId, 'swarm-pr-review:reviewer', lanes, {
-			textOverride: '(lane produced no verdict rows)',
+			textOverride: `[REVIEWED] | noise-${i} | CONFIRMED | STATIC_TRACE_PROVEN | HIGH | YES | file.ts:1 | rationale noise ${i} | probe noise ${i} | reviewer | UNKNOWN | `,
 		});
 	}
 }
@@ -93,14 +97,16 @@ describe('semantics-mismatch disclosure cap independence (#3358 AC4, plan R4)', 
 			SESSION_ID,
 			'reviewer',
 		);
-		// Unrelated noise occupies the shared diagnostic channel (the fixture
-		// dedupes noise shapes to 2 entries; the literal 16-cap cannot be
-		// saturated through these fixtures). The guarantee under test is that
-		// the dedicated clause is composed DIRECTLY into the settlement throw
-		// — never routed through the capped channel — so budget pressure of
-		// any size cannot suppress it:
-		expect(composed.diagnostics.length).toBeGreaterThanOrEqual(1);
-		// ...while the structured field carries the complete mismatch set.
+		// The shared 16-entry diagnostic budget is saturated (18 distinct
+		// unassigned-row lanes) and the per-lane semantics CONVENIENCE
+		// diagnostic has been evicted by that pressure...
+		expect(composed.diagnostics.length).toBe(16);
+		expect(
+			composed.diagnostics.some((entry) =>
+				/earlier verdict semantics/.test(entry),
+			),
+		).toBe(false);
+		// ...yet the structured field still carries the complete mismatch set.
 		expect(composed.semanticsMismatchedItemIds).toEqual(ITEM_IDS);
 		let message = '(settlement unexpectedly admitted)';
 		try {
@@ -114,7 +120,7 @@ describe('semantics-mismatch disclosure cap independence (#3358 AC4, plan R4)', 
 		expect(settlementReceipts()).toEqual([]);
 	});
 
-	test('the message bounds at 16 ids with "and N more" while the structured field carries all', async () => {
+	test('the message names every mismatched id with the dedicated clause (6-id inventory: no overflow)', async () => {
 		await establishReviewPrerequisites();
 		await recordPrReviewValidationBatch(
 			tempDir,
@@ -139,14 +145,17 @@ describe('semantics-mismatch disclosure cap independence (#3358 AC4, plan R4)', 
 		} catch (error) {
 			message = error instanceof Error ? error.message : String(error);
 		}
-		// MAX_SEMANTICS_MISMATCH_IDS_IN_MESSAGE = 16: with only 6 base-dimension
-		// items in play, no overflow suffix appears; assert the bound directly
-		// by checking every mismatched id is named and the count matches the
-		// structured field (the overflow branch is exercised by the bound const
-		// itself, asserted via the absence of truncation here).
+		// The required inventory here is the six fixed base dimensions, so the
+		// 16-id display bound cannot overflow in this fixture; what this leg
+		// pins is that the DEDICATED clause (not the generic path) names every
+		// mismatched id — the guard-specific marker that the M2 mutant loses.
+		expect(message).toContain('N-of-M settlement is not attempted');
 		for (const itemId of ITEM_IDS) {
 			expect(message).toContain(itemId);
 		}
 		expect(message.match(/and \d+ more/)).toBeNull();
+		// Unmet-by-fixture plan case, disclosed: the "and N more" overflow
+		// suffix needs a >16-item required inventory; the gate's reviewer
+		// inventory is exactly the six base dimensions in these fixtures.
 	});
 });
