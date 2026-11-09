@@ -46,8 +46,10 @@ import {
 import {
 	CRITIC_MEMORY_OUTCOME_GUIDANCE,
 	type CriticRole,
+	clearCriticPromptProvenance,
 	createCriticAgent,
 	createCriticAutonomousOversightAgent,
+	recordCriticPromptProvenance,
 } from './critic';
 import { type CuratorRole, createCuratorAgent } from './curator-agent';
 import { createDesignerAgent } from './designer';
@@ -618,6 +620,12 @@ If you call @coder instead of @${swarmId}_coder, the call will FAIL or go to the
 			pluginConfig?.memory?.enabled === true,
 		);
 		critic.name = prefixName('critic');
+		// #3358 AC3: PR critic-lane admission reads this registration-time
+		// record instead of re-reading the prompts directory on dispatch.
+		recordCriticPromptProvenance(critic.name, {
+			replaced: criticPrompts.prompt !== undefined,
+			appended: criticPrompts.appendPrompt !== undefined,
+		});
 		agents.push(applyOverrides(critic, swarmAgents, swarmPrefix, quiet));
 	}
 
@@ -986,6 +994,8 @@ export function createAgents(
 	// Clear the gated-agent advisory dedupe set at entry. Tests call createAgents
 	// repeatedly and need isolation; plugin init calls it twice (see note above).
 	_emittedGatedAgentAdvisories.clear();
+	// #3358 AC3: critic prompt provenance is rebuilt with the agent registry.
+	clearCriticPromptProvenance();
 	// Config may be reloaded in-process. Do not retain swarm entries which are
 	// absent from the new configuration (and make test resets deterministic).
 	_swarmAgentsMap.clear();

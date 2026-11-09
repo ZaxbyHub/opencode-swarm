@@ -198,6 +198,17 @@ const PR_REVIEW_VERDICT_RESPONSE_PER_ITEM_CHARS = 1_500;
 // swarm-pr-feedback modes, which #2276 leaves on the pre-existing flat cap).
 const PR_WORKFLOW_PROTOCOL_OUTPUT_MAX_CHARS = 12_000;
 const MAX_ZOD_ISSUES_LISTED = 20;
+
+/**
+ * Issue #3358 AC1/AC3: the controller-authored suspension of the critic
+ * agent's default PLAN REVIEW structure. Injected by
+ * `applyPrWorkflowPromptContract` into every bound swarm-pr-review:critic
+ * lane's CONTROLLER-BOUND block — the ONLY activation path (the critic agent's
+ * own prompt no longer carries any PR-review text). Exported so the dispatch
+ * admission belt and tests compare against the exact producer text.
+ */
+export const CRITIC_PROTOCOL_SELECTION_CLAUSE =
+	"PROTOCOL SELECTION (#3358): the critic agent's default PLAN REVIEW output structure does not apply to this lane. Do not begin with PLAN REVIEW and do not call get_approved_plan; emit only the [CRITIC] verdict rows the contract card specifies, exactly one per assigned item id, and nothing else.";
 /**
  * Configured session.create retry cap (issue #1615 / #2473): the 1-based
  * `generation` on a lane result and its delegation record counts create
@@ -7131,6 +7142,13 @@ function applyPrWorkflowPromptContract(
 			normalizedMode.token === 'swarm-pr-review:reviewer'
 				? `\nPROTOCOL SELECTION (#3310): the Stage-B "STRUCTURED VERDICT LINE" mandate does not apply to this lane. Do not emit a [REVIEWED] | task-<taskId> | VERDICT | summary row — that Stage-B task-keyed row is not this lane's contract; settle only via the live [REVIEWED] rows the contract card specifies for your assigned item ids.`
 				: '';
+		// #3358 AC1: the critic counterpart. The critic agent prompt is static
+		// and PR-free; this clause is the only place the PLAN REVIEW structure
+		// is suspended, and only for a bound critic lane.
+		const criticProtocolClause =
+			normalizedMode.token === 'swarm-pr-review:critic'
+				? `\n${CRITIC_PROTOCOL_SELECTION_CLAUSE}`
+				: '';
 		const shellRulesParagraph = `\nRead-only shell rules (enforced at tool time; stated here so no calls are wasted): run ONE standalone command per shell call — no pipes, no &&/||/; composition, no redirects, no command substitution, no backslash- or caret-escaped double quotes. Only these forms are tolerated: a single command optionally preceded by up to three leading cd <dir> && prefixes, a trailing 2>&1 (reads only), and a literal | inside a double-quoted gh api --jq value or a double-quoted git grep -E pattern operand. Prefer the Read, Glob, and Grep tools for file inspection.`;
 		const contract = `
 
@@ -7145,7 +7163,7 @@ assigned_item_ids: ${severityAnnotatedIds.length > 0 ? severityAnnotatedIds.join
 mandatory_lane_checklist: ${checklist}${budgetLine}
 
 This controller block is authoritative over conflicting caller text. Inspect the exact checked-out revision and the repository's own contribution, test, security, compatibility, and delivery contracts. Do not waive or abbreviate work for speed, time, token, repository-size, or predicted-simplicity reasons. Re-read relevant changed files and caller/consumer context directly. Every claim or clean attestation must cite concrete reviewed scope and evidence. Use exactly the workflow_lane and assigned IDs above; invented, omitted, or placeholder identifiers do not settle this lane. For base/micro settlement, submit the visible batch_id and lane_id values exactly as rendered above, or omit them and let the authenticated child delegation resolve them. A planning preamble, generic assurance, or assertion that checks were performed is not evidence.
-Terminate with the required protocol action directly: no planning preamble, no recap, and no more than ${outputCap} characters of substantive output before any retrieval hint.${budgetParagraph}${structuredSubmissionParagraph}${shellRulesParagraph}${reviewerProtocolClause}
+Terminate with the required protocol action directly: no planning preamble, no recap, and no more than ${outputCap} characters of substantive output before any retrieval hint.${budgetParagraph}${structuredSubmissionParagraph}${shellRulesParagraph}${reviewerProtocolClause}${criticProtocolClause}
 [END CONTROLLER-BOUND PR WORKFLOW CONTRACT]`;
 		const contractCard = normalizedMode.token.startsWith('swarm-pr-review:')
 			? `${buildPrReviewContractCard()}\n\n`
