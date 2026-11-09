@@ -166,8 +166,11 @@ describe('semantics-mismatch settlement guard scope (#3358 AC4, plan T2)', () =>
 		);
 		expect(composed.claims.has('C-1')).toBe(true);
 		expect(composed.unclaimed).toContain('C-0');
+		// The DEDICATED clause marker (guard-specific: the generic N-of-M path
+		// embeds composition diagnostics that also mention 'earlier verdict
+		// semantics', so the shared phrase alone would not discriminate).
 		await expect(
 			assertPrReviewValidationSettled(tempDir, SESSION_ID, 'reviewer'),
-		).rejects.toThrow(/earlier verdict semantics/);
+		).rejects.toThrow(/N-of-M settlement is not attempted/);
 	});
 });
