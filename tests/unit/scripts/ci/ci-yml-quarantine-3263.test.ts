@@ -202,7 +202,9 @@ describe('ci.yml integration — quarantine ledger entries for issue #3263 (this
 		// disposition against a reflexive "quarantine everything the
 		// issue lists" follow-up.
 		for (const ledger of ALL_LEDGER_PATHS) {
-			if (!existsSync(ledger)) continue;
+			// Every ledger must exist: a missing ledger would make this
+			// negative assertion pass vacuously.
+			expect(existsSync(ledger)).toBe(true);
 			expect(activeEntries(ledger)).not.toContain(path);
 		}
 	});
