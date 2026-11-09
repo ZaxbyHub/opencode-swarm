@@ -9,7 +9,10 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { resolveLocalNodeTool } from '../build/command-resolution';
-import type { IncrementalVerifyConfig } from '../config/schema';
+import {
+	type IncrementalVerifyConfig,
+	stripKnownSwarmPrefix,
+} from '../config/schema';
 import { getStoredInputArgs } from './guardrails/stored-input-args';
 import { isTaskToolId } from './normalize-tool-name';
 import { spawnAsync } from './spawn-helper';
@@ -189,14 +192,27 @@ export function createIncrementalVerifyHook(
 			const subagentType =
 				typeof args?.subagent_type === 'string' ? args.subagent_type : '';
 
-			// Normalise: extract the canonical role suffix from arbitrary,
-			// user-defined swarm IDs (e.g. 'banana_coder' or 'acme-prod_coder'
-			// → 'coder'). Swarm IDs are not predetermined — strip the leading
-			// user-defined prefix segment up to the first underscore.
-			const agentName = subagentType.replace(/^[^_]+_/, '');
+			// Normalise: derive the canonical role from the dispatched
+			// subagent type via the shared suffix-based extractor
+			// (getCanonicalAgentRole / stripKnownSwarmPrefix) — NOT a naive
+			// first-underscore split, which mis-normalizes underscore roles
+			// ('test_engineer' -> 'engineer') and double-prefixed names
+			// ('mega_local_test_engineer' -> 'local_test_engineer') and
+			// matches neither arm below (issue #3322; the #2960 defect
+			// class). The raw-name arm stays as an explicit compatibility
+			// leg for trigger entries spelled exactly as dispatched.
+			const agentName = stripKnownSwarmPrefix(subagentType);
+			// Issue #3617 review PRR-005/F-01: the pre-#3330 hook matched the
+			// naive prefix-stripped form ('acme_custom' -> 'custom'), so configs
+			// listing such non-canonical trigger entries silently stopped
+			// firing after the canonical-derivation swap. Keep that spelling
+			// as an explicit compatibility leg (naive by design, pinned by
+			// tests/unit/hooks/incremental-verify-negative-trigger.test.ts).
+			const baseCompatForm = subagentType.replace(/^[^_]+_/, '');
 			if (
 				!config.triggerAgents.includes(agentName) &&
-				!config.triggerAgents.includes(subagentType)
+				!config.triggerAgents.includes(subagentType) &&
+				!config.triggerAgents.includes(baseCompatForm)
 			) {
 				return;
 			}
