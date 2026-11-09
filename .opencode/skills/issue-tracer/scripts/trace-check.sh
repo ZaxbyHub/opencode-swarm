@@ -21,7 +21,7 @@ failed=0
 legacy=0
 trace_root_real=""
 
-usage() { echo "usage: trace-check.sh {tree-id|handshake|phase <phase> --slug <slug> [--trace-dir <dir>]|merge --slug <slug>}" >&2; exit 2; }
+usage() { echo "usage: trace-check.sh {tree-id|handshake|phase <phase> --slug <slug> [--trace-dir <dir>]|merge --slug <slug>|rebind --gate <gate> --reason <text> --slug <slug>}" >&2; exit 2; }
 valid_slug() { case "$1" in ''|*[!a-z0-9-]*) return 1;; *) return 0;; esac; }
 trim() { printf '%s' "$1" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'; }
 has_bad_control() {
@@ -349,6 +349,77 @@ artifact_identity_matches_gate() {
   fi
 }
 
+# Success iff a rebind-marked APPROVE row for the gate binds (commit, treeid)
+# with an artifact cell of `<artifact> rebind(<reason>)`, exactly the shape
+# `rebind` emits. An unmarked APPROVE row at the same coordinates does not
+# satisfy this - the rebind marker is what makes the head-drift event explicit.
+rebind_row_exists() {
+  local gate="$1" commit="$2" treeid="$3" artifact="$4" line g v c t a
+  trace_path_safe "$state" file || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in '|'*) ;; *) continue;; esac
+    IFS='|' read -r _ g v c t a _ <<EOF
+$line
+EOF
+    g="$(trim "$g")"; v="$(trim "$v")"; c="$(trim "$c")"; t="$(trim "$t")"; a="$(trim "${a:-}")"
+    [ "$g" = "$gate" ] || continue
+    [ "$v" = "APPROVE" ] || continue
+    [ "$c" = "$commit" ] || continue
+    [ "$t" = "$treeid" ] || continue
+    case "$a" in
+      "$artifact rebind("*) return 0 ;;
+    esac
+  done < <(state_lines)
+  return 1
+}
+
+# Phase 3 only: accept either the strict identity match or an explicit rebind
+# chain. Strict: the artifact's identity pair equals the current head/tree AND
+# an APPROVE row binds that pair. Rebind chain: the artifact's identity pair
+# equals a historical APPROVE row for the gate AND a rebind-marked APPROVE row
+# (emitted by `trace-check.sh rebind`, carrying `rebind(<reason>)`) binds the
+# current head/tree. Phases 4.5/4.6 deliberately keep the strict check; their
+# sanctioned drift path is a fresh delta-review artifact (06b/09b).
+artifact_identity_matches_gate_or_rebind() {
+  local file="$1" gate="$2" expected_commit="$3" expected_treeid="$4" artifact_prefix="$5"
+  artifact_identity "$file"
+  if [ "$ARTIFACT_COMMIT_COUNT" -ne 1 ] || [ "$ARTIFACT_TREE_COUNT" -ne 1 ] \
+    || [ -z "$ARTIFACT_COMMIT" ] || [ -z "$ARTIFACT_TREE" ]; then
+    rule_bad "artifact-identity-$gate" "expected exactly one reviewed-commit and one tree-id line"
+    return
+  fi
+  if [ "$ARTIFACT_COMMIT" = "$expected_commit" ] && [ "$ARTIFACT_TREE" = "$expected_treeid" ] \
+    && gate_row_exists "$gate" APPROVE "$expected_commit" "$expected_treeid"; then
+    rule_ok "artifact-identity-$gate"
+    return
+  fi
+  if gate_row_exists "$gate" APPROVE "$ARTIFACT_COMMIT" "$ARTIFACT_TREE" \
+    && rebind_row_exists "$gate" "$expected_commit" "$expected_treeid" "$artifact_prefix"; then
+    rule_ok "artifact-identity-$gate-rebind-chain"
+    return
+  fi
+  rule_bad "artifact-identity-$gate" "$(basename "$file") reviewed-commit/tree-id does not match the current $gate gate row"
+}
+
+# Parse the Gates table and set REBIND_COMMIT / REBIND_TREE / REBIND_ARTIFACT
+# from the LAST APPROVE row for the gate (return failure when none exists).
+gate_latest_approve_row() {
+  local gate="$1" line g v c t a found=0
+  trace_path_safe "$state" file || return 1
+  REBIND_COMMIT=""; REBIND_TREE=""; REBIND_ARTIFACT=""
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in '|'*) ;; *) continue;; esac
+    IFS='|' read -r _ g v c t a _ <<EOF
+$line
+EOF
+    g="$(trim "$g")"; v="$(trim "$v")"; c="$(trim "$c")"; t="$(trim "$t")"; a="$(trim "${a:-}")"
+    [ "$g" = "$gate" ] || continue
+    [ "$v" = "APPROVE" ] || continue
+    REBIND_COMMIT="$c"; REBIND_TREE="$t"; REBIND_ARTIFACT="$a"; found=1
+  done < <(state_lines)
+  [ "$found" -eq 1 ]
+}
+
 recurrence_justification_ok() {
   local file="$1"
   trace_path_safe "$file" file || return 1
@@ -617,7 +688,11 @@ phase3() {
   # frozen checkpoint-tree-id.
   head="$(git rev-parse HEAD)"; tid="$(tree_id)"
   state_gate plan-critic APPROVE "$head" "$tid"
-  artifact_identity_matches_gate "$trace/06-critic-review.md" plan-critic "$head" "$tid"
+  # Phase 3 is the one gate that may legitimately observe head drift after
+  # approval (implementation commits land after the plan critic approved at
+  # the pre-implementation head). Accept the explicit rebind chain there;
+  # phases 4.5/4.6 keep the strict artifact identity check.
+  artifact_identity_matches_gate_or_rebind "$trace/06-critic-review.md" plan-critic "$head" "$tid" "06-critic-review.md"
 }
 
 executable_ids() {
@@ -826,17 +901,56 @@ merge_check() {
   echo 'NOTE: human-enforced gate; this validator checks presence and binding only'
 }
 
+# Print (never write) the rebind gate row that re-binds a gate's existing
+# approval to the current HEAD/tree. trace-check.sh stays read-only: the
+# caller appends the printed row to state.md's "## Gates" table verbatim.
+# A rebind row is append-only bookkeeping for post-approval head drift (for
+# example, implementation commits landing after the plan-critic approval),
+# NOT a re-approval: it is valid only while the reviewed artifact (the plan)
+# is unchanged. If the reviewed artifact changed, run a fresh critic round
+# and record it in 06b-critic-recheck.md or the 09b delta artifact instead.
+rebind_emit() {
+  local head tid
+  if ! head="$(git rev-parse HEAD 2>/dev/null)"; then
+    echo "trace-check: rebind requires a commit on HEAD" >&2
+    return 1
+  fi
+  if ! tid="$(tree_id)"; then
+    echo "trace-check: rebind could not compute the working-tree identity" >&2
+    return 1
+  fi
+  gate_latest_approve_row "$gate" || { echo "trace-check: no $gate APPROVE row to rebind from" >&2; return 1; }
+  if ! is_hex "$REBIND_COMMIT" || ! is_hex "$REBIND_TREE" || [ -z "$REBIND_ARTIFACT" ]; then
+    echo "trace-check: latest $gate APPROVE row has no valid reviewed-commit/tree-id/artifact cells to rebind from" >&2
+    return 1
+  fi
+  if [ "$REBIND_COMMIT" = "$head" ] && [ "$REBIND_TREE" = "$tid" ]; then
+    echo "trace-check: the latest $gate APPROVE row already binds the current HEAD/tree; nothing to rebind" >&2
+    return 1
+  fi
+  printf '| %s | APPROVE | %s | %s | %s rebind(%s) |\n' "$gate" "$head" "$tid" "$REBIND_ARTIFACT" "$reason"
+  echo "rebind: append this row to state.md's Gates table verbatim" >&2
+  echo "rebind: bookkeeping for head drift, NOT a re-approval; if the reviewed artifact changed, run a fresh critic round instead" >&2
+}
+
 command="${1:-}"; shift || true
 case "$command" in
   tree-id) [ "$#" -eq 0 ] || usage; tree_id; exit $? ;;
   handshake) [ "$#" -eq 0 ] || usage; handshake; exit 0 ;;
   phase) phase="${1:-}"; shift || true; case "$phase" in 0|1|2|2.5|3|4|4.2|4.5|4.6|5) ;; *) usage;; esac ;;
   merge) phase="merge" ;;
+  rebind) phase="rebind" ;;
   *) usage ;;
 esac
-slug=""; trace=""
+slug=""; trace=""; gate=""; reason=""
 while [ "$#" -gt 0 ]; do
-  case "$1" in --slug) [ "$#" -ge 2 ] || usage; slug="$2"; shift 2;; --trace-dir) [ "$#" -ge 2 ] || usage; trace="$2"; shift 2;; *) usage;; esac
+  case "$1" in
+    --slug) [ "$#" -ge 2 ] || usage; slug="$2"; shift 2;;
+    --trace-dir) [ "$#" -ge 2 ] || usage; trace="$2"; shift 2;;
+    --gate) [ "$#" -ge 2 ] || usage; gate="$2"; shift 2;;
+    --reason) [ "$#" -ge 2 ] || usage; reason="$2"; shift 2;;
+    *) usage;;
+  esac
 done
 valid_slug "$slug" || { echo "trace-check: invalid slug" >&2; exit 2; }
 [ -n "$trace" ] || trace="$root/.agents/issue-traces/$slug"
@@ -891,6 +1005,19 @@ elif [ "$protocol_value" != "3.0.0" ]; then
   exit 1
 fi
 
+if [ "$command" = rebind ]; then
+  case "$gate" in plan-critic|implementation-review|final-critic) ;; *) echo "trace-check: rebind --gate must be plan-critic, implementation-review, or final-critic" >&2; exit 2;; esac
+  reason="$(trim "$reason")"
+  [ -n "$reason" ] || { echo "trace-check: rebind requires a non-empty --reason" >&2; exit 2; }
+  case "$reason" in *'|'*) echo "trace-check: rebind --reason cannot contain a pipe character (the row lands in a markdown table)" >&2; exit 2;; esac
+  has_bad_control "$reason" && { echo "trace-check: rebind --reason cannot contain control bytes" >&2; exit 2; }
+  if [ "${#reason}" -gt 120 ]; then
+    echo "trace-check: rebind --reason must be 120 characters or fewer" >&2
+    exit 2
+  fi
+  rebind_emit
+  exit $?
+fi
 if [ "$phase" = merge ]; then merge_check
 else
   if is_already_fixed && [ "$phase" != 0 ] && [ "$phase" != 1 ] && [ "$phase" != 2 ]; then

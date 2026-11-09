@@ -27,7 +27,7 @@ canonical workflow.
   tool but I'll try it anyway" is not acceptable for the one action in this
   skill that cannot be safely undone — surface to the user instead.
 - Do not soften Step 1's pre-flight gates or Step 3's pre-merge re-check —
-  this is the first skill in the repo authorized to execute a merge.
+  this skill executes a merge.
 - Load `../commit-pr/SKILL.md` before committing or pushing any fix, and
   `../../../.opencode/skills/ci-fix-monitor/SKILL.md` for
   failure-type-specific fix recipes, as the canonical's Composition section

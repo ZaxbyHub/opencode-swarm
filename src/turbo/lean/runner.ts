@@ -20,7 +20,7 @@ import { getSwarmAgents, resolveFallbackModel } from '../../agents/index';
 import { DEFAULT_LEAN_TURBO_CONFIG } from '../../config/constants';
 import type { Plan } from '../../config/plan-schema';
 import type { LeanTurboConfig } from '../../config/schema';
-import { stripKnownSwarmPrefix } from '../../config/schema';
+import { deriveSwarmIdentity } from '../../config/schema';
 import {
 	formatProviderMessageError,
 	readProviderMessageError,
@@ -1509,11 +1509,8 @@ export class LeanTurboRunner {
 		// coder fallback_model instead of failing the lane outright. Lane-level
 		// timeouts are NOT provider-transient and keep their existing fail-the-lane
 		// behavior (classified permanent below).
-		const coderBase = stripKnownSwarmPrefix(agent);
-		const coderSwarmId =
-			coderBase !== agent
-				? agent.slice(0, agent.length - coderBase.length - 1)
-				: undefined;
+		const { role: coderBase, swarmID: coderSwarmId } =
+			deriveSwarmIdentity(agent);
 		const coderSwarmAgents = getSwarmAgents(coderSwarmId);
 		let dispatchResult: LaneDispatchResult;
 		try {

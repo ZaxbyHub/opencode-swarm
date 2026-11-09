@@ -124,7 +124,9 @@ export interface WriteTarget {
 	 * itself carries `path: null` (the gate's dynamic-target block denies
 	 * it); this field lets that denial message render what the user
 	 * actually typed (`src/{a..e}`) instead of a brace-substituted branch
-	 * text the shell never received verbatim. Never set on any other write.
+	 * text the shell never received verbatim. Also set on a relative
+	 * `sudo -D … -e` target withdrawn as unresolved. Never set on any other
+	 * write.
 	 */
 	dynamicSourceWord?: string;
 	/**
@@ -423,6 +425,12 @@ const BUILTIN_WRITE_COMMANDS = new Set([
 	'truncate',
 	'unlink',
 	'rmdir',
+	// #3591 Fix 6a: `rm` joins through its own dedicated arm in
+	// detectBuiltinWrites (scope containment modeled on unlink/rmdir —
+	// every operand of a NON-destructive rm is a scope-checked write
+	// target; recursive/forced shapes emit nothing here and stay owned by
+	// the destructive arm, which the gate runs first).
+	'rm',
 	// #3568 parallel-review F-01: touch CREATES each named file (or updates
 	// its mtime) — every operand is a filesystem write and was previously
 	// invisible to both walks (`touch ../../esc` admitted at base too; the
@@ -2451,7 +2459,17 @@ export type LauncherWalkOutcome =
 			chdirTailIndex?: number;
 	  }
 	| { kind: 'benign' }
-	| { kind: 'edit'; editStartIndex: number }
+	| {
+			kind: 'edit';
+			editStartIndex: number;
+			/**
+			 * #3588 item 4 (Fix 5): sudo -D/--chdir operand captured when the
+			 * edit outcome was decided — RELATIVE edit targets resolve under it
+			 * (sudoedit re-bases them on the chdir directory; absolute targets
+			 * are unaffected and stay absolute).
+			 */
+			sudoChdir?: string;
+	  }
 	| { kind: 'interactive' }
 	| { kind: 'uncertain'; tailIndex: number };
 
@@ -2674,6 +2692,34 @@ function nestedTimeTail(
 	};
 }
 
+/**
+ * #3588 item 3 (Fix 4): under `-i`/`-s`, sudo runs the command words through
+ * the login shell as `shell -c "<words joined by spaces>"` — a tail word that
+ * carries whitespace or shell-operator structure AFTER quote removal is
+ * re-parsed as shell syntax by that join, which the static per-word walk
+ * cannot judge. Conservative deny on ANY such word of the execution tail
+ * (not only the first); genuinely plain multiword tails (`sudo -i make
+ * build`, every word a bare word) keep the per-word judged 'inner' outcome.
+ */
+function interactiveTailDeniesOnRejoin(
+	words: readonly string[],
+	startIndex: number,
+): boolean {
+	for (let w = startIndex; w < words.length; w += 1) {
+		const word = words[w];
+		if (word === undefined) break;
+		// Whitespace or an operator/quote character the re-joined string
+		// would read unquoted (a leading `#` starts a comment there too).
+		// PR #3615 feedback PRR-001: `$`, `{`, `}`, `,` are also rejoin-
+		// dangerous — parameter/brace expansion synthesizes word separators
+		// and operators at runtime (`touch${IFS}esc.txt`, `{rm,-rf,../outside}`)
+		// with NO literal operator in the word, so any expansion-bearing or
+		// brace-bearing tail word is unjudgeable here and fails closed.
+		if (/[\s;|&<>()`'"${},]/.test(word) || word.startsWith('#')) return true;
+	}
+	return false;
+}
+
 function walkSudoOptions(words: readonly string[]): LauncherWalkOutcome {
 	let i = 0;
 	let edit = false;
@@ -2695,7 +2741,11 @@ function walkSudoOptions(words: readonly string[]): LauncherWalkOutcome {
 			// or `sudo -e -- FILE` loses its write classification entirely.
 			if (edit) {
 				return i + 1 < words.length
-					? { kind: 'edit', editStartIndex: i + 1 }
+					? {
+							kind: 'edit',
+							editStartIndex: i + 1,
+							...(chdirDir !== undefined ? { sudoChdir: chdirDir } : {}),
+						}
 					: { kind: 'benign' };
 			}
 			if (i + 1 >= words.length) {
@@ -2713,6 +2763,12 @@ function walkSudoOptions(words: readonly string[]): LauncherWalkOutcome {
 			}
 			if (listMode) return { kind: 'benign' };
 			if (queryOther) return { kind: 'uncertain', tailIndex: i + 1 };
+			// #3588 item 3 (Fix 4): under -i/-s, a post-`--` tail word the
+			// login shell's `-c` rejoin would parse as shell structure is
+			// unjudgeable — deny as interactive instead of returning 'inner'.
+			if (interactive && interactiveTailDeniesOnRejoin(words, i + 1)) {
+				return { kind: 'interactive' };
+			}
 			// #3572 delta review: parse_args.c BLOCKS env consumption after
 			// the sentinel (got_end_of_args) — post-`--` VAR=value words are
 			// the literal command, so no assignment scan here.
@@ -2834,7 +2890,12 @@ function walkSudoOptions(words: readonly string[]): LauncherWalkOutcome {
 		// and resume getopt" — the post-assignment word may be an option or
 		// `--`), so an assignment here resumes the option loop; a real
 		// command word returns the walk outcome.
-		if (edit) return { kind: 'edit', editStartIndex: i };
+		if (edit)
+			return {
+				kind: 'edit',
+				editStartIndex: i,
+				...(chdirDir !== undefined ? { sudoChdir: chdirDir } : {}),
+			};
 		if (listMode) return { kind: 'benign' }; // -l [command]: lists privileges, never executes
 		if (queryOther)
 			// -v/-V/-K/-L with a trailing command: sudo(8)'s synopsis gives
@@ -2862,6 +2923,13 @@ function walkSudoOptions(words: readonly string[]): LauncherWalkOutcome {
 			// treating the next word as the command.
 			i = j;
 			continue;
+		}
+		// #3588 item 3 (Fix 4): under -i/-s, a tail word the login shell's
+		// `-c` rejoin would parse as shell structure is unjudgeable — deny as
+		// interactive instead of returning 'inner' (AC7's sanctioned deny
+		// leg; genuinely plain multiword tails keep the judged outcome).
+		if (interactive && interactiveTailDeniesOnRejoin(words, i)) {
+			return { kind: 'interactive' };
 		}
 		// #3572 delta-critic: a nested `time` inner word is the GNU binary
 		// (sudo execs directly, no shell) — surface its -o outcome.
@@ -3391,6 +3459,19 @@ function detectLauncherWrites(cmd: unknown): WriteTarget[] {
 		) {
 			const walk = walkLauncherOptions(name, suffix.slice(cursor), nameRaw);
 			if (walk?.kind === 'edit') {
+				// #3588 item 4 (Fix 5): sudoedit opens its operands against the
+				// INVOKING cwd; -D/--chdir only moves the editor's cwd (sudo
+				// 1.9.15p5: `cd /opt/ws; sudo -D /opt/other -e f` edits /opt/ws/f).
+				// Other sudo builds are unverified, so a RELATIVE operand under
+				// -D is withdrawn as unresolved rather than resolved at either
+				// directory. ABSOLUTE or drive-qualified operands name the same
+				// file under both models and are judged as written; TILDE-leading
+				// operands keep the dynamic-path marker and fail closed.
+				const chdirWithdraws = (operandPath: string): boolean =>
+					walk.sudoChdir !== undefined &&
+					operandPath !== '' &&
+					!isAbsolutePathSpelling(operandPath) &&
+					!operandPath.startsWith('~');
 				// sudo -e operands are EDIT TARGETS (write-class) — each one
 				// expands per-branch (bash hands sudo every expanded word);
 				// refusal classes land on the unconditional dynamic() path.
@@ -3402,11 +3483,19 @@ function detectLauncherWrites(cmd: unknown): WriteTarget[] {
 						suffixNodes[t],
 						operand,
 						0,
-						(path) => ({
-							category: 'launcher_write',
-							operator: 'sudo -e',
-							path,
-						}),
+						(branchPath) =>
+							chdirWithdraws(branchPath)
+								? {
+										category: 'launcher_write',
+										operator: 'sudo -e',
+										path: null,
+										dynamicSourceWord: branchPath,
+									}
+								: {
+										category: 'launcher_write',
+										operator: 'sudo -e',
+										path: branchPath,
+									},
 						() => ({
 							category: 'launcher_write',
 							operator: 'sudo -e',
@@ -3444,7 +3533,34 @@ function detectLauncherWrites(cmd: unknown): WriteTarget[] {
 					}),
 				);
 			}
-			return results; // launcher heads never nest another launcher
+			// #3588 item 1 (Fix 2): a launcher walk whose execution tail HEADS
+			// with another launcher hops one level deeper instead of stopping —
+			// `nice sudo time -o src/ok.txt true` previously returned here with
+			// no emission (the depth-1 `nestedTimeTail` probe only sees one
+			// level). Every hop consumes at least the tail head word, so the
+			// DETECTOR_UNWRAP_PARANOID_BOUND loop stays structurally
+			// terminating. All other outcome kinds (benign/interactive/
+			// uncertain/edit, or a non-launcher tail head) keep the return.
+			if (walk?.kind === 'inner') {
+				const tailWord = suffix[cursor + walk.innerIndex];
+				const tailBase = tailWord === undefined ? '' : basenameAnySep(tailWord);
+				if (
+					tailBase === 'sudo' ||
+					tailBase === 'time' ||
+					tailBase === 'nice' ||
+					tailBase === 'nohup'
+				) {
+					name = tailWord ?? null;
+					// Clear the stale raw launcher spelling — the deeper word
+					// has no trusted raw slice (walkLauncherOptions then
+					// selects the GNU-binary grammar for a bare `time`,
+					// which is the deny direction).
+					nameRaw = undefined;
+					cursor = cursor + walk.innerIndex + 1;
+					continue;
+				}
+			}
+			return results; // non-launcher tail (or a terminal outcome) — stop here
 		}
 		if (
 			base !== 'env' &&
@@ -3884,6 +4000,75 @@ function isHereDocMarker(node: unknown): node is BashHereDocMarker {
 }
 
 /** Detect builtin write commands: cp, mv, install, ln, truncate, dd. */
+/**
+ * #3591 (Fix 6, shared two-pass rm flag parse): GNU getopt permutation
+ * semantics for `rm` token lists — options may appear AFTER operands, so a
+ * leading-token-only flag read misses `rm foo -rf ../../outside`. Pass 1
+ * collects EVERY option token anywhere before the `--` separator and
+ * classifies the recursive/forced ones (`r`/`R`/`f`/`F` short-cluster
+ * members, exact `--recursive`/`--force` long options — GNU long-option
+ * abbreviations like `--rec` are a disclosed pre-existing residual); pass 2
+ * extracts every remaining token (non-option tokens before `--`, all tokens
+ * after it) as targets. `tokens` EXCLUDE the verb word. Shared by the
+ * detector's non-destructive rm arm (detectBuiltinWrites) and
+ * `dcExtractRecursiveRmTargets` so both layers classify identically.
+ */
+export function parseRmOptionTokens(tokens: readonly string[]): {
+	destructive: boolean;
+	targetIndices: number[];
+} {
+	// PR #3615 feedback PRR-002: both feeds into this parse are the
+	// quote-removed / escape-decoded words bash hands rm — the detector arm
+	// passes AST words (bash-parser quote removal) and dcExtractRecursiveRmTargets
+	// decodes its raw segment tokens at the boundary (dcDecodeShellWord). A
+	// quoted destructive flag (`rm "-rf" ../../outside`) and an escape-decoded
+	// one (`rm \-rf ../outside`) therefore classify identically on both
+	// layers; a word whose LITERAL text still starts with a dash here is a
+	// real option, and a word still carrying quote characters is a real
+	// filename character (bash quote removal is already done upstream).
+	// Fidelity bound: the boundary decode covers pair quotes and backslash
+	// escapes only — ANSI-C `$'…'` / locale `$"…"` words are NOT decoded
+	// (bash-parser rejects them, so the write gate's parse-error deny is
+	// the backstop for those spellings).
+	// Pass 1: option tokens anywhere before `--`, classified.
+	let destructive = false;
+	let separatorIndex = tokens.length;
+	for (let i = 0; i < tokens.length; i += 1) {
+		const token = tokens[i];
+		if (token === undefined) break;
+		if (token === '--') {
+			separatorIndex = i;
+			break;
+		}
+		if (!token.startsWith('-') || token === '-') continue;
+		if (token === '--recursive' || token === '--force') {
+			destructive = true;
+			continue;
+		}
+		if (!token.startsWith('--') && /[rRfF]/.test(token.slice(1))) {
+			destructive = true;
+		}
+	}
+	// Pass 2: the remaining tokens are targets. A bare `-` is an operand
+	// (stdin), never an option.
+	const targetIndices: number[] = [];
+	for (let i = 0; i < tokens.length; i += 1) {
+		const token = tokens[i];
+		if (token === undefined) break;
+		if (i === separatorIndex) continue;
+		if (
+			i < separatorIndex &&
+			token.startsWith('-') &&
+			token !== '-' &&
+			token !== '--'
+		) {
+			continue;
+		}
+		targetIndices.push(i);
+	}
+	return { destructive, targetIndices };
+}
+
 function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 	const results: WriteTarget[] = [];
 	const name = getCommandName(cmd);
@@ -4296,6 +4481,46 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 	}
 	const suffixWords = suffixWindowParts.rest;
 	const suffixNodes = suffixWindowAllNodes.slice(suffixWindowConsumed);
+
+	// #3591 Fix 6a: dedicated POSIX rm arm — scope containment modeled on
+	// the multi-operand rmdir arm (NOT the generic last-operand cp/mv
+	// destination arm): a NON-destructive rm (flagless, or non-destructive
+	// flags like -i/-I/-v/-d) deletes EVERY operand, so each literal
+	// non-option operand is emitted as its own scope-checked write target
+	// (pushExpandedDestination — braces expand per branch; `--` ends the
+	// option region per the shared two-pass parse, which also consumes
+	// GNU-permutation options after operands). A recursive/forced shape
+	// (any r/R/f/F cluster member or --recursive/--force, at ANY position)
+	// emits NOTHING here: the destructive arm (tool-before layer order —
+	// checkDestructiveCommand before checkShellWriteScope) owns flagged
+	// shapes and denies first, so the .swarm message pins and the
+	// extractor's flagless-null pin keep their current carriers.
+	if (lowerName === 'rm') {
+		const rmParse = parseRmOptionTokens(suffixWords);
+		if (rmParse.destructive) return results;
+		for (const idx of rmParse.targetIndices) {
+			const word = suffixWords[idx];
+			if (word === undefined || word === '') continue;
+			pushExpandedDestination(
+				results,
+				suffixNodes[idx],
+				word,
+				0,
+				(path) => ({
+					category: 'builtin_write',
+					operator: dedupeOperator,
+					path,
+				}),
+				() => ({
+					category: 'builtin_write',
+					operator: dedupeOperator,
+					path: null,
+					dynamicSourceWord: word,
+				}),
+			);
+		}
+		return results;
+	}
 
 	// A quoted, backslash-escaped or expanded operand (`"a"`, `a\b`, `$D`)
 	// never keeps this tag: detectPosixWrites withdraws it from any line that
@@ -8840,6 +9065,16 @@ function collectWritesWithNodes(
 	andSharedStack = true,
 	cdMode: 'gate' | 'gate-skip' | 'succeed' = 'gate',
 	functionsTable: Map<string, boolean>,
+	/**
+	 * #3586 Fix 1: whether the analyzed command contains ANY
+	 * dynamic-execution family member (eval/exec/source/./command/builtin/
+	 * trap/alias/unalias/shopt/set/history/fc/enable/mapfile/readarray) —
+	 * computed by a PRE-PASS over the full AST (see
+	 * {@link astHasDynamicExecutionFamily}) so LATER siblings count against
+	 * an EARLIER loop's arm-(a) exemption (an `eval`/`trap`/`alias` after
+	 * the loop can redefine `continue`/`break` behavior inside it).
+	 */
+	familyDynamic: boolean,
 ): void {
 	if (!node || typeof node !== 'object') return;
 
@@ -8862,6 +9097,7 @@ function collectWritesWithNodes(
 				cdMode,
 
 				functionsTable,
+				familyDynamic,
 			);
 		return;
 	}
@@ -8877,6 +9113,7 @@ function collectWritesWithNodes(
 						andSharedStack,
 						cdMode,
 						functionsTable,
+						familyDynamic,
 					);
 				}
 			}
@@ -8913,6 +9150,7 @@ function collectWritesWithNodes(
 					cdMode,
 
 					functionsTable,
+					familyDynamic,
 				);
 			}
 			break;
@@ -8937,6 +9175,7 @@ function collectWritesWithNodes(
 						andSharedStack,
 						cdMode,
 						functionsTable,
+						familyDynamic,
 					);
 				}
 			}
@@ -8953,6 +9192,7 @@ function collectWritesWithNodes(
 						andSharedStack,
 						cdMode,
 						functionsTable,
+						familyDynamic,
 					);
 				}
 			}
@@ -8981,6 +9221,7 @@ function collectWritesWithNodes(
 						cdMode,
 
 						functionsTable,
+						familyDynamic,
 					);
 					if (!directoryStatesEqual(componentState, state)) {
 						componentMutatedDirectory = true;
@@ -9037,6 +9278,7 @@ function collectWritesWithNodes(
 					andSharedStack,
 					cdMode,
 					functionsTable,
+					familyDynamic,
 				);
 				// Capture the COMPLETE state AFTER left has been processed (cd may
 				// have modified it).
@@ -9052,6 +9294,7 @@ function collectWritesWithNodes(
 							andSharedStack,
 							rightCdMode,
 							functionsTable,
+							familyDynamic,
 						);
 					} else if (isOr) {
 						// Two candidates: RIGHT SKIPPED (left succeeded — later
@@ -9072,6 +9315,7 @@ function collectWritesWithNodes(
 							cdMode,
 
 							functionsTable,
+							familyDynamic,
 						);
 						if (directoryStatesEqual(skipState, execState)) {
 							adoptDirectoryState(state, execState);
@@ -9086,6 +9330,7 @@ function collectWritesWithNodes(
 							andSharedStack,
 							rightCdMode,
 							functionsTable,
+							familyDynamic,
 						);
 						// #3530 dual-resolution: adopt the EXECUTION landing (and its
 						// withdrawal flag) into the pessimistic walk's state.
@@ -9112,6 +9357,7 @@ function collectWritesWithNodes(
 					andSharedStack,
 					cdMode,
 					functionsTable,
+					familyDynamic,
 				);
 				const leftState = cloneDirectoryState(state);
 				if (node.right) {
@@ -9124,6 +9370,7 @@ function collectWritesWithNodes(
 							andSharedStack,
 							rightCdMode,
 							functionsTable,
+							familyDynamic,
 						);
 					} else if (isOrType) {
 						// #3567 review PRR-012: two bash outcomes for `||` — right
@@ -9142,6 +9389,7 @@ function collectWritesWithNodes(
 							cdMode,
 
 							functionsTable,
+							familyDynamic,
 						);
 						if (directoryStatesEqual(skipState, execState)) {
 							adoptDirectoryState(state, execState);
@@ -9156,6 +9404,7 @@ function collectWritesWithNodes(
 							andSharedStack,
 							rightCdMode,
 							functionsTable,
+							familyDynamic,
 						);
 						if (cdMode === 'succeed') {
 							adoptDirectoryState(state, leftState);
@@ -9197,6 +9446,7 @@ function collectWritesWithNodes(
 					andSharedStack,
 					cdMode,
 					functionsTable,
+					familyDynamic,
 				);
 			}
 			// then/else each descend on a COPY from the post-clause state.
@@ -9211,6 +9461,7 @@ function collectWritesWithNodes(
 					cdMode,
 
 					functionsTable,
+					familyDynamic,
 				);
 				outcomes.push(thenState);
 			}
@@ -9224,6 +9475,7 @@ function collectWritesWithNodes(
 					cdMode,
 
 					functionsTable,
+					familyDynamic,
 				);
 				outcomes.push(elseState);
 			}
@@ -9261,6 +9513,29 @@ function collectWritesWithNodes(
 					}
 				}
 			}
+			// #3586 Fix 1: the loop-level redirects above apply ONCE at loop
+			// entry (bash applies the compound command's redirections before
+			// the first iteration), but every write collected from HERE on is
+			// iteration-carried — the clause re-executes per iteration in the
+			// current shell, so its writes are as loop-carried as body writes.
+			// Capture the slice start BEFORE the clause walk so a post-walk
+			// divergence can retroactively withdraw every write the loop
+			// collected (clause AND body): pushWriteWithState only sees the
+			// withdrawal flag AT PUSH TIME, and iteration 2+ runs at landing
+			// directories the single modeled pass never enumerated.
+			const sliceStart = out.length;
+			// #3586 Fix 1, review round 4.5 finding 2: the fixpoint compares
+			// against the loop's ENTRY state, snapshotted BEFORE the clause
+			// walk — the clause re-executes every iteration in the current
+			// shell, so a clause-resident cd drifts the per-iteration starting
+			// directory in a way a body-vs-post-clause comparison can never
+			// see (`cd src/sub; i=0; while cd ..; [ "$i" -lt 2 ]; do
+			// i=$((i+1)); echo x > f; done` — the body is idempotent against
+			// the POST-clause state, yet real bash writes src/f and then
+			// the escaping workspace-root f). One full iteration = clause AND
+			// body; the landing must equal the PRE-clause entry for
+			// idempotence.
+			const entryState = cloneDirectoryState(state);
 			// The clause runs (at least once) in the current shell — walk its
 			// effects on the parent state so body writes pair with the true
 			// first-iteration context.
@@ -9272,13 +9547,15 @@ function collectWritesWithNodes(
 					andSharedStack,
 					cdMode,
 					functionsTable,
+					familyDynamic,
 				);
 			}
 			if (node.do) {
 				// One full body iteration on a COPY: the loop's post-state is
-				// accepted ONLY on a full-state fixpoint (one-iteration landing
-				// equals the entry state — idempotent across iterations);
-				// anything else withdraws (v4 constraint 3).
+				// accepted ONLY on a full-state fixpoint (one full iteration —
+				// clause AND body — lands back at the loop's PRE-clause entry
+				// state, idempotent across iterations); anything else
+				// withdraws (v4 constraint 3).
 				const bodyState = cloneDirectoryState(state);
 				collectWritesWithNodes(
 					node.do,
@@ -9287,9 +9564,21 @@ function collectWritesWithNodes(
 					andSharedStack,
 					cdMode,
 					functionsTable,
+					familyDynamic,
 				);
-				if (!directoryStatesEqual(bodyState, state)) {
+				if (!directoryStatesEqual(bodyState, entryState)) {
 					state.withdrawn = true;
+					// #3586 Fix 1 (END-STATE after 14 plan-critic rounds): the
+					// landing ≠ the entry state, so the single modeled pass did
+					// NOT enumerate every directory a later iteration writes
+					// from. Withdraw the whole captured slice fail-closed —
+					// buildResolution nulls each unresolvedContext write and
+					// the gate denies. NO break-based exemption exists: the
+					// ambient environment (a BASH_ENV startup file or an
+					// exported BASH_FUNC_* definition) can redefine `break`
+					// entirely outside the analyzed command text, so no
+					// command-text condition on a break node is sound.
+					markWritesUnresolvedFrom(out, sliceStart);
 				}
 			}
 			break;
@@ -9303,6 +9592,9 @@ function collectWritesWithNodes(
 					}
 				}
 			}
+			// #3586 Fix 1: same slice capture as While/Until (a For has no
+			// clause — the capture starts at the body walk).
+			const sliceStart = out.length;
 			if (node.do) {
 				// Same fixpoint contract as While/Until (v4 constraint 3).
 				const bodyState = cloneDirectoryState(state);
@@ -9313,9 +9605,22 @@ function collectWritesWithNodes(
 					andSharedStack,
 					cdMode,
 					functionsTable,
+					familyDynamic,
 				);
 				if (!directoryStatesEqual(bodyState, state)) {
 					state.withdrawn = true;
+					// #3586 Fix 1 arm (a) — the SINGLE exemption: a For whose
+					// word list is ONE fully-literal word immune to every
+					// word-producing expansion, in a command with no
+					// dynamic-execution family member anywhere, expands to
+					// exactly ONE item — exactly one iteration runs and the
+					// single modeled pass enumerated every write the loop
+					// performs (ambient BASH_ENV/BASH_FUNC_* redefinition can
+					// change break/continue BEHAVIOR but cannot APPEND items
+					// to a literal one-word list — r12 execution).
+					if (!forWordListIsSingleLiteralWord(node) || familyDynamic) {
+						markWritesUnresolvedFrom(out, sliceStart);
+					}
 				}
 			}
 			break;
@@ -9346,6 +9651,7 @@ function collectWritesWithNodes(
 							cdMode,
 
 							functionsTable,
+							familyDynamic,
 						);
 						outcomes.push(bodyState);
 					}
@@ -9394,6 +9700,7 @@ function collectWritesWithNodes(
 					andSharedStack,
 					cdMode,
 					functionsTable,
+					familyDynamic,
 				);
 			}
 			break;
@@ -9491,6 +9798,124 @@ function collectWritesWithNodes(
 			break;
 		}
 	}
+}
+
+/**
+ * #3586 Fix 1: retroactively mark every write collected from `start` onward
+ * as `unresolvedContext` — the fail-closed sink for a loop whose one-pass
+ * landing diverged from its entry state (pushWriteWithState can only see the
+ * withdrawal flag at PUSH time; this closes the already-pushed slice the
+ * post-walk divergence retroactively invalidates). Idempotent per write.
+ */
+function markWritesUnresolvedFrom(out: WriteWithNode[], start: number): void {
+	for (let i = start; i < out.length; i += 1) {
+		const entry = out[i];
+		if (entry === undefined) continue;
+		if (entry.write.unresolvedContext !== true) {
+			entry.write = { ...entry.write, unresolvedContext: true };
+		}
+	}
+}
+
+/**
+ * #3586 Fix 1 arm (a): whether a For node's word list is a SINGLE word that
+ * is fully literal AND immune to every word-producing expansion — no
+ * unquoted glob characters (`*?[`), no tilde, no parameter/command/
+ * arithmetic expansion (the parser records those in expansion[]), no
+ * unquoted brace expansion, and no `!` character (history expansion can
+ * replace one literal word with several at runtime). Such a list expands to
+ * exactly one item, so the loop runs exactly one iteration. Fails closed on
+ * every doubt (multi-word lists, missing raw source text, empty words).
+ */
+function forWordListIsSingleLiteralWord(node: unknown): boolean {
+	const wordlist = (node as { wordlist?: unknown }).wordlist;
+	if (!Array.isArray(wordlist) || wordlist.length !== 1) return false;
+	const word = wordlist[0];
+	if (!word || typeof word !== 'object') return false;
+	// The parser records every parameter/command/arithmetic expansion on the
+	// word node — any entry can change the word's runtime value.
+	const expansion = (word as { expansion?: unknown }).expansion;
+	if (Array.isArray(expansion) && expansion.length > 0) return false;
+	const text = (word as { text?: unknown }).text;
+	if (typeof text !== 'string' || text === '') return false;
+	// PR #3615 feedback PRR-004: hasUnquotedBraceExpansion runs a quadratic
+	// regex over the raw word text, and a for-list word is attacker-controlled
+	// command text on the per-call hot path — cap the length and treat an
+	// oversized word as expansion-bearing (denies the exemption, fail closed)
+	// instead of feeding it to the quadratic scan.
+	if (text.length > 4096) return false;
+	// `!` anywhere (history expansion multiplies words when histexpand is on)
+	// and `~` anywhere (tilde expansion) both disqualify — conservative on
+	// the exemption, which is the deny direction.
+	if (text.includes('!') || text.includes('~')) return false;
+	// Unquoted glob characters and unquoted brace expansion both produce
+	// multiple items from one AST word; both helpers fail-safe (treat the
+	// word as expansion-bearing) when the raw source projection is missing.
+	if (hasUnquotedGlob(word)) return false;
+	if (hasUnquotedBraceExpansion(word, text)) return false;
+	return true;
+}
+
+/**
+ * #3586 Fix 1: the dynamic-execution family (plan-critic r5 set) — commands
+ * that can change how OTHER words in the same command string execute at
+ * runtime (redefining break/continue behavior, installing traps, expanding
+ * aliases, manufacturing words). Any member ANYWHERE in the analyzed command
+ * (including siblings visited AFTER a given loop — hence the pre-pass)
+ * disqualifies every For-loop arm-(a) exemption in that command.
+ */
+const DYNAMIC_EXECUTION_FAMILY = new Set([
+	'eval',
+	'exec',
+	'source',
+	'.',
+	'command',
+	'builtin',
+	'trap',
+	'alias',
+	'unalias',
+	'shopt',
+	'set',
+	'history',
+	'fc',
+	'enable',
+	'mapfile',
+	'readarray',
+]);
+
+/**
+ * #3586 Fix 1 PRE-PASS: walk the whole AST and report whether ANY Command
+ * node's canonicalized name (quote-removed word text, basename-normalized so
+ * path-qualified spellings like `/usr/bin/eval` count) is a
+ * dynamic-execution family member. Pure function of the AST — computed once
+ * per walk root and threaded through {@link collectWritesWithNodes}.
+ */
+function astHasDynamicExecutionFamily(root: unknown): boolean {
+	if (!root || typeof root !== 'object') return false;
+	const stack: unknown[] = [root];
+	while (stack.length > 0) {
+		const n = stack.pop();
+		if (!n || typeof n !== 'object') continue;
+		if ((n as { type?: unknown }).type === 'Command') {
+			const nameNode = (n as { name?: unknown }).name;
+			const nameText =
+				nameNode && typeof nameNode === 'object'
+					? (nameNode as { text?: unknown }).text
+					: undefined;
+			if (typeof nameText === 'string' && nameText !== '') {
+				const canonical = basenameAnySep(nameText);
+				if (DYNAMIC_EXECUTION_FAMILY.has(canonical)) return true;
+			}
+		}
+		for (const value of Object.values(n)) {
+			if (Array.isArray(value)) {
+				for (const item of value) stack.push(item);
+			} else if (value && typeof value === 'object') {
+				stack.push(value);
+			}
+		}
+	}
+	return false;
 }
 
 /**
@@ -9874,6 +10299,10 @@ export function resolveWriteTargets(
 	// command so function CALLS withdraw when their body moves directories.
 	const functionsTable = new Map<string, boolean>();
 	collectFunctionTransitions(ast, functionsTable);
+	// #3586 Fix 1: the dynamic-execution family PRE-PASS — one whole-AST scan
+	// before either walk, so later siblings count against an earlier loop's
+	// arm-(a) exemption (both walks consume the same flag).
+	const familyDynamic = astHasDynamicExecutionFamily(ast);
 	const trackedNodes: WriteWithNode[] = [];
 	collectWritesWithNodes(
 		ast as BashNode,
@@ -9889,6 +10318,7 @@ export function resolveWriteTargets(
 		true,
 		'gate',
 		functionsTable,
+		familyDynamic,
 	);
 	// A fresh state: the tracked walk MUTATES the state it is given, so the
 	// pessimistic pass must not inherit it.
@@ -9907,6 +10337,7 @@ export function resolveWriteTargets(
 		false,
 		'succeed',
 		functionsTable,
+		familyDynamic,
 	);
 
 	// Deduplicate walks the same way detectPosixWrites does — including the

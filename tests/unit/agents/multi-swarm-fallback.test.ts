@@ -1,30 +1,42 @@
 import { describe, expect, it } from 'bun:test';
 import {
 	createAgents,
-	extractSwarmIdFromAgentName,
 	getAgentConfigs,
 	getSwarmAgents,
 } from '../../../src/agents';
 import type { PluginConfig } from '../../../src/config';
-import { stripKnownSwarmPrefix } from '../../../src/config/schema';
+import {
+	deriveSwarmIdentity,
+	stripKnownSwarmPrefix,
+} from '../../../src/config/schema';
 
 describe('multi-swarm fallback model resolution', () => {
-	describe('extractSwarmIdFromAgentName', () => {
-		it('extracts swarm ID from prefixed agent name', () => {
-			expect(extractSwarmIdFromAgentName('local_coder')).toBe('local');
-			expect(extractSwarmIdFromAgentName('fast_architect')).toBe('fast');
-			expect(extractSwarmIdFromAgentName('precise_reviewer')).toBe('precise');
+	describe('deriveSwarmIdentity (retires the naive first-underscore helper)', () => {
+		it('derives the swarm ID from prefixed agent names (#3330)', () => {
+			expect(deriveSwarmIdentity('local_coder')).toEqual({
+				role: 'coder',
+				swarmID: 'local',
+			});
+			expect(deriveSwarmIdentity('fast_architect')).toEqual({
+				role: 'architect',
+				swarmID: 'fast',
+			});
+			expect(deriveSwarmIdentity('precise_reviewer')).toEqual({
+				role: 'reviewer',
+				swarmID: 'precise',
+			});
 		});
 
-		it('returns undefined for unprefixed agent name', () => {
-			expect(extractSwarmIdFromAgentName('coder')).toBeUndefined();
-			expect(extractSwarmIdFromAgentName('architect')).toBeUndefined();
+		it('resolves the default swarm for unprefixed agent names', () => {
+			expect(deriveSwarmIdentity('coder').swarmID).toBeUndefined();
+			expect(deriveSwarmIdentity('architect').swarmID).toBeUndefined();
 		});
 
-		it('handles edge cases', () => {
-			expect(extractSwarmIdFromAgentName('')).toBeUndefined();
-			expect(extractSwarmIdFromAgentName('_coder')).toBeUndefined();
-			expect(extractSwarmIdFromAgentName('a_b_c')).toBe('a');
+		it('handles edge cases with the guarded #3324 semantics', () => {
+			expect(deriveSwarmIdentity('').role).toBe('');
+			expect(deriveSwarmIdentity('_coder').swarmID).toBeUndefined();
+			// Case-carrying swarm ids keep their raw case.
+			expect(deriveSwarmIdentity('Case_coder').swarmID).toBe('Case');
 		});
 	});
 
