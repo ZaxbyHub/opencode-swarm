@@ -293,11 +293,15 @@ describe('issue #2614 — unregistered lane agents are refused at dispatch time'
 	test('deep gate: startAsyncLanePrompt refuses a provably-unregistered agent before promptAsync', async () => {
 		const directory = makeTempDir();
 		let promptAsyncCalled = false;
+		let createCalls = 0;
 		const ops = {
-			create: async () => ({
-				data: { id: 'session-2614-deep' },
-				error: undefined,
-			}),
+			create: async () => {
+				createCalls += 1;
+				return {
+					data: { id: 'session-2614-deep' },
+					error: undefined,
+				};
+			},
 			promptAsync: async () => {
 				promptAsyncCalled = true;
 				return { data: {}, error: undefined };
@@ -333,6 +337,9 @@ describe('issue #2614 — unregistered lane agents are refused at dispatch time'
 		});
 
 		expect(promptAsyncCalled).toBe(false);
+		// startAsyncLanePrompt takes an existing session id: a refusal must not
+		// touch the host at all (no session create, no prompt).
+		expect(createCalls).toBe(0);
 		const read = findByCorrelationIdDetailed(directory, 'session-2614-deep');
 		expect(read.status).not.toBe('uncertain');
 		const settled = read.value;
@@ -348,11 +355,15 @@ describe('issue #2614 — unregistered lane agents are refused at dispatch time'
 	test('F-05 deep gate: prefixed-unresolvable agent refuses even with a default-swarm entry', async () => {
 		const directory = makeTempDir();
 		let promptAsyncCalled = false;
+		let createCalls = 0;
 		const ops = {
-			create: async () => ({
-				data: { id: 'session-3617-f05' },
-				error: undefined,
-			}),
+			create: async () => {
+				createCalls += 1;
+				return {
+					data: { id: 'session-3617-f05' },
+					error: undefined,
+				};
+			},
 			promptAsync: async () => {
 				promptAsyncCalled = true;
 				return { data: {}, error: undefined };
@@ -398,6 +409,7 @@ describe('issue #2614 — unregistered lane agents are refused at dispatch time'
 				timeoutMs: 5_000,
 			});
 			expect(promptAsyncCalled).toBe(false);
+			expect(createCalls).toBe(0);
 			const read = findByCorrelationIdDetailed(directory, 'session-3617-f05');
 			expect(read.status).not.toBe('uncertain');
 			const settled = read.value;
