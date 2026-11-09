@@ -21,13 +21,15 @@
   `_internals` seam exposes the production composer for deterministic lifecycle tests.
 - **Phase-monitor no longer does session-keyed work on sessionless system-transform calls**
   (`src/hooks/phase-monitor.ts`, #3383): the hook ran `loadPlan` (which itself materializes
-  `.swarm/plan.md` and review receipts), invoked the curator delegate factory with
-  `sessionId === undefined`, ran curator init, and wrote `.swarm/curator-briefing.md` on calls with
+  `.swarm/plan.md` via its auto-heal path), invoked the curator delegate factory with
+  `sessionId === undefined`, ran curator init, and wrote `.swarm/curator-briefing.md` plus the
+  init review receipt (via `persistReviewReceipt`) on calls with
   no `sessionID` (title/summary/agent-generation surfaces). A falsy early-return guard
   (`if (!sessionId) return;`, mirroring the #3320 system-enhancer precedent — empty-string and null
   IDs are sessionless too) now precedes `loadPlan`. Session-bound behavior is unchanged.
 - Existing suites that pinned the sessionless behavior
   (`tests/unit/hooks/phase-monitor-curator.test.ts`, `tests/unit/hooks/phase-monitor.test.ts`,
+  `tests/unit/hooks/phase-monitor-architecture-summary.test.ts`,
   `tests/integration/phase-preflight-auto.test.ts`) were re-pinned with explicit session IDs,
   preserving their original curator/phase-transition coverage instead of flipping expectations.
 - New suites pin the contracts: frozen `instruction-pairing-identity`,
@@ -49,10 +51,14 @@ booted with knowledge disabled, so the producer was never exercised sessionlessl
 ## Verification
 
 - Frozen acceptance checks C1-C3 (checkpoint e53bbe1e, anchor published on both issues): all
-  RED at base e8223e308, GREEN at the fix head (replay via `repro/replay-all.sh`).
-- Supplementary lifecycle (8 legs) and falsy (2 legs) suites: DISCRIMINATING legs RED at base,
+  RED at base e8223e308, GREEN at the fix head (replay via `repro/replay-all.sh`; the C1/C2
+  frozen files were biome-formatted post-freeze in one disclosed CHECK_WRONG amendment wave —
+  the acceptance-table semantics digest was unchanged).
+- Supplementary lifecycle (8 legs) and falsy (3 legs, incl. the runtime-null sessionID leg)
+  suites: DISCRIMINATING legs RED at base,
   GREEN at head; PRESERVING legs GREEN both ends (L6 is GREEN at base AND head — base deletes
   unconditionally — its discriminator is the M7 per-run re-capture mutant, killed 10/10).
-- Re-pinned suites green: phase-monitor 7/7, phase-monitor-curator 17/17, phase-preflight-auto
+- Re-pinned suites green: phase-monitor 7/7, phase-monitor-curator 17/17,
+  phase-monitor-architecture-summary 2/2, phase-preflight-auto
   53/53; sibling suites green (instruction-pairing 6/6, memory command suites).
 - `bun run typecheck` clean; pinned `@biomejs/biome@2.3.14 ci` clean on all touched files.

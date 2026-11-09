@@ -85,6 +85,36 @@ describe('phase-monitor falsy sessionless guard (#3383 supplementary)', () => {
 		}
 	});
 
+	it('F3: a runtime-null sessionID is sessionless — same zero-side-effect contract as F1', async () => {
+		// Pins the null half of the falsy contract the file header and the
+		// production comment claim: a null-unsafe guard rewrite (e.g.
+		// `sessionId === undefined || sessionId === ''`) must stay RED here,
+		// because a null sessionID would otherwise fall through to loadPlan,
+		// delegateFactory(null) and the curator briefing/receipt writes.
+		const dir = canonicalMkdtemp('pm-falsy-null-3383-');
+		try {
+			writeMinimalPlan(dir);
+			const hook = createPhaseMonitorHook(dir, undefined, runner, factory);
+
+			await hook(
+				{ sessionID: null } as unknown as {
+					sessionID?: string;
+				},
+				{},
+			);
+
+			expect(CALLS.factorySessionIds.length).toBe(0);
+			expect(CALLS.runnerCalls).toBe(0);
+			expect(existsSync(path.join(dir, '.swarm', 'curator-briefing.md'))).toBe(
+				false,
+			);
+			expect(existsSync(path.join(dir, '.swarm', 'plan.md'))).toBe(false);
+			expect(readdirSync(path.join(dir, '.swarm'))).toEqual(['plan.json']);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	it('F2 (control): a truthy sessionID still initializes on the empty-string probe dir shape', async () => {
 		const dir = canonicalMkdtemp('pm-falsy-control-');
 		try {
