@@ -49,11 +49,13 @@ the shell semantics did.
    (`sudo -i 'echo x > ../esc'`, `${IFS}`, `{a,b}`) reach the shell as one
    literal word on that sudo version, so those denials are conservative:
    other sudo builds, including sudo-rs, have not been checked.
-5. **`sudo -D DIR -e FILE` resolves the edit target under DIR (#3588).**
-   `cd src; sudo -D /etc -e shadow` was admitted as `src/shadow`; relative
-   edit targets now resolve under the `-D`/`--chdir` directory, while
-   absolute targets are judged as written. A non-literal `-D` value
-   (`$D`, `~`, a glob or brace) denies relative targets as dynamic.
+5. **`sudo -D DIR -e FILE` denies relative edit targets (#3588).**
+   `cd src; sudo -D /etc -e shadow` was admitted. sudo 1.9.15p5 opens edit
+   targets against the invoking directory, and `-D` only moves the
+   editor's working directory, so #3588's premise that the target lands
+   under DIR is wrong on that version. Other sudo builds are unverified,
+   so relative targets under `-D` now deny as unresolved. Absolute targets
+   are judged as written.
 6. **Plain, quoted-flag, and late-flag `rm` are scope-checked (#3591).**
    Policy decision (AC10): **scope containment, modeled on
    `unlink`/`rmdir`** — every operand of a non-recursive, non-forced `rm`
@@ -87,14 +89,11 @@ branch is checked) — no change needed.
   judgeable). Payload words carrying `$` or brace/comma structure deny the
   same way. Only bare `$`-expansion is a confirmed bypass; the other
   shapes are conservative denials (see item 4).
-- `sudo -D DIR -e /absolute/path` is judged at the absolute path (a target
-  outside scope now denies). Conversely, `sudo -D src -e shadow` — denied
-  at the previous emission (the operand resolved at the workspace root,
-  outside a `src/` scope) — now ADMITS: the relative operand resolves
-  under the `-D` directory, inside scope. Tilde-leading operands
-  (`sudo -D src -e ~/shadow`) are never joined; they fail closed as
-  dynamic (real sudoedit resolves `~` to the invoker's home, outside the
-  workspace). This also denies a quoted literal `"~/x"`, which the gate
+- `sudo -D DIR -e` with a relative edit target denies, in or out of scope
+  (`sudo -D src -e shadow` was admitted at the previous emission's
+  in-scope path). `sudo -D DIR -e /absolute/path` is judged at the
+  absolute path. Tilde-leading operands (`sudo -D src -e ~/shadow`) fail
+  closed as dynamic, including a quoted literal `"~/x"`, which the gate
   cannot tell apart once quotes are removed.
 - Two loop and flag shapes change direction. `cd src; while cd .. && [ -z
   "$d" ]; do cd src; echo x > f; d=1; done` was withdrawn and now admits,

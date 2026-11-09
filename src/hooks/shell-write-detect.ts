@@ -3457,33 +3457,16 @@ function detectLauncherWrites(cmd: unknown): WriteTarget[] {
 		) {
 			const walk = walkLauncherOptions(name, suffix.slice(cursor), nameRaw);
 			if (walk?.kind === 'edit') {
-				// #3588 item 4 (Fix 5): -D/--chdir re-bases RELATIVE edit
-				// targets under the chdir directory (sudoedit semantics);
-				// ABSOLUTE or drive-qualified operands are emitted UNCHANGED —
-				// path.join would fabricate in-scope targets for
-				// `sudo -D src -e /etc/passwd` while real sudoedit ignores -D
-				// for absolute paths. The qualification lives INSIDE the
-				// expanded-branch emitter so brace behavior stays per-branch.
-				// PR #3615 feedback PRR-015 (Copilot): TILDE-leading operands
-				// are also emitted unchanged — joining would bury the leading
-				// `~` inside the chdir (`src/~/shadow`), hiding it from the
-				// dynamic-path marker and admitting an out-of-workspace
-				// sudoedit target as a literal in-scope path; unqualified,
-				// the raw `~`-leading operand is flagged dynamic (fail
-				// closed), matching sudo's home-relative sudoedit semantics.
-				// PR #3615 review F-01: a non-literal -D value ($D, ~, glob,
-				// brace) names a directory the walk cannot know — joining lets
-				// `../` cancel it and fabricates an in-scope literal
-				// (`sudo -D "$D" -e ../src/shadow` → `src/shadow`), so operands
-				// it would qualify are withdrawn as dynamic instead.
-				const sudoChdir = walk.sudoChdir;
-				const unresolvableChdir =
-					sudoChdir !== undefined &&
-					(isDynamicPath(sudoChdir) || /[*?[\]{}]/.test(sudoChdir))
-						? sudoChdir
-						: undefined;
-				const chdirQualifies = (operandPath: string): boolean =>
-					sudoChdir !== undefined &&
+				// #3588 item 4 (Fix 5): sudoedit opens its operands against the
+				// INVOKING cwd; -D/--chdir only moves the editor's cwd (sudo
+				// 1.9.15p5: `cd /opt/ws; sudo -D /opt/other -e f` edits /opt/ws/f).
+				// Other sudo builds are unverified, so a RELATIVE operand under
+				// -D is withdrawn as unresolved rather than resolved at either
+				// directory. ABSOLUTE or drive-qualified operands name the same
+				// file under both models and are judged as written; TILDE-leading
+				// operands keep the dynamic-path marker and fail closed.
+				const chdirWithdraws = (operandPath: string): boolean =>
+					walk.sudoChdir !== undefined &&
 					operandPath !== '' &&
 					!isAbsolutePathSpelling(operandPath) &&
 					!operandPath.startsWith('~');
@@ -3498,27 +3481,19 @@ function detectLauncherWrites(cmd: unknown): WriteTarget[] {
 						suffixNodes[t],
 						operand,
 						0,
-						(branchPath) => {
-							if (
-								unresolvableChdir !== undefined &&
-								chdirQualifies(branchPath)
-							) {
-								return {
-									category: 'launcher_write',
-									operator: 'sudo -e',
-									path: null,
-									dynamicSourceWord: unresolvableChdir,
-								};
-							}
-							return {
-								category: 'launcher_write',
-								operator: 'sudo -e',
-								path:
-									sudoChdir !== undefined && chdirQualifies(branchPath)
-										? path.join(sudoChdir, branchPath)
-										: branchPath,
-							};
-						},
+						(branchPath) =>
+							chdirWithdraws(branchPath)
+								? {
+										category: 'launcher_write',
+										operator: 'sudo -e',
+										path: null,
+										dynamicSourceWord: branchPath,
+									}
+								: {
+										category: 'launcher_write',
+										operator: 'sudo -e',
+										path: branchPath,
+									},
 						() => ({
 							category: 'launcher_write',
 							operator: 'sudo -e',
