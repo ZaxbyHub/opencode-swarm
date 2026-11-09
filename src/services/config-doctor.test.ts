@@ -74,7 +74,6 @@ describe('Config Doctor Service', () => {
 			expect(result.summary).toEqual({ info: 0, warn: 0, error: 0 });
 			expect(result.hasAutoFixableIssues).toBe(false);
 		});
-
 		it('should detect guardrails disabled', () => {
 			const config = createTestConfigObj({
 				guardrails: {
@@ -94,7 +93,6 @@ describe('Config Doctor Service', () => {
 			expect(result.findings[0]!.id).toBe('guardrails-disabled');
 			expect(result.findings[0]!.severity).toBe('error');
 		});
-
 		it('should detect invalid automation mode', () => {
 			const config = createTestConfigObj({
 				automation: {
@@ -110,7 +108,6 @@ describe('Config Doctor Service', () => {
 			expect(result.findings[0]!.autoFixable).toBe(true);
 			expect(result.findings[0]!.proposedFix?.value).toBe('manual');
 		});
-
 		it('should detect invalid capability types', () => {
 			const config = createTestConfigObj({
 				automation: {
@@ -128,7 +125,6 @@ describe('Config Doctor Service', () => {
 			expect(result.findings[0]!.severity).toBe('error');
 			expect(result.findings[0]!.autoFixable).toBe(true);
 		});
-
 		it('should detect out-of-bounds max_iterations', () => {
 			const config = createTestConfigObj({
 				max_iterations: 100,
@@ -140,7 +136,6 @@ describe('Config Doctor Service', () => {
 			expect(result.findings[0]!.id).toBe('out-of-bounds-iterations');
 			expect(result.findings[0]!.proposedFix?.value).toBe(10);
 		});
-
 		it('should detect unknown agent profiles', () => {
 			const config = createTestConfigObj({
 				guardrails: {
@@ -164,7 +159,6 @@ describe('Config Doctor Service', () => {
 			expect(result.findings[0]!.severity).toBe('info');
 			expect(result.findings[0]!.autoFixable).toBe(true);
 		});
-
 		it('should detect unknown hook fields', () => {
 			const config = createTestConfigObj({
 				hooks: {
@@ -179,7 +173,6 @@ describe('Config Doctor Service', () => {
 			expect(result.findings[0]!.severity).toBe('info');
 			expect(result.findings[0]!.autoFixable).toBe(true);
 		});
-
 		it('should detect out-of-bounds qa_retry_limit', () => {
 			const config = createTestConfigObj({
 				qa_retry_limit: 100,
@@ -191,7 +184,6 @@ describe('Config Doctor Service', () => {
 			expect(result.findings[0]!.id).toBe('out-of-bounds-retry-limit');
 			expect(result.findings[0]!.proposedFix?.value).toBe(10);
 		});
-
 		it('should detect unknown swarm agents', () => {
 			const config = createTestConfigObj({
 				swarms: {
@@ -210,7 +202,6 @@ describe('Config Doctor Service', () => {
 				true,
 			);
 		});
-
 		it('should detect when swarms is a non-object type', () => {
 			// When swarms is set to a non-object value, the doctor should emit
 			// a type-mismatch finding (consistent with pipeline/gates/other
@@ -231,7 +222,6 @@ describe('Config Doctor Service', () => {
 				`'swarms' must emit a finding when set to a non-object value (got string)`,
 			).toBeGreaterThan(0);
 		});
-
 		it('should surface invalid raw gates subsection after loader sanitization', () => {
 			createTestConfig(tempDir, {
 				max_iterations: 7,
@@ -1344,11 +1334,21 @@ describe('Config Doctor Service', () => {
 
 	describe('getConfigPaths', () => {
 		it('should return correct config paths', () => {
-			const { userConfigPath, projectConfigPath } = getConfigPaths(tempDir);
-
-			expect(userConfigPath).toContain('.config');
-			expect(userConfigPath).toContain('opencode');
-			expect(projectConfigPath).toContain('.opencode');
+			// #3355: pin XDG (the sdd-selection preload neutralizes it process-wide).
+			const savedXdg = process.env.XDG_CONFIG_HOME;
+			process.env.XDG_CONFIG_HOME = path.join(tempDir, '.config');
+			try {
+				// PRR-003
+				const { userConfigPath, projectConfigPath } = getConfigPaths(tempDir);
+				expect(userConfigPath).toContain('opencode'); // pinned branch
+				expect(projectConfigPath).toContain('.opencode');
+				// PRR-003: the XDG-UNSET homedir default still lands in .config.
+				delete process.env.XDG_CONFIG_HOME;
+				expect(getConfigPaths(tempDir).userConfigPath).toContain('.config');
+			} finally {
+				if (savedXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+				else process.env.XDG_CONFIG_HOME = savedXdg;
+			}
 		});
 	});
 

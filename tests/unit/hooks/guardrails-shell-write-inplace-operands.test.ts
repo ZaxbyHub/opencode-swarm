@@ -72,11 +72,18 @@ const BLOCKED: Array<[string, string | null]> = [
 const ALLOWED = [
 	"sed -i 's/a*/b/' src/a.ts",
 	"sed -i -E -e 's/(a|b)?/x/' src/a.ts",
-	"perl -i -pe 's/\\s+$//' src/a.ts",
 	"awk -i inplace -F '[,;]' '{print}' src/a.ts",
 	"awk -i inplace -v 're=[0-9]*' '{print}' src/a.ts",
 	'sed --in-place -e 1d src/a.ts',
 ];
+
+// #3491 W7 re-pin: `perl -i -pe 's/\s+$//' src/a.ts` moved out of ALLOWED —
+// the W7 cluster grammar decomposes `-pe` into an eval member whose inline
+// code real perl executes, so the command carries an interpreter_eval write
+// that #3347 routing judges at the eval's cwd (workspace root here) exactly
+// like `python -c`; `cd src && …` admits. The operand extraction itself
+// stays pinned by the detector-level suites and the sed/awk rows.
+const EVAL_BLOCKED = ["perl -i -pe 's/\\s+$//' src/a.ts"];
 
 describe('guardrails shell writes: in-place operands the picker used to miss', () => {
 	beforeEach(() => {
@@ -138,6 +145,21 @@ describe('guardrails shell writes: in-place operands the picker used to miss', (
 		).rejects.toThrow(
 			/^BLOCKED: bash\/shell write to a dynamic path target ""\$FILE"" that cannot be statically resolved/,
 		);
+	});
+
+	it.each(
+		EVAL_BLOCKED.flatMap((command) => [
+			['architect', command, false] as const,
+			['coder', command, true] as const,
+		]),
+	)('%s: %s is blocked (inline eval class)', async (role, command, scoped) => {
+		const hooks = createGuardrailsHooks(TEST_DIR, undefined, config());
+		const id = session(role, scoped);
+		// The scope-less architect gets the eval blanket block; the scoped
+		// coder's eval routes at the (out-of-scope) working directory.
+		await expect(
+			hooks.toolBefore(bashInput(id), output(command)),
+		).rejects.toThrow(/BLOCKED: perl \[eval\]|SCOPE_VIOLATION/);
 	});
 
 	it.each(

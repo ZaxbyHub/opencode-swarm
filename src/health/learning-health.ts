@@ -63,6 +63,7 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type { ContextWindowSource } from '../config/context-window';
+import { stripKnownSwarmPrefix } from '../config/schema';
 import {
 	pseudonymousRef,
 	pseudonymousSessionRef,
@@ -1240,11 +1241,13 @@ const EXPECTED_ROLES_BY_GAP_TYPE: Readonly<Record<string, readonly string[]>> =
 function normalizeParticipationAgent(agent: string): string {
 	// Agents are recorded with any swarm prefix stripped (curator
 	// normalizeAgentName semantics); a prefixed 'swarm_reviewer' is still the
-	// reviewer role participating.
-	const stripped = agent.includes('_')
-		? (agent.split('_').pop() ?? agent)
-		: agent;
-	return stripped.trim().toLowerCase();
+	// reviewer role participating. #3330: the shared canonical-role derivation
+	// replaces the old last-token split, which mis-derived compound roles
+	// (`local_test_engineer` -> `engineer` instead of `test_engineer`).
+	// Trim BEFORE stripping: the suffix extractor matches a real
+	// '_<role>' ending, which a trailing space hides (base's
+	// split-pop-trim normalized padded names; keep that behavior).
+	return stripKnownSwarmPrefix(agent.trim()).toLowerCase();
 }
 
 /**

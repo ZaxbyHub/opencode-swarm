@@ -28,7 +28,7 @@ describe('run-pr-feedback-stage-a trusted compound scripts in nested workspaces 
 		const directory = canonicalMkdtemp('stage-a-trusted-nested-');
 		createdDirs.push(directory);
 		const nestedManifest = `${JSON.stringify(
-			{ scripts: { build: 'turbo run build --filter=web && echo done' } },
+			{ scripts: { build: 'turbo run build && echo done' } },
 			null,
 			'\t',
 		)}\n`;

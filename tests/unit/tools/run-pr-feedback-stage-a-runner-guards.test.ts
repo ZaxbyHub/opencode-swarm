@@ -25,8 +25,8 @@ import {
 // runner payloads before or during Stage A reproduction.
 
 const SESSION = 'stage-a-runner-evidence-session';
-const HEAD = 'abc123';
-const BASE = 'def456';
+const HEAD = 'abccccccccccccccccccccccccccccccccccc123';
+const BASE = 'defffffffffffffffffffffffffffffffffff456';
 const REVISION = 'revision-1';
 let directory = '';
 let baseContracts = new Map<string, string>();

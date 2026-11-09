@@ -34,14 +34,19 @@ describe('shell-write-detect: sink-device exemption is an exact match', () => {
 		expect(writes(command)).toEqual(expected);
 	});
 
-	// The parser rejects a process substitution with a redirect inside it;
-	// the result is a parse error (the guard fails closed on it).
+	// #3539 W5 re-pin: these used to be parse errors (bash-parser rejects a
+	// process substitution; the guard failed closed on the whole line). With
+	// procsub masking the span body IS analyzed — its redirect goes to the
+	// sink device, so the exemption applies exactly as for a plain
+	// `> /dev/null` — and the masked residual parses clean, so the analysis
+	// carries no write and no parseError. A `>(…)` no longer hard-blocks a
+	// line whose every write is a sink-device write.
 	test.each([
 		'cmd >(cat > /dev/null)',
 		'cmd >(cat >> /dev/null)',
-	])('%s is a parse error with no write', (command) => {
+	])('%s is analyzed (sink-device body write) with no write and no parse error', (command) => {
 		const result = detectPosixWrites(command);
 		expect(result.writes).toEqual([]);
-		expect(result.parseError).toBe(true);
+		expect(result.parseError).toBeUndefined();
 	});
 });

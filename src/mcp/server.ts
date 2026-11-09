@@ -133,7 +133,7 @@ export function createMcpServer(options: RunMcpServerOptions): McpServer {
 			tool.name,
 			{
 				description: tool.description,
-				inputSchema: tool.inputSchema,
+				inputSchema: tool.inputSchema.shape as unknown as Record<string, never>,
 			},
 			async (args: Record<string, unknown>) => {
 				// Containment validation sits INSIDE the try: a rejection must

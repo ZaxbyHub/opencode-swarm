@@ -4,10 +4,18 @@ import * as path from 'node:path';
 import { z } from 'zod';
 import packageJson from '../../package.json' with { type: 'json' };
 import type { EvidenceBundle } from '../config/evidence-schema';
-import { readTaskEvidence } from '../gate-evidence';
+import {
+	isDurableNoMutationSettlement,
+	readTaskEvidence,
+} from '../gate-evidence';
 import type { PhaseGateEntry } from '../tools/phase-complete/preflight-report';
 import { stableReportHash } from '../tools/phase-complete/preflight-report';
 import { toPortableRelativePath } from '../tools/phase-complete/snapshot-identity';
+import {
+	deriveDurableTaskGate,
+	deriveTaskEvidenceSynthesis,
+	markdownTableCell,
+} from './gate-outcome';
 import { loadEvidence } from './manager';
 
 /**
@@ -16,7 +24,13 @@ import { loadEvidence } from './manager';
  * A receipt is a portable, hash-backed record of the durably recorded gate
  * outcomes for a task or phase: bounded gate records, the snapshot hashes the
  * gates were evaluated against, and content-hashed artifact refs. A gate that
- * ran without a durable record is absent (nothing is reconstructed). Receipts
+ * ran without a durable record is absent (nothing is reconstructed). Task-arm
+ * gate outcomes are derived from the durable entry via the shared
+ * gate-outcome helper (#3560): verdict-bearing records reflect their recorded
+ * verdict (REJECT never renders pass), presence-only records attest
+ * pass-on-presence honestly by producer contract, and the empty-gates
+ * synthesis is not_applicable unless durable read-only-settlement proof
+ * exists. Receipts
  * provide integrity AGAINST THE MODEL for lazy falsification (an agent cannot
  * edit persisted gate state under an unchanged digest and claim a gate passed —
  * report digests are RE-DERIVED from stored bytes at build time and from
@@ -435,9 +449,9 @@ export async function buildVerificationReceipt(
 		if (!evidence) {
 			throw new Error(`RECEIPT_NO_TASK_EVIDENCE: ${id}`);
 		}
-		const gateNames = Object.keys(
-			(evidence as unknown as { gates?: Record<string, unknown> }).gates ?? {},
-		);
+		const gateEntries =
+			(evidence as unknown as { gates?: Record<string, unknown> }).gates ?? {};
+		const gateNames = Object.keys(gateEntries);
 		let bundle: EvidenceBundle | null = null;
 		try {
 			const loaded = await loadEvidence(root, id, { migrate: false });
@@ -455,18 +469,33 @@ export async function buildVerificationReceipt(
 			if (gates.length >= MAX_RECEIPT_GATES) {
 				throw new Error(`RECEIPT_GATE_LIMIT: ${id}`);
 			}
+			// #3560: outcomes derive from the DURABLE entry (verdict-bearing
+			// kinds reflect their recorded verdict; presence-only kinds are
+			// honest pass-on-presence by producer contract) and the actor
+			// comes from the recorded agent — never a constant.
+			const derived = deriveDurableTaskGate(gateEntries[gateName]);
 			gates.push({
 				gate_id: gateName,
-				outcome: 'pass',
-				responsible_actor: 'swarm',
+				outcome: derived.outcome,
+				...(derived.code !== undefined ? { code: derived.code } : {}),
+				responsible_actor: derived.responsible_actor,
 				evidence_refs: evidenceRefs,
 			});
 		}
 		if (gates.length === 0) {
+			// #3560 AC5 (FB-002): no fabricated pass — only the platform's
+			// canonical read-only-settlement predicate (authoritative
+			// generation-0 idle/complete workflow with a bound proof) may make
+			// the synthesized row pass-bearing; a blocked/closed workflow that
+			// merely retains the marker yields not_applicable, not a pass.
+			const synthesized = deriveTaskEvidenceSynthesis(
+				isDurableNoMutationSettlement(evidence),
+			);
 			gates.push({
 				gate_id: 'task_evidence',
-				outcome: 'pass',
-				responsible_actor: 'swarm',
+				outcome: synthesized.outcome,
+				...(synthesized.code !== undefined ? { code: synthesized.code } : {}),
+				responsible_actor: synthesized.responsible_actor,
 				evidence_refs: evidenceRefs,
 			});
 		}
@@ -555,10 +584,15 @@ export function renderReceiptMarkdown(receipt: VerificationReceipt): string {
 		'|---|---|---|---|',
 	];
 	for (const gate of receipt.gates) {
+		// FB-003: durable-derived text is markdown-cell-escaped so a verdict /
+		// actor / gate id carrying `|` or newlines cannot forge a row in the
+		// human/export attestation that is absent from the hash-bound JSON.
 		lines.push(
-			`| ${gate.gate_id} | ${gate.outcome} | ${gate.code ?? '—'} | ${
-				gate.responsible_actor
-			} |`,
+			`| ${markdownTableCell(gate.gate_id)} | ${markdownTableCell(
+				gate.outcome,
+			)} | ${markdownTableCell(gate.code ?? '—')} | ${markdownTableCell(
+				gate.responsible_actor,
+			)} |`,
 		);
 	}
 	lines.push(
@@ -569,7 +603,12 @@ export function renderReceiptMarkdown(receipt: VerificationReceipt): string {
 		'|---|---|---|',
 	);
 	for (const artifact of receipt.artifacts) {
-		lines.push(`| ${artifact.path} | ${artifact.bytes} | ${artifact.sha256} |`);
+		// FB-003: same class as the gates table — the path is durable-derived.
+		lines.push(
+			`| ${markdownTableCell(artifact.path)} | ${artifact.bytes} | ${
+				artifact.sha256
+			} |`,
+		);
 	}
 	lines.push(
 		'',

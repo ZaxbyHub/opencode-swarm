@@ -523,6 +523,8 @@ Runs a type-checking or linting command after the coder agent completes.
 | `timeoutMs` | number | `30000` | Timeout in milliseconds (1000–300000) |
 | `triggerAgents` | string[] | `["coder"]` | Which agent names trigger the hook |
 
+`triggerAgents` entries match the dispatched subagent name exactly, its canonical role (suffix derivation), or its pre-derivation prefix-stripped form — the text after the first underscore, e.g. `custom` for `acme_custom` (compatibility leg).
+
 **Auto-detection order**: TypeScript → Go → Rust → Python → C#. Python emits a `SKIPPED` advisory if no command is set.
 
 **Example** — Python mypy configuration:
@@ -1358,6 +1360,22 @@ lifecycle bookkeeping stays active in BOTH modes (AGENTS.md invariant 9):
 - One structural bound stays fail-closed in both modes: patch payloads over
   1 MB (1,000,000 bytes) are rejected (`WRITE BLOCKED: Patch payload exceeds
   1 MB`) because authority cannot be verified for an unbounded write set.
+- Verifier-config protection is ALSO unconditional (#3120): writes to the
+  built-in verifier-config globs (`**/oxlintrc*`, `**/.oxlintrc*`,
+  `**/.eslintrc*`, `**/eslint.config.*`, `**/.prettierrc*`,
+  `**/prettier.config.*`, `**/biome.json`, `**/biome.jsonc`,
+  `**/tsconfig*.json`, `**/.secretscanignore`, `**/.golangci*` — the exact
+  `BUILT_IN_VERIFIER_CONFIG_GLOBS` set, plus configured
+  `authority.verifier_config_paths`) are denied for EVERY agent role,
+  including the OpenCode-native roles otherwise exempt from swarm write
+  restrictions, and the denial fires even with `guardrails.enabled: false`.
+  These files are owner policy for the verification system itself (the
+  secretscan Stage-A gate trusts `.secretscanignore`), so their integrity is
+  not switchable by the general enforcement knob. Boundary note: script
+  runners (`npm run <script>`, `bun run <script>`, `node <file>`) are not
+  treated as shell write vectors — their targets are not statically
+  knowable and blocking them would break every legitimate build; see the
+  `shell-write-detect` module documentation.
 
 Every completed `pre_check_batch` call also records exactly ONE bounded
 route event (`type: "stage_a_gate_route"`) in `.swarm/events.jsonl`, with

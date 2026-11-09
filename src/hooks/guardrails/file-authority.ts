@@ -30,6 +30,7 @@ import {
 	isPathWithinDeclaredScope,
 	type PathFlavor,
 	pathIdentitiesEqual,
+	redactPath,
 	sanitizeDiagnosticText,
 	unsafePathTextReason,
 } from '../../scope/path-identity';
@@ -612,7 +613,10 @@ const NON_WRITING_SWARM_RULES = Object.fromEntries(
 export const DEFAULT_AGENT_AUTHORITY_RULES: Record<string, AgentRule> = {
 	// Opencode native built-in agents — pass through with no swarm write restrictions.
 	// Opencode's own permission system governs what these agents may write; the swarm
-	// authority layer must not add further constraints on top of it.
+	// authority layer must not add further constraints on top of it. EXCEPTION (#3120):
+	// built-in verifier-config globs still deny for these roles (see the
+	// AUTHORITY_VERIFIER_CONFIG check ahead of the role-policy paths) — the ignore
+	// file class is owner policy for the verification system, not a swarm capability.
 	build: {},
 	plan: {},
 	general: {},
@@ -981,6 +985,37 @@ function denyAuthority(
 	const safeAgent = sanitizeDiagnosticText(agent, 96);
 	const safePath = sanitizeDiagnosticText(normalizedPath, 320);
 	const safeDetail = sanitizeDiagnosticText(input.detail, 640);
+	// #3587 (v2): the REASON's path slot stays WORKSPACE-RELATIVE (the
+	// pre-change display — escaping-write pins match the ../shape, so a
+	// resolved-absolute render is wrong here) with two home-fold rules: an
+	// ABSOLUTE normalizedPath (invalid-path arm, cross-drive arm) folds via
+	// redactPath; an ESCAPING relative path (../ prefix — provably outside
+	// the workspace, so a home/Users segment there is the real profile root,
+	// not a workspace dir name) folds that segment to ~. Ordinary relative
+	// and non-home absolute paths render unchanged. The structured `path`
+	// field (consumed by scope-guard and the audit channel) keeps its
+	// pre-change sanitized value. The invalid-path arm passes the RAW caller
+	// input (pre-normalization, backslashes on win32), so the display source
+	// is slash-normalized first — otherwise `..\Users\<name>\…` shapes dodge
+	// both fold branches (#3587 review round).
+	const displaySource = normalizedPath.replace(/\\/g, '/');
+	// #3587 review round: the escaping probe runs on the NORMALIZED form so
+	// non-canonical spellings (`./..`, `src/../..`) share the message
+	// channel's fold decision — same-class disagreement, killed in the
+	// helper first.
+	const escapingProbe = path.posix.normalize(displaySource);
+	// Non-escaping displays always route through the LEXICAL redactPath
+	// (pre-change host-normalized form on non-profile shapes), so a
+	// Windows-profile spelling folds even on POSIX hosts where `C:/…` is not
+	// path-absolute.
+	let reasonDisplay = redactPath(displaySource);
+	if (escapingProbe.startsWith('../')) {
+		reasonDisplay = escapingProbe.replace(
+			/(^|\/)(?:home|Users)\/[^/]+/g,
+			'$1~',
+		);
+	}
+	const safeReasonPath = sanitizeDiagnosticText(reasonDisplay, 320);
 	return {
 		allowed: false,
 		code: input.code,
@@ -989,7 +1024,7 @@ function denyAuthority(
 		path: safePath,
 		agent: safeAgent,
 		reason: sanitizeDiagnosticText(
-			`${input.code}: Path blocked: ${safeDetail} [agent=${safeAgent}; path=${safePath}]`,
+			`${input.code}: Path blocked: ${safeDetail} [agent=${safeAgent}; path=${safeReasonPath}]`,
 			1024,
 		),
 		recovery: input.recovery,
@@ -1305,22 +1340,26 @@ export function checkFileAuthorityWithRules(
 				'unclassified agent writes to repository control state (.git/.swarm) are always protected',
 		});
 	}
-	const isSwarmRole = Object.hasOwn(AUTHORITY_ROLE_CAPABILITIES, strippedAgent);
-	if (isSwarmRole) {
-		const matchedVerifier = [
-			...BUILT_IN_VERIFIER_CONFIG_GLOBS,
-			...(options.verifierConfigPaths ?? []),
-		].find(matchesGlob);
-		if (matchedVerifier) {
-			return denyAuthority(agentName, normalizedPath, {
-				code: 'AUTHORITY_VERIFIER_CONFIG',
-				layer: 'protected-path',
-				rule: `verifier-config:${matchedVerifier}`,
-				detail: `Path blocked (glob ${matchedVerifier}): swarm roles cannot write verifier-owned configuration in the config zone`,
-			});
-		}
+	// #3120 LEG 1: verifier-config globs are owner policy for the verification
+	// system itself (the secretscan Stage-A gate trusts .secretscanignore, see
+	// #3107/PR #3116), so the deny is a property of the protected FILE CLASS,
+	// not a capability of swarm roles. It therefore applies to EVERY agent —
+	// including the OpenCode-native roles deliberately exempted from swarm
+	// write restrictions below (general/build/plan/explore carry {} rule maps)
+	// — and it stays ahead of the authorityEnabled === false allow so the
+	// other knob cannot switch it off either.
+	const matchedVerifier = [
+		...BUILT_IN_VERIFIER_CONFIG_GLOBS,
+		...(options.verifierConfigPaths ?? []),
+	].find(matchesGlob);
+	if (matchedVerifier) {
+		return denyAuthority(agentName, normalizedPath, {
+			code: 'AUTHORITY_VERIFIER_CONFIG',
+			layer: 'protected-path',
+			rule: `verifier-config:${matchedVerifier}`,
+			detail: `Path blocked (glob ${matchedVerifier}): verifier-owned configuration in the config zone is protected for every agent role (#3120)`,
+		});
 	}
-
 	// Canonical non-writing capabilities are immutable hard policy. User config
 	// may further restrict direct-write roles, but cannot turn a read-only or
 	// dedicated-tool-only role into a raw writer (including prefixed roles).

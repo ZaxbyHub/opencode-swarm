@@ -29,7 +29,7 @@ Activates when: user asks to "specify", "define requirements", "write a spec", o
      - If the user chooses option (b): proceed directly to generation (step 2) with a note that existing SDD sources were bypassed per user decision.
      - If the user chooses option (a) and `/swarm sdd project` fails: report the failure and re-offer the choices.
 1c. **AMBIGUOUS — multiple SDD sources detected.** Both `openspec/` AND `.specify/` exist with no native `.swarm/spec.md`. Per `readEffectiveSpecSync` semantics this is NOT an effective spec (the function returns null). Do NOT treat this as a single-source NON-NATIVE choice. Instead:
-        - Inform the user: "Multiple SDD sources detected (openspec AND speckit) but no native spec exists. This is ambiguous — there is no single effective spec. You must choose which source to project, or disambiguate via `/swarm sdd status --source`."
+        - Inform the user: "Multiple SDD sources detected (openspec AND speckit) but no native spec exists. This is ambiguous — there is no single effective spec. You must choose which source to project, or disambiguate via `/swarm sdd status --source` (or pin the choice with `SWARM_SDD_SOURCE` / `sdd.source`; the flag wins over the env var, which wins over the config)."
        - Offer the user a choice:
          - **(a) Project from openspec** — run `/swarm sdd project --source openspec` (after consent) to project the openspec source into `.swarm/spec.md`.
           - **(b) Project from speckit** — run `/swarm sdd project --source speckit` (after consent) to project the speckit source into `.swarm/spec.md`.

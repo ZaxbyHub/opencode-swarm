@@ -16,6 +16,8 @@ import {
 import {
 	assertCurrentCheckoutHead,
 	assertPrFeedbackVerificationSettled,
+	readPrWorkflowGateState,
+	recordPrFeedbackBaseMismatch,
 	recordPrFeedbackStageA,
 } from '../hooks/pr-workflow-gate.js';
 import { storeSummary } from '../summaries/manager.js';
@@ -517,22 +519,36 @@ function categoryMatchesScriptName(
 	category: StageACategory,
 	scriptName: string,
 ): boolean {
+	// #3396 S3: npm executes implicit `pre*`/`post*` lifecycle hooks around the
+	// named script (`npm run build` runs `prebuild`, `build`, `postbuild`;
+	// nested hooks like `prepretest` unwind one prefix per level), so the
+	// matcher strips pre/post prefixes REPEATEDLY while one remains. Explicit
+	// names keep their existing treatment (`build` matches as before;
+	// `prepare` strips to `pare` and still matches nothing). The typecheck arm
+	// gains the leading boundary the other arms already had (normalizes the
+	// old `pretypecheck` asymmetry).
+	let name = scriptName;
+	let stripped = name.replace(/^(?:pre|post)(?=.)/i, '');
+	while (stripped !== name) {
+		name = stripped;
+		stripped = name.replace(/^(?:pre|post)(?=.)/i, '');
+	}
 	switch (category) {
 		case 'build':
 			return /(?:^|[:_-])(?:build|compile|package|assemble)(?:$|[:_-])/i.test(
-				scriptName,
+				name,
 			);
 		case 'typecheck':
-			return /(?:type[:_-]*check|check[:_-]*types|types?)(?:$|[:_-])/i.test(
-				scriptName,
+			return /(?:^|[:_-])(?:type[:_-]*check|check[:_-]*types|types?)(?:$|[:_-])/i.test(
+				name,
 			);
 		case 'lint':
 			return /(?:^|[:_-])(?:lint|format[:_-]*check|check[:_-]*format)(?:$|[:_-])/i.test(
-				scriptName,
+				name,
 			);
 		case 'reproduction':
 			return /(?:^|[:_-])(?:test|spec|repro(?:duction)?|regression)(?:$|[:_-])/i.test(
-				scriptName,
+				name,
 			);
 		case 'diff-check':
 			return false;
@@ -852,6 +868,208 @@ function isPlausibleReproductionCommand(
 		);
 	}
 	return false;
+}
+
+// #3396 S3: true when the script NAME is an implicit lifecycle hook (pre*/post*
+// around a category stem) rather than an explicit category script.
+function isLifecycleHookScriptName(scriptName: string): boolean {
+	// Copilot feedback: a name that merely STARTS with pre/post (`prettier`,
+	// `prepare`) is NOT an implicit lifecycle hook, and a bare category name
+	// (`build`) is the PRIMARY script, not a hook. Lifecycle = at least one
+	// pre/post prefix was stripped AND the remaining stem matches a Stage A
+	// category (`pretest` -> `test`).
+	const originalName = scriptName;
+	let stripped = scriptName.replace(/^(?:pre|post)(?=.)/i, '');
+	while (stripped !== scriptName) {
+		scriptName = stripped;
+		stripped = scriptName.replace(/^(?:pre|post)(?=.)/i, '');
+	}
+	return (
+		stripped !== originalName &&
+		(categoryMatchesScriptName('build', stripped) ||
+			categoryMatchesScriptName('typecheck', stripped) ||
+			categoryMatchesScriptName('lint', stripped) ||
+			categoryMatchesScriptName('reproduction', stripped))
+	);
+}
+
+// Shell reserved words / control / terminating / wrapper builtins that either
+// indicate control grammar or can hide the effective executable or mask a
+// failed validation segment (#3396 S2 critic rounds 2-5; #3120 family).
+const COMPOUND_REFUSED_HEADS = new Set([
+	'if',
+	'then',
+	'elif',
+	'else',
+	'fi',
+	'for',
+	'while',
+	'until',
+	'do',
+	'done',
+	'case',
+	'esac',
+	'select',
+	'time',
+	'coproc',
+	'function',
+	'in',
+	'{',
+	'}',
+	'!',
+	'exit',
+	'return',
+	'break',
+	'continue',
+	':',
+	'.',
+	'[',
+	'[[',
+	'wait',
+	'command',
+	'builtin',
+	'eval',
+	'exec',
+	'source',
+]);
+
+// #3396 S2 (D8-r5): the supported compound-script grammar is EXCLUSIVELY the
+// non-empty all-`&&` chain, and this screen refuses base-identity trust for
+// every other shell shape. It is a PLAUSIBILITY SCREEN over base-identical
+// text (the trust anchor remains base identity — the text already ran on the
+// merge base), NOT a sandbox; accepted risks are disclosed in the release
+// notes (literal unblocked tools can still write; NODE_OPTIONS/npm_config_*
+// and variable-expanded arguments are outside the literal screen). Rules:
+// (1) refuse the whole script when its text contains command/process
+// substitution or variable expansion dynamics — $(, backtick, ${, <( — the
+// simple parser's refusal philosophy; (2) lex `&&` as the ONLY separator
+// (quote-respecting); any remaining &, |, ;, CR, newline, (, ), {, }, <, >
+// anywhere refuses (so `||`, `;`, pipes, backgrounding, grouping, and every
+// redirection — including harmless-looking `2>&1` — lose base-identity
+// trust; `.pr-validation.json` is the sanctioned contract path), as does any
+// empty segment (leading/trailing/doubled delimiter); (3) per segment: strip
+// leading VAR=value assignments (a PURE-assignment segment skips — inside an
+// all-&& chain it cannot mask a prior segment's failure); the command head
+// must be a plain literal word (any $, backslash, quote, ~, or glob character
+// refuses — `c` + backslash + `url`, `$'curl'`, `cu"rl"` cannot be list-
+// compared); the head refuses when it is a reserved/control/wrapper builtin
+// (COMPOUND_REFUSED_HEADS) or a BLOCKED_EXECUTABLE, when its args hit the
+// mutating-argument regex, when an interpreter head carries an eval flag, or
+// when a package-manager segment carries a workspace/cwd override flag;
+// (4) the ONLY exemption is a TERMINAL `echo`/`printf` segment of the chain
+// (the idiomatic progress tail) that is literal, redirect-free and
+// assignment-free — and it requires at least one PRIOR non-exempt segment,
+// so `echo one && echo two` and `true && echo done` refuse.
+function hasDangerousCompoundSegment(scriptText: string): boolean {
+	const BACKTICK = String.fromCharCode(96);
+	if (
+		scriptText.includes('$(') ||
+		scriptText.includes('${') ||
+		scriptText.includes('<(') ||
+		scriptText.includes(BACKTICK)
+	) {
+		return true;
+	}
+	// Quote-respecting split on `&&` only.
+	const segments: string[] = [];
+	let current = '';
+	let quote: string | null = null;
+	for (let i = 0; i < scriptText.length; i += 1) {
+		const ch = scriptText[i];
+		if (quote) {
+			current += ch;
+			if (ch === quote) quote = null;
+			continue;
+		}
+		if (ch === "'" || ch === '"') {
+			quote = ch;
+			current += ch;
+			continue;
+		}
+		if (ch === '&' && scriptText[i + 1] === '&') {
+			segments.push(current);
+			current = '';
+			i += 1;
+			continue;
+		}
+		current += ch;
+	}
+	segments.push(current);
+	const isSegmentSafe = (rawSegment: string, exemptHead = false): boolean => {
+		const trimmed = rawSegment.trim();
+		if (trimmed.length === 0) return false;
+		if (/[&|;(){}<>\r\n]/.test(trimmed)) return false;
+		const tokens = trimmed.match(/"(?:\\.|[^"\\])*"|'[^']*'|[^\s]+/g) ?? [];
+		if (tokens.length === 0) return false;
+		// Strip leading VAR=value assignments to expose the real head.
+		let headIndex = 0;
+		while (
+			headIndex < tokens.length - 1 &&
+			/^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[headIndex])
+		) {
+			headIndex += 1;
+		}
+		if (/^[A-Za-z_][A-Za-z0-9_]*=$/.test(tokens[headIndex])) {
+			// Pure assignment segment: no execution capability here.
+			return true;
+		}
+		const head = tokens[headIndex];
+		// Literal-head requirement — quoting/backslash/expansion/glob heads
+		// cannot be safely compared against the blocked lists.
+		if (/[$\\'"~*?]/.test(head)) return false;
+		const headLower = head.toLowerCase();
+		if (COMPOUND_REFUSED_HEADS.has(headLower)) return false;
+		// `exemptHead` is used ONLY for the terminal echo/printf allowance
+		// (rule 4): every other axis — metacharacters, literal head,
+		// mutating/eval/override flags — still applies to the tail.
+		if (!exemptHead && BLOCKED_EXECUTABLES.has(headLower)) return false;
+		const args = tokens.slice(headIndex + 1);
+		if (args.some((arg) => MUTATING_ARGUMENT.test(arg))) return false;
+		if (
+			['bun', 'node', 'python', 'python3', 'ruby', 'perl', 'npx'].includes(
+				headLower,
+			) &&
+			args.some((arg) => ['-e', '--eval', '-c', '--call'].includes(arg))
+		) {
+			return false;
+		}
+		// #3396 feedback (PRR-010): the workspace/cwd override axis is a
+		// PACKAGE-MANAGER contract (`npm -C`, `pnpm --filter`, …) — applied
+		// to every segment it falsely refused ordinary tools sharing the
+		// short flags (`grep -w`, `grep -F`, `tar -C`).
+		if (
+			['npm', 'pnpm', 'yarn', 'bun', 'npx'].includes(headLower) &&
+			(args.some((arg) =>
+				/^(?:--(?:cwd|filter|prefix|workspace)(?:=|$)|-[CFw](?:$|=))/.test(arg),
+			) ||
+				(headLower === 'yarn' && args.includes('workspace')))
+		) {
+			return false;
+		}
+		return true;
+	};
+	// Rule 4: terminal echo/printf allowance inside the all-&& chain. The
+	// tail must FIRST pass the same metacharacter/literal screens as every
+	// other segment (4.5 review round 1: `echo done > .secretscanignore` and
+	// `echo done; curl …` must refuse — an exempt HEAD never exempts a
+	// redirect/separator smuggled into the tail).
+	const lastRaw = segments[segments.length - 1] ?? '';
+	const lastTrimmed = lastRaw.trim();
+	const lastHead = (lastTrimmed.match(/[^\s]+/) ?? [''])[0];
+	const lastIsExemptTail =
+		(lastHead === 'echo' || lastHead === 'printf') &&
+		!/[$\\'"~*?]/.test(lastHead) &&
+		!/^[A-Za-z_][A-Za-z0-9_]*=/.test(lastTrimmed) &&
+		isSegmentSafe(lastRaw, true);
+	const evaluated = lastIsExemptTail ? segments.slice(0, -1) : segments;
+	if (evaluated.length === 0) {
+		// Zero non-exempt segments. A SOLE echo/printf segment (`pretest:
+		// "echo done"`, the canonical npm announcement hook) is safe — the
+		// whole script is the exempt tail. A MULTI-segment all-echo chain
+		// (`echo one && echo two`) still refuses: no validation segment.
+		return segments.length !== 1;
+	}
+	return evaluated.some((segment) => !isSegmentSafe(segment));
 }
 
 function isPlausibleStageACommand(
@@ -1808,6 +2026,16 @@ function discoverApplicableStageAObligations(
 						typeof commandText === 'string'
 							? parseSimpleRepositoryScript(commandText)
 							: undefined;
+					// #3396 S3: reproduction-family lifecycle hooks
+					// (pretest/posttest, incl. repeated-prefix nested forms)
+					// are base-checked in their own pass below — they are not
+					// optional-category obligations.
+					if (
+						!isLifecycleHookScriptName(script) &&
+						categoryMatchesScriptName('reproduction', script)
+					) {
+						continue;
+					}
 					for (const category of OPTIONAL_STAGE_A_CATEGORIES) {
 						if (!categoryMatchesScriptName(category, script)) continue;
 						const authorizingValidator = contract?.validators.find(
@@ -1827,6 +2055,40 @@ function discoverApplicableStageAObligations(
 								);
 							},
 						);
+						// #3396 S3 (attach semantics): a lifecycle hook
+						// (prebuild/postbuild around a category stem) never
+						// becomes its own obligation — one command cannot prove
+						// multiple obligations and direct lifecycle check
+						// commands are rejected below. It ATTACHES to the
+						// primary script's obligation: base-identical hooks are
+						// trusted (compound bodies screened by the #3396 S2
+						// rules); a PR-added or modified hook fails the run
+						// closed with the remedy text.
+						if (isLifecycleHookScriptName(script)) {
+							if (authorizingValidator) continue;
+							if (typeof commandText !== 'string') continue;
+							const hookBaseIdentical = isBaseIdenticalRepositoryScript(
+								canonicalRoot,
+								candidateRoot,
+								script,
+								commandText,
+								contractBase,
+							);
+							if (
+								hookBaseIdentical &&
+								!hasDangerousCompoundSegment(commandText)
+							) {
+								continue;
+							}
+							// #3396 feedback (PRR-010): a base-identical hook
+							// that trips the plausibility screen must NOT be
+							// told it "was added or modified by this PR" —
+							// name the actual cause.
+							discoveryOverflow = hookBaseIdentical
+								? `Stage A lifecycle hook ${path.relative(canonicalRoot, candidateRoot).replaceAll('\\', '/') || '.'}/package.json#${script} is byte-identical to the immutable merge base but its body trips the Stage A plausibility screen (substitution, redirection, control grammar, or blocked executables) — simplify the hook body or authorize a .pr-validation.json validator that is already byte-identical there`
+								: `Stage A lifecycle hook ${path.relative(canonicalRoot, candidateRoot).replaceAll('\\', '/') || '.'}/package.json#${script} was added or modified by this PR — npm executes it implicitly around its primary script. Keep the hook byte-identical to the immutable merge base, authorize a .pr-validation.json validator that is already byte-identical there, or remove the hook change from this PR`;
+							continue;
+						}
 						if (!declaredCommand) {
 							if (!authorizingValidator) {
 								if (
@@ -1836,7 +2098,14 @@ function discoverApplicableStageAObligations(
 										script,
 										commandText,
 										contractBase,
-									)
+									) &&
+									// #3396 S2: base-identical trust for compound
+									// scripts passes the closed all-&& plausibility
+									// screen first — a "trivially-passing" dangerous
+									// compound (substitution, redirection, blocked
+									// executables, control grammar) is refused.
+									(typeof commandText !== 'string' ||
+										!hasDangerousCompoundSegment(commandText))
 								) {
 									addObligation(
 										category,
@@ -1867,11 +2136,69 @@ function discoverApplicableStageAObligations(
 							if (authorizingValidator) {
 								contractValidatorsCoveredByScripts.add(authorizingValidator.id);
 							}
+						} else {
+							// #3396 S3: a category-matched script whose simple parse
+							// is implausible fails closed ONLY when this PR changed it
+							// (a PR-added dangerous `prebuild: curl …` BLOCKS instead of
+							// being silently blessed). A base-identical script keeps the
+							// base's own choice — the merge base already ran it, and repos
+							// commonly carry custom validation commands whose shape the
+							// simple screen does not recognize.
+							if (
+								typeof commandText === 'string' &&
+								!isBaseIdenticalRepositoryScript(
+									canonicalRoot,
+									candidateRoot,
+									script,
+									commandText,
+									contractBase,
+								)
+							) {
+								discoveryOverflow = `Stage A implausible package script ${path.relative(canonicalRoot, candidateRoot).replaceAll('\\', '/') || '.'}/package.json#${script} for ${category} was added or modified by this PR and is not a recognized non-publishing validation command — replace it with a plausible ${category} command, authorize a base-identical .pr-validation.json validator, or keep it out of this PR`;
+							}
 						}
 					}
 				}
 			} catch {
 				discoveryOverflow = `Stage A cannot safely inspect malformed package manifest at ${path.relative(canonicalRoot, candidateRoot).replaceAll('\\', '/') || '.'}/package.json`;
+			}
+			// #3396 S3: reproduction-family lifecycle hooks (pretest/posttest,
+			// incl. repeated-prefix nested forms like prepretest) are base-checked
+			// in their own pass — they execute implicitly under `npm test`-family
+			// commands, never as optional-category obligations. Base-identical
+			// hooks (compound bodies screened by the #3396 S2 rules) are trusted;
+			// a PR-added or modified hook fails the run closed.
+			if (packageText) {
+				try {
+					const lifecycleValue = JSON.parse(packageText) as {
+						scripts?: Record<string, unknown>;
+					};
+					for (const [script, commandText] of Object.entries(
+						lifecycleValue.scripts ?? {},
+					)) {
+						if (!isLifecycleHookScriptName(script)) continue;
+						if (!categoryMatchesScriptName('reproduction', script)) continue;
+						if (typeof commandText !== 'string') {
+							discoveryOverflow = `Stage A reproduction lifecycle hook ${path.relative(canonicalRoot, candidateRoot).replaceAll('\\', '/') || '.'}/package.json#${script} has a non-string body`;
+							continue;
+						}
+						if (
+							isBaseIdenticalRepositoryScript(
+								canonicalRoot,
+								candidateRoot,
+								script,
+								commandText,
+								contractBase,
+							) &&
+							!hasDangerousCompoundSegment(commandText)
+						) {
+							continue;
+						}
+						discoveryOverflow = `Stage A reproduction lifecycle hook ${path.relative(canonicalRoot, candidateRoot).replaceAll('\\', '/') || '.'}/package.json#${script} was added or modified by this PR — npm executes it implicitly around the test script. Keep the hook byte-identical to the immutable merge base, authorize a base-identical .pr-validation.json validator, or remove the hook change from this PR`;
+					}
+				} catch {
+					// Malformed manifest already recorded above.
+				}
 			}
 		}
 		const pyprojectText = readPresentRepositoryText(
@@ -1961,6 +2288,58 @@ export async function executeRunPrFeedbackStageA(
 		);
 	} catch (error) {
 		return failure(error instanceof Error ? error.message : String(error));
+	}
+	// #3396 S1c: verify the caller-asserted base against the gate's durably
+	// bound PR_FEEDBACK merge base (resolved via one bounded gh pr view at
+	// activation). Matching → 'binding-verified'; differing → ignore the
+	// caller provenance entirely (no trusted base-identical scripts — the
+	// PR-added-script behavior becomes identical to no-provenance) and persist
+	// the bounded mismatch marker on the blocked path; no binding (resolution
+	// failed at activation, fail-open) → keep the disclosed caller-asserted
+	// floor.
+	let baseVerification:
+		| 'caller-asserted'
+		| 'binding-verified'
+		| 'binding-mismatch'
+		| 'none' = contractBase ? 'caller-asserted' : 'none';
+	if (contractBase) {
+		let boundBaseSha: string | undefined;
+		try {
+			const gateState = await readPrWorkflowGateState(
+				directory,
+				context.sessionID,
+			);
+			boundBaseSha =
+				gateState?.mode === 'PR_FEEDBACK'
+					? gateState.prFeedbackBaseSha
+					: undefined;
+		} catch {
+			boundBaseSha = undefined;
+		}
+		if (boundBaseSha) {
+			if (boundBaseSha === contractBase.baseSha) {
+				baseVerification = 'binding-verified';
+			} else {
+				baseVerification = 'binding-mismatch';
+				try {
+					await recordPrFeedbackBaseMismatch(
+						directory,
+						context.sessionID,
+						boundBaseSha,
+						contractBase.baseSha,
+					);
+				} catch {
+					// Best-effort evidence; the revocation below is the gate.
+				}
+				// #3396 S1c: ignore the caller provenance — the run CONTINUES
+				// with exactly the no-provenance behavior (trusted
+				// base-identical scripts unavailable; a run that needs them
+				// fails through the ordinary opaque-script path, and a run
+				// that needs none still succeeds). Persisting the mismatch
+				// marker above keeps durable evidence either way.
+				contractBase = undefined;
+			}
+		}
 	}
 	let applicableObligations: StageAObligation[];
 	try {
@@ -2059,6 +2438,24 @@ export async function executeRunPrFeedbackStageA(
 			);
 		}
 		const executable = normalizedExecutable(check.command);
+		// #3396 S3 (central, ahead of BOTH matching arms): a check command may
+		// not DIRECTLY select a lifecycle hook (`npm run prebuild`,
+		// `bun run pretest`, shorthand forms). Lifecycle hooks are base-checked
+		// as attached keys during discovery; running one directly would add
+		// another implicit execution layer (npm runs pre<pretest> for
+		// `npm run pretest` — plan-critic round-3 executed proof). The check
+		// must run the PRIMARY script, which executes its hooks implicitly.
+		{
+			const selectedScript = packageManagerSelectedScriptName(check.command);
+			if (
+				selectedScript !== undefined &&
+				isLifecycleHookScriptName(selectedScript)
+			) {
+				return failure(
+					`Stage A ${check.category} command directly selects the lifecycle hook "${selectedScript}" — run the primary script instead (lifecycle hooks execute implicitly and are base-checked as attached keys)`,
+				);
+			}
+		}
 		if (
 			selectedObligation &&
 			!commandMatchesObligationSource(
@@ -2422,17 +2819,36 @@ export async function executeRunPrFeedbackStageA(
 				applicableCategories,
 				applicableObligations,
 				// Record the base identity the trusted base-identical decisions
-				// consumed. The merge-base consistency check is internal-only —
-				// no durable PR_FEEDBACK base binding exists to verify against —
-				// so the receipt marks the trust floor for downstream detection
-				// instead of leaving base substitution silent (round-2 review).
-				...(contractBase
+				// consumed, under the NESTED baseIdentity option the record
+				// schema requires (#3396: the pre-fix call passed flat keys, so
+				// even the caller-asserted disclosure never persisted). The
+				// verification arm reflects the activation binding: verified
+				// match, caller-asserted floor (no binding), or none (no
+				// provenance — ALSO the arm a binding-mismatch run continues
+				// into: mismatch revokes the provenance and the run proceeds as
+				// no-provenance per #3396 S1c, with the mismatch identity
+				// persisted on the gate state in prFeedbackStageABaseMismatch
+				// rather than in this receipt).
+				baseIdentity: contractBase
 					? {
 							baseRef: contractBase.baseRef,
 							baseSha: contractBase.baseSha,
-							baseVerification: 'caller-asserted' as const,
+							// #3396 feedback (PRR-004): the strict child keeps
+							// the BASE two-value enum (rollback-safe floor);
+							// the 4-value verdict rides the root-level
+							// passthrough-safe prFeedbackStageABaseTrust.
+							baseVerification:
+								baseVerification === 'binding-verified'
+									? 'caller-asserted'
+									: baseVerification === 'binding-mismatch'
+										? 'none'
+										: baseVerification,
+							baseTrust: baseVerification,
 						}
-					: { baseVerification: 'none' as const }),
+					: {
+							baseVerification: 'none' as const,
+							baseTrust: 'none' as const,
+						},
 			},
 		);
 		// Success: do NOT persist full output. A successful Stage A run has no

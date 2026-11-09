@@ -146,7 +146,7 @@ const DECLARED_SITES: DeclaredSite[] = [
 		classification: 'foreign',
 		disposition: 'lane-permission-handled',
 		note:
-			'#3169 Phase 3 eager parentless lane create. Reached only on a CONFIRMED ' +
+			'#3169 Phase 3 eager lane create. Reached only on a CONFIRMED ' +
 			'parent-directory divergence; `directory` is the validated v1 caller ' +
 			'query.directory. Receives BOTH value classes: swarm worktree lane paths ' +
 			'(worktree-isolation handle.worktreePath — the lane directory resolves in its ' +
@@ -154,10 +154,11 @@ const DECLARED_SITES: DeclaredSite[] = [
 			'src/config/lane-permissions.ts, same as the v1 lane sites above) and, for ' +
 			'factory-from-lane callers, plugin-root directories (same-instance VALUES ' +
 			'arriving at this foreign-capable site; the disposition covers the lane case ' +
-			'and this sentence names the other). The create is parentless by design ' +
-			'(Phase 0 C1: a parented child would inherit the parent directory and ignore ' +
-			'the requested one); placement is verified post-create and mismatches are ' +
-			'removed and fail closed.',
+			'and this sentence names the other). The create carries the real parentID ' +
+			'(OpenCode 2.1 subagent resume requires it); because a parented child ' +
+			'inherits the parent directory (Phase 0 C1), the session is relocated with ' +
+			'session.move unless it already reports the requested directory. Placement ' +
+			'is verified post-create/post-move and failures are removed and fail closed.',
 	},
 	{
 		file: 'src/hooks/full-auto-intercept.ts',

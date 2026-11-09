@@ -297,12 +297,6 @@ describe('in-place editing', () => {
 		]);
 	});
 
-	test('perl -i edits file in place', () => {
-		expectWrites('perl -i -pe "s/foo/bar/" data.csv', [
-			{ category: 'inplace_edit', operator: 'perl -i', path: 'data.csv' },
-		]);
-	});
-
 	test('awk -i inplace edits file in place', () => {
 		expectWrites('awk -i inplace "{print $1}" records.txt', [
 			{ category: 'inplace_edit', operator: 'awk -i', path: 'records.txt' },
@@ -314,9 +308,12 @@ describe('in-place editing', () => {
 		expect(result.hasWrites).toBe(false);
 	});
 
-	test('perl without -i is not flagged', () => {
+	test('perl -pe (no -i) evaluates inline code — capability write', () => {
+		// #3572 N-12 re-pin relocated (FR-006 ratchet): see
+		// shell-write-detect-perl-cluster-n12.test.ts for the W7 pins.
 		const result = detectPosixWrites('perl -pe "print" file.txt');
-		expect(result.hasWrites).toBe(false);
+		expect(result.hasWrites).toBe(true);
+		expect(result.writes).toEqual([evalWrite('perl [eval]')]);
 	});
 
 	test('multiple files with sed -i', () => {
