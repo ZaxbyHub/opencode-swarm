@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.203.1",
+  "tagCommit": "52ec22c7aba725d33af4eb3b64cd68d33aeb63f0",
+  "targetCommitish": "52ec22c7aba725d33af4eb3b64cd68d33aeb63f0",
+  "releaseBodySha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "fragments": []
+}
