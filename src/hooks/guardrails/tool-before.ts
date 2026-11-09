@@ -81,6 +81,7 @@ import {
 	procSubSpanBodies,
 	resolveWriteTargets,
 	type WriteAnalysis,
+	setDetectionOptionsOverride,
 } from '../shell-write-detect';
 import {
 	PATCH_PAYLOAD_KEYS,
@@ -1617,6 +1618,16 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		const wrapperDeclaredHere = declaresWindowsWrapperLoose(command);
 		const windowsAuthoritative =
 			wrapperDeclaredHere || normalizedTool !== 'bash';
+		// #3616 D9: when the destructive-command policy is disabled, the
+		// detector emits flagged rm operands as ordinary write targets for the
+		// scope layer (see shell-write-detect's rm arm). The override covers
+		// this check's whole synchronous analysis+resolution span; the finally
+		// restores the default so no later caller inherits it.
+		const prevDetectionOptions =
+			cfg.block_destructive_commands === false
+				? ({ destructiveArmDisabled: true } as const)
+				: null;
+		setDetectionOptionsOverride(prevDetectionOptions);
 		const detect = (c: string): WriteAnalysis => {
 			const posix = detectPosixWrites(c);
 			if (windowsShell === null) return posix;
@@ -1818,6 +1829,9 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			analysis.writes,
 			shellDirectory,
 		);
+		// #3616 D9: restore the default detection options after the analysis +
+		// resolution span (the override was set ahead of the detect closure).
+		setDetectionOptionsOverride(null);
 
 		// #3347: the universal-deny → file-authority → declared-scope tail of
 		// the write loop, shared verbatim by resolved writes and by routed

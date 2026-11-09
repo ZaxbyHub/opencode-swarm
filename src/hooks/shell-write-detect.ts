@@ -417,6 +417,24 @@ const REDIRECT_ALL_WRITE_TOKENS = new Set([
 // ---------------------------------------------------------------------------
 
 /** Builtins that copy / move / link / resize files. */
+/**
+ * #3616 D9: detection-options override for the CURRENT synchronous gate pass.
+ * Set by tool-before around its analysis+resolution block (try/finally reset);
+ * the rm arm consults it so flagged operands emit as ordinary writes exactly
+ * when the destructive-command policy is disabled. Module-scoped by design —
+ * the gate is a synchronous single pass and threading a parameter through all
+ * ten collectWritesWithNodes recursion sites would duplicate state the walk
+ * already owns. Explain's dry-run never sets it (mirrors the live default).
+ */
+let detectionOptionsOverride: { destructiveArmDisabled?: boolean } | null = null;
+
+/** Set the detection-options override for the current synchronous pass. */
+export function setDetectionOptionsOverride(
+	options: { destructiveArmDisabled?: boolean } | null,
+): void {
+	detectionOptionsOverride = options;
+}
+
 const BUILTIN_WRITE_COMMANDS = new Set([
 	'cp',
 	'mv',
@@ -4643,7 +4661,28 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 	// extractor's flagless-null pin keep their current carriers.
 	if (lowerName === 'rm') {
 		const rmParse = parseRmOptionTokens(suffixWords);
-		if (rmParse.destructive) return results;
+		if (rmParse.destructive) {
+			// #3616 D9 (item 10, owner decision 2026-11-09): when the
+			// destructive-command policy is DISABLED, flagged rm operands are
+			// judged by the write-authorization scope layer instead — emit
+			// them as ordinary write targets (the same
+			// modeled-on-unlink/rmdir path the flagless arm uses), so a flag
+			// can never make a delete LESS checked. The destructive
+			// allowlist/protected-path rules stay off.
+			if (detectionOptionsOverride?.destructiveArmDisabled === true) {
+				for (const idx of rmParse.targetIndices) {
+					const operand = suffixWords[idx];
+					if (typeof operand === 'string' && operand !== '' && operand !== '--') {
+						results.push({
+							category: 'builtin_write',
+							operator: 'rm (destructive arm disabled)',
+							path: operand,
+						});
+					}
+				}
+			}
+			return results;
+		}
 		for (const idx of rmParse.targetIndices) {
 			const word = suffixWords[idx];
 			if (word === undefined || word === '') continue;
