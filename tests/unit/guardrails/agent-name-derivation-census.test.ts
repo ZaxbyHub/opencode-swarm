@@ -230,6 +230,12 @@ describe('agent-name derivation census (issue #3330 recurrence guardrail)', () =
 			'src/failures/action-identity.ts': { naive: 0, slice: 0 },
 			'src/hooks/incremental-verify.ts': { naive: 1, slice: 0 },
 		};
+		// The exact pin is only complete if it covers EVERY allowlisted file:
+		// a future allowlist entry without a row here would silently draw the
+		// one-occurrence budget from the walk while its count drifted free.
+		expect([...Object.keys(ALLOWLIST)].sort()).toEqual(
+			[...Object.keys(expected)].sort(),
+		);
 		for (const [rel, hits] of Object.entries(expected)) {
 			const normalized = fs
 				.readFileSync(path.join(repoRoot, rel), 'utf8')
