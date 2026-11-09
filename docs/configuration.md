@@ -523,6 +523,8 @@ Runs a type-checking or linting command after the coder agent completes.
 | `timeoutMs` | number | `30000` | Timeout in milliseconds (1000–300000) |
 | `triggerAgents` | string[] | `["coder"]` | Which agent names trigger the hook |
 
+`triggerAgents` entries match the dispatched subagent name exactly, its canonical role (suffix derivation), or its pre-derivation prefix-stripped form — the text after the first underscore, e.g. `custom` for `acme_custom` (compatibility leg).
+
 **Auto-detection order**: TypeScript → Go → Rust → Python → C#. Python emits a `SKIPPED` advisory if no command is set.
 
 **Example** — Python mypy configuration:

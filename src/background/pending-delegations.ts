@@ -67,6 +67,7 @@ import {
 	readPrWorkflowGateStateFromDisk,
 } from '../pr-review/persistence.js';
 import { readVerdictSettlementReceipt } from '../pr-review/verdict-settlement.js';
+import { flushRouteRetirementObligation } from '../review/route-invalidation-registry.js';
 import { telemetry } from '../telemetry.js';
 import { bunWrite } from '../utils/bun-compat.js';
 import {
@@ -5906,6 +5907,17 @@ function sweepStaleLocked(
 			result: livenessResult,
 			terminalResult: staleTerminal,
 		});
+		// #3564: the sweep just moved the record to a durable terminal status —
+		// its route-invalidation marker (if any) can never be consulted again
+		// (claimTerminalResult refuses non-pending/running; claimDelegationIngestion
+		// refuses swept terminal status), so discharge the retirement obligation
+		// now instead of letting dead occupancy accumulate toward the capacity
+		// wedge. Idempotent: no-op when no obligation exists.
+		flushRouteRetirementObligation(
+			directory,
+			record.parentSessionId,
+			record.callID,
+		);
 		// #2482 / #2244: the sweep just moved an open record to a durable
 		// terminal status WITHOUT the claim path emitting the terminal event
 		// — by definition its `delegation_begin` is unpaired. Emit the
@@ -6408,7 +6420,19 @@ export async function promoteDelegationFallback(
 					await fs.promises.unlink(fallbackPath(directory, correlationId));
 				} catch (err) {
 					if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
-						return null;
+						// #3577 (PRR-004): the record IS durably appended to the
+						// primary ledger at this point — the promotion succeeded;
+						// only the best-effort artifact cleanup failed. Returning
+						// null here made the completion observer flush the call's
+						// route-invalidation marker for a LIVE pending record
+						// (skipping its Stage-B route consult on a later
+						// delivery). The stale artifact file is inert: reads
+						// prefer the primary ledger, and a later promote attempt
+						// with the same identity resolves `current` from the
+						// primary and re-unlinks.
+						logger.warn(
+							`[background] fallback artifact for ${correlationId} could not be unlinked after promotion; the stale artifact is inert (primary record is authoritative)`,
+						);
 					}
 				}
 				return { source: 'primary' as const, record: promoted };

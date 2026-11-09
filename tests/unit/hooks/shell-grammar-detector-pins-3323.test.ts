@@ -56,12 +56,22 @@ describe('resolveWindowsWriteAuthority — wrapper declaration inputs', () => {
 	});
 
 	it.each([
-		['cmd /k copy a ..\\b'],
 		['echo cmd /c copy a ..\\b'],
 		['echo powershell -foo > out.txt'],
 		['echo pwsh -foo > out.txt'],
 	])('does not declare %s', (command) => {
 		expect(call(command)).toBeNull();
+	});
+
+	// #3572 review N-28 re-pin: the F-4 MSYS-parity widening INTENTIONALLY
+	// declares `cmd /k <payload>` (commit 40f4a3704 — cmd /k RUNS the
+	// payload, so the win32 authority must claim it). The escaping copy
+	// payload denies fail-closed at the gate (parse-fail on the merged
+	// walk) — the security property the old base-false pin incidentally
+	// co-held; the declaration itself is now true.
+	it('declares cmd /k copy a ..\\b (F-4 widening, intent re-pin)', () => {
+		expect(call('cmd /k copy a ..\\b')).not.toBeNull();
+		expect(call('cmd //k copy a ..\\b')).not.toBeNull();
 	});
 });
 

@@ -241,12 +241,12 @@ describe('guardrails adversarial - .swarm path evasion (sections 16-21)', () => 
 			await expect(hooks.toolBefore(input, output)).rejects.toThrow(/BLOCKED/);
 		});
 
-		test('rm src/temp.ts → ALLOWED (non-.swarm path)', async () => {
+		test('rm src/temp.ts → scope-checked write, re-pinned #3591 (rationale: rm-scope-3591)', async () => {
 			const config = defaultConfig();
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
 			const input = makeBashInput('test-session', 'rm src/temp.ts');
 			const output = makeBashOutput('rm src/temp.ts');
-			await expect(hooks.toolBefore(input, output)).resolves.toBeUndefined();
+			await expectScopeBlocked(hooks.toolBefore(input, output));
 		});
 
 		test('rm -rf .swarm/ → BLOCKED (recursive rm)', async () => {
@@ -467,12 +467,12 @@ describe('guardrails adversarial - .swarm path evasion (sections 16-21)', () => 
 			await expectScopeBlocked(hooks.toolBefore(input, output));
 		});
 
-		test('rm .swarm/file → ALLOWED when block_destructive_commands=false', async () => {
+		test('rm .swarm/file → scope-blocked write when block_destructive_commands=false, re-pinned #3591 (rationale: rm-scope-3591)', async () => {
 			const config = defaultConfig({ block_destructive_commands: false });
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
 			const input = makeBashInput('test-session', 'rm .swarm/file');
 			const output = makeBashOutput('rm .swarm/file');
-			await expect(hooks.toolBefore(input, output)).resolves.toBeUndefined();
+			await expectScopeBlocked(hooks.toolBefore(input, output));
 		});
 
 		test('move .swarm\\file .swarm\\renamed → ALLOWED when block_destructive_commands=false', async () => {

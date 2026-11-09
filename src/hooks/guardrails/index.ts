@@ -10,11 +10,7 @@
 import * as fsSync from 'node:fs';
 import * as path from 'node:path';
 
-import {
-	extractSwarmIdFromAgentName,
-	getSwarmAgents,
-	resolveFallbackModel,
-} from '../../agents/index';
+import { getSwarmAgents, resolveFallbackModel } from '../../agents/index';
 import { WRITE_TOOL_NAMES } from '../../config/constants';
 import {
 	type AuthorityConfig,
@@ -96,7 +92,6 @@ const MAX_PENDING_GATE_ROUTE_SESSIONS = 500;
 
 export const _internals = {
 	resolveParallelGateTaskAttribution,
-	extractSwarmIdFromAgentName,
 	getSwarmAgents,
 	getMostRecentAssistantText,
 	getProviderFailureFingerprint,

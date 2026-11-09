@@ -29,7 +29,7 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { CONFIG_CONSUMERS, type TopLevelConfigKey } from '../src/config/consumers';
-import { PluginConfigSchema } from '../src/config/schema';
+import { EFFECTIVE_AT_DATETIME_PATTERN, PluginConfigSchema } from '../src/config/schema';
 
 export const CONFIG_SCHEMA_RELATIVE_PATH = 'opencode-swarm.schema.json';
 export const CONFIG_DOCS_RELATIVE_PATH = 'docs/configuration.md';
@@ -107,6 +107,42 @@ function restoreAdversarialPairTupleBounds(schema: JsonSchemaObject): void {
 }
 
 /**
+ * Normalize the generated `pricing.effective_at` property to the shared
+ * runtime pattern (src/config/schema.ts EFFECTIVE_AT_DATETIME_PATTERN) in
+ * canonical `type, format, pattern` key order. The runtime schema pins the
+ * optional-seconds contract explicitly (zod 4.6 tightened `.datetime()` to
+ * required seconds); this normalization keeps the emitted artifact identical
+ * under zod 4.3.6 and 4.6.x regardless of the emitter's property ordering.
+ * Fails closed on an unrecognized shape rather than silently masking a
+ * future upstream change (trace 3501-3285-3527, #3501 AC2).
+ */
+function normalizeEffectiveAtDatetime(schema: JsonSchemaObject): void {
+	const pricing = asSchemaRecord(schema.properties?.pricing);
+	const properties = asSchemaRecord(pricing?.properties);
+	if (!properties) {
+		throw new Error(
+			'effective_at normalization refused: pricing properties missing from the generated schema',
+		);
+	}
+	const effectiveAt = asSchemaRecord(properties.effective_at);
+	if (!effectiveAt || effectiveAt.type !== 'string' || typeof effectiveAt.pattern !== 'string') {
+		throw new Error(
+			'effective_at normalization refused: unrecognized generated shape (expected a string type with a pattern)',
+		);
+	}
+	const rebuilt: Record<string, unknown> = {
+		type: 'string',
+		format: 'date-time',
+		pattern: EFFECTIVE_AT_DATETIME_PATTERN,
+	};
+	for (const [key, value] of Object.entries(effectiveAt)) {
+		if (key in rebuilt) continue;
+		rebuilt[key] = value;
+	}
+	properties.effective_at = rebuilt;
+}
+
+/**
  * Build the JSON Schema document for `opencode-swarm.json`.
  *
  * `io: 'input'` is mandatory: several fields (e.g. `default_agent`) use
@@ -123,6 +159,7 @@ export function buildConfigJsonSchema(): JsonSchemaObject {
 		io: 'input',
 	}) as JsonSchemaObject;
 	restoreAdversarialPairTupleBounds(generated);
+	normalizeEffectiveAtDatetime(generated);
 	generated.additionalProperties = false;
 	return {
 		$schema: 'https://json-schema.org/draft/2020-12/schema',

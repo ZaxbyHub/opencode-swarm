@@ -147,22 +147,6 @@ export function stripSwarmPrefix(
 }
 
 /**
- * Extract the swarm ID from a prefixed agent name.
- * For multi-swarm configurations, agent names are prefixed: "swarmId_agentName"
- * For the default swarm, agent names have no prefix.
- *
- * Example: "local_coder" -> "local", "coder" -> undefined (default swarm)
- * The regex matches everything before the first underscore.
- */
-export function extractSwarmIdFromAgentName(
-	agentName: string,
-): string | undefined {
-	if (!agentName) return undefined;
-	const match = agentName.match(/^([^_]+)_/);
-	return match ? match[1] : undefined;
-}
-
-/**
  * Get the model for an agent within a specific swarm config
  */
 function getModelForAgent(
@@ -261,7 +245,7 @@ export function resolveFallbackModel(
  *
  * @param swarmId - The swarm ID to retrieve config for. Defaults to 'default' for the default swarm.
  *                  For multi-swarm configs, use the swarm's ID (e.g., 'local', 'fast', 'precise').
- *                  Can also be extracted from a prefixed agent name using extractSwarmIdFromAgentName().
+ *                  Can also be derived from a prefixed agent name using deriveSwarmIdentity() (src/config/schema).
  */
 export function getSwarmAgents(
 	swarmId?: string,

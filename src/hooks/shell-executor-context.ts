@@ -17,12 +17,37 @@
  * see the payload.
  */
 
-/** cmd.exe switches that may appear before /c or /k (optionally :on/:off). */
-const CMD_SWITCH = String.raw`\/[a-z](?::(?:on|off))?`;
+/**
+ * cmd.exe switches that may appear before /c or /k (optionally :on/:off).
+ * `\/{1,2}` covers the MSYS double-slash spelling (#3491 publication
+ * condition): Git Bash translates `cmd //k "…"` to `/k` when spawning the
+ * native binary (executed ground truth: `cmd //k "copy a b"` copies), so the
+ * authority must select for both spellings.
+ */
+const CMD_SWITCH = String.raw`\/{1,2}[a-z](?::(?:on|off))?`;
 
-/** Statement-position cmd /c declaration (switch-tolerant). */
+/**
+ * cmd.exe binary head, BARE or ABSOLUTE path-qualified (#3539 W6 / RC-8):
+ * `cmd`, `cmd.exe`, `C:\Windows\System32\cmd.exe`, `C:/Windows/System32/cmd.exe`,
+ * `/usr/bin/cmd`, `\Windows\system32\cmd.exe` — case-insensitive (all these
+ * regexes carry /i), optional extension, both separator directions. RELATIVE
+ * spellings (`./cmd`, `somedir\cmd`) deliberately do NOT match: they name
+ * project-local programs, not the Windows shell (the same absolute-only rule
+ * the destructive verb normalizer applies).
+ */
+const CMD_BINARY = String.raw`(?:cmd|(?:[A-Za-z]:)?(?:[\\/][^\s\\/]*)*[\\/]cmd)(?:\.exe)?`;
+
+/**
+ * Statement-position cmd /c or /k declaration (switch-tolerant). #3539
+ * closure F-4: /k parity — `cmd /k copy a b` executes the payload and KEEPS
+ * the shell open (executed ground truth: the copy happens), so the win32
+ * authority must select for it exactly as for /c; the strip prefix below
+ * already modeled `\/[ck]`. #3491 publication condition: `\/{1,2}` also
+ * selects the MSYS double-slash spelling (`cmd //c`, `cmd //k`) — Git Bash
+ * passes the single-slash switch to the native binary (executed GT).
+ */
 export const CMD_WRAPPER_DECLARATION = new RegExp(
-	String.raw`(?:^|[;|&\n])\s*cmd(?:\.exe)?\s+(?:${CMD_SWITCH}\s+)*\/c(?:\s|$)`,
+	String.raw`(?:^|[;|&\n])\s*${CMD_BINARY}\s+(?:${CMD_SWITCH}\s+)*\/{1,2}[ck](?:\s|$)`,
 	'i',
 );
 
@@ -57,13 +82,13 @@ export function declaresWindowsWrapperLoose(command: string): boolean {
  * detected like bare `cmd /c copy a b`.
  */
 export const CMD_BUILTIN_PREFIX = new RegExp(
-	String.raw`(?:(?:^|\s)(?:if\s+(?:not\s+)?exist\s+(?:"[^"]*"|\S+)\s+)|(?:^|[;|&\n])\s*cmd(?:\.exe)?\s+(?:${CMD_SWITCH}\s+)*\/c\s+|(?:^|\s)(?:call|start)\s+)*`,
+	String.raw`(?:(?:^|\s)(?:if\s+(?:not\s+)?exist\s+(?:"[^"]*"|\S+)\s+)|(?:^|[;|&\n])\s*${CMD_BINARY}\s+(?:${CMD_SWITCH}\s+)*\/{1,2}[ck]\s+|(?:^|\s)(?:call|start)\s+)*`,
 	'i',
 );
 
-/** Strip pattern for a cmd /c or /k wrapper with any switches. */
+/** Strip pattern for a cmd /c or /k wrapper with any switches (both slash spellings). */
 export const CMD_STRIP_PREFIX = new RegExp(
-	String.raw`^cmd(?:\.exe)?\s+(?:${CMD_SWITCH}\s+)*\/[ck]\s+`,
+	String.raw`^${CMD_BINARY}\s+(?:${CMD_SWITCH}\s+)*\/{1,2}[ck]\s+`,
 	'i',
 );
 
