@@ -165,6 +165,12 @@ describe('#3591 Fix 6 shared two-pass parse (parseRmOptionTokens)', () => {
 		expect(p.targetIndices).toEqual([1, 2]);
 	});
 
+	test('`--` after an operand ends option parsing (late -rf is a target)', () => {
+		const p = parseRmOptionTokens(['x', '--', '-rf', 'y']);
+		expect(p.destructive).toBe(false);
+		expect(p.targetIndices).toEqual([0, 2, 3]);
+	});
+
 	test('a bare `-` is an operand, never an option', () => {
 		const p = parseRmOptionTokens(['-', 'x']);
 		expect(p.destructive).toBe(false);
@@ -315,6 +321,8 @@ describe('#3591 re-pins relocated from guardrails-swarm-path-evasion.adversarial
 			);
 		} catch (error) {
 			message = (error as Error).message;
+		} finally {
+			resetSwarmState();
 		}
 		// Denied by the write-authorization layer…
 		expect(message).toMatch(/SCOPE_NOT_DECLARED/);
@@ -341,6 +349,8 @@ describe('#3591 re-pins relocated from guardrails-swarm-path-evasion.adversarial
 			);
 		} catch (error) {
 			message = (error as Error).message;
+		} finally {
+			resetSwarmState();
 		}
 		// PR #3615 feedback PRR-010 (hermes Minor): pin the EXACT layer —
 		// the write-authorization SCOPE_NOT_DECLARED denial, and NOT the
@@ -369,6 +379,17 @@ describe('#3591 Fix 6 gate verdicts (coder, scope src/)', () => {
 		'rm src/a src/b',
 	])('%s → ADMIT (in-scope operands)', async (command) => {
 		const got = await gate(command);
+		expect(got.verdict).toBe('ADMITTED');
+	}, 30_000);
+
+	test('rm src/a -- -rf denies as a scope write, not a destructive flag', async () => {
+		const got = await gate('rm src/a -- -rf');
+		expect(got.verdict).toBe('DENIED');
+		expect(got.message).toMatch(/SCOPE_VIOLATION/);
+	}, 30_000);
+
+	test('rm src/a -- src/-rf admits (the token after -- is an in-scope target)', async () => {
+		const got = await gate('rm src/a -- src/-rf');
 		expect(got.verdict).toBe('ADMITTED');
 	}, 30_000);
 
