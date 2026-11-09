@@ -60,6 +60,15 @@ export function createPhaseMonitorHook(
 			typeof input === 'object' && input !== null
 				? (input as { sessionID?: string }).sessionID
 				: undefined;
+		// #3320/#3383: a SESSIONLESS system-surface call (title/summary/
+		// agent-generation surfaces) has no request-correlation key and no
+		// delivery owner — do no session-keyed work: no plan load (loadPlan
+		// itself persists plan.md), no curator-init delegation (which writes
+		// the briefing and its review receipt via persistReviewReceipt), no
+		// briefing write. Mirrors the system-enhancer guard (#3320), which
+		// keys on falsy sessionID — empty-string and null IDs are sessionless
+		// here too.
+		if (!sessionId) return;
 		const plan = await loadPlan(directory);
 		if (!plan) return;
 

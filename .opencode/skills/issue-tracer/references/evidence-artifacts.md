@@ -29,6 +29,18 @@ next-action: <free text, one line>
 
 Gate rows (`plan-critic`, `implementation-review`, `final-critic`, `merge-approval`) are appended, never edited.
 
+### Rebind rows (post-approval head drift)
+
+When a gate's approval row binds a head that has since moved (typically the `plan-critic` row, approved at the pre-implementation head before implementation commits land), `trace-check.sh rebind --gate <plan-critic|implementation-review|final-critic> --reason <text> --slug <slug>` validates the drift and **prints** the rebind row (the validator stays read-only - the caller appends it to the `## Gates` table verbatim):
+
+```text
+| plan-critic | APPROVE | <new-head> | <new-tree> | 06-critic-review.md rebind(<reason>) |
+```
+
+Rebind rows are append-only like every gate row; the original approval row is never edited or removed, and the printed row is the only sanctioned shape (an `APPROVE` verdict with a `rebind(<reason>)` marker appended to the original artifact cell). A rebind is bookkeeping for head drift, **not a re-approval**: it is valid only while the artifact the critic reviewed (the plan) is unchanged. If the plan, its assumptions, or the reviewed artifact changed, do not rebind - run a fresh critic round and record it in `06b-critic-recheck.md` (or the 09b delta artifact for the implementation/final gates) instead; phase 3's `artifact_identity_matches_gate_or_rebind` accepts the chain (historical APPROVE row matching the artifact's identity pair + a rebind-marked row binding the current head) and phases 4.5/4.6 keep the strict check, so those gates still require a fresh delta artifact when they drift.
+
+The rebind row is the explicit, recorded form of what used to be disclosed as prose next to the two known FAILs (`gate-plan-critic` + `artifact-identity-plan-critic`) that a post-implementation phase-3 re-sweep produced.
+
 ## `01-issue-summary.md`
 
 ```markdown
@@ -341,6 +353,17 @@ no-defect-class: true
 ## Justification
 [Reason this change has zero behavioral surface - one line.]
 ```
+
+## Mutation battery honesty (when the guardrail demonstration is a mutant suite)
+
+When a guardrail demonstration (or any evidence claim) is backed by a mutation battery - a script that flips one guarded condition per probe and expects the mapped test family to fail - the battery itself is evidence and must be honest:
+
+- **One cwd change.** Run every probe from a single shell state. A `cd` that compounds per probe (for example a second `cd backend` inside the loop) can leave pytest pointed at the wrong directory so no tests run at all; every probe then "passes" vacuously - the PR #1093 failure mode, where a first battery reported 8/8 KILLED while pytest had never run.
+- **Per-probe verdicts from the pytest summary.** KILLED only when the probe's own test id appears in the pytest summary as failed, SURVIVED only when it passes, and PROBE-ERROR when pytest produced no summary line (collection error, harness crash). Never classify PROBE-ERROR as KILLED, and never infer a verdict from a probe script's own exit code alone.
+- **Per-probe logs.** Keep each probe's full output in a file (for example `repro/mutants/<probe>.log`) and cite the directory; a bare "16/16 KILLED" with no logs is not evidence.
+- **Repo-relative capture paths.** Generate probes and logs with paths relative to the repo root so they resolve from the single shell state, and copy repro scripts with repo-relative `--copy` arguments.
+- **Re-anchor after edits.** Any post-battery edit that moves lines (lint `--fix`, formatting, later commits on top) can shift what the probes mutate; re-run the battery and re-record verdicts after such edits, the same way a line-keyed SAST baseline must be re-anchored before the gate re-runs.
+- **Exemplar:** ragappv3 PR #1093's `repro/mutation-battery.sh` (16 probes with per-probe logs under `repro/mutants/`, rebuilt after the original double-`cd` battery was found vacuous).
 
 ## `08b-implementation-review.md`
 

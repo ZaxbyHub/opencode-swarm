@@ -1,5 +1,7 @@
 /**
- * #3169 Phase 3 — eager parentless lane sessions in the v2 session-client shim.
+ * #3169 Phase 3 — eager lane sessions in the v2 session-client shim (the
+ * parented create + move placement contract is pinned in
+ * session-client-lane-parent-move.test.ts).
  *
  * Pins the lane-placement contract (trace 3169-epic-v2-phase3-isolated-coders,
  * approved plan Changes 1/1b/3/4):

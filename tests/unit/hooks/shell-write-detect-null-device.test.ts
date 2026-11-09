@@ -331,14 +331,24 @@ describe('shell-write-detect: perl in-place forms keep the real file', () => {
 		// Real perl rewrites FILE. perl has no detached backup suffix, so
 		// ./s.pl is the script and FILE the file.
 		['perl -i ./s.pl FILE', false],
-		['perl -i -pe1 FILE', false],
-		['perl -i -pes/a/b/ FILE', false],
-		['perl -i -wpe1 FILE', false],
-		['perl -i -0777pe1 FILE', false],
+		// #3491 W7 re-pin: glued CLUSTER forms (`-pe1`, `-pes/a/b/`, `-wpe1`,
+		// `-0777pe1`, `-le1`) carry the e member with an ATTACHED code
+		// argument — real perl executes that inline code (`perl -i -pe1 FILE`
+		// runs code `1` per line; verified against perl 5.36 on this host).
+		// The old positional matcher only saw `-e`-led tokens, and these rows
+		// pinned its evalToo=false residual (the RC-3 fail-open class); the
+		// frozen C8 check pins `perl -pe CODE` as a denied eval, so the glued
+		// spellings now classify identically.
+		['perl -i -pe1 FILE', true],
+		['perl -i -pes/a/b/ FILE', true],
+		['perl -i -wpe1 FILE', true],
+		['perl -i -0777pe1 FILE', true],
 		// Reported conservatively: without -p/-n real perl never reads FILE,
 		// but the detector cannot tell whether the script loops over <>.
-		['perl -i -le1 FILE', false],
-		['perl -le print -i FILE', false],
+		// `-le1` evaluates its attached `1`, and `-le print` hands `print` to
+		// e as its code word (W7 cluster grammar; perl 5.36 ground truth).
+		['perl -i -le1 FILE', true],
+		['perl -le print -i FILE', true],
 		['perl -i -e1 FILE', true],
 		['perl -i.bak -e1 FILE', true],
 		['perl -i -es/a/b/ FILE', true],

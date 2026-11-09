@@ -150,6 +150,61 @@ export function stripKnownSwarmPrefix(agentName: string): string {
 	return getCanonicalAgentRole(agentName);
 }
 
+/** Resolved agent-name identity: the canonical role plus the derived swarm id. */
+export interface SwarmIdentity {
+	/** Canonical lowercase role (a `getCanonicalAgentRole` result). */
+	readonly role: string;
+	/**
+	 * Derived swarm id, or `undefined` for the default swarm. Only a real
+	 * `<swarmId>_<role>` suffix slices an id; the slice is RAW-case (so
+	 * case-carrying ids like `Case_coder` -> `Case` survive), and a sliced id
+	 * containing an underscore can never match a configured swarm (schema:
+	 * swarm ids must not contain underscores) and fails closed to `undefined`.
+	 */
+	readonly swarmID: string | undefined;
+}
+
+/**
+ * THE shared guarded derivation of an agent name's (role, swarm id) pair
+ * (issues #3330/#3331/#3322 — the #2960/#3324 defect class). Every caller that
+ * needs a swarm id from an agent name must route through here instead of
+ * reimplementing a first-underscore split or an unguarded length-delta slice.
+ *
+ * Semantics (the guarded #3324 shape, enforced by
+ * tests/unit/guardrails/agent-name-derivation-census.test.ts and pinned by
+ * tests/unit/agents/agent-name-swarm-id.test.ts):
+ * - `role = getCanonicalAgentRole(agentName)` — case-insensitive, longest
+ *   canonical-role suffix wins, separators `_`, `-` and space all derive the
+ *   role.
+ * - The id is sliced ONLY when the name ends with `_<role>` (case-insensitive
+ *   match, RAW slice) and has at least one character before the separator.
+ * - Hyphen/space separators derive the role but never slice an id
+ *   (`code-coder` -> `{ coder, undefined }`); a case variant with no prefix
+ *   (`Coder` -> `{ coder, undefined }`) and an underscore role with no prefix
+ *   (`test_engineer` -> `{ test_engineer, undefined }`) resolve the default
+ *   swarm; a doubled separator (`local__coder` -> sliced id `local_`) fails
+ *   closed to `undefined` because no configured swarm key may contain `_`.
+ */
+export function deriveSwarmIdentity(agentName: string): SwarmIdentity {
+	const role = getCanonicalAgentRole(agentName);
+	if (!agentName || role === agentName) {
+		return { role, swarmID: undefined };
+	}
+	const lowerName = agentName.toLowerCase();
+	const lowerRole = role.toLowerCase();
+	if (
+		lowerRole.length > 0 &&
+		lowerName.length > lowerRole.length + 1 &&
+		lowerName.endsWith(`_${lowerRole}`)
+	) {
+		const sliced = agentName.slice(0, agentName.length - role.length - 1);
+		if (sliced.length > 0 && !sliced.includes('_')) {
+			return { role, swarmID: sliced };
+		}
+	}
+	return { role, swarmID: undefined };
+}
+
 // Per-agent extended-reasoning block. Mirrors the OpenCode SDK's
 // `reasoning` field on AgentConfig (e.g. Anthropic Claude reasoning effort).
 // This is distinct from the swarm-plugin's own `variant` field: `variant` is
@@ -223,10 +278,25 @@ export const ModelPricingConfigSchema = z.object({
 });
 export type ModelPricingConfig = z.infer<typeof ModelPricingConfigSchema>;
 
+/**
+ * Deliberate contract for `pricing.effective_at`: RFC 3339 timestamps with
+ * OPTIONAL seconds (pinned when the exact zod pin landed in #2558). zod
+ * 4.6 tightened `.datetime()` to required seconds, so the field pins the
+ * legacy pattern explicitly — runtime validation and the generated JSON
+ * Schema artifact share this one source (scripts/generate-config-schema.ts
+ * normalizes the emitted property to it, keeping the artifact identical
+ * under zod 4.3.6 and 4.6.x; trace 3501-3285-3527, #3501 AC2).
+ */
+export const EFFECTIVE_AT_DATETIME_PATTERN = String.raw`^(?:(?:\d\d[2468][048]|\d\d[13579][26]|\d\d0[48]|[02468][048]00|[13579][26]00)-02-29|\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\d|30)|(?:02)-(?:0[1-9]|1\d|2[0-8])))T(?:(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d+)?)?(?:Z))$`;
+
 export const PricingConfigSchema = z.object({
 	currency: z.literal('USD').optional().default('USD'),
 	version: z.string().min(1).max(128).optional(),
-	effective_at: z.string().datetime().optional(),
+	effective_at: z
+		.string()
+		.regex(new RegExp(EFFECTIVE_AT_DATETIME_PATTERN))
+		.meta({ format: 'date-time' })
+		.optional(),
 	billing_basis: z.enum(['token', 'request', 'subscription']).optional(),
 	reported_cost_currency: z
 		.record(z.string().min(1).max(128), z.literal('USD'))

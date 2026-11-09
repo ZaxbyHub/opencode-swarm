@@ -13,7 +13,7 @@
  * single thing most likely to be got backwards, and asserting on our own object
  * shape would not catch it.
  */
-import { describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { getHostDataDir } from '../../../src/config/cache-paths';
@@ -110,6 +110,21 @@ describe('regression (MEDIUM-4): the lane ruleset must not revoke host base allo
 	//
 	// Our catch-all deny sits in front of these, so anything we do not re-grant
 	// is silently REVOKED inside a lane. This test pins exactly which survive.
+	// #3355: the bunfig sdd-selection preload sets XDG_CONFIG_HOME for the
+	// whole process; this suite's fixtures describe the XDG-UNSET world (every
+	// path derives from os.homedir()). Pin it SCOPED — a collection-time
+	// delete would leak into every later file of an aggregate `bun test` run
+	// and defeat the preload for them (implementation-review finding 1), so
+	// snapshot-and-restore around each test (the gateInternals precedent).
+	const savedXdgConfigHome = process.env.XDG_CONFIG_HOME;
+	beforeEach(() => {
+		delete process.env.XDG_CONFIG_HOME;
+	});
+	afterEach(() => {
+		if (savedXdgConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
+		else process.env.XDG_CONFIG_HOME = savedXdgConfigHome;
+	});
+
 	const toolOutputGlob = path
 		.join(os.homedir(), '.local', 'share', 'opencode', 'tool-output', '*')
 		.split(path.sep)
