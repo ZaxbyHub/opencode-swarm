@@ -70,9 +70,11 @@ async function gateVerdict(
 		);
 		return { allow: true, message: '' };
 	} catch (error) {
+		const text = (error as Error).message ?? '';
+		if (!/BLOCKED|SCOPE_/.test(text)) throw error;
 		return {
 			allow: false,
-			message: (error as Error).message.split('\n')[0] ?? '',
+			message: text.split('\n')[0] ?? '',
 		};
 	} finally {
 		resetSwarmState();
@@ -98,7 +100,8 @@ function svVerdict(root: string, command: string): 'allow' | 'deny' {
 		// evaluateScopeValidate's deny channel, but any unrelated error must
 		// fail the leg loudly instead of masquerading as a deny verdict.
 		const message = (error as Error).message ?? '';
-		if (/ROOT_ESCAPE|SCOPE|DESTRUCTIVE/i.test(message)) return 'deny';
+		if (/\b(?:ROOT_ESCAPE|SCOPE_[A-Z_]+|DESTRUCTIVE_COMMAND)\b/.test(message))
+			return 'deny';
 		throw error;
 	}
 }
@@ -145,6 +148,24 @@ describe('#3591 parity: flagless in-scope — all surfaces allow', () => {
 		expect(got.explainScope).toBe('allow');
 		expect(got.explainNoScope).toBe('allow');
 		expect(got.sv).toBe('allow');
+	}, 30_000);
+});
+
+describe('#3591 parity: quoted and escaped destructive flags — all deny', () => {
+	// PR #3615 feedback PRR-002: the boundary decode must hold on every
+	// surface, not only the live gate.
+	test.each([
+		['rm "-rf" ../../outside'],
+		["rm '-rf' ../../outside"],
+		['rm \\-rf ../../outside'],
+		['rm "--recursive" ../../outside'],
+		['rm "-rf" .git'],
+	])('%s: gate/explain(±scope)/scope_validate all deny', async (command) => {
+		const got = await allSurfaces(command);
+		expect(got.gate).toBe(false);
+		expect(got.explainScope).toBe('block');
+		expect(got.explainNoScope).toBe('block');
+		expect(got.sv).toBe('deny');
 	}, 30_000);
 });
 

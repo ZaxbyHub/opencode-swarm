@@ -73,9 +73,11 @@ async function gate(
 		);
 		return { verdict: 'ADMITTED', message: '' };
 	} catch (error) {
+		const text = (error as Error).message ?? '';
+		if (!/BLOCKED|SCOPE_/.test(text)) throw error;
 		return {
 			verdict: 'DENIED',
-			message: (error as Error).message.split('\n')[0] ?? '',
+			message: text.split('\n')[0] ?? '',
 		};
 	} finally {
 		resetSwarmState();
