@@ -105,7 +105,7 @@ describe('createPhaseMonitorHook', () => {
 			stubCuratorRunner,
 		);
 
-		await hook({}, {});
+		await hook({ sessionID: 'sess-phase-monitor-test' }, {});
 
 		// Should NOT call checkAndTrigger on first call (phase initialization)
 		expect(mockCheckAndTrigger).not.toHaveBeenCalled();
@@ -123,10 +123,10 @@ describe('createPhaseMonitorHook', () => {
 		);
 
 		// First call - initialize
-		await hook({}, {});
+		await hook({ sessionID: 'sess-phase-monitor-test' }, {});
 
 		// Second call with same phase (plan.json unchanged)
-		await hook({}, {});
+		await hook({ sessionID: 'sess-phase-monitor-test' }, {});
 
 		// Should NOT call checkAndTrigger (same phase)
 		expect(mockCheckAndTrigger).not.toHaveBeenCalled();
@@ -151,7 +151,7 @@ describe('createPhaseMonitorHook', () => {
 		);
 
 		// First call - initialize phase 1
-		await hook({}, {});
+		await hook({ sessionID: 'sess-phase-monitor-test' }, {});
 		mockCheckAndTrigger.mockClear();
 
 		// Second call: phase 2 - plan must contain BOTH phases to look up previous phase
@@ -174,7 +174,7 @@ describe('createPhaseMonitorHook', () => {
 		]);
 
 		// Third call - phase changed
-		await hook({}, {});
+		await hook({ sessionID: 'sess-phase-monitor-test' }, {});
 
 		// Should call checkAndTrigger with correct arguments
 		expect(mockCheckAndTrigger).toHaveBeenCalledWith(
@@ -194,7 +194,7 @@ describe('createPhaseMonitorHook', () => {
 		);
 
 		// Should not throw - safeHook wraps and swallows errors
-		const result = await hook({}, {});
+		const result = await hook({ sessionID: 'sess-phase-monitor-test' }, {});
 		expect(result).toBeUndefined();
 
 		// Should not call checkAndTrigger
@@ -214,7 +214,7 @@ describe('createPhaseMonitorHook', () => {
 		);
 
 		// First call - initialize
-		await hook({}, {});
+		await hook({ sessionID: 'sess-phase-monitor-test' }, {});
 		mockCheckAndTrigger.mockClear();
 
 		// Corrupt the plan.json so loadPlan fails on second call
@@ -225,7 +225,7 @@ describe('createPhaseMonitorHook', () => {
 		);
 
 		// Should not throw - error is swallowed by safeHook
-		const result = await hook({}, {});
+		const result = await hook({ sessionID: 'sess-phase-monitor-test' }, {});
 		expect(result).toBeUndefined();
 
 		// checkAndTrigger should not have been called due to error
@@ -254,7 +254,7 @@ describe('createPhaseMonitorHook', () => {
 		);
 
 		// First call
-		await hook({}, {});
+		await hook({ sessionID: 'sess-phase-monitor-test' }, {});
 		mockCheckAndTrigger.mockClear();
 
 		// Change to phase 2 - include both phases
@@ -272,7 +272,7 @@ describe('createPhaseMonitorHook', () => {
 			{ id: 2, tasks: [{ id: '2.1', status: 'pending' }] },
 		]);
 
-		await hook({}, {});
+		await hook({ sessionID: 'sess-phase-monitor-test' }, {});
 
 		// Should count 3 completed out of 5
 		expect(mockCheckAndTrigger).toHaveBeenCalledWith(2, 3, 5);
@@ -291,7 +291,7 @@ describe('createPhaseMonitorHook', () => {
 		);
 
 		// First call
-		await hook({}, {});
+		await hook({ sessionID: 'sess-phase-monitor-test' }, {});
 		mockCheckAndTrigger.mockClear();
 
 		// Change to phase 3, but phases only contain 2 and 3 (phase 1 is missing)
@@ -300,7 +300,7 @@ describe('createPhaseMonitorHook', () => {
 			{ id: 3, tasks: [{ id: '3.1', status: 'pending' }] },
 		]);
 
-		await hook({}, {});
+		await hook({ sessionID: 'sess-phase-monitor-test' }, {});
 
 		// Should call checkAndTrigger with 0, 0 for missing phase 1 data
 		expect(mockCheckAndTrigger).toHaveBeenCalledWith(3, 0, 0);

@@ -35,6 +35,7 @@ import {
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
+import { ORCHESTRATOR_NAME } from '../config/agent-names.js';
 import { createKnowledgeInjectorHook } from '../hooks/knowledge-injector.js';
 import {
 	appendKnowledge,
@@ -45,7 +46,7 @@ import type {
 	MessageWithParts,
 	SwarmKnowledgeEntry,
 } from '../hooks/knowledge-types.js';
-import { swarmState } from '../state.js';
+import { getPrimaryOwner, swarmState } from '../state.js';
 import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache.js';
 
 export type InstructionPairingDirectivePriority =
@@ -235,7 +236,19 @@ function makeMessages(sessionId: string): { messages: MessageWithParts[] } {
 	// #2526: src/ never constructs role:'system' entries — the hook resolves
 	// the agent via swarmState.activeAgent and the session from any message
 	// info, so the user message alone is the complete host input here.
-	swarmState.activeAgent.set(sessionId, 'architect');
+	// #3372: never re-stamp a session that already carries identity state —
+	// a foreign or already-owned session keeps its live activeAgent entry for
+	// the whole measurement. Only when the entry is absent does the harness
+	// create one, resolving through the #3320 primary-owner record; ownerless
+	// synthetic pairing sessions keep the ORCHESTRATOR_NAME fallback so the
+	// injector still resolves a swarm context for them.
+	const existing = swarmState.activeAgent.get(sessionId);
+	if (existing === undefined) {
+		swarmState.activeAgent.set(
+			sessionId,
+			getPrimaryOwner(sessionId) ?? ORCHESTRATOR_NAME,
+		);
+	}
 	return {
 		messages: [
 			{
@@ -245,6 +258,14 @@ function makeMessages(sessionId: string): { messages: MessageWithParts[] } {
 		],
 	};
 }
+
+/**
+ * Test seam (#3372): direct binding to the production composer so tests can
+ * drive the exact identity lifecycle `measureInvocation` drives. Deliberately
+ * the production function itself — a wrapper here would defeat the seam's
+ * purpose (pinned by tests/unit/memory/instruction-pairing-identity*.test.ts).
+ */
+export const _internals = { makeMessages };
 
 function injectedText(output: { messages: MessageWithParts[] }): string {
 	return output.messages
@@ -353,6 +374,47 @@ async function measureInvocation(
 /** sessionId -> temp project root, for events-file-based hit detection. */
 const sessionTempRoot = new Map<string, string>();
 
+/**
+ * Refcounted in-flight registry for the synthetic pairing sessions' identity
+ * lifecycle (#3372, implementation-review rounds 1-2). Concurrent runs with
+ * colliding synthetic ids cannot restore one another's temporary entries:
+ * the ORIGINAL prior state is captured once by the FIRST holder, and only the
+ * LAST holder to finish performs the cleanup — earlier finishers do nothing.
+ * (A per-run prior capture restores another run's temporary value; a
+ * stamped-value token cannot distinguish invocations that stamp the same
+ * agent name — both were reviewer-executed counterexamples.)
+ */
+const pairingIdentityHolds = new Map<
+	string,
+	{ count: number; priorAgent: string | undefined }
+>();
+
+function holdPairingSessionIdentity(sessionId: string): void {
+	const existing = pairingIdentityHolds.get(sessionId);
+	if (existing) {
+		existing.count += 1;
+		return;
+	}
+	pairingIdentityHolds.set(sessionId, {
+		count: 1,
+		priorAgent: swarmState.activeAgent.get(sessionId),
+	});
+}
+
+function releasePairingSessionIdentity(sessionId: string): void {
+	const hold = pairingIdentityHolds.get(sessionId);
+	if (!hold) return;
+	hold.count -= 1;
+	// Another in-flight run still owns the entry — the last one out cleans up.
+	if (hold.count > 0) return;
+	pairingIdentityHolds.delete(sessionId);
+	if (hold.priorAgent === undefined) {
+		swarmState.activeAgent.delete(sessionId);
+	} else {
+		swarmState.activeAgent.set(sessionId, hold.priorAgent);
+	}
+}
+
 async function runTaskPairing(
 	task: InstructionPairingTask,
 	injectCharBudget: number,
@@ -360,6 +422,10 @@ async function runTaskPairing(
 	const root = mkdtempSync(path.join(tmpdir(), `pairing-${task.id}-`));
 	const sessionId = `pairing-${task.id}`;
 	sessionTempRoot.set(sessionId, root);
+	// #3372: hold the session's identity for this run — the refcounted
+	// registry guarantees the ORIGINAL prior state is restored by the last
+	// concurrent holder to finish (see pairingIdentityHolds).
+	holdPairingSessionIdentity(sessionId);
 	try {
 		await materializeTaskStore(root, task);
 		const config = pairingConfig(injectCharBudget);
@@ -431,7 +497,9 @@ async function runTaskPairing(
 		};
 	} finally {
 		// Invariant-8 hygiene: never leave synthetic pairing sessions mapped.
-		swarmState.activeAgent.delete(sessionId);
+		// The refcounted release restores the ORIGINAL prior state (last
+		// holder out) — see pairingIdentityHolds.
+		releasePairingSessionIdentity(sessionId);
 		sessionTempRoot.delete(sessionId);
 		rmSync(root, { recursive: true, force: true });
 	}
@@ -449,6 +517,9 @@ async function verifyCacheInvalidation(): Promise<{
 	const root = mkdtempSync(path.join(tmpdir(), 'pairing-invalidation-'));
 	const sessionId = 'pairing-invalidation';
 	sessionTempRoot.set(sessionId, root);
+	// #3372: same refcounted identity hold for this DISTINCT synthetic
+	// session ('pairing-invalidation') — last holder out restores.
+	holdPairingSessionIdentity(sessionId);
 	try {
 		mkdirSync(path.join(root, '.swarm'), { recursive: true });
 		const briefingPath = path.join(root, '.swarm', 'curator-briefing.md');
@@ -481,7 +552,9 @@ async function verifyCacheInvalidation(): Promise<{
 		};
 	} finally {
 		// Invariant-8 hygiene: never leave synthetic pairing sessions mapped.
-		swarmState.activeAgent.delete(sessionId);
+		// The refcounted release restores the ORIGINAL prior state (last
+		// holder out) — see pairingIdentityHolds.
+		releasePairingSessionIdentity(sessionId);
 		sessionTempRoot.delete(sessionId);
 		rmSync(root, { recursive: true, force: true });
 	}

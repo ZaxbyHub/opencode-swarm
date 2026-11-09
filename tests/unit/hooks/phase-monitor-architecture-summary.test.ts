@@ -117,9 +117,9 @@ describe('phase-monitor architecture summary aggregation', () => {
 		writePlan(1, [1]);
 
 		const hook = createPhaseMonitorHook(tempDir, undefined, stubCuratorRunner);
-		await hook({}, {}); // init phase 1
+		await hook({ sessionID: 's-archsum' }, {}); // init phase 1
 		writePlan(2, [1, 2]);
-		await hook({}, {}); // transition 1 -> 2 triggers aggregation of phase 1
+		await hook({ sessionID: 's-archsum' }, {}); // transition 1 -> 2 triggers aggregation of phase 1
 
 		const summary = readPhaseArchitectureSummary(tempDir, 1);
 		expect(summary).not.toBeNull();
@@ -133,9 +133,9 @@ describe('phase-monitor architecture summary aggregation', () => {
 		writePlan(1, [1]);
 
 		const hook = createPhaseMonitorHook(tempDir, undefined, stubCuratorRunner);
-		await hook({}, {});
+		await hook({ sessionID: 's-archsum' }, {});
 		writePlan(2, [1, 2]);
-		await hook({}, {});
+		await hook({ sessionID: 's-archsum' }, {});
 
 		expect(readPhaseArchitectureSummary(tempDir, 1)).toBeNull();
 	});

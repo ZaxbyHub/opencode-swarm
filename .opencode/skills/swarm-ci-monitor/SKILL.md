@@ -5,26 +5,27 @@ description: >
   researches every CI failure, fixes it end-to-end, iterates until all required
   checks are green (max 5 fix cycles), then merges. Use only after human review
   is complete and the PR is approved. Composes ci-fix-monitor for
-  failure-type-specific fix recipes. This is the first skill in the repo that
-  executes a merge — invoke it deliberately.
+  failure-type-specific fix recipes. It executes a merge (as does
+  swarm-pr-feedback's drive-to-merge run) — invoke it deliberately.
 disable-model-invocation: true
 metadata:
   audience: swarm-plugin
-  swarm-contract-digest: c1572cc54760
+  swarm-contract-digest: "db0fcef20ebe"
 ---
 
 # Swarm CI Monitor
 
 Drives a reviewed-and-approved PR to a merged state by monitoring its CI,
 exhaustively researching every failure, fixing it end-to-end, and iterating
-until all required checks are green — then merging via `gh pr merge` with no
-merge-strategy flag, so it works correctly whether the base branch merges
+until all required checks are green — then merging via `gh pr merge`, with no
+merge-strategy flag on a merge-queue base and the repository's allowed method
+on a direct base, so it works correctly whether the base branch merges
 directly or requires a merge queue (see Step 4).
 
 This is **not** a fresh review skill and **not** a PR-creation skill. It is the
 terminal closeout hop for a PR that is already approved and just needs to get
-green and merge. It is the first skill in opencode-swarm that performs a merge,
-so it carries extra safety gates.
+green and merge. It performs a merge (as does swarm-pr-feedback's drive-to-merge
+run), so it carries extra safety gates.
 
 ## Hard precondition
 
@@ -228,7 +229,8 @@ gate is Step 4b. Run this step fresh every time control reaches Step 4 —
 including after a Step 2 loop-back — never skip it because an earlier pass
 already ran once in this invocation.
 
-1. Re-fetch check runs for the **current** PR head SHA. If any required check
+1. Re-fetch check runs for the **current** PR head SHA, and record that SHA:
+   Step 4a merges only that commit. If any required check
    is stale (ran against an older SHA) → `gh run rerun --failed` for the
    transient/failed run, or wait and re-fetch at most 3× (~1 min apart); if
    still stale after that, escalate per Step 5. Never merge on a stale-green
@@ -255,17 +257,40 @@ run it in addition to, never instead of, Step 3.
 ### 4a. Execute the merge
 
 ```
-gh pr merge <N>
+gh pr merge <N> --repo <owner>/<repo> --match-head-commit <SHA>           # merge-queue base: no method flag
+gh pr merge <N> --repo <owner>/<repo> --match-head-commit <SHA> --merge   # direct base, when merge commits are the method
+gh pr merge <N> --repo <owner>/<repo> --match-head-commit <SHA> --squash  # direct base, when squash is the method
+gh pr merge <N> --repo <owner>/<repo> --match-head-commit <SHA> --rebase  # direct base, when rebase is the method
 ```
 
-- **No merge-strategy flag.** Do not pass `--squash`, `--merge`, or
-  `--rebase`. Per `gh pr merge --help`: "When targeting a branch that requires
-  a merge queue, no merge strategy is required" — this skill must work
-  correctly whether or not the base branch requires a merge queue, so let
-  branch protection determine the method rather than assuming squash.
-  `contributing.md`'s merge-queue/merge-commit guidance may describe a different (or
-  stale) configuration for a given deployment of this repo; do not assume it
-  applies without checking the actual outcome below.
+Tell the two bases apart with this command (it works in bash and PowerShell; take
+`<base>` from `gh pr view <N> --repo <owner>/<repo> --json baseRefName`):
+
+```
+gh api graphql -f owner=<owner> -f name=<repo> -f branch=<base> -f query='query($owner: String!, $name: String!, $branch: String!) { repository(owner: $owner, name: $name) { mergeQueue(branch: $branch) { id } } }'
+```
+
+A non-null `mergeQueue` means the base has a merge queue, and `null` means a
+direct base. If the call fails, ask the user; never guess.
+
+- **`--match-head-commit <SHA>` always.** Pass the head SHA Step 3 recorded, so
+  a commit pushed after the re-check cannot be merged unchecked. With an MCP
+  merge tool, pass its head-SHA parameter (for example `expectedHeadSha`); if
+  the tool has none, do not merge through it — surface the merge to the user.
+- **Merge-strategy flag only where the base needs one.** On a base that
+  requires a merge queue, pass no `--squash`, `--merge`, or `--rebase`. Per
+  `gh pr merge --help`: "When targeting a branch that requires a merge queue,
+  no merge strategy is required", and the queue determines the method. On a
+  direct-merge base, a non-interactive `gh pr merge` refuses without a method:
+  - pass the method the repository contract names;
+  - otherwise pass the only one `gh repo view <owner>/<repo> --json
+    mergeCommitAllowed,squashMergeAllowed,rebaseMergeAllowed` reports as
+    allowed;
+  - when several are allowed and none is named, ask the user. Never guess.
+
+  `contributing.md`'s merge-queue/merge-commit guidance may describe a
+  different (or stale) configuration for a given deployment of this repo; do
+  not assume it applies without checking the actual outcome below.
 - **No `--admin`.** Never bypass required checks, review, or a merge queue.
   If branch protection does not permit the invoking user to bypass, `--admin`
   simply fails — do not use it as a workaround for a stuck merge.
@@ -282,7 +307,7 @@ gh pr merge <N>
    the queue, not merged directly. This is **not a failure.** GitHub re-runs
    the required workflows against the queued change on top of the current base
    (and any earlier-queued PRs) before merging; there is no commit SHA yet.
-   Poll `gh pr view <N> --json state,mergedAt,mergeCommit,mergeStateStatus`
+   Poll `gh pr view <N> --repo <owner>/<repo> --json state,mergedAt,mergeCommit,mergeStateStatus`
    every 1-2 minutes. Do not apply 4b's short mismatch-retry window to this
    state — a queue entry can legitimately take several minutes to tens of
    minutes while it re-runs required workflows from scratch. Escalate as a
@@ -306,12 +331,12 @@ git object DB — so this gate does not share the stale-fetch failure mode of
 Steps 2 and 3:
 
 ```
-git fetch origin <base-branch>
-git rev-parse origin/<base-branch>
+git fetch <remote> <base-branch>     # <remote> points at <owner>/<repo>
+git rev-parse <remote>/<base-branch>
 ```
 
 The merge SHA captured in 4a (case 1 or case 2) must equal
-`origin/<base-branch>`. The GitHub API can report `state: MERGED` under
+`<remote>/<base-branch>`. The GitHub API can report `state: MERGED` under
 eventual-consistency lag; the local object DB cannot lie — once fetched, the
 commit either is or is not the base tip.
 
@@ -370,8 +395,8 @@ Ignore these thoughts; they are shortcuts that cause broken merges:
 - **commit-pr**: owns the commit/push discipline. This skill composes it for
   every push inside the loop.
 - **swarm-pr-subscribe**: owns background PR monitoring and event triage. This
-  skill is the explicit, user-invoked, merge-terminated path; it does not
-  depend on the background poller.
+  skill is an explicit, user-invoked, merge-terminated path (swarm-pr-feedback's
+  drive-to-merge run is the other); it does not depend on the background poller.
 - **swarm-pr-review** / **swarm-pr-feedback**: own review and known-feedback
   resolution. This skill assumes that work is already done (Step 1 gate 2).
 - **durable-session-state**: owns persisting state across context compaction.

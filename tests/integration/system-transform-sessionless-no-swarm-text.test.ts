@@ -20,6 +20,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
+import path from 'node:path';
 import { cancelDeferredMaintenanceScans } from '../../src/hooks/system-enhancer';
 import type { AgentSessionState } from '../../src/state';
 import { resetSwarmState, swarmState } from '../../src/state';
@@ -134,4 +135,99 @@ describe('registered system.transform without sessionID emits no swarm text (#33
 		// system-transform-global-mode-fallback.test.ts:87-148).
 		expect(output.system.join('\n')).not.toContain(producerMarker);
 	});
+});
+
+/**
+ * #3383 AC2 — the zero-swarm-text / zero-.swarm-writes sessionless contract
+ * must also hold when the composed chain INCLUDES the phase monitor.
+ *
+ * The cases above boot with knowledge disabled, so createPhaseMonitorHook was
+ * never part of the sessionless journey. Here the same registered-host boot
+ * runs with knowledge ENABLED, which composes createPhaseMonitorHook into
+ * `experimental.chat.system.transform` (src/index.ts composition:
+ * `knowledgeConfig.enabled ? createPhaseMonitorHook(...) : undefined`); the
+ * `automation.capabilities.phase_preflight` branch composes the identical
+ * hook but requires background automation managers (mode !== 'manual'), which
+ * is deliberately NOT booted here to keep the sessionless journey
+ * deterministic and offline.
+ *
+ * A minimal valid plan sits on disk so the sessionless phase-monitor call has
+ * everything it needs to misbehave: at base (defect 2) it runs loadPlan
+ * (materializing .swarm/plan.md + review receipts), invokes the real curator
+ * delegate factory with an undefined session, and writes
+ * .swarm/curator-briefing.md through the REAL offline curator runner. Those
+ * writes make this case RED at base — the composed-surface leak of defect 2 —
+ * and it must go GREEN once the sessionless invocation is guarded.
+ */
+describe('registered system.transform without sessionID writes nothing when knowledge composes the phase monitor (#3383 AC2)', () => {
+	let directory: string;
+	let host: Awaited<ReturnType<typeof bootSwarmPluginHost>>;
+	let isolatedEnv: ReturnType<typeof createIsolatedTestEnv>;
+
+	beforeAll(async () => {
+		isolatedEnv = createIsolatedTestEnv();
+		directory = createPluginHostProject('sessionless-knowledge-no-writes-3383');
+		fs.mkdirSync(path.join(directory, '.swarm'), { recursive: true });
+		fs.writeFileSync(
+			path.join(directory, '.swarm', 'plan.json'),
+			JSON.stringify({
+				schema_version: '1.0.0',
+				title: 'Sessionless composed-chain probe plan',
+				swarm: 'local',
+				phases: [{ id: 1, name: 'Phase 1', status: 'pending', tasks: [] }],
+			}),
+			'utf-8',
+		);
+		host = await bootSwarmPluginHost(directory, {
+			knowledge: { enabled: true, hive_enabled: false },
+			memory: { enabled: false },
+			hooks: { delegation_gate: false, system_enhancer: true },
+			context_budget: { scoring: { enabled: false } },
+		});
+	});
+
+	afterAll(() => {
+		try {
+			cancelDeferredMaintenanceScans(directory);
+			resetSwarmState();
+			fs.rmSync(directory, { recursive: true, force: true });
+		} catch {
+			// SQLite handles may remain open briefly on Windows; best effort only.
+		} finally {
+			isolatedEnv.cleanup();
+		}
+	});
+
+	it('does not run the composed phase monitor when the call has no sessionID', async () => {
+		const output = { system: ['base system seed'] };
+		await host.hooks['experimental.chat.system.transform'](
+			{ model: { providerID: 'x', modelID: 'y' } },
+			output,
+		);
+		// Same zero-swarm-text contract as the knowledge-disabled cases above.
+		expect(output.system.join('\n')).toContain('base system seed');
+		expect(output.system.join('\n')).not.toContain('## 🚀 TURBO MODE ACTIVE');
+		expect(output.system.join('\n')).not.toContain(
+			'## ⚡ FULL-AUTO MODE ACTIVE',
+		);
+		expect(output.system.join('\n')).not.toContain(
+			'[PLANNING PROFILE — CURRENT RUNTIME AUTHORITY]',
+		);
+		// Zero .swarm writes for the artifacts the AC names — loadPlan's
+		// plan.md materialization, its review-receipts side effect, and the
+		// curator-init briefing write. (A whole-tree diff is NOT sound here:
+		// the plugin's deferred post-boot work (bundled-skills sync,
+		// config-doctor, repo-graph, telemetry) lands during the first await
+		// window after server() resolves, which is unrelated to the
+		// sessionless call.)
+		expect(
+			fs.existsSync(path.join(directory, '.swarm', 'curator-briefing.md')),
+		).toBe(false);
+		expect(fs.existsSync(path.join(directory, '.swarm', 'plan.md'))).toBe(
+			false,
+		);
+		expect(
+			fs.existsSync(path.join(directory, '.swarm', 'review-receipts')),
+		).toBe(false);
+	}, 30_000);
 });
