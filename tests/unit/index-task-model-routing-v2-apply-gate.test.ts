@@ -438,6 +438,9 @@ describe('index task-model routing — v2 apply gate + route swarm-id derivation
 			['call-malformed', 'local__coder'],
 			['call-multi', 'mega_local_coder'],
 			['call-case', 'Case_coder'],
+			// Whitespace-padded (trailing space): the route must derive from the
+			// TRIMMED name like resolveTaskRouteModelChain, not fail closed.
+			['call-padded', ' Case_coder '],
 		] as const) {
 			await plugin['tool.execute.before']?.(
 				{ tool: 'Task', sessionID: PARENT_SESSION, callID } as never,
@@ -456,6 +459,7 @@ describe('index task-model routing — v2 apply gate + route swarm-id derivation
 		expect(byCall.get('call-malformed')).toBeDefined();
 		expect(byCall.get('call-multi')).toBeDefined();
 		expect(byCall.get('call-case')).toBeDefined();
+		expect(byCall.get('call-padded')).toBeDefined();
 		// Doubled separator: derived id contains an underscore -> default swarm.
 		expect(byCall.get('call-malformed')?.swarmID).toBeUndefined();
 		// Multi-token prefix: same fail-closed direction.
@@ -464,5 +468,7 @@ describe('index task-model routing — v2 apply gate + route swarm-id derivation
 		expect(byCall.get('call-case')?.swarmID).toBe('Case');
 		// The RAW dispatched name is preserved for the advance arm.
 		expect(byCall.get('call-case')?.agentName).toBe('Case_coder');
+		// Padded name: same swarm id the chain resolver derives (raw case kept).
+		expect(byCall.get('call-padded')?.swarmID).toBe('Case');
 	});
 });

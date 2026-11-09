@@ -4880,8 +4880,10 @@ async function initializeOpenCodeSwarm(
 						// digests only, never a swarm id after this change).
 						// agentName preserves the RAW dispatched name so the
 						// session.error advance arm resolves the same identity the
-						// chat boundary sees.
-						swarmID: deriveSwarmIdentity(toolBeforeArgs.subagent_type).swarmID,
+						// chat boundary sees. The swarm id is derived from the
+						// TRIMMED name, exactly as resolveTaskRouteModelChain does.
+						swarmID: deriveSwarmIdentity(toolBeforeArgs.subagent_type.trim())
+							.swarmID,
 						agentName: toolBeforeArgs.subagent_type,
 					});
 				}
