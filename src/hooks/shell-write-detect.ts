@@ -23,7 +23,7 @@
  * @module shell-write-detect
  */
 
-import { readFileSync, statSync } from 'node:fs';
+import { lstatSync, readFileSync, readlinkSync, statSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type {
@@ -8840,13 +8840,90 @@ function resolvePath(pathText: string | null, cwd: string): string | null {
 	// need win32 resolution; POSIX paths use posix resolution.
 	const isWindowsPath = /^[a-zA-Z]:[\\\\/]/.test(cwd) || cwd.includes('\\');
 	if (isWindowsPath) {
-		return path.win32.resolve(cwd, pathText);
+		return resolveThroughSymlinksWin32(pathText, cwd);
 	}
 	const normalizedRelativeWindowsPath =
 		!path.posix.isAbsolute(pathText) && !/^[a-zA-Z]:[\\/]/.test(pathText)
 			? pathText.replace(/\\/g, '/')
 			: pathText;
-	return path.posix.resolve(cwd, normalizedRelativeWindowsPath);
+	return resolveThroughSymlinksPosix(normalizedRelativeWindowsPath, cwd);
+}
+
+/**
+ * #3616 D8 (item 9): POSIX shells resolve `..` through the REAL directory a
+ * symlink component points at, not lexically. `link/../src/x` with
+ * link → another tree names a file in THAT tree while the lexical collapse
+ * names `src/x` (in scope) — the gate admitted and Linux deleted the file in
+ * the other tree (executed by the filing final critic). Left-to-right prefix
+ * resolution: walk the components cumulatively; at each intermediate
+ * component consult lstat — a symlink/junction component substitutes its
+ * real target before the walk continues (bounded by the component count). A
+ * non-ENOENT lstat failure returns null (unresolved → fail-closed deny).
+ * Windows/MSYS resolves `..` lexically too, so BOTH resolvers run the walk
+ * (a junction is a symlink on win32 — the gate-side judgment reproduces on
+ * this host and is pinned by C9).
+ */
+function resolveThroughSymlinksPosix(pathText: string, cwd: string): string | null {
+	const lexical = path.posix.resolve(cwd, pathText);
+	if (!path.posix.isAbsolute(pathText)) {
+		// Relative operand: resolve against cwd with symlink-aware prefix walk.
+		return resolveSymlinkAware(cwd, pathText, path.posix, (p) => p);
+	}
+	return resolveSymlinkAware(cwd, pathText, path.posix, (p) => p) ?? lexical;
+}
+
+function resolveThroughSymlinksWin32(pathText: string, cwd: string): string | null {
+	return resolveSymlinkAware(cwd, pathText, path.win32, (p) => p);
+}
+
+/**
+ * Shared symlink-aware resolution core. Anchored at `anchor` (an absolute
+ * directory), the operand's components are applied left-to-right; every
+ * intermediate accumulated prefix that exists is lstat'd — a symlink/junction
+ * component is replaced by its real target (readlink) before continuing, so
+ * a later `..` collapses against the REAL parent. ENOENT prefixes are
+ * skipped (the write may not exist yet); any other lstat/readlink failure
+ * fails closed (null).
+ */
+function resolveSymlinkAware(
+	anchor: string,
+	pathText: string,
+	pathImpl: typeof path.posix | typeof path.win32,
+	_normalize: (p: string) => string,
+): string | null {
+	// Fast path: no `..` at all — lexical resolve is exact.
+	if (!pathText.includes('..')) {
+		return pathImpl.resolve(anchor, pathText);
+	}
+	// Split the operand into components; resolve cumulatively from the anchor.
+	const absolute = pathImpl.isAbsolute(pathText);
+	let current = absolute ? pathImpl.parse(pathText).root : anchor;
+	const rest = absolute ? pathText.slice(pathImpl.parse(pathText).root.length) : pathText;
+	const components = rest.split(/[\\/]+/).filter((c) => c !== '' && c !== '.');
+	for (const component of components) {
+		if (component === '..') {
+			const parent = pathImpl.dirname(current);
+			current = parent === current ? current : parent;
+			continue;
+		}
+		let next = pathImpl.join(current, component);
+		// Consult lstat on every intermediate component (the final component
+		// too — a symlink LEAF write target redirects the write).
+		try {
+			const stat = lstatSync(next, { throwIfNoEntry: false });
+			if (stat?.isSymbolicLink()) {
+				const target = readlinkSync(next);
+				next = pathImpl.isAbsolute(target)
+					? target
+					: pathImpl.resolve(pathImpl.dirname(next), target);
+			}
+		} catch {
+			// Non-ENOENT failure (or readlink failure): fail closed.
+			return null;
+		}
+		current = next;
+	}
+	return current;
 }
 
 /**
