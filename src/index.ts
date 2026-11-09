@@ -4146,7 +4146,7 @@ async function initializeOpenCodeSwarm(
 											advanced.modelString,
 										);
 									} else if (noRouteApply.ambiguous) {
-										log(
+										logV2ApplySkip(
 											`v2 model apply skipped: registered roster keys collide case-insensitively for ${sanitizeDiagnosticScope(routeModel.exactAgentName)}`,
 										);
 									} else if (noRouteSurface) {
@@ -6826,7 +6826,7 @@ function sanitizeDiagnosticScope(value: string): string {
 // apply skipped" diagnostics must only fire on a v2 host — on v1 the
 // applyV2AgentModelOverride call is a no-op and the advance lands at the
 // chat.message boundary, so a skip line would misreport. The no-route arm
-// gates the same way via noRouteSurface.
+// uses the same helper for its collide line and noRouteSurface for no-key.
 function logV2ApplySkip(message: string): void {
 	if (hasV2AgentTransformSurface()) log(message);
 }
