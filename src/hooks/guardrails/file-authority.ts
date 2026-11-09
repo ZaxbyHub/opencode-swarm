@@ -30,6 +30,7 @@ import {
 	isPathWithinDeclaredScope,
 	type PathFlavor,
 	pathIdentitiesEqual,
+	redactPath,
 	sanitizeDiagnosticText,
 	unsafePathTextReason,
 } from '../../scope/path-identity';
@@ -984,6 +985,37 @@ function denyAuthority(
 	const safeAgent = sanitizeDiagnosticText(agent, 96);
 	const safePath = sanitizeDiagnosticText(normalizedPath, 320);
 	const safeDetail = sanitizeDiagnosticText(input.detail, 640);
+	// #3587 (v2): the REASON's path slot stays WORKSPACE-RELATIVE (the
+	// pre-change display — escaping-write pins match the ../shape, so a
+	// resolved-absolute render is wrong here) with two home-fold rules: an
+	// ABSOLUTE normalizedPath (invalid-path arm, cross-drive arm) folds via
+	// redactPath; an ESCAPING relative path (../ prefix — provably outside
+	// the workspace, so a home/Users segment there is the real profile root,
+	// not a workspace dir name) folds that segment to ~. Ordinary relative
+	// and non-home absolute paths render unchanged. The structured `path`
+	// field (consumed by scope-guard and the audit channel) keeps its
+	// pre-change sanitized value. The invalid-path arm passes the RAW caller
+	// input (pre-normalization, backslashes on win32), so the display source
+	// is slash-normalized first — otherwise `..\Users\<name>\…` shapes dodge
+	// both fold branches (#3587 review round).
+	const displaySource = normalizedPath.replace(/\\/g, '/');
+	// #3587 review round: the escaping probe runs on the NORMALIZED form so
+	// non-canonical spellings (`./..`, `src/../..`) share the message
+	// channel's fold decision — same-class disagreement, killed in the
+	// helper first.
+	const escapingProbe = path.posix.normalize(displaySource);
+	// Non-escaping displays always route through the LEXICAL redactPath
+	// (pre-change host-normalized form on non-profile shapes), so a
+	// Windows-profile spelling folds even on POSIX hosts where `C:/…` is not
+	// path-absolute.
+	let reasonDisplay = redactPath(displaySource);
+	if (escapingProbe.startsWith('../')) {
+		reasonDisplay = escapingProbe.replace(
+			/(^|\/)(?:home|Users)\/[^/]+/g,
+			'$1~',
+		);
+	}
+	const safeReasonPath = sanitizeDiagnosticText(reasonDisplay, 320);
 	return {
 		allowed: false,
 		code: input.code,
@@ -992,7 +1024,7 @@ function denyAuthority(
 		path: safePath,
 		agent: safeAgent,
 		reason: sanitizeDiagnosticText(
-			`${input.code}: Path blocked: ${safeDetail} [agent=${safeAgent}; path=${safePath}]`,
+			`${input.code}: Path blocked: ${safeDetail} [agent=${safeAgent}; path=${safeReasonPath}]`,
 			1024,
 		),
 		recovery: input.recovery,

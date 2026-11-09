@@ -10,6 +10,11 @@
 import path from 'node:path';
 import { z } from 'zod';
 import {
+	dcAnalyzeLauncherUncertainty,
+	dcPreprocessWrappers,
+	dcUnwrapWrappersBounded,
+} from '../hooks/guardrails/destructive-command';
+import {
 	checkFileAuthority,
 	checkWriteTargetForSymlink,
 } from '../hooks/guardrails/file-authority';
@@ -186,9 +191,104 @@ export function evaluateScopeValidate(
 	) {
 		fail('DESTRUCTIVE_COMMAND', 'destructive command intent is not permitted');
 	}
-	const { analysis, command } = detectWrites(args);
+	// #3569 core: route posix commands through the SAME canonical wrapper
+	// preprocessing the write gate and the explain service use
+	// (dcPreprocessWrappers — chdir-bearing wrapper segments rewrite to
+	// `( cd -- 'DIR' && inner )` so the wrapped command's writes resolve at
+	// the child cwd). Without this, scope_validate resolved a wrapped
+	// `tee`/`dd` operand at the parent cwd and diverged from the gate.
+	// Merged with #3568's residual-aware detectWrites (main): the resolver
+	// runs on the preprocessed command, and detectWrites' residualCommand
+	// substitution still applies on top.
+	const preprocessed =
+		args.shell === 'posix' ? dcPreprocessWrappers(args.command) : null;
+	if (preprocessed?.failClosed) {
+		fail('UNPARSEABLE_COMMAND', 'command could not be parsed safely');
+	}
+	const preprocessedCommand =
+		preprocessed?.changed && !preprocessed.failClosed
+			? preprocessed.command
+			: args.command;
+	const detectArgs: ScopeValidateArgs =
+		preprocessedCommand === args.command
+			? args
+			: { ...args, command: preprocessedCommand };
+	const { analysis: preAnalysis, command: residualCommand } =
+		detectWrites(detectArgs);
+	const detectionCommand = residualCommand;
+	let analysis = preAnalysis;
 	if (analysis.parseError) {
 		fail('UNPARSEABLE_COMMAND', 'command could not be parsed safely');
+	}
+	// #3569 4.5 r4 (reviewer Important): the gate compensates for the
+	// preprocessor serializing brace words QUOTED (the preprocessed text
+	// loses the expansion) by unioning the RAW analysis back (PRR-006
+	// filter). scope_validate must union too or it ALLOWS wrapper+brace
+	// shapes the gate denies (env -C src sed -i {s/a/b/,../../outside} y).
+	if (detectionCommand !== args.command) {
+		const { analysis: rawAnalysis } = detectWrites(args);
+		const seen = new Set(
+			analysis.writes.map(
+				(w) => `${w.category}\u0000${w.operator}\u0000${w.path ?? ''}`,
+			),
+		);
+		const regained = rawAnalysis.writes.filter(
+			(w) =>
+				!(
+					w.category === 'interpreter_eval' &&
+					w.path === null &&
+					!w.operator.endsWith('[eval stdin]')
+				) &&
+				// Dedupe against the preprocessed analysis (the gate's
+				// duplicate keys collapse downstream; sv renders the
+				// target list, so collapse here).
+				!seen.has(`${w.category}\u0000${w.operator}\u0000${w.path ?? ''}`),
+		);
+		if (regained.length > 0) {
+			analysis = {
+				...analysis,
+				writes: [...analysis.writes, ...regained],
+				hasWrites: analysis.hasWrites || regained.length > 0,
+			};
+		}
+		// #3590 feedback (copilot review): the RAW analysis's depth refusal
+		// must survive the union (mirror tool-before's mergeWriteAnalyses
+		// OR) — a wrapper chain the bound cannot inspect never reports safe
+		// here.
+		if (rawAnalysis.unwrapDepthExceeded) {
+			analysis = { ...analysis, unwrapDepthExceeded: true };
+		}
+	}
+	// #3590 feedback (copilot review): fail-closed BEFORE the no-writes
+	// early return — the detector sets this flag precisely so consumers
+	// refuse an uninspectable wrapper chain even when it yields zero
+	// writes (parity with tool-before).
+	if (analysis.unwrapDepthExceeded) {
+		fail(
+			'UNPARSEABLE_COMMAND',
+			'shell wrapper nesting exceeds the inspection bound — rejecting for safety',
+		);
+	}
+	// #3572 review N-16: the live gate consults the launcher deny-on-
+	// uncertainty channel and the paranoid-bound depth flag BEFORE its no-
+	// write early return and BEFORE grammar dispatch, so parity requires both
+	// channels for EVERY shell grammar (the reviewer's cmd/powershell
+	// question: the live gate denies `sudo -i` on the raw command regardless
+	// of the detected grammar).
+	const uncertainty = dcAnalyzeLauncherUncertainty(args.command);
+	if (uncertainty.deny) {
+		fail(
+			'UNPARSEABLE_COMMAND',
+			uncertainty.reason ||
+				'launcher option uncertainty — command could not be verified safely',
+		);
+	}
+	const bounded = dcUnwrapWrappersBounded(args.command);
+	if (bounded.depthExceeded) {
+		fail(
+			'UNPARSEABLE_COMMAND',
+			'shell wrapper nesting exceeds the inspection bound — command could not be verified safely',
+		);
 	}
 	if (!analysis.hasWrites) {
 		return {
@@ -199,7 +299,14 @@ export function evaluateScopeValidate(
 		};
 	}
 
-	const resolved = resolveWriteTargets(command, analysis.writes, directory);
+	// Detection and resolution must use the SAME string (the resolver
+	// re-parses it for cwd tracking — the gate's own contract; the
+	// residual substitution is already folded into detectionCommand).
+	const resolved = resolveWriteTargets(
+		detectionCommand,
+		analysis.writes,
+		directory,
+	);
 	const targets: ScopeValidateTarget[] = [];
 	for (const target of resolved) {
 		if (!target.resolved || !target.resolvedPath) {

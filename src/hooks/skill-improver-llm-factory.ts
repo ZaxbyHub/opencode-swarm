@@ -14,7 +14,7 @@
  */
 
 import { getSwarmAgents, resolveFallbackModel } from '../agents/index.js';
-import { stripKnownSwarmPrefix } from '../config/schema.js';
+import { deriveSwarmIdentity } from '../config/schema.js';
 import { throwIfProviderMessageError } from '../failures/provider-message-error';
 import { swarmState } from '../state.js';
 import { telemetry } from '../telemetry.js';
@@ -141,11 +141,8 @@ export function createSkillImproverLLMDelegate(
 			// route through the configured skill_improver fallback chain. Uses
 			// stripKnownSwarmPrefix — NOT a naive `_`-split — because `skill_improver`
 			// itself contains an underscore. Mirrors src/turbo/lean/reviewer.ts.
-			const baseRole = stripKnownSwarmPrefix(agentName);
-			const swarmId =
-				baseRole !== agentName
-					? agentName.slice(0, agentName.length - baseRole.length - 1)
-					: undefined;
+			const { role: baseRole, swarmID: swarmId } =
+				deriveSwarmIdentity(agentName);
 			const swarmAgents = getSwarmAgents(swarmId);
 
 			// Capture the session id as a const so the type narrows to `string`

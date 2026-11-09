@@ -21,7 +21,7 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { getSwarmAgents, resolveFallbackModel } from '../../agents/index';
-import { stripKnownSwarmPrefix } from '../../config/schema';
+import { deriveSwarmIdentity } from '../../config/schema';
 import { throwIfProviderMessageError } from '../../failures/provider-message-error';
 import type { ReviewModelDispatcher } from '../../review/contracts';
 import {
@@ -162,11 +162,8 @@ function resolveLegacyCriticModelConfig(
 	// fence exists only for older direct callers that still rely on getAgentConfigs.
 	if (config?.dispatcher || config?.agentModelRegistry) return undefined;
 
-	const agentBaseName = stripKnownSwarmPrefix(agentName);
-	const swarmId =
-		agentBaseName !== agentName
-			? agentName.slice(0, agentName.length - agentBaseName.length - 1)
-			: undefined;
+	const { role: agentBaseName, swarmID: swarmId } =
+		deriveSwarmIdentity(agentName);
 	return {
 		agentBaseName,
 		swarmAgents: getSwarmAgents(swarmId),
@@ -741,11 +738,7 @@ export async function dispatchPhaseCritic(
 		config?.agentModelRegistry,
 	);
 	const legacyModelConfig = resolveLegacyCriticModelConfig(agentName, config);
-	const agentBaseName = stripKnownSwarmPrefix(agentName);
-	const swarmID =
-		agentBaseName !== agentName
-			? agentName.slice(0, agentName.length - agentBaseName.length - 1)
-			: undefined;
+	const { role: agentBaseName, swarmID } = deriveSwarmIdentity(agentName);
 	let responseText: string;
 	try {
 		const dispatched = await dispatchWithModelFallback<string>({
