@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.202.3",
+  "tagCommit": "296850626519fa904c74cfd660414f5266510ad2",
+  "targetCommitish": "296850626519fa904c74cfd660414f5266510ad2",
+  "releaseBodySha256": "563c58efbb06cac79d7aeb0ac1f1cf1a7e8efe9b7b292f4d0cef3b32519bbef5",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/3587-file-authority-denial-redaction.md",
+      "sha256": "eac192cea4b4e99e7b20b83f9b19300f6ff6361a2c2e6697c654b22acec5fe47"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/3593-r4-observability-generation-ceiling.md",
+      "sha256": "d5f2d190a047a48c740b9c5ce9b19be032b935fc8bfa9ea616f1afb389d27b99"
+    }
+  ]
+}
