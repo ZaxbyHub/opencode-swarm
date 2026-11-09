@@ -25,6 +25,7 @@ import {
 	parseRmOptionTokens,
 	walkLauncherOptions,
 	walkShellCommandFlags,
+	envFlagConsumesNextWord,
 } from '../shell-write-detect';
 import { dcIsSwitchClusterText } from './cmd-delete-grammar';
 
@@ -1323,7 +1324,54 @@ function matchChdirWrapperSegment(segment: string): DcChdirMatch {
 	// the FLAG REGION (before the first plain word) — a substitution in the
 	// WRAPPED COMMAND's own arguments (`env -C src echo $(date) > out`) is
 	// ordinary shell and must keep flowing (the hoisted redirect resolves it).
-	const head = basenameAnySepLike(words[0]);
+	let head = basenameAnySepLike(words[0]);
+	// #3616 D5 (item 5): a launcher prefix (time/nice/nohup — and env, whose
+	// own flags/assignments are peeled with the same grammar as the env walk)
+	// hides the chdir-bearing head from the rewrite. Peel one launcher word
+	// at a time and RETRY: `time sudo -D /etc tee …` must reach
+	// matchSudoChdir exactly like its plain twin. A `bash -c "sudo -D …"`
+	// payload reaches this function as the unquoted inner text (the
+	// preprocessing splices the payload as a parenthesized subshell), so the
+	// same retry covers it. Bounded: each peel consumes at least one word.
+	for (let peel = 0; peel < words.length; peel += 1) {
+		if (
+			head === 'time' ||
+			head === 'nice' ||
+			head === 'nohup' ||
+			head === 'env'
+		) {
+			let next = 1;
+			if (head === 'time' || head === 'nice' || head === 'nohup') {
+				// Their own flags are argument-less for this purpose (nice -n
+				// N's consumed argument is handled by the launcher walks; the
+				// chdir matcher only needs the first plain word).
+				while (next < words.length && (words[next] as string).startsWith('-')) {
+					next += 1;
+					if (head === 'nice' && (words[next - 1] as string) === '-n') next += 1;
+				}
+			} else {
+				// env: flags (with their consumed args) and VAR= assignments.
+				while (next < words.length) {
+					const w = words[next] as string;
+					if (w.startsWith('-')) {
+						next += 1;
+						if (envFlagConsumesNextWord(w)) next += 1;
+						continue;
+					}
+					if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(w)) {
+						next += 1;
+						continue;
+					}
+					break;
+				}
+			}
+			if (next >= words.length) return null;
+			words.splice(0, next);
+			head = basenameAnySepLike(words[0]);
+			continue;
+		}
+		break;
+	}
 	if (head !== 'env' && head !== 'sudo') return null;
 	// Flag-region scan runs ONLY for wrapper heads — the nested re-walk of a
 	// rewritten payload must never see this check (a $() argument there is

@@ -2175,7 +2175,7 @@ const ENV_FLAGS_WITH_ARG = new Set([
  * across the set. Attached short forms (`-uFOO`) and mid-cluster arg-takers
  * carry their argument inside the token and stay safe without it.
  */
-function envFlagConsumesNextWord(token: string): boolean {
+export function envFlagConsumesNextWord(token: string): boolean {
 	if (token.startsWith('--')) {
 		const exact = ENV_FLAGS_WITH_ARG.has(token);
 		if (exact) return true;
