@@ -36,7 +36,7 @@ export interface PendingTaskModelRouteInput {
 	actionDigest: string;
 	swarmID?: string;
 	/**
-	 * The RAW dispatched agent name (subagent_type), preserved verbatim.
+	 * The dispatched agent spelling (subagent_type), whitespace-trimmed only.
 	 * Issue #3331: the session.error advance arm resolves the chain from this
 	 * name first, so both boundary sides normalize the SAME identity and a
 	 * chain-signature mismatch cannot silently discard a completed advance
@@ -114,7 +114,7 @@ export interface PendingTaskModelRouteSnapshotEntry {
 	role: string;
 	actionDigest: string;
 	swarmID?: string;
-	/** RAW dispatched agent name (issue #3331 advance-side identity). */
+	/** Dispatched agent spelling, trimmed (issue #3331 advance identity). */
 	agentName?: string;
 	childSessionID?: string;
 	updatedAt: number;

@@ -470,5 +470,7 @@ describe('index task-model routing — v2 apply gate + route swarm-id derivation
 		expect(byCall.get('call-case')?.agentName).toBe('Case_coder');
 		// Padded name: same swarm id the chain resolver derives (raw case kept).
 		expect(byCall.get('call-padded')?.swarmID).toBe('Case');
+		// The stored spelling is whitespace-trimmed, never stripped to a role.
+		expect(byCall.get('call-padded')?.agentName).toBe('Case_coder');
 	});
 });

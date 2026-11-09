@@ -3963,7 +3963,7 @@ async function initializeOpenCodeSwarm(
 					// would misresolve a same-turn provider error for a
 					// swarm-prefixed primary agent onto the wrong (or an empty)
 					// chain.
-					// #3331: for a routed Task child, the route's RAW dispatched
+					// #3331: for a routed Task child, the route's dispatched (trimmed)
 					// name is the identity the chat boundary reports
 					// (String(input.agent) equals the subagent_type), so it is
 					// resolved FIRST — a machinery-recorded bare-role pointer
@@ -4878,7 +4878,7 @@ async function initializeOpenCodeSwarm(
 						// malformed doubled-separator names), NOT from the action
 						// digest's trim+lowercase canonicalization (hashed into
 						// digests only, never a swarm id after this change).
-						// agentName preserves the RAW dispatched name so the
+						// agentName keeps the dispatched (trimmed) name so the
 						// session.error advance arm resolves the same identity the
 						// chat boundary sees. The swarm id is derived from the
 						// TRIMMED name, exactly as resolveTaskRouteModelChain does.

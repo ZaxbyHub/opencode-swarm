@@ -6,7 +6,8 @@ issue: 3331
 
 ## #3331 — Task-route advance survives nameform mismatches; discards are observable
 
-- The pending Task model route now records the RAW dispatched agent name
+- The pending Task model route now records the dispatched agent spelling
+  (whitespace-trimmed, never stripped to a bare role)
   (`agentName`), and the `session.error` fallback-advance arm resolves the model
   chain from it first — the same identity the `chat.message` boundary reports —
   so a hyphen/case spelling (e.g. `code-coder`, `Coder`) can no longer make the
