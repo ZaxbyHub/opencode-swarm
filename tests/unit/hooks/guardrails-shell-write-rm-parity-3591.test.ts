@@ -191,7 +191,9 @@ describe('#3591 parity: late-flag escape — all deny, naming the escape', () =>
 				'src/',
 				...command.split(' '),
 			]);
-			expect(explainText).toContain(escapeTarget);
+			// The report echoes the command, so only the rule row can prove this.
+			const firingRule = /\| *Firing Rule *\|(.*)\|/i.exec(explainText)?.[1];
+			expect(firingRule).toContain(escapeTarget);
 		},
 		30_000,
 	);

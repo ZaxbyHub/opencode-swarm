@@ -99,6 +99,8 @@ branch is checked) — no change needed.
   "$d" ]; do cd src; echo x > f; d=1; done` was withdrawn and now admits,
   which matches bash (the write lands in `src/f`). In-scope late-flag
   `rm src/a.ts -f` now denies like `rm -f src/a.ts`.
+- A `for` word list longer than 4096 characters loses the single-literal
+  word exemption, so a loop that changes directory denies its writes.
 - `rm $X`, `rm "$D"/x` and `rm ~/x` now deny as dynamic targets for
   enforced roles, and architect and other enforced-role `rm` of protected
   paths is now checked.
@@ -149,6 +151,11 @@ item 6 above closes it, so that residual no longer applies.
 - `pushd .` is not modeled as pushing a duplicate stack entry, so `cd src;
   pushd ../tests; pushd .; popd; echo x > f` is judged at `src/f` while
   bash writes under `tests/`. Pre-existing.
+- `rm` operands are judged lexically, so `rm link/../src/x` is judged as
+  `src/x`. Where `link` is a symlink to another tree, Linux resolves the
+  `..` through the link and deletes the file in that other tree. The gate
+  blocks creating escaping symlinks, but one already in the workspace is
+  enough. Pre-existing.
 - Launch-environment sanitization (`BASH_ENV` / `BASH_FUNC_*` scrubbing at
   the shell-spawn layer) is not in scope; the loop withdrawal is the
   command-text-level mitigation.
