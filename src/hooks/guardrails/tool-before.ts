@@ -2068,10 +2068,35 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 						write.original.path ?? write.original.dynamicSourceWord ?? '',
 						160,
 					);
+					// #3616 D14 (item 15): class-accurate deny reasons. The
+					// origin is set at the DECISION SITE when the write record
+					// carries one (loop withdrawal, directory-state
+					// withdrawal, wrapper-chdir backstop); tilde is derived
+					// here (textual); everything else keeps the legacy
+					// dynamic-text wording.
+					const originText = write.original.path ?? '';
+					const origin =
+						write.original.denialOrigin ??
+						(originText === '~' || originText.startsWith('~/')
+							? 'tilde'
+							: 'dynamic-text');
+					const originReason: Record<string, string> = {
+						tilde: 'tilde target expands against the invoking user home directory — not statically resolvable',
+						'loop-landing':
+							'the loop landing directory is unresolved (withdrawn loop state) — rejecting for safety',
+						'directory-withdrawal':
+							'the directory context was withdrawn (popd/cd -/reassignment) — rejecting for safety',
+						'wrapper-chdir':
+							'wrapper chdir context could not be resolved (sudo -D / env -C) — rejecting for safety',
+						'unverifiable-path':
+							'the path could not be verified on the filesystem — rejecting for safety',
+						'dynamic-text':
+							'cannot be statically resolved (shell variable or command substitution) — rejecting for safety',
+					};
 					throw new ShellWriteBlockedError(
 						`BLOCKED: bash/shell write to a dynamic path target${
 							dynamicTargetLabel ? ` "${dynamicTargetLabel}"` : ''
-						} that cannot be statically resolved (shell variable or command substitution) — rejecting for safety.`,
+						} that ${originReason[origin] ?? originReason['dynamic-text']}`,
 						{ writeOperator: write.original.operator },
 					);
 				}

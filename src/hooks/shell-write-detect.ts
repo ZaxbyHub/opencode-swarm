@@ -144,6 +144,19 @@ export interface WriteTarget {
 	 * `git apply` defaults to 1; explicit `-p<n>` overrides for both tools.
 	 */
 	patchStrip?: number;
+	/**
+	 * #3616 D14 (item 15): why this write's path is null / withdrawn — set at
+	 * the DECISION SITE (loop withdrawal, directory-state withdrawal, wrapper
+	 * chdir backstop), derived at render for tilde/dynamic-text. Renders the
+	 * class-accurate deny reason; 'dynamic-text' is the legacy default.
+	 */
+	denialOrigin?:
+		| 'tilde'
+		| 'loop-landing'
+		| 'directory-withdrawal'
+		| 'wrapper-chdir'
+		| 'unverifiable-path'
+		| 'dynamic-text';
 }
 
 /**
@@ -3533,6 +3546,7 @@ function detectLauncherWrites(cmd: unknown): WriteTarget[] {
 										operator: 'sudo -e',
 										path: null,
 										dynamicSourceWord: branchPath,
+										denialOrigin: 'wrapper-chdir',
 									}
 								: {
 										category: 'launcher_write',
@@ -3544,6 +3558,7 @@ function detectLauncherWrites(cmd: unknown): WriteTarget[] {
 							operator: 'sudo -e',
 							path: null,
 							dynamicSourceWord: operand,
+							denialOrigin: 'wrapper-chdir',
 						}),
 					);
 				}
@@ -9022,6 +9037,13 @@ interface DirectoryState {
 	prevCwd: string | null;
 	dirStack: string[];
 	withdrawn: boolean;
+	/**
+	 * #3616 D14: WHY the withdrawal fired — 'loop' (a For-body landing
+	 * change) or 'directory' (cd -/popd/OLDPWD/function-call). Stamped onto
+	 * later writes by pushWriteWithState so the deny site renders the
+	 * class-accurate reason; undefined means "not yet withdrawn".
+	 */
+	withdrawnOrigin?: 'loop' | 'directory';
 	/** Text-level per-command facts (evaluated once per walk on the raw line). */
 	homeReassigned: boolean;
 	oldpwdReassigned: boolean;
@@ -9033,6 +9055,9 @@ function cloneDirectoryState(state: DirectoryState): DirectoryState {
 		prevCwd: state.prevCwd,
 		dirStack: [...state.dirStack],
 		withdrawn: state.withdrawn,
+		...(state.withdrawnOrigin !== undefined
+			? { withdrawnOrigin: state.withdrawnOrigin }
+			: {}),
 		homeReassigned: state.homeReassigned,
 		oldpwdReassigned: state.oldpwdReassigned,
 	};
@@ -10046,6 +10071,7 @@ function collectWritesWithNodes(
 				);
 				if (!directoryStatesEqual(bodyState, state)) {
 					state.withdrawn = true;
+					state.withdrawnOrigin = 'loop';
 					// #3586 Fix 1 arm (a) — the SINGLE exemption: a For whose
 					// word list is ONE fully-literal word immune to every
 					// word-producing expansion, in a command with no
@@ -10056,7 +10082,7 @@ function collectWritesWithNodes(
 					// change break/continue BEHAVIOR but cannot APPEND items
 					// to a literal one-word list — r12 execution).
 					if (!forWordListIsSingleLiteralWord(node) || familyDynamic) {
-						markWritesUnresolvedFrom(out, sliceStart);
+						markWritesUnresolvedFrom(out, sliceStart, 'loop-landing');
 					}
 				}
 			}
@@ -10255,12 +10281,23 @@ const rsyncWrites = detectRsyncWrites(node);
  * withdrawal flag at PUSH time; this closes the already-pushed slice the
  * post-walk divergence retroactively invalidates). Idempotent per write.
  */
-function markWritesUnresolvedFrom(out: WriteWithNode[], start: number): void {
+function markWritesUnresolvedFrom(
+	out: WriteWithNode[],
+	start: number,
+	origin?: WriteTarget['denialOrigin'],
+): void {
 	for (let i = start; i < out.length; i += 1) {
 		const entry = out[i];
 		if (entry === undefined) continue;
-		if (entry.write.unresolvedContext !== true) {
-			entry.write = { ...entry.write, unresolvedContext: true };
+		if (
+			entry.write.unresolvedContext !== true ||
+			entry.write.denialOrigin !== origin
+		) {
+			entry.write = {
+				...entry.write,
+				unresolvedContext: true,
+				...(origin !== undefined ? { denialOrigin: origin } : {}),
+			};
 		}
 	}
 }
@@ -10380,7 +10417,20 @@ function pushWriteWithState(
 	out.push({
 		write:
 			state.withdrawn && write.unresolvedContext !== true
-				? { ...write, unresolvedContext: true }
+				? {
+						...write,
+						unresolvedContext: true,
+						// #3616 D14: a withdrawal without a loop origin IS
+						// directory-class (cd -/popd/OLDPWD/function-call).
+						...(write.denialOrigin === undefined
+							? {
+									denialOrigin:
+										state.withdrawnOrigin === 'loop'
+											? ('loop-landing' as const)
+											: ('directory-withdrawal' as const),
+								}
+							: {}),
+					}
 				: write,
 		context: state.cwd,
 	});
@@ -10830,6 +10880,7 @@ export function resolveWriteTargets(
 				evalDirectory?: string;
 				writeContext?: string;
 				unresolved?: true;
+				denialOrigin?: WriteTarget['denialOrigin'];
 			}
 		>();
 		for (const { write, context } of deduplicated) {
@@ -10858,12 +10909,15 @@ export function resolveWriteTargets(
 			const writeContext =
 				write.category === 'patch_apply' ? context : undefined;
 			map.set(key, {
-				resolvedPath,
-				resolved,
-				evalDirectory,
-				writeContext,
-				...(unresolved ? { unresolved: true } : {}),
-			});
+			resolvedPath,
+			resolved,
+			evalDirectory,
+			writeContext,
+			...(unresolved ? { unresolved: true } : {}),
+			...(write.denialOrigin !== undefined
+				? { denialOrigin: write.denialOrigin }
+				: {}),
+		});
 		}
 		return { map, colliding };
 	};
@@ -10905,8 +10959,15 @@ export function resolveWriteTargets(
 			evalDirectory?: string;
 			writeContext?: string;
 			unresolved?: true;
+			denialOrigin?: WriteTarget['denialOrigin'];
 		}): ResolvedWriteTarget => ({
-			original,
+			// #3616 D14: the resolver walk's decision-site origin rides onto
+			// the output write so the gate's deny site renders it.
+			original:
+				resolved.denialOrigin !== undefined &&
+				original.denialOrigin === undefined
+					? { ...original, denialOrigin: resolved.denialOrigin }
+					: original,
 			resolvedPath: resolved.resolvedPath,
 			resolved: resolved.resolved,
 			...(resolved.evalDirectory !== undefined
