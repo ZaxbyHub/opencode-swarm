@@ -413,4 +413,25 @@ describe('learning-health — role participation (feed 4)', () => {
 		});
 		expect(recoveredPayloads('role_participation')).toHaveLength(1);
 	});
+
+	test('padded prefixed participation normalizes to the canonical role', () => {
+		// Trailing-space dispatched spellings must still count as the missing
+		// roles participating: base's split-pop-trim normalized padded names,
+		// and the shared-derivation swap keeps that by trimming BEFORE the
+		// strip (the suffix extractor cannot see through trailing whitespace).
+		observeCuratorCompliance({
+			directory: artifactDir,
+			phase: 1,
+			gapTypes: ['missing_sme', 'missing_retro'],
+			agentsUsed: [],
+		});
+		clock += 60_000;
+		observeCuratorCompliance({
+			directory: artifactDir,
+			phase: 2,
+			gapTypes: [],
+			agentsUsed: ['local_reviewer ', 'mega_sme ', 'acme_retro '],
+		});
+		expect(recoveredPayloads('role_participation')).toHaveLength(1);
+	});
 });

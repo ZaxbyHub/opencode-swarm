@@ -1244,7 +1244,10 @@ function normalizeParticipationAgent(agent: string): string {
 	// reviewer role participating. #3330: the shared canonical-role derivation
 	// replaces the old last-token split, which mis-derived compound roles
 	// (`local_test_engineer` -> `engineer` instead of `test_engineer`).
-	return stripKnownSwarmPrefix(agent).trim().toLowerCase();
+	// Trim BEFORE stripping: the suffix extractor matches a real
+	// '_<role>' ending, which a trailing space hides (base's
+	// split-pop-trim normalized padded names; keep that behavior).
+	return stripKnownSwarmPrefix(agent.trim()).toLowerCase();
 }
 
 /**
