@@ -5,8 +5,8 @@ description: >
   in opencode-swarm. Use when the user wants the swarm to monitor a
   reviewed-and-approved PR's CI, research every failure exhaustively, fix
   end-to-end, iterate until green (max 5 cycles), then merge. Composes
-  ci-fix-monitor for fix recipes. This is the first skill in the repo that
-  executes a merge — invoke it deliberately.
+  ci-fix-monitor for fix recipes. It executes a merge (as does
+  swarm-pr-feedback's drive-to-merge run) — invoke it deliberately.
 disable-model-invocation: true
 metadata:
   audience: swarm-plugin
@@ -22,7 +22,7 @@ canonical workflow.
 - `gh` CLI is available natively; use it directly for every step (checks,
   merge, git operations) — the canonical's MCP tool-mapping table is for the
   Codex adapter, not this environment.
-- This is the first skill in the repo authorized to execute `gh pr merge`. Do
+- This skill executes `gh pr merge` (as does swarm-pr-feedback's drive-to-merge run). Do
   not soften or skip the pre-flight gates (Step 1), the pre-merge staleness
   re-check (Step 3), or the post-merge local-git confirmation (Step 4b) — they
   are the load-bearing safety mechanism, not optional ceremony.

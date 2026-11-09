@@ -4,16 +4,16 @@ description: >
   Ingest and resolve known pull request feedback with skeptical source verification.
   Use when addressing pasted PR feedback, GitHub review comments or threads,
   requested changes, CI/check failures, merge conflicts, stale PR branches, or
-  PR follow-up work that must close all known issues without dropping findings.
-  Supports multi-round bot reviews when the repo uses an auto-review bot that
-  posts a new review after every push, via the iterative pattern documented in
-  the body. Stage A
+  PR follow-up work that must close all known issues without dropping findings,
+  then drive the PR to green CI, merge, session retrospective, and memory closeout. Supports
+  multi-round bot reviews (a new bot review after every push) via the
+  iterative pattern documented in the body. Stage A
   (structural pre-checks) and Stage B (reviewer + test_engineer) gates and the
   reviewer + critic closeout gate are MANDATORY for any change made as part of
   this process.
 metadata:
   audience: swarm-plugin
-  swarm-contract-digest: "8f12c1815a46"
+  swarm-contract-digest: "72796577005e"
 ---
 
 # Swarm PR Feedback
@@ -41,12 +41,12 @@ Carry forward the original review finding IDs, classifications, reviewer/critic
 provenance, and any operational blockers instead of renumbering them as new
 discoveries.
 
-Feedback closure is not the end of the PR lifecycle: when PR monitoring is
-enabled (`pr_monitor.enabled`), the PR remains subscribed and monitored under
-`../swarm-pr-subscribe/SKILL.md` until it is merged or closed. Events that
-arrive after closure (a new bot round, a CI change, fresh review activity) are
-triaged through that skill and route back into this discipline when they need
-fixes.
+Feedback closure is not the end of the PR lifecycle. On a PR, the default run is
+`references/drive-to-merge.md`: gates → dispositions → CI green → merge (explicit
+authorization only) → monitor → retro + memory closeout; "fixes only" stops early. With
+`pr_monitor.enabled`, post-closure events (a new bot round, a CI change, fresh
+review activity) are triaged under `../swarm-pr-subscribe/SKILL.md` and route
+back into this discipline when they need fixes.
 
 ## Multi-Round Bot Reviews (Iterative Pattern)
 
