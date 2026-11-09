@@ -994,15 +994,32 @@ export async function handleGuardrailExplain(
 			}
 		}
 		if (decision === 'allow' && analysis.hasWrites) {
-			const resolvedWrites = resolveWriteTargets(
-				// #3539 W5 parity: the gate resolves against the procsub
-				// masking residual when the analysis carries one; explain
-				// must share the same resolution text or it answers allow
-				// for outer writes the gate blocks under tracked cd context.
-				analysis.residualCommand ?? detectionCommand,
-				analysis.writes,
-				directory,
-			);
+			// #3616 D2: a CODER invocation without --scope must not fabricate a
+			// declared scope equal to the project root — the live gate judges
+			// the coder's ACTIVE scope binding and denies no-scope coders
+			// outright, so an unqualified "allow: no rule matched" for a
+			// write-bearing command is a split-brain answer. Render block with
+			// the scope-unevaluated firing rule instead (the write verdict is
+			// not asserted either way — only that the scope dimension was
+			// never evaluated). Architect and other-role paths keep their
+			// existing behavior (noScopeLenient parity with the gate).
+			const resolvedWrites =
+				scope == null && agent === 'coder'
+					? []
+					: resolveWriteTargets(
+							// #3539 W5 parity: the gate resolves against the procsub
+							// masking residual when the analysis carries one; explain
+							// must share the same resolution text or it answers allow
+							// for outer writes the gate blocks under tracked cd context.
+							analysis.residualCommand ?? detectionCommand,
+							analysis.writes,
+							directory,
+						);
+			if (scope == null && agent === 'coder') {
+				decision = 'block';
+				firingRule =
+					'scope_unevaluated: no --scope given — the live gate judges the coder active scope binding; pass --scope to evaluate a hypothetical scope';
+			}
 
 			for (const write of resolvedWrites) {
 				if (write.resolvedPath) {

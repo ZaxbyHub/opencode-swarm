@@ -761,6 +761,47 @@ export const DEFAULT_AGENT_AUTHORITY_RULES: Record<string, AgentRule> = {
  *
  * @returns A block reason string if a symlink is detected, null if all clear.
  */
+/**
+ * #3606 D15: dependency-injection seam for the ancestor lstat (repo
+ * convention, AGENTS.md invariant 7) so tests can drive the non-ENOENT
+ * failure arm deterministically on every platform (on Windows, lstat of every
+ * malformed-ancestor shape returns ENOENT — the arm is POSIX-only reachable
+ * natively). Production routes through this seam.
+ */
+export const _internals: {
+	lstatSync: (...args: Parameters<typeof fsSync.lstatSync>) => ReturnType<typeof fsSync.lstatSync>;
+} = {
+	lstatSync: (pathLike, options) => fsSync.lstatSync(pathLike, options),
+};
+
+/**
+ * #3606 D15: compose an ancestor denial within a whole-message bound of 320.
+ * The ancestor is home-redacted (redactPath) and sanitized; the error detail
+ * renders the error CODE only (never String(err) — the raw message embeds
+ * paths); the class text is preserved inside the bound.
+ */
+function renderAncestorDenial(
+	kind: 'lstat-failed' | 'symlink-junction',
+	ancestor: string,
+	err?: unknown,
+): string {
+	const safeAncestor = sanitizeDiagnosticText(redactPath(ancestor), 320);
+	if (kind === 'lstat-failed') {
+		const code =
+			(err as NodeJS.ErrnoException | undefined)?.code ??
+			(err instanceof Error ? err.name : 'UNKNOWN');
+		const safeCode = sanitizeDiagnosticText(code, 40);
+		return sanitizeDiagnosticText(
+			`WRITE BLOCKED: lstat failed on "${safeAncestor}": ${safeCode} — refusing write on unverifiable path`,
+			320,
+		);
+	}
+	return sanitizeDiagnosticText(
+		`WRITE BLOCKED: "${safeAncestor}" is a symlink/junction — writing through a symlink or junction could redirect the write outside the working directory`,
+		320,
+	);
+}
+
 export function checkWriteTargetForSymlink(
 	targetPath: string,
 	cwd: string,
@@ -791,15 +832,15 @@ export function checkWriteTargetForSymlink(
 	for (const ancestor of ancestors) {
 		let stat: ReturnType<typeof fsSync.lstatSync> | null = null;
 		try {
-			stat = fsSync.lstatSync(ancestor);
+			stat = _internals.lstatSync(ancestor);
 		} catch (err: unknown) {
 			const code = (err as NodeJS.ErrnoException).code;
 			if (code === 'ENOENT') continue; // not yet created — OK for writes
 			// Unexpected error: fail closed
-			return `WRITE BLOCKED: lstat failed on "${ancestor}": ${String(err)} — refusing write on unverifiable path`;
+			return renderAncestorDenial('lstat-failed', ancestor, err);
 		}
-		if (stat.isSymbolicLink()) {
-			return `WRITE BLOCKED: "${ancestor}" is a symlink/junction — writing through a symlink or junction could redirect the write outside the working directory`;
+		if (stat?.isSymbolicLink()) {
+			return renderAncestorDenial('symlink-junction', ancestor);
 		}
 	}
 

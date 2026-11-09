@@ -2255,11 +2255,11 @@ export function dcLstatAncestorWalk(
 				continue;
 			}
 			// Unexpected error (EPERM, EACCES, etc.) — fail closed
-			return `lstat failed on "${ancestor}": ${String(err)} — refusing to allow destructive operation on unverifiable path`;
+			return `lstat failed on "${dcSafeDiagnosticValue(ancestor)}": ${dcSafeDiagnosticValue(String(err))} — refusing to allow destructive operation on unverifiable path`;
 		}
 
 		if (stat.isSymbolicLink()) {
-			return `BLOCKED: "${ancestor}" is a symlink/junction — deleting recursively through it would destroy the link target. Use platform-specific junction deletion (fsutil reparsepoint delete, Remove-Item without -Recurse) instead.`;
+			return `BLOCKED: "${dcSafeDiagnosticValue(ancestor)}" is a symlink/junction — deleting recursively through it would destroy the link target. Use platform-specific junction deletion (fsutil reparsepoint delete, Remove-Item without -Recurse) instead.`;
 		}
 	}
 
@@ -2286,17 +2286,17 @@ export function dcValidateTargets(
 
 		// Check for unexpanded vars — fail closed (cannot verify safety)
 		if (dcHasUnresolvableVars(t)) {
-			return `BLOCKED: Destructive command targets path with unexpanded variable "${t}" — cannot verify safety. Resolve variables before using destructive operations.`;
+			return `BLOCKED: Destructive command targets path with unexpanded variable "${dcSafeDiagnosticValue(t, 160)}" — cannot verify safety. Resolve variables before using destructive operations.`;
 		}
 
 		// Check remote filesystem prefixes
 		if (dcIsRemotePath(t)) {
-			return `BLOCKED: Destructive command targets remote/network filesystem path "${t}" — refusing to execute remote destructive operations.`;
+			return `BLOCKED: Destructive command targets remote/network filesystem path "${dcSafeDiagnosticValue(t)}" — refusing to execute remote destructive operations.`;
 		}
 
 		// UNC path \\server\share or extended \\?\
 		if (/^\\\\/.test(t)) {
-			return `BLOCKED: Destructive command targets UNC path "${t}" — UNC paths in destructive operations are not allowed.`;
+			return `BLOCKED: Destructive command targets UNC path "${dcSafeDiagnosticValue(t)}" — UNC paths in destructive operations are not allowed.`;
 		}
 
 		// lstat ancestor walk: MUST run before safe-target allowlist.
@@ -2316,14 +2316,14 @@ export function dcValidateTargets(
 
 		// Filesystem roots — unconditional block
 		if (DC_FS_ROOTS.has(t) || DC_FS_ROOTS.has(t.replace(/\//g, '\\'))) {
-			return `BLOCKED: Destructive command targets filesystem root "${t}"`;
+			return `BLOCKED: Destructive command targets filesystem root "${dcSafeDiagnosticValue(t)}"`;
 		}
 
 		// Absolute path: check against blocked system prefixes
 		if (path.isAbsolute(t) || /^[A-Za-z]:/.test(t)) {
 			for (const blocked of DC_BLOCKED_ABSOLUTE_PREFIXES) {
 				if (t.startsWith(blocked)) {
-					return `BLOCKED: Destructive command targets system path "${t}" which is under protected prefix "${blocked}"`;
+					return `BLOCKED: Destructive command targets system path "${dcSafeDiagnosticValue(t)}" which is under protected prefix "${dcSafeDiagnosticValue(blocked)}"`;
 				}
 			}
 		}
@@ -2370,24 +2370,40 @@ function dcHasUntrustedText(value: string): boolean {
 	);
 }
 
-function dcSafeDiagnosticValue(value: string): string {
-	return value
-		.split('')
-		.map((character) =>
-			dcIsUntrustedCodePoint(character.codePointAt(0) ?? 0) ? '?' : character,
-		)
-		.join('')
-		.slice(0, 512);
-}
-
 function dcPathComponents(value: string): string[] {
 	return value.replace(/\\/g, '/').split('/').filter(Boolean);
 }
 
+/**
+ * #3616 D13: bounded, control-neutralized diagnostic rendering DELEGATES to the
+ * canonical sanitizeDiagnosticText (code-point-safe truncation; the canonical
+ * also neutralizes the bidi marks the old local scanner missed). The local
+ * `?`-replacement semantics are preserved via the canonical's own replacement;
+ * no separate sanitizer implementation remains in this module.
+ */
+function dcSafeDiagnosticValue(value: string, maxLength = 512): string {
+	return sanitizeDiagnosticText(value, maxLength);
+}
+
+/**
+ * #3616 D11: platform-parameterized protected-component compare. darwin folds
+ * case (macOS default filesystems are case-insensitive; on case-sensitive
+ * volumes this only over-denies — fail-closed). Other platforms stay exact.
+ * dcComponentEquals delegates with process.platform so the production call
+ * sites inherit the platform behavior; the exported form exists for the seam.
+ */
+export function dcProtectedComponentEqualsForPlatform(
+	platform: NodeJS.Platform,
+): (left: string, right: string) => boolean {
+	if (platform === 'win32' || platform === 'darwin') {
+		return (left: string, right: string) =>
+			left.toLowerCase() === right.toLowerCase();
+	}
+	return (left: string, right: string) => left === right;
+}
+
 function dcComponentEquals(left: string, right: string): boolean {
-	return process.platform === 'win32'
-		? left.toLowerCase() === right.toLowerCase()
-		: left === right;
+	return dcProtectedComponentEqualsForPlatform(process.platform)(left, right);
 }
 
 function dcScopeContains(scopeEntry: string, target: string): boolean {
@@ -2601,7 +2617,7 @@ export function dcCheckJunctionCreation(
 			const resolved = path.resolve(cwd, target);
 			const rel = path.relative(cwd, resolved);
 			if (rel.startsWith('..') || path.isAbsolute(rel)) {
-				return `BLOCKED: Junction/symlink creation targeting path outside working directory: mklink target "${target}" resolves to "${resolved}" which is outside "${cwd}". Creating junctions to external paths and then deleting them recursively can destroy data.`;
+				return `BLOCKED: Junction/symlink creation targeting path outside working directory: mklink target "${dcSafeDiagnosticValue(target)}" resolves to "${dcSafeDiagnosticValue(resolved)}" which is outside "${dcSafeDiagnosticValue(cwd)}". Creating junctions to external paths and then deleting them recursively can destroy data.`;
 			}
 		}
 		return null; // target is inside cwd — allow
@@ -2621,7 +2637,7 @@ export function dcCheckJunctionCreation(
 			const resolved = path.resolve(cwd, target);
 			const rel = path.relative(cwd, resolved);
 			if (rel.startsWith('..') || path.isAbsolute(rel)) {
-				return `BLOCKED: Junction/symlink creation targeting path outside working directory: New-Item target "${target}" resolves to "${resolved}" which is outside "${cwd}". This pattern caused the K2.6 data-loss incident.`;
+				return `BLOCKED: Junction/symlink creation targeting path outside working directory: New-Item target "${dcSafeDiagnosticValue(target)}" resolves to "${dcSafeDiagnosticValue(resolved)}" which is outside "${dcSafeDiagnosticValue(cwd)}". This pattern caused the K2.6 data-loss incident.`;
 			}
 		}
 		return null;
@@ -2642,7 +2658,7 @@ export function dcCheckJunctionCreation(
 			const resolved = path.resolve(cwd, target);
 			const rel = path.relative(cwd, resolved);
 			if (rel.startsWith('..') || path.isAbsolute(rel)) {
-				return `BLOCKED: Symlink creation targeting path outside working directory: ln -s target "${target}" resolves to "${resolved}" which is outside "${cwd}". Symlinks to external paths combined with recursive deletion can destroy data.`;
+				return `BLOCKED: Symlink creation targeting path outside working directory: ln -s target "${dcSafeDiagnosticValue(target)}" resolves to "${dcSafeDiagnosticValue(resolved)}" which is outside "${dcSafeDiagnosticValue(cwd)}". Symlinks to external paths combined with recursive deletion can destroy data.`;
 			}
 		}
 		return null;

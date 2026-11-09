@@ -1461,8 +1461,17 @@ function hasUnquotedGlob(word: unknown): boolean {
  * shell expands, i.e. one written outside quotes and backslash escapes
  * (`'{print $1,$2}'` is one word). Without trusted source text the parsed
  * text decides (fail-safe: the parser drops quotes).
+ *
+ * #3616 D11 (item 11): words longer than 4096 characters are treated as
+ * expansion-bearing WITHOUT running the quadratic regex — the same cap
+ * PR #3615 applied to the for-word-list path, now hoisted here so every
+ * call site (sed picker, curl/wget destination, scp destination, for word
+ * list) inherits the short-circuit. Oversized words take the deny direction
+ * at every site (dynamic refusal / expansion-bearing), so the cap is
+ * fail-closed.
  */
 function hasUnquotedBraceExpansion(word: unknown, text: string): boolean {
+	if (text.length > 4096) return true;
 	const projection = unquotedProjection(word);
 	return BRACE_EXPANSION.test(projection === null ? text : projection);
 }
@@ -2457,6 +2466,14 @@ export type LauncherWalkOutcome =
 			 * points past it at the timed command.
 			 */
 			chdirTailIndex?: number;
+			/**
+			 * #3616 D6 (item 6): true when the tail runs under `sudo -i`/
+			 * `--login` — sudo chdirs to the target user's home before the
+			 * command, so RELATIVE write targets land there, not at the
+			 * ambient cwd. The consumer withdraws relative write tails
+			 * fail-closed (`-s` keeps the cwd and is unaffected).
+			 */
+			loginShell?: true;
 	  }
 	| { kind: 'benign' }
 	| {
@@ -2726,6 +2743,10 @@ function walkSudoOptions(words: readonly string[]): LauncherWalkOutcome {
 	let interactive = false;
 	let listMode = false;
 	let queryOther = false;
+	// #3616 D6: `-i`/`--login` (target-home chdir) tracked apart from
+	// `-s` (cwd kept) — the inner consumer withdraws relative write tails
+	// only under login.
+	let loginShellMode = false;
 	// #3572 delta-critic: `-k` alone (credential reset) is the documented
 	// no-command NO-OP; any other execution option implies the root shell.
 	let resetOnly = true;
@@ -2819,6 +2840,7 @@ function walkSudoOptions(words: readonly string[]): LauncherWalkOutcome {
 			}
 			if (SUDO_LONG_INTERACTIVE.has(token)) {
 				interactive = true;
+				if (token === '--login') loginShellMode = true;
 				i += 1;
 				continue;
 			}
@@ -2863,6 +2885,7 @@ function walkSudoOptions(words: readonly string[]): LauncherWalkOutcome {
 				}
 				if (SUDO_INTERACTIVE_CHARS.has(ch)) {
 					interactive = true;
+					if (ch === 'i') loginShellMode = true;
 					continue;
 				}
 				if (ch === 'e') {
@@ -2941,12 +2964,14 @@ function walkSudoOptions(words: readonly string[]): LauncherWalkOutcome {
 				timeOutputFile: nested.timeOutputFile,
 				chdirTailIndex: i,
 				...(chdirDir !== undefined ? { sudoChdir: chdirDir } : {}),
+				...(loginShellMode ? { loginShell: true as const } : {}),
 			};
 		}
 		return {
 			kind: 'inner',
 			innerIndex: i,
 			...(chdirDir !== undefined ? { sudoChdir: chdirDir } : {}),
+			...(loginShellMode ? { loginShell: true as const } : {}),
 		};
 	}
 	if (edit) return { kind: 'benign' }; // -e with no operand: usage error, nothing runs
@@ -3559,6 +3584,82 @@ function detectLauncherWrites(cmd: unknown): WriteTarget[] {
 					cursor = cursor + walk.innerIndex + 1;
 					continue;
 				}
+				// #3616 D6 (item 6): an execution tail under `sudo -i`/`--login`
+				// runs in the TARGET USER'S HOME (sudo chdirs before the
+				// command), so RELATIVE write targets land outside the
+				// workspace — unknowable statically. When the tail contains a
+				// write-vector word (builtin write command or a redirect
+				// operator) with a relative operand, withdraw fail-closed; a
+				// no-write tail (`sudo -i make build`) keeps the ordinary
+				// unwrap, and `-s` tails never reach this arm.
+				if (walk.loginShell === true) {
+					// The walk words exclude the launcher word itself: the tail
+					// starts AT the inner command word (tee …), so the
+					// write-vector scan sees the command AND its operands.
+					const tail = suffix.slice(cursor + walk.innerIndex);
+					// tee/dd write by design but live outside BUILTIN_WRITE_COMMANDS
+					// (detectBuiltinWrites handles them ahead of the set check).
+					const loginWriteWords = new Set([...BUILTIN_WRITE_COMMANDS, 'tee', 'dd']);
+					const hasWriteVector = tail.some((word, idx) => {
+						if (typeof word !== 'string') return false;
+						if (loginWriteWords.has(basenameAnySep(word))) return true;
+						if (/\S?>\S?/.test(word)) return true; // glued or bare redirect
+						if (idx > 0 && /^[0-9]?>>?$/.test(tail[idx - 1] ?? '')) return true;
+						return false;
+					});
+					if (hasWriteVector) {
+						const firstRelative =
+							tail.find(
+								(word) =>
+									typeof word === 'string' &&
+									!word.startsWith('/') &&
+									!word.startsWith('~') &&
+									!/^[A-Za-z]:[\/]/.test(word) &&
+									!/^-/.test(word) &&
+									word !== 'tee',
+							) ?? 'sudo -i tail';
+						results.push({
+							category: 'launcher_write',
+							operator: 'sudo -i login-shell tail (relative write under target home)',
+							path: null,
+							dynamicSourceWord: firstRelative.slice(0, 64),
+						});
+						return results;
+					}
+				}
+				// #3616 D5 (item 7): `env` interposed between launchers stops
+				// the hop filter today (nice env sudo -i …, nice env time -o …),
+				// hiding the inner launcher's writes. Peel the env word AND its
+				// own flags/assignments (the same grammar the transparent-env
+				// walk above uses), then keep hopping. `--` ends env's options
+				// but the following word is still the command — hop to it.
+				if (tailBase === 'env') {
+					let next = cursor + walk.innerIndex + 1;
+					while (next < suffix.length) {
+						const token = suffix[next];
+						if (token === undefined) break;
+						if (token === '--') {
+							next += 1;
+							break;
+						}
+						if (token.startsWith('-')) {
+							next += 1;
+							if (envFlagConsumesNextWord(token) && next < suffix.length) next += 1;
+							continue;
+						}
+						if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(token)) {
+							next += 1;
+							continue;
+						}
+						break;
+					}
+					if (next < suffix.length) {
+						name = suffix[next] ?? null;
+						nameRaw = undefined;
+						cursor = next + 1;
+						continue;
+					}
+				}
 			}
 			return results; // non-launcher tail (or a terminal outcome) — stop here
 		}
@@ -4013,6 +4114,40 @@ function isHereDocMarker(node: unknown): node is BashHereDocMarker {
  * detector's non-destructive rm arm (detectBuiltinWrites) and
  * `dcExtractRecursiveRmTargets` so both layers classify identically.
  */
+/**
+ * #3616 D3: GNU rm's verified long-option universe (coreutils manual). Used by
+ * rmLongOptionMatches for unambiguous-prefix classification.
+ */
+const RM_LONG_OPTIONS: readonly string[] = [
+	'--dir',
+	'--force',
+	'--help',
+	'--interactive',
+	'--no-preserve-root',
+	'--one-file-system',
+	'--preserve-root',
+	'--recursive',
+	'--verbose',
+	'--version',
+];
+
+/**
+ * #3616 D3: true when `token` unambiguously abbreviates `option` under GNU
+ * getopt rules — the token is a strict prefix of `option`, at least one
+ * character past `--`, and no OTHER rm long option also starts with the token
+ * (an ambiguous prefix is everyone's prefix, so the uniqueness check rejects
+ * it exactly as GNU's parser errors before deletion).
+ */
+function rmLongOptionMatches(token: string, option: '--recursive' | '--force'): boolean {
+	if (!token.startsWith('--') || token.length < 3 || token === option) return token === option;
+	if (!option.startsWith(token)) return false;
+	for (const candidate of RM_LONG_OPTIONS) {
+		if (candidate === option) continue;
+		if (candidate.startsWith(token)) return false; // ambiguous
+	}
+	return true;
+}
+
 export function parseRmOptionTokens(tokens: readonly string[]): {
 	destructive: boolean;
 	targetIndices: number[];
@@ -4031,6 +4166,17 @@ export function parseRmOptionTokens(tokens: readonly string[]): {
 	// (bash-parser rejects them, so the write gate's parse-error deny is
 	// the backstop for those spellings).
 	// Pass 1: option tokens anywhere before `--`, classified.
+	// #3616 D3: GNU getopt accepts UNAMBIGUOUS abbreviations of long options,
+	// so an exact-match compare missed `rm --rec src` (issue item 3). The
+	// RM_LONG_OPTIONS table is the verified GNU rm universe (coreutils manual,
+	// rm invocation): --dir, --force, --interactive, --one-file-system,
+	// --no-preserve-root, --preserve-root, --recursive, --verbose, plus the
+	// universal --help/--version. A `--token` counts as recursive/forced when
+	// it is a prefix of EXACTLY ONE table entry (--rec, --r, --f, --fo all
+	// qualify — rm has no other r-/f-long-option). An ambiguous prefix
+	// (--v/--ve/--ver collide with --verbose/--version) is NOT classified:
+	// GNU rejects the invocation before any deletion, so it falls through as
+	// an ordinary unknown token (no fail-open — the command never deletes).
 	let destructive = false;
 	let separatorIndex = tokens.length;
 	for (let i = 0; i < tokens.length; i += 1) {
@@ -4041,7 +4187,7 @@ export function parseRmOptionTokens(tokens: readonly string[]): {
 			break;
 		}
 		if (!token.startsWith('-') || token === '-') continue;
-		if (token === '--recursive' || token === '--force') {
+		if (rmLongOptionMatches(token, '--recursive') || rmLongOptionMatches(token, '--force')) {
 			destructive = true;
 			continue;
 		}
@@ -7879,6 +8025,39 @@ export function detectInteractiveSession(
  * @param command - A POSIX shell command string
  * @returns WriteAnalysis with array of detected write targets; hasWrites is false when array is empty
  */
+/**
+ * #3616 D1: an assignment to an ambient shell-state key. Word-start anchors
+ * cover prefix assignments, `;`/`&&`/`||`-separated and parenthesized
+ * segments, `export KEY=` / `env KEY=` arguments, and sudo VAR= pass rules.
+ * `ENV` matches only as a whole key name (word boundary both sides) so
+ * suffixes like MY_ENV= do not trip it.
+ */
+const AMBIENT_SHELL_STATE_KEY_ASSIGNMENT =
+	/(?:^|[\s;|&()])+(?:export\s+|env\s+|-x\s+)?(?:BASH_ENV|ENV|BASH_FUNC_[A-Za-z0-9_%]+)=/;
+
+/**
+ * #3616 D10: the first whitespace-delimited word longer than `budget`
+ * characters, or null. A linear pre-parse scan (single pass, character class
+ * test only — no regex over the whole command).
+ */
+function firstWordOverBudget(command: string, budget: number): string | null {
+	let start = -1;
+	const n = command.length;
+	for (let i = 0; i <= n; i += 1) {
+		const ch = i < n ? command.charCodeAt(i) : 32;
+		const isSpace = ch === 32 || ch === 9 || ch === 10 || ch === 13;
+		if (isSpace) {
+			if (start !== -1) {
+				if (i - start > budget) return command.slice(start, i);
+				start = -1;
+			}
+		} else if (start === -1) {
+			start = i;
+		}
+	}
+	return null;
+}
+
 export function detectPosixWrites(
 	command: string,
 	procsubRecursionDepth = 0,
@@ -7906,6 +8085,51 @@ export function detectPosixWrites(
 					category: 'interpreter_eval',
 					operator: 'unsafe command text',
 					path: null,
+				},
+			],
+			hasWrites: true,
+			parseError: true,
+		};
+	}
+
+	// #3616 D1 (item 1): in-command assignment/export/env-prefix naming
+	// BASH_ENV, ENV, or a BASH_FUNC_* key injects ambient shell state the
+	// command-text model cannot bound (a startup file need not look
+	// command-bearing; an imported function executes later) — deny the whole
+	// command regardless of value shape. Text-level scan covers all three
+	// spellings the plan enumerates (assignment prefixes incl. after `;`/`&&`,
+	// `export KEY=...`, `env KEY=...`) plus sudo VAR= pass rules upstream of
+	// the walk.
+	if (AMBIENT_SHELL_STATE_KEY_ASSIGNMENT.test(command)) {
+		return {
+			writes: [
+				{
+					category: 'interpreter_eval',
+					operator: 'ambient shell-state key assignment',
+					path: null,
+				},
+			],
+			hasWrites: true,
+			parseError: true,
+		};
+	}
+
+	// #3616 D10 (item 11): a whitespace-delimited word longer than 4096 chars
+	// cannot be analyzed in budget (the parse itself is the dominant cost;
+	// PR #3615 measured ~1.5s per walk on a 40k unclosed-brace operand). Deny
+	// before parsing: the oversized word is emitted as an opaque eval-class
+	// write the gate blanket-blocks — the same verdict the control operand
+	// (a small unclosed brace) already receives via dynamic refusal, so the
+	// two spellings classify identically (pinned by C11's verdict-equality).
+	const oversizedWord = firstWordOverBudget(command, 4096);
+	if (oversizedWord !== null) {
+		return {
+			writes: [
+				{
+					category: 'interpreter_eval',
+					operator: 'oversized word',
+					path: null,
+					dynamicSourceWord: oversizedWord.slice(0, 64),
 				},
 			],
 			hasWrites: true,
@@ -8707,13 +8931,17 @@ function parseDirectoryCommand(cmd: unknown): DirectoryCommand | null {
 /**
  * Move the state to an absolute landing under the mode's proof rules and
  * update prevCwd exactly like the shell (only a directory change that
- * actually happened updates OLDPWD). Returns true when the cwd moved.
+ * actually happened updates OLDPWD). Returns 'moved' when the cwd moved,
+ * 'same' when the landing equals the cwd (#3616 D7: bash `pushd .` pushes a
+ * duplicate stack entry in exactly this case, so pushd must distinguish it
+ * from a failed proof gate), and 'failed' when the gate could not prove the
+ * landing is a directory.
  */
 function landDirectoryState(
 	state: DirectoryState,
 	landing: string,
 	cdMode: 'gate' | 'gate-skip' | 'succeed',
-): boolean {
+): 'moved' | 'same' | 'failed' {
 	if (cdMode === 'gate') {
 		let isDirectory = false;
 		try {
@@ -8722,7 +8950,7 @@ function landDirectoryState(
 		} catch {
 			isDirectory = false;
 		}
-		if (!isDirectory) return false;
+		if (!isDirectory) return 'failed';
 	}
 	if (landing === state.cwd) {
 		// #3567 review PRR-006: bash still refreshes OLDPWD when `cd` lands on
@@ -8732,11 +8960,11 @@ function landDirectoryState(
 		// stale previous directory and judged the following write at a landing
 		// bash never used. Same-directory cd/pushd/popd now model the refresh.
 		state.prevCwd = state.cwd;
-		return false;
+		return 'same';
 	}
 	state.prevCwd = state.cwd;
 	state.cwd = landing;
-	return true;
+	return 'moved';
 }
 
 /** The shell's HOME landing for bare `cd` / `cd ~` / `cd ~/x` (#3491 W1). */
@@ -8840,7 +9068,14 @@ function applyDirectoryTransition(
 			landing = resolveBashCdTarget(operand, state.cwd, landing);
 		}
 		const oldCwd = state.cwd;
-		if (landDirectoryState(state, landing, cdMode)) {
+		const landed = landDirectoryState(state, landing, cdMode);
+		// #3616 D7 (item 8): bash's `pushd <current>` pushes a DUPLICATE entry
+		// even when the landing equals the cwd — landDirectoryState returns
+		// 'same' there, which the old boolean folded into "nothing happened",
+		// so the following popd removed the wrong entry. Push on BOTH moved
+		// and same-landing outcomes; only a failed proof gate ('failed') skips
+		// the push.
+		if (landed !== 'failed') {
 			if (state.dirStack.length >= 32) {
 				state.withdrawn = true;
 				return true;
