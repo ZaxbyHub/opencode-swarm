@@ -35,6 +35,15 @@ export interface PendingTaskModelRouteInput {
 	role: string;
 	actionDigest: string;
 	swarmID?: string;
+	/**
+	 * The dispatched agent spelling (subagent_type), whitespace-trimmed only.
+	 * Issue #3331: the session.error advance arm resolves the chain from this
+	 * name first, so both boundary sides normalize the SAME identity and a
+	 * chain-signature mismatch cannot silently discard a completed advance
+	 * (the stripped `role` alone can resolve a different primary than the
+	 * full name the chat boundary sees).
+	 */
+	agentName?: string;
 }
 
 export interface BindTaskModelRouteChildInput {
@@ -105,6 +114,8 @@ export interface PendingTaskModelRouteSnapshotEntry {
 	role: string;
 	actionDigest: string;
 	swarmID?: string;
+	/** Dispatched agent spelling, trimmed (issue #3331 advance identity). */
+	agentName?: string;
 	childSessionID?: string;
 	updatedAt: number;
 }
@@ -133,6 +144,7 @@ function normalizeRoute(
 		role: normalizeText(input.role),
 		actionDigest: normalizeText(input.actionDigest),
 		swarmID: normalizeText(input.swarmID) || undefined,
+		agentName: normalizeText(input.agentName) || undefined,
 		updatedAt: now,
 	};
 }

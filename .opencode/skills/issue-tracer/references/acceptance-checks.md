@@ -99,6 +99,24 @@ Some issues (pure documentation fixes, non-executable product decisions already 
   after every probe and verify `git status --porcelain` clean before any
   commit — a stray uncommitted mutant can ride explicit-path staging into the
   fix commit.
+- **Probe entry-state precondition.** `git checkout -- <file>` restores from
+  the INDEX, so a restoring probe run on a tree with UNCOMMITTED fix work
+  silently reverts that work — and the post-run `git status --porcelain`
+  check then reads clean, because the restore "cleaned" the tree while
+  destroying the fix (recurred on the PR #3592 round despite stored lessons).
+  Every probe script that restores via checkout must REFUSE TO START when
+  `git status --porcelain --untracked-files=no` is non-empty — commit the fix
+  first — and must leave the entry state exactly as found. When probing
+  uncommitted work is unavoidable, snapshot each target file before mutating
+  it and restore from the snapshot, never from the index.
+- **Attributed kills, not marker kills.** A mutation counts as killed only
+  when the probe records all four steps: (1) the target suite/check is GREEN
+  at baseline, (2) the mutation actually landed (assert the mutated text is
+  present before running), (3) the NAMED test or check goes RED under the
+  mutation — matched by its name or failure text, not a generic `(fail)` or
+  nonzero-exit anywhere in the output — and (4) restoration is verified. A
+  probe that accepts any failure line as a kill can be satisfied by an
+  unrelated failure and overstates the evidence.
 - **Frozen-docstring wording.** Check authors must phrase frozen-file
   docstrings to stay true at both ends: "RED at base, GREEN after the fix",
   never "must FAIL at the current tree" — the file ships and the claim becomes
