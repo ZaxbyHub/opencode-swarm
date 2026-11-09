@@ -24,8 +24,15 @@
  * known residual derivation sites using those shapes are recorded in the PR
  * body's Considered table instead of being allowlisted here.
  *
- * Allowlist (each entry is a derivation that deliberately does NOT use the
- * helper, with its justification):
+ * ALLOWLIST SCOPE (#3617 automation review of 8bedc1c73): an allowlisted
+ * file is scanned with a PER-OCCURRENCE budget — one occurrence of each
+ * predicate is exempt (the justified derivation itself), a SECOND hit in the
+ * same file fails the build. Files at their budget keep their recorded
+ * justification; a new naive derivation added beside it still fails.
+ * Hit counts use FULL-match counting, and trailing-comma wrapped call
+ * forms are counted too; the exact-count table below pins each
+ * allowlisted file's measured hits so even the first occurrence cannot
+ * drift silently.
  * - src/config/schema.ts — the helper's own definition carries the slice.
  * - src/hooks/full-auto-delegation.ts — prefix-EMPTINESS policy gate (deny a raw
  *   name with no non-empty prefix before the canonical role); helper semantics
@@ -73,12 +80,13 @@ const LEN = String.raw`[\w$]+(?:${ACCESS}[\w$]+)*?${ACCESS}length`;
 // The replace alternation must stay FIRST: its quote group is backreference 1.
 const NAIVE_FIRST_UNDERSCORE = new RegExp(
 	[
-		member('replace') + String.raw`\s*\/\^\[\^_\]\+_\/\s*,\s*(['"])\1\s*\)`,
-		member('match') + String.raw`\s*\/\^\(\[\^_\]\+\)_\/\s*\)`,
+		member('replace') +
+			String.raw`\s*\/\^\[\^_\]\+_\/\s*,\s*(['"])\1\s*,?\s*\)`,
+		member('match') + String.raw`\s*\/\^\(\[\^_\]\+\)_\/\s*,?\s*\)`,
 		member('split') +
 			String.raw`\s*['"]_['"]\s*\)\s*(?:(?:\?\.)?\s*\[\s*0\s*\]|` +
 			member('at') +
-			String.raw`\s*0\s*\))`,
+			String.raw`\s*0\s*,?\s*\))`,
 	].join('|'),
 );
 
@@ -94,6 +102,15 @@ const LENGTH_DELTA_SLICE = new RegExp(
 			String.raw`\s*0\s*,\s*${LEN}\s*-\s*1\s*-\s*${LEN}\s*,?\s*\)`,
 	].join('|'),
 );
+
+/**
+ * Count FULL predicate matches in whitespace-normalized text via a global
+ * clone. String.split would also emit the NAIVE predicate's quote-capture
+ * group as separate elements and double-count every replace occurrence.
+ */
+function countHits(normalized: string, predicate: RegExp): number {
+	return normalized.match(new RegExp(predicate.source, 'g'))?.length ?? 0;
+}
 
 function walk(dir: string, out: string[]): void {
 	for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -115,14 +132,20 @@ describe('agent-name derivation census (issue #3330 recurrence guardrail)', () =
 		const flagged: string[] = [];
 		for (const full of files) {
 			const rel = path.relative(repoRoot, full).split(path.sep).join('/');
-			if (ALLOWLIST[rel]) continue;
 			const raw = fs.readFileSync(full, 'utf8');
 			const normalized = raw.replace(/\s+/g, ' ');
-			if (NAIVE_FIRST_UNDERSCORE.test(normalized)) {
-				flagged.push(`${rel}: naive first-underscore replace`);
+			const budget = ALLOWLIST[rel] ? 1 : 0;
+			const naiveHits = countHits(normalized, NAIVE_FIRST_UNDERSCORE);
+			const sliceHits = countHits(normalized, LENGTH_DELTA_SLICE);
+			if (naiveHits > budget) {
+				flagged.push(
+					`${rel}: naive first-underscore replace (${naiveHits} > ${budget})`,
+				);
 			}
-			if (LENGTH_DELTA_SLICE.test(normalized)) {
-				flagged.push(`${rel}: unguarded length-delta slice`);
+			if (sliceHits > budget) {
+				flagged.push(
+					`${rel}: unguarded length-delta slice (${sliceHits} > ${budget})`,
+				);
 			}
 		}
 		// Extractors.ts's Math.max budget arithmetic must not be flagged (it is
@@ -154,6 +177,8 @@ describe('agent-name derivation census (issue #3330 recurrence guardrail)', () =
 			"name.split('_') . at(0)",
 			"name.split('_')?.at(0)",
 			"name.split('_').at?.(0)",
+			"name.replace (/^[^_]+_/, '',)",
+			'name . match(/^([^_]+)_/,)',
 		];
 		for (const sample of flaggedNaive) {
 			expect([sample, NAIVE_FIRST_UNDERSCORE.test(sample)]).toEqual([
@@ -189,6 +214,27 @@ describe('agent-name derivation census (issue #3330 recurrence guardrail)', () =
 				sample,
 				false,
 			]);
+		}
+	});
+
+	test('allowlisted files sit exactly at their one-occurrence budget (no silent widening)', () => {
+		const repoRoot = path.resolve(import.meta.dir, '../../..');
+		const expected: Record<string, { naive: number; slice: number }> = {
+			'src/config/schema.ts': { naive: 0, slice: 1 },
+			'src/hooks/full-auto-delegation.ts': { naive: 0, slice: 1 },
+			// action-identity's canonicalRole slice is two-operand (no -1), a
+			// shape deliberately OUTSIDE the LENGTH_DELTA_SLICE predicate —
+			// the allowlist entry documents that exception; the count is 0.
+			'src/failures/action-identity.ts': { naive: 0, slice: 0 },
+			'src/hooks/incremental-verify.ts': { naive: 1, slice: 0 },
+		};
+		for (const [rel, hits] of Object.entries(expected)) {
+			const normalized = fs
+				.readFileSync(path.join(repoRoot, rel), 'utf8')
+				.replace(/\s+/g, ' ');
+			const naive = countHits(normalized, NAIVE_FIRST_UNDERSCORE);
+			const slice = countHits(normalized, LENGTH_DELTA_SLICE);
+			expect([rel, { naive, slice }]).toEqual([rel, hits]);
 		}
 	});
 
