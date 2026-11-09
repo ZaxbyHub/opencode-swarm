@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.203.1",
+  "tagCommit": "e5a609072bc0da6465b3d5b9cc927754c8004954",
+  "targetCommitish": "e5a609072bc0da6465b3d5b9cc927754c8004954",
+  "releaseBodySha256": "719f8132d1027223c932039d9d055eb27f6de5e4ad46038e63b34a9b16fcdbe6",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 3,
+      "path": "docs/releases/pending/3372-3383-session-state-integrity.md",
+      "sha256": "99f6eb74185c698416f12c8f5a2c01d0e895baf21f8c08da37b8f06cab3ed282"
+    },
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/3586-3588-3591-shell-gate-walk-fixpoint.md",
+      "sha256": "6555d3094c0f10a26031ba2582c7c8ce38de4fba5ba9f72059ac8d4947f07e2c"
+    },
+    {
+      "prNumber": null,
+      "order": 2,
+      "path": "docs/releases/pending/quarantine-windows-retry-flakes-3263.md",
+      "sha256": "f431fff4e36a819cbd53ee4362559538f2fbe42bfd169240fa383dff6391869c"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/underscore-derivation-guarded-helper.md",
+      "sha256": "fba15e22d3c85ebb668e3f774cf328f62c26ecadb635136ea1f3a0026b3661ef"
+    }
+  ]
+}
