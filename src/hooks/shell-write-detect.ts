@@ -124,7 +124,9 @@ export interface WriteTarget {
 	 * itself carries `path: null` (the gate's dynamic-target block denies
 	 * it); this field lets that denial message render what the user
 	 * actually typed (`src/{a..e}`) instead of a brace-substituted branch
-	 * text the shell never received verbatim. Never set on any other write.
+	 * text the shell never received verbatim. Also set on a relative
+	 * `sudo -D … -e` target withdrawn as unresolved. Never set on any other
+	 * write.
 	 */
 	dynamicSourceWord?: string;
 	/**

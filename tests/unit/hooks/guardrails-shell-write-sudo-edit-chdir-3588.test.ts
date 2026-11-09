@@ -82,8 +82,8 @@ async function gate(
 	}
 }
 
-describe('#3588 Fix 5: -D/--chdir carries onto edit outcomes (gate)', () => {
-	test('cd src; sudo -D /etc -e shadow → DENY (resolves /etc/shadow)', async () => {
+describe('#3588 Fix 5: -D/--chdir withdraws relative edit targets (gate)', () => {
+	test('cd src; sudo -D /etc -e shadow → DENY (unresolved under -D)', async () => {
 		const got = await gate('cd src; sudo -D /etc -e shadow');
 		expect(got.verdict).toBe('DENIED');
 	}, 30_000);
