@@ -415,7 +415,7 @@ describe('route-invalidation settlement seams (#3509/#3516 seam coverage)', () =
 		).toBe(false);
 	});
 
-	it('seam narrowed-contract pin: update-task-status carries no invalidation consult (no callID surface) and the residual is disclosed in the release fragment', () => {
+	it('seam narrowed-contract pin: update-task-status carries no invalidation consult (no callID surface) and the residual is disclosed in the v7.201.1 release history', () => {
 		const toolSource = fs.readFileSync(
 			path.resolve(import.meta.dir, '../../../src/tools/update-task-status.ts'),
 			'utf8',
@@ -423,10 +423,7 @@ describe('route-invalidation settlement seams (#3509/#3516 seam coverage)', () =
 		expect(toolSource.includes('route-invalidation-registry')).toBe(false);
 		expect(toolSource.includes('isRouteBlockedForSettlement')).toBe(false);
 		const fragment = fs.readFileSync(
-			path.resolve(
-				import.meta.dir,
-				'../../../docs/releases/pending/3509-3516-route-receipt-hardening.md',
-			),
+			path.resolve(import.meta.dir, '../../../docs/releases/v7.201.1.md'),
 			'utf8',
 		);
 		expect(fragment.includes('update-task-status')).toBe(true);

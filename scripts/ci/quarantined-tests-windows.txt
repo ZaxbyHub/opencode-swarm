@@ -12,7 +12,7 @@
 # gate; an EXPIRY more than 14 days in the past also fails (inside the grace
 # window it only warns).
 #
-# STATUS: 8 active entries — tests/unit/execute-journey/j02-failure-rejection-distinct.test.ts (renewed 2026-10-21 per #3203, EXPIRY 2026-11-18), tests/unit/hooks/delegation-gate-background-coder.test.ts (renewed 2026-10-21 per #3203, EXPIRY 2026-11-18), and tests/unit/tools/dispatch-lanes-pr-review-resilience-followups.test.ts (issue #3248), plus the five issue #3264 merge-group flake cohort entries quarantined 2026-10-21 (EXPIRY 2026-11-20); OWNER/EXPIRY blocks below. The 9-entry I3 renewal cohort was retired per issue
+# STATUS: 10 active entries — tests/unit/execute-journey/j02-failure-rejection-distinct.test.ts (renewed 2026-10-21 per #3203, EXPIRY 2026-11-18), tests/unit/hooks/delegation-gate-background-coder.test.ts (renewed 2026-10-21 per #3203, EXPIRY 2026-11-18), and tests/unit/tools/dispatch-lanes-pr-review-resilience-followups.test.ts (issue #3248), plus the five issue #3264 merge-group flake cohort entries quarantined 2026-10-21 (EXPIRY 2026-11-20) and the two issue #3263 entries quarantined 2026-11-08 (EXPIRY 2026-12-06); OWNER/EXPIRY blocks below. The 9-entry I3 renewal cohort was retired per issue
 # #2973 on 2026-09-27: rows with their named root fixes already in-tree —
 # pr-monitor-status (PR #2190 freezeClock + EBUSY-retry), 2602-lifecycle and
 # phase-complete.lock-adversarial (PR #2807 safeRmRecursive) — and rows whose
@@ -281,3 +281,79 @@ tests/unit/workflow/coder-settlement-2214-hardening.test.ts
 #   merge-group windows-latest runs green (likely fast if the 2026-10-18
 #   detection was storm-correlated), or the teardown flake is root-fixed.
 tests/unit/commands/archive.test.ts
+
+# tests/unit/hooks/delegation-gate-retry-sounding-board-manual.test.ts (issue #3263)
+# -------------------------------------------------------------------------
+# CORE-TREE entry (tests/unit/hooks/**, detector rule C) routed to the
+# windows ledger after documented review, per the #2867
+# delegation-gate-background-coder precedent. Tests the #2703
+# sounding-board retry-recovery surface
+# (forceRecordRetrySoundingBoardApproval): records the durable gate
+# entry + audit event and unblocks the next coder dispatch, is
+# idempotent per (session, epoch), rejects non-architect sessions,
+# off-plan task ids, tasks without durable workflow evidence, and
+# breakers that never consulted the sounding board, remaps a corrupt
+# retry audit index to a typed recovery error, and clears the manual
+# entry on accepted_mutation (8 cases). Every case builds a full git
+# repository (spawnSync git with explicit cwd / stdin ignore / 5 s
+# timeout / bounded buffers, :27-39) and drives the delegation-gate
+# hook; teardown already uses createSafeTestDir / safeRmRecursive, so
+# the known teardown classes are ruled out. Flaky on windows-latest
+# merge-group unit shards only, twice three weeks apart: run 38590114992
+# (2026-10-14) `unit (windows-latest, 3)` and run 42106922029
+# (2026-11-05) `unit (windows-latest, 1)` — both Attempt-1 fail /
+# Passed on retry 1 (passed-on-retry flake; the ci.yml retry loop
+# discards attempt-1 output when a retry passes, so no assertion text
+# exists to drive a root fix). Rule-C review: (a) the annotation prefix
+# is `Passed on retry N`, not an infra signature (no Runner-offline /
+# no-space / waiting-for-a-runner markers); (b) zero ubuntu/macos flake
+# annotations for this file in either run (single-OS evidence), so the
+# windows ledger is the placement; (c) the file passes locally on a
+# clean TMPDIR, so the flake is environment-sensitive — the windows
+# git-spawn / completion-observer timing class behind
+# delegation-gate-background-coder (#2867), not a logic bug. Not
+# covered by the run-coverage-gate.sh:127-144 .swarm/ posture-wave
+# attribution (that wave is ubuntu coverage-shard only). Pre-existing,
+# unrelated to any specific PR.
+# OWNER: zaxbysauce — issue #3263 (merge-group flake tracker; evidence:
+#   runs 38590114992 + 42106922029, windows unit shards 3/1, retry-only)
+# EXPIRY: 2026-12-06 — retire when the file passes three consecutive
+#   merge-group windows-latest runs green, or the attempt-1 failure
+#   signature is root-fixed. After EXPIRY, Check 7 warns for 14 days,
+#   then hard-fails on day 15.
+tests/unit/hooks/delegation-gate-retry-sounding-board-manual.test.ts
+
+# tests/unit/commands/archive-dry-run.test.ts (issue #3263)
+# -------------------------------------------------------------------------
+# Tests handleArchiveCommand --dry-run loadEvidence discriminated-union
+# handling (4 cases: found bundles are listed as "would archive",
+# not_found and invalid_schema tasks are excluded, mixed scenarios
+# aggregate correctly). Passed-on-retry windows-latest flake detected
+# FOUR times, all windows-only, spanning the #3252 teardown hardening:
+# run 39108262782 (2026-10-18) `unit (windows-latest, 2)` retry 1, run
+# 40282456510 (2026-10-26) `unit (windows-latest, 5)` retry 1, and —
+# after 6f4772b0e (PR #3529, merged 2026-11-01) converted this file's
+# cleanupDir from raw rmSync to safeRmRecursive — run 42063128798
+# (2026-11-05) `unit (windows-latest, 6)` (attempts 1 and 2 failed,
+# passed on retry 2) and run 42086378186 (2026-11-05)
+# `unit (windows-latest, 6)` retry 1. Both 11-05 run heads verifiably
+# contain 6f4772b0e, so the raw-rmSync root-cause theory is falsified
+# and the recurrence rule pre-recorded in the #3263 2026-10-30 triage
+# note ("mark not-flaky once #3252 lands, or a ledger entry if it
+# recurs beyond it") fires. Zero ubuntu/macos flake annotations for
+# this file in all four runs (single-OS evidence), so the windows
+# ledger is the placement. The ci.yml retry loop discards attempt-1
+# output when a retry passes, so no assertion text exists to drive a
+# root fix from CI alone. Caveat: the 2026-11-05 detections fall inside
+# the 2026-11-05 merge-group failure cluster; if they were
+# cluster-correlated, the three-consecutive-green retirement criterion
+# below retires this entry quickly. Pre-existing, unrelated to any
+# specific PR.
+# OWNER: zaxbysauce — issue #3263 (merge-group flake tracker; evidence:
+#   runs 39108262782, 40282456510, 42063128798, 42086378186 — windows
+#   unit shards 2/5/6/6, retry-only)
+# EXPIRY: 2026-12-06 — retire when the file passes three consecutive
+#   merge-group windows-latest runs green, or the attempt-1 failure
+#   signature is root-fixed. After EXPIRY, Check 7 warns for 14 days,
+#   then hard-fails on day 15.
+tests/unit/commands/archive-dry-run.test.ts
