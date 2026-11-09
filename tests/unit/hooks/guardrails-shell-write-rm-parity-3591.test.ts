@@ -153,20 +153,45 @@ describe('#3591 parity: flagless in-scope — all surfaces allow', () => {
 
 describe('#3591 parity: quoted and escaped destructive flags — all deny', () => {
 	// PR #3615 feedback PRR-002: the boundary decode must hold on every
-	// surface, not only the live gate.
+	// surface. Each surface must deny through the DESTRUCTIVE channel: a
+	// flag misread as a filename would still be denied as a generic scope
+	// write for an out-of-scope operand, so the verdict alone proves nothing.
+	// Explain joins its argv with spaces, so it sees this exact command text.
 	test.each([
-		['rm "-rf" ../../outside'],
-		["rm '-rf' ../../outside"],
-		['rm \\-rf ../../outside'],
-		['rm "--recursive" ../../outside'],
-		['rm "-rf" .git'],
-	])('%s: gate/explain(±scope)/scope_validate all deny', async (command) => {
-		const got = await allSurfaces(command);
-		expect(got.gate).toBe(false);
-		expect(got.explainScope).toBe('block');
-		expect(got.explainNoScope).toBe('block');
-		expect(got.sv).toBe('deny');
-	}, 30_000);
+		['rm "-rf" ../../outside', /^ *DESTRUCTIVE_TARGET_INVALID/],
+		["rm '-rf' ../../outside", /^ *DESTRUCTIVE_TARGET_INVALID/],
+		['rm \\-rf ../../outside', /^ *DESTRUCTIVE_TARGET_INVALID/],
+		['rm "--recursive" ../../outside', /^ *DESTRUCTIVE_TARGET_INVALID/],
+		['rm "-rf" .git', /^ *DESTRUCTIVE_TARGET_PROTECTED/],
+		['rm "-rf" src', /^ *DESTRUCTIVE_TARGET_NOT_SAFE_ARTIFACT/],
+		['rm \\-rf src', /^ *DESTRUCTIVE_TARGET_NOT_SAFE_ARTIFACT/],
+	])(
+		'%s: every surface denies through the destructive channel',
+		async (command, rule) => {
+			const got = await allSurfaces(command);
+			expect(got.gate).toBe(false);
+			expect(got.explainScope).toBe('block');
+			expect(got.explainNoScope).toBe('block');
+			expect(got.sv).toBe('deny');
+			const root = workspace();
+			expect((await gateVerdict(root, command)).message).toContain(
+				'Recursive delete target',
+			);
+			const report = await handleGuardrailExplain(root, [
+				'--scope',
+				'src/',
+				...command.split(' '),
+			]);
+			expect(/\| *Firing Rule *\|(.*)\|/i.exec(report)?.[1]).toMatch(rule);
+			expect(() =>
+				evaluateScopeValidate(
+					{ command, shell: 'posix', scope_files: ['src/'] },
+					root,
+				),
+			).toThrow(/DESTRUCTIVE_COMMAND/);
+		},
+		30_000,
+	);
 });
 
 describe('#3591 parity: late-flag escape — all deny, naming the escape', () => {

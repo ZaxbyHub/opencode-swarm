@@ -413,10 +413,10 @@ describe('#3591 Fix 6 gate verdicts (coder, scope src/)', () => {
 	// PRR-002b: ESCAPE-DECODED flags (`\-rf`) decode to real options at the
 	// DC boundary (pre-existing recursive-delete fail-open, fixed there).
 	test.each([
-		['rm "-rf" ../../outside', 'DENIED', /traversal|outside/i],
-		["rm '-rf' ../../outside", 'DENIED', /traversal|outside/i],
-		['rm "-f" ../../outside', 'DENIED', /traversal|outside/i],
-		['rm "--recursive" ../../outside', 'DENIED', /traversal|outside/i],
+		['rm "-rf" ../../outside', 'DENIED', /Recursive delete target/],
+		["rm '-rf' ../../outside", 'DENIED', /Recursive delete target/],
+		['rm "-f" ../../outside', 'DENIED', /Recursive delete target/],
+		['rm "--recursive" ../../outside', 'DENIED', /Recursive delete target/],
 		['rm "-rf" .git', 'DENIED', /\.git/i],
 		['rm "-rf" /', 'DENIED', /filesystem root/i],
 		['rm "-rf" src', 'DENIED', /allowlisted/i],
@@ -427,9 +427,9 @@ describe('#3591 Fix 6 gate verdicts (coder, scope src/)', () => {
 		// resolution puts the literal-quote file at the workspace root).
 		[`rm '"-rf"' ../outside`, 'DENIED', /SCOPE_VIOLATION|outside/i],
 		// PRR-002b: escape-decoded destructive flags are real options.
-		['rm \\-rf ../outside', 'DENIED', /traversal|outside/i],
-		['rm \\-f ../outside', 'DENIED', /traversal|outside/i],
-		['rm \\--force ../outside', 'DENIED', /traversal|outside/i],
+		['rm \\-rf ../outside', 'DENIED', /Recursive delete target/],
+		['rm \\-f ../outside', 'DENIED', /Recursive delete target/],
+		['rm \\--force ../outside', 'DENIED', /Recursive delete target/],
 		// PRR-002a control: the literal-quote `"-v"` operand is a TARGET (not
 		// an option) resolving at the workspace root — outside the declared
 		// src/ scope, so real bash deleting it denies fail-closed (probed).
