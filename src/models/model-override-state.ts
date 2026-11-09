@@ -1,18 +1,5 @@
+import { sanitizeDiagnosticScope } from '../utils/diagnostic-scope';
 import { log } from '../utils/logger';
-
-// Issue #3617 review PRR-006/PRR-010: the diagnostic interpolates
-// model-derived identity strings — strip control characters (log-injection
-// shape) and bound the length before emission. Kept local: importing from
-// src/index.ts would create an import cycle.
-function sanitizeDiagnosticScope(value: string): string {
-	return Array.from(value)
-		.filter((ch) => {
-			const code = ch.codePointAt(0);
-			return code !== undefined && code > 0x1f && code !== 0x7f;
-		})
-		.join('')
-		.slice(0, 200);
-}
 
 const MAX_SCOPED_MODEL_OVERRIDES = 256;
 const SCOPED_MODEL_OVERRIDE_TTL_MS = 30 * 60_000;

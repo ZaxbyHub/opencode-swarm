@@ -346,7 +346,7 @@ import {
 import { buildPluginToolObject } from './tools/plugin-registration';
 import { reconcilePrWorkflowCheckoutReceipts } from './tools/prepare-pr-workflow-checkout.js';
 import { createTrainingCaptureObserver } from './training/capture.js';
-import { error, log, warn } from './utils';
+import { error, log, sanitizeDiagnosticScope, warn } from './utils';
 import { pushAdvisory } from './utils/advisory-queue';
 import { setGitBinaryOverride } from './utils/git-executable';
 import {
@@ -6809,18 +6809,8 @@ function resolveRegisteredRosterAgentKey(
 	return {};
 }
 
-// Issue #3617 feedback round (PRR-006/PRR-010): diagnostics interpolate
-// model-derived identity strings — strip control characters (log-injection /
-// forged-line shape) and bound the length before emission.
-function sanitizeDiagnosticScope(value: string): string {
-	return Array.from(value)
-		.filter((ch) => {
-			const code = ch.codePointAt(0);
-			return code !== undefined && code > 0x1f && code !== 0x7f;
-		})
-		.join('')
-		.slice(0, 200);
-}
+// Diagnostic identity strings are sanitized by the shared
+// sanitizeDiagnosticScope helper (src/utils/diagnostic-scope.ts).
 
 // Issue #3617 automation review (head bb0823236): the routed arm's "v2 model
 // apply skipped" diagnostics must only fire on a v2 host — on v1 the
