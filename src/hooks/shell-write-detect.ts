@@ -8075,6 +8075,82 @@ const AMBIENT_SHELL_STATE_KEY_ASSIGNMENT =
 	/(?:^|[\s;|&()])+(?:export\s+|env\s+|-x\s+)?(?:BASH_ENV|ENV|BASH_FUNC_[A-Za-z0-9_%]+)=/;
 
 /**
+ * #3616 D4 (item 4): gather every word-node array a command-bearing node
+ * carries — suffix words, prefix (assignment) words, the name word, a For
+ * word list, a Case clause — so the expansion scan below sees CommandExpansion
+ * bodies in ANY word position.
+ */
+function collectWordNodes(node: unknown): unknown[] {
+	if (!node || typeof node !== 'object') return [];
+	const out: unknown[] = [];
+	const rec = node as Record<string, unknown>;
+	for (const key of ['suffix', 'prefix', 'wordlist'] as const) {
+		const arr = rec[key];
+		if (Array.isArray(arr)) out.push(...arr);
+	}
+	if (rec.name && typeof rec.name === 'object') out.push(rec.name);
+	if (rec.clause && typeof rec.clause === 'object') out.push(rec.clause);
+	return out;
+}
+
+/**
+ * #3616 D4 (item 4): writes inside `$(...)` command substitutions carried in
+ * WORD positions — For word lists, command suffix words, assignment
+ * prefixes, Case subjects. The detection walk descends only command
+ * structure, so a clean-parsing `for i in $(echo x > ../esc); do :; done`
+ * reported ZERO writes (the CommandExpansion walk arm was dead code). This
+ * scan serializes each CommandExpansion body (the parser records the body
+ * text on the expansion node) and re-runs detectPosixWrites on it — the
+ * procsub precedent — emitting the body's writes for the consumer to resolve
+ * against ITS tracked cwd (never the unmatched-write fallback).
+ */
+function expansionWordWrites(
+	words: readonly unknown[],
+	depth: number,
+): WriteTarget[] {
+	if (depth > 8) return [];
+	const results: WriteTarget[] = [];
+	for (const word of words) {
+		if (!word || typeof word !== 'object') continue;
+		const expansions = (word as { expansion?: unknown }).expansion;
+		if (!Array.isArray(expansions)) continue;
+		for (const expansion of expansions) {
+			if (!expansion || typeof expansion !== 'object') continue;
+			const type = (expansion as { type?: unknown }).type;
+			// Only CommandExpansion carries a command body; parameter and
+			// arithmetic expansions never contain writes.
+			if (type !== 'CommandExpansion') continue;
+			const body = (expansion as { command?: unknown }).command;
+			if (typeof body !== 'string' || body === '') {
+				// Unserializable body: withdraw fail-closed.
+				results.push({
+					category: 'interpreter_eval',
+					operator: '$(...) word (unserializable body)',
+					path: null,
+				});
+				continue;
+			}
+			const inner = detectPosixWrites(body, depth + 1);
+			for (const write of inner.writes) {
+				results.push(
+					write.path === null
+						? write
+						: { ...write, operator: `${write.operator} [$()]` },
+				);
+			}
+			if (inner.parseError && inner.writes.length === 0) {
+				results.push({
+					category: 'interpreter_eval',
+					operator: '$(...) word (parse error in body)',
+					path: null,
+				});
+			}
+		}
+	}
+	return results;
+}
+
+/**
  * #3616 D10: the first whitespace-delimited word longer than `budget`
  * characters, or null. A linear pre-parse scan (single pass, character class
  * test only — no regex over the whole command).
@@ -8215,6 +8291,10 @@ export function detectPosixWrites(
 			for (const write of detectGitDestructive(cmd)) allWrites.push(write);
 			for (const write of detectPatchApply(cmd)) allWrites.push(write);
 			for (const write of detectRsyncWrites(cmd)) allWrites.push(write);
+			// #3616 D4: word-position $(...) writes (For word list, suffix,
+			// assignment prefix, Case clause).
+			for (const write of expansionWordWrites(collectWordNodes(cmd), 0))
+				allWrites.push(write);
 			if (
 				detectorCommandPartsFromWordsBounded(
 					getCommandName(cmd),
@@ -9943,6 +10023,12 @@ function collectWritesWithNodes(
 					}
 				}
 			}
+			// #3616 D4: the word list's $(...) bodies resolve at the
+			// loop-ENTRY state (bash expands the list before the first
+			// iteration — a body cd never moves a later sibling's landing).
+			for (const w of expansionWordWrites(collectWordNodes(node), 0)) {
+				pushWriteWithState(out, w, state);
+			}
 			// #3586 Fix 1: same slice capture as While/Until (a For has no
 			// clause — the capture starts at the body walk).
 			const sliceStart = out.length;
@@ -9984,6 +10070,11 @@ function collectWritesWithNodes(
 						pushWriteWithState(out, w, state);
 					}
 				}
+			}
+			// #3616 D4: the Case subject's $(...) bodies resolve at the
+			// clause-ENTRY state.
+			for (const w of expansionWordWrites(collectWordNodes(node), 0)) {
+				pushWriteWithState(out, w, state);
 			}
 			// Each branch descends on a copy of the clause-entry state; the
 			// no-match outcome keeps the entry state. `;&`/`;;&` fall-through
@@ -10141,7 +10232,13 @@ function collectWritesWithNodes(
 				pushWriteWithState(out, w, state);
 			}
 
-			const rsyncWrites = detectRsyncWrites(node);
+const rsyncWrites = detectRsyncWrites(node);
+			// #3616 D4: word-position $(...) writes resolve at the TRACKED
+			// walk state (the cd context of the enclosing command), never
+			// the unmatched-write fallback.
+			for (const w of expansionWordWrites(collectWordNodes(node), 0)) {
+				pushWriteWithState(out, w, state);
+			}
 			for (const w of rsyncWrites) {
 				pushWriteWithState(out, w, state);
 			}
