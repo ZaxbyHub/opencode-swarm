@@ -29,10 +29,12 @@ import {
 	test,
 } from 'bun:test';
 import fs from 'node:fs';
+import { createAgents, getSwarmAgents } from '../../../src/agents/index.js';
 import {
 	findByCorrelationIdDetailed,
 	recordPendingDelegation,
 } from '../../../src/background/pending-delegations.js';
+import type { PluginConfig } from '../../../src/config/index.js';
 import {
 	_internals,
 	_test_exports,
@@ -43,6 +45,11 @@ import {
 import { canonicalMkdtemp } from '../../../tests/helpers/tmpdir.js';
 
 const originalInternals = { ..._internals };
+
+// The pre-file default swarm config, restored by afterEach because
+// createAgents() REPLACES the module-scoped map (CI runs one child process
+// per file; this guards locally co-run siblings).
+const DEFAULT_AGENTS = { ...getSwarmAgents() };
 
 // Workaround for Bun #32056 (mirror of dispatch-lanes.test.ts): on Windows, a
 // pending promise that leaves the event loop idle prevents bun's per-test
@@ -57,6 +64,7 @@ afterAll(() => {
 
 afterEach(() => {
 	Object.assign(_internals, originalInternals);
+	createAgents({ agents: DEFAULT_AGENTS } as PluginConfig);
 });
 
 function makeTempDir(): string {
@@ -129,6 +137,39 @@ describe('issue #2614 — unregistered lane agents are refused at dispatch time'
 		expect(createCalls()).toBe(0);
 		expect(promptCalls()).toBe(0);
 		fs.rmSync(directory, { recursive: true, force: true });
+	});
+
+	test('hyphen-prefixed unresolvable agent refuses even with a default-swarm entry (#3617 F-05)', async () => {
+		const directory = makeTempDir();
+		const { ops, createCalls, promptCalls } = stubSyncOps();
+		_internals.getSessionOps = () => ops;
+		// A registry of prefixed names proves 'acme-prod-coder' is not a member.
+		_internals.getGeneratedAgentNames = () => [
+			'mega_architect',
+			'mega_explorer',
+		];
+		// End-to-end registry refusal coverage; the F-05 ARM itself is pinned
+		// by the deep-gate leg below (only startAsyncLanePrompt reaches it).
+		createAgents({
+			agents: { coder: { model: 'default/coder-model' } },
+		} as PluginConfig);
+
+		try {
+			const result = await executeDispatchLanes(
+				{
+					lanes: [{ id: 'hyphen', agent: 'acme-prod-coder', prompt: 'probe' }],
+				},
+				directory,
+				{ callerAgent: 'build' },
+			);
+			const lane = result.lane_results[0];
+			expect(lane?.status).toBe('rejected');
+			expect(lane?.error ?? '').toContain('acme-prod-coder');
+			expect(createCalls()).toBe(0);
+			expect(promptCalls()).toBe(0);
+		} finally {
+			fs.rmSync(directory, { recursive: true, force: true });
+		}
 	});
 
 	test('refusal list is bounded: first 8 registered names then ", and N more"', async () => {
@@ -252,11 +293,15 @@ describe('issue #2614 — unregistered lane agents are refused at dispatch time'
 	test('deep gate: startAsyncLanePrompt refuses a provably-unregistered agent before promptAsync', async () => {
 		const directory = makeTempDir();
 		let promptAsyncCalled = false;
+		let createCalls = 0;
 		const ops = {
-			create: async () => ({
-				data: { id: 'session-2614-deep' },
-				error: undefined,
-			}),
+			create: async () => {
+				createCalls += 1;
+				return {
+					data: { id: 'session-2614-deep' },
+					error: undefined,
+				};
+			},
 			promptAsync: async () => {
 				promptAsyncCalled = true;
 				return { data: {}, error: undefined };
@@ -292,6 +337,9 @@ describe('issue #2614 — unregistered lane agents are refused at dispatch time'
 		});
 
 		expect(promptAsyncCalled).toBe(false);
+		// startAsyncLanePrompt takes an existing session id: a refusal must not
+		// touch the host at all (no session create, no prompt).
+		expect(createCalls).toBe(0);
 		const read = findByCorrelationIdDetailed(directory, 'session-2614-deep');
 		expect(read.status).not.toBe('uncertain');
 		const settled = read.value;
@@ -302,5 +350,123 @@ describe('issue #2614 — unregistered lane agents are refused at dispatch time'
 		);
 		expect(terminalError).toContain('refusing to launch');
 		fs.rmSync(directory, { recursive: true, force: true });
+	});
+
+	test('F-05 deep gate: prefixed-unresolvable agent refuses even with a default-swarm entry', async () => {
+		const directory = makeTempDir();
+		let promptAsyncCalled = false;
+		let createCalls = 0;
+		const ops = {
+			create: async () => {
+				createCalls += 1;
+				return {
+					data: { id: 'session-3617-f05' },
+					error: undefined,
+				};
+			},
+			promptAsync: async () => {
+				promptAsyncCalled = true;
+				return { data: {}, error: undefined };
+			},
+			delete: async () => undefined,
+		} as never as SessionOps;
+		_internals.getGeneratedAgentNames = () => [
+			'mega_architect',
+			'mega_explorer',
+		];
+		// The DEFAULT swarm resolves a coder entry — without the F-05
+		// prefixedUnresolvable arm, 'acme-prod-coder' (whose swarm id no
+		// longer resolves) would LAUNCH against the default-swarm model
+		// under an agent name the host does not have. This direct deep-gate
+		// call is the only surface that reaches the arm (the shallow execute
+		// leg is refused earlier by validateLaneAgent's registry check).
+		createAgents({
+			agents: { coder: { model: 'default/coder-model' } },
+		} as PluginConfig);
+
+		try {
+			await recordPendingDelegation(directory, {
+				correlationId: 'session-3617-f05',
+				jobId: null,
+				subagentSessionId: 'session-3617-f05',
+				parentSessionId: 'parent-3617-f05',
+				callID: 'call-3617-f05',
+				normalizedAgent: 'coder',
+				swarmPrefixedAgent: 'acme-prod-coder',
+				planTaskId: null,
+				evidenceTaskId: null,
+				mode: 'swarm-pr-review:base',
+			});
+			await _test_exports.startAsyncLanePrompt({
+				session: ops,
+				directory,
+				sessionId: 'session-3617-f05',
+				lane: {
+					id: 'lane-f05',
+					agent: 'acme-prod-coder',
+					prompt: 'probe',
+				} as never,
+				timeoutMs: 5_000,
+			});
+			expect(promptAsyncCalled).toBe(false);
+			expect(createCalls).toBe(0);
+			const read = findByCorrelationIdDetailed(directory, 'session-3617-f05');
+			expect(read.status).not.toBe('uncertain');
+			const settled = read.value;
+			expect(settled).toBeDefined();
+			expect(settled?.status).toBe('error');
+			const terminalError = String(
+				settled?.terminalResult?.result.error ?? settled?.result?.error ?? '',
+			);
+			expect(terminalError).toContain('refusing to launch');
+		} finally {
+			fs.rmSync(directory, { recursive: true, force: true });
+		}
+	});
+
+	test('F-05 boundary: an EMPTY registry cannot prove the spelling unregistered, so the prefixed lane still launches (base-identical)', async () => {
+		const directory = makeTempDir();
+		let promptAsyncCalled = false;
+		const ops = {
+			create: async () => ({
+				data: { id: 'session-3617-f05-empty' },
+				error: undefined,
+			}),
+			promptAsync: async () => {
+				promptAsyncCalled = true;
+				return { data: {}, error: undefined };
+			},
+			delete: async () => undefined,
+		} as never as SessionOps;
+		// Empty registry = the documented legacy/unconfigured shape: the host
+		// roster is unknown, so neither base nor head refuses here (a forced
+		// refusal would also refuse case-variant bare roles such as 'Coder').
+		_internals.getGeneratedAgentNames = () => [];
+		createAgents({
+			agents: { coder: { model: 'default/coder-model' } },
+		} as PluginConfig);
+		try {
+			await _test_exports.startAsyncLanePrompt({
+				session: ops,
+				directory,
+				sessionId: 'session-3617-f05-empty',
+				lane: {
+					id: 'lane-f05-empty',
+					agent: 'acme-prod-coder',
+					prompt: 'probe',
+				} as never,
+				timeoutMs: 5_000,
+			});
+			expect(promptAsyncCalled).toBe(true);
+		} finally {
+			fs.rmSync(directory, { recursive: true, force: true });
+		}
+	});
+
+	test('hermeticity: the swarm-agent map is restored after the createAgents legs', () => {
+		// Runs last (file order): the F-05 legs above installed a default-swarm
+		// coder entry via createAgents(); afterEach must have restored the
+		// pre-file default so later tests (and co-run files) see the baseline.
+		expect(getSwarmAgents()?.coder).toEqual(DEFAULT_AGENTS.coder);
 	});
 });

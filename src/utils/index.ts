@@ -1,3 +1,4 @@
+export { sanitizeDiagnosticScope } from './diagnostic-scope';
 export {
 	CLIError,
 	ConfigError,

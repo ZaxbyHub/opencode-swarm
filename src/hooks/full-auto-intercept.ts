@@ -13,7 +13,10 @@ import * as fs from 'node:fs';
 import { createCriticAutonomousOversightAgent } from '../agents/critic';
 import { getSwarmAgents, resolveFallbackModel } from '../agents/index.js';
 import type { PluginConfig } from '../config';
-import { stripKnownSwarmPrefix } from '../config/schema.js';
+import {
+	deriveSwarmIdentity,
+	stripKnownSwarmPrefix,
+} from '../config/schema.js';
 import { appendCoreEventSync } from '../events/core-events.js';
 import {
 	classifyProviderFailure,
@@ -724,14 +727,8 @@ export async function dispatchCriticAndWriteEvent(
 	// Mirrors the sibling inline loop in `src/full-auto/oversight.ts` — the
 	// shared advance block lives in `advanceInlineFallback` (see utils/
 	// inline-fallback-advancer.ts) so the two bespoke loops cannot drift.
-	const oversightBaseRole = stripKnownSwarmPrefix(oversightAgentName);
-	const oversightSwarmId =
-		oversightBaseRole !== oversightAgentName
-			? oversightAgentName.slice(
-					0,
-					oversightAgentName.length - oversightBaseRole.length - 1,
-				)
-			: undefined;
+	const { role: oversightBaseRole, swarmID: oversightSwarmId } =
+		deriveSwarmIdentity(oversightAgentName);
 	const oversightSwarmAgents = getSwarmAgents(oversightSwarmId);
 	const oversightFallbackRole = oversightSwarmAgents?.[oversightBaseRole]
 		?.fallback_models?.length
