@@ -44,11 +44,16 @@ import { extractWorkflowIds } from '../observability/legacy.js';
 import { canonicalLineContent } from '../observability/observe.js';
 import type { TelemetryEvent, TelemetryListener } from '../telemetry.js';
 import { addTelemetryListener, removeTelemetryListener } from '../telemetry.js';
+import { isBlankDirectory } from '../utils/path-security.js';
 import { canonicalProjectKey } from './canonical-project.js';
 import { DbWriteError } from './db-errors.js';
 import { DURABILITY_CLASSES } from './durability.js';
 import { getGroupCommitWriter } from './group-commit-writer.js';
-import { getProjectDb, projectDbExists } from './project-db.js';
+import {
+	assertProjectDbRoot,
+	getProjectDb,
+	projectDbExists,
+} from './project-db.js';
 
 /** Hard cap on retained observability rows (DELETE-based retention). */
 export const MAX_OBSERVABILITY_EVENT_ROWS = 50_000;
@@ -234,8 +239,12 @@ function noteDropped(directory: string, category: string): void {
  * with a DIFFERENT directory evicts the previous listener first, so exactly
  * one sink listener is ever on the telemetry bus (per-directory counters live
  * in their own maps and simply resume under the new binding).
+ * A blank root is a no-op that keeps any existing binding, like
+ * `initTelemetry`: its canonical key is the cwd, so binding it would write the
+ * sink into whatever project the process runs in (#3165 B).
  */
 export function registerObservabilityEventSink(directory: string): void {
+	if (isBlankDirectory(directory)) return;
 	try {
 		const key = canonicalProjectKey(directory);
 		if (isObservabilitySinkDisabled()) {
@@ -572,7 +581,8 @@ function upsertHealthDelta(
  * the CALLER's to swallow (the sink listener does). In-memory health counters
  * track accepted/quarantined; retention + health persistence are appended to
  * the same batch on their throttle intervals so they can never race a live
- * append.
+ * append. A blank root throws `ProjectDbError` (`invalid_root`) before any
+ * counter moves: its canonical key is the cwd (#3165 B).
  */
 export function appendObservabilityEventDb(
 	directory: string,
@@ -580,6 +590,7 @@ export function appendObservabilityEventDb(
 	canonicalContent?: string,
 ): void {
 	if (isObservabilitySinkDisabled()) return;
+	assertProjectDbRoot(directory);
 	const root = canonicalProjectKey(directory);
 	const row = buildLiveRow(canonical, canonicalContent);
 	const h = _healthDeltas.get(root) ?? emptyHealth();
@@ -878,10 +889,13 @@ function filterImportCandidates(
  * content-derived synthetic ids make every re-insert a no-op (`INSERT OR
  * IGNORE`). Runs only from the report path — never per emit, never at init.
  * Files are read oldest-generation first so rowid order tracks event order.
+ * A blank root throws `ProjectDbError` (`invalid_root`) before the cwd's
+ * legacy stream is read (#3165 B).
  */
 export function syncObservabilityImport(
 	directory: string,
 ): ObservabilityImportResult {
+	assertProjectDbRoot(directory);
 	flushPendingWrites(directory);
 	const root = canonicalProjectKey(directory);
 	const result: ObservabilityImportResult = {
@@ -1060,10 +1074,14 @@ export function queryObservabilityEvents(
 	};
 }
 
-/** Cumulative persisted sink health (never opens a DB when absent). */
+/**
+ * Cumulative persisted sink health (never opens a DB when absent). A blank
+ * root has none: its canonical key would read the cwd project's counters.
+ */
 export function readObservabilitySinkHealth(
 	directory: string,
 ): ObservabilitySinkHealth | null {
+	if (isBlankDirectory(directory)) return null;
 	if (!projectDbExists(directory)) {
 		const root = canonicalProjectKey(directory);
 		const delta = _healthDeltas.get(root);
@@ -1139,6 +1157,8 @@ export function readObservabilityCoverage(
 }
 
 function legacyStreamExists(directory: string): boolean {
+	// A blank root has no stream; its canonical key is the cwd (#3165 B).
+	if (isBlankDirectory(directory)) return false;
 	const root = canonicalProjectKey(directory);
 	for (const fileName of LEGACY_STREAM_FILES) {
 		try {

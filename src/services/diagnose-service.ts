@@ -1180,7 +1180,7 @@ export async function getDiagnoseData(
 				{
 					name: 'Project directory',
 					status: '❌',
-					detail: `Not a usable project root (must be a non-blank absolute path; got ${JSON.stringify(directory)})`,
+					detail: `Not a usable project root (must be a non-blank absolute path; got ${sanitizeDiagnosticText(JSON.stringify(directory), 120)})`,
 				},
 			],
 			passCount: 0,

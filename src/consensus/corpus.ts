@@ -114,6 +114,7 @@ import {
 	trajectoryFileBytes,
 } from '../prm/trajectory-store.js';
 import type { TrajectoryEntry } from '../prm/types.js';
+import { sanitizeDiagnosticText } from '../scope/path-identity.js';
 import { rejectedEditsPath } from '../services/skill-evaluator.js';
 import { isNonBlankAbsoluteDirectory } from '../utils/path-security.js';
 import type { ConsensusCorpusHash, ConsensusSourceKind } from './contracts.js';
@@ -399,7 +400,7 @@ export function sanitizeExcerpt(value: string, maxChars: number): string {
 export function assertCorpusRoot(directory: unknown): void {
 	if (!isNonBlankAbsoluteDirectory(directory)) {
 		throw new Error(
-			`[consensus-corpus] workspace directory must be a non-blank absolute path (got ${JSON.stringify(directory)})`,
+			`[consensus-corpus] workspace directory must be a non-blank absolute path (got ${sanitizeDiagnosticText(JSON.stringify(directory), 120)})`,
 		);
 	}
 }

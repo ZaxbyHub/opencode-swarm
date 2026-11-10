@@ -42,16 +42,39 @@ A blank or whitespace project directory names no project, but several
   `resolveProjectRootDecision`, the init form of `assertProjectRoot`, now
   fails closed for a blank root, so init loads without writing `.swarm/`
   state, as it already did when the project root could not be determined.
-- `writeSnapshot` (the session snapshot) created `.swarm/swarm.db` and the
-  snapshot projection in the cwd; the `getProjectDb` guard above now stops
-  it.
+- The `swarm.db` stores that canonicalize the root before opening the
+  database never reached the `getProjectDb` guard, because
+  `canonicalProjectKey('')` is the absolute cwd. They now refuse a blank root
+  first:
+  - `getGroupCommitWriter`, `appendObservabilityEventDb`,
+    `syncObservabilityImport`, the phase-report and insight-candidate writers
+    and the legacy importers throw `ProjectDbError` (`invalid_root`) before
+    any state changes. Before, they created `<cwd>/.swarm/swarm.db` (a
+    whitespace root created a whitespace-named directory) or wrote through the
+    cwd project's cached writer.
+  - The snapshot-coordination entry points (`ensureSnapshotCoordinationReady`,
+    `startSnapshotCoordinationInitialization`,
+    `retrySnapshotCoordinationInitialization`) reject with the same error
+    instead of initializing the cwd project's coordination, so `writeSnapshot`
+    with a blank root no longer touches it.
+  - The close, status and lookup paths (`closeGroupCommitWriter`,
+    `markSnapshotCoordinationClosing`, `beginSnapshotCoordinationReset`,
+    `getSnapshotCoordinationStatus`, `getDashboardHandle`, the dashboard close
+    functions) treat a blank root as a no-op or not-found, so plugin dispose
+    with a blank root no longer closes the cwd project's writer or
+    coordination. The read paths return their empty result (`[]`, 0 or null).
+    `registerObservabilityEventSink` ignores a blank root, and
+    `startDashboardServer` disables itself for a whitespace root (it already
+    did for `''`).
+  - `getSwarmDbHealthSnapshot` reports an `invalid_root` error for a blank
+    root instead of a healthy "absent" database.
 
 The session-start and trajectory stores already refused such a root (#3146);
 they and the new guards share one helper, `isNonBlankAbsoluteDirectory` /
 `isBlankDirectory` in `src/utils/path-security.ts`.
 
-Every production caller passes an absolute project root, so normal use is
-unchanged.
+A caller that passes a non-blank root sees no change. The guards only
+refuse a blank root; a relative root still resolves as before (see below).
 
 ## Known caveat
 
@@ -63,4 +86,7 @@ tools and is not changed here.
 
 ## Migration
 
-None.
+A caller that passed a blank root used to read or write the process cwd's
+`.swarm/` state. It now gets a typed error (`ProjectDbError` `invalid_root`,
+`CORE_EVENT_NO_STORE`, or the corpus and project-root errors), `false`,
+`null`, an empty result, or a no-op. Pass the project root instead.

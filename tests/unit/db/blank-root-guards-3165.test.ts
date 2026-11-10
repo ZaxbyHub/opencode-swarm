@@ -61,8 +61,11 @@ beforeEach(() => {
 
 afterEach(() => {
 	process.chdir(originalCwd);
-	closeProjectDb(sandbox);
-	safeRmRecursive(sandbox);
+	try {
+		closeProjectDb(sandbox);
+	} finally {
+		safeRmRecursive(sandbox);
+	}
 });
 
 function cwdSwarmCreated(): boolean {
@@ -314,8 +317,8 @@ describe('shared .swarm write seams — regression: a blank root wrote under the
 	});
 
 	test('writeSnapshot on a blank root creates no cwd .swarm', async () => {
-		// Covered by the getProjectDb guard: snapshot coordination opens the
-		// project DB first, which now refuses a blank root.
+		// Covered by the snapshot-coordination guard, which refuses a blank
+		// root before the cwd project's coordination is initialized.
 		const state = {
 			toolAggregates: new Map(),
 			activeAgent: new Map(),

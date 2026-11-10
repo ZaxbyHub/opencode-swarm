@@ -15,6 +15,7 @@ import type { Database } from 'bun:sqlite';
 import { existsSync, mkdirSync, unlinkSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { sanitizeDiagnosticText } from '../scope/path-identity.js';
 import { atomicWriteSwarmFileSync } from '../utils/atomic-write.js';
 import {
 	canonicalRootKeyFresh,
@@ -825,12 +826,16 @@ export function runProjectMigrations(db: Database, markerDir?: string): void {
  * resolved: `save_plan` and `declare_scope` pass a caller-supplied relative
  * `working_directory` through unresolved today, and refusing it here would
  * turn their current behavior into a failure.
+ *
+ * Exported so the swarm.db stores that canonicalize the root BEFORE calling
+ * getProjectDb (`canonicalProjectKey('')` is the absolute cwd, so this guard
+ * would never see the blank) refuse it with the same typed error.
  */
-function assertProjectDbRoot(directory: string): void {
+export function assertProjectDbRoot(directory: string): void {
 	if (isBlankDirectory(directory)) {
 		throw new ProjectDbError(
 			'invalid_root',
-			`Project root must be a non-blank path (got ${JSON.stringify(directory)})`,
+			`Project root must be a non-blank path (got ${sanitizeDiagnosticText(JSON.stringify(directory), 120)})`,
 		);
 	}
 }
