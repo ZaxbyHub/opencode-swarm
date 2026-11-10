@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.203.2",
+  "tagCommit": "37cd7def6669824ae44c0625769e2d315c89cdae",
+  "targetCommitish": "37cd7def6669824ae44c0625769e2d315c89cdae",
+  "releaseBodySha256": "5f1a54ef7ecf36fa184deed4a22db4683d2ec996bae4a700904615e44def64d0",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/3165-b-blank-root-guards.md",
+      "sha256": "f70d9c04a0809e79061f1baa6f69063fbced8de2bb239fdf659ad81c175ad673"
+    },
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/3165-g8-v2-finish-fails-closed.md",
+      "sha256": "ac0e499a7337478857493bd5845d8c08940bf516d2e5a5d48532d80ae1c0e9e0"
+    }
+  ]
+}
