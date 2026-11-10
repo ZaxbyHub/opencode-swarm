@@ -109,16 +109,16 @@ describe('Lean Turbo runtime conformance — adversarial', () => {
 					JSON.stringify(turboState),
 				);
 
-				// NaN phase number via call — the function accepts number but phase-ready
-				// reads from state. The check happens in executePhaseComplete which validates.
-				// Here we test the verifyLeanTurboPhaseReady call with a float.
+				// NaN never equals a persisted phase, so no running session matches.
 				const result = phaseReadyInternals.verifyLeanTurboPhaseReady(
 					dir,
-					1.5,
+					Number.NaN,
 					SESSION_ID,
 				);
-				// With floating point phase, no session matches (session has phase: 1)
 				expect(result.ok).toBe(false);
+				expect(result.reason).toContain(
+					'No active Lean Turbo session for phase NaN',
+				);
 			} finally {
 				fs.rmSync(dir, { recursive: true, force: true });
 			}
