@@ -9,6 +9,7 @@
  * critic-only); GREEN at the shipped head.
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { CANDIDATE_HEADERS } from '../../../src/background/candidate-contract.js';
 import { PR_REVIEW_BASE_DIMENSION_IDS } from '../../../src/background/pr-review-contract.js';
 import {
 	_test_exports,
@@ -83,11 +84,18 @@ describe('gate-recorder and integrity sibling admission (#3358 AC8, plan R1)', (
 
 	test('recorder admits an exact declared role (reviewer)', async () => {
 		await establishReviewPrerequisites();
+		const declaredReviewer = [{ ...lanes[0], agent: 'reviewer' }];
 		await expect(
-			recordPrReviewValidationBatch(tempDir, SESSION_ID, 'reviewer', lanes, {
-				batchId: 'legit-reviewer',
-				prHeadSha: HEAD_SHA,
-			}),
+			recordPrReviewValidationBatch(
+				tempDir,
+				SESSION_ID,
+				'reviewer',
+				declaredReviewer,
+				{
+					batchId: 'legit-reviewer',
+					prHeadSha: HEAD_SHA,
+				},
+			),
 		).resolves.toBeDefined();
 	});
 
@@ -120,23 +128,66 @@ describe('gate-recorder and integrity sibling admission (#3358 AC8, plan R1)', (
 
 	test('a wrong-role child record fails lane integrity (council mode, reviewer child)', async () => {
 		await establishReviewPrerequisites();
-		await recordPrReviewValidationBatch(tempDir, SESSION_ID, 'council', lanes, {
-			batchId: 'wrong-child-council',
-			prHeadSha: HEAD_SHA,
-		});
+		// A council lane settles only via a [CLEAN] micro-lane artifact (the
+		// council-clean precedent); the child record carries the WRONG role.
+		const councilLane = [
+			{ laneId: 'lane-1', workflowLane: 'council-generalist' },
+		];
+		await recordPrReviewValidationBatch(
+			tempDir,
+			SESSION_ID,
+			'council',
+			councilLane,
+			{
+				batchId: 'wrong-child-council',
+				prHeadSha: HEAD_SHA,
+			},
+		);
 		await persistBatch(
 			'wrong-child-council',
 			'swarm-pr-review:council',
-			lanes,
+			councilLane,
 			{
-				textOverride: reviewerText,
+				textOverride: `${CANDIDATE_HEADERS.micro_lane}\n[CLEAN] | council-generalist | complete adversarial council review | inspected the complete diff and found no surviving council claim`,
 				recordAgent: 'reviewer',
 			},
 		);
 		_test_exports.resetTrackedStateCache();
 		await expect(
 			assertPrReviewValidationSettled(tempDir, SESSION_ID, 'council'),
-		).rejects.toThrow();
+		).rejects.toThrow(
+			/council obligations lack successful exact artifacts: council-generalist/,
+		);
+	});
+
+	test('a correct-role council child record settles (positive control)', async () => {
+		await establishReviewPrerequisites();
+		const councilLane = [
+			{ laneId: 'lane-1', workflowLane: 'council-generalist' },
+		];
+		await recordPrReviewValidationBatch(
+			tempDir,
+			SESSION_ID,
+			'council',
+			councilLane,
+			{
+				batchId: 'good-child-council',
+				prHeadSha: HEAD_SHA,
+			},
+		);
+		await persistBatch(
+			'good-child-council',
+			'swarm-pr-review:council',
+			councilLane,
+			{
+				textOverride: `${CANDIDATE_HEADERS.micro_lane}\n[CLEAN] | council-generalist | complete adversarial council review | inspected the complete diff and found no surviving council claim`,
+				recordAgent: 'council_generalist',
+			},
+		);
+		_test_exports.resetTrackedStateCache();
+		await expect(
+			assertPrReviewValidationSettled(tempDir, SESSION_ID, 'council'),
+		).resolves.toBeDefined();
 	});
 
 	test('a correct-role child record settles (reviewer mode)', async () => {
