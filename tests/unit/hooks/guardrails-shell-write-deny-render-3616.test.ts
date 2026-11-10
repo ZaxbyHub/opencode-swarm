@@ -241,10 +241,17 @@ describe('#3616 item 10: destructive arm disabled still judges rm operands', () 
 });
 
 describe('#3606: file-authority ancestor denial arms', () => {
-	// Synthetic home-rooted paths: the seam answers every lstat, so nothing
-	// is touched on disk and redaction is exercised on every platform (the
-	// temp workspace is not under home on Linux/macOS).
-	const home = os.homedir();
+	// Synthetic PROFILE-SHAPED paths: the seam answers every lstat, so nothing
+	// is touched on disk. redactPath folds lexical profile shapes
+	// (/home/<name>, /Users/<name>, C:\Users\<name>), so the fixture uses one
+	// on every platform instead of os.homedir() — a root-run runner's
+	// /root is not a profile shape and would not (and should not) redact.
+	const home =
+		process.platform === 'win32'
+			? 'C:\\Users\\sw3606user'
+			: process.platform === 'darwin'
+				? '/Users/sw3606user'
+				: '/home/sw3606user';
 	const syntheticCwd = path.join(home, 'sw3606-synthetic');
 	const injectEacces = (): { calls: number } => {
 		const counter = { calls: 0 };
