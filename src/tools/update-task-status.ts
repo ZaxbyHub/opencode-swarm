@@ -2003,11 +2003,11 @@ export async function executeUpdateTaskStatus(
 		// on exactly the common path it exists to describe.
 		// Declared external-evidence tasks (#3422) skip this precheck: the
 		// under-lock external arm runs the authoritative admission instead.
-		// The fallback dir matches the locked check's (`fallbackDir ?? directory`)
-		// so this precheck reaches the same exact-task decision. Passing none
-		// without a session took the legacy direct-caller path, which could admit
-		// what the locked check then refused as TASK_COMPLETION_CAS_MISMATCH
-		// instead of this normal gate message (#3165 E).
+		// Same fallback directory as the locked check (`fallbackDir ?? directory`),
+		// so both read one evidence source. Passing none without a session took the
+		// legacy direct-caller path, which could admit what the locked check then
+		// refused as TASK_COMPLETION_CAS_MISMATCH rather than this normal gate
+		// message (#3165 E).
 		if (
 			phaseRequiresReviewer &&
 			!councilCheck.active &&
