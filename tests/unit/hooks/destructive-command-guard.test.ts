@@ -262,12 +262,12 @@ describe('destructive command guard', () => {
 	});
 
 	describe('block_destructive_commands disabled', () => {
-		test('rm -rf / allowed when block_destructive_commands is false', async () => {
+		test('rm -rf / hits the write gate with block_destructive_commands false (#3616 item 10)', async () => {
 			const config = defaultConfig({ block_destructive_commands: false });
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
 			const input = makeBashInput('test-session', 'rm -rf /');
-			const output = makeBashOutput('rm -rf /');
-			await expect(hooks.toolBefore(input, output)).resolves.toBeUndefined();
+			const run = hooks.toolBefore(input, makeBashOutput('rm -rf /'));
+			await expect(run).rejects.toThrow(/SCOPE_NOT_DECLARED|WRITE/);
 		});
 
 		test('git push --force allowed when block_destructive_commands is false', async () => {

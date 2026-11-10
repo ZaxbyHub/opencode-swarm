@@ -2189,7 +2189,7 @@ const ENV_FLAGS_WITH_ARG = new Set([
  * across the set. Attached short forms (`-uFOO`) and mid-cluster arg-takers
  * carry their argument inside the token and stay safe without it.
  */
-export function envFlagConsumesNextWord(token: string): boolean {
+function envFlagConsumesNextWord(token: string): boolean {
 	if (token.startsWith('--')) {
 		const exact = ENV_FLAGS_WITH_ARG.has(token);
 		if (exact) return true;
@@ -8157,6 +8157,8 @@ function expansionWordWrites(
 			if (typeof body !== 'string' || body === '') {
 				// Unserializable body: withdraw fail-closed.
 				results.push({
+					// opaque interpreter_eval class: no capability flag,
+					// blanket-blocked
 					category: 'interpreter_eval',
 					operator: '$(...) word (unserializable body)',
 					path: null,
@@ -8173,6 +8175,8 @@ function expansionWordWrites(
 			}
 			if (inner.parseError && inner.writes.length === 0) {
 				results.push({
+					// opaque interpreter_eval class: no capability flag,
+					// blanket-blocked
 					category: 'interpreter_eval',
 					operator: '$(...) word (parse error in body)',
 					path: null,
@@ -8255,6 +8259,8 @@ export function detectPosixWrites(
 		return {
 			writes: [
 				{
+					// opaque interpreter_eval class: no capability flag,
+					// blanket-blocked
 					category: 'interpreter_eval',
 					operator: 'ambient shell-state key assignment',
 					path: null,
@@ -8277,6 +8283,8 @@ export function detectPosixWrites(
 		return {
 			writes: [
 				{
+					// opaque interpreter_eval class: no capability flag,
+					// blanket-blocked
 					category: 'interpreter_eval',
 					operator: 'oversized word',
 					path: null,

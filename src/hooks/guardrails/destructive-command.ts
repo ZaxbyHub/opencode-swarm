@@ -21,7 +21,6 @@ import { sanitizeDiagnosticText } from '../../scope/path-identity';
 import { CMD_STRIP_PREFIX, PS_STRIP_PREFIX } from '../shell-executor-context';
 import {
 	BASH_BUILTIN_COMMANDS,
-	envFlagConsumesNextWord,
 	expandBraceRaw,
 	parseRmOptionTokens,
 	walkLauncherOptions,
@@ -1252,6 +1251,26 @@ export function dcAnalyzeLauncherUncertainty(command: string): {
 /** Rewrite/nesting bound for the chdir transform (mirrors DC_MAX_UNWRAP_DEPTH). */
 const DC_CHDIR_REWRITE_MAX_DEPTH = 5;
 
+/**
+ * #3616 D5: env flags that provably cannot change the working directory or
+ * re-split the command line — the ONLY flags the launcher peel in
+ * matchChdirWrapperSegment may step over (`-u`/`--unset` consume one word).
+ * Everything else (`-C`, `-S`, `--chdir`, `--split-string`, clusters, BSD
+ * `-P`, unknown flags) keeps `env` as the chdir-wrapper head.
+ */
+const ENV_PEELABLE_FLAGS = new Set([
+	'-',
+	'--',
+	'-i',
+	'--ignore-environment',
+	'-0',
+	'--null',
+	'-v',
+	'--debug',
+	'-u',
+	'--unset',
+]);
+
 /** env short flags whose argument may ride INSIDE the token (`-Cdir`). */
 const ENV_SHORT_ARG_CHARS = new Set(['u', 'U', 'C', 'S', 'a', 'P']);
 
@@ -1333,7 +1352,7 @@ function matchChdirWrapperSegment(segment: string): DcChdirMatch {
 	// payload reaches this function as the unquoted inner text (the
 	// preprocessing splices the payload as a parenthesized subshell), so the
 	// same retry covers it. Bounded: each peel consumes at least one word.
-	for (let peel = 0; peel < words.length; peel += 1) {
+	peelLoop: for (let peel = 0; peel < words.length; peel += 1) {
 		if (
 			head === 'time' ||
 			head === 'nice' ||
@@ -1351,19 +1370,28 @@ function matchChdirWrapperSegment(segment: string): DcChdirMatch {
 						next += 1;
 				}
 			} else {
-				// env: flags (with their consumed args) and VAR= assignments.
+				// env: peel ONLY across assignments and flags that cannot
+				// change the working directory (or re-split the command). A
+				// chdir-bearing env (`env -C DIR …`, `-S '-C DIR …'`,
+				// `--chdir`, clusters, or any flag we do not recognize) is the
+				// chdir wrapper ITSELF — it must stay the head and reach
+				// matchEnvChdir below, or the child cwd is silently dropped
+				// and the wrapped write resolves at the ambient directory.
 				while (next < words.length) {
 					const w = words[next] as string;
-					if (w.startsWith('-')) {
-						next += 1;
-						if (envFlagConsumesNextWord(w)) next += 1;
-						continue;
-					}
 					if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(w)) {
 						next += 1;
 						continue;
 					}
-					break;
+					if (!w.startsWith('-')) break;
+					if (ENV_PEELABLE_FLAGS.has(w) || w.startsWith('--unset=')) {
+						next += 1;
+						if (w === '-u' || w === '--unset') next += 1;
+						continue;
+					}
+					// Not provably chdir-free: keep `env` as the head (it then
+					// flows through the flag-region scan and matchEnvChdir).
+					break peelLoop;
 				}
 			}
 			if (next >= words.length) return null;

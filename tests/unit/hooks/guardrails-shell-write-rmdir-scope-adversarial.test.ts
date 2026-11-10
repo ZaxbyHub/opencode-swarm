@@ -285,8 +285,11 @@ describe('real gate: sequences and operand shapes fall back to scope', () => {
 			path.join(ws, 'link'),
 			isWin32 ? 'junction' : 'dir',
 		);
-		// The kernel removes <outside>/a; the lexical reading is <ws>/a.
-		expect(await gate('coder', ws, 'rmdir link/../a')).toMatch(SCOPE_VIOLATION);
+		// The kernel removes <outside>/a; #3616 D8 resolves through the link, so
+		// the gate judges the REAL landing (outside the root), not <ws>/a.
+		expect(await gate('coder', ws, 'rmdir link/../a')).toMatch(
+			/AUTHORITY_ROOT_ESCAPE[\s\S]*rmdir-adv-out-/,
+		);
 	});
 
 	it('rejects an operand with a mid-word `#`', async () => {
