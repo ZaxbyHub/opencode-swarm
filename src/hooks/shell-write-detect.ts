@@ -4471,10 +4471,13 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 			// #3572 review (delta): GNU getopt also accepts the GLUED long form
 			// `--split-string=VALUE` — the payload rode in the flag token and
 			// was silently consumed as an env argument.
-			const gluedSplit =
-				word.startsWith('--split-string=') && word.length > 15
-					? word.slice('--split-string='.length)
-					: undefined;
+			// #3616 (review round 6): an EMPTY payload (`-S ''`,
+			// `--split-string=`) splices nothing, so the command is the words
+			// that follow — `env -S '' sh -c …` IS `env sh -c …`. The old
+			// empty-payload bail left that command unanalyzed.
+			const gluedSplit = word.startsWith('--split-string=')
+				? word.slice('--split-string='.length)
+				: undefined;
 			if (
 				word !== '-S' &&
 				word !== '--split-string' &&
@@ -4482,7 +4485,7 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 			)
 				continue;
 			const payload = gluedSplit ?? suffixWords[w + 1];
-			if (payload === undefined || payload.trim() === '') break;
+			if (payload === undefined) break;
 			// Glued form: the payload is INSIDE the token (no next word).
 			const glued = gluedSplit !== undefined;
 			const postStart = glued ? w + 1 : w + 2;
@@ -4597,7 +4600,7 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 			const reconstructed = [
 				'env',
 				...suffixWords.slice(0, w),
-				serializedPayload,
+				...(serializedPayload === '' ? [] : [serializedPayload]),
 				...suffixWords.slice(postStart),
 			].join(' ');
 			for (const write of detectPosixWrites(reconstructed).writes) {

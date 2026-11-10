@@ -202,6 +202,19 @@ describe('#3616 env split-string family: every spelling reaches the payload walk
 		`env -S'tee ../outside.txt'`,
 		`env --split='tee ../outside.txt'`,
 		`env -C .. -S'tee src/a'`,
+		// Words AFTER the split option: the split is an argv splice, so an
+		// empty / option-only payload leaves the following words as the
+		// command, and a payload command takes them as its arguments
+		// (implementation-review round 6).
+		`env --split-string= sh -c "echo x > ../x.txt"`,
+		`env --split= sh -c "echo x > ../x.txt"`,
+		`env --split '' sh -c "echo x > ../x.txt"`,
+		`env -S '' sh -c "echo x > ../x.txt"`,
+		`env --split='FOO=1' sh -c "echo x > ../x.txt"`,
+		`env --split='-i' sh -c "echo x > ../x.txt"`,
+		`env -S sh -c "echo x > ../x.txt"`,
+		`env --split=sh -c "echo x > ../x.txt"`,
+		`env -S tee ../outside.txt`,
 	];
 	for (const command of DENIED) {
 		test(
@@ -214,21 +227,32 @@ describe('#3616 env split-string family: every spelling reaches the payload walk
 			T,
 		);
 	}
-	test(
-		'a nested split spelling inside a payload fails closed',
-		async () => {
-			const r = await gate(`env -S '-S tee src/ok.txt'`);
-			expect(r.verdict).toBe('BLOCKED');
-			expect(r.message).toMatch(PARSE_DENY);
-		},
-		T,
-	);
+	for (const command of [
+		`env -S '-S tee src/ok.txt'`,
+		// A payload env would expand, or a literal redirect-operator word,
+		// followed by more words cannot be spliced faithfully.
+		`env -S '$SHELL' -c "echo x > ../x.txt"`,
+		`env -S 'echo >' ../o`,
+	]) {
+		test(
+			`${command} fails closed`,
+			async () => {
+				const r = await gate(command);
+				expect(r.verdict).toBe('BLOCKED');
+				expect(r.message).toMatch(PARSE_DENY);
+			},
+			T,
+		);
+	}
 	for (const command of [
 		`env -S 'tee src/ok.txt'`,
 		`env "--split=-C src tee ok.txt"`,
 		`env -C src -S 'tee ok.txt'`,
 		// env -S passes `>` through as a literal argv word (no redirect).
 		`env -S'echo x > ../o'`,
+		`env --split= sh -c "echo x > src/ok.txt"`,
+		`env -S '' sh -c "echo x > src/ok.txt"`,
+		`env -S sh -c "echo x > src/ok.txt"`,
 	]) {
 		test(
 			`control: ${command} is admitted`,

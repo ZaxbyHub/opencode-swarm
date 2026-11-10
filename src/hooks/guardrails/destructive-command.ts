@@ -1252,6 +1252,16 @@ export function dcAnalyzeLauncherUncertainty(command: string): {
 const DC_CHDIR_REWRITE_MAX_DEPTH = 5;
 
 /**
+ * File-target redirect operator WORDS (fd-prefixed N>/N>>, clobber >|,
+ * stdout+stderr &>/&>>, read-write <>, plain >/>>) as the wrapper-rewrite
+ * redirect hoist recognizes them.
+ */
+const DC_FILE_REDIRECT_OP = /^(?:\d*(?:>|>>|>\|)|<>|&>|&>>)$/;
+
+/** Payload text GNU env -S would expand or unescape at run time. */
+const DC_ENV_SPLIT_DYNAMIC = /[$`\\]/;
+
+/**
  * #3616 D5: env flags that provably cannot change the working directory or
  * re-split the command line — the ONLY flags the launcher peel in
  * matchChdirWrapperSegment may step over (`-u`/`--unset` consume one word).
@@ -1438,12 +1448,24 @@ function matchEnvChdir(words: string[]): DcChdirMatch {
 	// separate/glued, unambiguous abbreviation, cluster-last, glued cluster
 	// `-SPAYLOAD`). Each spelling recurses through this one path; a nested
 	// split spelling inside a payload fails closed. A chdir captured BEFORE
-	// the split option carries into the payload walk. When the payload
-	// carries no chdir at all, a NON-canonical spelling is rewritten to the
-	// canonical `env -S 'PAYLOAD' …` form the write detector's env walk
-	// already analyzes (it splits the payload as literal argv, so
-	// `env -S 'tee ../x'` is judged while a payload `>` stays a literal
-	// argument, exactly as env passes it).
+	// the split option carries into the payload walk. When no chdir is found
+	// the split is an argv SPLICE (env's getopt stops at the first
+	// non-option word, so words after a payload command are that command's
+	// arguments):
+	// - with NOTHING after the split option, the canonical single-argument
+	//   form `env -S 'P'` is exact for any payload — the write detector's own
+	//   env arm splits it as literal argv (a payload `>` stays a literal
+	//   argument, exactly as env passes it) and refuses dynamic payload
+	//   words — so a non-canonical spelling is rewritten to it;
+	// - with words AFTER it, a literal payload is spliced into the plain form
+	//   `env PRE… PAYLOAD-WORDS… POST…` — `env -S '' CMD…` IS `env CMD…`, and
+	//   `env -S sh -c SCRIPT` IS `env sh -c SCRIPT` — so the ordinary env
+	//   walk judges the command; a payload env would EXPAND or unescape at
+	//   run time (`$`, backtick, backslash), or one carrying a literal
+	//   redirect-operator word, cannot be spliced faithfully and fails
+	//   closed.
+	// Words before the split option (assignments, flags) are preserved in
+	// every rewrite so text-level scans still see them.
 	const recurseSplit = (
 		payload: string,
 		restIndex: number,
@@ -1461,13 +1483,35 @@ function matchEnvChdir(words: string[]): DcChdirMatch {
 			}
 		}
 		const after = words.slice(restIndex);
+		const pre = words.slice(1, cursor);
 		const carried = dir !== undefined ? ['-C', dir] : [];
 		const inner = matchEnvChdir(['env', ...carried, ...splitWords, ...after]);
-		if (inner !== null || canonical) return inner;
+		if (inner !== null) return inner;
+		if (after.length === 0) {
+			// Nothing follows the split option: the canonical single-argument
+			// form is exact for any payload (the detector arm splits it as
+			// literal argv and refuses dynamic words).
+			if (canonical || splitWords.length === 0) return null;
+			return {
+				kind: 'static',
+				dir: '.',
+				innerWords: ['env', ...pre, '-S', payload],
+			};
+		}
+		// Words follow the split option: argv splice. A payload env would
+		// expand/unescape, or one carrying a literal redirect-operator word
+		// (which the redirect hoist could not tell from a real redirect),
+		// cannot be represented — fail closed.
+		if (
+			DC_ENV_SPLIT_DYNAMIC.test(payload) ||
+			splitWords.some((w) => DC_FILE_REDIRECT_OP.test(w))
+		) {
+			return { kind: 'failClosed' };
+		}
 		return {
 			kind: 'static',
 			dir: '.',
-			innerWords: ['env', '-S', payload, ...after],
+			innerWords: ['env', ...pre, ...splitWords, ...after],
 		};
 	};
 	while (cursor < words.length) {
@@ -1738,7 +1782,7 @@ function preprocessWrapperText(
 		// stdout+stderr &>/&>>, read-write <>, and the plain >/>> pair). An
 		// fd-DUPLICATION target (2>&1) is not a file and stays inside — bash
 		// dups the descriptor, nothing is written.
-		const FILE_REDIRECT_OP = /^(?:\d*(?:>|>>|>\|)|<>|&>|&>>)$/;
+		const FILE_REDIRECT_OP = DC_FILE_REDIRECT_OP;
 		const FD_DUP_TARGET = /^&\d+$/;
 		let i = 0;
 		while (i < words.length) {
