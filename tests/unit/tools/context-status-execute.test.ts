@@ -3,6 +3,7 @@
 import { afterEach, beforeEach, describe, expect, it, test } from 'bun:test';
 import type { ToolContext } from '@opencode-ai/plugin';
 import {
+	_internals as learningHealthInternals,
 	readLearningHealth,
 	resetLearningHealthForTest,
 } from '../../../src/health/learning-health';
@@ -12,10 +13,22 @@ import { canonicalMkdtemp, removeTreeWithRetry } from '../../helpers/tmpdir.js';
 
 const originalLoadPluginConfig = _internals.loadPluginConfig;
 const originalFetchSessionMessages = _internals.fetchSessionMessages;
+const originalWriteArtifact = learningHealthInternals.writeArtifact;
 
-// Per-test project root: learning-health alarms (e.g. model_limit_fallback)
+// Per-test project roots: learning-health alarms (e.g. model_limit_fallback)
 // persist to <directory>/.swarm/learning-health.json, so never the checkout.
+// That write is fire-and-forget, so teardown awaits every write the test
+// started before removing the roots; removing first lets a late write
+// recreate the root.
 let projectDir: string;
+let tempRoots: string[] = [];
+const pendingWrites = new Set<Promise<void>>();
+
+function tempRoot(prefix: string): string {
+	const dir = canonicalMkdtemp(prefix);
+	tempRoots.push(dir);
+	return dir;
+}
 
 function makeCtx(overrides: Partial<ToolContext> = {}): ToolContext {
 	return {
@@ -67,18 +80,36 @@ function mockConfig(
 }
 
 beforeEach(() => {
-	projectDir = canonicalMkdtemp('swarm-ctx-exec-');
+	projectDir = tempRoot('swarm-ctx-exec-');
+	learningHealthInternals.writeArtifact = (directory, contents) => {
+		const write = originalWriteArtifact(directory, contents);
+		pendingWrites.add(write);
+		void write.finally(() => pendingWrites.delete(write)).catch(() => {});
+		return write;
+	};
 	swarmState.liveContextWindows.clear();
 	_internals.loadPluginConfig = (() =>
 		mockConfig()) as typeof _internals.loadPluginConfig;
 	_internals.fetchSessionMessages = originalFetchSessionMessages;
 });
 
-afterEach(() => {
+afterEach(async () => {
 	swarmState.liveContextWindows.clear();
 	_internals.loadPluginConfig = originalLoadPluginConfig;
 	_internals.fetchSessionMessages = originalFetchSessionMessages;
-	removeTreeWithRetry(projectDir);
+	await Promise.allSettled([...pendingWrites]);
+	learningHealthInternals.writeArtifact = originalWriteArtifact;
+	const roots = tempRoots;
+	tempRoots = [];
+	const errors: unknown[] = [];
+	for (const dir of roots) {
+		try {
+			removeTreeWithRetry(dir);
+		} catch (error) {
+			errors.push(error);
+		}
+	}
+	if (errors.length > 0) throw errors[0];
 });
 
 describe('context_status.execute', () => {
@@ -334,8 +365,8 @@ describe('context_status.execute', () => {
 
 describe('context_status.execute learning-health scoping (#2044)', () => {
 	test('a fallback resolution through execute is visible in the owning project snapshot only', async () => {
-		const ownerDir = canonicalMkdtemp('swarm-ctx-exec-lh-');
-		const otherDir = canonicalMkdtemp('swarm-ctx-exec-lh-');
+		const ownerDir = tempRoot('swarm-ctx-exec-lh-');
+		const otherDir = tempRoot('swarm-ctx-exec-lh-');
 		try {
 			resetLearningHealthForTest();
 			swarmState.liveContextWindows.clear();
@@ -365,8 +396,6 @@ describe('context_status.execute learning-health scoping (#2044)', () => {
 			).toBe(false);
 		} finally {
 			resetLearningHealthForTest();
-			removeTreeWithRetry(ownerDir);
-			removeTreeWithRetry(otherDir);
 		}
 	});
 });
