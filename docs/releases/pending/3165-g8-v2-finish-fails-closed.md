@@ -15,9 +15,10 @@ on OpenCode 1 (since v7.192.4).
 The adapter now copies the `finish` of the last assistant entry of the final
 turn onto `info`, matching v1, where the reply's `info.finish` is the last
 step's. When the host reports a `length` or `content-filter` finish on a reply
-that has text or a non-failed idle marker and no recorded error, every
-consumer of the shared reader now treats it as a failed dispatch on both
-hosts, and the Lean lane runner keeps its existing exemption for it. In the
+whose final turn has no failed idle marker, has text or an idle marker, and
+has no recorded error, the consumers of the shared reader now treat it as a
+failed dispatch on both hosts, except the Lean lane runner, which keeps its
+existing exemption for it. In the
 Epic phase review, a textless reply of that kind no longer reads as the empty
 provider-refusal signal: it skips the bash retry and fails that role's
 dispatch (a `REJECTED` verdict, `dispatch: failed`), as on OpenCode 1. The
@@ -26,11 +27,13 @@ error is classified as permanent, so no fallback model is tried either.
 Not changed: when OpenCode 2 reports the cut-off as a failed step
 (`session.execution.failed`, a recorded error), the adapter still takes its
 recorded-error path, which fails closed under the recorded error's own name,
-so the Lean runner's exemption does not apply there. Likewise, a textless
-reply with no idle marker and no recorded error still fails closed as a
-generic `ProviderError` (`v2 session failed without recorded error detail`)
-with `finish` dropped, so name-based handling such as the Lean runner's
-exemption does not apply to it either. A known gap, also unchanged: the
+so the Lean runner's exemption does not apply there (unless that name is
+itself `MessageOutputLengthError` or `MessageContentFilterError`). Likewise,
+with no recorded error, a reply whose final turn ends in a failed idle marker
+(even one with text) and a textless reply with no idle marker both still fail
+closed as a generic `ProviderError` (`v2 session failed without recorded error
+detail`) with `finish` dropped, so name-based handling such as the Lean
+runner's exemption does not apply to them either. A known gap, also unchanged: the
 adapter does not read an assistant entry's own `error` field.
 
 Unchanged: a reply that ends with `finish: "stop"`, `"tool-calls"`, `"error"`

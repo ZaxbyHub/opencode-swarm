@@ -135,6 +135,20 @@ describe('v2 session-client — regression: assistant finish was dropped on v2 (
 		expect(result.providerError?.name).toBe('MessageContentFilterError');
 		expect(result.providerError?.category).toBe('provider.content_filter');
 	});
+
+	test('a TEXTLESS length reply under a succeeded idle fails closed, not as the empty-refusal signal', async () => {
+		// The shape behind the Epic phase-review claim: an empty reply cut off by
+		// the output limit is a failed dispatch (status error), so it never reads
+		// as the completed-empty provider-refusal signal the bash retry keys on.
+		const result = await dispatchWith([
+			USER,
+			{ type: 'assistant', model: MODEL, content: [], finish: 'length' },
+			IDLE_OK,
+		]);
+		expect(result.status).toBe('error');
+		expect(result.providerError?.name).toBe('MessageOutputLengthError');
+		expect(result.providerError?.category).toBe('provider.output_length');
+	});
 });
 
 describe('v2 session-client finish passthrough — negative controls (#3165 G.8)', () => {
@@ -220,11 +234,15 @@ describe('v2 session-client finish passthrough — negative controls (#3165 G.8)
 	});
 
 	test.each([
-		'length',
-		'content-filter',
-	])('a recorded provider error still wins over finish "%s" (error branch unchanged)', async (finish) => {
+		['length', 'failed'],
+		['content-filter', 'failed'],
+		['length', 'succeeded'],
+		['content-filter', 'succeeded'],
+	])('a recorded provider error still wins over finish "%s" under a %s idle (error branch unchanged)', async (finish, outcome) => {
+		// The succeeded rows reach the error branch only through the recorded
+		// error (a failed idle takes it whatever the finish is).
 		const result = await dispatchWith(
-			[USER, assistant('partial', finish), { type: 'idle', outcome: 'failed' }],
+			[USER, assistant('partial', finish), { type: 'idle', outcome }],
 			() =>
 				recordV2SessionErrorFromEnvelope({
 					type: 'session.execution.failed',
@@ -240,6 +258,22 @@ describe('v2 session-client finish passthrough — negative controls (#3165 G.8)
 		expect(result.status).toBe('error');
 		expect(result.providerError?.name).toBe('APIError');
 		expect(result.providerError?.statusCode).toBe(403);
+	});
+
+	test('a failed idle with text and a length finish but no recorded error fails closed generically, finish dropped', async () => {
+		// Documented limit: a failed idle always takes the error branch, so the
+		// reply fails closed as the generic ProviderError, not under the
+		// finish-derived name the Lean runner's exemption keys on.
+		const result = await dispatchWith([
+			USER,
+			assistant('partial', 'length'),
+			{ type: 'idle', outcome: 'failed' },
+		]);
+		expect(result.status).toBe('error');
+		expect(result.providerError?.name).toBe('ProviderError');
+		expect(result.providerError?.message).toContain(
+			'v2 session failed without recorded error detail',
+		);
 	});
 
 	test('an assistant entry with no finish field is unchanged (pre-passthrough shape)', async () => {
