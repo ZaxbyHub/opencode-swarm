@@ -200,12 +200,12 @@ export function createIncrementalVerifyHook(
 			// ('mega_local_test_engineer' -> 'local_test_engineer') and
 			// matches neither arm below (issue #3322; the #2960 defect
 			// class). The raw-name arm stays as an explicit compatibility
-			// leg for trigger entries spelled exactly as dispatched.
+			// leg for trigger entries spelled exactly as the trimmed dispatch.
 			// #3625: trim ONCE at extraction so every trigger-match form
 			// below derives from the trimmed spelling. The suffix extractor
 			// cannot recognize a real `_<role>` ending through surrounding
 			// whitespace, so a padded dispatch (' Case_coder ') would match
-			// no configured entry on any of the three arms.
+			// no unpadded configured entry on any of the three arms.
 			const trimmedSubagentType = subagentType.trim();
 			const agentName = stripKnownSwarmPrefix(trimmedSubagentType);
 			// Issue #3617 review PRR-005/F-01: the pre-#3330 hook matched the

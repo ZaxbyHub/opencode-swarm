@@ -18,9 +18,10 @@
     (`coder`), and end-to-end that the chat boundary matches the route so the
     advanced fallback lands instead of a `mismatch` no-op.
   - `tests/unit/hooks/incremental-verify-negative-trigger.test.ts`
-    `padded-trigger (#3625)` — a whitespace-padded prefixed dispatch matches a
-    configured canonical `triggerAgents` entry (plus raw-arm and base-compat
-    padded legs, and a padded negative leg proving the gate still holds).
+    `padded-trigger (#3625)` — whitespace-padded dispatches match configured
+    `triggerAgents` entries through the canonical, raw-name, and base-compat
+    forms, and a padded suffix near-miss (`' Case_test_engineer '` against
+    `engineer`) stays gated.
 
 ## Why
 
@@ -34,7 +35,7 @@ cannot recognize a real `_<role>` ending through surrounding whitespace, so:
   `resolveTaskRouteModelChain` derives the bare role, making
   `resolveTaskChatModelOverride` return `mismatch` at the chat boundary (the
   route's fallback never applied); and
-- a padded `subagent_type` matched no configured `triggerAgents` entry on any
+- a `subagent_type` with trailing whitespace matched no unpadded configured `triggerAgents` entry on any
   of the three incremental-verify trigger arms.
 
 Both paths are unreachable with today's host (the v1 and v2 hosts resolve the
@@ -45,9 +46,11 @@ survive a future host that tolerates whitespace or aliases.
 
 ## Migration steps
 
-None. No config, schema, or public tool surface changed; the derivations are
-internal to the plugin and the trim only affects whitespace-padded dispatch
-spellings that previously mismatched.
+No config key, schema, or public tool surface changed. One behavior change is
+user-visible: a `triggerAgents` entry that is itself spelled with surrounding
+whitespace (for example `' coder '`) matched an identically padded dispatch
+before this change and no longer matches, because configured entries are not
+trimmed. Remove the surrounding whitespace from any such entry.
 
 ## Known caveats
 
@@ -57,3 +60,13 @@ spellings that previously mismatched.
 - The stored route `agentName` still receives the raw dispatched string;
   `normalizeRoute` (`src/models/task-model-routing.ts`) trims it on write, so
   behavior is unchanged there.
+- A padded dispatch whose fallback chain is exhausted now fails closed with
+  `MODEL_FALLBACK_EXHAUSTED` at the chat boundary. Before this change the role
+  mismatch made the boundary ignore the route. An
+  unpadded dispatch with an exhausted chain already behaved this way. The host
+  does not currently produce padded names.
+- A malformed leading-whitespace name such as `'  _coder'` no longer matches
+  trigger `coder`, because the trimmed `_coder` has no swarm prefix.
+- A whitespace-only `subagent_type` now trims to `''` and can match a
+  trigger entry that is itself `''`. Only an empty-string config entry can
+  produce this.

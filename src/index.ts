@@ -4886,9 +4886,9 @@ async function initializeOpenCodeSwarm(
 						// malformed doubled-separator names), NOT from the action
 						// digest's trim+lowercase canonicalization (hashed into
 						// digests only, never a swarm id after this change).
-						// agentName keeps the dispatched (trimmed) name so the
-						// session.error advance arm resolves the same identity the
-						// chat boundary sees. The swarm id is derived from the
+						// agentName stores the dispatched name as received; normalizeRoute
+						// trims it on store, so the session.error advance arm resolves
+						// the same identity the chat boundary sees. The swarm id is derived from the
 						// TRIMMED name, exactly as resolveTaskRouteModelChain does.
 						swarmID: deriveSwarmIdentity(toolBeforeArgs.subagent_type.trim())
 							.swarmID,
