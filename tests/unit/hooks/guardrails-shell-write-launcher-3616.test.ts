@@ -340,3 +340,35 @@ describe('#3616 env dash alias with a launcher command: the write is kept', () =
 		T,
 	);
 });
+
+describe('#3616 env dash + bare time: the payload is judged, not just -o', () => {
+	// Review round 10: the bare-time skip must not disable the payload
+	// analysis — the rewrite emits `time` QUOTED (the #3572 nested-time
+	// precedent) so the GNU binary grammar analyzes the wrapped command,
+	// while the dash-aware original analysis keeps the -o launcher write.
+	for (const command of [
+		`env - time sh -c "echo x > ../x.txt"`,
+		`env - time bash -c "tee ../x.txt"`,
+		`env - time sh -c "rm -rf ../ydir"`,
+		`env - time sudo -D /etc tee src/ok.txt`,
+		`env - time env -S '-C .. sh -c "echo x > src/a"'`,
+	]) {
+		test(
+			`${command} is denied`,
+			async () => {
+				const r = await gate(command);
+				expect(r.verdict).toBe('BLOCKED');
+			},
+			T,
+		);
+	}
+	test(
+		'control: env - time sh -c "echo x > src/ok.txt" is admitted',
+		async () => {
+			expect(
+				(await gate(`env - time sh -c "echo x > src/ok.txt"`)).verdict,
+			).toBe('ADMITTED');
+		},
+		T,
+	);
+});
