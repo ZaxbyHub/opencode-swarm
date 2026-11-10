@@ -21,6 +21,30 @@ A blank or whitespace project directory names no project, but several
   matching the PRM trajectory store. `loadConsensusCorpus` and the
   `consensus_mine` tool's boundary, `mineAndStoreConsensusV1`, throw before
   reading anything, including the prior consensus reports.
+- Three shared write paths created or appended to `<cwd>/.swarm/`:
+  - `assertProjectRoot`, the project-root check that guards runtime-state
+    writers such as the knowledge receipt ledger, accepted a blank root
+    because `realpath('')` is the cwd. It now throws, so `/swarm doctor` with
+    a blank root no longer creates `.swarm/knowledge-receipts-v2.jsonl` in
+    the cwd.
+  - `appendCoreEventSync` and `appendCoreEventsSync`, the single append seam
+    for `.swarm/events.jsonl`, throw `CORE_EVENT_NO_STORE` for a blank root
+    before touching the filesystem. Producers that catch append failures
+    skip the event; the task-repair and coder-retry circuit-breaker audit
+    producers, which rethrow anything other than a locked store, fail the
+    operation.
+    `recordSteeringConsumed` no longer appends to the cwd's event log.
+  - `initTelemetry` ignores a blank root instead of creating
+    `.swarm/telemetry.jsonl` in the cwd, and keeps any stream that is
+    already open.
+- Plugin init with a blank directory wrote its bootstrap state (advisories,
+  `config.example.json`, bundled skills, locks, telemetry) into the cwd.
+  `resolveProjectRootDecision`, the init form of `assertProjectRoot`, now
+  fails closed for a blank root, so init loads without writing `.swarm/`
+  state, as it already did when the project root could not be determined.
+- `writeSnapshot` (the session snapshot) created `.swarm/swarm.db` and the
+  snapshot projection in the cwd; the `getProjectDb` guard above now stops
+  it.
 
 The session-start and trajectory stores already refused such a root (#3146);
 they and the new guards share one helper, `isNonBlankAbsoluteDirectory` /

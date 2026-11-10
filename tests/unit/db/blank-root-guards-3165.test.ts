@@ -6,8 +6,9 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
+import { handleDoctorCommand } from '../../../src/commands/doctor.js';
 import type { CorpusReaders } from '../../../src/consensus/corpus.js';
 import {
 	listEvaluationRunIds,
@@ -23,11 +24,28 @@ import {
 	projectDbPath,
 	withProjectDbReadOnly,
 } from '../../../src/db/project-db.js';
+import {
+	appendCoreEventSync,
+	appendCoreEventsSync,
+	CORE_EVENT_NO_STORE,
+} from '../../../src/events/core-events.js';
+import { recordSteeringConsumed } from '../../../src/hooks/steering-consumed.js';
 import { getDiagnoseData } from '../../../src/services/diagnose-service.js';
+import { writeSnapshot } from '../../../src/session/snapshot-writer.js';
+import {
+	flushAndDrainTelemetry,
+	initTelemetry,
+	resetTelemetryForTesting,
+	telemetry,
+} from '../../../src/telemetry.js';
 import {
 	isBlankDirectory,
 	isNonBlankAbsoluteDirectory,
 } from '../../../src/utils/path-security.js';
+import {
+	assertProjectRoot,
+	resolveProjectRootDecision,
+} from '../../../src/utils/project-boundary.js';
 import { safeRmRecursive } from '../../helpers/safe-test-dir';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
@@ -222,5 +240,89 @@ describe('consensus corpus readers — regression: a blank or relative root read
 				}),
 			).rejects.toThrow('non-blank absolute path');
 		}
+	});
+});
+
+describe('shared .swarm write seams — regression: a blank root wrote under the cwd (#3165 B)', () => {
+	test('assertProjectRoot refuses a blank root', () => {
+		// Previous code ran realpath(''), which is the cwd, and passed.
+		for (const blank of BLANKS) {
+			expect(() => assertProjectRoot(blank)).toThrow('blank directory');
+		}
+		expect(() => assertProjectRoot(sandbox)).not.toThrow();
+	});
+
+	test('resolveProjectRootDecision (plugin init) fails closed for a blank root', () => {
+		// Previous code resolved '' to the cwd and returned kind 'root', so
+		// plugin init wrote .swarm/ state there.
+		for (const blank of BLANKS) {
+			expect(resolveProjectRootDecision(blank).kind).toBe('fail-closed');
+		}
+		expect(resolveProjectRootDecision(sandbox)).toEqual({
+			kind: 'root',
+			directory: sandbox,
+		});
+	});
+
+	test('handleDoctorCommand on a blank root creates no receipt ledger in the cwd', async () => {
+		// The receipt ledger resolves its root through assertProjectRoot.
+		await handleDoctorCommand('', []);
+		expect(cwdSwarmCreated()).toBe(false);
+	});
+
+	test('the core-event append seams refuse a blank root and leave the cwd events.jsonl untouched', () => {
+		mkdirSync(path.join(sandbox, '.swarm'), { recursive: true });
+		const events = path.join(sandbox, '.swarm', 'events.jsonl');
+		writeFileSync(events, '');
+		for (const blank of BLANKS) {
+			expect(() => appendCoreEventSync(blank, { type: 'probe' })).toThrow(
+				CORE_EVENT_NO_STORE,
+			);
+			expect(() => appendCoreEventsSync(blank, [{ type: 'probe' }])).toThrow(
+				CORE_EVENT_NO_STORE,
+			);
+			recordSteeringConsumed(blank, 'directive-1');
+		}
+		expect(readFileSync(events, 'utf8')).toBe('');
+	});
+
+	test('initTelemetry on a blank root is a no-op and creates no cwd .swarm', () => {
+		resetTelemetryForTesting(); // a disabled module would pass vacuously
+		try {
+			for (const blank of BLANKS) initTelemetry(blank);
+			expect(cwdSwarmCreated()).toBe(false);
+		} finally {
+			resetTelemetryForTesting();
+		}
+	});
+
+	test('initTelemetry on a blank root keeps the open project stream', async () => {
+		const project = canonicalMkdtemp('blank-root-3165-telemetry-');
+		resetTelemetryForTesting();
+		try {
+			initTelemetry(project);
+			for (const blank of BLANKS) initTelemetry(blank);
+			telemetry.sessionStarted('after-blank', 'architect');
+			await flushAndDrainTelemetry();
+			const log = path.join(project, '.swarm', 'telemetry.jsonl');
+			expect(readFileSync(log, 'utf8')).toContain('after-blank');
+			expect(cwdSwarmCreated()).toBe(false);
+		} finally {
+			resetTelemetryForTesting();
+			safeRmRecursive(project);
+		}
+	});
+
+	test('writeSnapshot on a blank root creates no cwd .swarm', async () => {
+		// Covered by the getProjectDb guard: snapshot coordination opens the
+		// project DB first, which now refuses a blank root.
+		const state = {
+			toolAggregates: new Map(),
+			activeAgent: new Map(),
+			delegationChains: new Map(),
+			agentSessions: new Map(),
+		};
+		await writeSnapshot('', state as never);
+		expect(cwdSwarmCreated()).toBe(false);
 	});
 });
