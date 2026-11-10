@@ -51,8 +51,9 @@ lane keeps the behavior it had before it started reading `info.error`.
 The v7.192.4 notes already describe the `finish` half; this section is the
 original #3172 change those notes build on.
 
-Known gap: on OpenCode 2 the v2 adapter does not pass `finish` through yet, so
-only the `info.error` shape fails closed there (tracked in #3165 G.8).
+On OpenCode 2 the `finish` shape fails closed too, now that the v2 adapter
+passes `finish` through; the separate OpenCode 2 note (#3634) gives the exact
+conditions.
 
 ## Correction to the v7.192.3 Lean runner notes
 
