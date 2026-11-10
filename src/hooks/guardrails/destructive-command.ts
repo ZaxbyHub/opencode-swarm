@@ -21,11 +21,11 @@ import { sanitizeDiagnosticText } from '../../scope/path-identity';
 import { CMD_STRIP_PREFIX, PS_STRIP_PREFIX } from '../shell-executor-context';
 import {
 	BASH_BUILTIN_COMMANDS,
+	envFlagConsumesNextWord,
 	expandBraceRaw,
 	parseRmOptionTokens,
 	walkLauncherOptions,
 	walkShellCommandFlags,
-	envFlagConsumesNextWord,
 } from '../shell-write-detect';
 import { dcIsSwitchClusterText } from './cmd-delete-grammar';
 
@@ -1347,7 +1347,8 @@ function matchChdirWrapperSegment(segment: string): DcChdirMatch {
 				// chdir matcher only needs the first plain word).
 				while (next < words.length && (words[next] as string).startsWith('-')) {
 					next += 1;
-					if (head === 'nice' && (words[next - 1] as string) === '-n') next += 1;
+					if (head === 'nice' && (words[next - 1] as string) === '-n')
+						next += 1;
 				}
 			} else {
 				// env: flags (with their consumed args) and VAR= assignments.

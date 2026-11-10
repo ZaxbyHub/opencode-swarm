@@ -769,7 +769,9 @@ export const DEFAULT_AGENT_AUTHORITY_RULES: Record<string, AgentRule> = {
  * natively). Production routes through this seam.
  */
 export const _internals: {
-	lstatSync: (...args: Parameters<typeof fsSync.lstatSync>) => ReturnType<typeof fsSync.lstatSync>;
+	lstatSync: (
+		...args: Parameters<typeof fsSync.lstatSync>
+	) => ReturnType<typeof fsSync.lstatSync>;
 } = {
 	lstatSync: (pathLike, options) => fsSync.lstatSync(pathLike, options),
 };

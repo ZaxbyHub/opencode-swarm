@@ -80,8 +80,8 @@ import {
 	mergeWriteAnalyses,
 	procSubSpanBodies,
 	resolveWriteTargets,
-	type WriteAnalysis,
 	setDetectionOptionsOverride,
+	type WriteAnalysis,
 } from '../shell-write-detect';
 import {
 	PATCH_PAYLOAD_KEYS,
@@ -2081,7 +2081,8 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 							? 'tilde'
 							: 'dynamic-text');
 					const originReason: Record<string, string> = {
-						tilde: 'tilde target expands against the invoking user home directory — not statically resolvable',
+						tilde:
+							'tilde target expands against the invoking user home directory — not statically resolvable',
 						'loop-landing':
 							'the loop landing directory is unresolved (withdrawn loop state) — rejecting for safety',
 						'directory-withdrawal':

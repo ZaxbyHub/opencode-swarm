@@ -439,7 +439,8 @@ const REDIRECT_ALL_WRITE_TOKENS = new Set([
  * ten collectWritesWithNodes recursion sites would duplicate state the walk
  * already owns. Explain's dry-run never sets it (mirrors the live default).
  */
-let detectionOptionsOverride: { destructiveArmDisabled?: boolean } | null = null;
+let detectionOptionsOverride: { destructiveArmDisabled?: boolean } | null =
+	null;
 
 /** Set the detection-options override for the current synchronous pass. */
 export function setDetectionOptionsOverride(
@@ -3632,7 +3633,11 @@ function detectLauncherWrites(cmd: unknown): WriteTarget[] {
 					const tail = suffix.slice(cursor + walk.innerIndex);
 					// tee/dd write by design but live outside BUILTIN_WRITE_COMMANDS
 					// (detectBuiltinWrites handles them ahead of the set check).
-					const loginWriteWords = new Set([...BUILTIN_WRITE_COMMANDS, 'tee', 'dd']);
+					const loginWriteWords = new Set([
+						...BUILTIN_WRITE_COMMANDS,
+						'tee',
+						'dd',
+					]);
 					const hasWriteVector = tail.some((word, idx) => {
 						if (typeof word !== 'string') return false;
 						if (loginWriteWords.has(basenameAnySep(word))) return true;
@@ -3647,13 +3652,14 @@ function detectLauncherWrites(cmd: unknown): WriteTarget[] {
 									typeof word === 'string' &&
 									!word.startsWith('/') &&
 									!word.startsWith('~') &&
-									!/^[A-Za-z]:[\/]/.test(word) &&
+									!/^[A-Za-z]:[/]/.test(word) &&
 									!/^-/.test(word) &&
 									word !== 'tee',
 							) ?? 'sudo -i tail';
 						results.push({
 							category: 'launcher_write',
-							operator: 'sudo -i login-shell tail (relative write under target home)',
+							operator:
+								'sudo -i login-shell tail (relative write under target home)',
 							path: null,
 							dynamicSourceWord: firstRelative.slice(0, 64),
 						});
@@ -3677,7 +3683,8 @@ function detectLauncherWrites(cmd: unknown): WriteTarget[] {
 						}
 						if (token.startsWith('-')) {
 							next += 1;
-							if (envFlagConsumesNextWord(token) && next < suffix.length) next += 1;
+							if (envFlagConsumesNextWord(token) && next < suffix.length)
+								next += 1;
 							continue;
 						}
 						if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(token)) {
@@ -4171,8 +4178,12 @@ const RM_LONG_OPTIONS: readonly string[] = [
  * (an ambiguous prefix is everyone's prefix, so the uniqueness check rejects
  * it exactly as GNU's parser errors before deletion).
  */
-function rmLongOptionMatches(token: string, option: '--recursive' | '--force'): boolean {
-	if (!token.startsWith('--') || token.length < 3 || token === option) return token === option;
+function rmLongOptionMatches(
+	token: string,
+	option: '--recursive' | '--force',
+): boolean {
+	if (!token.startsWith('--') || token.length < 3 || token === option)
+		return token === option;
 	if (!option.startsWith(token)) return false;
 	for (const candidate of RM_LONG_OPTIONS) {
 		if (candidate === option) continue;
@@ -4220,7 +4231,10 @@ export function parseRmOptionTokens(tokens: readonly string[]): {
 			break;
 		}
 		if (!token.startsWith('-') || token === '-') continue;
-		if (rmLongOptionMatches(token, '--recursive') || rmLongOptionMatches(token, '--force')) {
+		if (
+			rmLongOptionMatches(token, '--recursive') ||
+			rmLongOptionMatches(token, '--force')
+		) {
 			destructive = true;
 			continue;
 		}
@@ -4687,7 +4701,11 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 			if (detectionOptionsOverride?.destructiveArmDisabled === true) {
 				for (const idx of rmParse.targetIndices) {
 					const operand = suffixWords[idx];
-					if (typeof operand === 'string' && operand !== '' && operand !== '--') {
+					if (
+						typeof operand === 'string' &&
+						operand !== '' &&
+						operand !== '--'
+					) {
 						results.push({
 							category: 'builtin_write',
 							operator: 'rm (destructive arm disabled)',
@@ -8958,7 +8976,10 @@ function resolvePath(pathText: string | null, cwd: string): string | null {
  * (a junction is a symlink on win32 — the gate-side judgment reproduces on
  * this host and is pinned by C9).
  */
-function resolveThroughSymlinksPosix(pathText: string, cwd: string): string | null {
+function resolveThroughSymlinksPosix(
+	pathText: string,
+	cwd: string,
+): string | null {
 	const lexical = path.posix.resolve(cwd, pathText);
 	if (!path.posix.isAbsolute(pathText)) {
 		// Relative operand: resolve against cwd with symlink-aware prefix walk.
@@ -8967,7 +8988,10 @@ function resolveThroughSymlinksPosix(pathText: string, cwd: string): string | nu
 	return resolveSymlinkAware(cwd, pathText, path.posix, (p) => p) ?? lexical;
 }
 
-function resolveThroughSymlinksWin32(pathText: string, cwd: string): string | null {
+function resolveThroughSymlinksWin32(
+	pathText: string,
+	cwd: string,
+): string | null {
 	return resolveSymlinkAware(cwd, pathText, path.win32, (p) => p);
 }
 
@@ -8993,7 +9017,9 @@ function resolveSymlinkAware(
 	// Split the operand into components; resolve cumulatively from the anchor.
 	const absolute = pathImpl.isAbsolute(pathText);
 	let current = absolute ? pathImpl.parse(pathText).root : anchor;
-	const rest = absolute ? pathText.slice(pathImpl.parse(pathText).root.length) : pathText;
+	const rest = absolute
+		? pathText.slice(pathImpl.parse(pathText).root.length)
+		: pathText;
 	const components = rest.split(/[\\/]+/).filter((c) => c !== '' && c !== '.');
 	for (const component of components) {
 		if (component === '..') {
@@ -10258,7 +10284,7 @@ function collectWritesWithNodes(
 				pushWriteWithState(out, w, state);
 			}
 
-const rsyncWrites = detectRsyncWrites(node);
+			const rsyncWrites = detectRsyncWrites(node);
 			// #3616 D4: word-position $(...) writes resolve at the TRACKED
 			// walk state (the cd context of the enclosing command), never
 			// the unmatched-write fallback.
@@ -10909,15 +10935,15 @@ export function resolveWriteTargets(
 			const writeContext =
 				write.category === 'patch_apply' ? context : undefined;
 			map.set(key, {
-			resolvedPath,
-			resolved,
-			evalDirectory,
-			writeContext,
-			...(unresolved ? { unresolved: true } : {}),
-			...(write.denialOrigin !== undefined
-				? { denialOrigin: write.denialOrigin }
-				: {}),
-		});
+				resolvedPath,
+				resolved,
+				evalDirectory,
+				writeContext,
+				...(unresolved ? { unresolved: true } : {}),
+				...(write.denialOrigin !== undefined
+					? { denialOrigin: write.denialOrigin }
+					: {}),
+			});
 		}
 		return { map, colliding };
 	};
