@@ -22,11 +22,13 @@ A blank or whitespace project directory names no project, but several
   `consensus_mine` tool's boundary, `mineAndStoreConsensusV1`, throw before
   reading anything, including the prior consensus reports.
 - Three shared write paths created or appended to `<cwd>/.swarm/`:
-  - `assertProjectRoot`, the project-root check that guards runtime-state
-    writers such as the knowledge receipt ledger, accepted a blank root
-    because `realpath('')` is the cwd. It now throws, so `/swarm doctor` with
-    a blank root no longer creates `.swarm/knowledge-receipts-v2.jsonl` in
-    the cwd.
+  - `assertProjectRoot`, the shared project-root check, accepted a blank root
+    because `realpath('')` is the cwd. It now throws. It runs at about 80
+    call sites before `.swarm` state is written or locked (evidence, the plan
+    ledger and manager, scope, harness, evaluation, test-impact history,
+    council, the skill optimizer and the knowledge receipt ledger, among
+    others), so all of them now refuse a blank root; for example, `/swarm doctor` with a blank root no longer
+    creates `.swarm/knowledge-receipts-v2.jsonl` in the cwd.
   - `appendCoreEventSync` and `appendCoreEventsSync`, the single append seam
     for `.swarm/events.jsonl`, throw `CORE_EVENT_NO_STORE` for a blank root
     before touching the filesystem. Producers that catch append failures
@@ -87,7 +89,7 @@ refuse a blank root; a relative root still resolves as before (see below).
 
 Not every `.swarm` store is guarded yet. These still join a blank root with
 `.swarm/` (so they resolve under the cwd) and stay tracked in #3165 B:
-`src/plan/ledger.ts` (ledger and `plan.json` paths),
+the `src/plan/ledger.ts` reads (its writers go through `assertProjectRoot`),
 `src/council/council-round-state.ts`, `src/context-map/persistence.ts`,
 `src/memory/storage-root.ts`, `src/consensus/store.ts` (reached in production
 only after the guarded consensus boundary) and the compaction rehydration
