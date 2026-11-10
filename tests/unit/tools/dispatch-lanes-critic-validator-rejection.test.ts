@@ -273,7 +273,7 @@ describe('PR_FEEDBACK closeout-critic role predicate (issue #3340 AC2)', () => {
 // Issue #3341 — admission rejections are side-effect-free: validatePrWorkflow
 // LaneAdmission runs BEFORE activatePrWorkflow/bindPrReviewBase, so a rejected
 // request creates no durable workflow state and preserves any pre-existing
-// state byte-for-byte.
+// state structurally (deep equality of the parsed state).
 // ---------------------------------------------------------------------------
 describe('side-effect-free admission rejection (issue #3341)', () => {
 	const rejectedCriticDispatch = (sessionID: string, agent: string) =>
@@ -342,23 +342,41 @@ describe('side-effect-free admission rejection (issue #3341)', () => {
 		expect(await readPrWorkflowGateState(directory, session)).toBeNull();
 	});
 
+	// Regression pin (green at base 25a201430): a rejected re-bind of an
+	// already-active session with the same head is idempotent, so this case cannot
+	// tell the old check ordering from the new one. The #3341 discriminator is
+	// dispatch-lanes-state-free-admission-3341.test.ts (its fresh-session cases fail against the PR
+	// head f3d60da7e source; its PR_FEEDBACK case is a guard pin).
 	test('a rejected dispatch against an ALREADY-ACTIVE session preserves the prior state', async () => {
 		const session = 'preexisting-state-3341';
-		await activatePrWorkflow(directory, session, 'PR_REVIEW', {
-			requireCheckoutPreflight: false,
-		});
-		await bindPrReviewBase(directory, session, {
-			prHeadSha: 'abc123',
-			baseRef: 'origin/main',
-			baseSha: 'def456',
-		});
-		const before = await readPrWorkflowGateState(directory, session);
-		expect(before?.mode).toBe('PR_REVIEW');
-		const result = await rejectedCriticDispatch(session, 'explorer');
-		expect(result.success).toBe(false);
-		const after = await readPrWorkflowGateState(directory, session);
-		// Byte-level preservation: the rejection mutated nothing.
-		expect(JSON.stringify(after)).toBe(JSON.stringify(before));
+		// The gate-side revision digest must resolve so the request reaches
+		// admission; otherwise the critic preflight rejects with a digest error
+		// before the role check and the case proves nothing about admission.
+		const originalGateDigest = gateInternals.resolvePrWorkflowRevisionDigest;
+		gateInternals.resolvePrWorkflowRevisionDigest = () => 'revision-1';
+		try {
+			await activatePrWorkflow(directory, session, 'PR_REVIEW', {
+				requireCheckoutPreflight: false,
+			});
+			await bindPrReviewBase(directory, session, {
+				prHeadSha: 'abc123',
+				baseRef: 'origin/main',
+				baseSha: 'def456',
+			});
+			const before = await readPrWorkflowGateState(directory, session);
+			expect(before?.mode).toBe('PR_REVIEW');
+			const result = await rejectedCriticDispatch(session, 'explorer');
+			expect(result.success).toBe(false);
+			// The rejection is the admission role check, not a digest or preflight error.
+			expect(String(result.message)).toContain('uses invalid role');
+			expect(String(result.message)).not.toContain('could not compute');
+			const after = await readPrWorkflowGateState(directory, session);
+			// Structural preservation (deep equality of the parsed state): the
+			// rejection mutated nothing.
+			expect(after).toEqual(before);
+		} finally {
+			gateInternals.resolvePrWorkflowRevisionDigest = originalGateDigest;
+		}
 	});
 
 	test('mixed-invalid phase lanes report the owned-workflow-lanes error first (precedence pin)', async () => {

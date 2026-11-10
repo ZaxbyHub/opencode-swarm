@@ -137,7 +137,7 @@ describe('PR-contract override activation (#3310 → #3337)', () => {
 		expect(reviewer.config.prompt).toMatch(/STRUCTURED VERDICT LINE/);
 	});
 
-	test('override is additive-inverse-safe: the PLAN REVIEW default structure mandate survives', () => {
+	test('the static critic prompt keeps the PLAN REVIEW default structure mandate', () => {
 		expect(defaultCriticPrompt()).toMatch(/Begin directly with PLAN REVIEW/);
 	});
 
@@ -152,6 +152,17 @@ describe('PR-contract override activation (#3310 → #3337)', () => {
 		expect(prompt).toContain('[CRITIC]');
 		expect(prompt).toMatch(/Begin directly with PLAN REVIEW/);
 		expect(prompt).toMatch(/get_approved_plan/);
+		// The clause must SUSPEND the default structure; a reversed instruction
+		// (the clause requiring PLAN REVIEW) must fail here.
+		expect(prompt).toMatch(
+			/suspends the default "Begin directly with PLAN REVIEW"/,
+		);
+	});
+
+	test('the PR_FEEDBACK verification lane carries the Stage-B suspension clause (#3337 FB-008)', () => {
+		const verification = composedPrompt('swarm-pr-feedback:verification');
+		expect(verification).toContain('[FEEDBACK-VERIFIED]');
+		expect(verification).toMatch(/does not apply to this lane/);
 	});
 
 	test('discovery (base) composed prompts carry no override clause', () => {
@@ -163,12 +174,14 @@ describe('PR-contract override activation (#3310 → #3337)', () => {
 	test('the three ordered PR_FEEDBACK gates carry their mode-scoped clauses', () => {
 		const stageB = composedPrompt('swarm-pr-feedback:stage-b-reviewer');
 		expect(stageB).toContain('[STAGE-B-REVIEW]');
+		expect(stageB).toContain("rows given in this lane's task prompt");
 		expect(stageB).toMatch(/does not apply to this lane/);
 
 		const closeoutReview = composedPrompt(
 			'swarm-pr-feedback:closeout-reviewer',
 		);
 		expect(closeoutReview).toContain('[CLOSEOUT-REVIEW]');
+		expect(closeoutReview).toContain("rows given in this lane's task prompt");
 		expect(closeoutReview).toMatch(/does not apply to this lane/);
 
 		const closeoutCritic = composedPrompt('swarm-pr-feedback:closeout-critic');
@@ -176,13 +189,13 @@ describe('PR-contract override activation (#3310 → #3337)', () => {
 		expect(closeoutCritic).toContain('[CLOSEOUT-CRITIC]');
 	});
 
-	test('a plan quoting the contract phrase has no structural effect: no clause source exists in the static prompts', () => {
+	test('producer-side marker scoping: the override marker appears in dispatch-lanes.ts at least twice and never in the critic prompt source', () => {
 		// With the static prompts clean, quoting the phrase in plan or spec
 		// text cannot activate anything: the only producer of a suspension
 		// instruction is the controller's contract composition, which the
 		// plan text never enters. Pin the producer-side scoping: the override
-		// marker appears in dispatch-lanes.ts exactly inside the
-		// modeProtocolClause switch (critic and closeout-critic arms).
+		// marker appears in dispatch-lanes.ts at least twice (the
+		// critic and closeout-critic arms of the modeProtocolClause switch). The assertion counts occurrences file-wide; it does not pin their location.
 		const source = readFileSync(
 			join(__dirname, '../../../src/tools/dispatch-lanes.ts'),
 			'utf-8',

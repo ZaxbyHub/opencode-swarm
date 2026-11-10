@@ -45,6 +45,7 @@ import {
 	executeCollectLaneResults,
 	executeDispatchLanesAsync,
 } from '../../../src/tools/dispatch-lanes.ts';
+import { safeRmRecursive } from '../../helpers/safe-test-dir.ts';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.ts';
 import { initializeGitRepository } from '../helpers/git-repository.ts';
 import { LEGACY_PR_REVIEW_RESILIENCE_POLICY } from '../pr-review-test-policy.ts';
@@ -65,21 +66,6 @@ let directory = '';
 const transcripts = new Map<string, string>();
 const originalInternals = { ...dispatchInternals };
 const originalGateInternals = { ...gateInternals };
-
-async function rmRetry(dir: string): Promise<void> {
-	for (let attempt = 0; attempt < 5; attempt++) {
-		try {
-			await fsp.rm(dir, { recursive: true, force: true });
-			return;
-		} catch (error) {
-			const code = (error as NodeJS.ErrnoException).code;
-			if (code !== 'EBUSY' && code !== 'EPERM' && code !== 'ENOTEMPTY')
-				throw error;
-			await new Promise((resolve) => setTimeout(resolve, 20));
-		}
-	}
-	await fsp.rm(dir, { recursive: true, force: true });
-}
 
 /** Record + artifact + completed transition for one settled discovery lane. */
 async function recordSettledLane(args: {
@@ -353,7 +339,7 @@ afterEach(async () => {
 	gateInternals.resetTrackedStateCache();
 	dispatchTest.resetDeliveredLaneOutputs();
 	closeAllProjectDbs();
-	await rmRetry(directory);
+	safeRmRecursive(directory);
 	transcripts.clear();
 }, 30_000);
 
@@ -467,7 +453,7 @@ describe('critic preflight derivations read the authoritative gate (#3362 AC1)',
 });
 
 describe('null-prototype severity lookup (#3362 AC4)', () => {
-	test('a prototype-key item id WITHOUT an entry renders bare (no inherited member)', () => {
+	test('the severity lookup helper returns no inherited member for a prototype-key item id without an entry', () => {
 		const lookup = dispatchTest.ownPropertySeverityLookup(
 			new Map([
 				['c1', 'HIGH'],

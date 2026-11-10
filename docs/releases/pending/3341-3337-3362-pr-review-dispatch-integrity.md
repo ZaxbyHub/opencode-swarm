@@ -8,23 +8,26 @@ Closes #3341, closes #3337, closes #3362 (user-authorized collated delivery).
 
 ## What changed
 
-- **Rejected dispatches no longer consume durable workflow state (#3341).** Lane
-  admission validation (lane roles, owned-workflow-lane shape, agent
-  launchability — for critic/reviewer/council phases AND base/micro discovery
-  lanes) now runs in `validatePrWorkflowLaneAdmission` BEFORE
-  `activatePrWorkflow`/`bindPrReviewBase`. A rejected request creates no gate
-  state and leaves pre-existing state byte-unchanged; both
-  "side-effect-free invalid request" comments state that per-request guarantee
-  precisely. Previously an unlaunchable critic batch left the PR_REVIEW gate
+- **State-free rejections no longer consume durable workflow state (#3341).** The
+  state-free admission checks now run in `validatePrWorkflowLaneAdmission` BEFORE
+  `activatePrWorkflow`/`bindPrReviewBase`: lane roles, owned-workflow-lane shape,
+  agent launchability for critic/reviewer/council phases (base/micro discovery lanes get only the explorer-role check here; their launchability is still checked at launch, after activation, as before),
+  the contract-retry exclusion, the wave-stage/attempt pairing, and
+  unknown `swarm-pr-review:*` suffixes. A request rejected by these checks
+  creates no gate state and leaves pre-existing gate state structurally unchanged (parsed state deep-equal). Checks that
+  need gate state or resilience config (tier-dependent lane count and
+  max_concurrent, canary-first and fanout order, trigger evaluation,
+  swarm-pr-feedback:verification ownership) still run after activation and are
+  not covered by this guarantee. Previously an unlaunchable critic batch left the PR_REVIEW gate
   activated and base-bound.
 - **Prompt-structure overrides are controller-authored, not prompt-content
   triggered (#3337).** The critic agent's static prompt no longer carries a
   PR-review override that activated when the model judged the literal phrase
   "CONTROLLER-BOUND PR WORKFLOW CONTRACT" present — any plan or spec quoting
   the phrase satisfied that predicate. The dispatch controller now composes a
-  mode-scoped protocol clause into the lane's contract block for ALL FIVE
+  mode-scoped protocol clause into the lane's contract block for ALL SIX
   consumer modes (swarm-pr-review critic/reviewer and the three ordered
-  PR_FEEDBACK gates), the same proven channel reviewer lanes have used since
+  PR_FEEDBACK gates and the verification lane), the same proven channel reviewer lanes have used since
   #3310, with an explicit authority line naming precedence over the agent's
   default output structure. The reviewer prompt's literal-phrase Stage-B
   exception is gone; non-workflow reviewer and critic behavior is unchanged.

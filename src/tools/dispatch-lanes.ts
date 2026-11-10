@@ -1569,11 +1569,11 @@ export async function executeDispatchLanesAsync(
 	// Issue #2906: derive the counterbalancing inputs before prompt assembly.
 	// Both derivations are read-only gate reads, so a failure is still a
 	// side-effect-free invalid request. Issue #3341: the same per-request
-	// guarantee now covers lane admission (role and launchability) — every
-	// request-shape rejection in this handler (formatting, admission, or
-	// derivation) rejects without activating, binding, or otherwise mutating
-	// durable workflow state for that request, and any pre-existing workflow
-	// state is preserved unchanged. Reviewer batches receive the
+	// guarantee covers the state-free admission checks (lane roles and
+	// launchability, the staged/contract-retry shape, and unknown modes): those
+	// reject without activating, binding, or otherwise mutating durable workflow
+	// state, and any pre-existing workflow state is preserved unchanged.
+	// State-dependent checks are not covered by this guarantee. Reviewer batches receive the
 	// presentation order the gate will stamp (passed on to
 	// recordPrReviewValidationBatch as expectedPresentationOrder, so the
 	// stamped receipt can never disagree with the rendered prompt); critic
@@ -1642,7 +1642,7 @@ export async function executeDispatchLanesAsync(
 	// request rejects without activating, binding, or otherwise mutating
 	// durable workflow state for that request, and any pre-existing workflow
 	// state is preserved unchanged (issue #3341 extends the same per-request
-	// guarantee to lane admission — role and launchability — via
+	// guarantee to the state-free admission checks via
 	// validatePrWorkflowLaneAdmission). Failures after recording begins
 	// (session creation, batch recording) are dispositioned by their own
 	// crash-window semantics, not rolled back.
@@ -1729,19 +1729,27 @@ export async function executeDispatchLanesAsync(
 				context.sessionID,
 				'dispatch_lanes_async',
 			);
-			// Issue #3341: run every request-shape admission check (lane roles,
-			// owned-workflow-lane shape, agent launchability) BEFORE any state
-			// mutation for this request. enforcePrWorkflowDispatchLanesAsync is
-			// read-only, so a rejection here consumes no durable workflow state;
+			// Issue #3341: run every state-free request-shape check BEFORE any
+			// state mutation for this request: lane roles, owned-workflow-lane
+			// shape, phase-lane agent launchability, the staged/contract-retry shape, and
+			// unknown swarm-pr-review:* suffixes. enforcePrWorkflowDispatchLanesAsync
+			// is read-only, so a rejection here consumes no durable workflow state;
 			// pre-existing state (any mode) is preserved unchanged. The
 			// reachability guard matches the historical post-binding condition
-			// exactly (the checks used to run only under an active PR_REVIEW
-			// gate), so the set of rejected requests is unchanged.
+			// exactly, so the set of rejected requests is unchanged. Checks that
+			// need gate state or resilience config (lane count and max_concurrent
+			// for tiers M and L, canary-first and fanout order, trigger evaluation,
+			// PR_FEEDBACK verification ownership) still run after activation.
 			validatePrWorkflowLaneAdmission(
 				parsed.data.mode ?? '',
 				parsed.data.lanes,
 				context,
 				!gateState || gateState.mode === 'PR_REVIEW',
+				{
+					contractRetry: parsed.data.pr_review_contract_retry === true,
+					waveStage: parsed.data.pr_review_wave_stage,
+					waveAttempt: parsed.data.pr_review_wave_attempt,
+				},
 			);
 			if (!gateState && parsed.data.mode?.startsWith('swarm-pr-review:')) {
 				gateState = await activatePrWorkflow(
@@ -1804,19 +1812,9 @@ export async function executeDispatchLanesAsync(
 						| 1
 						| 2
 						| undefined;
-					if (
-						contractRetry &&
-						(waveStage !== undefined || waveAttempt !== undefined)
-					) {
-						throw new Error(
-							'BLOCKED: PR_REVIEW contract retry is mutually exclusive with pr_review_wave_stage and pr_review_wave_attempt',
-						);
-					}
-					if ((waveStage === undefined) !== (waveAttempt === undefined)) {
-						throw new Error(
-							'BLOCKED: PR_REVIEW staged base dispatch requires both pr_review_wave_stage and pr_review_wave_attempt together',
-						);
-					}
+					// The contract-retry exclusion and the wave-stage/attempt pairing
+					// are state-free and are validated before activation in
+					// validatePrWorkflowLaneAdmission (#3341).
 					if (
 						waveStage !== undefined &&
 						waveAttempt !== undefined &&
@@ -6354,13 +6352,18 @@ function getGeneratedAgentPrefix(
 }
 
 /**
- * Issue #3341: request-shape admission validation for PR-workflow
- * dispatches, hoisted BEFORE activatePrWorkflow/bindPrReviewBase so every
+ * Issue #3341: state-free request-shape admission validation for PR-workflow
+ * dispatches, run BEFORE activatePrWorkflow/bindPrReviewBase so every
  * rejection here is side-effect-free for the request — no activation,
  * binding, or other durable workflow-state mutation happens, and any
  * pre-existing workflow state is preserved unchanged. Every predicate is a
- * pure function of the request and the generated-agent registry; nothing
- * here reads gate state. `reachable` mirrors the post-binding condition
+ * pure function of the request, the generated-agent registry, and the
+ * launchability probe; nothing here reads gate state. Covered: lane roles,
+ * owned-workflow-lane shape, phase-lane agent launchability, the contract-retry
+ * exclusion, the wave-stage/attempt pairing, and unknown swarm-pr-review:*
+ * suffixes. Not covered (they need gate state or resilience config):
+ * tier-dependent lane count and max_concurrent, canary-first and fanout
+ * order, trigger evaluation, and PR_FEEDBACK verification ownership. `reachable` mirrors the post-binding condition
  * these checks historically ran under (an active PR_REVIEW gate for this
  * session): it is false only when a different workflow mode owns the
  * session, which keeps the pre-fix reachability (and therefore the set of
@@ -6376,9 +6379,31 @@ function validatePrWorkflowLaneAdmission(
 	}>,
 	context: DispatchLanesExecutionContext,
 	reachable: boolean,
+	waveShape: {
+		contractRetry: boolean;
+		waveStage: unknown;
+		waveAttempt: unknown;
+	},
 ): void {
 	if (!reachable) return;
 	if (mode === 'swarm-pr-review:base') {
+		// Staged and contract-retry request shape is a pure function of the
+		// request arguments (no gate state, no resilience config), so it is
+		// rejected here, before any activation, rather than after binding.
+		const { contractRetry, waveStage, waveAttempt } = waveShape;
+		if (
+			contractRetry &&
+			(waveStage !== undefined || waveAttempt !== undefined)
+		) {
+			throw new Error(
+				'BLOCKED: PR_REVIEW contract retry is mutually exclusive with pr_review_wave_stage and pr_review_wave_attempt',
+			);
+		}
+		if ((waveStage === undefined) !== (waveAttempt === undefined)) {
+			throw new Error(
+				'BLOCKED: PR_REVIEW staged base dispatch requires both pr_review_wave_stage and pr_review_wave_attempt together',
+			);
+		}
 		for (const lane of lanes) {
 			if (
 				resolveGeneratedAgentRole(
@@ -6455,6 +6480,14 @@ function validatePrWorkflowLaneAdmission(
 				);
 			}
 		}
+		return;
+	}
+	// Any other swarm-pr-review:* suffix is not a structured PR_REVIEW mode.
+	// Rejected here, before activation, so an unknown suffix leaves no gate.
+	if (mode.startsWith('swarm-pr-review:')) {
+		throw new Error(
+			'BLOCKED: active PR_REVIEW requires a structured base, micro, council, reviewer, or critic mode',
+		);
 	}
 }
 
@@ -6942,20 +6975,6 @@ function prReviewLaneResponseBudgetChars(
 }
 
 /**
- * #3337: the mode-scoped protocol clause composed into a workflow lane's
- * controller-bound contract. For each named workflow mode it states which
- * row protocol supersedes the lane agent's STATIC default output structure
- * (the critic agent's "Begin directly with PLAN REVIEW" structure and
- * get_approved_plan step; the reviewer agent's Stage-B task-keyed row).
- * Controller-authored and mode-scoped by construction: only
- * applyPrWorkflowPromptContract calls this, and only the controller
- * produces the contract block, so the suspension channel is structural —
- * no prompt content can activate it (closing the #3310 literal-phrase
- * activation channel). All five consumer modes are covered: the two
- * PR_REVIEW phases and the three ordered PR_FEEDBACK gates (whose lanes
- * run the same base reviewer/critic agents).
- */
-/**
  * #3362: the critic preflight's reviewer-severity lookup, deliberately
  * null-prototype so an assigned item id that collides with an Object
  * prototype key (toString, constructor, ...) can never resolve an inherited
@@ -6969,6 +6988,20 @@ function ownPropertySeverityLookup(
 	return Object.assign(Object.create(null), Object.fromEntries(derived));
 }
 
+/**
+ * #3337: the mode-scoped protocol clause composed into a workflow lane's
+ * controller-bound contract. For each named workflow mode it states which
+ * row protocol supersedes the lane agent's STATIC default output structure
+ * (the critic agent's "Begin directly with PLAN REVIEW" structure and
+ * get_approved_plan step; the reviewer agent's Stage-B task-keyed row).
+ * Controller-authored and mode-scoped by construction: only
+ * applyPrWorkflowPromptContract calls this, and only the controller
+ * produces the contract block, so the suspension channel is structural —
+ * no prompt content can activate it (closing the #3310 literal-phrase
+ * activation channel). All six consumer modes are covered: the two
+ * PR_REVIEW phases and the three ordered PR_FEEDBACK gates and the PR_FEEDBACK verification lane (whose lanes
+ * run the same base reviewer/critic agents).
+ */
 function modeProtocolClause(mode: string): string {
 	switch (mode) {
 		case 'swarm-pr-review:reviewer':
@@ -6976,11 +7009,13 @@ function modeProtocolClause(mode: string): string {
 		case 'swarm-pr-review:critic':
 			return `\nPR-REVIEW LANE OVERRIDE (#3310, #3337): this controller block suspends the default "Begin directly with PLAN REVIEW" structure and the get_approved_plan step for this lane. Emit only the [CRITIC] verdict rows this contract specifies, exactly one per assigned item id, and nothing else.`;
 		case 'swarm-pr-feedback:stage-b-reviewer':
-			return `\nPROTOCOL SELECTION (#3337): the Stage-B "STRUCTURED VERDICT LINE" mandate does not apply to this lane. Do not emit a [REVIEWED] | task-<taskId> | VERDICT | summary row — that Stage-B task-keyed row is not this lane's contract; settle only via the [STAGE-B-REVIEW] rows this contract specifies for your assigned feedback items.`;
+			return `\nPROTOCOL SELECTION (#3337): the Stage-B "STRUCTURED VERDICT LINE" mandate does not apply to this lane. Do not emit a [REVIEWED] | task-<taskId> | VERDICT | summary row — that Stage-B task-keyed row is not this lane's contract; settle only via the [STAGE-B-REVIEW] rows given in this lane's task prompt for your assigned feedback items.`;
 		case 'swarm-pr-feedback:closeout-reviewer':
-			return `\nPROTOCOL SELECTION (#3337): the Stage-B "STRUCTURED VERDICT LINE" mandate does not apply to this lane. Do not emit a [REVIEWED] | task-<taskId> | VERDICT | summary row — that Stage-B task-keyed row is not this lane's contract; settle only via the [CLOSEOUT-REVIEW] rows this contract specifies for your assigned feedback items.`;
+			return `\nPROTOCOL SELECTION (#3337): the Stage-B "STRUCTURED VERDICT LINE" mandate does not apply to this lane. Do not emit a [REVIEWED] | task-<taskId> | VERDICT | summary row — that Stage-B task-keyed row is not this lane's contract; settle only via the [CLOSEOUT-REVIEW] rows given in this lane's task prompt for your assigned feedback items.`;
+		case 'swarm-pr-feedback:verification':
+			return `\nPROTOCOL SELECTION (#3337): the Stage-B "STRUCTURED VERDICT LINE" mandate does not apply to this lane. Do not emit a [REVIEWED] | task-<taskId> | VERDICT | summary row — that Stage-B task-keyed row is not this lane's contract; settle only via the [FEEDBACK-VERIFIED] rows given in this lane's task prompt for your assigned feedback items.`;
 		case 'swarm-pr-feedback:closeout-critic':
-			return `\nPR-REVIEW LANE OVERRIDE (#3337): this controller block suspends the default "Begin directly with PLAN REVIEW" structure and the get_approved_plan step for this lane. Emit only the [CLOSEOUT-CRITIC] rows this contract specifies, exactly one per assigned item id, and nothing else.`;
+			return `\nPR-REVIEW LANE OVERRIDE (#3337): this controller block suspends the default "Begin directly with PLAN REVIEW" structure and the get_approved_plan step for this lane. Emit only the [CLOSEOUT-CRITIC] rows given in this lane's task prompt, exactly one per assigned item id, and nothing else.`;
 		default:
 			return '';
 	}

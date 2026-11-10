@@ -6,10 +6,9 @@
  * row naming the same id, the short row must be quarantined (not counted) and
  * the valid row must settle the item.
  *
- * RED at base, GREEN after the fix: at base the short duplicate counts in the
- * exact-set check (observedIds carries the id twice), which voids the lane and
- * also blocks the per-item parse (two rows for one id); after the fix the
- * illegal-arity duplicate is quarantined and the valid row settles.
+ * Regression pin: GREEN at base 25a201430 and after this PR. The illegal-arity
+ * quarantine branch already exists at base (indexVerdictRows), so these cases
+ * pass at base; this file guards that behaviour against regression.
  */
 
 import {
@@ -82,21 +81,27 @@ describe('issue #3310 AC25: quarantined short duplicate does not fail the valid 
 		// tests/unit/hooks/pr-workflow-gate-quarantine-diagnostic-order-3334.test.ts;
 		// per-lane aggregation versus per-row emission is not distinguished
 		// there — see the PR body's considered-not-filed row.)
+		const longStrayId = 'x'.repeat(200);
 		const artifact = [
 			'[REVIEWED] | C-1 | CONFIRMED | STATIC_TRACE_PROVEN | HIGH | YES | a.ts:1 | rationale long | probe text | notes | UNKNOWN |',
 			...Array.from(
 				{ length: 20 },
 				(_v, index) => `[REVIEWED] | stray-${index} | APPROVED | looks fine`,
 			),
+			`[REVIEWED] | ${longStrayId} | APPROVED | looks fine`,
 		].join('\n');
 		const { quarantined, parsed } = parsePrReviewVerdictRows(
 			artifact,
 			['C-1'],
 			'reviewer',
 		);
-		expect(quarantined).toHaveLength(20);
-		// Every stray id is bounded and distinct; the valid row still settles.
-		expect(new Set(quarantined.map((entry) => entry.itemId)).size).toBe(20);
+		expect(quarantined).toHaveLength(21);
+		// Every stray id is distinct and bounded (the 200-char id is cut to 64);
+		// the valid row still settles.
+		expect(new Set(quarantined.map((entry) => entry.itemId)).size).toBe(21);
+		for (const entry of quarantined) {
+			expect(entry.itemId.length).toBeLessThanOrEqual(64);
+		}
 		expect(parsed.has('C-1')).toBe(true);
 	});
 });
