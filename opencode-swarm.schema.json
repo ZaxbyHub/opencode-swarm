@@ -5092,7 +5092,7 @@
       "additionalProperties": false
     },
     "turbo_mode": {
-      "description": "Turbo mode for rapid iteration (v6.40): skips phase_complete Gates 1–5 and lets a non-Tier-3 task be re-dispatched to the coder before Stage A passes; per-task Stage A still runs, and Stage B (reviewer + test_engineer) is required exactly as without Turbo. When true, new sessions start with turbo mode on (session default); /swarm turbo still toggles per session. Directory-less constructions default off.",
+      "description": "Turbo mode for rapid iteration (v6.40): skips phase_complete Gates 1–5 and lets a non-Tier-3 task whose planned files_touched are known and non-empty be re-dispatched to the coder before Stage A passes; per-task Stage A still runs, and Stage B (reviewer + test_engineer) is required exactly as without Turbo. When true, new sessions start with turbo mode on (session default); /swarm turbo still toggles per session. Directory-less constructions default off.",
       "default": false,
       "type": "boolean"
     },

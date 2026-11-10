@@ -11,11 +11,21 @@ Turbo or Lean Turbo is active. A task that does not need Stage B without Turbo
 does not need it with Turbo either. Neither mode ever skips Stage B for a task
 that needs it.
 
-`docs/modes.md`, the README mode table and the Lean Turbo banner now say that.
-The banner is architect prompt text; its instruction is unchanged in substance
-(do not skip Stage B for a task that needs it); it no longer claims more than
-the gate enforces. The `turbo_mode` config description, the `/swarm turbo`
-README row and the README mode table get the same correction.
+`docs/modes.md`, `docs/getting-started.md` and the Turbo and Lean Turbo
+banners now say that, including for Lean Turbo's degraded and serialized
+tasks. The banners are architect prompt text; their instruction is unchanged
+in substance (do not skip Stage B for a task that needs it); they no longer
+claim more than the gate enforces. The `turbo_mode` config description, the
+`/swarm turbo` README row and the README mode table get the same correction.
+The config description and the mode table also state that Turbo's early coder
+re-dispatch applies only to a non-Tier-3 task whose planned `files_touched`
+are known and non-empty.
+
+The phase-wrap skill said "Turbo mode skips all gates automatically". Turbo
+makes `phase_complete` bypass the completion-verify, drift-verifier,
+hallucination-guard, mutation-gate and phase-council checks, not every gate:
+the architecture-supervisor, final-council and full-auto gates still apply.
+The skill now says so.
 
 ## Truncated replies fail closed (notes from #3172, not published until now)
 
@@ -46,15 +56,18 @@ only the `info.error` shape fails closed there (tracked in #3165 G.8).
 
 ## Correction to the v7.192.3 Lean runner notes
 
-The v7.192.3 notes say that only rate-limit, quota and server errors
-("429, 402, 5xx") fail over to the next model. The exact rule: a lane fails
-over when the formatted provider error reads as transient. That covers, for
-example, 429 and 402, quota and rate-limit messages, timeouts, network errors,
-an unavailable model, and the statuses 408, 500, 502, 503, 504 and 529. A lane
-dispatch timeout and a refused lane scope handshake never fail over. Other 5xx statuses (501, 505) fail over only when their message reads
-as transient, for example "server error" or "overloaded". An authentication or
-configuration refusal (403, `ProviderAuthError`) fails the lane without failing
-over, unless its message text itself reads as transient (tracked in #3165 G.6).
+The v7.192.3 notes say that a rate limit (429), quota (402) or server error
+(5xx) fails over to the lane's next fallback model, and that an authentication
+or configuration refusal (403, `ProviderAuthError`) fails the lane without
+failing over. The exact rule: a lane fails over when the formatted provider
+error reads as transient. That covers, for example, 429 and 402, quota and
+rate-limit messages, timeouts, network errors, an unavailable model, and the
+statuses 408, 500, 502, 503, 504 and 529. A lane dispatch timeout and a refused
+lane scope handshake never fail over. Other 5xx statuses (501, 505) fail over
+only when their message reads as transient, for example "server error" or
+"overloaded". An authentication or configuration refusal (403,
+`ProviderAuthError`) fails the lane without failing over, unless its message
+text itself reads as transient (tracked in #3165 G.6).
 
 ## Tests
 

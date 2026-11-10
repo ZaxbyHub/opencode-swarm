@@ -1040,7 +1040,7 @@ No. Full-Auto v2 *increases* critic involvement: every escalate-class action get
 The lane planner (`src/turbo/lean/planner.ts`) uses five conflict rules: exact-file match, parent/child directory containment, global file classification (package.json, barrels, lockfiles), protected path detection (auth, crypto, .env), and cross-lane dependency tracking. Tasks that can't be placed in a parallel lane are either serialized or degraded to balanced mode based on config. See the [Lean Turbo section](#lean-turbo-lane-planning-engine) for the full algorithm.
 
 **How is Epic Mode different from Lean Turbo?**  
-Lean Turbo dispatches lane tasks through its own runner (per-task Stage B is still required); Epic never skips per-task QA, has the architect dispatch each wave as visible `Task` calls, lets the delegation gate admit only the active wave, and adds a phase reviewer + critic gate, an epic branch with squash landing, and learning across epics. See [Mode comparison](#mode-comparison).
+Lean Turbo dispatches lane tasks through its own runner (per-task Stage B applies exactly as without Lean Turbo); Epic never skips per-task QA, has the architect dispatch each wave as visible `Task` calls, lets the delegation gate admit only the active wave, and adds a phase reviewer + critic gate, an epic branch with squash landing, and learning across epics. See [Mode comparison](#mode-comparison).
 
 **How do I tell what mode is active?**  
 `/swarm status` shows session modes. `/swarm epic status` shows whether an epic is open, its current wave and its landing state. `/swarm config` shows the resolved `execution_mode`.

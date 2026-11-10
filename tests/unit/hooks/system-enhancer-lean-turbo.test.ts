@@ -135,12 +135,33 @@ describe('System Enhancer — Lean Turbo Banner Delivery (#2759)', () => {
 			expect(LEAN_TURBO_BANNER).toContain(
 				'needs Stage B exactly when it would without Lean Turbo',
 			);
+			// Guards against the pre-faa19a36c wording "Lane tasks skip per-task
+			// Stage B", which told the architect to skip a gate the runtime keeps.
 			expect(LEAN_TURBO_BANNER).not.toContain('skip per-task Stage B');
 			// #3165: Stage B is not unconditional (a phase whose required_agents
 			// leave out the reviewer skips it in every mode), so the banner must
-			// not claim every task needs it.
+			// not claim every task needs it, in any phrasing.
 			expect(LEAN_TURBO_BANNER).not.toContain(
 				'MUST still go through full Stage B',
+			);
+			expect(LEAN_TURBO_BANNER).not.toMatch(/every task[^.]*must[^.]*Stage B/i);
+		});
+
+		it('states degraded and serialized tasks keep the same Stage B rule', () => {
+			expect(LEAN_TURBO_BANNER).toContain(
+				'under the same per-task Stage B rule as every other task',
+			);
+			expect(LEAN_TURBO_BANNER).not.toContain('with full Stage B gates');
+		});
+	});
+
+	describe('TURBO_MODE_BANNER Stage B wording (#3165)', () => {
+		it('ties the closing Stage B instruction to the rule without Turbo', () => {
+			expect(TURBO_MODE_BANNER).toContain(
+				'Do NOT skip Stage B (reviewer + test_engineer) for any task that would need it without Turbo.',
+			);
+			expect(TURBO_MODE_BANNER).not.toContain(
+				'Do NOT skip Stage A or Stage B gates.',
 			);
 		});
 	});
