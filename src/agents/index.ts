@@ -1550,8 +1550,8 @@ export function getAgentConfigs(
 		}),
 	);
 
-	// Write agent tool snapshot non-blocking
-	if (directory) {
+	// Write agent tool snapshot non-blocking (never under a blank root's cwd)
+	if (directory?.trim()) {
 		const sid = sessionId ?? `init-${Date.now()}`;
 		const evidenceDir = path.join(directory, '.swarm', 'evidence');
 		const filename = `agent-tools-${sid}.json`;

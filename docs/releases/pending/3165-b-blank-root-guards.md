@@ -1,4 +1,4 @@
-# Fix: `.swarm` stores no longer resolve a blank project root against the process cwd
+# Fix: the project DB, plugin init and the shared `.swarm` write paths refuse a blank project root
 
 ## What
 
@@ -42,6 +42,12 @@ A blank or whitespace project directory names no project, but several
   `resolveProjectRootDecision`, the init form of `assertProjectRoot`, now
   fails closed for a blank root, so init loads without writing `.swarm/`
   state, as it already did when the project root could not be determined.
+  The agent tool snapshot (`getAgentConfigs`) checked only for an empty
+  string, so a whitespace root still wrote
+  `<cwd>/<spaces>/.swarm/evidence/agent-tools-*.json`; it now skips a blank
+  root.
+- `/swarm reset-session` and `/swarm close` with a blank root backed up and
+  deleted the cwd project's session files. Both now refuse a blank root.
 - The `swarm.db` stores that canonicalize the root before opening the
   database never reached the `getProjectDb` guard, because
   `canonicalProjectKey('')` is the absolute cwd. They now refuse a blank root
@@ -54,7 +60,7 @@ A blank or whitespace project directory names no project, but several
     cwd project's cached writer.
   - The snapshot-coordination entry points (`ensureSnapshotCoordinationReady`,
     `startSnapshotCoordinationInitialization`,
-    `retrySnapshotCoordinationInitialization`) reject with the same error
+    `retrySnapshotCoordinationInitialization`) reject or throw the same error
     instead of initializing the cwd project's coordination, so `writeSnapshot`
     with a blank root no longer touches it.
   - The close, status and lookup paths (`closeGroupCommitWriter`,
@@ -62,7 +68,8 @@ A blank or whitespace project directory names no project, but several
     `getSnapshotCoordinationStatus`, `getDashboardHandle`, the dashboard close
     functions) treat a blank root as a no-op or not-found, so plugin dispose
     with a blank root no longer closes the cwd project's writer or
-    coordination. The read paths return their empty result (`[]`, 0 or null).
+    coordination. The phase-report, insight-candidate and observability
+    coverage reads return their empty result (`[]`, 0 or null).
     `registerObservabilityEventSink` ignores a blank root, and
     `startDashboardServer` disables itself for a whitespace root (it already
     did for `''`).
@@ -76,7 +83,15 @@ they and the new guards share one helper, `isNonBlankAbsoluteDirectory` /
 A caller that passes a non-blank root sees no change. The guards only
 refuse a blank root; a relative root still resolves as before (see below).
 
-## Known caveat
+## Known caveats
+
+Not every `.swarm` store is guarded yet. These still join a blank root with
+`.swarm/` (so they resolve under the cwd) and stay tracked in #3165 B:
+`src/plan/ledger.ts` (ledger and `plan.json` paths),
+`src/council/council-round-state.ts`, `src/context-map/persistence.ts`,
+`src/memory/storage-root.ts`, `src/consensus/store.ts` (reached in production
+only after the guarded consensus boundary) and the compaction rehydration
+cache (`src/hooks/compaction-customizer.ts`, in memory only).
 
 `getProjectDb` still resolves a RELATIVE root. `save_plan` and `declare_scope`
 pass a caller-supplied relative `working_directory` straight through, so
@@ -86,7 +101,8 @@ tools and is not changed here.
 
 ## Migration
 
-A caller that passed a blank root used to read or write the process cwd's
-`.swarm/` state. It now gets a typed error (`ProjectDbError` `invalid_root`,
+A caller of the guarded paths above that passed a blank root used to read or
+write the process cwd's `.swarm/` state. It now gets a typed error (`ProjectDbError` `invalid_root`,
 `CORE_EVENT_NO_STORE`, or the corpus and project-root errors), `false`,
-`null`, an empty result, or a no-op. Pass the project root instead.
+`null`, an empty result, a refusal message, or a no-op. Pass the project root
+instead.

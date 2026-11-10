@@ -7,9 +7,12 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { existsSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
 import * as net from 'node:net';
 import * as path from 'node:path';
+import { getAgentConfigs } from '../../../src/agents/index.js';
+import { handleCloseCommand } from '../../../src/commands/close.js';
+import { handleResetSessionCommand } from '../../../src/commands/reset-session.js';
 import { listTrajectorySessions } from '../../../src/consensus/corpus.js';
 import {
 	closeDashboardServerForRoot,
@@ -18,6 +21,7 @@ import {
 	getDashboardHandle,
 	startDashboardServer,
 } from '../../../src/dashboard/index.js';
+import { canonicalProjectKey } from '../../../src/db/canonical-project.js';
 import { ProjectDbError } from '../../../src/db/db-errors.js';
 import { getSwarmDbHealthSnapshot } from '../../../src/db/health.js';
 import {
@@ -58,7 +62,7 @@ afterEach(() => {
 	process.chdir(originalCwd);
 	try {
 		coordination.initialize = originalInitialize;
-		coordination.entries.delete(sandbox);
+		coordination.entries.delete(canonicalProjectKey(sandbox));
 		closeAllProjectDbs();
 	} finally {
 		safeRmRecursive(sandbox);
@@ -92,7 +96,7 @@ function installCwdEntry() {
 		settled: true,
 		underlying: Promise.resolve(),
 	};
-	coordination.entries.set(sandbox, entry as never);
+	coordination.entries.set(canonicalProjectKey(sandbox), entry as never);
 	return entry;
 }
 
@@ -121,7 +125,9 @@ describe('snapshot coordination — regression: a blank root initialized the cwd
 				await caughtFrom(() => retrySnapshotCoordinationInitialization(blank)),
 			);
 		}
-		expect(coordination.entries.get(sandbox)).toBe(entry as never);
+		expect(coordination.entries.get(canonicalProjectKey(sandbox))).toBe(
+			entry as never,
+		);
 		expect(initializeCalls).toEqual([]);
 	});
 
@@ -135,12 +141,16 @@ describe('snapshot coordination — regression: a blank root initialized the cwd
 				settled: true,
 			});
 			const guard = await beginSnapshotCoordinationReset(blank);
-			expect(coordination.entries.get(sandbox)).toBe(entry as never);
+			expect(coordination.entries.get(canonicalProjectKey(sandbox))).toBe(
+				entry as never,
+			);
 			expect(guard.markStranded()).toBe(false);
 			guard.release();
 			markSnapshotCoordinationClosing(blank);
 		}
-		expect(coordination.entries.get(sandbox)).toBe(entry as never);
+		expect(coordination.entries.get(canonicalProjectKey(sandbox))).toBe(
+			entry as never,
+		);
 		expect(entry.state).toBe('succeeded');
 	});
 });
@@ -180,7 +190,7 @@ describe('dashboard registry — regression: a blank root reached the cwd listen
 			expect(handle.status).toBe('disabled_invalid_options');
 			expect(handle.listening).toBe(false);
 		}
-		expect(existsSync(path.join(sandbox, '   '))).toBe(false);
+		expect(readdirSync(sandbox)).toEqual([]);
 		expect(cwdSwarmCreated()).toBe(false);
 	});
 
@@ -235,5 +245,52 @@ describe('blank-root diagnostics — regression: the raw root was echoed unbound
 		const detail = (await getDiagnoseData(huge)).checks[0]?.detail ?? '';
 		expect(detail).toContain('Not a usable project root');
 		expect(detail.length).toBeLessThan(250);
+	});
+});
+
+describe('commands and init — regression: a blank root acted on the cwd project (#3165 B)', () => {
+	function seedCwdSession(): string {
+		const session = path.join(sandbox, '.swarm', 'session');
+		mkdirSync(session, { recursive: true });
+		writeFileSync(path.join(session, 'state.json'), '{}');
+		return session;
+	}
+
+	test('/swarm reset-session refuses a blank root and keeps the cwd session files', async () => {
+		// Previous code backed up and deleted <cwd>/.swarm/session/*.
+		const session = seedCwdSession();
+		for (const blank of BLANKS) {
+			expect(await handleResetSessionCommand(blank, [])).toContain(
+				'project directory is blank',
+			);
+		}
+		expect(readdirSync(session)).toEqual(['state.json']);
+		expect(existsSync(path.join(sandbox, '.swarm', 'reset-backups'))).toBe(
+			false,
+		);
+	});
+
+	test('/swarm close refuses a blank root and keeps the cwd session files', async () => {
+		const session = seedCwdSession();
+		for (const blank of BLANKS) {
+			expect(await handleCloseCommand(blank, [])).toContain(
+				'project directory is blank',
+			);
+		}
+		expect(readdirSync(session)).toEqual(['state.json']);
+	});
+
+	test('getAgentConfigs writes no evidence snapshot under a whitespace root', async () => {
+		// Previous code checked `if (directory)`, so '   ' wrote
+		// <cwd>/   /.swarm/evidence/agent-tools-*.json (asynchronously).
+		for (const blank of BLANKS) getAgentConfigs(undefined, blank, 'blank-3165');
+		getAgentConfigs(undefined, sandbox, 'control-3165');
+		const evidence = path.join(sandbox, '.swarm', 'evidence');
+		for (let i = 0; i < 50 && !existsSync(evidence); i++) {
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		}
+		// The control's write landed, so the blank ones had the same time.
+		expect(readdirSync(evidence)).toEqual(['agent-tools-control-3165.json']);
+		expect(readdirSync(sandbox)).toEqual(['.swarm']);
 	});
 });

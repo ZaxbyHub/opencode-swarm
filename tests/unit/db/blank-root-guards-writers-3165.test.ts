@@ -7,7 +7,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
 import { ProjectDbError } from '../../../src/db/db-errors.js';
 import {
@@ -154,13 +154,6 @@ describe('group-commit writer — regression: a blank root reached the cwd write
 		expect(getGroupCommitWriter(sandbox)).toBe(cwdWriter);
 	});
 
-	test('getGroupCommitWriter on a blank root creates no cwd .swarm', () => {
-		for (const blank of BLANKS) {
-			expectInvalidRoot(() => getGroupCommitWriter(blank));
-		}
-		expect(cwdSwarmCreated()).toBe(false);
-	});
-
 	test('closeGroupCommitWriter on a blank root leaves the cwd writer open', () => {
 		// Previous code flushed, closed and evicted the cwd project's writer.
 		const cwdWriter = getGroupCommitWriter(sandbox);
@@ -193,7 +186,7 @@ describe('observability store — regression: a blank root wrote <cwd>/.swarm/sw
 			expectInvalidRoot(() => appendObservabilityEventDb(blank, sampleEvent()));
 		}
 		expect(cwdSwarmCreated()).toBe(false);
-		expect(existsSync(path.join(sandbox, '   '))).toBe(false);
+		expect(readdirSync(sandbox)).toEqual([]);
 	});
 
 	test('registerObservabilityEventSink on a blank root keeps the project binding', async () => {
