@@ -115,6 +115,7 @@ import {
 } from '../prm/trajectory-store.js';
 import type { TrajectoryEntry } from '../prm/types.js';
 import { rejectedEditsPath } from '../services/skill-evaluator.js';
+import { isNonBlankAbsoluteDirectory } from '../utils/path-security.js';
 import type { ConsensusCorpusHash, ConsensusSourceKind } from './contracts.js';
 
 /**
@@ -389,6 +390,21 @@ export function sanitizeExcerpt(value: string, maxChars: number): string {
 }
 
 /**
+ * Refuse a blank or relative workspace root. `path.join('', '.swarm', ...)` is
+ * relative, so the corpus readers would otherwise read `<cwd>/.swarm/` of
+ * whatever directory the process runs in (#3165 B). Matches the PRM trajectory
+ * store, which refuses the same roots. Also guards the `mineAndStoreConsensusV1`
+ * boundary, whose report-store reads run before the corpus loads.
+ */
+export function assertCorpusRoot(directory: unknown): void {
+	if (!isNonBlankAbsoluteDirectory(directory)) {
+		throw new Error(
+			`[consensus-corpus] workspace directory must be a non-blank absolute path (got ${JSON.stringify(directory)})`,
+		);
+	}
+}
+
+/**
  * READ-ONLY enumerator over `.swarm/trajectories`.
  *
  * `src/prm/trajectory-store.ts` reads exactly one session at a time and has no
@@ -398,10 +414,12 @@ export function sanitizeExcerpt(value: string, maxChars: number): string {
  * second writer-adjacent surface in a module another lane owns. It performs a
  * single `readdir`, filters to `<sessionId>.jsonl` names that match the shared
  * identifier shape, sorts, bounds, and returns. Missing directory \u21D2 `[]`.
+ * A blank or relative `directory` throws (see `assertCorpusRoot`).
  */
 export async function listTrajectorySessions(
 	directory: string,
 ): Promise<string[]> {
+	assertCorpusRoot(directory);
 	const root = path.join(directory, '.swarm', 'trajectories');
 	let entries: import('node:fs').Dirent[];
 	try {
@@ -424,10 +442,12 @@ export async function listTrajectorySessions(
  * `src/evaluation/store.ts` exposes `readEvaluationRun(directory, runId)` but no
  * listing (its own callers always know the run id). Mirrors the directory
  * discipline of `listGateAuditResults`: validated names only, sorted, bounded.
+ * A blank or relative `directory` throws (see `assertCorpusRoot`).
  */
 export async function listEvaluationRunIds(
 	directory: string,
 ): Promise<string[]> {
+	assertCorpusRoot(directory);
 	const root = path.join(directory, '.swarm', 'evolution', 'runs');
 	let entries: import('node:fs').Dirent[];
 	try {
@@ -1104,11 +1124,17 @@ function balancedSlice(
  * returned observations are stable-sorted, reduced by the optional
  * `options.filter`, and then truncated to `maxEvidenceItems` — filter first, so
  * the budget is spent on observations the caller can actually use.
+ *
+ * A blank or relative `directory` throws before any source is read. The
+ * per-source catch would otherwise turn the enumerators' refusal into an
+ * "unreadable source" while the other readers still read `<cwd>/.swarm/`
+ * (#3165 B).
  */
 export async function loadConsensusCorpus(
 	directory: string,
 	options: LoadCorpusOptions,
 ): Promise<ConsensusCorpus> {
+	assertCorpusRoot(directory);
 	const readers: CorpusReaders = { ...defaultReaders(), ...options.readers };
 	const maxExcerptChars = Math.max(1, options.maxExcerptChars);
 	// Set when a bounded source could only return a partial window

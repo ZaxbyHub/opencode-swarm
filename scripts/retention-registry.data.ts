@@ -3663,10 +3663,10 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		writerCitations: [
 			'src/session/snapshot-writer.ts:632 writeSnapshot — per-key SQLite snapshot authority via snapshot-store with serialized post-commit projection',
 			'src/session/snapshot-store.ts writeSnapshotRows — FULL transaction with per-session tombstones and cross-process-safe disjoint updates',
-			'src/session/session-start-store.ts:24 recordSessionStart — append flag a, fail-open',
+			'src/session/session-start-store.ts:19 recordSessionStart — append flag a, fail-open',
 			'src/services/context-budget-service.ts:218 writeBudgetState — bunWrite + cache invalidation',
 		],
-		readerCitations: ['src/session/snapshot-reader.ts:320 readSnapshot — full-file, version-validated (1-3), incompatible quarantined (:334-347); session-start-store.ts:39 readEarliestSessionStart — full-file min-scan'],
+		readerCitations: ['src/session/snapshot-reader.ts:320 readSnapshot — full-file, version-validated (1-3), incompatible quarantined (:334-347); session-start-store.ts:34 readEarliestSessionStart — full-file min-scan'],
 		schemaVersion: 'snapshot versions 1-3 (others quarantined)',
 		stateClass: 'authoritative',
 		privacyClass: 'content',

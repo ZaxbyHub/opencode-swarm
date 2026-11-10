@@ -21,6 +21,7 @@ import {
 	lexicalRootAliasKey,
 } from '../utils/canonical-root.js';
 import { canonicalExistingFilesystemPath } from '../utils/filesystem-identity.js';
+import { isBlankDirectory } from '../utils/path-security.js';
 import { ProjectDbError } from './db-errors.js';
 import { loadDatabaseCtor } from './sqlite-loader.js';
 
@@ -817,10 +818,29 @@ export function runProjectMigrations(db: Database, markerDir?: string): void {
 }
 
 /**
+ * Refuse a blank or whitespace project root with a typed `invalid_root`
+ * error. `resolve('')` is process.cwd(), so without this a blank root opened
+ * (and created) `<cwd>/.swarm/swarm.db` in whatever directory the process ran
+ * in (AGENTS.md invariant 4; #3165 section B). A RELATIVE root is still
+ * resolved: `save_plan` and `declare_scope` pass a caller-supplied relative
+ * `working_directory` through unresolved today, and refusing it here would
+ * turn their current behavior into a failure.
+ */
+function assertProjectDbRoot(directory: string): void {
+	if (isBlankDirectory(directory)) {
+		throw new ProjectDbError(
+			'invalid_root',
+			`Project root must be a non-blank path (got ${JSON.stringify(directory)})`,
+		);
+	}
+}
+
+/**
  * Return the absolute path to `.swarm/swarm.db` for the given directory.
  * Does not create the file or any parent directory.
  */
 export function projectDbPath(directory: string): string {
+	assertProjectDbRoot(directory);
 	return join(canonicalRootKeyFresh(directory), '.swarm', 'swarm.db');
 }
 
@@ -831,6 +851,7 @@ export function projectDbPath(directory: string): string {
  * workspace just to check for a missing record.
  */
 export function projectDbExists(directory: string): boolean {
+	if (isBlankDirectory(directory)) return false;
 	return existsSync(projectDbPath(directory));
 }
 
@@ -845,6 +866,8 @@ export function withProjectDbReadOnly<T>(
 	directory: string,
 	read: (db: Database) => T,
 ): T | null {
+	// A blank root names no project; never consult a cwd-keyed handle (#3165 B).
+	if (isBlankDirectory(directory)) return null;
 	// A cached writer may have authoritative commits that exist only in its live
 	// WAL. An immutable second connection deliberately ignores that WAL, so read
 	// through the already-open handle when one exists. This is observational: no
@@ -913,6 +936,7 @@ function checkpointWalBestEffort(db: Database): void {
  * half-open handle cached.
  */
 export function getProjectDb(directory: string): Database {
+	assertProjectDbRoot(directory);
 	// Preserve the existing create-on-first-open contract, but materialize the
 	// root before choosing its resource identity. A missing child beneath a
 	// symlink/junction parent otherwise changes from a lexical key to a physical
@@ -1036,6 +1060,10 @@ export function getProjectDb(directory: string): Database {
  * writers on one file). Reopening via `getProjectDb` always works.
  */
 export function closeProjectDb(directory: string): void {
+	// A blank root can name no open handle: getProjectDb refuses it (#3165 B).
+	// Without this, lexicalAliasKey('') resolves the cwd and could close the
+	// cwd project's live connection.
+	if (isBlankDirectory(directory)) return;
 	const alias = lexicalAliasKey(directory);
 	// Resolve the path again before consulting the alias table. The alias may
 	// have been retargeted since it was opened; an older alias binding must not
