@@ -19492,20 +19492,24 @@ export async function derivePrReviewOrderUnstableItems(
 ): Promise<string[]> {
 	const state = await requireBoundState(directory, sessionID, 'PR_REVIEW');
 	const ctx = await createPrReviewGateContext(directory, state);
-	const composition = composePrReviewPhaseVerdicts(
-		directory,
-		state,
-		'reviewer',
-		ctx,
-	);
+	// #3362: read the reviewer phase through the same fail-closed
+	// authoritative gate the binding path uses (authoritativeReviewerClaims).
+	// An UNCOVERED current reviewer phase (unsettled/partial with no admitted
+	// settlement) yields an empty map and the derivation returns [] WITHOUT
+	// consulting the coherence stamp: the stamp derives from a prior batch
+	// window and would be stale relative to the current uncovered phase — the
+	// severity and order-unstable preflights must fail closed together.
+	const claims = authoritativeReviewerClaims(directory, state, ctx);
+	if (claims.size === 0) return [];
 	// The order-unstable ids are STAMPED AT RECORD TIME onto the CRITIC batch's
 	// coherence record (the critic record is the only writer — see
 	// recordPrReviewValidationBatch), so that stamp is the receipt-of-record
 	// for what a critic dispatch is about to be told. Prefer the newest
-	// critic-phase stamp, and recompute from the composed claims only when no
-	// stamped set exists yet (pre-stamping batches, or a critic dispatch that
-	// precedes its own record). Reading the stamp is therefore never stale
-	// relative to the composition: both derive from the same window.
+	// critic-phase stamp, and recompute from the authoritative claims only
+	// when no stamped set exists yet (pre-stamping batches, or a critic
+	// dispatch that precedes its own record). The stamp is only consulted
+	// after the authoritative gate above confirmed a covered reviewer phase,
+	// so it is never stale relative to the CURRENT window.
 	const newestStampedBatchId = [...(state.prReviewValidationBatches ?? [])]
 		.reverse()
 		.find(
@@ -19517,19 +19521,24 @@ export async function derivePrReviewOrderUnstableItems(
 		? state.prReviewBatchCoherence?.[newestStampedBatchId]?.orderUnstableItemIds
 		: undefined;
 	if (stamped && stamped.length > 0) return [...new Set(stamped)].sort();
-	return [...composition.claims.entries()]
+	return [...claims.entries()]
 		.filter(([, claim]) => claim.orderAgreement === 'disagree')
 		.map(([itemId]) => itemId)
 		.sort();
 }
 
 /**
- * Issue #3310: the composed reviewer-phase severities, keyed by item id, so a
- * critic dispatch can tell each assigned item's reviewer severity up front —
- * the critic transport requires UPHELD to keep that exact severity rank.
- * Read-only derivation with the same shape as the #2906 readers; an unset or
- * partially-settled reviewer phase yields an empty/partial map and the
- * dispatch-side caller renders nothing extra for unknown ids.
+ * Issue #3310 / #3362: the authoritative reviewer-phase severities, keyed by
+ * item id, so a critic dispatch can tell each assigned item's reviewer
+ * severity up front — the critic transport requires UPHELD to keep that
+ * exact severity rank. Read through the same fail-closed authoritative gate
+ * the binding path uses (authoritativeReviewerClaims): an UNCOVERED reviewer
+ * phase (unsettled or partially settled with no admitted settlement) yields
+ * an EMPTY map — never a partial one — so the preflight can never annotate
+ * items the binder would refuse. Under an admitted N-of-M settlement that
+ * covers every unclaimed item, the surviving actual claims are returned.
+ * The pre-fix raw-composition shape ("empty/partial map") was a deliberate
+ * contract change in #3362, not a bugfix of this docstring.
  */
 export async function derivePrReviewReviewerSeverities(
 	directory: string,
@@ -19537,14 +19546,9 @@ export async function derivePrReviewReviewerSeverities(
 ): Promise<Map<string, string>> {
 	const state = await requireBoundState(directory, sessionID, 'PR_REVIEW');
 	const ctx = await createPrReviewGateContext(directory, state);
-	const composition = composePrReviewPhaseVerdicts(
-		directory,
-		state,
-		'reviewer',
-		ctx,
-	);
+	const claims = authoritativeReviewerClaims(directory, state, ctx);
 	const severities = new Map<string, string>();
-	for (const [itemId, claim] of composition.claims) {
+	for (const [itemId, claim] of claims) {
 		severities.set(itemId, claim.severity);
 	}
 	return severities;

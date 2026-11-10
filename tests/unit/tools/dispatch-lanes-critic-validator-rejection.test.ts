@@ -17,7 +17,9 @@ import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import * as path from 'node:path';
 import {
 	activatePrWorkflow,
+	bindPrReviewBase,
 	_test_exports as gateInternals,
+	readPrWorkflowGateState,
 	recordPrReviewValidationBatch,
 } from '../../../src/hooks/pr-workflow-gate.js';
 import {
@@ -264,5 +266,156 @@ describe('PR_FEEDBACK closeout-critic role predicate (issue #3340 AC2)', () => {
 		expect(result.success).toBe(false);
 		const message = String(result.message);
 		expect(message).not.toContain('requires workflow_lane');
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Issue #3341 — admission rejections are side-effect-free: validatePrWorkflow
+// LaneAdmission runs BEFORE activatePrWorkflow/bindPrReviewBase, so a rejected
+// request creates no durable workflow state and preserves any pre-existing
+// state byte-for-byte.
+// ---------------------------------------------------------------------------
+describe('side-effect-free admission rejection (issue #3341)', () => {
+	const rejectedCriticDispatch = (sessionID: string, agent: string) =>
+		executeDispatchLanesAsync(
+			{
+				mode: 'swarm-pr-review:critic',
+				pr_head_sha: 'abc123',
+				base_sha: 'def456',
+				base_ref: 'origin/main',
+				lanes: [
+					{
+						id: 'critic-lane-3341',
+						agent,
+						prompt: 'Challenge the assigned reviewer verdicts',
+						workflow_lane: 'critic-chunk-1',
+						review_item_ids: ['c1'],
+					},
+				],
+			},
+			directory,
+			{ sessionID },
+		);
+
+	test('a rejected critic-role dispatch leaves NO gate state on a fresh session', async () => {
+		const result = await rejectedCriticDispatch(
+			'stateful-critic-3341',
+			'critic_finding_validator',
+		);
+		expect(result.success).toBe(false);
+		expect(String(result.message)).toContain('must use the critic agent');
+		const state = await readPrWorkflowGateState(
+			directory,
+			'stateful-critic-3341',
+		);
+		// Exact absence, not merely a different mode: the request consumed no
+		// workflow identity at all.
+		expect(state).toBeNull();
+	});
+
+	test.each([
+		'reviewer',
+		'council',
+	] as const)('a rejected %s-role dispatch leaves NO gate state on a fresh session', async (phase) => {
+		const session = `stateful-${phase}-3341`;
+		const result = await executeDispatchLanesAsync(
+			{
+				mode: `swarm-pr-review:${phase}`,
+				pr_head_sha: 'abc123',
+				base_sha: 'def456',
+				base_ref: 'origin/main',
+				lanes: [
+					{
+						id: `${phase}-lane-3341`,
+						agent: 'critic',
+						prompt: 'Challenge',
+						workflow_lane: `${phase}-lane`,
+						review_item_ids: ['c1'],
+					},
+				],
+			},
+			directory,
+			{ sessionID: session },
+		);
+		expect(result.success).toBe(false);
+		expect(String(result.message)).toContain('uses invalid role');
+		expect(await readPrWorkflowGateState(directory, session)).toBeNull();
+	});
+
+	test('a rejected dispatch against an ALREADY-ACTIVE session preserves the prior state', async () => {
+		const session = 'preexisting-state-3341';
+		await activatePrWorkflow(directory, session, 'PR_REVIEW', {
+			requireCheckoutPreflight: false,
+		});
+		await bindPrReviewBase(directory, session, {
+			prHeadSha: 'abc123',
+			baseRef: 'origin/main',
+			baseSha: 'def456',
+		});
+		const before = await readPrWorkflowGateState(directory, session);
+		expect(before?.mode).toBe('PR_REVIEW');
+		const result = await rejectedCriticDispatch(session, 'explorer');
+		expect(result.success).toBe(false);
+		const after = await readPrWorkflowGateState(directory, session);
+		// Byte-level preservation: the rejection mutated nothing.
+		expect(JSON.stringify(after)).toBe(JSON.stringify(before));
+	});
+
+	test('mixed-invalid phase lanes report the owned-workflow-lanes error first (precedence pin)', async () => {
+		const result = await executeDispatchLanesAsync(
+			{
+				mode: 'swarm-pr-review:critic',
+				pr_head_sha: 'abc123',
+				base_sha: 'def456',
+				base_ref: 'origin/main',
+				lanes: [
+					{
+						id: 'mixed-lane-3341',
+						agent: 'critic_finding_validator',
+						prompt: 'Challenge',
+						workflow_lane: 'critic-chunk-1',
+						review_item_ids: ['c1'],
+						owned_workflow_lanes: ['base-dimension-1'],
+					},
+				],
+			},
+			directory,
+			{ sessionID: 'mixed-invalid-3341' },
+		);
+		expect(result.success).toBe(false);
+		const message = String(result.message);
+		expect(message).toContain('must not declare owned_workflow_lanes');
+		expect(message).not.toContain('uses invalid role');
+	});
+
+	test.each([
+		['swarm-pr-review:base', 'base'],
+		['swarm-pr-review:micro', 'micro'],
+	] as const)('a rejected %s explorer-role dispatch leaves NO gate state', async (mode, kind) => {
+		const session = `stateful-${kind}-3341`;
+		const result = await executeDispatchLanesAsync(
+			{
+				mode,
+				pr_head_sha: 'abc123',
+				base_sha: 'def456',
+				base_ref: 'origin/main',
+				batch_id: `${kind}-batch-3341`,
+				lanes: [
+					{
+						id: `${kind}-lane-3341`,
+						agent: 'critic',
+						prompt: 'Explore',
+						workflow_lane:
+							kind === 'base' ? 'intent-architecture' : 'auth-identity-secrets',
+						review_item_ids: ['c1'],
+					},
+				],
+			},
+			directory,
+			{ sessionID: session },
+		);
+		expect(result.success).toBe(false);
+		expect(String(result.message)).toContain(`must use the explorer role`);
+		expect(await readPrWorkflowGateState(directory, session)).toBeNull();
 	});
 });

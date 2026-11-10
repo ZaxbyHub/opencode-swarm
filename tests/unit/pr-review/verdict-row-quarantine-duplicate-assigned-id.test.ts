@@ -100,3 +100,79 @@ describe('issue #3310 AC25: quarantined short duplicate does not fail the valid 
 		expect(parsed.has('C-1')).toBe(true);
 	});
 });
+
+// ---------------------------------------------------------------------------
+// Issue #3362 AC3 — the corrected docstring contract, pinned: a LEGAL-arity
+// duplicate remains a per-item parse failure (the item settles nothing), an
+// ILLEGAL-arity duplicate is quarantined with the sibling keeping its claim,
+// and an UNASSIGNED tail-merged (recovered-overflow) row is quarantined at
+// its raw arrival arity with ZERO recovery bookkeeping — only admitted rows
+// emit recovery entries.
+// ---------------------------------------------------------------------------
+describe('issue #3362 AC3: duplicate/overflow truth pins', () => {
+	const LEGAL_ROW =
+		'[REVIEWED] | C-1 | CONFIRMED | STRUCTURALLY_PROVEN | HIGH | YES | a.ts:1 | rationale long | probe text | notes | UNKNOWN |';
+
+	test('a LEGAL-arity duplicate remains a per-item parse failure (no claim for the item)', () => {
+		const artifact = [LEGAL_ROW, LEGAL_ROW].join('\n');
+		const { parsed, quarantined } = parsePrReviewVerdictRows(
+			artifact,
+			['C-1'],
+			'reviewer',
+		);
+		// The item settles NOTHING: two legal rows for one id is the per-item
+		// parse failure shape (rows?.length === 1 fails), not quarantine.
+		expect(parsed.has('C-1')).toBe(false);
+		expect(quarantined).toEqual([]);
+	});
+
+	test('an ILLEGAL-arity duplicate is quarantined and the legal sibling keeps the claim', () => {
+		const artifact = [LEGAL_ROW, '[REVIEWED] | C-1 | APPROVED | fine'].join(
+			'\n',
+		);
+		const { parsed, quarantined } = parsePrReviewVerdictRows(
+			artifact,
+			['C-1'],
+			'reviewer',
+		);
+		expect(quarantined).toHaveLength(1);
+		expect(quarantined[0]?.itemId).toBe('C-1');
+		expect(parsed.has('C-1')).toBe(true);
+		expect(parsed.get('C-1')?.classification).toBe('CONFIRMED');
+	});
+
+	test('an UNASSIGNED tail-merged row quarantines at raw arity with ZERO recovery bookkeeping', () => {
+		// 15 raw fields: tail-merged down to the 12-field legal shape, but the
+		// id is not in the assigned set — the #3357 quarantine branch fires on
+		// the RAW arrival arity and the recovery path never runs.
+		const overArityGhost =
+			'[REVIEWED] | c-ghost | DISPROVED | STRUCTURALLY_PROVEN | NONE | NO | src/b.ts:2 | rationale | probe | notes | UNKNOWN | prose | with | extra | pipes';
+		const { parsed, quarantined, recoveries } = parsePrReviewVerdictRows(
+			[LEGAL_ROW, overArityGhost].join('\n'),
+			['C-1'],
+			'reviewer',
+		);
+		expect(quarantined).toHaveLength(1);
+		expect(quarantined[0]?.itemId).toBe('c-ghost');
+		// Raw arrival arity (15), not the tail-merged legal arity (12).
+		expect(quarantined[0]?.arity).toBe(15);
+		expect(recoveries).toEqual([]);
+		expect(parsed.has('C-1')).toBe(true);
+	});
+
+	test('an ASSIGNED tail-merged row keeps the legacy recovery path (control leg)', () => {
+		const overArityAssigned =
+			'[REVIEWED] | C-2 | DISPROVED | STRUCTURALLY_PROVEN | NONE | NO | src/b.ts:2 | rationale | probe | notes | UNKNOWN | prose | with | extra | pipes';
+		const { quarantined, recoveries } = parsePrReviewVerdictRows(
+			[LEGAL_ROW, overArityAssigned].join('\n'),
+			['C-1', 'C-2'],
+			'reviewer',
+		);
+		// Mirrors the #3357 control: quarantine stays empty and the admitted
+		// row emits its recovery entry (settlement shape is that suite's pin).
+		expect(quarantined).toEqual([]);
+		expect(recoveries).toHaveLength(1);
+		expect(recoveries[0]?.itemId).toBe('C-2');
+		expect(recoveries[0]?.recovery).toBe('legacy-lossy');
+	});
+});

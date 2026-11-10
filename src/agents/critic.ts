@@ -414,14 +414,17 @@ ANALYZE RULES:
 - Report the highest-severity findings first within each section.
 - If both spec.md and plan.md are present but empty, report CLEAN with a note that both files are empty.
 `;
-// #3310 (AC14): PR-review critic lanes compose this agent's prompt with the
-// controller's contract card and CONTROLLER-BOUND block; the default
-// PLAN REVIEW structure cannot produce the [CRITIC] rows that transport
-// requires, so the override suspends it for those lanes only. Non-PR use
-// of the critic agent is unchanged.
-const PR_REVIEW_LANE_OVERRIDE = `PR-REVIEW LANE OVERRIDE (#3310): when a CONTROLLER-BOUND PR WORKFLOW CONTRACT block is present in your prompt, the default output structure above is suspended for that lane: do not begin with PLAN REVIEW and do not call get_approved_plan — emit only the [CRITIC] verdict rows that contract specifies, exactly one per assigned item id, and nothing else.`;
+// #3310 (AC14) / #3337: PR-review critic lanes need the default PLAN REVIEW
+// structure suspended so only [CRITIC] verdict rows are emitted. That
+// override is CONTROLLER-AUTHORED: the dispatch controller composes a
+// mode-scoped protocol clause into the lane's contract block (see
+// modeProtocolClause in src/tools/dispatch-lanes.ts), the same proven
+// channel the reviewer lanes have used since #3310. The static agent prompt
+// carries no PR-review instructions — activation is structural (only the
+// controller produces the clause), never prompt-content-interpreted, and
+// non-workflow use of the critic agent is unchanged.
 
-export const PLAN_CRITIC_PROMPT = `${PLAN_CRITIC_PROMPT_BASE}\n\n${GRAPH_FIRST_CRITIC_GUIDANCE}\n\n${PR_REVIEW_LANE_OVERRIDE}`;
+export const PLAN_CRITIC_PROMPT = `${PLAN_CRITIC_PROMPT_BASE}\n\n${GRAPH_FIRST_CRITIC_GUIDANCE}`;
 
 // ============================================================
 // SOUNDING_BOARD_PROMPT — Pre-escalation filter
