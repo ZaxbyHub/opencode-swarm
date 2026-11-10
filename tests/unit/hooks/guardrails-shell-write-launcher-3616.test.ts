@@ -215,6 +215,14 @@ describe('#3616 env split-string family: every spelling reaches the payload walk
 		`env -S sh -c "echo x > ../x.txt"`,
 		`env --split=sh -c "echo x > ../x.txt"`,
 		`env -S tee ../outside.txt`,
+		// A lone `-` payload is env's obsolete -i alias: an option, not the
+		// command — the post words run as the command (review round 7).
+		`env -S '-' /bin/bash -c "echo x > ../x.txt"`,
+		`env --split='-' /bin/bash -c "echo x > ../x.txt"`,
+		`env -S '-' /bin/sh -c "tee ../x.txt"`,
+		`env -S '-u FOO -' sh -c "echo x > ../x.txt"`,
+		`env -S '' - sh -c "echo x > ../x.txt"`,
+		`env -C .. - /bin/sh -c "echo x > src/a"`,
 	];
 	for (const command of DENIED) {
 		test(
@@ -253,6 +261,7 @@ describe('#3616 env split-string family: every spelling reaches the payload walk
 		`env --split= sh -c "echo x > src/ok.txt"`,
 		`env -S '' sh -c "echo x > src/ok.txt"`,
 		`env -S sh -c "echo x > src/ok.txt"`,
+		`env -S '-' /bin/bash -c "echo x > src/ok.txt"`,
 	]) {
 		test(
 			`control: ${command} is admitted`,

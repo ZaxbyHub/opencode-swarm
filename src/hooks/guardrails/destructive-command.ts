@@ -1442,6 +1442,11 @@ function matchChdirWrapperSegment(segment: string): DcChdirMatch {
 function matchEnvChdir(words: string[]): DcChdirMatch {
 	let cursor = 1;
 	let dir: string | undefined;
+	// GNU/BSD env: a lone `-` is the obsolete spelling of `-i` (an option,
+	// not the command word — executed ground truth: `env -S '-' CMD` runs
+	// CMD with the environment cleared). Translate it when re-emitting
+	// option words so downstream peels only ever see canonical flags.
+	const dashAlias = (w: string): string => (w === '-' ? '-i' : w);
 	// #3616 F1 (final-critic round 2): GNU env (and BSD -S) splits the
 	// -S/--split-string payload into argv and processes those words as its
 	// own arguments in place of the option — for EVERY spelling (exact
@@ -1495,7 +1500,7 @@ function matchEnvChdir(words: string[]): DcChdirMatch {
 			return {
 				kind: 'static',
 				dir: '.',
-				innerWords: ['env', ...pre, '-S', payload],
+				innerWords: ['env', ...pre.map(dashAlias), '-S', payload],
 			};
 		}
 		// Words follow the split option: argv splice. A payload env would
@@ -1508,15 +1513,44 @@ function matchEnvChdir(words: string[]): DcChdirMatch {
 		) {
 			return { kind: 'failClosed' };
 		}
+		// Let this same walk find where the command starts (a forced `-C .`
+		// makes it return the command words, or null when nothing runs), and
+		// emit `env ASSIGNMENTS… COMMAND…`: env's own option words — `-`
+		// (the `-i` alias), `--`, `-u NAME`, … — are consumed here and never
+		// re-emitted, so no downstream wrapper peel has to step over them.
+		// Assignments are kept so text-level scans still see them.
+		const merged = [...splitWords, ...after];
+		const forced = matchEnvChdir(['env', '-C', '.', ...merged]);
+		if (forced === null) return null; // nothing runs
+		if (forced.kind !== 'static' || forced.dir !== '.') return forced;
+		const command = forced.innerWords;
+		const optionRegion = merged.slice(0, merged.length - command.length);
+		if (
+			command.length > merged.length ||
+			command.some((w, i) => w !== merged[optionRegion.length + i])
+		) {
+			return { kind: 'failClosed' };
+		}
 		return {
 			kind: 'static',
 			dir: '.',
-			innerWords: ['env', ...pre, ...splitWords, ...after],
+			innerWords: [
+				'env',
+				...[...pre, ...optionRegion].filter((w) =>
+					/^[A-Za-z_][A-Za-z0-9_]*=/.test(w),
+				),
+				...command,
+			],
 		};
 	};
 	while (cursor < words.length) {
 		const token = words[cursor];
 		if (token === undefined) break;
+		if (token === '-') {
+			// The -i alias (see dashAlias): an option, never the command.
+			cursor += 1;
+			continue;
+		}
 		if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(token)) {
 			cursor += 1;
 			continue;
