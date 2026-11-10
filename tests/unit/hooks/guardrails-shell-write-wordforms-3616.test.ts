@@ -329,6 +329,30 @@ describe('#3616 item 9: .. after a directory link resolves through the link', ()
 		},
 		T,
 	);
+
+	test.skipIf(process.platform === 'win32')(
+		'POSIX RELATIVE-target symlink: rm rlink/../src/x.txt resolves against the link directory',
+		async () => {
+			// rlink -> ../<ws>-outside/deep (a relative target): the walk must
+			// re-walk the target's own components from the LINK's directory,
+			// so `..` lands in <ws>-outside, not back inside the workspace.
+			const r = await gate('rm rlink/../src/x.txt', {
+				prep: (ws) => {
+					const outside = outsideRoot(ws);
+					mkdirSync(path.join(outside, 'deep'), { recursive: true });
+					mkdirSync(path.join(outside, 'src'), { recursive: true });
+					symlinkSync(
+						path.join('..', path.basename(outside), 'deep'),
+						path.join(ws, 'rlink'),
+					);
+				},
+			});
+			expect(r.verdict).toBe('BLOCKED');
+			expect(r.message).toMatch(AUTHORITY_DENY);
+			expect(r.message).toContain('-outside');
+		},
+		T,
+	);
 });
 
 describe('#3616 item 16 (not delivered): shipped post-exempt over-deny pinned', () => {
