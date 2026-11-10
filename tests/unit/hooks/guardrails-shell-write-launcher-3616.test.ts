@@ -272,3 +272,39 @@ describe('#3616 env split-string family: every spelling reaches the payload walk
 		);
 	}
 });
+
+describe('#3616 env dash alias without -S: the post-dash command is judged', () => {
+	// A lone `-` is env's obsolete -i spelling; the words after it run as
+	// the command (review round 8 pre-existing finding, fixed here). The
+	// legacy envPrefix peel cannot step over a bare `-`, so the walk
+	// consumes it and re-emits `env ASSIGNMENTS… COMMAND…`.
+	for (const command of [
+		`env -u X - /bin/sh -c "echo x > ../x.txt"`,
+		`env - /bin/sh -c "echo x > ../x.txt"`,
+		`env -i - /bin/sh -c "echo x > ../x.txt"`,
+		`env --unset X - /bin/sh -c "echo x > ../x.txt"`,
+		`env - FOO=1 /bin/sh -c "echo x > ../x.txt"`,
+	]) {
+		test(
+			`${command} is denied`,
+			async () => {
+				const r = await gate(command);
+				expect(r.verdict).toBe('BLOCKED');
+				expect(r.message).toMatch(AUTHORITY_DENY);
+			},
+			T,
+		);
+	}
+	for (const command of [
+		`env -u X - /bin/sh -c "echo x > src/ok.txt"`,
+		`env - /bin/sh -c "echo x > src/ok.txt"`,
+	]) {
+		test(
+			`control: ${command} is admitted`,
+			async () => {
+				expect((await gate(command)).verdict).toBe('ADMITTED');
+			},
+			T,
+		);
+	}
+});

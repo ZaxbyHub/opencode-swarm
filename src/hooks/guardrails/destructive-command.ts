@@ -1269,7 +1269,9 @@ const DC_ENV_SPLIT_DYNAMIC = /[$`\\]/;
  * `-P`, unknown flags) keeps `env` as the chdir-wrapper head.
  */
 const ENV_PEELABLE_FLAGS = new Set([
-	'-',
+	// No lone `-` here: it is env's -i alias, and the walk in
+	// matchEnvChdir consumes it (keeping env as the head so the command
+	// after it is re-emitted for judgment).
 	'--',
 	'-i',
 	'--ignore-environment',
@@ -1442,6 +1444,9 @@ function matchChdirWrapperSegment(segment: string): DcChdirMatch {
 function matchEnvChdir(words: string[]): DcChdirMatch {
 	let cursor = 1;
 	let dir: string | undefined;
+	// Set when the walk consumed a lone `-` (the -i alias) — see the
+	// no-chdir exit for why the command must then be re-emitted.
+	let dashAliasConsumed = false;
 	// GNU/BSD env: a lone `-` is the obsolete spelling of `-i` (an option,
 	// not the command word — executed ground truth: `env -S '-' CMD` runs
 	// CMD with the environment cleared). Translate it when re-emitting
@@ -1548,6 +1553,7 @@ function matchEnvChdir(words: string[]): DcChdirMatch {
 		if (token === undefined) break;
 		if (token === '-') {
 			// The -i alias (see dashAlias): an option, never the command.
+			dashAliasConsumed = true;
 			cursor += 1;
 			continue;
 		}
@@ -1687,7 +1693,26 @@ function matchEnvChdir(words: string[]): DcChdirMatch {
 	// A split payload with no chdir needs no rewrite: the detector's own
 	// env walk already analyzes it (`env -S 'tee ../x'` is denied at base),
 	// and env passes payload text such as `>` through as literal argv.
-	if (dir === undefined) return null;
+	if (dir === undefined) {
+		// #3616 (review round 8, pre-existing): when the walk consumed a
+		// lone `-` (env's -i alias) the legacy envPrefix peel cannot step
+		// over it, so the post-`-` command was never judged (`env -u X -
+		// sh -c "echo x > ../x"` ADMITTED while real env writes). Re-emit
+		// the command the same way the split splice does: env's own option
+		// words are dropped (detection-neutral), assignments are kept.
+		if (!dashAliasConsumed || rest.length === 0) return null;
+		return {
+			kind: 'static',
+			dir: '.',
+			innerWords: [
+				'env',
+				...words
+					.slice(1, cursor)
+					.filter((w) => /^[A-Za-z_][A-Za-z0-9_]*=/.test(w)),
+				...rest,
+			],
+		};
+	}
 	if (dir === '' || dir.includes('\0')) return { kind: 'failClosed' };
 	if (rest.length === 0) {
 		// Chdir with no command: nothing runs — not a wrapper to rewrite.
