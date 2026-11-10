@@ -8188,7 +8188,10 @@ function expansionWordWrites(
  * characters, or null. A linear pre-parse scan (single pass, character class
  * test only — no regex over the whole command).
  */
-function firstWordOverBudget(command: string, budget: number): string | null {
+export function firstWordOverBudget(
+	command: string,
+	budget: number,
+): string | null {
 	let start = -1;
 	const n = command.length;
 	for (let i = 0; i <= n; i += 1) {
@@ -10774,6 +10777,27 @@ export function resolveWriteTargets(
 		}));
 	}
 
+	// #3616 D11: skip the resolver's own parse for oversized words — the
+	// detection sentinel already denied them, and parsing a 40k-char word
+	// again costs ~100ms on the gate path. The writes resolve against cwd
+	// without subshell tracking (the same shape as the parse-failure path).
+	if (firstWordOverBudget(command, 4096) !== null) {
+		return writes.map((original) => ({
+			original,
+			resolvedPath:
+				original.unresolvedContext === true
+					? null
+					: resolvePath(original.path, cwd),
+			resolved:
+				original.unresolvedContext !== true &&
+				original.path !== null &&
+				!isDynamicPath(original.path),
+			...(original.capability === true &&
+			original.category === 'interpreter_eval'
+				? { evalDirectory: cwd }
+				: {}),
+		}));
+	}
 	let ast: unknown;
 	try {
 		ast = parse(command, { mode: 'posix', insertLOC: true });
