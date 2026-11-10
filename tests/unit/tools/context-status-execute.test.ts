@@ -1,7 +1,6 @@
 /** Integration tests for context_status.execute. */
 
 import { afterEach, beforeEach, describe, expect, it, test } from 'bun:test';
-import { rmSync } from 'node:fs';
 import type { ToolContext } from '@opencode-ai/plugin';
 import {
 	readLearningHealth,
@@ -9,7 +8,7 @@ import {
 } from '../../../src/health/learning-health';
 import { setLiveContextWindow, swarmState } from '../../../src/state';
 import { _internals, context_status } from '../../../src/tools/context-status';
-import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
+import { canonicalMkdtemp, removeTreeWithRetry } from '../../helpers/tmpdir.js';
 
 const originalLoadPluginConfig = _internals.loadPluginConfig;
 const originalFetchSessionMessages = _internals.fetchSessionMessages;
@@ -79,7 +78,7 @@ afterEach(() => {
 	swarmState.liveContextWindows.clear();
 	_internals.loadPluginConfig = originalLoadPluginConfig;
 	_internals.fetchSessionMessages = originalFetchSessionMessages;
-	rmSync(projectDir, { recursive: true, force: true });
+	removeTreeWithRetry(projectDir);
 });
 
 describe('context_status.execute', () => {
@@ -366,8 +365,8 @@ describe('context_status.execute learning-health scoping (#2044)', () => {
 			).toBe(false);
 		} finally {
 			resetLearningHealthForTest();
-			rmSync(ownerDir, { recursive: true, force: true });
-			rmSync(otherDir, { recursive: true, force: true });
+			removeTreeWithRetry(ownerDir);
+			removeTreeWithRetry(otherDir);
 		}
 	});
 });

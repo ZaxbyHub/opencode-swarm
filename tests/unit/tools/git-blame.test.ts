@@ -421,22 +421,23 @@ describe('git_blame - integration with real git repo', () => {
 
 		// Create a temp directory that is NOT a git repo (outside the checkout)
 		const nonGitDir = canonicalMkdtemp('git-blame-non-git-');
+		try {
+			const testFile = 'test.txt';
+			fs.writeFileSync(path.join(nonGitDir, testFile), 'content\n');
+			const result = await git_blame.execute({ file: testFile }, {
+				directory: nonGitDir,
+			} as never);
+			const parsed = JSON.parse(result);
 
-		// Create a file in it
-		const testFile = 'test.txt';
-		fs.writeFileSync(path.join(nonGitDir, testFile), 'content\n');
-
-		const result = await git_blame.execute({ file: testFile }, {
-			directory: nonGitDir,
-		} as never);
-		const parsed = JSON.parse(result);
-
-		fs.rmSync(nonGitDir, { recursive: true, force: true });
-
-		// Should get a git error since the directory is not a git repo
-		expect(parsed.error).toMatch(
-			/not a git repository|git execution failed|file not tracked/i,
-		);
+			// Should get a git error since the directory is not a git repo
+			expect(parsed.error).toMatch(
+				/not a git repository|git execution failed|file not tracked/i,
+			);
+		} finally {
+			// rmSync, not removeTreeWithRetry: this file's mock.module('node:fs')
+			// stubs existsSync to true, which that helper's final check reads.
+			fs.rmSync(nonGitDir, { recursive: true, force: true, maxRetries: 5 });
+		}
 	});
 
 	test('output is capped at 500 lines', async () => {
