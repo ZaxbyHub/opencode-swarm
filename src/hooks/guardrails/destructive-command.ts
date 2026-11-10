@@ -1701,6 +1701,13 @@ function matchEnvChdir(words: string[]): DcChdirMatch {
 		// the command the same way the split splice does: env's own option
 		// words are dropped (detection-neutral), assignments are kept.
 		if (!dashAliasConsumed || rest.length === 0) return null;
+		// #3616 (review round 9, pre-existing): a bare `time` command word
+		// must NOT be re-emitted — at a rewrite's subshell start it re-enters
+		// the bash-keyword grammar and the unwrap consumes `-o FILE` as the
+		// timed command, dropping the launcher write. Left alone, the
+		// detector's env walk consumes the dash alias and resolves the
+		// external `time` leaf, emitting the launcher_write.
+		if (rest[0] === 'time') return null;
 		return {
 			kind: 'static',
 			dir: '.',

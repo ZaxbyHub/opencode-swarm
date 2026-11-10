@@ -3333,7 +3333,14 @@ function detectorCommandPartsFromWordsBounded(
 					cursor++;
 					continue;
 				}
-				if (token.startsWith('-') && token !== '-') {
+				// A lone `-` is env's obsolete -i spelling (an option, never
+				// the command) — consume it so the wrapped command after it
+				// (`env - time -o FILE …`) still resolves as the leaf.
+				if (token === '-') {
+					cursor++;
+					continue;
+				}
+				if (token.startsWith('-')) {
 					cursor++;
 					if (envFlagConsumesNextWord(token) && cursor < suffix.length)
 						cursor++;
@@ -3677,6 +3684,12 @@ function detectLauncherWrites(cmd: unknown): WriteTarget[] {
 					while (next < suffix.length) {
 						const token = suffix[next];
 						if (token === undefined) break;
+						// A lone `-` is env's -i alias (an option, never the
+						// command): consume it and keep hopping (#3616).
+						if (token === '-') {
+							next += 1;
+							continue;
+						}
 						if (token === '--') {
 							next += 1;
 							break;
@@ -3720,7 +3733,14 @@ function detectLauncherWrites(cmd: unknown): WriteTarget[] {
 					cursor++;
 					continue;
 				}
-				if (token.startsWith('-') && token !== '-') {
+				// A lone `-` is env's -i alias (an option, never the
+				// command) — consume it so the wrapped command resolves
+				// (#3616).
+				if (token === '-') {
+					cursor++;
+					continue;
+				}
+				if (token.startsWith('-')) {
 					cursor++;
 					if (envFlagConsumesNextWord(token) && cursor < suffix.length)
 						cursor++;

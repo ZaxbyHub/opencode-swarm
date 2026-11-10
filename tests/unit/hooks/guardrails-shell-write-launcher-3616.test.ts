@@ -308,3 +308,35 @@ describe('#3616 env dash alias without -S: the post-dash command is judged', () 
 		);
 	}
 });
+
+describe('#3616 env dash alias with a launcher command: the write is kept', () => {
+	// Review round 9 (pre-existing, fixed here): `env - time -o FILE` lost
+	// the launcher-owned write — the rewrite re-emitted a bare `time` that
+	// re-entered the bash-keyword grammar (unwrap ate `-o FILE`), and the
+	// detector's env walk stopped at the dash. The walk now consumes the
+	// dash and the rewrite leaves `time` to the original analysis.
+	for (const command of [
+		`env - time -o ../t.txt true`,
+		`env -u X - time -o ../t.txt true`,
+		`env - \\time -o ../t.txt true`,
+	]) {
+		test(
+			`${command} is denied`,
+			async () => {
+				const r = await gate(command);
+				expect(r.verdict).toBe('BLOCKED');
+				expect(r.message).toMatch(AUTHORITY_DENY);
+			},
+			T,
+		);
+	}
+	test(
+		'control: env - time -o src/t.txt true is admitted',
+		async () => {
+			expect((await gate(`env - time -o src/t.txt true`)).verdict).toBe(
+				'ADMITTED',
+			);
+		},
+		T,
+	);
+});
