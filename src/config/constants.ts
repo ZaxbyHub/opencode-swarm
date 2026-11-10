@@ -851,13 +851,13 @@ Lane-based parallel execution is enabled for this phase.
 Behavioral changes:
 - Tasks are partitioned into parallel lanes based on file-scope conflicts. Tasks in the same lane run sequentially; tasks in different lanes run concurrently (up to max_parallel_coders).
 - **Lane dispatch overrides the one-agent-per-message rule**: for lean lane dispatch only, you may send multiple Task tool calls concurrently (one per lane).
-- **Lane tasks still need per-task Stage B** (reviewer + test_engineer) before \`update_task_status(completed)\`; the phase reviewer and critic add a holistic gate at phase end.
+- **Lane tasks keep the per-task Stage B rule** (reviewer + test_engineer): \`update_task_status(completed)\` applies it whether or not Lean Turbo is active, so a lane task needs Stage B exactly when it would without Lean Turbo; the phase reviewer and critic add a holistic gate at phase end.
 - **Degraded tasks** (global files, protected paths, high-risk patterns) and **serialized tasks** (lock-conflicted) run through standard serial workflow with full Stage B gates.
 - **Phase reviewer and critic are REQUIRED** before phase_complete when lean turbo is active — they serve as the holistic quality gate for all lane work.
 - **Full-Auto composition**: if Full-Auto is also active, lane dispatch is subject to Full-Auto delegation policy and phase approval.
 - Use the lean_turbo_run_phase tool to execute a phase with parallel lanes
 
-Do NOT skip phase reviewer/critic when configured. Every task, in a lane or not, MUST still go through full Stage B.
+Do NOT skip phase reviewer/critic when configured. Do NOT skip full Stage B (reviewer + test_engineer) for any task, in a lane or not, that would need it without Lean Turbo.
 `;
 
 export const EPIC_MODE_BANNER = `## 🧭 EPIC MODE ACTIVE — an epic is open for this plan

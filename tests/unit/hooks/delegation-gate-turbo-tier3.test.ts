@@ -2,8 +2,10 @@
  * Turbo's Stage A bypass decides Tier 3 by the task's files, not its id.
  *
  * Tier 3 is the security-sensitive file class (src/parallel/tier3-classifier.ts;
- * the architect prompt's TIER 3 rules), the same rule update_task_status
- * applies to Turbo's Stage B bypass. The gate guessed it from the task id
+ * the architect prompt's TIER 3 rules), the same classifier update_task_status
+ * consults in its legacy Turbo Stage B bypass branches (they can never
+ * admit a completion: the locked check always passes fallbackDir, see #3165
+ * section E). The gate guessed it from the task id
  * (`startsWith('3.')`): every phase-3 task lost the bypass, and a task in any
  * other phase that touches auth/crypto/secret files kept it.
  */

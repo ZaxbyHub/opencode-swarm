@@ -1,0 +1,67 @@
+# Docs: exact Stage B wording for Turbo and Lean Turbo, and release notes that were never published
+
+## Stage B under Turbo and Lean Turbo
+
+The Turbo and Lean Turbo docs said Stage B (reviewer + test_engineer) runs for
+"every task", and the Lean Turbo banner told the architect that every task must
+go through full Stage B. The runtime rule is narrower and the same in every
+mode: `update_task_status(completed)` applies one Stage B rule whether or not
+Turbo or Lean Turbo is active. A task that does not need Stage B without Turbo
+(for example, a task in a phase whose `required_agents` leave out the reviewer)
+does not need it with Turbo either. Neither mode ever skips Stage B for a task
+that needs it.
+
+`docs/modes.md`, the README mode table and the Lean Turbo banner now say that.
+The banner is architect prompt text; its instruction is unchanged in substance
+(do not skip Stage B for a task that needs it); it no longer claims more than
+the gate enforces. The `turbo_mode` config description, the `/swarm turbo`
+README row and the README mode table get the same correction.
+
+## Truncated replies fail closed (notes from #3172, not published until now)
+
+These notes describe a fix that shipped in v7.192.3 but were left out of every
+release since.
+
+When a reply is cut off by the output limit, the host records it on the
+assistant message, either as `info.error` set to `MessageOutputLengthError` or
+as `finish: "length"` with the partial text and no `info.error` (the shape a
+static check of the OpenCode 1.18.35 binary points to; not yet confirmed
+against a live truncated reply). The shared provider-error reader
+(`readProviderMessageError`) reports both, the `finish` shape since v7.192.4.
+Every consumer that reads a reply through it treats a cut-off reply as a failed
+dispatch: the full-auto oversight critic and intercept, the curator and
+skill-improver delegates, the ephemeral agent dispatcher, the mutation-test
+generator and the Lean integration critic. A reply truncated right after
+`VERDICT: APPROVED` therefore no longer reads as an approval. A
+`content-filter` finish is handled the same way.
+
+Only the Lean lane runner exempts a cut-off or content-filtered reply, so a
+lane keeps the behavior it had before it started reading `info.error`.
+
+The v7.192.4 notes already describe the `finish` half; this section is the
+original #3172 change those notes build on.
+
+Known gap: on OpenCode 2 the v2 adapter does not pass `finish` through yet, so
+only the `info.error` shape fails closed there (tracked in #3165 G.8).
+
+## Correction to the v7.192.3 Lean runner notes
+
+The v7.192.3 notes say that only rate-limit, quota and server errors
+("429, 402, 5xx") fail over to the next model. The exact rule: a lane fails
+over when the formatted provider error reads as transient. That covers, for
+example, 429 and 402, quota and rate-limit messages, timeouts, network errors,
+an unavailable model, and the statuses 408, 500, 502, 503, 504 and 529. A lane
+dispatch timeout and a refused lane scope handshake never fail over. Other 5xx statuses (501, 505) fail over only when their message reads
+as transient, for example "server error" or "overloaded". An authentication or
+configuration refusal (403, `ProviderAuthError`) fails the lane without failing
+over, unless its message text itself reads as transient (tracked in #3165 G.6).
+
+## Tests
+
+#3171 added a complement regression suite for the Lean runner's provider-error
+handling (`tests/unit/turbo/lean/runner-provider-message-error-3162.test.ts`).
+It is test-only; its own fragment is folded into this one.
+
+## Migration
+
+None.

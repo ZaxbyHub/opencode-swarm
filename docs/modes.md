@@ -17,9 +17,9 @@ All QA gates run normally. Every task passes through reviewer + test_engineer be
 
 ### Turbo
 
-Skips phase_complete Gates 1–5 (completion-verify, drift-verifier, hallucination-guard, mutation-gate, phase-council) and lets a non-Tier-3 task whose planned `files_touched` are known be re-dispatched to the coder before Stage A passes (a task with unknown or empty `files_touched` keeps the block). Stage A and Stage B (reviewer + test_engineer) are still required for every task: `update_task_status(completed)` checks them whether or not Turbo is active.
+Skips phase_complete Gates 1–5 (completion-verify, drift-verifier, hallucination-guard, mutation-gate, phase-council) and lets a non-Tier-3 task whose planned `files_touched` are known be re-dispatched to the coder before Stage A passes (a task with unknown or empty `files_touched` keeps the block). Turbo does not change when Stage A and Stage B (reviewer + test_engineer) are required: `update_task_status(completed)` applies the same rule whether or not Turbo is active, so a task needs them exactly when it would without Turbo.
 
-**Turbo does NOT relax Tier 3 files.** Security-sensitive paths keep the coder re-dispatch block until Stage A passes, even when Turbo is on (the only per-task gate Turbo relaxes; Stage B runs for every task regardless):
+**Turbo does NOT relax Tier 3 files.** Security-sensitive paths keep the coder re-dispatch block until Stage A passes, even when Turbo is on (the only per-task gate Turbo relaxes; Turbo does not change the Stage B rule):
 
 - `architect*.ts`, `delegation*.ts`, `guardrails*.ts`, `adversarial*.ts`, `sanitiz*.ts`
 - `auth*`, `permission*`, `crypto*`, `secret*`, `security*.ts`
@@ -330,13 +330,13 @@ Key characteristics:
 - **Parallel coder execution** — multiple coders dispatched simultaneously, each working in their own declared-scope lane
 - **File-conflict partitioning** — tasks assigned to lanes based on declared scopes and file conflict analysis
 - **Config-driven** — enabled via `turbo.strategy: "lean"` in config; `/swarm turbo lean on` activates it for the session
-- **Stage B model** — every task, in a lane or not, still needs per-task Stage B (reviewer + test_engineer) before `update_task_status(completed)`; the phase reviewer and critic add a holistic gate at phase end.
+- **Stage B model** — Lean Turbo does not change the per-task Stage B rule: a task, in a lane or not, needs Stage B (reviewer + test_engineer) before `update_task_status(completed)` exactly when it would without Lean Turbo; the phase reviewer and critic add a holistic gate at phase end.
 
 ### Comparison with Standard Turbo
 
 | Aspect | Standard Turbo | Lean Turbo |
 |--------|---------------|------------|
-| Stage B | Required for every task | Required for every task; phase-end reviewer/critic add a holistic gate |
+| Stage B | Same per-task rule as without Turbo | Same per-task rule as without Turbo; phase-end reviewer/critic add a holistic gate |
 | Coder execution | Single coder | Multiple coders in parallel lanes |
 | Activation | `/swarm turbo on` (session toggle) | `turbo.strategy: "lean"` in config + `/swarm turbo lean on` |
 | Scope handling | No scope analysis | Partitioned by file-conflict analysis |
@@ -471,7 +471,7 @@ Phase-level evidence is written to `.swarm/evidence/{phase}/lean-turbo-phase.jso
 - **Phase reviewer** — dispatched with combined phase diff; read-only verification that all lane tasks are complete and consistent
 - **Phase critic** — dispatched with boundary review; read-only verification of lane phase boundaries and cross-lane dependencies
 - Both are **required** at `phase_complete` when configured — absence blocks the phase gate
-- These add a holistic quality gate over all lane work; each task still gets its own Stage B.
+- These add a holistic quality gate over all lane work; per-task Stage B still applies to each task exactly as it would without Lean Turbo.
 
 ### Recovery from Paused/Blocked
 
@@ -488,7 +488,7 @@ Inspect the file to see:
 
 **Degraded tasks** — when Lean Turbo cannot place a task in a parallel lane, it falls back to standard serial flow:
 - Degradation reasons: global file conflict, protected path, unknown scope, invalid scope
-- Degraded tasks do **NOT** run in a parallel lane — they run one at a time, with Stage B (reviewer + test_engineer) like every task
+- Degraded tasks do **NOT** run in a parallel lane — they run one at a time, under the same per-task Stage B rule (reviewer + test_engineer) as every other task
 - `degradation_summary` shown in status when all tasks degraded
 
 **Full-Auto blocking** — Full-Auto state can block the Lean Turbo runner:

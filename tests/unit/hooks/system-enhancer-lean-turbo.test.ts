@@ -128,11 +128,20 @@ describe('System Enhancer — Lean Turbo Banner Delivery (#2759)', () => {
 			);
 		});
 
-		it('states lane tasks still need per-task Stage B', () => {
+		it('states lane tasks keep the per-task Stage B rule', () => {
 			expect(LEAN_TURBO_BANNER).toContain(
-				'Lane tasks still need per-task Stage B',
+				'Lane tasks keep the per-task Stage B rule',
+			);
+			expect(LEAN_TURBO_BANNER).toContain(
+				'needs Stage B exactly when it would without Lean Turbo',
 			);
 			expect(LEAN_TURBO_BANNER).not.toContain('skip per-task Stage B');
+			// #3165: Stage B is not unconditional (a phase whose required_agents
+			// leave out the reviewer skips it in every mode), so the banner must
+			// not claim every task needs it.
+			expect(LEAN_TURBO_BANNER).not.toContain(
+				'MUST still go through full Stage B',
+			);
 		});
 	});
 
