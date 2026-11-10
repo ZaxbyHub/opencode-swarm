@@ -82,8 +82,12 @@ The session-start and trajectory stores already refused such a root (#3146);
 they and the new guards share one helper, `isNonBlankAbsoluteDirectory` /
 `isBlankDirectory` in `src/utils/path-security.ts`.
 
-A caller that passes a non-blank root sees no change. The guards only
-refuse a blank root; a relative root still resolves as before (see below).
+A caller that passes a non-blank absolute root sees no change. Most guards
+refuse only a blank root, so a relative root still resolves there as before
+(see below). The read-only surfaces listed above, `/swarm diagnose` and the
+consensus corpus readers, also refuse a relative root, as the PRM trajectory
+store has since #3146: a relative root resolves against the cwd just like a
+blank one, and their only callers pass the host's project directory.
 
 ## Known caveats
 

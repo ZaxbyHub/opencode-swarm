@@ -30,7 +30,10 @@ import {
 	CORE_EVENT_NO_STORE,
 } from '../../../src/events/core-events.js';
 import { recordSteeringConsumed } from '../../../src/hooks/steering-consumed.js';
-import { getDiagnoseData } from '../../../src/services/diagnose-service.js';
+import {
+	getDiagnoseData,
+	handleDiagnoseCommand,
+} from '../../../src/services/diagnose-service.js';
 import { writeSnapshot } from '../../../src/session/snapshot-writer.js';
 import {
 	flushAndDrainTelemetry,
@@ -143,6 +146,15 @@ describe('getDiagnoseData — regression: a blank or relative root diagnosed the
 			expect(result.totalCount).toBe(1);
 			expect(result.checks[0]?.name).toBe('Project directory');
 			expect(result.checks[0]?.status).toBe('❌');
+		}
+		expect(cwdSwarmCreated()).toBe(false);
+	});
+
+	test('/swarm diagnose renders the single failing check for a blank or relative root', async () => {
+		for (const bad of [...BLANKS, 'relative/proj']) {
+			const out = await handleDiagnoseCommand(bad, []);
+			expect(out).toContain('❌ **Project directory**');
+			expect(out).toContain('0/1 checks passed');
 		}
 		expect(cwdSwarmCreated()).toBe(false);
 	});
