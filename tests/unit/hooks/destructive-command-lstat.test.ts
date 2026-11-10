@@ -604,9 +604,9 @@ describe('lstat ancestor walk — real symlink detection', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Group 6: block_destructive_commands: false bypasses all guards
+// Group 6: block_destructive_commands: false — destructive arm bypassed; rm reaches the write gate (#3616 item 10)
 // ---------------------------------------------------------------------------
-describe('block_destructive_commands: false bypasses all guards', () => {
+describe('block_destructive_commands: false — destructive arm bypassed', () => {
 	test('mklink /J with external target allowed when flag is false', async () => {
 		const externalTarget =
 			process.platform === 'win32'

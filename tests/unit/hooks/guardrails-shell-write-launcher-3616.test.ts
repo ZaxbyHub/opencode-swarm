@@ -185,3 +185,57 @@ describe('#3616 item 7: env interposed between launchers', () => {
 		);
 	}
 });
+
+describe('#3616 env split-string family: every spelling reaches the payload walk', () => {
+	// GNU env splits the -S/--split-string payload into argv in place of the
+	// option for EVERY spelling (final-critic round 2, F1). A `-C ..` payload
+	// moves the wrapped write to the workspace parent, so each spelling must
+	// deny; a payload with no chdir is judged like the canonical `-S` form.
+	const PAYLOAD_CHDIR = `-C .. sh -c 'echo x > src/a'`;
+	const DENIED: string[] = [
+		`env "--split-string=${PAYLOAD_CHDIR}"`,
+		`env "--split=${PAYLOAD_CHDIR}"`,
+		`env --spl "${PAYLOAD_CHDIR}"`,
+		`env "-S${PAYLOAD_CHDIR}"`,
+		`env "-iS${PAYLOAD_CHDIR}"`,
+		`env -S "${PAYLOAD_CHDIR}"`,
+		`env -S'tee ../outside.txt'`,
+		`env --split='tee ../outside.txt'`,
+		`env -C .. -S'tee src/a'`,
+	];
+	for (const command of DENIED) {
+		test(
+			`${command} is denied`,
+			async () => {
+				const r = await gate(command);
+				expect(r.verdict).toBe('BLOCKED');
+				expect(r.message).toMatch(AUTHORITY_DENY);
+			},
+			T,
+		);
+	}
+	test(
+		'a nested split spelling inside a payload fails closed',
+		async () => {
+			const r = await gate(`env -S '-S tee src/ok.txt'`);
+			expect(r.verdict).toBe('BLOCKED');
+			expect(r.message).toMatch(PARSE_DENY);
+		},
+		T,
+	);
+	for (const command of [
+		`env -S 'tee src/ok.txt'`,
+		`env "--split=-C src tee ok.txt"`,
+		`env -C src -S 'tee ok.txt'`,
+		// env -S passes `>` through as a literal argv word (no redirect).
+		`env -S'echo x > ../o'`,
+	]) {
+		test(
+			`control: ${command} is admitted`,
+			async () => {
+				expect((await gate(command)).verdict).toBe('ADMITTED');
+			},
+			T,
+		);
+	}
+});

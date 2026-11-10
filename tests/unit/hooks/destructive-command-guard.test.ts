@@ -267,7 +267,7 @@ describe('destructive command guard', () => {
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
 			const input = makeBashInput('test-session', 'rm -rf /');
 			const run = hooks.toolBefore(input, makeBashOutput('rm -rf /'));
-			await expect(run).rejects.toThrow(/SCOPE_NOT_DECLARED|WRITE/);
+			await expect(run).rejects.toThrow(/SCOPE_NOT_DECLARED|WRITE BLOCKED/);
 		});
 
 		test('git push --force allowed when block_destructive_commands is false', async () => {

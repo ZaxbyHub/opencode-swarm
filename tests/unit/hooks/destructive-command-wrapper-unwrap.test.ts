@@ -516,7 +516,7 @@ describe('wrapper unwrapping and normalization — adversarial', () => {
 			const command = 'rm -rf /';
 			const input = makeBashInput('test-session');
 			const run = hooks.toolBefore(input, makeBashOutput(command));
-			await expect(run).rejects.toThrow(/SCOPE_NOT_DECLARED|WRITE/);
+			await expect(run).rejects.toThrow(/SCOPE_NOT_DECLARED|WRITE BLOCKED/);
 		});
 
 		test('cmd /c "rmdir /s /q C:\\target" allowed when block_destructive_commands is false', async () => {

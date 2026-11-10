@@ -1432,6 +1432,44 @@ function matchChdirWrapperSegment(segment: string): DcChdirMatch {
 function matchEnvChdir(words: string[]): DcChdirMatch {
 	let cursor = 1;
 	let dir: string | undefined;
+	// #3616 F1 (final-critic round 2): GNU env (and BSD -S) splits the
+	// -S/--split-string payload into argv and processes those words as its
+	// own arguments in place of the option — for EVERY spelling (exact
+	// separate/glued, unambiguous abbreviation, cluster-last, glued cluster
+	// `-SPAYLOAD`). Each spelling recurses through this one path; a nested
+	// split spelling inside a payload fails closed. A chdir captured BEFORE
+	// the split option carries into the payload walk. When the payload
+	// carries no chdir at all, a NON-canonical spelling is rewritten to the
+	// canonical `env -S 'PAYLOAD' …` form the write detector's env walk
+	// already analyzes (it splits the payload as literal argv, so
+	// `env -S 'tee ../x'` is judged while a payload `>` stays a literal
+	// argument, exactly as env passes it).
+	const recurseSplit = (
+		payload: string,
+		restIndex: number,
+		canonical: boolean,
+	): DcChdirMatch => {
+		const splitWords = shellSplitWords(payload);
+		// Only env's own option region (before the command word) can carry
+		// a nested split spelling; the wrapped command's flags are its own.
+		for (const w of splitWords) {
+			if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(w)) continue;
+			if (!w.startsWith('-') || w === '-') break;
+			if (w === '--') break;
+			if (w.startsWith('--s') || /^-[A-Za-z0-9]*S/.test(w)) {
+				return { kind: 'failClosed' };
+			}
+		}
+		const after = words.slice(restIndex);
+		const carried = dir !== undefined ? ['-C', dir] : [];
+		const inner = matchEnvChdir(['env', ...carried, ...splitWords, ...after]);
+		if (inner !== null || canonical) return inner;
+		return {
+			kind: 'static',
+			dir: '.',
+			innerWords: ['env', '-S', payload, ...after],
+		};
+	};
 	while (cursor < words.length) {
 		const token = words[cursor];
 		if (token === undefined) break;
@@ -1456,14 +1494,7 @@ function matchEnvChdir(words: string[]): DcChdirMatch {
 			if (token === '--split-string') {
 				const arg = words[cursor + 1];
 				if (arg === undefined) return { kind: 'failClosed' };
-				// GNU env splits the payload into argv and processes those as
-				// its own arguments in place of the option.
-				const splitWords = shellSplitWords(arg);
-				if (splitWords.some((w) => w === '--split-string' || w === '-S')) {
-					return { kind: 'failClosed' };
-				}
-				const merged = [...splitWords, ...words.slice(cursor + 2)];
-				return matchEnvChdir(['env', ...merged]);
+				return recurseSplit(arg, cursor + 2, false);
 			}
 			// Other long flags: arg-taking when unambiguously abbreviating one
 			// (mirrors envFlagConsumesNextWord); otherwise argument-less.
@@ -1491,6 +1522,14 @@ function matchEnvChdir(words: string[]): DcChdirMatch {
 					cursor += 1;
 					continue;
 				}
+				if (
+					abbrev.length >= 3 &&
+					gluedMatch.length === 1 &&
+					gluedMatch[0] === '--split-string'
+				) {
+					// `--split-string=P` and abbreviations `--split=P`/`--spl=P`.
+					return recurseSplit(token.slice(eq + 1), cursor + 1, false);
+				}
 				if (abbrev.length >= 3 && gluedMatch.length === 1) {
 					cursor += 1;
 					continue;
@@ -1502,6 +1541,12 @@ function matchEnvChdir(words: string[]): DcChdirMatch {
 					const arg = words[cursor + 1];
 					if (arg === undefined) return { kind: 'failClosed' };
 					dir = arg;
+				}
+				if (unambiguous[0] === '--split-string') {
+					// Separate-argument abbreviation `--split P` / `--s P`.
+					const arg = words[cursor + 1];
+					if (arg === undefined) return { kind: 'failClosed' };
+					return recurseSplit(arg, cursor + 2, false);
 				}
 				cursor += 2;
 				continue;
@@ -1535,18 +1580,19 @@ function matchEnvChdir(words: string[]): DcChdirMatch {
 					const arg = words[cursor + 1];
 					if (arg === undefined) return { kind: 'failClosed' };
 					if (chars[firstArgIndex] === 'S') {
-						// GNU env splits the -S payload into argv and processes
-						// those as its own arguments in place of the option.
-						const splitWords = shellSplitWords(arg);
-						if (splitWords.some((w) => w === '--split-string' || w === '-S')) {
-							return { kind: 'failClosed' };
-						}
-						const merged = [...splitWords, ...words.slice(cursor + 2)];
-						return matchEnvChdir(['env', ...merged]);
+						return recurseSplit(arg, cursor + 2, token === '-S');
 					}
 					if (chars[firstArgIndex] === 'C') dir = arg;
 					cursor += 2;
 					continue;
+				}
+				if (chars[firstArgIndex] === 'S') {
+					// Glued cluster payload: `-SPAYLOAD` / `-iSPAYLOAD`.
+					return recurseSplit(
+						chars.slice(firstArgIndex + 1).join(''),
+						cursor + 1,
+						false,
+					);
 				}
 				if (chars[firstArgIndex] === 'C') {
 					dir = chars.slice(firstArgIndex + 1).join('');
@@ -1560,6 +1606,9 @@ function matchEnvChdir(words: string[]): DcChdirMatch {
 		break; // the command word
 	}
 	const rest = words.slice(cursor);
+	// A split payload with no chdir needs no rewrite: the detector's own
+	// env walk already analyzes it (`env -S 'tee ../x'` is denied at base),
+	// and env passes payload text such as `>` through as literal argv.
 	if (dir === undefined) return null;
 	if (dir === '' || dir.includes('\0')) return { kind: 'failClosed' };
 	if (rest.length === 0) {
