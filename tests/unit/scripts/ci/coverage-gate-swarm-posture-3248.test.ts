@@ -76,10 +76,10 @@ describe('coverage-gate checkout-drift posture (issue #3248)', () => {
 	});
 
 	test('the posture trade-off stays tied to its retirement plan (#3165-A, PRR-036)', () => {
-		// The pre-creation disables the drift tripwire's creation enforcement
-		// for coverage shards until #3165-A retires the writers; the gate
-		// comment must keep naming that plan so removing the acknowledgment
-		// (or the trade-off itself) fails a pin.
+		// The pre-creation skips the drift tripwire's creation check on
+		// coverage shards; since #3165-A a write inside .swarm/ fails anyway.
+		// The gate comment must keep naming #3165-A so removing that
+		// acknowledgment fails a pin.
 		const postureComment = script.indexOf('Checkout-drift posture alignment');
 		expect(postureComment).toBeGreaterThan(-1);
 		expect(script.slice(postureComment, postureComment + 1600)).toContain(

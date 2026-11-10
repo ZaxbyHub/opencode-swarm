@@ -12,13 +12,14 @@
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
-import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { readCoreEvents } from '../../../src/events/core-events.js';
 import {
 	createSteeringConsumedHook,
 	recordSteeringConsumed,
 } from '../../../src/hooks/steering-consumed.js';
+import { enterCwdSandbox } from '../../helpers/cwd-sandbox';
+import { canonicalMkdtemp, removeTreeWithRetry } from '../../helpers/tmpdir';
 
 function readEventLines(dir: string): string[] {
 	return readCoreEvents(dir).text.trim().split('\n');
@@ -30,20 +31,14 @@ describe('steering-consumed adversarial security tests', () => {
 	let eventsPath: string;
 
 	beforeEach(() => {
-		// Create a temporary directory for each test
-		tempDir = fs.mkdtempSync(path.join(tmpdir(), 'swarm-test-'));
+		tempDir = canonicalMkdtemp('swarm-test-');
 		swarmDir = path.join(tempDir, '.swarm');
 		fs.mkdirSync(swarmDir, { recursive: true });
 		eventsPath = path.join(swarmDir, 'events.jsonl');
 	});
 
 	afterEach(() => {
-		// Clean up temp directory
-		try {
-			fs.rmSync(tempDir, { recursive: true, force: true });
-		} catch {
-			// Ignore cleanup errors
-		}
+		removeTreeWithRetry(tempDir);
 	});
 
 	describe('1. Path traversal via directiveId', () => {
@@ -87,7 +82,7 @@ describe('steering-consumed adversarial security tests', () => {
 			recordSteeringConsumed(maliciousDir, 'test-id');
 
 			// File should NOT be created outside .swarm
-			const outsidePath = path.join(tmpdir(), '.swarm', 'events.jsonl');
+			const outsidePath = path.join(tempDir, '..', '.swarm', 'events.jsonl');
 			expect(fs.existsSync(outsidePath)).toBe(false);
 		});
 
@@ -432,16 +427,21 @@ describe('steering-consumed adversarial security tests', () => {
 	});
 
 	describe('10. Empty string directory', () => {
+		// A blank root resolves `.swarm/` against cwd: keep it out of the checkout.
+		let restoreCwd: () => void;
+		beforeEach(() => {
+			restoreCwd = enterCwdSandbox('steering-blank-dir-').restore;
+		});
+		afterEach(() => restoreCwd());
+
 		it('should handle empty string as directory', () => {
 			recordSteeringConsumed('', 'test-id');
-
 			// Should not crash (caught by try/catch)
 			expect(true).toBe(true);
 		});
 
 		it('should handle whitespace-only directory', () => {
 			recordSteeringConsumed('   \t\n   ', 'test-id');
-
 			// Should not crash (caught by try/catch)
 			expect(true).toBe(true);
 		});

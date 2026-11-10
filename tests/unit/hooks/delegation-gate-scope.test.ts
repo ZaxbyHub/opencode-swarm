@@ -6,6 +6,18 @@ import {
 } from '../../../src/hooks/delegation-gate';
 import { resolveCoderScopeSources } from '../../../src/scope/scope-binding';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
+import { canonicalMkdtemp, removeTreeWithRetry } from '../../helpers/tmpdir';
+
+// ensureAgentSession (reached through the hook) appends to
+// `<directory>/.swarm/session/session-start.jsonl`; a per-test project dir
+// keeps that write out of the plugin checkout.
+let projectDir: string;
+beforeEach(() => {
+	projectDir = canonicalMkdtemp('dg-scope-');
+});
+afterEach(() => {
+	removeTreeWithRetry(projectDir);
+});
 
 function makeConfig(overrides?: Record<string, unknown>): PluginConfig {
 	return {
@@ -56,7 +68,7 @@ describe('delegation-gate: declaredCoderScope extraction (Task 5.3)', () => {
 	describe('FILE: directive extraction', () => {
 		it('should extract single FILE: directive into declaredCoderScope', async () => {
 			const config = makeConfig();
-			const hook = createDelegationGateHook(config, process.cwd());
+			const hook = createDelegationGateHook(config, projectDir);
 
 			const messages = makeMessages(
 				'mega_coder\nTASK: 1.1\nFILE: src/foo.ts\nINPUT: do stuff',
@@ -70,7 +82,7 @@ describe('delegation-gate: declaredCoderScope extraction (Task 5.3)', () => {
 
 		it('should set declaredCoderScope to null when no FILE: directives present', async () => {
 			const config = makeConfig();
-			const hook = createDelegationGateHook(config, process.cwd());
+			const hook = createDelegationGateHook(config, projectDir);
 
 			const messages = makeMessages(
 				'mega_coder\nTASK: 1.1\nINPUT: do stuff',
@@ -84,7 +96,7 @@ describe('delegation-gate: declaredCoderScope extraction (Task 5.3)', () => {
 
 		it('should extract multiple different FILE: directives into array', async () => {
 			const config = makeConfig();
-			const hook = createDelegationGateHook(config, process.cwd());
+			const hook = createDelegationGateHook(config, projectDir);
 
 			const messages = makeMessages(
 				'mega_coder\nTASK: 1.1\nFILE: src/auth.ts\nFILE: src/login.ts\nFILE: src/session.ts\nINPUT: do stuff',
@@ -102,7 +114,7 @@ describe('delegation-gate: declaredCoderScope extraction (Task 5.3)', () => {
 
 		it('should deduplicate duplicate FILE: directives', async () => {
 			const config = makeConfig();
-			const hook = createDelegationGateHook(config, process.cwd());
+			const hook = createDelegationGateHook(config, projectDir);
 
 			const messages = makeMessages(
 				'mega_coder\nTASK: 1.1\nFILE: src/foo.ts\nFILE: src/bar.ts\nFILE: src/foo.ts\nINPUT: do stuff',
@@ -118,7 +130,7 @@ describe('delegation-gate: declaredCoderScope extraction (Task 5.3)', () => {
 
 		it('should trim leading/trailing whitespace from file paths', async () => {
 			const config = makeConfig();
-			const hook = createDelegationGateHook(config, process.cwd());
+			const hook = createDelegationGateHook(config, projectDir);
 
 			const messages = makeMessages(
 				'mega_coder\nTASK: 1.1\nFILE:   src/foo.ts  \nFILE:    bar.ts\nINPUT: do stuff',
@@ -134,7 +146,7 @@ describe('delegation-gate: declaredCoderScope extraction (Task 5.3)', () => {
 	describe('non-coder delegation scenarios', () => {
 		it('should NOT set declaredCoderScope for reviewer delegation', async () => {
 			const config = makeConfig();
-			const hook = createDelegationGateHook(config, process.cwd());
+			const hook = createDelegationGateHook(config, projectDir);
 
 			const messages = makeMessages(
 				'mega_reviewer\nTASK: 1.1\nFILE: src/foo.ts\nINPUT: review stuff',
@@ -148,7 +160,7 @@ describe('delegation-gate: declaredCoderScope extraction (Task 5.3)', () => {
 
 		it('should NOT set declaredCoderScope for test_engineer delegation', async () => {
 			const config = makeConfig();
-			const hook = createDelegationGateHook(config, process.cwd());
+			const hook = createDelegationGateHook(config, projectDir);
 
 			const messages = makeMessages(
 				'mega_test_engineer\nTASK: 1.1\nFILE: src/foo.ts\nINPUT: run tests',
@@ -162,7 +174,7 @@ describe('delegation-gate: declaredCoderScope extraction (Task 5.3)', () => {
 
 		it('should NOT set declaredCoderScope when no TASK: line present (no task ID)', async () => {
 			const config = makeConfig();
-			const hook = createDelegationGateHook(config, process.cwd());
+			const hook = createDelegationGateHook(config, projectDir);
 
 			const messages = makeMessages(
 				'mega_coder\nFILE: src/foo.ts\nINPUT: do stuff',
@@ -177,7 +189,7 @@ describe('delegation-gate: declaredCoderScope extraction (Task 5.3)', () => {
 
 		it('should NOT set declaredCoderScope when coder without task ID and with FILE:', async () => {
 			const config = makeConfig();
-			const hook = createDelegationGateHook(config, process.cwd());
+			const hook = createDelegationGateHook(config, projectDir);
 
 			// No TASK: line at all - this is a coder delegation pattern but missing task ID
 			const messages = makeMessages(
@@ -194,7 +206,7 @@ describe('delegation-gate: declaredCoderScope extraction (Task 5.3)', () => {
 	describe('regex boundary conditions', () => {
 		it('should NOT match inline FILE: (not at line start)', async () => {
 			const config = makeConfig();
-			const hook = createDelegationGateHook(config, process.cwd());
+			const hook = createDelegationGateHook(config, projectDir);
 
 			// "inline FILE:" is not at start of line
 			const messages = makeMessages(
@@ -210,7 +222,7 @@ describe('delegation-gate: declaredCoderScope extraction (Task 5.3)', () => {
 
 		it('FB-005 retains valid normalized scope entries for observe-only telemetry while strict extraction fails closed', async () => {
 			const config = makeConfig();
-			const hook = createDelegationGateHook(config, process.cwd());
+			const hook = createDelegationGateHook(config, projectDir);
 			const prompt =
 				'mega_coder\r\nTASK: 1.1\r\n  FILE: src/indented.ts (implementation target)\r\nFILE: src/indented.ts\r\nFILE: src/ambiguous.ts (annotation one) (annotation two)\r\nINPUT: do stuff';
 
@@ -234,7 +246,7 @@ describe('delegation-gate: declaredCoderScope extraction (Task 5.3)', () => {
 
 		it('should match FILE: at start of multiline string', async () => {
 			const config = makeConfig();
-			const hook = createDelegationGateHook(config, process.cwd());
+			const hook = createDelegationGateHook(config, projectDir);
 
 			const messages = makeMessages(
 				'mega_coder\nTASK: 1.1\n\nHere are the files:\nFILE: src/a.ts\nFILE: src/b.ts\n',
@@ -343,7 +355,7 @@ describe('delegation-gate: declaredCoderScope extraction (Task 5.3)', () => {
 	describe('interaction with existing functionality', () => {
 		it('should still extract declaredCoderScope without writing lastCoderDelegationTaskId', async () => {
 			const config = makeConfig();
-			const hook = createDelegationGateHook(config, process.cwd());
+			const hook = createDelegationGateHook(config, projectDir);
 
 			const messages = makeMessages(
 				'mega_coder\nTASK: Task Alpha\nFILE: src/alpha.ts',
@@ -360,7 +372,7 @@ describe('delegation-gate: declaredCoderScope extraction (Task 5.3)', () => {
 
 		it('should not affect non-architect sessions', async () => {
 			const config = makeConfig();
-			const hook = createDelegationGateHook(config, process.cwd());
+			const hook = createDelegationGateHook(config, projectDir);
 
 			// Coder agent (not architect)
 			const messages = makeMessages(
@@ -376,7 +388,7 @@ describe('delegation-gate: declaredCoderScope extraction (Task 5.3)', () => {
 
 		it('should handle empty FILE: value gracefully (not added to scope)', async () => {
 			const config = makeConfig();
-			const hook = createDelegationGateHook(config, process.cwd());
+			const hook = createDelegationGateHook(config, projectDir);
 
 			// Test with multiple FILE: lines where some are empty/whitespace-only
 			// The regex /^\s*FILE:\s*(.+)$/gm will NOT match "FILE: " alone (needs at least one char after whitespace)
@@ -395,7 +407,7 @@ describe('delegation-gate: declaredCoderScope extraction (Task 5.3)', () => {
 	describe('coder delegation pattern variations', () => {
 		it('should work with local_coder', async () => {
 			const config = makeConfig();
-			const hook = createDelegationGateHook(config, process.cwd());
+			const hook = createDelegationGateHook(config, projectDir);
 
 			const messages = makeMessages(
 				'local_coder\nTASK: 1.1\nFILE: src/local.ts',
@@ -409,7 +421,7 @@ describe('delegation-gate: declaredCoderScope extraction (Task 5.3)', () => {
 
 		it('should work with paid_coder', async () => {
 			const config = makeConfig();
-			const hook = createDelegationGateHook(config, process.cwd());
+			const hook = createDelegationGateHook(config, projectDir);
 
 			const messages = makeMessages(
 				'paid_coder\nTASK: 1.1\nFILE: src/paid.ts',
@@ -423,7 +435,7 @@ describe('delegation-gate: declaredCoderScope extraction (Task 5.3)', () => {
 
 		it('should work with simple "coder" (no prefix)', async () => {
 			const config = makeConfig();
-			const hook = createDelegationGateHook(config, process.cwd());
+			const hook = createDelegationGateHook(config, projectDir);
 
 			const messages = makeMessages(
 				'coder\nTASK: 1.1\nFILE: src/simple.ts',
@@ -437,7 +449,7 @@ describe('delegation-gate: declaredCoderScope extraction (Task 5.3)', () => {
 
 		it('should work with task_id format (e.g., "1.2.3")', async () => {
 			const config = makeConfig();
-			const hook = createDelegationGateHook(config, process.cwd());
+			const hook = createDelegationGateHook(config, projectDir);
 
 			const messages = makeMessages(
 				'mega_coder\nTASK: 1.2.3\nFILE: src/nested.ts',

@@ -23,6 +23,14 @@ function createTestFile(
 	return filePath;
 }
 
+/** Copy a real repo file into the sandbox: placeholderScan persists evidence under <directory>/.swarm, never the checkout. */
+function copyRepoFile(dir: string, rel: string): boolean {
+	const src = path.resolve(__dirname, '../../..', rel);
+	if (!fs.existsSync(src)) return false;
+	createTestFile(dir, rel, fs.readFileSync(src, 'utf-8'));
+	return true;
+}
+
 describe('placeholder_scan body-shape analysis (issue #2301)', () => {
 	let tempDir: string;
 
@@ -301,15 +309,11 @@ function f() { return {}; }
 
 	describe('real-world fixture files', () => {
 		it('scripts/check-skill-assertions.ts has zero code-stub-return findings', async () => {
-			const repoRoot = path.resolve(__dirname, '../../..');
-			const target = path.join(repoRoot, 'scripts/check-skill-assertions.ts');
-			if (!fs.existsSync(target)) {
-				// Skip if fixture not present (e.g. running outside repo layout)
-				return;
-			}
+			// Skip if fixture not present (e.g. running outside repo layout)
+			if (!copyRepoFile(tempDir, 'scripts/check-skill-assertions.ts')) return;
 			const result = await placeholderScan(
 				{ changed_files: ['scripts/check-skill-assertions.ts'] },
-				repoRoot,
+				tempDir,
 			);
 			const stubReturns = result.findings.filter(
 				(f) => f.rule_id === 'placeholder/code-stub-return',
@@ -318,14 +322,10 @@ function f() { return {}; }
 		});
 
 		it('scripts/drift-check.ts has zero code-stub-return findings', async () => {
-			const repoRoot = path.resolve(__dirname, '../../..');
-			const target = path.join(repoRoot, 'scripts/drift-check.ts');
-			if (!fs.existsSync(target)) {
-				return;
-			}
+			if (!copyRepoFile(tempDir, 'scripts/drift-check.ts')) return;
 			const result = await placeholderScan(
 				{ changed_files: ['scripts/drift-check.ts'] },
-				repoRoot,
+				tempDir,
 			);
 			const stubReturns = result.findings.filter(
 				(f) => f.rule_id === 'placeholder/code-stub-return',

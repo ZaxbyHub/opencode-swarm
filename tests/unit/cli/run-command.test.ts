@@ -1,6 +1,5 @@
 import {
 	afterAll,
-	afterEach,
 	beforeEach,
 	describe,
 	expect,
@@ -8,6 +7,7 @@ import {
 	mock,
 	spyOn,
 } from 'bun:test';
+import { useSuiteCwdSandbox } from '../../helpers/suite-cwd-sandbox';
 
 // Mock console methods BEFORE importing
 const mockConsoleLog = spyOn(console, 'log').mockImplementation(() => {});
@@ -155,7 +155,7 @@ const cliModule = require('../../../src/cli/index.js');
 const run = cliModule.run;
 
 describe('run() - CLI entry point', () => {
-	const cwd = process.cwd();
+	useSuiteCwdSandbox('run-command-'); // run() roots at process.cwd()
 
 	beforeEach(() => {
 		mockConsoleLog.mockClear();

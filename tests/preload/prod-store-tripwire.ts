@@ -46,6 +46,8 @@ if (process.env.SWARM_TEST_CHECKOUT_DRIFT_ROOT?.trim()) {
 	);
 }
 const checkoutBaseline = snapshotCheckout(repoRoot);
+/** Wait before the drift snapshot so in-flight un-awaited writes land. */
+const LATE_WRITE_SETTLE_MS = 25;
 
 afterEach(async () => {
 	await ensureTripwireGuardsArmed();
@@ -65,7 +67,16 @@ afterEach(async () => {
 //    swap (e.g. `wait`) silently converts every later consumer's retry
 //    budget to ~0 s — loud throw, silent cause — so this fails the run
 //    run-wide, not just in the leaking file.
-afterAll(() => {
+//  - late writes: bun test fires no exit/beforeExit event, so a write that
+//    lands after this hook is never seen. A fire-and-forget fs.promises chain
+//    a test started (e.g. src/health/learning-health.ts schedulePersist) can
+//    still be in flight when the last test returns; a short wait lets it land
+//    before the snapshot. A slower chain, or one waiting on a timer, can still
+//    escape: this narrows the window, it does not close it.
+afterAll(async () => {
+	await new Promise<void>((resolve) =>
+		setTimeout(resolve, LATE_WRITE_SETTLE_MS),
+	);
 	const failures: unknown[] = [];
 	try {
 		verifyRealStoresUnchanged();

@@ -18,6 +18,7 @@ import * as fs from 'node:fs';
 import * as realFs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 // Get workspace root for integration tests - this is a real git repo
 const WORKSPACE_ROOT = path.resolve(__dirname, '../../..');
@@ -418,18 +419,16 @@ describe('git_blame - integration with real git repo', () => {
 	test('handles non-git directory gracefully', async () => {
 		const { git_blame } = await import('../../../src/tools/git-blame');
 
-		// Create a temp directory that is NOT a git repo
-		const scratch = path.join(WORKSPACE_ROOT, '.swarm', 'test-tmp');
-		fs.mkdirSync(scratch, { recursive: true });
-		const nonGitDir = fs.realpathSync(
-			fs.mkdtempSync(path.join(scratch, 'non-git-dir-test-')),
-		);
+		// Create a temp directory that is NOT a git repo (outside the checkout)
+		const nonGitDir = canonicalMkdtemp('git-blame-non-git-');
 
 		// Create a file in it
 		const testFile = 'test.txt';
 		fs.writeFileSync(path.join(nonGitDir, testFile), 'content\n');
 
-		const result = await git_blame.execute({ file: testFile }, nonGitDir);
+		const result = await git_blame.execute({ file: testFile }, {
+			directory: nonGitDir,
+		} as never);
 		const parsed = JSON.parse(result);
 
 		fs.rmSync(nonGitDir, { recursive: true, force: true });

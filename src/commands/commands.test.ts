@@ -2,6 +2,10 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import {
+	type CwdSandbox,
+	enterCwdSandbox,
+} from '../../tests/helpers/cwd-sandbox.js';
 import { safeRmRecursive } from '../../tests/helpers/safe-test-dir.js';
 import { handleDoctorCommand } from '../commands/doctor';
 import { handlePreflightCommand } from '../commands/preflight';
@@ -191,6 +195,17 @@ describe('Command Adapters', () => {
 	});
 
 	describe('Error handling', () => {
+		// '' resolves `.swarm/` against cwd: run inside a sandbox, not the checkout.
+		let sandbox: CwdSandbox;
+
+		beforeEach(() => {
+			sandbox = enterCwdSandbox('command-test-empty-dir-');
+		});
+
+		afterEach(() => {
+			sandbox.restore();
+		});
+
 		it('preflight should handle invalid directory', async () => {
 			const result = await handlePreflightCommand('', []);
 

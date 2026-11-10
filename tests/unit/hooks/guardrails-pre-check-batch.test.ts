@@ -1,14 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import type { GuardrailsConfig } from '../../../src/config/schema';
-import {
-	_internals,
-	createGuardrailsHooks,
-} from '../../../src/hooks/guardrails';
+import { _internals } from '../../../src/hooks/guardrails';
 import {
 	getAgentSession,
 	resetSwarmState,
 	startAgentSession,
 } from '../../../src/state';
+import { createSandboxedGuardrailsHooks } from '../../helpers/sandboxed-guardrails-hooks';
 
 function defaultConfig(
 	overrides?: Partial<GuardrailsConfig>,
@@ -57,7 +55,7 @@ describe('guardrails - pre_check_batch state transition (v6.22 Task 2.1)', () =>
 	describe('toolAfter - pre_check_batch advances state to pre_check_passed', () => {
 		it('uncorrelated gates_passed receipt cannot advance exact task state', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			const sessionId = 'test-session';
 			const taskId = '1.2.3';
 
@@ -80,7 +78,7 @@ describe('guardrails - pre_check_batch state transition (v6.22 Task 2.1)', () =>
 
 		it('pre_check_batch with gates_passed: false does NOT advance state', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			const sessionId = 'test-session';
 			const taskId = '1.2.3';
 
@@ -103,7 +101,7 @@ describe('guardrails - pre_check_batch state transition (v6.22 Task 2.1)', () =>
 
 		it('pre_check_batch with malformed JSON does NOT advance state (isPassed=false)', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			const sessionId = 'test-session';
 			const taskId = '1.2.3';
 
@@ -128,7 +126,7 @@ describe('guardrails - pre_check_batch state transition (v6.22 Task 2.1)', () =>
 
 		it('pre_check_batch success but currentTaskId is null does NOT advance state', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			const sessionId = 'test-session';
 			const taskId = '1.2.3';
 
@@ -155,7 +153,7 @@ describe('guardrails - pre_check_batch state transition (v6.22 Task 2.1)', () =>
 
 		it('pre_check_batch but tool is different name does NOT advance state', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			const sessionId = 'test-session';
 			const taskId = '1.2.3';
 
@@ -183,7 +181,7 @@ describe('guardrails - pre_check_batch state transition (v6.22 Task 2.1)', () =>
 
 		it('pre_check_batch with non-string output does NOT crash and does NOT advance state', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			const sessionId = 'test-session';
 			const taskId = '1.2.3';
 
@@ -211,7 +209,7 @@ describe('guardrails - pre_check_batch state transition (v6.22 Task 2.1)', () =>
 
 		it('uncorrelated pre_check_batch cannot manufacture an initial workflow state', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			const sessionId = 'test-session';
 			const taskId = '1.2.3';
 
@@ -238,7 +236,7 @@ describe('guardrails - pre_check_batch state transition (v6.22 Task 2.1)', () =>
 
 		it('pre_check_batch does NOT advance state when already at pre_check_passed', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			const sessionId = 'test-session';
 			const taskId = '1.2.3';
 
@@ -276,7 +274,7 @@ describe('guardrails - pre_check_batch state transition (v6.22 Task 2.1)', () =>
 		// Attack Vector 1: JSON with __proto__ pollution attempting to set gates_passed
 		it('BLOCKED: __proto__ pollution cannot bypass gates_passed check', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			const sessionId = 'test-session';
 			const taskId = '1.2.3';
 
@@ -302,7 +300,7 @@ describe('guardrails - pre_check_batch state transition (v6.22 Task 2.1)', () =>
 		// Attack Vector 2: JSON with constructor pollution
 		it('BLOCKED: constructor pollution cannot bypass gates_passed check', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			const sessionId = 'test-session';
 			const taskId = '1.2.3';
 
@@ -328,7 +326,7 @@ describe('guardrails - pre_check_batch state transition (v6.22 Task 2.1)', () =>
 		// Attack Vector 3: gates_passed as truthy non-boolean values
 		it('BLOCKED: gates_passed as number (1) does not advance state', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			const sessionId = 'test-session';
 			const taskId = '1.2.3';
 
@@ -350,7 +348,7 @@ describe('guardrails - pre_check_batch state transition (v6.22 Task 2.1)', () =>
 
 		it('BLOCKED: gates_passed as string "true" does not advance state', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			const sessionId = 'test-session';
 			const taskId = '1.2.3';
 
@@ -372,7 +370,7 @@ describe('guardrails - pre_check_batch state transition (v6.22 Task 2.1)', () =>
 
 		it('BLOCKED: gates_passed as null does not advance state', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			const sessionId = 'test-session';
 			const taskId = '1.2.3';
 
@@ -394,7 +392,7 @@ describe('guardrails - pre_check_batch state transition (v6.22 Task 2.1)', () =>
 
 		it('BLOCKED: gates_passed as undefined does not advance state', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			const sessionId = 'test-session';
 			const taskId = '1.2.3';
 
@@ -416,7 +414,7 @@ describe('guardrails - pre_check_batch state transition (v6.22 Task 2.1)', () =>
 
 		it('BLOCKED: gates_passed as empty array [] does not advance state', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			const sessionId = 'test-session';
 			const taskId = '1.2.3';
 
@@ -438,7 +436,7 @@ describe('guardrails - pre_check_batch state transition (v6.22 Task 2.1)', () =>
 
 		it('BLOCKED: gates_passed as empty object {} does not advance state', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			const sessionId = 'test-session';
 			const taskId = '1.2.3';
 
@@ -461,7 +459,7 @@ describe('guardrails - pre_check_batch state transition (v6.22 Task 2.1)', () =>
 		// Attack Vector 4: Oversized JSON string (10000+ chars)
 		it('BLOCKED: oversized JSON string does not crash or advance state', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			const sessionId = 'test-session';
 			const taskId = '1.2.3';
 
@@ -491,7 +489,7 @@ describe('guardrails - pre_check_batch state transition (v6.22 Task 2.1)', () =>
 		// Attack Vector 5: JSON array instead of object
 		it('BLOCKED: JSON array instead of object does not advance state', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			const sessionId = 'test-session';
 			const taskId = '1.2.3';
 
@@ -514,7 +512,7 @@ describe('guardrails - pre_check_batch state transition (v6.22 Task 2.1)', () =>
 		// Attack Vector 6: JSON with gates_passed: true but also malicious keys
 		it('BLOCKED: nested gates_passed in malicious key does not advance state', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			const sessionId = 'test-session';
 			const taskId = '1.2.3';
 
@@ -541,7 +539,7 @@ describe('guardrails - pre_check_batch state transition (v6.22 Task 2.1)', () =>
 		// Attack Vector 7: Tool name case variants
 		it('BLOCKED: Pre_Check_Batch (wrong case) does not advance state', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			const sessionId = 'test-session';
 			const taskId = '1.2.3';
 
@@ -563,7 +561,7 @@ describe('guardrails - pre_check_batch state transition (v6.22 Task 2.1)', () =>
 
 		it('BLOCKED: PRE_CHECK_BATCH (uppercase) does not advance state', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			const sessionId = 'test-session';
 			const taskId = '1.2.3';
 
@@ -586,7 +584,7 @@ describe('guardrails - pre_check_batch state transition (v6.22 Task 2.1)', () =>
 		// Attack Vector 8: Empty string output
 		it('BLOCKED: empty string output does not advance state', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			const sessionId = 'test-session';
 			const taskId = '1.2.3';
 
@@ -608,7 +606,7 @@ describe('guardrails - pre_check_batch state transition (v6.22 Task 2.1)', () =>
 		// Attack Vector 9: Whitespace-only output
 		it('BLOCKED: whitespace-only output does not advance state', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			const sessionId = 'test-session';
 			const taskId = '1.2.3';
 
@@ -630,7 +628,7 @@ describe('guardrails - pre_check_batch state transition (v6.22 Task 2.1)', () =>
 		// Additional edge cases
 		it('BLOCKED: output as non-string (number) does not crash or advance', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			const sessionId = 'test-session';
 			const taskId = '1.2.3';
 
@@ -652,7 +650,7 @@ describe('guardrails - pre_check_batch state transition (v6.22 Task 2.1)', () =>
 
 		it('BLOCKED: JSON with gates_passed: false (explicit failure) does not advance', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			const sessionId = 'test-session';
 			const taskId = '1.2.3';
 
@@ -673,7 +671,7 @@ describe('guardrails - pre_check_batch state transition (v6.22 Task 2.1)', () =>
 
 		it('BLOCKED: missing gates_passed key does not advance state', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			const sessionId = 'test-session';
 			const taskId = '1.2.3';
 

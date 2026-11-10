@@ -14,9 +14,13 @@ import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 const originalLoadPluginConfig = _internals.loadPluginConfig;
 const originalFetchSessionMessages = _internals.fetchSessionMessages;
 
+// Per-test project root: learning-health alarms (e.g. model_limit_fallback)
+// persist to <directory>/.swarm/learning-health.json, so never the checkout.
+let projectDir: string;
+
 function makeCtx(overrides: Partial<ToolContext> = {}): ToolContext {
 	return {
-		directory: process.cwd(),
+		directory: projectDir,
 		sessionID: 'test-session',
 		agent: 'architect',
 		...overrides,
@@ -64,6 +68,7 @@ function mockConfig(
 }
 
 beforeEach(() => {
+	projectDir = canonicalMkdtemp('swarm-ctx-exec-');
 	swarmState.liveContextWindows.clear();
 	_internals.loadPluginConfig = (() =>
 		mockConfig()) as typeof _internals.loadPluginConfig;
@@ -74,6 +79,7 @@ afterEach(() => {
 	swarmState.liveContextWindows.clear();
 	_internals.loadPluginConfig = originalLoadPluginConfig;
 	_internals.fetchSessionMessages = originalFetchSessionMessages;
+	rmSync(projectDir, { recursive: true, force: true });
 });
 
 describe('context_status.execute', () => {
