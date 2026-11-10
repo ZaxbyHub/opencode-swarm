@@ -150,8 +150,10 @@ describe('v2 session-client finish passthrough — negative controls (#3165 G.8)
 	});
 
 	test('only the LAST final-turn assistant entry decides: an earlier length step then stop completes', async () => {
-		// v1 parity: the v1 reply's info.finish is the last step's finish. An
-		// implementation that scanned every final-turn entry would fail here.
+		// The finish rule follows v1, where the reply's info.finish is the last
+		// step's finish; an implementation that scanned every final-turn entry
+		// would fail here. The joined text is NOT a v1 parity claim: it is the
+		// shim's existing join over all final-turn entries, pinned as-is.
 		const result = await dispatchWith([
 			USER,
 			assistant('checking', 'length'),
@@ -160,6 +162,22 @@ describe('v2 session-client finish passthrough — negative controls (#3165 G.8)
 		]);
 		expect(result.status).toBe('completed');
 		expect(result.text).toBe('checking\ndone');
+		expect(result.providerError).toBeUndefined();
+	});
+
+	test("a final turn with NO assistant entry ignores an earlier turn's length finish", async () => {
+		// Pins the final-turn slice for finish: reading the last assistant entry
+		// of the WHOLE list would pick the earlier turn's `length` entry and fail
+		// this empty-but-succeeded turn as MessageOutputLengthError.
+		const result = await dispatchWith([
+			USER,
+			assistant('old partial', 'length'),
+			IDLE_OK,
+			USER,
+			IDLE_OK,
+		]);
+		expect(result.status).toBe('completed');
+		expect(result.text).toBe('');
 		expect(result.providerError).toBeUndefined();
 	});
 
@@ -176,14 +194,15 @@ describe('v2 session-client finish passthrough — negative controls (#3165 G.8)
 		expect(result.text).toBe('new answer');
 	});
 
-	test('finish "error" or "unknown" with empty text keeps the completed-empty bash-retry signal', async () => {
+	test('finish "tool-calls", "error" or "unknown" with empty text keeps the completed-empty bash-retry signal', async () => {
 		// The Epic phase-review bash retry (src/epic/phase-readiness.ts) treats a
 		// completed reply with no text as a provider refusal; the reader ignores
-		// these two finish values, so this passthrough must not change that.
+		// these finish values, so this passthrough must carry them unchanged
+		// (e.g. never map `tool-calls` onto `length`).
 		// Pre-existing gap, not endorsed here: an errored entry under a succeeded
 		// idle with no recorded error still reads as completed (v1 would carry
 		// info.error); this test only pins that the passthrough adds no change.
-		for (const finish of ['error', 'unknown']) {
+		for (const finish of ['tool-calls', 'error', 'unknown']) {
 			const result = await dispatchWith([
 				USER,
 				{
@@ -200,13 +219,12 @@ describe('v2 session-client finish passthrough — negative controls (#3165 G.8)
 		}
 	});
 
-	test('a recorded provider error still wins over finish "length" (error branch unchanged)', async () => {
+	test.each([
+		'length',
+		'content-filter',
+	])('a recorded provider error still wins over finish "%s" (error branch unchanged)', async (finish) => {
 		const result = await dispatchWith(
-			[
-				USER,
-				assistant('partial', 'length'),
-				{ type: 'idle', outcome: 'failed' },
-			],
+			[USER, assistant('partial', finish), { type: 'idle', outcome: 'failed' }],
 			() =>
 				recordV2SessionErrorFromEnvelope({
 					type: 'session.execution.failed',
