@@ -36,6 +36,10 @@ import {
 } from '../../helpers/plugin-host';
 
 const SESSION_ID = 'sess-lean-turbo-banner-test';
+// Matches a banner claiming Stage B is unconditional ("every/each/all tasks must ... Stage B").
+const STAGE_B_UNCONDITIONAL_RE =
+	/(every|each|all)\s+(coder\s+)?tasks?\b[^.]*\bmust\b[^.]*Stage B/i;
+
 const BASE_SYSTEM = 'Stable architect system prefix';
 const HOST_CONFIG = {
 	version_check: false,
@@ -144,7 +148,7 @@ describe('System Enhancer — Lean Turbo Banner Delivery (#2759)', () => {
 			expect(LEAN_TURBO_BANNER).not.toContain(
 				'MUST still go through full Stage B',
 			);
-			expect(LEAN_TURBO_BANNER).not.toMatch(/every task[^.]*must[^.]*Stage B/i);
+			expect(LEAN_TURBO_BANNER).not.toMatch(STAGE_B_UNCONDITIONAL_RE);
 		});
 
 		it('states degraded and serialized tasks keep the same Stage B rule', () => {
@@ -163,6 +167,17 @@ describe('System Enhancer — Lean Turbo Banner Delivery (#2759)', () => {
 			expect(TURBO_MODE_BANNER).not.toContain(
 				'Do NOT skip Stage A or Stage B gates.',
 			);
+			expect(TURBO_MODE_BANNER).not.toMatch(STAGE_B_UNCONDITIONAL_RE);
+		});
+
+		it('unconditional-Stage-B detector catches every/each/all phrasings', () => {
+			for (const claim of [
+				'Every task must go through full Stage B.',
+				'Each task must go through Stage B',
+				'All tasks MUST go through Stage B',
+			]) {
+				expect(claim).toMatch(STAGE_B_UNCONDITIONAL_RE);
+			}
 		});
 	});
 

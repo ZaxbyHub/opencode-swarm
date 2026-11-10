@@ -13,16 +13,20 @@ They compose independently. You can run `execution_mode: "strict"` with Turbo on
 
 ### Balanced (default)
 
-All QA gates run normally. Every task passes through reviewer + test_engineer before the architect marks it complete. This is the default when no session mode is set.
+All QA gates run normally. A coder task passes through reviewer + test_engineer before the architect marks it complete, unless the phase's `required_agents` leave out the reviewer, council mode is active and its evidence replaces them, or the task is `external_git` or read-only (no mutation and no declared files); a coder task whose changes are proven to be exact `.md` files only needs the reviewer but not the test_engineer. This is the default when no session mode is set.
 
 ### Turbo
 
-Skips phase_complete Gates 1–5 (completion-verify, drift-verifier, hallucination-guard, mutation-gate, phase-council) and lets a non-Tier-3 task whose planned `files_touched` are known be re-dispatched to the coder before Stage A passes (a task with unknown or empty `files_touched` keeps the block). Turbo does not change when Stage A and Stage B (reviewer + test_engineer) are required: `update_task_status(completed)` applies the same rule whether or not Turbo is active, so a task needs them exactly when it would without Turbo.
+Skips phase_complete Gates 1–5 (completion-verify, drift-verifier, hallucination-guard, mutation-gate, phase-council) and the todo gate, and lets a non-Tier-3 task whose planned `files_touched` are known be re-dispatched to the coder before Stage A passes (a task with unknown or empty `files_touched` keeps the block). Turbo does not change when Stage A and Stage B (reviewer + test_engineer) are required: `update_task_status(completed)` applies the same rule whether or not Turbo is active, so a task needs them exactly when it would without Turbo.
 
 **Turbo does NOT relax Tier 3 files.** Security-sensitive paths keep the coder re-dispatch block until Stage A passes, even when Turbo is on (the only per-task gate Turbo relaxes; Turbo does not change the Stage B rule):
 
-- `architect*.ts`, `delegation*.ts`, `guardrails*.ts`, `adversarial*.ts`, `sanitiz*.ts`
-- `auth*`, `permission*`, `crypto*`, `secret*`, `security*.ts`
+All four rules are case-insensitive:
+
+- File names matching `architect*.ts`, `delegation*.ts`, `guardrail*.ts` (including `guardrails*.ts`), `adversarial*.ts`, `sanitiz*.ts`, `security*.ts`
+- Exact base names, after removing only the final extension (so `auth.ts` matches, but `authorization.service.ts`, `permissions.test.ts` and `secrets.d.ts` do not): `auth`, `authenticate`, `authentication`, `authorization`, `permission`, `permissions`, `crypto`, `secret`, `secrets`, `secretscan`
+- Base names (final extension removed) starting with `auth`, `permission`, `crypto`, `secret`, or `security` followed by `-`, `_`, or `.` (for example `auth-token.ts`, `crypto_utils.js`, `auth.test.ts`)
+- Any file under a directory named exactly `auth`, `security`, `crypto`, `permission`, or `secret` (`src/secrets/x.ts` does not match)
 
 This list is defined in `src/parallel/tier3-classifier.ts` and applied to the task's planned `files_touched`. You cannot turn it off.
 
@@ -207,7 +211,7 @@ Balanced or Strict `execution_mode` for safety.
 
 ### Epic (preview)
 
-Opt-in (`epic.mode.enabled: true`). Binds to the current plan: `/swarm epic start` opens an epic for it (refusing plans too small to benefit), `epic_next_wave` issues each phase as waves of tasks whose declared scopes don't conflict, and every task still runs the full per-task QA pipeline (Stage A and Stage B). In a git project each coder works in an isolated worktree on the epic branch, and `/swarm epic close` squash-lands the work as staged changes. A phase reviewer + critic (`epic_phase_review`) is required before `phase_complete`. See [Epic Mode (preview)](#epic-mode-preview) for the full flow.
+Opt-in (`epic.mode.enabled: true`). Binds to the current plan: `/swarm epic start` opens an epic for it (refusing plans too small to benefit), `epic_next_wave` issues each phase as waves of tasks whose declared scopes don't conflict, and every task still runs the per-task QA pipeline (Stage A and Stage B, per the task's tier). In a git project each coder works in an isolated worktree on the epic branch, and `/swarm epic close` squash-lands the work as staged changes. A phase reviewer + critic (`epic_phase_review`) is required before `phase_complete`. See [Epic Mode (preview)](#epic-mode-preview) for the full flow.
 
 ### Combining Modes
 
@@ -1031,7 +1035,7 @@ Epic Mode learns from its own outcomes (Epic v2 C6; `src/epic/learning.ts`). Eve
 The README table names three safety tiers for readability. In the code, the `execution_mode` config key is the persistent setting (`strict` / `balanced` / `fast`), and `/swarm turbo` is the session-scoped override. There is no `/swarm strict` command.
 
 **Can Turbo break a security review?**  
-No. Tier 3 patterns (`auth*`, `crypto*`, `security*.ts`, etc.) always run full review regardless of Turbo. See `src/tools/update-task-status.ts:98-109` for the authoritative list.
+No. Tier 3 files (the `auth`, `crypto` and `security` families and the other patterns in the [Turbo](#turbo) section) keep the coder re-dispatch block before Stage A even under Turbo, and Turbo does not change the Stage B rule: a task needs reviewer + test_engineer exactly when it would without Turbo. See `src/parallel/tier3-classifier.ts` for the authoritative list.
 
 **Does Full-Auto bypass the critic?**  
 No. Full-Auto v2 *increases* critic involvement: every escalate-class action gets a dedicated read-only critic verification before it executes, and phase boundaries require an APPROVED `full_auto_oversight` evidence record before `phase_complete` will succeed. Reactive intercept verdicts are also mirrored into the v2 evidence pipeline when a durable run is active. See `src/full-auto/oversight.ts` and `src/full-auto/phase-approval.ts` for the dispatch and gate.

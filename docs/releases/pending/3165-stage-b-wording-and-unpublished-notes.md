@@ -23,9 +23,10 @@ are known and non-empty.
 
 The phase-wrap skill said "Turbo mode skips all gates automatically". Turbo
 makes `phase_complete` bypass the completion-verify, drift-verifier,
-hallucination-guard, mutation-gate and phase-council checks, not every gate:
-the architecture-supervisor, final-council and full-auto gates still apply.
-The skill now says so.
+hallucination-guard, mutation-gate, phase-council and todo-gate checks, not
+every gate: it does not skip the final-review, final-council, full-auto or
+architecture-supervisor gates (each still fires only under its own enable and
+trigger conditions). The skill now says so.
 
 ## Truncated replies fail closed (notes from #3172, not published until now)
 
