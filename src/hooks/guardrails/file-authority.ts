@@ -1270,7 +1270,7 @@ export function checkFileAuthorityWithRules(
 				code: 'AUTHORITY_ROOT_ESCAPE',
 				layer: 'containment',
 				rule: 'workspace-containment',
-				detail: `re-rooted target crosses symlink/junction "${plantedLink}" inside the matched worktree`,
+				detail: `re-rooted target crosses symlink/junction "${sanitizeDiagnosticText(redactPath(plantedLink), 320)}" inside the matched worktree`,
 			});
 		}
 	} else if (normalizedPath === '..' || normalizedPath.startsWith('../')) {
@@ -1291,7 +1291,7 @@ export function checkFileAuthorityWithRules(
 				code: 'AUTHORITY_ROOT_ESCAPE',
 				layer: 'containment',
 				rule: 'workspace-containment',
-				detail: `re-rooted target crosses symlink/junction "${plantedLink}" inside the matched worktree`,
+				detail: `re-rooted target crosses symlink/junction "${sanitizeDiagnosticText(redactPath(plantedLink), 320)}" inside the matched worktree`,
 			});
 		}
 	}
