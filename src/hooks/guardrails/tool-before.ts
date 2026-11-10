@@ -2101,7 +2101,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 							'wrapper-chdir':
 								'wrapper chdir context could not be resolved (sudo -D / env -C) — rejecting for safety',
 							'unverifiable-path':
-								'the path could not be verified on the filesystem — rejecting for safety',
+								'could not be verified on the filesystem (symlink resolution failed or exceeded the link-hop limit) — rejecting for safety',
 							'dynamic-text':
 								'cannot be statically resolved (shell variable or command substitution) — rejecting for safety',
 						};

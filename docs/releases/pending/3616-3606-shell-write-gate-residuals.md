@@ -4,7 +4,7 @@
   - 3606
 ---
 
-Fixes: guardrails shell write-gate residual completion (#3616 items 1-11, 13-15 + #3606; item 12's darwin case-folding and item 16's loop-landing adoption are NOT in this change — see below).
+Fixes: guardrails shell write-gate residual completion (#3616 items 1-15 + #3606; item 16's loop-landing adoption is NOT in this change — see below).
 
 ## Security (write-gate fail-open closures)
 
@@ -15,7 +15,8 @@ Fixes: guardrails shell write-gate residual completion (#3616 items 1-11, 13-15 
 - **`sudo -i` relative writes** (item 6): a write-bearing tail under `sudo -i`/`--login` withdraws fail-closed (sudo chdirs to the target user's home, which is unknowable statically). `sudo -s` (cwd kept), no-write tails (`sudo -i make build`), and absolute targets are unchanged.
 - **`env` between launchers** (item 7): the launcher hop filter peels interposed `env` (its flags, assignments, and `--`), so `nice env sudo -i …` and `nice env time -o ../x true` are judged like their env-free twins.
 - **`pushd .`** (item 8): pushes the duplicate directory-stack entry exactly as bash; the following `popd` no longer removes the wrong entry and later writes resolve at bash's real landing.
-- **Symlink-lexical `rm link/../x`** (item 9): `resolvePath` now walks components left-to-right consulting `lstat` — a symlink/junction component substitutes its real target before `..` collapses, so `link/../src/x` (link → another tree) resolves through the real tree instead of being admitted as in-scope `src/x`. Non-ENOENT lstat/readlink failures fail closed.
+- **Symlink-lexical `rm link/../x`** (item 9): `resolvePath` now walks components left-to-right consulting `lstat` — a symlink/junction component is replaced by its target and the target's own components are walked first (realpath order, so multi-hop chains `link1 → link2 → elsewhere` resolve fully) before `..` collapses, so `link/../src/x` (link → another tree) resolves through the real tree instead of being admitted as in-scope `src/x`. Non-ENOENT lstat/readlink failures, and link chains longer than 40 hops (cycles), fail closed with an "unverifiable path" reason.
+- **macOS `.git` case-folding** (item 12): the destructive gate's protected-component compare now routes through a platform seam (`dcProtectedComponentEqualsForPlatform`) that case-folds on darwin as well as win32, so `rm -rf .GIT` is protected on macOS's default case-insensitive filesystems (a case-sensitive darwin volume only over-denies). Linux stays exact.
 
 ## Behavior change (owner decision 2026-11-09)
 
@@ -37,7 +38,6 @@ Fixes: guardrails shell write-gate residual completion (#3616 items 1-11, 13-15 
 
 ## Not in this change
 
-- **Item 12** (macOS `rm -rf .GIT` case-folding): the darwin comparison seam ships (`dcProtectedComponentEqualsForPlatform`; darwin folds), but the recorded macOS probe rides the darwin CI lane; see the PR body.
 - **Item 16** (post-exempt-loop landing adoption): scoped out by owner decision — the loop landing is not statically knowable under the issue's own item-1 ambient-shadowing finding; PR #3615's conservative over-deny is preserved bit-for-bit and pinned as a PRESERVING check. #3616 remains open pending AC16 re-specification.
 
-Known bounds: `--v`/`--ve`/`--ver` (ambiguous between `--verbose`/`--version`) fall through as unknown tokens — GNU rejects ambiguous abbreviations before deletion, so nothing deletes either way. The ambient host-shell residual (item 1) and a future executor-level env scrub remain documented follow-ups.
+Known bounds: `--v`/`--ve`/`--ver` (ambiguous between `--verbose`/`--version`) fall through as unknown tokens — GNU rejects ambiguous abbreviations before deletion, so nothing deletes either way. The ambient-key scan is textual, so a non-assignment word that spells a key assignment (e.g. `echo ENV=x > src/a`) is also denied — a deliberate over-deny in the safe direction. The ambient host-shell residual (item 1) and a future executor-level env scrub remain documented follow-ups.

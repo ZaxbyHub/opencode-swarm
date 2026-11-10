@@ -200,7 +200,7 @@ describe('#3586 Fix 1 arm (a): the single fully-literal-word For exemption', () 
 		// #3616 D10: the pre-parse oversized-word sentinel now denies this
 		// shape BEFORE the parse (same fail-closed outcome, earlier stage) —
 		// the message is the sentinel's blanket-block, not the withdrawal.
-		expect(got.message).toMatch(/WITH BLOCKED|write detection failed to parse/);
+		expect(got.message).toMatch(/write detection failed to parse/);
 	}, 30_000);
 
 	test('a brace word disqualifies ({a,b} is one Word, two items)', async () => {

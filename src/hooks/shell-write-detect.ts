@@ -9002,11 +9002,16 @@ function resolveThroughSymlinksWin32(
  * Shared symlink-aware resolution core. Anchored at `anchor` (an absolute
  * directory), the operand's components are applied left-to-right; every
  * intermediate accumulated prefix that exists is lstat'd — a symlink/junction
- * component is replaced by its real target (readlink) before continuing, so
- * a later `..` collapses against the REAL parent. ENOENT prefixes are
- * skipped (the write may not exist yet); any other lstat/readlink failure
- * fails closed (null).
+ * component is replaced by its target (readlink) and the TARGET's own
+ * components are walked before the remaining operand components (realpath
+ * order), so a chain `link1 -> link2 -> real` resolves fully and a later `..`
+ * collapses against the REAL parent. ENOENT prefixes are skipped (the write
+ * may not exist yet); any other lstat/readlink failure, or more than
+ * SYMLINK_HOP_LIMIT link substitutions (an ELOOP-style cycle), fails closed
+ * (null).
  */
+const SYMLINK_HOP_LIMIT = 40;
+
 function resolveSymlinkAware(
 	anchor: string,
 	pathText: string,
@@ -9017,29 +9022,43 @@ function resolveSymlinkAware(
 	if (!pathText.includes('..')) {
 		return pathImpl.resolve(anchor, pathText);
 	}
+	const splitComponents = (text: string): string[] =>
+		text.split(/[\\/]+/).filter((c) => c !== '' && c !== '.');
 	// Split the operand into components; resolve cumulatively from the anchor.
 	const absolute = pathImpl.isAbsolute(pathText);
 	let current = absolute ? pathImpl.parse(pathText).root : anchor;
-	const rest = absolute
-		? pathText.slice(pathImpl.parse(pathText).root.length)
-		: pathText;
-	const components = rest.split(/[\\/]+/).filter((c) => c !== '' && c !== '.');
-	for (const component of components) {
+	const pending = splitComponents(
+		absolute ? pathText.slice(pathImpl.parse(pathText).root.length) : pathText,
+	);
+	let hops = 0;
+	while (pending.length > 0) {
+		const component = pending.shift() as string;
 		if (component === '..') {
 			const parent = pathImpl.dirname(current);
 			current = parent === current ? current : parent;
 			continue;
 		}
-		let next = pathImpl.join(current, component);
+		const next = pathImpl.join(current, component);
 		// Consult lstat on every intermediate component (the final component
 		// too — a symlink LEAF write target redirects the write).
 		try {
 			const stat = lstatSync(next, { throwIfNoEntry: false });
 			if (stat?.isSymbolicLink()) {
+				hops += 1;
+				if (hops > SYMLINK_HOP_LIMIT) return null;
 				const target = readlinkSync(next);
-				next = pathImpl.isAbsolute(target)
-					? target
-					: pathImpl.resolve(pathImpl.dirname(next), target);
+				// Re-walk the target's components (it may itself traverse
+				// links) ahead of the operand's remaining components.
+				if (pathImpl.isAbsolute(target)) {
+					const root = pathImpl.parse(target).root;
+					current = root;
+					pending.unshift(...splitComponents(target.slice(root.length)));
+				} else {
+					// A relative target resolves against the link's directory,
+					// which is `current`.
+					pending.unshift(...splitComponents(target));
+				}
+				continue;
 			}
 		} catch {
 			// Non-ENOENT failure (or readlink failure): fail closed.
@@ -10941,6 +10960,11 @@ export function resolveWriteTargets(
 			const resolvedPath = unresolved ? null : resolvePath(write.path, context);
 			const resolved =
 				!unresolved && write.path !== null && !isDynamicPath(write.path);
+			// #3616 D14: a STATIC path that still resolves to null failed the
+			// symlink-aware walk (non-ENOENT lstat/readlink failure, or a link
+			// chain past SYMLINK_HOP_LIMIT) — render the filesystem-verification
+			// reason, not the dynamic-text one.
+			const unverifiable = resolved && resolvedPath === null;
 			const key = buildDedupeKey(write.category, write.operator, write.path);
 			// A capability eval has no static target; the working directory it
 			// runs at (tracked through any `cd`) IS what the gate authorizes
@@ -10966,7 +10990,9 @@ export function resolveWriteTargets(
 				...(unresolved ? { unresolved: true } : {}),
 				...(write.denialOrigin !== undefined
 					? { denialOrigin: write.denialOrigin }
-					: {}),
+					: unverifiable
+						? { denialOrigin: 'unverifiable-path' as const }
+						: {}),
 			});
 		}
 		return { map, colliding };
