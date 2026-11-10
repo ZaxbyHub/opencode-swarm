@@ -99,4 +99,18 @@ describe('incremental-verify trigger gate — negative and compat legs (#3617)',
 		makeHook(['code-coder']);
 		expect(await drive('code-coder')).toBe(true);
 	});
+
+	test('padded-trigger (#3625): a whitespace-padded dispatch matches via every trimmed-derived form', async () => {
+		// Before #3625 all three trigger forms derived from the RAW padded
+		// spelling, so ' Case_coder ' matched no entry on any arm (the
+		// suffix extractor cannot see '_coder' through the trailing space).
+		makeHook(['coder']);
+		expect(await drive(' Case_coder ')).toBe(true); // canonical arm
+		makeHook(['Case_coder']);
+		expect(await drive(' Case_coder ')).toBe(true); // raw arm
+		makeHook(['custom']);
+		expect(await drive(' acme_custom ')).toBe(true); // base-compat arm
+		makeHook(['reviewer']);
+		expect(await drive(' coder ')).toBe(false); // still gated
+	});
 });
