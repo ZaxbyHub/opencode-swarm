@@ -356,8 +356,7 @@ type PreparedCoderScope =
  * Whether Turbo may skip the Stage A re-delegation block for `taskId`.
  *
  * Tier 3 is defined by the files a task touches (security-sensitive paths,
- * src/parallel/tier3-classifier.ts), the rule update_task_status already
- * applies to Turbo's Stage B bypass. The gate used to guess it from the task
+ * src/parallel/tier3-classifier.ts). The gate used to guess it from the task
  * id (`startsWith('3.')`): every phase-3 task was treated as Tier 3 and a
  * security-sensitive task in any other phase was bypassed. Only a task whose
  * planned `files_touched` are known and contain no Tier 3 path is bypassable;

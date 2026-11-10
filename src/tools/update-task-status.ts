@@ -32,7 +32,6 @@ import {
 import { hasDeclaredDiffScope, validateDiffScope } from '../hooks/diff-scope';
 import { validateSwarmPath } from '../hooks/utils.js';
 import { tryAcquireLock } from '../parallel/file-locks.js';
-import { matchesTier3 } from '../parallel/tier3-classifier.js';
 import { loadPlan, updateTaskStatus } from '../plan/manager';
 import { formatLegacyQaBindingRecovery } from '../qa-gate/recovery.js';
 import {
@@ -51,8 +50,6 @@ import {
 	getModifiedFilesForTask,
 	getStageBRouteEvidence,
 	getTaskState,
-	hasActiveLeanTurbo,
-	hasActiveTurboMode,
 	hasBothStageBCompletions,
 	hasModifiedFilesForTask,
 	isStageBRouteRequired,
@@ -66,7 +63,6 @@ import {
 	type ReviewerGateReasonCode,
 	telemetry,
 } from '../telemetry.js';
-import { verifyLeanTurboTaskCompletion } from '../turbo/lean/task-completion';
 import * as logger from '../utils/logger.js';
 import {
 	assertProjectRoot,
@@ -101,9 +97,6 @@ export const _internals = {
 	resolveWorkingDirectory,
 	loadPlan,
 	readTaskEvidenceRaw,
-	hasActiveLeanTurbo,
-	hasActiveTurboMode,
-	verifyLeanTurboTaskCompletion,
 	hasPassedDurableGateEvidence,
 	emitReviewerGateDecision: telemetry.reviewerGateDecision,
 	recordTaskAttempt,
@@ -359,7 +352,7 @@ function hasPassedDurableGateEvidence(
  * @param taskId - The task ID to check gate state for
  * @param workingDirectory - Optional working directory for plan.json fallback
  * @param stageBParallelEnabled - When true, also accept both-markers-present as passing (PR 2 barrier)
- * @param sessionID - Optional session ID to scope Lean Turbo bypass to the current tool-execution context
+ * @param sessionID - Optional session ID of the current tool-execution context
  * @returns ReviewerGateResult indicating whether the gate is blocked
  */
 function routeGateAllowsTask(
@@ -463,96 +456,6 @@ export function checkReviewerGate(
 	currentDeclaredFiles?: readonly string[] | null,
 ): ReviewerGateResult {
 	try {
-		// === Lean Turbo bypass check ===
-		// If Lean Turbo is active and task is in a completed lane, bypass Stage B
-		let skipStandardTurboBypass = false;
-		if (
-			!fallbackDir &&
-			!sessionID &&
-			_internals.hasActiveLeanTurbo(sessionID)
-		) {
-			const resolvedDir = workingDirectory!;
-			try {
-				const leanCheck = _internals.verifyLeanTurboTaskCompletion(
-					resolvedDir,
-					taskId,
-					sessionID,
-				);
-				if (leanCheck.ok) {
-					return reviewerGateDecision(
-						taskId,
-						sessionID,
-						{
-							blocked: false,
-							reason: `Lean Turbo bypass: ${leanCheck.reason}`,
-						},
-						'lean_turbo_completed_lane',
-						'fallback',
-					);
-				}
-				// Only allow standard Turbo bypass if we CONFIRMED the task is NOT in any lane
-				if (leanCheck.laneFound !== false) {
-					// laneFound is true (in lane but not eligible) or undefined (state missing/unreadable)
-					// Be conservative: skip standard Turbo bypass
-					skipStandardTurboBypass = true;
-				}
-			} catch {
-				// Lean Turbo check failed — be conservative and skip standard bypass
-				skipStandardTurboBypass = true;
-			}
-		}
-		if (
-			!fallbackDir &&
-			!sessionID &&
-			!skipStandardTurboBypass &&
-			_internals.hasActiveTurboMode(sessionID)
-		) {
-			// === Standard Turbo Mode bypass check ===
-			// If Turbo Mode is active AND task does not touch Tier 3 patterns, bypass Stage B
-			const resolvedDir = workingDirectory!;
-			try {
-				const planPath = path.join(resolvedDir, '.swarm', 'plan.json');
-				const planRaw = fs.readFileSync(planPath, 'utf-8');
-				const plan = JSON.parse(planRaw) as {
-					phases: Array<{
-						tasks: Array<{
-							id: string;
-							files_touched?: string[];
-						}>;
-					}>;
-				};
-
-				// Find the task and check its files_touched
-				for (const planPhase of plan.phases ?? []) {
-					for (const task of planPhase.tasks ?? []) {
-						if (
-							task.id === taskId &&
-							Array.isArray(task.files_touched) &&
-							task.files_touched.length > 0
-						) {
-							// If no Tier 3 patterns matched, bypass Stage B
-							if (!matchesTier3(task.files_touched)) {
-								return reviewerGateDecision(
-									taskId,
-									sessionID,
-									{
-										blocked: false,
-										reason: 'Turbo Mode bypass',
-									},
-									'standard_turbo_non_tier3',
-									'fallback',
-								);
-							}
-							// Task touches Tier 3 patterns - fall through to normal gate check
-							break;
-						}
-					}
-				}
-			} catch {
-				// plan.json missing or unreadable — fall through to normal gate check
-			}
-		}
-
 		// Runtime decisions are exact-task and durable. Session maps and delegation
 		// chains remain diagnostics only and may not satisfy or poison this gate.
 		// The compatibility fallbacks below are reachable only for legacy direct
@@ -1258,7 +1161,7 @@ function hasForeignAttributionRecord(
  * Stage B parallel is hardcoded (not config-driven).
  * @param taskId - The task ID to check gate state for
  * @param workingDirectory - Optional working directory for plan.json fallback
- * @param sessionID - Optional session ID to scope Lean Turbo bypass to the current tool-execution context
+ * @param sessionID - Optional session ID of the current tool-execution context
  * @param fallbackDir - Optional fallback directory for resolveWorkingDirectory when workingDirectory is absent
  * @returns ReviewerGateResult with optional scope warning appended to reason
  */
@@ -1720,7 +1623,7 @@ export function checkCouncilGate(
  * Only one concurrent call wins the lock; others return success: false with recovery_guidance: "retry".
  * @param args - The update task status arguments
  * @param fallbackDir - Fallback working directory if args.working_directory is not provided
- * @param ctx - Optional ToolContext providing sessionID for Lean Turbo cross-session bypass prevention
+ * @param ctx - Optional ToolContext; its sessionID scopes the gate checks to the calling session
  * @returns UpdateTaskStatusResult with success status and details
  */
 export async function executeUpdateTaskStatus(
@@ -2100,6 +2003,11 @@ export async function executeUpdateTaskStatus(
 		// on exactly the common path it exists to describe.
 		// Declared external-evidence tasks (#3422) skip this precheck: the
 		// under-lock external arm runs the authoritative admission instead.
+		// The fallback dir matches the locked check's (`fallbackDir ?? directory`)
+		// so this precheck reaches the same exact-task decision. Passing none
+		// without a session took the legacy direct-caller path, which could admit
+		// what the locked check then refused as TASK_COMPLETION_CAS_MISMATCH
+		// instead of this normal gate message (#3165 E).
 		if (
 			phaseRequiresReviewer &&
 			!councilCheck.active &&
@@ -2109,7 +2017,7 @@ export async function executeUpdateTaskStatus(
 				args.task_id,
 				directory,
 				ctx?.sessionID,
-				ctx?.sessionID ? fallbackDir : undefined,
+				fallbackDir ?? directory,
 			);
 			if (reviewerCheck.reason) {
 				const advisoryLines = reviewerCheck.reason

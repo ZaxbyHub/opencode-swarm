@@ -31,9 +31,6 @@ interface CapturedDecision {
 }
 
 const originals = {
-	hasActiveLeanTurbo: gateInternals.hasActiveLeanTurbo,
-	hasActiveTurboMode: gateInternals.hasActiveTurboMode,
-	verifyLeanTurboTaskCompletion: gateInternals.verifyLeanTurboTaskCompletion,
 	readTaskEvidenceRaw: gateInternals.readTaskEvidenceRaw,
 	hasPassedDurableGateEvidence: gateInternals.hasPassedDurableGateEvidence,
 	emitReviewerGateDecision: gateInternals.emitReviewerGateDecision,
@@ -131,10 +128,6 @@ beforeEach(() => {
 	});
 	writePlan();
 	decisions = [];
-	gateInternals.hasActiveLeanTurbo = () => false;
-	gateInternals.hasActiveTurboMode = () => false;
-	gateInternals.verifyLeanTurboTaskCompletion =
-		originals.verifyLeanTurboTaskCompletion;
 	gateInternals.readTaskEvidenceRaw = originals.readTaskEvidenceRaw;
 	gateInternals.hasPassedDurableGateEvidence =
 		originals.hasPassedDurableGateEvidence;
@@ -157,10 +150,6 @@ beforeEach(() => {
 
 afterEach(() => {
 	resetSwarmState();
-	gateInternals.hasActiveLeanTurbo = originals.hasActiveLeanTurbo;
-	gateInternals.hasActiveTurboMode = originals.hasActiveTurboMode;
-	gateInternals.verifyLeanTurboTaskCompletion =
-		originals.verifyLeanTurboTaskCompletion;
 	gateInternals.readTaskEvidenceRaw = originals.readTaskEvidenceRaw;
 	gateInternals.hasPassedDurableGateEvidence =
 		originals.hasPassedDurableGateEvidence;
@@ -204,12 +193,12 @@ describe('reviewer gate decision telemetry', () => {
 	});
 
 	test('does not let session Turbo modes bypass missing exact-task evidence', () => {
-		gateInternals.hasActiveLeanTurbo = () => true;
-		gateInternals.verifyLeanTurboTaskCompletion = () => ({
-			ok: true,
-			reason: 'lane complete',
-			laneFound: true,
-		});
+		// Real session state (#3165 E removed the gate's Turbo seams).
+		startAgentSession('caller-session', 'architect');
+		const session = swarmState.agentSessions.get('caller-session')!;
+		session.turboMode = true;
+		session.turboStrategy = 'lean';
+		session.leanTurboActive = true;
 		expectDecision(
 			checkReviewerGate('1.1', directory, false, 'caller-session'),
 			{ blocked: true, reason: '' },
@@ -218,8 +207,8 @@ describe('reviewer gate decision telemetry', () => {
 		);
 
 		decisions = [];
-		gateInternals.hasActiveLeanTurbo = () => false;
-		gateInternals.hasActiveTurboMode = () => true;
+		session.turboStrategy = 'standard';
+		session.leanTurboActive = false;
 		expectDecision(
 			checkReviewerGate('1.1', directory, false, 'caller-session'),
 			{ blocked: true, reason: '' },
