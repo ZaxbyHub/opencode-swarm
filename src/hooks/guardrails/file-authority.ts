@@ -744,6 +744,20 @@ export const DEFAULT_AGENT_AUTHORITY_RULES: Record<string, AgentRule> = {
 };
 
 /**
+ * #3606 test seam for the ancestor lstat walk: suites inject lstat
+ * outcomes (non-ENOENT failures, symlink stats) for workspaces that do
+ * not exist on the host, keeping the denial-rendering pins
+ * host-independent. Production callers get the real `fsSync.lstatSync`
+ * (arrow-wrapped so the single-arg overload keeps its `Stats` return —
+ * `.bind` would widen it to the options-overload union).
+ */
+export const _internals: {
+	lstatSync: (path: fsSync.PathLike) => fsSync.Stats;
+} = {
+	lstatSync: (ancestorPath) => fsSync.lstatSync(ancestorPath),
+};
+
+/**
  * Checks whether a write target path (or any ancestor strictly inside cwd)
  * is a symlink. Writing through a symlink can redirect the write to a
  * location outside the working directory, bypassing scope containment.
@@ -789,17 +803,40 @@ export function checkWriteTargetForSymlink(
 	}
 
 	for (const ancestor of ancestors) {
-		let stat: ReturnType<typeof fsSync.lstatSync> | null = null;
+		let stat: fsSync.Stats | null = null;
 		try {
-			stat = fsSync.lstatSync(ancestor);
+			stat = _internals.lstatSync(ancestor);
 		} catch (err: unknown) {
 			const code = (err as NodeJS.ErrnoException).code;
 			if (code === 'ENOENT') continue; // not yet created — OK for writes
-			// Unexpected error: fail closed
-			return `WRITE BLOCKED: lstat failed on "${ancestor}": ${String(err)} — refusing write on unverifiable path`;
+			// Unexpected error: fail closed. #3606: the resolved ancestor and
+			// the raw error string are untrusted operator-facing diagnostics —
+			// render both through the #3587 bounded-and-redacted contract:
+			// home-folded, control-neutralized, length-capped. This inlines
+			// renderDenialTarget's absolute-path form exactly
+			// (sanitizeDiagnosticText(redactPath(x), 320)); importing
+			// tool-before's helper here would create an import cycle.
+			// String(err) embeds the lstat operand verbatim (e.g.
+			// "statx '<path>'"), so every occurrence of the raw ancestor is
+			// folded into its redacted render FIRST — sanitize alone would
+			// bound the text but not redact the embedded profile prefix.
+			const renderedAncestor = sanitizeDiagnosticText(
+				redactPath(ancestor),
+				320,
+			);
+			const detail = sanitizeDiagnosticText(
+				String(err).split(ancestor).join(renderedAncestor),
+				160,
+			);
+			return `WRITE BLOCKED: lstat failed on "${renderedAncestor}": ${detail} — refusing write on unverifiable path`;
 		}
 		if (stat.isSymbolicLink()) {
-			return `WRITE BLOCKED: "${ancestor}" is a symlink/junction — writing through a symlink or junction could redirect the write outside the working directory`;
+			// #3606: same #3587 bounded-and-redacted contract for the
+			// symlink/junction arm — no raw runtime-profile prefix.
+			return `WRITE BLOCKED: "${sanitizeDiagnosticText(
+				redactPath(ancestor),
+				320,
+			)}" is a symlink/junction — writing through a symlink or junction could redirect the write outside the working directory`;
 		}
 	}
 
