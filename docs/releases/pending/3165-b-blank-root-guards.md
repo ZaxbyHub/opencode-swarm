@@ -23,7 +23,7 @@ A blank or whitespace project directory names no project, but several
   reading anything, including the prior consensus reports.
 - Three shared write paths created or appended to `<cwd>/.swarm/`:
   - `assertProjectRoot`, the shared project-root check, accepted a blank root
-    because `realpath('')` is the cwd. It now throws. It runs at about 80
+    because `realpath('')` is the cwd. It now throws. It runs at 77
     call sites before `.swarm` state is written or locked (evidence, the plan
     ledger and manager, scope, harness, evaluation, test-impact history,
     council, the skill optimizer and the knowledge receipt ledger, among
@@ -89,7 +89,8 @@ refuse a blank root; a relative root still resolves as before (see below).
 
 Not every `.swarm` store is guarded yet. These still join a blank root with
 `.swarm/` (so they resolve under the cwd) and stay tracked in #3165 B:
-the `src/plan/ledger.ts` reads (its writers go through `assertProjectRoot`),
+the `src/plan/ledger.ts` read paths, including the ledger repairs they write
+through `coordinateLedger` (its other writers go through `assertProjectRoot`),
 `src/council/council-round-state.ts`, `src/context-map/persistence.ts`,
 `src/memory/storage-root.ts`, `src/consensus/store.ts` (reached in production
 only after the guarded consensus boundary) and the compaction rehydration
