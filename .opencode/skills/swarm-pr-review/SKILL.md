@@ -4,7 +4,7 @@ description: Run a graph-guided, tool-augmented PR review using context packing,
 disable-model-invocation: true
 metadata:
   audience: swarm-plugin
-  swarm-contract-digest: "d13bb98e0e64"
+  swarm-contract-digest: "2641a448e263"
 ---
 
 # /swarm-pr-review
@@ -1262,7 +1262,7 @@ binding, and diagnostic contract in
 Under Profile A, dispatch critic chunks with `dispatch_lanes_async`,
 `mode: "swarm-pr-review:critic"`, a unique non-empty `workflow_lane` per
 chunk, `review_item_ids` containing the exact finding IDs assigned to that
-chunk, the `critic` agent (the controller block's PROTOCOL SELECTION clause suspends its default PLAN REVIEW structure for the lane), and the same exact `pr_head_sha`. The runtime
+chunk, the `critic` agent (the controller block's PROTOCOL SELECTION clause suspends its default PLAN REVIEW structure for the lane; the agent's own prompt is mode-less), and the same exact `pr_head_sha`. The runtime
 requires one parseable `[CRITIC]` row for every structurally assigned ID and
 requires the reviewer phase to have settled — every item in the current
 inventory holding a successful reviewer verdict, composed across batches —
