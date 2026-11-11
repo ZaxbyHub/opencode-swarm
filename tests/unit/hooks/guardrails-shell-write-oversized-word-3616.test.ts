@@ -115,7 +115,8 @@ describe('#3616 item 11: oversized operand per call site', () => {
 			async () => {
 				const r = await gate(command);
 				expect(r.verdict).toBe('BLOCKED');
-				expect(r.message).toMatch(/failed to parse command/);
+				// F-15 (PR #3651 review): the sentinel names its actual cause.
+				expect(r.message).toMatch(/4096-character analysis budget/);
 			},
 			T,
 		);

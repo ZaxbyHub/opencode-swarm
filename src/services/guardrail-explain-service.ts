@@ -315,6 +315,26 @@ function evaluateDestructiveDecision(
 			}
 		}
 	}
+	// #3616 feedback round (PR #3651 review PRR-009): mirror the gate's
+	// withdrawal-rewrite occurrence push (tool-before pushes each top-level
+	// segment's rewritten sub-segments with an uncertain context when its own
+	// dcPreprocessWrappers result is uncertain or carries the unresolved-cd
+	// sentinel). Without this, a withdrawal-shaped destructive command
+	// (`sh -c "sudo -i sh -c 'cd src && rm -rf dist'"`) gate-denies via the
+	// escaping sentinel while explain rests on the raw segments and can
+	// answer allow — the gate/explain split-brain class.
+	for (const segment of dcSplitSegments(command)) {
+		const segWithdrawal = dcPreprocessWrappers(segment);
+		if (!segWithdrawal.changed) continue;
+		if (
+			segWithdrawal.uncertain ||
+			segWithdrawal.command.includes('$__swarm_unresolved_chdir')
+		) {
+			for (const sub of dcSplitSegments(segWithdrawal.command)) {
+				pushSegmentOccurrence(sub, 'uncertain');
+			}
+		}
+	}
 	const relocate = (
 		resolveFrom: string | 'uncertain' | null,
 		targets: string[],
@@ -1000,8 +1020,11 @@ export async function handleGuardrailExplain(
 			// outright, so an unqualified "allow: no rule matched" for a
 			// write-bearing command is a split-brain answer. Render block with
 			// the scope-unevaluated firing rule instead (the write verdict is
-			// not asserted either way — only that the scope dimension was
-			// never evaluated). Architect and other-role paths keep their
+			// dimension was never EVALUATED — the live gate denies via
+			// SCOPE_NOT_DECLARED, so block IS the asserted verdict here
+			// (F-19a, PR #3651 review: the earlier comment claimed the write
+			// verdict was not asserted, contradicting the assignment below).
+			// Architect and other-role paths keep their
 			// existing behavior (noScopeLenient parity with the gate).
 			const resolvedWrites =
 				scope == null && agent === 'coder'

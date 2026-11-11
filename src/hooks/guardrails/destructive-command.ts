@@ -22,6 +22,7 @@ import { CMD_STRIP_PREFIX, PS_STRIP_PREFIX } from '../shell-executor-context';
 import {
 	BASH_BUILTIN_COMMANDS,
 	expandBraceRaw,
+	LOGIN_TAIL_WRITE_WORDS,
 	longFlagTakesArg,
 	parseRmOptionTokens,
 	SUDO_ARG_TAKING_SHORT,
@@ -1419,14 +1420,69 @@ function dcPeelLauncherWords(
 			head === 'time' ||
 			head === 'nice' ||
 			head === 'nohup' ||
-			head === 'env'
+			head === 'env' ||
+			head === 'exec' ||
+			head === 'command' ||
+			head === 'builtin' ||
+			head === 'timeout' ||
+			head === 'stdbuf'
 		) {
 			let next = 1;
-			if (head === 'time' || head === 'nice' || head === 'nohup') {
-				while (next < words.length && (words[next] as string).startsWith('-')) {
-					next += 1;
-					if (head === 'nice' && (words[next - 1] as string) === '-n')
+			if (head !== 'env') {
+				// #3616 feedback round (PR #3651 review F-03/F-04): the option
+				// region must consume EXACTLY what the real launchers consume —
+				// GNU time's arg-taking -o FILE / -f FMT / --output / --format
+				// (a skipped VALUE word left it as the launcher head and the
+				// wrapped sudo -D / env -C chdir was lost), nice's -n N /
+				// --adjustment N / --adjustment=N (real coreutils accepts the
+				// --adj abbreviation too), timeout's option region + DURATION
+				// positional, stdbuf's -i/-o/-e MODE (glued or separate), and
+				// the argless exec/command/builtin transparent prefixes
+				// (dcStripExecutionLauncher vocabulary — the legacy unwrap
+				// strips these, so the peel must reach the same head).
+				while (next < words.length) {
+					const w = words[next] as string;
+					if (!w.startsWith('-')) {
+						// timeout's DURATION is its first positional argument.
+						if (head === 'timeout' && /^[0-9]+[a-z]?$/i.test(w)) {
+							next += 1;
+							continue;
+						}
+						break;
+					}
+					if (w === '--') {
 						next += 1;
+						break;
+					}
+					if (w.startsWith('--')) {
+						const eq = w.indexOf('=');
+						const headW = eq === -1 ? w : w.slice(0, eq);
+						const takesValue =
+							(head === 'time' &&
+								(headW === '--output' || headW === '--format')) ||
+							(head === 'nice' && headW === '--adjustment') ||
+							(head === 'timeout' &&
+								(headW === '--kill-after' || headW === '--signal'));
+						if (takesValue && eq === -1) next += 2;
+						else next += 1;
+						continue;
+					}
+					// Short options: arg-taking members consume the NEXT word;
+					// glued attached values (`-oFILE`, `-oL`, `-n5`, `-k5`) and
+					// plain numeric nice adjustments consume only the token.
+					const c = w[1];
+					if (head === 'time' && (c === 'o' || c === 'f') && w.length === 2)
+						next += 2;
+					else if (head === 'nice' && c === 'n' && w.length === 2) next += 2;
+					else if (
+						head === 'timeout' &&
+						(c === 'k' || c === 's') &&
+						w.length === 2
+					)
+						next += 2;
+					else if (head === 'stdbuf' && c !== undefined && 'ioe'.includes(c))
+						next += w.length === 2 ? 2 : 1;
+					else next += 1;
 				}
 			} else {
 				while (next < words.length) {
@@ -1436,7 +1492,11 @@ function dcPeelLauncherWords(
 						continue;
 					}
 					if (!w.startsWith('-')) break;
-					if (ENV_PEELABLE_FLAGS.has(w) || w.startsWith('--unset=')) {
+					if (
+						ENV_PEELABLE_FLAGS.has(w) ||
+						w.startsWith('--unset=') ||
+						/^-[uU][A-Za-z_]/.test(w)
+					) {
 						next += 1;
 						if (w === '-u' || w === '--unset') next += 1;
 						continue;
@@ -1507,7 +1567,32 @@ function matchEnvChdir(words: string[]): DcChdirMatch {
 		restIndex: number,
 		canonical: boolean,
 	): DcChdirMatch => {
-		const splitWords = shellSplitWords(payload);
+		// #3616 feedback round (PR #3651 review F-06): GNU env splits `\_`
+		// as a word separator in -S payloads (executed ground truth:
+		// `rm\_-rf\_../v` runs `rm -rf ../v`). Translate UNQUOTED `\_` to a
+		// space before the generic shell split; quoted `\_` stays literal.
+		let translated = '';
+		let q: string | null = null;
+		for (let i = 0; i < payload.length; i++) {
+			const ch = payload[i];
+			if (q !== null) {
+				translated += ch;
+				if (ch === q) q = null;
+				continue;
+			}
+			if (ch === '"' || ch === "'") {
+				q = ch;
+				translated += ch;
+				continue;
+			}
+			if (ch === '\\' && payload[i + 1] === '_') {
+				translated += ' ';
+				i += 1;
+				continue;
+			}
+			translated += ch;
+		}
+		const splitWords = shellSplitWords(translated);
 		// Only env's own option region (before the command word) can carry
 		// a nested split spelling; the wrapped command's flags are its own.
 		for (const w of splitWords) {
@@ -1518,6 +1603,43 @@ function matchEnvChdir(words: string[]): DcChdirMatch {
 				return { kind: 'failClosed' };
 			}
 		}
+		// #3616 feedback round (PR #3651 review F-05): a payload carrying its
+		// own chdir-bearing wrapper (sudo -D/-i/--login/--chdir or env
+		// -C/--chdir) moves the landing the argv splice cannot model — the
+		// spliced words would be judged at the ambient cwd. Fail closed.
+		const payloadHasChdirWrapper = (): boolean => {
+			for (let x = 0; x < splitWords.length; x++) {
+				const sw = splitWords[x] ?? '';
+				const base = sw.replace(/^.*[/\\]/, '');
+				if (base !== 'sudo' && base !== 'env') continue;
+				for (let y = x + 1; y < splitWords.length; y++) {
+					const t = splitWords[y] ?? '';
+					if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(t)) continue;
+					if (!t.startsWith('-') || t === '-') break;
+					if (t === '--') break;
+					if (base === 'sudo') {
+						if (
+							t === '-D' ||
+							t.startsWith('-D') ||
+							t === '-i' ||
+							t.startsWith('-i') ||
+							t === '--login' ||
+							t === '--chdir' ||
+							t.startsWith('--chdir=')
+						)
+							return true;
+					} else if (
+						t === '-C' ||
+						t.startsWith('-C') ||
+						t === '--chdir' ||
+						t.startsWith('--chdir=')
+					)
+						return true;
+				}
+			}
+			return false;
+		};
+		if (payloadHasChdirWrapper()) return { kind: 'failClosed' };
 		const after = words.slice(restIndex);
 		const pre = words.slice(1, cursor);
 		const carried = dir !== undefined ? ['-C', dir] : [];
@@ -1807,21 +1929,8 @@ function matchSudoChdir(words: string[]): DcChdirMatch {
 		// their exact verdicts.
 		if (walk.kind === 'inner' && walk.loginShell === true) {
 			const tail = words.slice(1 + (walk.innerIndex ?? 0));
-			// Mirrors the detector's D6 set (BUILTIN_WRITE_COMMANDS + tee/dd)
-			// — keep in sync with shell-write-detect's loginWriteWords.
-			const loginWriteWords = new Set([
-				'rm',
-				'mv',
-				'cp',
-				'ln',
-				'touch',
-				'unlink',
-				'rmdir',
-				'tee',
-				'dd',
-				'truncate',
-				'install',
-			]);
+			// Shared with the detector's D6 arm (LOGIN_TAIL_WRITE_WORDS).
+			const loginWriteWords = LOGIN_TAIL_WRITE_WORDS;
 			// A tail word may be a quote-stripped multi-word payload
 			// (`tee ../x` from sh -c 'tee ../x') — classify by its FIRST
 			// token. A nested shell head (`sudo -i sh -c 'tee …'`) is
@@ -1913,19 +2022,7 @@ function matchSudoChdir(words: string[]): DcChdirMatch {
 		// the command word or an operand.
 		if (interactiveTail !== null) {
 			const tail = interactiveTail;
-			const loginWriteWords = new Set([
-				'rm',
-				'mv',
-				'cp',
-				'ln',
-				'touch',
-				'unlink',
-				'rmdir',
-				'tee',
-				'dd',
-				'truncate',
-				'install',
-			]);
+			const loginWriteWords = LOGIN_TAIL_WRITE_WORDS;
 			const isShellHeadWord = (word: string): boolean => {
 				const tok = word.split(/\s+/)[0] ?? word;
 				return (
@@ -3251,22 +3348,54 @@ export function dcCheckJunctionCreation(
 	// ln -s <target> (POSIX symlink; block if target resolves outside cwd)
 	// Both absolute and relative targets are checked: ln -s ../sensitive dist escapes cwd.
 	// #3539 W6: normalized verb word (`\ln`, `"ln"`, `/bin/ln` reach the arm).
+	// #3616 feedback round (PR #3651 review F-09): GNU ln accepts MORE
+	// spellings than the exact `-s` this regex matched — `--symbolic`,
+	// `-sT` (no-dereference target), `-sV` (verbosity suffix), and
+	// `--` before the operands — each of which bypassed the junction
+	// check while creating the same outward link. Walk ln's option
+	// region with a mini-getopt and treat ANY symbolic-creating spelling
+	// as the arm's trigger; the target is then the first non-option
+	// operand (ln TARGET [LINK]).
 	const lnHead = dcSegmentVerbMatch(segment, ['ln'], false);
-	const lnMatch = lnHead
-		? /^\s+(?:-[sfnv]*s[sfnv]*|-s)\s+"?([^"\s]+)"?(?:\s+"?[^"\s]+"?)?\s*$/.exec(
-				lnHead.rest,
-			)
-		: null;
-	if (lnMatch) {
-		const target = lnMatch[1].trim();
-		if (!dcHasUnresolvableVars(target)) {
-			const resolved = path.resolve(cwd, target);
-			const rel = path.relative(cwd, resolved);
-			if (rel.startsWith('..') || path.isAbsolute(rel)) {
-				return `BLOCKED: Symlink creation targeting path outside working directory: ln -s target "${dcSafeDiagnosticValue(target)}" resolves to "${dcSafeDiagnosticValue(resolved)}" which is outside "${dcSafeDiagnosticValue(cwd)}". Symlinks to external paths combined with recursive deletion can destroy data.`;
+	if (lnHead) {
+		const lnWords = lnHead.rest.trim().split(/\s+/).filter(Boolean);
+		let symbolic = false;
+		let operand: string | undefined;
+		for (let i = 0; i < lnWords.length; i++) {
+			const w = lnWords[i] as string;
+			const bare = w.replace(/^["']|["']$/g, '');
+			if (bare === '--') {
+				operand = lnWords[i + 1];
+				break;
 			}
+			if (bare.startsWith('--')) {
+				if ('symbolic'.startsWith(bare.slice(2)) && bare.length >= 3)
+					symbolic = true;
+				continue;
+			}
+			if (bare.startsWith('-')) {
+				const members = bare.slice(1);
+				const idx = members.indexOf('s');
+				if (idx !== -1) symbolic = true;
+				// -T (no-dereference) and suffix forms keep the operands;
+				// arg-less members only — ln has no separate-arg short
+				// options.
+				continue;
+			}
+			operand = w;
+			break;
 		}
-		return null;
+		if (symbolic && operand !== undefined) {
+			const target = operand.trim();
+			if (!dcHasUnresolvableVars(target)) {
+				const resolved = path.resolve(cwd, target);
+				const rel = path.relative(cwd, resolved);
+				if (rel.startsWith('..') || path.isAbsolute(rel)) {
+					return `BLOCKED: Symlink creation targeting path outside working directory: ln target "${dcSafeDiagnosticValue(target)}" resolves to "${dcSafeDiagnosticValue(resolved)}" which is outside "${dcSafeDiagnosticValue(cwd)}". Symlinks to external paths combined with recursive deletion can destroy data.`;
+				}
+			}
+			return null;
+		}
 	}
 
 	return null;

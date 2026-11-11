@@ -1678,8 +1678,16 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				primaryAnalysis.parseError &&
 				!suppressParseError(command)
 			) {
+				// F-15 (PR #3651 review): the oversized-word sentinel reports
+				// parseError for a command that never reached the parser —
+				// name the actual cause instead of a parse failure.
+				const oversized = primaryAnalysis.writes.some(
+					(w) => w.operator === 'oversized word',
+				);
 				throw new Error(
-					`BLOCKED: bash write detection failed to parse command — rejecting for safety`,
+					oversized
+						? `BLOCKED: command contains a word over the 4096-character analysis budget — denying before parsing for safety`
+						: `BLOCKED: bash write detection failed to parse command — rejecting for safety`,
 				);
 			}
 
@@ -2112,11 +2120,20 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 						// here (textual); everything else keeps the legacy
 						// dynamic-text wording.
 						const originText = write.original.path ?? '';
+						// #3616 feedback round (PR #3651 review PRR-006): when the
+						// denial command carries the withdrawal-rewrite sentinel,
+						// the write came from a wrapper-chdir withdrawal (sudo
+						// -D/-i, env -C) whose rewrite re-derived the record —
+						// a generic directory-withdrawal stamp here would name
+						// popd/cd -/reassignment, which the shape does not have.
 						const origin =
-							write.original.denialOrigin ??
-							(originText === '~' || originText.startsWith('~/')
-								? 'tilde'
-								: 'dynamic-text');
+							write.original.denialOrigin === 'directory-withdrawal' &&
+							preprocessed.command.includes('$__swarm_unresolved_chdir')
+								? 'wrapper-chdir'
+								: (write.original.denialOrigin ??
+									(originText === '~' || originText.startsWith('~/')
+										? 'tilde'
+										: 'dynamic-text'));
 						const originReason: Record<string, string> = {
 							tilde:
 								'tilde target expands against the invoking user home directory — not statically resolvable',

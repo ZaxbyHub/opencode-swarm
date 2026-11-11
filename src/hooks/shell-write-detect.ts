@@ -3675,11 +3675,7 @@ function detectLauncherWrites(cmd: unknown): WriteTarget[] {
 					const tail = suffix.slice(cursor + walk.innerIndex);
 					// tee/dd write by design but live outside BUILTIN_WRITE_COMMANDS
 					// (detectBuiltinWrites handles them ahead of the set check).
-					const loginWriteWords = new Set([
-						...BUILTIN_WRITE_COMMANDS,
-						'tee',
-						'dd',
-					]);
+					const loginWriteWords = LOGIN_TAIL_WRITE_WORDS;
 					const hasWriteVector = tail.some((word, idx) => {
 						if (typeof word !== 'string') return false;
 						if (loginWriteWords.has(basenameAnySep(word))) return true;
@@ -3717,7 +3713,11 @@ function detectLauncherWrites(cmd: unknown): WriteTarget[] {
 							operator:
 								'sudo -i login-shell tail (relative write under target home)',
 							path: null,
-							dynamicSourceWord: firstRelative.slice(0, 64),
+							// F-23 (PR #3651 review): code-point-safe cut — never
+							// split a surrogate pair in the rendered source word.
+							dynamicSourceWord: Array.from(firstRelative)
+								.slice(0, 64)
+								.join(''),
 							// #3616 (final-critic round 4, finding 2): the
 							// login landing is an unresolvable WRAPPER chdir —
 							// render the class-accurate reason, not the
@@ -4552,16 +4552,25 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 			const gluedSplit = word.startsWith('--split-string=')
 				? word.slice('--split-string='.length)
 				: undefined;
+			// #3616 feedback round (PR #3651 review F-02): GNU env also
+			// accepts the GLUED short form `-SPAYLOAD` — the payload rides
+			// inside the flag token and was silently consumed as an opaque
+			// env argument (an ambient-key payload escaped the scan).
+			const gluedShortSplit =
+				gluedSplit === undefined && word.startsWith('-S') && word.length > 2
+					? word.slice(2)
+					: undefined;
 			if (
 				word !== '-S' &&
 				word !== '--split-string' &&
-				gluedSplit === undefined
+				gluedSplit === undefined &&
+				gluedShortSplit === undefined
 			)
 				continue;
-			const payload = gluedSplit ?? suffixWords[w + 1];
+			const payload = gluedSplit ?? gluedShortSplit ?? suffixWords[w + 1];
 			if (payload === undefined) break;
 			// Glued form: the payload is INSIDE the token (no next word).
-			const glued = gluedSplit !== undefined;
+			const glued = gluedSplit !== undefined || gluedShortSplit !== undefined;
 			const postStart = glued ? w + 1 : w + 2;
 			const splitWords: string[] = [];
 			{
@@ -4595,6 +4604,15 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 							si += 1;
 						}
 						si += 1;
+						continue;
+					}
+					if (c === '\\' && payload[si + 1] === '_') {
+						// #3616 feedback round (PR #3651 review F-06): GNU env
+						// splits `\_` as a word separator in -S payloads
+						// (executed ground truth: `rm\_-rf\_../v` runs
+						// `rm -rf ../v`). Preserve every other escape.
+						pushW();
+						si += 2;
 						continue;
 					}
 					if (c === '\\' && si + 1 < payload.length) {
@@ -4633,6 +4651,51 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 					unresolvedContext: true,
 				});
 				return results;
+			}
+			// #3616 feedback round (PR #3651 review F-05): a payload carrying
+			// its own chdir-bearing wrapper (sudo -D/-i/--login/--chdir or
+			// env -C/--chdir) moves the landing the splice cannot model — the
+			// reconstruction judges the wrapped write at the ambient cwd.
+			// Same unconditional refusal as the nested-split case.
+			const payloadChdirWord = (base: string, w: string): boolean => {
+				if (base === 'sudo')
+					return (
+						w === '-D' ||
+						w.startsWith('-D') ||
+						w === '-i' ||
+						w.startsWith('-i') ||
+						w === '--login' ||
+						w === '--chdir' ||
+						w.startsWith('--chdir=')
+					);
+				return (
+					w === '-C' ||
+					w.startsWith('-C') ||
+					w === '--chdir' ||
+					w.startsWith('--chdir=')
+				);
+			};
+			for (let x = 0; x < splitWords.length; x++) {
+				const sw = splitWords[x] ?? '';
+				const base = sw.replace(/^.*[/\\]/, '');
+				if (base !== 'sudo' && base !== 'env') continue;
+				const region: string[] = [];
+				for (let y = x + 1; y < splitWords.length; y++) {
+					const t = splitWords[y] ?? '';
+					if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(t)) continue;
+					if (!t.startsWith('-') || t === '-') break;
+					if (t === '--') break;
+					region.push(t);
+				}
+				if (region.some((t) => payloadChdirWord(base, t))) {
+					results.push({
+						category: 'redirect',
+						operator: 'env -S',
+						path: null,
+						unresolvedContext: true,
+					});
+					return results;
+				}
 			}
 			// The argv re-parse expands payload words at execution time; a
 			// second -S in the ORIGINAL argv splices after this one and is
@@ -8182,7 +8245,7 @@ export function detectInteractiveSession(
  * suffixes like MY_ENV= do not trip it.
  */
 const AMBIENT_SHELL_STATE_KEY_ASSIGNMENT =
-	/(?:^|[\s;|&()])+(?:export\s+|env\s+|-x\s+)?(?:BASH_ENV|ENV|BASH_FUNC_[A-Za-z0-9_%]+)=/;
+	/(?:^|[\s;|&()])(?:export\s+|env\s+|-x\s+)?(?:BASH_ENV|ENV|BASH_FUNC_[A-Za-z0-9_%]+)=/;
 
 /**
  * #3616 D4 (item 4): gather every word-node array a command-bearing node
@@ -8365,7 +8428,8 @@ export function detectPosixWrites(
 					category: 'interpreter_eval',
 					operator: 'oversized word',
 					path: null,
-					dynamicSourceWord: oversizedWord.slice(0, 64),
+					// F-23 (PR #3651 review): code-point-safe cut.
+					dynamicSourceWord: Array.from(oversizedWord).slice(0, 64).join(''),
 				},
 			],
 			hasWrites: true,
@@ -9080,7 +9144,22 @@ function resolveThroughSymlinksWin32(
 	pathText: string,
 	cwd: string,
 ): string | null {
-	return resolveSymlinkAware(cwd, pathText, path.win32, (p) => p);
+	const walked = resolveSymlinkAware(cwd, pathText, path.win32, (p) => p);
+	// #3616 feedback round (PR #3651 review F-17): on win32 a `..` that
+	// crosses a junction resolves DIFFERENTLY per writer class — bash/MSYS
+	// walks physically (the result above), while native Win32 binaries
+	// (curl, cmd, PowerShell) collapse `..` lexically BEFORE the filesystem
+	// substitutes the junction, so they land where the lexical collapse
+	// names. When the two models disagree, at least one class lands outside
+	// whichever landing the gate judges, so the landing is writer-dependent
+	// and unverifiable — fail closed (null → unverifiable-path deny) instead
+	// of picking one model. Identical results (no junction crossed by the
+	// `..`) keep the walked verdict.
+	if (pathText.includes('..') && walked !== null) {
+		const lexical = path.win32.resolve(cwd, pathText);
+		if (walked.toLowerCase() !== lexical.toLowerCase()) return null;
+	}
+	return walked;
 }
 
 /**
@@ -9095,6 +9174,17 @@ function resolveThroughSymlinksWin32(
  * SYMLINK_HOP_LIMIT link substitutions (an ELOOP-style cycle), fails closed
  * (null).
  */
+/**
+ * #3616: the sudo -i login-tail write-vector word set (BUILTIN_WRITE_COMMANDS
+ * + tee/dd) shared by the detector's D6 arm and the destructive-command
+ * login arms (imported there) — one definition, three consumers.
+ */
+export const LOGIN_TAIL_WRITE_WORDS = new Set([
+	...BUILTIN_WRITE_COMMANDS,
+	'tee',
+	'dd',
+]);
+
 const SYMLINK_HOP_LIMIT = 40;
 
 function resolveSymlinkAware(

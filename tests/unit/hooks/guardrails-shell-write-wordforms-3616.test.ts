@@ -247,8 +247,17 @@ describe('#3616 item 9: .. after a directory link resolves through the link', ()
 			async () => {
 				const r = await gate(command, { prep: singleLink });
 				expect(r.verdict).toBe('BLOCKED');
-				expect(r.message).toMatch(AUTHORITY_DENY);
-				expect(r.message).toContain(landing);
+				if (process.platform === 'win32') {
+					// F-17 (PR #3651 review): on win32 a `..` crossing a junction
+					// is writer-dependent — native writers collapse `..`
+					// lexically (outside the workspace) while bash walks
+					// physically — so the gate denies fail-closed on the
+					// unverifiable landing instead of naming the walk landing.
+					expect(r.message).toMatch(/could not be verified on the filesystem/);
+				} else {
+					expect(r.message).toMatch(AUTHORITY_DENY);
+					expect(r.message).toContain(landing);
+				}
 			},
 			T,
 		);
@@ -259,7 +268,12 @@ describe('#3616 item 9: .. after a directory link resolves through the link', ()
 		async () => {
 			const r = await gate('echo x > link/sub/../src/f', { prep: singleLink });
 			expect(r.verdict).toBe('BLOCKED');
-			expect(r.message).toContain(`${path.basename(r.ws)}-outside`);
+			if (process.platform === 'win32') {
+				// F-17 writer-dependence: the landing is unverifiable on win32.
+				expect(r.message).toMatch(/could not be verified on the filesystem/);
+			} else {
+				expect(r.message).toContain(`${path.basename(r.ws)}-outside`);
+			}
 		},
 		T,
 	);
@@ -273,8 +287,13 @@ describe('#3616 item 9: .. after a directory link resolves through the link', ()
 			async () => {
 				const r = await gate(command, { prep: twoHopChain });
 				expect(r.verdict).toBe('BLOCKED');
-				expect(r.message).toMatch(AUTHORITY_DENY);
-				expect(r.message).toContain(`${path.basename(r.ws)}-outside`);
+				if (process.platform === 'win32') {
+					// F-17 writer-dependence: unverifiable landing on win32.
+					expect(r.message).toMatch(/could not be verified on the filesystem/);
+				} else {
+					expect(r.message).toMatch(AUTHORITY_DENY);
+					expect(r.message).toContain(`${path.basename(r.ws)}-outside`);
+				}
 			},
 			T,
 		);

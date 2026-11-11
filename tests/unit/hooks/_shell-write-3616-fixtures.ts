@@ -133,6 +133,10 @@ export async function gate(
 			return { verdict: 'ADMITTED', message: '', ws };
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);
+			// F-27a (PR #3651 review): a crash must not read as a deny —
+			// every gate denial in this repo embeds BLOCKED; anything else
+			// is an unexpected error and rethrows so the leg fails loudly.
+			if (!message.includes('BLOCKED')) throw err;
 			return { verdict: 'BLOCKED', message, ws };
 		}
 	} finally {

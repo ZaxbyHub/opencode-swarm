@@ -787,7 +787,11 @@ function renderAncestorDenial(
 	ancestor: string,
 	err?: unknown,
 ): string {
-	const safeAncestor = sanitizeDiagnosticText(redactPath(ancestor), 320);
+	// F-22 (PR #3651 review): the ancestor detail is capped harder than the
+	// whole-message bound so the trailing class text survives the 320-char
+	// compose (a 280-char ancestor previously consumed the budget and the
+	// message ended mid-class).
+	const safeAncestor = sanitizeDiagnosticText(redactPath(ancestor), 200);
 	if (kind === 'lstat-failed') {
 		const code =
 			(err as NodeJS.ErrnoException | undefined)?.code ??

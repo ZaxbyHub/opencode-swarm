@@ -1,14 +1,15 @@
 ---
-'opencode-swarm':
-  - 3616
-  - 3606
+title: Shell write-gate residual fail-opens (#3616 items 1-15) + #3606 ancestor redaction
+issue: 3616
 ---
+
+Also closes #3606.
 
 Fixes: guardrails shell write-gate residual completion (#3616 items 1-15 + #3606; item 16's loop-landing adoption is NOT in this change — see below).
 
 ## Security (write-gate fail-open closures)
 
-- **Ambient shell-state keys** (#3616 item 1): in-command assignments naming `BASH_ENV`, `ENV`, or `BASH_FUNC_*` (any spelling incl. `%%`-suffixed keys) now deny the whole command before parsing. Startup-file values need not look command-bearing and imported functions execute later, so all key-naming assignments are refused regardless of value shape. Residual (documented, not fixable at this layer): the host's outer bash inherits the OpenCode process environment before any plugin hook runs.
+- **Ambient shell-state keys** (#3616 item 1): in-command assignments naming `BASH_ENV`, `ENV`, or `BASH_FUNC_*` (unquoted spellings incl. `%%`-suffixed keys; a key word inside a QUOTED argument — e.g. a leading-quote form like `"BASH_ENV=x"` — is not matched by the textual scan) now deny the whole command before parsing. Startup-file values need not look command-bearing and imported functions execute later, so all key-naming assignments are refused regardless of value shape. Residual (documented, not fixable at this layer): the host's outer bash inherits the OpenCode process environment before any plugin hook runs.
 - **GNU long-option abbreviations** (item 3): `rm --rec src` / `rm --f src` are now classified recursive/forced exactly like their full spellings (unambiguous-prefix matching against GNU rm's real option universe). Previously `rm --rec src` admitted where `rm -rf src` denied.
 - **Word-position `$(...)` writes** (item 4): writes inside command substitutions in For word lists, command suffixes, assignment prefixes, and Case subjects are now detected and resolved at their tracked walk state (`for i in $(echo x > ../esc); do :; done` previously reported zero writes).
 - **`sudo -D` behind launchers** (item 5): `time sudo -D /etc tee src/ok.txt`, `bash -c "sudo -D /etc tee …"`, and their launcher+shell COMPOSITION (`time bash -c "sudo -D …"`, `env -i bash -c …`) now reach the chdir rewrite — the launcher peel is shared grammar, the shell `-c` payload recursion fires behind a launcher prefix too, and the nested rewrite fallback routes through the same shell-payload helper — so the write resolves under DIR instead of the ambient cwd. `env` itself is never peeled across a flag that could change the directory or re-split the command (`-C`, `-S`, `--chdir`, `--split-string`, clusters, unknown flags), so `env -C .. sh -c …` keeps its chdir.
@@ -27,7 +28,7 @@ Fixes: guardrails shell write-gate residual completion (#3616 items 1-15 + #3606
 
 - **Class-accurate deny reasons** (item 15): the dynamic-path deny names its true cause — tilde expansion, unresolved loop landing, withdrawn directory context (popd/`cd -`), unresolvable wrapper chdir (`sudo -D`), unverifiable path, or dynamic text — instead of the single misleading "shell variable or command substitution" label.
 - **Bounded, sanitized diagnostics** (items 13-14): all seven destructive-rm deny sites (plus the junction/symlink-creation sites) route through the canonical sanitizer — control characters and the bidi marks U+061C/U+200E/U+200F are neutralized, truncation is code-point-safe (never splits a surrogate pair), and the unexpanded-variable site caps the rendered target at 160 chars.
-- **Ancestor denials redacted** (#3606): both `checkWriteTargetForSymlink` arms (lstat-failed, symlink/junction) render the ancestor home-redacted within a whole-message 320-char bound, and the error detail renders the error CODE only — no raw profile-prefixed paths or unbounded error strings reach operator-facing messages.
+- **Ancestor denials redacted** (#3606): both `checkWriteTargetForSymlink` arms (lstat-failed, symlink/junction) render the ancestor home-redacted within a whole-message 320-char bound, and the error detail renders the error CODE only — no raw profile-prefixed paths or unbounded error strings reach operator-facing messages. Residual (F-21, PR #3651 review): the home fold matches literal `/home`, `/Users`, and drive `Users`/`home` roots — profile shapes like `/srv/nfs/alice/...`, `/var/home/alice/...`, `/root/...`, Samba `homes` shares, and the Windows extended-length form (`\\?\` + drive path) still render with the account segment.
 
 ## Explain
 
