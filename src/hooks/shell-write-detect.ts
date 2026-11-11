@@ -3376,6 +3376,26 @@ function detectorCommandPartsFromWordsBounded(
 					continue;
 				}
 				if (token.startsWith('-')) {
+					// #3616 feedback round 2 (PR #3651 critic C2): the GLUED
+					// split token (-S<payload>, --split=P) carries its
+					// payload INSIDE the flag — the leaf stays `env` (with
+					// the token in `rest`) so the detector's env -S arm
+					// engages even when words follow the payload
+					// (`env -S'…' bash -c true` previously resolved the leaf
+					// to `true`/`z` and skipped the arm). The separate
+					// `-S PAYLOAD` form keeps the historical consume flow
+					// (envFlagConsumesNextWord), whose controls admit.
+					if (
+						(token.startsWith('-S') && token.length > 2) ||
+						token.startsWith('--split')
+					) {
+						return {
+							leaf: 'env',
+							rest: suffix.slice(cursor),
+							rawLeaf: rawBase,
+							depthExceeded: false,
+						};
+					}
 					cursor++;
 					if (envFlagConsumesNextWord(token) && cursor < suffix.length)
 						cursor++;
@@ -4638,7 +4658,18 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 						x === '-S' ||
 						x === '--split-string' ||
 						x.startsWith('--split-string='),
-				)
+				) ||
+				// F-02/F-06 (PR #3651 critic round 12): the payload may carry
+				// its own ambient-key assignment (BASH_ENV=/tmp/x) and `\_`
+				// separator spellings — scan the RAW split words BEFORE the
+				// re-serialization re-quotes them (the quoted form defeats the
+				// ambient scan), and refuse the unmodelable `\_` separator.
+				splitWords.some((x: string) =>
+					/^(?:export\s+|env\s+|-x\s+)?(?:BASH_ENV|ENV|BASH_FUNC_[A-Za-z0-9_%]+)=/.test(
+						x,
+					),
+				) ||
+				/\\_/.test(payload)
 			) {
 				// Nested split-string: the payload re-parses again at execution
 				// time and the reconstruction cannot model it — emit the

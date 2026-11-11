@@ -1440,20 +1440,31 @@ function dcPeelLauncherWords(
 				// the argless exec/command/builtin transparent prefixes
 				// (dcStripExecutionLauncher vocabulary — the legacy unwrap
 				// strips these, so the peel must reach the same head).
+				let sawTimeoutOptions = false;
 				while (next < words.length) {
 					const w = words[next] as string;
 					if (!w.startsWith('-')) {
-						// timeout's DURATION is its first positional argument.
-						if (head === 'timeout' && /^[0-9]+[a-z]?$/i.test(w)) {
+						// timeout's DURATION is its first positional argument
+						// (C3: float/scientific/inf forms per GNU timeout and
+						// dcStripExecutionLauncher's duration grammar).
+						if (head === 'timeout' && /^[0-9]*\.?[0-9]+[a-z]?$/i.test(w)) {
 							next += 1;
 							continue;
 						}
 						break;
 					}
 					if (w === '--') {
+						// C3: `timeout -- 5 cmd` — `--` ends OPTIONS, not the
+						// duration; keep scanning so the DURATION positional
+						// is consumed.
+						if (head === 'timeout') {
+							next += 1;
+							continue;
+						}
 						next += 1;
 						break;
 					}
+					if (head === 'timeout') sawTimeoutOptions = true;
 					if (w.startsWith('--')) {
 						const eq = w.indexOf('=');
 						const headW = eq === -1 ? w : w.slice(0, eq);
@@ -1462,7 +1473,11 @@ function dcPeelLauncherWords(
 								(headW === '--output' || headW === '--format')) ||
 							(head === 'nice' && headW === '--adjustment') ||
 							(head === 'timeout' &&
-								(headW === '--kill-after' || headW === '--signal'));
+								(headW === '--kill-after' || headW === '--signal')) ||
+							(head === 'stdbuf' &&
+								(headW === '--input' ||
+									headW === '--output' ||
+									headW === '--error'));
 						if (takesValue && eq === -1) next += 2;
 						else next += 1;
 						continue;
@@ -1482,7 +1497,19 @@ function dcPeelLauncherWords(
 						next += 2;
 					else if (head === 'stdbuf' && c !== undefined && 'ioe'.includes(c))
 						next += w.length === 2 ? 2 : 1;
+					else if (head === 'exec' && c === 'a' && w.length === 2) next += 2;
 					else next += 1;
+				}
+				// C3: timeout with ONLY options and no DURATION yet — the
+				// duration follows the option region (also after `--`).
+				if (
+					head === 'timeout' &&
+					sawTimeoutOptions &&
+					next < words.length &&
+					!(words[next] as string).startsWith('-') &&
+					/^[0-9]*\.?[0-9]+[a-z]?$/i.test(words[next] as string)
+				) {
+					next += 1;
 				}
 			} else {
 				while (next < words.length) {
@@ -1495,10 +1522,16 @@ function dcPeelLauncherWords(
 					if (
 						ENV_PEELABLE_FLAGS.has(w) ||
 						w.startsWith('--unset=') ||
-						/^-[uU][A-Za-z_]/.test(w)
+						/^-[uU][A-Za-z_]/.test(w) ||
+						// C3: argless clusters (-i0v) and glued -u inside a
+						// cluster (-iuHOME: -u is last -> next word is its
+						// argument; -uHOME glued swallows the tail).
+						/^-[i0vV]+$/.test(w) ||
+						/^-[i0vV]*[uU][A-Za-z_]/.test(w)
 					) {
 						next += 1;
 						if (w === '-u' || w === '--unset') next += 1;
+						else if (/[uU]$/.test(w)) next += 1;
 						continue;
 					}
 					if (stopAtEnvFlags) return head; // env stays the head
@@ -1593,6 +1626,10 @@ function matchEnvChdir(words: string[]): DcChdirMatch {
 			translated += ch;
 		}
 		const splitWords = shellSplitWords(translated);
+		// F-06 (PR #3651 critic round 12): the `\_` translation changes the
+		// payload — the splice re-emission cannot faithfully represent it,
+		// so fail closed instead of judging a translated command.
+		if (translated !== payload) return { kind: 'failClosed' };
 		// Only env's own option region (before the command word) can carry
 		// a nested split spelling; the wrapped command's flags are its own.
 		for (const w of splitWords) {
@@ -3358,28 +3395,46 @@ export function dcCheckJunctionCreation(
 	// operand (ln TARGET [LINK]).
 	const lnHead = dcSegmentVerbMatch(segment, ['ln'], false);
 	if (lnHead) {
-		const lnWords = lnHead.rest.trim().split(/\s+/).filter(Boolean);
+		// C1 (PR #3651 critic round 12): split through shellSplitWords so
+		// quotes are stripped on options AND operands (a quoted `"/etc"`
+		// target previously resolved as a relative filename inside cwd and
+		// escaped the check). GNU ln arg-taking short options: -S SUFFIX
+		// and -t DIR (separate or glued); long: --suffix=SUF, --target-
+		// directory=DIR glued, or unambiguous abbreviations with separate
+		// args.
+		const lnWords = shellSplitWords(lnHead.rest.trim());
 		let symbolic = false;
 		let operand: string | undefined;
 		for (let i = 0; i < lnWords.length; i++) {
 			const w = lnWords[i] as string;
-			const bare = w.replace(/^["']|["']$/g, '');
-			if (bare === '--') {
+			if (w === '--') {
 				operand = lnWords[i + 1];
 				break;
 			}
-			if (bare.startsWith('--')) {
-				if ('symbolic'.startsWith(bare.slice(2)) && bare.length >= 3)
+			if (w.startsWith('--')) {
+				const eq = w.indexOf('=');
+				const headW = eq === -1 ? w : w.slice(0, eq);
+				if ('symbolic'.startsWith(headW.slice(2)) && headW.length >= 3)
 					symbolic = true;
+				const takesValue =
+					headW === '--suffix' ||
+					headW === '--target-directory' ||
+					(headW.length >= 3 &&
+						eq === -1 &&
+						'--suffix'.startsWith(headW) &&
+						!'--symbolic'.startsWith(headW)) ||
+					(headW.length >= 3 &&
+						eq === -1 &&
+						'--target-directory'.startsWith(headW));
+				if (eq === -1 && takesValue) i += 1;
 				continue;
 			}
-			if (bare.startsWith('-')) {
-				const members = bare.slice(1);
-				const idx = members.indexOf('s');
-				if (idx !== -1) symbolic = true;
-				// -T (no-dereference) and suffix forms keep the operands;
-				// arg-less members only — ln has no separate-arg short
-				// options.
+			if (w.startsWith('-')) {
+				const members = w.slice(1);
+				if (members.includes('s')) symbolic = true;
+				// -S SUFFIX / -t DIR consume the NEXT word when the arg-taking
+				// member is LAST; glued forms (-S.bak) swallow the tail.
+				if (members.endsWith('S') || members.endsWith('t')) i += 1;
 				continue;
 			}
 			operand = w;

@@ -412,3 +412,60 @@ describe('#3616 login-tail post-`--` and nested-time spellings (final-critic r5)
 		T,
 	);
 });
+
+describe('#3651 feedback round: launcher-peel, junction divergence, origin class', () => {
+	// F-03/F-04 (review): arg-taking option values and the exec/command/
+	// timeout/stdbuf vocabulary are consumed by the launcher peel so the
+	// wrapped sudo -D / env -C chdir survives.
+	for (const command of [
+		'/usr/bin/time -f FMT sudo -D /etc tee src/ok.txt',
+		'/usr/bin/time --format FMT sudo -D /etc tee src/ok.txt',
+		'nice --adjustment 5 env -C /etc tee src/x.txt',
+		'exec sudo -D /etc tee src/ok.txt',
+		'exec -a myname sudo -D /etc tee src/ok.txt',
+		'command sudo -D /etc tee src/ok.txt',
+		'timeout 5 sudo -D /etc tee src/ok.txt',
+		'timeout 0.5 sudo -D /etc tee src/ok.txt',
+		'timeout -- 5 sudo -D /etc tee src/ok.txt',
+		'stdbuf -oL sudo -D /etc tee src/ok.txt',
+		'stdbuf --output L sudo -D /etc tee src/ok.txt',
+		'env -uHOME env -C /etc tee src/x.txt',
+		'env -iuHOME env -C /etc tee src/x.txt',
+	]) {
+		test(
+			`${command} denies (wrapper chdir survives the peel)`,
+			async () => {
+				const r = await gate(command);
+				expect(r.verdict).toBe('BLOCKED');
+				expect(r.message).toMatch(AUTHORITY_DENY);
+			},
+			T,
+		);
+	}
+	// F-05: env -S payload chdir fail-closed (detector + recurseSplit arms).
+	for (const command of [
+		`env -S 'sudo -D /etc tee src/ok.txt'`,
+		`env -S'env -C /etc tee src/x.txt'`,
+		"env -S 'rm\\_-rf\\_../v'",
+		`env -S'BASH_ENV=/tmp/x bash' -c true`,
+	]) {
+		test(
+			`${command} denies (payload chdir/ambient refused)`,
+			async () => {
+				const r = await gate(command);
+				expect(r.verdict).toBe('BLOCKED');
+			},
+			T,
+		);
+	}
+	// Controls: benign spellings keep their verdicts.
+	for (const command of [`env -S 'echo hi'`, `env -S'echo hi' -c x`]) {
+		test(
+			`${command} stays admitted (benign payload)`,
+			async () => {
+				expect((await gate(command)).verdict).toBe('ADMITTED');
+			},
+			T,
+		);
+	}
+});
