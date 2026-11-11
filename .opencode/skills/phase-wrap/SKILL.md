@@ -74,7 +74,7 @@ The tool will automatically write the retrospective to \`.swarm/evidence/retro-{
    - Include evidence path (.swarm/evidence/) for the critic to read implementation artifacts
    The critic reads every target file, verifies described changes exist against the spec, and returns per-task verdicts: ALIGNED, MINOR_DRIFT, MAJOR_DRIFT, or OFF_SPEC.
    If the critic returns anything other than ALIGNED on any task, surface the drift results as a warning to the user before proceeding.
-   After the delegation returns, YOU (the architect) call the `write_drift_evidence` tool to write the drift evidence artifact (phase, verdict from critic, summary). The critic does NOT write files — it is read-only. Only then proceed to step 5.55. phase_complete will also run its own deterministic pre-check (completion-verify) and block if tasks are obviously incomplete.
+   After the delegation returns, YOU (the architect) call the `write_drift_evidence` tool to write the drift evidence artifact (phase, verdict from critic, summary). The critic does NOT write files — it is read-only. Only then proceed to step 5.55. Outside turbo mode, phase_complete will also run its own deterministic pre-check (completion-verify) and block if tasks are obviously incomplete.
    ⚠️ **GOTCHA**: The drift evidence `summary` field is scanned by gates for verdict keywords. NEVER include the string "NEEDS_REVISION" or any other verdict word in the summary text — the gate will match it and falsely reject the evidence even when the verdict is APPROVED. Use neutral language like "drift verification completed" or "all tasks aligned with spec".
 5.55. **Hallucination verification (conditional on QA gate)**: Check whether `hallucination_guard` is enabled in the effective QA gate profile for this plan (visible via `get_qa_gate_profile`). If disabled or turbo mode is active, skip silently and proceed to step 5.6.
    If `hallucination_guard` is enabled, delegate to the active swarm's critic_hallucination_verifier agent with HALLUCINATION-CHECK context:
@@ -84,7 +84,7 @@ The tool will automatically write the retrospective to \`.swarm/evidence/retro-{
    If the verifier returns NEEDS_REVISION: STOP — do NOT call phase_complete.
    Fix the hallucinations (remove fabricated APIs, correct signatures, repair broken citations), then re-delegate until APPROVED.
    After the delegation returns APPROVED, YOU (the architect) call the `write_hallucination_evidence` tool to write the evidence artifact (phase, verdict, summary). The critic does NOT write files — it is read-only.
-   NOTE: This step is enforced by the plugin. If `hallucination_guard` is enabled and `.swarm/evidence/{phase}/hallucination-guard.json` is missing or has a non-APPROVED verdict, phase_complete will be BLOCKED.
+   NOTE: Outside turbo mode, this step is enforced by the plugin. If `hallucination_guard` is enabled and `.swarm/evidence/{phase}/hallucination-guard.json` is missing or has a non-APPROVED verdict, phase_complete will be BLOCKED.
    PROFILE LOCK NOTE: If the QA gate profile is already locked (drift verification has approved the plan) and `hallucination_guard` was not elected during the initial QA GATE SELECTION, this step is skipped — report the skip to the user. A new plan cycle is required to enable the gate.
 5.56. **Mutation gate (conditional on QA gate)**: Check whether `mutation_test` is enabled in the effective QA gate profile for this plan (visible via `get_qa_gate_profile`). If disabled or turbo mode is active, skip silently and proceed to step 5.6.
    If `mutation_test` is enabled:
@@ -95,7 +95,7 @@ The tool will automatically write the retrospective to \`.swarm/evidence/retro-{
    5. If verdict is FAIL: STOP — do NOT call phase_complete. Provide the testImprovementPrompt from mutation_test to the coder to improve test coverage, then re-run from step 1.
    6. If verdict is WARN: non-blocking — proceed to step 5.6 with a warning to the user.
    7. If verdict is PASS: proceed to step 5.6.
-   NOTE: This step is enforced by the plugin. If `mutation_test` is enabled and `.swarm/evidence/{phase}/mutation-gate.json` is missing or has a 'fail' verdict, phase_complete will be BLOCKED.
+   NOTE: Outside turbo mode, this step is enforced by the plugin. If `mutation_test` is enabled and `.swarm/evidence/{phase}/mutation-gate.json` is missing or has a 'fail' verdict, phase_complete will be BLOCKED.
 5.58. **Design-doc sync (conditional on `design_docs.enabled` — issue #1080)**: If `design_docs.enabled` is not true, skip silently. Otherwise: `phase_complete` runs a deterministic, non-blocking design-doc drift check and writes `.swarm/doc-drift-phase-{phase}.json`. If its verdict is `DOC_STALE`, enter MODE: DESIGN_DOCS in sync mode for the stale sections only — delegate to the active swarm's `docs_design` agent (NOT the standard `docs` agent) with the changed files + the stale section IDs, and have it update the affected docs and append a `design-changelog.md` entry. This is advisory and NON-BLOCKING — never hold up phase_complete on design-doc lag, and never write `.swarm/spec.md`, `CHANGELOG.md`, or `docs/releases/pending/*` here.
 5.59. **Required agent dispatch for phase_complete**: Before calling `phase_complete`, the architect MUST have dispatched each of the active swarm's standard agents at least once during this phase. By default, `phase_complete` requires these agents:
 
@@ -126,7 +126,7 @@ This is not optional. Missing required-agent calls in a phase is always a violat
 There is no project where code ships without review, tests, and required documentation.
 
 5.6. **Mandatory gate evidence**: Before calling phase_complete, ensure:
-   - `.swarm/evidence/{phase}/completion-verify.json` exists (written automatically by the completion-verify gate)
+   - `.swarm/evidence/{phase}/completion-verify.json` exists (written automatically by the completion-verify gate) — outside turbo mode
     - `.swarm/evidence/{phase}/drift-verifier.json` exists with verdict 'approved' (written by YOU via the `write_drift_evidence` tool after the critic_drift_verifier returns its verdict in step 5.5) — required when an effective spec exists
    - `.swarm/evidence/{phase}/hallucination-guard.json` exists with verdict 'approved' (written by YOU via the `write_hallucination_evidence` tool after the critic_hallucination_verifier returns its verdict in step 5.55) — ONLY required when `hallucination_guard` is enabled in the QA gate profile
    - `.swarm/evidence/{phase}/mutation-gate.json` exists with verdict 'pass' or 'warn' (written by YOU via the `write_mutation_evidence` tool after step 5.56) — ONLY required when `mutation_test` is enabled in the QA gate profile
@@ -136,7 +136,7 @@ There is no project where code ships without review, tests, and required documen
       for the expected reason -> fix restored -> test passes. If the phase
       changed no regression tests, record `not applicable` with the changed-file
       evidence.
-    If any required file is missing, run the missing gate first. Turbo mode does not skip every gate: it makes phase_complete bypass the completion-verify, drift-verifier, hallucination-guard, mutation-gate, phase-council and todo-gate checks, while it does not skip the final-review, final-council, full-auto or architecture-supervisor gates (each still fires only under its own enable and trigger conditions).
+    If any required file is missing, run the missing gate first. Turbo mode does not skip every gate: it makes phase_complete bypass the completion-verify, drift-verifier, hallucination-guard, mutation-gate, phase-council and todo-gate checks, while it does not skip the final-review, final-council, full-auto or architecture-supervisor gates (each still fires only under its own enable and trigger conditions). Lean Turbo also runs its own phase-ready check (`lean_turbo_readiness`) unless Epic Mode owns readiness.
    NOTE: Outside turbo mode, steps 5.5, 5.55, and 5.56 are enforced by runtime hooks. If `hallucination_guard` is enabled and you skip the critic_hallucination_verifier delegation (or fail to call `write_hallucination_evidence`), phase_complete will be BLOCKED by the plugin. Similarly, if `mutation_test` is enabled and you skip step 5.56 (or fail to call `write_mutation_evidence`), phase_complete will be BLOCKED. These are not suggestions — they are hard enforcement mechanisms.
 5.65. **Phase Council (conditional on QA gate — `phase_council`)**: Check whether `phase_council` is enabled in the effective QA gate profile (visible via `get_qa_gate_profile`). If disabled or turbo mode is active, skip silently and proceed to step 5.7.
    This gate is triggered by the `phase_council` QA gate, NOT by `council_mode`. (`council_mode` controls per-task Stage B replacement in MODE: EXECUTE; `phase_council` controls holistic phase-level review here in MODE: PHASE-WRAP.)
