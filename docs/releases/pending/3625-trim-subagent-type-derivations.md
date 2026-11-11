@@ -23,6 +23,23 @@
     forms, and a padded suffix near-miss (`' Case_test_engineer '` against
     `engineer`) stays gated.
 
+- `src/sandbox/linux/bubblewrap-executor.ts` (`buildBwrapArgs`): the
+  size-capped `--tmpfs <temp>` is now mounted BEFORE any scope or read-only
+  root that lies beneath the temp root (and still after any scope that
+  contains it). New suite
+  `tests/unit/sandbox/bwrap-tmpfs-mount-order.test.ts` pins the order.
+
+## Why (sandbox mount order)
+
+bwrap mounts in argument order. The tmpfs was emitted after the scope
+`--bind`s, so a scope under `/tmp` (the default temp root, and where an
+`os.tmpdir()` workspace lives) was hidden by the tmpfs: in-scope writes
+landed in the sandbox-only tmpfs and never reached the host. GitHub's
+`ubuntu-latest` moved from 24.04 (no `bwrap` installed, so the Linux sandbox
+integration tests returned early) to 26.04 (bubblewrap 0.11.1, working user
+namespaces), which made those tests run for real and fail. A diagnostic run
+on both images confirmed the current order fails and tmpfs-first succeeds.
+
 ## Why
 
 Follow-up from PR #3617 (issue #3625): two sites still fed the raw
