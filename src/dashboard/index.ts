@@ -23,6 +23,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
 import { canonicalProjectKey } from '../db/canonical-project.js';
 import { log } from '../utils/logger.js';
+import { isBlankDirectory } from '../utils/path-security.js';
 import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache.js';
 import { closeDashboardServer, listenDashboardServer } from './server.js';
 
@@ -129,13 +130,19 @@ function disabledHandle(status: string): DashboardHandle {
  * handle carrying a positive notice signal (`enabled:false`, `listening:false`
  * plus a `disabled_port_conflict` status) and the `.swarm/dashboard-status.json`
  * notice file — the disable-with-notice contract in issue #2509 AC3/AC7.
+ * A blank or whitespace root is `disabled_invalid_options`: it names no
+ * project, and its notice file would land under the cwd (#3165 B).
  */
 export async function startDashboardServer(
 	options: DashboardStartOptions,
 ): Promise<DashboardHandle> {
 	const directory =
 		options.directory ?? options.projectRoot ?? options.root ?? '';
-	if (!directory || !Number.isInteger(options.port) || options.port <= 0) {
+	if (
+		isBlankDirectory(directory) ||
+		!Number.isInteger(options.port) ||
+		options.port <= 0
+	) {
 		return disabledHandle('disabled_invalid_options');
 	}
 	const rootKey = canonicalProjectKey(directory);
@@ -213,16 +220,22 @@ export async function startDashboardServer(
  */
 export const startDashboard = startDashboardServer;
 
-/** Live handle for a project root (for the `/swarm dashboard` command). */
+/**
+ * Live handle for a project root (for the `/swarm dashboard` command). A blank
+ * root has none: its canonical key is the cwd project's (#3165 B).
+ */
 export function getDashboardHandle(directory: string): DashboardHandle | null {
+	if (isBlankDirectory(directory)) return null;
 	return registry.get(canonicalProjectKey(directory))?.handle ?? null;
 }
 
 /**
  * Sync best-effort close used by the plugin dispose/exit cleanup path
- * (cannot await there). Safe when nothing is running.
+ * (cannot await there). Safe when nothing is running. A blank root is a
+ * no-op, never the cwd project's listener (#3165 B).
  */
 export function closeDashboardServerForRoot(directory: string): void {
+	if (isBlankDirectory(directory)) return;
 	const key = canonicalProjectKey(directory);
 	const entry = registry.get(key);
 	if (!entry) return;
@@ -236,12 +249,14 @@ export function closeDashboardServerForRoot(directory: string): void {
  * root's listener ONLY when the registered handle is the caller's own. A
  * stale dispose from instance A (whose start was overwritten by instance B's
  * later start on the same root) becomes a no-op instead of tearing down B's
- * live listener. Returns true when this call performed the close.
+ * live listener. Returns true when this call performed the close. A blank
+ * root closes nothing (#3165 B).
  */
 export function closeDashboardServerForRootIfOwner(
 	directory: string,
 	expectedHandle: DashboardHandle | null,
 ): boolean {
+	if (isBlankDirectory(directory)) return false;
 	const key = canonicalProjectKey(directory);
 	const entry = registry.get(key);
 	if (!entry) return false;

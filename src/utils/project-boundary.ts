@@ -2,6 +2,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { warn } from './logger';
+import { isBlankDirectory } from './path-security';
 
 /** Maximum depth to walk up the directory tree before failing closed. */
 export const MAX_PROJECT_ROOT_DEPTH = 20;
@@ -217,6 +218,12 @@ export function assertProjectRoot(
 	dependencies: ProjectRootProbeDependencies = fs,
 	artifactLabel = 'runtime state',
 ): void {
+	// #3165 B: realpath('') is the process cwd, which is not a project root.
+	if (isBlankDirectory(directory)) {
+		throw new Error(
+			`Cannot verify project root for a blank directory — refusing to write ${artifactLabel} under the process cwd`,
+		);
+	}
 	let resolved: string;
 	try {
 		resolved = dependencies.realpathSync(directory);
@@ -274,8 +281,9 @@ export function assertProjectRoot(
  * - `redirect`: an ancestor owns `.swarm/` plus a project indicator — use
  *   `owningRoot` for all project-surface reads/writes and surface an
  *   actionable hint naming it.
- * - `fail-closed`: ownership is indeterminable (inaccessible ancestor probes
- *   or depth exhaustion) — write no runtime state anywhere.
+ * - `fail-closed`: ownership is indeterminable (a blank directory,
+ *   inaccessible ancestor probes or depth exhaustion) — write no runtime
+ *   state anywhere.
  *
  * Silent by design: messaging is the caller's job (`assertProjectRoot` keeps
  * its warn/throw contract; bootstrap emits one bounded operational hint).
@@ -289,6 +297,14 @@ export function resolveProjectRootDecision(
 	directory: string,
 	dependencies: ProjectRootProbeDependencies = fs,
 ): ProjectRootDecision {
+	// Same policy as assertProjectRoot (#3165 B): realpath('') is the cwd.
+	if (isBlankDirectory(directory)) {
+		return {
+			kind: 'fail-closed',
+			directory,
+			reason: 'the directory is blank, so it names no project',
+		};
+	}
 	let resolved: string;
 	try {
 		resolved = dependencies.realpathSync(directory);
