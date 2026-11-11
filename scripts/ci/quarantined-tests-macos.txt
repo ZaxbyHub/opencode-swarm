@@ -15,14 +15,6 @@
 # Active macOS-only quarantine entries are below; each carries the Check
 # 7-enforced OWNER/EXPIRY metadata.
 
-# OWNER: zaxbysauce — issue #2738 (deterministic macOS signal-child failure:
-#   the crash fixture survives the delivered POSIX signal and exits 0 on
-#   macos-latest runners; 9/9 failures across PRs #2735/#2736 on 2026-09-12,
-#   ubuntu shards green; test already win32-skipped in-source)
-# EXPIRY: 2026-11-18 — retire when the #2738 signal-fixture root fix (SIGKILL
-#   delivery or survival detection) lands and the file passes on macos-latest.
-# Renewed 2026-09-25 per issue #2900 (Workstream I3); previous EXPIRY 2026-09-26.
-tests/unit/scripts/ci/repository-validation-real-process-2675.test.ts
 #
 # tests/unit/hooks/pr-feedback-scope-controller.test.ts (issue #2730)
 # ---------------------------------------------------------------------------

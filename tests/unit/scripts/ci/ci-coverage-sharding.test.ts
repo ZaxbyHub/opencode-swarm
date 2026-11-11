@@ -152,7 +152,13 @@ describe('ci.yml coverage sharding — CI-004 + issue #2341', () => {
 		// silently resolves to null, the is-release clause goes inert, and a
 		// release-please merge group (shards skipped, zero artifacts) would
 		// fail the download step and evict the release (final-critic F1).
-		expect(coverageAggJob).toContain('needs: [coverage-shard, detect-release]');
+		// `quality` is direct for the same reason (#3250): the fail-closed
+		// step echoes needs.quality.result so a cascade failure names its
+		// upstream layer; quality already gates coverage-shard, so the edge
+		// adds naming, not ordering.
+		expect(coverageAggJob).toContain(
+			'needs: [coverage-shard, detect-release, quality]',
+		);
 		expect(coverageAggJob).toContain('if: always()');
 		expect(coverageAggJob).toContain('timeout-minutes: 10');
 	});
@@ -168,6 +174,64 @@ describe('ci.yml coverage sharding — CI-004 + issue #2341', () => {
 		);
 		expect(coverageAggJob).toContain(
 			'if [ "$COVERAGE_SHARD_RESULT" != "success" ]; then',
+		);
+	});
+
+	test('fail-closed step names the upstream quality job result (issue #3250)', () => {
+		// Forensics for #3250: 11 of 14 "No files were found: coverage/lcov.info"
+		// signature runs were a quality failure (check:pending-fragment) that
+		// skipped the whole shard matrix; the old error named only the matrix
+		// result, not the layer that caused it. The quality result must ride
+		// an env var (never interpolate needs.* into shell source), and the
+		// step-scoped slice proves the strings sit in THIS step, not a sibling.
+		const failClosedStep = extractStep(
+			yml,
+			'Check coverage shard results (fail closed)',
+		);
+		expect(failClosedStep).not.toBe('');
+		expect(failClosedStep).toContain(
+			'QUALITY_RESULT: ${{ needs.quality.result }}',
+		);
+		expect(failClosedStep).toContain(
+			"::error::coverage-shard matrix result was '$COVERAGE_SHARD_RESULT', not 'success' (upstream quality job result: '$QUALITY_RESULT')",
+		);
+	});
+
+	test('merge step carries the id the upload gate references (issue #3250)', () => {
+		const mergeStep = extractStep(
+			yml,
+			'Merge shard reports and enforce threshold',
+		);
+		expect(mergeStep).not.toBe('');
+		expect(mergeStep).toContain('id: merge-coverage');
+		// The id is load-bearing: the upload gate below addresses it via
+		// steps.merge-coverage.outcome, and a renamed id would silently detach
+		// the gate (the outcome expression then resolves to empty and the
+		// comparison never suppresses the misleading warning).
+		expect(coverageAggJob).toContain('steps.merge-coverage.outcome');
+	});
+
+	test('final upload gates on the merge step having run, not on its exit status (issue #3250)', () => {
+		// Outcome semantics pinned for all three material cases:
+		//   success  -> upload runs (normal artifact)
+		//   failure  -> upload runs (threshold-failure report is the diagnostic;
+		//               a success-only gate would discard exactly the runs that
+		//               need diagnosis)
+		//   skipped  -> upload suppressed: the fail-closed step exited first,
+		//               the merge never ran, coverage/lcov.info was never
+		//               produced, and the unconditional always()-upload used to
+		//               warn "No files were found with the provided path:
+		//               coverage/lcov.info" — the misleading #3250 headline.
+		// With this gate, that warning firing again means a GENUINE
+		// merge-ran-but-no-file event.
+		const uploadStep = extractStep(yml, 'Upload coverage report');
+		expect(uploadStep).not.toBe('');
+		expect(uploadStep).toContain('if: always() &&');
+		expect(uploadStep).toContain("steps.merge-coverage.outcome != 'skipped'");
+		// The success-only regression must stay impossible to reintroduce
+		// silently: this pin is what the comparator reverse-mutation flips.
+		expect(uploadStep).not.toContain(
+			"steps.merge-coverage.outcome == 'success'",
 		);
 	});
 
