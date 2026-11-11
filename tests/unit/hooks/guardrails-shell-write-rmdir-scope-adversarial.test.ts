@@ -287,9 +287,18 @@ describe('real gate: sequences and operand shapes fall back to scope', () => {
 		);
 		// The kernel removes <outside>/a; #3616 D8 resolves through the link, so
 		// the gate judges the REAL landing (outside the root), not <ws>/a.
-		expect(await gate('coder', ws, 'rmdir link/../a')).toMatch(
-			/AUTHORITY_ROOT_ESCAPE[\s\S]*rmdir-adv-out-/,
-		);
+		// F-17 (PR #3651 review): on win32 a `..` crossing a junction is
+		// writer-dependent (native writers collapse `..` lexically), so the
+		// gate denies fail-closed on the unverifiable landing instead.
+		if (isWin32) {
+			expect(await gate('coder', ws, 'rmdir link/../a')).toMatch(
+				/could not be verified on the filesystem/,
+			);
+		} else {
+			expect(await gate('coder', ws, 'rmdir link/../a')).toMatch(
+				/AUTHORITY_ROOT_ESCAPE[\s\S]*rmdir-adv-out-/,
+			);
+		}
 	});
 
 	it('rejects an operand with a mid-word `#`', async () => {
