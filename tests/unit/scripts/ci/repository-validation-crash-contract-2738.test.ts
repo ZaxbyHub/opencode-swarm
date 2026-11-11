@@ -101,7 +101,9 @@ describe('repository-validation crash contract — issue #2738 retirement', () =
 		const spawnStart = harness.indexOf('child = Bun.spawn(item.argv');
 		expect(spawnStart).toBeGreaterThanOrEqual(0);
 		const spawnBlock = harness.slice(spawnStart, spawnStart + 500);
-		expect(spawnBlock).toContain('detached: true');
+		// Active-option match (not a commented-out `// detached: true`):
+		// line-anchored, so only a live option line satisfies it.
+		expect(spawnBlock).toMatch(/^[^\S\n]*detached: true,$/m);
 		expect(harness).toContain("process.kill(-child.pid, 'SIGKILL')");
 	});
 });
