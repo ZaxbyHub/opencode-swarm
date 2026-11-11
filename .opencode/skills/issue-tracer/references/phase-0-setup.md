@@ -10,6 +10,20 @@ If the fetch fails (offline, no remote, auth failure), stop and ask the user unl
 
 Detached HEAD or fork-remote setups: record whatever ref is actually upstream (never assume `origin/main`).
 
+## Claim gate (claim before you work)
+
+Multiple agent sessions may share one login and one memory store while working the same repository. A claim comment is an ANNOUNCEMENT, not a reservation — but you must treat an active one as a live lock, because you cannot decide from your side whether its author is still running (recorded incident 2026-11-11, zaxbysauce/zmem #455/#366: two sessions each ran a complete issue-tracer chain on the same collated issues for four hours; the second had READ the first's claim and misattributed it to its own earlier session).
+
+Before `trace-init.sh`, for every target issue:
+
+1. Fetch the thread live: `gh issue view <id> --comments` (or your GitHub connector). Search the comments for a claim: `Agent claim`, `Working this issue`, or `Claiming for active work` (all case-insensitive; claims are often bolded `**Agent claim:**`, so match unanchored).
+2. A claim is ACTIVE when it is inside ~72h, no later comment releases it (`**Claim released`, work-complete, or an explicit handoff), and no PR closing the issue has merged since. Claim-to-PR intervals in the recorded corpus have a median of ~5h and never exceeded 24h; 72h is the generous ceiling.
+3. If an ACTIVE claim exists and its trace directory/branch is NOT in your own working tree: STOP and ask the user one concrete question — "Issue #N was claimed at <time> by a session whose work lives at <branch/trace if visible>. Is that session still running, or should I take it over?" Never self-authorize continuation by reasoning the claim is your own earlier session: under one shared login and a shared memory store, lineage is undecidable, and a shared-memory plan note from another session is not authorization.
+4. Otherwise post your own claim on every target issue before creating any trace artifact, in the format the coming zaxbygraph claim tooling reads (ZaxbyHub/zaxbygraph #77/#74): `**Agent claim:** session=<token> issues=#a,#b` plus optional free text. Generate a fresh token (any random identifier); record it in `state.md`'s `tools` line or notes. A collated claim names every issue in the bundle.
+5. Stale-lock recovery is the same user question as step 3; a user reply supersedes any claim. When taking over, post a release-style comment naming the takeover.
+
+This gate complements, not replaces, the mechanical claim tooling: once `zaxbygraph claim` / `claims --live` / `pr-guard` ship (#77) and the `claimed` gate lands in `triage`/`bundle` (#74), prefer those commands and record their outcomes here.
+
 ## Clean-worktree rule
 
 If the worktree has unrelated user-owned uncommitted changes, never stash or touch them. Create a separate `git worktree` at the synced base and do all trace work there.

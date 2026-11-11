@@ -3,7 +3,7 @@ name: issue-tracer
 description: Evidence-first investigation, validation, and full resolution of issues and bugs. Use when asked to investigate, trace, root-cause, reproduce, plan, fix, resolve, close, or prepare a PR for an issue, bug report, defect, regression, failing test, crash, or confusing runtime behavior. Drives issue validation, acceptance-check-driven reproduction and fix planning, independent critic and implementation review, recurrence-class eradication, and an invariant-aware, PR-ready closure with a recorded human merge gate under a mandatory full-resolution contract that forbids partial fixes, deferred work, and unwired code.
 license: MIT
 metadata:
-  version: 3.0.1
+  version: 3.0.2
   source: .opencode/skills/issue-tracer/SKILL.md
   audience: swarm-plugin
 ---
@@ -71,6 +71,8 @@ This table is the normative center of the protocol: `trace-check.sh` reads it, a
 10. Below 90% root-cause confidence, return to localization with a named missing-evidence target; escalate on a genuine tie.
 11. Never disable, delete, weaken, or skip tests or checks to reach green.
 12. Never push, merge, publish, or perform destructive operations without explicit, recorded user approval - approval is bound to a specific PR head SHA and invalidated by any later push.
+13. Claim before you work, and treat an active claim as a live lock. Before Phase 1, fetch every target issue's comment thread live and look for a claim comment (`Agent claim`, `Working this issue`, `Claiming for active work` - case-insensitive). An active claim (inside ~72h, no release/`Claim released`/work-complete comment after it, no merged PR) whose trace or branch is not in your own working tree means STOP and ask the user. Never self-authorize continuation by reasoning the claim is your own earlier session: under one shared login and a shared memory store, lineage is undecidable. Post your own claim (`**Agent claim:** session=<token> issues=#a,#b`) before trace work starts.
+14. On discovering a parallel trace or PR for the same issues: never force-push over a parallel session's published head. Publish under a renamed branch, disclose the collision and the executed evidence in the PR body, and route the which-PR-ships decision to the user.
 
 ## Phases
 
@@ -79,6 +81,7 @@ Read the referenced file before starting that phase. `state.md` is updated at ev
 ### Phase 0: Setup
 
 - Fetch the default branch, record base SHA and freshness; fail closed on sync failure absent a quoted override.
+- Run the claim gate (see `references/phase-0-setup.md`): fetch each target issue's comments live; an active foreign claim means stop and ask the user; otherwise post your own claim with a session token before creating any trace artifact.
 - If the worktree has unrelated user changes, isolate work in a separate `git worktree` rather than touching them.
 - Run `trace-init.sh <issue-slug>` from the repo root to create the trace directory, seed `state.md`, and record the Phase 0 tree-id.
 - Classify the depth tier (S/M/L) and record it; run the advisory handshake.
@@ -106,6 +109,7 @@ Read the referenced file before starting that phase. `state.md` is updated at ev
 - Run `repro-check.sh run` against the pre-fix base for each executable check; reject vacuous checks that also pass on the buggy tree.
 - Freeze the checks with `repro-check.sh checkpoint` before any fix code exists; record the checkpoint tree-id.
 - Author checks at arm's length from the implementer when subagent dispatch is available (tiers M/L required, S optional); disclose the limitation otherwise. Check authoring is mechanical work: use the runner's lowest-cost tier that can plausibly succeed.
+- Before publishing the anchor comment, re-fetch the issue thread: a claim or checkpoint anchor with a different slug posted by another session means a parallel trace is live - halt and surface it to the user instead of publishing.
 - Reference: `references/acceptance-checks.md`.
 
 ### Phase 3: Fix Plan and Plan Critic
@@ -145,6 +149,7 @@ Read the referenced file before starting that phase. `state.md` is updated at ev
 ### Phase 5: Closure and Publication
 
 - Inspect the final diff for unrelated files; write `10-pr-body.md` from `assets/pr-template.md`, including the merge-status line.
+- Pre-publication collision check: `gh pr list` for the target issue numbers and `git ls-remote` for issue-numbered branches. An open parallel PR or an unexpected remote head is a collision - follow rule 14 (no force-push; rename the branch, disclose, ask the user).
 - Publish through the repository's own publish protocol (e.g. a `commit-pr` skill) when the user asks to commit, push, or open a PR.
 - Reference: `assets/pr-template.md`.
 
