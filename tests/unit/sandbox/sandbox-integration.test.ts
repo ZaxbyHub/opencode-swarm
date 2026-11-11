@@ -33,8 +33,12 @@ import * as path from 'path';
 
 // Platform detection
 const isLinux = process.platform === 'linux';
-// bwrap is a hard prerequisite for the Linux legs; a missing binary skips them explicitly.
-const bwrapOnPath = isLinux && spawnSync('bwrap', ['--version']).status === 0;
+// Mirror the executor's binary resolution (/usr/bin/bwrap first, then PATH) so a
+// missing binary skips the Linux legs explicitly rather than passing silently.
+const bwrapOnPath =
+	isLinux &&
+	(existsSync('/usr/bin/bwrap') ||
+		spawnSync('bwrap', ['--version']).status === 0);
 const isMac = process.platform === 'darwin';
 const isWindows = process.platform === 'win32';
 
