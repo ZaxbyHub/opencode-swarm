@@ -87,6 +87,11 @@ describe('ci.yml coverage aggregator diagnostics — issue #3250', () => {
 		expect(failClosedStep).toContain(
 			"::error::coverage-shard matrix result was '$COVERAGE_SHARD_RESULT', not 'success' (upstream quality job result: '$QUALITY_RESULT')",
 		);
+		// F-04: the fail-closed step must actually fail — pin the explicit
+		// nonzero exit as a STANDALONE line at the run block's shell depth
+		// so both a removed exit (the reports-but-does-not-exit mutant) and
+		// a commented-out one (`# exit 1`) stay red.
+		expect(failClosedStep).toMatch(/^ {12}exit 1$/m);
 	});
 
 	test('merge step carries the exact id the upload gate references', () => {
@@ -158,6 +163,19 @@ describe('ci.yml coverage aggregator diagnostics — issue #3250', () => {
 		// silently: this pin is what the comparator reverse-mutation flips.
 		expect(uploadStep).not.toContain(
 			"steps.merge-coverage.outcome == 'success'",
+		);
+		// PRR-002: substring pins alone cannot catch condition APPENDS — a
+		// mutant appending `|| failure()` to this `if:` restores the
+		// always-upload cascade warning while every substring pin stays
+		// green (scratch-executed in review round 2). Pin the WHOLE
+		// expression by normalized line equality so any edit to the gate
+		// is a deliberate, red-shown change.
+		const uploadIfLine = uploadStep
+			.split('\n')
+			.map((line) => line.trim())
+			.find((line) => line.startsWith('if: '));
+		expect(uploadIfLine).toBe(
+			"if: always() && github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true' && needs.detect-release.outputs.docs-only != 'true' && steps.merge-coverage.outcome != 'skipped'",
 		);
 	});
 });

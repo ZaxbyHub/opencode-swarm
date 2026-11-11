@@ -23,8 +23,10 @@
   worker topology. On macos-latest / Bun 1.3.13 the old target missed the
   spawned `bun test` process, which observed a worker failure, exited 0, and
   made the harness record `passed` (9/9 deterministic CI failures). The
-  crash arm also fails with an explicit "child survived the delivered
-  signal" diagnostic if the termination ever misses again.
+  crash arm fails loudly on every termination miss, with an explicit
+  "child survived the delivered signal" diagnostic for the recorded
+  exit-0 miss shape (the #2738 signature: harness recorded passed on a
+  surviving child).
 - The macOS quarantine entry for
   `tests/unit/scripts/ci/repository-validation-real-process-2675.test.ts` is
   retired (its stated criterion: the signal-fixture root fix lands and the

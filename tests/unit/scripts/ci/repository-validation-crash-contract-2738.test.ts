@@ -77,11 +77,19 @@ describe('repository-validation crash contract — issue #2738 retirement', () =
 	test('the retired file stays out of every quarantine ledger', () => {
 		// Re-adding the entry would silently skip the crash-classification
 		// arm on macOS CI — the exact coverage the retirement restored.
+		// PRR-010: parse ACTIVE entries per the ledgers' documented format
+		// (blank lines and lines starting with # are ignored) instead of a
+		// raw whole-file includes — a prose mention of the retired path
+		// (line-wrapped or not) must not fail this guard, and an ACTIVE
+		// entry line must. Mirrors the activeEntries() sibling readers.
 		for (const ledgerPath of LEDGER_PATHS) {
-			const ledger = readText(ledgerPath);
+			const activeEntries = readText(ledgerPath)
+				.split('\n')
+				.map((line) => line.trim())
+				.filter((line) => line.length > 0 && !line.startsWith('#'));
 			expect(
-				ledger.includes(RETIRED_TEST_FILE),
-				`${ledgerPath} must not list the retired #2738 entry`,
+				activeEntries.includes(RETIRED_TEST_FILE),
+				`${ledgerPath} must not list the retired #2738 entry as an active path`,
 			).toBe(false);
 		}
 	});
