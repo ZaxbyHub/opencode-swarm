@@ -35,10 +35,10 @@ arguments specify: a scope or read-only root there is visible and writable
 
 ## Known caveats
 
-- A scope that is an ancestor of the temp directory (only `/` in practice) now
+- A scope equal to or containing the temp directory (`/tmp` itself, or `/`) now
   binds the host `/tmp` directly, so the sandbox `/tmp` tmpfs and its 500 MiB cap
-  no longer apply to that path. Such a scope already grants host-wide writes, so
-  access is not widened beyond what that scope already allows.
+  no longer apply to that path. The scope names that directory, so this grants no
+  access it did not already have.
 - AC-008 no longer asserts a percentage overhead. It asserts that the average
   wrapped overhead is under 50 ms per command, and that every wrapped run exits 0.
   The previous 10% ratio measured 126–206% on the Ubuntu 26.04 runner; a ratio over

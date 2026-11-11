@@ -46,6 +46,17 @@ function wrap(
 }
 
 describe('BubblewrapSandboxExecutor: read-only workspace roots', () => {
+	test('mounts the /tmp tmpfs before a read-only root under /tmp', () => {
+		// A workspace under the temp dir must stay visible: the tmpfs is mounted
+		// first, then the read-only root on top of it (bwrap applies in argument order).
+		const cmd = wrap(['/tmp/ws'], ['/tmp/ws/tests/t.js']);
+		const tmpfs = cmd.indexOf("--tmpfs '/tmp'");
+		const ro = cmd.indexOf("--ro-bind '/tmp/ws' '/tmp/ws'");
+		expect(tmpfs).toBeGreaterThan(-1);
+		expect(ro).toBeGreaterThan(-1);
+		expect(tmpfs).toBeLessThan(ro);
+	});
+
 	test('mounts each readonly root with --ro-bind before the first scope --bind', () => {
 		const cmd = wrap(['/ws']);
 		const ro = cmd.indexOf("--ro-bind '/ws' '/ws'");
@@ -107,8 +118,8 @@ describe.skipIf(!isLinux)(
 						`(echo w >> ${q(`${ws}/src/lib.js`)}) 2>/dev/null && echo WRITE_SIBLING_ALLOWED || echo WRITE_SIBLING_DENIED`,
 						`(touch ${q(`${ws}/tests/new.js`)}) 2>/dev/null && echo CREATE_UNSCOPED_ALLOWED || echo CREATE_UNSCOPED_DENIED`,
 					].join('; ');
-					// The workspace lives under the OS tmpdir, which the sandbox masks
-					// with its own tmpfs, so point the tmpfs elsewhere for this probe.
+					// Keep the sandbox tmpfs inside the workspace so this probe does not
+					// depend on where the OS tmpdir sits.
 					const wrapped = executor.wrapCommand(
 						probe,
 						[scoped],
