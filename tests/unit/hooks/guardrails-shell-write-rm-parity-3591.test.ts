@@ -231,14 +231,9 @@ describe('#3591 brace operands — three-surface agreement (no-scope explain re-
 	// #3616 D2: explain WITHOUT `--scope` for a write-bearing command now
 	// renders block (scope_unevaluated) — parity with the live gate's
 	// SCOPE_NOT_DECLARED — replacing the pre-D2 "allow" divergence this
-	// describe previously disclosed.
-	// (guardrail-explain-service.ts:341-353), so it can read "allow" for a
-	// command the gate denies. Pinned HONESTLY as the CURRENT pre-existing
-	// behavior (untouched by this PR; tracked as a follow-up): the `rm`
-	// brace shape's no-scope verdict is still block (the #3569 brace-borne
-	// extractor rule fires scope-independently), while the `rmdir` brace
-	// shape — pinned as the 03 Leg-3 split-brain row — is the exact shape
-	// that reads "allow: no rule matched" against the gate's DENY.
+	// describe previously disclosed. Both brace shapes below block: the
+	// `rm` shape via the #3569 brace-borne extractor rule (scope-
+	// independent), the `rmdir` shape via the D2 scope-unevaluated rule.
 	test('rm src/{a,../esc}: gate DENY, explain --scope block, scope_validate deny; explain no-scope stays block (extractor rule is scope-independent)', async () => {
 		const command = 'rm src/{a,../esc}';
 		const got = await allSurfaces(command);
