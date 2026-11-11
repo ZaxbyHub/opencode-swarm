@@ -973,8 +973,8 @@ describe('AC-010: Full scope = no false positives', () => {
 		async () => {
 			const Executor = await getLinuxExecutor();
 
-			// Use /home as broad scope
-			const broadScope = '/home';
+			// Writable temp dir: host /home can be root-owned and deny the write.
+			const broadScope = makeTempDir('ac010-scope-');
 
 			const executor = new Executor([broadScope]);
 
@@ -982,8 +982,8 @@ describe('AC-010: Full scope = no false positives', () => {
 				return;
 			}
 
-			// Write to a path inside /home (within broad scope) — should succeed
-			const testFile = `/home/ac010-false-positive-${process.pid}.txt`;
+			// Write to a path inside the broad scope — should succeed
+			const testFile = `${broadScope}/ac010-false-positive-${process.pid}.txt`;
 			const result = spawnWrapped(
 				executor,
 				`echo "ac010 legitimate" > "${testFile}"`,
@@ -995,7 +995,7 @@ describe('AC-010: Full scope = no false positives', () => {
 
 			// Cleanup
 			try {
-				spawnSync(`rm -f "${testFile}"`, { shell: true, encoding: 'utf-8' });
+				spawnSync(`rm -rf "${broadScope}"`, { shell: true, encoding: 'utf-8' });
 			} catch {
 				// ignore cleanup errors
 			}
