@@ -297,4 +297,60 @@ describe('#3616 login-tail shared-grammar completion (review r17)', () => {
 		},
 		T,
 	);
+	// Review r18: the slicer must RESUME the option walk across VAR=value
+	// words exactly like walkSudoOptions (parse_args.c:284) — stopping at the
+	// assignment serialized the option word into command position and hid
+	// the write. The glued-abbreviation leg pins longFlagTakesArg composing
+	// the GNU prefix rule with `=`.
+	test(
+		'assignment before an option keeps the command word: sh -c "sudo -i FOO=bar --user root sh -c \'tee src/ok\'" denies',
+		async () => {
+			const r = await gate(
+				`sh -c "sudo -i FOO=bar --user root sh -c 'tee src/ok'"`,
+			);
+			expect(r.verdict).toBe('BLOCKED');
+			expect(r.message).toMatch(DYNAMIC_DENY);
+		},
+		T,
+	);
+	test(
+		'assignment before an option relocates the destructive verb: sh -c "sudo -i FOO=bar --user root sh -c \'cd src && rm -rf x\'" denies',
+		async () => {
+			const r = await gate(
+				`sh -c "sudo -i FOO=bar --user root sh -c 'cd src && rm -rf x'"`,
+			);
+			expect(r.verdict).toBe('BLOCKED');
+			expect(r.message).toContain('__swarm_unresolved_chdir');
+		},
+		T,
+	);
+	test(
+		'assignment-first spelling denies: sh -c "sudo FOO=bar -i --user root sh -c \'tee src/ok\'"',
+		async () => {
+			const r = await gate(
+				`sh -c "sudo FOO=bar -i --user root sh -c 'tee src/ok'"`,
+			);
+			expect(r.verdict).toBe('BLOCKED');
+			expect(r.message).toMatch(DYNAMIC_DENY);
+		},
+		T,
+	);
+	test(
+		'control: benign assignment with a no-write payload stays admitted: sh -c "sudo -i FOO=bar sh -c \'echo hi\'"',
+		async () => {
+			expect(
+				(await gate(`sh -c "sudo -i FOO=bar sh -c 'echo hi'"`)).verdict,
+			).toBe('ADMITTED');
+		},
+		T,
+	);
+	test(
+		'glued GNU abbreviation takes its value in-token: sh -c "sudo -i --u=root sh -c \'tee src/ok\'" denies',
+		async () => {
+			const r = await gate(`sh -c "sudo -i --u=root sh -c 'tee src/ok'"`);
+			expect(r.verdict).toBe('BLOCKED');
+			expect(r.message).toMatch(DYNAMIC_DENY);
+		},
+		T,
+	);
 });

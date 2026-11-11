@@ -2693,8 +2693,12 @@ function splitGluedLong(
 /**
  * Long-option arg-taking match: exact membership, or a glued `--flag=value`,
  * or (GNU getopt) an UNAMBIGUOUS prefix abbreviation of length ≥ 3 — the
- * same rule envFlagConsumesNextWord applies for env. `flag` names the
- * matched canonical flag so callers can distinguish --output from --format.
+ * same rule envFlagConsumesNextWord applies for env. The abbreviation rule
+ * composes with the glue: `--use=root` (prefix head + glued value) matches
+ * `--user` exactly as GNU getopt_long does (#3616 review r18 — a glued
+ * abbreviation must not fall to unknown, which strips the launcher and
+ * admits the tail). `flag` names the matched canonical flag so callers can
+ * distinguish --output from --format.
  */
 export function longFlagTakesArg(
 	token: string,
@@ -2711,6 +2715,24 @@ export function longFlagTakesArg(
 	const glued = splitGluedLong(token);
 	if (glued && argTaking.includes(glued.head))
 		return { takes: true, glued: true, value: glued.value, flag: glued.head };
+	if (glued && token.includes('=')) {
+		// GNU getopt_long: an unambiguous ≥3-char prefix of the head with the
+		// value glued (`--use=root` → --user=root) takes the argument in-token.
+		// token.includes('=') keeps the NON-glued prefix (`--use` alone,
+		// value:null from splitGluedLong) on the plain abbreviation branch
+		// below, where glued stays false so callers skip the NEXT word.
+		const gluedMatches = argTaking.filter((flag) =>
+			flag.startsWith(glued?.head ?? ''),
+		);
+		if ((glued?.head ?? '').length >= 3 && gluedMatches.length === 1) {
+			return {
+				takes: true,
+				glued: true,
+				value: glued?.value ?? null,
+				flag: gluedMatches[0] ?? null,
+			};
+		}
+	}
 	const matches = argTaking.filter((flag) => flag.startsWith(token));
 	if (token.length >= 3 && matches.length === 1) {
 		return { takes: true, glued: false, value: null, flag: matches[0] ?? null };

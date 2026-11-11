@@ -1970,7 +1970,18 @@ function matchSudoChdir(words: string[]): DcChdirMatch {
 				let start = 0;
 				while (start < tail.length) {
 					const w = tail[start];
-					if (typeof w !== 'string' || !w.startsWith('-')) break;
+					if (typeof w !== 'string') break;
+					// Assignments are interspersed with sudo's options
+					// (parse_args.c:284, pinned by the 3572 feedback suite):
+					// consume the run and RESUME the option walk — stopping
+					// HERE would serialize the option word into command
+					// position (`FOO=bar --user root sh -c …` parses `--user`
+					// as the command), hiding the write (review r18).
+					if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(w)) {
+						start += 1;
+						continue;
+					}
+					if (!w.startsWith('-')) break;
 					if (w === '--') {
 						start += 1;
 						break;
