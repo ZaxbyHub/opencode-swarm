@@ -40,6 +40,7 @@ import {
 	PR_REVIEW_BASE_DIMENSION_IDS,
 	PR_REVIEW_FINDINGS_MAX_BYTES,
 	PR_REVIEW_HANDOFF_MAX_BYTES,
+	PR_REVIEW_VERDICT_SEMANTICS_VERSION,
 	type PrReviewLaneResultEnvelope,
 	PrReviewLaneResultEnvelopeSchema,
 	type PrReviewResultReceipt,
@@ -8300,34 +8301,58 @@ function derivePrReviewOrderUnstableItemsForState(
 }
 
 /**
- * Issue #3340 AC1: the resolved-role assertion applied by
- * `recordPrReviewValidationBatch` to every lane of a critic-phase batch. Each
- * lane must declare its `agent`, and that agent's canonical role must be
- * exactly `critic` — the same rule the dispatch caller enforces (#3310).
+ * Issue #3358 AC8: the exact role set each PR_REVIEW validation phase admits.
+ * ONE table consumed by dispatch admission (dispatch-lanes.ts), the gate
+ * recorder (recordPrReviewValidationBatch), and artifact integrity — so a
+ * phase's transport row contract decides admission everywhere, never a
+ * prefix-shaped predicate. The factory council agents are the exact set
+ * src/agents/index.ts builds for council.general; a user-defined
+ * `council_*`-prefixed agent is NOT admitted to a council lane.
  */
+export const PR_REVIEW_PHASE_ADMITTED_ROLES: Readonly<
+	// Feedback F-011: the key union is the shared phase type, so a future
+	// fourth verdict phase is compile-forced to declare its admitted roles
+	// here (and every consumer derivation that keys on the phase) instead of
+	// silently skipping admission at the integrity site.
+	Record<PrReviewValidationPhase, readonly string[]>
+> = {
+	council: ['council_generalist', 'council_skeptic', 'council_domain_expert'],
+	reviewer: ['reviewer'],
+	critic: ['critic'],
+};
+
 function assertCriticLaneAgents(
 	phase: PrReviewValidationPhase,
 	lanes: readonly PrWorkflowLaneSpec[],
 	generatedAgentNames: readonly string[] | undefined,
 ): void {
-	if (phase !== 'critic') return;
-	for (const lane of lanes) {
-		const agent = lane.agent?.trim();
-		if (!agent) {
-			throw new Error(
-				`BLOCKED: PR_REVIEW critic lane "${lane.laneId ?? lane.workflowLane ?? '(unknown)'}" must declare its agent — only the critic agent may run critic lanes, so an undeclared agent cannot be admitted`,
-			);
-		}
-		// Mirror the dispatch caller's resolution exactly when the caller
-		// supplies the generated-name registry; without one, fall back to
-		// canonical/suffix extraction so direct gate callers still fail
-		// closed on critic-family roles (they are canonical roles returned
-		// unchanged) and arbitrary non-critic names.
-		const role = resolveGeneratedAgentRoleStrict(agent, generatedAgentNames);
-		if (role !== 'critic') {
-			throw new Error(
-				`BLOCKED: PR_REVIEW critic lane "${lane.laneId ?? lane.workflowLane ?? '(unknown)'}" uses invalid role "${role}" (agent "${agent}") — PR critic lanes must use the critic agent (critic_finding_validator and other critic-family roles cannot emit [CRITIC] rows)`,
-			);
+	if (phase === 'council' || phase === 'reviewer' || phase === 'critic') {
+		const admitted = PR_REVIEW_PHASE_ADMITTED_ROLES[phase];
+		for (const lane of lanes) {
+			const agent = lane.agent?.trim();
+			if (!agent) {
+				// Critic lanes must always declare (the row contract is
+				// single-agent); a declared agent for reviewer/council is
+				// verified when present, and undeclared ones are still policed
+				// at artifact integrity by the launch-time normalizedAgent.
+				if (phase === 'critic') {
+					throw new Error(
+						`BLOCKED: PR_REVIEW ${phase} lane "${lane.laneId ?? lane.workflowLane ?? '(unknown)'}" must declare its agent — only the critic agent may run critic lanes, so an undeclared agent cannot be admitted`,
+					);
+				}
+				continue;
+			}
+			// Mirror the dispatch caller's resolution exactly when the caller
+			// supplies the generated-name registry; without one, fall back to
+			// canonical/suffix extraction so direct gate callers still fail
+			// closed on critic-family roles (they are canonical roles returned
+			// unchanged) and arbitrary non-critic names.
+			const role = resolveGeneratedAgentRoleStrict(agent, generatedAgentNames);
+			if (!admitted.includes(role)) {
+				throw new Error(
+					`BLOCKED: PR_REVIEW ${phase} lane "${lane.laneId ?? lane.workflowLane ?? '(unknown)'}" uses invalid role "${role}" (agent "${agent}") — ${phase === 'critic' ? 'PR critic lanes must use the critic agent (critic_finding_validator and other critic-family roles cannot emit [CRITIC] rows)' : `PR ${phase} lanes must use one of: ${admitted.join(', ')}`}`,
+				);
+			}
 		}
 	}
 }
@@ -8646,6 +8671,27 @@ export async function assertPrReviewValidationSettled(
 			if (!boundPrHeadSha) {
 				throw new Error(
 					'BLOCKED: PR_REVIEW settlement requires a bound PR head SHA',
+				);
+			}
+			// Issue #3358 AC4: an UNCLAIMED item whose lane answered with a row
+			// written under earlier verdict semantics is never N-of-M-admitted —
+			// admission would settle it as typed-dead and hide that a verdict
+			// existed but no longer validates. Claimed items with a stale extra
+			// row (a newer valid claim won) are not blocking; the structured
+			// field still discloses them.
+			const unclaimedSet = new Set(composed.unclaimed);
+			const blockingSemanticsMismatches =
+				composed.semanticsMismatchedItemIds.filter((itemId) =>
+					unclaimedSet.has(itemId),
+				);
+			if (blockingSemanticsMismatches.length > 0) {
+				throw new Error(
+					renderPrReviewSemanticsMismatchGuardMessage({
+						requiredPhase,
+						unclaimed: composed.unclaimed,
+						blockingSemanticsMismatches,
+						diagnostics: composed.diagnostics,
+					}),
 				);
 			}
 			const admission = deriveVerdictSettlementAdmission({
@@ -14731,6 +14777,27 @@ function probeIncompleteBypassComposablePhase(
 			),
 		),
 	];
+	// Feedback F-003: mirror the ladder's #3358 AC4 guard FIRST — before the
+	// receipt shortcut below. The terminal-ready ladder throws for an
+	// UNCLAIMED item whose lane answered with a row written under earlier
+	// verdict semantics BEFORE it derives N-of-M admission — those rows are
+	// never re-admitted and never settled as typed-dead. A durable
+	// N-of-M receipt covering such an item must NOT flip the probe to
+	// settled: the ladder itself has no receipt reference before the guard,
+	// so a receipt-covered mismatched item would re-wedge completion with no
+	// INCOMPLETE exit (re-gate Finding 1). Report the phase genuinely
+	// unsettled so the bypass discloses the items as skipped — they are
+	// still never settled, which is exactly what AC3/AC4 require.
+	if (composed && composed.semanticsMismatchedItemIds.length > 0) {
+		const unclaimedSet = new Set(composed.unclaimed);
+		if (
+			composed.semanticsMismatchedItemIds.some((itemId) =>
+				unclaimedSet.has(itemId),
+			)
+		) {
+			return { phase, settled: false, admissible: false, unsettledItemIds };
+		}
+	}
 	// Feedback F-7 tail: a phase whose ADMITTED N-of-M verdict-settlement
 	// receipt (anchored on state via prReviewVerdictSettlementDigests) covers
 	// every currently-unclaimed item is SETTLED — composition keeps reporting
@@ -15922,6 +15989,11 @@ export const _test_exports = {
 	 * behavioural detection rather than to a null stub.
 	 */
 	resolveGhBinary,
+	// Feedback F-003: the INCOMPLETE bypass phase probe (plus its window
+	// derivation), so the semantics-mismatch × typed-dead × exhausted-budget
+	// interplay is testable without driving the whole completion ladder.
+	probeIncompleteBypassComposablePhase,
+	prReviewPhaseWindow,
 	// #3396 S1: overridable merge-base resolver for PR_FEEDBACK activation
 	// (production: ONE bounded `gh pr view` — see the production resolver
 	// above). Tests monkey-patch this seam exactly like the git resolvers.
@@ -18756,6 +18828,48 @@ function derivePrReviewCandidateSeverities(
 const MAX_UNCLAIMED_ITEMS_IN_MESSAGE = 50;
 
 /**
+ * Issue #3358 AC4: earlier-semantics item ids named in the dedicated
+ * settlement clause before it degrades to "and N more"; the complete set
+ * stays on `PrReviewPhaseComposition.semanticsMismatchedItemIds`.
+ */
+const MAX_SEMANTICS_MISMATCH_IDS_IN_MESSAGE = 16;
+
+/**
+ * Issue #3358 AC4 / feedback PRR-02: the dedicated earlier-semantics
+ * settlement-guard message, extracted so its 16-id display bound (and the
+ * "and N more" overflow suffix) is unit-testable independently of the
+ * six-dimension gate fixtures.
+ */
+export function renderPrReviewSemanticsMismatchGuardMessage(input: {
+	requiredPhase: string;
+	unclaimed: readonly string[];
+	blockingSemanticsMismatches: readonly string[];
+	diagnostics: readonly string[];
+}): string {
+	const unclaimedNamed = input.unclaimed.slice(
+		0,
+		MAX_UNCLAIMED_ITEMS_IN_MESSAGE,
+	);
+	const unclaimedOverflow = input.unclaimed.length - unclaimedNamed.length;
+	const mismatchNamed = input.blockingSemanticsMismatches.slice(
+		0,
+		MAX_SEMANTICS_MISMATCH_IDS_IN_MESSAGE,
+	);
+	const mismatchOverflow =
+		input.blockingSemanticsMismatches.length - mismatchNamed.length;
+	return (
+		`BLOCKED: PR_REVIEW ${input.requiredPhase} items lack an authenticated verdict from any successful lane: ${unclaimedNamed.join(', ')}` +
+		(unclaimedOverflow > 0 ? ` (+${unclaimedOverflow} more)` : '') +
+		`; items ${mismatchNamed.join(', ')}` +
+		(mismatchOverflow > 0 ? ` and ${mismatchOverflow} more` : '') +
+		` carry verdict rows written under earlier verdict semantics (current: v${PR_REVIEW_VERDICT_SEMANTICS_VERSION}; CONFIRMED requires a non-NONE severity since #3310); those rows are not re-admitted and N-of-M settlement is not attempted for them — re-dispatch those items' lanes` +
+		(input.diagnostics.length > 0
+			? `; diagnostics: ${input.diagnostics.join(' | ')}`
+			: '')
+	);
+}
+
+/**
  * The batches a phase composes over.
  *
  * Reviewer is scoped to everything after the latest council batch (a council
@@ -18765,7 +18879,7 @@ const MAX_UNCLAIMED_ITEMS_IN_MESSAGE = 50;
  * was not before — derivation and settlement previously disagreed on the window,
  * and one computation cannot hold two windows.
  */
-function prReviewPhaseWindow(
+export function prReviewPhaseWindow(
 	state: PrWorkflowGateState,
 	phase: PrReviewComposablePhase,
 ): PrReviewValidationBatchRecord[] {
@@ -19493,13 +19607,29 @@ export async function derivePrReviewOrderUnstableItems(
 	const state = await requireBoundState(directory, sessionID, 'PR_REVIEW');
 	const ctx = await createPrReviewGateContext(directory, state);
 	// #3362: read the reviewer phase through the same fail-closed
-	// authoritative gate the binding path uses (authoritativeReviewerClaims).
-	// An UNCOVERED current reviewer phase (unsettled/partial with no admitted
-	// settlement) yields an empty map and the derivation returns [] WITHOUT
-	// consulting the coherence stamp: the stamp derives from a prior batch
-	// window and would be stale relative to the current uncovered phase — the
-	// severity and order-unstable preflights must fail closed together.
+	// authoritative gate the binding path uses
+	// (authoritativeReviewerClaims). An UNCOVERED current reviewer phase
+	// (unsettled/partial with no admitted settlement) yields an empty map
+	// and the derivation returns [] WITHOUT consulting the coherence
+	// stamp: the stamp derives from a prior batch window and would be
+	// stale relative to the current uncovered phase — the severity and
+	// order-unstable preflights must fail closed together.
 	const claims = authoritativeReviewerClaims(directory, state, ctx);
+	return orderUnstableItemsFromClaims(state, claims);
+}
+
+/**
+ * Shared body of `derivePrReviewOrderUnstableItems` and
+ * `derivePrReviewCriticDispatchInputs` (#3358 AC6, #3362): pure over the
+ * authoritative reviewer claims, so one critic dispatch reads them once.
+ */
+function orderUnstableItemsFromClaims(
+	state: PrWorkflowGateState,
+	claims: ReadonlyMap<string, PrReviewItemClaim>,
+): string[] {
+	// #3362: an UNCOVERED reviewer phase fails closed here — [] without
+	// consulting the coherence stamp, which derives from a prior batch
+	// window and would be stale relative to the current uncovered phase.
 	if (claims.size === 0) return [];
 	// The order-unstable ids are STAMPED AT RECORD TIME onto the CRITIC batch's
 	// coherence record (the critic record is the only writer — see
@@ -19547,11 +19677,43 @@ export async function derivePrReviewReviewerSeverities(
 	const state = await requireBoundState(directory, sessionID, 'PR_REVIEW');
 	const ctx = await createPrReviewGateContext(directory, state);
 	const claims = authoritativeReviewerClaims(directory, state, ctx);
+	return reviewerSeveritiesFromClaims(claims);
+}
+
+function reviewerSeveritiesFromClaims(
+	claims: ReadonlyMap<string, PrReviewItemClaim>,
+): Map<string, string> {
 	const severities = new Map<string, string>();
 	for (const [itemId, claim] of claims) {
 		severities.set(itemId, claim.severity);
 	}
 	return severities;
+}
+
+/**
+ * Issue #3358 AC6: everything a critic dispatch preflight reads from the
+ * reviewer phase, derived from ONE gate context and ONE authoritative
+ * reviewer-claims read. Calling the two single-purpose readers back to back
+ * composed the reviewer phase (and resolved the bounded revision digest)
+ * twice per dispatch. #3362: the single read is the fail-closed
+ * authoritative gate, so both derivations fail closed together — an
+ * UNCOVERED reviewer phase yields `[]` and an empty severity map, never a
+ * partial one.
+ */
+export async function derivePrReviewCriticDispatchInputs(
+	directory: string,
+	sessionID: string,
+): Promise<{
+	orderUnstableItemIds: string[];
+	reviewerSeverities: Map<string, string>;
+}> {
+	const state = await requireBoundState(directory, sessionID, 'PR_REVIEW');
+	const ctx = await createPrReviewGateContext(directory, state);
+	const claims = authoritativeReviewerClaims(directory, state, ctx);
+	return {
+		orderUnstableItemIds: orderUnstableItemsFromClaims(state, claims),
+		reviewerSeverities: reviewerSeveritiesFromClaims(claims),
+	};
 }
 
 /**
@@ -20299,20 +20461,30 @@ function analyzeLaneArtifactIntegrity(args: {
 			artifact.role,
 		);
 	}
-	// Issue #3340 (issue item 2): the artifact/record pair being
-	// self-consistent is not enough — a critic-mode lane whose child record
-	// ran a NON-critic role must fail settlement. `normalizedAgent` is the
-	// resolved canonical role at launch time (not the raw prefixed name), so
-	// the exact comparison admits prefixed critic agents (`mega_critic`
-	// records `normalizedAgent: 'critic'`) while rejecting every other
-	// critic-family role.
+	// Issue #3340 (issue item 2), generalized by #3358 AC8: the
+	// artifact/record pair being self-consistent is not enough — a lane whose
+	// child record ran a role outside its phase's admitted set must fail
+	// settlement. `normalizedAgent` is the resolved canonical role at launch
+	// time (not the raw prefixed name), so the exact table lookup admits
+	// prefixed agents (`mega_critic` records `normalizedAgent: 'critic'`)
+	// while rejecting every critic-family impostor and any user-defined
+	// council_-prefixed agent on a council lane. Launch-time authority: this
+	// holds even when a direct recorder caller omitted `agent`.
+	const expectedAdmittedRole =
+		expected.mode === 'swarm-pr-review:council'
+			? PR_REVIEW_PHASE_ADMITTED_ROLES.council
+			: expected.mode === 'swarm-pr-review:reviewer'
+				? PR_REVIEW_PHASE_ADMITTED_ROLES.reviewer
+				: expected.mode === 'swarm-pr-review:critic'
+					? PR_REVIEW_PHASE_ADMITTED_ROLES.critic
+					: undefined;
 	if (
-		expected.mode === 'swarm-pr-review:critic' &&
-		record.normalizedAgent !== 'critic'
+		expectedAdmittedRole &&
+		!expectedAdmittedRole.includes(record.normalizedAgent)
 	) {
 		return failedLaneValidation(
 			'record.normalized_agent',
-			'critic',
+			expectedAdmittedRole.join('|'),
 			record.normalizedAgent || '(missing)',
 		);
 	}

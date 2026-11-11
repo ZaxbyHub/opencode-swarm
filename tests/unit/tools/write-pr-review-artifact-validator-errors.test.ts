@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
 import {
 	_test_exports,
+	markPrReviewArtifactBoundary,
 	PR_REVIEW_BASE_DIMENSION_IDS,
 } from '../../../src/hooks/pr-workflow-gate.js';
 import {
@@ -423,11 +425,13 @@ describe('write_pr_review_artifact validator errors (issue #2277)', () => {
 		// C-2's reviewer and critic severities AGREE (both HIGH), so its present
 		// but differing severity pins the agreement cell of the truth table.
 		// C-1 is critic-routed and DISPROVED with severity NONE, so its
-		// authoritative severity here is NONE.
+		// authoritative severity here is NONE. Its record is PRE_EXISTING (not
+		// CONFIRMED) because CONFIRMED+NONE is now refused at the write schema
+		// (#3358) before this disposition check could run.
 		const message = await rejectionMessage(
 			writePrReviewFindings(directory, 'critic-matrix', 'post_critic', [
 				artifactRecord('C-0', 'CONFIRMED', 'report', 'LOW'),
-				artifactRecord('C-1', 'CONFIRMED', 'report', 'NONE'),
+				artifactRecord('C-1', 'PRE_EXISTING', 'report', 'NONE'),
 				artifactRecord('C-2', 'DISPROVED', 'suppress_with_reason', 'NONE'),
 				artifactRecord('C-3', 'CONFIRMED', 'report', 'LOW'),
 				artifactRecord('C-4', 'CONFIRMED', 'report', 'LOW'),
@@ -440,7 +444,7 @@ describe('write_pr_review_artifact validator errors (issue #2277)', () => {
 				'  C-0: status expected "DISPROVED", got "CONFIRMED"',
 				'  C-0: next_action expected "suppress_with_reason", got "report"',
 				'  C-0: severity expected "NONE", got "LOW"',
-				'  C-1: status expected "DISPROVED", got "CONFIRMED"',
+				'  C-1: status expected "DISPROVED", got "PRE_EXISTING"',
 				'  C-1: next_action expected "suppress_with_reason", got "report"',
 				'  C-2: status expected "CONFIRMED", got "DISPROVED"',
 				'  C-2: next_action expected "report" or "handoff_to_feedback", got "suppress_with_reason"',

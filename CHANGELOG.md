@@ -1,5 +1,18 @@
 # Changelog
 
+## [7.203.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.203.1...v7.203.2) (2026-11-10)
+
+
+### Bug Fixes
+
+* **commands:** refuse a blank root in reset-session, close and the agent snapshot ([851ae24](https://github.com/ZaxbyHub/opencode-swarm/commit/851ae24552c57beb6fb8dffce7f33e5719fda874))
+* **db:** refuse a blank project root instead of using the process cwd ([86618a2](https://github.com/ZaxbyHub/opencode-swarm/commit/86618a2afe84ee8b08b8fd92e6749a96249c1a3a))
+* **db:** refuse a blank project root instead of using the process cwd ([f1e718d](https://github.com/ZaxbyHub/opencode-swarm/commit/f1e718d338f9043b7ba3cd6f6958132464aec048))
+* **db:** refuse a blank root in the swarm.db writers that canonicalize first ([576471f](https://github.com/ZaxbyHub/opencode-swarm/commit/576471fcef0c5c7580bc6e12b7ac6198460ebe5c))
+* **host/v2:** carry the assistant finish so a cut-off reply fails closed on opencode 2 ([fef848b](https://github.com/ZaxbyHub/opencode-swarm/commit/fef848b60810596dab73900fe0fe87599d9afd9d))
+* **host/v2:** carry the assistant finish so a cut-off reply fails closed on opencode 2 ([94052a2](https://github.com/ZaxbyHub/opencode-swarm/commit/94052a2f013ab4c7f6949359cef14b750b322147))
+* **state:** refuse a blank root in the shared .swarm write seams ([fdebe9b](https://github.com/ZaxbyHub/opencode-swarm/commit/fdebe9bccf060e60f945da379fe186ea591b2a44))
+
 ## [7.203.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.203.0...v7.203.1) (2026-11-09)
 
 

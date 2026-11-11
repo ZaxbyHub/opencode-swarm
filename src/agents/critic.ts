@@ -414,17 +414,48 @@ ANALYZE RULES:
 - Report the highest-severity findings first within each section.
 - If both spec.md and plan.md are present but empty, report CLEAN with a note that both files are empty.
 `;
-// #3310 (AC14) / #3337: PR-review critic lanes need the default PLAN REVIEW
-// structure suspended so only [CRITIC] verdict rows are emitted. That
-// override is CONTROLLER-AUTHORED: the dispatch controller composes a
-// mode-scoped protocol clause into the lane's contract block (see
-// modeProtocolClause in src/tools/dispatch-lanes.ts), the same proven
-// channel the reviewer lanes have used since #3310. The static agent prompt
-// carries no PR-review instructions — activation is structural (only the
-// controller produces the clause), never prompt-content-interpreted, and
-// non-workflow use of the critic agent is unchanged.
-
+// #3358 AC1: the PR-review critic-lane suspension of the default PLAN REVIEW
+// structure is NOT part of this prompt. It is injected per lane by the
+// controller (dispatch-lanes.ts CRITIC_PROTOCOL_SELECTION_CLAUSE, inside the
+// controller-bound contract block) only for a bound swarm-pr-review:critic
+// dispatch, so non-PR critic runs carry no PR-review text that a quoted
+// phrase could activate.
 export const PLAN_CRITIC_PROMPT = `${PLAN_CRITIC_PROMPT_BASE}\n\n${GRAPH_FIRST_CRITIC_GUIDANCE}`;
+
+/**
+ * Issue #3358 AC3: whether a registered critic agent's prompt was customized
+ * from the user prompts directory (`critic.md` replacement or
+ * `critic_append.md` append; src/config/loader.ts loadAgentPrompt). Captured
+ * at registration so PR critic-lane admission never re-reads the filesystem
+ * on the dispatch path. Keyed by the LOWERCASED registered generated name —
+ * the generated-agent registry matches names case-insensitively — and rebuilt
+ * on every `createAgents` call (bounded by the registered critic count).
+ */
+export interface CriticPromptProvenance {
+	replaced: boolean;
+	appended: boolean;
+}
+
+const criticPromptProvenanceByAgent = new Map<string, CriticPromptProvenance>();
+
+export function recordCriticPromptProvenance(
+	agentName: string,
+	provenance: CriticPromptProvenance,
+): void {
+	criticPromptProvenanceByAgent.set(agentName.toLowerCase(), {
+		...provenance,
+	});
+}
+
+export function criticPromptProvenance(
+	agentName: string,
+): CriticPromptProvenance | undefined {
+	return criticPromptProvenanceByAgent.get(agentName.toLowerCase());
+}
+
+export function clearCriticPromptProvenance(): void {
+	criticPromptProvenanceByAgent.clear();
+}
 
 // ============================================================
 // SOUNDING_BOARD_PROMPT — Pre-escalation filter

@@ -3,6 +3,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, readFileSync, renameSync } from 'node:fs';
 import { canonicalProjectKey } from '../db/canonical-project.js';
+import { assertProjectDbRoot } from '../db/project-db.js';
 import { validateSwarmPath } from '../hooks/utils.js';
 import { loadPlan, PlanRecoverySupersededError } from '../plan/manager.js';
 import { advisoryWarn } from '../services/warning-buffer.js';
@@ -12,6 +13,7 @@ import {
 	swarmState,
 } from '../state.js';
 import { telemetry } from '../telemetry.js';
+import { isBlankDirectory } from '../utils/path-security.js';
 import { withTimeout } from '../utils/timeout.js';
 import {
 	beginHydrationScope,
@@ -364,9 +366,20 @@ async function initializeSnapshotCoordination(
 	return isCurrent() ? 'succeeded' : 'superseded';
 }
 
+/**
+ * A blank root rejects with `ProjectDbError` (`invalid_root`) before any
+ * readiness entry or hydration scope is touched: `canonicalProjectKey('')` is
+ * the cwd, so it would otherwise initialize (or reuse) the cwd project's
+ * coordination (#3165 B).
+ */
 export function startSnapshotCoordinationInitialization(
 	directory: string,
 ): Promise<void> {
+	try {
+		assertProjectDbRoot(directory);
+	} catch (error) {
+		return Promise.reject(error);
+	}
 	const root = canonicalProjectKey(directory);
 	const existing = entries.get(root);
 	if (existing?.state === 'closing') {
@@ -459,9 +472,11 @@ export function startSnapshotCoordinationInitialization(
 	return underlying;
 }
 
+/** A blank root rejects with `ProjectDbError` (`invalid_root`) (#3165 B). */
 export async function ensureSnapshotCoordinationReady(
 	directory: string,
 ): Promise<void> {
+	assertProjectDbRoot(directory);
 	const root = canonicalProjectKey(directory);
 	const entry = entries.get(root);
 	if (entry?.state === 'closing') {
@@ -497,9 +512,11 @@ export async function ensureSnapshotCoordinationReady(
 	}
 }
 
+/** A blank root throws `ProjectDbError` (`invalid_root`) (#3165 B). */
 export function retrySnapshotCoordinationInitialization(
 	directory: string,
 ): Promise<void> {
+	assertProjectDbRoot(directory);
 	const root = canonicalProjectKey(directory);
 	const entry = entries.get(root);
 	if (entry?.state === 'closing') {
@@ -545,9 +562,11 @@ export function retrySnapshotCoordinationInitialization(
 	return startSnapshotCoordinationInitialization(root);
 }
 
+/** A blank root is `idle`: it names no entry, and its key is the cwd's. */
 export function getSnapshotCoordinationStatus(
 	directory: string,
 ): SnapshotCoordinationStatus {
+	if (isBlankDirectory(directory)) return { state: 'idle', settled: true };
 	const entry = entries.get(canonicalProjectKey(directory));
 	if (!entry) return { state: 'idle', settled: true };
 	return {
@@ -566,10 +585,17 @@ export function getSnapshotCoordinationStatus(
  * deletes the SQLite authority and legacy projection. The guard deliberately
  * survives a prior initialization failure: reset remains best-effort, but a
  * concurrent initializer cannot race through the destructive window.
+ *
+ * A blank root returns an inert guard and installs nothing: its canonical key
+ * is the cwd, so a guard there would close the cwd project's coordination
+ * (#3165 B).
  */
 export async function beginSnapshotCoordinationReset(
 	directory: string,
 ): Promise<SnapshotCoordinationResetGuard> {
+	if (isBlankDirectory(directory)) {
+		return { release: () => {}, markStranded: () => false };
+	}
 	const root = canonicalProjectKey(directory);
 	const prior = entries.get(root);
 	let closeError: Error | undefined;
@@ -685,7 +711,9 @@ export async function closeSnapshotCoordinationInitialization(
 	}
 }
 
+/** A blank root is a no-op: it names no entry, and its key is the cwd's. */
 export function markSnapshotCoordinationClosing(directory: string): void {
+	if (isBlankDirectory(directory)) return;
 	const entry = entries.get(canonicalProjectKey(directory));
 	if (entry) {
 		entry.state = 'closing';

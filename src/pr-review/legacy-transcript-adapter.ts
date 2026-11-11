@@ -40,8 +40,10 @@ import {
 	findByBatchIdDetailed,
 } from '../background/pending-delegations.js';
 import {
+	CONFIRMED_REVIEWER_SEVERITY_NONE_MESSAGE,
 	PR_REVIEW_DISCARDED_EXAMPLE_ITEM_ID,
 	PR_REVIEW_VERDICT_ROW_DESCRIPTORS,
+	PR_REVIEW_VERDICT_SEMANTICS_VERSION,
 	PrReviewCriticVerdictFieldsSchema,
 	PrReviewReviewerVerdictFieldsSchema,
 	type PrReviewRiskImpact,
@@ -107,6 +109,14 @@ export interface PrReviewPhaseComposition {
 	 * removal cannot change any label).
 	 */
 	orderObservingBatchIds: string[];
+	/**
+	 * Issue #3358 AC4: reviewer phase only (empty for critic). Every item id a
+	 * scanned lane answered with a well-formed row written under earlier
+	 * verdict semantics (PR_REVIEW_VERDICT_SEMANTICS_VERSION) — never claimed.
+	 * Complete and independent of the capped `diagnostics` budget; settlement
+	 * blocks with a dedicated disclosure only for the subset still unclaimed.
+	 */
+	semanticsMismatchedItemIds: string[];
 	diagnostics: string[];
 }
 
@@ -600,6 +610,14 @@ export function composePrReviewPhaseVerdicts(
 	// QUARANTINE noise only — the batch non-contribution diagnostic shares the
 	// same cap and is NOT deferred.
 	const deferredQuarantineDiagnostics: string[] = [];
+	// Feedback F-009: earlier-semantics convenience diagnostics are deferred
+	// the same way — they explain an AC4 disclosure that also lives on the
+	// structured `semanticsMismatchedItemIds` field, so they must never evict
+	// the lane-voiding evidence (unassigned-row, abandoned-lane) out of the
+	// capped budget. They flush after the abandoned-lane evidence, before the
+	// quarantine flush (still lowest-priority among the non-noise classes).
+	const deferredSemanticsDiagnostics: string[] = [];
+	const semanticsMismatchedItemIds = new Set<string>();
 	const satisfiedObligations = new Set<string>();
 	const scannedBatches: PrReviewTranscriptBatch[] = [];
 	// Issue #3098: formatted artifact-integrity failure per declared obligation.
@@ -674,6 +692,58 @@ export function composePrReviewPhaseVerdicts(
 				diagnostics,
 				`${phase} batch "${batch.batchId}" was validated against a different inventory or is not wholly successful legacy state; it contributes no claims`,
 			);
+			// FB-009: a batch that cannot contribute claims still gets the
+			// #3358 AC3 disclosure scan. Its lanes may carry reviewer rows
+			// written under earlier verdict semantics; skipping the scan here
+			// would leave an item unclaimed with NO mismatch disclosure when
+			// its only rows live in this batch. This is a SETTLEMENT-BEHAVIOR
+			// change, not disclosure-only: the disclosed ids feed the
+			// semantics settlement guard and the bypass-probe mirror, so a
+			// multi-owner item that could previously N-of-M-settle around its
+			// mismatched row now permanently requires re-dispatch (AC4
+			// doctrine: a stale-semantics verdict is never silently settled).
+			// No claim, obligation, or order observation is recorded from a
+			// rejected batch; lanes that fail artifact integrity stay silent
+			// (no readable artifact is nothing disclosed-to-drop). This scan
+			// reads the delegation store per lane, so an uncertain store read
+			// throws here where the pre-FB-009 rejection branch did not read
+			// the store at all (fail-closed, #2511 discipline).
+			for (const qualified of recordsPassingBatchIntegrity(
+				directory,
+				state,
+				batch.batchId,
+				batch.lanes,
+				expectedMode,
+				batch.validatedAt,
+				true,
+				forbiddenSubagentSessionIds,
+			)) {
+				const integrityDiagnostics: string[] = [];
+				const artifact = loadArtifactPassingLaneIntegrity(
+					directory,
+					state,
+					qualified.record,
+					expectedMode,
+					qualified.expectedWorkflowLane,
+					ctx.revisionDigest,
+					integrityDiagnostics,
+				);
+				if (!artifact) continue;
+				const { semanticsMismatched: rejectedBatchMismatches } =
+					parsePrReviewVerdictRows(
+						artifact.text,
+						qualified.expectedLane.reviewItemIds ?? [],
+						phase,
+						reviewerClaims,
+					);
+				if (rejectedBatchMismatches.length === 0) continue;
+				for (const itemId of rejectedBatchMismatches) {
+					semanticsMismatchedItemIds.add(itemId);
+				}
+				deferredSemanticsDiagnostics.push(
+					`${phase} lane "${qualified.expectedLane.laneId}" in non-contributing batch "${batch.batchId}" has ${rejectedBatchMismatches.length} verdict row(s) written under earlier verdict semantics (current: v${PR_REVIEW_VERDICT_SEMANTICS_VERSION}; CONFIRMED requires a non-NONE severity) for item ids ${rejectedBatchMismatches.map((id) => `"${id}"`).join(', ')}; the batch contributes no claims`,
+				);
+			}
 			continue;
 		}
 		const coherence = state.prReviewBatchCoherence?.[batch.batchId];
@@ -709,12 +779,13 @@ export function composePrReviewPhaseVerdicts(
 				continue;
 			}
 			const declaredItems = qualified.expectedLane.reviewItemIds ?? [];
-			const { markerRows, parsed, quarantined } = parsePrReviewVerdictRows(
-				artifact.text,
-				declaredItems,
-				phase,
-				reviewerClaims,
-			);
+			const { markerRows, parsed, quarantined, semanticsMismatched } =
+				parsePrReviewVerdictRows(
+					artifact.text,
+					declaredItems,
+					phase,
+					reviewerClaims,
+				);
 			// #3310: illegal-arity rows are quarantined, not lane-voiding.
 			// ONE aggregated bounded diagnostic per lane, so a stray-row-heavy
 			// artifact cannot exhaust the shared composition-diagnostic budget
@@ -741,6 +812,19 @@ export function composePrReviewPhaseVerdicts(
 					`${phase} lane "${qualified.expectedLane.laneId}" contains an unassigned verdict row; it contributes no claims`,
 				);
 				continue;
+			}
+			// #3358 AC4: earlier-semantics rows are recorded in full on the
+			// structured field (the guarantee) plus one convenience diagnostic
+			// per lane (subject to the shared cap). Ids are controller-declared
+			// assigned ids, not model text.
+			if (semanticsMismatched.length > 0) {
+				for (const itemId of semanticsMismatched) {
+					semanticsMismatchedItemIds.add(itemId);
+				}
+				// Feedback F-009: deferred — see deferredSemanticsDiagnostics.
+				deferredSemanticsDiagnostics.push(
+					`${phase} lane "${qualified.expectedLane.laneId}" has ${semanticsMismatched.length} verdict row(s) written under earlier verdict semantics (current: v${PR_REVIEW_VERDICT_SEMANTICS_VERSION}; CONFIRMED requires a non-NONE severity) for item ids ${semanticsMismatched.map((id) => `"${id}"`).join(', ')}; they are not re-admitted`,
+				);
 			}
 			recordOrderObservations(batch.batchId, coherence, parsed);
 			if (declaredItems.length > 0 && parsed.size === declaredItems.length) {
@@ -917,6 +1001,14 @@ export function composePrReviewPhaseVerdicts(
 		);
 	}
 
+	// Feedback F-009: earlier-semantics convenience diagnostics flush AFTER the
+	// lane-voiding evidence above and BEFORE the quarantine noise below — the
+	// structured field already carries the full disclosure, so these may lose
+	// the cap contention to the evidence that explains why settlement blocked.
+	for (const message of deferredSemanticsDiagnostics) {
+		appendCompositionDiagnostic(diagnostics, message);
+	}
+
 	// #3334: flush the deferred quarantine diagnostics AFTER every integrity
 	// diagnostic had its chance at the capped budget. Quarantine noise explains
 	// nothing about WHY a settlement blocked; the unassigned-row and
@@ -934,6 +1026,8 @@ export function composePrReviewPhaseVerdicts(
 		// Empty for the critic phase (order observations are reviewer-only).
 		orderObservingBatchIds:
 			phase === 'reviewer' ? [...orderObservingBatchIds] : [],
+		semanticsMismatchedItemIds:
+			phase === 'reviewer' ? [...semanticsMismatchedItemIds] : [],
 		diagnostics,
 	};
 	// An exhaustive pass is a superset of the memoizable one, but it is computed
@@ -1084,6 +1178,26 @@ export function validateReviewerVerdictFields(
 }
 
 /**
+ * Issue #3358 AC4: true when a reviewer row fails the live schema ONLY
+ * because of the v1→v2 tightening (CONFIRMED with severity NONE), i.e. it is a
+ * well-formed row written under earlier verdict semantics rather than a
+ * malformed one. Such a row still never claims (fail-closed); the caller
+ * discloses it instead of dropping it silently.
+ */
+export function isReviewerRowVerdictSemanticsMismatch(
+	fields: string[],
+): boolean {
+	const parsed = PrReviewReviewerVerdictFieldsSchema.safeParse(fields);
+	if (parsed.success) return false;
+	return (
+		parsed.error.issues.length > 0 &&
+		parsed.error.issues.every(
+			(issue) => issue.message === CONFIRMED_REVIEWER_SEVERITY_NONE_MESSAGE,
+		)
+	);
+}
+
+/**
  * Digest of the FULL canonical reviewer row, not the classification/severity
  * pair a reviewer verdict projects to. Only 2 of the 12 required fields survive
  * that projection, so a tuple binding would still match a row whose evidence,
@@ -1136,6 +1250,12 @@ export function parsePrReviewVerdictRows(
 	>;
 	recoveries: IndexedVerdictRows['recoveries'];
 	quarantined: IndexedVerdictRows['quarantined'];
+	/**
+	 * #3358 AC4: declared item ids carrying at least one well-formed verdict
+	 * row written under earlier (v1) verdict semantics (any row of the item,
+	 * not only a lone one). Never claims; disclosed.
+	 */
+	semanticsMismatched: string[];
 } {
 	const parsed = new Map<
 		string,
@@ -1150,6 +1270,7 @@ export function parsePrReviewVerdictRows(
 	const marker = phase === 'reviewer' ? '[REVIEWED]' : '[CRITIC]';
 	const { markerRows, rowsByItemId, recoveries, quarantined } =
 		indexVerdictRows(text, marker, new Set(itemIds));
+	const semanticsMismatched: string[] = [];
 	for (const itemId of itemIds) {
 		if (itemId === PR_REVIEW_DISCARDED_EXAMPLE_ITEM_ID) continue;
 		if (phase === 'reviewer') {
@@ -1163,7 +1284,19 @@ export function parsePrReviewVerdictRows(
 			// lane-output-recoverability reference).
 			const fields =
 				rows?.length === 1 ? validateReviewerVerdictFields(rows[0]) : null;
-			if (!fields) continue;
+			if (!fields) {
+				// #3358 AC4: a row rejected ONLY by the v1→v2 tightening is an
+				// earlier-semantics verdict — still unclaimed, but disclosed.
+				// Feedback FB-009: disclose when ANY of the item's rows is such
+				// a row, not only when it is the lone row — an item carrying an
+				// earlier-semantics row plus a second row is equally unclaimed
+				// (a multi-row item never claims) and was previously dropped
+				// from the disclosure.
+				if (rows?.some((row) => isReviewerRowVerdictSemanticsMismatch(row))) {
+					semanticsMismatched.push(itemId);
+				}
+				continue;
+			}
 			parsed.set(itemId, {
 				classification: fields[2],
 				severity: fields[4],
@@ -1190,7 +1323,7 @@ export function parsePrReviewVerdictRows(
 			severity: verdict.severity,
 		});
 	}
-	return { markerRows, parsed, recoveries, quarantined };
+	return { markerRows, parsed, recoveries, quarantined, semanticsMismatched };
 }
 
 /** Exact assigned-row contract used by both normal and recovered collection. */
