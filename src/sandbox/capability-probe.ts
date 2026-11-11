@@ -168,6 +168,16 @@ function resolveWindowsCommandProcessorBinary(): string {
 	return comSpec || 'cmd';
 }
 
+/** Bounded errno-style code of a thrown value ('unknown' when absent). */
+function errorCode(error: unknown): string {
+	return typeof error === 'object' &&
+		error !== null &&
+		'code' in error &&
+		typeof (error as { code?: unknown }).code === 'string'
+		? ((error as { code: string }).code ?? 'unknown')
+		: 'unknown';
+}
+
 function cleanupProbeTempRoot(
 	tempRoot: string,
 	mechanism: string,
@@ -176,13 +186,7 @@ function cleanupProbeTempRoot(
 	try {
 		_internals.removeProbeTempRoot(tempRoot, { recursive: true, force: true });
 	} catch (error) {
-		const code =
-			typeof error === 'object' &&
-			error !== null &&
-			'code' in error &&
-			typeof (error as { code?: unknown }).code === 'string'
-				? ((error as { code: string }).code ?? 'unknown')
-				: 'unknown';
+		const code = errorCode(error);
 		reasons.push(`${mechanism} probe temp cleanup failed (${code})`);
 		warn(
 			`[sandbox] ${mechanism} probe temp cleanup failed (${code}); continuing with bounded probe result`,
@@ -293,15 +297,28 @@ function runBoundedSync(
 
 function probeLinuxBehavior(): BehavioralEvidence {
 	const binary = bwrapInternals.resolveBwrapBinary();
-	const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'swarm-bwrap-probe-'));
-	const allowedRoot = path.join(tempRoot, 'allowed');
-	const inScopeFile = path.join(allowedRoot, 'inside.txt');
-	const outOfScopeFile = path.join(tempRoot, 'outside.txt');
-	fs.mkdirSync(allowedRoot, { recursive: true });
 	const reasons: string[] = [];
 	let filesystem: SandboxDimensionStrength = 'weak';
 	let network: SandboxDimensionStrength = 'weak';
+	// #3332: the whole setup phase (temp root creation through the bounded
+	// spawns) lives inside the guarded region — a setup failure (mkdtemp
+	// ENOSPC/EACCES, mkdir EACCES, …) returns a bounded weak probe result and
+	// cleans up whatever it created instead of escaping unhandled and leaking
+	// the temp root. tempRoot stays undefined when mkdtempSync itself fails,
+	// so no cleanup is attempted for a root that was never created.
+	let tempRoot: string | undefined;
 	try {
+		tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'swarm-bwrap-probe-'));
+		const allowedRoot = path.join(tempRoot, 'allowed');
+		const inScopeFile = path.join(allowedRoot, 'inside.txt');
+		const outOfScopeFile = path.join(tempRoot, 'outside.txt');
+		fs.mkdirSync(allowedRoot, { recursive: true });
+		// #3332: /lib64 exists on multilib hosts only (usr-merged and
+		// non-multilib images lack it); bwrap aborts the invocation when a
+		// bind source is missing, so consult the host per probe run.
+		const lib64BindArgs = fs.existsSync('/lib64')
+			? ['--ro-bind', '/lib64', '/lib64']
+			: [];
 		const baseArgs = [
 			'--unshare-user',
 			'--unshare-net',
@@ -327,9 +344,7 @@ function probeLinuxBehavior(): BehavioralEvidence {
 			'--ro-bind',
 			'/lib',
 			'/lib',
-			'--ro-bind',
-			'/lib64',
-			'/lib64',
+			...lib64BindArgs,
 			'--proc',
 			'/proc',
 			'--unshare-pid',
@@ -386,8 +401,14 @@ function probeLinuxBehavior(): BehavioralEvidence {
 				'bubblewrap network namespace isolation was not independently verified',
 			);
 		}
+	} catch (error) {
+		// Bounded probe result on a setup failure (#3332): never propagate.
+		const code = errorCode(error);
+		reasons.push(`bubblewrap probe temp setup failed (${code})`);
 	} finally {
-		cleanupProbeTempRoot(tempRoot, 'bubblewrap', reasons);
+		if (tempRoot !== undefined) {
+			cleanupProbeTempRoot(tempRoot, 'bubblewrap', reasons);
+		}
 	}
 	return {
 		filesystem,
@@ -399,22 +420,23 @@ function probeLinuxBehavior(): BehavioralEvidence {
 
 function probeMacOSBehavior(): BehavioralEvidence {
 	const binary = macosExecutorInternals.resolveSandboxExecBinary();
-	const tempRoot = fs.mkdtempSync(
-		path.join(os.tmpdir(), 'swarm-seatbelt-probe-'),
-	);
-	const allowedRoot = path.join(tempRoot, 'allowed');
-	const sandboxTemp = path.join(tempRoot, 'sandbox-tmp');
-	const inScopeFile = path.join(allowedRoot, 'inside.txt');
-	const outOfScopeFile = path.join(tempRoot, 'outside.txt');
-	fs.mkdirSync(allowedRoot, { recursive: true });
-	fs.mkdirSync(sandboxTemp, { recursive: true });
-	const profile = macosExecutorInternals.buildSandboxProfile(
-		[allowedRoot],
-		sandboxTemp,
-	);
 	const reasons: string[] = [];
 	let filesystem: SandboxDimensionStrength = 'weak';
+	// #3332: setup failures return a bounded probe result (never an unhandled
+	// throw), and the temp root is cleaned only when it was created.
+	let tempRoot: string | undefined;
 	try {
+		tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'swarm-seatbelt-probe-'));
+		const allowedRoot = path.join(tempRoot, 'allowed');
+		const sandboxTemp = path.join(tempRoot, 'sandbox-tmp');
+		const inScopeFile = path.join(allowedRoot, 'inside.txt');
+		const outOfScopeFile = path.join(tempRoot, 'outside.txt');
+		fs.mkdirSync(allowedRoot, { recursive: true });
+		fs.mkdirSync(sandboxTemp, { recursive: true });
+		const profile = macosExecutorInternals.buildSandboxProfile(
+			[allowedRoot],
+			sandboxTemp,
+		);
 		const inScope = runBoundedSync(
 			binary,
 			['-p', profile, '/usr/bin/tee', inScopeFile],
@@ -440,12 +462,18 @@ function probeMacOSBehavior(): BehavioralEvidence {
 				'sandbox-exec denial behavior was not independently verified in a bounded probe',
 			);
 		}
+		reasons.push(
+			'(allow default) leaves network, IPC, and process-spawn behavior outside the boundary',
+		);
+	} catch (error) {
+		// Bounded probe result on a setup failure (#3332): never propagate.
+		const code = errorCode(error);
+		reasons.push(`sandbox-exec probe temp setup failed (${code})`);
 	} finally {
-		cleanupProbeTempRoot(tempRoot, 'sandbox-exec', reasons);
+		if (tempRoot !== undefined) {
+			cleanupProbeTempRoot(tempRoot, 'sandbox-exec', reasons);
+		}
 	}
-	reasons.push(
-		'(allow default) leaves network, IPC, and process-spawn behavior outside the boundary',
-	);
 	return {
 		filesystem,
 		network: 'none',

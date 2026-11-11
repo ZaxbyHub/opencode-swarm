@@ -127,6 +127,16 @@ function buildBwrapArgs(input: BwrapArgsInput): string[] {
 		'--tmpfs',
 		quote(input.temp),
 	];
+	// #3332: a host without /lib64 (usr-merged or non-multilib images, e.g.
+	// Alpine/musl) cannot mount it — bwrap aborts the whole invocation when a
+	// bind source is missing. Emit the bind only when the host has the
+	// directory so a wrap degrades per-host instead of failing wholesale.
+	// Availability is read HERE (module-load time for the smoke args below,
+	// per-wrap for wrapCommand callers) from node:fs; tests force both host
+	// shapes by mocking node:fs before importing this module.
+	const lib64BindArgs: string[] = existsSync('/lib64')
+		? ['--ro-bind', '/lib64', '/lib64']
+		: [];
 	const args = [
 		'--unshare-user',
 		'--unshare-ipc',
@@ -149,9 +159,7 @@ function buildBwrapArgs(input: BwrapArgsInput): string[] {
 		'--ro-bind',
 		'/lib',
 		'/lib',
-		'--ro-bind',
-		'/lib64',
-		'/lib64',
+		...lib64BindArgs,
 		'--proc',
 		'/proc',
 		'--unshare-pid',
@@ -178,9 +186,11 @@ function buildBwrapArgs(input: BwrapArgsInput): string[] {
  * all — Ubuntu 24.04+ restricts unprivileged user namespaces
  * (`kernel.apparmor_restrict_unprivileged_userns = 1`) and every real
  * invocation fails with "setting up uid map: Permission denied"; unprivileged
- * containers can allow the user namespace but refuse `--proc`; a host
- * without `/lib64` fails the bind. Availability must therefore be proven by
- * running one.
+ * containers can allow the user namespace but refuse `--proc`. Availability
+ * must therefore be proven by running one. A host without `/lib64` no longer
+ * fails the bind — `buildBwrapArgs` emits that bind only when the host has
+ * the directory (#3332) — but every OTHER kernel feature the wrap needs is
+ * still exercised below.
  */
 export const BWRAP_NAMESPACE_SMOKE_ARGS: readonly string[] = buildBwrapArgs({
 	quote: (value) => value,
