@@ -23,11 +23,20 @@
     forms, and a padded suffix near-miss (`' Case_test_engineer '` against
     `engineer`) stays gated.
 
-- `src/sandbox/linux/bubblewrap-executor.ts` (`buildBwrapArgs`): the
-  size-capped `--tmpfs <temp>` is now mounted BEFORE any scope or read-only
-  root that lies beneath the temp root (and still after any scope that
-  contains it). New suite
-  `tests/unit/sandbox/bwrap-tmpfs-mount-order.test.ts` pins the order.
+- `src/sandbox/linux/bubblewrap-executor.ts` (`buildBwrapArgs`): when the
+  temp root is neither equal to nor inside any scope or read-only root (the
+  production case: temp is always `/tmp`), the size-capped `--tmpfs <temp>`
+  is now the FIRST mount, ahead of the read-only roots, scope binds,
+  `--dev /dev`, and the system binds. When temp equals or lies inside a
+  scope or read-only root, the previous order is kept (tmpfs after the
+  binds) so temp stays a private tmpfs. New suite
+  `tests/unit/sandbox/bwrap-tmpfs-mount-order.test.ts` pins both branches.
+- `tests/unit/sandbox/sandbox-integration.test.ts`: AC-008 now bounds the
+  absolute per-call overhead (< 50 ms) instead of a relative < 10% (a fixed
+  few-ms namespace setup measured 206% of a bare bash spawn on
+  ubuntu-26.04), and AC-010's broad scope is the user's home directory
+  instead of root-owned `/home`, which the runner user cannot write even
+  outside the sandbox.
 
 ## Why (sandbox mount order)
 
@@ -37,8 +46,13 @@ bwrap mounts in argument order. The tmpfs was emitted after the scope
 landed in the sandbox-only tmpfs and never reached the host. GitHub's
 `ubuntu-latest` moved from 24.04 (no `bwrap` installed, so the Linux sandbox
 integration tests returned early) to 26.04 (bubblewrap 0.11.1, working user
-namespaces), which made those tests run for real and fail. A diagnostic run
-on both images confirmed the current order fails and tmpfs-first succeeds.
+namespaces), which made those tests run for real for the first time. A
+diagnostic run on ubuntu-26.04 confirmed that the old order loses the
+in-scope write and that tmpfs-first writes it to the host.
+
+Known limit (fails closed): if temp is inside one mount while a scope sits
+under temp, that scope stays hidden; writes are lost and nothing on the host
+is widened. It requires a project root of `/`, which production never binds.
 
 ## Why
 

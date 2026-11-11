@@ -83,10 +83,10 @@ interface BwrapArgsInput {
 	command: string;
 }
 
-/** True when `child` is a path strictly beneath `parent` (both absolute). */
-function isStrictDescendant(child: string, parent: string): boolean {
+/** True when `child` equals `parent` or lies beneath it (both absolute). */
+function isSameOrDescendant(child: string, parent: string): boolean {
 	const base = parent.endsWith('/') ? parent : `${parent}/`;
-	return child !== parent && child.startsWith(base);
+	return child === parent || child.startsWith(base);
 }
 
 /**
@@ -112,10 +112,14 @@ function buildBwrapArgs(input: BwrapArgsInput): string[] {
 	// workspace under `/tmp`, the default — must therefore be mounted AFTER the
 	// tmpfs, or its writes land in the hidden tmpfs and never reach the host
 	// (observed on ubuntu-26.04: "No such file or directory" on an in-scope
-	// write). The inverse — `temp` strictly inside a scope — keeps the tmpfs
-	// last so the temp directory stays a tmpfs rather than the host directory.
+	// write). The inverse — `temp` equal to or inside a scope or read-only
+	// root — keeps the tmpfs last (the pre-fix order) so the temp directory
+	// stays a private, size-capped tmpfs rather than the host directory.
+	// Known limit: the rule is all-or-nothing, so a scope under `temp` while
+	// `temp` is itself inside another mount stays hidden (writes are lost,
+	// nothing on the host is widened); production `temp` is always `/tmp`.
 	const tempInsideMount = [...input.readonlyRoots, ...input.scopes].some((p) =>
-		isStrictDescendant(input.temp, p),
+		isSameOrDescendant(input.temp, p),
 	);
 	const tmpfsArgs = [
 		'--size',
