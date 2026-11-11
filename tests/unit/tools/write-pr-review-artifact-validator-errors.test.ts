@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
 import {
 	_test_exports,
+	markPrReviewArtifactBoundary,
 	PR_REVIEW_BASE_DIMENSION_IDS,
 } from '../../../src/hooks/pr-workflow-gate.js';
 import {

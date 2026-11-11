@@ -1251,8 +1251,9 @@ export function parsePrReviewVerdictRows(
 	recoveries: IndexedVerdictRows['recoveries'];
 	quarantined: IndexedVerdictRows['quarantined'];
 	/**
-	 * #3358 AC4: declared item ids whose single row is a well-formed verdict
-	 * written under earlier (v1) verdict semantics. Never claims; disclosed.
+	 * #3358 AC4: declared item ids carrying at least one well-formed verdict
+	 * row written under earlier (v1) verdict semantics (any row of the item,
+	 * not only a lone one). Never claims; disclosed.
 	 */
 	semanticsMismatched: string[];
 } {

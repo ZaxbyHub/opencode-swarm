@@ -14777,6 +14777,27 @@ function probeIncompleteBypassComposablePhase(
 			),
 		),
 	];
+	// Feedback F-003: mirror the ladder's #3358 AC4 guard FIRST — before the
+	// receipt shortcut below. The terminal-ready ladder throws for an
+	// UNCLAIMED item whose lane answered with a row written under earlier
+	// verdict semantics BEFORE it derives N-of-M admission — those rows are
+	// never re-admitted and never settled as typed-dead. A durable
+	// N-of-M receipt covering such an item must NOT flip the probe to
+	// settled: the ladder itself has no receipt reference before the guard,
+	// so a receipt-covered mismatched item would re-wedge completion with no
+	// INCOMPLETE exit (re-gate Finding 1). Report the phase genuinely
+	// unsettled so the bypass discloses the items as skipped — they are
+	// still never settled, which is exactly what AC3/AC4 require.
+	if (composed && composed.semanticsMismatchedItemIds.length > 0) {
+		const unclaimedSet = new Set(composed.unclaimed);
+		if (
+			composed.semanticsMismatchedItemIds.some((itemId) =>
+				unclaimedSet.has(itemId),
+			)
+		) {
+			return { phase, settled: false, admissible: false, unsettledItemIds };
+		}
+	}
 	// Feedback F-7 tail: a phase whose ADMITTED N-of-M verdict-settlement
 	// receipt (anchored on state via prReviewVerdictSettlementDigests) covers
 	// every currently-unclaimed item is SETTLED — composition keeps reporting
@@ -14794,27 +14815,6 @@ function probeIncompleteBypassComposablePhase(
 		)
 	) {
 		return { phase, settled: true, admissible: false, unsettledItemIds: [] };
-	}
-	// Feedback F-003: mirror the ladder's #3358 AC4 guard. The terminal-ready
-	// ladder throws for an UNCLAIMED item whose lane answered with a row
-	// written under earlier verdict semantics BEFORE it derives N-of-M
-	// admission — those rows are never re-admitted and never settled as
-	// typed-dead. Without this mirror the probe computed admission with no
-	// semantics filter, so a mismatched item whose owners are typed-dead and
-	// whose retry budget is exhausted probed `admissible`, the bypass arm
-	// (`!settled && !admissible`) was skipped, and the ladder re-threw the
-	// guard with no INCOMPLETE exit. Report the phase genuinely unsettled so
-	// the bypass discloses the items as skipped — they are still never
-	// settled, which is exactly what AC3/AC4 require.
-	if (composed && composed.semanticsMismatchedItemIds.length > 0) {
-		const unclaimedSet = new Set(composed.unclaimed);
-		if (
-			composed.semanticsMismatchedItemIds.some((itemId) =>
-				unclaimedSet.has(itemId),
-			)
-		) {
-			return { phase, settled: false, admissible: false, unsettledItemIds };
-		}
 	}
 	if (composed && state.prHeadSha) {
 		const admission = deriveVerdictSettlementAdmission({

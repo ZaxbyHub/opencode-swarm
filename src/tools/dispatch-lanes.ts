@@ -7232,11 +7232,11 @@ function applyPrWorkflowPromptContract(
 		// is unaffected: the test_engineer prompt never carried an override).
 		const FEEDBACK_VERDICT_PROTOCOL_CLAUSES: Record<string, string> = {
 			'swarm-pr-feedback:stage-b-reviewer':
-				'PROTOCOL SELECTION (feedback stage-b): the reviewer prompt\'s Stage-B "STRUCTURED VERDICT LINE" mandate does not apply to this lane. Do not emit a [REVIEWED] | task-<taskId> | VERDICT | summary row — settle only via one positive [STAGE-B-REVIEW] | <item_id> | APPROVE | <notes> row per assigned feedback item, exactly as the contract card and the [STAGE-B-REVIEW] row family require.',
+				'\nPROTOCOL SELECTION (feedback stage-b): the reviewer prompt\'s Stage-B "STRUCTURED VERDICT LINE" mandate does not apply to this lane. Do not emit a [REVIEWED] | task-<taskId> | VERDICT | summary row — settle only via one positive [STAGE-B-REVIEW] | <item_id> | APPROVE | <notes> row per assigned feedback item, exactly as the controller block and the [STAGE-B-REVIEW] row family require.',
 			'swarm-pr-feedback:closeout-reviewer':
-				'PROTOCOL SELECTION (feedback closeout): the reviewer prompt\'s Stage-B "STRUCTURED VERDICT LINE" mandate does not apply to this lane. Do not emit a [REVIEWED] | task-<taskId> | VERDICT | summary row — settle only via one positive [CLOSEOUT-REVIEW] | <item_id> | APPROVE | <notes> row per assigned feedback item, exactly as the contract card and the [CLOSEOUT-REVIEW] row family require.',
+				'\nPROTOCOL SELECTION (feedback closeout): the reviewer prompt\'s Stage-B "STRUCTURED VERDICT LINE" mandate does not apply to this lane. Do not emit a [REVIEWED] | task-<taskId> | VERDICT | summary row — settle only via one positive [CLOSEOUT-REVIEW] | <item_id> | APPROVE | <notes> row per assigned feedback item, exactly as the controller block and the [CLOSEOUT-REVIEW] row family require.',
 			'swarm-pr-feedback:closeout-critic':
-				'PROTOCOL SELECTION (feedback closeout): the critic prompt\'s default "Begin directly with PLAN REVIEW" structure does not apply to this lane. Do not produce a PLAN REVIEW of a plan document and do not call get_approved_plan — settle only via one positive [CLOSEOUT-CRITIC] | <item_id> | APPROVE | <notes> row per assigned feedback item, exactly as the contract card and the [CLOSEOUT-CRITIC] row family require.',
+				'\nPROTOCOL SELECTION (feedback closeout): the critic prompt\'s default "Begin directly with PLAN REVIEW" structure does not apply to this lane. Do not produce a PLAN REVIEW of a plan document and do not call get_approved_plan — settle only via one positive [CLOSEOUT-CRITIC] | <item_id> | APPROVE | <notes> row per assigned feedback item, exactly as the controller block and the [CLOSEOUT-CRITIC] row family require.',
 		};
 		const feedbackProtocolClause =
 			FEEDBACK_VERDICT_PROTOCOL_CLAUSES[normalizedMode.token] ?? '';

@@ -115,6 +115,8 @@ describe('PR #3631 feedback contract riders', () => {
 	});
 
 	test('F-006: re-applying the contract to its own output is byte-identical', () => {
+		// The mapper RETURNS new lane objects ({...lane, prompt}); the input
+		// array is never mutated, so the assertion must read the returned lane.
 		const once = applyContract('swarm-pr-review:reviewer').prompt;
 		const lanes = [
 			{
@@ -124,12 +126,13 @@ describe('PR #3631 feedback contract riders', () => {
 				review_item_ids: ['C-1'],
 			},
 		];
-		_test_exports.applyPrWorkflowPromptContract(lanes as never, {
+		const second = _test_exports.applyPrWorkflowPromptContract(lanes as never, {
 			mode: 'swarm-pr-review:reviewer',
 			prHeadSha: 'abc123',
 			revisionDigest: 'revision-test',
-		});
-		expect(lanes[0]!.prompt).toBe(once);
+		}) as { ok: boolean; lanes?: Array<{ prompt: string }> };
+		expect(second.ok).toBe(true);
+		expect(second.lanes?.[0]?.prompt).toBe(once);
 	});
 
 	test('F-002: DOWNGRADED|NONE is refused with the DISPROVED remedy named', () => {
