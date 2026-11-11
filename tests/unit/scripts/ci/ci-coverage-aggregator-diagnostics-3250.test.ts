@@ -20,9 +20,10 @@ import { join } from 'node:path';
  * `!= 'skipped'` gate and re-emit the misleading warning), and the upload
  * gate is never success-only (threshold-failure merges keep their report).
  *
- * Split from ci-coverage-sharding.test.ts per FR-006 (the sharding file was
- * over the 500-line cap at 444 lines on main; these tests belong to the
- * #3250 diagnostics surface, not the sharding topology surface).
+ * Split from ci-coverage-sharding.test.ts per FR-006: the sharding file was
+ * 444 lines on main and the #3250 additions pushed it past the 500-line cap
+ * (508 at the fix commit); these tests belong to the #3250 diagnostics
+ * surface, not the sharding topology surface, so they live here.
  */
 
 const CI_YML_PATH = join(
