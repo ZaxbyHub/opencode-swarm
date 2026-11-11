@@ -30,6 +30,7 @@ import { getSandboxSkipSummary } from '../sandbox/skip-state.js';
 import { sanitizeDiagnosticText } from '../scope/path-identity';
 import { readEffectiveSpecSync } from '../sdd/effective-spec';
 import { getAgentSession } from '../state.js';
+import { isNonBlankAbsoluteDirectory } from '../utils/path-security.js';
 import { listCoderSettlementWalStates } from '../workflow/coder-settlement.js';
 import { renderRecoveryInvocationQuickForms } from '../workflow/recovery-invocation.js';
 import { scanWedgedStageA } from '../workflow/stage-a-repair.js';
@@ -1169,6 +1170,25 @@ export async function getDiagnoseData(
 	directory: string,
 	sessionID?: string,
 ): Promise<DiagnoseData> {
+	// A blank or relative root names no project: every check below would read
+	// (and the swarm.db probe would open) `.swarm/` under process.cwd()
+	// instead (AGENTS.md invariant 4; #3165 section B). Report it as the one
+	// failing check rather than diagnosing whatever directory the process runs in.
+	if (!isNonBlankAbsoluteDirectory(directory)) {
+		return {
+			checks: [
+				{
+					name: 'Project directory',
+					status: '❌',
+					detail: `Not a usable project root (must be a non-blank absolute path; got ${sanitizeDiagnosticText(JSON.stringify(directory), 120)})`,
+				},
+			],
+			passCount: 0,
+			totalCount: 1,
+			allPassed: false,
+			deferredWarnings: getDeferredWarnings(),
+		};
+	}
 	const checks: HealthCheck[] = [];
 
 	// Check: Version (running) — surface npm staleness so users notice when

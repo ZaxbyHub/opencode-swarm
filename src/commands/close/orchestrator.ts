@@ -283,17 +283,17 @@ export async function handleCloseCommand(
 	args: string[],
 	options: CloseCommandOptions = {},
 ): Promise<string> {
+	if (typeof directory !== 'string' || directory.trim() === '') {
+		return '❌ Refused: the project directory is blank, so there is no session to close.';
+	}
 	const swarmDir = path.join(directory, '.swarm');
 	try {
 		const stat = fsSync.lstatSync(swarmDir);
-		// isSymbolicLink() correctly detects both symlinks and Windows junction
-		// points on modern Node/Bun (Node 20+, Bun 1.0+). No additional check
-		// needed — `isReparsePoint()` is not available in the Bun type system.
+		// isSymbolicLink() also detects Windows junctions (Node 20+, Bun 1.0+).
 		if (stat.isSymbolicLink()) {
 			return `❌ Refused: .swarm/ is a symlink or junction. Refusing to operate on a redirected directory for safety.`;
 		}
 	} catch (err) {
-		// ENOENT means .swarm/ doesn't exist yet — fine, proceed
 		if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') {
 			throw err;
 		}
