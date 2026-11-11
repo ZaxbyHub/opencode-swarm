@@ -33,6 +33,8 @@ import * as path from 'path';
 
 // Platform detection
 const isLinux = process.platform === 'linux';
+// bwrap is a hard prerequisite for the Linux legs; a missing binary skips them explicitly.
+const bwrapOnPath = isLinux && spawnSync('bwrap', ['--version']).status === 0;
 const isMac = process.platform === 'darwin';
 const isWindows = process.platform === 'win32';
 
@@ -785,7 +787,7 @@ describe('AC-008: Performance overhead budget', () => {
 	const ITERATIONS = 100;
 	const FILE_SIZE_KB = 1;
 
-	test.skipIf(!isLinux || Boolean(process.env.COVERAGE_SHARD_INDEX))(
+	test.skipIf(!bwrapOnPath || Boolean(process.env.COVERAGE_SHARD_INDEX))(
 		'Linux: bwrap overhead < 50 ms per command for repeated writes',
 		async () => {
 			const Executor = await getLinuxExecutor();
@@ -794,9 +796,8 @@ describe('AC-008: Performance overhead budget', () => {
 			try {
 				const executor = new Executor([scopeDir]);
 
-				if (!executor.isAvailable()) {
-					return;
-				}
+				// bwrap is present (checked above); the executor must then be available.
+				expect(executor.isAvailable()).toBe(true);
 
 				// Baseline: plain bash -c (no sandbox); wrapped differs only by bwrap.
 				const testFile = path.join(scopeDir, 'ac008-test.txt');
