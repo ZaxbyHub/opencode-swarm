@@ -95,7 +95,13 @@ describe('repository-validation crash contract — issue #2738 retirement', () =
 		// fixture's group kill would take the runner down with it. The
 		// harness's own killProcessTree already relies on the same property
 		// via `process.kill(-child.pid, 'SIGKILL')`.
-		expect(harness).toContain('detached: true');
+		// Scoped to the VALIDATION-CHILD spawn block: a file-wide contains
+		// check stays green if the flag migrates to another Bun.spawn in the
+		// same file, which would re-arm the exact hazard this guard pins.
+		const spawnStart = harness.indexOf('child = Bun.spawn(item.argv');
+		expect(spawnStart).toBeGreaterThanOrEqual(0);
+		const spawnBlock = harness.slice(spawnStart, spawnStart + 500);
+		expect(spawnBlock).toContain('detached: true');
 		expect(harness).toContain("process.kill(-child.pid, 'SIGKILL')");
 	});
 });

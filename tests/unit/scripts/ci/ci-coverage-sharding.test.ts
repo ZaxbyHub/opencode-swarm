@@ -197,18 +197,52 @@ describe('ci.yml coverage sharding — CI-004 + issue #2341', () => {
 		);
 	});
 
-	test('merge step carries the id the upload gate references (issue #3250)', () => {
+	test('merge step carries the exact id the upload gate references (issue #3250)', () => {
 		const mergeStep = extractStep(
 			yml,
 			'Merge shard reports and enforce threshold',
 		);
 		expect(mergeStep).not.toBe('');
-		expect(mergeStep).toContain('id: merge-coverage');
-		// The id is load-bearing: the upload gate below addresses it via
-		// steps.merge-coverage.outcome, and a renamed id would silently detach
-		// the gate (the outcome expression then resolves to empty and the
-		// comparison never suppresses the misleading warning).
-		expect(coverageAggJob).toContain('steps.merge-coverage.outcome');
+		// Exact-token pin: a prefixed rename (id: merge-coverage-v2) detaches
+		// the upload gate's steps.merge-coverage.outcome reference — the
+		// outcome expression resolves empty, `'' != 'skipped'` is true, and
+		// the upload runs unconditionally again — while a substring pin stays
+		// green under that exact mutation.
+		expect(mergeStep).toMatch(/^ {8}id: merge-coverage$/m);
+		// Reference resolution: every steps.<id>.outcome reference in the job
+		// must name an id this job actually declares.
+		const declaredIds = [
+			...coverageAggJob.matchAll(/^ {8}id: ([A-Za-z0-9_-]+)$/gm),
+		].map((match) => match[1]);
+		const referencedIds = [
+			...coverageAggJob.matchAll(/steps\.([A-Za-z0-9_-]+)\.outcome/g),
+		].map((match) => match[1]);
+		expect(referencedIds.length).toBeGreaterThan(0);
+		for (const referenced of referencedIds) {
+			expect(declaredIds).toContain(referenced);
+		}
+	});
+
+	test('aggregator step order is fail-closed -> download -> merge -> upload (issue #3250)', () => {
+		// The upload gate is only meaningful because the fail-closed step
+		// precedes the merge: reordering them makes the merge run first and
+		// fail at the per-shard presence check, so outcome becomes 'failure',
+		// the != 'skipped' gate passes, and the always()-upload re-emits the
+		// misleading "No files were found" warning — the exact #3250 symptom
+		// reintroduced with every membership pin still green. Order is
+		// load-bearing; pin it.
+		const failClosed = coverageAggJob.indexOf(
+			'Check coverage shard results (fail closed)',
+		);
+		const download = coverageAggJob.indexOf('Download shard reports');
+		const merge = coverageAggJob.indexOf(
+			'Merge shard reports and enforce threshold',
+		);
+		const upload = coverageAggJob.indexOf('Upload coverage report');
+		expect(failClosed).toBeGreaterThanOrEqual(0);
+		expect(download).toBeGreaterThan(failClosed);
+		expect(merge).toBeGreaterThan(download);
+		expect(upload).toBeGreaterThan(merge);
 	});
 
 	test('final upload gates on the merge step having run, not on its exit status (issue #3250)', () => {
