@@ -196,14 +196,16 @@ describe('Command Adapters', () => {
 
 	describe('Error handling', () => {
 		// '' resolves `.swarm/` against cwd: run inside a sandbox, not the checkout.
-		let sandbox: CwdSandbox;
+		let sandbox: CwdSandbox | undefined;
 
 		beforeEach(() => {
 			sandbox = enterCwdSandbox('command-test-empty-dir-');
 		});
 
 		afterEach(() => {
-			sandbox.restore();
+			// Optional chaining: if enterCwdSandbox threw, do not mask its error.
+			sandbox?.restore();
+			sandbox = undefined;
 		});
 
 		it('preflight should handle invalid directory', async () => {

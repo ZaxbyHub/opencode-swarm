@@ -428,11 +428,11 @@ describe('steering-consumed adversarial security tests', () => {
 
 	describe('10. Empty string directory', () => {
 		// A blank root resolves `.swarm/` against cwd: keep it out of the checkout.
-		let restoreCwd: () => void;
+		let restoreCwd: (() => void) | undefined;
 		beforeEach(() => {
 			restoreCwd = enterCwdSandbox('steering-blank-dir-').restore;
 		});
-		afterEach(() => restoreCwd());
+		afterEach(() => restoreCwd?.());
 
 		it('should handle empty string as directory', () => {
 			recordSteeringConsumed('', 'test-id');

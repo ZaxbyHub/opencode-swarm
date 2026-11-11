@@ -488,7 +488,7 @@ Every `bun test` process loads `tests/preload/prod-store-tripwire.ts`, which sna
 
 - a new, removed or changed top-level entry (including creating `.swarm/`) fails the run;
 - a change inside an existing `.swarm/` fails the run too, in CI and locally;
-- `SWARM_TEST_CHECKOUT_DRIFT=enforce|warn|off` sets both checks to one mode. If you run tests in a checkout where a live opencode-swarm session is writing `.swarm/` state, set `SWARM_TEST_CHECKOUT_DRIFT=warn` so its writes print a `CHECKOUT DRIFT` warning instead of failing your run;
+- `SWARM_TEST_CHECKOUT_DRIFT=enforce|warn|off` sets both checks to one mode. If you run tests in a checkout where a live opencode-swarm session is writing `.swarm/` state, set `SWARM_TEST_CHECKOUT_DRIFT=warn` so its writes print a `CHECKOUT DRIFT` warning instead of failing your run. `warn` downgrades both checks, so it also stops failing on new top-level entries. The value is matched case-insensitively after trimming, and anything else (including an empty or misspelled value) is treated as `enforce`;
 - a part that cannot be checked (an unreadable root or `.swarm/` directory, a `.swarm/` with more than 20,000 entries) is reported as a warning;
 - writes inside an existing top-level directory such as `src/` or `tests/` are not detected: only top-level names, top-level files and `.swarm/` are compared.
 - the comparison runs 25 ms after the last test, so an un-awaited write a test started still lands in time to be caught; a write that waits on a timer, or takes longer, is not.

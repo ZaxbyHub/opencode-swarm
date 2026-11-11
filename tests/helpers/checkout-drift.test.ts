@@ -128,6 +128,21 @@ describe('checkout drift: modes and reporting', () => {
 		});
 	});
 
+	test('the mode value is trimmed; an empty or unknown value fails closed to enforce', () => {
+		for (const raw of [' warn ', 'Warn\r\n']) {
+			expect(resolveDriftMode({ SWARM_TEST_CHECKOUT_DRIFT: raw })).toEqual({
+				topLevel: 'warn',
+				swarm: 'warn',
+			});
+		}
+		for (const raw of ['', '  ', 'warning', 'bogus', '0']) {
+			expect(resolveDriftMode({ SWARM_TEST_CHECKOUT_DRIFT: raw })).toEqual({
+				topLevel: 'enforce',
+				swarm: 'enforce',
+			});
+		}
+	});
+
 	test('enforced drift throws; warned drift only warns', () => {
 		const drift = {
 			topLevel: ['x: created'],

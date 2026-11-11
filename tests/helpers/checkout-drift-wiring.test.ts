@@ -48,6 +48,12 @@ test('writes into the guarded checkout', () => {
 });
 `;
 
+// The late-write case races a wall-clock window (the preload's 25 ms settle):
+// skipped under coverage shards, whose self-hosted pool is contended
+// (docs/ci/merge-queue-policy.md), and enforced in the hosted unit matrix.
+const skipCoverageShard = Boolean(process.env.COVERAGE_SHARD_INDEX);
+const describeWallClock = describe.skipIf(skipCoverageShard);
+
 let scratch: string;
 let checkout: string;
 let fixtureDir: string;
@@ -112,6 +118,17 @@ describe('checkout-drift preload wiring', () => {
 		expect(exitCode).not.toBe(0);
 	}, 60_000);
 
+	test('a .swarm/ write only warns with SWARM_TEST_CHECKOUT_DRIFT=warn', () => {
+		const { exitCode, output } = runFixture(
+			path.join('.swarm', 'state.json'),
+			'warn',
+		);
+		expect(output).toContain('.swarm/state.json: created');
+		expect(exitCode).toBe(0);
+	}, 60_000);
+});
+
+describeWallClock('checkout-drift preload wiring (wall-clock window)', () => {
 	test('a .swarm/ write still in flight when the last test returns fails the run', () => {
 		const { exitCode, output } = runFixture(
 			path.join('.swarm', 'late.json'),
@@ -121,14 +138,5 @@ describe('checkout-drift preload wiring', () => {
 		expect(output).toContain('.swarm/late.json: created');
 		expect(output).toContain('error: CHECKOUT DRIFT');
 		expect(exitCode).not.toBe(0);
-	}, 60_000);
-
-	test('a .swarm/ write only warns with SWARM_TEST_CHECKOUT_DRIFT=warn', () => {
-		const { exitCode, output } = runFixture(
-			path.join('.swarm', 'state.json'),
-			'warn',
-		);
-		expect(output).toContain('.swarm/state.json: created');
-		expect(exitCode).toBe(0);
 	}, 60_000);
 });

@@ -195,11 +195,16 @@ export function resolveDriftRoot(
 	return override && path.isAbsolute(override) ? override : preloadRepoRoot;
 }
 
+/**
+ * `SWARM_TEST_CHECKOUT_DRIFT` is matched case-insensitively after trimming
+ * (like `SWARM_TEST_CHECKOUT_DRIFT_ROOT`). Any other value, including an empty
+ * or misspelled one, fails closed to enforce.
+ */
 export function resolveDriftMode(env: NodeJS.ProcessEnv): {
 	topLevel: DriftMode;
 	swarm: DriftMode;
 } {
-	const raw = env.SWARM_TEST_CHECKOUT_DRIFT?.toLowerCase();
+	const raw = env.SWARM_TEST_CHECKOUT_DRIFT?.trim().toLowerCase();
 	if (raw === 'enforce' || raw === 'warn' || raw === 'off') {
 		return { topLevel: raw, swarm: raw };
 	}
