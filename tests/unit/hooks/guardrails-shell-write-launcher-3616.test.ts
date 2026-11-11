@@ -437,3 +437,58 @@ describe('#3616 launcher + shell composition keeps the inner chdir (critic r3 (a
 		);
 	}
 });
+
+describe('#3616 shell-wrapped sudo -i withdraws (critic r4 (e))', () => {
+	// A login sudo inside a shell payload previously spliced to
+	// `( tee src/ok )` — the legacy unwrap stripped the sudo words, so the
+	// login-landing withdrawal could never fire. matchSudoChdir now has a
+	// login arm: a write-bearing tail with a RELATIVE operand returns the
+	// uncertain (withdrawal) match at the shared funnel.
+	for (const command of [
+		`sh -c "sudo -i tee src/ok"`,
+		`bash -c "sudo -i tee src/ok"`,
+		`env -i sh -c "sudo -i tee src/ok"`,
+		`time sh -c "sudo -i tee src/ok"`,
+		`env - time sh -c "sudo -i tee src/ok"`,
+	]) {
+		test(
+			`${command} is denied by withdrawal`,
+			async () => {
+				const r = await gate(command);
+				expect(r.verdict).toBe('BLOCKED');
+				expect(r.message).toMatch(DYNAMIC_DENY);
+				// Not the pre-item-15 default label.
+				expect(r.message).not.toMatch(/shell variable or command substitution/);
+			},
+			T,
+		);
+	}
+	test(
+		'control: sh -c "sudo -s tee src/ok" stays admitted',
+		async () => {
+			expect((await gate(`sh -c "sudo -s tee src/ok"`)).verdict).toBe(
+				'ADMITTED',
+			);
+		},
+		T,
+	);
+	test(
+		'control: sh -c "sudo -i make build" stays admitted',
+		async () => {
+			expect((await gate(`sh -c "sudo -i make build"`)).verdict).toBe(
+				'ADMITTED',
+			);
+		},
+		T,
+	);
+	test(
+		'control: sh -c "sudo -i tee /etc/x" denies by authority, not withdrawal',
+		async () => {
+			const r = await gate(`sh -c "sudo -i tee /etc/x"`);
+			expect(r.verdict).toBe('BLOCKED');
+			expect(r.message).toMatch(AUTHORITY_DENY);
+			expect(r.message).not.toMatch(DYNAMIC_DENY);
+		},
+		T,
+	);
+});

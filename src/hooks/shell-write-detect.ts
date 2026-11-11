@@ -3669,6 +3669,11 @@ function detectLauncherWrites(cmd: unknown): WriteTarget[] {
 								'sudo -i login-shell tail (relative write under target home)',
 							path: null,
 							dynamicSourceWord: firstRelative.slice(0, 64),
+							// #3616 (final-critic round 4, finding 2): the
+							// login landing is an unresolvable WRAPPER chdir —
+							// render the class-accurate reason, not the
+							// dynamic-text default.
+							denialOrigin: 'wrapper-chdir',
 						});
 						return results;
 					}

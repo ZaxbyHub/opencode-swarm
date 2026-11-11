@@ -1759,7 +1759,51 @@ function matchSudoChdir(words: string[]): DcChdirMatch {
 	const walk = walkLauncherOptions(head, words.slice(1));
 	if (walk === null || walk.kind !== 'inner') return null;
 	const dir = walk.sudoChdir;
-	if (dir === undefined) return null;
+	if (dir === undefined) {
+		// #3616 (final-critic round 4 (e)): a LOGIN sudo (`-i`/`--login`)
+		// chdirs to the target user's home — unresolvable statically — so a
+		// write-bearing tail with a RELATIVE operand must withdraw fail-closed
+		// HERE (the shared funnel for direct, launcher-prefixed, env-peeled and
+		// shell-payload spellings), or the legacy unwrap strips the sudo words
+		// and the detector's D6 withdrawal can never fire (`sh -c "sudo -i
+		// tee src/ok"` spliced to `( tee src/ok )`). No-write tails, `-s`
+		// tails, and absolute-only tails stay null so the C6 controls keep
+		// their exact verdicts.
+		if (walk.loginShell === true) {
+			const tail = words.slice(1 + (walk.innerIndex ?? 0));
+			const loginWriteWords = new Set([
+				'rm',
+				'mv',
+				'cp',
+				'tee',
+				'dd',
+				'truncate',
+				'install',
+			]);
+			const hasWriteVector = tail.some((word, idx) => {
+				if (typeof word !== 'string') return false;
+				if (loginWriteWords.has(basenameAnySepLike(word))) return true;
+				if (/\S?>\S?/.test(word)) return true; // glued or bare redirect
+				if (idx > 0 && /^[0-9]?>>?$/.test(tail[idx - 1] ?? '')) return true;
+				return false;
+			});
+			const hasRelativeOperand = tail.some(
+				(word) =>
+					typeof word === 'string' &&
+					!word.startsWith('/') &&
+					!word.startsWith('~/') &&
+					word !== '~' &&
+					!/^[A-Za-z]:[\\/]/.test(word) &&
+					!word.startsWith('-') &&
+					word !== 'tee' &&
+					word !== 'dd',
+			);
+			if (hasWriteVector && hasRelativeOperand && tail.length > 0) {
+				return { kind: 'uncertain', innerWords: tail };
+			}
+		}
+		return null;
+	}
 	if (dir === '' || dir.includes('\0')) return { kind: 'failClosed' };
 	// #3572 delta: a NESTED GNU `time -o` outcome carries chdirTailIndex —
 	// the word index the rewritten subshell must slice from (the `time`

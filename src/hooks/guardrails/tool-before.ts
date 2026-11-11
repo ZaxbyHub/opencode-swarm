@@ -2099,7 +2099,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 							'directory-withdrawal':
 								'the directory context was withdrawn (popd/cd -/reassignment) — rejecting for safety',
 							'wrapper-chdir':
-								'wrapper chdir context could not be resolved (sudo -D / env -C) — rejecting for safety',
+								'wrapper chdir context could not be resolved (sudo -D/-i, env -C) — rejecting for safety',
 							'unverifiable-path':
 								'could not be verified on the filesystem (symlink resolution failed or exceeded the link-hop limit) — rejecting for safety',
 							'dynamic-text':
