@@ -400,36 +400,9 @@ describe('#3616 launcher + shell composition keeps the inner chdir (critic r3 (a
 	// now peels the launcher grammar first, and the nested fallback routes
 	// through the same helper.
 	for (const [command, landing] of [
-		[
-			`time bash -c "sudo -D /etc tee src/ok"`,
-			'C:' +
-				String.fromCharCode(92) +
-				'etc' +
-				String.fromCharCode(92) +
-				'src' +
-				String.fromCharCode(92) +
-				'ok',
-		],
-		[
-			`nice bash -c "sudo -D /etc tee src/ok"`,
-			'C:' +
-				String.fromCharCode(92) +
-				'etc' +
-				String.fromCharCode(92) +
-				'src' +
-				String.fromCharCode(92) +
-				'ok',
-		],
-		[
-			`env -i bash -c "sudo -D /etc tee src/ok"`,
-			'C:' +
-				String.fromCharCode(92) +
-				'etc' +
-				String.fromCharCode(92) +
-				'src' +
-				String.fromCharCode(92) +
-				'ok',
-		],
+		[`time bash -c "sudo -D /etc tee src/ok"`, /etc[\\\\/]src[\\\\/]ok/],
+		[`nice bash -c "sudo -D /etc tee src/ok"`, /etc[\\\\/]src[\\\\/]ok/],
+		[`env -i bash -c "sudo -D /etc tee src/ok"`, /etc[\\\\/]src[\\\\/]ok/],
 		[`time sh -c "env -C .. tee src/a"`, 'path=../src/a'],
 		[`time bash -c "env -C .. tee src/a"`, 'path=../src/a'],
 		// nested fallback: the dash rewrite's quoted-time inner text

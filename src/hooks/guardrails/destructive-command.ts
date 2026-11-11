@@ -2018,8 +2018,6 @@ export function dcPreprocessWrappers(command: string): DcWrapperPreprocess {
 					processed.push(`( ${payloadInner} )`);
 					continue;
 				}
-				processed.push(unwrapped);
-				continue;
 			}
 			processed.push(unwrapped);
 			continue;
