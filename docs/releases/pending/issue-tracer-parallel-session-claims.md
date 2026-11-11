@@ -7,7 +7,7 @@
 - Phase 1 intake re-checks the claim state and reads the FULL comment thread (parallel sessions record decision proposals and owner confirmations in comments; an uninformed intake question can contradict a recorded owner decision).
 - Phase 2.5 anchor publication gains a fetch-before-post check: a rival `issue-tracer-checkpoint-v1` anchor with a different slug, or an active foreign claim, halts before publishing.
 - Phase 5 gains a pre-publication collision check (`gh pr list` + `git ls-remote`).
-- `metadata.version` bumped 3.0.1 → 3.0.2 in the canonical skill and both adapter shims (`.claude`, `.agents`), per the install lockstep rule.
+- `metadata.version` bumped to 3.0.2 in the canonical skill and both adapter shims (`.claude`, `.agents` — repairing their pre-existing 3.0.0 lag), per the install lockstep rule.
 
 ## Why
 
