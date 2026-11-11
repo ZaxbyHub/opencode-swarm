@@ -1364,55 +1364,9 @@ function matchChdirWrapperSegment(segment: string): DcChdirMatch {
 	// payload reaches this function as the unquoted inner text (the
 	// preprocessing splices the payload as a parenthesized subshell), so the
 	// same retry covers it. Bounded: each peel consumes at least one word.
-	peelLoop: for (let peel = 0; peel < words.length; peel += 1) {
-		if (
-			head === 'time' ||
-			head === 'nice' ||
-			head === 'nohup' ||
-			head === 'env'
-		) {
-			let next = 1;
-			if (head === 'time' || head === 'nice' || head === 'nohup') {
-				// Their own flags are argument-less for this purpose (nice -n
-				// N's consumed argument is handled by the launcher walks; the
-				// chdir matcher only needs the first plain word).
-				while (next < words.length && (words[next] as string).startsWith('-')) {
-					next += 1;
-					if (head === 'nice' && (words[next - 1] as string) === '-n')
-						next += 1;
-				}
-			} else {
-				// env: peel ONLY across assignments and flags that cannot
-				// change the working directory (or re-split the command). A
-				// chdir-bearing env (`env -C DIR …`, `-S '-C DIR …'`,
-				// `--chdir`, clusters, or any flag we do not recognize) is the
-				// chdir wrapper ITSELF — it must stay the head and reach
-				// matchEnvChdir below, or the child cwd is silently dropped
-				// and the wrapped write resolves at the ambient directory.
-				while (next < words.length) {
-					const w = words[next] as string;
-					if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(w)) {
-						next += 1;
-						continue;
-					}
-					if (!w.startsWith('-')) break;
-					if (ENV_PEELABLE_FLAGS.has(w) || w.startsWith('--unset=')) {
-						next += 1;
-						if (w === '-u' || w === '--unset') next += 1;
-						continue;
-					}
-					// Not provably chdir-free: keep `env` as the head (it then
-					// flows through the flag-region scan and matchEnvChdir).
-					break peelLoop;
-				}
-			}
-			if (next >= words.length) return null;
-			words.splice(0, next);
-			head = basenameAnySepLike(words[0]);
-			continue;
-		}
-		break;
-	}
+	const peeledHead = dcPeelLauncherWords(words, true);
+	if (peeledHead === null) return null;
+	head = peeledHead;
 	if (head !== 'env' && head !== 'sudo') return null;
 	// Flag-region scan runs ONLY for wrapper heads — the nested re-walk of a
 	// rewritten payload must never see this check (a $() argument there is
@@ -1439,6 +1393,61 @@ function matchChdirWrapperSegment(segment: string): DcChdirMatch {
 	}
 	if (head === 'env') return matchEnvChdir(words);
 	return matchSudoChdir(words);
+}
+
+/**
+ * #3616 (final-critic round 3 (a)): peel leading launcher words — time/
+ * nice/nohup (their flags; nice -n consumes one word) and env (assignments
+ * plus the provably chdir-free flag whitelist) — MUTATING `words` down to
+ * the first non-launcher head. Returns the new head's basename, or null
+ * when the peel consumed everything. `stopAtEnvFlags` keeps the historical
+ * matchChdirWrapperSegment behavior of STOPPING with env as the head on a
+ * non-peelable env flag (env is then the chdir wrapper and must be judged);
+ * when false (the shell-payload site) the env flag region is simply stepped
+ * over because the SHELL, not env, is what we are looking for.
+ */
+function dcPeelLauncherWords(
+	words: string[],
+	stopAtEnvFlags: boolean,
+): string | null {
+	for (;;) {
+		const head = basenameAnySepLike(words[0] ?? '');
+		if (
+			head === 'time' ||
+			head === 'nice' ||
+			head === 'nohup' ||
+			head === 'env'
+		) {
+			let next = 1;
+			if (head === 'time' || head === 'nice' || head === 'nohup') {
+				while (next < words.length && (words[next] as string).startsWith('-')) {
+					next += 1;
+					if (head === 'nice' && (words[next - 1] as string) === '-n')
+						next += 1;
+				}
+			} else {
+				while (next < words.length) {
+					const w = words[next] as string;
+					if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(w)) {
+						next += 1;
+						continue;
+					}
+					if (!w.startsWith('-')) break;
+					if (ENV_PEELABLE_FLAGS.has(w) || w.startsWith('--unset=')) {
+						next += 1;
+						if (w === '-u' || w === '--unset') next += 1;
+						continue;
+					}
+					if (stopAtEnvFlags) return head; // env stays the head
+					break;
+				}
+			}
+			if (next >= words.length) return null;
+			words.splice(0, next);
+			continue;
+		}
+		return head;
+	}
 }
 
 function matchEnvChdir(words: string[]): DcChdirMatch {
@@ -1887,12 +1896,24 @@ function preprocessWrapperText(
 	const inner =
 		nested !== null
 			? nested
-			: {
-					text: dcUnwrapWrappers(innerRaw),
-					rewrote: false,
-					uncertain: false,
-					failClosed: false,
-				};
+			: (() => {
+					// #3616 (final-critic round 3 (a)): the inner text may itself
+					// be a (launcher-prefixed) shell wrapper whose payload carries
+					// a chdir (`'time' sh -c 'env -C .. tee x'` from the dash
+					// rewrite). The legacy unwrap strips the wrapper and DISCARDS
+					// the chdir — route through the shell-payload recursion first.
+					const spliced = dcShellPayloadRewrite(
+						innerRaw,
+						dcUnwrapWrappers(innerRaw),
+						depth + 1,
+					);
+					return {
+						text: spliced ?? dcUnwrapWrappers(innerRaw),
+						rewrote: false,
+						uncertain: false,
+						failClosed: false,
+					};
+				})();
 	const hoistSuffix =
 		hoistedRedirects.length > 0 ? ` ${hoistedRedirects.join(' ')}` : '';
 	if (match.kind === 'uncertain') {
@@ -1915,6 +1936,37 @@ function preprocessWrapperText(
  * Preprocess a command for write-path detection (#3491 W2). Segment order is
  * preserved; only changed commands differ from the input.
  */
+/**
+ * #3616 (final-critic round 3 (a)): when `text` is a (possibly launcher-
+ * prefixed) shell -c wrapper whose flag walk yields a payload, rewrite it as
+ * the parenthesized subshell `( <payload analysis> )` — recursing
+ * preprocessWrapperText on the ONE-LEVEL payload so a chdir-bearing wrapper
+ * inside it (sudo -D / env -C) is rewritten instead of discarded by the
+ * legacy unwrap. Returns null when text is not such a wrapper; `fallback`
+ * is the legacy-unwrapped text used when the payload itself has no chdir
+ * match (byte-identical to the pre-#3616 behavior).
+ */
+function dcShellPayloadRewrite(
+	text: string,
+	fallback: string,
+	depth: number,
+): string | null {
+	const words = shellSplitWords(text);
+	const shellHead = dcPeelLauncherWords(words, false);
+	const isShellHead =
+		shellHead === 'bash' ||
+		shellHead === 'sh' ||
+		shellHead === 'zsh' ||
+		shellHead === 'dash' ||
+		(shellHead ?? '').startsWith('ksh');
+	if (!isShellHead) return null;
+	const payloadWords = words.slice(1);
+	const walk = walkShellCommandFlags(payloadWords);
+	if (walk.kind !== 'payload') return null;
+	const payloadResult = preprocessWrapperText(walk.payload, depth);
+	return `( ${payloadResult === null ? fallback : payloadResult.text} )`;
+}
+
 export function dcPreprocessWrappers(command: string): DcWrapperPreprocess {
 	const segments = dcSplitSegments(command);
 	const processed: string[] = [];
@@ -1933,41 +1985,41 @@ export function dcPreprocessWrappers(command: string): DcWrapperPreprocess {
 				// parenthesized subshell so its inner `cd` cannot move the
 				// parent walk state (`bash -c 'cd src'; echo x > f` must
 				// resolve f at the session cwd, never at src).
-				const headM = /^(\S+)\s+([\s\S]+)$/.exec(segment);
-				const base = headM ? basenameAnySepLike(headM[1] as string) : '';
-				const shellPayloadBase =
-					base === 'bash' ||
-					base === 'sh' ||
-					base === 'zsh' ||
-					base === 'dash' ||
-					base === 'ksh' ||
-					base.startsWith('ksh');
+				// #3616 (final-critic round 3 (a)): a launcher prefix
+				// (time/nice/nohup/env) hides the shell head — peel it with
+				// the same grammar before the shell check, so
+				// `time bash -c "sudo -D /etc tee x"` reaches the payload
+				// recursion too instead of unwrapping to a chdir-less text.
+				// The peel MUTATES a copy; what remains after the head is the
+				// shell's flag region + payload.
+				const peeledWords = shellSplitWords(segment);
+				const shellHead = dcPeelLauncherWords(peeledWords, false);
+				const isShellHead =
+					shellHead === 'bash' ||
+					shellHead === 'sh' ||
+					shellHead === 'zsh' ||
+					shellHead === 'dash' ||
+					(shellHead ?? '').startsWith('ksh');
+				const payloadWordsSource = peeledWords.slice(1);
 				if (
-					shellPayloadBase &&
-					headM &&
-					walkShellCommandFlags(shellSplitWords(headM[2] as string)).kind ===
-						'payload'
+					isShellHead &&
+					walkShellCommandFlags(payloadWordsSource).kind === 'payload'
 				) {
 					// #3616 D5 (item 5): the payload itself may carry a
 					// chdir-bearing wrapper (bash -c "sudo -D /etc tee x") —
 					// recurse on the ONE-LEVEL payload (the segment's own
 					// quote-stripped argument), not on `unwrapped` (the full
 					// unwrap already discarded the sudo -D chdir).
-					// headM[2] starts at the FLAG region (-c …): strip the
-					// shell's own leading flag words, then one pair of
-					// surrounding quotes, to recover the payload command.
-					const payloadAfterFlags = (headM[2] as string)
-						.trim()
-						.replace(/^(?:-[A-Za-z]+\s+)+/, '');
-					const payloadText = /^["'](.*)["']$/.test(payloadAfterFlags)
-						? payloadAfterFlags.slice(1, -1)
-						: payloadAfterFlags;
+					const walk = walkShellCommandFlags(payloadWordsSource);
+					const payloadText = walk.kind === 'payload' ? walk.payload : '';
 					const payloadResult = preprocessWrapperText(payloadText, 1);
 					const payloadInner =
 						payloadResult === null ? unwrapped : payloadResult.text;
 					processed.push(`( ${payloadInner} )`);
 					continue;
 				}
+				processed.push(unwrapped);
+				continue;
 			}
 			processed.push(unwrapped);
 			continue;

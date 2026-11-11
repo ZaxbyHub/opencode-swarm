@@ -392,3 +392,75 @@ describe('#3616 env dash + bare time: the payload is judged, not just -o', () =>
 		T,
 	);
 });
+
+describe('#3616 launcher + shell composition keeps the inner chdir (critic r3 (a))', () => {
+	// `time bash -c "sudo -D /etc tee x"` previously unwrapped to a
+	// chdir-less text (the shell-payload recursion only fired when the
+	// SEGMENT head was the shell; a launcher prefix hid it). The recursion
+	// now peels the launcher grammar first, and the nested fallback routes
+	// through the same helper.
+	for (const [command, landing] of [
+		[
+			`time bash -c "sudo -D /etc tee src/ok"`,
+			'C:' +
+				String.fromCharCode(92) +
+				'etc' +
+				String.fromCharCode(92) +
+				'src' +
+				String.fromCharCode(92) +
+				'ok',
+		],
+		[
+			`nice bash -c "sudo -D /etc tee src/ok"`,
+			'C:' +
+				String.fromCharCode(92) +
+				'etc' +
+				String.fromCharCode(92) +
+				'src' +
+				String.fromCharCode(92) +
+				'ok',
+		],
+		[
+			`env -i bash -c "sudo -D /etc tee src/ok"`,
+			'C:' +
+				String.fromCharCode(92) +
+				'etc' +
+				String.fromCharCode(92) +
+				'src' +
+				String.fromCharCode(92) +
+				'ok',
+		],
+		[`time sh -c "env -C .. tee src/a"`, 'path=../src/a'],
+		[`time bash -c "env -C .. tee src/a"`, 'path=../src/a'],
+		// nested fallback: the dash rewrite's quoted-time inner text
+		[`env - time sh -c "env -C .. tee src/a"`, 'path=../src/a'],
+	] as Array<[string, string | RegExp]>) {
+		test(
+			`${command} is denied at the wrapped command's landing`,
+			async () => {
+				const r = await gate(command);
+				expect(r.verdict).toBe('BLOCKED');
+				expect(r.message).toMatch(AUTHORITY_DENY);
+				if (typeof landing === 'string') {
+					expect(r.message).toContain(landing);
+				} else {
+					expect(r.message).toMatch(landing);
+				}
+			},
+			T,
+		);
+	}
+	for (const command of [
+		`time bash -c "tee src/ok"`,
+		`time sh -c "echo hi"`,
+		`env -i bash -c "echo x > src/ok.txt"`,
+	]) {
+		test(
+			`control: ${command} is admitted`,
+			async () => {
+				expect((await gate(command)).verdict).toBe('ADMITTED');
+			},
+			T,
+		);
+	}
+});
