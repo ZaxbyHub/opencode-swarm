@@ -139,9 +139,15 @@ is a violation, not a shortcut — the rejection names the value you owed, e.g.
 
 The vocabulary is the VERDICT dialect — `INFO | LOW | MEDIUM | HIGH | CRITICAL |
 NONE` — because a findings record is a projection of an authenticated
-`[REVIEWED]`/`[CRITIC]` row. `NONE` is a first-class value here: a `DISPROVED`
-critic verdict is required to carry it, and a CONFIRMED-but-cosmetic reviewer
-verdict legitimately does. (This is a WIDER set than the `[CANDIDATE]` row
+`[REVIEWED]`/`[CRITIC]` row. `NONE` is a first-class value for NON-CONFIRMED
+statuses: a `DISPROVED` critic verdict is required to carry it. A CONFIRMED
+record can never carry it — the #3310 transport rule rejects a CONFIRMED
+reviewer row at NONE, and since the #3358 write contract the findings schema
+refuses the CONFIRMED+NONE pair outright. An absent severity on a CONFIRMED
+record is likewise a violation, reported by the aggregated validator as
+`severity expected "LOW", got (omitted)` (issue #2279). A critic dismissing a
+finding emits `DISPROVED` (severity NONE), not
+`DOWNGRADED` at NONE — the #3358 row contract refuses DOWNGRADED|NONE. (This is a WIDER set than the `[CANDIDATE]` row
 severities, which exclude `NONE` — a discovered candidate asserting "no severity"
 is a contradiction.)
 
@@ -191,9 +197,12 @@ severity is compared exactly. The sentinel rule applies only when no row exists.
 
 ## Error reporting
 
-An invalid records payload is rejected in ONE call: every violation across
-every record is listed with the field, the expected value, and the actual
-value, sorted by finding_id — for example:
+An invalid records payload is rejected in ONE call where the violations are
+authoritative-validator class: every violation across every record is listed
+with the field, the expected value, and the actual value, sorted by
+finding_id. (Schema-stage rejections — e.g. the #3358 CONFIRMED+NONE rule —
+short-circuit before the aggregated validator and report the schema issue
+alone; fix that issue and resubmit to reach the aggregated report.) — for example:
 
 ```
 BLOCKED: PR_REVIEW post_reviewer artifact invalid — 4 violation(s):
