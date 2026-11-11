@@ -1446,6 +1446,20 @@ function dcPeelLauncherWords(
 			words.splice(0, next);
 			continue;
 		}
+		// #3616 (review r15 finding 2): at the SHELL-PAYLOAD site only
+		// (stopAtEnvFlags false — the chdir matcher keeps routing sudo to
+		// matchSudoChdir), a non-chdir sudo prefix is transparent: peel
+		// sudo's own option region so `sudo sh -c "sudo -i tee x"` reaches
+		// the shell head. Reached only when the chdir matcher already
+		// returned null, so a -D/-i sudo never lands here.
+		if (head === 'sudo' && !stopAtEnvFlags) {
+			const w = walkLauncherOptions(words[0] ?? '', words.slice(1));
+			if (w !== null && w.kind === 'inner') {
+				words.splice(0, 1 + w.innerIndex);
+				continue;
+			}
+			return null;
+		}
 		return head;
 	}
 }
@@ -1757,8 +1771,27 @@ function matchSudoChdir(words: string[]): DcChdirMatch {
 	const head = words[0];
 	if (head === undefined) return null;
 	const walk = walkLauncherOptions(head, words.slice(1));
-	if (walk === null || walk.kind !== 'inner') return null;
-	const dir = walk.sudoChdir;
+	// #3616 (review r15 finding 3): `-i` followed by a shell-looking word
+	// classifies as kind 'interactive' (no innerIndex), so the login arm
+	// below never sees `sudo -i sh -c 'tee x'`. For that shape run the
+	// same withdrawal scan over the raw words (flags skipped; only when a
+	// login flag is actually present — `-s` alone maps to 'inner' or
+	// benign and must keep its cwd semantics).
+	const interactiveTail = (() => {
+		if (walk !== null && walk.kind === 'interactive') {
+			const hasLoginFlag = words.slice(1).some((w) => {
+				if (w === '-i' || w === '--login') return true;
+				if (typeof w !== 'string' || !w.startsWith('-') || w.startsWith('--'))
+					return false;
+				return w.slice(1).includes('i');
+			});
+			if (hasLoginFlag) return words.slice(1);
+		}
+		return null;
+	})();
+	if (walk === null || (walk.kind !== 'inner' && interactiveTail === null))
+		return null;
+	const dir = walk.kind === 'inner' ? walk.sudoChdir : undefined;
 	if (dir === undefined) {
 		// #3616 (final-critic round 4 (e)): a LOGIN sudo (`-i`/`--login`)
 		// chdirs to the target user's home — unresolvable statically — so a
@@ -1769,42 +1802,171 @@ function matchSudoChdir(words: string[]): DcChdirMatch {
 		// tee src/ok"` spliced to `( tee src/ok )`). No-write tails, `-s`
 		// tails, and absolute-only tails stay null so the C6 controls keep
 		// their exact verdicts.
-		if (walk.loginShell === true) {
+		if (walk.kind === 'inner' && walk.loginShell === true) {
 			const tail = words.slice(1 + (walk.innerIndex ?? 0));
+			// Mirrors the detector's D6 set (BUILTIN_WRITE_COMMANDS + tee/dd)
+			// — keep in sync with shell-write-detect's loginWriteWords.
 			const loginWriteWords = new Set([
 				'rm',
 				'mv',
 				'cp',
+				'ln',
+				'touch',
+				'unlink',
+				'rmdir',
 				'tee',
 				'dd',
 				'truncate',
 				'install',
 			]);
+			// A tail word may be a quote-stripped multi-word payload
+			// (`tee ../x` from sh -c 'tee ../x') — classify by its FIRST
+			// token. A nested shell head (`sudo -i sh -c 'tee …'`) is
+			// write-bearing when its payload word is.
+			const isShellHeadWord = (word: string): boolean => {
+				const tok = word.split(/\s+/)[0] ?? word;
+				return (
+					tok === 'sh' ||
+					tok === 'bash' ||
+					tok === 'zsh' ||
+					tok === 'dash' ||
+					tok.startsWith('ksh')
+				);
+			};
+			const wordBearsWrite = (word: string): boolean => {
+				const tok = word.split(/\s+/)[0] ?? word;
+				if (loginWriteWords.has(basenameAnySepLike(tok))) return true;
+				return /\S?>\S?/.test(word); // glued or bare redirect
+			};
 			const hasWriteVector = tail.some((word, idx) => {
 				if (typeof word !== 'string') return false;
-				if (loginWriteWords.has(basenameAnySepLike(word))) return true;
-				if (/\S?>\S?/.test(word)) return true; // glued or bare redirect
+				if (isShellHeadWord(word)) {
+					// `sh -c <payload>`: the payload word is the next-next.
+					const payload = tail[idx + 2];
+					if (
+						tail[idx + 1] === '-c' &&
+						typeof payload === 'string' &&
+						wordBearsWrite(payload)
+					) {
+						return true;
+					}
+					return false;
+				}
+				if (wordBearsWrite(word)) return true;
 				if (idx > 0 && /^[0-9]?>>?$/.test(tail[idx - 1] ?? '')) return true;
 				return false;
 			});
-			const hasRelativeOperand = tail.some(
-				(word) =>
-					typeof word === 'string' &&
-					!word.startsWith('/') &&
-					!word.startsWith('~/') &&
-					word !== '~' &&
-					!/^[A-Za-z]:[\\/]/.test(word) &&
-					!word.startsWith('-') &&
-					word !== 'tee' &&
-					word !== 'dd',
+			// Relative-OPERAND check (review r15 finding 4): the command
+			// word (idx 0) and flags never count; for the multi-operand
+			// copiers only the LAST operand (the write target) counts.
+			const copiers = new Set(['cp', 'mv', 'install', 'ln']);
+			const isRelativeWord = (word: string): boolean =>
+				!word.startsWith('/') &&
+				!word.startsWith('~/') &&
+				word !== '~' &&
+				!/^[A-Za-z]:[\\/]/.test(word) &&
+				!word.startsWith('-');
+			const commandWord = (tail[0] ?? '').split(/\s+/)[0] ?? '';
+			const operandWords = tail
+				.slice(1)
+				.filter((w) => typeof w === 'string' && !w.startsWith('-'));
+			const relevantOperands = copiers.has(basenameAnySepLike(commandWord))
+				? operandWords.slice(-1)
+				: operandWords;
+			const hasRelativeOperand = relevantOperands.some(
+				(w) => typeof w === 'string' && isRelativeWord(w),
 			);
 			if (hasWriteVector && hasRelativeOperand && tail.length > 0) {
 				return { kind: 'uncertain', innerWords: tail };
 			}
 		}
+		// interactive login tail (finding 3): the same withdrawal scan over
+		// the raw words; flags are skipped so `-i` itself never counts as
+		// the command word or an operand.
+		if (interactiveTail !== null) {
+			const tail = interactiveTail;
+			const loginWriteWords = new Set([
+				'rm',
+				'mv',
+				'cp',
+				'ln',
+				'touch',
+				'unlink',
+				'rmdir',
+				'tee',
+				'dd',
+				'truncate',
+				'install',
+			]);
+			const isShellHeadWord = (word: string): boolean => {
+				const tok = word.split(/\s+/)[0] ?? word;
+				return (
+					tok === 'sh' ||
+					tok === 'bash' ||
+					tok === 'zsh' ||
+					tok === 'dash' ||
+					tok.startsWith('ksh')
+				);
+			};
+			const wordBearsWrite = (word: string): boolean => {
+				const tok = word.split(/\s+/)[0] ?? word;
+				if (loginWriteWords.has(basenameAnySepLike(tok))) return true;
+				return /\S?>\S?/.test(word);
+			};
+			const nonFlag = tail.filter(
+				(w) => typeof w === 'string' && !w.startsWith('-'),
+			) as string[];
+			const hasWriteVector = tail.some((word, idx) => {
+				if (typeof word !== 'string' || word.startsWith('-')) return false;
+				if (isShellHeadWord(word)) {
+					const payload = tail[idx + 2];
+					if (
+						tail[idx + 1] === '-c' &&
+						typeof payload === 'string' &&
+						wordBearsWrite(payload)
+					)
+						return true;
+					return false;
+				}
+				if (wordBearsWrite(word)) return true;
+				if (idx > 0 && /^[0-9]?>>?$/.test(tail[idx - 1] ?? '')) return true;
+				return false;
+			});
+			// The first non-flag word is sudo's COMMAND; operands are the
+			// rest (flags skipped, so `-c` never counts).
+			const operands = nonFlag.slice(1);
+			const hasRelativeOperand = operands.some(
+				(w) =>
+					!w.startsWith('/') &&
+					!w.startsWith('~/') &&
+					w !== '~' &&
+					!/^[A-Za-z]:[\\/]/.test(w),
+			);
+			if (hasWriteVector && hasRelativeOperand && operands.length > 0) {
+				// innerWords keeps the raw tail FROM THE COMMAND WORD (sudo's
+				// own option region skipped with the arity table) so the
+				// serialized `sh -c '<payload>'` survives for detection.
+				const argTaking = new Set([...'ugprtCTUDR']);
+				let start = 0;
+				while (start < tail.length) {
+					const w = tail[start];
+					if (typeof w !== 'string' || !w.startsWith('-')) break;
+					if (w === '--') {
+						start += 1;
+						break;
+					}
+					start += argTaking.has(w.slice(1, -1) ? '' : w.slice(-1)) ? 2 : 1;
+				}
+				const inner = tail.slice(start);
+				if (inner.length > 0) {
+					return { kind: 'uncertain', innerWords: inner };
+				}
+			}
+		}
 		return null;
 	}
 	if (dir === '' || dir.includes('\0')) return { kind: 'failClosed' };
+	if (walk.kind !== 'inner') return null; // -D path needs the inner walk
 	// #3572 delta: a NESTED GNU `time -o` outcome carries chdirTailIndex —
 	// the word index the rewritten subshell must slice from (the `time`
 	// word, keeping the timed launcher and its -o operand INSIDE the child
