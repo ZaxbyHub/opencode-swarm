@@ -143,9 +143,10 @@ NONE` — because a findings record is a projection of an authenticated
 statuses: a `DISPROVED` critic verdict is required to carry it. A CONFIRMED
 record can never carry it — the #3310 transport rule rejects a CONFIRMED
 reviewer row at NONE, and since the #3358 write contract the findings schema
-refuses the CONFIRMED+NONE pair outright (an omitted severity on a CONFIRMED
-record is rejected by the aggregated validator, which names the required
-value). A critic dismissing a finding emits `DISPROVED` (severity NONE), not
+refuses the CONFIRMED+NONE pair outright. An absent severity on a CONFIRMED
+record is likewise a violation, reported by the aggregated validator as
+`severity expected "LOW", got (omitted)` (issue #2279). A critic dismissing a
+finding emits `DISPROVED` (severity NONE), not
 `DOWNGRADED` at NONE — the #3358 row contract refuses DOWNGRADED|NONE. (This is a WIDER set than the `[CANDIDATE]` row
 severities, which exclude `NONE` — a discovered candidate asserting "no severity"
 is a contradiction.)
