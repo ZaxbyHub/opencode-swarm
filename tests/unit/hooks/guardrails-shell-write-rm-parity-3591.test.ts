@@ -227,9 +227,11 @@ describe('#3591 parity: late-flag escape — all deny, naming the escape', () =>
 	);
 });
 
-describe('#3591 brace operands — three-surface agreement + the pre-existing explain-noscope divergence', () => {
-	// Final-critic round 1 disclosure: explain WITHOUT `--scope` excludes the
-	// scope dimension and omits the verified-scope marker
+describe('#3591 brace operands — three-surface agreement (no-scope explain re-pinned by D2)', () => {
+	// #3616 D2: explain WITHOUT `--scope` for a write-bearing command now
+	// renders block (scope_unevaluated) — parity with the live gate's
+	// SCOPE_NOT_DECLARED — replacing the pre-D2 "allow" divergence this
+	// describe previously disclosed.
 	// (guardrail-explain-service.ts:341-353), so it can read "allow" for a
 	// command the gate denies. Pinned HONESTLY as the CURRENT pre-existing
 	// behavior (untouched by this PR; tracked as a follow-up): the `rm`
@@ -248,7 +250,7 @@ describe('#3591 brace operands — three-surface agreement + the pre-existing ex
 		expect(got.explainNoScope).toBe('block');
 	}, 30_000);
 
-	test('rmdir src/{a,../esc}: gate DENY, explain --scope block, scope_validate deny, explain WITHOUT --scope "allow" (pre-existing divergence, follow-up)', async () => {
+	test('rmdir src/{a,../esc}: gate DENY, explain --scope block, scope_validate deny, explain WITHOUT --scope block (#3616 D2 scope_unevaluated)', async () => {
 		const command = 'rmdir src/{a,../esc}';
 		const got = await allSurfaces(command);
 		expect(got.gate).toBe(false);
