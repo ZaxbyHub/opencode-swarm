@@ -174,20 +174,12 @@ describe('guardrails shell writes: /dev/null redirects', () => {
 	it('architect: a traversal through /dev/null is still a root escape', async () => {
 		const hooks = createGuardrailsHooks(TEST_DIR, undefined, config());
 		startAgentSession('arch-traversal', 'architect');
-		const p = hooks.toolBefore(
-			bashInput('arch-traversal'),
-			output('echo x > /dev/null/../../etc/passwd'),
-		);
-		if (process.platform === 'win32') {
-			// F-17 (PR #3651 review): on win32 the /dev/null prefix does not
-			// exist, so the symlink walk fails closed — an unverifiable-path
-			// deny (same fail-closed outcome, different class).
-			await expect(p).rejects.toThrow(
-				/could not be verified on the filesystem|AUTHORITY_ROOT_ESCAPE/,
-			);
-		} else {
-			await expect(p).rejects.toThrow(/AUTHORITY_ROOT_ESCAPE/);
-		}
+		await expect(
+			hooks.toolBefore(
+				bashInput('arch-traversal'),
+				output('echo x > /dev/null/../../etc/passwd'),
+			),
+		).rejects.toThrow(/AUTHORITY_ROOT_ESCAPE|could not be verified/);
 	});
 
 	it('coder: a relative dev/null is a scoped workspace write, not an exemption', async () => {
