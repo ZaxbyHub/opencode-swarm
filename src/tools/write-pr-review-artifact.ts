@@ -11,8 +11,10 @@ import {
 	PrReviewFindingSchema,
 	PrReviewHandoffSchema,
 	PrReviewPartialBaseCoverageSchema,
+	PrReviewPersistedFindingRecordSchema,
 	PrReviewRunIdSchema,
 	WritePrReviewArtifactArgsSchema,
+	WritePrReviewArtifactCommittedReplayArgsSchema,
 } from '../background/pr-review-contract.js';
 import {
 	admitPrReviewPartialBaseCoverage,
@@ -56,7 +58,7 @@ type PersistedFinding = Omit<
 	recorded_at: string;
 };
 
-const PersistedFindingSchema = PrReviewFindingSchema.extend({
+const PersistedFindingSchema = PrReviewPersistedFindingRecordSchema.extend({
 	boundary: z.enum(['post_explorer', 'post_reviewer', 'post_critic']),
 	pr_head_sha: z.string().regex(/^[0-9a-f]{6,64}$/i),
 	recorded_at: z.string().datetime(),
@@ -235,7 +237,11 @@ function canonicalFindingRecords(
 				file_line: record.file_line,
 				evidence: record.evidence,
 				next_action: record.next_action,
-				severity: record.severity,
+				// FB-008: the writers coerce an absent severity to NONE at
+				// persistence, so omitted and NONE are the same committed state
+				// — a v1 retry that omits what the store holds as NONE is the
+				// same replay identity, not a payload change.
+				severity: record.severity ?? 'NONE',
 				category: record.category,
 				confidence: record.confidence,
 				provenance: record.provenance,
@@ -450,7 +456,103 @@ export async function executeWritePrReviewArtifact(
 		}
 		return failure(message);
 	};
-	const parsed = WritePrReviewArtifactArgsSchema.safeParse(args);
+	/**
+	 * FB-008: proof-only probe for the severity-only committed replay. Runs
+	 * the same store checks the main flow performs, with no reservation side
+	 * effects (an omitted run_id resolves to the committed run), and returns
+	 * false for every non-replay shape so the caller surfaces the original
+	 * strict schema error. Any read failure means "not provable".
+	 *
+	 * Disclosed limitation (SolCritic): this tolerance admits the payload
+	 * past the SCHEMA stage only. A committed post_critic replay whose live
+	 * critic authority no longer composes can still be refused further down
+	 * at assertCriticSettlements — the replay path is complete for
+	 * reviewer-boundary legacy rows, partial for critic-routed ones.
+	 */
+	const isSeverityOnlyCommittedReplay = async (
+		tolerantData: z.infer<
+			typeof WritePrReviewArtifactCommittedReplayArgsSchema
+		>,
+	): Promise<boolean> => {
+		try {
+			if (tolerantData.kind !== 'findings') return false;
+			const probeSessionID = context.sessionID?.trim();
+			if (!probeSessionID) return false;
+			const probeState = await readPrWorkflowGateState(
+				directory,
+				probeSessionID,
+			);
+			if (probeState?.mode !== 'PR_REVIEW' || !probeState.prHeadSha)
+				return false;
+			if (probeState.prHeadSha !== tolerantData.pr_head_sha.toLowerCase())
+				return false;
+			const runId = tolerantData.run_id ?? probeState.prReviewArtifactRunId;
+			if (!runId || probeState.prReviewArtifactRunId !== runId) return false;
+			if (
+				!(probeState.prReviewArtifactBoundaries ?? []).includes(
+					tolerantData.boundary,
+				)
+			) {
+				return false;
+			}
+			const probeFindingsPath = validateSwarmPath(
+				directory,
+				path.join('pr-review', runId, 'findings.jsonl'),
+			);
+			const probeExisting = await readFindings(probeFindingsPath);
+			const probeBoundaryRecords = probeExisting.filter(
+				(record) => record.boundary === tolerantData.boundary,
+			);
+			return (
+				probeBoundaryRecords.length > 0 &&
+				canonicalFindingRecords(probeBoundaryRecords) ===
+					canonicalFindingRecords(tolerantData.records)
+			);
+		} catch {
+			return false;
+		}
+	};
+	let parsed = WritePrReviewArtifactArgsSchema.safeParse(args);
+	let severityOnlyCommittedReplay = false;
+	let strictError: z.core.$ZodIssue[] | undefined;
+	if (!parsed.success) {
+		// FB-008 (feedback): a retry of a boundary already committed under
+		// earlier verdict semantics carries the persisted rows verbatim —
+		// CONFIRMED with an explicit or omitted NONE severity — which the live
+		// write contract refuses at parse, so the idempotent committed-replay
+		// admission downstream could never run. Tolerate the parse ONLY when
+		// every issue is a records severity issue, the durable read shape
+		// accepts the payload, AND the store proves the payload is an exact
+		// replay of a boundary the active workflow already committed. Every
+		// other shape surfaces the original strict error untouched.
+		strictError = [...parsed.error.issues];
+		const replayArgs =
+			WritePrReviewArtifactCommittedReplayArgsSchema.safeParse(args);
+		const severityOnlyFailure =
+			replayArgs.success &&
+			parsed.error.issues.length > 0 &&
+			parsed.error.issues.every(
+				(issue) =>
+					issue.path.length === 3 &&
+					issue.path[0] === 'records' &&
+					typeof issue.path[1] === 'number' &&
+					issue.path[2] === 'severity',
+			);
+		if (
+			severityOnlyFailure &&
+			replayArgs.success &&
+			(await isSeverityOnlyCommittedReplay(replayArgs.data))
+		) {
+			// The tolerant records schema shares the write records' field shape
+			// (it only drops the CONFIRMED-severity refinements), so the data
+			// flows through the same downstream validation unchanged.
+			parsed = {
+				success: true,
+				data: replayArgs.data,
+			} as unknown as typeof parsed;
+			severityOnlyCommittedReplay = true;
+		}
+	}
 	if (!parsed.success) {
 		return await reject(
 			`Invalid PR-review artifact: ${formatPrReviewValidationIssues(
@@ -645,21 +747,34 @@ export async function executeWritePrReviewArtifact(
 				);
 			}
 		}
-		try {
-			await assertPrReviewArtifactRecordsMatchAuthoritativeVerdicts(
-				directory,
-				sessionID,
-				findingsInput.boundary,
-				findingsInput.records,
-			);
-		} catch (error) {
+		if (severityOnlyCommittedReplay && !isCommittedReplay) {
+			// FB-008: the payload parsed only through the committed-replay
+			// tolerance but is not an exact replay of a committed boundary —
+			// surface the original strict error instead of proceeding.
 			return await reject(
-				formatPrReviewRuntimeFieldError(
-					'records',
-					`records exactly matching authoritative ${findingsInput.boundary} verdicts and disposition rules`,
-					error instanceof Error ? error.message : String(error),
-				),
+				`Invalid PR-review artifact: ${formatPrReviewValidationIssues(
+					strictError ?? [],
+					args,
+				).join('; ')}`,
 			);
+		}
+		if (!severityOnlyCommittedReplay) {
+			try {
+				await assertPrReviewArtifactRecordsMatchAuthoritativeVerdicts(
+					directory,
+					sessionID,
+					findingsInput.boundary,
+					findingsInput.records,
+				);
+			} catch (error) {
+				return await reject(
+					formatPrReviewRuntimeFieldError(
+						'records',
+						`records exactly matching authoritative ${findingsInput.boundary} verdicts and disposition rules`,
+						error instanceof Error ? error.message : String(error),
+					),
+				);
+			}
 		}
 		if (
 			hasExistingBoundaryRecords &&

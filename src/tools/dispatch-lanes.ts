@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import pLimit from 'p-limit';
 import { z } from 'zod';
+import { criticPromptProvenance } from '../agents/critic.js';
 import { getSwarmAgents } from '../agents/index.js';
 import {
 	CANDIDATE_FIELD_COUNT,
@@ -89,9 +90,8 @@ import {
 	bindPrReviewTriggerLedger,
 	collectPrWorkflowPendingLaneLiveness,
 	declarePrFeedbackInventory,
-	derivePrReviewOrderUnstableItems,
+	derivePrReviewCriticDispatchInputs,
 	derivePrReviewPresentationOrder,
-	derivePrReviewReviewerSeverities,
 	describePrWorkflowRevisionDigestFailure,
 	enforcePrFeedbackVerificationOwnership,
 	enforcePrReviewBaseDimensions,
@@ -100,6 +100,7 @@ import {
 	PR_REVIEW_BASE_DIMENSION_IDS,
 	PR_REVIEW_BASE_LANE_FLOORS,
 	PR_REVIEW_MICRO_LANE_FLOORS,
+	PR_REVIEW_PHASE_ADMITTED_ROLES,
 	PR_WORKFLOW_PROBE_SKIPPED_NO_BUDGET_REASON,
 	type PrReviewDepthTier,
 	type PrReviewLaneValidationFailure,
@@ -198,6 +199,17 @@ const PR_REVIEW_VERDICT_RESPONSE_PER_ITEM_CHARS = 1_500;
 // swarm-pr-feedback modes, which #2276 leaves on the pre-existing flat cap).
 const PR_WORKFLOW_PROTOCOL_OUTPUT_MAX_CHARS = 12_000;
 const MAX_ZOD_ISSUES_LISTED = 20;
+
+/**
+ * Issue #3358 AC1/AC3: the controller-authored suspension of the critic
+ * agent's default PLAN REVIEW structure. Injected by
+ * `applyPrWorkflowPromptContract` into every bound swarm-pr-review:critic
+ * lane's CONTROLLER-BOUND block — the ONLY activation path (the critic agent's
+ * own prompt no longer carries any PR-review text). Exported so the dispatch
+ * admission belt and tests compare against the exact producer text.
+ */
+export const CRITIC_PROTOCOL_SELECTION_CLAUSE =
+	"PROTOCOL SELECTION (#3358): the critic agent's default PLAN REVIEW output structure does not apply to this lane. Do not begin with PLAN REVIEW and do not call get_approved_plan; emit only the [CRITIC] verdict rows the contract card specifies, exactly one per assigned item id, and nothing else.";
 /**
  * Configured session.create retry cap (issue #1615 / #2473): the 1-based
  * `generation` on a lane result and its delegation record counts create
@@ -1107,6 +1119,7 @@ export const _internals: {
 
 export const _test_exports = {
 	validatePrReviewMicroDispatch,
+	ownPropertySeverityLookup,
 	resolveCollectExpectedWorkflowIdentity,
 	applyCommonPrompt,
 	applyExplorerFormatSuffix,
@@ -1567,7 +1580,12 @@ export async function executeDispatchLanesAsync(
 	}
 	// Issue #2906: derive the counterbalancing inputs before prompt assembly.
 	// Both derivations are read-only gate reads, so a failure is still a
-	// side-effect-free invalid request. Reviewer batches receive the
+	// side-effect-free invalid request. Issue #3341: the same per-request
+	// guarantee covers the state-free admission checks (lane roles and
+	// launchability, the staged/contract-retry shape, and unknown modes): those
+	// reject without activating, binding, or otherwise mutating durable workflow
+	// state, and any pre-existing workflow state is preserved unchanged.
+	// State-dependent checks are not covered by this guarantee. Reviewer batches receive the
 	// presentation order the gate will stamp (passed on to
 	// recordPrReviewValidationBatch as expectedPresentationOrder, so the
 	// stamped receipt can never disagree with the rendered prompt); critic
@@ -1601,24 +1619,22 @@ export async function executeDispatchLanesAsync(
 						context.sessionID,
 					);
 				} else {
-					prReviewOrderUnstableItemIds = await derivePrReviewOrderUnstableItems(
+					// #3358 AC6: one gate context and one reviewer composition feed
+					// both critic inputs (order-unstable ids, #2906; reviewer
+					// severities, #3310 — UPHELD keeps that exact rank). An empty
+					// severity map renders nothing extra.
+					const criticInputs = await derivePrReviewCriticDispatchInputs(
 						directory,
 						context.sessionID,
 					);
-					// #3310: the critic needs each assigned item's reviewer severity
-					// (UPHELD keeps that exact rank). Same read-only derivation
-					// shape as the #2906 readers; an empty map renders nothing extra.
-					const derivedSeverities = await derivePrReviewReviewerSeverities(
-						directory,
-						context.sessionID,
-					);
+					prReviewOrderUnstableItemIds = criticInputs.orderUnstableItemIds;
+					const derivedSeverities = criticInputs.reviewerSeverities;
 					if (derivedSeverities.size > 0) {
-						// Own-property lookup only: an assigned item id colliding with a
-						// prototype key must not render inherited members into the block.
-						prReviewReviewerSeverities = Object.assign(
-							Object.create(null),
-							Object.fromEntries(derivedSeverities),
-						);
+						// Own-property lookup only (#3362): an assigned item id
+						// colliding with a prototype key must not render inherited
+						// members into the block.
+						prReviewReviewerSeverities =
+							ownPropertySeverityLookup(derivedSeverities);
 					}
 				}
 			}
@@ -1633,9 +1649,17 @@ export async function executeDispatchLanesAsync(
 		}
 	}
 	// Validate every controller-owned prompt before publishing gate ownership.
-	// A formatting failure must be a side-effect-free invalid request: otherwise
-	// an unlaunchable batch consumes durable workflow state and cannot be retried
-	// with the same identity.
+	// Every rejection raised BEFORE gate activation/binding — the
+	// prompt-contract formatting failures below, the PR_REVIEW phase
+	// role/launchability/critic-prompt admission hoisted into
+	// assertPrReviewPhaseLaneAdmission (#3358), and the state-free
+	// request-shape checks in validatePrWorkflowLaneAdmission (#3341:
+	// lane roles, owned-workflow-lane shape, the staged/contract-retry
+	// shape, and unknown modes) — is a side-effect-free invalid request:
+	// otherwise an unlaunchable batch consumes durable workflow state
+	// and cannot be retried with the same identity. Rejections raised
+	// after activation (batch recording) are not side-effect-free, which
+	// is exactly why admission runs first.
 	const formatExplorerLanes = (input: DispatchLaneSpec[]) =>
 		applyExplorerFormatSuffix(input, {
 			failClosed: Boolean(
@@ -1712,12 +1736,54 @@ export async function executeDispatchLanesAsync(
 		}
 		lanes = formatted.lanes;
 	}
+	// #3358 AC3: the effective critic lane prompt must carry the controller
+	// suspension clause — admission verifies what the model will actually see,
+	// not only the agent name. The clause is controller-authored text, so this
+	// holds for a default AND a customPrompt critic agent.
+	if (parsed.data.mode === 'swarm-pr-review:critic') {
+		const missingClause = lanes.find(
+			(lane) => !lane.prompt.includes(CRITIC_PROTOCOL_SELECTION_CLAUSE),
+		);
+		if (missingClause) {
+			return asyncFailureResult({
+				failure_class: 'invalid_args',
+				message: `BLOCKED: PR_REVIEW critic lane "${missingClause.id}" effective prompt does not carry the PR-contract suspension clause — the controller failed to compose the critic protocol selection block`,
+			});
+		}
+	}
 	if (context.sessionID?.trim()) {
 		try {
 			let gateState = await enforcePrWorkflowDispatchLanesAsync(
 				directory,
 				context.sessionID,
 				'dispatch_lanes_async',
+			);
+			// Issue #3341 / #3358 AC11: run every state-free request-shape
+			// check BEFORE any state mutation for this request: lane roles,
+			// owned-workflow-lane shape, phase-lane agent launchability, the
+			// staged/contract-retry shape, and unknown swarm-pr-review:*
+			// suffixes. enforcePrWorkflowDispatchLanesAsync is read-only, so a
+			// rejection here consumes no durable workflow state; pre-existing
+			// state (any mode) is preserved unchanged. The reachability guard
+			// matches the historical post-binding condition exactly, so the
+			// set of rejected requests is unchanged. Checks that need gate
+			// state or resilience config (lane count and max_concurrent for
+			// tiers M and L, canary-first and fanout order, trigger
+			// evaluation, PR_FEEDBACK verification ownership) still run after
+			// activation. The council/reviewer/critic arm delegates to
+			// assertPrReviewPhaseLaneAdmission (#3358 AC8/AC11), which owns
+			// the phase role table, launchability, and critic-prompt
+			// provenance for those modes.
+			validatePrWorkflowLaneAdmission(
+				parsed.data.mode ?? '',
+				parsed.data.lanes,
+				context,
+				!gateState || gateState.mode === 'PR_REVIEW',
+				{
+					contractRetry: parsed.data.pr_review_contract_retry === true,
+					waveStage: parsed.data.pr_review_wave_stage,
+					waveAttempt: parsed.data.pr_review_wave_attempt,
+				},
 			);
 			if (!gateState && parsed.data.mode?.startsWith('swarm-pr-review:')) {
 				gateState = await activatePrWorkflow(
@@ -1780,19 +1846,9 @@ export async function executeDispatchLanesAsync(
 						| 1
 						| 2
 						| undefined;
-					if (
-						contractRetry &&
-						(waveStage !== undefined || waveAttempt !== undefined)
-					) {
-						throw new Error(
-							'BLOCKED: PR_REVIEW contract retry is mutually exclusive with pr_review_wave_stage and pr_review_wave_attempt',
-						);
-					}
-					if ((waveStage === undefined) !== (waveAttempt === undefined)) {
-						throw new Error(
-							'BLOCKED: PR_REVIEW staged base dispatch requires both pr_review_wave_stage and pr_review_wave_attempt together',
-						);
-					}
+					// The contract-retry exclusion and the wave-stage/attempt pairing
+					// are state-free and are validated before activation in
+					// validatePrWorkflowLaneAdmission (#3341).
 					if (
 						waveStage !== undefined &&
 						waveAttempt !== undefined &&
@@ -1884,18 +1940,8 @@ export async function executeDispatchLanesAsync(
 							);
 						}
 					}
-					for (const lane of parsed.data.lanes) {
-						if (
-							resolveGeneratedAgentRole(
-								lane.agent,
-								swarmState.generatedAgentNames,
-							) !== 'explorer'
-						) {
-							throw new Error(
-								`BLOCKED: PR_REVIEW base lane "${lane.id}" must use the explorer role`,
-							);
-						}
-					}
+					// Lane admission (explorer-role) for base lanes is validated
+					// pre-activation in validatePrWorkflowLaneAdmission (#3341).
 					gateState = await enforcePrReviewBaseDimensions(
 						directory,
 						context.sessionID,
@@ -1923,18 +1969,8 @@ export async function executeDispatchLanesAsync(
 							`BLOCKED: PR_REVIEW head mismatch; expected "${gateState.prHeadSha}", received "${headSha}"`,
 						);
 					}
-					for (const lane of parsed.data.lanes) {
-						if (
-							resolveGeneratedAgentRole(
-								lane.agent,
-								swarmState.generatedAgentNames,
-							) !== 'explorer'
-						) {
-							throw new Error(
-								`BLOCKED: PR_REVIEW micro lane "${lane.id}" must use the explorer role`,
-							);
-						}
-					}
+					// Lane admission (explorer-role) for micro lanes is validated
+					// pre-activation in validatePrWorkflowLaneAdmission (#3341).
 					const effectiveTriggerEvaluation =
 						parsed.data.trigger_evaluation !== undefined
 							? parsed.data.trigger_evaluation
@@ -1979,42 +2015,13 @@ export async function executeDispatchLanesAsync(
 						: parsed.data.mode.endsWith(':reviewer')
 							? 'reviewer'
 							: 'critic';
-					if (parsed.data.lanes.some((lane) => lane.owned_workflow_lanes)) {
-						throw new Error(
-							`BLOCKED: PR_REVIEW ${phase} lanes must not declare owned_workflow_lanes; depth-tier consolidation applies only to base and micro discovery lanes`,
-						);
-					}
-					for (const lane of parsed.data.lanes) {
-						const role = resolveGeneratedAgentRole(
-							lane.agent,
-							swarmState.generatedAgentNames,
-						);
-						if (
-							(phase === 'council' && !role.startsWith('council_')) ||
-							(phase === 'reviewer' && role !== 'reviewer') ||
-							// #3310: PR critic lanes must use the one named critic agent.
-							// Other critic-family roles (critic_finding_validator, critic_sounding_board,
-							// critic_drift_verifier, ...) carry output contracts (strict JSON,
-							// dispositions) that cannot emit [CRITIC] rows.
-							(phase === 'critic' && role !== 'critic')
-						) {
-							throw new Error(
-								`BLOCKED: PR_REVIEW ${phase} lane "${lane.id}" uses invalid role "${role || lane.agent}"${phase === 'critic' ? ' — PR critic lanes must use the critic agent (critic_finding_validator and other critic-family roles cannot emit [CRITIC] rows)' : ''}`,
-							);
-						}
-						// Issue #3311 (ghost owners): validate the agent BEFORE the
-						// validation batch is recorded. launchAsyncLane would reject
-						// this agent after the record exists, leaving an owner lane
-						// with no delegation record that N-of-M admission correctly
-						// refuses (the #3101 silence constraint) but that should
-						// never have been declared an owner at all.
-						const agentValidation = validateLaneAgent(lane.agent, context);
-						if (!agentValidation.ok) {
-							throw new Error(
-								`BLOCKED: PR_REVIEW ${phase} lane "${lane.id}" agent "${lane.agent}" is not launchable on this host: ${agentValidation.error}`,
-							);
-						}
-					}
+					// Lane admission (owned_workflow_lanes, admitted roles,
+					// launchability, critic prompt provenance) ran pre-activation
+					// in validatePrWorkflowLaneAdmission ->
+					// assertPrReviewPhaseLaneAdmission (#3358 AC11 / #3341); the
+					// gate recorder re-asserts the declared-agent rule at the
+					// boundary that persists the batch (assertCriticLaneAgents,
+					// #3340/#3358).
 					await recordPrReviewValidationBatch(
 						directory,
 						context.sessionID,
@@ -6381,6 +6388,111 @@ function getGeneratedAgentPrefix(
 	return null;
 }
 
+/**
+ * Issue #3341: state-free request-shape admission validation for PR-workflow
+ * dispatches, run BEFORE activatePrWorkflow/bindPrReviewBase so every
+ * rejection here is side-effect-free for the request — no activation,
+ * binding, or other durable workflow-state mutation happens, and any
+ * pre-existing workflow state is preserved unchanged. Every predicate is a
+ * pure function of the request, the generated-agent registry, and the
+ * launchability probe; nothing here reads gate state. Covered: lane roles,
+ * owned-workflow-lane shape, phase-lane agent launchability, the contract-retry
+ * exclusion, the wave-stage/attempt pairing, and unknown swarm-pr-review:*
+ * suffixes. Not covered (they need gate state or resilience config):
+ * tier-dependent lane count and max_concurrent, canary-first and fanout
+ * order, trigger evaluation, and PR_FEEDBACK verification ownership. `reachable` mirrors the post-binding condition
+ * these checks historically ran under (an active PR_REVIEW gate for this
+ * session): it is false only when a different workflow mode owns the
+ * session, which keeps the pre-fix reachability (and therefore the set of
+ * rejected requests) exactly the same — only the durable-state consumption
+ * changes.
+ */
+function validatePrWorkflowLaneAdmission(
+	mode: string,
+	lanes: ReadonlyArray<DispatchLaneSpec>,
+	context: DispatchLanesExecutionContext,
+	reachable: boolean,
+	waveShape: {
+		contractRetry: boolean;
+		waveStage: unknown;
+		waveAttempt: unknown;
+	},
+): void {
+	if (!reachable) return;
+	if (mode === 'swarm-pr-review:base') {
+		// Staged and contract-retry request shape is a pure function of the
+		// request arguments (no gate state, no resilience config), so it is
+		// rejected here, before any activation, rather than after binding.
+		const { contractRetry, waveStage, waveAttempt } = waveShape;
+		if (
+			contractRetry &&
+			(waveStage !== undefined || waveAttempt !== undefined)
+		) {
+			throw new Error(
+				'BLOCKED: PR_REVIEW contract retry is mutually exclusive with pr_review_wave_stage and pr_review_wave_attempt',
+			);
+		}
+		if ((waveStage === undefined) !== (waveAttempt === undefined)) {
+			throw new Error(
+				'BLOCKED: PR_REVIEW staged base dispatch requires both pr_review_wave_stage and pr_review_wave_attempt together',
+			);
+		}
+		for (const lane of lanes) {
+			if (
+				resolveGeneratedAgentRole(
+					lane.agent,
+					swarmState.generatedAgentNames,
+				) !== 'explorer'
+			) {
+				throw new Error(
+					`BLOCKED: PR_REVIEW base lane "${lane.id}" must use the explorer role`,
+				);
+			}
+		}
+		return;
+	}
+	if (mode === 'swarm-pr-review:micro') {
+		for (const lane of lanes) {
+			if (
+				resolveGeneratedAgentRole(
+					lane.agent,
+					swarmState.generatedAgentNames,
+				) !== 'explorer'
+			) {
+				throw new Error(
+					`BLOCKED: PR_REVIEW micro lane "${lane.id}" must use the explorer role`,
+				);
+			}
+		}
+		return;
+	}
+	if (
+		mode === 'swarm-pr-review:council' ||
+		mode === 'swarm-pr-review:reviewer' ||
+		mode === 'swarm-pr-review:critic'
+	) {
+		// #3358 AC8/AC11: the council/reviewer/critic admission table,
+		// launchability probe, and critic-prompt provenance check live in
+		// assertPrReviewPhaseLaneAdmission — the ONE source the gate recorder
+		// and artifact integrity also read (PR_REVIEW_PHASE_ADMITTED_ROLES) —
+		// so this hoist delegates instead of re-deriving the predicates.
+		assertPrReviewPhaseLaneAdmission(
+			mode,
+			lanes,
+			context,
+			_internals.getGeneratedAgentNames(),
+		);
+		return;
+	}
+	// Any other swarm-pr-review:* suffix is not a structured PR_REVIEW mode.
+	// Rejected here, before activation, so an unknown suffix leaves no gate.
+	if (mode.startsWith('swarm-pr-review:')) {
+		throw new Error(
+			'BLOCKED: active PR_REVIEW requires a structured base, micro, council, reviewer, or critic mode',
+		);
+	}
+}
+
 function buildReadOnlyTools(mode?: string): ReadOnlyToolPermissions {
 	const tools: Record<string, boolean> = {};
 	for (const toolName of READ_ONLY_TOOL_DENYLIST) {
@@ -6864,6 +6976,20 @@ function prReviewLaneResponseBudgetChars(
 	return undefined;
 }
 
+/**
+ * #3362: the critic preflight's reviewer-severity lookup, deliberately
+ * null-prototype so an assigned item id that collides with an Object
+ * prototype key (toString, constructor, ...) can never resolve an inherited
+ * member — an id WITHOUT a settled severity renders bare. Exported through
+ * _test_exports for the behavioral pin; reverting to a plain
+ * Object.fromEntries object re-fails it.
+ */
+function ownPropertySeverityLookup(
+	derived: Map<string, string>,
+): Record<string, string> {
+	return Object.assign(Object.create(null), Object.fromEntries(derived));
+}
+
 function applyPrWorkflowPromptContract(
 	lanes: DispatchLaneSpec[],
 	options: {
@@ -6891,9 +7017,11 @@ function applyPrWorkflowPromptContract(
 		/**
 		 * Issue #3310: critic lanes only. Assigned item id -> the reviewer
 		 * severity the composed reviewer phase settled for that item, so the
-		 * critic knows the exact rank UPHELD must keep. Rendered per item on the
-		 * assigned_item_ids line (`c1 (HIGH)`); ids without an entry render
-		 * bare. An absent, undefined, or EMPTY map renders the pre-#3310
+		 * critic knows the exact rank UPHELD must keep. Rendered per item on
+		 * its own `reviewer_severity: <id>=<SEVERITY>` line while
+		 * assigned_item_ids keeps bare ids (#3358 AC8; a verbatim copy of the
+		 * old same-line decoration voided the lane). Ids without an entry get
+		 * no line. An absent, undefined, or EMPTY map renders the pre-#3310
 		 * byte-shape exactly.
 		 */
 		reviewerSeverities?: Record<string, string>;
@@ -6915,7 +7043,58 @@ function applyPrWorkflowPromptContract(
 		};
 	}
 	const errors: string[] = [];
+	// #3358 AC7: recognize our OWN output (exactly contractCard + operator
+	// text + one trailing controller block for the current bindings) so
+	// re-applying the contract is idempotent. Recognition is an idempotence
+	// optimization, NEVER authentication: the recognized controller-owned
+	// parts are always discarded and rebuilt from the current options below,
+	// and only the extracted operator remainder is linted and reused — forged
+	// controller text cannot survive into the composed prompt.
+	const contractCardPrefix =
+		mode?.startsWith('swarm-pr-review:') === true
+			? `${buildPrReviewContractCard()}\n\n`
+			: '';
+	const CONTRACT_BLOCK_HEADER = '[CONTROLLER-BOUND PR WORKFLOW CONTRACT]';
+	const CONTRACT_BLOCK_FOOTER = '[END CONTROLLER-BOUND PR WORKFLOW CONTRACT]';
+	const stripControllerOwnedPrompt = (prompt: string): string | null => {
+		if (contractCardPrefix === '' || !prompt.startsWith(contractCardPrefix)) {
+			return null;
+		}
+		const withoutCard = prompt.slice(contractCardPrefix.length);
+		const blockStart = withoutCard.lastIndexOf(CONTRACT_BLOCK_HEADER);
+		if (blockStart < 0) return null;
+		const blockEnd = withoutCard.lastIndexOf(CONTRACT_BLOCK_FOOTER);
+		if (blockEnd < blockStart) return null;
+		const expectedEnd = blockEnd + CONTRACT_BLOCK_FOOTER.length;
+		if (expectedEnd !== withoutCard.length) return null;
+		const block = withoutCard.slice(blockStart, expectedEnd);
+		// The recognized block must bind the CURRENT options; a stale or forged
+		// block fails this and stays operator text. The lints reject verdict-row
+		// template text, not block text; the residual exposure is bounded by
+		// the real block being appended last, where it declares itself
+		// authoritative over conflicting caller text (feedback-round wording
+		// fix: the lints never claimed to reject block text).
+		const modeOk = block.includes(`mode: ${mode}`);
+		const headOk =
+			options.prHeadSha !== undefined &&
+			block.includes(`pr_head_sha: ${options.prHeadSha}`);
+		const digestOk =
+			options.revisionDigest !== undefined &&
+			block.includes(`revision_digest: ${options.revisionDigest}`);
+		if (!modeOk || !headOk || !digestOk) return null;
+		// Feedback F-006: the composition appends exactly "\n\n" before the
+		// block header, so a faithful strip removes exactly that separator;
+		// keeping it made every re-application grow the prompt by two
+		// characters (6882→6890 over five passes in the review probe) while
+		// still passing the exactly-one-block assertion. Removing the exact
+		// separator restores the pre-composition text byte-identically.
+		const remainder = withoutCard.slice(0, blockStart);
+		return remainder.endsWith('\n\n')
+			? remainder.slice(0, remainder.length - 2)
+			: remainder;
+	};
 	const contracted = lanes.map((lane) => {
+		const lanePrompt = stripControllerOwnedPrompt(lane.prompt) ?? lane.prompt;
 		const normalizedMode = classifyControllerTokenField(mode);
 		const workflowLane = classifyControllerTokenField(lane.workflow_lane ?? '');
 		const prHeadSha = classifyControllerTokenField(options.prHeadSha ?? '');
@@ -7000,7 +7179,7 @@ function applyPrWorkflowPromptContract(
 				'\\[' + prReviewVerdictTemplateToken.slice(1, -1) + '\\][^\\S\\n]*\\|',
 			);
 			const operatorChannels: Array<[string, string]> = [
-				['lane prompt', lane.prompt],
+				['lane prompt', lanePrompt],
 				['caller scope', options.callerFocus ?? ''],
 			];
 			const offending = operatorChannels.find(
@@ -7056,20 +7235,28 @@ function applyPrWorkflowPromptContract(
 				? [...assignedIds].sort()
 				: [...assignedIds].sort().reverse()
 			: assignedIds;
-		// #3310: critic lanes render each assigned item's reviewer severity on the
-		// same line as its id when the composed map supplies one; unknown ids render
-		// bare and an absent/empty map keeps the pre-#3310 byte-shape exactly.
+		// #3310 / #3358 AC8: critic lanes see each assigned item's reviewer
+		// severity on its OWN `reviewer_severity:` line, never decorating the id
+		// token (a verbatim copy of `c1 (HIGH)` voided the lane as an
+		// unassigned id). Unknown ids get no line; an absent/empty map keeps the
+		// pre-#3310 byte-shape exactly.
 		const severityEntries =
 			options.reviewerSeverities &&
 			Object.keys(options.reviewerSeverities).length > 0
 				? options.reviewerSeverities
 				: undefined;
-		const severityAnnotatedIds =
+		const severityLines =
 			severityEntries && normalizedModeToken === 'swarm-pr-review:critic'
-				? renderedIds.map((id) =>
-						severityEntries[id] ? `${id} (${severityEntries[id]})` : id,
+				? renderedIds.flatMap((id) =>
+						severityEntries[id]
+							? [`reviewer_severity: ${id}=${severityEntries[id]}`]
+							: [],
 					)
-				: renderedIds;
+				: [];
+		const severityBlock =
+			severityLines.length > 0
+				? `\nreviewer_severity lines annotate assigned ids and are never item ids; UPHELD must keep the listed severity.\n${severityLines.join('\n')}`
+				: '';
 		const orderLine = presentationOrder
 			? `\npresentation_order: ${presentationOrder} (${presentationOrder === 'A' ? 'canonical' : 'reversed'}; order candidate prose in this order)`
 			: '';
@@ -7131,6 +7318,42 @@ function applyPrWorkflowPromptContract(
 			normalizedMode.token === 'swarm-pr-review:reviewer'
 				? `\nPROTOCOL SELECTION (#3310): the Stage-B "STRUCTURED VERDICT LINE" mandate does not apply to this lane. Do not emit a [REVIEWED] | task-<taskId> | VERDICT | summary row — that Stage-B task-keyed row is not this lane's contract; settle only via the live [REVIEWED] rows the contract card specifies for your assigned item ids.`
 				: '';
+		// #3358 AC1: the critic counterpart. The critic agent prompt is static
+		// and PR-free; this clause is the only place the PLAN REVIEW structure
+		// is suspended, and only for a bound critic lane.
+		const criticProtocolClause =
+			normalizedMode.token === 'swarm-pr-review:critic'
+				? `\n${CRITIC_PROTOCOL_SELECTION_CLAUSE}`
+				: '';
+		// Feedback round F-001: the phrase-activated overrides removed from the
+		// critic and reviewer agent prompts (#3358 AC1) were also the only
+		// suppression the swarm-pr-feedback verdict lanes had — the base
+		// controller block header activated them on feedback lanes too (base
+		// appended the same header for every mode), so the reviewer Stage-B
+		// mandate and the critic PLAN REVIEW structure were suppressed there.
+		// The replacement clauses above are gated to swarm-pr-review modes
+		// only, which regressed the feedback lanes: the reviewer prompt still
+		// mandates the Stage-B task-keyed row and the critic prompt still
+		// mandates "Begin directly with PLAN REVIEW", while the feedback gate
+		// settles on one phase-specific positive row per item. Re-home the
+		// suppression as controller-authored mode-scoped clauses (stage-b-test
+		// is unaffected: the test_engineer prompt never carried an override).
+		const FEEDBACK_VERDICT_PROTOCOL_CLAUSES: Record<string, string> = {
+			'swarm-pr-feedback:stage-b-reviewer':
+				'\nPROTOCOL SELECTION (feedback stage-b): the reviewer prompt\'s Stage-B "STRUCTURED VERDICT LINE" mandate does not apply to this lane. Do not emit a [REVIEWED] | task-<taskId> | VERDICT | summary row — settle only via one positive [STAGE-B-REVIEW] | <item_id> | APPROVE | <notes> row per assigned feedback item, exactly as the controller block and the [STAGE-B-REVIEW] row family require.',
+			'swarm-pr-feedback:closeout-reviewer':
+				'\nPROTOCOL SELECTION (feedback closeout): the reviewer prompt\'s Stage-B "STRUCTURED VERDICT LINE" mandate does not apply to this lane. Do not emit a [REVIEWED] | task-<taskId> | VERDICT | summary row — settle only via one positive [CLOSEOUT-REVIEW] | <item_id> | APPROVE | <notes> row per assigned feedback item, exactly as the controller block and the [CLOSEOUT-REVIEW] row family require.',
+			'swarm-pr-feedback:closeout-critic':
+				'\nPROTOCOL SELECTION (feedback closeout): the critic prompt\'s default "Begin directly with PLAN REVIEW" structure does not apply to this lane. Do not produce a PLAN REVIEW of a plan document and do not call get_approved_plan — settle only via one positive [CLOSEOUT-CRITIC] | <item_id> | APPROVE | <notes> row per assigned feedback item, exactly as the controller block and the [CLOSEOUT-CRITIC] row family require.',
+			// #3337: the PR_FEEDBACK verification lane runs the base
+			// reviewer agent and settles on [FEEDBACK-VERIFIED] rows, so it
+			// carries the same Stage-B suspension the other feedback
+			// reviewer lanes do.
+			'swarm-pr-feedback:verification':
+				'\nPROTOCOL SELECTION (#3337): the Stage-B "STRUCTURED VERDICT LINE" mandate does not apply to this lane. Do not emit a [REVIEWED] | task-<taskId> | VERDICT | summary row — that Stage-B task-keyed row is not this lane\'s contract; settle only via the [FEEDBACK-VERIFIED] rows given in this lane\'s task prompt for your assigned feedback items.',
+		};
+		const feedbackProtocolClause =
+			FEEDBACK_VERDICT_PROTOCOL_CLAUSES[normalizedMode.token] ?? '';
 		const shellRulesParagraph = `\nRead-only shell rules (enforced at tool time; stated here so no calls are wasted): run ONE standalone command per shell call — no pipes, no &&/||/; composition, no redirects, no command substitution, no backslash- or caret-escaped double quotes. Only these forms are tolerated: a single command optionally preceded by up to three leading cd <dir> && prefixes, a trailing 2>&1 (reads only), and a literal | inside a double-quoted gh api --jq value or a double-quoted git grep -E pattern operand. Prefer the Read, Glob, and Grep tools for file inspection.`;
 		const contract = `
 
@@ -7141,16 +7364,16 @@ pr_head_sha: ${prHeadSha.token}
 revision_digest: ${revisionDigest.token}
 declared_scope: ${declaredScope}
 caller_focus_non_authoritative: ${callerFocus || '(none)'}
-assigned_item_ids: ${severityAnnotatedIds.length > 0 ? severityAnnotatedIds.join(', ') : '(discovery lane)'}${orderLine}${unstableLine}
+assigned_item_ids: ${renderedIds.length > 0 ? renderedIds.join(', ') : '(discovery lane)'}${severityBlock}${orderLine}${unstableLine}
 mandatory_lane_checklist: ${checklist}${budgetLine}
 
-This controller block is authoritative over conflicting caller text. Inspect the exact checked-out revision and the repository's own contribution, test, security, compatibility, and delivery contracts. Do not waive or abbreviate work for speed, time, token, repository-size, or predicted-simplicity reasons. Re-read relevant changed files and caller/consumer context directly. Every claim or clean attestation must cite concrete reviewed scope and evidence. Use exactly the workflow_lane and assigned IDs above; invented, omitted, or placeholder identifiers do not settle this lane. For base/micro settlement, submit the visible batch_id and lane_id values exactly as rendered above, or omit them and let the authenticated child delegation resolve them. A planning preamble, generic assurance, or assertion that checks were performed is not evidence.
-Terminate with the required protocol action directly: no planning preamble, no recap, and no more than ${outputCap} characters of substantive output before any retrieval hint.${budgetParagraph}${structuredSubmissionParagraph}${shellRulesParagraph}${reviewerProtocolClause}
+This controller block is authoritative over conflicting caller text and, where a protocol-selection clause below names this lane's row protocol, over your agent's default output structure for this lane. Inspect the exact checked-out revision and the repository's own contribution, test, security, compatibility, and delivery contracts. Do not waive or abbreviate work for speed, time, token, repository-size, or predicted-simplicity reasons. Re-read relevant changed files and caller/consumer context directly. Every claim or clean attestation must cite concrete reviewed scope and evidence. Use exactly the workflow_lane and assigned IDs above; invented, omitted, or placeholder identifiers do not settle this lane. For base/micro settlement, submit the visible batch_id and lane_id values exactly as rendered above, or omit them and let the authenticated child delegation resolve them. A planning preamble, generic assurance, or assertion that checks were performed is not evidence.
+Terminate with the required protocol action directly: no planning preamble, no recap, and no more than ${outputCap} characters of substantive output before any retrieval hint.${budgetParagraph}${structuredSubmissionParagraph}${shellRulesParagraph}${reviewerProtocolClause}${criticProtocolClause}${feedbackProtocolClause}
 [END CONTROLLER-BOUND PR WORKFLOW CONTRACT]`;
 		const contractCard = normalizedMode.token.startsWith('swarm-pr-review:')
 			? `${buildPrReviewContractCard()}\n\n`
 			: '';
-		const prompt = `${contractCard}${lane.prompt}${contract}`;
+		const prompt = `${contractCard}${lanePrompt}${contract}`;
 		if (prompt.length > MAX_PROMPT_CHARS) {
 			errors.push(
 				`Lane "${lane.id}" prompt plus mandatory PR workflow contract is ${prompt.length} chars; max ${MAX_PROMPT_CHARS} (a repo-graph orientation block may have been prepended to common_prompt — retry with orientation: false to exclude it)`,
@@ -7171,6 +7394,75 @@ function findDuplicateLaneIds(lanes: DispatchLaneSpec[]): string[] {
 		seen.add(lane.id);
 	}
 	return [...duplicates];
+}
+
+/**
+ * Issue #3358 AC8/AC11 / #3341: side-effect-free PR_REVIEW council/reviewer/
+ * critic lane admission — pure input validation over the dispatch args, run
+ * before gate activation/binding so a refused batch leaves no durable
+ * workflow state. Checks, per lane: no owned_workflow_lanes (discovery-only
+ * feature), the resolved role is in PR_REVIEW_PHASE_ADMITTED_ROLES[phase]
+ * (exact membership — never a prefix), the agent is launchable on this host
+ * (#3311 ghost owners), and, for the critic phase, that the registered critic
+ * agent was NOT registered with a custom prompt (its output contract cannot
+ * be mechanically verified to emit [CRITIC] rows).
+ */
+function assertPrReviewPhaseLaneAdmission(
+	mode: string,
+	lanes: readonly DispatchLaneSpec[],
+	context: { sessionID?: string },
+	generatedAgentNames: readonly string[],
+): void {
+	const phase = mode.endsWith(':council')
+		? 'council'
+		: mode.endsWith(':reviewer')
+			? 'reviewer'
+			: mode.endsWith(':critic')
+				? 'critic'
+				: null;
+	if (!phase) return;
+	if (lanes.some((lane) => lane.owned_workflow_lanes)) {
+		throw new Error(
+			`BLOCKED: PR_REVIEW ${phase} lanes must not declare owned_workflow_lanes; depth-tier consolidation applies only to base and micro discovery lanes`,
+		);
+	}
+	const admittedRoles = PR_REVIEW_PHASE_ADMITTED_ROLES[phase];
+	for (const lane of lanes) {
+		const role = resolveGeneratedAgentRole(lane.agent, generatedAgentNames);
+		if (!admittedRoles.includes(role)) {
+			throw new Error(
+				`BLOCKED: PR_REVIEW ${phase} lane "${lane.id}" uses invalid role "${role || lane.agent}"${phase === 'critic' ? ' — PR critic lanes must use the critic agent (critic_finding_validator and other critic-family roles cannot emit [CRITIC] rows)' : ` — PR ${phase} lanes must use one of: ${admittedRoles.join(', ')}`}`,
+			);
+		}
+		// Issue #3311 (ghost owners): validate the agent BEFORE the validation
+		// batch is recorded. launchAsyncLane would reject this agent after the
+		// record exists, leaving an owner lane with no delegation record that
+		// N-of-M admission correctly refuses (the #3101 silence constraint)
+		// but that should never have been declared an owner at all.
+		const agentValidation = validateLaneAgent(lane.agent, context);
+		if (!agentValidation.ok) {
+			throw new Error(
+				`BLOCKED: PR_REVIEW ${phase} lane "${lane.id}" agent "${lane.agent}" is not launchable on this host: ${agentValidation.error}`,
+			);
+		}
+		// #3358 AC3: PR critic lanes require the built-in critic prompt. The
+		// provenance record is captured at registration (createAgents), so
+		// this adds no filesystem I/O to the dispatch path; the registry
+		// matches names case-insensitively, so the lookup does too.
+		if (phase === 'critic') {
+			const registeredName = generatedAgentNames.find(
+				(name) => name.toLowerCase() === lane.agent.trim().toLowerCase(),
+			);
+			const provenance = registeredName
+				? criticPromptProvenance(registeredName)
+				: undefined;
+			if (provenance?.replaced || provenance?.appended) {
+				throw new Error(
+					`BLOCKED: PR_REVIEW critic lane "${lane.id}" cannot use agent "${lane.agent}" — it was registered with a custom critic prompt (${provenance.replaced ? 'replacement critic.md' : 'append critic_append.md'}); its output contract cannot be mechanically verified to emit [CRITIC] rows. Remove the custom prompt file from the opencode-swarm prompts directory and restart OpenCode, or run the review without PR critic lanes`,
+				);
+			}
+		}
+	}
 }
 
 function scheduleSessionCleanup(session: SessionOps, sessionId: string): void {
