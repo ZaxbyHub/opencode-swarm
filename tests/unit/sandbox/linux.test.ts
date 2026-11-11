@@ -7,6 +7,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
+import { existsSync } from 'node:fs';
 
 const isWindows = process.platform === 'win32';
 
@@ -214,12 +215,11 @@ describe('BubblewrapSandboxExecutor', () => {
 			expect(result).not.toContain('/constructor/tmp');
 		});
 
-		test('includes --ro-bind /lib and --ro-bind /lib64', () => {
+		test('includes --ro-bind /lib; /lib64 follows host availability (#3332)', () => {
 			const result = executor.wrapCommand('echo hello', []);
-
 			expect(result).toContain('--ro-bind');
 			expect(result).toContain('/lib');
-			expect(result).toContain('/lib64');
+			expect(result.includes('/lib64')).toBe(existsSync('/lib64'));
 		});
 
 		test('includes --proc /proc', () => {
