@@ -198,6 +198,10 @@ describe('#3616 login-tail long options and compound payloads (review r16)', () 
 			const r = await gate(`sh -c "sudo -i sh -c 'cd src && rm -rf x'"`);
 			expect(r.verdict).toBe('BLOCKED');
 			expect(r.message).toMatch(/Recursive delete target|dynamic path target/);
+			// Sharper oracle (review r17 nit): the relocation target IS the
+			// escaping sentinel path, proving the push (not some other arm)
+			// produced the deny.
+			expect(r.message).toContain('__swarm_unresolved_chdir');
 		},
 		T,
 	);
@@ -220,6 +224,76 @@ describe('#3616 login-tail long options and compound payloads (review r16)', () 
 		'control: sudo -i make build stays admitted',
 		async () => {
 			expect((await gate('sudo -i make build')).verdict).toBe('ADMITTED');
+		},
+		T,
+	);
+});
+
+describe('#3616 login-tail shared-grammar completion (review r17)', () => {
+	// The r16 fixes stopped one spelling short of the detector's own option
+	// grammar. r17 closes the gap by consuming the SHARED primitives
+	// (longFlagTakesArg + the sudo tables, walkShellCommandFlags) and scopes
+	// the destructive-arm push per top-level segment.
+	test(
+		'sibling after a withdrawn wrapper keeps its parent-cwd verdict: env -C $DIR true; rm -rf dist admits',
+		async () => {
+			expect((await gate('env -C $DIR true; rm -rf dist')).verdict).toBe(
+				'ADMITTED',
+			);
+		},
+		T,
+	);
+	test(
+		'sibling after a withdrawn wrapper keeps its parent-cwd verdict: sudo -D "$D" true; rm -rf node_modules admits',
+		async () => {
+			expect(
+				(await gate('sudo -D "$D" true; rm -rf node_modules')).verdict,
+			).toBe('ADMITTED');
+		},
+		T,
+	);
+	test(
+		'GNU long abbreviation skips its argument: sh -c "sudo -i --use root sh -c \'tee src/ok\'" denies',
+		async () => {
+			const r = await gate(`sh -c "sudo -i --use root sh -c 'tee src/ok'"`);
+			expect(r.verdict).toBe('BLOCKED');
+			expect(r.message).toMatch(DYNAMIC_DENY);
+		},
+		T,
+	);
+	test(
+		'short cluster skips its argument: sh -c "sudo -i -Eu root sh -c \'tee src/ok\'" denies',
+		async () => {
+			const r = await gate(`sh -c "sudo -i -Eu root sh -c 'tee src/ok'"`);
+			expect(r.verdict).toBe('BLOCKED');
+			expect(r.message).toMatch(DYNAMIC_DENY);
+		},
+		T,
+	);
+	test(
+		'clustered shell flags select the payload: sh -c "sudo -i sh -ec \'cd src && tee ok\'" denies',
+		async () => {
+			const r = await gate(`sh -c "sudo -i sh -ec 'cd src && tee ok'"`);
+			expect(r.verdict).toBe('BLOCKED');
+			expect(r.message).toMatch(DYNAMIC_DENY);
+		},
+		T,
+	);
+	test(
+		'ordered shell flags select the payload: sh -c "sudo -i sh -e -c \'cd src && tee ok\'" denies',
+		async () => {
+			const r = await gate(`sh -c "sudo -i sh -e -c 'cd src && tee ok'"`);
+			expect(r.verdict).toBe('BLOCKED');
+			expect(r.message).toMatch(DYNAMIC_DENY);
+		},
+		T,
+	);
+	test(
+		'a raw command merely CONTAINING the sentinel literal never triggers the push',
+		async () => {
+			expect((await gate(`echo '$__swarm_unresolved_chdir'`)).verdict).toBe(
+				'ADMITTED',
+			);
 		},
 		T,
 	);

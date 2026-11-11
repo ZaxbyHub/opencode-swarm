@@ -2547,7 +2547,12 @@ export type LauncherWalkOutcome =
 const SUDO_ARGLESS_EXEC_CHARS = new Set([...'EnBbBAHPSk']);
 const SUDO_QUERY_CHARS = new Set([...'lvVKL']);
 const SUDO_INTERACTIVE_CHARS = new Set([...'is']);
-const SUDO_ARG_TAKING_SHORT = new Set([...'ugprtCTUDR']);
+// #3616 review r17 finding 2: the sudo option tables are exported for the
+// destructive-command login-tail slicer — the option-region skip must consume
+// EXACTLY what walkSudoOptions consumes (exact long names, `=`-glued values,
+// GNU unambiguous prefix abbreviations via longFlagTakesArg, getopt short
+// clusters) from the same tables, never a mirrored copy that can drift.
+export const SUDO_ARG_TAKING_SHORT = new Set([...'ugprtCTUDR']);
 const SUDO_LONG_ARGLESS_EXEC = new Set([
 	'--preserve-env',
 	'--non-interactive',
@@ -2568,7 +2573,7 @@ const SUDO_LONG_QUERY = new Set([
 	'--help',
 ]);
 const SUDO_LONG_INTERACTIVE = new Set(['--login', '--shell']);
-const SUDO_LONG_ARG_TAKING = [
+export const SUDO_LONG_ARG_TAKING = [
 	'--user',
 	'--group',
 	'--prompt',
@@ -2691,7 +2696,7 @@ function splitGluedLong(
  * same rule envFlagConsumesNextWord applies for env. `flag` names the
  * matched canonical flag so callers can distinguish --output from --format.
  */
-function longFlagTakesArg(
+export function longFlagTakesArg(
 	token: string,
 	argTaking: readonly string[],
 ): {

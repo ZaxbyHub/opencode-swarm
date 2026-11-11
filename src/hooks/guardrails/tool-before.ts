@@ -933,23 +933,30 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				`BLOCKED: shell interpreter invocation "${uncertainCluster}" carries a flag cluster the guard cannot statically model (unknown option or glued argument) — deny-on-uncertainty.`,
 			);
 		}
-		// #3616 (review r16 finding 2): a LOGIN-sudo withdrawal rewrite
-		// (dcPreprocessWrappers uncertain / carrying the synthetic
-		// unresolved-cd sentinel — the uncertain flag does not propagate
-		// through the payload-recursion string return) re-homes the wrapped
-		// tail at an unresolvable child cwd. The write detector sees the
-		// rewrite, but the DESTRUCTIVE arm is verb-anchored on raw
-		// segments — push the rewritten command's segments with the
-		// uncertain context so a destructive verb in the tail (`sudo -i
-		// sh -c 'cd src && rm -rf x'`) relocates to the escaping sentinel
-		// (fail-closed).
-		const loginWithdrawal = dcPreprocessWrappers(command);
-		if (
-			loginWithdrawal.uncertain ||
-			loginWithdrawal.command.includes('$__swarm_unresolved_chdir')
-		) {
-			for (const sub of dcSplitSegments(loginWithdrawal.command)) {
-				pushSegmentOccurrence(sub, 'uncertain');
+		// #3616 (review r16 finding 2, scoped by review r17 finding 1): a
+		// withdrawal rewrite (dcPreprocessWrappers uncertain / carrying the
+		// synthetic unresolved-cd sentinel) re-homes the wrapped tail at an
+		// unresolvable child cwd. The write detector sees the rewrite, but
+		// the DESTRUCTIVE arm is verb-anchored on raw segments — push the
+		// REWRITTEN segments' sub-segments with the uncertain context so a
+		// destructive verb in the tail (`sudo -i sh -c 'cd src && rm -rf
+		// x'`) relocates to the escaping sentinel (fail-closed). PER
+		// TOP-LEVEL SEGMENT, never whole-command: an unrewritten sibling
+		// (`env -C $DIR true; rm -rf dist`) runs at the parent cwd and must
+		// keep its own verdict (the env-3491 sibling control pins that
+		// admission); the `changed` guard keeps a raw command that merely
+		// CONTAINS the sentinel literal (echo '$__swarm_unresolved_chdir')
+		// from triggering the push with no rewrite at all.
+		for (const segment of dcSplitSegments(command)) {
+			const segWithdrawal = dcPreprocessWrappers(segment);
+			if (!segWithdrawal.changed) continue;
+			if (
+				segWithdrawal.uncertain ||
+				segWithdrawal.command.includes('$__swarm_unresolved_chdir')
+			) {
+				for (const sub of dcSplitSegments(segWithdrawal.command)) {
+					pushSegmentOccurrence(sub, 'uncertain');
+				}
 			}
 		}
 		const relocate = (

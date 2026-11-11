@@ -22,7 +22,10 @@ import { CMD_STRIP_PREFIX, PS_STRIP_PREFIX } from '../shell-executor-context';
 import {
 	BASH_BUILTIN_COMMANDS,
 	expandBraceRaw,
+	longFlagTakesArg,
 	parseRmOptionTokens,
+	SUDO_ARG_TAKING_SHORT,
+	SUDO_LONG_ARG_TAKING,
 	walkLauncherOptions,
 	walkShellCommandFlags,
 } from '../shell-write-detect';
@@ -1846,8 +1849,16 @@ function matchSudoChdir(words: string[]): DcChdirMatch {
 					// ('cd src && tee ok', 'env tee x') hides the write
 					// behind a non-write first token, so the safe
 					// direction is unconditional withdrawal; a no-write
-					// payload over-denies, disclosed.
-					return tail[idx + 1] === '-c' && typeof tail[idx + 2] === 'string';
+					// payload over-denies, disclosed. The payload is
+					// located with the SHARED shell flag walk, not a
+					// literal next-word `-c` — clustered (`sh -ec`) and
+					// ordered (`sh -e -c`) spellings select the same
+					// payload (review r17 finding 3).
+					const shellWalk = walkShellCommandFlags(tail.slice(idx + 1));
+					return (
+						shellWalk.kind === 'payload' &&
+						typeof shellWalk.payload === 'string'
+					);
 				}
 				if (wordBearsWrite(word)) return true;
 				if (idx > 0 && /^[0-9]?>>?$/.test(tail[idx - 1] ?? '')) return true;
@@ -1920,8 +1931,15 @@ function matchSudoChdir(words: string[]): DcChdirMatch {
 					// (review r16 finding 2) — a compound payload hides
 					// the write behind a non-write first token; the safe
 					// direction is unconditional withdrawal (a no-write
-					// payload over-denies, disclosed).
-					return tail[idx + 1] === '-c' && typeof tail[idx + 2] === 'string';
+					// payload over-denies, disclosed). The payload is
+					// located with the SHARED shell flag walk so clustered
+					// (`sh -ec`) and ordered (`sh -e -c`) spellings select
+					// the same payload (review r17 finding 3).
+					const shellWalk = walkShellCommandFlags(tail.slice(idx + 1));
+					return (
+						shellWalk.kind === 'payload' &&
+						typeof shellWalk.payload === 'string'
+					);
 				}
 				if (wordBearsWrite(word)) return true;
 				if (idx > 0 && /^[0-9]?>>?$/.test(tail[idx - 1] ?? '')) return true;
@@ -1939,28 +1957,16 @@ function matchSudoChdir(words: string[]): DcChdirMatch {
 			);
 			if (hasWriteVector && hasRelativeOperand && operands.length > 0) {
 				// innerWords keeps the raw tail FROM THE COMMAND WORD (sudo's
-				// own option region skipped: short arg-taking flags skip
-				// their argument, long arg-taking options — SUDO_LONG_ARG_
-				// TAKING, mirrored here — skip theirs unless glued with =,
-				// and every other flag takes none) so the serialized
-				// `sh -c '<payload>'` survives for detection.
-				const argTaking = new Set([...'ugprtCTUDR']);
-				const longArgTaking = new Set([
-					'--user',
-					'--group',
-					'--prompt',
-					'--role',
-					'--type',
-					'--close-from',
-					'--command-timeout',
-					'--other-user',
-					'--chdir',
-					'--chroot',
-				]);
-				const longHead = (w: string): string => {
-					const eq = w.indexOf('=');
-					return eq === -1 ? w : w.slice(0, eq);
-				};
+				// own option region skipped) so the serialized `sh -c
+				// '<payload>'` survives for detection. The skip consumes
+				// EXACTLY what the detector's walkSudoOptions consumes —
+				// from the SHARED tables via longFlagTakesArg (exact long
+				// names, `=`-glued values, GNU unambiguous prefix
+				// abbreviations like `--use root`) and the getopt short
+				// cluster rule (the first arg-taking member either is last
+				// and takes the next word — `-Eu root` — or swallows the
+				// token tail) — never a mirrored list that can drift
+				// (review r17 finding 2).
 				let start = 0;
 				while (start < tail.length) {
 					const w = tail[start];
@@ -1970,10 +1976,25 @@ function matchSudoChdir(words: string[]): DcChdirMatch {
 						break;
 					}
 					if (w.startsWith('--')) {
-						start += longArgTaking.has(longHead(w)) && !w.includes('=') ? 2 : 1;
+						const arg = longFlagTakesArg(w, SUDO_LONG_ARG_TAKING);
+						start += arg.takes && !arg.glued ? 2 : 1;
 						continue;
 					}
-					start += argTaking.has(w.slice(1)) ? 2 : 1;
+					if (w.length > 1) {
+						const members = w.slice(1);
+						let skipNext = false;
+						for (let m = 0; m < members.length; m++) {
+							const ch = members[m];
+							if (ch === undefined) break;
+							if (SUDO_ARG_TAKING_SHORT.has(ch)) {
+								skipNext = m === members.length - 1;
+								break;
+							}
+						}
+						start += skipNext ? 2 : 1;
+						continue;
+					}
+					start += 1;
 				}
 				const inner = tail.slice(start);
 				if (inner.length > 0) {
@@ -2126,16 +2147,19 @@ function preprocessWrapperText(
 					// a chdir (`'time' sh -c 'env -C .. tee x'` from the dash
 					// rewrite). The legacy unwrap strips the wrapper and DISCARDS
 					// the chdir — route through the shell-payload recursion first.
+					// The recursion's flags ride along (review r17 question 1):
+					// a withdrawal inside the payload keeps its `uncertain` on
+					// this result, not just the sentinel text.
 					const spliced = dcShellPayloadRewrite(
 						innerRaw,
 						dcUnwrapWrappers(innerRaw),
 						depth + 1,
 					);
 					return {
-						text: spliced ?? dcUnwrapWrappers(innerRaw),
+						text: spliced.text ?? dcUnwrapWrappers(innerRaw),
 						rewrote: false,
-						uncertain: false,
-						failClosed: false,
+						uncertain: spliced.uncertain,
+						failClosed: spliced.failClosed,
 					};
 				})();
 	const hoistSuffix =
@@ -2166,15 +2190,18 @@ function preprocessWrapperText(
  * the parenthesized subshell `( <payload analysis> )` — recursing
  * preprocessWrapperText on the ONE-LEVEL payload so a chdir-bearing wrapper
  * inside it (sudo -D / env -C) is rewritten instead of discarded by the
- * legacy unwrap. Returns null when text is not such a wrapper; `fallback`
- * is the legacy-unwrapped text used when the payload itself has no chdir
- * match (byte-identical to the pre-#3616 behavior).
+ * legacy unwrap. Returns text null when text is not such a wrapper;
+ * `fallback` is the legacy-unwrapped text used when the payload itself has
+ * no chdir match (byte-identical to the pre-#3616 behavior). The payload
+ * recursion's `uncertain`/`failClosed` flags ride along (review r17,
+ * question 1) — a withdrawal inside the payload must reach the caller's
+ * DcWrapperPreprocess flags instead of surviving only as the sentinel text.
  */
 function dcShellPayloadRewrite(
 	text: string,
 	fallback: string,
 	depth: number,
-): string | null {
+): { text: string | null; uncertain: boolean; failClosed: boolean } {
 	const words = shellSplitWords(text);
 	const shellHead = dcPeelLauncherWords(words, false);
 	const isShellHead =
@@ -2183,12 +2210,17 @@ function dcShellPayloadRewrite(
 		shellHead === 'zsh' ||
 		shellHead === 'dash' ||
 		(shellHead ?? '').startsWith('ksh');
-	if (!isShellHead) return null;
+	if (!isShellHead) return { text: null, uncertain: false, failClosed: false };
 	const payloadWords = words.slice(1);
 	const walk = walkShellCommandFlags(payloadWords);
-	if (walk.kind !== 'payload') return null;
+	if (walk.kind !== 'payload')
+		return { text: null, uncertain: false, failClosed: false };
 	const payloadResult = preprocessWrapperText(walk.payload, depth);
-	return `( ${payloadResult === null ? fallback : payloadResult.text} )`;
+	return {
+		text: `( ${payloadResult === null ? fallback : payloadResult.text} )`,
+		uncertain: payloadResult?.uncertain ?? false,
+		failClosed: payloadResult?.failClosed ?? false,
+	};
 }
 
 export function dcPreprocessWrappers(command: string): DcWrapperPreprocess {
@@ -2239,6 +2271,12 @@ export function dcPreprocessWrappers(command: string): DcWrapperPreprocess {
 					const payloadResult = preprocessWrapperText(payloadText, 1);
 					const payloadInner =
 						payloadResult === null ? unwrapped : payloadResult.text;
+					// Review r17 question 1: OR the payload recursion's flags
+					// into the aggregate — the withdrawal used to survive only
+					// as sentinel text in the pushed string, so callers gating
+					// on `.uncertain` missed it.
+					uncertain = uncertain || (payloadResult?.uncertain ?? false);
+					failClosed = failClosed || (payloadResult?.failClosed ?? false);
 					processed.push(`( ${payloadInner} )`);
 					continue;
 				}
