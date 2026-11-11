@@ -229,7 +229,7 @@ describe('#3616 login-tail long options and compound payloads (review r16)', () 
 	);
 });
 
-describe('#3616 login-tail shared-grammar completion (review r17)', () => {
+describe('#3616 login-tail shared-grammar completion (reviews r17-r18)', () => {
 	// The r16 fixes stopped one spelling short of the detector's own option
 	// grammar. r17 closes the gap by consuming the SHARED primitives
 	// (longFlagTakesArg + the sudo tables, walkShellCommandFlags) and scopes

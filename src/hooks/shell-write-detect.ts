@@ -2696,9 +2696,10 @@ function splitGluedLong(
  * same rule envFlagConsumesNextWord applies for env. The abbreviation rule
  * composes with the glue: `--use=root` (prefix head + glued value) matches
  * `--user` exactly as GNU getopt_long does (#3616 review r18 — a glued
- * abbreviation must not fall to unknown, which strips the launcher and
- * admits the tail). `flag` names the matched canonical flag so callers can
- * distinguish --output from --format.
+ * abbreviation must not fall to unknown, which for a SHELL-WRAPPED sudo
+ * strips the launcher and admits the tail; a bare top-level sudo is still
+ * denied by the launcher-uncertainty scan). `flag` names the matched
+ * canonical flag so callers can distinguish --output from --format.
  */
 export function longFlagTakesArg(
 	token: string,
