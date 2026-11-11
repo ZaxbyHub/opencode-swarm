@@ -108,15 +108,15 @@ function buildBwrapArgs(input: BwrapArgsInput): string[] {
 		'--new-session',
 		'--cap-drop',
 		'ALL',
-		...roBindArgs,
-		// The /tmp tmpfs must be mounted BEFORE the scope binds. bwrap applies
-		// mounts in argument order, so a tmpfs mounted after a scope bind that
-		// lives under the temp directory would shadow that scope with an empty
-		// filesystem and make writes inside it fail.
+		// The /tmp tmpfs must be mounted BEFORE the read-only roots and scope
+		// binds. bwrap applies mounts in argument order, so a tmpfs mounted after
+		// a bind under the temp directory hides that bind behind an empty
+		// filesystem and writes or reads through it fail.
 		'--size',
 		String(TMPFS_SIZE_BYTES),
 		'--tmpfs',
 		quote(input.temp),
+		...roBindArgs,
 		...bindArgs,
 		'--dev',
 		'/dev',
