@@ -15,7 +15,7 @@ On 2026-11-11, two agent sessions sharing one login each ran a complete issue-tr
 
 ## Migration steps
 
-No migration required. The claim gate runs with `gh` alone; once ZaxbyHub/zaxbygraph #77 (`claim`/`release`/`claims --live`/`pr-guard`) and #74 (the `claimed` gate in `triage`/`bundle`) ship, prefer those commands — the skill text says so.
+No migration required. User-level copies of the skill reconcile against the version stamp per `references/install.md` (a 3.0.1 user copy shadows this change until refreshed). The claim gate runs with `gh` alone; once ZaxbyHub/zaxbygraph #77 (`claim`/`release`/`claims --live`/`pr-guard`) and #74 (the `claimed` gate in `triage`/`bundle`) ship, prefer those commands — the skill text says so.
 
 ## Breaking changes
 
