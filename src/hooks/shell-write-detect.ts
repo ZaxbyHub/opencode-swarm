@@ -2855,6 +2855,11 @@ function walkSudoOptions(words: readonly string[]): LauncherWalkOutcome {
 			// the literal command, so no assignment scan here.
 			// #3572 delta-critic: the nested GNU `time` lookup runs on the
 			// post-`--` word exactly like the non-sentinel path.
+			// #3616 final-critic round 5: `--` only ends option parsing —
+			// an earlier `-i`/`--login` still chdirs to the target home, so
+			// the post-`--` inner returns carry loginShell exactly like the
+			// non-sentinel returns (dropping it admitted `sudo -i -- tee
+			// src/ok` while the no-`--` twin denied).
 			const nested = nestedTimeTail(words, i + 1);
 			if (nested !== null) {
 				return {
@@ -2863,12 +2868,14 @@ function walkSudoOptions(words: readonly string[]): LauncherWalkOutcome {
 					timeOutputFile: nested.timeOutputFile,
 					chdirTailIndex: i + 1,
 					...(chdirDir !== undefined ? { sudoChdir: chdirDir } : {}),
+					...(loginShellMode ? { loginShell: true as const } : {}),
 				};
 			}
 			return {
 				kind: 'inner',
 				innerIndex: i + 1,
 				...(chdirDir !== undefined ? { sudoChdir: chdirDir } : {}),
+				...(loginShellMode ? { loginShell: true as const } : {}),
 			};
 		}
 		if (token.startsWith('--') && token.length > 2) {
@@ -3680,17 +3687,31 @@ function detectLauncherWrites(cmd: unknown): WriteTarget[] {
 						if (idx > 0 && /^[0-9]?>>?$/.test(tail[idx - 1] ?? '')) return true;
 						return false;
 					});
-					if (hasWriteVector) {
-						const firstRelative =
-							tail.find(
-								(word) =>
-									typeof word === 'string' &&
-									!word.startsWith('/') &&
-									!word.startsWith('~') &&
-									!/^[A-Za-z]:[/]/.test(word) &&
-									!/^-/.test(word) &&
-									word !== 'tee',
-							) ?? 'sudo -i tail';
+					// #3616 final-critic round 5: a NESTED GNU time inner word
+					// (`sudo -i time -o src/t.txt true`, with or without `--`)
+					// hides the write in the walk's timeOutputFile — the inner
+					// tail starts past it and carries no write word, so a
+					// RELATIVE -o report file under the login home escaped the
+					// withdrawal (an absolute -o keeps the ordinary judged path).
+					const loginTimeFile =
+						typeof walk.timeOutputFile === 'string' ? walk.timeOutputFile : '';
+					const loginTimeFileRelative =
+						loginTimeFile !== '' &&
+						!loginTimeFile.startsWith('/') &&
+						!loginTimeFile.startsWith('~') &&
+						!/^[A-Za-z]:[/]/.test(loginTimeFile);
+					if (hasWriteVector || loginTimeFileRelative) {
+						const firstRelative = loginTimeFileRelative
+							? loginTimeFile
+							: (tail.find(
+									(word) =>
+										typeof word === 'string' &&
+										!word.startsWith('/') &&
+										!word.startsWith('~') &&
+										!/^[A-Za-z]:[/]/.test(word) &&
+										!/^-/.test(word) &&
+										word !== 'tee',
+								) ?? 'sudo -i tail');
 						results.push({
 							category: 'launcher_write',
 							operator:

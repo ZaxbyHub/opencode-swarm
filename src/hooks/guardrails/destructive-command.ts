@@ -1864,6 +1864,22 @@ function matchSudoChdir(words: string[]): DcChdirMatch {
 				if (idx > 0 && /^[0-9]?>>?$/.test(tail[idx - 1] ?? '')) return true;
 				return false;
 			});
+			// #3616 final-critic round 5: a NESTED GNU time inner word
+			// (`sudo -i time -o src/t.txt true`) hides the write in the
+			// walk's timeOutputFile — the tail starts past `-o FILE` and
+			// carries no write word, so a RELATIVE report file under the
+			// login home escaped the withdrawal here too (absolute keeps
+			// the ordinary judged path).
+			const nestedTimeFile =
+				typeof walk.timeOutputFile === 'string' && walk.timeOutputFile !== ''
+					? walk.timeOutputFile
+					: null;
+			const nestedTimeFileRelative =
+				nestedTimeFile !== null &&
+				!nestedTimeFile.startsWith('/') &&
+				!nestedTimeFile.startsWith('~/') &&
+				nestedTimeFile !== '~' &&
+				!/^[A-Za-z]:[\\/]/.test(nestedTimeFile);
 			// Relative-OPERAND check (review r15 finding 4): the command
 			// word (idx 0) and flags never count; for the multi-operand
 			// copiers only the LAST operand (the write target) counts.
@@ -1884,7 +1900,11 @@ function matchSudoChdir(words: string[]): DcChdirMatch {
 			const hasRelativeOperand = relevantOperands.some(
 				(w) => typeof w === 'string' && isRelativeWord(w),
 			);
-			if (hasWriteVector && hasRelativeOperand && tail.length > 0) {
+			if (
+				(hasWriteVector || nestedTimeFileRelative) &&
+				(hasRelativeOperand || nestedTimeFileRelative) &&
+				tail.length > 0
+			) {
 				return { kind: 'uncertain', innerWords: tail };
 			}
 		}

@@ -354,3 +354,61 @@ describe('#3616 login-tail shared-grammar completion (reviews r17-r18)', () => {
 		T,
 	);
 });
+
+describe('#3616 login-tail post-`--` and nested-time spellings (final-critic r5)', () => {
+	// `--` only ends option parsing — an earlier -i/--login still chdirs to
+	// the target home, so the post-`--` inner returns must carry loginShell
+	// exactly like the non-sentinel returns (the walk dropped it and every
+	// post-`--` spelling admitted while the no-`--` twins denied).
+	for (const command of [
+		'sudo -i -- tee src/ok',
+		'sudo --login -- tee src/ok',
+		'sudo -iu root -- tee src/ok',
+	]) {
+		test(
+			`${command} is denied by withdrawal`,
+			async () => {
+				const r = await gate(command);
+				expect(r.verdict).toBe('BLOCKED');
+				expect(r.message).toMatch(DYNAMIC_DENY);
+			},
+			T,
+		);
+	}
+	test(
+		'sudo -i -- rm -rf dist is denied (destructive verb relocated to the sentinel)',
+		async () => {
+			const r = await gate('sudo -i -- rm -rf dist');
+			expect(r.verdict).toBe('BLOCKED');
+			expect(r.message).toContain('__swarm_unresolved_chdir');
+		},
+		T,
+	);
+	// A NESTED GNU time inner word hides the write in the walk's
+	// timeOutputFile — both the `--` and no-`--` spellings carry it.
+	test(
+		'sudo -i -- time -o src/t.txt true is denied (relative -o under the login home)',
+		async () => {
+			const r = await gate('sudo -i -- time -o src/t.txt true');
+			expect(r.verdict).toBe('BLOCKED');
+			expect(r.message).toMatch(DYNAMIC_DENY);
+		},
+		T,
+	);
+	test(
+		'sudo -i time -o src/t.txt true is denied (no-`--` twin)',
+		async () => {
+			const r = await gate('sudo -i time -o src/t.txt true');
+			expect(r.verdict).toBe('BLOCKED');
+			expect(r.message).toMatch(DYNAMIC_DENY);
+		},
+		T,
+	);
+	test(
+		'control: sudo -i -- make build stays admitted',
+		async () => {
+			expect((await gate('sudo -i -- make build')).verdict).toBe('ADMITTED');
+		},
+		T,
+	);
+});
