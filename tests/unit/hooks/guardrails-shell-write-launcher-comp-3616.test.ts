@@ -162,3 +162,65 @@ describe('#3616 login-tail family completion (review r15 findings)', () => {
 		);
 	}
 });
+
+describe('#3616 login-tail long options and compound payloads (review r16)', () => {
+	// F1: long arg-taking sudo options with a SEPARATE argument
+	// (--user root) are skipped by the interactive-tail slicer, so the
+	// withdrawal inner words start at the command word, not the option
+	// argument. F2: ANY shell -c payload under a login tail is treated as
+	// write-bearing (compound payloads hide the write behind a non-write
+	// first token; over-deny, safe direction) — and the destructive arm
+	// now consumes the withdrawal rewrite via the uncertain-context push.
+	for (const command of [
+		`sh -c "sudo -i --user root sh -c 'tee src/ok'"`,
+		`sh -c "sudo -i --group root sh -c 'tee src/ok'"`,
+		`sh -c "sudo -i --prompt P sh -c 'tee src/ok'"`,
+		`sh -c "sudo -i -u root sh -c 'tee src/ok'"`,
+		`sh -c "sudo -i --user=root sh -c 'tee src/ok'"`,
+		`sh -c "sudo -i sh -c 'cd src && tee ok'"`,
+		`sh -c "sudo -i sh -c 'env tee src/ok'"`,
+		`sh -c "sudo -i sh -c 'true && tee src/ok'"`,
+		`sh -c "sudo -i bash -c 'cd src && tee ok'"`,
+	]) {
+		test(
+			`${command} is denied by withdrawal`,
+			async () => {
+				const r = await gate(command);
+				expect(r.verdict).toBe('BLOCKED');
+				expect(r.message).toMatch(DYNAMIC_DENY);
+			},
+			T,
+		);
+	}
+	test(
+		'sh -c "sudo -i sh -c \'cd src && rm -rf x\'" is denied (destructive verb relocated to the sentinel)',
+		async () => {
+			const r = await gate(`sh -c "sudo -i sh -c 'cd src && rm -rf x'"`);
+			expect(r.verdict).toBe('BLOCKED');
+			expect(r.message).toMatch(/Recursive delete target|dynamic path target/);
+		},
+		T,
+	);
+	// No-write shell payload control: the unconditional payload flag forces
+	// the withdrawal REWRITE, but the deny still requires a detected write —
+	// `echo hi` writes nothing, so it stays admitted (correct, not an
+	// over-deny; the over-deny bound only compounds with a write-bearing
+	// payload, as the tests above pin).
+	test(
+		'control: sh -c "sudo -i sh -c \'echo hi\'" stays admitted',
+		async () => {
+			expect((await gate(`sh -c "sudo -i sh -c 'echo hi'"`)).verdict).toBe(
+				'ADMITTED',
+			);
+		},
+		T,
+	);
+	// Plain (non-shell) no-write tails stay admitted.
+	test(
+		'control: sudo -i make build stays admitted',
+		async () => {
+			expect((await gate('sudo -i make build')).verdict).toBe('ADMITTED');
+		},
+		T,
+	);
+});

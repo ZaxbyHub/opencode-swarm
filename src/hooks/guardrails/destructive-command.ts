@@ -1841,16 +1841,13 @@ function matchSudoChdir(words: string[]): DcChdirMatch {
 			const hasWriteVector = tail.some((word, idx) => {
 				if (typeof word !== 'string') return false;
 				if (isShellHeadWord(word)) {
-					// `sh -c <payload>`: the payload word is the next-next.
-					const payload = tail[idx + 2];
-					if (
-						tail[idx + 1] === '-c' &&
-						typeof payload === 'string' &&
-						wordBearsWrite(payload)
-					) {
-						return true;
-					}
-					return false;
+					// `sh -c <payload>`: ANY payload is write-bearing
+					// (review r16 finding 2) — a compound payload
+					// ('cd src && tee ok', 'env tee x') hides the write
+					// behind a non-write first token, so the safe
+					// direction is unconditional withdrawal; a no-write
+					// payload over-denies, disclosed.
+					return tail[idx + 1] === '-c' && typeof tail[idx + 2] === 'string';
 				}
 				if (wordBearsWrite(word)) return true;
 				if (idx > 0 && /^[0-9]?>>?$/.test(tail[idx - 1] ?? '')) return true;
@@ -1919,14 +1916,12 @@ function matchSudoChdir(words: string[]): DcChdirMatch {
 			const hasWriteVector = tail.some((word, idx) => {
 				if (typeof word !== 'string' || word.startsWith('-')) return false;
 				if (isShellHeadWord(word)) {
-					const payload = tail[idx + 2];
-					if (
-						tail[idx + 1] === '-c' &&
-						typeof payload === 'string' &&
-						wordBearsWrite(payload)
-					)
-						return true;
-					return false;
+					// `sh -c <payload>`: ANY payload is write-bearing
+					// (review r16 finding 2) — a compound payload hides
+					// the write behind a non-write first token; the safe
+					// direction is unconditional withdrawal (a no-write
+					// payload over-denies, disclosed).
+					return tail[idx + 1] === '-c' && typeof tail[idx + 2] === 'string';
 				}
 				if (wordBearsWrite(word)) return true;
 				if (idx > 0 && /^[0-9]?>>?$/.test(tail[idx - 1] ?? '')) return true;
@@ -1944,9 +1939,28 @@ function matchSudoChdir(words: string[]): DcChdirMatch {
 			);
 			if (hasWriteVector && hasRelativeOperand && operands.length > 0) {
 				// innerWords keeps the raw tail FROM THE COMMAND WORD (sudo's
-				// own option region skipped with the arity table) so the
-				// serialized `sh -c '<payload>'` survives for detection.
+				// own option region skipped: short arg-taking flags skip
+				// their argument, long arg-taking options — SUDO_LONG_ARG_
+				// TAKING, mirrored here — skip theirs unless glued with =,
+				// and every other flag takes none) so the serialized
+				// `sh -c '<payload>'` survives for detection.
 				const argTaking = new Set([...'ugprtCTUDR']);
+				const longArgTaking = new Set([
+					'--user',
+					'--group',
+					'--prompt',
+					'--role',
+					'--type',
+					'--close-from',
+					'--command-timeout',
+					'--other-user',
+					'--chdir',
+					'--chroot',
+				]);
+				const longHead = (w: string): string => {
+					const eq = w.indexOf('=');
+					return eq === -1 ? w : w.slice(0, eq);
+				};
 				let start = 0;
 				while (start < tail.length) {
 					const w = tail[start];
@@ -1955,7 +1969,11 @@ function matchSudoChdir(words: string[]): DcChdirMatch {
 						start += 1;
 						break;
 					}
-					start += argTaking.has(w.slice(1, -1) ? '' : w.slice(-1)) ? 2 : 1;
+					if (w.startsWith('--')) {
+						start += longArgTaking.has(longHead(w)) && !w.includes('=') ? 2 : 1;
+						continue;
+					}
+					start += argTaking.has(w.slice(1)) ? 2 : 1;
 				}
 				const inner = tail.slice(start);
 				if (inner.length > 0) {
