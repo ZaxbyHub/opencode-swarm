@@ -26,7 +26,9 @@ makes `phase_complete` bypass the completion-verify, drift-verifier,
 hallucination-guard, mutation-gate, phase-council and todo-gate checks, not
 every gate: it does not skip the final-review, final-council, full-auto or
 architecture-supervisor gates (each still fires only under its own enable and
-trigger conditions). The skill now says so.
+trigger conditions). The skill now says so, both in its gate-evidence note and
+in the drift, hallucination and phase-council steps, which now skip under Turbo
+as the mutation step already did.
 
 ## Truncated replies fail closed (notes from #3172, not published until now)
 
