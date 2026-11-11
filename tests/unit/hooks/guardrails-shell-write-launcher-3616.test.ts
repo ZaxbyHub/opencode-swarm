@@ -19,6 +19,7 @@
  * 4. `env` interposed between launchers matches the env-free twin's verdict.
  */
 import { afterEach, describe, expect, test } from 'bun:test';
+import { dcPreprocessWrappers } from '../../../src/hooks/guardrails/destructive-command';
 import { detectPosixWrites } from '../../../src/hooks/shell-write-detect';
 import { resetSwarmState } from '../../../src/state';
 import { gate } from './_shell-write-3616-fixtures';
@@ -346,18 +347,22 @@ describe('#3616 env dash + bare time: the payload is judged, not just -o', () =>
 	// analysis — the rewrite emits `time` QUOTED (the #3572 nested-time
 	// precedent) so the GNU binary grammar analyzes the wrapped command,
 	// while the dash-aware original analysis keeps the -o launcher write.
-	for (const command of [
-		`env - time sh -c "echo x > ../x.txt"`,
-		`env - time bash -c "tee ../x.txt"`,
-		`env - time sh -c "rm -rf ../ydir"`,
-		`env - time sudo -D /etc tee src/ok.txt`,
-		`env - time env -S '-C .. sh -c "echo x > src/a"'`,
-	]) {
+	for (const [command, reason] of [
+		[`env - time sh -c "echo x > ../x.txt"`, AUTHORITY_DENY],
+		[`env - time bash -c "tee ../x.txt"`, AUTHORITY_DENY],
+		// rm -rf: the destructive arm denies (payload analyzed).
+		[`env - time sh -c "rm -rf ../ydir"`, /Recursive delete target/],
+		[`env - time sudo -D /etc tee src/ok.txt`, AUTHORITY_DENY],
+		[`env - time env -S '-C .. sh -c "echo x > src/a"'`, AUTHORITY_DENY],
+	] as Array<[string, RegExp]>) {
 		test(
-			`${command} is denied`,
+			`${command} is denied for the payload's own reason`,
 			async () => {
 				const r = await gate(command);
 				expect(r.verdict).toBe('BLOCKED');
+				// Not the blanket parse refusal — the payload was analyzed.
+				expect(r.message).not.toMatch(PARSE_DENY);
+				expect(r.message).toMatch(reason);
 			},
 			T,
 		);
@@ -368,6 +373,21 @@ describe('#3616 env dash + bare time: the payload is judged, not just -o', () =>
 			expect(
 				(await gate(`env - time sh -c "echo x > src/ok.txt"`)).verdict,
 			).toBe('ADMITTED');
+		},
+		T,
+	);
+	test(
+		'the -o rewrite emits the time word quoted (GNU grammar, not the bash keyword)',
+		() => {
+			const pre = dcPreprocessWrappers('env - time -o ../t.txt true') as {
+				changed: boolean;
+				command: string;
+			};
+			expect(pre.changed).toBe(true);
+			// Quoted 'time' selects the GNU binary grammar at the subshell
+			// start; unquoted it re-enters the bash-keyword grammar and the
+			// unwrap eats -o FILE (review round 11, mutation 1).
+			expect(pre.command).toContain("'time' -o");
 		},
 		T,
 	);
