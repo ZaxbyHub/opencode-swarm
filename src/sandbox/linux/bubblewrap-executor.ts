@@ -83,6 +83,12 @@ interface BwrapArgsInput {
 	command: string;
 }
 
+/** True when `child` is a path strictly beneath `parent` (both absolute). */
+function isStrictDescendant(child: string, parent: string): boolean {
+	const base = parent.endsWith('/') ? parent : `${parent}/`;
+	return child !== parent && child.startsWith(base);
+}
+
 /**
  * The bwrap argument list of a wrap — the single source of truth for both
  * `wrapCommand` and the namespace smoke test, so the smoke test can never
@@ -101,6 +107,22 @@ function buildBwrapArgs(input: BwrapArgsInput): string[] {
 	]);
 	// --bind SRC DEST for each scope path.
 	const bindArgs = input.scopes.flatMap((p) => ['--bind', quote(p), quote(p)]);
+	// The size-capped tmpfs hides everything beneath `temp` that was mounted
+	// before it. A scope (or read-only root) UNDER `temp` — e.g. a mkdtemp
+	// workspace under `/tmp`, the default — must therefore be mounted AFTER the
+	// tmpfs, or its writes land in the hidden tmpfs and never reach the host
+	// (observed on ubuntu-26.04: "No such file or directory" on an in-scope
+	// write). The inverse — `temp` strictly inside a scope — keeps the tmpfs
+	// last so the temp directory stays a tmpfs rather than the host directory.
+	const tempInsideMount = [...input.readonlyRoots, ...input.scopes].some((p) =>
+		isStrictDescendant(input.temp, p),
+	);
+	const tmpfsArgs = [
+		'--size',
+		String(TMPFS_SIZE_BYTES),
+		'--tmpfs',
+		quote(input.temp),
+	];
 	const args = [
 		'--unshare-user',
 		'--unshare-ipc',
@@ -108,14 +130,12 @@ function buildBwrapArgs(input: BwrapArgsInput): string[] {
 		'--new-session',
 		'--cap-drop',
 		'ALL',
+		...(tempInsideMount ? [] : tmpfsArgs),
 		...roBindArgs,
 		...bindArgs,
 		'--dev',
 		'/dev',
-		'--size',
-		String(TMPFS_SIZE_BYTES),
-		'--tmpfs',
-		quote(input.temp),
+		...(tempInsideMount ? tmpfsArgs : []),
 		'--ro-bind',
 		'/etc',
 		'/etc',
