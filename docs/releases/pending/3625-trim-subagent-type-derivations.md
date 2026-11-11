@@ -52,7 +52,9 @@ in-scope write and that tmpfs-first writes it to the host.
 
 Known limit (fails closed): if temp is inside one mount while a scope sits
 under temp, that scope stays hidden; writes are lost and nothing on the host
-is widened. It requires a project root of `/`, which production never binds.
+is widened. It occurs only when the workspace root or a writable scope is
+exactly `/tmp` (or a scope is `/`); writes under `/tmp` are then lost, as
+they already were before this change.
 
 ## Why
 

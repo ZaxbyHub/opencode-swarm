@@ -781,12 +781,12 @@ describe('AC-007: Standard I/O and process signalling unaffected', () => {
 // AC-008: bounded per-call overhead (< 50 ms absolute) — skipped under coverage shards (the instrumented parent inflates timings on shared hosts); enforced wherever bwrap works (ubuntu-26.04 hosted; ubuntu-24.04 has no bwrap and returns early).
 // ---------------------------------------------------------------------------
 
-describe('AC-008: Performance overhead < 10%', () => {
+describe('AC-008: Performance overhead < 50 ms per call', () => {
 	const ITERATIONS = 100;
 	const FILE_SIZE_KB = 1;
 
 	test.skipIf(!isLinux || Boolean(process.env.COVERAGE_SHARD_INDEX))(
-		'Linux: bwrap overhead < 10% for repeated writes',
+		'Linux: bwrap overhead < 50 ms per call for repeated writes',
 		async () => {
 			const Executor = await getLinuxExecutor();
 			const scopeDir = makeTempDir('ac008-scope-');
@@ -990,15 +990,10 @@ describe('AC-010: Full scope = no false positives', () => {
 				[broadScope],
 			);
 
+			// Clean up BEFORE asserting so a failed assert never leaks into $HOME.
+			rmSync(testFile, { force: true });
 			// With broad scope, legitimate writes should succeed
 			expect(result.success).toBe(true);
-
-			// Cleanup
-			try {
-				spawnSync(`rm -f "${testFile}"`, { shell: true, encoding: 'utf-8' });
-			} catch {
-				// ignore cleanup errors
-			}
 		},
 	);
 
