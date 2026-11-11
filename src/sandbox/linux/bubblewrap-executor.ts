@@ -83,6 +83,12 @@ interface BwrapArgsInput {
 	command: string;
 }
 
+/** True when `child` equals `parent` or lies beneath it (both absolute). */
+function isSameOrDescendant(child: string, parent: string): boolean {
+	const base = parent.endsWith('/') ? parent : `${parent}/`;
+	return child === parent || child.startsWith(base);
+}
+
 /**
  * The bwrap argument list of a wrap — the single source of truth for both
  * `wrapCommand` and the namespace smoke test, so the smoke test can never
@@ -101,6 +107,26 @@ function buildBwrapArgs(input: BwrapArgsInput): string[] {
 	]);
 	// --bind SRC DEST for each scope path.
 	const bindArgs = input.scopes.flatMap((p) => ['--bind', quote(p), quote(p)]);
+	// The size-capped tmpfs hides everything beneath `temp` that was mounted
+	// before it. A scope (or read-only root) UNDER `temp` — e.g. a mkdtemp
+	// workspace under `/tmp`, the default — must therefore be mounted AFTER the
+	// tmpfs, or its writes land in the hidden tmpfs and never reach the host
+	// (observed on ubuntu-26.04: "No such file or directory" on an in-scope
+	// write). The inverse — `temp` equal to or inside a scope or read-only
+	// root — keeps the tmpfs last (the pre-fix order) so the temp directory
+	// stays a private, size-capped tmpfs rather than the host directory.
+	// Known limit: the rule is all-or-nothing, so a scope under `temp` while
+	// `temp` is itself inside another mount stays hidden (writes are lost,
+	// nothing on the host is widened); production `temp` is always `/tmp`.
+	const tempInsideMount = [...input.readonlyRoots, ...input.scopes].some((p) =>
+		isSameOrDescendant(input.temp, p),
+	);
+	const tmpfsArgs = [
+		'--size',
+		String(TMPFS_SIZE_BYTES),
+		'--tmpfs',
+		quote(input.temp),
+	];
 	const args = [
 		'--unshare-user',
 		'--unshare-ipc',
@@ -108,14 +134,12 @@ function buildBwrapArgs(input: BwrapArgsInput): string[] {
 		'--new-session',
 		'--cap-drop',
 		'ALL',
+		...(tempInsideMount ? [] : tmpfsArgs),
 		...roBindArgs,
 		...bindArgs,
 		'--dev',
 		'/dev',
-		'--size',
-		String(TMPFS_SIZE_BYTES),
-		'--tmpfs',
-		quote(input.temp),
+		...(tempInsideMount ? tmpfsArgs : []),
 		'--ro-bind',
 		'/etc',
 		'/etc',

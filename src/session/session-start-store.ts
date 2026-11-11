@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
+import { isNonBlankAbsoluteDirectory } from '../utils/path-security.js';
 
 const SESSION_START_FILE = 'session-start.jsonl';
 
@@ -11,13 +12,7 @@ const SESSION_START_FILE = 'session-start.jsonl';
  * root (AGENTS.md invariant 4).
  */
 function sessionStartPath(directory: string): string | null {
-	if (
-		typeof directory !== 'string' ||
-		directory.trim() === '' ||
-		!path.isAbsolute(directory)
-	) {
-		return null;
-	}
+	if (!isNonBlankAbsoluteDirectory(directory)) return null;
 	return path.join(directory, '.swarm', 'session', SESSION_START_FILE);
 }
 

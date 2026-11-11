@@ -59,6 +59,7 @@ import {
 import { telemetry } from '../telemetry.js';
 import { renameSyncWithRetry } from '../utils/atomic-write.js';
 import { warn } from '../utils/logger.js';
+import { isBlankDirectory } from '../utils/path-security.js';
 
 // ---------------------------------------------------------------------------
 // Hard limits (issue #2039). Exported so tests can override small budgets via
@@ -1022,6 +1023,12 @@ export function getCoreEventLifetimeCount(directory: string): number {
  *  rethrow their pre-existing locked codes). */
 export const CORE_EVENT_LOCKED = 'CORE_EVENT_STORE_LOCKED';
 export const CORE_EVENT_LINE_TOO_LARGE = 'CORE_EVENT_LINE_TOO_LARGE';
+export const CORE_EVENT_NO_STORE = 'CORE_EVENT_NO_STORE';
+
+/** A blank root has no store: `.swarm/` would resolve against the cwd (#3165 B). */
+function assertCoreEventRoot(directory: string): void {
+	if (isBlankDirectory(directory)) throw new Error(CORE_EVENT_NO_STORE);
+}
 
 /**
  * Append one event to `.swarm/events.jsonl` through the canonical seam.
@@ -1040,15 +1047,16 @@ export const CORE_EVENT_LINE_TOO_LARGE = 'CORE_EVENT_LINE_TOO_LARGE';
  *
  * Throws `CORE_EVENT_STORE_LOCKED` after bounded lock retry, or a typed
  * serialize error for oversized lines — every producer's existing error
- * handling applies unchanged.
+ * handling applies unchanged. Throws `CORE_EVENT_NO_STORE` for a blank root,
+ * or for a project without `.swarm/` when `ensureSwarmDir` is false.
  */
-export const CORE_EVENT_NO_STORE = 'CORE_EVENT_NO_STORE';
 
 export function appendCoreEventSync(
 	directory: string,
 	event: Record<string, unknown>,
 	options?: { dedupeOnAuthorityKey?: boolean; ensureSwarmDir?: boolean },
 ): void {
+	assertCoreEventRoot(directory);
 	const line = `${JSON.stringify(event)}\n`;
 	const lineBytes = Buffer.byteLength(line);
 	if (lineBytes - 1 > _internals.limits.maxLineBytes) {
@@ -1141,6 +1149,7 @@ export function appendCoreEventsSync(
 	options?: { dedupeOnAuthorityKey?: boolean; ensureSwarmDir?: boolean },
 ): void {
 	if (events.length === 0) return;
+	assertCoreEventRoot(directory);
 	const lines = events.map((event) => `${JSON.stringify(event)}\n`);
 	for (const line of lines) {
 		if (Buffer.byteLength(line) - 1 > _internals.limits.maxLineBytes) {

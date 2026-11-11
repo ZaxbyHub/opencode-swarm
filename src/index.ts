@@ -4871,16 +4871,24 @@ async function initializeOpenCodeSwarm(
 							getAgentSession(input.sessionID)?.activeInvocationId ?? 0,
 						),
 						callID: input.callID,
-						role: stripKnownSwarmPrefix(toolBeforeArgs.subagent_type),
+						// #3625: derive the route role from the TRIMMED name —
+						// the same one-token trim the sibling swarmID derivation
+						// below already applies. The suffix extractor cannot see
+						// a real `_<role>` ending through surrounding whitespace,
+						// so a padded dispatch would otherwise store the padded
+						// spelling as the role while resolveTaskRouteModelChain
+						// derives the bare role, and the chat boundary would
+						// mismatch the route.
+						role: stripKnownSwarmPrefix(toolBeforeArgs.subagent_type.trim()),
 						actionDigest: actionIdentity.digest,
 						// #3330/#3331: the route's swarm id comes from the shared
 						// guarded derivation (fail-closed to the default swarm for
 						// malformed doubled-separator names), NOT from the action
 						// digest's trim+lowercase canonicalization (hashed into
 						// digests only, never a swarm id after this change).
-						// agentName keeps the dispatched (trimmed) name so the
-						// session.error advance arm resolves the same identity the
-						// chat boundary sees. The swarm id is derived from the
+						// agentName stores the dispatched name as received; normalizeRoute
+						// trims it on store, so the session.error advance arm resolves
+						// the same identity the chat boundary sees. The swarm id is derived from the
 						// TRIMMED name, exactly as resolveTaskRouteModelChain does.
 						swarmID: deriveSwarmIdentity(toolBeforeArgs.subagent_type.trim())
 							.swarmID,
