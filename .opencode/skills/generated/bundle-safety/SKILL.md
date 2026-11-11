@@ -60,7 +60,7 @@ Verify identifier names survive the transform via the layered test stack:
 
  **Static (grep) layer:**
 - `tests/unit/build/full-auto-toolbefore-fail-closed.test.ts` — fail-closed hook substring/wrapping checks verifying that specific identifier substrings (e.g. `fullAutoPermissionHook.toolBefore`, `guardrailsHooks.toolBefore`, `scopeGuardHook.toolBefore`, `delegationGateHooks.toolBefore`) are present and that fail-closed hooks are not wrapped in `safeHook(...)`.
-- `tests/unit/turbo/lean/runtime-conformance.test.ts` — `distContains()` checks verifying that Lean Turbo integration-point identifiers (`verifyLeanTurboPhaseReady`, `verifyLeanTurboTaskCompletion`, `LEAN_TURBO_BANNER`, `enableLeanTurbo`, `hasActiveTurboMode`) survive the build.
+- `tests/unit/turbo/lean/runtime-conformance.test.ts` — `distContains()` checks verifying that Lean Turbo integration-point identifiers (`verifyLeanTurboPhaseReady`, `LEAN_TURBO_BANNER`, `enableLeanTurbo`, `hasActiveTurboMode`) survive the build.
 
 **Runtime layer:**
 - `tests/unit/build/throw-and-verify-located.test.ts` — asserts that thrown errors carry readable stack frames with preserved function names (e.g. `initializeOpenCodeSwarm`). This is the runtime complement to the static grep assertions.

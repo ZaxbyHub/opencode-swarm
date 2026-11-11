@@ -7,7 +7,7 @@
  *  3. Config: integrated_diff_required=false allows reviewer to skip diff summary (verify this is intentional / documented)
  *  4. Schema: worktree_isolation=true via type coercion bypass (string "true" or coerce trick)
  *  5. Schema: max_parallel_coders=0 via type coercion (string "0")
- *  6. Serialized tasks: non-existent task ID in serializedTasks set — must not cause silent bypass
+ *  6. Serialized tasks: non-existent task ID in serializedTasks set — state load/save must not throw or drop it
  *  7. Evidence: lane evidence file write fails (permission denied) — runner must not crash
  *
  * Uses _internals DI seam (not mock.module) per writing-tests SKILL.md.
@@ -26,10 +26,6 @@ import {
 	repairStateUnreadable,
 	saveLeanTurboRunState,
 } from '../../../../src/turbo/lean/state';
-import {
-	_internals as taskCompletionInternals,
-	verifyLeanTurboTaskCompletion,
-} from '../../../../src/turbo/lean/task-completion';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -810,106 +806,6 @@ describe('ATTACK VECTOR 5 — max_parallel_coders=0 via type coercion', () => {
 // ════════════════════════════════════════════════════════════════════════════════
 
 describe('ATTACK VECTOR 6 — serialized task set to non-existent task ID', () => {
-	test('verifyLeanTurboTaskCompletion rejects when task ID does not exist in plan', () => {
-		const dir = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'lean-ser-adversary-')),
-		);
-		try {
-			fs.mkdirSync(path.join(dir, '.swarm', 'evidence'), { recursive: true });
-
-			// Create turbo-state with a serialized task that doesn't exist in plan
-			const turboState = {
-				version: 1,
-				updatedAt: new Date().toISOString(),
-				sessions: {
-					'sess-ser': {
-						status: 'running',
-						sessionID: 'sess-ser',
-						strategy: 'lean',
-						phase: 1,
-						maxParallelCoders: 2,
-						lanes: [
-							{
-								laneId: 'lane-1',
-								taskIds: ['1.1'],
-								files: [],
-								status: 'completed',
-								startedAt: new Date().toISOString(),
-								completedAt: new Date().toISOString(),
-							},
-						],
-						degradedTasks: [],
-						serializedTasks: ['nonexistent-task-id'], // <— attack: non-existent task
-						counters: {
-							lanesPlanned: 1,
-							lanesStarted: 1,
-							lanesCompleted: 1,
-							lanesFailed: 0,
-							tasksSerialized: 1,
-							tasksDegraded: 0,
-						},
-					},
-				},
-			};
-			fs.writeFileSync(
-				path.join(dir, '.swarm', 'turbo-state.json'),
-				JSON.stringify(turboState),
-			);
-
-			// Create plan with only task 1.1
-			const planJson = {
-				schema_version: '1.0.0',
-				title: 'Test Plan',
-				swarm: 'test',
-				current_phase: 1,
-				phases: [
-					{
-						id: 1,
-						name: 'Phase 1',
-						status: 'in_progress',
-						tasks: [
-							{
-								id: '1.1',
-								phase: 1,
-								status: 'pending',
-								size: 'small',
-								description: 'Real task',
-								depends: [],
-								files_touched: [],
-							},
-						],
-					},
-				],
-			};
-			fs.writeFileSync(
-				path.join(dir, '.swarm', 'plan.json'),
-				JSON.stringify(planJson),
-			);
-
-			// Write lane evidence for lane-1
-			fs.mkdirSync(path.join(dir, '.swarm', 'evidence', '1', 'lean-turbo'), {
-				recursive: true,
-			});
-			fs.writeFileSync(
-				path.join(dir, '.swarm', 'evidence', '1', 'lean-turbo', 'lane-1.json'),
-				JSON.stringify({
-					laneId: 'lane-1',
-					taskIds: ['1.1'],
-					files: [],
-					status: 'completed',
-					completedAt: new Date().toISOString(),
-				}),
-			);
-
-			// Task 1.1 exists and is in a completed lane — so it should pass
-			// The non-existent task in serializedTasks doesn't affect task 1.1
-			const result = verifyLeanTurboTaskCompletion(dir, '1.1', 'sess-ser');
-			expect(result.ok).toBe(true);
-		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
-		}
-	});
-
 	test('runners serializedTasks with non-existent task ID does not corrupt state', async () => {
 		// This tests the code path where serializedTasks contains non-existent IDs
 		// The runner should not throw when processing such state

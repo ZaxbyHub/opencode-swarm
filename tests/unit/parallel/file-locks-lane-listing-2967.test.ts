@@ -3,7 +3,7 @@
 // over-cap file that may not grow). Lane locks ride the wx owner-payload
 // substrate — listActiveLocks projects the PAYLOAD (agent/taskId + live
 // heartbeat) AND the sibling .meta sidecar (laneId + originalPath), so the
-// lean lane gates (phase-ready / task-completion) can gate on lane identity
+// lean lane gates (phase-ready) can gate on lane identity
 // again (feedback PRR-001). AFTER-EACH CLEANUP (feedback PRR-030b): this
 // suite leaked its temp trees — dispose every scratch tree in afterEach.
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
