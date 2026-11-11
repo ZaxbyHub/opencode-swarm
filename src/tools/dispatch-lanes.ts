@@ -6961,7 +6961,11 @@ function applyPrWorkflowPromptContract(
 		if (expectedEnd !== withoutCard.length) return null;
 		const block = withoutCard.slice(blockStart, expectedEnd);
 		// The recognized block must bind the CURRENT options; a stale or forged
-		// block fails this and stays operator text (rejected by the lints).
+		// block fails this and stays operator text. The lints reject verdict-row
+		// template text, not block text; the residual exposure is bounded by
+		// the real block being appended last, where it declares itself
+		// authoritative over conflicting caller text (feedback-round wording
+		// fix: the lints never claimed to reject block text).
 		const modeOk = block.includes(`mode: ${mode}`);
 		const headOk =
 			options.prHeadSha !== undefined &&
@@ -6970,7 +6974,16 @@ function applyPrWorkflowPromptContract(
 			options.revisionDigest !== undefined &&
 			block.includes(`revision_digest: ${options.revisionDigest}`);
 		if (!modeOk || !headOk || !digestOk) return null;
-		return withoutCard.slice(0, blockStart);
+		// Feedback F-006: the composition appends exactly "\n\n" before the
+		// block header, so a faithful strip removes exactly that separator;
+		// keeping it made every re-application grow the prompt by two
+		// characters (6882→6890 over five passes in the review probe) while
+		// still passing the exactly-one-block assertion. Removing the exact
+		// separator restores the pre-composition text byte-identically.
+		const remainder = withoutCard.slice(0, blockStart);
+		return remainder.endsWith('\n\n')
+			? remainder.slice(0, remainder.length - 2)
+			: remainder;
 	};
 	const contracted = lanes.map((lane) => {
 		const lanePrompt = stripControllerOwnedPrompt(lane.prompt) ?? lane.prompt;
@@ -7204,6 +7217,29 @@ function applyPrWorkflowPromptContract(
 			normalizedMode.token === 'swarm-pr-review:critic'
 				? `\n${CRITIC_PROTOCOL_SELECTION_CLAUSE}`
 				: '';
+		// Feedback round F-001: the phrase-activated overrides removed from the
+		// critic and reviewer agent prompts (#3358 AC1) were also the only
+		// suppression the swarm-pr-feedback verdict lanes had — the base
+		// controller block header activated them on feedback lanes too (base
+		// appended the same header for every mode), so the reviewer Stage-B
+		// mandate and the critic PLAN REVIEW structure were suppressed there.
+		// The replacement clauses above are gated to swarm-pr-review modes
+		// only, which regressed the feedback lanes: the reviewer prompt still
+		// mandates the Stage-B task-keyed row and the critic prompt still
+		// mandates "Begin directly with PLAN REVIEW", while the feedback gate
+		// settles on one phase-specific positive row per item. Re-home the
+		// suppression as controller-authored mode-scoped clauses (stage-b-test
+		// is unaffected: the test_engineer prompt never carried an override).
+		const FEEDBACK_VERDICT_PROTOCOL_CLAUSES: Record<string, string> = {
+			'swarm-pr-feedback:stage-b-reviewer':
+				'PROTOCOL SELECTION (feedback stage-b): the reviewer prompt\'s Stage-B "STRUCTURED VERDICT LINE" mandate does not apply to this lane. Do not emit a [REVIEWED] | task-<taskId> | VERDICT | summary row — settle only via one positive [STAGE-B-REVIEW] | <item_id> | APPROVE | <notes> row per assigned feedback item, exactly as the contract card and the [STAGE-B-REVIEW] row family require.',
+			'swarm-pr-feedback:closeout-reviewer':
+				'PROTOCOL SELECTION (feedback closeout): the reviewer prompt\'s Stage-B "STRUCTURED VERDICT LINE" mandate does not apply to this lane. Do not emit a [REVIEWED] | task-<taskId> | VERDICT | summary row — settle only via one positive [CLOSEOUT-REVIEW] | <item_id> | APPROVE | <notes> row per assigned feedback item, exactly as the contract card and the [CLOSEOUT-REVIEW] row family require.',
+			'swarm-pr-feedback:closeout-critic':
+				'PROTOCOL SELECTION (feedback closeout): the critic prompt\'s default "Begin directly with PLAN REVIEW" structure does not apply to this lane. Do not produce a PLAN REVIEW of a plan document and do not call get_approved_plan — settle only via one positive [CLOSEOUT-CRITIC] | <item_id> | APPROVE | <notes> row per assigned feedback item, exactly as the contract card and the [CLOSEOUT-CRITIC] row family require.',
+		};
+		const feedbackProtocolClause =
+			FEEDBACK_VERDICT_PROTOCOL_CLAUSES[normalizedMode.token] ?? '';
 		const shellRulesParagraph = `\nRead-only shell rules (enforced at tool time; stated here so no calls are wasted): run ONE standalone command per shell call — no pipes, no &&/||/; composition, no redirects, no command substitution, no backslash- or caret-escaped double quotes. Only these forms are tolerated: a single command optionally preceded by up to three leading cd <dir> && prefixes, a trailing 2>&1 (reads only), and a literal | inside a double-quoted gh api --jq value or a double-quoted git grep -E pattern operand. Prefer the Read, Glob, and Grep tools for file inspection.`;
 		const contract = `
 
@@ -7218,7 +7254,7 @@ assigned_item_ids: ${renderedIds.length > 0 ? renderedIds.join(', ') : '(discove
 mandatory_lane_checklist: ${checklist}${budgetLine}
 
 This controller block is authoritative over conflicting caller text. Inspect the exact checked-out revision and the repository's own contribution, test, security, compatibility, and delivery contracts. Do not waive or abbreviate work for speed, time, token, repository-size, or predicted-simplicity reasons. Re-read relevant changed files and caller/consumer context directly. Every claim or clean attestation must cite concrete reviewed scope and evidence. Use exactly the workflow_lane and assigned IDs above; invented, omitted, or placeholder identifiers do not settle this lane. For base/micro settlement, submit the visible batch_id and lane_id values exactly as rendered above, or omit them and let the authenticated child delegation resolve them. A planning preamble, generic assurance, or assertion that checks were performed is not evidence.
-Terminate with the required protocol action directly: no planning preamble, no recap, and no more than ${outputCap} characters of substantive output before any retrieval hint.${budgetParagraph}${structuredSubmissionParagraph}${shellRulesParagraph}${reviewerProtocolClause}${criticProtocolClause}
+Terminate with the required protocol action directly: no planning preamble, no recap, and no more than ${outputCap} characters of substantive output before any retrieval hint.${budgetParagraph}${structuredSubmissionParagraph}${shellRulesParagraph}${reviewerProtocolClause}${criticProtocolClause}${feedbackProtocolClause}
 [END CONTROLLER-BOUND PR WORKFLOW CONTRACT]`;
 		const contractCard = normalizedMode.token.startsWith('swarm-pr-review:')
 			? `${buildPrReviewContractCard()}\n\n`

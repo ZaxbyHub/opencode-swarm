@@ -641,6 +641,14 @@ function refineConfirmedRiskMetadata(
  * severity is NONE (#3310), so a findings record carrying that pair would
  * persist exactly the state the transport refuses. Write boundary only — see
  * `PrReviewPersistedFindingRecordSchema` for why readers stay tolerant.
+ *
+ * Feedback round: an OMITTED severity on a CONFIRMED record stays under the
+ * #2279 unconditional severity comparison in the aggregated validator
+ * (pr-workflow-gate.ts reportSeverity — "an OMITTED severity is a mismatch,
+ * never a skip"), which names the required value in the one-rejection report.
+ * Enforcing it here at the schema would preempt that aggregated report and
+ * break the documented error-ordering contract, so the schema deliberately
+ * keeps rejecting only the explicit NONE pair.
  */
 function refineConfirmedSeverity(
 	value: PrReviewFindingShape,
@@ -763,6 +771,84 @@ export const WritePrReviewArtifactArgsSchema = z
 				message: 'is valid only for the post_explorer boundary',
 			});
 		}
+		const bytes = serializedPrReviewArtifactInputBytes(value);
+		const maxBytes =
+			value.kind === 'findings'
+				? PR_REVIEW_FINDINGS_WRITE_MAX_BYTES
+				: PR_REVIEW_HANDOFF_WRITE_MAX_BYTES;
+		if (bytes > maxBytes) {
+			ctx.addIssue({
+				code: 'custom',
+				path: [value.kind === 'findings' ? 'records' : 'handoff'],
+				message: `serialized UTF-8 payload must be at most ${maxBytes} bytes (got ${bytes})`,
+			});
+		}
+	});
+
+/**
+ * FB-008 (feedback): committed-replay tolerance for the findings payload. A
+ * retry of a boundary already committed under earlier verdict semantics
+ * carries the persisted rows verbatim (CONFIRMED + NONE), which the live
+ * write contract refuses at parse — so the idempotent replay admission
+ * downstream could never run. This variant keeps every other rule of the
+ * write contract but reads records through the durable read shape
+ * (`PrReviewPersistedFindingRecordSchema`); the writer admits a parse through
+ * it ONLY when the payload canonically equals an already-committed boundary
+ * of the active head-bound workflow, and surfaces the original strict error
+ * for every other failure.
+ */
+function refineWriteArgsShape(
+	value:
+		| {
+				kind: 'findings';
+				boundary: (typeof PR_REVIEW_ARTIFACT_BOUNDARIES)[number];
+				partial_base_coverage?: unknown;
+		  }
+		| { kind: 'handoff' },
+	ctx: z.RefinementCtx,
+): void {
+	if (
+		value.kind === 'findings' &&
+		value.partial_base_coverage !== undefined &&
+		value.boundary !== 'post_explorer'
+	) {
+		ctx.addIssue({
+			code: 'custom',
+			path: ['partial_base_coverage'],
+			message: 'is valid only for the post_explorer boundary',
+		});
+	}
+}
+
+export const WritePrReviewArtifactCommittedReplayArgsSchema = z
+	.discriminatedUnion('kind', [
+		z
+			.object({
+				kind: z.literal('findings'),
+				run_id: PrReviewRunIdSchema.optional(),
+				pr_head_sha: z
+					.string()
+					.trim()
+					.regex(/^[0-9a-f]{6,64}$/i),
+				boundary: z.enum(PR_REVIEW_ARTIFACT_BOUNDARIES),
+				records: z.array(PrReviewPersistedFindingRecordSchema).min(1).max(1000),
+				partial_base_coverage: PrReviewPartialBaseCoverageSchema.optional(),
+			})
+			.strict(),
+		z
+			.object({
+				kind: z.literal('handoff'),
+				run_id: PrReviewRunIdSchema.optional(),
+				pr_head_sha: z
+					.string()
+					.trim()
+					.regex(/^[0-9a-f]{6,64}$/i),
+				handoff: PrReviewHandoffSchema,
+			})
+			.strict(),
+	])
+	.superRefine((value, ctx) => {
+		refineWriteArgsShape(value, ctx);
 		const bytes = serializedPrReviewArtifactInputBytes(value);
 		const maxBytes =
 			value.kind === 'findings'
@@ -932,6 +1018,28 @@ export const PrReviewCriticVerdictFieldsSchema = z
 				code: 'custom',
 				path: [3],
 				message: 'DOWNGRADED critic severity cannot be CRITICAL',
+			});
+		}
+		if (status === 'DOWNGRADED' && severity === 'NONE') {
+			// F-002: a DOWNGRADED row at NONE is transport-legal at the row
+			// level but its truthful post-critic projection is CONFIRMED+NONE —
+			// exactly the pair the write boundary refuses (refineConfirmedSeverity),
+			// which deadlocked post-critic persistence for that population
+			// (base accepted the projection). NONE means "no real severity", and
+			// a finding with no real severity is not a downgrade target — the
+			// #3310 doctrine is that even a downgrade is impossible at NONE:
+			// a critic dismissing the finding entirely must emit DISPROVED (which
+			// requires NONE). Rejecting here keeps the row vocabulary and the
+			// write boundary coherent end-to-end. Disclosed asymmetry: durable
+			// pre-upgrade DOWNGRADED|NONE critic rows now fail the live schema
+			// (unclaimed, fail-closed, named generically) WITHOUT the #3358
+			// AC4-style dedicated disclosure — that analog exists only for
+			// reviewer rows; adding it is deferred (ask-tracker row).
+			ctx.addIssue({
+				code: 'custom',
+				path: [3],
+				message:
+					'DOWNGRADED critic severity must not be NONE — dismiss the finding with DISPROVED (which requires NONE) instead',
 			});
 		}
 	});
@@ -1146,7 +1254,8 @@ export function buildPrReviewContractCard(): string {
 		'- DISPROVED requires severity NONE.',
 		// #3310: state the cross-row severity rules the transport enforces.
 		"- UPHELD keeps the reviewer's severity exactly and is not permitted at NONE.",
-		"- DOWNGRADED must be strictly lower than the reviewer's severity and never CRITICAL.",
+		"- DOWNGRADED must be strictly lower than the reviewer's severity and never CRITICAL or NONE.",
+		'- A critic dismissing a finding entirely emits DISPROVED (severity NONE), not DOWNGRADED at NONE.',
 		'- NEEDS_MORE_EVIDENCE is not a terminal critic transport row.',
 		'- risk_impact/risk_tags are REQUIRED on every CONFIRMED REVIEWED row; malformed or unknown values fail the row.',
 		'- Critic routing is typed (issue #2383): CRITICAL/HIGH always; MEDIUM only when HIGH_IMPACT or any risk tag; UNKNOWN always; ORDINARY MEDIUMs with no tags are not critic-routed.',

@@ -622,9 +622,14 @@ If you call @coder instead of @${swarmId}_coder, the call will FAIL or go to the
 		critic.name = prefixName('critic');
 		// #3358 AC3: PR critic-lane admission reads this registration-time
 		// record instead of re-reading the prompts directory on dispatch.
+		// Feedback F-007: provenance must mirror the loader's own truthiness
+		// (createCriticAgent runs the built-in prompt when customPrompt /
+		// customAppendPrompt are falsy — an EMPTY critic.md / critic_append.md
+		// leaves the verifiable built-in prompt active), so the admission
+		// refusal names the same effective prompt the lane would run.
 		recordCriticPromptProvenance(critic.name, {
-			replaced: criticPrompts.prompt !== undefined,
-			appended: criticPrompts.appendPrompt !== undefined,
+			replaced: Boolean(criticPrompts.prompt),
+			appended: Boolean(criticPrompts.appendPrompt),
 		});
 		agents.push(applyOverrides(critic, swarmAgents, swarmPrefix, quiet));
 	}

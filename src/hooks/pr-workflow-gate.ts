@@ -8310,7 +8310,11 @@ function derivePrReviewOrderUnstableItemsForState(
  * `council_*`-prefixed agent is NOT admitted to a council lane.
  */
 export const PR_REVIEW_PHASE_ADMITTED_ROLES: Readonly<
-	Record<'council' | 'reviewer' | 'critic', readonly string[]>
+	// Feedback F-011: the key union is the shared phase type, so a future
+	// fourth verdict phase is compile-forced to declare its admitted roles
+	// here (and every consumer derivation that keys on the phase) instead of
+	// silently skipping admission at the integrity site.
+	Record<PrReviewValidationPhase, readonly string[]>
 > = {
 	council: ['council_generalist', 'council_skeptic', 'council_domain_expert'],
 	reviewer: ['reviewer'],
@@ -8681,27 +8685,13 @@ export async function assertPrReviewValidationSettled(
 					unclaimedSet.has(itemId),
 				);
 			if (blockingSemanticsMismatches.length > 0) {
-				const unclaimedNamed = composed.unclaimed.slice(
-					0,
-					MAX_UNCLAIMED_ITEMS_IN_MESSAGE,
-				);
-				const unclaimedOverflow =
-					composed.unclaimed.length - unclaimedNamed.length;
-				const mismatchNamed = blockingSemanticsMismatches.slice(
-					0,
-					MAX_SEMANTICS_MISMATCH_IDS_IN_MESSAGE,
-				);
-				const mismatchOverflow =
-					blockingSemanticsMismatches.length - mismatchNamed.length;
 				throw new Error(
-					`BLOCKED: PR_REVIEW ${requiredPhase} items lack an authenticated verdict from any successful lane: ${unclaimedNamed.join(', ')}` +
-						(unclaimedOverflow > 0 ? ` (+${unclaimedOverflow} more)` : '') +
-						`; items ${mismatchNamed.join(', ')}` +
-						(mismatchOverflow > 0 ? ` and ${mismatchOverflow} more` : '') +
-						` carry verdict rows written under earlier verdict semantics (current: v${PR_REVIEW_VERDICT_SEMANTICS_VERSION}; CONFIRMED requires a non-NONE severity since #3310); those rows are not re-admitted and N-of-M settlement is not attempted for them — re-dispatch those items' lanes` +
-						(composed.diagnostics.length > 0
-							? `; diagnostics: ${composed.diagnostics.join(' | ')}`
-							: ''),
+					renderPrReviewSemanticsMismatchGuardMessage({
+						requiredPhase,
+						unclaimed: composed.unclaimed,
+						blockingSemanticsMismatches,
+						diagnostics: composed.diagnostics,
+					}),
 				);
 			}
 			const admission = deriveVerdictSettlementAdmission({
@@ -14805,6 +14795,27 @@ function probeIncompleteBypassComposablePhase(
 	) {
 		return { phase, settled: true, admissible: false, unsettledItemIds: [] };
 	}
+	// Feedback F-003: mirror the ladder's #3358 AC4 guard. The terminal-ready
+	// ladder throws for an UNCLAIMED item whose lane answered with a row
+	// written under earlier verdict semantics BEFORE it derives N-of-M
+	// admission — those rows are never re-admitted and never settled as
+	// typed-dead. Without this mirror the probe computed admission with no
+	// semantics filter, so a mismatched item whose owners are typed-dead and
+	// whose retry budget is exhausted probed `admissible`, the bypass arm
+	// (`!settled && !admissible`) was skipped, and the ladder re-threw the
+	// guard with no INCOMPLETE exit. Report the phase genuinely unsettled so
+	// the bypass discloses the items as skipped — they are still never
+	// settled, which is exactly what AC3/AC4 require.
+	if (composed && composed.semanticsMismatchedItemIds.length > 0) {
+		const unclaimedSet = new Set(composed.unclaimed);
+		if (
+			composed.semanticsMismatchedItemIds.some((itemId) =>
+				unclaimedSet.has(itemId),
+			)
+		) {
+			return { phase, settled: false, admissible: false, unsettledItemIds };
+		}
+	}
 	if (composed && state.prHeadSha) {
 		const admission = deriveVerdictSettlementAdmission({
 			directory,
@@ -15978,6 +15989,11 @@ export const _test_exports = {
 	 * behavioural detection rather than to a null stub.
 	 */
 	resolveGhBinary,
+	// Feedback F-003: the INCOMPLETE bypass phase probe (plus its window
+	// derivation), so the semantics-mismatch × typed-dead × exhausted-budget
+	// interplay is testable without driving the whole completion ladder.
+	probeIncompleteBypassComposablePhase,
+	prReviewPhaseWindow,
 	// #3396 S1: overridable merge-base resolver for PR_FEEDBACK activation
 	// (production: ONE bounded `gh pr view` — see the production resolver
 	// above). Tests monkey-patch this seam exactly like the git resolvers.
@@ -18819,6 +18835,41 @@ const MAX_UNCLAIMED_ITEMS_IN_MESSAGE = 50;
 const MAX_SEMANTICS_MISMATCH_IDS_IN_MESSAGE = 16;
 
 /**
+ * Issue #3358 AC4 / feedback PRR-02: the dedicated earlier-semantics
+ * settlement-guard message, extracted so its 16-id display bound (and the
+ * "and N more" overflow suffix) is unit-testable independently of the
+ * six-dimension gate fixtures.
+ */
+export function renderPrReviewSemanticsMismatchGuardMessage(input: {
+	requiredPhase: string;
+	unclaimed: readonly string[];
+	blockingSemanticsMismatches: readonly string[];
+	diagnostics: readonly string[];
+}): string {
+	const unclaimedNamed = input.unclaimed.slice(
+		0,
+		MAX_UNCLAIMED_ITEMS_IN_MESSAGE,
+	);
+	const unclaimedOverflow = input.unclaimed.length - unclaimedNamed.length;
+	const mismatchNamed = input.blockingSemanticsMismatches.slice(
+		0,
+		MAX_SEMANTICS_MISMATCH_IDS_IN_MESSAGE,
+	);
+	const mismatchOverflow =
+		input.blockingSemanticsMismatches.length - mismatchNamed.length;
+	return (
+		`BLOCKED: PR_REVIEW ${input.requiredPhase} items lack an authenticated verdict from any successful lane: ${unclaimedNamed.join(', ')}` +
+		(unclaimedOverflow > 0 ? ` (+${unclaimedOverflow} more)` : '') +
+		`; items ${mismatchNamed.join(', ')}` +
+		(mismatchOverflow > 0 ? ` and ${mismatchOverflow} more` : '') +
+		` carry verdict rows written under earlier verdict semantics (current: v${PR_REVIEW_VERDICT_SEMANTICS_VERSION}; CONFIRMED requires a non-NONE severity since #3310); those rows are not re-admitted and N-of-M settlement is not attempted for them — re-dispatch those items' lanes` +
+		(input.diagnostics.length > 0
+			? `; diagnostics: ${input.diagnostics.join(' | ')}`
+			: '')
+	);
+}
+
+/**
  * The batches a phase composes over.
  *
  * Reviewer is scoped to everything after the latest council batch (a council
@@ -18828,7 +18879,7 @@ const MAX_SEMANTICS_MISMATCH_IDS_IN_MESSAGE = 16;
  * was not before — derivation and settlement previously disagreed on the window,
  * and one computation cannot hold two windows.
  */
-function prReviewPhaseWindow(
+export function prReviewPhaseWindow(
 	state: PrWorkflowGateState,
 	phase: PrReviewComposablePhase,
 ): PrReviewValidationBatchRecord[] {

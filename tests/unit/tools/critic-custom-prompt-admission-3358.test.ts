@@ -40,6 +40,10 @@ const originalResolveIsWorkingTreeCleanAsync =
 const originalResolveDiffStats = gateInternals.resolvePrReviewDiffStats;
 const originalResolveDiffStatsAsync =
 	gateInternals.resolvePrReviewDiffStatsAsync;
+const originalGateResolveRevision =
+	gateInternals.resolvePrWorkflowRevisionDigest;
+const originalGateResolveRevisionAsync =
+	gateInternals.resolvePrWorkflowRevisionDigestAsync;
 const originalResolveRevision =
 	dispatchInternals.resolvePrWorkflowRevisionDigest;
 const originalResolveRevisionAsync =
@@ -118,11 +122,20 @@ describe('PR critic admission vs custom critic prompts (#3358 AC3)', () => {
 		gateInternals.resolveIsWorkingTreeCleanAsync =
 			originalResolveIsWorkingTreeCleanAsync;
 		gateInternals.resolvePrReviewDiffStats = originalResolveDiffStats;
-		delete (gateInternals as { resolvePrWorkflowRevisionDigest?: unknown })
-			.resolvePrWorkflowRevisionDigest;
-		delete (gateInternals as { resolvePrWorkflowRevisionDigestAsync?: unknown })
-			.resolvePrWorkflowRevisionDigestAsync;
+		// F-004: restore (never delete) the gate digest seams — deleting left
+		// the shared module object missing two own members, and a later
+		// same-process suite's gate-context creation threw on the restored
+		// identity check (co-run probe: critic-preflight-single-composition
+		// went 1/2 after this file ran in one bun process).
+		gateInternals.resolvePrWorkflowRevisionDigest = originalGateResolveRevision;
+		gateInternals.resolvePrWorkflowRevisionDigestAsync =
+			originalGateResolveRevisionAsync;
 		gateInternals.resolvePrReviewDiffStatsAsync = originalResolveDiffStatsAsync;
+		// F-004 (second surface): the critic provenance registry is module
+		// state shared across suites; its last test leaves 'critic' recorded
+		// with replacement provenance, which BLOCKED the next file's critic
+		// dispatch with "registered with a custom critic prompt". Clear it.
+		clearCriticPromptProvenance();
 		dispatchInternals.resolvePrWorkflowRevisionDigest = originalResolveRevision;
 		dispatchInternals.resolvePrWorkflowRevisionDigestAsync =
 			originalResolveRevisionAsync;
