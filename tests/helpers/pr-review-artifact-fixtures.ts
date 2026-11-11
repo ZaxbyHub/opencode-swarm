@@ -102,10 +102,15 @@ export async function persistPrReviewBatch(
 		const subagentSessionId = options.subagentSessionId ?? defaultCorrelationId;
 		const correlationId = subagentSessionId;
 		// Issue #3340: critic lanes settle only when the child delegation record
-		// ran the `critic` role; mirror the production normalizedAgent for the
-		// mode instead of hardcoding 'reviewer' for every lane.
+		// ran the `critic` role; #3358 AC8 extends the mirror to council lanes
+		// (an admitted factory council role). Mirror the production
+		// normalizedAgent for the mode instead of hardcoding 'reviewer'.
 		const recordAgent =
-			mode === 'swarm-pr-review:critic' ? 'critic' : 'reviewer';
+			mode === 'swarm-pr-review:critic'
+				? 'critic'
+				: mode === 'swarm-pr-review:council'
+					? 'council_generalist'
+					: 'reviewer';
 		await recordPendingDelegation(directory, {
 			correlationId,
 			jobId: options.prReviewResultReceipt
