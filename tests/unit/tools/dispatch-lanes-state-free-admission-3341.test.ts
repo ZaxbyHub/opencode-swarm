@@ -211,6 +211,45 @@ describe('state-free request-shape rejection before activation (issue #3341)', (
 		expect(await readPrWorkflowGateState(directory, session)).toEqual(before);
 	});
 
+	test('an unknown swarm-pr-review:* suffix into an active PR_FEEDBACK session is not pre-rejected by the hoisted checks', async () => {
+		const session = 'unknown-suffix-feedback-guard-3341';
+		await activatePrWorkflow(directory, session, 'PR_FEEDBACK', {
+			prHeadSha: 'abc123',
+		});
+		const before = await readPrWorkflowGateState(directory, session);
+		expect(before).not.toBeNull();
+		const result = await executeDispatchLanesAsync(
+			{
+				mode: 'swarm-pr-review:typo',
+				pr_head_sha: 'abc123',
+				base_sha: 'def456',
+				base_ref: 'origin/main',
+				lanes: [
+					{
+						id: 'unknown-suffix-feedback-lane-3341',
+						agent: 'explorer',
+						prompt: 'Probe',
+						workflow_lane: 'intent-architecture',
+						review_item_ids: ['c1'],
+					},
+				],
+			},
+			directory,
+			{ sessionID: session },
+		);
+		// The reachability argument is `!gateState || gateState.mode ===
+		// 'PR_REVIEW'`, so a session owned by PR_FEEDBACK leaves the hoisted
+		// checks short-circuited: the unknown-suffix rejection must NOT fire
+		// here (it fires only for a PR_REVIEW or absent gate), and the
+		// pre-existing gate must survive unchanged. This is the guard a
+		// post-merge review asked us to pin — the hoist must not widen the
+		// rejected-request set for foreign-mode sessions.
+		expect(String(result.message)).not.toContain(
+			'requires a structured base, micro, council, reviewer, or critic mode',
+		);
+		expect(await readPrWorkflowGateState(directory, session)).toEqual(before);
+	});
+
 	test('a wave stage without a wave attempt leaves NO gate state', async () => {
 		const session = 'wave-pair-3341';
 		const result = await executeDispatchLanesAsync(
