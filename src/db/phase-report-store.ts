@@ -16,11 +16,16 @@
 
 import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { isBlankDirectory } from '../utils/path-security.js';
 import { canonicalProjectKey } from './canonical-project.js';
 import { DURABILITY_CLASSES } from './durability.js';
 import { getGroupCommitWriter } from './group-commit-writer.js';
 import { importLegacyJsonFiles } from './legacy-import.js';
-import { getProjectDb, projectDbExists } from './project-db.js';
+import {
+	assertProjectDbRoot,
+	getProjectDb,
+	projectDbExists,
+} from './project-db.js';
 
 export type PhaseReportKind = 'curator_drift' | 'design_doc_drift';
 
@@ -39,9 +44,11 @@ const importedRoots = new Set<string>();
  * hasAnyInsightState): a project with neither a swarm.db NOR a legacy report
  * file has nothing to read, and reading it must not materialize a DB. When a
  * legacy file IS present the read proceeds (the lazy import then creates the
- * DB — the sanctioned migration path).
+ * DB — the sanctioned migration path). A blank root has no state: its
+ * canonical key is the cwd (#3165 B).
  */
 function hasAnyPhaseReportState(directory: string): boolean {
+	if (isBlankDirectory(directory)) return false;
 	if (projectDbExists(directory)) return true;
 	const root = canonicalProjectKey(directory);
 	let entries: string[];
@@ -85,9 +92,12 @@ function kindCount(
 
 /**
  * One-time (per process, per canonical root) lazy import of both legacy
- * report families. Never runs at plugin init.
+ * report families. Never runs at plugin init. A blank root throws
+ * `ProjectDbError` (`invalid_root`) before the import guard is consulted, so
+ * neither it nor `upsertPhaseReportDb` reaches the cwd project (#3165 B).
  */
 export function ensurePhaseReportsImported(directory: string): void {
+	assertProjectDbRoot(directory);
 	const root = canonicalProjectKey(directory);
 	if (importedRoots.has(root)) return;
 	for (const kind of Object.keys(

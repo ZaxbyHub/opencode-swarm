@@ -245,6 +245,10 @@ export async function handleResetSessionCommand(
 	args: string[],
 	sessionID?: string,
 ): Promise<string> {
+	// #3165 B: a blank root would back up and delete the cwd's session state.
+	if (typeof directory !== 'string' || directory.trim() === '') {
+		return '❌ Refused: the project directory is blank, so there is no session to reset.';
+	}
 	const results: string[] = [];
 
 	// Keep a closing guard through snapshot/projection deletion. A plain close

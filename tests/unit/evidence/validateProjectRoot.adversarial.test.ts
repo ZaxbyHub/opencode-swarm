@@ -588,13 +588,13 @@ describe('ERROR HANDLING — malformed directory inputs', () => {
 		);
 	});
 
-	it('empty string resolves to CWD and validates correctly (no crash)', () => {
-		// Empty string resolves to CWD via realpathSync('')
-		// The repo root itself is a valid evidence root when it contains both
-		// .swarm/ and a project indicator; this verifies the edge case is handled,
-		// not that it rejects the current checkout.
-		// This verifies empty string is handled, not a crash
-		expect(() => validateProjectRoot('')).not.toThrow();
+	it('a blank directory is refused instead of resolving to the cwd', () => {
+		// realpathSync('') is the cwd, so '' used to validate whichever checkout
+		// the process ran in, and evidence was written there (#3165 B). A blank
+		// root names no project, so it is refused before any filesystem lookup.
+		for (const blank of ['', '   ']) {
+			expect(() => validateProjectRoot(blank)).toThrow(/blank directory/);
+		}
 	});
 
 	it('root filesystem path / or C:\\ does not crash', () => {

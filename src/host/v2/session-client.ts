@@ -390,8 +390,24 @@ interface ContextClassification {
 	outcome: string | undefined;
 	texts: string[];
 	model: Record<string, unknown>;
+	/**
+	 * `finish` of the LAST final-turn assistant entry (`SessionMessageAssistant
+	 * .finish`, `@opencode/client` >= 2.0.26: stop | length | tool-calls |
+	 * content-filter | error | unknown), or undefined when that entry has none.
+	 * v1 carries the same field on the reply's `info`, so the shared
+	 * provider-error reader sees a reply the host ended early (`length`,
+	 * `content-filter`) on both hosts (#3165 G.8).
+	 */
+	finish: string | undefined;
 	/** Only the paths where a recorded event error decides the verdict. */
 	needsErrorLookup: boolean;
+}
+
+/** An assistant entry's `finish` (a non-empty string), else undefined. */
+function entryFinish(entry: unknown): string | undefined {
+	if (!entry || typeof entry !== 'object') return undefined;
+	const finish = (entry as { finish?: unknown }).finish;
+	return typeof finish === 'string' && finish.length > 0 ? finish : undefined;
 }
 
 /**
@@ -429,6 +445,7 @@ function classifyContextEntries(entries: unknown[]): ContextClassification {
 			}
 			return acc;
 		}, {}),
+		finish: entryFinish(assistantEntries[assistantEntries.length - 1]),
 		needsErrorLookup:
 			outcome === 'failed' || (outcome === undefined && texts.length === 0),
 	};
@@ -445,7 +462,10 @@ function buildTranslatedPromptData(
 		};
 	}
 	return {
-		info: classification.model,
+		info:
+			classification.finish === undefined
+				? classification.model
+				: { ...classification.model, finish: classification.finish },
 		parts: classification.texts.map((text) => ({
 			type: 'text' as const,
 			text,
