@@ -106,6 +106,13 @@ describe('repository-validation crash contract — issue #2738 retirement', () =
 		// Scoped to the VALIDATION-CHILD spawn block: a file-wide contains
 		// check stays green if the flag migrates to another Bun.spawn in the
 		// same file, which would re-arm the exact hazard this guard pins.
+		// Position-dependence guard (bot review on the feedback head): the
+		// window below keys on the FIRST `child = Bun.spawn(item.argv`
+		// occurrence, so a SECOND validation-spawn site (earlier in the
+		// file) would shift the window and let the guard pass while the
+		// real spawn drifted. Exactly one such site may exist; a second
+		// site is itself the drift this guard exists for.
+		expect(harness.split('child = Bun.spawn(item.argv').length - 1).toBe(1);
 		const spawnStart = harness.indexOf('child = Bun.spawn(item.argv');
 		expect(spawnStart).toBeGreaterThanOrEqual(0);
 		const spawnBlock = harness.slice(spawnStart, spawnStart + 500);
