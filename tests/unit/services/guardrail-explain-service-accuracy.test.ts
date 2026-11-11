@@ -140,12 +140,18 @@ describe('Guardrail explain accuracy — destructive commands', () => {
 		expect(decision).toBe('block');
 	});
 
-	test('in-project write WITHOUT --scope (echo hi > local.txt) → decision === allow', async () => {
+	test('in-project write WITHOUT --scope (echo hi > local.txt) → decision === block (#3616 D2: scope_unevaluated parity with the live gate)', async () => {
 		const result = await handleGuardrailExplain(tempDir, [
 			'echo hi > local.txt',
 		]);
 		const decision = extractDecision(result);
-		expect(decision).toBe('allow');
+		// #3616 D2 re-pin: the live gate denies a no-scope coder's shell
+		// writes outright (SCOPE_NOT_DECLARED — no scope binding exists to
+		// prove even an in-project write in scope), so explain must not
+		// render an unqualified allow for a write-bearing command. The old
+		// `allow` pin was the split-brain answer; the scope dimension is
+		// unevaluated, not proven in-scope.
+		expect(decision).toBe('block');
 	});
 
 	test('human-only swarm command via shell (bunx opencode-swarm run reset) → decision === block', async () => {
