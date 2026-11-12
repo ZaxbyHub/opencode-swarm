@@ -7,17 +7,15 @@
  */
 import { describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
-import * as path from 'node:path';
 import { swarmMemoryRecallAdapter } from '../../../src/mcp/adapters/knowledge-memory';
+import { safeRmRecursive } from '../../helpers/safe-test-dir.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 describe('knowledge-memory adapter disabled message (issue #3659)', () => {
 	test('disabled adapter message addresses the operator and stays inert', async () => {
 		// A root with no opencode-swarm config: memory.enabled resolves to the
 		// schema default false, so the adapter's feature-flag probe degrades.
-		const root = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'km-disabled-3659-')),
-		);
+		const root = canonicalMkdtemp('km-disabled-3659-');
 		try {
 			const result = await swarmMemoryRecallAdapter.execute(
 				{ query: 'anything' },
@@ -28,7 +26,7 @@ describe('knowledge-memory adapter disabled message (issue #3659)', () => {
 			expect(result.message).toContain('Swarm memory is disabled');
 			expect(result.message).toContain('operator');
 		} finally {
-			fs.rmSync(root, { recursive: true, force: true });
+			safeRmRecursive(root);
 		}
 	});
 });
