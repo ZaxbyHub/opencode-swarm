@@ -75,7 +75,7 @@ directory name standing in for a plan task id.
 ## Verification
 
 - 11 frozen acceptance checks (anchor
-  `manifest=989e32dec3a3d50a21d85ff3b3097056b831c0d7`): C1/C2/C3/C9
+  `manifest=84fe56a7908c6343e340af4548dc7af1c889c754`): C1/C2/C3/C9
   RED-at-base → GREEN at head; C6 NEW-SURFACE spec green; C4/C5/C7/C8/C10/C11
   floors green at both ends. Real-git fixtures (stale-first candidate,
   stdout-guard overflow, parser-cap overflow, overflow-then-HEAD guard,
