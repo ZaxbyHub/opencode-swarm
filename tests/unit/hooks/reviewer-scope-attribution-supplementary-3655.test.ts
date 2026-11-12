@@ -30,6 +30,7 @@ import {
 	recordReviewerScopeGenerationFileFingerprint,
 	resetSwarmState,
 	startAgentSession,
+	startReviewerScopeGeneration,
 } from '../../../src/state';
 import { installActiveScopeBinding } from '../../helpers/active-scope-binding';
 import { safeRmRecursive } from '../../helpers/safe-test-dir.js';
@@ -174,6 +175,39 @@ describe('reviewer scope attribution supplementary (issue #3655)', () => {
 		// Degraded reconciliation retains collecting; dispatch is typed retryable.
 		expect(generationFor('c-nogit')?.status).toBe('collecting');
 		const denial = await dispatchReviewer('r-nogit');
+		expect(denial.message).toContain('REVIEWER_ATTRIBUTION_EMPTY');
+		expect(denial.message).toContain('retryable=true');
+	}, 60_000);
+
+	test('null dispatch head on a git workspace degrades, never no-change', async () => {
+		// Direct generation construction (the v2-suite state pattern) with a
+		// null dispatch head on a CLEAN git workspace: the only shape that
+		// distinguishes degraded from proved-empty, because verifyWorkingTreeClean
+		// would otherwise happily report clean and misclassify as no_change.
+		const child = 'child-nullhead';
+		startAgentSession(child, 'coder', directory);
+		installActiveScopeBinding({
+			directory,
+			childSessionId: child,
+			parentSessionId: 'parent',
+			dispatchCallId: 'c-nullhead',
+			taskId: TASK_ID,
+			files: [DECLARED_FILE],
+		});
+		expect(
+			startReviewerScopeGeneration({
+				parentSessionID: 'parent',
+				taskId: TASK_ID,
+				coderCallID: 'c-nullhead',
+				declaredFiles: [DECLARED_FILE],
+				captureDirectory: directory,
+				workspaceIdentity: directory,
+				dispatchGitHead: null,
+			}),
+		).not.toBeNull();
+		await completeCoder('c-nullhead');
+		expect(generationFor('c-nullhead')?.status).toBe('collecting');
+		const denial = await dispatchReviewer('r-nullhead');
 		expect(denial.message).toContain('REVIEWER_ATTRIBUTION_EMPTY');
 		expect(denial.message).toContain('retryable=true');
 	}, 60_000);
