@@ -3,7 +3,7 @@
  *
  * These tests verify that Turbo Mode is correctly integrated across all surfaces:
  * 1. /swarm turbo command toggles turboMode correctly
- * 2. checkReviewerGate bypasses Stage B when turboMode is active AND task is not Tier 3
+ * 2. checkReviewerGate never bypasses Stage B under turboMode, even for non-Tier-3 tasks (#3165 E)
  * 3. Evidence records include turbo flag when recorded under turboMode
  * 4. Architect prompt includes TURBO MODE ACTIVE banner when active
  * 5. Status output shows TURBO MODE indicator when active
@@ -226,10 +226,10 @@ describe('Task 4: Turbo Mode Regression Tests', () => {
 	});
 
 	// ============================================
-	// TEST 2: checkReviewerGate bypasses Stage B when turboMode is active AND task is not Tier 3
+	// TEST 2: checkReviewerGate never bypasses Stage B under turboMode (#3165 E)
 	// ============================================
-	describe('2. checkReviewerGate bypasses Stage B when turboMode is active', () => {
-		it('2.1 turboMode active + non-Tier3 task = bypass Stage B', async () => {
+	describe('2. checkReviewerGate does not bypass Stage B when turboMode is active', () => {
+		it('2.1 turboMode active + non-Tier3 task = still blocked without Stage B evidence', async () => {
 			// Set turboMode to true
 			const session = getAgentSession(testSessionId);
 			session!.turboMode = true;
@@ -252,8 +252,8 @@ describe('Task 4: Turbo Mode Regression Tests', () => {
 
 			const result = checkReviewerGate('1.1', tmpDir);
 
-			expect(result.blocked).toBe(false);
-			expect(result.reason).toBe('Turbo Mode bypass');
+			expect(result.blocked).toBe(true);
+			expect(result.reason).toContain('Task 1.1 has not passed QA gates');
 		});
 
 		it('2.2 turboMode inactive = normal gate check (blocked without evidence)', async () => {

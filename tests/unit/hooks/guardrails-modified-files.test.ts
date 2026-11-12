@@ -1,13 +1,13 @@
 import { beforeEach, describe, expect, it } from 'bun:test';
 import { ORCHESTRATOR_NAME } from '../../../src/config/constants';
 import type { GuardrailsConfig } from '../../../src/config/schema';
-import { createGuardrailsHooks } from '../../../src/hooks/guardrails';
 import {
 	getAgentSession,
 	resetSwarmState,
 	startAgentSession,
 	swarmState,
 } from '../../../src/state';
+import { createSandboxedGuardrailsHooks } from '../../helpers/sandboxed-guardrails-hooks';
 
 function defaultConfig(
 	overrides?: Partial<GuardrailsConfig>,
@@ -45,7 +45,7 @@ describe('guardrails modifiedFilesThisCoderTask tracking (Task 5.2)', () => {
 	describe('basic tracking - delegationActive=true', () => {
 		it('write tool with filePath → tracks path in modifiedFilesThisCoderTask', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			// Start as architect but set delegationActive=true to simulate coder subagent
 			startAgentSession('test-session', ORCHESTRATOR_NAME);
 
@@ -63,7 +63,7 @@ describe('guardrails modifiedFilesThisCoderTask tracking (Task 5.2)', () => {
 
 		it('same path added twice → only one entry (dedup)', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			startAgentSession('test-session', ORCHESTRATOR_NAME);
 
 			const session = getAgentSession('test-session');
@@ -86,7 +86,7 @@ describe('guardrails modifiedFilesThisCoderTask tracking (Task 5.2)', () => {
 
 		it('non-write tool (bash) → modifiedFilesThisCoderTask unchanged', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			startAgentSession('test-session', ORCHESTRATOR_NAME);
 
 			const session = getAgentSession('test-session');
@@ -106,7 +106,7 @@ describe('guardrails modifiedFilesThisCoderTask tracking (Task 5.2)', () => {
 	describe('path extraction from different arg fields', () => {
 		it('args.path works for path extraction', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			startAgentSession('test-session', ORCHESTRATOR_NAME);
 
 			const session = getAgentSession('test-session');
@@ -124,7 +124,7 @@ describe('guardrails modifiedFilesThisCoderTask tracking (Task 5.2)', () => {
 
 		it('args.file works for path extraction', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			startAgentSession('test-session', ORCHESTRATOR_NAME);
 
 			const session = getAgentSession('test-session');
@@ -142,7 +142,7 @@ describe('guardrails modifiedFilesThisCoderTask tracking (Task 5.2)', () => {
 
 		it('args.target works for path extraction', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			startAgentSession('test-session', ORCHESTRATOR_NAME);
 
 			const session = getAgentSession('test-session');
@@ -171,7 +171,7 @@ describe('guardrails modifiedFilesThisCoderTask tracking (Task 5.2)', () => {
 			'user chosen 42 coder',
 		])('architect dispatches the canonical coder role as %s → resets modifiedFilesThisCoderTask to []', async (subagentType) => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			// Start as architect
 			startAgentSession('test-session', ORCHESTRATOR_NAME);
 
@@ -205,7 +205,7 @@ describe('guardrails modifiedFilesThisCoderTask tracking (Task 5.2)', () => {
 			undefined,
 		])('non-coder delegation identity %s → does NOT reset', async (subagentType) => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			startAgentSession('test-session', ORCHESTRATOR_NAME);
 
 			const session = getAgentSession('test-session');
@@ -228,7 +228,7 @@ describe('guardrails modifiedFilesThisCoderTask tracking (Task 5.2)', () => {
 	describe('accumulation and reset flow', () => {
 		it('tracking accumulates across multiple write-tool calls within one delegation', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			startAgentSession('test-session', ORCHESTRATOR_NAME);
 
 			const session = getAgentSession('test-session');
@@ -258,7 +258,7 @@ describe('guardrails modifiedFilesThisCoderTask tracking (Task 5.2)', () => {
 
 		it('after reset on new coder dispatch, subsequent writes track fresh list', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			startAgentSession('test-session', ORCHESTRATOR_NAME);
 
 			const session = getAgentSession('test-session');
@@ -306,7 +306,7 @@ describe('guardrails modifiedFilesThisCoderTask tracking (Task 5.2)', () => {
 	describe('delegationActive=false scenarios', () => {
 		it('delegationActive=false → write tool does NOT track', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			startAgentSession('test-session', ORCHESTRATOR_NAME);
 
 			const session = getAgentSession('test-session');
@@ -324,7 +324,7 @@ describe('guardrails modifiedFilesThisCoderTask tracking (Task 5.2)', () => {
 
 		it('no session → fail-closed with WRITE BLOCKED (no active agent)', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			// No session started
 
 			const input = makeInput('non-existent-session', 'write', 'call-1');
@@ -343,7 +343,7 @@ describe('guardrails modifiedFilesThisCoderTask tracking (Task 5.2)', () => {
 	describe('existing architect behavior preserved', () => {
 		it('architect direct write still increments architectWriteCount', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			// Start as architect (NOT delegationActive)
 			startAgentSession('test-session', ORCHESTRATOR_NAME);
 
@@ -362,7 +362,7 @@ describe('guardrails modifiedFilesThisCoderTask tracking (Task 5.2)', () => {
 
 		it('architect direct write to non-source (README) → does NOT increment architectWriteCount', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			startAgentSession('test-session', ORCHESTRATOR_NAME);
 
 			const session = getAgentSession('test-session');
@@ -380,7 +380,7 @@ describe('guardrails modifiedFilesThisCoderTask tracking (Task 5.2)', () => {
 
 		it('coder subagent write - tracks in modifiedFilesThisCoderTask (architectWriteCount behavior may vary)', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			startAgentSession('test-session', ORCHESTRATOR_NAME);
 
 			const session = getAgentSession('test-session');
@@ -405,7 +405,7 @@ describe('guardrails modifiedFilesThisCoderTask tracking (Task 5.2)', () => {
 	describe('edge cases', () => {
 		it('empty string path fails closed and does not track', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			startAgentSession('test-session', ORCHESTRATOR_NAME);
 
 			const session = getAgentSession('test-session');
@@ -423,7 +423,7 @@ describe('guardrails modifiedFilesThisCoderTask tracking (Task 5.2)', () => {
 
 		it('undefined path fails closed and does not track', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			startAgentSession('test-session', ORCHESTRATOR_NAME);
 
 			const session = getAgentSession('test-session');
@@ -441,7 +441,7 @@ describe('guardrails modifiedFilesThisCoderTask tracking (Task 5.2)', () => {
 
 		it('namespace-prefixed tool name (opencode:write) → still tracks', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			startAgentSession('test-session', ORCHESTRATOR_NAME);
 
 			const session = getAgentSession('test-session');

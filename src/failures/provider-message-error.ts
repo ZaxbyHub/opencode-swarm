@@ -12,8 +12,11 @@
  * runner) read `info.error` through it and turn it into an error on their
  * existing error path. Not every `session.prompt` consumer does: the PR
  * wake-prompt senders (`pr-workflow-response-gate.ts`, `pr-event-delivery.ts`)
- * do not read the reply, and `dispatch-lanes.ts` reads `info.error` with its
- * own lane-error mapping.
+ * do not read the reply, and `dispatch-lanes.ts` reads `info.error` (with its
+ * own lane-error mapping) and treats the early `finish` values as
+ * terminal/incomplete only on its asynchronous collect path
+ * (`extractAssistantTranscript`); its blocking `runLane` path checks only
+ * `result.error` and the reply text and never reads `info`.
  */
 import { classifyProviderFailure } from './invocation-failure';
 
@@ -31,7 +34,7 @@ export type ProviderMessageError = {
  * `finish: 'content-filter'` on the assistant message, with the partial text
  * and no `info.error`. A truncated `VERDICT: APPROVED` is still a cut-off
  * reply, so report it as a provider error too. `dispatch-lanes.ts` already
- * treats these two finish values as terminal.
+ * treats these two finish values as terminal on its asynchronous collect path.
  */
 function readEarlyFinish(info: object): ProviderMessageError | null {
 	const finish = (info as { finish?: unknown }).finish;

@@ -115,6 +115,17 @@ describe('repository-validation authority real-process fixtures — issue #2675'
 			});
 			const result = report.results[0];
 
+			// #2738 survival detection: a `passed` verdict here means the crash
+			// fixture terminated WITHOUT killing the authority-spawned `bun
+			// test` process (the child observed a worker failure and exited 0).
+			// Fail with an explicit diagnostic instead of a bare status
+			// mismatch so the platform topology break is identifiable from the
+			// assertion message alone.
+			if (result?.status === 'passed') {
+				throw new Error(
+					'child survived the delivered signal: the crash fixture exited without terminating the spawned bun test process (signal-target topology broke on this platform — see issue #2738)',
+				);
+			}
 			expect(result?.status).toBe('crashed');
 			expect(result?.status).not.toBe('timed_out');
 			expect(result?.signal).toBeTruthy();

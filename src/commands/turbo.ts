@@ -38,8 +38,8 @@ export const TURBO_EPIC_REDIRECT_MESSAGE =
 /**
  * Reply to any Turbo-enabling invocation while an Epic is open for the
  * project: Turbo/Lean relax gates that Epic keeps (phase_complete Gates 1–5,
- * the coder re-dispatch block before Stage A; per-task Stage B is required in
- * every mode), so enabling is refused until the Epic is closed. Disabling
+ * the coder re-dispatch block before Stage A; per-task Stage B applies the
+ * same rule in every mode), so enabling is refused until the Epic is closed. Disabling
  * Turbo stays available.
  */
 export const TURBO_EPIC_OPEN_REFUSAL =

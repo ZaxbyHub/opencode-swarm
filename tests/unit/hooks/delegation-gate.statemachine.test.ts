@@ -5,12 +5,24 @@ import {
 	resetSwarmState,
 	swarmState,
 } from '../../../src/state';
+import { canonicalMkdtemp, removeTreeWithRetry } from '../../helpers/tmpdir';
 import {
 	getPrimaryText,
 	getSystemWarningText,
 	makeConfig,
 	makeMessages,
 } from './_delegation-gate-helpers';
+
+// ensureAgentSession (reached through the hook) appends to
+// `<directory>/.swarm/session/session-start.jsonl`; a per-test project dir
+// keeps that write out of the plugin checkout.
+let projectDir: string;
+beforeEach(() => {
+	projectDir = canonicalMkdtemp('dg-statemachine-');
+});
+afterEach(() => {
+	removeTreeWithRetry(projectDir);
+});
 
 // ============================================
 // Task 3.2 — state machine secondary signal for priorTaskStuckAtCoder
@@ -28,7 +40,7 @@ describe('Task 3.2 — priorTaskStuckAtCoder state machine secondary signal', ()
 
 	it('State machine stuck detection — warn path: priorCoderTaskId stuck at coder_delegated triggers warning even with hasReviewer && hasTestEngineer from chain', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, projectDir);
 		const sessionID = 'test-session-3-2-1';
 
 		// Setup: First coder delegation for task 2.1
@@ -71,7 +83,7 @@ describe('Task 3.2 — priorTaskStuckAtCoder state machine secondary signal', ()
 
 	it('State machine stuck detection — block path: priorCoderTaskId stuck at coder_delegated with qaSkipCount >= 1 throws hard block', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, projectDir);
 		const sessionID = 'test-session-3-2-2';
 
 		// Setup: Prior task 2.1 is stuck at coder_delegated
@@ -109,7 +121,7 @@ describe('Task 3.2 — priorTaskStuckAtCoder state machine secondary signal', ()
 
 	it('State machine clear — no false positive: priorCoderTaskId advanced past coder_delegated does NOT trigger escalation', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, projectDir);
 		const sessionID = 'test-session-3-2-3';
 
 		// Setup: First task 2.1 has ADVANCED past coder_delegated (e.g., to reviewer_run)
@@ -141,7 +153,7 @@ describe('Task 3.2 — priorTaskStuckAtCoder state machine secondary signal', ()
 
 	it('No prior coder task — no false positive: priorCoderTaskId === null does NOT trigger state machine check', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, projectDir);
 		const sessionID = 'test-session-3-2-4';
 
 		// Setup: No prior coder delegation (first coder ever)
@@ -172,7 +184,7 @@ describe('Task 3.2 — priorTaskStuckAtCoder state machine secondary signal', ()
 
 	it('priorCoderTaskId captured correctly: first coder sets lastCoderDelegationTaskId, second coder captures the first task ID', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, projectDir);
 		const sessionID = 'test-session-3-2-5';
 
 		// First coder delegation
@@ -226,7 +238,7 @@ describe('Task 3.2 — priorTaskStuckAtCoder state machine secondary signal', ()
 
 	it('state machine stuck detection works with task advanced to tests_run (clear, not stuck)', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, projectDir);
 		const sessionID = 'test-session-3-2-6';
 
 		// Setup: First task 2.1 has advanced to tests_run (complete QA cycle)
@@ -261,7 +273,7 @@ describe('Task 3.2 — priorTaskStuckAtCoder state machine secondary signal', ()
 
 	it('state machine stuck detection works with task at pre_check_passed (not stuck)', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, projectDir);
 		const sessionID = 'test-session-3-2-7';
 
 		// Setup: First task 2.1 is at pre_check_passed (moved past coder_delegated but not full cycle)
@@ -291,7 +303,7 @@ describe('Task 3.2 — priorTaskStuckAtCoder state machine secondary signal', ()
 
 	it('state machine stuck detection works with task at idle (never delegated before)', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, projectDir);
 		const sessionID = 'test-session-3-2-8';
 
 		// Setup: prior task 2.1 is at idle (default state, never delegated)

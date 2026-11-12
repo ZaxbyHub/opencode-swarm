@@ -1038,7 +1038,7 @@ describe('update-task-status adversarial tests', () => {
 
 				const result = await executeUpdateTaskStatus(args);
 				expect(result.success).toBe(false);
-				expect(result.errors?.[0]).toContain('QA gates');
+				expect(result.errors?.[0]).toContain('no exact-task QA evidence');
 			});
 
 			it('allows completed status when exact durable evidence reaches tests_run', async () => {

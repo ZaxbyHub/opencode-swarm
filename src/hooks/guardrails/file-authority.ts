@@ -744,6 +744,20 @@ export const DEFAULT_AGENT_AUTHORITY_RULES: Record<string, AgentRule> = {
 };
 
 /**
+ * #3606 test seam for the ancestor lstat walk: suites inject lstat
+ * outcomes (non-ENOENT failures, symlink stats) for workspaces that do
+ * not exist on the host, keeping the denial-rendering pins
+ * host-independent. Production callers get the real `fsSync.lstatSync`
+ * (arrow-wrapped so the single-arg overload keeps its `Stats` return —
+ * `.bind` would widen it to the options-overload union).
+ */
+export const _internals: {
+	lstatSync: (path: fsSync.PathLike) => fsSync.Stats;
+} = {
+	lstatSync: (ancestorPath) => fsSync.lstatSync(ancestorPath),
+};
+
+/**
  * Checks whether a write target path (or any ancestor strictly inside cwd)
  * is a symlink. Writing through a symlink can redirect the write to a
  * location outside the working directory, bypassing scope containment.
@@ -761,21 +775,6 @@ export const DEFAULT_AGENT_AUTHORITY_RULES: Record<string, AgentRule> = {
  *
  * @returns A block reason string if a symlink is detected, null if all clear.
  */
-/**
- * #3606 D15: dependency-injection seam for the ancestor lstat (repo
- * convention, AGENTS.md invariant 7) so tests can drive the non-ENOENT
- * failure arm deterministically on every platform (on Windows, lstat of every
- * malformed-ancestor shape returns ENOENT — the arm is POSIX-only reachable
- * natively). Production routes through this seam.
- */
-export const _internals: {
-	lstatSync: (
-		...args: Parameters<typeof fsSync.lstatSync>
-	) => ReturnType<typeof fsSync.lstatSync>;
-} = {
-	lstatSync: (pathLike, options) => fsSync.lstatSync(pathLike, options),
-};
-
 /**
  * #3606 D15: compose an ancestor denial within a whole-message bound of 320.
  * The ancestor is home-redacted (redactPath) and sanitized; the error detail
@@ -836,7 +835,7 @@ export function checkWriteTargetForSymlink(
 	}
 
 	for (const ancestor of ancestors) {
-		let stat: ReturnType<typeof fsSync.lstatSync> | null = null;
+		let stat: fsSync.Stats | null = null;
 		try {
 			stat = _internals.lstatSync(ancestor);
 		} catch (err: unknown) {
@@ -1280,7 +1279,7 @@ export function checkFileAuthorityWithRules(
 				code: 'AUTHORITY_ROOT_ESCAPE',
 				layer: 'containment',
 				rule: 'workspace-containment',
-				detail: `re-rooted target crosses symlink/junction "${plantedLink}" inside the matched worktree`,
+				detail: `re-rooted target crosses symlink/junction "${sanitizeDiagnosticText(redactPath(plantedLink), 320)}" inside the matched worktree`,
 			});
 		}
 	} else if (normalizedPath === '..' || normalizedPath.startsWith('../')) {
@@ -1301,7 +1300,7 @@ export function checkFileAuthorityWithRules(
 				code: 'AUTHORITY_ROOT_ESCAPE',
 				layer: 'containment',
 				rule: 'workspace-containment',
-				detail: `re-rooted target crosses symlink/junction "${plantedLink}" inside the matched worktree`,
+				detail: `re-rooted target crosses symlink/junction "${sanitizeDiagnosticText(redactPath(plantedLink), 320)}" inside the matched worktree`,
 			});
 		}
 	}

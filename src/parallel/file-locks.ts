@@ -971,7 +971,7 @@ export function listActiveLocks(directory: string): FileLock[] {
 				if (payload !== null && isPidAlive(payload.ownerPid)) {
 					// Feedback PRR-001: lane identity lives in the sibling .meta
 					// sidecar — project originalPath/laneId so the lean lane
-					// gates (phase-ready/task-completion) see held lane locks.
+					// gates (phase-ready) see held lane locks.
 					// Plain-path locks have no meta and keep the hash-path
 					// identity. Additionally, a live lane lock whose meta names
 					// OUR pid is released below (the self-release fence); the

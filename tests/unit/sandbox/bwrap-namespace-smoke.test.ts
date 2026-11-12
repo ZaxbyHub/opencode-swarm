@@ -169,12 +169,18 @@ describe('bwrap namespace smoke args match a real default-policy wrap', () => {
 		const smoke = new Set(BWRAP_NAMESPACE_SMOKE_ARGS);
 		for (const flag of realDefaultWrapArgs().filter((a) => a.startsWith('--')))
 			expect(smoke.has(flag)).toBe(true);
-		for (const required of ['--unshare-net', '--size', '--tmpfs', '/lib64'])
+		for (const required of ['--unshare-net', '--size', '--tmpfs'])
 			expect(smoke.has(required)).toBe(true);
+		// #3332: the /lib64 bind follows HOST availability (a usr-merged or
+		// non-multilib host has no /lib64). The expectation derives from the
+		// host filesystem, never from BWRAP_NAMESPACE_SMOKE_ARGS itself.
+		const expectedRoBinds = fs.existsSync('/lib64')
+			? ['/etc', '/usr', '/lib', '/lib64']
+			: ['/etc', '/usr', '/lib'];
 		// No whole-root bind standing in for the real system binds.
 		const roBinds = BWRAP_NAMESPACE_SMOKE_ARGS.flatMap((arg, i) =>
 			arg === '--ro-bind' ? [BWRAP_NAMESPACE_SMOKE_ARGS[i + 1]] : [],
 		);
-		expect(roBinds).toEqual(['/etc', '/usr', '/lib', '/lib64']);
+		expect(roBinds).toEqual(expectedRoBinds);
 	});
 });

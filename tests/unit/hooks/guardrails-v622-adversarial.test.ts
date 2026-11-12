@@ -1,14 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import type { GuardrailsConfig } from '../../../src/config/schema';
-import {
-	_internals,
-	createGuardrailsHooks,
-} from '../../../src/hooks/guardrails';
+import { _internals } from '../../../src/hooks/guardrails';
 import {
 	getAgentSession,
 	resetSwarmState,
 	startAgentSession,
 } from '../../../src/state';
+import { createSandboxedGuardrailsHooks } from '../../helpers/sandboxed-guardrails-hooks';
 
 function defaultConfig(
 	overrides?: Partial<GuardrailsConfig>,
@@ -54,7 +52,7 @@ describe('guardrails - v6.22 Task 2.1/2.2/2.3 adversarial tests', () => {
 	describe('OBJECTIVE 1: plan.json direct write block', () => {
 		it('write tool targeting .swarm/plan.json → throws PLAN STATE VIOLATION', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			const sessionId = 'test-session';
 
 			// Set up architect session
@@ -74,7 +72,7 @@ describe('guardrails - v6.22 Task 2.1/2.2/2.3 adversarial tests', () => {
 
 		it('write tool targeting .swarm/plan.md → throws PLAN STATE VIOLATION (regression)', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			const sessionId = 'test-session';
 
 			// Set up architect session
@@ -93,7 +91,7 @@ describe('guardrails - v6.22 Task 2.1/2.2/2.3 adversarial tests', () => {
 
 		it('edit tool targeting .swarm/plan.json → throws PLAN STATE VIOLATION', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			const sessionId = 'test-session';
 
 			startAgentSession(sessionId, 'architect');
@@ -118,7 +116,7 @@ describe('guardrails - v6.22 Task 2.1/2.2/2.3 adversarial tests', () => {
 
 		it('patchText > 1MB → rejected with WRITE BLOCKED', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			const sessionId = 'test-session';
 
 			startAgentSession(sessionId, ORCHESTRATOR_NAME);
@@ -141,7 +139,7 @@ ${largeContent}`;
 
 		it('patchText = exactly 1MB → still processed', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			const sessionId = 'test-session';
 
 			startAgentSession(sessionId, ORCHESTRATOR_NAME);
@@ -163,7 +161,7 @@ ${largeContent}`;
 
 		it('traditional diff --- .swarm/plan.json → blocked', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			const sessionId = 'test-session';
 
 			startAgentSession(sessionId, ORCHESTRATOR_NAME);
@@ -189,7 +187,7 @@ ${largeContent}`;
 
 		it('traditional diff --- .swarm/plan.json\\t2024-01-01 (with timestamp) → blocked', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			const sessionId = 'test-session';
 
 			startAgentSession(sessionId, ORCHESTRATOR_NAME);
@@ -215,7 +213,7 @@ ${largeContent}`;
 
 		it('traditional diff --- a/.swarm/plan.json → NOT double-matched via traditional pattern (a/ prefix filtered)', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			const sessionId = 'test-session';
 
 			startAgentSession(sessionId, ORCHESTRATOR_NAME);
@@ -242,7 +240,7 @@ ${largeContent}`;
 
 		it('git diff format diff --git a/.swarm/plan.json b/.swarm/plan.json → blocked', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			const sessionId = 'test-session';
 
 			startAgentSession(sessionId, ORCHESTRATOR_NAME);
@@ -270,7 +268,7 @@ index 1234567..89abcdef 100644
 
 		it('unified diff +++ b/<path> format → still works for non-plan files', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			const sessionId = 'test-session';
 
 			startAgentSession(sessionId, ORCHESTRATOR_NAME);
@@ -293,7 +291,7 @@ index 1234567..89abcdef 100644
 
 		it('+++ /dev/null → ignored', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			const sessionId = 'test-session';
 
 			startAgentSession(sessionId, ORCHESTRATOR_NAME);
@@ -322,7 +320,7 @@ index 1234567..89abcdef 100644
 	describe('OBJECTIVE 3: pre_check_batch result handling with warn on error', () => {
 		it('uncorrelated gates_passed output cannot advance exact task state', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			const sessionId = 'test-session';
 			const taskId = '1.2.3';
 
@@ -347,7 +345,7 @@ index 1234567..89abcdef 100644
 
 		it('gates_passed: false → advanceTaskState NOT called', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			const sessionId = 'test-session';
 			const taskId = '1.2.3';
 
@@ -372,7 +370,7 @@ index 1234567..89abcdef 100644
 
 		it('malformed JSON in pre_check_batch output → no throw, isPassed = false', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			const sessionId = 'test-session';
 			const taskId = '1.2.3';
 
@@ -397,7 +395,7 @@ index 1234567..89abcdef 100644
 
 		it('already-passed task remains passed when state advancement is rejected', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			const sessionId = 'test-session';
 			const taskId = '1.2.3';
 
@@ -425,7 +423,7 @@ index 1234567..89abcdef 100644
 
 		it('null currentTaskId skips state advancement', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			const sessionId = 'test-session';
 			const taskId = '1.2.3';
 
@@ -460,7 +458,7 @@ index 1234567..89abcdef 100644
 
 		it('patch with both git diff and traditional diff formats → still blocked', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			const sessionId = 'test-session';
 
 			startAgentSession(sessionId, ORCHESTRATOR_NAME);
@@ -487,7 +485,7 @@ index 1234567..89abcdef 100644
 
 		it('patchText at exactly 1MB boundary with plan.json → blocked', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			const sessionId = 'test-session';
 
 			startAgentSession(sessionId, ORCHESTRATOR_NAME);
@@ -510,7 +508,7 @@ index 1234567..89abcdef 100644
 
 		it('empty patchText → no error', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			const sessionId = 'test-session';
 
 			startAgentSession(sessionId, ORCHESTRATOR_NAME);
@@ -526,7 +524,7 @@ index 1234567..89abcdef 100644
 
 		it('patch with only whitespace → no error', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			const sessionId = 'test-session';
 
 			startAgentSession(sessionId, ORCHESTRATOR_NAME);
@@ -542,7 +540,7 @@ index 1234567..89abcdef 100644
 
 		it('pre_check_batch with gates_passed: true but non-object JSON → handled gracefully', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			const sessionId = 'test-session';
 			const taskId = '1.2.3';
 

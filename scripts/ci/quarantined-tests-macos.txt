@@ -15,14 +15,6 @@
 # Active macOS-only quarantine entries are below; each carries the Check
 # 7-enforced OWNER/EXPIRY metadata.
 
-# OWNER: zaxbysauce — issue #2738 (deterministic macOS signal-child failure:
-#   the crash fixture survives the delivered POSIX signal and exits 0 on
-#   macos-latest runners; 9/9 failures across PRs #2735/#2736 on 2026-09-12,
-#   ubuntu shards green; test already win32-skipped in-source)
-# EXPIRY: 2026-11-18 — retire when the #2738 signal-fixture root fix (SIGKILL
-#   delivery or survival detection) lands and the file passes on macos-latest.
-# Renewed 2026-09-25 per issue #2900 (Workstream I3); previous EXPIRY 2026-09-26.
-tests/unit/scripts/ci/repository-validation-real-process-2675.test.ts
 #
 # tests/unit/hooks/pr-feedback-scope-controller.test.ts (issue #2730)
 # ---------------------------------------------------------------------------
@@ -43,12 +35,14 @@ tests/unit/scripts/ci/repository-validation-real-process-2675.test.ts
 # it (shard round-robin). The ci.yml retry loop discards attempt-1 output
 # when a retry passes, so no assertion text exists to drive a root-cause
 # fix; the file passes locally (8/8 cases). Pre-existing, unrelated to any
-# specific PR. This is the last remaining issue #2730 candidate without an
-# owning entry: init-rehome.test.ts is quarantined in the general ledger
-# via issue #2660 (PR #2799), bun-compat-exit-first-2530.test.ts in this
-# ledger via issue #2740 (PR #2769), and repository-validation-real-
-# process-2675.test.ts in this ledger via issue #2738 — so this PR adds
-# only this entry and pins the no-duplicate invariant for the other three.
+# specific PR. Of the other issue #2730 candidates: init-rehome.test.ts is
+# quarantined in the general ledger via issue #2660 (PR #2799) and
+# bun-compat-exit-first-2530.test.ts in this ledger via issue #2740
+# (PR #2769); the third, repository-validation-real-process-2675.test.ts,
+# was retired from this ledger by the issue #2738 group-kill root fix
+# (removed by PR #3650), so this entry is the only active addition here
+# and the no-duplicate invariant now covers the two still-active siblings
+# plus the retired one.
 # Quarantined per issue #2730; tracked under #1782 (test-stability sprint).
 # OWNER: zaxbysauce — issue #2973 (I3 renewal-cohort retirement tracker;
 #   original flake evidence: closed #2730, block history above)

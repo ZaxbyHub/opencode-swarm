@@ -316,8 +316,9 @@ describe('issue #3422 — external evidence terminal path', () => {
 		writeProject(directory, singlePhasePlan(plainTask()));
 		const result = await completeTask();
 		expect(result.success).toBe(false);
+		// #3165 E: the pre-lock gate now refuses this, so no CAS_MISMATCH prefix.
 		expect(result.errors?.[0]).toBe(
-			'TASK_COMPLETION_CAS_MISMATCH: Task 2.1 has no exact-task QA evidence. Delegate the required Stage B agents, then retry completion.',
+			'Task 2.1 has no exact-task QA evidence. Delegate the required Stage B agents, then retry completion.',
 		);
 	});
 

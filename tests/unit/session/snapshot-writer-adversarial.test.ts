@@ -10,6 +10,7 @@ import { existsSync } from 'node:fs';
 import { mkdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { closeProjectDb } from '../../../src/db/project-db';
 import { claimSnapshotSessionOwnership } from '../../../src/session/snapshot-store';
 import {
 	createSnapshotWriterHook,
@@ -18,20 +19,19 @@ import {
 	writeSnapshot,
 } from '../../../src/session/snapshot-writer';
 import type { AgentSessionState, InvocationWindow } from '../../../src/state';
+import { enterCwdSandbox } from '../../helpers/cwd-sandbox';
 
 describe('snapshot-writer ADVERSARIAL', () => {
 	let testDir: string;
 	let state: any;
 
 	beforeEach(async () => {
-		// Create unique temp directory for each test
 		testDir = path.join(
 			tmpdir(),
 			`snapshot-adversarial-${Date.now()}-${Math.random().toString(36).slice(2)}`,
 		);
 		await mkdir(testDir, { recursive: true });
 
-		// Create mock state
 		state = {
 			toolAggregates: new Map([
 				[
@@ -62,7 +62,6 @@ describe('snapshot-writer ADVERSARIAL', () => {
 	});
 
 	afterEach(async () => {
-		// Clean up test directory
 		try {
 			await rm(testDir, { recursive: true, force: true });
 		} catch {
@@ -89,8 +88,12 @@ describe('snapshot-writer ADVERSARIAL', () => {
 		});
 
 		it('should handle empty string directory', async () => {
-			// Empty directory should fail silently (caught by writeSnapshot catch block)
-			await writeSnapshot('', state);
+			// '' resolves against the cwd, so keep it out of the checkout (#3165 A).
+			const sandbox = enterCwdSandbox('snapshot-blank-dir-');
+			await writeSnapshot('', state).finally(() => {
+				closeProjectDb(sandbox.cwd);
+				sandbox.restore();
+			});
 		});
 
 		it('should not write to system paths', async () => {
@@ -103,11 +106,8 @@ describe('snapshot-writer ADVERSARIAL', () => {
 			// This test verifies writeSnapshot does not throw.
 			await writeSnapshot(systemPath, state);
 
-			// In this test environment the OS allows writing to /usr/bin,
-			// so the file may or may not exist depending on permissions.
-			// We just verify writeSnapshot completed without throwing above.
+			// Permissions decide whether the file exists; the no-throw above is the check.
 			const targetPath = path.join(systemPath, '.swarm', 'session', PROJECTION);
-			// File existence depends on OS permissions - just verify the path is defined
 			expect(typeof targetPath).toBe('string');
 		});
 	});

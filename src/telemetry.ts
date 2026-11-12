@@ -223,8 +223,8 @@ export type ReviewerGateEvidenceKind =
  * analytics, so additions are allowed but existing values must not be renamed.
  */
 export type ReviewerGateReasonCode =
-	| 'lean_turbo_completed_lane'
-	| 'standard_turbo_non_tier3'
+	// Retired in #3165 E, still possible in older telemetry.jsonl rows:
+	// 'lean_turbo_completed_lane', 'standard_turbo_non_tier3'.
 	| 'durable_evidence_complete'
 	| 'workflow_state_complete'
 	| 'stage_b_parallel_complete'

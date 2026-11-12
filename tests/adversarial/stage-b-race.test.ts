@@ -10,8 +10,6 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { existsSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
 import {
 	hasBothStageBCompletions,
 	recordStageBCompletion,
@@ -20,28 +18,28 @@ import {
 	swarmState,
 } from '../../src/state';
 import { checkReviewerGate } from '../../src/tools/update-task-status';
+import { canonicalMkdtemp, removeTreeWithRetry } from '../helpers/tmpdir';
 
 // Regression for adversarial-reviewer finding: cross-session Stage B completion
 // marker contamination. The cross-session loop in delegation-gate must only
 // record completion for seedTaskId, not every task in every other session.
 
+// Evidence-first path: checkReviewerGate reads `<workingDirectory>/.swarm/
+// evidence/<task>.json` and returns blocked:false when it finds one. Pointing it
+// at an empty per-test temp root keeps stale evidence in the checkout from
+// leaking into these tests, and keeps the tests from deleting that evidence.
+let projectDir: string;
+const gate = (taskId: string, stageBParallel: boolean) =>
+	checkReviewerGate(taskId, projectDir, stageBParallel);
+
 beforeEach(() => {
 	resetSwarmState();
-
-	// Clear stale evidence files from previous sessions that would cause
-	// checkReviewerGate to return blocked:false via the evidence-first path.
-	// Evidence files in the project root are artifacts of prior work, not
-	// controlled by these tests. Using path.join(join(...), ...) to guard
-	// against null/undefined working_directory in the gate check.
-	const evidenceDir = join(process.cwd(), '.swarm', 'evidence');
-	for (const taskId of ['1.1', '1.2', '9.6', '9.7', '9.8']) {
-		const ep = join(evidenceDir, `${taskId}.json`);
-		if (existsSync(ep)) rmSync(ep);
-	}
+	projectDir = canonicalMkdtemp('stage-b-race-');
 });
 
 afterEach(() => {
 	resetSwarmState();
+	removeTreeWithRetry(projectDir);
 });
 
 describe('Stage B race — concurrent writes do not lose completions', () => {
@@ -113,19 +111,19 @@ describe('Stage B race — barrier determinism', () => {
 
 		// Neither done
 		expect(hasBothStageBCompletions(session, taskId)).toBe(false);
-		const r1 = checkReviewerGate(taskId, undefined, true);
+		const r1 = gate(taskId, true);
 		expect(r1.blocked).toBe(true);
 
 		// Only reviewer done
 		recordStageBCompletion(session, taskId, 'reviewer');
 		expect(hasBothStageBCompletions(session, taskId)).toBe(false);
-		const r2 = checkReviewerGate(taskId, undefined, true);
+		const r2 = gate(taskId, true);
 		expect(r2.blocked).toBe(true);
 
 		// Both done
 		recordStageBCompletion(session, taskId, 'test_engineer');
 		expect(hasBothStageBCompletions(session, taskId)).toBe(true);
-		const r3 = checkReviewerGate(taskId, undefined, true);
+		const r3 = gate(taskId, true);
 		expect(r3.blocked).toBe(false);
 	});
 
@@ -138,12 +136,12 @@ describe('Stage B race — barrier determinism', () => {
 
 		recordStageBCompletion(session, taskId, 'test_engineer');
 		expect(hasBothStageBCompletions(session, taskId)).toBe(false);
-		const r = checkReviewerGate(taskId, undefined, true);
+		const r = gate(taskId, true);
 		expect(r.blocked).toBe(true);
 
 		recordStageBCompletion(session, taskId, 'reviewer');
 		expect(hasBothStageBCompletions(session, taskId)).toBe(true);
-		const r2 = checkReviewerGate(taskId, undefined, true);
+		const r2 = gate(taskId, true);
 		expect(r2.blocked).toBe(false);
 	});
 });
@@ -163,7 +161,7 @@ describe('Stage B race — flag-off does not activate barrier (no regression)', 
 		recordStageBCompletion(session, taskId, 'test_engineer');
 
 		// Flag off — barrier check is not run, must be at tests_run in state machine
-		const result = checkReviewerGate(taskId, undefined, false);
+		const result = gate(taskId, false);
 		expect(result.blocked).toBe(true);
 	});
 
@@ -173,7 +171,7 @@ describe('Stage B race — flag-off does not activate barrier (no regression)', 
 		const session = swarmState.agentSessions.get(sessId)!;
 		session.taskWorkflowStates.set('1.1', 'tests_run');
 
-		const result = checkReviewerGate('1.1', undefined, false);
+		const result = gate('1.1', false);
 		expect(result.blocked).toBe(false);
 	});
 });
@@ -191,9 +189,9 @@ describe('Stage B race — multi-task isolation', () => {
 		recordStageBCompletion(session, '1.1', 'test_engineer');
 
 		// Task 1.1 unblocked
-		expect(checkReviewerGate('1.1', undefined, true).blocked).toBe(false);
+		expect(gate('1.1', true).blocked).toBe(false);
 		// Task 1.2 still blocked
-		expect(checkReviewerGate('1.2', undefined, true).blocked).toBe(true);
+		expect(gate('1.2', true).blocked).toBe(true);
 	});
 
 	test('cross-session: completion for seedTaskId does not contaminate other tasks in other sessions', () => {
