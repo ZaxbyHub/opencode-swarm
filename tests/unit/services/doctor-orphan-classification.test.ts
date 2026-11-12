@@ -166,16 +166,17 @@ describe('doctor — Orphaned Evidence classification for derived writer subtree
 	});
 
 	test('a bare numeric dir WITHOUT a marker stays a task id (GREEN at base and after the fix — marker-gate anti-mutant leg)', async () => {
-		// Final-critic round 1 (surviving-mutant closure): the marker gate is
-		// what distinguishes a phase directory from a numeric task id — a
-		// mutant returning true for ANY numeric name must go red here. The
-		// dir carries only a real bundle shape, no phase artifact.
+		// Final-critic round 1 (surviving-mutant closure), corrected round 2:
+		// the marker gate is what distinguishes a phase directory from a
+		// numeric task id — a mutant returning true for ANY numeric name must
+		// go red here. The dir deliberately carries NEITHER a bundle
+		// (evidence.json would hit the bundle-precedence check first, which
+		// the sibling legs already pin) NOR a phase artifact — only a plain
+		// non-marker file, so the numeric branch's marker gate is the sole
+		// decider.
 		const numeric = path.join(dir, '.swarm', 'evidence', '42');
 		mkdirSync(numeric, { recursive: true });
-		writeFileSync(
-			path.join(numeric, 'evidence.json'),
-			JSON.stringify({ taskId: '42' }),
-		);
+		writeFileSync(path.join(numeric, 'notes.txt'), 'plain task note\n');
 
 		const data = await getDiagnoseData(dir);
 		const check = data.checks.find(

@@ -18,12 +18,18 @@ Three verification-surface correctness fixes, one per issue:
   candidate instead of silently nulling the changed-line map (the live
   #3092 incident: a stale `zaxbyhub/main` made the diff-scoped secretscan
   gate permanently red until a manual fetch). A merge-base equal to HEAD is
-  accepted but FLAGGED non-authoritative (#3092 PRR-002), and BOTH consumers
-  then fail closed on the flagged resolution — the changed-line map returns
-  null with a named diagnostic (the 4.5 review caught the ranges consumer
-  treating the empty committed map as authoritative, failing the SAST gate
-  OPEN on that geometry), and the ambiguity set keeps its original refusal;
-  nothing gets the pre-existing discount in that geometry. Abort, timeout,
+  accepted but FLAGGED non-authoritative (#3092 PRR-002): the ambiguity set
+  keeps its original refusal, and the changed-line map fails closed with a
+  named diagnostic WHEN the HEAD-equal base was reached by falling through
+  a candidate that failed validation (overflow/planted-ref signature — the
+  4.5 review caught the ranges consumer treating the empty committed map as
+  authoritative there, failing the SAST gate OPEN). A FIRST-resolvable
+  HEAD-equal base — a fresh branch with no commits past its base — keeps
+  the staged/unstaged/untracked map exactly as at base (the #2918 F-002
+  ignored-file contract); residual: a ref planted at HEAD as the very first
+  resolvable candidate still yields an empty committed hop there (same
+  git-state trust as the pre-existing intermediate-commit residual; full
+  mitigation requires fetch-verified refs). Abort, timeout,
   and spawn failures without output-guard flags stop the walk after one
   spawn (executable-resolution and HEAD-resolution failures each carry their
   own named cause); an output-guard termination (reported by the runner as

@@ -228,9 +228,13 @@ async function resolveValidatedDiffBase(
 		// authoritative — the #2918 F-002 ignored-file contract depends on a
 		// non-null map in this geometry) but flags it so each consumer can
 		// fail closed where the empty hop is load-bearing: the ambiguity
-		// consumer refuses the discount, and the ranges consumer returns null
-		// (a non-null empty map would mark every committed finding
-		// PRE-EXISTING — the SAST fail-open the review found).
+		// consumer refuses the discount unconditionally, and the ranges
+		// consumer returns null when the HEAD-equal base was reached by
+		// FALLING THROUGH a candidate that failed validation (a non-null
+		// empty map would mark every committed finding PRE-EXISTING — the
+		// SAST fail-open the review found); a FIRST-resolvable HEAD-equal
+		// base keeps the pre-fix map (see the consumer guard for the
+		// residual first-candidate planted-ref trust).
 		const mergeBaseEqualsHead =
 			headSha !== null && candidate.toLowerCase() === headSha;
 		const diffResult = await runGitClassified(
