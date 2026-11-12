@@ -2,10 +2,11 @@
  * Tests for CLI version flag parsing
  * Tests FR-001, FR-002: CLI version and -v/--version flag handling
  */
-import { describe, expect, it } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { spawn } from 'node:child_process';
 import * as path from 'node:path';
 import pkg from '../../package.json';
+import { createSafeTestDir } from '../../tests/helpers/safe-test-dir.js';
 
 describe('CLI version flag parsing', () => {
 	async function runCli(
@@ -99,11 +100,23 @@ describe('CLI version flag parsing', () => {
 });
 
 describe('Diagnose service version check', () => {
+	// Diagnose writes `.swarm/` artifacts (learning-health.json) under the
+	// directory it is given: use a temp project root, never the checkout.
+	let projectDir: string;
+	let cleanup: () => void;
+
+	beforeEach(() => {
+		({ dir: projectDir, cleanup } = createSafeTestDir('cli-version-diag-'));
+	});
+
+	afterEach(() => {
+		cleanup();
+	});
+
 	it('should include version in diagnose data', async () => {
 		const { getDiagnoseData } = await import('../services/diagnose-service');
 
-		// Use the project root for testing
-		const diagnoseData = await getDiagnoseData(process.cwd());
+		const diagnoseData = await getDiagnoseData(projectDir);
 
 		const versionCheck = diagnoseData.checks.find((c) => c.name === 'Version');
 		expect(versionCheck).toBeDefined();
@@ -115,7 +128,7 @@ describe('Diagnose service version check', () => {
 			'../services/diagnose-service'
 		);
 
-		const diagnoseData = await getDiagnoseData(process.cwd());
+		const diagnoseData = await getDiagnoseData(projectDir);
 		const markdown = formatDiagnoseMarkdown(diagnoseData);
 
 		expect(markdown).toContain(`**Version**: ${pkg.version}`);

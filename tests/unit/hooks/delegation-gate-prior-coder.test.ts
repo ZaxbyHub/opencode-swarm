@@ -21,6 +21,18 @@ import {
 	resetSwarmState,
 	swarmState,
 } from '../../../src/state';
+import { canonicalMkdtemp, removeTreeWithRetry } from '../../helpers/tmpdir';
+
+// ensureAgentSession (reached through the hook) appends to
+// `<directory>/.swarm/session/session-start.jsonl`; a per-test project dir
+// keeps that write out of the plugin checkout.
+let projectDir: string;
+beforeEach(() => {
+	projectDir = canonicalMkdtemp('dg-prior-coder-');
+});
+afterEach(() => {
+	removeTreeWithRetry(projectDir);
+});
 
 function makeConfig(): PluginConfig {
 	return {
@@ -83,7 +95,7 @@ describe('delegation-gate: priorCoderTaskId side-effect fix', () => {
 		 */
 		it('handles known session with prior coder task ID', async () => {
 			const config = makeConfig();
-			const hook = createDelegationGateHook(config, process.cwd());
+			const hook = createDelegationGateHook(config, projectDir);
 
 			// Create a session with a prior coder delegation task ID
 			const session = ensureAgentSession('session-known');
@@ -113,7 +125,7 @@ describe('delegation-gate: priorCoderTaskId side-effect fix', () => {
 		 */
 		it('handles null sessionID without creating session', async () => {
 			const config = makeConfig();
-			const hook = createDelegationGateHook(config, process.cwd());
+			const hook = createDelegationGateHook(config, projectDir);
 
 			// Verify no sessions exist before
 			expect(swarmState.agentSessions.size).toBe(0);
@@ -135,7 +147,7 @@ describe('delegation-gate: priorCoderTaskId side-effect fix', () => {
 		 */
 		it('handles undefined sessionID without creating session', async () => {
 			const config = makeConfig();
-			const hook = createDelegationGateHook(config, process.cwd());
+			const hook = createDelegationGateHook(config, projectDir);
 
 			// Verify no sessions exist before
 			expect(swarmState.agentSessions.size).toBe(0);
@@ -166,7 +178,7 @@ describe('delegation-gate: priorCoderTaskId side-effect fix', () => {
 		 */
 		it('handles session with null lastCoderDelegationTaskId', async () => {
 			const config = makeConfig();
-			const hook = createDelegationGateHook(config, process.cwd());
+			const hook = createDelegationGateHook(config, projectDir);
 
 			// Create session WITHOUT setting lastCoderDelegationTaskId (it's null by default)
 			ensureAgentSession('session-no-prior');
@@ -199,7 +211,7 @@ describe('delegation-gate: priorCoderTaskId side-effect fix', () => {
 		 */
 		it('coder delegation no longer writes lastCoderDelegationTaskId from prompt text', async () => {
 			const config = makeConfig();
-			const hook = createDelegationGateHook(config, process.cwd());
+			const hook = createDelegationGateHook(config, projectDir);
 
 			// Verify session does NOT exist before
 			expect(swarmState.agentSessions.has('session-coder')).toBe(false);
@@ -235,7 +247,7 @@ FILE: src/feature.ts
 		 */
 		it('handles session with currentTaskId and task lines', async () => {
 			const config = makeConfig();
-			const hook = createDelegationGateHook(config, process.cwd());
+			const hook = createDelegationGateHook(config, projectDir);
 
 			// Create session with currentTaskId set
 			const session = ensureAgentSession('session-with-task');
@@ -273,7 +285,7 @@ Please continue.`,
 		 */
 		it('creates session when sessionID is set but session does not exist', async () => {
 			const config = makeConfig();
-			const hook = createDelegationGateHook(config, process.cwd());
+			const hook = createDelegationGateHook(config, projectDir);
 
 			// Verify session does NOT exist before
 			expect(swarmState.agentSessions.has('session-unknown')).toBe(false);

@@ -5,6 +5,7 @@ import {
 } from '../../../src/config/constants';
 import { TOOL_NAME_SET, TOOL_NAMES } from '../../../src/tools/tool-names';
 import { seedCouncilLaunch } from '../../helpers/task-workflow-evidence';
+import { canonicalMkdtemp, removeTreeWithRetry } from '../../helpers/tmpdir';
 
 describe('submit_council_verdicts — registration', () => {
 	test('submit_council_verdicts is in TOOL_NAMES', () => {
@@ -109,17 +110,24 @@ describe('submit_council_verdicts — config gate', () => {
 		const { submit_council_verdicts } = await import(
 			'../../../src/tools/convene-council'
 		);
-		const result = await submit_council_verdicts.execute(
-			{
-				// missing required fields
-				taskId: 'not-a-valid-task-id',
-			},
-			{ directory: process.cwd() },
-		);
-		const parsed = JSON.parse(result);
-		expect(parsed.success).toBe(false);
-		expect(parsed.reason).toBe('invalid arguments');
-		expect(Array.isArray(parsed.errors)).toBe(true);
+		// A real project root: the rejected attempt is still recorded under
+		// <directory>/.swarm/council/, which must not be the plugin checkout.
+		const directory = canonicalMkdtemp('convene-council-invalid-');
+		try {
+			const result = await submit_council_verdicts.execute(
+				{
+					// missing required fields
+					taskId: 'not-a-valid-task-id',
+				},
+				{ directory },
+			);
+			const parsed = JSON.parse(result);
+			expect(parsed.success).toBe(false);
+			expect(parsed.reason).toBe('invalid arguments');
+			expect(Array.isArray(parsed.errors)).toBe(true);
+		} finally {
+			removeTreeWithRetry(directory);
+		}
 	});
 });
 

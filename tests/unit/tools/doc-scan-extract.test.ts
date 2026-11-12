@@ -14,6 +14,10 @@ import {
 	extractDocConstraints,
 	scanDocIndex,
 } from '../../../src/tools/doc-scan';
+import { executeInDirectory } from '../../helpers/tool-directory';
+
+// An explicit ToolContext directory keeps the manifest write out of the checkout.
+const runDocExtract = executeInDirectory(doc_extract);
 
 // Helper to create temp test directories
 function createTempDir(): string {
@@ -1051,12 +1055,12 @@ Guidelines.
 `,
 			);
 
-			const result = await doc_extract.execute(
+			const result = await runDocExtract(
 				{
 					task_files: ['docs/guide.md'],
 					task_description: 'update development guide',
 				},
-				{ cwd: tempDir } as any,
+				tempDir,
 			);
 
 			const parsed = JSON.parse(result);
@@ -1067,7 +1071,7 @@ Guidelines.
 		});
 
 		it('should return error when task_files and task_description are both missing', async () => {
-			const result = await doc_extract.execute({}, { cwd: tempDir } as any);
+			const result = await runDocExtract({}, tempDir);
 
 			const parsed = JSON.parse(result);
 			expect(parsed.success).toBe(false);
@@ -1075,12 +1079,9 @@ Guidelines.
 		});
 
 		it('should return error when task_files is empty array and task_description is empty', async () => {
-			const result = await doc_extract.execute(
-				{
-					task_files: [],
-					task_description: '',
-				},
-				{ cwd: tempDir } as any,
+			const result = await runDocExtract(
+				{ task_files: [], task_description: '' },
+				tempDir,
 			);
 
 			const parsed = JSON.parse(result);
@@ -1097,9 +1098,7 @@ Guidelines.
 				},
 			);
 
-			const result = await doc_extract.execute(maliciousArgs, {
-				cwd: tempDir,
-			} as any);
+			const result = await runDocExtract(maliciousArgs, tempDir);
 
 			const parsed = JSON.parse(result);
 			// Should return error, not crash

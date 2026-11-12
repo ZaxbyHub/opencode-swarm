@@ -21,18 +21,18 @@
  *  - mtime changes of top-level DIRECTORIES (an editor's atomic save in
  *    src/ bumps it), only new/removed names and changed top-level FILES.
  *
- * Changes INSIDE a `.swarm/` that already existed at preload are only warned
- * about by default, in CI too: a number of existing suites still write
- * `.swarm/` state into the checkout (they are listed in the warning, which is
- * the worklist for making this enforced), and on a developer's primary
- * checkout a live opencode-swarm session legitimately writes there while
- * tests run. New top-level entries, and creating `.swarm/` where none existed,
- * are always enforced. `SWARM_TEST_CHECKOUT_DRIFT=enforce|warn|off` overrides
- * the mode. A part of the checkout that cannot be checked (an unreadable root,
- * a `.swarm/` directory that cannot be read, a `.swarm/` over
- * MAX_SWARM_ENTRIES) is reported as a warning, never skipped silently. Writes
- * INSIDE an existing top-level directory (`src/`, `tests/`) are out of scope:
- * only the directory's existence is compared there.
+ * Both checks are enforced by default, in CI and locally: a new, removed or
+ * changed top-level entry, creating `.swarm/`, and any change INSIDE a
+ * `.swarm/` that already existed at preload fail the run (#3165 section A
+ * moved the last suites that wrote there onto sandboxes). On a developer's
+ * primary checkout a live opencode-swarm session legitimately writes into
+ * `.swarm/` while tests run; set `SWARM_TEST_CHECKOUT_DRIFT=warn` there.
+ * `SWARM_TEST_CHECKOUT_DRIFT=enforce|warn|off` overrides the mode. A part
+ * of the checkout that cannot be checked (an unreadable root, a `.swarm/`
+ * directory that cannot be read, a `.swarm/` over MAX_SWARM_ENTRIES) is
+ * reported as a warning, never skipped silently. Writes INSIDE an existing
+ * top-level directory (`src/`, `tests/`) are out of scope: only the
+ * directory's existence is compared there.
  */
 
 import * as realFs from 'node:fs';
@@ -54,8 +54,8 @@ export const IGNORED_SWARM_PREFIXES: readonly string[] = [
 	// The coverage gate's shard manifests (issue #3248 class 1): pre-created
 	// before any test file runs so each file's checkout snapshot sees an
 	// existing .swarm/, mirroring the unit job's repository-validation
-	// posture. Ignored here so CI's own manifests never reach the warn
-	// worklist.
+	// posture. Ignored here so CI's own manifests are never reported as
+	// drift.
 	'coverage-gate',
 ];
 
@@ -195,15 +195,20 @@ export function resolveDriftRoot(
 	return override && path.isAbsolute(override) ? override : preloadRepoRoot;
 }
 
+/**
+ * `SWARM_TEST_CHECKOUT_DRIFT` is matched case-insensitively after trimming
+ * (like `SWARM_TEST_CHECKOUT_DRIFT_ROOT`). Any other value, including an empty
+ * or misspelled one, fails closed to enforce.
+ */
 export function resolveDriftMode(env: NodeJS.ProcessEnv): {
 	topLevel: DriftMode;
 	swarm: DriftMode;
 } {
-	const raw = env.SWARM_TEST_CHECKOUT_DRIFT?.toLowerCase();
+	const raw = env.SWARM_TEST_CHECKOUT_DRIFT?.trim().toLowerCase();
 	if (raw === 'enforce' || raw === 'warn' || raw === 'off') {
 		return { topLevel: raw, swarm: raw };
 	}
-	return { topLevel: 'enforce', swarm: 'warn' };
+	return { topLevel: 'enforce', swarm: 'enforce' };
 }
 
 /** Throws (or warns) per mode. Returns the messages it reported. */

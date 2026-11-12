@@ -1,12 +1,12 @@
 import { beforeEach, describe, expect, it } from 'bun:test';
 import { ORCHESTRATOR_NAME } from '../../../src/config/constants';
 import type { GuardrailsConfig } from '../../../src/config/schema';
-import { createGuardrailsHooks } from '../../../src/hooks/guardrails';
 import {
 	getAgentSession,
 	resetSwarmState,
 	startAgentSession,
 } from '../../../src/state';
+import { createSandboxedGuardrailsHooks } from '../../helpers/sandboxed-guardrails-hooks';
 
 function defaultConfig(
 	overrides?: Partial<GuardrailsConfig>,
@@ -49,7 +49,7 @@ describe('guardrails plan.md write-block guard - adversarial tests', () => {
 			if (process.platform === 'win32') return;
 
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			startAgentSession('test-session', ORCHESTRATOR_NAME);
 
 			const input = makeInput('test-session', 'write', 'call-1');
@@ -62,7 +62,7 @@ describe('guardrails plan.md write-block guard - adversarial tests', () => {
 
 		it('absolute Unix path /workspace/.swarm/plan.md → blocked (containment, gap closed)', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			startAgentSession('test-session', ORCHESTRATOR_NAME);
 
 			const input = makeInput('test-session', 'write', 'call-1');
@@ -86,7 +86,7 @@ describe('guardrails plan.md write-block guard - adversarial tests', () => {
 			if (process.platform === 'win32') return;
 
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			startAgentSession('test-session', ORCHESTRATOR_NAME);
 
 			const input = makeInput('test-session', 'write', 'call-1');
@@ -100,7 +100,7 @@ describe('guardrails plan.md write-block guard - adversarial tests', () => {
 	describe('attack vector 2: path with trailing slash', () => {
 		it('.swarm/plan.md/ with trailing slash → should throw (path resolves)', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			startAgentSession('test-session', ORCHESTRATOR_NAME);
 
 			const input = makeInput('test-session', 'write', 'call-1');
@@ -114,7 +114,7 @@ describe('guardrails plan.md write-block guard - adversarial tests', () => {
 
 		it('.swarm/plan.md// double slash → should throw', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			startAgentSession('test-session', ORCHESTRATOR_NAME);
 
 			const input = makeInput('test-session', 'write', 'call-1');
@@ -129,7 +129,7 @@ describe('guardrails plan.md write-block guard - adversarial tests', () => {
 	describe('attack vector 3: URL encoding attempts', () => {
 		it('path with %2F encoded slash → should NOT throw (raw string, not decoded)', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			startAgentSession('test-session', ORCHESTRATOR_NAME);
 
 			const input = makeInput('test-session', 'write', 'call-1');
@@ -142,7 +142,7 @@ describe('guardrails plan.md write-block guard - adversarial tests', () => {
 
 		it('path with encoded .. (%2E%2E) → should NOT throw (not decoded)', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			startAgentSession('test-session', ORCHESTRATOR_NAME);
 
 			const input = makeInput('test-session', 'write', 'call-1');
@@ -158,7 +158,7 @@ describe('guardrails plan.md write-block guard - adversarial tests', () => {
 	describe('attack vector 4: mixed case variations', () => {
 		it('.swarm/Plan.MD mixed case → should throw (case-insensitive)', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			startAgentSession('test-session', ORCHESTRATOR_NAME);
 
 			const input = makeInput('test-session', 'write', 'call-1');
@@ -171,7 +171,7 @@ describe('guardrails plan.md write-block guard - adversarial tests', () => {
 
 		it('.SWARM/PLAN.MD uppercase → should throw (case-insensitive)', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			startAgentSession('test-session', ORCHESTRATOR_NAME);
 
 			const input = makeInput('test-session', 'write', 'call-1');
@@ -184,7 +184,7 @@ describe('guardrails plan.md write-block guard - adversarial tests', () => {
 
 		it('.SwArm/PlAn.Md random case → should throw', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			startAgentSession('test-session', ORCHESTRATOR_NAME);
 
 			const input = makeInput('test-session', 'write', 'call-1');
@@ -199,7 +199,7 @@ describe('guardrails plan.md write-block guard - adversarial tests', () => {
 	describe('attack vector 5: relative path traversal', () => {
 		it('.swarm/../.swarm/plan.md traversal → should throw (resolves to plan.md)', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			startAgentSession('test-session', ORCHESTRATOR_NAME);
 
 			const input = makeInput('test-session', 'write', 'call-1');
@@ -212,7 +212,7 @@ describe('guardrails plan.md write-block guard - adversarial tests', () => {
 
 		it('../.swarm/plan.md from subdirectory → blocked (containment, gap closed)', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			startAgentSession('test-session', ORCHESTRATOR_NAME);
 
 			const input = makeInput('test-session', 'write', 'call-1');
@@ -232,7 +232,7 @@ describe('guardrails plan.md write-block guard - adversarial tests', () => {
 			'..\\.swarm\\plan.md Windows backslash → blocked (traversal caught by containment)',
 			async () => {
 				const config = defaultConfig();
-				const hooks = createGuardrailsHooks(config);
+				const hooks = createSandboxedGuardrailsHooks(config);
 				startAgentSession('test-session', ORCHESTRATOR_NAME);
 
 				const input = makeInput('test-session', 'write', 'call-1');
@@ -251,7 +251,7 @@ describe('guardrails plan.md write-block guard - adversarial tests', () => {
 	describe('attack vector 6: apply_patch with plan.md in diff content', () => {
 		it('apply_patch with *** Update File: .swarm/plan.md → should throw', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			startAgentSession('test-session', ORCHESTRATOR_NAME);
 
 			const input = makeInput('test-session', 'apply_patch', 'call-1');
@@ -268,7 +268,7 @@ describe('guardrails plan.md write-block guard - adversarial tests', () => {
 
 		it('apply_patch with +++ b/.swarm/plan.md (unified diff) → should throw', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			startAgentSession('test-session', ORCHESTRATOR_NAME);
 
 			const input = makeInput('test-session', 'apply_patch', 'call-1');
@@ -286,7 +286,7 @@ describe('guardrails plan.md write-block guard - adversarial tests', () => {
 
 		it('apply_patch with *** Add File: .swarm/plan.md → should throw', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			startAgentSession('test-session', ORCHESTRATOR_NAME);
 
 			const input = makeInput('test-session', 'apply_patch', 'call-1');
@@ -301,7 +301,7 @@ describe('guardrails plan.md write-block guard - adversarial tests', () => {
 
 		it('apply_patch with mixed case .SWARM/PLAN.MD → should throw', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			startAgentSession('test-session', ORCHESTRATOR_NAME);
 
 			const input = makeInput('test-session', 'apply_patch', 'call-1');
@@ -316,7 +316,7 @@ describe('guardrails plan.md write-block guard - adversarial tests', () => {
 
 		it('apply_patch with patch content only (no targetPath arg) → should work for non-plan paths', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			startAgentSession('test-session', ORCHESTRATOR_NAME);
 
 			const input = makeInput('test-session', 'apply_patch', 'call-1');
@@ -344,7 +344,7 @@ describe('guardrails plan.md write-block guard - adversarial tests', () => {
 			{ value: '' },
 			{ value: '   ' },
 		])('rejects unverifiable filePath %#', async ({ value: filePath }) => {
-			const hooks = createGuardrailsHooks(defaultConfig());
+			const hooks = createSandboxedGuardrailsHooks(defaultConfig());
 			startAgentSession('test-session', ORCHESTRATOR_NAME);
 			const args = filePath === undefined ? {} : { filePath };
 			await expect(
@@ -359,7 +359,7 @@ describe('guardrails plan.md write-block guard - adversarial tests', () => {
 	describe('edge cases and boundary conditions', () => {
 		it('plan.md without .swarm prefix → should NOT throw', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			startAgentSession('test-session', ORCHESTRATOR_NAME);
 
 			const input = makeInput('test-session', 'write', 'call-1');
@@ -371,7 +371,7 @@ describe('guardrails plan.md write-block guard - adversarial tests', () => {
 
 		it('.swarm/plan.md.txt (different extension) → should NOT throw', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			startAgentSession('test-session', ORCHESTRATOR_NAME);
 
 			const input = makeInput('test-session', 'write', 'call-1');
@@ -382,7 +382,7 @@ describe('guardrails plan.md write-block guard - adversarial tests', () => {
 
 		it('.swarm/plan.md.bak (backup file) → should NOT throw', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			startAgentSession('test-session', ORCHESTRATOR_NAME);
 
 			const input = makeInput('test-session', 'write', 'call-1');
@@ -393,7 +393,7 @@ describe('guardrails plan.md write-block guard - adversarial tests', () => {
 
 		it('.swarm/plan.md.old → should NOT throw', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			startAgentSession('test-session', ORCHESTRATOR_NAME);
 
 			const input = makeInput('test-session', 'write', 'call-1');
@@ -404,7 +404,7 @@ describe('guardrails plan.md write-block guard - adversarial tests', () => {
 
 		it('.swarm/plan.md~ (vim backup) → should NOT throw', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			startAgentSession('test-session', ORCHESTRATOR_NAME);
 
 			const input = makeInput('test-session', 'write', 'call-1');
@@ -415,7 +415,7 @@ describe('guardrails plan.md write-block guard - adversarial tests', () => {
 
 		it('using different arg key: path → should throw', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			startAgentSession('test-session', ORCHESTRATOR_NAME);
 
 			const input = makeInput('test-session', 'write', 'call-1');
@@ -428,7 +428,7 @@ describe('guardrails plan.md write-block guard - adversarial tests', () => {
 
 		it('using different arg key: file → should throw', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			startAgentSession('test-session', ORCHESTRATOR_NAME);
 
 			const input = makeInput('test-session', 'write', 'call-1');
@@ -441,7 +441,7 @@ describe('guardrails plan.md write-block guard - adversarial tests', () => {
 
 		it('using different arg key: target → should throw', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			startAgentSession('test-session', ORCHESTRATOR_NAME);
 
 			const input = makeInput('test-session', 'write', 'call-1');
@@ -456,7 +456,7 @@ describe('guardrails plan.md write-block guard - adversarial tests', () => {
 	describe('tool type variations', () => {
 		it('edit tool with .swarm/plan.md → should throw', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			startAgentSession('test-session', ORCHESTRATOR_NAME);
 
 			const input = makeInput('test-session', 'edit', 'call-1');
@@ -469,7 +469,7 @@ describe('guardrails plan.md write-block guard - adversarial tests', () => {
 
 		it('patch tool with .swarm/plan.md → should throw', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			startAgentSession('test-session', ORCHESTRATOR_NAME);
 
 			const input = makeInput('test-session', 'patch', 'call-1');
@@ -482,7 +482,7 @@ describe('guardrails plan.md write-block guard - adversarial tests', () => {
 
 		it('create_file tool with .swarm/plan.md → should throw', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			startAgentSession('test-session', ORCHESTRATOR_NAME);
 
 			const input = makeInput('test-session', 'create_file', 'call-1');
@@ -495,7 +495,7 @@ describe('guardrails plan.md write-block guard - adversarial tests', () => {
 
 		it('insert tool with .swarm/plan.md → should throw', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			startAgentSession('test-session', ORCHESTRATOR_NAME);
 
 			const input = makeInput('test-session', 'insert', 'call-1');
@@ -508,7 +508,7 @@ describe('guardrails plan.md write-block guard - adversarial tests', () => {
 
 		it('replace tool with .swarm/plan.md → should throw', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 			startAgentSession('test-session', ORCHESTRATOR_NAME);
 
 			const input = makeInput('test-session', 'replace', 'call-1');

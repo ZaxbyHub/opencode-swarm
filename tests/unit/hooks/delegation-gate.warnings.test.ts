@@ -11,11 +11,23 @@ import {
 	resetSwarmState,
 	swarmState,
 } from '../../../src/state';
+import { canonicalMkdtemp, removeTreeWithRetry } from '../../helpers/tmpdir';
 import {
 	getPrimaryText,
 	makeConfig,
 	makeMessages,
 } from './_delegation-gate-helpers';
+
+// ensureAgentSession (reached through the hook) appends to
+// `<directory>/.swarm/session/session-start.jsonl`; a per-test project dir
+// keeps that write out of the plugin checkout.
+let projectDir: string;
+beforeEach(() => {
+	projectDir = canonicalMkdtemp('dg-warnings-');
+});
+afterEach(() => {
+	removeTreeWithRetry(projectDir);
+});
 
 // Zero-coder-delegation detection tests (v6.12)
 describe('zero-coder-delegation detection', () => {
@@ -29,7 +41,7 @@ describe('zero-coder-delegation detection', () => {
 
 	it('should warn when architect writes code without delegating to coder', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, projectDir);
 
 		// Simulate session where architect has written files
 		const session = ensureAgentSession('test-session');
@@ -62,7 +74,7 @@ describe('zero-coder-delegation detection', () => {
 
 	it('should NOT warn when task ID matches last coder delegation', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, projectDir);
 
 		// Simulate session where architect wrote files BUT also delegated to coder for same task
 		const session = ensureAgentSession('test-session');
@@ -85,7 +97,7 @@ describe('zero-coder-delegation detection', () => {
 
 	it('should NOT warn when architect has not written any files', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, projectDir);
 
 		// Session exists but no writes
 		const session = ensureAgentSession('test-session');
@@ -102,7 +114,7 @@ describe('zero-coder-delegation detection', () => {
 
 	it('should NOT warn on coder delegation messages', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, projectDir);
 
 		// Architect has written files
 		const session = ensureAgentSession('test-session');
@@ -125,7 +137,7 @@ describe('zero-coder-delegation detection', () => {
 
 	it('should track coder delegation task IDs', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, projectDir);
 
 		// lastCoderDelegationTaskId is now written ONLY by the structured
 		// dispatch path (prepareCoderScope success in toolBefore) — the old
@@ -147,7 +159,7 @@ describe('zero-coder-delegation detection', () => {
 
 	it('should NOT track task ID from non-coder messages', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, projectDir);
 
 		// Send a non-coder message
 		const messages = makeMessages('TASK: Review this please', 'architect');
@@ -160,7 +172,7 @@ describe('zero-coder-delegation detection', () => {
 
 	it('should warn on subsequent different tasks after writing files', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, projectDir);
 
 		// First: architect delegates to coder for Task A
 		const messages1 = makeMessages(
@@ -188,7 +200,7 @@ describe('zero-coder-delegation detection', () => {
 
 	it('should NOT warn for messages without TASK line', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, projectDir);
 
 		const session = ensureAgentSession('test-session');
 		session.architectWriteCount = 5;
@@ -208,7 +220,7 @@ describe('zero-coder-delegation detection', () => {
 
 	it('should not warn when sessionID is missing', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, projectDir);
 
 		// No sessionID
 		const messages = {
@@ -233,7 +245,7 @@ describe('zero-coder-delegation detection', () => {
 describe('Task 2.2 — message transforms cannot publish workflow state', () => {
 	it('keeps task state idle when coder-shaped text is only observed in messagesTransform', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, projectDir);
 		const sessionID = 'test-session-state-1';
 
 		// Send a coder delegation with a task ID
@@ -253,7 +265,7 @@ describe('Task 2.2 — message transforms cannot publish workflow state', () => 
 
 	it('repeated coder-shaped messages remain non-authoritative and non-throwing', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, projectDir);
 		const sessionID = 'test-session-state-2';
 
 		// Neither observation may manufacture accepted-mutation evidence.
@@ -287,7 +299,7 @@ describe('Task 2.2 — message transforms cannot publish workflow state', () => 
 
 	it('when isCoderDelegation is false (delegating to reviewer, not coder), getTaskState is NOT advanced to coder_delegated', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, projectDir);
 		const sessionID = 'test-session-state-3';
 
 		// Delegation to reviewer (not coder)
@@ -307,7 +319,7 @@ describe('Task 2.2 — message transforms cannot publish workflow state', () => 
 
 	it('when currentTaskId is null/undefined (no task ID in the delegation), state is NOT advanced', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, projectDir);
 		const sessionID = 'test-session-state-4';
 
 		// Coder delegation without TASK: line
@@ -329,7 +341,7 @@ describe('Task 2.2 — message transforms cannot publish workflow state', () => 
 
 	it('prefixed coder text also cannot publish workflow state', async () => {
 		const config = makeConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, projectDir);
 		const sessionID = 'test-session-state-5';
 
 		// mega_coder delegation
