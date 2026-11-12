@@ -1,15 +1,14 @@
 /**
  * Issue #3659 supplementary pin: the MCP knowledge-memory adapter's disabled
  * message addresses the operator, not the model. The three tool handlers'
- * disabled payloads are already pinned in
- * tests/unit/tools/swarm-memory-tools.test.ts; this covers the fourth surface
- * (src/mcp/adapters/knowledge-memory.ts).
+ * disabled payloads are pinned in tests/unit/tools/swarm-memory-tools.test.ts
+ * (operator wording + real schema key path); this covers the fourth surface
+ * (src/mcp/adapters/knowledge-memory.ts) with the same assertions.
  */
 import { describe, expect, test } from 'bun:test';
-import * as fs from 'node:fs';
 import { swarmMemoryRecallAdapter } from '../../../src/mcp/adapters/knowledge-memory';
-import { safeRmRecursive } from '../../helpers/safe-test-dir.js';
-import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
+import { safeRmRecursive, safeRmRecursive } from '../../helpers/safe-test-dir.js';
+import { canonicalMkdtemp, canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 describe('knowledge-memory adapter disabled message (issue #3659)', () => {
 	test('disabled adapter message addresses the operator and stays inert', async () => {

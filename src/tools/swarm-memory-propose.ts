@@ -83,7 +83,7 @@ export const swarm_memory_propose: ReturnType<typeof createSwarmTool> =
 					success: false,
 					disabled: true,
 					message:
-						'Swarm memory is disabled (swarm.memory.enabled is false). This is an operator configuration setting in opencode-swarm.json; the tool stays inert until an operator enables it.',
+						'Swarm memory is disabled (the memory.enabled setting is false in opencode-swarm.json). This is an operator configuration; the tool stays inert until an operator enables it.',
 				});
 			}
 			const parsed = ProposalArgsSchema.safeParse(args);

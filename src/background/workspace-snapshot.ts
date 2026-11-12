@@ -2333,18 +2333,23 @@ export async function committedFilesBetweenAsync(
 	directory: string,
 	fromHead: string | null,
 	toHead: string | null,
+	options?: { relative?: boolean },
 ): Promise<string[] | null> {
 	if (fromHead === null || toHead === null) return null;
 	if (fromHead === toHead) return [];
 	// Same --no-renames rationale as the sync twin (PR review 2819-r1 PRR-005).
-	const committed = await runGitAsync(directory, [
-		'diff',
-		'--name-only',
-		'--no-renames',
-		'-z',
-		fromHead,
-		toHead,
-	]);
+	// `--relative` (PR #3668 feedback F-1): `git diff --name-only` prints
+	// repo-TOPLEVEL-relative paths even when run under `-C <subdir>`; the
+	// reviewer-scope reconciliation consumes capture-root-relative paths, so
+	// callers whose `directory` may be a project subdirectory of the repo pass
+	// `{ relative: true }` to get paths relative to `directory` itself (paths
+	// outside it arrive `../`-prefixed and cannot match a declared scope).
+	// The sync twin keeps its toplevel-relative contract (its Stage B callers
+	// compare against whole-tree state).
+	const args = ['diff', '--name-only', '--no-renames'];
+	if (options?.relative === true) args.push('--relative');
+	args.push('-z', fromHead, toHead);
+	const committed = await runGitAsync(directory, args);
 	if (committed === null) return null;
 	return parseNulPaths(committed);
 }

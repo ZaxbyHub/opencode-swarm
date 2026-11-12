@@ -38,14 +38,21 @@ function git(args: string[]): void {
 	}
 }
 
-/** Minimal fake ChildProcess: emits a clean (exit 0, empty stdout) close. */
-function fakeCleanChild(): ReturnType<typeof _internals.spawn> {
+/**
+ * Minimal fake ChildProcess. `stdoutText` is emitted before a clean
+ * (exit 0) close; per-call output lets the stub answer the toplevel probe
+ * and the porcelain probe differently (PR #3668 two-probe verdict).
+ */
+function fakeCleanChild(stdoutText = ''): ReturnType<typeof _internals.spawn> {
 	const emitter = new EventEmitter() as unknown as ReturnType<
 		typeof _internals.spawn
 	> & { stdout: EventEmitter; kill: () => void };
 	emitter.stdout = new EventEmitter();
 	emitter.kill = () => {};
 	queueMicrotask(() => {
+		if (stdoutText.length > 0) {
+			emitter.stdout.emit('data', Buffer.from(stdoutText));
+		}
 		emitter.emit('close', 0);
 	});
 	return emitter;
@@ -92,14 +99,16 @@ describe('reviewer-scope-lifecycle no-change status probe (issue #2236 regressio
 		const RESOLVED_GIT = 'C:\\Program Files\\Git\\cmd\\git.exe';
 		_internals.resolveGitExecutable = () => RESOLVED_GIT;
 
-		let spawnCalls = 0;
-		let capturedCommand: string | undefined;
-		let capturedArgs: readonly string[] | undefined;
+		const calls: Array<{ command: string; args: readonly string[] }> = [];
 		_internals.spawn = ((command: string, args: readonly string[]) => {
-			spawnCalls += 1;
-			capturedCommand = command;
-			capturedArgs = args;
-			return fakeCleanChild();
+			calls.push({ command, args });
+			// PR #3668: the verdict is a two-probe sequence — toplevel
+			// resolution first, then porcelain status with per-file
+			// untracked enumeration.
+			if (args[0] === 'rev-parse') {
+				return fakeCleanChild('C:\fixture-toplevel');
+			}
+			return fakeCleanChild('');
 		}) as typeof _internals.spawn;
 
 		const childSessionID = 'child-nochange';
@@ -144,10 +153,21 @@ describe('reviewer-scope-lifecycle no-change status probe (issue #2236 regressio
 
 		// Non-vacuous: prove the spawn seam actually fired before trusting its
 		// captured arguments — a path that never spawns must not pass silently.
-		expect(spawnCalls).toBeGreaterThan(0);
-		expect(capturedCommand).toBe(RESOLVED_GIT);
-		// Array form, not a collapsed shell string — proves the fix did not
-		// regress into string-concatenation of the space-containing path.
-		expect(capturedArgs).toEqual(['status', '--porcelain']);
-	});
+		// PR #3668 feedback: the zero-routed flow probes twice — once inside
+		// reconciliation (committed-diff union) and once for the proved-empty
+		// clean verdict. Each probe is a toplevel resolution + porcelain pair.
+		expect(calls.length).toBe(4);
+		for (const call of calls) {
+			expect(call.command).toBe(RESOLVED_GIT);
+			// Array form, not a collapsed shell string — proves the fix did not
+			// regress into string-concatenation of the space-containing path.
+			expect(Array.isArray(call.args)).toBe(true);
+		}
+		expect(calls[0].args).toEqual(['rev-parse', '--show-toplevel']);
+		expect(calls[1].args).toContain('status');
+		expect(calls[1].args).toContain('--porcelain');
+		// PR #3668 feedback F-4: per-file untracked enumeration keeps a wholly
+		// untracked .swarm/ directory from collapsing out of the verdict.
+		expect(calls[1].args).toContain('--untracked-files=all');
+	}, 60_000);
 });

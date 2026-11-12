@@ -60,6 +60,11 @@ describe('swarm memory tools', () => {
 
 		expect(parsed.disabled).toBe(true);
 		expect(parsed.message).toContain('Swarm memory is disabled');
+		// PR #3668 feedback FB-008: pin the operator-facing rewording and the
+		// real schema key path so a revert to the model-facing text goes red.
+		expect(parsed.message).toContain('operator');
+		expect(parsed.message).toContain('memory.enabled');
+		expect(parsed.message).not.toContain('swarm.memory.enabled');
 	});
 
 	test('recall returns compact markdown and memory IDs from the gateway', async () => {
@@ -109,6 +114,11 @@ describe('swarm memory tools', () => {
 
 		expect(parsed.disabled).toBe(true);
 		expect(parsed.message).toContain('Swarm memory is disabled');
+		// PR #3668 feedback FB-008: pin the operator-facing rewording and the
+		// real schema key path so a revert to the model-facing text goes red.
+		expect(parsed.message).toContain('operator');
+		expect(parsed.message).toContain('memory.enabled');
+		expect(parsed.message).not.toContain('swarm.memory.enabled');
 	});
 
 	test('propose creates a pending proposal and reports that durable memory was not written', async () => {

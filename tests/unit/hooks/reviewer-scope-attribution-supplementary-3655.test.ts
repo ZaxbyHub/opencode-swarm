@@ -174,6 +174,12 @@ describe('reviewer scope attribution supplementary (issue #3655)', () => {
 		await completeCoder('c-nogit');
 		// Degraded reconciliation retains collecting; dispatch is typed retryable.
 		expect(generationFor('c-nogit')?.status).toBe('collecting');
+		// PR #3668 feedback FB-009: the degraded advisory itself is asserted.
+		const advisoryText = (
+			swarmState.agentSessions.get('parent')?.pendingAdvisoryMessages ?? []
+		).join('\n');
+		expect(advisoryText).toContain('REVIEWER_ATTRIBUTION_DEGRADED');
+		expect(advisoryText).toContain('ACTION[architect]');
 		const denial = await dispatchReviewer('r-nogit');
 		expect(denial.message).toContain('REVIEWER_ATTRIBUTION_EMPTY');
 		expect(denial.message).toContain('retryable=true');
