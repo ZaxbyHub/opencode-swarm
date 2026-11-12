@@ -2343,7 +2343,8 @@ export async function committedFilesBetweenAsync(
 	// reviewer-scope reconciliation consumes capture-root-relative paths, so
 	// callers whose `directory` may be a project subdirectory of the repo pass
 	// `{ relative: true }` to get paths relative to `directory` itself (paths
-	// outside it arrive `../`-prefixed and cannot match a declared scope).
+	// outside it are excluded from the diff output entirely, so they cannot
+	// match a declared scope).
 	// The sync twin keeps its toplevel-relative contract (its Stage B callers
 	// compare against whole-tree state).
 	const args = ['diff', '--name-only', '--no-renames'];

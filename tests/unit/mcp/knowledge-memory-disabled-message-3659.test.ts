@@ -7,8 +7,8 @@
  */
 import { describe, expect, test } from 'bun:test';
 import { swarmMemoryRecallAdapter } from '../../../src/mcp/adapters/knowledge-memory';
-import { safeRmRecursive, safeRmRecursive } from '../../helpers/safe-test-dir.js';
-import { canonicalMkdtemp, canonicalMkdtemp } from '../../helpers/tmpdir.js';
+import { safeRmRecursive } from '../../helpers/safe-test-dir.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 describe('knowledge-memory adapter disabled message (issue #3659)', () => {
 	test('disabled adapter message addresses the operator and stays inert', async () => {

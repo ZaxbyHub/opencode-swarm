@@ -31,6 +31,7 @@ import {
 	resetSwarmState,
 	startAgentSession,
 	startReviewerScopeGeneration,
+	swarmState,
 } from '../../../src/state';
 import { installActiveScopeBinding } from '../../helpers/active-scope-binding';
 import { safeRmRecursive } from '../../helpers/safe-test-dir.js';

@@ -89,6 +89,15 @@ export const _internals: {
 const NOCHANGE_STATUS_TIMEOUT_MS = 10_000;
 /** Byte cap for small bounded git text probes (rev-parse and friends). */
 const NOCHANGE_TEXT_BYTES = 4 * 1024;
+/**
+ * Byte cap for the porcelain status probe. Per-file enumeration
+ * (`--untracked-files=all`) expands untracked directories into one record per
+ * file, so an ordinary dirty workspace easily produces tens of KiB — this
+ * keeps the historical 256 KiB status bound rather than the tiny rev-parse
+ * one (PR #3668 Stage B: a shared 4 KiB cap degraded the flat committed case
+ * into a false DEGRADED on ~400-entry workspaces).
+ */
+const NOCHANGE_STATUS_BYTES = 256 * 1024;
 const MANIFEST_PROMPT_BYTES = 8 * 1024;
 
 function lifecycleTarget(args: unknown): string {
@@ -304,6 +313,7 @@ async function withCaptureRetry<T>(
 async function runBoundedGitText(
 	directory: string,
 	args: readonly string[],
+	maxBytes: number = NOCHANGE_TEXT_BYTES,
 ): Promise<string | null> {
 	let child: child_process.ChildProcess | undefined;
 	let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
@@ -338,7 +348,7 @@ async function runBoundedGitText(
 			child?.stdout?.on('data', (chunk: Buffer | string) => {
 				const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
 				stdoutBytes += bytes.byteLength;
-				if (stdoutBytes > NOCHANGE_TEXT_BYTES) {
+				if (stdoutBytes > maxBytes) {
 					killNull();
 					return;
 				}
@@ -412,11 +422,11 @@ async function captureWorkspaceDirtPaths(
 		'--show-toplevel',
 	]);
 	if (toplevel === null || toplevel.trim().length === 0) return null;
-	const status = await runBoundedGitText(directory, [
-		'status',
-		'--porcelain',
-		'--untracked-files=all',
-	]);
+	const status = await runBoundedGitText(
+		directory,
+		['status', '--porcelain', '--untracked-files=all'],
+		NOCHANGE_STATUS_BYTES,
+	);
 	if (status === null) return null;
 	const capturePrefix = path
 		.relative(toplevel.trim(), path.resolve(directory))
@@ -429,6 +439,11 @@ async function captureWorkspaceDirtPaths(
 		// Porcelain v1 line shape is exactly "XY <path>" (two status columns,
 		// one space, path; rename: "XY O -> N") — the X column may itself be a
 		// space (" M path"), so the line is NOT trimmed before the slice.
+		// Divergence from the settlement side's filterSwarmRuntimePorcelain
+		// (documented, fail-closed): porcelain v1 without -z C-quotes exotic
+		// names under core.quotePath, and a rename with one runtime side counts
+		// as dirt here where the v2 -z helper drops the record — both
+		// directions err toward "dirty", never toward a false clean.
 		for (const rawPath of trimmedLine.slice(3).split(' -> ')) {
 			if (rawPath.length === 0) continue;
 			const captureRelative = toCaptureRelativePath(rawPath, capturePrefix);
@@ -960,12 +975,21 @@ async function routeCommittedDeclaredChanges(
 	// F-3: the per-generation file cap DELETES the generation when exceeded;
 	// detect it up front so routing never destroys the generation mid-loop and
 	// the architect gets a typed, retryable advisory instead of a silent null.
+	// Capacity counts only NEWLY routed files: `candidates` mixes already
+	// guardrail-routed declared files (still dirty on disk) with genuinely new
+	// committed/dirty ones, and `generation.modifiedFiles.length` already owns
+	// the routed half (PR #3668 Stage B: double-counting emitted a false
+	// OVERFLOW when 130 routed-dirty files plus 1 committed file filled well
+	// under the cap).
+	const unroutedCandidateCount = candidates.filter(
+		(file) => !routedFiles.has(file),
+	).length;
 	const capacity =
 		MAX_REVIEWER_SCOPE_GENERATION_FILES - generation.modifiedFiles.length;
-	if (candidates.length > capacity) {
+	if (unroutedCandidateCount > capacity) {
 		pushAdvisory(
 			ensureAgentSession(parentSessionID),
-			`REVIEWER_SCOPE_GENERATION_OVERFLOW: task ${generation.taskId} generation ${generation.generation}: ${candidates.length} declared-scope changes exceed the ${MAX_REVIEWER_SCOPE_GENERATION_FILES}-file generation cap (${capacity} slots remaining); the generation is retained unclassified. ACTION[architect]: split the task or narrow the declared scope, then re-dispatch the coder`,
+			`REVIEWER_SCOPE_GENERATION_OVERFLOW: task ${generation.taskId} generation ${generation.generation}: ${unroutedCandidateCount} new declared-scope changes exceed the ${MAX_REVIEWER_SCOPE_GENERATION_FILES}-file generation cap (${capacity} slots remaining); the generation is retained unclassified. ACTION[architect]: split the task or narrow the declared scope, then re-dispatch the coder`,
 		);
 		return 'overflow';
 	}

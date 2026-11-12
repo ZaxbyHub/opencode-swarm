@@ -840,7 +840,7 @@ Optional scoped memory substrate for recall and proposal-only memory writes.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `enabled` | boolean | `false` | Enable agent access to `swarm_memory_recall`, `swarm_memory_propose`, and `swarm_memory_outcome` |
+| `enabled` | boolean | `false` | Enable agent access to `swarm_memory_recall`, `swarm_memory_propose`, and `swarm_memory_outcome`. When false (the default), the three tools are not registered in the main session either; execute-time disabled results remain only on surfaces that still reach the handlers (e.g. the MCP adapter). |
 | `provider` | string | `"sqlite"` | Memory provider. Supports default `"sqlite"` and legacy/debug `"local-jsonl"` |
 | `storageDir` | string | `".swarm/memory"` | Local storage directory under the project root |
 | `sqlite.path` | string | `".swarm/memory/memory.db"` | SQLite database path. Must remain inside `.swarm/` |

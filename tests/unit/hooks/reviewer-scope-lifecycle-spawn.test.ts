@@ -106,7 +106,7 @@ describe('reviewer-scope-lifecycle no-change status probe (issue #2236 regressio
 			// resolution first, then porcelain status with per-file
 			// untracked enumeration.
 			if (args[0] === 'rev-parse') {
-				return fakeCleanChild('C:\fixture-toplevel');
+				return fakeCleanChild('C:/fixture/toplevel');
 			}
 			return fakeCleanChild('');
 		}) as typeof _internals.spawn;
