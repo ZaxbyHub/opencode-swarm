@@ -25,7 +25,11 @@ const ENTRY_SKILL_BASELINES: Record<string, number> = {
 	'.opencode/skills/swarm-pr-review/SKILL.md': 1716,
 	'.opencode/skills/swarm-pr-feedback/SKILL.md': 797,
 	'.opencode/skills/writing-tests/SKILL.md': 424,
-	'.opencode/skills/issue-tracer/SKILL.md': 196,
+	// 201 (was 196): v3.0.2 adds Non-Negotiable Rules 13-14 (claim gate +
+	// collision handling) and three phase-bullet pointers after the verified
+	// 2026-11-11 zmem #455/#366 double-implementation; binding-policy growth,
+	// same one-way-ratchet precedent as the 12ca05ef9 swarm-pr-review bump.
+	'.opencode/skills/issue-tracer/SKILL.md': 201,
 	'.claude/skills/graphify/SKILL.md': 420,
 	'.claude/skills/commit-pr/SKILL.md': 478,
 };

@@ -18,7 +18,7 @@ Use the project skill at `.claude/skills/issue-tracer/SKILL.md` as your operatin
 
 This agent follows the v3 gate table and 11-phase workflow defined in `.opencode/skills/issue-tracer/SKILL.md`. Work locally under `.agents/issue-traces/<issue-slug>/` (see trace-init.sh). Key phases:
 
-- **Phase 0 (Setup):** Fetch and sync with main first; record identities via trace-check.sh tree-id; run trace-check.sh handshake.
+- **Phase 0 (Setup):** Fetch and sync with main first; run the claim gate in `.opencode/skills/issue-tracer/references/phase-0-setup.md` (an active foreign claim or a foreign closing PR means stop and ask the user; otherwise record a session token in `state.md`, post your claim, read it back); record identities via trace-check.sh tree-id; run trace-check.sh handshake.
 - **Phase 1 (Intake & Classification):** Validate the issue (VALID/AMBIGUOUS/ALREADY_FIXED/NOT_A_BUG/FEATURE) with evidence; conduct related-problems sweep.
 - **Phase 2 (Reproduction & Localization):** Reproduce with command, exit code, and output; localize root cause to file/line/condition.
 - **Phase 2.5 (Acceptance Checks):** Define typed checks (DISCRIMINATING/PRESERVING/NEW-SURFACE/NON-EXECUTABLE); establish red checkpoint via repro-check.sh.
