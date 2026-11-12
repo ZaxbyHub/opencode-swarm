@@ -1,5 +1,14 @@
 # Changelog
 
+## [7.204.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.204.1...v7.204.2) (2026-11-12)
+
+
+### Bug Fixes
+
+* **3655-3659:** closeout critic round — unborn-HEAD regression leg, truthful non-git caveat, ledger/gates backfill ([0c1f380](https://github.com/ZaxbyHub/opencode-swarm/commit/0c1f380dc64a0d0920e6b228f7d5dc92d6a6a679))
+* **3655:** git-resolved capture prefix — 8.3 short-form workspaces misclassified all dirt (FB-026) ([9986746](https://github.com/ZaxbyHub/opencode-swarm/commit/9986746aebcc157db13f847234cef59ee614dddf))
+* **stage-b:** reconcile committed coder output into reviewer-scope attribution; gate swarm_memory_* main-session registration ([#3655](https://github.com/ZaxbyHub/opencode-swarm/issues/3655), [#3659](https://github.com/ZaxbyHub/opencode-swarm/issues/3659)) ([86ff1f0](https://github.com/ZaxbyHub/opencode-swarm/commit/86ff1f07694fb91f30648029be15bc7654a6e3b3))
+
 ## [7.204.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.204.0...v7.204.1) (2026-11-12)
 
 
