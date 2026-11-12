@@ -388,6 +388,7 @@ export const CONFIG_CONSUMERS: Record<
 	memory: {
 		consumers: [
 			'src/agents/index.ts:createSwarmAgents',
+			'src/tools/plugin-registration.ts:buildPluginToolObject',
 			'src/commands/close/orchestrator.ts:handleCloseCommand',
 			'src/commands/memory-link.ts:handleMemoryLinkCommand',
 			'src/commands/memory.ts:handleMemoryConsolidationLogCommand',

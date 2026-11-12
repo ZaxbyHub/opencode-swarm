@@ -303,6 +303,15 @@ export interface ReviewerScopeGeneration {
 	captureDirectory: string;
 	/** Canonical workspace identity of `captureDirectory` (issue #2100 root correctness). */
 	workspaceIdentity: string;
+	/**
+	 * Git HEAD captured when the coder dispatch began (issue #3655). The
+	 * completion lifecycle reconciles committed changes since this head into
+	 * the generation when guardrail write-routing observed nothing. Undefined
+	 * on generations created before the field existed and null on non-git
+	 * workspaces — both reconcile as degraded (fail-closed typed denial),
+	 * never as proof of no change.
+	 */
+	dispatchGitHead?: string | null;
 	declaredFiles: string[];
 	modifiedFiles: string[];
 	modifiedFileFingerprints: import('./hooks/reviewer-scope-file-fingerprint.js').ReviewerScopeFileFingerprint[];
@@ -1559,6 +1568,8 @@ export function startReviewerScopeGeneration(input: {
 	captureDirectory: string;
 	/** Canonical workspace identity of `captureDirectory` (scope-binding identity). */
 	workspaceIdentity: string;
+	/** Dispatch-time git HEAD for committed-change reconciliation (issue #3655). */
+	dispatchGitHead?: string | null;
 	createdAt?: number;
 }): ReviewerScopeGeneration | null {
 	const session = swarmState.agentSessions.get(input.parentSessionID);
@@ -1605,6 +1616,8 @@ export function startReviewerScopeGeneration(input: {
 		modifiedFileFingerprints: [],
 		captureFailures: [],
 		status: 'collecting',
+		dispatchGitHead:
+			input.dispatchGitHead === undefined ? null : input.dispatchGitHead,
 		createdAt: now,
 	};
 	if (!latestByTask.has(generation.taskId)) {
@@ -1963,14 +1976,20 @@ export function peekReadyReviewerScopeGeneration(input: {
 }
 
 /**
- * Inspect the single generation for a task in a NON-reviewable status
- * (`no_change` | `mergeback_pending` | `mergeback_mismatch`) so lifecycle
- * denials can name the exact typed recovery action instead of generic stale.
+ * Inspect the single generation for a task in a NON-ready status
+ * (`collecting` | `no_change` | `mergeback_pending` | `mergeback_mismatch`)
+ * so lifecycle denials can name the exact typed recovery action instead of
+ * generic stale. `collecting` was added for issue #3655's typed
+ * attribution-empty / capture-incomplete denials.
  */
 export function peekReviewerScopeGenerationByStatus(input: {
 	parentSessionID: string;
 	taskId: string;
-	status: 'no_change' | 'mergeback_pending' | 'mergeback_mismatch';
+	status:
+		| 'collecting'
+		| 'no_change'
+		| 'mergeback_pending'
+		| 'mergeback_mismatch';
 	now?: number;
 }): ReviewerScopeGeneration | null {
 	const session = swarmState.agentSessions.get(input.parentSessionID);

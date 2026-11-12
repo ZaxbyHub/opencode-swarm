@@ -1,6 +1,14 @@
 import * as child_process from 'node:child_process';
+import {
+	committedFilesBetweenAsync,
+	isSwarmRuntimePath,
+	resolveCurrentGitHeadAsync,
+} from '../background/workspace-snapshot.js';
 import { stripKnownSwarmPrefix } from '../config/schema.js';
-import { sanitizeDiagnosticText } from '../scope/path-identity.js';
+import {
+	isPathWithinDeclaredScope,
+	sanitizeDiagnosticText,
+} from '../scope/path-identity.js';
 import {
 	canonicalWorkspaceIdentity,
 	getScopeBindingForParentDispatch,
@@ -14,12 +22,16 @@ import {
 	ensureAgentSession,
 	getReviewerScopeGenerationForCoderCall,
 	isReviewerScopeGenerationCurrent,
+	MAX_REVIEWER_SCOPE_GENERATION_FILES,
 	markReviewerScopeGenerationMergebackPending,
 	markReviewerScopeGenerationNoChange,
 	markReviewerScopeGenerationReady,
 	peekReadyReviewerScopeGeneration,
 	peekReviewerScopeGenerationByStatus,
 	type ReviewerScopeGeneration,
+	recordReviewerScopeGenerationCaptureFailure,
+	recordReviewerScopeGenerationFile,
+	recordReviewerScopeGenerationFileFingerprint,
 	resolveSessionWorkspaceDirectory,
 	startReviewerScopeGeneration,
 } from '../state.js';
@@ -74,6 +86,16 @@ export const _internals: {
 };
 
 const NOCHANGE_STATUS_TIMEOUT_MS = 10_000;
+/** Byte cap for small bounded git text probes (rev-parse and friends). */
+const NOCHANGE_TEXT_BYTES = 4 * 1024;
+/**
+ * Byte cap for the porcelain status probe. Per-file enumeration
+ * (`--untracked-files=all`) expands untracked directories into one record per
+ * file, so an ordinary dirty workspace easily produces tens of KiB — this
+ * keeps the historical 256 KiB status bound rather than the tiny rev-parse
+ * one (PR #3668 Stage B: a shared 4 KiB cap degraded the flat committed case
+ * into a false DEGRADED on ~400-entry workspaces).
+ */
 const NOCHANGE_STATUS_BYTES = 256 * 1024;
 const MANIFEST_PROMPT_BYTES = 8 * 1024;
 
@@ -231,7 +253,7 @@ function freshnessDenial(
 	}
 	return typedReviewerScopeError(
 		'REVIEWER_SCOPE_STALE',
-		`task ${generation.taskId} generation ${generation.generation}: coder post-write fingerprints changed before reviewer dispatch`,
+		`task ${generation.taskId} generation ${generation.generation}: coder post-write fingerprints changed before reviewer dispatch (retryable=false, responsible: architect)`,
 	);
 }
 
@@ -283,73 +305,60 @@ async function withCaptureRetry<T>(
 }
 
 /**
- * Bounded `git status --porcelain` probe for the no-change path. Only ever
- * answers clean/dirty/unverifiable — never blocks indefinitely, never floods
+ * Small bounded git text probe (rev-parse and friends). Null on any failure,
+ * timeout, or oversized output — never blocks indefinitely, never floods
  * stdout into memory, never leaks git errors into chat.
  */
-async function verifyWorkingTreeClean(
+async function runBoundedGitText(
 	directory: string,
-): Promise<'clean' | 'dirty' | 'unverifiable'> {
+	args: readonly string[],
+	maxBytes: number = NOCHANGE_TEXT_BYTES,
+): Promise<string | null> {
 	let child: child_process.ChildProcess | undefined;
 	let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
 	try {
-		// AGENTS.md invariant 3 requires the spawn-level timeout; the explicit
-		// timer below remains the single resolution path (settled-guarded), and
-		// the spawn option is defense in depth for a timer-schedule stall.
-		child = _internals.spawn(
-			_internals.resolveGitExecutable(),
-			['status', '--porcelain'],
-			{
-				cwd: directory,
-				stdio: ['ignore', 'pipe', 'ignore'],
-				timeout: NOCHANGE_STATUS_TIMEOUT_MS,
-				windowsHide: true,
-			},
-		);
-		return await new Promise<'clean' | 'dirty' | 'unverifiable'>((resolve) => {
+		child = _internals.spawn(_internals.resolveGitExecutable(), [...args], {
+			cwd: directory,
+			stdio: ['ignore', 'pipe', 'ignore'],
+			timeout: NOCHANGE_STATUS_TIMEOUT_MS,
+			windowsHide: true,
+		});
+		return await new Promise<string | null>((resolve) => {
 			let settled = false;
 			let stdoutBytes = 0;
 			const chunks: Buffer[] = [];
-			const finish = (value: 'clean' | 'dirty' | 'unverifiable'): void => {
+			const finish = (value: string | null): void => {
 				if (settled) return;
 				settled = true;
 				if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
 				resolve(value);
 			};
-			const killUnverifiable = (): void => {
+			const killNull = (): void => {
 				try {
 					child?.kill();
 				} catch {
 					// Best-effort cleanup; the child may already have exited.
 				}
-				finish('unverifiable');
+				finish(null);
 			};
-			timeoutHandle = setTimeout(killUnverifiable, NOCHANGE_STATUS_TIMEOUT_MS);
+			timeoutHandle = setTimeout(killNull, NOCHANGE_STATUS_TIMEOUT_MS);
 			timeoutHandle.unref?.();
-			child?.once('error', killUnverifiable);
+			child?.once('error', killNull);
 			child?.stdout?.on('data', (chunk: Buffer | string) => {
 				const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
 				stdoutBytes += bytes.byteLength;
-				if (stdoutBytes > NOCHANGE_STATUS_BYTES) {
-					killUnverifiable();
+				if (stdoutBytes > maxBytes) {
+					killNull();
 					return;
 				}
 				chunks.push(bytes);
 			});
 			child?.once('close', (exitCode) => {
-				if (exitCode !== 0) {
-					finish('unverifiable');
-					return;
-				}
-				finish(
-					Buffer.concat(chunks).toString('utf-8').trim().length === 0
-						? 'clean'
-						: 'dirty',
-				);
+				finish(exitCode === 0 ? Buffer.concat(chunks).toString('utf-8') : null);
 			});
 		});
 	} catch {
-		return 'unverifiable';
+		return null;
 	} finally {
 		if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
 		try {
@@ -358,6 +367,118 @@ async function verifyWorkingTreeClean(
 			// Best-effort cleanup; the child may already have exited.
 		}
 	}
+}
+
+/** Minimal C-style unquote for core.quotePath porcelain paths (PR #3668 F-4/F-8). */
+function unquotePorcelainPath(p: string): string {
+	if (p.length >= 2 && p.startsWith('"') && p.endsWith('"')) {
+		return p
+			.slice(1, -1)
+			.replace(/\\(["\\nt])/g, (_, e: string) =>
+				e === 'n' ? '\n' : e === 't' ? '\t' : e,
+			);
+	}
+	return p;
+}
+
+/**
+ * Strip the repo-toplevel→capture-root prefix from a porcelain/diff path so
+ * nested-root workspaces (project root a subdirectory of the git repo) get
+ * capture-relative paths, matching the declared-scope and runtime-filter
+ * bases (PR #3668 F-1). Returns null for paths outside the capture root —
+ * they cannot belong to this generation's declared scope.
+ */
+function toCaptureRelativePath(
+	p: string,
+	capturePrefix: string,
+): string | null {
+	const unquoted = unquotePorcelainPath(p);
+	const normalized = unquoted.replaceAll('\\', '/');
+	if (capturePrefix === '') return normalized;
+	if (normalized === capturePrefix) return '';
+	if (normalized.startsWith(`${capturePrefix}/`)) {
+		return normalized.slice(capturePrefix.length + 1);
+	}
+	return null;
+}
+
+/**
+ * Bounded workspace-dirt enumeration for the no-change/reconciliation paths.
+ * Returns the capture-root-relative non-runtime dirt paths plus the total
+ * dirt count (paths outside the capture root count as dirt but cannot carry
+ * declared scope), or null when git is unavailable — classification fails
+ * closed on null. Runtime paths (.swarm/...) never count as dirt (same
+ * rationale as the settlement side's filterSwarmRuntimePorcelain, #2271
+ * bug 2); `--untracked-files=all` keeps per-file granularity so a wholly
+ * untracked `.swarm/` directory cannot collapse a visible-code file out of
+ * the verdict (PR #3668 F-4).
+ */
+async function captureWorkspaceDirtPaths(
+	directory: string,
+): Promise<{ inRoot: string[]; totalDirt: number } | null> {
+	// The capture prefix comes from git itself (`rev-parse --show-prefix`),
+	// never from a lexical `path.relative(git-toplevel, resolve(directory))`:
+	// the two strings can disagree about Windows 8.3 short names (os.tmpdir()
+	// hands out `RUNNER~1` while `rev-parse --show-toplevel` prints the long
+	// form) — and path.relative treats those as DIFFERENT directories, so
+	// every porcelain path was classified "outside the capture root" on such
+	// runners, silently dropping declared-scope dirt from the routing loop
+	// (no fingerprint, no recorded failure) and reading no-change workspaces
+	// as dirty. `--show-prefix` is resolved by git, so the forms cannot
+	// disagree. A failed probe degrades (null), matching every other probe.
+	const showPrefix = await runBoundedGitText(directory, [
+		'rev-parse',
+		'--show-prefix',
+	]);
+	if (showPrefix === null) return null;
+	const capturePrefix = showPrefix.trim().replace(/\/+$/, '');
+	const status = await runBoundedGitText(
+		directory,
+		['status', '--porcelain', '--untracked-files=all'],
+		NOCHANGE_STATUS_BYTES,
+	);
+	if (status === null) return null;
+	const inRoot = new Set<string>();
+	let totalDirt = 0;
+	for (const line of status.split('\n')) {
+		const trimmedLine = line.replace(/\r$/, '');
+		if (trimmedLine.length < 4) continue;
+		// Porcelain v1 line shape is exactly "XY <path>" (two status columns,
+		// one space, path; rename: "XY O -> N") — the X column may itself be a
+		// space (" M path"), so the line is NOT trimmed before the slice.
+		// Divergence from the settlement side's filterSwarmRuntimePorcelain
+		// (documented, fail-closed): porcelain v1 without -z C-quotes exotic
+		// names under core.quotePath, and a rename with one runtime side counts
+		// as dirt here where the v2 -z helper drops the record — both
+		// directions err toward "dirty", never toward a false clean.
+		for (const rawPath of trimmedLine.slice(3).split(' -> ')) {
+			if (rawPath.length === 0) continue;
+			const captureRelative = toCaptureRelativePath(rawPath, capturePrefix);
+			if (captureRelative === null) {
+				// Outside the capture root: another actor's tree area. Counts as
+				// dirt for the clean verdict but can never carry declared scope.
+				totalDirt += 1;
+				continue;
+			}
+			if (isSwarmRuntimePath(captureRelative)) continue;
+			totalDirt += 1;
+			inRoot.add(captureRelative);
+		}
+	}
+	return { inRoot: [...inRoot], totalDirt };
+}
+
+/**
+ * Bounded `git status --porcelain` verdict for the no-change path. Only ever
+ * answers clean/dirty/unverifiable — never blocks indefinitely, never floods
+ * stdout into memory, never leaks git errors into chat.
+ */
+async function verifyWorkingTreeClean(
+	directory: string,
+): Promise<'clean' | 'dirty' | 'unverifiable'> {
+	const dirt = await captureWorkspaceDirtPaths(directory);
+	if (dirt === null) return 'unverifiable';
+	return dirt.totalDirt === 0 ? 'clean' : 'dirty';
 }
 
 function reviewerManifestPromptBlock(input: {
@@ -389,7 +510,7 @@ function reviewerManifestPromptBlock(input: {
 			: `${JSON.stringify(entry.path)} state=file bytes=${entry.bytes} sha256=${entry.sha256} delivery=${entry.mode}`,
 	);
 	const instruction = [
-		'completeness: exact — every guardrail-observed modified file is listed; none omitted.',
+		'completeness: attributed — every attributed modified file (guardrail-observed, committed since dispatch, or a declared-scope working-tree change) is listed; none omitted.',
 		'Every listed file must be verified against its sha256 (current bytes) before a verdict.',
 		'Files with delivery=manual MUST be inspected through read-only tools; inline bytes were not attached.',
 		'</reviewer_scope_manifest>',
@@ -529,6 +650,11 @@ export async function beginApprovedReviewerScopeLifecycle(input: {
 			input.args && typeof input.args === 'object'
 				? (input.args as Record<string, unknown>)
 				: null;
+		// Issue #3655: record the dispatch-time HEAD so coder completion can
+		// reconcile committed changes into the generation when guardrail
+		// write-routing observed nothing. A null head (non-git workspace or a
+		// failed rev-parse) reconciles as degraded — never as proof of no change.
+		const dispatchGitHead = await resolveCurrentGitHeadAsync(capture.directory);
 		return startReviewerScopeGeneration({
 			parentSessionID: input.parentSessionID,
 			taskId,
@@ -538,6 +664,7 @@ export async function beginApprovedReviewerScopeLifecycle(input: {
 			declaredFiles: binding.files,
 			captureDirectory: capture.directory,
 			workspaceIdentity: capture.identity,
+			dispatchGitHead,
 		})
 			? 'coder_started'
 			: null;
@@ -556,7 +683,7 @@ export async function beginApprovedReviewerScopeLifecycle(input: {
 			if (noChange) {
 				throw typedReviewerScopeError(
 					'REVIEWER_SCOPE_NO_CHANGE',
-					`task ${taskId} generation ${noChange.generation}: the coder made zero guardrail-observed writes and the workspace diff is empty — no reviewer pass is owed (retryable=true, responsible: architect). ACTION[architect]: satisfy acceptance deterministically, or re-dispatch the coder if changes were intended`,
+					`task ${taskId} generation ${noChange.generation}: the coder made zero guardrail-observed writes and no committed or working-tree change exists within the declared reviewer scope — no reviewer pass is owed (retryable=true, responsible: architect). ACTION[architect]: satisfy acceptance deterministically, or re-dispatch the coder if changes were intended`,
 				);
 			}
 			const pending = peekReviewerScopeGenerationByStatus({
@@ -583,6 +710,42 @@ export async function beginApprovedReviewerScopeLifecycle(input: {
 				throw typedReviewerScopeError(
 					'REVIEWER_SCOPE_MERGEBACK_MISMATCH',
 					`task ${taskId} generation ${mismatch.generation}: merge-back verification failed (${mergebackReason}) (retryable=true, responsible: architect). ACTION[architect]: resolve the lane merge conflict or re-dispatch the coder`,
+				);
+			}
+			// Issue #3655: a generation still `collecting` at reviewer dispatch
+			// is an attribution problem with a typed cause, not terminal
+			// fingerprint drift. Zero routed files means attribution was empty
+			// (or degraded — reconciliation could not prove the committed diff);
+			// routed files without complete fingerprints is a capture problem
+			// whose retryability follows the recorded failure class.
+			const collecting = peekReviewerScopeGenerationByStatus({
+				parentSessionID: input.parentSessionID,
+				taskId,
+				status: 'collecting',
+			});
+			if (collecting) {
+				if (collecting.modifiedFiles.length === 0) {
+					throw typedReviewerScopeError(
+						'REVIEWER_ATTRIBUTION_EMPTY',
+						`task ${taskId} generation ${collecting.generation}: coder attribution was empty — zero guardrail-observed writes were routed and no committed declared change was proven (declaredFiles=${collecting.declaredFiles.length}, routed=0, committed-in-scope=unproven-or-empty, retryable=true, responsible: architect). ACTION[architect]: inspect the workspace for writes that bypassed guardrails, or re-dispatch the coder`,
+					);
+				}
+				const permanentCaptureFailure = collecting.captureFailures.find(
+					(entry) => entry.retryable === false,
+				);
+				if (permanentCaptureFailure) {
+					throw typedReviewerScopeError(
+						'REVIEWER_CAPTURE_FAILED',
+						`task ${taskId} generation ${collecting.generation}: file ${sanitizeDiagnosticText(permanentCaptureFailure.file, 120)} capture failed permanently (${permanentCaptureFailure.code}, retryable=false, responsible: architect). ACTION[architect]: resolve the ${permanentCaptureFailure.code} condition, then re-dispatch the coder so completion recaptures before dispatching the reviewer`,
+					);
+				}
+				const shown = collecting.captureFailures
+					.map((entry) => sanitizeDiagnosticText(entry.file, 120))
+					.slice(0, 5)
+					.join(', ');
+				throw typedReviewerScopeError(
+					'REVIEWER_CAPTURE_INCOMPLETE',
+					`task ${taskId} generation ${collecting.generation}: ${collecting.modifiedFiles.length - collecting.modifiedFileFingerprints.length} file(s) have no stored fingerprint${shown ? ` (capture failures: ${shown})` : ''} (retryable=true, responsible: architect). ACTION[architect]: re-dispatch the coder so capture re-runs, or inspect the capture failures`,
 				);
 			}
 			throw typedReviewerScopeError(
@@ -742,6 +905,173 @@ export async function beginApprovedReviewerScopeLifecycle(input: {
 	return null;
 }
 
+/**
+ * Issue #3655 (extended by PR #3668 feedback F-2): reconcile committed and
+ * declared-scope working-tree attribution into the generation at coder
+ * completion — runs on EVERY completion whose declared scope still has
+ * unrouted files (the shared-root counterpart of the background ingestion
+ * bridge in stage-b-gates).
+ *
+ * - `skipped` — every declared file was already guardrail-routed; no git
+ *   work needed (read-only fast path).
+ * - `routed` — at least one newly routed in-declared-scope file entered the
+ *   generation (fingerprints captured or typed failures recorded); the caller
+ *   continues into the completeness/ready path with a refreshed view.
+ * - `proved-empty` — the committed diff was PROVEN to contain nothing in
+ *   declared scope; classification falls to the working-tree verdict.
+ * - `degraded` — attribution could not be proven (no dispatch head recorded,
+ *   current head unresolvable, or a failed diff). Never treated as proof of
+ *   no change. Zero-routed generations stay `collecting` for the typed
+ *   attribution-empty denial at reviewer dispatch; routed completions
+ *   proceed on their guardrail-routed attribution with a DEGRADED advisory
+ *   (closeout review: a non-git workspace can never produce a dispatch
+ *   head, so a hard denial would repeat forever).
+ * - `overflow` — the declared-scope candidate set exceeds the generation
+ *   file cap; the OVERFLOW advisory is pushed here and the caller returns
+ *   without classification.
+ */
+async function routeCommittedDeclaredChanges(
+	parentSessionID: string,
+	generation: ReviewerScopeGeneration,
+): Promise<'routed' | 'proved-empty' | 'degraded' | 'overflow' | 'skipped'> {
+	// PR #3668 feedback F-2: reconcile on EVERY completion whose declared scope
+	// still has unrouted files (previously gated on zero routed writes, which
+	// silently under-reported committed declared output when at least one
+	// write was guardrail-observed). A fully routed scope needs no git work.
+	const routedFiles = new Set(generation.modifiedFiles);
+	const missingDeclared = generation.declaredFiles.filter(
+		(file) => !routedFiles.has(file),
+	);
+	// An empty declared scope keeps the proved-empty classification (the
+	// read-only no-change contract), never an empty ready publication.
+	if (generation.declaredFiles.length > 0 && missingDeclared.length === 0) {
+		return 'skipped';
+	}
+	const dispatchHead = generation.dispatchGitHead ?? null;
+	if (dispatchHead === null) return 'degraded';
+	const currentHead = await resolveCurrentGitHeadAsync(
+		generation.captureDirectory,
+	);
+	if (currentHead === null) return 'degraded';
+	// `relative: true` (F-1): the diff is run with cwd = captureDirectory, so
+	// the returned paths are capture-root-relative even when the project root
+	// is a subdirectory of the git repo; `../`-prefixed paths outside the root
+	// cannot match declared scope.
+	const committed = await committedFilesBetweenAsync(
+		generation.captureDirectory,
+		dispatchHead,
+		currentHead,
+		{ relative: true },
+	);
+	if (committed === null) return 'degraded';
+	// Declared-scope working-tree changes (written but not committed, or never
+	// guardrail-observed) join the union — capture-relative so nested roots
+	// match (captureWorkspaceDirtPaths).
+	const dirt = await captureWorkspaceDirtPaths(generation.captureDirectory);
+	if (dirt === null) return 'degraded';
+	const declaredDirt = dirt.inRoot.filter((file) =>
+		isPathWithinDeclaredScope(
+			file,
+			generation.declaredFiles,
+			generation.captureDirectory,
+		),
+	);
+	const candidates = [
+		...new Set([
+			...committed.filter((file) => !isSwarmRuntimePath(file)),
+			...declaredDirt,
+		]),
+	].filter((file) =>
+		isPathWithinDeclaredScope(
+			file,
+			generation.declaredFiles,
+			generation.captureDirectory,
+		),
+	);
+	if (candidates.length === 0) return 'proved-empty';
+	// F-3: the per-generation file cap DELETES the generation when exceeded;
+	// detect it up front so routing never destroys the generation mid-loop and
+	// the architect gets a typed, retryable advisory instead of a silent null.
+	// Capacity counts only NEWLY routed files: `candidates` mixes already
+	// guardrail-routed declared files (still dirty on disk) with genuinely new
+	// committed/dirty ones, and `generation.modifiedFiles.length` already owns
+	// the routed half (PR #3668 Stage B: double-counting emitted a false
+	// OVERFLOW when 130 routed-dirty files plus 1 committed file filled well
+	// under the cap).
+	const unroutedCandidateCount = candidates.filter(
+		(file) => !routedFiles.has(file),
+	).length;
+	const capacity =
+		MAX_REVIEWER_SCOPE_GENERATION_FILES - generation.modifiedFiles.length;
+	if (unroutedCandidateCount > capacity) {
+		pushAdvisory(
+			ensureAgentSession(parentSessionID),
+			`REVIEWER_SCOPE_GENERATION_OVERFLOW: task ${generation.taskId} generation ${generation.generation}: ${unroutedCandidateCount} new declared-scope changes exceed the ${MAX_REVIEWER_SCOPE_GENERATION_FILES}-file generation cap (${capacity} slots remaining); the generation is retained unclassified. ACTION[architect]: split the task or narrow the declared scope, then re-dispatch the coder`,
+		);
+		return 'overflow';
+	}
+	let routed = 0;
+	const deadlineAt = Date.now() + REVIEWER_SCOPE_CAPTURE_BATCH_DEADLINE_MS;
+	for (const file of candidates) {
+		if (
+			!recordReviewerScopeGenerationFile({
+				parentSessionID,
+				taskId: generation.taskId,
+				coderCallID: generation.coderCallID,
+				file,
+			})
+		) {
+			continue;
+		}
+		routed += 1;
+		// F-6/F-3: bounded attempts + batch deadline at this hook-path capture
+		// site, matching the guardrails sibling convention.
+		let fingerprint = null;
+		for (
+			let attempt = 1;
+			attempt <= REVIEWER_SCOPE_CAPTURE_ATTEMPTS;
+			attempt += 1
+		) {
+			const capture = captureReviewerScopeFileFingerprint(
+				generation.captureDirectory,
+				file,
+				{ deadlineAt },
+			);
+			if (capture.kind !== 'capture_failed') {
+				fingerprint = reviewerScopeCaptureToFingerprint(capture);
+				break;
+			}
+			if (
+				!capture.retryable ||
+				Date.now() > deadlineAt ||
+				attempt === REVIEWER_SCOPE_CAPTURE_ATTEMPTS
+			) {
+				recordReviewerScopeGenerationCaptureFailure({
+					parentSessionID,
+					taskId: generation.taskId,
+					coderCallID: generation.coderCallID,
+					file: capture.file,
+					code: capture.code,
+					retryable: capture.retryable,
+				});
+				break;
+			}
+		}
+		if (fingerprint) {
+			recordReviewerScopeGenerationFileFingerprint({
+				parentSessionID,
+				taskId: generation.taskId,
+				coderCallID: generation.coderCallID,
+				fingerprint,
+			});
+		}
+	}
+	// Files entered the generation even when every capture failed — the
+	// completeness check and dispatch denials own that state (capture
+	// incomplete / capture failed), not the empty-attribution class.
+	return routed > 0 ? 'routed' : 'degraded';
+}
+
 /** Mark a synchronous coder terminal; background running placeholders are inert. */
 export async function completeReviewerScopeLifecycle(input: {
 	directory: string;
@@ -778,45 +1108,118 @@ export async function completeReviewerScopeLifecycle(input: {
 	});
 	if (!generation) return null;
 	if (generation.status !== 'collecting') return null;
-	if (generation.modifiedFiles.length === 0) {
-		const status = await verifyWorkingTreeClean(generation.captureDirectory);
-		if (status === 'clean') {
-			return markReviewerScopeGenerationNoChange({
+	let scoped = generation;
+	{
+		// Issue #3655 (extended by PR #3668 feedback F-2): classify from
+		// guardrail routing only after reconciling committed AND declared-scope
+		// working-tree attribution — on every completion whose declared scope
+		// still has unrouted files, not only the zero-routed case.
+		const reconciliation = await routeCommittedDeclaredChanges(
+			input.parentSessionID,
+			scoped,
+		);
+		if (reconciliation === 'degraded') {
+			if (scoped.modifiedFiles.length > 0) {
+				// Closeout review (PR #3668): routed completions must NOT lose
+				// their attribution to a degraded git channel. The cases this
+				// rescues: the coder dispatched before the repo's first commit
+				// (unborn HEAD — no dispatch head was recorded, but the commit
+				// lands during the coder's run, so reviewer dispatch resolves
+				// HEAD by then), and a transiently failed committed diff. The
+				// guardrail-routed attribution stands; the advisory records
+				// that the committed-diff leg was unproven, and the
+				// completeness/ready path proceeds with what was routed
+				// (over-review, not denial). A workspace with NO git at all
+				// still cannot dispatch the reviewer afterward (review-receipt-
+				// scope.ts resolveHeadSha denies with head_timeout,
+				// retryable=true) — a pre-existing limitation outside this
+				// PR's scope, surfaced to the architect as a retryable denial.
+				pushAdvisory(
+					ensureAgentSession(input.parentSessionID),
+					`REVIEWER_ATTRIBUTION_DEGRADED: task ${taskId} generation ${scoped.generation}: committed-change reconciliation could not be proven (no dispatch git head, unresolvable current head, or failed committed diff); proceeding on the ${scoped.modifiedFiles.length} guardrail-routed file(s). ACTION[architect]: if committed output was expected beyond the routed writes, inspect the workspace manually`,
+				);
+				// Fall through to completeness/ready with the routed view.
+			} else {
+				// Zero-routed completion with an unproven git channel: a clean
+				// working tree is NOT proof of no mutation, and nothing was
+				// routed — retain for the typed reviewer-dispatch denial.
+				pushAdvisory(
+					ensureAgentSession(input.parentSessionID),
+					`REVIEWER_ATTRIBUTION_DEGRADED: task ${taskId} generation ${scoped.generation}: committed-change reconciliation could not be proven (no dispatch git head, unresolvable current head, or failed committed diff); the generation is retained for a typed reviewer-dispatch denial. ACTION[architect]: verify git availability for the workspace, then re-dispatch the coder`,
+				);
+				return null;
+			}
+		}
+		if (reconciliation === 'overflow') {
+			// The generation-cap advisory was already pushed by the
+			// reconciliation; the generation stays collecting for the typed
+			// (retryable) reviewer-dispatch denial. Never terminal.
+			return null;
+		}
+		if (reconciliation === 'routed') {
+			const refreshed = getReviewerScopeGenerationForCoderCall({
 				parentSessionID: input.parentSessionID,
 				taskId,
 				coderCallID: input.callID,
-			})
-				? 'coder_no_change'
-				: null;
+			});
+			if (
+				!refreshed ||
+				refreshed.status !== 'collecting' ||
+				refreshed.modifiedFiles.length === 0
+			) {
+				// Routing raced with another transition; leave the recorded
+				// state to the dispatch-time denial paths.
+				return null;
+			}
+			scoped = refreshed;
+		} else if (reconciliation === 'proved-empty') {
+			// proved-empty: the committed diff and the declared-scope working
+			// tree were proven to contain nothing attributable. Truthfulness
+			// now rests on the rest of the working tree.
+			const status = await verifyWorkingTreeClean(scoped.captureDirectory);
+			if (status === 'clean') {
+				return markReviewerScopeGenerationNoChange({
+					parentSessionID: input.parentSessionID,
+					taskId,
+					coderCallID: input.callID,
+				})
+					? 'coder_no_change'
+					: null;
+			}
+			// Dirty or unverifiable workspace with zero observed writes: changes
+			// escaped guardrail observation. Fail closed — retained, actionable.
+			pushAdvisory(
+				ensureAgentSession(input.parentSessionID),
+				`REVIEWER_SCOPE_UNATTRIBUTED_CHANGE: task ${taskId} generation ${scoped.generation}: the workspace diff was ${status === 'dirty' ? 'dirty' : 'not verifiable'} while zero guardrail-observed writes were routed. ACTION[architect]: inspect the workspace for writes that bypassed guardrails, then re-dispatch the coder`,
+			);
+			return null;
 		}
-		// Dirty or unverifiable workspace with zero observed writes: changes
-		// escaped guardrail observation. Fail closed — retained, actionable.
-		pushAdvisory(
-			ensureAgentSession(input.parentSessionID),
-			`REVIEWER_SCOPE_UNATTRIBUTED_CHANGE: task ${taskId} generation ${generation.generation}: the workspace diff was ${status === 'dirty' ? 'dirty' : 'not verifiable'} while zero guardrail-observed writes were routed. ACTION[architect]: inspect the workspace for writes that bypassed guardrails, then re-dispatch the coder`,
-		);
-		return null;
+		// 'skipped': every declared file was already routed — proceed to the
+		// completeness/ready path with the existing generation view.
 	}
+	const generationScoped = scoped;
 	const complete =
-		generation.modifiedFiles.length ===
-			generation.modifiedFileFingerprints.length &&
-		generation.modifiedFiles.every((file) =>
-			generation.modifiedFileFingerprints.some((entry) => entry.file === file),
+		generationScoped.modifiedFiles.length ===
+			generationScoped.modifiedFileFingerprints.length &&
+		generationScoped.modifiedFiles.every((file) =>
+			generationScoped.modifiedFileFingerprints.some(
+				(entry) => entry.file === file,
+			),
 		);
 	if (!complete) {
 		const missing =
-			generation.modifiedFiles.length -
-			generation.modifiedFileFingerprints.length;
+			generationScoped.modifiedFiles.length -
+			generationScoped.modifiedFileFingerprints.length;
 		pushAdvisory(
 			ensureAgentSession(input.parentSessionID),
-			`REVIEWER_CAPTURE_INCOMPLETE: task ${taskId} generation ${generation.generation}: ${missing} file(s) have no stored fingerprint after coder completion; the generation is retained but not reviewable yet. ACTION[architect]: retry the coder so capture re-runs, or inspect ${generation.captureFailures
+			`REVIEWER_CAPTURE_INCOMPLETE: task ${taskId} generation ${generationScoped.generation}: ${missing} file(s) have no stored fingerprint after coder completion; the generation is retained but not reviewable yet. ACTION[architect]: retry the coder so capture re-runs, or inspect ${generationScoped.captureFailures
 				.map((entry) => sanitizeDiagnosticText(entry.file, 120))
 				.slice(0, 5)
 				.join(', ')} capture failures (responsible: architect)`,
 		);
 		return null;
 	}
-	const laneIdentity = generation.workspaceIdentity;
+	const laneIdentity = generationScoped.workspaceIdentity;
 	// Both this identity and the merge-back verifier's primary identity derive
 	// from the same plugin root (ctx.directory) in the single-host model; the
 	// verifier records the exact primary identity it verified on settlement.
