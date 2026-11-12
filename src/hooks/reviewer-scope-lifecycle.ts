@@ -1114,13 +1114,19 @@ export async function completeReviewerScopeLifecycle(input: {
 		if (reconciliation === 'degraded') {
 			if (scoped.modifiedFiles.length > 0) {
 				// Closeout review (PR #3668): routed completions must NOT lose
-				// their attribution to a degraded git channel — in a non-git
-				// workspace (explicitly supported) or after an unborn-HEAD
-				// rev-parse, re-dispatching the coder can never create git, so
-				// the retryable denial would repeat forever. The guardrail-
-				// routed attribution stands; the advisory records that the
-				// committed-diff leg was unproven, and the completeness/ready
-				// path proceeds with what was routed (over-review, not denial).
+				// their attribution to a degraded git channel. The cases this
+				// rescues: the coder dispatched before the repo's first commit
+				// (unborn HEAD — no dispatch head was recorded, but the commit
+				// lands during the coder's run, so reviewer dispatch resolves
+				// HEAD by then), and a transiently failed committed diff. The
+				// guardrail-routed attribution stands; the advisory records
+				// that the committed-diff leg was unproven, and the
+				// completeness/ready path proceeds with what was routed
+				// (over-review, not denial). A workspace with NO git at all
+				// still cannot dispatch the reviewer afterward (review-receipt-
+				// scope.ts resolveHeadSha denies with head_timeout,
+				// retryable=true) — a pre-existing limitation outside this
+				// PR's scope, surfaced to the architect as a retryable denial.
 				pushAdvisory(
 					ensureAgentSession(input.parentSessionID),
 					`REVIEWER_ATTRIBUTION_DEGRADED: task ${taskId} generation ${scoped.generation}: committed-change reconciliation could not be proven (no dispatch git head, unresolvable current head, or failed committed diff); proceeding on the ${scoped.modifiedFiles.length} guardrail-routed file(s). ACTION[architect]: if committed output was expected beyond the routed writes, inspect the workspace manually`,

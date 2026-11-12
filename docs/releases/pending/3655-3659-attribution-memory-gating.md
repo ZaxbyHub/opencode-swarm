@@ -11,8 +11,10 @@ Two shared-root workflow fixes:
 
 - A coder delegation whose declared output was committed, left uncommitted, or
   otherwise missed guardrail write-routing now reaches the reviewer gate (in
-  git workspaces; non-git workspaces keep the typed degraded denial for
-  committed attribution, while guardrail-routed completions proceed). At
+  git workspaces; a workspace with no git at all still cannot dispatch the
+  reviewer — the pre-existing `head_timeout` denial — but guardrail-routed
+  completions now proceed when the git channel is merely degraded, e.g. the
+  coder dispatched into a repo before its first commit). At
   every coder completion whose declared scope still has unrouted files, the
   reviewer-scope generation reconciles declared-scope changes from two sources
   — the committed diff since the dispatch-time HEAD and the declared-scope

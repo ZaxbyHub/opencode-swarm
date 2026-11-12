@@ -15,6 +15,10 @@ import * as path from 'node:path';
 import { committedFilesBetweenAsync } from '../../../src/background/workspace-snapshot';
 import { resolveReviewerScopeTaskId } from '../../../src/hooks/review-receipt-scope';
 import {
+	captureReviewerScopeFileFingerprint,
+	reviewerScopeCaptureToFingerprint,
+} from '../../../src/hooks/reviewer-scope-file-fingerprint';
+import {
 	beginApprovedReviewerScopeLifecycle,
 	completeReviewerScopeLifecycle,
 } from '../../../src/hooks/reviewer-scope-lifecycle';
@@ -22,6 +26,7 @@ import {
 	getReviewerScopeGenerationForCoderCall,
 	MAX_REVIEWER_SCOPE_GENERATION_FILES,
 	recordReviewerScopeGenerationFile,
+	recordReviewerScopeGenerationFileFingerprint,
 	resetSwarmState,
 	startAgentSession,
 	swarmState,
@@ -232,6 +237,71 @@ describe('reviewer scope nested-root reconciliation (PR #3668 feedback)', () => 
 		const denial = await dispatchReviewerAt(proj, 'r-cap');
 		expect(denial.message).toContain('REVIEWER_ATTRIBUTION_EMPTY');
 		expect(denial.message).toContain('retryable=true');
+	}, 60_000);
+
+	test('degraded reconciliation with routed files proceeds to ready and dispatch (unborn-HEAD leg)', async () => {
+		// Closeout-critic round: the completion arm's degraded-continue branch
+		// (routed files survive a degraded git channel) had no regression leg —
+		// mutating its routed-files guard to `if (false)` passed the whole
+		// suite. This leg discriminates: the coder dispatches into a repo with
+		// NO commits (unborn HEAD, so no dispatch git head is recorded), routes
+		// a file through the guardrail, then commits. Reconciliation is
+		// degraded (dispatchHead null), but the routed attribution must stand:
+		// completion reaches ready with the DEGRADED advisory, and reviewer
+		// dispatch is claimed (HEAD resolves by then).
+		resetSwarmState();
+		const unborn = path.join(parent, 'unborn');
+		fs.mkdirSync(path.join(unborn, 'docs'), { recursive: true });
+		git(['init'], unborn);
+		git(['config', 'user.email', 'test@example.com'], unborn);
+		git(['config', 'user.name', 'Test'], unborn);
+		startAgentSession('parent', 'architect', unborn);
+		expect(await beginCoderAt(unborn, 'c-unborn')).toBe('coder_started');
+		fs.writeFileSync(path.join(unborn, 'docs/a.md'), 'routed bytes\n');
+		expect(
+			recordReviewerScopeGenerationFile({
+				parentSessionID: 'parent',
+				taskId: TASK_ID,
+				coderCallID: 'c-unborn',
+				file: 'docs/a.md',
+			}),
+		).toBe(true);
+		// Degraded reconciliation never reaches the reconciliation capture
+		// loop (it returns at the null-dispatch-head check), so the routed
+		// file's fingerprint must come from the write-time guardrail record —
+		// exactly what the test replicates here.
+		const capture = captureReviewerScopeFileFingerprint(unborn, 'docs/a.md');
+		if (capture.kind === 'capture_failed') {
+			throw new Error(`fixture capture failed: ${capture.code}`);
+		}
+		const fingerprint = reviewerScopeCaptureToFingerprint(capture);
+		expect(fingerprint).not.toBeNull();
+		expect(
+			recordReviewerScopeGenerationFileFingerprint({
+				parentSessionID: 'parent',
+				taskId: TASK_ID,
+				coderCallID: 'c-unborn',
+				fingerprint: fingerprint!,
+			}),
+		).toBe(true);
+		git(['add', 'docs/a.md'], unborn);
+		git(['commit', '-m', 'first commit after dispatch'], unborn);
+		expect(await completeCoderAt(unborn, 'c-unborn')).not.toBeNull();
+		const advisoryText = advisories().join('\n');
+		expect(advisoryText).toContain('REVIEWER_ATTRIBUTION_DEGRADED');
+		expect(advisoryText).toContain(
+			'proceeding on the 1 guardrail-routed file(s)',
+		);
+		const generation = getReviewerScopeGenerationForCoderCall({
+			parentSessionID: 'parent',
+			taskId: TASK_ID,
+			coderCallID: 'c-unborn',
+		});
+		expect(generation?.status).toBe('ready');
+		expect(generation?.modifiedFiles).toContain('docs/a.md');
+		expect((await dispatchReviewerAt(unborn, 'r-unborn')).value).toBe(
+			'reviewer_claimed',
+		);
 	}, 60_000);
 
 	test('routed-dirty files do not double-count toward the generation cap', async () => {
