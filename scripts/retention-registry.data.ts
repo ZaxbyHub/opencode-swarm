@@ -2179,7 +2179,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/evidence/manager.ts', 'src/tools/write-retro.ts', 'src/tools/sbom-generate.ts', 'src/summaries/manager.ts'],
 		writerCitations: [
-			'src/evidence/manager.ts:196 saveEvidence — withEvidenceLock, bundle trim MAX_BUNDLE_ENTRIES 100 (:263-267), EVINENCE_MAX_JSON_BYTES 500 KiB, temp+rename :288-298',
+			'src/evidence/manager.ts:196 saveEvidence — withEvidenceLock, bundle trim MAX_BUNDLE_ENTRIES 100 (:263-267), EVINENCE_MAX_JSON_BYTES 500 KiB, temp+rename :288-299',
 			'src/evidence/manager.ts:701 archiveEvidence — retention maxAgeDays 30 / maxBundles 10 defaults (src/commands/close/archive-stage.ts:498-544)',
 			'src/summaries/manager.ts:132 storeSummary — atomic (summaries row below owns lifecycle)',
 		],
@@ -2191,7 +2191,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			bound: '≤100 entries + ≤500 KiB per bundle; retention 30 d / 10 bundles; evidence/ close-scoped',
 			scope: 'per-key',
 			keyspaceBound:
-				'FINITE BY A REAL GLOBAL REAPER: one key per taskId bundle directory, and archiveEvidence enumerates the ENTIRE keyspace via listEvidenceTaskIds(directory) and deletes across it (src/evidence/manager.ts:689-751) — the maxAgeDays/maxBundles retention selects victims by comparing every remaining bundle against a global count (src/evidence/manager.ts:732-743), so unlike the ≤100-entry/≤500-KiB per-bundle cap in this row\'s `bound` field, that retention IS a keyspace bound. Belt-and-braces, "evidence" is also in ACTIVE_STATE_DIRS_TO_CLEAN and the whole tree is recursively removed at close (src/commands/close/constants.ts:253-269; src/commands/close/clean-stage.ts:176-190). CAVEAT: archiveEvidence has exactly two callers — /swarm close (src/commands/close/archive-stage.ts:531-536, 30 d / 10 bundles), where the subsequent full-tree removal makes it largely redundant, and the operator-invoked /swarm archive (src/commands/archive.ts:95, 90 d / 1000 bundles). It is not wired to any automatic interval, so mid-session reclamation requires one of those two commands to run.',
+				'FINITE BY A REAL GLOBAL REAPER: one key per taskId bundle directory, and archiveEvidence enumerates the ENTIRE keyspace via listEvidenceTaskIds(directory) and deletes across it (src/evidence/manager.ts:689-751) — the maxAgeDays/maxBundles retention selects victims by comparing every remaining bundle against a global count (src/evidence/manager.ts:732-755), so unlike the ≤100-entry/≤500-KiB per-bundle cap in this row\'s `bound` field, that retention IS a keyspace bound. Belt-and-braces, "evidence" is also in ACTIVE_STATE_DIRS_TO_CLEAN and the whole tree is recursively removed at close (src/commands/close/constants.ts:253-269; src/commands/close/clean-stage.ts:176-190). CAVEAT: archiveEvidence has exactly two callers — /swarm close (src/commands/close/archive-stage.ts:531-536, 30 d / 10 bundles), where the subsequent full-tree removal makes it largely redundant, and the operator-invoked /swarm archive (src/commands/archive.ts:95, 90 d / 1000 bundles). It is not wired to any automatic interval, so mid-session reclamation requires one of those two commands to run.',
 			citation: 'src/evidence/manager.ts:261-280; src/commands/close/archive-stage.ts:498-544',
 		},
 		readBound: { pattern: 'full-file', bound: '≤500 KiB per bundle by write-side enforcement', sync: false, citation: 'src/evidence/manager.ts:275-280,387-416' },

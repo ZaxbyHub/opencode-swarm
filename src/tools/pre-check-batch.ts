@@ -92,7 +92,6 @@ type DiffBaseAttempt = {
 
 type ClassifiedGitOutcome =
 	| { kind: 'systemic' }
-	| { kind: 'unresolvable' }
 	| { kind: 'failed' }
 	| { kind: 'ok'; stdout: string };
 
@@ -138,14 +137,25 @@ async function runGitClassified(
 	) {
 		return { kind: 'systemic' };
 	}
+	// Timeout/abort teardown with uncollectable streams reports spawn-error
+	// with BOTH truncation flags and EMPTY output (external-tool-runner
+	// teardown path) — a systemic failure, not a candidate-unusable overflow:
+	// a true overflow kill collects partial text, so non-empty stdout with
+	// truncation flags stays the per-candidate `failed` below.
+	if (
+		result.status === 'spawn-error' &&
+		result.stdoutTruncated &&
+		result.stderrTruncated &&
+		result.stdout === '' &&
+		result.stderr === ''
+	) {
+		return { kind: 'systemic' };
+	}
 	if (result.status === 'completed' && result.exitCode !== 0) {
 		return { kind: 'failed' };
 	}
 	if (result.stdoutTruncated || result.stderrTruncated) {
 		return { kind: 'failed' };
-	}
-	if (result.status !== 'completed') {
-		return { kind: 'systemic' };
 	}
 	return { kind: 'ok', stdout: result.stdout };
 }
@@ -155,18 +165,55 @@ async function runGitClassified(
  * diff parses (#3131). The envelope is ALWAYS present so a null resolution
  * still carries the full attempt list for the named diagnostic.
  */
+type DiffBaseResolution = {
+	mergeBase: string;
+	committedLines: Map<string, Set<number>>;
+	mergeBaseEqualsHead: boolean;
+};
+
+type DiffBaseEnvelope = {
+	attempted: DiffBaseAttempt[];
+	resolution: DiffBaseResolution | null;
+	failureCause?: 'git-executable' | 'head-resolution';
+};
+
+/**
+ * Single-entry batch memo for the shared diff-base resolver (PR-feedback
+ * FB-003): both consumers run back-to-back inside one pre_check_batch on
+ * the same directory, and while HEAD is unchanged the resolution is purely
+ * HEAD-derived, so the second consumer reuses the first consumer's envelope
+ * instead of re-running the full candidate walk. Cleared at the top of
+ * runPreCheckBatch (batch scope); the directory+headSha key self-invalidates
+ * on any HEAD move. Disclosed residual: a fetch that moves a candidate ref
+ * WITHOUT moving HEAD between two direct (non-batch) calls could serve a
+ * stale mergeBase — same class as the existing changedLineRangesMemo batch
+ * cache.
+ */
+let diffBaseResolutionMemo: {
+	directory: string;
+	headSha: string | null;
+	envelope: DiffBaseEnvelope;
+} | null = null;
+
+/**
+ * Per-directory cooldown for the always-visible diff-base failure
+ * diagnostic (PR-feedback FB-001, AGENTS.md invariant 8): without it the
+ * diagnostic re-emits on every gated batch and — before the batch memo —
+ * fired twice per batch (once per consumer). Single-entry and bounded;
+ * keyed by directory so distinct repositories never suppress each other.
+ */
+const DIFF_BASE_WARN_COOLDOWN_MS = 60_000;
+let lastDiffBaseFailureWarn: { directory: string; atMs: number } | null = null;
+
+/**
+ * Walk DIFF_BASE_CANDIDATES and return the first candidate whose committed
+ * diff parses (#3131). The envelope is ALWAYS present so a null resolution
+ * still carries the full attempt list for the named diagnostic.
+ */
 async function resolveValidatedDiffBase(
 	directory: string,
 	abortSignal?: AbortSignal,
-): Promise<{
-	attempted: DiffBaseAttempt[];
-	resolution: {
-		mergeBase: string;
-		committedLines: Map<string, Set<number>>;
-		mergeBaseEqualsHead: boolean;
-	} | null;
-	failureCause?: 'git-executable' | 'head-resolution';
-}> {
+): Promise<DiffBaseEnvelope> {
 	let executable: string;
 	try {
 		executable = await resolveGitExecutableAsync();
@@ -194,11 +241,29 @@ async function resolveValidatedDiffBase(
 			failureCause: 'head-resolution',
 		};
 	}
+	// A non-repository directory (or an unborn HEAD) makes rev-parse exit
+	// non-zero; every merge-base probe would fail identically, so the doomed
+	// walk is skipped and the cause is named (FB-001).
+	if (headResult.kind === 'failed') {
+		return {
+			attempted: [],
+			resolution: null,
+			failureCause: 'head-resolution',
+		};
+	}
 	const headSha =
 		headResult.kind === 'ok' &&
 		/^[0-9a-f]{40,64}$/i.test(headResult.stdout.trim())
 			? headResult.stdout.trim().toLowerCase()
 			: null;
+	if (
+		headSha !== null &&
+		diffBaseResolutionMemo &&
+		diffBaseResolutionMemo.directory === directory &&
+		diffBaseResolutionMemo.headSha === headSha
+	) {
+		return diffBaseResolutionMemo.envelope;
+	}
 	const attempted: DiffBaseAttempt[] = [];
 	for (const baseBranch of DIFF_BASE_CANDIDATES) {
 		const mergeBaseResult = await runGitClassified(
@@ -267,10 +332,108 @@ async function resolveValidatedDiffBase(
 			continue;
 		}
 		attempted.push({ ref: baseBranch, outcome: 'ok' });
-		return {
+		const resolved = {
 			attempted,
 			resolution: { mergeBase: candidate, committedLines, mergeBaseEqualsHead },
 		};
+		if (headSha !== null) {
+			diffBaseResolutionMemo = { directory, headSha, envelope: resolved };
+		}
+		return resolved;
+	}
+	// FB-001: a repository whose default branch is not main/master fails
+	// every fixed candidate (permanent fail-closed + a CRITICAL-WARN on every
+	// gated batch). Derive one extra candidate from the remote's symbolic
+	// HEAD — lazily, only on this total-failure path (one bounded spawn; a
+	// repo without origin/HEAD exits non-zero and is skipped silently) — and
+	// walk it with the same validated acceptance as the fixed list.
+	if (!abortSignal?.aborted) {
+		const symbolicResult = await runGitClassified(
+			['symbolic-ref', 'refs/remotes/origin/HEAD'],
+			directory,
+			abortSignal,
+			executable,
+		);
+		const symbolicRef =
+			symbolicResult.kind === 'ok'
+				? symbolicResult.stdout.trim().replace(/^refs\/remotes\//, '')
+				: null;
+		if (
+			symbolicRef &&
+			/^[A-Za-z0-9._/-]+$/.test(symbolicRef) &&
+			!(DIFF_BASE_CANDIDATES as readonly string[]).includes(symbolicRef)
+		) {
+			const baseBranch = symbolicRef;
+			const mergeBaseResult = await runGitClassified(
+				['merge-base', baseBranch, 'HEAD'],
+				directory,
+				abortSignal,
+				executable,
+			);
+			if (mergeBaseResult.kind === 'systemic') {
+				attempted.push({ ref: baseBranch, outcome: 'systemic' });
+				return { attempted, resolution: null };
+			}
+			if (mergeBaseResult.kind === 'ok') {
+				const candidate = mergeBaseResult.stdout.trim();
+				if (candidate && /^[0-9a-f]{40,64}$/i.test(candidate)) {
+					const mergeBaseEqualsHead =
+						headSha !== null && candidate.toLowerCase() === headSha;
+					const diffResult = await runGitClassified(
+						[
+							'-c',
+							'core.quotePath=false',
+							'diff',
+							'--no-ext-diff',
+							'--no-color',
+							'--no-prefix',
+							'-U0',
+							`${candidate}..HEAD`,
+							'--',
+						],
+						directory,
+						abortSignal,
+						executable,
+					);
+					if (diffResult.kind === 'systemic') {
+						attempted.push({ ref: baseBranch, outcome: 'systemic' });
+						return { attempted, resolution: null };
+					}
+					if (diffResult.kind === 'ok') {
+						const committedLines = parseDiffLineRangesChecked(
+							diffResult.stdout,
+							true,
+						);
+						if (committedLines) {
+							attempted.push({ ref: baseBranch, outcome: 'ok' });
+							const resolved = {
+								attempted,
+								resolution: {
+									mergeBase: candidate,
+									committedLines,
+									mergeBaseEqualsHead,
+								},
+							};
+							if (headSha !== null) {
+								diffBaseResolutionMemo = {
+									directory,
+									headSha,
+									envelope: resolved,
+								};
+							}
+							return resolved;
+						}
+					}
+				}
+				attempted.push({ ref: baseBranch, outcome: 'unusable' });
+			} else {
+				attempted.push({ ref: baseBranch, outcome: 'unresolvable' });
+			}
+		}
+	}
+	if (headSha !== null) {
+		const exhausted = { attempted, resolution: null };
+		diffBaseResolutionMemo = { directory, headSha, envelope: exhausted };
 	}
 	return { attempted, resolution: null };
 }
@@ -278,25 +441,49 @@ async function resolveValidatedDiffBase(
 /**
  * Bounded named diagnostic when NO diff base produced a usable committed
  * diff (#3131 AC3). Today the null is silent and indistinguishable from "git
- * unavailable"; this names every candidate tried and why each failed, on an
+ * unavailable"; this names every candidate tried and why each failed, on the
  * always-visible operational channel (criticalWarn is un-gated — the
- * operator must fetch remotes or gating silently degrades) plus the
- * debug-gated logger for debug runs.
+ * operator must act or gating silently degrades). Emission is cooled down
+ * per directory (FB-001, AGENTS.md invariant 8): both diff-base consumers
+ * run in the same batch, and the diagnostic must not flood the channel on
+ * every gated batch. The remedy is conditional — "fetch the remote tracking
+ * refs" only helps when a candidate ref exists but is stale (some outcome
+ * was `unusable`); an all-`unresolvable` walk means the refs do not exist in
+ * this repository at all, so the advice names the actual requirement.
  */
 function logDiffBaseResolutionFailure(
+	directory: string,
 	attempted: DiffBaseAttempt[],
 	failureCause?: 'git-executable' | 'head-resolution',
 ): void {
+	const nowMs = Date.now();
+	if (
+		lastDiffBaseFailureWarn &&
+		lastDiffBaseFailureWarn.directory === directory &&
+		nowMs - lastDiffBaseFailureWarn.atMs < DIFF_BASE_WARN_COOLDOWN_MS
+	) {
+		return;
+	}
+	lastDiffBaseFailureWarn = { directory, atMs: nowMs };
 	const detail =
 		failureCause === 'git-executable'
 			? 'the git executable could not be resolved, so no candidate was tried'
 			: failureCause === 'head-resolution'
-				? 'resolving HEAD failed (timeout, spawn failure, or aborted), so no candidate was tried'
+				? 'resolving HEAD failed (timeout, spawn failure, non-repository directory, or aborted), so no candidate was tried'
 				: `no usable diff base among candidates tried (${attempted
 						.map((entry) => `${entry.ref}=${entry.outcome}`)
 						.join(', ')})`;
-	const line = `changed-line base resolution failed: ${detail} — changed-line classification is fail-closed (all findings treated as new) until a candidate's committed diff resolves; fetch the remote tracking refs`;
-	criticalWarn(line);
+	const allUnresolvable =
+		attempted.length > 0 &&
+		attempted.every((entry) => entry.outcome === 'unresolvable');
+	const remedy = failureCause
+		? ''
+		: allUnresolvable
+			? ' — none of the candidate refs exists in this repository; ensure one of them points at the default branch (a local branch or its remote-tracking ref)'
+			: ' — fetch the remote tracking refs so a stale candidate resolves';
+	criticalWarn(
+		`changed-line base resolution failed: ${detail}${remedy} — changed-line classification is fail-closed (all findings treated as new)`,
+	);
 }
 
 export const _internals: {
@@ -1219,7 +1406,7 @@ async function runGit(
 		cwd: directory,
 		timeoutMs: GIT_TIMEOUT_MS,
 		maxStdoutBytes: GIT_MAX_OUTPUT_BYTES,
-		maxStderrBytes: 64_000,
+		maxStderrBytes: GIT_MAX_STDERR_BYTES,
 		abortSignal,
 	});
 	if (
@@ -1479,7 +1666,7 @@ export async function getChangedLineAmbiguousFiles(
 	const { attempted, resolution, failureCause } =
 		await resolveValidatedDiffBase(directory, abortSignal);
 	if (!resolution) {
-		logDiffBaseResolutionFailure(attempted, failureCause);
+		logDiffBaseResolutionFailure(directory, attempted, failureCause);
 		return null;
 	}
 	// #3092 review (PRR-002), original guard retained: a merge-base equal to
@@ -1601,7 +1788,7 @@ export async function getChangedLineRanges(
 	const { attempted, resolution, failureCause } =
 		await resolveValidatedDiffBase(directory, abortSignal);
 	if (!resolution) {
-		logDiffBaseResolutionFailure(attempted, failureCause);
+		logDiffBaseResolutionFailure(directory, attempted, failureCause);
 		return null;
 	}
 	// #3092 PRR-002 for the ranges consumer (4.5 review F1, final-critic
@@ -1663,12 +1850,23 @@ export async function getChangedLineRanges(
 		runGit(statusArgs, directory, abortSignal),
 	]);
 	if (staged === null || unstaged === null || status === null) {
+		// REL-4: the base-resolution failure is loud; keep the leg failure
+		// from being the only silent fail-closed path (debug-gated — the
+		// operator-facing criticalWarn channel is reserved for must-act-on).
+		warn(
+			'pre-check: a staged/unstaged/status git leg failed — changed-line classification is fail-closed (all findings treated as new)',
+		);
 		return null;
 	}
 
 	const stagedLines = parseDiffLineRangesChecked(staged, true);
 	const unstagedLines = parseDiffLineRangesChecked(unstaged, true);
-	if (!stagedLines || !unstagedLines) return null;
+	if (!stagedLines || !unstagedLines) {
+		warn(
+			'pre-check: a staged/unstaged diff could not be parsed — changed-line classification is fail-closed (all findings treated as new)',
+		);
+		return null;
+	}
 
 	const result = new Map<string, Set<number>>();
 	mergeChangedLines(result, committedLines);
@@ -1869,6 +2067,10 @@ export async function runPreCheckBatch(
 	contextDir?: string,
 	abortSignal?: AbortSignal,
 ): Promise<PreCheckBatchResult> {
+	// Batch scope for the shared diff-base memo (FB-003): the two consumers
+	// run back-to-back inside THIS batch; a fresh batch re-walks so a fetch
+	// that moved candidate refs between batches is honored.
+	diffBaseResolutionMemo = null;
 	// Use provided workspaceDir or fall back to input directory, then plugin context directory
 	const effectiveWorkspaceDir = (workspaceDir ||
 		input.directory ||
