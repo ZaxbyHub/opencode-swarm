@@ -173,8 +173,8 @@ describe('#3606 ancestor denial arms render bounded, redacted ancestors', () => 
 		// Verdict semantics unchanged: the arm still denies, fail-closed.
 		expect(reason).toContain('WRITE BLOCKED: lstat failed on');
 		expect(reason).toContain('refusing write on unverifiable path');
-		// The hostile error text survives (sanitized) so operators keep the
-		// errno class, but the embedded control character is neutralized.
+		// Only the errno class surfaces (code-only detail); the embedded
+		// control character is neutralized.
 		expect(reason).toContain('EPERM');
 		expect(reason).not.toContain('\u0001');
 		// The detail is the errno CODE only — the raw message text cannot
@@ -187,13 +187,13 @@ describe('#3606 ancestor denial arms render bounded, redacted ancestors', () => 
 		expect(slot).toBe(
 			sanitizeDiagnosticText(
 				redactPath(path.resolve('/home/alice/ws', 'proj/x/y.txt')),
-				320,
+				200,
 			),
 		);
 		expect(reason).not.toContain('/home/alice');
 		expect(reason).not.toContain('alice');
-		// Whole-message bound: 320 (path) + 160 (error detail) + fixed prose.
-		expect(reason?.length ?? 0).toBeLessThanOrEqual(560);
+		// Whole-message bound: the composed denial is capped at 320.
+		expect(reason?.length ?? 0).toBeLessThanOrEqual(320);
 	});
 
 	test('lstat-failure arm: raw error text never reaches the denial (code-only detail)', () => {
