@@ -775,6 +775,38 @@ export const _internals: {
  *
  * @returns A block reason string if a symlink is detected, null if all clear.
  */
+/**
+ * #3606 D15: compose an ancestor denial within a whole-message bound of 320.
+ * The ancestor is home-redacted (redactPath) and sanitized; the error detail
+ * renders the error CODE only (never String(err) — the raw message embeds
+ * paths); the class text is preserved inside the bound.
+ */
+function renderAncestorDenial(
+	kind: 'lstat-failed' | 'symlink-junction',
+	ancestor: string,
+	err?: unknown,
+): string {
+	// F-22 (PR #3651 review): the ancestor detail is capped harder than the
+	// whole-message bound so the trailing class text survives the 320-char
+	// compose (a 280-char ancestor previously consumed the budget and the
+	// message ended mid-class).
+	const safeAncestor = sanitizeDiagnosticText(redactPath(ancestor), 200);
+	if (kind === 'lstat-failed') {
+		const code =
+			(err as NodeJS.ErrnoException | undefined)?.code ??
+			(err instanceof Error ? err.name : 'UNKNOWN');
+		const safeCode = sanitizeDiagnosticText(code, 40);
+		return sanitizeDiagnosticText(
+			`WRITE BLOCKED: lstat failed on "${safeAncestor}": ${safeCode} — refusing write on unverifiable path`,
+			320,
+		);
+	}
+	return sanitizeDiagnosticText(
+		`WRITE BLOCKED: "${safeAncestor}" is a symlink/junction — writing through a symlink or junction could redirect the write outside the working directory`,
+		320,
+	);
+}
+
 export function checkWriteTargetForSymlink(
 	targetPath: string,
 	cwd: string,
@@ -809,34 +841,11 @@ export function checkWriteTargetForSymlink(
 		} catch (err: unknown) {
 			const code = (err as NodeJS.ErrnoException).code;
 			if (code === 'ENOENT') continue; // not yet created — OK for writes
-			// Unexpected error: fail closed. #3606: the resolved ancestor and
-			// the raw error string are untrusted operator-facing diagnostics —
-			// render both through the #3587 bounded-and-redacted contract:
-			// home-folded, control-neutralized, length-capped. This inlines
-			// renderDenialTarget's absolute-path form exactly
-			// (sanitizeDiagnosticText(redactPath(x), 320)); importing
-			// tool-before's helper here would create an import cycle.
-			// String(err) embeds the lstat operand verbatim (e.g.
-			// "statx '<path>'"), so every occurrence of the raw ancestor is
-			// folded into its redacted render FIRST — sanitize alone would
-			// bound the text but not redact the embedded profile prefix.
-			const renderedAncestor = sanitizeDiagnosticText(
-				redactPath(ancestor),
-				320,
-			);
-			const detail = sanitizeDiagnosticText(
-				String(err).split(ancestor).join(renderedAncestor),
-				160,
-			);
-			return `WRITE BLOCKED: lstat failed on "${renderedAncestor}": ${detail} — refusing write on unverifiable path`;
+			// Unexpected error: fail closed
+			return renderAncestorDenial('lstat-failed', ancestor, err);
 		}
-		if (stat.isSymbolicLink()) {
-			// #3606: same #3587 bounded-and-redacted contract for the
-			// symlink/junction arm — no raw runtime-profile prefix.
-			return `WRITE BLOCKED: "${sanitizeDiagnosticText(
-				redactPath(ancestor),
-				320,
-			)}" is a symlink/junction — writing through a symlink or junction could redirect the write outside the working directory`;
+		if (stat?.isSymbolicLink()) {
+			return renderAncestorDenial('symlink-junction', ancestor);
 		}
 	}
 

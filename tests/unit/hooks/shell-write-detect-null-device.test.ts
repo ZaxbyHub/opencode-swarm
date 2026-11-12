@@ -82,7 +82,20 @@ describe('shell-write-detect: sink-device redirects are not write targets', () =
 		const command = 'cmd > /dev/null/../../etc/passwd';
 		const result = detectPosixWrites(command);
 		const resolved = resolveWriteTargets(command, result.writes, WS);
-		expect(resolved.map((r) => r.resolvedPath)).toEqual(['/etc/passwd']);
+		const paths = resolved.map((r) => r.resolvedPath);
+		expect(paths).toHaveLength(1);
+		// #3616 D8 (realpath-order resolution): on darwin /etc is a symlink
+		// to /private/etc, so the walk resolves through it to the real
+		// target; on Linux /etc is a real dir (exact spelling); on win32 the
+		// walk skips ENOENT prefixes to the same lexical string. The
+		// allowed set is per-platform (F-26b: the disjunction no longer
+		// accepts the darwin spelling on Linux) and every member is outside
+		// the workspace — that is the property under test.
+		const allowed =
+			process.platform === 'darwin'
+				? ['/etc/passwd', '/private/etc/passwd']
+				: ['/etc/passwd'];
+		expect(allowed).toContain(paths[0]);
 	});
 
 	test('a here-doc delimiter named like the device is still a here-doc marker', () => {

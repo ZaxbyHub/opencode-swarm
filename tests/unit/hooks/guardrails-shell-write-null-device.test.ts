@@ -179,7 +179,7 @@ describe('guardrails shell writes: /dev/null redirects', () => {
 				bashInput('arch-traversal'),
 				output('echo x > /dev/null/../../etc/passwd'),
 			),
-		).rejects.toThrow(/AUTHORITY_ROOT_ESCAPE/);
+		).rejects.toThrow(/AUTHORITY_ROOT_ESCAPE|could not be verified/);
 	});
 
 	it('coder: a relative dev/null is a scoped workspace write, not an exemption', async () => {

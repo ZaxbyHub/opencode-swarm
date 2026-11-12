@@ -604,9 +604,9 @@ describe('lstat ancestor walk — real symlink detection', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Group 6: block_destructive_commands: false bypasses all guards
+// Group 6: block_destructive_commands: false — destructive arm bypassed; rm reaches the write gate (#3616 item 10)
 // ---------------------------------------------------------------------------
-describe('block_destructive_commands: false bypasses all guards', () => {
+describe('block_destructive_commands: false — destructive arm bypassed', () => {
 	test('mklink /J with external target allowed when flag is false', async () => {
 		const externalTarget =
 			process.platform === 'win32'
@@ -644,7 +644,7 @@ describe('block_destructive_commands: false bypasses all guards', () => {
 		).resolves.toBeUndefined();
 	});
 
-	test('rm -rf /etc allowed when flag is false', async () => {
+	test('rm -rf /etc reaches the shell-write gate when flag is false (#3616 item 10)', async () => {
 		const hooks = createGuardrailsHooks(
 			TEST_DIR,
 			undefined,
@@ -656,10 +656,10 @@ describe('block_destructive_commands: false bypasses all guards', () => {
 				{ tool: 'bash', sessionID: 'test-session', callID: 'bypass3' },
 				output,
 			),
-		).resolves.toBeUndefined();
+		).rejects.toThrow(/SCOPE_NOT_DECLARED|WRITE BLOCKED/);
 	});
 
-	test('rm -rf $VAR/path allowed when flag is false (unexpanded var bypass)', async () => {
+	test('rm -rf $VAR/path reaches the shell-write gate when flag is false (#3616 item 10)', async () => {
 		const hooks = createGuardrailsHooks(
 			TEST_DIR,
 			undefined,
@@ -671,7 +671,7 @@ describe('block_destructive_commands: false bypasses all guards', () => {
 				{ tool: 'bash', sessionID: 'test-session', callID: 'bypass4' },
 				output,
 			),
-		).resolves.toBeUndefined();
+		).rejects.toThrow(/SCOPE_NOT_DECLARED|WRITE BLOCKED/);
 	});
 
 	test('Remove-Item -Recurse $env:APPDATA still scope-blocked when flag is false', async () => {
@@ -689,7 +689,7 @@ describe('block_destructive_commands: false bypasses all guards', () => {
 		).rejects.toThrow(/SCOPE_NOT_DECLARED|WRITE BLOCKED/);
 	});
 
-	test('rm --recursive --force /important allowed when flag is false', async () => {
+	test('rm --recursive --force /important reaches the shell-write gate when flag is false (#3616 item 10)', async () => {
 		const hooks = createGuardrailsHooks(
 			TEST_DIR,
 			undefined,
@@ -703,6 +703,6 @@ describe('block_destructive_commands: false bypasses all guards', () => {
 				{ tool: 'bash', sessionID: 'test-session', callID: 'bypass6' },
 				output,
 			),
-		).resolves.toBeUndefined();
+		).rejects.toThrow(/SCOPE_NOT_DECLARED|WRITE BLOCKED/);
 	});
 });
