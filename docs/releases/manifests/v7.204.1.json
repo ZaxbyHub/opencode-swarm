@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.204.1",
+  "tagCommit": "554e2edc7a05ea91fa301401251efe72c8649656",
+  "targetCommitish": "554e2edc7a05ea91fa301401251efe72c8649656",
+  "releaseBodySha256": "854226a2e7dd48d26e88d584e820f6ff0612f2c663713c862c6b3d309d181dcc",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2973-quarantine-retirement-probe-race.md",
+      "sha256": "b86cd0705cdd27a3e0bc193516149623bdad2e9640a12a3d41c228b6a1ca3c4c"
+    }
+  ]
+}
