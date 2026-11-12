@@ -232,12 +232,17 @@ describe('reviewer scope attribution supplementary (issue #3655)', () => {
 	test('one-character-prefix non-runtime dirt stays dirty, never false clean', async () => {
 		// " M a.swarm/config.json" must parse to a.swarm/config.json (dirt),
 		// not .swarm/config.json (filtered runtime) — the fail-open shape from
-		// implementation-review round 1, finding 1.
+		// implementation-review round 1, finding 1. The file is TRACKED and
+		// modified in the worktree so the porcelain line carries the " M"
+		// worktree-status shape (review round-2 LOW correction).
 		fs.mkdirSync(path.join(directory, 'a.swarm'), { recursive: true });
 		fs.writeFileSync(path.join(directory, 'a.swarm/config.json'), '{}\n');
+		git(['add', '-f', 'a.swarm/config.json']);
+		git(['commit', '-m', 'track one-char-prefix dir']);
 		await beginCoder('c-prefix');
+		fs.appendFileSync(path.join(directory, 'a.swarm/config.json'), '{}\n');
 		await completeCoder('c-prefix');
-		// Non-runtime untracked dirt: stranded collecting, typed denial.
+		// Non-runtime tracked dirt: stranded collecting, typed denial.
 		expect(generationFor('c-prefix')?.status).toBe('collecting');
 		const prefixDenial = await dispatchReviewer('r-prefix');
 		expect(prefixDenial.message).toContain('REVIEWER_ATTRIBUTION_EMPTY');
