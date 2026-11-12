@@ -87,7 +87,7 @@ const DIFF_BASE_CANDIDATES = [
  */
 type DiffBaseAttempt = {
 	ref: string;
-	outcome: 'unresolvable' | 'unusable' | 'systemic' | 'ok';
+	outcome: 'unresolvable' | 'unusable' | 'systemic' | 'head-shadowed' | 'ok';
 };
 
 type ClassifiedGitOutcome =
@@ -217,16 +217,17 @@ async function resolveValidatedDiffBase(
 		// #3092 review (PRR-002), resolver-level (4.5 review F1): a merge-base
 		// equal to HEAD means the committed hop is empty and
 		// NON-AUTHORITATIVE — HEAD sits on the default branch itself, the
-		// branch carries no commits past its base yet, or every candidate ref
+		// branch carries no commits past its base yet, or the candidate ref
 		// was planted/shadowed at the tip. Accepting it (an empty committed
 		// map parses fine) let a freshly committed finding classify
 		// PRE-EXISTING through the ranges consumer — the SAST gate failed
-		// OPEN where pre-fix it was null-fail-closed. Reject the candidate
-		// and fall through; if nothing else resolves, the total-failure null
-		// + diagnostic preserves the fail-closed contract for BOTH consumers.
+		// OPEN where pre-fix it was null-fail-closed. The git state itself is
+		// untrustworthy, so the walk STOPS here (fail-closed for BOTH
+		// consumers) instead of silently switching to a later candidate —
+		// pinned end-to-end by the #3092 planted-at-HEAD fixture.
 		if (headSha !== null && candidate.toLowerCase() === headSha) {
-			attempted.push({ ref: baseBranch, outcome: 'unusable' });
-			continue;
+			attempted.push({ ref: baseBranch, outcome: 'head-shadowed' });
+			return { attempted, resolution: null };
 		}
 		const diffResult = await runGitClassified(
 			[
