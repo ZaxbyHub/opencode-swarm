@@ -1,5 +1,19 @@
 # Changelog
 
+## [7.204.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.203.3...v7.204.0) (2026-11-12)
+
+
+### Features
+
+* **issue-tracer:** v3.0.2 — parallel-session claim gate, anchor pre-read, pre-push collision check ([56cd565](https://github.com/ZaxbyHub/opencode-swarm/commit/56cd565370a6b0dfdcc125f208c4180ffe9c8ebe))
+
+
+### Bug Fixes
+
+* **3616:** shell write-gate residual fail-opens (items 1-15) + [#3606](https://github.com/ZaxbyHub/opencode-swarm/issues/3606) ancestor-denial redaction ([c21c138](https://github.com/ZaxbyHub/opencode-swarm/commit/c21c1381c58435aadbc0f675fe33069484278765))
+* **3651:** delta-critic r1 — fragment merge-resolution sentence corrected (renderAncestorDenial composer wording; the denial kind is a private argument, not an explain-mirror feed); stale [#3637](https://github.com/ZaxbyHub/opencode-swarm/issues/3637)-era slot/bound pins in the redaction suite tightened (200 slot, 320 whole-message bound) ([b497d2b](https://github.com/ZaxbyHub/opencode-swarm/commit/b497d2bf2bee7aee668cd8e0cab6c4d4d1780b7c))
+* **issue-tracer:** resolve swarm-pr-review findings on the parallel-session claim gate ([ed6053f](https://github.com/ZaxbyHub/opencode-swarm/commit/ed6053f5b333e50dad94450c49030c07f1ed9053))
+
 ## [7.203.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.203.2...v7.203.3) (2026-11-12)
 
 
