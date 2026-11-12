@@ -1,5 +1,30 @@
 # Changelog
 
+## [7.203.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.203.2...v7.203.3) (2026-11-12)
+
+
+### Bug Fixes
+
+* **ci:** coverage-aggregator diagnostics discriminate their failure layer; group-kill the macOS crash fixture ([#3250](https://github.com/ZaxbyHub/opencode-swarm/issues/3250), [#2738](https://github.com/ZaxbyHub/opencode-swarm/issues/2738)) ([89ec7ab](https://github.com/ZaxbyHub/opencode-swarm/commit/89ec7ab4ba51dc4411e65dd5e44d4831dab98435))
+* **ci:** name the aggregator's upstream layer, stop the misleading lcov warning, group-kill the crash fixture ([#3250](https://github.com/ZaxbyHub/opencode-swarm/issues/3250), [#2738](https://github.com/ZaxbyHub/opencode-swarm/issues/2738)) ([3071a17](https://github.com/ZaxbyHub/opencode-swarm/commit/3071a17f00654c4d482abdb4c136df742c47c738))
+* **docs:** state the exact stage b rule for turbo and lean, publish stranded release notes ([4121cd5](https://github.com/ZaxbyHub/opencode-swarm/commit/4121cd5f4d804edfc2bc4e25a6958fac075bd3ee))
+* Follow-up from PR [#3592](https://github.com/ZaxbyHub/opencode-swarm/issues/3592): ancestor denial arms (lstat-failed / symlink-junction) render raw, un-redacted ancestor paths ([#3606](https://github.com/ZaxbyHub/opencode-swarm/issues/3606)) ([8f6d96f](https://github.com/ZaxbyHub/opencode-swarm/commit/8f6d96f654694383ad56913a3d114b01247794f8))
+* Follow-up from PR [#3617](https://github.com/ZaxbyHub/opencode-swarm/issues/3617): trim subagent_type identity derivations (route role + incremental-verify trigger gate) ([#3625](https://github.com/ZaxbyHub/opencode-swarm/issues/3625)) ([31a076d](https://github.com/ZaxbyHub/opencode-swarm/commit/31a076d2670d8dd8cdbc3df35702284ea0836248))
+* **guardrails:** pin ancestor denial redaction and redact planted-link path ([#3606](https://github.com/ZaxbyHub/opencode-swarm/issues/3606)) ([c0b0a05](https://github.com/ZaxbyHub/opencode-swarm/commit/c0b0a05ce6a39cb234b5df0ad6c412e32d810f86))
+* **guardrails:** redact the planted-link path in its denial detail ([#3606](https://github.com/ZaxbyHub/opencode-swarm/issues/3606)) ([de9d157](https://github.com/ZaxbyHub/opencode-swarm/commit/de9d1570667610878f1a36d0c5f0a594108c0aa9))
+* **guardrails:** render ancestor denial paths bounded and redacted ([#3606](https://github.com/ZaxbyHub/opencode-swarm/issues/3606)) ([a7484a1](https://github.com/ZaxbyHub/opencode-swarm/commit/a7484a191f748f59f495aa39b9a983971b61e5bc))
+* **pr-review:** bind critic-lane contract to structural admission, disclosure, and exact roles ([#3358](https://github.com/ZaxbyHub/opencode-swarm/issues/3358), [#3337](https://github.com/ZaxbyHub/opencode-swarm/issues/3337), [#3341](https://github.com/ZaxbyHub/opencode-swarm/issues/3341)) ([fc0b564](https://github.com/ZaxbyHub/opencode-swarm/commit/fc0b564435ad4b1774e92c53ee2ce434839cad19))
+* **pr-review:** feedback-round closures — feedback-lane protocol clauses, DOWNGRADED|NONE refusal, committed-replay tolerance, settlement-disclosure widening ([0ea7458](https://github.com/ZaxbyHub/opencode-swarm/commit/0ea7458cfd4dae356cb2b7c28a9eb4cb7ae1dafe))
+* **pr-review:** hoist state-free admission checks, scope protocol clauses, fail-closed severities ([#3341](https://github.com/ZaxbyHub/opencode-swarm/issues/3341), [#3337](https://github.com/ZaxbyHub/opencode-swarm/issues/3337), [#3362](https://github.com/ZaxbyHub/opencode-swarm/issues/3362)) ([1c5d9aa](https://github.com/ZaxbyHub/opencode-swarm/commit/1c5d9aa9aa4e211ea07de9e86f690956c60858ac))
+* **pr-review:** re-gate fixes — mirror before receipt shortcut, discriminating F-006 rider, FR-006 splits ([f7a1793](https://github.com/ZaxbyHub/opencode-swarm/commit/f7a1793b3c8b61af3d3e32ce6b70de16e9ea94c1))
+* **pr-review:** side-effect-free admission, controller-scoped protocol clauses, fail-closed severity derivation ([#3341](https://github.com/ZaxbyHub/opencode-swarm/issues/3341), [#3337](https://github.com/ZaxbyHub/opencode-swarm/issues/3337), [#3362](https://github.com/ZaxbyHub/opencode-swarm/issues/3362)) ([da4d188](https://github.com/ZaxbyHub/opencode-swarm/commit/da4d188f1412c36c6741a273b85c12f60fe1eeba))
+* **routing:** close PR [#3639](https://github.com/ZaxbyHub/opencode-swarm/issues/3639) review feedback for trim subagent_type derivations ([539bc52](https://github.com/ZaxbyHub/opencode-swarm/commit/539bc526aa108af61efc8462dc3e27895226ece9))
+* **sandbox+ci:** host-conditional /lib64 bwrap binds, bounded probe setup, evidence capture script ([6bc9be5](https://github.com/ZaxbyHub/opencode-swarm/commit/6bc9be53cd4ed606bfdca16414e32e17c94d62e4))
+* **sandbox+ci:** host-conditional /lib64 bwrap binds, bounded probe setup, evidence capture script ([95c984e](https://github.com/ZaxbyHub/opencode-swarm/commit/95c984e7f94a59520bb1ae64972e7b5743833a20))
+* **sandbox:** close review findings on bwrap tmpfs mount order ([3b704c1](https://github.com/ZaxbyHub/opencode-swarm/commit/3b704c176e73e762bb8b0c91b1d9e842beb88b4e))
+* **sandbox:** mount bwrap tmpfs before scopes under the temp root ([6b49ba1](https://github.com/ZaxbyHub/opencode-swarm/commit/6b49ba14694b4ee9d042a480dff32b96ee3f0cae))
+* **tools:** stop turbo checks leaking across sessions, drop dead stage b bypass ([66012e2](https://github.com/ZaxbyHub/opencode-swarm/commit/66012e22dd230d1d240d90d6f99f51a2112cb1f5))
+
 ## [7.203.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.203.1...v7.203.2) (2026-11-10)
 
 
