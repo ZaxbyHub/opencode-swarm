@@ -543,7 +543,7 @@ export async function executePhaseComplete(
 	const warnings: string[] = [];
 	if (hasActiveTurboMode(sessionID)) {
 		warnings.push(
-			`Turbo mode active — skipped completion-verify, drift-verifier, hallucination-guard, mutation-gate, phase-council and todo gates for phase ${phase}.`,
+			`Turbo mode active — skipped Gates 1–5 (completion-verify, drift-verifier, hallucination-guard, mutation-gate, phase-council) and the todo gate for phase ${phase}.`,
 		);
 	}
 
