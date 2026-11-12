@@ -4,13 +4,13 @@
  * The `runs` element of `BuildEvidenceSchema` is a plain (strip-mode) zod
  * object, so a key the schema does not declare is silently dropped when a
  * bundle is re-read through `EvidenceBundleSchema.parse`
- * (`src/evidence/manager.ts:232`). That is why `spawn_error` is declared
+ * (`src/evidence/manager.ts:234`). That is why `spawn_error` is declared
  * optional on the schema rather than only on the TypeScript interface: without
  * it, persisted build evidence would lose the launch-failure distinction the
  * moment it was loaded back, while every behavioural test stayed green.
  *
  * The WRITE path is not what this pins — `validateEvidence`'s parse result is
- * discarded at `manager.ts:212`, so the first write already keeps the raw key.
+ * discarded at `manager.ts:214`, so the first write already keeps the raw key.
  */
 import { describe, expect, test } from 'bun:test';
 import { BuildEvidenceSchema } from '../../../src/config/evidence-schema';
