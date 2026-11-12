@@ -5,6 +5,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import * as bunCompat from '../../../src/utils/bun-compat';
+import { nativeOutputLimitProbe as sharedProbe } from '../../helpers/native-output-limit-probe-3251.js';
 import { safeRmRecursive } from '../../helpers/safe-test-dir';
 
 // #2973: 30s — cold bun-build/node probes on stalled macos runners exceeded 5s.
@@ -164,57 +165,18 @@ async function readNativeReader(proc: bunCompat.BunCompatSubprocess) {
 	return new TextDecoder().decode(bytes);
 }
 
+/**
+ * nativeOutputLimitProbe lives in tests/helpers/native-output-limit-probe-3251.ts
+ * (#3251 extraction): one shared implementation drives both this suite and the
+ * race spec — honest terminationObserved/attempts reporting, bounded
+ * re-observation (≤3 attempts, setTimeout backoff), and a 1000 ms kill-origin
+ * deadline inside the 10 000 ms spawn backstop so the overflow controller, not
+ * the timeout controller, is what a green receipt proves. The seam-injected
+ * deterministic sequences are pinned in
+ * tests/unit/utils/bun-compat-native-output-limit-race-3251.test.ts.
+ */
 async function nativeOutputLimitProbe() {
-	const outputLimitError = (
-		bunCompat as typeof bunCompat & {
-			BunCompatOutputLimitError?: typeof Error;
-		}
-	).BunCompatOutputLimitError;
-	const describeError = (error: unknown) => ({
-		ok: false as const,
-		name: error instanceof Error ? error.name : typeof error,
-		instanceOf:
-			typeof outputLimitError === 'function' &&
-			error instanceof outputLimitError,
-		limit: (error as { limit?: number }).limit,
-		captured: (error as { captured?: number }).captured,
-		total: (error as { total?: number }).total,
-	});
-	const proc = nativeSpawn(
-		[
-			process.execPath,
-			'--eval',
-			`const p = 'O'.repeat(${LARGE_OUTPUT_BYTES * 2}); process.stdout.write(p); process.stderr.write(p)`,
-		],
-		{
-			cwd: process.cwd(),
-			stdin: 'ignore',
-			stdout: 'pipe',
-			stderr: 'pipe',
-			timeout: 3_000,
-			maxBuffer: OUTPUT_LIMIT_BYTES,
-		},
-	);
-	const stdout = proc.stdout
-		.text()
-		.then(
-			(value) => ({ ok: true as const, length: value.length }),
-			describeError,
-		);
-	const stderr = proc.stderr
-		.text()
-		.then(
-			(value) => ({ ok: true as const, length: value.length }),
-			describeError,
-		);
-	const exitCode = await proc.exited;
-	return {
-		outputLimitErrorExported: typeof outputLimitError === 'function',
-		exitCode,
-		signalCode: proc.signalCode ?? null,
-		stdout: await stdout,
-		stderr: await stderr,
-	};
+	return sharedProbe();
 }
 
 async function nativeTimeoutProbe() {
@@ -452,7 +414,12 @@ describe('bunSpawn Node fallback exit-first output consumption (#2530)', () => {
 	test('native Bun reports bounded output overflow and terminates the child', async () => {
 		const receipt = await nativeOutputLimitProbe();
 		expect(receipt.outputLimitErrorExported).toBe(true);
-		expect(receipt.exitCode !== 0 || receipt.signalCode !== null).toBe(true);
+		// #3251: the receipt reports termination honestly — the kill-origin
+		// deadline (1s << 10s backstop) makes the OVERFLOW controller, not the
+		// spawn timeout, the only path to a green terminationObserved here.
+		expect(receipt.terminationObserved).toBe(true);
+		expect(receipt.terminationObservedLate).toBe(false);
+		expect(receipt.attempts).toBe(1);
 		const errors = [receipt.stdout, receipt.stderr].filter((item) => !item.ok);
 		expect(errors.length).toBeGreaterThan(0);
 		for (const error of errors) {

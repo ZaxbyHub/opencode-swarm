@@ -26,15 +26,27 @@ afterEach(() => {
 	fx.dispose();
 });
 
-function recoveredLines(root: string): string[] {
+// Shared guarded read (#3262 2026-11-12 detection, run 43115686414): emit()
+// writes through an async stream, so the FIRST waitUntil poll (which runs
+// before any sleep) can hit the telemetry file before it exists — an ENOENT
+// there must read as absence, not throw out of the predicate (the fixture's
+// own readBreakEvents guards the identical read the same way). Every other
+// error (EACCES, EIO, …) PROPAGATES — this is ENOENT-only, not a blanket
+// swallow.
+function readTelemetryOrEmpty(root: string): string {
 	try {
-		return fs
-			.readFileSync(path.join(root, '.swarm', 'telemetry.jsonl'), 'utf-8')
-			.split('\n')
-			.filter((l) => l.includes('"event":"evidence_lock_stale_recovered"'));
-	} catch {
-		return [];
+		// biome-ignore format: the frozen C6 check requires catch within 3 lines of this guarded read
+		return fs.readFileSync(path.join(root, '.swarm', 'telemetry.jsonl'), 'utf-8');
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === 'ENOENT') return '';
+		throw error;
 	}
+}
+
+function recoveredLines(root: string): string[] {
+	return readTelemetryOrEmpty(root)
+		.split('\n')
+		.filter((l) => l.includes('"event":"evidence_lock_stale_recovered"'));
 }
 
 describe('evidence lock — stale_recovered emit gate (feedback PRR-010/029)', () => {
@@ -61,9 +73,7 @@ describe('evidence lock — stale_recovered emit gate (feedback PRR-010/029)', (
 		// the same stream — once visible, the recovered line is too.
 		await waitUntil(
 			() =>
-				fs
-					.readFileSync(path.join(dir, '.swarm', 'telemetry.jsonl'), 'utf-8')
-					.includes('"event":"store_lock_stale_broken"'),
+				readTelemetryOrEmpty(dir).includes('"event":"store_lock_stale_broken"'),
 			10_000,
 			'break event flush',
 		);
@@ -86,13 +96,30 @@ describe('evidence lock — stale_recovered emit gate (feedback PRR-010/029)', (
 		// operational payload — same class as production emissions).
 		emit('store_lock_stale_broken', { store: '__flush_probe', ageMs: 0 });
 		await waitUntil(
-			() =>
-				fs
-					.readFileSync(path.join(dir, '.swarm', 'telemetry.jsonl'), 'utf-8')
-					.includes('__flush_probe'),
+			() => readTelemetryOrEmpty(dir).includes('__flush_probe'),
 			10_000,
 			'sentinel flush',
 		);
 		expect(recoveredLines(dir)).toEqual([]);
 	}, 20_000);
+});
+
+describe('guarded telemetry reader (#3262 detection, ENOENT-only)', () => {
+	test('a missing telemetry file reads as absence (first-poll ENOENT tolerance)', () => {
+		const dir = fx.scratch('ev-enoent-');
+		// No initTelemetry: .swarm/telemetry.jsonl does not exist yet — exactly
+		// the first-poll shape of run 43115686414.
+		expect(readTelemetryOrEmpty(dir)).toBe('');
+		expect(recoveredLines(dir)).toEqual([]);
+	});
+
+	test('non-ENOENT read errors propagate out of the reader', () => {
+		const dir = fx.scratch('ev-eacces-');
+		// A DIRECTORY at the telemetry path makes the guarded read fail with
+		// EISDIR — a non-ENOENT error that must NOT be swallowed.
+		fs.mkdirSync(path.join(dir, '.swarm', 'telemetry.jsonl'), {
+			recursive: true,
+		});
+		expect(() => readTelemetryOrEmpty(dir)).toThrow();
+	});
 });
