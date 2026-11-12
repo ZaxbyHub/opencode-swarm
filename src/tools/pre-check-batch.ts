@@ -12,7 +12,7 @@ import type { GateConfigOverrides, PluginConfig } from '../config';
 import { loadGateOverrides } from '../config';
 import type { SecretscanEvidence } from '../config/evidence-schema.js';
 import { saveEvidence } from '../evidence/manager.js';
-import { warn } from '../utils';
+import { criticalWarn, warn } from '../utils';
 import { runExternalTool } from '../utils/external-tool-runner';
 import { sameExistingFilesystemPath } from '../utils/filesystem-identity.js';
 import { resolveGitExecutableAsync } from '../utils/git-executable.js';
@@ -53,8 +53,202 @@ const MAX_CONCURRENT = 4;
 const MAX_FILES = 100;
 const GIT_TIMEOUT_MS = 10_000;
 const GIT_MAX_OUTPUT_BYTES = 2_000_000;
+const GIT_MAX_STDERR_BYTES = 64_000;
 const ALL_LINES_CHANGED = -1;
 const MAX_CHANGED_LINE_ENTRIES = 200_000;
+
+/**
+ * Diff-base candidates walked in order (#3131). A candidate is only USABLE if
+ * its committed diff can actually be acquired and parsed — a stale-but-
+ * resolvable ref that overflows the stdout guard or the parser cap must fall
+ * through to the next candidate instead of nulling the changed-line map.
+ */
+const DIFF_BASE_CANDIDATES = [
+	'zaxbyhub/main',
+	'upstream/main',
+	'origin/main',
+	'main',
+	'origin/master',
+	'master',
+] as const;
+
+/**
+ * One diff-base candidate walk outcome (#3131).
+ * - `unresolvable`: `git merge-base <ref> HEAD` completed non-zero (the
+ *   normal "no merge base" answer) — try the next candidate.
+ * - `unusable`: the candidate resolved, but its committed diff could not be
+ *   acquired (stdout/stderr guard tripped — note the overflow KILLS the
+ *   child, so the runner reports spawn-error WITH truncation flags; the
+ *   flags are checked before the status), exited non-zero, or failed to
+ *   parse — try the next candidate.
+ * - `systemic`: abort, timeout, spawn failure, or executable-resolution
+ *   failure — every later candidate would fail identically, so the walk
+ *   stops (fail-closed, no fall-through).
+ */
+type DiffBaseAttempt = {
+	ref: string;
+	outcome: 'unresolvable' | 'unusable' | 'systemic' | 'ok';
+};
+
+type ClassifiedGitOutcome =
+	| { kind: 'systemic' }
+	| { kind: 'unresolvable' }
+	| { kind: 'failed' }
+	| { kind: 'ok'; stdout: string };
+
+/**
+ * Result-aware sibling of `runGit` (#3131): keeps the hardened executable
+ * resolution (the caller resolves once and passes the same executable to
+ * every call), array-form argv, explicit cwd, bounded output, and abort
+ * plumbing, but reports WHY a call failed instead of collapsing every
+ * failure to null. Classification order is load-bearing: truncation flags
+ * are checked BEFORE the status field because an output-guard kill produces
+ * `{status:'spawn-error', stdoutTruncated:true}` (external-tool-runner.ts
+ * terminates the child on overflow) and must count as candidate-unusable,
+ * not systemic.
+ */
+async function runGitClassified(
+	args: string[],
+	directory: string,
+	abortSignal: AbortSignal | undefined,
+	executable: string,
+): Promise<ClassifiedGitOutcome> {
+	if (abortSignal?.aborted) return { kind: 'systemic' };
+	let result: Awaited<ReturnType<typeof runExternalTool>>;
+	try {
+		result = await _internals.runExternalTool({
+			executable,
+			args,
+			cwd: directory,
+			timeoutMs: GIT_TIMEOUT_MS,
+			maxStdoutBytes: GIT_MAX_OUTPUT_BYTES,
+			maxStderrBytes: GIT_MAX_STDERR_BYTES,
+			abortSignal,
+		});
+	} catch {
+		return { kind: 'systemic' };
+	}
+	if (result.status !== 'completed' && result.status !== 'spawn-error') {
+		return { kind: 'systemic' };
+	}
+	if (
+		result.status === 'spawn-error' &&
+		!result.stdoutTruncated &&
+		!result.stderrTruncated
+	) {
+		return { kind: 'systemic' };
+	}
+	if (result.status === 'completed' && result.exitCode !== 0) {
+		return { kind: 'failed' };
+	}
+	if (result.stdoutTruncated || result.stderrTruncated) {
+		return { kind: 'failed' };
+	}
+	if (result.status !== 'completed') {
+		return { kind: 'systemic' };
+	}
+	return { kind: 'ok', stdout: result.stdout };
+}
+
+/**
+ * Walk DIFF_BASE_CANDIDATES and return the first candidate whose committed
+ * diff parses (#3131). The envelope is ALWAYS present so a null resolution
+ * still carries the full attempt list for the named diagnostic.
+ */
+async function resolveValidatedDiffBase(
+	directory: string,
+	abortSignal?: AbortSignal,
+): Promise<{
+	attempted: DiffBaseAttempt[];
+	resolution: {
+		mergeBase: string;
+		committedLines: Map<string, Set<number>>;
+	} | null;
+}> {
+	let executable: string;
+	try {
+		executable = await resolveGitExecutableAsync();
+	} catch {
+		return {
+			attempted: DIFF_BASE_CANDIDATES.map((ref) => ({
+				ref,
+				outcome: 'systemic' as const,
+			})),
+			resolution: null,
+		};
+	}
+	const attempted: DiffBaseAttempt[] = [];
+	for (const baseBranch of DIFF_BASE_CANDIDATES) {
+		const mergeBaseResult = await runGitClassified(
+			['merge-base', baseBranch, 'HEAD'],
+			directory,
+			abortSignal,
+			executable,
+		);
+		if (mergeBaseResult.kind === 'systemic') {
+			attempted.push({ ref: baseBranch, outcome: 'systemic' });
+			return { attempted, resolution: null };
+		}
+		if (mergeBaseResult.kind !== 'ok') {
+			attempted.push({ ref: baseBranch, outcome: 'unresolvable' });
+			continue;
+		}
+		const candidate = mergeBaseResult.stdout.trim();
+		if (!candidate || !/^[0-9a-f]{40,64}$/i.test(candidate)) {
+			attempted.push({ ref: baseBranch, outcome: 'unresolvable' });
+			continue;
+		}
+		const diffResult = await runGitClassified(
+			[
+				'-c',
+				'core.quotePath=false',
+				'diff',
+				'--no-ext-diff',
+				'--no-color',
+				'--no-prefix',
+				'-U0',
+				`${candidate}..HEAD`,
+				'--',
+			],
+			directory,
+			abortSignal,
+			executable,
+		);
+		if (diffResult.kind === 'systemic') {
+			attempted.push({ ref: baseBranch, outcome: 'systemic' });
+			return { attempted, resolution: null };
+		}
+		if (diffResult.kind !== 'ok') {
+			attempted.push({ ref: baseBranch, outcome: 'unusable' });
+			continue;
+		}
+		const committedLines = parseDiffLineRangesChecked(diffResult.stdout, true);
+		if (!committedLines) {
+			attempted.push({ ref: baseBranch, outcome: 'unusable' });
+			continue;
+		}
+		attempted.push({ ref: baseBranch, outcome: 'ok' });
+		return { attempted, resolution: { mergeBase: candidate, committedLines } };
+	}
+	return { attempted, resolution: null };
+}
+
+/**
+ * Bounded named diagnostic when NO diff base produced a usable committed
+ * diff (#3131 AC3). Today the null is silent and indistinguishable from "git
+ * unavailable"; this names every candidate tried and why each failed, on an
+ * always-visible operational channel (criticalWarn is un-gated — the
+ * operator must fetch remotes or gating silently degrades) plus the
+ * debug-gated logger for debug runs.
+ */
+function logDiffBaseResolutionFailure(attempted: DiffBaseAttempt[]): void {
+	const summary = attempted
+		.map((entry) => `${entry.ref}=${entry.outcome}`)
+		.join(', ');
+	const line = `changed-line base resolution failed: no usable diff base among candidates tried (${summary}) — changed-line classification is fail-closed (all findings treated as new) until a candidate's committed diff resolves; fetch the remote tracking refs`;
+	criticalWarn(line);
+	warn(line);
+}
 
 export const _internals: {
 	qualityBudget: typeof qualityBudget;
@@ -1228,27 +1422,19 @@ export async function getChangedLineAmbiguousFiles(
 	abortSignal?: AbortSignal,
 	requestedFiles: string[] = [],
 ): Promise<Set<string> | null> {
-	let mergeBase: string | null = null;
-	for (const baseBranch of [
-		'zaxbyhub/main',
-		'upstream/main',
-		'origin/main',
-		'main',
-		'origin/master',
-		'master',
-	]) {
-		const output = await runGit(
-			['merge-base', baseBranch, 'HEAD'],
-			directory,
-			abortSignal,
-		);
-		const candidate = output?.trim();
-		if (candidate && /^[0-9a-f]{40,64}$/i.test(candidate)) {
-			mergeBase = candidate;
-			break;
-		}
+	// #3131: same validated base selection as getChangedLineRanges — both
+	// consumers of the diff base must resolve the SAME usable candidate, so a
+	// stale first ref cannot inflate this committed hop either. The scoped
+	// `--name-only` diff below then runs against the resolved mergeBase.
+	const { attempted, resolution } = await resolveValidatedDiffBase(
+		directory,
+		abortSignal,
+	);
+	if (!resolution) {
+		logDiffBaseResolutionFailure(attempted);
+		return null;
 	}
-	if (!mergeBase) return null;
+	const mergeBase = resolution.mergeBase;
 
 	// #3092 review (PRR-002): a merge-base equal to HEAD means the committed
 	// hop is empty and NON-AUTHORITATIVE — HEAD sits on the default branch
@@ -1373,27 +1559,19 @@ export async function getChangedLineRanges(
 	abortSignal?: AbortSignal,
 	requestedFiles: string[] = [],
 ): Promise<Map<string, Set<number>> | null> {
-	let mergeBase: string | null = null;
-	for (const baseBranch of [
-		'zaxbyhub/main',
-		'upstream/main',
-		'origin/main',
-		'main',
-		'origin/master',
-		'master',
-	]) {
-		const output = await runGit(
-			['merge-base', baseBranch, 'HEAD'],
-			directory,
-			abortSignal,
-		);
-		const candidate = output?.trim();
-		if (candidate && /^[0-9a-f]{40,64}$/i.test(candidate)) {
-			mergeBase = candidate;
-			break;
-		}
+	// #3131: the diff base is the first candidate whose committed diff is
+	// actually USABLE — a stale-but-resolvable ref whose diff trips the stdout
+	// guard or the parser cap falls through to the next candidate instead of
+	// nulling the whole map. A total failure carries a named diagnostic.
+	const { attempted, resolution } = await resolveValidatedDiffBase(
+		directory,
+		abortSignal,
+	);
+	if (!resolution) {
+		logDiffBaseResolutionFailure(attempted);
+		return null;
 	}
-	if (!mergeBase) return null;
+	const { mergeBase, committedLines } = resolution;
 
 	const commonDiffArgs = [
 		'-c',
@@ -1419,12 +1597,10 @@ export async function getChangedLineRanges(
 		...(requestedPathspecs.length > 0 ? ['--ignored=matching'] : []),
 		...(requestedPathspecs.length > 0 ? ['--', ...requestedPathspecs] : []),
 	];
-	const [committed, staged, unstaged, status] = await Promise.all([
-		runGit(
-			[...commonDiffArgs, `${mergeBase}..HEAD`, '--'],
-			directory,
-			abortSignal,
-		),
+	// #3131: the committed leg was already acquired and parsed by
+	// resolveValidatedDiffBase (it IS the validation), so only the staged,
+	// unstaged, and status legs run here.
+	const [staged, unstaged, status] = await Promise.all([
 		runGit(
 			[...commonDiffArgs, '--cached', 'HEAD', '--'],
 			directory,
@@ -1433,19 +1609,13 @@ export async function getChangedLineRanges(
 		runGit([...commonDiffArgs, '--'], directory, abortSignal),
 		runGit(statusArgs, directory, abortSignal),
 	]);
-	if (
-		committed === null ||
-		staged === null ||
-		unstaged === null ||
-		status === null
-	) {
+	if (staged === null || unstaged === null || status === null) {
 		return null;
 	}
 
-	const committedLines = parseDiffLineRangesChecked(committed, true);
 	const stagedLines = parseDiffLineRangesChecked(staged, true);
 	const unstagedLines = parseDiffLineRangesChecked(unstaged, true);
-	if (!committedLines || !stagedLines || !unstagedLines) return null;
+	if (!stagedLines || !unstagedLines) return null;
 
 	const result = new Map<string, Set<number>>();
 	mergeChangedLines(result, committedLines);
