@@ -62,6 +62,8 @@ describe('handleArchiveCommand', () => {
 		// Create recent bundle
 		const taskId = '1.2';
 		await saveEvidence(tempDir, taskId, createNoteEvidence(taskId, 'New note'));
+		// #3218 H7 (impl-review nit): pin to the frozen clock like the :89 twin.
+		await makeBundleOld(tempDir, taskId, 0);
 
 		// Run dry-run
 		const result = await handleArchiveCommand(tempDir, ['--dry-run']);

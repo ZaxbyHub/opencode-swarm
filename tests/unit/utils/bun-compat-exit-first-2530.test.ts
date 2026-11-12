@@ -419,7 +419,12 @@ describe('bunSpawn Node fallback exit-first output consumption (#2530)', () => {
 		// spawn timeout, the only path to a green terminationObserved here.
 		expect(receipt.terminationObserved).toBe(true);
 		expect(receipt.terminationObservedLate).toBe(false);
-		expect(receipt.attempts).toBe(1);
+		// Hold-open child: the kill lands on the first attempt in the common
+		// case, but a rare scheduler miss re-spawns (bounded) — assert the
+		// BOUND, not attempts===1 (impl-review round 1: ===1 turns the
+		// residual race residue into a test failure).
+		expect(receipt.attempts).toBeGreaterThanOrEqual(1);
+		expect(receipt.attempts).toBeLessThanOrEqual(3);
 		const errors = [receipt.stdout, receipt.stderr].filter((item) => !item.ok);
 		expect(errors.length).toBeGreaterThan(0);
 		for (const error of errors) {

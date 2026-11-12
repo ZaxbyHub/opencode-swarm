@@ -1,0 +1,20 @@
+# Quarantined tests - CI's unit/coverage jobs skip these files.
+#
+# Format: one repo-relative test file path per line. Blank lines and lines
+# starting with # are ignored.
+#
+# METADATA REQUIREMENT (issue #2477): every active path entry must carry,
+# in the comment block directly above it:
+#   # OWNER: <owner> — <issue ref / context>
+#   # EXPIRY: YYYY-MM-DD — <retirement criterion>
+# Enforced by `bun run check:invariants` Check 7: missing metadata fails
+# the gate; an EXPIRY more than 14 days in the past also fails (inside
+# the grace window it only warns).
+#
+# The coverage job runs ubuntu-only and honors ONLY this ledger
+# (scripts/ci/run-coverage-gate.sh never branches per-OS), so ubuntu-only
+# flakes belong here and nowhere else.
+#
+# STATUS: 0 active entries — the 2026-11-18 renewal cohort was un-quarantined
+# 2026-11-12 per issue #2973 (post-un-quarantine observation); re-add only
+# with fresh qualifying failure evidence per the #1782 convention.

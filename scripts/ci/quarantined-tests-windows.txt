@@ -75,6 +75,7 @@ tests/unit/tools/dispatch-lanes-pr-review-resilience-followups.test.ts
 # OWNER: zaxbysauce — issue #3218; criterion: 2 consecutive green windows-latest merge-group runs
 # EXPIRY: 2026-12-20 — re-anchored 2026-11-12 per the #3218 disposition: determinism-hardened in this PR (cache invalidation + clock pinning + boundary spec); original CI mechanism unproven
 tests/unit/commands/archive.test.ts
+
 # OWNER: zaxbysauce — issue #3218; criterion: 2 consecutive green windows-latest merge-group runs
 # EXPIRY: 2026-12-20 — re-anchored 2026-11-12 with archive.test.ts (#3218); post-hardening recurrences; same cache-invalidation fix applied
 tests/unit/commands/archive-dry-run.test.ts

@@ -16,7 +16,7 @@
 // production `setDate` semantics from the same constant so the boundary token
 // equals the production `cutoffIso` byte-for-byte in any timezone.
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, statSync } from 'node:fs';
 import * as path from 'node:path';
 import type { Evidence } from '../../../src/config/evidence-schema.js';
 import {
@@ -25,6 +25,7 @@ import {
 	saveEvidence,
 } from '../../../src/evidence/manager.js';
 import {
+	_internals as artifactCacheInternals,
 	invalidateCachedArtifact,
 	resetSwarmArtifactCache,
 } from '../../../src/utils/swarm-artifact-cache.js';
@@ -75,6 +76,35 @@ async function classifyByAge(directory: string): Promise<string[]> {
  * temp root, bypassing saveEvidence. Returns the bundle path.
  */
 async function pinBundleTimestamp(
+	directory: string,
+	taskId: string,
+	iso: string,
+): Promise<string> {
+	const result = await loadEvidence(directory, taskId);
+	if (result.status !== 'found') {
+		throw new Error(`Bundle not found for task ${taskId}`);
+	}
+	const bundle = result.bundle;
+	bundle.updated_at = iso;
+	bundle.created_at = iso;
+	const evidencePath = path.join(
+		directory,
+		'.swarm',
+		'evidence',
+		taskId,
+		'evidence.json',
+	);
+	await Bun.write(evidencePath, JSON.stringify(bundle));
+	return evidencePath;
+}
+
+/**
+ * Same-size bundle rewrite WITHOUT cache invalidation — the #3218 H2 hazard
+ * itself (the makeBundleOld idiom before the fix). Deliberately uninvalidated
+ * so the mid-flip read can serve the cached pre-rewrite value under a
+ * colliding stat stamp.
+ */
+async function rewriteBundleUninvalidated(
 	directory: string,
 	taskId: string,
 	iso: string,
@@ -228,18 +258,39 @@ describe('evidence retention boundary — updated_at, strict cutoff (#3218 froze
 			// Fresh at F: not selected.
 			expect(await classifyByAge(tempDir)).not.toContain(TASK_FLIP);
 
-			// Same-size rewrite to F−100d WITHOUT cache invalidation: the
-			// outcome depends on the filesystem stamp collision, so it is
-			// recorded but not asserted (the leg's load-bearing assertion is
-			// post-invalidation, which is deterministic).
-			await pinBundleTimestamp(tempDir, TASK_FLIP, isoOf(ancientMs));
-			const midFlip = await classifyByAge(tempDir);
-			void midFlip;
-
-			// After explicit invalidation the next classification must observe
-			// the rewritten updated_at and select the bundle.
-			invalidateCachedArtifact(bundlePath);
-			expect(await classifyByAge(tempDir)).toEqual([TASK_FLIP]);
+			// Same-size rewrite to F−100d WITHOUT invalidation (the #3218 H2
+			// hazard itself), then FORCE a colliding stat stamp via the
+			// cache's own _internals seam: capture the REAL stamp the cache
+			// stored on the first read (before the rewrite), and make every
+			// later stat/statSync return exactly it — the definition of a
+			// same-stamp collision (swarm-artifact-cache.ts:106 documents the
+			// seam; utimesSync cannot portably pin ctime). Under the colliding
+			// stamp the next classification MUST serve the cached pre-rewrite
+			// value: NOT selected.
+			const stampBefore = statSync(bundlePath);
+			await rewriteBundleUninvalidated(tempDir, TASK_FLIP, isoOf(ancientMs));
+			const cachedStamp = {
+				mtimeMs: stampBefore.mtimeMs,
+				ctimeMs: stampBefore.ctimeMs,
+				size: stampBefore.size,
+				isFile: () => true,
+			} as unknown as import('node:fs').Stats;
+			const realStat = artifactCacheInternals.stat;
+			const realStatSync = artifactCacheInternals.statSync;
+			artifactCacheInternals.stat = (() =>
+				Promise.resolve(cachedStamp)) as typeof artifactCacheInternals.stat;
+			artifactCacheInternals.statSync = (() => cachedStamp) as typeof statSync;
+			try {
+				expect(await classifyByAge(tempDir)).not.toContain(TASK_FLIP);
+				// After explicit invalidation the colliding stamp is discarded
+				// and the next classification must observe the rewritten
+				// updated_at and select the bundle.
+				invalidateCachedArtifact(bundlePath);
+				expect(await classifyByAge(tempDir)).toEqual([TASK_FLIP]);
+			} finally {
+				artifactCacheInternals.stat = realStat;
+				artifactCacheInternals.statSync = realStatSync;
+			}
 		},
 		TEST_TIMEOUT_MS,
 	);
