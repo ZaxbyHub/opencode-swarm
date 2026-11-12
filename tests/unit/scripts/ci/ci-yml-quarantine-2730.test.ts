@@ -6,32 +6,32 @@ import { join } from 'node:path';
 //
 // Issue #2730 listed 4 candidates from a merge-group flake-detection run
 // (CI run 34670762927, head 1499a74b, 2026-09-12T04:27:48Z → 04:34:14Z).
-// Their dispositions, after sibling auto-fix PRs merged while this PR was
-// in review:
+// Their dispositions, after the 2026-11-12 un-quarantine per issue #2973
+// (collated trace; re-anchors to #3218/#2973):
 //   - tests/unit/hooks/pr-feedback-scope-controller.test.ts
-//     (macos-latest unit-shard 1, passed-on-retry flake — the ONLY
-//     candidate without an owning entry; THIS PR adds it to
-//     scripts/ci/quarantined-tests-macos.txt)
+//     (macos-latest unit-shard 1, passed-on-retry flake — STILL ACTIVE in
+//     scripts/ci/quarantined-tests-macos.txt, re-anchored 2026-11-12 with
+//     OWNER #2973 / EXPIRY 2026-12-20)
 //   - tests/unit/scripts/ci/repository-validation-real-process-2675.test.ts
 //     (macos-latest unit-shard 1, hard fail — was quarantined in
 //     scripts/ci/quarantined-tests-macos.txt by issue #2738, commit
 //     ad8c53ae3; RETIRED when the #2738 process-group SIGKILL root fix
-//     landed — now pinned ABSENT, see the describe block below)
+//     landed — pinned ABSENT, see the describe block below)
 //   - tests/unit/telemetry/init-rehome.test.ts
-//     (ubuntu-latest coverage-shard 3, passed-on-retry flake — already
-//     quarantined in the GENERAL ledger by issue #2660 / PR #2799,
-//     which is the only ledger the ubuntu-only coverage job honors; this
-//     PR must NOT duplicate it)
+//     (ubuntu-latest coverage-shard 3, passed-on-retry flake — was
+//     quarantined in the GENERAL ledger by issue #2660 / PR #2799;
+//     RETIRED 2026-11-12 per the #2973 un-quarantine — now pinned ABSENT
+//     from every ledger)
 //   - tests/unit/utils/bun-compat-exit-first-2530.test.ts
-//     (macos-latest unit-shard 5, hard fail both attempts — already
-//     quarantined in the macOS ledger by issue #2740 / PR #2769; this
-//     PR must NOT duplicate it)
+//     (macos-latest unit-shard 5, hard fail both attempts — quarantined
+//     by issue #2740 / PR #2769, re-added per #3248, and finally RETIRED
+//     2026-11-12 per the #2973 un-quarantine — now pinned ABSENT from
+//     every ledger)
 //
-// Each pinning test below reads the real ledger files off disk and
-// asserts the owning entry is present exactly once in the correct
-// ledger and absent from the others, that the on-disk file exists, and
-// that the entry block carries the OWNER/EXPIRY metadata required by
-// Check 7 (issue #2477).
+// Each pinning test below reads the real ledger files off disk: active
+// entries are asserted present exactly once in the correct ledger with
+// their OWNER/EXPIRY metadata block (issue #2477 Check 7); retired paths
+// are asserted absent from every ledger while still existing on disk.
 
 const REPO_ROOT = join(import.meta.dir, '../../../..');
 const GENERAL_LEDGER_PATH = join(REPO_ROOT, 'scripts/ci/quarantined-tests.txt');
@@ -88,25 +88,19 @@ function metadataBlock(ledgerPath: string, entry: string): string {
 	return blockAbove.reverse().join('\n');
 }
 
-function expectCarriesOwnerExpiry(ledgerPath: string, entry: string): void {
-	const block = metadataBlock(ledgerPath, entry);
-	expect(block.includes('# OWNER:')).toBe(true);
-	expect(block.match(/#\s*EXPIRY:\s*\d{4}-\d{2}-\d{2}/) !== null).toBe(true);
-}
-
 describe('ci.yml integration — quarantine ledger disposition for issue #2730 merge-group flake detection', () => {
-	describe('pr-feedback-scope-controller.test.ts (macos-latest, unit-shard 1) — added by this PR', () => {
-		test('is an active entry in the macOS ledger (single-OS evidence)', () => {
+	describe('pr-feedback-scope-controller.test.ts (macos-latest, unit-shard 1) — re-anchored per #2973', () => {
+		test('is an active entry in the macOS ledger exactly once', () => {
 			// Without this entry, the flake-detection script keeps
 			// re-filing the candidate (Rule A only drops already-quarantined
 			// files). The flake originated on macos-latest unit-shard 1
 			// (CI run 34670762927, 2026-09-12T03:56:04Z, Attempt 1 failed →
 			// Passed on retry 1) with no other OS showing the same flake.
+			// Re-anchored 2026-11-12: exactly one owning entry remains, so
+			// no second OWNER/EXPIRY block can compete for renewal.
 			expect(existsSync(MACOS_LEDGER_PATH)).toBe(true);
 			const entries = activeEntries(MACOS_LEDGER_PATH);
 			expect(entries).toContain(PR_FEEDBACK_SCOPE_CONTROLLER);
-			// Exactly one owning entry: a second block would leave two
-			// OWNER/EXPIRY owners competing for renewal.
 			expect(
 				entries.filter((e) => e === PR_FEEDBACK_SCOPE_CONTROLLER).length,
 			).toBe(1);
@@ -131,13 +125,19 @@ describe('ci.yml integration — quarantine ledger disposition for issue #2730 m
 			}
 		});
 
-		test('carries OWNER + EXPIRY metadata (issue #2477 Check 7)', () => {
+		test('carries the re-anchored OWNER (#2973) + EXPIRY 2026-12-20 metadata (issue #2477 Check 7)', () => {
 			// Check 7 hard-fails any active entry missing OWNER/EXPIRY or
-			// with EXPIRY lapsed beyond the grace window. Reading the raw
-			// file here is more direct than invoking check:invariants and
-			// gives a focused, fast RED signal if the next entry edit
-			// drops one of the two required lines.
-			expectCarriesOwnerExpiry(MACOS_LEDGER_PATH, PR_FEEDBACK_SCOPE_CONTROLLER);
+			// with EXPIRY lapsed beyond the grace window. The 2026-11-12
+			// re-anchor moved this entry under the #2973 cohort anchor with
+			// criterion "macos retry-flake diagnosis" and EXPIRY 2026-12-20;
+			// reading the raw file here gives a focused, fast RED signal if
+			// the next entry edit drops the anchor or the date.
+			const block = metadataBlock(
+				MACOS_LEDGER_PATH,
+				PR_FEEDBACK_SCOPE_CONTROLLER,
+			);
+			expect(block).toMatch(/^# OWNER: .*#2973/m);
+			expect(block).toMatch(/^# EXPIRY: 2026-12-20/m);
 		});
 
 		test('the quarantined path exists and is discovered by the ci.yml find chain', () => {
@@ -153,23 +153,22 @@ describe('ci.yml integration — quarantine ledger disposition for issue #2730 m
 		});
 	});
 
-	describe('init-rehome.test.ts (ubuntu-latest, coverage-shard 3) — already quarantined by issue #2660 / PR #2799', () => {
-		test('is an active entry in the GENERAL ledger exactly once', () => {
-			// The coverage job runs ubuntu-only and honors ONLY the
-			// general ledger (run-coverage-gate.sh never branches per-OS).
-			// The entry is owned by issue #2660, not this PR; this PR
-			// pins that it stays present (the coverage job keeps
-			// suppressing the flake) and unique.
+	describe('init-rehome.test.ts (ubuntu-latest, coverage-shard 3) — retired by the 2026-11-12 #2973 un-quarantine', () => {
+		test('is retired — NOT an active entry in the GENERAL ledger', () => {
+			// The coverage job runs ubuntu-only and honors ONLY the general
+			// ledger (run-coverage-gate.sh never branches per-OS). The
+			// #2660-owned entry was un-quarantined 2026-11-12 per issue
+			// #2973 (collated trace): the general ledger no longer
+			// suppresses the file and the ubuntu coverage shards must keep
+			// running it.
 			expect(existsSync(GENERAL_LEDGER_PATH)).toBe(true);
-			const entries = activeEntries(GENERAL_LEDGER_PATH);
-			expect(entries).toContain(INIT_REHOME);
-			expect(entries.filter((e) => e === INIT_REHOME).length).toBe(1);
+			expect(activeEntries(GENERAL_LEDGER_PATH)).not.toContain(INIT_REHOME);
 		});
 
-		test('is scoped to the general ledger only (not duplicated into per-OS or integration ledgers)', () => {
-			// The macos/windows ledgers would be a no-op for a coverage
-			// job that never runs on those runners; listing it there
-			// would imply OS-specific evidence that does not exist.
+		test('is absent from every per-OS and integration ledger (no cross-ledger migration)', () => {
+			// Retirement must not become a cross-ledger migration: these
+			// ledgers never held the entry, and the un-quarantine must not
+			// leave a stray duplicate behind.
 			expect(activeEntries(MACOS_LEDGER_PATH)).not.toContain(INIT_REHOME);
 			expect(activeEntries(WINDOWS_LEDGER_PATH)).not.toContain(INIT_REHOME);
 			if (existsSync(INTEGRATION_LEDGER_PATH)) {
@@ -179,43 +178,27 @@ describe('ci.yml integration — quarantine ledger disposition for issue #2730 m
 			}
 		});
 
-		test('its owning entry carries OWNER + EXPIRY metadata (issue #2477 Check 7)', () => {
-			expectCarriesOwnerExpiry(GENERAL_LEDGER_PATH, INIT_REHOME);
-		});
-
-		test('the quarantined path exists and is discovered by the ci.yml find chain', () => {
+		test('the retired path exists on disk and is discovered by the ci.yml find chain', () => {
 			expect(existsSync(join(REPO_ROOT, INIT_REHOME))).toBe(true);
 		});
 	});
 
-	describe('bun-compat-exit-first-2530.test.ts (macos-latest, unit-shard 5, hard fail) — re-added per #3248', () => {
-		test('is an active entry in the macOS ledger (#3248 re-add)', () => {
-			// #2973 retired this entry on 2026-09-27 with the absence-guard
-			// "no silent re-add without fresh merge-group macos-latest failure
-			// evidence". That evidence arrived (issue #3248): hard failures on
-			// merge-group runs 38449931439 + 38421990284, both
-			// `unit (macos-latest, 5)`, with a DIFFERENT signature than the
-			// timeout flake the retirement cured — the overflow child exits 0
-			// before the kill lands, so the 30s PROBE_TIMEOUT_MS remedy does
-			// not apply. The re-add is documented in the ledger block.
+	describe('bun-compat-exit-first-2530.test.ts (macos-latest, unit-shard 5, hard fail) — retired by the 2026-11-12 #2973 un-quarantine', () => {
+		test('is retired — NOT an active entry in the macOS ledger', () => {
+			// Quarantined by #2740, retired by #2973 on 2026-09-27, re-added
+			// per #3248 (fresh merge-group macos-latest hard-failure
+			// evidence), and finally un-quarantined 2026-11-12 per issue
+			// #2973 (collated trace). The macOS unit shards must keep
+			// running the file; re-adding it again requires fresh
+			// merge-group macos-latest failure evidence per the #1782
+			// convention.
 			expect(existsSync(MACOS_LEDGER_PATH)).toBe(true);
-			expect(activeEntries(MACOS_LEDGER_PATH)).toContain(BUN_COMPAT_EXIT_FIRST);
-		});
-
-		test('the re-added macOS entry carries the Check 7 OWNER/EXPIRY metadata (#3248)', () => {
-			expectCarriesOwnerExpiry(MACOS_LEDGER_PATH, BUN_COMPAT_EXIT_FIRST);
-		});
-
-		test('the re-added macOS entry is present exactly once (PRR-029)', () => {
-			// A duplicate entry with its own OWNER/EXPIRY block would leave two
-			// competing renewal owners while membership pins stay green.
-			const dupes = activeEntries(MACOS_LEDGER_PATH).filter(
-				(entry) => entry === BUN_COMPAT_EXIT_FIRST,
+			expect(activeEntries(MACOS_LEDGER_PATH)).not.toContain(
+				BUN_COMPAT_EXIT_FIRST,
 			);
-			expect(dupes.length).toBe(1);
 		});
 
-		test('is scoped to the macOS ledger only (not general, not windows, not integration)', () => {
+		test('is absent from the general, windows, and integration ledgers', () => {
 			expect(activeEntries(GENERAL_LEDGER_PATH)).not.toContain(
 				BUN_COMPAT_EXIT_FIRST,
 			);
@@ -229,7 +212,7 @@ describe('ci.yml integration — quarantine ledger disposition for issue #2730 m
 			}
 		});
 
-		test('the quarantined path exists and is discovered by the ci.yml find chain', () => {
+		test('the retired path exists on disk and is discovered by the ci.yml find chain', () => {
 			expect(existsSync(join(REPO_ROOT, BUN_COMPAT_EXIT_FIRST))).toBe(true);
 		});
 	});

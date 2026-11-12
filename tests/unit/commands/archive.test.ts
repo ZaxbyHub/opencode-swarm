@@ -10,6 +10,7 @@ import {
 	_internals as evidenceInternals,
 	saveEvidence,
 } from '../../../src/evidence/manager';
+import { invalidateCachedArtifact } from '../../../src/utils/swarm-artifact-cache';
 import { safeRmRecursive } from '../../helpers/safe-test-dir';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
@@ -61,6 +62,8 @@ describe('handleArchiveCommand', () => {
 		// Create recent bundle
 		const taskId = '1.2';
 		await saveEvidence(tempDir, taskId, createNoteEvidence(taskId, 'New note'));
+		// #3218 H7 (impl-review nit): pin to the frozen clock like the :89 twin.
+		await makeBundleOld(tempDir, taskId, 0);
 
 		// Run dry-run
 		const result = await handleArchiveCommand(tempDir, ['--dry-run']);
@@ -90,6 +93,11 @@ describe('handleArchiveCommand', () => {
 		// Create recent bundle
 		const taskId = '1.2';
 		await saveEvidence(tempDir, taskId, createNoteEvidence(taskId, 'New note'));
+		// #3218 (H7 leg): saveEvidence stamps updated_at from the REAL clock
+		// while `now` is frozen at FIXED_NOW — the test would fail whenever
+		// the host clock is before FIXED_NOW-90d. Pin the bundle to the frozen
+		// clock (0 days old) so the test asserts classification, not wall-time.
+		await makeBundleOld(tempDir, taskId, 0);
 
 		// Run archive (not dry-run)
 		const result = await handleArchiveCommand(tempDir, []);
@@ -256,6 +264,13 @@ async function makeBundleOld(
 		'evidence.json',
 	);
 	await Bun.write(evidencePath, JSON.stringify(bundle));
+	// #3218 (H2 leg, plan-critic round-1 challenge 3): the rewrite is
+	// same-size (ISO strings are fixed-width) and the process-global artifact
+	// cache is mtime-stamped — a same-tick rewrite can serve the PRE-rewrite
+	// JSON to the next loadEvidence. Invalidate after the write, mirroring the
+	// production writer's own invariant (src/evidence/manager.ts:305-309,
+	// issue #1729 defect class).
+	invalidateCachedArtifact(evidencePath);
 }
 
 // Helper function to create note evidence with required fields
