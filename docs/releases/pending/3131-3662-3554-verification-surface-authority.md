@@ -18,18 +18,21 @@ Three verification-surface correctness fixes, one per issue:
   candidate instead of silently nulling the changed-line map (the live
   #3092 incident: a stale `zaxbyhub/main` made the diff-scoped secretscan
   gate permanently red until a manual fetch). A merge-base equal to HEAD is
-  rejected as non-authoritative (#3092 PRR-002, now enforced in the shared
-  resolver for BOTH the changed-line map and the ambiguity set — the 4.5
-  review caught the ranges consumer accepting an empty committed map and the
-  SAST gate failing open on that geometry). Abort, timeout, and spawn
-  failures without output-guard flags stop the walk after one spawn; an
-  output-guard termination (reported by the runner as spawn-error WITH
-  truncation flags) is treated as candidate-unusable and falls through,
-  bounded by the candidate list — every terminal path is fail-closed. When
-  no candidate yields a usable base, the null now carries a named diagnostic
-  (every ref tried + outcome) on the always-visible `criticalWarn` channel,
-  so "all candidates unusable" is no longer indistinguishable from "git
-  unavailable".
+  accepted but FLAGGED non-authoritative (#3092 PRR-002), and BOTH consumers
+  then fail closed on the flagged resolution — the changed-line map returns
+  null with a named diagnostic (the 4.5 review caught the ranges consumer
+  treating the empty committed map as authoritative, failing the SAST gate
+  OPEN on that geometry), and the ambiguity set keeps its original refusal;
+  nothing gets the pre-existing discount in that geometry. Abort, timeout,
+  and spawn failures without output-guard flags stop the walk after one
+  spawn (executable-resolution and HEAD-resolution failures each carry their
+  own named cause); an output-guard termination (reported by the runner as
+  spawn-error WITH truncation flags) is treated as candidate-unusable and
+  falls through, bounded by the candidate list — every terminal path is
+  fail-closed. When no candidate yields a usable base, the null carries a
+  named diagnostic (every ref tried + outcome, or the pre-walk failure
+  cause) on the always-visible `criticalWarn` channel, so "all candidates
+  unusable" is no longer indistinguishable from "git unavailable".
 
 - **#3662 — session authority.** The `completion_verify` tool wrapper no
   longer falls back to the model-supplied `sessionID` argument when the
@@ -66,7 +69,7 @@ directory name standing in for a plan task id.
 ## Verification
 
 - 11 frozen acceptance checks (anchor
-  `manifest=426c2d0da750882907dae7a5540c7dc7ee1d82e4`): C1/C2/C3/C9
+  `manifest=4b1af13d3ba4abefb8df0426f949d6b2a2c468f5`): C1/C2/C3/C9
   RED-at-base → GREEN at head; C6 NEW-SURFACE spec green; C4/C5/C7/C8/C10/C11
   floors green at both ends. Real-git fixtures (stale-first candidate,
   stdout-guard overflow, parser-cap overflow, overflow-then-HEAD guard,

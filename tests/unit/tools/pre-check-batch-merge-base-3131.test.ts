@@ -252,30 +252,119 @@ describe('getChangedLineRanges — merge-base candidate selection (#3131)', () =
 		expect(ambiguous).toBeNull();
 	});
 
-	test('overflow-then-HEAD candidate fails closed for the RANGES consumer too, not only the ambiguity consumer (GREEN at base, GREEN after the 4.5-review fix)', async () => {
+	test('overflow-then-HEAD candidate fails closed for the RANGES consumer too, not only the ambiguity consumer (RED at base, GREEN after the 4.5-review fix)', async () => {
 		// 4.5 review F1: the same geometry through getChangedLineRanges —
 		// an accepted HEAD-equal base yields an EMPTY committed map that
 		// classifySastFindings treats as authoritative (every finding
 		// PRE-EXISTING, gate fails OPEN). Base nulls here (stdout-guard on
-		// the stale diff); the HEAD-shadow rejection in the resolver must
-		// keep it null for this consumer as well.
+		// the stale diff) with NO warning; the 4.5 fix must keep it null
+		// AND surface the named always-visible diagnostic (the fail-closed
+		// outcome must be distinguishable from git-unavailable).
 		const { stale } = buildAbcHistory();
 		const head = revParseHead();
 		updateRef('refs/remotes/zaxbyhub/main', stale);
 		updateRef('refs/remotes/origin/main', head);
 
-		const map = await getChangedLineRanges(repo, undefined, []);
-
+		const warnSpy = spyOn(console, 'warn').mockImplementation(() => {});
+		let map: Map<string, Set<number>> | null = new Map();
+		let captured = '';
+		try {
+			map = await getChangedLineRanges(repo, undefined, []);
+			// Bun's mockRestore clears call state — snapshot before finally.
+			captured = warnSpy.mock.calls
+				.map((call) => String(call[0] ?? ''))
+				.join('\n');
+		} finally {
+			warnSpy.mockRestore();
+		}
 		expect(map).toBeNull();
+		expect(captured).toContain('empty committed hop');
 	});
 
-	test('a systemic merge-base failure stops the walk after ONE spawn instead of fanning six (RED at base, GREEN after the fix)', async () => {
-		// Plan-critic round 2 (finding 2): a spawn-level failure (not a
-		// per-candidate unresolvable exit) is systemic — every later candidate
-		// would fail identically. The resolver must stop after ONE spawn (the
-		// upfront rev-parse HEAD leg since the 4.5-review HEAD-shadow check)
-		// and return null. At base runGit collapses the failure to
-		// "unresolvable" and walks all six candidates after the rev-parse.
+	test('a systemic HEAD-resolution failure stops before any candidate spawn (RED at base, GREEN after the fix)', async () => {
+		// 4.5 review round 2 (M6 family): the upfront rev-parse HEAD leg is
+		// the first spawn; a spawn-level failure there must stop the walk
+		// with ZERO candidate spawns and the head-resolution diagnostic (not
+		// the git-executable wording). At base no rev-parse exists and the
+		// walk fans all six candidates.
+		initRepo('trunk');
+		writeFileSync(path.join(repo, 'base.txt'), 'line1\n');
+		commitAll('seed');
+
+		const savedRun = preCheckInternals.runExternalTool;
+		let candidateSpawns = 0;
+		preCheckInternals.runExternalTool = (async (options: {
+			args?: string[];
+		}) => {
+			if (options?.args?.includes('merge-base')) candidateSpawns++;
+			return { status: 'spawn-error' } as never;
+		}) as never;
+		const warnSpy = spyOn(console, 'warn').mockImplementation(() => {});
+		let map: Map<string, Set<number>> | null = new Map();
+		let captured = '';
+		try {
+			map = await getChangedLineRanges(repo, undefined, []);
+			// Bun's mockRestore clears call state — snapshot before finally.
+			captured = warnSpy.mock.calls
+				.map((call) => String(call[0] ?? ''))
+				.join('\n');
+		} finally {
+			preCheckInternals.runExternalTool = savedRun;
+			warnSpy.mockRestore();
+		}
+		expect(map).toBeNull();
+		expect(candidateSpawns).toBe(0);
+		expect(captured).toContain('resolving HEAD failed');
+		expect(captured).not.toContain('git executable could not be resolved');
+	});
+
+	test('a systemic merge-base failure stops the candidate walk after ONE spawn instead of fanning six (RED at base, GREEN after the fix)', async () => {
+		// 4.5 review round 2 (M6): HEAD resolves fine, then the FIRST
+		// candidate's merge-base spawn fails — the walk must stop after
+		// exactly one candidate spawn. At base runGit collapses the failure
+		// to "unresolvable" and walks all six.
+		initRepo('trunk');
+		writeFileSync(path.join(repo, 'base.txt'), 'line1\n');
+		commitAll('seed');
+
+		const savedRun = preCheckInternals.runExternalTool;
+		let candidateSpawns = 0;
+		preCheckInternals.runExternalTool = (async (options: {
+			args?: string[];
+		}) => {
+			const args = options?.args ?? [];
+			if (args.includes('merge-base')) {
+				candidateSpawns++;
+				return { status: 'spawn-error' } as never;
+			}
+			if (args[0] === 'rev-parse') {
+				return {
+					status: 'completed',
+					exitCode: 0,
+					stdout: `${'a'.repeat(40)}\n`,
+					stderr: '',
+					stdoutTruncated: false,
+					stderrTruncated: false,
+				} as never;
+			}
+			return { status: 'spawn-error' } as never;
+		}) as never;
+		try {
+			const map = await getChangedLineRanges(repo, undefined, []);
+			expect(map).toBeNull();
+		} finally {
+			preCheckInternals.runExternalTool = savedRun;
+		}
+		expect(candidateSpawns).toBe(1);
+	});
+
+	test('a systemic failure on the very first spawn stops with ONE total spawn (RED at base, GREEN after the fix)', async () => {
+		// Plan-critic round 2 (finding 2): any spawn-level failure is
+		// systemic — every later spawn would fail identically. With the
+		// upfront rev-parse HEAD leg that first spawn IS the rev-parse; the
+		// walk must stop there (one total spawn). At base no rev-parse
+		// exists and runGit collapses the failure to "unresolvable", so all
+		// six candidate spawns run.
 		initRepo('trunk');
 		writeFileSync(path.join(repo, 'base.txt'), 'line1\n');
 		commitAll('seed');

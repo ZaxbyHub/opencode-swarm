@@ -87,7 +87,7 @@ const DIFF_BASE_CANDIDATES = [
  */
 type DiffBaseAttempt = {
 	ref: string;
-	outcome: 'unresolvable' | 'unusable' | 'systemic' | 'head-shadowed' | 'ok';
+	outcome: 'unresolvable' | 'unusable' | 'systemic' | 'ok';
 };
 
 type ClassifiedGitOutcome =
@@ -165,15 +165,16 @@ async function resolveValidatedDiffBase(
 		committedLines: Map<string, Set<number>>;
 		mergeBaseEqualsHead: boolean;
 	} | null;
+	failureCause?: 'git-executable' | 'head-resolution';
 }> {
 	let executable: string;
 	try {
 		executable = await resolveGitExecutableAsync();
 	} catch {
 		// Executable resolution failed before any candidate was tried; the
-		// empty attempt list makes logDiffBaseResolutionFailure name the
+		// cause discriminator makes logDiffBaseResolutionFailure name the
 		// real cause instead of an untried candidate list.
-		return { attempted: [], resolution: null };
+		return { attempted: [], resolution: null, failureCause: 'git-executable' };
 	}
 	// Resolve HEAD once for the #3092 PRR-002 shadow check below. A
 	// non-SHA/unresolvable HEAD (degenerate repository) leaves headSha null —
@@ -187,7 +188,11 @@ async function resolveValidatedDiffBase(
 		executable,
 	);
 	if (headResult.kind === 'systemic') {
-		return { attempted: [], resolution: null };
+		return {
+			attempted: [],
+			resolution: null,
+			failureCause: 'head-resolution',
+		};
 	}
 	const headSha =
 		headResult.kind === 'ok' &&
@@ -274,13 +279,18 @@ async function resolveValidatedDiffBase(
  * operator must fetch remotes or gating silently degrades) plus the
  * debug-gated logger for debug runs.
  */
-function logDiffBaseResolutionFailure(attempted: DiffBaseAttempt[]): void {
+function logDiffBaseResolutionFailure(
+	attempted: DiffBaseAttempt[],
+	failureCause?: 'git-executable' | 'head-resolution',
+): void {
 	const detail =
-		attempted.length === 0
+		failureCause === 'git-executable'
 			? 'the git executable could not be resolved, so no candidate was tried'
-			: `no usable diff base among candidates tried (${attempted
-					.map((entry) => `${entry.ref}=${entry.outcome}`)
-					.join(', ')})`;
+			: failureCause === 'head-resolution'
+				? 'resolving HEAD failed (timeout, spawn failure, or aborted), so no candidate was tried'
+				: `no usable diff base among candidates tried (${attempted
+						.map((entry) => `${entry.ref}=${entry.outcome}`)
+						.join(', ')})`;
 	const line = `changed-line base resolution failed: ${detail} — changed-line classification is fail-closed (all findings treated as new) until a candidate's committed diff resolves; fetch the remote tracking refs`;
 	criticalWarn(line);
 }
@@ -1462,12 +1472,10 @@ export async function getChangedLineAmbiguousFiles(
 	// stale first ref cannot inflate this committed hop either. The scoped
 	// `--name-only` diff below then runs against the resolved mergeBase.
 	// (#3092 PRR-002 HEAD-shadow rejection lives in the resolver itself.)
-	const { attempted, resolution } = await resolveValidatedDiffBase(
-		directory,
-		abortSignal,
-	);
+	const { attempted, resolution, failureCause } =
+		await resolveValidatedDiffBase(directory, abortSignal);
 	if (!resolution) {
-		logDiffBaseResolutionFailure(attempted);
+		logDiffBaseResolutionFailure(attempted, failureCause);
 		return null;
 	}
 	// #3092 review (PRR-002), original guard retained: a merge-base equal to
@@ -1586,12 +1594,10 @@ export async function getChangedLineRanges(
 	// actually USABLE — a stale-but-resolvable ref whose diff trips the stdout
 	// guard or the parser cap falls through to the next candidate instead of
 	// nulling the whole map. A total failure carries a named diagnostic.
-	const { attempted, resolution } = await resolveValidatedDiffBase(
-		directory,
-		abortSignal,
-	);
+	const { attempted, resolution, failureCause } =
+		await resolveValidatedDiffBase(directory, abortSignal);
 	if (!resolution) {
-		logDiffBaseResolutionFailure(attempted);
+		logDiffBaseResolutionFailure(attempted, failureCause);
 		return null;
 	}
 	// #3092 PRR-002 for the ranges consumer (4.5 review F1): a HEAD-equal
