@@ -21,7 +21,14 @@ Two shared-root workflow fixes:
   working tree — routing each with its fingerprint. Reconciliation is
   path-base correct for workspaces whose project root is a subdirectory of
   the git repository (paths are normalized to the project root, so monorepo
-  layouts attribute correctly). Output that guardrail routing never observed
+  layouts attribute correctly). The capture prefix is resolved by git itself
+  (`rev-parse --show-prefix`), never lexically — on hosts whose temp paths
+  surface Windows 8.3 short names (`RUNNER~1`), a lexical `path.relative`
+  against the canonical `rev-parse --show-toplevel` output treated the two
+  spellings as different directories and misclassified every working-tree
+  change as outside the project root (declared-scope output silently left
+  the reviewer gate; no-change workspaces read dirty). Output that
+  guardrail routing never observed
   no longer strands the generation and throws terminal
   `REVIEWER_SCOPE_STALE (retryable=false)`.
 - Attribution problems now surface typed, actionable denials instead of one

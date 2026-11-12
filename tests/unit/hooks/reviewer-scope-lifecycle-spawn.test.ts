@@ -102,11 +102,12 @@ describe('reviewer-scope-lifecycle no-change status probe (issue #2236 regressio
 		const calls: Array<{ command: string; args: readonly string[] }> = [];
 		_internals.spawn = ((command: string, args: readonly string[]) => {
 			calls.push({ command, args });
-			// PR #3668: the verdict is a two-probe sequence — toplevel
-			// resolution first, then porcelain status with per-file
-			// untracked enumeration.
+			// PR #3668: the verdict is a two-probe sequence — capture-prefix
+			// resolution first (`rev-parse --show-prefix`; FB-026: resolved by
+			// git, never lexically — 8.3 short-form cwd vs canonical toplevel),
+			// then porcelain status with per-file untracked enumeration.
 			if (args[0] === 'rev-parse') {
-				return fakeCleanChild('C:/fixture/toplevel');
+				return fakeCleanChild('');
 			}
 			return fakeCleanChild('');
 		}) as typeof _internals.spawn;
@@ -155,7 +156,10 @@ describe('reviewer-scope-lifecycle no-change status probe (issue #2236 regressio
 		// captured arguments — a path that never spawns must not pass silently.
 		// PR #3668 feedback: the zero-routed flow probes twice — once inside
 		// reconciliation (committed-diff union) and once for the proved-empty
-		// clean verdict. Each probe is a toplevel resolution + porcelain pair.
+		// clean verdict. Each probe is a capture-prefix resolution + porcelain
+		// pair (FB-026: the prefix comes from `rev-parse --show-prefix`, never
+		// from a lexical path.relative against `--show-toplevel` — the lexical
+		// form misclassifies 8.3 short-form cwd spellings on Windows runners).
 		expect(calls.length).toBe(4);
 		for (const call of calls) {
 			expect(call.command).toBe(RESOLVED_GIT);
@@ -163,7 +167,7 @@ describe('reviewer-scope-lifecycle no-change status probe (issue #2236 regressio
 			// regress into string-concatenation of the space-containing path.
 			expect(Array.isArray(call.args)).toBe(true);
 		}
-		expect(calls[0].args).toEqual(['rev-parse', '--show-toplevel']);
+		expect(calls[0].args).toEqual(['rev-parse', '--show-prefix']);
 		expect(calls[1].args).toContain('status');
 		expect(calls[1].args).toContain('--porcelain');
 		// PR #3668 feedback F-4: per-file untracked enumeration keeps a wholly

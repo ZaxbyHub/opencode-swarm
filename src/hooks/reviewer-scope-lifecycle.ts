@@ -1,5 +1,4 @@
 import * as child_process from 'node:child_process';
-import * as path from 'node:path';
 import {
 	committedFilesBetweenAsync,
 	isSwarmRuntimePath,
@@ -417,20 +416,28 @@ function toCaptureRelativePath(
 async function captureWorkspaceDirtPaths(
 	directory: string,
 ): Promise<{ inRoot: string[]; totalDirt: number } | null> {
-	const toplevel = await runBoundedGitText(directory, [
+	// The capture prefix comes from git itself (`rev-parse --show-prefix`),
+	// never from a lexical `path.relative(git-toplevel, resolve(directory))`:
+	// the two strings can disagree about Windows 8.3 short names (os.tmpdir()
+	// hands out `RUNNER~1` while `rev-parse --show-toplevel` prints the long
+	// form) — and path.relative treats those as DIFFERENT directories, so
+	// every porcelain path was classified "outside the capture root" on such
+	// runners, silently dropping declared-scope dirt from the routing loop
+	// (no fingerprint, no recorded failure) and reading no-change workspaces
+	// as dirty. `--show-prefix` is resolved by git, so the forms cannot
+	// disagree. A failed probe degrades (null), matching every other probe.
+	const showPrefix = await runBoundedGitText(directory, [
 		'rev-parse',
-		'--show-toplevel',
+		'--show-prefix',
 	]);
-	if (toplevel === null || toplevel.trim().length === 0) return null;
+	if (showPrefix === null) return null;
+	const capturePrefix = showPrefix.trim().replace(/\/+$/, '');
 	const status = await runBoundedGitText(
 		directory,
 		['status', '--porcelain', '--untracked-files=all'],
 		NOCHANGE_STATUS_BYTES,
 	);
 	if (status === null) return null;
-	const capturePrefix = path
-		.relative(toplevel.trim(), path.resolve(directory))
-		.replaceAll('\\', '/');
 	const inRoot = new Set<string>();
 	let totalDirt = 0;
 	for (const line of status.split('\n')) {
