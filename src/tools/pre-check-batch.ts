@@ -1600,14 +1600,23 @@ export async function getChangedLineRanges(
 		logDiffBaseResolutionFailure(attempted, failureCause);
 		return null;
 	}
-	// #3092 PRR-002 for the ranges consumer (4.5 review F1): a HEAD-equal
-	// base would hand classifySastFindings an authoritative-looking empty
-	// committed hop — every committed finding PRE-EXISTING, gate open where
-	// base was fail-closed. Fail closed instead (all findings NEW); the
-	// untracked/staged legs lose nothing the fail-closed contract owed them.
-	if (resolution.mergeBaseEqualsHead) {
+	// #3092 PRR-002 for the ranges consumer (4.5 review F1, final-critic
+	// refinement): a HEAD-equal base hands classifySastFindings an
+	// authoritative-looking empty committed hop — every committed finding
+	// PRE-EXISTING, gate open where base was fail-closed. But a branch with
+	// no commits past its base is the ORDINARY fresh-ref geometry: at base
+	// the first-valid-wins walk accepted that candidate and the
+	// staged/unstaged/untracked legs stayed authoritative (#2918 F-002
+	// ignored-file contract). Fail closed ONLY when the HEAD-equal base was
+	// reached by FALLING THROUGH an earlier candidate that resolved but
+	// failed validation (overflow/planted-ref signature); when it is the
+	// first resolvable candidate, keep the pre-fix behavior.
+	const headEqualFromFallThrough =
+		resolution.mergeBaseEqualsHead &&
+		attempted.some((entry) => entry.outcome === 'unusable');
+	if (headEqualFromFallThrough) {
 		criticalWarn(
-			'changed-line base resolution: the selected diff base equals HEAD (empty committed hop is non-authoritative) — changed-line classification is fail-closed (all findings treated as new); create branch commits past the base or fetch the remote tracking refs',
+			'changed-line base resolution: the selected diff base equals HEAD after another candidate failed validation (overflow or planted-ref signature; empty committed hop is non-authoritative) — changed-line classification is fail-closed (all findings treated as new); fetch the remote tracking refs',
 		);
 		return null;
 	}

@@ -281,6 +281,26 @@ describe('getChangedLineRanges — merge-base candidate selection (#3131)', () =
 		expect(captured).toContain('empty committed hop');
 	});
 
+	test('a fresh ref at HEAD on a branch with no commits keeps the map (GREEN at base, GREEN after the final-critic fix)', async () => {
+		// Final-critic round 1: the ordinary fresh-ref geometry — origin/main
+		// legitimately sits at HEAD because the branch has no commits yet, and
+		// NO earlier candidate failed validation. At base the first-valid-wins
+		// walk accepted it and the staged/unstaged/untracked legs stayed
+		// authoritative (#2918 F-002 contract); the over-broad HEAD-equal
+		// guard nullled it. Only the FALL-THROUGH signature (an earlier
+		// candidate resolved but failed validation) may fail closed.
+		initRepo('feature2');
+		writeFileSync(path.join(repo, 'base.txt'), 'line1\n');
+		commitAll('seed');
+		updateRef('refs/remotes/origin/main', revParseHead());
+		writeFileSync(path.join(repo, 'new.txt'), 'uncommitted\n');
+
+		const map = await getChangedLineRanges(repo, undefined, []);
+
+		expect(map).not.toBeNull();
+		expect(map?.has('new.txt')).toBe(true);
+	});
+
 	test('a systemic HEAD-resolution failure stops before any candidate spawn (RED at base, GREEN after the fix)', async () => {
 		// 4.5 review round 2 (M6 family): the upfront rev-parse HEAD leg is
 		// the first spawn; a spawn-level failure there must stop the walk

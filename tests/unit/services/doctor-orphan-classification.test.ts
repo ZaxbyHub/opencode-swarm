@@ -165,6 +165,27 @@ describe('doctor — Orphaned Evidence classification for derived writer subtree
 		expect(check?.detail).toContain('9');
 	});
 
+	test('a bare numeric dir WITHOUT a marker stays a task id (GREEN at base and after the fix — marker-gate anti-mutant leg)', async () => {
+		// Final-critic round 1 (surviving-mutant closure): the marker gate is
+		// what distinguishes a phase directory from a numeric task id — a
+		// mutant returning true for ANY numeric name must go red here. The
+		// dir carries only a real bundle shape, no phase artifact.
+		const numeric = path.join(dir, '.swarm', 'evidence', '42');
+		mkdirSync(numeric, { recursive: true });
+		writeFileSync(
+			path.join(numeric, 'evidence.json'),
+			JSON.stringify({ taskId: '42' }),
+		);
+
+		const data = await getDiagnoseData(dir);
+		const check = data.checks.find(
+			(entry) => entry.name === 'Orphaned Evidence',
+		);
+		expect(check).toBeDefined();
+		expect(check?.status).toBe('❌');
+		expect(check?.detail).toContain('42');
+	});
+
 	test('named derived dir carrying a real evidence.json bundle stays a task id (GREEN at base and after the fix — precedence anti-mutant leg)', async () => {
 		// F5 precedence applied to the named set with the EXACT derived name
 		// (plan-critic round 2, finding 5): a directory literally named
