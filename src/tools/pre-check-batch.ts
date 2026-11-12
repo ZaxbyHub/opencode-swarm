@@ -169,14 +169,30 @@ async function resolveValidatedDiffBase(
 	try {
 		executable = await resolveGitExecutableAsync();
 	} catch {
-		return {
-			attempted: DIFF_BASE_CANDIDATES.map((ref) => ({
-				ref,
-				outcome: 'systemic' as const,
-			})),
-			resolution: null,
-		};
+		// Executable resolution failed before any candidate was tried; the
+		// empty attempt list makes logDiffBaseResolutionFailure name the
+		// real cause instead of an untried candidate list.
+		return { attempted: [], resolution: null };
 	}
+	// Resolve HEAD once for the #3092 PRR-002 shadow check below. A
+	// non-SHA/unresolvable HEAD (degenerate repository) leaves headSha null —
+	// the shadow check is skipped and the candidate walk proceeds on its own
+	// merits (a repository without a resolvable HEAD fails the diff legs
+	// anyway).
+	const headResult = await runGitClassified(
+		['rev-parse', 'HEAD'],
+		directory,
+		abortSignal,
+		executable,
+	);
+	if (headResult.kind === 'systemic') {
+		return { attempted: [], resolution: null };
+	}
+	const headSha =
+		headResult.kind === 'ok' &&
+		/^[0-9a-f]{40,64}$/i.test(headResult.stdout.trim())
+			? headResult.stdout.trim().toLowerCase()
+			: null;
 	const attempted: DiffBaseAttempt[] = [];
 	for (const baseBranch of DIFF_BASE_CANDIDATES) {
 		const mergeBaseResult = await runGitClassified(
@@ -196,6 +212,20 @@ async function resolveValidatedDiffBase(
 		const candidate = mergeBaseResult.stdout.trim();
 		if (!candidate || !/^[0-9a-f]{40,64}$/i.test(candidate)) {
 			attempted.push({ ref: baseBranch, outcome: 'unresolvable' });
+			continue;
+		}
+		// #3092 review (PRR-002), resolver-level (4.5 review F1): a merge-base
+		// equal to HEAD means the committed hop is empty and
+		// NON-AUTHORITATIVE — HEAD sits on the default branch itself, the
+		// branch carries no commits past its base yet, or every candidate ref
+		// was planted/shadowed at the tip. Accepting it (an empty committed
+		// map parses fine) let a freshly committed finding classify
+		// PRE-EXISTING through the ranges consumer — the SAST gate failed
+		// OPEN where pre-fix it was null-fail-closed. Reject the candidate
+		// and fall through; if nothing else resolves, the total-failure null
+		// + diagnostic preserves the fail-closed contract for BOTH consumers.
+		if (headSha !== null && candidate.toLowerCase() === headSha) {
+			attempted.push({ ref: baseBranch, outcome: 'unusable' });
 			continue;
 		}
 		const diffResult = await runGitClassified(
@@ -242,12 +272,14 @@ async function resolveValidatedDiffBase(
  * debug-gated logger for debug runs.
  */
 function logDiffBaseResolutionFailure(attempted: DiffBaseAttempt[]): void {
-	const summary = attempted
-		.map((entry) => `${entry.ref}=${entry.outcome}`)
-		.join(', ');
-	const line = `changed-line base resolution failed: no usable diff base among candidates tried (${summary}) — changed-line classification is fail-closed (all findings treated as new) until a candidate's committed diff resolves; fetch the remote tracking refs`;
+	const detail =
+		attempted.length === 0
+			? 'the git executable could not be resolved, so no candidate was tried'
+			: `no usable diff base among candidates tried (${attempted
+					.map((entry) => `${entry.ref}=${entry.outcome}`)
+					.join(', ')})`;
+	const line = `changed-line base resolution failed: ${detail} — changed-line classification is fail-closed (all findings treated as new) until a candidate's committed diff resolves; fetch the remote tracking refs`;
 	criticalWarn(line);
-	warn(line);
 }
 
 export const _internals: {
@@ -1426,6 +1458,7 @@ export async function getChangedLineAmbiguousFiles(
 	// consumers of the diff base must resolve the SAME usable candidate, so a
 	// stale first ref cannot inflate this committed hop either. The scoped
 	// `--name-only` diff below then runs against the resolved mergeBase.
+	// (#3092 PRR-002 HEAD-shadow rejection lives in the resolver itself.)
 	const { attempted, resolution } = await resolveValidatedDiffBase(
 		directory,
 		abortSignal,
@@ -1435,29 +1468,6 @@ export async function getChangedLineAmbiguousFiles(
 		return null;
 	}
 	const mergeBase = resolution.mergeBase;
-
-	// #3092 review (PRR-002): a merge-base equal to HEAD means the committed
-	// hop is empty and NON-AUTHORITATIVE — HEAD sits on the default branch
-	// itself, the branch carries no commits past its base yet, or every
-	// candidate ref was planted/shadowed at the tip. Treating the empty hop
-	// as proof that nothing was committed recently let a freshly committed
-	// secret classify PRE-EXISTING. Fail closed: the ambiguity source is
-	// untrustworthy, so nothing gets the discount. Cost: worktree-only
-	// (uncommitted) brownfield edits before the first branch commit also
-	// lose the discount. Residual trust boundary: a local ref planted at an
-	// INTERMEDIATE commit can still shrink the committed hop — the same
-	// git-state trust the SAST classification inherits; full mitigation
-	// requires fetch-verified refs.
-	const headSha = (
-		await runGit(['rev-parse', 'HEAD'], directory, abortSignal)
-	)?.trim();
-	if (
-		typeof headSha === 'string' &&
-		/^[0-9a-f]{40,64}$/i.test(headSha) &&
-		headSha.toLowerCase() === mergeBase.toLowerCase()
-	) {
-		return null;
-	}
 
 	// :(literal) pathspec magic (#3092 review PRR-005): coder-supplied names
 	// are file paths, not fnmatch patterns — glob metacharacters in real
@@ -1571,7 +1581,7 @@ export async function getChangedLineRanges(
 		logDiffBaseResolutionFailure(attempted);
 		return null;
 	}
-	const { mergeBase, committedLines } = resolution;
+	const { committedLines } = resolution;
 
 	const commonDiffArgs = [
 		'-c',

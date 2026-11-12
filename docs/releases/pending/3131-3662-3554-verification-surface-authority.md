@@ -17,8 +17,15 @@ Three verification-surface correctness fixes, one per issue:
   stdout guard or the 200k-line parser cap falls through to the next
   candidate instead of silently nulling the changed-line map (the live
   #3092 incident: a stale `zaxbyhub/main` made the diff-scoped secretscan
-  gate permanently red until a manual fetch). Systemic failures (abort,
-  timeout, spawn failure) stop the walk after one spawn — fail-closed. When
+  gate permanently red until a manual fetch). A merge-base equal to HEAD is
+  rejected as non-authoritative (#3092 PRR-002, now enforced in the shared
+  resolver for BOTH the changed-line map and the ambiguity set — the 4.5
+  review caught the ranges consumer accepting an empty committed map and the
+  SAST gate failing open on that geometry). Abort, timeout, and spawn
+  failures without output-guard flags stop the walk after one spawn; an
+  output-guard termination (reported by the runner as spawn-error WITH
+  truncation flags) is treated as candidate-unusable and falls through,
+  bounded by the candidate list — every terminal path is fail-closed. When
   no candidate yields a usable base, the null now carries a named diagnostic
   (every ref tried + outcome) on the always-visible `criticalWarn` channel,
   so "all candidates unusable" is no longer indistinguishable from "git

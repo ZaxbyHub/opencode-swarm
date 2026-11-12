@@ -252,22 +252,38 @@ describe('getChangedLineRanges — merge-base candidate selection (#3131)', () =
 		expect(ambiguous).toBeNull();
 	});
 
+	test('overflow-then-HEAD candidate fails closed for the RANGES consumer too, not only the ambiguity consumer (GREEN at base, GREEN after the 4.5-review fix)', async () => {
+		// 4.5 review F1: the same geometry through getChangedLineRanges —
+		// an accepted HEAD-equal base yields an EMPTY committed map that
+		// classifySastFindings treats as authoritative (every finding
+		// PRE-EXISTING, gate fails OPEN). Base nulls here (stdout-guard on
+		// the stale diff); the HEAD-shadow rejection in the resolver must
+		// keep it null for this consumer as well.
+		const { stale } = buildAbcHistory();
+		const head = revParseHead();
+		updateRef('refs/remotes/zaxbyhub/main', stale);
+		updateRef('refs/remotes/origin/main', head);
+
+		const map = await getChangedLineRanges(repo, undefined, []);
+
+		expect(map).toBeNull();
+	});
+
 	test('a systemic merge-base failure stops the walk after ONE spawn instead of fanning six (RED at base, GREEN after the fix)', async () => {
 		// Plan-critic round 2 (finding 2): a spawn-level failure (not a
 		// per-candidate unresolvable exit) is systemic — every later candidate
-		// would fail identically. The resolver must stop after one merge-base
-		// spawn and return null. At base runGit collapses the failure to
-		// "unresolvable" and walks all six candidates.
+		// would fail identically. The resolver must stop after ONE spawn (the
+		// upfront rev-parse HEAD leg since the 4.5-review HEAD-shadow check)
+		// and return null. At base runGit collapses the failure to
+		// "unresolvable" and walks all six candidates after the rev-parse.
 		initRepo('trunk');
 		writeFileSync(path.join(repo, 'base.txt'), 'line1\n');
 		commitAll('seed');
 
 		const savedRun = preCheckInternals.runExternalTool;
-		let mergeBaseCalls = 0;
-		preCheckInternals.runExternalTool = (async (options: {
-			args?: string[];
-		}) => {
-			if (options?.args?.includes('merge-base')) mergeBaseCalls++;
+		let totalSpawns = 0;
+		preCheckInternals.runExternalTool = (async () => {
+			totalSpawns++;
 			return { status: 'spawn-error' } as never;
 		}) as never;
 		try {
@@ -276,7 +292,7 @@ describe('getChangedLineRanges — merge-base candidate selection (#3131)', () =
 		} finally {
 			preCheckInternals.runExternalTool = savedRun;
 		}
-		expect(mergeBaseCalls).toBe(1);
+		expect(totalSpawns).toBe(1);
 	});
 
 	test('all-candidates-failed diagnostic is visible WITHOUT OPENCODE_SWARM_DEBUG and names the whole candidate list (RED at base, GREEN after the fix)', async () => {
