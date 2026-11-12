@@ -3,9 +3,9 @@
  * (file-authority.ts — lstat-failure and symlink/junction) render the
  * resolved ancestor through the shared #3587 bounded-and-redacted
  * contract: home-folded, control-neutralized, ≤320 chars. The lstat error
- * detail is sanitized and capped at 160 chars, and every occurrence of the
- * raw ancestor inside it is folded first, because `String(err)` embeds the
- * lstat operand verbatim.
+ * detail renders the errno CODE only (bounded at 40) — the raw `String(err)`
+ * message is never interpolated, so nothing can embed the lstat operand or
+ * other profile-prefixed paths (PR #3651 merge resolution).
  *
  * Unit legs drive the ancestor walk through the file-authority `_internals`
  * lstat seam with a fabricated `/home/alice/ws` workspace, so the real
@@ -177,9 +177,10 @@ describe('#3606 ancestor denial arms render bounded, redacted ancestors', () => 
 		// errno class, but the embedded control character is neutralized.
 		expect(reason).toContain('EPERM');
 		expect(reason).not.toContain('\u0001');
-		// The error detail is capped at 160 chars, so a 400-char run cannot
-		// survive. Removing the cap makes this fail.
-		expect(reason).not.toContain('e'.repeat(161));
+		// The detail is the errno CODE only — the raw message text cannot
+		// appear (removing the code-only render makes this fail).
+		expect(reason).not.toContain('denied');
+		expect(reason).not.toContain('Error');
 		// The quoted ancestor slot folds the runtime profile prefix and
 		// stays within the 320 bound; the raw prefix never reaches the text.
 		const slot = lstatSlot(reason);
@@ -195,13 +196,13 @@ describe('#3606 ancestor denial arms render bounded, redacted ancestors', () => 
 		expect(reason?.length ?? 0).toBeLessThanOrEqual(560);
 	});
 
-	test('lstat-failure arm: error text embedding the ancestor operand is folded', () => {
+	test('lstat-failure arm: raw error text never reaches the denial (code-only detail)', () => {
 		const reason = withInjectedLstat(operandEchoingLstat('EPERM'), () =>
 			checkWriteTargetForSymlink('proj/x/y.txt', '/home/alice/ws'),
 		);
 		expect(reason).toContain('WRITE BLOCKED: lstat failed on');
-		// The lstat error embeds the operand, so the raw profile prefix would
-		// survive here if the split/join fold were removed.
+		// Only the errno code surfaces; the operand-echoing message text and
+		// any embedded profile prefix cannot survive the code-only detail.
 		expect(reason).toContain('EPERM');
 		expect(reason).not.toContain('alice');
 	});
@@ -284,9 +285,10 @@ describe('#3606 ancestor denial arms render bounded, redacted ancestors', () => 
 			expect(got.verdict).toBe('DENIED');
 			expect(got.message).toMatch(/symlink\/junction/);
 			const slot = /"([^"]*)"/.exec(got.message)?.[1] ?? '';
-			// Host-independent: the slot is exactly the redacted, capped form of
-			// the real ancestor, whether or not the workspace sits under the profile.
-			expect(slot).toBe(sanitizeDiagnosticText(redactPath(linkDir), 320));
+			// Host-independent: the slot is exactly the redacted F-22 form of the
+			// real ancestor (200-char slot cap), whether or not the workspace
+			// sits under the profile.
+			expect(slot).toBe(sanitizeDiagnosticText(redactPath(linkDir), 200));
 		},
 		30_000,
 	);
