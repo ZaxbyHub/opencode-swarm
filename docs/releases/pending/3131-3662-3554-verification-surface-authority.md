@@ -24,12 +24,18 @@ Three verification-surface correctness fixes, one per issue:
   a candidate that failed validation (overflow/planted-ref signature — the
   4.5 review caught the ranges consumer treating the empty committed map as
   authoritative there, failing the SAST gate OPEN). A FIRST-resolvable
-  HEAD-equal base — a fresh branch with no commits past its base — keeps
-  the staged/unstaged/untracked map exactly as at base (the #2918 F-002
-  ignored-file contract); residual: a ref planted at HEAD as the very first
-  resolvable candidate still yields an empty committed hop there (same
-  git-state trust as the pre-existing intermediate-commit residual; full
-  mitigation requires fetch-verified refs). Abort, timeout,
+  HEAD-equal base keeps the staged/unstaged/untracked map exactly as at
+  base (the #2918 F-002 ignored-file contract). That residual acceptance is
+  a disclosed trade-off, not a clean pass: when the first resolvable
+  candidate is HEAD-equal — a fresh branch with no commits past its base,
+  but equally a repo with no remote where you commit on `main`, or a
+  push-to-main checkout where `origin/main == HEAD` — the committed hop is
+  empty, so the SAST arm classifies committed changes as PRE-EXISTING
+  (advisory: the gate passes; the source comment at the classify call site
+  discloses the asymmetry). This PR does not change that geometry
+  (byte-identical at base — not a regression); closing it needs
+  fetch-verified/remote-preferring base resolution and is tracked as a
+  follow-up. Abort, timeout,
   and spawn failures without output-guard flags stop the walk after one
   spawn (executable-resolution and HEAD-resolution failures each carry their
   own named cause); an output-guard termination (reported by the runner as
@@ -47,21 +53,31 @@ Three verification-surface correctness fixes, one per issue:
   runs the verification (and blocks an incomplete phase) instead of
   returning `passed` with the bypass reason. The argument stays
   accepted-and-ignored with an honest description. The direct
-  `executeCompletionVerify` API keeps explicit-session authority — the
-  `phase_complete` gate passing its own session is intended behavior.
+  `executeCompletionVerify` API keeps explicit-session authority. The
+  sibling `phase_complete` gate still reads `ctx?.sessionID ??
+  args.sessionID` (unchanged, pre-existing — a context-absent call naming a
+  Turbo-active session bypasses its completion_verify gate there); that
+  class is tracked for owner adjudication in #3675.
 
 - **#3554 — evidence-root classification.** `/swarm doctor` stops reporting
   derived non-task subtrees under `.swarm/evidence/` as "Orphaned
-  Evidence ❌". A listing-side classification (src/evidence/derived-entries.ts)
+  Evidence ❌" for the classified writer population. A listing-side
+  classification (src/evidence/derived-entries.ts)
   exempts the named derived writers (`gate-audit`, `task-gate-requirements`,
-  `task-gate-quarantine`, `auto-review`) and marker-gated phase-numbered
-  directories (every real phase-writer artifact: SAST baseline, epic phase
-  review, lean-turbo critic/reviewer + nested `lean-turbo/`, curator
-  findings, completion-verify, auto-review, architecture summaries,
+  `task-gate-quarantine`, `auto-review`, `sbom`) and marker-gated
+  phase-numbered directories (the verified phase-writer artifacts: SAST
+  baseline, epic phase review, lean-turbo critic/reviewer + nested
+  `lean-turbo/`, curator findings, completion-verify, phase-council
+  (opt-in), auto-review, architecture summaries,
   drift/hallucination/mutation evidence, and the `full-auto-{seq}.json`
   grammar). A REAL task bundle — a directory containing a root-level
   `evidence.json` — always wins over every name/marker exemption, so a task
-  genuinely named `gate-audit` or `9` is still enumerated. Phase-evidence
+  genuinely named `gate-audit` or `9` is still enumerated. Two disclosed
+  residuals remain out of scope: (a) the doctor's orphan filter (not the
+  listing classifier) still reports the fixed-id tool-evidence bundles
+  (`build`, `syntax_check`, `secretscan`, …) that legitimately carry a root
+  `evidence.json` — fixing that belongs in the doctor filter, not the
+  classifier, and is tracked as a follow-up; (b) phase-evidence
   snapshot membership is untouched (`SNAPSHOT_EXCLUDED_EVIDENCE_ENTRIES`
   stays exactly `{'receipts'}`; byte-identical snapshots pinned).
 

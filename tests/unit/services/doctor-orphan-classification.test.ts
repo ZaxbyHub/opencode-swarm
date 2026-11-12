@@ -57,7 +57,8 @@ beforeEach(() => {
 	mkdirSync(path.join(evidence, 'task-gate-quarantine'), { recursive: true });
 	// Phase-numbered dirs, one per REAL phase-writer artifact shape (plan-critic
 	// rounds 1+2 F4: every in-scope writer must be recognized — the registry
-	// below is the verified producer sweep, each row cites its source):
+	// below is the verified producer sweep, each row cites its source; the
+	// parallel review of PR #3677 (PB F-2) added the two last rows):
 	// 1 sast-baseline.json (src/tools/sast-baseline.ts:192)
 	// 2 epic-phase-review.json (src/epic/phase-readiness.ts:78)
 	// 3 lean-turbo-critic.json (src/turbo/lean/integration.ts:411)
@@ -72,6 +73,8 @@ beforeEach(() => {
 	// 12 hallucination-guard.json (src/tools/write-hallucination-evidence.ts)
 	// 13 mutation-gate.json (src/tools/write-mutation-evidence.ts)
 	// 14 nested lean-turbo/ dir only (src/turbo/lean/evidence.ts:96/:202)
+	// 15 phase-council.json (src/tools/submit-phase-council-verdicts.ts:391-393,
+	//     phase_council opt-in — default off — but a real writer when enabled)
 	const phaseArtifacts: Array<[string, string]> = [
 		['1', 'sast-baseline.json'],
 		['2', 'epic-phase-review.json'],
@@ -86,6 +89,7 @@ beforeEach(() => {
 		['11', 'drift-verifier.json'],
 		['12', 'hallucination-guard.json'],
 		['13', 'mutation-gate.json'],
+		['15', 'phase-council.json'],
 	];
 	for (const [phaseDir, artifact] of phaseArtifacts) {
 		mkdirSync(path.join(evidence, phaseDir), { recursive: true });
@@ -104,6 +108,10 @@ beforeEach(() => {
 		path.join(evidence, 'auto-review', 'session-end-abc.json'),
 		'{}',
 	);
+	// Named derived root from the SBOM writer (PB F-2b, PR #3677 review):
+	// src/tools/sbom-generate.ts:36 defaults to .swarm/evidence/sbom.
+	mkdirSync(path.join(evidence, 'sbom'), { recursive: true });
+	writeFileSync(path.join(evidence, 'sbom', 'cdx-1.json'), '{}');
 });
 
 afterEach(() => {
@@ -122,6 +130,7 @@ describe('doctor — Orphaned Evidence classification for derived writer subtree
 		expect(detail).not.toContain('gate-audit');
 		expect(detail).not.toContain('task-gate-requirements');
 		expect(detail).not.toContain('task-gate-quarantine');
+		expect(detail).not.toContain('sbom');
 	});
 
 	test('a real plan-task evidence bundle for a plan task stays non-orphaned (control leg)', async () => {

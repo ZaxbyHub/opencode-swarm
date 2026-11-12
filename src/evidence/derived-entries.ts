@@ -26,12 +26,15 @@ import { FULL_AUTO_OVERSIGHT_EVIDENCE_FILE_RE } from '../full-auto/evidence-name
  * - `task-gate-quarantine` — src/evidence/task-gate-repair.ts
  * - `auto-review` — src/review/evidence.ts (non-phase arm writes
  *   evidence/auto-review/<trigger>-<hash>.json)
+ * - `sbom` — src/tools/sbom-generate.ts:36 (default root
+ *   `.swarm/evidence/sbom`; writer appends at :441-450)
  */
 export const DERIVED_EVIDENCE_DIR_NAMES: ReadonlySet<string> = new Set([
 	'gate-audit',
 	'task-gate-requirements',
 	'task-gate-quarantine',
 	'auto-review',
+	'sbom',
 ]);
 
 /**
@@ -50,6 +53,8 @@ export const DERIVED_EVIDENCE_DIR_NAMES: ReadonlySet<string> = new Set([
  * - drift-verifier.json — src/tools/write-drift-evidence.ts
  * - hallucination-guard.json — src/tools/write-hallucination-evidence.ts
  * - mutation-gate.json — src/tools/write-mutation-evidence.ts
+ * - phase-council.json — src/tools/submit-phase-council-verdicts.ts:391-393
+ *   (phase_council is opt-in — default off — but a real writer when enabled)
  */
 export const PHASE_DIR_ARTIFACT_MARKERS: ReadonlySet<string> = new Set([
 	'sast-baseline.json',
@@ -64,6 +69,7 @@ export const PHASE_DIR_ARTIFACT_MARKERS: ReadonlySet<string> = new Set([
 	'drift-verifier.json',
 	'hallucination-guard.json',
 	'mutation-gate.json',
+	'phase-council.json',
 ]);
 
 /**

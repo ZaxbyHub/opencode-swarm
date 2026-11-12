@@ -2184,7 +2184,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			'src/summaries/manager.ts:132 storeSummary — atomic (summaries row below owns lifecycle)',
 		],
 		readerCitations: ['src/evidence/manager.ts:390 loadEvidence — full-file Zod-validated with legacy migration, async; :518 listEvidenceTaskIds — directory list'],
-		schemaVersion: 'EvidenceBundle schema_version; legacy flat retrospective migrated in place (:319-480)',
+		schemaVersion: 'EvidenceBundle schema_version; legacy flat retrospective migrated in place (:321-482)',
 		stateClass: 'governed-content',
 		privacyClass: 'content',
 		writeLimits: {
@@ -2192,9 +2192,9 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			scope: 'per-key',
 			keyspaceBound:
 				'FINITE BY A REAL GLOBAL REAPER: one key per taskId bundle directory, and archiveEvidence enumerates the ENTIRE keyspace via listEvidenceTaskIds(directory) and deletes across it (src/evidence/manager.ts:689-751) — the maxAgeDays/maxBundles retention selects victims by comparing every remaining bundle against a global count (src/evidence/manager.ts:732-755), so unlike the ≤100-entry/≤500-KiB per-bundle cap in this row\'s `bound` field, that retention IS a keyspace bound. Belt-and-braces, "evidence" is also in ACTIVE_STATE_DIRS_TO_CLEAN and the whole tree is recursively removed at close (src/commands/close/constants.ts:253-269; src/commands/close/clean-stage.ts:176-190). CAVEAT: archiveEvidence has exactly two callers — /swarm close (src/commands/close/archive-stage.ts:531-536, 30 d / 10 bundles), where the subsequent full-tree removal makes it largely redundant, and the operator-invoked /swarm archive (src/commands/archive.ts:95, 90 d / 1000 bundles). It is not wired to any automatic interval, so mid-session reclamation requires one of those two commands to run.',
-			citation: 'src/evidence/manager.ts:261-280; src/commands/close/archive-stage.ts:498-544',
+			citation: 'src/evidence/manager.ts:263-282; src/commands/close/archive-stage.ts:498-544',
 		},
-		readBound: { pattern: 'full-file', bound: '≤500 KiB per bundle by write-side enforcement', sync: false, citation: 'src/evidence/manager.ts:275-280,387-416' },
+		readBound: { pattern: 'full-file', bound: '≤500 KiB per bundle by write-side enforcement', sync: false, citation: 'src/evidence/manager.ts:277-282,389-418' },
 		lockModel: 'withEvidenceLock per bundle',
 		crashBehavior: 'atomic write + cache invalidation after rename (:308)',
 		closePolicy: 'cleaned — evidence/ dir lifecycle (after retention archiving)',
@@ -2202,7 +2202,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		legacyCompatibility: 'one-time in-place legacy migration under lock',
 		healthSignal: 'n/a',
 		owner: 'this-gate',
-		disposition: { kind: 'not-a-defect', proof: 'Hard per-bundle caps (100 entries / 500 KiB) + age/count retention + close lifecycle (src/evidence/manager.ts:261-280,665; src/commands/close/archive-stage.ts:498-544).' },
+		disposition: { kind: 'not-a-defect', proof: 'Hard per-bundle caps (100 entries / 500 KiB) + age/count retention + close lifecycle (src/evidence/manager.ts:263-282,701; src/commands/close/archive-stage.ts:498-544).' },
 	},
 	{
 		id: 'verification-receipts',
