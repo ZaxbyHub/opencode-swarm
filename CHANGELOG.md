@@ -1,5 +1,16 @@
 # Changelog
 
+## [7.204.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.204.0...v7.204.1) (2026-11-12)
+
+
+### Bug Fixes
+
+* **tests:** final-critic round 1 — race-spec attempts bound, dispatch-lanes criterion diagnosis arm ([1d24adc](https://github.com/ZaxbyHub/opencode-swarm/commit/1d24adc0c2b0a46884a5fa06f8a7d2c1b71187fa))
+* **tests:** impl-review round 1 — discriminating cache-flip leg, 3248 re-anchor value pin, attempts bound, ledger headers ([7d3c554](https://github.com/ZaxbyHub/opencode-swarm/commit/7d3c554352f224f98a4a29089f173acbbf4ed3dc))
+* **tests:** re-observe a late probe termination within the bounded budget (FB-001..FB-005) ([ecdb032](https://github.com/ZaxbyHub/opencode-swarm/commit/ecdb0322ddd1fcdc13432355315e3fc033566c41))
+* **tests:** retire the 2026-11-28 quarantine wall cohort + probe/archive/ENOENT flake roots ([#2973](https://github.com/ZaxbyHub/opencode-swarm/issues/2973) [#3218](https://github.com/ZaxbyHub/opencode-swarm/issues/3218) [#3251](https://github.com/ZaxbyHub/opencode-swarm/issues/3251) [#3261](https://github.com/ZaxbyHub/opencode-swarm/issues/3261) [#3262](https://github.com/ZaxbyHub/opencode-swarm/issues/3262) [#3630](https://github.com/ZaxbyHub/opencode-swarm/issues/3630)) ([6369309](https://github.com/ZaxbyHub/opencode-swarm/commit/63693095b5b3a7c0427a72bd3cc32134e2d5b7db))
+* **tests:** retire the 2026-11-28 quarantine wall cohort + probe/archive/ENOENT flake roots ([#2973](https://github.com/ZaxbyHub/opencode-swarm/issues/2973) [#3218](https://github.com/ZaxbyHub/opencode-swarm/issues/3218) [#3251](https://github.com/ZaxbyHub/opencode-swarm/issues/3251) [#3261](https://github.com/ZaxbyHub/opencode-swarm/issues/3261) [#3262](https://github.com/ZaxbyHub/opencode-swarm/issues/3262) [#3630](https://github.com/ZaxbyHub/opencode-swarm/issues/3630)) ([d1b3c50](https://github.com/ZaxbyHub/opencode-swarm/commit/d1b3c5023b64d3c757307c2e10ad4b8680b3b3b2))
+
 ## [7.204.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.203.3...v7.204.0) (2026-11-12)
 
 
