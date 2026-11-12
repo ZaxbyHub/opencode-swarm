@@ -163,6 +163,7 @@ async function resolveValidatedDiffBase(
 	resolution: {
 		mergeBase: string;
 		committedLines: Map<string, Set<number>>;
+		mergeBaseEqualsHead: boolean;
 	} | null;
 }> {
 	let executable: string;
@@ -214,21 +215,19 @@ async function resolveValidatedDiffBase(
 			attempted.push({ ref: baseBranch, outcome: 'unresolvable' });
 			continue;
 		}
-		// #3092 review (PRR-002), resolver-level (4.5 review F1): a merge-base
-		// equal to HEAD means the committed hop is empty and
-		// NON-AUTHORITATIVE — HEAD sits on the default branch itself, the
-		// branch carries no commits past its base yet, or the candidate ref
-		// was planted/shadowed at the tip. Accepting it (an empty committed
-		// map parses fine) let a freshly committed finding classify
-		// PRE-EXISTING through the ranges consumer — the SAST gate failed
-		// OPEN where pre-fix it was null-fail-closed. The git state itself is
-		// untrustworthy, so the walk STOPS here (fail-closed for BOTH
-		// consumers) instead of silently switching to a later candidate —
-		// pinned end-to-end by the #3092 planted-at-HEAD fixture.
-		if (headSha !== null && candidate.toLowerCase() === headSha) {
-			attempted.push({ ref: baseBranch, outcome: 'head-shadowed' });
-			return { attempted, resolution: null };
-		}
+		// #3092 review (PRR-002) + 4.5 review F1: a merge-base equal to HEAD
+		// means the committed hop is empty and NON-AUTHORITATIVE (HEAD sits
+		// on the default branch itself, no branch commits yet, or the ref was
+		// planted/shadowed at the tip). The resolver still ACCEPTS the
+		// candidate (the untracked/staged legs of the union remain
+		// authoritative — the #2918 F-002 ignored-file contract depends on a
+		// non-null map in this geometry) but flags it so each consumer can
+		// fail closed where the empty hop is load-bearing: the ambiguity
+		// consumer refuses the discount, and the ranges consumer returns null
+		// (a non-null empty map would mark every committed finding
+		// PRE-EXISTING — the SAST fail-open the review found).
+		const mergeBaseEqualsHead =
+			headSha !== null && candidate.toLowerCase() === headSha;
 		const diffResult = await runGitClassified(
 			[
 				'-c',
@@ -259,7 +258,10 @@ async function resolveValidatedDiffBase(
 			continue;
 		}
 		attempted.push({ ref: baseBranch, outcome: 'ok' });
-		return { attempted, resolution: { mergeBase: candidate, committedLines } };
+		return {
+			attempted,
+			resolution: { mergeBase: candidate, committedLines, mergeBaseEqualsHead },
+		};
 	}
 	return { attempted, resolution: null };
 }
@@ -1468,6 +1470,16 @@ export async function getChangedLineAmbiguousFiles(
 		logDiffBaseResolutionFailure(attempted);
 		return null;
 	}
+	// #3092 review (PRR-002), original guard retained: a merge-base equal to
+	// HEAD means the committed hop is empty and NON-AUTHORITATIVE — fail
+	// closed, nothing gets the discount (worktree-only edits before the
+	// first branch commit also lose it; residual: a ref planted at an
+	// INTERMEDIATE commit can still shrink the hop — same git-state trust
+	// the SAST classification inherits; full mitigation requires
+	// fetch-verified refs).
+	if (resolution.mergeBaseEqualsHead) {
+		return null;
+	}
 	const mergeBase = resolution.mergeBase;
 
 	// :(literal) pathspec magic (#3092 review PRR-005): coder-supplied names
@@ -1580,6 +1592,17 @@ export async function getChangedLineRanges(
 	);
 	if (!resolution) {
 		logDiffBaseResolutionFailure(attempted);
+		return null;
+	}
+	// #3092 PRR-002 for the ranges consumer (4.5 review F1): a HEAD-equal
+	// base would hand classifySastFindings an authoritative-looking empty
+	// committed hop — every committed finding PRE-EXISTING, gate open where
+	// base was fail-closed. Fail closed instead (all findings NEW); the
+	// untracked/staged legs lose nothing the fail-closed contract owed them.
+	if (resolution.mergeBaseEqualsHead) {
+		criticalWarn(
+			'changed-line base resolution: the selected diff base equals HEAD (empty committed hop is non-authoritative) — changed-line classification is fail-closed (all findings treated as new); create branch commits past the base or fetch the remote tracking refs',
+		);
 		return null;
 	}
 	const { committedLines } = resolution;
