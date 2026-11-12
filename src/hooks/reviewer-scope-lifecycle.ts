@@ -357,17 +357,18 @@ async function verifyWorkingTreeClean(
 				// settlement side's filterSwarmRuntimePorcelain (#2271 bug 2):
 				// runtime writes must not flip a truthful no-change completion
 				// into the guardrail-bypass arm. Non-runtime dirt stays dirty.
+				// Porcelain v1 line shape is exactly "XY <path>" (two status
+				// columns, one space, path; rename: "XY O -> N") — the X column
+				// may itself be a space (" M path"), so the line must NOT be
+				// trimmed before slicing off the 3-byte prefix.
 				const dirt = Buffer.concat(chunks)
 					.toString('utf-8')
 					.split('\n')
-					.map((line) => line.replace(/\r$/, '').trim())
-					.filter((line) => line.length > 0)
+					.map((line) => line.replace(/\r$/, ''))
+					.filter((line) => line.length >= 4)
 					.filter((line) => {
-						// Porcelain v1 line shape: "XY <path>" (rename: "XY O -> N").
 						const paths = line.slice(3).split(' -> ');
-						return paths.some(
-							(p) => p.length > 0 && !isSwarmRuntimePath(p.trim()),
-						);
+						return paths.some((p) => p.length > 0 && !isSwarmRuntimePath(p));
 					});
 				finish(dirt.length === 0 ? 'clean' : 'dirty');
 			});

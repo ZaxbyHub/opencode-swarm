@@ -212,6 +212,71 @@ describe('reviewer scope attribution supplementary (issue #3655)', () => {
 		expect(denial.message).toContain('retryable=true');
 	}, 60_000);
 
+	test('tracked .swarm runtime modification does not flip a no-change completion', async () => {
+		// The porcelain line for a tracked runtime file is " M .swarm/..." —
+		// the leading-space X column must survive parsing so the runtime filter
+		// sees the real path (implementation-review round 1, finding 1).
+		fs.mkdirSync(path.join(directory, '.swarm'), { recursive: true });
+		fs.writeFileSync(path.join(directory, '.swarm/events.jsonl'), '{}\n');
+		git(['add', '-f', '.swarm/events.jsonl']);
+		git(['commit', '-m', 'track swarm runtime file']);
+		await beginCoder('c-tracked');
+		// Modify the tracked runtime file in the worktree (no commit).
+		fs.appendFileSync(path.join(directory, '.swarm/events.jsonl'), '{}\n');
+		await completeCoder('c-tracked');
+		expect(generationFor('c-tracked')?.status).toBe('no_change');
+		const trackedDenial = await dispatchReviewer('r-tracked');
+		expect(trackedDenial.message).toContain('REVIEWER_SCOPE_NO_CHANGE');
+	}, 60_000);
+
+	test('one-character-prefix non-runtime dirt stays dirty, never false clean', async () => {
+		// " M a.swarm/config.json" must parse to a.swarm/config.json (dirt),
+		// not .swarm/config.json (filtered runtime) — the fail-open shape from
+		// implementation-review round 1, finding 1.
+		fs.mkdirSync(path.join(directory, 'a.swarm'), { recursive: true });
+		fs.writeFileSync(path.join(directory, 'a.swarm/config.json'), '{}\n');
+		await beginCoder('c-prefix');
+		await completeCoder('c-prefix');
+		// Non-runtime untracked dirt: stranded collecting, typed denial.
+		expect(generationFor('c-prefix')?.status).toBe('collecting');
+		const prefixDenial = await dispatchReviewer('r-prefix');
+		expect(prefixDenial.message).toContain('REVIEWER_ATTRIBUTION_EMPTY');
+		expect(prefixDenial.message).not.toContain('REVIEWER_SCOPE_NO_CHANGE');
+	}, 60_000);
+
+	test('failed committed diff degrades to a typed denial, never no-change', async () => {
+		// Resolvable current head but a dispatch head that cannot be diffed
+		// (nonexistent object): committedFilesBetweenAsync returns null and
+		// completion must classify degraded, not proved-empty (plan-mandated
+		// diff-failure leg; implementation-review round 1, finding 3).
+		const childBadDiff = 'child-baddiff';
+		startAgentSession(childBadDiff, 'coder', directory);
+		installActiveScopeBinding({
+			directory,
+			childSessionId: childBadDiff,
+			parentSessionId: 'parent',
+			dispatchCallId: 'c-baddiff',
+			taskId: TASK_ID,
+			files: [DECLARED_FILE],
+		});
+		expect(
+			startReviewerScopeGeneration({
+				parentSessionID: 'parent',
+				taskId: TASK_ID,
+				coderCallID: 'c-baddiff',
+				declaredFiles: [DECLARED_FILE],
+				captureDirectory: directory,
+				workspaceIdentity: directory,
+				dispatchGitHead: '0000000000000000000000000000000000000000',
+			}),
+		).not.toBeNull();
+		await completeCoder('c-baddiff');
+		expect(generationFor('c-baddiff')?.status).toBe('collecting');
+		const badDiffDenial = await dispatchReviewer('r-baddiff');
+		expect(badDiffDenial.message).toContain('REVIEWER_ATTRIBUTION_EMPTY');
+		expect(badDiffDenial.message).toContain('retryable=true');
+	}, 60_000);
+
 	test('routed file without fingerprint gets retryable capture-incomplete denial', async () => {
 		await beginCoder('c-incomplete');
 		fs.mkdirSync(path.join(directory, 'docs'), { recursive: true });

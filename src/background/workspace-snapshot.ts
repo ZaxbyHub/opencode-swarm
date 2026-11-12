@@ -2301,7 +2301,7 @@ export function committedFilesBetween(
 	fromHead: string | null,
 	toHead: string | null,
 ): string[] | null {
-	if (fromHead === null || toHead === null) return [];
+	if (fromHead === null || toHead === null) return null;
 	if (fromHead === toHead) return [];
 	// --no-renames: default rename detection collapses a rename to only its new
 	// path, which would hide the OLD (scope-declared) path from the Stage B
@@ -2334,7 +2334,7 @@ export async function committedFilesBetweenAsync(
 	fromHead: string | null,
 	toHead: string | null,
 ): Promise<string[] | null> {
-	if (fromHead === null || toHead === null) return [];
+	if (fromHead === null || toHead === null) return null;
 	if (fromHead === toHead) return [];
 	// Same --no-renames rationale as the sync twin (PR review 2819-r1 PRR-005).
 	const committed = await runGitAsync(directory, [
