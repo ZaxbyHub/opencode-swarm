@@ -58,7 +58,8 @@ export async function computeSwarmMemoryRecall(
 		return JSON.stringify({
 			success: false,
 			disabled: true,
-			message: 'Swarm memory is disabled. Set swarm.memory.enabled=true.',
+			message:
+				'Swarm memory is disabled (swarm.memory.enabled is false). This is an operator configuration setting in opencode-swarm.json; the tool stays inert until an operator enables it.',
 		});
 	}
 	const parsed = RecallArgsSchema.safeParse(args);

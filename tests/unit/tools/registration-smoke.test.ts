@@ -16,7 +16,11 @@ import { TOOL_NAMES } from '../../../src/tools/tool-names';
 describe('tool registration smoke test', () => {
 	// The real plugin tool object. swarm_command's DI instance is not needed to
 	// enumerate keys/handlers, so an empty agent map is fine here.
-	const toolObject = buildPluginToolObject({});
+	// Registration smoke over the full manifest — memory enabled so the
+	// opt-in swarm_memory_* family (issue #3659) is covered here too.
+	const toolObject = buildPluginToolObject({}, {
+		memory: { enabled: true },
+	} as never);
 	const registeredToolKeys = new Set(Object.keys(toolObject));
 
 	test('every TOOL_NAMES entry is registered in the plugin tool object', () => {

@@ -2301,7 +2301,7 @@ export function committedFilesBetween(
 	fromHead: string | null,
 	toHead: string | null,
 ): string[] | null {
-	if (fromHead === null || toHead === null) return null;
+	if (fromHead === null || toHead === null) return [];
 	if (fromHead === toHead) return [];
 	// --no-renames: default rename detection collapses a rename to only its new
 	// path, which would hide the OLD (scope-declared) path from the Stage B
@@ -2309,6 +2309,35 @@ export function committedFilesBetween(
 	// in-scope file visible to the freshness predicate (PR review 2819-r1
 	// PRR-005).
 	const committed = runGit(directory, [
+		'diff',
+		'--name-only',
+		'--no-renames',
+		'-z',
+		fromHead,
+		toHead,
+	]);
+	if (committed === null) return null;
+	return parseNulPaths(committed);
+}
+
+/**
+ * Async twin of {@link committedFilesBetween} (issue #3655). Identical output
+ * contract — repo-relative committed paths between two treeishes, `[]` for an
+ * identical-head pair, `null` when the diff cannot be proven — but routed
+ * through the bounded async git runner. The reviewer-scope completion
+ * lifecycle consumes this from `tool.execute.after`
+ * (completeReviewerScopeLifecycle), a hook-reachable path where the sync
+ * twin's spawnSync would block the host event loop.
+ */
+export async function committedFilesBetweenAsync(
+	directory: string,
+	fromHead: string | null,
+	toHead: string | null,
+): Promise<string[] | null> {
+	if (fromHead === null || toHead === null) return [];
+	if (fromHead === toHead) return [];
+	// Same --no-renames rationale as the sync twin (PR review 2819-r1 PRR-005).
+	const committed = await runGitAsync(directory, [
 		'diff',
 		'--name-only',
 		'--no-renames',

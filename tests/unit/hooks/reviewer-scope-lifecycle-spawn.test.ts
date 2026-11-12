@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { spawnSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -23,6 +24,20 @@ const realResolveGitExecutable = _internals.resolveGitExecutable;
 let directory = '';
 const SUCCESS_OUTPUT = { status: 'completed', output: 'done' };
 
+function git(args: string[]): void {
+	const result = spawnSync('git', args, {
+		cwd: directory,
+		encoding: 'utf-8',
+		timeout: 10_000,
+		maxBuffer: 1024 * 1024,
+		stdio: ['ignore', 'pipe', 'pipe'],
+		windowsHide: true,
+	});
+	if (result.status !== 0) {
+		throw new Error(result.stderr || `git ${args.join(' ')} failed`);
+	}
+}
+
 /** Minimal fake ChildProcess: emits a clean (exit 0, empty stdout) close. */
 function fakeCleanChild(): ReturnType<typeof _internals.spawn> {
 	const emitter = new EventEmitter() as unknown as ReturnType<
@@ -40,6 +55,16 @@ beforeEach(() => {
 	resetSwarmState();
 	directory = canonicalMkdtemp('reviewer-scope-lifecycle-spawn-');
 	fs.mkdirSync(path.join(directory, 'src'), { recursive: true });
+	// Issue #3655 made completion reconcile committed changes before the
+	// working-tree verdict, and a null dispatch HEAD degrades fail-closed —
+	// so this fixture needs a real committed baseline for the spawn seam's
+	// clean verdict to be reached at all.
+	fs.writeFileSync(path.join(directory, 'README.md'), 'baseline\n');
+	git(['init']);
+	git(['config', 'user.email', 'test@example.com']);
+	git(['config', 'user.name', 'Test']);
+	git(['add', 'README.md']);
+	git(['commit', '-m', 'baseline']);
 	startAgentSession('parent', 'architect', directory);
 	startAgentSession('fixture-child', 'coder', directory);
 	installActiveScopeBinding({
