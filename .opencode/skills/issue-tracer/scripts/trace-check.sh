@@ -491,6 +491,14 @@ phase0() {
   esac
   case "$(state_value tier)" in S|M|L) rule_ok tier;; *) rule_bad tier "must be S, M, or L";; esac
   [ "$(state_value handshake)" != "unset" ] && [ -n "$(state_value handshake)" ] && rule_ok handshake || rule_bad handshake "must be recorded"
+  # Claim gate (SKILL.md rule 13): the claim token or the not_applicable marker
+  # rides the existing tools: line. This is advisory (WARN, never FAIL): existing
+  # traces predate the gate and a hard failure needs a protocol-version decision.
+  if printf '%s' "$(state_value tools)" | grep -Eq '(^|[, ])session=[A-Za-z0-9-]{16,64}([, ]|$)|claim: not_applicable \([^)]+\)'; then
+    rule_ok claim-recorded
+  else
+    echo "WARN claim-recorded: tools: records neither session=<token> nor claim: not_applicable (<reason>) (claim gate, SKILL.md rule 13)"
+  fi
 }
 
 acceptance_ids() {

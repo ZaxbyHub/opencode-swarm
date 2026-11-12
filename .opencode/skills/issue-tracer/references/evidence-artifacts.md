@@ -18,7 +18,7 @@ freshness: <synced|behind:<n>|fetch-failed:<reason>|user-override:"<quoted user 
 phase0-tree-id: <40-hex or unset>
 checkpoint-tree-id: <40-hex or unset>
 handshake: <MATCH|SHIM|STALE:<path>|ABSENT|unset>
-tools: <comma list, e.g. graphify,zvec_grep,gh,subagents,claude-cli,codex-cli or none>
+tools: <comma list, e.g. graphify,zvec_grep,gh,subagents,claude-cli,codex-cli or none; plus exactly one claim entry: session=<token> or claim: not_applicable (<reason, no commas>)>
 merge: <AWAITING_USER_APPROVAL|APPROVED:<pr-head-sha>|MERGED|not-applicable>
 next-action: <free text, one line>
 
