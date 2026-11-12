@@ -523,7 +523,7 @@ export const completion_verify: ToolDefinition = createSwarmTool({
 			.string()
 			.optional()
 			.describe(
-				'Session ID for tracking state (auto-provided by plugin context)',
+				'Ignored. The session comes from the plugin runtime context only; a session named here never affects the Turbo Mode decision (#3662).',
 			),
 		working_directory: z
 			.string()
@@ -549,10 +549,15 @@ export const completion_verify: ToolDefinition = createSwarmTool({
 							: typeof obj.phase === 'string'
 								? Number(obj.phase)
 								: 0,
-					// The plugin context's session wins over a model-supplied one.
-					sessionID:
-						ctx?.sessionID ??
-						(typeof obj.sessionID === 'string' ? obj.sessionID : undefined),
+					// #3662: the Turbo bypass is keyed to the session the
+					// PLUGIN RUNTIME says the caller is in — a model-supplied
+					// sessionID argument must never select whose Turbo Mode
+					// skips verification. A missing context session means "no
+					// Turbo bypass", never "the session the arguments name".
+					// (Direct executeCompletionVerify callers — the
+					// phase_complete gate — keep passing their own session
+					// explicitly; that explicit authority is intended.)
+					sessionID: ctx?.sessionID,
 					working_directory:
 						typeof obj.working_directory === 'string'
 							? obj.working_directory
