@@ -281,7 +281,7 @@ Swarm has session-scoped modes you toggle at any time:
 | Mode | Speed | Safety | When to Use |
 |------|-------|--------|-------------|
 | **Balanced** (default) | Medium | High | Everyday development |
-| **Turbo** | Fast | Medium | Rapid iteration: skips phase_complete Gates 1–5; per-task review and tests apply exactly as without Turbo |
+| **Turbo** | Fast | Medium | Rapid iteration: skips phase_complete Gates 1–5 and the todo gate; per-task review and tests apply exactly as without Turbo |
 | **Full-Auto** | Fast | Depends on critic | Unattended multi-interaction runs |
 | **Epic** (opt-in) | Fast on plans with many independent tasks | High (per-task QA always runs) | Large plans run phase by phase as parallel waves of tasks with disjoint scopes |
 

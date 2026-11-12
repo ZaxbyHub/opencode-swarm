@@ -4511,7 +4511,7 @@ export const PluginConfigSchema = z.object({
 		.default(false)
 		.optional()
 		.describe(
-			'Turbo mode for rapid iteration (v6.40): skips phase_complete Gates 1–5 and lets a non-Tier-3 task whose planned files_touched are known and non-empty be re-dispatched to the coder before Stage A passes; per-task Stage A still runs, and Stage B (reviewer + test_engineer) is required exactly as without Turbo. When true, new sessions start with turbo mode on (session default); /swarm turbo still toggles per session. Directory-less constructions default off.',
+			'Turbo mode for rapid iteration (v6.40): skips phase_complete Gates 1–5 and the todo gate, and lets a non-Tier-3 task whose planned files_touched are known and non-empty be re-dispatched to the coder before Stage A passes; per-task Stage A still runs, and Stage B (reviewer + test_engineer) is required exactly as without Turbo. When true, new sessions start with turbo mode on (session default); /swarm turbo still toggles per session. Directory-less constructions default off.',
 		),
 
 	// Quiet mode — suppress non-critical startup warnings. Defaults to true so

@@ -126,7 +126,6 @@ This is not optional. Missing required-agent calls in a phase is always a violat
 There is no project where code ships without review, tests, and required documentation.
 
 5.6. **Mandatory gate evidence**: Before calling phase_complete, ensure:
-   - `.swarm/evidence/{phase}/completion-verify.json` exists (written automatically by the completion-verify gate) — outside turbo mode
     - `.swarm/evidence/{phase}/drift-verifier.json` exists with verdict 'approved' (written by YOU via the `write_drift_evidence` tool after the critic_drift_verifier returns its verdict in step 5.5) — required when an effective spec exists
    - `.swarm/evidence/{phase}/hallucination-guard.json` exists with verdict 'approved' (written by YOU via the `write_hallucination_evidence` tool after the critic_hallucination_verifier returns its verdict in step 5.55) — ONLY required when `hallucination_guard` is enabled in the QA gate profile
    - `.swarm/evidence/{phase}/mutation-gate.json` exists with verdict 'pass' or 'warn' (written by YOU via the `write_mutation_evidence` tool after step 5.56) — ONLY required when `mutation_test` is enabled in the QA gate profile
@@ -136,6 +135,7 @@ There is no project where code ships without review, tests, and required documen
       for the expected reason -> fix restored -> test passes. If the phase
       changed no regression tests, record `not applicable` with the changed-file
       evidence.
+    Completion-verify needs no evidence file: outside turbo mode phase_complete runs that check itself and does not write `.swarm/evidence/{phase}/completion-verify.json` or use it as evidence (only a direct `completion_verify` tool call writes that file).
     If any required file is missing, run the missing gate first. Turbo mode does not skip every gate: it makes phase_complete bypass the completion-verify, drift-verifier, hallucination-guard, mutation-gate, phase-council and todo-gate checks, while it does not skip the final-review, final-council, full-auto or architecture-supervisor gates (each still fires only under its own enable and trigger conditions). Lean Turbo also runs its own phase-ready check (`lean_turbo_readiness`) unless Epic Mode owns readiness.
    NOTE: Outside turbo mode, steps 5.5, 5.55, and 5.56 are enforced by runtime hooks. If `hallucination_guard` is enabled and you skip the critic_hallucination_verifier delegation (or fail to call `write_hallucination_evidence`), phase_complete will be BLOCKED by the plugin. Similarly, if `mutation_test` is enabled and you skip step 5.56 (or fail to call `write_mutation_evidence`), phase_complete will be BLOCKED. These are not suggestions — they are hard enforcement mechanisms.
 5.65. **Phase Council (conditional on QA gate — `phase_council`)**: Check whether `phase_council` is enabled in the effective QA gate profile (visible via `get_qa_gate_profile`). If disabled or turbo mode is active, skip silently and proceed to step 5.7.

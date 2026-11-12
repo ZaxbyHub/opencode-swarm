@@ -44,7 +44,7 @@ Session-scoped. Resets when you start a new session.
 
 ### Full-Auto
 
-Full-Auto is opencode-swarm's autonomy control plane. It reduces approval friction by deterministically allowing safe operations and routing ambiguous or high-risk operations through the read-only `critic_oversight` agent before they execute. Unlike Turbo (which skips phase_complete Gates 1–5), Full-Auto adds a *new* decision layer on top of every existing guardrail.
+Full-Auto is opencode-swarm's autonomy control plane. It reduces approval friction by deterministically allowing safe operations and routing ambiguous or high-risk operations through the read-only `critic_oversight` agent before they execute. Unlike Turbo (which skips phase_complete Gates 1–5 and the todo gate), Full-Auto adds a *new* decision layer on top of every existing guardrail.
 
 **First-class toggle.** Full-Auto is enabled and disabled at will from the session — no config-level enablement is required:
 
@@ -217,7 +217,7 @@ Opt-in (`epic.mode.enabled: true`). Binds to the current plan: `/swarm epic star
 
 **Lean Turbo** composes with all session modes except an open epic — it is a lane planning layer, not a mode toggle. It partitions tasks into parallel lanes when `turbo.lean` is configured in config, regardless of whether Turbo or Full-Auto is active.
 
-**Turbo + Full-Auto** are independent. Both can be on simultaneously — Turbo skips phase_complete Gates 1–5, Full-Auto keeps the architect moving between tasks without prompting you.
+**Turbo + Full-Auto** are independent. Both can be on simultaneously — Turbo skips phase_complete Gates 1–5 and the todo gate, Full-Auto keeps the architect moving between tasks without prompting you.
 
 **Epic + Turbo / Lean Turbo** do not combine. `/swarm epic start` refuses while Turbo is on (config `turbo_mode`, or any session in this process) or a Lean run is running, and while an epic is open `/swarm turbo` refuses every enabling form (`on`, `lean on`, `standard on`). Epic plans its own waves and never dispatches through the Lean runner. See [Mode comparison](#mode-comparison).
 
@@ -256,7 +256,7 @@ Skips the compaction service. Use when you're hitting context pressure on short 
 | Mode | Scope | Persistent | Skips | When |
 |------|-------|:---:|------|------|
 | Balanced (session) | Session | No | Nothing | Default |
-| Turbo | Session | No | phase_complete Gates 1–5 | Rapid iteration |
+| Turbo | Session | No | phase_complete Gates 1–5 and the todo gate | Rapid iteration |
 | Lean Turbo | Session | Config | Parallel lanes for non-conflicting tasks | Multi-task phases |
 | Full-Auto | Session | No | User confirmation between interactions | Unattended runs |
 | [Epic Mode](#epic-mode-preview) | Plan (one open epic per project) | Yes, until `/swarm epic close` | Nothing — per-task QA always runs; ready tasks with disjoint scopes run as parallel waves | Large plans with many independent tasks |
@@ -1035,7 +1035,7 @@ Epic Mode learns from its own outcomes (Epic v2 C6; `src/epic/learning.ts`). Eve
 The README table names three safety tiers for readability. In the code, the `execution_mode` config key is the persistent setting (`strict` / `balanced` / `fast`), and `/swarm turbo` is the session-scoped override. There is no `/swarm strict` command.
 
 **Can Turbo break a security review?**  
-No. Tier 3 files (the `auth`, `crypto` and `security` families and the other patterns in the [Turbo](#turbo) section) keep the coder re-dispatch block before Stage A even under Turbo, and Turbo does not change the Stage B rule: a task needs reviewer + test_engineer exactly when it would without Turbo. See `src/parallel/tier3-classifier.ts` for the authoritative list.
+No. Tier 3 files (the `auth`, `crypto` and `security` families and the other patterns in the [Turbo](#turbo) section) keep the coder re-dispatch block before Stage A even under Turbo, and Turbo does not change the Stage B rule: a task needs reviewer + test_engineer exactly when it would without Turbo. `src/parallel/tier3-classifier.ts` is the authoritative list for that re-dispatch block. The architect's QA tiers, which decide how many reviewer and test_engineer passes a task gets, use their own Tier 3 pattern list, which differs from the classifier.
 
 **Does Full-Auto bypass the critic?**  
 No. Full-Auto v2 *increases* critic involvement: every escalate-class action gets a dedicated read-only critic verification before it executes, and phase boundaries require an APPROVED `full_auto_oversight` evidence record before `phase_complete` will succeed. Reactive intercept verdicts are also mirrored into the v2 evidence pipeline when a durable run is active. See `src/full-auto/oversight.ts` and `src/full-auto/phase-approval.ts` for the dispatch and gate.
