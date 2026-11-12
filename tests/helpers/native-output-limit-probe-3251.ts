@@ -5,19 +5,27 @@
  * suite and the #3251 race spec drive ONE implementation — the regression
  * oracle cannot pass while the production-used probe stays wrong.
  *
- * Contract (plan-critic round 1-2 approved):
+ * Contract (plan-critic round 1-2 approved; late-retry + late gating added in
+ * the PR #3672 feedback round):
  * - Receipt carries `terminationObserved`, `terminationObservedLate`,
  *   `attempts` (1..3), plus the 2530-compatible fields.
- * - Bounded re-observation: a clean exit-0 with no signal RE-SPAWNS, at most
- *   3 attempts total, 20 ms setTimeout backoff, attempt-counted (no raw clock
- *   reads — the check:test-clock gate).
+ * - Bounded re-observation: a clean exit-0 with no signal RE-SPAWNS, and a
+ *   LATE termination (resolution after the observation deadline) is
+ *   re-observed too — at most 3 attempts total, 20 ms setTimeout backoff,
+ *   attempt-counted (no raw clock reads — the check:test-clock gate).
  * - Kill-origin discriminator: a 1000 ms observation deadline armed at spawn,
  *   strictly shorter than the 10 000 ms spawn backstop; termination observed
  *   only after the deadline reports terminationObservedLate (a FAILING
- *   receipt — the timeout path can never satisfy the window, so a pass proves
- *   the OVERFLOW controller killed). Production claim scope: the overflow
- *   kill REQUEST is wired (src/utils/bun-compat.ts createOutputOverflowController
- *   → requestKill); success acknowledgment is not observable and not claimed.
+ *   receipt). Because a spawn-timeout-origin kill is late on EVERY attempt
+ *   (systemic slowness) while a correct overflow kill is re-sampled on-time,
+ *   a green receipt still proves the OVERFLOW controller killed, and a slow
+ *   runner no longer false-fails a correct kill. Production claim scope: the
+ *   overflow kill REQUEST is wired (src/utils/bun-compat.ts
+ *   createOutputOverflowController → requestKill); success acknowledgment is
+ *   not observable and not claimed.
+ * - terminationObservedLate is gated on termination actually being observed —
+ *   a slow clean exit-0 (attempts exhausted) is false/false, never a
+ *   contradictory false/true.
  * - Invariant-3 posture: per-attempt outputs are drained (stream text()
  *   promises awaited) and a best-effort kill runs in finally.
  * - Injectable spawnAttempt seam: deterministic per-attempt sequences are
@@ -169,21 +177,39 @@ export async function nativeOutputLimitProbe(
 			outputLimitErrorExported = observed.outputLimitErrorExported;
 		}
 		last = observed;
-		if (observed.exitCode !== 0 && observed.exitCode !== null) break;
-		if (observed.signalCode !== null) break;
-		// Clean exit-0 with no signal: no termination evidence — re-observe.
+		// Only ON-TIME termination evidence is trusted. A LATE termination
+		// (race resolved by the observation deadline) is re-observed within
+		// the same bounded budget: a spawn-timeout-origin kill is late on
+		// EVERY attempt (systemic slowness), so the final receipt still
+		// reports late=true and fails the hold-open assertions — while a
+		// slow-but-correct overflow kill gets a fresh on-time sample instead
+		// of a false failing receipt (PR #3672 feedback FB-001).
+		if (
+			observed.exitCode !== 0 &&
+			observed.exitCode !== null &&
+			!observed.laterThanDeadline
+		) {
+			break;
+		}
+		if (observed.signalCode !== null && !observed.laterThanDeadline) break;
+		// Clean exit-0 with no signal, or a late termination: re-observe.
 	}
 	const attempt = last ?? {
 		exitCode: null,
 		signalCode: null,
 		laterThanDeadline: false,
 	};
+	const terminationObserved =
+		(attempt.exitCode !== 0 && attempt.exitCode !== null) ||
+		attempt.signalCode !== null;
 	return {
 		outputLimitErrorExported,
-		terminationObserved:
-			(attempt.exitCode !== 0 && attempt.exitCode !== null) ||
-			attempt.signalCode !== null,
-		terminationObservedLate: attempt.laterThanDeadline,
+		terminationObserved,
+		// Late is only meaningful when termination was actually observed —
+		// a slow clean exit-0 (attempts exhausted) reports
+		// terminationObserved=false WITHOUT a contradictory late=true
+		// (PR #3672 feedback FB-003).
+		terminationObservedLate: attempt.laterThanDeadline && terminationObserved,
 		attempts: attemptsMade,
 		exitCode: attempt.exitCode,
 		signalCode: attempt.signalCode,

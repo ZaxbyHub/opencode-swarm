@@ -12,7 +12,7 @@
 # gate; an EXPIRY more than 14 days in the past also fails (inside the grace
 # window it only warns).
 #
-# STATUS: 3 active entries — re-anchored 2026-11-12 (EXPIRY 2026-12-20): archive.test.ts + archive-dry-run.test.ts (OWNER #3218) and dispatch-lanes-pr-review-resilience-followups (OWNER #2973); OWNER/EXPIRY blocks below. The 2026-11-20/11-18 cohorts were un-quarantined per issue #2973 (post-un-quarantine observation); the re-add policy line below still governs.
+# STATUS: 3 active entries — re-anchored 2026-11-12 (EXPIRY 2026-12-20): archive.test.ts + archive-dry-run.test.ts (OWNER #3218) and dispatch-lanes-pr-review-resilience-followups (OWNER #2973); OWNER/EXPIRY blocks below. The retired entries were un-quarantined per issue #2973 (post-un-quarantine observation): the 2026-11-18 renewal remainder (j02-failure-rejection-distinct, delegation-gate-background-coder), four of the five 2026-11-20 #3264 cohort entries (archive.test.ts re-anchored below), and delegation-gate-retry-sounding-board-manual of the 2026-12-06 #3263 pair (archive-dry-run.test.ts re-anchored below); the re-add policy line below still governs.
 # #2973 on 2026-09-27: rows with their named root fixes already in-tree —
 # pr-monitor-status (PR #2190 freezeClock + EBUSY-retry), 2602-lifecycle and
 # phase-complete.lock-adversarial (PR #2807 safeRmRecursive) — and rows whose

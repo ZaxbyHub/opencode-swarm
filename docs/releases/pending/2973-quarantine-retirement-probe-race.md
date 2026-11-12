@@ -8,10 +8,14 @@ Clears the 2026-11-28..2026-12-05 quarantine-census hard-fail wall cohort
 
 - **12 ledger entries un-quarantined** (post-#3640 stability cohort): the
   16-file local battery is green 48/48, the entries had zero home-platform CI
-  executions while quarantined (Linux CI skips the OS ledgers), and their
-  retirement criteria accumulate green merge-group runs now that they execute
-  again. Tracked per-entry in the PR body — no completed-retirement claim is
-  made until each criterion's runs are green.
+  executions while quarantined — the 3 general-ledger entries were skipped on
+  every OS (the general ledger is consulted everywhere as a skip list) and the
+  9 per-OS-ledger entries were skipped on their home platform only (the same
+  entries still ran in Linux unit/coverage jobs, which consult only the
+  general ledger) — and their retirement criteria accumulate green
+  merge-group runs now that they execute again on their home platform.
+  Tracked per-entry in the PR body — no completed-retirement claim is made
+  until each criterion's runs are green.
 - **4 entries re-anchored** with new testable criteria (EXPIRY 2026-12-20,
   no bare date rolls): `archive.test.ts` + `archive-dry-run.test.ts` to #3218
   (determinism-hardened; original CI mechanism unproven),
