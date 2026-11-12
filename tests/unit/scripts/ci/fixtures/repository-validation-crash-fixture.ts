@@ -1,16 +1,29 @@
-// This fixture intentionally terminates the child with SIGKILL. The authority
-// test skips the signal assertion on Windows, where Bun does not expose POSIX
-// signal termination semantics. SIGKILL is uncatchable, so a successful helper
-// exit cannot be mistaken for a normal fixture exit.
-// Bun can execute a test file in a worker process. Killing process.pid would
-// then only kill that worker; the parent `bun test` process can observe the
-// worker failure and exit 0, so the validation authority incorrectly records a
-// pass. Signal the worker's parent instead: it is the actual `bun test`
-// process that the authority spawned. Keep the signal in an external utility
-// so Bun's test harness cannot defer or otherwise intercept its delivery.
+// This fixture intentionally terminates the child process GROUP with SIGKILL
+// (issue #2738). The authority harness spawns `bun test` with detached: true,
+// which makes it a process-group and session leader (Bun maps detached to
+// POSIX_SPAWN_SETSID, including the macOS non-PTY posix_spawn path); every
+// process `bun test` spawns — workers, supervisors, this fixture — inherits
+// that group. `kill -KILL 0` targets the caller's whole process group, so it
+// terminates the authority-spawned `bun test` process and all of its
+// descendants regardless of Bun's internal worker topology. That topology
+// independence is the point: the previous parent-pid design assumed the
+// fixture's parent WAS the spawned `bun test` process; when Bun
+// 1.3.13 on macos-latest broke that assumption, the signal missed the
+// authority's child, the fixture's own abort killed only a worker, `bun test`
+// observed the worker failure and exited 0, and the authority mis-recorded a
+// pass (9/9 CI failures, PRs #2735/#2736). SIGKILL is uncatchable, and the
+// outer test runner lives in a different session, so the group kill cannot
+// escape the harness's detached child tree.
+// SAFETY PRECONDITION: this fixture is valid ONLY under the harness's
+// detached spawn (scripts/ci/repository-validation.ts); the crash-contract
+// guardrail test pins that `detached: true` stays in place, because a
+// non-detached child would share the outer runner's process group. Authority
+// fixture only — never run as a standalone test.
+// Keep the signal in an external utility so Bun's test harness cannot defer
+// or otherwise intercept its delivery.
 let signaler: Bun.Subprocess;
 try {
-	signaler = Bun.spawn(['kill', '-KILL', String(process.ppid)], {
+	signaler = Bun.spawn(['kill', '-KILL', '0'], {
 		cwd: process.cwd(),
 		stdin: 'ignore',
 		stdout: 'ignore',

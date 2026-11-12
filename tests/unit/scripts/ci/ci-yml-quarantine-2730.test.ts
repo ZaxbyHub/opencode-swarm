@@ -13,9 +13,10 @@ import { join } from 'node:path';
 //     candidate without an owning entry; THIS PR adds it to
 //     scripts/ci/quarantined-tests-macos.txt)
 //   - tests/unit/scripts/ci/repository-validation-real-process-2675.test.ts
-//     (macos-latest unit-shard 1, hard fail — already quarantined in
+//     (macos-latest unit-shard 1, hard fail — was quarantined in
 //     scripts/ci/quarantined-tests-macos.txt by issue #2738, commit
-//     ad8c53ae3; this PR must NOT add a second entry)
+//     ad8c53ae3; RETIRED when the #2738 process-group SIGKILL root fix
+//     landed — now pinned ABSENT, see the describe block below)
 //   - tests/unit/telemetry/init-rehome.test.ts
 //     (ubuntu-latest coverage-shard 3, passed-on-retry flake — already
 //     quarantined in the GENERAL ledger by issue #2660 / PR #2799,
@@ -233,15 +234,13 @@ describe('ci.yml integration — quarantine ledger disposition for issue #2730 m
 		});
 	});
 
-	describe('repository-validation-real-process-2675.test.ts (already quarantined by issue #2738)', () => {
-		test('is NOT duplicated into the general or windows ledgers by this PR', () => {
-			// Issue #2730 listed this path, but it is already an active
-			// entry in scripts/ci/quarantined-tests-macos.txt via
-			// issue #2738 (commit ad8c53ae3, 2026-09-12). The
-			// flake-detection script's Rule A drops already-quarantined
-			// candidates, so re-listing it in another ledger would be a
-			// silent no-op for detection but a confusing cross-ledger
-			// duplicate for triage.
+	describe('repository-validation-real-process-2675.test.ts (retired from quarantine by issue #2738)', () => {
+		test('is NOT duplicated into the general or windows ledgers', () => {
+			// Issue #2730 listed this path while it was an active macOS
+			// entry via issue #2738 (commit ad8c53ae3, 2026-09-12). The
+			// #2738 root fix (process-group SIGKILL + survival detection)
+			// retired the entry, and retirement must not become a
+			// cross-ledger migration.
 			expect(activeEntries(GENERAL_LEDGER_PATH)).not.toContain(
 				REPO_VALIDATION_REAL_PROCESS_2675,
 			);
@@ -250,14 +249,18 @@ describe('ci.yml integration — quarantine ledger disposition for issue #2730 m
 			);
 		});
 
-		test('remains in the macOS ledger exactly once (carried over from issue #2738)', () => {
-			// Sanity check: the existing macOS-ledger entry survives this
-			// PR's edit, and no duplicate block was added for it.
-			const entries = activeEntries(MACOS_LEDGER_PATH);
-			expect(entries).toContain(REPO_VALIDATION_REAL_PROCESS_2675);
-			expect(
-				entries.filter((e) => e === REPO_VALIDATION_REAL_PROCESS_2675).length,
-			).toBe(1);
+		test('is retired from the macOS ledger (issue #2738 root fix landed)', () => {
+			// Retirement contract: the crash fixture now terminates the
+			// authority-spawned `bun test` process group (kill -KILL 0) and
+			// the test fails with an explicit child-survived diagnostic if
+			// the termination ever misses again — the quarantine's stated
+			// retirement criterion (scripts/ci/quarantined-tests-macos.txt,
+			// issue #2738 EXPIRY 2026-11-18). The entry must stay ABSENT;
+			// re-adding it would silently skip the crash-classification arm
+			// on macOS CI.
+			expect(activeEntries(MACOS_LEDGER_PATH)).not.toContain(
+				REPO_VALIDATION_REAL_PROCESS_2675,
+			);
 		});
 	});
 });
