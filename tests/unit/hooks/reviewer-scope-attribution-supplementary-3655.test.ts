@@ -383,4 +383,31 @@ describe('reviewer scope attribution supplementary (issue #3655)', () => {
 		const observed = await changedFilesSinceSnapshotAsync(directory, baseline);
 		expect(observed).toContain(DECLARED_FILE);
 	}, 60_000);
+
+	test('large dirty workspace does not degrade the flat committed case', async () => {
+		// Stage B regression: the porcelain probe's byte cap shared the tiny
+		// rev-parse bound, so a ~400-entry dirty workspace overflowed it and a
+		// committed declared completion degraded into a false DEGRADED denial.
+		await beginCoder('c-bigdirty');
+		fs.mkdirSync(path.join(directory, 'docs'), { recursive: true });
+		fs.writeFileSync(path.join(directory, DECLARED_FILE), 'committed\n');
+		git(['add', DECLARED_FILE]);
+		git(['commit', '-m', 'coder output']);
+		// 400 untracked non-declared files at the root: the porcelain payload
+		// comfortably exceeds any small text bound but stays under 256 KiB.
+		for (let i = 0; i < 400; i += 1) {
+			fs.writeFileSync(
+				path.join(directory, `scratch-${String(i).padStart(3, '0')}.txt`),
+				'untracked scratch\n',
+			);
+		}
+		await completeCoder('c-bigdirty');
+		const generation = generationFor('c-bigdirty');
+		expect(generation?.status).toBe('ready');
+		expect(generation?.modifiedFiles).toContain(DECLARED_FILE);
+		const advisoryText = (
+			swarmState.agentSessions.get('parent')?.pendingAdvisoryMessages ?? []
+		).join('\n');
+		expect(advisoryText).not.toContain('REVIEWER_ATTRIBUTION_DEGRADED');
+	}, 60_000);
 });

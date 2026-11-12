@@ -198,6 +198,14 @@ describe('swarm memory tools', () => {
 		);
 
 		expect(parsed.disabled).toBe(true);
+		// PR #3668 feedback FB-008: pin the outcome handler's operator-facing
+		// rewording and the real schema key path (same mutation-verified pins
+		// as the recall/propose legs — a revert to the model-facing text with
+		// the swarm.memory.enabled spelling must go red here too).
+		expect(parsed.message).toContain('Swarm memory is disabled');
+		expect(parsed.message).toContain('operator');
+		expect(parsed.message).toContain('memory.enabled');
+		expect(parsed.message).not.toContain('swarm.memory.enabled');
 		expect(outcomeInternals.createMemoryGateway).not.toHaveBeenCalled();
 	});
 

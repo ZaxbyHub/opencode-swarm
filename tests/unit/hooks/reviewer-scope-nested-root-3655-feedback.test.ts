@@ -234,6 +234,42 @@ describe('reviewer scope nested-root reconciliation (PR #3668 feedback)', () => 
 		expect(denial.message).toContain('retryable=true');
 	}, 60_000);
 
+	test('routed-dirty files do not double-count toward the generation cap', async () => {
+		// Stage B regression (closeout round): the capacity pre-check counted
+		// already-routed dirty files in BOTH the candidate set and
+		// modifiedFiles.length, emitting a false OVERFLOW for a mixed
+		// completion well under the cap. Discriminating scale: >cap/2 routed
+		// dirty files plus one committed file made the old check fire.
+		const proj = path.join(parent, 'proj');
+		expect(await beginCoderAt(proj, 'c-dedupe')).toBe('coder_started');
+		const routedDirty = Math.floor(MAX_REVIEWER_SCOPE_GENERATION_FILES / 2) + 3;
+		for (let i = 0; i < routedDirty; i += 1) {
+			const file = `docs/g${String(i).padStart(3, '0')}.md`;
+			fs.writeFileSync(path.join(proj, file), `routed ${i}\n`);
+			expect(
+				recordReviewerScopeGenerationFile({
+					parentSessionID: 'parent',
+					taskId: TASK_ID,
+					coderCallID: 'c-dedupe',
+					file,
+				}),
+			).toBe(true);
+		}
+		fs.writeFileSync(path.join(proj, DECLARED_FILE), 'committed one\n');
+		git(['add', 'proj/docs/declared.md']);
+		git(['commit', '-m', 'one committed declared file']);
+		await completeCoderAt(proj, 'c-dedupe');
+		const generation = getReviewerScopeGenerationForCoderCall({
+			parentSessionID: 'parent',
+			taskId: TASK_ID,
+			coderCallID: 'c-dedupe',
+		});
+		expect(generation?.status).toBe('ready');
+		expect(advisories().join('\n')).not.toContain(
+			'REVIEWER_SCOPE_GENERATION_OVERFLOW',
+		);
+	}, 60_000);
+
 	test('reconcile-path capture failure records the permanent failure and denies typed', async () => {
 		const proj = path.join(parent, 'proj');
 		expect(await beginCoderAt(proj, 'c-capfail')).toBe('coder_started');

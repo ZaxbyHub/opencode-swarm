@@ -2,8 +2,10 @@
  * Issue #3659 supplementary pin: the MCP knowledge-memory adapter's disabled
  * message addresses the operator, not the model. The three tool handlers'
  * disabled payloads are pinned in tests/unit/tools/swarm-memory-tools.test.ts
- * (operator wording + real schema key path); this covers the fourth surface
- * (src/mcp/adapters/knowledge-memory.ts) with the same assertions.
+ * (operator wording + the real `memory.enabled` schema key path, each
+ * asserting the absence of the old `swarm.memory.enabled` spelling); this
+ * file pins the fourth surface (src/mcp/adapters/knowledge-memory.ts) with
+ * the same three assertions.
  */
 import { describe, expect, test } from 'bun:test';
 import { swarmMemoryRecallAdapter } from '../../../src/mcp/adapters/knowledge-memory';
@@ -24,6 +26,8 @@ describe('knowledge-memory adapter disabled message (issue #3659)', () => {
 			expect(result.reason).toBe('memory_disabled');
 			expect(result.message).toContain('Swarm memory is disabled');
 			expect(result.message).toContain('operator');
+			expect(result.message).toContain('memory.enabled');
+			expect(result.message).not.toContain('swarm.memory.enabled');
 		} finally {
 			safeRmRecursive(root);
 		}

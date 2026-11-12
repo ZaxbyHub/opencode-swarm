@@ -1,5 +1,6 @@
 ---
-issues: [3655, 3659]
+issue: 3655
+title: Coder committed output reaches reviewer dispatch (#3655); swarm_memory tools honor the enabled flag (#3659)
 ---
 
 # Coder committed output no longer wedges reviewer dispatch; swarm_memory tools honor the enabled flag
@@ -9,7 +10,9 @@ issues: [3655, 3659]
 Two shared-root workflow fixes:
 
 - A coder delegation whose declared output was committed, left uncommitted, or
-  otherwise missed guardrail write-routing now reaches the reviewer gate. At
+  otherwise missed guardrail write-routing now reaches the reviewer gate (in
+  git workspaces; non-git workspaces keep the typed degraded denial for
+  committed attribution, while guardrail-routed completions proceed). At
   every coder completion whose declared scope still has unrouted files, the
   reviewer-scope generation reconciles declared-scope changes from two sources
   — the committed diff since the dispatch-time HEAD and the declared-scope
@@ -25,8 +28,8 @@ Two shared-root workflow fixes:
   (retryable=true). Routed files with incomplete fingerprints deny with
   `REVIEWER_CAPTURE_INCOMPLETE` (retryable, re-dispatch the coder) or, for
   permanent capture failures, `REVIEWER_CAPTURE_FAILED` with a repair-then-
-  re-dispatch-the-coder action (the failure file is sanitized in the denial
-  text). Declared-scope change sets exceeding the 256-file generation cap are
+  re-dispatch-the-coder action (the collecting-state denial sanitizes the
+  failure file before interpolation). Declared-scope change sets exceeding the 256-file generation cap are
   refused up front with a `REVIEWER_SCOPE_GENERATION_OVERFLOW` advisory
   instead of silently destroying the generation. Genuine post-capture drift on
   a ready generation remains terminal `REVIEWER_SCOPE_STALE` and now states

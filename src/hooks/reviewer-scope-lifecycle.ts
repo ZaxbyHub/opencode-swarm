@@ -899,19 +899,29 @@ export async function beginApprovedReviewerScopeLifecycle(input: {
 }
 
 /**
- * Issue #3655: reconcile committed git attribution into a zero-routed-write
- * generation at coder completion — the shared-root counterpart of the
- * background ingestion bridge (stage-b-gates).
+ * Issue #3655 (extended by PR #3668 feedback F-2): reconcile committed and
+ * declared-scope working-tree attribution into the generation at coder
+ * completion — runs on EVERY completion whose declared scope still has
+ * unrouted files (the shared-root counterpart of the background ingestion
+ * bridge in stage-b-gates).
  *
- * - `routed` — at least one committed in-declared-scope file entered the
+ * - `skipped` — every declared file was already guardrail-routed; no git
+ *   work needed (read-only fast path).
+ * - `routed` — at least one newly routed in-declared-scope file entered the
  *   generation (fingerprints captured or typed failures recorded); the caller
  *   continues into the completeness/ready path with a refreshed view.
  * - `proved-empty` — the committed diff was PROVEN to contain nothing in
  *   declared scope; classification falls to the working-tree verdict.
  * - `degraded` — attribution could not be proven (no dispatch head recorded,
  *   current head unresolvable, or a failed diff). Never treated as proof of
- *   no change; the generation stays `collecting` for the typed
- *   attribution-empty denial at reviewer dispatch.
+ *   no change. Zero-routed generations stay `collecting` for the typed
+ *   attribution-empty denial at reviewer dispatch; routed completions
+ *   proceed on their guardrail-routed attribution with a DEGRADED advisory
+ *   (closeout review: a non-git workspace can never produce a dispatch
+ *   head, so a hard denial would repeat forever).
+ * - `overflow` — the declared-scope candidate set exceeds the generation
+ *   file cap; the OVERFLOW advisory is pushed here and the caller returns
+ *   without classification.
  */
 async function routeCommittedDeclaredChanges(
 	parentSessionID: string,
@@ -1102,15 +1112,30 @@ export async function completeReviewerScopeLifecycle(input: {
 			scoped,
 		);
 		if (reconciliation === 'degraded') {
-			// Committed attribution could not be proven (non-git workspace,
-			// unresolvable HEAD, or a failed diff). A clean working tree is NOT
-			// proof of no mutation here — retain the generation for the typed
-			// attribution-empty denial at reviewer dispatch.
-			pushAdvisory(
-				ensureAgentSession(input.parentSessionID),
-				`REVIEWER_ATTRIBUTION_DEGRADED: task ${taskId} generation ${scoped.generation}: committed-change reconciliation could not be proven (no dispatch git head, unresolvable current head, or failed committed diff); the generation is retained for a typed reviewer-dispatch denial. ACTION[architect]: verify git availability for the workspace, then re-dispatch the coder`,
-			);
-			return null;
+			if (scoped.modifiedFiles.length > 0) {
+				// Closeout review (PR #3668): routed completions must NOT lose
+				// their attribution to a degraded git channel — in a non-git
+				// workspace (explicitly supported) or after an unborn-HEAD
+				// rev-parse, re-dispatching the coder can never create git, so
+				// the retryable denial would repeat forever. The guardrail-
+				// routed attribution stands; the advisory records that the
+				// committed-diff leg was unproven, and the completeness/ready
+				// path proceeds with what was routed (over-review, not denial).
+				pushAdvisory(
+					ensureAgentSession(input.parentSessionID),
+					`REVIEWER_ATTRIBUTION_DEGRADED: task ${taskId} generation ${scoped.generation}: committed-change reconciliation could not be proven (no dispatch git head, unresolvable current head, or failed committed diff); proceeding on the ${scoped.modifiedFiles.length} guardrail-routed file(s). ACTION[architect]: if committed output was expected beyond the routed writes, inspect the workspace manually`,
+				);
+				// Fall through to completeness/ready with the routed view.
+			} else {
+				// Zero-routed completion with an unproven git channel: a clean
+				// working tree is NOT proof of no mutation, and nothing was
+				// routed — retain for the typed reviewer-dispatch denial.
+				pushAdvisory(
+					ensureAgentSession(input.parentSessionID),
+					`REVIEWER_ATTRIBUTION_DEGRADED: task ${taskId} generation ${scoped.generation}: committed-change reconciliation could not be proven (no dispatch git head, unresolvable current head, or failed committed diff); the generation is retained for a typed reviewer-dispatch denial. ACTION[architect]: verify git availability for the workspace, then re-dispatch the coder`,
+				);
+				return null;
+			}
 		}
 		if (reconciliation === 'overflow') {
 			// The generation-cap advisory was already pushed by the
