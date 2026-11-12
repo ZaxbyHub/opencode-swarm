@@ -68,7 +68,7 @@
 #
 # Do NOT re-add entries here unless a merge_group run on windows-latest has
 # confirmed a real failure that cannot be fixed at the root.
-# OWNER: zaxbysauce — issue #2973; criterion: windows merge-group stability post-#3640
+# OWNER: zaxbysauce — issue #2973; criterion: windows merge-group stability post-#3640, else obtain the failing-run diagnosis
 # EXPIRY: 2026-12-20 — re-anchored 2026-11-12 (trace 2973-…-quarantine-retirement): no reproducible diagnosis yet; observe post-#3640 stability, capture diagnosis on any windows merge-group failure
 tests/unit/tools/dispatch-lanes-pr-review-resilience-followups.test.ts
 
