@@ -35,7 +35,15 @@ Three verification-surface correctness fixes, one per issue:
   discloses the asymmetry). This PR does not change that geometry
   (byte-identical at base — not a regression); closing it needs
   fetch-verified/remote-preferring base resolution and is tracked as a
-  follow-up. Abort, timeout,
+  follow-up. The introduced fall-through itself carries a second disclosed
+  trade-off: when an EARLIER candidate overflows and a LATER non-HEAD
+  candidate (a local or fork ref at an intermediate commit) resolves, the
+  committed hop silently narrows to that candidate — at base this shape
+  failed closed to `null`; silent narrowing was kept over a per-fall-through
+  `criticalWarn` because the common stale-upstream geometry (a stale first
+  ref succeeded by a fresher default-branch candidate) is the fix's purpose
+  and warning on it would re-introduce the noise cluster this PR removes.
+  The narrowing residual is tracked in the same follow-up. Abort, timeout,
   and spawn failures without output-guard flags stop the walk after one
   spawn (executable-resolution and HEAD-resolution failures each carry their
   own named cause); an output-guard termination (reported by the runner as
