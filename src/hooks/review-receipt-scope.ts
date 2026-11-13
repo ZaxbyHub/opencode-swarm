@@ -40,6 +40,7 @@ const DEFAULT_MAX_SCOPE_BYTES = 256 * 1024;
 const MAX_SCOPE_BYTES = 2 * 1024 * 1024;
 const HEAD_TIMEOUT_MS = 5_000;
 const HEAD_OUTPUT_BYTES = 256;
+const STDERR_EXCERPT_BYTES = 512;
 const HEAD_SHA_PATTERN = /^[0-9a-f]{40,64}$/i;
 
 export const REVIEWER_TASK_SCOPE_DESCRIPTION = 'reviewer-task-files-v2';
@@ -92,6 +93,12 @@ export type ReviewerScopeBuildFailureCode =
 	| 'invalid_path'
 	| 'workspace_unresolvable'
 	| 'head_timeout'
+	// #3680: permanent git-environment causes, typed apart from the
+	// transient head_timeout retry arm (issue AC12).
+	| 'no_git_workspace'
+	| 'git_unavailable'
+	| 'git_dubious_ownership'
+	| 'git_unhealthy'
 	| 'head_changed'
 	| 'outside_workspace'
 	| 'symlink_or_reparse'
@@ -199,69 +206,258 @@ function pathKey(relativePath: string): string {
 		: relativePath;
 }
 
-async function resolveHeadSha(directory: string): Promise<string | null> {
-	let child: child_process.ChildProcess | undefined;
-	let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
-	try {
-		child = _internals.spawn(
-			_internals.resolveGitExecutable(),
-			['rev-parse', '--verify', 'HEAD'],
-			{
+/** Bounded non-interactive git child: stdin ignored, stdout/stderr capped,
+ * timeout + best-effort kill (AGENTS.md invariant 3). Resolves a tagged
+ * result — never throws. */
+interface BoundedGitResult {
+	kind: 'exit' | 'spawn-error' | 'timeout' | 'overflow';
+	exitCode?: number;
+	stdout?: string;
+	stderr?: string;
+}
+
+function runBoundedGit(
+	args: readonly string[],
+	directory: string,
+	budgetMs: number,
+	captureStderr: boolean,
+): Promise<BoundedGitResult> {
+	return new Promise<BoundedGitResult>((resolve) => {
+		let child: child_process.ChildProcess | undefined;
+		let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+		let settled = false;
+		let stdoutBytes = 0;
+		let stderrBytes = 0;
+		const stdoutChunks: Buffer[] = [];
+		const stderrChunks: Buffer[] = [];
+		const finish = (value: BoundedGitResult): void => {
+			if (settled) return;
+			settled = true;
+			if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
+			try {
+				child?.kill();
+			} catch {
+				// Best-effort cleanup; the child may already have exited.
+			}
+			resolve(value);
+		};
+		try {
+			child = _internals.spawn(_internals.resolveGitExecutable(), [...args], {
 				cwd: directory,
-				stdio: ['ignore', 'pipe', 'ignore'],
-				timeout: HEAD_TIMEOUT_MS,
+				stdio: ['ignore', 'pipe', captureStderr ? 'pipe' : 'ignore'],
+				timeout: Math.max(1, budgetMs),
 				windowsHide: true,
-			},
-		);
-
-		return await new Promise<string | null>((resolve) => {
-			let settled = false;
-			let stdoutBytes = 0;
-			const stdoutChunks: Buffer[] = [];
-			const finish = (value: string | null): void => {
-				if (settled) return;
-				settled = true;
-				if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
-				resolve(value);
-			};
-			const killAndFail = (): void => {
-				try {
-					child?.kill();
-				} catch {
-					// Best-effort cleanup; the child may already have exited.
-				}
-				finish(null);
-			};
-
-			timeoutHandle = setTimeout(killAndFail, HEAD_TIMEOUT_MS);
-			timeoutHandle.unref?.();
-			child?.once('error', killAndFail);
-			child?.stdout?.on('data', (chunk: Buffer | string) => {
-				const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-				stdoutBytes += bytes.byteLength;
-				if (stdoutBytes > HEAD_OUTPUT_BYTES) {
-					killAndFail();
-					return;
-				}
-				stdoutChunks.push(bytes);
 			});
-			child?.once('close', (exitCode) => {
-				if (exitCode !== 0 || stdoutBytes > HEAD_OUTPUT_BYTES) {
-					finish(null);
+		} catch {
+			finish({ kind: 'spawn-error' });
+			return;
+		}
+		timeoutHandle = setTimeout(
+			() => finish({ kind: 'timeout' }),
+			Math.max(1, budgetMs),
+		);
+		timeoutHandle.unref?.();
+		child?.once('error', () => finish({ kind: 'spawn-error' }));
+		child?.stdout?.on('data', (chunk: Buffer | string) => {
+			const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+			stdoutBytes += bytes.byteLength;
+			if (stdoutBytes > HEAD_OUTPUT_BYTES) {
+				finish({ kind: 'overflow' });
+				return;
+			}
+			stdoutChunks.push(bytes);
+		});
+		if (captureStderr) {
+			child?.stderr?.on('data', (chunk: Buffer | string) => {
+				const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+				stderrBytes += bytes.byteLength;
+				if (stderrBytes > STDERR_EXCERPT_BYTES) {
+					// Keep the bounded excerpt; extra bytes are dropped.
+					stderrBytes = STDERR_EXCERPT_BYTES + 1;
 					return;
 				}
-				const sha = Buffer.concat(stdoutChunks).toString('utf-8').trim();
-				finish(HEAD_SHA_PATTERN.test(sha) ? sha : null);
+				stderrChunks.push(bytes);
+			});
+		}
+		child?.once('close', (exitCode) => {
+			finish({
+				kind: 'exit',
+				exitCode: exitCode ?? -1,
+				stdout: Buffer.concat(stdoutChunks).toString('utf-8').trim(),
+				stderr: captureStderr
+					? Buffer.concat(stderrChunks)
+							.toString('utf-8')
+							.replace(/\p{Cc}/gu, ' ')
+							.slice(0, STDERR_EXCERPT_BYTES)
+					: '',
 			});
 		});
-	} catch {
-		return null;
-	} finally {
-		if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
-		try {
-			child?.kill();
-		} catch {
-			// Best-effort cleanup; the child may already have exited.
+	});
+}
+
+/**
+ * #3680 (issue AC12): resolve HEAD with a CAUSE-typed result. `HEAD^{commit}`
+ * verifies the object exists (plain `HEAD` accepts SHA-shaped garbage from a
+ * corrupt packed ref). A failure is further classified (three bounded
+ * follow-ups, only on the failure arm) into unborn (transient — a commit
+ * rescues it) vs corrupt (terminal — nothing in the workspace rescues it).
+ */
+async function resolveHeadSha(
+	directory: string,
+	budgetMs: number,
+): Promise<
+	| { ok: true; sha: string }
+	| {
+			ok: false;
+			cause:
+				| 'timeout'
+				| 'spawn-error'
+				| 'overflow'
+				| 'nonzero'
+				| 'malformed-shape';
+	  }
+> {
+	const verify = await runBoundedGit(
+		['rev-parse', '--verify', 'HEAD^{commit}'],
+		directory,
+		budgetMs,
+		false,
+	);
+	if (verify.kind === 'timeout') return { ok: false, cause: 'timeout' };
+	if (verify.kind === 'spawn-error') return { ok: false, cause: 'spawn-error' };
+	if (verify.kind === 'overflow') return { ok: false, cause: 'overflow' };
+	const sha = verify.stdout ?? '';
+	if (verify.exitCode === 0 && HEAD_SHA_PATTERN.test(sha)) {
+		return { ok: true, sha };
+	}
+	if (verify.exitCode === 0) return { ok: false, cause: 'malformed-shape' };
+	// Nonzero: distinguish unborn (transient) from corrupt (terminal).
+	const symbolic = await runBoundedGit(
+		['symbolic-ref', '-q', 'HEAD'],
+		directory,
+		budgetMs,
+		true,
+	);
+	if (symbolic.kind !== 'exit') {
+		return {
+			ok: false,
+			cause: symbolic.kind === 'spawn-error' ? 'spawn-error' : 'timeout',
+		};
+	}
+	if (symbolic.exitCode !== 0 || !symbolic.stdout) {
+		// Detached HEAD whose object does not verify — corrupt, never unborn.
+		return { ok: false, cause: 'nonzero' };
+	}
+	const branchRef = symbolic.stdout;
+	const refPresent = await runBoundedGit(
+		['show-ref', '--verify', '--quiet', branchRef],
+		directory,
+		budgetMs,
+		true,
+	);
+	if (refPresent.kind !== 'exit') {
+		return {
+			ok: false,
+			cause: refPresent.kind === 'spawn-error' ? 'spawn-error' : 'timeout',
+		};
+	}
+	if (refPresent.exitCode === 1) {
+		// Branch ref absent while symbolic HEAD points at it: genuinely unborn.
+		return { ok: false, cause: 'nonzero' };
+	}
+	// Ref present (exit 0) or itself unreadable (exit >1, e.g. 128 corrupt
+	// loose/packed ref) but the commit object fails: corrupt, terminal.
+	return { ok: false, cause: 'nonzero' };
+}
+
+export type WorkspaceGitHealth =
+	| { kind: 'head'; sha: string }
+	| {
+			kind: 'denial';
+			code: Extract<
+				ReviewerScopeBuildFailureCode,
+				| 'head_timeout'
+				| 'no_git_workspace'
+				| 'git_unavailable'
+				| 'git_dubious_ownership'
+				| 'git_unhealthy'
+			>;
+			retryable: boolean;
+	  };
+
+/**
+ * #3680: one git-native availability + HEAD classification (never an fs
+ * `.git` marker check — AGENTS.md invariant 4 makes `.opencode/` a
+ * legitimate project-root declaration without a working repository of its
+ * own, and executed fixtures show fs markers disagree with git on both
+ * nested-root and dangling `.git`-file workspaces). Permanent environmental
+ * causes resolve `retryable: false`; only genuinely transient causes
+ * (timeout, overflow, unborn HEAD) keep the `head_timeout` retry arm.
+ */
+export async function classifyWorkspaceGitHealth(
+	directory: string,
+	deadlineAt?: number,
+): Promise<WorkspaceGitHealth> {
+	const remaining = (): number => {
+		if (deadlineAt === undefined) return HEAD_TIMEOUT_MS;
+		return Math.max(1, Math.min(HEAD_TIMEOUT_MS, deadlineAt - Date.now()));
+	};
+	const availability = await runBoundedGit(
+		['rev-parse', '--git-dir'],
+		directory,
+		Math.min(2_000, remaining()),
+		true,
+	);
+	switch (availability.kind) {
+		case 'spawn-error':
+			return { kind: 'denial', code: 'git_unavailable', retryable: false };
+		case 'timeout':
+		case 'overflow':
+			// Transient: do not invent a permanent cause from slow/odd git.
+			return { kind: 'denial', code: 'head_timeout', retryable: true };
+		case 'exit':
+			break;
+	}
+	const stderrText = availability.stderr ?? '';
+	if (availability.exitCode !== 0) {
+		if (/dubious ownership/i.test(stderrText)) {
+			return {
+				kind: 'denial',
+				code: 'git_dubious_ownership',
+				retryable: false,
+			};
+		}
+		if (/not a git repository/i.test(stderrText)) {
+			return { kind: 'denial', code: 'no_git_workspace', retryable: false };
+		}
+		return { kind: 'denial', code: 'git_unhealthy', retryable: false };
+	}
+	const head = await resolveHeadSha(directory, remaining());
+	if (head.ok) return { kind: 'head', sha: head.sha };
+	switch (head.cause) {
+		case 'timeout':
+		case 'spawn-error':
+		case 'overflow':
+		case 'malformed-shape':
+			return { kind: 'denial', code: 'head_timeout', retryable: true };
+		case 'nonzero': {
+			// resolveHeadSha already separated unborn (transient) from corrupt
+			// (terminal) — re-run the cheap discriminator result via the
+			// presence of ANY commit: an unborn workspace has none.
+			const anyCommit = await runBoundedGit(
+				['rev-list', '--all', '--max-count=1'],
+				directory,
+				remaining(),
+				false,
+			);
+			if (
+				anyCommit.kind === 'exit' &&
+				anyCommit.exitCode === 0 &&
+				!anyCommit.stdout
+			) {
+				return { kind: 'denial', code: 'head_timeout', retryable: true };
+			}
+			return { kind: 'denial', code: 'git_unhealthy', retryable: false };
 		}
 	}
 }
@@ -325,10 +521,11 @@ export async function buildReviewerTaskScope(
 	if (!workspaceIdentity) {
 		return { ok: false, code: 'workspace_unresolvable', retryable: false };
 	}
-	const headSha = await resolveHeadSha(realRoot);
-	if (!headSha) {
-		return { ok: false, code: 'head_timeout', retryable: true };
+	const health = await classifyWorkspaceGitHealth(realRoot, options.deadlineAt);
+	if (health.kind === 'denial') {
+		return { ok: false, code: health.code, retryable: health.retryable };
 	}
+	const headSha = health.sha;
 
 	const candidates = new Map<
 		string,
@@ -433,8 +630,8 @@ export async function buildReviewerTaskScope(
 		}
 	}
 
-	const finalHeadSha = await resolveHeadSha(realRoot);
-	if (finalHeadSha !== headSha) {
+	const finalHead = await classifyWorkspaceGitHealth(realRoot);
+	if (finalHead.kind !== 'head' || finalHead.sha !== headSha) {
 		return { ok: false, code: 'head_changed', retryable: true };
 	}
 
