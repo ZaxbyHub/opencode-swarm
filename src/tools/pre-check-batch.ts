@@ -13,6 +13,7 @@ import { loadGateOverrides } from '../config';
 import type { SecretscanEvidence } from '../config/evidence-schema.js';
 import { saveEvidence } from '../evidence/manager.js';
 import { criticalWarn, warn } from '../utils';
+import { canonicalRootKey } from '../utils/canonical-root.js';
 import { runExternalTool } from '../utils/external-tool-runner';
 import { sameExistingFilesystemPath } from '../utils/filesystem-identity.js';
 import { resolveGitExecutableAsync } from '../utils/git-executable.js';
@@ -245,13 +246,20 @@ function cooldownSuppressed(
 	nowMs: number,
 	windowMs: number,
 ): boolean {
-	const last = record.get(directory);
+	// Canonical project identity, not the caller's lexical spelling: two
+	// spellings (drive-case, junction alias, trailing separator) of one
+	// physical repository must share one window, and the path-identity
+	// ratchet (scripts/check-path-identity.ts, CI step "Path identity
+	// ratchet (issue #2474)") refuses a raw resolve result as a project
+	// Map/Set key.
+	const key = canonicalRootKey(directory);
+	const last = record.get(key);
 	if (last !== undefined && nowMs - last < windowMs) return true;
 	if (last === undefined && record.size >= WARN_COOLDOWN_MAX_DIRECTORIES) {
 		const oldest = record.keys().next();
 		if (!oldest.done) record.delete(oldest.value);
 	}
-	record.set(directory, nowMs);
+	record.set(key, nowMs);
 	return false;
 }
 const lastDiffBaseFailureWarn = new Map<string, number>();
