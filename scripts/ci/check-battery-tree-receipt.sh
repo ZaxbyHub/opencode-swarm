@@ -9,8 +9,9 @@
 #
 #   head  must equal `git rev-parse HEAD` of the tree being validated
 #   dirty "" (recorded from a clean tree) must match a clean tree; a 40-hex
-#         sha1 digest must match the canonical digest of the current dirty
-#         state (sha1 over `git status --porcelain`, CRLF-normalized)
+#         sha1 digest must match the canonical CONTENT-COVERING digest of the
+#         current dirty state (git diff HEAD --binary + sorted untracked
+#         path/blob-id rows — porcelain alone is content-blind)
 #   files every recorded file must exist in the tree
 #
 # Refusals (exit 1): TREE-RECEIPT: mismatch (head or dirty binding),

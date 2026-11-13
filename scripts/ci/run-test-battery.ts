@@ -180,11 +180,12 @@ async function main(): Promise<void> {
 	}
 
 	// A stale receipt from an earlier passing run must not survive a later
-	// failed/refused run on the same tree: remove the default receipt up front
-	// (success-only writes re-create it).
-	const defaultReceipt = path.join(process.cwd(), '.swarm', 'evidence', 'battery', 'battery-tree-receipt.json');
+	// failed/refused run on the same tree: remove the previous receipt target
+	// up front (success-only writes re-create it).
+	const staleReceipt =
+		receiptOut ?? path.join(process.cwd(), '.swarm', 'evidence', 'battery', 'battery-tree-receipt.json');
 	try {
-		fs.rmSync(defaultReceipt, { force: true });
+		fs.rmSync(staleReceipt, { force: true });
 	} catch {
 		/* best effort — a failure here surfaces as the checker's own mismatch */
 	}
