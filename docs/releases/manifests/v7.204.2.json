@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.204.2",
+  "tagCommit": "e72fc9776226950ed4966889ff904fe3dd4e3427",
+  "targetCommitish": "e72fc9776226950ed4966889ff904fe3dd4e3427",
+  "releaseBodySha256": "9fa3d02d1cb12320d910320fbb1df185a8e983d8d9408a8c66d704476bb0b325",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/3655-3659-attribution-memory-gating.md",
+      "sha256": "4def81f900558ab4829cc3ba8b767ac6fbf802f2b75d453a5d30cfbabaead083"
+    }
+  ]
+}
