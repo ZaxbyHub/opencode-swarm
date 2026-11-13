@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.204.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.204.2...v7.204.3) (2026-11-13)
+
+
+### Bug Fixes
+
+* **3131,3662,3554:** verification-surface authority — merge-base fall-through, session-bound Turbo bypass, derived-evidence classification ([785fb51](https://github.com/ZaxbyHub/opencode-swarm/commit/785fb51c9fddab7f8bcd98b211ea598e2c39b710))
+
 ## [7.204.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.204.1...v7.204.2) (2026-11-12)
 
 
