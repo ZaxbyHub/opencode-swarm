@@ -147,4 +147,18 @@ describe('#3648 D1 disclosed over-deny bound: python-parity contract', () => {
 		},
 		T,
 	);
+	test(
+		'4.5 r3: -i inplace with NO data-file operands still classifies the inline program',
+		async () => {
+			const a = await gate('awk -i inplace \'BEGIN{print > "../secret"}\'');
+			expect(a.verdict).toBe('BLOCKED');
+			const b = await gate('awk -iinplace \'BEGIN{system("rm -rf ../x")}\'', {
+				blockDestructive: true,
+			});
+			expect(b.verdict).toBe('BLOCKED');
+			const c = await gate('awk -i inplace -f prog.awk');
+			expect(c.verdict).toBe('ADMITTED');
+		},
+		T,
+	);
 });

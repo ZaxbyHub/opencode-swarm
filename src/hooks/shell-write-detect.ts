@@ -5107,8 +5107,8 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 					const ch = members[mi];
 					if (ch === undefined) break;
 					if (ch === '0' || ch === 'r' || ch === 't' || ch === 'x') continue;
-					if ('adEILlnPs'.includes(ch)) {
-						consumedNext = 'adEILnPs'.includes(ch) && mi === members.length - 1;
+					if ('adEILnPs'.includes(ch)) {
+						consumedNext = mi === members.length - 1;
 						valueOption = true;
 						break;
 					}
@@ -7025,7 +7025,13 @@ function detectInterpreterEval(cmd: unknown): WriteTarget[] {
 			if (!sawProgramFile && !sawInline) sawProgram = true;
 			i += 1;
 		}
-		if (sawInPlace) return results; // the in-place arm owns the whole command
+		// 4.5 r3: the in-place carve-out applies ONLY when the in-place
+		// arm actually owns at least one operand target — with an inline
+		// program and ZERO data-file operands, detectInplaceEdit emits
+		// nothing and real gawk still executes the BEGIN block
+		// (`awk -i inplace 'BEGIN{print > "../secret"}' wrote ../secret`
+		// while the gate admitted).
+		if (sawInPlace && detectInplaceEdit(cmd).length > 0) return results;
 		if (!(sawInline || sawProgram || denyOnUncertainty)) return results;
 	} else {
 		const relevantFlags = evalFlags[canonical] ?? [];

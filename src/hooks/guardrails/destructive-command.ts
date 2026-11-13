@@ -3098,18 +3098,8 @@ export function dcExtractRecursiveRmTargets(segment: string): string[] | null {
 	// glued tail or the next word; flags {0 r t x}; an unknown option scans
 	// every remaining token (deny-direction).
 	if (normalizedRmVerb === 'xargs' && verbTokens.length >= 2) {
-		const XARGS_VALUE_SHORT = new Set([
-			'a',
-			'd',
-			'E',
-			'e',
-			'I',
-			'L',
-			'l',
-			'n',
-			'P',
-			's',
-		]);
+		// e/l ride the optional-glued branch below, not this set.
+		const XARGS_VALUE_SHORT = new Set(['a', 'd', 'E', 'I', 'L', 'n', 'P', 's']);
 		const XARGS_FLAG_SHORT = new Set(['0', 'r', 't', 'x']);
 		const XARGS_LONG_VALUE_DETACHED = new Set([
 			'--arg-file',
