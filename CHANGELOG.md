@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.204.4](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.204.3...v7.204.4) (2026-11-13)
+
+
+### Bug Fixes
+
+* **3605,3601:** feedback round — per-hit Phase 4.2 table + fail-closed battery/receipt/ledger/preflight hardening ([b6106b8](https://github.com/ZaxbyHub/opencode-swarm/commit/b6106b8b5f33c4280c1ade35173f2ff352dff994))
+* **3605,3601:** verification-surface gates — battery admission proof, cluster preflight, cost/yield ledger, PR-body order, gate-state parity ([13b49ac](https://github.com/ZaxbyHub/opencode-swarm/commit/13b49acade7bf3c88d782a7961b99ec8f9286d7a))
+
 ## [7.204.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.204.2...v7.204.3) (2026-11-13)
 
 
