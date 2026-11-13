@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.204.4",
+  "tagCommit": "a12b57b536f8836083d48e93626b5e2bb8197545",
+  "targetCommitish": "a12b57b536f8836083d48e93626b5e2bb8197545",
+  "releaseBodySha256": "751c2df6891fa9ccf5298a4125cca2b495d18d51d495a580ff6a9a7c360b59bd",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/3605-3601-verification-surface-gates.md",
+      "sha256": "4e94d52bf94bc58f14f881c307ababa5c7986eac47ccd6b33485fc0bea6ed9b5"
+    }
+  ]
+}
