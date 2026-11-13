@@ -216,6 +216,28 @@ interface BoundedGitResult {
 	stderr?: string;
 }
 
+/**
+ * Spawn errnos that mean "the OS could not start the process right now", not
+ * "git does not exist here". They are TRANSIENT — the caller's retry arm can
+ * genuinely clear them (a descriptor leak is closed, a fork storm passes) —
+ * so they must ride the retryable `head_timeout` channel instead of the
+ * permanent `git_unavailable` one (#3680 AC12; final-critic round-2 blocker 1:
+ * Node throws ENOMEM SYNCHRONOUSLY from spawn() and reports ENFILE only via
+ * the async 'error' event, so the set must be applied to BOTH arms — the same
+ * set the sibling classifier uses at reviewer-scope-file-fingerprint.ts).
+ */
+const TRANSIENT_SPAWN_ERRNOS = new Set([
+	'EMFILE',
+	'ENFILE',
+	'EAGAIN',
+	'ENOMEM',
+]);
+
+function isTransientSpawnErrno(error: unknown): boolean {
+	const code = (error as NodeJS.ErrnoException | null)?.code;
+	return typeof code === 'string' && TRANSIENT_SPAWN_ERRNOS.has(code);
+}
+
 function runBoundedGit(
 	args: readonly string[],
 	directory: string,
@@ -259,8 +281,16 @@ function runBoundedGit(
 					LC_MESSAGES: 'C',
 				},
 			});
-		} catch {
-			finish({ kind: 'spawn-error' });
+		} catch (error) {
+			// Node throws ENOMEM (and other non-event errnos) SYNCHRONOUSLY
+			// from spawn(), so the transient set must be applied here too —
+			// without this, an ENOMEM storm reads as a permanent missing
+			// binary and the reviewer dispatch denies terminal.
+			finish(
+				isTransientSpawnErrno(error)
+					? { kind: 'timeout' }
+					: { kind: 'spawn-error' },
+			);
 			return;
 		}
 		// REFERENCED on purpose: with a fully fake child (unit tests) the
@@ -272,14 +302,16 @@ function runBoundedGit(
 			() => finish({ kind: 'timeout' }),
 			Math.max(1, budgetMs),
 		);
-		// Resource-exhaustion spawn failures (EMFILE/EAGAIN/ENOMEM) are
+		// Resource-exhaustion spawn failures (EMFILE/ENFILE/EAGAIN/ENOMEM) are
 		// TRANSIENT — the caller's retry arm can genuinely clear them — so
 		// they must not be classified as a permanent missing-binary cause.
+		// (The sync catch above covers the errnos spawn() throws directly.)
 		child?.once('error', (error: unknown) => {
-			const code = (error as NodeJS.ErrnoException | null)?.code;
-			const transient =
-				code === 'EMFILE' || code === 'EAGAIN' || code === 'ENOMEM';
-			finish(transient ? { kind: 'timeout' } : { kind: 'spawn-error' });
+			finish(
+				isTransientSpawnErrno(error)
+					? { kind: 'timeout' }
+					: { kind: 'spawn-error' },
+			);
 		});
 		child?.stdout?.on('data', (chunk: Buffer | string) => {
 			const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
@@ -293,12 +325,20 @@ function runBoundedGit(
 		if (captureStderr) {
 			child?.stderr?.on('data', (chunk: Buffer | string) => {
 				const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-				stderrBytes += bytes.byteLength;
-				if (stderrBytes > STDERR_EXCERPT_BYTES) {
-					// Keep the bounded excerpt; extra bytes are dropped.
-					stderrBytes = STDERR_EXCERPT_BYTES + 1;
+				// Keep the FIRST STDERR_EXCERPT_BYTES bytes, including the
+				// prefix of the chunk that crosses the cap: git writes the
+				// dubious-ownership message in ONE write and it exceeds 512
+				// bytes for realistic Windows paths, so dropping the whole
+				// crossing chunk would discard the very cause string the
+				// classifier matches (final-critic round-2 blocker 3).
+				const room = STDERR_EXCERPT_BYTES - stderrBytes;
+				if (room <= 0) return;
+				if (bytes.byteLength > room) {
+					stderrChunks.push(bytes.subarray(0, room));
+					stderrBytes = STDERR_EXCERPT_BYTES;
 					return;
 				}
+				stderrBytes += bytes.byteLength;
 				stderrChunks.push(bytes);
 			});
 		}

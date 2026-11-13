@@ -40,10 +40,12 @@ pending-owner decision:
   cannot be proven from workspace state (three heuristic designs were
   disproved by executed counterexamples
   during the plan review, including the push-to-main and planted-
-  first-candidate geometries), and the two sound closures (fetch-verified
-  base selection vs. conservative fail-closed on every HEAD-equal /
-  push-to-main-shaped acceptance) reverse the #2918 F-002 fresh-branch
-  contract and need a maintainer decision. **HEAD-equal acceptance is
+  first-candidate geometries), and the two sound closures each carry
+  their own cost: conservative fail-closed on every HEAD-equal /
+  push-to-main-shaped acceptance reverses the #2918 F-002 fresh-branch
+  contract, while fetch-verified base selection adds remote-tracking-ref
+  mutation to a gate path. Both need a maintainer decision. **HEAD-equal
+  acceptance is
   therefore still classified PRE-EXISTING today by design-pending**, exactly
   as disclosed in the #3131 release fragment; the secretscan arm keeps its
   unconditional HEAD-equal shield.
