@@ -28,7 +28,7 @@
 
 import { describe, expect, test } from 'bun:test';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
 import { getChangedLineRanges } from '../../../src/tools/pre-check-batch.js';
 import { canonicalMkdtemp, removeTreeWithRetry } from '../../helpers/tmpdir.js';
@@ -156,6 +156,47 @@ describe('getChangedLineRanges — diff-base fall-through warning (#3681, C5)', 
 			}
 		}
 	}, 120_000);
+
+	test('interleaved directories each keep their own cooldown window (A/B/A)', async () => {
+		// Per-directory independence (plan-critic shipped-scope finding 3;
+		// round-1 critic item 7's "interleaved multi-directory tests"): a
+		// single `{directory, atMs}` record is only CONSECUTIVE-same-
+		// directory suppression — A warns, B warns, then A warns AGAIN
+		// inside the window because B replaced A's only entry. With the
+		// bounded keyed registry, A's window survives B's emission, so the
+		// return to A must stay SILENT. Each directory is walked twice
+		// (cold-filesystem first-walk tolerance, as in the cooldown leg
+		// above).
+		const repoA = canonicalMkdtemp('pcb-fallthrough-interleave-a-');
+		const repoB = canonicalMkdtemp('pcb-fallthrough-interleave-b-');
+		const spy = captureWarn();
+		try {
+			buildAbcHistory(repoA);
+			cpSync(repoA, repoB, { recursive: true });
+			spy.install();
+			await getChangedLineRanges(repoA);
+			await getChangedLineRanges(repoA);
+			await getChangedLineRanges(repoB);
+			await getChangedLineRanges(repoB);
+			await getChangedLineRanges(repoA);
+			await getChangedLineRanges(repoA);
+			const allWarns = [...spy.warns];
+			spy.restore();
+
+			const hits = allWarns.filter((line) => line.includes(TOKEN));
+			// Exactly one per directory: the A/B/A return to A must NOT
+			// re-warn, which is what the single-entry record got wrong.
+			expect(hits.length).toBe(2);
+		} finally {
+			spy.restore();
+			try {
+				removeTreeWithRetry(repoA);
+				removeTreeWithRetry(repoB);
+			} catch {
+				// Windows EBUSY-class teardown noise must not fail the leg.
+			}
+		}
+	}, 180_000);
 
 	test('unresolvable-only skip (missing earlier candidate) stays silent', async () => {
 		const repo = canonicalMkdtemp('pcb-staleupstream-3681-');

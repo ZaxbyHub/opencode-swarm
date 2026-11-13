@@ -258,6 +258,60 @@ describe('buildReviewerTaskScope git-environment denials (#3680)', () => {
 		const result = await buildReviewerTaskScope(directory, ['src/actual.ts']);
 		expect(result.ok).toBe(true);
 	}, 60_000);
+
+	test('a permanent git-environment cause found DURING capture keeps its typed terminal code', async () => {
+		// Entry classification succeeds on a healthy repo; the workspace then
+		// becomes permanently unavailable, so the post-capture recheck's
+		// `rev-parse --git-dir` (the SECOND such probe — the capture legs use
+		// status/diff, never --git-dir) reports `not a git repository`. The
+		// pre-#3680 shape collapsed every recheck denial into retryable
+		// `head_changed`, letting a permanently broken workspace ride the
+		// retry arm and surface as REVIEWER_CAPTURE_RETRY_EXHAUSTED
+		// (plan-critic shipped-scope finding 4; #3680 AC9/AC12).
+		makeHealthyRepo();
+		fs.mkdirSync(path.join(directory, 'src'), { recursive: true });
+		fs.writeFileSync(
+			path.join(directory, 'src', 'a.ts'),
+			'export const a = 1;\n',
+		);
+		let gitDirProbes = 0;
+		receiptScopeInternals.spawn = ((
+			command: string,
+			args: string[],
+			options: Parameters<typeof originalSpawn>[2],
+		) => {
+			if (args.includes('--git-dir')) {
+				gitDirProbes += 1;
+				if (gitDirProbes >= 2) {
+					const stdout = new PassThrough();
+					const stderr = new PassThrough();
+					const child = Object.assign(new EventEmitter(), {
+						stdin: null,
+						stdout,
+						stderr,
+						kill: () => true,
+					}) as unknown as ReturnType<typeof originalSpawn>;
+					queueMicrotask(() => {
+						stderr.write('fatal: not a git repository\n');
+						stderr.end();
+						stdout.end();
+						child.emit('close', 128);
+					});
+					return child;
+				}
+			}
+			return originalSpawn(command, args, options);
+		}) as typeof originalSpawn;
+		const result = await buildReviewerTaskScope(directory, [
+			path.join(directory, 'src', 'a.ts'),
+		]);
+		expect(gitDirProbes).toBeGreaterThanOrEqual(2);
+		expect(result).toMatchObject({
+			ok: false,
+			code: 'no_git_workspace',
+			retryable: false,
+		});
+	}, 120_000);
 });
 
 describe('reviewer-scope lifecycle git-environment denials (#3680)', () => {

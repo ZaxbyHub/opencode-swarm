@@ -230,17 +230,39 @@ let diffBaseResolutionMemo: {
  * keyed by directory so distinct repositories never suppress each other.
  */
 const DIFF_BASE_WARN_COOLDOWN_MS = 60_000;
-let lastDiffBaseFailureWarn: { directory: string; atMs: number } | null = null;
+/** Bounded per-directory cooldown registry (AGENTS.md invariant 8): one
+ * entry per directory, capped with FIFO eviction so a long-lived host
+ * process cannot grow without bound. A single `{directory, atMs}` record —
+ * the previous shape, here and in the FB-001 diagnostic — is only
+ * CONSECUTIVE-same-directory suppression: A warns, B warns, then A warns
+ * again inside the window because B replaced A's only entry. Keyed entries
+ * make each directory's window independent (plan-critic shipped-scope
+ * finding 3; AC5's per-directory cooldown). */
+const WARN_COOLDOWN_MAX_DIRECTORIES = 32;
+function cooldownSuppressed(
+	record: Map<string, number>,
+	directory: string,
+	nowMs: number,
+	windowMs: number,
+): boolean {
+	const last = record.get(directory);
+	if (last !== undefined && nowMs - last < windowMs) return true;
+	if (last === undefined && record.size >= WARN_COOLDOWN_MAX_DIRECTORIES) {
+		const oldest = record.keys().next();
+		if (!oldest.done) record.delete(oldest.value);
+	}
+	record.set(directory, nowMs);
+	return false;
+}
+const lastDiffBaseFailureWarn = new Map<string, number>();
 
 /**
  * #3681 item 3(b): per-directory cooldown for the differential
- * fall-through-acceptance signal. Separate single-entry record from the
- * FB-001 failure diagnostic so neither suppresses the other (invariant 8;
- * same bounded shape as lastDiffBaseFailureWarn — one entry, replaced on
- * each emission, so distinct directories never suppress each other).
+ * fall-through-acceptance signal. Separate registry from the FB-001 failure
+ * diagnostic so neither suppresses the other (invariant 8; the same bounded
+ * keyed shape, so interleaved directories each keep their own window).
  */
-let lastDiffBaseFallthroughWarn: { directory: string; atMs: number } | null =
-	null;
+const lastDiffBaseFallthroughWarn = new Map<string, number>();
 
 /**
  * Walk DIFF_BASE_CANDIDATES and return the first candidate whose committed
@@ -507,13 +529,15 @@ function logDiffBaseResolutionFailure(
 ): void {
 	const nowMs = Date.now();
 	if (
-		lastDiffBaseFailureWarn &&
-		lastDiffBaseFailureWarn.directory === directory &&
-		nowMs - lastDiffBaseFailureWarn.atMs < DIFF_BASE_WARN_COOLDOWN_MS
+		cooldownSuppressed(
+			lastDiffBaseFailureWarn,
+			directory,
+			nowMs,
+			DIFF_BASE_WARN_COOLDOWN_MS,
+		)
 	) {
 		return;
 	}
-	lastDiffBaseFailureWarn = { directory, atMs: nowMs };
 	const detail =
 		failureCause === 'git-executable'
 			? 'the git executable could not be resolved, so no candidate was tried'
@@ -1590,8 +1614,14 @@ function parseDiffLineRangesChecked(
 				continue;
 			}
 			// `\ No newline at end of file` is hunk metadata and consumes
-			// neither side's count.
-			if (line.startsWith('\\')) continue;
+			// neither side's count. Any OTHER backslash-prefixed line while
+			// armed is an unknown prefix — fail closed rather than treating
+			// arbitrary `\...` content as inert metadata (plan-critic
+			// shipped-scope finding 2).
+			if (line.startsWith('\\')) {
+				if (line === '\\ No newline at end of file') continue;
+				return null;
+			}
 			// Context line (single leading space) consumes both sides.
 			if (line.startsWith(' ')) {
 				if (oldRemaining === 0 || newRemaining === 0) return null;
@@ -1610,6 +1640,20 @@ function parseDiffLineRangesChecked(
 			expectingDestination = false;
 			destinationSeen = false;
 			continue;
+		}
+		// Header mode with both counters exhausted: a body-shaped line here
+		// means the previous hunk OVER-delivered its counts (a well-formed
+		// diff reaches `@@` / `diff --git` / the next `--- `/`+++ ` pair or
+		// EOF). Silently ignoring it would accept a malformed diff and keep
+		// the discount, so fail closed (plan-critic shipped-scope finding 1;
+		// AC1's count-mismatch clause). The `--- `/`+++ ` file headers are
+		// the legitimate `-`/`+`-prefixed shapes in this mode.
+		if (
+			(line.startsWith('+') || line.startsWith('-') || line.startsWith(' ')) &&
+			!line.startsWith('--- ') &&
+			!line.startsWith('+++ ')
+		) {
+			return null;
 		}
 		if (line.startsWith('--- ') && (inGitFile || !requireGitFileHeaders)) {
 			if (expectingDestination || destinationNeedsHunk) return null;
@@ -1923,13 +1967,13 @@ export async function getChangedLineRanges(
 	if (!resolution.mergeBaseEqualsHead && resolution.hadUnusableAttempt) {
 		const nowMs = Date.now();
 		if (
-			!(
-				lastDiffBaseFallthroughWarn &&
-				lastDiffBaseFallthroughWarn.directory === directory &&
-				nowMs - lastDiffBaseFallthroughWarn.atMs < DIFF_BASE_WARN_COOLDOWN_MS
+			!cooldownSuppressed(
+				lastDiffBaseFallthroughWarn,
+				directory,
+				nowMs,
+				DIFF_BASE_WARN_COOLDOWN_MS,
 			)
 		) {
-			lastDiffBaseFallthroughWarn = { directory, atMs: nowMs };
 			criticalWarn(
 				`changed-line base resolution: diff-base fall-through accepted — an earlier candidate produced an unusable committed diff (stdout overflow or parse failure); accepted ${resolution.acceptedCandidateRef} at ${resolution.mergeBase.slice(0, 10)}; committed changes between the skipped candidate and the accepted base classify PRE-EXISTING (advisory)`,
 			);

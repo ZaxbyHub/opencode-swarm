@@ -516,8 +516,15 @@ export async function classifyWorkspaceGitHealth(
 	const head = await resolveHeadSha(directory, deadlineAt);
 	if (head.ok) return { kind: 'head', sha: head.sha };
 	switch (head.cause) {
-		case 'timeout':
 		case 'spawn-error':
+			// The availability child spawned fine, so a later child's spawn
+			// failure is a permanent missing/unwritable executable — the
+			// transient resource-exhaustion errnos were already converted to
+			// `timeout` inside runBoundedGit, so a residual spawn-error must
+			// not ride the retryable arm (plan-critic shipped-scope finding
+			// 5; #3680 AC12).
+			return { kind: 'denial', code: 'git_unavailable', retryable: false };
+		case 'timeout':
 		case 'overflow':
 		case 'malformed-shape':
 			return { kind: 'denial', code: 'head_timeout', retryable: true };
@@ -704,7 +711,17 @@ export async function buildReviewerTaskScope(
 		realRoot,
 		options.deadlineAt,
 	);
-	if (finalHead.kind !== 'head' || finalHead.sha !== headSha) {
+	if (finalHead.kind === 'denial') {
+		// A git-environment cause discovered DURING capture must keep its
+		// own typed code and retryability. Collapsing every denial into
+		// retryable `head_changed` — the pre-#3680 shape — lets a workspace
+		// that became permanently unavailable or corrupt mid-capture ride
+		// the retry arm and surface as REVIEWER_CAPTURE_RETRY_EXHAUSTED
+		// instead of the actionable terminal denial (plan-critic
+		// shipped-scope finding 4; #3680 AC9/AC12).
+		return { ok: false, code: finalHead.code, retryable: finalHead.retryable };
+	}
+	if (finalHead.sha !== headSha) {
 		return { ok: false, code: 'head_changed', retryable: true };
 	}
 

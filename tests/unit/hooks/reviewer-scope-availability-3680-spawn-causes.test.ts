@@ -214,6 +214,46 @@ describe('spawn-failure cause typing (#3680 — final-critic round-2 blockers 1-
 		}
 	}, 60_000);
 
+	test('a spawn failure AFTER a successful availability probe stays terminal git_unavailable', async () => {
+		// The availability child spawns fine (exit 0, '.git'), so a later
+		// child's spawn failure is a permanent missing/unwritable executable,
+		// not a transient one: the resource-exhaustion errnos were already
+		// converted to `timeout` inside runBoundedGit. Grouping this residual
+		// spawn-error with timeout made a vanished git binary retryable
+		// (plan-critic shipped-scope finding 5; #3680 AC12).
+		receiptScopeInternals.spawn = ((_command: string, args: string[]) => {
+			const stdout = new PassThrough();
+			const stderr = new PassThrough();
+			const child = Object.assign(new EventEmitter(), {
+				stdin: null,
+				stdout,
+				stderr,
+				kill: () => true,
+			}) as unknown as ReturnType<typeof originalSpawn>;
+			queueMicrotask(() => {
+				if (args.includes('--git-dir')) {
+					stdout.write('.git\n');
+					stdout.end();
+					stderr.end();
+					child.emit('close', 0);
+					return;
+				}
+				// The HEAD^{commit} verify child cannot be spawned at all.
+				child.emit(
+					'error',
+					Object.assign(new Error('spawn git ENOENT'), { code: 'ENOENT' }),
+				);
+			});
+			return child;
+		}) as typeof originalSpawn;
+		const health = await classifyWorkspaceGitHealth(directory);
+		expect(health).toEqual({
+			kind: 'denial',
+			code: 'git_unavailable',
+			retryable: false,
+		});
+	}, 60_000);
+
 	test('a single over-512-byte dubious-ownership stderr keeps the cause', async () => {
 		// git writes the message in ONE write and it exceeds the 512-byte
 		// excerpt cap for realistic Windows paths; the cap must keep the
