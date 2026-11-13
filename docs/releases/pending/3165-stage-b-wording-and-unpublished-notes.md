@@ -45,11 +45,12 @@ Every consumer that reads a reply through it treats a cut-off reply as a failed
 dispatch: the full-auto oversight critic and intercept, the curator and
 skill-improver delegates, the ephemeral agent dispatcher, the mutation-test
 generator and the Lean integration critic. A reply truncated right after
-`VERDICT: APPROVED` therefore no longer reads as an approval. A
-`content-filter` finish is handled the same way.
+`VERDICT: APPROVED` therefore no longer reads as an approval. Since v7.192.4,
+a `content-filter` finish is handled the same way.
 
-Only the Lean lane runner exempts a cut-off or content-filtered reply, so a
-lane keeps the behavior it had before it started reading `info.error`.
+Only the Lean lane runner exempts a cut-off reply (and, since v7.192.4, a
+content-filtered one), so a lane keeps the behavior it had before it started
+reading `info.error`.
 
 The v7.192.4 notes already describe the `finish` half; this section is the
 original #3172 change those notes build on.
