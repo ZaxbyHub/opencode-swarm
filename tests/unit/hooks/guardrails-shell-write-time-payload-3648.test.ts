@@ -217,4 +217,37 @@ describe('#3648 D7 detector/resolver proofs: the first-leaf emission survives th
 		},
 		T,
 	);
+	test(
+		'4.6 r2: unknown options and unownable tails fail closed, clean in-scope tails still admit',
+		async () => {
+			// Unknown-option + glued + sentinel + interposed-wrapper shapes from
+			// the final-critic round-2 probes (default config).
+			const denied = [
+				'command time --output=src/t rm -rf /',
+				'command time -- rm -rf ../y',
+				'command time -q rm -rf ../y',
+				'command time -osrc/t rm -rf ../y',
+				'nice time -q rm -rf ../y',
+				'time --output=f sh -c "rm -rf ../y"',
+				'time --format=%e rm -rf /',
+				'time -of sh -c "rm -rf ../y"',
+				'/usr/bin/time -o src/t env rm -rf ../y',
+				'/usr/bin/time -o src/t timeout 5 rm -rf ../y',
+				'/usr/bin/time -o src/t bash -lc "rm -rf ../y"',
+				'/usr/bin/time -o src/t sh -c "true; rm -rf ../y"',
+				'/usr/bin/time -o src/t sh -c "cd .. && rm -rf y"',
+				'time -o f nice rm -rf ../y',
+			];
+			for (const c of denied) {
+				const r = await gate(c);
+				expect(r.verdict).toBe('BLOCKED');
+			}
+			// Clean in-scope admissions survive.
+			const a = await gate('cd src && /usr/bin/time -o r.txt rm -rf build');
+			expect(a.verdict).toBe('ADMITTED');
+			const b = await gate('time -o x true');
+			expect(b.verdict).toBe('ADMITTED');
+		},
+		T,
+	);
 });

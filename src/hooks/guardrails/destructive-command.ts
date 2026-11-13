@@ -3195,26 +3195,34 @@ export function dcExtractRecursiveRmTargets(segment: string): string[] | null {
 		}
 		return null;
 	}
-	// 4.6 final critic: a GNU-time wrapper hides the timed command from the
-	// DESTRUCTIVE arm too — under the DEFAULT config (block_destructive
-	// on), recursive-rm targets are judged here, and `time -o src/t sh -c
-	// "rm -rf ../y"` (also behind command/nice, also `rm -rf /`) admitted
-	// because the write-side fix never feeds this extractor. Deny-direction
-	// scan: peel leading launcher words and a time spelling, then look for
-	// a recursive-rm sequence anywhere in the remaining tokens (multi-word
-	// sh -c payloads included) — any hit withdraws via the unconditional
-	// refusal marker.
+	// 4.6 final critic (rounds 1-2): a GNU-time wrapper hides the timed
+	// command from the DESTRUCTIVE arm — under the DEFAULT config
+	// (block_destructive on), recursive-rm targets are judged here, and
+	// `time -o src/t sh -c "rm -rf ../y"` (also behind command/nice, also
+	// `rm -rf /`) admitted because the write-side fix never fed this
+	// extractor. Two-layer remedy: (1) peel launcher words + the time word
+	// + its FULL GNU option grammar (value-taking -o F/-f F/--output
+	// F/--format F and glued --output=F/-oF forms, argless -a -p -v -q
+	// --quiet --append --portability --verbose, `--` ends options) and
+	// re-run the extractor on the tail so an in-scope tail keeps its
+	// scoped ADMIT (the 3572 N-02 pin); (2) FAIL CLOSED: when anything
+	// about the tail is not statically resolvable — an UNKNOWN option, or
+	// a tail the single-segment rm extractor cannot own (env/timeout/nice
+	// after time, multi-statement or cd-bearing sh -c payloads, clustered
+	// shell flags) yet still CONTAINS a recursive-rm spelling — withdraw
+	// via the unconditional refusal marker.
 	{
 		const isTimeWord = (w: string): boolean => {
-			const bare = w.replace(/^(["']|\\)+/, '').replace(/["']$/, '');
+			const bare = w.replace(/^["'\\]+/, '').replace(/["']$/, '');
 			return bare === 'time' || /(^|\/)time$/.test(bare);
 		};
 		let wi = 0;
 		let sawTime = false;
+		let unknownOption = false;
 		for (let hop = 0; hop < 8 && wi < verbTokens.length; hop++) {
 			const w = verbTokens[wi];
 			if (w === undefined) break;
-			const bare = w.replace(/^(["']|\\)+/, '').replace(/["']$/, '');
+			const bare = w.replace(/^["'\\]+/, '').replace(/["']$/, '');
 			if (bare === 'command' || bare === 'nohup') {
 				wi += 1;
 				continue;
@@ -3231,48 +3239,90 @@ export function dcExtractRecursiveRmTargets(segment: string): string[] | null {
 			if (isTimeWord(w)) {
 				sawTime = true;
 				wi += 1;
-				// GNU time options off the top: value-taking -o F / -f F
-				// (and --output/--format), argless -a -p -v; unknown dash
-				// words are conservative — stop option consumption and
-				// judge the REST. The value-taking singles MUST be tested
-				// before the argless class or `/^[apv]+$/`-style matching
-				// shadows `-o` (leaving its FILE word as the tail head).
+				// GNU time option grammar (r2 critic: value-taking singles
+				// MUST be tested before the argless class or an argless regex
+				// shadows `-o` and leaves its FILE word as the tail head).
 				while (wi < verbTokens.length) {
 					const t = verbTokens[wi];
-					if (t === undefined || !t.startsWith('-') || t === '-') break;
+					if (t === undefined || t === '-') break;
+					if (t === '--') {
+						wi += 1; // end of options; the tail follows
+						break;
+					}
+					if (!t.startsWith('-')) break;
 					const body = t.replace(/^--?/, '');
 					if (body === '') break;
+					const isLong = t.startsWith('--');
 					if (
 						body === 'o' ||
 						body === 'f' ||
 						body === 'output' ||
 						body === 'format'
 					) {
-						wi += 2; // flag + its FILE value
+						wi += isLong && body.includes('=') ? 1 : 2; // glued vs detached
 						continue;
 					}
-					if (/^[apv]+$/.test(body)) {
+					if (
+						/^o./.test(body) ||
+						/^f./.test(body) ||
+						body.startsWith('output=') ||
+						body.startsWith('format=')
+					) {
+						wi += 1; // glued -oF / -fF / --output=F / --format=F
+						continue;
+					}
+					if (
+						/^[apqv]+$/.test(body) ||
+						body === 'quiet' ||
+						body === 'append' ||
+						body === 'portability' ||
+						body === 'verbose' ||
+						body === 'help' ||
+						body === 'version'
+					) {
 						wi += 1;
 						continue;
 					}
-					break; // unknown/attached-value option: judge from here
+					// r2 critic: an UNKNOWN option fails closed — the tail's
+					// option boundary is unknowable, so any recursive-rm
+					// spelling in the remaining words withdraws.
+					unknownOption = true;
+					break;
 				}
 				break;
 			}
 			break;
 		}
 		if (sawTime) {
-			// Peel-and-recurse, not a blanket refusal: the timed tail runs
-			// in the current shell, so its targets deserve the SAME scoped
-			// evaluation as an unmasked tail (the 3572 N-02-correction pin
-			// requires `cd src && /usr/bin/time -o r.txt rm -rf build` to
-			// ADMIT — build is in scope). Strip a leading sh -c payload
-			// wrapper (the quoted payload token becomes the segment text),
-			// then re-run this extractor on the tail; the caller evaluates
-			// the extracted targets with the OUTER segment's cwd context.
+			// Deny-direction residue scan (covers unknownOption and tails the
+			// single-segment extractor cannot own): a recursive-rm spelling
+			// anywhere in the remaining text withdraws.
+			const residueHasRecursiveRm = (toks: string[]): boolean => {
+				const joined = toks
+					.map((t) =>
+						typeof t === 'string' ? t.replace(/^["']|["']$/g, '') : '',
+					)
+					.join(' ');
+				const words = joined.split(/\s+/);
+				for (let k = 0; k < words.length; k++) {
+					if (
+						dcNormalizeVerbWord(words[k] ?? '').replace(
+							/\.[Ee][Xx][Ee]$/,
+							'',
+						) !== 'rm'
+					) {
+						continue;
+					}
+					const flags = words.slice(k + 1).join(' ');
+					if (/(^|\s)-[a-z]*[rf]/.test(flags) || /--recursive/.test(flags)) {
+						return true;
+					}
+				}
+				return false;
+			};
 			let rest = verbTokens.slice(wi);
 			const headBare = (rest[0] ?? '')
-				.replace(/^(["']|\\)+/, '')
+				.replace(/^["'\\]+/, '')
 				.replace(/["']$/, '');
 			if (
 				(headBare === 'sh' ||
@@ -3288,18 +3338,28 @@ export function dcExtractRecursiveRmTargets(segment: string): string[] | null {
 				}
 			}
 			if (rest.length === 0) return null;
-			// Recursion bound: the peeled tail cannot itself be a time
-			// wrapper (sawTime consumed the only one) — but guard anyway
-			// against pathological repeats by refusing re-entry markers.
+			if (unknownOption && residueHasRecursiveRm(rest)) {
+				return ['__swarm_brace_refusal__/time-masked rm'];
+			}
+			// Peel-and-recurse for the clean shapes: the timed tail runs in
+			// the current shell, so its targets get the SAME scoped evaluation
+			// as an unmasked tail (the 3572 N-02 pin requires `cd src &&
+			// /usr/bin/time -o r.txt rm -rf build` to ADMIT). The caller
+			// evaluates the extracted targets with the OUTER segment's cwd
+			// context. If the extractor cannot own the tail (env/timeout/nice
+			// interposed, multi-statement payloads) yet the residue carries a
+			// recursive rm, withdraw instead of returning null.
 			const tailText = rest
 				.map((tok) =>
 					typeof tok === 'string' ? tok.replace(/^["']|["']$/g, '') : '',
 				)
 				.join(' ');
-			if (tailText.includes('__swarm_brace_refusal__/time-masked')) {
-				return null;
+			const inner = dcExtractRecursiveRmTargets(tailText);
+			if (inner !== null) return inner;
+			if (residueHasRecursiveRm(rest)) {
+				return ['__swarm_brace_refusal__/time-masked rm'];
 			}
-			return dcExtractRecursiveRmTargets(tailText);
+			return null;
 		}
 	}
 	if (verbTokens.length < 2 || normalizedRmVerb !== 'rm') {

@@ -41,11 +41,15 @@ redaction in authority denials gains its first test pin:
   glued `((sudo …`, brace groups) no longer escapes the login-shell
   withdrawal; `>(cat)`/`2>(wc)` redirect openers are untouched.
 - **GNU `time` payloads** are analyzed: `time -o src/t.txt sh -c "echo x >
-  ../y.txt"` denies (bare keyword and GNU spellings, glued `-oFILE` included)
-  while the pinned admissions hold (`time -o ../secret` alone, `time -o x
-  true`, bare glued-brace forms, `time make build`, and both N-02 forms
-  `cd src && /usr/bin/time -o ok.txt true` / `cd src && 'time' -o ok.txt
-  true`). DISCLOSED known-edge: bare-keyword `time -o ../esc <cmd>` stays
+  ../y.txt"` denies (bare keyword and GNU spellings) for WRITE payloads, and
+  time-masked RECURSIVE DELETES deny under the default config too
+  (`time -o f sh -c "rm -rf ../y"`, glued `-oF`, `--output=`, unknown
+  options, and interposed env/timeout/nice/`bash -lc` wrappers withdraw
+  fail-closed) while the pinned admissions hold (`time -o ../secret` alone,
+  `time -o x true`, bare glued-brace forms, `time make build`, the in-scope
+  timed delete `cd src && /usr/bin/time -o r.txt rm -rf build`, and both
+  N-02 forms `cd src && /usr/bin/time -o ok.txt true` / `cd src && 'time'
+  -o ok.txt true`). DISCLOSED known-edge: bare-keyword `time -o ../esc <cmd>` stays
   admitted — emitting the `-o` target for the bare spelling would break the
   two pinned admissions above; under bash the keyword reading never opens the
   file, under dash it may.
