@@ -90,3 +90,10 @@ describe('publication gate order wiring pin (#3601 AC1)', () => {
 		expect(gate).toContain('BASH_SOURCE');
 	}, 30_000);
 });
+
+describe('writing-tests battery-wrapper guidance pin (#3605 4.2 census P3)', () => {
+	test('the isolation-diagnosis pairing step routes through the wrapper, not a raw batch', () => {
+		const skill = read('.opencode/skills/writing-tests/SKILL.md');
+		expect(skill).toContain('bun scripts/ci/run-test-battery.ts <fileA>.test.ts <fileB>.test.ts');
+	}, 30_000);
+});
