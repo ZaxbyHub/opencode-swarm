@@ -77,19 +77,43 @@ function resolveCandidate(root: string, arg: string): string {
 }
 
 /**
- * Canonical dirty-state binding (#3605 AC7): sha1 over `git status
- * --porcelain` output with CRLF normalized; a clean tree records "" (the
- * producer form); the checker accepts both forms and compares accordingly.
+ * Canonical dirty-state binding (#3605 AC7), CONTENT-COVERING: porcelain
+ * status lists paths and status codes only, so an edit to an already-modified
+ * file would not move the digest — the exact vacuous-proof class this PR
+ * closes. The digest instead covers bytes: `git diff HEAD --binary` (tracked
+ * content changes) plus, for each untracked non-ignored file (sorted, C
+ * locale), the path and its `git hash-object` blob id. A clean tree (no diff,
+ * no untracked files) records "" (the producer form); the checker recomputes
+ * identically and compares. The byte layout is mirrored exactly in
+ * scripts/ci/check-battery-tree-receipt.sh — change both together.
  */
 function computeDirtyDigest(root: string): string {
 	try {
-		const out = execFileSync('git', ['-C', root, 'status', '--porcelain'], {
-			encoding: 'utf8',
-			timeout: 15_000,
+		const diff = execFileSync('git', ['-C', root, 'diff', 'HEAD', '--binary'], {
+			timeout: 30_000,
 			stdio: ['ignore', 'pipe', 'ignore'],
+			maxBuffer: 64 * 1024 * 1024,
 		});
-		if (out.trim().length === 0) return '';
-		return createHash('sha1').update(out.replace(/\r\n/g, '\n')).digest('hex');
+		const untracked = execFileSync(
+			'git',
+			['-C', root, 'ls-files', '--others', '--exclude-standard', '-z'],
+			{ timeout: 15_000, stdio: ['ignore', 'pipe', 'ignore'] },
+		);
+		const paths = untracked.length === 0 ? [] : untracked.toString('utf8').split('\0').filter(Boolean).sort();
+		if (diff.length === 0 && paths.length === 0) return '';
+		const hash = createHash('sha1');
+		hash.update(diff);
+		hash.update('\0');
+		for (const rel of paths) {
+			const blob = execFileSync('git', ['-C', root, 'hash-object', '--', rel], {
+				timeout: 15_000,
+				stdio: ['ignore', 'pipe', 'ignore'],
+			})
+				.toString('utf8')
+				.trim();
+			hash.update(`${rel}\n${blob}\n`);
+		}
+		return hash.digest('hex');
 	} catch {
 		// Git unavailable or failing: bind to a marker rather than guessing.
 		return 'git-unavailable';
@@ -153,6 +177,16 @@ async function main(): Promise<void> {
 	if (positional.length === 0) {
 		console.error('BATTERY-REFUSED: no test files discovered (pass test file paths as arguments)');
 		process.exit(1);
+	}
+
+	// A stale receipt from an earlier passing run must not survive a later
+	// failed/refused run on the same tree: remove the default receipt up front
+	// (success-only writes re-create it).
+	const defaultReceipt = path.join(process.cwd(), '.swarm', 'evidence', 'battery', 'battery-tree-receipt.json');
+	try {
+		fs.rmSync(defaultReceipt, { force: true });
+	} catch {
+		/* best effort — a failure here surfaces as the checker's own mismatch */
 	}
 
 	const root = process.cwd();

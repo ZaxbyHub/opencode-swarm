@@ -34,7 +34,8 @@ const ENTRY_SKILL_BASELINES: Record<string, number> = {
 	// 2026-11-11 zmem #455/#366 double-implementation; binding-policy growth,
 	// same one-way-ratchet precedent as the 12ca05ef9 swarm-pr-review bump.
 	// v3.0.3 adds the Phase 4.2 generate-recurrence-table.sh bullet (#3605 AC2);
-	// the cluster-preflight clause and gate-table cell are in-place edits.
+	// the Phase 0 cluster-preflight clause and the gate-table cell are in-place
+	// edits to existing lines (no line growth).
 	'.opencode/skills/issue-tracer/SKILL.md': 202,
 	'.claude/skills/graphify/SKILL.md': 420,
 	'.claude/skills/commit-pr/SKILL.md': 478,

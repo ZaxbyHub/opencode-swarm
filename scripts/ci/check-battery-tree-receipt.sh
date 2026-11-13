@@ -78,16 +78,43 @@ done <<EOF
 $r_files
 EOF
 
-status_out="$(git -C "$root" status --porcelain 2>/dev/null | tr -d '\r' || true)"
-if [ -z "$status_out" ]; then
-  current_dirty=""
-else
-  current_dirty="$(printf '%s\n' "$status_out" | sha1sum 2>/dev/null | cut -d' ' -f1 || sha1 -q 2>/dev/null || echo git-unavailable)"
+# CONTENT-COVERING dirty binding (mirrors computeDirtyDigest in
+# run-test-battery.ts byte for byte — change both together): `git diff HEAD
+# --binary` for tracked content, then each untracked non-ignored file's path
+# and blob id (sorted, C locale). Porcelain alone is content-blind: editing an
+# already-modified file would not move it. A clean tree is "".
+current_dirty=""
+clean=true
+if [ -n "$(git -C "$root" diff HEAD --binary 2>/dev/null)" ]; then clean=false; fi
+if [ -n "$(git -C "$root" ls-files --others --exclude-standard 2>/dev/null)" ]; then clean=false; fi
+if [ "$clean" = false ]; then
+  hash_tool=""
+  if command -v sha1sum >/dev/null 2>&1; then
+    hash_tool=sha1sum
+  elif command -v shasum >/dev/null 2>&1; then
+    hash_tool="shasum -a 1" # shellcheck disable=SC2086
+  fi
+  if [ -z "$hash_tool" ]; then
+    current_dirty="git-unavailable"
+  else
+    current_dirty="$(
+      {
+        git -C "$root" diff HEAD --binary 2>/dev/null
+        printf '\0'
+        git -C "$root" ls-files --others --exclude-standard -z 2>/dev/null \
+          | LC_ALL=C sort -z \
+          | while IFS= read -r -d '' rel; do
+              blob="$(git -C "$root" hash-object -- "$rel" 2>/dev/null)"
+              printf '%s\n%s\n' "$rel" "$blob"
+            done
+      } | $hash_tool | cut -d' ' -f1
+    )"
+  fi
 fi
 
 if [ -z "$r_dirty" ]; then
   # Producer form for a clean tree: only a clean tree matches.
-  if [ -n "$status_out" ]; then
+  if [ "$clean" = false ]; then
     echo "TREE-RECEIPT: mismatch (receipt recorded a clean tree, but the current tree is dirty)" >&2
     exit 1
   fi

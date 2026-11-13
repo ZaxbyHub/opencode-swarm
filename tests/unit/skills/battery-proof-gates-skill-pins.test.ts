@@ -39,6 +39,17 @@ describe('issue-tracer cluster-preflight + generator skill pins (#3605 AC2/AC3)'
 		expect(script).toContain('missing claim or open-PR evidence');
 	}, 30_000);
 
+	test('the Phase 0 claim-gate bullet names the preflight artifact BEFORE setup', () => {
+		const skill = read('.opencode/skills/issue-tracer/SKILL.md');
+		const bullet =
+			skill.split('\n').find((l) => l.includes('Run the claim gate')) ?? '';
+		expect(bullet).toContain('repro/cluster-preflight.md');
+		expect(bullet).toContain('BEFORE any setup artifact');
+		expect(bullet.indexOf('cluster-preflight.md')).toBeLessThan(
+			bullet.indexOf('trace-init.sh'),
+		);
+	}, 30_000);
+
 	test('issue-tracer version is 3.0.3 in the canonical and both shims (lockstep)', () => {
 		for (const relative of [
 			'.opencode/skills/issue-tracer/SKILL.md',
@@ -94,6 +105,8 @@ describe('publication gate order wiring pin (#3601 AC1)', () => {
 describe('writing-tests battery-wrapper guidance pin (#3605 4.2 census P3)', () => {
 	test('the isolation-diagnosis pairing step routes through the wrapper, not a raw batch', () => {
 		const skill = read('.opencode/skills/writing-tests/SKILL.md');
-		expect(skill).toContain('bun scripts/ci/run-test-battery.ts <fileA>.test.ts <fileB>.test.ts');
+		expect(skill).toContain(
+			'bun scripts/ci/run-test-battery.ts <fileA>.test.ts <fileB>.test.ts',
+		);
 	}, 30_000);
 });

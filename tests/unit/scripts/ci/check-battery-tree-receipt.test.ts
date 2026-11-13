@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { writeFileSync } from 'node:fs';
+import { copyFileSync, writeFileSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { bashCommand } from '../../../helpers/bash.js';
@@ -9,7 +9,9 @@ import { canonicalMkdtemp } from '../../../helpers/tmpdir.js';
 // #3605 AC7: scripts/ci/check-battery-tree-receipt.sh binds a gate-sensitive
 // battery to the tree it ran on. head must match the tree being validated;
 // "" (recorded from a clean tree) matches ONLY a clean tree, and a 40-hex
-// digest matches only that exact dirty state; recorded files must exist.
+// digest matches only that exact CONTENT-COVERING dirty state (git diff HEAD
+// --binary + sorted untracked blob ids — porcelain alone is content-blind);
+// recorded files must exist.
 
 const ROOT = path.join(import.meta.dir, '..', '..', '..', '..');
 const SCRIPT = path.join(
@@ -98,6 +100,28 @@ function runCheck(
 	};
 }
 
+/** Content-covering canonical digest, mirroring the producer/checker byte layout. */
+async function canonicalDigest(root: string): Promise<string> {
+	const { createHash } = await import('node:crypto');
+	const run = (...args: string[]) =>
+		spawnSync('git', ['-C', root, ...args], { maxBuffer: 64 * 1024 * 1024 })
+			.stdout;
+	const diff = run('diff', 'HEAD', '--binary');
+	const untracked = run('ls-files', '--others', '--exclude-standard', '-z');
+	const nul = String.fromCharCode(0);
+	const paths = untracked.length
+		? untracked.toString('utf8').split(nul).filter(Boolean).sort()
+		: [];
+	const hash = createHash('sha1');
+	hash.update(diff);
+	hash.update(nul);
+	for (const rel of paths) {
+		const blob = run('hash-object', '--', rel).toString().trim();
+		hash.update(`${rel}\n${blob}\n`);
+	}
+	return hash.digest('hex');
+}
+
 describe('check-battery-tree-receipt (#3605 AC7)', () => {
 	test('HEAD-bound clean receipt passes', async () => {
 		await fs.writeFile(path.join(directory, 'README.md'), 'seed\n', 'utf-8');
@@ -175,7 +199,6 @@ describe('check-battery-tree-receipt (#3605 AC7)', () => {
 			'-m',
 			'readme',
 		);
-		// Receipt recorded when clean; tree is now dirty.
 		const receipt = await writeReceipt({
 			head: head(),
 			dirty: '',
@@ -203,16 +226,7 @@ describe('check-battery-tree-receipt (#3605 AC7)', () => {
 			'readme',
 		);
 		await fs.writeFile(path.join(directory, 'dirty.txt'), 'x\n', 'utf-8');
-		const digest = spawnSync(
-			'git',
-			['-C', directory, 'status', '--porcelain'],
-			{ encoding: 'utf-8' },
-		).stdout.replace(/\r\n/g, '\n');
-		const { createHash } = await import('node:crypto');
-		// Hash with the trailing newline the checker's printf re-adds (command
-		// substitution strips it; printf restores exactly one).
-		const normalized = digest.endsWith('\n') ? digest : `${digest}\n`;
-		const dirty = createHash('sha1').update(normalized).digest('hex');
+		const dirty = await canonicalDigest(directory);
 		const good = await writeReceipt({
 			head: head(),
 			dirty,
@@ -235,7 +249,7 @@ describe('check-battery-tree-receipt (#3605 AC7)', () => {
 		// The wrapper binds to its repo root (process.cwd(), like the sibling
 		// runner), so the producer runs from ROOT against an IN-REPO test file
 		// (an out-of-repo file records an absolute path the checker correctly
-		// refuses as unknown against ROOT); the receipt binds to the MAIN repo
+		// refuses as unknown against ROOT); the receipt binds the MAIN repo
 		// tree and is checked against ROOT.
 		const inRepoFixture =
 			'tests/unit/pr-review/observability-generation-ceiling-3593-r4.test.ts';
@@ -251,22 +265,19 @@ describe('check-battery-tree-receipt (#3605 AC7)', () => {
 			{ cwd: ROOT, encoding: 'utf-8', stdin: 'ignore', timeout: 180_000 },
 		);
 		expect(producer.status).toBe(0);
-		// The producer writes JSON.stringify(receipt, null, 2) — pretty-printed,
-		// with "files": [ ... ] spanning lines. The checker must extract the
-		// element and verify it against the tree the battery ran on.
 		const raw = await fs.readFile(receiptOut, 'utf-8');
 		expect(raw).toContain('"files": [');
 		expect(raw).toContain(inRepoFixture);
 		const okRun = runCheck(receiptOut, ROOT);
 		// The receipt was just generated against THIS tree: head matches HEAD,
 		// the file exists, and the dirty binding matches whatever the live
-		// state is (empty on a clean tree, its digest otherwise) - so the ok
+		// state is (empty on a clean tree, its digest otherwise) — so the ok
 		// arm is unconditional.
 		expect(okRun.status).toBe(0);
 		expect(okRun.output).toContain('TREE-RECEIPT: ok');
-		// The same pretty receipt naming a nonexistent file is refused in EITHER
-		// tree state (the file check precedes the dirty comparison — the seam
-		// single-line fixtures cannot witness).
+		// The same pretty receipt naming a nonexistent file is refused (the
+		// file check precedes the dirty comparison — the seam single-line
+		// fixtures cannot witness).
 		const tampered = JSON.parse(raw) as {
 			head: string;
 			dirty: string;
@@ -277,6 +288,70 @@ describe('check-battery-tree-receipt (#3605 AC7)', () => {
 		const bad = runCheck(receiptOut, ROOT);
 		expect(bad.status).toBe(1);
 		expect(bad.output).toContain('TREE-RECEIPT: unknown-file');
+	}, 240_000);
+
+	test('editing an already-dirty file changes the binding (content-covering digest)', async () => {
+		// Run the REAL producer inside this fixture repo (it needs the CI
+		// keepalive preload and a package.json test script to execute a file),
+		// so the receipt binds THIS tree; then edit an already-dirty tracked
+		// file — the porcelain view is unchanged, but the binding must refuse.
+		await fs.mkdir(path.join(directory, 'scripts', 'ci'), { recursive: true });
+		copyFileSync(
+			path.join(ROOT, 'scripts', 'ci', 'bun-32056-keepalive.ts'),
+			path.join(directory, 'scripts', 'ci', 'bun-32056-keepalive.ts'),
+		);
+		await fs.writeFile(
+			path.join(directory, 'package.json'),
+			'{"scripts":{"test":"bun test"}}\n',
+			'utf-8',
+		);
+		await fs.writeFile(path.join(directory, 'tracked.txt'), 'v1\n', 'utf-8');
+		const fixture = path.join(directory, 'fixture-pass.test.ts');
+		await fs.writeFile(
+			fixture,
+			"import { test, expect } from 'bun:test';\ntest('pass', () => { expect(1).toBe(1); });\n",
+			'utf-8',
+		);
+		git('add', '-A');
+		git(
+			'-c',
+			'user.name=t',
+			'-c',
+			'user.email=t@t.invalid',
+			'-c',
+			'commit.gpgsign=false',
+			'commit',
+			'-q',
+			'-m',
+			'seed',
+		);
+		await fs.writeFile(
+			path.join(directory, 'tracked.txt'),
+			'v2 edited\n',
+			'utf-8',
+		);
+		const receiptOut = path.join(directory, 'receipt.json');
+		const producer = spawnSync(
+			process.execPath,
+			[
+				path.join(ROOT, 'scripts', 'ci', 'run-test-battery.ts'),
+				fixture,
+				'--receipt-out',
+				receiptOut,
+			],
+			{ cwd: directory, encoding: 'utf-8', stdin: 'ignore', timeout: 180_000 },
+		);
+		expect(producer.status).toBe(0);
+		const before = runCheck(receiptOut);
+		expect(before.status).toBe(0);
+		await fs.writeFile(
+			path.join(directory, 'tracked.txt'),
+			'v3 edited again\n',
+			'utf-8',
+		);
+		const after = runCheck(receiptOut);
+		expect(after.status).toBe(1);
+		expect(after.output).toContain('TREE-RECEIPT: mismatch');
 	}, 240_000);
 
 	test('a SINGLE-LINE multi-element files array splits per element', async () => {

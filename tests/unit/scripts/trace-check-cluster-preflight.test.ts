@@ -11,7 +11,14 @@ import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 // (every trace selects a cluster of >= 1 issue); the shape check exists so a
 // recorded-at-only artifact cannot pass vacuously.
 
-const SCRIPT = path.join(process.cwd(), '.opencode', 'skills', 'issue-tracer', 'scripts', 'trace-check.sh');
+const SCRIPT = path.join(
+	process.cwd(),
+	'.opencode',
+	'skills',
+	'issue-tracer',
+	'scripts',
+	'trace-check.sh',
+);
 
 const PREFLIGHT_VALID =
 	'recorded-at: 2026-01-01T00:00:00Z\n\n## candidate #1\n\n- claim comments (live): none\n- open PRs naming 1 in:body: none\n- verdict: CLEAR\n';

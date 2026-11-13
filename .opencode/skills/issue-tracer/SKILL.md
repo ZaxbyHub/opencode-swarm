@@ -81,7 +81,7 @@ Read the referenced file before starting that phase. `state.md` is updated at ev
 ### Phase 0: Setup
 
 - Fetch the default branch, record base SHA and freshness; fail closed on sync failure absent a quoted override.
-- Run the claim gate (see `references/phase-0-setup.md`): fetch each target issue's comments and closing-PR references live; an active foreign claim, or any closing or work-naming open pull request other than your own trace's PR, means stop and ask the user; otherwise run `trace-init.sh`, record a fresh session token in `state.md`, post your own claim, and read it back before any further trace work.
+- Run the claim gate (see `references/phase-0-setup.md`): fetch each target issue's comments and closing-PR references live; an active foreign claim, or any closing or work-naming open pull request other than your own trace's PR, means stop and ask the user; otherwise record the preflight artifact `repro/cluster-preflight.md` (canonical template in `references/phase-0-setup.md`) BEFORE any setup artifact, then run `trace-init.sh`, record a fresh session token in `state.md`, post your own claim, and read it back before any further trace work.
 - If the worktree has unrelated user changes, isolate work in a separate `git worktree` rather than touching them.
 - Run `trace-init.sh <issue-slug>` from the repo root to create the trace directory, seed `state.md`, and record the Phase 0 tree-id.
 - Classify the depth tier (S/M/L) and record it; run the advisory handshake.

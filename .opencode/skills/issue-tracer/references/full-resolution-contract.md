@@ -38,6 +38,18 @@ Applies in every phase. Whenever command-selection logic, fixture expectations, 
 5. The release verification sweep includes a focused test-drift regression check.
 6. Do not accept work where tests pass by coincidence rather than correctness.
 
+## Phase 4.2 disposition-table generation (fail-closed)
+
+Generate the disposition table with
+`.opencode/skills/issue-tracer/scripts/generate-recurrence-table.sh` — never hand-run
+multi-step joins. Inputs (first line of each file MUST be `tree-digest: <sha>`, identical
+in both): `hits.tsv` rows `<predicate>	<count>	<paths>`; `dispositions.tsv` rows
+`<predicate>	<disposition>	<note>`. The generator refuses (exit 1) on a hit without a
+disposition (`GENERATION-REFUSED: unmatched`), divergent digests (`digest`), orphan
+dispositions or rendered/summary count disagreement (`count-drift`), and duplicate
+predicates. Success renders `<outdir>/recurrence-table.md` and prints
+`RECURRENCE-TABLE: ok rows=<N>`; embed the generated table in 08a.
+
 ## No-Gap Closure Checklist
 
 Before declaring the issue ready:
