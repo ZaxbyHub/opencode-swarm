@@ -31,7 +31,9 @@ beforeEach(() => {
 	git('config', 'core.autocrlf', 'false');
 	// The receipt file lives in the worktree under test; keep it from making
 	// every fixture tree 'dirty' by its own untracked presence (the real
-	// producer writes receipts under the gitignored .swarm/evidence/).
+	// producer writes receipts under the gitignored .swarm/evidence/ default
+	// and REFUSES a non-git-ignored explicit --receipt-out inside a repo, so
+	// an in-repo target is only ever written when .gitignore covers it).
 	writeFileSync(path.join(directory, '.gitignore'), 'receipt.json\n', 'utf-8');
 	git(
 		'-c',
@@ -377,5 +379,113 @@ describe('check-battery-tree-receipt (#3605 AC7)', () => {
 		const { status, output } = runCheck(receipt);
 		expect(status).toBe(0);
 		expect(output).toContain('TREE-RECEIPT: ok');
+	}, 60_000);
+
+	test('a "]" inside a quoted filename does not terminate a compact single-line array (Stage-B FB-006)', async () => {
+		await fs.writeFile(path.join(directory, 'README.md'), 'seed\n', 'utf-8');
+		await fs.writeFile(path.join(directory, 'a]b.test.ts'), 'x\n', 'utf-8');
+		git('add', '-A');
+		git(
+			'-c',
+			'user.name=t',
+			'-c',
+			'user.email=t@t.invalid',
+			'-c',
+			'commit.gpgsign=false',
+			'commit',
+			'-q',
+			'-m',
+			'bracket-name',
+		);
+		const receipt = path.join(directory, 'receipt.json');
+		await fs.writeFile(
+			receipt,
+			`{"head":"${head()}","dirty":"","files":["README.md","a]b.test.ts"]}`,
+			'utf-8',
+		);
+		const { status, output } = runCheck(receipt);
+		expect(status).toBe(0);
+		expect(output).toContain('TREE-RECEIPT: ok');
+	}, 60_000);
+
+	test('a receipt without the dirty key is refused (no clean-arm fallthrough)', async () => {
+		await fs.writeFile(path.join(directory, 'README.md'), 'seed\n', 'utf-8');
+		git('add', '-A');
+		git(
+			'-c',
+			'user.name=t',
+			'-c',
+			'user.email=t@t.invalid',
+			'-c',
+			'commit.gpgsign=false',
+			'commit',
+			'-q',
+			'-m',
+			'readme',
+		);
+		const target = path.join(directory, 'receipt.json');
+		await fs.writeFile(
+			target,
+			JSON.stringify({ head: head(), files: ['README.md'] }),
+			'utf-8',
+		);
+		const { status, output } = runCheck(target);
+		expect(status).toBe(1);
+		expect(output).toContain('TREE-RECEIPT: mismatch');
+		expect(output).toContain('dirty');
+	}, 60_000);
+
+	test('a truncated receipt (no closing brace on the last line) is refused', async () => {
+		const target = path.join(directory, 'receipt.json');
+		const full = JSON.stringify({ head: head(), dirty: '', files: [] });
+		await fs.writeFile(target, full.slice(0, -1), 'utf-8'); // drop the closing brace
+		const { status, output } = runCheck(target);
+		expect(status).toBe(1);
+		expect(output).toContain('TREE-RECEIPT: mismatch');
+	}, 60_000);
+
+	test('a receipt recording head "unknown" is refused (sentinel, not a digest)', async () => {
+		const target = path.join(directory, 'receipt.json');
+		await fs.writeFile(
+			target,
+			JSON.stringify({ head: 'unknown', dirty: '', files: [] }),
+			'utf-8',
+		);
+		const { status, output } = runCheck(target);
+		expect(status).toBe(1);
+		expect(output).toContain('TREE-RECEIPT: mismatch');
+	}, 60_000);
+
+	test('a receipt whose files list escapes the validated root is refused', async () => {
+		const target = path.join(directory, 'receipt.json');
+		await fs.writeFile(
+			target,
+			JSON.stringify({
+				head: head(),
+				dirty: '',
+				files: ['../outside.txt'],
+			}),
+			'utf-8',
+		);
+		const { status, output } = runCheck(target);
+		expect(status).toBe(1);
+		expect(output).toContain('TREE-RECEIPT: unknown-file');
+	}, 60_000);
+
+	test('an unresolvable CURRENT head is refused (unknown-head both directions)', async () => {
+		// A git repo with no commits: rev-parse HEAD fails, so the current
+		// tree has no resolvable head and no receipt can bind to it.
+		const uncommitted = path.join(directory, 'uncommitted-repo');
+		await fs.mkdir(uncommitted, { recursive: true });
+		git('init', '-q', uncommitted);
+		const target = path.join(directory, 'receipt.json');
+		await fs.writeFile(
+			target,
+			JSON.stringify({ head: '0'.repeat(40), dirty: '', files: [] }),
+			'utf-8',
+		);
+		const { status, output } = runCheck(target, uncommitted);
+		expect(status).toBe(1);
+		expect(output).toContain('TREE-RECEIPT: mismatch');
 	}, 60_000);
 });

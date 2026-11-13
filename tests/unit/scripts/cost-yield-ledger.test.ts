@@ -111,4 +111,62 @@ describe('cost-yield-ledger (#3605 AC4)', () => {
 		expect(status).toBe(1);
 		expect(output).toContain('LEDGER-REFUSED: unpaired');
 	}, 60_000);
+
+	test('a blank data row, a non-numeric cell, and a wrong-arity row are each refused with their line number (F-06)', async () => {
+		const blank = await writeLedger('blank-row.tsv', [
+			'lane-a\t12\t8\t3\t50000\t120000\t8000\t9000\t2',
+			'',
+			'lane-b\t7\t4\t2\t30000\t90000\t5000\t6000\t1',
+		]);
+		const blankRun = run(blank);
+		expect(blankRun.status).toBe(1);
+		expect(blankRun.output).toContain('data row 2 violates');
+
+		const nonNumeric = await writeLedger('non-numeric.tsv', [
+			'lane-a\tN/A\t8\t3\t50000\t120000\t8000\t9000\t2',
+		]);
+		const numRun = run(nonNumeric);
+		expect(numRun.status).toBe(1);
+		expect(numRun.output).toContain('data row 1 violates');
+
+		const wideRow = await writeLedger('wide-row.tsv', [
+			'lane-a\t12\t8\t3\t50000\t120000\t8000\t9000\t2',
+			'lane-b\t7\t4\t2\t30000\t90000\t5000\t6000\t1\textra',
+		]);
+		const wideRun = run(wideRow);
+		expect(wideRun.status).toBe(1);
+		expect(wideRun.output).toContain('data row 2 violates');
+	}, 60_000);
+
+	test('a nine-field row under a WRONG HEADER is refused as a header violation (F-06)', async () => {
+		// The fixture passes the old per-row guard (9 well-formed fields) — the
+		// refusal must come from the header contract, not a row arity accident.
+		const target = path.join(directory, 'nine-field-bad-header.tsv');
+		await fs.writeFile(
+			target,
+			'id\telapsed_min\ttool_uses\trequests\tinput\tcache_read\tcache_creation\toutput\tfindings\nlane-a\t12\t8\t3\t50000\t120000\t8000\t9000\t2\n',
+			'utf-8',
+		);
+		const { status, output } = run(target);
+		expect(status).toBe(1);
+		expect(output).toContain('unexpected header');
+	}, 60_000);
+
+	test('a header-only input (zero lanes) is refused', async () => {
+		const input = await writeLedger('no-lanes.tsv', []);
+		const { status, output } = run(input);
+		expect(status).toBe(1);
+		expect(output).toContain('no lane rows');
+	}, 60_000);
+
+	test('findings with zero recorded requests render the no-denominator aggregate', async () => {
+		const input = await writeLedger('no-requests.tsv', [
+			'lane-a\t5\t3\t0\t\t\t\t\t4',
+		]);
+		const { status, output } = run(input);
+		expect(status).toBe(0);
+		expect(output).toContain(
+			'per-finding cost: n/a (zero requests recorded, so no cost denominator exists)',
+		);
+	}, 60_000);
 });

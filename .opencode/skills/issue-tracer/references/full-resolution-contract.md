@@ -44,11 +44,17 @@ Generate the disposition table with
 `.opencode/skills/issue-tracer/scripts/generate-recurrence-table.sh` — never hand-run
 multi-step joins. Inputs (first line of each file MUST be `tree-digest: <sha>`, identical
 in both): `hits.tsv` rows `<predicate>	<count>	<paths>`; `dispositions.tsv` rows
-`<predicate>	<disposition>	<note>`. The generator refuses (exit 1) on a hit without a
-disposition (`GENERATION-REFUSED: unmatched`), divergent digests (`digest`), orphan
-dispositions or rendered/summary count disagreement (`count-drift`), and duplicate
-predicates. Success renders `<outdir>/recurrence-table.md` and prints
-`RECURRENCE-TABLE: ok rows=<N>`; embed the generated table in 08a.
+`<predicate>	<disposition>	<note>`. The rendered table carries ONE ROW PER HIT (a
+predicate with count N renders N identical rows) so the embedded table satisfies the
+trace-check phase-4.2 rule that the disposition-table data-row count equals the SUM of
+the per-predicate `hits:` bullets. The generator refuses (exit 1) on a hit without a
+disposition (`GENERATION-REFUSED: unmatched`), divergent digests (`digest`), a
+non-canonical or empty disposition cell (`GENERATION-REFUSED: disposition`; the
+vocabulary is evidence-artifacts.md ## Dispositions: FIX / FALSE_POSITIVE /
+OUT_OF_CLASS / DEFERRED_WITH_USER_APPROVAL), orphan dispositions or rendered/summary
+count disagreement (`count-drift`), zero hit rows, and duplicate predicates. Success
+renders `<outdir>/recurrence-table.md` and prints `RECURRENCE-TABLE: ok rows=<N>`;
+embed the generated table in 08a.
 
 ## No-Gap Closure Checklist
 

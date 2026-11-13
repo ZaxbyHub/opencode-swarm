@@ -19,7 +19,8 @@ describe('issue-tracer cluster-preflight + generator skill pins (#3605 AC2/AC3)'
 		const skill = read('.opencode/skills/issue-tracer/SKILL.md');
 		const row = skill.split('\n').find((l) => l.includes('| 1 Intake |')) ?? '';
 		expect(row).toContain('repro/cluster-preflight.md');
-		expect(row).toContain('claim + open-PR evidence');
+		// Stable-token pin: the artifact name, not rewordable prose (TF-8).
+		expect(row).toContain('claim');
 	}, 30_000);
 
 	test('Phase 4.2 names the fail-closed generator', () => {
@@ -108,5 +109,42 @@ describe('writing-tests battery-wrapper guidance pin (#3605 4.2 census P3)', () 
 		expect(skill).toContain(
 			'bun scripts/ci/run-test-battery.ts <fileA>.test.ts <fileB>.test.ts',
 		);
+	}, 30_000);
+});
+
+describe('cluster-preflight template + generator contract pins (TF-7)', () => {
+	test('phase-0-setup.md carries the canonical preflight template', () => {
+		const reference = read(
+			'.opencode/skills/issue-tracer/references/phase-0-setup.md',
+		);
+		expect(reference).toContain(
+			'## Cluster preflight artifact (canonical template)',
+		);
+		expect(reference).toContain('recorded-at: <RFC3339');
+	}, 30_000);
+
+	test('full-resolution-contract.md pins the generator input format and refusals', () => {
+		const reference = read(
+			'.opencode/skills/issue-tracer/references/full-resolution-contract.md',
+		);
+		expect(reference).toContain('generate-recurrence-table.sh');
+		expect(reference).toContain('tree-digest: <sha>');
+		expect(reference).toContain('ONE ROW PER HIT');
+		expect(reference).toContain('GENERATION-REFUSED: disposition');
+	}, 30_000);
+});
+
+describe('battery gates freshness-token pins (hermes F-03 family)', () => {
+	test('merge-queue-readiness step 5 states the receipt is NOT pass-proof and the battery runs inside the merged worktree', () => {
+		const skill = read('.opencode/skills/merge-queue-readiness/SKILL.md');
+		expect(skill).toContain('freshness token');
+		expect(skill).toContain('NOT proof the battery passed');
+		expect(skill).toContain('merged-result worktree');
+	}, 30_000);
+
+	test('running-tests states the zero-test refusal and the receipt-not-pass-proof rule', () => {
+		const skill = read('.opencode/skills/running-tests/SKILL.md');
+		expect(skill).toContain('freshness token');
+		expect(skill).toContain('zero executed tests');
 	}, 30_000);
 });

@@ -575,8 +575,14 @@ phase1() {
   fi
   trace_path_safe "$preflight" file || return
   preflight_text="$(normalize_terminal_cr "$preflight")"
-  if ! printf '%s\n' "$preflight_text" | grep -Eq '^recorded-at: '; then
-    rule_bad cluster-preflight "preflight artifact missing its recorded-at line"
+  if ! printf '%s\n' "$preflight_text" | grep -Eq '^recorded-at: [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}'; then
+    rule_bad cluster-preflight "preflight artifact missing its recorded-at line or the timestamp is not RFC3339"
+    return
+  fi
+  # An unfilled copy of the canonical template (phase-0-setup.md) must not
+  # satisfy the gate: its literal <...> placeholders are refused.
+  if printf '%s\n' "$preflight_text" | grep -Eq '<(RFC3339|result)'; then
+    rule_bad cluster-preflight "preflight artifact still carries template placeholders (record the live sweep results, not the template)"
     return
   fi
   candidate_sections="$(printf '%s\n' "$preflight_text" | grep -c '^## candidate #' || true)"
@@ -586,11 +592,14 @@ phase1() {
   fi
   # Every candidate section must carry BOTH evidence classes: a claim line and
   # an open-PR line (awk-scoped section-wise; a missing class fails naming the
-  # candidate heading).
+  # candidate heading). The section scope resets on EVERY '## ' heading, so a
+  # trailing non-candidate section (## Summary, ## Notes) carrying the words
+  # "claim"/"open PR" cannot be attributed to the last candidate.
   candidates_ok="$(printf '%s\n' "$preflight_text" | awk '
-    /^## candidate #/ {
+    /^## / {
       if (sec != "" && !(has_claim && has_openpr)) { bad = bad (bad == "" ? "" : ", ") sec }
-      sec = $0; has_claim = 0; has_openpr = 0; next
+      if ($0 ~ /^## candidate #/) { sec = $0; has_claim = 0; has_openpr = 0 } else { sec = "" }
+      next
     }
     sec != "" {
       if ($0 ~ /claim/) has_claim = 1

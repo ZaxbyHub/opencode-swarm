@@ -65,11 +65,24 @@ export function extractSchemaObjectKeys(
 		);
 
 	// Unwrap chained calls (.passthrough(), .strict(), ...) until we reach the
-	// CallExpression whose callee is `<x>.object`.
+	// CallExpression whose callee is `<x>.object`. A chain that carries
+	// .extend/.merge/.and ANYWHERE between the initializer and the object
+	// literal silently ADDS or REWRITES keys the object literal does not list,
+	// so those wrappers fail closed instead of yielding a short key set.
+	const keyRewritingWrappers = new Set(['extend', 'merge', 'and']);
 	let node: ts.Expression = initializer;
 	for (let depth = 0; depth < 16; depth++) {
 		if (ts.isCallExpression(node)) {
 			const callee = node.expression;
+			if (
+				ts.isPropertyAccessExpression(callee) &&
+				ts.isIdentifier(callee.name) &&
+				keyRewritingWrappers.has(callee.name.text)
+			) {
+				throw new UnsupportedShapeError(
+					`unsupported schema declaration shape: .${callee.name.text}() rewrites the key set outside the enumerated object literal`,
+				);
+			}
 			if (
 				ts.isPropertyAccessExpression(callee) &&
 				ts.isIdentifier(callee.name) &&
@@ -212,6 +225,17 @@ describe('PrWorkflowGateState schema/interface shape parity ratchet (#3601 AC9)'
 		expect(() => extractSchemaObjectKeys(synthetic, 'S')).toThrow(
 			/unsupported schema declaration shape/,
 		);
+	}, 30_000);
+
+	test('walker refuses key-rewriting wrappers (.extend/.merge/.and) anywhere in the chain (F-22)', () => {
+		// Each of these silently ADDS or REWRITES keys the enumerated object
+		// literal does not list — a short key set would pass vacuously.
+		for (const wrapper of ['extend', 'merge', 'and']) {
+			const synthetic = `const S = z\n\t.object({ a: z.string() })\n\t.${wrapper}({ b: z.string() });\n`;
+			expect(() => extractSchemaObjectKeys(synthetic, 'S')).toThrow(
+				new RegExp(`\\.${wrapper}\\(\\) rewrites the key set`),
+			);
+		}
 	}, 30_000);
 
 	test('walker refuses a computed interface member and heritage clauses', () => {

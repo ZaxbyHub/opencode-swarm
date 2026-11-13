@@ -7,8 +7,9 @@ import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 // #3605 AC2: generate-recurrence-table.sh renders the Phase 4.2 disposition
 // table from digest-bound TSV inputs and fails closed on unmatched joins,
-// digest disagreement, orphan dispositions (count drift), and rendered/summary
-// count disagreement.
+// digest disagreement, non-canonical dispositions, orphan dispositions (count
+// drift), and rendered/summary count disagreement. The table carries ONE ROW
+// PER HIT so the embedded table satisfies the phase-4.2 rows == hits-sum rule.
 
 const ROOT = path.join(import.meta.dir, '..', '..', '..');
 const SCRIPT = path.join(
@@ -34,7 +35,9 @@ const DIGEST = '0123456789abcdef0123456789abcdef01234567';
 
 async function writeInput(name: string, lines: string[]): Promise<string> {
 	const target = path.join(directory, name);
-	await fs.writeFile(target, lines.join('\n') + '\n', 'utf-8');
+	// join('\n') only: an explicit trailing-newline leg uses '' as its last
+	// element to produce a file whose final line is unterminated.
+	await fs.writeFile(target, lines.join('\n'), 'utf-8');
 	return target;
 }
 
@@ -62,7 +65,7 @@ function run(
 }
 
 describe('generate-recurrence-table (#3605 AC2)', () => {
-	test('matched inputs render a table whose counts agree with the summary', async () => {
+	test('per-hit rows: a count-2 predicate renders twice and the summary counts hits, not predicates', async () => {
 		const hits = await writeInput('hits.tsv', [
 			`tree-digest: ${DIGEST}`,
 			'census-mislabel\t2\tsrc/a.ts src/b.ts',
@@ -70,21 +73,35 @@ describe('generate-recurrence-table (#3605 AC2)', () => {
 		]);
 		const disp = await writeInput('disp.tsv', [
 			`tree-digest: ${DIGEST}`,
-			'census-mislabel\tFIXED\tre-labeled by the sweep',
+			'census-mislabel\tFIX\tre-labeled by the sweep',
 			'census-stale\tFALSE_POSITIVE\tnot on a touched path',
 		]);
 		const outdir = path.join(directory, 'out-ok');
 		const { status, output } = run(hits, disp, outdir);
 		expect(status).toBe(0);
-		expect(output).toContain('RECURRENCE-TABLE: ok rows=2');
+		expect(output).toContain('RECURRENCE-TABLE: ok rows=3');
 		const table = await fs.readFile(
 			path.join(outdir, 'recurrence-table.md'),
 			'utf-8',
 		);
 		expect(table).toContain(
-			'| census-mislabel | 2 | FIXED | re-labeled by the sweep |',
+			'| census-mislabel | 2 | FIX | re-labeled by the sweep |',
 		);
-		expect(table).toContain('rows: 2 fixed: 1');
+		expect(table).toContain(
+			'| census-stale | 1 | FALSE_POSITIVE | not on a touched path |',
+		);
+		// One row per hit: the count-2 predicate appears exactly twice.
+		const mislabelRows = table
+			.split('\n')
+			.filter((line) => line.startsWith('| census-mislabel |')).length;
+		expect(mislabelRows).toBe(2);
+		// Data rows (header and separator excluded) equal the hit sum.
+		const dataRows = table
+			.split('\n')
+			.filter((line) => line.startsWith('| ') && !line.startsWith('|---'))
+			.filter((line) => !line.startsWith('| Predicate')).length;
+		expect(dataRows).toBe(3);
+		expect(table).toContain('rows: 3 fixed: 2');
 	}, 60_000);
 
 	test('a hit predicate without a disposition is refused unmatched', async () => {
@@ -95,7 +112,7 @@ describe('generate-recurrence-table (#3605 AC2)', () => {
 		]);
 		const disp = await writeInput('disp.tsv', [
 			`tree-digest: ${DIGEST}`,
-			'census-mislabel\tFIXED\tnote',
+			'census-mislabel\tFIX\tnote',
 		]);
 		const { status, output } = run(
 			hits,
@@ -113,12 +130,27 @@ describe('generate-recurrence-table (#3605 AC2)', () => {
 		]);
 		const disp = await writeInput('disp.tsv', [
 			`tree-digest: fedcba9876543210fedcba9876543210fedcba98`,
-			'p\tFIXED\tnote',
+			'p\tFIX\tnote',
 		]);
 		const { status, output } = run(
 			hits,
 			disp,
 			path.join(directory, 'out-digest'),
+		);
+		expect(status).toBe(1);
+		expect(output).toContain('GENERATION-REFUSED: digest');
+	}, 60_000);
+
+	test('an input missing its tree-digest header is refused as digest (F-09)', async () => {
+		const hits = await writeInput('hits-headerless.tsv', [
+			'p\t1\tsrc/a.ts',
+			'',
+		]);
+		const disp = await writeInput('disp-headerless.tsv', ['p\tFIX\tnote', '']);
+		const { status, output } = run(
+			hits,
+			disp,
+			path.join(directory, 'out-headerless'),
 		);
 		expect(status).toBe(1);
 		expect(output).toContain('GENERATION-REFUSED: digest');
@@ -131,8 +163,8 @@ describe('generate-recurrence-table (#3605 AC2)', () => {
 		]);
 		const disp = await writeInput('disp.tsv', [
 			`tree-digest: ${DIGEST}`,
-			'p\tFIXED\tnote',
-			'ghost\tFIXED\tdisposition with no hit',
+			'p\tFIX\tnote',
+			'ghost\tFIX\tdisposition with no hit',
 		]);
 		const { status, output } = run(
 			hits,
@@ -151,11 +183,98 @@ describe('generate-recurrence-table (#3605 AC2)', () => {
 		]);
 		const disp = await writeInput('disp.tsv', [
 			`tree-digest: ${DIGEST}`,
-			'p\tFIXED\tnote',
+			'p\tFIX\tnote',
 		]);
 		const { status, output } = run(hits, disp, path.join(directory, 'out-dup'));
 		expect(status).toBe(1);
 		expect(output).toContain('GENERATION-REFUSED: unmatched');
+	}, 60_000);
+
+	test('an empty or non-canonical disposition cell is refused with the vocabulary named', async () => {
+		const hits = await writeInput('hits-bad.tsv', [
+			`tree-digest: ${DIGEST}`,
+			'p\t1\tsrc/a.ts',
+		]);
+		const typoDisp = await writeInput('disp-typo.tsv', [
+			`tree-digest: ${DIGEST}`,
+			'p\tFIXD\tnote',
+		]);
+		const { status, output } = run(
+			hits,
+			typoDisp,
+			path.join(directory, 'out-typo'),
+		);
+		expect(status).toBe(1);
+		expect(output).toContain('GENERATION-REFUSED: disposition');
+		expect(output).toContain(
+			'FIX / FALSE_POSITIVE / OUT_OF_CLASS / DEFERRED_WITH_USER_APPROVAL',
+		);
+
+		const emptyDisp = await writeInput('disp-empty.tsv', [
+			`tree-digest: ${DIGEST}`,
+			'p\t\tnote',
+		]);
+		const empty = run(hits, emptyDisp, path.join(directory, 'out-empty'));
+		expect(empty.status).toBe(1);
+		expect(empty.output).toContain('GENERATION-REFUSED: disposition');
+	}, 60_000);
+
+	test('zero hit rows are refused as count drift', async () => {
+		const hits = await writeInput('hits-zero.tsv', [
+			`tree-digest: ${DIGEST}`,
+			'',
+		]);
+		const disp = await writeInput('disp-zero.tsv', [
+			`tree-digest: ${DIGEST}`,
+			'',
+		]);
+		const { status, output } = run(
+			hits,
+			disp,
+			path.join(directory, 'out-zero'),
+		);
+		expect(status).toBe(1);
+		expect(output).toContain('GENERATION-REFUSED: count-drift');
+	}, 60_000);
+
+	test('a zero or non-numeric hit count is refused (vacuous-row guard)', async () => {
+		const hits = await writeInput('hits-badcount.tsv', [
+			`tree-digest: ${DIGEST}`,
+			'p\t0\tsrc/a.ts',
+			'q\tnot-a-number\tsrc/b.ts',
+		]);
+		const disp = await writeInput('disp-badcount.tsv', [
+			`tree-digest: ${DIGEST}`,
+			'p\tFIX\tnote',
+			'q\tFIX\tnote',
+		]);
+		const { status, output } = run(
+			hits,
+			disp,
+			path.join(directory, 'out-badcount'),
+		);
+		expect(status).toBe(1);
+		expect(output).toContain('GENERATION-REFUSED: count');
+	}, 60_000);
+
+	test('a final hit row without a trailing newline is still rendered', async () => {
+		const hits = await writeInput('hits-noln.tsv', [
+			`tree-digest: ${DIGEST}`,
+			'p\t1\tsrc/a.ts',
+		]);
+		const disp = await writeInput('disp-noln.tsv', [
+			`tree-digest: ${DIGEST}`,
+			'p\tFIX\tnote',
+		]);
+		const outdir = path.join(directory, 'out-noln');
+		const { status, output } = run(hits, disp, outdir);
+		expect(status).toBe(0);
+		expect(output).toContain('RECURRENCE-TABLE: ok rows=1');
+		const table = await fs.readFile(
+			path.join(outdir, 'recurrence-table.md'),
+			'utf-8',
+		);
+		expect(table).toContain('| p | 1 | FIX | note |');
 	}, 60_000);
 
 	test('render join is exact column-1: a suffix predicate listed first cannot hijack the row', async () => {
@@ -166,8 +285,8 @@ describe('generate-recurrence-table (#3605 AC2)', () => {
 		]);
 		const disp = await writeInput('disp-suffix.tsv', [
 			`tree-digest: ${DIGEST}`,
-			'bar-foo	WONTFIX	note-bar',
-			'foo	FIXED	note-foo',
+			'bar-foo	FALSE_POSITIVE	note-bar',
+			'foo	FIX	note-foo',
 		]);
 		const outdir = path.join(directory, 'out-suffix');
 		const { status, output } = run(hits, disp, outdir);
@@ -177,7 +296,27 @@ describe('generate-recurrence-table (#3605 AC2)', () => {
 			path.join(outdir, 'recurrence-table.md'),
 			'utf-8',
 		);
-		expect(table).toContain('| foo | 1 | FIXED | note-foo |');
-		expect(table).toContain('| bar-foo | 1 | WONTFIX | note-bar |');
+		expect(table).toContain('| foo | 1 | FIX | note-foo |');
+		expect(table).toContain('| bar-foo | 1 | FALSE_POSITIVE | note-bar |');
+	}, 60_000);
+
+	test('a backslash-bearing predicate joins exactly (no awk escape mangling)', async () => {
+		const hits = await writeInput('hits-backslash.tsv', [
+			`tree-digest: ${DIGEST}`,
+			'foo\\.bar\t1\tsrc/a.ts',
+		]);
+		const disp = await writeInput('disp-backslash.tsv', [
+			`tree-digest: ${DIGEST}`,
+			'foo\\.bar\tFIX\tnote',
+		]);
+		const outdir = path.join(directory, 'out-backslash');
+		const { status, output } = run(hits, disp, outdir);
+		expect(status).toBe(0);
+		expect(output).toContain('RECURRENCE-TABLE: ok rows=1');
+		const table = await fs.readFile(
+			path.join(outdir, 'recurrence-table.md'),
+			'utf-8',
+		);
+		expect(table).toContain('| foo\\.bar | 1 | FIX | note |');
 	}, 60_000);
 });

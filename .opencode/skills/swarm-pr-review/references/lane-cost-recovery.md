@@ -47,7 +47,9 @@ bash .opencode/skills/swarm-pr-review/scripts/cost-yield-ledger.sh <lanes.tsv> \
   > <run-dir>/cost-yield-ledger.md
 ```
 
-Persist the rendered ledger in the review run artifacts (`.zcode/pr-review/<run>/`)
+Persist the rendered ledger in the review run artifacts (`<run-dir>/` — under Profile A
+`.swarm/pr-review/<run_id>/`; under Profiles B/C the session/task workspace's
+`pr-review/<run_id>/` directory, never `.swarm/`)
 and state the paired `per-finding cost:` aggregate in the synthesis — cost and
 yield are paired per row by design, so neither column can be read alone (the
 two highest-cost lanes of the measured example produced the deepest findings).

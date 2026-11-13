@@ -128,7 +128,47 @@ describe('trace-check phase 1 cluster-preflight gate (#3605 AC3)', () => {
 		);
 		const result = run(repoDir, ['phase', '1', '--slug', 'issue-1']);
 		expect(result.code).not.toBe(0);
-		expect(result.out).toContain('missing its recorded-at line');
+		expect(result.out).toContain(
+			'recorded-at line or the timestamp is not RFC3339',
+		);
+	}, 60_000);
+
+	test('phase 1 fails a non-RFC3339 recorded-at timestamp (bare date, no time)', () => {
+		const repoDir = makeRepo();
+		const traceDir = makeTrace(repoDir);
+		fs.writeFileSync(
+			path.join(traceDir, 'repro', 'cluster-preflight.md'),
+			'recorded-at: 2026-01-01\n\n## candidate #1\n\n- claim comments (live): none\n- open PRs naming 1 in:body: none\n',
+		);
+		const result = run(repoDir, ['phase', '1', '--slug', 'issue-1']);
+		expect(result.code).not.toBe(0);
+		expect(result.out).toContain(
+			'recorded-at line or the timestamp is not RFC3339',
+		);
+	}, 60_000);
+
+	test('phase 1 refuses a preflight that still carries template placeholders', () => {
+		const repoDir = makeRepo();
+		const traceDir = makeTrace(repoDir);
+		fs.writeFileSync(
+			path.join(traceDir, 'repro', 'cluster-preflight.md'),
+			'recorded-at: 2026-01-01T00:00:00Z\n\n## candidate #1\n\n- claim comments (live): <result>\n- open PRs naming 1 in:body: <result>\n',
+		);
+		const result = run(repoDir, ['phase', '1', '--slug', 'issue-1']);
+		expect(result.code).not.toBe(0);
+		expect(result.out).toContain('template placeholders');
+	}, 60_000);
+
+	test('evidence lines after a trailing non-candidate ## heading do not count (section scope resets)', () => {
+		const repoDir = makeRepo();
+		const traceDir = makeTrace(repoDir);
+		fs.writeFileSync(
+			path.join(traceDir, 'repro', 'cluster-preflight.md'),
+			'recorded-at: 2026-01-01T00:00:00Z\n\n## candidate #1\n\n## notes\n\n- claim comments (live): none\n- open PRs naming 1 in:body: none\n',
+		);
+		const result = run(repoDir, ['phase', '1', '--slug', 'issue-1']);
+		expect(result.code).not.toBe(0);
+		expect(result.out).toContain('missing claim or open-PR evidence');
 	}, 60_000);
 
 	test('phase 1 fails a recorded-at-only artifact with zero candidate sections', () => {

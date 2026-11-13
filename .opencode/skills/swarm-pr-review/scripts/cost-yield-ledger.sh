@@ -26,7 +26,9 @@
 #   id, elapsed_min, tool_uses, requests, input_tokens,
 #   cache_read_input_tokens, cache_creation_input_tokens, output_tokens,
 #   actionable_findings
-# (a lane row with fewer than 9 fields — a missing yield — is refused).
+# (any data row that is not exactly 9 well-formed fields — wrong arity, blank
+# line, empty id, or a non-numeric elapsed/tool-uses/requests/findings cell —
+# is refused by line number).
 #
 # Usage: cost-yield-ledger.sh <lanes.tsv>
 # Success: `COST-YIELD-LEDGER: ok lanes=N` + the rendered ledger on stdout.
@@ -52,14 +54,26 @@ if [ "$actual_header" != "$expected_header" ]; then
   exit 1
 fi
 
-# Refuse any data row with fewer than 9 fields (missing yield et al.).
-bad_row="$(tail -n +2 "$input" | awk -F '\t' 'NF != 9 {print $1}' | head -1 || true)"
+# Refuse any bad data row, keyed on the row's EXISTENCE (line number), never
+# on the value of $1 (an empty id would otherwise bypass the guard). Bad =
+# wrong arity (fewer OR more than 9 fields), a blank line, an empty id, or a
+# non-numeric requests/tool-uses/yield cell (a missing or "N/A" yield must
+# refuse, not coerce to zero actionable findings).
+bad_row="$(tail -n +2 "$input" | awk -F '\t' '
+  NF != 9 || $1 == "" || $2 == "" || $3 == "" || $4 == "" || $9 == "" \
+    || $2 !~ /^[0-9]+([.][0-9]+)?$/ || $3 !~ /^[0-9]+$/ || $4 !~ /^[0-9]+$/ || $9 !~ /^[0-9]+$/ \
+    || ($5 != "" && $5 !~ /^[0-9]+$/) || ($6 != "" && $6 !~ /^[0-9]+$/) || ($7 != "" && $7 !~ /^[0-9]+$/) \
+    || ($8 != "" && $8 !~ /^[0-9]+$/) { print NR }' | head -1 || true)"
 if [ -n "$bad_row" ]; then
-  echo "LEDGER-REFUSED: unpaired (row '$bad_row' does not carry all 9 fields)" >&2
+  echo "LEDGER-REFUSED: unpaired (data row $bad_row violates the 9-column contract: 9 tab-separated fields, non-empty id/elapsed/tool-uses/requests/findings, numeric cells)" >&2
   exit 1
 fi
 
 lanes="$(tail -n +2 "$input" | grep -c . || true)"
+if [ "$lanes" -eq 0 ]; then
+  echo "LEDGER-REFUSED: unpaired (header-only input carries no lane rows)" >&2
+  exit 1
+fi
 
 echo "lane-cost-yield-ledger (cost and yield are paired per row by design; derived per-request context = (input+cache_read+cache_creation)/requests)"
 tail -n +2 "$input" | awk -F '\t' '
@@ -69,6 +83,7 @@ tail -n +2 "$input" | awk -F '\t' '
   tcc = ($7 == "" ? 0 : $7 + 0); findings = $9 + 0
   total_ctx = tin + tcr + tcc
   pooled_ctx += total_ctx
+  pooled_requests += requests
   pooled_findings += findings
   if (requests > 0) {
     ctx_req = total_ctx / requests
@@ -78,8 +93,10 @@ tail -n +2 "$input" | awk -F '\t' '
   }
 }
 END {
-  if (pooled_findings > 0) {
+  if (pooled_findings > 0 && pooled_requests > 0) {
     printf "per-finding cost: %.1f\n", pooled_ctx / pooled_findings
+  } else if (pooled_findings > 0) {
+    print "per-finding cost: n/a (zero requests recorded, so no cost denominator exists)"
   } else {
     print "per-finding cost: n/a (zero actionable findings)"
   }

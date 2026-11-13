@@ -143,7 +143,7 @@ mock.module('../../../src/utils/path-security', () => ({
 When test files pass individually but fail when run together, follow this protocol:
 
 1. **Isolate**: Run the failing file alone: `bun test <file>.test.ts --timeout 30000`
-2. **Pair**: Run it WITH its suspected polluting neighbor via the fail-closed battery wrapper (a raw two-file `bun test` batch silently drops an unmatched path and exits 0): `bun scripts/ci/run-test-battery.ts <fileA>.test.ts <fileB>.test.ts`
+2. **Pair**: Run it WITH its suspected polluting neighbor via the fail-closed battery wrapper (a raw two-file `bun test` batch silently drops an unmatched path and exits 0): `bun scripts/ci/run-test-battery.ts <fileA>.test.ts <fileB>.test.ts` (the `scripts/ci/` wrapper is this repository's own tooling; consumer projects without it should use their repo's equivalent fail-closed battery)
 3. **Classify**:
    - Both pass alone → fail together → **mock pollution** from neighbor
    - Fails alone → **test logic bug** (not isolation issue)
