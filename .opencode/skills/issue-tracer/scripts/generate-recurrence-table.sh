@@ -100,7 +100,10 @@ table="$outdir/recurrence-table.md"
   echo '|---|---|---|---|'
   tail -n +2 "$hits" | while IFS="$(printf '\t')" read -r pred count paths; do
     [ -z "$pred" ] && continue
-    d_row="$(tail -n +2 "$disp" | grep -F "$(printf '%s\t' "$pred")" | head -1)"
+    # Exact column-1 lookup ($1 == pred): an unanchored fixed-string grep
+    # would let a predicate join a SUFFIX predicate's row (foo vs bar-foo)
+    # when the suffix row appears first.
+    d_row="$(awk -F '\t' -v p="$pred" 'NR > 1 && $1 == p { print; exit }' "$disp")"
     d_disp="$(printf '%s\n' "$d_row" | cut -f2)"
     d_note="$(printf '%s\n' "$d_row" | cut -f3)"
     printf '| %s | %s | %s | %s |\n' "$pred" "$count" "$d_disp" "$d_note"

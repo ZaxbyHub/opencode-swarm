@@ -157,4 +157,27 @@ describe('generate-recurrence-table (#3605 AC2)', () => {
 		expect(status).toBe(1);
 		expect(output).toContain('GENERATION-REFUSED: unmatched');
 	}, 60_000);
+
+	test('render join is exact column-1: a suffix predicate listed first cannot hijack the row', async () => {
+		const hits = await writeInput('hits-suffix.tsv', [
+			`tree-digest: ${DIGEST}`,
+			'foo	1	src/a.ts',
+			'bar-foo	1	src/b.ts',
+		]);
+		const disp = await writeInput('disp-suffix.tsv', [
+			`tree-digest: ${DIGEST}`,
+			'bar-foo	WONTFIX	note-bar',
+			'foo	FIXED	note-foo',
+		]);
+		const outdir = path.join(directory, 'out-suffix');
+		const { status, output } = run(hits, disp, outdir);
+		expect(status).toBe(0);
+		expect(output).toContain('RECURRENCE-TABLE: ok rows=2');
+		const table = await fs.readFile(
+			path.join(outdir, 'recurrence-table.md'),
+			'utf-8',
+		);
+		expect(table).toContain('| foo | 1 | FIXED | note-foo |');
+		expect(table).toContain('| bar-foo | 1 | WONTFIX | note-bar |');
+	}, 60_000);
 });

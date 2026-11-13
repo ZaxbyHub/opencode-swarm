@@ -278,4 +278,31 @@ describe('check-battery-tree-receipt (#3605 AC7)', () => {
 		expect(bad.status).toBe(1);
 		expect(bad.output).toContain('TREE-RECEIPT: unknown-file');
 	}, 240_000);
+
+	test('a SINGLE-LINE multi-element files array splits per element', async () => {
+		await fs.writeFile(path.join(directory, 'README.md'), 'seed\n', 'utf-8');
+		await fs.writeFile(path.join(directory, 'package.json'), '{}\n', 'utf-8');
+		git('add', '-A');
+		git(
+			'-c',
+			'user.name=t',
+			'-c',
+			'user.email=t@t.invalid',
+			'-c',
+			'commit.gpgsign=false',
+			'commit',
+			'-q',
+			'-m',
+			'files',
+		);
+		const receipt = path.join(directory, 'receipt.json');
+		await fs.writeFile(
+			receipt,
+			`{"head":"${head()}","dirty":"","files":["README.md","package.json"]}`,
+			'utf-8',
+		);
+		const { status, output } = runCheck(receipt);
+		expect(status).toBe(0);
+		expect(output).toContain('TREE-RECEIPT: ok');
+	}, 60_000);
 });

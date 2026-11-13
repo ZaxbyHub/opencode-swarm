@@ -48,7 +48,7 @@ r_files="$(awk '
     if (line ~ /\]/) { sub(/\].*/, "", line); if (line != "") print line; in_files = 0; next }
     if (line != "") print line
   }
-' "$receipt" | tr -d '",' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/"//g' | sed '/^$/d')"
+' "$receipt" | tr ',' '\n' | tr -d '"' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | sed '/^$/d')"
 # Fail closed if the receipt carries a files array the extractor could not
 # find at all (malformed receipt), rather than vacuously verifying nothing.
 if ! grep -q '"files"' "$receipt"; then
