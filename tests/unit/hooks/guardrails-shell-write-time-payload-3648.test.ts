@@ -271,3 +271,69 @@ describe('#3648 D7 detector/resolver proofs: the first-leaf emission survives th
 		T,
 	);
 });
+
+describe('FB-019 (#3689 closeout review): gtime rides the GNU time grammar on the WRITE side too', () => {
+	// The closeout reviewer proved by gate() probe that gtime was admitted for
+	// the write payloads while /usr/bin/time blocked them — the binary is
+	// Homebrew coreutils GNU time (macOS), always a real executable.
+	test(
+		'gtime escaping -o / inner write verbs are denied; benign gtime forms stay admitted',
+		async () => {
+			const denied = [
+				'gtime -o ../secret echo hi',
+				'/opt/homebrew/bin/gtime -o ../secret echo hi',
+				'gtime cp src/a ../secret',
+				'gtime -o ../secret cp src/a src/b',
+			];
+			for (const c of denied) {
+				const r = await gate(c);
+				expect(r.verdict).toBe('BLOCKED');
+			}
+			// Closeout round 2 (reviewer ff307c5d) found TWO more un-threaded
+			// gtime sites: nestedTimeTail (write-side login-hop) and
+			// dcPeelLauncherWords (destructive launcher peel + its -o/-f/
+			// --output/--format option consumption + the uncertainty tailBase).
+			// Each shape's `time` twin already blocked; gtime admitted.
+			const nestedDenied = [
+				'sudo -i gtime -o src/t.txt true',
+				'sudo -i -- gtime -o src/t.txt true',
+				'gtime sudo -D /etc tee src/x',
+				'env -u FOO gtime -o src/t.txt env -C .. tee src/x',
+				'env -u FOO gtime bash -c "sudo -D /etc tee src/x"',
+			];
+			for (const c of nestedDenied) {
+				const r = await gate(c);
+				expect(r.verdict).toBe('BLOCKED');
+			}
+			for (const c of ['gtime make build', 'gtime -o src/t.txt echo hi']) {
+				const r = await gate(c);
+				expect(r.verdict).toBe('ADMITTED');
+			}
+		},
+		T,
+	);
+	// Closeout delta round 3 (reviewer e84b8237) completed the 'time' site
+	// census and found matchEnvChdir's env-dash special branch keyed on the
+	// EXACT 'time' word: gtime (and even path-qualified /usr/bin/time) fell
+	// through to the env-retaining arm, leaving the sh -c payload unspliced.
+	test(
+		'env-dash gtime/path-time payloads deny (matchEnvChdir basename key)',
+		async () => {
+			const envDashDenied = [
+				'env - gtime -o src/t.txt sh -c "echo x > ../x"',
+				'env -i - gtime -o src/t.txt sh -c "echo x > ../x"',
+				'env - /usr/bin/time -o src/t.txt sh -c "echo x > ../x"',
+				'env - /opt/homebrew/bin/gtime -o src/t.txt sh -c "echo x > ../x"',
+				'env - time -o src/t.txt sh -c "echo x > ../x"',
+			];
+			for (const c of envDashDenied) {
+				const r = await gate(c);
+				expect(r.verdict).toBe('BLOCKED');
+			}
+			// #3616 round-8 control still holds: non-time heads after the dash.
+			const ctl = await gate('env -u X - sh -c "echo x > ../x"');
+			expect(ctl.verdict).toBe('BLOCKED');
+		},
+		T,
+	);
+});

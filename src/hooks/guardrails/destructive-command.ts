@@ -1168,9 +1168,16 @@ export function dcLauncherTimedTail(segment: string): string | null {
  * (mutated copy) with the openers removed.
  */
 function dcStripLeadingOpeners(words: string[]): string[] {
+	// FB-001 (#3689 review): the peel must NOT mutate the caller's array.
+	// The caller in dcAnalyzeLauncherUncertainty detects whether anything
+	// was stripped by comparing the returned words against its own copy —
+	// an in-place glued rewrite (`(sudo` → `sudo`) made both sides equal
+	// and the strip a silent no-op, admitting `(sudo -i)`/`((sudo -i))`
+	// while `( sudo -i )` denied.
+	const out = [...words];
 	let start = 0;
-	while (start < words.length) {
-		const w = words[start];
+	while (start < out.length) {
+		const w = out[start];
 		if (w === undefined) break;
 		if (/^[({]+$/.test(w)) {
 			start += 1;
@@ -1178,12 +1185,34 @@ function dcStripLeadingOpeners(words: string[]): string[] {
 		}
 		const glued = /^([({]+)(.*)$/.exec(w);
 		if (glued !== null && glued[2] !== '') {
-			words[start] = glued[2] as string;
+			out[start] = glued[2] as string;
 			break;
 		}
 		break;
 	}
-	return words.slice(start);
+	return out.slice(start);
+}
+
+/**
+ * FB-001: whether dcStripLeadingOpeners WOULD consume a glued opener
+ * (`(sudo …`, `{(sudo …` — a run of standalone openers followed by a
+ * glued one) as opposed to only standalone opener tokens. Callers gate the
+ * mirrored CLOSER trim on this so the standalone form keeps its closer
+ * token (whose option-walk uncertainty carries pinned denies).
+ */
+function dcGluedOpenerConsumed(words: string[]): boolean {
+	let start = 0;
+	while (start < words.length) {
+		const w = words[start];
+		if (w === undefined) return false;
+		if (/^[({]+$/.test(w)) {
+			start += 1;
+			continue;
+		}
+		const glued = /^([({]+)(.*)$/.exec(w);
+		return glued !== null && glued[2] !== '';
+	}
+	return false;
 }
 
 export function dcAnalyzeLauncherUncertainty(command: string): {
@@ -1206,6 +1235,38 @@ export function dcAnalyzeLauncherUncertainty(command: string): {
 				strippedWords.length !== segWords.length ||
 				segWords[0] !== strippedWords[0]
 			) {
+				// FB-001: a glued CLOSER run (`(sudo -i)` → last token
+				// '-i)') would poison the launcher option walk the same way
+				// the glued opener poisoned detection — trim trailing
+				// subshell/brace closers from the final word. The trim is
+				// gated on the GLUED opener form only: in the standalone
+				// form the trailing closer is its own token whose option-walk
+				// uncertainty carries a pinned deny (`( sudo -i make build )`
+				// — the bounds-pinned safe-direction bound), and removing it
+				// there flipped that pin to ADMITTED.
+				if (dcGluedOpenerConsumed(segWords)) {
+					// FB-001 closeout critic (finding #1): the earlier trim
+					// reached only the LAST word, so `( (sudo -i) )` (standalone
+					// opener wrapping a glued one) cleared the trailing `)` but
+					// left the glued `-i)` — regressing a shape that BLOCKED at
+					// the intake head to ADMITTED. Drop trailing STANDALONE
+					// closer runs first, THEN strip any glued closer on the new
+					// last word. Pure closer tokens carry no write semantics, so
+					// dropping them only unwraps the subshell/brace group.
+					while (
+						strippedWords.length > 0 &&
+						/^[})\];]+$/.test(strippedWords[strippedWords.length - 1] ?? '')
+					) {
+						strippedWords.pop();
+					}
+					const lastIdx = strippedWords.length - 1;
+					if (lastIdx >= 0) {
+						strippedWords[lastIdx] = (strippedWords[lastIdx] ?? '').replace(
+							/[})\];]+$/,
+							'',
+						);
+					}
+				}
 				seg = strippedWords.join(' ');
 			}
 		}
@@ -1278,6 +1339,7 @@ export function dcAnalyzeLauncherUncertainty(command: string): {
 			if (
 				tailBase !== 'sudo' &&
 				tailBase !== 'time' &&
+				tailBase !== 'gtime' &&
 				tailBase !== 'nice' &&
 				tailBase !== 'nohup'
 			) {
@@ -1465,6 +1527,12 @@ function dcPeelLauncherWords(
 		const head = basenameAnySepLike(words[0] ?? '');
 		if (
 			head === 'time' ||
+			// FB-019 (closeout round 2): gtime (Homebrew GNU time) must peel
+			// as a launcher head like `time` — otherwise `gtime sudo -D /etc
+			// tee src/x` stops the peel at gtime and the chdir/authority
+			// backstop never reaches the wrapped write (the `time` twin
+			// BLOCKS with AUTHORITY_ROOT_ESCAPE).
+			head === 'gtime' ||
 			head === 'nice' ||
 			head === 'nohup' ||
 			head === 'env' ||
@@ -1516,7 +1584,7 @@ function dcPeelLauncherWords(
 						const eq = w.indexOf('=');
 						const headW = eq === -1 ? w : w.slice(0, eq);
 						const takesValue =
-							(head === 'time' &&
+							((head === 'time' || head === 'gtime') &&
 								(headW === '--output' || headW === '--format')) ||
 							(head === 'nice' && headW === '--adjustment') ||
 							(head === 'timeout' &&
@@ -1533,7 +1601,11 @@ function dcPeelLauncherWords(
 					// glued attached values (`-oFILE`, `-oL`, `-n5`, `-k5`) and
 					// plain numeric nice adjustments consume only the token.
 					const c = w[1];
-					if (head === 'time' && (c === 'o' || c === 'f') && w.length === 2)
+					if (
+						(head === 'time' || head === 'gtime') &&
+						(c === 'o' || c === 'f') &&
+						w.length === 2
+					)
 						next += 2;
 					else if (head === 'nice' && c === 'n' && w.length === 2) next += 2;
 					else if (
@@ -1939,14 +2011,23 @@ function matchEnvChdir(words: string[]): DcChdirMatch {
 		// `-o FILE` as the timed command. Emitted quoted (the #3572 nested-
 		// time precedent), the GNU binary grammar analyzes the payload while
 		// the dash-aware original analysis still emits the launcher write.
-		if (rest[0] === 'time') {
+		// FB-019 (closeout round 3): the branch keyed on the EXACT `time`
+		// word, so `gtime` (and path-qualified `/usr/bin/time`,
+		// `/opt/homebrew/bin/gtime`) fell through to the env-retaining branch,
+		// which left the wrapped `sh -c` payload unspliced — `env - gtime -o
+		// src/t.txt sh -c "echo x > ../x"` ADMITTED while the bare-time twin
+		// BLOCKED. Key on the command BASENAME instead; only the bare `time`
+		// keyword spelling needs quoting (a path/gtime spelling is never a
+		// bash keyword, so it passes through verbatim to matchTimeWrapperSegment).
+		const envDashHeadBase = basenameAnySepLike(rest[0] ?? '');
+		if (envDashHeadBase === 'time' || envDashHeadBase === 'gtime') {
+			const headEmit =
+				rest[0] === 'time' ? shSingleQuote(rest[0]) : (rest[0] as string);
 			return {
 				kind: 'static',
 				dir: '.',
 				innerWords: rest,
-				chdirInnerText: `${shSingleQuote(rest[0])} ${shSerializeWords(
-					rest.slice(1),
-				)}`,
+				chdirInnerText: `${headEmit} ${shSerializeWords(rest.slice(1))}`,
 			};
 		}
 		return {
@@ -2384,10 +2465,14 @@ function matchTimeWrapperSegment(
 	// GNU spellings: path-qualified, backslash-escaped, or quoted. 4.5
 	// review: the escaped form needs a LITERAL backslash in the regex
 	// (`\\time`) — a single `\t` in a JS regex literal is the TAB character
-	// and matched nothing.
+	// and matched nothing. FB-019 (#3689 review): `gtime` (macOS/Homebrew
+	// coreutils GNU time) joins the GNU class — it is always a real binary,
+	// never the bash keyword, so it never rides the bare-keyword branch.
 	const gnu =
 		bare === null
-			? /^(\/[^\s]*time|\\time|['"]time['"])(?=[\s]|$)([\s\S]*)$/.exec(stripped)
+			? /^(\/[^\s]*g?time|\\g?time|['"]g?time['"]|gtime)(?=[\s]|$)([\s\S]*)$/.exec(
+					stripped,
+				)
 			: null;
 	const m = bare ?? gnu;
 	if (m === null) return null;
@@ -3214,12 +3299,31 @@ export function dcExtractRecursiveRmTargets(segment: string): string[] | null {
 	{
 		const isTimeWord = (w: string): boolean => {
 			const bare = w.replace(/^["'\\]+/, '').replace(/["']$/, '');
-			return bare === 'time' || /(^|\/)time$/.test(bare);
+			// FB-019 (#3689 review): `gtime` is the GNU time binary name on
+			// macOS/Homebrew coreutils (and a real executable, never the bash
+			// keyword) — it must peel exactly like /usr/bin/time.
+			return (
+				bare === 'time' ||
+				bare === 'gtime' ||
+				/(^|\/|\\)time$/.test(bare) ||
+				/(^|\/|\\)gtime$/.test(bare)
+			);
 		};
 		let wi = 0;
 		let sawTime = false;
 		let unknownOption = false;
-		for (let hop = 0; hop < 8 && wi < verbTokens.length; hop++) {
+		// FB-002 (#3689 review): the peel is ITERATIVE — `time` heads, their
+		// options, and the transparent launcher heads are all consumed in ONE
+		// pass here. The previous design recursed per time-prefix (each level
+		// re-tokenizing the shrinking tail), which made this synchronous
+		// pre-execution hook O(n²) in command length (measured 2 ms → 13.9 s
+		// at 111 KB). One recursion remains at the bottom of this block for
+		// the final tail (the 3572 N-02 scoped-ADMIT path).
+		// FB-009: the hop bound is the shared paranoid bound (the #3572 lesson
+		// — 8 heads are machine-generatable); exhausting it with a peelable
+		// head still in front fails closed below.
+		let boundExhaustedWithHeadPeelable = false;
+		for (let hop = 0; hop < DC_UNWRAP_PARANOID_BOUND; hop += 1) {
 			const w = verbTokens[wi];
 			if (w === undefined) break;
 			const bare = w.replace(/^["'\\]+/, '').replace(/["']$/, '');
@@ -3228,11 +3332,66 @@ export function dcExtractRecursiveRmTargets(segment: string): string[] | null {
 				continue;
 			}
 			if (bare === 'nice') {
-				const nx = verbTokens[wi + 1];
-				if (nx !== undefined && /^-[ng]$/i.test(nx)) {
-					wi += 2;
-				} else {
-					wi += 1;
+				// FB-008: `nice` consumed the -n flag but NOT its value, so
+				// 'nice -n 5 time …' left '5' as the tail head and the peel
+				// stopped. Consume flag+value (detached) or the glued form.
+				// Stage-B reviewer round 2 executed two more admissions:
+				// glued '--adjustment=5' matched no branch, and 'nice -n -5'
+				// refused the negative value at the startsWith('-') guard —
+				// both stranded the peel before the time word.
+				wi += 1;
+				const nx = verbTokens[wi];
+				if (nx === '-n' || nx === '-g' || nx === '--adjustment') {
+					wi += 1; // the flag itself
+					const val = String(verbTokens[wi] ?? '');
+					if (/^[+-]?\d+$/.test(val)) {
+						wi += 1; // numeric adjustment, INCLUDING negative
+					} else if (val !== '' && !val.startsWith('-')) {
+						wi += 1; // GNU rejects non-numeric, but the value is
+						// positionally the next word either way
+					}
+				} else if (
+					nx !== undefined &&
+					(/^-[ng](\d+|-\d+)$/.test(nx) || nx.startsWith('--adjustment='))
+				) {
+					wi += 1; // glued -n5 / -n-5 / --adjustment=5
+				} else if (nx !== undefined && /^[+-]?\d+$/.test(nx)) {
+					wi += 1; // bare nice -5 / nice 5 adjustment
+				}
+				continue;
+			}
+			if (bare === 'env') {
+				// FB-009: env heads hid the time word (the critic's
+				// `env time -o … rm -rf ../outside` bypass). Peel env plus
+				// leading assignments and its argless flags; an unknown env
+				// option stops the peel and leaves the residue scan to fail
+				// closed.
+				wi += 1;
+				while (wi < verbTokens.length) {
+					const e = verbTokens[wi];
+					if (e === undefined) break;
+					if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(e)) {
+						wi += 1;
+						continue;
+					}
+					if (
+						e === '-i' ||
+						e === '--ignore-environment' ||
+						e === '-0' ||
+						e === '--null' ||
+						e === '-v' ||
+						e === '--debug' ||
+						e === '--help' ||
+						e === '--version'
+					) {
+						wi += 1;
+						continue;
+					}
+					if (e === '--') {
+						wi += 1;
+						break;
+					}
+					break;
 				}
 				continue;
 			}
@@ -3289,9 +3448,29 @@ export function dcExtractRecursiveRmTargets(segment: string): string[] | null {
 					unknownOption = true;
 					break;
 				}
-				break;
+				if (unknownOption) break;
+				continue; // FB-002: keep peeling — a second time/launcher head
+				// after the options is consumed in THIS pass, not by recursion.
 			}
 			break;
+		}
+		// FB-009: bound exhaustion WITH a still-peelable head in front (a
+		// time/launcher chain beyond the shared bound) must not quietly return
+		// "no targets" — the residue scan below withdraws recursive-rm shapes.
+		{
+			const stuck = verbTokens[wi];
+			if (stuck !== undefined && sawTime) {
+				const stuckBare = stuck.replace(/^["'\\]+/, '').replace(/["']$/, '');
+				if (
+					stuckBare === 'command' ||
+					stuckBare === 'nohup' ||
+					stuckBare === 'nice' ||
+					stuckBare === 'env' ||
+					isTimeWord(stuck)
+				) {
+					boundExhaustedWithHeadPeelable = true;
+				}
+			}
 		}
 		if (sawTime) {
 			// Deny-direction residue scan (covers unknownOption and tails the
@@ -3344,7 +3523,10 @@ export function dcExtractRecursiveRmTargets(segment: string): string[] | null {
 				}
 			}
 			if (rest.length === 0) return null;
-			if (unknownOption && residueHasRecursiveRm(rest)) {
+			if (
+				(unknownOption || boundExhaustedWithHeadPeelable) &&
+				residueHasRecursiveRm(rest)
+			) {
 				return ['__swarm_brace_refusal__/time-masked rm'];
 			}
 			// Peel-and-recurse for the clean shapes: the timed tail runs in
@@ -3734,11 +3916,23 @@ export function dcEvaluateRecursiveDeleteTargets(input: {
 	// scope/basename evaluation — fail closed regardless of scope.
 	for (const target of input.targets) {
 		if (target.includes('__swarm_brace_refusal__/')) {
+			// FB-016 (#3689 review): the refusal reason must name the ACTUAL
+			// unknowable composition. The xargs-fed and time-masked markers
+			// ride this channel but carry no brace expansion (and the fed
+			// verb may be non-recursive `rmdir`/`unlink`/`shred`) — a brace
+			// diagnosis sent operators chasing a nonexistent brace. The
+			// original brace wording stays byte-identical for genuine brace
+			// markers (explain mirror + audit consumers share this evaluator).
+			const suffix = target.split('__swarm_brace_refusal__/')[1] ?? '';
+			const refusalDetail = suffix.startsWith('xargs-fed ')
+				? `BLOCKED: "${dcSafeDiagnosticValue(suffix)}" runs with stdin-supplied operands under xargs — its targets are not statically resolvable (refused dynamically, not a resolvable filename).`
+				: suffix.startsWith('time-masked ')
+					? 'BLOCKED: Recursive delete is masked behind a time wrapper the option grammar cannot statically resolve (refused dynamically, not a resolvable filename).'
+					: 'BLOCKED: Recursive delete target carries an unresolvable brace expansion (refused dynamically, not a resolvable filename).';
 			return {
 				allowed: false,
 				code: 'DESTRUCTIVE_TARGET_INVALID',
-				reason:
-					'BLOCKED: Recursive delete target carries an unresolvable brace expansion (refused dynamically, not a resolvable filename).',
+				reason: refusalDetail,
 			};
 		}
 	}

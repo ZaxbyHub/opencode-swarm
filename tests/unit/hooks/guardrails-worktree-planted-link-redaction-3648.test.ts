@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { execSync } from 'node:child_process';
 import * as fsSync from 'node:fs';
-import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import {
 	checkFileAuthority,
@@ -35,8 +34,22 @@ describe('planted-link redaction in re-rooted authority denials (#3648 AC15)', (
 	let linkedDir: string;
 	let linkPath: string;
 
+	// FB-012 (#3689 review): the git helper had no timeout and left stdin
+	// piped (a credential/gpg prompt could hang the shard — the same Windows
+	// CI-hang class as #3691), and the fixture commit ran without disabling
+	// signing/hooks (sibling precedent tests/gitignore-warning.test.ts
+	// neutralizes both).
 	const git = (args: string, cwd: string): void => {
-		execSync(`git ${args}`, { cwd, stdio: 'pipe' });
+		execSync(`git ${args}`, {
+			cwd,
+			stdio: ['ignore', 'pipe', 'pipe'],
+			timeout: 30_000,
+			env: {
+				...process.env,
+				GIT_TERMINAL_PROMPT: '0',
+				GIT_CONFIG_NOSYSTEM: '1',
+			},
+		});
 	};
 
 	beforeEach(() => {
@@ -46,6 +59,11 @@ describe('planted-link redaction in re-rooted authority denials (#3648 AC15)', (
 		git('init -b main', mainRepoDir);
 		git('config user.name "Test"', mainRepoDir);
 		git('config user.email "test@example.com"', mainRepoDir);
+		// FB-012: neutralize ambient signing/hooking before the first commit
+		// (a developer machine with commit.gpgsign=true or global hooks must
+		// not hang or fail the fixture).
+		git('config commit.gpgsign false', mainRepoDir);
+		git('config core.hooksPath .git/no-op-hooks', mainRepoDir);
 		git('commit --allow-empty -m "initial commit"', mainRepoDir);
 		linkedDir = path.join(sandboxDir, 'linked');
 		git(`worktree add "${linkedDir}" -b feat/linked`, mainRepoDir);
@@ -108,60 +126,83 @@ describe('planted-link redaction in re-rooted authority denials (#3648 AC15)', (
 	}, 60_000);
 
 	it('the planted-link detail rides the different-filesystem-root arm where a second root exists', () => {
-		// Arm A needs a target that resolves onto a different filesystem
-		// root (another drive on win32, another mount on Linux). Build the
-		// probe from the sandbox's own root: when no second root is
-		// constructible, skip with a diagnostic (never silently — the #3606
-		// suite's skip-probe pattern).
-		const secondRoot = (() => {
-			const roots = fsSync
-				.readdirSync(path.parse(sandboxDir).root, { withFileTypes: true })
-				.map((e) => e.name)
-				.slice(0, 0); // directory listing of the root is not a reliable probe
-			void roots;
-			if (process.platform === 'win32') {
-				// Prefer any drive other than the sandbox's own.
-				for (const letter of 'DEFGHIJKLMNOPQRSTUVWXYZ') {
-					const candidate = `${letter}:\\`;
-					if (fsSync.existsSync(candidate)) return candidate;
+		// FB-013 (#3689 review): the previous probe put a PLAIN file on the
+		// second root — its target never matched a registered worktree, so
+		// matchWorktreeRoot() returned null, the check took the plain
+		// 'different drive or filesystem root' deny, and the conditional
+		// re-rooted assertion never executed on ANY host (vacuous leg;
+		// FB-022 also removed a dead roots probe left from that design).
+		// The arm genuinely needs the LINKED WORKTREE ITSELF on the second
+		// root (reviewer recipe): a registered linked worktree whose root
+		// matches, with the target crossing a planted link below it, while
+		// the target lands on a different filesystem root than `dir`.
+		// When no second root is constructible (single-mount hosts), the
+		// leg skips WITH a diagnostic — the PR body/fragment claim for this
+		// arm is accordingly host-conditional, not "always pinned".
+		const ownRoot = path.parse(sandboxDir).root;
+		let secondWorktree: string | null = null;
+		if (process.platform === 'win32') {
+			for (const letter of 'DEFGHIJKLMNOPQRSTUVWXYZ') {
+				const candidate = `${letter}:\\`;
+				if (candidate === ownRoot || !fsSync.existsSync(candidate)) continue;
+				const dir = `${letter}:\\swarm-wt-redact-linked-${process.pid}`;
+				if (fsSync.existsSync(dir)) continue;
+				try {
+					git(`worktree add "${dir}" -b feat/linked-second-root`, mainRepoDir);
+					secondWorktree = dir;
+				} catch {
+					// Drive not writable / registry refusal — skip with diagnostic.
+					try {
+						git(`worktree prune`, mainRepoDir);
+					} catch {
+						/* best effort */
+					}
 				}
+				break;
 			}
-			return null;
-		})();
-		if (secondRoot === null) {
+		}
+		if (secondWorktree === null) {
 			console.warn(
-				'[planted-link-redaction] no second filesystem root on this host; different-root arm skipped with diagnostic',
+				'[planted-link-redaction] no second filesystem root worktree constructible on this host; different-root arm skipped with diagnostic',
 			);
 			return;
-		}
-		const target = path.join(secondRoot, 'swarm-wt-redact-arm-a.txt');
-		if (fsSync.existsSync(target)) {
-			console.warn(
-				'[planted-link-redaction] second-root target already exists; arm skipped',
-			);
-			return;
-		}
-		const result = checkFileAuthority('architect', target, mainRepoDir);
-		expect(result.allowed).toBe(false);
-		// On the different-root arm the planted link below the MATCHED
-		// worktree is what distinguishes the re-rooted detail from the plain
-		// 'different drive or filesystem root' deny: the target itself is
-		// outside every root, so a plain different-root deny is also
-		// correct — assert the code and, when the re-rooted detail fires,
-		// its exact slot.
-		if (!result.allowed) {
-			expect(result.code).toBe('AUTHORITY_ROOT_ESCAPE');
-			const reason = result.reason ?? '';
-			if (reason.includes('re-rooted target crosses symlink/junction')) {
-				expect(reason).toContain(
-					`"${sanitizeDiagnosticText(redactPath(linkPath), 320)}"`,
-				);
-			}
 		}
 		try {
-			fsSync.rmSync(target, { force: true });
-		} catch {
-			// best effort
+			const planted = path.join(secondWorktree, 'planted-link');
+			fsSync.symlinkSync(
+				path.join(secondWorktree, 'outside-not-there'),
+				planted,
+				process.platform === 'win32' ? 'junction' : 'dir',
+			);
+			clearGuardrailsCaches();
+			const target = path.join(planted, 'arm-a-new-file.txt');
+			const result = checkFileAuthority('architect', target, mainRepoDir);
+			expect(result.allowed).toBe(false);
+			if (result.allowed) return;
+			expect(result.code).toBe('AUTHORITY_ROOT_ESCAPE');
+			const reason = result.reason ?? '';
+			// Unconditional (no if-guard): when this arm executes at all it
+			// MUST render the re-rooted planted-link detail with the exact
+			// redacted slot — the whole point of the leg.
+			expect(reason).toContain('re-rooted target crosses symlink/junction');
+			expect(reason).toContain(
+				`"${sanitizeDiagnosticText(redactPath(planted), 320)}"`,
+			);
+		} finally {
+			// Cleanup is UNCONDITIONAL on both paths: `git worktree remove`
+			// can leave the directory behind on Windows (busy junction from
+			// the planted link), so the forced rm + prune always follow.
+			try {
+				git(`worktree remove --force "${secondWorktree}"`, mainRepoDir);
+			} catch {
+				// fall through to the forced cleanup
+			}
+			try {
+				fsSync.rmSync(secondWorktree, { recursive: true, force: true });
+				git('worktree prune', mainRepoDir);
+			} catch {
+				// best effort — residue is namespaced by pid.
+			}
 		}
 	}, 60_000);
 });

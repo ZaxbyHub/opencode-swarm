@@ -6,12 +6,13 @@
  * absolute operand or an embedded `of=<abs>`) withdraw under a chroot, a
  * dynamic chroot root and a repeated `-R` (usage error) deny on uncertainty,
  * and an OUTER redirect opened at the invoking cwd stays untouched. Prep
- * creates a fixed-name sibling `fixed-chroot-out` OUTSIDE the workspace (the
- * frozen C08 pattern) and removes it after every leg.
+ * creates the chroot base `fixed-chroot-out` INSIDE the per-test workspace
+ * but OUTSIDE the declared scope (`src/`) — the escaping base the gate must
+ * re-root relative operands into.
  */
 
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, rmSync } from 'node:fs';
+import { mkdirSync } from 'node:fs';
 import * as path from 'node:path';
 import { resetSwarmState } from '../../../src/state';
 import { gate } from './_shell-write-3616-fixtures';
@@ -21,26 +22,24 @@ const CHROOT_NAME = 'fixed-chroot-out';
 
 type GateResult = Awaited<ReturnType<typeof gate>>;
 
+// FB-015 (#3689 review): the chroot base used to be a FIXED-NAME directory
+// in the shared system-temp root (sibling of the per-test workspace),
+// created/removed outside a finally — two concurrent `bun test` processes
+// collided on it and a throwing leg leaked it permanently. It now lives
+// inside the unique per-test workspace (path.dirname(ws) was shared; ws
+// itself is canonicalMkdtemp-unique), which keeps it outside the declared
+// scope and inherits the fixture's own cleanup.
 function chrootPrep(ws: string): void {
-	mkdirSync(path.join(path.dirname(ws), CHROOT_NAME), { recursive: true });
+	mkdirSync(path.join(ws, CHROOT_NAME), { recursive: true });
 	mkdirSync(path.join(ws, 'src'), { recursive: true });
 }
 
-/** gate() with the fixed-name sibling chroot root created and cleaned up. */
+/** gate() with the per-workspace chroot base created. */
 async function chrootGate(
 	command: string,
 	opts?: { blockDestructive?: boolean },
 ): Promise<GateResult> {
-	const r = await gate(command, { ...opts, prep: chrootPrep });
-	try {
-		rmSync(path.join(path.dirname(r.ws), CHROOT_NAME), {
-			recursive: true,
-			force: true,
-		});
-	} catch {
-		// best-effort cleanup of the fixed-name sibling directory (C08).
-	}
-	return r;
+	return gate(command, { ...opts, prep: chrootPrep });
 }
 
 afterEach(() => {
@@ -52,7 +51,7 @@ describe('#3648 D6: sudo --chroot/-R re-bases the judged tail', () => {
 		'sudo --chroot <outside sibling> cp is denied (relative tail lands in the chroot)',
 		async () => {
 			const r = await chrootGate(
-				`sudo --chroot ../${CHROOT_NAME} cp src/x.txt src/esc.txt`,
+				`sudo --chroot ${CHROOT_NAME} cp src/x.txt src/esc.txt`,
 			);
 			expect(r.verdict).toBe('BLOCKED');
 			// The judged landing is INSIDE the chroot root, outside the ws.
@@ -65,7 +64,7 @@ describe('#3648 D6: sudo --chroot/-R re-bases the judged tail', () => {
 		'sudo -R <outside sibling> cp is denied (short spelling)',
 		async () => {
 			const r = await chrootGate(
-				`sudo -R ../${CHROOT_NAME} cp src/x.txt src/esc.txt`,
+				`sudo -R ${CHROOT_NAME} cp src/x.txt src/esc.txt`,
 			);
 			expect(r.verdict).toBe('BLOCKED');
 			expect(r.message).toMatch(/fixed-chroot-out[\\/]src[\\/]esc\.txt/);
@@ -97,7 +96,7 @@ describe('#3648 D6: sudo --chroot/-R re-bases the judged tail', () => {
 			// MANDATORY leg: generic re-rooting cannot cover embedded
 			// `of=<abs>` spellings — under a chroot they must withdraw.
 			const r = await chrootGate(
-				'sudo --chroot ../fixed-chroot-out dd if=src/x.txt of=/workspace/src/ok',
+				'sudo --chroot fixed-chroot-out dd if=src/x.txt of=/workspace/src/ok',
 			);
 			expect(r.verdict).toBe('BLOCKED');
 			expect(r.message).toMatch(/dynamic path target/);
@@ -121,7 +120,7 @@ describe('#3648 D6: sudo --chroot/-R re-bases the judged tail', () => {
 		'nice sudo --chroot <outside sibling> cp is denied (launcher-nested)',
 		async () => {
 			const r = await chrootGate(
-				`nice sudo --chroot ../${CHROOT_NAME} cp src/x.txt src/esc.txt`,
+				`nice sudo --chroot ${CHROOT_NAME} cp src/x.txt src/esc.txt`,
 			);
 			expect(r.verdict).toBe('BLOCKED');
 			expect(r.message).toMatch(/fixed-chroot-out[\\/]src[\\/]esc\.txt/);

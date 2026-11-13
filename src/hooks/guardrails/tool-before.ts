@@ -2109,8 +2109,23 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 						// #3568 review F-10: the user's SOURCE word is untrusted
 						// text — sanitize control characters and bound its length
 						// before it reaches the operator-facing denial.
+						// FB-017 (#3689 review): an ABSOLUTE-shaped source word
+						// (POSIX /, drive C:/ or C:\, UNC \\) additionally goes
+						// through redactPath so a home/profile prefix renders
+						// folded like the sibling SCOPE_VIOLATION sink — the
+						// xargs arm stores the raw verb word and
+						// `xargs /home/alice/bin/cp` used to leak the profile
+						// path. RELATIVE words (the #3491 source-word rendering
+						// contract, `src/{a,../esc}`, `src/ok.txt`) stay
+						// BYTE-VERBATIM: redactPath normalizes separators and
+						// broke the slash-shaped pins (CI-equivalent importers
+						// brace-3491/brace-sites-3491/launcher-3616).
+						const dynamicRawWord =
+							write.original.path ?? write.original.dynamicSourceWord ?? '';
 						const dynamicTargetLabel = sanitizeDiagnosticText(
-							write.original.path ?? write.original.dynamicSourceWord ?? '',
+							/^(?:\/|[A-Za-z]:[\\/]|\\\\)/.test(dynamicRawWord)
+								? redactPath(dynamicRawWord)
+								: dynamicRawWord,
 							160,
 						);
 						// #3616 D14 (item 15): class-accurate deny reasons. The

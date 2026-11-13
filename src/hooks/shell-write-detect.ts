@@ -501,7 +501,15 @@ function isBareRmdirOperand(word: string): boolean {
 	return BARE_RMDIR_OPERAND.test(word) && !word.split('/').includes('..');
 }
 
-/** Builtins with in-place editing semantics (modify file argument in place). */
+/** Builtins with in-place editing semantics (modify file argument in place).
+ * FB-018 (#3689 review): the awk FAMILY (gawk/mawk/nawk/original-awk) is
+ * routed here through AWK_FAMILY_ALIAS at the leaf (detectInplaceEdit) so
+ * every awk-branch operand/program-slot logic fires uniformly — adding the
+ * aliases to this set directly was WRONG (detectInplaceEdit keys several
+ * branches on the literal 'awk' and would misread the positional program as
+ * a data file). Carve-out safety rests on the program-text gate (FB-005) in
+ * the eval arm: a redirect/system-bearing program still classifies as eval
+ * even under `-i inplace`. */
 const INPLACE_EDIT_COMMANDS = new Set(['sed', 'perl', 'awk']);
 
 /**
@@ -558,6 +566,13 @@ const INTERPRETER_EVAL_COMMANDS = new Set([
 	'awk',
 	'gawk',
 	'mawk',
+	// FB-019 (#3689 review): nawk is the BSD/macOS native awk binary and
+	// original-awk the Debian BWK package — same positional-program eval
+	// semantics; omitting them re-opened the #3648 AC2 fail-open under a
+	// renamed binary. busybox awk stays out (subcommand canonicalization is
+	// a separate documented design boundary — Considered, not filed).
+	'nawk',
+	'original-awk',
 ]);
 
 /**
@@ -570,6 +585,8 @@ const INTERPRETER_EVAL_COMMANDS = new Set([
 const AWK_FAMILY_ALIAS = new Map([
 	['gawk', 'awk'],
 	['mawk', 'awk'],
+	['nawk', 'awk'],
+	['original-awk', 'awk'],
 ]);
 
 /** Network downloaders. */
@@ -2703,14 +2720,20 @@ export function walkLauncherOptions(
 	const base = basenameAnySep(launcherWord);
 	if (base === 'sudo') return walkSudoOptions(words);
 	if (base === 'sudoedit') return walkSudoeditOptions(words);
-	if (base === 'time') {
+	if (base === 'time' || base === 'gtime') {
 		// #3572 N-03: keyword-suppression must be PROVEN by a defined raw
 		// spelling — when the caller cannot supply one (dequoted chain words
 		// in the leaf walk), the GNU binary grammar wins. The GNU grammar
 		// detects the `-o` write target where the keyword grammar emits
 		// nothing, so the unresolved case is deny-direction (an
 		// over-approximated launcher_write, never a lost one).
+		// FB-019 (#3689 closeout review): `gtime` (macOS/Homebrew coreutils
+		// GNU time) is a real executable, NEVER the bash keyword — it rides
+		// the GNU binary grammar unconditionally. Without this site the
+		// write side admitted `gtime -o ../secret echo hi` while
+		// /usr/bin/time blocked.
 		const binaryGrammar =
+			base === 'gtime' ||
 			isAbsolutePathSpelling(launcherWord) ||
 			rawLauncherWord === undefined ||
 			isKeywordSuppressedSpelling(rawLauncherWord, launcherWord);
@@ -2798,7 +2821,12 @@ function nestedTimeTail(
 	words: readonly string[],
 	innerIndex: number,
 ): { innerIndex: number; timeOutputFile: string } | null {
-	if (basenameAnySep(words[innerIndex] ?? '') !== 'time') return null;
+	// FB-019 (closeout round 2): gtime is the Homebrew GNU-time binary — the
+	// nested-time tail detection must recognize it too, or `sudo -i gtime -o
+	// src/t.txt true` loses the wrapper-chdir fail-closed that the `time`
+	// twin gets (the loginShell hop discards the home context).
+	const tailHeadBase = basenameAnySep(words[innerIndex] ?? '');
+	if (tailHeadBase !== 'time' && tailHeadBase !== 'gtime') return null;
 	const gnu = walkGnuTimeOptions(words.slice(innerIndex + 1));
 	if (
 		gnu.kind !== 'inner' ||
@@ -3578,6 +3606,9 @@ function detectorCommandPartsFromWordsBounded(
 			base !== 'exec' &&
 			base !== 'sudo' &&
 			base !== 'time' &&
+			// FB-019: gtime must reach the shared launcher dispatcher like
+			// time/nice/nohup, not stop the walk as an opaque leaf.
+			base !== 'gtime' &&
 			base !== 'nice' &&
 			base !== 'nohup'
 		) {
@@ -3802,6 +3833,7 @@ function detectLauncherWrites(cmd: unknown): WriteTarget[] {
 			base === 'sudo' ||
 			base === 'sudoedit' ||
 			base === 'time' ||
+			base === 'gtime' ||
 			base === 'nice' ||
 			base === 'nohup'
 		) {
@@ -3902,6 +3934,7 @@ function detectLauncherWrites(cmd: unknown): WriteTarget[] {
 				if (
 					tailBase === 'sudo' ||
 					tailBase === 'time' ||
+					tailBase === 'gtime' ||
 					tailBase === 'nice' ||
 					tailBase === 'nohup'
 				) {
@@ -5047,14 +5080,59 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 				BUILTIN_WRITE_COMMANDS.has(base) || base === 'tee' || base === 'dd'
 			);
 		};
+		// FB-004 (#3689 review): a verb OUTSIDE the write tables is not
+		// automatically benign — an interpreter/shell verb (`sh -c 'rm -rf
+		// ../secret'`, `python3 -c 'open(…,"w")'`, `awk 'BEGIN{print > …}'`,
+		// `perl -e 'unlink …'`, `node -e 'writeFileSync …'`) or a launcher
+		// verb (`env`, `sudo`, `nice`, `time`, `timeout`, another `xargs`)
+		// executes the payload at runtime with STDIN-fed operands — exactly
+		// the unknowable composition this arm exists to withdraw. Classify
+		// those as fail-closed withdraws too (same dynamic marker).
+		const verbWithdraws = (word: string): boolean => {
+			const base = basenameAnySep(word);
+			if (
+				base === 'xargs' ||
+				base === 'env' ||
+				base === 'sudo' ||
+				base === 'nice' ||
+				base === 'nohup' ||
+				base === 'timeout' ||
+				base === 'command' ||
+				base === 'builtin' ||
+				base === 'time' ||
+				base === 'gtime'
+			) {
+				return true;
+			}
+			if (/(^|\/|\\)(g?time)$/.test(base)) return true;
+			return INTERPRETER_EVAL_COMMANDS.has(base);
+		};
+		// FB-010 (#3689 review): an expansion-bearing verb (`"$CMD"`,
+		// `${CMD}`, backticks) selects the command at runtime — the same
+		// unknowable-verb class; withdraw instead of treating it as benign
+		// (the arm already fails closed for UNKNOWN OPTIONS — keep the
+		// deny-direction consistent).
+		const verbIsDynamic = (word: string): boolean =>
+			/[$`]/.test(word) || word === '*' || word.startsWith('*');
+		// FB-003 (#3689 review): anchor the walk on the WRAPPER-CONSUMED
+		// tail. getSuffixWords returns the raw suffix, so under
+		// `sudo xargs cp …` / `(sudo xargs cp …)` the first walked word was
+		// the leaf name `xargs` itself (or wrapper residue) — taken as the
+		// verb, missing the write-table check, and ADMITTED. Sibling arms
+		// read the consumed tail (#3485 PRR-006 window); mirror that: start
+		// after the first token whose basename is `xargs`.
+		const leafIdx = xargsWords.findIndex(
+			(w) => typeof w === 'string' && basenameAnySep(w) === 'xargs',
+		);
+		const walkWords = leafIdx >= 0 ? xargsWords.slice(leafIdx + 1) : xargsWords;
 		let wi = 0;
 		let verbWord: string | undefined;
 		let unknownOption = false;
-		while (wi < xargsWords.length) {
-			const t = xargsWords[wi];
+		while (wi < walkWords.length) {
+			const t = walkWords[wi];
 			if (t === undefined) break;
 			if (t === '--') {
-				verbWord = xargsWords[wi + 1];
+				verbWord = walkWords[wi + 1];
 				break;
 			}
 			if (t.startsWith('--')) {
@@ -5133,9 +5211,12 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 		}
 		if (unknownOption) {
 			// Unknown option: the verb position is unknowable — scan every
-			// remaining word (deny-direction).
-			const found = xargsWords.find(
-				(w) => typeof w === 'string' && isWriteVerbWord(w),
+			// remaining word (deny-direction). FB-004/010: the scan uses the
+			// same expanded predicate as the verb position.
+			const found = walkWords.find(
+				(w) =>
+					typeof w === 'string' &&
+					(isWriteVerbWord(w) || verbWithdraws(w) || verbIsDynamic(w)),
 			);
 			if (found !== undefined) {
 				results.push({
@@ -5147,7 +5228,12 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 			}
 			return results;
 		}
-		if (verbWord !== undefined && isWriteVerbWord(verbWord)) {
+		if (
+			verbWord !== undefined &&
+			(isWriteVerbWord(verbWord) ||
+				verbWithdraws(verbWord) ||
+				verbIsDynamic(verbWord))
+		) {
 			results.push({
 				category: 'builtin_write',
 				operator: `xargs-fed ${basenameAnySep(verbWord)}`,
@@ -5686,7 +5772,13 @@ function detectInplaceEdit(cmd: unknown): WriteTarget[] {
 	if (!name) return results;
 
 	const leaf = detectorCommandLeaf(cmd);
-	const lowerName = detectorSetMember(leaf, INPLACE_EDIT_COMMANDS);
+	// FB-018 (#3689 review): route awk-family dialects (gawk/mawk/nawk/
+	// original-awk) through the literal-'awk'-keyed operand logic of this
+	// function via the family alias map — `gawk -i inplace '{print}' src/f`
+	// must keep the same program-slot model (and the same ADMIT) as `awk`.
+	const familyLeaf =
+		typeof leaf === 'string' ? (AWK_FAMILY_ALIAS.get(leaf) ?? leaf) : leaf;
+	const lowerName = detectorSetMember(familyLeaf, INPLACE_EDIT_COMMANDS);
 	if (!lowerName) return [];
 
 	// #3569 4.5 r2: wrapper-consumed suffix window (#3485 PRR-006,
@@ -6921,6 +7013,18 @@ function detectInterpreterEval(cmd: unknown): WriteTarget[] {
 		let sawProgram = false;
 		let sawInPlace = false;
 		let denyOnUncertainty = false;
+		// FB-005 (#3689 review): the `-i inplace` carve-out must apply ONLY
+		// to programs without external-effect syntax. Real gawk executes
+		// `print > "file"`, `print | "cmd"`, `system("rm -rf …")` and
+		// `getline < "file"` even under -i inplace — the in-place redirect
+		// does not disable the program (verified by the reviewer executing
+		// gawk). Captured program texts gate the carve-out; any redirect/
+		// pipe/system/getline spelling falls through to the eval
+		// classification (deny direction; comparisons like `$1 > 2`
+		// over-deny into the sanctioned python-parity class).
+		const programTexts: string[] = [];
+		const awkProgramHasExternalEffect = (t: string): boolean =>
+			/[<>|]/.test(t) || /\bsystem\s*\(/.test(t) || /\bgetline\b/.test(t);
 		let i = 0;
 		while (i < suffixWords.length) {
 			const w = suffixWords[i];
@@ -6935,6 +7039,7 @@ function detectInterpreterEval(cmd: unknown): WriteTarget[] {
 			if (w.startsWith('--')) {
 				if (w.startsWith('--source=')) {
 					sawInline = true;
+					programTexts.push(w.slice('--source='.length));
 					i += 1;
 					continue;
 				}
@@ -6946,8 +7051,10 @@ function detectInterpreterEval(cmd: unknown): WriteTarget[] {
 				if (w === '--source' || w === '--file') {
 					const nxt = suffixWords[i + 1];
 					if (nxt !== undefined) {
-						if (w === '--source') sawInline = true;
-						else sawProgramFile = true;
+						if (w === '--source') {
+							sawInline = true;
+							programTexts.push(nxt);
+						} else sawProgramFile = true;
 						i += 1;
 					}
 					i += 1;
@@ -6997,8 +7104,12 @@ function detectInterpreterEval(cmd: unknown): WriteTarget[] {
 				const ch = members[0];
 				const last = members.length === 1;
 				if (ch === 'f') sawProgramFile = true;
-				else if (ch === 'e') sawInline = true;
-				else if (ch === 'i') {
+				else if (ch === 'e') {
+					sawInline = true;
+					programTexts.push(
+						last ? (suffixWords[i + 1] ?? '') : members.slice(1),
+					);
+				} else if (ch === 'i') {
 					// 4.5 r2: `-i` is gawk's --include short form, not solely
 					// in-place — the in-place carve-out applies ONLY when the
 					// value is literally `inplace` (detached `-i inplace` or
@@ -7022,16 +7133,29 @@ function detectInterpreterEval(cmd: unknown): WriteTarget[] {
 			}
 			// First non-option word: the PROGRAM, unless a -f/--file program
 			// already supplied it (then it is a data file).
-			if (!sawProgramFile && !sawInline) sawProgram = true;
+			if (!sawProgramFile && !sawInline) {
+				sawProgram = true;
+				programTexts.push(w);
+			}
 			i += 1;
 		}
 		// 4.5 r3: the in-place carve-out applies ONLY when the in-place
 		// arm actually owns at least one operand target — with an inline
 		// program and ZERO data-file operands, detectInplaceEdit emits
 		// nothing and real gawk still executes the BEGIN block
-		// (`awk -i inplace 'BEGIN{print > "../secret"}' wrote ../secret`
+		// (`awk -i inplace 'BEGIN{print > "../secret"}'` wrote ../secret
 		// while the gate admitted).
-		if (sawInPlace && detectInplaceEdit(cmd).length > 0) return results;
+		// FB-005 (#3689 review): and ONLY when every captured program is
+		// free of external-effect syntax (>, >>, |, system(), getline) —
+		// -i inplace does not disable those; they must reach the eval
+		// classification. A program we never captured text for (after `--`)
+		// counts as opaque (deny direction).
+		const programsOpaque =
+			(sawInline || sawProgram) &&
+			(programTexts.length === 0 ||
+				programTexts.some((t) => awkProgramHasExternalEffect(t)));
+		if (sawInPlace && !programsOpaque && detectInplaceEdit(cmd).length > 0)
+			return results;
 		if (!(sawInline || sawProgram || denyOnUncertainty)) return results;
 	} else {
 		const relevantFlags = evalFlags[canonical] ?? [];

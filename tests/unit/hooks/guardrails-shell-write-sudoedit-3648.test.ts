@@ -102,4 +102,65 @@ describe('#3648 D3: sudoedit edit operands are judged per its own getopt', () =>
 		},
 		T,
 	);
+
+	// FB-006 (#3689 review round): the PR summary claims `-R DIR`/`--chroot`
+	// withdrawal but the suite pinned zero -R legs — neutralizing the
+	// glued/detached -R mapping flipped these shapes to ADMITTED with the
+	// suite green. The chroot re-bases operand resolution (sudo 1.9
+	// synopsis), so EVERY edit operand withdraws while the chroot context is
+	// live, in-scope-looking ones included; the no-option control stays
+	// admitted so a wholesale -R breakage cannot hide.
+	test(
+		'sudoedit -R /outside src/a is denied (detached -R; operand under unresolvable chroot)',
+		async () => {
+			const r = await gate('sudoedit -R /outside src/a');
+			expect(r.verdict).toBe('BLOCKED');
+		},
+		T,
+	);
+
+	test(
+		'sudoedit -R/outside src/a is denied (glued -R)',
+		async () => {
+			const r = await gate('sudoedit -R/outside src/a');
+			expect(r.verdict).toBe('BLOCKED');
+		},
+		T,
+	);
+
+	test(
+		'sudoedit --chroot /outside src/a is denied (detached long form)',
+		async () => {
+			const r = await gate('sudoedit --chroot /outside src/a');
+			expect(r.verdict).toBe('BLOCKED');
+		},
+		T,
+	);
+
+	test(
+		'sudoedit --chroot=/outside src/a is denied (glued long form)',
+		async () => {
+			const r = await gate('sudoedit --chroot=/outside src/a');
+			expect(r.verdict).toBe('BLOCKED');
+		},
+		T,
+	);
+
+	test(
+		'sudoedit -R src-dir src/a is denied (workspace-relative chroot still re-bases resolution)',
+		async () => {
+			const r = await gate('sudoedit -R src-dir src/a');
+			expect(r.verdict).toBe('BLOCKED');
+		},
+		T,
+	);
+
+	test(
+		'sudoedit src/a stays admitted (no chroot option — control)',
+		async () => {
+			const r = await gate('sudoedit src/a');
+			expect(r.verdict).toBe('ADMITTED');
+		},
+		T,
+	);
 });
