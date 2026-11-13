@@ -74,10 +74,16 @@ async function runBaseQuery(
 
 /**
  * Resolve the merge-base commit quality deltas are measured against.
- * Mirrors pre-check-batch's candidate loop: first candidate branch that
- * produces a valid sha wins. Returns null when git is unavailable, the
- * directory is not a repository, or no candidate branch exists (callers then
- * fall back to head-only absolute metrics).
+ * Uses the same candidate order as pre-check-batch but keeps the
+ * FIRST-valid-sha-wins rule (unlike pre-check-batch's validated resolver
+ * from #3131): quality deltas degrade gracefully to head-only absolute
+ * metrics only when NO candidate resolves — a stale-but-resolvable first
+ * candidate still wins and skews the deltas against the stale base (that
+ * exposure is exactly what #3676 tracks), so the overflow/planted-ref
+ * fail-closed machinery does not apply here. Returns null when git is unavailable, the
+ * directory is not a repository, or no candidate branch exists (callers
+ * then fall back to head-only absolute metrics). See #3676 for the
+ * same-class stale-first-candidate exposure on this surface.
  */
 export async function resolveQualityMergeBase(
 	workingDir: string,
