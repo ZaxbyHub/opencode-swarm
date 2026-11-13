@@ -128,17 +128,31 @@ describe('reviewer scope capture races (v2)', () => {
 	});
 
 	test('HEAD advance between initial SHA and capture recheck is typed retryable', async () => {
-		// Fake spawn: the first rev-parse returns the real HEAD; the second
-		// (final recheck) returns a different valid SHA — a HEAD race.
-		const realSha = spawnSync('git', ['rev-parse', '--verify', 'HEAD'], {
-			cwd: directory,
-			encoding: 'utf-8',
-			timeout: 5_000,
-		}).stdout.trim();
-		let spawnCalls = 0;
-		receiptScopeInternals.spawn = (() => {
-			spawnCalls += 1;
-			const sha = spawnCalls <= 1 ? realSha : 'f'.repeat(40);
+		// Fake spawn keyed on ARGS (not call order — #3680 added a bounded
+		// --git-dir availability probe ahead of HEAD resolution, so a
+		// positional stub no longer pins the race): the first HEAD^{commit}
+		// verification returns the real HEAD, the recheck returns a different
+		// valid SHA — a HEAD race.
+		const realSha = spawnSync(
+			'git',
+			['rev-parse', '--verify', 'HEAD^{commit}'],
+			{
+				cwd: directory,
+				encoding: 'utf-8',
+				timeout: 5_000,
+			},
+		).stdout.trim();
+		let headChecks = 0;
+		receiptScopeInternals.spawn = ((
+			_command: string,
+			args: readonly string[],
+		) => {
+			const sha = args.includes('--git-dir')
+				? '.git'
+				: (() => {
+						headChecks += 1;
+						return headChecks <= 1 ? realSha : 'f'.repeat(40);
+					})();
 			const stdout = new PassThrough();
 			const fakeChild = Object.assign(new EventEmitter(), {
 				stdin: null,
@@ -155,7 +169,7 @@ describe('reviewer scope capture races (v2)', () => {
 		}) as typeof originalReceiptSpawn;
 
 		const result = await buildReviewerTaskScope(directory, ['src/a.ts']);
-		expect(spawnCalls).toBeGreaterThanOrEqual(2);
+		expect(headChecks).toBeGreaterThanOrEqual(2);
 		expect(result).toMatchObject({
 			ok: false,
 			code: 'head_changed',
