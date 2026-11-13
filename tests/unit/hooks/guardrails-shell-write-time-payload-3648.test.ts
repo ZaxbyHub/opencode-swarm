@@ -250,4 +250,24 @@ describe('#3648 D7 detector/resolver proofs: the first-leaf emission survives th
 		},
 		T,
 	);
+	test(
+		'4.6 r3: uppercase recursive flags and separator-glued rm withdraw',
+		async () => {
+			const denied = [
+				'/usr/bin/time -o src/t env rm -Rf /',
+				'/usr/bin/time -o src/t env rm -R ../y',
+				'/usr/bin/time -o src/t timeout 5 rm -R ../y',
+				'/usr/bin/time -o src/t sh -c "true;rm -rf ../y"',
+				'command time -q sh -c "true;rm -rf ../y"',
+				'time -o f sh -c "cd ..&&rm -rf y"',
+			];
+			for (const c of denied) {
+				const r = await gate(c);
+				expect(r.verdict).toBe('BLOCKED');
+			}
+			const a = await gate('cd src && /usr/bin/time -o r.txt rm -rf build');
+			expect(a.verdict).toBe('ADMITTED');
+		},
+		T,
+	);
 });

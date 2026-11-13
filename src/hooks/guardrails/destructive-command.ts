@@ -3296,14 +3296,17 @@ export function dcExtractRecursiveRmTargets(segment: string): string[] | null {
 		if (sawTime) {
 			// Deny-direction residue scan (covers unknownOption and tails the
 			// single-segment extractor cannot own): a recursive-rm spelling
-			// anywhere in the remaining text withdraws.
+			// anywhere in the remaining text withdraws. r3 critic: split on
+			// SHELL SEPARATORS too (`true;rm`, `..&&rm`) and match recursive
+			// flags CASE-INSENSITITVELY (`-R`, `-Rf`, `-fR` are recursive
+			// in GNU rm; only the verb itself is case-sensitive).
 			const residueHasRecursiveRm = (toks: string[]): boolean => {
 				const joined = toks
 					.map((t) =>
 						typeof t === 'string' ? t.replace(/^["']|["']$/g, '') : '',
 					)
 					.join(' ');
-				const words = joined.split(/\s+/);
+				const words = joined.split(/[\s;&|()]+/);
 				for (let k = 0; k < words.length; k++) {
 					if (
 						dcNormalizeVerbWord(words[k] ?? '').replace(
@@ -3314,7 +3317,10 @@ export function dcExtractRecursiveRmTargets(segment: string): string[] | null {
 						continue;
 					}
 					const flags = words.slice(k + 1).join(' ');
-					if (/(^|\s)-[a-z]*[rf]/.test(flags) || /--recursive/.test(flags)) {
+					if (
+						/(^|\s)-[A-Za-z]*[rRf]/.test(flags) ||
+						/--recursive/i.test(flags)
+					) {
 						return true;
 					}
 				}
