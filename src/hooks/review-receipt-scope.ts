@@ -223,8 +223,11 @@ interface BoundedGitResult {
  * so they must ride the retryable `head_timeout` channel instead of the
  * permanent `git_unavailable` one (#3680 AC12; final-critic round-2 blocker 1:
  * Node throws ENOMEM SYNCHRONOUSLY from spawn() and reports ENFILE only via
- * the async 'error' event, so the set must be applied to BOTH arms — the same
- * set the sibling classifier uses at reviewer-scope-file-fingerprint.ts).
+ * the async 'error' event, so the set must be applied to BOTH arms).
+ * Deliberately a SUPERSET of the descriptor-exhaustion pair (EMFILE/ENFILE)
+ * the sibling fs classifier at reviewer-scope-file-fingerprint.ts:381 treats
+ * as transient: that one guards openSync, this one guards spawn, where the
+ * fork/exec path can also fail with EAGAIN or ENOMEM.
  */
 const TRANSIENT_SPAWN_ERRNOS = new Set([
 	'EMFILE',
@@ -252,6 +255,12 @@ function runBoundedGit(
 		let stderrBytes = 0;
 		const stdoutChunks: Buffer[] = [];
 		const stderrChunks: Buffer[] = [];
+		// spawn()'s timeout option must be an unsigned INTEGER: a fractional
+		// remaining budget (the clamp legs derive deadlines from
+		// performance.now()) otherwise throws ERR_OUT_OF_RANGE synchronously,
+		// which the catch below would classify as a permanent missing-binary
+		// cause and answer with the wrong remedy (final-critic round-3 probe).
+		const budget = Math.max(1, Math.ceil(budgetMs));
 		const finish = (value: BoundedGitResult): void => {
 			if (settled) return;
 			settled = true;
@@ -267,7 +276,7 @@ function runBoundedGit(
 			child = _internals.spawn(_internals.resolveGitExecutable(), [...args], {
 				cwd: directory,
 				stdio: ['ignore', 'pipe', captureStderr ? 'pipe' : 'ignore'],
-				timeout: Math.max(1, budgetMs),
+				timeout: budget,
 				windowsHide: true,
 				// LC_ALL=C keeps the cause matchers below honest on gettext
 				// hosts: a translated 'not a git repository' / 'detected
@@ -298,10 +307,7 @@ function runBoundedGit(
 		// against an idle loop. With a real child the close event clears it
 		// via finish(); the ref only keeps the loop alive for at most
 		// budgetMs, which is the bounded wait we already promise.
-		timeoutHandle = setTimeout(
-			() => finish({ kind: 'timeout' }),
-			Math.max(1, budgetMs),
-		);
+		timeoutHandle = setTimeout(() => finish({ kind: 'timeout' }), budget);
 		// Resource-exhaustion spawn failures (EMFILE/ENFILE/EAGAIN/ENOMEM) are
 		// TRANSIENT — the caller's retry arm can genuinely clear them — so
 		// they must not be classified as a permanent missing-binary cause.

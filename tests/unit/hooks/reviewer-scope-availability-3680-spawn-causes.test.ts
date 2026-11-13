@@ -93,6 +93,12 @@ describe('classifyWorkspaceGitHealth deadline budget (#3680)', () => {
 			expect(typeof timeout).toBe('number');
 			expect(timeout as number).toBeGreaterThanOrEqual(1);
 			expect(timeout as number).toBeLessThanOrEqual(500);
+			// spawn()'s timeout option rejects a fractional value with a
+			// synchronous ERR_OUT_OF_RANGE (final-critic round-3 probe), so
+			// the remaining budget must be ceiled to an integer before it
+			// reaches argv — the deadline above is performance.now()-derived
+			// and therefore fractional.
+			expect(Number.isInteger(timeout)).toBe(true);
 		}
 		expect(elapsedMs).toBeLessThan(1_900);
 	}, 60_000);
