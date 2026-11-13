@@ -155,4 +155,21 @@ describe('#3648 D6: sudo --chroot/-R re-bases the judged tail', () => {
 		},
 		T,
 	);
+	test(
+		'4.5 review: sh -c payload with an absolute write target withdraws',
+		async () => {
+			const r = await gate('sudo --chroot /r sh -c "cp a /workspace/src/ok"');
+			expect(r.verdict).toBe('BLOCKED');
+		},
+		T,
+	);
+
+	test(
+		'4.5 review: dot-root absolute operand withdraws (disclosed over-deny)',
+		async () => {
+			const r = await gate('sudo --chroot . cp a /workspace/src/ok');
+			expect(r.verdict).toBe('BLOCKED');
+		},
+		T,
+	);
 });

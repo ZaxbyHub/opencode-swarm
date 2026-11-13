@@ -2027,7 +2027,15 @@ function matchSudoChdir(words: string[]): DcChdirMatch {
 		}
 		const hasAbsoluteWriteSpelling = restCh.some((w) => {
 			if (typeof w !== 'string') return false;
-			if (w.startsWith('/') || /^[A-Za-z]:[/]/.test(w)) return true;
+			// 4.5 review: detect an absolute-path TOKEN ANYWHERE in the
+			// word — an sh -c payload arrives as one multi-word token
+			// (`cp a /abs`), so a startsWith('/') whole-word test missed it
+			// and the chroot cd-rewrite judged the payload at the invoking
+			// root (fail-open). Whitespace-preceded /abs, drive prefixes,
+			// of=/abs, and redirects all count (deny-direction over-deny:
+			// any absolute spelling in the tail withdraws the whole tail).
+			if (/(?:^|[\s>])\//.test(w)) return true;
+			if (/(?:^|[\s>])[A-Za-z]:[\\/]/.test(w)) return true;
 			if (/of=\//.test(w)) return true; // embedded dd-style absolute target
 			return /\S?>\S?\//.test(w); // redirect carrying an absolute path
 		});
@@ -2371,10 +2379,13 @@ function matchTimeWrapperSegment(
 	const stripped = text.trim().replace(/^[({\s]+/, '');
 	// BARE keyword spelling only.
 	const bare = /^(time)(?=[\s]|$)([\s\S]*)$/.exec(stripped);
-	// GNU spellings: path-qualified, backslash-escaped, or quoted.
+	// GNU spellings: path-qualified, backslash-escaped, or quoted. 4.5
+	// review: the escaped form needs a LITERAL backslash in the regex
+	// (`\\time`) — a single `\t` in a JS regex literal is the TAB character
+	// and matched nothing.
 	const gnu =
 		bare === null
-			? /^(\/[^\s]*time|\time|['"]time['"])(?=[\s]|$)([\s\S]*)$/.exec(stripped)
+			? /^(\/[^\s]*time|\\time|['"]time['"])(?=[\s]|$)([\s\S]*)$/.exec(stripped)
 			: null;
 	const m = bare ?? gnu;
 	if (m === null) return null;
@@ -3101,11 +3112,14 @@ export function dcExtractRecursiveRmTargets(segment: string): string[] | null {
 		const XARGS_LONG_VALUE_DETACHED = new Set([
 			'--arg-file',
 			'--delimiter',
-			'--replace',
 			'--max-args',
 			'--max-procs',
 			'--max-chars',
 		]);
+		// 4.5 review: GNU xargs --replace[=STR] takes an OPTIONAL GLUED
+		// value only — bare --replace is a single-word flag (the glued form
+		// rides the t.includes('=') branch above); advancing two words
+		// skipped the real verb (`xargs --replace rm -rf` admitted).
 		const XARGS_LONG_FLAG = new Set([
 			'--null',
 			'--no-run-if-empty',
@@ -3143,25 +3157,25 @@ export function dcExtractRecursiveRmTargets(segment: string): string[] | null {
 			if (t.startsWith('-') && t !== '-') {
 				const members = t.slice(1);
 				let consumedNext = false;
-				let stop = false;
+				let valueOption = false;
 				for (let mi = 0; mi < members.length; mi++) {
 					const ch = members[mi];
 					if (ch === undefined) break;
 					if (XARGS_FLAG_SHORT.has(ch)) continue;
 					if (XARGS_VALUE_SHORT.has(ch)) {
 						consumedNext = mi === members.length - 1;
-						stop = true;
+						valueOption = true;
 						break;
 					}
 					unknownOption = true;
 					break;
 				}
 				if (unknownOption) break;
-				if (stop) {
-					vi += consumedNext ? 2 : 1;
-					break;
-				}
-				vi += 1;
+				// 4.5 review: a value-taking short option consumes its value
+				// and the walk CONTINUES — breaking made the following flag
+				// the "verb" (`xargs -n 5 -0 rm -rf` admitted on this arm
+				// too).
+				vi += valueOption ? (consumedNext ? 2 : 1) : 1;
 				continue;
 			}
 			break;

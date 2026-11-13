@@ -121,4 +121,18 @@ describe('#3648 D1 disclosed over-deny bound: python-parity contract', () => {
 		},
 		T,
 	);
+	test(
+		'4.5 review: glued -ffile does not hang and --include programs still deny',
+		async () => {
+			const a = await gate('awk -ffile.awk data');
+			expect(a.verdict).toBe('ADMITTED');
+			const b = await gate(
+				'awk --include foo.awk \'BEGIN{print > "../secret"}\'',
+			);
+			expect(b.verdict).toBe('BLOCKED');
+			const c = await gate('awk -v x=1 -f prog.awk data');
+			expect(c.verdict).toBe('ADMITTED');
+		},
+		T,
+	);
 });

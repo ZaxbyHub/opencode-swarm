@@ -182,4 +182,15 @@ describe('#3648 D7 detector/resolver proofs: the first-leaf emission survives th
 		},
 		T,
 	);
+	test(
+		'4.5 review: backslash-escaped time payload denied (literal backslash)',
+		async () => {
+			// Literal backslash-time: written via the Edit tool (a bash
+			// heredoc collapsed the escape to a TAB — the very bug class
+			// this leg pins, caught in the source by the 4.5 reviewer).
+			const r = await gate('\\time -o src/t.txt sh -c "echo x > ../y.txt"');
+			expect(r.verdict).toBe('BLOCKED');
+		},
+		T,
+	);
 });

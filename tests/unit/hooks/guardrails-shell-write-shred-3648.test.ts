@@ -97,4 +97,14 @@ describe('#3648 D4: shred operands are overwrite write targets', () => {
 		},
 		T,
 	);
+	test(
+		'4.5 review: a consumed value option does not end option parsing',
+		async () => {
+			const a = await gate('shred -s 1024 -z src/a');
+			expect(a.verdict).toBe('ADMITTED');
+			const b = await gate('shred -s 1024 -z ../x');
+			expect(b.verdict).toBe('BLOCKED');
+		},
+		T,
+	);
 });

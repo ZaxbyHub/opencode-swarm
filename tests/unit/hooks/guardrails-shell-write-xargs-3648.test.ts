@@ -104,4 +104,18 @@ describe('#3648 D2: xargs-fed write/delete verbs withdraw fail-closed', () => {
 		},
 		T,
 	);
+	test(
+		'4.5 review: flags after a value-taking option still reach the verb',
+		async () => {
+			const a = await gate('echo ../x | xargs -n 5 -0 rm -rf', {
+				blockDestructive: true,
+			});
+			expect(a.verdict).toBe('BLOCKED');
+			const b = await gate('xargs -I{} -t cp src/a {}');
+			expect(b.verdict).toBe('BLOCKED');
+			const c = await gate('xargs --replace tee ../esc');
+			expect(c.verdict).toBe('BLOCKED');
+		},
+		T,
+	);
 });

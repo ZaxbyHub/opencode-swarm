@@ -5078,10 +5078,17 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 					wi += 1;
 					continue;
 				}
+				// 4.5 review: GNU xargs `--replace[=STR]` takes an OPTIONAL
+				// GLUED value — a bare `--replace` is a single-word flag,
+				// and advancing two words skipped the real verb
+				// (`xargs --replace tee ../esc` admitted).
+				if (t === '--replace') {
+					wi += 1;
+					continue;
+				}
 				if (
 					t === '--arg-file' ||
 					t === '--delimiter' ||
-					t === '--replace' ||
 					t === '--max-args' ||
 					t === '--max-procs' ||
 					t === '--max-chars'
@@ -5095,28 +5102,25 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 			if (t.startsWith('-') && t !== '-') {
 				const members = t.slice(1);
 				let consumedNext = false;
-				let stop = false;
+				let valueOption = false;
 				for (let mi = 0; mi < members.length; mi++) {
 					const ch = members[mi];
 					if (ch === undefined) break;
 					if (ch === '0' || ch === 'r' || ch === 't' || ch === 'x') continue;
 					if ('adEeILlnPs'.includes(ch)) {
 						consumedNext = mi === members.length - 1;
-						stop = true;
+						valueOption = true;
 						break;
 					}
 					unknownOption = true;
 					break;
 				}
-				if (unknownOption || stop) {
-					if (!unknownOption && consumedNext) {
-						verbWord = xargsWords[wi + 2];
-					} else if (!unknownOption) {
-						verbWord = xargsWords[wi + 1];
-					}
-					break;
-				}
-				wi += 1;
+				if (unknownOption) break;
+				// 4.5 review: a value-taking short option CONSUMES its value
+				// and the walk CONTINUES — breaking here made the following
+				// flag the "verb" (`xargs -n 5 -0 rm -rf` admitted). The
+				// verb is the first non-option word after ALL options.
+				wi += valueOption ? (consumedNext ? 2 : 1) : 1;
 				continue;
 			}
 			verbWord = t;
@@ -5451,10 +5455,13 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 						continue;
 					if (ch === 'n' || ch === 's') {
 						if (m === members.length - 1 && w + 1 < suffixWords.length) w++; // detached value
-						stop = true; // value consumed (glued tail or next word) — end of token
+						// 4.5 review: a CONSUMED value option does NOT end
+						// option parsing — `shred -s 1024 -z src/a` misread
+						// the trailing -z flag as an out-of-scope operand.
+						// The walk continues over the remaining options.
 						break;
 					}
-					stop = true;
+					stop = true; // unknown member: remaining words are operands
 					break;
 				}
 				if (stop) {
@@ -6951,10 +6958,13 @@ function detectInterpreterEval(cmd: unknown): WriteTarget[] {
 					i += 1;
 					continue;
 				}
-				// --include/--load: library loaders (value-taking), not inline
-				// code — same carve-out as -i/-l above.
+				// --include/--load: value-taking library loaders. NOT the
+				// in-place carve-out (4.5 review: detectInplaceEdit matches only
+				// -i/-i* spellings, so marking --include as in-place returned
+				// early and ADMITTED `awk --include lib 'BEGIN{...}'`); the value
+				// is consumed and the program classification continues — an
+				// inline program after a library load still classifies as eval.
 				if (w === '--include' || w === '--load') {
-					if (w === '--include') sawInPlace = true;
 					i += 2;
 					continue;
 				}
@@ -6971,7 +6981,11 @@ function detectInterpreterEval(cmd: unknown): WriteTarget[] {
 				// (argument = next word) or swallows the token tail. An unknown
 				// member denies on uncertainty.
 				const members = w.slice(1);
-				if (!/^[vFfeil]+$/.test(members)) {
+				// 4.5 review: validate the FIRST member only — the glued VALUE
+				// tail may contain any characters, and requiring the whole token
+				// to be [vFfeil]+ hung on `-ffile` (all-flag chars, not last, the
+				// cursor never advanced: an infinite loop).
+				if (!/^[vFfeil]/.test(members)) {
 					denyOnUncertainty = true;
 					break;
 				}
@@ -6980,7 +6994,11 @@ function detectInterpreterEval(cmd: unknown): WriteTarget[] {
 				if (ch === 'f') sawProgramFile = true;
 				else if (ch === 'e') sawInline = true;
 				else if (ch === 'i') sawInPlace = true;
-				if (last) i += 1; // the value is the next word
+				// Glued value (-ffile): token alone (+1). Detached (-f file):
+				// token + next word (+2) — the old `if (last) i += 1` skipped
+				// only one slot for detached values (4.5 review Important 5a:
+				// `awk -v x=1 -f prog.awk data` misread x=1 as the program).
+				i += last ? 2 : 1;
 				continue;
 			}
 			// First non-option word: the PROGRAM, unless a -f/--file program
