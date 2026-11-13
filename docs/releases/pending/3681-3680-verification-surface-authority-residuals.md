@@ -84,12 +84,13 @@ pending-owner decision:
 - `src/hooks/review-receipt-scope.ts` — `classifyWorkspaceGitHealth` +
   typed `resolveHeadSha` causes; new permanent codes join
   `ReviewerScopeBuildFailureCode`.
-- `src/hooks/reviewer-scope-lifecycle.ts` — routed and zero-routed dispatch
-  paths classify on entry and once more after capture (the recheck), and
-  terminate on permanent causes; the degraded advisory names the terminal
-  condition instead of advising re-dispatch; the in-code attribution
-  comment corrected (the routed head_timeout wall pre-dates PR #3668;
-  the zero-routed retryable conversion was #3668's).
+- `src/hooks/reviewer-scope-lifecycle.ts` — the zero-routed denial and
+  degraded-advisory paths classify on entry and terminate on permanent
+  causes; the routed capture in `review-receipt-scope.ts` classifies on
+  entry and once more after capture (the recheck); the degraded advisory
+  names the terminal condition instead of advising re-dispatch; the in-code
+  attribution comment corrected (the routed head_timeout wall pre-dates
+  PR #3668; the zero-routed retryable conversion was #3668's).
 - `docs/configuration.md` — reviewer-gate rows document the no-git terminal
   state.
 
