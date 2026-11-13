@@ -247,6 +247,17 @@ function runBoundedGit(
 				stdio: ['ignore', 'pipe', captureStderr ? 'pipe' : 'ignore'],
 				timeout: Math.max(1, budgetMs),
 				windowsHide: true,
+				// LC_ALL=C keeps the cause matchers below honest on gettext
+				// hosts: a translated 'not a git repository' / 'detected
+				// dubious ownership' would otherwise fall through to the
+				// generic corrupt classification and lose the actionable
+				// remedy (final-critic probe 7(ii)).
+				env: {
+					...process.env,
+					LC_ALL: 'C',
+					LANGUAGE: '',
+					LC_MESSAGES: 'C',
+				},
 			});
 		} catch {
 			finish({ kind: 'spawn-error' });
@@ -261,7 +272,15 @@ function runBoundedGit(
 			() => finish({ kind: 'timeout' }),
 			Math.max(1, budgetMs),
 		);
-		child?.once('error', () => finish({ kind: 'spawn-error' }));
+		// Resource-exhaustion spawn failures (EMFILE/EAGAIN/ENOMEM) are
+		// TRANSIENT — the caller's retry arm can genuinely clear them — so
+		// they must not be classified as a permanent missing-binary cause.
+		child?.once('error', (error: unknown) => {
+			const code = (error as NodeJS.ErrnoException | null)?.code;
+			const transient =
+				code === 'EMFILE' || code === 'EAGAIN' || code === 'ENOMEM';
+			finish(transient ? { kind: 'timeout' } : { kind: 'spawn-error' });
+		});
 		child?.stdout?.on('data', (chunk: Buffer | string) => {
 			const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
 			stdoutBytes += bytes.byteLength;

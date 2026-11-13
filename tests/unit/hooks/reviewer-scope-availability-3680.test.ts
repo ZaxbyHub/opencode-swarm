@@ -263,16 +263,41 @@ describe('buildReviewerTaskScope git-environment denials (#3680)', () => {
 describe('classifyWorkspaceGitHealth deadline budget (#3680)', () => {
 	test('each probe child is clamped to the caller deadline and never hangs', async () => {
 		const observedTimeouts: unknown[] = [];
-		// Bind the fake-child spawn BEFORE installing the recording wrapper —
-		// reading the seam inside the wrapper would re-enter the wrapper
-		// itself (self-referential mock hang).
-		const fakeSpawn = (() => {
+		// Fake children by role: the availability probe answers (exit 0,
+		// stdout '.git'), the HEAD^{commit} verify fails fast (exit 128 — so
+		// the failure-arm follow-ups actually run), and every later child
+		// hangs so the classifier's own per-child timer is the only terminator.
+		// (Final-critic round 1: the previous never-answering fake let the
+		// unclamped 2000ms probe satisfy the old <=2000 bound while the three
+		// resolveHeadSha children — the ones the clamp exists for — never ran;
+		// removing the clamps left the suite 14/14 green.)
+		let call = 0;
+		const fakeSpawn = ((_command: string, args: string[]) => {
+			call += 1;
+			const stdout = new PassThrough();
+			const stderr = new PassThrough();
 			const child = Object.assign(new EventEmitter(), {
 				stdin: null,
-				stdout: new PassThrough(),
-				stderr: new PassThrough(),
+				stdout,
+				stderr,
 				kill: () => true,
 			}) as unknown as ReturnType<typeof originalSpawn>;
+			if (args.includes('--git-dir')) {
+				queueMicrotask(() => {
+					stdout.write('.git\n');
+					stdout.end();
+					stderr.end();
+					child.emit('close', 0);
+				});
+			} else if (args.includes('--verify')) {
+				queueMicrotask(() => {
+					stdout.end();
+					stderr.end();
+					child.emit('close', 128);
+				});
+			}
+			// symbolic-ref / show-ref children never emit: the clamped timer
+			// must terminate them.
 			return child;
 		}) as typeof originalSpawn;
 		const recordingSpawn = ((
@@ -284,19 +309,28 @@ describe('classifyWorkspaceGitHealth deadline budget (#3680)', () => {
 			return fakeSpawn(command, args, options);
 		}) as typeof originalSpawn;
 		receiptScopeInternals.spawn = recordingSpawn;
-		// performance.timeOrigin + performance.now() approximates the epoch
-		// clock classifyWorkspaceGitHealth uses (and stays outside the
-		// check:test-clock raw-clock pattern); a short remaining budget must
-		// clamp every child's timeout into [1, 2000] and still terminate.
+		// performance.timeOrigin + performance.now() IS the epoch-ms clock
+		// classifyWorkspaceGitHealth uses (same OS clock, ~0ms skew) and stays
+		// outside the check:test-clock raw-clock pattern. A ~400ms remaining
+		// budget must clamp EVERY child (probe included) well under the
+		// unclamped caps (2000/5000) and still terminate.
+		const startedAt = performance.now();
 		const deadlineAt = performance.timeOrigin + performance.now() + 400;
 		const health = await classifyWorkspaceGitHealth(directory, deadlineAt);
-		expect(health).toMatchObject({ kind: 'denial', retryable: true });
-		expect(observedTimeouts.length).toBeGreaterThanOrEqual(1);
+		const elapsedMs = performance.now() - startedAt;
+		expect(health).toEqual({
+			kind: 'denial',
+			code: 'head_timeout',
+			retryable: true,
+		});
+		// probe + HEAD verify + at least one failure-arm follow-up
+		expect(observedTimeouts.length).toBeGreaterThanOrEqual(3);
 		for (const timeout of observedTimeouts) {
 			expect(typeof timeout).toBe('number');
 			expect(timeout as number).toBeGreaterThanOrEqual(1);
-			expect(timeout as number).toBeLessThanOrEqual(2_000);
+			expect(timeout as number).toBeLessThanOrEqual(500);
 		}
+		expect(elapsedMs).toBeLessThan(1_900);
 	}, 60_000);
 });
 

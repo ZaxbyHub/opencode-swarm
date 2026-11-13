@@ -31,12 +31,14 @@ pending-owner decision:
   accepted AFTER an earlier candidate produced an unusable committed diff
   (stdout overflow / parse failure), the resolver now emits a per-directory
   cooled-down CRITICAL-WARN naming `diff-base fall-through accepted`, the
-  skipped-candidate signature, and the accepted ref. The silent hop
-  narrowing itself (committed changes between the skipped candidate and the
-  accepted base classify PRE-EXISTING) is disclosed and **pending the
-  owner adjudication tracked on #3681** — with no network, committed-hop
-  authority for a HEAD-equal acceptance cannot be proven from workspace
-  state (three heuristic designs were disproved by executed counterexamples
+  unusable-diff class, and the accepted ref (the skipped candidate is
+  recorded in the resolver's attempt list rather than named in the
+  message). The silent hop narrowing itself (committed changes between the
+  skipped candidate and the accepted base classify PRE-EXISTING) is
+  disclosed and **pending the owner adjudication tracked on #3681** —
+  with no network, committed-hop authority for a HEAD-equal acceptance
+  cannot be proven from workspace state (three heuristic designs were
+  disproved by executed counterexamples
   during the plan review, including the push-to-main and planted-
   first-candidate geometries), and the two sound closures (fetch-verified
   base selection vs. conservative fail-closed on every HEAD-equal /
@@ -81,11 +83,11 @@ pending-owner decision:
   typed `resolveHeadSha` causes; new permanent codes join
   `ReviewerScopeBuildFailureCode`.
 - `src/hooks/reviewer-scope-lifecycle.ts` — routed and zero-routed dispatch
-  paths classify once per attempt and terminate on permanent causes; the
-  degraded advisory names the terminal condition instead of advising
-  re-dispatch; the in-code attribution comment corrected (the routed
-  head_timeout wall pre-dates PR #3668; the zero-routed retryable
-  conversion was #3668's).
+  paths classify on entry and once more after capture (the recheck), and
+  terminate on permanent causes; the degraded advisory names the terminal
+  condition instead of advising re-dispatch; the in-code attribution
+  comment corrected (the routed head_timeout wall pre-dates PR #3668;
+  the zero-routed retryable conversion was #3668's).
 - `docs/configuration.md` — reviewer-gate rows document the no-git terminal
   state.
 

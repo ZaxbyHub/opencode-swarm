@@ -183,7 +183,8 @@ async function runGitClassified(
  * the differential `diff-base fall-through accepted` signal in the ranges
  * consumer. The sibling surface src/quality/git-base.ts (first-valid-wins,
  * #3676) must be decided TOGETHER with this one — same candidate-order
- * contract — via the authoritative-base follow-up issue.
+ * contract — under the owner decisions tracked on #3681 (items 3a/4,
+ * ASK-3) and #3676 (ASK-1) until a follow-up issue exists.
  */
 type DiffBaseResolution = {
 	mergeBase: string;
