@@ -3,7 +3,7 @@ name: issue-tracer
 description: Evidence-first investigation, validation, and full resolution of issues and bugs. Use when asked to investigate, trace, root-cause, reproduce, plan, fix, resolve, close, or prepare a PR for an issue, bug report, defect, regression, failing test, crash, or confusing runtime behavior. Drives issue validation, acceptance-check-driven reproduction and fix planning, independent critic and implementation review, recurrence-class eradication, and an invariant-aware, PR-ready closure with a recorded human merge gate under a mandatory full-resolution contract that forbids partial fixes, deferred work, and unwired code.
 license: MIT
 metadata:
-  version: 3.0.2
+  version: 3.0.3
   source: .opencode/skills/issue-tracer/SKILL.md
   audience: swarm-plugin
 ---
@@ -36,7 +36,7 @@ This table is the normative center of the protocol: `trace-check.sh` reads it, a
 | Phase | Required artifact(s) | Validator | Exit condition |
 |---|---|---|---|
 | 0 Setup | `state.md` | `trace-check.sh phase 0` | base SHA, tree-id, tier, freshness, and handshake recorded; the claim gate ran and `tools:` records `session=<token>` or `claim: not_applicable (<reason>)` |
-| 1 Intake | `01-issue-summary.md` | `trace-check.sh phase 1` | classification set; acceptance criteria numbered; related issues listed |
+| 1 Intake | `01-issue-summary.md` | `trace-check.sh phase 1` | classification set; acceptance criteria numbered; related issues listed; cluster preflight recorded (`repro/cluster-preflight.md`, per-candidate claim + open-PR evidence) |
 | 2 Reproduction + localization | `02-reproduction.md`, `03-localization-log.md`, `04-root-cause.md` | `trace-check.sh phase 2` | reproduction command + exit code + output; root cause at line/condition level |
 | 2.5 Acceptance checks (red checkpoint) | `## Acceptance checks` table in `02`, `repro/checkpoint.manifest` | `trace-check.sh phase 2.5` | every AC typed and checked; manifest identities are `(path, check-id)` pairs, so multiple commands may freeze identical bytes from one file; checkpoint tree-id recorded; diff from Phase 0 limited to manifest paths; the external anchor publication is a human gate (not machine-verifiable by this validator) and must be confirmed before implementation |
 | 3 Plan + critic | `05-fix-plan.md`, `06-critic-review.md`, `07-approved-plan.md` | `trace-check.sh phase 3` | critic replays every frozen check; APPROVE recorded with both identities; user approval quoted |
@@ -130,6 +130,7 @@ Read the referenced file before starting that phase. `state.md` is updated at ev
 
 - Characterize the defect class as a one-sentence pattern; derive and run concrete search predicates repo-wide.
 - Disposition every hit; install a guardrail at the strongest feasible rung; demonstrate it failing on the original defect and passing on the fix.
+- Generate the disposition table with `scripts/generate-recurrence-table.sh` (fails closed on unmatched joins, digest disagreement, or count drift) instead of hand-running joins.
 - Fast path: pure style/naming changes mark `no-defect-class: true` with a one-line `## Justification`.
 - Reference: `references/full-resolution-contract.md`.
 

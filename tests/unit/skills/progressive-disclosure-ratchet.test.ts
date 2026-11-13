@@ -22,14 +22,20 @@ import { join } from 'node:path';
 const ROOT = process.cwd();
 
 const ENTRY_SKILL_BASELINES: Record<string, number> = {
-	'.opencode/skills/swarm-pr-review/SKILL.md': 1716,
+	// 1717 (was 1716): #3605 AC4 adds the Phase 9 cost/yield-ledger bullet
+	// (paired cost+yield persistence + synthesis aggregate) with its detail in
+	// references/lane-cost-recovery.md; binding-policy growth, same one-way
+	// precedent as the 12ca05ef9 bump.
+	'.opencode/skills/swarm-pr-review/SKILL.md': 1717,
 	'.opencode/skills/swarm-pr-feedback/SKILL.md': 797,
 	'.opencode/skills/writing-tests/SKILL.md': 424,
-	// 201 (was 196): v3.0.2 adds Non-Negotiable Rules 13-14 (claim gate +
+	// 202 (was 201): v3.0.3 adds Non-Negotiable Rules 13-14 (claim gate +
 	// collision handling) and three phase-bullet pointers after the verified
 	// 2026-11-11 zmem #455/#366 double-implementation; binding-policy growth,
 	// same one-way-ratchet precedent as the 12ca05ef9 swarm-pr-review bump.
-	'.opencode/skills/issue-tracer/SKILL.md': 201,
+	// v3.0.3 adds the Phase 4.2 generate-recurrence-table.sh bullet (#3605 AC2);
+	// the cluster-preflight clause and gate-table cell are in-place edits.
+	'.opencode/skills/issue-tracer/SKILL.md': 202,
 	'.claude/skills/graphify/SKILL.md': 420,
 	'.claude/skills/commit-pr/SKILL.md': 478,
 };

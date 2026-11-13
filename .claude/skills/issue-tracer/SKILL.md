@@ -9,7 +9,7 @@ description: >
   no-gap fix planning, recurrence-class eradication, independent critic and
   implementation review, and PR-ready closure.
 metadata:
-  version: 3.0.2
+  version: 3.0.3
   audience: swarm-plugin
 ---
 

@@ -155,6 +155,10 @@ describe('trace-check.sh CRLF fixture (#2566)', () => {
 			'## Source\nx\n## Observed Behavior\nx\n## Expected Behavior\nx\n## Acceptance Criteria\n- [ ] AC1: works\n## Classification\nVALID\n## Related Issues\nx\n',
 		);
 		writeCrlf(
+			path.join(trace, 'repro', 'cluster-preflight.md'),
+			'recorded-at: 2026-01-01T00:00:00Z\n\n## candidate #1\n\n- claim comments (live): none\n- open PRs naming 1 in:body: none\n- verdict: CLEAR\n',
+		);
+		writeCrlf(
 			path.join(trace, '02-reproduction.md'),
 			'## Commands Tried\n```text\nrun\n```\n- Exit code: 1\n## Reproduction Verdict\nred\n',
 		);
