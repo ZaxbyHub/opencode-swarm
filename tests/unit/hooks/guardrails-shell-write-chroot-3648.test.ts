@@ -172,4 +172,17 @@ describe('#3648 D6: sudo --chroot/-R re-bases the judged tail', () => {
 		},
 		T,
 	);
+	test(
+		'4.5 r2: quoted absolute targets inside sh -c payloads withdraw',
+		async () => {
+			// Any absolute spelling inside the tail withdraws whole-tail — the
+			// constant path exercises the quote-preceded detection (the real
+			// workspace path is not needed; withdrawal is path-independent).
+			const a = await gate('sudo --chroot /r sh -c "cp a \'C:/ws/src/ok\'"');
+			expect(a.verdict).toBe('BLOCKED');
+			const b = await gate('sudo --chroot /r sh -c "cp a \\"C:/ws/src/ok\\""');
+			expect(b.verdict).toBe('BLOCKED');
+		},
+		T,
+	);
 });

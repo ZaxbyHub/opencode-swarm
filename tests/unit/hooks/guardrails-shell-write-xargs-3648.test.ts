@@ -118,4 +118,18 @@ describe('#3648 D2: xargs-fed write/delete verbs withdraw fail-closed', () => {
 		},
 		T,
 	);
+	test(
+		'4.5 r2: -e/-l optional-glued options never consume the verb',
+		async () => {
+			const a = await gate('xargs -e tee ../esc');
+			expect(a.verdict).toBe('BLOCKED');
+			const b = await gate('xargs -l tee ../esc');
+			expect(b.verdict).toBe('BLOCKED');
+			const c = await gate('echo src/a | xargs -e rm ../x', {
+				blockDestructive: true,
+			});
+			expect(c.verdict).toBe('BLOCKED');
+		},
+		T,
+	);
 });

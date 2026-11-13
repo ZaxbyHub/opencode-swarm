@@ -2027,16 +2027,18 @@ function matchSudoChdir(words: string[]): DcChdirMatch {
 		}
 		const hasAbsoluteWriteSpelling = restCh.some((w) => {
 			if (typeof w !== 'string') return false;
-			// 4.5 review: detect an absolute-path TOKEN ANYWHERE in the
+			// 4.5 review r1: detect an absolute-path TOKEN ANYWHERE in the
 			// word — an sh -c payload arrives as one multi-word token
 			// (`cp a /abs`), so a startsWith('/') whole-word test missed it
 			// and the chroot cd-rewrite judged the payload at the invoking
-			// root (fail-open). Whitespace-preceded /abs, drive prefixes,
-			// of=/abs, and redirects all count (deny-direction over-deny:
-			// any absolute spelling in the tail withdraws the whole tail).
-			if (/(?:^|[\s>])\//.test(w)) return true;
-			if (/(?:^|[\s>])[A-Za-z]:[\\/]/.test(w)) return true;
-			if (/of=\//.test(w)) return true; // embedded dd-style absolute target
+			// root (fail-open). r2: the preceding character may also be a
+			// QUOTE or '=' — inner quotes stay literal inside the payload
+			// token (`cp a '<ws>/ok'`, `dd of='<ws>/ok'`) and the round-1
+			// [\s>] class missed them. Deny-direction over-deny: any
+			// absolute spelling in the tail withdraws the whole tail.
+			if (/(?:^|[\s>'"=])\//.test(w)) return true;
+			if (/(?:^|[\s>'"=])[A-Za-z]:[\\/]/.test(w)) return true;
+			if (/of=['"]?\//.test(w)) return true; // embedded dd-style absolute target
 			return /\S?>\S?\//.test(w); // redirect carrying an absolute path
 		});
 		if (hasAbsoluteWriteSpelling) {
@@ -3162,6 +3164,14 @@ export function dcExtractRecursiveRmTargets(segment: string): string[] | null {
 					const ch = members[mi];
 					if (ch === undefined) break;
 					if (XARGS_FLAG_SHORT.has(ch)) continue;
+					// 4.5 r2: GNU xargs `-e`/`-l` take OPTIONAL GLUED values
+					// only (getopt `e::`, `l::`) — they never consume the
+					// next word (consuming it swallowed the verb:
+					// `xargs -e rm ../x` admitted on this arm).
+					if (ch === 'e' || ch === 'l') {
+						valueOption = true;
+						break;
+					}
 					if (XARGS_VALUE_SHORT.has(ch)) {
 						consumedNext = mi === members.length - 1;
 						valueOption = true;

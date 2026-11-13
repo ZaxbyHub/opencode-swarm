@@ -5107,8 +5107,13 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 					const ch = members[mi];
 					if (ch === undefined) break;
 					if (ch === '0' || ch === 'r' || ch === 't' || ch === 'x') continue;
-					if ('adEeILlnPs'.includes(ch)) {
-						consumedNext = mi === members.length - 1;
+					if ('adEILlnPs'.includes(ch)) {
+						consumedNext = 'adEILnPs'.includes(ch) && mi === members.length - 1;
+						valueOption = true;
+						break;
+					}
+					if (ch === 'e' || ch === 'l') {
+						// optional glued value only — never consumes the next word
 						valueOption = true;
 						break;
 					}
@@ -6993,7 +6998,21 @@ function detectInterpreterEval(cmd: unknown): WriteTarget[] {
 				const last = members.length === 1;
 				if (ch === 'f') sawProgramFile = true;
 				else if (ch === 'e') sawInline = true;
-				else if (ch === 'i') sawInPlace = true;
+				else if (ch === 'i') {
+					// 4.5 r2: `-i` is gawk's --include short form, not solely
+					// in-place — the in-place carve-out applies ONLY when the
+					// value is literally `inplace` (detached `-i inplace` or
+					// glued `-iinplace`); any other library (`-i foo.awk`,
+					// `-ifile.awk`) leaves the program classification live
+					// (an inline program still classifies as eval).
+					const gluedTail = members.slice(1);
+					if (last) {
+						const nxt = suffixWords[i + 1];
+						if (nxt === 'inplace') sawInPlace = true;
+					} else if (gluedTail === 'inplace') {
+						sawInPlace = true;
+					}
+				}
 				// Glued value (-ffile): token alone (+1). Detached (-f file):
 				// token + next word (+2) — the old `if (last) i += 1` skipped
 				// only one slot for detached values (4.5 review Important 5a:
