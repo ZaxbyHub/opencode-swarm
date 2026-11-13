@@ -243,7 +243,16 @@ describe('consumer union parity: wrapper + brace shapes (4.5 r4)', () => {
 			} catch (error) {
 				threw = error;
 			}
-			expect((threw as Error)?.message).toContain('SCOPE_VIOLATION');
+			// #3648 4.5 r3: `awk -i inplace` with ZERO data-file operands
+			// now classifies as an interpreter eval (real gawk executes the
+			// BEGIN block), so that one shape denies with UNRESOLVED_TARGET
+			// instead of SCOPE_VIOLATION — the deny verdict is unchanged
+			// (3474-3576: widen the message pin, never the block assertion).
+			const message = (threw as Error)?.message ?? '';
+			expect(
+				message.includes('SCOPE_VIOLATION') ||
+					message.includes('UNRESOLVED_TARGET'),
+			).toBe(true);
 		}
 	});
 	test('awk implicit program slot never consumes an expanding word (gate)', async () => {
