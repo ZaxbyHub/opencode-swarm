@@ -164,11 +164,37 @@ async function runGitClassified(
  * Walk DIFF_BASE_CANDIDATES and return the first candidate whose committed
  * diff parses (#3131). The envelope is ALWAYS present so a null resolution
  * still carries the full attempt list for the named diagnostic.
+ *
+ * #3681 items 3-4 — base-selection authority (design note, AC4):
+ * Local refs are UNTRUSTED inputs. Three successive heuristics for telling
+ * an authoritative HEAD-equal acceptance from a planted/stale one were
+ * disproved by executed counterexamples (branch-name match; reflog-top
+ * `checkout:`; deferring to the first older resolvable base — a commit-
+ * then-branch + planted ref, a cross-branch push HEAD:main, and a stale
+ * intermediate remote ref each survive all three). With no network, committed-
+ * hop authority CANNOT be proven from workspace state; the sound closures are
+ * fetch-verified base selection (adds remote-tracking-ref mutation to a gate
+ * path) or conservative fail-closed on every HEAD-equal acceptance (reverses
+ * the #2918 F-002 fresh-branch contract pinned by
+ * tests/unit/tools/pre-check-batch-merge-base-3131.test.ts:284-302 and would
+ * false-NEW fresh-branch findings) — an OWNER decision tracked on #3681 and
+ * in the trace ASK tracker, deliberately NOT resolved here. What this
+ * resolver DOES ship: hadUnusableAttempt/acceptedCandidateRef provenance and
+ * the differential `diff-base fall-through accepted` signal in the ranges
+ * consumer. The sibling surface src/quality/git-base.ts (first-valid-wins,
+ * #3676) must be decided TOGETHER with this one — same candidate-order
+ * contract — via the authoritative-base follow-up issue.
  */
 type DiffBaseResolution = {
 	mergeBase: string;
 	committedLines: Map<string, Set<number>>;
 	mergeBaseEqualsHead: boolean;
+	/** #3681 item 3: an earlier candidate in this walk produced an
+	 * unusable committed diff (stdout overflow / parse failure), so a later
+	 * acceptance silently narrows the committed hop vs the true base. */
+	hadUnusableAttempt: boolean;
+	/** Ref name of the accepted candidate (operator diagnostic). */
+	acceptedCandidateRef: string;
 };
 
 type DiffBaseEnvelope = {
@@ -204,6 +230,16 @@ let diffBaseResolutionMemo: {
  */
 const DIFF_BASE_WARN_COOLDOWN_MS = 60_000;
 let lastDiffBaseFailureWarn: { directory: string; atMs: number } | null = null;
+
+/**
+ * #3681 item 3(b): per-directory cooldown for the differential
+ * fall-through-acceptance signal. Separate single-entry record from the
+ * FB-001 failure diagnostic so neither suppresses the other (invariant 8;
+ * same bounded shape as lastDiffBaseFailureWarn — one entry, replaced on
+ * each emission, so distinct directories never suppress each other).
+ */
+let lastDiffBaseFallthroughWarn: { directory: string; atMs: number } | null =
+	null;
 
 /**
  * Walk DIFF_BASE_CANDIDATES and return the first candidate whose committed
@@ -334,7 +370,15 @@ async function resolveValidatedDiffBase(
 		attempted.push({ ref: baseBranch, outcome: 'ok' });
 		const resolved = {
 			attempted,
-			resolution: { mergeBase: candidate, committedLines, mergeBaseEqualsHead },
+			resolution: {
+				mergeBase: candidate,
+				committedLines,
+				mergeBaseEqualsHead,
+				hadUnusableAttempt: attempted.some(
+					(entry) => entry.outcome === 'unusable',
+				),
+				acceptedCandidateRef: baseBranch,
+			},
 		};
 		if (headSha !== null) {
 			diffBaseResolutionMemo = { directory, headSha, envelope: resolved };
@@ -412,6 +456,10 @@ async function resolveValidatedDiffBase(
 									mergeBase: candidate,
 									committedLines,
 									mergeBaseEqualsHead,
+									hadUnusableAttempt: attempted.some(
+										(entry) => entry.outcome === 'unusable',
+									),
+									acceptedCandidateRef: baseBranch,
 								},
 							};
 							if (headSha !== null) {
@@ -1514,9 +1562,46 @@ function parseDiffLineRangesChecked(
 	let destinationSeen = false;
 	let destinationNeedsHunk = false;
 	let collectedLines = 0;
+	// #3681 item 1: hunk-body state. While a hunk still owes body lines,
+	// `--- ` / `+++ ` / `@@` / `diff --git` prefixes are CONTENT (a deleted
+	// line whose text begins `-- ` renders as `--- <content>`, an added line
+	// beginning `++ ` renders as `+++ <content>`) — never file-header
+	// boundaries. Without this, the parser reattributed the rest of a hunk
+	// to a phantom file key and the SAST PRE-EXISTING classification lost
+	// real changed lines (fail-open). Both counters come from the `@@`
+	// header; any prefix other than `+`/`-`/`\ ` while armed, an
+	// over-delivered side, or EOF while armed fails CLOSED (null) — every
+	// consumer treats null as "no discount", the safe direction.
+	let oldRemaining = 0;
+	let newRemaining = 0;
 
 	for (const rawLine of diffOutput.split(/\r?\n/)) {
 		const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
+		if (oldRemaining > 0 || newRemaining > 0) {
+			if (line.startsWith('+')) {
+				if (newRemaining === 0) return null;
+				newRemaining--;
+				continue;
+			}
+			if (line.startsWith('-')) {
+				if (oldRemaining === 0) return null;
+				oldRemaining--;
+				continue;
+			}
+			// `\ No newline at end of file` is hunk metadata and consumes
+			// neither side's count.
+			if (line.startsWith('\\')) continue;
+			// Context line (single leading space) consumes both sides.
+			if (line.startsWith(' ')) {
+				if (oldRemaining === 0 || newRemaining === 0) return null;
+				oldRemaining--;
+				newRemaining--;
+				continue;
+			}
+			// `@@`, `diff --git`, `--- `, `+++ `, or any other shape while
+			// armed means the hunk under-delivered: fail closed.
+			return null;
+		}
 		if (line.startsWith('diff --git ')) {
 			if (expectingDestination || destinationNeedsHunk) return null;
 			inGitFile = true;
@@ -1556,10 +1641,11 @@ function parseDiffLineRangesChecked(
 		) {
 			return null;
 		}
-		const match = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/.exec(line);
+		const match = /^@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(line);
 		if (!match) return null;
-		const start = Number.parseInt(match[1], 10);
-		const count = match[2] !== undefined ? Number.parseInt(match[2], 10) : 1;
+		const oldCount = match[1] !== undefined ? Number.parseInt(match[1], 10) : 1;
+		const start = Number.parseInt(match[2], 10);
+		const count = match[3] !== undefined ? Number.parseInt(match[3], 10) : 1;
 		if (
 			!Number.isSafeInteger(start) ||
 			!Number.isSafeInteger(count) ||
@@ -1567,11 +1653,18 @@ function parseDiffLineRangesChecked(
 			(count > 0 && start < 1) ||
 			count > MAX_CHANGED_LINE_ENTRIES ||
 			start + count - 1 > Number.MAX_SAFE_INTEGER ||
-			collectedLines + count > MAX_CHANGED_LINE_ENTRIES
+			collectedLines + count > MAX_CHANGED_LINE_ENTRIES ||
+			!Number.isSafeInteger(oldCount) ||
+			oldCount < 0 ||
+			oldCount > MAX_CHANGED_LINE_ENTRIES
 		) {
 			return null;
 		}
 		destinationNeedsHunk = false;
+		// Arm the hunk-body counters (#3681 item 1); the loop consumes the
+		// body before any further header prefix can be trusted.
+		oldRemaining = oldCount;
+		newRemaining = count;
 		if (!currentFile) continue;
 		const lines = result.get(currentFile);
 		if (!lines) return null;
@@ -1580,7 +1673,14 @@ function parseDiffLineRangesChecked(
 		}
 		collectedLines += count;
 	}
-	if (expectingDestination || destinationNeedsHunk) return null;
+	if (
+		expectingDestination ||
+		destinationNeedsHunk ||
+		oldRemaining > 0 ||
+		newRemaining > 0
+	) {
+		return null;
+	}
 
 	return result;
 }
@@ -1811,6 +1911,29 @@ export async function getChangedLineRanges(
 		);
 		return null;
 	}
+	// #3681 item 3(b): an accepted NON-HEAD candidate after an earlier
+	// candidate failed validation silently narrows the committed hop — at the
+	// #3131 base this shape failed closed to null, and the fall-through fix
+	// (deliberate, FB-001) made it silent. Differential signal only: the
+	// ordinary stale-upstream geometry (first resolvable candidate accepted,
+	// no prior unusable attempt) stays quiet; emission is cooled down per
+	// directory (invariant 8). The classification itself remains as disclosed
+	// pending the #3681 items 3a/4 owner adjudication (see resolver docstring).
+	if (!resolution.mergeBaseEqualsHead && resolution.hadUnusableAttempt) {
+		const nowMs = Date.now();
+		if (
+			!(
+				lastDiffBaseFallthroughWarn &&
+				lastDiffBaseFallthroughWarn.directory === directory &&
+				nowMs - lastDiffBaseFallthroughWarn.atMs < DIFF_BASE_WARN_COOLDOWN_MS
+			)
+		) {
+			lastDiffBaseFallthroughWarn = { directory, atMs: nowMs };
+			criticalWarn(
+				`changed-line base resolution: diff-base fall-through accepted — an earlier candidate produced an unusable committed diff (stdout overflow or parse failure); accepted ${resolution.acceptedCandidateRef} at ${resolution.mergeBase.slice(0, 10)}; committed changes between the skipped candidate and the accepted base classify PRE-EXISTING (advisory)`,
+			);
+		}
+	}
 	const { committedLines } = resolution;
 
 	const commonDiffArgs = [
@@ -1827,6 +1950,16 @@ export async function getChangedLineRanges(
 		.filter(
 			(file) => file.length > 0 && file !== '..' && !file.startsWith('../'),
 		);
+	// #3681 item 2: `:(literal)` argv decoration parity with the ambiguity
+	// consumer's literalPathspecs (#3092 PRR-005). Plain pathspecs let Git
+	// glob-expand a bracket/brace filename (requesting `app/a[b].ts` also
+	// admitted `app/ab.ts`, whose findings then read as NEW without the
+	// caller requesting that file). The RAW relative paths stay the map
+	// keys and the requestedKeys prefix logic below — decoration is applied
+	// ONLY at argv construction.
+	const literalPathspecs = requestedPathspecs.map(
+		(file) => `:(literal)${file}`,
+	);
 	const statusArgs = [
 		'-c',
 		'core.quotePath=false',
@@ -1835,7 +1968,7 @@ export async function getChangedLineRanges(
 		'-z',
 		'--untracked-files=all',
 		...(requestedPathspecs.length > 0 ? ['--ignored=matching'] : []),
-		...(requestedPathspecs.length > 0 ? ['--', ...requestedPathspecs] : []),
+		...(literalPathspecs.length > 0 ? ['--', ...literalPathspecs] : []),
 	];
 	// #3131: the committed leg was already acquired and parsed by
 	// resolveValidatedDiffBase (it IS the validation), so only the staged,
