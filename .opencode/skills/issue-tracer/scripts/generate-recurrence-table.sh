@@ -39,8 +39,10 @@ for f in "$hits" "$disp"; do
   fi
 done
 
-hits_digest="$(sed -n '1{s/^tree-digest: //p}' "$hits")"
-disp_digest="$(sed -n '1{s/^tree-digest: //p}' "$disp")"
+# awk, not sed: BSD sed (macOS) rejects `1{s/.../p}` block syntax ("bad flag in
+# substitute command: '}'"); this awk form is POSIX-portable.
+hits_digest="$(awk 'NR==1 && /^tree-digest: /{sub(/^tree-digest: /,""); print; exit}' "$hits")"
+disp_digest="$(awk 'NR==1 && /^tree-digest: /{sub(/^tree-digest: /,""); print; exit}' "$disp")"
 if [ -z "$hits_digest" ] || [ -z "$disp_digest" ]; then
   echo "GENERATION-REFUSED: digest (input missing its tree-digest header)" >&2
   exit 1
