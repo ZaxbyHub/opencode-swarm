@@ -105,6 +105,43 @@ describe('unknown backslash-prefixed armed lines (#3681 round 2)', () => {
 		expect(result.size).toBe(0);
 	}, 10_000);
 
+	test('unknown backslash metadata AFTER the hunk completes fails closed', () => {
+		// The header-mode guard covers `+`/`-`/` `-shaped over-delivery; the
+		// same rule must cover hunk metadata once the counts are spent, or a
+		// post-hunk `\garbage` rides through inert and the malformed diff
+		// keeps its map (plan-critic round 7, finding 1).
+		const result = parseDiffLineRanges(
+			[
+				'diff --git f.ts f.ts',
+				'--- f.ts',
+				'+++ f.ts',
+				'@@ -1,0 +1,1 @@',
+				'+expected',
+				'\\garbage',
+			].join('\n'),
+		);
+		expect(result.size).toBe(0);
+	}, 10_000);
+
+	test('the exact no-newline marker after a completed hunk stays inert (positive control)', () => {
+		// git emits the marker after the FINAL body line, which is header
+		// mode when the counts were exactly spent — the legitimate case the
+		// strictness must not reject.
+		const result = parseDiffLineRanges(
+			[
+				'diff --git f.ts f.ts',
+				'--- f.ts',
+				'+++ f.ts',
+				'@@ -1,0 +1,1 @@',
+				'+expected',
+				'\\ No newline at end of file',
+			].join('\n'),
+		);
+		const lines = result.get('f.ts');
+		expect(lines).toBeDefined();
+		expect([...(lines ?? [])]).toEqual([1]);
+	}, 10_000);
+
 	test('the exact no-newline marker stays inert (positive control)', () => {
 		const result = parseDiffLineRanges(
 			[

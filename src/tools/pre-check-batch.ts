@@ -1663,6 +1663,16 @@ function parseDiffLineRangesChecked(
 		) {
 			return null;
 		}
+		// Same rule for hunk metadata once the counts are spent: the ONLY
+		// legitimate backslash line in header mode is the exact no-newline
+		// marker (git emits it after the final body line of a no-trailing-
+		// newline hunk). Any other `\...` shape here is an unknown prefix and
+		// the previous hunk over-delivered — fail closed rather than letting
+		// arbitrary post-hunk metadata ride through inert (plan-critic
+		// shipped-scope round 7, finding 1).
+		if (line.startsWith('\\') && line !== '\\ No newline at end of file') {
+			return null;
+		}
 		if (line.startsWith('--- ') && (inGitFile || !requireGitFileHeaders)) {
 			if (expectingDestination || destinationNeedsHunk) return null;
 			expectingDestination = true;
