@@ -4,7 +4,7 @@ description: Run a graph-guided, tool-augmented PR review using context packing,
 disable-model-invocation: true
 metadata:
   audience: swarm-plugin
-  swarm-contract-digest: "2641a448e263"
+  swarm-contract-digest: "5199fa462b35"
 ---
 
 # /swarm-pr-review
@@ -1371,7 +1371,8 @@ Before final output:
 - distinguish PR-introduced from pre-existing,
 - distinguish confirmed from plausible-but-unverified,
 - include disproved agent/tool claims,
-- keep final comments actionable.
+- keep final comments actionable,
+- persist the per-lane cost/yield ledger (`scripts/cost-yield-ledger.sh` over the harness-recovered lane rows; see `references/lane-cost-recovery.md`) to the run artifacts and state the paired per-finding cost aggregate in the synthesis (#3605 AC4).
 
 ### Finding ID format
 

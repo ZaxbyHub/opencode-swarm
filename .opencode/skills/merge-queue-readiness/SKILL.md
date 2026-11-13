@@ -29,9 +29,10 @@ Before adding the PR to the merge queue (or before the final push if the repo us
    bun test tests/unit --timeout 120000
    ```
    (Use per-file loops for hot modules per AGENTS.md invariant 6)
-5. **If failures:** Fix on the PR branch, re-push, re-simulate. Always run the cleanup step (6) before re-simulating or on any exit path — do not leave the simulation worktree behind.
-6. **Cleanup for manual fallback (run on EVERY exit path, including failure):** Prefer non-force `git worktree remove ../.swarm-worktrees/merge-sim`. If the removal is blocked or fails, surface the block to the user (the worktree guard fails closed for safety) and run `git worktree prune`.
-7. **Only after simulation passes,** add PR to the merge queue.
+5. **Battery tree receipts (#3605 AC7):** if a gate-sensitive local battery is part of your evidence, it must bind to the merged result. Receipts are produced by `scripts/ci/run-test-battery.ts` and bind to the tree the battery RAN on, so the battery itself must run inside the merged-result worktree (step 3/4 tree, before its teardown): run the battery there, then validate `bash scripts/ci/check-battery-tree-receipt.sh <receipt.json> <merged-worktree-root>` against that same tree. The receipt is a tree-binding freshness token, NOT proof the battery passed — read the battery's own pass/fail summary alongside it. A `TREE-RECEIPT: mismatch` or `unknown-file` refusal means the battery validated a tree this simulation is NOT validating — re-run the battery inside the merged-result worktree before queueing. Scope: `/swarm ci-simulate` does NOT run the battery or the receipt check and tears its worktree down automatically, so AC7 battery evidence can only be gathered on the MANUAL worktree path (steps 3–4, before its teardown); this repository's own tooling (`scripts/ci/`) — consumer projects should use their repo's equivalent.
+6. **If failures:** Fix on the PR branch, re-push, re-simulate. Always run the cleanup step (7) before re-simulating or on any exit path — do not leave the simulation worktree behind.
+7. **Cleanup for manual fallback (run on EVERY exit path, including failure):** Prefer non-force `git worktree remove ../.swarm-worktrees/merge-sim`. If the removal is blocked or fails, surface the block to the user (the worktree guard fails closed for safety) and run `git worktree prune`.
+8. **Only after simulation passes,** add PR to the merge queue.
 
 ## Why this matters
 PR-branch CI and merge-group CI test DIFFERENT things:

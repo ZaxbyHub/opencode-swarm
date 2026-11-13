@@ -271,6 +271,22 @@ but they must be documented.
 
 ---
 
+## Battery Tree Receipts (gate-sensitive batteries)
+
+Multi-file pin batteries must run through `bun scripts/ci/run-test-battery.ts <files>...` —
+it refuses unmatched paths (raw multi-file `bun test` batches silently drop them and exit 0),
+refuses non-test files and files reporting zero executed tests, fails nonzero when any file
+failed, and records a tree receipt (HEAD + content-covering dirty digest + named files) at
+`.swarm/evidence/battery/battery-tree-receipt.json`. Before treating a local battery
+as merge-queue evidence, validate the binding against the merged result:
+`bash scripts/ci/check-battery-tree-receipt.sh <receipt.json> <merged-worktree-root>` (see the
+merge-queue-readiness skill). A mismatch means the battery validated a tree CI is not
+validating. The receipt is a tree-binding freshness token, NOT proof the tests passed —
+read the battery's own pass/fail summary alongside it.
+
+Scope note: `scripts/ci/…` paths in this skill are THIS repository's own tooling; a consumer
+project without them should run its repo's equivalent fail-closed battery wrapper.
+
 ## Reading CI Failure Logs
 
 When a CI job fails, the GitHub Actions log shows the exact `file:line` of the failure.

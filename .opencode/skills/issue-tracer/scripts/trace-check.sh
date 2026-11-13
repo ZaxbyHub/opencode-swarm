@@ -553,6 +553,7 @@ is_already_fixed() { [ "$(state_value classification)" = "ALREADY_FIXED" ]; }
 
 phase1() {
   local file="$trace/01-issue-summary.md" value acceptance_count classification_count
+  local preflight preflight_text candidate_sections candidates_ok
   check_headings "$file" '## Source' '## Observed Behavior' '## Expected Behavior' '## Acceptance Criteria' '## Classification' '## Related Issues'
   trace_path_safe "$file" file || return
   acceptance_count="$(acceptance_ids | grep -c . || true)"
@@ -562,6 +563,58 @@ phase1() {
   classification_count="$(normalize_terminal_cr "$file" | grep -A100 '^## Classification$' | grep -c "$value" || true)"
   if normalize_terminal_cr "$file" | grep -A100 '^## Classification$' | grep -Eq 'VALID|AMBIGUOUS|ALREADY_FIXED|NOT_A_BUG|FEATURE' && [ "${classification_count:-0}" -gt 0 ]; then rule_ok classification
   else rule_bad classification "artifact does not match state"; fi
+  # Cluster preflight (#3605 AC3): the claim/open-PR sweep must be recorded as
+  # a trace artifact BEFORE Phase-0 setup work, with per-candidate claim and
+  # open-PR evidence. Universal by design: every trace selects a cluster of
+  # >=1 issue, the validator cannot distinguish collated from single, and the
+  # parallel-session race applies identically to single-issue picks.
+  preflight="$trace/repro/cluster-preflight.md"
+  if [ ! -f "$preflight" ]; then
+    rule_bad cluster-preflight "phase-1 requires repro/cluster-preflight.md (claim/open-PR sweep recorded before Phase-0 setup)"
+    return
+  fi
+  trace_path_safe "$preflight" file || return
+  preflight_text="$(normalize_terminal_cr "$preflight")"
+  if ! printf '%s\n' "$preflight_text" | grep -Eq '^recorded-at: [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}'; then
+    rule_bad cluster-preflight "preflight artifact missing its recorded-at line or the timestamp is not RFC3339"
+    return
+  fi
+  # An unfilled copy of the canonical template (phase-0-setup.md) must not
+  # satisfy the gate: its literal <...> placeholders are refused.
+  if printf '%s\n' "$preflight_text" | grep -Eq '<(RFC3339|result)'; then
+    rule_bad cluster-preflight "preflight artifact still carries template placeholders (record the live sweep results, not the template)"
+    return
+  fi
+  candidate_sections="$(printf '%s\n' "$preflight_text" | grep -c '^## candidate #' || true)"
+  if [ "${candidate_sections:-0}" -lt 1 ]; then
+    rule_bad cluster-preflight "preflight artifact records no candidate sections (recorded-at alone is vacuous)"
+    return
+  fi
+  # Every candidate section must carry BOTH evidence classes: a claim line and
+  # an open-PR line (awk-scoped section-wise; a missing class fails naming the
+  # candidate heading). The section scope resets on EVERY '## ' heading, so a
+  # trailing non-candidate section (## Summary, ## Notes) carrying the words
+  # "claim"/"open PR" cannot be attributed to the last candidate.
+  candidates_ok="$(printf '%s\n' "$preflight_text" | awk '
+    /^## / {
+      if (sec != "" && !(has_claim && has_openpr)) { bad = bad (bad == "" ? "" : ", ") sec }
+      if ($0 ~ /^## candidate #/) { sec = $0; has_claim = 0; has_openpr = 0 } else { sec = "" }
+      next
+    }
+    sec != "" {
+      if ($0 ~ /claim/) has_claim = 1
+      if ($0 ~ /open PR/) has_openpr = 1
+    }
+    END {
+      if (sec != "" && !(has_claim && has_openpr)) { bad = bad (bad == "" ? "" : ", ") sec }
+      print (bad == "" ? "ok" : "bad: " bad)
+    }
+  ')"
+  if [ "$candidates_ok" = "ok" ]; then
+    rule_ok cluster-preflight
+  else
+    rule_bad cluster-preflight "candidate section(s) missing claim or open-PR evidence ($candidates_ok)"
+  fi
 }
 
 phase2() {

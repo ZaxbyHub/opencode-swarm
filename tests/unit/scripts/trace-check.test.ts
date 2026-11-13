@@ -96,6 +96,12 @@ function writeSummary(dir: string, classification = 'VALID') {
 		path.join(dir, '01-issue-summary.md'),
 		`## Source\nx\n## Observed Behavior\nx\n## Expected Behavior\nx\n## Acceptance Criteria\n- [ ] AC1: works\n## Classification\n${classification}\n## Related Issues\nx\n`,
 	);
+	// Phase 1 also requires the cluster-preflight artifact (#3605 AC3): a
+	// recorded-at line plus per-candidate claim and open-PR evidence.
+	fs.writeFileSync(
+		path.join(dir, 'repro', 'cluster-preflight.md'),
+		'recorded-at: 2026-01-01T00:00:00Z\n\n## candidate #1\n\n- claim comments (live): none\n- open PRs naming 1 in:body: none\n- verdict: CLEAR\n',
+	);
 }
 
 describe('trace-check.sh identities, handshake, and early phases', () => {
