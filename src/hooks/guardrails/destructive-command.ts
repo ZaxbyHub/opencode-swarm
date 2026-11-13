@@ -1157,6 +1157,35 @@ export function dcLauncherTimedTail(segment: string): string | null {
  * consult this and deny — the advisory alone was ruled insufficient by the
  * plan critic; the recorded decision is deny-on-uncertainty.
  */
+/**
+ * #3648 AC7 (D5, #3652 item 2): strip a LEADING opener run — standalone
+ * delimiter words (`(`, `((`, `{`) and glued opener prefixes (`(sudo …`) —
+ * from a word list, mirroring dcSegmentVerbMatch's leading open-bracket
+ * character class and the
+ * rm extractor's standalone+glued skip (2810-2821). SEGMENT-START only:
+ * `>(cat)` / `2>(wc)` redirect openers never match (a leading `>` fails the
+ * character class), and mid-segment parens are untouched. Returns the words
+ * (mutated copy) with the openers removed.
+ */
+function dcStripLeadingOpeners(words: string[]): string[] {
+	let start = 0;
+	while (start < words.length) {
+		const w = words[start];
+		if (w === undefined) break;
+		if (/^[({]+$/.test(w)) {
+			start += 1;
+			continue;
+		}
+		const glued = /^([({]+)(.*)$/.exec(w);
+		if (glued !== null && glued[2] !== '') {
+			words[start] = glued[2] as string;
+			break;
+		}
+		break;
+	}
+	return words.slice(start);
+}
+
 export function dcAnalyzeLauncherUncertainty(command: string): {
 	deny: boolean;
 	reason: string;
@@ -1167,6 +1196,19 @@ export function dcAnalyzeLauncherUncertainty(command: string): {
 		// — `env -i sudo -i` skipped the channel while its bare twin denied.
 		// Unwrap only those transparent heads (bounded), then walk.
 		let seg = segment;
+		// #3648 AC7 (D5): a leading `(`/`{` wrapper (standalone or glued)
+		// must not hide the launcher head from the uncertainty channel —
+		// `( sudo -i sh -c '…' )` denies exactly like its bare twin.
+		{
+			const segWords = shellSplitWords(seg);
+			const strippedWords = dcStripLeadingOpeners(segWords);
+			if (
+				strippedWords.length !== segWords.length ||
+				segWords[0] !== strippedWords[0]
+			) {
+				seg = strippedWords.join(' ');
+			}
+		}
 		// #3572 review (delta): the hop bound is the shared paranoid unwrap
 		// bound — 8 transparent heads were machine-generatable and left
 		// `env`×9 + `sudo -i` admitted; beyond this bound the shared
@@ -1348,7 +1390,12 @@ function basenameAnySepLike(word: string): string {
 function matchChdirWrapperSegment(segment: string): DcChdirMatch {
 	const trimmed = segment.trim();
 	if (trimmed === '') return null;
-	const words = shellSplitWords(trimmed);
+	let words = shellSplitWords(trimmed);
+	if (words.length === 0) return null;
+	// #3648 AC7 (D5): tolerate a leading `(`/`{` wrapper (standalone or
+	// glued) so `( sudo -i sh -c 'cd src && rm -rf x' )` reaches the login
+	// withdrawal exactly like the bare form.
+	words = dcStripLeadingOpeners(words);
 	if (words.length === 0) return null;
 	// #3567 review P-F3: an unquoted $(...) command substitution SPLITS into
 	// fragments (the quote-removal tokenizer is not a shell grammar), so the
@@ -1954,6 +2001,41 @@ function matchSudoChdir(words: string[]): DcChdirMatch {
 	if (walk === null || (walk.kind !== 'inner' && interactiveTail === null))
 		return null;
 	const dir = walk.kind === 'inner' ? walk.sudoChdir : undefined;
+	// #3648 AC8 (D6): `sudo -R/--chroot DIR` re-bases the tail under the
+	// chroot root (sudo exec_setup: chroot(dir) then chdir("/")) — BOTH
+	// relative and absolute targets land under it. A login shell (-i)
+	// stays with the login arm below (unresolvable home INSIDE the chroot,
+	// the strictly stronger withdrawal). Otherwise: relative-only tails
+	// take the existing cd-rewrite at the chroot root; a tail containing
+	// ANY absolute write spelling (absolute operand word, embedded
+	// of=<abs>-style target, or a redirect inside the tail) withdraws the
+	// WHOLE tail — generic absolute re-rooting was rejected by the plan
+	// critic (round 3 probed `dd of=/abs` fail-open under it); -D and -R
+	// together are an unresolvable base (withdrawal); a dynamic chroot
+	// root withdraws too.
+	const chrootBase = walk.kind === 'inner' ? walk.sudoChroot : undefined;
+	if (
+		chrootBase !== undefined &&
+		walk.kind === 'inner' &&
+		walk.loginShell !== true
+	) {
+		const restCh = words.slice(1 + (walk.chdirTailIndex ?? walk.innerIndex));
+		if (restCh.length === 0) return null;
+		if (dir !== undefined) return { kind: 'uncertain', innerWords: restCh };
+		if (dcIsDynamicChdirOperand(chrootBase)) {
+			return { kind: 'uncertain', innerWords: restCh };
+		}
+		const hasAbsoluteWriteSpelling = restCh.some((w) => {
+			if (typeof w !== 'string') return false;
+			if (w.startsWith('/') || /^[A-Za-z]:[/]/.test(w)) return true;
+			if (/of=\//.test(w)) return true; // embedded dd-style absolute target
+			return /\S?>\S?\//.test(w); // redirect carrying an absolute path
+		});
+		if (hasAbsoluteWriteSpelling) {
+			return { kind: 'uncertain', innerWords: restCh };
+		}
+		return { kind: 'static', dir: chrootBase, innerWords: restCh };
+	}
 	if (dir === undefined) {
 		// #3616 (final-critic round 4 (e)): a LOGIN sudo (`-i`/`--login`)
 		// chdirs to the target user's home — unresolvable statically — so a
@@ -2244,6 +2326,162 @@ export interface DcWrapperPreprocess {
 	failClosed: boolean;
 }
 
+/**
+ * #3648 AC9 / #3652 item 4 (D7, plan-critic rounds 1-5): the GNU-`time`
+ * payload rewrite. The timed command after `time`'s own options is invisible
+ * to detection (`sh -c` payload splices key on the LEAF head, which is
+ * `time`, and the launcher hop only re-enters launcher-headed tails), so an
+ * in-scope `-o` decoy — or the keyword spelling's tail — masks the payload's
+ * escaping write. This matcher runs on the RAW segment text (the spelling
+ * distinction needs the original bytes):
+ *
+ * - BARE `time` (keyword grammar; r4: NO `-o` write may EVER be emitted for
+ *   the bare spelling — `time -o x true` (nest-3588) and the glued-brace
+ *   `writes: []` pins require admission, and the keyword walker never sets
+ *   timeOutputFile): the shared GNU walk (raw spelling UNDEFINED → GNU
+ *   grammar) locates the timed tail; the segment rewrites to
+ *   `( <timed tail> )`. No tail (e.g. `time -o ../secret` alone) → no
+ *   rewrite (GNU time usage-errors before opening the file — A5e admits).
+ * - GNU SPELLINGS (path-qualified `/…/time`, backslash-escaped `	ime`,
+ *   quoted `'time'`/`"time"` — r5: the ORIGINAL spelling must survive the
+ *   rewrite or the first leaf re-enters the keyword grammar, emits nothing,
+ *   and the -o write orphans into the starting-cwd fallback): the segment
+ *   rewrites to `( <original invocation verbatim> ; <timed tail> )` — the
+ *   first leaf keeps emitting and cwd-resolving `time -o` exactly as today,
+ *   the duplicated tail leaf gets FULL standalone analysis (payload splice,
+ *   redirects, cd tracking). Tail duplication is verdict-idempotent
+ *   (identical writes resolve identically; round-4 critic nth-occurrence
+ *   probe confirmed pairing survives).
+ *
+ * Outer segment-level redirects are HOISTED out of the subshell (bash opens
+ * them in the invoking cwd — the same rule preprocessWrapperText applies).
+ * Leading `(`/`{` openers (standalone or glued) are tolerated (D5 family).
+ */
+function matchTimeWrapperSegment(
+	text: string,
+	depth: number,
+): {
+	text: string;
+	rewrote: boolean;
+	uncertain: boolean;
+	failClosed: boolean;
+} | null {
+	// Strip a leading opener run: standalone and glued `(`/`{` only — a
+	// leading `>`/`2>` redirect opener never matches (D5 family rule).
+	const stripped = text.trim().replace(/^[({\s]+/, '');
+	// BARE keyword spelling only.
+	const bare = /^(time)(?=[\s]|$)([\s\S]*)$/.exec(stripped);
+	// GNU spellings: path-qualified, backslash-escaped, or quoted.
+	const gnu =
+		bare === null
+			? /^(\/[^\s]*time|\time|['"]time['"])(?=[\s]|$)([\s\S]*)$/.exec(stripped)
+			: null;
+	const m = bare ?? gnu;
+	if (m === null) return null;
+	const rawFirst = m[1] as string;
+	const restText = m[2] as string;
+	const words = shellSplitWords(restText);
+	if (words.length === 0) return null;
+	// Force the GNU grammar for TAIL LOCATION ONLY (raw spelling undefined →
+	// binary grammar): glued `-oFILE`, `--output=`, `-v`, every GNU spelling
+	// rides the one shared walk (r4: no head whitelist).
+	const walk = walkLauncherOptions('time', words, undefined);
+	if (walk === null || walk.kind !== 'inner') return null;
+	const tail = words.slice(walk.innerIndex);
+	if (tail.length === 0) return null;
+	// #3616 regression guard (launcher-3616 suite, live-caught): when the
+	// GNU walk consumed NOTHING (no time options at all) and the tail head is
+	// not a shell interpreter, the EXISTING machinery (the env-dash
+	// quoted-time hop and the launcher peel) already analyzes that tail —
+	// rewriting here changes the denial REASON without adding coverage
+	// (`env - time env -S '...'` flipped AUTHORITY_ROOT_ESCAPE to a dynamic
+	// marker). A shell-headed tail keeps the rewrite: the payload splice is
+	// the only way its redirect becomes visible.
+	const tailHeadToken = (tail[0] ?? '').split(/\s+/)[0] ?? '';
+	const tailIsShellHeaded = /^(sh|bash|zsh|dash|ksh)/.test(tailHeadToken);
+	if (
+		walk.innerIndex === 0 &&
+		walk.timeOutputFile === undefined &&
+		!tailIsShellHeaded
+	) {
+		return null;
+	}
+	// Hoist trailing file-redirect pairs OUT of the tail (bash opens them in
+	// the invoking cwd, outside the timed payload's semantics).
+	const FD_DUP = /^&\d+$/;
+	const tailWords: string[] = [];
+	const hoisted: string[] = [];
+	for (let i = 0; i < tail.length; i++) {
+		const w = tail[i] as string;
+		if (
+			DC_FILE_REDIRECT_OP.test(w) &&
+			i + 1 < tail.length &&
+			!FD_DUP.test(tail[i + 1] as string)
+		) {
+			hoisted.push(`${w} ${shSingleQuote(tail[i + 1] as string)}`);
+			i += 1;
+			continue;
+		}
+		tailWords.push(w);
+	}
+	if (tailWords.length === 0) return null;
+	const tailText = shSerializeWords(tailWords);
+	// The tail gets the #3616 sh-c PAYLOAD SPLICE first — a `sh -c` tail
+	// leaf would otherwise route only through the eval-cwd arm, which cannot
+	// see the payload's OWN redirect when the tracked cwd is in scope
+	// (`cd src && /usr/bin/time -o ok.txt sh -c 'echo x > ../esc'` admitted
+	// at the first cut). No payload (plain commands) keeps the raw tail.
+	let innerTail = tailText;
+	let tailUncertain = false;
+	let tailFailClosed = false;
+	// The FALLBACK must be the UNWRAPPED payload text (dcUnwrapWrappers)
+	// — dcShellPayloadRewrite only splices through its fallback when the
+	// payload has no nested chdir wrapper; passing the raw tail text made
+	// the splice a no-op wrap and the payload's redirect stayed invisible.
+	const spliced = dcShellPayloadRewrite(
+		tailText,
+		dcUnwrapWrappers(tailText),
+		depth + 1,
+	);
+	if (spliced.text !== null) {
+		innerTail = spliced.text;
+		tailUncertain = spliced.uncertain;
+		tailFailClosed = spliced.failClosed;
+	} else {
+		const nested = preprocessWrapperText(tailText, depth + 1);
+		if (nested !== null) {
+			innerTail = nested.text;
+			tailUncertain = nested.uncertain;
+			tailFailClosed = nested.failClosed;
+		}
+	}
+	const hoistSuffix = hoisted.length > 0 ? ` ${hoisted.join(' ')}` : '';
+	if (bare !== null) {
+		// D7a: drop the `time` node entirely — nothing to preserve for the
+		// bare spelling (NO -o emission ever; the keyword walker sets no
+		// timeOutputFile and the rewritten text contains no `time` word).
+		return {
+			text: `( ${innerTail} )${hoistSuffix}`,
+			rewrote: true,
+			uncertain: tailUncertain,
+			failClosed: tailFailClosed,
+		};
+	}
+	// D7b: the first leaf is the COMPLETE original invocation (options AND
+	// the timed command) with its original spelling — a leaf ending at the
+	// options walks benign and emits nothing, orphaning the -o write (the
+	// round-4 critic's spelling-erasure probe, caught live again here: the
+	// first cut sliced words[0..innerIndex] and `time -o ok.txt true` lost
+	// its -o emission entirely). rawFirst keeps its path/backslash/quotes.
+	const firstLeaf = `${rawFirst} ${shSerializeWords(words)}`;
+	return {
+		text: `( ${firstLeaf} ; ${innerTail} )${hoistSuffix}`,
+		rewrote: true,
+		uncertain: tailUncertain,
+		failClosed: tailFailClosed,
+	};
+}
+
 function preprocessWrapperText(
 	text: string,
 	depth: number,
@@ -2256,6 +2494,11 @@ function preprocessWrapperText(
 	if (depth >= DC_CHDIR_REWRITE_MAX_DEPTH) {
 		return { text, rewrote: false, uncertain: false, failClosed: true };
 	}
+	// #3648 AC9 (D7): the GNU-time payload rewrite runs BEFORE the chdir
+	// match (a `time`-headed segment is never a chdir wrapper; without this
+	// arm its payload stays invisible to detection).
+	const timeRewrite = matchTimeWrapperSegment(text, depth);
+	if (timeRewrite !== null) return timeRewrite;
 	const match = matchChdirWrapperSegment(text);
 	if (match === null) return null;
 	if (match.kind === 'failClosed') {
@@ -2834,6 +3077,110 @@ export function dcExtractRecursiveRmTargets(segment: string): string[] | null {
 		/\.[Ee][Xx][Ee]$/,
 		'',
 	);
+	// #3648 AC3 (D2): `xargs [flags] rm …` (also rmdir/unlink/shred) feeds
+	// the verb STDIN-SUPPLIED targets — statically unknowable. Withdraw
+	// fail-closed through the unconditional-refusal marker (the same shape
+	// dcEvaluateRecursiveDeleteTargets rejects for brace refusals). xargs
+	// getopt: value-taking short members {a d E e I L l n P s} consume a
+	// glued tail or the next word; flags {0 r t x}; an unknown option scans
+	// every remaining token (deny-direction).
+	if (normalizedRmVerb === 'xargs' && verbTokens.length >= 2) {
+		const XARGS_VALUE_SHORT = new Set([
+			'a',
+			'd',
+			'E',
+			'e',
+			'I',
+			'L',
+			'l',
+			'n',
+			'P',
+			's',
+		]);
+		const XARGS_FLAG_SHORT = new Set(['0', 'r', 't', 'x']);
+		const XARGS_LONG_VALUE_DETACHED = new Set([
+			'--arg-file',
+			'--delimiter',
+			'--replace',
+			'--max-args',
+			'--max-procs',
+			'--max-chars',
+		]);
+		const XARGS_LONG_FLAG = new Set([
+			'--null',
+			'--no-run-if-empty',
+			'--verbose',
+			'--exit',
+		]);
+		const deleteVerbs = new Set(['rm', 'rmdir', 'unlink', 'shred']);
+		const normalizeVerb = (w: string): string =>
+			dcNormalizeVerbWord(w).replace(/\.[Ee][Xx][Ee]$/, '');
+		let vi = 1;
+		let unknownOption = false;
+		while (vi < verbTokens.length) {
+			const t = verbTokens[vi];
+			if (t === undefined) break;
+			if (t === '--') {
+				vi += 1;
+				break;
+			}
+			if (t.startsWith('--')) {
+				if (XARGS_LONG_FLAG.has(t)) {
+					vi += 1;
+					continue;
+				}
+				if (t.includes('=')) {
+					vi += 1;
+					continue;
+				}
+				if (XARGS_LONG_VALUE_DETACHED.has(t)) {
+					vi += 2;
+					continue;
+				}
+				unknownOption = true;
+				break;
+			}
+			if (t.startsWith('-') && t !== '-') {
+				const members = t.slice(1);
+				let consumedNext = false;
+				let stop = false;
+				for (let mi = 0; mi < members.length; mi++) {
+					const ch = members[mi];
+					if (ch === undefined) break;
+					if (XARGS_FLAG_SHORT.has(ch)) continue;
+					if (XARGS_VALUE_SHORT.has(ch)) {
+						consumedNext = mi === members.length - 1;
+						stop = true;
+						break;
+					}
+					unknownOption = true;
+					break;
+				}
+				if (unknownOption) break;
+				if (stop) {
+					vi += consumedNext ? 2 : 1;
+					break;
+				}
+				vi += 1;
+				continue;
+			}
+			break;
+		}
+		if (unknownOption) {
+			const hit = verbTokens.find(
+				(w) => typeof w === 'string' && deleteVerbs.has(normalizeVerb(w)),
+			);
+			if (hit !== undefined) {
+				return [`__swarm_brace_refusal__/xargs-fed ${normalizeVerb(hit)}`];
+			}
+			return null;
+		}
+		const fedVerb = verbTokens[vi];
+		if (fedVerb !== undefined && deleteVerbs.has(normalizeVerb(fedVerb))) {
+			return [`__swarm_brace_refusal__/xargs-fed ${normalizeVerb(fedVerb)}`];
+		}
+		return null;
+	}
 	if (verbTokens.length < 2 || normalizedRmVerb !== 'rm') {
 		return null;
 	}

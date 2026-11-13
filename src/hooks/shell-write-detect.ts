@@ -468,6 +468,11 @@ const BUILTIN_WRITE_COMMANDS = new Set([
 	// invisible to both walks (`touch ../../esc` admitted at base too; the
 	// procsub-body form inherited the same hole).
 	'touch',
+	// #3648 item 6 (AC6): shred OVERWRITES each named operand in place — an
+	// irreversible data-loss write that was invisible to the gate (its own
+	// arm below reports every operand; recursive/`-u` shapes stay write-scope
+	// judged, not destructive-gate owned).
+	'shred',
 ]);
 
 /**
@@ -532,7 +537,7 @@ const AWK_LONG_SWITCHES = new Set([
 	'--help',
 ]);
 
-/** Interpreters that accept inline code via -c / -e / -p / -r flags (NOT -m, which runs an installed module — see detectInterpreterEval). deno (#3491 W7) evaluates ONLY at subcommand position (`deno eval CODE`). */
+/** Interpreters that accept inline code via -c / -e / -p / -r flags (NOT -m, which runs an installed module — see detectInterpreterEval). deno (#3491 W7) evaluates ONLY at subcommand position (`deno eval CODE`). awk (#3648 AC2): the program is a POSITIONAL (or gawk `-e/--source=`); see the awk branch in detectInterpreterEval — `awk -f progfile` stays the script-file carve-out. */
 const INTERPRETER_EVAL_COMMANDS = new Set([
 	'python',
 	'python3',
@@ -550,6 +555,21 @@ const INTERPRETER_EVAL_COMMANDS = new Set([
 	'ksh',
 	'deno',
 	'eval',
+	'awk',
+	'gawk',
+	'mawk',
+]);
+
+/**
+ * #3648 AC2 awk-family alias map: `detectorSetMember` strips NUMERIC
+ * suffixes only, so `gawk`/`mawk` never map to `awk` through version
+ * stripping. Applied AFTER stripping in canonicalInterpreterName (and only
+ * there — the plan critic round-1 blocker 2: no busybox-subcommand mapping;
+ * the leaf canonicalizer returns single basenames only).
+ */
+const AWK_FAMILY_ALIAS = new Map([
+	['gawk', 'awk'],
+	['mawk', 'awk'],
 ]);
 
 /** Network downloaders. */
@@ -734,6 +754,9 @@ const POSIX_WRITE_TOKENS = new Set([
 	'truncate',
 	'unlink',
 	'install',
+	// #3648 AC6: shred is an overwrite verb — keeps the PowerShell
+	// read-only-predicate honest alongside the write-verb set above.
+	'shred',
 ]);
 
 /**
@@ -2292,14 +2315,16 @@ function canonicalInterpreterName(cmd: unknown): string | null {
 	const word = words[i];
 	if (word === undefined) return null;
 	const full = basenameAnySep(word);
-	if (INTERPRETER_EVAL_COMMANDS.has(full)) return full;
+	if (INTERPRETER_EVAL_COMMANDS.has(full)) {
+		return AWK_FAMILY_ALIAS.get(full) ?? full;
+	}
 	const stripped = full.replace(/\d+(\.\d+)*$/, '');
 	if (
 		stripped !== '' &&
 		stripped !== full &&
 		INTERPRETER_EVAL_COMMANDS.has(stripped)
 	) {
-		return stripped;
+		return AWK_FAMILY_ALIAS.get(stripped) ?? stripped;
 	}
 	return null;
 }
@@ -2506,6 +2531,17 @@ export type LauncherWalkOutcome =
 			 * fail-closed (`-s` keeps the cwd and is unaffected).
 			 */
 			loginShell?: true;
+			/**
+			 * #3648 AC8 (D6): the `-R/--chroot` root captured when the inner
+			 * outcome was decided. sudo exec_setup() does chroot(dir) then
+			 * chdir("/"): BOTH relative and absolute tail targets land under
+			 * it. The consumer (matchSudoChdir) re-bases relative tails via
+			 * the cd-rewrite and withdraws whole tails containing ANY
+			 * absolute write spelling (generic absolute re-rooting was
+			 * rejected by the plan critic — `dd of=/abs` embedded targets
+			 * stay fail-open under it).
+			 */
+			sudoChroot?: string;
 	  }
 	| { kind: 'benign' }
 	| {
@@ -2518,6 +2554,13 @@ export type LauncherWalkOutcome =
 			 * are unaffected and stay absolute).
 			 */
 			sudoChdir?: string;
+			/**
+			 * #3648 AC4 (plan critic rounds 3-4): `sudoedit -h HOST` selects a
+			 * REMOTE host — the edit landing is unmodeled, so EVERY edit
+			 * operand withdraws (never benign: a benign outcome is neither
+			 * unwrapped nor denied and would suppress edit analysis entirely).
+			 */
+			sudoHost?: true;
 	  }
 	| { kind: 'interactive' }
 	| { kind: 'uncertain'; tailIndex: number };
@@ -2659,6 +2702,7 @@ export function walkLauncherOptions(
 ): LauncherWalkOutcome | null {
 	const base = basenameAnySep(launcherWord);
 	if (base === 'sudo') return walkSudoOptions(words);
+	if (base === 'sudoedit') return walkSudoeditOptions(words);
 	if (base === 'time') {
 		// #3572 N-03: keyword-suppression must be PROVEN by a defined raw
 		// spelling — when the caller cannot supply one (dequoted chain words
@@ -2797,6 +2841,150 @@ function interactiveTailDeniesOnRejoin(
 	return false;
 }
 
+/**
+ * #3648 AC4: the sudoedit(8) option walk — the DOCUMENTED sudoedit synopsis
+ * (sudo.man SUDOEDIT section; plan-critic rounds 2-4 corrected it twice:
+ * NOT ordinary sudo's grammar). Argument-less: -A --askpass, -B --bell,
+ * -k --kill, -N, -n --non-interactive, -S --stdin. Argument-taking (detached
+ * or glued): -a/--auth-type TYPE, -C/--close-from FD, -c/--login-class CLASS,
+ * -D/--chdir DIR, -g/--group GROUP, -h/--host HOST, -p/--prompt PROMPT,
+ * -R/--chroot DIR, -r/--role ROLE, -T/--command-timeout TIMEOUT,
+ * -t/--type TYPE, -u/--user USER. Every other option → `uncertain`
+ * (fail-closed). The operands from the first non-option word are EDIT
+ * TARGETS (`{kind:'edit'}`), landing on the INVOKING cwd (sudo 1.9.15p5
+ * ground truth, same model as `sudo -e`). -h HOST sets `sudoHost` (every
+ * operand withdraws — remote landing unmodeled); -R/--chroot sets
+ * `sudoChdir` (relative operands withdraw via the existing chdirWithdraws
+ * seam — the edit chroot base is unresolvable). --help/--version are
+ * non-execution query modes (benign), verified against the manual.
+ */
+function walkSudoeditOptions(words: readonly string[]): LauncherWalkOutcome {
+	const ARGLESS_SHORT = new Set(['A', 'B', 'k', 'N', 'n', 'S']);
+	const ARG_TAKING_SHORT = new Set([
+		'a',
+		'C',
+		'c',
+		'D',
+		'g',
+		'h',
+		'p',
+		'R',
+		'r',
+		'T',
+		't',
+		'u',
+	]);
+	const ARG_TAKING_LONG = [
+		'--auth-type',
+		'--close-from',
+		'--login-class',
+		'--chdir',
+		'--group',
+		'--host',
+		'--prompt',
+		'--chroot',
+		'--role',
+		'--command-timeout',
+		'--type',
+		'--user',
+	];
+	let chdirDir: string | undefined;
+	let hostSeen = false;
+	for (let i = 0; i < words.length; ) {
+		const token = words[i];
+		if (token === undefined) break;
+		if (token === '--') {
+			return i + 1 < words.length
+				? {
+						kind: 'edit',
+						editStartIndex: i + 1,
+						...(chdirDir !== undefined ? { sudoChdir: chdirDir } : {}),
+						...(hostSeen ? { sudoHost: true as const } : {}),
+					}
+				: { kind: 'benign' };
+		}
+		if (token.startsWith('--') && token.length > 2) {
+			if (token === '--help' || token === '--version')
+				return { kind: 'benign' };
+			if (
+				token === '--askpass' ||
+				token === '--bell' ||
+				token === '--kill' ||
+				token === '--no-update' ||
+				token === '--non-interactive' ||
+				token === '--stdin'
+			) {
+				i += 1;
+				continue;
+			}
+			const arg = longFlagTakesArg(token, ARG_TAKING_LONG);
+			if (arg.takes) {
+				// -R/--chroot re-bases the EDIT landing inside the chroot —
+				// statically unresolvable for edits, so it rides the same
+				// withdraw seam as --chdir (relative operands withdraw).
+				const chdirLike = arg.flag === '--chdir' || arg.flag === '--chroot';
+				if (arg.glued) {
+					if (chdirLike && chdirDir === undefined)
+						chdirDir = arg.value ?? undefined;
+					if (arg.flag === '--host') hostSeen = true;
+					i += 1;
+					continue;
+				}
+				if (i + 1 >= words.length) return { kind: 'benign' };
+				if (chdirLike && chdirDir === undefined) chdirDir = words[i + 1];
+				if (arg.flag === '--host') hostSeen = true;
+				i += 2; // flag word + its value
+				continue;
+			}
+			return { kind: 'uncertain', tailIndex: i + 1 };
+		}
+		if (token.startsWith('-') && token.length > 1) {
+			const members = token.slice(1);
+			let consumedNext = false;
+			let argMember = '';
+			for (let m = 0; m < members.length; m++) {
+				const ch = members[m];
+				if (ch === undefined) break;
+				if (ARG_TAKING_SHORT.has(ch)) {
+					if (m === members.length - 1) consumedNext = true;
+					if (ch === 'D' || ch === 'R') {
+						// -D chdir / -R chroot: both withdraw relative edit
+						// operands (glued tail applied here; detached below).
+						if (m !== members.length - 1 && chdirDir === undefined) {
+							chdirDir = members.slice(m + 1);
+						}
+					}
+					if (ch === 'h') hostSeen = true;
+					argMember = ch;
+					break;
+				}
+				if (ARGLESS_SHORT.has(ch)) continue;
+				return { kind: 'uncertain', tailIndex: i + 1 };
+			}
+			i += 1;
+			if (consumedNext) {
+				if (i >= words.length) return { kind: 'benign' };
+				if (
+					(argMember === 'D' || argMember === 'R') &&
+					chdirDir === undefined
+				) {
+					chdirDir = words[i];
+				}
+				i += 1;
+			}
+			continue;
+		}
+		// First non-option word: the edit operands start here.
+		return {
+			kind: 'edit',
+			editStartIndex: i,
+			...(chdirDir !== undefined ? { sudoChdir: chdirDir } : {}),
+			...(hostSeen ? { sudoHost: true as const } : {}),
+		};
+	}
+	return { kind: 'benign' };
+}
+
 function walkSudoOptions(words: readonly string[]): LauncherWalkOutcome {
 	let i = 0;
 	let edit = false;
@@ -2812,6 +3000,11 @@ function walkSudoOptions(words: readonly string[]): LauncherWalkOutcome {
 	let resetOnly = true;
 	let execOrResetSeen = false;
 	let chdirDir: string | undefined;
+	// #3648 AC8 (D6): -R/--chroot root. A REPEAT is a usage error in sudo's
+	// parse_args (the command never executes) — deny-direction `uncertain`,
+	// never first-wins (plan critic round 2).
+	let chrootDir: string | undefined;
+	let chrootSeen = false;
 	while (i < words.length) {
 		const token = words[i];
 		if (token === undefined) break;
@@ -2826,6 +3019,7 @@ function walkSudoOptions(words: readonly string[]): LauncherWalkOutcome {
 							kind: 'edit',
 							editStartIndex: i + 1,
 							...(chdirDir !== undefined ? { sudoChdir: chdirDir } : {}),
+							...(chrootDir !== undefined ? { sudoChroot: chrootDir } : {}),
 						}
 					: { kind: 'benign' };
 			}
@@ -2868,6 +3062,7 @@ function walkSudoOptions(words: readonly string[]): LauncherWalkOutcome {
 					timeOutputFile: nested.timeOutputFile,
 					chdirTailIndex: i + 1,
 					...(chdirDir !== undefined ? { sudoChdir: chdirDir } : {}),
+					...(chrootDir !== undefined ? { sudoChroot: chrootDir } : {}),
 					...(loginShellMode ? { loginShell: true as const } : {}),
 				};
 			}
@@ -2875,12 +3070,28 @@ function walkSudoOptions(words: readonly string[]): LauncherWalkOutcome {
 				kind: 'inner',
 				innerIndex: i + 1,
 				...(chdirDir !== undefined ? { sudoChdir: chdirDir } : {}),
+				...(chrootDir !== undefined ? { sudoChroot: chrootDir } : {}),
 				...(loginShellMode ? { loginShell: true as const } : {}),
 			};
 		}
 		if (token.startsWith('--') && token.length > 2) {
 			const arg = longFlagTakesArg(token, SUDO_LONG_ARG_TAKING);
 			if (arg.takes) {
+				// #3648 AC8 (D6): --chroot root capture (repeat = usage error,
+				// deny-direction uncertain — sudo parse_args rejects repeats).
+				if (arg.flag === '--chroot') {
+					if (chrootSeen) return { kind: 'uncertain', tailIndex: i + 1 };
+					chrootSeen = true;
+					if (arg.glued) {
+						chrootDir = arg.value ?? undefined;
+						i += 1;
+					} else {
+						if (i + 1 >= words.length) return { kind: 'benign' };
+						chrootDir = words[i + 1];
+						i += 2;
+					}
+					continue;
+				}
 				if (arg.glued) {
 					if (arg.flag === '--chdir' && chdirDir === undefined)
 						chdirDir = arg.value ?? undefined;
@@ -2965,6 +3176,20 @@ function walkSudoOptions(words: readonly string[]): LauncherWalkOutcome {
 			if (unknown) return { kind: 'uncertain', tailIndex: i + 1 };
 			i += 1;
 			if (mode === 'arg') {
+				// #3648 AC8 (D6): -R chroot capture (repeat = usage error,
+				// deny-direction uncertain).
+				if (argMember === 'R') {
+					if (chrootSeen) return { kind: 'uncertain', tailIndex: i + 1 };
+					chrootSeen = true;
+					if (consumedNext) {
+						if (i >= words.length) return { kind: 'benign' };
+						chrootDir = words[i];
+						i += 1; // the argument word
+					} else {
+						chrootDir = argTail;
+					}
+					continue;
+				}
 				if (consumedNext) {
 					if (i >= words.length) return { kind: 'benign' };
 					if (argMember === 'D' && chdirDir === undefined) chdirDir = words[i];
@@ -2985,6 +3210,7 @@ function walkSudoOptions(words: readonly string[]): LauncherWalkOutcome {
 				kind: 'edit',
 				editStartIndex: i,
 				...(chdirDir !== undefined ? { sudoChdir: chdirDir } : {}),
+				...(chrootDir !== undefined ? { sudoChroot: chrootDir } : {}),
 			};
 		if (listMode) return { kind: 'benign' }; // -l [command]: lists privileges, never executes
 		if (queryOther)
@@ -3031,6 +3257,7 @@ function walkSudoOptions(words: readonly string[]): LauncherWalkOutcome {
 				timeOutputFile: nested.timeOutputFile,
 				chdirTailIndex: i,
 				...(chdirDir !== undefined ? { sudoChdir: chdirDir } : {}),
+				...(chrootDir !== undefined ? { sudoChroot: chrootDir } : {}),
 				...(loginShellMode ? { loginShell: true as const } : {}),
 			};
 		}
@@ -3038,6 +3265,7 @@ function walkSudoOptions(words: readonly string[]): LauncherWalkOutcome {
 			kind: 'inner',
 			innerIndex: i,
 			...(chdirDir !== undefined ? { sudoChdir: chdirDir } : {}),
+			...(chrootDir !== undefined ? { sudoChroot: chrootDir } : {}),
 			...(loginShellMode ? { loginShell: true as const } : {}),
 		};
 	}
@@ -3572,6 +3800,7 @@ function detectLauncherWrites(cmd: unknown): WriteTarget[] {
 		// launcher-write emission gate.
 		if (
 			base === 'sudo' ||
+			base === 'sudoedit' ||
 			base === 'time' ||
 			base === 'nice' ||
 			base === 'nohup'
@@ -3586,11 +3815,16 @@ function detectLauncherWrites(cmd: unknown): WriteTarget[] {
 				// directory. ABSOLUTE or drive-qualified operands name the same
 				// file under both models and are judged as written; TILDE-leading
 				// operands keep the dynamic-path marker and fail closed.
+				// #3648 AC4: `sudoedit -h HOST` (walk.sudoHost) edits on a
+				// REMOTE host — EVERY operand withdraws (the landing is
+				// unmodeled); `sudoedit -R DIR` reaches here as sudoChdir, so
+				// relative operands withdraw through the same seam.
 				const chdirWithdraws = (operandPath: string): boolean =>
-					walk.sudoChdir !== undefined &&
-					operandPath !== '' &&
-					!isAbsolutePathSpelling(operandPath) &&
-					!operandPath.startsWith('~');
+					walk.sudoHost === true ||
+					(walk.sudoChdir !== undefined &&
+						operandPath !== '' &&
+						!isAbsolutePathSpelling(operandPath) &&
+						!operandPath.startsWith('~'));
 				// sudo -e operands are EDIT TARGETS (write-class) — each one
 				// expands per-branch (bash hands sudo every expanded word);
 				// refusal classes land on the unconditional dynamic() path.
@@ -4369,7 +4603,9 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 	const leaf = detectorCommandLeaf(cmd);
 	const lowerName =
 		detectorSetMember(leaf, BUILTIN_WRITE_COMMANDS) ??
-		(leaf === 'dd' || leaf === 'tee' || leaf === 'env' ? leaf : null);
+		(leaf === 'dd' || leaf === 'tee' || leaf === 'env' || leaf === 'xargs'
+			? leaf
+			: null);
 	if (!lowerName) return results;
 
 	// #3485 (PRR-008): dedupe on the RESOLVED real command as spelled — not
@@ -4793,6 +5029,125 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 		}
 	}
 
+	// #3648 AC3 (D2): `xargs [flags] <verb> …` feeds the verb STDIN-SUPPLIED
+	// operands — statically unknowable, so when the verb is a write/delete
+	// verb the composition withdraws fail-closed through the existing
+	// dynamic marker (plan-critic round 1 blocker 4: NO custom denialOrigin —
+	// the origin union and renderer are closed surfaces; the default
+	// dynamic-path-target denial is the sanctioned idiom). xargs getopt:
+	// value-taking short members {a d E e I L l n P s} consume a glued tail
+	// or the next word; flags {0 r t x}; long forms mirror; an UNKNOWN
+	// option falls back to scanning every remaining word for a write verb
+	// (deny-direction over-deny, disclosed).
+	const xargsWords = getSuffixWords(cmd);
+	if (lowerName === 'xargs') {
+		const isWriteVerbWord = (word: string): boolean => {
+			const base = basenameAnySep(word);
+			return (
+				BUILTIN_WRITE_COMMANDS.has(base) || base === 'tee' || base === 'dd'
+			);
+		};
+		let wi = 0;
+		let verbWord: string | undefined;
+		let unknownOption = false;
+		while (wi < xargsWords.length) {
+			const t = xargsWords[wi];
+			if (t === undefined) break;
+			if (t === '--') {
+				verbWord = xargsWords[wi + 1];
+				break;
+			}
+			if (t.startsWith('--')) {
+				if (
+					t === '--null' ||
+					t === '--no-run-if-empty' ||
+					t === '--verbose' ||
+					t === '--exit'
+				) {
+					wi += 1;
+					continue;
+				}
+				if (
+					t.startsWith('--arg-file=') ||
+					t.startsWith('--delimiter=') ||
+					t.startsWith('--replace=') ||
+					t.startsWith('--max-args=') ||
+					t.startsWith('--max-procs=') ||
+					t.startsWith('--max-chars=')
+				) {
+					wi += 1;
+					continue;
+				}
+				if (
+					t === '--arg-file' ||
+					t === '--delimiter' ||
+					t === '--replace' ||
+					t === '--max-args' ||
+					t === '--max-procs' ||
+					t === '--max-chars'
+				) {
+					wi += 2;
+					continue;
+				}
+				unknownOption = true;
+				break;
+			}
+			if (t.startsWith('-') && t !== '-') {
+				const members = t.slice(1);
+				let consumedNext = false;
+				let stop = false;
+				for (let mi = 0; mi < members.length; mi++) {
+					const ch = members[mi];
+					if (ch === undefined) break;
+					if (ch === '0' || ch === 'r' || ch === 't' || ch === 'x') continue;
+					if ('adEeILlnPs'.includes(ch)) {
+						consumedNext = mi === members.length - 1;
+						stop = true;
+						break;
+					}
+					unknownOption = true;
+					break;
+				}
+				if (unknownOption || stop) {
+					if (!unknownOption && consumedNext) {
+						verbWord = xargsWords[wi + 2];
+					} else if (!unknownOption) {
+						verbWord = xargsWords[wi + 1];
+					}
+					break;
+				}
+				wi += 1;
+				continue;
+			}
+			verbWord = t;
+			break;
+		}
+		if (unknownOption) {
+			// Unknown option: the verb position is unknowable — scan every
+			// remaining word (deny-direction).
+			const found = xargsWords.find(
+				(w) => typeof w === 'string' && isWriteVerbWord(w),
+			);
+			if (found !== undefined) {
+				results.push({
+					category: 'builtin_write',
+					operator: `xargs-fed ${basenameAnySep(found)}`,
+					path: null,
+					dynamicSourceWord: found,
+				});
+			}
+			return results;
+		}
+		if (verbWord !== undefined && isWriteVerbWord(verbWord)) {
+			results.push({
+				category: 'builtin_write',
+				operator: `xargs-fed ${basenameAnySep(verbWord)}`,
+				path: null,
+				dynamicSourceWord: verbWord,
+			});
+		}
+		return results;
+	}
 	if (!BUILTIN_WRITE_COMMANDS.has(lowerName)) return results;
 
 	// `rmdir /s [/q] <path>` is a cmd.exe destructive form.  Let the
@@ -5039,6 +5394,92 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 					}),
 				);
 			}
+		}
+	} else if (lowerName === 'shred') {
+		// #3648 AC6: GNU shred overwrites EVERY named operand in place (an
+		// irreversible data-loss write). Modeled on the truncate arm in shape
+		// only — the option grammar is shred's own documented one: value-taking
+		// `-n N` / `--iterations=N`, `-s N` / `--size=N`,
+		// `--random-source=FILE`; flags `-f --force`, `-u --remove`,
+		// `-v --verbose`, `-x --exact`, `-z --zero`; `--remove[=how]` takes an
+		// OPTIONAL GLUED value (a detached following word stays an OPERAND).
+		// NO numeric-name exclusion: a file literally named `1` is a real
+		// operand (unlike truncate, whose detached numeric is a size — shred's
+		// sizes ride options, so a bare numeric is always a file). `--` ends
+		// options (coreutils). An unknown option stops the parse and treats
+		// the REMAINING words as operands (over-report, deny-direction).
+		let endOfOptions = false;
+		for (let w = 0; w < suffixWords.length; w++) {
+			const word = suffixWords[w];
+			if (word === undefined) break;
+			if (!endOfOptions && word === '--') {
+				endOfOptions = true;
+				continue;
+			}
+			if (!endOfOptions && word.startsWith('--')) {
+				if (
+					word === '--force' ||
+					word === '--verbose' ||
+					word === '--exact' ||
+					word === '--zero'
+				) {
+					continue;
+				}
+				if (word === '--remove') continue; // optional value is glued only
+				const gluedMatch =
+					/^--(iterations|size|random-source|remove)=(.*)$/.exec(word);
+				if (gluedMatch) continue;
+				// `--file`-style unknown long with no grammar: stop parsing,
+				// remaining words are operands (deny-direction).
+				endOfOptions = true;
+				continue;
+			}
+			if (!endOfOptions && word.startsWith('-') && word !== '-') {
+				// Short cluster: n and s take a value (glued tail or next
+				// word); f/u/v/x/z are flags; anything else stops the parse.
+				const members = word.slice(1);
+				let stop = false;
+				for (let m = 0; m < members.length; m++) {
+					const ch = members[m];
+					if (
+						ch === 'f' ||
+						ch === 'u' ||
+						ch === 'v' ||
+						ch === 'x' ||
+						ch === 'z'
+					)
+						continue;
+					if (ch === 'n' || ch === 's') {
+						if (m === members.length - 1 && w + 1 < suffixWords.length) w++; // detached value
+						stop = true; // value consumed (glued tail or next word) — end of token
+						break;
+					}
+					stop = true;
+					break;
+				}
+				if (stop) {
+					endOfOptions = true;
+				}
+				continue;
+			}
+			// Operand: every non-option word is an overwrite target.
+			pushExpandedDestination(
+				results,
+				suffixNodes[w],
+				word,
+				0,
+				(path) => ({
+					category: 'builtin_write',
+					operator: 'shred',
+					path,
+				}),
+				() => ({
+					category: 'builtin_write',
+					operator: 'shred',
+					path: null,
+					dynamicSourceWord: word,
+				}),
+			);
 		}
 	} else if (lowerName === 'rmdir') {
 		// POSIX `rmdir dir...` removes EVERY operand (#3503): report each
@@ -6450,6 +6891,105 @@ function detectInterpreterEval(cmd: unknown): WriteTarget[] {
 					? RUBY_CLUSTER_GRAMMAR
 					: PYTHON_CLUSTER_GRAMMAR;
 		if (!scanInterpreterEvalCluster(grammar, args)) return results;
+	} else if (canonical === 'awk') {
+		// #3648 AC2: an INLINE awk program (the positional program, or gawk
+		// `-e/--source=`) is an eval — the whole invocation becomes the
+		// interpreter_eval capability (python -c parity: tool-before's
+		// scope-gated routing judges the eval working directory; `print >`
+		// targets and system() payloads are not statically knowable — the
+		// sanctioned withdraw arm). `awk -f progfile data` keeps the
+		// script-file carve-out (parity: `python script.py` is not an eval).
+		// UNKNOWN options classify as eval (deny-on-uncertainty). Plan-critic
+		// rounds 1-2: gawk/mawk alias through AWK_FAMILY_ALIAS; dialect
+		// grammar is the COMMON core (-v/-F value-taking, -f file) plus the
+		// gawk `-e/--source` inline form; benign inline programs are part of
+		// the disclosed over-deny (python-parity contract).
+		let sawProgramFile = false;
+		let sawInline = false;
+		let sawProgram = false;
+		let sawInPlace = false;
+		let denyOnUncertainty = false;
+		let i = 0;
+		while (i < suffixWords.length) {
+			const w = suffixWords[i];
+			if (w === undefined) break;
+			if (w === '--') {
+				// gawk: words after `--` are data files; a program not yet
+				// seen can only be the next word — treat it as the program
+				// (deny-direction).
+				if (!sawProgramFile && !sawInline && !sawProgram) sawProgram = true;
+				break;
+			}
+			if (w.startsWith('--')) {
+				if (w.startsWith('--source=')) {
+					sawInline = true;
+					i += 1;
+					continue;
+				}
+				if (w.startsWith('--file=')) {
+					sawProgramFile = true;
+					i += 1;
+					continue;
+				}
+				if (w === '--source' || w === '--file') {
+					const nxt = suffixWords[i + 1];
+					if (nxt !== undefined) {
+						if (w === '--source') sawInline = true;
+						else sawProgramFile = true;
+						i += 1;
+					}
+					i += 1;
+					continue;
+				}
+				if (
+					w === '--assign' ||
+					w === '--separator' ||
+					w.startsWith('--assign=') ||
+					w.startsWith('--separator=')
+				) {
+					if (w === '--assign' || w === '--separator') i += 1; // detached value
+					i += 1;
+					continue;
+				}
+				// --include/--load: library loaders (value-taking), not inline
+				// code — same carve-out as -i/-l above.
+				if (w === '--include' || w === '--load') {
+					if (w === '--include') sawInPlace = true;
+					i += 2;
+					continue;
+				}
+				if (w.startsWith('--include=') || w.startsWith('--load=')) {
+					i += 1;
+					continue;
+				}
+				denyOnUncertainty = true;
+				break;
+			}
+			if (w.startsWith('-') && w !== '-') {
+				// Short cluster, getopt left-to-right: every awk short member is
+				// ARG-TAKING (v F f e i l), so the FIRST member either is last
+				// (argument = next word) or swallows the token tail. An unknown
+				// member denies on uncertainty.
+				const members = w.slice(1);
+				if (!/^[vFfeil]+$/.test(members)) {
+					denyOnUncertainty = true;
+					break;
+				}
+				const ch = members[0];
+				const last = members.length === 1;
+				if (ch === 'f') sawProgramFile = true;
+				else if (ch === 'e') sawInline = true;
+				else if (ch === 'i') sawInPlace = true;
+				if (last) i += 1; // the value is the next word
+				continue;
+			}
+			// First non-option word: the PROGRAM, unless a -f/--file program
+			// already supplied it (then it is a data file).
+			if (!sawProgramFile && !sawInline) sawProgram = true;
+			i += 1;
+		}
+		if (sawInPlace) return results; // the in-place arm owns the whole command
+		if (!(sawInline || sawProgram || denyOnUncertainty)) return results;
 	} else {
 		const relevantFlags = evalFlags[canonical] ?? [];
 		// Match exact flag (-c), equals-glued (-c=CODE), or directly-glued (-cCODE / -c'code')
