@@ -252,11 +252,15 @@ function runBoundedGit(
 			finish({ kind: 'spawn-error' });
 			return;
 		}
+		// REFERENCED on purpose: with a fully fake child (unit tests) the
+		// timer is the only event source, and an unref'd timer never fires
+		// against an idle loop. With a real child the close event clears it
+		// via finish(); the ref only keeps the loop alive for at most
+		// budgetMs, which is the bounded wait we already promise.
 		timeoutHandle = setTimeout(
 			() => finish({ kind: 'timeout' }),
 			Math.max(1, budgetMs),
 		);
-		timeoutHandle.unref?.();
 		child?.once('error', () => finish({ kind: 'spawn-error' }));
 		child?.stdout?.on('data', (chunk: Buffer | string) => {
 			const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
@@ -301,10 +305,12 @@ function runBoundedGit(
  * corrupt packed ref). A failure is further classified (three bounded
  * follow-ups, only on the failure arm) into unborn (transient — a commit
  * rescues it) vs corrupt (terminal — nothing in the workspace rescues it).
+ * Every child is clamped against the caller's ABSOLUTE deadline (a slow
+ * failure arm must not spend 3x the per-child budget past `deadlineAt`).
  */
 async function resolveHeadSha(
 	directory: string,
-	budgetMs: number,
+	deadlineAt?: number,
 ): Promise<
 	| { ok: true; sha: string }
 	| {
@@ -318,10 +324,14 @@ async function resolveHeadSha(
 				| 'malformed-shape';
 	  }
 > {
+	const budget = (): number => {
+		if (deadlineAt === undefined) return HEAD_TIMEOUT_MS;
+		return Math.max(1, Math.min(HEAD_TIMEOUT_MS, deadlineAt - Date.now()));
+	};
 	const verify = await runBoundedGit(
 		['rev-parse', '--verify', 'HEAD^{commit}'],
 		directory,
-		budgetMs,
+		budget(),
 		false,
 	);
 	if (verify.kind === 'timeout') return { ok: false, cause: 'timeout' };
@@ -341,7 +351,7 @@ async function resolveHeadSha(
 	const symbolic = await runBoundedGit(
 		['symbolic-ref', '-q', 'HEAD'],
 		directory,
-		budgetMs,
+		budget(),
 		true,
 	);
 	if (symbolic.kind !== 'exit') {
@@ -357,7 +367,7 @@ async function resolveHeadSha(
 	const refPresent = await runBoundedGit(
 		['show-ref', '--verify', '--quiet', branchRef],
 		directory,
-		budgetMs,
+		budget(),
 		true,
 	);
 	if (refPresent.kind !== 'exit') {
@@ -438,7 +448,7 @@ export async function classifyWorkspaceGitHealth(
 		}
 		return { kind: 'denial', code: 'git_unhealthy', retryable: false };
 	}
-	const head = await resolveHeadSha(directory, remaining());
+	const head = await resolveHeadSha(directory, deadlineAt);
 	if (head.ok) return { kind: 'head', sha: head.sha };
 	switch (head.cause) {
 		case 'timeout':
@@ -625,7 +635,10 @@ export async function buildReviewerTaskScope(
 		}
 	}
 
-	const finalHead = await classifyWorkspaceGitHealth(realRoot);
+	const finalHead = await classifyWorkspaceGitHealth(
+		realRoot,
+		options.deadlineAt,
+	);
 	if (finalHead.kind !== 'head' || finalHead.sha !== headSha) {
 		return { ok: false, code: 'head_changed', retryable: true };
 	}

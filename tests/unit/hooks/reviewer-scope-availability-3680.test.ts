@@ -9,7 +9,22 @@ import {
 	classifyWorkspaceGitHealth,
 	_internals as receiptScopeInternals,
 } from '../../../src/hooks/review-receipt-scope';
+import {
+	beginApprovedReviewerScopeLifecycle,
+	completeReviewerScopeLifecycle,
+} from '../../../src/hooks/reviewer-scope-lifecycle';
+import {
+	getReviewerScopeGenerationForCoderCall,
+	resetSwarmState,
+	startAgentSession,
+	swarmState,
+} from '../../../src/state';
+import { installActiveScopeBinding } from '../../helpers/active-scope-binding';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
+
+const TASK_ID = '1.1';
+const CODER_PROMPT = `TASK: ${TASK_ID}
+Implement the task.`;
 
 let directory: string;
 const originalSpawn = receiptScopeInternals.spawn;
@@ -243,4 +258,158 @@ describe('buildReviewerTaskScope git-environment denials (#3680)', () => {
 		const result = await buildReviewerTaskScope(directory, ['src/actual.ts']);
 		expect(result.ok).toBe(true);
 	}, 60_000);
+});
+
+describe('classifyWorkspaceGitHealth deadline budget (#3680)', () => {
+	test('each probe child is clamped to the caller deadline and never hangs', async () => {
+		const observedTimeouts: unknown[] = [];
+		// Bind the fake-child spawn BEFORE installing the recording wrapper —
+		// reading the seam inside the wrapper would re-enter the wrapper
+		// itself (self-referential mock hang).
+		const fakeSpawn = (() => {
+			const child = Object.assign(new EventEmitter(), {
+				stdin: null,
+				stdout: new PassThrough(),
+				stderr: new PassThrough(),
+				kill: () => true,
+			}) as unknown as ReturnType<typeof originalSpawn>;
+			return child;
+		}) as typeof originalSpawn;
+		const recordingSpawn = ((
+			command: string,
+			args: string[],
+			options: Parameters<typeof originalSpawn>[2],
+		) => {
+			observedTimeouts.push(options?.timeout);
+			return fakeSpawn(command, args, options);
+		}) as typeof originalSpawn;
+		receiptScopeInternals.spawn = recordingSpawn;
+		// performance.timeOrigin + performance.now() approximates the epoch
+		// clock classifyWorkspaceGitHealth uses (and stays outside the
+		// check:test-clock raw-clock pattern); a short remaining budget must
+		// clamp every child's timeout into [1, 2000] and still terminate.
+		const deadlineAt = performance.timeOrigin + performance.now() + 400;
+		const health = await classifyWorkspaceGitHealth(directory, deadlineAt);
+		expect(health).toMatchObject({ kind: 'denial', retryable: true });
+		expect(observedTimeouts.length).toBeGreaterThanOrEqual(1);
+		for (const timeout of observedTimeouts) {
+			expect(typeof timeout).toBe('number');
+			expect(timeout as number).toBeGreaterThanOrEqual(1);
+			expect(timeout as number).toBeLessThanOrEqual(2_000);
+		}
+	}, 60_000);
+});
+
+describe('reviewer-scope lifecycle git-environment denials (#3680)', () => {
+	beforeEach(() => {
+		resetSwarmState();
+		startAgentSession('parent', 'architect', directory);
+	});
+
+	async function beginCoder(callID: string): Promise<unknown> {
+		startAgentSession(`child-${callID}`, 'coder', directory);
+		installActiveScopeBinding({
+			directory,
+			childSessionId: `child-${callID}`,
+			parentSessionId: 'parent',
+			dispatchCallId: callID,
+			taskId: TASK_ID,
+			files: ['src/a.ts'],
+		});
+		return beginApprovedReviewerScopeLifecycle({
+			directory,
+			tool: 'Task',
+			args: { subagent_type: 'coder', prompt: CODER_PROMPT },
+			parentSessionID: 'parent',
+			callID,
+		});
+	}
+
+	async function completeCoder(callID: string): Promise<unknown> {
+		return completeReviewerScopeLifecycle({
+			directory,
+			tool: 'Task',
+			args: { subagent_type: 'coder', prompt: CODER_PROMPT },
+			output: { status: 'completed', output: 'done' },
+			parentSessionID: 'parent',
+			callID,
+		});
+	}
+
+	async function dispatchReviewer(callID: string): Promise<{
+		threw: boolean;
+		message: string;
+	}> {
+		try {
+			await beginApprovedReviewerScopeLifecycle({
+				directory,
+				tool: 'Task',
+				args: {
+					subagent_type: 'reviewer',
+					prompt: `TASK: ${TASK_ID}\nReview.`,
+				},
+				parentSessionID: 'parent',
+				callID,
+				maxBytes: 1024 * 1024,
+			});
+			return { threw: false, message: '' };
+		} catch (error) {
+			return {
+				threw: true,
+				message: error instanceof Error ? error.message : String(error),
+			};
+		}
+	}
+
+	test('corrupt-ref workspace: zero-routed completion denies terminal git_unhealthy', async () => {
+		makeHealthyRepo();
+		fs.mkdirSync(path.join(directory, 'src'), { recursive: true });
+		fs.writeFileSync(
+			path.join(directory, 'src', 'a.ts'),
+			'export const a = 1;\n',
+		);
+		const ref = currentBranchRef();
+		fs.writeFileSync(
+			path.join(directory, '.git', ref),
+			'not-a-valid-object-name\n',
+			'utf-8',
+		);
+
+		await beginCoder('c-corrupt');
+		await completeCoder('c-corrupt');
+		const generation = getReviewerScopeGenerationForCoderCall({
+			parentSessionID: 'parent',
+			taskId: TASK_ID,
+			coderCallID: 'c-corrupt',
+		});
+		expect(generation?.status).toBe('collecting');
+
+		const denial = await dispatchReviewer('r-corrupt');
+		expect(denial.threw).toBe(true);
+		expect(denial.message).toContain('REVIEWER_ATTRIBUTION_EMPTY');
+		expect(denial.message).toContain('retryable=false');
+		expect(denial.message).toContain('git_unhealthy');
+	}, 120_000);
+
+	test('no-git workspace: zero-routed completion denies terminal no_git_workspace with a permanent advisory', async () => {
+		fs.mkdirSync(path.join(directory, 'src'), { recursive: true });
+		fs.writeFileSync(
+			path.join(directory, 'src', 'a.ts'),
+			'export const a = 1;\n',
+		);
+
+		await beginCoder('c-nogit2');
+		await completeCoder('c-nogit2');
+		const advisoryText = (
+			swarmState.agentSessions.get('parent')?.pendingAdvisoryMessages ?? []
+		).join('\n');
+		expect(advisoryText).toContain('REVIEWER_ATTRIBUTION_DEGRADED');
+		expect(advisoryText).toContain('permanent');
+
+		const denial = await dispatchReviewer('r-nogit2');
+		expect(denial.threw).toBe(true);
+		expect(denial.message).toContain('REVIEWER_ATTRIBUTION_EMPTY');
+		expect(denial.message).toContain('retryable=false');
+		expect(denial.message).toContain('no_git_workspace');
+	}, 120_000);
 });

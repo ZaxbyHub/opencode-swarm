@@ -142,7 +142,7 @@ describe('getChangedLineRanges — diff-base fall-through warning (#3681, C5)', 
 
 			const maps = [first, second];
 			const accepted = maps.some(
-				(map) => map !== null && map.has('base.txt') && !map.has('big.txt'),
+				(map) => map?.has('base.txt') && !map.has('big.txt'),
 			);
 			expect(accepted).toBe(true);
 			const hits = allWarns.filter((line) => line.includes(TOKEN));

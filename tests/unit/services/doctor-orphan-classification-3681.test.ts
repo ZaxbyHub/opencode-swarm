@@ -135,24 +135,22 @@ describe('doctor — Orphaned Evidence reserved fixed ids (#3681, C8)', () => {
 		expect(named).toEqual([]);
 	}, 60_000);
 
-	// PRODUCTION DEFECT (reported, not fixed here): the zero-padded near-miss
-	// `phase-01-summaries` is wrongly EXEMPTED — PHASE_SUMMARIES_ID_REGEX is
-	// /^phase-\d+-summaries$/ and \d+ matches the zero-padded `01`, while the
-	// docstring on src/summaries/store.ts explicitly claims
-	// `phase-01-summaries` is NOT exempted. The writer can never emit a
-	// zero-padded phase number, so this shape is a real orphan being hidden.
-	// test.failing pins the REQUIRED contract: this leg passes while the
-	// defect exists and goes red when the regex is tightened (then remove
-	// the failing marker).
-	test.failing('zero-padded near-miss phase-01-summaries is enumerated as an orphan (docstring contract)', async () => {
+	// Near-miss shapes must stay enumerable as orphans: the predicate is
+	// anchored to the canonical decimal of AgentWorkSummarySchema.phase
+	// (integer 0-999, no leading zeros), so a zero-padded `phase-01-summaries`
+	// and an out-of-range `phase-1000-summaries` are NOT exempted — the writer
+	// can never emit either, so each is a real orphan being hidden.
+	test('near-miss phase-summary ids are enumerated as orphans (docstring contract)', async () => {
 		for (const id of [...RESERVED_IDS, 'phase-1-summaries', '1.1']) {
 			writeEvidenceBundle(id);
 		}
 		writeEvidenceBundle('phase-01-summaries');
+		writeEvidenceBundle('phase-1000-summaries');
 
 		const check = await orphanedEvidenceCheck();
 		expect(check).toBeDefined();
 		const entries = orphanEntries(check?.detail ?? '');
 		expect(entries).toContain('phase-01-summaries');
+		expect(entries).toContain('phase-1000-summaries');
 	}, 60_000);
 });
