@@ -108,7 +108,9 @@ describe('spawn-failure cause typing (#3680 — final-critic round-2 blockers 1-
 	// Node's spawn() reports only EACCES/EAGAIN/EMFILE/ENFILE/ENOENT through
 	// the async 'error' event and THROWS other errnos (ENOMEM included)
 	// synchronously, so the transient set is pinned on BOTH arms.
-	for (const errno of ['EMFILE', 'ENFILE', 'EAGAIN'] as const) {
+	// ETXTBSY (execve(2): the executable is open for writing) clears when the
+	// writer closes, so it is transient too (plan-critic round 5).
+	for (const errno of ['EMFILE', 'ENFILE', 'EAGAIN', 'ETXTBSY'] as const) {
 		test(`${errno} via the error event stays transient head_timeout`, async () => {
 			receiptScopeInternals.spawn = (() => {
 				const child = Object.assign(new EventEmitter(), {
@@ -141,6 +143,21 @@ describe('spawn-failure cause typing (#3680 — final-critic round-2 blockers 1-
 			throw Object.assign(new Error('Cannot allocate memory'), {
 				code: 'ENOMEM',
 			});
+		}) as typeof originalSpawn;
+		const health = await classifyWorkspaceGitHealth(directory);
+		expect(health).toEqual({
+			kind: 'denial',
+			code: 'head_timeout',
+			retryable: true,
+		});
+	}, 60_000);
+
+	test('ETXTBSY thrown synchronously from spawn stays transient head_timeout', async () => {
+		// The synchronous arm must carry the same set as the event arm, so an
+		// executable being replaced mid-write retries instead of denying
+		// terminal (plan-critic round 5).
+		receiptScopeInternals.spawn = (() => {
+			throw Object.assign(new Error('Text file busy'), { code: 'ETXTBSY' });
 		}) as typeof originalSpawn;
 		const health = await classifyWorkspaceGitHealth(directory);
 		expect(health).toEqual({

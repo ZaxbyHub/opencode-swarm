@@ -219,21 +219,29 @@ interface BoundedGitResult {
 /**
  * Spawn errnos that mean "the OS could not start the process right now", not
  * "git does not exist here". They are TRANSIENT — the caller's retry arm can
- * genuinely clear them (a descriptor leak is closed, a fork storm passes) —
- * so they must ride the retryable `head_timeout` channel instead of the
- * permanent `git_unavailable` one (#3680 AC12; final-critic round-2 blocker 1:
- * Node throws ENOMEM SYNCHRONOUSLY from spawn() and reports ENFILE only via
- * the async 'error' event, so the set must be applied to BOTH arms).
+ * genuinely clear them (a descriptor leak is closed, a fork storm passes, an
+ * executable being replaced finishes) — so they must ride the retryable
+ * `head_timeout` channel instead of the permanent `git_unavailable` one
+ * (#3680 AC12; final-critic round-2 blocker 1: Node throws ENOMEM
+ * SYNCHRONOUSLY from spawn() and reports ENFILE only via the async 'error'
+ * event, so the set must be applied to BOTH arms).
  * Deliberately a SUPERSET of the descriptor-exhaustion pair (EMFILE/ENFILE)
  * the sibling fs classifier at reviewer-scope-file-fingerprint.ts:381 treats
  * as transient: that one guards openSync, this one guards spawn, where the
- * fork/exec path can also fail with EAGAIN or ENOMEM.
+ * fork/exec path can also fail with EAGAIN, ENOMEM, or ETXTBSY (execve(2):
+ * the executable is open for writing by another process — the condition
+ * clears when the writer closes, so a later retry can succeed; plan-critic
+ * shipped-scope round 5). NOT claimed exhaustive: an errno outside this set
+ * is treated as permanent, which is the conservative direction for a
+ * missing/unwritable binary, and the residual-exec taxonomy is audited
+ * rather than asserted complete.
  */
 const TRANSIENT_SPAWN_ERRNOS = new Set([
 	'EMFILE',
 	'ENFILE',
 	'EAGAIN',
 	'ENOMEM',
+	'ETXTBSY',
 ]);
 
 function isTransientSpawnErrno(error: unknown): boolean {
