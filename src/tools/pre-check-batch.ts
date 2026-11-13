@@ -576,6 +576,7 @@ export const _internals: {
 	runWithTimeout: typeof runWithTimeout;
 	getChangedLineRanges: typeof getChangedLineRanges;
 	getChangedLineAmbiguousFiles: typeof getChangedLineAmbiguousFiles;
+	parseDiffLineRangesChecked: typeof parseDiffLineRangesChecked;
 	saveEvidence: typeof saveEvidence;
 	runExternalTool: typeof runExternalTool;
 	detectResolvedLinter: typeof detectResolvedLinter;
@@ -595,6 +596,7 @@ export const _internals: {
 	runWithTimeout,
 	getChangedLineRanges,
 	getChangedLineAmbiguousFiles,
+	parseDiffLineRangesChecked,
 	saveEvidence,
 	runExternalTool,
 	detectResolvedLinter,
@@ -1675,6 +1677,15 @@ function parseDiffLineRangesChecked(
 		}
 		if (line.startsWith('--- ') && (inGitFile || !requireGitFileHeaders)) {
 			if (expectingDestination || destinationNeedsHunk) return null;
+			// A git file section carries exactly ONE `--- `/`+++ ` pair; the
+			// next file starts at a fresh `diff --git` boundary. Accepting a
+			// second pair inside the same section lets a malformed diff
+			// reattribute the following hunks to a PHANTOM file key, so the
+			// real file loses its later changed lines (the fail-open shape
+			// this whole unit closes). Only enforced where git file headers
+			// are required at all — the header-less mode has no section
+			// boundary to key on (plan-critic shipped-scope round 8).
+			if (requireGitFileHeaders && destinationSeen) return null;
 			expectingDestination = true;
 			continue;
 		}

@@ -29,6 +29,7 @@ import * as path from 'node:path';
 import {
 	getChangedLineRanges,
 	parseDiffLineRanges,
+	_internals as preCheckBatchInternals,
 } from '../../../src/tools/pre-check-batch.js';
 import { canonicalMkdtemp, removeTreeWithRetry } from '../../helpers/tmpdir.js';
 
@@ -140,6 +141,58 @@ describe('unknown backslash-prefixed armed lines (#3681 round 2)', () => {
 		const lines = result.get('f.ts');
 		expect(lines).toBeDefined();
 		expect([...(lines ?? [])]).toEqual([1]);
+	}, 10_000);
+
+	test('a second file-header pair inside one git section fails closed (production mode)', () => {
+		// The production consumer parses with requireGitFileHeaders=true, and
+		// a git file section carries exactly ONE `--- `/`+++ ` pair — the next
+		// file starts at a fresh `diff --git`. Accepting a second pair inside
+		// the same section lets a malformed diff reattribute the following
+		// hunks to a PHANTOM key, so the real file loses its later changed
+		// lines and they classify PRE-EXISTING (plan-critic round 8). The
+		// public wrapper cannot reach this shape (it parses with the flag
+		// false), so this leg drives the checked parser through the _internals
+		// seam with the production flag.
+		const malformed = [
+			'diff --git f.ts f.ts',
+			'--- f.ts',
+			'+++ f.ts',
+			'@@ -1,0 +1,1 @@',
+			'+one',
+			'--- phantom.ts',
+			'+++ phantom.ts',
+			'@@ -2,0 +2,1 @@',
+			'+two',
+		].join('\n');
+		const checked = preCheckBatchInternals.parseDiffLineRangesChecked(
+			malformed,
+			true,
+		);
+		expect(checked).toBeNull();
+	}, 10_000);
+
+	test('a fresh diff --git boundary still starts a new file (production mode)', () => {
+		// The control for the leg above: the same two-file diff WITH the
+		// boundary git actually emits must parse both files.
+		const wellFormed = [
+			'diff --git f.ts f.ts',
+			'--- f.ts',
+			'+++ f.ts',
+			'@@ -1,0 +1,1 @@',
+			'+one',
+			'diff --git phantom.ts phantom.ts',
+			'--- phantom.ts',
+			'+++ phantom.ts',
+			'@@ -2,0 +2,1 @@',
+			'+two',
+		].join('\n');
+		const checked = preCheckBatchInternals.parseDiffLineRangesChecked(
+			wellFormed,
+			true,
+		);
+		expect(checked).not.toBeNull();
+		expect([...(checked?.keys() ?? [])].sort()).toEqual(['f.ts', 'phantom.ts']);
+		expect([...(checked?.get('phantom.ts') ?? [])]).toEqual([2]);
 	}, 10_000);
 
 	test('the exact no-newline marker stays inert (positive control)', () => {
