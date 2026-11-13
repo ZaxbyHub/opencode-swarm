@@ -37,7 +37,28 @@ fi
 
 r_head="$(sed -n 's/.*"head": *"\([^"]*\)".*/\1/p' "$receipt" | head -1)"
 r_dirty="$(sed -n 's/.*"dirty": *"\([^"]*\)".*/\1/p' "$receipt" | head -1)"
-r_files="$(sed -n 's/.*"files": *\[\(.*\)\].*/\1/p' "$receipt" | head -1 | tr -d '"' | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+# The producer writes pretty-printed JSON (JSON.stringify(receipt, null, 2)),
+# so "files": [ ... ] spans multiple lines. Extract the elements between the
+# "files": [ opener and its closing ] line-sensitively; a single-line sed
+# pattern would silently yield an empty set and skip file verification.
+r_files="$(awk '
+  /"files": *\[/ { in_files = 1; line = $0; sub(/.*"files": *\[/, "", line); if (line ~ /\]/) { sub(/\].*/, "", line); if (line != "") print line; in_files = 0; next } if (line != "") print line; next }
+  in_files {
+    line = $0
+    if (line ~ /\]/) { sub(/\].*/, "", line); if (line != "") print line; in_files = 0; next }
+    if (line != "") print line
+  }
+' "$receipt" | tr -d '",' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/"//g' | sed '/^$/d')"
+# Fail closed if the receipt carries a files array the extractor could not
+# find at all (malformed receipt), rather than vacuously verifying nothing.
+if ! grep -q '"files"' "$receipt"; then
+  echo "TREE-RECEIPT: mismatch (receipt carries no files array)" >&2
+  exit 1
+fi
+if [ -z "$r_files" ]; then
+  echo "TREE-RECEIPT: mismatch (files array present but no elements extracted — empty battery or unparseable receipt)" >&2
+  exit 1
+fi
 
 current_head="$(git -C "$root" rev-parse HEAD 2>/dev/null || echo unknown)"
 if [ -z "$r_head" ] || [ "$r_head" != "$current_head" ]; then

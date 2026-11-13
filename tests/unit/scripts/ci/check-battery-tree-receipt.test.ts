@@ -230,4 +230,52 @@ describe('check-battery-tree-receipt (#3605 AC7)', () => {
 		expect(badRun.status).toBe(1);
 		expect(badRun.output).toContain('TREE-RECEIPT: mismatch');
 	}, 60_000);
+
+	test('a REAL run-test-battery receipt (pretty-printed) is parsed and verified end to end', async () => {
+		// The wrapper binds to its repo root (process.cwd(), like the sibling
+		// runner), so the producer runs from ROOT against an IN-REPO test file
+		// (an out-of-repo file records an absolute path the checker correctly
+		// refuses as unknown against ROOT); the receipt binds to the MAIN repo
+		// tree and is checked against ROOT.
+		const inRepoFixture =
+			'tests/unit/pr-review/observability-generation-ceiling-3593-r4.test.ts';
+		const receiptOut = path.join(directory, 'receipt.json');
+		const producer = spawnSync(
+			process.execPath,
+			[
+				path.join(ROOT, 'scripts', 'ci', 'run-test-battery.ts'),
+				inRepoFixture,
+				'--receipt-out',
+				receiptOut,
+			],
+			{ cwd: ROOT, encoding: 'utf-8', stdin: 'ignore', timeout: 180_000 },
+		);
+		expect(producer.status).toBe(0);
+		// The producer writes JSON.stringify(receipt, null, 2) — pretty-printed,
+		// with "files": [ ... ] spanning lines. The checker must extract the
+		// element and verify it against the tree the battery ran on.
+		const raw = await fs.readFile(receiptOut, 'utf-8');
+		expect(raw).toContain('"files": [');
+		expect(raw).toContain(inRepoFixture);
+		const okRun = runCheck(receiptOut, ROOT);
+		// The receipt was just generated against THIS tree: head matches HEAD,
+		// the file exists, and the dirty binding matches whatever the live
+		// state is (empty on a clean tree, its digest otherwise) - so the ok
+		// arm is unconditional.
+		expect(okRun.status).toBe(0);
+		expect(okRun.output).toContain('TREE-RECEIPT: ok');
+		// The same pretty receipt naming a nonexistent file is refused in EITHER
+		// tree state (the file check precedes the dirty comparison — the seam
+		// single-line fixtures cannot witness).
+		const tampered = JSON.parse(raw) as {
+			head: string;
+			dirty: string;
+			files: string[];
+		};
+		tampered.files = ['no-such-file-3605.test.ts'];
+		await fs.writeFile(receiptOut, JSON.stringify(tampered, null, 2), 'utf-8');
+		const bad = runCheck(receiptOut, ROOT);
+		expect(bad.status).toBe(1);
+		expect(bad.output).toContain('TREE-RECEIPT: unknown-file');
+	}, 240_000);
 });

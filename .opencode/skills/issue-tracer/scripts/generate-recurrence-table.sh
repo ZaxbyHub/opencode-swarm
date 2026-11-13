@@ -59,19 +59,23 @@ if [ -n "$dup_hits" ] || [ -n "$dup_disp" ]; then
   exit 1
 fi
 
-# Unmatched: every hit predicate must have a disposition row.
-missing_disp="$(tail -n +2 "$hits" | cut -f1 | while IFS= read -r p; do
-  grep -Fq "$(printf '%s\t' "$p")" "$disp" || printf '%s ' "$p"
-done)"
+# Unmatched: every hit predicate must have a disposition row. Joins are
+# EXACT column-1 comparisons (awk $1 == p): a substring/suffix grep would let
+# a predicate like "foo" join against "bar-foo" and render a misjoined row.
+missing_disp="$(awk -F '\t' '
+  NR == FNR { if (FNR > 1) disps[$1] = 1; next }
+  FNR > 1 { if (!(($1) in disps)) printf "%s ", $1 }
+' "$disp" "$hits")"
 if [ -n "$missing_disp" ]; then
   echo "GENERATION-REFUSED: unmatched (hit predicates without dispositions:${missing_disp})" >&2
   exit 1
 fi
 
 # Orphan dispositions (no matching hit) are count drift by construction.
-orphan_disp="$(tail -n +2 "$disp" | cut -f1 | while IFS= read -r p; do
-  grep -Fq "$(printf '%s\t' "$p")" "$hits" || printf '%s ' "$p"
-done)"
+orphan_disp="$(awk -F '\t' '
+  NR == FNR { if (FNR > 1) hits[$1] = 1; next }
+  FNR > 1 { if (!(($1) in hits)) printf "%s ", $1 }
+' "$hits" "$disp")"
 if [ -n "$orphan_disp" ]; then
   echo "GENERATION-REFUSED: count-drift (dispositions without hits:${orphan_disp})" >&2
   exit 1

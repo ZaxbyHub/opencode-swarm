@@ -1,9 +1,9 @@
-import { describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { bashCommand } from '../../../helpers/bash';
-import { canonicalMkdtemp } from '../../../helpers/tmpdir';
+import { bashCommand } from '../../helpers/bash.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 // #3605 AC3: trace-check.sh phase 1 refuses a trace whose cluster-preflight
 // artifact is absent or malformed, and accepts one that records per-candidate
@@ -11,11 +11,7 @@ import { canonicalMkdtemp } from '../../../helpers/tmpdir';
 // (every trace selects a cluster of >= 1 issue); the shape check exists so a
 // recorded-at-only artifact cannot pass vacuously.
 
-const SCRIPT = path.resolve(
-	__dirname,
-	'../../../..',
-	'.opencode/skills/issue-tracer/scripts/trace-check.sh',
-);
+const SCRIPT = path.join(process.cwd(), '.opencode', 'skills', 'issue-tracer', 'scripts', 'trace-check.sh');
 
 const PREFLIGHT_VALID =
 	'recorded-at: 2026-01-01T00:00:00Z\n\n## candidate #1\n\n- claim comments (live): none\n- open PRs naming 1 in:body: none\n- verdict: CLEAR\n';
@@ -51,8 +47,16 @@ function git(cwd: string, ...args: string[]): string {
 	return proc.stdout.toString().trim();
 }
 
+const repos: string[] = [];
+
+afterEach(() => {
+	for (const dir of repos) fs.rmSync(dir, { recursive: true, force: true });
+	repos.length = 0;
+});
+
 function makeRepo(): string {
 	const dir = canonicalMkdtemp('trace-check-preflight-');
+	repos.push(dir);
 	git(dir, 'init', '-q', '-b', 'main');
 	git(dir, 'config', 'user.email', 'trace@example.invalid');
 	git(dir, 'config', 'user.name', 'Trace');

@@ -81,7 +81,7 @@ function resolveCandidate(root: string, arg: string): string {
  * --porcelain` output with CRLF normalized; a clean tree records "" (the
  * producer form); the checker accepts both forms and compares accordingly.
  */
-export function computeDirtyDigest(root: string): string {
+function computeDirtyDigest(root: string): string {
 	try {
 		const out = execFileSync('git', ['-C', root, 'status', '--porcelain'], {
 			encoding: 'utf8',
@@ -114,7 +114,7 @@ interface BatteryReceipt {
 	files: string[];
 }
 
-export function writeReceipt(root: string, files: readonly string[], receiptOut: string | null): string {
+function writeReceipt(root: string, files: readonly string[], receiptOut: string | null): string {
 	const receipt: BatteryReceipt = {
 		head: currentHead(root),
 		dirty: computeDirtyDigest(root),
@@ -200,13 +200,17 @@ async function main(): Promise<void> {
 
 	assertBatteryAccounting(discovered, executed);
 
-	const receiptPath = writeReceipt(root, discovered, receiptOut);
-	console.log(`battery-tree-receipt: ${receiptPath}`);
 	console.log(`BATTERY pass=${discovered.length - failed} fail=${failed}`);
 	if (failed > 0) {
 		console.error(`FAILED files: ${failedFiles.join(', ')}`);
 		process.exit(1);
 	}
+	// The tree receipt binds a PASSING battery to the tree it ran on; a failed
+	// run must not leave a receipt a readiness check could mistake for one.
+	const receiptPath = writeReceipt(root, discovered, receiptOut);
+	console.log(`battery-tree-receipt: ${receiptPath}`);
 }
 
-await main();
+if (import.meta.main) {
+	await main();
+}
