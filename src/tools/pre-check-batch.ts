@@ -377,6 +377,7 @@ async function resolveValidatedDiffBase(
 				'--no-ext-diff',
 				'--no-color',
 				'--no-prefix',
+				'--submodule=short',
 				'-U0',
 				`${candidate}..HEAD`,
 				'--',
@@ -462,6 +463,7 @@ async function resolveValidatedDiffBase(
 							'--no-ext-diff',
 							'--no-color',
 							'--no-prefix',
+							'--submodule=short',
 							'-U0',
 							`${candidate}..HEAD`,
 							'--',
@@ -1579,6 +1581,15 @@ function normalizeDiffPath(rawPath: string): string | null {
 /**
  * Parse unified diff output (with -U0) to extract added/modified line numbers per file.
  * Returns a Map from normalised file path → Set of changed line numbers.
+ *
+ * SCOPE (deliberate, fail-closed): only ordinary unified diff is supported.
+ * A combined diff (`diff --cc`, the default `git diff` rendering of an
+ * unresolved merge) is NOT parsed — its `@@@` headers and two-column body do
+ * not match this grammar, so such input returns null and every finding is
+ * treated as new (the safe direction: no PRE-EXISTING discount from a shape
+ * the parser does not understand). Callers that need merge-conflict coverage
+ * must request a non-combined rendering explicitly. Pinned by
+ * tests/unit/tools/pre-check-batch-parser-strictness-3681b.test.ts.
  */
 export function parseDiffLineRanges(
 	diffOutput: string,
@@ -2017,6 +2028,7 @@ export async function getChangedLineRanges(
 		'--no-ext-diff',
 		'--no-color',
 		'--no-prefix',
+		'--submodule=short',
 		'-U0',
 	];
 	const requestedPathspecs = requestedFiles

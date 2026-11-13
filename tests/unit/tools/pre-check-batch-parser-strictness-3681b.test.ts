@@ -195,6 +195,28 @@ describe('unknown backslash-prefixed armed lines (#3681 round 2)', () => {
 		expect([...(checked?.get('phantom.ts') ?? [])]).toEqual([2]);
 	}, 10_000);
 
+	test('a combined (merge) diff fails closed rather than misparsing', () => {
+		// Combined output (`diff --cc`, the default rendering of an unresolved
+		// merge) is deliberately out of grammar: the `@@@` header and the
+		// two-column body must not be half-parsed into a partial map. Failing
+		// closed means every finding is treated as new — the safe direction.
+		// Pinned so the limitation is deliberate, not accidental.
+		const combined = [
+			'diff --cc f.ts',
+			'--- f.ts',
+			'+++ f.ts',
+			'@@@ -1,1 -1,1 +1,1 @@@',
+			'--one',
+			'- two',
+			'++three',
+		].join('\n');
+		const checked = preCheckBatchInternals.parseDiffLineRangesChecked(
+			combined,
+			true,
+		);
+		expect(checked).toBeNull();
+	}, 10_000);
+
 	test('the exact no-newline marker stays inert (positive control)', () => {
 		const result = parseDiffLineRanges(
 			[
