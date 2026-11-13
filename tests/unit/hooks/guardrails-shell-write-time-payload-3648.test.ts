@@ -193,4 +193,28 @@ describe('#3648 D7 detector/resolver proofs: the first-leaf emission survives th
 		},
 		T,
 	);
+	test(
+		'4.6 final critic: time-masked recursive deletes deny under the DEFAULT config',
+		async () => {
+			// Default config (destructive blocking ON): the timed command hides
+			// from the destructive arm — the write-side fix alone admitted
+			// `time -o f sh -c "rm -rf /"` (final-critic live probe).
+			const a = await gate('/usr/bin/time -o src/t sh -c "rm -rf ../y"');
+			expect(a.verdict).toBe('BLOCKED');
+			const b = await gate('time -o src/t sh -c "rm -rf /"');
+			expect(b.verdict).toBe('BLOCKED');
+			const c = await gate('command time -o src/t rm -rf ../y');
+			expect(c.verdict).toBe('BLOCKED');
+			const d = await gate('nice time -o src/t sh -c "rm -rf ../y"');
+			expect(d.verdict).toBe('BLOCKED');
+			const e = await gate('time -a -o src/t sh -c "rm -rf ../y"');
+			expect(e.verdict).toBe('BLOCKED');
+			// Admissions that must survive the deny-direction scan.
+			const f = await gate('cd src && /usr/bin/time -o ok.txt true');
+			expect(f.verdict).toBe('ADMITTED');
+			const g = await gate('time make build');
+			expect(g.verdict).toBe('ADMITTED');
+		},
+		T,
+	);
 });
