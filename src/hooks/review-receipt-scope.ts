@@ -313,7 +313,8 @@ async function resolveHeadSha(
 				| 'timeout'
 				| 'spawn-error'
 				| 'overflow'
-				| 'nonzero'
+				| 'unborn'
+				| 'corrupt'
 				| 'malformed-shape';
 	  }
 > {
@@ -331,7 +332,12 @@ async function resolveHeadSha(
 		return { ok: true, sha };
 	}
 	if (verify.exitCode === 0) return { ok: false, cause: 'malformed-shape' };
-	// Nonzero: distinguish unborn (transient) from corrupt (terminal).
+	// Nonzero: distinguish unborn (transient — a commit rescues it) from
+	// corrupt (terminal — nothing in the workspace rescues it). Deterministic
+	// chain, no "any commit exists somewhere" heuristic: HEAD must be a
+	// symbolic ref whose TARGET ref is ABSENT. A detached HEAD, a symref
+	// target that EXISTS but does not peel (garbage loose/packed ref, e.g.
+	// all-zeros) — each is corrupt.
 	const symbolic = await runBoundedGit(
 		['symbolic-ref', '-q', 'HEAD'],
 		directory,
@@ -345,8 +351,7 @@ async function resolveHeadSha(
 		};
 	}
 	if (symbolic.exitCode !== 0 || !symbolic.stdout) {
-		// Detached HEAD whose object does not verify — corrupt, never unborn.
-		return { ok: false, cause: 'nonzero' };
+		return { ok: false, cause: 'corrupt' };
 	}
 	const branchRef = symbolic.stdout;
 	const refPresent = await runBoundedGit(
@@ -362,12 +367,13 @@ async function resolveHeadSha(
 		};
 	}
 	if (refPresent.exitCode === 1) {
-		// Branch ref absent while symbolic HEAD points at it: genuinely unborn.
-		return { ok: false, cause: 'nonzero' };
+		// Symbolic HEAD points at a branch ref that does not exist at all:
+		// genuinely unborn; the first commit resolves it.
+		return { ok: false, cause: 'unborn' };
 	}
 	// Ref present (exit 0) or itself unreadable (exit >1, e.g. 128 corrupt
 	// loose/packed ref) but the commit object fails: corrupt, terminal.
-	return { ok: false, cause: 'nonzero' };
+	return { ok: false, cause: 'corrupt' };
 }
 
 export type WorkspaceGitHealth =
@@ -440,25 +446,14 @@ export async function classifyWorkspaceGitHealth(
 		case 'overflow':
 		case 'malformed-shape':
 			return { kind: 'denial', code: 'head_timeout', retryable: true };
-		case 'nonzero': {
-			// resolveHeadSha already separated unborn (transient) from corrupt
-			// (terminal) — re-run the cheap discriminator result via the
-			// presence of ANY commit: an unborn workspace has none.
-			const anyCommit = await runBoundedGit(
-				['rev-list', '--all', '--max-count=1'],
-				directory,
-				remaining(),
-				false,
-			);
-			if (
-				anyCommit.kind === 'exit' &&
-				anyCommit.exitCode === 0 &&
-				!anyCommit.stdout
-			) {
-				return { kind: 'denial', code: 'head_timeout', retryable: true };
-			}
+		case 'unborn':
+			// Proven by resolveHeadSha: symbolic HEAD points at an ABSENT
+			// branch ref (show-ref exit 1) — genuinely unborn; the first
+			// commit rescues it, so the transient head_timeout arm stands
+			// (frozen C10 contract).
+			return { kind: 'denial', code: 'head_timeout', retryable: true };
+		case 'corrupt':
 			return { kind: 'denial', code: 'git_unhealthy', retryable: false };
-		}
 	}
 }
 
