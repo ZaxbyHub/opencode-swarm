@@ -41,6 +41,7 @@ function runBattery(
 	};
 }
 
+// vacuous-ok: fixture FILE CONTENT for a passing bun test, not an assertion in this suite
 const PASS_FIXTURE = `import { test, expect } from 'bun:test';\ntest('pass', () => { expect(1).toBe(1); });\n`;
 const FAIL_FIXTURE = `import { test, expect } from 'bun:test';\ntest('fail', () => { expect(1).toBe(2); });\n`;
 

@@ -307,11 +307,9 @@ describe('check-battery-tree-receipt (#3605 AC7)', () => {
 		);
 		await fs.writeFile(path.join(directory, 'tracked.txt'), 'v1\n', 'utf-8');
 		const fixture = path.join(directory, 'fixture-pass.test.ts');
-		await fs.writeFile(
-			fixture,
-			"import { test, expect } from 'bun:test';\ntest('pass', () => { expect(1).toBe(1); });\n",
-			'utf-8',
-		);
+		const PASSING_BUN_TEST =
+			"import { test, expect } from 'bun:test';\ntest('pass', () => { expect(1).toBe(1); });\n"; // vacuous-ok: fixture FILE CONTENT, not an assertion in this suite
+		await fs.writeFile(fixture, PASSING_BUN_TEST, 'utf-8');
 		git('add', '-A');
 		git(
 			'-c',
