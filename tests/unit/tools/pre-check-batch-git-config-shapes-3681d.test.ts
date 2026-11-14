@@ -15,7 +15,8 @@
  *  - Every map key went on the command line, so a very large changeset
  *    exceeded the Windows 32767-character limit, `runGit` returned null, and
  *    the WHOLE map was nulled — an availability regression against main. The
- *    argv is now chunked.
+ *    argv is now chunked (round 16), and the chunk bound is the accumulated
+ *    argv LENGTH rather than a fixed per-chunk path count (round 17).
  */
 
 import { describe, expect, test } from 'bun:test';
@@ -169,49 +170,215 @@ describe('filter detection for quote-leading paths (#3681 round 16)', () => {
 	}, 30_000);
 });
 
-describe('filter leg argv chunking (#3681 round 16)', () => {
-	test('a changeset larger than one chunk keeps the whole map', async () => {
-		// Every map key used to go on the command line; past roughly 550 changed
-		// files on Windows this exceeds the 32767-character limit, `runGit`
-		// returns null, and the whole map is nulled — an availability regression
-		// against main (round-16 finding, executed: 600 keys -> ENAMETOOLONG ->
-		// null). 250 files is enough to exercise several chunks without making
-		// the leg slow.
-		const directory = canonicalMkdtemp('git-shapes-3681d-many-');
-		const requested: string[] = [];
+describe('filter leg argv chunking (#3681 rounds 16 and 17)', () => {
+	test('a changeset whose argv exceeds the Windows command-line limit keeps the whole map', async () => {
+		// Round 16 chunked the argv. Round 17 replaced the fixed per-chunk path
+		// COUNT with an accumulated-LENGTH bound, because a single path may
+		// legally be several kilobytes (Linux allows 4096 bytes per component)
+		// and a count cannot bound the command line — the round-16 leg could not
+		// tell the two apart, so it pinned neither (self-review finding,
+		// executed: 250 short paths total ~3.2 KB of argv and fit one chunk, so
+		// removing the chunking entirely left the leg green).
+		//
+		// This fixture is built so BOTH shapes die: 100 paths of ~405 bytes each
+		// is ~40 KB of argv, which exceeds the 32767-character CreateProcess
+		// limit whether it goes out in ONE call or in one fixed 100-path chunk.
+		// Only the length bound survives (100 / 39-per-chunk = 3 calls).
+		//
+		// The paths live only in the index — Windows refuses a 405-character path
+		// on disk — exactly as the round-16 quote-leading leg does. `git
+		// check-attr` is a pure `.gitattributes` lookup, so it answers for a path
+		// with no worktree file (executed probe).
+		const directory = canonicalMkdtemp('git-shapes-3681d-long-');
+		const FILE_COUNT = 100;
+		const SEGMENTS = 7;
+		const SEGMENT = 'a'.repeat(55);
+		const longPath = (index: number): string =>
+			[
+				...Array.from(
+					{ length: SEGMENTS },
+					(_, segment) => `${SEGMENT}${segment}`,
+				),
+				`f${index}.ts`,
+			].join('/');
 		try {
 			git(directory, 'init', '-q', '-b', 'main');
 			git(directory, 'config', 'user.email', 'test@example.com');
 			git(directory, 'config', 'user.name', 'Test');
 			git(directory, 'config', 'core.autocrlf', 'false');
-			for (let index = 0; index < 250; index++) {
-				const file = `src/f${String(index).padStart(4, '0')}.ts`;
-				write(directory, file, 'export const a = 1;\n');
-				requested.push(path.join(directory, file));
-			}
-			git(directory, 'add', '-A');
-			git(directory, 'commit', '-q', '-m', 'base');
-			for (let index = 0; index < 250; index++) {
-				write(
+			// Committed in the BASE so the rule itself is not a changed file and
+			// the map size stays exactly FILE_COUNT.
+			write(directory, '.gitattributes', '*.ts filter=squeeze\n');
+			git(directory, 'config', 'filter.squeeze.clean', 'sed 1d');
+			git(directory, 'config', 'filter.squeeze.smudge', 'cat');
+			git(directory, 'add', '.gitattributes');
+			git(directory, 'commit', '-q', '-m', 'attrs');
+			// The changed files must sit on a branch AHEAD of `main`, otherwise
+			// `merge-base main HEAD` is HEAD itself and the committed hop is
+			// empty (the round-18 rawPaths threading would go unpinned too).
+			git(directory, 'checkout', '-q', '-b', 'feature');
+
+			// `hash-object -w --stdin` deliberately takes no `--path`, so no
+			// clean filter runs and the blob is the literal worktree bytes.
+			const blob = execFileSync('git', ['hash-object', '-w', '--stdin'], {
+				cwd: directory,
+				input: 'export const a = 1;\nexport const b = 2;\n',
+				encoding: 'utf8',
+			}).trim();
+			for (let index = 0; index < FILE_COUNT; index++) {
+				git(
 					directory,
-					`src/f${String(index).padStart(4, '0')}.ts`,
-					'export const a = 2;\n',
+					'update-index',
+					'--add',
+					'--cacheinfo',
+					`100644,${blob},${longPath(index)}`,
 				);
 			}
-			git(directory, 'add', '-A');
+			git(directory, 'commit', '-q', '-m', 'many long paths');
 
-			const ranges = await getChangedLineRanges(
-				directory,
-				undefined,
-				requested,
-			);
+			const ranges = await getChangedLineRanges(directory, undefined, []);
 			expect(ranges).not.toBeNull();
-			expect(ranges?.size).toBe(250);
-			// Spot-check one file's precise line numbers, proving the map is not
-			// blanket-marked.
-			expect([...(ranges?.get('src/f0000.ts') ?? [])]).toEqual([1]);
+			expect(ranges?.size).toBe(FILE_COUNT);
+			// Every one of them matches `*.ts filter=squeeze`, so the clean
+			// filter shifted every coordinate and every file must carry the
+			// sentinel. Spot-check the first, a middle, and the last: a partial
+			// chunking bug would leave the tail unmarked.
+			for (const index of [0, 49, 99]) {
+				expect([...(ranges?.get(longPath(index).toLowerCase()) ?? [])]).toEqual(
+					[ALL_LINES_CHANGED],
+				);
+			}
 		} finally {
 			removeTreeWithRetry(directory);
 		}
-	}, 120_000);
+	}, 180_000);
+});
+
+describe('filter detection for space-bearing paths (#3681 round 18)', () => {
+	test('a path containing a space is queried without the trailing TAB git appends', async () => {
+		// `git diff` appends a TAB to an UNQUOTED `--- `/`+++ ` header whenever
+		// the filename contains a space (executed probe:
+		// `+++ my app.ts` + U+0009). `normalizeDiffPath` strips it for the map
+		// key, but the raw spelling kept it, so `check-attr` was asked about
+		// `my app.ts\t` — a path that matches no `.gitattributes` rule, because
+		// the name no longer ends in `.ts`. The clean filter's shifted
+		// coordinates survived and the source-line finding classified
+		// PRE-EXISTING (round-18 finding, executed).
+		const directory = canonicalMkdtemp('git-shapes-3681d-space-');
+		try {
+			git(directory, 'init', '-q', '-b', 'main');
+			git(directory, 'config', 'user.email', 'test@example.com');
+			git(directory, 'config', 'user.name', 'Test');
+			git(directory, 'config', 'core.autocrlf', 'false');
+			write(directory, '.gitattributes', '*.ts filter=squeeze\n');
+			git(directory, 'config', 'filter.squeeze.clean', 'sed 1d');
+			git(directory, 'config', 'filter.squeeze.smudge', 'cat');
+			write(
+				directory,
+				'my app.ts',
+				'export const a = 1;\nexport const b = 2;\n',
+			);
+			git(directory, 'add', '-A');
+			git(directory, 'commit', '-q', '-m', 'base');
+			git(directory, 'checkout', '-q', '-b', 'feature');
+			write(
+				directory,
+				'my app.ts',
+				'export const a = 1;\nexport const B = 2;\n',
+			);
+			git(directory, 'add', '-A');
+
+			const ranges = await getChangedLineRanges(directory, undefined, []);
+			expect(ranges).not.toBeNull();
+			expect([...(ranges?.get('my app.ts') ?? [])]).toEqual([
+				ALL_LINES_CHANGED,
+			]);
+
+			const classified = classifySastFindings(
+				[sastFinding(path.join(directory, 'my app.ts'), 2)],
+				ranges,
+				directory,
+			);
+			expect(classified.newFindings).toHaveLength(1);
+			expect(classified.preexistingFindings).toHaveLength(0);
+		} finally {
+			removeTreeWithRetry(directory);
+		}
+	}, 30_000);
+});
+
+describe('filter detection when two spellings share one map key (#3681 round 18)', () => {
+	test('every raw spelling for a key is queried, not just the last one written', async () => {
+		// `normalizeRepoPathKey` lowercases on win32/darwin, so the two distinct
+		// index entries git emits in the order `FOO.ts` then `Foo.ts` collapse to
+		// ONE map key. A `Map<string, string>` kept only the LAST spelling
+		// written (`Foo.ts`), so a `.gitattributes` rule on `FOO.ts` was never
+		// queried and that file's clean filter kept its shifted coordinates
+		// (round-18 finding, executed). A set keeps every spelling, so
+		// `check-attr` is asked about both. Windows cannot hold both names on
+		// disk, so both entries are created through the index.
+		const directory = canonicalMkdtemp('git-shapes-3681d-case-');
+		try {
+			git(directory, 'init', '-q', '-b', 'main');
+			git(directory, 'config', 'user.email', 'test@example.com');
+			git(directory, 'config', 'user.name', 'Test');
+			git(directory, 'config', 'core.autocrlf', 'false');
+			git(directory, 'config', 'core.ignoreCase', 'false');
+			// The rule names the FIRST spelling git emits, which is the one a
+			// last-write-wins collector would drop.
+			write(directory, '.gitattributes', 'FOO.ts filter=squeeze\n');
+			git(directory, 'config', 'filter.squeeze.clean', 'sed 1d');
+			git(directory, 'config', 'filter.squeeze.smudge', 'cat');
+			git(directory, 'add', '.gitattributes');
+			git(directory, 'commit', '-q', '-m', 'attrs');
+			git(directory, 'checkout', '-q', '-b', 'feature');
+
+			const before = execFileSync('git', ['hash-object', '-w', '--stdin'], {
+				cwd: directory,
+				input: 'export const a = 1;\nexport const b = 2;\n',
+				encoding: 'utf8',
+			}).trim();
+			const after = execFileSync('git', ['hash-object', '-w', '--stdin'], {
+				cwd: directory,
+				input: 'export const a = 1;\nexport const B = 2;\n',
+				encoding: 'utf8',
+			}).trim();
+			for (const spelling of ['FOO.ts', 'Foo.ts']) {
+				git(
+					directory,
+					'update-index',
+					'--add',
+					'--cacheinfo',
+					`100644,${before},${spelling}`,
+				);
+			}
+			git(directory, 'commit', '-q', '-m', 'both spellings');
+			for (const spelling of ['FOO.ts', 'Foo.ts']) {
+				git(
+					directory,
+					'update-index',
+					'--add',
+					'--cacheinfo',
+					`100644,${after},${spelling}`,
+				);
+			}
+			git(directory, 'commit', '-q', '-m', 'changed');
+
+			const ranges = await getChangedLineRanges(directory, undefined, []);
+			expect(ranges).not.toBeNull();
+			// Both spellings share this one key, and the rule on `FOO.ts` must
+			// reach it.
+			expect([...(ranges?.get('foo.ts') ?? [])]).toEqual([ALL_LINES_CHANGED]);
+
+			const classified = classifySastFindings(
+				[sastFinding(path.join(directory, 'FOO.ts'), 2)],
+				ranges,
+				directory,
+			);
+			expect(classified.newFindings).toHaveLength(1);
+			expect(classified.preexistingFindings).toHaveLength(0);
+		} finally {
+			removeTreeWithRetry(directory);
+		}
+	}, 30_000);
 });

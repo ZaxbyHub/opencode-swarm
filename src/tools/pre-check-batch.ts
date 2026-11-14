@@ -197,6 +197,16 @@ type DiffBaseResolution = {
 	hadUnusableAttempt: boolean;
 	/** Ref name of the accepted candidate (operator diagnostic). */
 	acceptedCandidateRef: string;
+	/**
+	 * The RAW repo-relative spellings the committed hop emitted, keyed by
+	 * the normalized map key. The filter leg queries these alongside the
+	 * staged/unstaged/untracked spellings: a file modified ONLY in the
+	 * committed hop never reaches the later collectors, so without this it
+	 * is never asked about and a configured clean/process filter keeps its
+	 * shifted coordinates (round-18 finding, executed — a regression the
+	 * raw-path remediation itself introduced).
+	 */
+	committedRawPaths: Map<string, Set<string>>;
 };
 
 type DiffBaseEnvelope = {
@@ -280,6 +290,9 @@ const lastDiffBaseFallthroughWarn = new Map<string, number>();
 async function resolveValidatedDiffBase(
 	directory: string,
 	abortSignal?: AbortSignal,
+	// Optional collector for the committed hop's raw spellings; see
+	// DiffBaseResolution.committedRawPaths.
+	committedRawPaths?: Map<string, Set<string>>,
 ): Promise<DiffBaseEnvelope> {
 	let executable: string;
 	try {
@@ -396,7 +409,11 @@ async function resolveValidatedDiffBase(
 			attempted.push({ ref: baseBranch, outcome: 'unusable' });
 			continue;
 		}
-		const committedLines = parseDiffLineRangesChecked(diffResult.stdout, true);
+		const committedLines = parseDiffLineRangesChecked(
+			diffResult.stdout,
+			true,
+			committedRawPaths,
+		);
 		if (!committedLines) {
 			attempted.push({ ref: baseBranch, outcome: 'unusable' });
 			continue;
@@ -412,6 +429,7 @@ async function resolveValidatedDiffBase(
 					(entry) => entry.outcome === 'unusable',
 				),
 				acceptedCandidateRef: baseBranch,
+				committedRawPaths: committedRawPaths ?? new Map(),
 			},
 		};
 		if (headSha !== null) {
@@ -484,6 +502,7 @@ async function resolveValidatedDiffBase(
 						const committedLines = parseDiffLineRangesChecked(
 							diffResult.stdout,
 							true,
+							committedRawPaths,
 						);
 						if (committedLines) {
 							attempted.push({ ref: baseBranch, outcome: 'ok' });
@@ -497,6 +516,7 @@ async function resolveValidatedDiffBase(
 										(entry) => entry.outcome === 'unusable',
 									),
 									acceptedCandidateRef: baseBranch,
+									committedRawPaths: committedRawPaths ?? new Map(),
 								},
 							};
 							if (headSha !== null) {
@@ -1557,6 +1577,44 @@ function decodeGitQuotedPath(value: string): string | null {
 	return Buffer.from(bytes).toString('utf8');
 }
 
+/**
+ * The RAW repo-relative path carried by a `--- ` / `+++ ` /
+ * `copy to ` / `rename to ` diff header: C-quote-decoded if git
+ * quoted it, otherwise the unquoted text with the trailing TAB git appends
+ * to a space-bearing filename removed. Mirrors what `normalizeDiffPath`
+ * does for the map key, so the two agree on which file they name.
+ */
+function rawHeaderPath(line: string, prefixLength: number): string | null {
+	const raw = line.slice(prefixLength);
+	const token = raw.startsWith('"') ? raw : raw.split('\t', 1)[0];
+	return decodeGitQuotedPath(token);
+}
+
+/**
+ * Record one RAW repo-relative spelling for a normalized map key.
+ *
+ * A `Map<string, string>` cannot represent this: `normalizeRepoPathKey`
+ * lowercases on win32/darwin, so two distinct raw spellings (`Src.ts` and
+ * `src.ts` on a case-sensitive volume, or the same file reached through two
+ * diff legs) collapse to one key and a last-write-wins map keeps only the
+ * last one queried (round-18 finding, executed: a `filter=squeeze` rule on
+ * `Foo.ts` was missed because `foo.ts` was written last). A set keeps
+ * every spelling so `git check-attr` is asked about each of them.
+ */
+function recordRawPath(
+	rawPaths: Map<string, Set<string>> | undefined,
+	key: string,
+	rawPath: string | null,
+): void {
+	if (rawPaths === undefined || rawPath === null) return;
+	const existing = rawPaths.get(key);
+	if (existing === undefined) {
+		rawPaths.set(key, new Set([rawPath]));
+		return;
+	}
+	existing.add(rawPath);
+}
+
 function normalizeRepoPathKey(repoPath: string): string {
 	const normalized = repoPath.replace(/\\/g, '/');
 	return _internals.platform() === 'win32' || _internals.platform() === 'darwin'
@@ -1751,7 +1809,7 @@ function parseDiffLineRangesChecked(
 	// query can miss a mixed-case file's `filter=` rule entirely (round-16
 	// finding, executed: `check-attr -- src/app.ts` returns nothing for a
 	// `.gitattributes` rule on `Src/App.ts`).
-	rawPaths?: Map<string, string>,
+	rawPaths?: Map<string, Set<string>>,
 ): Map<string, Set<number>> | null {
 	const result = new Map<string, Set<number>>();
 	let currentFile: string | null = null;
@@ -1895,8 +1953,17 @@ function parseDiffLineRangesChecked(
 			// set — over-gating, never fail-open.
 			result.set(destination, new Set([ALL_LINES_CHANGED]));
 			if (rawPaths !== undefined) {
-				const decoded = decodeGitQuotedPath(line.slice(prefix.length));
-				if (decoded !== null) rawPaths.set(destination, decoded);
+				// `git diff` appends a trailing TAB to an UNQUOTED header
+				// whenever the filename contains a space (observed:
+				// `+++ my app.ts\t`). `normalizeDiffPath` strips it for the
+				// key; the raw spelling must be stripped the same way or
+				// `check-attr` is asked about a path that does not exist
+				// (round-18 finding, executed).
+				recordRawPath(
+					rawPaths,
+					destination,
+					rawHeaderPath(line, prefix.length),
+				);
 			}
 			collectedLines += 1;
 			copyRenameDestination = destination;
@@ -1938,8 +2005,7 @@ function parseDiffLineRangesChecked(
 			if (binaryFile === null) return null;
 			result.set(binaryFile, new Set([ALL_LINES_CHANGED]));
 			if (rawPaths !== undefined && rawBinaryPath !== null) {
-				const decoded = decodeGitQuotedPath(rawBinaryPath);
-				if (decoded !== null) rawPaths.set(binaryFile, decoded);
+				recordRawPath(rawPaths, binaryFile, rawBinaryPath);
 			}
 
 			collectedLines += 1;
@@ -1999,8 +2065,7 @@ function parseDiffLineRangesChecked(
 				// `"`, `\` or a control character; decode it to the real path
 				// before handing it to `check-attr` (whose own `-z` output is raw
 				// and must NOT be decoded — the two sides differ).
-				const decoded = decodeGitQuotedPath(rawDestination);
-				if (decoded !== null) rawPaths.set(currentFile, decoded);
+				recordRawPath(rawPaths, currentFile, rawHeaderPath(line, 4));
 			}
 			if (currentFile === null && rawDestination.trim() !== '/dev/null') {
 				return null;
@@ -2109,8 +2174,7 @@ function parseDiffLineRangesChecked(
 	if (copyRenameDestination !== null) {
 		result.set(copyRenameDestination, new Set([ALL_LINES_CHANGED]));
 		if (rawPaths !== undefined && rawCopyRenameDestination !== null) {
-			const decoded = decodeGitQuotedPath(rawCopyRenameDestination);
-			if (decoded !== null) rawPaths.set(copyRenameDestination, decoded);
+			recordRawPath(rawPaths, copyRenameDestination, rawCopyRenameDestination);
 		}
 		collectedLines += 1;
 	}
@@ -2143,7 +2207,7 @@ function mergeChangedLines(
 
 function parseUntrackedStatus(
 	output: string,
-	rawPaths?: Map<string, string>,
+	rawPaths?: Map<string, Set<string>>,
 ): string[] | null {
 	if (output.length > 0 && !output.endsWith('\0')) return null;
 
@@ -2159,7 +2223,7 @@ function parseUntrackedStatus(
 		if (status === '??' || status === '!!') {
 			const key = normalizeRepoPathKey(filePath);
 			untracked.push(key);
-			if (rawPaths !== undefined) rawPaths.set(key, filePath);
+			if (rawPaths !== undefined) recordRawPath(rawPaths, key, filePath);
 		}
 
 		if (/[RC]/.test(status)) {
@@ -2335,8 +2399,13 @@ export async function getChangedLineRanges(
 	// actually USABLE — a stale-but-resolvable ref whose diff trips the stdout
 	// guard or the parser cap falls through to the next candidate instead of
 	// nulling the whole map. A total failure carries a named diagnostic.
+	// One collector for every leg, INCLUDING the committed hop: a file
+	// modified only there never reaches the staged/unstaged/untracked
+	// collectors, so the resolver feeds this same map (round-18
+	// finding, executed).
+	const rawPaths = new Map<string, Set<string>>();
 	const { attempted, resolution, failureCause } =
-		await resolveValidatedDiffBase(directory, abortSignal);
+		await resolveValidatedDiffBase(directory, abortSignal, rawPaths);
 	if (!resolution) {
 		logDiffBaseResolutionFailure(directory, attempted, failureCause);
 		return null;
@@ -2447,7 +2516,6 @@ export async function getChangedLineRanges(
 
 	// The raw repo-relative spellings, so the filter leg can ask git about the
 	// exact path `git diff` operated on rather than a case-folded key.
-	const rawPaths = new Map<string, string>();
 	const stagedLines = parseDiffLineRangesChecked(staged, true, rawPaths);
 	const unstagedLines = parseDiffLineRangesChecked(unstaged, true, rawPaths);
 	if (!stagedLines || !unstagedLines) {
@@ -2516,7 +2584,7 @@ export async function getChangedLineRanges(
  */
 async function markContentFilteredFiles(
 	result: Map<string, Set<number>>,
-	rawPaths: Map<string, string>,
+	rawPaths: Map<string, Set<string>>,
 	directory: string,
 	abortSignal?: AbortSignal,
 ): Promise<boolean> {
@@ -2532,7 +2600,11 @@ async function markContentFilteredFiles(
 	//    may pass nothing at all (the default) — either way the changed files
 	//    would never be queried (round-15 finding, executed).
 	if (result.size === 0 || rawPaths.size === 0) return true;
-	const entries = [...rawPaths].filter(([key]) => result.has(key));
+	const entries = [...rawPaths]
+		.filter(([key]) => result.has(key))
+		.flatMap(([key, spellings]) =>
+			[...spellings].map((raw) => [key, raw] as const),
+		);
 	if (entries.length === 0) return true;
 	// `git check-attr --all -z` rather than the `filter <attr>` form, for two
 	// reasons the round-15 gates found by execution:
@@ -2550,16 +2622,13 @@ async function markContentFilteredFiles(
 	// (round-16 finding, executed: `decodeGitQuotedPath('"x.js')` returns null
 	// and the file is silently skipped).
 	const configured = new Set<string>();
-	// Chunk the argv: `runGit` uses `stdin: 'ignore'`, so `--stdin` is not
-	// available, and a very large changeset would otherwise exceed the Windows
-	// 32767-character command-line limit and fail closed for the whole batch
-	// (round-16 finding, executed: 600 keys -> ENAMETOOLONG -> null map).
-	// Chunk by ACCUMULATED ARGV LENGTH, not by path count: a single path may
-	// legally be several kilobytes (Linux allows 4096 bytes per component), so
-	// a fixed count does not bound the command line and a repo of long paths
-	// could still trip ENAMETOOLONG.  uses , so
-	//  is not available (round-16 finding, executed: 600 keys ->
-	// ENAMETOOLONG -> null map for the whole batch).
+	// Chunk by ACCUMULATED ARGV LENGTH, not by path count. `runGit` uses
+	// `stdin: 'ignore'`, so `--stdin` is not available, and a very large
+	// changeset would otherwise exceed the Windows 32767-character command-line
+	// limit and fail closed for the whole batch (round-16 finding, executed: 600
+	// keys -> ENAMETOOLONG -> null map). A single path may also legally be
+	// several kilobytes (Linux allows 4096 bytes per component), so a fixed count
+	// does not bound the command line either (round-17 self-review finding).
 	const MAX_ARGV_BYTES = 16_000;
 	const FIXED_ARGV = [
 		'-c',
@@ -2593,7 +2662,7 @@ async function markContentFilteredFiles(
 		// triples. A well-formed stream ends with the value's own NUL, so the
 		// record count minus one is a multiple of three; anything else is
 		// truncated output and fails closed rather than silently skipping.
-		const records = output.split(' ');
+		const records = output.split('\0');
 		if (records.length === 0 || records[records.length - 1] !== '')
 			return false;
 		if ((records.length - 1) % 3 !== 0) return false;
