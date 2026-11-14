@@ -200,11 +200,22 @@ describe('unknown backslash-prefixed armed lines (#3681 round 2)', () => {
 		// merge) is deliberately out of grammar: the `@@@` header and the
 		// two-column body must not be half-parsed into a partial map. Failing
 		// closed means every finding is treated as new — the safe direction.
-		// Pinned so the limitation is deliberate, not accidental. The fixture
-		// is preceded by an ordinary `diff --git` section so the rejection
-		// happens on the `@@@` header itself (a `diff --cc` line alone never
-		// opens a section and would be rejected earlier, pinning the wrong
-		// rule — final-critic round 12).
+		// Pinned so the limitation is deliberate, not accidental.
+		//
+		// WHERE this rejects, precisely: the ordinary `diff --git` section
+		// first sets `destinationSeen`, and `diff --cc` does not reset it, so
+		// the combined section's own `--- f.ts` trips the
+		// one-pair-per-git-section guard BEFORE the `@@@` header is ever
+		// examined. Executed proof: replacing the `@@@` header with a valid
+		// `@@` header still returns null, and truncating the fixture at
+		// `--- f.ts` still returns null. An earlier version of this comment
+		// claimed the rejection happened on the `@@@` header — false, and
+		// corrected in round 13 (implementation-review round 12 and
+		// plan-critic round 11 both overturned it by execution). The
+		// combined shape is in fact rejected by a STACK of independent rules;
+		// see pre-check-batch-git-config-shapes-3681.test.ts for the explicit
+		// `diff --cc` section-boundary rejection and the surviving-mutant
+		// disclosure.
 		const combined = [
 			'diff --git a.ts a.ts',
 			'--- a.ts',

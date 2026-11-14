@@ -375,6 +375,7 @@ async function resolveValidatedDiffBase(
 				'core.quotePath=false',
 				'diff',
 				'--no-ext-diff',
+				'--no-textconv',
 				'--no-color',
 				'--no-prefix',
 				'--submodule=short',
@@ -462,6 +463,7 @@ async function resolveValidatedDiffBase(
 							'core.quotePath=false',
 							'diff',
 							'--no-ext-diff',
+							'--no-textconv',
 							'--no-color',
 							'--no-prefix',
 							'--submodule=short',
@@ -1599,6 +1601,38 @@ export function parseDiffLineRanges(
 	return parseDiffLineRangesChecked(diffOutput, false) ?? new Map();
 }
 
+/**
+ * Extract the destination path from a `Binary files <src> and <dst> differ`
+ * line. The ` and ` separator is used rather than a space split because the
+ * callers pin `core.quotePath=false`, which leaves a path containing spaces
+ * unquoted — `Binary files my file.js and my file.js differ` splits correctly
+ * on ` and ` but not on a space. Returns null when the separator is absent
+ * (a shape this parser does not understand), so the caller fails closed.
+ */
+function parseBinaryFilesLine(line: string): string | null {
+	const inner = line.slice(
+		'Binary files '.length,
+		line.length - ' differ'.length,
+	);
+	const separator = inner.indexOf(' and ');
+	if (separator === -1) return null;
+	const destination = inner.slice(separator + ' and '.length).trim();
+	return destination.length > 0 ? destination : null;
+}
+
+/**
+ * Extract the destination path from the tail of a `diff --git a/<p> b/<p>`
+ * line. Only used as the fallback for a `GIT binary patch` section, which
+ * carries no path of its own. A two-token tail is unambiguous under
+ * `--no-prefix`; anything else (a quoted path, or a path containing a space)
+ * returns null so the caller fails closed rather than inventing a key. The
+ * cost of that conservatism is over-gating (no discount), never fail-open.
+ */
+function parseGitDiffDestination(rest: string): string | null {
+	const parts = rest.split(' ');
+	return parts.length === 2 ? parts[1] : null;
+}
+
 function parseDiffLineRangesChecked(
 	diffOutput: string,
 	requireGitFileHeaders: boolean,
@@ -1610,6 +1644,12 @@ function parseDiffLineRangesChecked(
 	let destinationSeen = false;
 	let destinationNeedsHunk = false;
 	let collectedLines = 0;
+	// The `diff --git a/<path> b/<path>` line's destination. A file section
+	// that git renders as BINARY (`Binary files … differ` / `GIT binary
+	// patch`) carries no `--- `/`+++ `/`@@` at all, so this is the only
+	// place its path appears — without capturing it the section would be
+	// silently skipped and the file would vanish from the map.
+	let gitFilePath: string | null = null;
 	// #3681 item 1: hunk-body state. While a hunk still owes body lines,
 	// `--- ` / `+++ ` / `@@` / `diff --git` prefixes are CONTENT (a deleted
 	// line whose text begins `-- ` renders as `--- <content>`, an added line
@@ -1662,6 +1702,61 @@ function parseDiffLineRangesChecked(
 			currentFile = null;
 			expectingDestination = false;
 			destinationSeen = false;
+			// `diff --git a/<path> b/<path>`. The a-side may be /dev/null
+			// (a new file) and either side may be quoted when it contains
+			// special characters (core.quotePath), so the destination is
+			// only trusted for the BINARY-section fallback below, where it
+			// is the only path available; an unparseable line leaves the
+			// fallback to fail closed rather than inventing a key.
+			gitFilePath = parseGitDiffDestination(line.slice('diff --git '.length));
+			continue;
+		}
+		// A combined diff (`diff --cc` / `diff --combined`) is out of grammar
+		// by design. Reject it AT THE SECTION BOUNDARY rather than letting the
+		// line fall through to the `@@` skip below: the previous shape was
+		// rejected only incidentally — by the one-pair-per-git-section guard
+		// on the combined section's OWN `--- `/`+++ ` pair — which is not the
+		// rule the pinning leg claimed to exercise, and a future grammar
+		// change could silently start accepting combined output. An explicit
+		// rejection names the rule the leg actually pins.
+		if (line.startsWith('diff --cc ') || line.startsWith('diff --combined ')) {
+			return null;
+		}
+		// A file section git renders as BINARY carries no `--- `/`+++ `/`@@`
+		// at all: the content is not diffable as text (`.gitattributes`
+		// `-diff`/`binary`, or a genuinely binary blob). Silently skipping
+		// the line drops the file from the map entirely, and classifySastFindings
+		// treats a MISSING key as PRE-EXISTING — so a newly added dangerous
+		// line in such a file keeps its discount (fail-open, the same
+		// direction as the phantom-key defect this unit closes). Mark the
+		// file ALL_LINES_CHANGED instead: every finding in it is new, which
+		// is the safe direction and matches the untracked/ignored-file
+		// convention. Executed proof: base and head both returned no key for
+		// a `.gitattributes`-marked `-diff`/`binary` text file.
+		if (
+			(line.startsWith('Binary files ') && line.endsWith(' differ')) ||
+			line.startsWith('GIT binary patch')
+		) {
+			if (!inGitFile) return null;
+			const binaryFile = line.startsWith('Binary files ')
+				? parseBinaryFilesLine(line)
+				: gitFilePath;
+			// A DELETED binary file (`… and /dev/null differ`) has no lines
+			// left to gate, so the section is consumed without a key. An
+			// unresolvable path fails closed rather than inventing one.
+			if (binaryFile === '/dev/null') {
+				inGitFile = false;
+				destinationSeen = false;
+				gitFilePath = null;
+				continue;
+			}
+			if (binaryFile === null) return null;
+			result.set(binaryFile, new Set([ALL_LINES_CHANGED]));
+			collectedLines += 1;
+			currentFile = binaryFile;
+			inGitFile = false;
+			destinationSeen = false;
+			gitFilePath = null;
 			continue;
 		}
 		// Header mode with both counters exhausted: a body-shaped line here
@@ -2028,6 +2123,7 @@ export async function getChangedLineRanges(
 		'core.quotePath=false',
 		'diff',
 		'--no-ext-diff',
+		'--no-textconv',
 		'--no-color',
 		'--no-prefix',
 		'--submodule=short',
