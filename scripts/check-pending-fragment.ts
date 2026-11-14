@@ -394,7 +394,10 @@ function runGit(
 			stdout = utf8FatalDecoder.decode(proc.stdout as Buffer);
 		} catch {
 			return {
-				exitCode: 1,
+				// Report git's REAL exit code (final-critic round 2 minor 3):
+				// the decode failure is ours, not git's — a fabricated exit 1
+				// made the operator message claim git failed when it exited 0.
+				exitCode: proc.exitCode ?? 0,
 				stdout: '',
 				infra: true,
 				timedOut: false,
@@ -728,7 +731,16 @@ export function decodeSinglePath(
 /** Fatal decoder: replacement-mode decoding silently rewrites invalid bytes
  * (issue #3306 AC1) — a byte-strict decode is the only form that can tell
  * malformed input from valid input that legitimately encodes U+FFFD. */
-const utf8FatalDecoder = new TextDecoder('utf-8', { fatal: true });
+// Final-critic round 2: ignoreBOM PRESERVES a leading U+FEFF — in git -z
+// output and list files those bytes are part of a PATH, not an encoding
+// marker. TextDecoder strips the BOM by default, which turned a
+// BOM-prefixed repository path into its un-prefixed form BEFORE
+// classification: the gate satisfied the mandate on a name the aggregator
+// can never collect (its filter requires the literal docs/ prefix).
+const utf8FatalDecoder = new TextDecoder('utf-8', {
+	fatal: true,
+	ignoreBOM: true,
+});
 
 function decodeUtf8Strict(bytes: Buffer, source: string): string {
 	try {

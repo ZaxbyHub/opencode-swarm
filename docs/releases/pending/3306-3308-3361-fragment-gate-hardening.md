@@ -62,6 +62,7 @@ No workflow changes needed: every strictness change only fires on inputs
 that were already malformed (invalid UTF-8, NUL-in-newline, flag-like
 values, multi-record argv values, backslash/dotdot/dot-slash-prefixed
 names). Deliberate verdict changes: X.MD fragments now satisfy the gate
-and are displayed (matching the release aggregator), and a BOM-prefixed
-list input is decoded with the BOM stripped instead of being classified
-with the BOM embedded in the first token.
+and are displayed (matching the release aggregator), and a BOM-prefixed path name keeps its U+FEFF (the
+decoder preserves the byte order mark) so a BOM-prefixed pseudo-fragment
+cannot satisfy the mandate - the aggregator's collection requires the
+literal docs/ prefix.
