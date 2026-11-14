@@ -11,8 +11,11 @@ issue: 3306
   exit 2 with no verdict instead of silently classifying replacement
   characters or a glued blob as one path (#3306 AC1/AC2).
 - `isPendingFragment` (`scripts/user-visible-paths.ts`) matches the release
-  aggregator's name rules: C0 control characters, `..` segments, and
-  leading-`./` (or `.\`) forms no longer satisfy the fragment mandate, and
+  aggregator's name rules: C0 control characters, `..` segments,
+  leading-`./` forms, and any backslash-bearing name (the aggregator's
+  collection path cannot resolve the normalized form, so a root-level
+  backslash-named file would pass the gate yet ship no release note) no
+  longer satisfy the fragment mandate, and
   the `.md` suffix matches case-insensitively, so a `X.MD` fragment that the
   release pipeline would collect is no longer rejected by the gate (#3306
   AC3/AC4). The pull_request display in `pr-standards.yml` matches `.MD`
@@ -47,8 +50,9 @@ green.
 
 ## Verification
 
-17 frozen acceptance checks (10 DISCRIMINATING RED→GREEN, 6 PRESERVING
-GREEN→GREEN, battery-integrity NEW-SURFACE): all PASS at the shipped head;
+17 frozen acceptance checks (9 DISCRIMINATING RED→GREEN, 6 PRESERVING
+GREEN→GREEN, battery-integrity NEW-SURFACE + its C5 seam row): all PASS at the
+shipped head (battery: 27 pass + 1 by-design POSIX-only skip);
 13-suite battery 0 fail; typecheck, biome ci, check:test-tmpdir,
 check:test-clock, check:mock-cleanup, required-check-contract green.
 
@@ -56,5 +60,8 @@ check:test-clock, check:mock-cleanup, required-check-contract green.
 
 No workflow changes needed: every strictness change only fires on inputs
 that were already malformed (invalid UTF-8, NUL-in-newline, flag-like
-values, multi-record argv values). Valid inputs keep their exact previous
-verdicts.
+values, multi-record argv values, backslash/dotdot/dot-slash-prefixed
+names). Deliberate verdict changes: X.MD fragments now satisfy the gate
+and are displayed (matching the release aggregator), and a BOM-prefixed
+list input is decoded with the BOM stripped instead of being classified
+with the BOM embedded in the first token.

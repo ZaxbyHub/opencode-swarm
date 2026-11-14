@@ -223,6 +223,14 @@ export function isPendingFragment(file: string): boolean {
 	// such stripping — a `./`-prefixed (or `.\`-prefixed) name must not
 	// satisfy the gate.
 	if (file.startsWith('./') || file.startsWith('.\\')) return false;
+	// A backslash anywhere in the raw name is not a fragment (final-critic
+	// round 1): git and GitHub always emit `/`-separated repo paths, and the
+	// aggregator's collection path (containedPendingPath →
+	// readFragmentFromWorkspace) resolves the NORMALIZED name — a root-level
+	// file literally named `docs\releases\pending\x.md` satisfies this gate
+	// but yields no release note (read returns null / release fails closed
+	// under requireComplete). Both sides must refuse it.
+	if (file.includes('\\')) return false;
 	const p = toPosix(file);
 	if (p.split('/').some((segment) => segment === '..')) return false;
 	return p.startsWith(`${FRAGMENT_DIR}/`) && p.toLowerCase().endsWith('.md');

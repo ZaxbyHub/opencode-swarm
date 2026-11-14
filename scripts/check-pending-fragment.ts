@@ -346,17 +346,20 @@ export function classifyRepoRoot(startDir: string): RepoRootClassification {
 
 /**
  * Human-readable cause for an infra-flagged git result (issue #3472 review
- * feedback): a spawn exception and a timeout kill are different failures and
- * the operator message must not claim one for the other.
+ * feedback): a spawn exception, a timeout kill, and undecodable output are
+ * different failures and the operator message must not claim one for the
+ * other.
  */
 function describeInfra(result: {
 	exitCode: number;
 	infra: boolean;
 	timedOut: boolean;
+	outputUndecodable?: boolean;
 }): string {
-	return result.timedOut
-		? ' — the spawned git timed out'
-		: ' — the spawned git could not be run (spawn failed)';
+	if (result.timedOut) return ' — the spawned git timed out';
+	if (result.outputUndecodable)
+		return ' — git emitted non-UTF-8 bytes (a repository path is not valid UTF-8)';
+	return ' — the spawned git could not be run (spawn failed)';
 }
 
 const BASE_BRANCH_CANDIDATES = ['origin/main', 'main'];
@@ -364,7 +367,13 @@ const BASE_BRANCH_CANDIDATES = ['origin/main', 'main'];
 function runGit(
 	args: string[],
 	cwd: string,
-): { exitCode: number; stdout: string; infra: boolean; timedOut: boolean } {
+): {
+	exitCode: number;
+	stdout: string;
+	infra: boolean;
+	timedOut: boolean;
+	outputUndecodable: boolean;
+} {
 	try {
 		const proc = _internals.spawnSync({
 			cmd: ['git', ...args],
@@ -374,19 +383,44 @@ function runGit(
 			stderr: 'pipe',
 			timeout: GIT_TIMEOUT_MS,
 		});
+		// Final-critic round 1 (issue #3306 class): git's `-z` diff listings
+		// are list inputs feeding the classifier — decode them byte-strictly
+		// so a non-UTF-8 path cannot silently become a U+FFFD-bearing token
+		// here (the --print-requirement readers already exit 2 on the same
+		// bytes; the two gate paths must agree). SHA/branch outputs are
+		// ASCII and unaffected.
+		let stdout: string;
+		try {
+			stdout = utf8FatalDecoder.decode(proc.stdout as Buffer);
+		} catch {
+			return {
+				exitCode: 1,
+				stdout: '',
+				infra: true,
+				timedOut: false,
+				outputUndecodable: true,
+			};
+		}
 		return {
 			exitCode: proc.exitCode ?? 1,
-			stdout: proc.stdout.toString(),
+			stdout,
 			// exitCode null = killed by the spawn timeout: an infrastructure
 			// failure, distinct from git answering "no" (issue #3283).
 			infra: proc.exitCode === null,
 			timedOut: proc.exitCode === null,
+			outputUndecodable: false,
 		};
 	} catch {
 		// A spawn exception (binary missing, resource exhaustion) is a
 		// different infrastructure failure from a timeout — keep them
 		// distinguishable for the operator message (PR #3472 feedback).
-		return { exitCode: 1, stdout: '', infra: true, timedOut: false };
+		return {
+			exitCode: 1,
+			stdout: '',
+			infra: true,
+			timedOut: false,
+			outputUndecodable: false,
+		};
 	}
 }
 
