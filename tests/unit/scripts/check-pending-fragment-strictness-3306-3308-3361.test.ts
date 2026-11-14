@@ -85,10 +85,10 @@ function mappingSlice(block: string, startMarker: string): string {
  * Run an extracted mapping slice with stubbed git/gh/bun (mirrors the
  * contract suite's runMapping). git is stubbed so no real repository
  * operation runs inside the slice; by default it emits an EMPTY diff
- * stream — opts.gitChanged / opts.gitAdded make it emit NUL-framed content
- * for the changed/added diff redirects instead. The gh stub writes one
- * `CALL <argv>` line per invocation so call COUNTS are assertable; real
- * jq/wc/mktemp/trap run.
+ * stream — opts.gitChanged / opts.gitAdded seed the stub's emitted line
+ * (bash drops NUL bytes from script seeds, so these arrive NUL-less; the
+ * NUL-framed transport runs through the tmp_added FILES). The gh stub writes
+ * one `CALL <argv>` line per invocation (call COUNTS assertable; real jq/wc/mktemp/trap run).
  */
 function runMapping(
 	mapping: string,
@@ -141,7 +141,7 @@ function runMapping(
 		'  esac',
 		'}',
 		'bun() {',
-		"  [ -n '${opts.verdict}' ] && printf '%s\\n' '${opts.verdict}'",
+		`  [ -n '${opts.verdict}' ] && printf '%s\\n' '${opts.verdict}'`,
 		`  return ${opts.rc}`,
 		'}',
 		mapping,
@@ -308,7 +308,7 @@ describe('3306 D6 strictness: --added values per framing (future-red at base)', 
 	// 05 D6 — so every leg passes a stdinText argument.
 	const D6_NEGATIVE_CASES: Array<[string, string, string]> = [
 		['jsonl', 'empty', ''],
-		['jsonl', 'multi-record (literal backslash-n)', '"a"\\n"b"'],
+		['jsonl', 'malformed JSON (literal backslash-n)', '"a"\\n"b"'],
 		['jsonl', 'not JSON-encoded', 'plain.md'],
 		['newline', 'a literal newline byte', 'a\nb'],
 		['newline', 'empty', ''],
@@ -481,8 +481,8 @@ describe('3306 D3b display parity (future-red at base)', () => {
 	// future-red leg must NOT sit inside the C15-swept 'argv-source matrix'.
 	test('pull_request arm 3306 D3b: uppercase MD display — the satisfied arm prints the X.MD fragment name', () => {
 		// The REAL display slice greps the NUL-decoded added list with
-		// `grep -E '^docs/releases/pending/.+\.md$'`; at base (no -i) X.MD
-		// matches nothing. Phase 4.5 mutation: remove the -i.
+		// `grep -E '^docs/releases/pending/.+\.[mM][dD]$'`; at base the
+		// suffix was case-sensitive `\.md$`. Phase 4.5 mutation: revert it.
 		const mapping = mappingSlice(
 			stepRunBlock('Require pending release fragment'),
 			'tmp_changed="$(mktemp)"',

@@ -397,10 +397,15 @@ function runGit(
 				// Report git's REAL exit code (final-critic round 2 minor 3):
 				// the decode failure is ours, not git's — a fabricated exit 1
 				// made the operator message claim git failed when it exited 0.
-				exitCode: proc.exitCode ?? 0,
+				// A killed (timeout) git maps null -> 1, matching the success
+				// path below, so both timeout shapes report the same number
+				// (FB-002/R-01: the decode branch must not erase the timeout
+				// state — describeInfra prioritizes timedOut and reports the
+				// true cause for a killed-and-truncated output stream).
+				exitCode: proc.exitCode ?? 1,
 				stdout: '',
 				infra: true,
-				timedOut: false,
+				timedOut: proc.exitCode === null,
 				outputUndecodable: true,
 			};
 		}
@@ -671,6 +676,15 @@ export function decodePathList(
 				if (typeof value !== 'string') {
 					throw new Error('not a string');
 				}
+				// JSON "\u0000" escapes decode to NUL-bearing path strings; the
+				// newline arm refuses framing NULs at the framing layer, so the
+				// jsonl arm refuses them at the decode layer (same exit-2
+				// shape). Other control characters stay valid path bytes here —
+				// classification (isPendingFragment) applies the C0 rule after
+				// decode (FB-003/R-04 layering alignment, NUL-only).
+				if (value.includes('\0')) {
+					throw new Error('NUL byte in decoded path');
+				}
 				out.push(value);
 			} catch {
 				throw new PathListDecodeError(
@@ -699,9 +713,12 @@ export function decodePathList(
 /**
  * Decode ONE path supplied as a direct argv value (`--added <path>`, issue
  * #3306 AC7): the value must decode to exactly one path under the selected
- * framing — empty values, multi-record values, and values containing a
- * literal framing separator are refused instead of silently splitting or
- * dropping records.
+ * framing — empty values, multi-record values (embedded framing separators
+ * split the record), and NUL-bearing values are refused instead of silently
+ * splitting or dropping records. Any number of leading/trailing line separators
+ * in newline framing is tolerated (consistent with the list-file reader's
+ * CRLF/blank-line handling); embedded separators still refuse via
+ * cardinality.
  */
 export function decodeSinglePath(
 	value: string,

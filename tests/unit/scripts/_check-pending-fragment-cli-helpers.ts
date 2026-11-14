@@ -24,12 +24,15 @@ export interface CliResult {
 export function runCli(input: {
 	args: string[];
 	stdin: string;
+	/** Raw stdin bytes — for inputs that are not valid UTF-8 (a JS string
+	 * always is). Takes precedence over `stdin` when set. */
+	stdinBytes?: Buffer;
 	timeoutMs?: number;
 }): CliResult {
 	const proc = Bun.spawnSync({
 		cmd: ['bun', SCRIPT, ...input.args],
 		cwd: REPO_ROOT,
-		stdin: Buffer.from(input.stdin, 'utf8'),
+		stdin: input.stdinBytes ?? Buffer.from(input.stdin, 'utf8'),
 		stdout: 'pipe',
 		stderr: 'pipe',
 		timeout: input.timeoutMs ?? 30_000,

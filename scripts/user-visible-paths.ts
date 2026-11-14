@@ -208,13 +208,19 @@ export function isUserVisiblePath(file: string): boolean {
 /**
  * Is this path an ADDED pending fragment satisfying the mandate? Pure.
  *
- * Parity with the release aggregator's `filterPendingFragmentPaths`
- * (scripts/release-notes-fragments.mjs; issues #3306/#3361): a name counts
- * as a pending fragment only when the aggregator would collect it too — no
- * C0 control characters, no `..` segments, no leading `./` prefix (the
- * aggregator performs no such stripping), and the `.md` suffix matches
- * case-insensitively. The directory prefix itself stays case-sensitive on
- * both sides.
+ * Pipeline parity with the release aggregator (issues #3306/#3361): a name
+ * counts as a pending fragment only when the aggregator could actually
+ * COLLECT and read it. This is deliberately stricter than the aggregator's
+ * `filterPendingFragmentPaths` alone, which normalizes backslashes before
+ * its C0/`..`/prefix checks — a backslash-bearing name passes that filter
+ * but its normalized form resolves to a file that does not exist, so the
+ * aggregator's collection path (containedPendingPath →
+ * readFragmentFromWorkspace) yields nothing and the release would ship no
+ * note. Refusals here mirror what the aggregator refuses outright (C0
+ * control characters, `..` segments) or cannot collect at read time
+ * (backslash names, leading-`./`/`.\` forms — the filter performs no such
+ * stripping). The `.md` suffix matches case-insensitively on both sides;
+ * the directory prefix itself stays case-sensitive on both sides.
  */
 export function isPendingFragment(file: string): boolean {
 	if (/[\x00-\x1f]/.test(file)) return false;

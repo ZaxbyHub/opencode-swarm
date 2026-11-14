@@ -56,15 +56,22 @@ green.
 17 frozen acceptance checks (9 DISCRIMINATING RED→GREEN, 6 PRESERVING
 GREEN→GREEN, battery-integrity NEW-SURFACE + its C5 seam row): all PASS at the
 shipped head (battery: 27 pass + 1 by-design POSIX-only skip);
-13-suite battery 0 fail; typecheck, biome ci, check:test-tmpdir,
-check:test-clock, check:mock-cleanup, required-check-contract green.
+15-suite fragment-gate battery 256 tests, 255 pass + 1 by-design POSIX-only
+skip, 0 fail; typecheck, biome ci, check:test-tmpdir, check:test-clock,
+check:mock-cleanup, required-check-contract green.
 
 ## Migration
 
-No workflow changes needed: every strictness change only fires on inputs
-that were already malformed (invalid UTF-8, NUL-in-newline, flag-like
-values, multi-record argv values, backslash/dotdot/dot-slash-prefixed
-names). Deliberate verdict changes: X.MD fragments now satisfy the gate
+No workflow changes needed for well-formed inputs; every strictness change
+fires on inputs that are malformed (invalid UTF-8, NUL-in-newline, flag-like
+values, multi-record argv values) or on names the release pipeline cannot
+actually collect (backslash/dotdot/dot-slash-prefixed fragment names). Two
+classes deserve explicit mention: a repository path that is not valid UTF-8
+(legal on POSIX filesystems) now fails the gate closed through the
+infrastructure envelope instead of classifying with substituted characters,
+and a direct `--added` value under the legacy newline framing tolerates
+leading/trailing line separators (embedded separators are refused).
+Deliberate verdict changes: X.MD fragments now satisfy the gate
 and are displayed (matching the release aggregator), and a BOM-prefixed path name keeps its U+FEFF (the
 decoder preserves the byte order mark) so a BOM-prefixed pseudo-fragment
 cannot satisfy the mandate - the aggregator's collection requires the
