@@ -818,7 +818,7 @@ do_checkpoint() (
   else
     node "$script_dir/generate-checkpoint-artifacts.mjs" "$candidate" "$trace_dir" "$slug" --publish "$original" </dev/null
   fi
-  for path in "${paths[@]}"; do echo "checkpoint: $kind $path"; done
+  for path in ${paths[@]+"${paths[@]}"}; do echo "checkpoint: $kind $path"; done
 )
 
 do_verify() {
