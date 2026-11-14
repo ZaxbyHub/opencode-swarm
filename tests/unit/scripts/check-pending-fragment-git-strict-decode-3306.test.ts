@@ -18,8 +18,8 @@ import { rmSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
 
 import { _internals, main } from '../../../scripts/check-pending-fragment.ts';
-import { runCli } from './_check-pending-fragment-cli-helpers';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
+import { runCli } from './_check-pending-fragment-cli-helpers';
 
 /** Directories this process created (exact-list cleanup, #3308 pattern). */
 const createdTempDirs: string[] = [];
