@@ -27,7 +27,12 @@ const ENTRY_SKILL_BASELINES: Record<string, number> = {
 	// references/lane-cost-recovery.md; binding-policy growth, same one-way
 	// precedent as the 12ca05ef9 bump.
 	'.opencode/skills/swarm-pr-review/SKILL.md': 1717,
-	'.opencode/skills/swarm-pr-feedback/SKILL.md': 797,
+	// 810 (was 797): the #1120 retro adds the recorded-fetch obligation to the
+	// round-boundary bullet, the Stage B named-probe mandate, and the compact
+	// Pre-flight: Restart Inventory section (binding policy; full protocols in
+	// references/restart-inventory.md and references/intake-surfaces.md),
+	// same one-way binding-policy precedent as the #3605/12ca05ef9 bumps.
+	'.opencode/skills/swarm-pr-feedback/SKILL.md': 810,
 	'.opencode/skills/writing-tests/SKILL.md': 424,
 	// 202 (was 201): v3.0.3 adds Non-Negotiable Rules 13-14 (claim gate +
 	// collision handling) and three phase-bullet pointers after the verified

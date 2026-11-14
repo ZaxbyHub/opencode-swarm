@@ -159,4 +159,27 @@ describe('swarm-pr-feedback mechanical gates', () => {
 		expect(intake).toContain('[ -n "$mergedAt" ]');
 		expect(intake).not.toContain('Gate on state==MERGED + mergedAt');
 	});
+
+	// pr3698 retro amendments (recorded re-fetch, named probes, restart
+	// inventory): deleting any of the three new obligations must fail the
+	// suite. Needles are matched on whitespace-normalized text.
+	test('pr3698 retro: recorded re-fetch, named probes, and restart inventory are pinned', () => {
+		const text = read(CANONICAL).replace(/\s+/g, ' ');
+		// Recorded re-fetch (all profiles): critic restart = fix round, and
+		// the boundary fetch appends a receipt to the findings ledger.
+		expect(text).toContain(
+			'a critic NEEDS_REVISION restart counts as a fix round',
+		);
+		expect(text).toContain('The fetch is a RECORDED obligation');
+		expect(text).toContain(
+			'append a fetch receipt (surfaces, comment ids, timestamp)',
+		);
+		// Stage B named-probe mandate: a green suite alone is test theater.
+		expect(text).toContain('must NAME its discriminating probe');
+		expect(text).toContain('a green suite alone is test theater');
+		// Restart Inventory section exists with its four buckets.
+		expect(text).toContain('## Pre-flight: Restart Inventory (Profiles B/C)');
+		expect(text).toContain('reusable artifacts / stale approvals');
+		expect(text).toContain('references/restart-inventory.md');
+	});
 });

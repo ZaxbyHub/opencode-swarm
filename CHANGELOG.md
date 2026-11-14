@@ -1,5 +1,14 @@
 # Changelog
 
+## [7.204.5](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.204.4...v7.204.5) (2026-11-14)
+
+
+### Bug Fixes
+
+* **guardrails:** close breadth-review fail-opens — nested opener strip, xargs verb classification, awk -i inplace eval waiver, iterative time peel, gtime family, accurate refusals ([#3648](https://github.com/ZaxbyHub/opencode-swarm/issues/3648) [#3652](https://github.com/ZaxbyHub/opencode-swarm/issues/3652)) ([f3cdb21](https://github.com/ZaxbyHub/opencode-swarm/commit/f3cdb21a9e2a8140a10b308beb6f9a83818e36bc))
+* **guardrails:** judge awk programs, xargs-fed verbs, sudoedit, shred, chroot roots, paren-led login sudo, and GNU-time payloads ([#3648](https://github.com/ZaxbyHub/opencode-swarm/issues/3648) [#3652](https://github.com/ZaxbyHub/opencode-swarm/issues/3652)) ([5ee43f4](https://github.com/ZaxbyHub/opencode-swarm/commit/5ee43f4dd6e8c94f4da23de41457c2562582e0bf))
+* **skills:** respect the progressive-disclosure ratchet — compact the [#1120](https://github.com/ZaxbyHub/opencode-swarm/issues/1120) retro amendments ([1538ed1](https://github.com/ZaxbyHub/opencode-swarm/commit/1538ed1f4044f0183cdd42c16322e371205a7dce))
+
 ## [7.204.4](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.204.3...v7.204.4) (2026-11-13)
 
 
