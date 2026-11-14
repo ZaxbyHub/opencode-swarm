@@ -32,8 +32,11 @@ issue: 3306
   byte (C0 and DEL) in explicit `\xNN` form in gate messages (#3361 AC4
   escaping arm).
 - Test hygiene: the transport suite removes every temp directory it creates
-  (exact-list `afterAll`), and `yaml` is now a declared devDependency
-  (#3308 AC4/AC5). New pre-authored battery
+  (exact-list `afterAll`), and every test that parsed YAML through the
+  transitively-resolved `yaml` package now imports the declared `js-yaml`
+  instead (#3308 AC4/AC5; the release-owner guard forbids non-release PRs
+  from editing package.json, so declaring `yaml` itself is not possible
+  here). New pre-authored battery
   `tests/unit/scripts/check-pending-fragment-strictness-3306-3308-3361.test.ts`
   pins the one-listing invariant, the jsonl lone-record fixture, the
   `--paths-format` enum branch, the argv→source matrix, the pull_request
