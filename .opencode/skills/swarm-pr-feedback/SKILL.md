@@ -187,6 +187,20 @@ ledger items as `NEEDS_MORE_EVIDENCE` or re-dispatch a narrower read-only lane.
 report directly — a truncated or summary-only report is a preview, not
 verification evidence, and keeps its items open the same way.)
 
+## Pre-flight: Restart Inventory (Profiles B/C)
+
+After a harness session restart mid-round, the previous session's in-flight
+subagent work is gone (its agent ids no longer resolve) even though the
+durable artifacts survive. Before dispatching anything, sort the prior
+round's state into four buckets and record the inventory in the task-gates
+artifact: (1) reusable artifacts — ledgers, gate receipts, context packs on
+disk; (2) stale approvals — any gate verdict recorded before the restart is
+bound to a content digest that must be re-verified, not trusted; (3) dead
+agent ids — SendMessage to them fails; do not retry or wait on them; and
+(4) fresh-dispatch work — every lane that was in flight needs a NEW dispatch
+with a complete standalone context packet. This inventory is the difference
+between a bounded recovery and re-running settled gates.
+
 ## Pre-flight: Dirty Worktree Handling
 
 Before staging any files for the PR commit, check the working tree state:
@@ -326,8 +340,16 @@ Rules:
 - **Re-fetch at every round boundary (#3607).** Intake is not one-time:
   re-fetch issue comments, inline review comments, and reviews at the start of
   every fix round and again before the closeout gate — per-head bots post
-  findings against intermediate heads mid-round. Commands and bot markers:
-  `references/intake-surfaces.md` (## Round-boundary re-fetch).
+  findings against intermediate heads mid-round. A critic NEEDS_REVISION that
+  restarts the gate ladder counts as a fix round: re-fetch before re-running
+  the gates, not only at the closeout. Commands and bot markers:
+  `references/intake-surfaces.md` (## Round-boundary re-fetch). The fetch is
+  a RECORDED obligation, not an assumed one: append a fetch receipt (surfaces
+  fetched, comment ids seen, timestamp) to the findings ledger at every
+  boundary, so an unreconciled out-of-band review is visible in the artifact
+  instead of silently missing (ragappv3 PR #1120 r2: a five-MEDIUM bot review
+  posted between two orchestrator comments stayed un-ingested until the
+  closeout critic's mandated fetch caught it).
 
 Rationale: the closure summary is the only artifact the user/maintainer reads
 to confirm the PR is ready to merge; a review comment fixed or skipped without
@@ -506,8 +528,13 @@ example `git rev-parse HEAD` plus a working-tree diff hash) so stale receipts
 are detectable, and re-run the whole set after any content change. Stage B:
 one fresh reviewer subagent, then one fresh test-engineer-role subagent
 (Profile B), or two strictly separated re-derivation passes (Profile C).
-Closeout: a separate fresh reviewer, then a separate fresh critic, per the
-swarm closeout contract. Emit the same `[STAGE-B-REVIEW]`, `[STAGE-B-TEST]`,
+The test-engineer verdict for each fixed item must NAME its discriminating
+probe — the runtime mutant, source surgery, or executed pre-fix failure that
+the pin catches — with the observed failure mode; a PASS whose only evidence
+is "the suite is green" is test theater and does not settle the item (a
+hollow pin survived a full review ladder on ragappv3 PR #1120 until the
+reviewer simulated the mutation). Closeout: a separate fresh reviewer, then
+a separate fresh critic, per the swarm closeout contract. Emit the same `[STAGE-B-REVIEW]`, `[STAGE-B-TEST]`,
 `[CLOSEOUT-REVIEW]`, and `[CLOSEOUT-CRITIC]` rows, record the verdicts in the
 session task-gates artifact, and disclose Profile C's procedural independence
 in the closure ledger. Any edit after a gate verdict invalidates that verdict
