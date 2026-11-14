@@ -72,7 +72,7 @@ pending-owner decision:
   invariant 3 with the capture deadline honored.
 
 
-- **#3681 item 1 (rounds 13-14) — git-configuration output shapes.** The
+- **#3681 item 1 (rounds 13-18) — git-configuration output shapes.** The
   strict parser is only as safe as the shape git actually renders, and four
   repository-configuration families changed that shape without changing the
   content. A text file marked `-diff` or `binary` in `.gitattributes` renders as
@@ -86,13 +86,35 @@ pending-owner decision:
   both make git diff a TRANSFORMED representation while SAST scans the
   worktree one, so hunk coordinates pointed at text the scanner never saw;
   `--no-textconv` is now pinned beside `--no-ext-diff` on the three
-  patch-producing argv sites, and a bounded `git check-attr filter` leg marks
-  any changed file carrying a configured filter `ALL_LINES_CHANGED`. A copied
+  patch-producing argv sites, and a `git check-attr --all -z` leg marks any
+  changed file carrying a configured filter `ALL_LINES_CHANGED`. The leg
+  queries the RAW repo-relative spellings git emitted rather than the
+  case-folded map keys (a lowercased query misses a mixed-case rule whenever
+  `core.ignoreCase` is false), records every spelling that maps to one key
+  rather than the last one written, strips the trailing TAB `git diff` appends
+  to an unquoted `+++ ` header for a space-bearing filename, covers the
+  committed hop as well as the staged/unstaged/untracked legs, and chunks its
+  argv by accumulated LENGTH so a very large changeset cannot exceed the
+  Windows 32767-character command-line limit. `--all` rather than
+  `check-attr filter <attr>` because the latter always emits a record (value
+  `unspecified` when unset) and git permits — and executes — a driver
+  literally named `unspecified`, `unset` or `set`, so neither the record's
+  existence nor its value can be read as "the attribute is absent". A copied
   file under `diff.renames=copies` emits only `copy from`/`copy to` with no
   hunk and its destination left the map entirely; it is now gated. And a
   `+++ ` destination the `diff --git` header did not name, or a non-empty diff
   containing no git file section at all, now fails closed instead of
   producing an authoritative map.
+
+  Disclosed over-gating, not closed here: the leg marks a file
+  `ALL_LINES_CHANGED` whenever `check-attr --all` reports a `filter`
+  attribute, including `filter=lfs` (whose clean/smudge are byte-identical
+  round-trips that do not shift coordinates) and a filter configured with
+  neither a `clean` nor a `process` command (which git treats as
+  pass-through). Both cases therefore lose the PRE-EXISTING discount they
+  could legitimately keep. Narrowing it requires deciding whether
+  "configured but inert" is safe, which is a product decision, not a
+  correctness fix — so the conservative direction ships.
 
   Two pre-existing shapes in the same class are deliberately NOT closed here
   and are filed as one collated follow-up: a nested independent project root
@@ -106,7 +128,12 @@ pending-owner decision:
   `:(literal)` status-leg argv; `hadUnusableAttempt`/`acceptedCandidateRef`
   resolver provenance; per-directory cooled-down
   `diff-base fall-through accepted` criticalWarn; resolver docstring now
-  records the authority theorem and the pending #3681 owner decision.
+  records the authority theorem and the pending #3681 owner decision;
+  `git-configuration` output-shape handling (`Binary files` sections,
+  copy/rename destinations, the phantom-destination and no-section
+  fail-closes, `--no-textconv` argv pins, and the `check-attr --all -z`
+  filter leg with its raw-path collector, TAB-stripped header spellings,
+  committed-hop coverage and length-bounded argv chunking).
 - `src/validation/task-id.ts`, `src/summaries/store.ts` — exported
   single-source exemption predicates.
 - `src/services/diagnose-service.ts` — orphan filter consumes them.
