@@ -806,7 +806,7 @@ describe('AC-008: Performance overhead < 50 ms per call', () => {
 				const content = 'x'.repeat(FILE_SIZE_KB * 1024);
 				const echoCmd = `echo "${content.substring(0, 32)}" > "${testFile}"`;
 
-				const baselineStart = Date.now();
+				const baselineStart = performance.now();
 				for (let i = 0; i < ITERATIONS; i++) {
 					spawnSync(`bash -c '${echoCmd}'`, {
 						shell: true,
@@ -814,10 +814,10 @@ describe('AC-008: Performance overhead < 50 ms per call', () => {
 						timeout: 10_000,
 					});
 				}
-				const baselineMs = Date.now() - baselineStart;
+				const baselineMs = performance.now() - baselineStart;
 
 				// Wrapped: spawnSync with bwrap-wrapped command
-				const wrappedStart = Date.now();
+				const wrappedStart = performance.now();
 				for (let i = 0; i < ITERATIONS; i++) {
 					const wrapped = executor.wrapCommand(echoCmd, [scopeDir]);
 					spawnSync(wrapped, {
@@ -826,7 +826,7 @@ describe('AC-008: Performance overhead < 50 ms per call', () => {
 						timeout: 10_000,
 					});
 				}
-				const wrappedMs = Date.now() - wrappedStart;
+				const wrappedMs = performance.now() - wrappedStart;
 
 				const perCallOverheadMs = (wrappedMs - baselineMs) / ITERATIONS;
 				// AC-008: bounded ABSOLUTE per-call cost. Namespace setup is a fixed
@@ -857,15 +857,15 @@ describe('AC-008: Performance overhead < 50 ms per call', () => {
 			const testFile = path.join(scopeDir, 'ac008-baseline.txt');
 			const content = 'x'.repeat(FILE_SIZE_KB * 1024);
 
-			const baselineStart = Date.now();
+			const baselineStart = performance.now();
 			for (let i = 0; i < ITERATIONS; i++) {
 				writeFileSync(testFile, content, 'utf-8');
 			}
-			const baselineMs = Date.now() - baselineStart;
+			const baselineMs = performance.now() - baselineStart;
 
 			// Wrapped: 100 writes with restricted token wrapping
 			// Note: Due to command wrapping issues, this may not produce accurate results
-			const wrappedStart = Date.now();
+			const wrappedStart = performance.now();
 			for (let i = 0; i < ITERATIONS; i++) {
 				const wrapped = executor.wrapCommand(
 					`cmd /c "echo ${content.substring(0, 32)} > "${testFile}""`,
@@ -877,7 +877,7 @@ describe('AC-008: Performance overhead < 50 ms per call', () => {
 					timeout: 10_000,
 				});
 			}
-			const wrappedMs = Date.now() - wrappedStart;
+			const wrappedMs = performance.now() - wrappedStart;
 
 			const overhead = ((wrappedMs - baselineMs) / baselineMs) * 100;
 
@@ -963,54 +963,33 @@ describe('AC-009: Unsupported platform reports status clearly', () => {
 		}
 	});
 });
-
-// ---------------------------------------------------------------------------
-// AC-010: Full scope = no false positives — skipped under coverage shards too (bwrap userns config on the self-hosted pool). #3165 C-3: the broad scope is now a test-created sandbox home (the pre-fix version used the user's real home dir, where root-owned /home was not writable by the runner user even unsandboxed).
-// ---------------------------------------------------------------------------
-
+// AC-010: Full scope = no false positives — coverage-shard skipped (bwrap userns on the self-hosted pool). #3165 C-3: broad scope = test-created sandbox home (pre-fix: the user's real home dir).
 describe('AC-010: Full scope = no false positives', () => {
 	test.skipIf(!isLinux || Boolean(process.env.COVERAGE_SHARD_INDEX))(
 		'Linux: writes succeed when scope is very broad',
 		async () => {
 			const Executor = await getLinuxExecutor();
-
-			// #3165 C-3: the broad scope is a test-created sandbox home (with a
-			// nested subdir so the scope is genuinely broad), NEVER the
-			// developer's real home — the pre-fix version wrote a probe file
-			// under the real os.homedir() on every run.
+			// #3165 C-3: sandbox home, never the real home; unavailable executor throws inside the try (r2/r4); probe = mkdtemp basename (unique, no clock, r5).
 			const broadScope = canonicalMkdtemp('ac010-broad-');
 			mkdirSync(path.join(broadScope, 'nested-scope'));
-
 			try {
 				const executor = new Executor([broadScope]);
-
-				if (!executor.isAvailable()) {
-					// Fail, do not skip: a vacuous pass cannot validate AC-010
-					// (plan-critic round 2). bwrap exists on ubuntu-26.04
-					// runners. (Inside the try so the finally still cleans the
-					// sandbox on this throw — plan-critic round 4.)
+				if (!executor.isAvailable())
 					throw new Error(
-						'AC-010 requires an available Linux executor; availability probe failed — refusing to pass vacuously',
+						'AC-010 requires an available Linux executor (bwrap on ubuntu-26.04); refusing to pass vacuously',
 					);
-				}
-
-				// Write to a path inside the broad scope — should succeed.
-				// Unique name so the negative check below is meaningful.
-				const probeName = `ac010-fp-${process.pid}-${Date.now()}.txt`;
+				const probeName = `ac010-${path.basename(broadScope)}.txt`;
 				const testFile = path.join(broadScope, probeName);
 				const result = spawnWrapped(
 					executor,
 					`echo "ac010 legitimate" > "${testFile}"`,
 					[broadScope],
 				);
-				// Positive: the sandbox write landed.
 				expect(existsSync(testFile), 'sandbox probe file exists').toBe(true);
-				// Negative: nothing leaked into the real home.
 				expect(
 					existsSync(path.join(os.homedir(), probeName)),
-					'no probe file under the real home',
+					'no home leak',
 				).toBe(false);
-				// With broad scope, legitimate writes should succeed.
 				expect(result.success).toBe(true);
 			} finally {
 				rmSync(broadScope, { recursive: true, force: true });

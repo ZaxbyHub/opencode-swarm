@@ -223,8 +223,10 @@ describe('macOS sandbox-exec activation tests (issue #2590 follow-ups)', () => {
 					}
 
 					// Write to a path inside the broad scope — should succeed.
-					// Unique name so the negative check below is meaningful.
-					const probeName = `ac010-broad-scope-${process.pid}-${Date.now()}.txt`;
+					// The mkdtemp basename is already unique per run, so the
+					// probe name inherits it without a clock read (check:test-
+					// clock; plan-critic round 5).
+					const probeName = `ac010-${path.basename(broadScope)}.txt`;
 					const testFile = path.join(broadScope, probeName);
 					const result = spawnWrapped(
 						executor,

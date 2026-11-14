@@ -21,7 +21,7 @@ Skips phase_complete Gates 1–5 (completion-verify, drift-verifier, hallucinati
 
 **Turbo does NOT relax Tier 3 files.** Security-sensitive paths keep the coder re-dispatch block until Stage A passes, even when Turbo is on (the only per-task gate Turbo relaxes; Turbo does not change the Stage B rule):
 
-All four rules are case-insensitive:
+All six rules are case-insensitive:
 
 - File names matching `architect*.ts`, `delegation*.ts`, `guardrail*.ts` (including `guardrails*.ts`), `adversarial*.ts`, `sanitiz*.ts`, `security*.ts`
 - Exact base names, after removing only the final extension (so `auth.ts` matches, but `authorization.service.ts`, `permissions.test.ts` and `secrets.d.ts` do not): `auth`, `authenticate`, `authentication`, `authorization`, `permission`, `permissions`, `crypto`, `secret`, `secrets`, `secretscan`, `credential`, `credentials`
