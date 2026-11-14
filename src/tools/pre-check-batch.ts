@@ -2554,18 +2554,37 @@ async function markContentFilteredFiles(
 	// available, and a very large changeset would otherwise exceed the Windows
 	// 32767-character command-line limit and fail closed for the whole batch
 	// (round-16 finding, executed: 600 keys -> ENAMETOOLONG -> null map).
-	const CHUNK = 100;
-	for (let start = 0; start < entries.length; start += CHUNK) {
+	// Chunk by ACCUMULATED ARGV LENGTH, not by path count: a single path may
+	// legally be several kilobytes (Linux allows 4096 bytes per component), so
+	// a fixed count does not bound the command line and a repo of long paths
+	// could still trip ENAMETOOLONG.  uses , so
+	//  is not available (round-16 finding, executed: 600 keys ->
+	// ENAMETOOLONG -> null map for the whole batch).
+	const MAX_ARGV_BYTES = 16_000;
+	const FIXED_ARGV = [
+		'-c',
+		'core.quotePath=false',
+		'check-attr',
+		'--all',
+		'-z',
+		'--',
+	];
+	let cursor = 0;
+	while (cursor < entries.length) {
+		const batch: string[] = [];
+		let batchBytes = 0;
+		while (cursor < entries.length) {
+			const raw = entries[cursor][1];
+			// +2 for the argv separator and a NUL terminator, matching how the
+			// platform builds the command line.
+			const cost = raw.length + 2;
+			if (batch.length > 0 && batchBytes + cost > MAX_ARGV_BYTES) break;
+			batch.push(raw);
+			batchBytes += cost;
+			cursor += 1;
+		}
 		const output = await runGit(
-			[
-				'-c',
-				'core.quotePath=false',
-				'check-attr',
-				'--all',
-				'-z',
-				'--',
-				...entries.slice(start, start + CHUNK).map(([, raw]) => raw),
-			],
+			[...FIXED_ARGV, ...batch],
 			directory,
 			abortSignal,
 		);
