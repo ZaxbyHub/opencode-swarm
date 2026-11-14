@@ -378,6 +378,7 @@ async function resolveValidatedDiffBase(
 				'--no-color',
 				'--no-prefix',
 				'--submodule=short',
+				'--inter-hunk-context=0',
 				'-U0',
 				`${candidate}..HEAD`,
 				'--',
@@ -464,6 +465,7 @@ async function resolveValidatedDiffBase(
 							'--no-color',
 							'--no-prefix',
 							'--submodule=short',
+							'--inter-hunk-context=0',
 							'-U0',
 							`${candidate}..HEAD`,
 							'--',
@@ -2029,6 +2031,7 @@ export async function getChangedLineRanges(
 		'--no-color',
 		'--no-prefix',
 		'--submodule=short',
+		'--inter-hunk-context=0',
 		'-U0',
 	];
 	const requestedPathspecs = requestedFiles

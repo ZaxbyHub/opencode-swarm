@@ -200,9 +200,19 @@ describe('unknown backslash-prefixed armed lines (#3681 round 2)', () => {
 		// merge) is deliberately out of grammar: the `@@@` header and the
 		// two-column body must not be half-parsed into a partial map. Failing
 		// closed means every finding is treated as new — the safe direction.
-		// Pinned so the limitation is deliberate, not accidental.
+		// Pinned so the limitation is deliberate, not accidental. The fixture
+		// is preceded by an ordinary `diff --git` section so the rejection
+		// happens on the `@@@` header itself (a `diff --cc` line alone never
+		// opens a section and would be rejected earlier, pinning the wrong
+		// rule — final-critic round 12).
 		const combined = [
+			'diff --git a.ts a.ts',
+			'--- a.ts',
+			'+++ a.ts',
+			'@@ -1,0 +1,1 @@',
+			'+ordinary',
 			'diff --cc f.ts',
+			'index 0000000,0000000..0000000',
 			'--- f.ts',
 			'+++ f.ts',
 			'@@@ -1,1 -1,1 +1,1 @@@',
@@ -279,6 +289,109 @@ describe('header-mode positives (#3681 round 2)', () => {
 			const lines = ranges?.get('src/app.ts');
 			expect(lines).toBeDefined();
 			expect([...(lines ?? [])].length).toBeGreaterThan(0);
+		} finally {
+			removeTreeWithRetry(directory);
+		}
+	}, 30_000);
+
+	test('a submodule pointer change under diff.submodule=log keeps the map non-null', async () => {
+		// A repo-configured `diff.submodule=log` renders a changed pointer of
+		// a REGISTERED submodule as `Submodule sm a..b:` followed by
+		// `  > <msg>` — a leading-space line the header-mode over-delivery
+		// guard fails closed on, nulling the whole changed-line map for any
+		// repo with submodules (final-critic round 11). The three diff argv
+		// sites pin `--submodule=short`, which renders the pointer as an
+		// ordinary `-Subproject commit`/`+Subproject commit` pair. Removing
+		// the pin nulls the map, so this leg is the 20th killed probe.
+		const directory = canonicalMkdtemp('parser-strictness-3681b-sm-');
+		const smSrc = path.join(directory, 'sm-src');
+		const smClone = path.join(directory, 'sm');
+		try {
+			git(directory, 'init', '-q', '-b', 'main');
+			git(directory, 'config', 'user.email', 'test@example.com');
+			git(directory, 'config', 'user.name', 'Test');
+			git(directory, 'config', 'core.autocrlf', 'false');
+			write(directory, 'src/app.ts', 'export const a = 1;\n');
+			// A real registered submodule: only a submodule listed in
+			// .gitmodules gets the `Submodule …` rendering.
+			mkdirSync(smSrc, { recursive: true });
+			write(smSrc, 'keep.txt', 'one\n');
+			git(smSrc, 'init', '-q', '-b', 'main');
+			git(smSrc, 'config', 'user.email', 'test@example.com');
+			git(smSrc, 'config', 'user.name', 'Test');
+			git(smSrc, 'add', 'keep.txt');
+			git(smSrc, 'commit', '-q', '-m', 'sm base');
+			git(
+				directory,
+				'-c',
+				'protocol.file.allow=always',
+				'submodule',
+				'add',
+				'-q',
+				'./sm-src',
+				'sm',
+			);
+			git(directory, 'add', 'src/app.ts');
+			git(directory, 'commit', '-q', '-m', 'base');
+			// Advance the pointer by committing inside the clone, which is
+			// what the parent index records.
+			write(smClone, 'keep.txt', 'two\n');
+			git(smClone, 'commit', '-q', '-am', 'sm change');
+			git(directory, 'add', 'sm');
+			git(directory, 'config', 'diff.submodule', 'log');
+			write(directory, 'src/app.ts', 'export const a = 2;\n');
+			git(directory, 'add', 'src/app.ts');
+			const ranges = await getChangedLineRanges(directory, undefined, [
+				path.join(directory, 'src', 'app.ts'),
+			]);
+			expect(ranges).not.toBeNull();
+			const lines = ranges?.get('src/app.ts');
+			expect(lines).toBeDefined();
+			expect([...(lines ?? [])].length).toBeGreaterThan(0);
+		} finally {
+			removeTreeWithRetry(directory);
+		}
+	}, 30_000);
+
+	test('a fused blank context line under interHunkContext+suppressBlankEmpty keeps the map non-null', async () => {
+		// A repo-configured `diff.interHunkContext` fuses the -U0 hunks and
+		// `diff.suppressBlankEmpty` renders the fused blank context line with
+		// NO leading space — an empty line the armed branch would fail closed
+		// on, nulling the whole map (final-critic round 12; executed: base
+		// returned a map, the unpinned head returned null). The three diff
+		// argv sites pin `--inter-hunk-context=0`, keeping the hunks separate.
+		const directory = canonicalMkdtemp('parser-strictness-3681b-ihc-');
+		try {
+			git(directory, 'init', '-q', '-b', 'main');
+			git(directory, 'config', 'user.email', 'test@example.com');
+			git(directory, 'config', 'user.name', 'Test');
+			git(directory, 'config', 'core.autocrlf', 'false');
+			// Two edits separated by exactly one BLANK line: the config fuses
+			// them into one hunk whose blank context line renders spaceless.
+			write(
+				directory,
+				'src/f.ts',
+				['alpha', 'one', '', 'two', 'omega'].join('\n'),
+			);
+			git(directory, 'add', 'src/f.ts');
+			git(directory, 'commit', '-q', '-m', 'base');
+			write(
+				directory,
+				'src/f.ts',
+				['alpha', 'ONE', '', 'TWO', 'omega'].join('\n'),
+			);
+			git(directory, 'add', 'src/f.ts');
+			git(directory, 'config', 'diff.interHunkContext', '3');
+			git(directory, 'config', 'diff.suppressBlankEmpty', 'true');
+			const ranges = await getChangedLineRanges(directory, undefined, [
+				path.join(directory, 'src', 'f.ts'),
+			]);
+			expect(ranges).not.toBeNull();
+			const lines = ranges?.get('src/f.ts');
+			expect(lines).toBeDefined();
+			expect([...(lines ?? [])].sort((left, right) => left - right)).toEqual([
+				2, 4,
+			]);
 		} finally {
 			removeTreeWithRetry(directory);
 		}
