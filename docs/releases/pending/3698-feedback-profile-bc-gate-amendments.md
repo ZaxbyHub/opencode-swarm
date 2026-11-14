@@ -1,8 +1,8 @@
-# Swarm-PR-Feedback Profile B/C gate amendments: recorded re-fetch, named probes, restart inventory
+# Swarm-PR-Feedback gate amendments: recorded re-fetch (all profiles), named probes and restart inventory (Profiles B/C)
 
 ## What
 
-Three amendments to `.opencode/skills/swarm-pr-feedback/SKILL.md`, each carried by field evidence from the ragappv3 PR #1120 retrospective (dual-critic consolidated, 2026-11-14):
+Three amendments to `.opencode/skills/swarm-pr-feedback/SKILL.md`, each carried by field evidence from the ragappv3 PR #1120 retrospective (dual-critic consolidated, 2026-11-14). The first applies under EVERY profile (the controller records no comment fetch mechanically, so Profile A needs the receipt most — review pr3698-20261114 CT-1 residual); the other two are Profiles B/C:
 
 - **Round-boundary re-fetch is a recorded obligation.** A critic NEEDS_REVISION that restarts the gate ladder counts as a fix round (re-fetch due before gates re-run), and every boundary fetch appends a receipt to the findings ledger (surfaces fetched, comment ids seen, timestamp) so an unreconciled out-of-band review is visible in the artifact instead of silently missing. Field evidence: a five-MEDIUM out-of-band bot review posted between two orchestrator comments on ragappv3 PR #1120 stayed un-ingested until the closeout critic's mandated fetch caught it.
 - **Stage B test-engineer verdicts must name the discriminating probe** (runtime mutant, source surgery, or executed pre-fix failure, with the observed failure mode). A PASS whose only evidence is a green suite is test theater — a hollow static pin survived a full review ladder on the same PR until the reviewer simulated the mutation.
