@@ -207,6 +207,8 @@ set_trace_root() {
 
 trace_for() {
   [ -n "$trace_dir" ] || trace_dir="$root/.agents/issue-traces/$slug"
+  # A generated runner or Windows caller may supply a native drive path.
+  case "$trace_dir" in [A-Za-z]:/*) trace_dir="$(to_shell_path "$trace_dir")" ;; esac
   validate_trace_dir_prefix
   refuse_ancestor_symlink_escape
 }

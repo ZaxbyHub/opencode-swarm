@@ -49,7 +49,9 @@ try {
 		'#!/usr/bin/env bash',
 		'# GENERATED from checkpoint.manifest. Run from the repository root.',
 		'set -eu',
-		'trace_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"',
+		'trace_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && git rev-parse --show-toplevel)"',
+		'trace_prefix="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && git rev-parse --show-prefix)"',
+		'trace_dir="${trace_dir}/${trace_prefix%/}"',
 		'script=.opencode/skills/issue-tracer/scripts/repro-check.sh',
 		'bash "$script" verify-checkpoint --slug ' + quote(slug) + ' --trace-dir "$trace_dir"',
 	];
