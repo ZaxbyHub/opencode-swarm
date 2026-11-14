@@ -156,6 +156,15 @@ newer external finding has no row is invalid; the final critic repeats this
 fetch independently and reconciles it against the durable closure ledger
 (task-gates artifact, head SHA + fetch time).
 
+
+Field evidence (ragappv3 PR #1120 r2, 2026-11-13): a five-MEDIUM out-of-band
+bot review (comment 6860666137) posted between two orchestrator comments
+stayed un-ingested by the feedback ledger — two of its findings were genuinely
+unfixed — until the closeout critic's mandated surface fetch caught it,
+costing a full re-gate round. The fetch receipt exists so this is visible in
+the artifact instead of silently missing.
+
+
 ## Merge-queue wait poll loop
 
 Copy this template instead of re-deriving the monitor each merge watch (#3607
