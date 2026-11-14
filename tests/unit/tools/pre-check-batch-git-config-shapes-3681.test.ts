@@ -34,6 +34,7 @@ import * as path from 'node:path';
 import {
 	classifySastFindings,
 	getChangedLineRanges,
+	parseDiffLineRanges,
 	_internals as preCheckBatchInternals,
 } from '../../../src/tools/pre-check-batch.js';
 import { canonicalMkdtemp, removeTreeWithRetry } from '../../helpers/tmpdir.js';

@@ -1602,35 +1602,124 @@ export function parseDiffLineRanges(
 }
 
 /**
- * Extract the destination path from a `Binary files <src> and <dst> differ`
- * line. The ` and ` separator is used rather than a space split because the
- * callers pin `core.quotePath=false`, which leaves a path containing spaces
- * unquoted — `Binary files my file.js and my file.js differ` splits correctly
- * on ` and ` but not on a space. Returns null when the separator is absent
- * (a shape this parser does not understand), so the caller fails closed.
+ * Split a `diff --git <src> <dst>` / `Binary files <src> and <dst> differ`
+ * body into its two paths, WITHOUT guessing when the split is ambiguous.
+ *
+ * The callers pin `core.quotePath=false`, so a path containing a space is
+ * emitted unquoted and `Binary files my file.js and my file.js differ` cannot
+ * be split on a space. The disambiguators, in order:
+ *
+ *  1. Two quoted tokens — unambiguous by construction.
+ *  2. A symmetric `<p> <sep> <p>` form (a backreference match) — the ordinary
+ *     non-rename case, where both sides name the same path.
+ *  3. Exactly one `/dev/null` side, paired with a single unquoted remainder.
+ *
+ * Anything else — two DIFFERENT unquoted paths (a rename/copy, whose real
+ * paths arrive on `rename from`/`rename to`/`copy from`/`copy to` lines), or a
+ * path containing the separator — returns null so the caller fails closed.
+ * Round-13 evidence for why guessing is not acceptable: a file named
+ * `rock and roll.js` rendered as `Binary files rock and roll.js and rock and
+ * roll.js differ` and a first-separator split produced the PHANTOM key
+ * `roll.js and rock and roll.js`, so the real file left the map and its
+ * findings classified PRE-EXISTING (fail-open).
+ */
+function splitDiffPathPair(
+	body: string,
+	separator: string,
+): { source: string; destination: string } | null {
+	const escapedSeparator = separator.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+	// 1. Two quoted tokens — unambiguous by construction (a quoted path may
+	// contain the separator, so the quotes are what make the split safe).
+	const quoted = new RegExp(
+		`^"((?:[^"\\\\]|\\\\.)*)"${escapedSeparator}"((?:[^"\\\\]|\\\\.)*)"$`,
+	).exec(body);
+	if (quoted) {
+		const source = decodeGitQuotedPath(`"${quoted[1]}"`);
+		const destination = decodeGitQuotedPath(`"${quoted[2]}"`);
+		if (source === null || destination === null) return null;
+		return { source, destination };
+	}
+	if (body.startsWith('"')) return null;
+
+	// 2. Symmetric form: the same path on both sides.
+	const symmetric = new RegExp(`^(.+)${escapedSeparator}\\1$`);
+	const symmetricMatch = symmetric.exec(body);
+	if (symmetricMatch) {
+		const path = symmetricMatch[1];
+		if (path.length === 0) return null;
+		return { source: path, destination: path };
+	}
+
+	// 3. Exactly one /dev/null side.
+	const devNullDestination = new RegExp(
+		`^/dev/null${escapedSeparator}(.+)$`,
+	).exec(body);
+	if (devNullDestination) {
+		return { source: '/dev/null', destination: devNullDestination[1] };
+	}
+	const devNullSource = new RegExp(`^(.+)${escapedSeparator}/dev/null$`).exec(
+		body,
+	);
+	if (devNullSource) {
+		return { source: devNullSource[1], destination: '/dev/null' };
+	}
+	return null;
+}
+
+/**
+ * The destination of a `Binary files <src> and <dst> differ` line, normalized
+ * exactly as the `+++ ` branch normalizes its path so the two kinds of section
+ * agree on the key spelling (round-13 evidence: `Src/App.js` entered the map
+ * mixed-case while the classifier lowercases keys on win32/darwin, so the
+ * lookup missed and the finding classified PRE-EXISTING).
+ *
+ * `normalizeRepoPathKey` is applied directly rather than through
+ * `normalizeDiffPath`, because the pair is ALREADY decoded — re-running the
+ * decoder would split a decoded path containing a literal tab at that tab and
+ * truncate it (`src/😀<TAB>unsafe.ts` became `src/😀`).
  */
 function parseBinaryFilesLine(line: string): string | null {
 	const inner = line.slice(
 		'Binary files '.length,
 		line.length - ' differ'.length,
 	);
-	const separator = inner.indexOf(' and ');
-	if (separator === -1) return null;
-	const destination = inner.slice(separator + ' and '.length).trim();
-	return destination.length > 0 ? destination : null;
+	const pair = splitDiffPathPair(inner, ' and ');
+	if (pair === null) return null;
+	if (pair.destination === '/dev/null') return '/dev/null';
+	return normalizeRepoPathKey(pair.destination);
 }
 
 /**
- * Extract the destination path from the tail of a `diff --git a/<p> b/<p>`
- * line. Only used as the fallback for a `GIT binary patch` section, which
- * carries no path of its own. A two-token tail is unambiguous under
- * `--no-prefix`; anything else (a quoted path, or a path containing a space)
- * returns null so the caller fails closed rather than inventing a key. The
- * cost of that conservatism is over-gating (no discount), never fail-open.
+ * The parsed pair of a `diff --git <src> <dst>` line. Used as the fallback for
+ * a `GIT binary patch` section (which carries no path of its own) and to
+ * VALIDATE the section's `+++ ` destination against the header git actually
+ * emitted — a mismatch is the phantom-destination fail-open the plan critic
+ * demonstrated (`diff --git src/real.ts src/real.ts` plus
+ * `+++ src/phantom.ts` used to yield `{src/phantom.ts: [1]}`).
+ *
+ * As with `parseBinaryFilesLine`, the pair is already decoded, so only the key
+ * normalization is applied.
  */
-function parseGitDiffDestination(rest: string): string | null {
-	const parts = rest.split(' ');
-	return parts.length === 2 ? parts[1] : null;
+function parseGitDiffPair(rest: string): {
+	source: string;
+	destination: string;
+} | null {
+	const pair = splitDiffPathPair(rest, ' ');
+	if (pair === null) return null;
+	// An unparseable side leaves the pair unusable; the caller then skips
+	// every check that depends on it rather than comparing against a bogus
+	// path. (splitDiffPathPair already returns null in that case, so this is
+	// a defensive re-check for the normalization step.)
+	const source =
+		pair.source === '/dev/null'
+			? '/dev/null'
+			: normalizeRepoPathKey(pair.source);
+	const destination =
+		pair.destination === '/dev/null'
+			? '/dev/null'
+			: normalizeRepoPathKey(pair.destination);
+	if (source.length === 0 || destination.length === 0) return null;
+	return { source, destination };
 }
 
 function parseDiffLineRangesChecked(
@@ -1644,12 +1733,27 @@ function parseDiffLineRangesChecked(
 	let destinationSeen = false;
 	let destinationNeedsHunk = false;
 	let collectedLines = 0;
-	// The `diff --git a/<path> b/<path>` line's destination. A file section
-	// that git renders as BINARY (`Binary files … differ` / `GIT binary
-	// patch`) carries no `--- `/`+++ `/`@@` at all, so this is the only
-	// place its path appears — without capturing it the section would be
-	// silently skipped and the file would vanish from the map.
-	let gitFilePath: string | null = null;
+	// The `diff --git <src> <dst>` line's parsed pair. A file section that git
+	// renders as BINARY (`Binary files … differ` / `GIT binary patch`) carries
+	// no `--- `/`+++ `/`@@` at all, so this is the only place its path appears
+	// — without capturing it the section would be silently skipped and the file
+	// would vanish from the map. It is ALSO used to VALIDATE the section's
+	// `+++ ` destination, which is what closes the phantom-destination
+	// fail-open (a `+++ ` that names a path the header did not).
+	let gitFilePair: { source: string; destination: string } | null = null;
+	// Set when the current section is a pure copy/rename (`copy from`/`copy to`
+	// / `rename from`/`rename to` with no hunk): the destination is a new path
+	// in the tree, so it is marked ALL_LINES_CHANGED. Round-13 evidence: with
+	// `diff.renames=copies`, a copied file emits ONLY those two lines, so the
+	// destination used to be omitted entirely and its findings classified
+	// PRE-EXISTING.
+	let copyRenameDestination: string | null = null;
+	// Whether any `diff --git ` line was seen at all. In production mode a
+	// NON-EMPTY diff that contains no git file section is output this parser
+	// does not understand, and returning an authoritative empty map from it
+	// would silently disable the discount for the WHOLE batch — so it fails
+	// closed instead (round-13 evidence: `"not a diff\n"` returned `[]`).
+	let sawGitFileSection = false;
 	// #3681 item 1: hunk-body state. While a hunk still owes body lines,
 	// `--- ` / `+++ ` / `@@` / `diff --git` prefixes are CONTENT (a deleted
 	// line whose text begins `-- ` renders as `--- <content>`, an added line
@@ -1702,13 +1806,16 @@ function parseDiffLineRangesChecked(
 			currentFile = null;
 			expectingDestination = false;
 			destinationSeen = false;
-			// `diff --git a/<path> b/<path>`. The a-side may be /dev/null
-			// (a new file) and either side may be quoted when it contains
-			// special characters (core.quotePath), so the destination is
-			// only trusted for the BINARY-section fallback below, where it
-			// is the only path available; an unparseable line leaves the
-			// fallback to fail closed rather than inventing a key.
-			gitFilePath = parseGitDiffDestination(line.slice('diff --git '.length));
+			// `diff --git <src> <dst>`. The a-side may be /dev/null (a new
+			// file), either side may be quoted when it contains special
+			// characters, and a path containing a space is emitted unquoted
+			// under the pinned `core.quotePath=false` — so the pair is parsed
+			// only when the split is unambiguous (see splitDiffPathPair). An
+			// unparseable header leaves the pair null, which makes every
+			// dependent check below fail closed rather than invent a key.
+			gitFilePair = parseGitDiffPair(line.slice('diff --git '.length));
+			sawGitFileSection = true;
+			copyRenameDestination = null;
 			continue;
 		}
 		// A combined diff (`diff --cc` / `diff --combined`) is out of grammar
@@ -1721,6 +1828,41 @@ function parseDiffLineRangesChecked(
 		// rejection names the rule the leg actually pins.
 		if (line.startsWith('diff --cc ') || line.startsWith('diff --combined ')) {
 			return null;
+		}
+		// A pure copy/rename section (`copy from`/`copy to`, `rename from`/
+		// `rename to`) carries no `--- `/`+++ `/`@@` when the content is
+		// unchanged, and its DESTINATION is a path that did not exist before —
+		// so omitting it lets every finding in a newly copied file classify
+		// PRE-EXISTING. Round-13 evidence: with `diff.renames=copies`, a copy
+		// of a source file emitted only these two lines and the destination
+		// left the map entirely. The destination is marked ALL_LINES_CHANGED,
+		// which over-gates a pure rename (findings in the renamed file become
+		// NEW) but never fails open.
+		if (
+			(line.startsWith('copy from ') || line.startsWith('rename from ')) &&
+			copyRenameDestination === null
+		) {
+			if (expectingDestination || destinationNeedsHunk) return null;
+			continue;
+		}
+		if (line.startsWith('copy to ') || line.startsWith('rename to ')) {
+			if (expectingDestination || destinationNeedsHunk) return null;
+			const prefix = line.startsWith('copy to ') ? 'copy to ' : 'rename to ';
+			const destination = normalizeDiffPath(line.slice(prefix.length));
+			if (destination === null) return null;
+			// Committed EAGERLY, not at EOF: the next `diff --git` boundary
+			// resets the section state, so a copy section followed by an
+			// ordinary one would otherwise lose its destination (round-13
+			// evidence: with `diff.renames=copies`, the copied file left the
+			// map entirely and its findings classified PRE-EXISTING). If the
+			// same section then carries a hunk, the `+++ ` branch's
+			// `result.has` guard keeps this entry instead of overwriting it,
+			// and the hunk's line numbers are added to the ALL_LINES_CHANGED
+			// set — over-gating, never fail-open.
+			result.set(destination, new Set([ALL_LINES_CHANGED]));
+			collectedLines += 1;
+			copyRenameDestination = destination;
+			continue;
 		}
 		// A file section git renders as BINARY carries no `--- `/`+++ `/`@@`
 		// at all: the content is not diffable as text (`.gitattributes`
@@ -1740,14 +1882,15 @@ function parseDiffLineRangesChecked(
 			if (!inGitFile) return null;
 			const binaryFile = line.startsWith('Binary files ')
 				? parseBinaryFilesLine(line)
-				: gitFilePath;
+				: (gitFilePair?.destination ?? null);
 			// A DELETED binary file (`… and /dev/null differ`) has no lines
 			// left to gate, so the section is consumed without a key. An
 			// unresolvable path fails closed rather than inventing one.
 			if (binaryFile === '/dev/null') {
 				inGitFile = false;
 				destinationSeen = false;
-				gitFilePath = null;
+				gitFilePair = null;
+				copyRenameDestination = null;
 				continue;
 			}
 			if (binaryFile === null) return null;
@@ -1756,7 +1899,8 @@ function parseDiffLineRangesChecked(
 			currentFile = binaryFile;
 			inGitFile = false;
 			destinationSeen = false;
-			gitFilePath = null;
+			gitFilePair = null;
+			copyRenameDestination = null;
 			continue;
 		}
 		// Header mode with both counters exhausted: a body-shaped line here
@@ -1804,6 +1948,26 @@ function parseDiffLineRangesChecked(
 			const rawDestination = line.slice(4);
 			currentFile = normalizeDiffPath(rawDestination);
 			if (currentFile === null && rawDestination.trim() !== '/dev/null') {
+				return null;
+			}
+			// Phantom-destination guard: the `+++ ` path must name the file
+			// the section header named. A section headed
+			// `diff --git src/real.ts src/real.ts` whose `+++ ` says
+			// `src/phantom.ts` used to produce `{src/phantom.ts: [1]}`, so the
+			// REAL file lost its changed line and its findings classified
+			// PRE-EXISTING (the exact fail-open this unit exists to close).
+			// A differing destination is legitimate ONLY when the header's
+			// own destination is /dev/null — i.e. a new file, where git names
+			// the a-side as /dev/null and the b-side as the real path. When
+			// the header itself could not be parsed unambiguously the pair is
+			// null and the check is skipped, because rejecting every diff
+			// with a space in a path would over-gate far more than it protects.
+			if (
+				currentFile !== null &&
+				gitFilePair !== null &&
+				gitFilePair.destination !== currentFile &&
+				gitFilePair.destination !== '/dev/null'
+			) {
 				return null;
 			}
 			expectingDestination = false;
@@ -1860,6 +2024,25 @@ function parseDiffLineRangesChecked(
 		destinationNeedsHunk ||
 		oldRemaining > 0 ||
 		newRemaining > 0
+	) {
+		return null;
+	}
+	// A pure copy/rename section ends at EOF (or at the next `diff --git`)
+	// with its destination recorded but no hunk; commit it here so a copied
+	// file is gated rather than omitted.
+	if (copyRenameDestination !== null && copyRenameDestination !== 'pending') {
+		result.set(copyRenameDestination, new Set([ALL_LINES_CHANGED]));
+		collectedLines += 1;
+	}
+	// Production-mode no-section rule: a NON-EMPTY diff that never opened a
+	// git file section is output this parser does not understand, and an
+	// authoritative empty map from it silently disables the discount for the
+	// WHOLE batch (round-13 evidence: `"not a diff\n"` returned `[]`). Empty
+	// output remains the legitimate no-change shorthand.
+	if (
+		requireGitFileHeaders &&
+		!sawGitFileSection &&
+		diffOutput.trim().length > 0
 	) {
 		return null;
 	}
@@ -2207,7 +2390,88 @@ export async function getChangedLineRanges(
 			}
 		}
 	}
+	// Content-altering clean/process filters. `--no-textconv` disables the
+	// textconv driver, but a `filter=<driver>` attribute still makes git diff
+	// the CLEANED representation while SAST scans the worktree one, so hunk
+	// coordinates refer to text the scanner never sees (round-13 evidence:
+	// `filter.squeeze.clean=sed 1d` made git report `@@ -2 +2 @@` for an edit
+	// on SOURCE line 3, and the line-3 finding classified PRE-EXISTING). The
+	// only reliable detection is to ask git which attributes apply, so any
+	// changed file carrying a configured `filter` attribute is marked
+	// ALL_LINES_CHANGED — over-gating, never fail-open. Only `filter` is
+	// queried: the `diff`/textconv driver is already neutralized on the argv
+	// by `--no-textconv`, and marking those files too would needlessly discard
+	// the discount for every repo with a textconv driver. A spawn failure or
+	// unparseable output fails closed like every other leg in this function.
+	const filtered = await markContentFilteredFiles(
+		result,
+		directory,
+		requestedPathspecs,
+		abortSignal,
+	);
+	if (!filtered) {
+		warn(
+			'pre-check: the git check-attr leg failed — changed-line classification is fail-closed (all findings treated as new)',
+		);
+		return null;
+	}
 	return result;
+}
+
+/**
+ * Mark every changed file that carries a configured `filter` attribute as
+ * ALL_LINES_CHANGED, because a content-altering clean/process filter makes git
+ * diff a TRANSFORMED representation while SAST scans the worktree one.
+ *
+ * Returns false when the leg could not be evaluated, so the caller fails
+ * closed rather than trusting coordinates it could not verify.
+ */
+async function markContentFilteredFiles(
+	result: Map<string, Set<number>>,
+	directory: string,
+	requestedPathspecs: string[],
+	abortSignal?: AbortSignal,
+): Promise<boolean> {
+	if (result.size === 0 || requestedPathspecs.length === 0) return true;
+	const output = await runGit(
+		[
+			'-c',
+			'core.quotePath=false',
+			'check-attr',
+			'filter',
+			'--',
+			...requestedPathspecs,
+		],
+		directory,
+		abortSignal,
+	);
+	if (output === null) return false;
+	// `git check-attr` emits one `<path>: filter: <value>` line per queried
+	// path. `unspecified`, `unset` and `set` are the "no driver" answers;
+	// anything else names a configured clean/process driver.
+	const configured = new Set<string>();
+	for (const line of output.split(/\r?\n/)) {
+		if (line.length === 0) continue;
+		const match = /^(.+?): filter: (.+)$/.exec(line);
+		if (!match) return false;
+		const value = match[2].trim();
+		if (
+			value === '' ||
+			value === 'unspecified' ||
+			value === 'unset' ||
+			value === 'set'
+		) {
+			continue;
+		}
+		configured.add(normalizeRepoPathKey(match[1]));
+	}
+	if (configured.size === 0) return true;
+	for (const file of configured) {
+		if (result.has(file)) {
+			result.set(file, new Set([ALL_LINES_CHANGED]));
+		}
+	}
+	return true;
 }
 
 /**
