@@ -132,4 +132,26 @@ describe('#3648 D2: xargs-fed write/delete verbs withdraw fail-closed', () => {
 		},
 		T,
 	);
+	// Hermes round-3 coverage note: the remaining GNU value-taking shorts
+	// (-P parallelism, -d delimiter, -s max-chars) get grammar legs of their
+	// own (they ride the same 'adEILnPs' consumption path proven by -n; this
+	// pins it against a future table edit).
+	test(
+		'hermes-r3: -P/-d/-s detached values are consumed before verb detection',
+		async () => {
+			const a = await gate('echo ../x | xargs -P 4 rm -rf', {
+				blockDestructive: true,
+			});
+			expect(a.verdict).toBe('BLOCKED');
+			const b = await gate('xargs -P4 cp src/a ../esc');
+			expect(b.verdict).toBe('BLOCKED');
+			const c = await gate('echo ../x | xargs -d \\n cp src/a');
+			expect(c.verdict).toBe('BLOCKED');
+			const d = await gate('echo ../x | xargs -s 4096 rm -rf', {
+				blockDestructive: true,
+			});
+			expect(d.verdict).toBe('BLOCKED');
+		},
+		T,
+	);
 });
