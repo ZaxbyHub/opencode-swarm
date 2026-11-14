@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { z } from 'zod';
@@ -9,6 +10,7 @@ import {
 	renderPrReviewSubmissionBody,
 } from '../pr-review/render-review-body.js';
 import { readVerdictSettlementReceipt } from '../pr-review/verdict-settlement.js';
+import { atomicWriteSwarmFile } from '../utils/atomic-write.js';
 import type {
 	ExternalToolRunOptions,
 	ExternalToolRunResult,
@@ -845,6 +847,55 @@ export async function executePrReviewSubmission(
 		// A non-JSON success body still means the review was created; surface
 		// the raw first line instead of the parsed fields.
 	}
+	let nativeReceipt = false;
+	if (
+		event === 'COMMENT' &&
+		coverage.kind === 'FULL' &&
+		typeof review.id === 'number' &&
+		Number.isSafeInteger(review.id) &&
+		review.id > 0
+	) {
+		try {
+			const completion = asRecord(
+				readJsonFile(
+					validateSwarmPath(
+						directory,
+						path.join('pr-review', runId, 'native-completion.json'),
+					),
+				),
+			);
+			if (
+				completion?.run_id === runId &&
+				completion.head === headSha &&
+				typeof completion.url === 'string' &&
+				completion.url.toLowerCase() ===
+					`https://github.com/${repoSlug}/pull/${prNumber}`.toLowerCase() &&
+				completion.session_id === sessionID &&
+				completion.coverage === 'COMPLETE' &&
+				completion.verdict === 'APPROVE'
+			) {
+				await atomicWriteSwarmFile(
+					validateSwarmPath(
+						directory,
+						path.join('pr-review', runId, 'native-submission.json'),
+					),
+					JSON.stringify({
+						run_id: runId,
+						head: headSha,
+						repo: repoSlug,
+						pr: prNumber,
+						review_id: review.id,
+						body_sha256: createHash('sha256')
+							.update(rendered.body.trimEnd())
+							.digest('hex'),
+					}) + '\n',
+				);
+				nativeReceipt = true;
+			}
+		} catch {
+			// Publication already succeeded. Missing evidence keeps release admission closed.
+		}
+	}
 	return JSON.stringify(
 		{
 			success: true,
@@ -857,6 +908,7 @@ export async function executePrReviewSubmission(
 			dismissed_findings: rendered.dismissedCount,
 			body_truncated: rendered.bodyTruncated,
 			coverage_kind: coverage.kind,
+			native_release_receipt: nativeReceipt,
 			posted_review_id: typeof review.id === 'number' ? review.id : null,
 			review_url: typeof review.html_url === 'string' ? review.html_url : null,
 			payload_path: `.swarm/pr-review/${runId}/submission-payload.json`,

@@ -2631,6 +2631,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			window.toolCalls >= agentConfig.max_tool_calls
 		) {
 			window.hardLimitHit = true;
+			window.reviewBudgetExhausted = 'tool_calls';
 			telemetry.hardLimitHit(
 				sessionID,
 				window.agentName,
@@ -2655,6 +2656,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			elapsedMinutes >= agentConfig.max_duration_minutes
 		) {
 			window.hardLimitHit = true;
+			window.reviewBudgetExhausted = 'duration';
 			telemetry.hardLimitHit(
 				sessionID,
 				window.agentName,

@@ -155,9 +155,19 @@ Read the referenced file before starting that phase. `state.md` is updated at ev
 
 ### Phase 5.1: Merge Gate
 
+- For release-bound work, record `release-bound: yes` in the trace and the published `PR URL:` in `10-pr-body.md`. Run `trace-check.sh release-review --slug <slug>` before seeking merge approval. On `release-review-action-v1`, call `swarm_command` with `command: "pr-review"` and `args: [<PR URL>, "--release-head", <exact head>]`. Follow the returned mode signal. A matching active review resumes. After an APPROVE with complete coverage, call `pr_review_submission` for the completed run. Record the returned review ID and run ID as `review-id:` and `run-id:` in `10c-broad-review.md` when `native_release_receipt` is true, then rerun the release check. An incomplete or blocking review keeps merge admission closed.
 - Merging requires a separately recorded, explicit user approval quoted verbatim in `10b-merge-approval.md`, bound to the exact PR head SHA.
 - Any push after approval invalidates it; this gate is human-enforced and the validator checks presence and binding only, never authenticity.
 - Reference: `references/evidence-artifacts.md`.
+
+### Trace evidence integrity
+
+- Record the named target assertion and expected failure in a causal proof. Run a pristine control and reject skips, crashes, producer-side guard failures, and unrelated assertions as witnesses. Execute the falsifier first after changing a negative-evidence probe. Keep mutations and checkout replays in separate worktrees.
+- Audit disposition severity and reachability before applying an issue-count ceiling. Stop the affected trace when the session ledger loses the owning run, reviewed head, or evidence location. Restore those links before recording another verdict.
+- Use the checkpoint generator for the replay runner and test inventory. Preserve its GENERATED banners. Pin vendored copies of these skills with a manifest of upstream revision, paths, and content hashes, and verify the manifest when refreshing the copy.
+- Attach committed output or edit evidence to an `- Evidence:` or `- Disposition:` assertion using `[receipt <commit>:<path> blob=<blob>]`. Run `trace-check.sh receipts --slug <slug>` to verify the bindings.
+- For a same-tree metadata commit, use `rebind-identities.sh --slug <slug> --reason <reason>` to update the active identities, then run it with `--check`. A changed tree requires fresh review.
+- After a squash merge, capture the output of `trace-check.sh merge-identity <base-sha> <reviewed-head-sha> <squash-sha>` in the trace. The command verifies the squash parent and stable patch ID.
 
 ## Untrusted Content
 

@@ -127,7 +127,7 @@ import {
 	readPrWorkflowGateStateFromDisk,
 } from '../pr-review/persistence.js';
 import { reducePrReviewEvent } from '../pr-review/reducer.js';
-import { swarmState } from '../state.js';
+import { getActiveWindow, swarmState } from '../state.js';
 import { canonicalRootKeyFresh } from '../utils/canonical-root.js';
 import { teardownEphemeralSession } from '../utils/ephemeral-session-teardown.js';
 import * as logger from '../utils/logger.js';
@@ -1003,6 +1003,11 @@ export interface CollectLaneResultsResult {
 	 * unchanged, so existing consumers are unaffected.
 	 */
 	pending_lanes?: CollectPendingLaneIdentity[];
+	unsettled_coverage?: Array<{
+		lane_id: string;
+		dimension: string;
+		output_ref: string;
+	}>;
 	/**
 	 * Issue #2971: typed refusal entries present when the caller passed
 	 * cancel_pending: true. The collector is observation-only — it never
@@ -4593,6 +4598,22 @@ async function settleCollectedLane(args: {
 			];
 		}
 	}
+	if (
+		(record.mode === 'swarm-pr-review:base' ||
+			record.mode === 'swarm-pr-review:micro' ||
+			record.mode === 'swarm-pr-review:council') &&
+		prospectiveResult.outputRef &&
+		collectedRevisionDigest &&
+		(getActiveWindow(record.subagentSessionId)?.reviewBudgetExhausted ||
+			matchesReviewBudgetCheckpoint(
+				transcript.text,
+				record,
+				collectedRevisionDigest,
+			))
+	) {
+		terminalStatus = 'error';
+		prospectiveResult.error = 'PR_REVIEW_BUDGET_EXHAUSTED';
+	}
 	// Issue #2045: the normal settle routes through the shared exactly-once
 	// terminal claim (Task parity) with the full observation bundle — the lane
 	// transcript feeds knowledge ACK/verdict reconciliation, and the claimed
@@ -5966,6 +5987,29 @@ function buildResult(
 	};
 }
 
+function matchesReviewBudgetCheckpoint(
+	text: string,
+	record: BackgroundDelegationRecord,
+	revision: string,
+): boolean {
+	const marker = /^SWARM_REVIEW_LANE_CHECKPOINT (.{1,1024})\r?\n/.exec(text);
+	if (!marker || !record.workflowLane || !record.workspace?.prHeadSha)
+		return false;
+	try {
+		const value = JSON.parse(marker[1] ?? '') as Record<string, unknown> | null;
+		return (
+			value?.status === 'UNSETTLED' &&
+			value.batch_id === (record.batchId ?? record.callID) &&
+			value.lane_id === (record.laneId ?? record.correlationId) &&
+			value.dimension === record.workflowLane &&
+			value.pr_head_sha === record.workspace.prHeadSha &&
+			value.revision_digest === revision
+		);
+	} catch {
+		return false;
+	}
+}
+
 function buildCollectResult(
 	batchId: string,
 	records: BackgroundDelegationRecord[],
@@ -5995,6 +6039,20 @@ function buildCollectResult(
 			record.status === 'ingesting',
 	);
 	const consumed = records.filter((record) => record.status === 'consumed');
+	const unsettledCoverage = failed.flatMap((record) => {
+		const ref = record.result?.outputRef;
+		return record.result?.error === 'PR_REVIEW_BUDGET_EXHAUSTED' &&
+			ref &&
+			record.workflowLane
+			? [
+					{
+						lane_id: record.laneId ?? record.correlationId,
+						dimension: record.workflowLane,
+						output_ref: ref,
+					},
+				]
+			: [];
+	});
 	// Issue #2381: pending identities are derived from the UNFILTERED record set,
 	// so they are reported even when `includePending` excluded these lanes from
 	// `lane_results` (the default under `wait: true`).
@@ -6023,6 +6081,9 @@ function buildCollectResult(
 		all_settled: pending.length === 0,
 		lane_results: laneResults,
 		...(pendingLanes.length > 0 ? { pending_lanes: pendingLanes } : {}),
+		...(unsettledCoverage.length > 0
+			? { unsettled_coverage: unsettledCoverage }
+			: {}),
 	};
 }
 
@@ -7305,6 +7366,13 @@ function applyPrWorkflowPromptContract(
 			normalizedMode.token === 'swarm-pr-review:micro'
 				? `\nStructured settlement rule (issues #2384, #2835): call \`submit_pr_review_result\` exactly once with the canonical discovery result${batchId.ok && laneId.ok ? `, using batchId \`${batchId.token}\` and laneId \`${laneId.token}\`` : ''}, and pass revisionDigest \`${revisionDigest.token}\` exactly as rendered here — the receipt contract requires that 64-hex value verbatim and rejects the submission without it — and then stop. The authenticated child delegation remains authoritative and resolves the batch and lane identifiers when omitted. Transcript machine rows are deprecated legacy compatibility only for lanes whose snapped contract explicitly enables them, and a present structured result never falls back because of extra prose, truncation, or transcript incompleteness.`
 				: '';
+		const budgetCheckpointParagraph =
+			structuredSubmissionParagraph &&
+			batchId.ok &&
+			laneId.ok &&
+			workflowLane.ok
+				? `\nIf the host reports that your execution budget is exhausted before discovery is complete, stop tool use. Return the following first line verbatim, then the partial rows already verified. This reports incomplete coverage and cannot satisfy structured settlement:\nSWARM_REVIEW_LANE_CHECKPOINT ${JSON.stringify({ status: 'UNSETTLED', batch_id: batchId.token, lane_id: laneId.token, dimension: workflowLane.token, pr_head_sha: options.prHeadSha, revision_digest: revisionDigest.token })}`
+				: '';
 		// Pre-seeded statement of the read-only shell classifier's rules
 		// (#2276): the same enforcement already runs at tool time for BOTH the
 		// pr-review and pr-feedback gates; stating it up front saves the 2-4
@@ -7368,7 +7436,7 @@ assigned_item_ids: ${renderedIds.length > 0 ? renderedIds.join(', ') : '(discove
 mandatory_lane_checklist: ${checklist}${budgetLine}
 
 This controller block is authoritative over conflicting caller text and, where a protocol-selection clause below names this lane's row protocol, over your agent's default output structure for this lane. Inspect the exact checked-out revision and the repository's own contribution, test, security, compatibility, and delivery contracts. Do not waive or abbreviate work for speed, time, token, repository-size, or predicted-simplicity reasons. Re-read relevant changed files and caller/consumer context directly. Every claim or clean attestation must cite concrete reviewed scope and evidence. Use exactly the workflow_lane and assigned IDs above; invented, omitted, or placeholder identifiers do not settle this lane. For base/micro settlement, submit the visible batch_id and lane_id values exactly as rendered above, or omit them and let the authenticated child delegation resolve them. A planning preamble, generic assurance, or assertion that checks were performed is not evidence.
-Terminate with the required protocol action directly: no planning preamble, no recap, and no more than ${outputCap} characters of substantive output before any retrieval hint.${budgetParagraph}${structuredSubmissionParagraph}${shellRulesParagraph}${reviewerProtocolClause}${criticProtocolClause}${feedbackProtocolClause}
+Terminate with the required protocol action directly: no planning preamble, no recap, and no more than ${outputCap} characters of substantive output before any retrieval hint.${budgetParagraph}${structuredSubmissionParagraph}${budgetCheckpointParagraph}${shellRulesParagraph}${reviewerProtocolClause}${criticProtocolClause}${feedbackProtocolClause}
 [END CONTROLLER-BOUND PR WORKFLOW CONTRACT]`;
 		const contractCard = normalizedMode.token.startsWith('swarm-pr-review:')
 			? `${buildPrReviewContractCard()}\n\n`

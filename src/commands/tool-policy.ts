@@ -165,6 +165,21 @@ export function classifySwarmCommandToolUse(
 		};
 	}
 
+	if (canonicalKey === 'pr-review') {
+		return args.length === 3 &&
+			/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/[1-9][0-9]*$/.test(
+				args[0] ?? '',
+			) &&
+			args[1] === '--release-head' &&
+			/^[a-f0-9]{40}$/.test(args[2] ?? '')
+			? { allowed: true }
+			: {
+					allowed: false,
+					message:
+						'Usage through swarm_command: pr-review <GitHub PR URL> --release-head <full SHA>',
+				};
+	}
+
 	if (canonicalKey === 'knowledge') {
 		if (args.length === 0) return { allowed: true };
 		if (args.length === 1 && (args[0] === 'list' || args[0] === 'unactionable'))
