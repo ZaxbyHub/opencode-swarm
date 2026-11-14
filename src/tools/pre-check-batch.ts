@@ -1667,6 +1667,24 @@ function splitDiffPathPair(
 }
 
 /**
+ * The RAW (un-normalized, still C-quoted) destination of a
+ * `Binary files <src> and <dst> differ` line, for the `rawPaths` collector.
+ * `core.quotePath=false` leaves a path containing spaces unquoted, so the
+ * symmetric form is what makes the split unambiguous — the same rules
+ * `splitDiffPathPair` applies, minus the decoding.
+ */
+function rawBinaryDestination(line: string): string | null {
+	const inner = line.slice(
+		'Binary files '.length,
+		line.length - ' differ'.length,
+	);
+	const separator = inner.indexOf(' and ');
+	if (separator === -1) return null;
+	const destination = inner.slice(separator + ' and '.length);
+	return destination.length > 0 ? destination : null;
+}
+
+/**
  * The destination of a `Binary files <src> and <dst> differ` line, normalized
  * exactly as the `+++ ` branch normalizes its path so the two kinds of section
  * agree on the key spelling (round-13 evidence: `Src/App.js` entered the map
@@ -1725,6 +1743,15 @@ function parseGitDiffPair(rest: string): {
 function parseDiffLineRangesChecked(
 	diffOutput: string,
 	requireGitFileHeaders: boolean,
+	// Optional collector: normalized map key -> the RAW repo-relative path git
+	// actually emitted. `normalizeRepoPathKey` lowercases on win32/darwin, which
+	// is right for classification but wrong for asking git about attributes:
+	// `.gitattributes` matching is case-sensitive whenever `core.ignoreCase` is
+	// false (git's default on a case-sensitive macOS volume), so a lowercased
+	// query can miss a mixed-case file's `filter=` rule entirely (round-16
+	// finding, executed: `check-attr -- src/app.ts` returns nothing for a
+	// `.gitattributes` rule on `Src/App.ts`).
+	rawPaths?: Map<string, string>,
 ): Map<string, Set<number>> | null {
 	const result = new Map<string, Set<number>>();
 	let currentFile: string | null = null;
@@ -1748,6 +1775,9 @@ function parseDiffLineRangesChecked(
 	// destination used to be omitted entirely and its findings classified
 	// PRE-EXISTING.
 	let copyRenameDestination: string | null = null;
+	// The raw spelling of `copyRenameDestination`, for the same reason as
+	// `rawPaths` above.
+	let rawCopyRenameDestination: string | null = null;
 	// Whether any `diff --git ` line was seen at all. In production mode a
 	// NON-EMPTY diff that contains no git file section is output this parser
 	// does not understand, and returning an authoritative empty map from it
@@ -1864,8 +1894,13 @@ function parseDiffLineRangesChecked(
 			// and the hunk's line numbers are added to the ALL_LINES_CHANGED
 			// set — over-gating, never fail-open.
 			result.set(destination, new Set([ALL_LINES_CHANGED]));
+			if (rawPaths !== undefined) {
+				const decoded = decodeGitQuotedPath(line.slice(prefix.length));
+				if (decoded !== null) rawPaths.set(destination, decoded);
+			}
 			collectedLines += 1;
 			copyRenameDestination = destination;
+			rawCopyRenameDestination = line.slice(prefix.length);
 			continue;
 		}
 		// A file section git renders as BINARY carries no `--- `/`+++ `/`@@`
@@ -1887,6 +1922,9 @@ function parseDiffLineRangesChecked(
 			const binaryFile = line.startsWith('Binary files ')
 				? parseBinaryFilesLine(line)
 				: (gitFilePair?.destination ?? null);
+			const rawBinaryPath = line.startsWith('Binary files ')
+				? rawBinaryDestination(line)
+				: null;
 			// A DELETED binary file (`… and /dev/null differ`) has no lines
 			// left to gate, so the section is consumed without a key. An
 			// unresolvable path fails closed rather than inventing one.
@@ -1899,6 +1937,11 @@ function parseDiffLineRangesChecked(
 			}
 			if (binaryFile === null) return null;
 			result.set(binaryFile, new Set([ALL_LINES_CHANGED]));
+			if (rawPaths !== undefined && rawBinaryPath !== null) {
+				const decoded = decodeGitQuotedPath(rawBinaryPath);
+				if (decoded !== null) rawPaths.set(binaryFile, decoded);
+			}
+
 			collectedLines += 1;
 			currentFile = binaryFile;
 			inGitFile = false;
@@ -1951,6 +1994,14 @@ function parseDiffLineRangesChecked(
 			}
 			const rawDestination = line.slice(4);
 			currentFile = normalizeDiffPath(rawDestination);
+			if (currentFile !== null && rawPaths !== undefined) {
+				// The diff output is NOT `-z`, so git C-quotes a path containing
+				// `"`, `\` or a control character; decode it to the real path
+				// before handing it to `check-attr` (whose own `-z` output is raw
+				// and must NOT be decoded — the two sides differ).
+				const decoded = decodeGitQuotedPath(rawDestination);
+				if (decoded !== null) rawPaths.set(currentFile, decoded);
+			}
 			if (currentFile === null && rawDestination.trim() !== '/dev/null') {
 				return null;
 			}
@@ -2057,6 +2108,10 @@ function parseDiffLineRangesChecked(
 	// diff that ends inside the section.)
 	if (copyRenameDestination !== null) {
 		result.set(copyRenameDestination, new Set([ALL_LINES_CHANGED]));
+		if (rawPaths !== undefined && rawCopyRenameDestination !== null) {
+			const decoded = decodeGitQuotedPath(rawCopyRenameDestination);
+			if (decoded !== null) rawPaths.set(copyRenameDestination, decoded);
+		}
 		collectedLines += 1;
 	}
 	// Production-mode no-section rule: a NON-EMPTY diff that never opened a
@@ -2086,7 +2141,10 @@ function mergeChangedLines(
 	}
 }
 
-function parseUntrackedStatus(output: string): string[] | null {
+function parseUntrackedStatus(
+	output: string,
+	rawPaths?: Map<string, string>,
+): string[] | null {
 	if (output.length > 0 && !output.endsWith('\0')) return null;
 
 	const untracked: string[] = [];
@@ -2099,7 +2157,9 @@ function parseUntrackedStatus(output: string): string[] | null {
 		const filePath = record.slice(3);
 		if (!filePath || !isKnownPorcelainStatus(status)) return null;
 		if (status === '??' || status === '!!') {
-			untracked.push(normalizeRepoPathKey(filePath));
+			const key = normalizeRepoPathKey(filePath);
+			untracked.push(key);
+			if (rawPaths !== undefined) rawPaths.set(key, filePath);
 		}
 
 		if (/[RC]/.test(status)) {
@@ -2385,8 +2445,11 @@ export async function getChangedLineRanges(
 		return null;
 	}
 
-	const stagedLines = parseDiffLineRangesChecked(staged, true);
-	const unstagedLines = parseDiffLineRangesChecked(unstaged, true);
+	// The raw repo-relative spellings, so the filter leg can ask git about the
+	// exact path `git diff` operated on rather than a case-folded key.
+	const rawPaths = new Map<string, string>();
+	const stagedLines = parseDiffLineRangesChecked(staged, true, rawPaths);
+	const unstagedLines = parseDiffLineRangesChecked(unstaged, true, rawPaths);
 	if (!stagedLines || !unstagedLines) {
 		warn(
 			'pre-check: a staged/unstaged diff could not be parsed — changed-line classification is fail-closed (all findings treated as new)',
@@ -2398,7 +2461,7 @@ export async function getChangedLineRanges(
 	mergeChangedLines(result, committedLines);
 	mergeChangedLines(result, stagedLines);
 	mergeChangedLines(result, unstagedLines);
-	const untracked = parseUntrackedStatus(status);
+	const untracked = parseUntrackedStatus(status, rawPaths);
 	if (untracked === null) return null;
 	const requestedKeys = requestedPathspecs.map(normalizeRepoPathKey);
 	for (const file of untracked) {
@@ -2430,6 +2493,7 @@ export async function getChangedLineRanges(
 	// unparseable output fails closed like every other leg in this function.
 	const filtered = await markContentFilteredFiles(
 		result,
+		rawPaths,
 		directory,
 		abortSignal,
 	);
@@ -2452,71 +2516,74 @@ export async function getChangedLineRanges(
  */
 async function markContentFilteredFiles(
 	result: Map<string, Set<number>>,
+	rawPaths: Map<string, string>,
 	directory: string,
 	abortSignal?: AbortSignal,
 ): Promise<boolean> {
-	// The queried paths are the map's OWN keys, not the caller's
-	// `requestedFiles`: a caller may pass a directory (`files: ['src']`), which
-	// `git check-attr` reports as the directory itself rather than expanding,
-	// and may pass nothing at all (the default) — either way the changed files
-	// would never be queried and their filters never detected (round-15
-	// finding, executed: `[["src/app.ts",[2]]]` instead of `[-1]`).
-	if (result.size === 0) return true;
-	const queried = [...result.keys()];
-	if (queried.length === 0) return true;
-	const output = await runGit(
-		[
-			'-c',
-			'core.quotePath=false',
-			// `--all -z` rather than the `filter <attr>` form, for two reasons
-			// the round-15 gates found by execution:
-			//   1. `check-attr filter -- <path>` ALWAYS emits a record for every
-			//      queried path, with the value `unspecified` when nothing is
-			//      set — so "is the attribute present?" cannot be answered from
-			//      the record's existence. `--all` emits a record ONLY for
-			//      attributes that are actually set.
-			//   2. Git permits a driver literally named `unspecified`, `unset`
-			//      or `set` and EXECUTES it, so the value cannot be interpreted
-			//      as a sentinel either (a parametrized real-git probe showed
-			//      all three reserved names shift hunk coordinates exactly like
-			//      an ordinary driver).
-			// `-z` makes the records NUL-separated, which is also the only
-			// unambiguous form for a path containing a newline.
-			'check-attr',
-			'--all',
-			'-z',
-			'--',
-			// PLAIN pathspecs, deliberately: `git check-attr` does not
-			// understand pathspec magic, so `:(literal)src/app.ts` is queried
-			// as the literal path `:(literal)src/app.ts` and reports nothing.
-			// Plain pathspecs may glob-expand a bracket/brace filename to a
-			// sibling as well, which only ever widens the query — the requested
-			// file is still matched, so a configured filter on it is still
-			// detected.
-			...queried,
-		],
-		directory,
-		abortSignal,
-	);
-	if (output === null) return false;
-	// `--all -z` emits repeating NUL-separated `<path> <attribute> <value>`
-	// triples. Select the `filter` records; any other attribute (including
-	// `diff`, whose textconv driver is already neutralized on the argv) is
-	// ignored.
+	// The queried paths are the RAW repo-relative spellings git emitted, not the
+	// normalized map keys and not the caller's `requestedFiles`:
+	//  - the map keys are lowercased on win32/darwin, and `.gitattributes`
+	//    matching is case-sensitive whenever `core.ignoreCase` is false (git's
+	//    default on a case-sensitive macOS volume), so a lowercased query can
+	//    miss a mixed-case file's `filter=` rule entirely (round-16 finding,
+	//    executed);
+	//  - a caller may pass a directory (`files: ['src']`), which
+	//    `git check-attr` reports as the directory rather than expanding, and
+	//    may pass nothing at all (the default) — either way the changed files
+	//    would never be queried (round-15 finding, executed).
+	if (result.size === 0 || rawPaths.size === 0) return true;
+	const entries = [...rawPaths].filter(([key]) => result.has(key));
+	if (entries.length === 0) return true;
+	// `git check-attr --all -z` rather than the `filter <attr>` form, for two
+	// reasons the round-15 gates found by execution:
+	//   1. `check-attr filter -- <path>` ALWAYS emits a record for every queried
+	//      path, with the value `unspecified` when nothing is set — so "is the
+	//      attribute present?" cannot be answered from the record's existence.
+	//      `--all` emits a record ONLY for attributes that are actually set.
+	//   2. Git permits a driver literally named `unspecified`, `unset` or `set`
+	//      and EXECUTES it, so the value cannot be interpreted as a sentinel
+	//      either (a parametrized real-git probe showed all three reserved
+	//      names shift hunk coordinates exactly like `squeeze`).
+	// `-z` also makes the records NUL-separated, which is the only unambiguous
+	// form for a path containing a newline — and it means the path field is
+	// ALREADY the raw bytes, so it must NOT be run through the C-quote decoder
+	// (round-16 finding, executed: `decodeGitQuotedPath('"x.js')` returns null
+	// and the file is silently skipped).
 	const configured = new Set<string>();
-	const records = output.split('\0');
-	for (let index = 0; index + 2 < records.length; index += 3) {
-		const rawPath = records[index];
-		const attribute = records[index + 1];
-		if (attribute !== 'filter') continue;
-		if (rawPath.length === 0) continue;
-		// `core.quotePath=false` still leaves git quoting a path containing
-		// `"`, `\` or a control character, so the captured path may be a quoted
-		// form that must be decoded before it can match a map key (round-15
-		// finding, executed: `"a\"b.js"` keyed the map as `a"b.js`).
-		const decoded = decodeGitQuotedPath(rawPath);
-		if (decoded === null) continue;
-		configured.add(normalizeRepoPathKey(decoded));
+	// Chunk the argv: `runGit` uses `stdin: 'ignore'`, so `--stdin` is not
+	// available, and a very large changeset would otherwise exceed the Windows
+	// 32767-character command-line limit and fail closed for the whole batch
+	// (round-16 finding, executed: 600 keys -> ENAMETOOLONG -> null map).
+	const CHUNK = 100;
+	for (let start = 0; start < entries.length; start += CHUNK) {
+		const output = await runGit(
+			[
+				'-c',
+				'core.quotePath=false',
+				'check-attr',
+				'--all',
+				'-z',
+				'--',
+				...entries.slice(start, start + CHUNK).map(([, raw]) => raw),
+			],
+			directory,
+			abortSignal,
+		);
+		if (output === null) return false;
+		// `--all -z` emits repeating NUL-separated `<path> <attribute> <value>`
+		// triples. A well-formed stream ends with the value's own NUL, so the
+		// record count minus one is a multiple of three; anything else is
+		// truncated output and fails closed rather than silently skipping.
+		const records = output.split(' ');
+		if (records.length === 0 || records[records.length - 1] !== '')
+			return false;
+		if ((records.length - 1) % 3 !== 0) return false;
+		for (let index = 0; index + 2 < records.length; index += 3) {
+			if (records[index + 1] !== 'filter') continue;
+			const rawPath = records[index];
+			if (rawPath.length === 0) continue;
+			configured.add(normalizeRepoPathKey(rawPath));
+		}
 	}
 	if (configured.size === 0) return true;
 	for (const file of configured) {
