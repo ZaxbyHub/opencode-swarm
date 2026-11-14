@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.204.6](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.204.5...v7.204.6) (2026-11-14)
+
+
+### Bug Fixes
+
+* **3306,3308,3361:** fragment-gate hardening — byte-strict decoding, aggregator parity, argv strictness, hygiene pins ([7760ec2](https://github.com/ZaxbyHub/opencode-swarm/commit/7760ec28f51897700c460ab662edb1a3daa6279c))
+* **3306:** feedback round — timeout-state fidelity, jsonl NUL refusal, CI pins, per-test budgets ([85a29ce](https://github.com/ZaxbyHub/opencode-swarm/commit/85a29ce313422e5050320be5be94ae171a410aed))
+
 ## [7.204.5](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.204.4...v7.204.5) (2026-11-14)
 
 
