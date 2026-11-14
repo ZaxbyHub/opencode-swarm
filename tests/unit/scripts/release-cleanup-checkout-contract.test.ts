@@ -24,7 +24,7 @@
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
-import { parse } from 'yaml';
+import { load as parse } from 'js-yaml';
 // @ts-expect-error JavaScript CLI module intentionally has no declaration file.
 import { validateExactTagProof } from '../../../scripts/release-notes-fragments.mjs';
 

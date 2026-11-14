@@ -205,8 +205,39 @@ export function isUserVisiblePath(file: string): boolean {
 	return false;
 }
 
-/** Is this path an ADDED pending fragment satisfying the mandate? Pure. */
+/**
+ * Is this path an ADDED pending fragment satisfying the mandate? Pure.
+ *
+ * Pipeline parity with the release aggregator (issues #3306/#3361): a name
+ * counts as a pending fragment only when the aggregator could actually
+ * COLLECT and read it. This is deliberately stricter than the aggregator's
+ * `filterPendingFragmentPaths` alone, which normalizes backslashes before
+ * its C0/`..`/prefix checks — a backslash-bearing name passes that filter
+ * but its normalized form resolves to a file that does not exist, so the
+ * aggregator's collection path (containedPendingPath →
+ * readFragmentFromWorkspace) yields nothing and the release would ship no
+ * note. Refusals here mirror what the aggregator refuses outright (C0
+ * control characters, `..` segments) or cannot collect at read time
+ * (backslash names, leading-`./`/`.\` forms — the filter performs no such
+ * stripping). The `.md` suffix matches case-insensitively on both sides;
+ * the directory prefix itself stays case-sensitive on both sides.
+ */
 export function isPendingFragment(file: string): boolean {
+	if (/[\x00-\x1f]/.test(file)) return false;
+	// The leading-`./` test must run on the RAW name: toPosix strips one
+	// leading `./` (`.\` normalizes into it), and the aggregator performs no
+	// such stripping — a `./`-prefixed (or `.\`-prefixed) name must not
+	// satisfy the gate.
+	if (file.startsWith('./') || file.startsWith('.\\')) return false;
+	// A backslash anywhere in the raw name is not a fragment (final-critic
+	// round 1): git and GitHub always emit `/`-separated repo paths, and the
+	// aggregator's collection path (containedPendingPath →
+	// readFragmentFromWorkspace) resolves the NORMALIZED name — a root-level
+	// file literally named `docs\releases\pending\x.md` satisfies this gate
+	// but yields no release note (read returns null / release fails closed
+	// under requireComplete). Both sides must refuse it.
+	if (file.includes('\\')) return false;
 	const p = toPosix(file);
-	return p.startsWith(`${FRAGMENT_DIR}/`) && p.endsWith('.md');
+	if (p.split('/').some((segment) => segment === '..')) return false;
+	return p.startsWith(`${FRAGMENT_DIR}/`) && p.toLowerCase().endsWith('.md');
 }
