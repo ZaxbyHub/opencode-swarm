@@ -229,7 +229,7 @@ jobs:
                   ;;
                 *)
                   echo "Release fragment present:"
-                  tr '\0' '\n' < "$tmp_added" | grep -E '^docs/releases/pending/.+\.md$' || true
+                  tr '\0' '\n' < "$tmp_added" | grep -E '^docs/releases/pending/.+\.[mM][dD]$' || true
                   ;;
               esac
               ;;

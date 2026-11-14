@@ -104,10 +104,13 @@ export function evaluateFragmentCheck(
 			message:
 				visible.length === 0
 					? 'no user-visible surfaces touched — fragment not required'
-					: `pending fragment present (${input.addedFiles.filter(isPendingFragment).join(', ')})`,
+					: `pending fragment present (${input.addedFiles
+							.filter(isPendingFragment)
+							.map(renderNameForMessage)
+							.join(', ')})`,
 		};
 	}
-	const shown = visible.slice(0, 8).join(', ');
+	const shown = visible.slice(0, 8).map(renderNameForMessage).join(', ');
 	const more = visible.length > 8 ? ` (+${visible.length - 8} more)` : '';
 	return {
 		violation: true,
@@ -155,15 +158,33 @@ export function resolveEnforce(raw: string | undefined): boolean {
 }
 
 /**
- * DI seam for every Bun.spawnSync git call this module makes (issue #3283).
- * Tests inject call-sensitive wrappers here to force spawn timeouts
- * (`exitCode: null`) and per-call failures deterministically; production is
+ * Render a path name for an operator-facing message (issue #3361 AC4): a
+ * name containing a control byte (C0 or DEL) is emitted with every control
+ * byte in explicit \xNN form so a crafted name cannot carry terminal escape
+ * sequences into gate logs while staying identifiable. Plain names pass
+ * through unchanged.
+ */
+export function renderNameForMessage(name: string): string {
+	if (!/[\x00-\x1f\x7f]/.test(name)) return name;
+	return name.replace(/[\x00-\x1f\x7f]/g, (ch) => {
+		const code = ch.charCodeAt(0);
+		return `\\x${code.toString(16).padStart(2, '0')}`;
+	});
+}
+
+/**
+ * DI seam for every Bun.spawnSync git call this module makes (issue #3283)
+ * and for the list-file read (issue #3306 AC5: a stat-able but unreadable
+ * file must exit 2, and the read failure is not portable to every host as a
+ * chmod probe). Tests inject call-sensitive wrappers here; production is
  * the identity indirection. Restore in `finally` — the convention of
  * AGENTS.md invariant 7.
  */
 export const _internals = {
 	spawnSync: (options: Parameters<typeof Bun.spawnSync>[0]) =>
 		Bun.spawnSync(options),
+	readFileSync: (...args: Parameters<typeof fs.readFileSync>) =>
+		fs.readFileSync(...args),
 };
 
 export type RepoRootClassification =
@@ -507,12 +528,24 @@ function parsePrintRequirementArgs(
 	let addedFile: string | null = null;
 	let changedFile: string | null = null;
 	let format: PathListFormat | null = null;
+	// Issue #3306 AC6: a `--`-prefixed token after a value-taking option is
+	// a mistyped flag, not a path — consuming it silently (the old behavior)
+	// classified the flag text as an added path. Single-dash names (e.g.
+	// `-note`) stay legal values.
+	const valueAfter = (option: string, token: string): string | { error: string } => {
+		if (token.startsWith('--')) {
+			return { error: `${option} requires a value (flag-like token ${token} follows)` };
+		}
+		return token;
+	};
 	for (let i = 0; i < args.length; i++) {
 		if (args[i] === '--added') {
 			if (i + 1 >= args.length) {
 				return { error: '--added requires a value' };
 			}
-			added.push(args[i + 1]);
+			const value = valueAfter('--added', args[i + 1]);
+			if (typeof value === 'object') return value;
+			added.push(value);
 			i++;
 		} else if (args[i] === '--added-file') {
 			if (i + 1 >= args.length) {
@@ -521,7 +554,9 @@ function parsePrintRequirementArgs(
 			if (addedFile !== null) {
 				return { error: '--added-file may be given only once' };
 			}
-			addedFile = args[i + 1];
+			const value = valueAfter('--added-file', args[i + 1]);
+			if (typeof value === 'object') return value;
+			addedFile = value;
 			i++;
 		} else if (args[i] === '--changed-file') {
 			if (i + 1 >= args.length) {
@@ -530,7 +565,9 @@ function parsePrintRequirementArgs(
 			if (changedFile !== null) {
 				return { error: '--changed-file may be given only once' };
 			}
-			changedFile = args[i + 1];
+			const value = valueAfter('--changed-file', args[i + 1]);
+			if (typeof value === 'object') return value;
+			changedFile = value;
 			i++;
 		} else if (args[i] === '--paths-format') {
 			if (i + 1 >= args.length) {
@@ -607,13 +644,67 @@ export function decodePathList(
 		}
 		return out;
 	}
+	// newline framing (issue #3306 AC2): a NUL byte means the caller piped
+	// NUL-framed bytes through the legacy line-delimited mode — one token
+	// would silently classify the whole blob as a single (wrong) path.
+	if (raw.includes('\0')) {
+		throw new PathListDecodeError(
+			`newline-framed ${source} contains a NUL byte — use --paths-format nul`,
+			source,
+		);
+	}
 	return raw
 		.split('\n')
 		.map((line) => line.replace(/\r$/, ''))
 		.filter((line) => line.length > 0);
 }
 
-function readBoundedFileSync(file: string, source: string): string {
+/**
+ * Decode ONE path supplied as a direct argv value (`--added <path>`, issue
+ * #3306 AC7): the value must decode to exactly one path under the selected
+ * framing — empty values, multi-record values, and values containing a
+ * literal framing separator are refused instead of silently splitting or
+ * dropping records.
+ */
+export function decodeSinglePath(
+	value: string,
+	format: PathListFormat,
+	source: string,
+): string {
+	// A direct argv value is ONE record: under nul framing a NUL anywhere in
+	// the value (embedded or trailing) means the caller concatenated framed
+	// records into one argument — refuse rather than silently split or drop.
+	if (format === 'nul' && value.includes('\0')) {
+		throw new PathListDecodeError(
+			`${source} must not contain a NUL byte`,
+			source,
+		);
+	}
+	const framed = format === 'nul' ? `${value}\0` : value;
+	const decoded = decodePathList(framed, format, source);
+	if (decoded.length !== 1) {
+		throw new PathListDecodeError(
+			`${source} must decode to exactly one path (got ${decoded.length})`,
+			source,
+		);
+	}
+	return decoded[0];
+}
+
+/** Fatal decoder: replacement-mode decoding silently rewrites invalid bytes
+ * (issue #3306 AC1) — a byte-strict decode is the only form that can tell
+ * malformed input from valid input that legitimately encodes U+FFFD. */
+const utf8FatalDecoder = new TextDecoder('utf-8', { fatal: true });
+
+function decodeUtf8Strict(bytes: Buffer, source: string): string {
+	try {
+		return utf8FatalDecoder.decode(bytes);
+	} catch {
+		throw new PathListDecodeError(`${source} is not valid UTF-8`, source);
+	}
+}
+
+export function readBoundedFileSync(file: string, source: string): string {
 	let stat: import('node:fs').Stats;
 	try {
 		stat = fs.statSync(file);
@@ -629,7 +720,16 @@ function readBoundedFileSync(file: string, source: string): string {
 			source,
 		);
 	}
-	return fs.readFileSync(file, 'utf8');
+	// Issue #3306 AC5: a stat-able but unreadable file (EACCES-class) is an
+	// input problem, not a crash — it must reach the same exit-2 usage path
+	// as every other PathListDecodeError instead of an uncaught throw.
+	let bytes: Buffer;
+	try {
+		bytes = _internals.readFileSync(file) as Buffer;
+	} catch {
+		throw new PathListDecodeError(`cannot read ${source}: ${file}`, source);
+	}
+	return decodeUtf8Strict(bytes, source);
 }
 
 /**
@@ -686,7 +786,7 @@ async function readStdinBounded(source: string): Promise<string> {
 		// deterministically on this error path instead.
 		for (const timer of timers) clearTimeout(timer);
 	}
-	return Buffer.concat(chunks).toString('utf8');
+	return decodeUtf8Strict(Buffer.concat(chunks), source);
 }
 
 /**
@@ -738,17 +838,21 @@ export async function printRequirement(
 		const added =
 			addedRaw !== null
 				? decodePathList(addedRaw, format, 'added list')
-				: parsed.added;
+				: parsed.added.map((value) =>
+						decodeSinglePath(value, format, '--added value'),
+					);
 		const verdict = evaluateRequirement(changed, added);
 		console.log(`required=${verdict.required} satisfied=${verdict.satisfied}`);
 		return verdict.violation ? 1 : 0;
 	} catch (error) {
 		if (error instanceof PathListDecodeError) {
 			console.error(`[check-pending-fragment] ${error.message}`);
-			// Exit deterministically: a pending stdin read from a lost idle/byte
-			// race would otherwise keep the event loop alive past exitCode.
-			// In-process callers (tests) always pass stdinText and never reach
-			// this branch.
+			// Exit deterministically for real CLI callers: a pending stdin read
+			// from a lost idle/byte race would otherwise keep the event loop
+			// alive past exitCode. Injected-input callers (tests passing
+			// stdinText) get a normal return so the runner process survives
+			// (issue #3306 AC7 contract).
+			if (stdinText !== undefined) return 2;
 			process.exit(2);
 		}
 		throw error;

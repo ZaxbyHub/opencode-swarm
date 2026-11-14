@@ -205,8 +205,25 @@ export function isUserVisiblePath(file: string): boolean {
 	return false;
 }
 
-/** Is this path an ADDED pending fragment satisfying the mandate? Pure. */
+/**
+ * Is this path an ADDED pending fragment satisfying the mandate? Pure.
+ *
+ * Parity with the release aggregator's `filterPendingFragmentPaths`
+ * (scripts/release-notes-fragments.mjs; issues #3306/#3361): a name counts
+ * as a pending fragment only when the aggregator would collect it too — no
+ * C0 control characters, no `..` segments, no leading `./` prefix (the
+ * aggregator performs no such stripping), and the `.md` suffix matches
+ * case-insensitively. The directory prefix itself stays case-sensitive on
+ * both sides.
+ */
 export function isPendingFragment(file: string): boolean {
+	if (/[\x00-\x1f]/.test(file)) return false;
+	// The leading-`./` test must run on the RAW name: toPosix strips one
+	// leading `./` (`.\` normalizes into it), and the aggregator performs no
+	// such stripping — a `./`-prefixed (or `.\`-prefixed) name must not
+	// satisfy the gate.
+	if (file.startsWith('./') || file.startsWith('.\\')) return false;
 	const p = toPosix(file);
-	return p.startsWith(`${FRAGMENT_DIR}/`) && p.endsWith('.md');
+	if (p.split('/').some((segment) => segment === '..')) return false;
+	return p.startsWith(`${FRAGMENT_DIR}/`) && p.toLowerCase().endsWith('.md');
 }
