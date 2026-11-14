@@ -199,12 +199,13 @@ type DiffBaseResolution = {
 	acceptedCandidateRef: string;
 	/**
 	 * The RAW repo-relative spellings the committed hop emitted, keyed by
-	 * the normalized map key. The filter leg queries these alongside the
-	 * staged/unstaged/untracked spellings: a file modified ONLY in the
-	 * committed hop never reaches the later collectors, so without this it
-	 * is never asked about and a configured clean/process filter keeps its
-	 * shifted coordinates (round-18 finding, executed — a regression the
-	 * raw-path remediation itself introduced).
+	 * the normalized map key. The RESOLVER owns this map (fresh per
+	 * candidate, never aliased to a caller's), so it survives the memo: a
+	 * memo hit returns the cached envelope, and every consumer merges this
+	 * map into its own collector — otherwise a file modified ONLY in the
+	 * committed hop is never asked about and a configured clean/process
+	 * filter keeps its shifted coordinates (round-19 finding, executed: a
+	 * second getChangedLineRanges call on the same HEAD lost the mark).
 	 */
 	committedRawPaths: Map<string, Set<string>>;
 };
@@ -290,9 +291,6 @@ const lastDiffBaseFallthroughWarn = new Map<string, number>();
 async function resolveValidatedDiffBase(
 	directory: string,
 	abortSignal?: AbortSignal,
-	// Optional collector for the committed hop's raw spellings; see
-	// DiffBaseResolution.committedRawPaths.
-	committedRawPaths?: Map<string, Set<string>>,
 ): Promise<DiffBaseEnvelope> {
 	let executable: string;
 	try {
@@ -409,6 +407,12 @@ async function resolveValidatedDiffBase(
 			attempted.push({ ref: baseBranch, outcome: 'unusable' });
 			continue;
 		}
+		// A FRESH collector per candidate: the resolver owns it (it is
+		// stored on the resolution and cached by the memo), so a caller's
+		// map is never aliased and a candidate that is later rejected
+		// cannot leak its spellings into the accepted one (round-19
+		// finding, executed).
+		const committedRawPaths = new Map<string, Set<string>>();
 		const committedLines = parseDiffLineRangesChecked(
 			diffResult.stdout,
 			true,
@@ -429,7 +433,7 @@ async function resolveValidatedDiffBase(
 					(entry) => entry.outcome === 'unusable',
 				),
 				acceptedCandidateRef: baseBranch,
-				committedRawPaths: committedRawPaths ?? new Map(),
+				committedRawPaths,
 			},
 		};
 		if (headSha !== null) {
@@ -499,6 +503,7 @@ async function resolveValidatedDiffBase(
 						return { attempted, resolution: null };
 					}
 					if (diffResult.kind === 'ok') {
+						const committedRawPaths = new Map<string, Set<string>>();
 						const committedLines = parseDiffLineRangesChecked(
 							diffResult.stdout,
 							true,
@@ -516,7 +521,7 @@ async function resolveValidatedDiffBase(
 										(entry) => entry.outcome === 'unusable',
 									),
 									acceptedCandidateRef: baseBranch,
-									committedRawPaths: committedRawPaths ?? new Map(),
+									committedRawPaths,
 								},
 							};
 							if (headSha !== null) {
@@ -1578,15 +1583,20 @@ function decodeGitQuotedPath(value: string): string | null {
 }
 
 /**
- * The RAW repo-relative path carried by a `--- ` / `+++ ` /
- * `copy to ` / `rename to ` diff header: C-quote-decoded if git
- * quoted it, otherwise the unquoted text with the trailing TAB git appends
- * to a space-bearing filename removed. Mirrors what `normalizeDiffPath`
- * does for the map key, so the two agree on which file they name.
+ * The RAW repo-relative path carried by a `--- ` / `+++ ` / `copy to ` /
+ * `rename to ` diff header, C-quote-decoded if git quoted it.
+ *
+ * `git diff` appends a trailing TAB to the header whenever the filename
+ * contains a space, and it does so for a QUOTED path too - after the
+ * closing quote (executed: `+++ "a \tb.ts"` + U+0009). Splitting on the
+ * literal TAB is therefore safe in both shapes, because git C-quoting
+ * escapes a real TAB inside the name as the two characters `\t`.
+ * Mirrors what `normalizeDiffPath` does for the map key, so the two agree
+ * on which file they name (round-19 finding, executed).
  */
 function rawHeaderPath(line: string, prefixLength: number): string | null {
 	const raw = line.slice(prefixLength);
-	const token = raw.startsWith('"') ? raw : raw.split('\t', 1)[0];
+	const token = raw.split('\t', 1)[0];
 	return decodeGitQuotedPath(token);
 }
 
@@ -1623,9 +1633,10 @@ function normalizeRepoPathKey(repoPath: string): string {
 }
 
 function normalizeDiffPath(rawPath: string): string | null {
-	const pathToken = rawPath.startsWith('"')
-		? rawPath
-		: rawPath.split('\t', 1)[0];
+	// Unconditional, not `startsWith('"')`: git appends the
+	// trailing TAB after the closing quote of a QUOTED space-bearing
+	// path too (see rawHeaderPath).
+	const pathToken = rawPath.split('\t', 1)[0];
 	const decoded = decodeGitQuotedPath(pathToken);
 	if (
 		decoded === null ||
@@ -2401,11 +2412,15 @@ export async function getChangedLineRanges(
 	// nulling the whole map. A total failure carries a named diagnostic.
 	// One collector for every leg, INCLUDING the committed hop: a file
 	// modified only there never reaches the staged/unstaged/untracked
-	// collectors, so the resolver feeds this same map (round-18
-	// finding, executed).
+	// collectors. The resolver owns the committed map and the memo
+	// caches it, so it is MERGED here rather than passed in - a
+	// parameter would be silently empty on every memo hit, which is a
+	// repeat direct call, an ambiguity-consumer-first ordering, or a
+	// second concurrent batch on the same directory (round-19 finding,
+	// executed).
 	const rawPaths = new Map<string, Set<string>>();
 	const { attempted, resolution, failureCause } =
-		await resolveValidatedDiffBase(directory, abortSignal, rawPaths);
+		await resolveValidatedDiffBase(directory, abortSignal);
 	if (!resolution) {
 		logDiffBaseResolutionFailure(directory, attempted, failureCause);
 		return null;
@@ -2453,7 +2468,15 @@ export async function getChangedLineRanges(
 			);
 		}
 	}
-	const { committedLines } = resolution;
+	const { committedLines, committedRawPaths } = resolution;
+	for (const [key, spellings] of committedRawPaths) {
+		const existing = rawPaths.get(key);
+		if (existing === undefined) {
+			rawPaths.set(key, new Set(spellings));
+			continue;
+		}
+		for (const spelling of spellings) existing.add(spelling);
+	}
 
 	const commonDiffArgs = [
 		'-c',
@@ -2611,7 +2634,10 @@ async function markContentFilteredFiles(
 	//   1. `check-attr filter -- <path>` ALWAYS emits a record for every queried
 	//      path, with the value `unspecified` when nothing is set — so "is the
 	//      attribute present?" cannot be answered from the record's existence.
-	//      `--all` emits a record ONLY for attributes that are actually set.
+	//      `--all` emits a record for every attribute that is SET *or explicitly
+	//      unset* (executed: a `src/app.ts -filter` line yields `filter unset`),
+	//      which is strictly narrower than every-queried-path but still not
+	//      'only the ones with a driver'.
 	//   2. Git permits a driver literally named `unspecified`, `unset` or `set`
 	//      and EXECUTES it, so the value cannot be interpreted as a sentinel
 	//      either (a parametrized real-git probe showed all three reserved
@@ -2621,6 +2647,22 @@ async function markContentFilteredFiles(
 	// ALREADY the raw bytes, so it must NOT be run through the C-quote decoder
 	// (round-16 finding, executed: `decodeGitQuotedPath('"x.js')` returns null
 	// and the file is silently skipped).
+
+	// CONSERVATIVE BY NECESSITY, NOT BY PREFERENCE. A record is enough to mark
+	// the file ALL_LINES_CHANGED, and three shapes lose a discount they could
+	// legitimately keep (round-19 finding, executed): an explicit `-filter`
+	// opt-out, a bare `filter` (git reports `set`), and a
+	// `filter=<driver>` with neither an effective `clean` nor `process`
+	// command. None of them can be filtered out by value, because git permits
+	// and executes a driver literally named `unset` or `set`.
+	// ACTIVE LFS IS NOT IN THAT SET: `filter.lfs.clean` replaces the
+	// worktree content with a pointer, so the committed blob is a 3-line
+	// pointer while the scanner sees the expanded file and the diff
+	// coordinates are in POINTER space (executed: a 10-line worktree file
+	// yields a 3-line HEAD blob and `@@ -2,2 +2,2 @@`). Gating it is
+	// correctness-required, so narrowing is a product decision that needs
+	// effective-config detection first.
+
 	const configured = new Set<string>();
 	// Chunk by ACCUMULATED ARGV LENGTH, not by path count. `runGit` uses
 	// `stdin: 'ignore'`, so `--stdin` is not available, and a very large

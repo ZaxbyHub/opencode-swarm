@@ -108,14 +108,24 @@ pending-owner decision:
 
   Disclosed over-gating, not closed here: the leg marks a file
   `ALL_LINES_CHANGED` whenever `check-attr --all` reports a `filter`
-  attribute, including `filter=lfs` (whose clean/smudge are byte-identical
-  round-trips that do not shift coordinates) and a filter configured with
-  neither a `clean` nor a `process` command (which git treats as
-  pass-through). Both cases therefore lose the PRE-EXISTING discount they
-  could legitimately keep. Narrowing it requires deciding whether
-  "configured but inert" is safe, which is a product decision, not a
-  correctness fix — so the conservative direction ships.
+  record, and three shapes lose the PRE-EXISTING discount they could
+  legitimately keep — an explicit `-filter` opt-out (a common LFS
+  exception, which git reports as `filter unset`), a bare `filter`
+  (git reports `filter set`), and a `filter=<driver>` with neither an
+  effective `clean` nor `process` command (git treats it as
+  pass-through). None can be filtered out by value, because git permits
+  and executes a driver literally named `unset` or `set`. Narrowing
+  them needs effective-config detection first and is recorded as a future
+  IMPROVEMENT, not a correctness fix.
 
+  ACTIVE LFS IS NOT OVER-GATING AND IS NOT IN THAT SET. `filter.lfs.clean`
+  replaces the worktree content with a pointer, so the committed blob is a
+  3-line pointer while the scanner sees the expanded file and the diff
+  coordinates are in pointer space (executed with git-lfs 3.7.1: a 10-line
+  worktree file yields a 3-line HEAD blob and `@@ -2,2 +2,2 @@`, so a
+  source-line-9 finding has no corresponding pointer coordinate).
+  Conservatively gating it is correctness-REQUIRED, exactly as the leg
+  already does.
   Two pre-existing shapes in the same class are deliberately NOT closed here
   and are filed as one collated follow-up: a nested independent project root
   that carries `.opencode/` but no `.git` of its own still gets
