@@ -30,6 +30,7 @@ import {
 } from 'node:fs';
 import * as os from 'os';
 import * as path from 'path';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 // Platform detection
 const isLinux = process.platform === 'linux';
@@ -973,27 +974,45 @@ describe('AC-010: Full scope = no false positives', () => {
 		async () => {
 			const Executor = await getLinuxExecutor();
 
-			// Use the user's home directory as the broad scope
-			const broadScope = os.homedir();
+			// #3165 C-3: the broad scope is a test-created sandbox home (with a
+			// nested subdir so the scope is genuinely broad), NEVER the
+			// developer's real home — the pre-fix version wrote a probe file
+			// under the real os.homedir() on every run.
+			const broadScope = canonicalMkdtemp('ac010-broad-');
+			mkdirSync(path.join(broadScope, 'nested-scope'));
 
 			const executor = new Executor([broadScope]);
 
 			if (!executor.isAvailable()) {
-				return;
+				// Fail, do not skip: a vacuous pass cannot validate AC-010
+				// (plan-critic round 2). bwrap exists on ubuntu-26.04 runners.
+				throw new Error(
+					'AC-010 requires an available Linux executor; availability probe failed — refusing to pass vacuously',
+				);
 			}
 
-			// Write to a path inside the broad scope — should succeed
-			const testFile = path.join(broadScope, `ac010-fp-${process.pid}.txt`);
-			const result = spawnWrapped(
-				executor,
-				`echo "ac010 legitimate" > "${testFile}"`,
-				[broadScope],
-			);
-
-			// Clean up BEFORE asserting so a failed assert never leaks into $HOME.
-			rmSync(testFile, { force: true });
-			// With broad scope, legitimate writes should succeed
-			expect(result.success).toBe(true);
+			// Write to a path inside the broad scope — should succeed.
+			// Unique name so the negative check below is meaningful.
+			const probeName = `ac010-fp-${process.pid}-${Date.now()}.txt`;
+			const testFile = path.join(broadScope, probeName);
+			try {
+				const result = spawnWrapped(
+					executor,
+					`echo "ac010 legitimate" > "${testFile}"`,
+					[broadScope],
+				);
+				// Positive: the sandbox write landed.
+				expect(existsSync(testFile), 'sandbox probe file exists').toBe(true);
+				// Negative: nothing leaked into the real home.
+				expect(
+					existsSync(path.join(os.homedir(), probeName)),
+					'no probe file under the real home',
+				).toBe(false);
+				// With broad scope, legitimate writes should succeed.
+				expect(result.success).toBe(true);
+			} finally {
+				rmSync(broadScope, { recursive: true, force: true });
+			}
 		},
 	);
 

@@ -18,10 +18,15 @@ const TIER_3_EXACT_BASENAMES = new Set([
 	'secret',
 	'secrets',
 	'secretscan',
+	// #3165 F-2: credential-style modules — singular AND plural, so both
+	// credential.ts and credentials.ts classify (the keyword prefix below
+	// covers the hyphenated/underscored/dotted forms of both spellings).
+	'credential',
+	'credentials',
 ]);
 
 const TIER_3_KEYWORD_PREFIX_RE =
-	/^(auth|permission|crypto|secret|security)[-_.]/i;
+	/^(auth|permission|crypto|secret|security|credentials?)[-_.]/i;
 
 const TIER_3_DIRECTORY_SEGMENTS = new Set([
 	'auth',
@@ -29,10 +34,56 @@ const TIER_3_DIRECTORY_SEGMENTS = new Set([
 	'crypto',
 	'permission',
 	'secret',
+	// #3165 F-2: the gate-critical subsystems the #3146 review named — every
+	// file under hooks/guardrails/ and the sandbox executors is Tier 3.
+	'guardrails',
+	'sandbox',
+]);
+
+/**
+ * #3165 F-2: gate-critical entry files whose basenames are innocuous
+ * (`index.ts`, `phase-complete.ts`, `ledger.ts`). Compared against the
+ * NORMALIZED, case-folded repo-relative path — a bare `index.ts` (pinned
+ * non-Tier-3 by tests/unit/parallel/tier3-classifier.test.ts) never matches;
+ * only these exact paths do.
+ */
+const TIER_3_EXACT_REPO_PATHS = new Set([
+	'src/cli/index.ts',
+	'src/tools/phase-complete.ts',
+	'src/plan/ledger.ts',
 ]);
 
 function normalizeToForwardSlash(filePath: string): string {
 	return filePath.replace(/\\/g, '/');
+}
+
+/**
+ * Normalizes a planned `files_touched` entry for classification (#3165 F-2,
+ * plan-critic r1/r3): trim, backslashes → forward slashes, strip a leading
+ * `./` run, collapse interior `./` segments — all LEXICALLY, with no
+ * process.cwd() dependency (a task entry is repo-relative by contract, so an
+ * entry that cannot be proven repo-relative without a cwd fails CLOSED).
+ * Returns null when the entry must classify as Tier 3 precisely because it is
+ * not provably a plain repo-relative path: blank/whitespace-only, absolute
+ * (POSIX `/…` or Windows drive forms `C:\…` / `C:…`, the latter covering
+ * drive-RELATIVE spellings), `~`-prefixed home aliases, or any `..` segment.
+ */
+export function normalizeTier3Path(input: string): string | null {
+	if (typeof input !== 'string') return null;
+	const trimmed = input.trim();
+	if (trimmed === '') return null;
+	if (trimmed.startsWith('/')) return null;
+	if (trimmed.startsWith('~')) return null;
+	if (/^[A-Za-z]:/.test(trimmed)) return null;
+	const withSlashes = normalizeToForwardSlash(trimmed);
+	const segments: string[] = [];
+	for (const segment of withSlashes.split('/')) {
+		if (segment === '' || segment === '.') continue;
+		if (segment === '..') return null;
+		segments.push(segment);
+	}
+	if (segments.length === 0) return null;
+	return segments.join('/');
 }
 
 export function matchesTier3(files: string[]): boolean {
@@ -43,10 +94,15 @@ export function matchesTier3(files: string[]): boolean {
 }
 
 export function isTier3Path(filePath: string): boolean {
-	const normalized = normalizeToForwardSlash(filePath);
-	const segments = normalized.split('/');
+	const normalized = normalizeTier3Path(filePath);
+	if (normalized === null) return true; // fail closed (#3165 F-2)
+	const lower = normalized.toLowerCase();
+
+	if (TIER_3_EXACT_REPO_PATHS.has(lower)) return true;
+
+	const segments = lower.split('/');
 	const fileName = segments[segments.length - 1] || '';
-	const fileBaseName = fileName.replace(/\.[^.]*$/, '').toLowerCase();
+	const fileBaseName = fileName.replace(/\.[^.]*$/, '');
 
 	if (TIER_3_EXACT_BASENAMES.has(fileBaseName)) return true;
 
@@ -57,7 +113,7 @@ export function isTier3Path(filePath: string): boolean {
 	}
 
 	for (let i = 0; i < segments.length - 1; i++) {
-		if (TIER_3_DIRECTORY_SEGMENTS.has(segments[i].toLowerCase())) return true;
+		if (TIER_3_DIRECTORY_SEGMENTS.has(segments[i])) return true;
 	}
 
 	return false;
@@ -68,5 +124,7 @@ export const _internals = {
 	TIER_3_EXACT_BASENAMES,
 	TIER_3_KEYWORD_PREFIX_RE,
 	TIER_3_DIRECTORY_SEGMENTS,
+	TIER_3_EXACT_REPO_PATHS,
 	normalizeToForwardSlash,
+	normalizeTier3Path,
 };

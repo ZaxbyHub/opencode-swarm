@@ -28,7 +28,7 @@
 
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { existsSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { SandboxError } from '../../../src/sandbox/executor';
@@ -200,35 +200,45 @@ describe('macOS sandbox-exec activation tests (issue #2590 follow-ups)', () => {
 			async () => {
 				const Executor = await getMacExecutor();
 
-				// Use the user's home directory (broad scope on macOS). The
-				// previous /Users target failed on hosted CI runners regardless
-				// of the sandbox: /Users is root-owned (755), so the runner user
-				// gets EACCES at the OS layer even when the sandbox allows the
-				// subpath (issue #2590 CI, 2026-09-07).
-				const broadScope = os.homedir();
+				// #3165 C-3: the broad scope is a test-created sandbox home
+				// (with a nested subdir so the scope is genuinely broad), NEVER
+				// the developer's real home — the pre-fix version wrote a probe
+				// file under the real os.homedir() on every darwin run (the
+				// original /Users target from #2590 was replaced by homedir();
+				// both write outside the test's sandbox).
+				const broadScope = canonicalMkdtemp('ac010-broad-');
+				mkdirSync(path.join(broadScope, 'nested-scope'));
 
 				const executor = new Executor([broadScope]);
 
 				if (!executor.isAvailable()) {
-					return;
+					// Fail, do not skip: a vacuous pass cannot validate AC-010
+					// (plan-critic round 2). macOS runners ship sandbox-exec.
+					throw new Error(
+						'AC-010 requires an available macOS executor; availability probe failed — refusing to pass vacuously',
+					);
 				}
 
-				// Write to a path inside the broad scope — should succeed
-				const testFile = path.join(
-					broadScope,
-					`ac010-broad-scope-${process.pid}.txt`,
-				);
-				// The probe file lands in the developer's real home: remove it in
-				// a finally so a failed assertion cannot leave it behind.
+				// Write to a path inside the broad scope — should succeed.
+				// Unique name so the negative check below is meaningful.
+				const probeName = `ac010-broad-scope-${process.pid}-${Date.now()}.txt`;
+				const testFile = path.join(broadScope, probeName);
 				try {
 					const result = spawnWrapped(
 						executor,
 						`echo "ac010 legitimate" > "${testFile}"`,
 						[broadScope],
 					);
+					// Positive: the sandbox write landed.
+					expect(existsSync(testFile), 'sandbox probe file exists').toBe(true);
+					// Negative: nothing leaked into the real home.
+					expect(
+						existsSync(path.join(os.homedir(), probeName)),
+						'no probe file under the real home',
+					).toBe(false);
 					expect(result.success).toBe(true);
 				} finally {
-					rmSync(testFile, { force: true });
+					rmSync(broadScope, { recursive: true, force: true });
 				}
 			},
 		);

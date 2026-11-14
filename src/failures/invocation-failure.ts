@@ -295,6 +295,35 @@ function screamingKeyContainsSuffix(key: string): boolean {
 }
 
 /**
+ * Bare well-known credential VALUE shapes (#3165 F-1): content-based, so they
+ * fire wherever the token appears — including prose placements with no
+ * adjacent `key[:=]value` span ("Incorrect API key provided: sk-proj-…",
+ * "please rotate ghp_…"), which the KV arms above cannot match (letters
+ * between morpheme and separator defeat FILL, and without a separator neither
+ * KV arm fires at all). MIRRORS the token VALUE shapes of
+ * `redactShellCommand` (src/hooks/guardrails/helpers.ts) — deliberately a
+ * mirror, not a shared module, per the src/training/redact.ts precedent: the
+ * failure-display path keeps its small import graph and its own bounded
+ * pipeline, and the parity suite (invocation-failure-bare-tokens-3165.test.ts)
+ * pins both sites against the same corpus so they cannot drift. ReDoS posture:
+ * like the KV arms, each shape's trailing quantifier is individually
+ * unbounded; total regex work is bounded by the MAX_SANITIZE_INPUT_CHARS
+ * pre-slice.
+ */
+const BARE_TOKEN_VALUE_PATTERNS: ReadonlyArray<{ family: string; re: RegExp }> =
+	[
+		{ family: 'openai', re: /\bsk-[A-Za-z0-9_-]{20,}/g },
+		{
+			family: 'github',
+			re: /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}/g,
+		},
+		{ family: 'github', re: /\bgithub_pat_[A-Za-z0-9_]{22,}/g },
+		{ family: 'aws', re: /\bAKIA[0-9A-Z]{16}\b/g },
+		{ family: 'slack', re: /\bxox[baprs]-[A-Za-z0-9-]{10,}/g },
+		{ family: 'google', re: /\bAIza[A-Za-z0-9_-]{30,}/g },
+	];
+
+/**
  * Redacts secrets/URLs and strips control chars for terminal/display safety.
  * Order of operations (each step exists to keep a prior fix closed):
  *   1. slice to MAX_SANITIZE_INPUT_CHARS (regex-work bound)
@@ -309,10 +338,12 @@ function screamingKeyContainsSuffix(key: string): boolean {
  *      Digest, …) between separator and credential so `Authorization: Basic
  *      <base64>` redacts the credential, not just the scheme
  *   5. redact SCREAMING_CASE KV pairs (unchanged shape)
- *   6. strip residual control/format/DI runs to spaces
- *   7. sweep residual over-long bare `[<params>m` SGR bodies (the >32-char
+ *   6. redact bare well-known credential VALUE shapes wherever they appear,
+ *      no key=value span needed (#3165 F-1 — see BARE_TOKEN_VALUE_PATTERNS)
+ *   7. strip residual control/format/DI runs to spaces
+ *   8. sweep residual over-long bare `[<params>m` SGR bodies (the >32-char
  *      CSI tail the bounded pre-pass cannot match)
- *   8. trim + 512-byte UTF-8 bound
+ *   9. trim + 512-byte UTF-8 bound
  *
  * Best-effort defense-in-depth for a log-display string, NOT a security
  * boundary: combining marks (U+0300 class) still defeat keyword matching and
@@ -332,10 +363,15 @@ export function sanitizeFailureEvidenceDisplay(value: string): string {
 		.replace(SCREAMING_KV_CANDIDATE_PATTERN, (match, key: string) => {
 			if (!screamingKeyContainsSuffix(key)) return match;
 			return `${key.replace(CONTROL_CHAR_RUN, '').replace(/\s+/g, '')}=<redacted>`;
-		})
+		});
+	let swept = redacted;
+	for (const { family, re } of BARE_TOKEN_VALUE_PATTERNS) {
+		swept = swept.replace(re, () => `[REDACTED:${family}]`);
+	}
+	const stripped = swept
 		.replace(CONTROL_CHAR_RUN, ' ')
 		.replace(BARE_SGR_PARAMETER_RUN, ' ');
-	return boundedUtf8(redacted.trim());
+	return boundedUtf8(stripped.trim());
 }
 
 function signalFrom(value: unknown): string {
