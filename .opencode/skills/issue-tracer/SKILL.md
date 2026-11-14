@@ -162,9 +162,39 @@ Read the referenced file before starting that phase. `state.md` is updated at ev
 
 ### Trace evidence integrity
 
-- Record the named target assertion and expected failure in a causal proof. Run a pristine control and reject skips, crashes, producer-side guard failures, and unrelated assertions as witnesses. Execute the falsifier first after changing a negative-evidence probe. Keep mutations and checkout replays in separate worktrees.
-- Audit disposition severity and reachability before applying an issue-count ceiling. Stop the affected trace when the session ledger loses the owning run, reviewed head, or evidence location. Restore those links before recording another verdict.
-- Use the checkpoint generator for the replay runner and test inventory. Preserve its GENERATED banners. Pin vendored copies of these skills with a manifest of upstream revision, paths, and content hashes, and verify the manifest when refreshing the copy.
+#### Causal-oracle evidence rule
+
+Name the target assertion and its expected failure. Run a pristine control under the same conditions and verify the expected differential.
+
+#### Falsifier-first rule
+
+Execute the falsifier first after changing a negative-evidence probe.
+
+#### Guard-discrimination rule
+
+Reject skips, crashes, producer-side guard failures, and unrelated assertions as witnesses.
+
+#### Disposition-audit rule
+
+Audit disposition severity and reachability before applying an issue-count ceiling.
+
+#### Checkout-exclusion rule
+
+Keep mutation probes and concurrent checkout replays in separate worktrees.
+
+#### Session-ledger abort criterion
+
+Stop the affected trace when the session ledger loses the owning run, reviewed head, or evidence location. Restore those links before recording another verdict.
+
+#### Generator-only authorship and banner rule
+
+Use the checkpoint generator for the replay runner and test inventory. Preserve its GENERATED banners.
+
+#### Vendored-copy manifest-pin guidance
+
+Pin vendored copies with a manifest of upstream revision, paths, and content hashes. Verify the manifest when refreshing the copy.
+
+#### Trace validation commands
 - Attach committed output or edit evidence to an `- Evidence:` or `- Disposition:` assertion using `[receipt <commit>:<path> blob=<blob>]`. Run `trace-check.sh receipts --slug <slug>` to verify the bindings.
 - For a same-tree metadata commit, use `rebind-identities.sh --slug <slug> --reason <reason>` to update the active identities, then run it with `--check`. A changed tree requires fresh review.
 - After a squash merge, capture the output of `trace-check.sh merge-identity <base-sha> <reviewed-head-sha> <squash-sha>` in the trace. The command verifies the squash parent and stable patch ID.
