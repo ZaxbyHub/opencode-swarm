@@ -39,7 +39,19 @@ const MAX_SCOPE_FILES = 256;
 const DEFAULT_MAX_SCOPE_BYTES = 256 * 1024;
 const MAX_SCOPE_BYTES = 2 * 1024 * 1024;
 const HEAD_TIMEOUT_MS = 5_000;
+// Sized for a SHA: `rev-parse --verify HEAD` emits 40-64 hex characters, and
+// HEAD_SHA_PATTERN below rejects anything longer as a malformed shape.
 const HEAD_OUTPUT_BYTES = 256;
+// The availability probe runs PATH-valued commands (`rev-parse --git-dir`,
+// `symbolic-ref -q HEAD`), whose stdout is a filesystem path rather than a
+// SHA. Reusing HEAD_OUTPUT_BYTES there made a git-dir path over 256 bytes —
+// a linked worktree lane root, or any subdirectory root — overflow into a
+// RETRYABLE `head_timeout` denial even though the workspace is healthy, and
+// that denial is not something re-dispatch can clear (FB-004; executed with a
+// deep linked worktree whose absolute git-dir path is ~250 bytes and crosses
+// the cap at ~250 bytes of main-repo path). The probe's stdout is never read
+// — only its exit code and stderr — so a path-sized bound costs nothing.
+const PATH_OUTPUT_BYTES = 4096;
 const STDERR_EXCERPT_BYTES = 512;
 const HEAD_SHA_PATTERN = /^[0-9a-f]{40,64}$/i;
 
@@ -254,6 +266,10 @@ function runBoundedGit(
 	directory: string,
 	budgetMs: number,
 	captureStderr: boolean,
+	// Per-call stdout ceiling. Defaults to HEAD_OUTPUT_BYTES because every
+	// caller but the availability probe parses a fixed-shape SHA/ref answer;
+	// the availability probe passes PATH_OUTPUT_BYTES (see the constant).
+	maxStdoutBytes: number = HEAD_OUTPUT_BYTES,
 ): Promise<BoundedGitResult> {
 	return new Promise<BoundedGitResult>((resolve) => {
 		let child: child_process.ChildProcess | undefined;
@@ -291,12 +307,23 @@ function runBoundedGit(
 				// dubious ownership' would otherwise fall through to the
 				// generic corrupt classification and lose the actionable
 				// remedy (final-critic probe 7(ii)).
+				// GIT_TERMINAL_PROMPT=0 keeps an unauthenticated remote (or a
+				// credential-helper prompt surfaced through rev-parse) from
+				// blocking on a terminal prompt inside this bounded child: the
+				// reviewer dispatch must resolve by its deadline, never wait on
+				// a human that is not there.
 				env: {
 					...process.env,
 					LC_ALL: 'C',
 					LANGUAGE: '',
 					LC_MESSAGES: 'C',
+					GIT_TERMINAL_PROMPT: '0',
 				},
+				// kill() defaults to SIGTERM, which a wedged git can ignore
+				// (or handle slowly); the timer below already resolved our
+				// promise, so escalate unconditionally to guarantee the child
+				// cannot outlive the budget it was given.
+				killSignal: 'SIGKILL',
 			});
 		} catch (error) {
 			// Node throws ENOMEM (and other non-event errnos) SYNCHRONOUSLY
@@ -330,7 +357,7 @@ function runBoundedGit(
 		child?.stdout?.on('data', (chunk: Buffer | string) => {
 			const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
 			stdoutBytes += bytes.byteLength;
-			if (stdoutBytes > HEAD_OUTPUT_BYTES) {
+			if (stdoutBytes > maxStdoutBytes) {
 				finish({ kind: 'overflow' });
 				return;
 			}
@@ -496,6 +523,7 @@ export async function classifyWorkspaceGitHealth(
 		directory,
 		Math.min(2_000, remaining()),
 		true,
+		PATH_OUTPUT_BYTES,
 	);
 	switch (availability.kind) {
 		case 'spawn-error':

@@ -44,10 +44,13 @@ pending-owner decision:
   their own cost: conservative fail-closed on every HEAD-equal /
   push-to-main-shaped acceptance reverses the #2918 F-002 fresh-branch
   contract, while fetch-verified base selection adds remote-tracking-ref
-  mutation to a gate path. Both need a maintainer decision. **HEAD-equal
-  acceptance is
-  therefore still classified PRE-EXISTING today by design-pending**, exactly
-  as disclosed in the #3131 release fragment; the secretscan arm keeps its
+  mutation to a gate path. Both need a maintainer decision. **When the
+  ACCEPTED base is HEAD-equal the committed hop is therefore still
+  classified PRE-EXISTING today by design-pending** — the reachable
+  instance being a FIRST-resolvable candidate that equals HEAD (a fresh
+  branch, a repository with no remote where you commit on `main`, or a
+  push-to-main checkout where `origin/main == HEAD`), exactly as disclosed
+  in the #3131 release fragment; the secretscan arm keeps its
   unconditional HEAD-equal shield.
 - **#3681 item 5 — honest doctor.** `/swarm diagnose`'s orphaned-evidence
   filter now recognizes the reserved fixed tool-evidence ids (single source:
@@ -64,8 +67,9 @@ pending-owner decision:
   ref/object) on BOTH the routed and the zero-routed attribution paths —
   ending the endless `head_timeout retryable=true` retry loop that could
   never self-heal. Transient causes (unborn HEAD — one commit rescues it,
-  genuine timeout, oversized output) keep the retryable `head_timeout`
-  behavior. The availability probe is git-native (`rev-parse --git-dir`,
+  genuine timeout, oversized output, and a malformed HEAD SHA shape —
+  `rev-parse --verify HEAD^{commit}` exiting 0 with output that is not a
+  40-64 hex SHA) keep the retryable `head_timeout` behavior. The availability probe is git-native (`rev-parse --git-dir`,
   then `rev-parse --verify HEAD^{commit}` with a bounded follow-up chain
   distinguishing absent-branch unborn from corrupt refs), never a
   filesystem `.git` marker check, and every spawn is bounded per AGENTS.md
@@ -108,15 +112,16 @@ pending-owner decision:
 
   Disclosed over-gating, not closed here: the leg marks a file
   `ALL_LINES_CHANGED` whenever `check-attr --all` reports a `filter`
-  record, and two shapes lose the PRE-EXISTING discount they could
+  record, and three shapes lose the PRE-EXISTING discount they could
   legitimately keep — an explicit `-filter` opt-out (a common LFS
-  exception, which git reports as `filter unset`) and a bare `filter`
-  (git reports `filter set`). Neither can be filtered out by value,
-  because git permits and executes a driver literally named `unset` or
-  `set`. Narrowing them needs effective-config detection first and is
-  recorded as a future IMPROVEMENT, not a correctness fix.
+  exception, which git reports as `filter unset`), a bare `filter`
+  (git reports `filter set`), and a pass-through driver whose rendered
+  diff is identical to the unfiltered one. None can be filtered out by
+  value, because git permits and executes a driver literally named
+  `unset` or `set`. Narrowing them needs effective-config detection
+  first and is recorded as a future IMPROVEMENT, not a correctness fix.
 
-  THREE FURTHER SHAPES ARE CORRECTNESS-REQUIRED, NOT OVER-GATING.
+  TWO FURTHER SHAPES ARE CORRECTNESS-REQUIRED, NOT OVER-GATING.
   A `filter=<driver>` with an effective `smudge` but no `clean` or `process`
   shifts coordinates exactly the way LFS does: git skips the clean step,
   so the committed blob is the source text while the scanner reads the
@@ -127,8 +132,9 @@ pending-owner decision:
   10-line worktree file yields a 3-line HEAD blob and `@@ -2,2 +2,2 @@`,
   and a source-line-9 finding has no corresponding pointer coordinate
   (executed with git-lfs 3.7.1). A driver with NEITHER an effective
-  `clean`, `process` nor `smudge` is genuine pass-through (executed:
-  `@@ -3 +3 @@` unchanged).
+  `clean`, `process` nor `smudge` is NOT in this set — it is genuine
+  pass-through (executed: `@@ -3 +3 @@` unchanged), so gating it is the
+  third over-gating shape named above, not a correctness requirement.
   Two pre-existing shapes in the same class are deliberately NOT closed here
   and are filed as one collated follow-up: a nested independent project root
   that carries `.opencode/` but no `.git` of its own still gets

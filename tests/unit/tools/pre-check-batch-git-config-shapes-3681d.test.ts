@@ -27,10 +27,40 @@ import {
 	classifySastFindings,
 	getChangedLineRanges,
 } from '../../../src/tools/pre-check-batch.js';
-import { canonicalMkdtemp, removeTreeWithRetry } from '../../helpers/tmpdir.js';
+import {
+	canonicalMkdtemp,
+	canonicalTmpDir,
+	removeTreeWithRetry,
+} from '../../helpers/tmpdir.js';
 
 /** The module-private sentinel; a set containing it means "every line". */
 const ALL_LINES_CHANGED = -1;
+
+// FB-014: the fixture must never inherit the host's global git config. A
+// `commit.gpgsign=true` with no reachable `gpg.program` fails every `git
+// commit` here (executed: 5/5 legs in pre-check-batch-git-config-shapes-3681d
+// and 1/1 in pre-check-batch-pathspec-literal-3681), and GitHub runners carry
+// no identity of their own by design. Pointing GIT_CONFIG_GLOBAL at an EMPTY
+// file isolates every global key — gpgsign, signing format, hooks, templates
+// — rather than patching the one key that was observed, and the local config
+// these fixtures set themselves still applies. The file lives in the OS temp
+// dir, NOT inside the repository: a stray file in the repo would change the
+// very `git status` / diff output these fixtures assert on, and `.git` is a
+// FILE rather than a directory in a submodule or linked worktree.
+const isolatedGlobalConfigPaths = new Map<string, string>();
+let isolatedGlobalConfigCounter = 0;
+function isolatedGlobalConfig(cwd: string): string {
+	const existing = isolatedGlobalConfigPaths.get(cwd);
+	if (existing !== undefined) return existing;
+	isolatedGlobalConfigCounter += 1;
+	const target = path.join(
+		canonicalTmpDir(),
+		`swarm-fixture-global-config-${process.pid}-${isolatedGlobalConfigCounter}`,
+	);
+	writeFileSync(target, '');
+	isolatedGlobalConfigPaths.set(cwd, target);
+	return target;
+}
 
 function git(cwd: string, ...args: string[]): void {
 	execFileSync('git', args, {
@@ -38,6 +68,11 @@ function git(cwd: string, ...args: string[]): void {
 		stdio: ['ignore', 'ignore', 'pipe'],
 		timeout: 20_000,
 		windowsHide: true,
+		env: {
+			...process.env,
+			GIT_CONFIG_NOSYSTEM: '1',
+			GIT_CONFIG_GLOBAL: isolatedGlobalConfig(cwd),
+		},
 	});
 }
 
@@ -92,11 +127,23 @@ describe('filter detection under core.ignoreCase=false (#3681 round 16)', () => 
 				path.join(directory, 'Src', 'App.ts'),
 			]);
 			expect(ranges).not.toBeNull();
-			// The map key stays lowercased (that is what the classifier looks
-			// up), but it must carry the sentinel.
-			expect([...(ranges?.get('src/app.ts') ?? [])]).toEqual([
+			// `normalizeRepoPathKey` folds case only on win32/darwin, so the map
+			// key this leg must read is the platform's own fold of `Src/App.ts`.
+			// A hardcoded lowercase is false on linux and turned this leg red on
+			// unit (ubuntu-latest, 3) for 3/3 attempts (FB-001). The classifier
+			// looks a finding up through the same fold, so mirroring it here keeps
+			// both sides on one platform-neutral key — and a regression that
+			// folds on the wrong platform fails on the `has` check below.
+			const expectedKey =
+				process.platform === 'win32' || process.platform === 'darwin'
+					? 'src/app.ts'
+					: 'Src/App.ts';
+			expect([...(ranges?.get(expectedKey) ?? [])]).toEqual([
 				ALL_LINES_CHANGED,
 			]);
+			expect(
+				ranges?.has(expectedKey === 'src/app.ts' ? 'Src/App.ts' : 'src/app.ts'),
+			).toBe(false);
 
 			const classified = classifySastFindings(
 				[sastFinding(path.join(directory, 'Src', 'App.ts'), 3)],
@@ -366,9 +413,18 @@ describe('filter detection when two spellings share one map key (#3681 round 18)
 
 			const ranges = await getChangedLineRanges(directory, undefined, []);
 			expect(ranges).not.toBeNull();
-			// Both spellings share this one key, and the rule on `FOO.ts` must
-			// reach it.
-			expect([...(ranges?.get('foo.ts') ?? [])]).toEqual([ALL_LINES_CHANGED]);
+			// `normalizeRepoPathKey` folds case only on win32/darwin, so the two
+			// spellings collapse to ONE key only on those platforms. On linux
+			// they stay two distinct keys, and the hardcoded lowercase this leg
+			// used to assert turned it red on unit (ubuntu-latest, 3) for 3/3
+			// attempts (FB-002). Assert the platform's real key: the collapsed
+			// one where folding happens, and the exact-case spelling the
+			// `.gitattributes` rule names where it does not.
+			const folded =
+				process.platform === 'win32' || process.platform === 'darwin';
+			expect([...(ranges?.get(folded ? 'foo.ts' : 'FOO.ts') ?? [])]).toEqual([
+				ALL_LINES_CHANGED,
+			]);
 
 			const classified = classifySastFindings(
 				[sastFinding(path.join(directory, 'FOO.ts'), 2)],

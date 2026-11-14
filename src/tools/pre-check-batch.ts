@@ -1655,6 +1655,15 @@ function normalizeDiffPath(rawPath: string): string | null {
  * Parse unified diff output (with -U0) to extract added/modified line numbers per file.
  * Returns a Map from normalised file path → Set of changed line numbers.
  *
+ * The returned Map is EMPTY, not null, when the input is a shape this parser
+ * deliberately refuses (see SCOPE below): the wrapper below substitutes
+ * `new Map()` for the `parseDiffLineRangesChecked` null. An empty map is the
+ * fail-closed answer for the "no line numbers" question — every consumer
+ * that asks `ranges.get(key)` receives `undefined` and classifies its
+ * findings as NEW — so callers must not read an empty result as "the diff
+ * was parsed and nothing changed". A caller that needs to distinguish the
+ * two must call parseDiffLineRangesChecked directly.
+ *
  * SCOPE (deliberate, fail-closed): only ordinary unified diff is supported.
  * A combined diff (`diff --cc`, the default `git diff` rendering of an
  * unresolved merge) is NOT parsed — its `@@@` headers and two-column body do
@@ -2649,13 +2658,14 @@ async function markContentFilteredFiles(
 	// and the file is silently skipped).
 
 	// CONSERVATIVE BY NECESSITY, NOT BY PREFERENCE. A record is enough to mark
-	// the file ALL_LINES_CHANGED, and two shapes lose a discount they could
-	// legitimately keep (round-19 finding, executed): an explicit `-filter`
-	// opt-out, and a bare `filter` (git reports `set`). Neither can be
+	// the file ALL_LINES_CHANGED, and THREE shapes lose a discount they could
+	// legitimately keep (round-19/20 findings, executed): an explicit `-filter`
+	// opt-out, a bare `filter` (git reports `set`), and a pass-through driver
+	// whose rendered diff is identical to the unfiltered one. None can be
 	// filtered out by value, because git permits and executes a driver
 	// literally named `unset` or `set`.
 	//
-	// TWO FURTHER SHAPES ARE CORRECTNESS-REQUIRED, NOT OVER-GATING. A
+	// TWO SHAPES ARE CORRECTNESS-REQUIRED, NOT OVER-GATING. A
 	// `filter=<driver>` with an effective `smudge` but no `clean` or
 	// `process` shifts coordinates exactly the way LFS does: git skips the clean
 	// step, so the committed blob is the source text while the scanner reads
@@ -2667,10 +2677,13 @@ async function markContentFilteredFiles(
 	// coordinates are in POINTER space (executed: a 10-line worktree file
 	// yields a 3-line HEAD blob and `@@ -2,2 +2,2 @@`).
 	//
-	// So only `-filter` and a bare `filter` are candidates for narrowing, and
-	// that needs effective-config detection first - a product decision, not a
-	// correctness fix. A driver with NEITHER an effective `clean`, `process` nor
-	// `smudge` is genuine pass-through (executed: `@@ -3 +3 @@` unchanged).
+	// So the narrowing candidates are `-filter`, a bare `filter`, and a
+	// pass-through driver, and narrowing ANY of them needs effective-config
+	// detection first - a product decision, not a correctness fix. A driver
+	// with NEITHER an effective `clean`, `process` nor `smudge` is that
+	// pass-through case (executed: `@@ -3 +3 @@` unchanged), which is why it
+	// belongs with the narrowing candidates above and not with the two
+	// correctness-required shapes.
 
 	const configured = new Set<string>();
 	// Chunk by ACCUMULATED ARGV LENGTH, not by path count. `runGit` uses

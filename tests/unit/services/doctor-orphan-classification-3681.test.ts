@@ -5,12 +5,15 @@
  * probe C8).
  *
  * Prior buggy behavior: the Orphaned Evidence check enumerated every
- * non-plan evidence bundle id, so the eight reserved fixed tool-evidence
+ * non-plan evidence bundle id, so the seven reserved fixed tool-evidence
  * writers (build, syntax_check, placeholder_scan, secretscan, sast_scan,
  * quality_budget, sbom_generate) plus the phase summaries bucket went ❌
  * with a misleading cleanup suggestion. The fix exempts exactly the
  * single-sourced predicates isInternalToolEvidenceId and
- * isPhaseSummariesId (`^phase-\d+-summaries$`).
+ * isPhaseSummariesId (`^phase-\d+-summaries$`). The count above is the
+ * enumerated membership of INTERNAL_TOOL_ID_REGEX (src/validation/task-id.ts)
+ * at the time this probe was written — that regex is the single source, so a
+ * later id added there makes this docstring stale rather than the check wrong.
  *
  * Non-vacuity (GREEN at base AND after the fix): a REAL unknown bundle
  * (9.9, not in the plan) stays enumerated, and the near-miss ids

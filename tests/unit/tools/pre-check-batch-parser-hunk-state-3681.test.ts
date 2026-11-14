@@ -32,7 +32,37 @@ import {
 	parseDiffLineRanges,
 } from '../../../src/tools/pre-check-batch.js';
 import type { SastScanFinding } from '../../../src/tools/sast-scan.js';
-import { canonicalMkdtemp, removeTreeWithRetry } from '../../helpers/tmpdir.js';
+import {
+	canonicalMkdtemp,
+	canonicalTmpDir,
+	removeTreeWithRetry,
+} from '../../helpers/tmpdir.js';
+
+// FB-014: the fixture must never inherit the host's global git config. A
+// `commit.gpgsign=true` with no reachable `gpg.program` fails every `git
+// commit` here (executed: 5/5 legs in pre-check-batch-git-config-shapes-3681d
+// and 1/1 in pre-check-batch-pathspec-literal-3681), and GitHub runners carry
+// no identity of their own by design. Pointing GIT_CONFIG_GLOBAL at an EMPTY
+// file isolates every global key — gpgsign, signing format, hooks, templates
+// — rather than patching the one key that was observed, and the local config
+// these fixtures set themselves still applies. The file lives in the OS temp
+// dir, NOT inside the repository: a stray file in the repo would change the
+// very `git status` / diff output these fixtures assert on, and `.git` is a
+// FILE rather than a directory in a submodule or linked worktree.
+const isolatedGlobalConfigPaths = new Map<string, string>();
+let isolatedGlobalConfigCounter = 0;
+function isolatedGlobalConfig(cwd: string): string {
+	const existing = isolatedGlobalConfigPaths.get(cwd);
+	if (existing !== undefined) return existing;
+	isolatedGlobalConfigCounter += 1;
+	const target = path.join(
+		canonicalTmpDir(),
+		`swarm-fixture-global-config-${process.pid}-${isolatedGlobalConfigCounter}`,
+	);
+	writeFileSync(target, '');
+	isolatedGlobalConfigPaths.set(cwd, target);
+	return target;
+}
 
 function git(cwd: string, ...args: string[]): void {
 	execFileSync('git', args, {
@@ -40,6 +70,11 @@ function git(cwd: string, ...args: string[]): void {
 		stdio: ['ignore', 'ignore', 'pipe'],
 		timeout: 10_000,
 		windowsHide: true,
+		env: {
+			...process.env,
+			GIT_CONFIG_NOSYSTEM: '1',
+			GIT_CONFIG_GLOBAL: isolatedGlobalConfig(cwd),
+		},
 	});
 }
 
