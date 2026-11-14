@@ -1847,6 +1847,10 @@ function parseDiffLineRangesChecked(
 		}
 		if (line.startsWith('copy to ') || line.startsWith('rename to ')) {
 			if (expectingDestination || destinationNeedsHunk) return null;
+			// Round-15 nit: the `--- `/`+++ ` branch requires a git file
+			// section in production mode; these lines are section content too,
+			// so the same requirement applies.
+			if (requireGitFileHeaders && !inGitFile) return null;
 			const prefix = line.startsWith('copy to ') ? 'copy to ' : 'rename to ';
 			const destination = normalizeDiffPath(line.slice(prefix.length));
 			if (destination === null) return null;
@@ -1962,11 +1966,30 @@ function parseDiffLineRangesChecked(
 			// the header itself could not be parsed unambiguously the pair is
 			// null and the check is skipped, because rejecting every diff
 			// with a space in a path would over-gate far more than it protects.
+			//
+			// There is deliberately NO exemption for a /dev/null destination:
+			// a `diff --git <file> /dev/null` header is a DELETED file, whose
+			// `+++ ` is legitimately `/dev/null` — so `currentFile` is null and
+			// the guard's own `currentFile !== null` already passes it through.
+			// An earlier cut exempted `gitFilePair.destination === '/dev/null'`
+			// instead, which inverted the intent and let
+			// `diff --git src/real.ts /dev/null` + `+++ src/phantom.ts` through
+			// (round-15 finding, executed: `{src/phantom.ts: [1]}`).
 			if (
 				currentFile !== null &&
 				gitFilePair !== null &&
-				gitFilePair.destination !== currentFile &&
-				gitFilePair.destination !== '/dev/null'
+				gitFilePair.destination !== currentFile
+			) {
+				return null;
+			}
+			// A rename/copy section names its destination on `rename to` /
+			// `copy to`; a `+++ ` that disagrees with it is the same phantom
+			// shape (round-15 reviewer question, executed: over-gating rather
+			// than fail-open, but the disagreement is still a malformed diff).
+			if (
+				currentFile !== null &&
+				copyRenameDestination !== null &&
+				copyRenameDestination !== currentFile
 			) {
 				return null;
 			}
@@ -2027,10 +2050,12 @@ function parseDiffLineRangesChecked(
 	) {
 		return null;
 	}
-	// A pure copy/rename section ends at EOF (or at the next `diff --git`)
-	// with its destination recorded but no hunk; commit it here so a copied
-	// file is gated rather than omitted.
-	if (copyRenameDestination !== null && copyRenameDestination !== 'pending') {
+	// A pure copy/rename section ends at EOF with its destination recorded but
+	// no hunk; commit it here so a copied file is gated rather than omitted.
+	// (The commit is already done eagerly on `copy to`/`rename to` — the next
+	// `diff --git` resets the section state — so this is the safety net for a
+	// diff that ends inside the section.)
+	if (copyRenameDestination !== null) {
 		result.set(copyRenameDestination, new Set([ALL_LINES_CHANGED]));
 		collectedLines += 1;
 	}
@@ -2406,7 +2431,6 @@ export async function getChangedLineRanges(
 	const filtered = await markContentFilteredFiles(
 		result,
 		directory,
-		requestedPathspecs,
 		abortSignal,
 	);
 	if (!filtered) {
@@ -2429,48 +2453,70 @@ export async function getChangedLineRanges(
 async function markContentFilteredFiles(
 	result: Map<string, Set<number>>,
 	directory: string,
-	requestedPathspecs: string[],
 	abortSignal?: AbortSignal,
 ): Promise<boolean> {
-	if (result.size === 0 || requestedPathspecs.length === 0) return true;
+	// The queried paths are the map's OWN keys, not the caller's
+	// `requestedFiles`: a caller may pass a directory (`files: ['src']`), which
+	// `git check-attr` reports as the directory itself rather than expanding,
+	// and may pass nothing at all (the default) — either way the changed files
+	// would never be queried and their filters never detected (round-15
+	// finding, executed: `[["src/app.ts",[2]]]` instead of `[-1]`).
+	if (result.size === 0) return true;
+	const queried = [...result.keys()];
+	if (queried.length === 0) return true;
 	const output = await runGit(
 		[
 			'-c',
 			'core.quotePath=false',
+			// `--all -z` rather than the `filter <attr>` form, for two reasons
+			// the round-15 gates found by execution:
+			//   1. `check-attr filter -- <path>` ALWAYS emits a record for every
+			//      queried path, with the value `unspecified` when nothing is
+			//      set — so "is the attribute present?" cannot be answered from
+			//      the record's existence. `--all` emits a record ONLY for
+			//      attributes that are actually set.
+			//   2. Git permits a driver literally named `unspecified`, `unset`
+			//      or `set` and EXECUTES it, so the value cannot be interpreted
+			//      as a sentinel either (a parametrized real-git probe showed
+			//      all three reserved names shift hunk coordinates exactly like
+			//      an ordinary driver).
+			// `-z` makes the records NUL-separated, which is also the only
+			// unambiguous form for a path containing a newline.
 			'check-attr',
-			'filter',
+			'--all',
+			'-z',
 			'--',
 			// PLAIN pathspecs, deliberately: `git check-attr` does not
 			// understand pathspec magic, so `:(literal)src/app.ts` is queried
-			// as the literal path `:(literal)src/app.ts` and reports
-			// `unspecified`. Plain pathspecs may glob-expand a bracket/brace
-			// filename to a sibling as well, which only ever widens the query
-			// — the requested file is still matched, so a configured filter on
-			// it is still detected.
-			...requestedPathspecs,
+			// as the literal path `:(literal)src/app.ts` and reports nothing.
+			// Plain pathspecs may glob-expand a bracket/brace filename to a
+			// sibling as well, which only ever widens the query — the requested
+			// file is still matched, so a configured filter on it is still
+			// detected.
+			...queried,
 		],
 		directory,
 		abortSignal,
 	);
 	if (output === null) return false;
-	// `git check-attr` emits one `<path>: filter: <value>` line per queried
-	// path. `unspecified`, `unset` and `set` are the "no driver" answers;
-	// anything else names a configured clean/process driver.
+	// `--all -z` emits repeating NUL-separated `<path> <attribute> <value>`
+	// triples. Select the `filter` records; any other attribute (including
+	// `diff`, whose textconv driver is already neutralized on the argv) is
+	// ignored.
 	const configured = new Set<string>();
-	for (const line of output.split(/\r?\n/)) {
-		if (line.length === 0) continue;
-		const match = /^(.+?): filter: (.+)$/.exec(line);
-		if (!match) return false;
-		const value = match[2].trim();
-		if (
-			value === '' ||
-			value === 'unspecified' ||
-			value === 'unset' ||
-			value === 'set'
-		) {
-			continue;
-		}
-		configured.add(normalizeRepoPathKey(match[1]));
+	const records = output.split('\0');
+	for (let index = 0; index + 2 < records.length; index += 3) {
+		const rawPath = records[index];
+		const attribute = records[index + 1];
+		if (attribute !== 'filter') continue;
+		if (rawPath.length === 0) continue;
+		// `core.quotePath=false` still leaves git quoting a path containing
+		// `"`, `\` or a control character, so the captured path may be a quoted
+		// form that must be decoded before it can match a map key (round-15
+		// finding, executed: `"a\"b.js"` keyed the map as `a"b.js`).
+		const decoded = decodeGitQuotedPath(rawPath);
+		if (decoded === null) continue;
+		configured.add(normalizeRepoPathKey(decoded));
 	}
 	if (configured.size === 0) return true;
 	for (const file of configured) {
