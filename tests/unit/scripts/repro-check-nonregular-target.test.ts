@@ -141,7 +141,7 @@ describe('repro-check.sh refuses a non-regular checkpoint.manifest', () => {
 
 describe('repro-check.sh opens manifest temp files without following links', () => {
 	test.skipIf(process.platform === 'win32')(
-		'checkpoint refuses a pre-existing temp symlink and preserves its target',
+		'checkpoint stages privately when the legacy temp name is a symlink',
 		() => {
 			const worktree = repo();
 			const base = git(worktree, 'rev-parse', 'HEAD');
@@ -172,8 +172,13 @@ describe('repro-check.sh opens manifest temp files without following links', () 
 				'--',
 				'subject.txt',
 			]);
-			expect(result.code).toBe(2);
-			expect(result.err).toContain('refusing non-regular target');
+			expect(result.code, result.err).toBe(0);
+			expect(fs.readFileSync(manifest, 'utf8')).toContain(
+				'# issue-tracer checkpoint manifest v2 rows=1',
+			);
+			expect(fs.lstatSync(`${manifest}.append.tmp`).isSymbolicLink()).toBe(
+				true,
+			);
 			expect(fs.readFileSync(target, 'utf8')).toBe('untouched\n');
 		},
 	);
