@@ -2649,19 +2649,28 @@ async function markContentFilteredFiles(
 	// and the file is silently skipped).
 
 	// CONSERVATIVE BY NECESSITY, NOT BY PREFERENCE. A record is enough to mark
-	// the file ALL_LINES_CHANGED, and three shapes lose a discount they could
+	// the file ALL_LINES_CHANGED, and two shapes lose a discount they could
 	// legitimately keep (round-19 finding, executed): an explicit `-filter`
-	// opt-out, a bare `filter` (git reports `set`), and a
-	// `filter=<driver>` with neither an effective `clean` nor `process`
-	// command. None of them can be filtered out by value, because git permits
-	// and executes a driver literally named `unset` or `set`.
-	// ACTIVE LFS IS NOT IN THAT SET: `filter.lfs.clean` replaces the
+	// opt-out, and a bare `filter` (git reports `set`). Neither can be
+	// filtered out by value, because git permits and executes a driver
+	// literally named `unset` or `set`.
+	//
+	// TWO FURTHER SHAPES ARE CORRECTNESS-REQUIRED, NOT OVER-GATING. A
+	// `filter=<driver>` with an effective `smudge` but no `clean` or
+	// `process` shifts coordinates exactly the way LFS does: git skips the clean
+	// step, so the committed blob is the source text while the scanner reads
+	// the SMUDGED worktree (executed: a 3-line committed blob against a
+	// 4-line worktree file, so a committed-new line 4 is outside the union).
+	// ACTIVE LFS IS THE SAME MECHANISM: `filter.lfs.clean` replaces the
 	// worktree content with a pointer, so the committed blob is a 3-line
 	// pointer while the scanner sees the expanded file and the diff
 	// coordinates are in POINTER space (executed: a 10-line worktree file
-	// yields a 3-line HEAD blob and `@@ -2,2 +2,2 @@`). Gating it is
-	// correctness-required, so narrowing is a product decision that needs
-	// effective-config detection first.
+	// yields a 3-line HEAD blob and `@@ -2,2 +2,2 @@`).
+	//
+	// So only `-filter` and a bare `filter` are candidates for narrowing, and
+	// that needs effective-config detection first - a product decision, not a
+	// correctness fix. A driver with NEITHER an effective `clean`, `process` nor
+	// `smudge` is genuine pass-through (executed: `@@ -3 +3 @@` unchanged).
 
 	const configured = new Set<string>();
 	// Chunk by ACCUMULATED ARGV LENGTH, not by path count. `runGit` uses
