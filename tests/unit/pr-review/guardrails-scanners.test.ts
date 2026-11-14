@@ -74,7 +74,7 @@ describe('guardrail scanners bite on synthetic anti-patterns (issue #2385)', () 
 	});
 
 	test('parallel-rule scanner flags the pre-#2385 inline circuit construction', () => {
-		// Verbatim shape of the removed pr-workflow-gate.ts:4916-4939 pattern.
+		// Verbatim shape of the removed pr-workflow-gate.ts pattern (the inline circuit-construction form; nearest current nextResilience assignment block: 7174-7192).
 		const hits = scanParallelCircuitRuleConstruction([
 			{
 				path: 'src/hooks/pr-workflow-gate.ts',

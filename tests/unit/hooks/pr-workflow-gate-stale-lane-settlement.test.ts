@@ -350,8 +350,8 @@ describe('abortPrWorkflow — regression: abort must always be reachable when la
 describe('completePrWorkflow — regression: stale lanes must not block completion (R2/W-4)', () => {
 	test('completion passes the open-lane predicate when the only lane is stale', async () => {
 		// Previous behaviour: `BLOCKED: PR_REVIEW completion has 1 unsettled PR
-		// workflow lane(s)` at pr-workflow-gate.ts:5187 and the identical block at
-		// :4484 (assertPrReviewTerminalReady). Completion legitimately fails later
+		// workflow lane(s)` at pr-workflow-gate.ts:14981 and the identical block at
+		// :13101 (assertPrReviewTerminalReady). Completion legitimately fails later
 		// on real coverage; what must NOT survive is the unsettled-lane refusal.
 		await writeRawState('stale-complete', {
 			mode: 'PR_REVIEW',

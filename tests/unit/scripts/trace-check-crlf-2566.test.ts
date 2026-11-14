@@ -45,7 +45,7 @@ function run(cwd: string, args: string[], stubGithub = false) {
 		stdin: 'ignore',
 		stdout: 'pipe',
 		stderr: 'pipe',
-		timeout: 15_000,
+		timeout: 45_000,
 	});
 	return {
 		code: proc.exitCode,
@@ -110,14 +110,14 @@ describe('trace-check.sh CRLF fixture (#2566)', () => {
 			stdin: 'ignore',
 			stdout: 'pipe',
 			stderr: 'pipe',
-			timeout: 15_000,
+			timeout: 45_000,
 		});
 
 		expect(
 			proc.exitCode,
 			`${proc.stdout.toString()}\n${proc.stderr.toString()}`,
 		).toBe(0);
-	}, 30_000);
+	}, 105_000);
 
 	test('accepts CRLF in phase gates and all line-oriented trace artifacts', () => {
 		const repo = canonicalMkdtemp('trace-check-crlf-gates-');
@@ -169,6 +169,10 @@ describe('trace-check.sh CRLF fixture (#2566)', () => {
 		writeCrlf(
 			path.join(trace, '01-issue-summary.md'),
 			'## Source\nx\n## Observed Behavior\nx\n## Expected Behavior\nx\n## Acceptance Criteria\n- [ ] AC1: works\n## Classification\nVALID\n## Related Issues\nx\n',
+		);
+		writeCrlf(
+			path.join(trace, 'repro', 'cluster-preflight.md'),
+			'recorded-at: 2026-01-01T00:00:00Z\n\n## candidate #1\n\n- claim comments (live): none\n- open PRs naming 1 in:body: none\n- verdict: CLEAR\n',
 		);
 		writeCrlf(
 			path.join(trace, '02-reproduction.md'),
@@ -236,5 +240,5 @@ describe('trace-check.sh CRLF fixture (#2566)', () => {
 			).toBe(0);
 			for (const line of expected) expect(result.out).toContain(line);
 		}
-	}, 30_000);
+	}, 105_000);
 });

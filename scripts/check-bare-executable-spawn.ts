@@ -34,7 +34,7 @@
  *      (deliberately NOT callee-restricted — see below).
  *
  * `sameStringArray(check.command, ['git', 'diff', '--check'])` at
- * `src/hooks/pr-workflow-gate.ts:3358` is excluded STRUCTURALLY: its callee
+ * `src/hooks/pr-workflow-gate.ts:9382` is excluded STRUCTURALLY: its callee
  * is not in the spawn family (forms 1/2), and it passes no object-literal
  * argument (form 3). No allowlist entry is needed or wanted.
  *
