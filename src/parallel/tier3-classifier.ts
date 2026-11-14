@@ -83,13 +83,16 @@ export function normalizeTier3Path(input: string): string | null {
 	const withSlashes = normalizeToForwardSlash(trimmed);
 	if (withSlashes.startsWith('/')) return null;
 	if (/^[A-Za-z]:/.test(withSlashes)) return null;
-	// Directory-shaped entry (trailing slash): final-critic round 1. At BASE
-	// the directory loop saw `src/security/` as the non-final `security`
-	// segment and classified it Tier 3; collapsing the empty final segment
-	// silently DOWNGRADED it (executed: base true -> head false, and the real
-	// consumer granted Turbo bypass). A files_touched entry names a FILE; a
-	// trailing slash is malformed input and fails CLOSED to Tier 3.
-	if (withSlashes.endsWith('/')) return null;
+	// Directory-shaped entry (trailing slash or terminal-dot spellings —
+	// final-critic rounds 1-2). At BASE the directory loop saw
+	// `src/security/` as the non-final `security` segment and classified it
+	// Tier 3; collapsing the empty/dot final segments silently DOWNGRADED it
+	// (executed: base true -> head false for `src/security/`, and round 2
+	// proved the same for `src/security/.` and `src/security/./.`, with the
+	// real consumer granting Turbo bypass). A files_touched entry names a
+	// FILE; a trailing slash or terminal dot(s) are malformed input and fail
+	// CLOSED to Tier 3.
+	if (/\/\.*$/.test(withSlashes)) return null;
 	const segments: string[] = [];
 	for (const segment of withSlashes.split('/')) {
 		if (segment === '' || segment === '.') continue;

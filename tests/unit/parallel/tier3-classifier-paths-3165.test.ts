@@ -76,10 +76,15 @@ describe('normalizeTier3Path fail-closed matrix (#3165 F-2)', () => {
 		'\\\\?\\C:\\repo\\src\\util\\format.ts',
 		// Directory-shaped (trailing-slash) entries — final-critic round 1:
 		// `src/security/` classified Tier 3 at BASE and must stay Tier 3; the
-		// same holds for the new guardrails/ and sandbox/ segments.
+		// same holds for the new guardrails/ and sandbox/ segments. Round 2:
+		// terminal-dot spellings (`/.`, `/./.`) are the SAME declaration and
+		// must fail closed identically.
 		'src/security/',
 		'src/sandbox/',
 		'src/hooks/guardrails/',
+		'src/security/.',
+		'src/security/./.',
+		'src/sandbox/.',
 	];
 	for (const input of unprovable) {
 		test(`normalizeTier3Path(${JSON.stringify(input)}) -> null (Tier 3)`, () => {
