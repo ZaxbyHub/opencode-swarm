@@ -106,6 +106,10 @@ describe('turboMayBypassTask', () => {
 			{ id: '5.10', files: ['\\\\server\\share\\src\\util\\format.ts'] }, // UNC
 			{ id: '5.11', files: ['\\src\\util\\format.ts'] }, // rooted backslash
 			{ id: '5.12', files: ['\\\\?\\C:\\repo\\src\\util\\format.ts'] }, // extended-length
+			// Directory-shaped entries (final-critic round 1): src/security/
+			// was Tier 3 at base and must never obtain the Turbo bypass.
+			{ id: '5.13', files: ['src/security/'] }, // trailing slash (dir)
+			{ id: '5.14', files: ['src/sandbox/'] }, // trailing slash (dir)
 		];
 		const plan = JSON.parse(
 			fs.readFileSync(path.join(directory, '.swarm', 'plan.json'), 'utf-8'),
