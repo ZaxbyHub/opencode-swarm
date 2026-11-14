@@ -71,6 +71,35 @@ pending-owner decision:
   filesystem `.git` marker check, and every spawn is bounded per AGENTS.md
   invariant 3 with the capture deadline honored.
 
+
+- **#3681 item 1 (rounds 13-14) — git-configuration output shapes.** The
+  strict parser is only as safe as the shape git actually renders, and four
+  repository-configuration families changed that shape without changing the
+  content. A text file marked `-diff` or `binary` in `.gitattributes` renders as
+  `Binary files X and Y differ` with no hunk at all, so the file never entered
+  the changed-line map and `classifySastFindings` treated the missing key as
+  PRE-EXISTING — a newly added dangerous line kept its discount; such a file
+  is now marked `ALL_LINES_CHANGED`, with its path normalized exactly as the
+  `+++ ` branch normalizes its own (a mixed-case path, a path containing
+  ` and `, and a path with a leading space each failed open before that). A
+  `diff.<driver>.textconv` filter and a `filter=<driver>` clean/process filter
+  both make git diff a TRANSFORMED representation while SAST scans the
+  worktree one, so hunk coordinates pointed at text the scanner never saw;
+  `--no-textconv` is now pinned beside `--no-ext-diff` on the three
+  patch-producing argv sites, and a bounded `git check-attr filter` leg marks
+  any changed file carrying a configured filter `ALL_LINES_CHANGED`. A copied
+  file under `diff.renames=copies` emits only `copy from`/`copy to` with no
+  hunk and its destination left the map entirely; it is now gated. And a
+  `+++ ` destination the `diff --git` header did not name, or a non-empty diff
+  containing no git file section at all, now fails closed instead of
+  producing an authoritative map.
+
+  Two pre-existing shapes in the same class are deliberately NOT closed here
+  and are filed as one collated follow-up: a nested independent project root
+  that carries `.opencode/` but no `.git` of its own still gets
+  repository-root-relative map keys while the classifier computes
+  project-directory-relative paths, and the parser still does not validate
+  the `diff --git` paths against `--- `/`+++ ` for every shape.
 ## Fix
 
 - `src/tools/pre-check-batch.ts` — strict hunk-body parser state machine;
