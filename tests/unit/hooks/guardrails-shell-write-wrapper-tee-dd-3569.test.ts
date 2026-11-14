@@ -229,10 +229,16 @@ describe('consumer union parity: wrapper + brace shapes (4.5 r4)', () => {
 		const ws = canonicalMkdtemp('wtd3569-r4-');
 		created.push(ws);
 		mkdirSync(path.join(ws, 'src'), { recursive: true });
+		// FB-014 (#3689 review round): the #3648 message-pin widening is
+		// scoped to the ONE shape whose denial class legitimately flipped
+		// (zero-operand `awk -i inplace` — now an interpreter eval denying
+		// with UNRESOLVED_TARGET; see the 804354df9 CI round-1 note in the
+		// PR body). The sed/tee legs keep their exact SCOPE_VIOLATION pin:
+		// widening them too would let a class regression on those shapes —
+		// which the awk change does not affect — pass silently.
 		for (const command of [
 			'env -C src sed -i {s/a/b/,../../outside} y',
 			'env -C src tee {a,../../esc}',
-			'env -C src awk -i inplace {1,../../outside}',
 		]) {
 			let threw: unknown = null;
 			try {
@@ -245,6 +251,24 @@ describe('consumer union parity: wrapper + brace shapes (4.5 r4)', () => {
 			}
 			expect((threw as Error)?.message).toContain('SCOPE_VIOLATION');
 		}
+		let awkThrew: unknown = null;
+		try {
+			evaluateScopeValidate(
+				{
+					command: 'env -C src awk -i inplace {1,../../outside}',
+					shell: 'posix',
+					scope_files: ['src/'],
+				},
+				ws,
+			);
+		} catch (error) {
+			awkThrew = error;
+		}
+		const awkMessage = (awkThrew as Error)?.message ?? '';
+		expect(
+			awkMessage.includes('SCOPE_VIOLATION') ||
+				awkMessage.includes('UNRESOLVED_TARGET'),
+		).toBe(true);
 	});
 	test('awk implicit program slot never consumes an expanding word (gate)', async () => {
 		const got = await gate('env -C src awk -i inplace {1,../../outside}');
