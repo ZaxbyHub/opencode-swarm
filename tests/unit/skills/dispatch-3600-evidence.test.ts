@@ -149,6 +149,15 @@ test('identity rebind updates active surfaces and rejects each stale projection'
 	expect(tree).toBe(baseTree);
 
 	const script = `${scripts}/rebind-identities.sh`;
+	const partial = `${trace}/06-critic-review.md`;
+	write(
+		partial,
+		read(partial).replace(
+			`reviewed-commit: ${base}`,
+			`reviewed-commit: ${head}`,
+		),
+	);
+	expect(run(script, '--slug', slug, '--check').code).not.toBe(0);
 	const rebound = run(script, '--slug', slug, '--reason', 'head-move');
 	expect(rebound.code, rebound.output).toBe(0);
 	const state = read(`${trace}/state.md`);
@@ -291,7 +300,41 @@ test('checkpoint emits a runner that copies all frozen inputs and replays each b
 	expect(read(`${trace}/repro/C1.base.log`)).toContain('base-gap-one');
 	expect(read(`${trace}/repro/C2.base.log`)).toContain('base-gap-two');
 	expect(read(`${trace}/repro/C3.base.log`)).toContain('retained');
+
+	const runner = `${trace}/repro/replay-base.sh`;
+	write(runner, read(runner).replace('bash driver-two.sh', 'bash missing.sh'));
+	const tampered = run(runner);
+	expect(tampered.code, tampered.output).not.toBe(0);
+	expect(tampered.output).toContain('stale generated checkpoint artifact');
 }, 90_000);
+
+test('a failed generation permits an identical checkpoint retry', () => {
+	const { base, checkpoint, read, run, write } = fixture();
+	const plan = `${trace}/05-fix-plan.md`;
+	write(plan, '## Test inventory\n## Test inventory\n');
+	write('driver.sh', 'echo red\n');
+	const failed = run(
+		`${scripts}/repro-check.sh`,
+		'checkpoint',
+		'--slug',
+		slug,
+		'--base',
+		base,
+		'--id',
+		'C1',
+		'--argv',
+		'bash driver.sh',
+		'--expect',
+		'base-gap',
+		'--',
+		'driver.sh',
+	);
+	expect(failed.code, failed.output).not.toBe(0);
+	expect(failed.output).toContain('duplicate test inventory headings');
+	write(plan, '# Fix plan\n');
+	checkpoint('C1', 'bash driver.sh', ['driver.sh']);
+	expect(read(`${trace}/repro/checkpoint.manifest`)).toContain('rows=1');
+}, 30_000);
 
 test('CHECK_WRONG amendment regenerates the current inventory without losing sibling checks or prose', () => {
 	const { checkpoint, git, read, write } = fixture();

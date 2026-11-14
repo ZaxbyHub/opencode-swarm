@@ -1,11 +1,11 @@
 import { afterEach, expect, mock, test } from 'bun:test';
-import { findByCorrelationId } from '../../../src/background/pending-delegations';
-import { createGuardrailsHooks } from '../../../src/hooks/guardrails';
 import {
-	ensureAgentSession,
-	getActiveWindow,
-	swarmState,
-} from '../../../src/state';
+	buildTypedDelegationTerminal,
+	claimTerminalResult,
+	findByCorrelationId,
+} from '../../../src/background/pending-delegations';
+import { createGuardrailsHooks } from '../../../src/hooks/guardrails';
+import { ensureAgentSession, swarmState } from '../../../src/state';
 import {
 	_internals,
 	_test_exports,
@@ -46,20 +46,24 @@ function readCoverage(
 	unsettled_coverage?: Array<{
 		lane_id: string;
 		dimension: string;
-		output_ref: string;
+		output_ref?: string;
 	}>;
 } {
 	return result;
 }
 
-async function collectCheckpoint({ stale = false, hostBudget = false } = {}) {
+async function collectCheckpoint({
+	hostBudget = true,
+	council = false,
+	empty = false,
+} = {}) {
 	const directory = makeTempDir();
 	const lane = `${batch}-lane`;
 	const session = `${batch}-session`;
 	await recordPending({
 		directory,
 		batchId: batch,
-		mode: 'swarm-pr-review:base',
+		mode: council ? 'swarm-pr-review:council' : 'swarm-pr-review:base',
 		workflowLane: dimension,
 		workspace: {
 			directory,
@@ -70,7 +74,7 @@ async function collectCheckpoint({ stale = false, hostBudget = false } = {}) {
 		},
 	});
 	const initial = findByCorrelationId(directory, session);
-	expect(initial).toBeDefined();
+	if (!initial) throw new Error('fixture delegation missing');
 	_internals.resolvePrWorkflowRevisionDigestAsync = async () => revision;
 	let now = 1_760_000_000_000;
 	_internals.now = () => now;
@@ -84,7 +88,7 @@ async function collectCheckpoint({ stale = false, hostBudget = false } = {}) {
 		lane_id: lane,
 		dimension,
 		pr_head_sha: head,
-		revision_digest: stale ? 'd'.repeat(64) : revision,
+		revision_digest: revision,
 	});
 	let terminal = false;
 	_internals.getSessionOps = () => ({
@@ -96,15 +100,16 @@ async function collectCheckpoint({ stale = false, hostBudget = false } = {}) {
 			},
 		})),
 		messages: mock(async () => ({
-			data: terminal
-				? [
-						assistantMessage(
-							hostBudget
-								? rows
-								: `SWARM_REVIEW_LANE_CHECKPOINT ${metadata}\n${rows}`,
-						),
-					]
-				: [],
+			data:
+				terminal && !empty
+					? [
+							assistantMessage(
+								hostBudget
+									? rows
+									: `SWARM_REVIEW_LANE_CHECKPOINT ${metadata}\n${rows}`,
+							),
+						]
+					: [],
 		})),
 	});
 
@@ -144,7 +149,22 @@ async function collectCheckpoint({ stale = false, hostBudget = false } = {}) {
 				{ args: { filePath: 'feature.ts' } },
 			),
 		).rejects.toThrow('Tool calls exhausted');
-		expect(getActiveWindow(session)?.reviewBudgetExhausted).toBe('tool_calls');
+		expect(
+			findByCorrelationId(directory, session)?.prReviewBudgetExhausted,
+		).toBe('tool_calls');
+		// A caller may still hold the pre-exhaustion snapshot. The store owns
+		// the ordering decision even when that caller proposes completion.
+		const staleCompletion = buildTypedDelegationTerminal(
+			initial,
+			'completed',
+			{ text: rows, chars: rows.length, truncated: false, digest: revision },
+			now,
+		);
+		expect(await claimTerminalResult(directory, session, staleCompletion)).toBe(
+			null,
+		);
+		swarmState.activeAgent.delete(session);
+		swarmState.agentSessions.delete(session);
 	}
 	const result = readCoverage(
 		await executeCollectLaneResults(
@@ -155,16 +175,25 @@ async function collectCheckpoint({ stale = false, hostBudget = false } = {}) {
 			directory,
 		),
 	);
-	if (hostBudget) swarmState.agentSessions.delete(session);
 	expect(abort).not.toHaveBeenCalled();
 	expect(result.success).toBe(false);
-	if (stale) {
+	if (!hostBudget) {
 		expect(result.unsettled_coverage).toBeUndefined();
 		return;
 	}
 	expect(result.unsettled_coverage).toEqual([
-		{ lane_id: lane, dimension, output_ref: expect.any(String) },
+		{
+			lane_id: lane,
+			dimension,
+			...(empty ? {} : { output_ref: expect.any(String) }),
+		},
 	]);
+	expect(result.all_settled).toBe(true);
+	const settled = findByCorrelationId(directory, session);
+	expect(settled?.status).toBe('error');
+	expect(settled?.result?.error).toBe('PR_REVIEW_BUDGET_EXHAUSTED');
+	expect(settled?.result?.prReviewResultReceipt).toBeUndefined();
+	if (empty) return;
 	const reference = result.unsettled_coverage?.[0]?.output_ref;
 	if (!reference) throw new Error('missing output reference');
 	const full = await retrieve_lane_output.execute(
@@ -183,14 +212,14 @@ async function collectCheckpoint({ stale = false, hostBudget = false } = {}) {
 	expect(full).toContain(rows);
 }
 
-test('collector retains a genuine lane-owned budget checkpoint without treating it as completed coverage', async () => {
+test('collector preserves a host-stopped lane’s partial rows after session teardown', async () => {
 	await collectCheckpoint();
 }, 30_000);
 
-test('collector rejects budget checkpoint evidence from a stale review revision', async () => {
-	await collectCheckpoint({ stale: true });
+test('collector ignores a model-authored budget marker even with matching dispatch identity', async () => {
+	await collectCheckpoint({ hostBudget: false });
 }, 30_000);
 
-test('collector preserves partial rows from a host-stopped lane without a model marker', async () => {
-	await collectCheckpoint({ hostBudget: true });
+test('collector reports a host-stopped council lane with no output reference', async () => {
+	await collectCheckpoint({ council: true, empty: true });
 }, 30_000);

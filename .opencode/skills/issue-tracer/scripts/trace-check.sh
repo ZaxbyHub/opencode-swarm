@@ -642,7 +642,7 @@ EOF
   # that repro-check refuses a header with no count; awk rather than a
   # `head | grep -q` pipeline so no SIGPIPE can decide the verdict, and the
   # END guard makes an empty manifest fail instead of vacuously passing.
-  trace_path_safe "$manifest_path" file && awk 'NR == 1 { sub(/\r$/, "", $0); if ($0 ~ /^# issue-tracer checkpoint manifest v1 rows=[0-9]+$/) exit 0; exit 1 } END { if (NR == 0) exit 1 }' "$manifest_path" && rule_ok checkpoint-manifest || { rule_bad checkpoint-manifest "missing or invalid"; return; }
+  trace_path_safe "$manifest_path" file && awk 'NR == 1 { sub(/\r$/, "", $0); if ($0 ~ /^# issue-tracer checkpoint manifest v[12] rows=[0-9]+$/) exit 0; exit 1 } END { if (NR == 0) exit 1 }' "$manifest_path" && rule_ok checkpoint-manifest || { rule_bad checkpoint-manifest "missing or invalid"; return; }
   # A checkpoint tree has one effective blob per path. Multiple acceptance
   # checks may share a path when they captured identical bytes; those rows can
   # be deduplicated while deriving the tree. Divergent effective blobs for one
@@ -838,6 +838,18 @@ phase4() {
     rule_bad acceptance-manifest-semantics "acceptance table semantics do not match checkpoint manifest"
   fi
   if bash "$script_dir/repro-check.sh" verify-checkpoint --slug "$slug" --trace-dir "$trace" >/dev/null 2>&1; then rule_ok checkpoint-verification; else rule_bad checkpoint-verification "verify-checkpoint failed"; fi
+  # Version 1 is the legacy manifest format. Version 2 commits to the
+  # generated artifacts through the manifest covered by the checkpoint anchor.
+  if IFS= read -r row < "$manifest" && [[ "${row%$'\r'}" =~ ^#\ issue-tracer\ checkpoint\ manifest\ v2\ rows=[0-9]+$ ]]; then
+    if bash "$script_dir/repro-check.sh" verify-generated --slug "$slug" --trace-dir "$trace"; then
+      rule_ok generated-checkpoint
+    else
+      rule_bad generated-checkpoint "generated replay or inventory does not match the checkpoint"
+    fi
+  elif [ -L "$trace/repro/replay-base.sh" ] ||
+    { [ -e "$trace/repro/replay-base.sh" ] && ! trace_path_safe "$trace/repro/replay-base.sh" file; }; then
+    rule_bad generated-checkpoint "unsafe legacy replay"
+  fi
   deferred_clean_count="$(normalize_terminal_cr "$file" | grep -A100 '^## Deferred-Work Scan$' | grep -c '^scan-deferred: clean' || true)"
   [ "${deferred_clean_count:-0}" -gt 0 ] && rule_ok deferred-work-scan || rule_bad deferred-work-scan "clean result missing"
 }
@@ -859,12 +871,16 @@ execution_receipts() {
         fi
       fi
       rule_bad receipts "$name: unverified execution receipt: $line"
-    done < <(normalize_terminal_cr "$trace/$name" | sed -n -e '/^- Evidence: /p' -e '/^- Disposition: /p')
+    done < <(normalize_terminal_cr "$trace/$name" | awk '
+      /^[[:space:]]*-[[:space:]]+([Ee]vidence|[Dd]isposition):/ { print; next }
+      /\[receipt / { print }
+    ')
   done
 }
 
 phase4_published_argv() {
-  local issue repo origin number
+  local issue repo origin number replay replay_head
+  local replay_args=()
   issue="$(state_value published-issue)"
   [ -n "$issue" ] || return 0
   if [[ ! "$issue" =~ ^https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/issues/([1-9][0-9]*)$ ]]; then
@@ -873,14 +889,23 @@ phase4_published_argv() {
   fi
   repo="${BASH_REMATCH[1]}"; number="${BASH_REMATCH[2]}"
   origin="$(git config --get remote.origin.url || true)"
-  case "${origin%.git}" in
+  repo="$(printf '%s' "$repo" | tr '[:upper:]' '[:lower:]')"
+  origin="$(printf '%s' "${origin%.git}" | tr '[:upper:]' '[:lower:]')"
+  case "$origin" in
     "https://github.com/$repo"|"git@github.com:$repo"|"ssh://git@github.com/$repo") ;;
     *) rule_bad published-argv "published issue repository differs from origin"; return ;;
   esac
+  replay="$trace/repro/published-replay.tsv"
+  if [ -e "$replay" ] || [ -L "$replay" ]; then
+    trace_path_safe "$replay" file || { rule_bad published-argv "unsafe published argv replay"; return; }
+    trace_path_safe "$trace/repro/checkpoint.manifest" file || { rule_bad published-argv "missing checkpoint manifest for published replay"; return; }
+    replay_head="$(git rev-parse HEAD)" || { rule_bad published-argv "unable to identify replay head"; return; }
+    replay_args=(--published-replay "$replay" --expected-head "$replay_head" --checkpoint-manifest "$trace/repro/checkpoint.manifest")
+  fi
   if (
     set -o pipefail
     bounded_gh_api 30 "repos/$repo/issues/$number" --jq '.body' |
-      bash "$script_dir/check-published-argv.sh" --reproduction "$trace/02-reproduction.md" --published-issue-body -
+      bash "$script_dir/check-published-argv.sh" --reproduction "$trace/02-reproduction.md" --published-issue-body - ${replay_args[@]+"${replay_args[@]}"}
   ); then
     rule_ok published-argv
   else
@@ -948,44 +973,79 @@ phase5() {
   esac
 }
 release_review() {
-  local release head tid file url failed_before repo pr review run remote origin remote_head
+  local release head tid file url failed_before repo pr review run remote origin squash live identity classification_filter filter
+  head="${1:-}"
+  squash="${2:-}"
   release="$(state_value release-bound)"
   case "$release" in
-    ''|no) return 0 ;;
-    yes) ;;
+    ''|no|yes) ;;
     *) rule_bad broad-review "invalid release-bound value"; return 1 ;;
   esac
-  head="$(git rev-parse HEAD)" || return 1
-  tid="$(tree_id)" || return 1
   file="$trace/10-pr-body.md"
+  if [ -z "$head" ] && [ "$release" != yes ] && [ ! -e "$file" ] && [ ! -L "$file" ]; then return 0; fi
   trace_path_safe "$file" file || { rule_bad broad-review "missing PR publication evidence"; return 1; }
+  url="$(normalize_terminal_cr "$file" | awk '/^PR URL: / { sub(/^PR URL: /, ""); print; n++ } END { if (n != 1) exit 1 }')" || url=""
+  if [ -z "$head" ] && [ -z "$url" ] && [ "$release" != yes ] &&
+     ! normalize_terminal_cr "$file" | grep '^PR URL:' >/dev/null; then return 0; fi
+  if [[ ! "$url" =~ ^https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/pull/([1-9][0-9]*)$ ]]; then
+    rule_bad broad-review "invalid published PR URL"; return 1
+  fi
+  repo="$(printf '%s' "${BASH_REMATCH[1]}" | tr '[:upper:]' '[:lower:]')"
+  pr="${url##*/}"
+  origin="$(git remote get-url origin 2>/dev/null)" || origin=""
+  origin="$(printf '%s' "${origin%.git}" | tr '[:upper:]' '[:lower:]')"
+  case "$origin" in
+    "https://github.com/$repo"|"git@github.com:$repo"|"ssh://git@github.com/$repo") ;;
+    *) rule_bad broad-review "published PR is outside the origin repository"; return 1 ;;
+  esac
+  if [ -n "$squash" ]; then
+    is_hex "$head" && is_hex "$squash" || { rule_bad broad-review "invalid recorded merge identity"; return 1; }
+    filter='.merged, .head.sha, .merge_commit_sha'
+    identity="$(printf 'true\n%s\n%s' "$head" "$squash")"
+  else
+    live="$(git rev-parse HEAD)" || return 1
+    if [ -n "$head" ] && [ "$head" != "$live" ]; then rule_bad broad-review "checkout differs from approved PR head"; return 1; fi
+    head="$live"
+    filter='.head.sha'
+    identity="$head"
+  fi
+  normalize_terminal_cr "$file" | awk -v head="$head" '/^PR head:/ { n++; if ($0 == "PR head: " head) match_count++ } END { exit !(n == 1 && match_count == 1) }' || { rule_bad broad-review "PR head does not match reviewed commit"; return 1; }
+  if [ "$release" != yes ]; then
+    classification_filter='if (.labels | type) != "array" or (.head.ref | type) != "string" then error("missing release classification") elif any(.labels[]; (.name | ascii_downcase) == "release-bound") or (.head.ref | startswith("release-please--")) then "yes" else "no" end'
+    filter="$filter, ($classification_filter)"
+  fi
+  live="$(bounded_gh_api 15 "repos/$repo/pulls/$pr" --jq "$filter" 2>/dev/null)" || live=""
+  if [ "$release" != yes ]; then
+    release="${live##*$'\n'}"
+    live="${live%$'\n'*}"
+    case "$release" in
+      no|yes) ;;
+      *) rule_bad broad-review "live PR release applicability could not be verified"; return 1 ;;
+    esac
+  fi
+  if [ "$live" != "$identity" ]; then
+    if [ -n "$squash" ]; then
+      rule_bad broad-review "live PR merge identity could not be verified"
+    else
+      rule_bad broad-review "live PR head could not be verified"
+    fi
+    return 1
+  fi
+  [ "$release" = yes ] || return 0
+  if [ -n "$squash" ]; then
+    tid="$(git rev-parse --verify "$head^{tree}")" || return 1
+  else
+    tid="$(tree_id)" || return 1
+  fi
   failed_before="$failed"
   state_gate final-critic APPROVE "$head" "$tid"
   artifact_identity_matches_gate "$trace/09-final-critic.md" final-critic "$head" "$tid"
   [ "$failed" = "$failed_before" ] || return 1
-  normalize_terminal_cr "$file" | awk -v head="$head" '$0 == "PR head: " head { n++ } END { exit n != 1 }' || { rule_bad broad-review "PR head does not match reviewed commit"; return 1; }
-  url="$(normalize_terminal_cr "$file" | awk '/^PR URL: / { sub(/^PR URL: /, ""); print; n++ } END { if (n != 1) exit 1 }')" || {
-    rule_bad broad-review "expected one published PR URL"; return 1;
-  }
-  if ! printf '%s\n' "$url" | grep -Eq '^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[1-9][0-9]*$'; then
-    rule_bad broad-review "invalid published PR URL"; return 1
-  fi
-  repo="${url#https://github.com/}"
-  pr="${repo##*/}"
-  repo="${repo%/pull/*}"
   file="$trace/10c-broad-review.md"
   if trace_path_safe "$file" file; then
     review="$(normalize_terminal_cr "$file" | awk '/^review-id: [1-9][0-9]*$/ { print $2; n++ } END { if (n != 1) exit 1 }')" || review=""
     run="$(normalize_terminal_cr "$file" | awk '/^run-id: [a-zA-Z0-9][a-zA-Z0-9._-]*$/ && length($2) <= 128 { print $2; n++ } END { if (n != 1) exit 1 }')" || run=""
     if [ -n "$review" ] && [ -n "$run" ]; then
-      origin="$(git remote get-url origin 2>/dev/null)" || origin=""
-      origin="${origin%.git}"
-      case "$origin" in
-        "https://github.com/$repo"|"git@github.com:$repo") ;;
-        *) rule_bad broad-review "published PR is outside the origin repository"; return 1 ;;
-      esac
-      remote_head="$(bounded_gh_api 15 "repos/$repo/pulls/$pr" --jq '.head.sha' 2>/dev/null)" || remote_head=""
-      [ "$remote_head" = "$head" ] || { rule_bad broad-review "live PR head could not be verified"; return 1; }
       remote="$(bounded_gh_api 15 "repos/$repo/pulls/$pr/reviews/$review" --jq 'select(.state == "COMMENTED" and (.author_association == "OWNER" or .author_association == "MEMBER" or .author_association == "COLLABORATOR")) | .commit_id, .body' 2>/dev/null)" || remote=""
       if [ "${remote%%$'\n'*}" = "$head" ] && printf '%s\n' "$remote" | awk -v run="$run" -v head="$head" '
         $0 == "PR review submission for run " run " at head " head ". Report verdict: COMMENT." { identity++ }
@@ -1002,7 +1062,9 @@ release_review() {
       fi
     fi
   fi
-  printf 'release-review-action-v1 head=%s command=/swarm pr-review %s\n' "$head" "$url"
+  if [ -z "$squash" ]; then
+    printf 'release-review-action-v1 head=%s command=/swarm pr-review %s --release-head %s\n' "$head" "$url" "$head"
+  fi
   rule_bad broad-review "native broad review must complete before merge"
   return 1
 }
@@ -1017,9 +1079,14 @@ merge_check() {
   state_gate merge-approval RECORDED "" ""
   if [ "$(state_value merge)" = MERGED ]; then
     squash="$(normalize_terminal_cr "$file" | awk '/^## Merge commit SHA$/ { getline; print; n++ } END { if (n != 1) exit 1 }')" || squash=""
-    if merge_identity "$(state_value base-sha)" "$pr" "$squash"; then rule_ok stable-patch-id; else rule_bad stable-patch-id "reviewed head and squash could not be matched"; fi
+    if merge_identity "$(state_value base-sha)" "$pr" "$squash"; then
+      rule_ok stable-patch-id
+      release_review "$pr" "$squash" || { [ "$failed" -ne 0 ] || rule_bad broad-review "unable to verify native review"; }
+    else
+      rule_bad stable-patch-id "reviewed head and squash could not be matched"
+    fi
   else
-    release_review || { [ "$failed" -ne 0 ] || rule_bad broad-review "unable to verify native review"; }
+    release_review "$pr" || { [ "$failed" -ne 0 ] || rule_bad broad-review "unable to verify native review"; }
   fi
   echo 'NOTE: human-enforced gate; this validator checks presence and binding only'
 }

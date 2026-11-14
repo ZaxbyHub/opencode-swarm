@@ -53,6 +53,13 @@ test('merged trace binds the reviewed patch to the squash parent and detects div
 		'upstream advances',
 	);
 	const squash = commit('subject.txt', 'new\n', 'equivalent squash');
+	git(
+		root,
+		'remote',
+		'add',
+		'origin',
+		'https://github.com/example/fixture.git',
+	);
 	git(root, 'switch', '-qc', 'divergent', squashParent);
 	const wrongSquash = commit('subject.txt', 'different\n', 'different squash');
 
@@ -90,12 +97,20 @@ test('merged trace binds the reviewed patch to the squash parent and detects div
 		path.join(trace, '10-pr-body.md'),
 		[
 			`PR head: ${head}`,
+			'PR URL: https://github.com/example/fixture/pull/42',
 			'## Acceptance Criteria -> Evidence',
 			'fixture',
 			'## Waivers (or none)',
 			'none',
 			'',
 		].join('\n'),
+	);
+	fs.writeFileSync(
+		path.join(root, 'gh'),
+		'#!/usr/bin/env bash\n' +
+			'[[ "$2" = repos/example/fixture/pulls/42 && "$4" = *merge_commit_sha* && "$4" = *classification* ]] || exit 9\n' +
+			`printf '%s\\n' true '${head}' '${squash}' no\n`,
+		{ mode: 0o755 },
 	);
 
 	function validate(mergeCommit: string) {
@@ -117,7 +132,16 @@ test('merged trace binds the reviewed patch to the squash parent and detects div
 			].join('\n'),
 		);
 		const result = Bun.spawnSync({
-			cmd: bashCommand(script, 'merge', '--slug', slug),
+			cmd: [
+				bashCommand(script)[0],
+				'-c',
+				'export PATH="$PWD:/usr/bin:/bin:$PATH"; [ "$(command -v gh)" = "$PWD/gh" ] || exit 19; exec bash "$@"',
+				'bash',
+				script,
+				'merge',
+				'--slug',
+				slug,
+			],
 			cwd: root,
 			stdin: 'ignore',
 			stdout: 'pipe',

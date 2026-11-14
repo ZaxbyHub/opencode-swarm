@@ -14,7 +14,7 @@ const sha = /^[0-9a-f]{40}$/;
 function replaceLine(content, key, before, after, file) {
 	const lines = content.split(/\r?\n/);
 	const matching = lines.map((line, index) => line.startsWith(key) ? index : -1).filter((index) => index >= 0);
-	if (matching.length !== 1 || lines[matching[0]] !== key + before) {
+	if (matching.length !== 1 || ![key + before, key + after].includes(lines[matching[0]])) {
 		throw new Error(`${file}: inconsistent ${key.trim()}`);
 	}
 	lines[matching[0]] = key + after;
@@ -22,6 +22,9 @@ function replaceLine(content, key, before, after, file) {
 }
 
 try {
+	if (!sha.test(head ?? '') || !sha.test(tree ?? '')) {
+		throw new Error('expected 40-hex head and tree identities');
+	}
 	const [slugFlag, slug, mode, reason] = args;
 	const check = mode === '--check';
 	if (slugFlag !== '--slug' || !/^[a-z0-9-]+$/.test(slug) ||
@@ -79,6 +82,8 @@ try {
 				writeFileSync(temp, content, { flag: 'wx' });
 				staged.push([temp, target]);
 			}
+			// Commit the ledger last. If interrupted, the same transition accepts
+			// each artifact already at the destination or still at the old head.
 			for (const [temp, target] of staged) renameSync(temp, target);
 		} finally {
 			for (const [temp] of staged) {

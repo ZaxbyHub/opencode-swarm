@@ -400,7 +400,7 @@ Written when CI rounds occur after publication: one entry per round with the fai
 
 ## `repro/` layout
 
-Lives inside the trace directory (git-excluded, never committed): `checkpoint.manifest` (rows are appended, never edited - a frozen `(path, check-id)` pair is superseded only by a recorded `AMEND` row, while distinct check ids may share a path only when they capture identical current bytes; divergent effective blobs for one path fail closed, and both the header's recorded row count and `seq` continuity are validated on every read and write; header `# issue-tracer checkpoint manifest v1 rows=<N>`, restamped with the row and seeded by `trace-init.sh` as `rows=0`, and see `references/acceptance-checks.md` for what that does and does not guarantee) plus `<check-id>.base.log` and `<check-id>.head.log` per executable check, written by `repro-check.sh run`.
+The git-excluded trace directory stores `checkpoint.manifest` and each executable check's `<check-id>.base.log` and `<check-id>.head.log`. The manifest is seeded by `trace-init.sh` with a v1 header declaring `rows=0`. A successful checkpoint publishes a v2 header and appends the new rows. A frozen `(path, check-id)` pair is superseded only by an `AMEND` row. Distinct check ids may share a path when they capture identical current bytes. Validation checks the header's recorded row count and `seq` continuity. Phase 4 verifies generated replay evidence for v2 manifests. See `references/acceptance-checks.md`.
 
 ## OBE subset
 
@@ -412,7 +412,9 @@ See `references/full-resolution-contract.md` for this section - kept there as th
 
 ## Native release review
 
-For release-bound work, record `release-bound: yes` in the trace and the published `PR URL:` in `10-pr-body.md`. Run `trace-check.sh release-review --slug <slug>` before seeking merge approval. On `release-review-action-v1`, call `swarm_command` with `command: "pr-review"` and `args: [<PR URL>, "--release-head", <exact head>]`. Follow the returned mode signal. A matching active review resumes. After an APPROVE with complete coverage, call `pr_review_submission` for the completed run. Record the returned review ID and run ID as `review-id:` and `run-id:` in `10c-broad-review.md` when `native_release_receipt` is true, then rerun the release check. An incomplete or blocking review keeps merge admission closed.
+Record the published `PR URL:` and exact `PR head:` in `10-pr-body.md` before merge admission. This applies to ordinary PRs too, since the merge check reads release applicability from the same GitHub response used to verify PR identity. Mark release-bound PRs with the GitHub `release-bound` label and record `release-bound: yes` in the trace. GitHub's release label and release-please branch identity require review even when a trace omits the marker or says `no`. A positive trace marker can also require review.
+
+Run `bash .opencode/skills/issue-tracer/scripts/trace-check.sh release-review --slug <slug>` from the repository root before seeking merge approval. The `release-review-action-v1` command includes the PR URL and exact head. For `swarm_command`, pass `command: "pr-review"` and `args: [<PR URL>, "--release-head", <exact head>]`. A matching active review resumes. After an APPROVE with complete coverage, call `pr_review_submission` for the completed run. Record `review-id:` and `run-id:` in `10c-broad-review.md` when `native_release_receipt` is true. Rerun the release check. An incomplete or blocking review keeps merge admission closed. After a squash merge, retain this evidence so reconciliation can verify the recorded PR head and the live GitHub merge identity.
 
 ## Trace evidence integrity
 
@@ -450,5 +452,6 @@ Pin vendored copies with a manifest of upstream revision, paths, and content has
 
 ### Trace validation commands
 - Attach committed output or edit evidence to an `- Evidence:` or `- Disposition:` assertion using `[receipt <commit>:<path> blob=<blob>]`. Run `trace-check.sh receipts --slug <slug>` to verify the bindings.
-- For a same-tree metadata commit, use `rebind-identities.sh --slug <slug> --reason <reason>` to update the active identities, then run it with `--check`. A changed tree requires fresh review.
+- For an edit that relies on an exact literal, use `node .opencode/skills/issue-tracer/scripts/apply-edit.mjs --file PATH --find TEXT --replace TEXT --count N` with the expected number of matches. Record the resulting edit evidence after committing it.
+- For a same-tree metadata commit, use `bash .opencode/skills/issue-tracer/scripts/rebind-identities.sh --slug <slug> --reason <reason>` to update the active identities, then run it with `--check`. A changed tree requires fresh review.
 - After a squash merge, capture the output of `trace-check.sh merge-identity <base-sha> <reviewed-head-sha> <squash-sha>` in the trace. The command verifies the squash parent and stable patch ID.

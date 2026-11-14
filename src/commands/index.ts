@@ -391,7 +391,7 @@ async function buildSwarmCommandPrompt(args: {
 	const isV1ToolCommand =
 		SWARM_COMMAND_TOOL_ALLOWLIST.has(canonicalKey) &&
 		(canonicalKey !== 'pr-review' ||
-			typedResolved.remainingArgs[1] === '--release-head');
+			typedResolved.remainingArgs.includes('--release-head'));
 	const canUseTool = agentHasSwarmCommandTool(
 		activeAgentName,
 		agents,

@@ -63,7 +63,9 @@ interface SubmissionFailure {
 		| 'nothing-new'
 		| 'gh-not-found'
 		| 'transport-failed'
-		| 'payload-write-failed';
+		| 'payload-write-failed'
+		| 'native-receipt-write-failed'
+		| 'native-receipt-ambiguous';
 	message: string;
 }
 
@@ -383,13 +385,24 @@ async function fetchExistingCommentBodies(
 	directory: string,
 	repoSlug: string,
 	prNumber: number,
-): Promise<{ bodies: string[] } | { refusal: string }> {
+	recovering: boolean,
+): Promise<
+	{ bodies: string[]; reviews: Record<string, unknown>[] } | { refusal: string }
+> {
 	const endpoints = [
 		`repos/${repoSlug}/pulls/${prNumber}/comments?per_page=100`,
 		`repos/${repoSlug}/pulls/${prNumber}/reviews?per_page=100`,
 	];
 	const bodies: string[] = [];
+	const reviews: Record<string, unknown>[] = [];
+	// GitHub lists reviews chronologically. A prior submission can be beyond
+	// the first page, and recovery needs a unique match across the review list.
+	// Bound pagination and refuse to post when the lookup cannot be completed.
+	const reviewPageSize = 100;
+	const maxReviewPages = 10;
+	let reviewPage = 1;
 	for (const endpoint of endpoints) {
+		const isReviews = endpoint.includes('/reviews?');
 		const run: ExternalToolRunResult = await _internals.runExternalTool({
 			executable,
 			args: ['api', endpoint],
@@ -440,17 +453,42 @@ async function fetchExistingCommentBodies(
 		try {
 			parsed = JSON.parse(run.stdout) as unknown;
 		} catch {
+			parsed = null;
+		}
+		if (!Array.isArray(parsed)) {
+			if (isReviews && recovering) {
+				return {
+					refusal: failure(
+						'transport-failed',
+						'Unable to read a complete review listing for submission dedupe.',
+						true,
+					),
+				};
+			}
 			continue;
 		}
-		if (!Array.isArray(parsed)) continue;
 		for (const entry of parsed) {
 			const record = asRecord(entry);
+			if (record && isReviews) reviews.push(record);
 			if (typeof record?.body === 'string' && record.body !== '') {
 				bodies.push(record.body);
 			}
 		}
+		if (isReviews && recovering && parsed.length >= reviewPageSize) {
+			if (reviewPage === maxReviewPages) {
+				return {
+					refusal: failure(
+						'transport-failed',
+						'Review listing exceeded the submission dedupe page limit.',
+						true,
+					),
+				};
+			}
+			reviewPage++;
+			endpoints.push(endpoints[1] + '&page=' + reviewPage);
+		}
 	}
-	return { bodies };
+	return { bodies, reviews };
 }
 
 export const _internals: {
@@ -738,18 +776,157 @@ export async function executePrReviewSubmission(
 		);
 	}
 
-	// Step f — existing-comments fetch (dedupe context), strictly BEFORE the
-	// POST. Failure refuses rather than risking duplicate posts.
+	async function persistNativeReceipt(
+		reviewId: unknown,
+		body: string,
+	): Promise<'written' | 'write-failed' | 'inapplicable'> {
+		if (
+			event === 'COMMENT' &&
+			coverage.kind === 'FULL' &&
+			typeof reviewId === 'number' &&
+			Number.isSafeInteger(reviewId) &&
+			reviewId > 0
+		) {
+			try {
+				const completion = asRecord(
+					readJsonFile(
+						validateSwarmPath(
+							directory,
+							path.join('pr-review', runId, 'native-completion.json'),
+						),
+					),
+				);
+				if (
+					completion?.run_id === runId &&
+					completion.head === headSha &&
+					typeof completion.url === 'string' &&
+					completion.url.toLowerCase() ===
+						`https://github.com/${repoSlug}/pull/${prNumber}`.toLowerCase() &&
+					completion.session_id === sessionID &&
+					completion.coverage === 'COMPLETE' &&
+					completion.verdict === 'APPROVE'
+				) {
+					try {
+						await atomicWriteSwarmFile(
+							validateSwarmPath(
+								directory,
+								path.join('pr-review', runId, 'native-submission.json'),
+							),
+							JSON.stringify({
+								run_id: runId,
+								head: headSha,
+								repo: repoSlug.toLowerCase(),
+								pr: prNumber,
+								review_id: reviewId,
+								body_sha256: createHash('sha256')
+									.update(body.trimEnd())
+									.digest('hex'),
+							}) + '\n',
+						);
+					} catch {
+						return 'write-failed';
+					}
+					return 'written';
+				}
+			} catch {
+				// Publication already succeeded. Missing evidence keeps release admission closed.
+			}
+		}
+		return 'inapplicable';
+	}
+
+	let previous: Record<string, unknown> | null = null;
+	if (event === 'COMMENT' && coverage.kind === 'FULL') {
+		try {
+			previous = asRecord(readJsonFile(payloadArtifactPath(directory, runId)));
+		} catch {
+			// Ordinary submissions may have no saved payload to reconcile.
+		}
+	}
+	const priorBody = previous?.body;
+
+	// Obtain dedupe context before posting to avoid repeating the review.
 	const existing = await fetchExistingCommentBodies(
 		executable,
 		directory,
 		repoSlug,
 		prNumber,
+		typeof priorBody === 'string',
 	);
 	if ('refusal' in existing) return existing.refusal;
 	rendererInput.existingComments = existing.bodies;
 
 	const rendered = renderPrReviewSubmissionBody(rendererInput);
+	// Reconcile only the exact prior payload with a unique existing review.
+	// Rendering after dedupe can change the body and must not sign a different review.
+	if (
+		previous?.commit_id === headSha &&
+		previous.event === event &&
+		typeof priorBody === 'string' &&
+		priorBody.startsWith(
+			'PR review submission for run ' +
+				runId +
+				' at head ' +
+				headSha +
+				'. Report verdict: COMMENT.\n',
+		) &&
+		priorBody
+			.split('\n')
+			.filter((line) => line.startsWith('- Coverage kind: '))
+			.join('') === '- Coverage kind: FULL'
+	) {
+		const matches = existing.reviews.filter(
+			(entry) =>
+				entry.commit_id === headSha &&
+				entry.state === 'COMMENTED' &&
+				typeof entry.body === 'string' &&
+				entry.body.trimEnd() === priorBody.trimEnd() &&
+				['OWNER', 'MEMBER', 'COLLABORATOR'].some(
+					(association) => association === entry.author_association,
+				),
+		);
+		if (matches.length > 1) {
+			return failure(
+				'native-receipt-ambiguous',
+				'Multiple existing reviews match the saved submission. Resolve the ambiguity before retrying native receipt recovery.',
+				true,
+			);
+		}
+		const match = matches[0];
+		const recovery = match
+			? await persistNativeReceipt(match.id, priorBody)
+			: 'inapplicable';
+		if (recovery === 'write-failed') {
+			return failure(
+				'native-receipt-write-failed',
+				'The matching review is already posted, but its native submission receipt could not be written. Retry receipt recovery after restoring local write access.',
+				true,
+			);
+		}
+		if (match) {
+			return JSON.stringify(
+				{
+					success: true,
+					run_id: runId,
+					pr_head_sha: headSha,
+					event,
+					inline_comment_count: 0,
+					skipped_as_posted: rendered.skippedAsPosted.length,
+					truncated_inline_comments: rendered.truncatedInlineComments,
+					dismissed_findings: rendered.dismissedCount,
+					body_truncated: rendered.bodyTruncated,
+					coverage_kind: coverage.kind,
+					native_release_receipt: recovery === 'written',
+					posted_review_id: match.id,
+					review_url:
+						typeof match.html_url === 'string' ? match.html_url : null,
+				},
+				null,
+				2,
+			);
+		}
+	}
+
 	if (
 		rendered.inlineComments.length === 0 &&
 		rendererInput.findings.length > 0 &&
@@ -847,55 +1024,8 @@ export async function executePrReviewSubmission(
 		// A non-JSON success body still means the review was created; surface
 		// the raw first line instead of the parsed fields.
 	}
-	let nativeReceipt = false;
-	if (
-		event === 'COMMENT' &&
-		coverage.kind === 'FULL' &&
-		typeof review.id === 'number' &&
-		Number.isSafeInteger(review.id) &&
-		review.id > 0
-	) {
-		try {
-			const completion = asRecord(
-				readJsonFile(
-					validateSwarmPath(
-						directory,
-						path.join('pr-review', runId, 'native-completion.json'),
-					),
-				),
-			);
-			if (
-				completion?.run_id === runId &&
-				completion.head === headSha &&
-				typeof completion.url === 'string' &&
-				completion.url.toLowerCase() ===
-					`https://github.com/${repoSlug}/pull/${prNumber}`.toLowerCase() &&
-				completion.session_id === sessionID &&
-				completion.coverage === 'COMPLETE' &&
-				completion.verdict === 'APPROVE'
-			) {
-				await atomicWriteSwarmFile(
-					validateSwarmPath(
-						directory,
-						path.join('pr-review', runId, 'native-submission.json'),
-					),
-					JSON.stringify({
-						run_id: runId,
-						head: headSha,
-						repo: repoSlug,
-						pr: prNumber,
-						review_id: review.id,
-						body_sha256: createHash('sha256')
-							.update(rendered.body.trimEnd())
-							.digest('hex'),
-					}) + '\n',
-				);
-				nativeReceipt = true;
-			}
-		} catch {
-			// Publication already succeeded. Missing evidence keeps release admission closed.
-		}
-	}
+	const nativeReceipt =
+		(await persistNativeReceipt(review.id, rendered.body)) === 'written';
 	return JSON.stringify(
 		{
 			success: true,

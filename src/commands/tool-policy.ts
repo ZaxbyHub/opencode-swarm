@@ -8,6 +8,7 @@ import { canonicalCommandKey } from './command-dispatch.js';
 import {
 	COMMAND_REGISTRY,
 	type CommandEntry,
+	parseReleaseReviewArgs,
 	VALID_COMMANDS,
 } from './registry.js';
 import { parseReportArgs } from './report.js';
@@ -166,12 +167,7 @@ export function classifySwarmCommandToolUse(
 	}
 
 	if (canonicalKey === 'pr-review') {
-		return args.length === 3 &&
-			/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/[1-9][0-9]*$/.test(
-				args[0] ?? '',
-			) &&
-			args[1] === '--release-head' &&
-			/^[a-f0-9]{40}$/.test(args[2] ?? '')
+		return parseReleaseReviewArgs(args)
 			? { allowed: true }
 			: {
 					allowed: false,

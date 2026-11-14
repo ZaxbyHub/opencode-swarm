@@ -32,6 +32,13 @@ test('compares the fetched receipt bytes and reports a divergent digest', () => 
 	const root = canonicalMkdtemp('published-anchor-3576-');
 	roots.push(root);
 	git(root, 'init', '-q', '-b', 'main');
+	git(
+		root,
+		'remote',
+		'add',
+		'origin',
+		'https://github.com/Example/Project.git',
+	);
 	git(root, 'config', 'user.email', 'trace@example.invalid');
 	git(root, 'config', 'user.name', 'Trace fixture');
 	fs.writeFileSync(
@@ -60,7 +67,7 @@ test('compares the fetched receipt bytes and reports a divergent digest', () => 
 			'test "$1" = api',
 			'test "$2" = repos/example/project/issues/comments/12345',
 			'test "$3" = --jq',
-			'test "$4" = .body',
+			'test "$4" = ".issue_url, .body"',
 			'printf "called\\n" >> fixture-gh.calls',
 			'cat fixture-comment.md',
 			'',
@@ -104,6 +111,7 @@ test('compares the fetched receipt bytes and reports a divergent digest', () => 
 		[
 			`# Trace State: ${slug}`,
 			'protocol: 3.0.0',
+			'published-issue: https://github.com/example/project/issues/3576',
 			`checkpoint-tree-id: ${git(root, 'rev-parse', 'HEAD^{tree}')}`,
 			'',
 		].join('\n'),
@@ -138,15 +146,21 @@ test('compares the fetched receipt bytes and reports a divergent digest', () => 
 		'https://github.com/example/project/issues/3576#issuecomment-12345',
 	];
 
-	fs.writeFileSync(comment, `${receipt}\n`);
+	const issue = 'https://api.github.com/repos/example/project/issues/3576';
+	fs.writeFileSync(comment, `${issue}\n${receipt}\n`);
 	const matching = run(...args);
 	expect(matching.code, matching.diagnostic).toBe(0);
 	expect(fs.readFileSync(calls, 'utf8')).toBe('called\n');
 
-	fs.writeFileSync(comment, `${changedReceipt}\n`);
+	fs.writeFileSync(comment, `${issue}\n${changedReceipt}\n`);
 	const mismatch = run(...args);
 	expect(mismatch.code, mismatch.diagnostic).not.toBe(0);
-	expect(mismatch.diagnostic).toContain(manifest);
-	expect(mismatch.diagnostic).toContain(wrongManifest);
+	expect(mismatch.diagnostic).toContain('published receipt differs');
+	expect(mismatch.diagnostic).not.toContain(wrongManifest);
 	expect(fs.readFileSync(calls, 'utf8')).toBe('called\ncalled\n');
+
+	fs.writeFileSync(comment, `${issue.replace('/3576', '/1')}\n${receipt}\n`);
+	const wrongIssue = run(...args);
+	expect(wrongIssue.code).not.toBe(0);
+	expect(wrongIssue.diagnostic).toContain('different issue');
 }, 30_000);

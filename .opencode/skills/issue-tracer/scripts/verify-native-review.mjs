@@ -24,7 +24,8 @@ try {
 	}
 	const body = Buffer.concat(chunks).toString('utf8').trimEnd();
 	const digest = createHash('sha256').update(body).digest('hex');
-	if (receipt.run_id !== run || receipt.head !== head || receipt.repo !== repo ||
+	if (receipt.run_id !== run || receipt.head !== head || typeof receipt.repo !== 'string' ||
+		receipt.repo.toLowerCase() !== repo.toLowerCase() ||
 		receipt.pr !== Number(pr) || receipt.review_id !== Number(review) || receipt.body_sha256 !== digest) process.exit(1);
 } catch {
 	process.exit(1);

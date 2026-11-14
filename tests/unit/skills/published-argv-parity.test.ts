@@ -32,6 +32,8 @@ test('published argv parity — reports every divergent acceptance command (#362
 				'- [ ] AC3: Preserved behavior.',
 				'  - class: PRESERVING',
 				'  - argv: bash same.sh',
+				'- [ ] AC4: Executable criterion relabeled as documentation.',
+				'  - class: NON-EXECUTABLE(DOCS_ONLY)',
 				'',
 			].join('\n'),
 		);
@@ -44,6 +46,7 @@ test('published argv parity — reports every divergent acceptance command (#362
 				`| AC1 | NEW-SURFACE | C1 | ${traced[0]} | missing | ERROR | GREEN | evidence |`,
 				`| AC2 | NEW-SURFACE | C2 | ${traced[1]} | missing | ERROR | GREEN | evidence |`,
 				'| AC3 | PRESERVING | C3 | bash same.sh | - | GREEN | GREEN | evidence |',
+				'| AC4 | DISCRIMINATING | C4 | bash other.sh | missing | RED | GREEN | evidence |',
 				'',
 			].join('\n'),
 		);
@@ -75,6 +78,7 @@ test('published argv parity — reports every divergent acceptance command (#362
 			expect(diagnostic, output).toContain(traced[index]);
 		}
 		expect(fs.existsSync(path.join(root, 'sentinel'))).toBe(false);
+		expect(output).toContain('AC4 published classification differs from trace');
 	} finally {
 		safeRmRecursive(root);
 	}

@@ -77,6 +77,16 @@ test('published argv parity — identifies proven false-green but not an unchang
 		const issue = path.join(root, 'issue.md');
 		const reproduction = path.join(root, '02-reproduction.md');
 		const replay = path.join(root, 'published-replay.tsv');
+		const manifest = path.join(root, 'checkpoint.manifest');
+		fs.writeFileSync(
+			manifest,
+			[
+				'# issue-tracer checkpoint manifest v1 rows=2',
+				`1\tCHECKPOINT\ttrace.sh\t${'a'.repeat(40)}\t100644\tC1\tbash trace.sh\tbroken\t${base}\t-`,
+				`2\tCHECKPOINT\ttrace.sh\t${'a'.repeat(40)}\t100644\tC2\tbash trace.sh\tbroken\t${base}\t-`,
+				'',
+			].join('\n'),
+		);
 		fs.writeFileSync(
 			issue,
 			'## Acceptance criteria\n- [ ] AC1: First behavior.\n  - class: DISCRIMINATING\n  - argv: bash published-pass.sh\n- [ ] AC2: Second behavior.\n  - class: DISCRIMINATING\n  - argv: bash published-discriminates.sh\n',
@@ -94,22 +104,28 @@ test('published argv parity — identifies proven false-green but not an unchang
 				'',
 			].join('\n'),
 		);
-		const result = Bun.spawnSync({
-			cmd: bashCommand(
-				script,
-				'--reproduction',
-				reproduction,
-				'--published-issue-body',
-				issue,
-				'--published-replay',
-				replay,
-			),
-			cwd: repo,
-			stdin: 'ignore',
-			stdout: 'pipe',
-			stderr: 'pipe',
-			timeout: 10_000,
-		});
+		const run = (expectedHead: string) =>
+			Bun.spawnSync({
+				cmd: bashCommand(
+					script,
+					'--reproduction',
+					reproduction,
+					'--published-issue-body',
+					issue,
+					'--published-replay',
+					replay,
+					'--expected-head',
+					expectedHead,
+					'--checkpoint-manifest',
+					manifest,
+				),
+				cwd: repo,
+				stdin: 'ignore',
+				stdout: 'pipe',
+				stderr: 'pipe',
+				timeout: 10_000,
+			});
+		const result = run(head);
 		const output = `${result.stdout}\n${result.stderr}`;
 		expect(result.exitCode, output).toBe(1);
 		const lines = output.split(/\r?\n/);
@@ -125,6 +141,21 @@ test('published argv parity — identifies proven false-green but not an unchang
 			),
 			output,
 		).toBe(false);
+
+		const matchingTrace = fs
+			.readFileSync(reproduction, 'utf8')
+			.replace('C1 | bash trace.sh', 'C1 | bash published-pass.sh');
+		fs.writeFileSync(reproduction, matchingTrace);
+		const matching = run(head);
+		expect(matching.exitCode).toBe(1);
+		expect(matching.stderr.toString()).toContain(
+			'AC1 published argv was green at both ends',
+		);
+		const stale = run('a'.repeat(40));
+		expect(stale.exitCode).toBe(1);
+		expect(stale.stderr.toString()).toContain(
+			'invalid or stale published replay row',
+		);
 	} finally {
 		safeRmRecursive(root);
 	}
