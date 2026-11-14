@@ -965,7 +965,7 @@ describe('AC-009: Unsupported platform reports status clearly', () => {
 });
 
 // ---------------------------------------------------------------------------
-// AC-010: Full scope = no false positives — skipped under coverage shards too (bwrap userns config on the self-hosted pool). The broad scope is the user's home dir: root-owned /home is not writable by the runner user even unsandboxed.
+// AC-010: Full scope = no false positives — skipped under coverage shards too (bwrap userns config on the self-hosted pool). #3165 C-3: the broad scope is now a test-created sandbox home (the pre-fix version used the user's real home dir, where root-owned /home was not writable by the runner user even unsandboxed).
 // ---------------------------------------------------------------------------
 
 describe('AC-010: Full scope = no false positives', () => {
@@ -981,21 +981,23 @@ describe('AC-010: Full scope = no false positives', () => {
 			const broadScope = canonicalMkdtemp('ac010-broad-');
 			mkdirSync(path.join(broadScope, 'nested-scope'));
 
-			const executor = new Executor([broadScope]);
-
-			if (!executor.isAvailable()) {
-				// Fail, do not skip: a vacuous pass cannot validate AC-010
-				// (plan-critic round 2). bwrap exists on ubuntu-26.04 runners.
-				throw new Error(
-					'AC-010 requires an available Linux executor; availability probe failed — refusing to pass vacuously',
-				);
-			}
-
-			// Write to a path inside the broad scope — should succeed.
-			// Unique name so the negative check below is meaningful.
-			const probeName = `ac010-fp-${process.pid}-${Date.now()}.txt`;
-			const testFile = path.join(broadScope, probeName);
 			try {
+				const executor = new Executor([broadScope]);
+
+				if (!executor.isAvailable()) {
+					// Fail, do not skip: a vacuous pass cannot validate AC-010
+					// (plan-critic round 2). bwrap exists on ubuntu-26.04
+					// runners. (Inside the try so the finally still cleans the
+					// sandbox on this throw — plan-critic round 4.)
+					throw new Error(
+						'AC-010 requires an available Linux executor; availability probe failed — refusing to pass vacuously',
+					);
+				}
+
+				// Write to a path inside the broad scope — should succeed.
+				// Unique name so the negative check below is meaningful.
+				const probeName = `ac010-fp-${process.pid}-${Date.now()}.txt`;
+				const testFile = path.join(broadScope, probeName);
 				const result = spawnWrapped(
 					executor,
 					`echo "ac010 legitimate" > "${testFile}"`,

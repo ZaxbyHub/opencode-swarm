@@ -209,21 +209,23 @@ describe('macOS sandbox-exec activation tests (issue #2590 follow-ups)', () => {
 				const broadScope = canonicalMkdtemp('ac010-broad-');
 				mkdirSync(path.join(broadScope, 'nested-scope'));
 
-				const executor = new Executor([broadScope]);
-
-				if (!executor.isAvailable()) {
-					// Fail, do not skip: a vacuous pass cannot validate AC-010
-					// (plan-critic round 2). macOS runners ship sandbox-exec.
-					throw new Error(
-						'AC-010 requires an available macOS executor; availability probe failed — refusing to pass vacuously',
-					);
-				}
-
-				// Write to a path inside the broad scope — should succeed.
-				// Unique name so the negative check below is meaningful.
-				const probeName = `ac010-broad-scope-${process.pid}-${Date.now()}.txt`;
-				const testFile = path.join(broadScope, probeName);
 				try {
+					const executor = new Executor([broadScope]);
+
+					if (!executor.isAvailable()) {
+						// Fail, do not skip: a vacuous pass cannot validate AC-010
+						// (plan-critic round 2). macOS runners ship sandbox-exec.
+						// (Inside the try so the finally still cleans the sandbox
+						// on this throw — plan-critic round 4.)
+						throw new Error(
+							'AC-010 requires an available macOS executor; availability probe failed — refusing to pass vacuously',
+						);
+					}
+
+					// Write to a path inside the broad scope — should succeed.
+					// Unique name so the negative check below is meaningful.
+					const probeName = `ac010-broad-scope-${process.pid}-${Date.now()}.txt`;
+					const testFile = path.join(broadScope, probeName);
 					const result = spawnWrapped(
 						executor,
 						`echo "ac010 legitimate" > "${testFile}"`,

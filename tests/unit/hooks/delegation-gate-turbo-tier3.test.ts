@@ -100,6 +100,12 @@ describe('turboMayBypassTask', () => {
 			{ id: '5.5', files: ['C:src/util/format.ts'] }, // drive-RELATIVE
 			{ id: '5.6', files: ['~/src/util/format.ts'] }, // home alias
 			{ id: '5.7', files: ['src/../src/util/format.ts'] }, // dot-dot segment
+			// Windows absolute spellings that only surface after backslash
+			// conversion (plan-critic r4 executed consumer probe: the UNC
+			// form returned turboMayBypass=true pre-fix).
+			{ id: '5.10', files: ['\\\\server\\share\\src\\util\\format.ts'] }, // UNC
+			{ id: '5.11', files: ['\\src\\util\\format.ts'] }, // rooted backslash
+			{ id: '5.12', files: ['\\\\?\\C:\\repo\\src\\util\\format.ts'] }, // extended-length
 		];
 		const plan = JSON.parse(
 			fs.readFileSync(path.join(directory, '.swarm', 'plan.json'), 'utf-8'),

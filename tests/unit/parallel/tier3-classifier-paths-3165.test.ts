@@ -66,6 +66,14 @@ describe('normalizeTier3Path fail-closed matrix (#3165 F-2)', () => {
 		'~/src/util/format.ts',
 		'src/../src/util/format.ts',
 		'../src/util/format.ts',
+		// Windows absolute spellings that only surface AFTER backslash
+		// conversion (plan-critic r4 executed probes — each bypassed when the
+		// leading-'/' rejection ran before the conversion): UNC, rooted
+		// backslash, and extended-length forms.
+		'\\\\server\\share\\src\\util\\format.ts',
+		'\\\\server\\share\\src\\cli\\index.ts',
+		'\\src\\util\\format.ts',
+		'\\\\?\\C:\\repo\\src\\util\\format.ts',
 	];
 	for (const input of unprovable) {
 		test(`normalizeTier3Path(${JSON.stringify(input)}) -> null (Tier 3)`, () => {

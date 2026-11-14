@@ -72,10 +72,17 @@ export function normalizeTier3Path(input: string): string | null {
 	if (typeof input !== 'string') return null;
 	const trimmed = input.trim();
 	if (trimmed === '') return null;
-	if (trimmed.startsWith('/')) return null;
 	if (trimmed.startsWith('~')) return null;
-	if (/^[A-Za-z]:/.test(trimmed)) return null;
+	// Convert backslashes FIRST (plan-critic r4): rejecting a leading '/' or
+	// drive form on the RAW string lets Windows absolute spellings through —
+	// `\\server\share\…` (UNC), `\src\…` (rooted), and `\\?\C:\…`
+	// (extended-length) all normalize to benign-LOOKING relative paths after
+	// the conversion and bypassed the gate in the r4 executed probe. After
+	// conversion, a single leading-'/' rejection catches the POSIX absolute
+	// form AND every backslash-rooted Windows form.
 	const withSlashes = normalizeToForwardSlash(trimmed);
+	if (withSlashes.startsWith('/')) return null;
+	if (/^[A-Za-z]:/.test(withSlashes)) return null;
 	const segments: string[] = [];
 	for (const segment of withSlashes.split('/')) {
 		if (segment === '' || segment === '.') continue;

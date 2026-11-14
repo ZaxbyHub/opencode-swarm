@@ -153,5 +153,13 @@ describe('mirror parity: display redactor vs redactShellCommand (#3165 F-1)', ()
 			expect(display.includes(sample.needle)).toBe(false);
 			expect(shell.includes(sample.needle)).toBe(false);
 		});
+		test(`both redactors emit the ${sample.family} family placeholder for ${sample.id}`, () => {
+			// Plan-critic r4: assert the family placeholder at BOTH sites, not
+			// just elimination — the mirror cannot drift to a silent generic.
+			const display = sanitizeFailureEvidenceDisplay(sample.input);
+			const shell = redactShellCommand(sample.input);
+			expect(display).toContain(`[REDACTED:${sample.family}]`);
+			expect(shell).toContain(`[REDACTED:${sample.family}]`);
+		});
 	}
 });
