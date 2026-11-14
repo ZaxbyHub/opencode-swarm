@@ -24,6 +24,7 @@ root="$(git rev-parse --show-toplevel 2>/dev/null)" || { echo "repro-check: not 
 root="$(to_shell_path "$root")"
 root_real="$(cd "$root" && pwd -P)"
 script_dir="$(cd "$(dirname "$0")" && pwd -P)"
+. "$script_dir/github-api.sh"
 trace_root_real=""
 
 usage() { echo "usage: repro-check.sh {run|checkpoint|verify-checkpoint|verify-semantics|anchor|verify-anchor} --slug <slug> ..." >&2; exit 2; }
@@ -939,7 +940,7 @@ do_verify_anchor() {
     local comment_pattern='^https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/issues/[1-9][0-9]*#issuecomment-([1-9][0-9]*)$'
     [[ "$published" =~ $comment_pattern ]] || { echo "repro-check: invalid published issue comment URL" >&2; exit 2; }
     local endpoint="repos/${BASH_REMATCH[1]}/issues/comments/${BASH_REMATCH[2]}"
-    body="$(timeout 15s gh api "$endpoint" --jq '.body')" || { echo "repro-check: could not retrieve published receipt" >&2; exit 1; }
+    body="$(bounded_gh_api 15 "$endpoint" --jq '.body')" || { echo "repro-check: could not retrieve published receipt" >&2; exit 1; }
     external="$(printf '%s\n' "$body" | awk '/^issue-tracer-checkpoint-v1 / { sub(/\r$/, ""); print; n++ } END { if (n != 1) exit 1 }')" || { echo "repro-check: expected one published receipt" >&2; exit 1; }
     [ "$external" = "$receipt" ] || { printf 'repro-check: published receipt differs\n- %s\n+ %s\n' "$receipt" "$external" >&2; exit 1; }
   fi

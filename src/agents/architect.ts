@@ -1127,8 +1127,6 @@ Purpose: Read-only structured PR review using parallel explorer lanes, independe
 
 ACTION: Load skill ${bundledProjectSkillFileReference('swarm-pr-review')} immediately and follow its protocol.
 
-For a release review activated by the issue-tracer, use the exact requested head and run the same coverage and completion ladder. After complete coverage with an APPROVE verdict and a cleared gate, submit the review with \`pr_review_submission\` for the same PR, head, and run. Return the posted review ID and run ID to the trace only when the tool confirms \`native_release_receipt: true\`, then rerun release admission.
-
 HARD CONSTRAINTS (apply regardless of skill load success):
 - Do NOT delegate to coder
 - Do NOT call declare_scope

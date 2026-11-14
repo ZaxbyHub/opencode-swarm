@@ -17,6 +17,7 @@ root="$(to_shell_path "$root")"
 root_real="$(cd "$root" && pwd -P)"
 issue_traces_base="$root_real/.agents/issue-traces"
 script_dir="$(cd "$(dirname "$0")" && pwd -P)"
+. "$script_dir/github-api.sh"
 failed=0
 legacy=0
 trace_root_real=""
@@ -878,7 +879,7 @@ phase4_published_argv() {
   esac
   if (
     set -o pipefail
-    timeout 30s gh api "repos/$repo/issues/$number" --jq '.body' |
+    bounded_gh_api 30 "repos/$repo/issues/$number" --jq '.body' |
       bash "$script_dir/check-published-argv.sh" --reproduction "$trace/02-reproduction.md" --published-issue-body -
   ); then
     rule_ok published-argv
@@ -983,9 +984,9 @@ release_review() {
         "https://github.com/$repo"|"git@github.com:$repo") ;;
         *) rule_bad broad-review "published PR is outside the origin repository"; return 1 ;;
       esac
-      remote_head="$(timeout 15s gh api "repos/$repo/pulls/$pr" --jq '.head.sha' 2>/dev/null)" || remote_head=""
+      remote_head="$(bounded_gh_api 15 "repos/$repo/pulls/$pr" --jq '.head.sha' 2>/dev/null)" || remote_head=""
       [ "$remote_head" = "$head" ] || { rule_bad broad-review "live PR head could not be verified"; return 1; }
-      remote="$(timeout 15s gh api "repos/$repo/pulls/$pr/reviews/$review" --jq 'select(.state == "COMMENTED" and (.author_association == "OWNER" or .author_association == "MEMBER" or .author_association == "COLLABORATOR")) | .commit_id, .body' 2>/dev/null)" || remote=""
+      remote="$(bounded_gh_api 15 "repos/$repo/pulls/$pr/reviews/$review" --jq 'select(.state == "COMMENTED" and (.author_association == "OWNER" or .author_association == "MEMBER" or .author_association == "COLLABORATOR")) | .commit_id, .body' 2>/dev/null)" || remote=""
       if [ "${remote%%$'\n'*}" = "$head" ] && printf '%s\n' "$remote" | awk -v run="$run" -v head="$head" '
         $0 == "PR review submission for run " run " at head " head ". Report verdict: COMMENT." { identity++ }
         $0 == "- Coverage kind: FULL" { full++ }
