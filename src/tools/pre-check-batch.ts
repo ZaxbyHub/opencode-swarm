@@ -13,6 +13,7 @@ import { loadGateOverrides } from '../config';
 import type { SecretscanEvidence } from '../config/evidence-schema.js';
 import { saveEvidence } from '../evidence/manager.js';
 import { criticalWarn, warn } from '../utils';
+import { canonicalRootKey } from '../utils/canonical-root.js';
 import { runExternalTool } from '../utils/external-tool-runner';
 import { sameExistingFilesystemPath } from '../utils/filesystem-identity.js';
 import { resolveGitExecutableAsync } from '../utils/git-executable.js';
@@ -164,11 +165,49 @@ async function runGitClassified(
  * Walk DIFF_BASE_CANDIDATES and return the first candidate whose committed
  * diff parses (#3131). The envelope is ALWAYS present so a null resolution
  * still carries the full attempt list for the named diagnostic.
+ *
+ * #3681 items 3-4 — base-selection authority (design note, AC4):
+ * Local refs are UNTRUSTED inputs. Three successive heuristics for telling
+ * an authoritative HEAD-equal acceptance from a planted/stale one were
+ * disproved by executed counterexamples (branch-name match; reflog-top
+ * `checkout:`; deferring to the first older resolvable base — a commit-
+ * then-branch + planted ref, a cross-branch push HEAD:main, and a stale
+ * intermediate remote ref each survive all three). With no network, committed-
+ * hop authority CANNOT be proven from workspace state; the sound closures are
+ * fetch-verified base selection (adds remote-tracking-ref mutation to a gate
+ * path) or conservative fail-closed on every HEAD-equal acceptance (reverses
+ * the #2918 F-002 fresh-branch contract pinned by
+ * tests/unit/tools/pre-check-batch-merge-base-3131.test.ts:284-302 and would
+ * false-NEW fresh-branch findings) — an OWNER decision tracked on #3681 and
+ * in the trace ASK tracker, deliberately NOT resolved here. What this
+ * resolver DOES ship: hadUnusableAttempt/acceptedCandidateRef provenance and
+ * the differential `diff-base fall-through accepted` signal in the ranges
+ * consumer. The sibling surface src/quality/git-base.ts (first-valid-wins,
+ * #3676) must be decided TOGETHER with this one — same candidate-order
+ * contract — under the owner decisions tracked on #3681 (items 3a/4,
+ * ASK-3) and #3676 (ASK-1) until a follow-up issue exists.
  */
 type DiffBaseResolution = {
 	mergeBase: string;
 	committedLines: Map<string, Set<number>>;
 	mergeBaseEqualsHead: boolean;
+	/** #3681 item 3: an earlier candidate in this walk produced an
+	 * unusable committed diff (stdout overflow / parse failure), so a later
+	 * acceptance silently narrows the committed hop vs the true base. */
+	hadUnusableAttempt: boolean;
+	/** Ref name of the accepted candidate (operator diagnostic). */
+	acceptedCandidateRef: string;
+	/**
+	 * The RAW repo-relative spellings the committed hop emitted, keyed by
+	 * the normalized map key. The RESOLVER owns this map (fresh per
+	 * candidate, never aliased to a caller's), so it survives the memo: a
+	 * memo hit returns the cached envelope, and every consumer merges this
+	 * map into its own collector — otherwise a file modified ONLY in the
+	 * committed hop is never asked about and a configured clean/process
+	 * filter keeps its shifted coordinates (round-19 finding, executed: a
+	 * second getChangedLineRanges call on the same HEAD lost the mark).
+	 */
+	committedRawPaths: Map<string, Set<string>>;
 };
 
 type DiffBaseEnvelope = {
@@ -203,7 +242,46 @@ let diffBaseResolutionMemo: {
  * keyed by directory so distinct repositories never suppress each other.
  */
 const DIFF_BASE_WARN_COOLDOWN_MS = 60_000;
-let lastDiffBaseFailureWarn: { directory: string; atMs: number } | null = null;
+/** Bounded per-directory cooldown registry (AGENTS.md invariant 8): one
+ * entry per directory, capped with FIFO eviction so a long-lived host
+ * process cannot grow without bound. A single `{directory, atMs}` record —
+ * the previous shape, here and in the FB-001 diagnostic — is only
+ * CONSECUTIVE-same-directory suppression: A warns, B warns, then A warns
+ * again inside the window because B replaced A's only entry. Keyed entries
+ * make each directory's window independent (plan-critic shipped-scope
+ * finding 3; AC5's per-directory cooldown). */
+const WARN_COOLDOWN_MAX_DIRECTORIES = 32;
+function cooldownSuppressed(
+	record: Map<string, number>,
+	directory: string,
+	nowMs: number,
+	windowMs: number,
+): boolean {
+	// Canonical project identity, not the caller's lexical spelling: two
+	// spellings (drive-case, junction alias, trailing separator) of one
+	// physical repository must share one window, and the path-identity
+	// ratchet (scripts/check-path-identity.ts, CI step "Path identity
+	// ratchet (issue #2474)") refuses a raw resolve result as a project
+	// Map/Set key.
+	const key = canonicalRootKey(directory);
+	const last = record.get(key);
+	if (last !== undefined && nowMs - last < windowMs) return true;
+	if (last === undefined && record.size >= WARN_COOLDOWN_MAX_DIRECTORIES) {
+		const oldest = record.keys().next();
+		if (!oldest.done) record.delete(oldest.value);
+	}
+	record.set(key, nowMs);
+	return false;
+}
+const lastDiffBaseFailureWarn = new Map<string, number>();
+
+/**
+ * #3681 item 3(b): per-directory cooldown for the differential
+ * fall-through-acceptance signal. Separate registry from the FB-001 failure
+ * diagnostic so neither suppresses the other (invariant 8; the same bounded
+ * keyed shape, so interleaved directories each keep their own window).
+ */
+const lastDiffBaseFallthroughWarn = new Map<string, number>();
 
 /**
  * Walk DIFF_BASE_CANDIDATES and return the first candidate whose committed
@@ -308,8 +386,11 @@ async function resolveValidatedDiffBase(
 				'core.quotePath=false',
 				'diff',
 				'--no-ext-diff',
+				'--no-textconv',
 				'--no-color',
 				'--no-prefix',
+				'--submodule=short',
+				'--inter-hunk-context=0',
 				'-U0',
 				`${candidate}..HEAD`,
 				'--',
@@ -326,7 +407,17 @@ async function resolveValidatedDiffBase(
 			attempted.push({ ref: baseBranch, outcome: 'unusable' });
 			continue;
 		}
-		const committedLines = parseDiffLineRangesChecked(diffResult.stdout, true);
+		// A FRESH collector per candidate: the resolver owns it (it is
+		// stored on the resolution and cached by the memo), so a caller's
+		// map is never aliased and a candidate that is later rejected
+		// cannot leak its spellings into the accepted one (round-19
+		// finding, executed).
+		const committedRawPaths = new Map<string, Set<string>>();
+		const committedLines = parseDiffLineRangesChecked(
+			diffResult.stdout,
+			true,
+			committedRawPaths,
+		);
 		if (!committedLines) {
 			attempted.push({ ref: baseBranch, outcome: 'unusable' });
 			continue;
@@ -334,7 +425,16 @@ async function resolveValidatedDiffBase(
 		attempted.push({ ref: baseBranch, outcome: 'ok' });
 		const resolved = {
 			attempted,
-			resolution: { mergeBase: candidate, committedLines, mergeBaseEqualsHead },
+			resolution: {
+				mergeBase: candidate,
+				committedLines,
+				mergeBaseEqualsHead,
+				hadUnusableAttempt: attempted.some(
+					(entry) => entry.outcome === 'unusable',
+				),
+				acceptedCandidateRef: baseBranch,
+				committedRawPaths,
+			},
 		};
 		if (headSha !== null) {
 			diffBaseResolutionMemo = { directory, headSha, envelope: resolved };
@@ -385,8 +485,11 @@ async function resolveValidatedDiffBase(
 							'core.quotePath=false',
 							'diff',
 							'--no-ext-diff',
+							'--no-textconv',
 							'--no-color',
 							'--no-prefix',
+							'--submodule=short',
+							'--inter-hunk-context=0',
 							'-U0',
 							`${candidate}..HEAD`,
 							'--',
@@ -400,9 +503,11 @@ async function resolveValidatedDiffBase(
 						return { attempted, resolution: null };
 					}
 					if (diffResult.kind === 'ok') {
+						const committedRawPaths = new Map<string, Set<string>>();
 						const committedLines = parseDiffLineRangesChecked(
 							diffResult.stdout,
 							true,
+							committedRawPaths,
 						);
 						if (committedLines) {
 							attempted.push({ ref: baseBranch, outcome: 'ok' });
@@ -412,6 +517,11 @@ async function resolveValidatedDiffBase(
 									mergeBase: candidate,
 									committedLines,
 									mergeBaseEqualsHead,
+									hadUnusableAttempt: attempted.some(
+										(entry) => entry.outcome === 'unusable',
+									),
+									acceptedCandidateRef: baseBranch,
+									committedRawPaths,
 								},
 							};
 							if (headSha !== null) {
@@ -458,13 +568,15 @@ function logDiffBaseResolutionFailure(
 ): void {
 	const nowMs = Date.now();
 	if (
-		lastDiffBaseFailureWarn &&
-		lastDiffBaseFailureWarn.directory === directory &&
-		nowMs - lastDiffBaseFailureWarn.atMs < DIFF_BASE_WARN_COOLDOWN_MS
+		cooldownSuppressed(
+			lastDiffBaseFailureWarn,
+			directory,
+			nowMs,
+			DIFF_BASE_WARN_COOLDOWN_MS,
+		)
 	) {
 		return;
 	}
-	lastDiffBaseFailureWarn = { directory, atMs: nowMs };
 	const detail =
 		failureCause === 'git-executable'
 			? 'the git executable could not be resolved, so no candidate was tried'
@@ -495,6 +607,7 @@ export const _internals: {
 	runWithTimeout: typeof runWithTimeout;
 	getChangedLineRanges: typeof getChangedLineRanges;
 	getChangedLineAmbiguousFiles: typeof getChangedLineAmbiguousFiles;
+	parseDiffLineRangesChecked: typeof parseDiffLineRangesChecked;
 	saveEvidence: typeof saveEvidence;
 	runExternalTool: typeof runExternalTool;
 	detectResolvedLinter: typeof detectResolvedLinter;
@@ -514,6 +627,7 @@ export const _internals: {
 	runWithTimeout,
 	getChangedLineRanges,
 	getChangedLineAmbiguousFiles,
+	parseDiffLineRangesChecked,
 	saveEvidence,
 	runExternalTool,
 	detectResolvedLinter,
@@ -1468,6 +1582,49 @@ function decodeGitQuotedPath(value: string): string | null {
 	return Buffer.from(bytes).toString('utf8');
 }
 
+/**
+ * The RAW repo-relative path carried by a `--- ` / `+++ ` / `copy to ` /
+ * `rename to ` diff header, C-quote-decoded if git quoted it.
+ *
+ * `git diff` appends a trailing TAB to the header whenever the filename
+ * contains a space, and it does so for a QUOTED path too - after the
+ * closing quote (executed: `+++ "a \tb.ts"` + U+0009). Splitting on the
+ * literal TAB is therefore safe in both shapes, because git C-quoting
+ * escapes a real TAB inside the name as the two characters `\t`.
+ * Mirrors what `normalizeDiffPath` does for the map key, so the two agree
+ * on which file they name (round-19 finding, executed).
+ */
+function rawHeaderPath(line: string, prefixLength: number): string | null {
+	const raw = line.slice(prefixLength);
+	const token = raw.split('\t', 1)[0];
+	return decodeGitQuotedPath(token);
+}
+
+/**
+ * Record one RAW repo-relative spelling for a normalized map key.
+ *
+ * A `Map<string, string>` cannot represent this: `normalizeRepoPathKey`
+ * lowercases on win32/darwin, so two distinct raw spellings (`Src.ts` and
+ * `src.ts` on a case-sensitive volume, or the same file reached through two
+ * diff legs) collapse to one key and a last-write-wins map keeps only the
+ * last one queried (round-18 finding, executed: a `filter=squeeze` rule on
+ * `Foo.ts` was missed because `foo.ts` was written last). A set keeps
+ * every spelling so `git check-attr` is asked about each of them.
+ */
+function recordRawPath(
+	rawPaths: Map<string, Set<string>> | undefined,
+	key: string,
+	rawPath: string | null,
+): void {
+	if (rawPaths === undefined || rawPath === null) return;
+	const existing = rawPaths.get(key);
+	if (existing === undefined) {
+		rawPaths.set(key, new Set([rawPath]));
+		return;
+	}
+	existing.add(rawPath);
+}
+
 function normalizeRepoPathKey(repoPath: string): string {
 	const normalized = repoPath.replace(/\\/g, '/');
 	return _internals.platform() === 'win32' || _internals.platform() === 'darwin'
@@ -1476,9 +1633,10 @@ function normalizeRepoPathKey(repoPath: string): string {
 }
 
 function normalizeDiffPath(rawPath: string): string | null {
-	const pathToken = rawPath.startsWith('"')
-		? rawPath
-		: rawPath.split('\t', 1)[0];
+	// Unconditional, not `startsWith('"')`: git appends the
+	// trailing TAB after the closing quote of a QUOTED space-bearing
+	// path too (see rawHeaderPath).
+	const pathToken = rawPath.split('\t', 1)[0];
 	const decoded = decodeGitQuotedPath(pathToken);
 	if (
 		decoded === null ||
@@ -1496,6 +1654,15 @@ function normalizeDiffPath(rawPath: string): string | null {
 /**
  * Parse unified diff output (with -U0) to extract added/modified line numbers per file.
  * Returns a Map from normalised file path → Set of changed line numbers.
+ *
+ * SCOPE (deliberate, fail-closed): only ordinary unified diff is supported.
+ * A combined diff (`diff --cc`, the default `git diff` rendering of an
+ * unresolved merge) is NOT parsed — its `@@@` headers and two-column body do
+ * not match this grammar, so such input returns null and every finding is
+ * treated as new (the safe direction: no PRE-EXISTING discount from a shape
+ * the parser does not understand). Callers that need merge-conflict coverage
+ * must request a non-combined rendering explicitly. Pinned by
+ * tests/unit/tools/pre-check-batch-parser-strictness-3681b.test.ts.
  */
 export function parseDiffLineRanges(
 	diffOutput: string,
@@ -1503,9 +1670,157 @@ export function parseDiffLineRanges(
 	return parseDiffLineRangesChecked(diffOutput, false) ?? new Map();
 }
 
+/**
+ * Split a `diff --git <src> <dst>` / `Binary files <src> and <dst> differ`
+ * body into its two paths, WITHOUT guessing when the split is ambiguous.
+ *
+ * The callers pin `core.quotePath=false`, so a path containing a space is
+ * emitted unquoted and `Binary files my file.js and my file.js differ` cannot
+ * be split on a space. The disambiguators, in order:
+ *
+ *  1. Two quoted tokens — unambiguous by construction.
+ *  2. A symmetric `<p> <sep> <p>` form (a backreference match) — the ordinary
+ *     non-rename case, where both sides name the same path.
+ *  3. Exactly one `/dev/null` side, paired with a single unquoted remainder.
+ *
+ * Anything else — two DIFFERENT unquoted paths (a rename/copy, whose real
+ * paths arrive on `rename from`/`rename to`/`copy from`/`copy to` lines), or a
+ * path containing the separator — returns null so the caller fails closed.
+ * Round-13 evidence for why guessing is not acceptable: a file named
+ * `rock and roll.js` rendered as `Binary files rock and roll.js and rock and
+ * roll.js differ` and a first-separator split produced the PHANTOM key
+ * `roll.js and rock and roll.js`, so the real file left the map and its
+ * findings classified PRE-EXISTING (fail-open).
+ */
+function splitDiffPathPair(
+	body: string,
+	separator: string,
+): { source: string; destination: string } | null {
+	const escapedSeparator = separator.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+	// 1. Two quoted tokens — unambiguous by construction (a quoted path may
+	// contain the separator, so the quotes are what make the split safe).
+	const quoted = new RegExp(
+		`^"((?:[^"\\\\]|\\\\.)*)"${escapedSeparator}"((?:[^"\\\\]|\\\\.)*)"$`,
+	).exec(body);
+	if (quoted) {
+		const source = decodeGitQuotedPath(`"${quoted[1]}"`);
+		const destination = decodeGitQuotedPath(`"${quoted[2]}"`);
+		if (source === null || destination === null) return null;
+		return { source, destination };
+	}
+	if (body.startsWith('"')) return null;
+
+	// 2. Symmetric form: the same path on both sides.
+	const symmetric = new RegExp(`^(.+)${escapedSeparator}\\1$`);
+	const symmetricMatch = symmetric.exec(body);
+	if (symmetricMatch) {
+		const path = symmetricMatch[1];
+		if (path.length === 0) return null;
+		return { source: path, destination: path };
+	}
+
+	// 3. Exactly one /dev/null side.
+	const devNullDestination = new RegExp(
+		`^/dev/null${escapedSeparator}(.+)$`,
+	).exec(body);
+	if (devNullDestination) {
+		return { source: '/dev/null', destination: devNullDestination[1] };
+	}
+	const devNullSource = new RegExp(`^(.+)${escapedSeparator}/dev/null$`).exec(
+		body,
+	);
+	if (devNullSource) {
+		return { source: devNullSource[1], destination: '/dev/null' };
+	}
+	return null;
+}
+
+/**
+ * The RAW (un-normalized, still C-quoted) destination of a
+ * `Binary files <src> and <dst> differ` line, for the `rawPaths` collector.
+ * `core.quotePath=false` leaves a path containing spaces unquoted, so the
+ * symmetric form is what makes the split unambiguous — the same rules
+ * `splitDiffPathPair` applies, minus the decoding.
+ */
+function rawBinaryDestination(line: string): string | null {
+	const inner = line.slice(
+		'Binary files '.length,
+		line.length - ' differ'.length,
+	);
+	const separator = inner.indexOf(' and ');
+	if (separator === -1) return null;
+	const destination = inner.slice(separator + ' and '.length);
+	return destination.length > 0 ? destination : null;
+}
+
+/**
+ * The destination of a `Binary files <src> and <dst> differ` line, normalized
+ * exactly as the `+++ ` branch normalizes its path so the two kinds of section
+ * agree on the key spelling (round-13 evidence: `Src/App.js` entered the map
+ * mixed-case while the classifier lowercases keys on win32/darwin, so the
+ * lookup missed and the finding classified PRE-EXISTING).
+ *
+ * `normalizeRepoPathKey` is applied directly rather than through
+ * `normalizeDiffPath`, because the pair is ALREADY decoded — re-running the
+ * decoder would split a decoded path containing a literal tab at that tab and
+ * truncate it (`src/😀<TAB>unsafe.ts` became `src/😀`).
+ */
+function parseBinaryFilesLine(line: string): string | null {
+	const inner = line.slice(
+		'Binary files '.length,
+		line.length - ' differ'.length,
+	);
+	const pair = splitDiffPathPair(inner, ' and ');
+	if (pair === null) return null;
+	if (pair.destination === '/dev/null') return '/dev/null';
+	return normalizeRepoPathKey(pair.destination);
+}
+
+/**
+ * The parsed pair of a `diff --git <src> <dst>` line. Used as the fallback for
+ * a `GIT binary patch` section (which carries no path of its own) and to
+ * VALIDATE the section's `+++ ` destination against the header git actually
+ * emitted — a mismatch is the phantom-destination fail-open the plan critic
+ * demonstrated (`diff --git src/real.ts src/real.ts` plus
+ * `+++ src/phantom.ts` used to yield `{src/phantom.ts: [1]}`).
+ *
+ * As with `parseBinaryFilesLine`, the pair is already decoded, so only the key
+ * normalization is applied.
+ */
+function parseGitDiffPair(rest: string): {
+	source: string;
+	destination: string;
+} | null {
+	const pair = splitDiffPathPair(rest, ' ');
+	if (pair === null) return null;
+	// An unparseable side leaves the pair unusable; the caller then skips
+	// every check that depends on it rather than comparing against a bogus
+	// path. (splitDiffPathPair already returns null in that case, so this is
+	// a defensive re-check for the normalization step.)
+	const source =
+		pair.source === '/dev/null'
+			? '/dev/null'
+			: normalizeRepoPathKey(pair.source);
+	const destination =
+		pair.destination === '/dev/null'
+			? '/dev/null'
+			: normalizeRepoPathKey(pair.destination);
+	if (source.length === 0 || destination.length === 0) return null;
+	return { source, destination };
+}
+
 function parseDiffLineRangesChecked(
 	diffOutput: string,
 	requireGitFileHeaders: boolean,
+	// Optional collector: normalized map key -> the RAW repo-relative path git
+	// actually emitted. `normalizeRepoPathKey` lowercases on win32/darwin, which
+	// is right for classification but wrong for asking git about attributes:
+	// `.gitattributes` matching is case-sensitive whenever `core.ignoreCase` is
+	// false (git's default on a case-sensitive macOS volume), so a lowercased
+	// query can miss a mixed-case file's `filter=` rule entirely (round-16
+	// finding, executed: `check-attr -- src/app.ts` returns nothing for a
+	// `.gitattributes` rule on `Src/App.ts`).
+	rawPaths?: Map<string, Set<string>>,
 ): Map<string, Set<number>> | null {
 	const result = new Map<string, Set<number>>();
 	let currentFile: string | null = null;
@@ -1514,19 +1829,239 @@ function parseDiffLineRangesChecked(
 	let destinationSeen = false;
 	let destinationNeedsHunk = false;
 	let collectedLines = 0;
+	// The `diff --git <src> <dst>` line's parsed pair. A file section that git
+	// renders as BINARY (`Binary files … differ` / `GIT binary patch`) carries
+	// no `--- `/`+++ `/`@@` at all, so this is the only place its path appears
+	// — without capturing it the section would be silently skipped and the file
+	// would vanish from the map. It is ALSO used to VALIDATE the section's
+	// `+++ ` destination, which is what closes the phantom-destination
+	// fail-open (a `+++ ` that names a path the header did not).
+	let gitFilePair: { source: string; destination: string } | null = null;
+	// Set when the current section is a pure copy/rename (`copy from`/`copy to`
+	// / `rename from`/`rename to` with no hunk): the destination is a new path
+	// in the tree, so it is marked ALL_LINES_CHANGED. Round-13 evidence: with
+	// `diff.renames=copies`, a copied file emits ONLY those two lines, so the
+	// destination used to be omitted entirely and its findings classified
+	// PRE-EXISTING.
+	let copyRenameDestination: string | null = null;
+	// The raw spelling of `copyRenameDestination`, for the same reason as
+	// `rawPaths` above.
+	let rawCopyRenameDestination: string | null = null;
+	// Whether any `diff --git ` line was seen at all. In production mode a
+	// NON-EMPTY diff that contains no git file section is output this parser
+	// does not understand, and returning an authoritative empty map from it
+	// would silently disable the discount for the WHOLE batch — so it fails
+	// closed instead (round-13 evidence: `"not a diff\n"` returned `[]`).
+	let sawGitFileSection = false;
+	// #3681 item 1: hunk-body state. While a hunk still owes body lines,
+	// `--- ` / `+++ ` / `@@` / `diff --git` prefixes are CONTENT (a deleted
+	// line whose text begins `-- ` renders as `--- <content>`, an added line
+	// beginning `++ ` renders as `+++ <content>`) — never file-header
+	// boundaries. Without this, the parser reattributed the rest of a hunk
+	// to a phantom file key and the SAST PRE-EXISTING classification lost
+	// real changed lines (fail-open). Both counters come from the `@@`
+	// header; any prefix other than `+`/`-`/`\ ` while armed, an
+	// over-delivered side, or EOF while armed fails CLOSED (null) — every
+	// consumer treats null as "no discount", the safe direction.
+	let oldRemaining = 0;
+	let newRemaining = 0;
 
 	for (const rawLine of diffOutput.split(/\r?\n/)) {
 		const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
+		if (oldRemaining > 0 || newRemaining > 0) {
+			if (line.startsWith('+')) {
+				if (newRemaining === 0) return null;
+				newRemaining--;
+				continue;
+			}
+			if (line.startsWith('-')) {
+				if (oldRemaining === 0) return null;
+				oldRemaining--;
+				continue;
+			}
+			// `\ No newline at end of file` is hunk metadata and consumes
+			// neither side's count. Any OTHER backslash-prefixed line while
+			// armed is an unknown prefix — fail closed rather than treating
+			// arbitrary `\...` content as inert metadata (plan-critic
+			// shipped-scope finding 2).
+			if (line.startsWith('\\')) {
+				if (line === '\\ No newline at end of file') continue;
+				return null;
+			}
+			// Context line (single leading space) consumes both sides.
+			if (line.startsWith(' ')) {
+				if (oldRemaining === 0 || newRemaining === 0) return null;
+				oldRemaining--;
+				newRemaining--;
+				continue;
+			}
+			// `@@`, `diff --git`, `--- `, `+++ `, or any other shape while
+			// armed means the hunk under-delivered: fail closed.
+			return null;
+		}
 		if (line.startsWith('diff --git ')) {
 			if (expectingDestination || destinationNeedsHunk) return null;
 			inGitFile = true;
 			currentFile = null;
 			expectingDestination = false;
 			destinationSeen = false;
+			// `diff --git <src> <dst>`. The a-side may be /dev/null (a new
+			// file), either side may be quoted when it contains special
+			// characters, and a path containing a space is emitted unquoted
+			// under the pinned `core.quotePath=false` — so the pair is parsed
+			// only when the split is unambiguous (see splitDiffPathPair). An
+			// unparseable header leaves the pair null, which makes every
+			// dependent check below fail closed rather than invent a key.
+			gitFilePair = parseGitDiffPair(line.slice('diff --git '.length));
+			sawGitFileSection = true;
+			copyRenameDestination = null;
 			continue;
+		}
+		// A combined diff (`diff --cc` / `diff --combined`) is out of grammar
+		// by design. Reject it AT THE SECTION BOUNDARY rather than letting the
+		// line fall through to the `@@` skip below: the previous shape was
+		// rejected only incidentally — by the one-pair-per-git-section guard
+		// on the combined section's OWN `--- `/`+++ ` pair — which is not the
+		// rule the pinning leg claimed to exercise, and a future grammar
+		// change could silently start accepting combined output. An explicit
+		// rejection names the rule the leg actually pins.
+		if (line.startsWith('diff --cc ') || line.startsWith('diff --combined ')) {
+			return null;
+		}
+		// A pure copy/rename section (`copy from`/`copy to`, `rename from`/
+		// `rename to`) carries no `--- `/`+++ `/`@@` when the content is
+		// unchanged, and its DESTINATION is a path that did not exist before —
+		// so omitting it lets every finding in a newly copied file classify
+		// PRE-EXISTING. Round-13 evidence: with `diff.renames=copies`, a copy
+		// of a source file emitted only these two lines and the destination
+		// left the map entirely. The destination is marked ALL_LINES_CHANGED,
+		// which over-gates a pure rename (findings in the renamed file become
+		// NEW) but never fails open.
+		if (
+			(line.startsWith('copy from ') || line.startsWith('rename from ')) &&
+			copyRenameDestination === null
+		) {
+			if (expectingDestination || destinationNeedsHunk) return null;
+			continue;
+		}
+		if (line.startsWith('copy to ') || line.startsWith('rename to ')) {
+			if (expectingDestination || destinationNeedsHunk) return null;
+			// Round-15 nit: the `--- `/`+++ ` branch requires a git file
+			// section in production mode; these lines are section content too,
+			// so the same requirement applies.
+			if (requireGitFileHeaders && !inGitFile) return null;
+			const prefix = line.startsWith('copy to ') ? 'copy to ' : 'rename to ';
+			const destination = normalizeDiffPath(line.slice(prefix.length));
+			if (destination === null) return null;
+			// Committed EAGERLY, not at EOF: the next `diff --git` boundary
+			// resets the section state, so a copy section followed by an
+			// ordinary one would otherwise lose its destination (round-13
+			// evidence: with `diff.renames=copies`, the copied file left the
+			// map entirely and its findings classified PRE-EXISTING). If the
+			// same section then carries a hunk, the `+++ ` branch's
+			// `result.has` guard keeps this entry instead of overwriting it,
+			// and the hunk's line numbers are added to the ALL_LINES_CHANGED
+			// set — over-gating, never fail-open.
+			result.set(destination, new Set([ALL_LINES_CHANGED]));
+			if (rawPaths !== undefined) {
+				// `git diff` appends a trailing TAB to an UNQUOTED header
+				// whenever the filename contains a space (observed:
+				// `+++ my app.ts\t`). `normalizeDiffPath` strips it for the
+				// key; the raw spelling must be stripped the same way or
+				// `check-attr` is asked about a path that does not exist
+				// (round-18 finding, executed).
+				recordRawPath(
+					rawPaths,
+					destination,
+					rawHeaderPath(line, prefix.length),
+				);
+			}
+			collectedLines += 1;
+			copyRenameDestination = destination;
+			rawCopyRenameDestination = line.slice(prefix.length);
+			continue;
+		}
+		// A file section git renders as BINARY carries no `--- `/`+++ `/`@@`
+		// at all: the content is not diffable as text (`.gitattributes`
+		// `-diff`/`binary`, or a genuinely binary blob). Silently skipping
+		// the line drops the file from the map entirely, and classifySastFindings
+		// treats a MISSING key as PRE-EXISTING — so a newly added dangerous
+		// line in such a file keeps its discount (fail-open, the same
+		// direction as the phantom-key defect this unit closes). Mark the
+		// file ALL_LINES_CHANGED instead: every finding in it is new, which
+		// is the safe direction and matches the untracked/ignored-file
+		// convention. Executed proof: base and head both returned no key for
+		// a `.gitattributes`-marked `-diff`/`binary` text file.
+		if (
+			(line.startsWith('Binary files ') && line.endsWith(' differ')) ||
+			line.startsWith('GIT binary patch')
+		) {
+			if (!inGitFile) return null;
+			const binaryFile = line.startsWith('Binary files ')
+				? parseBinaryFilesLine(line)
+				: (gitFilePair?.destination ?? null);
+			const rawBinaryPath = line.startsWith('Binary files ')
+				? rawBinaryDestination(line)
+				: null;
+			// A DELETED binary file (`… and /dev/null differ`) has no lines
+			// left to gate, so the section is consumed without a key. An
+			// unresolvable path fails closed rather than inventing one.
+			if (binaryFile === '/dev/null') {
+				inGitFile = false;
+				destinationSeen = false;
+				gitFilePair = null;
+				copyRenameDestination = null;
+				continue;
+			}
+			if (binaryFile === null) return null;
+			result.set(binaryFile, new Set([ALL_LINES_CHANGED]));
+			if (rawPaths !== undefined && rawBinaryPath !== null) {
+				recordRawPath(rawPaths, binaryFile, rawBinaryPath);
+			}
+
+			collectedLines += 1;
+			currentFile = binaryFile;
+			inGitFile = false;
+			destinationSeen = false;
+			gitFilePair = null;
+			copyRenameDestination = null;
+			continue;
+		}
+		// Header mode with both counters exhausted: a body-shaped line here
+		// means the previous hunk OVER-delivered its counts (a well-formed
+		// diff reaches `@@` / `diff --git` / the next `--- `/`+++ ` pair or
+		// EOF). Silently ignoring it would accept a malformed diff and keep
+		// the discount, so fail closed (plan-critic shipped-scope finding 1;
+		// AC1's count-mismatch clause). The `--- `/`+++ ` file headers are
+		// the legitimate `-`/`+`-prefixed shapes in this mode.
+		if (
+			(line.startsWith('+') || line.startsWith('-') || line.startsWith(' ')) &&
+			!line.startsWith('--- ') &&
+			!line.startsWith('+++ ')
+		) {
+			return null;
+		}
+		// Same rule for hunk metadata once the counts are spent: the ONLY
+		// legitimate backslash line in header mode is the exact no-newline
+		// marker (git emits it after the final body line of a no-trailing-
+		// newline hunk). Any other `\...` shape here is an unknown prefix and
+		// the previous hunk over-delivered — fail closed rather than letting
+		// arbitrary post-hunk metadata ride through inert (plan-critic
+		// shipped-scope round 7, finding 1).
+		if (line.startsWith('\\') && line !== '\\ No newline at end of file') {
+			return null;
 		}
 		if (line.startsWith('--- ') && (inGitFile || !requireGitFileHeaders)) {
 			if (expectingDestination || destinationNeedsHunk) return null;
+			// A git file section carries exactly ONE `--- `/`+++ ` pair; the
+			// next file starts at a fresh `diff --git` boundary. Accepting a
+			// second pair inside the same section lets a malformed diff
+			// reattribute the following hunks to a PHANTOM file key, so the
+			// real file loses its later changed lines (the fail-open shape
+			// this whole unit closes). Only enforced where git file headers
+			// are required at all — the header-less mode has no section
+			// boundary to key on (plan-critic shipped-scope round 8).
+			if (requireGitFileHeaders && destinationSeen) return null;
 			expectingDestination = true;
 			continue;
 		}
@@ -1536,7 +2071,53 @@ function parseDiffLineRangesChecked(
 			}
 			const rawDestination = line.slice(4);
 			currentFile = normalizeDiffPath(rawDestination);
+			if (currentFile !== null && rawPaths !== undefined) {
+				// The diff output is NOT `-z`, so git C-quotes a path containing
+				// `"`, `\` or a control character; decode it to the real path
+				// before handing it to `check-attr` (whose own `-z` output is raw
+				// and must NOT be decoded — the two sides differ).
+				recordRawPath(rawPaths, currentFile, rawHeaderPath(line, 4));
+			}
 			if (currentFile === null && rawDestination.trim() !== '/dev/null') {
+				return null;
+			}
+			// Phantom-destination guard: the `+++ ` path must name the file
+			// the section header named. A section headed
+			// `diff --git src/real.ts src/real.ts` whose `+++ ` says
+			// `src/phantom.ts` used to produce `{src/phantom.ts: [1]}`, so the
+			// REAL file lost its changed line and its findings classified
+			// PRE-EXISTING (the exact fail-open this unit exists to close).
+			// A differing destination is legitimate ONLY when the header's
+			// own destination is /dev/null — i.e. a new file, where git names
+			// the a-side as /dev/null and the b-side as the real path. When
+			// the header itself could not be parsed unambiguously the pair is
+			// null and the check is skipped, because rejecting every diff
+			// with a space in a path would over-gate far more than it protects.
+			//
+			// There is deliberately NO exemption for a /dev/null destination:
+			// a `diff --git <file> /dev/null` header is a DELETED file, whose
+			// `+++ ` is legitimately `/dev/null` — so `currentFile` is null and
+			// the guard's own `currentFile !== null` already passes it through.
+			// An earlier cut exempted `gitFilePair.destination === '/dev/null'`
+			// instead, which inverted the intent and let
+			// `diff --git src/real.ts /dev/null` + `+++ src/phantom.ts` through
+			// (round-15 finding, executed: `{src/phantom.ts: [1]}`).
+			if (
+				currentFile !== null &&
+				gitFilePair !== null &&
+				gitFilePair.destination !== currentFile
+			) {
+				return null;
+			}
+			// A rename/copy section names its destination on `rename to` /
+			// `copy to`; a `+++ ` that disagrees with it is the same phantom
+			// shape (round-15 reviewer question, executed: over-gating rather
+			// than fail-open, but the disagreement is still a malformed diff).
+			if (
+				currentFile !== null &&
+				copyRenameDestination !== null &&
+				copyRenameDestination !== currentFile
+			) {
 				return null;
 			}
 			expectingDestination = false;
@@ -1556,10 +2137,11 @@ function parseDiffLineRangesChecked(
 		) {
 			return null;
 		}
-		const match = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/.exec(line);
+		const match = /^@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(line);
 		if (!match) return null;
-		const start = Number.parseInt(match[1], 10);
-		const count = match[2] !== undefined ? Number.parseInt(match[2], 10) : 1;
+		const oldCount = match[1] !== undefined ? Number.parseInt(match[1], 10) : 1;
+		const start = Number.parseInt(match[2], 10);
+		const count = match[3] !== undefined ? Number.parseInt(match[3], 10) : 1;
 		if (
 			!Number.isSafeInteger(start) ||
 			!Number.isSafeInteger(count) ||
@@ -1567,11 +2149,18 @@ function parseDiffLineRangesChecked(
 			(count > 0 && start < 1) ||
 			count > MAX_CHANGED_LINE_ENTRIES ||
 			start + count - 1 > Number.MAX_SAFE_INTEGER ||
-			collectedLines + count > MAX_CHANGED_LINE_ENTRIES
+			collectedLines + count > MAX_CHANGED_LINE_ENTRIES ||
+			!Number.isSafeInteger(oldCount) ||
+			oldCount < 0 ||
+			oldCount > MAX_CHANGED_LINE_ENTRIES
 		) {
 			return null;
 		}
 		destinationNeedsHunk = false;
+		// Arm the hunk-body counters (#3681 item 1); the loop consumes the
+		// body before any further header prefix can be trusted.
+		oldRemaining = oldCount;
+		newRemaining = count;
 		if (!currentFile) continue;
 		const lines = result.get(currentFile);
 		if (!lines) return null;
@@ -1580,7 +2169,38 @@ function parseDiffLineRangesChecked(
 		}
 		collectedLines += count;
 	}
-	if (expectingDestination || destinationNeedsHunk) return null;
+	if (
+		expectingDestination ||
+		destinationNeedsHunk ||
+		oldRemaining > 0 ||
+		newRemaining > 0
+	) {
+		return null;
+	}
+	// A pure copy/rename section ends at EOF with its destination recorded but
+	// no hunk; commit it here so a copied file is gated rather than omitted.
+	// (The commit is already done eagerly on `copy to`/`rename to` — the next
+	// `diff --git` resets the section state — so this is the safety net for a
+	// diff that ends inside the section.)
+	if (copyRenameDestination !== null) {
+		result.set(copyRenameDestination, new Set([ALL_LINES_CHANGED]));
+		if (rawPaths !== undefined && rawCopyRenameDestination !== null) {
+			recordRawPath(rawPaths, copyRenameDestination, rawCopyRenameDestination);
+		}
+		collectedLines += 1;
+	}
+	// Production-mode no-section rule: a NON-EMPTY diff that never opened a
+	// git file section is output this parser does not understand, and an
+	// authoritative empty map from it silently disables the discount for the
+	// WHOLE batch (round-13 evidence: `"not a diff\n"` returned `[]`). Empty
+	// output remains the legitimate no-change shorthand.
+	if (
+		requireGitFileHeaders &&
+		!sawGitFileSection &&
+		diffOutput.trim().length > 0
+	) {
+		return null;
+	}
 
 	return result;
 }
@@ -1596,7 +2216,10 @@ function mergeChangedLines(
 	}
 }
 
-function parseUntrackedStatus(output: string): string[] | null {
+function parseUntrackedStatus(
+	output: string,
+	rawPaths?: Map<string, Set<string>>,
+): string[] | null {
 	if (output.length > 0 && !output.endsWith('\0')) return null;
 
 	const untracked: string[] = [];
@@ -1609,7 +2232,9 @@ function parseUntrackedStatus(output: string): string[] | null {
 		const filePath = record.slice(3);
 		if (!filePath || !isKnownPorcelainStatus(status)) return null;
 		if (status === '??' || status === '!!') {
-			untracked.push(normalizeRepoPathKey(filePath));
+			const key = normalizeRepoPathKey(filePath);
+			untracked.push(key);
+			if (rawPaths !== undefined) recordRawPath(rawPaths, key, filePath);
 		}
 
 		if (/[RC]/.test(status)) {
@@ -1785,6 +2410,15 @@ export async function getChangedLineRanges(
 	// actually USABLE — a stale-but-resolvable ref whose diff trips the stdout
 	// guard or the parser cap falls through to the next candidate instead of
 	// nulling the whole map. A total failure carries a named diagnostic.
+	// One collector for every leg, INCLUDING the committed hop: a file
+	// modified only there never reaches the staged/unstaged/untracked
+	// collectors. The resolver owns the committed map and the memo
+	// caches it, so it is MERGED here rather than passed in - a
+	// parameter would be silently empty on every memo hit, which is a
+	// repeat direct call, an ambiguity-consumer-first ordering, or a
+	// second concurrent batch on the same directory (round-19 finding,
+	// executed).
+	const rawPaths = new Map<string, Set<string>>();
 	const { attempted, resolution, failureCause } =
 		await resolveValidatedDiffBase(directory, abortSignal);
 	if (!resolution) {
@@ -1811,15 +2445,49 @@ export async function getChangedLineRanges(
 		);
 		return null;
 	}
-	const { committedLines } = resolution;
+	// #3681 item 3(b): an accepted NON-HEAD candidate after an earlier
+	// candidate failed validation silently narrows the committed hop — at the
+	// #3131 base this shape failed closed to null, and the fall-through fix
+	// (deliberate, FB-001) made it silent. Differential signal only: the
+	// ordinary stale-upstream geometry (first resolvable candidate accepted,
+	// no prior unusable attempt) stays quiet; emission is cooled down per
+	// directory (invariant 8). The classification itself remains as disclosed
+	// pending the #3681 items 3a/4 owner adjudication (see resolver docstring).
+	if (!resolution.mergeBaseEqualsHead && resolution.hadUnusableAttempt) {
+		const nowMs = Date.now();
+		if (
+			!cooldownSuppressed(
+				lastDiffBaseFallthroughWarn,
+				directory,
+				nowMs,
+				DIFF_BASE_WARN_COOLDOWN_MS,
+			)
+		) {
+			criticalWarn(
+				`changed-line base resolution: diff-base fall-through accepted — an earlier candidate produced an unusable committed diff (stdout overflow or parse failure); accepted ${resolution.acceptedCandidateRef} at ${resolution.mergeBase.slice(0, 10)}; committed changes between the skipped candidate and the accepted base classify PRE-EXISTING (advisory)`,
+			);
+		}
+	}
+	const { committedLines, committedRawPaths } = resolution;
+	for (const [key, spellings] of committedRawPaths) {
+		const existing = rawPaths.get(key);
+		if (existing === undefined) {
+			rawPaths.set(key, new Set(spellings));
+			continue;
+		}
+		for (const spelling of spellings) existing.add(spelling);
+	}
 
 	const commonDiffArgs = [
 		'-c',
 		'core.quotePath=false',
 		'diff',
 		'--no-ext-diff',
+		'--no-textconv',
 		'--no-color',
 		'--no-prefix',
+		'--submodule=short',
+		'--inter-hunk-context=0',
 		'-U0',
 	];
 	const requestedPathspecs = requestedFiles
@@ -1827,6 +2495,16 @@ export async function getChangedLineRanges(
 		.filter(
 			(file) => file.length > 0 && file !== '..' && !file.startsWith('../'),
 		);
+	// #3681 item 2: `:(literal)` argv decoration parity with the ambiguity
+	// consumer's literalPathspecs (#3092 PRR-005). Plain pathspecs let Git
+	// glob-expand a bracket/brace filename (requesting `app/a[b].ts` also
+	// admitted `app/ab.ts`, whose findings then read as NEW without the
+	// caller requesting that file). The RAW relative paths stay the map
+	// keys and the requestedKeys prefix logic below — decoration is applied
+	// ONLY at argv construction.
+	const literalPathspecs = requestedPathspecs.map(
+		(file) => `:(literal)${file}`,
+	);
 	const statusArgs = [
 		'-c',
 		'core.quotePath=false',
@@ -1835,7 +2513,7 @@ export async function getChangedLineRanges(
 		'-z',
 		'--untracked-files=all',
 		...(requestedPathspecs.length > 0 ? ['--ignored=matching'] : []),
-		...(requestedPathspecs.length > 0 ? ['--', ...requestedPathspecs] : []),
+		...(literalPathspecs.length > 0 ? ['--', ...literalPathspecs] : []),
 	];
 	// #3131: the committed leg was already acquired and parsed by
 	// resolveValidatedDiffBase (it IS the validation), so only the staged,
@@ -1859,8 +2537,10 @@ export async function getChangedLineRanges(
 		return null;
 	}
 
-	const stagedLines = parseDiffLineRangesChecked(staged, true);
-	const unstagedLines = parseDiffLineRangesChecked(unstaged, true);
+	// The raw repo-relative spellings, so the filter leg can ask git about the
+	// exact path `git diff` operated on rather than a case-folded key.
+	const stagedLines = parseDiffLineRangesChecked(staged, true, rawPaths);
+	const unstagedLines = parseDiffLineRangesChecked(unstaged, true, rawPaths);
 	if (!stagedLines || !unstagedLines) {
 		warn(
 			'pre-check: a staged/unstaged diff could not be parsed — changed-line classification is fail-closed (all findings treated as new)',
@@ -1872,7 +2552,7 @@ export async function getChangedLineRanges(
 	mergeChangedLines(result, committedLines);
 	mergeChangedLines(result, stagedLines);
 	mergeChangedLines(result, unstagedLines);
-	const untracked = parseUntrackedStatus(status);
+	const untracked = parseUntrackedStatus(status, rawPaths);
 	if (untracked === null) return null;
 	const requestedKeys = requestedPathspecs.map(normalizeRepoPathKey);
 	for (const file of untracked) {
@@ -1889,7 +2569,168 @@ export async function getChangedLineRanges(
 			}
 		}
 	}
+	// Content-altering clean/process filters. `--no-textconv` disables the
+	// textconv driver, but a `filter=<driver>` attribute still makes git diff
+	// the CLEANED representation while SAST scans the worktree one, so hunk
+	// coordinates refer to text the scanner never sees (round-13 evidence:
+	// `filter.squeeze.clean=sed 1d` made git report `@@ -2 +2 @@` for an edit
+	// on SOURCE line 3, and the line-3 finding classified PRE-EXISTING). The
+	// only reliable detection is to ask git which attributes apply, so any
+	// changed file carrying a configured `filter` attribute is marked
+	// ALL_LINES_CHANGED — over-gating, never fail-open. Only `filter` is
+	// queried: the `diff`/textconv driver is already neutralized on the argv
+	// by `--no-textconv`, and marking those files too would needlessly discard
+	// the discount for every repo with a textconv driver. A spawn failure or
+	// unparseable output fails closed like every other leg in this function.
+	const filtered = await markContentFilteredFiles(
+		result,
+		rawPaths,
+		directory,
+		abortSignal,
+	);
+	if (!filtered) {
+		warn(
+			'pre-check: the git check-attr leg failed — changed-line classification is fail-closed (all findings treated as new)',
+		);
+		return null;
+	}
 	return result;
+}
+
+/**
+ * Mark every changed file that carries a configured `filter` attribute as
+ * ALL_LINES_CHANGED, because a content-altering clean/process filter makes git
+ * diff a TRANSFORMED representation while SAST scans the worktree one.
+ *
+ * Returns false when the leg could not be evaluated, so the caller fails
+ * closed rather than trusting coordinates it could not verify.
+ */
+async function markContentFilteredFiles(
+	result: Map<string, Set<number>>,
+	rawPaths: Map<string, Set<string>>,
+	directory: string,
+	abortSignal?: AbortSignal,
+): Promise<boolean> {
+	// The queried paths are the RAW repo-relative spellings git emitted, not the
+	// normalized map keys and not the caller's `requestedFiles`:
+	//  - the map keys are lowercased on win32/darwin, and `.gitattributes`
+	//    matching is case-sensitive whenever `core.ignoreCase` is false (git's
+	//    default on a case-sensitive macOS volume), so a lowercased query can
+	//    miss a mixed-case file's `filter=` rule entirely (round-16 finding,
+	//    executed);
+	//  - a caller may pass a directory (`files: ['src']`), which
+	//    `git check-attr` reports as the directory rather than expanding, and
+	//    may pass nothing at all (the default) — either way the changed files
+	//    would never be queried (round-15 finding, executed).
+	if (result.size === 0 || rawPaths.size === 0) return true;
+	const entries = [...rawPaths]
+		.filter(([key]) => result.has(key))
+		.flatMap(([key, spellings]) =>
+			[...spellings].map((raw) => [key, raw] as const),
+		);
+	if (entries.length === 0) return true;
+	// `git check-attr --all -z` rather than the `filter <attr>` form, for two
+	// reasons the round-15 gates found by execution:
+	//   1. `check-attr filter -- <path>` ALWAYS emits a record for every queried
+	//      path, with the value `unspecified` when nothing is set — so "is the
+	//      attribute present?" cannot be answered from the record's existence.
+	//      `--all` emits a record for every attribute that is SET *or explicitly
+	//      unset* (executed: a `src/app.ts -filter` line yields `filter unset`),
+	//      which is strictly narrower than every-queried-path but still not
+	//      'only the ones with a driver'.
+	//   2. Git permits a driver literally named `unspecified`, `unset` or `set`
+	//      and EXECUTES it, so the value cannot be interpreted as a sentinel
+	//      either (a parametrized real-git probe showed all three reserved
+	//      names shift hunk coordinates exactly like `squeeze`).
+	// `-z` also makes the records NUL-separated, which is the only unambiguous
+	// form for a path containing a newline — and it means the path field is
+	// ALREADY the raw bytes, so it must NOT be run through the C-quote decoder
+	// (round-16 finding, executed: `decodeGitQuotedPath('"x.js')` returns null
+	// and the file is silently skipped).
+
+	// CONSERVATIVE BY NECESSITY, NOT BY PREFERENCE. A record is enough to mark
+	// the file ALL_LINES_CHANGED, and two shapes lose a discount they could
+	// legitimately keep (round-19 finding, executed): an explicit `-filter`
+	// opt-out, and a bare `filter` (git reports `set`). Neither can be
+	// filtered out by value, because git permits and executes a driver
+	// literally named `unset` or `set`.
+	//
+	// TWO FURTHER SHAPES ARE CORRECTNESS-REQUIRED, NOT OVER-GATING. A
+	// `filter=<driver>` with an effective `smudge` but no `clean` or
+	// `process` shifts coordinates exactly the way LFS does: git skips the clean
+	// step, so the committed blob is the source text while the scanner reads
+	// the SMUDGED worktree (executed: a 3-line committed blob against a
+	// 4-line worktree file, so a committed-new line 4 is outside the union).
+	// ACTIVE LFS IS THE SAME MECHANISM: `filter.lfs.clean` replaces the
+	// worktree content with a pointer, so the committed blob is a 3-line
+	// pointer while the scanner sees the expanded file and the diff
+	// coordinates are in POINTER space (executed: a 10-line worktree file
+	// yields a 3-line HEAD blob and `@@ -2,2 +2,2 @@`).
+	//
+	// So only `-filter` and a bare `filter` are candidates for narrowing, and
+	// that needs effective-config detection first - a product decision, not a
+	// correctness fix. A driver with NEITHER an effective `clean`, `process` nor
+	// `smudge` is genuine pass-through (executed: `@@ -3 +3 @@` unchanged).
+
+	const configured = new Set<string>();
+	// Chunk by ACCUMULATED ARGV LENGTH, not by path count. `runGit` uses
+	// `stdin: 'ignore'`, so `--stdin` is not available, and a very large
+	// changeset would otherwise exceed the Windows 32767-character command-line
+	// limit and fail closed for the whole batch (round-16 finding, executed: 600
+	// keys -> ENAMETOOLONG -> null map). A single path may also legally be
+	// several kilobytes (Linux allows 4096 bytes per component), so a fixed count
+	// does not bound the command line either (round-17 self-review finding).
+	const MAX_ARGV_BYTES = 16_000;
+	const FIXED_ARGV = [
+		'-c',
+		'core.quotePath=false',
+		'check-attr',
+		'--all',
+		'-z',
+		'--',
+	];
+	let cursor = 0;
+	while (cursor < entries.length) {
+		const batch: string[] = [];
+		let batchBytes = 0;
+		while (cursor < entries.length) {
+			const raw = entries[cursor][1];
+			// +2 for the argv separator and a NUL terminator, matching how the
+			// platform builds the command line.
+			const cost = raw.length + 2;
+			if (batch.length > 0 && batchBytes + cost > MAX_ARGV_BYTES) break;
+			batch.push(raw);
+			batchBytes += cost;
+			cursor += 1;
+		}
+		const output = await runGit(
+			[...FIXED_ARGV, ...batch],
+			directory,
+			abortSignal,
+		);
+		if (output === null) return false;
+		// `--all -z` emits repeating NUL-separated `<path> <attribute> <value>`
+		// triples. A well-formed stream ends with the value's own NUL, so the
+		// record count minus one is a multiple of three; anything else is
+		// truncated output and fails closed rather than silently skipping.
+		const records = output.split('\0');
+		if (records.length === 0 || records[records.length - 1] !== '')
+			return false;
+		if ((records.length - 1) % 3 !== 0) return false;
+		for (let index = 0; index + 2 < records.length; index += 3) {
+			if (records[index + 1] !== 'filter') continue;
+			const rawPath = records[index];
+			if (rawPath.length === 0) continue;
+			configured.add(normalizeRepoPathKey(rawPath));
+		}
+	}
+	if (configured.size === 0) return true;
+	for (const file of configured) {
+		if (result.has(file)) {
+			result.set(file, new Set([ALL_LINES_CHANGED]));
+		}
+	}
+	return true;
 }
 
 /**

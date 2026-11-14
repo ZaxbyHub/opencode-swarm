@@ -40,6 +40,7 @@ const DEFAULT_MAX_SCOPE_BYTES = 256 * 1024;
 const MAX_SCOPE_BYTES = 2 * 1024 * 1024;
 const HEAD_TIMEOUT_MS = 5_000;
 const HEAD_OUTPUT_BYTES = 256;
+const STDERR_EXCERPT_BYTES = 512;
 const HEAD_SHA_PATTERN = /^[0-9a-f]{40,64}$/i;
 
 export const REVIEWER_TASK_SCOPE_DESCRIPTION = 'reviewer-task-files-v2';
@@ -92,6 +93,12 @@ export type ReviewerScopeBuildFailureCode =
 	| 'invalid_path'
 	| 'workspace_unresolvable'
 	| 'head_timeout'
+	// #3680: permanent git-environment causes, typed apart from the
+	// transient head_timeout retry arm (issue AC12).
+	| 'no_git_workspace'
+	| 'git_unavailable'
+	| 'git_dubious_ownership'
+	| 'git_unhealthy'
 	| 'head_changed'
 	| 'outside_workspace'
 	| 'symlink_or_reparse'
@@ -199,70 +206,344 @@ function pathKey(relativePath: string): string {
 		: relativePath;
 }
 
-async function resolveHeadSha(directory: string): Promise<string | null> {
-	let child: child_process.ChildProcess | undefined;
-	let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
-	try {
-		child = _internals.spawn(
-			_internals.resolveGitExecutable(),
-			['rev-parse', '--verify', 'HEAD'],
-			{
+/** Bounded non-interactive git child: stdin ignored, stdout/stderr capped,
+ * timeout + best-effort kill (AGENTS.md invariant 3). Resolves a tagged
+ * result — never throws. */
+interface BoundedGitResult {
+	kind: 'exit' | 'spawn-error' | 'timeout' | 'overflow';
+	exitCode?: number;
+	stdout?: string;
+	stderr?: string;
+}
+
+/**
+ * Spawn errnos that mean "the OS could not start the process right now", not
+ * "git does not exist here". They are TRANSIENT — the caller's retry arm can
+ * genuinely clear them (a descriptor leak is closed, a fork storm passes, an
+ * executable being replaced finishes) — so they must ride the retryable
+ * `head_timeout` channel instead of the permanent `git_unavailable` one
+ * (#3680 AC12; final-critic round-2 blocker 1: Node throws ENOMEM
+ * SYNCHRONOUSLY from spawn() and reports ENFILE only via the async 'error'
+ * event, so the set must be applied to BOTH arms).
+ * Deliberately a SUPERSET of the descriptor-exhaustion pair (EMFILE/ENFILE)
+ * the sibling fs classifier at reviewer-scope-file-fingerprint.ts:381 treats
+ * as transient: that one guards openSync, this one guards spawn, where the
+ * fork/exec path can also fail with EAGAIN, ENOMEM, or ETXTBSY (execve(2):
+ * the executable is open for writing by another process — the condition
+ * clears when the writer closes, so a later retry can succeed; plan-critic
+ * shipped-scope round 5). NOT claimed exhaustive: an errno outside this set
+ * is treated as permanent, which is the conservative direction for a
+ * missing/unwritable binary, and the residual-exec taxonomy is audited
+ * rather than asserted complete.
+ */
+const TRANSIENT_SPAWN_ERRNOS = new Set([
+	'EMFILE',
+	'ENFILE',
+	'EAGAIN',
+	'ENOMEM',
+	'ETXTBSY',
+]);
+
+function isTransientSpawnErrno(error: unknown): boolean {
+	const code = (error as NodeJS.ErrnoException | null)?.code;
+	return typeof code === 'string' && TRANSIENT_SPAWN_ERRNOS.has(code);
+}
+
+function runBoundedGit(
+	args: readonly string[],
+	directory: string,
+	budgetMs: number,
+	captureStderr: boolean,
+): Promise<BoundedGitResult> {
+	return new Promise<BoundedGitResult>((resolve) => {
+		let child: child_process.ChildProcess | undefined;
+		let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+		let settled = false;
+		let stdoutBytes = 0;
+		let stderrBytes = 0;
+		const stdoutChunks: Buffer[] = [];
+		const stderrChunks: Buffer[] = [];
+		// spawn()'s timeout option must be an unsigned INTEGER: a fractional
+		// remaining budget (the clamp legs derive deadlines from
+		// performance.now()) otherwise throws ERR_OUT_OF_RANGE synchronously,
+		// which the catch below would classify as a permanent missing-binary
+		// cause and answer with the wrong remedy (final-critic round-3 probe).
+		const budget = Math.max(1, Math.ceil(budgetMs));
+		const finish = (value: BoundedGitResult): void => {
+			if (settled) return;
+			settled = true;
+			if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
+			try {
+				child?.kill();
+			} catch {
+				// Best-effort cleanup; the child may already have exited.
+			}
+			resolve(value);
+		};
+		try {
+			child = _internals.spawn(_internals.resolveGitExecutable(), [...args], {
 				cwd: directory,
-				stdio: ['ignore', 'pipe', 'ignore'],
-				timeout: HEAD_TIMEOUT_MS,
+				stdio: ['ignore', 'pipe', captureStderr ? 'pipe' : 'ignore'],
+				timeout: budget,
 				windowsHide: true,
-			},
-		);
-
-		return await new Promise<string | null>((resolve) => {
-			let settled = false;
-			let stdoutBytes = 0;
-			const stdoutChunks: Buffer[] = [];
-			const finish = (value: string | null): void => {
-				if (settled) return;
-				settled = true;
-				if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
-				resolve(value);
-			};
-			const killAndFail = (): void => {
-				try {
-					child?.kill();
-				} catch {
-					// Best-effort cleanup; the child may already have exited.
-				}
-				finish(null);
-			};
-
-			timeoutHandle = setTimeout(killAndFail, HEAD_TIMEOUT_MS);
-			timeoutHandle.unref?.();
-			child?.once('error', killAndFail);
-			child?.stdout?.on('data', (chunk: Buffer | string) => {
-				const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-				stdoutBytes += bytes.byteLength;
-				if (stdoutBytes > HEAD_OUTPUT_BYTES) {
-					killAndFail();
-					return;
-				}
-				stdoutChunks.push(bytes);
+				// LC_ALL=C keeps the cause matchers below honest on gettext
+				// hosts: a translated 'not a git repository' / 'detected
+				// dubious ownership' would otherwise fall through to the
+				// generic corrupt classification and lose the actionable
+				// remedy (final-critic probe 7(ii)).
+				env: {
+					...process.env,
+					LC_ALL: 'C',
+					LANGUAGE: '',
+					LC_MESSAGES: 'C',
+				},
 			});
-			child?.once('close', (exitCode) => {
-				if (exitCode !== 0 || stdoutBytes > HEAD_OUTPUT_BYTES) {
-					finish(null);
+		} catch (error) {
+			// Node throws ENOMEM (and other non-event errnos) SYNCHRONOUSLY
+			// from spawn(), so the transient set must be applied here too —
+			// without this, an ENOMEM storm reads as a permanent missing
+			// binary and the reviewer dispatch denies terminal.
+			finish(
+				isTransientSpawnErrno(error)
+					? { kind: 'timeout' }
+					: { kind: 'spawn-error' },
+			);
+			return;
+		}
+		// REFERENCED on purpose: with a fully fake child (unit tests) the
+		// timer is the only event source, and an unref'd timer never fires
+		// against an idle loop. With a real child the close event clears it
+		// via finish(); the ref only keeps the loop alive for at most
+		// budgetMs, which is the bounded wait we already promise.
+		timeoutHandle = setTimeout(() => finish({ kind: 'timeout' }), budget);
+		// Resource-exhaustion spawn failures (EMFILE/ENFILE/EAGAIN/ENOMEM) are
+		// TRANSIENT — the caller's retry arm can genuinely clear them — so
+		// they must not be classified as a permanent missing-binary cause.
+		// (The sync catch above covers the errnos spawn() throws directly.)
+		child?.once('error', (error: unknown) => {
+			finish(
+				isTransientSpawnErrno(error)
+					? { kind: 'timeout' }
+					: { kind: 'spawn-error' },
+			);
+		});
+		child?.stdout?.on('data', (chunk: Buffer | string) => {
+			const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+			stdoutBytes += bytes.byteLength;
+			if (stdoutBytes > HEAD_OUTPUT_BYTES) {
+				finish({ kind: 'overflow' });
+				return;
+			}
+			stdoutChunks.push(bytes);
+		});
+		if (captureStderr) {
+			child?.stderr?.on('data', (chunk: Buffer | string) => {
+				const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+				// Keep the FIRST STDERR_EXCERPT_BYTES bytes, including the
+				// prefix of the chunk that crosses the cap: git writes the
+				// dubious-ownership message in ONE write and it exceeds 512
+				// bytes for realistic Windows paths, so dropping the whole
+				// crossing chunk would discard the very cause string the
+				// classifier matches (final-critic round-2 blocker 3).
+				const room = STDERR_EXCERPT_BYTES - stderrBytes;
+				if (room <= 0) return;
+				if (bytes.byteLength > room) {
+					stderrChunks.push(bytes.subarray(0, room));
+					stderrBytes = STDERR_EXCERPT_BYTES;
 					return;
 				}
-				const sha = Buffer.concat(stdoutChunks).toString('utf-8').trim();
-				finish(HEAD_SHA_PATTERN.test(sha) ? sha : null);
+				stderrBytes += bytes.byteLength;
+				stderrChunks.push(bytes);
+			});
+		}
+		child?.once('close', (exitCode) => {
+			finish({
+				kind: 'exit',
+				exitCode: exitCode ?? -1,
+				stdout: Buffer.concat(stdoutChunks).toString('utf-8').trim(),
+				stderr: captureStderr
+					? Buffer.concat(stderrChunks)
+							.toString('utf-8')
+							.replace(/\p{Cc}/gu, ' ')
+							.slice(0, STDERR_EXCERPT_BYTES)
+					: '',
 			});
 		});
-	} catch {
-		return null;
-	} finally {
-		if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
-		try {
-			child?.kill();
-		} catch {
-			// Best-effort cleanup; the child may already have exited.
+	});
+}
+
+/**
+ * #3680 (issue AC12): resolve HEAD with a CAUSE-typed result. `HEAD^{commit}`
+ * verifies the object exists (plain `HEAD` accepts SHA-shaped garbage from a
+ * corrupt packed ref). A failure is further classified (three bounded
+ * follow-ups, only on the failure arm) into unborn (transient — a commit
+ * rescues it) vs corrupt (terminal — nothing in the workspace rescues it).
+ * Every child is clamped against the caller's ABSOLUTE deadline (a slow
+ * failure arm must not spend 3x the per-child budget past `deadlineAt`).
+ */
+async function resolveHeadSha(
+	directory: string,
+	deadlineAt?: number,
+): Promise<
+	| { ok: true; sha: string }
+	| {
+			ok: false;
+			cause:
+				| 'timeout'
+				| 'spawn-error'
+				| 'overflow'
+				| 'unborn'
+				| 'corrupt'
+				| 'malformed-shape';
+	  }
+> {
+	const budget = (): number => {
+		if (deadlineAt === undefined) return HEAD_TIMEOUT_MS;
+		return Math.max(1, Math.min(HEAD_TIMEOUT_MS, deadlineAt - Date.now()));
+	};
+	const verify = await runBoundedGit(
+		['rev-parse', '--verify', 'HEAD^{commit}'],
+		directory,
+		budget(),
+		false,
+	);
+	if (verify.kind === 'timeout') return { ok: false, cause: 'timeout' };
+	if (verify.kind === 'spawn-error') return { ok: false, cause: 'spawn-error' };
+	if (verify.kind === 'overflow') return { ok: false, cause: 'overflow' };
+	const sha = verify.stdout ?? '';
+	if (verify.exitCode === 0 && HEAD_SHA_PATTERN.test(sha)) {
+		return { ok: true, sha };
+	}
+	if (verify.exitCode === 0) return { ok: false, cause: 'malformed-shape' };
+	// Nonzero: distinguish unborn (transient — a commit rescues it) from
+	// corrupt (terminal — nothing in the workspace rescues it). Deterministic
+	// chain, no "any commit exists somewhere" heuristic: HEAD must be a
+	// symbolic ref whose TARGET ref is ABSENT. A detached HEAD, a symref
+	// target that EXISTS but does not peel (garbage loose/packed ref, e.g.
+	// all-zeros) — each is corrupt.
+	const symbolic = await runBoundedGit(
+		['symbolic-ref', '-q', 'HEAD'],
+		directory,
+		budget(),
+		true,
+	);
+	if (symbolic.kind !== 'exit') {
+		return {
+			ok: false,
+			cause: symbolic.kind === 'spawn-error' ? 'spawn-error' : 'timeout',
+		};
+	}
+	if (symbolic.exitCode !== 0 || !symbolic.stdout) {
+		return { ok: false, cause: 'corrupt' };
+	}
+	const branchRef = symbolic.stdout;
+	const refPresent = await runBoundedGit(
+		['show-ref', '--verify', '--quiet', branchRef],
+		directory,
+		budget(),
+		true,
+	);
+	if (refPresent.kind !== 'exit') {
+		return {
+			ok: false,
+			cause: refPresent.kind === 'spawn-error' ? 'spawn-error' : 'timeout',
+		};
+	}
+	if (refPresent.exitCode === 1) {
+		// Symbolic HEAD points at a branch ref that does not exist at all:
+		// genuinely unborn; the first commit resolves it.
+		return { ok: false, cause: 'unborn' };
+	}
+	// Ref present (exit 0) or itself unreadable (exit >1, e.g. 128 corrupt
+	// loose/packed ref) but the commit object fails: corrupt, terminal.
+	return { ok: false, cause: 'corrupt' };
+}
+
+export type WorkspaceGitHealth =
+	| { kind: 'head'; sha: string }
+	| {
+			kind: 'denial';
+			code: Extract<
+				ReviewerScopeBuildFailureCode,
+				| 'head_timeout'
+				| 'no_git_workspace'
+				| 'git_unavailable'
+				| 'git_dubious_ownership'
+				| 'git_unhealthy'
+			>;
+			retryable: boolean;
+	  };
+
+/**
+ * #3680: one git-native availability + HEAD classification (never an fs
+ * `.git` marker check — AGENTS.md invariant 4 makes `.opencode/` a
+ * legitimate project-root declaration without a working repository of its
+ * own, and executed fixtures show fs markers disagree with git on both
+ * nested-root and dangling `.git`-file workspaces). Permanent environmental
+ * causes resolve `retryable: false`; only genuinely transient causes
+ * (timeout, overflow, unborn HEAD) keep the `head_timeout` retry arm.
+ */
+export async function classifyWorkspaceGitHealth(
+	directory: string,
+	deadlineAt?: number,
+): Promise<WorkspaceGitHealth> {
+	const remaining = (): number => {
+		if (deadlineAt === undefined) return HEAD_TIMEOUT_MS;
+		return Math.max(1, Math.min(HEAD_TIMEOUT_MS, deadlineAt - Date.now()));
+	};
+	const availability = await runBoundedGit(
+		['rev-parse', '--git-dir'],
+		directory,
+		Math.min(2_000, remaining()),
+		true,
+	);
+	switch (availability.kind) {
+		case 'spawn-error':
+			return { kind: 'denial', code: 'git_unavailable', retryable: false };
+		case 'timeout':
+		case 'overflow':
+			// Transient: do not invent a permanent cause from slow/odd git.
+			return { kind: 'denial', code: 'head_timeout', retryable: true };
+		case 'exit':
+			break;
+	}
+	const stderrText = availability.stderr ?? '';
+	if (availability.exitCode !== 0) {
+		if (/dubious ownership/i.test(stderrText)) {
+			return {
+				kind: 'denial',
+				code: 'git_dubious_ownership',
+				retryable: false,
+			};
 		}
+		if (/not a git repository/i.test(stderrText)) {
+			return { kind: 'denial', code: 'no_git_workspace', retryable: false };
+		}
+		return { kind: 'denial', code: 'git_unhealthy', retryable: false };
+	}
+	const head = await resolveHeadSha(directory, deadlineAt);
+	if (head.ok) return { kind: 'head', sha: head.sha };
+	switch (head.cause) {
+		case 'spawn-error':
+			// The availability child spawned fine, so a later child's spawn
+			// failure is a permanent missing/unwritable executable — the
+			// transient resource-exhaustion errnos were already converted to
+			// `timeout` inside runBoundedGit, so a residual spawn-error must
+			// not ride the retryable arm (plan-critic shipped-scope finding
+			// 5; #3680 AC12).
+			return { kind: 'denial', code: 'git_unavailable', retryable: false };
+		case 'timeout':
+		case 'overflow':
+		case 'malformed-shape':
+			return { kind: 'denial', code: 'head_timeout', retryable: true };
+		case 'unborn':
+			// Proven by resolveHeadSha: symbolic HEAD points at an ABSENT
+			// branch ref (show-ref exit 1) — genuinely unborn; the first
+			// commit rescues it, so the transient head_timeout arm stands
+			// (frozen C10 contract).
+			return { kind: 'denial', code: 'head_timeout', retryable: true };
+		case 'corrupt':
+			return { kind: 'denial', code: 'git_unhealthy', retryable: false };
 	}
 }
 
@@ -325,10 +606,11 @@ export async function buildReviewerTaskScope(
 	if (!workspaceIdentity) {
 		return { ok: false, code: 'workspace_unresolvable', retryable: false };
 	}
-	const headSha = await resolveHeadSha(realRoot);
-	if (!headSha) {
-		return { ok: false, code: 'head_timeout', retryable: true };
+	const health = await classifyWorkspaceGitHealth(realRoot, options.deadlineAt);
+	if (health.kind === 'denial') {
+		return { ok: false, code: health.code, retryable: health.retryable };
 	}
+	const headSha = health.sha;
 
 	const candidates = new Map<
 		string,
@@ -433,8 +715,21 @@ export async function buildReviewerTaskScope(
 		}
 	}
 
-	const finalHeadSha = await resolveHeadSha(realRoot);
-	if (finalHeadSha !== headSha) {
+	const finalHead = await classifyWorkspaceGitHealth(
+		realRoot,
+		options.deadlineAt,
+	);
+	if (finalHead.kind === 'denial') {
+		// A git-environment cause discovered DURING capture must keep its
+		// own typed code and retryability. Collapsing every denial into
+		// retryable `head_changed` — the pre-#3680 shape — lets a workspace
+		// that became permanently unavailable or corrupt mid-capture ride
+		// the retry arm and surface as REVIEWER_CAPTURE_RETRY_EXHAUSTED
+		// instead of the actionable terminal denial (plan-critic
+		// shipped-scope finding 4; #3680 AC9/AC12).
+		return { ok: false, code: finalHead.code, retryable: finalHead.retryable };
+	}
+	if (finalHead.sha !== headSha) {
 		return { ok: false, code: 'head_changed', retryable: true };
 	}
 

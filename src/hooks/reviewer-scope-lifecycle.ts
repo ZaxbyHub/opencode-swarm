@@ -45,6 +45,7 @@ import { isTaskToolId } from './normalize-tool-name.js';
 import { computeScopeFingerprint } from './review-receipt.js';
 import {
 	buildReviewerTaskScope,
+	classifyWorkspaceGitHealth,
 	REVIEWER_TASK_SCOPE_DESCRIPTION,
 	REVIEWER_TASK_SCOPE_HEADER,
 	type ReviewerTaskScope,
@@ -725,6 +726,22 @@ export async function beginApprovedReviewerScopeLifecycle(input: {
 			});
 			if (collecting) {
 				if (collecting.modifiedFiles.length === 0) {
+					// #3680: a permanent git-environment condition (no git at all, missing
+					// binary, dubious ownership, corrupt ref) must surface as a TERMINAL
+					// denial — re-dispatch can never resolve it. Transient causes keep the
+					// retryable attribution-empty arm unchanged (frozen C10/C13 contract).
+					const zeroRoutedHealth = await classifyWorkspaceGitHealth(
+						collecting.captureDirectory,
+					);
+					if (
+						zeroRoutedHealth.kind === 'denial' &&
+						!zeroRoutedHealth.retryable
+					) {
+						throw typedReviewerScopeError(
+							'REVIEWER_ATTRIBUTION_EMPTY',
+							`task ${taskId} generation ${collecting.generation}: coder attribution was empty and the workspace has a permanent git-environment condition (${zeroRoutedHealth.code}, retryable=false, responsible: architect). ACTION[architect]: resolve git availability for this workspace (initialize a repository, repair a corrupt ref, or exclude it from reviewer gating); re-dispatching cannot resolve a permanent cause`,
+						);
+					}
 					throw typedReviewerScopeError(
 						'REVIEWER_ATTRIBUTION_EMPTY',
 						`task ${taskId} generation ${collecting.generation}: coder attribution was empty — zero guardrail-observed writes were routed and no committed declared change was proven (declaredFiles=${collecting.declaredFiles.length}, routed=0, committed-in-scope=unproven-or-empty, retryable=true, responsible: architect). ACTION[architect]: inspect the workspace for writes that bypassed guardrails, or re-dispatch the coder`,
@@ -1129,11 +1146,15 @@ export async function completeReviewerScopeLifecycle(input: {
 				// guardrail-routed attribution stands; the advisory records
 				// that the committed-diff leg was unproven, and the
 				// completeness/ready path proceeds with what was routed
-				// (over-review, not denial). A workspace with NO git at all
-				// still cannot dispatch the reviewer afterward (review-receipt-
-				// scope.ts resolveHeadSha denies with head_timeout,
-				// retryable=true) — a pre-existing limitation outside this
-				// PR's scope, surfaced to the architect as a retryable denial.
+				// (over-review, not denial). Attribution for the no-git wall:
+				// the ROUTED head_timeout denial pre-dates PR #3668 (the
+				// review-receipt-scope.ts producer is byte-identical across its
+				// merge base — executed); what #3668 changed is the ZERO-ROUTED
+				// leg, which converted the previously terminal REVIEWER_SCOPE_STALE
+				// into a retryable attribution-empty loop. #3680 types both: transient
+				// (unborn HEAD) stays retryable; permanent (no git at all, missing
+				// binary, dubious ownership, corrupt ref) is terminal with an
+				// actionable cause — see classifyWorkspaceGitHealth.
 				pushAdvisory(
 					ensureAgentSession(input.parentSessionID),
 					`REVIEWER_ATTRIBUTION_DEGRADED: task ${taskId} generation ${scoped.generation}: committed-change reconciliation could not be proven (no dispatch git head, unresolvable current head, or failed committed diff); proceeding on the ${scoped.modifiedFiles.length} guardrail-routed file(s). ACTION[architect]: if committed output was expected beyond the routed writes, inspect the workspace manually`,
@@ -1143,9 +1164,14 @@ export async function completeReviewerScopeLifecycle(input: {
 				// Zero-routed completion with an unproven git channel: a clean
 				// working tree is NOT proof of no mutation, and nothing was
 				// routed — retain for the typed reviewer-dispatch denial.
+				const degradedHealth = await classifyWorkspaceGitHealth(
+					scoped.captureDirectory,
+				);
+				const degradedPermanent =
+					degradedHealth.kind === 'denial' && !degradedHealth.retryable;
 				pushAdvisory(
 					ensureAgentSession(input.parentSessionID),
-					`REVIEWER_ATTRIBUTION_DEGRADED: task ${taskId} generation ${scoped.generation}: committed-change reconciliation could not be proven (no dispatch git head, unresolvable current head, or failed committed diff); the generation is retained for a typed reviewer-dispatch denial. ACTION[architect]: verify git availability for the workspace, then re-dispatch the coder`,
+					`REVIEWER_ATTRIBUTION_DEGRADED: task ${taskId} generation ${scoped.generation}: committed-change reconciliation could not be proven (no dispatch git head, unresolvable current head, or failed committed diff); the generation is retained for a typed reviewer-dispatch denial${degradedPermanent ? ` (${(degradedHealth as { code: string }).code}, permanent). ACTION[architect]: resolve git availability (initialize a repository, repair the corrupt ref, or exclude this workspace from reviewer gating); re-dispatching the coder cannot resolve a permanent git-environment condition` : `. ACTION[architect]: verify git availability for the workspace, then re-dispatch the coder`}`,
 				);
 				return null;
 			}

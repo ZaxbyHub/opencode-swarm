@@ -219,6 +219,14 @@ describe('parseDiffLineRanges', () => {
 			'--- src/foo.ts',
 			'+++ src/foo.ts',
 			'@@ -10,3 +10,5 @@ function example() {',
+			'-old one',
+			'-old two',
+			'-old three',
+			'+new one',
+			'+new two',
+			'+new three',
+			'+new four',
+			'+new five',
 		].join('\n');
 
 		const result = parseDiffLineRanges(diff);
@@ -237,10 +245,15 @@ describe('parseDiffLineRanges', () => {
 			'--- src/a.ts',
 			'+++ src/a.ts',
 			'@@ -1,0 +1,2 @@',
+			'+alpha',
+			'+beta',
 			'diff --git src/b.ts src/b.ts',
 			'--- src/b.ts',
 			'+++ src/b.ts',
 			'@@ -5,0 +5,3 @@',
+			'+one',
+			'+two',
+			'+three',
 		].join('\n');
 
 		const result = parseDiffLineRanges(diff);
@@ -250,14 +263,22 @@ describe('parseDiffLineRanges', () => {
 	});
 
 	test('parses hunk with count 0 (pure deletion)', () => {
-		const diff = ['+++ src/foo.ts', '@@ -10,3 +10,0 @@'].join('\n');
+		const diff = [
+			'+++ src/foo.ts',
+			'@@ -10,3 +10,0 @@',
+			'-gone one',
+			'-gone two',
+			'-gone three',
+		].join('\n');
 
 		const result = parseDiffLineRanges(diff);
 		expect(result.get('src/foo.ts')!.size).toBe(0);
 	});
 
 	test('parses hunk with no count (single line change)', () => {
-		const diff = ['+++ src/foo.ts', '@@ -10 +20 @@'].join('\n');
+		const diff = ['+++ src/foo.ts', '@@ -10 +20 @@', '-before', '+after'].join(
+			'\n',
+		);
 
 		const result = parseDiffLineRanges(diff);
 		const lines = result.get('src/foo.ts')!;
@@ -269,6 +290,11 @@ describe('parseDiffLineRanges', () => {
 		const diff = [
 			'+++ src/foo.ts',
 			'@@ -10,3 +20,5 @@ function add(a, b) {',
+			' context one',
+			' context two',
+			' context three',
+			'+added one',
+			'+added two',
 		].join('\n');
 
 		const result = parseDiffLineRanges(diff);
@@ -283,13 +309,16 @@ describe('parseDiffLineRanges', () => {
 	});
 
 	test('decodes quoted UTF-8 octal paths and CRLF hunks', () => {
-		const diff = '+++ "src/space \\342\\230\\203.ts"\r\n@@ -0,0 +2,1 @@\r\n';
+		const diff =
+			'+++ "src/space \\342\\230\\203.ts"\r\n@@ -0,0 +2,1 @@\r\n+const x = 1;\r\n';
 		const result = parseDiffLineRanges(diff);
 		expect(result.get('src/space ☃.ts')).toEqual(new Set([2]));
 	});
 
 	test('ignores deleted destinations', () => {
-		const result = parseDiffLineRanges('+++ /dev/null\n@@ -1,1 +0,0 @@\n');
+		const result = parseDiffLineRanges(
+			'+++ /dev/null\n@@ -1,1 +0,0 @@\n-removed line\n',
+		);
 		expect(result.size).toBe(0);
 	});
 });

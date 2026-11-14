@@ -49,6 +49,22 @@ function writeRawSidecar(absPath: string, bundle: unknown): void {
 // ---------------------------------------------------------------------------
 
 /**
+ * Canonical pattern for the synthetic bucket id written by
+ * {@link writeAgentSummary} when a summary carries no task_id
+ * (`phase-${summary.phase}-summaries`). The diagnose orphan filter reuses
+ * this predicate (#3681 item 5); the phase slot is the canonical decimal of
+ * AgentWorkSummarySchema.phase (integer 0-999, no leading zeros), so
+ * `phase-01-summaries`, `phase-1000-summaries`, `phase-1-summaries-extra`
+ * and similar near-misses are NOT exempted (they stay enumerable as
+ * orphans).
+ */
+const PHASE_SUMMARIES_ID_REGEX = /^phase-(?:0|[1-9]\d{0,2})-summaries$/;
+
+export function isPhaseSummariesId(taskId: string): boolean {
+	return PHASE_SUMMARIES_ID_REGEX.test(taskId);
+}
+
+/**
  * Persist a per-agent work summary as a `note` evidence entry. The structured payload
  * lives entirely under metadata so it survives EvidenceBundleSchema validation.
  * Keyed by the agent's task_id when present, else a synthetic phase-scoped bucket.
