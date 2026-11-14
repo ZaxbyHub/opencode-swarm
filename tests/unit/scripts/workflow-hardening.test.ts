@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import * as path from 'node:path';
-import { parse } from 'yaml';
+import { load as parse } from 'js-yaml';
 
 /**
  * Execution-boundary pins for the pr-standards job (issue #3282, absorbed by
