@@ -961,6 +961,7 @@ export interface InvocationWindow {
 	consecutiveErrors: number;
 	/** Whether hard limit was hit for this invocation */
 	hardLimitHit: boolean;
+	reviewBudgetExhausted?: 'tool_calls' | 'duration';
 	/** Timestamp of most recent successful tool call */
 	lastSuccessTimeMs: number;
 	/** Circular buffer of recent tool calls (max 20) for repetition detection */

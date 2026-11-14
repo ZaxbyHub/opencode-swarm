@@ -128,3 +128,11 @@ Some issues (pure documentation fixes, non-executable product decisions already 
   --expect --copy --deps` spelled out (every file the base leg needs listed in
   `--copy`). Replays then run one command instead of re-assembling flags — an
   omitted `--copy` silently rewrites certified RED base logs as ERROR.
+
+## Published acceptance commands
+
+Use the published issue's `argv:` verbatim for each executable acceptance criterion and prove that command at both revisions. When a published command cannot witness the fix, record the AC, both commands, and the observed base and head outcomes. Correct the issue with the maintainer before claiming parity. For a GitHub-backed trace, record `published-issue: https://github.com/OWNER/REPO/issues/NUMBER` in `state.md` so Phase 4 fetches the live issue body and checks parity. The validator treats the published command as text.
+
+## Causal evidence and falsifiers
+
+Negative-evidence checks must identify the target assertion and its expected failure reason. Run a pristine control under the same conditions and require the intended result to differ. Treat producer guards, skips, crashes, and unrelated assertion failures as invalid evidence. When editing a probe that supplies negative evidence, execute its falsifier before accepting the edited probe. Keep mutation probes isolated from concurrent checkouts and replays.

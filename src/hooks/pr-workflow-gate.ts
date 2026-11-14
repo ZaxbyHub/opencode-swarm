@@ -248,6 +248,7 @@ import {
 import { swarmState } from '../state.js';
 import { resolveGhBinary } from '../tools/gh-evidence.js';
 import { getPrWorkflowToolCapability } from '../tools/tool-metadata.js';
+import { atomicWriteSwarmFile } from '../utils/atomic-write.js';
 import { sameProjectRoot } from '../utils/canonical-root.js';
 import { runExternalTool } from '../utils/external-tool-runner.js';
 import { log, warn } from '../utils/logger.js';
@@ -1003,6 +1004,7 @@ export interface PrReviewVerdictRejectionRecord {
 export const MAX_PR_REVIEW_VERDICT_REJECTIONS = 24;
 
 export interface PrWorkflowGateState {
+	releaseReview?: { url: string; head: string };
 	schemaVersion: 1;
 	/** Monotonic durable revision used to reject stale same-session transitions. */
 	revision: number;
@@ -1820,6 +1822,12 @@ const PrWorkflowGateStateSchema = z
 			.optional(),
 		prReviewReservedRunId: z.string().min(1).optional(),
 		prReviewArtifactRunId: z.string().min(1).optional(),
+		releaseReview: z
+			.object({
+				url: z.string().url().max(2000),
+				head: z.string().regex(/^[a-f0-9]{40}$/),
+			})
+			.optional(),
 		prReviewFindingsPath: z.string().min(1).optional(),
 		prReviewPartialBaseCoverage:
 			PrReviewPartialBaseCoverageRecordSchema.optional(),
@@ -2194,6 +2202,7 @@ export async function activatePrWorkflow(
 	options: {
 		prHeadSha?: string;
 		requireCheckoutPreflight?: boolean;
+		releaseReview?: PrWorkflowGateState['releaseReview'];
 		prUrl?: string;
 		// #2882 AC5: configured context authorizing a declared generic
 		// self-hosted GitLab MR URL as the PR_FEEDBACK target. Fail-closed
@@ -2295,6 +2304,15 @@ export async function activatePrWorkflow(
 				normalizedSessionID,
 			);
 			if (existing?.mode === mode) {
+				if (
+					options.releaseReview &&
+					(existing.releaseReview?.url !== options.releaseReview.url ||
+						existing.releaseReview?.head !== options.releaseReview.head)
+				) {
+					throw new Error(
+						'BLOCKED: active workflow does not match the release PR and head',
+					);
+				}
 				if (mode === 'PR_FEEDBACK' && options.prUrl) {
 					const requestedTarget = canonicalGitHubPrUrl(
 						options.prUrl,
@@ -2484,6 +2502,9 @@ export async function activatePrWorkflow(
 					? { skillContractAdvisories: activationAdvisories }
 					: {}),
 				...(initialHead ? { prHeadSha: initialHead } : {}),
+				...(options.releaseReview
+					? { releaseReview: options.releaseReview }
+					: {}),
 				...(feedbackTargetUrl
 					? { prFeedbackTargetUrl: feedbackTargetUrl }
 					: {}),
@@ -3305,7 +3326,10 @@ export async function clearPrWorkflowGateState(
 	directory: string,
 	sessionID: string,
 	expectedRevision?: number,
-	options: { allowSalvagedRead?: boolean } = {},
+	options: {
+		allowSalvagedRead?: boolean;
+		releaseApproval?: PrWorkflowGateState;
+	} = {},
 ): Promise<void> {
 	const normalizedSessionID = normalizeSessionID(sessionID);
 	await withSessionStateMutation(directory, normalizedSessionID, async () => {
@@ -3333,6 +3357,53 @@ export async function clearPrWorkflowGateState(
 				throw new Error(
 					'BLOCKED: PR workflow gate state changed during terminal completion; revalidate the current session state before retrying',
 				);
+			}
+			const runId = current.prReviewArtifactRunId;
+			const release = current.releaseReview;
+			const releaseReceipt =
+				release && runId && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(runId)
+					? validateSwarmPath(
+							directory,
+							path.join('pr-review', runId, 'native-completion.json'),
+						)
+					: undefined;
+			if (options.releaseApproval) {
+				if (
+					workflowIdentity(current) !==
+					workflowIdentity(options.releaseApproval)
+				) {
+					throw new Error(
+						'BLOCKED: release review workflow changed during completion',
+					);
+				}
+				if (
+					!release ||
+					release.head !== current.prHeadSha ||
+					!runId ||
+					!releaseReceipt
+				) {
+					throw new Error('BLOCKED: no valid release review run to complete');
+				}
+				await atomicWriteSwarmFile(
+					releaseReceipt,
+					JSON.stringify({
+						run_id: runId,
+						head: release.head,
+						url: release.url,
+						session_id: current.sessionID,
+						coverage: 'COMPLETE',
+						verdict: 'APPROVE',
+					}) + '\n',
+				);
+				await _test_exports.afterNativeReleaseReceiptWrite?.();
+			} else if (releaseReceipt) {
+				// A previous APPROVE may have persisted its receipt before an interrupted
+				// clear. A different terminal verdict or abort revokes that receipt.
+				await fsp
+					.unlink(releaseReceipt)
+					.catch((error: NodeJS.ErrnoException) => {
+						if (error.code !== 'ENOENT') throw error;
+					});
 			}
 		}
 		await deleteStateWhileLocked(directory, normalizedSessionID, {
@@ -5688,6 +5759,11 @@ async function bindPrWorkflowHeadWhileLocked(
 		throw new Error(
 			`BLOCKED: no active PR workflow gate for session "${normalizedSessionID}". ` +
 				'The gate must be activated before the PR head can be bound.',
+		);
+	}
+	if (state.releaseReview && normalizedHead !== state.releaseReview.head) {
+		throw new Error(
+			'BLOCKED: the requested head differs from the release review head',
 		);
 	}
 	await assertCurrentCheckoutHead(directory, normalizedHead, state.mode);
@@ -14986,6 +15062,7 @@ export async function completePrWorkflow(
 	// mid-completion, bumping the durable revision; the terminal clear must
 	// CAS against that post-admission revision. Undefined otherwise.
 	let terminalClearRevision: number | undefined;
+	let releaseApproval: PrWorkflowGateState | undefined;
 	if (expectedMode === 'PR_REVIEW') {
 		// Issue #2383: the controller must declare its terminal verdict and the
 		// gate validates it against the settlement-derived coverage kind, so a
@@ -15586,6 +15663,13 @@ export async function completePrWorkflow(
 					`BLOCKED: PR_REVIEW ${ready.settlement.kind} completion allows report_verdict ${policyAllowed.join(' | ')}; got "${verdict}". Final finding policy and coverage do not permit this report.`,
 				);
 			}
+			if (
+				readyState.releaseReview &&
+				ready.settlement.kind === 'COMPLETE' &&
+				verdict === 'APPROVE'
+			) {
+				releaseApproval = readyState;
+			}
 			// Feedback F7: the ladder path completes only with every validation
 			// phase settled through composition or N-of-M admission — the skip
 			// disclosure's condition (an unsettled phase disclosed at an
@@ -15977,11 +16061,13 @@ export async function completePrWorkflow(
 		directory,
 		sessionID,
 		terminalClearRevision ?? state.revision,
+		{ releaseApproval },
 	);
 	return 'completed';
 }
 
 export const _test_exports = {
+	afterNativeReleaseReceiptWrite: undefined as (() => void) | undefined,
 	/**
 	 * Issue #3099 R6: `gh` availability seam. Read at ACTIVATION call time and
 	 * handed to the readiness service, so a test can pin presence or absence.

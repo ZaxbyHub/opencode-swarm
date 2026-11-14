@@ -409,3 +409,46 @@ Lives inside the trace directory (git-excluded, never committed): `checkpoint.ma
 ## Test Validation and Drift Review
 
 See `references/full-resolution-contract.md` for this section - kept there as the single copy; this reference only points to it so the requirement is not duplicated and cannot drift.
+
+## Native release review
+
+For release-bound work, record `release-bound: yes` in the trace and the published `PR URL:` in `10-pr-body.md`. Run `trace-check.sh release-review --slug <slug>` before seeking merge approval. On `release-review-action-v1`, call `swarm_command` with `command: "pr-review"` and `args: [<PR URL>, "--release-head", <exact head>]`. Follow the returned mode signal. A matching active review resumes. After an APPROVE with complete coverage, call `pr_review_submission` for the completed run. Record the returned review ID and run ID as `review-id:` and `run-id:` in `10c-broad-review.md` when `native_release_receipt` is true, then rerun the release check. An incomplete or blocking review keeps merge admission closed.
+
+## Trace evidence integrity
+
+### Causal-oracle evidence rule
+
+Name the target assertion and its expected failure. Run a pristine control under the same conditions and verify the expected differential.
+
+### Falsifier-first rule
+
+Execute the falsifier first after changing a negative-evidence probe.
+
+### Guard-discrimination rule
+
+Reject skips, crashes, producer-side guard failures, and unrelated assertions as witnesses.
+
+### Disposition-audit rule
+
+Audit disposition severity and reachability before applying an issue-count ceiling.
+
+### Checkout-exclusion rule
+
+Keep mutation probes and concurrent checkout replays in separate worktrees.
+
+### Session-ledger abort criterion
+
+Stop the affected trace when the session ledger loses the owning run, reviewed head, or evidence location. Restore those links before recording another verdict.
+
+### Generator-only authorship and banner rule
+
+Use the checkpoint generator for the replay runner and test inventory. Preserve its GENERATED banners.
+
+### Vendored-copy manifest-pin guidance
+
+Pin vendored copies with a manifest of upstream revision, paths, and content hashes. Verify the manifest when refreshing the copy.
+
+### Trace validation commands
+- Attach committed output or edit evidence to an `- Evidence:` or `- Disposition:` assertion using `[receipt <commit>:<path> blob=<blob>]`. Run `trace-check.sh receipts --slug <slug>` to verify the bindings.
+- For a same-tree metadata commit, use `rebind-identities.sh --slug <slug> --reason <reason>` to update the active identities, then run it with `--check`. A changed tree requires fresh review.
+- After a squash merge, capture the output of `trace-check.sh merge-identity <base-sha> <reviewed-head-sha> <squash-sha>` in the trace. The command verifies the squash parent and stable patch ID.

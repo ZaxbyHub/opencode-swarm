@@ -108,6 +108,7 @@ describe('Command registration parity — classification baselines', () => {
 		// memory consolidation-log (read consolidation log), gate-audit (bounded
 		// production audit), and gate-stats (offline audit reducer). `review`
 		const NEWER_ALLOWLIST_ADDITIONS = [
+			'pr-review',
 			'ci-simulate',
 			'costs',
 			'guardrail explain',

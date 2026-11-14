@@ -4,7 +4,11 @@ import {
 	syncBundledProjectSkillsIfMissingAsync,
 } from '../config/bundled-skills.js';
 import { loadPluginConfig } from '../config/loader.js';
-import type { AutoReviewConfig, PluginConfig } from '../config/schema.js';
+import {
+	type AutoReviewConfig,
+	type PluginConfig,
+	stripKnownSwarmPrefix,
+} from '../config/schema.js';
 import type { EvaluationModelDispatcher } from '../evaluation/model-dispatcher.js';
 import {
 	activatePrWorkflow,
@@ -1627,19 +1631,40 @@ export const COMMAND_REGISTRY = {
 		toolPolicy: 'restricted',
 	},
 	'pr-review': {
-		handler: (ctx) =>
-			handleModeCommandWithBundledSkills(
+		handler: async (ctx) => {
+			if (ctx.args[1] === '--release-head') {
+				const [url, , head] = ctx.args;
+				if (
+					stripKnownSwarmPrefix(ctx.activeAgentName ?? '') !== 'architect' ||
+					ctx.args.length !== 3 ||
+					!url ||
+					!head ||
+					!/^[a-f0-9]{40}$/.test(head)
+				) {
+					return 'BLOCKED: release review requires the architect, a GitHub PR URL, and an exact head.';
+				}
+				const signal = handlePrReviewCommand(ctx.directory, [url]);
+				if (signal !== `[MODE: PR_REVIEW pr="${url}" council=false]`)
+					return signal;
+				await activatePrWorkflow(ctx.directory, ctx.sessionID, 'PR_REVIEW', {
+					requireCheckoutPreflight: true,
+					releaseReview: { url, head },
+				});
+				return `${signal} Release review is bound to ${head}. Complete the native review and submit it before resuming merge admission.`;
+			}
+			return handleModeCommandWithBundledSkills(
 				ctx,
 				handlePrReviewCommand,
 				'PR_REVIEW',
-			),
+			);
+		},
 		description:
 			'Launch deep PR review with multi-lane analysis [url] [--council]',
 		args: '<pr-url|owner/repo#N|N> [--council]',
 		details:
 			'Launches a structured PR review: preserves dirty state, verifies and binds an exact detached PR head, reconstructs PR intent via obligation extraction cascade, computes a depth tier (S/M/L) from the bound merge-base diff, launches the base explorer wave through dispatch_lanes_async (all 6 review dimensions covered on every PR — six singleton lanes at tier L, consolidated owned_workflow_lanes partitions at tiers S/M) while the architect keeps doing non-dependent work, and polls collect_lane_results incrementally. It evaluates an exact 11-row repository-agnostic risk-family ledger, records applicable rows as MATCHED and concretely inapplicable rows as provenance-free NOT_TRIGGERED, always keeps unclassified-risk MATCHED, and dispatches micro work only for MATCHED families (dedicated lanes at tier L, consolidated sweeps at S/M). It then validates findings through independent reviewer confirmation, applies critic challenge to HIGH/CRITICAL findings, and synthesizes only after matched coverage is closed. Failed obligations retry through the same structured async mode and exact PR head; blocking or direct-Task dispatch is not provenance-equivalent, so unclosed matched coverage leaves the review BLOCKED rather than degraded. --council variant fires adversarial multi-model review. Supports full GitHub URL, owner/repo#N shorthand, or bare PR number (resolves against origin remote).',
 		category: 'agent',
-		toolPolicy: 'none',
+		toolPolicy: 'agent',
 	},
 	'pr-feedback': {
 		handler: (ctx) => handlePrFeedbackCommandWithTransition(ctx),

@@ -24,6 +24,7 @@ root="$(git rev-parse --show-toplevel 2>/dev/null)" || { echo "repro-check: not 
 root="$(to_shell_path "$root")"
 root_real="$(cd "$root" && pwd -P)"
 script_dir="$(cd "$(dirname "$0")" && pwd -P)"
+. "$script_dir/github-api.sh"
 trace_root_real=""
 
 usage() { echo "usage: repro-check.sh {run|checkpoint|verify-checkpoint|verify-semantics|anchor|verify-anchor} --slug <slug> ..." >&2; exit 2; }
@@ -206,6 +207,8 @@ set_trace_root() {
 
 trace_for() {
   [ -n "$trace_dir" ] || trace_dir="$root/.agents/issue-traces/$slug"
+  # A generated runner or Windows caller may supply a native drive path.
+  case "$trace_dir" in [A-Za-z]:/*) trace_dir="$(to_shell_path "$trace_dir")" ;; esac
   validate_trace_dir_prefix
   refuse_ancestor_symlink_escape
 }
@@ -561,6 +564,7 @@ quoted_argv() { local arg; for arg in "$@"; do printf '%q ' "$arg"; done; }
 
 do_run() {
   local base="" class="" check_id="" expect="" timeout_seconds=600 deps=link arg base_status head_status base_result head_result verdict exit_code=0
+  local base_only=0
   local copies=()
   trace_dir=""; slug=""
   while [ "$#" -gt 0 ]; do
@@ -570,6 +574,7 @@ do_run() {
       --id) [ "$#" -ge 2 ] || usage; check_id="$2"; shift 2;;
       --expect) [ "$#" -ge 2 ] || usage; expect="$2"; shift 2;;
       --copy) [ "$#" -ge 2 ] || usage; copies+=("$2"); shift 2;;
+      --base-only) base_only=1; shift;;
       --deps) [ "$#" -ge 2 ] || usage; deps="$2"; shift 2;;
       --timeout) [ "$#" -ge 2 ] || usage; timeout_seconds="$2"; shift 2;;
       --slug) [ "$#" -ge 2 ] || usage; slug="$2"; shift 2;;
@@ -604,6 +609,15 @@ do_run() {
   link_deps
   base_status="$(run_one "$worktree" "$trace_dir/repro/$check_id.base.log" "$timeout_seconds" "$@")"
   trace_path_safe "$trace_dir/repro/$check_id.base.log" file || { echo "repro-check: base log was not created safely" >&2; exit 2; }
+  if [ "$base_only" -eq 1 ]; then
+    printf 'base %s: %s exit=%s log=repro/%s.base.log\n' "$check_id" "$base" "$base_status" "$check_id"
+    case "$class:$base_status" in
+      PRESERVING:0) exit 0;;
+      NEW-SURFACE:126|NEW-SURFACE:127) grep -Eq -- "$expect" "$trace_dir/repro/$check_id.base.log"; exit $?;;
+      *:0|*:124|*:125|*:126|*:127|PRESERVING:*) exit 1;;
+      *) grep -Eq -- "$expect" "$trace_dir/repro/$check_id.base.log"; exit $?;;
+    esac
+  fi
   head_status="$(run_one "$root" "$trace_dir/repro/$check_id.head.log" "$timeout_seconds" "$@")"
   trace_path_safe "$trace_dir/repro/$check_id.head.log" file || { echo "repro-check: head log was not created safely" >&2; exit 2; }
   if [ "$base_status" -eq 124 ] || [ "$head_status" -eq 124 ]; then
@@ -794,6 +808,13 @@ do_checkpoint() {
     append_manifest_row "$manifest" "$seq" "$row"
     echo "checkpoint: $kind $path"
   done
+  if trace_path_safe "$trace_dir/02-reproduction.md" file; then
+    local table
+    table="$(acceptance_rows)" || { echo "repro-check: invalid acceptance table for replay generation" >&2; exit 2; }
+    printf '%s\n' "$table" | node "$script_dir/generate-checkpoint-artifacts.mjs" "$manifest" "$trace_dir" "$slug"
+  else
+    node "$script_dir/generate-checkpoint-artifacts.mjs" "$manifest" "$trace_dir" "$slug" </dev/null
+  fi
 }
 
 do_verify() {
@@ -895,13 +916,14 @@ do_anchor() {
 }
 
 do_verify_anchor() {
-  local receipt="" manifest expected_digest expected_semantics expected_tree parsed_slug parsed_manifest parsed_semantics parsed_tree
+  local receipt="" published="" body="" external="" manifest expected_digest expected_semantics expected_tree parsed_slug parsed_manifest parsed_semantics parsed_tree
   trace_dir=""; slug=""
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --slug) [ "$#" -ge 2 ] || usage; slug="$2"; shift 2;;
       --trace-dir) [ "$#" -ge 2 ] || usage; trace_dir="$2"; shift 2;;
       --receipt) [ "$#" -ge 2 ] || usage; receipt="$2"; shift 2;;
+      --published) [ "$#" -ge 2 ] || usage; published="$2"; shift 2;;
       *) usage;;
     esac
   done
@@ -916,6 +938,14 @@ do_verify_anchor() {
   parsed_semantics="${receipt#*semantics=}"; parsed_semantics="${parsed_semantics%% tree=*}"
   parsed_tree="${receipt##* tree=}"
   [ "$parsed_slug" = "$slug" ] || { echo "repro-check: anchor receipt slug does not match --slug" >&2; exit 2; }
+  if [ -n "$published" ]; then
+    local comment_pattern='^https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/issues/[1-9][0-9]*#issuecomment-([1-9][0-9]*)$'
+    [[ "$published" =~ $comment_pattern ]] || { echo "repro-check: invalid published issue comment URL" >&2; exit 2; }
+    local endpoint="repos/${BASH_REMATCH[1]}/issues/comments/${BASH_REMATCH[2]}"
+    body="$(bounded_gh_api 15 "$endpoint" --jq '.body')" || { echo "repro-check: could not retrieve published receipt" >&2; exit 1; }
+    external="$(printf '%s\n' "$body" | awk '/^issue-tracer-checkpoint-v1 / { sub(/\r$/, ""); print; n++ } END { if (n != 1) exit 1 }')" || { echo "repro-check: expected one published receipt" >&2; exit 1; }
+    [ "$external" = "$receipt" ] || { printf 'repro-check: published receipt differs\n- %s\n+ %s\n' "$receipt" "$external" >&2; exit 1; }
+  fi
   trace_for
   set_trace_root
   manifest="$trace_dir/repro/checkpoint.manifest"

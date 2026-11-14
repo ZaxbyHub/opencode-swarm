@@ -17,6 +17,7 @@ root="$(to_shell_path "$root")"
 root_real="$(cd "$root" && pwd -P)"
 issue_traces_base="$root_real/.agents/issue-traces"
 script_dir="$(cd "$(dirname "$0")" && pwd -P)"
+. "$script_dir/github-api.sh"
 failed=0
 legacy=0
 trace_root_real=""
@@ -669,7 +670,7 @@ EOF
   done <<EOF
 $rows
 EOF
-  duplicate_check="$(printf '%s\n' "$rows" | awk -F '\t' '{ if (++seen[$3] > 1 && duplicate == "") duplicate = $3 } END { if (duplicate != "") print duplicate }')"
+  duplicate_check="$(printf '%s\n' "$rows" | awk -F '\t' '$2 ~ /^(DISCRIMINATING|PRESERVING|NEW-SURFACE)$/ { if (++seen[$3] > 1 && duplicate == "") duplicate = $3 } END { if (duplicate != "") print duplicate }')"
   check="$duplicate_check"
   [ -z "$check" ] && rule_ok acceptance-check-ids || rule_bad acceptance-check-ids "duplicate check id $check"
   while IFS=$'\t' read -r ac class check argv expect pre post notes; do
@@ -869,6 +870,8 @@ phase4() {
   check_headings "$file" '## Regression Test' '## Acceptance check results' '## Quality Checks' '## Deferred-Work Scan' '## Verification Reasoning' '## Checkpoint verification'
   manifest="$trace/repro/checkpoint.manifest"
   trace_path_safe "$trace/02-reproduction.md" file || { rule_bad acceptance-source "missing or unsafe reproduction artifact"; return; }
+  phase4_published_argv
+  execution_receipts
   trace_path_safe "$trace/repro" dir || { rule_bad recurrence-manifest "missing or unsafe repro directory"; return; }
   trace_path_safe "$manifest" file || { rule_bad recurrence-manifest "missing or unsafe checkpoint manifest"; return; }
   rows="$(acceptance_table_rows "$trace/02-reproduction.md")" || { rule_bad acceptance-table "missing or malformed acceptance table"; return; }
@@ -890,6 +893,52 @@ phase4() {
   if bash "$script_dir/repro-check.sh" verify-checkpoint --slug "$slug" --trace-dir "$trace" >/dev/null 2>&1; then rule_ok checkpoint-verification; else rule_bad checkpoint-verification "verify-checkpoint failed"; fi
   deferred_clean_count="$(normalize_terminal_cr "$file" | grep -A100 '^## Deferred-Work Scan$' | grep -c '^scan-deferred: clean' || true)"
   [ "${deferred_clean_count:-0}" -gt 0 ] && rule_ok deferred-work-scan || rule_bad deferred-work-scan "clean result missing"
+}
+
+execution_receipts() {
+  local name line commit file blob actual pattern
+  pattern='\[receipt ([0-9a-f]{40}):([A-Za-z0-9._/-]+) blob=([0-9a-f]{40})\]$'
+  for name in 08-test-results.md 08a-recurrence-sweep.md; do
+    [ -e "$trace/$name" ] || continue
+    trace_path_safe "$trace/$name" file || { rule_bad receipts "$name is unsafe"; continue; }
+    while IFS= read -r line; do
+      if [[ "$line" =~ $pattern ]]; then
+        commit="${BASH_REMATCH[1]}"; file="${BASH_REMATCH[2]}"; blob="${BASH_REMATCH[3]}"
+        actual="$(git rev-parse --verify "$commit:$file" 2>/dev/null || true)"
+        if [ "$actual" = "$blob" ] && [ "$(git cat-file -t "$commit" 2>/dev/null)" = commit ] &&
+          [ "$(git cat-file -t "$blob" 2>/dev/null)" = blob ]; then
+          rule_ok receipts
+          continue
+        fi
+      fi
+      rule_bad receipts "$name: unverified execution receipt: $line"
+    done < <(normalize_terminal_cr "$trace/$name" | sed -n -e '/^- Evidence: /p' -e '/^- Disposition: /p')
+  done
+}
+
+phase4_published_argv() {
+  local issue repo origin number
+  issue="$(state_value published-issue)"
+  [ -n "$issue" ] || return 0
+  if [[ ! "$issue" =~ ^https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/issues/([1-9][0-9]*)$ ]]; then
+    rule_bad published-argv "invalid published-issue URL"
+    return
+  fi
+  repo="${BASH_REMATCH[1]}"; number="${BASH_REMATCH[2]}"
+  origin="$(git config --get remote.origin.url || true)"
+  case "${origin%.git}" in
+    "https://github.com/$repo"|"git@github.com:$repo"|"ssh://git@github.com/$repo") ;;
+    *) rule_bad published-argv "published issue repository differs from origin"; return ;;
+  esac
+  if (
+    set -o pipefail
+    bounded_gh_api 30 "repos/$repo/issues/$number" --jq '.body' |
+      bash "$script_dir/check-published-argv.sh" --reproduction "$trace/02-reproduction.md" --published-issue-body -
+  ); then
+    rule_ok published-argv
+  else
+    rule_bad published-argv "could not verify published acceptance commands"
+  fi
 }
 
 phase42() {
@@ -951,15 +1000,101 @@ phase5() {
     *) rule_bad merge-state "not ready" ;;
   esac
 }
+release_review() {
+  local release head tid file url failed_before repo pr review run remote origin remote_head
+  release="$(state_value release-bound)"
+  case "$release" in
+    ''|no) return 0 ;;
+    yes) ;;
+    *) rule_bad broad-review "invalid release-bound value"; return 1 ;;
+  esac
+  head="$(git rev-parse HEAD)" || return 1
+  tid="$(tree_id)" || return 1
+  file="$trace/10-pr-body.md"
+  trace_path_safe "$file" file || { rule_bad broad-review "missing PR publication evidence"; return 1; }
+  failed_before="$failed"
+  state_gate final-critic APPROVE "$head" "$tid"
+  artifact_identity_matches_gate "$trace/09-final-critic.md" final-critic "$head" "$tid"
+  [ "$failed" = "$failed_before" ] || return 1
+  normalize_terminal_cr "$file" | awk -v head="$head" '$0 == "PR head: " head { n++ } END { exit n != 1 }' || { rule_bad broad-review "PR head does not match reviewed commit"; return 1; }
+  url="$(normalize_terminal_cr "$file" | awk '/^PR URL: / { sub(/^PR URL: /, ""); print; n++ } END { if (n != 1) exit 1 }')" || {
+    rule_bad broad-review "expected one published PR URL"; return 1;
+  }
+  if ! printf '%s\n' "$url" | grep -Eq '^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[1-9][0-9]*$'; then
+    rule_bad broad-review "invalid published PR URL"; return 1
+  fi
+  repo="${url#https://github.com/}"
+  pr="${repo##*/}"
+  repo="${repo%/pull/*}"
+  file="$trace/10c-broad-review.md"
+  if trace_path_safe "$file" file; then
+    review="$(normalize_terminal_cr "$file" | awk '/^review-id: [1-9][0-9]*$/ { print $2; n++ } END { if (n != 1) exit 1 }')" || review=""
+    run="$(normalize_terminal_cr "$file" | awk '/^run-id: [a-zA-Z0-9][a-zA-Z0-9._-]*$/ && length($2) <= 128 { print $2; n++ } END { if (n != 1) exit 1 }')" || run=""
+    if [ -n "$review" ] && [ -n "$run" ]; then
+      origin="$(git remote get-url origin 2>/dev/null)" || origin=""
+      origin="${origin%.git}"
+      case "$origin" in
+        "https://github.com/$repo"|"git@github.com:$repo") ;;
+        *) rule_bad broad-review "published PR is outside the origin repository"; return 1 ;;
+      esac
+      remote_head="$(bounded_gh_api 15 "repos/$repo/pulls/$pr" --jq '.head.sha' 2>/dev/null)" || remote_head=""
+      [ "$remote_head" = "$head" ] || { rule_bad broad-review "live PR head could not be verified"; return 1; }
+      remote="$(bounded_gh_api 15 "repos/$repo/pulls/$pr/reviews/$review" --jq 'select(.state == "COMMENTED" and (.author_association == "OWNER" or .author_association == "MEMBER" or .author_association == "COLLABORATOR")) | .commit_id, .body' 2>/dev/null)" || remote=""
+      if [ "${remote%%$'\n'*}" = "$head" ] && printf '%s\n' "$remote" | awk -v run="$run" -v head="$head" '
+        $0 == "PR review submission for run " run " at head " head ". Report verdict: COMMENT." { identity++ }
+        $0 == "- Coverage kind: FULL" { full++ }
+        /^- Coverage kind: / { coverage++ }
+        END { exit !(identity == 1 && full == 1 && coverage == 1) }
+      '; then
+        if printf '%s' "${remote#*$'\n'}" | node "$script_dir/verify-native-review.mjs" "$root_real" "$repo" "$pr" "$run" "$head" "$review"; then
+          rule_ok broad-review
+          return 0
+        fi
+        rule_bad broad-review "matching remote review lacks verified native completion provenance"
+        return 1
+      fi
+    fi
+  fi
+  printf 'release-review-action-v1 head=%s command=/swarm pr-review %s\n' "$head" "$url"
+  rule_bad broad-review "native broad review must complete before merge"
+  return 1
+}
+
 merge_check() {
-  local file="$trace/10b-merge-approval.md" pr final
+  local file="$trace/10b-merge-approval.md" pr final squash
   check_headings "$file" '## User approval (verbatim)' '## PR head SHA' '## Final critic reviewed-commit'
   trace_path_safe "$file" file || return
   pr="$(normalize_terminal_cr "$file" | grep -A3 '^## PR head SHA$' | grep -Eo '[0-9a-f]{40}' | head -n1 || true)"
   final="$(normalize_terminal_cr "$file" | grep -A3 '^## Final critic reviewed-commit$' | grep -Eo '[0-9a-f]{40}' | head -n1 || true)"
   is_hex "$pr" && [ "$pr" = "$final" ] && rule_ok merge-sha-binding || rule_bad merge-sha-binding "PR and final critic SHA differ"
   state_gate merge-approval RECORDED "" ""
+  if [ "$(state_value merge)" = MERGED ]; then
+    squash="$(normalize_terminal_cr "$file" | awk '/^## Merge commit SHA$/ { getline; print; n++ } END { if (n != 1) exit 1 }')" || squash=""
+    if merge_identity "$(state_value base-sha)" "$pr" "$squash"; then rule_ok stable-patch-id; else rule_bad stable-patch-id "reviewed head and squash could not be matched"; fi
+  else
+    release_review || { [ "$failed" -ne 0 ] || rule_bad broad-review "unable to verify native review"; }
+  fi
   echo 'NOTE: human-enforced gate; this validator checks presence and binding only'
+}
+
+merge_identity() {
+  local base head squash parent reviewed actual commit
+  [ "$#" -eq 3 ] || usage
+  base="$1"; head="$2"; squash="$3"
+  for commit in "$base" "$head" "$squash"; do
+    is_hex "$commit" && [ "$(git cat-file -t "$commit" 2>/dev/null)" = commit ] || {
+      echo 'merge-identity: expected three full commit IDs' >&2; return 1;
+    }
+  done
+  parent="$(git show -s --format=%P "$squash")" || return 1
+  is_hex "$parent" || { echo 'merge-identity: expected a squash with one parent' >&2; return 1; }
+  git merge-base --is-ancestor "$base" "$head" || return 1
+  git merge-base --is-ancestor "$base" "$parent" || return 1
+  reviewed="$(set -o pipefail; git diff --no-ext-diff --binary "$base" "$head" -- | git patch-id --stable)" || return 1
+  actual="$(set -o pipefail; git diff --no-ext-diff --binary "$parent" "$squash" -- | git patch-id --stable)" || return 1
+  reviewed="${reviewed%% *}"; actual="${actual%% *}"
+  is_hex "$reviewed" && [ "$reviewed" = "$actual" ] || { echo 'merge-identity: stable patch IDs differ or are empty' >&2; return 1; }
+  printf 'merge-identity-v1 base=%s head=%s squash=%s squash-parent=%s patch-id=%s\n' "$base" "$head" "$squash" "$parent" "$reviewed"
 }
 
 # Print (never write) the rebind gate row that re-binds a gate's existing
@@ -998,8 +1133,11 @@ command="${1:-}"; shift || true
 case "$command" in
   tree-id) [ "$#" -eq 0 ] || usage; tree_id; exit $? ;;
   handshake) [ "$#" -eq 0 ] || usage; handshake; exit 0 ;;
+  merge-identity) merge_identity "$@"; exit $? ;;
   phase) phase="${1:-}"; shift || true; case "$phase" in 0|1|2|2.5|3|4|4.2|4.5|4.6|5) ;; *) usage;; esac ;;
   merge) phase="merge" ;;
+  release-review) phase="release-review" ;;
+  receipts) phase="receipts" ;;
   rebind) phase="rebind" ;;
   *) usage ;;
 esac
@@ -1080,6 +1218,8 @@ if [ "$command" = rebind ]; then
   exit $?
 fi
 if [ "$phase" = merge ]; then merge_check
+elif [ "$phase" = receipts ]; then execution_receipts
+elif [ "$phase" = release-review ]; then release_review || exit 1
 else
   if is_already_fixed && [ "$phase" != 0 ] && [ "$phase" != 1 ] && [ "$phase" != 2 ]; then
     rule_ok obe-subset

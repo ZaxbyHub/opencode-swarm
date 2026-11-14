@@ -12,10 +12,9 @@ function cmd(name: string): CommandEntry {
 	] as CommandEntry;
 }
 
-// --- 1. CLASSIFICATION SNAPSHOT ---
-
 describe('toolPolicy classification snapshot — no regression', () => {
 	const EXPECTED_AGENT = new Set<string>([
+		'pr-review',
 		'agents',
 		'config',
 		'config doctor',

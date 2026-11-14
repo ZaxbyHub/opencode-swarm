@@ -27,7 +27,6 @@ describe('toolPolicy none classification snapshot', () => {
 			'link status',
 			'loop',
 			'pr-feedback',
-			'pr-review',
 			'promote',
 			'qa-gates',
 			'simulate',
