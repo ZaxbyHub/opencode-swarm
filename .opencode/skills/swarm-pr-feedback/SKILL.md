@@ -13,7 +13,7 @@ description: >
   this process.
 metadata:
   audience: swarm-plugin
-  swarm-contract-digest: "72796577005e"
+  swarm-contract-digest: "b8dbb685e873"
 ---
 
 # Swarm PR Feedback
@@ -187,6 +187,15 @@ ledger items as `NEEDS_MORE_EVIDENCE` or re-dispatch a narrower read-only lane.
 report directly — a truncated or summary-only report is a preview, not
 verification evidence, and keeps its items open the same way.)
 
+## Pre-flight: Restart Inventory (Profiles B/C)
+
+After a session restart mid-round, record a four-bucket inventory in the
+task-gates artifact before dispatching: reusable artifacts / stale approvals
+(gate verdicts bound to pre-restart digests need re-verification) / dead
+agent ids (SendMessage fails; never retry or wait) / fresh-dispatch work
+(every in-flight lane needs a new standalone packet). Full protocol:
+`references/restart-inventory.md`.
+
 ## Pre-flight: Dirty Worktree Handling
 
 Before staging any files for the PR commit, check the working tree state:
@@ -325,8 +334,10 @@ Rules:
   forward with the new evidence.
 - **Re-fetch at every round boundary (#3607).** Intake is not one-time:
   re-fetch issue comments, inline review comments, and reviews at the start of
-  every fix round and again before the closeout gate — per-head bots post
-  findings against intermediate heads mid-round. Commands and bot markers:
+  every fix round and again before the closeout gate — a critic NEEDS_REVISION
+  restart counts as a fix round. The fetch is a RECORDED obligation: append a
+  fetch receipt (surfaces, comment ids, timestamp) to the findings ledger at
+  every boundary. Commands, bot markers, field evidence:
   `references/intake-surfaces.md` (## Round-boundary re-fetch).
 
 Rationale: the closure summary is the only artifact the user/maintainer reads
@@ -505,9 +516,12 @@ output as a receipt in the ledger; track the content digest manually (for
 example `git rev-parse HEAD` plus a working-tree diff hash) so stale receipts
 are detectable, and re-run the whole set after any content change. Stage B:
 one fresh reviewer subagent, then one fresh test-engineer-role subagent
-(Profile B), or two strictly separated re-derivation passes (Profile C).
-Closeout: a separate fresh reviewer, then a separate fresh critic, per the
-swarm closeout contract. Emit the same `[STAGE-B-REVIEW]`, `[STAGE-B-TEST]`,
+(Profile B), or two strictly separated re-derivation passes (Profile C);
+each test-engineer verdict must NAME its discriminating probe (mutant /
+source surgery / executed pre-fix failure, with the observed failure mode) —
+a green suite alone is test theater and does not settle the item. Closeout:
+a separate fresh reviewer, then a separate fresh critic, per the swarm
+closeout contract. Emit the same `[STAGE-B-REVIEW]`, `[STAGE-B-TEST]`,
 `[CLOSEOUT-REVIEW]`, and `[CLOSEOUT-CRITIC]` rows, record the verdicts in the
 session task-gates artifact, and disclose Profile C's procedural independence
 in the closure ledger. Any edit after a gate verdict invalidates that verdict
