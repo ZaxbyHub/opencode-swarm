@@ -2440,6 +2440,13 @@ async function markContentFilteredFiles(
 			'check-attr',
 			'filter',
 			'--',
+			// PLAIN pathspecs, deliberately: `git check-attr` does not
+			// understand pathspec magic, so `:(literal)src/app.ts` is queried
+			// as the literal path `:(literal)src/app.ts` and reports
+			// `unspecified`. Plain pathspecs may glob-expand a bracket/brace
+			// filename to a sibling as well, which only ever widens the query
+			// — the requested file is still matched, so a configured filter on
+			// it is still detected.
 			...requestedPathspecs,
 		],
 		directory,
