@@ -206,6 +206,7 @@ test('merge admission requires a complete broad review of the exact release head
 	expect(rejected.output).toMatch(/broad[- ]review/i);
 
 	review(head, 'COMPLETE', 'APPROVE');
-	const approved = merge();
-	expect(approved.code, approved.output).toBe(0);
+	const unverified = merge();
+	expect(unverified.code, unverified.output).not.toBe(0);
+	expect(unverified.output).toMatch(/broad[- ]review/i);
 }, 90_000);
