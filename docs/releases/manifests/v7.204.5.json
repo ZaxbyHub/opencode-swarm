@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.204.5",
+  "tagCommit": "23ef6a11a6859cd139ba3936f4650629fda2b96a",
+  "targetCommitish": "23ef6a11a6859cd139ba3936f4650629fda2b96a",
+  "releaseBodySha256": "8067a5d3dae3ad25919b13ff14c406802dc812f943c098a27361faa744ccaeb8",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/3648-3652-write-delete-gate-bypasses.md",
+      "sha256": "aee9d8feff27a4c8af5bea39b7f92210259d70a45af97c8b4043face0622afbe"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/3698-feedback-profile-bc-gate-amendments.md",
+      "sha256": "295e54dbd03670b65bfdb7dcf001659bc622277c58c533bfe92e769887044afd"
+    }
+  ]
+}
