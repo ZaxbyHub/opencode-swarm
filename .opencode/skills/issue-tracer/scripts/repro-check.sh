@@ -610,6 +610,7 @@ do_run() {
     printf 'base %s: %s exit=%s log=repro/%s.base.log\n' "$check_id" "$base" "$base_status" "$check_id"
     case "$class:$base_status" in
       PRESERVING:0) exit 0;;
+      NEW-SURFACE:126|NEW-SURFACE:127) grep -Eq -- "$expect" "$trace_dir/repro/$check_id.base.log"; exit $?;;
       *:0|*:124|*:125|*:126|*:127|PRESERVING:*) exit 1;;
       *) grep -Eq -- "$expect" "$trace_dir/repro/$check_id.base.log"; exit $?;;
     esac
@@ -804,7 +805,13 @@ do_checkpoint() {
     append_manifest_row "$manifest" "$seq" "$row"
     echo "checkpoint: $kind $path"
   done
-  node "$script_dir/generate-checkpoint-artifacts.mjs" "$manifest" "$trace_dir" "$slug"
+  if trace_path_safe "$trace_dir/02-reproduction.md" file; then
+    local table
+    table="$(acceptance_rows)" || { echo "repro-check: invalid acceptance table for replay generation" >&2; exit 2; }
+    printf '%s\n' "$table" | node "$script_dir/generate-checkpoint-artifacts.mjs" "$manifest" "$trace_dir" "$slug"
+  else
+    node "$script_dir/generate-checkpoint-artifacts.mjs" "$manifest" "$trace_dir" "$slug" </dev/null
+  fi
 }
 
 do_verify() {

@@ -72,7 +72,7 @@ async function collectCheckpoint({ stale = false, hostBudget = false } = {}) {
 	const initial = findByCorrelationId(directory, session);
 	expect(initial).toBeDefined();
 	_internals.resolvePrWorkflowRevisionDigestAsync = async () => revision;
-	let now = Date.now();
+	let now = 1_760_000_000_000;
 	_internals.now = () => now;
 	_internals.sleep = mock(async (ms: number) => {
 		now += ms;

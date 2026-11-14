@@ -75,6 +75,7 @@ function fixture() {
 		argv: string,
 		files: string[],
 		reason?: string,
+		expected = 'base-gap',
 	) {
 		const result = run(
 			`${scripts}/repro-check.sh`,
@@ -88,7 +89,7 @@ function fixture() {
 			'--argv',
 			argv,
 			'--expect',
-			'base-gap',
+			expected,
 			...(reason ? ['--reason', reason] : []),
 			'--',
 			...files,
@@ -263,13 +264,33 @@ test('checkpoint emits a runner that copies all frozen inputs and replays each b
 		'driver-two.sh',
 		'if grep -qx base feature.txt; then echo base-gap-two; exit 1; fi\n',
 	);
+	write('preserving.sh', 'echo retained\n');
+	write(
+		`${trace}/02-reproduction.md`,
+		[
+			'## Acceptance checks',
+			'| AC | class | check | argv | expect | pre-fix | post-fix | notes |',
+			'| AC1 | DISCRIMINATING | C1 | bash "driver one.sh" | base-gap | RED | - | - |',
+			'| AC2 | NEW-SURFACE | C2 | bash driver-two.sh | base-gap | ERROR | - | - |',
+			'| AC3 | PRESERVING | C3 | bash preserving.sh | retained | GREEN | - | - |',
+			'',
+		].join('\n'),
+	);
 	checkpoint('C1', 'bash "driver one.sh"', ['driver one.sh', 'copy input.txt']);
 	checkpoint('C2', 'bash driver-two.sh', ['driver-two.sh']);
+	checkpoint(
+		'C3',
+		'bash preserving.sh',
+		['preserving.sh'],
+		undefined,
+		'retained',
+	);
 
 	const replay = run(`${trace}/repro/replay-base.sh`);
 	expect(replay.code, replay.output).toBe(0);
 	expect(read(`${trace}/repro/C1.base.log`)).toContain('base-gap-one');
 	expect(read(`${trace}/repro/C2.base.log`)).toContain('base-gap-two');
+	expect(read(`${trace}/repro/C3.base.log`)).toContain('retained');
 }, 90_000);
 
 test('CHECK_WRONG amendment regenerates the current inventory without losing sibling checks or prose', () => {

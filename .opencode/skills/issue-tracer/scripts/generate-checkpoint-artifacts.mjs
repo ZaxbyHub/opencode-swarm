@@ -28,6 +28,15 @@ const quote = (value) => "'" + value.replaceAll("'", "'\\''") + "'";
 const [manifest, trace, slug] = process.argv.slice(2);
 try {
 	if (!regular(manifest)) throw new Error('checkpoint manifest missing');
+	const classes = new Map();
+	for (const line of readFileSync(0, 'utf8').split('\n').filter(Boolean)) {
+		const [, classification, id] = line.split('\t');
+		if (classification === 'NON-EXECUTABLE') continue;
+		if (!['PRESERVING', 'DISCRIMINATING', 'NEW-SURFACE'].includes(classification) || classes.has(id)) {
+			throw new Error(`invalid acceptance classification for ${id}`);
+		}
+		classes.set(id, classification);
+	}
 	const checks = new Map();
 	for (const line of readFileSync(manifest, 'utf8').split(/\r?\n/).slice(1).filter(Boolean)) {
 		const [, , file, blob, , id, argv, expect, base] = line.split('\t');
@@ -46,7 +55,8 @@ try {
 	];
 	const inventory = ['## Test inventory', '', '<!-- GENERATED from checkpoint.manifest -->', ''];
 	for (const [id, { files, argv, expect, base }] of checks) {
-		const classification = expect === '-' ? 'PRESERVING' : 'DISCRIMINATING';
+		const classification = classes.get(id) ?? (classes.size ? null : expect === '-' ? 'PRESERVING' : 'DISCRIMINATING');
+		if (!classification) throw new Error(`missing acceptance classification for ${id}`);
 		const flags = ['--base-only', '--slug', slug, '--base', base, '--id', id, '--class', classification, '--expect', expect];
 		for (const file of files.keys()) flags.push('--copy', file);
 		driver.push('bash "$script" run --trace-dir "$trace_dir" ' + flags.map(quote).join(' ') + ' -- bash -c ' + quote(argv));

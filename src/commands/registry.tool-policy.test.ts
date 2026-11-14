@@ -16,6 +16,7 @@ function cmd(name: string): CommandEntry {
 
 describe('toolPolicy classification snapshot — no regression', () => {
 	const EXPECTED_AGENT = new Set<string>([
+		'pr-review',
 		'agents',
 		'config',
 		'config doctor',
