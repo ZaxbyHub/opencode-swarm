@@ -325,7 +325,9 @@ describe('capture-required-check-evidence duplicate-name context binding (#3661 
 						rules: [
 							{
 								type: 'required_status_checks',
-								parameters: { required_status_checks: CONTRACT.requiredContexts },
+								parameters: {
+									required_status_checks: CONTRACT.requiredContexts,
+								},
 							},
 						],
 					},
@@ -363,7 +365,9 @@ describe('capture-required-check-evidence duplicate-name context binding (#3661 
 				};
 			}
 			if (endpoint.includes('/check-runs')) {
-				const head = /\/commits\/([0-9a-f]{40})\/check-runs/.exec(endpoint)?.[1];
+				const head = /\/commits\/([0-9a-f]{40})\/check-runs/.exec(
+					endpoint,
+				)?.[1];
 				if (head === headNew) {
 					return {
 						ok: true,

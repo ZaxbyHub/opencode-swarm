@@ -900,9 +900,7 @@ export function isSandboxExecAvailable(): boolean {
  */
 export function isWindowsSandboxAvailable(): boolean {
 	const capability = syncVisibleCapability('win32');
-	return (
-		capability?.status === 'enabled' && capability?.platform === 'win32'
-	);
+	return capability?.status === 'enabled' && capability?.platform === 'win32';
 }
 
 export class SandboxCapabilityProbe {

@@ -209,9 +209,9 @@ describe('capture-required-check-evidence observed-runs scope (#3661 AC5)', () =
 			'.github/workflows/pr-standards.yml',
 		];
 		for (const seededPath of seededContractRunPaths) {
-			expect(
-				observed.some((run) => run.workflowPath === seededPath),
-			).toBe(true);
+			expect(observed.some((run) => run.workflowPath === seededPath)).toBe(
+				true,
+			);
 		}
 		expect(observed.length).toBe(seededContractRunPaths.length);
 	}, 60_000);

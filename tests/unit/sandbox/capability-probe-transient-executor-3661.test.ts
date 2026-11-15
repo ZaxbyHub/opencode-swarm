@@ -32,8 +32,8 @@ import {
 	isBubblewrapAvailable,
 	isSandboxExecAvailable,
 	isWindowsSandboxAvailable,
-	SandboxCapabilityProbe,
 	type SandboxCapability,
+	SandboxCapabilityProbe,
 } from '../../../src/sandbox/capability-probe';
 import {
 	_resetExecutorCache,
