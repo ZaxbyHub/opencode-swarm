@@ -28,7 +28,9 @@ import {
 } from '../config/bundled-skills.js';
 import { log } from '../utils/logger.js';
 
-/** Single total wait budget: ~4x the max measured window (3.612 s). */
+/** Single total wait budget: ~4x the committed final-batch max window
+ * (3.612 s); >= 3.5x the widest observed window across all 19 ADR
+ * observations (~4.2 s). */
 export const FIRST_TURN_GATE_TOTAL_BUDGET_MS = 15_000;
 
 export type BundledSkillsFirstTurnGate = (

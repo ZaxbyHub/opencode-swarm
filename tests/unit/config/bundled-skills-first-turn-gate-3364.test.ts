@@ -159,14 +159,20 @@ describe('materialization registry (#3364)', () => {
 	// Windows without Developer Mode refuses unprivileged symlinks (EPERM) —
 	// probe once at load; the behavioral leg runs only where symlinks work.
 	const SYMLINK_CAPABLE = (() => {
-		const probeRoot = canonicalMkdtemp('gate-3364-symprobe-');
+		// Whole-body guard: a probe-infra throw (mkdtemp/EBUSY cleanup) must
+		// degrade to skip-one-test, never fail the whole file at import.
 		try {
-			fs.symlinkSync(probeRoot, path.join(probeRoot, 'link-probe'));
-			return true;
+			const probeRoot = canonicalMkdtemp('gate-3364-symprobe-');
+			try {
+				fs.symlinkSync(probeRoot, path.join(probeRoot, 'link-probe'));
+				return true;
+			} catch {
+				return false;
+			} finally {
+				fs.rmSync(probeRoot, { recursive: true, force: true });
+			}
 		} catch {
 			return false;
-		} finally {
-			fs.rmSync(probeRoot, { recursive: true, force: true });
 		}
 	})();
 	test.skipIf(!SYMLINK_CAPABLE)(
@@ -286,6 +292,22 @@ describe('first-turn gate (#3364)', () => {
 		// 30 s guidance-chain budget (V2_GUIDANCE_CHAIN_TIMEOUT_MS).
 		expect(FIRST_TURN_GATE_TOTAL_BUDGET_MS).toBeGreaterThanOrEqual(4 * 3_612);
 		expect(FIRST_TURN_GATE_TOTAL_BUDGET_MS).toBeLessThanOrEqual(60_000);
+	}, 30_000);
+
+	test('unregistered root: the gate returns immediately (not-started degradation)', async () => {
+		// B-4: the not-started path (writes disabled at enqueue, or cap
+		// refusal) never waits — today's command-path backstop ordering.
+		const gate = createBundledSkillsFirstTurnGate(
+			root,
+			FIRST_TURN_GATE_TOTAL_BUDGET_MS,
+		);
+		const startedAt = performance.now();
+		await gate({}, {});
+		const elapsed = performance.now() - startedAt;
+		expect(elapsed).toBeLessThanOrEqual(100);
+		expect(await awaitBundledSkillsMaterialization(root, 10)).toBe(
+			'not-started',
+		);
 	}, 30_000);
 
 	test('post-settlement invocations are immediate (no repeated waits)', async () => {

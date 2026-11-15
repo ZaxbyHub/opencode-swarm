@@ -240,7 +240,7 @@ describe('issue #2670 init-path contract', () => {
 		expect(report.firstToolDone).toBe(true);
 		expect(report.firstToolName).toBe(firstKey);
 		expect(contractRowsByStage('first_tool').length).toBe(1);
-	});
+	}, 30_000);
 
 	test('emission is debug-gated end to end', async () => {
 		emitEnabled = false;

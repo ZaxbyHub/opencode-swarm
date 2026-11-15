@@ -91,6 +91,7 @@ describe('resume mode re-derivation (#3106 PRR-003)', () => {
 		await seedPausedRun('assisted');
 		const out = await handleFullAutoCommand(tmpDir, ['resume'], SESSION_ID);
 		expect(out).not.toStartWith('Error:');
+		expect(out).toContain('mode=strict');
 		expect(loadFullAutoRunState(tmpDir, SESSION_ID)?.mode).toBe('strict');
 	}, 60_000);
 
@@ -109,6 +110,10 @@ describe('resume mode re-derivation (#3106 PRR-003)', () => {
 		expect(loadFullAutoRunState(tmpDir, SESSION_ID)?.mode).toBe('supervised');
 	}, 60_000);
 
+	// NOTE: this cell is non-discriminating for the mode-SOURCE axis (both
+	// the old runState fallback and the new config-default semantics arm
+	// supervised here); it pins only the terminal ?? 'supervised' default.
+	// Cell 2 above is the discriminator for the semantics change.
 	test('neither config nor run mode falls back to supervised', async () => {
 		writeProjectConfig(undefined);
 		await seedPausedRun('supervised');

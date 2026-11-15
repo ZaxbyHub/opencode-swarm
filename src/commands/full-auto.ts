@@ -198,7 +198,7 @@ export async function handleFullAutoCommand(
 			return 'Error: resume refused because the paused run changed state after the probe (pause generation mismatch — another process aborted, disarmed, or re-paused it). Re-run `/swarm full-auto retry-oversight` to establish a fresh probe, then resume.';
 		}
 		session.fullAutoMode = true;
-		return `Full-Auto Mode resumed (new run generation=${loadFullAutoRunState(directory, sessionID)?.runGeneration ?? 'unknown'}, prior pause generation=${runState.pauseGeneration ?? 0}). Re-issue the blocked action so it can be re-reviewed.`;
+		return `Full-Auto Mode resumed (mode=${effectiveMode}, new run generation=${loadFullAutoRunState(directory, sessionID)?.runGeneration ?? 'unknown'}, prior pause generation=${runState.pauseGeneration ?? 0}). Re-issue the blocked action so it can be re-reviewed.`;
 	}
 	if (parsedCommand.kind === 'abort') {
 		terminateFullAutoRun(

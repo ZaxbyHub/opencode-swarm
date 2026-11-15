@@ -1854,12 +1854,15 @@ async function initializeOpenCodeSwarm(
 	// withTimeout (which unref's its timer) can bound it; content-equality-checked,
 	// atomic-overwrite-with-rollback, symlink-guarded, byte/file-bounded. On timeout/error we
 	// fail open — the command-path sync remains as a backstop.
+	//
 	// #3364: PRE-REGISTER the deferred materialization handle at ENQUEUE time so
 	// the first-turn gate can join it even if the first chat transform arrives
 	// before the post-resolution task fires. Cost: one bounded SYNCHRONOUS
 	// realpath (canonicalRootKeyFresh, the same helper the sync itself uses at
-	// run time) plus one map write — no AWAITED I/O, init-path safe (repro-704
-	// deadline unaffected; verified by check C2).
+	// run time) plus one map write — no AWAITED I/O, init-path safe (the
+	// repro-704 deadline is unaffected; the init contract stays pinned by
+	// tests/unit/index-startup-contract-outcomes-2670.test.ts and the CI
+	// repro-704 smoke leg).
 	if (bootstrapStateWritesEnabled) {
 		registerDeferredBundledSkillsSync(bootstrapRoot);
 	}

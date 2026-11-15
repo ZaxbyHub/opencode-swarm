@@ -28,7 +28,14 @@ export function initProject(directory: string): void {
 				: result.error
 					? `spawn error code ${String(result.error)}`
 					: 'no spawn error reported';
-		const stderrTail = (result.stderr ?? '').slice(-512);
+		const rawTail = (result.stderr ?? '').slice(-512);
+		// Back off one extra code unit when the boundary splits a UTF-16
+		// surrogate pair, so the diagnostics line never carries a lone surrogate.
+		const tailHead = rawTail.codePointAt(0) ?? 0;
+		const stderrTail =
+			rawTail.length > 0 && tailHead >= 0xdc00 && tailHead <= 0xdfff
+				? rawTail.slice(1)
+				: rawTail;
 		throw new Error(
 			`git init failed in ${directory}: ${spawnError}, status=${String(result.status)}, signal=${String(result.signal)}${stderrTail ? `, stderr=${stderrTail}` : ''}`,
 		);
