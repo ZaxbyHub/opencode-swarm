@@ -212,7 +212,7 @@ export async function handleFullAutoCommand(
 				if (isInfrastructurePauseReason(postState.pauseReason)) {
 					return 'Error: resume refused because the paused run changed state after the probe (pause generation mismatch — another process re-paused it). Re-run `/swarm full-auto retry-oversight` to establish a fresh probe, then resume.';
 				}
-				return `Error: resume refused because the paused run changed state after the probe (pause generation mismatch — another process re-paused it; reason: ${postState.pauseReason ?? 'unspecified'}). A non-infrastructure pause is not retry-oversight-eligible; resolve the pause cause, then re-run \`/swarm full-auto resume\`.`;
+				return `Error: resume refused because the paused run changed state after the probe (pause generation mismatch — another process re-paused it; reason: ${postState.pauseReason ?? 'unspecified'}). A non-infrastructure pause is not retry-oversight-eligible; after resolving the pause cause, re-enable with \`/swarm full-auto off\` then \`/swarm full-auto on\`.`;
 			}
 			return 'Error: resume refused because the paused run changed state after the probe (another process aborted or disarmed it). The run is no longer resumable; re-enable with `/swarm full-auto on`.';
 		}

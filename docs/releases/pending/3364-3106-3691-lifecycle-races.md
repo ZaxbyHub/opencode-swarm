@@ -29,8 +29,11 @@
   also applies. The raw-config hybrid (override survives unless the config
   explicitly sets a mode) is the recorded owner follow-up option. Resume also arms through an expected-pauseGeneration CAS under the state
   lock: a second process aborting, disarming, or re-pausing the run inside the
-  check-then-arm window is refused (with retry-oversight guidance) instead of
-  being silently resurrected.
+  check-then-arm window is refused with state- and reason-conditional
+  guidance instead of being silently resurrected (an infrastructure re-pause
+  is directed to `retry-oversight`; a non-infrastructure re-pause names the
+  reason and directs to `off` then `on`; an abort or disarm directs to
+  re-enable with `on`).
 - **git-init harness diagnostics (#3691):** the delegation-gate test harness's
   `initProject` moved to `tests/helpers/git-init-project.ts` and now throws with
   `result.error`/`status=`/`signal=` plus a bounded stderr tail — the empty

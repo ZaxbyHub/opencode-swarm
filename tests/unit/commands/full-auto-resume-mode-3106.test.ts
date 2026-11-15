@@ -203,6 +203,12 @@ describe('resume CAS command interleave (#3106 PRR-004)', () => {
 		);
 		expect(out).toContain('reason: reactive verdict DENY');
 		expect(out).not.toContain('to establish a fresh probe');
+		// The recovery path must be actionable: off→on is the only supported
+		// recovery for a non-infrastructure pause (canResumeFromProbe still
+		// requires an infrastructure reason, so re-running resume alone is
+		// refused — closeout NEW-1).
+		expect(out).toContain('/swarm full-auto off');
+		expect(out).toContain('/swarm full-auto on');
 		const after = loadFullAutoRunState(tmpDir, SESSION_ID);
 		expect(after?.status).toBe('paused');
 		expect(after?.pauseGeneration).toBe((seeded?.pauseGeneration ?? 0) + 1);
