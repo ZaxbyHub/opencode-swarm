@@ -359,10 +359,16 @@ describe('wiring pins (#3364)', () => {
 			path.join(REPO_ROOT, 'src', 'index.ts'),
 			'utf8',
 		);
+		// Shape-tolerant pin (post-A-3): the registration sits inside the
+		// bootstrapStateWritesEnabled guard, and the refusal branch logs.
 		const guard = src.indexOf(
-			'if (bootstrapStateWritesEnabled) {\n\t\tregisterDeferredBundledSkillsSync(bootstrapRoot);\n\t}',
+			'if (bootstrapStateWritesEnabled) {\n\t\tif (\n\t\t\tregisterDeferredBundledSkillsSync(bootstrapRoot) ===',
 		);
 		expect(guard).toBeGreaterThan(-1);
+		expect(src).toContain("'registration-refused'");
+		expect(src).toContain(
+			'bundled-skills materialization registration refused (cap)',
+		);
 	}, 30_000);
 
 	test('gate factory receives bootstrapRoot', () => {
