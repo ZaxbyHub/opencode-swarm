@@ -266,8 +266,18 @@ describe('first-turn gate (#3364)', () => {
 	test('bounded: a never-settling scheduled entry resolves at the budget (fail-open)', async () => {
 		registerDeferredBundledSkillsSync(root); // scheduled, never adopted
 		const gate = createBundledSkillsFirstTurnGate(root, 50);
-		await gate({}, {}); // must resolve (timeout latch), never throw
-		expect(true).toBe(true);
+		const startedAt = performance.now();
+		await gate({}, {}); // must resolve at the timeout budget, never throw
+		const elapsed = performance.now() - startedAt;
+		// Concrete bounds: the wait honored the 50 ms budget (>= 40 ms) and did
+		// not hang past a generous ceiling (<= 5 s). A gate that returned
+		// immediately (the never-waits mutant) fails the lower bound; a gate
+		// that ignored the budget fails the upper bound.
+		expect(elapsed).toBeGreaterThanOrEqual(40);
+		expect(elapsed).toBeLessThanOrEqual(5_000);
+		// The budget bounded only the WAIT: the registry entry itself stays
+		// pending (never adopted, never settled by the gate's timeout).
+		expect(_test_exports.materializationOutcomeFor(root)).toBe('scheduled');
 	}, 30_000);
 
 	test('total budget is range-pinned: >= 4x the max measured window (3612 ms), <= 60 s', () => {
@@ -291,8 +301,15 @@ describe('first-turn gate (#3364)', () => {
 		);
 		await gate({}, {});
 		await syncPromise;
+		expect(_test_exports.materializationOutcomeFor(root)).toBe('materialized');
+		const startedAt = performance.now();
 		await gate({}, {}); // resolved-promise await: a microtask
-		expect(true).toBe(true);
+		const elapsed = performance.now() - startedAt;
+		// Concrete: the post-settlement invocation did not pay another
+		// materialization wait (the settled promise resolves in microtask time,
+		// far under even one event-loop timer tick of the budget).
+		expect(elapsed).toBeLessThanOrEqual(100);
+		expect(await awaitBundledSkillsMaterialization(root, 1_000)).toBe('ready');
 	}, 30_000);
 });
 
