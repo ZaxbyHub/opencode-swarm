@@ -209,8 +209,13 @@ describe('first-turn gate (#3364)', () => {
 		);
 		const input = { marker: 1 };
 		const output = { marker: 2 };
-		await gate(input, output); // single wait: resolves only after settlement
-		await syncPromise;
+		// ORDERING IS THE ASSERTION: the file read happens at the INSTANT the
+		// gate resolves, BEFORE the copy promise is awaited. The 120-file copy
+		// is still in flight when the gate is invoked (the sync call returns a
+		// pending promise synchronously), so a gate that returned without
+		// waiting would observe a missing file here (verified by the
+		// never-waits mutation probe — implementation-review round 1, F1).
+		await gate(input, output);
 		expect(input.marker).toBe(1);
 		expect(output.marker).toBe(2); // no mutation
 		const skill = fs.readFileSync(
@@ -218,6 +223,7 @@ describe('first-turn gate (#3364)', () => {
 			'utf8',
 		);
 		expect(skill).toBe('x');
+		await syncPromise; // hygiene only: settle the copy before cleanup
 	}, 60_000);
 
 	test('concurrent pre-settlement invocations join the same wait (none slip past)', async () => {
@@ -232,16 +238,29 @@ describe('first-turn gate (#3364)', () => {
 			root,
 			FIRST_TURN_GATE_TOTAL_BUDGET_MS,
 		);
-		const [a, b] = await Promise.all([gate({}, {}), gate({}, {})]);
-		await syncPromise;
-		expect(a).toBeUndefined();
-		expect(b).toBeUndefined();
-		// Both waited: the file exists by the time EITHER resolved.
-		expect(
-			fs.existsSync(
-				path.join(root, '.swarm', 'bundled-skills', 'brainstorm', 'SKILL.md'),
-			),
-		).toBe(true);
+		const skillPath = path.join(
+			root,
+			'.swarm',
+			'bundled-skills',
+			'brainstorm',
+			'SKILL.md',
+		);
+		// Each invocation records file presence AT ITS OWN resolution instant —
+		// a gate that lets either slip past while the copy is pending observes
+		// a missing file (the never-waits mutant fails both flags).
+		let aSawFile = false;
+		let bSawFile = false;
+		await Promise.all([
+			gate({}, {}).then(() => {
+				aSawFile = fs.existsSync(skillPath);
+			}),
+			gate({}, {}).then(() => {
+				bSawFile = fs.existsSync(skillPath);
+			}),
+		]);
+		expect(aSawFile).toBe(true);
+		expect(bSawFile).toBe(true);
+		await syncPromise; // hygiene only
 	}, 60_000);
 
 	test('bounded: a never-settling scheduled entry resolves at the budget (fail-open)', async () => {
@@ -249,6 +268,14 @@ describe('first-turn gate (#3364)', () => {
 		const gate = createBundledSkillsFirstTurnGate(root, 50);
 		await gate({}, {}); // must resolve (timeout latch), never throw
 		expect(true).toBe(true);
+	}, 30_000);
+
+	test('total budget is range-pinned: >= 4x the max measured window (3612 ms), <= 60 s', () => {
+		// Shrinkage starves real copies (mutation M4 caught the 15_000->1 case);
+		// unbounded growth would stall the first turn and, on v2, eat the
+		// 30 s guidance-chain budget (V2_GUIDANCE_CHAIN_TIMEOUT_MS).
+		expect(FIRST_TURN_GATE_TOTAL_BUDGET_MS).toBeGreaterThanOrEqual(4 * 3_612);
+		expect(FIRST_TURN_GATE_TOTAL_BUDGET_MS).toBeLessThanOrEqual(60_000);
 	}, 30_000);
 
 	test('post-settlement invocations are immediate (no repeated waits)', async () => {

@@ -61,7 +61,10 @@ Measured 2026-10-16 on a real host, closing the question this ADR's discovery sl
   three escapes keep the fail-open command-path backstop for that turn — a copy
   slower than 15 s, a genuinely failed sync, and registration refusal at the
   8-root all-pending cap (practically unreachable: one project root per plugin
-  process). The init path adds no awaited I/O (repro-704 stays green).
+  process). The init path adds no awaited I/O (one bounded sync realpath at
+  enqueue-time registration; repro-704 stays green). On v2 the gate budget
+  runs inside the 30 s guidance-chain budget; only the >15 s escape consumes
+  it, and chain exhaustion restores the pre-transform messages (fail-open).
 
 ## Appendix: Invalidation re-check (issue #2909 exit gate) — 2026-10-16
 

@@ -158,8 +158,9 @@ function createMaterializationEntry(
 
 /**
  * Pre-register a deferred materialization handle for a project root BEFORE the
- * plugin's post-resolution task runs (#3364). Map write only — no I/O, no
- * await — so it is safe to call during plugin init at task-enqueue time. The
+ * plugin's post-resolution task runs (#3364). Cost: one bounded SYNCHRONOUS
+ * realpath (canonicalRootKeyFresh) plus one map write — no AWAITED I/O — so
+ * it is safe to call during plugin init at task-enqueue time. The
  * post-resolution task's `syncBundledProjectSkillsIfMissingAsync` call adopts
  * the scheduled entry; only the actual sync completion settles it (the outer
  * await timeout never does).

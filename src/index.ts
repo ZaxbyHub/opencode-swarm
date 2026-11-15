@@ -1856,8 +1856,10 @@ async function initializeOpenCodeSwarm(
 	// fail open — the command-path sync remains as a backstop.
 	// #3364: PRE-REGISTER the deferred materialization handle at ENQUEUE time so
 	// the first-turn gate can join it even if the first chat transform arrives
-	// before the post-resolution task fires. Map write only — no I/O, no await,
-	// init-path safe (the same guard the task body applies at run time).
+	// before the post-resolution task fires. Cost: one bounded SYNCHRONOUS
+	// realpath (canonicalRootKeyFresh, the same helper the sync itself uses at
+	// run time) plus one map write — no AWAITED I/O, init-path safe (repro-704
+	// deadline unaffected; verified by check C2).
 	if (bootstrapStateWritesEnabled) {
 		registerDeferredBundledSkillsSync(bootstrapRoot);
 	}

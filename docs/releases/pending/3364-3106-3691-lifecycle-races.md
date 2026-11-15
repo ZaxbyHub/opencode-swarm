@@ -46,4 +46,7 @@ git-init flake with an undiagnosable empty error.
 - The CAS is opt-in: only the resume command passes the expected generation;
   `on` and the intercept hooks keep the unconditional arm.
 - v2 hosts share the fix through the same v1 messages-transform chain — no
-  separate v2 wiring.
+  separate v2 wiring. On v2 the gate's 15 s budget runs inside the 30 s
+  guidance-chain budget (V2_GUIDANCE_CHAIN_TIMEOUT_MS): only the disclosed
+  >15 s copy escape can consume it, and chain exhaustion restores the
+  pre-transform messages (guidance dropped for that turn — fail-open).
