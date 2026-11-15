@@ -65,10 +65,10 @@ In diff mode, the selected changes are the committed branch changes in
 records the runtime (`bunVersion`, `platform`, `arch`), exact array-form argv
 and cwd for every item, the `origin/main` diff base, per-surface results, and
 summary counts. A process must end in one of `passed`, `failed`, `crashed`,
-`timed_out`, `missing`, `skipped`, or `output_truncated` (an exit-0 child whose
-bounded reader missed its deadline was only partially observed — the row counts
-as failed (#3664)); a crash, timeout, missing item, or skipped item cannot be
-reported as a complete pass. The run-level status is
+`timed_out`, `missing`, `skipped`, or `output_truncated` (a cleanly-exiting
+child — no signal, known exit code — whose bounded reader missed its deadline
+was only partially observed; the row counts as failed (#3664)); a crash,
+timeout, missing item, or skipped item cannot be reported as a complete pass. The run-level status is
 `passed`, `failed`, `incomplete`, or `no_op`; `no_op` is reserved for a diff
 run with no discovered work and is not equivalent to `passed`.
 

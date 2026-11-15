@@ -13,8 +13,17 @@
  * The fix parks the transient observation in a second, accessor-visible
  * slot that the memo check never serves — re-probing stays live (#3661
  * item 5) while an enabled capability stays visible. Accessor precedence is
- * `_cached ?? _cachedTransient`: a memoized healthy result always outranks
- * the transient observation (leg 2 pins that precedence).
+ * IDENTITY-GATED: a slot is consulted only when it was recorded for the
+ * CURRENT probe-source identity, memoized result first, transient second
+ * (the probe-source identity is driven through the
+ * `_internals.currentProbeSourceIdentity` seam by legs L4/L5). Leg 2 pins
+ * memoized-outranks-transient at the same identity; L4 pins the
+ * reviewer-counterexample case (stale-identity disabled memo must NOT mask
+ * a fresh enabled transient re-probe after a binary change — a plain
+ * `_cached ?? _cachedTransient` preference fails exactly there); L5 pins
+ * the transient slot's own identity gate (an accessor read without an
+ * intervening re-probe after an identity change is fail-closed, and the
+ * next detect() restores visibility at the fresh identity).
  *
  * Determinism: the binary-stage probe is driven through the
  * `_internals.probePlatform` seam with a capability tagged to the HOST
@@ -223,4 +232,106 @@ describe('capability probe transient visibility — PR #3718 F-001', () => {
 			_resetExecutorCache();
 		}
 	}, 60_000);
+
+	// L4 (Stage-B reviewer counterexample, PR #3718 feedback round): a
+	// healthy DISABLED memo recorded at a PREVIOUS probe-source identity
+	// must NOT mask a fresh ENABLED transient re-probe after a binary change
+	// (install/upgrade of the sandbox binary changes the probe source; the
+	// first post-change probe can hit temp-setup failure). A plain
+	// `_cached ?? _cachedTransient` preference without the identity gates
+	// returns the stale disabled memo here — re-introducing the
+	// null-executor class this battery exists to prevent — so this leg is
+	// the kill mutant's witness.
+	test('L4: a stale-identity disabled memo does not mask a fresh enabled transient re-probe', async () => {
+		_resetCapabilityCache();
+		const originalProbePlatform = _internals.probePlatform;
+		const originalEvidence = _internals.detectBehavioralEvidence;
+		const originalIdentity = _internals.currentProbeSourceIdentity;
+		let platformProbeCalls = 0;
+		let identity = 'probe-source-A';
+		_internals.currentProbeSourceIdentity = (() =>
+			identity) as typeof originalIdentity;
+		_internals.probePlatform = (async () => {
+			platformProbeCalls += 1;
+			// First probe (identity A): binary missing — clean DISABLED.
+			// Second probe (identity B): binary installed, temp setup fails.
+			return hostCapability(platformProbeCalls === 1);
+		}) as typeof originalProbePlatform;
+		_internals.detectBehavioralEvidence = (() => ({
+			filesystem: 'none' as const,
+			network: 'none' as const,
+			process: 'none' as const,
+			reasons:
+				platformProbeCalls === 1
+					? ['healthy probe ran to completion']
+					: [SETUP_FAILURE_REASON],
+		})) as typeof originalEvidence;
+		try {
+			await new SandboxCapabilityProbe().detect();
+			expect(platformProbeCalls).toBe(1);
+			expect(hostAvailable()).toBe(false);
+			// The sandbox binary changes underneath the memo.
+			identity = 'probe-source-B';
+			const second = await new SandboxCapabilityProbe().detect();
+			// Stale-identity memo must not short-circuit detect().
+			expect(platformProbeCalls).toBe(2);
+			expect(second.status).toBe('enabled');
+			// Security pin: the CURRENT probe's enabled transient outranks
+			// the stale-identity disabled memo (kills the identity-less
+			// `??` preference mutant).
+			expect(hostAvailable()).toBe(true);
+		} finally {
+			_internals.currentProbeSourceIdentity = originalIdentity;
+			_internals.probePlatform = originalProbePlatform;
+			_internals.detectBehavioralEvidence = originalEvidence;
+			_resetCapabilityCache();
+		}
+	}, 30_000);
+
+	// L5: the transient slot carries its own identity gate. An accessor read
+	// outside the documented post-detect() pattern — here, after the probe
+	// source changed without a re-probe — is fail-closed for a sandbox
+	// availability gate, and the next detect() re-tags visibility at the
+	// fresh identity. This pins the transient-side identity check (an
+	// untagged `_cachedTransient` fallback survives L4 but dies here).
+	test('L5: an accessor read after an identity change without re-probe is fail-closed; the next detect() restores visibility', async () => {
+		_resetCapabilityCache();
+		const originalProbePlatform = _internals.probePlatform;
+		const originalEvidence = _internals.detectBehavioralEvidence;
+		const originalIdentity = _internals.currentProbeSourceIdentity;
+		let platformProbeCalls = 0;
+		let identity = 'probe-source-A';
+		_internals.currentProbeSourceIdentity = (() =>
+			identity) as typeof originalIdentity;
+		_internals.probePlatform = (async () => {
+			platformProbeCalls += 1;
+			return hostCapability();
+		}) as typeof originalProbePlatform;
+		_internals.detectBehavioralEvidence = (() => ({
+			filesystem: 'none' as const,
+			network: 'none' as const,
+			process: 'none' as const,
+			reasons: [SETUP_FAILURE_REASON],
+		})) as typeof originalEvidence;
+		try {
+			await new SandboxCapabilityProbe().detect();
+			expect(hostAvailable()).toBe(true);
+			// Binary swapped externally with NO detect() in between: the
+			// transient belongs to a stale identity — fail closed.
+			identity = 'probe-source-B';
+			expect(hostAvailable()).toBe(false);
+			// The documented pattern (accessor read after detect() resolves)
+			// re-probes — _cached is absent so the memo guard never
+			// short-circuits — and re-tags the transient at the fresh
+			// identity.
+			await new SandboxCapabilityProbe().detect();
+			expect(platformProbeCalls).toBe(2);
+			expect(hostAvailable()).toBe(true);
+		} finally {
+			_internals.currentProbeSourceIdentity = originalIdentity;
+			_internals.probePlatform = originalProbePlatform;
+			_internals.detectBehavioralEvidence = originalEvidence;
+			_resetCapabilityCache();
+		}
+	}, 30_000);
 });
