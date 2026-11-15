@@ -173,7 +173,25 @@ export async function handleFullAutoCommand(
 		if (blockers.length > 0) {
 			return `Error: resume refused because active policy/sandbox/action blockers remain for the paused action: ${blockers.join(', ')}. Clear the exact blocker, then retry.`;
 		}
-		startFullAutoRun(directory, sessionID, { mode: runState.mode });
+		// #3106: re-derive the armed mode from live config (the already-authorized
+		// preflight config — no second config read), mirroring the `on` arm's
+		// live-derivation so a post-pause config tightening is in force for the
+		// resumed run. Absent config keeps the run's armed mode (a per-run
+		// override survives resume); `supervised` only when neither exists.
+		const fullAutoConfig = auth.config.full_auto;
+		const effectiveMode = fullAutoConfig?.mode ?? runState.mode ?? 'supervised';
+		// #3106: CAS the arm against the pause generation observed BEFORE the
+		// probe/blocker checks — a second process landing a terminal write or a
+		// re-pause inside the check-then-arm window must not be resurrected.
+		const armed = startFullAutoRun(
+			directory,
+			sessionID,
+			{ mode: effectiveMode },
+			{ expectedPauseGeneration: runState.pauseGeneration },
+		);
+		if (!armed) {
+			return 'Error: resume refused because the paused run changed state after the probe (pause generation mismatch — another process aborted, disarmed, or re-paused it). Re-run `/swarm full-auto retry-oversight` to establish a fresh probe, then resume.';
+		}
 		session.fullAutoMode = true;
 		return `Full-Auto Mode resumed (new run generation=${loadFullAutoRunState(directory, sessionID)?.runGeneration ?? 'unknown'}, prior pause generation=${runState.pauseGeneration ?? 0}). Re-issue the blocked action so it can be re-reviewed.`;
 	}

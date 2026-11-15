@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import { advisoryWarn } from '../services/warning-buffer.js';
 import { canonicalRootKeyFresh } from '../utils/canonical-root.js';
 import { log } from '../utils/logger.js';
+import { withTimeout } from '../utils/timeout.js';
 export const BUNDLED_PROJECT_SKILLS = [
 	'brainstorm',
 	'specify',
@@ -81,6 +82,148 @@ const MAX_SKILL_FILES = 64;
 const MAX_SKILL_BYTES = 512_000;
 const MAX_IN_FLIGHT_SYNCS = 64;
 const inFlightSyncs = new Map<string, Promise<void>>();
+
+// ---------------------------------------------------------------------------
+// Materialization registry (#3364): a per-root completion handle so the
+// first-turn gate can ORDER the architect's MODE self-load read after the
+// deferred bundled-skill copy. Entries track materialization SUCCESS, not
+// mere promise settlement (the sync is fail-open by design and resolves after
+// copy failures — those settle 'failed'). Keyed on canonicalRootKeyFresh per
+// the path-identity convention; bounded with delete-then-set recency; a
+// pending entry is never evicted, and when every slot is pending a new
+// registration is REFUSED (the caller learns via the return value and the
+// root degrades to today's command-path backstop ordering).
+// ---------------------------------------------------------------------------
+export type BundledSkillsMaterializationOutcome =
+	| 'scheduled'
+	| 'in-flight'
+	| 'materialized'
+	| 'failed';
+export type BundledSkillsMaterializationStatus =
+	| 'ready'
+	| 'failed'
+	| 'timeout'
+	| 'not-started';
+interface MaterializationEntry {
+	outcome: BundledSkillsMaterializationOutcome;
+	promise: Promise<void>;
+	settle: (outcome: 'materialized' | 'failed') => void;
+}
+const MAX_MATERIALIZATION_REGISTRY = 8;
+const materializationRegistry = new Map<string, MaterializationEntry>();
+
+function settleMaterializationEntry(
+	entry: MaterializationEntry,
+	outcome: 'materialized' | 'failed',
+): void {
+	if (entry.outcome === 'materialized' || entry.outcome === 'failed') return;
+	entry.outcome = outcome;
+	entry.settle(outcome === 'materialized' ? 'materialized' : 'failed');
+}
+
+function createMaterializationEntry(
+	key: string,
+	outcome: 'scheduled' | 'in-flight',
+): MaterializationEntry | undefined {
+	// Admission at cap with every slot pending (#3364 plan D1.6): refuse rather
+	// than break the bound or evict a pending handle. Settled entries are
+	// evicted oldest-first (delete-then-set keeps recency honest on re-run).
+	if (materializationRegistry.size >= MAX_MATERIALIZATION_REGISTRY) {
+		let evicted = false;
+		for (const [k, v] of materializationRegistry) {
+			if (v.outcome === 'materialized' || v.outcome === 'failed') {
+				materializationRegistry.delete(k);
+				evicted = true;
+				break;
+			}
+		}
+		if (!evicted) return undefined;
+	}
+	let settleFn: () => void = () => {};
+	const promise = new Promise<void>((resolve) => {
+		settleFn = () => resolve();
+	});
+	const entry: MaterializationEntry = {
+		outcome,
+		promise,
+		settle: (o) => {
+			settleFn();
+			entry.outcome = o;
+		},
+	};
+	materializationRegistry.delete(key);
+	materializationRegistry.set(key, entry);
+	return entry;
+}
+
+/**
+ * Pre-register a deferred materialization handle for a project root BEFORE the
+ * plugin's post-resolution task runs (#3364). Map write only — no I/O, no
+ * await — so it is safe to call during plugin init at task-enqueue time. The
+ * post-resolution task's `syncBundledProjectSkillsIfMissingAsync` call adopts
+ * the scheduled entry; only the actual sync completion settles it (the outer
+ * await timeout never does).
+ */
+export function registerDeferredBundledSkillsSync(
+	projectDirectory: string,
+): 'registered' | 'registration-refused' {
+	const key = canonicalRootKeyFresh(projectDirectory);
+	const existing = materializationRegistry.get(key);
+	if (existing) {
+		if (existing.outcome === 'scheduled' || existing.outcome === 'in-flight') {
+			return 'registered';
+		}
+		// Settled: re-register fresh (delete-then-set refreshes recency).
+	}
+	return createMaterializationEntry(key, 'scheduled')
+		? 'registered'
+		: 'registration-refused';
+}
+
+/**
+ * Settle a still-SCHEDULED entry as failed (#3364): the post-resolution task's
+ * error path calls this so an entry whose sync never adopted cannot remain
+ * pending forever. No-op for adopted (in-flight/settled) entries — after
+ * adoption only the sync promise itself settles the entry.
+ */
+export function failScheduledBundledSkillsSync(projectDirectory: string): void {
+	const key = canonicalRootKeyFresh(projectDirectory);
+	const entry = materializationRegistry.get(key);
+	if (entry && entry.outcome === 'scheduled') {
+		settleMaterializationEntry(entry, 'failed');
+	}
+}
+
+/**
+ * Await bundled-skill materialization for a project root, bounded (#3364).
+ * - 'ready': the sync settled with materialization success.
+ * - 'failed': the sync settled without success (copy failure or guard refusal).
+ * - 'timeout': the bounded wait expired before settlement.
+ * - 'not-started': no registration exists for the root (plugin never
+ *   initialized it, or registration was refused at the all-pending cap).
+ * Never throws. The deadline uses `withTimeout` semantics (ref'd timer,
+ * finally cleanup) — never a detached unref'd race.
+ */
+export async function awaitBundledSkillsMaterialization(
+	projectDirectory: string,
+	timeoutMs: number,
+): Promise<BundledSkillsMaterializationStatus> {
+	const key = canonicalRootKeyFresh(projectDirectory);
+	const entry = materializationRegistry.get(key);
+	if (!entry) return 'not-started';
+	try {
+		await withTimeout(
+			Promise.resolve(entry.promise),
+			timeoutMs,
+			new Error(
+				`awaitBundledSkillsMaterialization exceeded ${timeoutMs}ms budget`,
+			),
+		);
+	} catch {
+		return 'timeout';
+	}
+	return entry.outcome === 'materialized' ? 'ready' : 'failed';
+}
 interface CopyState {
 	files: number;
 	bytes: number;
@@ -389,7 +532,7 @@ async function performBundledProjectSkillSyncAsync(
 	projectDirectory: string,
 	packageRoot: string,
 	quiet: boolean,
-): Promise<void> {
+): Promise<{ materialized: boolean }> {
 	// Tracks whether `skillsDir` passed its symlink/directory guards. The
 	// retired-dir cleanup below must ONLY run on that validated path: running
 	// it unconditionally (e.g. via a bare `finally`) would also fire on the
@@ -406,8 +549,12 @@ async function performBundledProjectSkillSyncAsync(
 		if (!(await ensureNotSymlinkedDirectoryAsync(sourceRoot))) {
 			throw new Error('refusing to copy symlinked bundled skill source root');
 		}
-		if (!(await ensureNotSymlinkedDirectoryAsync(swarmDir))) return;
-		if (!(await ensureNotSymlinkedDirectoryAsync(skillsDir))) return;
+		if (!(await ensureNotSymlinkedDirectoryAsync(swarmDir))) {
+			return { materialized: false };
+		}
+		if (!(await ensureNotSymlinkedDirectoryAsync(skillsDir))) {
+			return { materialized: false };
+		}
 		skillsDirValidated = true;
 		for (const slug of BUNDLED_PROJECT_SKILLS) {
 			const sourceDir = path.join(sourceRoot, slug);
@@ -428,6 +575,7 @@ async function performBundledProjectSkillSyncAsync(
 				slug: bundledProjectSkillFileReference(slug),
 			});
 		}
+		return { materialized: true };
 	} catch (err) {
 		// Non-fatal: plugin init and command registration must remain fail-open.
 		// The failure IS operator-actionable (the backstop broke): under
@@ -444,6 +592,7 @@ async function performBundledProjectSkillSyncAsync(
 			// biome-ignore lint/suspicious/noConsole: Fallback user-facing warning when bundled skill sync fails non-quietly — cannot use advisoryWarn as it would duplicate the already-raised advisory
 			console.warn(failureMsg);
 		}
+		return { materialized: false };
 	} finally {
 		// Retired slugs (renamed away in past releases) have no copy loop entry,
 		// so remove their stale materialized directories separately — on the
@@ -478,29 +627,64 @@ export async function syncBundledProjectSkillsIfMissingAsync(
 	packageRoot: string,
 	quiet = false,
 ): Promise<void> {
-	const syncKey = `${canonicalRootKeyFresh(projectDirectory)}\u0000${BUNDLED_PROJECT_SKILL_ROOT}`;
+	const rootKey = canonicalRootKeyFresh(projectDirectory);
+	const syncKey = `${rootKey}\u0000${BUNDLED_PROJECT_SKILL_ROOT}`;
 	const existing = inFlightSyncs.get(syncKey);
 	if (existing) return existing;
 	if (inFlightSyncs.size >= MAX_IN_FLIGHT_SYNCS) {
 		log('skipping bundled skill sync because the in-flight limit was reached', {
 			limit: MAX_IN_FLIGHT_SYNCS,
 		});
+		// The sync will not run: a pre-registered scheduled entry for this root
+		// must not stay pending forever (#3364 — every path settles exactly once).
+		failScheduledBundledSkillsSync(projectDirectory);
 		return;
 	}
+	// Materialization-registry integration (#3364): adopt a pre-registered
+	// 'scheduled' entry (created at post-resolution-task ENQUEUE time so the
+	// handle exists before the first turn can ask), or create a fresh entry.
+	// Only THIS promise's own completion settles the entry — the caller's
+	// outer await timeout is a race and must never fail it.
+	const scheduled = materializationRegistry.get(rootKey);
+	const entry =
+		scheduled?.outcome === 'scheduled'
+			? scheduled
+			: (createMaterializationEntry(rootKey, 'in-flight') ?? scheduled);
+	if (entry && entry.outcome === 'scheduled') entry.outcome = 'in-flight';
 	const syncPromise = performBundledProjectSkillSyncAsync(
 		projectDirectory,
 		packageRoot,
 		quiet,
-	).finally(() => {
-		if (inFlightSyncs.get(syncKey) === syncPromise) {
-			inFlightSyncs.delete(syncKey);
-		}
-	});
+	)
+		.then(
+			(result) => {
+				if (entry)
+					settleMaterializationEntry(
+						entry,
+						result.materialized ? 'materialized' : 'failed',
+					);
+			},
+			() => {
+				if (entry) settleMaterializationEntry(entry, 'failed');
+			},
+		)
+		.finally(() => {
+			if (inFlightSyncs.get(syncKey) === syncPromise) {
+				inFlightSyncs.delete(syncKey);
+			}
+		});
 	inFlightSyncs.set(syncKey, syncPromise);
 	return syncPromise;
 }
 export const _test_exports = {
 	collectBundledSkillFilesBoundedAsync,
 	copyBundledDirectoryBoundedAsync,
-	resetBundledProjectSkillSyncCache: () => inFlightSyncs.clear(),
+	resetBundledProjectSkillSyncCache: () => {
+		inFlightSyncs.clear();
+		materializationRegistry.clear();
+	},
+	materializationRegistrySize: () => materializationRegistry.size,
+	materializationOutcomeFor: (projectDirectory: string) =>
+		materializationRegistry.get(canonicalRootKeyFresh(projectDirectory))
+			?.outcome,
 };
