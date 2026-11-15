@@ -56,7 +56,7 @@ function runBounded(
 	timeoutMs: number,
 ): Promise<BoundedResult> {
 	return new Promise((resolve) => {
-		const startedAt = Date.now();
+		const startedAt = performance.now();
 		const child = spawn(cmd, args, {
 			cwd: REPO_ROOT,
 			stdin: 'ignore',
@@ -89,7 +89,7 @@ function runBounded(
 				stdout,
 				stderr,
 				timedOut: true,
-				elapsedMs: Date.now() - startedAt,
+				elapsedMs: performance.now() - startedAt,
 			});
 		}, timeoutMs);
 		child.on('error', (error) => {
@@ -98,7 +98,7 @@ function runBounded(
 				stdout,
 				stderr: `${stderr}${String(error)}`,
 				timedOut: false,
-				elapsedMs: Date.now() - startedAt,
+				elapsedMs: performance.now() - startedAt,
 			});
 		});
 		child.on('close', (code) => {
@@ -107,7 +107,7 @@ function runBounded(
 				stdout,
 				stderr,
 				timedOut: false,
-				elapsedMs: Date.now() - startedAt,
+				elapsedMs: performance.now() - startedAt,
 			});
 		});
 	});
@@ -116,12 +116,12 @@ function runBounded(
 function tsChildCode(input: string): string {
 	return [
 		`const mod = await import(${JSON.stringify(TS_SPEC)});`,
-		'const t0 = Date.now();',
+		'const t0 = performance.now();',
 		'try {',
 		`	const result = mod.normalizeMockTarget(${JSON.stringify(input)});`,
-		"	process.stdout.write('RESULT:' + result + String.fromCharCode(10) + 'MS:' + (Date.now() - t0) + String.fromCharCode(10));",
+		"	process.stdout.write('RESULT:' + result + String.fromCharCode(10) + 'MS:' + (performance.now() - t0) + String.fromCharCode(10));",
 		'} catch (error) {',
-		"	process.stdout.write('REJECTED:' + ((error && error.message) || String(error)) + String.fromCharCode(10) + 'MS:' + (Date.now() - t0) + String.fromCharCode(10));",
+		"	process.stdout.write('REJECTED:' + ((error && error.message) || String(error)) + String.fromCharCode(10) + 'MS:' + (performance.now() - t0) + String.fromCharCode(10));",
 		'}',
 	].join('\n');
 }

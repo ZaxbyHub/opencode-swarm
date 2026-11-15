@@ -1,13 +1,13 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import type { EvaluationRunV1 } from '../../../src/evaluation/contracts.js';
+import { computeRunIntegrityHash } from '../../../src/evaluation/hashing.js';
 import {
 	createEvaluationModelDispatcher,
 	_internals as dispatcherInternals,
 } from '../../../src/evaluation/model-dispatcher.js';
 import { saveEvaluationRun } from '../../../src/evaluation/store.js';
-import { computeRunIntegrityHash } from '../../../src/evaluation/hashing.js';
-import type { EvaluationRunV1 } from '../../../src/evaluation/contracts.js';
 import { canonicalMkdtemp, removeTreeWithRetry } from '../../helpers/tmpdir.js';
 
 /**
@@ -38,9 +38,7 @@ function clientWhosePromptFails(): {
 			session: {
 				create: async () => ({ data: { id: 'session-eval-3710' } }),
 				prompt: async () => {
-					throw new Error(
-						`Failed to run: bad key ${SYNTH_TOKEN} rejected`,
-					);
+					throw new Error(`Failed to run: bad key ${SYNTH_TOKEN} rejected`);
 				},
 				delete: async () => ({}),
 			},
