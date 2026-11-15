@@ -23,6 +23,36 @@ const pr = {
 };
 
 describe('swarm CI monitor observation adapter', () => {
+	test('rejects 1,001 suites before fetching any check-run pages', async () => {
+		const pulls = 'repos/example/swarm/pulls/42';
+		const suites = `repos/example/swarm/commits/${headSha}/check-suites?per_page=1`;
+		const calls: Array<[string, string]> = [];
+		const result = await observeCi(
+			{ repository: request.repository, number: request.number, headSha },
+			(program, argv) => {
+				const endpoint = argv[3];
+				calls.push([program, endpoint]);
+				if (endpoint === pulls) {
+					return JSON.stringify({ ...pr, state: 'OPEN', mergeCommitSha: null });
+				}
+				if (endpoint === suites) return '1001';
+				throw new Error(`Unexpected observation request: ${endpoint}`);
+			},
+		);
+
+		expect(result.census).toEqual({
+			state: 'incomplete',
+			checks: [],
+			totalCount: null,
+			reason: 'suite-limit',
+		});
+		expect(calls).toEqual([
+			['gh', pulls],
+			['gh', suites],
+			['gh', pulls],
+		]);
+	});
+
 	test('caps a transport that never reaches its last page', async () => {
 		const result = await collectCheckRuns(headSha, async (page) => ({
 			totalCount: 100,
