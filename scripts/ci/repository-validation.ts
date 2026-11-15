@@ -1043,8 +1043,15 @@ async function runDefaultProcess(item: ValidationItem, options: RunProcessOption
 	// pass on truncated evidence, so it takes the self-naming degraded
 	// terminal with a reason naming the truncated channel(s).
 	const truncatedChannels: string[] = [];
-	if (!stdoutResult.complete || stdoutResult.truncated) truncatedChannels.push('stdout');
-	if (!stderrResult.complete || stderrResult.truncated) truncatedChannels.push('stderr');
+	// #3664, final-critic round 1: COMPLETENESS ONLY. The byte-cap
+	// `truncated` flag means the SAVED log is bounded, not that the
+	// observation is incomplete — the reader drains the stream to EOF either
+	// way, so a fully-read exit-0 child whose output exceeded the cap was
+	// completely observed and stays `passed` (executed CI evidence: three
+	// real passing test files exceed the 64 KiB cap; folding the flag in
+	// failed them). Bounded saved logs remain disclosed by the cap itself.
+	if (!stdoutResult.complete) truncatedChannels.push('stdout');
+	if (!stderrResult.complete) truncatedChannels.push('stderr');
 	const outputIncomplete = truncatedChannels.length > 0;
 	const status = timedOut
 		? 'timed_out'

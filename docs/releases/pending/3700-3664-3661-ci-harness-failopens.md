@@ -22,13 +22,15 @@ pipeline (collated #3700 + #3664 + #3661):
   paired rename sources) so a nested independent project root (`.opencode/`
   boundary, #2127) classifies its genuine edits NEW.
 - **Per-file CI validation harness (#3664):** the child terminal-status
-  derivation now consults bounded-reader completeness (and the byte-cap
-  truncation flag). An exit-0 child whose stdout/stderr reader missed its
-  deadline records the new self-naming `output_truncated` terminal with a
-  reason naming the truncated channel(s), counts as started+completed+failed,
-  and fails the run — it can no longer record a clean `passed` on partially
-  observed output. The report verifier accepts and reconciles the new terminal
-  in lockstep.
+  derivation now consults bounded-reader COMPLETENESS. An exit-0 child whose
+  stdout/stderr reader missed its deadline records the new self-naming
+  `output_truncated` terminal with a reason naming the truncated channel(s),
+  counts as started+completed+failed, and fails the run — it can no longer
+  record a clean `passed` on partially observed output. Output that merely
+  EXCEEDS the saved-log byte cap is NOT incomplete (the reader drains to EOF
+  and the exit code is known), so fully-read capped output stays `passed`
+  (final-critic round 1, executed against real CI reports). The report
+  verifier accepts and reconciles the new terminal in lockstep.
 - **Required-check evidence capture + sandbox probe (#3661):** the capture CLI
   parses argv strictly (unknown flags, `--output=PATH`, case variants, and
   stray positionals exit 2 before any capture work — no more silent
