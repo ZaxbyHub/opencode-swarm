@@ -3,10 +3,11 @@
  *
  * The deferred bundled-skill sync (post-resolution task, AGENTS.md Invariant 1)
  * can still be copying `.swarm/bundled-skills/` when the first chat turn
- * arrives — measured 16/16 live observations with the first-turn arrival
- * 1249-3558 ms BEFORE the copy finished (issue #3364), and the architect's
- * MODE self-load protocol reports `SKILL_LOAD_FAILED` on a missing file.
- * Nothing ordered the read after the copy.
+ * arrives — measured in 19/19 live observations (ADR-0003 measurement of
+ * record, windows ~0.4-4.2 s; issue #3364) with the first-turn arrival BEFORE
+ * the copy finished, and the architect's MODE self-load protocol reports
+ * `SKILL_LOAD_FAILED` on a missing file. Nothing ordered the read after the
+ * copy.
  *
  * This gate closes that ordering gap WITHOUT touching the init path: composed
  * as the FIRST step of `experimental.chat.messages.transform`, its first

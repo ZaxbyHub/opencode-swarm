@@ -1851,7 +1851,7 @@ async function initializeOpenCodeSwarm(
 	// cannot read a SKILL.md until a later tool turn, and command-path sync remains
 	// a backstop if that practical timing assumption does not hold. It is
 	// still HARD-BOUNDED + fail-open: the async variant yields between files so
-	// withTimeout (which unref's its timer) can bound it; content-equality-checked,
+	// withTimeout can bound it; content-equality-checked,
 	// atomic-overwrite-with-rollback, symlink-guarded, byte/file-bounded. On timeout/error we
 	// fail open — the command-path sync remains as a backstop.
 	//
@@ -1859,10 +1859,12 @@ async function initializeOpenCodeSwarm(
 	// the first-turn gate can join it even if the first chat transform arrives
 	// before the post-resolution task fires. Cost: one bounded SYNCHRONOUS
 	// realpath (canonicalRootKeyFresh, the same helper the sync itself uses at
-	// run time) plus one map write — no AWAITED I/O, init-path safe (the
-	// repro-704 deadline is unaffected; the init contract stays pinned by
-	// tests/unit/index-startup-contract-outcomes-2670.test.ts and the CI
-	// repro-704 smoke leg).
+	// run time) plus one map write — no AWAITED I/O, init-path safe. The call
+	// is count-bounded, not time-bounded by construction (the path is warm —
+	// init already canonicalized it); repro-704 measured green with the call
+	// present (T1 160.9 ms vs the 400 ms deadline), and the init contract
+	// stays pinned by tests/unit/index-startup-contract-outcomes-2670.test.ts
+	// plus the CI repro-704 smoke leg.
 	if (bootstrapStateWritesEnabled) {
 		if (
 			registerDeferredBundledSkillsSync(bootstrapRoot) ===

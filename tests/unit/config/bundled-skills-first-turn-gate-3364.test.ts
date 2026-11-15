@@ -156,6 +156,42 @@ describe('materialization registry (#3364)', () => {
 		for (const r of roots) fs.rmSync(r, { recursive: true, force: true });
 	}, 30_000);
 
+	test('cap eviction: a settled entry is evicted oldest-first so a ninth registration succeeds', async () => {
+		// D1.6 eviction branch (round-2 R2-B-3): at the 8-slot cap with at
+		// least one SETTLED entry, the first settled entry is evicted
+		// oldest-first and admission succeeds; with all slots pending, the
+		// cap test above proves refusal. Pins the settled-eviction path
+		// that production (multi-root workspaces re-materializing after
+		// sync failures settle their handles) exercises today without
+		// coverage.
+		registerDeferredBundledSkillsSync(root);
+		failScheduledBundledSkillsSync(root);
+		expect(_test_exports.materializationOutcomeFor(root)).toBe('failed');
+		const pendingRoots: string[] = [];
+		for (let i = 0; i < 7; i += 1) {
+			const r = canonicalMkdtemp(`gate-3364-evict-${i}-`);
+			pendingRoots.push(r);
+			expect(registerDeferredBundledSkillsSync(r)).toBe('registered');
+		}
+		// 8/8 slots full (1 settled-failed + 7 pending): the ninth admission
+		// evicts the settled entry, not a pending one.
+		const ninth = canonicalMkdtemp('gate-3364-evict-9-');
+		expect(registerDeferredBundledSkillsSync(ninth)).toBe('registered');
+		expect(_test_exports.materializationOutcomeFor(root)).toBeUndefined();
+		expect(await awaitBundledSkillsMaterialization(root, 1)).toBe(
+			'not-started',
+		);
+		// With the settled slot consumed, the tenth registration finds
+		// every slot pending and is refused (cap still holds).
+		const tenth = canonicalMkdtemp('gate-3364-evict-10-');
+		expect(registerDeferredBundledSkillsSync(tenth)).toBe(
+			'registration-refused',
+		);
+		for (const r of [...pendingRoots, ninth, tenth]) {
+			fs.rmSync(r, { recursive: true, force: true });
+		}
+	}, 30_000);
+
 	// Windows without Developer Mode refuses unprivileged symlinks (EPERM) —
 	// probe once at load; the behavioral leg runs only where symlinks work.
 	const SYMLINK_CAPABLE = (() => {

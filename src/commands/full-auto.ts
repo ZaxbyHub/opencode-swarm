@@ -188,14 +188,24 @@ export async function handleFullAutoCommand(
 		// #3106: CAS the arm against the pause generation observed BEFORE the
 		// probe/blocker checks — a second process landing a terminal write or a
 		// re-pause inside the check-then-arm window must not be resurrected.
+		// `?? 0` keeps the CAS armed even for a legacy state whose generation
+		// field is absent (Copilot round-2 review; an undefined value would
+		// silently skip the precondition).
 		const armed = startFullAutoRun(
 			directory,
 			sessionID,
 			{ mode: effectiveMode },
-			{ expectedPauseGeneration: runState.pauseGeneration },
+			{ expectedPauseGeneration: runState.pauseGeneration ?? 0 },
 		);
 		if (!armed) {
-			return 'Error: resume refused because the paused run changed state after the probe (pause generation mismatch — another process aborted, disarmed, or re-paused it). Re-run `/swarm full-auto retry-oversight` to establish a fresh probe, then resume.';
+			// State-conditional recovery guidance (round-2 review F2):
+			// retry-oversight only works for a still-paused run — abort
+			// (terminated) and off (idle) must re-enable with `on`.
+			const postState = loadFullAutoRunState(directory, sessionID);
+			if (postState?.status === 'paused') {
+				return 'Error: resume refused because the paused run changed state after the probe (pause generation mismatch — another process re-paused it). Re-run `/swarm full-auto retry-oversight` to establish a fresh probe, then resume.';
+			}
+			return 'Error: resume refused because the paused run changed state after the probe (another process aborted or disarmed it). The run is no longer resumable; re-enable with `/swarm full-auto on`.';
 		}
 		session.fullAutoMode = true;
 		return `Full-Auto Mode resumed (mode=${effectiveMode}, new run generation=${loadFullAutoRunState(directory, sessionID)?.runGeneration ?? 'unknown'}, prior pause generation=${runState.pauseGeneration ?? 0}). Re-issue the blocked action so it can be re-reviewed.`;

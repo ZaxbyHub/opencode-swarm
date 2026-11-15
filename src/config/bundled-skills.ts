@@ -684,7 +684,6 @@ export const _test_exports = {
 		inFlightSyncs.clear();
 		materializationRegistry.clear();
 	},
-	materializationRegistrySize: () => materializationRegistry.size,
 	materializationOutcomeFor: (projectDirectory: string) =>
 		materializationRegistry.get(canonicalRootKeyFresh(projectDirectory))
 			?.outcome,

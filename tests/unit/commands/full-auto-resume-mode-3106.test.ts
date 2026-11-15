@@ -110,11 +110,15 @@ describe('resume mode re-derivation (#3106 PRR-003)', () => {
 		expect(loadFullAutoRunState(tmpDir, SESSION_ID)?.mode).toBe('supervised');
 	}, 60_000);
 
-	// NOTE: this cell is non-discriminating for the mode-SOURCE axis (both
-	// the old runState fallback and the new config-default semantics arm
-	// supervised here); it pins only the terminal ?? 'supervised' default.
+	// NOTE: this cell is non-discriminating for the mode-SOURCE axis — the
+	// old runState fallback and the new config-default semantics arm the
+	// same value here. The supervised outcome is attributable to the parsed
+	// config's schema default (full_auto.mode always materializes), NOT to
+	// the terminal ?? fallback: under a successful config parse that
+	// fallback is unreachable (runState.mode is always set on a paused
+	// run, and fullAutoConfig?.mode is always set when parsing succeeds).
 	// Cell 2 above is the discriminator for the semantics change.
-	test('neither config nor run mode falls back to supervised', async () => {
+	test('config file without a full_auto block: the schema default (supervised) wins over the paused-time mode', async () => {
 		writeProjectConfig(undefined);
 		await seedPausedRun('supervised');
 		const out = await handleFullAutoCommand(tmpDir, ['resume'], SESSION_ID);
@@ -142,13 +146,40 @@ describe('resume CAS command interleave (#3106 PRR-004)', () => {
 		if (session) session.fullAutoMode = false;
 		const out = await handleFullAutoCommand(tmpDir, ['resume'], SESSION_ID);
 		expect(out).toStartWith('Error:');
-		expect(out).toContain('retry-oversight');
+		expect(out).toContain('/swarm full-auto on');
+		expect(out).not.toContain('retry-oversight');
 		const after = loadFullAutoRunState(tmpDir, SESSION_ID);
 		expect(after?.status).toBe('terminated');
 		expect(after?.terminateReason).toBe(
 			'manual abort via /swarm full-auto abort',
 		);
 		expect(session?.fullAutoMode).toBe(false);
+	}, 60_000);
+
+	test('re-pause inside the check-then-arm window is refused with retry-oversight guidance (run stays resumable)', async () => {
+		writeProjectConfig(undefined);
+		await seedPausedRun('supervised');
+		const seeded = loadFullAutoRunState(tmpDir, SESSION_ID);
+		expect(seeded?.status).toBe('paused');
+		// A second process pauses the run INSIDE the command, between the
+		// state read and the arm — pauseGeneration moves under the run, so
+		// the CAS refuses. Unlike the terminate leg, the run stays paused
+		// and resumable: the refusal guidance points at retry-oversight
+		// (fresh probe), not at re-enable.
+		registerFullAutoRecoveryBlockerEvaluator(() => {
+			pauseFullAutoRun(
+				tmpDir,
+				SESSION_ID,
+				'oversight infrastructure failure after 1 attempt(s): server error',
+			);
+			return [];
+		});
+		const out = await handleFullAutoCommand(tmpDir, ['resume'], SESSION_ID);
+		expect(out).toStartWith('Error:');
+		expect(out).toContain('retry-oversight');
+		const after = loadFullAutoRunState(tmpDir, SESSION_ID);
+		expect(after?.status).toBe('paused');
+		expect(after?.pauseGeneration).toBe((seeded?.pauseGeneration ?? 0) + 1);
 	}, 60_000);
 
 	test('positive control: no interleave, resume arms (status running)', async () => {

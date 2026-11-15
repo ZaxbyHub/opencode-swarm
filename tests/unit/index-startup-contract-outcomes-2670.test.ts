@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { failScheduledBundledSkillsSync } from '../../src/config/bundled-skills';
 import { closeAllProjectDbs } from '../../src/db/project-db.js';
 import OpenCodeSwarm, {
 	overrideIndexInternalsForTest,
@@ -202,6 +203,14 @@ describe('issue #2670 init-path contract', () => {
 		emitEnabled = true;
 		const dir = makeWorkspace();
 		const { serverResult } = await bootWithCapturedTasks(dir);
+		// Settle the captured bundled-skill prerequisite before driving the
+		// transform: the captured scheduler never runs the post-resolution
+		// task, so the pre-registered entry would otherwise hold the first
+		// transform for the full 15 s gate budget (round-2 review F1). The
+		// gate resolves on the settlement and this test keeps its focus on
+		// the first-use markers; the budget path is covered by the gate
+		// suite's "bounded" leg.
+		failScheduledBundledSkillsSync(dir);
 		const transform = (serverResult as unknown as Record<string, unknown>)[
 			'experimental.chat.messages.transform'
 		] as ((input: unknown, output: unknown) => Promise<void>) | undefined;
@@ -240,7 +249,7 @@ describe('issue #2670 init-path contract', () => {
 		expect(report.firstToolDone).toBe(true);
 		expect(report.firstToolName).toBe(firstKey);
 		expect(contractRowsByStage('first_tool').length).toBe(1);
-	}, 30_000);
+	});
 
 	test('emission is debug-gated end to end', async () => {
 		emitEnabled = false;

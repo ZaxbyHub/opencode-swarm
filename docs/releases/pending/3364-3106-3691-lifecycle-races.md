@@ -6,9 +6,12 @@
   materialization now pre-registers a completion handle at post-resolution-task
   enqueue time, and a gate composed FIRST in the chat messages transform awaits
   it (single 15 s budget) before the first turn proceeds. A fresh project's
-  first architect MODE self-load can no longer race the copy — measured 16/16
-  live observations had the first turn arriving 1.2–3.6 s before the copy
-  finished. **Known bound (disclosed; owner confirmation pending — the plan-approval question went unanswered 2026-11-14, adopted under the session's standing work authorization):** three escapes keep today's
+  first architect MODE self-load can no longer race the copy — measured in
+  19/19 live observations (ADR-0003 measurement of record, windows
+  ~0.4–4.2 s) with the first turn arriving before the copy finished. **Known
+  bound (disclosed; owner confirmation pending — the plan-approval question
+  went unanswered 2026-11-14, adopted under the session's standing work
+  authorization):** three escapes keep today's
   fail-open behavior for that turn (command-path sync backstop intact): a copy
   slower than the 15 s budget, a genuinely failed sync, and registration refusal
   at the internal 8-root cap (practically unreachable — one project root per
