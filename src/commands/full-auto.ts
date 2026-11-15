@@ -176,8 +176,13 @@ export async function handleFullAutoCommand(
 		// #3106: re-derive the armed mode from live config (the already-authorized
 		// preflight config — no second config read), mirroring the `on` arm's
 		// live-derivation so a post-pause config tightening is in force for the
-		// resumed run. Absent config keeps the run's armed mode (a per-run
-		// override survives resume); `supervised` only when neither exists.
+		// resumed run. SHIPPED SEMANTICS (disclosed): the parsed config always
+		// materializes full_auto.mode (schema default 'supervised',
+		// src/config/schema.ts), so the config value — explicit or defaulted —
+		// always wins and a per-run `on [mode]` override does NOT survive
+		// resume under a default config (an `on strict` run resumes supervised).
+		// The runState.mode arm below is live only if the parsed config stops
+		// defaulting; the raw-config hybrid remains the owner's follow-up call.
 		const fullAutoConfig = auth.config.full_auto;
 		const effectiveMode = fullAutoConfig?.mode ?? runState.mode ?? 'supervised';
 		// #3106: CAS the arm against the pause generation observed BEFORE the

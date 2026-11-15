@@ -17,10 +17,14 @@
 - **Full-Auto resume mode + CAS (#3106):** `/swarm full-auto resume` now
   re-derives the armed mode from live config (`full_auto.mode`, defaulting to
   `supervised`) instead of re-arming the paused-time mode — a post-pause config
-  tightening is in force for the resumed run. NOTE: the parsed config always
-  materializes `full_auto.mode` (Zod default `supervised`), so a per-run `on
-  [mode]` override does not survive resume unless the config sets no mode at
-  all. Resume also arms through an expected-pauseGeneration CAS under the state
+  tightening is in force for the resumed run. BEHAVIOR CHANGE (disclosed,
+  owner decision at the PR): the parsed config ALWAYS materializes
+  `full_auto.mode` (schema default `supervised`), so the config value —
+  explicit or defaulted — always wins on resume: a per-run `on strict`
+  override pauses and resumes as `supervised` under a default config (the
+  pre-fix behavior kept the paused-time mode). A post-pause config LOOSENING
+  also applies. The raw-config hybrid (override survives unless the config
+  explicitly sets a mode) is the recorded owner follow-up option. Resume also arms through an expected-pauseGeneration CAS under the state
   lock: a second process aborting, disarming, or re-pausing the run inside the
   check-then-arm window is refused (with retry-oversight guidance) instead of
   being silently resurrected.

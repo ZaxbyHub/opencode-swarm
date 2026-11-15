@@ -57,7 +57,7 @@ Measured 2026-10-16 on a real host, closing the question this ADR's discovery sl
   same shared wait, so the CURRENT turn proceeds only after materialization
   settles, and a copy finishing mid-wait (measured window <= 3.612 s) is
   observed by that same turn. v2 hosts share the fix through the same v1 chain
-  (no separate wiring). **Disclosed bounds (owner-accepted with #3364 plan):**
+  (no separate wiring). **Disclosed bounds (adopted under the session's standing work authorization; owner confirmation pending — the plan-approval question went unanswered 2026-11-14):**
   three escapes keep the fail-open command-path backstop for that turn — a copy
   slower than 15 s, a genuinely failed sync, and registration refusal at the
   8-root all-pending cap (practically unreachable: one project root per plugin
