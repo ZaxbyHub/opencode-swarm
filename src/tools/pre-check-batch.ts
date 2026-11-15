@@ -1906,6 +1906,13 @@ function parseDiffLineRangesChecked(
 	// output this parser does not understand and fails closed instead of
 	// yielding an authoritative map from partially-understood input.
 	let inBinaryPayload = false;
+	// True from a `GIT binary patch` line until the next `diff --git` section:
+	// fragment size lines (`literal/delta <n>`) and base85 payloads are grammar
+	// ONLY inside such a section (4.5 review finding: without this gate, a
+	// stray `literal 5` after an ordinary section armed payload mode and
+	// admitted space-free junk — the junk-acceptance fail-open through a
+	// different door).
+	let sawBinaryPatchSection = false;
 
 	for (const rawLine of diffOutput.split(/\r?\n/)) {
 		const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
@@ -1947,6 +1954,7 @@ function parseDiffLineRangesChecked(
 			expectingDestination = false;
 			destinationSeen = false;
 			inBinaryPayload = false;
+			sawBinaryPatchSection = false;
 			// `diff --git <src> <dst>`. The a-side may be /dev/null (a new
 			// file), either side may be quoted when it contains special
 			// characters, and a path containing a space is emitted unquoted
@@ -2044,6 +2052,7 @@ function parseDiffLineRangesChecked(
 				// lines + base85 payloads + blank terminators (handled in the
 				// structural fall-through below).
 				inBinaryPayload = true;
+				sawBinaryPatchSection = true;
 			}
 			const binaryFile = line.startsWith('Binary files ')
 				? parseBinaryFilesLine(line)
@@ -2191,11 +2200,17 @@ function parseDiffLineRangesChecked(
 				inBinaryPayload = false;
 				continue;
 			}
-			// A fragment size line (re-)arms binary-payload mode.
-			if (/^(?:literal|delta) \d+$/.test(line)) {
-				inBinaryPayload = true;
-				continue;
-			}
+				// A fragment size line (re-)arms binary-payload mode — but
+				// ONLY inside a `GIT binary patch` section (4.5 review
+				// finding: a stray `literal 5` after an ordinary section
+				// armed payload mode and admitted space-free junk).
+				if (
+					sawBinaryPatchSection &&
+					/^(?:literal|delta) \d+$/.test(line)
+				) {
+					inBinaryPayload = true;
+					continue;
+				}
 			if (inBinaryPayload) {
 				// Real base85 payload lines never contain a space; a
 				// space-bearing line inside the payload region is junk.
