@@ -1175,6 +1175,13 @@ export const _test_exports = {
 	// contract builder so budget scaling can be asserted without prompt-text
 	// parsing (file precedent: prompt-construction internals live here).
 	prReviewLaneResponseBudgetChars,
+	// #3710: minimal test-only export. The collect-settlement inlineDetail
+	// redaction seam (the PR_WORKFLOW_CONTRACT_INVALID thrown-cause site)
+	// lives inside settleCollectedLane and is otherwise reachable only
+	// through a full collect orchestration; exporting the pure composer lets
+	// the regression suite drive it (plus its persisted lane-rejection
+	// artifact via persistLaneRejectionDetail) directly.
+	composeLaneRejectionError,
 };
 
 type ReadOnlyToolPermissions = Record<string, boolean> & {

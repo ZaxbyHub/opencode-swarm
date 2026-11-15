@@ -31,14 +31,30 @@ mirror-parity loops) alongside the existing #3165 suite, which is unchanged.
 
 **Disclosed bound (header placements):** credential tokens inside Authorization/Bearer header placements are redacted by the pre-existing context arms with their GENERIC placeholders (the shell Bearer/Basic and -H header arms; the display credential-KV arm) at both sites - byte-identically to base, for every family. The per-family placeholder contract covers prose/bare placements (the placement class with no adjacent key/scheme context the context arms can match); pinned as intended by tests/unit/failures/redaction-bounds-pins-3710.test.ts.
 
+**Disclosed bound (path-like base64 false positives):** an >=80-character
+mixed-class run without `.`/`-`/`_` separators — e.g. a flattened long
+mixed-case filesystem path in an ENOENT message — is redacted as
+`[REDACTED:base64]` at BOTH sites (the shell site has behaved this way since
+the arm shipped; the display site now matches it). Hex-only digests stay
+visible at both sites.
+
+**Disclosed split (sync tool output):** on the blocking dispatch path the
+saved terminal record is sanitized, while the tool-result `error` returned to
+the model still carries `syncClassifiedReason ?? formatError(error)` verbatim
+(display surface, not a `.swarm` artifact). The lane-rejection artifact's
+inline detail is additionally flattened to the sanitizer's 512-byte
+single-line bound.
+
 **Disclosed bound:** bare 32-hex Azure OpenAI keys are deliberately NOT patterned
 — they are indistinguishable from MD5/hex digests that must stay visible
 (#3712 AC3); only contextual `AccountKey=` forms are redacted.
 
 ### Redacted provider-error text at every persistence boundary (#3710)
 
-Raw provider/SDK error JSON (`JSON.stringify(<result>.error)`) and raw
-`.message` text no longer reach durable state or logger output unredacted.
+Across the dispatch family (full-auto oversight + legacy intercept, lean
+turbo runner/critic/reviewer, dispatch-lanes, and the evaluation model
+dispatcher), raw provider/SDK error JSON (`JSON.stringify(<result>.error)`) and
+raw `.message` text no longer reach durable `.swarm` state unredacted.
 `sanitizeFailureEvidenceDisplay` is applied at the persistence seams of the
 dispatch family — AFTER every transient/quota classifier read, so model failover
 behavior is unchanged:
