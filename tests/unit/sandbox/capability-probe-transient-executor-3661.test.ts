@@ -12,17 +12,19 @@
  *
  * The fix parks the transient observation in a second, accessor-visible
  * slot that the memo check never serves — re-probing stays live (#3661
- * item 5) while an enabled capability stays visible. A memoized healthy
- * result supersedes (and clears) the transient slot at every identity.
+ * item 5) while an enabled capability stays visible. Accessor precedence is
+ * `_cached ?? _cachedTransient`: a memoized healthy result always outranks
+ * the transient observation (leg 2 pins that precedence).
  *
  * Determinism: the binary-stage probe is driven through the
  * `_internals.probePlatform` seam with a capability tagged to the HOST
- * platform (the transient slot is identity-keyed against
- * `currentProbeSourceIdentity(<accessor platform>)`, which only matches on
- * the host's own platform), and the setup-failure marker is injected
- * through `_internals.detectBehavioralEvidence` exactly as the #3661
- * memoization battery does. Every host therefore exercises its own real
- * accessor + executor-creation path — no platform-skipped legs.
+ * platform (the accessors discriminate on the capability's own
+ * status/platform pair, and the executor creators dispatch on the real
+ * process.platform, so the host tag makes every leg exercise the host's
+ * own path), and the setup-failure marker is injected through
+ * `_internals.detectBehavioralEvidence` exactly as the #3661 memoization
+ * battery does. Every host therefore runs its own real accessor +
+ * executor-creation path — no platform-skipped legs.
  */
 
 import { describe, expect, test } from 'bun:test';

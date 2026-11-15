@@ -99,15 +99,17 @@ let _cachedProbeSourceIdentity: string | undefined;
 
 // F-001 (PR #3718 review): a transient setup-failure observation is never
 // memoized as the authoritative result (see detect()), but it must remain
-// visible to the synchronous accessors for its probe-source identity — an
-// ENABLED binary-stage capability has to keep executor availability intact
-// while the behavioral evidence re-probes. Storing it in `_cached` instead
-// would reintroduce #3661 item 5 (a transient failure masking healthy
-// probes); not storing it at all let getExecutor() resolve and cache a NULL
-// executor from an enabled capability (advisory-mode shell commands then
-// ran unsandboxed for the process lifetime — the regression this closes).
+// visible to the synchronous accessors — an ENABLED binary-stage capability
+// has to keep executor availability intact while the behavioral evidence
+// re-probes. Storing it in `_cached` instead would reintroduce #3661 item 5
+// (a transient failure masking healthy probes); not storing it at all let
+// getExecutor() resolve and cache a NULL executor from an enabled capability
+// (advisory-mode shell commands then ran unsandboxed for the process
+// lifetime — the regression this closes). The accessor precedence is
+// `_cached ?? _cachedTransient`: an authoritative memoized result always
+// outranks the transient observation, matching the pre-fix accessor
+// semantics (which likewise ignored probe-source identity).
 let _cachedTransient: SandboxCapabilityV1 | undefined;
-let _cachedTransientProbeSourceIdentity: string | undefined;
 
 interface BehavioralEvidence {
 	filesystem: SandboxDimensionStrength;
@@ -535,7 +537,6 @@ export function _resetCapabilityCache(): void {
 	_cached = undefined;
 	_cachedProbeSourceIdentity = undefined;
 	_cachedTransient = undefined;
-	_cachedTransientProbeSourceIdentity = undefined;
 }
 
 /**
@@ -844,33 +845,19 @@ function probeWindows(): SandboxCapability {
  */
 /**
  * The capability the synchronous accessors answer from (F-001, PR #3718
- * review): the memoized healthy probe result when it matches the CURRENT
- * probe-source identity, otherwise the transient setup-failure observation
- * for that identity. This is deliberately NOT what detect() returns from
- * cache — only `_cached` short-circuits detect(), so a transient
- * observation is always re-probed by the next detect() call (#3661 item 5);
- * the transient slot exists solely so an enabled binary-stage capability
- * stays visible to executor availability in the meantime. A memoized
- * result always supersedes (and clears) the transient slot at every
- * identity, so a stale enabled observation can never outlive a real answer.
+ * review): the memoized authoritative result when one exists — matching the
+ * pre-fix accessor semantics exactly, which also ignored probe-source
+ * identity — otherwise the transient setup-failure observation. This is
+ * deliberately NOT what detect() returns from cache: only `_cached`
+ * short-circuits detect(), so a transient observation is always re-probed by
+ * the next detect() call (#3661 item 5); the transient slot exists solely so
+ * an enabled binary-stage capability stays visible to executor availability
+ * in the meantime. A memoized result always outranks the transient slot
+ * (and detect() also clears it on memoization), so a transient observation
+ * can never outlive a real answer.
  */
-function syncVisibleCapability(
-	platform: 'linux' | 'darwin' | 'win32',
-): SandboxCapabilityV1 | undefined {
-	const probeSourceIdentity = currentProbeSourceIdentity(platform);
-	if (
-		_cached !== undefined &&
-		_cachedProbeSourceIdentity === probeSourceIdentity
-	) {
-		return _cached;
-	}
-	if (
-		_cachedTransient !== undefined &&
-		_cachedTransientProbeSourceIdentity === probeSourceIdentity
-	) {
-		return _cachedTransient;
-	}
-	return undefined;
+function syncVisibleCapability(): SandboxCapabilityV1 | undefined {
+	return _cached ?? _cachedTransient;
 }
 
 /**
@@ -879,7 +866,7 @@ function syncVisibleCapability(
  * has not yet been called or if the visible result is not Linux/enabled.
  */
 export function isBubblewrapAvailable(): boolean {
-	const capability = syncVisibleCapability('linux');
+	const capability = syncVisibleCapability();
 	return capability?.status === 'enabled' && capability?.platform === 'linux';
 }
 
@@ -889,7 +876,7 @@ export function isBubblewrapAvailable(): boolean {
  * has not yet been called or if the visible result is not macOS/enabled.
  */
 export function isSandboxExecAvailable(): boolean {
-	const capability = syncVisibleCapability('darwin');
+	const capability = syncVisibleCapability();
 	return capability?.status === 'enabled' && capability?.platform === 'darwin';
 }
 
@@ -899,7 +886,7 @@ export function isSandboxExecAvailable(): boolean {
  * has not yet been called or if the visible result is not win32/enabled.
  */
 export function isWindowsSandboxAvailable(): boolean {
-	const capability = syncVisibleCapability('win32');
+	const capability = syncVisibleCapability();
 	return capability?.status === 'enabled' && capability?.platform === 'win32';
 }
 
@@ -940,13 +927,13 @@ export class SandboxCapabilityProbe {
 		if (!hasProbeSetupFailureReason(result)) {
 			_cached = result;
 			_cachedProbeSourceIdentity = probeSourceIdentity;
-			// A memoized authoritative answer supersedes any transient
-			// observation at every identity.
+			// Hygiene, not a pinned behavior: the `_cached ?? _cachedTransient`
+			// precedence already hides any transient once an authoritative
+			// result exists; dropping the transient keeps the invariant that
+			// at most one accessor-visible slot carries state.
 			_cachedTransient = undefined;
-			_cachedTransientProbeSourceIdentity = undefined;
 		} else {
 			_cachedTransient = result;
-			_cachedTransientProbeSourceIdentity = probeSourceIdentity;
 		}
 		return result;
 	}
