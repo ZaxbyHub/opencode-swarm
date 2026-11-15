@@ -10,7 +10,7 @@ description: >
 disable-model-invocation: true
 metadata:
   audience: swarm-plugin
-  swarm-contract-digest: "db0fcef20ebe"
+  swarm-contract-digest: "f32ce6bce7ed"
 ---
 
 # Swarm CI Monitor
@@ -60,7 +60,7 @@ MCP tools and verify availability first:
 
 | Capability needed | `gh` CLI | Example remote-MCP shape (resolve the real names via ToolSearch) |
 |---|---|
-| `gh pr checks <N>` | `mcp__github__pull_request_read` method `get_check_runs` |
+| Exact-head check runs | A paginated commit check-runs operation, such as `get_check_runs` when it exposes revision and pagination evidence |
 | `gh pr view <N> --json mergeable,mergeStateStatus,reviewDecision` | `mcp__github__pull_request_read` method `get` |
 | `gh run view <run> --log` | `mcp__github__get_job_logs` with `job_id`, `return_content: true` |
 
@@ -105,6 +105,22 @@ the active durable task/plan checkpoint and reload it on resume. Never reset
 the counter to 5 after compaction.
 
 ### 2a. Fetch check runs for the PR head SHA
+
+Resolve the PR number, repository, target base and full head SHA together. On
+a host with `gh`, Git and Bun, run `bun <skill-dir>/scripts/observe-ci.ts
+<owner>/<repo> <N> <head-sha>`. Save the JSON in the active task checkpoint. It
+reports the exact-head census as `complete` or `incomplete` with a reason and
+any validated partial results. A JSON result exits zero, including an
+incomplete result. Refresh the PR identity on resume and obtain a new
+observation when the head or base changed.
+
+On an MCP-only host, enumerate all check-run pages for the exact head. Require
+the same head, a consistent total, unique check IDs and an exhausted listing.
+An unavailable page, missing completeness evidence or changed PR identity
+means `incomplete`. Retry the read or stop with the missing evidence. Advance
+only with a complete census and the existing required-check verdict. Use
+`gh pr checks --required` or equivalent protection evidence for requiredness
+and legacy status contexts. The check-run census cannot provide those facts.
 
 Determine green state by these rules (re-stated here so this merge gate does
 not depend on ci-fix-monitor's generated file being regenerated unchanged):
@@ -314,6 +330,11 @@ direct base. If the call fails, ask the user; never guess.
    "queue timeout" terminal (distinct from "post-merge mismatch") only after
    90 minutes with no resolution. Once `state == "MERGED"`, take
    `mergeCommit.oid` as the merge SHA and proceed to 4b.
+   Record a known candidate Actions run ID with the task when available. Re-run
+   the observation with `--candidate-run <run-id>` to report its distinct SHA
+   and status. The run must be a `merge_group` run in the same repository with
+   the target base and PR number in its queue branch. Stale or unavailable
+   candidate status leaves terminal proof to the PR and independent Git check.
 3. **Error.** "not mergeable", "merge conflict", or any other error → **do not
    retry blindly.** Abort and report. A clean merge/enqueue is expected
    because Step 3 just confirmed `CLEAN`; an error here means state changed
@@ -325,6 +346,13 @@ local-git check first: if the base tip already reflects a merge, treat it as
 case 1/2 above; if not, treat the ambiguous response as an error per case 3.
 
 ### 4b. Post-merge confirmation (the independent gate)
+
+The saved read-only observation reports `merged` when the exact PR reports its
+merge SHA and that SHA is independently proven to be on the advertised target
+base by local Git ancestry. If the needed objects or Git capability are
+unavailable, record `unconfirmed`. MCP-only hosts need equivalent independent
+Git proof to report a terminal merge. Apply the independent gate below before
+declaring this workflow complete.
 
 Confirm the merge via a **different system** than the GitHub API — the local
 git object DB — so this gate does not share the stale-fetch failure mode of
