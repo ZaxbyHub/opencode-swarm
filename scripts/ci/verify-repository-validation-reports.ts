@@ -17,7 +17,7 @@ import {
 
 export { DEFAULT_BOUNDS, MAX_REPORT_BYTES } from './repository-validation-constants';
 
-const TERMINAL_STATUSES = new Set(['passed', 'failed', 'crashed', 'timed_out', 'missing', 'skipped']);
+const TERMINAL_STATUSES = new Set(['passed', 'failed', 'crashed', 'timed_out', 'output_truncated', 'missing', 'skipped']);
 const RUN_STATUSES = new Set(['passed', 'failed', 'incomplete', 'no_op']);
 export const MAX_REPORT_SCAN_DEPTH = 8;
 export const MAX_REPORT_SCAN_ENTRIES = 50_000;
@@ -315,14 +315,17 @@ function artifactCoordinates(artifact: string, prefix: string): { os: string; sh
 
 function expectedStatus(results: JsonResult[], mode: unknown): string {
 	const passed = results.filter((result) => result.status === 'passed').length;
-	const failed = results.filter((result) => result.status === 'failed').length;
+	const failed = results.filter((result) => result.status === 'failed' || result.status === 'output_truncated').length;
+	const outputTruncated = results.filter((result) => result.status === 'output_truncated').length;
 	const incomplete = results.some((result) =>
 		result.status === 'crashed' || result.status === 'timed_out' || result.status === 'missing' || result.status === 'skipped',
 	);
 	if (mode === 'diff' && results.length === 0) return 'no_op';
 	if (results.length === 0) return 'failed';
 	if (incomplete) return 'incomplete';
-	if (failed > 0 || passed !== results.length) return 'failed';
+	// An output_truncated row is a KNOWN failed verdict (incomplete
+	// observation), never unresolved work: the run status is failed.
+	if (failed > 0 || outputTruncated > 0 || passed !== results.length) return 'failed';
 	return 'passed';
 }
 
@@ -330,12 +333,13 @@ function validateSummary(report: JsonReport, results: JsonResult[], reportPath: 
 	if (!report.summary || typeof report.summary !== 'object') fail(`missing summary: ${reportPath}`);
 	const counts = {
 		discovered: results.length,
-		started: results.filter((result) => ['passed', 'failed', 'crashed', 'timed_out'].includes(String(result.status))).length,
-		completed: results.filter((result) => ['passed', 'failed'].includes(String(result.status))).length,
+		started: results.filter((result) => ['passed', 'failed', 'crashed', 'timed_out', 'output_truncated'].includes(String(result.status))).length,
+		completed: results.filter((result) => ['passed', 'failed', 'output_truncated'].includes(String(result.status))).length,
 		passed: results.filter((result) => result.status === 'passed').length,
-		failed: results.filter((result) => result.status === 'failed').length,
+		failed: results.filter((result) => result.status === 'failed' || result.status === 'output_truncated').length,
 		crashed: results.filter((result) => result.status === 'crashed').length,
 		timedOut: results.filter((result) => result.status === 'timed_out').length,
+		outputTruncated: results.filter((result) => result.status === 'output_truncated').length,
 		missing: results.filter((result) => result.status === 'missing').length,
 		skipped: results.filter((result) => result.status === 'skipped').length,
 	};

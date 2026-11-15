@@ -53,6 +53,7 @@ export const TERMINAL_STATUSES = [
 	'timed_out',
 	'missing',
 	'skipped',
+	'output_truncated',
 ] as const;
 
 export type TerminalStatus = (typeof TERMINAL_STATUSES)[number];
@@ -131,6 +132,7 @@ export interface ValidationSummary {
 	failed: number;
 	crashed: number;
 	timedOut: number;
+	outputTruncated: number;
 	missing: number;
 	skipped: number;
 }
@@ -972,13 +974,16 @@ async function runDefaultProcess(item: ValidationItem, options: RunProcessOption
 			}).finally(() => resolve(124));
 		}, options.perItemTimeoutMs);
 	});
-	const stdoutPromise = readBoundedWithStatus(
+	// Child readers route through _internals (#3664): the bounded-reader
+	// completeness this derivation consumes must be stubbable in tests the
+	// same way the git-diff reader already is.
+	const stdoutPromise = _internals.readBoundedWithStatus(
 		child.stdout,
 		options.maxOutputBytes,
 		options.perItemTimeoutMs + PROCESS_KILLER_TIMEOUT_MS,
 		outputStop.signal,
 	);
-	const stderrPromise = readBoundedWithStatus(
+	const stderrPromise = _internals.readBoundedWithStatus(
 		child.stderr,
 		options.maxOutputBytes,
 		options.perItemTimeoutMs + PROCESS_KILLER_TIMEOUT_MS,
@@ -1032,8 +1037,31 @@ async function runDefaultProcess(item: ValidationItem, options: RunProcessOption
 	const signal = (child as unknown as { signalCode?: string | null }).signalCode ?? null;
 	const durationMs = Date.now() - started;
 	const abnormalExit = signal !== null || rawExitCode === null;
+	// Reader completeness is a derivation input (#3664): an exit-0 child whose
+	// bounded stdout/stderr reader missed its deadline (or hit the byte cap)
+	// was only partially observed — recording it `passed` would misrecord a
+	// pass on truncated evidence, so it takes the self-naming degraded
+	// terminal with a reason naming the truncated channel(s).
+	const truncatedChannels: string[] = [];
+	if (!stdoutResult.complete || stdoutResult.truncated) truncatedChannels.push('stdout');
+	if (!stderrResult.complete || stderrResult.truncated) truncatedChannels.push('stderr');
+	const outputIncomplete = truncatedChannels.length > 0;
+	const status = timedOut
+		? 'timed_out'
+		: !treeCleanupSucceeded
+			? 'crashed'
+			: abnormalExit
+				? 'crashed'
+				: outputIncomplete
+					? 'output_truncated'
+					: rawExitCode === 0
+						? 'passed'
+						: 'failed';
 	return {
-		status: timedOut ? 'timed_out' : !treeCleanupSucceeded ? 'crashed' : abnormalExit ? 'crashed' : rawExitCode === 0 ? 'passed' : 'failed',
+		status,
+		reason: outputIncomplete
+			? `bounded ${truncatedChannels.join(' and ')} ${truncatedChannels.length > 1 ? 'readers' : 'reader'} incomplete: terminal evidence is truncated (incomplete observation)`
+			: undefined,
 		exitCode: timedOut ? 124 : rawExitCode,
 		signal: timedOut ? signal ?? 'SIGKILL' : signal,
 		stdout: redactAndBound(stdout, options.maxOutputBytes),
@@ -1101,6 +1129,7 @@ function summarize(results: ValidationResult[]): ValidationSummary {
 		failed: 0,
 		crashed: 0,
 		timedOut: 0,
+		outputTruncated: 0,
 		missing: 0,
 		skipped: 0,
 	};
@@ -1123,6 +1152,15 @@ function summarize(results: ValidationResult[]): ValidationSummary {
 			case 'timed_out':
 				summary.started++;
 				summary.timedOut++;
+				break;
+			case 'output_truncated':
+				// A truncated observation is a KNOWN failed verdict, not
+				// unresolved work: started + completed + failed, plus its own
+				// observability counter.
+				summary.started++;
+				summary.completed++;
+				summary.failed++;
+				summary.outputTruncated++;
 				break;
 			case 'missing':
 				summary.missing++;
@@ -1147,7 +1185,13 @@ function deriveStatus(mode: ValidationMode, summary: ValidationSummary): Validat
 	// is incomplete: the failed row is known, but the run cannot claim a
 	// complete verdict while crash/timeout/missing/skipped work remains.
 	if (hasIncompleteTerminals) return 'incomplete';
-	if (summary.failed > 0 || summary.passed !== summary.discovered) return 'failed';
+	if (
+		summary.failed > 0 ||
+		summary.outputTruncated > 0 ||
+		summary.passed !== summary.discovered
+	) {
+		return 'failed';
+	}
 	return 'passed';
 }
 

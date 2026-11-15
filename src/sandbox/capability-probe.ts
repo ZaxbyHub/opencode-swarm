@@ -862,14 +862,38 @@ export class SandboxCapabilityProbe {
 			}
 		}
 
-		_cached = withProbeIdentity(
+		const result = withProbeIdentity(
 			upgradeCapability(
 				detected,
 				_internals.detectBehavioralEvidence(detected),
 			),
 			probeSourceIdentity,
 		);
-		_cachedProbeSourceIdentity = probeSourceIdentity;
-		return _cached;
+		// A setup-failure result is transient evidence (temp-dir creation or
+		// probe-environment failure, #3661 item 5): never memoize it, or a
+		// later healthy probe is masked for the process lifetime. The
+		// binary-identity guard above stays the only healthy-result cache
+		// invalidation axis; the local result is always returned.
+		if (!hasProbeSetupFailureReason(result)) {
+			_cached = result;
+			_cachedProbeSourceIdentity = probeSourceIdentity;
+		}
+		return result;
 	}
+}
+
+/**
+ * True when a capability carries a probe temp-setup-failure reason. The linux
+ * bwrap arm (`bubblewrap probe temp setup failed (…)`) and the darwin
+ * sandbox-exec arm (`sandbox-exec probe temp setup failed (…)`) share the
+ * marker core; behavioral evidence passes reasons through upgradeCapability,
+ * so the check runs on the final capability.
+ */
+function hasProbeSetupFailureReason(capability: SandboxCapabilityV1): boolean {
+	const reasons: unknown = (capability as { reasons?: unknown }).reasons;
+	if (!Array.isArray(reasons)) return false;
+	return reasons.some(
+		(reason) =>
+			typeof reason === 'string' && reason.includes('probe temp setup failed'),
+	);
 }

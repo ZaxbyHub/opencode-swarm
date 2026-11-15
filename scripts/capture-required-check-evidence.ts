@@ -60,7 +60,11 @@ interface GhApiResult {
 
 /** Test seam: run `gh api <endpoint>` under the full subprocess contract. */
 function ghApiViaCli(endpoint: string, cwd: string): GhApiResult {
-	const proc = spawnSync('gh', ['api', endpoint], {
+	// Routed through _internals.spawnSync (#3661 item 2): spawnSync is
+	// synchronous and reaps the child itself, so there is deliberately no
+	// post-call kill — signalling the returned pid would target a reaped,
+	// potentially recycled process.
+	const proc = _internals.spawnSync('gh', ['api', endpoint], {
 		cwd,
 		input: '',
 		timeout: API_TIMEOUT_MS,
@@ -74,38 +78,26 @@ function ghApiViaCli(endpoint: string, cwd: string): GhApiResult {
 			GH_NO_UPDATE_NOTIFIER: '1',
 		},
 	});
+	if (proc.error) {
+		return { ok: false, status: -1, json: null, error: proc.error.message };
+	}
+	if (proc.status !== 0) {
+		return {
+			ok: false,
+			status: proc.status,
+			json: null,
+			error: (proc.stderr || '').split('\n')[0]?.slice(0, 300) || `gh exited ${proc.status}`,
+		};
+	}
 	try {
-		if (proc.error) {
-			return { ok: false, status: -1, json: null, error: proc.error.message };
-		}
-		if (proc.status !== 0) {
-			return {
-				ok: false,
-				status: proc.status,
-				json: null,
-				error: (proc.stderr || '').split('\n')[0]?.slice(0, 300) || `gh exited ${proc.status}`,
-			};
-		}
-		try {
-			return { ok: true, status: 0, json: JSON.parse(proc.stdout) };
-		} catch (error) {
-			return {
-				ok: false,
-				status: 0,
-				json: null,
-				error: `gh api ${endpoint} returned non-JSON output: ${error instanceof Error ? error.message : String(error)}`,
-			};
-		}
-	} finally {
-		// spawnSync is synchronous; on timeout the child is already reaped.
-		// Best-effort kill for any platform quirk, per AGENTS.md invariant 3.
-		if (proc.error && proc.pid) {
-			try {
-				process.kill(proc.pid);
-			} catch {
-				// already exited
-			}
-		}
+		return { ok: true, status: 0, json: JSON.parse(proc.stdout) };
+	} catch (error) {
+		return {
+			ok: false,
+			status: 0,
+			json: null,
+			error: `gh api ${endpoint} returned non-JSON output: ${error instanceof Error ? error.message : String(error)}`,
+		};
 	}
 }
 
@@ -125,9 +117,11 @@ function writeArtifactAtomic(target: string, contents: string): void {
 export const _internals: {
 	ghApi: typeof ghApiViaCli;
 	writeArtifactAtomic: typeof writeArtifactAtomic;
+	spawnSync: typeof spawnSync;
 } = {
 	ghApi: ghApiViaCli,
 	writeArtifactAtomic,
+	spawnSync,
 };
 
 /** Thrown by refuse(); main() converts it to the exit code. */
@@ -204,6 +198,8 @@ interface CheckRun {
 	name: string;
 	status: string;
 	conclusion: string | null;
+	/** Producing GitHub App (nullable on the wire; used for duplicate-name binding). */
+	app?: { slug?: string | null } | null;
 }
 
 interface ActionsRun {
@@ -334,10 +330,50 @@ export function runCapture(cwd = REPO_ROOT): RequiredCheckEvidence {
 			check_runs?: CheckRun[];
 		};
 		const all = checks.check_runs ?? [];
-		const contextsComplete = contract.requiredContexts.every((name) => {
-			const match = all.find((run) => run.name === name);
-			return match !== undefined && match.status === 'completed' && match.conclusion === 'success';
-		});
+		let contextsComplete = true;
+		for (const name of contract.requiredContexts) {
+			const matches = all.filter((run) => run.name === name);
+			if (matches.length === 0) {
+				contextsComplete = false;
+				break;
+			}
+			const allSuccessful = matches.every(
+				(run) => run.status === 'completed' && run.conclusion === 'success',
+			);
+			if (!allSuccessful) {
+				if (matches.length > 1) {
+					// Producer binding (#3661 item 3): with same-named duplicates
+					// every run must be a completed success — a first-success
+					// duplicate ahead of a failure must not satisfy the check.
+					refuse(
+						`required context "${name}" has ${matches.length} same-named check runs at head ${head}; binding requires every same-named run to be completed and successful`,
+					);
+				}
+				contextsComplete = false;
+				break;
+			}
+			if (matches.length > 1) {
+				// Duplicates are acceptable only when the producing app is
+				// unambiguous: EVERY same-named run carries a non-empty app
+				// slug and they all agree. Missing identity on any duplicate
+				// is ambiguous and refuses.
+				const slugs = matches.map((run) => run.app?.slug);
+				const allIdentified = slugs.every(
+					(slug) => typeof slug === 'string' && slug.length > 0,
+				);
+				const distinctSlugs = new Set(
+					slugs.filter(
+						(slug): slug is string =>
+							typeof slug === 'string' && slug.length > 0,
+					),
+				);
+				if (!allIdentified || distinctSlugs.size !== 1) {
+					refuse(
+						`required context "${name}" has ambiguous producer binding at head ${head} (same-named runs must all carry one agreeing app slug)`,
+					);
+				}
+			}
+		}
 		const runsCoverWorkflows = mergeGroupWorkflows.every((workflow) =>
 			runs.some((run) => run.head_sha === head && run.path === workflow.file),
 		);
@@ -353,12 +389,20 @@ export function runCapture(cwd = REPO_ROOT): RequiredCheckEvidence {
 		);
 	}
 
-	// Step 3 — merge-group evidence from the selected head. The run map must
-	// cover EVERY contract workflow (empty arrays allowed for workflows that
-	// do not run on merge_group), and every mapped/receipted run's endpoint
-	// must appear in sources.
+	// Step 3 — merge-group evidence from the selected head, scoped to CONTRACT
+	// workflows only (#3661 item 4): a merge_group run at the head from a
+	// workflow outside the contract is excluded here, matching the
+	// validator's EVIDENCE_MERGE_GROUP_UNKNOWN rule by construction instead
+	// of failing the offline validation later. The run map must still cover
+	// EVERY contract workflow (empty arrays allowed for workflows that do
+	// not run on merge_group), and every mapped/receipted run's endpoint must
+	// appear in sources.
+	const contractWorkflowFiles = new Set(contract.workflows.map((workflow) => workflow.file));
 	const selectedRuns = runs.filter(
-		(run) => run.head_sha === captureSha && run.event === 'merge_group',
+		(run) =>
+			run.head_sha === captureSha &&
+			run.event === 'merge_group' &&
+			contractWorkflowFiles.has(run.path),
 	);
 	const observedRuns = selectedRuns.map((run) => ({
 		id: run.id,
@@ -516,11 +560,33 @@ export function main(argv: string[] = process.argv.slice(2), cwd = REPO_ROOT): n
 	if (argv.includes('--self-test')) {
 		return runSelfTest() ? 0 : 1;
 	}
-	const dryRun = argv.includes('--dry-run');
-	const outputIndex = argv.indexOf('--output');
-	const outputArg = outputIndex >= 0 ? argv[outputIndex + 1] : undefined;
-	if (outputIndex >= 0 && (outputArg === undefined || outputArg.startsWith('--'))) {
-		console.error('capture-required-check-evidence: --output requires a path');
+	// Strict argv (#3661 item 1): only the space-separated `--output <path>`
+	// form is recognized. Every other token — unknown flags, the
+	// `--output=<path>` equals form, case-variant spellings, stray positionals
+	// — refuses with exit 2 BEFORE any capture work or write, so a typo can
+	// never silently fall through to the default write of the committed
+	// evidence artifact.
+	let dryRun = false;
+	let outputArg: string | undefined;
+	for (let i = 0; i < argv.length; i += 1) {
+		const token = argv[i];
+		if (token === '--dry-run') {
+			dryRun = true;
+			continue;
+		}
+		if (token === '--output') {
+			const value = argv[i + 1];
+			if (value === undefined || value.startsWith('--')) {
+				console.error('capture-required-check-evidence: --output requires a path');
+				return 2;
+			}
+			outputArg = value;
+			i += 1;
+			continue;
+		}
+		console.error(
+			`capture-required-check-evidence: unrecognized argument "${token}" (allowed: --self-test, --dry-run, --output <path>)`,
+		);
 		return 2;
 	}
 	try {
