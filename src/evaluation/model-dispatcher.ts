@@ -1,4 +1,5 @@
 import type { Agent, OpencodeClient } from '@opencode-ai/sdk';
+import { sanitizeFailureEvidenceDisplay } from '../failures/invocation-failure.js';
 import type {
 	DelegationCostFields,
 	PricingConfig,
@@ -7,7 +8,6 @@ import {
 	dispatchWithModelFallback,
 	parseModelString,
 } from '../utils/model-dispatch-fallback.js';
-import { sanitizeFailureEvidenceDisplay } from '../failures/invocation-failure.js';
 import {
 	isQuotaError,
 	isTransientProviderError,
