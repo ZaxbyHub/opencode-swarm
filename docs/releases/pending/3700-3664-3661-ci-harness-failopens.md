@@ -24,7 +24,9 @@ pipeline (collated #3700 + #3664 + #3661):
 - **Per-file CI validation harness (#3664):** the child terminal-status
   derivation now consults bounded-reader COMPLETENESS. An exit-0 child whose
   stdout/stderr reader missed its deadline records the new self-naming
-  `output_truncated` terminal with a reason naming the truncated channel(s),
+  `output_truncated` terminal with a reason naming the truncated channel(s)
+  (the reason is reserved for that terminal — timeout and crash rows keep the
+  undefined reason, since the kill is their cause; PR #3718 review round),
   counts as started+completed+failed, and fails the run — it can no longer
   record a clean `passed` on partially observed output. Output that merely
   EXCEEDS the saved-log byte cap is NOT incomplete (the reader drains to EOF
@@ -39,10 +41,16 @@ pipeline (collated #3700 + #3664 + #3661):
   a testable `_internals.spawnSync` seam); a required context matching
   multiple same-named check runs now requires every run completed+successful
   and an unambiguous single producing app slug; merge-group run collection is
-  scoped to contract workflows (matching the validator by construction); and a
-  sandbox-probe setup-failure result is never memoized (the next `detect()`
-  re-probes instead of serving a degraded capability for the process
-  lifetime).
+  scoped to contract workflows (matching the validator by construction); a
+  non-qualifying duplicate-named run disqualifies its head (skip to the next
+  candidate) rather than aborting the whole capture; and a sandbox-probe
+  setup-failure result is never memoized (the next `detect()` re-probes
+  instead of serving a degraded capability for the process lifetime), while
+  the enabled binary-stage observation of that transient result stays visible
+  to the synchronous executor-availability checks through a second
+  accessor-only slot — so a transient probe-environment failure can no longer
+  memoize a null executor and silently run advisory-mode shell commands
+  unsandboxed (PR #3718 review round, F-001).
 
 ## Why
 

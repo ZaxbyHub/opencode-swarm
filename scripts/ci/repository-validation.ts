@@ -1064,11 +1064,20 @@ async function runDefaultProcess(item: ValidationItem, options: RunProcessOption
 					: rawExitCode === 0
 						? 'passed'
 						: 'failed';
+	// FB-007 (Copilot review, PR #3718 feedback round): the truncation
+	// reason belongs ONLY to the `output_truncated` terminal itself. A
+	// timed-out or crashed child whose readers were also incomplete carries
+	// the kill/crash as its terminal cause — an un-killed child would have
+	// been drained — so labeling that row "terminal evidence is truncated"
+	// misattributes the failure and confuses report consumers. The
+	// incompleteness stays visible through the terminal counters; the reason
+	// text no longer claims a truncation failure that did not happen.
 	return {
 		status,
-		reason: outputIncomplete
-			? `bounded ${truncatedChannels.join(' and ')} ${truncatedChannels.length > 1 ? 'readers' : 'reader'} incomplete: terminal evidence is truncated (incomplete observation)`
-			: undefined,
+		reason:
+			status === 'output_truncated'
+				? `bounded ${truncatedChannels.join(' and ')} ${truncatedChannels.length > 1 ? 'readers' : 'reader'} incomplete: terminal evidence is truncated (incomplete observation)`
+				: undefined,
 		exitCode: timedOut ? 124 : rawExitCode,
 		signal: timedOut ? signal ?? 'SIGKILL' : signal,
 		stdout: redactAndBound(stdout, options.maxOutputBytes),

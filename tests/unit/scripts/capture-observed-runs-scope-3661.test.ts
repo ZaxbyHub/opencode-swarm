@@ -198,5 +198,21 @@ describe('capture-required-check-evidence observed-runs scope (#3661 AC5)', () =
 		expect(
 			observed.some((run) => run.workflowPath === NON_CONTRACT_WORKFLOW),
 		).toBe(false);
+		// FB-008 (zaxbysauce r1 review): retention pin — exclusion of the
+		// non-contract run and "something remains" is not enough. The
+		// observed set must be EXACTLY the two seeded contract merge-group
+		// runs at the capture head: a filter that dropped a contract
+		// workflow's run (or dropped everything) reddens here, not only at
+		// the toBeGreaterThan(0) above.
+		const seededContractRunPaths = [
+			'.github/workflows/ci.yml',
+			'.github/workflows/pr-standards.yml',
+		];
+		for (const seededPath of seededContractRunPaths) {
+			expect(
+				observed.some((run) => run.workflowPath === seededPath),
+			).toBe(true);
+		}
+		expect(observed.length).toBe(seededContractRunPaths.length);
 	}, 60_000);
 });

@@ -254,7 +254,17 @@ describe('capture-required-check-evidence duplicate-name context binding (#3661 
 		removeTreeWithRetry(root);
 	});
 
-	test('a required context matching a success run AND a failure run at the candidate head refuses the capture', () => {
+	// RE-PINNED (PR #3718 feedback round, FB-002 — critic-confirmed): the
+	// frozen leg originally pinned an IN-LOOP refusal (whole capture aborts
+	// the moment a duplicate fails). The contract was corrected to
+	// skip-this-head-and-try-the-next (identical to the singleton path) so a
+	// flaking duplicate on the newest head cannot strand an otherwise clean
+	// older head. This fixture lists ONE candidate head, so the capture still
+	// must refuse — via the TERMINAL aggregate refusal ("no recent successful
+	// merge-group head carries all N required contexts") — and still must
+	// write nothing. The no-fail-open property this leg exists for is
+	// unchanged; only the refusal's origin moved from the loop to the tail.
+	test('a required context matching a success run AND a failure run at the only candidate head refuses the capture', () => {
 		duplicateNameApi(duplicatePair('failure-sibling'));
 		seedLocalWorkflows();
 		let refusal: unknown;
@@ -263,12 +273,151 @@ describe('capture-required-check-evidence duplicate-name context binding (#3661 
 		} catch (error) {
 			refusal = error;
 		}
-		// RED at the current code: the find() picks the success entry, the
-		// failed sibling is never examined, and runCapture returns an artifact
-		// (no refusal is thrown at all).
+		// RED at the original base code: find() picked the success entry, the
+		// failed sibling was never examined, and runCapture returned an
+		// artifact (no refusal was thrown at all).
 		expect(refusal).toBeInstanceOf(CaptureRefusal);
 		const message = (refusal as Error).message.toLowerCase();
-		expect(/quality|binding/.test(message)).toBe(true);
+		expect(message).toContain('required context');
+		expect(writes).toEqual([]);
+	}, 60_000);
+
+	// FB-002 (review-confirmed): a non-successful duplicate must DISQUALIFY
+	// the head it lives on, not abort the whole capture. Newest head carries
+	// the failure-sibling duplicate; the older head is fully clean. RED at
+	// the intake head: the in-loop refuse() throws on the newest head before
+	// the older candidate is ever examined. After the fix the loop skips to
+	// the older head and the capture succeeds there.
+	test('a failing duplicate at the newest head skips to the older clean head', () => {
+		const headNew = 'f'.repeat(40);
+		const headOld = EVIDENCE_JSON.captureSha as string;
+		const runRecord = (id: number, head: string) => [
+			{
+				id,
+				name: 'CI',
+				path: '.github/workflows/ci.yml',
+				event: 'merge_group',
+				status: 'completed',
+				conclusion: 'success',
+				head_sha: head,
+			},
+			{
+				id: id + 1,
+				name: 'PR Standards',
+				path: '.github/workflows/pr-standards.yml',
+				event: 'merge_group',
+				status: 'completed',
+				conclusion: 'success',
+				head_sha: head,
+			},
+		];
+		_internals.ghApi = ((endpoint: string) => {
+			if (endpoint.startsWith(`/repos/${CONTRACT.repository}/rulesets/`)) {
+				return {
+					ok: true,
+					status: 0,
+					json: {
+						id: Number(CONTRACT.rulesetId),
+						enforcement: 'active',
+						conditions: {
+							ref_name: { include: ['refs/heads/main', '~DEFAULT_BRANCH'] },
+						},
+						rules: [
+							{
+								type: 'required_status_checks',
+								parameters: { required_status_checks: CONTRACT.requiredContexts },
+							},
+						],
+					},
+				};
+			}
+			if (endpoint.includes('/rules/branches/')) {
+				return {
+					ok: true,
+					status: 0,
+					json: [
+						{ type: 'pull_request', ruleset_id: Number(CONTRACT.rulesetId) },
+						{
+							type: 'required_status_checks',
+							ruleset_id: Number(CONTRACT.rulesetId),
+						},
+						{ type: 'merge_queue', ruleset_id: Number(CONTRACT.rulesetId) },
+					],
+				};
+			}
+			if (endpoint.includes('/branches/')) {
+				return { ok: true, status: 0, json: { protected: true } };
+			}
+			if (endpoint.includes('/actions/runs?')) {
+				// headNew listed FIRST — the capture iterates candidate heads
+				// newest-first by listing order.
+				return {
+					ok: true,
+					status: 0,
+					json: {
+						workflow_runs: [
+							...runRecord(42999999990, headNew),
+							...runRecord(42999999980, headOld),
+						],
+					},
+				};
+			}
+			if (endpoint.includes('/check-runs')) {
+				const head = /\/commits\/([0-9a-f]{40})\/check-runs/.exec(endpoint)?.[1];
+				if (head === headNew) {
+					return {
+						ok: true,
+						status: 0,
+						json: {
+							check_runs: [
+								...duplicatePair('failure-sibling'),
+								...CONTRACT.requiredContexts.slice(1).map((name) => ({
+									name,
+									status: 'completed',
+									conclusion: 'success',
+								})),
+							],
+						},
+					};
+				}
+				return {
+					ok: true,
+					status: 0,
+					json: {
+						check_runs: CONTRACT.requiredContexts.map((name) => ({
+							name,
+							status: 'completed',
+							conclusion: 'success',
+						})),
+					},
+				};
+			}
+			if (endpoint.includes('/contents/')) {
+				return {
+					ok: true,
+					status: 0,
+					json: {
+						sha: 'a'.repeat(40),
+						encoding: 'base64',
+						content: Buffer.from(WORKFLOW_CONTENT, 'utf-8').toString('base64'),
+					},
+				};
+			}
+			return {
+				ok: false,
+				status: 404,
+				json: null,
+				error: `unexpected ${endpoint}`,
+			};
+		}) as typeof _internals.ghApi;
+		seedLocalWorkflows();
+		const artifact = runCapture(root);
+		expect(artifact.captureSha).toBe(headOld);
+		expect(
+			(artifact.mergeGroup?.contexts ?? []).includes(
+				CONTRACT.requiredContexts[0] as string,
+			),
+		).toBe(true);
 		expect(writes).toEqual([]);
 	}, 60_000);
 

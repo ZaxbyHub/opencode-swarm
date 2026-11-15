@@ -341,14 +341,14 @@ export function runCapture(cwd = REPO_ROOT): RequiredCheckEvidence {
 				(run) => run.status === 'completed' && run.conclusion === 'success',
 			);
 			if (!allSuccessful) {
-				if (matches.length > 1) {
-					// Producer binding (#3661 item 3): with same-named duplicates
-					// every run must be a completed success — a first-success
-					// duplicate ahead of a failure must not satisfy the check.
-					refuse(
-						`required context "${name}" has ${matches.length} same-named check runs at head ${head}; binding requires every same-named run to be completed and successful`,
-					);
-				}
+				// Producer binding (#3661 item 3): with same-named duplicates
+				// every run must be a completed success — a first-success
+				// duplicate ahead of a failure must not satisfy the check.
+				// F-002 (PR #3718 review): a non-successful duplicate makes
+				// THIS head unqualifying (skip to the next candidate head,
+				// exactly like the singleton path), it does not abort the
+				// whole capture — an older head may be fully clean. If no
+				// candidate head qualifies, the terminal refusal below fires.
 				contextsComplete = false;
 				break;
 			}

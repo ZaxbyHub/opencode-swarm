@@ -1817,7 +1817,11 @@ function parseGitDiffPair(rest: string): {
 		// for exactly this shape, and `diff --git src/real.ts src/other.ts`
 		// + `+++ src/phantom.ts` admitted a phantom key (the fail-open this
 		// closes). A header yielding MORE than two tokens (a space-containing
-		// unquoted path) stays null — fail closed, exactly as before.
+		// unquoted path) also stays null — and that residual is NOT a
+		// rejection: the section keeps parsing and only the header-to-`+++`
+		// correlation (this guard) is skipped for the section, the documented
+		// over-gating trade-off at the `+++ ` branch's phantom guard. Do not
+		// describe it as fail closed.
 		const tokens = rest.split(' ');
 		if (tokens.length === 2 && tokens[0].length > 0 && tokens[1].length > 0) {
 			pair = { source: tokens[0], destination: tokens[1] };

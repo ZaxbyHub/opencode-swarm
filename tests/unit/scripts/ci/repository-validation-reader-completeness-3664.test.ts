@@ -68,6 +68,11 @@ describe('repository validation reader completeness — issue #3664', () => {
 			// stdout/stderr keys).
 			expect(String(row?.reason)).toMatch(/stdout|stderr/i);
 			expect(String(row?.reason)).toMatch(/incomplete|truncat/i);
+			// FB-004 (review-confirmed): the dedicated summary counter is
+			// pinned here (mutation-kills a dropped/incremented counter) —
+			// exactly one row entered the terminal, and it also counts as
+			// failed.
+			expect(report.summary.outputTruncated).toBe(1);
 			// Run-level derivation: the output_truncated row fails the run.
 			expect(report.status).toBe('failed');
 			expect(report.summary.passed).toBe(0);
@@ -138,8 +143,11 @@ describe('repository validation reader completeness — issue #3664', () => {
 			};
 			const first = await validateRepository(options);
 			expect(first.results[0]?.status).toBe('output_truncated');
+			// FB-004: the counter is pinned in the persisted path too.
+			expect(first.summary.outputTruncated).toBe(1);
 			const second = await validateRepository(options);
 			expect(second.results[0]?.status).toBe('output_truncated');
+			expect(second.summary.outputTruncated).toBe(1);
 			// The returned report object does not carry the merged history (the
 			// merge happens inside writeValidationReport for the persisted
 			// payload), so read the written artifact back.
@@ -156,6 +164,57 @@ describe('repository validation reader completeness — issue #3664', () => {
 			_internals.readBoundedWithStatus = originalRead;
 			_internals.killProcessTree = originalKillProcessTree;
 			removeTreeWithRetry(tmpRoot);
+		}
+	}, 60_000);
+
+	// FB-007 (Copilot review, PR #3718 feedback round): an incomplete reader
+	// must NOT brand a row whose terminal CAUSE is the timeout with a
+	// truncation reason — the kill is the cause and the unread pipes are
+	// incidental to it; labeling the row "terminal evidence is truncated"
+	// misattributes the failure to report consumers. Deterministic through
+	// the same seams: both reader stubs report complete:false and a 1ms
+	// per-item deadline forces the timeout. RED at the intake head: the
+	// reason was derived from reader incompleteness regardless of status, so
+	// the `reason` undefined-assertion below fails.
+	test('FB-007: a timed_out row keeps an undefined reason despite incomplete readers, and the truncated-output counter stays zero', async () => {
+		const QUICK_FIXTURE = path.resolve(
+			'tests/unit/scripts/ci/fixtures/quick-pass-fixture.ts',
+		);
+		const originalRead = _internals.readBoundedWithStatus;
+		const originalKillProcessTree = _internals.killProcessTree;
+		_internals.readBoundedWithStatus = (async () => ({
+			value: 'partial',
+			truncated: false,
+			complete: false,
+		})) as typeof originalRead;
+		_internals.killProcessTree = (async () =>
+			true) as typeof originalKillProcessTree;
+		try {
+			const report = await validateRepository({
+				root: path.resolve('.'),
+				mode: 'full',
+				testFiles: [QUICK_FIXTURE],
+				// 1ms per-item deadline: the child cannot exit before it, so
+				// the terminal cause is the timeout regardless of output.
+				perItemTimeoutMs: 1,
+				suiteTimeoutMs: 60_000,
+			});
+			const row = report.results[0];
+			expect(row).toBeDefined();
+			expect(row?.status).toBe('timed_out');
+			// The FB-007 pin: the truncation reason is reserved for the
+			// output_truncated terminal.
+			expect(row?.reason).toBeUndefined();
+			// The dedicated counter stays out of timeout rows; the timeout
+			// itself is counted in its own bucket.
+			expect(report.summary.outputTruncated).toBe(0);
+			expect(report.summary.timedOut).toBe(1);
+			// A timed-out run is not a complete pass.
+			expect(report.status).not.toBe('passed');
+			expect(exitCodeForValidationStatus(report.status)).toBe(1);
+		} finally {
+			_internals.readBoundedWithStatus = originalRead;
+			_internals.killProcessTree = originalKillProcessTree;
 		}
 	}, 60_000);
 

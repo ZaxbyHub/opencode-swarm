@@ -97,6 +97,18 @@ export function assessSandboxRequirements(
 let _cached: SandboxCapabilityV1 | undefined;
 let _cachedProbeSourceIdentity: string | undefined;
 
+// F-001 (PR #3718 review): a transient setup-failure observation is never
+// memoized as the authoritative result (see detect()), but it must remain
+// visible to the synchronous accessors for its probe-source identity — an
+// ENABLED binary-stage capability has to keep executor availability intact
+// while the behavioral evidence re-probes. Storing it in `_cached` instead
+// would reintroduce #3661 item 5 (a transient failure masking healthy
+// probes); not storing it at all let getExecutor() resolve and cache a NULL
+// executor from an enabled capability (advisory-mode shell commands then
+// ran unsandboxed for the process lifetime — the regression this closes).
+let _cachedTransient: SandboxCapabilityV1 | undefined;
+let _cachedTransientProbeSourceIdentity: string | undefined;
+
 interface BehavioralEvidence {
 	filesystem: SandboxDimensionStrength;
 	network: SandboxDimensionStrength;
@@ -522,6 +534,8 @@ function detectBehavioralEvidence(
 export function _resetCapabilityCache(): void {
 	_cached = undefined;
 	_cachedProbeSourceIdentity = undefined;
+	_cachedTransient = undefined;
+	_cachedTransientProbeSourceIdentity = undefined;
 }
 
 /**
@@ -593,12 +607,42 @@ function withProbeTimeout(
  * the tests. See src/sandbox/macos/sandbox-exec-executor.ts's _internals for
  * the sibling sync-probe seam.
  */
+/**
+ * Platform binary-stage probe seam (F-001, PR #3718 review feedback round):
+ * detect() obtains the binary-stage capability through this indirection so
+ * tests can pin the enabled-capability-with-transient-behavioral-failure
+ * shape deterministically on any host. The default is the original switch —
+ * identical dispatch, no behavior change in production.
+ */
+async function probePlatform(
+	platform: 'linux' | 'darwin' | 'win32',
+): Promise<SandboxCapability> {
+	switch (platform) {
+		case 'linux':
+			return probeLinux();
+		case 'darwin':
+			return probeMacOS();
+		case 'win32':
+			return probeWindows();
+		default: {
+			// Unknown platform — treat as unsupported.
+			return {
+				status: 'unsupported',
+				mechanism: 'unknown',
+				platform,
+				error: `unsupported platform: ${platform}`,
+			};
+		}
+	}
+}
+
 export const _internals: {
 	withProbeTimeout: typeof withProbeTimeout;
 	spawnSync: typeof spawnSync;
 	detectBehavioralEvidence: typeof detectBehavioralEvidence;
 	resolveWindowsCommandProcessorBinary: typeof resolveWindowsCommandProcessorBinary;
 	currentProbeSourceIdentity: typeof currentProbeSourceIdentity;
+	probePlatform: typeof probePlatform;
 	removeProbeTempRoot: (target: fs.PathLike, options?: fs.RmOptions) => void;
 } = {
 	withProbeTimeout,
@@ -606,6 +650,7 @@ export const _internals: {
 	detectBehavioralEvidence,
 	resolveWindowsCommandProcessorBinary,
 	currentProbeSourceIdentity,
+	probePlatform,
 	removeProbeTempRoot: (target: fs.PathLike, options?: fs.RmOptions) =>
 		fs.rmSync(target, { recursive: true, force: true, ...options }),
 } as const;
@@ -798,30 +843,66 @@ function probeWindows(): SandboxCapability {
  * Results are cached for the session lifetime (module-level variable).
  */
 /**
+ * The capability the synchronous accessors answer from (F-001, PR #3718
+ * review): the memoized healthy probe result when it matches the CURRENT
+ * probe-source identity, otherwise the transient setup-failure observation
+ * for that identity. This is deliberately NOT what detect() returns from
+ * cache — only `_cached` short-circuits detect(), so a transient
+ * observation is always re-probed by the next detect() call (#3661 item 5);
+ * the transient slot exists solely so an enabled binary-stage capability
+ * stays visible to executor availability in the meantime. A memoized
+ * result always supersedes (and clears) the transient slot at every
+ * identity, so a stale enabled observation can never outlive a real answer.
+ */
+function syncVisibleCapability(
+	platform: 'linux' | 'darwin' | 'win32',
+): SandboxCapabilityV1 | undefined {
+	const probeSourceIdentity = currentProbeSourceIdentity(platform);
+	if (
+		_cached !== undefined &&
+		_cachedProbeSourceIdentity === probeSourceIdentity
+	) {
+		return _cached;
+	}
+	if (
+		_cachedTransient !== undefined &&
+		_cachedTransientProbeSourceIdentity === probeSourceIdentity
+	) {
+		return _cachedTransient;
+	}
+	return undefined;
+}
+
+/**
  * Synchronous check whether Bubblewrap was detected as available.
  * Must be called after detect() has resolved — returns false if detect()
- * has not yet been called or if the cached result is not Linux/enabled.
+ * has not yet been called or if the visible result is not Linux/enabled.
  */
 export function isBubblewrapAvailable(): boolean {
-	return _cached?.status === 'enabled' && _cached?.platform === 'linux';
+	const capability = syncVisibleCapability('linux');
+	return capability?.status === 'enabled' && capability?.platform === 'linux';
 }
 
 /**
  * Synchronous check whether sandbox-exec was detected as available.
  * Must be called after detect() has resolved — returns false if detect()
- * has not yet been called or if the cached result is not macOS/enabled.
+ * has not yet been called or if the visible result is not macOS/enabled.
  */
 export function isSandboxExecAvailable(): boolean {
-	return _cached?.status === 'enabled' && _cached?.platform === 'darwin';
+	const capability = syncVisibleCapability('darwin');
+	return capability?.status === 'enabled' && capability?.platform === 'darwin';
 }
 
 /**
  * Synchronous check whether Windows Restricted Token support is available.
  * Must be called after detect() has resolved — returns false if detect()
- * has not yet been called or if the cached result is not win32/enabled.
+ * has not yet been called or if the visible result is not win32/enabled.
  */
 export function isWindowsSandboxAvailable(): boolean {
-	return _cached?.status === 'enabled' && _cached?.platform === 'win32';
+	const capability = syncVisibleCapability('win32');
+	return (
+		capability?.status === 'enabled' && capability?.platform === 'win32'
+	);
 }
 
 export class SandboxCapabilityProbe {
@@ -839,28 +920,7 @@ export class SandboxCapabilityProbe {
 		) {
 			return _cached;
 		}
-		let detected: SandboxCapability;
-
-		switch (platform) {
-			case 'linux':
-				detected = await probeLinux();
-				break;
-			case 'darwin':
-				detected = await probeMacOS();
-				break;
-			case 'win32':
-				detected = probeWindows();
-				break;
-			default: {
-				// Unknown platform — treat as unsupported.
-				detected = {
-					status: 'unsupported',
-					mechanism: 'unknown',
-					platform,
-					error: `unsupported platform: ${platform}`,
-				};
-			}
-		}
+		const detected = await _internals.probePlatform(platform);
 
 		const result = withProbeIdentity(
 			upgradeCapability(
@@ -870,13 +930,25 @@ export class SandboxCapabilityProbe {
 			probeSourceIdentity,
 		);
 		// A setup-failure result is transient evidence (temp-dir creation or
-		// probe-environment failure, #3661 item 5): never memoize it, or a
-		// later healthy probe is masked for the process lifetime. The
-		// binary-identity guard above stays the only healthy-result cache
-		// invalidation axis; the local result is always returned.
+		// probe-environment failure, #3661 item 5): never memoize it as the
+		// authoritative result, or a later healthy probe is masked for the
+		// process lifetime. The binary-identity guard above stays the only
+		// healthy-result cache invalidation axis; the local result is always
+		// returned. F-001 (PR #3718 review): the transient observation is
+		// parked in the accessor-visible slot so an enabled binary-stage
+		// capability keeps executor availability — dropping it entirely
+		// memoized a null executor from an ENABLED capability, silently
+		// un-sandboxing advisory-mode shell commands.
 		if (!hasProbeSetupFailureReason(result)) {
 			_cached = result;
 			_cachedProbeSourceIdentity = probeSourceIdentity;
+			// A memoized authoritative answer supersedes any transient
+			// observation at every identity.
+			_cachedTransient = undefined;
+			_cachedTransientProbeSourceIdentity = undefined;
+		} else {
+			_cachedTransient = result;
+			_cachedTransientProbeSourceIdentity = probeSourceIdentity;
 		}
 		return result;
 	}
