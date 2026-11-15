@@ -32,6 +32,17 @@ export interface Runner3177Harness {
 	promptModels: Array<string | undefined>;
 	/** Replace the queued prompt answers (e.g. between phases). */
 	setResponses: (responses: PromptAnswer[]) => void;
+	/**
+	 * Build a SECOND runner sharing this harness's directory, session, and
+	 * seeded agent chain WITHOUT resetting the scoped-selection store — the
+	 * shape the lean-turbo-run-phase tool produces on a same-phase re-run in
+	 * one process. Its prompt answers track into this sibling's own
+	 * promptModels array.
+	 */
+	makeSiblingRunner: (responses: PromptAnswer[]) => {
+		runner: LeanTurboRunner;
+		promptModels: Array<string | undefined>;
+	};
 	cleanup: () => void;
 }
 
@@ -187,10 +198,81 @@ export function makeRunner3177Harness(
 		delete: async () => undefined,
 	};
 
+	const makeRunnerWithOps = (
+		responses: PromptAnswer[],
+		track: Array<string | undefined>,
+	): LeanTurboRunner => {
+		const r = new LeanTurboRunner({
+			directory,
+			sessionID: HARNESS_SESSION_ID,
+			generatedAgentNames: ['coder'],
+			leanConfig: {
+				...DEFAULT_LEAN_TURBO_CONFIG,
+				worktree_isolation: false,
+				require_declared_scope: false,
+			} as never,
+		});
+		const queue2 = [...responses];
+		const sticky2: PromptAnswer =
+			responses.length > 0 ? responses[responses.length - 1] : null;
+		(r as unknown as { _sessionOps: unknown })._sessionOps = {
+			create: async () => ({
+				data: { id: `lane-child-${track.length + 1}` },
+				error: null,
+			}),
+			prompt: async (args: {
+				body?: { model?: unknown };
+			}): Promise<{
+				data: {
+					id: string;
+					info: Record<string, unknown>;
+					parts: Array<{ type: string; text: string }>;
+				};
+				error: null;
+			}> => {
+				track.push(modelLabel(args?.body?.model));
+				const answer = queue2.length > 0 ? queue2.shift()! : sticky2;
+				const id = `msg_${track.length}`;
+				if (answer === null) {
+					return {
+						data: { id, info: { id }, parts: [{ type: 'text', text: 'done' }] },
+						error: null,
+					};
+				}
+				return {
+					data: {
+						id,
+						info: {
+							id,
+							error: {
+								name: 'AI_APICallError',
+								data: {
+									...(answer.statusCode === undefined
+										? {}
+										: { statusCode: answer.statusCode }),
+									message: answer.message,
+								},
+							},
+						},
+						parts: [{ type: 'text', text: '' }],
+					},
+					error: null,
+				};
+			},
+			delete: async () => undefined,
+		};
+		return r;
+	};
+
 	return {
 		runner,
 		directory,
 		promptModels,
+		makeSiblingRunner: (responses: PromptAnswer[]) => {
+			const siblingModels: Array<string | undefined> = [];
+			const sibling = makeRunnerWithOps(responses, siblingModels);
+			return { runner: sibling, promptModels: siblingModels };
+		},
 		setResponses: (next: PromptAnswer[]) => {
 			queue.length = 0;
 			queue.push(...next);

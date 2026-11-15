@@ -4200,9 +4200,12 @@ export function createDelegationGateHook(
 		//   PRM ladder reset, currentTaskId/declaredCoderScope stamped from the
 		//   architect's declaration). The correlation key is the fence: an id
 		//   that names no live pending generation gets SCOPE_NOT_DECLARED and
-		//   mutates nothing; a second claimant for a claimed generation gets
-		//   SCOPE_BINDING_ALREADY_CLAIMED and (post-#3403) its lineage write is
-		//   rolled back below. This is the documented v1 host contract — the
+		//   CLAIMS NO SCOPE BINDING AND MUTATES NO SESSION IDENTITY (the
+		//   #3036 dispatch-lineage write above still records the host-observed
+		//   pair and is kept on that benign path by design); a second claimant
+		//   for a claimed generation gets SCOPE_BINDING_ALREADY_CLAIMED and
+		//   (post-#3403) its lineage write is rolled back below. This is the
+		//   documented v1 host contract — the
 		//   model is stated here so the next reviewer need not re-derive it;
 		//   changing it is a product decision, not a bug fix.
 		//

@@ -612,7 +612,11 @@ function providerSignal(error: unknown): string {
 
 /**
  * #3177: the provider-category set `classifyProviderFailure` itself emits
- * (enumerated per the category docstring above). A carrier snapshot outside
+ * (enumerated per the category docstring above), plus the two early-finish
+ * categories `readEarlyFinish` stamps on its carriers
+ * (provider.output_length / provider.content_filter, review finding F-001:
+ * rejecting them degraded the carrier to text classification and lost the
+ * category/risk the reader had already computed). A carrier snapshot outside
  * this set is not honored (fail-closed to normal classification).
  */
 const KNOWN_PROVIDER_CARRIER_CATEGORIES = new Set([
@@ -625,6 +629,8 @@ const KNOWN_PROVIDER_CARRIER_CATEGORIES = new Set([
 	'provider.content_policy',
 	'provider.request_shape',
 	'provider.unknown',
+	'provider.output_length',
+	'provider.content_filter',
 ]);
 
 const KNOWN_PROVIDER_CARRIER_RETRY_CLASSES =

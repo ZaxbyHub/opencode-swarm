@@ -132,3 +132,42 @@ describe('#3177 structured provider-failure classification', () => {
 		);
 	});
 });
+
+test('abort arm outranks the carrier snapshot (F-003 pin)', () => {
+	const snapshot = readProviderMessageError({
+		error: {
+			name: 'AI_APICallError',
+			data: { statusCode: 429, message: 'rate limit' },
+		},
+	});
+	expect(snapshot?.category).toBe('provider.rate_limit');
+	const carrier = providerMessageErrorToError('probe', snapshot!);
+	// Control: the carrier alone classifies retryable from the snapshot.
+	expect(classifyProviderFailure(carrier).category).toBe('provider.rate_limit');
+	// Abort-shaped carrier stays cancelled regardless of its snapshot.
+	const aborted = providerMessageErrorToError('probe', snapshot!);
+	aborted.name = 'AbortError';
+	const record = classifyProviderFailure(aborted);
+	expect(record.category).toBe('provider.cancelled');
+	expect(record.retryClass).toBe('do_not_retry');
+	expect(isRetryableProviderFailure(record)).toBe(false);
+});
+
+test('early-finish carrier snapshots round-trip (F-001 pin)', () => {
+	const lengthSnapshot = readProviderMessageError({ finish: 'length' });
+	expect(lengthSnapshot?.category).toBe('provider.output_length');
+	expect(lengthSnapshot?.retryClass).toBe('do_not_retry');
+	const lengthRecord = classifyProviderFailure(
+		providerMessageErrorToError('probe', lengthSnapshot!),
+	);
+	expect(lengthRecord.category).toBe('provider.output_length');
+	expect(lengthRecord.retryClass).toBe('do_not_retry');
+
+	const filterSnapshot = readProviderMessageError({ finish: 'content-filter' });
+	expect(filterSnapshot?.category).toBe('provider.content_filter');
+	const filterRecord = classifyProviderFailure(
+		providerMessageErrorToError('probe', filterSnapshot!),
+	);
+	expect(filterRecord.category).toBe('provider.content_filter');
+	expect(filterRecord.retryClass).toBe('do_not_retry');
+});

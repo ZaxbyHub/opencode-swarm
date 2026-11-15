@@ -61,3 +61,26 @@ describe('#3177 phase-fresh scoped fallback selection', () => {
 		}
 	}, 30_000);
 });
+
+test('AC4 (run scope): a sibling runner for the SAME phase starts fresh after exhaustion', async () => {
+	// F-002: pins the per-runner run ordinal — a re-run of the same phase
+	// (the lean-turbo-run-phase tool builds a fresh runner per call, in the
+	// SAME process and session) must not inherit that phase's own exhausted
+	// chain. The sibling shares this harness's directory/session/agent chain
+	// WITHOUT resetting the scoped-selection store, so only the run ordinal
+	// separates the two keys — under a constant-run-ordinal mutant the sibling
+	// would inherit the exhausted selection and dispatch nothing.
+	const h = makeRunner3177Harness([
+		{ statusCode: 429, message: 'Rate limit exceeded for model' },
+	]);
+	try {
+		await h.runner.runPhase(1);
+		expect(h.promptModels).toEqual([PRIMARY_MODEL, FALLBACK_MODEL]);
+
+		const sibling = h.makeSiblingRunner([null]);
+		await sibling.runner.runPhase(1);
+		expect(sibling.promptModels).toEqual([PRIMARY_MODEL]);
+	} finally {
+		h.cleanup();
+	}
+}, 30_000);
