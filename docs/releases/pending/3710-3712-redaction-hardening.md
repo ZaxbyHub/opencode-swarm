@@ -29,6 +29,8 @@ carry their correct provider labels. The widened corpus is pinned at both sites 
 a new sibling parity suite (prose elimination, family placeholder, and
 mirror-parity loops) alongside the existing #3165 suite, which is unchanged.
 
+**Disclosed bound (header placements):** credential tokens inside Authorization/Bearer header placements are redacted by the pre-existing context arms with their GENERIC placeholders (the shell Bearer/Basic and -H header arms; the display credential-KV arm) at both sites - byte-identically to base, for every family. The per-family placeholder contract covers prose/bare placements (the placement class with no adjacent key/scheme context the context arms can match); pinned as intended by tests/unit/failures/redaction-bounds-pins-3710.test.ts.
+
 **Disclosed bound:** bare 32-hex Azure OpenAI keys are deliberately NOT patterned
 — they are indistinguishable from MD5/hex digests that must stay visible
 (#3712 AC3); only contextual `AccountKey=` forms are redacted.
