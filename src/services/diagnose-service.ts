@@ -30,7 +30,9 @@ import { getSandboxSkipSummary } from '../sandbox/skip-state.js';
 import { sanitizeDiagnosticText } from '../scope/path-identity';
 import { readEffectiveSpecSync } from '../sdd/effective-spec';
 import { getAgentSession } from '../state.js';
+import { isPhaseSummariesId } from '../summaries/store.js';
 import { isNonBlankAbsoluteDirectory } from '../utils/path-security.js';
+import { isInternalToolEvidenceId } from '../validation/task-id.js';
 import { listCoderSettlementWalStates } from '../workflow/coder-settlement.js';
 import { renderRecoveryInvocationQuickForms } from '../workflow/recovery-invocation.js';
 import { scanWedgedStageA } from '../workflow/stage-a-repair.js';
@@ -348,8 +350,22 @@ async function checkOrphanedEvidence(
 
 	try {
 		const evidenceTaskIds = await listEvidenceTaskIds(directory);
+		// #3681 item 5: reserved fixed ids are legitimate non-plan writers —
+		// the tool-evidence bundles (single source: isInternalToolEvidenceId
+		// wraps task-id's INTERNAL_TOOL_ID_REGEX) and the synthetic phase
+		// summary buckets (isPhaseSummariesId). The loose /^retro-/ exemption
+		// is INTENTIONALLY broader than RETRO_TASK_ID_REGEX: the retro writer
+		// contract (src/tools/write-retro.ts VALID_TASK_ID) accepts the
+		// broader `retro-<alnum>` form required by /swarm close's plan-free
+		// path, and the #3554 derived-entries classifier must NOT grow these
+		// ids (bundle precedence would drop them from quality-checks,
+		// archive-retention, and summary consumers).
 		const orphaned = evidenceTaskIds.filter(
-			(id) => !planTaskIds.has(id) && !/^retro-/.test(id),
+			(id) =>
+				!planTaskIds.has(id) &&
+				!/^retro-/.test(id) &&
+				!isInternalToolEvidenceId(id) &&
+				!isPhaseSummariesId(id),
 		);
 
 		if (orphaned.length === 0) {

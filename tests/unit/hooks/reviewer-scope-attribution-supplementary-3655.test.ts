@@ -181,9 +181,13 @@ describe('reviewer scope attribution supplementary (issue #3655)', () => {
 		).join('\n');
 		expect(advisoryText).toContain('REVIEWER_ATTRIBUTION_DEGRADED');
 		expect(advisoryText).toContain('ACTION[architect]');
+		// #3680: the no-git zero-routed denial is TERMINAL with a named cause —
+		// the 'typed denial, never no-change' property still holds (the retry
+		// loop it replaced was the defect). Frozen check C13 asserts the same.
 		const denial = await dispatchReviewer('r-nogit');
 		expect(denial.message).toContain('REVIEWER_ATTRIBUTION_EMPTY');
-		expect(denial.message).toContain('retryable=true');
+		expect(denial.message).toContain('retryable=false');
+		expect(denial.message).toContain('no_git_workspace');
 	}, 60_000);
 
 	test('null dispatch head on a git workspace degrades, never no-change', async () => {
