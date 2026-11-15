@@ -1,5 +1,19 @@
 # Changelog
 
+## [7.204.7](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.204.6...v7.204.7) (2026-11-15)
+
+
+### Bug Fixes
+
+* **3165:** feedback round — review-hardening closure ([73a7881](https://github.com/ZaxbyHub/opencode-swarm/commit/73a7881ceb5b4886130223a26329e6c1833193be))
+* **3165:** sandboxed allowlist+AC-010 tests, bare-token redaction, fail-closed Tier-3 paths ([d373ba2](https://github.com/ZaxbyHub/opencode-swarm/commit/d373ba20b3ec9a7c3cb62f66fe200a700593e6ed))
+* **3681,3680:** verification-surface residuals — strict diff parser, git-configuration shapes, no-git terminal denials ([6923575](https://github.com/ZaxbyHub/opencode-swarm/commit/6923575a52ebd0ec24260a20cc55c8caa18bd859))
+* **3699:** feedback round — cross-platform assertions, path-sized probe bound, honest disclosures ([96169fa](https://github.com/ZaxbyHub/opencode-swarm/commit/96169fa7c236517f73a906785f4f65416418ae8f))
+* **issue-tracer:** preserve Bash 3.2 checkpoint compatibility ([b843ad0](https://github.com/ZaxbyHub/opencode-swarm/commit/b843ad0e2d1dcedc8e1170abd557c2a4e31c1e8a))
+* **issue-tracer:** verify release reviews and trace evidence ([a9f7d3d](https://github.com/ZaxbyHub/opencode-swarm/commit/a9f7d3dcf27903acdc2af16e2c6ab222047c2a39))
+* **review:** address trace and native review feedback ([4bed48b](https://github.com/ZaxbyHub/opencode-swarm/commit/4bed48ba6c568ef27dde085f03551388b41517f0))
+* **review:** align generated evidence with CI contracts ([6e0c985](https://github.com/ZaxbyHub/opencode-swarm/commit/6e0c98583ea0af1c0f6dbc33b8598da617a8b7a2))
+
 ## [7.204.6](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.204.5...v7.204.6) (2026-11-14)
 
 
