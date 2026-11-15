@@ -173,9 +173,51 @@ export async function handleFullAutoCommand(
 		if (blockers.length > 0) {
 			return `Error: resume refused because active policy/sandbox/action blockers remain for the paused action: ${blockers.join(', ')}. Clear the exact blocker, then retry.`;
 		}
-		startFullAutoRun(directory, sessionID, { mode: runState.mode });
+		// #3106: re-derive the armed mode from live config (the already-authorized
+		// preflight config — no second config read), mirroring the `on` arm's
+		// live-derivation so a post-pause config tightening is in force for the
+		// resumed run. SHIPPED SEMANTICS (disclosed): the parsed config always
+		// materializes full_auto.mode (schema default 'supervised',
+		// src/config/schema.ts), so the config value — explicit or defaulted —
+		// always wins and a per-run `on [mode]` override does NOT survive
+		// resume under a default config (an `on strict` run resumes supervised).
+		// The runState.mode arm below is live only if the parsed config stops
+		// defaulting; the raw-config hybrid remains the owner's follow-up call.
+		const fullAutoConfig = auth.config.full_auto;
+		const effectiveMode = fullAutoConfig?.mode ?? runState.mode ?? 'supervised';
+		// #3106: CAS the arm against the pause generation observed BEFORE the
+		// probe/blocker checks — a second process landing a terminal write or a
+		// re-pause inside the check-then-arm window must not be resurrected.
+		// `?? 0` keeps the CAS armed even for a legacy state whose generation
+		// field is absent (Copilot round-2 review; an undefined value would
+		// silently skip the precondition).
+		const armed = startFullAutoRun(
+			directory,
+			sessionID,
+			{ mode: effectiveMode },
+			{ expectedPauseGeneration: runState.pauseGeneration ?? 0 },
+		);
+		if (!armed) {
+			// State-conditional recovery guidance (round-2 review F2, made
+			// reason-aware on the Stage B reviewer's point): retry-oversight
+			// only works for a still-paused run whose pause reason is
+			// infrastructure/deadline (canRetryOversight) — a concurrent
+			// reactive-verdict or denial-limit re-pause is NOT retry-eligible
+			// (full-auto-intercept.ts:1464 / full-auto-permission.ts:522 can
+			// re-pause inside the window on the legacy session flag), so
+			// those runs get resolve-then-resume guidance instead. Abort
+			// (terminated) and off (idle) must re-enable with `on`.
+			const postState = loadFullAutoRunState(directory, sessionID);
+			if (postState?.status === 'paused') {
+				if (isInfrastructurePauseReason(postState.pauseReason)) {
+					return 'Error: resume refused because the paused run changed state after the probe (pause generation mismatch — another process re-paused it). Re-run `/swarm full-auto retry-oversight` to establish a fresh probe, then resume.';
+				}
+				return `Error: resume refused because the paused run changed state after the probe (pause generation mismatch — another process re-paused it; reason: ${postState.pauseReason ?? 'unspecified'}). A non-infrastructure pause is not retry-oversight-eligible; after resolving the pause cause, re-enable with \`/swarm full-auto off\` then \`/swarm full-auto on\`.`;
+			}
+			return 'Error: resume refused because the paused run changed state after the probe (another process aborted or disarmed it). The run is no longer resumable; re-enable with `/swarm full-auto on`.';
+		}
 		session.fullAutoMode = true;
-		return `Full-Auto Mode resumed (new run generation=${loadFullAutoRunState(directory, sessionID)?.runGeneration ?? 'unknown'}, prior pause generation=${runState.pauseGeneration ?? 0}). Re-issue the blocked action so it can be re-reviewed.`;
+		return `Full-Auto Mode resumed (mode=${effectiveMode}, new run generation=${loadFullAutoRunState(directory, sessionID)?.runGeneration ?? 'unknown'}, prior pause generation=${runState.pauseGeneration ?? 0}). Re-issue the blocked action so it can be re-reviewed.`;
 	}
 	if (parsedCommand.kind === 'abort') {
 		terminateFullAutoRun(

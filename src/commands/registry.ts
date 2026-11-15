@@ -2026,11 +2026,11 @@ export const COMMAND_REGISTRY = {
 			'Control Full-Auto Mode for the active session [on [mode]|off|exit|status|retry-oversight|resume|abort]',
 		args: 'on [assisted|supervised|strict], off|exit, status, retry-oversight, resume, abort',
 		details:
-			'First-class toggle for Full-Auto Mode — a critic gate reviewing escalations on your behalf (the architect still plans and delegates; full-auto never executes tasks itself). No config-level enablement is required: "on" activates immediately (unless full_auto.locked is true in config), "off" disarms the run and returns the session to normal interactive operation, "status" reports the durable run state. ' +
-			'An optional mode after "on" overrides full_auto.mode for this run: assisted (critic consulted only on policy escalations), supervised (default — risky/high-impact actions reviewed by the critic), strict (ALL plan mutations reviewed by the critic). ' +
-			'While active, the critic answers architect questions and reviews phase boundaries, delegations, and risky actions on your behalf; only ESCALATE_TO_HUMAN verdicts halt the run for your input. ' +
-			'`retry-oversight` performs a transport-only health probe for an infrastructure/deadline pause and never replays the denied action. `resume` runs the same authorization preflight as `on` first (readable config; `full_auto.locked` refuses), then requires a recent successful matching probe and no active recovery blockers. `abort` terminates the durable run immediately. ' +
-			'The run state is durable (.swarm/full-auto-state.json) and survives restarts; toggle with no argument flips the current state. ' +
+			'First-class toggle for Full-Auto Mode — a critic gate reviewing escalations on your behalf (the architect still plans and delegates; it never executes tasks itself). No config-level enablement is required: "on" activates immediately (unless full_auto.locked is true in config), "off" disarms the run (back to interactive operation), "status" reports the durable run state. ' +
+			'An optional mode after "on" overrides full_auto.mode for this run (the override holds until the run pauses or ends; `resume` re-derives from live config, so `on strict` resumes supervised under default config): assisted (critic on policy escalations only), supervised (default — risky/high-impact actions reviewed), strict (ALL plan mutations reviewed). ' +
+			'While active, the critic answers architect questions and reviews phase boundaries, delegations, and risky actions; only ESCALATE_TO_HUMAN verdicts halt for your input. ' +
+			'`retry-oversight` performs a transport-only health probe for an infrastructure/deadline pause; it never replays the denied action. `resume` runs the same `on` preflight (readable config; `full_auto.locked` refuses), then requires a recent matching probe and no active recovery blockers. `abort` terminates the durable run immediately. ' +
+			'Run state is durable (.swarm/full-auto-state.json) and survives restarts; a bare toggle flips the current state. ' +
 			'Composes with an open epic (Epic Mode): both the Full-Auto phase approval and the epic_phase_readiness gate apply at phase_complete.',
 		category: 'utility',
 		// An agent running under Full-Auto must not be able to disable its own
