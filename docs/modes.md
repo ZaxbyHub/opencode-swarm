@@ -21,12 +21,14 @@ Skips phase_complete Gates 1–5 (completion-verify, drift-verifier, hallucinati
 
 **Turbo does NOT relax Tier 3 files.** Security-sensitive paths keep the coder re-dispatch block until Stage A passes, even when Turbo is on (the only per-task gate Turbo relaxes; Turbo does not change the Stage B rule):
 
-All four rules are case-insensitive:
+All six rules are case-insensitive:
 
 - File names matching `architect*.ts`, `delegation*.ts`, `guardrail*.ts` (including `guardrails*.ts`), `adversarial*.ts`, `sanitiz*.ts`, `security*.ts`
-- Exact base names, after removing only the final extension (so `auth.ts` matches, but `authorization.service.ts`, `permissions.test.ts` and `secrets.d.ts` do not): `auth`, `authenticate`, `authentication`, `authorization`, `permission`, `permissions`, `crypto`, `secret`, `secrets`, `secretscan`
-- Base names (final extension removed) starting with `auth`, `permission`, `crypto`, `secret`, or `security` followed by `-`, `_`, or `.` (for example `auth-token.ts`, `crypto_utils.js`, `auth.test.ts`)
-- Any file under a directory named exactly `auth`, `security`, `crypto`, `permission`, or `secret` (`src/secrets/x.ts` does not match)
+- Exact base names, after removing only the final extension (so `auth.ts` matches, but `authorization.service.ts`, `permissions.test.ts` and `secrets.d.ts` do not): `auth`, `authenticate`, `authentication`, `authorization`, `permission`, `permissions`, `crypto`, `secret`, `secrets`, `secretscan`, `credential`, `credentials`
+- Base names (final extension removed) starting with `auth`, `permission`, `crypto`, `secret`, `security`, `credential`, or `credentials` followed by `-`, `_`, or `.` (for example `auth-token.ts`, `crypto_utils.js`, `auth.test.ts`, `credentials-helper.ts`)
+- Any file under a directory named exactly `auth`, `security`, `crypto`, `permission`, `secret`, `guardrails`, or `sandbox` (`src/secrets/x.ts` does not match)
+- The exact repo-relative paths `src/cli/index.ts`, `src/tools/phase-complete.ts`, and `src/plan/ledger.ts` (matched after path normalization, case-insensitively — a bare `index.ts` from another directory does not match)
+- An entry that is not provably a plain repo-relative path — blank/whitespace-only, absolute (including Windows drive forms), `~`-prefixed, containing a `..` segment, or with a directory-shaped spelling (trailing separator, terminal-dot file or interior-dot segment, or trailing/colon segments) — classifies as Tier 3 (fail closed): the entry cannot be proven non-sensitive, so it keeps the highest review tier. Bare sensitive directory names (`src/security`, `src/hooks/guardrails`) and ancestor directories of the exact paths above (`src`, `src/cli`, `src/tools`, `src/plan`) also classify as Tier 3 (PR #3705 review hardening)
 
 This list is defined in `src/parallel/tier3-classifier.ts` and applied to the task's planned `files_touched`. You cannot turn it off.
 

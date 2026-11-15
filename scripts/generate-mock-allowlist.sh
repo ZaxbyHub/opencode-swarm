@@ -4,13 +4,23 @@
 # and outputs a sorted unique set to scripts/mock-allowlist.txt.
 #
 # Usage: scripts/generate-mock-allowlist.sh [--check]
+# Env:   MOCK_ALLOWLIST_OUT=<path>  Redirect BOTH the regenerated output and
+#        the --check comparison input to <path> instead of the tracked
+#        scripts/mock-allowlist.txt (empty/unset = the tracked file). The
+#        APPROVED-NEW marker harvest also reads the effective file. Added for
+#        issue #3165 (C-2) so the test suite can exercise the generator
+#        against a sandbox copy without ever writing the tracked file.
 # NOTE: Requires GNU grep (uses -oP for Perl regex patterns).
 
 set -euo pipefail
 
 SCRIPT_DIR="$(dirname "$0")"
-ALLOWLIST_FILE="$SCRIPT_DIR/mock-allowlist.txt"
-ALLOWLIST_DISPLAY="scripts/mock-allowlist.txt"
+ALLOWLIST_FILE="${MOCK_ALLOWLIST_OUT:-$SCRIPT_DIR/mock-allowlist.txt}"
+if [ -n "${MOCK_ALLOWLIST_OUT:-}" ]; then
+  ALLOWLIST_DISPLAY="$MOCK_ALLOWLIST_OUT"
+else
+  ALLOWLIST_DISPLAY="scripts/mock-allowlist.txt"
+fi
 TEMP_ALLOWLIST="$(mktemp)"
 TEMP_APPROVED="$(mktemp)"
 trap "rm -f '$TEMP_ALLOWLIST' '$TEMP_APPROVED'" EXIT
