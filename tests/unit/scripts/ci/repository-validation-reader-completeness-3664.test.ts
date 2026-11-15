@@ -2,20 +2,16 @@
  * #3664 — a validation row must not record a clean `passed` on the strength
  * of an INCOMPLETE output reader.
  *
- * The fixture (tests/unit/scripts/ci/fixtures/exit0-pipe-holder-3664.ts) is a
- * bun test that passes immediately while a DETACHED child keeps an inherited
- * copy of the stdout/stderr pipes open. The direct child exits 0, but the
- * harness's bounded readers never observe EOF — `complete: false` — so the
- * output channel is NOT proven read-to-completion. At the current code the
- * row still records `status: 'passed'` (reader completeness is not part of
- * the terminal-status derivation), which launders a truncated channel into a
- * green result.
- *
- * Leg 1 stubs `_internals.killProcessTree` to `async () => true` (the most
- * adverse shape: cleanup always "succeeds", so nothing else can explain the
- * non-passed terminal) — RED at the current code (`row.status === 'passed'`).
- * Leg 2 runs the REAL cleanup path and pins the same contract: whatever
- * cleanup achieved, an incomplete reader must not read as clean `passed`.
+ * The contract is pinned DETERMINISTICALLY through the
+ * `_internals.readBoundedWithStatus` seam (the derivation's input) and the
+ * `_internals.killProcessTree` seam (the most adverse cleanup shape), plus
+ * persisted attempt-history and verifier-terminal parity legs. A real-process
+ * pipe-holding fixture variant was removed after CI proved the mechanism
+ * non-portable: on ubuntu-latest the bun-test grandchild's inherited stdout
+ * fd closes when the fixture's bun process exits, so the reader legitimately
+ * observes EOF and the row is `passed` — that tests Linux/bun fd-inheritance
+ * semantics, not the harness derivation (which the seam leg pins exactly and
+ * mutation M2 killed three legs on).
  */
 
 import { describe, expect, test } from 'bun:test';
@@ -28,56 +24,7 @@ import {
 } from '../../../../scripts/ci/repository-validation';
 import { canonicalMkdtemp, removeTreeWithRetry } from '../../../helpers/tmpdir';
 
-const FIXTURE = path.resolve(
-	'tests/unit/scripts/ci/fixtures/exit0-pipe-holder-3664.ts',
-);
-
 describe('repository validation reader completeness — issue #3664', () => {
-	test('a passed fixture whose detached child holds the pipe must not record a clean passed (cleanup stubbed successful)', async () => {
-		const originalKillProcessTree = _internals.killProcessTree;
-		_internals.killProcessTree = (async () =>
-			true) as typeof originalKillProcessTree;
-		try {
-			const report = await validateRepository({
-				root: path.resolve('.'),
-				mode: 'full',
-				testFiles: [FIXTURE],
-				perItemTimeoutMs: 2_000,
-				suiteTimeoutMs: 60_000,
-			});
-			const row = report.results[0];
-			expect(row).toBeDefined();
-			// The named assertion: never a clean pass on an incomplete reader.
-			expect(row?.status).not.toBe('passed');
-			// The implementer may choose the degraded terminal's name; it must be
-			// one of these non-passed terminals.
-			expect([
-				'failed',
-				'crashed',
-				'timed_out',
-				'degraded',
-				'output_truncated',
-			]).toContain(row?.status);
-		} finally {
-			_internals.killProcessTree = originalKillProcessTree;
-		}
-	}, 60_000);
-
-	test('the real cleanup path records the same contract for the pipe-holding fixture', async () => {
-		// No stub: whichever way real tree cleanup lands on this host, the row
-		// for the incomplete-reader case must not read as a clean pass.
-		const report = await validateRepository({
-			root: path.resolve('.'),
-			mode: 'full',
-			testFiles: [FIXTURE],
-			perItemTimeoutMs: 2_000,
-			suiteTimeoutMs: 60_000,
-		});
-		const row = report.results[0];
-		expect(row).toBeDefined();
-		expect(row?.status).not.toBe('passed');
-	}, 60_000);
-
 	// C9/C10 (critic amendment): deterministic seam-driven leg — no dependence
 	// on the real pipe fixture. RED reasoning at the current code:
 	// runDefaultProcess invokes the module-LOCAL readBoundedWithStatus for the
