@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.204.8](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.204.7...v7.204.8) (2026-11-15)
+
+
+### Bug Fixes
+
+* **ci-monitor:** verify exact-head CI and merge queue observations ([1e525fc](https://github.com/ZaxbyHub/opencode-swarm/commit/1e525fc930d14399d0aa3a167de1984894b88780))
+* **ci-monitor:** verify exact-head CI and merge queue observations ([1348ad8](https://github.com/ZaxbyHub/opencode-swarm/commit/1348ad8646e8d62670b4285ac6f27fa4f4afc5f6))
+
 ## [7.204.7](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.204.6...v7.204.7) (2026-11-15)
 
 
