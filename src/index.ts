@@ -1864,7 +1864,18 @@ async function initializeOpenCodeSwarm(
 	// tests/unit/index-startup-contract-outcomes-2670.test.ts and the CI
 	// repro-704 smoke leg).
 	if (bootstrapStateWritesEnabled) {
-		registerDeferredBundledSkillsSync(bootstrapRoot);
+		if (
+			registerDeferredBundledSkillsSync(bootstrapRoot) ===
+			'registration-refused'
+		) {
+			// A-3: the all-pending cap refused this root's handle — the gate
+			// degrades to 'not-started' (command-path backstop ordering).
+			// Practically unreachable (one root per plugin process); logged so
+			// a future multi-root regression is visible in diagnostics.
+			log('bundled-skills materialization registration refused (cap)', {
+				projectRoot: bootstrapRoot,
+			});
+		}
 	}
 	postResolutionTasks.push(() => {
 		if (!bootstrapStateWritesEnabled) return;
