@@ -15,8 +15,10 @@ canonical workflow.
 - MCP tool names (`mcp__github__*`) are injected by the runtime harness and
   may differ across environments; verify availability via `ToolSearch` before
   first use in a session.
-- No `gh` CLI in the remote/MCP environment. Use MCP tools instead:
-  - PR checks → `mcp__github__pull_request_read` method `get_check_runs`
+- In a remote environment without `gh`, use MCP tools:
+  - PR checks → enumerate all exact-head pages as required by canonical Step 2a.
+    A single result without completeness evidence leaves the observation incomplete.
+    Keep queue-run evidence separate and use independent Git proof for terminal merge.
   - Failure logs → `mcp__github__get_job_logs` with `job_id`, `return_content: true`
   - PR mergeable/mergeStateStatus/reviewDecision → `mcp__github__pull_request_read` method `get`
 - **Merge is new surface area.** There is no `mcp__github__merge_pull_request`
