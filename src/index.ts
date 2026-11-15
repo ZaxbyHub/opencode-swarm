@@ -48,7 +48,11 @@ import {
 	resolveRegisteredAgentModel,
 	resolveRuntimeAgentModel,
 } from './config/agent-model.js';
-import { syncBundledProjectSkillsIfMissingAsync } from './config/bundled-skills.js';
+import {
+	failScheduledBundledSkillsSync,
+	registerDeferredBundledSkillsSync,
+	syncBundledProjectSkillsIfMissingAsync,
+} from './config/bundled-skills.js';
 import {
 	DEFAULT_MODELS,
 	ORCHESTRATOR_NAME,
@@ -148,6 +152,7 @@ import {
 	recordToolCall,
 } from './hooks/adversarial-detector.js';
 import { createAutoReviewHook } from './hooks/auto-review.js';
+import { createBundledSkillsFirstTurnGate } from './hooks/bundled-skills-first-turn-gate.js';
 import { createCcCommandInterceptHook } from './hooks/cc-command-intercept.js';
 import { createCoChangeSuggesterHook } from './hooks/co-change-suggester.js';
 import { cacheCohortIdAtMessage } from './hooks/cohort-cache.js';
@@ -1846,9 +1851,34 @@ async function initializeOpenCodeSwarm(
 	// cannot read a SKILL.md until a later tool turn, and command-path sync remains
 	// a backstop if that practical timing assumption does not hold. It is
 	// still HARD-BOUNDED + fail-open: the async variant yields between files so
-	// withTimeout (which unref's its timer) can bound it; content-equality-checked,
+	// withTimeout can bound it; content-equality-checked,
 	// atomic-overwrite-with-rollback, symlink-guarded, byte/file-bounded. On timeout/error we
 	// fail open — the command-path sync remains as a backstop.
+	//
+	// #3364: PRE-REGISTER the deferred materialization handle at ENQUEUE time so
+	// the first-turn gate can join it even if the first chat transform arrives
+	// before the post-resolution task fires. Cost: one bounded SYNCHRONOUS
+	// realpath (canonicalRootKeyFresh, the same helper the sync itself uses at
+	// run time) plus one map write — no AWAITED I/O, init-path safe. The call
+	// is count-bounded, not time-bounded by construction (the path is warm —
+	// init already canonicalized it); repro-704 measured green with the call
+	// present (T1 160.9 ms vs the 400 ms deadline), and the init contract
+	// stays pinned by tests/unit/index-startup-contract-outcomes-2670.test.ts
+	// plus the CI repro-704 smoke leg.
+	if (bootstrapStateWritesEnabled) {
+		if (
+			registerDeferredBundledSkillsSync(bootstrapRoot) ===
+			'registration-refused'
+		) {
+			// A-3: the all-pending cap refused this root's handle — the gate
+			// degrades to 'not-started' (command-path backstop ordering).
+			// Practically unreachable (one root per plugin process); logged so
+			// a future multi-root regression is visible in diagnostics.
+			log('bundled-skills materialization registration refused (cap)', {
+				projectRoot: bootstrapRoot,
+			});
+		}
+	}
 	postResolutionTasks.push(() => {
 		if (!bootstrapStateWritesEnabled) return;
 		void withTimeout(
@@ -1866,6 +1896,12 @@ async function initializeOpenCodeSwarm(
 			log('bundled skill materialization timed out or failed (non-fatal)', {
 				error: msg,
 			});
+			// #3364: if the sync never ADOPTED the scheduled entry (it threw
+			// before starting), settle it failed so the gate cannot wait on a
+			// handle whose work will never run. No-op once adopted — after
+			// adoption only the sync promise itself settles the entry (the 2 s
+			// outer await timeout above is a race, never a cancellation).
+			failScheduledBundledSkillsSync(bootstrapRoot);
 		});
 	});
 	// Background staleness check against npm. Detached, never blocks init,
@@ -2686,6 +2722,11 @@ async function initializeOpenCodeSwarm(
 	// to the architect on their next turn via pendingAdvisoryMessages.
 	const initOrphanRecoveryAdvisoryHook =
 		createInitOrphanRecoveryAdvisoryHook(bootstrapRoot);
+	// #3364: order the first chat turn after the deferred bundled-skill
+	// materialization (single bounded wait; see the gate module for the
+	// latch/concurrency semantics and the disclosed degradation bounds).
+	const bundledSkillsFirstTurnGate =
+		createBundledSkillsFirstTurnGate(bootstrapRoot);
 
 	// Self-review advisory hook
 	const selfReviewConfig = SelfReviewConfigSchema.parse(
@@ -4326,6 +4367,10 @@ async function initializeOpenCodeSwarm(
 			undefined,
 			composeHandlers(
 				...[
+					// #3364 FIRST: gate the turn on bundled-skill materialization so
+					// the architect MODE self-load read cannot race the deferred copy.
+					// Single shared wait, fail-open, no input/output mutation.
+					bundledSkillsFirstTurnGate,
 					// OpenCode runs messages.transform before system.transform. Stage
 					// session-bound architect guidance against this request's live array.
 					messagesTransformArchitectEnhancerStage,
