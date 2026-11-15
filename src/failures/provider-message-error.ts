@@ -27,6 +27,21 @@ export type ProviderMessageError = {
 	message: string;
 	/** Provider failure category, e.g. `provider.rate_limit`. */
 	category: string;
+	/**
+	 * #3177: the retry class the canonical classifier derived at READ time
+	 * (over the unbounded raw provider message). The display text above is
+	 * bounded to 512 bytes and can lose the very keyword a later text-based
+	 * reclassification would match, so consumers that need the retry verdict
+	 * must prefer this snapshot (see the snapshot arm in
+	 * `classifyProviderFailure`).
+	 */
+	retryClass: string;
+	/**
+	 * #3177: the risk band the canonical classifier derived at read time,
+	 * carried with `retryClass` so the snapshot round-trips the full retry
+	 * semantics without a second mapping.
+	 */
+	risk: string;
 };
 
 /**
@@ -44,12 +59,20 @@ function readEarlyFinish(info: object): ProviderMessageError | null {
 			name: 'MessageOutputLengthError',
 			message: 'reply cut off by the output limit (finish=length)',
 			category: 'provider.output_length',
+			// Early-finish shapes are terminal in the shipped consumers
+			// (dispatch-lanes treats both finishes as terminal; the lean runner
+			// nulls them out of the refusal path entirely), so their snapshot
+			// carries the do-not-retry reading.
+			retryClass: 'do_not_retry',
+			risk: 'low',
 		};
 	if (reason === 'content-filter')
 		return {
 			name: 'MessageContentFilterError',
 			message: 'reply withheld by the content filter (finish=content-filter)',
 			category: 'provider.content_filter',
+			retryClass: 'do_not_retry',
+			risk: 'low',
 		};
 	return null;
 }
@@ -97,6 +120,10 @@ export function readProviderMessageError(
 		// characters); fall back to a constant, never to the raw text.
 		message: classified.evidence.display || 'no message',
 		category: classified.category,
+		// #3177: round-trip the canonical retry semantics so downstream
+		// reclassification over the bounded display cannot lose the verdict.
+		retryClass: classified.retryClass,
+		risk: classified.risk,
 	};
 }
 

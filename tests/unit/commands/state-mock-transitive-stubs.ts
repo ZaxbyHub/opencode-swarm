@@ -39,6 +39,11 @@ export const STATE_MOCK_TRANSITIVE_STUBS = {
 	setDispatchParent: () => undefined,
 	resolveDispatchParent: () => undefined,
 	clearDispatchLineageForSession: () => undefined,
+	// #3403: generation-stamped lineage writes + attempt-scoped rollback,
+	// consumed by the delegation gate's taskMetadata through the same
+	// transitive importers as the lineage exports above.
+	writeDispatchParentEntry: () => 0,
+	restoreDispatchParentEntry: () => undefined,
 	MAX_TRACKED_DISPATCH_PARENTS: 200,
 	PENDING_DISPATCH_AUTHORIZATION_TTL_MS: 600_000,
 	MAX_TRACKED_BUDGET_SESSIONS: 500,

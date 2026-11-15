@@ -1903,6 +1903,17 @@ interface ScopeClaimReceipt {
 /**
  * Cross-process, successor-first claim transaction. All contenders for one
  * pending generation lock the same stable receipt path.
+ *
+ * #3403 (trust model): the claim correlates a live `pending_child` generation
+ * on the exact triple (ownerSessionId === parentSessionId, dispatchCallId ===
+ * dispatchCallId, ownerMessageId === dispatchCallId) — the first two are
+ * host-typed (host session id / Task part id), while `childSessionId` is
+ * TOOL-EMITTED metadata on v1 hosts (v2 synthesizes it from host progress,
+ * #3401). Whatever child id the metadata names becomes the claim winner; the
+ * correlation triple is the fence (no matching live generation →
+ * SCOPE_NOT_DECLARED, nothing mutated; a different winner exists →
+ * SCOPE_BINDING_ALREADY_CLAIMED). The caller (delegation-gate taskMetadata)
+ * stamps the winner's session identity after a successful claim.
  */
 export async function claimScopeBindingForChildDurably(input: {
 	directory: string;

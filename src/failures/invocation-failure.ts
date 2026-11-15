@@ -611,6 +611,76 @@ function providerSignal(error: unknown): string {
 }
 
 /**
+ * #3177: the provider-category set `classifyProviderFailure` itself emits
+ * (enumerated per the category docstring above). A carrier snapshot outside
+ * this set is not honored (fail-closed to normal classification).
+ */
+const KNOWN_PROVIDER_CARRIER_CATEGORIES = new Set([
+	'provider.cancelled',
+	'provider.authentication_configuration',
+	'provider.quota_billing',
+	'provider.rate_limit',
+	'provider.unavailable',
+	'provider.context_window',
+	'provider.content_policy',
+	'provider.request_shape',
+	'provider.unknown',
+]);
+
+const KNOWN_PROVIDER_CARRIER_RETRY_CLASSES =
+	new Set<InvocationFailureRetryClass>([
+		'retry_same',
+		'retry_fallback',
+		'repair_then_retry',
+		'operator_action',
+		'do_not_retry',
+	]);
+
+const KNOWN_PROVIDER_CARRIER_RISKS = new Set<InvocationFailureRisk>([
+	'low',
+	'medium',
+	'high',
+]);
+
+/**
+ * #3177: read the verified carrier snapshot off an error. Returns null unless
+ * `error.providerError` is an object whose category, retryClass, and risk are
+ * all known enum values — the exact shape `readProviderMessageError` +
+ * `providerMessageErrorToError` produce.
+ */
+function readProviderCarrierSnapshot(error: unknown): {
+	category: string;
+	retryClass: InvocationFailureRetryClass;
+	risk: InvocationFailureRisk;
+} | null {
+	if (typeof error !== 'object' || error === null) return null;
+	const carrier = readOwn(error, 'providerError');
+	if (typeof carrier !== 'object' || carrier === null) return null;
+	const category = readOwn(carrier, 'category');
+	const retryClass = readOwn(carrier, 'retryClass');
+	const risk = readOwn(carrier, 'risk');
+	if (
+		typeof category !== 'string' ||
+		typeof retryClass !== 'string' ||
+		typeof risk !== 'string'
+	)
+		return null;
+	if (
+		!KNOWN_PROVIDER_CARRIER_CATEGORIES.has(category) ||
+		!KNOWN_PROVIDER_CARRIER_RETRY_CLASSES.has(
+			retryClass as InvocationFailureRetryClass,
+		) ||
+		!KNOWN_PROVIDER_CARRIER_RISKS.has(risk as InvocationFailureRisk)
+	)
+		return null;
+	return {
+		category,
+		retryClass: retryClass as InvocationFailureRetryClass,
+		risk: risk as InvocationFailureRisk,
+	};
+}
+
+/**
  * Provider failure categories in use (enumerated per issue #2673 plan-critic
  * finding 6, so downstream category-prefix consumers — telemetry filters,
  * dashboards, circuit thresholds — can discover every leaf):
@@ -637,6 +707,28 @@ export function classifyProviderFailure(
 			risk: 'low',
 			action,
 			display: signal || 'AbortError',
+			code,
+			statusCode,
+		});
+	}
+	// #3177: honor a verified provider-message carrier's read-time snapshot.
+	// `providerMessageErrorToError` attaches `.providerError` (the
+	// ProviderMessageError the reader classified over the UNBOUNDED raw
+	// provider message); the carrier's own message is bounded display text
+	// that can lose the very keyword the text arms below match. Provenance is
+	// the nested carrier object itself — never a bare `.category` property —
+	// and every enum field must be known; anything else falls through to
+	// normal classification (fail-closed). Abort-like errors were already
+	// handled above, so an abort-shaped carrier stays cancelled regardless.
+	const carrierSnapshot = readProviderCarrierSnapshot(error);
+	if (carrierSnapshot) {
+		return buildRecord({
+			source: 'provider',
+			category: carrierSnapshot.category,
+			retryClass: carrierSnapshot.retryClass,
+			risk: carrierSnapshot.risk,
+			action,
+			display: signal || carrierSnapshot.category,
 			code,
 			statusCode,
 		});

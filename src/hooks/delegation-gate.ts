@@ -134,9 +134,11 @@ import {
 	markStageBRouteRequired,
 	recordStageBCompletion,
 	reserveStageBRouteEvidence,
-	setDispatchParent,
+	resolveDispatchParent,
+	restoreDispatchParentEntry,
 	swarmState,
 	updateTaskWorkflowCache,
+	writeDispatchParentEntry,
 } from '../state';
 import { telemetry } from '../telemetry.js';
 import type {
@@ -4180,13 +4182,47 @@ export function createDelegationGateHook(
 		parentSessionID: string;
 		childSessionID: string;
 	}): Promise<void> => {
+		// #3403 (trust model, PRR-009): field-by-field authority for this
+		// handler —
+		//   HOST-TYPED: `parentSessionID` (the host's `part.sessionID`; never
+		//   tool-controlled), `callID` (the host's Task part id), and the
+		//   dispatch `directory` (plugin-resolved project root).
+		//   TOOL-EMITTED: `childSessionID`. On v1 hosts it arrives in the Task
+		//   part's tool-emitted `state.metadata` (the documented design choice,
+		//   src/index.ts taskMetadata wiring); on v2 hosts the event pump
+		//   synthesizes the same v1 shape from host progress metadata
+		//   (#3401, src/host/v2/events.ts), gated on the tracked tool name so a
+		//   non-subagent tool cannot masquerade.
+		//   WHAT A TOOL-EMITTED CHILD ID CAN CAUSE: while a live `pending_child`
+		//   generation exists for the exact (parentSessionID, callID) pair, the
+		//   named session wins the durable claim — `ensureAgentSession` below
+		//   creates or OVERWRITES that session's identity (agentName → 'coder',
+		//   PRM ladder reset, currentTaskId/declaredCoderScope stamped from the
+		//   architect's declaration). The correlation key is the fence: an id
+		//   that names no live pending generation gets SCOPE_NOT_DECLARED and
+		//   mutates nothing; a second claimant for a claimed generation gets
+		//   SCOPE_BINDING_ALREADY_CLAIMED and (post-#3403) its lineage write is
+		//   rolled back below. This is the documented v1 host contract — the
+		//   model is stated here so the next reviewer need not re-derive it;
+		//   changing it is a product decision, not a bug fix.
+		//
 		// Issue #3036: record the host-observed dispatch pair BEFORE any early
 		// return below — reviewer/test-engineer children return at the
 		// SCOPE_NOT_DECLARED guard and never reach ensureAgentSession, yet their
 		// knowledge_receipt filings still need the lineage to authorize against
 		// the architect-stamped membership. The parent id here is the host's
 		// `part.sessionID`, never tool-controlled metadata.
-		setDispatchParent(input.childSessionID, input.parentSessionID);
+		//
+		// #3403 (PRR-006): the write is generation-stamped so a FAILED claim can
+		// roll exactly this write back (see the failure branch below) — no
+		// half-applied activation (lineage committed while the route/full-auto
+		// bindings stay permanently skipped) survives the throw, and the
+		// pre-existing lineage (if any) is restored rather than deleted.
+		const previousParent = resolveDispatchParent(input.childSessionID);
+		const lineageWriteGeneration = writeDispatchParentEntry(
+			input.childSessionID,
+			input.parentSessionID,
+		);
 		const bindRouteChildSession = (): void => {
 			const routeBindings = stageBRouteSlotByCallID.get(input.callID);
 			if (!routeBindings) return;
@@ -4219,6 +4255,15 @@ export function createDelegationGateHook(
 				});
 				return;
 			}
+			// #3403: roll this attempt's lineage write back before surfacing the
+			// failure. Generation-gated: a stale failure (a newer write for the same
+			// child landed while this claim was in flight) no-ops and never clobbers
+			// the newer entry, including the same-parent case.
+			restoreDispatchParentEntry(
+				input.childSessionID,
+				lineageWriteGeneration,
+				previousParent,
+			);
 			throw new Error(`${result.code}: ${result.message}`);
 		}
 		const { previous, claimed } = result.value;
