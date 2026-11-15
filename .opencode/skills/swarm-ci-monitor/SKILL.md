@@ -10,7 +10,7 @@ description: >
 disable-model-invocation: true
 metadata:
   audience: swarm-plugin
-  swarm-contract-digest: "f32ce6bce7ed"
+  swarm-contract-digest: "e428ab09ce23"
 ---
 
 # Swarm CI Monitor
@@ -255,8 +255,9 @@ already ran once in this invocation.
 
 1. Resolve the repository, PR number, target base and current head SHA again.
    Re-fetch authoritative requiredness and status evidence for that identity
-   using Step 2a's rule, and record the SHA for Step 4a. A changed head or base
-   requires new evidence for the applicable checks. An incomplete census may
+   using Step 2a's rule, and record that SHA:
+   Step 4a merges only that commit. A changed head or base requires new
+   evidence for the applicable checks. An incomplete census may
    proceed with fresh, independently verified required-green evidence. Stop
    before Step 4 if requiredness or current status is unknown or any required
    check is non-green under Step 2a's rules.
