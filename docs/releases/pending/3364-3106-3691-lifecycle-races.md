@@ -38,7 +38,9 @@
 
 ## Why
 
-Issue #3364 measured the first-turn window on a real host (16/16 runs); nothing
+Issue #3364 measured the first-turn window on a real host (16/16 runs in the
+issue's own probe; the ADR-0003 measurement of record cited above is 19/19,
+windows ~0.4–4.2 s); nothing
 ordered the architect's MODE self-load read after the deferred copy, so
 `SKILL_LOAD_FAILED` was reachable by timing luck. Issue #3106 carried two
 verified findings from the PR #3091 review (paused-time mode re-arm asymmetry

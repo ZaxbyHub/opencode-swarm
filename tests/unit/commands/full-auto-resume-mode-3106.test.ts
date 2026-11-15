@@ -182,6 +182,32 @@ describe('resume CAS command interleave (#3106 PRR-004)', () => {
 		expect(after?.pauseGeneration).toBe((seeded?.pauseGeneration ?? 0) + 1);
 	}, 60_000);
 
+	test('non-infrastructure re-pause refusal names the reason and does NOT point at retry-oversight', async () => {
+		writeProjectConfig(undefined);
+		await seedPausedRun('supervised');
+		const seeded = loadFullAutoRunState(tmpDir, SESSION_ID);
+		expect(seeded?.status).toBe('paused');
+		// canRetryOversight requires an infrastructure/deadline pause reason;
+		// a concurrent reactive-verdict or denial-limit re-pause (reachable
+		// on the legacy session flag, full-auto-intercept.ts:1464) is NOT
+		// retry-oversight-eligible, so the refusal must say so instead of
+		// recommending a command that would refuse the run (Stage B NEW-1).
+		registerFullAutoRecoveryBlockerEvaluator(() => {
+			pauseFullAutoRun(tmpDir, SESSION_ID, 'reactive verdict DENY');
+			return [];
+		});
+		const out = await handleFullAutoCommand(tmpDir, ['resume'], SESSION_ID);
+		expect(out).toStartWith('Error:');
+		expect(out).toContain(
+			'non-infrastructure pause is not retry-oversight-eligible',
+		);
+		expect(out).toContain('reason: reactive verdict DENY');
+		expect(out).not.toContain('to establish a fresh probe');
+		const after = loadFullAutoRunState(tmpDir, SESSION_ID);
+		expect(after?.status).toBe('paused');
+		expect(after?.pauseGeneration).toBe((seeded?.pauseGeneration ?? 0) + 1);
+	}, 60_000);
+
 	test('positive control: no interleave, resume arms (status running)', async () => {
 		writeProjectConfig(undefined);
 		await seedPausedRun('supervised');

@@ -198,12 +198,21 @@ export async function handleFullAutoCommand(
 			{ expectedPauseGeneration: runState.pauseGeneration ?? 0 },
 		);
 		if (!armed) {
-			// State-conditional recovery guidance (round-2 review F2):
-			// retry-oversight only works for a still-paused run — abort
+			// State-conditional recovery guidance (round-2 review F2, made
+			// reason-aware on the Stage B reviewer's point): retry-oversight
+			// only works for a still-paused run whose pause reason is
+			// infrastructure/deadline (canRetryOversight) — a concurrent
+			// reactive-verdict or denial-limit re-pause is NOT retry-eligible
+			// (full-auto-intercept.ts:1464 / full-auto-permission.ts:522 can
+			// re-pause inside the window on the legacy session flag), so
+			// those runs get resolve-then-resume guidance instead. Abort
 			// (terminated) and off (idle) must re-enable with `on`.
 			const postState = loadFullAutoRunState(directory, sessionID);
 			if (postState?.status === 'paused') {
-				return 'Error: resume refused because the paused run changed state after the probe (pause generation mismatch — another process re-paused it). Re-run `/swarm full-auto retry-oversight` to establish a fresh probe, then resume.';
+				if (isInfrastructurePauseReason(postState.pauseReason)) {
+					return 'Error: resume refused because the paused run changed state after the probe (pause generation mismatch — another process re-paused it). Re-run `/swarm full-auto retry-oversight` to establish a fresh probe, then resume.';
+				}
+				return `Error: resume refused because the paused run changed state after the probe (pause generation mismatch — another process re-paused it; reason: ${postState.pauseReason ?? 'unspecified'}). A non-infrastructure pause is not retry-oversight-eligible; resolve the pause cause, then re-run \`/swarm full-auto resume\`.`;
 			}
 			return 'Error: resume refused because the paused run changed state after the probe (another process aborted or disarmed it). The run is no longer resumable; re-enable with `/swarm full-auto on`.';
 		}
