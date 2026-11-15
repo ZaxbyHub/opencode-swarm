@@ -4,8 +4,10 @@ import { readFileSync } from 'node:fs';
 import * as path from 'node:path';
 import {
 	isTier3Path,
+	matchesTier3,
 	normalizeTier3Path,
 } from '../../../src/parallel/tier3-classifier';
+import { normalizeScopeFiles } from '../../../src/scope/scope-binding';
 
 /**
  * #3165 F-2: the issue's named deep-path modules classify as Tier 3, the
@@ -113,11 +115,97 @@ describe('normalizeTier3Path fail-closed matrix (#3165 F-2)', () => {
 	});
 
 	test('duplicate entries are idempotent under matchesTier3', () => {
+		// Parallel review F-07/F-13: the original body never called
+		// matchesTier3 (the name promised a consumer-level pin; the body
+		// tested isTier3Path directly). The aggregation-level pin now runs,
+		// plus one positive aggregation control.
+		expect(matchesTier3(['src/util/format.ts'])).toBe(false);
+		expect(matchesTier3(['src/util/format.ts', 'src/util/format.ts'])).toBe(
+			false,
+		);
 		expect(
-			['src/util/format.ts', 'src/util/format.ts'].every(
-				(f) => !isTier3Path(f),
-			),
+			matchesTier3(['src/util/format.ts', 'src/security/provider.ts']),
 		).toBe(true);
+	});
+
+	test('directory-surface hardening: bare dirs, ancestors, terminal-dot files, colon spellings (PR #3705 review)', () => {
+		const tier3 = [
+			'src/security', // bare gate dir (F-001)
+			'src/hooks/guardrails', // bare gate dir
+			'src/sandbox', // bare gate dir
+			'src', // ancestor of the exact trio (critic sharpening of F-001)
+			'src/cli', // ancestor
+			'src/tools', // ancestor
+			'src/plan', // ancestor
+			'src/cli/index.ts.', // terminal-dot FILE (F-003)
+			'src/security./foo.ts', // interior-dot DIRECTORY segment (Stage-B round)
+			'src/plan/ledger.ts:', // ADS/colon spelling (F-005)
+			'src/cli/index.ts:stream', // colon suffix spelling
+			'guardrails/x.ts', // gate directory segment in any position
+		];
+		for (const tier3Path of tier3) {
+			expect(isTier3Path(tier3Path), tier3Path).toBe(true);
+		}
+		// Benign controls: not gate surface, not ancestors of the trio,
+		// well-formed spellings (a terminal-dot benign spelling fails closed
+		// by design — see the malformed-input row in the fail-closed matrix).
+		const bypass = ['src/util/format.ts', 'src/render/canvas.ts', 'src/render'];
+		for (const bypassPath of bypass) {
+			expect(isTier3Path(bypassPath), bypassPath).toBe(false);
+		}
+	});
+});
+
+describe('save_plan normalization seam -> classifier chain (PR #3705 feedback FB-001)', () => {
+	// FB-001 (parallel review F-03): raw-spelling fixtures bypass the
+	// production seam — save_plan normalizes files_touched through
+	// normalizeScopeFiles (src/scope/scope-binding.ts) BEFORE persistence
+	// (src/tools/save-plan.ts:1226), so a rule that only matches raw
+	// directory spellings never fires on real plans. These rows exercise
+	// the REAL normalizer + the REAL consumer aggregation (matchesTier3)
+	// so the hardening is proven on the PERSISTED form, not raw fixtures.
+	test('every hardening spelling survives save_plan normalization and classifies Tier 3', () => {
+		const spellings = [
+			'src/security',
+			'src/security/',
+			'src/security/.',
+			'src/security/./.',
+			'src/sandbox',
+			'src/hooks/guardrails',
+			'src',
+			'src/cli',
+			'src/tools',
+			'src/plan',
+			'src/plan/ledger.ts:',
+			'src/cli/index.ts.',
+			'src/security./foo.ts', // interior-dot directory segment (Stage-B round)
+			'src/cli/index.ts:stream',
+		];
+		for (const spelling of spellings) {
+			const normalized = normalizeScopeFiles([spelling]);
+			expect(normalized, spelling).not.toBeNull();
+			expect(
+				matchesTier3(normalized as string[]),
+				`normalized ${JSON.stringify(spelling)} -> ${JSON.stringify(normalized)}`,
+			).toBe(true);
+		}
+	});
+
+	test('benign spellings keep Turbo bypass after normalization', () => {
+		const benign = [
+			'src/util/format.ts',
+			'src/render/canvas.ts',
+			'src/render',
+			'index.ts',
+		];
+		for (const benignPath of benign) {
+			const normalized = normalizeScopeFiles([benignPath]);
+			expect(normalized, benignPath).not.toBeNull();
+			expect(
+				matchesTier3(normalized as string[]),
+				`normalized benign ${JSON.stringify(benignPath)} must keep bypass`,
+			).toBe(false);
+		}
 	});
 });
 

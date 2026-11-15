@@ -18,7 +18,10 @@
  *   - AC-008: absolute 250ms/call ceiling instead of a <10% percentage over
  *     a trivial echo baseline (per-command sandbox cost is fixed; CI measured
  *     191.73% overhead) + positive control that the wrapped write landed.
- *   - AC-010: writes under os.homedir() instead of root-owned /Users.
+ *   - AC-010: writes land in a test-created sandbox home, NOT the real
+ *     homedir (the pre-fix variant wrote under os.homedir() — the exact
+ *     anti-pattern AC-010 forbids — so this bullet documents the
+ *     correction's direction, not a permission to write the real home).
  *   - Recovery: resets the probe memo AFTER executor1's construction seals
  *     it, so the false-probe mock actually reaches executor2.
  *

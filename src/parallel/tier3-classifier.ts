@@ -117,9 +117,31 @@ export function isTier3Path(filePath: string): boolean {
 
 	if (TIER_3_EXACT_REPO_PATHS.has(lower)) return true;
 
+	// #3705 feedback F-001/F-003/F-005 (parallel-review convergence): a
+	// bare directory name ('src/security', 'src/hooks/guardrails',
+	// 'src/sandbox' — docs/planning.md accepts directories as supported
+	// scope spellings and save_plan strips the trailing slash before
+	// persisting), a terminal-dot spelling of a gate file
+	// ('src/cli/index.ts.'), a colon/ADS spelling ('src/plan/ledger.ts:'),
+	// or an ancestor directory of the exact gate paths ('src', 'src/cli',
+	// 'src/tools', 'src/plan') all name the gate surface and fail CLOSED.
 	const segments = lower.split('/');
 	const fileName = segments[segments.length - 1] || '';
 	const fileBaseName = fileName.replace(/\.[^.]*$/, '');
+
+	if (TIER_3_DIRECTORY_SEGMENTS.has(fileName)) return true;
+	// Any segment with a terminal dot is malformed input and fails CLOSED
+	// (Stage-B round): covers terminal-dot FILES ('src/cli/index.ts.') and
+	// interior-dot DIRECTORY segments ('src/security./foo.ts' — executed
+	// probe at the published head: false, a live bypass). Legit repo paths
+	// never carry a segment ending in '.', so over-denial risk is nil.
+	for (const segment of segments) {
+		if (segment.endsWith('.')) return true;
+	}
+	if (lower.includes(':')) return true;
+	for (const gatePath of TIER_3_EXACT_REPO_PATHS) {
+		if (gatePath === lower || gatePath.startsWith(`${lower}/`)) return true;
+	}
 
 	if (TIER_3_EXACT_BASENAMES.has(fileBaseName)) return true;
 
