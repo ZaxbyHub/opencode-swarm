@@ -47,6 +47,7 @@ import {
 	SandboxCapabilityProbe,
 } from '../../../src/sandbox/capability-probe';
 import {
+	_getMacOSSandboxPolicyForTest,
 	_resetExecutorCache,
 	getExecutor,
 	setMacOSSandboxPolicy,
@@ -210,9 +211,12 @@ describe('capability probe transient visibility — PR #3718 F-001', () => {
 			process: 'none' as const,
 			reasons: [SETUP_FAILURE_REASON],
 		})) as typeof originalEvidence;
+		// The macOS creator is config-gated (F6a item 3); open the gate for
+		// this leg only and restore the CAPTURED prior value afterwards (the
+		// precondition "was false" is not established by this file —
+		// Stage-B reviewer finding, PR #3718 feedback round).
+		const priorMacOSPolicy = _getMacOSSandboxPolicyForTest();
 		try {
-			// The macOS creator is config-gated (F6a item 3); open the gate
-			// for this leg only. Restored to the default false in finally.
 			if (HOST === 'darwin') setMacOSSandboxPolicy(true);
 			_resetExecutorCache();
 			const executor = await getExecutor();
@@ -225,7 +229,7 @@ describe('capability probe transient visibility — PR #3718 F-001', () => {
 			expect(executor).not.toBeNull();
 			expect(executor).toHaveProperty('mechanism');
 		} finally {
-			if (HOST === 'darwin') setMacOSSandboxPolicy(false);
+			if (HOST === 'darwin') setMacOSSandboxPolicy(priorMacOSPolicy);
 			_internals.probePlatform = originalProbePlatform;
 			_internals.detectBehavioralEvidence = originalEvidence;
 			_resetCapabilityCache();

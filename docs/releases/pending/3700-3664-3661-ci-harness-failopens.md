@@ -22,8 +22,10 @@ pipeline (collated #3700 + #3664 + #3661):
   paired rename sources) so a nested independent project root (`.opencode/`
   boundary, #2127) classifies its genuine edits NEW.
 - **Per-file CI validation harness (#3664):** the child terminal-status
-  derivation now consults bounded-reader COMPLETENESS. An exit-0 child whose
-  stdout/stderr reader missed its deadline records the new self-naming
+  derivation now consults bounded-reader COMPLETENESS. A child whose run
+  completed with no timeout and no crash (cleanup succeeded, no signal, known
+  exit code) but whose stdout/stderr reader missed its deadline records the
+  new self-naming
   `output_truncated` terminal with a reason naming the truncated channel(s)
   (the reason is reserved for that terminal — timeout and crash rows keep the
   undefined reason, since the kill is their cause; PR #3718 review round),
