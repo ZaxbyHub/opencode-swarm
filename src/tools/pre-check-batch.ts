@@ -2200,17 +2200,14 @@ function parseDiffLineRangesChecked(
 				inBinaryPayload = false;
 				continue;
 			}
-				// A fragment size line (re-)arms binary-payload mode — but
-				// ONLY inside a `GIT binary patch` section (4.5 review
-				// finding: a stray `literal 5` after an ordinary section
-				// armed payload mode and admitted space-free junk).
-				if (
-					sawBinaryPatchSection &&
-					/^(?:literal|delta) \d+$/.test(line)
-				) {
-					inBinaryPayload = true;
-					continue;
-				}
+			// A fragment size line (re-)arms binary-payload mode — but
+			// ONLY inside a `GIT binary patch` section (4.5 review
+			// finding: a stray `literal 5` after an ordinary section
+			// armed payload mode and admitted space-free junk).
+			if (sawBinaryPatchSection && /^(?:literal|delta) \d+$/.test(line)) {
+				inBinaryPayload = true;
+				continue;
+			}
 			if (inBinaryPayload) {
 				// Real base85 payload lines never contain a space; a
 				// space-bearing line inside the payload region is junk.
