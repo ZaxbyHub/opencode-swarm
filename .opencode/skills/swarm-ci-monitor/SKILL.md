@@ -116,11 +116,19 @@ observation when the head or base changed.
 
 On an MCP-only host, enumerate all check-run pages for the exact head. Require
 the same head, a consistent total, unique check IDs and an exhausted listing.
-An unavailable page, missing completeness evidence or changed PR identity
-means `incomplete`. Retry the read or stop with the missing evidence. Advance
-only with a complete census and the existing required-check verdict. Use
-`gh pr checks --required` or equivalent protection evidence for requiredness
-and legacy status contexts. The check-run census cannot provide those facts.
+Record an incomplete observation with its reason when a page, identity, or
+completeness evidence is missing.
+
+On either host, record the census state and any reason it is incomplete. To
+advance, independently verify all applicable required checks and legacy status
+contexts for the exact PR head and target base. Use `gh pr checks --required`
+with exact-head verification, or equivalent GitHub MCP and protection evidence.
+The partial census and a zero observer exit code supply no required-check verdict.
+An incomplete census may advance with sufficient required-green evidence. If
+requiredness or current status cannot be established, retry the missing read
+within the existing bounds or stop and report what is missing. If an unchanged
+page or suite limit makes the census incomplete, keep that result and use the
+required-check evidence without repeatedly fetching the same census.
 
 Determine green state by these rules (re-stated here so this merge gate does
 not depend on ci-fix-monitor's generated file being regenerated unchanged):
@@ -245,14 +253,18 @@ gate is Step 4b. Run this step fresh every time control reaches Step 4 —
 including after a Step 2 loop-back — never skip it because an earlier pass
 already ran once in this invocation.
 
-1. Re-fetch check runs for the **current** PR head SHA, and record that SHA:
-   Step 4a merges only that commit. If any required check
-   is stale (ran against an older SHA) → `gh run rerun --failed` for the
-   transient/failed run, or wait and re-fetch at most 3× (~1 min apart); if
-   still stale after that, escalate per Step 5. Never merge on a stale-green
-   check. This is the one failure type Step 2's fix loop can actually address
-   — on failure, go back to Step 2 (counts as a new iteration against the
-   budget); abort per Step 5 if the budget is exhausted.
+1. Resolve the repository, PR number, target base and current head SHA again.
+   Re-fetch authoritative requiredness and status evidence for that identity
+   using Step 2a's rule, and record the SHA for Step 4a. A changed head or base
+   requires new evidence for the applicable checks. An incomplete census may
+   proceed with fresh, independently verified required-green evidence. Stop
+   before Step 4 if requiredness or current status is unknown or any required
+   check is non-green under Step 2a's rules.
+   If any required check ran against an older SHA, rerun a transient failed
+   run with `gh run rerun --failed`, or wait and re-fetch at most 3× (~1 min
+   apart). If the evidence is still stale, escalate per Step 5. On a check
+   failure, return to Step 2 within the existing iteration budget, or abort
+   per Step 5 if the budget is exhausted.
 2. Re-verify `mergeable: MERGEABLE` + `mergeStateStatus: CLEAN` (a base push
    or merge-queue entry can change this between green-detection and merge). If
    this regresses, Step 2 has no mechanism to fix a mergeable-state
