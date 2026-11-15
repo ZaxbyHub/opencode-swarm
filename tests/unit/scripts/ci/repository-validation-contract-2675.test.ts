@@ -61,6 +61,7 @@ describe('issue #2675 repository validation contract', () => {
 			failed: 1,
 			crashed: 1,
 			timedOut: 1,
+			outputTruncated: 0,
 			missing: 1,
 			skipped: 0,
 		});
@@ -136,6 +137,7 @@ describe('issue #2675 repository validation contract', () => {
 			'timed_out',
 			'missing',
 			'skipped',
+			'output_truncated',
 		]);
 		expect(observedArgv).toEqual([
 			[

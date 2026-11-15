@@ -29,7 +29,7 @@
  * INTO the nested root; its paired outside-prefix source record must drop
  * WITH its pair, not corrupt the -z porcelain record stream).
  *
- * Isolation note: the resolver memo is module-global but keyed by directory,
+ * Isolation note: the resolver memo is scoped per invocation (direct calls pass no holder),
  * so every test() below builds its OWN fresh fixture directory — no test can
  * inherit another's envelope.
  */
