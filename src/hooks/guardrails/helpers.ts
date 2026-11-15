@@ -232,13 +232,35 @@ export function redactShellCommand(cmd: string): string {
 	// Well-known token VALUE shapes (content-based; fires regardless of the
 	// flag/variable name carrying them). GitHub suffix bound is 20+: real PATs
 	// are 36+, and shorter truncated/pasted fragments stay minimized too.
+	// #3712: the anthropic/openrouter shapes run BEFORE the openai shape —
+	// the openai pattern subsumes `sk-ant-api03-…` and `sk-or-v1-…`, and in a
+	// sequential .replace chain the first matching arm owns the token, so
+	// ordering assigns the rotation-correct provider label.
 	out = out
+		.replace(/\bsk-ant-[A-Za-z0-9_-]{20,}/g, '[REDACTED:anthropic]')
+		.replace(/\bsk-or-[A-Za-z0-9_-]{20,}/g, '[REDACTED:openrouter]')
 		.replace(/\bsk-[A-Za-z0-9_-]{20,}/g, '[REDACTED:openai]')
 		.replace(/\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}/g, '[REDACTED:github]')
 		.replace(/\bgithub_pat_[A-Za-z0-9_]{22,}/g, '[REDACTED:github]')
 		.replace(/\bAKIA[0-9A-Z]{16}\b/g, '[REDACTED:aws]')
 		.replace(/\bxox[baprs]-[A-Za-z0-9-]{10,}/g, '[REDACTED:slack]')
-		.replace(/\bAIza[A-Za-z0-9_-]{30,}/g, '[REDACTED:google]');
+		.replace(/\bAIza[A-Za-z0-9_-]{30,}/g, '[REDACTED:google]')
+		// #3712 F-006: Google OAuth client secrets, GCP access tokens, Groq
+		// service keys, and whole three-segment JWTs (header and payload
+		// segments are both base64url of `{"…`, so both start with eyJ).
+		.replace(/\bGOCSPX-[A-Za-z0-9_-]{20,}/g, '[REDACTED:google]')
+		.replace(/\bya29\.[A-Za-z0-9_-]{20,}/g, '[REDACTED:google]')
+		.replace(/\bgsk_[A-Za-z0-9]{20,}/g, '[REDACTED:groq]')
+		.replace(
+			/\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g,
+			'[REDACTED:jwt]',
+		)
+		// #3712 azure CONTEXTUAL arm: connection-string `AccountKey=<base64>`
+		// material — the WHOLE span collapses to the bare family placeholder
+		// (no `AccountKey=` residue). Bare 32-hex Azure OpenAI keys are
+		// deliberately NOT patterned: they are indistinguishable from hex
+		// digests that must stay visible (disclosed bound, #3712 AC3).
+		.replace(/\bAccountKey=[A-Za-z0-9+/]{20,}={0,2}/g, '[REDACTED:azure]');
 
 	// Long base64-like payload runs (encoded wrappers, heredoc payloads).
 	// Requires ≥80 chars of base64 charset AND at least one uppercase, one

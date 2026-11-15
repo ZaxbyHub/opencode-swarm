@@ -22,6 +22,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { getSwarmAgents, resolveFallbackModel } from '../../agents/index';
 import { deriveSwarmIdentity } from '../../config/schema';
+import { sanitizeFailureEvidenceDisplay } from '../../failures/invocation-failure';
 import { throwIfProviderMessageError } from '../../failures/provider-message-error';
 import type { ReviewModelDispatcher } from '../../review/contracts';
 import {
@@ -817,15 +818,21 @@ export async function dispatchPhaseCritic(
 		const isQuota = isQuotaError(
 			error instanceof Error ? error.message : String(error),
 		);
+		// #3710: the persisted evidence and the returned reason carry REDACTED
+		// provider error text (applied after the isQuotaError classification
+		// read above; the raw error object is never mutated).
+		const sanitizedReason = sanitizeFailureEvidenceDisplay(
+			error instanceof Error ? error.message : String(error),
+		);
 		const evidencePath = await _internals.writeCriticEvidence(
 			directory,
 			phase,
 			'REJECTED',
-			error instanceof Error ? error.message : String(error),
+			sanitizedReason,
 		);
 		return {
 			verdict: 'REJECTED',
-			reason: `Critic dispatch failed${isQuota ? ' (model quota/usage limit exhausted across all configured fallbacks)' : ''}: ${error instanceof Error ? error.message : String(error)}`,
+			reason: `Critic dispatch failed${isQuota ? ' (model quota/usage limit exhausted across all configured fallbacks)' : ''}: ${sanitizedReason}`,
 			evidencePath,
 		};
 	}

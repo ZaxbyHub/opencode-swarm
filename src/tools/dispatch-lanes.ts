@@ -4170,6 +4170,13 @@ function composeLaneRejectionError(args: {
 	/** Site tail appended to both the artifact detail and the inline slice. */
 	detailTail?: string;
 }): string {
+	// #3710: the inline detail is raw error text (formatError output); the
+	// persisted lane-rejection artifact and the returned terminal error both
+	// derive from it, so redact once at entry — downstream of every classifier
+	// and discriminator read of the formatted string at the callers.
+	const inlineDetail = args.inlineDetail
+		? sanitizeFailureEvidenceDisplay(args.inlineDetail)
+		: undefined;
 	const rowId = args.failure
 		? extractLaneRejectionRowId(args.failure)
 		: LANE_REJECTION_ROW_UNIDENTIFIED;
@@ -4180,12 +4187,12 @@ function composeLaneRejectionError(args: {
 	const identity = `; batch=${args.record.batchId ?? '(missing)'} lane=${args.record.laneId ?? '(missing)'} workflow_lane=${args.record.workflowLane ?? '(missing)'}`;
 	const renderedDetail = args.failure
 		? formatPrReviewLaneValidationFailure(args.failure)
-		: (args.inlineDetail ?? '');
+		: (inlineDetail ?? '');
 	const tail = args.detailTail ? `; ${args.detailTail}` : '';
 	const artifactRef = persistLaneRejectionDetail(
 		args.directory,
 		args.record,
-		`${header}${identity}\n${renderedDetail}${args.inlineDetail ? `\n${args.inlineDetail}` : ''}${tail}`,
+		`${header}${identity}\n${renderedDetail}${inlineDetail ? `\n${inlineDetail}` : ''}${tail}`,
 	);
 	return `${header}${identity}; detail in artifact ${artifactRef ?? '(unavailable)'}; ${renderedDetail}${tail}`.slice(
 		0,
@@ -4930,11 +4937,16 @@ async function appendAsyncLaneLaunchError(
 	const record = recordRead.value;
 	// Issue #2615: every launch rejection is typed 'resource' — the lane never
 	// started, so no transcript evidence can exist — not only PR-review lanes.
+	// #3710: the terminal triple (error/chars/truncated/digest) derives from
+	// ONE sanitized message with the established #2045/#2349 semantics, so all
+	// four fields describe the same value; callers already consumed the raw
+	// formatted string for classification before reaching this sink.
+	const sanitizedMessage = sanitizeFailureEvidenceDisplay(message);
 	const launchErrorResult = {
-		error: message,
-		chars: message.length,
-		truncated: false,
-		digest: digestText(message),
+		error: sanitizedMessage.slice(0, MAX_ERROR_CHARS),
+		chars: sanitizedMessage.length,
+		truncated: sanitizedMessage.length > MAX_ERROR_CHARS,
+		digest: digestText(sanitizedMessage),
 		workflowLaneFailureClass: 'resource' as const,
 	};
 	if (record) {
@@ -5940,7 +5952,12 @@ async function runLane(
 		// landed cannot leave an unhandled rejection.
 		const lifecycleRecord = await lifecycleRecordPromise.catch(() => null);
 		if (lifecycleRecord) {
-			const failureReason = syncClassifiedReason ?? formatError(error);
+			// #3710: the persisted terminal error carries REDACTED provider
+			// text; syncClassifiedReason is an already-classified string and
+			// the formatError path was consumed by the sync classifiers above.
+			const failureReason = sanitizeFailureEvidenceDisplay(
+				syncClassifiedReason ?? formatError(error),
+			);
 			await settleDelegationTerminal(
 				directory,
 				lifecycleRecord,
