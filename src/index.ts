@@ -4628,8 +4628,22 @@ async function initializeOpenCodeSwarm(
 				//    dispatch denial before generic delegation processing can validate its
 				//    prompt or publish delegation, scope, or background state. Guardrails and
 				//    scope-guard remain first.
-				const prWorkflowControllerSessionID =
-					await prWorkflowSessionResolver.resolve(input.sessionID);
+				const prWorkflowTool = normalizeToolName(input.tool) ?? input.tool;
+				let prWorkflowControllerSessionID: string;
+				try {
+					prWorkflowControllerSessionID =
+						await prWorkflowSessionResolver.resolve(input.sessionID);
+				} catch (error) {
+					if (
+						prWorkflowTool !== 'abort_pr_workflow' &&
+						prWorkflowTool !== 'pr_workflow_status'
+					) {
+						throw error;
+					}
+					// The recovery tools resolve their own authority even when the
+					// strict resolver cannot read the current gate.
+					prWorkflowControllerSessionID = input.sessionID;
+				}
 				const prWorkflowToolContext = resolveToolBeforeContext(
 					input as { tool: string; sessionID: string; callID: string },
 					output as { args?: unknown },
@@ -4637,7 +4651,7 @@ async function initializeOpenCodeSwarm(
 				await enforcePrWorkflowToolBefore(
 					bootstrapRoot,
 					prWorkflowControllerSessionID,
-					normalizeToolName(input.tool) ?? input.tool,
+					prWorkflowTool,
 					prWorkflowToolContext.args ?? undefined,
 					instanceGeneratedAgentNames,
 					input.callID,

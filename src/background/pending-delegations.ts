@@ -307,6 +307,8 @@ export interface BackgroundDelegationRecord {
 	ownedWorkflowLanes?: string[];
 	/** Dispatch-time snapshot; absent legacy records keep transcript compatibility. */
 	prReviewLegacyTranscriptCompatibility?: boolean;
+	/** Host-enforced discovery budget limit on this exact dispatch attempt. */
+	prReviewBudgetExhausted?: 'tool_calls' | 'duration';
 	/** Canonical hash of prompt/provenance inputs captured at dispatch time. */
 	promptHash?: string;
 	/** Project/root provenance captured at dispatch time. */
@@ -1030,6 +1032,7 @@ const RecordSchema = z
 			.max(11)
 			.optional(),
 		prReviewLegacyTranscriptCompatibility: z.boolean().optional(),
+		prReviewBudgetExhausted: z.enum(['tool_calls', 'duration']).optional(),
 		promptHash: z.string().optional(),
 		workspace: WorkspaceSchema.optional(),
 		taskChangeContext: TaskChangeContextSchema.optional(),
@@ -3685,6 +3688,63 @@ export async function appendDelegationTransition(
 	}
 }
 
+export const PR_REVIEW_BUDGET_EXHAUSTED = 'PR_REVIEW_BUDGET_EXHAUSTED';
+
+/** Record the host's authenticated child-session decision on the dispatch itself. */
+export async function recordPrReviewBudgetExhaustion(
+	directory: string,
+	childSessionId: string,
+	reason: NonNullable<BackgroundDelegationRecord['prReviewBudgetExhausted']>,
+): Promise<void> {
+	// A non-review invocation needs no write lock.
+	const read = findByCorrelationIdDetailed(directory, childSessionId);
+	if (
+		read.status === 'ok' &&
+		(!read.value || !isReviewBudgetLane(read.value))
+	) {
+		return;
+	}
+	await withEvidenceLock(
+		directory,
+		BACKGROUND_DELEGATIONS_FILE,
+		STORE_LOCK_AGENT,
+		STORE_LOCK_TASK,
+		async () => {
+			const records = loadRecordsForWrite(directory);
+			if (records === null) throw new Error('Delegation store is unavailable');
+			const current = findRecordForWrite(records, childSessionId);
+			if (
+				!current ||
+				current.subagentSessionId !== childSessionId ||
+				!isReviewBudgetLane(current) ||
+				(current.status !== 'pending' && current.status !== 'running') ||
+				current.prReviewBudgetExhausted ||
+				recordedPrReviewResultReceipt(current)
+			) {
+				return;
+			}
+			appendRecord(directory, {
+				...current,
+				prReviewBudgetExhausted: reason,
+				updatedAt: Math.max(current.updatedAt + 1, Date.now()),
+			});
+			maybeCompactDelegationsLocked(directory);
+		},
+	);
+}
+
+function isReviewBudgetLane(record: BackgroundDelegationRecord): boolean {
+	return Boolean(
+		record.batchId &&
+			record.laneId &&
+			record.workflowLane &&
+			record.workspace?.prHeadSha &&
+			(record.mode === 'swarm-pr-review:base' ||
+				record.mode === 'swarm-pr-review:micro' ||
+				record.mode === 'swarm-pr-review:council'),
+	);
+}
+
 export type PublishPrReviewResultReceiptOutcome =
 	| { status: 'recorded'; record: BackgroundDelegationRecord }
 	| { status: 'duplicate'; record: BackgroundDelegationRecord }
@@ -3754,6 +3814,13 @@ export async function publishPrReviewResultReceipt(
 					return;
 				}
 				const current = target.record;
+				if (current.prReviewBudgetExhausted) {
+					outcome = {
+						status: 'terminal',
+						reason: PR_REVIEW_BUDGET_EXHAUSTED,
+					};
+					return;
+				}
 				if (current.result?.prReviewResultReceipt) {
 					const existing = current.result.prReviewResultReceipt;
 					if (samePrReviewReceiptSemantics(existing, parsed.data)) {
@@ -4556,6 +4623,16 @@ export async function claimTerminalResult(
 					return;
 				}
 				if (current.status !== 'pending' && current.status !== 'running') {
+					return;
+				}
+				// A guardrail marker can land after collection loaded its snapshot.
+				// Re-observe the attempt before accepting a stale non-budget decision.
+				if (
+					current.prReviewBudgetExhausted &&
+					normalizedTerminal.status !== 'cancelled' &&
+					(normalizedTerminal.status !== 'error' ||
+						normalizedTerminal.result.error !== PR_REVIEW_BUDGET_EXHAUSTED)
+				) {
 					return;
 				}
 				// Issue #2865: refuse to persist an error/`contract` terminal

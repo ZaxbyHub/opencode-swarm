@@ -624,7 +624,13 @@ export type PrWorkflowGateCoordinationRecovery<
 > =
 	| { kind: 'absent' }
 	| { kind: 'valid'; rowRevision: number; generation: number; state: S }
-	| { kind: 'corrupt'; rowRevision: number; generation: number; reason: string }
+	| {
+			kind: 'corrupt';
+			rowRevision: number;
+			generation: number;
+			reason: string;
+			parsedPayload?: unknown;
+	  }
 	| { kind: 'invalid'; reason: string };
 
 /**
@@ -669,6 +675,7 @@ export function readPrWorkflowGateStateCoordinationForRecovery<
 			rowRevision: row.revision,
 			generation: row.generation,
 			reason: 'coordination payload failed the workflow state schema',
+			parsedPayload: parsedJson,
 		};
 	}
 	if (parsed.data.sessionID !== normalizedSessionID) {

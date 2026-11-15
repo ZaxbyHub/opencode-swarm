@@ -4,7 +4,7 @@ description: Run a graph-guided, tool-augmented PR review using context packing,
 disable-model-invocation: true
 metadata:
   audience: swarm-plugin
-  swarm-contract-digest: "5199fa462b35"
+  swarm-contract-digest: "ddc0e5d29f4e"
 ---
 
 # /swarm-pr-review
@@ -807,7 +807,7 @@ Host transport metadata is not stronger than the durable artifact. A truncated i
 
 Before Phase 4 or synthesis, all base lanes must be settled. `dispatch_lanes_async` accepts a maximum of 8 lanes per call; base lanes (6) and micro-lanes (Phase 4) are dispatched in separate calls by design. Do not let one lane's conclusions bias another lane.
 
-**COVERAGE GATE — zero tolerance for unclosed gaps.** After `collect_lane_results`, verify every lane produced validated output. Two failure modes exist:
+**COVERAGE GATE — zero tolerance for unclosed gaps.** After `collect_lane_results`, verify every lane produced validated output. For each `unsettled_coverage` entry, keep `owned_workflow_lanes` (or its single `dimension`) unresolved and use any `output_ref` only as context for a fresh, exact-head attempt under the existing retry policy below. A missing reference means no partial text was preserved. Require the new attempt’s normal settlement evidence before crediting coverage, and disclose any remaining obligations if admission refuses another attempt. Two failure modes exist:
 - **Mode A (empty output):** Lane returns 0 chars, `status: cancelled`, `output_digest` matches SHA-256 of empty string (`e3b0c442...b855`).
 - **Mode B (invalid structured output):** Under Profile A, collection reports `status: failed` with a named contract predicate while retaining the non-empty preview, digest, and `output_ref`; the artifact has zero valid `[CANDIDATE]` rows and no parseable `[CLEAN] | lane | coverage_scope | evidence` attestation. Under Profiles B/C, treat the equivalent non-empty report as failed when parsing yields zero candidates and no valid clean attestation. The non-empty transcript is diagnostic evidence, never coverage proof.
 

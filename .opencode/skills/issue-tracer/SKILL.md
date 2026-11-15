@@ -158,7 +158,7 @@ Read the referenced file before starting that phase. `state.md` is updated at ev
 
 - Merging requires a separately recorded, explicit user approval quoted verbatim in `10b-merge-approval.md`, bound to the exact PR head SHA.
 - Any push after approval invalidates it; this gate is human-enforced and the validator checks presence and binding only, never authenticity.
-- Reference: `references/evidence-artifacts.md`.
+- Reference: `references/evidence-artifacts.md` (native release review and trace evidence integrity).
 
 ## Untrusted Content
 
