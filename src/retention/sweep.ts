@@ -90,28 +90,24 @@ export interface RetentionSweepOptions {
 	 * of finishing its full pass after the awaiter already moved on.
 	 */
 	shouldContinue?: () => boolean;
-	/**
-	 * The `--explain` surface: list what the unclaimed-directory catch-all
-	 * WOULD prune (path, age, size, owner) in `result.explained`, and delete
-	 * nothing. Implies a no-delete pass even when `dryRun` is false.
-	 */
-	explain?: boolean;
 }
 
 export interface RetentionSweepResult {
 	/**
-	 * Per-pass counts. Under `dryRun` (or `explain`) each value is the number
-	 * the pass WOULD prune — the rehearsal convention every family already
-	 * follows (`pruneDirectory` returns its victim count without deleting).
-	 * It is not an "actually deleted" count in that mode; `explained` carries
-	 * the per-directory evidence behind the catch-all's number.
+	 * Per-pass counts. Under `dryRun` each value is the number the pass WOULD
+	 * prune — the rehearsal convention every family already follows
+	 * (`pruneDirectory` returns its victim count without deleting). It is not
+	 * an "actually deleted" count in that mode; `explained` carries the
+	 * per-directory evidence behind the catch-all's number.
 	 */
 	pruned: Record<string, number>;
 	disabled?: boolean;
 	dryRun?: boolean;
 	/**
-	 * Populated under `explain` or `dryRun`: every directory the tier-3
-	 * catch-all selected, with the evidence used to select it.
+	 * Populated under `dryRun`: every directory the tier-3 catch-all selected,
+	 * with the evidence used to select it (path, age, size, owner). The sweep
+	 * also writes this list to the debug log, which is how an operator reads
+	 * the rehearsal (`retention.dry_run`).
 	 */
 	explained?: ExplainedPrune[];
 	errors: Record<string, string>;
@@ -545,27 +541,36 @@ export async function runRetentionSweep(
 	// token has already fired, the specific families get the remaining budget
 	// and the catch-all simply resumes on the next sweep. The tier-1 allowlist
 	// and the tier-2 claims were resolved before any deletion ran (a manifest
-	// error refuses the whole sweep). `dryRun` and `explain` both list the
-	// planned set in `result.explained` and delete nothing.
+	// error refuses the whole sweep). `dryRun` lists the planned set in
+	// `result.explained` (and the debug log) and deletes nothing. The pass
+	// refuses to run when `.swarm` is itself a link, and when deletes are armed
+	// it refuses unless `retention.log` is writable.
 	if (cancelled('unclaimed-directories')) return result;
 	try {
 		const outcome = await pruneUnclaimedDirectories(swarmRoot, {
 			now,
 			dryRun,
-			explain: options.explain === true,
 			claims: ownership.claims,
 			shouldContinue: options.shouldContinue,
 		});
 		for (const failure of outcome.failures) {
 			result.errors[failure.path] = failure.message;
 		}
-		const prunedCount =
-			dryRun || options.explain === true
-				? outcome.planned.length
-				: outcome.pruned.length;
+		// A stale tree whose content cannot be verified is kept — say so, rather
+		// than leaving the operator to wonder why it is never reclaimed.
+		for (const kept of outcome.unverifiable) {
+			result.errors[kept.path] = kept.message;
+		}
+		const prunedCount = dryRun ? outcome.planned.length : outcome.pruned.length;
 		if (prunedCount > 0) result.pruned['unclaimed-directories'] = prunedCount;
-		if (dryRun || options.explain === true) {
+		if (dryRun) {
 			result.explained = outcome.planned;
+			if (outcome.planned.length > 0) {
+				log(
+					'retention sweep: dry-run — unclaimed directories that WOULD be pruned',
+					outcome.planned,
+				);
+			}
 		}
 	} catch (error) {
 		result.errors['unclaimed-directories'] =

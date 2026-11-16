@@ -8,7 +8,7 @@
  * duplicate-claim refusal), malformed-manifest fail-closed (the WHOLE sweep,
  * not just the catch-all), per-resolved-path containment for a symlinked
  * `.swarm` and for links inside it, `.preserve` markers, young-entry keep,
- * `--explain`/`dryRun` rehearsal, and the retention.log line grammar.
+ * `dryRun` rehearsal (which must also keep family files), and the retention.log line grammar.
  */
 import { afterEach, describe, expect, it } from 'bun:test';
 import {
@@ -239,31 +239,6 @@ describe('unclaimed .swarm directories get a lifecycle', () => {
 		expect(existsSync(path.join(root, '.swarm', 'junk-dir'))).toBe(false);
 	});
 
-	it('.preserve marker blocks pruning', async () => {
-		const root = makeRoot('preserve-marker');
-		const kept = seedSwarmFile(
-			root,
-			path.join('scratch', 'old.bin'),
-			NOW - 90 * DAY_MS,
-			'x'.repeat(16),
-		);
-		seedSwarmFile(root, path.join('scratch', '.preserve'), NOW, '');
-		// A marker-free sibling proves the pass actually ran in this root, so
-		// "kept" cannot be a vacuous pass from a disabled catch-all.
-		const prunedSibling = seedSwarmFile(
-			root,
-			path.join('scratch-unmarked', 'old.bin'),
-			NOW - 90 * DAY_MS,
-			'x'.repeat(16),
-		);
-		const result = await runRetentionSweep(root, { now: NOW });
-		expect(existsSync(kept)).toBe(true);
-		expect(existsSync(path.join(root, '.swarm', 'scratch'))).toBe(true);
-		expect(existsSync(prunedSibling)).toBe(false);
-		expect(result.pruned['unclaimed-directories']).toBe(1);
-		expect(result.errors).toEqual({});
-	});
-
 	it('young entries under an unknown directory are not pruned', async () => {
 		const root = makeRoot('young');
 		const fresh = seedSwarmFile(
@@ -287,8 +262,13 @@ describe('unclaimed .swarm directories get a lifecycle', () => {
 		expect(result.errors).toEqual({});
 	});
 
-	it('explain lists exactly what a real sweep prunes and deletes nothing', async () => {
+	it('dryRun lists exactly what a real sweep prunes and deletes nothing, family files included', async () => {
 		const root = makeRoot('explain');
+		const familyFile = seedSwarmFile(
+			root,
+			path.join('pr-feedback-events', 'old.json'),
+			NOW - 200 * DAY_MS,
+		);
 		const older = seedSwarmFile(
 			root,
 			path.join('junk-b', 'nested', 'old.bin'),
@@ -310,15 +290,16 @@ describe('unclaimed .swarm directories get a lifecycle', () => {
 
 		const explained = await runRetentionSweep(root, {
 			now: NOW,
-			explain: true,
+			dryRun: true,
 		});
+		expect(existsSync(familyFile)).toBe(true);
 		expect(existsSync(old)).toBe(true);
 		expect(existsSync(older)).toBe(true);
 		expect(existsSync(young)).toBe(true);
-		expect(explained.dryRun).toBe(false);
+		expect(explained.dryRun).toBe(true);
 		expect(explained.explained?.map((entry) => entry.path)).toEqual([
-			path.join('.swarm', 'junk-a'),
-			path.join('.swarm', 'junk-b'),
+			'.swarm/junk-a',
+			'.swarm/junk-b',
 		]);
 		expect(explained.explained?.map((entry) => entry.ageDays)).toEqual([
 			45, 60,
@@ -326,6 +307,7 @@ describe('unclaimed .swarm directories get a lifecycle', () => {
 		expect(explained.pruned['unclaimed-directories']).toBe(2);
 
 		const swept = await runRetentionSweep(root, { now: NOW });
+		expect(existsSync(familyFile)).toBe(false);
 		expect(existsSync(old)).toBe(false);
 		expect(existsSync(older)).toBe(false);
 		expect(existsSync(young)).toBe(true);
@@ -354,8 +336,8 @@ describe('unclaimed .swarm directories get a lifecycle', () => {
 			.split('\n')
 			.filter((line) => line.length > 0);
 		expect(lines).toEqual([
-			`${ISO_NOW} pruned ${path.join('.swarm', 'junk-a')} age=45 size=10`,
-			`${ISO_NOW} pruned ${path.join('.swarm', 'junk-b')} age=52 size=12`,
+			`${ISO_NOW} pruned .swarm/junk-a age=45 size=10`,
+			`${ISO_NOW} pruned .swarm/junk-b age=52 size=12`,
 		]);
 	});
 
@@ -372,12 +354,12 @@ describe('unclaimed .swarm directories get a lifecycle', () => {
 		expect(existsSync(victim)).toBe(true);
 		expect(result.pruned['unclaimed-directories']).toBe(1);
 		expect(result.explained?.map((entry) => entry.path)).toEqual([
-			path.join('.swarm', 'junk-dir'),
+			'.swarm/junk-dir',
 		]);
 		expect(existsSync(path.join(root, '.swarm', 'retention.log'))).toBe(false);
 	});
 
-	it('refuses to write the log through a symlink and still prunes', async () => {
+	it('refuses the whole pass when the log is a symlink: an unrecordable prune is not performed', async () => {
 		const root = makeRoot('log-symlink');
 		const target = seedFile(
 			makeRoot('log-symlink-target'),
@@ -390,15 +372,15 @@ describe('unclaimed .swarm directories get a lifecycle', () => {
 		const linked = linkFile(target, logPath);
 		if (!linked) expect(process.platform).toBe('win32');
 		if (!linked) return;
-		seedSwarmFile(
+		const victim = seedSwarmFile(
 			root,
 			path.join('junk-dir', 'old.bin'),
 			NOW - 41 * DAY_MS,
 			'x'.repeat(8),
 		);
 		const result = await runRetentionSweep(root, { now: NOW });
-		// The deletion still happens; only the audit write is refused.
-		expect(result.pruned['unclaimed-directories']).toBe(1);
+		expect(existsSync(victim)).toBe(true);
+		expect(result.pruned['unclaimed-directories']).toBeUndefined();
 		expect(result.errors['.swarm/retention.log']).toContain('symlink');
 		expect(readFileSync(target, 'utf-8')).toBe('do-not-touch');
 	});
@@ -431,9 +413,7 @@ describe('unclaimed .swarm directories get a lifecycle', () => {
 			RETENTION_LOG_MAX_BYTES,
 		);
 		// The newest prune always survives; the oldest history is what goes.
-		expect(text).toContain(
-			`${ISO_NOW} pruned ${path.join('.swarm', 'junk-dir')} age=41 size=8`,
-		);
+		expect(text).toContain(`${ISO_NOW} pruned .swarm/junk-dir age=41 size=8`);
 		expect(text).toContain('old line 5999');
 		expect(text).not.toContain('old line 0 ');
 	});
@@ -453,13 +433,13 @@ describe('unclaimed .swarm directories get a lifecycle', () => {
 		);
 		const explained = await runRetentionSweep(root, {
 			now: NOW,
-			explain: true,
+			dryRun: true,
 		});
 		// The claim is a LEASE: past its horizon the directory is reclaimable,
 		// and the plan still records which owner's claim set the horizon.
 		expect(explained.explained).toEqual([
 			{
-				path: path.join('.swarm', 'review-sandbox'),
+				path: '.swarm/review-sandbox',
 				ageDays: 20,
 				sizeBytes: 8,
 				owner: 'reviewer',

@@ -20,28 +20,34 @@ Directories immediately under `.swarm/` now have three tiers of ownership:
    One file per owner and one writer each, so there is no shared file to merge
    and no cross-agent edit surface — a single shared config key would turn
    every new scratch owner into a conflict in one file. A claim is a lease, not
-   a permanent exemption: past its `maxAgeDays` the directory becomes
-   reclaimable again, because a claim that never expires would recreate the
-   very defect this fixes. A malformed, ambiguous, or unreadable manifest
+   a permanent exemption: the claim SETS the directory's horizon to its
+   `maxAgeDays` (longer or shorter than the 30-day default), and past it the
+   directory becomes reclaimable again, because a claim that never expires
+   would recreate the very defect this fixes. A malformed, ambiguous, or unreadable manifest
    refuses the **whole** sweep (fail closed) and names the file and the reason.
 3. **Tier 3 — catch-all.** An unclaimed directory is pruned only when it is a
    real directory (never a symlink), has no `.preserve` marker, contains no
    future-dated entries, and all of its content is older than its horizon
-   (30 days by default, or the owning manifest's `maxAgeDays`). Every pruned
-   path is appended to `.swarm/retention.log` as
-   `<ISO-8601> pruned <path> age=<days> size=<bytes>`, and the log itself is
-   compacted to its newest 256 KiB.
+   (30 days by default, or the owning manifest's `maxAgeDays`). The pass
+   refuses to run unless `.swarm/retention.log` is writable, so a prune is never
+   performed unrecorded; after the deletes, every pruned path is appended to the
+   log as `<ISO-8601> pruned <path> age=<days> size=<bytes>` (control characters
+   in a name are escaped), and the log itself is compacted to its newest
+   256 KiB.
 
-`runRetentionSweep({ explain: true })` is the `--explain` surface: it returns
-every planned prune (path, age, size, owning manifest) in `result.explained`
-and deletes nothing. `dryRun` keeps its existing count-and-report behaviour and
-now also populates `explained`.
+`retention.dry_run` (`runRetentionSweep({ dryRun: true })`) keeps its existing
+count-and-report behaviour and now also populates `result.explained` with every
+planned prune (path, age, size, owning manifest) and writes that list to the
+debug log, which is how an operator previews what the catch-all would remove
+before enabling it. It deletes nothing: no family file and no directory.
 
-Containment is enforced **per resolved path**: each candidate is `realpath`-ed
-and required to sit inside the `realpath`-ed `.swarm` root immediately before
-deletion. The existing whole-sweep containment guard remains as the outer
-check, which is not sufficient for a catch-all that deletes arbitrary children
-(a child can be swapped for a symlink after that check ran).
+Containment has three layers. The catch-all refuses to run at all when `.swarm`
+is itself a link (a `.swarm` linked to the project root would otherwise make
+`.git` and `src` look like unclaimed children). Each candidate must be a real
+directory, not a link. And each candidate is `realpath`-ed and required to be an
+immediate child of the `realpath`-ed `.swarm` root immediately before deletion;
+this narrows, but cannot close, the window in which a parent could be swapped
+for a link, and that window needs write access to `.swarm`.
 
 ## Why
 
@@ -55,15 +61,25 @@ treated as permission to delete.
 
 ## Migration
 
-No breaking changes and no config key:
+No config key and no API removal, but **this release deletes data on upgrade**:
 
-- Existing projects need no action; the tier-1 allowlist already covers
-  everything swarm writes today.
-- An agent that writes its own scratch tree can add
-  `.swarm/retention.d/<owner>.json` to declare the horizon it wants. Omitting
-  the manifest simply means the 30-day default applies.
-- `RetentionSweepResult` gains an optional `explained` field and
-  `RetentionSweepOptions` gains an optional `explain` flag; both are additive.
+- **The first sweep after upgrade deletes unrecognised `.swarm/` directories
+  whose newest file is older than 30 days.** The sweep runs at every session
+  start and before `/swarm close`, with `retention.enabled` defaulting to on.
+  The tier-1 allowlist covers the directories swarm itself writes (a unit test
+  checks it against the retention registry), but anything else under `.swarm/`
+  that you or a tool put there — scratch trees, hand-made backups, exported
+  reports — is reclaimable.
+- To keep a directory: put a `.preserve` file in it (permanent), or declare it
+  in `.swarm/retention.d/<owner>.json` (a lease with its own `maxAgeDays`).
+- To preview first: set `retention.dry_run: true`; the planned prunes are in
+  the debug log and nothing is deleted. To opt out entirely:
+  `retention.enabled: false` (this also disables every other retention
+  family; there is no catch-all-only switch).
+- A malformed `retention.d` manifest refuses the whole sweep, family prunes
+  included; the reason is in the debug log.
+- `RetentionSweepResult` gains an optional `explained` field (populated under
+  `dryRun`); it is additive.
 
 ## Caveats
 
@@ -73,4 +89,14 @@ No breaking changes and no config key:
 - Claim expiry is measured from the newest file in the claimed subtree, so an
   owner that keeps writing into a claimed directory keeps its lease.
 - A directory whose content cannot be enumerated within the bounded subtree
-  scan (2000 stat operations) is treated as in use and kept.
+  scan (2000 entries, counting files, directories and links) is treated as in
+  use and kept, and the sweep reports it (`result.errors['.swarm/<name>']`, in
+  the debug log) so an operator can tell why a large stale tree is never
+  reclaimed. Large source-tree-like sandboxes exceed this budget: mark them
+  with `.preserve` or remove them by hand.
+- Age is the newest regular-file mtime in the tree. Copies that preserve
+  mtimes (`cp -a`, tar, Windows `copyFile`) look old on the day they are made,
+  so put a `.preserve` marker in a freshly copied scratch tree you want to
+  keep.
+- The scan cost is per candidate directory and synchronous; a `.swarm/` with
+  thousands of large unclaimed directories makes the first sweep slow.

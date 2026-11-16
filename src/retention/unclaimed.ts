@@ -18,20 +18,26 @@
  *     `{ "owner": "reviewer", "preserve": ["review-sandbox"], "maxAgeDays": 90 }`.
  *     One file per owner and one writer each, so there is no shared file to
  *     merge and no cross-agent edit surface — a shared config would turn every
- *     new scratch owner into a conflict in one file. A claim extends the
- *     directory's horizon to the owner's declared `maxAgeDays`; it is a LEASE,
- *     not a permanent exemption, because a claim that never expires would
- *     recreate the very defect this module fixes.
+ *     new scratch owner into a conflict in one file. A claim SETS the
+ *     directory's horizon to the owner's declared `maxAgeDays` (longer or
+ *     shorter than the 30-day default); it is a LEASE, not a permanent
+ *     exemption, because a claim that never expires would recreate the very
+ *     defect this module fixes.
  *     A malformed or unreadable manifest refuses the ENTIRE sweep (fail
  *     closed): an unparseable ownership claim is not a licence to delete.
  *  3. TIER 3 — the catch-all. An unclaimed, non-symlinked directory with no
  *     `.preserve` marker whose entire content is older than its horizon is
- *     pruned, and every pruned path is appended to `.swarm/retention.log`.
+ *     pruned. The retention log is validated BEFORE the first delete and every
+ *     pruned path is appended to it after the delete loop.
  *
- * CONTAINMENT: enforced PER RESOLVED PATH, immediately before each delete. The
- * outer guard in `runRetentionSweep` proves the `.swarm` root sits inside the
- * project root, which is not sufficient for a catch-all that deletes arbitrary
- * children: a child can be swapped for a symlink after that check ran.
+ * CONTAINMENT, in three layers:
+ *  - the tier-3 pass refuses to run at all when `.swarm` itself is a link
+ *    (`.swarm` -> project root would make `.git` and `src` "children");
+ *  - every candidate is `lstat`-ed and must be a real directory, not a link;
+ *  - every candidate's realpath must be an IMMEDIATE child of the realpath of
+ *    `.swarm`, checked right before its delete. This narrows the window in
+ *    which a parent can be swapped for a link (`fs.rmSync` follows a swapped
+ *    PARENT) but cannot close it; the window needs write access to `.swarm`.
  */
 
 import * as fs from 'node:fs';
@@ -153,6 +159,17 @@ export const TIER1_PRESERVED_SWARM_ENTRIES: ReadonlySet<string> = new Set([
 	'worktree-recovery-claims',
 	'review-v8',
 	'semgrep-rules',
+
+	// Registry-owned `project-swarm` directories (scripts/retention-registry.
+	// data.ts). Two are classified `authoritative` and are protected regardless
+	// of age; the others are rebuilt or short-lived but their own writers own
+	// their lifecycle. `tests/unit/retention/unclaimed-tier1-registry.test.ts`
+	// fails when a registry directory is missing from this set.
+	'background-delegation-fallback',
+	'worktree-provisioning-owners',
+	'reflections',
+	'otlp-export',
+	'stage-b-dispatch-bindings',
 ]);
 
 /** One owner's claim over directories immediately under `.swarm/`. */
@@ -199,10 +216,8 @@ export interface ExplainedPrune {
 export interface UnclaimedSweepOptions {
 	/** Clock injection point for tests/checks. */
 	now: number;
-	/** Count without deleting (the sweep-wide `dry_run` surface). */
+	/** Plan without deleting (the sweep-wide `dry_run` surface). */
 	dryRun?: boolean;
-	/** List what WOULD be pruned without pruning (the `--explain` surface). */
-	explain?: boolean;
 	/** Parsed tier-2 claims; an absent map means "no owner claims anything". */
 	claims?: ReadonlyMap<string, OwnerClaim>;
 	/** Cooperative stop token, polled between candidates. */
@@ -212,10 +227,16 @@ export interface UnclaimedSweepOptions {
 export interface UnclaimedSweepOutcome {
 	/** Every directory this pass selected (pruned, or would prune). */
 	planned: ExplainedPrune[];
-	/** Directories actually removed (empty under dryRun/explain). */
+	/** Directories actually removed (empty under dryRun). */
 	pruned: ExplainedPrune[];
 	/** Per-directory failures; the pass stays fail-open per candidate. */
 	failures: Array<{ path: string; message: string }>;
+	/**
+	 * Directories deliberately KEPT because their content could not be verified
+	 * (unreadable level, or more entries than the per-subtree scan budget).
+	 * Reported so an operator can see why a stale tree is never reclaimed.
+	 */
+	unverifiable: Array<{ path: string; message: string }>;
 }
 
 function errorCode(error: unknown): string {
@@ -278,7 +299,7 @@ export function loadOwnerManifests(swarmRoot: string): OwnerManifestSet {
 		// file must not block a project that is otherwise healthy.
 		if (
 			name.startsWith('.') ||
-			!/^[A-Za-z0-9][A-Za-z0-9._-]*\.json$/.test(name)
+			!/^[A-Za-z0-9][A-Za-z0-9._-]*\.json$/i.test(name)
 		) {
 			continue;
 		}
@@ -438,7 +459,20 @@ export function formatRetentionLogLine(
 	now: number,
 	entry: ExplainedPrune,
 ): string {
-	return `${new Date(now).toISOString()} pruned ${entry.path} age=${entry.ageDays} size=${entry.sizeBytes}`;
+	return `${new Date(now).toISOString()} pruned ${escapeLogPath(entry.path)} age=${entry.ageDays} size=${entry.sizeBytes}`;
+}
+
+/**
+ * A POSIX directory name may legally hold a newline; written raw it would let
+ * a directory name forge a second log record. Control characters are escaped
+ * as `\xNN` so the log stays one record per line.
+ */
+function escapeLogPath(value: string): string {
+	return value.replace(
+		// biome-ignore lint/suspicious/noControlCharactersInRegex: matching control characters IS the escape.
+		/[\u0000-\u001f\u007f]/g,
+		(char) => `\\x${char.charCodeAt(0).toString(16).padStart(2, '0')}`,
+	);
 }
 
 function splitLogLines(text: string): string[] {
@@ -534,12 +568,38 @@ export async function appendRetentionLog(
 }
 
 /**
+ * True when `.swarm` is a real directory that sits directly inside its own
+ * parent. A `.swarm` that is a link (a symlink, or a junction on Windows) is
+ * refused outright: if it points INTO the project, every project directory
+ * would look like an unclaimed child of `.swarm`, and the per-candidate
+ * containment check compares against the already-redirected root so it cannot
+ * help.
+ */
+function swarmRootIsCanonical(swarmRoot: string): boolean {
+	try {
+		if (fs.lstatSync(swarmRoot).isSymbolicLink()) return false;
+		const resolvedParent = fs.realpathSync(path.dirname(swarmRoot));
+		const resolvedSwarm = fs.realpathSync(swarmRoot);
+		return (
+			path.relative(resolvedParent, resolvedSwarm) === path.basename(swarmRoot)
+		);
+	} catch {
+		return false;
+	}
+}
+
+/**
  * Tier 3: prune unclaimed directories immediately under `.swarm/`. Every
- * candidate must satisfy ALL of: not tier 1; not claimed by a live tier-2
- * manifest; a real directory (lstat, never a symlink); no `.preserve` marker;
- * content verifiable within the subtree scan budget; no future mtime; and
- * content strictly older than its horizon. `dryRun` and `explain` both list
- * the planned set and delete nothing.
+ * candidate must satisfy ALL of: not tier 1 (compared case-insensitively, so a
+ * differently-cased spelling on a case-insensitive filesystem is preserved);
+ * not claimed by a live tier-2 manifest; a real directory (lstat, never a
+ * symlink); no `.preserve` marker; content verifiable within the subtree scan
+ * budget; no future mtime; and content strictly older than its horizon.
+ * `dryRun` lists the planned set and deletes nothing.
+ *
+ * The pass is skipped when `.swarm` is itself a link, and when deletes are
+ * armed it is skipped unless the retention log is writable: a prune that
+ * cannot be recorded is not performed.
  *
  * Never throws: an unreadable `.swarm` is an empty pass, and a per-directory
  * failure is reported in `failures` without aborting the siblings.
@@ -552,8 +612,28 @@ export async function pruneUnclaimedDirectories(
 		planned: [],
 		pruned: [],
 		failures: [],
+		unverifiable: [],
 	};
-	const suppressDeletes = options.dryRun === true || options.explain === true;
+	const suppressDeletes = options.dryRun === true;
+	if (!swarmRootIsCanonical(swarmRoot)) {
+		outcome.failures.push({
+			path: '.swarm',
+			message:
+				'refusing unclaimed-directory pass: .swarm is a link or does not resolve to a directory directly inside the project root',
+		});
+		return outcome;
+	}
+	if (!suppressDeletes) {
+		try {
+			assertLogTargetIsWritable(path.join(swarmRoot, RETENTION_LOG_FILE));
+		} catch (error) {
+			outcome.failures.push({
+				path: `.swarm/${RETENTION_LOG_FILE}`,
+				message: `refusing unclaimed-directory pass: the prune audit log is not writable (${describeError(error)})`,
+			});
+			return outcome;
+		}
+	}
 	// The caller proved the swarm root sits inside the project; the realpath is
 	// the REFERENT every candidate must resolve inside, per delete.
 	let resolvedSwarmRoot: string;
@@ -568,28 +648,39 @@ export async function pruneUnclaimedDirectories(
 	} catch {
 		return outcome;
 	}
-	const claims = options.claims ?? new Map<string, OwnerClaim>();
+	const claims = new Map<string, OwnerClaim>();
+	for (const [claimed, claim] of options.claims ?? []) {
+		claims.set(claimed.toLowerCase(), claim);
+	}
 
 	for (const name of names) {
 		if (options.shouldContinue && !options.shouldContinue()) break;
-		if (TIER1_PRESERVED_SWARM_ENTRIES.has(name)) continue;
+		if (TIER1_PRESERVED_SWARM_ENTRIES.has(name.toLowerCase())) continue;
 		const entryPath = path.join(swarmRoot, name);
 		const stat = await fs.promises.lstat(entryPath).catch(() => null);
 		if (!stat || stat.isSymbolicLink() || !stat.isDirectory()) continue;
 		if (await hasPreserveMarker(entryPath)) continue;
-		const claim = claims.get(name);
+		const claim = claims.get(name.toLowerCase());
 		const horizonDays = claim?.maxAgeDays ?? DEFAULT_UNCLAIMED_MAX_AGE_DAYS;
 		const content = subtreeContentStats(entryPath, SUBTREE_SCAN_CAP);
 		// Unverifiable content is never a victim (fail closed): an unreadable or
-		// over-budget subtree may still be in use.
-		if (content === null) continue;
+		// over-budget subtree may still be in use. It is REPORTED, not silently
+		// skipped, so an operator can see why a stale tree is never reclaimed.
+		if (content === null) {
+			outcome.unverifiable.push({
+				path: `.swarm/${name}`,
+				message: `kept: content could not be verified (unreadable, or more than ${SUBTREE_SCAN_CAP} entries); add a .preserve marker to silence this, or remove the tree by hand`,
+			});
+			continue;
+		}
 		const newest = content.newestFileMtime ?? stat.mtimeMs;
 		if (newest > options.now) continue; // clock-skew guard
 		const ageMs = options.now - newest;
 		if (ageMs <= horizonDays * DAY_MS) continue;
 		if (!isContainedInSwarmRoot(resolvedSwarmRoot, entryPath)) continue;
 		const plan: ExplainedPrune = {
-			path: path.join('.swarm', name),
+			// Always `/`-separated (the documented and logged form), on every OS.
+			path: `.swarm/${name}`,
 			ageDays: Math.floor(ageMs / DAY_MS),
 			sizeBytes: content.bytes,
 			...(claim ? { owner: claim.owner } : {}),
