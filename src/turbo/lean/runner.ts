@@ -21,6 +21,7 @@ import { DEFAULT_LEAN_TURBO_CONFIG } from '../../config/constants';
 import type { Plan } from '../../config/plan-schema';
 import type { LeanTurboConfig } from '../../config/schema';
 import { deriveSwarmIdentity } from '../../config/schema';
+import { sanitizeFailureEvidenceDisplay } from '../../failures/invocation-failure';
 import {
 	classifyProviderFailure,
 	isRetryableProviderFailure,
@@ -1639,6 +1640,17 @@ export class LeanTurboRunner {
 				error: isQuotaError(msg)
 					? `${msg} (model quota/usage limit exhausted across all configured fallbacks)`
 					: msg,
+			};
+		}
+		// #3710: persisted lane/phase/recovery failure reasons carry REDACTED
+		// provider error text. This wrap point sits AFTER every classifier read
+		// (the dispatchWithModelFallback classify callbacks ran inside the
+		// try block and isQuotaError ran in the catch above), covering the
+		// lane-evidence, phase-evidence, and recovery-record sinks below.
+		if (!dispatchResult.ok && dispatchResult.error) {
+			dispatchResult = {
+				...dispatchResult,
+				error: sanitizeFailureEvidenceDisplay(dispatchResult.error),
 			};
 		}
 

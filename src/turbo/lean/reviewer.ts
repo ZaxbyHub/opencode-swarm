@@ -16,6 +16,7 @@ import * as path from 'node:path';
 import { getSwarmAgents, resolveFallbackModel } from '../../agents/index';
 import { deriveSwarmIdentity } from '../../config/schema';
 import { DEFAULT_EPHEMERAL_TIMEOUT_MS } from '../../evaluation/ephemeral-agent-dispatcher';
+import { sanitizeFailureEvidenceDisplay } from '../../failures/invocation-failure';
 import {
 	createReviewModelDispatcher,
 	type ReviewModelDispatcher,
@@ -648,15 +649,21 @@ export async function dispatchPhaseReviewer(
 		const isQuota = isQuotaError(
 			error instanceof Error ? error.message : String(error),
 		);
+		// #3710: the persisted evidence and the returned reason carry REDACTED
+		// provider error text (applied after the isQuotaError classification
+		// read above; the raw error object is never mutated).
+		const sanitizedReason = sanitizeFailureEvidenceDisplay(
+			error instanceof Error ? error.message : String(error),
+		);
 		const evidencePath = await _internals.writeReviewerEvidence(
 			directory,
 			phase,
 			'REJECTED',
-			error instanceof Error ? error.message : String(error),
+			sanitizedReason,
 		);
 		return {
 			verdict: 'REJECTED',
-			reason: `Reviewer dispatch failed${isQuota ? ' (model quota/usage limit exhausted across all configured fallbacks)' : ''}: ${error instanceof Error ? error.message : String(error)}`,
+			reason: `Reviewer dispatch failed${isQuota ? ' (model quota/usage limit exhausted across all configured fallbacks)' : ''}: ${sanitizedReason}`,
 			evidencePath,
 		};
 	}

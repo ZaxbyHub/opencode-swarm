@@ -42,6 +42,7 @@ import {
 	DEFAULT_READ_ONLY_TOOLS,
 	type ReadOnlyToolDenials,
 } from '../evaluation/ephemeral-agent-dispatcher';
+import { sanitizeFailureEvidenceDisplay } from '../failures/invocation-failure';
 import { isValidTaskId } from '../gate-evidence';
 import { validateSwarmPath } from '../hooks/utils';
 import { computePlanStructureHash } from '../plan/ledger';
@@ -844,11 +845,12 @@ async function dispatchRole(
 			role,
 			agent: agentName,
 			verdict: 'REJECTED',
-			reason:
-				`${role} dispatch failed: ${error instanceof Error ? error.message : String(error)}`.slice(
-					0,
-					MAX_REASON_CHARS,
-				),
+			// #3710: the reason reaches the durable epic phase-review
+			// evidence file, so it is redacted HERE — AFTER the classify
+			// callback above has read the raw message.
+			reason: `${role} dispatch failed: ${sanitizeFailureEvidenceDisplay(
+				error instanceof Error ? error.message : String(error),
+			)}`.slice(0, MAX_REASON_CHARS),
 			dispatch: 'failed',
 			tool_profile: toolProfile,
 			dispatched_at: dispatchedAt,

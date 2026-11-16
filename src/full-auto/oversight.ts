@@ -30,6 +30,7 @@ import { appendCoreEventSync } from '../events/core-events.js';
 import {
 	classifyProviderFailure,
 	isRetryableProviderFailure,
+	sanitizeFailureEvidenceDisplay,
 } from '../failures/invocation-failure';
 import {
 	providerMessageErrorToError,
@@ -609,7 +610,7 @@ export async function dispatchFullAutoOversight(
 		lastError = result.error;
 		dispatchFailureWasTransient = isTransientDispatchError(lastError);
 		logger.warn(
-			`[full-auto/oversight] dispatch attempt ${attempt + 1}/${maxRetries + 1} failed: ${lastError instanceof Error ? lastError.message : String(lastError)}`,
+			`[full-auto/oversight] dispatch attempt ${attempt + 1}/${maxRetries + 1} failed: ${sanitizeFailureEvidenceDisplay(lastError instanceof Error ? lastError.message : String(lastError))}`,
 		);
 		if (dispatchFailureWasTransient && attempt < maxRetries) {
 			// Transient — will retry. #1896: advance to the next configured fallback
@@ -667,9 +668,14 @@ export async function dispatchFullAutoOversight(
 	}
 
 	if (dispatchError) {
+		// #3710: persisted failure reasons carry redacted provider error
+		// text. Applied AFTER every classifier read (isTransientDispatchError
+		// ran above on the raw error); the fixed prefixes survive the
+		// sanitizer so the pause-reason matchers in full-auto/recovery.ts and
+		// full-auto-permission.ts keep working.
 		const infraReason = dispatchFailureWasTransient
-			? `oversight infrastructure failure after ${maxRetries + 1} attempt(s): ${dispatchError instanceof Error ? dispatchError.message : String(dispatchError)}`
-			: `oversight dispatch failed without retry: ${dispatchError instanceof Error ? dispatchError.message : String(dispatchError)}`;
+			? `oversight infrastructure failure after ${maxRetries + 1} attempt(s): ${sanitizeFailureEvidenceDisplay(dispatchError instanceof Error ? dispatchError.message : String(dispatchError))}`
+			: `oversight dispatch failed without retry: ${sanitizeFailureEvidenceDisplay(dispatchError instanceof Error ? dispatchError.message : String(dispatchError))}`;
 		// Increment consecutive-failure counter. After threshold, auto-degrade to
 		// manual (terminate) so the run doesn't stay paused forever.
 		let consecutive = 0;
@@ -931,7 +937,7 @@ export async function probeFullAutoOversightHealth(input: {
 			return {
 				healthy: false,
 				attempts: 1,
-				reason: `health probe create failed: ${JSON.stringify(created.error)}`,
+				reason: `health probe create failed: ${sanitizeFailureEvidenceDisplay(JSON.stringify(created.error) ?? 'no error detail')}`,
 			};
 		}
 		sessionId = created.data.id;
@@ -944,7 +950,9 @@ export async function probeFullAutoOversightHealth(input: {
 		return {
 			healthy: false,
 			attempts: 1,
-			reason: error instanceof Error ? error.message : String(error),
+			reason: sanitizeFailureEvidenceDisplay(
+				error instanceof Error ? error.message : String(error),
+			),
 		};
 	} finally {
 		await cleanupEphemeralSessionWithinBudget(
