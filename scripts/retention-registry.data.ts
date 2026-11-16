@@ -719,9 +719,9 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		canonicalRoot: 'outside-swarm',
 		writerModules: ['src/tools/prepare-pr-feedback-commit-message.ts'],
 		writerCitations: [
-			'src/tools/prepare-pr-feedback-commit-message.ts:308 atomicWriteFileAnyRoot — canonical atomic write (temp+fsync+rename, mode 0600, same-tick validateTarget re-proof)',
+			'src/tools/prepare-pr-feedback-commit-message.ts:317 atomicWriteFileAnyRoot — canonical atomic write (temp+fsync+rename, mode 0600, same-tick validateTarget re-proof)',
 			'src/tools/prepare-pr-feedback-commit-message.ts:112 mkdirSync — dedicated temp subdirectory (recursive, mode 0700, inside acquireCommitMessageDir)',
-			'src/tools/prepare-pr-feedback-commit-message.ts:196 rmSync — pruneStaleMessageFiles TTL reaper',
+			'src/tools/prepare-pr-feedback-commit-message.ts:205 rmSync — pruneStaleMessageFiles TTL reaper (same-tick lstat re-proof at entry)',
 		],
 		readerCitations: [
 			'no plugin reader — the authored path is returned to the caller (:220-225) and consumed by `git commit -F` outside the plugin',
@@ -733,9 +733,9 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			bound: 'MAX_COMMIT_MESSAGE_CHARS 8192 per file (:42,:53-55; whitespace-only and NUL refused); one file per (sanitized sessionID, sha256(message)[:16]) key (:68-81); pruneStaleMessageFiles age-prunes every .txt in the directory at MESSAGE_FILE_TTL_MS 24 h on every authoring call (:44,:88-107)',
 			scope: 'per-key',
 			keyspaceBound:
-				'FINITE BY REAPER: the message-digest key domain has no closed enumeration, but pruneStaleMessageFiles (src/tools/prepare-pr-feedback-commit-message.ts:187-206) walks the whole dedicated directory on EVERY authoring call and removes every file older than the 24 h TTL, so the keyspace cannot outgrow one 24 h window of authored messages.',
+				'FINITE BY REAPER: the message-digest key domain has no closed enumeration, but pruneStaleMessageFiles (src/tools/prepare-pr-feedback-commit-message.ts:183-224) walks the whole dedicated directory on EVERY authoring call and removes every file older than the 24 h TTL, so the keyspace cannot outgrow one 24 h window of authored messages.',
 			citation:
-				'src/tools/prepare-pr-feedback-commit-message.ts:48-50,69-71,103-164,167-180,187-206,308-325',
+				'src/tools/prepare-pr-feedback-commit-message.ts:48-50,69-71,103-164,172-185,183-224,317-334',
 		},
 		readBound: {
 			pattern: 'write-only',
@@ -757,7 +757,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		disposition: {
 			kind: 'not-a-defect',
 			proof:
-				'Ephemeral authored commit-message files live in a dedicated OS-temp subdirectory OUTSIDE every repository (prepare-pr-feedback-commit-message.ts:69-71,167-180); the filename key is (sanitized sessionID, sha256(message)[:16]) and pruneStaleMessageFiles (:187-206) reaps files older than MESSAGE_FILE_TTL_MS=24 h on every authoring call, so there is no unbounded growth axis; writes are atomic with mode 0600 with a same-tick link re-proof (:308-325) and a TMPDIR resolving inside the repository is refused (:267-275) or resolved through a link into the repository (:291-301).',
+				'Ephemeral authored commit-message files live in a dedicated OS-temp subdirectory OUTSIDE every repository (prepare-pr-feedback-commit-message.ts:69-71,167-180); the filename key is (sanitized sessionID, sha256(message)[:16]) and pruneStaleMessageFiles (:183-224) reaps files older than MESSAGE_FILE_TTL_MS=24 h on every authoring call, so there is no unbounded growth axis; writes are atomic with mode 0600 with a same-tick link re-proof (:317-334) and a TMPDIR resolving inside the repository is refused (:267-275) or resolved through a link into the repository (:291-301).',
 		},
 	},
 	{

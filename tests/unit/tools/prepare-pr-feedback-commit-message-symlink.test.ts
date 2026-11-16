@@ -332,9 +332,17 @@ describe('prepare_pr_feedback_commit_message symlink/junction guard (#3486)', ()
 		const victim = canonicalMkdtemp('symlink-3486-swap-');
 		createdRoots.push(victim);
 		writeFileSync(join(victim, 'sentinel.txt'), 'sentinel\n');
+		// A STALE .txt in the victim (4.5 review round): the TTL prune runs
+		// before the write's validateTarget, so without the prune's own
+		// entry re-proof this swap window would DELETE this file through the
+		// link — the exact destructive side effect AC1 forbids.
+		const victimStale = join(victim, 'stale.txt');
+		writeFileSync(victimStale, 'stale-survivor\n');
+		utimesSync(victimStale, OLD_MTIME_SECONDS, OLD_MTIME_SECONDS);
 
 		// Swap fires inside the seam window AFTER acquisition and BEFORE the
-		// write: the module's post-acquisition realpathSync call is the hook.
+		// prune/write: the module's post-acquisition realpathSync call is the
+		// hook.
 		const realRealpath = savedInternals.realpathSync;
 		let swapped = false;
 		_internals.realpathSync = ((p: string) => {
@@ -358,8 +366,9 @@ describe('prepare_pr_feedback_commit_message symlink/junction guard (#3486)', ()
 
 		expect(result.success).toBe(false);
 		expect(result.message).toContain('replaced with a link');
-		// The victim only ever received the prune walk (no stale .txt), and
-		// never the authored file.
-		expect(readdirSync(victim)).toEqual(['sentinel.txt']);
+		// The victim is untouched: the authored file never landed, AND the
+		// stale .txt survived the prune (the prune's entry re-proof skipped
+		// the swapped link instead of walking it).
+		expect(readdirSync(victim).sort()).toEqual(['sentinel.txt', 'stale.txt']);
 	}, 60_000);
 });

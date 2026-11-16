@@ -34,7 +34,8 @@ The tool now ACQUIRES the directory with a real proof before any use:
 - the realpath ancestor check (temp root resolving inside the repository) is
   retained.
 
-Disclosed bound: the TTL prune itself is best-effort hygiene guarded by the
-same acquisition but not write-time-re-proved — the protected operation is the
-authored message write. New suite:
+The TTL prune is best-effort hygiene with its OWN same-tick lstat re-proof at
+entry (a directory swapped for a link after the acquisition is skipped, never
+pruned through), so neither the stale-file deletions nor the authored write can
+be redirected through a swapped link. New suite:
 `tests/unit/tools/prepare-pr-feedback-commit-message-symlink.test.ts`.

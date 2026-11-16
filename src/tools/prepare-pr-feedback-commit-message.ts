@@ -182,10 +182,19 @@ function resolvePrFeedbackCommitMessageFilePath(
 /**
  * FB-9/F-R21: prune authored files older than the TTL so the shared temp
  * directory stays bounded. Best-effort — a prune failure never fails the
- * authoring call.
+ * authoring call. Same-tick re-proof at entry (4.5 review round): the directory
+ * acquired earlier is re-lstat'd before the walk, so a directory swapped for a
+ * link after the acquisition is NEVER pruned through (the stale-file deletions
+ * the TTL performs cannot be redirected into a link target).
  */
 function pruneStaleMessageFiles(dir: string): void {
 	try {
+		const dirStats = _internals.lstatSync(dir);
+		if (dirStats.isSymbolicLink() || !dirStats.isDirectory()) {
+			// Swapped for a link (or replaced by a non-directory) after the
+			// acquisition — skip the prune rather than walk through it.
+			return;
+		}
 		const now = Date.now();
 		for (const entry of readdirSync(dir)) {
 			if (!entry.endsWith('.txt')) continue;
