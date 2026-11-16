@@ -21,10 +21,10 @@ import { DEFAULT_LEAN_TURBO_CONFIG } from '../../config/constants';
 import type { Plan } from '../../config/plan-schema';
 import type { LeanTurboConfig } from '../../config/schema';
 import { deriveSwarmIdentity } from '../../config/schema';
-import { sanitizeFailureEvidenceDisplay } from '../../failures/invocation-failure';
 import {
 	classifyProviderFailure,
 	isRetryableProviderFailure,
+	sanitizeFailureEvidenceDisplay,
 } from '../../failures/invocation-failure';
 import {
 	formatProviderMessageError,
