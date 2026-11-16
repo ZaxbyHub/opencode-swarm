@@ -10,7 +10,6 @@ import {
 	existsSync,
 	mkdirSync,
 	renameSync,
-	rmSync,
 	symlinkSync,
 	utimesSync,
 	writeFileSync,
@@ -22,7 +21,7 @@ import {
 	formatRetentionLogLine,
 	TIER1_PRESERVED_SWARM_ENTRIES,
 } from '../../../src/retention/unclaimed';
-import { canonicalMkdtemp } from '../../helpers/tmpdir';
+import { canonicalMkdtemp, removeTreeWithRetry } from '../../helpers/tmpdir';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const NOW = 1_757_000_000_000; // fixed epoch anchor (check-test-clock-safe)
@@ -59,13 +58,7 @@ function linkDir(target: string, linkPath: string): boolean {
 }
 
 afterEach(() => {
-	for (const root of tempRoots) {
-		try {
-			rmSync(root, { recursive: true, force: true });
-		} catch {
-			/* best-effort teardown */
-		}
-	}
+	for (const root of tempRoots) removeTreeWithRetry(root);
 	tempRoots.length = 0;
 });
 
