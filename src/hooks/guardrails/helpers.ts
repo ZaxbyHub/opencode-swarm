@@ -10,6 +10,7 @@ import * as path from 'node:path';
 import { WRITE_TOOL_NAMES } from '../../config/constants';
 import { classifyFile } from '../../context/zone-classifier';
 import { isPathWithinDeclaredScope } from '../../scope/path-identity';
+import { redactJwsTokens } from '../../utils/jws-redaction';
 import { normalizeToolName } from '../normalize-tool-name';
 import { getGlobMatcher } from './file-authority';
 
@@ -228,6 +229,12 @@ export function redactShellCommand(cmd: string): string {
 		/(-H\s+['"]?(?:Authorization|X-API-Key|X-Auth-Token|[A-Za-z][A-Za-z-]*-(?:key|token|secret|auth|credential)):\s*)([^'">\s][^'">\n]*)(['"]?)/gi,
 		'$1[REDACTED]$3',
 	);
+
+	// #3723: whole JWS tokens whose header exceeds the legacy arm's 1024-char
+	// bound (x5c certificate-chain headers are 1.2-5 KB) — linear single-pass
+	// span scan. The legacy bounded jwt arm below stays (fast path + pin
+	// parity); this pre-pass only ADDS coverage the bound left open.
+	out = redactJwsTokens(out);
 
 	// Well-known token VALUE shapes (content-based; fires regardless of the
 	// flag/variable name carrying them). GitHub suffix bound is 20+: real PATs

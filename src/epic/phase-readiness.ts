@@ -43,6 +43,7 @@ import {
 	type ReadOnlyToolDenials,
 } from '../evaluation/ephemeral-agent-dispatcher';
 import { sanitizeFailureEvidenceDisplay } from '../failures/invocation-failure';
+import { providerMessageErrorToError } from '../failures/provider-message-error';
 import { isValidTaskId } from '../gate-evidence';
 import { validateSwarmPath } from '../hooks/utils';
 import { computePlanStructureHash } from '../plan/ledger';
@@ -802,6 +803,21 @@ async function dispatchRole(
 				if (response.status === 'timeout') {
 					throw new Error(
 						`Epic phase ${role} dispatch timed out after ${timeoutMs}ms`,
+					);
+				}
+				// #3724 item 2: when the dispatcher surfaced a provider error,
+				// rethrow the provider-message CARRIER (status/category/
+				// providerError snapshot) instead of flattening response.error
+				// into plain text — dispatchWithModelFallback's carrier-aware
+				// gate then classifies from the snapshot, so a deterministic
+				// 403 whose text mentions rate limits can no longer advance the
+				// fallback_models chain. Structure-less errors keep the plain
+				// text throw; the classify callback below still reads raw text
+				// for them (pinned by the 3710 suite).
+				if (response.providerError) {
+					throw providerMessageErrorToError(
+						`Epic phase ${role} dispatch provider error`,
+						response.providerError,
 					);
 				}
 				throw new Error(

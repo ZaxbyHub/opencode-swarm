@@ -991,7 +991,19 @@ export class LeanTurboRunner {
 				readError?.name === 'MessageContentFilterError'
 					? null
 					: readError;
-			if (!promptResult.data || providerError) {
+			// #3724 item 3 (real-output guard, the lean twin of dispatch-lanes'
+			// load-bearing `!transcript.text` term): a reply that produced REAL
+			// OUTPUT (non-empty text parts) plus a provider error is not a
+			// refusal either — the lane keeps the carve-out behavior (settles
+			// completed, worktree merged back) instead of failing and stranding
+			// the produced work in a preserved worktree. Only a reply with NO
+			// real output settles failed below.
+			const replyText = (promptResult.data?.parts ?? [])
+				.filter((part) => part.type === 'text')
+				.map((part) => part.text ?? '')
+				.join('')
+				.trim();
+			if (!promptResult.data || (providerError && !replyText)) {
 				abortController?.abort();
 				void teardownEphemeralSession(session, sessionId);
 				// Issue #2002 (Lean Turbo half): `_publishLaneScope` may have already

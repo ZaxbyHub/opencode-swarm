@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { findJwsTokenSpans } from '../utils/jws-redaction.js';
 import {
 	extractStatusCode,
 	MODEL_UNAVAILABLE_PATTERN,
@@ -496,6 +497,13 @@ export function sanitizeFailureEvidenceDisplay(value: string): string {
 			});
 		}
 	}
+	// #3723: linear JWS span scan on the UNCONDENSED view — covers headers of
+	// ANY length (x5c certificate chains exceed the legacy arm's 1024-char
+	// bound). The legacy jwt family entry stays (fast path + pin parity); the
+	// union/splice below dedupes identical spans.
+	for (const span of findJwsTokenSpans(redacted)) {
+		bareMatches.push({ family: 'jwt', start: span.start, end: span.end });
+	}
 	// Pass B — fill tolerance: the Cf/DI-deleted condensed view, mapped
 	// back to original offsets (a span mapped back INCLUDES any deleted
 	// invisible bytes that sat inside it).
@@ -509,6 +517,19 @@ export function sanitizeFailureEvidenceDisplay(value: string): string {
 				end: condensedToOriginal[match.index + match[0].length - 1] + 1,
 			});
 		}
+	}
+	// #3723 (critic r2 finding 1): the SAME span scan on the CONDENSED view —
+	// a long-header token WITH an embedded zero-width byte splits the run on
+	// the uncondensed view (the fill byte is not in the run class) AND misses
+	// the legacy condensed arm (its header bound is still 1024), so only this
+	// pass closes the composition case. A mapped-back span INCLUDES the
+	// deleted invisible bytes that sat inside it.
+	for (const span of findJwsTokenSpans(condensed)) {
+		bareMatches.push({
+			family: 'jwt',
+			start: condensedToOriginal[span.start],
+			end: condensedToOriginal[span.end - 1] + 1,
+		});
 	}
 	let swept = redacted;
 	if (bareMatches.length > 0) {
