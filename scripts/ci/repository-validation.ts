@@ -1037,11 +1037,12 @@ async function runDefaultProcess(item: ValidationItem, options: RunProcessOption
 	const signal = (child as unknown as { signalCode?: string | null }).signalCode ?? null;
 	const durationMs = Date.now() - started;
 	const abnormalExit = signal !== null || rawExitCode === null;
-	// Reader completeness is a derivation input (#3664): an exit-0 child whose
-	// bounded stdout/stderr reader missed its deadline (or hit the byte cap)
-	// was only partially observed — recording it `passed` would misrecord a
-	// pass on truncated evidence, so it takes the self-naming degraded
-	// terminal with a reason naming the truncated channel(s).
+	// Reader completeness is a derivation input (#3664): a child that
+	// completed without timeout or crash (cleanup succeeded, no signal,
+	// known exit code) but whose bounded stdout/stderr reader missed its
+	// deadline was only partially observed — recording it `passed` would
+	// misrecord a pass on truncated evidence, so it takes the self-naming
+	// degraded terminal with a reason naming the truncated channel(s).
 	const truncatedChannels: string[] = [];
 	// #3664, final-critic round 1: COMPLETENESS ONLY. The byte-cap
 	// `truncated` flag means the SAVED log is bounded, not that the
@@ -1069,9 +1070,12 @@ async function runDefaultProcess(item: ValidationItem, options: RunProcessOption
 	// timed-out or crashed child whose readers were also incomplete carries
 	// the kill/crash as its terminal cause — an un-killed child would have
 	// been drained — so labeling that row "terminal evidence is truncated"
-	// misattributes the failure and confuses report consumers. The
-	// incompleteness stays visible through the terminal counters; the reason
-	// text no longer claims a truncation failure that did not happen.
+	// misattributes the failure and confuses report consumers. That
+	// incompleteness is NOT separately recorded on timeout/crash rows: the
+	// row is counted in its own failing bucket (timedOut/crashed) and the
+	// outputTruncated counter stays reserved for the truncation terminal;
+	// what the gate removes is the reason text claiming a truncation
+	// failure that did not happen.
 	return {
 		status,
 		reason:

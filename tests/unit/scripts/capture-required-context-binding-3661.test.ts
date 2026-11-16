@@ -278,6 +278,12 @@ describe('capture-required-check-evidence duplicate-name context binding (#3661 
 		// artifact (no refusal was thrown at all).
 		expect(refusal).toBeInstanceOf(CaptureRefusal);
 		const message = (refusal as Error).message.toLowerCase();
+		// The TERMINAL-origin discriminator (final-critic round 1): 'required
+		// context' alone also matches the retained in-loop slug-ambiguity
+		// refusal; this substring is unique to the aggregate tail refusal, so
+		// the leg proves the skip-head-then-refuse-at-tail shape, not merely
+		// that "some" refusal fired.
+		expect(message).toContain('no recent successful merge-group head');
 		expect(message).toContain('required context');
 		expect(writes).toEqual([]);
 	}, 60_000);
