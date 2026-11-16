@@ -95,13 +95,9 @@
     },
     "auto_select_architect": {
       "description": "Auto-select the swarm architect for new sessions instead of OpenCode built-ins. Omitted or false: manual selection (omitted behaves as false). true: enable auto-select and disable built-in build/plan agents. \"<architect_name>\" (e.g. \"mega_architect\"): enable targeting one architect in multi-swarm setups.",
-      "anyOf": [
-        {
-          "type": "boolean"
-        },
-        {
-          "type": "string"
-        }
+      "type": [
+        "boolean",
+        "string"
       ]
     },
     "swarms": {
@@ -3648,13 +3644,9 @@
         },
         "model": {
           "default": null,
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
+          "type": [
+            "string",
+            "null"
           ]
         },
         "fallback_models": {
@@ -3867,13 +3859,9 @@
         },
         "model": {
           "default": null,
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
+          "type": [
+            "string",
+            "null"
           ]
         },
         "fallback_models": {

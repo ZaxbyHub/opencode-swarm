@@ -7,7 +7,6 @@
  */
 import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import type { PluginConfig } from '../../../src/config';
 import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
@@ -30,7 +29,14 @@ function git(directory: string, args: string[]): void {
 		timeout: 5_000,
 		maxBuffer: 128 * 1024,
 	});
-	if (result.status !== 0) throw new Error(result.stderr || result.stdout);
+	if (result.status !== 0) {
+		throw new Error(
+			result.error?.message ||
+				result.stderr ||
+				result.stdout ||
+				`git ${args.join(' ')} exited ${result.status}`,
+		);
+	}
 }
 
 const config = {
@@ -143,6 +149,16 @@ describe('#3403 claim session-identity mutation (named fields)', () => {
 			pre.prmTrajectoryStep = 7;
 			pre.prmPatternCounts = new Map([['repeated-pattern', 2]]);
 			pre.prmDelegationCallId = 'call-stale';
+			// Lifecycle + circuit state the overwrite must also reset/rebind (the
+			// identity is taken over, so the previous owner's flags and circuit
+			// must not carry over to the coder identity).
+			pre.delegationActive = true;
+			pre.nonTransientCircuit = {
+				...pre.nonTransientCircuit,
+				category: 'stale-category',
+				sameCategoryCount: 2,
+				hardStop: true,
+			};
 
 			await claim(fixture, 'child-existing');
 			const post = getAgentSession('child-existing');
@@ -156,6 +172,14 @@ describe('#3403 claim session-identity mutation (named fields)', () => {
 			expect(post?.prmInitialized).toBe(false);
 			expect(post?.prmTrajectoryStep).toBe(0);
 			expect(post?.prmPatternCounts?.size).toBe(0);
+			// Lifecycle + circuit (ensureAgentSession's name-change arm): the
+			// previous owner's delegation flag and non-transient circuit are cleared
+			// and rebound to the coder identity.
+			expect(post?.delegationActive).toBe(false);
+			expect(post?.nonTransientCircuit?.ownerAgent).toBe('coder');
+			expect(post?.nonTransientCircuit?.category).toBeNull();
+			expect(post?.nonTransientCircuit?.sameCategoryCount).toBe(0);
+			expect(post?.nonTransientCircuit?.hardStop).toBe(false);
 		} finally {
 			fixture.cleanup();
 		}

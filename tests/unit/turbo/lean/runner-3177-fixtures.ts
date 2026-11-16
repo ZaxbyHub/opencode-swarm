@@ -7,7 +7,6 @@
  * fallback `prov/fb1`).
  */
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { createAgents } from '../../../../src/agents';
 import { DEFAULT_LEAN_TURBO_CONFIG } from '../../../../src/config/constants';
@@ -17,6 +16,7 @@ import { clearScopeBindings } from '../../../../src/scope/scope-binding';
 import { resetSwarmState, startAgentSession } from '../../../../src/state';
 import { LeanTurboRunner } from '../../../../src/turbo/lean/runner';
 import * as leanState from '../../../../src/turbo/lean/state';
+import { canonicalMkdtemp } from '../../../helpers/tmpdir';
 
 export const HARNESS_SESSION_ID = 'sess-runner-3177';
 export const PRIMARY_MODEL = 'prov/primary';
@@ -108,9 +108,7 @@ export function makeRunner3177Harness(
 	resetScopedModelSelectionStateForTests();
 	clearScopeBindings();
 	startAgentSession(HARNESS_SESSION_ID, 'architect');
-	const directory = fs.realpathSync(
-		fs.mkdtempSync(path.join(os.tmpdir(), 'runner-3177-')),
-	);
+	const directory = fs.realpathSync(canonicalMkdtemp('runner-3177-'));
 	fs.mkdirSync(path.join(directory, '.swarm', 'scopes'), { recursive: true });
 	fs.mkdirSync(path.join(directory, 'src'), { recursive: true });
 	fs.writeFileSync(

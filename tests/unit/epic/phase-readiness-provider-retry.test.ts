@@ -273,7 +273,7 @@ describe('runEpicPhaseReview provider-refusal retry', () => {
 							statusCode: 403,
 							message: 'free tier',
 							category: 'provider.authentication_configuration',
-							retryClass: 'do_not_retry',
+							retryClass: 'operator_action',
 							risk: 'high',
 						},
 						durationMs: 5,

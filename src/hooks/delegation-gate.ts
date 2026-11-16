@@ -3523,6 +3523,12 @@ const maintainBackgroundDelegationsForDispatch: typeof import('../background/pen
 export const _internals = {
 	isEpicOpenForProject,
 	/**
+	 * #3403 (review round 3, AC2): the durable scope-claim is routed through this
+	 * seam so tests can drive a claim that THROWS and pin the throw-path lineage
+	 * rollback. Production code never reassigns it.
+	 */
+	claimScopeBindingForChildDurably,
+	/**
 	 * #3502 review (PRR-007), #3509/#3516: set by createDelegationGateHook so
 	 * tests can observe the settlement-side invalidation gate for a specific
 	 * hook instance (is THIS dispatch's call blocked for this verdict task?).
@@ -4177,7 +4183,36 @@ export function createDelegationGateHook(
 			clearExactScopeBinding(entry.binding);
 		}
 	};
-	const taskMetadata = async (input: {
+	// #3403 (AC2, review round 3): overlapping taskMetadata attempts for ONE
+	// child are serialized. Each attempt captures `previousParent` and writes
+	// lineage before awaiting its durable claim; without serialization a later
+	// attempt captured the earlier attempt's in-flight write as its previous
+	// parent, so when both claims failed the rollback re-committed the failed
+	// lineage (half-applied activation). Serialized, every attempt captures the
+	// state the previous attempt rolled back to. Chains are per hook instance
+	// and removed as soon as the child's tail settles (bounded).
+	const taskMetadataChainByChild = new Map<string, Promise<void>>();
+	const taskMetadata = (input: {
+		callID: string;
+		parentSessionID: string;
+		childSessionID: string;
+	}): Promise<void> => {
+		const key = input.childSessionID;
+		const prior = taskMetadataChainByChild.get(key) ?? Promise.resolve();
+		const run = prior.then(() => taskMetadataAttempt(input));
+		const settled = run.then(
+			() => undefined,
+			() => undefined,
+		);
+		taskMetadataChainByChild.set(key, settled);
+		void settled.then(() => {
+			if (taskMetadataChainByChild.get(key) === settled) {
+				taskMetadataChainByChild.delete(key);
+			}
+		});
+		return run;
+	};
+	const taskMetadataAttempt = async (input: {
 		callID: string;
 		parentSessionID: string;
 		childSessionID: string;
@@ -4200,14 +4235,17 @@ export function createDelegationGateHook(
 		//   PRM ladder reset, currentTaskId/declaredCoderScope stamped from the
 		//   architect's declaration). The correlation key is the fence: an id
 		//   that names no live pending generation gets SCOPE_NOT_DECLARED and
-		//   CLAIMS NO SCOPE BINDING AND MUTATES NO SESSION IDENTITY (the
-		//   #3036 dispatch-lineage write above still records the host-observed
-		//   pair and is kept on that benign path by design); a second claimant
-		//   for a claimed generation gets SCOPE_BINDING_ALREADY_CLAIMED and
-		//   (post-#3403) its lineage write is rolled back below. This is the
-		//   documented v1 host contract — the
-		//   model is stated here so the next reviewer need not re-derive it;
-		//   changing it is a product decision, not a bug fix.
+		//   CLAIMS NO SCOPE BINDING AND MUTATES NO SESSION IDENTITY. It is NOT
+		//   inert, though: the #3036 lineage write above records the TOOL-EMITTED
+		//   child against the HOST-TYPED parent and is kept on that benign path
+		//   by design. That lineage grants the child knowledge_receipt filing
+		//   authority for the parent's stamps (src/tools/knowledge-receipt.ts),
+		//   so a tool-emitted child id CAN widen that authority. Every other
+		//   claim failure (SCOPE_BINDING_ALREADY_CLAIMED, SCOPE_BINDING_AMBIGUOUS,
+		//   SCOPE_BINDING_EXPIRED, persistence and store-overload codes) and a
+		//   thrown claim roll that write back. This is the documented v1 host
+		//   contract; the model is stated here so the next reviewer need not
+		//   re-derive it. Changing it is a product decision, not a bug fix.
 		//
 		// Issue #3036: record the host-observed dispatch pair BEFORE any early
 		// return below — reviewer/test-engineer children return at the
@@ -4233,12 +4271,25 @@ export function createDelegationGateHook(
 				binding.childSessionId = input.childSessionID;
 			}
 		};
-		const result = await claimScopeBindingForChildDurably({
-			directory,
-			parentSessionId: input.parentSessionID,
-			childSessionId: input.childSessionID,
-			dispatchCallId: input.callID,
-		});
+		// A claim that THROWS (corrupt or unreadable scope artifacts surface as
+		// exceptions) is a failed activation too: roll the lineage write back
+		// before the exception propagates, so the throw path leaves no
+		// half-applied state either (review round 3, AC2).
+		const result = await _internals
+			.claimScopeBindingForChildDurably({
+				directory,
+				parentSessionId: input.parentSessionID,
+				childSessionId: input.childSessionID,
+				dispatchCallId: input.callID,
+			})
+			.catch((error: unknown) => {
+				restoreDispatchParentEntry(
+					input.childSessionID,
+					lineageWriteGeneration,
+					previousParent,
+				);
+				throw error;
+			});
 		if (!result.ok) {
 			if (result.code === 'SCOPE_NOT_DECLARED') {
 				// Reviewer/test-engineer tasks do not own coder scope, but their

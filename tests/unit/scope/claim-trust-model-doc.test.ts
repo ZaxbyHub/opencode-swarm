@@ -20,7 +20,9 @@ function readSource(rel: string): string {
 describe('#3403 claim trust-model documentation', () => {
 	test('delegation-gate taskMetadata documents the field-by-field authority model', () => {
 		const source = readSource('src/hooks/delegation-gate.ts');
-		const taskMetadataAt = source.indexOf('const taskMetadata = async');
+		// The trust-model block sits inside the attempt body (the public
+		// taskMetadata wrapper serializes overlapping attempts per child).
+		const taskMetadataAt = source.indexOf('const taskMetadataAttempt = async');
 		expect(taskMetadataAt).toBeGreaterThan(0);
 		const window = source.slice(taskMetadataAt, taskMetadataAt + 6000);
 		// The trust model block sits on the handler and names its claims.
@@ -56,9 +58,10 @@ describe('#3403 claim trust-model documentation', () => {
 		expect(docWindow).toContain('childSessionId');
 		expect(docWindow).toContain('SCOPE_NOT_DECLARED');
 		expect(docWindow).toContain('SCOPE_BINDING_ALREADY_CLAIMED');
-		// The stated fence: the correlation triple gates what a tool-emitted id
-		// can cause, and the caller stamps identity only after a success.
-		expect(docWindow).toContain('correlation');
+		// The stated fence: the (parentSessionId, dispatchCallId) pair gates what a
+		// tool-emitted id can cause, and the caller stamps identity only after a
+		// success.
+		expect(docWindow).toContain('(parentSessionId, dispatchCallId) pair');
 		expect(docWindow).toContain('taskMetadata');
 	});
 });

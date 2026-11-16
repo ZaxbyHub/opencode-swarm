@@ -18,7 +18,12 @@
  * (`extractAssistantTranscript`); its blocking `runLane` path checks only
  * `result.error` and the reply text and never reads `info`.
  */
-import { classifyProviderFailure } from './invocation-failure';
+import {
+	classifyProviderFailure,
+	type InvocationFailureRetryClass,
+	type InvocationFailureRisk,
+	sanitizeFailureEvidenceDisplay,
+} from './invocation-failure';
 
 export type ProviderMessageError = {
 	name: string;
@@ -35,13 +40,13 @@ export type ProviderMessageError = {
 	 * must prefer this snapshot (see the snapshot arm in
 	 * `classifyProviderFailure`).
 	 */
-	retryClass: string;
+	retryClass: InvocationFailureRetryClass;
 	/**
 	 * #3177: the risk band the canonical classifier derived at read time,
 	 * carried with `retryClass` so the snapshot round-trips the full retry
 	 * semantics without a second mapping.
 	 */
-	risk: string;
+	risk: InvocationFailureRisk;
 };
 
 /**
@@ -112,8 +117,12 @@ export function readProviderMessageError(
 	);
 	return {
 		name:
+			// `name` is provider-chosen: sanitize it like the message (control and
+			// ANSI sequences reach lane evidence and reviewer summaries). A name that
+			// sanitizes to nothing falls back to the constant.
 			typeof name === 'string' && name.length > 0
-				? name.slice(0, 64)
+				? sanitizeFailureEvidenceDisplay(name.slice(0, 64)).trim() ||
+					'UnknownError'
 				: 'UnknownError',
 		...(statusCode === undefined ? {} : { statusCode }),
 		// The sanitized display can be empty (e.g. a message of only control

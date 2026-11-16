@@ -135,7 +135,7 @@ describe('epic phase review bash retry: each refusal arm alone', () => {
 				name: 'APIError',
 				message: 'forbidden',
 				category: 'provider.authentication_configuration',
-				retryClass: 'do_not_retry',
+				retryClass: 'operator_action',
 				risk: 'high',
 			},
 		],

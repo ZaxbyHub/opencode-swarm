@@ -36,7 +36,6 @@ export const STATE_MOCK_TRANSITIVE_STUBS = {
 	// delegation-gate / delegate-directive-injection / knowledge-receipt-tool
 	// importers; same missing-binding failure class as above.
 	recordPendingDispatchAuthorization: () => undefined,
-	setDispatchParent: () => undefined,
 	resolveDispatchParent: () => undefined,
 	clearDispatchLineageForSession: () => undefined,
 	// #3403: generation-stamped lineage writes + attempt-scoped rollback,

@@ -1,17 +1,19 @@
 /**
- * #3403 (AC7): the coder scope-claim activation is all-or-nothing. A claim
- * failure other than SCOPE_NOT_DECLARED must roll this attempt's lineage
- * write back (generation-gated) so no dispatch is left with lineage committed
- * while its route/full-auto bindings are permanently skipped — while the
- * #3036 benign path (reviewer/test-engineer children returning at
+ * #3403 (AC2): the coder scope-claim activation is all-or-nothing. A claim
+ * failure other than SCOPE_NOT_DECLARED (and a claim that throws) must roll
+ * this attempt's lineage write back so no dispatch is left with lineage
+ * committed while its route/full-auto bindings are permanently skipped — while
+ * the #3036 benign path (reviewer/test-engineer children returning at
  * SCOPE_NOT_DECLARED) keeps its lineage byte-identically.
  */
 import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import type { PluginConfig } from '../../../src/config';
-import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
+import {
+	_internals,
+	createDelegationGateHook,
+} from '../../../src/hooks/delegation-gate';
 import {
 	getAgentSession,
 	resetSwarmState,
@@ -33,7 +35,14 @@ function git(directory: string, args: string[]): void {
 		timeout: 5_000,
 		maxBuffer: 128 * 1024,
 	});
-	if (result.status !== 0) throw new Error(result.stderr || result.stdout);
+	if (result.status !== 0) {
+		throw new Error(
+			result.error?.message ||
+				result.stderr ||
+				result.stdout ||
+				`git ${args.join(' ')} exited ${result.status}`,
+		);
+	}
 }
 
 const config = {
@@ -139,6 +148,19 @@ async function setup(testId: string): Promise<Fixture> {
 	return fixture;
 }
 
+/**
+ * Two live pending generations match one Task callID (task 1.1 and task 1.2
+ * published under the same callID), so any claim for it resolves to
+ * SCOPE_BINDING_AMBIGUOUS — a typed, non-ALREADY_CLAIMED failure.
+ */
+async function publishAmbiguous(
+	fixture: Fixture,
+	callID: string,
+): Promise<void> {
+	await publish(fixture, callID, '1.1');
+	await publish(fixture, callID, '1.2');
+}
+
 describe('#3403 claim partial-commit atomicity', () => {
 	test('a second claimant throws AND its lineage write is rolled back (no half-applied activation)', async () => {
 		const fixture = await setup('already-claimed');
@@ -172,6 +194,83 @@ describe('#3403 claim partial-commit atomicity', () => {
 		}
 	}, 30_000);
 
+	test('an AMBIGUOUS claim (multiple live generations) rolls its lineage write back', async () => {
+		const fixture = await setup('ambiguous');
+		try {
+			await publishAmbiguous(fixture, 'call-amb');
+			await expect(
+				claimChild(fixture, 'call-amb', 'child-amb'),
+			).rejects.toThrow('SCOPE_BINDING_AMBIGUOUS');
+			expect(resolveDispatchParent('child-amb')).toBeUndefined();
+			expect(getAgentSession('child-amb')).toBeUndefined();
+		} finally {
+			fixture.cleanup();
+		}
+	}, 30_000);
+
+	test.each([
+		'SCOPE_BINDING_PERSISTENCE_FAILED',
+		'SCOPE_BINDING_EXPIRED',
+		'SCOPE_BINDING_STORE_OVERLOADED',
+	])('a typed %s claim failure rolls its lineage write back', async (code) => {
+		const fixture = await setup(`typed-${code}`);
+		const original = _internals.claimScopeBindingForChildDurably;
+		// Injected typed failure: the same non-benign rollback arm the real
+		// persistence/expiry/overload results reach.
+		_internals.claimScopeBindingForChildDurably = (async () => ({
+			ok: false,
+			code,
+			message: 'injected typed failure',
+		})) as never;
+		try {
+			await expect(
+				claimChild(fixture, `call-${code}`, `child-${code}`),
+			).rejects.toThrow(code);
+			expect(resolveDispatchParent(`child-${code}`)).toBeUndefined();
+		} finally {
+			_internals.claimScopeBindingForChildDurably = original;
+			fixture.cleanup();
+		}
+	}, 30_000);
+
+	test('a THROWN claim rolls its lineage write back before the exception propagates', async () => {
+		const fixture = await setup('thrown-claim');
+		const original = _internals.claimScopeBindingForChildDurably;
+		_internals.claimScopeBindingForChildDurably = async () => {
+			throw new Error('scope store unavailable');
+		};
+		try {
+			await expect(
+				claimChild(fixture, 'call-throw', 'child-throw'),
+			).rejects.toThrow('scope store unavailable');
+			expect(resolveDispatchParent('child-throw')).toBeUndefined();
+		} finally {
+			_internals.claimScopeBindingForChildDurably = original;
+			fixture.cleanup();
+		}
+	}, 30_000);
+
+	test('overlapping failed taskMetadata attempts for one child leave NO lineage (serialized)', async () => {
+		const fixture = await setup('overlap-both-fail');
+		try {
+			await publishAmbiguous(fixture, 'call-overlap');
+			// Two attempts for the SAME child in flight at once — the shape
+			// message.part.updated ticks produce. Serialized, the second attempt
+			// captures the first attempt's ROLLED-BACK state, not its in-flight
+			// write, so both failing leaves no lineage behind.
+			const settled = await Promise.allSettled([
+				claimChild(fixture, 'call-overlap', 'child-both'),
+				claimChild(fixture, 'call-overlap', 'child-both'),
+			]);
+			for (const outcome of settled) {
+				expect(outcome.status).toBe('rejected');
+			}
+			expect(resolveDispatchParent('child-both')).toBeUndefined();
+		} finally {
+			fixture.cleanup();
+		}
+	}, 30_000);
+
 	test('#3036 preservation: a SCOPE_NOT_DECLARED taskMetadata still records lineage', async () => {
 		const fixture = await setup('scope-not-declared');
 		try {
@@ -192,8 +291,7 @@ describe('#3403 claim partial-commit atomicity', () => {
 		const fixture = await setup('adopted-restore');
 		try {
 			// Pre-existing best-effort adopted lineage for the loser.
-			const { setDispatchParent } = await import('../../../src/state');
-			setDispatchParent('child-loser', 'adopted-parent');
+			writeDispatchParentEntry('child-loser', 'adopted-parent');
 			await publish(fixture, 'call-1', '1.1');
 			await claimChild(fixture, 'call-1', 'child-winner');
 			await expect(
@@ -216,30 +314,6 @@ describe('#3403 claim partial-commit atomicity', () => {
 		expect(resolveDispatchParent('child-race')).toBe('parent-new');
 	});
 
-	test('overlapping failures keep the HOST-OBSERVED pair (deliberate #3036 semantics)', () => {
-		// Reviewer round-1 scenario: attempt A writes with no previous
-		// parent; attempt B (same child) reads A's write as ITS previous
-		// and writes a newer generation; A fails (rollback no-ops on the
-		// generation mismatch); B fails and restores its captured
-		// previous — A's parent. The surviving lineage is the HOST-OBSERVED
-		// pair, which is exactly what the #3036 benign path
-		// (SCOPE_NOT_DECLARED) deliberately records: the pair is host-typed
-		// truth, independent of claim success. What must NEVER survive is
-		// a half-applied ACTIVATION (lineage without bindings for a claim
-		// that succeeded) — the loser's session state stays absent below.
-		resetSwarmState();
-		const genA = writeDispatchParentEntry('child-both-fail', 'parent');
-		// B reads A's write as previous, then writes newer.
-		const previousForB = resolveDispatchParent('child-both-fail');
-		const genB = writeDispatchParentEntry('child-both-fail', 'parent');
-		// A fails first: rollback no-ops (live generation is B's now).
-		restoreDispatchParentEntry('child-both-fail', genA, undefined);
-		expect(resolveDispatchParent('child-both-fail')).toBe('parent');
-		// B fails: restores its captured previous (A's write).
-		restoreDispatchParentEntry('child-both-fail', genB, previousForB);
-		expect(resolveDispatchParent('child-both-fail')).toBe('parent');
-	});
-
 	test('stale-race (ii): an older failure never deletes a newer SAME-parent write', () => {
 		resetSwarmState();
 		const gen1 = writeDispatchParentEntry('child-race2', 'parent');
@@ -250,7 +324,7 @@ describe('#3403 claim partial-commit atomicity', () => {
 		expect(resolveDispatchParent('child-race2')).toBe('parent');
 	});
 
-	test('a retry after a transient claim failure converges to the uninterrupted state', async () => {
+	test('a retry after a competing-claim failure converges to the uninterrupted state', async () => {
 		const fixture = await setup('retry-converge');
 		try {
 			await publish(fixture, 'call-1', '1.1');

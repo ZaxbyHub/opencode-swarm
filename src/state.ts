@@ -1432,8 +1432,9 @@ function setDispatchParentEntry(
 
 /**
  * The complete Issue #3036 authoritative write (entry + expired-pending prune
- * + exactly-one matching pending-authorization consumption), shared by
- * setDispatchParent and writeDispatchParentEntry so the two can never drift.
+ * + exactly-one matching pending-authorization consumption). Shared by the
+ * generation-returning write entry point (writeDispatchParentEntry) so every
+ * authoritative lineage write goes through one body.
  */
 function commitDispatchParent(
 	childSessionId: string,
@@ -1454,17 +1455,10 @@ function commitDispatchParent(
 	return generation;
 }
 
-export function setDispatchParent(
-	childSessionId: string,
-	parentSessionId: string,
-): void {
-	commitDispatchParent(childSessionId, parentSessionId);
-}
-
 /**
- * #3403: the generation-returning equivalent of the complete setDispatchParent
- * operation. The delegation gate's taskMetadata uses the returned generation
- * to scope a failed claim's rollback to exactly this write.
+ * #3403: the authoritative lineage write. The delegation gate's taskMetadata
+ * uses the returned generation to scope a failed claim's rollback to exactly
+ * this write.
  */
 export function writeDispatchParentEntry(
 	childSessionId: string,
