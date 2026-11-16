@@ -163,7 +163,7 @@ export const TIER1_PRESERVED_SWARM_ENTRIES: ReadonlySet<string> = new Set([
 	// Registry-owned `project-swarm` directories (scripts/retention-registry.
 	// data.ts). Two are classified `authoritative` and are protected regardless
 	// of age; the others are rebuilt or short-lived but their own writers own
-	// their lifecycle. `tests/unit/retention/unclaimed-tier1-registry.test.ts`
+	// their lifecycle. `tests/unit/retention/unclaimed-guards.test.ts`
 	// fails when a registry directory is missing from this set.
 	'background-delegation-fallback',
 	'worktree-provisioning-owners',
@@ -393,7 +393,7 @@ export function loadOwnerManifests(swarmRoot: string): OwnerManifestSet {
 				fail(`"preserve" lists "${claimed}" twice`);
 			}
 			seen.add(claimed);
-			const existing = claims.get(claimed);
+			const existing = claims.get(claimed.toLowerCase());
 			if (existing) {
 				fail(
 					`claims "${claimed}", already claimed by ${existing.manifestFile}; two owners cannot share one directory`,
@@ -410,7 +410,8 @@ export function loadOwnerManifests(swarmRoot: string): OwnerManifestSet {
 					? maxAgeDays
 					: DEFAULT_UNCLAIMED_MAX_AGE_DAYS,
 		};
-		for (const claimedName of seen) claims.set(claimedName, claim);
+		for (const claimedName of seen)
+			claims.set(claimedName.toLowerCase(), claim);
 	}
 	return { claims, files };
 }

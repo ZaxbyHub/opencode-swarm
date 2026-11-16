@@ -371,6 +371,50 @@ describe('audit log (L-1) and manifests (L-3)', () => {
 		expect(existsSync(kept)).toBe(true);
 	});
 
+	it('claim lookup is case-insensitive: preserve "Review-Sandbox" leases dir review-sandbox', async () => {
+		const root = makeRoot('claim-case');
+		seed(root, path.join('.swarm', 'retention.d', 'owner.json'), NOW);
+		writeFileSync(
+			path.join(root, '.swarm', 'retention.d', 'owner.json'),
+			JSON.stringify({
+				owner: 'reviewer',
+				preserve: ['Review-Sandbox'],
+				maxAgeDays: 100,
+			}),
+		);
+		const kept = seed(
+			root,
+			path.join('.swarm', 'review-sandbox', 'a.bin'),
+			NOW - 50 * DAY_MS,
+		);
+		const victim = seed(
+			root,
+			path.join('.swarm', 'zz-scratch', 'a.bin'),
+			NOW - 50 * DAY_MS,
+		);
+		await runRetentionSweep(root, { now: NOW });
+		expect(existsSync(victim)).toBe(false);
+		expect(existsSync(kept)).toBe(true);
+	});
+
+	it('two owners claiming names that differ only in case is refused as a duplicate', async () => {
+		const root = makeRoot('claim-dup-case');
+		const dir = path.join(root, '.swarm', 'retention.d');
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(
+			path.join(dir, 'a.json'),
+			JSON.stringify({ owner: 'a', preserve: ['Foo'] }),
+		);
+		writeFileSync(
+			path.join(dir, 'b.json'),
+			JSON.stringify({ owner: 'b', preserve: ['foo'] }),
+		);
+		const victim = seed(root, path.join('.swarm', 'zz-scratch', 'old.bin'));
+		const result = await runRetentionSweep(root, { now: NOW });
+		expect(result.errors.manifests).toContain('already claimed');
+		expect(existsSync(victim)).toBe(true);
+	});
+
 	it.each([
 		['two manifests declare one owner', 'dup'],
 		['maxAgeDays below 1', 'low'],
