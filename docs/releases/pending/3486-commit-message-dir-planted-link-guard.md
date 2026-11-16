@@ -35,7 +35,12 @@ The tool now ACQUIRES the directory with a real proof before any use:
   retained.
 
 The TTL prune is best-effort hygiene with its OWN same-tick lstat re-proof at
-entry (a directory swapped for a link after the acquisition is skipped, never
-pruned through), so neither the stale-file deletions nor the authored write can
-be redirected through a swapped link. New suite:
+entry, and the write carries the same-tick validateTarget re-proof the atomic
+writer already documents (FB-001): after each re-proof there is no awaitable
+boundary before the synchronous filesystem operations, so an in-process task
+that swaps the directory for a link during a yield is caught rather than
+written/pruned through. As with every path-based check on a portable Node
+runtime, a separate PROCESS racing the syscall boundary itself is outside this
+guarantee — the threat closed here is the planted-persistent-link and
+in-process-swap classes (the issue's model), not cross-process TOCTOU. New suite:
 `tests/unit/tools/prepare-pr-feedback-commit-message-symlink.test.ts`.
