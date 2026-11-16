@@ -351,12 +351,16 @@ const BARE_TOKEN_VALUE_PATTERNS: ReadonlyArray<{
 	{ family: 'google', re: /\bya29\.[A-Za-z0-9_-]{20,}/g },
 	// #3712 F-006: Groq service keys.
 	{ family: 'groq', re: /\bgsk_[A-Za-z0-9]{20,}/g },
-	// #3712 F-006: JWTs (header and payload both base64url of `{"…`,
-	// so both leading segments start with eyJ; the signature closes the
-	// token). Matches the WHOLE three-segment token as one span.
+	// #3712 F-006: JWTs (the HEADER segment is base64url of `{"…`, so it
+	// starts with eyJ; the signature closes the token). Matches the WHOLE
+	// three-segment token as one span.
+	//
+	// #3710 review: the PAYLOAD segment is any base64url run, not only a
+	// JSON object — an empty claims object encodes as `e30`, not `eyJ` (and a
+	// `null`/string payload encodes as `bnVsbA`/`Ingi`).
 	{
 		family: 'jwt',
-		re: /\beyJ[A-Za-z0-9_-]{10,1024}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g,
+		re: /\beyJ[A-Za-z0-9_-]{10,1024}\.[A-Za-z0-9_-]{1,}\.[A-Za-z0-9_-]{10,}/g,
 	},
 	// #3712 F-013: base64 credential arm at the display site — mirrors the
 	// shell site's ≥80-char mixed-class run (the class guard keeps hex-only

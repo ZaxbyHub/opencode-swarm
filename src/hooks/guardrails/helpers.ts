@@ -246,13 +246,16 @@ export function redactShellCommand(cmd: string): string {
 		.replace(/\bxox[baprs]-[A-Za-z0-9-]{10,}/g, '[REDACTED:slack]')
 		.replace(/\bAIza[A-Za-z0-9_-]{30,}/g, '[REDACTED:google]')
 		// #3712 F-006: Google OAuth client secrets, GCP access tokens, Groq
-		// service keys, and whole three-segment JWTs (header and payload
-		// segments are both base64url of `{"…`, so both start with eyJ).
+		// service keys, and whole three-segment JWTs (the HEADER segment is
+		// base64url of `{"…`, so it starts with eyJ).
 		.replace(/\bGOCSPX-[A-Za-z0-9_-]{20,}/g, '[REDACTED:google]')
 		.replace(/\bya29\.[A-Za-z0-9_-]{20,}/g, '[REDACTED:google]')
 		.replace(/\bgsk_[A-Za-z0-9]{20,}/g, '[REDACTED:groq]')
 		.replace(
-			/\beyJ[A-Za-z0-9_-]{10,1024}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g,
+			// #3710 review: the PAYLOAD segment is any base64url run, not only a
+			// JSON object — an empty claims object encodes as `e30`, not `eyJ`
+			// (and a `null`/string payload encodes as `bnVsbA`/`Ingi`).
+			/\beyJ[A-Za-z0-9_-]{10,1024}\.[A-Za-z0-9_-]{1,}\.[A-Za-z0-9_-]{10,}/g,
 			'[REDACTED:jwt]',
 		)
 		// #3712 azure CONTEXTUAL arm: connection-string `AccountKey=<base64>`

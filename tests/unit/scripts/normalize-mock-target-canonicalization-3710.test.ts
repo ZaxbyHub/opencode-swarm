@@ -55,7 +55,11 @@ function runBounded(script: string, arg: string): Promise<BoundedResult> {
 	return new Promise((resolve) => {
 		const child = spawn('bash', ['-c', script, BASH_LIB_SPEC, arg], {
 			cwd: REPO_ROOT,
-			stdin: 'ignore',
+			// node:child_process's spawn takes stdio, not stdin: a
+			// `stdin: 'ignore'` option is IGNORED there, so the child keeps an
+			// OPEN PIPE on stdin (it can block waiting for input). stdio slot 0
+			// is the way to close the child's stdin (AGENTS.md invariant 3).
+			stdio: ['ignore', 'pipe', 'pipe'],
 			windowsHide: true,
 		});
 		let stdout = '';

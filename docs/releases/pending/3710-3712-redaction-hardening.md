@@ -15,12 +15,16 @@ these additional bare well-known credential families, each with its own
 - `openrouter` — `sk-or-…` shapes (previously mislabeled `[REDACTED:openai]`)
 - `google` — `GOCSPX-…` (OAuth client secrets) and `ya29.…` (GCP access tokens)
 - `groq` — `gsk_…` service keys
-- `jwt` — whole three-segment JWTs (both leading segments start `eyJ`). The
-  header segment is length-bounded (10–1024 chars; the payload/signature
-  segments stay at 10+): an unbounded segment made the regex quadratic on a
-  dense `eyJ-` run at the shell site, which has no input-length bound and
-  redacts BEFORE the audit truncation (measured: 256 KB took 30.7–33.3 s at
-  the unbounded arm; 150–229 ms at the bound). **Disclosed bound (verified):**
+- `jwt` — whole three-segment JWTs. The HEADER segment is base64url of `{"…`
+  (so it starts with `eyJ`) and is length-bounded to 10–1024 chars; the
+  PAYLOAD segment is any base64url run (≥1 char) and the signature is
+  ≥10 chars. The payload is deliberately NOT required to be a JSON object:
+  an empty claims object encodes as `e30`, not `eyJ` (and a `null`/string
+  payload encodes as `bnVsbA`/`Ingi`), so requiring `eyJ` there would miss
+  those tokens. **Disclosed bound (verified):** an unbounded header segment
+  made the regex quadratic on a dense `eyJ-` run at the shell site, which
+  has no input-length bound and redacts BEFORE the audit truncation (measured:
+  256 KB took 30.7–33.3 s at the unbounded arm; 150–229 ms at the bound), so
   a JWT whose header segment EXCEEDS 1024 chars is NOT matched by this arm
   at either site, and the base64 fallback arm's class excludes base64url's
   `-`/`_`, so such a token is not eliminated by a fallback either. A JWS

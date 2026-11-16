@@ -46,6 +46,22 @@ describe('JWT arm is bounded at the shell site (#3710 review R-19)', () => {
 		expect(redactShellCommand(SYNTH_JWT)).toContain('[REDACTED:jwt]');
 	}, 30_000);
 
+	test('a JWT with a non-object payload (empty claims, e30) is redacted at both sites', () => {
+		// An EMPTY claims object encodes as `e30`, not `eyJ` — the payload
+		// segment of a JWT is any base64url run, not only a JSON object. An
+		// arm that required the payload to start with `eyJ` missed this shape
+		// (and a `null`/string payload encodes as `bnVsbA`/`Ingi`).
+		const emptyClaimsJwt =
+			'eyJhbGciOiJIUzI1NiJ9.e30.c2lnbmF0dXJlU2lnbmF0dXJlVmFsdWUxMjM0NTY3ODkw';
+		expect(sanitizeFailureEvidenceDisplay(emptyClaimsJwt)).toContain(
+			'[REDACTED:jwt]',
+		);
+		expect(redactShellCommand(emptyClaimsJwt)).toContain('[REDACTED:jwt]');
+		expect(sanitizeFailureEvidenceDisplay(emptyClaimsJwt)).not.toContain(
+			'e30.',
+		);
+	}, 30_000);
+
 	test('a JWT with a long-but-bounded header is still redacted at both sites', () => {
 		// The header segment bound is 1024 chars; a token just under it must
 		// still be eliminated (the bound must not cost realistic coverage).
