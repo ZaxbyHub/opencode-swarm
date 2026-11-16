@@ -26,15 +26,16 @@ these additional bare well-known credential families, each with its own
   `-`/`_`, so such a token is not eliminated by a fallback either. A JWS
   that carries an `x5c` certificate chain (RFC 7515 §4.1.6 — e.g. an Apple
   App Store Server or Android attestation signed payload) routinely has a
-  header of 1.2–5 KB, so this shape IS produced in practice: the header
-  itself is caught by the base64 arm, but the PAYLOAD and the SIGNATURE
-  survive in clear text at both sites in a bare placement (e.g.
-  `echo <jwt> | jq`); a key/value placement (`token=<jwt>`) is still caught
-  by the generic credential arm at the shell site. The `jwt` family is NEW in
-  this change — at the PR's base neither site patterned a JWT at all, so no
-  JWT (long header or not) was covered there — but the coverage gap is real
-  and is tracked in issue #3723 (the bound stays; the gap needs a
-  single-pass tokenizer that does not scan per start position).
+  header of 1.2–5 KB, so this shape IS produced in practice: the header is
+  TYPICALLY caught by the base64 arm (that arm's class excludes base64url's
+  `-`/`_`, so a header whose long run carries those characters is not), but
+  the PAYLOAD and the SIGNATURE survive in clear text at both sites in a bare
+  placement (e.g. `echo <jwt> | jq`); a key/value placement (`token=<jwt>`)
+  is still caught by the generic credential arm at the shell site. The `jwt`
+  family is NEW in this change — at the PR's base neither site patterned a
+  JWT at all, so no JWT (long header or not) was covered there — but the
+  coverage gap is real and is tracked in issue #3723 (the bound stays; the
+  gap needs a single-pass tokenizer that does not scan per start position).
 - `azure` — CONTEXTUAL only: connection-string `AccountKey=<base64>` spans
   collapse to the bare `[REDACTED:azure]` placeholder. The arm is
   case-INSENSITIVE (`accountKey=`, `ACCOUNTKEY=`), matching Azure's
