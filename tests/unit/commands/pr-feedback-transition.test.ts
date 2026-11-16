@@ -169,6 +169,7 @@ async function materializeTerminalReview(runId = RUN_ID): Promise<{
 		[
 			{
 				laneId: `${runId}-critic`,
+				agent: 'critic',
 				workflowLane: `${runId}-critic`,
 				reviewItemIds: candidateIds.slice(1),
 			},

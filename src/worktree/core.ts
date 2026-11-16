@@ -23,6 +23,10 @@ import { advisoryWarn } from '../services/warning-buffer';
 import { log } from '../utils';
 import { bunSpawn } from '../utils/bun-compat';
 import { resolveGitExecutable } from '../utils/git-executable.js';
+import {
+	assertSettlementArtifactsRemovable,
+	withSettlementArtifactLifecycle,
+} from './settlement-artifact-lifecycle';
 // Note: writeScopeToDisk is accessed via _internals.writeScopeToDisk at call time
 // to allow DI for tests without mock.module leakage. The top-level import is intentionally
 // omitted; the seam default performs a dynamic import on first use.
@@ -46,6 +50,8 @@ import type {
  * local object is file-scoped and trivially restorable via `afterEach`.
  */
 export const _internals: {
+	withSettlementArtifactLifecycle: typeof withSettlementArtifactLifecycle;
+	assertSettlementArtifactsRemovable: typeof assertSettlementArtifactsRemovable;
 	bunSpawn: typeof bunSpawn;
 	/**
 	 * Issue #2527 F3: clear the durable live-lane-owner record when this
@@ -107,6 +113,8 @@ export const _internals: {
 	 */
 	resolveGitExecutable: typeof resolveGitExecutable;
 } = {
+	withSettlementArtifactLifecycle,
+	assertSettlementArtifactsRemovable,
 	clearLiveLaneOwner,
 	bunSpawn,
 	resolveGitExecutable,
@@ -1076,6 +1084,33 @@ export async function provisionWorktree(
  * @returns `{ success: true }` on success or `{ error: string }` on failure.
  */
 export async function removeWorktree(
+	worktreePath: string,
+	projectRoot: string,
+	options?: { force?: boolean; worktreeDir?: string },
+): Promise<RemoveSuccess | RemoveFailure> {
+	try {
+		return await _internals.withSettlementArtifactLifecycle(
+			projectRoot,
+			async () => {
+				await _internals.assertSettlementArtifactsRemovable(projectRoot, {
+					path: worktreePath,
+				});
+				return removeWorktreeUnderLifecycleLock(
+					worktreePath,
+					projectRoot,
+					options,
+				);
+			},
+		);
+	} catch (error) {
+		return {
+			error: `CODER_SETTLEMENT_ARTIFACT_REMOVAL_REFUSED: ${error instanceof Error ? error.message : String(error)}`,
+		};
+	}
+}
+
+/** Caller holds artifact lifecycle admission across every Git and residual removal. */
+async function removeWorktreeUnderLifecycleLock(
 	worktreePath: string,
 	projectRoot: string,
 	options?: { force?: boolean; worktreeDir?: string },

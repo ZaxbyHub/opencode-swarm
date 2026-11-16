@@ -25,6 +25,10 @@ import {
 	loadFullAutoRunState,
 	startFullAutoRun,
 } from '../../../src/full-auto/state';
+import {
+	recordCodeModeWrapperCall,
+	resetCodeModeWrapperCalls,
+} from '../../../src/hooks/code-mode-wrapper';
 import { createFullAutoPermissionHook } from '../../../src/hooks/full-auto-permission';
 import { _internals as stateInternals, swarmState } from '../../../src/state';
 
@@ -67,6 +71,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	resetCodeModeWrapperCalls();
 	stateInternals.swarmState.opencodeClient = origClient;
 	swarmState.activeAgent.delete(SESSION_ID);
 	swarmState.agentSessions.delete(SESSION_ID);
@@ -332,5 +337,100 @@ describe('Phase 6.6/6.7 — APPROVED critic + persistence failure -> BLOCKED out
 				{ args: { query: 'foo' } },
 			),
 		).rejects.toThrow(/FULL_AUTO_(BLOCKED|CRITIC_DENY)/);
+	});
+});
+
+describe('#3446 — Code Mode execute wrapper under the permission hook', () => {
+	const code = 'return await tools.swarm_status({});';
+	// The pass-through is opt-in (permission_policy.trust_code_mode_wrapper).
+	const trustingConfig = (): PluginConfig => {
+		const base = makeConfig() as unknown as {
+			full_auto: Record<string, unknown>;
+		};
+		return {
+			...base,
+			full_auto: {
+				...base.full_auto,
+				permission_policy: {
+					enabled: true,
+					allow_defaults: true,
+					trust_code_mode_wrapper: true,
+				},
+			},
+		} as unknown as PluginConfig;
+	};
+
+	test('an opted-in call the v2 adapter marked as the wrapper is allowed without a critic dispatch', async () => {
+		startFullAutoRun(tmpDir, SESSION_ID, { enabled: true });
+		// No client: any critic escalation would pause the run (fail-closed).
+		stateInternals.swarmState.opencodeClient = null;
+		recordCodeModeWrapperCall(SESSION_ID, 'wrap-1');
+		const hook = createFullAutoPermissionHook({
+			config: trustingConfig(),
+			directory: tmpDir,
+		});
+		await hook.toolBefore(
+			{ tool: 'execute', sessionID: SESSION_ID, callID: 'wrap-1' },
+			{ args: { code } },
+		);
+		expect(loadFullAutoRunState(tmpDir, SESSION_ID)?.status).toBe('running');
+		resetCodeModeWrapperCalls();
+	});
+
+	test('a marked wrapper is escalated by default (no operator opt-in), pausing without a critic', async () => {
+		startFullAutoRun(tmpDir, SESSION_ID, { enabled: true });
+		stateInternals.swarmState.opencodeClient = null;
+		recordCodeModeWrapperCall(SESSION_ID, 'wrap-default-1');
+		const hook = createFullAutoPermissionHook({
+			config: makeConfig(),
+			directory: tmpDir,
+		});
+		await expect(
+			hook.toolBefore(
+				{ tool: 'execute', sessionID: SESSION_ID, callID: 'wrap-default-1' },
+				{ args: { code } },
+			),
+		).rejects.toThrow(
+			/FULL_AUTO_BLOCKED: critic verdict BLOCKED.*opencodeClient unavailable/,
+		);
+		expect(loadFullAutoRunState(tmpDir, SESSION_ID)?.status).toBe('paused');
+		resetCodeModeWrapperCalls();
+	});
+
+	test('an unmarked execute tool with a code argument is still escalated even when opted in (and pauses without a critic)', async () => {
+		startFullAutoRun(tmpDir, SESSION_ID, { enabled: true });
+		stateInternals.swarmState.opencodeClient = null;
+		const hook = createFullAutoPermissionHook({
+			config: trustingConfig(),
+			directory: tmpDir,
+		});
+		await expect(
+			hook.toolBefore(
+				{ tool: 'execute', sessionID: SESSION_ID, callID: 'plugin-exec-1' },
+				{ args: { code } },
+			),
+		).rejects.toThrow(
+			/FULL_AUTO_BLOCKED: critic verdict BLOCKED.*opencodeClient unavailable/,
+		);
+		expect(loadFullAutoRunState(tmpDir, SESSION_ID)?.status).toBe('paused');
+	});
+	test('an opted-in marked wrapper whose program reaches the network is still escalated (and pauses without a critic)', async () => {
+		startFullAutoRun(tmpDir, SESSION_ID, { enabled: true });
+		stateInternals.swarmState.opencodeClient = null;
+		recordCodeModeWrapperCall(SESSION_ID, 'wrap-fetch-1');
+		const hook = createFullAutoPermissionHook({
+			config: trustingConfig(),
+			directory: tmpDir,
+		});
+		await expect(
+			hook.toolBefore(
+				{ tool: 'execute', sessionID: SESSION_ID, callID: 'wrap-fetch-1' },
+				{ args: { code: "return await fetch('http://localhost:4000/x');" } },
+			),
+		).rejects.toThrow(
+			/FULL_AUTO_BLOCKED: critic verdict BLOCKED.*opencodeClient unavailable/,
+		);
+		expect(loadFullAutoRunState(tmpDir, SESSION_ID)?.status).toBe('paused');
+		resetCodeModeWrapperCalls();
 	});
 });

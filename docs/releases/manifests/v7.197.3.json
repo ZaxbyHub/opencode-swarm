@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.197.3",
+  "tagCommit": "501d12f5bf9cfcb1a43ad918bcaa62ddc8efb106",
+  "targetCommitish": "501d12f5bf9cfcb1a43ad918bcaa62ddc8efb106",
+  "releaseBodySha256": "adee1396a41c507bd19d29961e0b5e1a190a8c48aae2652fdc19c5f341436598",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/2908-settle-admit-authority-census.md",
+      "sha256": "a4ac79e214771f6b1dd74179f85452678dda4967baf50acc38883934bf748a12"
+    },
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/2955-fragment-path-table.md",
+      "sha256": "9e1336e7b4bb84b1b0e3ccca20b3e28a083ab0acfeba76cc9e53f3a698bf663e"
+    }
+  ]
+}

@@ -5,35 +5,36 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 // Import the tool AFTER setting up test environment
-const { checkpoint } = await import('../../../src/tools/checkpoint');
+const { checkpoint, _internals } = await import(
+	'../../../src/tools/checkpoint'
+);
+const { stubCheckpointProbesAsRepo, stubCheckpointPreflightNotRepo } =
+	await import('../../helpers/checkpoint-probe-seams');
 
 describe('checkpoint tool', () => {
 	let tempDir: string;
 	let originalCwd: string;
 
 	beforeEach(() => {
-		// Create a unique temp directory for each test
 		tempDir = fs.realpathSync(
 			fs.mkdtempSync(path.join(os.tmpdir(), 'checkpoint-test-')),
 		);
 		originalCwd = process.cwd();
-
 		// Initialize a git repo in temp directory
 		process.chdir(tempDir);
 		execSync('git init', { encoding: 'utf-8' });
 		execSync('git config --local commit.gpgsign false', { encoding: 'utf-8' });
 		execSync('git config user.email "test@test.com"', { encoding: 'utf-8' });
 		execSync('git config user.name "Test"', { encoding: 'utf-8' });
-		// Create initial commit
 		fs.writeFileSync(path.join(tempDir, 'initial.txt'), 'initial');
 		execSync('git add .', { encoding: 'utf-8' });
 		execSync('git commit -m "initial"', { encoding: 'utf-8' });
+		// PRR-011: probe seams stubbed to "repo" (property assignment).
+		stubCheckpointProbesAsRepo(_internals);
 	});
 
 	afterEach(() => {
-		// Restore original directory
 		process.chdir(originalCwd);
-		// Clean up temp directory
 		try {
 			fs.rmSync(tempDir, { recursive: true, force: true });
 		} catch {
@@ -314,30 +315,29 @@ describe('checkpoint tool', () => {
 
 	describe('non-git directory', () => {
 		test('returns error when not in git repo', async () => {
-			// Create temp dir without git - use different temp root to avoid locking
 			const nonGitDir = path.join(os.tmpdir(), 'non-git-' + Date.now());
 			fs.mkdirSync(nonGitDir, { recursive: true });
-
-			// Save original dir and change to non-git
 			const prevCwd = process.cwd();
 			process.chdir(nonGitDir);
+
+			// The parent stub answers "repo"; this leg needs not-git.
+			stubCheckpointPreflightNotRepo(_internals);
 
 			const result = await checkpoint.execute({ action: 'list' });
 			const parsed = JSON.parse(result);
 
 			expect(parsed.success).toBe(false);
-			// Error must include the specific isGitRepo warning, not just a generic message.
-			// The entry guard now surfaces: "git probe failed — directory may not be a git repository"
-			expect(parsed.error).toMatch(
-				/git probe failed|may not be a git repository/,
-			);
+			// #3427: the entry preflight rides the shared async reader, so a
+			// failed probe (here: a real non-repo temp dir) is a uniform
+			// not-a-repository refusal — the old sync probe's retry-chain
+			// warning texts died with the local isGitRepo helper.
+			expect(parsed.error).toMatch(/not a git repository/);
 			expect(parsed.error).toContain(
 				'checkpoint tools require a git repository',
 			);
 
-			// Restore first, then cleanup
 			process.chdir(prevCwd);
-			// Use setTimeout to delay cleanup and avoid locking
+			// Delayed cleanup avoids Windows directory locking.
 			setTimeout(() => {
 				try {
 					fs.rmSync(nonGitDir, { recursive: true, force: true });

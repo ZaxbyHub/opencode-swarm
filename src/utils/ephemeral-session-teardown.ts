@@ -193,31 +193,101 @@ export type EphemeralTeardownVerification =
 	  };
 
 /**
- * Bounded existence check via `session.get`. `get` throwing (session-gone
- * errors surface as rejections on the SDK surface) or returning an empty body
- * both mean the session is gone (mirrors the reason-forwarding resolver
- * precedent in `src/hooks/pr-workflow-session-resolver.ts`).
+ * Existence verdict for the post-delete verify (`session.get`).
+ *
+ * - `'gone'` — confirmed-gone signal only: an empty body (`data` undefined or
+ *   null with no transport-class error envelope), or — for hosts configured
+ *   `throwOnError: true` — a rejection that is neither the verify deadline
+ *   error (compared by identity) nor transport-class.
+ * - `'unreadable'` — the verify timed out (the locally constructed deadline
+ *   error, distinguished by identity) or the call failed with a transport-class
+ *   error (whatwg fetch `TypeError`, connection-reset family). Never a death
+ *   claim: under the installed SDK's `throwOnError` default-off, session-gone
+ *   surfaces through the body check, so nearly every rejection/envelope-error
+ *   reaching these paths is an unproven-death signal (issue #2964).
+ * - `'alive'` — non-empty body, or `get` unavailable (cannot disprove).
  */
+type SessionExistence = 'alive' | 'gone' | 'unreadable';
+
+/**
+ * Transport-class failure codes for `isTransientTransportError`. Closed set —
+ * do not broaden speculatively; an unrecognized error keeps today's semantics
+ * (conservative in both directions: no new death claims, no new unverified
+ * results).
+ */
+const TRANSIENT_TRANSPORT_ERROR_CODES: ReadonlySet<string> = new Set([
+	'ECONNRESET',
+	'ECONNREFUSED',
+	'EAI_AGAIN',
+	'ETIMEDOUT',
+	'ENOTFOUND',
+	'EPIPE',
+	'UND_ERR_SOCKET',
+]);
+
+/**
+ * Whether an error looks like a transient transport failure rather than a
+ * host-level answer: a whatwg fetch network `TypeError`, a Node/Deno
+ * connection error code, or an SDK abort. Used both for rejections of
+ * `session.get` and for transport errors normalized into `{data: null, error}`
+ * envelopes by the v2 session shim (`src/host/v2/session-client.ts`).
+ */
+function isTransientTransportError(err: unknown): boolean {
+	if (typeof err !== 'object' || err === null) return false;
+	if (err instanceof TypeError) return true;
+	const coded = err as { code?: unknown; name?: unknown };
+	if (
+		typeof coded.code === 'string' &&
+		TRANSIENT_TRANSPORT_ERROR_CODES.has(coded.code)
+	) {
+		return true;
+	}
+	return coded.name === 'AbortError';
+}
+
 async function sessionExists(
 	session: EphemeralSessionLifecycle,
 	sessionId: string,
 	verifyTimeoutMs: number,
-): Promise<boolean> {
-	if (typeof session.get !== 'function') return true; // cannot disprove → treat as alive
+): Promise<SessionExistence> {
+	if (typeof session.get !== 'function') return 'alive'; // cannot disprove → treat as alive
+	// #2964: hoisted so the deadline rejection is distinguishable BY IDENTITY
+	// from any host-thrown error (withTimeout rejects with this exact object).
+	const verifyTimeoutError = new Error(
+		`ephemeral session verify timed out after ${verifyTimeoutMs}ms`,
+	);
 	try {
 		const result = await withTimeout(
 			session.get({ path: { id: sessionId } }),
 			verifyTimeoutMs,
-			new Error(
-				`ephemeral session verify timed out after ${verifyTimeoutMs}ms`,
-			),
+			verifyTimeoutError,
 		);
 		const body = (result as { data?: unknown } | undefined)?.data;
-		if (body === undefined || body === null) return false;
-		return true;
-	} catch {
-		// A rejected get is how the host reports "no such session".
-		return false;
+		if (body === undefined || body === null) {
+			// v2-host arm (#2964): the v2 session shim normalizes host
+			// rejections to `{data: null, error}` envelopes, so a transport
+			// failure reaches this body check without ever throwing. Only a
+			// transport-class envelope error is unproven; an absent error (or a
+			// host not-found error object) is the gone signal, exactly as the
+			// raw v1 SDK resolves 404s to `{error}` with no `data` key.
+			const envelopeError = (result as { error?: unknown } | undefined)?.error;
+			if (
+				envelopeError !== undefined &&
+				envelopeError !== null &&
+				isTransientTransportError(envelopeError)
+			) {
+				return 'unreadable';
+			}
+			return 'gone';
+		}
+		return 'alive';
+	} catch (err) {
+		// The verify deadline fired (identity match) or the transport died —
+		// neither proves the session is gone. Everything else keeps today's
+		// 'gone' reading for hosts that throw on 404 (`throwOnError: true`).
+		if (err === verifyTimeoutError) return 'unreadable';
+		if (isTransientTransportError(err)) return 'unreadable';
+		return 'gone';
 	}
 }
 
@@ -260,12 +330,25 @@ export async function teardownEphemeralSessionVerified(
 			skipAbort: deleteAttempts > 0 ? true : options.skipAbort,
 		});
 		deleteAttempts += 1;
-		const alive = await _internals.sessionExists(
+		// #2964: only a confirmed-gone signal verifies teardown; an unreadable
+		// verify (deadline or transport) is a typed failure, never ok:true.
+		const existence = await _internals.sessionExists(
 			session,
 			sessionId,
 			verifyTimeoutMs,
 		);
-		if (!alive) return { ok: true, sessionId, attempts: deleteAttempts };
+		if (existence === 'gone') {
+			return { ok: true, sessionId, attempts: deleteAttempts };
+		}
+		if (existence === 'unreadable') {
+			return {
+				ok: false,
+				sessionId,
+				attempts: deleteAttempts,
+				kind: 'ephemeral-session-teardown-unverified',
+				reason: 'verify-unreadable',
+			};
+		}
 		if (deleteAttempts >= attempts) {
 			return {
 				ok: false,
@@ -283,11 +366,13 @@ export const _internals: {
 	boundedAbort: typeof boundedAbortEphemeralSession;
 	boundedDelete: typeof boundedDeleteEphemeralSession;
 	sessionExists: typeof sessionExists;
+	isTransientTransportError: typeof isTransientTransportError;
 	log: typeof log;
 } = {
 	boundedSessionCall,
 	boundedAbort: boundedAbortEphemeralSession,
 	boundedDelete: boundedDeleteEphemeralSession,
 	sessionExists,
+	isTransientTransportError,
 	log,
 };

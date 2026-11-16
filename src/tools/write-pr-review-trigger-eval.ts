@@ -493,6 +493,35 @@ export async function executeWritePrReviewTriggerEval(
 		const laneAlreadySubmittedReceipt =
 			!!record?.result?.prReviewResultReceipt ||
 			!!record?.terminalResult?.result.prReviewResultReceipt;
+		// Issue #3311: the dead-family evidence class set — liveness (host
+		// abandonment, #2835), resource (provider-terminal lanes the producer
+		// now stamps), and the PRE-UPGRADE classless provider-terminal shape
+		// (status 'error' with terminalErrorClass present, no workflow class —
+		// records written before the producer fix). operator_cancelled and
+		// classless-silence records stay rejected (a missing class with no
+		// terminalErrorClass is never terminality evidence). Shared by the
+		// snapshot predicate and the decision-moment fresh re-read below so the
+		// two arms cannot drift.
+		const deadFamilyEvidenceClass = (
+			candidate:
+				| {
+						status?: string;
+						result?: {
+							workflowLaneFailureClass?: string | null;
+							terminalErrorClass?: unknown;
+						} | null;
+				  }
+				| undefined,
+		): boolean => {
+			if (!candidate) return false;
+			const cls = candidate.result?.workflowLaneFailureClass;
+			if (cls === 'liveness' || cls === 'resource') return true;
+			return (
+				candidate.status === 'error' &&
+				cls == null &&
+				candidate.result?.terminalErrorClass != null
+			);
+		};
 		const deadFamilyRecordShape =
 			provenanceFailure &&
 			!laneAlreadySubmittedReceipt &&
@@ -500,7 +529,7 @@ export async function executeWritePrReviewTriggerEval(
 			record.mode === 'swarm-pr-review:micro' &&
 			recordOwnedLanes.includes(row.trigger_id) &&
 			(record.status === 'stale' || record.status === 'error') &&
-			record.result?.workflowLaneFailureClass === 'liveness' &&
+			deadFamilyEvidenceClass(record) &&
 			!record.result?.outputRef?.trim() &&
 			!outputArtifact &&
 			record.workspace?.prHeadSha === parsed.data.pr_head_sha &&
@@ -575,7 +604,7 @@ export async function executeWritePrReviewTriggerEval(
 				freshRecord.mode === 'swarm-pr-review:micro' &&
 				freshOwnedLanes.includes(row.trigger_id) &&
 				(freshRecord.status === 'stale' || freshRecord.status === 'error') &&
-				freshRecord.result?.workflowLaneFailureClass === 'liveness' &&
+				deadFamilyEvidenceClass(freshRecord) &&
 				!freshRecord.result?.outputRef?.trim() &&
 				freshRecord.workspace?.prHeadSha === parsed.data.pr_head_sha &&
 				freshRecord.workspace?.gitHead === parsed.data.pr_head_sha &&

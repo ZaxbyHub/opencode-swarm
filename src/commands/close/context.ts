@@ -132,6 +132,16 @@ export interface CleanStageResult {
 	configBackupsRemoved: number;
 	swarmPlanFilesRemoved: number;
 	/**
+	 * #2968 swarm-pr-review FB-003: `receipt-<kind>-<id>-<hash>` export
+	 * bundles (and crashed-export `.receipt-<...>.tmp-<pid>-<ts>` staging
+	 * trees) reaped from `.swarm/plan-export/` at close. This is the reaper
+	 * the retention registry's `verification-receipts` row cites as its
+	 * keyspaceBound — without it the registry's boundedness premise was
+	 * false and every distinct export accumulated byte-copies forever.
+	 * Optional so pre-existing typed fixtures remain valid.
+	 */
+	receiptBundlesRemoved?: number;
+	/**
 	 * Stale atomic-write temp files MOVED into `.swarm/quarantine/<batch>/`
 	 * (issue #2035). Quarantine is a recoverable move with a manifest — the
 	 * pre-#2035 blind `.tmp.*` unlink sweep is gone; preserved candidates

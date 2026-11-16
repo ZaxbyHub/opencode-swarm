@@ -55,8 +55,15 @@ function interfaceFields(name: string): string[] {
 	const body = SOURCE.slice(bodyStart + 1, bodyEnd);
 	const fields: string[] = [];
 	for (const line of body.split('\n')) {
-		const match = line.match(/^\t([A-Za-z_][A-Za-z_0-9]*):/);
-		if (match) fields.push(match[1]!);
+		// Optional properties (`operator?: string`) declare the same field as
+		// their required siblings — the `?` is not part of the name.
+		const match = line.match(/^\t([A-Za-z_][A-Za-z_0-9]*)\?:/);
+		if (match) {
+			fields.push(match[1]!);
+			continue;
+		}
+		const required = line.match(/^\t([A-Za-z_][A-Za-z_0-9]*):/);
+		if (required) fields.push(required[1]!);
 	}
 	return fields;
 }

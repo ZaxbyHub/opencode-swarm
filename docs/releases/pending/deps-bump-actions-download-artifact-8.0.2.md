@@ -1,0 +1,1 @@
+Bump the actions/download-artifact GitHub Actions pin from 4.3.0 to 8.0.2 across the CI, drift-check, flake-detection, and release-and-publish workflows. CI-only change; no plugin runtime surface is affected.

@@ -15,7 +15,6 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
 	_resetSandboxAssessmentCache,
@@ -109,37 +108,15 @@ describe('O-005: non-Linux executors ignore readonly_roots', () => {
 		macInternals.resetProbeMemo();
 		const executor = new MacOSSandboxExecutor([]);
 		const scope = [path.resolve('scope-dir')];
-		const profileDirs: string[] = [];
-		const wrapAndRead = (policy: SandboxPolicyOptions) => {
-			const wrapped = executor.wrapCommand(
-				'ls',
-				scope,
-				undefined,
-				undefined,
-				policy,
-			);
-			// The profile path embeds pid/time/mkdtemp randomness; compare the
-			// profile file contents and a path-normalised command instead.
-			const profilePath = /-f '([^']+)'/.exec(wrapped)?.[1] ?? '';
-			expect(profilePath).not.toBe('');
-			profileDirs.push(path.dirname(profilePath));
-			return {
-				command: wrapped.replace(profilePath, '<PROFILE>'),
-				profile: fs.readFileSync(profilePath, 'utf8'),
-			};
-		};
-		try {
-			const withRoots = wrapAndRead(WITH_ROOTS);
-			const withoutRoots = wrapAndRead(WITHOUT_ROOTS);
-			expect(withRoots.command).toBe(withoutRoots.command);
-			expect(withRoots.profile).toBe(withoutRoots.profile);
-			expect(withRoots.command).not.toContain(ROOT);
-			expect(withRoots.profile).not.toContain(ROOT);
-		} finally {
-			for (const dir of profileDirs) {
-				fs.rmSync(dir, { recursive: true, force: true });
-			}
-		}
+		// The profile is passed inline (-p), so the wrapped command string IS the
+		// command plus the profile: equality of the two strings covers both.
+		const wrap = (policy: SandboxPolicyOptions) =>
+			executor.wrapCommand('ls', scope, undefined, undefined, policy);
+		const withRoots = wrap(WITH_ROOTS);
+		const withoutRoots = wrap(WITHOUT_ROOTS);
+		expect(withRoots).toContain("sandbox-exec -p '");
+		expect(withRoots).toBe(withoutRoots);
+		expect(withRoots).not.toContain(ROOT);
 	});
 
 	test('Windows PowerShell wrapper output is identical with and without it', () => {

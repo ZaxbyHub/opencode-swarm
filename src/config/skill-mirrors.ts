@@ -393,6 +393,16 @@ export const ADDITIONAL_SKILL_MIRROR_CONTRACTS: Array<{
 			'Orphaned .claude+.agents skill with no .opencode counterpart: .claude is the canonical research protocol, .agents is a Codex-specific adapter.',
 	},
 	{
+		slug: 'session-retrospective',
+		kind: 'agents-only',
+		extraIdenticalPaths: [
+			'.claude/skills/session-retrospective/SKILL.md',
+			'.agents/skills/session-retrospective/SKILL.md',
+		],
+		reason:
+			'Repo-internal .claude+.agents skill with no .opencode counterpart. .claude is the canonical retrospective protocol. .agents is the harness-neutral adapter that ZCode and Codex load, since ZCode scans only .zcode/skills and .agents/skills. It is not bundled: a new .opencode skill would need a package.json#files entry, which ordinary PRs cannot edit.',
+	},
+	{
 		slug: 'tech-debt-ci-review',
 		kind: 'agents-only',
 		extraIdenticalPaths: [
@@ -468,7 +478,7 @@ export const ADDITIONAL_SKILL_MIRROR_CONTRACTS: Array<{
 			'.agents/skills/mock-to-internals-migration/SKILL.md',
 		],
 		reason:
-			'.agents-only skill with no .claude counterpart. The .agents shim references .opencode/skills/generated/mock-to-internals-migration as its canonical reference.',
+			'.agents-only skill with no .claude counterpart. Self-contained Codex canon for the mock.module → _internals migration protocol (issue #2966 ported the protocol body in from the retired generated fork; it no longer references .opencode/skills/generated/).',
 	},
 	{
 		slug: 'subprocess-safety',

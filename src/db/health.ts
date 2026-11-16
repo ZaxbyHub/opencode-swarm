@@ -11,6 +11,7 @@
 import { existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { canonicalProjectKey } from './canonical-project.js';
+import { ProjectDbError } from './db-errors.js';
 import { getProjectDb, projectDbPath } from './project-db.js';
 
 /** quick_check size cap: an oversized DB reports `too_large` instead of scanning inline. */
@@ -33,7 +34,8 @@ export type SwarmDbHealthSnapshot =
 
 /**
  * Probe `.swarm/swarm.db` health. Never opens-for-create (an absent DB is
- * `absent`, which callers render as healthy) and never throws.
+ * `absent`, which callers render as healthy) and never throws. A blank root
+ * is an `error` (`invalid_root`), not `absent`: nothing was probed (#3165 B).
  */
 export function getSwarmDbHealthSnapshot(
 	directory: string,
@@ -43,7 +45,10 @@ export function getSwarmDbHealthSnapshot(
 		if (size > SWARM_DB_QUICK_CHECK_MAX_BYTES) {
 			return { kind: 'too_large', sizeBytes: size };
 		}
-	} catch {
+	} catch (err) {
+		if (err instanceof ProjectDbError && err.category === 'invalid_root') {
+			return { kind: 'error', category: err.category, message: err.message };
+		}
 		return { kind: 'absent' };
 	}
 	// Read the marker BEFORE getProjectDb: a successful open runs the

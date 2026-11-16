@@ -21,8 +21,8 @@ import {
 } from '../../../src/tools/run-pr-feedback-stage-a.js';
 
 const SESSION = 'stage-a-contract-authorization';
-const HEAD = 'abc123';
-const BASE = 'def456';
+const HEAD = 'abccccccccccccccccccccccccccccccccccc123';
+const BASE = 'defffffffffffffffffffffffffffffffffff456';
 const REVISION = 'revision-1';
 let directory = '';
 let baseContracts = new Map<string, string>();
@@ -95,7 +95,9 @@ beforeEach(async () => {
 	_internals.resolveExactMergeBaseAsync = async (...a) =>
 		_internals.resolveExactMergeBase(...a);
 	_internals.readGitTextAtRevision = (_directory, sha, contractPath) =>
-		sha === BASE ? (baseContracts.get(contractPath) ?? null) : null;
+		sha === BASE
+			? (baseContracts.get(contractPath.replace(/^\.\//, '')) ?? null)
+			: null;
 	_internals.runExternalTool = mock(async () => ({
 		status: 'completed' as const,
 		exitCode: 0,

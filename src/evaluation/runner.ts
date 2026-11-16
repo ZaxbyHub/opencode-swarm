@@ -416,7 +416,14 @@ async function executePairMember(args: {
 									: execution.status,
 							durationMs: execution.durationMs,
 							cost: execution.cost,
-							failureCode: execution.error ?? `executor-${execution.status}`,
+							// #3710: the failureCode field is schema-capped at 160 chars, and
+							// redaction can LENGTHEN a message (a URL becomes <url:hash>, a
+							// credential value becomes <redacted>), so bound it here —
+							// after sanitization — instead of letting the run parse fail and
+							// the whole evaluation run be discarded.
+							failureCode: execution.error
+								? execution.error.slice(0, 160)
+								: `executor-${execution.status}`,
 						});
 					}
 					if (

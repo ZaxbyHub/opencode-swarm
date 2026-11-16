@@ -1,0 +1,1 @@
+Bump the actions/setup-node GitHub Actions pin from 7.0.0 to 7.1.0 in ci.yml and release-and-publish.yml so CI jobs run on the current action release. CI-only change; no plugin runtime surface is affected.

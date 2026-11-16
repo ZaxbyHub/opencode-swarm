@@ -199,9 +199,14 @@ describe('buildProbeProfile — F6a item 2 shape parity with production', () => 
 		const allowIdx = profile.indexOf('(allow file-write* (subpath');
 		expect(denyIdx).toBeGreaterThanOrEqual(0);
 		expect(allowIdx).toBeGreaterThan(denyIdx);
-		expect(profile).toContain(
-			'(allow file-write* (subpath "/tmp/swarm-probe"))',
-		);
+		// On macOS /tmp is a link into /private, so the profile embeds the
+		// kernel-resolved form; elsewhere it cannot be confirmed and stays as given.
+		// A fixed expectation (not realpathOrSelf itself) so this cannot be circular.
+		const expected =
+			process.platform === 'darwin'
+				? '/private/tmp/swarm-probe'
+				: '/tmp/swarm-probe';
+		expect(profile).toContain(`(allow file-write* (subpath "${expected}"))`);
 	});
 
 	test('contains NO setenv/unsetenv — they are not SBPL ops and broke the probe (issue #2590)', () => {

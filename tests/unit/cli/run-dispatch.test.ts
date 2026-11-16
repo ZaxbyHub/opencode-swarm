@@ -1,12 +1,5 @@
-import {
-	afterEach,
-	beforeEach,
-	describe,
-	expect,
-	it,
-	mock,
-	spyOn,
-} from 'bun:test';
+import { beforeEach, describe, expect, it, mock, spyOn } from 'bun:test';
+import { useSuiteCwdSandbox } from '../../helpers/suite-cwd-sandbox';
 
 // Mock console methods BEFORE importing
 const mockConsoleLog = spyOn(console, 'log').mockImplementation(() => {});
@@ -155,9 +148,12 @@ const cliModule = require('../../../src/cli/index.js');
 const run = cliModule.run;
 
 describe('run() dispatch function', () => {
-	const cwd = process.cwd();
+	// run() roots at process.cwd(): hold it in a sandbox, off the checkout.
+	const sandbox = useSuiteCwdSandbox('run-dispatch-');
+	let cwd = '';
 
 	beforeEach(() => {
+		cwd = sandbox.cwd;
 		mockConsoleLog.mockClear();
 		mockConsoleError.mockClear();
 		mockProcessExit.mockClear();

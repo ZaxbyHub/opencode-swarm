@@ -81,6 +81,16 @@ function makeBashOutput(command: string) {
 const realBunSpawn = _internals.bunSpawn;
 const realPlatform = _internals.platform;
 const realSleep = _internals.sleep;
+const realArtifactLifecycle = _internals.withSettlementArtifactLifecycle;
+const realArtifactCheck = _internals.assertSettlementArtifactsRemovable;
+
+function stubArtifactAdmission(): void {
+	// These fake-root fixtures isolate Git argv/retry/force behavior. Real WAL
+	// admission is covered by the settlement-artifact-lifecycle/cleanup-sinks #3409 tests.
+	_internals.withSettlementArtifactLifecycle = async (_directory, operation) =>
+		operation();
+	_internals.assertSettlementArtifactsRemovable = async () => {};
+}
 
 /**
  * Constructs a minimal BunCompatSubprocess mock.
@@ -112,6 +122,8 @@ afterEach(() => {
 	_internals.bunSpawn = realBunSpawn;
 	_internals.platform = realPlatform;
 	_internals.sleep = realSleep;
+	_internals.withSettlementArtifactLifecycle = realArtifactLifecycle;
+	_internals.assertSettlementArtifactsRemovable = realArtifactCheck;
 });
 
 // ===========================================================================
@@ -183,6 +195,7 @@ describe('guardrails: git worktree remove --force blocked', () => {
 // ===========================================================================
 
 describe('removeWorktree: --force opt-in fallback (#1708)', () => {
+	beforeEach(stubArtifactAdmission);
 	const fakeWorktreePath = join('C:', 'worktrees', 'session-abc', 'lane-1');
 	const fakeProjectRoot = join('C:', 'project-root');
 
@@ -284,6 +297,7 @@ describe('removeWorktree: --force opt-in fallback (#1708)', () => {
 // ===========================================================================
 
 describe('removeWorktree: bounded retry on Windows (DD-10)', () => {
+	beforeEach(stubArtifactAdmission);
 	const fakeWorktreePath = join('C:', 'worktrees', 'session-abc', 'lane-1');
 	const fakeProjectRoot = join('C:', 'project-root');
 

@@ -960,6 +960,54 @@ export async function getStatusData(
 function renderCoordinationStatus(
 	status: SnapshotCoordinationStatus,
 ): string[] {
+	// #2963: origin-keyed recovery guidance (combined-first, same precedence
+	// as every other consumer). A settled closing entry left by a partially
+	// failed reset names the working recovery; a prior initializer that is
+	// still settling keeps the generic settle-wait line; shutdown and
+	// in-flight-reset windows state their own truthful recovery.
+	if (status.state === 'closing') {
+		if (
+			status.pendingPriorAttempt &&
+			status.closingReason === 'reset-cleanup-failed'
+		) {
+			return [
+				'',
+				`**SQLite coordination**: ${status.state}${status.settled ? ' (settled)' : ' (unsettled)'}`,
+				...(status.error ? [`  - ${status.error}`] : []),
+				'  - Recovery: wait for the settling initialization attempt, then re-run `/swarm reset-session` (or restart the host); durable snapshot writes are stopped until then',
+			];
+		}
+		if (status.pendingPriorAttempt) {
+			return [
+				'',
+				`**SQLite coordination**: ${status.state}${status.settled ? ' (settled)' : ' (unsettled)'}`,
+				...(status.error ? [`  - ${status.error}`] : []),
+				'  - Recovery: `/swarm recover --coordination` (an unsettled timed-out attempt must finish before retry)',
+			];
+		}
+		if (status.closingReason === 'reset-cleanup-failed') {
+			return [
+				'',
+				`**SQLite coordination**: ${status.state}${status.settled ? ' (settled)' : ' (unsettled)'}`,
+				...(status.error ? [`  - ${status.error}`] : []),
+				'  - Recovery: re-run `/swarm reset-session` (durable snapshot writes are stopped until it succeeds; a host restart also clears the guard)',
+			];
+		}
+		if (status.closingReason === 'shutdown') {
+			return [
+				'',
+				`**SQLite coordination**: ${status.state}${status.settled ? ' (settled)' : ' (unsettled)'}`,
+				...(status.error ? [`  - ${status.error}`] : []),
+				'  - Coordination is closing for host shutdown; durable snapshot writes are stopped until the host restarts.',
+			];
+		}
+		return [
+			'',
+			`**SQLite coordination**: ${status.state}${status.settled ? ' (settled)' : ' (unsettled)'}`,
+			...(status.error ? [`  - ${status.error}`] : []),
+			'  - A `/swarm reset-session` is in progress; durable snapshot writes resume when it completes.',
+		];
+	}
 	return [
 		'',
 		`**SQLite coordination**: ${status.state}${status.settled ? ' (settled)' : ' (unsettled)'}`,

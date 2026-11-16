@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.199.1",
+  "tagCommit": "984420ff7b1f7f638bf655ab8b0f33dee58d3b5f",
+  "targetCommitish": "984420ff7b1f7f638bf655ab8b0f33dee58d3b5f",
+  "releaseBodySha256": "efa3f0b8542b94472a63b9a1bb49dcb556c7c8260bce999a7c4ab62b4d2b1bf9",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/3389-retry-escalation-repair-admission.md",
+      "sha256": "7a20035263c59929eb10cb691206dc6e262ca73b48715e930fdc4070515b2e84"
+    },
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/guardrails-worktree-authority-containment.md",
+      "sha256": "f0c3059cb9332108b1fe6c51c0bdca0804a085ada568da3a5a58e105f72a668b"
+    }
+  ]
+}

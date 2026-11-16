@@ -20,8 +20,10 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { bundledProjectSkillFileReference } from '../config/bundled-skills.js';
 import { stripKnownSwarmPrefix } from '../config/schema.js';
 import { appendCoreEventSync } from '../events/core-events.js';
+import { sanitizeDiagnosticText } from '../scope/path-identity.js';
 import { criticalWarn, warn } from '../utils/logger.js';
 import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache.js';
 import type { MessageWithParts } from './knowledge-types.js';
@@ -282,6 +284,7 @@ export const _internals: {
 	readdirSync: typeof fs.readdirSync;
 	existsSync: typeof fs.existsSync;
 	statSync: typeof fs.statSync;
+	lstatSync: typeof fs.lstatSync;
 	realpathSync: typeof fs.realpathSync;
 	mkdirSync: typeof fs.mkdirSync;
 	appendFileSync: typeof fs.appendFileSync;
@@ -310,6 +313,7 @@ export const _internals: {
 	readdirSync: fs.readdirSync.bind(fs),
 	existsSync: fs.existsSync.bind(fs),
 	statSync: fs.statSync.bind(fs),
+	lstatSync: fs.lstatSync.bind(fs),
 	realpathSync: fs.realpathSync.bind(fs),
 	mkdirSync: fs.mkdirSync.bind(fs),
 	appendFileSync: fs.appendFileSync.bind(fs),
@@ -564,6 +568,140 @@ export function extractFileSkillReferences(fieldValue: string): string[] {
 export const MAX_EXPLICIT_SKILL_REFERENCES = 16;
 export const MAX_PROVENANCE_SKILL_REFERENCES_PER_TRANSFORM = 64;
 
+/**
+ * Historical retired generated-skill slugs → named replacement (issue #2966).
+ *
+ * The values use the CONSUMER-STABLE bundled reference form
+ * (`file:.swarm/bundled-skills/<slug>/SKILL.md`): repository `.opencode`
+ * natives do not exist in consumer projects, where the shipped canons are
+ * materialized under `.swarm/bundled-skills/`. This map is a frozen static
+ * constant on purpose — it must never be derived from the repo tree at
+ * runtime because the gate ships to consumer projects whose generated trees
+ * differ. `pr-review-fix` names its successor in its own retirement marker.
+ */
+export const RETIRED_SKILL_REPLACEMENTS: Readonly<Record<string, string>> = {
+	'gate-attribution': bundledProjectSkillFileReference('gate-attribution'),
+	'merge-queue-readiness': bundledProjectSkillFileReference(
+		'merge-queue-readiness',
+	),
+	'skill-edit-validation': bundledProjectSkillFileReference(
+		'skill-edit-validation',
+	),
+	'worktree-retry-cleanup': bundledProjectSkillFileReference(
+		'worktree-retry-cleanup',
+	),
+	'pr-review-fix': bundledProjectSkillFileReference('swarm-pr-feedback'),
+	// pr-readiness was likewise a legacy shim naming swarm-pr-feedback as its
+	// successor (its deleted SKILL.md: "Use swarm-pr-feedback skill instead").
+	'pr-readiness': bundledProjectSkillFileReference('swarm-pr-feedback'),
+};
+
+/** Bound on marker-derived text entering architect-visible refusal reasons. */
+const RETIREMENT_REASON_MAX_CHARS = 160;
+
+/** Byte cap before reading a repository-controlled marker file (#2966 review: cap-before-read, like MAX_SKILL_BYTES). */
+const MAX_MARKER_BYTES = 8_192;
+
+type RetirementMarker = 'retired' | 'stale';
+
+/**
+ * Marker presence via lstat: a DANGLING symlinked marker still counts as
+ * present (fail closed — review LO/RB-06), and a live symlinked marker counts
+ * as present for the blocking decision while its content is refused for the
+ * detail read (#2966 review PRR-005: never read through a symlink).
+ */
+function readRetirementMarker(skillDir: string): RetirementMarker | null {
+	for (const kind of ['retired', 'stale'] as const) {
+		try {
+			const st = _internals.lstatSync(path.join(skillDir, `${kind}.marker`));
+			if (st.isFile() || st.isSymbolicLink()) return kind;
+		} catch {
+			// ENOENT and unreadable alike — try the next kind, then no marker.
+		}
+	}
+	return null;
+}
+
+/**
+ * Best-effort marker payload for the refusal message: `{retiredAt, reason}`
+ * JSON for retired markers, free text for stale ones. Content is never read
+ * through a symlink and never beyond a small byte cap (cap-before-read, the
+ * repo's convention for repo-controlled files); rendered through the canonical
+ * `sanitizeDiagnosticText` (C0+C1+bidi flattened, single line) and bounded
+ * once on the AGGREGATE. An unreadable/refused marker yields undefined — the
+ * refusal still fails closed with the generic message.
+ */
+function readMarkerDetail(
+	skillDir: string,
+	marker: RetirementMarker,
+): string | undefined {
+	const file = path.join(
+		skillDir,
+		marker === 'retired' ? 'retired.marker' : 'stale.marker',
+	);
+	try {
+		const st = _internals.lstatSync(file);
+		if (st.isSymbolicLink() || !st.isFile() || st.size > MAX_MARKER_BYTES) {
+			return undefined;
+		}
+		const raw = _internals.readFileSync(file, 'utf-8');
+		if (marker === 'retired') {
+			try {
+				const parsed = JSON.parse(raw) as {
+					retiredAt?: unknown;
+					reason?: unknown;
+				};
+				const parts: string[] = [];
+				if (
+					typeof parsed.reason === 'string' &&
+					parsed.reason.trim().length > 0
+				) {
+					parts.push(parsed.reason);
+				}
+				if (
+					typeof parsed.retiredAt === 'string' &&
+					parsed.retiredAt.trim().length > 0
+				) {
+					parts.push(`retired ${parsed.retiredAt}`);
+				}
+				if (parts.length > 0) {
+					return sanitizeDiagnosticText(
+						parts.join(', '),
+						RETIREMENT_REASON_MAX_CHARS,
+					);
+				}
+			} catch {
+				// Non-JSON payload — fall through to the sanitized raw text.
+			}
+		}
+		const flat = sanitizeDiagnosticText(raw, RETIREMENT_REASON_MAX_CHARS);
+		return flat.length > 0 ? flat : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function retirementMessage(
+	slug: string,
+	marker: RetirementMarker,
+	detail: string | undefined,
+): string {
+	const state = marker === 'retired' ? 'retired' : 'stale';
+	const detailText = detail === undefined ? '' : ` (${detail})`;
+	const safeSlug = sanitizeDiagnosticText(slug, 120);
+	// Own-property lookup only: a skill directory named `constructor` or
+	// `toString` must not resolve inherited Object.prototype members into the
+	// guidance (#2966 review PRR-004/LO-11).
+	const replacement = Object.hasOwn(RETIRED_SKILL_REPLACEMENTS, slug)
+		? RETIRED_SKILL_REPLACEMENTS[slug]
+		: undefined;
+	const guidance =
+		replacement === undefined
+			? 'regenerate via skill_generate or pick a live skill with skill_inspect'
+			: `use "${replacement}" instead`;
+	return `skill "${safeSlug}" is ${state}${detailText}: ${guidance} — do not delegate with retired skills`;
+}
+
 interface SkillReferenceValidation {
 	valid: boolean;
 	reason: string | null;
@@ -640,6 +778,43 @@ export function validateSkillReference(
 			return {
 				valid: false,
 				reason: 'skill symlink resolves outside the project',
+			};
+		}
+
+		// Issue #2966: retirement/staleness markers fail the explicit-reference
+		// gate. Discovery and routing already skip marker'd directories; this
+		// check closes the remaining injectability hole for explicit
+		// `SKILLS: file:` references (a retired fork passes every path-shape
+		// check above). Both the realpath's directory and the lexical path's
+		// directory are checked — a marker on either side of a symlink blocks
+		// (conservative lifecycle policy). Marker STATE wins over which side it
+		// sits on: a `retired` marker on EITHER side beats a `stale` marker on
+		// the other (#2966 review PRR-001); a same-state tie prefers the
+		// realpath side. When both directories are the same (no symlink), the
+		// second probe is skipped.
+		const realSkillDir = path.dirname(realPath);
+		const lexicalSkillDir = path.dirname(lexicalPath);
+		const realMarker = readRetirementMarker(realSkillDir);
+		const lexicalMarker =
+			realSkillDir === lexicalSkillDir
+				? null
+				: readRetirementMarker(lexicalSkillDir);
+		const retirement =
+			realMarker === 'retired' || lexicalMarker === 'retired'
+				? 'retired'
+				: (realMarker ?? lexicalMarker);
+		if (retirement !== null) {
+			const slug = path.basename(lexicalSkillDir);
+			// The detail comes from the side that supplied the winning marker
+			// state (a same-state tie prefers the realpath side).
+			const winnerIsReal = realMarker === retirement;
+			const detail = readMarkerDetail(
+				winnerIsReal ? realSkillDir : lexicalSkillDir,
+				retirement,
+			);
+			return {
+				valid: false,
+				reason: retirementMessage(slug, retirement, detail),
 			};
 		}
 

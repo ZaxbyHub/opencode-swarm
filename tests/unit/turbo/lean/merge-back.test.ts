@@ -7,7 +7,6 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test, vi } from 'bun:test';
-import type { LeanTurboConfig } from '../../../../src/config/schema';
 import {
 	clearDeferredWarnings,
 	getDeferredWarnings,
@@ -16,7 +15,6 @@ import {
 	_internals,
 	attemptMergeBackFromDirty,
 	cleanupOrphanedBranches,
-	getMergeStrategy,
 	handleMergeConflict,
 	mergeLaneBranch,
 	postMergeCleanup,
@@ -24,6 +22,7 @@ import {
 } from '../../../../src/turbo/lean/merge-back';
 import { _internals as worktreeInternals } from '../../../../src/turbo/lean/worktree';
 import type { BunCompatSubprocess } from '../../../../src/utils/bun-compat';
+import * as artifactAdmission from '../../../helpers/artifact-admission-stub';
 import { cleanMergeOverlapSnapshot } from '../../../helpers/merge-overlap-fixture';
 
 // Mock helpers
@@ -65,31 +64,8 @@ function stubSpawn(exitCode: number, stdout = '', stderr = '') {
 /** Restores the real bunSpawn after every test. */
 afterEach(() => {
 	_internals.bunSpawn = realBunSpawn;
+	artifactAdmission.restore(_internals);
 	clearDeferredWarnings();
-});
-
-// getMergeStrategy
-
-describe('getMergeStrategy', () => {
-	test('returns config.merge_strategy when set to merge', () => {
-		const config: LeanTurboConfig = { merge_strategy: 'merge' };
-		expect(getMergeStrategy(config)).toBe('merge');
-	});
-
-	test('returns config.merge_strategy when set to rebase', () => {
-		const config: LeanTurboConfig = { merge_strategy: 'rebase' };
-		expect(getMergeStrategy(config)).toBe('rebase');
-	});
-
-	test('returns config.merge_strategy when set to cherry-pick', () => {
-		const config: LeanTurboConfig = { merge_strategy: 'cherry-pick' };
-		expect(getMergeStrategy(config)).toBe('cherry-pick');
-	});
-
-	test('returns merge when config.merge_strategy is undefined', () => {
-		const config: LeanTurboConfig = {};
-		expect(getMergeStrategy(config)).toBe('merge');
-	});
 });
 
 // mergeLaneBranch
@@ -385,6 +361,7 @@ describe('mergeLaneBranch', () => {
 // postMergeCleanup
 
 describe('postMergeCleanup', () => {
+	beforeEach(() => artifactAdmission.install(_internals));
 	const fakeDir = 'C:\\project-root';
 	const fakeBranch = 'swarm-lane/session-abc/lane-1';
 
@@ -921,6 +898,7 @@ describe('_internals.bunSpawn', () => {
 // cleanupOrphanedBranches
 
 describe('cleanupOrphanedBranches', () => {
+	beforeEach(() => artifactAdmission.install(_internals));
 	const fakeDir = 'C:\\project-root';
 
 	test('removes branches not in activeSessionIds', async () => {

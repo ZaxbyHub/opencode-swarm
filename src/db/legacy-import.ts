@@ -28,7 +28,7 @@ import {
 import { join } from 'node:path';
 import { warn } from '../utils/logger.js';
 import { canonicalProjectKey } from './canonical-project.js';
-import { getProjectDb } from './project-db.js';
+import { assertProjectDbRoot, getProjectDb } from './project-db.js';
 
 /** Bounded rename retry (Windows EPERM/EACCES on freshly-written files). */
 const RENAME_RETRIES = 20;
@@ -103,7 +103,9 @@ export const _internals: {
  *
  * `parseLine` returns the row payload string for a valid line or null to skip
  * (corrupt line). Rows are inserted with versions 1..n in file order. The
- * emptiness probe is `streamCount(db)` (e.g. rows for the stream).
+ * emptiness probe is `streamCount(db)` (e.g. rows for the stream). A blank
+ * root throws `ProjectDbError` (`invalid_root`) before the cwd's `.swarm/` is
+ * read: its canonical key is the cwd (#3165 B).
  */
 export function importLegacyJsonl(
 	directory: string,
@@ -120,6 +122,7 @@ export function importLegacyJsonl(
 		parseLine: (line: string) => string | null;
 	},
 ): LegacyImportResult {
+	assertProjectDbRoot(directory);
 	const root = canonicalProjectKey(directory);
 	const filePath = join(root, '.swarm', opts.fileName);
 	if (!existsSync(filePath)) {
@@ -196,6 +199,8 @@ export function importLegacyJsonl(
  * `(kind, phase)`. Files are discovered by exact prefix/suffix match in
  * `.swarm/` (readdir — no user-supplied paths), the phase is parsed from the
  * filename, and each file's parsed+validated object becomes the row payload.
+ * A blank root throws `ProjectDbError` (`invalid_root`) before the cwd's
+ * `.swarm/` is listed (#3165 B).
  */
 export function importLegacyJsonFiles(
 	directory: string,
@@ -212,6 +217,7 @@ export function importLegacyJsonFiles(
 		) => void;
 	},
 ): LegacyImportResult {
+	assertProjectDbRoot(directory);
 	const root = canonicalProjectKey(directory);
 	const swarmDir = join(root, '.swarm');
 	let entries: string[];

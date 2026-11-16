@@ -151,9 +151,9 @@ Triggers the architect to convene a three-agent General Council: Generalist (rev
 
 Launch deep PR review with multi-lane analysis [url] [--council]
 
-**Args:** `<pr-url|owner/repo#N|N> [--council]`
+**Args:** `<pr-url|owner/repo#N|N> [--council] | <GitHub PR URL> --release-head <full SHA>`
 
-Launches a structured PR review: preserves dirty state, verifies and binds an exact detached PR head, reconstructs PR intent via obligation extraction cascade, computes a depth tier (S/M/L) from the bound merge-base diff, launches the base explorer wave through dispatch_lanes_async (all 6 review dimensions covered on every PR — six singleton lanes at tier L, consolidated owned_workflow_lanes partitions at tiers S/M) while the architect keeps doing non-dependent work, and polls collect_lane_results incrementally. It evaluates an exact 11-row repository-agnostic risk-family ledger, records applicable rows as MATCHED and concretely inapplicable rows as provenance-free NOT_TRIGGERED, always keeps unclassified-risk MATCHED, and dispatches micro work only for MATCHED families (dedicated lanes at tier L, consolidated sweeps at S/M). It then validates findings through independent reviewer confirmation, applies critic challenge to HIGH/CRITICAL findings, and synthesizes only after matched coverage is closed. Failed obligations retry through the same structured async mode and exact PR head; blocking or direct-Task dispatch is not provenance-equivalent, so unclosed matched coverage leaves the review BLOCKED rather than degraded. --council variant fires adversarial multi-model review. Supports full GitHub URL, owner/repo#N shorthand, or bare PR number (resolves against origin remote).
+Launches a structured PR review: preserves dirty state, verifies and binds an exact detached PR head, reconstructs PR intent via obligation extraction cascade, computes a depth tier (S/M/L) from the bound merge-base diff, launches the base explorer wave through dispatch_lanes_async (all 6 review dimensions covered on every PR — six singleton lanes at tier L, consolidated owned_workflow_lanes partitions at tiers S/M) while the architect keeps doing non-dependent work, and polls collect_lane_results incrementally. It evaluates an exact 11-row repository-agnostic risk-family ledger, records applicable rows as MATCHED and concretely inapplicable rows as provenance-free NOT_TRIGGERED, always keeps unclassified-risk MATCHED, and dispatches micro work only for MATCHED families (dedicated lanes at tier L, consolidated sweeps at S/M). It then validates findings through independent reviewer confirmation, applies critic challenge to HIGH/CRITICAL findings, and synthesizes only after matched coverage is closed. Failed obligations retry through the same structured async mode and exact PR head; blocking or direct-Task dispatch is not provenance-equivalent, so unclosed matched coverage leaves the review BLOCKED rather than degraded. --council variant fires adversarial multi-model review. Supports full GitHub URL, owner/repo#N shorthand, or bare PR number (resolves against origin remote). For release admission, the architect uses the full GitHub PR URL and exact head SHA.
 
 ### `/swarm pr-feedback`
 
@@ -161,7 +161,7 @@ Ingest and close known PR feedback (review comments, CI failures, conflicts) [pr
 
 **Args:** `[url|owner/repo#N|N] [instructions...]`
 
-Triggers MODE: PR_FEEDBACK — ingests existing pull-request feedback (review threads, requested changes, CI/check failures, merge conflicts, stale branch state, pasted notes), verifies every claim against source, clusters related problems, fixes confirmed items, validates the branch, and reports closure status for every ledger item. Distinct from /swarm pr-review, which discovers new findings. The PR reference is optional: with none, the architect builds the ledger from the current PR/branch; text after the reference is forwarded as extra instructions. Supports full GitHub URL, owner/repo#N shorthand, or bare PR number (resolved against origin).
+Triggers MODE: PR_FEEDBACK — ingests existing pull-request feedback (review threads, requested changes, CI/check failures, merge conflicts, stale branch state, pasted notes), verifies every claim against source, clusters related problems, fixes confirmed items, validates the branch, and reports closure status for every ledger item. Distinct from /swarm pr-review, which discovers new findings. On a PR the default run continues to green CI and a monitored merge, then a session retrospective and the memory closeout. It merges only when your own words ask for the merge (for example "/swarm pr-feedback 123 and merge"; a question or mention never counts) or you answer yes to its merge question. "Fixes only" skips CI and the merge; "no merge" skips only the merge. The PR reference is optional: with none, the architect builds the ledger from the current PR/branch; text after the reference is forwarded as extra instructions. Supports full GitHub URL, owner/repo#N shorthand, or bare PR number (resolved against origin).
 
 ### `/swarm ci-monitor`
 
@@ -169,7 +169,7 @@ Drive an already-reviewed, approved PR to green and merged (monitor CI, fix, mer
 
 **Args:** `<pr-url|owner/repo#N|N>`
 
-Triggers MODE: CI_MONITOR — takes an already human-reviewed, approved PR, exhaustively researches every CI failure, fixes it end-to-end, iterates until all required checks are green (max 5 fix cycles), then merges via `gh pr merge` with no merge-strategy flag. Invoke only after human review is complete; the skill re-verifies reviewDecision: APPROVED and mergeable state before doing anything destructive. Distinct from /swarm pr-subscribe, which passively watches a PR without a merge terminal. Supports full GitHub URL, owner/repo#N shorthand, or bare PR number (resolved against origin).
+Triggers MODE: CI_MONITOR — takes an already human-reviewed, approved PR, exhaustively researches every CI failure, fixes it end-to-end, iterates until all required checks are green (max 5 fix cycles), then merges via `gh pr merge` (no strategy flag on a merge-queue base; the allowed method on a direct base). Invoke only after human review is complete; the skill re-verifies reviewDecision: APPROVED and mergeable state before doing anything destructive. Distinct from /swarm pr-subscribe, which passively watches a PR without a merge terminal. Supports full GitHub URL, owner/repo#N shorthand, or bare PR number (resolved against origin).
 
 ### `/swarm pr subscribe`
 
@@ -611,6 +611,14 @@ Generate evidence summary with completion ratio and blockers
 
 Generates a summary showing completion ratio across all tasks, lists blockers, and identifies missing evidence.
 
+### `/swarm receipt`
+
+Emit or verify verification receipts <task|phase> <id> [--export] | --verify <bundle>
+
+**Args:** `<task|phase> <id> [--export] | --verify <bundle>`
+
+Emits a portable, hash-backed record of the durably recorded gate outcomes for a task or phase (JSON + Markdown under .swarm/evidence/receipts/; --export writes a PR-attachable bundle under .swarm/plan-export/, reaped at close). --verify re-checks every recorded hash in a bundle on any machine (including a fresh clone) and exits nonzero on any mismatch with a typed failure (corrupt_json, unsupported_format_version, schema_mismatch, receipt_hash_mismatch, missing_artifact, digest_mismatch, path_escape).
+
 ### `/swarm archive`
 
 Archive old evidence bundles [--dry-run]
@@ -656,7 +664,7 @@ Manage OpenSpec-compatible SDD artifacts and effective spec projection
 
 **Args:** `status|validate|project [--json] [--change <id>] [--dry-run] [--source <provider>] [--feature <id>|all] [--overwrite]`
 
-Parent command for spec-driven development artifacts. Use sdd status to inspect .swarm/spec.md plus openspec/ artifacts, sdd validate to validate OpenSpec-compatible deltas, and sdd project to materialize the effective spec into .swarm/spec.md for planning. Spec-Kit: sdd project projects ALL features with feature-scoped ids (featureId/FR-nnn) when several exist; --feature <id> selects one (v1 bare-id output); --feature all is the explicit multi-feature alias (project only).
+Parent command for spec-driven development artifacts. Use sdd status to inspect .swarm/spec.md plus openspec/ artifacts, sdd validate to validate OpenSpec-compatible deltas, and sdd project to materialize the effective spec into .swarm/spec.md for planning. Spec-Kit: sdd project projects ALL features with feature-scoped ids (featureId/FR-nnn) when several exist; --feature <id> selects one (v1 bare-id output); --feature all is the explicit multi-feature alias (project only). Provider selection precedence: --source <provider> beats SWARM_SDD_SOURCE, which beats sdd.source in the config (.opencode/opencode-swarm.json or the user config), which beats auto-detection; a selection from any non-flag source is final and /swarm sdd status reports where it came from.
 
 #### `/swarm sdd status`
 
@@ -728,7 +736,15 @@ Clear session state while preserving plan, evidence, and knowledge
 
 **Args:** `--confirm=<token> (purge dirty/live lanes)`
 
-Deletes only .swarm/session/state.json and other session files. Clears in-memory agent sessions, delegation chains, and active-agent mappings. Preserves plan, evidence, and knowledge. Also releases this session's pending knowledge-gate obligations (#2398) and recovers stale coder settlements so dispatches cannot wedge on CODER_DISPATCH_IN_PROGRESS (#2268). Auto-backs up removed files to .swarm/reset-backups/ (newest 5 kept).
+Deletes .swarm/session/state.json plus other session files; clears in-memory sessions, chains, and active-agent maps. Preserves plan, evidence, and knowledge; releases this session's pending knowledge-gate obligations (#2398); recovers coder settlements wedged on CODER_DISPATCH_IN_PROGRESS (#2268); backs up to .swarm/reset-backups/ (newest 5 kept). If a cleanup step fails, the closing guard stays closed by design, writes pause (an advisory says why), and a reset re-run or restart recovers.
+
+### `/swarm attest`
+
+Verify a git-external deliverable with pinned anchors <task_id>
+
+**Args:** `<task_id>`
+
+Runs the task's pinned read-only git evidence_anchors (issue #3422) inside the project root and records the durable external-evidence bundle that admits completion — the in-machine exit for tasks whose deliverable (commit/push, gh ops) can never produce a coder settlement. Fail-closed: the plan task must declare evidence_class external_git with 1..16 anchors (expect exact / expect_prefix non-empty), every anchor runs as a bounded no-shell argv spawn (stdin ignored, 10s per anchor, 30s total; output over the 4096-char evidence bound refuses the anchor rather than truncating it), and only positively-known read-only git subcommands/flags (rev-list, log, rev-parse, show, diff) are admitted. Undeclared tasks, mismatched anchors, and non-read-only commands refuse exactly as the completion gate does. Declaration changes revoke stale proofs (a fresh attest is then required). See docs/commands.md and docs/plan-durability.md.
 
 ### `/swarm recover`
 
@@ -785,7 +801,7 @@ Control Full-Auto Mode for the active session [on [mode]|off|exit|status|retry-o
 
 **Args:** `on [assisted|supervised|strict], off|exit, status, retry-oversight, resume, abort`
 
-First-class toggle for Full-Auto Mode — a critic gate reviewing escalations on your behalf (the architect still plans and delegates; full-auto never executes tasks itself). No config-level enablement is required: "on" activates immediately (unless full_auto.locked is true in config), "off" disarms the run and returns the session to normal interactive operation, "status" reports the durable run state. An optional mode after "on" overrides full_auto.mode for this run: assisted (critic consulted only on policy escalations), supervised (default — risky/high-impact actions reviewed by the critic), strict (ALL plan mutations reviewed by the critic). While active, the critic answers architect questions and reviews phase boundaries, delegations, and risky actions on your behalf; only ESCALATE_TO_HUMAN verdicts halt the run for your input. `retry-oversight` performs a transport-only health probe for an infrastructure/deadline pause and never replays the denied action. `resume` runs the same authorization preflight as `on` first (readable config; `full_auto.locked` refuses), then requires a recent successful matching probe and no active recovery blockers. `abort` terminates the durable run immediately. The run state is durable (.swarm/full-auto-state.json) and survives restarts; toggle with no argument flips the current state. Composes with an open epic (Epic Mode): both the Full-Auto phase approval and the epic_phase_readiness gate apply at phase_complete.
+First-class toggle for Full-Auto Mode — a critic gate reviewing escalations on your behalf (the architect still plans and delegates; it never executes tasks itself). No config-level enablement is required: "on" activates immediately (unless full_auto.locked is true in config), "off" disarms the run (back to interactive operation), "status" reports the durable run state. An optional mode after "on" overrides full_auto.mode for this run (the override holds until the run pauses or ends; `resume` re-derives from live config, so `on strict` resumes supervised under default config): assisted (critic on policy escalations only), supervised (default — risky/high-impact actions reviewed), strict (ALL plan mutations reviewed). While active, the critic answers architect questions and reviews phase boundaries, delegations, and risky actions; only ESCALATE_TO_HUMAN verdicts halt for your input. `retry-oversight` performs a transport-only health probe for an infrastructure/deadline pause; it never replays the denied action. `resume` runs the same `on` preflight (readable config; `full_auto.locked` refuses), then requires a recent matching probe and no active recovery blockers. `abort` terminates the durable run immediately. Run state is durable (.swarm/full-auto-state.json) and survives restarts; a bare toggle flips the current state. Composes with an open epic (Epic Mode): both the Full-Auto phase approval and the epic_phase_readiness gate apply at phase_complete.
 
 ### `/swarm write-retro`
 

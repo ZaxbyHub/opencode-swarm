@@ -24,11 +24,16 @@
 
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { isBlankDirectory } from '../utils/path-security.js';
 import { canonicalProjectKey } from './canonical-project.js';
 import { DURABILITY_CLASSES } from './durability.js';
 import { getGroupCommitWriter } from './group-commit-writer.js';
 import { importLegacyJsonl } from './legacy-import.js';
-import { getProjectDb, projectDbExists } from './project-db.js';
+import {
+	assertProjectDbRoot,
+	getProjectDb,
+	projectDbExists,
+} from './project-db.js';
 
 /** The single stream id used by this store (table is stream-shaped for D2+). */
 export const INSIGHT_CANDIDATE_STREAM_ID = 'insight-candidates';
@@ -53,9 +58,11 @@ const importedRoots = new Set<string>();
  * project with neither a swarm.db NOR a legacy queue file has nothing to
  * read, and reading it must not materialize a DB. When the legacy file IS
  * present the read proceeds (the lazy import then creates the DB — the
- * sanctioned migration path).
+ * sanctioned migration path). A blank root has no state: its canonical key
+ * is the cwd (#3165 B).
  */
 function hasAnyInsightState(directory: string): boolean {
+	if (isBlankDirectory(directory)) return false;
 	if (projectDbExists(directory)) return true;
 	try {
 		return existsSync(
@@ -76,9 +83,13 @@ interface InsightCandidateTableRow {
 
 /**
  * One-time (per process, per canonical root) lazy import of the legacy
- * `.swarm/insight-candidates.jsonl` queue. Never runs at plugin init.
+ * `.swarm/insight-candidates.jsonl` queue. Never runs at plugin init. A
+ * blank root throws `ProjectDbError` (`invalid_root`) before the import guard
+ * is consulted, so neither it nor `appendInsightCandidatesDb` reaches the cwd
+ * project (#3165 B).
  */
 export function ensureInsightLegacyImported(directory: string): void {
+	assertProjectDbRoot(directory);
 	const root = canonicalProjectKey(directory);
 	if (importedRoots.has(root)) return;
 	importLegacyJsonl(directory, {

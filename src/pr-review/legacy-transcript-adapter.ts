@@ -40,8 +40,10 @@ import {
 	findByBatchIdDetailed,
 } from '../background/pending-delegations.js';
 import {
+	CONFIRMED_REVIEWER_SEVERITY_NONE_MESSAGE,
 	PR_REVIEW_DISCARDED_EXAMPLE_ITEM_ID,
 	PR_REVIEW_VERDICT_ROW_DESCRIPTORS,
+	PR_REVIEW_VERDICT_SEMANTICS_VERSION,
 	PrReviewCriticVerdictFieldsSchema,
 	PrReviewReviewerVerdictFieldsSchema,
 	type PrReviewRiskImpact,
@@ -107,6 +109,14 @@ export interface PrReviewPhaseComposition {
 	 * removal cannot change any label).
 	 */
 	orderObservingBatchIds: string[];
+	/**
+	 * Issue #3358 AC4: reviewer phase only (empty for critic). Every item id a
+	 * scanned lane answered with a well-formed row written under earlier
+	 * verdict semantics (PR_REVIEW_VERDICT_SEMANTICS_VERSION) — never claimed.
+	 * Complete and independent of the capped `diagnostics` budget; settlement
+	 * blocks with a dedicated disclosure only for the subset still unclaimed.
+	 */
+	semanticsMismatchedItemIds: string[];
 	diagnostics: string[];
 }
 
@@ -442,6 +452,35 @@ function appendCompositionDiagnostic(
 	diagnostics.push(message.slice(0, MAX_BASE_COVERAGE_DIAGNOSTIC_CHARS));
 }
 
+/**
+ * Issue #3334: lane-authored transcript text (the item-id field of a verdict
+ * row) must never reach diagnostics, telemetry payloads, or operator-facing
+ * BLOCKED messages as free prose. The ONE bounding helper every quarantine /
+ * recovery egress routes through. Sentinels: `(missing)` for an absent field,
+ * `(invalid-id)` for control characters (the parser decodes `\n`/`\r` escapes
+ * into real control characters) or non-identifier text, `(redacted)` when
+ * secret redaction fires (redaction placeholders render `[REDACTED:<type>]`,
+ * which is outside the identifier charset). The sentinels contain
+ * parentheses — themselves outside the identifier charset — so a lane-authored
+ * sentinel-shaped id normalizes to `(invalid-id)` and can never collide with
+ * `(missing)` or `(redacted)`; the only true collision is a literal
+ * `(invalid-id)` id. Claim keys keep the raw id either way.
+ */
+const VERDICT_ROW_IDENTIFIER_CHARSET = /^[A-Za-z0-9._:-]+$/;
+
+function boundVerdictRowIdentifier(raw: string | undefined): string {
+	if (raw === undefined || raw === '') return '(missing)';
+	// Control characters (the parser decodes `\n`/`\r` escapes into real
+	// control characters) are non-charset by construction, so the charset
+	// check is the single gate that covers both the control-character rule
+	// (#3334 AC2) and the prose rule (#3334 AC1).
+	if (!VERDICT_ROW_IDENTIFIER_CHARSET.test(raw)) return '(invalid-id)';
+	const redacted = redactSecrets(raw).slice(0, 64);
+	return VERDICT_ROW_IDENTIFIER_CHARSET.test(redacted)
+		? redacted
+		: '(redacted)';
+}
+
 const REVIEWER_ITEM_BINDING_KEY_PREFIX = 'item:';
 
 /**
@@ -564,6 +603,21 @@ export function composePrReviewPhaseVerdicts(
 	const claims = new Map<string, PrReviewItemClaim>();
 	const contributingBatchIds: string[] = [];
 	const diagnostics: string[] = [];
+	// #3334: quarantine diagnostics are deferred until AFTER the batch loop so
+	// they can never consume the shared composition-diagnostic budget ahead of
+	// lane-voiding evidence (unassigned-row, abandoned-lane). They flush after
+	// the integrity diagnostics, still subject to the same cap. This defers
+	// QUARANTINE noise only — the batch non-contribution diagnostic shares the
+	// same cap and is NOT deferred.
+	const deferredQuarantineDiagnostics: string[] = [];
+	// Feedback F-009: earlier-semantics convenience diagnostics are deferred
+	// the same way — they explain an AC4 disclosure that also lives on the
+	// structured `semanticsMismatchedItemIds` field, so they must never evict
+	// the lane-voiding evidence (unassigned-row, abandoned-lane) out of the
+	// capped budget. They flush after the abandoned-lane evidence, before the
+	// quarantine flush (still lowest-priority among the non-noise classes).
+	const deferredSemanticsDiagnostics: string[] = [];
+	const semanticsMismatchedItemIds = new Set<string>();
 	const satisfiedObligations = new Set<string>();
 	const scannedBatches: PrReviewTranscriptBatch[] = [];
 	// Issue #3098: formatted artifact-integrity failure per declared obligation.
@@ -638,6 +692,58 @@ export function composePrReviewPhaseVerdicts(
 				diagnostics,
 				`${phase} batch "${batch.batchId}" was validated against a different inventory or is not wholly successful legacy state; it contributes no claims`,
 			);
+			// FB-009: a batch that cannot contribute claims still gets the
+			// #3358 AC3 disclosure scan. Its lanes may carry reviewer rows
+			// written under earlier verdict semantics; skipping the scan here
+			// would leave an item unclaimed with NO mismatch disclosure when
+			// its only rows live in this batch. This is a SETTLEMENT-BEHAVIOR
+			// change, not disclosure-only: the disclosed ids feed the
+			// semantics settlement guard and the bypass-probe mirror, so a
+			// multi-owner item that could previously N-of-M-settle around its
+			// mismatched row now permanently requires re-dispatch (AC4
+			// doctrine: a stale-semantics verdict is never silently settled).
+			// No claim, obligation, or order observation is recorded from a
+			// rejected batch; lanes that fail artifact integrity stay silent
+			// (no readable artifact is nothing disclosed-to-drop). This scan
+			// reads the delegation store per lane, so an uncertain store read
+			// throws here where the pre-FB-009 rejection branch did not read
+			// the store at all (fail-closed, #2511 discipline).
+			for (const qualified of recordsPassingBatchIntegrity(
+				directory,
+				state,
+				batch.batchId,
+				batch.lanes,
+				expectedMode,
+				batch.validatedAt,
+				true,
+				forbiddenSubagentSessionIds,
+			)) {
+				const integrityDiagnostics: string[] = [];
+				const artifact = loadArtifactPassingLaneIntegrity(
+					directory,
+					state,
+					qualified.record,
+					expectedMode,
+					qualified.expectedWorkflowLane,
+					ctx.revisionDigest,
+					integrityDiagnostics,
+				);
+				if (!artifact) continue;
+				const { semanticsMismatched: rejectedBatchMismatches } =
+					parsePrReviewVerdictRows(
+						artifact.text,
+						qualified.expectedLane.reviewItemIds ?? [],
+						phase,
+						reviewerClaims,
+					);
+				if (rejectedBatchMismatches.length === 0) continue;
+				for (const itemId of rejectedBatchMismatches) {
+					semanticsMismatchedItemIds.add(itemId);
+				}
+				deferredSemanticsDiagnostics.push(
+					`${phase} lane "${qualified.expectedLane.laneId}" in non-contributing batch "${batch.batchId}" has ${rejectedBatchMismatches.length} verdict row(s) written under earlier verdict semantics (current: v${PR_REVIEW_VERDICT_SEMANTICS_VERSION}; CONFIRMED requires a non-NONE severity) for item ids ${rejectedBatchMismatches.map((id) => `"${id}"`).join(', ')}; the batch contributes no claims`,
+				);
+			}
 			continue;
 		}
 		const coherence = state.prReviewBatchCoherence?.[batch.batchId];
@@ -673,29 +779,30 @@ export function composePrReviewPhaseVerdicts(
 				continue;
 			}
 			const declaredItems = qualified.expectedLane.reviewItemIds ?? [];
-			const { markerRows, parsed, quarantined } = parsePrReviewVerdictRows(
-				artifact.text,
-				declaredItems,
-				phase,
-				reviewerClaims,
-			);
+			const { markerRows, parsed, quarantined, semanticsMismatched } =
+				parsePrReviewVerdictRows(
+					artifact.text,
+					declaredItems,
+					phase,
+					reviewerClaims,
+				);
 			// #3310: illegal-arity rows are quarantined, not lane-voiding.
 			// ONE aggregated bounded diagnostic per lane, so a stray-row-heavy
 			// artifact cannot exhaust the shared composition-diagnostic budget
 			// ahead of the unassigned-row and abandoned-lane evidence below.
-			// Identifiers and arity only — never row prose — and the item id is
-			// model-controlled transcript text, so it is redacted and bounded
-			// exactly like the verdict-rejection journal does.
+			// Identifiers and arity only — never row prose: the item id is
+			// model-controlled transcript text, bounded to the sentinel-safe
+			// identifier form by boundVerdictRowIdentifier at the quarantine
+			// producer ((missing)/(invalid-id)/(redacted) sentinels).
 			if (quarantined.length > 0) {
 				const arities = [
 					...new Set(quarantined.map((stray) => stray.arity)),
 				].sort((a, b) => a - b);
 				const ids = quarantined
-					.map((stray) => redactSecrets(stray.itemId).slice(0, 64))
+					.map((stray) => stray.itemId)
 					.filter((value, index, all) => all.indexOf(value) === index)
 					.slice(0, 8);
-				appendCompositionDiagnostic(
-					diagnostics,
+				deferredQuarantineDiagnostics.push(
 					`${phase} lane "${qualified.expectedLane.laneId}" quarantined ${quarantined.length} illegal-arity ${quarantined[0]?.marker ?? 'verdict'} row(s) (arities ${arities.join(', ')}; item ids ${ids.map((id) => `"${id}"`).join(', ')}); quarantined rows carry no verdict`,
 				);
 			}
@@ -705,6 +812,19 @@ export function composePrReviewPhaseVerdicts(
 					`${phase} lane "${qualified.expectedLane.laneId}" contains an unassigned verdict row; it contributes no claims`,
 				);
 				continue;
+			}
+			// #3358 AC4: earlier-semantics rows are recorded in full on the
+			// structured field (the guarantee) plus one convenience diagnostic
+			// per lane (subject to the shared cap). Ids are controller-declared
+			// assigned ids, not model text.
+			if (semanticsMismatched.length > 0) {
+				for (const itemId of semanticsMismatched) {
+					semanticsMismatchedItemIds.add(itemId);
+				}
+				// Feedback F-009: deferred — see deferredSemanticsDiagnostics.
+				deferredSemanticsDiagnostics.push(
+					`${phase} lane "${qualified.expectedLane.laneId}" has ${semanticsMismatched.length} verdict row(s) written under earlier verdict semantics (current: v${PR_REVIEW_VERDICT_SEMANTICS_VERSION}; CONFIRMED requires a non-NONE severity) for item ids ${semanticsMismatched.map((id) => `"${id}"`).join(', ')}; they are not re-admitted`,
+				);
 			}
 			recordOrderObservations(batch.batchId, coherence, parsed);
 			if (declaredItems.length > 0 && parsed.size === declaredItems.length) {
@@ -881,6 +1001,23 @@ export function composePrReviewPhaseVerdicts(
 		);
 	}
 
+	// Feedback F-009: earlier-semantics convenience diagnostics flush AFTER the
+	// lane-voiding evidence above and BEFORE the quarantine noise below — the
+	// structured field already carries the full disclosure, so these may lose
+	// the cap contention to the evidence that explains why settlement blocked.
+	for (const message of deferredSemanticsDiagnostics) {
+		appendCompositionDiagnostic(diagnostics, message);
+	}
+
+	// #3334: flush the deferred quarantine diagnostics AFTER every integrity
+	// diagnostic had its chance at the capped budget. Quarantine noise explains
+	// nothing about WHY a settlement blocked; the unassigned-row and
+	// abandoned-lane diagnostics do, so they win the cap contention by
+	// construction.
+	for (const message of deferredQuarantineDiagnostics) {
+		appendCompositionDiagnostic(diagnostics, message);
+	}
+
 	const composition: PrReviewPhaseComposition = {
 		claims,
 		requiredInventory,
@@ -889,6 +1026,8 @@ export function composePrReviewPhaseVerdicts(
 		// Empty for the critic phase (order observations are reviewer-only).
 		orderObservingBatchIds:
 			phase === 'reviewer' ? [...orderObservingBatchIds] : [],
+		semanticsMismatchedItemIds:
+			phase === 'reviewer' ? [...semanticsMismatchedItemIds] : [],
 		diagnostics,
 	};
 	// An exhaustive pass is a superset of the memoizable one, but it is computed
@@ -920,9 +1059,20 @@ export interface IndexedVerdictRows {
 	 * grammar noise (typically a Stage-B task row or an echoed format line) —
 	 * they carry no authenticable verdict, so they are quarantined out of the
 	 * exact-set count instead of voiding every valid sibling row. Identifiers
-	 * and arity only; never row prose. A legal-arity row naming an unassigned
-	 * ID is NOT quarantined — that is the spoofing class and still voids the
-	 * lane.
+	 * and arity only; never row prose.
+	 *
+	 * Issue #3357 (second arm): a row that ARRIVED over its legal arity was
+	 * tail-merged back to exactly the legal count (`recoveredOverflow`), so
+	 * the post-parse-arity discriminator above can never see it — the #3310
+	 * headline root cause survived in exactly that shape. When the caller
+	 * supplies the assigned-id set, such a recoveredOverflow row whose
+	 * post-merge id is UNASSIGNED is quarantined on its arrival arity
+	 * (rawFieldCount) instead of being admitted to `markerRows`: over-arrival
+	 * is by construction non-format-conformant (a spoofer copying the injected
+	 * contract card emits exactly the legal arity), so it is grammar noise,
+	 * not spoofing. The spoofing floor is unchanged: a row that arrived at
+	 * EXACTLY the legal arity (no tail-merge) naming an unassigned ID is NOT
+	 * quarantined — that is the spoofing class and still voids the lane.
 	 */
 	quarantined: Array<{
 		marker: '[REVIEWED]' | '[CRITIC]';
@@ -934,6 +1084,7 @@ export interface IndexedVerdictRows {
 export function indexVerdictRows(
 	text: string,
 	marker: '[REVIEWED]' | '[CRITIC]',
+	assignedIds?: ReadonlySet<string>,
 ): IndexedVerdictRows {
 	const markerRows: string[][] = [];
 	const rowsByItemId = new Map<string, string[][]>();
@@ -956,8 +1107,27 @@ export function indexVerdictRows(
 			// exact-set count, so valid siblings keep their claims.
 			quarantined.push({
 				marker,
-				itemId: fields[1] ?? '(missing)',
+				itemId: boundVerdictRowIdentifier(fields[1]),
 				arity: fields.length,
+			});
+			continue;
+		}
+		if (
+			assignedIds &&
+			row.recoveredOverflow &&
+			!assignedIds.has(fields[1] ?? '')
+		) {
+			// #3357: the row ARRIVED over the legal arity and was tail-merged
+			// down to it, so the #3310 arity discriminator above cannot fire.
+			// With an unassigned id it is Stage-B/echoed-format grammar noise
+			// (over-arrival is non-format-conformant by construction), not the
+			// spoofing class — quarantine on the RAW arrival arity instead of
+			// admitting it into markerRows where it would void every valid
+			// sibling through the exact-set check.
+			quarantined.push({
+				marker,
+				itemId: boundVerdictRowIdentifier(fields[1]),
+				arity: row.rawFieldCount,
 			});
 			continue;
 		}
@@ -965,7 +1135,12 @@ export function indexVerdictRows(
 			const recovery = row.overflowClass as
 				| 'legacy-fidelity-safe'
 				| 'legacy-lossy';
-			const itemId = fields[1] ?? '(missing)';
+			// #3334: the recovery entry feeds warn(), the
+			// verdict_row_pipe_recovery telemetry event, and the durable
+			// recovery receipt — the id is bounded at this single producer so
+			// every consumer (including future ones) sees the sentinel-safe
+			// form.
+			const itemId = boundVerdictRowIdentifier(fields[1]);
 			recoveries.push({ marker, itemId, recovery });
 			warn(
 				'PR_REVIEW recovered a legacy verdict row with unescaped pipe overflow',
@@ -1000,6 +1175,26 @@ export function validateReviewerVerdictFields(
 ): string[] | null {
 	const parsed = PrReviewReviewerVerdictFieldsSchema.safeParse(fields);
 	return parsed.success ? [...parsed.data] : null;
+}
+
+/**
+ * Issue #3358 AC4: true when a reviewer row fails the live schema ONLY
+ * because of the v1→v2 tightening (CONFIRMED with severity NONE), i.e. it is a
+ * well-formed row written under earlier verdict semantics rather than a
+ * malformed one. Such a row still never claims (fail-closed); the caller
+ * discloses it instead of dropping it silently.
+ */
+export function isReviewerRowVerdictSemanticsMismatch(
+	fields: string[],
+): boolean {
+	const parsed = PrReviewReviewerVerdictFieldsSchema.safeParse(fields);
+	if (parsed.success) return false;
+	return (
+		parsed.error.issues.length > 0 &&
+		parsed.error.issues.every(
+			(issue) => issue.message === CONFIRMED_REVIEWER_SEVERITY_NONE_MESSAGE,
+		)
+	);
 }
 
 /**
@@ -1055,6 +1250,12 @@ export function parsePrReviewVerdictRows(
 	>;
 	recoveries: IndexedVerdictRows['recoveries'];
 	quarantined: IndexedVerdictRows['quarantined'];
+	/**
+	 * #3358 AC4: declared item ids carrying at least one well-formed verdict
+	 * row written under earlier (v1) verdict semantics (any row of the item,
+	 * not only a lone one). Never claims; disclosed.
+	 */
+	semanticsMismatched: string[];
 } {
 	const parsed = new Map<
 		string,
@@ -1068,14 +1269,34 @@ export function parsePrReviewVerdictRows(
 	>();
 	const marker = phase === 'reviewer' ? '[REVIEWED]' : '[CRITIC]';
 	const { markerRows, rowsByItemId, recoveries, quarantined } =
-		indexVerdictRows(text, marker);
+		indexVerdictRows(text, marker, new Set(itemIds));
+	const semanticsMismatched: string[] = [];
 	for (const itemId of itemIds) {
 		if (itemId === PR_REVIEW_DISCARDED_EXAMPLE_ITEM_ID) continue;
 		if (phase === 'reviewer') {
 			const rows = rowsByItemId.get(itemId);
+			// #3336 durable replay rule: a schema-invalid row NEVER claims —
+			// this is the read-time gate that makes pre-upgrade artifacts
+			// re-parse under the LIVE schema (fail-closed for tightened
+			// rules like CONFIRMED+NONE; accepting for widened rules like
+			// UPHELD LOW/INFO; see the schema comments in
+			// pr-review-contract.ts and the skill's
+			// lane-output-recoverability reference).
 			const fields =
 				rows?.length === 1 ? validateReviewerVerdictFields(rows[0]) : null;
-			if (!fields) continue;
+			if (!fields) {
+				// #3358 AC4: a row rejected ONLY by the v1→v2 tightening is an
+				// earlier-semantics verdict — still unclaimed, but disclosed.
+				// Feedback FB-009: disclose when ANY of the item's rows is such
+				// a row, not only when it is the lone row — an item carrying an
+				// earlier-semantics row plus a second row is equally unclaimed
+				// (a multi-row item never claims) and was previously dropped
+				// from the disclosure.
+				if (rows?.some((row) => isReviewerRowVerdictSemanticsMismatch(row))) {
+					semanticsMismatched.push(itemId);
+				}
+				continue;
+			}
 			parsed.set(itemId, {
 				classification: fields[2],
 				severity: fields[4],
@@ -1102,7 +1323,7 @@ export function parsePrReviewVerdictRows(
 			severity: verdict.severity,
 		});
 	}
-	return { markerRows, parsed, recoveries, quarantined };
+	return { markerRows, parsed, recoveries, quarantined, semanticsMismatched };
 }
 
 /** Exact assigned-row contract used by both normal and recovered collection. */
@@ -1122,7 +1343,20 @@ export function analyzePrReviewVerdictRowContract(
 	const assigned = new Set(itemIds);
 	const { markerRows, parsed, recoveries, quarantined } =
 		parsePrReviewVerdictRows(text, itemIds, phase, reviewerClaims);
-	const observedIds = markerRows.map((fields) => fields[1] || '(missing)');
+	// #3334 recurrence sweep: observed ids that are NOT assigned are
+	// lane-authored transcript text, so they are bounded by the same helper as
+	// the quarantine/recovery producers before rendering into the exact-set
+	// contract failure (analysis.actual → formatPrReviewLaneValidationFailure
+	// → lane-failure diagnostics). ASSIGNED ids are controller-declared — the
+	// same trust level as `expected`, which renders itemIds raw — and
+	// unexpectedIds compares observed ids against the RAW assigned set, so
+	// bounding an assigned id would compare a sentinel against a raw id and
+	// misreport a legitimate id as "(invalid-id)" (#3375 review, PRR-002).
+	const observedIds = markerRows.map((fields) =>
+		assigned.has(fields[1] ?? '')
+			? (fields[1] ?? '')
+			: boundVerdictRowIdentifier(fields[1]),
+	);
 	const unexpectedIds = [
 		...new Set(observedIds.filter((itemId) => !assigned.has(itemId))),
 	];
@@ -1163,9 +1397,12 @@ function verdictRowIdsMatchExactly(
 }
 
 /**
- * Settlement composes valid assigned siblings item-by-item, but an invented ID
- * invalidates the entire artifact because no declared ownership can authorize
- * that row. Missing or duplicate assigned rows remain per-item parse failures.
+ * Membership-only check: true when every marker row names an assigned item id.
+ * An invented ID invalidates the entire artifact because no declared ownership
+ * can authorize that row. This predicate does not handle missing or duplicate
+ * rows: those are per-item parse failures (parsePrReviewVerdictRows for both
+ * phases; parseCriticVerdict applies the same one-row rule), and illegal-
+ * arity duplicates are quarantined in indexVerdictRows.
  */
 function verdictRowsContainOnlyAssignedIds(
 	markerRows: readonly string[][],
@@ -1215,10 +1452,17 @@ export function artifactHasExactPositiveVerdictRow(
 		.split(/\r?\n/)
 		.map((line) => pipeFieldsCapped(line, 4))
 		.filter((fields) => fields[0] === marker && fields[1] === itemId);
+	// Issue #3316 (B6): feedback gate lanes have historically emitted the
+	// past-tense `APPROVED` on the three review/critic markers; accept it as
+	// the exact positive token wherever `APPROVE` is expected. `PASS` stays
+	// exact for [STAGE-B-TEST] and no other token (SKIPPED, prose) ever maps.
+	const verdictMatches = (verdict: string): boolean =>
+		verdict === positiveVerdict ||
+		(positiveVerdict === 'APPROVE' && verdict === 'APPROVED');
 	return (
 		rows.length === 1 &&
 		rows[0].length >= 4 &&
-		rows[0][2] === positiveVerdict &&
+		verdictMatches(rows[0][2]) &&
 		rows[0].slice(1, 4).every(Boolean)
 	);
 }

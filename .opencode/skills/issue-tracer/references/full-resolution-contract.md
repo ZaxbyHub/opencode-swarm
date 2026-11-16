@@ -6,8 +6,9 @@ Closure - any statement or artifact presenting the issue as fixed, done, resolve
 
 ## Mechanical gates
 
-- **Clause 2 (no deferred work).** Run and record:
-  `git diff origin/<default-branch>...HEAD | grep -nE '^\+.*(TODO|FIXME|XXX|HACK|NotImplemented|raise NotImplementedError|unimplemented!|todo!)'`
+- **Clause 2 (no deferred work).** Run and record the scanner itself from the repo root:
+  `bash .opencode/skills/issue-tracer/scripts/scan-deferred.sh origin/<default-branch>`
+  (its pattern is single-sourced there — the bare-word marker group is word-bounded on both sides so identifier-shaped letter-runs stay clean, zmem #309 — which also keeps this document's own diff free of literal marker tokens).
   Every hit is eliminated, or dispositioned FALSE_POSITIVE (quoting the hit) only when it is non-production content - fixtures, docs quoting, test data. Hits in production code are always eliminate-or-waiver. A genuinely separable concern discovered en route is filed as a tracked issue with the user's quoted acknowledgment; a code comment or summary sentence is never an acceptable parking spot.
 - **Clause 3 (no unwired code).** For each added or renamed function, method, class, constant, config key, route, or flag - regardless of visibility - record the call-site grep or execution trace proving invocation outside its own definition and tests. Tests demonstrate the path; they never constitute it (test code itself is exempt - tests are their own runtime). Dead branches and unreachable flags are removed, not shipped.
   `.opencode/skills/issue-tracer/scripts/scan-deferred.sh` (run from the repo root) is the standing reachability scan referenced at Phase 4 and the No-Gap Closure Checklist.
@@ -36,6 +37,24 @@ Applies in every phase. Whenever command-selection logic, fixture expectations, 
 4. New behavior needs positive and negative cases; boundary/security-sensitive behavior needs adversarial cases.
 5. The release verification sweep includes a focused test-drift regression check.
 6. Do not accept work where tests pass by coincidence rather than correctness.
+
+## Phase 4.2 disposition-table generation (fail-closed)
+
+Generate the disposition table with
+`.opencode/skills/issue-tracer/scripts/generate-recurrence-table.sh` — never hand-run
+multi-step joins. Inputs (first line of each file MUST be `tree-digest: <sha>`, identical
+in both): `hits.tsv` rows `<predicate>	<count>	<paths>`; `dispositions.tsv` rows
+`<predicate>	<disposition>	<note>`. The rendered table carries ONE ROW PER HIT (a
+predicate with count N renders N identical rows) so the embedded table satisfies the
+trace-check phase-4.2 rule that the disposition-table data-row count equals the SUM of
+the per-predicate `hits:` bullets. The generator refuses (exit 1) on a hit without a
+disposition (`GENERATION-REFUSED: unmatched`), divergent digests (`digest`), a
+non-canonical or empty disposition cell (`GENERATION-REFUSED: disposition`; the
+vocabulary is evidence-artifacts.md ## Dispositions: FIX / FALSE_POSITIVE /
+OUT_OF_CLASS / DEFERRED_WITH_USER_APPROVAL), orphan dispositions or rendered/summary
+count disagreement (`count-drift`), zero hit rows, and duplicate predicates. Success
+renders `<outdir>/recurrence-table.md` and prints `RECURRENCE-TABLE: ok rows=<N>`;
+embed the generated table in 08a.
 
 ## No-Gap Closure Checklist
 

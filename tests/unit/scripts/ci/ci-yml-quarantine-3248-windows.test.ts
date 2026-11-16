@@ -76,13 +76,17 @@ describe('ci.yml integration — windows ledger entry for issue #3248', () => {
 		expect(dupes.length).toBe(1);
 	});
 
-	test(`${DISPATCH_LANES_RESILIENCE} carries the Check 7 OWNER/EXPIRY metadata`, () => {
+	test(`${DISPATCH_LANES_RESILIENCE} carries the re-anchored OWNER/EXPIRY metadata (2026-11-12 #2973 trace)`, () => {
 		const block = metadataBlock(WINDOWS_LEDGER_PATH, DISPATCH_LANES_RESILIENCE);
-		expect(/^#\s*OWNER:\s*\S/m.test(block)).toBe(true);
-		expect(/^#\s*EXPIRY:\s*\d{4}-\d{2}-\d{2}\b/m.test(block)).toBe(true);
-		// Retirement criterion ties to #3248/#3252; removing the criterion
-		// text while keeping the entry would strand the retirement contract.
-		expect(block).toContain('#3248');
+		// Re-anchored shape: OWNER ref #2973, EXPIRY 2026-12-20, and the
+		// criterion token — asserted as VALUES, not generic presence (impl
+		// review round 1: the old `toContain('#3248')` matched unrelated
+		// header text when the walk crossed into the ledger header).
+		expect(block).toMatch(/^#\s*OWNER:.*#2973/m);
+		expect(block).toMatch(/^#\s*EXPIRY:\s*2026-12-20\b/m);
+		expect(block).toContain(
+			'criterion: windows merge-group stability post-#3640',
+		);
 	});
 
 	test(`${DISPATCH_LANES_RESILIENCE} is scoped to the windows ledger only (no cross-ledger duplicate)`, () => {

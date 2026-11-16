@@ -60,6 +60,13 @@ requirements imposed on unrelated repositories.
   `git status --porcelain` clean before the first commit of the round. An
   uncommitted mutant left in a tracked source file can ride explicit-path
   staging into the fix commit — or `git add -A` into the release.
+  Additional precondition (recurred on the PR #3592 round): a checkout-
+  restoring probe run while fix work is UNCOMMITTED silently reverts that
+  work and then reads clean — commit the fix BEFORE the first probe, or give
+  the probe script an entry-state guard that refuses a dirty tree
+  (`git status --porcelain --untracked-files=no` must be empty). The
+  issue-tracer acceptance-check contract carries the same rule with the
+  attributed-kill requirements.
 - **Stable obligation identity + coverage-diff.** Never substitute the
   obligation between ledger and proof: if the ledger defined mutant M4 as X,
   closing it with a different mutant Y is a new row, not a closure.

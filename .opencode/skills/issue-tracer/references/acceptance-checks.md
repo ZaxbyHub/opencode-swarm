@@ -33,7 +33,7 @@ Research measured that an agent's own generated tests overfit toward validating 
 
 ## Red checkpoint manifest and amendment procedure
 
-`repro/checkpoint.manifest` lives in the git-excluded trace directory and is written only by `repro-check.sh checkpoint`; `repro-check.sh verify-checkpoint` replays it. The format is defined by the script itself: a `# issue-tracer checkpoint manifest v1 rows=<N>` header line, where `<N>` is the number of data rows and is restamped on every append, then one tab-separated row per checkpoint event with exactly ten fields - seq, kind (`CHECKPOINT` or `AMEND`), path, blob id, mode, check id, argv, expected regex, base SHA, and reason. Manifest identity is the `(path, check-id)` pair, so distinct checks may share a path when they capture the same current bytes. Files are formatted with the repo's own formatter before hashing, and new checks live in their own new files (never appended to an existing file already at the 500-line test-file cap) so a later formatter pass does not silently change a frozen blob.
+`repro/checkpoint.manifest` lives in the git-excluded trace directory. Each successful `repro-check.sh checkpoint` publishes a `# issue-tracer checkpoint manifest v2 rows=<N>` header, followed by one tab-separated row per checkpoint event. Each row contains exactly ten fields in sequence: seq, kind (`CHECKPOINT` or `AMEND`), path, blob id, mode, check id, argv, expected regex, base SHA, and reason. The number of data rows must equal `<N>`. Existing v1 manifests retain the same row and count checks. Phase 4 requires generated replay verification for v2 manifests, and the external checkpoint anchor covers the version header. Manifest identity is the `(path, check-id)` pair, so distinct checks may share a path when they capture the same current bytes. Files are formatted with the repo's own formatter before hashing, and new checks live in their own new files (never appended to an existing file already at the 500-line test-file cap) so a later formatter pass does not silently change a frozen blob.
 
 Four properties are mechanically enforced, by both `checkpoint` and `verify-checkpoint`. First, **a frozen pair cannot be re-frozen**: once a `(path, check-id)` pair appears in the manifest, a plain `repro-check.sh checkpoint` on that pair exits 2, while a different check id may checkpoint the same path only after hashing the current bytes. `verify-checkpoint` independently rejects any later row for the same pair that is not an `AMEND`, so a forged duplicate `CHECKPOINT` row is refused too, and an `AMEND` must name an existing exact pair. Second, **the effective manifest has one blob per path**: multiple check ids sharing a path are deduplicable only when their latest blobs are identical; divergent effective blobs fail closed instead of becoming path-only last-writer-wins. Third, **the recorded row count is validated**: the header's `rows=<N>` must equal the number of data rows actually present. Fourth, **seq continuity is validated**: the seq column must run 1..N with no gaps and every row must carry exactly ten fields. The count and seq checks are complementary and neither is sufficient alone - seq continuity is only a *prefix* invariant, so truncating the tail (`head -3`, or dropping the last row) leaves the survivors perfectly contiguous; the count is what catches that, and seq is what catches a deletion in the middle. Together they make deleting, truncating, reordering, duplicating, or mangling a row exit 2 in both commands instead of silently dropping that check out of the replay set.
 
@@ -52,6 +52,8 @@ issue-tracer-checkpoint-v1 slug=<slug> manifest=<40-hex manifest blob> semantics
 ```
 
 The implementation owner publishes that literal in the issue, PR, or other reviewer-visible external conversation and records the artifact location in the trace as a non-authoritative discovery copy. Publication and its before/after timing are human-enforced: `trace-check.sh` cannot observe that external conversation. The owner must not regenerate it after implementation begins. An independent reviewer copies the published literal into `repro-check.sh verify-anchor --slug <slug> --receipt '<literal>'`; verification compares the current manifest digest, the current ordered `AC/class/check/argv/expect` digest, and `state.md`'s recorded `checkpoint-tree-id`. It deliberately does not compare the live working-tree tree, which changes as the fix is implemented. Malformed, stale, tampered, semantic-table-edited, or delete-and-refreeze evidence fails closed; a byte-identical refreeze remains valid because it has the same content identity.
+
+Before posting the anchor comment, re-fetch the target issue's comment thread and check for a rival: an `issue-tracer-checkpoint-v1` literal posted by an `OWNER`, `MEMBER`, or `COLLABORATOR` that is not your own (your OWN prior anchor is the comment whose URL your trace recorded as its discovery copy — identify it by that URL, never by digest equality, because two sessions on the same slug and base can share a tree digest; a literal from an untrusted author association is recorded and mentioned to the user, not an automatic halt), or an active claim comment that is not yours (newer or older; crossed claims halt both sessions and the earliest claim is only the suggested winner), means a parallel trace is live on the same work. Do not publish — halt and surface the collision to the user (Non-Negotiable Rules 13-14). Re-fetch again immediately after publishing: a rival literal that predates yours is surfaced the same way. In the recorded 2026-11-11 incident, two sessions published anchors to the same issue sixteen minutes apart and neither noticed; the fetch-before-post check would have exposed the collision hours before either PR was opened.
 
 Receipt compatibility is intentionally strict: the pre-semantics receipt
 syntax (the same `issue-tracer-checkpoint-v1` prefix without a `semantics=`
@@ -99,6 +101,24 @@ Some issues (pure documentation fixes, non-executable product decisions already 
   after every probe and verify `git status --porcelain` clean before any
   commit — a stray uncommitted mutant can ride explicit-path staging into the
   fix commit.
+- **Probe entry-state precondition.** `git checkout -- <file>` restores from
+  the INDEX, so a restoring probe run on a tree with UNCOMMITTED fix work
+  silently reverts that work — and the post-run `git status --porcelain`
+  check then reads clean, because the restore "cleaned" the tree while
+  destroying the fix (recurred on the PR #3592 round despite stored lessons).
+  Every probe script that restores via checkout must REFUSE TO START when
+  `git status --porcelain --untracked-files=no` is non-empty — commit the fix
+  first — and must leave the entry state exactly as found. When probing
+  uncommitted work is unavoidable, snapshot each target file before mutating
+  it and restore from the snapshot, never from the index.
+- **Attributed kills, not marker kills.** A mutation counts as killed only
+  when the probe records all four steps: (1) the target suite/check is GREEN
+  at baseline, (2) the mutation actually landed (assert the mutated text is
+  present before running), (3) the NAMED test or check goes RED under the
+  mutation — matched by its name or failure text, not a generic `(fail)` or
+  nonzero-exit anywhere in the output — and (4) restoration is verified. A
+  probe that accepts any failure line as a kill can be satisfied by an
+  unrelated failure and overstates the evidence.
 - **Frozen-docstring wording.** Check authors must phrase frozen-file
   docstrings to stay true at both ends: "RED at base, GREEN after the fix",
   never "must FAIL at the current tree" — the file ships and the claim becomes
@@ -108,3 +128,15 @@ Some issues (pure documentation fixes, non-executable product decisions already 
   --expect --copy --deps` spelled out (every file the base leg needs listed in
   `--copy`). Replays then run one command instead of re-assembling flags — an
   omitted `--copy` silently rewrites certified RED base logs as ERROR.
+
+## Published acceptance commands
+
+Use the published issue's `argv:` verbatim for each executable acceptance criterion and prove that command at both revisions. When a published command cannot witness the fix, record the AC, both commands, and the observed base and head outcomes. Correct the issue with the maintainer before claiming parity. For a GitHub-backed trace, record `published-issue: https://github.com/OWNER/REPO/issues/NUMBER` in `state.md` so Phase 4 fetches the live issue body and checks parity. The validator treats the published command as text.
+
+For an independently observed published-command replay, save `repro/published-replay.tsv` with the tab-separated header `ac_id, argv, base_sha, base_exit, head_sha, head_exit` (tabs in place of comma-space). Record one row per observed criterion, using the exact published argv, its checkpoint base, and the current committed head. Run the reviewed command in the isolated reproduction workflow. The checker matches the recorded base to the effective checkpoint manifest and the recorded head to the current HEAD before diagnosing a discriminating command that exited zero at both revisions. A command mismatch fails parity even when replay evidence is unavailable.
+
+A checkpoint publishes its manifest after preparing the generated replay and test inventory. If generation fails, resolve the reported error and retry the checkpoint with the same inputs. Run `bash .opencode/skills/issue-tracer/scripts/repro-check.sh verify-generated --slug <slug>` to verify the generated artifacts and the frozen file bytes before replay. When amending a check's argv, expectation, or base, pass every affected path for that check in one invocation.
+
+## Causal evidence and falsifiers
+
+Negative-evidence checks must identify the target assertion and its expected failure reason. Run a pristine control under the same conditions and require the intended result to differ. Treat producer guards, skips, crashes, and unrelated assertion failures as invalid evidence. When editing a probe that supplies negative evidence, execute its falsifier before accepting the edited probe. Keep mutation probes isolated from concurrent checkouts and replays.

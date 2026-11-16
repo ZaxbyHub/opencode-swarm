@@ -294,11 +294,13 @@ describe('memory family migration destination-lock admission', () => {
 			filename: 'memories.jsonl',
 			merged: 2,
 			skipped: 0,
+			superseded: 0,
 		});
 		expect(b.perMember.find((m) => m.filename === 'memories.jsonl')).toEqual({
 			filename: 'memories.jsonl',
 			merged: 2,
 			skipped: 0,
+			superseded: 0,
 		});
 		expect(new Set(readIds(dest, 'memories.jsonl'))).toEqual(
 			new Set(['dest-1', 'a-1', 'a-2', 'b-1', 'b-2']),
@@ -339,7 +341,12 @@ describe('memory family migration destination-lock admission', () => {
 		const first = await migrateMemoryFamily(destRoot, srcRoot);
 		expect(
 			first.perMember.find((m) => m.filename === 'memories.jsonl'),
-		).toEqual({ filename: 'memories.jsonl', merged: 1, skipped: 1 });
+		).toEqual({
+			filename: 'memories.jsonl',
+			merged: 1,
+			skipped: 1,
+			superseded: 0,
+		});
 		expect(readIds(dest, 'memories.jsonl')).toEqual([
 			'dest-1',
 			'dest-2',
@@ -349,7 +356,12 @@ describe('memory family migration destination-lock admission', () => {
 		const second = await migrateMemoryFamily(destRoot, srcRoot);
 		expect(
 			second.perMember.find((m) => m.filename === 'memories.jsonl'),
-		).toEqual({ filename: 'memories.jsonl', merged: 0, skipped: 2 });
+		).toEqual({
+			filename: 'memories.jsonl',
+			merged: 0,
+			skipped: 2,
+			superseded: 0,
+		});
 		expect(snapshotTree(dest)).toEqual(afterFirst);
 	});
 });

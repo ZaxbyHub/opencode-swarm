@@ -1,19 +1,8 @@
 ---
 name: bundle-safety
 description: Bundle transform safety — minification variant selection, consumer-constraint verification, identifier preservation, and namespace re-export coverage for build output.
-triggers:
-  - minify
-  - minification
-  - bundle
-  - esbuild
-  - build size
-  - re-export
-  - identifier
-  - namespace re-export
-  - exportLines
-  - exportRanges
-  - dist/index.js
 metadata:
+  triggers: '["minify","minification","bundle","esbuild","build size","re-export","identifier","namespace re-export","exportLines","exportRanges","dist/index.js"]'
   generated_from_knowledge: '["5746c5c9-1330-4fbe-b62e-f564deb1ff77", "5d99affe-bdd1-4945-8cd8-fcf37abb8c84", "9323a8f0-c07e-41c2-9857-11a24c55dca2"]'
   source_knowledge_ids: '["5746c5c9-1330-4fbe-b62e-f564deb1ff77", "5d99affe-bdd1-4945-8cd8-fcf37abb8c84", "9323a8f0-c07e-41c2-9857-11a24c55dca2"]'
   generated_at: "2026-07-02T20:47:50.522Z"
@@ -71,7 +60,7 @@ Verify identifier names survive the transform via the layered test stack:
 
  **Static (grep) layer:**
 - `tests/unit/build/full-auto-toolbefore-fail-closed.test.ts` — fail-closed hook substring/wrapping checks verifying that specific identifier substrings (e.g. `fullAutoPermissionHook.toolBefore`, `guardrailsHooks.toolBefore`, `scopeGuardHook.toolBefore`, `delegationGateHooks.toolBefore`) are present and that fail-closed hooks are not wrapped in `safeHook(...)`.
-- `tests/unit/turbo/lean/runtime-conformance.test.ts` — `distContains()` checks verifying that Lean Turbo integration-point identifiers (`verifyLeanTurboPhaseReady`, `verifyLeanTurboTaskCompletion`, `LEAN_TURBO_BANNER`, `enableLeanTurbo`, `hasActiveTurboMode`) survive the build.
+- `tests/unit/turbo/lean/runtime-conformance.test.ts` — `distContains()` checks verifying that Lean Turbo integration-point identifiers (`verifyLeanTurboPhaseReady`, `LEAN_TURBO_BANNER`, `enableLeanTurbo`, `hasActiveTurboMode`) survive the build.
 
 **Runtime layer:**
 - `tests/unit/build/throw-and-verify-located.test.ts` — asserts that thrown errors carry readable stack frames with preserved function names (e.g. `initializeOpenCodeSwarm`). This is the runtime complement to the static grep assertions.

@@ -20,6 +20,7 @@
  */
 
 import type { ConsensusMineRequest, ConsensusReportV1 } from './contracts.js';
+import { assertCorpusRoot } from './corpus.js';
 import { type MineConsensusDeps, mineConsensus } from './miner.js';
 import {
 	listConsensusProposalFingerprints,
@@ -46,10 +47,14 @@ export type MineAndStoreConsensusResult = {
  * Mine, then persist. The two phases stay separable on purpose — `mineConsensus`
  * mutates nothing and is safe to call speculatively; only this boundary writes,
  * and it writes exactly one artifact: the report itself.
+ *
+ * A blank or relative `directory` throws before the prior-report read, which
+ * would otherwise read `<cwd>/.swarm/evolution/consensus` (#3165 B).
  */
 export async function mineAndStoreConsensusV1(
 	options: MineAndStoreConsensusOptions,
 ): Promise<MineAndStoreConsensusResult> {
+	assertCorpusRoot(options.directory);
 	const priorFingerprints =
 		options.deps.priorFingerprints ??
 		(await listConsensusProposalFingerprints(options.directory));

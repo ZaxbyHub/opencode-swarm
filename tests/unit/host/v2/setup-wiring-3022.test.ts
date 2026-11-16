@@ -6,7 +6,7 @@ import {
 	hasV2AgentTransformSurface,
 } from '../../../../src/host/v2/model-apply';
 import { openCodeSwarmV2Setup } from '../../../../src/host/v2/setup';
-import { canonicalMkdtemp } from '../../../helpers/tmpdir';
+import { canonicalMkdtemp, removeTreeWithRetry } from '../../../helpers/tmpdir';
 
 /**
  * Issue #3022 review round 1 (implementation-review finding 2): the four
@@ -62,7 +62,7 @@ describe('#3022 v2 setup wiring (functional)', () => {
 		expect(hasV2AgentTransformSurface()).toBe(true);
 		await cleanup();
 		expect(hasV2AgentTransformSurface()).toBe(false);
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeTreeWithRetry(dir);
 	});
 
 	test('a ctx without the agent domain leaves the surface unset (still fail-open)', async () => {
@@ -73,7 +73,7 @@ describe('#3022 v2 setup wiring (functional)', () => {
 		);
 		expect(hasV2AgentTransformSurface()).toBe(false);
 		await cleanup();
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeTreeWithRetry(dir);
 	});
 });
 
@@ -88,7 +88,11 @@ describe('#3022 v2 setup + advance wiring (source contract)', () => {
 	);
 
 	test('setup registers the agent-transform surface', () => {
-		expect(setupSrc).toContain('registerV2AgentTransformSurface(ctx);');
+		// #2910 W5 re-pin: the call is token-carrying (per-instance owner
+		// scoping — a setup's cleanup clears only its own surface).
+		expect(setupSrc).toContain(
+			'registerV2AgentTransformSurface(ctx, ownerToken);',
+		);
 	});
 
 	test('setup runs the startup roster preflight inline at its tail, withTimeout-bounded (C6 scan)', () => {
@@ -99,11 +103,32 @@ describe('#3022 v2 setup + advance wiring (source contract)', () => {
 	test('both index.ts session.error advance arms apply the advanced model on v2', () => {
 		const calls = indexSrc.match(/void applyV2AgentModelOverride\(/g) ?? [];
 		expect(calls.length).toBe(2);
-		// Both call sites key on the exact registered agent name.
+		// #3331 + #3617 PRR-001: both call sites resolve the REGISTERED roster
+		// key through the shared resolver (exact spelling first; a
+		// case-insensitive match only when unique; ambiguity refused), never
+		// the raw exactAgentName spelling — the create-or-update editor would
+		// mint a phantom or a wrong-target agent.
+		// 3 matches: 2 call sites + the shared resolver's own declaration.
+		expect(indexSrc.match(/resolveRegisteredRosterAgentKey\(/g)?.length).toBe(
+			3,
+		);
 		expect(
 			indexSrc.match(
-				/applyV2AgentModelOverride\(\n\s+routeModel\.exactAgentName,/g,
+				/void applyV2AgentModelOverride\((?:\n\s+)?(?:routedApply|noRouteApply)\.registeredName,/g,
 			)?.length,
 		).toBe(2);
+		// The raw spelling may feed the RESOLVER but never the apply call.
+		expect(
+			indexSrc.match(
+				/void applyV2AgentModelOverride\(\s*routeModel\.exactAgentName/g,
+			)?.length ?? 0,
+		).toBe(0);
+	});
+
+	test('index.ts injects the fresh-tables builder into the v2 setup deps (PRR-046)', () => {
+		// The default export's setup block must pass buildV2RegistrationTables
+		// — deleting the injection silently no-ops the production refresh
+		// (the dep is optional, so tsc and every other test stay green).
+		expect(indexSrc).toContain('buildV2RegistrationTables,');
 	});
 });

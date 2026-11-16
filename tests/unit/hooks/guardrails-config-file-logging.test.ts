@@ -87,50 +87,46 @@ describe('guardrails config-file logging', () => {
 	// -------------------------------------------------------------------------
 	// Test 1: warn triggered for config-zone files
 	// (classifyFile returns zone: 'config')
+	//
+	// #3120: files matching BUILT_IN_VERIFIER_CONFIG_GLOBS (tsconfig.json,
+	// biome.json, …) are now hard-blocked for EVERY role — the authority
+	// throw in toolBefore happens BEFORE the config-file warn, so blocked
+	// writes never reach the warn. Only NON-verifier config-zone files
+	// (config/settings.yml) keep the warn path.
 	// -------------------------------------------------------------------------
 	describe('config-zone classification triggers warn', () => {
-		it('warns for tsconfig.json (zone: config)', async () => {
+		it('blocks tsconfig.json write for build (verifier-config glob, #3120)', async () => {
 			const config = defaultConfig();
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
 			setupBuildSession();
 			const warnSpy = spyOn(utilsModule, 'warn').mockImplementation(() => {});
 
-			await hooks.toolBefore(
-				makeInput('test-session', 'write', 'call-1'),
-				makeOutput({ filePath: 'tsconfig.json' }),
-			);
+			await expect(
+				hooks.toolBefore(
+					makeInput('test-session', 'write', 'call-1'),
+					makeOutput({ filePath: 'tsconfig.json' }),
+				),
+			).rejects.toThrow(/WRITE BLOCKED.*AUTHORITY_VERIFIER_CONFIG/);
 
-			expect(warnSpy).toHaveBeenCalledWith(
-				'Config file write attempt',
-				expect.objectContaining({
-					agent: 'build',
-					path: 'tsconfig.json',
-					allowed: true,
-					type: 'direct_write',
-				}),
+			// The authority throw fires first: the config-file warn never runs.
+			const configFileWarnings = warnSpy.mock.calls.filter(
+				([msg]) => msg === 'Config file write attempt',
 			);
+			expect(configFileWarnings).toHaveLength(0);
 			warnSpy.mockRestore();
 		});
 
-		it('warns for biome.json (zone: config via .json extension)', async () => {
+		it('blocks biome.json write for build (verifier-config glob, #3120)', async () => {
 			const config = defaultConfig();
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
 			setupBuildSession();
-			const warnSpy = spyOn(utilsModule, 'warn').mockImplementation(() => {});
 
-			await hooks.toolBefore(
-				makeInput('test-session', 'write', 'call-1'),
-				makeOutput({ filePath: 'biome.json' }),
-			);
-
-			expect(warnSpy).toHaveBeenCalledWith(
-				'Config file write attempt',
-				expect.objectContaining({
-					path: 'biome.json',
-					type: 'direct_write',
-				}),
-			);
-			warnSpy.mockRestore();
+			await expect(
+				hooks.toolBefore(
+					makeInput('test-session', 'write', 'call-1'),
+					makeOutput({ filePath: 'biome.json' }),
+				),
+			).rejects.toThrow(/WRITE BLOCKED.*AUTHORITY_VERIFIER_CONFIG/);
 		});
 
 		it('warns for nested config/settings.yml (zone: config)', async () => {
@@ -159,18 +155,20 @@ describe('guardrails config-file logging', () => {
 			setupBuildSession();
 			const warnSpy = spyOn(utilsModule, 'warn').mockImplementation(() => {});
 
+			// #3120: tsconfig.json is a verifier-config glob and now hard-blocks,
+			// so the audit-type pin uses a NON-verifier config-zone file.
 			await hooks.toolBefore(
 				makeInput('test-session', 'apply_patch', 'call-patch'),
 				makeOutput({
 					input:
-						'*** Begin Patch\n*** Update File: tsconfig.json\n@@\n-old\n+new\n*** End Patch',
+						'*** Begin Patch\n*** Update File: config/settings.yml\n@@\n-old\n+new\n*** End Patch',
 				}),
 			);
 
 			expect(warnSpy).toHaveBeenCalledWith(
 				'Config file write attempt',
 				expect.objectContaining({
-					path: 'tsconfig.json',
+					path: 'config/settings.yml',
 					type: 'direct_patch',
 				}),
 			);
@@ -179,10 +177,12 @@ describe('guardrails config-file logging', () => {
 	});
 
 	// -------------------------------------------------------------------------
-	// Test 2: warn triggered for KNOWN_VERIFIER_CONFIG_GLOBS matches
-	// (classifyFile returns zone !== 'config', but glob pattern matches)
+	// Test 2: KNOWN_VERIFIER_CONFIG_GLOBS matches now hard-block (#3120).
+	// Every case below is in BUILT_IN_VERIFIER_CONFIG_GLOBS, so a build-role
+	// write toolBefore REJECTS with AUTHORITY_VERIFIER_CONFIG before the
+	// config-file warn can fire (pre-#3120 these warned with allowed: true).
 	// -------------------------------------------------------------------------
-	describe('KNOWN_VERIFIER_CONFIG_GLOBS matching triggers warn', () => {
+	describe('KNOWN_VERIFIER_CONFIG_GLOBS matching hard-blocks writes (#3120)', () => {
 		const globCases = [
 			{ filePath: '.eslintrc', label: '.eslintrc (root dotfile)' },
 			{ filePath: '.eslintrc.js', label: '.eslintrc.js' },
@@ -198,24 +198,23 @@ describe('guardrails config-file logging', () => {
 		];
 
 		for (const { filePath, label } of globCases) {
-			it(`warns for ${label}`, async () => {
+			it(`blocks write to ${label} (AUTHORITY_VERIFIER_CONFIG)`, async () => {
 				const config = defaultConfig();
 				const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
 				setupBuildSession();
 				const warnSpy = spyOn(utilsModule, 'warn').mockImplementation(() => {});
 
-				await hooks.toolBefore(
-					makeInput('test-session', 'write', 'call-1'),
-					makeOutput({ filePath }),
-				);
+				await expect(
+					hooks.toolBefore(
+						makeInput('test-session', 'write', 'call-1'),
+						makeOutput({ filePath }),
+					),
+				).rejects.toThrow(/WRITE BLOCKED.*AUTHORITY_VERIFIER_CONFIG/);
 
-				expect(warnSpy).toHaveBeenCalledWith(
-					'Config file write attempt',
-					expect.objectContaining({
-						path: filePath,
-						type: 'direct_write',
-					}),
+				const configFileWarnings = warnSpy.mock.calls.filter(
+					([msg]) => msg === 'Config file write attempt',
 				);
+				expect(configFileWarnings).toHaveLength(0);
 				warnSpy.mockRestore();
 			});
 		}
@@ -268,7 +267,9 @@ describe('guardrails config-file logging', () => {
 	});
 
 	// -------------------------------------------------------------------------
-	// Test 4: delegated context preserves the delegated audit type
+	// Test 4: delegated context — verifier-config globs hard-block (#3120);
+	// the delegated_write / delegated_patch audit types stay pinned via a
+	// NON-verifier config-zone file (config/settings.yml).
 	// -------------------------------------------------------------------------
 	describe('delegated config-file writes trigger the canonical warn', () => {
 		function setupDelegatedBuildSession(sessionID = 'test-session'): void {
@@ -281,66 +282,78 @@ describe('guardrails config-file logging', () => {
 			}
 		}
 
-		it('warns for delegated write to .eslintrc (glob match)', async () => {
+		it('blocks delegated write to .eslintrc (glob match, #3120)', async () => {
 			const config = defaultConfig();
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
 			setupDelegatedBuildSession();
-			const warnSpy = spyOn(utilsModule, 'warn').mockImplementation(() => {});
 
 			// Delegated write: delegationActive=true, tool is 'write'
-			await hooks.toolBefore(
-				makeInput('test-session', 'write', 'call-1'),
-				makeOutput({ filePath: '.eslintrc' }),
-			);
-
-			expect(warnSpy).toHaveBeenCalledWith(
-				'Config file write attempt',
-				expect.objectContaining({
-					type: 'delegated_write',
-					path: '.eslintrc',
-				}),
-			);
-			warnSpy.mockRestore();
+			await expect(
+				hooks.toolBefore(
+					makeInput('test-session', 'write', 'call-1'),
+					makeOutput({ filePath: '.eslintrc' }),
+				),
+			).rejects.toThrow(/WRITE BLOCKED.*AUTHORITY_VERIFIER_CONFIG/);
 		});
 
-		it('warns for delegated write to tsconfig.json (zone: config)', async () => {
+		it('blocks delegated write to tsconfig.json (zone: config, #3120)', async () => {
 			const config = defaultConfig();
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
 			setupDelegatedBuildSession();
-			const warnSpy = spyOn(utilsModule, 'warn').mockImplementation(() => {});
 
-			await hooks.toolBefore(
-				makeInput('test-session', 'write', 'call-1'),
-				makeOutput({ filePath: 'tsconfig.json' }),
-			);
-
-			expect(warnSpy).toHaveBeenCalledWith(
-				'Config file write attempt',
-				expect.objectContaining({
-					type: 'delegated_write',
-					path: 'tsconfig.json',
-				}),
-			);
-			warnSpy.mockRestore();
+			await expect(
+				hooks.toolBefore(
+					makeInput('test-session', 'write', 'call-1'),
+					makeOutput({ filePath: 'tsconfig.json' }),
+				),
+			).rejects.toThrow(/WRITE BLOCKED.*AUTHORITY_VERIFIER_CONFIG/);
 		});
 
-		it('preserves delegated_patch audit type for native apply_patch', async () => {
+		it('blocks delegated native apply_patch to tsconfig.json (#3120)', async () => {
+			const hooks = createGuardrailsHooks(TEST_DIR, undefined, defaultConfig());
+			setupDelegatedBuildSession();
+
+			await expect(
+				hooks.toolBefore(
+					makeInput('test-session', 'apply_patch', 'call-patch'),
+					makeOutput({
+						input:
+							'*** Begin Patch\n*** Update File: tsconfig.json\n@@\n-old\n+new\n*** End Patch',
+					}),
+				),
+			).rejects.toThrow(/WRITE BLOCKED.*AUTHORITY_VERIFIER_CONFIG/);
+		});
+
+		it('preserves delegated audit types for non-verifier config files', async () => {
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, defaultConfig());
 			setupDelegatedBuildSession();
 			const warnSpy = spyOn(utilsModule, 'warn').mockImplementation(() => {});
 
+			// #3120: verifier-config globs hard-block, so the delegated_write and
+			// delegated_patch audit-type pins use a NON-verifier config-zone file.
 			await hooks.toolBefore(
-				makeInput('test-session', 'apply_patch', 'call-patch'),
-				makeOutput({
-					input:
-						'*** Begin Patch\n*** Update File: tsconfig.json\n@@\n-old\n+new\n*** End Patch',
-				}),
+				makeInput('test-session', 'write', 'call-delegated-write'),
+				makeOutput({ filePath: 'config/settings.yml' }),
 			);
-
 			expect(warnSpy).toHaveBeenCalledWith(
 				'Config file write attempt',
 				expect.objectContaining({
-					path: 'tsconfig.json',
+					type: 'delegated_write',
+					path: 'config/settings.yml',
+				}),
+			);
+
+			await hooks.toolBefore(
+				makeInput('test-session', 'apply_patch', 'call-delegated-patch'),
+				makeOutput({
+					input:
+						'*** Begin Patch\n*** Update File: config/settings.yml\n@@\n-old\n+new\n*** End Patch',
+				}),
+			);
+			expect(warnSpy).toHaveBeenCalledWith(
+				'Config file write attempt',
+				expect.objectContaining({
+					path: 'config/settings.yml',
 					type: 'delegated_patch',
 				}),
 			);
@@ -393,47 +406,34 @@ describe('guardrails config-file logging', () => {
 	// Edge cases: path normalization
 	// -------------------------------------------------------------------------
 	describe('path normalization edge cases', () => {
-		it('handles absolute Windows paths for config files', async () => {
+		it('handles absolute Windows paths for verifier config files (#3120 block)', async () => {
 			const config = defaultConfig();
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
 			setupBuildSession();
-			const warnSpy = spyOn(utilsModule, 'warn').mockImplementation(() => {});
 
-			// Absolute path to tsconfig.json
+			// Absolute path to tsconfig.json — the authority check normalizes it
+			// back to the workspace-relative form before the verifier glob match.
 			const absPath = path.join(TEST_DIR, 'tsconfig.json');
-			await hooks.toolBefore(
-				makeInput('test-session', 'write', 'call-1'),
-				makeOutput({ filePath: absPath }),
-			);
-
-			expect(warnSpy).toHaveBeenCalledWith(
-				'Config file write attempt',
-				expect.objectContaining({
-					type: 'direct_write',
-				}),
-			);
-			warnSpy.mockRestore();
+			await expect(
+				hooks.toolBefore(
+					makeInput('test-session', 'write', 'call-1'),
+					makeOutput({ filePath: absPath }),
+				),
+			).rejects.toThrow(/WRITE BLOCKED.*AUTHORITY_VERIFIER_CONFIG/);
 		});
 
-		it('normalizes backslash paths for glob matching on Windows', async () => {
+		it('blocks .prettierrc via glob matching on Windows paths (#3120)', async () => {
 			const config = defaultConfig();
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
 			setupBuildSession();
-			const warnSpy = spyOn(utilsModule, 'warn').mockImplementation(() => {});
 
 			// Using forward-slash path which should work on Windows too
-			await hooks.toolBefore(
-				makeInput('test-session', 'write', 'call-1'),
-				makeOutput({ filePath: '.prettierrc' }),
-			);
-
-			expect(warnSpy).toHaveBeenCalledWith(
-				'Config file write attempt',
-				expect.objectContaining({
-					path: '.prettierrc',
-				}),
-			);
-			warnSpy.mockRestore();
+			await expect(
+				hooks.toolBefore(
+					makeInput('test-session', 'write', 'call-1'),
+					makeOutput({ filePath: '.prettierrc' }),
+				),
+			).rejects.toThrow(/WRITE BLOCKED.*AUTHORITY_VERIFIER_CONFIG/);
 		});
 	});
 });

@@ -6,18 +6,15 @@ import {
 	SWARM_COMMAND_TOOL_ALLOWLIST,
 } from './tool-policy.js';
 
-// ── Helper ───────────────────────────────────────────────────────────────────
-
 function cmd(name: string): CommandEntry {
 	return COMMAND_REGISTRY[
 		name as keyof typeof COMMAND_REGISTRY
 	] as CommandEntry;
 }
 
-// --- 1. CLASSIFICATION SNAPSHOT ---
-
 describe('toolPolicy classification snapshot — no regression', () => {
 	const EXPECTED_AGENT = new Set<string>([
+		'pr-review',
 		'agents',
 		'config',
 		'config doctor',
@@ -63,9 +60,9 @@ describe('toolPolicy classification snapshot — no regression', () => {
 		// agent-callable PR subscription lifecycle (idempotent, capped; ex-human-only)
 		'pr subscribe',
 		'pr unsubscribe',
-		// guardrail diagnostics: pre-existing 'agent' commands not previously
-		// enumerated here — registry is the source of truth (both 'agent')
+		// guardrail diagnostics: pre-existing 'agent' commands (registry is the source of truth)
 		'guardrail explain',
+		'attest', // #3422 (agent)
 		'guardrail reset',
 		'guardrail-log',
 		'lanes',
@@ -86,6 +83,7 @@ describe('toolPolicy classification snapshot — no regression', () => {
 		'harness-opt plan',
 		'harness-opt status',
 		'harness-opt history',
+		'receipt', // #2968/#2970: portable verification receipts (emission + verify, toolPolicy 'agent')
 	]);
 
 	const EXPECTED_RESTRICTED = new Set<string>([

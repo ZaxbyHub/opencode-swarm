@@ -11,6 +11,7 @@
 import type { PluginConfig } from '../config';
 import { loadPlan } from '../plan/manager';
 import { extractCurrentPhaseFromPlan } from './extractors';
+import { resolveMessageTransformContext } from './host-boundary';
 import { safeHook } from './utils';
 
 /**
@@ -119,9 +120,15 @@ export function createPipelineTrackerHook(
 				const lastUserMessage = messages[lastUserMessageIndex];
 				if (!lastUserMessage?.parts) return;
 
-				// Only inject for architect (or if no agent specified = main session)
-				const agent = lastUserMessage.info?.agent;
-				if (agent && agent !== 'architect') return;
+				// Only inject for the architect (or if no agent resolvable = main
+				// session). Identity resolution (#3320) prefers session state (set by
+				// chat.message / the v2 seed) and falls back to the last user
+				// message's info.agent — the shared resolver — and prefixed
+				// architects (mega_architect) strip to the base role, so they keep
+				// receiving the reminder while identified non-architects
+				// (build/plan/general) do not.
+				const mctx = resolveMessageTransformContext(output);
+				if (mctx.agent && !mctx.isArchitect) return;
 
 				// Find the first text part
 				const textPartIndex = lastUserMessage.parts.findIndex(

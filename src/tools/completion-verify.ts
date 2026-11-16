@@ -6,7 +6,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import type { ToolDefinition } from '@opencode-ai/plugin';
+import type { ToolContext, ToolDefinition } from '@opencode-ai/plugin';
 import { z } from 'zod';
 import { validateSwarmPath } from '../hooks/utils';
 import { hasActiveTurboMode } from '../state';
@@ -269,7 +269,9 @@ export async function executeCompletionVerify(
 	}
 
 	// === Turbo Mode bypass ===
-	if (hasActiveTurboMode(args.sessionID)) {
+	// Only the caller's own session counts. hasActiveTurboMode(undefined) means
+	// "any session", so another session's Turbo skipped this check (#3165 E).
+	if (args.sessionID && hasActiveTurboMode(args.sessionID)) {
 		const result: CompletionVerifyResult = {
 			success: true,
 			phase,
@@ -521,7 +523,7 @@ export const completion_verify: ToolDefinition = createSwarmTool({
 			.string()
 			.optional()
 			.describe(
-				'Session ID for tracking state (auto-provided by plugin context)',
+				'Ignored. The session comes from the plugin runtime context only; a session named here never affects the Turbo Mode decision (#3662).',
 			),
 		working_directory: z
 			.string()
@@ -530,7 +532,11 @@ export const completion_verify: ToolDefinition = createSwarmTool({
 				'Explicit project root directory. When provided, .swarm/ is resolved relative to this path instead of the plugin context directory. Use this when CWD differs from the actual project root.',
 			),
 	},
-	execute: async (args: unknown, directory: string): Promise<string> => {
+	execute: async (
+		args: unknown,
+		directory: string,
+		ctx?: ToolContext,
+	): Promise<string> => {
 		let parsedArgs: CompletionVerifyArgs;
 
 		try {
@@ -543,8 +549,15 @@ export const completion_verify: ToolDefinition = createSwarmTool({
 							: typeof obj.phase === 'string'
 								? Number(obj.phase)
 								: 0,
-					sessionID:
-						typeof obj.sessionID === 'string' ? obj.sessionID : undefined,
+					// #3662: the Turbo bypass is keyed to the session the
+					// PLUGIN RUNTIME says the caller is in — a model-supplied
+					// sessionID argument must never select whose Turbo Mode
+					// skips verification. A missing context session means "no
+					// Turbo bypass", never "the session the arguments name".
+					// (Direct executeCompletionVerify callers — the
+					// phase_complete gate — keep passing their own session
+					// explicitly; that explicit authority is intended.)
+					sessionID: ctx?.sessionID,
 					working_directory:
 						typeof obj.working_directory === 'string'
 							? obj.working_directory

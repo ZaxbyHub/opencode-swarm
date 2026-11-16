@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.200.13",
+  "tagCommit": "790b9dbba991ed0d50422080e245ef4a3dcca6b4",
+  "targetCommitish": "790b9dbba991ed0d50422080e245ef4a3dcca6b4",
+  "releaseBodySha256": "8ed92c5dc1623da4708f2ca2b7cde4545ac44992a41993f729d4e762712e11ea",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/retired-skill-injection-gate.md",
+      "sha256": "fcb9b71cc27d6cc9bd726c95fffa35efc0c36de5a07458cf5ad776455e3c1900"
+    },
+    {
+      "prNumber": null,
+      "order": 2,
+      "path": "docs/releases/pending/rmdir-guard-parity-3503-3505.md",
+      "sha256": "73783f13b3fbb3e5be7397ad792ff7e2ce0536151d76c8f768c1c8037d716911"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/turbo-rule3-lean-wiring.md",
+      "sha256": "eff994927cf9d7b8e6f477f5abb2e98e910ffb7027d5c8b9e160d4254f7b2fa1"
+    }
+  ]
+}

@@ -17,6 +17,7 @@ import {
 	routeReviewSemantic,
 	shouldParallelizeReview,
 } from '../../../src/parallel/review-router';
+import { safeRmRecursive } from '../../helpers/safe-test-dir';
 
 describe('review-router module tests', () => {
 	let tmpDir: string;
@@ -27,7 +28,7 @@ describe('review-router module tests', () => {
 
 	afterEach(() => {
 		try {
-			fs.rmSync(tmpDir, { recursive: true, force: true });
+			safeRmRecursive(tmpDir);
 		} catch {
 			// Ignore cleanup errors
 		}

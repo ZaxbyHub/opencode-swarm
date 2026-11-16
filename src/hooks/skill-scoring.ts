@@ -361,6 +361,229 @@ interface SkillMetadataChild {
 	listItems: string[];
 }
 
+/** A parsed inline flow-map `metadata: {k: v, ...}` value (issue #3217). */
+export interface MetadataFlowMap {
+	/** (key, rawValue) pairs in declaration order; keys NOT lowercased. */
+	pairs: Array<[string, string]>;
+	/** Keys declared more than once inside the flow map. */
+	duplicateKeys: Set<string>;
+}
+
+interface FlowScanState {
+	depth: number;
+	/** Stack of expected closing brackets (kind-aware: `]` cannot close `{`). */
+	closers: Array<'}' | ']'>;
+	quote: '"' | "'" | undefined;
+	/** Set inside a double-quoted scalar right after a backslash. */
+	escaped: boolean;
+	/** True when the next non-space character starts a value (or a key). */
+	atValueStart: boolean;
+	/** False once a top-level comment starts — the caller stops scanning. */
+	alive: boolean;
+}
+
+/**
+ * Advance the flow scan state over one character using YAML flow semantics
+ * bounded to this parser: a quote opens a quoted scalar ONLY at a value/key
+ * start (so an apostrophe mid-word like `it's` stays plain), backslash
+ * escapes apply inside double quotes, brackets are kind-aware (a `]` cannot
+ * close `{`; a stray closer poisons the scan), and a `#` at top level after
+ * whitespace starts a comment (alive=false).
+ */
+function scanFlowChar(ch: string, prev: string, state: FlowScanState): void {
+	if (!state.alive) return;
+	if (state.quote) {
+		if (state.escaped) {
+			state.escaped = false;
+		} else if (state.quote === '"' && ch === '\\') {
+			state.escaped = true;
+		} else if (ch === state.quote) {
+			state.quote = undefined;
+			state.atValueStart = false;
+		}
+		return;
+	}
+	if ((ch === '"' || ch === "'") && state.atValueStart) {
+		state.quote = ch;
+		state.atValueStart = false;
+		return;
+	}
+	if (ch === '#' && state.depth === 0 && (prev === '' || /\s/.test(prev))) {
+		state.alive = false;
+		return;
+	}
+	if (ch === '{' || ch === '[') {
+		state.closers.push(ch === '{' ? '}' : ']');
+		state.depth += 1;
+		state.atValueStart = true;
+		return;
+	}
+	if (ch === '}' || ch === ']') {
+		const expected = state.closers[state.closers.length - 1];
+		if (expected !== ch) {
+			// Kind mismatch or stray closer: poison the scan.
+			state.depth = -1;
+			state.alive = false;
+			return;
+		}
+		state.closers.pop();
+		state.depth -= 1;
+		state.atValueStart = false;
+		return;
+	}
+	if (ch === ',') {
+		state.atValueStart = true;
+		return;
+	}
+	if (ch === ':') {
+		state.atValueStart = true;
+		return;
+	}
+	if (!/\s/.test(ch)) state.atValueStart = false;
+}
+
+function initialFlowState(): FlowScanState {
+	return {
+		depth: 0,
+		closers: [],
+		quote: undefined,
+		escaped: false,
+		atValueStart: true,
+		alive: true,
+	};
+}
+
+/** Strip a top-level trailing YAML comment (` # ...`) from a flow value. */
+function stripFlowTrailingComment(value: string): string {
+	const state = initialFlowState();
+	let prev = '';
+	for (let i = 0; i < value.length; i++) {
+		const ch = value[i] as string;
+		scanFlowChar(ch, prev, state);
+		if (!state.alive || state.depth < 0) return value.slice(0, i).trimEnd();
+		prev = ch;
+	}
+	return value.trimEnd();
+}
+
+/**
+ * Parse a single-level YAML flow mapping (`{key: value, ...}`) within the
+ * bounded line parser — the same subset collectMetadataChildren reads in
+ * block form (issue #3217). Values are kept raw (quotes intact); nested flow
+ * collections must be balanced and kind-matched. A quote opens only at a
+ * value start (apostrophes mid-word stay plain), backslash escapes apply in
+ * double quotes, and a top-level trailing comment is ignored.
+ * Returns null when the value is not a `{...}` form or any segment is not a
+ * `key: value` pair — callers treat that as malformed and fail closed.
+ */
+export function parseMetadataFlowMap(raw: string): MetadataFlowMap | null {
+	const trimmed = stripFlowTrailingComment(raw.trim());
+	if (!trimmed.startsWith('{') || !trimmed.endsWith('}')) return null;
+	const inner = trimmed.slice(1, -1).trim();
+	const pairs: Array<[string, string]> = [];
+	const duplicateKeys = new Set<string>();
+	if (inner === '') return { pairs, duplicateKeys };
+	// Split on top-level commas only (quotes and kind-matched brackets guard
+	// depth; a bracket-kind mismatch or a negative depth rejects the map).
+	const segments: string[] = [];
+	const state = initialFlowState();
+	let current = '';
+	let prev = '';
+	for (const ch of inner) {
+		// Split on a top-level comma OUTSIDE any quoted scalar — the quote
+		// state lives in `state`, so the check must consult it before the
+		// split (a comma inside `"1,2"` is scalar content, feedback round 2).
+		if (ch === ',' && state.depth === 0 && !state.quote) {
+			segments.push(current);
+			current = '';
+			prev = ch;
+			continue;
+		}
+		scanFlowChar(ch, prev, state);
+		if (!state.alive || state.depth < 0) return null;
+		current += ch;
+		prev = ch;
+	}
+	if (state.quote || state.depth !== 0 || state.closers.length > 0) return null;
+	segments.push(current);
+	const seen = new Set<string>();
+	for (const segment of segments) {
+		const text = segment.trim();
+		const pair = text.match(
+			/^(?:"([^"]+)"|'([^']+)'|([A-Za-z_][A-Za-z0-9_-]*))\s*:\s*(.*)$/,
+		);
+		if (!pair || pair[4].trim() === '') return null;
+		const key = (pair[1] ?? pair[2] ?? pair[3] ?? '').toLowerCase();
+		if (seen.has(key)) duplicateKeys.add(key);
+		seen.add(key);
+		pairs.push([pair[1] ?? pair[2] ?? pair[3] ?? '', pair[4].trim()]);
+	}
+	return { pairs, duplicateKeys };
+}
+
+/** Strip a trailing YAML comment from an inline `metadata:` value,
+ * quote-aware: a `#` at value start is a comment-only line (empty), and a
+ * `#` inside a quoted scalar (e.g. `{note: "a # b"}`) is scalar content —
+ * only a top-level ` #` after the value ends the line (PR #3387 feedback
+ * round 2: the earlier naive `indexOf(' #')` truncated quoted hashes and
+ * failed valid YAML closed). */
+export function stripInlineMetadataComment(rawValue: string): string {
+	const trimmed = rawValue.trim();
+	if (trimmed.startsWith('#')) return '';
+	return stripFlowTrailingComment(trimmed);
+}
+
+/**
+ * True when a flow-collection value leaves the scanner unbalanced at end of
+ * input (open bracket or open quote) — the value continues on the next line.
+ */
+export function flowNeedsContinuation(value: string): boolean {
+	const state = initialFlowState();
+	let prev = '';
+	for (const ch of value) {
+		scanFlowChar(ch, prev, state);
+		if (!state.alive || state.depth < 0) return false;
+		prev = ch;
+	}
+	return state.depth > 0 || state.quote !== undefined;
+}
+
+/**
+ * Consume continuation lines of a multi-line flow collection started on the
+ * `metadata:` line, until the brackets balance (bounded by the frontmatter
+ * end). Returns the joined single-line value and the last consumed line
+ * index, or null when the collection never balances.
+ */
+export function consumeFlowContinuation(
+	firstValue: string,
+	lines: string[],
+	start: number,
+	end: number,
+): { value: string; endIndex: number } | null {
+	const state = initialFlowState();
+	let prev = '';
+	const advance = (chunk: string): boolean => {
+		for (const ch of chunk) {
+			scanFlowChar(ch, prev, state);
+			if (!state.alive || state.depth < 0) return false;
+			prev = ch;
+		}
+		return true;
+	};
+	if (!advance(firstValue)) return null;
+	const parts: string[] = [firstValue.trim()];
+	for (let j = start; j < end; j++) {
+		const line = lines[j] ?? '';
+		parts.push(line.trim());
+		prev = ' ';
+		if (!advance(` ${line}`)) return null;
+		if (state.depth === 0 && !state.quote && state.closers.length === 0) {
+			return { value: parts.join(' '), endIndex: j };
+		}
+	}
+	return null;
+}
+
 /**
  * Collect the indented children of an Agent-Skills-spec `metadata:` map
  * (https://agentskills.io/specification — a string-keyed map for non-spec
@@ -528,12 +751,73 @@ export function parseSkillFrontmatter(
 		if (key === 'metadata') {
 			duplicateMetadataBlocks += 1;
 			if (duplicateMetadataBlocks === 1) {
-				const collected = collectMetadataChildren(lines, i + 1, end);
-				metadataChildren = collected.children;
-				if (collected.duplicateKeys.has('audience')) {
-					audience = { status: 'invalid', values: [] };
+				// Comment-strip the inline value exactly like the drift-check
+				// detector classifies it (issue #3217 feedback round): a
+				// comment-only `metadata: # note` line is an EMPTY value and
+				// takes the block-collection path.
+				const inline = stripInlineMetadataComment(rawValue);
+				if (inline !== '') {
+					// Inline value: resolve per bounded YAML flow semantics.
+					// A `{` left unbalanced at end of line starts a
+					// multi-line flow collection — consume continuation lines
+					// until the brackets balance. Anything that does not
+					// parse (malformed flow, sequences, bare scalars) fails
+					// closed (audience invalid, never absent/match-all).
+					let flowValue = inline;
+					let cursorEnd = i;
+					if (flowValue.startsWith('{') && flowNeedsContinuation(flowValue)) {
+						const consumed = consumeFlowContinuation(
+							flowValue,
+							lines,
+							i + 1,
+							end,
+						);
+						if (consumed === null) {
+							audience = { status: 'invalid', values: [] };
+							continue;
+						}
+						flowValue = consumed.value;
+						cursorEnd = consumed.endIndex;
+					}
+					if (flowValue.startsWith('{')) {
+						const flow = parseMetadataFlowMap(flowValue);
+						if (flow === null) {
+							audience = { status: 'invalid', values: [] };
+						} else {
+							const children = new Map<string, SkillMetadataChild>();
+							for (const [rawKey, rawValueOfPair] of flow.pairs) {
+								const childKey = rawKey.toLowerCase();
+								if (children.has(childKey)) continue; // first wins
+								children.set(childKey, {
+									inline: stripQuotes(rawValueOfPair.trim()).replace(
+										/''/g,
+										"'",
+									),
+									listItems: [],
+								});
+							}
+							metadataChildren = children;
+							if (flow.duplicateKeys.has('audience')) {
+								audience = { status: 'invalid', values: [] };
+							}
+						}
+					} else {
+						// Non-flow inline value (sequence, scalar, garbage):
+						// unparseable for this reader — fail closed. The
+						// drift-check detector flags every non-empty inline
+						// value as non-canonical, so tracked trees cannot
+						// carry these shapes.
+						audience = { status: 'invalid', values: [] };
+					}
+					i = cursorEnd;
+				} else {
+					const collected = collectMetadataChildren(lines, i + 1, end);
+					metadataChildren = collected.children;
+					if (collected.duplicateKeys.has('audience')) {
+						audience = { status: 'invalid', values: [] };
+					}
+					i = collected.nextIndex;
 				}
-				i = collected.nextIndex;
 			}
 			continue;
 		}

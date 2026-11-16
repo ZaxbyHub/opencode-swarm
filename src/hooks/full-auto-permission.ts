@@ -23,6 +23,10 @@
  *   - When a denial is recorded, also evaluate denial thresholds and pause
  *     or terminate per `full_auto.denials.on_limit`.
  */
+
+import { canonicalCommandKey } from '../commands/command-dispatch';
+import { resolveCommand } from '../commands/registry';
+import { classifySwarmCommandToolUse } from '../commands/tool-policy';
 import type { PluginConfig } from '../config';
 import { ORCHESTRATOR_NAME } from '../config/constants';
 import { stripKnownSwarmPrefix } from '../config/schema';
@@ -62,6 +66,7 @@ import {
 	resolveAuthorizedScopeBindingForSession,
 } from '../scope/scope-persistence';
 import { getModifiedFilesForTask, swarmState } from '../state';
+import { isCodeModeWrapperCall } from './code-mode-wrapper';
 import {
 	consumePendingInputWarning,
 	peekPendingInputWarning,
@@ -77,6 +82,84 @@ export const _internals = {
 export interface FullAutoPermissionHookOptions {
 	config: PluginConfig;
 	directory: string;
+}
+
+/**
+ * `/swarm` commands that only read and display state. Deliberately SEPARATE from
+ * the tool policy's agent allowlist, which also contains state-changing and
+ * process-spawning commands (`auto-proceed`, `guardrail reset`, `attest`,
+ * `ci-simulate`, `gate-audit`, `review`, `post-mortem`, `pr subscribe`,
+ * `sdd project`, `*-opt` runs, ...). Canonical keys.
+ *
+ * The invariant is: no change to source, plan, gates or any operator-visible
+ * state, and no process spawn or network egress. Some of these commands do
+ * refresh bookkeeping under `.swarm/` (e.g. `report` writes `.swarm/swarm.db`
+ * and a cohort manifest, `memory *` create `.swarm/memory/memory.db`, and
+ * commands that load the plan may regenerate `plan.md`): writes are confined
+ * to `.swarm/`, which `tests/unit/hooks/full-auto-swarm-command-policy-3446.test.ts`
+ * pins by running every key and diffing the tree outside `.swarm/`. Keys that
+ * were shown to spawn processes (`diagnose`, `doctor tools`) or contact
+ * GitHub (`pr status`) are NOT in this set.
+ */
+export const READ_ONLY_SWARM_COMMANDS: ReadonlySet<string> = new Set([
+	'status',
+	'history',
+	'show-plan',
+	'help',
+	'agents',
+	'lanes',
+	'learning',
+	'costs',
+	'gate-stats',
+	'guardrail-log',
+	'guardrail explain',
+	'evidence',
+	'evidence summary',
+	'report',
+	'retrieve',
+	'dashboard',
+	'knowledge',
+	'context-map stats',
+	'sdd status',
+	'sdd validate',
+	'memory status',
+	'memory pending',
+	'memory stale',
+	'memory recall-log',
+	'memory value-log',
+	'memory consolidation-log',
+	'memory audit-verify',
+	'memory link status',
+	'harness-opt history',
+	'harness-opt status',
+]);
+
+/**
+ * Is this `swarm_command` call on the read-only allowlist AND permitted by the
+ * tool's own policy for this exact command + args? Anything else (unknown,
+ * human-only, restricted, bad args, or any state-changing command) returns
+ * false and falls through to the normal escalation.
+ */
+export function isSwarmCommandReadOnly(args: unknown): boolean {
+	if (!args || typeof args !== 'object') return false;
+	const { command, args: rest } = args as { command?: unknown; args?: unknown };
+	if (typeof command !== 'string' || command.length === 0) return false;
+	if (rest !== undefined && !Array.isArray(rest)) return false;
+	const tokens = [command];
+	for (const token of rest ?? []) {
+		if (typeof token !== 'string') return false;
+		tokens.push(token);
+	}
+	try {
+		const resolved = resolveCommand(tokens);
+		if (resolved === null) return false;
+		return (
+			READ_ONLY_SWARM_COMMANDS.has(canonicalCommandKey(resolved)) &&
+			classifySwarmCommandToolUse(resolved).allowed
+		);
+	} catch {
+		return false;
+	}
 }
 
 export function createFullAutoPermissionHook(
@@ -262,6 +345,11 @@ export function createFullAutoPermissionHook(
 						? getModifiedFilesForTask(session, taskId)
 						: undefined,
 				fullAutoConfig: effectiveFullAutoConfig,
+				swarmCommandReadOnly:
+					toolName === 'swarm_command' && isSwarmCommandReadOnly(argsObj),
+				hostCodeModeWrapper:
+					toolName === 'execute' &&
+					isCodeModeWrapperCall(sessionID, input.callID),
 				pluginConfig: config,
 			};
 

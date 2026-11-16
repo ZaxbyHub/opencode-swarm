@@ -99,7 +99,7 @@ function handleSetCommand(
 	const normalizedValue = value.toLowerCase();
 
 	// Check for preset values
-	if (normalizedValue in PRESETS) {
+	if (Object.hasOwn(PRESETS, normalizedValue)) {
 		const presetConcurrency = PRESETS[normalizedValue];
 		session.maxConcurrencyOverride = presetConcurrency;
 		return `Concurrency override set to ${presetConcurrency} (${normalizedValue})`;

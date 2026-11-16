@@ -52,4 +52,17 @@ describe('computeRedactionPolicyVersion (#1466 object form)', () => {
 		expect(withNer).not.toBe(base);
 		expect(withDetect).not.toBe(withReject);
 	});
+
+	// #3382: explicit current-policy pin. SALT 3 x 1_000_000 + 14 pattern
+	// families x 2 + 1 (rejectDurableSecrets). A salt-only revert (or an
+	// unnoticed pattern-family removal) must flip this, not just the relative
+	// deltas above.
+	test('#3382 current policy version is pinned (salt 3, 14 families)', () => {
+		expect(computeRedactionPolicyVersion({ rejectDurableSecrets: true })).toBe(
+			3_000_029,
+		);
+		expect(computeRedactionPolicyVersion({ rejectDurableSecrets: false })).toBe(
+			3_000_028,
+		);
+	});
 });

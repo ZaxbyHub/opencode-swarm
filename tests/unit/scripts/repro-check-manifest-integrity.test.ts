@@ -180,7 +180,11 @@ describe('repro-check.sh checkpoint manifest integrity', () => {
 	test('ATTACK B: a frozen path cannot be silently re-baselined by a second plain checkpoint', () => {
 		const worktree = repo();
 		const base = git(worktree, 'rev-parse', 'HEAD');
-		expect(checkpoint(worktree, base, ['check-a.sh']).code).toBe(0);
+		const firstCheckpoint = checkpoint(worktree, base, ['check-a.sh']);
+		expect(
+			firstCheckpoint.code,
+			firstCheckpoint.out + firstCheckpoint.err,
+		).toBe(0);
 		const frozen = manifestLines(worktree);
 		expect(frozen).toHaveLength(2);
 
@@ -234,8 +238,8 @@ describe('repro-check.sh checkpoint manifest integrity', () => {
 		const result = checkpoint(worktree, base, ['check-a.sh', 'check-a.sh']);
 		expect(result.code).toBe(2);
 		expect(result.err).toContain('already frozen');
-		// The first append stands and nothing was added for the repeat, so the
-		// seq column is still contiguous.
+		// A rejected multi-path input must not freeze an earlier path.
+		expect(checkpoint(worktree, base, ['check-a.sh']).code).toBe(0);
 		expect(manifestRows(worktree)).toHaveLength(1);
 	}, 30_000);
 
@@ -274,7 +278,7 @@ describe('repro-check.sh checkpoint manifest integrity', () => {
 		const base = git(worktree, 'rev-parse', 'HEAD');
 		expect(checkpoint(worktree, base, CHECK_FILES).code).toBe(0);
 		const lines = manifestLines(worktree);
-		expect(lines[0]).toBe('# issue-tracer checkpoint manifest v1 rows=3');
+		expect(lines[0]).toBe('# issue-tracer checkpoint manifest v2 rows=3');
 		expect(run(worktree, ['verify-checkpoint', '--slug', 'issue-1']).code).toBe(
 			0,
 		);
@@ -325,12 +329,12 @@ describe('repro-check.sh checkpoint manifest integrity', () => {
 		const base = git(worktree, 'rev-parse', 'HEAD');
 		expect(checkpoint(worktree, base, ['check-a.sh']).code).toBe(0);
 		const lines = manifestLines(worktree);
-		expect(lines[0]).toBe('# issue-tracer checkpoint manifest v1 rows=1');
+		expect(lines[0]).toBe('# issue-tracer checkpoint manifest v2 rows=1');
 
 		// Only the header changes; the single data row is untouched and valid.
 		fs.writeFileSync(
 			manifestFile(worktree),
-			`# issue-tracer checkpoint manifest v1 rows=4\n${lines[1]}\n`,
+			`# issue-tracer checkpoint manifest v2 rows=4\n${lines[1]}\n`,
 		);
 
 		const verify = run(worktree, ['verify-checkpoint', '--slug', 'issue-1']);

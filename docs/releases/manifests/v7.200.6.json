@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.200.6",
+  "tagCommit": "aaf57dde05b98ac7585f9af2d50c3e1572144ec8",
+  "targetCommitish": "aaf57dde05b98ac7585f9af2d50c3e1572144ec8",
+  "releaseBodySha256": "930d6627c2663973ebf4bd935b5716e0e377886522c3e54d83337fa39dfe983c",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/3323-3343-3346-3347-shell-write-guard-cluster.md",
+      "sha256": "d831ed9a236e7037b178fd98f8c26647f624a92d34aa195150ffb4528b202dda"
+    }
+  ]
+}

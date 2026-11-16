@@ -69,25 +69,86 @@ export const MigrationStatusSchema = z.enum([
 ]);
 export type MigrationStatus = z.infer<typeof MigrationStatusSchema>;
 
+/**
+ * External-evidence anchor (issue #3422): a pinned read-only git assertion a
+ * task declares so `/swarm attest` can verify a git-external deliverable
+ * (commit/push, gh ops) without a coder settlement.
+ *
+ * `expect` matches the trimmed stdout exactly; `expect_prefix` requires a
+ * NON-EMPTY prefix of it (an empty prefix would match everything and attest
+ * nothing). At least one of the two must be present per anchor; both bounds
+ * mirror the durable-evidence storage cap so an anchor is never accepted with
+ * output that cannot be persisted verbatim.
+ */
+export const ExternalEvidenceAnchorSchema = z
+	.object({
+		command: z.string().min(1).max(400),
+		expect: z.string().max(4096).optional(),
+		expect_prefix: z.string().min(1).max(4096).optional(),
+	})
+	// Issue #3432 review PRR-008: the documented contract is "at least one
+	// expectation per anchor" — enforce it at the persistence boundary so a
+	// vacuous anchor (which would attest anything) never enters a persisted
+	// plan, instead of being refused only at attest time.
+	.superRefine((anchor, ctx) => {
+		if (anchor.expect === undefined && anchor.expect_prefix === undefined) {
+			ctx.addIssue({
+				code: z.ZodIssueCode.custom,
+				message:
+					'evidence anchor must carry expect and/or a non-empty expect_prefix',
+				path: ['expect'],
+			});
+		}
+	});
+export type ExternalEvidenceAnchor = z.infer<
+	typeof ExternalEvidenceAnchorSchema
+>;
+
 // Task schema
-export const TaskSchema = z.object({
-	id: z.string(), // e.g. "1.1", "2.3"
-	phase: z.number().int().min(1), // phase number this task belongs to
-	status: TaskStatusSchema.default('pending'),
-	size: TaskSizeSchema.default('small'),
-	description: z.string().min(1),
-	depends: z.array(z.string()).default([]), // task IDs, e.g. ["1.1", "1.2"]
-	acceptance: z.string().optional(), // acceptance criteria
-	files_touched: z.array(z.string()).default([]), // files modified by this task
-	evidence_path: z.string().optional(), // path to evidence directory
-	blocked_reason: z.string().optional(), // why task is blocked
-	// Spec FR-###/SC-### IDs this task maps to (issue #1687, FR-000/SC-000).
-	// Deliberately `.optional()` (NOT `.default([])`): must serialize to
-	// `undefined` (omitted by JSON.stringify) for tasks that don't set it, so
-	// computePlanLedgerHash/computePlanStructureHash/computePlanContentHash stay
-	// byte-identical for every existing persisted plan predating this field.
-	fr_refs: z.array(z.string()).optional(),
-});
+export const TaskSchema = z
+	.object({
+		id: z.string(), // e.g. "1.1", "2.3"
+		phase: z.number().int().min(1), // phase number this task belongs to
+		status: TaskStatusSchema.default('pending'),
+		size: TaskSizeSchema.default('small'),
+		description: z.string().min(1),
+		depends: z.array(z.string()).default([]), // task IDs, e.g. ["1.1", "1.2"]
+		acceptance: z.string().optional(), // acceptance criteria
+		files_touched: z.array(z.string()).default([]), // files modified by this task
+		evidence_path: z.string().optional(), // path to evidence directory
+		blocked_reason: z.string().optional(), // why task is blocked
+		// Spec FR-###/SC-### IDs this task maps to (issue #1687, FR-000/SC-000).
+		// Deliberately `.optional()` (NOT `.default([])`): must serialize to
+		// `undefined` (omitted by JSON.stringify) for tasks that don't set it, so
+		// computePlanLedgerHash/computePlanStructureHash/computePlanContentHash stay
+		// byte-identical for every existing persisted plan predating this field.
+		fr_refs: z.array(z.string()).optional(),
+		// External-evidence completion class (issue #3422). Optional and
+		// omitted-when-unset like fr_refs, so legacy plans hash byte-identically;
+		// UNLIKE fr_refs these fields ARE included in the three hash normalizers
+		// (they gate completion admission, so declaration edits must be
+		// hash-visible — see docs/plan-durability.md). Omission on a save_plan
+		// revision preserves the prior declaration; an explicit
+		// 'coder_mutation' clears it.
+		evidence_class: z.enum(['coder_mutation', 'external_git']).optional(),
+		evidence_anchors: z.array(ExternalEvidenceAnchorSchema).max(16).optional(),
+	})
+	// Issue #3432 review PRR-008: an external_git declaration without at
+	// least one pinned anchor can never be attested — reject the shape at
+	// the persistence boundary instead of deferring to attest time.
+	.superRefine((task, ctx) => {
+		if (task.evidence_class === 'external_git') {
+			const anchors = task.evidence_anchors;
+			if (!anchors || anchors.length === 0) {
+				ctx.addIssue({
+					code: z.ZodIssueCode.custom,
+					message:
+						'tasks declaring evidence_class external_git must pin 1..16 evidence_anchors',
+					path: ['evidence_anchors'],
+				});
+			}
+		}
+	});
 export type Task = z.infer<typeof TaskSchema>;
 
 // Phase schema

@@ -25,9 +25,17 @@
  * (fail-closed preserved; documented v2 delta in the inventory).
  */
 
+import { loadFullAutoRunState } from '../../full-auto/state';
+import {
+	clearCodeModeWrapperCall,
+	recordCodeModeWrapperCall,
+} from '../../hooks/code-mode-wrapper';
 import { normalizeToolNameLowerCase } from '../../hooks/normalize-tool-name';
+import { recordObservedHostShell } from '../../hooks/shell-executor-context';
+import { addDeferredWarning } from '../../services/warning-buffer';
 import { log } from '../../utils';
 import { withTimeout } from '../../utils/timeout';
+import { resolveV2ToolBeforeBudgetMs } from './hook-budget';
 import { normalizeV2AgentRef, seedV1SessionState } from './setup';
 import type {
 	V1HooksSubset,
@@ -53,13 +61,32 @@ const V2_HOOK_TIMEOUT_MS = 60_000;
  * stays untouched.
  */
 
-/** Mirrors `isTaskToolId`'s shape (dotted SDK form OR normalized base name). */
-function isV2SubagentToolId(toolName: string | null | undefined): boolean {
+/** Mirrors `isTaskToolId`'s shape (dotted SDK form OR normalized base name).
+ * Exported for the event pump's progress-event gating (issue #3401). */
+export function isV2SubagentToolId(
+	toolName: string | null | undefined,
+): boolean {
 	if (!toolName) return false;
 	if (toolName.includes('.')) {
 		return /^tool\.[^.:]+\.subagent$/i.test(toolName);
 	}
 	return normalizeToolNameLowerCase(toolName) === 'subagent';
+}
+
+/**
+ * True for the host's Code Mode wrapper (#3446): the host-owned `execute`
+ * tool whose input is a JS program. The host id is matched exactly (no
+ * namespace stripping), and the call must carry a string `code` program.
+ */
+export function isV2CodeModeWrapper(event: {
+	readonly tool: string;
+	readonly input?: unknown;
+}): boolean {
+	return (
+		event.tool === 'execute' &&
+		isPlainObject(event.input) &&
+		typeof (event.input as Record<string, unknown>).code === 'string'
+	);
 }
 
 /**
@@ -70,7 +97,11 @@ function isV2SubagentToolId(toolName: string | null | undefined): boolean {
  * keep them dead — every recognized form collapses to `task`.
  */
 
-function isPlainObject(value: unknown): value is Record<string, unknown> {
+/** Plain-object shape guard (arrays/instances rejected); exported for the
+ * event pump's progress-metadata validation (issue #3401 / PR #3402). */
+export function isPlainObject(
+	value: unknown,
+): value is Record<string, unknown> {
 	return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
@@ -176,6 +207,16 @@ function renderV1TaskEnvelopeFromV2(wrapper: V2SubagentWrapper): string {
 	return `<task id="${wrapper.sessionID}" state="${wrapper.state}"><task_result>${inner}</task_result></task>`;
 }
 
+/** Is a Full-Auto run active (not idle) for this session? Fail-safe to false. */
+function isFullAutoRunActive(directory: string, sessionID: string): boolean {
+	try {
+		const status = loadFullAutoRunState(directory, sessionID)?.status;
+		return status !== undefined && status !== 'idle';
+	} catch {
+		return false;
+	}
+}
+
 /** adapter for tool.execute.before */
 async function onV2ToolBefore(
 	event: V2ToolHookInput,
@@ -186,38 +227,58 @@ async function onV2ToolBefore(
 	if (typeof handler !== 'function') return;
 	seedV1SessionState(event.sessionID, event.agent, directory);
 	const isSubagent = isV2SubagentToolId(event.tool);
-	const output = {
-		args: isSubagent ? mapV2SubagentArgsToV1(event.input) : event.input,
-	};
-	await withTimeout(
-		Promise.resolve(
-			handler(
-				{
-					tool: isSubagent ? 'task' : event.tool,
-					sessionID: event.sessionID,
-					callID: event.id,
-					agent: normalizeV2AgentRef(event.agent),
-					messageID: event.messageID,
-				},
-				output,
+	// The host's Code Mode wrapper (#3446): only this adapter sees the host's
+	// real tool id, so it marks the call for the Full-Auto classifier. Nested
+	// `tools.<name>()` calls arrive as their own events under their own names.
+	// The mark is consumed by the permission hook inside this before chain, so
+	// it is cleared in `finally` — a rejected or timed-out chain must not leave
+	// it behind (the after hook may never fire for a rejected before).
+	const wrapperMarked = isV2CodeModeWrapper(event);
+	if (wrapperMarked) {
+		recordCodeModeWrapperCall(event.sessionID, event.id);
+	}
+	try {
+		const output = {
+			args: isSubagent ? mapV2SubagentArgsToV1(event.input) : event.input,
+		};
+		const budgetMs = resolveV2ToolBeforeBudgetMs(
+			isFullAutoRunActive(directory, event.sessionID),
+			directory,
+		);
+		await withTimeout(
+			Promise.resolve(
+				handler(
+					{
+						tool: isSubagent ? 'task' : event.tool,
+						sessionID: event.sessionID,
+						callID: event.id,
+						agent: normalizeV2AgentRef(event.agent),
+						messageID: event.messageID,
+					},
+					output,
+				),
 			),
-		),
-		V2_HOOK_TIMEOUT_MS,
-		new Error('[opencode-swarm] v2: tool.execute.before exceeded budget'),
-	);
-	if (isSubagent) {
-		// Write back IN PLACE onto the retained original input object: the v2
-		// host may hold its own reference to the event payload (the v1
-		// invariant-10 class), so reassignment could be invisible to it.
-		const mapped = mapV1TaskArgsToV2(output.args);
-		if (isPlainObject(event.input) && isPlainObject(mapped)) {
-			for (const key of Object.keys(event.input)) {
-				delete (event.input as Record<string, unknown>)[key];
+			budgetMs,
+			new Error(
+				`[opencode-swarm] v2: tool.execute.before exceeded budget (${budgetMs} ms; set full_auto.oversight.hook_timeout_ms to change)`,
+			),
+		);
+		if (isSubagent) {
+			// Write back IN PLACE onto the retained original input object: the v2
+			// host may hold its own reference to the event payload (the v1
+			// invariant-10 class), so reassignment could be invisible to it.
+			const mapped = mapV1TaskArgsToV2(output.args);
+			if (isPlainObject(event.input) && isPlainObject(mapped)) {
+				for (const key of Object.keys(event.input)) {
+					delete (event.input as Record<string, unknown>)[key];
+				}
+				Object.assign(event.input as Record<string, unknown>, mapped);
 			}
-			Object.assign(event.input as Record<string, unknown>, mapped);
+		} else {
+			event.input = output.args;
 		}
-	} else {
-		event.input = output.args;
+	} finally {
+		if (wrapperMarked) clearCodeModeWrapperCall(event.sessionID, event.id);
 	}
 }
 
@@ -227,6 +288,9 @@ async function onV2ToolAfter(
 	hooks: V1HooksSubset,
 	directory: string,
 ): Promise<void> {
+	// The Code Mode wrapper mark is only read by the before chain; drop it now
+	// the call has completed, whether or not an after handler is registered.
+	clearCodeModeWrapperCall(event.sessionID, event.id);
 	const handler = hooks['tool.execute.after'];
 	if (typeof handler !== 'function') return;
 	seedV1SessionState(event.sessionID, event.agent, directory);
@@ -378,6 +442,15 @@ async function onV2Prompt(
 		sessionID: event.sessionID,
 	};
 	const parts = [{ type: 'text', text }];
+	// #3320 review round (PRR-006/010/016): the v1 chat.message chain's
+	// agent-less branch already restores the session's PRIMARY owner (the
+	// delegation tracker reads the record directly), so the prompt event must
+	// NOT synthesize an `agent` field — doing so routed v2 prompts through the
+	// tracker's NAMED branch, which flipped `delegationActive` to true for
+	// native build/plan sessions and armed the PRM detector, the trajectory
+	// logger, and the chat-visible non-architect advisory on surfaces this PR
+	// exists to leave alone. An agent-less prompt keeps the named-branch side
+	// effects off while the owner restore preserves the native identity.
 	const input = {
 		sessionID: event.sessionID,
 		message: { ...message },
@@ -410,7 +483,28 @@ async function onV2Prompt(
 	}
 }
 
-/** Register the tool hooks (execute.before/after). */
+/**
+ * Surface one v2 host-registration failure (#3352): a deferred warning naming
+ * the hook/domain and the error (the operator-reachable channel; log() is
+ * OPENCODE_SWARM_DEBUG-gated) plus the debug log. Never throws.
+ */
+function warnV2HookRegistrationFailure(label: string, err: unknown): void {
+	const message = err instanceof Error ? err.message : String(err);
+	log(`v2 ${label} registration failed (non-fatal)`, { error: message });
+	addDeferredWarning(
+		`[opencode-swarm] v2: ${label} registration failed (${message}); the hook was not installed on this host.`,
+	);
+}
+
+/**
+ * Register the tool hooks (execute.before/after).
+ *
+ * #3352: BOTH registrations of the pair are attempted independently — a
+ * rejection of the first never skips its sibling. Each failure records a
+ * deferred warning naming the hook + error; the function resolves when at
+ * least one registration landed and rejects only if both failed (setup's
+ * runRegistration wrapper isolates that rejection with its own warning).
+ */
 export async function registerV2ToolHooks(
 	ctx: V2PluginContext,
 	hooks: V1HooksSubset,
@@ -425,8 +519,11 @@ export async function registerV2ToolHooks(
 		new Error(
 			'[opencode-swarm] v2: execute.before registration exceeded budget',
 		),
-	);
-	registrations.push(before);
+	).catch((err: unknown) => {
+		warnV2HookRegistrationFailure('execute.before', err);
+		return undefined;
+	});
+	if (before !== undefined) registrations.push(before);
 	const after = await withTimeout(
 		ctx.tool.hook('execute.after', async (event: unknown) => {
 			return onV2ToolAfter(event as V2ToolHookInput, hooks, directory);
@@ -435,11 +532,25 @@ export async function registerV2ToolHooks(
 		new Error(
 			'[opencode-swarm] v2: execute.after registration exceeded budget',
 		),
-	);
-	registrations.push(after);
+	).catch((err: unknown) => {
+		warnV2HookRegistrationFailure('execute.after', err);
+		return undefined;
+	});
+	if (after !== undefined) registrations.push(after);
+	if (before === undefined && after === undefined) {
+		throw new Error(
+			'[opencode-swarm] v2: execute.before and execute.after registrations both failed',
+		);
+	}
 }
 
-/** Register the compaction + prompt session hooks. */
+/**
+ * Register the compaction + prompt session hooks.
+ *
+ * #3352: same pair-independence contract as registerV2ToolHooks — a
+ * rejecting 'compaction' registration still attempts 'prompt', each failure
+ * warns, and only a double failure rejects.
+ */
 export async function registerV2SessionHooks(
 	ctx: V2PluginContext,
 	hooks: V1HooksSubset,
@@ -456,14 +567,75 @@ export async function registerV2SessionHooks(
 		}) as never),
 		V2_HOOK_TIMEOUT_MS,
 		new Error('[opencode-swarm] v2: compaction registration exceeded budget'),
-	);
-	registrations.push(compaction);
+	).catch((err: unknown) => {
+		warnV2HookRegistrationFailure('compaction', err);
+		return undefined;
+	});
+	if (compaction !== undefined) registrations.push(compaction);
 	const prompt = await withTimeout(
 		ctx.session.hook('prompt', (async (event: unknown) => {
 			return onV2Prompt(event as V2SessionPromptEvent, hooks);
 		}) as never),
 		V2_HOOK_TIMEOUT_MS,
 		new Error('[opencode-swarm] v2: prompt registration exceeded budget'),
-	);
-	registrations.push(prompt);
+	).catch((err: unknown) => {
+		warnV2HookRegistrationFailure('prompt', err);
+		return undefined;
+	});
+	if (prompt !== undefined) registrations.push(prompt);
+	if (compaction === undefined && prompt === undefined) {
+		throw new Error(
+			'[opencode-swarm] v2: compaction and prompt registrations both failed',
+		);
+	}
+}
+
+/**
+ * Register the shell-executor observer hook (#3346).
+ *
+ * The v2 host reports the shell a `shell`-tool command will actually execute
+ * through `ctx.shell` "create.before" (payload carries the resolved `shell`
+ * path). Recording it in the observed-host-shell store lets the write gate
+ * and `/swarm guardrail explain` key cmd/powershell grammar inheritance on
+ * the real executor instead of the platform — closing the Git-Bash-on-Windows
+ * false-positive class from #3323/#3346.
+ *
+ * Contract (mirrors registerV2SessionHooks' bounded registration, with a
+ * softer failure mode): a host without the shell domain (pre-2.0.29-era
+ * hosts; the vendored member is optional) is a SKIP, not a failure — the
+ * gate falls back to the platform-keyed interim, never wider than today. A
+ * present-but-REJECTING registration warns through the shared
+ * warnV2HookRegistrationFailure path and is likewise non-fatal; a successful
+ * registration lands in the disposal sink. Authoritative hook observations
+ * only — this module performs no environment probing (plan-critic r2).
+ */
+export async function registerV2ShellHooks(
+	ctx: V2PluginContext,
+	registrations: V2Registration[],
+): Promise<void> {
+	const shellDomain = ctx.shell;
+	if (!shellDomain || typeof shellDomain.hook !== 'function') {
+		return;
+	}
+	const registration = await withTimeout(
+		Promise.resolve(
+			shellDomain.hook('create.before', (invocation) => {
+				const shell =
+					invocation && typeof invocation.shell === 'string'
+						? invocation.shell
+						: '';
+				recordObservedHostShell(shell);
+			}) as Promise<unknown>,
+		),
+		V2_HOOK_TIMEOUT_MS,
+		new Error(
+			'[opencode-swarm] v2: shell.create.before registration exceeded budget',
+		),
+	).catch((err: unknown) => {
+		warnV2HookRegistrationFailure('shell.create.before', err);
+		return undefined;
+	});
+	if (registration !== undefined && registration !== null) {
+		registrations.push(registration as V2Registration);
+	}
 }

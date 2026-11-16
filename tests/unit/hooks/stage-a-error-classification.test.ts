@@ -43,6 +43,8 @@ const REDUCER_ALLOWLIST = new Set([
 	'TASK_WORKFLOW_GENERATION_REQUIRED',
 	// QA gating on terminal transitions, not Stage A attribution.
 	'TASK_WORKFLOW_QA_REQUIRED',
+	// External-evidence admission fencing (#3422): task-shape refusal, not attribution.
+	'TASK_WORKFLOW_EXTERNAL_ATTEST_STATE',
 	// CAS fencing: fires during ordinary concurrent/parallel-lane operation
 	// (a sibling transition legitimately bumped the generation), not only
 	// after a reset — escalating it would false-positive on normal races.

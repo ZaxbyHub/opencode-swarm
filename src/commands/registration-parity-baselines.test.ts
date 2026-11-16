@@ -101,13 +101,14 @@ describe('Command registration parity — classification baselines', () => {
 		// After the fix, only these additions are permitted to differ.
 		// `pr subscribe` / `pr unsubscribe` moved from human-only to agent
 		// Newer agent-callable commands added to the allowlist since the
-		// pre-fix baseline was frozen. All are read-only/diagnostic and
-		// therefore agent-appropriate: costs (token/cost totals), ci-simulate
+		// pre-fix baseline was frozen. pr-review activates review workflow
+		// state. Diagnostic commands include costs (token/cost totals), ci-simulate
 		// (dry-run CI), guardrail explain (dry-run guardrail preview),
 		// guardrail-log (read decision log), lanes (list worktree lanes),
 		// memory consolidation-log (read consolidation log), gate-audit (bounded
 		// production audit), and gate-stats (offline audit reducer). `review`
 		const NEWER_ALLOWLIST_ADDITIONS = [
+			'pr-review',
 			'ci-simulate',
 			'costs',
 			'guardrail explain',
@@ -123,6 +124,8 @@ describe('Command registration parity — classification baselines', () => {
 		];
 		const EXPECTED_ADDITIONS = {
 			allowlist: new Set([
+				// #3422: attest is agent-callable (toolPolicy 'agent').
+				'attest',
 				'pr status',
 				'pr subscribe',
 				'pr unsubscribe',
@@ -145,6 +148,9 @@ describe('Command registration parity — classification baselines', () => {
 				'harness-opt plan',
 				'harness-opt status',
 				'harness-opt history',
+				// #2968: verification receipts — emission/verify is an
+				// agent-appropriate diagnostic (toolPolicy 'agent').
+				'receipt',
 			]),
 			// Aliases that inherit a human-only/restricted canonical target (so
 			// the Bash CLI guardrail blocks the alias/dash form too — see
@@ -196,6 +202,8 @@ describe('Command registration parity — classification baselines', () => {
 			]),
 			toolCommands: new Set([
 				'full-auto',
+				// #3422: attest carries toolPolicy 'agent'.
+				'attest',
 				// #3169: epic is human-only (schema-visible; never agent-callable).
 				'epic',
 				'dataset consent',
@@ -234,6 +242,8 @@ describe('Command registration parity — classification baselines', () => {
 				'harness-opt run',
 				'harness-opt compare',
 				'harness-opt stop',
+				// #2968: receipt carries toolPolicy 'agent'.
+				'receipt',
 			]),
 			noArgs: new Set(['pr status', 'lanes', 'context-map stats']),
 		};

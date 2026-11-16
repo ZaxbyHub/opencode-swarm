@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.199.0",
+  "tagCommit": "745a6ac084c6e1e86865551d1b310820d79c02f2",
+  "targetCommitish": "745a6ac084c6e1e86865551d1b310820d79c02f2",
+  "releaseBodySha256": "0ccd681ddf543fa97e0555596d5d1d1dbce0aafd3d1213723d2ebbecb9041e08",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 3,
+      "path": "docs/releases/pending/3320-native-agent-identity.md",
+      "sha256": "2789f257122aec34fb16b371f5589320ff3bbdf0e228c68766f6d41c74911f57"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/authority-disabled-role-policy.md",
+      "sha256": "45b5b2e4889a881806ef0bd221fba8b70b9c6e067926080d25596604aae5e73f"
+    },
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/delegation-gate-acceptance-autoinject.md",
+      "sha256": "b2936f17a41274ba8c1914ee3336f2946fbd66d31679aebfa266ec43948cdd52"
+    },
+    {
+      "prNumber": null,
+      "order": 2,
+      "path": "docs/releases/pending/pr-review-quarantine-ops-3334-3336.md",
+      "sha256": "990faeafd5d48b295c9050430c0ee5646a247d2fd678d3b66b23c856d2dc9dcf"
+    },
+    {
+      "prNumber": null,
+      "order": 6,
+      "path": "docs/releases/pending/pr-review-typed-terminal-classes-3311.md",
+      "sha256": "0efa0ac89755bd3e15e25c5a8ea823e504b101c937c25a9f2342e3a6468d80e4"
+    },
+    {
+      "prNumber": null,
+      "order": 5,
+      "path": "docs/releases/pending/skills-frontmatter-hardening-3215-3216-3217.md",
+      "sha256": "9b1daa62a9df6211462621d8de309c6667771c44bf2ea6173a635e4d2553e63b"
+    },
+    {
+      "prNumber": null,
+      "order": 4,
+      "path": "docs/releases/pending/v2-host-agent-stale-delegation-clobber.md",
+      "sha256": "932039354a8f3b3be348969f36fc5e8c95919edce3e534a8269c70a897126df4"
+    }
+  ]
+}

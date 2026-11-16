@@ -123,7 +123,8 @@ async function recordCriticBatch(args: {
 		tempDir,
 		SESSION_ID,
 		'critic',
-		args.lanes,
+		// Issue #3340: critic batches must declare the critic agent per lane.
+		args.lanes.map((lane) => ({ ...lane, agent: 'critic' })),
 		{ batchId: args.batchId, prHeadSha: HEAD_SHA },
 	);
 	if (args.successfulLaneId && args.rows) {

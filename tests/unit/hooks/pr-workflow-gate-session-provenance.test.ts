@@ -57,6 +57,7 @@ describe('pr-workflow-gate independent session provenance', () => {
 			[
 				{
 					laneId: 'critic-shared',
+					agent: 'critic',
 					workflowLane: 'critic-shared',
 					reviewItemIds: ids,
 				},
@@ -90,6 +91,7 @@ describe('pr-workflow-gate independent session provenance', () => {
 			[
 				{
 					laneId: 'critic-independent',
+					agent: 'critic',
 					workflowLane: 'critic-independent',
 					reviewItemIds: ids,
 				},

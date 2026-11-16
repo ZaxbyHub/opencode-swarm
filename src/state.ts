@@ -16,6 +16,7 @@ import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { OpencodeClient } from '@opencode-ai/sdk';
+import { ALL_AGENT_NAMES, ALL_SUBAGENT_NAMES } from './config/agent-names';
 import { ORCHESTRATOR_NAME } from './config/constants';
 import { loadPluginConfig, loadPluginConfigWithMeta } from './config/loader';
 import { type Plan, PlanSchema, type TaskStatus } from './config/plan-schema';
@@ -64,6 +65,7 @@ import { derivePlanId } from './plan/utils.js';
 import type { EscalationTracker } from './prm/escalation.js';
 import { clearTrajectoryCache } from './prm/trajectory-store.js';
 import type { PatternMatch, PrmEpisodeState } from './prm/types.js';
+import { _test_exports as routeInvalidationRegistryTestExports } from './review/route-invalidation-registry.js';
 import type { ReviewRouteEvidence } from './review/routing-enforcement.js';
 import { clearScopeBindings } from './scope/scope-binding.js';
 import { clearScopeBindingFromDisk } from './scope/scope-persistence.js';
@@ -301,6 +303,15 @@ export interface ReviewerScopeGeneration {
 	captureDirectory: string;
 	/** Canonical workspace identity of `captureDirectory` (issue #2100 root correctness). */
 	workspaceIdentity: string;
+	/**
+	 * Git HEAD captured when the coder dispatch began (issue #3655). The
+	 * completion lifecycle reconciles committed changes since this head into
+	 * the generation when guardrail write-routing observed nothing. Undefined
+	 * on generations created before the field existed and null on non-git
+	 * workspaces — both reconcile as degraded (fail-closed typed denial),
+	 * never as proof of no change.
+	 */
+	dispatchGitHead?: string | null;
 	declaredFiles: string[];
 	modifiedFiles: string[];
 	modifiedFileFingerprints: import('./hooks/reviewer-scope-file-fingerprint.js').ReviewerScopeFileFingerprint[];
@@ -1005,6 +1016,15 @@ export const swarmState = {
 	/** Active agent per session — keyed by sessionID, updated by chat.message hook */
 	activeAgent: defaultRunContext.activeAgent,
 
+	/**
+	 * Primary owner per session — keyed by sessionID (#3320). The last PRIMARY
+	 * agent identity recorded through chat.message / the v2 seed: the swarm
+	 * architect (plain or prefixed) or any non-swarm agent (build/plan/general).
+	 * Swarm SUBAGENT names never become the primary owner; handoffs restore
+	 * `getPrimaryOwner(sessionID) ?? ORCHESTRATOR_NAME`.
+	 */
+	primaryOwnerBySession: new Map<string, string>(),
+
 	/** Delegation chains per session — keyed by sessionID */
 	delegationChains: defaultRunContext.delegationChains,
 
@@ -1147,7 +1167,7 @@ export const swarmState = {
 	 * Bounded via {@link MAX_TRACKED_DISPATCH_PARENTS} (AGENTS.md invariant 8);
 	 * cleared with the other session-keyed maps on reset and end-of-session.
 	 */
-	dispatchParentByChildSession: new Map<string, string>(),
+	dispatchParentByChildSession: new Map<string, DispatchParentEntry>(),
 
 	/**
 	 * Issue #3036: injection-time dispatch facts awaiting child registration.
@@ -1181,6 +1201,7 @@ export function resetSwarmState(): void {
 	swarmState.activeToolCalls.clear();
 	swarmState.toolAggregates.clear();
 	swarmState.activeAgent.clear();
+	swarmState.primaryOwnerBySession.clear();
 	swarmState.delegationChains.clear();
 	swarmState.pendingEvents = 0;
 	swarmState.lastBudgetBySession.clear();
@@ -1230,6 +1251,10 @@ export function resetSwarmState(): void {
 		});
 	}
 	resetStandardWorktreeIsolationState();
+	// Issues #3509/#3516: the process-local route-invalidation registry is
+	// module-scoped bounded state — clear it with the rest so every test suite
+	// and /swarm reset-session starts from an empty registry (invariant 8).
+	routeInvalidationRegistryTestExports.reset();
 	resetRealtimeLearningNudgeState();
 	// v6.71+ Clear the council-mode disagreement warn-once memo so tests and
 	// fresh sessions observe consistent first-time warnings.
@@ -1358,20 +1383,40 @@ export function recordPendingDispatchAuthorization(
 }
 
 /**
+ * #3403: one dispatch-lineage entry. `writeGeneration` is a per-write
+ * monotonically increasing token allocated by every lineage write (see
+ * writeDispatchParentEntry / setDispatchParentEntry) so a failed activation's
+ * rollback can only undo ITS OWN write — a stale failure no-ops against any
+ * newer write for the same child, including a newer attempt that wrote the
+ * SAME parent (value equality alone cannot distinguish those).
+ */
+export interface DispatchParentEntry {
+	parent: string;
+	writeGeneration: number;
+}
+
+let dispatchParentWriteGeneration = 0;
+
+/**
  * Issue #3036: authoritative dispatch-lineage write (host-observed pair — the
  * delegation gate's taskMetadata path). Overwrites any earlier best-effort
  * adoption for the same child and consumes the matching pending fact so it
- * cannot be adopted by a later same-role registration.
+ * cannot be adopted by a later same-role registration. Returns the write
+ * generation allocated to this write (0 when the input was rejected).
  */
 function setDispatchParentEntry(
 	childSessionId: string,
 	parentSessionId: string,
-): void {
-	if (!childSessionId || !parentSessionId) return;
+): number {
+	if (!childSessionId || !parentSessionId) return 0;
+	dispatchParentWriteGeneration += 1;
 	// Delete-then-set refreshes insertion order so re-confirmed pairs are
 	// evicted last (FIFO by last write, not by first insert).
 	swarmState.dispatchParentByChildSession.delete(childSessionId);
-	swarmState.dispatchParentByChildSession.set(childSessionId, parentSessionId);
+	swarmState.dispatchParentByChildSession.set(childSessionId, {
+		parent: parentSessionId,
+		writeGeneration: dispatchParentWriteGeneration,
+	});
 	if (
 		swarmState.dispatchParentByChildSession.size > MAX_TRACKED_DISPATCH_PARENTS
 	) {
@@ -1382,14 +1427,21 @@ function setDispatchParentEntry(
 			swarmState.dispatchParentByChildSession.delete(oldestKey);
 		}
 	}
+	return dispatchParentWriteGeneration;
 }
 
-export function setDispatchParent(
+/**
+ * The complete Issue #3036 authoritative write (entry + expired-pending prune
+ * + exactly-one matching pending-authorization consumption). Shared by the
+ * generation-returning write entry point (writeDispatchParentEntry) so every
+ * authoritative lineage write goes through one body.
+ */
+function commitDispatchParent(
 	childSessionId: string,
 	parentSessionId: string,
-): void {
-	if (!childSessionId || !parentSessionId) return;
-	setDispatchParentEntry(childSessionId, parentSessionId);
+): number {
+	if (!childSessionId || !parentSessionId) return 0;
+	const generation = setDispatchParentEntry(childSessionId, parentSessionId);
 	const now = Date.now();
 	pruneExpiredPendingDispatchAuthorizations(now);
 	const normalizedParent = parentSessionId;
@@ -1400,13 +1452,58 @@ export function setDispatchParent(
 		(pending) => pending.parentSessionId === normalizedParent,
 	);
 	if (matchIndex >= 0) pendings.splice(matchIndex, 1);
+	return generation;
+}
+
+/**
+ * #3403: the authoritative lineage write. The delegation gate's taskMetadata
+ * uses the returned generation to scope a failed claim's rollback to exactly
+ * this write.
+ */
+export function writeDispatchParentEntry(
+	childSessionId: string,
+	parentSessionId: string,
+): number {
+	return commitDispatchParent(childSessionId, parentSessionId);
+}
+
+/**
+ * #3403: attempt-scoped lineage rollback. Acts ONLY when the live entry is
+ * still the write identified by `writtenGeneration` — a newer write for the
+ * same child (any parent, including the same parent) is never clobbered by an
+ * older failure. Restores `previousParent` as a fresh generation, or deletes
+ * the entry when this attempt's write created it.
+ *
+ * Deliberately NOT re-queued: the pending dispatch authorization the original
+ * write consumed stays consumed (the host-observed pair superseded the queued
+ * fact; restoring the pre-existing lineage is the state the failed activation
+ * should leave behind).
+ */
+export function restoreDispatchParentEntry(
+	childSessionId: string,
+	writtenGeneration: number,
+	previousParent: string | undefined,
+): void {
+	if (
+		!childSessionId ||
+		!Number.isSafeInteger(writtenGeneration) ||
+		writtenGeneration <= 0
+	)
+		return;
+	const live = swarmState.dispatchParentByChildSession.get(childSessionId);
+	if (!live || live.writeGeneration !== writtenGeneration) return;
+	if (previousParent === undefined) {
+		swarmState.dispatchParentByChildSession.delete(childSessionId);
+		return;
+	}
+	setDispatchParentEntry(childSessionId, previousParent);
 }
 
 /** Issue #3036: resolve a child session's registered dispatch parent, if any. */
 export function resolveDispatchParent(
 	childSessionId: string,
 ): string | undefined {
-	return swarmState.dispatchParentByChildSession.get(childSessionId);
+	return swarmState.dispatchParentByChildSession.get(childSessionId)?.parent;
 }
 
 /**
@@ -1441,8 +1538,8 @@ function adoptPendingDispatchAuthorization(
 /** Issue #3036: clear dispatch lineage for a session (child-keyed and parent-valued). */
 export function clearDispatchLineageForSession(sessionId: string): void {
 	swarmState.dispatchParentByChildSession.delete(sessionId);
-	for (const [child, parent] of swarmState.dispatchParentByChildSession) {
-		if (parent === sessionId) {
+	for (const [child, entry] of swarmState.dispatchParentByChildSession) {
+		if (entry.parent === sessionId) {
 			swarmState.dispatchParentByChildSession.delete(child);
 		}
 	}
@@ -1543,6 +1640,8 @@ export function startReviewerScopeGeneration(input: {
 	captureDirectory: string;
 	/** Canonical workspace identity of `captureDirectory` (scope-binding identity). */
 	workspaceIdentity: string;
+	/** Dispatch-time git HEAD for committed-change reconciliation (issue #3655). */
+	dispatchGitHead?: string | null;
 	createdAt?: number;
 }): ReviewerScopeGeneration | null {
 	const session = swarmState.agentSessions.get(input.parentSessionID);
@@ -1589,6 +1688,8 @@ export function startReviewerScopeGeneration(input: {
 		modifiedFileFingerprints: [],
 		captureFailures: [],
 		status: 'collecting',
+		dispatchGitHead:
+			input.dispatchGitHead === undefined ? null : input.dispatchGitHead,
 		createdAt: now,
 	};
 	if (!latestByTask.has(generation.taskId)) {
@@ -1947,14 +2048,20 @@ export function peekReadyReviewerScopeGeneration(input: {
 }
 
 /**
- * Inspect the single generation for a task in a NON-reviewable status
- * (`no_change` | `mergeback_pending` | `mergeback_mismatch`) so lifecycle
- * denials can name the exact typed recovery action instead of generic stale.
+ * Inspect the single generation for a task in a NON-ready status
+ * (`collecting` | `no_change` | `mergeback_pending` | `mergeback_mismatch`)
+ * so lifecycle denials can name the exact typed recovery action instead of
+ * generic stale. `collecting` was added for issue #3655's typed
+ * attribution-empty / capture-incomplete denials.
  */
 export function peekReviewerScopeGenerationByStatus(input: {
 	parentSessionID: string;
 	taskId: string;
-	status: 'no_change' | 'mergeback_pending' | 'mergeback_mismatch';
+	status:
+		| 'collecting'
+		| 'no_change'
+		| 'mergeback_pending'
+		| 'mergeback_mismatch';
 	now?: number;
 }): ReviewerScopeGeneration | null {
 	const session = swarmState.agentSessions.get(input.parentSessionID);
@@ -2311,6 +2418,11 @@ export function sweepStaleSessions(
 		// timestamp, so an interrupted turn would make its session permanently
 		// unevictable — a worse leak than the one this pass closes.
 		swarmState.activeAgent.delete(id);
+		// #3320 review round: the primary-owner record is session-keyed like the
+		// maps above — sweep it in the same pass so owner entries cannot outlive
+		// the sessions they key (they would otherwise reach the FIFO cap sooner
+		// and evict live sessions' owners via recordPrimaryOwner's refresh).
+		swarmState.primaryOwnerBySession.delete(id);
 	}
 	return staleIds;
 }
@@ -2663,6 +2775,9 @@ export function endAgentSession(sessionId: string, directory?: string): void {
 	// persist in memory and in every state.json snapshot until process exit.
 	swarmState.activeAgent.delete(sessionId);
 	swarmState.delegationChains.delete(sessionId);
+	// #3320 review round: the primary-owner record is a session-keyed satellite
+	// like the two above — drop it in the same pass.
+	swarmState.primaryOwnerBySession.delete(sessionId);
 	// Issue #3036: dispatch lineage is a session-keyed satellite too — clear
 	// this session's child entry and any children keyed to it as parent.
 	clearDispatchLineageForSession(sessionId);
@@ -2987,6 +3102,102 @@ export function ensureAgentSession(
 		adoptPendingDispatchAuthorization(sessionId, agentName);
 	}
 	return session;
+}
+
+/**
+ * Registered swarm agent name sets (#3320), derived from the dependency-free
+ * agent-name registry leaf. Membership is checked AFTER stripKnownSwarmPrefix
+ * so prefixed names (mega_coder, mega_architect) resolve to their base roles.
+ */
+const SWARM_AGENT_NAME_SET: ReadonlySet<string> = new Set(ALL_AGENT_NAMES);
+const SWARM_SUBAGENT_NAME_SET: ReadonlySet<string> = new Set(
+	ALL_SUBAGENT_NAMES,
+);
+
+/** Bounded size of the primary-owner map (invariant 8: bounded, FIFO-evicted). */
+const MAX_TRACKED_PRIMARY_OWNERS = 1000;
+
+/**
+ * Identities that may observe a session transiently (host housekeeping and
+ * helper agents) but can never OWN it (#3320 review round): recording one as
+ * the primary owner would let a title/summary/compaction/explore observation
+ * permanently demote a swarm architect session via the owner-restore sites.
+ */
+const NON_OWNABLE_AGENT_NAMES: ReadonlySet<string> = new Set([
+	'compaction',
+	'title',
+	'summary',
+	'explore',
+]);
+
+/**
+ * Record a session's PRIMARY owner (#3320).
+ *
+ * PRIMARY identities: the swarm architect (plain or swarm-prefixed) and
+ * non-swarm agent names (OpenCode native primaries such as build/plan/general,
+ * plus custom non-swarm primaries). Two exclusion classes never become the
+ * owner — the owner is who the session belongs to, not who is currently
+ * driving it:
+ * - swarm SUBAGENT names (coder, reviewer, ... after prefix-strip) —
+ *   delegation workers;
+ * - host housekeeping/helper identities (compaction, title, summary,
+ *   explore) — transient observers, not owners.
+ *
+ * Note the classification uses the shared `stripKnownSwarmPrefix` role scan,
+ * so a CUSTOM agent whose name merely suffix-collides with a swarm role
+ * (e.g. `helper_coder`) is also excluded and fails toward the architect
+ * default at handoffs — the same restricted treatment such names received at
+ * base (where unknown agents were denied file authority outright).
+ */
+export function recordPrimaryOwner(sessionId: string, agentName: string): void {
+	if (!sessionId || !agentName) return;
+	if (isRegisteredSwarmSubagent(agentName)) return;
+	if (NON_OWNABLE_AGENT_NAMES.has(agentName.toLowerCase())) return;
+	// Delete THIS key first so a size-neutral refresh of an already-tracked
+	// session never evicts an unrelated live session's owner (review finding
+	// PRR-009: the eviction loop used to run before the same-key delete).
+	swarmState.primaryOwnerBySession.delete(sessionId);
+	while (swarmState.primaryOwnerBySession.size >= MAX_TRACKED_PRIMARY_OWNERS) {
+		const oldest = swarmState.primaryOwnerBySession.keys().next().value;
+		if (typeof oldest !== 'string') break;
+		swarmState.primaryOwnerBySession.delete(oldest);
+	}
+	swarmState.primaryOwnerBySession.set(sessionId, agentName);
+}
+
+/**
+ * The session's last recorded PRIMARY agent identity (#3320), or undefined
+ * when none is recorded (fresh session, plugin restart, or subagent-only
+ * activity). Handoff sites restore `getPrimaryOwner(id) ?? ORCHESTRATOR_NAME`.
+ */
+export function getPrimaryOwner(sessionId: string): string | undefined {
+	return swarmState.primaryOwnerBySession.get(sessionId);
+}
+
+/**
+ * True when `agentName` (after prefix-strip) names a registered swarm
+ * SUBAGENT — the identity class the stale-delegation revert exists to rescue.
+ * The architect is deliberately excluded (it is the revert TARGET, not a
+ * state to revert FROM).
+ */
+export function isRegisteredSwarmSubagent(agentName: string): boolean {
+	const stripped = stripKnownSwarmPrefix(agentName);
+	return SWARM_SUBAGENT_NAME_SET.has(stripped);
+}
+
+/**
+ * True when the session's resolved identity is a registered swarm agent
+ * (#3320) — the ownership class swarm-only injections and enforcement gates
+ * key on. Resolution follows the isSessionBoundArchitect order
+ * (activeAgent first, then the agentSessions record). Unresolved sessions
+ * return false; message stages keep their own unresolved default.
+ */
+export function isSwarmOwnedSession(sessionID: string): boolean {
+	const resolved =
+		swarmState.activeAgent.get(sessionID) ??
+		swarmState.agentSessions.get(sessionID)?.agentName;
+	if (typeof resolved !== 'string' || !resolved) return false;
+	return SWARM_AGENT_NAME_SET.has(stripKnownSwarmPrefix(resolved));
 }
 
 /**

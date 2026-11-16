@@ -119,7 +119,11 @@ describe('#3029 F-004(b) — pump identity-seeding call site contract', () => {
 		// The call must precede the mapping (identity is seeded for unmapped
 		// identity-bearing envelopes too).
 		const seedAt = source.indexOf('seedSessionIdentityFromEnvelope(envelope);');
-		const mapAt = source.indexOf('const mapped = mapV2EventToV1(envelope);');
+		// #3401: the map call now carries the pump's tool-name lookup; the
+		// ordering pin (seed precedes map) is preserved against the new shape.
+		const mapAt = source.indexOf(
+			'const mapped = mapV2EventToV1(envelope, lookupToolNameForDispatch);',
+		);
 		expect(seedAt).toBeGreaterThan(-1);
 		expect(mapAt).toBeGreaterThan(seedAt);
 	});
@@ -190,11 +194,16 @@ describe('#3029 review round 2 — sticky gate + normalized modelString call-sit
 			'utf-8',
 		);
 		// Arm 1 (Task-route) names the gate variable; arm 2 (no-route/primary)
-		// calls the predicate inline. Both apply only under the sticky gate.
+		// calls the predicate inline into noRouteSticky (#3617 feedback: the
+		// gate also resolves the roster key under the same sticky condition).
+		// Both apply only under their sticky gate.
 		expect(source).toContain(
 			'const stickyEligible = isStickyModelError(errorSignal);',
 		);
-		expect(source).toContain('if (isStickyModelError(errorSignal)) {');
+		expect(source).toContain(
+			'const noRouteSticky = isStickyModelError(errorSignal);',
+		);
+		expect(source).toContain('if (noRouteSticky) {');
 	});
 
 	test('the Task-route arm applies the normalized chain modelString', () => {
@@ -208,9 +217,16 @@ describe('#3029 review round 2 — sticky gate + normalized modelString call-sit
 			'const chainModel = routedAdvance.modelString;',
 		);
 		expect(chainAt).toBeGreaterThan(-1);
-		const window = source.slice(chainAt, chainAt + 400);
-		expect(window).toContain('void applyV2AgentModelOverride(');
-		expect(window).toContain('routeModel.exactAgentName');
-		expect(window).toContain('chainModel,');
+		// #3331: the routed arm resolves the registered roster key inside the
+		// same sticky-apply block (the gate sits between chainModel and the
+		// call), so the window spans to the apply invocation.
+		// Pin the ACTUAL argument shape on the WHOLE source — a window slice is
+		// fragile as the gate grows (implementation-review round 3 + #3617
+		// PRR-001 reflow), and a toContain('chainModel') would be a tautology
+		// (the anchor string contains the token). The wrong-model mutant
+		// (second arg = routeModel.primaryModel) fails this pin.
+		expect(source).toMatch(
+			/void applyV2AgentModelOverride\(\s*routedApply\.registeredName,\s*chainModel,?\s*\)/,
+		);
 	});
 });

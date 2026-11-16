@@ -1,7 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { BigIntStats, Dirent } from 'node:fs';
+import { realpathSync } from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import type { SessionStatus } from '@opencode-ai/sdk';
 import { z } from 'zod';
 import {
@@ -39,6 +41,7 @@ import {
 	PR_REVIEW_BASE_DIMENSION_IDS,
 	PR_REVIEW_FINDINGS_MAX_BYTES,
 	PR_REVIEW_HANDOFF_MAX_BYTES,
+	PR_REVIEW_VERDICT_SEMANTICS_VERSION,
 	type PrReviewLaneResultEnvelope,
 	PrReviewLaneResultEnvelopeSchema,
 	type PrReviewResultReceipt,
@@ -62,6 +65,7 @@ import {
 	readPrReviewTriggerReceiptForGate,
 } from '../background/pr-review-trigger-receipt-reader.js';
 import {
+	fastForwardToRefAsync,
 	type RevisionDigestResult,
 	resolveCommitCountSince,
 	resolveCommitCountSinceAsync,
@@ -71,15 +75,19 @@ import {
 	resolveCurrentUpstreamPushTarget,
 	resolveCurrentUpstreamPushTargetAsync,
 	resolveCurrentUpstreamRemoteRef,
+	resolveExactMergeBaseAsync,
 	resolveExactRemoteBranchHead,
 	resolveExactRemoteBranchHeadAsync,
+	resolveIsAncestorAsync,
 	resolveIsExactSingleChildCommit,
 	resolveIsExactSingleChildCommitAsync,
 	resolveIsWorkingTreeClean,
 	resolveIsWorkingTreeCleanAsync,
+	resolveLocalRefHeadAsync,
 	resolvePrFeedbackTrackingCandidatesAsync,
 	resolvePrReviewDiffStats,
 	resolvePrReviewDiffStatsAsync,
+	resolvePrWorkflowChangedPathSetAsync,
 	resolvePrWorkflowRevisionDigest,
 	resolvePrWorkflowRevisionDigestDetailed,
 	resolvePrWorkflowRevisionDigestDetailedAsync,
@@ -87,12 +95,15 @@ import {
 	resolveRemoteRefsContainingHeadAsync,
 	resolveRemoteUrlIdentity,
 	resolveRemoteUrlIdentityAsync,
+	resolveRepoTopLevelAsync,
+	resolveWorkingTreeDirtyPathsAsync,
 	switchPrFeedbackTrackingCandidateAsync,
 } from '../background/workspace-snapshot.js';
 import { WRITE_TOOL_NAMES } from '../config/constants.js';
 import type { LaneLivenessWatchdogConfig } from '../config/schema.js';
 import {
 	DEFAULT_PR_REVIEW_RESILIENCE_CONFIG,
+	getCanonicalAgentRole,
 	type PrReviewResilienceConfig,
 	resolveGeneratedAgentRole,
 } from '../config/schema.js';
@@ -140,6 +151,11 @@ import {
 	PrReviewPartialBaseCoverageRecordSchema,
 	type PrReviewReportVerdict,
 	type PrReviewTerminalCoverageSettlement,
+	readAndVerifyCoverageDisclosure,
+	// Feedback F2: OR the persisted skip-disclosure term into the finding-
+	// policy projection's disclosedDegradation leg (see
+	// readPrReviewFinalFindingPolicyForReport).
+	stateCarriesValidationSkipDisclosure,
 	summarizePrReviewBaseDimensionAttempts,
 } from '../pr-review/completion.js';
 import {
@@ -210,6 +226,7 @@ import type {
 } from '../pr-review/types.js';
 import {
 	buildVerdictSettlementReceipt,
+	deriveVerdictAttemptCounts,
 	deriveVerdictSettlementAdmission,
 	effectiveVerdictSettlementItems,
 	type PrReviewVerdictSettlementPhase,
@@ -222,6 +239,7 @@ import {
 	canonicalForgePrUrl,
 	type ForgeContext,
 } from '../providers/forge-provider.js';
+import { isPathIdentityWithin } from '../scope/path-identity.js';
 import { canonicalWorkspaceIdentity } from '../scope/scope-binding.js';
 import { collectPrWorkflowGhReadinessAdvisory } from '../services/pr-workflow-gh-readiness.js';
 import {
@@ -231,7 +249,9 @@ import {
 import { swarmState } from '../state.js';
 import { resolveGhBinary } from '../tools/gh-evidence.js';
 import { getPrWorkflowToolCapability } from '../tools/tool-metadata.js';
+import { atomicWriteSwarmFile } from '../utils/atomic-write.js';
 import { sameProjectRoot } from '../utils/canonical-root.js';
+import { runExternalTool } from '../utils/external-tool-runner.js';
 import { log, warn } from '../utils/logger.js';
 import { withTimeout } from '../utils/timeout.js';
 import {
@@ -246,6 +266,7 @@ import {
 } from './lane-liveness-watchdog.js';
 import { normalizeToolName } from './normalize-tool-name.js';
 import { validateSwarmPath } from './utils.js';
+import { resolveWriteTargets } from './write-target-resolver.js';
 
 export type {
 	PrReviewDimensionCancellationRecord,
@@ -323,6 +344,7 @@ export type PrReviewLaneValidationPredicate =
 	| 'record.workflow_lane'
 	| 'record.owned_workflow_lanes'
 	| 'record.mode'
+	| 'record.normalized_agent'
 	| 'record.pr_head_sha'
 	| 'record.git_head'
 	| 'record.status'
@@ -563,6 +585,15 @@ export interface PrWorkflowLaneSpec {
 	workflowLane?: string;
 	reviewItemIds?: string[];
 	/**
+	 * The agent this lane declares it will run (threaded from the dispatch
+	 * lane's `agent`). The critic-phase recorder asserts its canonical role
+	 * (issue #3340 AC1): PR_REVIEW critic batches are refused unless every
+	 * lane declares an agent whose resolved role is exactly `critic`, so the
+	 * role rule holds at the persisting boundary instead of only at the
+	 * dispatch call site (#3310). Persisted on the batch record for audit.
+	 */
+	agent?: string;
+	/**
 	 * Complete dimension/family set this lane covers under a consolidated depth
 	 * tier. Must contain workflowLane. Absent means the singleton [workflowLane].
 	 */
@@ -657,6 +688,27 @@ interface PrFeedbackStageARecord {
 		source: string;
 		validatorContract?: { path: string; id: string };
 	}>;
+	/**
+	 * Caller-asserted base identity behind this run's trusted base-identical
+	 * script/contract decisions. There is no durable PR_FEEDBACK base binding
+	 * to verify against yet (pr-workflow-gate binds a merge base only for
+	 * PR_REVIEW), so this is recorded for downstream detectability, not as a
+	 * verified anchor; `baseVerification: 'caller-asserted'` marks runs where
+	 * trust decisions consumed a caller-supplied merge base.
+	 *
+	 * #3396 feedback (PRR-004): this STRICT child keeps the BASE two-value
+	 * enum — widening a `.strict()` child breaks rollback (an old binary
+	 * reading a new receipt fails safeParse on every gate-state read). The
+	 * 4-value binding verdict lives in the ROOT-level
+	 * `prFeedbackStageABaseTrust` (passthrough-ignored by older binaries);
+	 * this field carries the honest trust FLOOR: 'caller-asserted' covers
+	 * caller-asserted and binding-verified runs, 'none' covers none and
+	 * binding-mismatch runs (mismatch revokes provenance — the run proceeds
+	 * exactly as no-provenance).
+	 */
+	baseRef?: string;
+	baseSha?: string;
+	baseVerification?: 'caller-asserted' | 'none';
 	validatedAt: string;
 }
 
@@ -853,6 +905,8 @@ interface PrReviewValidationBatchRecord {
 		laneId: string;
 		workflowLane: string;
 		reviewItemIds?: string[];
+		/** Declared lane agent (issue #3340 audit trail; critic batches refuse non-critic roles at record time). */
+		agent?: string;
 	}>;
 	validatedAt: string;
 }
@@ -951,7 +1005,8 @@ export interface PrReviewVerdictRejectionRecord {
 export const MAX_PR_REVIEW_VERDICT_REJECTIONS = 24;
 
 export interface PrWorkflowGateState {
-	schemaVersion: 1;
+	releaseReview?: { url: string; head: string };
+	schemaVersion: 1 | 2;
 	/** Monotonic durable revision used to reject stale same-session transitions. */
 	revision: number;
 	/** Stable identity that prevents revision-only ABA during mode replacement. */
@@ -1051,6 +1106,18 @@ export interface PrWorkflowGateState {
 	prReviewCoverageDisclosurePath?: string;
 	prReviewCoverageDisclosureDigest?: string;
 	/**
+	 * Issue #3312: durable validation-phase skip disclosure persisted by the
+	 * INCOMPLETE bypass arm in `completePrWorkflow` (a controller-derived
+	 * projection of derived state — never a lane/model assertion). Mirrors the
+	 * `PrReviewCompletionState` fields in `src/pr-review/completion.ts`; read by
+	 * the completion report projection's disclosed-degradation leg only.
+	 */
+	prReviewValidationSkipDisclosure?: PrReviewValidationSkipDisclosureRecord;
+	/** Issue #3312: durable path of the validation-skip-disclosure artifact. */
+	prReviewValidationSkipDisclosurePath?: string;
+	/** Issue #3312: sha256 of the validation-skip-disclosure artifact bytes. */
+	prReviewValidationSkipDisclosureDigest?: string;
+	/**
 	 * Explicit per-dimension cancellations (issue #2383), written only by the
 	 * audited armed-recovery operation. A cancelled dimension is terminal for
 	 * settlement purposes and never counts as covered. Bounded to the six
@@ -1084,6 +1151,48 @@ export interface PrWorkflowGateState {
 	checkoutRecovery?: PrWorkflowCheckoutRecoveryRecord;
 	/** HTTPS PR URL selected after canonical GitHub PR identity validation. */
 	prFeedbackTargetUrl?: string;
+	/**
+	 * #3396 S1: merge-base identity resolved via ONE bounded `gh pr view` at
+	 * PR_FEEDBACK activation and durably bound to the gate. Stage A compares
+	 * its caller-asserted `base_sha` against this anchor (binding-verified /
+	 * binding-mismatch); absent when resolution failed at activation — see
+	 * {@link prFeedbackBaseBindingError}.
+	 */
+	prFeedbackBaseRef?: string;
+	/** The bound base commit OID (40-hex, lowercase). #3396 S1. */
+	prFeedbackBaseSha?: string;
+	/**
+	 * Bounded, sanitized advisory recorded when base resolution failed at
+	 * activation (no gh, network failure, non-GitHub forge). Binding is
+	 * fail-open: activation itself must never wedge on it (#3396 S1b).
+	 */
+	prFeedbackBaseBindingError?: string;
+	/**
+	 * #3396 S1c: bounded marker persisted when a Stage A run received a
+	 * caller-asserted base_sha that DIFFERS from the durably bound
+	 * prFeedbackBaseSha. The run itself BLOCKS base-identical trust (the
+	 * caller provenance is ignored, identical to no-provenance), and this
+	 * marker keeps durable evidence of the mismatch on the blocked path
+	 * (blocked Stage A runs otherwise persist nothing).
+	 */
+	prFeedbackStageABaseMismatch?: {
+		expectedBaseSha: string;
+		receivedBaseSha: string;
+		at: string;
+	};
+	/**
+	 * #3396 feedback (PRR-004): the full 4-value Stage A base-trust verdict
+	 * ('caller-asserted' | 'binding-verified' | 'binding-mismatch' | 'none'),
+	 * carried at the ROOT level so the strict child above stays on the BASE
+	 * two-value enum (rollback-safe) — an older binary ignores this unknown
+	 * passthrough key instead of refusing to read the state. Written together
+	 * with the strict-child floor by `recordPrFeedbackStageA`.
+	 */
+	prFeedbackStageABaseTrust?:
+		| 'caller-asserted'
+		| 'binding-verified'
+		| 'binding-mismatch'
+		| 'none';
 	prFeedbackReviewHandoff?: PrFeedbackReviewHandoffRecord;
 	prFeedbackInventory?: string[];
 	/**
@@ -1131,9 +1240,13 @@ export interface PrWorkflowGateState {
 	 */
 	prFeedbackRebindCount?: number;
 	prFeedbackScopes?: PrFeedbackScopeDeclarationRecord[];
+	// #3231: append-generation CAS machinery — mirrored from the zod schema
+	// (schema keys must stay a subset of this interface).
+	observabilityRevision?: number;
 }
 
 const GATE_SCHEMA_VERSION = 1 as const;
+const RELEASE_GATE_SCHEMA_VERSION = 2 as const;
 const MAX_WORKFLOW_BATCHES = 128;
 /**
  * Every valid PR_REVIEW base batch partitions the fixed six-dimension base
@@ -1353,6 +1466,15 @@ const PrFeedbackStageARecordSchema = z
 			)
 			.max(256)
 			.optional(),
+		baseRef: z.string().min(1).max(256).optional(),
+		baseSha: z
+			.string()
+			// Repo OID convention (GIT_OBJECT_ID_PATTERN): SHA-1 and SHA-256
+			// object formats are both first-class; the merge-base resolver and
+			// the tool's base_sha arg already admit 64-hex.
+			.regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/)
+			.optional(),
+		baseVerification: z.enum(['caller-asserted', 'none']).optional(),
 		validatedAt: z.string().min(1),
 	})
 	.strict();
@@ -1531,6 +1653,9 @@ const PrReviewValidationBatchRecordSchema = z
 							.min(1)
 							.max(MAX_PR_REVIEW_COLLECTION_RECEIPT_ITEM_IDS)
 							.optional(),
+						// Issue #3340: declared lane agent, persisted for audit
+						// by the critic-phase admission assertion.
+						agent: z.string().min(1).optional(),
 					})
 					.strict(),
 			)
@@ -1628,9 +1753,17 @@ const PrFeedbackReviewHandoffRecordSchema = z
 	})
 	.strict();
 
+const ReleaseReviewGateBindingSchema = z.object({
+	url: z.string().url().max(2000),
+	head: z.string().regex(/^[a-f0-9]{40}$/),
+});
+
 const PrWorkflowGateStateSchema = z
 	.object({
-		schemaVersion: z.literal(GATE_SCHEMA_VERSION),
+		schemaVersion: z.union([
+			z.literal(GATE_SCHEMA_VERSION),
+			z.literal(RELEASE_GATE_SCHEMA_VERSION),
+		]),
 		revision: z.number().int().nonnegative().default(0),
 		workflowInstanceId: z.string().min(1).max(128).optional(),
 		sessionID: z.string().min(1),
@@ -1699,6 +1832,7 @@ const PrWorkflowGateStateSchema = z
 			.optional(),
 		prReviewReservedRunId: z.string().min(1).optional(),
 		prReviewArtifactRunId: z.string().min(1).optional(),
+		releaseReview: ReleaseReviewGateBindingSchema.optional(),
 		prReviewFindingsPath: z.string().min(1).optional(),
 		prReviewPartialBaseCoverage:
 			PrReviewPartialBaseCoverageRecordSchema.optional(),
@@ -1706,6 +1840,40 @@ const PrWorkflowGateStateSchema = z
 		prReviewCoverageDisclosureDigest: z
 			.string()
 			.regex(/^[0-9a-f]{64}$/)
+			.optional(),
+		// Issue #3312 + feedback F13/F-3: the validation-skip-disclosure mirror
+		// fields were persisted `.passthrough()`-opaque before this schema —
+		// validate them like their coverage-disclosure siblings above (added
+		// AFTER the F14a restore fix per the F-3 ordering constraint: a
+		// schema-invalid record must never wedge the restore path).
+		prReviewValidationSkipDisclosurePath: z.string().min(1).max(512).optional(),
+		prReviewValidationSkipDisclosureDigest: z
+			.string()
+			.regex(/^[0-9a-f]{64}$/)
+			.optional(),
+		prReviewValidationSkipDisclosure: z
+			.object({
+				schemaVersion: z.literal(1),
+				runId: PrReviewRunIdSchema,
+				prHeadSha: z.string(),
+				revisionDigest: z.string(),
+				createdAt: z.string(),
+				coverageKind: z.enum(['COMPLETE', 'PARTIAL']),
+				reportVerdict: z.literal('INCOMPLETE'),
+				truncated: z.boolean().optional(),
+				skippedPhases: z
+					.array(
+						z
+							.object({
+								phase: z.enum(['reviewer', 'critic', 'council']),
+								reason: z.string(),
+								unsettledItemIds: z.array(z.string()).max(26),
+							})
+							.strict(),
+					)
+					.max(4),
+			})
+			.strict()
 			.optional(),
 		prReviewDimensionCancellations: z
 			.record(
@@ -1756,6 +1924,26 @@ const PrWorkflowGateStateSchema = z
 		prReviewHandoffRequired: z.boolean().optional(),
 		checkoutRecovery: PrWorkflowCheckoutRecoveryRecordSchema.optional(),
 		prFeedbackTargetUrl: z.string().url().max(2000).optional(),
+		// #3396 S1: durably bound PR_FEEDBACK merge base + fail-open binding
+		// advisory. Optional in both directions (older state omits them; older
+		// code ignores them through the root `.passthrough()`).
+		prFeedbackBaseRef: z.string().min(1).max(200).optional(),
+		prFeedbackBaseSha: z
+			.string()
+			.regex(
+				/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/,
+				'PR_FEEDBACK base SHA must be 40- or 64-hex',
+			)
+			.optional(),
+		prFeedbackBaseBindingError: z.string().max(500).optional(),
+		// #3396 S1c: durable evidence of a Stage A base binding mismatch.
+		prFeedbackStageABaseMismatch: z
+			.object({
+				expectedBaseSha: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/),
+				receivedBaseSha: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/),
+				at: z.string().min(1).max(64),
+			})
+			.optional(),
 		prFeedbackReviewHandoff: PrFeedbackReviewHandoffRecordSchema.optional(),
 		prFeedbackInventory: z.array(z.string().min(1)).min(1).optional(),
 		// Append-only audit ledger for inventory amendments (issue #2242 R3).
@@ -1779,6 +1967,9 @@ const PrWorkflowGateStateSchema = z
 			.optional(),
 		prFeedbackVerification: PrFeedbackVerificationRecordSchema.optional(),
 		prFeedbackStageA: PrFeedbackStageARecordSchema.optional(),
+		prFeedbackStageABaseTrust: z
+			.enum(['caller-asserted', 'binding-verified', 'binding-mismatch', 'none'])
+			.optional(),
 		prFeedbackGateBatches: z
 			.array(PrFeedbackGateBatchRecordSchema)
 			.max(MAX_WORKFLOW_BATCHES)
@@ -1804,6 +1995,15 @@ const PrWorkflowGateStateSchema = z
 			.array(PrFeedbackScopeDeclarationRecordSchema)
 			.max(MAX_WORKFLOW_BATCHES)
 			.optional(),
+		// #3231: append-generation CAS machinery (see
+		// `appendObservabilityStateWhileLocked` in src/pr-review/persistence.ts).
+		// Optional both ways: older state omits it, and older code passes it
+		// through the root `.passthrough()` below without deleting it. NOT a
+		// registered observability field — the four-name registry ratchet in
+		// tests/unit/pr-review/observability-contract-guard-3199.test.ts pins
+		// the durable-wins list, and this field is owned by the persistence
+		// CAS itself.
+		observabilityRevision: z.number().int().nonnegative().optional(),
 	})
 	// .passthrough(), not .strict(): this state is written unconditionally on
 	// every PR_REVIEW/PR_FEEDBACK session and persists across process
@@ -1815,7 +2015,21 @@ const PrWorkflowGateStateSchema = z
 	// Passthrough keeps unknown fields opaque but present through any
 	// read-modify-write cycle, so older code degrades to "ignore the field
 	// it doesn't know about" instead of "refuse to read the file at all".
-	.passthrough();
+	.passthrough()
+	.refine(
+		(state) =>
+			state.releaseReview
+				? state.mode === 'PR_REVIEW' &&
+					(state.prHeadSha === undefined ||
+						state.prHeadSha === state.releaseReview.head)
+				: state.schemaVersion === GATE_SCHEMA_VERSION,
+		'Release review state must contain a matching PR_REVIEW binding',
+	)
+	.transform((state) =>
+		state.releaseReview
+			? { ...state, schemaVersion: RELEASE_GATE_SCHEMA_VERSION }
+			: state,
+	);
 
 function formatCheckoutRecoveryBlock(state: PrWorkflowGitState): string {
 	const evidence = JSON.stringify({
@@ -1847,6 +2061,159 @@ function checkoutRecoveryRecord(
 	};
 }
 
+// #3396 S1c: persist the bounded binding-mismatch marker. The marker is
+// recorded on EVERY binding-mismatch (the run continues with caller
+// provenance revoked, so a run that is later BLOCKED and a run that succeeds
+// without provenance both leave durable evidence). Best-effort and fail-open
+// by design: a CAS loss or any storage error is swallowed — enforcement is
+// the revoked provenance (and whatever downstream screen refuses the run);
+// the marker is evidence, never a gate.
+export async function recordPrFeedbackBaseMismatch(
+	directory: string,
+	sessionID: string,
+	expectedBaseSha: string,
+	receivedBaseSha: string,
+): Promise<void> {
+	try {
+		await withSessionStateMutation(
+			directory,
+			normalizeSessionID(sessionID),
+			async () => {
+				const existing = await readPrWorkflowGateStateFromDisk(
+					directory,
+					normalizeSessionID(sessionID),
+				);
+				if (!existing || existing.mode !== 'PR_FEEDBACK') return;
+				// #3396 feedback (PRR-014): evidence must not advance the
+				// state machine's durable revision (a bumped revision can
+				// wedge a concurrent gate operation's revision CAS) and must
+				// survive a concurrent stale-snapshot write — the no-bump
+				// append path plus the durable-wins registry entry below
+				// give both.
+				await appendObservabilityStateWhileLocked(directory, {
+					...existing,
+					prFeedbackStageABaseMismatch: {
+						expectedBaseSha: expectedBaseSha.toLowerCase(),
+						receivedBaseSha: receivedBaseSha.toLowerCase(),
+						at: isoNow(),
+					},
+					updatedAt: isoNow(),
+				});
+			},
+		);
+	} catch {
+		// Best-effort evidence only — never wedge the blocked path.
+	}
+}
+
+// #3396 feedback (PRR-007): DI seam (AGENTS.md invariant 7: prefer DI over
+// mock.module) — the only `gh` subprocess site of the PR_FEEDBACK base
+// resolver, plus the merge-base resolver it feeds. Tests stub both through
+// `_test_exports._internals`.
+export const _internals = {
+	runExternalTool,
+	resolveExactMergeBaseAsync,
+	resolveGhBinary,
+};
+
+// #3396 S1: resolve the merge base of a canonical GitHub PR via ONE bounded
+// `gh pr view` (runExternalTool: array argv, explicit cwd, ignored stdin,
+// timeout, bounded streams, finally-kill — the gh-evidence precedent).
+// Returns null on ANY failure (no gh, timeout, non-zero exit, undecodable
+// output): the caller records an advisory and stays fail-open.
+async function resolvePrFeedbackBaseViaGhProduction(
+	directory: string,
+	prUrl: string,
+): Promise<{
+	baseRefName: string;
+	baseRefOid: string;
+	headRefOid?: string;
+} | null> {
+	const gh = _internals.resolveGhBinary();
+	if (!gh) return null;
+	const run = await _internals.runExternalTool({
+		executable: gh,
+		args: ['pr', 'view', prUrl, '--json', 'baseRefName,baseRefOid,headRefOid'],
+		cwd: directory,
+		timeoutMs: 10_000,
+		maxStdoutBytes: 64 * 1024,
+		maxStderrBytes: 16 * 1024,
+	});
+	if (run.status !== 'completed' || run.exitCode !== 0) return null;
+	try {
+		const parsed = JSON.parse(run.stdout) as {
+			baseRefName?: unknown;
+			baseRefOid?: unknown;
+			headRefOid?: unknown;
+		};
+		if (
+			typeof parsed.baseRefName === 'string' &&
+			parsed.baseRefName.length > 0 &&
+			parsed.baseRefName.length <= 200 &&
+			typeof parsed.baseRefOid === 'string' &&
+			typeof parsed.headRefOid === 'string' &&
+			/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(parsed.baseRefOid) &&
+			/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(parsed.headRefOid)
+		) {
+			// #3396 feedback (PRR-001): `baseRefOid` is the base-branch TIP,
+			// not the merge base Stage A's provenance contract requires (a
+			// caller's base_sha must equal `git merge-base base_ref
+			// pr_head_sha`). Binding the tip made binding-mismatch the
+			// normal case for every advanced-base PR. Compute the real
+			// merge base locally — the same quantity bindPrReviewBase binds
+			// for PR_REVIEW.
+			const mergeBase = await _internals.resolveExactMergeBaseAsync(
+				directory,
+				parsed.baseRefOid,
+				parsed.headRefOid,
+			);
+			if (
+				typeof mergeBase === 'string' &&
+				/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(mergeBase)
+			) {
+				return {
+					baseRefName: parsed.baseRefName,
+					baseRefOid: mergeBase.toLowerCase(),
+					// #3396 feedback (reviewer F5): carried so apply sites can
+					// skip an anchor computed for a DIFFERENT PR head than the
+					// one currently bound (pre-lock resolution races a head
+					// move).
+					headRefOid: parsed.headRefOid.toLowerCase(),
+				};
+			}
+		}
+	} catch {
+		// Undecodable output — fail-open null below.
+	}
+	return null;
+}
+
+// Bounded, sanitized binding-failure advisory text.
+function sanitizeBaseBindingError(message: string): string {
+	// Escape-free control-character strip (biome forbids control characters in
+	// regex literals): every code point below 0x20 and DEL becomes a space.
+	let sanitized = '';
+	for (const ch of message) {
+		const code = ch.codePointAt(0) ?? 32;
+		sanitized += code < 32 || code === 127 ? ' ' : ch;
+	}
+	return sanitized.trim().slice(0, 200);
+}
+
+// #3396 feedback (reviewer F5): the pre-lock resolution races a concurrent
+// head move (gh + merge-base run without the checkout lock). An anchor
+// computed for a DIFFERENT PR head than the one bound/being bound must not
+// be applied — skip the binding (unbound → the next matching re-activation
+// re-resolves; Stage A keeps the disclosed caller-asserted floor meanwhile).
+// Unknown on either side applies without head validation.
+function resolvedBaseHeadMatches(
+	resolvedHead: string | undefined,
+	boundHead: string | undefined,
+): boolean {
+	if (resolvedHead === undefined || boundHead === undefined) return true;
+	return resolvedHead.toLowerCase() === boundHead.toLowerCase();
+}
+
 export async function activatePrWorkflow(
 	directory: string,
 	sessionID: string,
@@ -1854,6 +2221,8 @@ export async function activatePrWorkflow(
 	options: {
 		prHeadSha?: string;
 		requireCheckoutPreflight?: boolean;
+		/** Null requests an ordinary review; omitted allows internal reentry. */
+		releaseReview?: PrWorkflowGateState['releaseReview'] | null;
 		prUrl?: string;
 		// #2882 AC5: configured context authorizing a declared generic
 		// self-hosted GitLab MR URL as the PR_FEEDBACK target. Fail-closed
@@ -1876,6 +2245,78 @@ export async function activatePrWorkflow(
 	// Checkout restoration must be atomic against a new gate in any session,
 	// not only against reactivation of the restoring session. Every activation
 	// therefore takes the project checkout lock before its one session lock.
+	// #3396 feedback (PRR-013, reviewer F1): resolvePrFeedbackBaseViaGh shells
+	// out to `gh pr view` — an unbounded network subprocess. Holding the
+	// project checkout mutation lock across it would stall every other
+	// session's gate mutations for the call's full latency, so the base is
+	// resolved BEFORE the locks on BOTH the create path (no gate yet) and an
+	// unbound re-activation, against this pre-lock state sample. The locked
+	// region below applies the result only when the base is still unbound
+	// there — a concurrent activation that binds the base first wins.
+	// #3396 feedback (reviewer F5): the resolution races a concurrent head
+	// move (gh + merge-base run without the checkout lock), so the resolved
+	// head identity is carried through and the apply sites skip an anchor
+	// computed for a DIFFERENT PR head than the one bound/being bound — an
+	// unbound base is re-resolved by the next matching re-activation.
+	let baseBindingResolution:
+		| {
+				kind: 'resolved';
+				baseRefName: string;
+				baseRefOid: string;
+				headRefOid?: string;
+		  }
+		| { kind: 'binding-error'; message: string }
+		| undefined;
+	const prUrlForBaseBinding =
+		typeof options.prUrl === 'string' ? options.prUrl : undefined;
+	const baseBindingNeeded =
+		mode === 'PR_FEEDBACK' &&
+		prUrlForBaseBinding !== undefined &&
+		(initiallyActive === null ||
+			(initiallyActive.mode === mode && !initiallyActive.prFeedbackBaseSha));
+	if (baseBindingNeeded) {
+		const requestedTargetPreLock = canonicalGitHubPrUrl(
+			prUrlForBaseBinding,
+			options.forge,
+		);
+		const existingTargetPreLock = initiallyActive?.prFeedbackTargetUrl
+			? canonicalGitHubPrUrl(initiallyActive.prFeedbackTargetUrl, options.forge)
+			: null;
+		if (
+			requestedTargetPreLock &&
+			(!existingTargetPreLock ||
+				requestedTargetPreLock === existingTargetPreLock)
+		) {
+			try {
+				const resolvedBasePreLock =
+					await _test_exports.resolvePrFeedbackBaseViaGh(
+						directory,
+						prUrlForBaseBinding,
+					);
+				baseBindingResolution = resolvedBasePreLock
+					? {
+							kind: 'resolved',
+							baseRefName: resolvedBasePreLock.baseRefName,
+							baseRefOid: resolvedBasePreLock.baseRefOid,
+							headRefOid: resolvedBasePreLock.headRefOid,
+						}
+					: {
+							kind: 'binding-error',
+							message: sanitizeBaseBindingError(
+								`PR_FEEDBACK base binding failed for ${prUrlForBaseBinding}: gh pr view did not return a usable baseRefName/merge base`,
+							),
+						};
+			} catch (error) {
+				baseBindingResolution = {
+					kind: 'binding-error',
+					message: sanitizeBaseBindingError(
+						`PR_FEEDBACK base binding failed: ${error instanceof Error ? error.message : String(error)}`,
+					),
+				};
+			}
+		}
+	}
+
 	return withPrWorkflowCheckoutMutationLock(directory, async () =>
 		withSessionStateMutation(directory, normalizedSessionID, async () => {
 			let existing = await readPrWorkflowGateStateFromDisk(
@@ -1883,6 +2324,16 @@ export async function activatePrWorkflow(
 				normalizedSessionID,
 			);
 			if (existing?.mode === mode) {
+				if (
+					options.releaseReview !== undefined &&
+					(existing.releaseReview?.url.toLowerCase() !==
+						options.releaseReview?.url.toLowerCase() ||
+						existing.releaseReview?.head !== options.releaseReview?.head)
+				) {
+					throw new Error(
+						'BLOCKED: active workflow does not match the release PR and head',
+					);
+				}
 				if (mode === 'PR_FEEDBACK' && options.prUrl) {
 					const requestedTarget = canonicalGitHubPrUrl(
 						options.prUrl,
@@ -1901,11 +2352,55 @@ export async function activatePrWorkflow(
 							`BLOCKED: active PR_FEEDBACK targets a different GitHub pull request`,
 						);
 					}
-					if (!existingTarget) {
+					// #3396 S1: bind the merge base alongside the first target
+					// binding on re-activation (fail-open advisory on failure).
+					// Idempotent: an already-bound base is never re-resolved here.
+					// #3396 feedback (PRR-006): an unbound base resolves on every
+					// matching re-activation — the first binding attempt may have
+					// failed transiently while the target was already bound — and a
+					// successful re-resolution clears the stale advisory.
+					// #3396 feedback (PRR-013): the gh subprocess ran BEFORE the
+					// locks (baseBindingResolution, above); this region only applies
+					// the pre-computed result when the base is still unbound under
+					// the lock — a concurrent activation's binding wins.
+					let reactivationBase:
+						| {
+								prFeedbackBaseRef: string;
+								prFeedbackBaseSha: string;
+								prFeedbackBaseBindingError: undefined;
+						  }
+						| { prFeedbackBaseBindingError: string }
+						| undefined;
+					if (
+						!existing.prFeedbackBaseSha &&
+						baseBindingResolution &&
+						// #3396 feedback (reviewer F5): skip an anchor computed for
+						// a different PR head than the one bound here.
+						(baseBindingResolution.kind !== 'resolved' ||
+							resolvedBaseHeadMatches(
+								baseBindingResolution.headRefOid,
+								existing.prHeadSha,
+							))
+					) {
+						reactivationBase =
+							baseBindingResolution.kind === 'resolved'
+								? {
+										prFeedbackBaseRef: baseBindingResolution.baseRefName,
+										prFeedbackBaseSha: baseBindingResolution.baseRefOid,
+										prFeedbackBaseBindingError: undefined,
+									}
+								: existing.prFeedbackBaseBindingError
+									? undefined
+									: {
+											prFeedbackBaseBindingError: baseBindingResolution.message,
+										};
+					}
+					if (!existingTarget || reactivationBase) {
 						existing = await writeStateWhileLocked(directory, {
 							...existing,
 							prFeedbackTargetUrl: options.prUrl,
 							updatedAt: isoNow(),
+							...(reactivationBase ?? {}),
 						});
 					}
 				}
@@ -1986,8 +2481,40 @@ export async function activatePrWorkflow(
 					'BLOCKED: PR_FEEDBACK target must be a canonical GitHub PR URL',
 				);
 			}
+			// #3396 S1: durably bind the merge base at activation. Fail-open —
+			// a resolution failure records an advisory and never wedges
+			// activation; without a binding, Stage A keeps the disclosed
+			// caller-asserted floor. #3396 feedback (PRR-013, reviewer F1):
+			// the gh subprocess ran BEFORE the locks (baseBindingResolution,
+			// computed above for this create path); nothing network-bound is
+			// awaited here. #3396 feedback (reviewer F5): an anchor computed
+			// for a different PR head than the one being bound is skipped —
+			// the next matching re-activation re-resolves.
+			let prFeedbackBase:
+				| { prFeedbackBaseRef: string; prFeedbackBaseSha: string }
+				| { prFeedbackBaseBindingError: string }
+				| undefined;
+			if (feedbackTargetUrl && baseBindingResolution) {
+				prFeedbackBase =
+					baseBindingResolution.kind === 'resolved' &&
+					resolvedBaseHeadMatches(
+						baseBindingResolution.headRefOid,
+						options.prHeadSha,
+					)
+						? {
+								prFeedbackBaseRef: baseBindingResolution.baseRefName,
+								prFeedbackBaseSha: baseBindingResolution.baseRefOid,
+							}
+						: baseBindingResolution.kind === 'binding-error'
+							? {
+									prFeedbackBaseBindingError: baseBindingResolution.message,
+								}
+							: undefined;
+			}
 			const nextState: PrWorkflowGateState = {
-				schemaVersion: GATE_SCHEMA_VERSION,
+				schemaVersion: options.releaseReview
+					? RELEASE_GATE_SCHEMA_VERSION
+					: GATE_SCHEMA_VERSION,
 				revision: 0,
 				workflowInstanceId: randomUUID(),
 				sessionID: normalizedSessionID,
@@ -1998,9 +2525,13 @@ export async function activatePrWorkflow(
 					? { skillContractAdvisories: activationAdvisories }
 					: {}),
 				...(initialHead ? { prHeadSha: initialHead } : {}),
+				...(options.releaseReview
+					? { releaseReview: options.releaseReview }
+					: {}),
 				...(feedbackTargetUrl
 					? { prFeedbackTargetUrl: feedbackTargetUrl }
 					: {}),
+				...(prFeedbackBase ?? {}),
 			};
 			return writeStateWhileLocked(directory, nextState);
 		}),
@@ -2025,8 +2556,14 @@ export async function appendPrWorkflowSkillContractAdvisories(
 	if (advisories.length === 0) return;
 	const normalizedSessionID = normalizeSessionID(sessionID);
 	if (!normalizedSessionID) return;
-	await withSessionStateMutation(directory, normalizedSessionID, async () => {
-		try {
+	// Issue #3232: the fail-open boundary must cover lock acquisition too.
+	// withSessionStateMutation acquires the session-state mutation lock
+	// BEFORE the callback runs, so a try placed inside the callback lets the
+	// acquire loop's BLOCKED throw (lock exhaustion) escape the function and
+	// abort the wake evaluation that called it. Same shape as the three
+	// sibling observability writers below.
+	try {
+		await withSessionStateMutation(directory, normalizedSessionID, async () => {
 			const existing = await readPrWorkflowGateStateFromDisk(
 				directory,
 				normalizedSessionID,
@@ -2047,10 +2584,10 @@ export async function appendPrWorkflowSkillContractAdvisories(
 				skillContractAdvisories: merged,
 				updatedAt: isoNow(),
 			});
-		} catch {
-			// Fail-open: see the doc comment above.
-		}
-	});
+		});
+	} catch {
+		// Fail-open: see the doc comment above.
+	}
 }
 
 export async function readPrWorkflowGateState(
@@ -2812,34 +3349,87 @@ export async function clearPrWorkflowGateState(
 	directory: string,
 	sessionID: string,
 	expectedRevision?: number,
-	options: { allowSalvagedRead?: boolean } = {},
+	options: {
+		allowSalvagedRead?: boolean;
+		expectedRecoveryRowRevision?: number;
+		releaseApproval?: PrWorkflowGateState;
+	} = {},
 ): Promise<void> {
 	const normalizedSessionID = normalizeSessionID(sessionID);
 	await withSessionStateMutation(directory, normalizedSessionID, async () => {
-		// The CAS-guard read is only meaningful when a caller supplies a
-		// revision to compare against; skip it entirely otherwise so a
-		// genuinely unreadable/malformed state file can still be cleared
-		// (the sole purpose of this escape hatch) instead of the read itself
-		// re-throwing the same failure it exists to recover from.
-		if (expectedRevision !== undefined) {
+		if (expectedRevision !== undefined || options.allowSalvagedRead) {
 			// Issue #2242 R4: the recovery abort path salvaged a revision from a
 			// schema-invalid state and still wants real concurrency protection.
 			// Reading it back through the GENERAL reader would re-throw the very
 			// `is invalid` failure the salvage exists to route around, forcing an
 			// unnecessary CAS drop. Only the abort path sets this flag; every
 			// other caller keeps the strict read byte-for-byte.
+			const recovery = options.allowSalvagedRead
+				? await readPrWorkflowGateStateForRecovery(
+						directory,
+						normalizedSessionID,
+					)
+				: null;
 			const current = options.allowSalvagedRead
-				? ((
-						await readPrWorkflowGateStateForRecovery(
-							directory,
-							normalizedSessionID,
-						)
-					)?.state ?? null)
+				? recovery?.state
 				: await readPrWorkflowGateStateFromDisk(directory, normalizedSessionID);
-			if (!current || current.revision !== expectedRevision) {
+			const changed =
+				expectedRevision === undefined
+					? recovery?.revisionSalvageable !== false ||
+						recovery.coordinationRowRevision !==
+							options.expectedRecoveryRowRevision
+					: current?.revision !== expectedRevision;
+			if (!current || changed) {
 				throw new Error(
 					'BLOCKED: PR workflow gate state changed during terminal completion; revalidate the current session state before retrying',
 				);
+			}
+			const runId = current.prReviewArtifactRunId;
+			const release = current.releaseReview;
+			const releaseReceipt =
+				release && runId && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(runId)
+					? validateSwarmPath(
+							directory,
+							path.join('pr-review', runId, 'native-completion.json'),
+						)
+					: undefined;
+			if (options.releaseApproval) {
+				if (
+					workflowIdentity(current) !==
+					workflowIdentity(options.releaseApproval)
+				) {
+					throw new Error(
+						'BLOCKED: release review workflow changed during completion',
+					);
+				}
+				if (
+					!release ||
+					release.head !== current.prHeadSha ||
+					!runId ||
+					!releaseReceipt
+				) {
+					throw new Error('BLOCKED: no valid release review run to complete');
+				}
+				await atomicWriteSwarmFile(
+					releaseReceipt,
+					JSON.stringify({
+						run_id: runId,
+						head: release.head,
+						url: release.url,
+						session_id: current.sessionID,
+						coverage: 'COMPLETE',
+						verdict: 'APPROVE',
+					}) + '\n',
+				);
+				await _test_exports.afterNativeReleaseReceiptWrite?.();
+			} else if (releaseReceipt) {
+				// A previous APPROVE may have persisted its receipt before an interrupted
+				// clear. A different terminal verdict or abort revokes that receipt.
+				await fsp
+					.unlink(releaseReceipt)
+					.catch((error: NodeJS.ErrnoException) => {
+						if (error.code !== 'ENOENT') throw error;
+					});
 			}
 		}
 		await deleteStateWhileLocked(directory, normalizedSessionID, {
@@ -3437,7 +4027,8 @@ function isOpenPrWorkflowLane(
 /**
  * Issue #2506 (G2): optional lane-liveness watchdog options for the on-demand
  * settlement entry points. The two-argument call shape every existing caller
- * uses means "watchdog disabled" (the default-off config contract).
+ * uses means no policy is threaded — the config contract threaded by the tool
+ * wrappers applies (default-on since #3313 AC14).
  */
 export interface PrWorkflowLaneLivenessOptions {
 	laneLivenessWatchdog?: LaneLivenessWatchdogConfig;
@@ -3760,10 +4351,13 @@ export async function settlePresumedStalePrWorkflowLanes(
 	sessionID: string,
 	options?: PrWorkflowLaneLivenessOptions,
 ): Promise<PrWorkflowStaleLaneSettlement> {
-	// Issue #2506 (G2): resolve the ONE effective horizon up front. With the
-	// watchdog disabled (the default, and the shape of every pre-#2506
-	// two-argument call) this is exactly `PR_WORKFLOW_STALE_LANE_TIMEOUT_MS`
-	// and every behavior below is byte-identical to the substrate's.
+	// Issue #2506 (G2): resolve the ONE effective horizon up front. The default
+	// config ships the watchdog ENABLED (issue #3313 flipped the schema default
+	// to on), so an unconfigured caller gets the watchdog's deadline/stall
+	// settlement at the 30-minute reachability floor; a caller that passes NO
+	// options at all (no policy read) gets the plain
+	// `PR_WORKFLOW_STALE_LANE_TIMEOUT_MS` horizon with byte-identical pre-#2506
+	// behavior below.
 	const watchdog = options?.laneLivenessWatchdog;
 	const { deadlineActive, stallActive } =
 		laneLivenessWatchdogFeatures(watchdog);
@@ -4703,7 +5297,12 @@ export async function abortPrWorkflow(
 			directory,
 			sessionID,
 			casEscape ? undefined : (cancelRevision ?? state.revision),
-			{ allowSalvagedRead: recovery.salvaged },
+			{
+				allowSalvagedRead: recovery.salvaged,
+				...(casEscape && recovery.coordinationRowRevision !== undefined
+					? { expectedRecoveryRowRevision: recovery.coordinationRowRevision }
+					: {}),
+			},
 		);
 	} catch (error) {
 		// The `pr_workflow_aborted` record above is already durable, and the
@@ -5193,6 +5792,11 @@ async function bindPrWorkflowHeadWhileLocked(
 				'The gate must be activated before the PR head can be bound.',
 		);
 	}
+	if (state.releaseReview && normalizedHead !== state.releaseReview.head) {
+		throw new Error(
+			'BLOCKED: the requested head differs from the release review head',
+		);
+	}
 	await assertCurrentCheckoutHead(directory, normalizedHead, state.mode);
 	if (state.prHeadSha && state.prHeadSha !== normalizedHead) {
 		throw new Error(
@@ -5272,72 +5876,221 @@ async function bindPrWorkflowHeadWhileLocked(
  *   6. The immutable feedback inventory is preserved (item ownership
  *      continuity); only ancestry-bound receipts are invalidated.
  */
+/**
+ * Issue #3315 D1: fast-forward the local branch to the fetched bound tracking
+ * ref when — and only when — a POSITIVE fast-forward opportunity exists: the
+ * tracking ref resolves to exactly the requested new head AND the current HEAD
+ * is verified as its ancestor. A missing/mismatched ref falls through to the
+ * caller's existing assertions; an ancestry probe that cannot be verified
+ * (timeout) refuses with an explicit unverifiable message instead of
+ * misreporting divergence (FB-11/F-R13); a genuine non-descendant refuses
+ * with the fast-forward refusal. HEAD only ever moves via `git merge
+ * --ff-only` — never a merge commit, rebase, or reset — and every probe is
+ * fail-soft so fixture repositories without a real git directory are
+ * unaffected.
+ */
+async function maybeFastForwardRebindHead(
+	directory: string,
+	normalizedHead: string,
+): Promise<void> {
+	const tracking = await _test_exports
+		.resolveCurrentUpstreamPushTargetAsync(directory)
+		.catch(() => null);
+	if (!tracking?.remoteTrackingRef) return;
+	const trackingHead = await _test_exports.resolveLocalRefHeadAsync(
+		directory,
+		tracking.remoteTrackingRef,
+	);
+	// FB-8/PRR-009: the tracking head is lowercased by the resolver, so the
+	// requested head must be lowercased too — the schema accepts mixed-case
+	// hex, and a case-only mismatch silently skipped the ff remedy.
+	if (!trackingHead || trackingHead !== normalizedHead.toLowerCase()) return;
+	const currentHead = (
+		await _test_exports.resolveCurrentGitHeadAsync(directory)
+	)
+		?.trim()
+		.toLowerCase();
+	if (!currentHead) return;
+	if (currentHead === normalizedHead.toLowerCase()) return;
+	const ancestry = await _test_exports.resolveIsAncestorAsync(
+		directory,
+		currentHead,
+		normalizedHead,
+	);
+	if (ancestry === null) {
+		throw new Error(
+			`BLOCKED: PR_FEEDBACK rebind fast-forward could not verify whether "${normalizedHead}" is a descendant of the current HEAD "${currentHead}" (the ancestry probe timed out or its output was truncated); nothing moved — retry the rebind`,
+		);
+	}
+	if (!ancestry) {
+		throw new Error(
+			`BLOCKED: PR_FEEDBACK rebind fast-forward refused: the bound tracking ref ${tracking.remoteTrackingRef} points at "${normalizedHead}", which is not a descendant of the current HEAD "${currentHead}"; resolve the divergence manually (push the repair, then rebind) — the gate never merges or rebases`,
+		);
+	}
+	if (
+		(await _test_exports.resolveIsWorkingTreeCleanAsync(directory)) !== true
+	) {
+		throw new Error(
+			'BLOCKED: PR_FEEDBACK rebind fast-forward requires a clean index and working tree; clean the tree first, then rebind',
+		);
+	}
+	const moved = await _test_exports.fastForwardToRefAsync(
+		directory,
+		tracking.remoteTrackingRef,
+	);
+	if (!moved) {
+		throw new Error(
+			`BLOCKED: PR_FEEDBACK rebind fast-forward to ${tracking.remoteTrackingRef} failed or timed out; if git left an index.lock or a partially updated tree, remove the lock / restore the tree manually before retrying — otherwise a plain retry of the rebind completes it`,
+		);
+	}
+}
+
 export async function rebindPrFeedbackHead(
 	directory: string,
 	sessionID: string,
 	prHeadSha: string,
 ): Promise<PrWorkflowGateState> {
-	const state = await requireBoundState(directory, sessionID, 'PR_FEEDBACK');
-	const normalizedHead = normalizePrHeadSha(prHeadSha);
-	if (state.prFeedbackReadyToPublish) {
-		throw new Error(
-			'BLOCKED: PR_FEEDBACK rebind is refused while publication is armed; complete the workflow (or push the bound commit) before rebinding.',
+	// Issue #3315 D1: the whole sequence — preconditions, the ff-only HEAD
+	// move, and the CAS state write — runs under the checkout mutation lock in
+	// bind's lock order, so nothing can interpose between the checks and the
+	// move (the previous shape ran every check unlocked and only wrapped the
+	// final write).
+	return withPrWorkflowCheckoutMutationLock(directory, async () => {
+		const state = await requireBoundState(directory, sessionID, 'PR_FEEDBACK');
+		// FB-8/PRR-009: the schema accepts mixed-case hex; lowercase once so
+		// every downstream comparison (mover, asserts, CAS payload) agrees.
+		const normalizedHead = normalizePrHeadSha(prHeadSha).toLowerCase();
+		if (state.prFeedbackReadyToPublish) {
+			throw new Error(
+				'BLOCKED: PR_FEEDBACK rebind is refused while publication is armed; complete the workflow (or push the bound commit) before rebinding.',
+			);
+		}
+		// Issue #2511: an unreadable store must fail closed — the rebind guard
+		// cannot verify in-flight lanes, so rebind is refused until it is readable.
+		const rebindRead = readDelegationsDetailed(directory);
+		if (rebindRead.status === 'uncertain') {
+			throw new Error(
+				`BLOCKED: PR_FEEDBACK rebind refused while the delegation store is unreadable after ${rebindRead.attempts} attempts (${rebindRead.reason}); in-flight lanes are UNKNOWN. Restore the store before rebinding.`,
+			);
+		}
+		const openLanes = rebindRead.records.filter(
+			(record) =>
+				record.parentSessionId === state.sessionID &&
+				record.mode?.startsWith('swarm-pr-') &&
+				(record.status === 'pending' || record.status === 'running'),
 		);
-	}
-	// Issue #2511: an unreadable store must fail closed — the rebind guard
-	// cannot verify in-flight lanes, so rebind is refused until it is readable.
-	const rebindRead = readDelegationsDetailed(directory);
-	if (rebindRead.status === 'uncertain') {
-		throw new Error(
-			`BLOCKED: PR_FEEDBACK rebind refused while the delegation store is unreadable after ${rebindRead.attempts} attempts (${rebindRead.reason}); in-flight lanes are UNKNOWN. Restore the store before rebinding.`,
-		);
-	}
-	const openLanes = rebindRead.records.filter(
-		(record) =>
-			record.parentSessionId === state.sessionID &&
-			record.mode?.startsWith('swarm-pr-') &&
-			(record.status === 'pending' || record.status === 'running'),
-	);
-	if (openLanes.length > 0) {
-		throw new Error(
-			`BLOCKED: PR_FEEDBACK rebind refused while ${openLanes.length} PR workflow lane(s) are still in flight; collect their results first.`,
-		);
-	}
-	if (normalizedHead === state.prHeadSha) {
-		throw new Error(
-			`BLOCKED: PR_FEEDBACK rebind to the current intake head "${normalizedHead}" is a no-op; a rebind must move to a genuinely new verified PR head after merge/rebase repair.`,
-		);
-	}
-	await assertCurrentCheckoutHead(directory, normalizedHead, state.mode);
-	await assertPrFeedbackTrackingCheckout(directory, normalizedHead);
-	const nextState: PrWorkflowGateState = {
-		...state,
-		prHeadSha: normalizedHead,
-		// Invalidate every ancestry-bound receipt: the entire mechanical ladder
-		// (Stage A → verification → ordered gates) must re-run on the new
-		// ancestry. The immutable inventory and retired item ownership survive
-		// so item-set continuity is preserved across the repair.
-		prFeedbackStageA: undefined,
-		prFeedbackVerifications: undefined,
-		prFeedbackGateBatches: undefined,
-		prFeedbackRebindCount: (state.prFeedbackRebindCount ?? 0) + 1,
-		updatedAt: isoNow(),
-	};
-	try {
-		appendCoreEventSync(directory, {
-			type: 'pr_feedback_rebound',
-			timestamp: isoNow(),
-			sessionID: state.sessionID,
-			previousPrHeadSha: state.prHeadSha,
+		if (openLanes.length > 0) {
+			throw new Error(
+				`BLOCKED: PR_FEEDBACK rebind refused while ${openLanes.length} PR workflow lane(s) are still in flight; collect their results first.`,
+			);
+		}
+		if (normalizedHead === state.prHeadSha) {
+			throw new Error(
+				`BLOCKED: PR_FEEDBACK rebind to the current intake head "${normalizedHead}" is a no-op; a rebind must move to a genuinely new verified PR head after merge/rebase repair.`,
+			);
+		}
+		// Issue #3315 D1: after the remote advances, nothing else the gate admits
+		// can move HEAD to the fetched tracking head — move it here (ff-only,
+		// positive-opportunity-gated) before the checkout assertions run.
+		// FB-6/PRR-006: the two post-move assertions are INSIDE the compensation
+		// try — a probe failure after a successful ff leaves HEAD moved, and the
+		// operator must be told so (the compensation message covers it; a plain
+		// retry heals because the mover no-ops once HEAD equals the requested
+		// head).
+		try {
+			await maybeFastForwardRebindHead(directory, normalizedHead);
+			await assertCurrentCheckoutHead(directory, normalizedHead, state.mode);
+			await assertPrFeedbackTrackingCheckout(directory, normalizedHead);
+		} catch (error) {
+			const currentHead = (
+				await _test_exports
+					.resolveCurrentGitHeadAsync(directory)
+					.catch(() => null)
+			)
+				?.trim()
+				.toLowerCase();
+			if (
+				currentHead !== undefined &&
+				currentHead !== null &&
+				currentHead !== (state.prHeadSha ?? '').toLowerCase() &&
+				error instanceof Error
+			) {
+				throw new Error(
+					`BLOCKED: ${error.message} NOTE: the checkout HEAD is "${currentHead}" while the bound intake head is still "${state.prHeadSha}" — the fast-forward already moved HEAD; a plain retry of the same rebind completes it`,
+					{ cause: error },
+				);
+			}
+			throw error;
+		}
+		const nextState: PrWorkflowGateState = {
+			...state,
 			prHeadSha: normalizedHead,
-			rebindCount: nextState.prFeedbackRebindCount,
-		});
-	} catch {
-		// Non-fatal audit trail.
-	}
-	return withSessionStateMutation(directory, state.sessionID, async () =>
-		writeStateWhileLocked(directory, nextState),
-	);
+			// Invalidate every ancestry-bound receipt: the entire mechanical ladder
+			// (Stage A → verification → ordered gates) must re-run on the new
+			// ancestry. The immutable inventory and retired item ownership survive
+			// so item-set continuity is preserved across the repair.
+			prFeedbackStageA: undefined,
+			prFeedbackVerifications: undefined,
+			prFeedbackGateBatches: undefined,
+			// #3396 feedback (PRR-009): the base anchor and mismatch marker
+			// are ancestry-bound too — a rebind moves the head, so the stale
+			// anchor would false-mismatch every post-rebind Stage A run and
+			// the stale marker would survive into the repaired state.
+			// #3396 feedback (reviewer F6): the root-level trust verdict is
+			// written by the same recordPrFeedbackStageA call as the receipt
+			// above, so it clears with it; the stale binding advisory goes
+			// too (the next matching re-activation re-resolves the cleared
+			// base and a success writes a fresh verdict/advisory anyway).
+			prFeedbackBaseRef: undefined,
+			prFeedbackBaseSha: undefined,
+			prFeedbackBaseBindingError: undefined,
+			prFeedbackStageABaseTrust: undefined,
+			prFeedbackStageABaseMismatch: undefined,
+			// Issue #3316 (D5): a consumed scope must never authorize writes
+			// against the rebound ancestry — clear it exactly like invalidation
+			// does (pinned by pr-feedback-scope-rebind-clear-l3.test.ts).
+			prFeedbackScopes: undefined,
+			prFeedbackRebindCount: (state.prFeedbackRebindCount ?? 0) + 1,
+			updatedAt: isoNow(),
+		};
+		try {
+			appendCoreEventSync(directory, {
+				type: 'pr_feedback_rebound',
+				timestamp: isoNow(),
+				sessionID: state.sessionID,
+				previousPrHeadSha: state.prHeadSha,
+				prHeadSha: normalizedHead,
+				rebindCount: nextState.prFeedbackRebindCount,
+			});
+		} catch {
+			// Non-fatal audit trail.
+		}
+		try {
+			return await withSessionStateMutation(
+				directory,
+				state.sessionID,
+				async () =>
+					writeStateWhileLocked(directory, nextState, {
+						// #3396 feedback (PRR-009): the mismatch marker is a
+						// REGISTERED durable-wins field (PRR-014), so without
+						// this explicit per-field reset the durable-wins merge
+						// would resurrect the stale marker over the clear above.
+						clearObservabilityFields: ['prFeedbackStageABaseMismatch'],
+					}),
+			);
+		} catch (error) {
+			// Issue #3315 D1 compensation: HEAD may already sit at the new head
+			// while the rebind state failed to persist. Surface the split state
+			// honestly — a plain retry of the same rebind heals it (the mover
+			// no-ops once HEAD equals the tracking head, then the write retries).
+			throw new Error(
+				`BLOCKED: PR_FEEDBACK rebind moved the checkout toward "${normalizedHead}" but could not persist the rebind state (${
+					error instanceof Error ? error.message : String(error)
+				}); HEAD is already at the new head — retry the same rebind to complete it`,
+				{ cause: error },
+			);
+		}
+	});
 }
 
 /** Bind an active PR_REVIEW workflow to one immutable merge-base scope. */
@@ -5438,8 +6191,32 @@ export async function assertPrReviewCleanCheckout(
 	if (
 		(await _test_exports.resolveIsWorkingTreeCleanAsync(directory)) !== true
 	) {
+		// Issue #3315 E1/AC22: name the offending paths (first N plus a count
+		// of the rest) from the same porcelain enumeration that produced the
+		// dirty verdict — sibling seam, so the cleanliness semantics are
+		// unchanged and an unreadable enumeration merely omits the detail.
+		// FB-17/PRR-021: `-z` paths are byte-transparent — control characters
+		// and ANSI escapes are escaped before the join so the refusal stays a
+		// single-line, gate-authored message.
+		const dirtyPaths =
+			await _test_exports.resolveWorkingTreeDirtyPathsAsync(directory);
+		const sanitizePath = (value: string): string =>
+			value.replace(
+				/[\p{Cc}]/gu,
+				(ch) => `\\u${ch.charCodeAt(0).toString(16).padStart(4, '0')}`,
+			);
+		const shown = dirtyPaths
+			? dirtyPaths
+					.slice(0, PR_WORKFLOW_DIRTY_PATH_DISCLOSURE_LIMIT)
+					.map(sanitizePath)
+			: [];
+		const total = dirtyPaths ? dirtyPaths.length : 0;
+		const detail =
+			shown.length > 0
+				? ` Dirty paths (first ${shown.length} of ${total}): ${shown.join(', ')}.`
+				: '';
 		throw new Error(
-			`BLOCKED: ${mode} requires a clean index and working tree at the exact PR head`,
+			`BLOCKED: ${mode} requires a clean index and working tree at the exact PR head.${detail}`,
 		);
 	}
 }
@@ -6836,6 +7613,58 @@ export async function rollbackPrReviewBaseAdmissionIfUnlaunched(
 }
 
 /**
+ * Issue #3311 (ghost owners): remove a reviewer/critic validation batch whose
+ * dispatch launched ZERO lanes. A recorded-but-unlaunched batch would leave
+ * owner lanes with no delegation record, which N-of-M admission correctly
+ * treats as blocking (the #3101 silence constraint) — but the batch should
+ * never have been recorded. Mirrors `rollbackPrReviewBaseAdmissionIfUnlaunched`
+ * (fail-closed on an unreadable store: the rollback must PROVE the batch has
+ * no delegation records before removing the validation batch).
+ */
+export async function rollbackPrReviewValidationBatchIfUnlaunched(
+	directory: string,
+	sessionID: string,
+	batchId: string,
+): Promise<boolean> {
+	const normalizedSessionID = normalizeSessionID(sessionID);
+	const normalizedBatchId = normalizeBatchId(batchId);
+	return withPrWorkflowCheckoutMutationLock(directory, async () =>
+		withSessionStateMutation(directory, normalizedSessionID, async () => {
+			const state = await readPrWorkflowGateState(
+				directory,
+				normalizedSessionID,
+			);
+			if (!state || state.mode !== 'PR_REVIEW') return false;
+			const previous = state.prReviewValidationBatches ?? [];
+			if (!previous.some((batch) => batch.batchId === normalizedBatchId)) {
+				return false;
+			}
+			const batchRead = findByBatchIdDetailed(directory, normalizedBatchId, {
+				parentSessionId: normalizedSessionID,
+			});
+			if (batchRead.status === 'uncertain') {
+				// Issue #2511 fail-closed: without a readable store the batch's
+				// unlaunched-ness cannot be proven, so the batch stays recorded.
+				warnDelegationReadUncertainOnce(
+					'validation batch rollback existence guard',
+					batchRead,
+				);
+				return false;
+			}
+			if (batchRead.value.length > 0) return false;
+			await writeStateWhileLocked(directory, {
+				...state,
+				updatedAt: isoNow(),
+				prReviewValidationBatches: previous.filter(
+					(batch) => batch.batchId !== normalizedBatchId,
+				),
+			});
+			return true;
+		}),
+	);
+}
+
+/**
  * Delegation statuses that prove a lane will produce nothing further.
  *
  * Enumerated here rather than reusing `isTerminal`
@@ -7578,6 +8407,72 @@ function derivePrReviewOrderUnstableItemsForState(
 		.sort();
 }
 
+/**
+ * Issue #3358 AC8: the exact role set each PR_REVIEW validation phase admits.
+ * ONE table consumed by dispatch admission (dispatch-lanes.ts), the gate
+ * recorder (recordPrReviewValidationBatch), and artifact integrity — so a
+ * phase's transport row contract decides admission everywhere, never a
+ * prefix-shaped predicate. The factory council agents are the exact set
+ * src/agents/index.ts builds for council.general; a user-defined
+ * `council_*`-prefixed agent is NOT admitted to a council lane.
+ */
+export const PR_REVIEW_PHASE_ADMITTED_ROLES: Readonly<
+	// Feedback F-011: the key union is the shared phase type, so a future
+	// fourth verdict phase is compile-forced to declare its admitted roles
+	// here (and every consumer derivation that keys on the phase) instead of
+	// silently skipping admission at the integrity site.
+	Record<PrReviewValidationPhase, readonly string[]>
+> = {
+	council: ['council_generalist', 'council_skeptic', 'council_domain_expert'],
+	reviewer: ['reviewer'],
+	critic: ['critic'],
+};
+
+function assertCriticLaneAgents(
+	phase: PrReviewValidationPhase,
+	lanes: readonly PrWorkflowLaneSpec[],
+	generatedAgentNames: readonly string[] | undefined,
+): void {
+	if (phase === 'council' || phase === 'reviewer' || phase === 'critic') {
+		const admitted = PR_REVIEW_PHASE_ADMITTED_ROLES[phase];
+		for (const lane of lanes) {
+			const agent = lane.agent?.trim();
+			if (!agent) {
+				// Critic lanes must always declare (the row contract is
+				// single-agent); a declared agent for reviewer/council is
+				// verified when present, and undeclared ones are still policed
+				// at artifact integrity by the launch-time normalizedAgent.
+				if (phase === 'critic') {
+					throw new Error(
+						`BLOCKED: PR_REVIEW ${phase} lane "${lane.laneId ?? lane.workflowLane ?? '(unknown)'}" must declare its agent — only the critic agent may run critic lanes, so an undeclared agent cannot be admitted`,
+					);
+				}
+				continue;
+			}
+			// Mirror the dispatch caller's resolution exactly when the caller
+			// supplies the generated-name registry; without one, fall back to
+			// canonical/suffix extraction so direct gate callers still fail
+			// closed on critic-family roles (they are canonical roles returned
+			// unchanged) and arbitrary non-critic names.
+			const role = resolveGeneratedAgentRoleStrict(agent, generatedAgentNames);
+			if (!admitted.includes(role)) {
+				throw new Error(
+					`BLOCKED: PR_REVIEW ${phase} lane "${lane.laneId ?? lane.workflowLane ?? '(unknown)'}" uses invalid role "${role}" (agent "${agent}") — ${phase === 'critic' ? 'PR critic lanes must use the critic agent (critic_finding_validator and other critic-family roles cannot emit [CRITIC] rows)' : `PR ${phase} lanes must use one of: ${admitted.join(', ')}`}`,
+				);
+			}
+		}
+	}
+}
+
+function resolveGeneratedAgentRoleStrict(
+	agent: string,
+	generatedAgentNames: readonly string[] | undefined,
+): string {
+	return generatedAgentNames
+		? resolveGeneratedAgentRole(agent, generatedAgentNames)
+		: getCanonicalAgentRole(agent);
+}
+
 export async function recordPrReviewValidationBatch(
 	directory: string,
 	sessionID: string,
@@ -7593,8 +8488,21 @@ export async function recordPrReviewValidationBatch(
 		 * closed so the prompt can never misrepresent the stamped receipt.
 		 */
 		expectedPresentationOrder?: 'A' | 'B';
+		/**
+		 * Issue #3340 AC1: the generated-agent-name registry the dispatch
+		 * caller resolves lane roles against. When supplied, the critic-phase
+		 * admission below resolves declared agents through the identical
+		 * strict resolver, so the gate verdict matches the dispatch verdict
+		 * for prefixed generated names (e.g. `mega_critic`).
+		 */
+		generatedAgentNames?: readonly string[];
 	},
 ): Promise<PrWorkflowGateState> {
+	// Issue #3340 AC1: enforce the critic-role rule at the boundary that
+	// persists the verdict batch, not only at the dispatch call site (#3310).
+	// Pure input validation — reject before any state read or write so a
+	// refused batch leaves no trace and no partially-mutated window state.
+	assertCriticLaneAgents(phase, lanes, options.generatedAgentNames);
 	let state = await bindPrWorkflowHead(directory, sessionID, options.prHeadSha);
 	if (state.mode !== 'PR_REVIEW') throw wrongModeError(state, 'PR_REVIEW');
 	if (!state.prReviewTriggerEvalPath) {
@@ -7872,6 +8780,27 @@ export async function assertPrReviewValidationSettled(
 					'BLOCKED: PR_REVIEW settlement requires a bound PR head SHA',
 				);
 			}
+			// Issue #3358 AC4: an UNCLAIMED item whose lane answered with a row
+			// written under earlier verdict semantics is never N-of-M-admitted —
+			// admission would settle it as typed-dead and hide that a verdict
+			// existed but no longer validates. Claimed items with a stale extra
+			// row (a newer valid claim won) are not blocking; the structured
+			// field still discloses them.
+			const unclaimedSet = new Set(composed.unclaimed);
+			const blockingSemanticsMismatches =
+				composed.semanticsMismatchedItemIds.filter((itemId) =>
+					unclaimedSet.has(itemId),
+				);
+			if (blockingSemanticsMismatches.length > 0) {
+				throw new Error(
+					renderPrReviewSemanticsMismatchGuardMessage({
+						requiredPhase,
+						unclaimed: composed.unclaimed,
+						blockingSemanticsMismatches,
+						diagnostics: composed.diagnostics,
+					}),
+				);
+			}
 			const admission = deriveVerdictSettlementAdmission({
 				directory,
 				prHeadSha: boundPrHeadSha,
@@ -7886,13 +8815,27 @@ export async function assertPrReviewValidationSettled(
 					MAX_UNCLAIMED_ITEMS_IN_MESSAGE,
 				);
 				const overflow = composed.unclaimed.length - named.length;
+				// Issue #3311: per-item attempt counts from the SAME window the
+				// admission reads (single derivation shared with the status
+				// projection), so the operator sees how close each item is to
+				// admissibility instead of re-deriving it from free text.
+				const attemptCounts = deriveVerdictAttemptCounts({
+					window: prReviewPhaseWindow(state, requiredPhase),
+					unclaimed: composed.unclaimed,
+				});
+				const attemptText = attemptCounts
+					.map(
+						(count) =>
+							`${count.itemId}: attempts: ${count.attemptsUsed} of ${count.attemptsRequired} (remaining: ${count.remaining})`,
+					)
+					.join('; ');
 				throw new Error(
 					`BLOCKED: PR_REVIEW ${requiredPhase} items lack an authenticated verdict from any successful lane: ${named.join(', ')}` +
 						(overflow > 0 ? ` (+${overflow} more)` : '') +
 						(composed.diagnostics.length > 0
 							? `; diagnostics: ${composed.diagnostics.join(' | ')}`
 							: '') +
-						`; N-of-M settlement not admissible (${admission.reason}); re-dispatch the unclaimed items to exhaust the retry budget with controller-observed liveness evidence, or complete downgrade-only once admissible`,
+						`; N-of-M settlement not admissible (${admission.reason}); per-item attempts: ${attemptText}; settle or re-dispatch the unclaimed items (a re-dispatched lane resolves the item on success), or complete downgrade-only once admissible; an item owned by a classless terminal (e.g. a host-aborted lane) never becomes admissible — complete the workflow with an INCOMPLETE verdict to exit while naming it`,
 				);
 			}
 			const runId = state.prReviewArtifactRunId ?? state.prReviewReservedRunId;
@@ -8237,9 +9180,27 @@ export async function enforcePrFeedbackVerificationOwnership(
 	)) {
 		claimedByItemId.set(itemId, laneId);
 	}
+	// Issue #3316 (D7a): ownership is exclusive only per item the batch actually
+	// covers at the CURRENT revision digest. A batch whose lanes never settled —
+	// or whose artifacts bind an older digest so it can never contribute
+	// coverage again — releases its items, so a re-dispatch under a different
+	// lane id is accepted instead of wedging the run on "owned by both". The
+	// sanctioned recovery reuses the same lane ids anyway; retired ownership
+	// above keeps GC-pruned bindings exclusive.
+	const currentDigestForOwnership = await currentPrFeedbackRevisionDigest(
+		directory,
+		state,
+	);
 	for (const record of previous) {
+		const batchCovered = prFeedbackBatchCoveredItems(
+			directory,
+			state,
+			record,
+			currentDigestForOwnership,
+		);
 		for (const lane of record.ownership) {
 			for (const itemId of lane.ownedItemIds) {
+				if (!batchCovered.has(itemId)) continue;
 				claimedByItemId.set(itemId, lane.laneId);
 			}
 		}
@@ -8361,7 +9322,7 @@ async function assertPrFeedbackVerificationSettledState(
 	const missing = inventory.filter((itemId) => !covered.has(itemId));
 	if (missing.length > 0 || covered.size !== inventory.length) {
 		throw new Error(
-			`BLOCKED: PR_FEEDBACK verification ownership is incomplete; missing inventory items: ${missing.join(', ') || '(none)'}`,
+			`BLOCKED: PR_FEEDBACK verification ownership is incomplete; missing inventory items: ${missing.join(', ') || '(none)'} — re-dispatch swarm-pr-feedback:verification on the edited tree (new batch_id, same lane ids) to re-settle coverage; further coder writes need a fresh scope under a new task_id, and Stage A plus the ordered gates re-run on the new digest`,
 		);
 	}
 	return currentDigest;
@@ -8399,6 +9360,25 @@ export async function recordPrFeedbackStageA(
 			source: string;
 			validatorContract?: { path: string; id: string };
 		}>;
+		/**
+		 * Caller-asserted base identity consumed by this run's trusted
+		 * base-identical decisions. Recorded (not verified): the durable
+		 * binding verdict is the caller's `baseTrust` (4-value, root-level);
+		 * `baseVerification` stays the BASE two-value enum and is the honest
+		 * trust FLOOR written into the strict child (#3396 feedback PRR-004:
+		 * 'caller-asserted' covers caller-asserted and binding-verified,
+		 * 'none' covers none and binding-mismatch).
+		 */
+		baseIdentity?: {
+			baseRef?: string;
+			baseSha?: string;
+			baseVerification: 'caller-asserted' | 'none';
+			baseTrust:
+				| 'caller-asserted'
+				| 'binding-verified'
+				| 'binding-mismatch'
+				| 'none';
+		};
 	} = {},
 ): Promise<PrWorkflowGateState> {
 	const state = await assertPrFeedbackVerificationSettled(directory, sessionID);
@@ -8589,8 +9569,16 @@ export async function recordPrFeedbackStageA(
 			feedbackItemIds: reproductionFeedbackItemIds,
 			applicableCategories: normalizedCategories,
 			applicableObligations,
+			...(options.baseIdentity !== undefined
+				? {
+						baseRef: options.baseIdentity.baseRef,
+						baseSha: options.baseIdentity.baseSha,
+					}
+				: {}),
+			baseVerification: options.baseIdentity?.baseVerification,
 			validatedAt: isoNow(),
 		},
+		prFeedbackStageABaseTrust: options.baseIdentity?.baseTrust,
 		prFeedbackGateBatches: retainsGateBatches
 			? [...(state.prFeedbackGateBatches ?? [])]
 			: [],
@@ -8881,10 +9869,17 @@ function assertIndependentFeedbackGateSessions(
 		}
 		const record = matching[0];
 		const expectedRole = PR_FEEDBACK_PHASE_ROLE[batch.phase];
-		const roleMatches =
-			record.normalizedAgent === expectedRole ||
-			(expectedRole === 'critic' &&
-				record.normalizedAgent.startsWith('critic_'));
+		// Issue #3340 AC2 (recorded decision): PR_FEEDBACK closeout-critic
+		// requires the role to be EXACTLY `critic`, the same rule as the
+		// PR_REVIEW critic phase (#3310). The closeout gate settles only on
+		// one complete [CLOSEOUT-CRITIC] verdict row per inventory item — the
+		// same row-emission contract the other critic-family agents
+		// (critic_finding_validator, critic_sounding_board, ...) cannot
+		// fulfill under their own output contracts. The pre-#3340
+		// `startsWith('critic_')` leniency is intentionally removed; critic
+		// dispatches that used a critic-family agent must re-run with the
+		// `critic` agent.
+		const roleMatches = record.normalizedAgent === expectedRole;
 		if (!roleMatches) {
 			throw new Error(
 				`BLOCKED: PR_FEEDBACK ${batch.phase} requires role ${expectedRole}, received ${record.normalizedAgent || '(unknown)'}`,
@@ -12014,6 +13009,10 @@ export async function readPrReviewFinalFindingPolicyForReport(
 	// downgrade the completion gates enforce — a disclosed coverage degradation
 	// (dead family or dead verdict lane) excludes APPROVE from the reported
 	// permitted verdicts.
+	// Feedback F2: a persisted validation-skip disclosure is itself a disclosed
+	// degradation — OR it into this leg so the projected permitted verdicts
+	// never admit APPROVE for a skip-disclosed run. This mirrors the #2840
+	// both-legs discipline (gate-side completion flag AND projection agree).
 	const disclosedDegradation =
 		prReviewReceiptHasCoverageDegradations(
 			directory,
@@ -12021,7 +13020,9 @@ export async function readPrReviewFinalFindingPolicyForReport(
 			// Thread the memoized gate context: a fresh context here resolves the
 			// revision digest a second time and breaks the one-digest-per-pass
 			// threading contract pinned by pr-workflow-gate-digest-threading.
-		) || (await verdictSettlementDegradesReport(directory, state, ctx));
+		) ||
+		(await verdictSettlementDegradesReport(directory, state, ctx)) ||
+		stateCarriesValidationSkipDisclosure(state, ctx.revisionDigest);
 	const permittedVerdicts = allowedPrReviewReportVerdicts(
 		settlement.kind,
 		findings,
@@ -12082,20 +13083,44 @@ function assertMatchingPrReviewFeedbackConsent(
 		sourceWorkflowInstanceId: string;
 	},
 ): void {
-	if (
-		record.session_id !== input.sessionID ||
-		record.run_id !== input.runId ||
-		record.handoff_path !== input.handoffPath ||
-		record.handoff_digest !== input.handoffDigest ||
-		canonicalGitHubPrUrl(record.pr_url) !== canonicalGitHubPrUrl(input.prUrl) ||
-		record.pr_head_sha.toLowerCase() !== input.prHeadSha.toLowerCase() ||
-		record.finding_ids_digest !== input.findingIdsDigest ||
-		record.source_workflow_instance_id !== input.sourceWorkflowInstanceId
-	) {
+	if (record.session_id !== input.sessionID) {
+		throw new Error(
+			'BLOCKED: PR_REVIEW feedback consent artifact belongs to a different session (it was already rebound, or another session owns it); remove the stale sidecar and repeat the exact continuation offer',
+		);
+	}
+	if (!prReviewFeedbackConsentFieldsMatch(record, input)) {
 		throw new Error(
 			'BLOCKED: PR_REVIEW feedback consent artifact does not match the requested handoff; remove the stale sidecar or repeat the exact continuation offer',
 		);
 	}
+}
+
+/**
+ * Issue #3316 (D7c): the consent fields that must match for BOTH the owning
+ * session and a user-confirmed foreign-session rebind (session_id exempt in
+ * the rebind arm — the rebind rewrites it under the lock).
+ */
+function prReviewFeedbackConsentFieldsMatch(
+	record: z.infer<typeof PrReviewFeedbackConsentSchema>,
+	input: {
+		runId: string;
+		handoffPath: string;
+		handoffDigest: string;
+		prUrl: string;
+		prHeadSha: string;
+		findingIdsDigest: string;
+		sourceWorkflowInstanceId: string;
+	},
+): boolean {
+	return (
+		record.run_id === input.runId &&
+		record.handoff_path === input.handoffPath &&
+		record.handoff_digest === input.handoffDigest &&
+		canonicalGitHubPrUrl(record.pr_url) === canonicalGitHubPrUrl(input.prUrl) &&
+		record.pr_head_sha.toLowerCase() === input.prHeadSha.toLowerCase() &&
+		record.finding_ids_digest === input.findingIdsDigest &&
+		record.source_workflow_instance_id === input.sourceWorkflowInstanceId
+	);
 }
 
 function workflowIdentity(state: PrWorkflowGateState): string {
@@ -12464,6 +13489,10 @@ export async function transitionPrReviewToFeedback(
 	let expectedConsentSourceIdentity: string;
 	let sourceRevision = 0;
 	let provenance: PrFeedbackReviewHandoffRecord['provenance'];
+	// Issue #3316 (D7c): a foreign-session continuation whose consent record
+	// matches on every field except session_id may rebind the consent to the
+	// current session — only after the explicit user-confirmation gates below.
+	let consentRebindFromSession: string | null = null;
 	if (preliminary) {
 		if (preliminary.mode !== 'PR_REVIEW') {
 			throw wrongModeError(preliminary, 'PR_REVIEW');
@@ -12512,11 +13541,7 @@ export async function transitionPrReviewToFeedback(
 			directory,
 			request.runId,
 		);
-		if (
-			!reservation ||
-			reservation.session_id !== normalizedSessionID ||
-			reservation.run_id !== request.runId
-		) {
+		if (!reservation || reservation.run_id !== request.runId) {
 			throw new Error(
 				'BLOCKED: completed PR_REVIEW continuation requires the matching durable run reservation for this session',
 			);
@@ -12524,6 +13549,9 @@ export async function transitionPrReviewToFeedback(
 		expectedConsentSourceIdentity = reservation.workflow_instance_id;
 		sourceIdentity = expectedConsentSourceIdentity;
 		provenance = 'external-v1';
+		if (reservation.session_id !== normalizedSessionID) {
+			consentRebindFromSession = reservation.session_id;
+		}
 	}
 
 	const consent = await readPrReviewFeedbackConsent(directory, request.runId);
@@ -12532,8 +13560,7 @@ export async function transitionPrReviewToFeedback(
 			'BLOCKED: PR_FEEDBACK continuation requires explicit confirmation; repeat the exact continuation command first',
 		);
 	}
-	assertMatchingPrReviewFeedbackConsent(consent, {
-		sessionID: normalizedSessionID,
+	const consentFieldsInput = {
 		runId: request.runId,
 		handoffPath: normalizedHandoff.relativePath,
 		handoffDigest: preliminaryRead.digest,
@@ -12541,7 +13568,21 @@ export async function transitionPrReviewToFeedback(
 		prHeadSha: artifact.pr_head_sha,
 		findingIdsDigest: hashPrReviewFindingIds(artifact.finding_ids),
 		sourceWorkflowInstanceId: expectedConsentSourceIdentity,
-	});
+	};
+	if (consentRebindFromSession !== null) {
+		// Foreign session: every field except session_id must match; the
+		// rebind itself happens under the lock, after the confirmation gates.
+		if (!prReviewFeedbackConsentFieldsMatch(consent, consentFieldsInput)) {
+			throw new Error(
+				'BLOCKED: PR_REVIEW feedback consent artifact does not match the requested handoff; remove the stale sidecar or repeat the exact continuation offer',
+			);
+		}
+	} else {
+		assertMatchingPrReviewFeedbackConsent(consent, {
+			sessionID: normalizedSessionID,
+			...consentFieldsInput,
+		});
+	}
 	const exactCommand = request.exactCommand?.trim();
 	const acceptedContinuationCommands =
 		buildAcceptedPrFeedbackContinuationCommands(
@@ -12602,7 +13643,12 @@ export async function transitionPrReviewToFeedback(
 				);
 				if (
 					!lockedReservation ||
-					lockedReservation.session_id !== normalizedSessionID ||
+					// Issue #3316 (D7c): for a user-confirmed foreign-session rebind the
+					// reservation still belongs to the ORIGINAL review session — pin the
+					// instance identity (and that the session did not churn to a third
+					// value) rather than the current session.
+					lockedReservation.session_id !==
+						(consentRebindFromSession ?? normalizedSessionID) ||
 					lockedReservation.workflow_instance_id !==
 						expectedConsentSourceIdentity
 				) {
@@ -12640,8 +13686,7 @@ export async function transitionPrReviewToFeedback(
 					'BLOCKED: PR_REVIEW feedback consent artifact disappeared during transition',
 				);
 			}
-			assertMatchingPrReviewFeedbackConsent(lockedConsent, {
-				sessionID: normalizedSessionID,
+			const lockedConsentFieldsInput = {
 				runId: request.runId,
 				handoffPath: normalizedHandoff.relativePath,
 				handoffDigest: lockedRead.digest,
@@ -12651,6 +13696,59 @@ export async function transitionPrReviewToFeedback(
 					lockedRead.artifact.finding_ids,
 				),
 				sourceWorkflowInstanceId: expectedConsentSourceIdentity,
+			};
+			let effectiveLockedConsent = lockedConsent;
+			if (
+				consentRebindFromSession !== null &&
+				lockedConsent.session_id !== normalizedSessionID
+			) {
+				// Issue #3316 (D7c): execute the audited consent rebind under the
+				// lock — every field except session_id must still match, and the
+				// user-confirmation gates already ran outside. The rewrite goes
+				// through the confirmed-state atomic-replace branch (offers are
+				// create-only by design), so the offered→confirmed flip below is
+				// a no-op for the rebound record. The rebind is ONE-SHOT: only a
+				// consent still owned by the reservation's original session may
+				// be rebound, which is also the compare-and-swap — a second
+				// foreign session (or a racing one) observes the already-rebound
+				// owner and is refused instead of silently stealing the consent.
+				if (lockedConsent.session_id !== consentRebindFromSession) {
+					throw new Error(
+						`BLOCKED: PR_REVIEW feedback consent for run "${request.runId}" was already rebound to another session; the original continuation offer is spent`,
+					);
+				}
+				if (
+					!prReviewFeedbackConsentFieldsMatch(
+						lockedConsent,
+						lockedConsentFieldsInput,
+					)
+				) {
+					throw new Error(
+						'BLOCKED: PR_REVIEW feedback consent artifact does not match the requested handoff; remove the stale sidecar or repeat the exact continuation offer',
+					);
+				}
+				effectiveLockedConsent = {
+					...lockedConsent,
+					state: 'confirmed',
+					session_id: normalizedSessionID,
+					confirmed_at: isoNow(),
+				};
+				await writePrReviewFeedbackConsent(directory, effectiveLockedConsent);
+				try {
+					appendCoreEventSync(directory, {
+						type: 'pr_feedback_consent_rebound',
+						timestamp: isoNow(),
+						sessionID: normalizedSessionID,
+						previousSessionId: lockedConsent.session_id,
+						runId: request.runId,
+					});
+				} catch {
+					// Non-fatal audit trail.
+				}
+			}
+			assertMatchingPrReviewFeedbackConsent(effectiveLockedConsent, {
+				sessionID: normalizedSessionID,
+				...lockedConsentFieldsInput,
 			});
 			if (
 				!buildAcceptedPrFeedbackContinuationCommands(
@@ -12663,9 +13761,9 @@ export async function transitionPrReviewToFeedback(
 					'BLOCKED: PR_FEEDBACK continuation command changed during transition',
 				);
 			}
-			if (lockedConsent.state === 'offered') {
+			if (effectiveLockedConsent.state === 'offered') {
 				await writePrReviewFeedbackConsent(directory, {
-					...lockedConsent,
+					...effectiveLockedConsent,
 					state: 'confirmed',
 					confirmed_at: isoNow(),
 				});
@@ -12811,6 +13909,109 @@ export async function consumePrFeedbackScopeDeclaration(
 	});
 }
 
+/**
+ * Canonical containment identity for a path that may not fully exist yet:
+ * realpath the longest existing ancestor prefix, then append the remaining
+ * not-yet-existing segments lexically. A symlink/junction ancestor is
+ * therefore resolved to its target (a link inside the scope pointing outside
+ * canonicalizes OUTSIDE), while purely not-yet-created paths keep their
+ * lexical form under the canonical prefix. Unresolvable roots fall back to
+ * the lexically resolved path.
+ */
+function canonicalizeExistingPrefix(resolvedPath: string): string {
+	const suffix: string[] = [];
+	let current = resolvedPath;
+	while (true) {
+		try {
+			return [realpathSync(current), ...suffix.reverse()].join(path.sep);
+		} catch {
+			const parent = path.dirname(current);
+			if (parent === current) return path.resolve(resolvedPath);
+			suffix.push(path.basename(current));
+			current = parent;
+		}
+	}
+}
+
+/**
+ * Issue #3316 (D5): a CONSUMED declaration stays authoritative for the coder
+ * child's bound writes across the digest moves its own edits cause. Unlike
+ * `resolvePrFeedbackScopeDeclaration` this does not re-assert settled
+ * verification and does not compare the current digest — the declaration was
+ * validated at consume time, and scopes are cleared on invalidation and
+ * rebind, so survival implies the same generation.
+ */
+async function resolveConsumedPrFeedbackScopeDeclaration(
+	directory: string,
+	sessionID: string,
+	taskId: string,
+): Promise<PrFeedbackScopeDeclarationRecord | null> {
+	const state = await readPrWorkflowGateState(directory, sessionID);
+	if (state?.mode !== 'PR_FEEDBACK') return null;
+	const declaration = (state.prFeedbackScopes ?? []).find(
+		(entry) => entry.taskId === taskId && entry.consumedByCallId,
+	);
+	return declaration ?? null;
+}
+
+/**
+ * Issue #3316 (D5): direct write tools are admitted inside a consumed scope's
+ * file list on the strength of the consumed declaration itself within the
+ * head-bound PR_FEEDBACK gate state — not the moving dirty-tree digest. The
+ * head binding is structural (the state IS the bound workflow; scopes are
+ * cleared on rebind and invalidation), not a per-write HEAD comparison.
+ * Fail-closed on any unreadable state, unbound head, empty inventory,
+ * unverifiable write target, or target outside every consumed declaration.
+ * Containment is canonical: existing path components are resolved through the
+ * filesystem (a symlink/junction ancestor cannot redirect a write out of the
+ * declared scope), and not-yet-existing components compare lexically under
+ * the canonical existing prefix.
+ */
+async function prFeedbackConsumedScopeAuthorizesWrite(
+	directory: string,
+	sessionID: string,
+	toolName: string,
+	args: Record<string, unknown>,
+): Promise<boolean> {
+	let state: PrWorkflowGateState | null;
+	try {
+		state = await readPrWorkflowGateState(directory, sessionID);
+	} catch {
+		return false;
+	}
+	if (!state || state.mode !== 'PR_FEEDBACK') return false;
+	if (!state.prHeadSha || !state.prFeedbackInventory?.length) return false;
+	const consumed = (state.prFeedbackScopes ?? []).filter(
+		(entry) => entry.consumedByCallId,
+	);
+	if (consumed.length === 0) return false;
+	const resolution = resolveWriteTargets(toolName, args, { directory });
+	if (resolution.status !== 'resolved' || resolution.paths.length === 0)
+		return false;
+	const coversTarget = (target: string): boolean => {
+		// Containment is CANONICAL path identity, not a lexical prefix: a
+		// `..`-traversal target like `src/index.ts/../../outside.ts`
+		// prefix-matches the declared file but resolves outside it
+		// (implementation-review round 1), and a symlinked/junctioned
+		// directory inside the declared scope could redirect a write outside
+		// it while passing lexically (PR-review round). Both operands are
+		// canonicalized through the filesystem for their existing prefix, so
+		// only the canonical resolution of the target admits.
+		const canonicalTarget = canonicalizeExistingPrefix(
+			path.resolve(directory, target),
+		);
+		return consumed.some((entry) =>
+			entry.files.some((file) =>
+				isPathIdentityWithin(
+					canonicalTarget,
+					canonicalizeExistingPrefix(path.resolve(directory, file)),
+				),
+			),
+		);
+	};
+	return resolution.paths.every(coversTarget);
+}
+
 export async function validatePrFeedbackScopeBinding(
 	directory: string,
 	binding: {
@@ -12823,7 +14024,7 @@ export async function validatePrFeedbackScopeBinding(
 ): Promise<boolean> {
 	if (!binding.workflowSessionId || !binding.workflowRevisionDigest)
 		return false;
-	const declaration = await resolvePrFeedbackScopeDeclaration(
+	const declaration = await resolveConsumedPrFeedbackScopeDeclaration(
 		directory,
 		binding.workflowSessionId,
 		binding.taskId,
@@ -12844,7 +14045,21 @@ export async function enforcePrWorkflowToolBefore(
 	generatedAgentNames: readonly string[] = [],
 	callID?: string,
 ): Promise<void> {
-	let state = await readPrWorkflowGateState(directory, sessionID);
+	const normalizedTool = toolName.toLowerCase();
+	let state: PrWorkflowGateState | null;
+	try {
+		state = await readPrWorkflowGateState(directory, sessionID);
+	} catch (error) {
+		// These two tools use recovery-only readers and enforce their own
+		// authority. An unreadable gate still blocks every other tool.
+		if (
+			normalizedTool === 'abort_pr_workflow' ||
+			normalizedTool === 'pr_workflow_status'
+		) {
+			return;
+		}
+		throw error;
+	}
 	if (!state) {
 		// Issue #2108 safety boundary: a hand-DELETED gate state file must not
 		// silently reopen arbitrary pushes for a session whose events trail
@@ -12898,7 +14113,6 @@ export async function enforcePrWorkflowToolBefore(
 		state =
 			(await ensurePublicationGenerationCurrent(directory, sessionID)) ?? state;
 	}
-	const normalizedTool = toolName.toLowerCase();
 	const isDirectAgentTask =
 		normalizedTool === 'task' || normalizedTool === 'run_agent';
 	const requestedAgentFields = (['subagent_type', 'agent'] as const).filter(
@@ -13062,11 +14276,22 @@ export async function enforcePrWorkflowToolBefore(
 		/\bgit\b(?:(?![;&|]).){0,200}\bcommit\b/i.test(command);
 	const isStandaloneGitCommitShell =
 		containsGitCommitShell && isSafeStandaloneGitCommit(command);
+	const isStandaloneGitAddShell =
+		isShellCommandRequiringVerification && isSafeStandaloneGitAdd(command);
 	const isPublicationShell =
 		isShellCommandRequiringVerification &&
 		(/\bgit\b(?:(?![;&|]).){0,200}\bpush\b/i.test(command) ||
 			/\bgh\s+(?:api|pr|issue|run)\b/i.test(command));
-	const isPublicationTool = !isInternalWorkflowTool && isRemoteMutationTool;
+	// Issue #3315 D2: a trusted-observe capability outranks the publication NAME
+	// heuristic in every state. `pr_workflow_status`, `git_blame` and `gitingest`
+	// carry observe metadata, and the gate's own BLOCKED text prescribes
+	// `pr_workflow_status` for exactly these unarmed states. Validate-capability
+	// tools are NEVER exempted (they execute); `isNamedReadOnlyTool` is not the
+	// key for the same reason.
+	const isTrustedObserveTool =
+		trustedCapability === 'observe' && isTrustedWorkflowTool;
+	const isPublicationTool =
+		!isInternalWorkflowTool && !isTrustedObserveTool && isRemoteMutationTool;
 	const isCoderTask =
 		isDirectAgentTask &&
 		requestedRoles.length > 0 &&
@@ -13080,6 +14305,31 @@ export async function enforcePrWorkflowToolBefore(
 			? ` ${describeBlockedPrReviewShellCommand(command, shellPermissionEnvelope)}`
 			: '';
 	if (state.mode === 'PR_REVIEW') {
+		// Issue #3315 E1 (FB-16/PRR-020 scoped to the BOUND state per AC21):
+		// test_runner executes test suites in the working directory, so inside
+		// a bound PR_REVIEW checkout it would dirty the exact-PR-head tree with
+		// untracked outputs (snapshot files, fixtures) and wedge
+		// dispatch/completion on the clean-tree checks. Refuse it at admission;
+		// validation runs through dispatch_lanes_async lanes or PR_FEEDBACK
+		// Stage A, which executes the repository's own scripts. (The refusal
+		// fires for lane children too: their calls resolve to the gate-owning
+		// session here. FB-20/PRR-010: lane tool grants are set by the agent
+		// config allowlist, not by a lane overlay — the gate is the refusing
+		// layer.)
+		if (normalizedTool === 'test_runner' && state.prHeadSha) {
+			throw new Error(
+				'BLOCKED: PR_REVIEW test_runner would execute inside the bound checkout at the exact PR head and its outputs (snapshot files, fixtures) would dirty the tree; run validation through dispatch_lanes_async lanes or PR_FEEDBACK Stage A',
+			);
+		}
+		// Issue #3315 E3: the two recovery swarm commands stay reachable in
+		// PR_REVIEW — `diagnose` is read-only diagnostics and `guardrail reset`
+		// clears session-scoped circuit state, never workflow state.
+		if (
+			normalizedTool === 'swarm_command' &&
+			isPrWorkflowRecoverySwarmCommandArgs(args)
+		) {
+			return;
+		}
 		let hasAuthorizedDirectReentry = false;
 		if (
 			isDirectAgentTask &&
@@ -13125,6 +14375,14 @@ export async function enforcePrWorkflowToolBefore(
 		throw new Error(
 			'BLOCKED: PR_FEEDBACK reviewer, test, critic, explorer, and unknown agent lanes require structured dispatch_lanes_async provenance',
 		);
+	}
+	// Issue #3315 E3: same two recovery commands as PR_REVIEW (see the
+	// PR_REVIEW branch for the rationale).
+	if (
+		normalizedTool === 'swarm_command' &&
+		isPrWorkflowRecoverySwarmCommandArgs(args)
+	) {
+		return;
 	}
 	if (
 		!isInternalWorkflowTool &&
@@ -13185,10 +14443,17 @@ export async function enforcePrWorkflowToolBefore(
 		if (
 			(normalizedTool === 'bash' || normalizedTool === 'shell') &&
 			command.length > 0 &&
+			// Issue #3316 (D7b): the exact bound tracking fetch stays available
+			// in the armed window (mirroring the non-armed envelope above) so
+			// the operator can re-sync the bound ref without leaving the armed
+			// state. Every other fetch form still falls to the push-only refusal.
 			isAllowedPrWorkflowReadOnlyShell(command, {
 				allowCheckout: false,
 				allowFetch: false,
-				allowTrackingFetch: false,
+				allowTrackingFetch: Boolean(state.prHeadSha),
+				trackingFetchTarget: state.prHeadSha
+					? await _test_exports.resolveCurrentUpstreamPushTargetAsync(directory)
+					: null,
 			})
 		)
 			return;
@@ -13234,8 +14499,121 @@ export async function enforcePrWorkflowToolBefore(
 	}
 	if (!state.prHeadSha && isCanonicalReviewCheckout) return;
 	if (isStandaloneGitCommitShell) {
+		// Issue #3315 D8/AC25: `git commit -F <path>` is admitted by the
+		// classifier only when the message file resolves OUTSIDE the
+		// repository — an in-repo message file is an untracked file that
+		// breaks the clean-tree arming check. Author the file with the
+		// prepare_pr_feedback_commit_message controller tool. Containment is
+		// measured against the git TOPLEVEL (FB-13/F-R50: the clean check is
+		// repo-wide even when the gate directory is a subdirectory of the
+		// repository); an unresolvable toplevel falls back to the gate
+		// directory (fail-closed for the in-repo direction is preserved
+		// because the lexical check still runs on `directory`).
+		const messageFile = extractStandaloneGitCommitMessageFile(command);
+		if (messageFile !== null) {
+			const cwdBase = resolveStandaloneGitCommandCwd(command, directory);
+			const resolvedFile = path.resolve(cwdBase, messageFile);
+			const containmentRoot =
+				await _test_exports.resolveRepoTopLevelAsync(directory);
+			if (
+				isPathInsideRepository(resolvedFile, directory) ||
+				(containmentRoot !== null &&
+					isPathInsideRepository(resolvedFile, containmentRoot))
+			) {
+				throw new Error(
+					`BLOCKED: PR_FEEDBACK commit -F message file "${messageFile}" resolves inside the repository; an in-repo message file would dirty the clean-tree arming check. The message file must live outside the repository; author it with the prepare_pr_feedback_commit_message tool and pass the returned path`,
+				);
+			}
+		}
 		await assertPrFeedbackReadyToPublish(directory, sessionID);
 		return;
+	}
+	if (
+		isShellCommandRequiringVerification &&
+		isSanctionedSoftResetToHead(command, state.prHeadSha)
+	) {
+		// Issue #3316 (D6): one sanctioned `git reset --soft <intake head>` so
+		// an invalidated generation can return HEAD to the immutable intake
+		// head and the mechanical ladder can restart (verification dispatch and
+		// Stage A both require HEAD == intake). Five fail-closed conditions;
+		// every other reset form falls through to the existing fail-closed
+		// refusal with its byte-identical message.
+		const currentHead = await _test_exports
+			.resolveCurrentGitHeadAsync(directory)
+			.catch(() => undefined);
+		const activeGeneration = state.prFeedbackPublication?.active;
+		if (
+			activeGeneration?.state === 'invalidated' &&
+			!state.prFeedbackReadyToPublish &&
+			currentHead &&
+			currentHead.trim().toLowerCase() !== state.prHeadSha!.toLowerCase() &&
+			currentHead.trim().length > 0 &&
+			(await _test_exports.resolveIsExactSingleChildCommitAsync(
+				directory,
+				state.prHeadSha!,
+				currentHead.trim(),
+			)) === true
+		) {
+			try {
+				appendPublicationEvent(directory, {
+					type: 'pr_feedback_publication_reset_soft',
+					sessionID: state.sessionID,
+					generation: activeGeneration.generation,
+					intakeHead: state.prHeadSha,
+					localHead: currentHead.trim(),
+				});
+			} catch {
+				// Non-fatal audit trail.
+			}
+			return;
+		}
+	}
+	if (isStandaloneGitAddShell) {
+		// Issue #3315 D3: the one sanctioned staging surface. Only an exact
+		// `git add -- <paths>` shape whose every path sits inside the
+		// current changed-path set (the set the revision digest hashes) is
+		// admitted, under the same ladder precondition as the approved
+		// commit. Every other form — flags, globs, pathspec magic,
+		// out-of-set paths — falls through to the fail-closed refusal
+		// below, whose message stays byte-identical. Matching is EXACT
+		// first, then case/separator-folded ONLY when that fold is
+		// unambiguous (exactly one set member) — a case-insensitive
+		// filesystem stays usable while a POSIX pair of case-variant files
+		// can never admit the wrong one (FB-13/PRR-014).
+		const stagedPaths = extractStandaloneGitAddPaths(command);
+		const changedPaths = state.prHeadSha
+			? await _test_exports.resolvePrWorkflowChangedPathSetAsync(
+					directory,
+					state.prHeadSha,
+				)
+			: null;
+		const foldToken = (token: string): string =>
+			token.replace(/\\/g, '/').replace(/^\.\//, '');
+		const tokenAdmitted = (token: string): boolean => {
+			if (changedPaths === null) return false;
+			const folded = foldToken(token);
+			// Exact separator/./-normalized match (case preserved) admits
+			// directly. Otherwise a case-folded match admits ONLY when it is
+			// unambiguous — a POSIX pair of case-variant files can never
+			// admit the wrong one (FB-13/PRR-014).
+			if (changedPaths.has(folded)) return true;
+			let foldedMatches = 0;
+			for (const member of changedPaths) {
+				if (member.toLowerCase() === folded.toLowerCase()) {
+					foldedMatches += 1;
+					if (foldedMatches > 1) return false;
+				}
+			}
+			return foldedMatches === 1;
+		};
+		if (
+			changedPaths !== null &&
+			stagedPaths.length > 0 &&
+			stagedPaths.every(tokenAdmitted)
+		) {
+			await assertPrFeedbackReadyToPublish(directory, sessionID);
+			return;
+		}
 	}
 	if (isPublicationShell || isPublicationTool) {
 		throw new Error(
@@ -13267,6 +14645,32 @@ export async function enforcePrWorkflowToolBefore(
 	// the armed-state refusal, so letting it past the verification gate here
 	// does not weaken publication safety.
 	if (normalizedTool === 'abort_pr_workflow') return;
+	// Issue #3315 D1/D2: read-only observation and the base-sync rebind must
+	// be reachable from a bound-but-unverified PR_FEEDBACK state, exactly like
+	// abort_pr_workflow above. Observation publishes nothing; the rebind itself
+	// invalidates every ancestry-bound receipt and publishes nothing, so
+	// neither weakens the verification ladder the way an early write would.
+	// Scope: ONLY rebind joins abort's carve-out — every other controller tool
+	// keeps the verification-settled requirement.
+	if (normalizedTool === 'rebind_pr_feedback_head' || isTrustedObserveTool)
+		return;
+	// Issue #3316 (D5): direct writes INSIDE a consumed scope's file list stay
+	// admitted after the digest moves — the scope declaration (bound head +
+	// immutable inventory + consumed file list) is the authority, not the
+	// moving dirty-tree digest. Everything else still requires settled
+	// verification at the current digest (Stage A, ordered gates and arming
+	// keep their own digest bindings).
+	if (
+		isDirectWrite &&
+		(await prFeedbackConsumedScopeAuthorizesWrite(
+			directory,
+			sessionID,
+			normalizedTool,
+			args ?? {},
+		))
+	) {
+		return;
+	}
 	await assertPrFeedbackVerificationSettled(directory, sessionID);
 }
 
@@ -13377,6 +14781,290 @@ export async function reserveActivePrReviewReentryAuthorization(
 // back. Function declarations hoist, so the reference is available here.
 bindPrReviewReentryBindingReader(readPrReviewReentryBindingContext);
 
+/**
+ * Issue #3312 (U1): one skipped-phase entry in the INCOMPLETE bypass's durable
+ * validation-skip disclosure. `unsettledItemIds` is bounded by
+ * {@link MAX_SKIP_DISCLOSURE_UNSETTLED_ITEM_IDS} with a final `+N more`
+ * marker when truncated.
+ */
+interface PrReviewValidationSkipPhaseEntry {
+	phase: 'reviewer' | 'critic' | 'council';
+	reason: string;
+	unsettledItemIds: string[];
+}
+
+/**
+ * Issue #3312 (U1): the durable shape of
+ * `.swarm/pr-review/<runId>/validation-skip-disclosure.json` and of the
+ * `prReviewValidationSkipDisclosure` gate-state mirror. Structurally identical
+ * to the `PrReviewCompletionState` mirror fields in `src/pr-review/completion.ts`
+ * (the state schema is `.passthrough()`, so the fields survive persistence).
+ */
+interface PrReviewValidationSkipDisclosureRecord {
+	schemaVersion: number;
+	runId: string;
+	prHeadSha: string;
+	revisionDigest: string;
+	createdAt: string;
+	coverageKind: 'COMPLETE' | 'PARTIAL';
+	reportVerdict: 'INCOMPLETE';
+	/** Feedback F6: set when the byte-degrade loop cut any phase's id list. */
+	truncated?: boolean;
+	skippedPhases: PrReviewValidationSkipPhaseEntry[];
+}
+
+/** Bounded-discipline cap for disclosed unsettled item ids (mirrors the
+ * `MAX_LANE_LIVENESS_DISCLOSED_IDS` discipline applied to the skip record). */
+const MAX_SKIP_DISCLOSURE_UNSETTLED_ITEM_IDS = 25;
+
+/** Issue #3312 (U1): write bound for the validation-skip disclosure artifact
+ * (same 4 KiB discipline as the coverage disclosure in completion.ts). */
+const PR_REVIEW_VALIDATION_SKIP_DISCLOSURE_MAX_BYTES = 4_096;
+
+/** The pinned skip reason recorded for every skipped phase. */
+const PR_REVIEW_VALIDATION_SKIP_REASON =
+	'unsettled validation phase at INCOMPLETE completion';
+
+function boundSkipDisclosureItemIds(
+	ids: readonly string[],
+	cap: number = MAX_SKIP_DISCLOSURE_UNSETTLED_ITEM_IDS,
+): string[] {
+	const bounded = ids.slice(0, cap);
+	const overflow = ids.length - bounded.length;
+	return overflow > 0 ? [...bounded, `+${overflow} more`] : [...bounded];
+}
+
+/**
+ * Feedback F6: raw (unbounded) unsettled item ids for one phase of a probe
+ * pass, so the disclosure byte-degrade loop can re-bound the SAME ids at a
+ * smaller cap instead of re-deriving the probe mid-write.
+ */
+function probePhaseIdsById(
+	probes: readonly IncompleteBypassPhaseProbe[],
+	phase: 'reviewer' | 'critic' | 'council',
+): string[] {
+	return probes.find((probe) => probe.phase === phase)?.unsettledItemIds ?? [];
+}
+
+/**
+ * Issue #3312 (U1): read-only per-phase settlement probe backing the INCOMPLETE
+ * bypass arm. A phase is SETTLED when composition claims its whole inventory;
+ * when items are unclaimed, the same N-of-M admissibility derivation
+ * `assertPrReviewValidationSettled` uses decides between `admissible` (the
+ * phase would settle through the ladder's admission path — the arm persists
+ * its receipt exactly as the ladder would) and genuinely `unsettled` (the only
+ * kind of phase the bypass skips). The probe itself NEVER persists anything,
+ * so a fully-settled run keeps byte-identical ladder behavior.
+ */
+type IncompleteBypassPhaseProbe = {
+	phase: 'reviewer' | 'critic' | 'council';
+	settled: boolean;
+	admissible: boolean;
+	unsettledItemIds: string[];
+	/**
+	 * Feedback AUTO-M1/F-7: overrides the pinned skip reason for this phase —
+	 * set when the phase cannot even be probed (e.g. the critic inventory is
+	 * underivable), so the disclosure names WHY instead of the generic
+	 * unsettled-phase reason.
+	 */
+	skipReason?: string;
+};
+
+function probeIncompleteBypassComposablePhase(
+	directory: string,
+	state: PrWorkflowGateState,
+	ctx: PrReviewGateContext,
+	phase: 'reviewer' | 'critic',
+	window: ReturnType<typeof prReviewPhaseWindow>,
+): IncompleteBypassPhaseProbe {
+	let composed: PrReviewPhaseComposition | null = null;
+	try {
+		composed = composePrReviewPhaseVerdicts(directory, state, phase, ctx);
+	} catch {
+		// Composition itself failed (missing artifact/provenance): the phase
+		// cannot be settled, and the ladder would surface the same error for
+		// non-INCOMPLETE verdicts. Disclose it as unsettled over its declared
+		// ownership instead of blocking the INCOMPLETE exit.
+		composed = null;
+	}
+	if (composed && composed.unclaimed.length === 0) {
+		return { phase, settled: true, admissible: false, unsettledItemIds: [] };
+	}
+	const unsettledItemIds = composed?.unclaimed ?? [
+		...new Set(
+			window.flatMap((batch) =>
+				batch.lanes.flatMap((lane) => lane.reviewItemIds ?? []),
+			),
+		),
+	];
+	// Feedback F-003: mirror the ladder's #3358 AC4 guard FIRST — before the
+	// receipt shortcut below. The terminal-ready ladder throws for an
+	// UNCLAIMED item whose lane answered with a row written under earlier
+	// verdict semantics BEFORE it derives N-of-M admission — those rows are
+	// never re-admitted and never settled as typed-dead. A durable
+	// N-of-M receipt covering such an item must NOT flip the probe to
+	// settled: the ladder itself has no receipt reference before the guard,
+	// so a receipt-covered mismatched item would re-wedge completion with no
+	// INCOMPLETE exit (re-gate Finding 1). Report the phase genuinely
+	// unsettled so the bypass discloses the items as skipped — they are
+	// still never settled, which is exactly what AC3/AC4 require.
+	if (composed && composed.semanticsMismatchedItemIds.length > 0) {
+		const unclaimedSet = new Set(composed.unclaimed);
+		if (
+			composed.semanticsMismatchedItemIds.some((itemId) =>
+				unclaimedSet.has(itemId),
+			)
+		) {
+			return { phase, settled: false, admissible: false, unsettledItemIds };
+		}
+	}
+	// Feedback F-7 tail: a phase whose ADMITTED N-of-M verdict-settlement
+	// receipt (anchored on state via prReviewVerdictSettlementDigests) covers
+	// every currently-unclaimed item is SETTLED — composition keeps reporting
+	// those items unclaimed forever, so consult the receipt before deciding
+	// the phase needs admission or disclosure. This is what makes a re-probe
+	// after the admissible loop see a just-persisted receipt as settled.
+	if (
+		composed &&
+		settlementCoveringAllUnclaimed(
+			directory,
+			state,
+			phase,
+			composed.unclaimed,
+			ctx.revisionDigest,
+		)
+	) {
+		return { phase, settled: true, admissible: false, unsettledItemIds: [] };
+	}
+	if (composed && state.prHeadSha) {
+		const admission = deriveVerdictSettlementAdmission({
+			directory,
+			prHeadSha: state.prHeadSha,
+			phase,
+			window,
+			unclaimed: composed.unclaimed,
+			parentSessionId: state.sessionID,
+		});
+		if (admission.admitted) {
+			return { phase, settled: false, admissible: true, unsettledItemIds };
+		}
+	}
+	return { phase, settled: false, admissible: false, unsettledItemIds };
+}
+
+/**
+ * Issue #3312 (U1): probe every validation phase the terminal-ready ladder
+ * would settle — council only when a council batch is declared, reviewer
+ * always (declared-required), critic only when a critic inventory exists over
+ * the reviewer verdicts (the ladder's `criticInventory.length > 0` condition;
+ * the inventory is derived only once the reviewer phase is settled or
+ * N-of-M-admissible, because critic coverage is defined over surviving
+ * reviewer claims — the ladder's coverage-gate wrapper throws on an unsettled
+ * reviewer phase precisely to avoid silently skipping critic coverage, while
+ * this arm discloses the unsettled reviewer phase instead).
+ */
+function probeIncompleteBypassValidationPhases(
+	directory: string,
+	state: PrWorkflowGateState,
+	ctx: PrReviewGateContext,
+): IncompleteBypassPhaseProbe[] {
+	const probes: IncompleteBypassPhaseProbe[] = [];
+	const validationBatches = state.prReviewValidationBatches ?? [];
+	if (validationBatches.some((batch) => batch.phase === 'council')) {
+		// Council has no N-of-M admission route: its obligations need successful
+		// exact artifacts (same derivation the settlement assert uses).
+		const councilBatches = validationBatches.filter(
+			(batch) => batch.phase === 'council',
+		);
+		const settledObligations = new Set<string>();
+		for (const batch of councilBatches) {
+			for (const obligation of successfulObligationsFromExactBatch(
+				directory,
+				state,
+				batch.batchId,
+				batch.lanes,
+				'swarm-pr-review:council',
+				batch.validatedAt,
+				true,
+				new Set(),
+				ctx.revisionDigest,
+			)) {
+				settledObligations.add(obligation);
+			}
+		}
+		const missing = [
+			...new Set(
+				councilBatches.flatMap((batch) =>
+					batch.lanes.map((lane) => lane.workflowLane),
+				),
+			),
+		].filter((obligation) => !settledObligations.has(obligation));
+		probes.push({
+			phase: 'council',
+			settled: missing.length === 0,
+			admissible: false,
+			unsettledItemIds: missing,
+		});
+	}
+	const reviewerProbe = probeIncompleteBypassComposablePhase(
+		directory,
+		state,
+		ctx,
+		'reviewer',
+		prReviewPhaseWindow(state, 'reviewer'),
+	);
+	probes.push(reviewerProbe);
+	if (reviewerProbe.settled || reviewerProbe.admissible) {
+		let criticInventory: string[] = [];
+		try {
+			// The pure derivation (docblock: usable on unsettled states) — the
+			// coverage-gate wrapper's settled-reviewer invariant is the ladder's
+			// silent-skip defense, which this arm replaces with an explicit
+			// disclosure of the unsettled phase.
+			criticInventory = derivePrReviewCriticInventory(directory, state, ctx);
+		} catch (error) {
+			// Feedback AUTO-M1/F-7: an underivable critic inventory used to read as
+			// "empty inventory" and silently DROP the critic phase from the probe,
+			// hiding it from the skip disclosure entirely. Disclose the critic
+			// phase as unsettled with the bounded derivation error as its skip
+			// reason instead; the unsettled ids degrade to the declared critic
+			// batches' item ids when present, else an empty list (the reason
+			// carries the failure). The arm then names the critic phase as
+			// skipped — never a silent no-critic-coverage claim.
+			probes.push({
+				phase: 'critic',
+				settled: false,
+				admissible: false,
+				skipReason: `critic inventory underivable: ${boundSalvagedSchemaError(
+					error instanceof Error ? error.message : String(error),
+				)}`,
+				unsettledItemIds: [
+					...new Set(
+						(state.prReviewValidationBatches ?? [])
+							.filter((batch) => batch.phase === 'critic')
+							.flatMap((batch) =>
+								batch.lanes.flatMap((lane) => lane.reviewItemIds ?? []),
+							),
+					),
+				],
+			});
+			return probes;
+		}
+		if (criticInventory.length > 0) {
+			probes.push(
+				probeIncompleteBypassComposablePhase(
+					directory,
+					state,
+					ctx,
+					'critic',
+					prReviewPhaseWindow(state, 'critic'),
+				),
+			);
+		}
+	}
+	return probes;
+}
+
 export async function completePrWorkflow(
 	directory: string,
 	sessionID: string,
@@ -13418,6 +15106,7 @@ export async function completePrWorkflow(
 	// mid-completion, bumping the durable revision; the terminal clear must
 	// CAS against that post-admission revision. Undefined otherwise.
 	let terminalClearRevision: number | undefined;
+	let releaseApproval: PrWorkflowGateState | undefined;
 	if (expectedMode === 'PR_REVIEW') {
 		// Issue #2383: the controller must declare its terminal verdict and the
 		// gate validates it against the settlement-derived coverage kind, so a
@@ -13525,6 +15214,23 @@ export async function completePrWorkflow(
 		// every blocked attempt either leads to a re-dispatch (consuming
 		// budget) or to an explicit operator-confirmed abandonment.
 		if (settlement.kind === 'PARTIAL' || settlement.kind === 'NO_COVERAGE') {
+			// Issue #3312 (U2/AC13): dimensions whose (dimension, terminalState,
+			// failureClass) tuple is covered by the ADMITTED coverage disclosure
+			// were already disclosed to the operator — the retry-first refusal
+			// must not re-demand them (that re-demand was the F-class wedge that
+			// kept a truthfully disclosed run uncompletable). An absent
+			// disclosure reads as null → no exclusion (load-bearing for the
+			// undisclosed-dimension refusal below, which keeps firing).
+			const admittedCoverageDisclosure = await readAndVerifyCoverageDisclosure(
+				directory,
+				state,
+			);
+			const disclosedTuples = new Set(
+				(admittedCoverageDisclosure?.unresolvedDimensions ?? []).map(
+					(entry) =>
+						`${entry.dimension} ${entry.terminalState} ${entry.failureClass ?? ''}`,
+				),
+			);
 			const stagedPolicyEnabled =
 				state.prReviewResilience?.policy?.enabled === true;
 			const consumedLegacyContractRetry = new Set(
@@ -13537,6 +15243,16 @@ export async function completePrWorkflow(
 			const retryableRemainder = settlement.unresolvedDimensions.filter(
 				(entry) => {
 					if (entry.failureClass === 'operator_cancelled') return false;
+					if (
+						disclosedTuples.has(
+							`${entry.dimension} ${entry.terminalState} ${entry.failureClass ?? ''}`,
+						)
+					) {
+						// Covered by the admitted disclosure — see the U2/AC13
+						// comment above. The staged/legacy budget predicates below
+						// are otherwise untouched.
+						return false;
+					}
 					if (stagedPolicyEnabled) {
 						return (
 							entry.failureClass === 'contract' ||
@@ -13575,11 +15291,31 @@ export async function completePrWorkflow(
 					// operator-visible receipt and must still fire.
 				}
 				throw new Error(
-					`BLOCKED: PR_REVIEW ${settlement.kind} completion refused while eligible retryable work remains and retry budget is available. Remaining dimensions: ${retryableRemainder.map((entry) => `${entry.dimension} (${entry.failureClass})`).join(', ')}. Retry budget: ${attemptsUsed}/${maxAttempts} attempts used${stagedPolicyEnabled ? ' (staged policy)' : ' (legacy single contract retry)'} — re-dispatch the dimension(s) via dispatch_lanes_async to consume the retry budget, or end the workflow through the human force path (/swarm abort-pr-workflow). If lanes are still live at an earlier stage, settle them explicitly first — cancel_lane_batch (confirm: true + reason) refuses busy/retry lanes, so live work is never destroyed on the model path.`,
+					`BLOCKED: PR_REVIEW ${settlement.kind} completion refused while eligible retryable work remains and retry budget is available. Remaining dimensions: ${retryableRemainder.map((entry) => `${entry.dimension} (${entry.failureClass})`).join(', ')}. Retry budget: ${attemptsUsed}/${maxAttempts} attempts used${stagedPolicyEnabled ? ' (staged policy)' : ' (legacy single contract retry)'} — re-dispatch the dimension(s) via dispatch_lanes_async to consume the retry budget, or end the workflow through the human force path (/swarm abort-pr-workflow). If lanes are still live at an earlier stage, settle them explicitly first — cancel_lane_batch (confirm: true + reason) refuses busy/retry lanes, and with the watchdog now default-on (#3313) a busy lane past the 30-minute deadline is settled by the watchdog rather than destroyed, but live work is still never destroyed on the model path.`,
 				);
 			}
 		}
 		dispatchCoverageFinalization(settlement);
+		// Issue #3312 (U1): the honest INCOMPLETE bypass probe. Read-only per-
+		// phase settlement probe (see probeIncompleteBypassValidationPhases) —
+		// computed only for an INCOMPLETE verdict over COMPLETE/PARTIAL
+		// coverage, so APPROVE/REQUEST_CHANGES and NO_COVERAGE completions are
+		// untouched. A run whose every phase settles (directly or through the
+		// N-of-M admission the ladder itself would run) leaves this null-or-
+		// fully-settled and falls through to the unchanged ladder below.
+		let incompleteBypass: {
+			coverageKind: 'COMPLETE' | 'PARTIAL';
+			phases: IncompleteBypassPhaseProbe[];
+		} | null = null;
+		if (
+			verdict === 'INCOMPLETE' &&
+			(settlement.kind === 'COMPLETE' || settlement.kind === 'PARTIAL')
+		) {
+			incompleteBypass = {
+				coverageKind: settlement.kind,
+				phases: probeIncompleteBypassValidationPhases(directory, state, ctx),
+			};
+		}
 		if (settlement.kind === 'NO_COVERAGE') {
 			// NO_COVERAGE settles at completion (issue #2383): zero covered
 			// dimensions means no candidate inventory, no findings ladder, and
@@ -13595,6 +15331,7 @@ export async function completePrWorkflow(
 			// audit line. A run with zero artifacts may have no reserved run
 			// id, so one is generated in that case.
 			const noCoverageRunId =
+				state.prReviewPartialBaseCoverage?.runId ??
 				state.prReviewArtifactRunId ??
 				state.prReviewReservedRunId ??
 				generatePrReviewRunId();
@@ -13606,10 +15343,12 @@ export async function completePrWorkflow(
 			);
 			// The admission bumped the durable revision; the terminal clear below
 			// must CAS against the post-admission revision. If that clear itself
-			// fails, the gate keeps the admitted (immutable) disclosure and a
-			// retry re-admission throws — a deliberate fail-closed wedge; the
-			// operator re-reads state and recovers via armed recovery rather
-			// than silently re-crediting a zero-coverage settlement.
+			// fails, the gate keeps the admitted disclosure and the run-id chain
+			// above prefers its run id (issue #3312 AC14), so a retry re-admits
+			// through the idempotent byte-identical replay path instead of minting
+			// a fresh id and colliding with the existing disclosure. A same-tuple
+			// change still routes through the audited supersession arm; a
+			// different disclosure keeps being refused there.
 			terminalClearRevision = admittedState.revision;
 			try {
 				appendCoreEventSync(directory, {
@@ -13629,6 +15368,287 @@ export async function completePrWorkflow(
 				// Non-fatal audit trail (same discipline as abort).
 			}
 			// Fall through to the shared terminal clear below.
+		} else if (
+			incompleteBypass?.phases.some(
+				(probe) => !probe.settled && !probe.admissible,
+			)
+		) {
+			// Issue #3312 (U1): the honest INCOMPLETE bypass arm. The settlement
+			// is COMPLETE or PARTIAL (head-bound above, every launched lane
+			// terminal, coverage disclosed) but at least one declared validation
+			// phase cannot settle; instead of wedging the completion on the
+			// terminal-ready ladder's settlement assertions, complete with the
+			// pinned INCOMPLETE verdict and a durable skip disclosure naming
+			// the skipped phases and their unsettled item ids. APPROVE and
+			// REQUEST_CHANGES never enter this arm (the verdict is fixed
+			// INCOMPLETE by the probe guard); the head-binding and
+			// lane-settlement checks above already ran (AC6/AC7 floors).
+			// (a) AC21 floor: base coverage (and the PARTIAL disclosure
+			// requirement) must still settle — the arm discloses unsettled
+			// PHASES, never unsettled coverage.
+			await assertPrReviewBaseCoverageSettled(directory, sessionID, ctx);
+			// Feedback F-6: mirror the ladder's trigger-eval presence floor
+			// (assertPrReviewTerminalReady's check): without a persisted trigger
+			// evaluation artifact, the coverage kind this run discloses rests on
+			// nothing — the bypass must not complete a run the ladder itself
+			// would refuse for a missing trigger evaluation.
+			if (!state.prReviewTriggerEvalPath) {
+				throw new Error(
+					'BLOCKED: PR_REVIEW INCOMPLETE completion requires a persisted trigger evaluation artifact; the coverage this run discloses rests on nothing without it',
+				);
+			}
+			// Admissible-but-unclaimed phases settle through the exact N-of-M
+			// admission the ladder would run — persist their receipts here so
+			// settled-phase behavior is identical on the bypass path. A
+			// throwing assert (e.g. a concurrent mutation) demotes the phase to
+			// a disclosed skip rather than blocking the INCOMPLETE exit.
+			// `assertPrReviewValidationSettled` returns the state WITH the
+			// persisted receipt's anchor digest (prReviewVerdictSettlementDigests);
+			// the re-probe below must consume THAT state or it cannot see the
+			// just-persisted receipt as settlement.
+			let stateAfterAdmission = state;
+			for (const probe of incompleteBypass.phases) {
+				if (probe.settled || !probe.admissible) continue;
+				try {
+					stateAfterAdmission = await assertPrReviewValidationSettled(
+						directory,
+						sessionID,
+						probe.phase,
+						ctx,
+					);
+				} catch {
+					// The re-probe below decides whether the phase still shows
+					// unsettled and must be disclosed as skipped.
+				}
+			}
+			// Feedback F-7 tail: RE-DERIVE the probe AFTER the admissible loop.
+			// A phase whose receipt just persisted (and anchored on the returned
+			// state) now reads as settled through the receipt-aware probe, so it
+			// must NOT be listed as skipped; a phase that is still unsettled (or
+			// whose admission assert threw) stays disclosed. Building
+			// skippedPhases from this fresh pass is what keeps the disclosure
+			// truthful about what the completed run actually skipped.
+			const reprobedPhases = probeIncompleteBypassValidationPhases(
+				directory,
+				stateAfterAdmission,
+				ctx,
+			);
+			const skippedPhases: PrReviewValidationSkipPhaseEntry[] = [];
+			for (const probe of reprobedPhases) {
+				if (probe.settled) continue;
+				skippedPhases.push({
+					phase: probe.phase,
+					reason: probe.skipReason ?? PR_REVIEW_VALIDATION_SKIP_REASON,
+					unsettledItemIds: boundSkipDisclosureItemIds(probe.unsettledItemIds),
+				});
+			}
+			// (c) Run id: prefer the persisted skip disclosure (a retry after a
+			// failed terminal clear re-derives and overwrites the artifact
+			// idempotently under the same run id — the run-id-reuse discipline
+			// U3 gives the NO_COVERAGE arm), then the artifact/reserved ids,
+			// then the trigger-eval binding (a COMPLETE run may carry no
+			// artifact or reserved id), else generate one.
+			const skipRunId = PrReviewRunIdSchema.parse(
+				state.prReviewValidationSkipDisclosure?.runId ??
+					state.prReviewArtifactRunId ??
+					state.prReviewReservedRunId ??
+					state.prReviewTriggerEvalRunId ??
+					generatePrReviewRunId(),
+			);
+			const skipRelativePath = path
+				.join('pr-review', skipRunId, 'validation-skip-disclosure.json')
+				.split(path.sep)
+				.join('/');
+			// (d)+(e)+(f): persist the durable artifact, then the gate-state
+			// mirror fields, rolling the artifact back when the state write
+			// fails — mirroring the admission's removeNewDisclosure discipline
+			// (no orphan artifact). The write runs under the session mutation
+			// lock with a fresh disk read, so admissible-phase receipt persists
+			// above are folded into the CAS baseline.
+			const disclosedState = await withSessionStateMutation(
+				directory,
+				normalizeSessionID(sessionID),
+				async () => {
+					const fresh = await readPrWorkflowGateStateFromDisk(
+						directory,
+						sessionID,
+					);
+					if (!fresh || fresh.mode !== 'PR_REVIEW') {
+						throw new Error(
+							'BLOCKED: PR_REVIEW validation skip disclosure requires the active head-bound gate state',
+						);
+					}
+					// Feedback AUTO-H1/F-5: bind the disclosure to the SAME
+					// workflow identity the probe ran under. The probe and the
+					// record fields below were derived from `state`; if the run
+					// identity changed underneath (rebind/restart) the fresh
+					// read disagrees and the disclosure would pin stale
+					// prHeadSha/revisionDigest onto a new run — refuse and let
+					// the retry re-probe from the current state.
+					if (workflowIdentity(fresh) !== workflowIdentity(state)) {
+						throw new Error(
+							'BLOCKED: PR_REVIEW state changed while writing the validation skip disclosure; retry from current state',
+						);
+					}
+					const absolutePath = validateSwarmPath(directory, skipRelativePath);
+					// Feedback F14a/F-2/AUTO-H2: retain the artifact's PRIOR bytes
+					// before overwriting, so a state-write failure can restore them
+					// instead of deleting a disclosure a previous invocation
+					// legitimately admitted (a retry's rollback used to rm the
+					// preexisting artifact outright).
+					let priorArtifactBytes: string | null = null;
+					try {
+						priorArtifactBytes = await fsp.readFile(absolutePath, 'utf8');
+					} catch (error) {
+						if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+							throw error;
+						}
+						priorArtifactBytes = null;
+					}
+					let record: PrReviewValidationSkipDisclosureRecord = {
+						schemaVersion: 1,
+						runId: skipRunId,
+						prHeadSha: state.prHeadSha ?? 'unknown',
+						revisionDigest: ctx.revisionDigest,
+						createdAt: isoNow(),
+						coverageKind: incompleteBypass.coverageKind,
+						reportVerdict: 'INCOMPLETE',
+						skippedPhases,
+					};
+					// Feedback F6: byte-degrade the id lists instead of throwing at
+					// the first overflow. Re-build the phases with progressively
+					// fewer disclosed ids per phase (each step keeps the '+N more'
+					// marker, so the cut is visible), re-serializing until the
+					// record fits; ONLY a record that still exceeds the bound at the
+					// minimal cap of 3 throws (unreachable with the 160-char item-id
+					// schema cap — 3 ids x 2 phases stays far under the bound). Any
+					// phase whose list was cut is flagged `truncated: true`.
+					let raw = JSON.stringify(record, null, 2);
+					if (
+						Buffer.byteLength(raw, 'utf8') >
+						PR_REVIEW_VALIDATION_SKIP_DISCLOSURE_MAX_BYTES
+					) {
+						for (const cap of [12, 6, 3] as const) {
+							const degradedPhases = skippedPhases.map((entry) => ({
+								...entry,
+								unsettledItemIds: boundSkipDisclosureItemIds(
+									probePhaseIdsById(reprobedPhases, entry.phase),
+									cap,
+								),
+							}));
+							const anyPhaseCut = degradedPhases.some(
+								(entry, index) =>
+									entry.unsettledItemIds.length <
+									skippedPhases[index]!.unsettledItemIds.length,
+							);
+							record = {
+								...record,
+								...(anyPhaseCut ? { truncated: true } : {}),
+								skippedPhases: degradedPhases,
+							};
+							raw = JSON.stringify(record, null, 2);
+							if (
+								Buffer.byteLength(raw, 'utf8') <=
+								PR_REVIEW_VALIDATION_SKIP_DISCLOSURE_MAX_BYTES
+							) {
+								break;
+							}
+						}
+					}
+					if (
+						Buffer.byteLength(raw, 'utf8') >
+						PR_REVIEW_VALIDATION_SKIP_DISCLOSURE_MAX_BYTES
+					) {
+						throw new Error(
+							'BLOCKED: PR_REVIEW validation skip disclosure exceeds its write bound',
+						);
+					}
+					// Retry-after-failed-clear semantics: the skip disclosure is
+					// a controller-derived PROJECTION of derived state (never a
+					// lane/model assertion), so a retry re-derives and overwrites
+					// the same artifact idempotently under the same run id — no
+					// immutability guard, unlike the PARTIAL coverage disclosure
+					// which pins lane evidence.
+					await writeAtomicJson(directory, absolutePath, record);
+					const digest = createHash('sha256').update(raw, 'utf8').digest('hex');
+					// Bind the reserved run id when nothing else pinned it (e.g. a
+					// COMPLETE run whose only run identity is the trigger-eval
+					// binding): the completion report projection reads the
+					// disclosure's run binding through prReviewArtifactRunId ??
+					// prReviewReservedRunId, and one run's artifacts must share
+					// one .swarm/pr-review/<runId>/ directory.
+					const bindReservedRunId =
+						!fresh.prReviewArtifactRunId && !fresh.prReviewReservedRunId;
+					try {
+						return await writeStateWhileLocked(directory, {
+							...fresh,
+							updatedAt: isoNow(),
+							...(bindReservedRunId
+								? { prReviewReservedRunId: skipRunId }
+								: {}),
+							prReviewValidationSkipDisclosure: record,
+							prReviewValidationSkipDisclosurePath: skipRelativePath,
+							prReviewValidationSkipDisclosureDigest: digest,
+						});
+					} catch (error) {
+						// Feedback F14a/AUTO-H2: the state write failed. When THIS
+						// invocation created the artifact (no prior bytes), the old
+						// compare-and-rm rollback applies. When a PRIOR artifact
+						// existed, restore its exact bytes (mirroring
+						// restoreSupersededDisclosure in completion.ts) so the
+						// durable state — which still mirrors the prior record and
+						// digest — never points at unadmitted bytes. A restore
+						// failure must SURFACE alongside the state-write failure
+						// (independent review F-1), never be swallowed.
+						try {
+							if (priorArtifactBytes === null) {
+								if ((await fsp.readFile(absolutePath, 'utf8')) === raw) {
+									await fsp.rm(absolutePath, { force: true });
+								}
+							} else if ((await fsp.readFile(absolutePath, 'utf8')) === raw) {
+								await writeAtomicJson(
+									directory,
+									absolutePath,
+									JSON.parse(priorArtifactBytes) as unknown,
+								);
+							}
+						} catch (restoreError) {
+							throw new Error(
+								`PR_REVIEW validation skip disclosure state write failed (${error instanceof Error ? error.message : String(error)}) AND the prior artifact bytes could not be restored (${restoreError instanceof Error ? restoreError.message : String(restoreError)}); the durable state digest may point at unadmitted bytes — reconcile ${skipRelativePath} before retrying`,
+								{ cause: error },
+							);
+						}
+						throw error;
+					}
+				},
+			);
+			// (h) The disclosure write bumped the durable revision; the shared
+			// terminal clear below must CAS against the post-write revision.
+			terminalClearRevision = disclosedState.revision;
+			// (g) Non-fatal audit event naming the disclosed skip.
+			// The event reports the FULL pre-degrade skippedPhases counts while
+			// the persisted record may be byte-degraded (truncated: true) — the
+			// audit trail is authoritative for counts, the record for the
+			// bounded disclosure.
+			try {
+				appendCoreEventSync(directory, {
+					type: 'pr_review_validation_skip_disclosed',
+					timestamp: isoNow(),
+					sessionID: state.sessionID,
+					prHeadSha: state.prHeadSha,
+					revisionDigest: ctx.revisionDigest,
+					runId: skipRunId,
+					coverageKind: incompleteBypass.coverageKind,
+					skippedPhases: skippedPhases.map(
+						(entry) => `${entry.phase}: ${entry.unsettledItemIds.length} items`,
+					),
+				});
+			} catch {
+				// Non-fatal audit trail (same discipline as the NO_COVERAGE arm).
+			}
+			// (i) Fall through to the shared terminal clear below —
+			// _test_exports.beforeTerminalClear fires AFTER the disclosure
+			// write by construction.
 		} else {
 			// Fail fast on an illegal verdict BEFORE the expensive terminal
 			// ladder, then re-validate against the post-ladder settlement in
@@ -13686,6 +15706,69 @@ export async function completePrWorkflow(
 				throw new Error(
 					`BLOCKED: PR_REVIEW ${ready.settlement.kind} completion allows report_verdict ${policyAllowed.join(' | ')}; got "${verdict}". Final finding policy and coverage do not permit this report.`,
 				);
+			}
+			if (
+				readyState.releaseReview &&
+				ready.settlement.kind === 'COMPLETE' &&
+				verdict === 'APPROVE'
+			) {
+				releaseApproval = readyState;
+			}
+			// Feedback F7: the ladder path completes only with every validation
+			// phase settled through composition or N-of-M admission — the skip
+			// disclosure's condition (an unsettled phase disclosed at an
+			// INCOMPLETE exit) no longer holds. A disclosure can survive here
+			// when a bypass arm wrote it and the terminal clear failed (crash),
+			// and the phases then settled before this retry. Strip the three
+			// mirror fields and best-effort remove the artifact so no later
+			// projection reads a stale skip disclosure off a completed run; the
+			// strip bumps the durable revision, so the shared terminal clear
+			// below must CAS against the stripped state's revision.
+			if (readyState.prReviewValidationSkipDisclosure) {
+				const strippedState = await withSessionStateMutation(
+					directory,
+					normalizeSessionID(sessionID),
+					async () => {
+						const current = await readPrWorkflowGateStateFromDisk(
+							directory,
+							sessionID,
+						);
+						if (!current || current.mode !== 'PR_REVIEW') {
+							throw new Error(
+								'BLOCKED: PR_REVIEW state vanished while invalidating the stale validation skip disclosure; retry from current state',
+							);
+						}
+						if (workflowIdentity(current) !== workflowIdentity(readyState)) {
+							throw new Error(
+								'BLOCKED: PR_REVIEW state changed while invalidating the stale validation skip disclosure; retry from current state',
+							);
+						}
+						const next: typeof current = { ...current };
+						delete next.prReviewValidationSkipDisclosure;
+						delete next.prReviewValidationSkipDisclosurePath;
+						delete next.prReviewValidationSkipDisclosureDigest;
+						if (current.prReviewValidationSkipDisclosurePath) {
+							try {
+								await fsp.rm(
+									validateSwarmPath(
+										directory,
+										current.prReviewValidationSkipDisclosurePath,
+									),
+									{ force: true },
+								);
+							} catch {
+								// Best-effort artifact removal: the state strip is
+								// what every projection reads first; an orphaned
+								// artifact file with no state mirror is inert.
+							}
+						}
+						return await writeStateWhileLocked(directory, {
+							...next,
+							updatedAt: isoNow(),
+						});
+					},
+				);
+				terminalClearRevision = strippedState.revision;
 			}
 		}
 	} else {
@@ -14022,11 +16105,13 @@ export async function completePrWorkflow(
 		directory,
 		sessionID,
 		terminalClearRevision ?? state.revision,
+		{ releaseApproval },
 	);
 	return 'completed';
 }
 
 export const _test_exports = {
+	afterNativeReleaseReceiptWrite: undefined as (() => void) | undefined,
 	/**
 	 * Issue #3099 R6: `gh` availability seam. Read at ACTIVATION call time and
 	 * handed to the readiness service, so a test can pin presence or absence.
@@ -14034,6 +16119,15 @@ export const _test_exports = {
 	 * behavioural detection rather than to a null stub.
 	 */
 	resolveGhBinary,
+	// Feedback F-003: the INCOMPLETE bypass phase probe (plus its window
+	// derivation), so the semantics-mismatch × typed-dead × exhausted-budget
+	// interplay is testable without driving the whole completion ladder.
+	probeIncompleteBypassComposablePhase,
+	prReviewPhaseWindow,
+	// #3396 S1: overridable merge-base resolver for PR_FEEDBACK activation
+	// (production: ONE bounded `gh pr view` — see the production resolver
+	// above). Tests monkey-patch this seam exactly like the git resolvers.
+	resolvePrFeedbackBaseViaGh: resolvePrFeedbackBaseViaGhProduction,
 	// Issue #2601 (PRR-009): direct codec access so tests can pin the
 	// skillContractAdvisories schema cap independently of the append guard.
 	parseGateState: (data: unknown) => PrWorkflowGateStateSchema.safeParse(data),
@@ -14229,6 +16323,12 @@ export const _test_exports = {
 	resolveCommitCountSinceAsync,
 	resolveIsWorkingTreeClean,
 	resolveIsWorkingTreeCleanAsync,
+	resolveLocalRefHeadAsync,
+	resolveIsAncestorAsync,
+	fastForwardToRefAsync,
+	resolveRepoTopLevelAsync,
+	resolvePrWorkflowChangedPathSetAsync,
+	resolveWorkingTreeDirtyPathsAsync,
 	resolveIsExactSingleChildCommit,
 	resolveIsExactSingleChildCommitAsync,
 	resolvePrReviewDiffStats,
@@ -14363,6 +16463,12 @@ bindPrReviewStateCodec<PrWorkflowGateState>(
 		'prReviewSubmitRejections',
 		'prReviewVerdictRejections',
 		'skillContractAdvisories',
+		// #3396 feedback (PRR-014): the binding-mismatch marker is
+		// observability evidence written concurrently with Stage A's other
+		// state-machine transitions — durable-wins so a stale snapshot's
+		// write cannot clobber it, and appendable without advancing the
+		// durable revision.
+		'prFeedbackStageABaseMismatch',
 	],
 );
 
@@ -14464,6 +16570,7 @@ function normalizeWorkflowLanes(lanes: readonly PrWorkflowLaneSpec[]): Array<{
 	const normalized = lanes.map((lane) => {
 		const workflowLane = lane.workflowLane?.trim();
 		const laneId = lane.laneId?.trim() || workflowLane;
+		const agent = lane.agent?.trim();
 		if (!workflowLane || !laneId) {
 			throw new Error(
 				'BLOCKED: PR workflow lane validation requires every lane to have non-empty laneId and workflow_lane values',
@@ -14509,6 +16616,7 @@ function normalizeWorkflowLanes(lanes: readonly PrWorkflowLaneSpec[]): Array<{
 			workflowLane,
 			...(reviewItemIds ? { reviewItemIds } : {}),
 			...(ownedWorkflowLanes ? { ownedWorkflowLanes } : {}),
+			...(agent ? { agent } : {}),
 		};
 	});
 	assertNoDuplicates(
@@ -14607,9 +16715,14 @@ const PR_REVIEW_CONTROLLER_TOOLS = new Set([
 	'write_pr_review_trigger_eval',
 ]);
 
+/** Issue #3315 AC22: how many dirty paths a refusal names before "of N". */
+const PR_WORKFLOW_DIRTY_PATH_DISCLOSURE_LIMIT = 5;
+
 const PR_FEEDBACK_CONTROLLER_TOOLS = new Set([
 	'invalidate_pr_feedback_publication',
+	'prepare_pr_feedback_commit_message',
 	'prepare_pr_feedback_scope',
+	'rebind_pr_feedback_head',
 	'run_pr_feedback_stage_a',
 ]);
 
@@ -15362,6 +17475,304 @@ function describeShellSyntaxViolation(command: string): string | null {
 	}
 }
 
+/**
+ * Issue #3315 E3: the two diagnostic recovery commands must stay reachable for
+ * the architect while a PR workflow gate is active. Deliberately NARROWER than
+ * isAllowedRecoverySwarmCommand (guardrails/nontransient-circuit.ts), which
+ * also admits state-mutating commands (`handoff`, `full-auto …`) that PR modes
+ * keep rejecting; the `diagnosis` alias is likewise not admitted here.
+ */
+function isPrWorkflowRecoverySwarmCommandArgs(
+	args: Record<string, unknown> | undefined,
+): boolean {
+	const raw =
+		typeof args?.command === 'string'
+			? args.command
+			: typeof args?.subcommand === 'string'
+				? args.subcommand
+				: '';
+	const parts = raw.trim().toLowerCase().split(/\s+/).filter(Boolean);
+	if (parts.length === 0) return false;
+	if (parts[0] === 'diagnose') return true;
+	return parts[0] === 'guardrail' && parts[1] === 'reset';
+}
+
+/**
+ * Issue #3315 D3: the one sanctioned staging shape — `git add -- <path...>`
+ * with no flags at all, no globs, no pathspec magic. Paths are read through
+ * the same shell-faithful tokenizer as the commit classifier, so a balanced
+ * quoted path arrives unquoted exactly as a real shell would deliver it.
+ * Every path
+ * must additionally be inside the current changed-path set (checked at
+ * admission time against the same enumeration the revision digest hashes), so
+ * ignored or unhashed content can never be staged through this surface.
+ */
+function isSafeStandaloneGitAdd(command: string): boolean {
+	if (hasUnsafeShellControlSyntax(command)) return false;
+	const match = /^git\s+add\s+--\s+(.+)$/i.exec(command.trim());
+	if (!match) return false;
+	const paths = extractStandaloneGitAddPaths(command);
+	return paths.length > 0 && paths.every((token) => isSanctionedAddPath(token));
+}
+
+/** Path tokens accepted by the sanctioned `git add --` shape (D3). */
+function isSanctionedAddPath(token: string): boolean {
+	if (token.length === 0) return false;
+	if (/["'`\\]/.test(token)) return false;
+	// [*?] and [ ] are git wildmatch glob metacharacters: a literal bracketed
+	// filename would wildmatch-expand to sibling paths at execution, staging
+	// content the digest never hashed (PRR-014).
+	if (/[*?[\]]/.test(token)) return false;
+	if (token.includes(':')) return false;
+	if (token.startsWith('-')) return false;
+	return true;
+}
+
+/**
+ * Extract the path tokens of a sanctioned `git add -- <paths>` command (D3)
+ * through the same shell-faithful tokenizer as the commit classifier (FB-24:
+ * the previous whitespace split honored JS \s, which includes NBSP/formfeed
+ * that cmd/POSIX deliver INSIDE the argv word).
+ */
+function extractStandaloneGitAddPaths(command: string): string[] {
+	const tokens = tokenizeStandaloneGitCommand(command);
+	if (tokens.length < 3) return [];
+	if (tokens[0].quoted || tokens[0].text.toLowerCase() !== 'git') return [];
+	if (tokens[1].quoted || tokens[1].text.toLowerCase() !== 'add') return [];
+	const separator = tokens[2];
+	if (!separator || separator.text !== '--') return [];
+	return tokens
+		.slice(3)
+		.map((token) => token.text)
+		.filter(Boolean);
+}
+
+/**
+ * Quote-aware tokenizer for standalone git commands (issue #3315 D8): a
+ * character scanner that models how cmd.exe/PowerShell/POSIX all treat double
+ * quotes — quote characters are dropped, whitespace inside quotes does not
+ * split, and a quote may OPEN MID-TOKEN (gluing: `-m"docs: -F"` is the single
+ * argv `-mdocs: -F`, an attached -m operand, not a -F flag). A token whose
+ * first character came from inside quotes is marked quoted and is never
+ * treated as an option flag; `-F` inside a `-m "…"` message operand stays
+ * message text, exactly as git itself would read it.
+ */
+function tokenizeStandaloneGitCommand(
+	command: string,
+): Array<{ text: string; quoted: boolean }> {
+	const tokens: Array<{ text: string; quoted: boolean }> = [];
+	let current = '';
+	let started = false;
+	let beganQuoted = false;
+	let inQuotes = false;
+	const flush = () => {
+		if (started) {
+			tokens.push({ text: current, quoted: beganQuoted });
+		}
+		current = '';
+		started = false;
+		beganQuoted = false;
+	};
+	for (const ch of command) {
+		if (ch === '"') {
+			if (!started) {
+				started = true;
+				beganQuoted = true;
+			}
+			inQuotes = !inQuotes;
+			continue;
+		}
+		// Split ONLY on the characters cmd.exe and POSIX IFS treat as
+		// separators outside quotes — space, tab, newline. JS \s additionally
+		// matches NBSP/formfeed/vtab, which those shells deliver INSIDE the
+		// argv word; splitting there would mis-resolve an attached -F value
+		// as absolute when the shell-faithful value is relative (in-repo).
+		if (!inQuotes && (ch === ' ' || ch === '\t' || ch === '\n')) {
+			flush();
+			continue;
+		}
+		started = true;
+		current += ch;
+	}
+	flush();
+	return tokens;
+}
+
+/**
+ * Index of the `commit` subcommand token, or -1. Only tokens BEFORE this
+ * index are global git options (where `-C <dir>` relocates the working
+ * directory); after it, `-C` is git-commit's --reuse-message, never a cwd.
+ */
+function standaloneGitCommitSubcommandIndex(
+	tokens: Array<{ text: string; quoted: boolean }>,
+): number {
+	for (let i = 0; i < tokens.length; i += 1) {
+		if (!tokens[i].quoted && tokens[i].text === 'commit') return i;
+	}
+	return -1;
+}
+
+/**
+ * Issue #3315 D8/AC25 (feedback round: PRR-001/002): extract the message-file
+ * argument git actually reads from a standalone `git commit`. git binds
+ * -F/--file to ONE variable with LAST occurrence winning, so every occurrence
+ * is recorded and the last is returned. The walk models git parse-options:
+ * - long options with an attached `=value` never consume the next token;
+ *   `--file=`/unambiguous abbreviations of it (`--fil=` — `--fi=` is
+ *   ambiguous and errors in git) resolve to the message file in both the
+ *   attached and space-separated forms;
+ * - short-option CLUSTERS are walked char by char: boolean shorts continue,
+ *   a value-taking short (c/C/m/t) consumes the rest of the token (attached)
+ *   or the next token (bare) and ends the cluster, and an `F` in a cluster
+ *   takes the rest of the token (attached) or the next token as the message
+ *   file;
+ * - operands of every value-taking git-commit option are consumed as values
+ *   (a `-F` inside a commit message, an author, or a cleanup mode is operand
+ *   text, not a flag);
+ * - an unquoted `--` terminates option parsing (everything after it is a
+ *   pathspec);
+ * - leading `^` characters are stripped before flag-position tests (cmd.exe
+ *   escape: `^-F x` delivers `-F x` under cmd, a literal unknown rev under
+ *   POSIX — over-detection there is a harmless false refusal).
+ * Null when the commit carries no message-file argument.
+ */
+function extractStandaloneGitCommitMessageFile(command: string): string | null {
+	const tokens = tokenizeStandaloneGitCommand(command);
+	const subcommand = standaloneGitCommitSubcommandIndex(tokens);
+	if (subcommand < 0) return null;
+	let lastMessageFile: string | null = null;
+	for (let i = subcommand + 1; i < tokens.length; i += 1) {
+		// Flag POSITION is evaluated on the quote-stripped, caret-stripped
+		// text: every supported shell strips quotes around a bare flag and
+		// cmd.exe strips carets, so `git commit "-F" x` and `^-F x` deliver a
+		// real -F to git. Quoted OPERANDS are protected by the consumption
+		// branches below, not by skipping quoted tokens here.
+		const token = tokens[i];
+		const text = token.text.replace(/^\^+/, '');
+		if (text === '--') break; // pathspec terminator: no flags after it
+		if (text === '-F' || text === '--file') {
+			const value = tokens[i + 1];
+			lastMessageFile = value === undefined ? null : value.text;
+			continue;
+		}
+		if (GIT_COMMIT_VALUE_TAKING_OPTIONS.has(text)) {
+			i += 1; // the next token is this option's operand, never a flag
+			continue;
+		}
+		if (text.startsWith('--')) {
+			const eq = text.indexOf('=');
+			if (eq < 0) {
+				// Space-form unambiguous abbreviation of --file (--fil x): the
+				// next token is the message file. (--fi is ambiguous and never
+				// reaches git.)
+				if (/^--fil$/i.test(text)) {
+					const value = tokens[i + 1];
+					lastMessageFile = value === undefined ? null : value.text;
+					i += 1;
+				}
+				continue;
+			}
+			const name = text.slice(2, eq).toLowerCase();
+			if (name === 'file' || name === 'fil') {
+				lastMessageFile = text.slice(eq + 1);
+			}
+			continue;
+		}
+		if (text.startsWith('-') && text.length > 1) {
+			// Short-option cluster walk (git parse-options semantics): boolean
+			// shorts continue, a value-taking short (c/C/m/t) consumes the rest
+			// of the token (attached) or the next token (bare) and ends the
+			// walk, and F records the message file from its attached rest or
+			// the next token.
+			let consumedNext = false;
+			for (let p = 1; p < text.length; p += 1) {
+				const c = text[p];
+				if (c === 'F') {
+					const rest = text.slice(p + 1);
+					if (rest.length > 0) {
+						lastMessageFile = rest;
+					} else {
+						lastMessageFile = tokens[i + 1]?.text ?? null;
+						consumedNext = true;
+					}
+					break;
+				}
+				if ('cCmt'.includes(c)) {
+					if (p + 1 >= text.length) consumedNext = true;
+					break;
+				}
+				// Boolean short (a, e, i, n, q, s, v, ...): keep walking.
+			}
+			if (consumedNext) i += 1;
+		}
+	}
+	return lastMessageFile;
+}
+
+/**
+ * The finite git-commit option set that REQUIRES a value in the
+ * space-separated form (git parse-options consumes the next argv
+ * unconditionally for these). `--untracked-files`/`-u` deliberately absent:
+ * their value is optional, so a following `-F` stays a real flag.
+ */
+const GIT_COMMIT_VALUE_TAKING_OPTIONS: ReadonlySet<string> = new Set([
+	'-m',
+	'--message',
+	'-c',
+	'--reedit-message',
+	'-C',
+	'--reuse-message',
+	'-t',
+	'--template',
+	'--fixup',
+	'--squash',
+	'--author',
+	'--date',
+	'--cleanup',
+	'--trailer',
+	'--pathspec-from-file',
+]);
+
+/**
+ * Issue #3315 D8/AC25: the working base a standalone git command resolves
+ * paths against — the GLOBAL `-C <dir>` relocation (which only appears before
+ * the subcommand; `git commit -C <x>` is --reuse-message), else the gate
+ * directory.
+ */
+function resolveStandaloneGitCommandCwd(
+	command: string,
+	directory: string,
+): string {
+	const tokens = tokenizeStandaloneGitCommand(command);
+	const subcommand = standaloneGitCommitSubcommandIndex(tokens);
+	const limit = subcommand >= 0 ? subcommand : tokens.length;
+	for (let i = 0; i < limit; i += 1) {
+		if (!tokens[i].quoted && tokens[i].text === '-C' && tokens[i + 1]) {
+			return path.resolve(directory, tokens[i + 1].text);
+		}
+	}
+	return directory;
+}
+
+/**
+ * Issue #3315 D8/AC25: containment of an ABSOLUTELY resolved path against the
+ * repository root, lexically first and — when the target exists — through
+ * realpath on both sides so a junction/symlink that lands inside cannot pose
+ * as an outside-repo file.
+ */
+function isPathInsideRepository(target: string, repoRoot: string): boolean {
+	const lexicalInside = (value: string, root: string): boolean => {
+		const rel = path.relative(root, value);
+		return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+	};
+	if (lexicalInside(target, repoRoot)) return true;
+	try {
+		return lexicalInside(realpathSync(target), realpathSync(repoRoot));
+	} catch {
+		return false;
+	}
+}
+
 function isSafeStandaloneGitCommit(command: string): boolean {
 	if (hasUnsafeShellControlSyntax(command)) return false;
 	if (/(?:^|\s)--(?:allow-empty|amend)(?:\s|=|$)/i.test(command)) return false;
@@ -15376,6 +17787,33 @@ function isSafeStandaloneGitCommit(command: string): boolean {
 	// fail-closed reject.
 	return /^[Gg][Ii][Tt](?:\s+-C(?:=|\s+)(?:"[^"\r\n]+"|'[^'\r\n]+'|[^\s;&|<>`]+))?\s+commit(?:\s+(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s;&|<>`]+))*\s*$/.test(
 		command.trim(),
+	);
+}
+
+/**
+ * Issue #3316 (D6): the ONE sanctioned reset form — exactly
+ * `git reset --soft <intake head>` (four whitespace-separated tokens, no `-C`,
+ * no other flags, no quoting tricks; the target must equal the bound intake
+ * head). Admission additionally requires an invalidated generation, no armed
+ * mirror, a resolvable current HEAD distinct from the intake head, and that
+ * HEAD is the single non-merge child of the intake head. Every other reset
+ * form falls through to the existing fail-closed refusal unchanged.
+ */
+function isSanctionedSoftResetToHead(
+	command: string,
+	intakeHead: string | undefined,
+): boolean {
+	if (!intakeHead) return false;
+	if (hasUnsafeShellControlSyntax(command)) return false;
+	const tokens = command.trim().split(/\s+/);
+	if (tokens.length !== 4) return false;
+	const [gitToken, subcommand, flag, target] = tokens;
+	return (
+		/^[Gg][Ii][Tt]$/.test(gitToken) &&
+		subcommand === 'reset' &&
+		flag === '--soft' &&
+		target === intakeHead &&
+		isSafeGitRefToken(target)
 	);
 }
 
@@ -16520,6 +18958,48 @@ function derivePrReviewCandidateSeverities(
 const MAX_UNCLAIMED_ITEMS_IN_MESSAGE = 50;
 
 /**
+ * Issue #3358 AC4: earlier-semantics item ids named in the dedicated
+ * settlement clause before it degrades to "and N more"; the complete set
+ * stays on `PrReviewPhaseComposition.semanticsMismatchedItemIds`.
+ */
+const MAX_SEMANTICS_MISMATCH_IDS_IN_MESSAGE = 16;
+
+/**
+ * Issue #3358 AC4 / feedback PRR-02: the dedicated earlier-semantics
+ * settlement-guard message, extracted so its 16-id display bound (and the
+ * "and N more" overflow suffix) is unit-testable independently of the
+ * six-dimension gate fixtures.
+ */
+export function renderPrReviewSemanticsMismatchGuardMessage(input: {
+	requiredPhase: string;
+	unclaimed: readonly string[];
+	blockingSemanticsMismatches: readonly string[];
+	diagnostics: readonly string[];
+}): string {
+	const unclaimedNamed = input.unclaimed.slice(
+		0,
+		MAX_UNCLAIMED_ITEMS_IN_MESSAGE,
+	);
+	const unclaimedOverflow = input.unclaimed.length - unclaimedNamed.length;
+	const mismatchNamed = input.blockingSemanticsMismatches.slice(
+		0,
+		MAX_SEMANTICS_MISMATCH_IDS_IN_MESSAGE,
+	);
+	const mismatchOverflow =
+		input.blockingSemanticsMismatches.length - mismatchNamed.length;
+	return (
+		`BLOCKED: PR_REVIEW ${input.requiredPhase} items lack an authenticated verdict from any successful lane: ${unclaimedNamed.join(', ')}` +
+		(unclaimedOverflow > 0 ? ` (+${unclaimedOverflow} more)` : '') +
+		`; items ${mismatchNamed.join(', ')}` +
+		(mismatchOverflow > 0 ? ` and ${mismatchOverflow} more` : '') +
+		` carry verdict rows written under earlier verdict semantics (current: v${PR_REVIEW_VERDICT_SEMANTICS_VERSION}; CONFIRMED requires a non-NONE severity since #3310); those rows are not re-admitted and N-of-M settlement is not attempted for them — re-dispatch those items' lanes` +
+		(input.diagnostics.length > 0
+			? `; diagnostics: ${input.diagnostics.join(' | ')}`
+			: '')
+	);
+}
+
+/**
  * The batches a phase composes over.
  *
  * Reviewer is scoped to everything after the latest council batch (a council
@@ -16529,7 +19009,7 @@ const MAX_UNCLAIMED_ITEMS_IN_MESSAGE = 50;
  * was not before — derivation and settlement previously disagreed on the window,
  * and one computation cannot hold two windows.
  */
-function prReviewPhaseWindow(
+export function prReviewPhaseWindow(
 	state: PrWorkflowGateState,
 	phase: PrReviewComposablePhase,
 ): PrReviewValidationBatchRecord[] {
@@ -16544,6 +19024,19 @@ function prReviewPhaseWindow(
 	return (
 		latestCouncilIndex >= 0 ? all.slice(latestCouncilIndex + 1) : all
 	).filter((batch) => batch.phase === 'reviewer');
+}
+
+/**
+ * Issue #3311: exported wrapper so the `pr_workflow_status` projection derives
+ * per-item verdict attempt counts over EXACTLY the window the N-of-M admission
+ * reads (the post-latest-council reviewer slice included), instead of
+ * hand-rolling a filter that can drift from settlement semantics.
+ */
+export function prReviewPhaseWindowForStatus(
+	state: PrWorkflowGateState,
+	phase: PrReviewComposablePhase,
+): PrReviewValidationBatchRecord[] {
+	return prReviewPhaseWindow(state, phase);
 }
 
 /**
@@ -17243,20 +19736,40 @@ export async function derivePrReviewOrderUnstableItems(
 ): Promise<string[]> {
 	const state = await requireBoundState(directory, sessionID, 'PR_REVIEW');
 	const ctx = await createPrReviewGateContext(directory, state);
-	const composition = composePrReviewPhaseVerdicts(
-		directory,
-		state,
-		'reviewer',
-		ctx,
-	);
+	// #3362: read the reviewer phase through the same fail-closed
+	// authoritative gate the binding path uses
+	// (authoritativeReviewerClaims). An UNCOVERED current reviewer phase
+	// (unsettled/partial with no admitted settlement) yields an empty map
+	// and the derivation returns [] WITHOUT consulting the coherence
+	// stamp: the stamp derives from a prior batch window and would be
+	// stale relative to the current uncovered phase — the severity and
+	// order-unstable preflights must fail closed together.
+	const claims = authoritativeReviewerClaims(directory, state, ctx);
+	return orderUnstableItemsFromClaims(state, claims);
+}
+
+/**
+ * Shared body of `derivePrReviewOrderUnstableItems` and
+ * `derivePrReviewCriticDispatchInputs` (#3358 AC6, #3362): pure over the
+ * authoritative reviewer claims, so one critic dispatch reads them once.
+ */
+function orderUnstableItemsFromClaims(
+	state: PrWorkflowGateState,
+	claims: ReadonlyMap<string, PrReviewItemClaim>,
+): string[] {
+	// #3362: an UNCOVERED reviewer phase fails closed here — [] without
+	// consulting the coherence stamp, which derives from a prior batch
+	// window and would be stale relative to the current uncovered phase.
+	if (claims.size === 0) return [];
 	// The order-unstable ids are STAMPED AT RECORD TIME onto the CRITIC batch's
 	// coherence record (the critic record is the only writer — see
 	// recordPrReviewValidationBatch), so that stamp is the receipt-of-record
 	// for what a critic dispatch is about to be told. Prefer the newest
-	// critic-phase stamp, and recompute from the composed claims only when no
-	// stamped set exists yet (pre-stamping batches, or a critic dispatch that
-	// precedes its own record). Reading the stamp is therefore never stale
-	// relative to the composition: both derive from the same window.
+	// critic-phase stamp, and recompute from the authoritative claims only
+	// when no stamped set exists yet (pre-stamping batches, or a critic
+	// dispatch that precedes its own record). The stamp is only consulted
+	// after the authoritative gate above confirmed a covered reviewer phase,
+	// so it is never stale relative to the CURRENT window.
 	const newestStampedBatchId = [...(state.prReviewValidationBatches ?? [])]
 		.reverse()
 		.find(
@@ -17268,19 +19781,24 @@ export async function derivePrReviewOrderUnstableItems(
 		? state.prReviewBatchCoherence?.[newestStampedBatchId]?.orderUnstableItemIds
 		: undefined;
 	if (stamped && stamped.length > 0) return [...new Set(stamped)].sort();
-	return [...composition.claims.entries()]
+	return [...claims.entries()]
 		.filter(([, claim]) => claim.orderAgreement === 'disagree')
 		.map(([itemId]) => itemId)
 		.sort();
 }
 
 /**
- * Issue #3310: the composed reviewer-phase severities, keyed by item id, so a
- * critic dispatch can tell each assigned item's reviewer severity up front —
- * the critic transport requires UPHELD to keep that exact severity rank.
- * Read-only derivation with the same shape as the #2906 readers; an unset or
- * partially-settled reviewer phase yields an empty/partial map and the
- * dispatch-side caller renders nothing extra for unknown ids.
+ * Issue #3310 / #3362: the authoritative reviewer-phase severities, keyed by
+ * item id, so a critic dispatch can tell each assigned item's reviewer
+ * severity up front — the critic transport requires UPHELD to keep that
+ * exact severity rank. Read through the same fail-closed authoritative gate
+ * the binding path uses (authoritativeReviewerClaims): an UNCOVERED reviewer
+ * phase (unsettled or partially settled with no admitted settlement) yields
+ * an EMPTY map — never a partial one — so the preflight can never annotate
+ * items the binder would refuse. Under an admitted N-of-M settlement that
+ * covers every unclaimed item, the surviving actual claims are returned.
+ * The pre-fix raw-composition shape ("empty/partial map") was a deliberate
+ * contract change in #3362, not a bugfix of this docstring.
  */
 export async function derivePrReviewReviewerSeverities(
 	directory: string,
@@ -17288,17 +19806,44 @@ export async function derivePrReviewReviewerSeverities(
 ): Promise<Map<string, string>> {
 	const state = await requireBoundState(directory, sessionID, 'PR_REVIEW');
 	const ctx = await createPrReviewGateContext(directory, state);
-	const composition = composePrReviewPhaseVerdicts(
-		directory,
-		state,
-		'reviewer',
-		ctx,
-	);
+	const claims = authoritativeReviewerClaims(directory, state, ctx);
+	return reviewerSeveritiesFromClaims(claims);
+}
+
+function reviewerSeveritiesFromClaims(
+	claims: ReadonlyMap<string, PrReviewItemClaim>,
+): Map<string, string> {
 	const severities = new Map<string, string>();
-	for (const [itemId, claim] of composition.claims) {
+	for (const [itemId, claim] of claims) {
 		severities.set(itemId, claim.severity);
 	}
 	return severities;
+}
+
+/**
+ * Issue #3358 AC6: everything a critic dispatch preflight reads from the
+ * reviewer phase, derived from ONE gate context and ONE authoritative
+ * reviewer-claims read. Calling the two single-purpose readers back to back
+ * composed the reviewer phase (and resolved the bounded revision digest)
+ * twice per dispatch. #3362: the single read is the fail-closed
+ * authoritative gate, so both derivations fail closed together — an
+ * UNCOVERED reviewer phase yields `[]` and an empty severity map, never a
+ * partial one.
+ */
+export async function derivePrReviewCriticDispatchInputs(
+	directory: string,
+	sessionID: string,
+): Promise<{
+	orderUnstableItemIds: string[];
+	reviewerSeverities: Map<string, string>;
+}> {
+	const state = await requireBoundState(directory, sessionID, 'PR_REVIEW');
+	const ctx = await createPrReviewGateContext(directory, state);
+	const claims = authoritativeReviewerClaims(directory, state, ctx);
+	return {
+		orderUnstableItemIds: orderUnstableItemsFromClaims(state, claims),
+		reviewerSeverities: reviewerSeveritiesFromClaims(claims),
+	};
 }
 
 /**
@@ -18044,6 +20589,33 @@ function analyzeLaneArtifactIntegrity(args: {
 			'artifact.role',
 			record.normalizedAgent,
 			artifact.role,
+		);
+	}
+	// Issue #3340 (issue item 2), generalized by #3358 AC8: the
+	// artifact/record pair being self-consistent is not enough — a lane whose
+	// child record ran a role outside its phase's admitted set must fail
+	// settlement. `normalizedAgent` is the resolved canonical role at launch
+	// time (not the raw prefixed name), so the exact table lookup admits
+	// prefixed agents (`mega_critic` records `normalizedAgent: 'critic'`)
+	// while rejecting every critic-family impostor and any user-defined
+	// council_-prefixed agent on a council lane. Launch-time authority: this
+	// holds even when a direct recorder caller omitted `agent`.
+	const expectedAdmittedRole =
+		expected.mode === 'swarm-pr-review:council'
+			? PR_REVIEW_PHASE_ADMITTED_ROLES.council
+			: expected.mode === 'swarm-pr-review:reviewer'
+				? PR_REVIEW_PHASE_ADMITTED_ROLES.reviewer
+				: expected.mode === 'swarm-pr-review:critic'
+					? PR_REVIEW_PHASE_ADMITTED_ROLES.critic
+					: undefined;
+	if (
+		expectedAdmittedRole &&
+		!expectedAdmittedRole.includes(record.normalizedAgent)
+	) {
+		return failedLaneValidation(
+			'record.normalized_agent',
+			expectedAdmittedRole.join('|'),
+			record.normalizedAgent || '(missing)',
 		);
 	}
 	if (artifact.source !== 'collect_lane_results') {
@@ -18947,6 +21519,26 @@ export async function validatePrWorkflowTransportRecovery(
 			acceptedReviewItemIds: [...itemIds],
 			rejectedReviewItemIds: [],
 		};
+		// #3357 AC2 + feedback round (PRR-004/PRR-006): surface quarantined
+		// strays on the SAME durable receipt surface as the recovery entries.
+		// The reason is arm-neutral ("for id", never "for unassigned id"):
+		// analysis.quarantined merges the #3310 post-parse-arity arm — whose
+		// rows may carry ASSIGNED ids — with the #3357 over-arrival arm, so a
+		// hard-coded "unassigned" would be a false durable statement for
+		// #3310 rows. Entries are capped (PRR-006): a stray-heavy artifact
+		// must not inflate the durable record without bound; the last entry
+		// carries the overflow count.
+		const maxQuarantineReceiptEntries = 16;
+		const quarantinedStrays = analysis.quarantined ?? [];
+		const itemizedQuarantined = quarantinedStrays.slice(
+			0,
+			maxQuarantineReceiptEntries,
+		);
+		const overflowCount = quarantinedStrays.length - itemizedQuarantined.length;
+		const overflowNote =
+			overflowCount > 0
+				? `; +${overflowCount} more quarantined row(s) not itemized`
+				: '';
 		const recoveries = [
 			...(analysis.recoveries ?? []).map(({ recovery, itemId }) => ({
 				workflowLane,
@@ -18955,6 +21547,15 @@ export async function validatePrWorkflowTransportRecovery(
 					recovery === 'legacy-fidelity-safe'
 						? `legacy verdict row ${itemId} used trailing-field pipe recovery with full field fidelity`
 						: `legacy verdict row ${itemId} used trailing-field pipe recovery with lossy prose normalization`,
+			})),
+			...itemizedQuarantined.map((stray, index) => ({
+				workflowLane,
+				kind: 'legacy-verdict-row-quarantine' as const,
+				reason: `legacy verdict row for id ${stray.itemId} quarantined at raw arity ${stray.arity} (grammar noise; carries no authenticable verdict)${
+					overflowCount > 0 && index === itemizedQuarantined.length - 1
+						? overflowNote
+						: ''
+				}`,
 			})),
 			...(input.result.truncated === true
 				? [
@@ -19212,6 +21813,8 @@ export interface PrWorkflowGateRecoveryRead {
 	disclosure?: string;
 	/** false when `revision` could not be salvaged — the CAS escape is required. */
 	revisionSalvageable: boolean;
+	/** SQLite row revision available even when the workflow revision is unreadable. */
+	coordinationRowRevision?: number;
 	/**
 	 * true when a `prFeedbackReadyToPublish` key is present in the raw bytes but
 	 * is itself unreadable. Callers MUST treat this as armed: silently dropping
@@ -19245,8 +21848,9 @@ export interface PrWorkflowGateRecoveryRead {
  *   - **Unparseable shadow bytes fail everywhere**, recovery included. There
  *     is nothing to salvage from that projection and guessing would be
  *     fabrication. A coordination payload that is unparseable or otherwise
- *     corrupt is recoverable only when this exact shadow has the same revision
- *     as the row generation, and the disclosure names that degraded source.
+ *     corrupt is recoverable when the shadow matches the row generation. When
+ *     the workflow revision is unreadable, require the parsed payload and shadow
+ *     to agree and use the SQLite row revision to detect a concurrent change.
  *   - **Schema-validation failure on parseable shadow JSON** salvages the
  *     fields abort actually reads — `{sessionID, mode, prHeadSha}` plus
  *     `revision`, `prFeedbackReadyToPublish` and `checkoutRecovery` when each
@@ -19369,15 +21973,22 @@ export async function readPrWorkflowGateStateForRecovery(
 		.nonnegative()
 		.safeParse(rawRecord.revision);
 	const salvagedHead = z.string().min(1).safeParse(rawRecord.prHeadSha);
+	const salvagedRelease = ReleaseReviewGateBindingSchema.safeParse(
+		rawRecord.releaseReview,
+	);
+	const salvagedReleaseRun = PrReviewRunIdSchema.safeParse(
+		rawRecord.prReviewArtifactRunId,
+	);
 	const salvagedActivatedAt = z
 		.string()
 		.min(1)
 		.safeParse(rawRecord.activatedAt);
 	const salvagedUpdatedAt = z.string().min(1).safeParse(rawRecord.updatedAt);
 	if (
-		coordinationGeneration !== undefined &&
-		(!salvagedRevision.success ||
-			salvagedRevision.data !== coordinationGeneration)
+		coordination.kind === 'corrupt' &&
+		(salvagedRevision.success
+			? salvagedRevision.data !== coordination.generation
+			: !isDeepStrictEqual(coordination.parsedPayload, rawRecord))
 	) {
 		throw invalidError;
 	}
@@ -19443,6 +22054,17 @@ export async function readPrWorkflowGateStateForRecovery(
 				: isoNow(),
 			updatedAt: salvagedUpdatedAt.success ? salvagedUpdatedAt.data : isoNow(),
 			...(salvagedHead.success ? { prHeadSha: salvagedHead.data } : {}),
+			...(salvagedMode.data === 'PR_REVIEW' &&
+			salvagedRelease.success &&
+			salvagedHead.success &&
+			salvagedHead.data === salvagedRelease.data.head
+				? {
+						releaseReview: salvagedRelease.data,
+						...(salvagedReleaseRun.success
+							? { prReviewArtifactRunId: salvagedReleaseRun.data }
+							: {}),
+					}
+				: {}),
 			...(salvagedArmed.success
 				? { prFeedbackReadyToPublish: salvagedArmed.data }
 				: {}),
@@ -19457,9 +22079,12 @@ export async function readPrWorkflowGateStateForRecovery(
 		schemaErrors,
 		disclosure,
 		revisionSalvageable: salvagedRevision.success,
+		...(coordination.kind === 'corrupt'
+			? { coordinationRowRevision: coordination.rowRevision }
+			: {}),
 		armedShapeUnreadable,
-		// Every prReview* field was dropped by this minimal reconstruction; the
-		// status projection must not read their absence as "no dispatches yet".
+		// The review coverage projection was dropped by this minimal
+		// reconstruction; status must not read it as "no dispatches yet".
 		prReviewProjectionDropped: true,
 	};
 }

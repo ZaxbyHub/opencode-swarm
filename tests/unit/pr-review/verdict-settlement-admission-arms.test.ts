@@ -135,7 +135,7 @@ describe('verdict settlement admission arms (issue #3101, review PRR-025)', () =
 			unclaimed: ['X'],
 		});
 		expect(admission.admitted).toBe(false);
-		expect(admission.reason).toMatch(/non-liveness-terminal owner lane/);
+		expect(admission.reason).toMatch(/non-admissible owner lane/);
 	});
 
 	test('identity conjunction: a record with a mismatched prHeadSha is not admissible terminality evidence', async () => {
@@ -148,7 +148,7 @@ describe('verdict settlement admission arms (issue #3101, review PRR-025)', () =
 			unclaimed: ['X'],
 		});
 		expect(admission.admitted).toBe(false);
-		expect(admission.reason).toMatch(/non-liveness-terminal owner lane/);
+		expect(admission.reason).toMatch(/non-admissible owner lane/);
 	});
 
 	test('identity conjunction: a record whose laneId does not match the declaring lane is not admissible', async () => {
@@ -161,7 +161,7 @@ describe('verdict settlement admission arms (issue #3101, review PRR-025)', () =
 			unclaimed: ['X'],
 		});
 		expect(admission.admitted).toBe(false);
-		expect(admission.reason).toMatch(/non-liveness-terminal owner lane/);
+		expect(admission.reason).toMatch(/non-admissible owner lane/);
 	});
 
 	test('a completed (non-liveness-terminal) owner record is refused even with the liveness class present', async () => {
@@ -174,7 +174,12 @@ describe('verdict settlement admission arms (issue #3101, review PRR-025)', () =
 			unclaimed: ['X'],
 		});
 		expect(admission.admitted).toBe(false);
-		expect(admission.reason).toMatch(/non-liveness-terminal owner lane/);
+		// Issue #3311: a completed owner is a consumed attempt, never a
+		// blocker - with a single batch the per-item budget arm refuses first;
+		// with the budget met, the no-typed-dead-source arm refuses instead.
+		expect(admission.reason).toMatch(
+			/verdict retry budget not exhausted .1 of 3 required attempts./,
+		);
 	});
 
 	test('cancelled and error terminal records map to their own disclosed terminalStatus values', async () => {
@@ -273,7 +278,7 @@ describe('verdict settlement admission arms (issue #3101, review PRR-025)', () =
 			parentSessionId: 'arms-session',
 		});
 		expect(admission.admitted).toBe(false);
-		expect(admission.reason).toMatch(/non-liveness-terminal owner lane/);
+		expect(admission.reason).toMatch(/non-admissible owner lane/);
 	});
 
 	test('receipt schema caps items at the writer/read contract bound (review PRR-023)', () => {

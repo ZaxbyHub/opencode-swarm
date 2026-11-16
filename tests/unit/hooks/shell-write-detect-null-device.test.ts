@@ -82,7 +82,20 @@ describe('shell-write-detect: sink-device redirects are not write targets', () =
 		const command = 'cmd > /dev/null/../../etc/passwd';
 		const result = detectPosixWrites(command);
 		const resolved = resolveWriteTargets(command, result.writes, WS);
-		expect(resolved.map((r) => r.resolvedPath)).toEqual(['/etc/passwd']);
+		const paths = resolved.map((r) => r.resolvedPath);
+		expect(paths).toHaveLength(1);
+		// #3616 D8 (realpath-order resolution): on darwin /etc is a symlink
+		// to /private/etc, so the walk resolves through it to the real
+		// target; on Linux /etc is a real dir (exact spelling); on win32 the
+		// walk skips ENOENT prefixes to the same lexical string. The
+		// allowed set is per-platform (F-26b: the disjunction no longer
+		// accepts the darwin spelling on Linux) and every member is outside
+		// the workspace — that is the property under test.
+		const allowed =
+			process.platform === 'darwin'
+				? ['/etc/passwd', '/private/etc/passwd']
+				: ['/etc/passwd'];
+		expect(allowed).toContain(paths[0]);
 	});
 
 	test('a here-doc delimiter named like the device is still a here-doc marker', () => {
@@ -331,14 +344,24 @@ describe('shell-write-detect: perl in-place forms keep the real file', () => {
 		// Real perl rewrites FILE. perl has no detached backup suffix, so
 		// ./s.pl is the script and FILE the file.
 		['perl -i ./s.pl FILE', false],
-		['perl -i -pe1 FILE', false],
-		['perl -i -pes/a/b/ FILE', false],
-		['perl -i -wpe1 FILE', false],
-		['perl -i -0777pe1 FILE', false],
+		// #3491 W7 re-pin: glued CLUSTER forms (`-pe1`, `-pes/a/b/`, `-wpe1`,
+		// `-0777pe1`, `-le1`) carry the e member with an ATTACHED code
+		// argument — real perl executes that inline code (`perl -i -pe1 FILE`
+		// runs code `1` per line; verified against perl 5.36 on this host).
+		// The old positional matcher only saw `-e`-led tokens, and these rows
+		// pinned its evalToo=false residual (the RC-3 fail-open class); the
+		// frozen C8 check pins `perl -pe CODE` as a denied eval, so the glued
+		// spellings now classify identically.
+		['perl -i -pe1 FILE', true],
+		['perl -i -pes/a/b/ FILE', true],
+		['perl -i -wpe1 FILE', true],
+		['perl -i -0777pe1 FILE', true],
 		// Reported conservatively: without -p/-n real perl never reads FILE,
 		// but the detector cannot tell whether the script loops over <>.
-		['perl -i -le1 FILE', false],
-		['perl -le print -i FILE', false],
+		// `-le1` evaluates its attached `1`, and `-le print` hands `print` to
+		// e as its code word (W7 cluster grammar; perl 5.36 ground truth).
+		['perl -i -le1 FILE', true],
+		['perl -le print -i FILE', true],
 		['perl -i -e1 FILE', true],
 		['perl -i.bak -e1 FILE', true],
 		['perl -i -es/a/b/ FILE', true],
@@ -415,7 +438,12 @@ describe('shell-write-detect: in-place controls are unchanged', () => {
 
 	test('perl -pi -e X f stays an interpreter eval only', () => {
 		expect(detectPosixWrites('perl -pi -e X f').writes).toEqual([
-			{ category: 'interpreter_eval', operator: 'perl [eval]', path: null },
+			{
+				category: 'interpreter_eval',
+				operator: 'perl [eval]',
+				path: null,
+				capability: true,
+			},
 		]);
 	});
 });

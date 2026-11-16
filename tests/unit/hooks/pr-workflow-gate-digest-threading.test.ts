@@ -141,6 +141,7 @@ describe('pr-workflow-gate revision digest threading', () => {
 			[
 				{
 					laneId: 'critic-all',
+					agent: 'critic',
 					workflowLane: 'critic-all',
 					reviewItemIds: CANDIDATE_IDS,
 				},

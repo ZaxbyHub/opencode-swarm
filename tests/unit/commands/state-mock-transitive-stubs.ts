@@ -24,13 +24,25 @@ export const STATE_MOCK_TRANSITIVE_STUBS = {
 	setFinalAccountingWarningBand: () => undefined,
 	getFinalAccountingWarningBand: () => false,
 	clearFinalAccountingWarningBands: () => undefined,
+	// Issue #3320: primary-owner / swarm-ownership exports reached transitively
+	// through delegation-tracker.ts, guardrails/tool-before.ts, and the v2
+	// adapters (all in the chat/tool hook graph the close commands import);
+	// same missing-binding failure class as above.
+	recordPrimaryOwner: () => undefined,
+	getPrimaryOwner: () => undefined,
+	isRegisteredSwarmSubagent: () => false,
+	isSwarmOwnedSession: () => false,
 	// Issue #3036: dispatch-lineage exports reached transitively through the
 	// delegation-gate / delegate-directive-injection / knowledge-receipt-tool
 	// importers; same missing-binding failure class as above.
 	recordPendingDispatchAuthorization: () => undefined,
-	setDispatchParent: () => undefined,
 	resolveDispatchParent: () => undefined,
 	clearDispatchLineageForSession: () => undefined,
+	// #3403: generation-stamped lineage writes + attempt-scoped rollback,
+	// consumed by the delegation gate's taskMetadata through the same
+	// transitive importers as the lineage exports above.
+	writeDispatchParentEntry: () => 0,
+	restoreDispatchParentEntry: () => undefined,
 	MAX_TRACKED_DISPATCH_PARENTS: 200,
 	PENDING_DISPATCH_AUTHORIZATION_TTL_MS: 600_000,
 	MAX_TRACKED_BUDGET_SESSIONS: 500,

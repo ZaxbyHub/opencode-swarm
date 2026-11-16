@@ -20,7 +20,6 @@
 
 import { beforeEach, describe, expect, it } from 'bun:test';
 import type { GuardrailsConfig } from '../../../src/config/schema';
-import { createGuardrailsHooks } from '../../../src/hooks/guardrails';
 import {
 	getAgentSession,
 	resetSwarmState,
@@ -28,6 +27,7 @@ import {
 	swarmState,
 } from '../../../src/state';
 import { normalizePath } from '../../../src/utils/path';
+import { createSandboxedGuardrailsHooks } from '../../helpers/sandboxed-guardrails-hooks';
 
 function defaultConfig(
 	overrides?: Partial<GuardrailsConfig>,
@@ -75,7 +75,7 @@ describe('Task 5.2 Modified Files Tracking — ADVERSARIAL SECURITY TESTS', () =
 		for (const { name, value } of maliciousValues) {
 			it(`should fail closed with ${name} in filePath`, async () => {
 				const config = defaultConfig();
-				const hooks = createGuardrailsHooks(config);
+				const hooks = createSandboxedGuardrailsHooks(config);
 
 				// Set up session as architect (to avoid circuit breaker)
 				startAgentSession('session-1', 'architect');
@@ -91,7 +91,7 @@ describe('Task 5.2 Modified Files Tracking — ADVERSARIAL SECURITY TESTS', () =
 
 			it(`should not add ${name} to modifiedFilesThisCoderTask`, async () => {
 				const config = defaultConfig();
-				const hooks = createGuardrailsHooks(config);
+				const hooks = createSandboxedGuardrailsHooks(config);
 
 				// Set up session with delegationActive=true (coder subagent)
 				startAgentSession('session-1', 'coder');
@@ -113,7 +113,7 @@ describe('Task 5.2 Modified Files Tracking — ADVERSARIAL SECURITY TESTS', () =
 
 		it('should fail closed on all invalid path field variations', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 
 			// Set up as architect to avoid circuit breaker
 			startAgentSession('session-1', 'architect');
@@ -146,7 +146,7 @@ describe('Task 5.2 Modified Files Tracking — ADVERSARIAL SECURITY TESTS', () =
 			if (process.platform === 'win32') return;
 
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 
 			// Set up as architect to avoid circuit breaker
 			startAgentSession('session-1', 'architect');
@@ -170,7 +170,7 @@ describe('Task 5.2 Modified Files Tracking — ADVERSARIAL SECURITY TESTS', () =
 			if (process.platform === 'win32') return;
 
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 
 			startAgentSession('session-1', 'coder');
 			const session = getAgentSession('session-1');
@@ -195,7 +195,7 @@ describe('Task 5.2 Modified Files Tracking — ADVERSARIAL SECURITY TESTS', () =
 			if (process.platform === 'win32') return;
 
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 
 			startAgentSession('session-1', 'coder');
 			const session = getAgentSession('session-1');
@@ -221,7 +221,7 @@ describe('Task 5.2 Modified Files Tracking — ADVERSARIAL SECURITY TESTS', () =
 	describe('Attack Vector 3 — Null byte injection', () => {
 		it('should reject path with null byte (lstat fail-closed)', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 
 			startAgentSession('session-1', 'coder');
 			const session = getAgentSession('session-1');
@@ -244,7 +244,7 @@ describe('Task 5.2 Modified Files Tracking — ADVERSARIAL SECURITY TESTS', () =
 
 		it('should reject path with multiple null bytes (lstat fail-closed)', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 
 			startAgentSession('session-1', 'coder');
 			const session = getAgentSession('session-1');
@@ -271,7 +271,7 @@ describe('Task 5.2 Modified Files Tracking — ADVERSARIAL SECURITY TESTS', () =
 			const config = defaultConfig({
 				profiles: { coder: { max_tool_calls: 5000, warning_threshold: 0.9 } },
 			});
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 
 			startAgentSession('session-1', 'coder');
 			const session = getAgentSession('session-1');
@@ -292,7 +292,7 @@ describe('Task 5.2 Modified Files Tracking — ADVERSARIAL SECURITY TESTS', () =
 			const config = defaultConfig({
 				profiles: { coder: { max_tool_calls: 2000, warning_threshold: 0.9 } },
 			});
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 
 			startAgentSession('session-1', 'coder');
 			const session = getAgentSession('session-1');
@@ -332,7 +332,7 @@ describe('Task 5.2 Modified Files Tracking — ADVERSARIAL SECURITY TESTS', () =
 		for (const { name, value, shouldReset } of bypassAttempts) {
 			it(`subagent_type='${name}' should ${shouldReset ? '' : 'NOT '}reset array`, async () => {
 				const config = defaultConfig();
-				const hooks = createGuardrailsHooks(config);
+				const hooks = createSandboxedGuardrailsHooks(config);
 
 				// Set up architect session
 				startAgentSession('architect-session', 'architect');
@@ -364,7 +364,7 @@ describe('Task 5.2 Modified Files Tracking — ADVERSARIAL SECURITY TESTS', () =
 	describe('Attack Vector 6 — Multi-session isolation', () => {
 		it('should keep sessions isolated', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 
 			// Create two separate sessions
 			startAgentSession('session-1', 'coder');
@@ -397,7 +397,7 @@ describe('Task 5.2 Modified Files Tracking — ADVERSARIAL SECURITY TESTS', () =
 
 		it('should isolate reset operations between sessions', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 
 			// Create architect session
 			startAgentSession('architect-session', 'architect');
@@ -431,7 +431,7 @@ describe('Task 5.2 Modified Files Tracking — ADVERSARIAL SECURITY TESTS', () =
 	describe('Attack Vector 7 — delegationActive + architect edge case', () => {
 		it('should handle architect session with delegationActive flag', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 
 			// Create architect session but with delegationActive=true (edge case)
 			startAgentSession('edge-session', 'architect');
@@ -451,7 +451,7 @@ describe('Task 5.2 Modified Files Tracking — ADVERSARIAL SECURITY TESTS', () =
 
 		it('should not crash with delegationActive + architect combo', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 
 			// Create session with both flags
 			startAgentSession('edge-session', 'architect');
@@ -486,7 +486,7 @@ describe('Task 5.2 Modified Files Tracking — ADVERSARIAL SECURITY TESTS', () =
 		for (const { name, value } of nonStringTypes) {
 			it(`should not crash with subagent_type=${name}`, async () => {
 				const config = defaultConfig();
-				const hooks = createGuardrailsHooks(config);
+				const hooks = createSandboxedGuardrailsHooks(config);
 
 				startAgentSession('architect-session', 'architect');
 				swarmState.activeAgent.set('architect-session', 'architect');
@@ -500,7 +500,7 @@ describe('Task 5.2 Modified Files Tracking — ADVERSARIAL SECURITY TESTS', () =
 
 			it(`should not reset array with subagent_type=${name}`, async () => {
 				const config = defaultConfig();
-				const hooks = createGuardrailsHooks(config);
+				const hooks = createSandboxedGuardrailsHooks(config);
 
 				startAgentSession('architect-session', 'architect');
 				swarmState.activeAgent.set('architect-session', 'architect');
@@ -528,7 +528,7 @@ describe('Task 5.2 Modified Files Tracking — ADVERSARIAL SECURITY TESTS', () =
 	describe('Attack Vector 9 — Task tool with no args', () => {
 		it('should not crash with missing args', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 
 			startAgentSession('architect-session', 'architect');
 			swarmState.activeAgent.set('architect-session', 'architect');
@@ -546,7 +546,7 @@ describe('Task 5.2 Modified Files Tracking — ADVERSARIAL SECURITY TESTS', () =
 
 		it('should not crash with empty args object', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 
 			startAgentSession('architect-session', 'architect');
 			swarmState.activeAgent.set('architect-session', 'architect');
@@ -563,7 +563,7 @@ describe('Task 5.2 Modified Files Tracking — ADVERSARIAL SECURITY TESTS', () =
 
 		it('should not crash with null args', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 
 			startAgentSession('architect-session', 'architect');
 			swarmState.activeAgent.set('architect-session', 'architect');
@@ -589,7 +589,7 @@ describe('Task 5.2 Modified Files Tracking — ADVERSARIAL SECURITY TESTS', () =
 			['array', ['file1.ts', 'file2.ts']],
 		] as const) {
 			it(`should fail closed with ${name} args`, async () => {
-				const hooks = createGuardrailsHooks(defaultConfig());
+				const hooks = createSandboxedGuardrailsHooks(defaultConfig());
 				startAgentSession('session-1', 'architect');
 				swarmState.activeAgent.set('session-1', 'architect');
 				await expect(
@@ -600,7 +600,7 @@ describe('Task 5.2 Modified Files Tracking — ADVERSARIAL SECURITY TESTS', () =
 
 		it('should not add to array with invalid args structure', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 
 			startAgentSession('session-1', 'coder');
 			const session = getAgentSession('session-1');
@@ -626,7 +626,7 @@ describe('Task 5.2 Modified Files Tracking — ADVERSARIAL SECURITY TESTS', () =
 		// before authority and tracking so malformed paths cannot become bypasses.
 		it('should reject whitespace-only path', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 
 			startAgentSession('session-1', 'coder');
 			const session = getAgentSession('session-1');
@@ -643,7 +643,7 @@ describe('Task 5.2 Modified Files Tracking — ADVERSARIAL SECURITY TESTS', () =
 
 		it('should reject tab-only path', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 
 			startAgentSession('session-1', 'coder');
 			const session = getAgentSession('session-1');
@@ -660,7 +660,7 @@ describe('Task 5.2 Modified Files Tracking — ADVERSARIAL SECURITY TESTS', () =
 
 		it('should reject newline-only path', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 
 			startAgentSession('session-1', 'coder');
 			const session = getAgentSession('session-1');
@@ -677,7 +677,7 @@ describe('Task 5.2 Modified Files Tracking — ADVERSARIAL SECURITY TESTS', () =
 
 		it('should accept path with surrounding whitespace (tracked, contained in cwd)', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 
 			startAgentSession('session-1', 'coder');
 			const session = getAgentSession('session-1');
@@ -699,7 +699,7 @@ describe('Task 5.2 Modified Files Tracking — ADVERSARIAL SECURITY TESTS', () =
 	describe('Edge Case — Duplicate path prevention', () => {
 		it('should not add duplicate paths', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 
 			startAgentSession('session-1', 'coder');
 			const session = getAgentSession('session-1');
@@ -718,7 +718,7 @@ describe('Task 5.2 Modified Files Tracking — ADVERSARIAL SECURITY TESTS', () =
 
 		it('should handle duplicates with different casing', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 
 			startAgentSession('session-1', 'coder');
 			const session = getAgentSession('session-1');
@@ -748,7 +748,7 @@ describe('Task 5.2 Modified Files Tracking — ADVERSARIAL SECURITY TESTS', () =
 	describe('Edge Case — Path field priority', () => {
 		it('should track filePath and path as a complete target set', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 
 			startAgentSession('session-1', 'coder');
 			const session = getAgentSession('session-1');
@@ -770,7 +770,7 @@ describe('Task 5.2 Modified Files Tracking — ADVERSARIAL SECURITY TESTS', () =
 
 		it('should track path and file as a complete target set', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 
 			startAgentSession('session-1', 'coder');
 			const session = getAgentSession('session-1');
@@ -788,7 +788,7 @@ describe('Task 5.2 Modified Files Tracking — ADVERSARIAL SECURITY TESTS', () =
 
 		it('should track file and target as a complete target set', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 
 			startAgentSession('session-1', 'coder');
 			const session = getAgentSession('session-1');
@@ -806,7 +806,7 @@ describe('Task 5.2 Modified Files Tracking — ADVERSARIAL SECURITY TESTS', () =
 
 		it('should fall back to target when others missing', async () => {
 			const config = defaultConfig();
-			const hooks = createGuardrailsHooks(config);
+			const hooks = createSandboxedGuardrailsHooks(config);
 
 			startAgentSession('session-1', 'coder');
 			const session = getAgentSession('session-1');

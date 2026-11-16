@@ -9,6 +9,7 @@
  * compatibility.
  */
 
+import { execFileSync } from 'node:child_process';
 import * as fsSync from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
@@ -29,6 +30,7 @@ import {
 	isPathWithinDeclaredScope,
 	type PathFlavor,
 	pathIdentitiesEqual,
+	redactPath,
 	sanitizeDiagnosticText,
 	unsafePathTextReason,
 } from '../../scope/path-identity';
@@ -38,6 +40,7 @@ import {
 	boundedBunHash,
 	coarseObjectDiscriminator,
 } from '../../utils/arg-hash';
+import { resolveGitExecutable } from '../../utils/git-executable.js';
 import { stableCanonicalStringify } from '../../utils/stable-stringify';
 
 /**
@@ -187,12 +190,291 @@ const globMatcherCache = new QuickLRU<string, (path: string) => boolean>({
 });
 
 /**
+ * LRU cache for git worktree roots.
+ * Maps repository directory -> array of resolved worktree root paths.
+ * Entries expire after 60 s so worktrees created or removed mid-session
+ * (and transient git failures) are re-queried instead of staying frozen for
+ * the process lifetime.
+ */
+const GIT_WORKTREE_CACHE_MAX_AGE_MS = 60_000;
+const gitWorktreeCache = new QuickLRU<string, string[]>({
+	maxSize: 50,
+	maxAge: GIT_WORKTREE_CACHE_MAX_AGE_MS,
+});
+
+/**
+ * Environment for git subprocesses with repository-redirecting variables
+ * stripped: an inherited GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE/GIT_COMMON_DIR
+ * would silently retarget `git worktree list` at another repository (PRR-026
+ * precedent in src/services/swarm-residue.ts), and every root that listing
+ * returns becomes a trusted authority root.
+ */
+function gitEnvWithoutRepoRedirectors(): NodeJS.ProcessEnv {
+	const env: NodeJS.ProcessEnv = { ...process.env };
+	delete env.GIT_DIR;
+	delete env.GIT_WORK_TREE;
+	delete env.GIT_INDEX_FILE;
+	delete env.GIT_COMMON_DIR;
+	return env;
+}
+
+/**
+ * One `worktree` record of `git worktree list --porcelain`.
+ */
+interface WorktreeListRecord {
+	path: string;
+	attributes: Set<string>;
+}
+
+/**
+ * Splits porcelain output into per-worktree records. Each record starts at a
+ * `worktree <path>` line; subsequent lines (`bare`, `detached`, `locked`,
+ * `prunable`, `HEAD <sha>`, `branch <ref>`) are that record's attributes.
+ */
+function parseWorktreeListPorcelain(output: string): WorktreeListRecord[] {
+	const records: WorktreeListRecord[] = [];
+	for (const line of output.split('\n')) {
+		if (line.startsWith('worktree ')) {
+			const wtPath = line.slice('worktree '.length).trim();
+			if (wtPath) {
+				records.push({ path: wtPath, attributes: new Set() });
+			}
+			continue;
+		}
+		const record = records[records.length - 1];
+		if (!record) continue;
+		const separator = line.indexOf(' ');
+		const attribute = separator === -1 ? line : line.slice(0, separator);
+		if (attribute) record.attributes.add(attribute);
+	}
+	return records;
+}
+
+/**
+ * Back-anchor validation for a worktree record (issue #3368 review): the
+ * main worktree record is the repository the listing ran in (its `.git` is a
+ * directory, not a redirect file), and every LINKED root must round-trip —
+ * the root's `.git` FILE must point at a registration directory whose own
+ * `gitdir` file names the root's `.git` path back. Without this round-trip,
+ * three attacker-forgeable files under `<repo>/.git/worktrees/<id>/` would
+ * make `git worktree list` report an arbitrary directory as a worktree, and
+ * every directory this function returns is a trusted containment root.
+ */
+
+/**
+ * Native-realpath canonicalization for Windows paths. Expands 8.3 short-name
+ * segments (C:\Users\RUNNER~1\... -> C:\Users\runneradmin\...) that the plain
+ * JS realpath leaves untouched, and strips the \\?\ device prefix. Returns
+ * undefined when the path does not exist (or cannot be opened) — callers
+ * decide whether that means "skip" (a trusted root must exist) or
+ * "keep lexical form" (see canonicalizeWindowsPathTailTolerant).
+ */
+function canonicalizeWindowsPathNative(p: string): string | undefined {
+	if (process.platform !== 'win32') return p;
+	try {
+		const native = fsSync.realpathSync.native(p);
+		return native.startsWith(String.fromCharCode(92, 92, 63, 92))
+			? native.slice(4)
+			: native;
+	} catch {
+		return undefined;
+	}
+}
+
+function canonicalizeWindowsPath(p: string): string {
+	return canonicalizeWindowsPathNative(p) ?? p;
+}
+
+/**
+ * Windows: canonicalize a WRITE TARGET that may not exist yet — the common
+ * case for a write-authority check. realpathSync.native fails on a missing
+ * leaf, which would leave an 8.3 short-form target unexpanded while the
+ * (existing) worktree roots are canonicalized long-form, so the two sides
+ * can never lexically match and every not-yet-existing in-worktree write is
+ * denied (windows CI, guardrails-worktree-authority). Canonicalize the
+ * nearest EXISTING ancestor instead and re-append the missing tail. A
+ * symlink/junction ancestor is resolved through, so a target chained out of
+ * every trusted root still fails to match and is denied as before.
+ */
+function canonicalizeWindowsPathTailTolerant(p: string): string {
+	if (process.platform !== 'win32') return p;
+	const tail: string[] = [];
+	let probe = p;
+	for (;;) {
+		const native = canonicalizeWindowsPathNative(probe);
+		if (native !== undefined) {
+			return tail.length === 0 ? native : path.join(native, ...tail.reverse());
+		}
+		const parent = path.dirname(probe);
+		if (parent === probe) return p;
+		tail.push(path.basename(probe));
+		probe = parent;
+	}
+}
+
+function isValidWorktreeRecord(
+	repoRootRecord: WorktreeListRecord | undefined,
+	record: WorktreeListRecord,
+): boolean {
+	if (record === repoRootRecord) {
+		try {
+			return fsSync.statSync(path.join(record.path, '.git')).isDirectory();
+		} catch {
+			return false;
+		}
+	}
+	if (record.attributes.has('bare')) return false;
+	const dotGitPath = path.join(record.path, '.git');
+	let dotGitStat: fsSync.Stats;
+	try {
+		dotGitStat = fsSync.lstatSync(dotGitPath);
+	} catch {
+		return false;
+	}
+	if (!dotGitStat.isFile()) return false;
+	let gitDirLine: string;
+	try {
+		gitDirLine = fsSync.readFileSync(dotGitPath, 'utf8').trim();
+	} catch {
+		return false;
+	}
+	if (!gitDirLine.startsWith('gitdir:')) return false;
+	const gitDirRef = gitDirLine.slice('gitdir:'.length).trim();
+	if (!gitDirRef) return false;
+	const gitDirPath = path.isAbsolute(gitDirRef)
+		? gitDirRef
+		: path.resolve(record.path, gitDirRef);
+	// REPO-ANCHOR leg: the referenced registration must live inside THIS
+	// repository's .git/worktrees/. The round-trip leg below alone would also
+	// accept a DIFFERENT repository's real linked worktree (its .git file
+	// round-trips against its own registration), which would re-root
+	// containment onto an unrelated checkout.
+	let registrationGitdirFile: string;
+	try {
+		registrationGitdirFile = fsSync.realpathSync(
+			path.join(gitDirPath, 'gitdir'),
+		);
+	} catch {
+		return false;
+	}
+	if (repoRootRecord) {
+		// Canonicalize the repo .git dir (realpath) before the lexical
+		// containment check: git's porcelain output may carry 8.3 short-name
+		// or differently-cased segments on Windows, and realpath on the
+		// registration file alone would then mismatch the raw-path root.
+		let worktreesRoot: string;
+		try {
+			worktreesRoot = path.join(
+				fsSync.realpathSync(path.join(repoRootRecord.path, '.git')),
+				'worktrees',
+			);
+		} catch {
+			return false;
+		}
+		if (!isPathIdentityWithin(registrationGitdirFile, worktreesRoot)) {
+			return false;
+		}
+	}
+	// ROUND-TRIP leg: the registration's gitdir file must name this root's
+	// .git path back. This proves the pair is mutually consistent, which
+	// rejects the 3-file forgery (gitdir pointing at a dir with no
+	// cooperating .git file) and registrations naming unrelated repos.
+	// SCOPE: it does NOT reject a cooperative forgery where the target
+	// directory also contains an attacker-written .git file — git itself
+	// cannot distinguish that from a real `git worktree add`, and every
+	// anchor leg lives in .git/ which the repo's own content can write.
+	// Worktree trust is therefore git-native trust, bounded by the
+	// precondition that .git/ is not attacker-writable.
+	let backReference: string;
+	try {
+		backReference = fsSync.readFileSync(registrationGitdirFile, 'utf8').trim();
+	} catch {
+		return false;
+	}
+	try {
+		return pathIdentitiesEqual(
+			fsSync.realpathSync(dotGitPath),
+			fsSync.realpathSync(backReference),
+		);
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Returns a list of absolute, realpath-normalized worktree roots for the given working directory.
+ * Cached in gitWorktreeCache.
+ *
+ * Only roots that pass back-anchor validation are returned: `bare` records
+ * are skipped (their git dir would otherwise become a writable trusted root
+ * whose hooks/config have no `.git` path segment), and a record whose
+ * registration cannot be round-tripped back to this repository is rejected —
+ * closing registrations whose target has no cooperating `.git` pointer and
+ * registrations naming other repositories. Residual (git-native): a target
+ * directory that already holds a `.git` pointer from earlier git history
+ * (moved/copied/pruned worktree folders) still validates, because git
+ * itself cannot distinguish that from a real `git worktree add`.
+ */
+export function canonicalizeWindowsPathPublic(p: string): string {
+	return canonicalizeWindowsPath(p);
+}
+
+export function canonicalizeWindowsPathTailTolerantPublic(p: string): string {
+	return canonicalizeWindowsPathTailTolerant(p);
+}
+
+export function getLinkedGitWorktrees(dir: string): string[] {
+	const cached = gitWorktreeCache.get(dir);
+	if (cached !== undefined) {
+		return cached;
+	}
+
+	const worktrees: string[] = [];
+	try {
+		const output = execFileSync(
+			resolveGitExecutable(),
+			['worktree', 'list', '--porcelain'],
+			{
+				cwd: dir,
+				encoding: 'utf8',
+				stdio: ['ignore', 'pipe', 'ignore'],
+				timeout: 1500,
+				maxBuffer: 4 * 1024 * 1024,
+				windowsHide: true,
+				env: gitEnvWithoutRepoRedirectors(),
+			},
+		);
+
+		const records = parseWorktreeListPorcelain(output);
+		const repoRootRecord = records[0];
+		for (const record of records) {
+			if (!isValidWorktreeRecord(repoRootRecord, record)) {
+				continue;
+			}
+			const native = canonicalizeWindowsPathNative(record.path);
+			if (native === undefined) {
+				// A root that cannot be natively realpath'd is not a verified
+				// directory; failing closed here beats trusting a lexical path.
+				continue;
+			}
+			worktrees.push(native);
+		}
+	} catch {
+		// Not a git repository or git command failed
+	}
+
+	gitWorktreeCache.set(dir, worktrees);
+	return worktrees;
+}
+
+/**
  * Clears all guardrails caches.
  * Use this for test isolation or when guardrails config reloads at runtime.
  */
 export function clearGuardrailsCaches(): void {
 	pathNormalizationCache.clear();
 	globMatcherCache.clear();
+	gitWorktreeCache.clear();
 }
 
 /**
@@ -331,7 +613,10 @@ const NON_WRITING_SWARM_RULES = Object.fromEntries(
 export const DEFAULT_AGENT_AUTHORITY_RULES: Record<string, AgentRule> = {
 	// Opencode native built-in agents — pass through with no swarm write restrictions.
 	// Opencode's own permission system governs what these agents may write; the swarm
-	// authority layer must not add further constraints on top of it.
+	// authority layer must not add further constraints on top of it. EXCEPTION (#3120):
+	// built-in verifier-config globs still deny for these roles (see the
+	// AUTHORITY_VERIFIER_CONFIG check ahead of the role-policy paths) — the ignore
+	// file class is owner policy for the verification system, not a swarm capability.
 	build: {},
 	plan: {},
 	general: {},
@@ -459,6 +744,20 @@ export const DEFAULT_AGENT_AUTHORITY_RULES: Record<string, AgentRule> = {
 };
 
 /**
+ * #3606 test seam for the ancestor lstat walk: suites inject lstat
+ * outcomes (non-ENOENT failures, symlink stats) for workspaces that do
+ * not exist on the host, keeping the denial-rendering pins
+ * host-independent. Production callers get the real `fsSync.lstatSync`
+ * (arrow-wrapped so the single-arg overload keeps its `Stats` return —
+ * `.bind` would widen it to the options-overload union).
+ */
+export const _internals: {
+	lstatSync: (path: fsSync.PathLike) => fsSync.Stats;
+} = {
+	lstatSync: (ancestorPath) => fsSync.lstatSync(ancestorPath),
+};
+
+/**
  * Checks whether a write target path (or any ancestor strictly inside cwd)
  * is a symlink. Writing through a symlink can redirect the write to a
  * location outside the working directory, bypassing scope containment.
@@ -476,6 +775,38 @@ export const DEFAULT_AGENT_AUTHORITY_RULES: Record<string, AgentRule> = {
  *
  * @returns A block reason string if a symlink is detected, null if all clear.
  */
+/**
+ * #3606 D15: compose an ancestor denial within a whole-message bound of 320.
+ * The ancestor is home-redacted (redactPath) and sanitized; the error detail
+ * renders the error CODE only (never String(err) — the raw message embeds
+ * paths); the class text is preserved inside the bound.
+ */
+function renderAncestorDenial(
+	kind: 'lstat-failed' | 'symlink-junction',
+	ancestor: string,
+	err?: unknown,
+): string {
+	// F-22 (PR #3651 review): the ancestor detail is capped harder than the
+	// whole-message bound so the trailing class text survives the 320-char
+	// compose (a 280-char ancestor previously consumed the budget and the
+	// message ended mid-class).
+	const safeAncestor = sanitizeDiagnosticText(redactPath(ancestor), 200);
+	if (kind === 'lstat-failed') {
+		const code =
+			(err as NodeJS.ErrnoException | undefined)?.code ??
+			(err instanceof Error ? err.name : 'UNKNOWN');
+		const safeCode = sanitizeDiagnosticText(code, 40);
+		return sanitizeDiagnosticText(
+			`WRITE BLOCKED: lstat failed on "${safeAncestor}": ${safeCode} — refusing write on unverifiable path`,
+			320,
+		);
+	}
+	return sanitizeDiagnosticText(
+		`WRITE BLOCKED: "${safeAncestor}" is a symlink/junction — writing through a symlink or junction could redirect the write outside the working directory`,
+		320,
+	);
+}
+
 export function checkWriteTargetForSymlink(
 	targetPath: string,
 	cwd: string,
@@ -504,17 +835,17 @@ export function checkWriteTargetForSymlink(
 	}
 
 	for (const ancestor of ancestors) {
-		let stat: ReturnType<typeof fsSync.lstatSync> | null = null;
+		let stat: fsSync.Stats | null = null;
 		try {
-			stat = fsSync.lstatSync(ancestor);
+			stat = _internals.lstatSync(ancestor);
 		} catch (err: unknown) {
 			const code = (err as NodeJS.ErrnoException).code;
 			if (code === 'ENOENT') continue; // not yet created — OK for writes
 			// Unexpected error: fail closed
-			return `WRITE BLOCKED: lstat failed on "${ancestor}": ${String(err)} — refusing write on unverifiable path`;
+			return renderAncestorDenial('lstat-failed', ancestor, err);
 		}
-		if (stat.isSymbolicLink()) {
-			return `WRITE BLOCKED: "${ancestor}" is a symlink/junction — writing through a symlink or junction could redirect the write outside the working directory`;
+		if (stat?.isSymbolicLink()) {
+			return renderAncestorDenial('symlink-junction', ancestor);
 		}
 	}
 
@@ -700,6 +1031,37 @@ function denyAuthority(
 	const safeAgent = sanitizeDiagnosticText(agent, 96);
 	const safePath = sanitizeDiagnosticText(normalizedPath, 320);
 	const safeDetail = sanitizeDiagnosticText(input.detail, 640);
+	// #3587 (v2): the REASON's path slot stays WORKSPACE-RELATIVE (the
+	// pre-change display — escaping-write pins match the ../shape, so a
+	// resolved-absolute render is wrong here) with two home-fold rules: an
+	// ABSOLUTE normalizedPath (invalid-path arm, cross-drive arm) folds via
+	// redactPath; an ESCAPING relative path (../ prefix — provably outside
+	// the workspace, so a home/Users segment there is the real profile root,
+	// not a workspace dir name) folds that segment to ~. Ordinary relative
+	// and non-home absolute paths render unchanged. The structured `path`
+	// field (consumed by scope-guard and the audit channel) keeps its
+	// pre-change sanitized value. The invalid-path arm passes the RAW caller
+	// input (pre-normalization, backslashes on win32), so the display source
+	// is slash-normalized first — otherwise `..\Users\<name>\…` shapes dodge
+	// both fold branches (#3587 review round).
+	const displaySource = normalizedPath.replace(/\\/g, '/');
+	// #3587 review round: the escaping probe runs on the NORMALIZED form so
+	// non-canonical spellings (`./..`, `src/../..`) share the message
+	// channel's fold decision — same-class disagreement, killed in the
+	// helper first.
+	const escapingProbe = path.posix.normalize(displaySource);
+	// Non-escaping displays always route through the LEXICAL redactPath
+	// (pre-change host-normalized form on non-profile shapes), so a
+	// Windows-profile spelling folds even on POSIX hosts where `C:/…` is not
+	// path-absolute.
+	let reasonDisplay = redactPath(displaySource);
+	if (escapingProbe.startsWith('../')) {
+		reasonDisplay = escapingProbe.replace(
+			/(^|\/)(?:home|Users)\/[^/]+/g,
+			'$1~',
+		);
+	}
+	const safeReasonPath = sanitizeDiagnosticText(reasonDisplay, 320);
 	return {
 		allowed: false,
 		code: input.code,
@@ -708,7 +1070,7 @@ function denyAuthority(
 		path: safePath,
 		agent: safeAgent,
 		reason: sanitizeDiagnosticText(
-			`${input.code}: Path blocked: ${safeDetail} [agent=${safeAgent}; path=${safePath}]`,
+			`${input.code}: Path blocked: ${safeDetail} [agent=${safeAgent}; path=${safeReasonPath}]`,
 			1024,
 		),
 		recovery: input.recovery,
@@ -832,25 +1194,132 @@ export function checkFileAuthorityWithRules(
 	// below. Comparing filesystem roots catches this universally: POSIX
 	// systems only have root `/`, so roots only differ when the target is
 	// on a different Windows drive.
+	let effectiveDir = dir;
+	// The caller cwd/target may be in 8.3 short-name form (GitHub Windows
+	// runners report TEMP as C:\Users\RUNNER~1\...) while git reports
+	// long-form roots; canonicalize before every lexical comparison. The
+	// target may not exist yet (write check), so canonicalization walks to
+	// the nearest existing ancestor instead of giving up on the leaf.
+	const nativeTarget2 = canonicalizeWindowsPathTailTolerant(resolvedTarget);
+	// Re-root to the LONGEST (most specific) matching worktree root, not the
+	// first: `git worktree list` always lists the main worktree first, so a
+	// first-match loop re-roots targets inside a NESTED linked worktree to the
+	// outer root, and deny rules resolved against the wrong root silently stop
+	// matching (issue #3368 review, F-001).
+	const matchWorktreeRoot = (): string | undefined => {
+		const worktrees = getLinkedGitWorktrees(dir);
+		let best: { wt: string; rel: string } | undefined;
+		for (const wt of worktrees) {
+			const relToWt = path.relative(wt, nativeTarget2).replace(/\\/g, '/');
+			if (
+				relToWt !== '..' &&
+				!relToWt.startsWith('../') &&
+				!isOnDifferentFilesystemRoot(nativeTarget2, wt)
+			) {
+				if (!best || wt.length > best.wt.length) {
+					best = { wt, rel: relToWt };
+				}
+			}
+		}
+		if (best) {
+			effectiveDir = best.wt;
+			normalizedPath = best.rel;
+		}
+		return best?.wt;
+	};
+	// A re-rooted target whose lexical chain crosses a symlink/junction inside
+	// the matched worktree can redirect a NEW-file write anywhere (the target
+	// itself does not exist yet, so realpath normalization cannot catch it).
+	// Walk the ancestors between the matched root and the target and deny on
+	// the first planted link, mirroring checkWriteTargetForSymlink's walk but
+	// bounded by the re-rooted base instead of the session cwd.
+	const findPlantedLinkBelow = (root: string): string | null => {
+		const ancestors: string[] = [];
+		let current = nativeTarget2;
+		while (true) {
+			const rel = path.relative(root, current);
+			if (
+				rel === '' ||
+				rel === '..' ||
+				rel.startsWith(`..${path.sep}`) ||
+				path.isAbsolute(rel)
+			)
+				break;
+			ancestors.push(current);
+			const parent = path.dirname(current);
+			if (parent === current) break;
+			current = parent;
+		}
+		for (const ancestor of ancestors) {
+			try {
+				if (fsSync.lstatSync(ancestor).isSymbolicLink()) return ancestor;
+			} catch (err: unknown) {
+				const code = (err as NodeJS.ErrnoException).code;
+				if (code === 'ENOENT') continue;
+				return ancestor;
+			}
+		}
+		return null;
+	};
 	if (isOnDifferentFilesystemRoot(resolvedTarget, dir)) {
-		return denyAuthority(agentName, normalizedPath, {
-			code: 'AUTHORITY_ROOT_ESCAPE',
-			layer: 'containment',
-			rule: 'same-filesystem-root',
-			detail: 'target is on a different drive or filesystem root',
-		});
-	}
-	if (normalizedPath === '..' || normalizedPath.startsWith('../')) {
-		return denyAuthority(agentName, normalizedPath, {
-			code: 'AUTHORITY_ROOT_ESCAPE',
-			layer: 'containment',
-			rule: 'workspace-containment',
-			detail: 'target resolves outside the working directory',
-		});
+		// Even across roots, check if target resides in a linked Git worktree of dir
+		const matchedWorktree = matchWorktreeRoot();
+
+		if (!matchedWorktree) {
+			return denyAuthority(agentName, normalizedPath, {
+				code: 'AUTHORITY_ROOT_ESCAPE',
+				layer: 'containment',
+				rule: 'same-filesystem-root',
+				detail: 'target is on a different drive or filesystem root',
+			});
+		}
+		const plantedLink = findPlantedLinkBelow(matchedWorktree);
+		if (plantedLink) {
+			return denyAuthority(agentName, normalizedPath, {
+				code: 'AUTHORITY_ROOT_ESCAPE',
+				layer: 'containment',
+				rule: 'workspace-containment',
+				detail: `re-rooted target crosses symlink/junction "${sanitizeDiagnosticText(redactPath(plantedLink), 320)}" inside the matched worktree`,
+			});
+		}
+	} else if (normalizedPath === '..' || normalizedPath.startsWith('../')) {
+		// Check whether target resides in a linked Git worktree of dir
+		const matchedWorktree = matchWorktreeRoot();
+
+		if (!matchedWorktree) {
+			return denyAuthority(agentName, normalizedPath, {
+				code: 'AUTHORITY_ROOT_ESCAPE',
+				layer: 'containment',
+				rule: 'workspace-containment',
+				detail: 'target resolves outside the working directory',
+			});
+		}
+		const plantedLink = findPlantedLinkBelow(matchedWorktree);
+		if (plantedLink) {
+			return denyAuthority(agentName, normalizedPath, {
+				code: 'AUTHORITY_ROOT_ESCAPE',
+				layer: 'containment',
+				rule: 'workspace-containment',
+				detail: `re-rooted target crosses symlink/junction "${sanitizeDiagnosticText(redactPath(plantedLink), 320)}" inside the matched worktree`,
+			});
+		}
 	}
 
-	const rules =
+	const classifiedRules =
 		effectiveRules[normalizedAgent] ?? effectiveRules[strippedAgent];
+	// With authority disabled, an agent that has no classification (a custom or
+	// host agent such as `sre-planner`) is not denied merely for being unknown.
+	// It still passes through every hard-policy check below (universal deny,
+	// control-state protection, canonical capabilities) and then hits the
+	// authorityEnabled === false allow. The literal `unknown` name is the
+	// fail-open sentinel for a session registered without an agent name
+	// (state.ts ensureAgentSession), so it keeps the unknown-agent denial.
+	const unclassifiedWhileDisabled =
+		!classifiedRules &&
+		options.authorityEnabled === false &&
+		normalizedAgent !== 'unknown';
+	const rules: AgentRule | undefined =
+		classifiedRules ?? (unclassifiedWhileDisabled ? {} : undefined);
 	if (!rules) {
 		return denyAuthority(agentName, normalizedPath, {
 			code: 'AUTHORITY_UNKNOWN_AGENT',
@@ -862,15 +1331,17 @@ export function checkFileAuthorityWithRules(
 	const flavor = getPathFlavor();
 	const matchesPathPrefix = (candidate: string, prefix: string): boolean =>
 		isPathIdentityWithin(
-			path.resolve(dir, candidate),
-			path.resolve(dir, prefix),
+			path.resolve(effectiveDir, candidate),
+			path.resolve(effectiveDir, prefix),
 			flavor,
 		);
 	const matchesGlob = (glob: string): boolean =>
 		getGlobMatcher(glob)(normalizedPath);
 
 	for (const prefix of options.universalDenyPrefixes ?? []) {
-		if (matchesAuthorityDenyPrefix(normalizedPath, prefix, dir, flavor)) {
+		if (
+			matchesAuthorityDenyPrefix(normalizedPath, prefix, effectiveDir, flavor)
+		) {
 			return denyAuthority(agentName, normalizedPath, {
 				code: 'AUTHORITY_UNIVERSAL_DENY',
 				layer: 'universal-deny',
@@ -896,22 +1367,45 @@ export function checkFileAuthorityWithRules(
 				'coder writes to repository control state (.git/.swarm) are always protected',
 		});
 	}
-	const isSwarmRole = Object.hasOwn(AUTHORITY_ROLE_CAPABILITIES, strippedAgent);
-	if (isSwarmRole) {
-		const matchedVerifier = [
-			...BUILT_IN_VERIFIER_CONFIG_GLOBS,
-			...(options.verifierConfigPaths ?? []),
-		].find(matchesGlob);
-		if (matchedVerifier) {
-			return denyAuthority(agentName, normalizedPath, {
-				code: 'AUTHORITY_VERIFIER_CONFIG',
-				layer: 'protected-path',
-				rule: `verifier-config:${matchedVerifier}`,
-				detail: `Path blocked (glob ${matchedVerifier}): swarm roles cannot write verifier-owned configuration in the config zone`,
-			});
-		}
+	// Agents admitted only because authority is disabled were denied outright
+	// before authority.enabled:false admitted them, so through this file-write
+	// authority check they never gain write access to repository control state.
+	// (Shell-command writes are decided by the shell path in tool-before.ts.)
+	if (
+		unclassifiedWhileDisabled &&
+		isPolicyProtectedPath(normalizedPath, {
+			includeDefaults: false,
+			additional: ['.git', '.swarm'],
+		})
+	) {
+		return denyAuthority(agentName, normalizedPath, {
+			code: 'AUTHORITY_PROTECTED_PATH',
+			layer: 'protected-path',
+			rule: 'unclassified-agent-control-state-protection',
+			detail:
+				'unclassified agent writes to repository control state (.git/.swarm) are always protected',
+		});
 	}
-
+	// #3120 LEG 1: verifier-config globs are owner policy for the verification
+	// system itself (the secretscan Stage-A gate trusts .secretscanignore, see
+	// #3107/PR #3116), so the deny is a property of the protected FILE CLASS,
+	// not a capability of swarm roles. It therefore applies to EVERY agent —
+	// including the OpenCode-native roles deliberately exempted from swarm
+	// write restrictions below (general/build/plan/explore carry {} rule maps)
+	// — and it stays ahead of the authorityEnabled === false allow so the
+	// other knob cannot switch it off either.
+	const matchedVerifier = [
+		...BUILT_IN_VERIFIER_CONFIG_GLOBS,
+		...(options.verifierConfigPaths ?? []),
+	].find(matchesGlob);
+	if (matchedVerifier) {
+		return denyAuthority(agentName, normalizedPath, {
+			code: 'AUTHORITY_VERIFIER_CONFIG',
+			layer: 'protected-path',
+			rule: `verifier-config:${matchedVerifier}`,
+			detail: `Path blocked (glob ${matchedVerifier}): verifier-owned configuration in the config zone is protected for every agent role (#3120)`,
+		});
+	}
 	// Canonical non-writing capabilities are immutable hard policy. User config
 	// may further restrict direct-write roles, but cannot turn a read-only or
 	// dedicated-tool-only role into a raw writer (including prefixed roles).
@@ -946,7 +1440,19 @@ export function checkFileAuthorityWithRules(
 		isCoderAgent &&
 		options.declaredScope != null &&
 		options.declaredScope.length > 0 &&
-		isPathWithinDeclaredScope(normalizedPath, options.declaredScope, dir);
+		// Declared scope is evaluated once, in the same coordinate system as
+		// every other post-containment rule (re-rooted normalizedPath against
+		// effectiveDir). The removed second disjunct tested the RAW caller
+		// string against the ORIGINAL dir — a different coordinate system that
+		// could grant declared-scope allow for a path the containment layer
+		// never matched (issue #3368 review, F-006); every production caller
+		// passes declaredScope entries covering the same file the
+		// normalized operands already resolve.
+		isPathWithinDeclaredScope(
+			normalizedPath,
+			options.declaredScope,
+			effectiveDir,
+		);
 	if (pathIsInDeclaredScope) {
 		return {
 			allowed: true,

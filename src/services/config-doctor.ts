@@ -20,6 +20,7 @@ import {
 	findRetiredEpicConfigKeys,
 	GATE_CONFIG_KNOWN_SECTION_KEYS,
 	GateConfigSchema,
+	HooksConfigSchema,
 	PluginConfigSchema,
 	retiredEpicKeyReplacement,
 	stripKnownSwarmPrefix,
@@ -147,6 +148,16 @@ export const DEFAULT_FLIPS: ReadonlyArray<{
 		sinceVersion: 3,
 		evidence: 'docs/defaults-governance.md',
 	},
+	{
+		field: 'lane_liveness_watchdog.enabled',
+		v7Default: 'false (opt-in)',
+		v8Default:
+			'true — a busy PR lane past the 30-minute reachability floor settles as liveness-dead with its host session aborted (#3313)',
+		killSwitch: 'lane_liveness_watchdog.enabled: false',
+		preset: 'conservative',
+		sinceVersion: 3,
+		evidence: 'docs/defaults-governance.md',
+	},
 ];
 
 /**
@@ -180,6 +191,14 @@ function levenshteinDistance(a: string, b: string): number {
 }
 
 /**
+ * Name a value's type for a finding message. `typeof` alone reports an array
+ * as "object", which contradicts a "must be an object" message.
+ */
+function describeValueType(value: unknown): string {
+	return Array.isArray(value) ? 'array' : typeof value;
+}
+
+/**
  * Emit a type-mismatch finding for object-type config keys.
  */
 function emitObjectTypeMismatch(
@@ -194,7 +213,7 @@ function emitObjectTypeMismatch(
 		findings.push({
 			id: `invalid-${key}-type`,
 			title: `Invalid ${key} type`,
-			description: `"${key}" must be an object, got ${typeof value}`,
+			description: `"${key}" must be an object, got ${describeValueType(value)}`,
 			severity: 'error',
 			path: key,
 			currentValue: value,
@@ -1291,25 +1310,23 @@ function validateConfigKey(path: string, value: unknown): ConfigFinding[] {
 	switch (path) {
 		// ── EXISTING SPECIFIC VALIDATION CASES ──
 
-		// Check deprecated fields
+		// Top-level `agents` is a current, documented key: it is merged into every
+		// swarm at runtime (src/agents/index.ts createAgents) and docs/configuration.md
+		// lists it as the default-swarm override. A `swarms.<id>.agents` entry
+		// replaces it per role, but neither form is deprecated, so no finding.
 		case 'agents': {
-			if (value !== undefined) {
-				// Legacy agents config - warn about migration
+			// null and undefined never reach this case: walkConfigAndValidate returns
+			// early on both, so only a defined, non-null value is checked here.
+			if (typeof value !== 'object' || Array.isArray(value)) {
+				const kind = describeValueType(value);
 				findings.push({
-					id: 'deprecated-agents-config',
-					title: 'Deprecated agents configuration',
-					description:
-						'The "agents" field is deprecated. Use "swarms" instead for multi-swarm support.',
-					severity: 'warn',
+					id: 'invalid-agents-type',
+					title: 'Invalid agents type',
+					description: `"agents" must be an object keyed by agent name, got ${kind}`,
+					severity: 'error',
 					path: 'agents',
 					currentValue: value,
 					autoFixable: false,
-					proposedFix: {
-						type: 'remove',
-						path: 'agents',
-						description: 'Remove deprecated agents config - use swarms instead',
-						risk: 'low',
-					},
 				});
 			}
 			break;
@@ -1476,16 +1493,10 @@ function validateConfigKey(path: string, value: unknown): ConfigFinding[] {
 				value !== null
 			) {
 				const hooks = value as Record<string, unknown>;
-				// Check for deprecated/unknown hook fields
-				const validHooks = [
-					'system_enhancer',
-					'compaction',
-					'agent_activity',
-					'delegation_tracker',
-					'agent_awareness_max_chars',
-					'delegation_gate',
-					'delegation_max_chars',
-				];
+				// Check for deprecated/unknown hook fields. Derived from the schema so a
+				// newly added hooks.* key can never be flagged as unknown (and removed
+				// by --fix) while HooksConfigSchema accepts it.
+				const validHooks: string[] = Object.keys(HooksConfigSchema.shape);
 				for (const hookName of Object.keys(hooks)) {
 					if (!validHooks.includes(hookName)) {
 						findings.push({
@@ -1572,7 +1583,7 @@ function validateConfigKey(path: string, value: unknown): ConfigFinding[] {
 					findings.push({
 						id: 'invalid-swarms-type',
 						title: 'Invalid swarms type',
-						description: `"swarms" must be an object, got ${typeof value}`,
+						description: `"swarms" must be an object, got ${describeValueType(value)}`,
 						severity: 'error',
 						path: 'swarms',
 						currentValue: value,

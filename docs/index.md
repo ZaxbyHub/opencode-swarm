@@ -50,6 +50,7 @@ OpenCode Swarm is an architect-centric agentic swarm plugin for OpenCode. It coo
 | [Consensus Mining](consensus-mining.md) | Mining existing evidence into proposals-only consensus reports, thresholds, truncation, reproducibility |
 | [Work Complete Council](council/README.md) | Optional consensus gate for verifying phase completion |
 | [Troubleshooting](troubleshooting/recovery-guide.md) | Session recovery, common error scenarios |
+| [Coder Settlement Recovery](coder-settlement-recovery.md) | `/swarm recover` for interrupted coder dispatches, retained `refs/swarm/coder-settlements/` backups, the advisory `RECOVERABLE_ORPHAN_COMMIT` report, settlement error codes |
 
 ### Architecture and Design
 

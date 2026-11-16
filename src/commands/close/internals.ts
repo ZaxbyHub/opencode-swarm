@@ -33,6 +33,24 @@ export const _internals = {
 		undefined as unknown as typeof import('./fs-helpers.js').unlinkActiveStateFileWithRetry,
 	unlink: fs.unlink,
 	unlinkSidecarSync: fsSync.unlinkSync,
+	// #3260-B: write-denied discriminator for the unlink retry. True ONLY for
+	// explicitly classified permission errors (EACCES/EPERM) from an access
+	// W_OK probe — ENOENT and every other access outcome mean "not denied"
+	// (the retry schedule continues), so a transient lock on a readable file
+	// never fails fast and a missing file (ENOENT) never misclassifies as a
+	// permanent hold.
+	isWriteDenied: ((targetPath: string): boolean => {
+		try {
+			fsSync.accessSync(targetPath, fsSync.constants.W_OK);
+			return false;
+		} catch (error) {
+			const code = (error as NodeJS.ErrnoException).code;
+			return code === 'EACCES' || code === 'EPERM';
+		}
+	}) as (targetPath: string) => boolean,
+	// #3260-B: injectable clock for the clean-stage admission deadline
+	// (tests stub this member instead of touching Date).
+	now: (() => Date.now()) as () => number,
 	sleep:
 		undefined as unknown as typeof import('../../utils/bun-compat.js').sleep,
 	collectGarbageBestEffort:
@@ -46,8 +64,16 @@ export const _internals = {
 		undefined as unknown as typeof import('./orchestrator.js').detectFullAuto,
 	guaranteeAllPlansComplete:
 		undefined as unknown as typeof import('./finalize-stage.js').guaranteeAllPlansComplete,
+	// #3427: the align stage's repository probe rides the shared async
+	// reader (same GitRepositoryStatus result vocabulary the sync
+	// branch.getGitRepositoryStatus produced, so the reason-specific skip
+	// diagnostics survive) — the slot keeps its name; only the return type
+	// became a Promise. Legacy sync stubs keep working at runtime (awaiting
+	// a plain value is a no-op) — note the test tree is NOT typechecked
+	// (tsconfig includes src/ only), so that tolerance, not the compiler,
+	// is what keeps older sync stubs passing.
 	getGitRepositoryStatus:
-		undefined as unknown as typeof import('../../git/branch.js').getGitRepositoryStatus,
+		undefined as unknown as typeof import('../../commands/git-status-read.js').readGitRepositoryStatusDetailedAsync,
 	// #2953: the seam value is guardResetWithRecheck (installed by
 	// wireCloseInternals) — it takes the wider options (carrying the
 	// confirmed tracked-dirty scope) and returns a result that may carry

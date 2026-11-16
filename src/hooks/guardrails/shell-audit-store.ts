@@ -87,6 +87,8 @@ export interface ShellAuditLimits {
 	maxCommandChars: number;
 	/** Free-text (reason) truncation bound applied at line-shaping time. */
 	maxReasonChars: number;
+	/** Path truncation bound applied at line-shaping time (issue #3495). */
+	maxPathChars: number;
 	/**
 	 * Hard bound on any single whole-file store read. A legacy header-less
 	 * file larger than this migrates through the bounded STREAMING reader
@@ -116,6 +118,7 @@ export const SHELL_AUDIT_LIMITS: ShellAuditLimits = {
 	maxLineBytes: 64 * 1024,
 	maxCommandChars: 4_096,
 	maxReasonChars: 1_024,
+	maxPathChars: 320,
 	migrationMaxBytes: 8 * 1024 * 1024,
 };
 

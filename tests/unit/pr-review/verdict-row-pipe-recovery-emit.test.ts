@@ -84,4 +84,19 @@ describe('verdict_row_pipe_recovery emission (issue #2184 residual)', () => {
 		});
 		expect(events.length).toBe(0);
 	});
+
+	test('issue #3334: a control-character id in a recovered row emits the (invalid-id) sentinel', () => {
+		// The recovery entry feeds warn(), this telemetry event, and the
+		// durable recovery receipt — the id is bounded at the producer, so a
+		// parser-decoded newline can never reach the telemetry payload.
+		withTelemetry(() => {
+			indexVerdictRows(
+				'[REVIEWED] | rec\\nid | CONFIRMED | STRUCTURALLY_PROVEN | HIGH | YES | file.ts:1 | rationale | probe | notes | UNKNOWN | tail with | pipes',
+				'[REVIEWED]',
+			);
+		});
+		expect(events.length).toBe(1);
+		expect(events[0]?.itemId).toBe('(invalid-id)');
+		expect(JSON.stringify(events[0])).not.toMatch(/\\n|[\r\n]/);
+	});
 });

@@ -12,7 +12,7 @@
  * `{ field: Body["field"] }` records; they are vendored here as plain optional fields of the
  * same types (e.g. `SessionCreateInput` is all-optional in the published form).
  *
- * Drift guard: DEFERRED to the #2910 follow-up PR (a check-host-contract v2 digest leg over this corpus, plus the dual-host CI lane); until it lands, type truth rests on this provenance pin (now 2.0.26) and the live-host smoke. See docs/host/v2-hook-inventory.md for the full v1-to-v2 map.
+ * Drift guard: SHIPPED with the #2910 dual-host work — the check-host-contract-v2 digest leg and the dual-host CI lane landed, and the weekly digest plus the vendored-pin freshness detector (scripts/drift-check.ts, reading this header's pin) now guard this corpus. See docs/host/v2-hook-inventory.md for the full v1-to-v2 map.
  *
  * Host-tolerance contract for the session/worktree method surface (issue #3169):
  * the members below are REQUIRED to mirror the published `SessionDomain`/`WorktreeDomain`.
@@ -105,6 +105,29 @@ export interface V2ToolEditor {
 		readonly name: string;
 		readonly description: string;
 	}): void;
+}
+
+/**
+ * v2 `ShellCreateBefore` payload (dist/promise/shell.d.ts @2.0.29). The
+ * `shell` field is the resolved shell PATH the host will execute the
+ * command with (upstream `ShellSelect` resolution) — the authoritative
+ * executor report the write gate keys cmd/powershell grammar inheritance
+ * on (#3346).
+ */
+export interface V2ShellCreateBefore {
+	readonly command: string;
+	readonly cwd: string;
+	readonly timeout: number;
+	readonly shell: string;
+	readonly env: Record<string, string | undefined>;
+}
+
+/** v2 `ShellDomain` (dist/promise/shell.d.ts @2.0.29) — hook payloads inline. */
+export interface V2ShellDomain {
+	readonly hook: <K extends 'create.before'>(
+		event: K,
+		handler: (payload: V2ShellCreateBefore) => Promise<void> | void,
+	) => Promise<unknown> | unknown;
 }
 
 /** v2 `ToolDomain` (dist/promise/tool.d.ts) — hook payloads inline. */
@@ -502,9 +525,33 @@ export interface V2EventDomain {
 	) => AsyncIterable<V2EventEnvelope> | Promise<AsyncIterable<V2EventEnvelope>>;
 }
 
-/** v2 `PermissionDomain` (only used for the v1 ask() bridge, best-effort). */
+/**
+ * v2 `PermissionDomain` (only used for the v1 ask() bridge, best-effort).
+ * `assert` is documented in `@opencode/plugin@2.0.29`
+ * `dist/promise/permission.d.ts` and ABSENT at the 2.0.26 vendored pin —
+ * feature-detected (`typeof === 'function'`) at the call site
+ * (src/host/v2/tools.ts buildPermissionBridge, #3351).
+ */
 export interface V2PermissionDomain {
-	readonly reply?: (input: unknown) => Promise<unknown>;
+	/**
+	 * Ask-side permission assertion (2.0.29+): input
+	 * `{ sessionID: string; agent: string; action: string; resources: string[] }`;
+	 * a resolution grants the request, a rejection denies it.
+	 */
+	assert?: (input: {
+		sessionID: string;
+		agent: string;
+		action: string;
+		resources: string[];
+	}) => Promise<unknown>;
+	/**
+	 * Answer-side RPC `{ requestID, reply, message }` — the host's channel for
+	 * ANSWERING a permission request, not for raising one. The bridge never
+	 * interprets a resolved reply value as a grant (fail-closed; #3351
+	 * decision — grant shapes stay uninterpreted pending live-host
+	 * observation).
+	 */
+	reply?: (input: unknown) => Promise<unknown>;
 	readonly list?: () => Promise<unknown[]>;
 	readonly hook?: (
 		name: 'evaluate',
@@ -529,6 +576,15 @@ export interface V2PluginContext {
 	readonly permission?: V2PermissionDomain;
 	/** Present on 2.0.26 hosts; no Phase 1 code path consumes it (issue #3169). */
 	readonly worktree?: V2WorktreeDomain;
+	/**
+	 * v2 `ShellDomain` (dist/promise/shell.d.ts @2.0.29; the
+	 * `shell.create.before` hook was added upstream 2026-07-29 and is present
+	 * across the vendored 2.0.26 pin). OPTIONAL: hosts predating the domain —
+	 * and the structural-type discipline of this file — treat it as absent.
+	 * Consumed by `registerV2ShellHooks` (src/host/v2/hooks.ts) to observe
+	 * the shell the `shell` tool actually executes (#3346).
+	 */
+	readonly shell?: V2ShellDomain;
 	readonly [key: string]: unknown;
 }
 

@@ -305,7 +305,7 @@ describe('v2 session-client shim (issue #3169 Phase 2)', () => {
 	});
 
 	// #3169 Phase 3 contract flip (full pins in session-client-lane-3169.test.ts).
-	test('AC3 divergent parent directory takes the Phase 3 eager parentless real create', async () => {
+	test('AC3 divergent parent directory takes the Phase 3 eager PARENTED real create', async () => {
 		await withDir(async (directory) => {
 			const laneDirectory = canonicalMkdtemp('swarm-v2-lane-');
 			try {
@@ -317,7 +317,9 @@ describe('v2 session-client shim (issue #3169 Phase 2)', () => {
 				});
 				const createCalls = session.calls.filter((c) => c.op === 'create');
 				expect(createCalls).toHaveLength(1);
+				// Parented create (2.1 resume rule); move pins: *-lane-parent-move.
 				expect(createCalls[0].arg).toEqual({
+					parentID: 'ses_parent',
 					location: { directory: laneDirectory },
 				});
 			} finally {

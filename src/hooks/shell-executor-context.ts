@@ -17,12 +17,37 @@
  * see the payload.
  */
 
-/** cmd.exe switches that may appear before /c or /k (optionally :on/:off). */
-const CMD_SWITCH = String.raw`\/[a-z](?::(?:on|off))?`;
+/**
+ * cmd.exe switches that may appear before /c or /k (optionally :on/:off).
+ * `\/{1,2}` covers the MSYS double-slash spelling (#3491 publication
+ * condition): Git Bash translates `cmd //k "…"` to `/k` when spawning the
+ * native binary (executed ground truth: `cmd //k "copy a b"` copies), so the
+ * authority must select for both spellings.
+ */
+const CMD_SWITCH = String.raw`\/{1,2}[a-z](?::(?:on|off))?`;
 
-/** Statement-position cmd /c declaration (switch-tolerant). */
+/**
+ * cmd.exe binary head, BARE or ABSOLUTE path-qualified (#3539 W6 / RC-8):
+ * `cmd`, `cmd.exe`, `C:\Windows\System32\cmd.exe`, `C:/Windows/System32/cmd.exe`,
+ * `/usr/bin/cmd`, `\Windows\system32\cmd.exe` — case-insensitive (all these
+ * regexes carry /i), optional extension, both separator directions. RELATIVE
+ * spellings (`./cmd`, `somedir\cmd`) deliberately do NOT match: they name
+ * project-local programs, not the Windows shell (the same absolute-only rule
+ * the destructive verb normalizer applies).
+ */
+const CMD_BINARY = String.raw`(?:cmd|(?:[A-Za-z]:)?(?:[\\/][^\s\\/]*)*[\\/]cmd)(?:\.exe)?`;
+
+/**
+ * Statement-position cmd /c or /k declaration (switch-tolerant). #3539
+ * closure F-4: /k parity — `cmd /k copy a b` executes the payload and KEEPS
+ * the shell open (executed ground truth: the copy happens), so the win32
+ * authority must select for it exactly as for /c; the strip prefix below
+ * already modeled `\/[ck]`. #3491 publication condition: `\/{1,2}` also
+ * selects the MSYS double-slash spelling (`cmd //c`, `cmd //k`) — Git Bash
+ * passes the single-slash switch to the native binary (executed GT).
+ */
 export const CMD_WRAPPER_DECLARATION = new RegExp(
-	String.raw`(?:^|[;|&\n])\s*cmd(?:\.exe)?\s+(?:${CMD_SWITCH}\s+)*\/c(?:\s|$)`,
+	String.raw`(?:^|[;|&\n])\s*${CMD_BINARY}\s+(?:${CMD_SWITCH}\s+)*\/{1,2}[ck](?:\s|$)`,
 	'i',
 );
 
@@ -57,16 +82,76 @@ export function declaresWindowsWrapperLoose(command: string): boolean {
  * detected like bare `cmd /c copy a b`.
  */
 export const CMD_BUILTIN_PREFIX = new RegExp(
-	String.raw`(?:(?:^|\s)(?:if\s+(?:not\s+)?exist\s+(?:"[^"]*"|\S+)\s+)|(?:^|[;|&\n])\s*cmd(?:\.exe)?\s+(?:${CMD_SWITCH}\s+)*\/c\s+|(?:^|\s)(?:call|start)\s+)*`,
+	String.raw`(?:(?:^|\s)(?:if\s+(?:not\s+)?exist\s+(?:"[^"]*"|\S+)\s+)|(?:^|[;|&\n])\s*${CMD_BINARY}\s+(?:${CMD_SWITCH}\s+)*\/{1,2}[ck]\s+|(?:^|\s)(?:call|start)\s+)*`,
 	'i',
 );
 
-/** Strip pattern for a cmd /c or /k wrapper with any switches. */
+/** Strip pattern for a cmd /c or /k wrapper with any switches (both slash spellings). */
 export const CMD_STRIP_PREFIX = new RegExp(
-	String.raw`^cmd(?:\.exe)?\s+(?:${CMD_SWITCH}\s+)*\/[ck]\s+`,
+	String.raw`^${CMD_BINARY}\s+(?:${CMD_SWITCH}\s+)*\/{1,2}[ck]\s+`,
 	'i',
 );
 
 /** Strip pattern for a powershell/pwsh -Command/-c wrapper with switches. */
 export const PS_STRIP_PREFIX =
 	/^(?:powershell|pwsh)(?:\.exe)?\s+(?:-[A-Za-z]+\s+)*-(?:command|c)\s+/i;
+
+/**
+ * Observed host shell for the OpenCode 2 `shell` tool (#3346).
+ *
+ * The v2 host resolves the shell a `shell`-tool command actually executes
+ * (user-configured shell, else `$SHELL` when compatible+executable, else on
+ * win32 the first of pwsh → powershell → Git Bash → COMSPEC, else a POSIX
+ * fallback) and REPORTS it to plugins through the
+ * `@opencode/plugin` v2 `ctx.shell.hook("create.before", …)` payload
+ * (`{ command, cwd, timeout, shell, env }`; hook added upstream 2026-07-29,
+ * present across the vendored 2.0.26/2.0.29 pin). `registerV2ShellHooks`
+ * (src/host/v2/hooks.ts) records that authoritative observation here; the
+ * write gate (`resolveWindowsWriteAuthority` call site in
+ * guardrails/tool-before.ts) and `/swarm guardrail explain`
+ * (guardrail-explain-service.ts) read it so both key cmd/powershell grammar
+ * inheritance on the shell the host actually runs instead of the platform.
+ *
+ * Authoritative hook observations ONLY — no environment seeding (plan-critic
+ * r2: a seeded `$SHELL` value treated as authoritative could null the win32
+ * fallback and fail the gate open on the first call, and synchronous PATH
+ * probing would run before any registration timeout exists). Before the
+ * first report the resolver falls back to the platform-keyed interim from
+ * #3326, which is never wider than the pre-#3346 behavior. The v1 host has
+ * no `shell` tool dispatch and never writes this store.
+ */
+let observedHostShell: string | undefined;
+
+/** Record the host-reported shell for the `shell` tool (latest wins). */
+export function recordObservedHostShell(shell: string): void {
+	if (typeof shell !== 'string' || shell.trim() === '') return;
+	observedHostShell = shell;
+}
+
+/** The host-reported shell for the `shell` tool, when one has been observed. */
+export function getObservedHostShell(): string | undefined {
+	return observedHostShell;
+}
+
+/** Test seam: clear the observed host shell. */
+export function resetObservedHostShell(): void {
+	observedHostShell = undefined;
+}
+
+/**
+ * Classify a host-reported shell path into the grammar family the write
+ * detectors should apply for the `shell` tool: a PowerShell-family binary
+ * (powershell/pwsh) or cmd.exe keeps a Windows grammar eligible; ANY other
+ * basename (bash, zsh, sh, dash, ksh, fish, nu, …) is a POSIX-family
+ * executor. Separator-independent basename: the host may report a Windows
+ * path while the gate evaluates under an injected POSIX platform (and vice
+ * versa), so `path.basename` — which is separator-bound to the host — is
+ * never used here (mirrors `basenameAnySep` in shell-write-detect.ts).
+ */
+export function hostShellGrammarFamily(hostShell: string): 'windows' | 'posix' {
+	const leaf = hostShell.split(/[\\/]/).filter(Boolean).pop() ?? hostShell;
+	const name = leaf.replace(/\.exe$/i, '').toLowerCase();
+	return name === 'powershell' || name === 'pwsh' || name === 'cmd'
+		? 'windows'
+		: 'posix';
+}

@@ -115,7 +115,20 @@ detected, statically resolvable write targets are inside `scope_files`; it is
 an advisory and does not grant permission to any other tool. Parse failures,
 dynamic or unresolved targets, path escapes, symlink/junction escapes, and
 destructive or catastrophic command intent are denied. The command is not
-spawned and no scope declaration is persisted.
+spawned and no scope declaration is persisted. Unlike the live shell
+write-scope gate, `scope_validate` does not apply the bare-`rmdir`
+empty-directory exemption: an `rmdir` of a directory outside `scope_files` is
+denied, so this advisory can be more conservative than the gate. The live
+shell write-scope gate unwraps launcher prefixes (`command`, `builtin`,
+`exec`, `timeout`, `stdbuf`) and single-quoted `sh -c` / `bash -c` payloads
+before its checks, so those forms receive the same scope decision as the
+unwrapped spelling. This advisory applies the detectors directly: it
+canonicalizes `command`/`builtin`/`exec`/`env`-wrapped spellings and, since
+PR #3590, routes through the same wrapper preprocessing as the live gate —
+including the `timeout`/`stdbuf` unwrap and single-quoted `sh -c`/`bash -c`
+payload unwrap — so those prefixes receive the SAME decision as the gate
+(previously it did not run that unwrap and could be more permissive for
+them; #3474/#3475).
 
 ### `knowledge_add` (available only under both write gates)
 

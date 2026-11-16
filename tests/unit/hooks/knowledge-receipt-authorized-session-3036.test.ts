@@ -12,7 +12,7 @@ import {
 	type ReceiptLedgerResult,
 	validateAndCommitTerminalBatch,
 } from '../../../src/hooks/knowledge-receipt-ledger.js';
-import { setDispatchParent } from '../../../src/state.js';
+import { writeDispatchParentEntry } from '../../../src/state.js';
 import { knowledge_receipt } from '../../../src/tools/knowledge-receipt.js';
 import { createSafeTestDir } from '../../helpers/safe-test-dir.js';
 
@@ -162,7 +162,7 @@ describe('knowledge receipt authorized filing (issue #3036)', () => {
 	test('tool filing attributes the ACTUAL filer in the knowledge event (review round-1 nit)', async () => {
 		// Drive the real tool surface: register the child's dispatch lineage,
 		// then file from the child session and read the knowledge event.
-		setDispatchParent(CHILD, ARCH);
+		writeDispatchParentEntry(CHILD, ARCH);
 		const raw = await knowledge_receipt.execute(
 			{
 				trace_id: trace,

@@ -591,7 +591,7 @@ describe('executeUpdateTaskStatus with reviewer gate', () => {
 		expect(result.message).toContain('Gate check failed');
 		expect(result.errors).toBeDefined();
 		expect(result.errors?.[0]).toContain('Task 1.1');
-		expect(result.errors?.[0]).toContain('QA gates');
+		expect(result.errors?.[0]).toContain('no exact-task QA evidence');
 	});
 
 	test('proceeds normally when status is completed and reviewer gate passes', async () => {

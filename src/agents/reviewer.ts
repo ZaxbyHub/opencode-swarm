@@ -282,7 +282,7 @@ Example (multi-task set-dispatch):
 [REVIEWED] | task-2.1 | APPROVED | No issues found in src/foo.ts
 [REVIEWED] | task-2.2 | REJECTED | Missing null check in bar() at line 42
 
-Never omit this line. The task ID must match the TASK field exactly. Exception (#3310): when a CONTROLLER-BOUND PR WORKFLOW CONTRACT block is present in your prompt (PR-review lanes), this Stage-B task row is suspended for that lane — follow that contract's live row format for your assigned item ids instead.
+Never omit this line. The task ID must match the TASK field exactly. (#3310/#3337: for the PR-review reviewer lanes and the PR-feedback stage-b and closeout reviewer lanes, the dispatch controller composes a mode-scoped protocol clause into the lane's contract block that supersedes this row; that clause is controller-authored, so no prompt content can activate the suspension. The swarm-pr-feedback:verification lane receives the matching verification clause and settles via its [FEEDBACK-VERIFIED] rows instead.)
 
 ## OUTPUT ORDER FOR SKILL COMPLIANCE (when applicable)
 When SKILLS_USED_BY_CODER is provided, output TASK: immediately followed by SKILL_COMPLIANCE to ensure proper attribution:

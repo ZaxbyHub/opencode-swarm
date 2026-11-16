@@ -125,6 +125,15 @@ export function buildInvariantsOracleExpected(): {
 		'NOTE: src/knowledge/family-migration.ts not found - Check 8 skipped for this path.',
 		'=== Check 9: destructive commands adopt the two-step confirm contract (issue #2946) ===',
 		'Check 9 skipped: no command registry in this tree (fixture tree without the swarm command surface).',
+		// Check 10 (issue #2969): the oracle fixture is a REAL git repo with a
+		// src/ tree (Check 4 needs origin/main; Check 2 needs src/tools), so it
+		// legitimately trips the missing-allowlist fail-close arm — the count
+		// below is 2 (cwd violation + missing raw-write allowlist).
+		'=== Check 10: raw renameSync / raw rm ratchet (crash-consistency allowlist, issue #2969) ===',
+		'ERROR: scripts/raw-write-allowlist.txt not found — the raw-write crash-consistency allowlist is required for Check 10.',
+		'       Regenerate: bun run scripts/check-invariants.ts --regen-raw-write-allowlist',
+		'allowlist entries: 0 (src: 0, tests: 0)',
+		'src arm: 0 file(s), 0 raw renameSync site(s) | tests arm: 0 file(s), 0 raw rm site(s)',
 		'',
 		'=== Summary ===',
 		'Checks run: 1 (subprocess timeout, advisory) | 2 (process.cwd ban) |',
@@ -132,8 +141,9 @@ export function buildInvariantsOracleExpected(): {
 		'            5 (knowledge array dedup guardrail) | 6 (advisory-injection ratchet) |',
 		'            7 (quarantine OWNER/EXPIRY metadata) |',
 		'            8 (family-migration destination lock admission) |',
-		'            9 (destructive-command registry enumeration, #2946)',
-		'1 invariant violation(s) found.',
+		'            9 (destructive-command registry enumeration, #2946) |',
+		'            10 (raw-rename/raw-rm crash-consistency allowlist, #2969)',
+		'2 invariant violation(s) found.',
 	].join('\n');
 	const legacyExpected = [
 		...SIX_CHECK_BLOCK,

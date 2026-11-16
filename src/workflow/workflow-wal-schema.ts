@@ -76,6 +76,8 @@ export interface TaskTerminalWalV1 {
 	qaExempt: boolean;
 	/** Completion used the trusted generation-0 empty-scope settlement path. */
 	readOnlyNoMutation?: boolean;
+	/** Completion admitted through the external-evidence path (#3422). */
+	externalEvidence?: boolean;
 	recordedAt: string;
 }
 
@@ -421,6 +423,7 @@ export function parseTaskTerminalWal(
 		generation: number;
 		qaExempt: boolean;
 		readOnlyNoMutation?: boolean;
+		externalEvidence?: boolean;
 		recordedAt: string;
 		planIdentityHash: string;
 		planEpoch: string;
@@ -454,6 +457,8 @@ export function parseTaskTerminalWal(
 		typeof parsed.qaExempt !== 'boolean' ||
 		(parsed.readOnlyNoMutation !== undefined &&
 			typeof parsed.readOnlyNoMutation !== 'boolean') ||
+		(parsed.externalEvidence !== undefined &&
+			typeof parsed.externalEvidence !== 'boolean') ||
 		typeof parsed.recordedAt !== 'string' ||
 		!Number.isFinite(Date.parse(parsed.recordedAt))
 	) {

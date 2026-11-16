@@ -79,6 +79,10 @@ Honest-class rules:
 **NON-EXECUTABLE criteria.** Some criteria have no meaningful executable check — docs-only changes, host-only behavior (GUI/TUI surfaces a check cannot drive), maintainer product decisions, unavailable external services. For those, write `class: NON-EXECUTABLE(<reason>)` with the closed reason enum `DOCS_ONLY | HOST_ONLY | PRODUCT_DECISION | EXTERNAL_SERVICE_UNAVAILABLE`, replace `argv`/`expect` with **named substitute evidence** (a review artifact, a decision recorded on the issue, a captured external state), and get plan-critic approval for the substitution — never force an artificial executable check; that is the vacuous shape the rule above forbids.
 - `argv` is one command, runnable from the repository root, POSIX-safe, deterministic (use the repo's test-runner flags for hermetic runs — see repo notes). `expect` describes what the **base** leg shows; the head leg's pass condition lives in the check's own exit logic.
 
+### Published acceptance commands
+
+The published `argv:` is the command the trace must prove at both revisions. When it cannot witness the fix, disclose the affected criterion, both commands, and their observed outcomes before asking the maintainer to correct the published criterion.
+
 ### Evidence rules
 
 - Every claim is anchored: permalinks embed the full SHA; before filing, re-verify each claim at that commit and say so in the preamble.
@@ -102,6 +106,43 @@ The core is the required minimum. For issues whose fix has real design surface, 
 - [ ] No vacuous checks; argv runnable from repo root; expect describes the base leg
 - [ ] Program issues: title `[Workstream <letter>] PR n of m`, Sequence section, one issue = one PR
 - [ ] Any NON-EXECUTABLE criterion carries a closed-enum reason and named substitute evidence (not a forced check)
+- [ ] Follow-up issues: passed the necessity gate below, collated into at most two issues per source PR (more needs the maintainer's go-ahead, Priority items excepted), titled `Follow-up from PR #N: <theme>`
+
+### Filing follow-up issues
+
+This section covers work found during a PR review or a PR-feedback round that the PR does not fix. Agents and contributors handle it the same way. Issue-tracer closeouts keep their own full-resolution contract (the issue-tracer skill's `references/full-resolution-contract.md`): a separable concern there is fixed or filed with the user's acknowledgment, and this section does not waive any of its clauses. Collation and the title convention below still apply to issues filed from a trace. Anything the PR introduced is fixed in the PR, not routed here; a small pre-existing item inside the PR's files and scope is fixed only with the maintainer's go-ahead. Nothing is silently dropped. Equally, not every leftover becomes an issue: most review findings are never acted on, and filing all of them turns review noise into backlog noise.
+
+**1. Give every unfixed item exactly one disposition.**
+
+| Disposition | When |
+|---|---|
+| `ABSORB` | An open issue already covers it. Comment on that issue with the new evidence instead of opening a new one. |
+| `FILE` | It passes the necessity gate (step 2) and is Priority, or the maintainer approved it. |
+| `RECORD` | It fails gate 1 or gate 2, or the maintainer declined it. Add a row to the PR body's "Considered, not filed" table (inside `## Summary`) with: the item, the reason, which gate test failed, and a re-evaluation trigger. This is a complete closure. |
+| `ASK` | It needs a product or maintainer decision, it fails only gate 3, or it is an Improvement item awaiting approval. Ask before filing anything; a decline makes it `RECORD` (quote it); an approval makes a gate-3 or Improvement item `FILE`, lands a gate-4 fix in the PR, and sends an unverified item back to investigation. |
+
+`ASK` takes precedence over fixing in the PR when the fix itself needs a product or compatibility decision. `ABSORB` takes precedence over `RECORD` when an open issue already covers the item.
+
+**2. Apply the necessity gate.** `FILE` only when all four hold, or when the maintainer approves an `ASK` proposal. Failing gate 1 or 2 is `RECORD`, except that an unverified item claiming a wedge, fail-open gate, security, or data-loss consequence is `ASK`. Failing only gate 3 makes the item an Improvement proposal (`ASK`). Failing gate 4 means `ABSORB` (already tracked) or `ASK` to fix it in the PR (fixable here), never `RECORD` without the maintainer's decline. A wedge, fail-open gate, security, or data-loss consequence satisfies gate 3.
+
+1. **Verified.** An executed probe or an exact `path:line` source trace proves it on the current head. An `INFERENCE` is never filed.
+2. **Consequential.** There is a concrete, reachable trigger with a correctness, safety or security, data-loss, or workflow-blocking consequence. Coverage gaps, docs, wording, and "could harden" items fail unless they hide a real defect.
+3. **Material.** It is on a hot path, invalidates a gate or contract, or blocks planned work.
+4. **Untracked and not fixable here.** No open issue covers it, and it cannot be fixed in the PR without leaving the PR's files or scope.
+
+**3. Collate the survivors.**
+
+- All `FILE` items from one PR go into one issue titled `Follow-up from PR #<N>: <theme>`, in the executable-contract format above, with at least one acceptance criterion per item, each bound to its own check.
+- Split into a second issue only when the items genuinely need separate PRs. A HIGH-severity item (fail-open gate, security, data loss) may stand alone.
+- More than two follow-up issues from one PR needs the maintainer's go-ahead before filing (Priority items excepted). A standalone HIGH item counts toward the two. Priority items over the budget are still filed, and the overflow is reported.
+
+**4. Respect the two tiers.**
+
+- **Priority** items (a wedge, fail-open gate, security, or data loss) are filed after the closeout review, once the push is published.
+- **Improvement** items that pass the gate are proposed as a list in the final response to the maintainer and filed only once the maintainer approves.
+- Findings about how the review or feedback round was conducted, such as an incomplete ledger or a missed disposition, are `RECORD` unless they block a workflow. This never covers defects in any code, skill text, or gate, changed by the PR or not: PR-introduced ones are fixed in the PR, and a fail-open gate is Priority.
+
+**5. Keep the record true.** A disposition is planned before the closeout review and executed after the push. The published record states it only after it is true on the live artifact: the issue is filed, the comment is posted, or the table row is in the PR body. The swarm-pr-feedback ledger form of this rule is the swarm-pr-feedback skill's `references/followup-dispositions.md`.
 
 ### Repo notes (opencode-swarm)
 
@@ -192,8 +233,12 @@ In diff mode, selection is based on committed branch changes in
 exact array-form command and cwd for each item, the `origin/main` diff base,
 per-item terminal status, bounded output, timing, signal, and cleanup outcome.
 Terminal statuses are `passed`, `failed`, `crashed`, `timed_out`, `missing`,
-and `skipped`; a run containing an unresolved crash, timeout, missing item, or
-skip is `incomplete` rather than a complete pass. Run-level statuses are
+`skipped`, and `output_truncated` (a child whose run completed with no
+timeout and no crash — tree cleanup succeeded, no signal, known exit code —
+but whose bounded stdout/stderr reader missed its deadline; the terminal
+evidence was only partially observed, so the row counts as failed (#3664)); a
+run containing an unresolved crash, timeout, missing item, or skip is
+`incomplete` rather than a complete pass. Run-level statuses are
 `passed`, `failed`, `incomplete`, and `no_op`, with `no_op` reserved for an
 empty diff selection.
 
@@ -399,7 +444,11 @@ fragments into the release notes, so a missing fragment means the PR ships with
 no notes. Escape hatch: `FRAGMENT_CHECK_ENFORCE=0` (soft-warn) applies to
 the CI quality gate only — the PR Standards fragment gate has no soft-warn
 path, so a workflow/skills/`docs/configuration.md` PR missing a fragment is
-blocked regardless. Release-please branches are exempt.
+blocked regardless. Release-please branches are exempt. The hatch soft-warns
+BOTH fragment violations and git infrastructure failures (unusable repository
+root, base-branch probe failures, merge-base/diff failures and timeouts —
+issue #3283); CI never sets it, so the required `quality` context fails closed
+whenever the gate cannot determine the diff instead of silently passing.
 
 **Do not ask for a merge if any check is red.** Fix the issue first.
 
@@ -446,10 +495,11 @@ All tests use `bun:test`. Do not use Jest, Vitest, or any other framework. See `
 Every `bun test` process loads `tests/preload/prod-store-tripwire.ts`, which snapshots the repository root and its `.swarm/` before any test file loads and compares them once all tests have finished. Tests must write only into temp directories (`canonicalMkdtemp`, `createSafeTestDir`) or a `ToolContext` with an explicit directory, never into the checkout:
 
 - a new, removed or changed top-level entry (including creating `.swarm/`) fails the run;
-- a change inside an existing `.swarm/` only prints a `CHECKOUT DRIFT` warning, because some suites still write there (tracked in #3153);
-- `SWARM_TEST_CHECKOUT_DRIFT=enforce|warn|off` sets both checks to one mode, e.g. `enforce` to make `.swarm/` writes fail locally while fixing them;
+- a change inside an existing `.swarm/` fails the run too, in CI and locally;
+- `SWARM_TEST_CHECKOUT_DRIFT=enforce|warn|off` sets both checks to one mode. If you run tests in a checkout where a live opencode-swarm session is writing `.swarm/` state, set `SWARM_TEST_CHECKOUT_DRIFT=warn` so its writes print a `CHECKOUT DRIFT` warning instead of failing your run. `warn` downgrades both checks, so it also stops failing on new top-level entries. The value is matched case-insensitively after trimming, and anything else (including an empty or misspelled value) is treated as `enforce`;
 - a part that cannot be checked (an unreadable root or `.swarm/` directory, a `.swarm/` with more than 20,000 entries) is reported as a warning;
 - writes inside an existing top-level directory such as `src/` or `tests/` are not detected: only top-level names, top-level files and `.swarm/` are compared.
+- the comparison runs 25 ms after the last test, so an un-awaited write a test started still lands in time to be caught; a write that waits on a timer, or takes longer, is not.
 
 The helper is `tests/helpers/checkout-drift.ts`; its wiring is pinned by `tests/helpers/checkout-drift-wiring.test.ts`.
 
@@ -584,8 +634,11 @@ The drift workflow runs `verify-retention` to reject byte-identical consumed
 fragments and to enforce the pending-fragment count limit, reporting the
 14-day add rate and projected days-to-limit (with a `::warning::` under 30
 days). Every release run ends in a `release-health-summary` job that reports
-the cleanup conclusion and emits an `::error::` annotation if the cleanup job
-did not complete.
+the release-please, update-release-notes, and cleanup-release-fragments
+conclusions and emits an `::error::` annotation (plus a job failure) if
+`update-release-notes` did not succeed — a failed producer cannot strand a
+release silently behind a skipped cleanup — or if the cleanup job did not
+complete.
 
 ---
 

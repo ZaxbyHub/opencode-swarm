@@ -82,6 +82,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { advisoryWarn } from '../services/warning-buffer.js';
+import { type BunCompatSubprocess, bunSpawn } from './bun-compat.js';
 
 /** Env var escape hatch — a blocked user can set this without editing files. */
 export const GIT_BINARY_ENV_VAR = 'OPENCODE_SWARM_GIT_BINARY';
@@ -179,12 +180,18 @@ interface Candidate {
 interface ProbeOutcome {
 	accepted: boolean;
 	reason?: string;
+	/**
+	 * #3317: the probe attempt was rejected because its spawn TIMED OUT — an
+	 * unknown, not a definite rejection. A cycle whose attempts are all
+	 * timeouts must not be negative-cached (see `applyProbeResult`).
+	 */
+	timedOut?: boolean;
 }
 
 type ProbeCycleResult =
 	| { outcome: 'accepted'; path: string }
-	| { outcome: 'exhausted-budget' }
-	| { outcome: 'all-rejected' };
+	| { outcome: 'exhausted-budget'; sawTimeout?: boolean }
+	| { outcome: 'all-rejected'; sawTimeout?: boolean };
 
 interface CacheSuccess {
 	kind: 'success';
@@ -413,7 +420,11 @@ function probeCandidate(
 	}
 
 	if (result.error) {
-		return { accepted: false, reason: `spawn failed: ${result.error.message}` };
+		return {
+			accepted: false,
+			reason: `spawn failed: ${result.error.message}`,
+			timedOut: (result.error as NodeJS.ErrnoException).code === 'ETIMEDOUT',
+		};
 	}
 	if (result.status !== 0) {
 		const statusDescription =
@@ -455,6 +466,7 @@ function* probeCycle(
 ): Generator<void, ProbeCycleResult, void> {
 	const start = _internals.now();
 	let budgetExceeded = false;
+	let sawTimeout = false;
 
 	for (const candidate of candidates) {
 		if (_internals.now() - start > TOTAL_BUDGET_MS) {
@@ -469,6 +481,7 @@ function* probeCycle(
 			accepted: result.accepted,
 			reason: result.reason,
 		});
+		if (result.timedOut) sawTimeout = true;
 
 		if (candidate.source === 'override' && !result.accepted) {
 			// Invalid override behavior (F4, carry-forward item i): NOT fatal,
@@ -487,8 +500,8 @@ function* probeCycle(
 	}
 
 	return budgetExceeded
-		? { outcome: 'exhausted-budget' }
-		: { outcome: 'all-rejected' };
+		? { outcome: 'exhausted-budget', sawTimeout }
+		: { outcome: 'all-rejected', sawTimeout };
 }
 
 function driveSync(
@@ -501,19 +514,180 @@ function driveSync(
 	return step.value;
 }
 
-async function driveAsync(
-	gen: Generator<void, ProbeCycleResult, void>,
-): Promise<ProbeCycleResult> {
-	let step = gen.next();
-	while (!step.done) {
-		// Real event-loop yield (macrotask), not a microtask — a synchronous
-		// spawnSync loop cannot be interrupted by an outer withTimeout wrapper,
-		// which is exactly why the init path needs this async entry point
-		// (AGENTS.md invariant 1).
-		await _internals.yieldToEventLoop();
-		step = gen.next();
+/**
+ * #3317: the async candidate probe. Same acceptance logic as `probeCandidate`
+ * (absolute-path check, stat checks, `--version` output pattern), but the
+ * spawn is the async `bunSpawn` with `killProcessTree` and a caller-owned
+ * single-timer deadline — a probe cycle driven through this helper never
+ * touches the synchronous `_internals.spawnSync` seam and never blocks on a
+ * SPAWN. The one synchronous call kept is the per-candidate `fs.statSync`
+ * precheck (bounded local stat, identical to the sync twin) — a stat against
+ * a stalled network mount could still block briefly (accepted; the spawn
+ * path, which is the #3275 failure class, is fully async). The deadline
+ * convention mirrors `runGitAsyncDetailed` (src/background/workspace-snapshot.ts):
+ * exactly one timer, and the `finally` tree-kills the child.
+ */
+async function probeCandidateAsync(
+	candidatePath: string,
+	platform: NodeJS.Platform,
+	// Callers may cap this below PER_PROBE_TIMEOUT_MS to the cycle's
+	// remaining total budget (post-push automation review) so a probe
+	// started near the budget boundary cannot overrun TOTAL_BUDGET_MS.
+	probeTimeoutMs: number = PER_PROBE_TIMEOUT_MS,
+): Promise<ProbeOutcome> {
+	if (!isAbsoluteForPlatform(candidatePath, platform)) {
+		return { accepted: false, reason: 'not an absolute path' };
 	}
-	return step.value;
+
+	let stat: fs.Stats;
+	try {
+		stat = fs.statSync(candidatePath);
+	} catch (err) {
+		const code = (err as NodeJS.ErrnoException)?.code;
+		if (code === 'ENOENT') return { accepted: false, reason: 'no such file' };
+		return {
+			accepted: false,
+			reason: `cannot stat (${code ?? 'unknown error'})`,
+		};
+	}
+	if (stat.isDirectory()) {
+		return { accepted: false, reason: 'is a directory' };
+	}
+	if (!stat.isFile()) {
+		return { accepted: false, reason: 'not a regular file' };
+	}
+
+	let proc: BunCompatSubprocess | undefined;
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		proc = _internals.asyncSpawn([candidatePath, '--version'], {
+			cwd: os.tmpdir(),
+			stdin: 'ignore',
+			stdout: 'pipe',
+			stderr: 'ignore',
+			killProcessTree: true,
+			maxBuffer: PROBE_MAX_BUFFER_BYTES,
+		});
+		if (proc.spawnError) {
+			return {
+				accepted: false,
+				reason: `spawn failed: ${proc.spawnError.message}`,
+				timedOut:
+					(proc.spawnError as NodeJS.ErrnoException).code === 'ETIMEDOUT',
+			};
+		}
+		const completed = (async () => {
+			const [exitCode, stdout] = await Promise.all([
+				proc.exited,
+				proc.stdout.text(),
+			]);
+			return { kind: 'completed' as const, exitCode, stdout };
+		})();
+		// Losing-racer no-op catch (the withTimeout unhandled-rejection hazard).
+		completed.catch(() => {});
+		const result = await Promise.race([
+			completed,
+			new Promise<{ kind: 'timeout' }>((resolve) => {
+				timer = setTimeout(() => resolve({ kind: 'timeout' }), probeTimeoutMs);
+			}),
+		]);
+		if (result.kind === 'timeout') {
+			return { accepted: false, reason: 'spawn timed out', timedOut: true };
+		}
+		if (result.exitCode !== 0) {
+			const statusDescription =
+				result.exitCode !== null
+					? `exit ${result.exitCode}`
+					: `signal ${proc.signalCode ?? 'unknown'}`;
+			return {
+				accepted: false,
+				reason: `git --version returned ${statusDescription}`,
+			};
+		}
+		const versionOutput = result.stdout.trim();
+		if (!GIT_VERSION_PATTERN.test(versionOutput)) {
+			const excerpt = excerptProbeOutput(versionOutput);
+			return {
+				accepted: false,
+				reason: excerpt
+					? `not git: --version printed "${excerpt}"`
+					: 'not git: --version printed nothing',
+			};
+		}
+		return { accepted: true };
+	} catch (err) {
+		return {
+			accepted: false,
+			reason: `spawn threw: ${err instanceof Error ? err.message : String(err)}`,
+		};
+	} finally {
+		if (timer) clearTimeout(timer);
+		try {
+			proc?.kill('SIGKILL');
+		} catch {
+			// Best-effort tree cleanup for an already-exited process.
+		}
+	}
+}
+
+/**
+ * #3317: the async probe cycle — the async twin of `probeCycle`, sharing the
+ * same candidate order, budget accounting, override warning, and attempt
+ * recording, but probing through `probeCandidateAsync` so the whole cycle
+ * never spawns synchronously. Yields between candidates exactly like the old
+ * async driver did (the per-candidate stat precheck remains synchronous and
+ * bounded — see probeCandidateAsync).
+ */
+async function probeCycleAsync(
+	candidates: Candidate[],
+	platform: NodeJS.Platform,
+	attempts: GitResolutionAttempt[],
+): Promise<ProbeCycleResult> {
+	const start = _internals.now();
+	let budgetExceeded = false;
+	let sawTimeout = false;
+
+	for (const candidate of candidates) {
+		// Cap each probe by the REMAINING total budget (post-push automation
+		// review): the pre-candidate check alone let a probe started just
+		// inside the boundary run a full PER_PROBE_TIMEOUT_MS past
+		// TOTAL_BUDGET_MS, making the advertised cycle budget inaccurate.
+		const remainingBudgetMs = TOTAL_BUDGET_MS - (_internals.now() - start);
+		if (remainingBudgetMs <= 0) {
+			budgetExceeded = true;
+			break;
+		}
+
+		const result = await probeCandidateAsync(
+			candidate.path,
+			platform,
+			Math.min(PER_PROBE_TIMEOUT_MS, remainingBudgetMs),
+		);
+		attempts.push({
+			source: candidate.source,
+			candidate: candidate.path,
+			accepted: result.accepted,
+			reason: result.reason,
+		});
+		if (result.timedOut) sawTimeout = true;
+
+		if (candidate.source === 'override' && !result.accepted) {
+			advisoryWarn(
+				`[opencode-swarm] git.binary override "${candidate.path}" is unusable (${result.reason}); falling back to automatic git resolution.`,
+			);
+		}
+
+		if (result.accepted) {
+			return { outcome: 'accepted', path: candidate.path };
+		}
+
+		// Real event-loop yield (macrotask), not a microtask.
+		await _internals.yieldToEventLoop();
+	}
+
+	return budgetExceeded
+		? { outcome: 'exhausted-budget', sawTimeout }
+		: { outcome: 'all-rejected', sawTimeout };
 }
 
 /** Read the cache, expiring a stale negative entry in place. */
@@ -568,6 +742,16 @@ function applyProbeResult(
 		return result.path;
 	}
 
+	// #3317: a cycle whose attempts include a TIMEOUT is an unknown, not a
+	// rejection — a slow-but-working first spawn (for example a cold antivirus
+	// scan of git.exe) must not demote every caller to bare `git` for the whole
+	// negative-cache TTL. Leave the cache EMPTY so the next resolution
+	// re-probes. Definite rejections (stat ENOENT, nonzero exit, non-git
+	// output) below still cache normally.
+	if (result.sawTimeout) {
+		return BARE_GIT;
+	}
+
 	cache = {
 		kind: 'fallback',
 		expiresAt: _internals.now() + NEGATIVE_CACHE_TTL_MS,
@@ -613,7 +797,10 @@ export async function resolveGitExecutableAsync(): Promise<string> {
 	const candidates = buildCandidates(platform);
 
 	const run = (async (): Promise<string> => {
-		const result = await driveAsync(probeCycle(candidates, platform, attempts));
+		// #3317: the async entry drives the async probe cycle (bunSpawn-based,
+		// killable, spawn-non-blocking) — never the synchronous `_internals.spawnSync`
+		// probe the sync entry below uses.
+		const result = await probeCycleAsync(candidates, platform, attempts);
 		return applyProbeResult(result, attempts, generation);
 	})();
 
@@ -700,15 +887,19 @@ export function describeGitResolution(): GitResolutionDescription {
  * `platform`/`env` let tests drive every platform branch regardless of the
  * host OS running the test. `now`/`yieldToEventLoop` make the TTL, budget,
  * and async-yield behavior deterministically testable without real sleeps.
+ * `asyncSpawn` (#3317) is the async probe's spawn — a separate seam from
+ * `spawnSync` so tests can count the synchronous probe independently.
  */
 export const _internals: {
 	spawnSync: typeof spawnSync;
+	asyncSpawn: typeof bunSpawn;
 	platform: () => NodeJS.Platform;
 	env: () => NodeJS.ProcessEnv;
 	now: () => number;
 	yieldToEventLoop: () => Promise<void>;
 } = {
 	spawnSync,
+	asyncSpawn: bunSpawn,
 	platform: () => process.platform,
 	env: () => process.env,
 	now: () => Date.now(),

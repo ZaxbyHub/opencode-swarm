@@ -46,8 +46,10 @@ import {
 import {
 	CRITIC_MEMORY_OUTCOME_GUIDANCE,
 	type CriticRole,
+	clearCriticPromptProvenance,
 	createCriticAgent,
 	createCriticAutonomousOversightAgent,
+	recordCriticPromptProvenance,
 } from './critic';
 import { type CuratorRole, createCuratorAgent } from './curator-agent';
 import { createDesignerAgent } from './designer';
@@ -144,22 +146,6 @@ export function stripSwarmPrefix(
 		return agentName.substring(prefixWithUnderscore.length);
 	}
 	return agentName;
-}
-
-/**
- * Extract the swarm ID from a prefixed agent name.
- * For multi-swarm configurations, agent names are prefixed: "swarmId_agentName"
- * For the default swarm, agent names have no prefix.
- *
- * Example: "local_coder" -> "local", "coder" -> undefined (default swarm)
- * The regex matches everything before the first underscore.
- */
-export function extractSwarmIdFromAgentName(
-	agentName: string,
-): string | undefined {
-	if (!agentName) return undefined;
-	const match = agentName.match(/^([^_]+)_/);
-	return match ? match[1] : undefined;
 }
 
 /**
@@ -261,7 +247,7 @@ export function resolveFallbackModel(
  *
  * @param swarmId - The swarm ID to retrieve config for. Defaults to 'default' for the default swarm.
  *                  For multi-swarm configs, use the swarm's ID (e.g., 'local', 'fast', 'precise').
- *                  Can also be extracted from a prefixed agent name using extractSwarmIdFromAgentName().
+ *                  Can also be derived from a prefixed agent name using deriveSwarmIdentity() (src/config/schema).
  */
 export function getSwarmAgents(
 	swarmId?: string,
@@ -634,6 +620,17 @@ If you call @coder instead of @${swarmId}_coder, the call will FAIL or go to the
 			pluginConfig?.memory?.enabled === true,
 		);
 		critic.name = prefixName('critic');
+		// #3358 AC3: PR critic-lane admission reads this registration-time
+		// record instead of re-reading the prompts directory on dispatch.
+		// Feedback F-007: provenance must mirror the loader's own truthiness
+		// (createCriticAgent runs the built-in prompt when customPrompt /
+		// customAppendPrompt are falsy — an EMPTY critic.md / critic_append.md
+		// leaves the verifiable built-in prompt active), so the admission
+		// refusal names the same effective prompt the lane would run.
+		recordCriticPromptProvenance(critic.name, {
+			replaced: Boolean(criticPrompts.prompt),
+			appended: Boolean(criticPrompts.appendPrompt),
+		});
 		agents.push(applyOverrides(critic, swarmAgents, swarmPrefix, quiet));
 	}
 
@@ -1002,6 +999,8 @@ export function createAgents(
 	// Clear the gated-agent advisory dedupe set at entry. Tests call createAgents
 	// repeatedly and need isolation; plugin init calls it twice (see note above).
 	_emittedGatedAgentAdvisories.clear();
+	// #3358 AC3: critic prompt provenance is rebuilt with the agent registry.
+	clearCriticPromptProvenance();
 	// Config may be reloaded in-process. Do not retain swarm entries which are
 	// absent from the new configuration (and make test resets deterministic).
 	_swarmAgentsMap.clear();
@@ -1566,8 +1565,8 @@ export function getAgentConfigs(
 		}),
 	);
 
-	// Write agent tool snapshot non-blocking
-	if (directory) {
+	// Write agent tool snapshot non-blocking (never under a blank root's cwd)
+	if (directory?.trim()) {
 		const sid = sessionId ?? `init-${Date.now()}`;
 		const evidenceDir = path.join(directory, '.swarm', 'evidence');
 		const filename = `agent-tools-${sid}.json`;

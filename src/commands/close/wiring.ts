@@ -4,11 +4,7 @@ import { loadPluginConfigWithMeta } from '../../config';
 import { finalizeContextTelemetry } from '../../context-map/telemetry.js';
 import { finalizeCoreEventsForClose } from '../../events/core-events.js';
 import { archiveEvidence } from '../../evidence/manager';
-import {
-	getGitRepositoryStatus,
-	resetToMainAfterMerge,
-	resetToRemoteBranch,
-} from '../../git/branch';
+import { resetToMainAfterMerge, resetToRemoteBranch } from '../../git/branch';
 import { runCuratorPostMortem } from '../../hooks/curator-postmortem';
 import { checkHivePromotions } from '../../hooks/hive-promoter';
 import { curateAndStoreSwarm } from '../../hooks/knowledge-curator';
@@ -24,6 +20,7 @@ import {
 } from '../../state';
 import { closeRepoMemory } from '../../tools/repo-graph/indexed-storage';
 import { collectGarbageBestEffort, sleep } from '../../utils/bun-compat.js';
+import { readGitRepositoryStatusDetailedAsync } from '../git-status-read.js';
 import { guardResetWithRecheck } from './align-stage.js';
 import { _internals, closeReceiptLifecycleInternals } from './internals.js';
 
@@ -40,7 +37,9 @@ export function wireCloseInternals(): void {
 		unlinkSidecarSync: fsSync.unlinkSync,
 		sleep,
 		collectGarbageBestEffort,
-		getGitRepositoryStatus,
+		// #3427: async, reader-backed repository probe (same result
+		// vocabulary as the old sync branch.getGitRepositoryStatus install).
+		getGitRepositoryStatus: readGitRepositoryStatusDetailedAsync,
 		// #2953: install the guard as the seam value — every dispatch through
 		// _internals.resetToMainAfterMerge re-verifies the confirmed
 		// tracked-dirty scope immediately before the real aggressive reset.

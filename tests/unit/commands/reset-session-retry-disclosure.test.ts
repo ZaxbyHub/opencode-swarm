@@ -36,4 +36,13 @@ describe('/swarm reset-session footer disclosure (issue #2703)', () => {
 		expect(output).toContain('TASK_RETRY_CRITIC_REQUIRED');
 		expect(output).toContain('approve_retry_sounding_board');
 	});
+
+	test('points a TASK_RETRY_USER_ESCALATION_REQUIRED-wedged task at the audited force repair with its plan-status precondition (issue #3389)', async () => {
+		const output = await handleResetSessionCommand(directory, [], 'sess-1');
+		expect(output).toContain('TASK_RETRY_USER_ESCALATION_REQUIRED');
+		expect(output).toContain('update_task_status force repair');
+		expect(output).toContain('issue #3389');
+		expect(output).toContain('plan status must');
+		expect(output).toContain('in_progress');
+	});
 });

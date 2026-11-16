@@ -12,7 +12,7 @@ Read, in order:
 1. `AGENTS.md` (Invariant 3: subprocesses)
 2. `docs/engineering-invariants.md` (subsection 3)
 3. `.agents/skills/writing-tests/SKILL.md` if tests are touched
-4. `.opencode/skills/generated/mock-to-internals-migration/SKILL.md` if converting mock.module to _internals
+4. `.agents/skills/mock-to-internals-migration/SKILL.md` if converting mock.module to _internals
 
 Codex-specific execution notes:
 - This skill consolidates AGENTS.md Invariant 3 into an actionable checklist.

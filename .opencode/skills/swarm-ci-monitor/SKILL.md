@@ -5,26 +5,27 @@ description: >
   researches every CI failure, fixes it end-to-end, iterates until all required
   checks are green (max 5 fix cycles), then merges. Use only after human review
   is complete and the PR is approved. Composes ci-fix-monitor for
-  failure-type-specific fix recipes. This is the first skill in the repo that
-  executes a merge — invoke it deliberately.
+  failure-type-specific fix recipes. It executes a merge (as does
+  swarm-pr-feedback's drive-to-merge run) — invoke it deliberately.
 disable-model-invocation: true
 metadata:
   audience: swarm-plugin
-  swarm-contract-digest: c1572cc54760
+  swarm-contract-digest: "e428ab09ce23"
 ---
 
 # Swarm CI Monitor
 
 Drives a reviewed-and-approved PR to a merged state by monitoring its CI,
 exhaustively researching every failure, fixing it end-to-end, and iterating
-until all required checks are green — then merging via `gh pr merge` with no
-merge-strategy flag, so it works correctly whether the base branch merges
+until all required checks are green — then merging via `gh pr merge`, with no
+merge-strategy flag on a merge-queue base and the repository's allowed method
+on a direct base, so it works correctly whether the base branch merges
 directly or requires a merge queue (see Step 4).
 
 This is **not** a fresh review skill and **not** a PR-creation skill. It is the
 terminal closeout hop for a PR that is already approved and just needs to get
-green and merge. It is the first skill in opencode-swarm that performs a merge,
-so it carries extra safety gates.
+green and merge. It performs a merge (as does swarm-pr-feedback's drive-to-merge
+run), so it carries extra safety gates.
 
 ## Hard precondition
 
@@ -59,7 +60,7 @@ MCP tools and verify availability first:
 
 | Capability needed | `gh` CLI | Example remote-MCP shape (resolve the real names via ToolSearch) |
 |---|---|
-| `gh pr checks <N>` | `mcp__github__pull_request_read` method `get_check_runs` |
+| Exact-head check runs | A paginated commit check-runs operation, such as `get_check_runs` when it exposes revision and pagination evidence |
 | `gh pr view <N> --json mergeable,mergeStateStatus,reviewDecision` | `mcp__github__pull_request_read` method `get` |
 | `gh run view <run> --log` | `mcp__github__get_job_logs` with `job_id`, `return_content: true` |
 
@@ -104,6 +105,30 @@ the active durable task/plan checkpoint and reload it on resume. Never reset
 the counter to 5 after compaction.
 
 ### 2a. Fetch check runs for the PR head SHA
+
+Resolve the PR number, repository, target base and full head SHA together. On
+a host with `gh`, Git and Bun, run `bun <skill-dir>/scripts/observe-ci.ts
+<owner>/<repo> <N> <head-sha>`. Save the JSON in the active task checkpoint. It
+reports the exact-head census as `complete` or `incomplete` with a reason and
+any validated partial results. A JSON result exits zero, including an
+incomplete result. Refresh the PR identity on resume and obtain a new
+observation when the head or base changed.
+
+On an MCP-only host, enumerate all check-run pages for the exact head. Require
+the same head, a consistent total, unique check IDs and an exhausted listing.
+Record an incomplete observation with its reason when a page, identity, or
+completeness evidence is missing.
+
+On either host, record the census state and any reason it is incomplete. To
+advance, independently verify all applicable required checks and legacy status
+contexts for the exact PR head and target base. Use `gh pr checks --required`
+with exact-head verification, or equivalent GitHub MCP and protection evidence.
+The partial census and a zero observer exit code supply no required-check verdict.
+An incomplete census may advance with sufficient required-green evidence. If
+requiredness or current status cannot be established, retry the missing read
+within the existing bounds or stop and report what is missing. If an unchanged
+page or suite limit makes the census incomplete, keep that result and use the
+required-check evidence without repeatedly fetching the same census.
 
 Determine green state by these rules (re-stated here so this merge gate does
 not depend on ci-fix-monitor's generated file being regenerated unchanged):
@@ -228,13 +253,19 @@ gate is Step 4b. Run this step fresh every time control reaches Step 4 —
 including after a Step 2 loop-back — never skip it because an earlier pass
 already ran once in this invocation.
 
-1. Re-fetch check runs for the **current** PR head SHA. If any required check
-   is stale (ran against an older SHA) → `gh run rerun --failed` for the
-   transient/failed run, or wait and re-fetch at most 3× (~1 min apart); if
-   still stale after that, escalate per Step 5. Never merge on a stale-green
-   check. This is the one failure type Step 2's fix loop can actually address
-   — on failure, go back to Step 2 (counts as a new iteration against the
-   budget); abort per Step 5 if the budget is exhausted.
+1. Resolve the repository, PR number, target base and current head SHA again.
+   Re-fetch authoritative requiredness and status evidence for that identity
+   using Step 2a's rule, and record that SHA:
+   Step 4a merges only that commit. A changed head or base requires new
+   evidence for the applicable checks. An incomplete census may
+   proceed with fresh, independently verified required-green evidence. Stop
+   before Step 4 if requiredness or current status is unknown or any required
+   check is non-green under Step 2a's rules.
+   If any required check ran against an older SHA, rerun a transient failed
+   run with `gh run rerun --failed`, or wait and re-fetch at most 3× (~1 min
+   apart). If the evidence is still stale, escalate per Step 5. On a check
+   failure, return to Step 2 within the existing iteration budget, or abort
+   per Step 5 if the budget is exhausted.
 2. Re-verify `mergeable: MERGEABLE` + `mergeStateStatus: CLEAN` (a base push
    or merge-queue entry can change this between green-detection and merge). If
    this regresses, Step 2 has no mechanism to fix a mergeable-state
@@ -255,17 +286,40 @@ run it in addition to, never instead of, Step 3.
 ### 4a. Execute the merge
 
 ```
-gh pr merge <N>
+gh pr merge <N> --repo <owner>/<repo> --match-head-commit <SHA>           # merge-queue base: no method flag
+gh pr merge <N> --repo <owner>/<repo> --match-head-commit <SHA> --merge   # direct base, when merge commits are the method
+gh pr merge <N> --repo <owner>/<repo> --match-head-commit <SHA> --squash  # direct base, when squash is the method
+gh pr merge <N> --repo <owner>/<repo> --match-head-commit <SHA> --rebase  # direct base, when rebase is the method
 ```
 
-- **No merge-strategy flag.** Do not pass `--squash`, `--merge`, or
-  `--rebase`. Per `gh pr merge --help`: "When targeting a branch that requires
-  a merge queue, no merge strategy is required" — this skill must work
-  correctly whether or not the base branch requires a merge queue, so let
-  branch protection determine the method rather than assuming squash.
-  `contributing.md`'s merge-queue/merge-commit guidance may describe a different (or
-  stale) configuration for a given deployment of this repo; do not assume it
-  applies without checking the actual outcome below.
+Tell the two bases apart with this command (it works in bash and PowerShell; take
+`<base>` from `gh pr view <N> --repo <owner>/<repo> --json baseRefName`):
+
+```
+gh api graphql -f owner=<owner> -f name=<repo> -f branch=<base> -f query='query($owner: String!, $name: String!, $branch: String!) { repository(owner: $owner, name: $name) { mergeQueue(branch: $branch) { id } } }'
+```
+
+A non-null `mergeQueue` means the base has a merge queue, and `null` means a
+direct base. If the call fails, ask the user; never guess.
+
+- **`--match-head-commit <SHA>` always.** Pass the head SHA Step 3 recorded, so
+  a commit pushed after the re-check cannot be merged unchecked. With an MCP
+  merge tool, pass its head-SHA parameter (for example `expectedHeadSha`); if
+  the tool has none, do not merge through it — surface the merge to the user.
+- **Merge-strategy flag only where the base needs one.** On a base that
+  requires a merge queue, pass no `--squash`, `--merge`, or `--rebase`. Per
+  `gh pr merge --help`: "When targeting a branch that requires a merge queue,
+  no merge strategy is required", and the queue determines the method. On a
+  direct-merge base, a non-interactive `gh pr merge` refuses without a method:
+  - pass the method the repository contract names;
+  - otherwise pass the only one `gh repo view <owner>/<repo> --json
+    mergeCommitAllowed,squashMergeAllowed,rebaseMergeAllowed` reports as
+    allowed;
+  - when several are allowed and none is named, ask the user. Never guess.
+
+  `contributing.md`'s merge-queue/merge-commit guidance may describe a
+  different (or stale) configuration for a given deployment of this repo; do
+  not assume it applies without checking the actual outcome below.
 - **No `--admin`.** Never bypass required checks, review, or a merge queue.
   If branch protection does not permit the invoking user to bypass, `--admin`
   simply fails — do not use it as a workaround for a stuck merge.
@@ -282,13 +336,18 @@ gh pr merge <N>
    the queue, not merged directly. This is **not a failure.** GitHub re-runs
    the required workflows against the queued change on top of the current base
    (and any earlier-queued PRs) before merging; there is no commit SHA yet.
-   Poll `gh pr view <N> --json state,mergedAt,mergeCommit,mergeStateStatus`
+   Poll `gh pr view <N> --repo <owner>/<repo> --json state,mergedAt,mergeCommit,mergeStateStatus`
    every 1-2 minutes. Do not apply 4b's short mismatch-retry window to this
    state — a queue entry can legitimately take several minutes to tens of
    minutes while it re-runs required workflows from scratch. Escalate as a
    "queue timeout" terminal (distinct from "post-merge mismatch") only after
    90 minutes with no resolution. Once `state == "MERGED"`, take
    `mergeCommit.oid` as the merge SHA and proceed to 4b.
+   Record a known candidate Actions run ID with the task when available. Re-run
+   the observation with `--candidate-run <run-id>` to report its distinct SHA
+   and status. The run must be a `merge_group` run in the same repository with
+   the target base and PR number in its queue branch. Stale or unavailable
+   candidate status leaves terminal proof to the PR and independent Git check.
 3. **Error.** "not mergeable", "merge conflict", or any other error → **do not
    retry blindly.** Abort and report. A clean merge/enqueue is expected
    because Step 3 just confirmed `CLEAN`; an error here means state changed
@@ -301,17 +360,24 @@ case 1/2 above; if not, treat the ambiguous response as an error per case 3.
 
 ### 4b. Post-merge confirmation (the independent gate)
 
+The saved read-only observation reports `merged` when the exact PR reports its
+merge SHA and that SHA is independently proven to be on the advertised target
+base by local Git ancestry. If the needed objects or Git capability are
+unavailable, record `unconfirmed`. MCP-only hosts need equivalent independent
+Git proof to report a terminal merge. Apply the independent gate below before
+declaring this workflow complete.
+
 Confirm the merge via a **different system** than the GitHub API — the local
 git object DB — so this gate does not share the stale-fetch failure mode of
 Steps 2 and 3:
 
 ```
-git fetch origin <base-branch>
-git rev-parse origin/<base-branch>
+git fetch <remote> <base-branch>     # <remote> points at <owner>/<repo>
+git rev-parse <remote>/<base-branch>
 ```
 
 The merge SHA captured in 4a (case 1 or case 2) must equal
-`origin/<base-branch>`. The GitHub API can report `state: MERGED` under
+`<remote>/<base-branch>`. The GitHub API can report `state: MERGED` under
 eventual-consistency lag; the local object DB cannot lie — once fetched, the
 commit either is or is not the base tip.
 
@@ -370,8 +436,8 @@ Ignore these thoughts; they are shortcuts that cause broken merges:
 - **commit-pr**: owns the commit/push discipline. This skill composes it for
   every push inside the loop.
 - **swarm-pr-subscribe**: owns background PR monitoring and event triage. This
-  skill is the explicit, user-invoked, merge-terminated path; it does not
-  depend on the background poller.
+  skill is an explicit, user-invoked, merge-terminated path (swarm-pr-feedback's
+  drive-to-merge run is the other); it does not depend on the background poller.
 - **swarm-pr-review** / **swarm-pr-feedback**: own review and known-feedback
   resolution. This skill assumes that work is already done (Step 1 gate 2).
 - **durable-session-state**: owns persisting state across context compaction.

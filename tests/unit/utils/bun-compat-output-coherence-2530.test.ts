@@ -1,15 +1,23 @@
-import { describe, expect, test } from 'bun:test';
+import { describe as describeBlock, expect, test } from 'bun:test';
 import { spawnSync as nodeSpawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
+
+// Skipped under coverage shards: coverage instrumentation distorts child-process
+// exit/buffering semantics and wall-clock bounds on shared self-hosted hosts;
+// the hosted unit matrix keeps this suite fully enforced.
+const skipCoverage = Boolean(process.env.COVERAGE_SHARD_INDEX);
+const describe = describeBlock.skipIf(skipCoverage);
+
 import {
 	BunCompatOutputLimitError,
 	type BunCompatSubprocess,
 	bunSpawn,
 	DEFAULT_BUN_SPAWN_MAX_BUFFER_BYTES,
 } from '../../../src/utils/bun-compat';
+import { safeRmRecursive } from '../../helpers/safe-test-dir';
 
 const TEST_CWD = path.resolve(import.meta.dir, '../../..');
 const TIMEOUT_MS = 5_000;
@@ -75,7 +83,7 @@ function runNodeProbe(makeProbe: (moduleUrl: string) => string) {
 			},
 		);
 	} finally {
-		rmSync(tempDir, { recursive: true, force: true });
+		safeRmRecursive(tempDir);
 	}
 }
 

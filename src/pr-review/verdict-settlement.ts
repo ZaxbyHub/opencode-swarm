@@ -70,8 +70,12 @@ export const PrReviewVerdictSettlementItemSchema = z
 		itemId: z.string().trim().min(1),
 		sourceBatchId: z.string().trim().min(1),
 		sourceLaneId: z.string().trim().min(1),
-		disposition: z.literal('liveness_dead'),
-		evidenceClass: z.literal('liveness'),
+		disposition: z.enum([
+			'liveness_dead',
+			'verdict_contract_dead',
+			'resource_dead',
+		]),
+		evidenceClass: z.enum(['liveness', 'verdict_contract', 'resource']),
 		terminalStatus: z.enum(['stale', 'cancelled', 'error']),
 	})
 	.strict();
@@ -105,26 +109,64 @@ export function verdictSettlementRelativePath(
 }
 
 /**
- * Mirrors `isLivenessTerminalLaneRecord` (pr-workflow-gate.ts, issue #2585
- * AC13) without importing the gate (which imports this module). Record-state
- * gated only — never time-based. Keep the two predicates in sync by
- * inspection; no test pins the cross-module structural parity directly (each
- * side's own suites pin its behavior).
+ * The typed-dead disclosure classes N-of-M admission accepts as terminality
+ * evidence (issue #3311). The gate's strictly-liveness parent-repair predicate
+ * (`isLivenessTerminalLaneRecord`, pr-workflow-gate.ts:2088, issue #2585 AC13)
+ * and this classifier intentionally DIVERGE: this side admits the widened
+ * typed-dead classes, that side stays liveness-only for base/micro discovery
+ * repair. Do not re-twin them.
  */
-function isLivenessTerminalLaneRecord(
+type VerdictSettlementDisclosureClass =
+	| 'liveness'
+	| 'verdict_contract'
+	| 'resource';
+
+/**
+ * Classify an owner record for settlement (issue #3311):
+ * - typed-dead(disclosureClass): terminal status AND a class that maps to a
+ *   disclosure class. `contract` on a verdict-mode record maps to
+ *   `verdict_contract` as READER-SIDE LEGACY TOLERANCE: the only 'contract'
+ *   producer at the time of the widening is discovery-gated
+ *   (dispatch-lanes.ts base|micro|council block) and cannot stamp a
+ *   `swarm-pr-review:reviewer|critic` record, so a class-'contract'
+ *   verdict-mode owner is a pre-upgrade fixture shape that must disclose as
+ *   `verdict_contract` (frozen by the #3311 acceptance checks).
+ * - consumed-completed (status 'completed'): counts as a consumed attempt,
+ *   never terminality evidence — completed status takes precedence over any
+ *   present class.
+ * - blocking (classless, `operator_cancelled`, `deadline`, wrong status):
+ *   keeps blocking settlement.
+ * The claimed `terminalResult.result` class is authoritative when present; the
+ * `record.result` class is the fallback (the same precedence the circuit and
+ * the completion typed-failure reader apply).
+ */
+function typedDeadDisclosureClassForRecord(
 	record: BackgroundDelegationRecord,
-): boolean {
+): VerdictSettlementDisclosureClass | null {
 	if (
 		record.status !== 'cancelled' &&
 		record.status !== 'stale' &&
 		record.status !== 'error'
 	) {
-		return false;
+		return null;
 	}
-	return (
-		record.terminalResult?.result.workflowLaneFailureClass === 'liveness' ||
-		record.result?.workflowLaneFailureClass === 'liveness'
-	);
+	const terminalClass =
+		record.terminalResult?.result.workflowLaneFailureClass ?? null;
+	const resultClass = record.result?.workflowLaneFailureClass ?? null;
+	for (const cls of [terminalClass, resultClass]) {
+		switch (cls) {
+			case 'liveness':
+				return 'liveness';
+			case 'verdict_contract':
+			case 'contract':
+				return 'verdict_contract';
+			case 'resource':
+				return 'resource';
+			default:
+				break;
+		}
+	}
+	return null;
 }
 
 /** Structural slice of `PrReviewValidationBatchRecord` this module consumes. */
@@ -204,6 +246,7 @@ export function deriveVerdictSettlementAdmission(args: {
 			batchId: string;
 			laneId: string;
 			status: 'stale' | 'cancelled' | 'error';
+			disclosure: VerdictSettlementDisclosureClass;
 		}> = [];
 		for (const { batch, lane } of owners) {
 			itemAttemptBatchIds.add(batch.batchId);
@@ -230,10 +273,33 @@ export function deriveVerdictSettlementAdmission(args: {
 					candidate.mode === expectedMode &&
 					candidate.workspace?.prHeadSha === prHeadSha,
 			);
-			if (!record || !isLivenessTerminalLaneRecord(record)) {
+			// Issue #3311 widened admission: every owner must be typed-dead or a
+			// consumed-completed attempt; a missing record, a classless record,
+			// operator_cancelled and any other non-admissible class keep blocking
+			// (constraints 1 + 2 of #3101 are unchanged — this types terminality,
+			// it never loosens identity or admits silence).
+			if (!record) {
 				return {
 					admitted: false,
-					reason: `item ${itemId} still has a non-liveness-terminal owner lane ${lane.laneId}`,
+					reason: `item ${itemId} still has a non-admissible owner lane ${lane.laneId} (missing delegation record)`,
+					items: [],
+				};
+			}
+			if (record.status === 'completed') {
+				// Consumed-completed attempt (V1 A3): a completed lane whose claim
+				// was dropped produced output that is stale by construction; it
+				// counts toward the budget but is never terminality evidence.
+				continue;
+			}
+			const disclosure = typedDeadDisclosureClassForRecord(record);
+			if (!disclosure) {
+				const blockingClass =
+					record.terminalResult?.result.workflowLaneFailureClass ??
+					record.result?.workflowLaneFailureClass ??
+					'classless';
+				return {
+					admitted: false,
+					reason: `item ${itemId} still has a non-admissible owner lane ${lane.laneId} (${blockingClass})`,
 					items: [],
 				};
 			}
@@ -244,6 +310,7 @@ export function deriveVerdictSettlementAdmission(args: {
 					record.status === 'cancelled' || record.status === 'error'
 						? record.status
 						: 'stale',
+				disclosure,
 			});
 		}
 		if (itemAttemptBatchIds.size < 1 + PR_REVIEW_VERDICT_RETRY_BUDGET) {
@@ -253,17 +320,68 @@ export function deriveVerdictSettlementAdmission(args: {
 				items: [],
 			};
 		}
+		// At least one owner must be typed-dead: the receipt row cites a
+		// typed-dead source batch/lane, so completed owners alone can never
+		// admit an item (frozen by the #3311 no-typed-owner floor).
+		if (dead.length === 0) {
+			return {
+				admitted: false,
+				reason: `item ${itemId} has no typed-dead owner lane to cite (completed owners consume attempts but are never terminality evidence)`,
+				items: [],
+			};
+		}
 		const first = dead[0]!;
 		items.push({
 			itemId,
 			sourceBatchId: first.batchId,
 			sourceLaneId: first.laneId,
-			disposition: 'liveness_dead',
-			evidenceClass: 'liveness',
+			disposition: `${first.disclosure}_dead`,
+			evidenceClass: first.disclosure,
 			terminalStatus: first.status,
 		});
 	}
 	return { admitted: true, reason: 'admitted', items };
+}
+
+/** Per-item verdict attempt accounting (issue #3311 AC22/AC24 shape). */
+export interface VerdictSettlementAttemptCount {
+	itemId: string;
+	/** Distinct window batches whose lanes declare the item. */
+	attemptsUsed: number;
+	/** Always `1 + PR_REVIEW_VERDICT_RETRY_BUDGET`. */
+	attemptsRequired: number;
+	remaining: number;
+}
+
+/**
+ * Per-item attempt counts over the SAME window semantics the admission's
+ * budget arm uses (distinct window batches whose lanes declare the item —
+ * window-based, independent of delegation-store state). The gate's BLOCKED
+ * text and the pr_workflow_status projection both consume this single
+ * derivation so their counts cannot drift (issue #3311).
+ */
+export function deriveVerdictAttemptCounts(args: {
+	window: readonly VerdictSettlementWindowBatch[];
+	unclaimed: readonly string[];
+}): VerdictSettlementAttemptCount[] {
+	const attemptsRequired = 1 + PR_REVIEW_VERDICT_RETRY_BUDGET;
+	return args.unclaimed.map((itemId) => {
+		const batches = new Set<string>();
+		for (const batch of args.window) {
+			if (
+				batch.lanes.some((lane) => (lane.reviewItemIds ?? []).includes(itemId))
+			) {
+				batches.add(batch.batchId);
+			}
+		}
+		const attemptsUsed = batches.size;
+		return {
+			itemId,
+			attemptsUsed,
+			attemptsRequired,
+			remaining: Math.max(0, attemptsRequired - attemptsUsed),
+		};
+	});
 }
 
 export function buildVerdictSettlementReceipt(args: {

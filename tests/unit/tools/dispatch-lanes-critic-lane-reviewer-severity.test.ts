@@ -14,11 +14,11 @@
 //       (e.g. { c1: 'HIGH', c2: 'LOW' }); single-token values.
 //   Rendering contract: for mode 'swarm-pr-review:critic', when supplied,
 //   the CONTROLLER-BOUND block renders each assigned item's reviewer
-//   severity next to/after that item id ON THE SAME LINE (e.g.
-//   `assigned_item_ids: c1 (HIGH), c2 (LOW)`). The rendered annotation is
-//   the bare severity token in parentheses; the item-id token itself is the
-//   bare id. When the option is absent (or explicitly undefined), the block
-//   renders exactly as before — no severity text is added.
+//   severity on its OWN line, `reviewer_severity: c1=HIGH`, while
+//   assigned_item_ids keeps the bare ids (#3358 AC8 superseded the original
+//   same-line `c1 (HIGH)` shape: a verbatim copy of that decorated token
+//   voided the lane). When the option is absent (or explicitly undefined),
+//   the block renders exactly as before — no severity text is added.
 //
 // RED at base, GREEN after the fix.
 import { describe, expect, test } from 'bun:test';
@@ -61,16 +61,16 @@ function contractedPrompt(options: ContractOptions): string {
 }
 
 describe('critic-lane reviewer severity rendering (issue #3310 AC13)', () => {
-	test('renders each assigned item id together with its reviewer severity on the same line', () => {
+	test('renders each assigned item id together with its reviewer severity on its own line', () => {
 		const prompt = contractedPrompt(
 			criticOptions({ reviewerSeverities: { c1: 'HIGH', c2: 'LOW' } }),
 		);
-		// Same-line pairing of item id and severity (the [^\n]* window forbids
-		// a severity stranded on another line).
-		expect(prompt).toMatch(/c1[^\n]*HIGH/);
-		expect(prompt).toMatch(/c2[^\n]*LOW/);
-		// The assigned ids still render inside the controller block.
-		expect(prompt).toContain('assigned_item_ids:');
+		// Id/severity pairing on one reviewer_severity line each (the [^\n]*
+		// window forbids a severity stranded on another line).
+		expect(prompt).toContain('reviewer_severity: c1=HIGH');
+		expect(prompt).toContain('reviewer_severity: c2=LOW');
+		// The assigned ids still render bare inside the controller block.
+		expect(prompt).toContain('assigned_item_ids: c1, c2');
 	});
 
 	test('absent reviewerSeverities keeps the pre-fix block byte-shape (backward compat)', () => {

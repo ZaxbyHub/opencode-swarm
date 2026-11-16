@@ -238,8 +238,15 @@ describe('architect prompt budget matrix — issue #2671 acceptance', () => {
 			'x'.repeat(ARCHITECT_PROMPT_BUDGET_CHARS),
 		);
 		expect(over.withinBudget).toBe(false);
-		// 163000-char ceiling at the 4-chars/token estimate (#2946 raised it).
-		expect(over.tokenEstimate).toBe(40750);
+		// 163000 -> 164000 -> 165000-char ceiling (#3315 raised it; #2946 raised
+		// it before; the #3312/#3313 rebase over #3419 raised it last — the
+		// honest-INCOMPLETE guidance and #3419's verification re-dispatch
+		// recovery fit under the ceiling separately but not together). The estimate pin derives from the imported ceiling so the
+		// suite stays green at both ends of a deliberate ceiling change while
+		// still biting any estimateModelTokens drift.
+		expect(over.tokenEstimate).toBe(
+			Math.ceil(ARCHITECT_PROMPT_BUDGET_CHARS / 4),
+		);
 
 		// Mandatory directives: present in every cell, relative order stable,
 		// and the prompt stays a plain host-renderable string with no

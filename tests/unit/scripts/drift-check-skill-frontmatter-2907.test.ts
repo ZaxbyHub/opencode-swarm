@@ -3,6 +3,11 @@
  * Pins the three error classes (non-spec top-level keys, name ≠ directory,
  * bare non-string metadata scalars) plus the host-consumed allowlist, and
  * proves the detector is reachable through the DETECTORS registry.
+ *
+ * Updated for the #3216 post-migration decision (the generated-tree exemption
+ * is REMOVED — generated SKILL.md files are enforced like every other tracked
+ * skill) and the #3217 detector alignment (a non-empty inline flow-map
+ * `metadata:` value is a finding).
  */
 import { describe, expect, test } from 'bun:test';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
@@ -145,7 +150,7 @@ describe('detectSkillFrontmatterSpecDrift (issue #2907)', () => {
 		}
 	});
 
-	test('quoted metadata scalars and the generated tree are exempt', () => {
+	test('quoted metadata scalars pass', () => {
 		const root = makeTree({
 			'.opencode/skills/demo-skill/SKILL.md': [
 				'---',
@@ -157,11 +162,83 @@ describe('detectSkillFrontmatterSpecDrift (issue #2907)', () => {
 				'  audience: \'["swarm-plugin"]\'',
 				'---',
 			].join('\n'),
+		});
+		try {
+			expect(detectSkillFrontmatterSpecDrift(root)).toEqual([]);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	// Issue #3216: the generated-tree exemption is REMOVED post-migration.
+	// Generated SKILL.md files are held to the same spec-conformance rules as
+	// every other tracked skill: non-spec top-level keys and name ≠ directory
+	// are errors there too. RED at base (the detector still skips the tree).
+	test('the generated tree is enforced (issue #3216)', () => {
+		const root = makeTree({
 			'.opencode/skills/generated/legacy/SKILL.md': [
 				'---',
 				'name: legacy',
 				'description: x',
 				'audience: anything',
+				'---',
+			].join('\n'),
+			'.opencode/skills/generated/mismatched/SKILL.md': [
+				'---',
+				'name: other-name',
+				'description: x',
+				'---',
+			].join('\n'),
+		});
+		try {
+			const findings = detectSkillFrontmatterSpecDrift(root);
+			// Exactly one finding per fixture file: the legacy file's
+			// non-spec top-level `audience:` key, the mismatched file's
+			// name ≠ directory violation.
+			expect(findings).toHaveLength(2);
+			const messages = findings.map((f) => f.message).join('\n');
+			expect(messages).toContain(
+				'non-spec top-level frontmatter key "audience"',
+			);
+			expect(messages).toContain('does not match the parent directory');
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	// Issue #3217 detector alignment: a non-empty inline flow-map `metadata:`
+	// value is a finding. Exact message substring asserted: 'block form' —
+	// the implementer's finding message must contain it (suggested full shape:
+	// `metadata: value must use the block form (inline flow maps are not
+	// string-typed scalars)`). RED at base (the inline value is ignored).
+	test('inline flow-map metadata value is a finding (issue #3217)', () => {
+		const root = makeTree({
+			'.opencode/skills/demo-skill/SKILL.md': [
+				'---',
+				'name: demo-skill',
+				'description: x',
+				'metadata: {audience: swarm-plugin}',
+				'---',
+			].join('\n'),
+		});
+		try {
+			const findings = detectSkillFrontmatterSpecDrift(root);
+			expect(findings).toHaveLength(1);
+			expect(findings[0].message).toContain('block form');
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	// Plan-critic Round 3: a value that is entirely a comment is an EMPTY
+	// value (valid YAML `metadata: # note`) and must NOT be flagged.
+	test('comment-only metadata value is not a finding (Round 3)', () => {
+		const root = makeTree({
+			'.opencode/skills/demo-skill/SKILL.md': [
+				'---',
+				'name: demo-skill',
+				'description: x',
+				'metadata: # note',
 				'---',
 			].join('\n'),
 		});

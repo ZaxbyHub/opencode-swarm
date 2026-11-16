@@ -1,7 +1,13 @@
-import { describe, expect, test } from 'bun:test';
+import { describe as describeBlock, expect, test } from 'bun:test';
 import { spawnSync as nodeSpawnSync } from 'node:child_process';
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
+
+// Skipped under coverage shards: coverage instrumentation distorts child-process
+// exit/buffering semantics and wall-clock bounds on shared self-hosted hosts;
+// the hosted unit matrix keeps this suite fully enforced.
+const skipCoverage = Boolean(process.env.COVERAGE_SHARD_INDEX);
+const describe = describeBlock.skipIf(skipCoverage);
 
 describe('bunSpawn Node fallback stream consumption', () => {
 	test('preserves asynchronous Node spawn errors', () => {

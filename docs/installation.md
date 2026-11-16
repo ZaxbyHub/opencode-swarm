@@ -79,6 +79,24 @@ You should see:
 
 ---
 
+## Host Support
+
+The same package runs on both OpenCode host lines — install it once and the host picks its entrypoint. No separate build, flag, or config is needed.
+
+| Host | Entrypoint | Status |
+|------|-----------|--------|
+| **OpenCode 1.x** | `server()` — the original v1 plugin path | Supported; **1.18.29 or newer recommended** |
+| **OpenCode 2.x** | `setup()` — the v2 adapter (`src/host/v2/`) over the same init core | Supported |
+
+Both paths are continuously verified in CI:
+
+- **OpenCode 1.x:** the merge queue re-runs the full smoke lane — the init-deadline repro (`scripts/repro-704.mjs`), the v2-host cell, and the parity fixture — while bundle-portability and plugin-shape checks run as unit tests on every PR.
+- **OpenCode 2.x:** the merge-queue `v2-host-smoke` cell loads the built package under Node (dual-shape export + bounded `setup()` timing), loads a pinned real host (`@opencode/cli@2.0.29`) auth-free to prove agent/command registration, and runs the v1/v2 guidance-parity fixture test. The adapter's types are vendored at pin `@opencode/plugin@2.0.26` (`src/host/v2/types.ts`); a weekly host-contract digest compares that pin against the live npm corpus and host sources, and the drift check raises a fail-open freshness notice when the pin trails npm-latest by more than five minor series (the weekly host-contract digest reports structural drift at the current 2.0.26 → 2.1.4 gap).
+
+The full v1→v2 surface mapping (including known per-surface deltas) is in [docs/host/v2-hook-inventory.md](host/v2-hook-inventory.md); the design record is [ADR-0003](decisions/0003-opencode-v2-plugin-api.md).
+
+---
+
 ## Configuration Reference
 
 ### Model Assignment

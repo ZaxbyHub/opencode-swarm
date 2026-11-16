@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import { _internals as lintInternals } from '../../../src/tools/lint';
 import { _internals as batchInternals } from '../../../src/tools/pre-check-batch';
 import { _internals as sastInternals } from '../../../src/tools/sast-scan';
+import { safeRmAllRecursive } from '../../helpers/safe-test-dir.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const originals = {
@@ -21,9 +22,8 @@ afterEach(() => {
 	batchInternals.runExternalTool = originals.runExternalTool;
 	batchInternals.qualityBudget = originals.qualityBudget;
 	lintInternals.runExternalTool = originals.lintRunExternalTool;
-	for (const dir of tempDirs.splice(0)) {
-		fs.rmSync(dir, { recursive: true, force: true });
-	}
+	// #3260-C: one stuck root no longer strands the rest.
+	safeRmAllRecursive(tempDirs.splice(0));
 });
 
 describe('pre-check cancellation propagation — issue #2097', () => {

@@ -47,7 +47,16 @@ export const DELEGATION_WRITE_ALLOWED_FUNCTIONS: ReadonlySet<string> = new Set([
 	'startAsyncLanePrompt',
 	'appendAsyncLaneLaunchError',
 	'collectOnce',
+	// collectOnce's per-record const closure (the scanner attributes to the
+	// nearest declaration): the #3313 idle/terminal-proof empty-text settle —
+	// child-evidence-driven (host readiness idle or the window's own terminal
+	// assistant proof), never observer-deadline evidence.
+	'fetchLaneRecord',
 	'settleCollectedLane',
+	// #3312/#3313 receipt settle: child-evidence-driven through the
+	// exactly-bound structured receipt (#2865 identity checks); unbound
+	// receipts keep the lane pending.
+	'settleCollectedLaneFromReceipt',
 	'sweepStaleAsyncLaneRecords',
 ]);
 

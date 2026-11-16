@@ -115,14 +115,14 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 			const hook = createPhaseMonitorHook(tempDir, mockManager);
 
 			// First call - initializes phase tracking (should NOT trigger)
-			await hook({}, {});
+			await hook({ sessionID: 'sess-phase-preflight-auto' }, {});
 			expect(checkAndTriggerSpy).not.toHaveBeenCalled();
 
 			// Update plan to phase 2
 			await createTestPlan(2, 2);
 
 			// Second call - phase changed, should trigger
-			await hook({}, {});
+			await hook({ sessionID: 'sess-phase-preflight-auto' }, {});
 			expect(checkAndTriggerSpy).toHaveBeenCalledTimes(1);
 			expect(checkAndTriggerSpy).toHaveBeenCalledWith(
 				2, // currentPhase
@@ -141,16 +141,16 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 			const hook = createPhaseMonitorHook(tempDir, mockManager);
 
 			// Initialize
-			await hook({}, {});
+			await hook({ sessionID: 'sess-phase-preflight-auto' }, {});
 
 			// Transition to phase 2
 			await createTestPlan(2, 3);
-			await hook({}, {});
+			await hook({ sessionID: 'sess-phase-preflight-auto' }, {});
 			expect(checkAndTriggerSpy).toHaveBeenCalledTimes(1);
 
 			// Transition to phase 3
 			await createTestPlan(3, 3);
-			await hook({}, {});
+			await hook({ sessionID: 'sess-phase-preflight-auto' }, {});
 			expect(checkAndTriggerSpy).toHaveBeenCalledTimes(2);
 		});
 
@@ -200,7 +200,7 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 			await savePlan(tempDir, PlanSchema.parse(planAtPhase1));
 
 			const hook = createPhaseMonitorHook(tempDir, mockManager);
-			await hook({}, {}); // Initialize at phase 1
+			await hook({ sessionID: 'sess-phase-preflight-auto' }, {}); // Initialize at phase 1
 
 			// Now complete phase 1 and save at phase 2 — normalization advances
 			// the cursor off the now-terminal phase 1.
@@ -221,7 +221,7 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 				),
 			};
 			await savePlan(tempDir, PlanSchema.parse(planAtPhase2));
-			await hook({}, {});
+			await hook({ sessionID: 'sess-phase-preflight-auto' }, {});
 
 			expect(checkAndTriggerSpy).toHaveBeenCalledWith(
 				2, // currentPhase
@@ -241,13 +241,13 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 			const hook = createPhaseMonitorHook(tempDir, mockManager);
 
 			// First call - initializes
-			await hook({}, {});
+			await hook({ sessionID: 'sess-phase-preflight-auto' }, {});
 			expect(checkAndTriggerSpy).not.toHaveBeenCalled();
 
 			// Multiple subsequent calls at same phase - should NOT trigger
-			await hook({}, {});
-			await hook({}, {});
-			await hook({}, {});
+			await hook({ sessionID: 'sess-phase-preflight-auto' }, {});
+			await hook({ sessionID: 'sess-phase-preflight-auto' }, {});
+			await hook({ sessionID: 'sess-phase-preflight-auto' }, {});
 
 			expect(checkAndTriggerSpy).not.toHaveBeenCalled();
 		});
@@ -261,7 +261,7 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 			const hook = createPhaseMonitorHook(tempDir, mockManager);
 
 			// Initialize
-			await hook({}, {});
+			await hook({ sessionID: 'sess-phase-preflight-auto' }, {});
 
 			// Simulate task updates in same phase - rewrite plan with same current_phase
 			const plan = await loadPlan(tempDir);
@@ -288,7 +288,7 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 			await savePlan(tempDir, PlanSchema.parse(updatedPlan));
 
 			// Hook called again - should NOT trigger because phase hasn't changed
-			await hook({}, {});
+			await hook({ sessionID: 'sess-phase-preflight-auto' }, {});
 
 			expect(checkAndTriggerSpy).not.toHaveBeenCalled();
 		});
@@ -303,11 +303,11 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 
 			// Rapid calls - all in same phase
 			await Promise.all([
-				hook({}, {}),
-				hook({}, {}),
-				hook({}, {}),
-				hook({}, {}),
-				hook({}, {}),
+				hook({ sessionID: 'sess-phase-preflight-auto' }, {}),
+				hook({ sessionID: 'sess-phase-preflight-auto' }, {}),
+				hook({ sessionID: 'sess-phase-preflight-auto' }, {}),
+				hook({ sessionID: 'sess-phase-preflight-auto' }, {}),
+				hook({ sessionID: 'sess-phase-preflight-auto' }, {}),
 			]);
 
 			// Only the initialization should have happened (phase 1 tracked but no trigger)
@@ -335,7 +335,7 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 			const hook = createPhaseMonitorHook(tempDir, failingManager);
 
 			// Initialize at phase 1
-			await hook({}, {});
+			await hook({ sessionID: 'sess-phase-preflight-auto' }, {});
 
 			// Update to phase 2 - this should NOT throw even though the manager fails
 			await createTestPlan(2, 2);
@@ -343,7 +343,7 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 			// This should not propagate the error - safeHook catches it
 			let threw = false;
 			try {
-				await hook({}, {});
+				await hook({ sessionID: 'sess-phase-preflight-auto' }, {});
 			} catch {
 				threw = true;
 			}
@@ -374,7 +374,7 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 			const hook = createPhaseMonitorHook(tempDir, failingManager);
 
 			// Initialize
-			await hook({}, {});
+			await hook({ sessionID: 'sess-phase-preflight-auto' }, {});
 
 			// First transition - fail
 			shouldFail = true;
@@ -383,7 +383,7 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 			// Should not propagate - safeHook catches it
 			let threw = false;
 			try {
-				await hook({}, {});
+				await hook({ sessionID: 'sess-phase-preflight-auto' }, {});
 			} catch {
 				threw = true;
 			}
@@ -395,7 +395,7 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 
 			threw = false;
 			try {
-				await hook({}, {});
+				await hook({ sessionID: 'sess-phase-preflight-auto' }, {});
 			} catch {
 				threw = true;
 			}
@@ -474,7 +474,7 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 			// Should not throw even with no valid plan
 			let threw = false;
 			try {
-				await hook({}, {});
+				await hook({ sessionID: 'sess-phase-preflight-auto' }, {});
 			} catch {
 				threw = true;
 			}
@@ -493,12 +493,12 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 			const hook = createPhaseMonitorHook(tempDir, mockManager);
 
 			// Initialize - tracks phase 1
-			await hook({}, {});
+			await hook({ sessionID: 'sess-phase-preflight-auto' }, {});
 			expect(checkAndTriggerSpy).not.toHaveBeenCalled();
 
 			// Step 2: Transition to phase 2
 			await createTestPlan(2, 3);
-			await hook({}, {});
+			await hook({ sessionID: 'sess-phase-preflight-auto' }, {});
 			expect(checkAndTriggerSpy).toHaveBeenCalledTimes(1);
 
 			// Step 3: Multiple updates within phase 2 - should NOT retrigger.
@@ -526,15 +526,15 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 			await savePlan(tempDir, PlanSchema.parse(updatedPlan));
 
 			// Multiple hooks calls - should NOT trigger preflight
-			await hook({}, {});
-			await hook({}, {});
-			await hook({}, {});
+			await hook({ sessionID: 'sess-phase-preflight-auto' }, {});
+			await hook({ sessionID: 'sess-phase-preflight-auto' }, {});
+			await hook({ sessionID: 'sess-phase-preflight-auto' }, {});
 
 			expect(checkAndTriggerSpy).toHaveBeenCalledTimes(1); // Still only 1
 
 			// Step 4: Transition to phase 3
 			await createTestPlan(3, 3);
-			await hook({}, {});
+			await hook({ sessionID: 'sess-phase-preflight-auto' }, {});
 			expect(checkAndTriggerSpy).toHaveBeenCalledTimes(2); // Now 2
 		});
 
@@ -548,7 +548,7 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 			// Initialize should work
 			let threw = false;
 			try {
-				await hook({}, {});
+				await hook({ sessionID: 'sess-phase-preflight-auto' }, {});
 			} catch {
 				threw = true;
 			}
@@ -560,7 +560,7 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 			// Hook should handle missing plan gracefully
 			threw = false;
 			try {
-				await hook({}, {});
+				await hook({ sessionID: 'sess-phase-preflight-auto' }, {});
 			} catch {
 				threw = true;
 			}
@@ -572,7 +572,7 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 			// Should work again
 			threw = false;
 			try {
-				await hook({}, {});
+				await hook({ sessionID: 'sess-phase-preflight-auto' }, {});
 			} catch {
 				threw = true;
 			}
@@ -596,7 +596,7 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 
 			let threw = false;
 			try {
-				await hook({}, {});
+				await hook({ sessionID: 'sess-phase-preflight-auto' }, {});
 			} catch {
 				threw = true;
 			}
@@ -611,7 +611,7 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 
 			let threw = false;
 			try {
-				await hook({}, {});
+				await hook({ sessionID: 'sess-phase-preflight-auto' }, {});
 			} catch {
 				threw = true;
 			}
@@ -626,7 +626,7 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 
 			let threw = false;
 			try {
-				await hook({}, {});
+				await hook({ sessionID: 'sess-phase-preflight-auto' }, {});
 			} catch {
 				threw = true;
 			}
@@ -651,7 +651,7 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 
 			let threw = false;
 			try {
-				await hook({}, {});
+				await hook({ sessionID: 'sess-phase-preflight-auto' }, {});
 			} catch {
 				threw = true;
 			}
@@ -676,7 +676,7 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 
 			let threw = false;
 			try {
-				await hook({}, {});
+				await hook({ sessionID: 'sess-phase-preflight-auto' }, {});
 			} catch {
 				threw = true;
 			}
@@ -701,7 +701,7 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 
 			let threw = false;
 			try {
-				await hook({}, {});
+				await hook({ sessionID: 'sess-phase-preflight-auto' }, {});
 			} catch {
 				threw = true;
 			}
@@ -743,7 +743,7 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 
 			let threw = false;
 			try {
-				await hook({}, {});
+				await hook({ sessionID: 'sess-phase-preflight-auto' }, {});
 			} catch {
 				threw = true;
 			}
@@ -770,7 +770,7 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 
 			let threw = false;
 			try {
-				await hook({}, {});
+				await hook({ sessionID: 'sess-phase-preflight-auto' }, {});
 			} catch {
 				threw = true;
 			}
@@ -802,7 +802,7 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 
 			let threw = false;
 			try {
-				await hook({}, {});
+				await hook({ sessionID: 'sess-phase-preflight-auto' }, {});
 			} catch {
 				threw = true;
 			}
@@ -847,7 +847,7 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 
 			let threw = false;
 			try {
-				await hook({}, {});
+				await hook({ sessionID: 'sess-phase-preflight-auto' }, {});
 			} catch {
 				threw = true;
 			}
@@ -891,7 +891,7 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 
 			let threw = false;
 			try {
-				await hook({}, {});
+				await hook({ sessionID: 'sess-phase-preflight-auto' }, {});
 			} catch {
 				threw = true;
 			}
@@ -933,7 +933,7 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 
 			let threw = false;
 			try {
-				await hook({}, {});
+				await hook({ sessionID: 'sess-phase-preflight-auto' }, {});
 			} catch {
 				threw = true;
 			}
@@ -978,7 +978,7 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 
 			let threw = false;
 			try {
-				await hook({}, {});
+				await hook({ sessionID: 'sess-phase-preflight-auto' }, {});
 			} catch {
 				threw = true;
 			}
@@ -1010,7 +1010,7 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 
 			let threw = false;
 			try {
-				await hook({}, {});
+				await hook({ sessionID: 'sess-phase-preflight-auto' }, {});
 			} catch {
 				threw = true;
 			}
@@ -1070,7 +1070,7 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 
 			let threw = false;
 			try {
-				await hook({}, {});
+				await hook({ sessionID: 'sess-phase-preflight-auto' }, {});
 			} catch {
 				threw = true;
 			}
@@ -1090,7 +1090,7 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 
 			let threw = false;
 			try {
-				await hook({}, {});
+				await hook({ sessionID: 'sess-phase-preflight-auto' }, {});
 			} catch {
 				threw = true;
 			}
@@ -1105,7 +1105,7 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 
 			let threw = false;
 			try {
-				await hook({}, {});
+				await hook({ sessionID: 'sess-phase-preflight-auto' }, {});
 			} catch {
 				threw = true;
 			}
@@ -1125,7 +1125,7 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 
 			let threw = false;
 			try {
-				await hook({}, {});
+				await hook({ sessionID: 'sess-phase-preflight-auto' }, {});
 			} catch {
 				threw = true;
 			}
@@ -1141,7 +1141,7 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 			// Sequential operations to avoid Windows file locking issues
 			// Tests that the hook doesn't crash even with rapid state changes
 			for (let i = 0; i < 10; i++) {
-				await hook({}, {});
+				await hook({ sessionID: 'sess-phase-preflight-auto' }, {});
 				// Interleave writes
 				if (i % 3 === 0) {
 					await createTestPlan((i % 3) + 1, 3);
@@ -1160,7 +1160,7 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 
 			let threw = false;
 			try {
-				await hook({}, {});
+				await hook({ sessionID: 'sess-phase-preflight-auto' }, {});
 			} catch {
 				threw = true;
 			}
@@ -1175,7 +1175,7 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 
 			let threw = false;
 			try {
-				await hook({}, {});
+				await hook({ sessionID: 'sess-phase-preflight-auto' }, {});
 			} catch {
 				threw = true;
 			}
@@ -1191,7 +1191,7 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 			const checkAndTriggerSpy = vi.spyOn(mockManager, 'checkAndTrigger');
 			const hook = createPhaseMonitorHook(tempDir, mockManager);
 
-			await hook({}, {}); // Initialize at phase 1
+			await hook({ sessionID: 'sess-phase-preflight-auto' }, {}); // Initialize at phase 1
 
 			// Try to set current_phase to 0 (invalid)
 			const zeroPhasePlan = {
@@ -1208,7 +1208,7 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 
 			let threw = false;
 			try {
-				await hook({}, {});
+				await hook({ sessionID: 'sess-phase-preflight-auto' }, {});
 			} catch {
 				threw = true;
 			}
@@ -1222,7 +1222,7 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 			const checkAndTriggerSpy = vi.spyOn(mockManager, 'checkAndTrigger');
 			const hook = createPhaseMonitorHook(tempDir, mockManager);
 
-			await hook({}, {}); // Initialize at phase 2
+			await hook({ sessionID: 'sess-phase-preflight-auto' }, {}); // Initialize at phase 2
 
 			// Transition backwards. #2532: savePlan can no longer persist a
 			// backward cursor, so the projection is written directly (like the
@@ -1234,7 +1234,7 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 
 			let threw = false;
 			try {
-				await hook({}, {});
+				await hook({ sessionID: 'sess-phase-preflight-auto' }, {});
 			} catch {
 				threw = true;
 			}
@@ -1250,14 +1250,14 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 			const checkAndTriggerSpy = vi.spyOn(mockManager, 'checkAndTrigger');
 			const hook = createPhaseMonitorHook(tempDir, mockManager);
 
-			await hook({}, {}); // Initialize at phase 1
+			await hook({ sessionID: 'sess-phase-preflight-auto' }, {}); // Initialize at phase 1
 
 			// Skip directly to phase 5
 			await createTestPlan(5, 5);
 
 			let threw = false;
 			try {
-				await hook({}, {});
+				await hook({ sessionID: 'sess-phase-preflight-auto' }, {});
 			} catch {
 				threw = true;
 			}
@@ -1283,7 +1283,7 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 
 			let threw = false;
 			try {
-				await hook({}, {});
+				await hook({ sessionID: 'sess-phase-preflight-auto' }, {});
 			} catch {
 				threw = true;
 			}
@@ -1315,7 +1315,7 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 
 			let threw = false;
 			try {
-				await hook({}, {});
+				await hook({ sessionID: 'sess-phase-preflight-auto' }, {});
 			} catch {
 				threw = true;
 			}
@@ -1340,7 +1340,7 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 
 			let threw = false;
 			try {
-				await hook({}, {});
+				await hook({ sessionID: 'sess-phase-preflight-auto' }, {});
 			} catch {
 				threw = true;
 			}
@@ -1355,12 +1355,12 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 			const mockManager = createMockPreflightManager();
 			const hook = createPhaseMonitorHook(tempDir, mockManager);
 
-			await hook({}, {}); // Initialize
+			await hook({ sessionID: 'sess-phase-preflight-auto' }, {}); // Initialize
 
 			// Sequential phase changes (avoids Windows file locking issues)
 			for (let i = 2; i <= 20; i++) {
 				await createTestPlan(i, 20);
-				await hook({}, {});
+				await hook({ sessionID: 'sess-phase-preflight-auto' }, {});
 			}
 
 			// If we get here, the hook handled rapid sequential transitions gracefully
@@ -1374,14 +1374,14 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 			const checkAndTriggerSpy = vi.spyOn(mockManager, 'checkAndTrigger');
 			const hook = createPhaseMonitorHook(tempDir, mockManager);
 
-			await hook({}, {}); // Initialize
+			await hook({ sessionID: 'sess-phase-preflight-auto' }, {}); // Initialize
 
 			// Oscillate
 			for (let i = 0; i < 5; i++) {
 				await createTestPlan(2, 2);
-				await hook({}, {});
+				await hook({ sessionID: 'sess-phase-preflight-auto' }, {});
 				await createTestPlan(1, 2);
-				await hook({}, {});
+				await hook({ sessionID: 'sess-phase-preflight-auto' }, {});
 			}
 
 			// Should not crash - each transition should trigger
@@ -1403,13 +1403,13 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 			};
 
 			const hook = createPhaseMonitorHook(tempDir, explodingManager);
-			await hook({}, {}); // Initialize
+			await hook({ sessionID: 'sess-phase-preflight-auto' }, {}); // Initialize
 
 			await createTestPlan(2, 2);
 
 			let threw = false;
 			try {
-				await hook({}, {});
+				await hook({ sessionID: 'sess-phase-preflight-auto' }, {});
 			} catch {
 				threw = true;
 			}
@@ -1431,13 +1431,13 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 			};
 
 			const hook = createPhaseMonitorHook(tempDir, rejectingManager);
-			await hook({}, {}); // Initialize
+			await hook({ sessionID: 'sess-phase-preflight-auto' }, {}); // Initialize
 
 			await createTestPlan(2, 2);
 
 			let threw = false;
 			try {
-				await hook({}, {});
+				await hook({ sessionID: 'sess-phase-preflight-auto' }, {});
 			} catch {
 				threw = true;
 			}
@@ -1465,13 +1465,13 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 			};
 
 			const hook = createPhaseMonitorHook(tempDir, deepRecursionManager);
-			await hook({}, {}); // Initialize
+			await hook({ sessionID: 'sess-phase-preflight-auto' }, {}); // Initialize
 
 			await createTestPlan(2, 2);
 
 			let threw = false;
 			try {
-				await hook({}, {});
+				await hook({ sessionID: 'sess-phase-preflight-auto' }, {});
 			} catch {
 				threw = true;
 			}
@@ -1545,13 +1545,13 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 			};
 
 			const hook = createPhaseMonitorHook(tempDir, stateChangingManager);
-			await hook({}, {}); // Initialize
+			await hook({ sessionID: 'sess-phase-preflight-auto' }, {}); // Initialize
 
 			await createTestPlan(2, 2);
 
 			let threw = false;
 			try {
-				await hook({}, {});
+				await hook({ sessionID: 'sess-phase-preflight-auto' }, {});
 			} catch {
 				threw = true;
 			}
@@ -1598,12 +1598,12 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 			};
 
 			const hook = createPhaseMonitorHook(tempDir, failingManager);
-			await hook({}, {}); // Initialize
+			await hook({ sessionID: 'sess-phase-preflight-auto' }, {}); // Initialize
 
 			// Run many iterations
 			for (let i = 0; i < 100; i++) {
 				await createTestPlan((i % 2) + 1, 2);
-				await hook({}, {});
+				await hook({ sessionID: 'sess-phase-preflight-auto' }, {});
 			}
 
 			// If we get here without OOM, closure retention is handled
@@ -1648,13 +1648,13 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 			});
 
 			const hook = createPhaseMonitorHook(tempDir, thenableRejectManager);
-			await hook({}, {}); // Initialize
+			await hook({ sessionID: 'sess-phase-preflight-auto' }, {}); // Initialize
 
 			await createTestPlan(2, 2);
 
 			let threw = false;
 			try {
-				await hook({}, {});
+				await hook({ sessionID: 'sess-phase-preflight-auto' }, {});
 			} catch {
 				threw = true;
 			}
@@ -1684,13 +1684,13 @@ describe('Phase Preflight Auto-Trigger Integration', () => {
 				new MaliciousPromise(() => {});
 
 			const hook = createPhaseMonitorHook(tempDir, maliciousManager);
-			await hook({}, {}); // Initialize
+			await hook({ sessionID: 'sess-phase-preflight-auto' }, {}); // Initialize
 
 			await createTestPlan(2, 2);
 
 			let threw = false;
 			try {
-				await hook({}, {});
+				await hook({ sessionID: 'sess-phase-preflight-auto' }, {});
 			} catch {
 				threw = true;
 			}

@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.200.11",
+  "tagCommit": "ca083fa3d1ca4f11bf8927962d5c826e43e435a2",
+  "targetCommitish": "ca083fa3d1ca4f11bf8927962d5c826e43e435a2",
+  "releaseBodySha256": "cf321d4180b608b57142ffc687a1c99952b015e7dfe92e5653543dfdedcef162",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/3495-3345-guardrails-shell-audit-rmdir.md",
+      "sha256": "cbd61c047835e48a768eb5d653da646a85ce3acf7c3531c493f5ada1b2ca29f7"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/delegation-route-receipt-fall-through-3380.md",
+      "sha256": "8512e697e9fdbf2b89daf0e0ebe725045b3340203d359e82578290492ea5f0b5"
+    }
+  ]
+}

@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.200.1",
+  "tagCommit": "e66e53c50a6adbfb7eff9b8872b6578e568b39d8",
+  "targetCommitish": "e66e53c50a6adbfb7eff9b8872b6578e568b39d8",
+  "releaseBodySha256": "d565d12d1edf63b7f8de11665074e7b942a350088f2b08135e6693d904d0eaf9",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/3203-quarantine-aging-ebusy-retirement.md",
+      "sha256": "f289018b65dd339ab3cbb39d06049074e178d25a72eb82aba5ad4e38b9b99cb3"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/3427-3434-rollback-gate-async-hardening.md",
+      "sha256": "7b864b404a46f398cc0f382234b04f20ef72cf7af6422614482064ccc3d2a11d"
+    },
+    {
+      "prNumber": null,
+      "order": 2,
+      "path": "docs/releases/pending/git-status-async-diagnosable.md",
+      "sha256": "af478b82b5fb336c3f1fd25306b3613573ba97fb1a67e1f871eede32c6f9f730"
+    },
+    {
+      "prNumber": null,
+      "order": 3,
+      "path": "docs/releases/pending/transient-retry-subprocess-hardening.md",
+      "sha256": "666b5bc5a23d0587cf0ff084ea7c4b1fe21c5cf7a69cbed8adf0f29beccc799c"
+    },
+    {
+      "prNumber": null,
+      "order": 4,
+      "path": "docs/releases/pending/workstream-j14-reset-session-recovery-contract.md",
+      "sha256": "d2df237a5f26f31cd881af49e6d85584dc0566896fc2521f68784c4ecf224aab"
+    }
+  ]
+}

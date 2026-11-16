@@ -10,6 +10,7 @@ import {
 	loadEvidence,
 	saveEvidence,
 } from '../../../src/evidence/manager';
+import { safeRmRecursive } from '../../helpers/safe-test-dir';
 
 const realLoadEvidence = _internals.loadEvidence;
 const realNow = _internals.now;
@@ -279,7 +280,7 @@ function mkdtemp(): string {
 }
 
 function cleanup(dir: string): void {
-	rmSync(dir, { recursive: true, force: true });
+	safeRmRecursive(dir);
 }
 
 async function makeBundleOld(

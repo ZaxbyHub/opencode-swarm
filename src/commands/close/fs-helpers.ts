@@ -78,9 +78,18 @@ export async function unlinkActiveStateFileWithRetry(
 			await _internals.unlink(filePath);
 			return;
 		} catch (error) {
-			const code = (error as NodeJS.ErrnoException)?.code;
+			const code = (error as NodeJS.ErrnoException).code;
 			const delay = ACTIVE_STATE_UNLINK_RETRY_DELAYS_MS[attempt];
 			if ((code !== 'EBUSY' && code !== 'EPERM') || delay === undefined) {
+				throw error;
+			}
+			// #3260-B: a write-DENIED artifact (EACCES/EPERM from the W_OK
+			// probe — ACL-denied or attribute-locked) can never be unlinked by
+			// waiting: fail fast to the caller's warning instead of burning
+			// the 15.2 s schedule. ENOENT and every other access outcome
+			// classify as NOT denied (transient foreign-handle holds keep the
+			// full schedule — only elapsed time helps those).
+			if (code === 'EPERM' && _internals.isWriteDenied(filePath)) {
 				throw error;
 			}
 			_internals.collectGarbageBestEffort();

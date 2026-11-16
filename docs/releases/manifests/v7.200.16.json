@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.200.16",
+  "tagCommit": "79f3d751a9c3d9cd640121ff9f06ea5e4c65b23d",
+  "targetCommitish": "79f3d751a9c3d9cd640121ff9f06ea5e4c65b23d",
+  "releaseBodySha256": "807810c0436966ec34e38a963fd8d1c8906171d05dd785f14e5a6d0e3c5d11e7",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/teardown-retry-hardening-3260-3252.md",
+      "sha256": "b10368762694d7f72e31e925471e51d763226a854637f660126be672cd6b14a7"
+    }
+  ]
+}

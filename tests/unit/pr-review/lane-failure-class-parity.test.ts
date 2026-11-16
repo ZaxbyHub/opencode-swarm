@@ -41,6 +41,8 @@ const FAILURE_CLASS_MEMBERS = {
 	// Issue #2971: explicit operator cancellation (cancel_lane_batch / the
 	// /swarm abort-pr-workflow force override) — never host liveness.
 	operator_cancelled: 'operator_cancelled',
+	// Issue #3311: verdict-lane contract failures carry their own class
+	verdict_contract: 'verdict_contract',
 } as const satisfies Record<
 	BackgroundDelegationWorkflowLaneFailureClass,
 	string

@@ -14,6 +14,12 @@
 import { readFile, rename, writeFile } from 'node:fs/promises';
 import { splitSkillFrontmatter } from '../config/skill-contract-digest.js';
 import type { SkillImproverLLMDelegate } from '../hooks/skill-improver-llm-factory.js';
+import {
+	consumeFlowContinuation,
+	flowNeedsContinuation,
+	parseMetadataFlowMap,
+	stripInlineMetadataComment,
+} from '../hooks/skill-scoring.js';
 import { warn } from '../utils/logger.js';
 import type { SkillChangelogEntry } from './skill-changelog.js';
 import { appendSkillChangelog } from './skill-changelog.js';
@@ -72,6 +78,28 @@ export async function getSkillVersion(skillPath: string): Promise<number> {
 	}
 }
 
+/** Mirror of the drift-check detector's child-value rejections: quote a
+ * flow-map value being emitted as a block metadata child whenever its bare
+ * form would be rejected (bare non-string scalars, flow collections).
+ * Already-quoted values pass through unchanged. */
+const BLOCK_CHILD_NON_STRING_SCALAR =
+	/^(?:-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?|-?\.[0-9]+|true|false|null|yes|no|on|off|~|\d{4}-\d{2}-\d{2}(?:[T ].*)?)$/i;
+
+function quoteBlockChildValue(value: string): string {
+	const t = value.trim();
+	const quoted =
+		(t.startsWith('"') && t.endsWith('"') && t.length >= 2) ||
+		(t.startsWith("'") && t.endsWith("'") && t.length >= 2);
+	if (quoted) return t;
+	if (/^\[.*\]$/.test(t) || /^\{.*\}$/.test(t)) {
+		return `'${t.replace(/'/g, "''")}'`;
+	}
+	if (BLOCK_CHILD_NON_STRING_SCALAR.test(t)) {
+		return `'${t.replace(/'/g, "''")}'`;
+	}
+	return t;
+}
+
 export function buildDeterministicRevision(
 	currentContent: string,
 	currentVersion: number,
@@ -84,19 +112,10 @@ export function buildDeterministicRevision(
 		.map((v) => `- ${v.agent} (${v.taskId}): ${v.reviewerNotes ?? v.verdict}`)
 		.join('\n');
 
-	const revisionSection = [
-		'## Revision Notes',
-		'',
-		`### Version ${nextVersion} (${isoDate})`,
-		'',
-		`Revised due to ${violationContexts.length} violation(s):`,
-		violationLines,
-		'',
-		'Review the Required Procedure and Forbidden Shortcuts sections above for alignment with these violation patterns.',
-		'',
-	].join('\n');
-
-	let result = currentContent;
+	// The notes header is decided AFTER the surgery attempt (see skipSurgery
+	// below): an unparseable braced inline value intentionally leaves the
+	// frontmatter untouched, so claiming "Version N+1" there would be a bump
+	// the file never received (PR #3387 feedback review, finding 3).
 
 	// Update or add version in FRONTMATTER ONLY. All version surgery is
 	// bounded to the frontmatter slice so an indented `version:`/`confidence:`
@@ -106,45 +125,187 @@ export function buildDeterministicRevision(
 	// top-level `version:` is bumped in place (its shape is already
 	// pre-spec), and every NEW insertion prefers the spec shape so the
 	// writer never produces frontmatter its own detector rejects.
-	const split = splitSkillFrontmatter(result);
-	let fm = split.frontmatter;
-	const nestedVersion = /^(\s+)version:\s*"?(\d+)"?\s*[ \t]*$/m.exec(fm);
-	if (nestedVersion?.[1]) {
-		fm = fm.replace(
-			/^(\s+)version:\s*"?(\d+)"?\s*[ \t]*$/m,
-			`${nestedVersion[1]}version: "${nextVersion}"`,
-		);
-	} else if (/^version:\s*"?(\d+)"?\s*[ \t]*$/m.test(fm)) {
-		// Legacy column-0 (quoted tolerated): bump in place, shape preserved.
-		fm = fm.replace(
-			/^version:\s*"?(\d+)"?\s*[ \t]*$/m,
-			`version: ${nextVersion}`,
-		);
-	} else if (/^(\s+)confidence:\s*/m.test(fm)) {
-		const indent = /^(\s+)confidence:/m.exec(fm)?.[1] ?? '';
-		fm = fm.replace(
-			/^(\s+)(confidence:[^\n]*)$/m,
-			`$1$2\n${indent}version: "${nextVersion}"`,
-		);
-	} else if (
-		/^confidence:[^\n]*$/m.test(fm) &&
-		!/^metadata:[ \t]*$/m.test(fm)
-	) {
-		// Legacy column-0 confidence without a metadata block: legacy insert.
-		fm = fm.replace(/^(confidence:[^\n]*)$/m, `$1\nversion: ${nextVersion}`);
-	} else if (/^metadata:[ \t]*$/m.test(fm)) {
-		// Spec-shaped frontmatter: insert the version as the FIRST metadata
-		// child so the writer never emits column-0 in a spec-shaped file.
-		fm = fm.replace(/^(metadata:[ \t]*\n)/m, `$1  version: "${nextVersion}"\n`);
-	} else {
-		// No metadata block and no anchors: insert a minimal spec-shaped
-		// block before the closing fence (keeps `name:` as the first key).
-		fm = fm.replace(
-			/\n(---[ \t]*(?:\r?\n|$))/,
-			`\nmetadata:\n  version: "${nextVersion}"\n$1`,
-		);
+	const split = splitSkillFrontmatter(currentContent);
+	const fmLines = split.frontmatter.split('\n');
+	// Inline-value `metadata:` (flow maps and any other non-empty inline
+	// value) is rewritten to the canonical block form FIRST (issue #3217):
+	// the version child is bumped in place inside the rewrite, so the anchor
+	// branches below never fire for these inputs and a revision can never
+	// stack a second `metadata:` block beneath an inline one.
+	//
+	// Feedback-round invariants (PR #3387 review): the match is spliced BY
+	// INDEX — never via String.replace — so a byte-identical decoy earlier in
+	// the frontmatter is untouched and `$` sequences in author values cannot
+	// be expanded; multi-line flow maps are consumed whole; a braced value
+	// that does not parse SKIPS surgery entirely so the reader keeps failing
+	// closed (an invalid audience is never widened to absent); values the
+	// drift-check detector would reject as children are quoted on emission;
+	// and comment-only `metadata: # note` lines are stripped exactly like the
+	// detector strips them (falling through to the anchors below).
+	const inlineLineIndex = fmLines.findIndex((line) =>
+		/^metadata[ \t]*:[ \t]*\S/i.test(line),
+	);
+	const inlineRawValue =
+		inlineLineIndex === -1
+			? ''
+			: stripInlineMetadataComment(
+					(/^[^:]*:[ \t]*(.*)$/.exec(fmLines[inlineLineIndex] ?? '') ?? [
+						'',
+						'',
+					])[1] ?? '',
+				);
+	const hasInlineMetadata = inlineLineIndex !== -1 && inlineRawValue !== '';
+	let skipSurgery = false;
+	if (hasInlineMetadata && inlineLineIndex >= 0) {
+		let flowValue = inlineRawValue;
+		let lastInlineLine = inlineLineIndex;
+		if (flowValue.startsWith('{') && flowNeedsContinuation(flowValue)) {
+			const consumed = consumeFlowContinuation(
+				flowValue,
+				fmLines,
+				inlineLineIndex + 1,
+				fmLines.length,
+			);
+			if (consumed === null) {
+				// Unparseable multi-line flow: skip surgery entirely — the
+				// frontmatter is left untouched so the reader keeps failing
+				// closed and no corrupt bytes reach disk.
+				skipSurgery = true;
+			} else {
+				flowValue = consumed.value;
+				lastInlineLine = consumed.endIndex;
+			}
+		}
+		if (!skipSurgery) {
+			if (flowValue.startsWith('{')) {
+				const flow = parseMetadataFlowMap(flowValue);
+				if (flow === null) {
+					// Balanced-but-malformed braced value: skip surgery (same
+					// rationale — never widen an invalid audience).
+					skipSurgery = true;
+				} else {
+					const childLines: string[] = ['metadata:'];
+					let versionHandled = false;
+					for (const [rawKey, rawValue] of flow.pairs) {
+						const key = rawKey.toLowerCase();
+						if (key === 'version') {
+							if (versionHandled) continue; // writer owns version
+							childLines.push(`  version: "${nextVersion}"`);
+							versionHandled = true;
+							continue;
+						}
+						// Duplicate keys are emitted VERBATIM (both
+						// occurrences) so the reader still marks the
+						// duplicate and keeps failing closed — first-wins
+						// here would silently widen an invalid audience.
+						childLines.push(`  ${rawKey}: ${quoteBlockChildValue(rawValue)}`);
+					}
+					if (!versionHandled) {
+						childLines.push(`  version: "${nextVersion}"`);
+					}
+					fmLines.splice(
+						inlineLineIndex,
+						lastInlineLine - inlineLineIndex + 1,
+						...childLines,
+					);
+					// A coexisting column-0 `version:` is bumped too so the
+					// stale legacy value cannot shadow the rewritten child.
+					for (let li = 0; li < fmLines.length; li++) {
+						const column0 = /^version:\s*"?(\d+)"?\s*$/.exec(fmLines[li] ?? '');
+						if (column0) {
+							fmLines[li] = `version: ${nextVersion}`;
+							break;
+						}
+					}
+				}
+			} else {
+				// Non-flow inline value (scalar or sequence): audience-neutral
+				// canonicalization — the value is preserved verbatim as a
+				// quoted child and the version child is appended.
+				const childLines = [
+					'metadata:',
+					`  legacy_inline: '${flowValue.replace(/'/g, "''")}'`,
+					`  version: "${nextVersion}"`,
+				];
+				fmLines.splice(inlineLineIndex, 1, ...childLines);
+			}
+		}
 	}
-	result = fm + split.body;
+	// The notes header reflects what actually happened: a skip-surgery
+	// revision leaves the frontmatter untouched and must not claim a version
+	// bump (PR #3387 feedback review, finding 3).
+	const revisionSection = [
+		'## Revision Notes',
+		'',
+		skipSurgery
+			? `### Not revised (${isoDate}) — unparseable inline metadata; fix the metadata: line`
+			: `### Version ${nextVersion} (${isoDate})`,
+		'',
+		`Revised due to ${violationContexts.length} violation(s):`,
+		violationLines,
+		'',
+		'Review the Required Procedure and Forbidden Shortcuts sections above for alignment with these violation patterns.',
+		'',
+	].join('\n');
+
+	let result: string;
+	if (skipSurgery) {
+		result = split.frontmatter + split.body;
+	} else {
+		let fm = fmLines.join('\n');
+		if (!hasInlineMetadata) {
+			const nestedVersion = /^(\s+)version:\s*"?(\d+)"?\s*[ \t]*$/m.exec(fm);
+			if (nestedVersion?.[1]) {
+				fm = fm.replace(
+					/^(\s+)version:\s*"?(\d+)"?\s*[ \t]*$/m,
+					`${nestedVersion[1]}version: "${nextVersion}"`,
+				);
+			} else if (/^version:\s*"?(\d+)"?\s*[ \t]*$/m.test(fm)) {
+				// Legacy column-0 (quoted tolerated): bump in place, shape preserved.
+				fm = fm.replace(
+					/^version:\s*"?(\d+)"?\s*[ \t]*$/m,
+					`version: ${nextVersion}`,
+				);
+			} else if (/^(\s+)confidence:\s*/m.test(fm)) {
+				const indent = /^(\s+)confidence:/m.exec(fm)?.[1] ?? '';
+				fm = fm.replace(
+					/^(\s+)(confidence:[^\n]*)$/m,
+					`$1$2\n${indent}version: "${nextVersion}"`,
+				);
+			} else if (
+				/^confidence:[^\n]*$/m.test(fm) &&
+				!/^metadata:(?:[ \t]*#[^\n]*)?[ \t]*$/im.test(fm)
+			) {
+				// Legacy column-0 confidence without a metadata block: legacy insert.
+				fm = fm.replace(
+					/^(confidence:[^\n]*)$/m,
+					`$1\nversion: ${nextVersion}`,
+				);
+			} else if (/^metadata:(?:[ \t]*#[^\n]*)?[ \t]*$/im.test(fm)) {
+				// Spec-shaped frontmatter (a comment-only value counts as an
+				// empty block, mirroring the detector): insert the version as
+				// the FIRST metadata child, preserving any comment. Function
+				// replacer — the returned text is used literally and can
+				// never expand `$` sequences.
+				fm = fm.replace(
+					/^metadata:(?:[ \t]*(#[^\n]*))?[ \t]*$/im,
+					(_matched, comment: string | undefined) =>
+						comment
+							? `metadata: ${comment.trim()}\n  version: "${nextVersion}"`
+							: `metadata:\n  version: "${nextVersion}"`,
+				);
+			} else {
+				// No metadata block and no anchors: insert a minimal
+				// spec-shaped block before the closing fence (keeps `name:`
+				// as the first key).
+				fm = fm.replace(
+					/\n(---[ \t]*(?:\r?\n|$))/,
+					`\nmetadata:\n  version: "${nextVersion}"\n$1`,
+				);
+			}
+		}
+		result = fm + split.body;
+	}
 
 	// Remove any existing Revision Notes section (from prior revisions)
 	const revisionNotesPattern =

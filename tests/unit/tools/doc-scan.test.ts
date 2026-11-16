@@ -8,6 +8,10 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { doc_scan, scanDocIndex } from '../../../src/tools/doc-scan';
+import { executeInDirectory } from '../../helpers/tool-directory';
+
+// An explicit ToolContext directory keeps the manifest write out of the checkout.
+const runDocScan = executeInDirectory(doc_scan);
 
 // Helper to create temp test directories
 function createTempDir(): string {
@@ -551,9 +555,7 @@ describe('doc-scan tool verification tests', () => {
 			createTestFile(tempDir, 'README.md', '# Project\n\nSummary.\n');
 
 			// Scan with force
-			const result = await doc_scan.execute({ force: true }, {
-				cwd: tempDir,
-			} as any);
+			const result = await runDocScan({ force: true }, tempDir);
 			const parsed = parseToolResult(result);
 
 			expect(parsed.success).toBe(true);
@@ -649,7 +651,7 @@ describe('doc-scan tool verification tests', () => {
 		it('should return valid JSON with success, files_count, cached, and manifest', async () => {
 			createTestFile(tempDir, 'README.md', '# Project\n\nSummary.\n');
 
-			const result = await doc_scan.execute({}, { cwd: tempDir } as any);
+			const result = await runDocScan({}, tempDir);
 			const parsed = parseToolResult(result);
 
 			expect(parsed.success).toBe(true);
@@ -672,9 +674,7 @@ describe('doc-scan tool verification tests', () => {
 				},
 			);
 
-			const result = await doc_scan.execute(maliciousArgs, {
-				cwd: tempDir,
-			} as any);
+			const result = await runDocScan(maliciousArgs, tempDir);
 			const parsed = parseToolResult(result);
 
 			// Should still succeed despite malicious getter
@@ -684,7 +684,7 @@ describe('doc-scan tool verification tests', () => {
 		it('should return a valid manifest structure', async () => {
 			createTestFile(tempDir, 'README.md', '# Title\n\nSummary text.\n');
 
-			const result = await doc_scan.execute({}, { cwd: tempDir } as any);
+			const result = await runDocScan({}, tempDir);
 			const parsed = parseToolResult(result);
 
 			expect(parsed.manifest.files).toBeDefined();

@@ -15,6 +15,7 @@ import {
 	clearDeferredWarnings,
 	getDeferredWarnings,
 } from '../../../src/services/warning-buffer';
+import type { bunSpawn } from '../../../src/utils/bun-compat';
 import {
 	_internals,
 	describeGitResolution,
@@ -34,8 +35,37 @@ import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const ORIGINAL_INTERNALS = { ..._internals };
 
+/**
+ * #3317: the ASYNC resolver entry probes through `_internals.asyncSpawn` —
+ * these synthetic probe shapes stub that seam (the #1952 async-twin
+ * delegation pattern) so resolver fixtures stay platform-independent (an
+ * un-stubbed probe would ACCEPT a real /usr/bin/git on linux runners).
+ */
+function rejectedAsyncProbe(): ReturnType<typeof bunSpawn> {
+	return {
+		stdout: { text: async () => '' },
+		stderr: { text: async () => '' },
+		exited: Promise.resolve(1),
+		spawnError: undefined,
+		signalCode: null,
+		kill() {},
+	} as unknown as ReturnType<typeof bunSpawn>;
+}
+
+function versionOkAsyncProbe(): ReturnType<typeof bunSpawn> {
+	return {
+		stdout: { text: async () => 'git version 2.43.0\n' },
+		stderr: { text: async () => '' },
+		exited: Promise.resolve(0),
+		spawnError: undefined,
+		signalCode: null,
+		kill() {},
+	} as unknown as ReturnType<typeof bunSpawn>;
+}
+
 function restoreInternals(): void {
 	_internals.spawnSync = ORIGINAL_INTERNALS.spawnSync;
+	_internals.asyncSpawn = ORIGINAL_INTERNALS.asyncSpawn;
 	_internals.platform = ORIGINAL_INTERNALS.platform;
 	_internals.env = ORIGINAL_INTERNALS.env;
 	_internals.now = ORIGINAL_INTERNALS.now;
@@ -419,6 +449,8 @@ describe('git-executable — resolveGitExecutableAsync', () => {
 		_internals.platform = () => 'linux';
 		_internals.env = () => ({ PATH: '' });
 		_internals.spawnSync = () => fakeSpawnResult({ status: 1 });
+		// #3317: stub the async seam to a rejected probe (platform-independent).
+		_internals.asyncSpawn = () => rejectedAsyncProbe();
 
 		await expect(resolveGitExecutableAsync()).resolves.toBe('git');
 		// One yield per probed candidate — 3 linux platform candidates. The
@@ -435,6 +467,8 @@ describe('git-executable — resolveGitExecutableAsync', () => {
 		};
 		_internals.env = () => ({ PATH: '' });
 		_internals.spawnSync = () => fakeSpawnResult({ status: 1 });
+		// #3317: same asyncSpawn rejection stub (platform-independent).
+		_internals.asyncSpawn = () => rejectedAsyncProbe();
 
 		const [a, b] = await Promise.all([
 			resolveGitExecutableAsync(),
@@ -453,6 +487,12 @@ describe('git-executable — resolveGitExecutableAsync', () => {
 		_internals.env = () => ({ [GIT_BINARY_ENV_VAR]: gitPath, PATH: '' });
 		_internals.spawnSync = (cmd) =>
 			cmd === gitPath ? fakeSpawnResult({ status: 0 }) : enoentResult();
+		// #3317: the async entry probes through asyncSpawn, so both seams
+		// answer — only the override candidate is healthy.
+		_internals.asyncSpawn = ((cmd: string[]) =>
+			cmd[0] === gitPath
+				? versionOkAsyncProbe()
+				: rejectedAsyncProbe()) as typeof _internals.asyncSpawn;
 
 		await expect(resolveGitExecutableAsync()).resolves.toBe(gitPath);
 	});

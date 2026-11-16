@@ -285,6 +285,10 @@ export const KNOWN_TELEMETRY_KEYS: Readonly<Record<string, readonly string[]>> =
 			'attempt',
 		]),
 
+		// src/parallel/file-locks.ts — fenced stale store-lock break (issue
+		// #2967): identifier-free payload (store discriminator + age only).
+		store_lock_stale_broken: Object.freeze(['store', 'ageMs']),
+
 		// src/plan/manager.ts:329,1696 and src/plan/ledger.ts:681.
 		plan_ledger_cas_retry: Object.freeze([
 			'attempt',

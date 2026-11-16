@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.199.5",
+  "tagCommit": "2ad011b44f650bfe7202187df2477fad1c9a6046",
+  "targetCommitish": "2ad011b44f650bfe7202187df2477fad1c9a6046",
+  "releaseBodySha256": "69aae253a80935dccb10248928eeeae7c12fee94d8ab9af40cf3f1a358568da3",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/3312-3313-honest-incomplete-lane-settlement.md",
+      "sha256": "afb71994b103f0c4f604602ba36626c89ef17aa208313247a5ba34a63f90b8aa"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/git-status-async-diagnosable.md",
+      "sha256": "d061d753a32aa8bcf8b96dc5ee095d3c292632a17009b4e1a5778e0cb6055cb0"
+    }
+  ]
+}

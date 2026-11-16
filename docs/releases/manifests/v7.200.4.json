@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.200.4",
+  "tagCommit": "a2a2757043f95942807e60d6aa1a137112776a60",
+  "targetCommitish": "a2a2757043f95942807e60d6aa1a137112776a60",
+  "releaseBodySha256": "8c2b8f6a7c3b77df4b752b58c9a08f499157c46cdc1dd414e30ba14e8c8c35b5",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/3448-save-durable-status-vanished-lane.md",
+      "sha256": "1cda2d36e6bae0c70e023e197318c9852e510ac3b52e68a2ef601f42171a5cd1"
+    }
+  ]
+}

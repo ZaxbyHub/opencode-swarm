@@ -95,6 +95,7 @@ describe('order-unstable item derivations (issue #2906)', () => {
 			[
 				{
 					laneId: 'ou-critic-lane',
+					agent: 'critic',
 					workflowLane: 'ou-critic-lane',
 					reviewItemIds: criticItems,
 				},

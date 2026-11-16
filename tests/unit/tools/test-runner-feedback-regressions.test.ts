@@ -6,6 +6,7 @@ import {
 	runTests,
 	test_runner,
 } from '../../../src/tools/test-runner';
+import { safeRmAllRecursive } from '../../helpers/safe-test-dir';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 const originalSpawn = _internals.bunSpawn;
@@ -61,9 +62,8 @@ describe('test-runner feedback regressions', () => {
 		_internals.bunSpawn = originalSpawn;
 		_internals.isCommandAvailable = originalAvailable;
 		delete process.env.SWARM_LANG_BACKEND;
-		for (const dir of tempDirs.splice(0)) {
-			fs.rmSync(dir, { recursive: true, force: true });
-		}
+		// #3260-C: one stuck root no longer strands the rest.
+		safeRmAllRecursive(tempDirs.splice(0));
 	});
 
 	it('FB-006 snapshots exit-before-timeout classification before bounded stream drains finish', async () => {

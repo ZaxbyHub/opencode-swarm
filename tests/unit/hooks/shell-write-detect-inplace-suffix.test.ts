@@ -137,9 +137,16 @@ describe('shell-write-detect: only a pure literal word is the BSD script', () =>
 			"sed -i '' s-x-/`printf ..`/victim-1 src/a.ts -n",
 			['s-x-/`printf ..`/victim-1', 'src/a.ts'],
 		],
+		// #3491 closure F-1 re-pin: per-branch (each expanded word edited).
 		[
 			"sed -i '' s-x-/{..,a}/{..,b}/outside/victimH-1 src/a.ts -n",
-			['s-x-/{..,a}/{..,b}/outside/victimH-1', 'src/a.ts'],
+			[
+				's-x-/../../outside/victimH-1',
+				's-x-/../b/outside/victimH-1',
+				's-x-/a/../outside/victimH-1',
+				's-x-/a/b/outside/victimH-1',
+				'src/a.ts',
+			],
 		],
 		[
 			"sed -i '' s-x-/.?/.?/outside/victimG-1 src/a.ts -n",
@@ -197,7 +204,8 @@ describe('shell-write-detect: an expansion in any option word', () => {
 			['--expression=$X', 'src/a.ts'],
 		],
 		["X='s.sed ../../v'; sed --file=$X -i src/a.ts", ['--file=$X', 'src/a.ts']],
-		['sed -e{1d,x} -i f', ['-e{1d,x}', 'f']],
+		// #3491 closure F-1 re-pin: per-branch (`-e1d -ex`), over-report.
+		['sed -e{1d,x} -i f', ['-e1d', '-ex', 'f']],
 		// An expanding -e does not count as a script flag, so `.bak` after a
 		// bare -i is not taken for a BSD suffix: GNU edits it as a file.
 		["X=' 1d ../../v'; sed -e$X -i .bak f", ['-e$X', '.bak', 'f']],
@@ -233,7 +241,8 @@ describe('shell-write-detect: an expansion in a detached option argument', () =>
 			['$X', '-i', 'inplace', '{print}', 'f'],
 		],
 		["X='1 ../../v'; perl -e $X -i f", ['$X', '-i', 'f']],
-		['sed -e {1d,../../v} -i src/a.ts', ['{1d,../../v}', 'src/a.ts']],
+		// #3491 closure F-1 re-pin: per-branch (../../v branch visible).
+		['sed -e {1d,../../v} -i src/a.ts', ['1d', '../../v', 'src/a.ts']],
 		// Literal arguments and double-quoted expansions are unchanged.
 		['sed -e 1d -i f', ['f']],
 		['sed -l 5 -i 1d f', ['f']],
@@ -383,14 +392,16 @@ describe('shell-write-detect: neighbouring picker pins', () => {
  */
 describe('shell-write-detect: a multi-word expansion is never the GNU script', () => {
 	test.each([
+		// #3491 closure F-1 re-pins: per-branch; EMPTY-alternative shapes
+		// hit the W8 refusal (null path).
 		[
 			'sed -i {1d,../../outside/v} src/a.ts',
-			['{1d,../../outside/v}', 'src/a.ts'],
+			['1d', '../../outside/v', 'src/a.ts'],
 		],
-		['sed -E -i -s a{,..}/x ../x -n', ['a{,..}/x', '../x']],
-		["sed -E -i'' -n a{,..}/x .env -n", ['a{,..}/x', '.env']],
-		['sed -i.bak {1d,../v} src/a.ts', ['{1d,../v}', 'src/a.ts']],
-		['sed 1d{,x} -i src/a.ts', ['1d{,x}', 'src/a.ts']],
+		['sed -E -i -s a{,..}/x ../x -n', [null, '../x']],
+		["sed -E -i'' -n a{,..}/x .env -n", [null, '.env']],
+		['sed -i.bak {1d,../v} src/a.ts', ['1d', '../v', 'src/a.ts']],
+		['sed 1d{,x} -i src/a.ts', [null, 'src/a.ts']],
 		["S='1d ../../x'; sed -i $S src/a.ts", ['$S', 'src/a.ts']],
 		// Quoted scripts in the script slot stay the script.
 		["sed -i '1d' src/a.ts", ['src/a.ts']],

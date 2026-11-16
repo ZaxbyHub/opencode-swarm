@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { ACTIVE_STATE_UNLINK_RETRY_DELAYS_MS } from '../../../src/commands/close/unlink-schedule.js';
 import { isCanonicalPathWithinRoot } from '../../../src/utils/path-security.js';
 import {
 	_internals,
@@ -222,16 +223,18 @@ describe('safeRmRecursive retry shape (issue #3248 class 2)', () => {
 			// The hedge runs on EVERY failed attempt (not just the first).
 			expect(gcCalls).toBe(3);
 			// PRR-025: pin the CADENCE, not just the count — a wait(100) →
-			// wait(1) mutation would collapse the ~10 s budget to ~0.1 s
-			// while a count-only assertion stays green.
-			expect(waitArgs).toEqual([100, 100, 100]);
+			// wait(1) mutation would collapse the budget while a count-only
+			// assertion stays green. #3260-A: the cadence is the production
+			// schedule's head ([25,50,100,...]) since the helper now consumes
+			// ACTIVE_STATE_UNLINK_RETRY_DELAYS_MS.
+			expect(waitArgs).toEqual([25, 50, 100]);
 		} finally {
 			restoreInternals();
 			cleanup();
 		}
 	});
 
-	it('exhausts the bounded 100-attempt (~10 s) budget and rethrows the original error', () => {
+	it('exhausts the production-schedule budget and rethrows the original error', () => {
 		const { dir, cleanup } = createSafeTestDir('safe-rm-exhaust-');
 		let rmCalls = 0;
 		const waitArgs: number[] = [];
@@ -250,13 +253,18 @@ describe('safeRmRecursive retry shape (issue #3248 class 2)', () => {
 
 		try {
 			expect(() => safeRmRecursive(dir)).toThrow(/EBUSY/);
-			// 100 rmSync attempts (the old budget was 21 ≈ 2 s; #3248 raised it
-			// because windows-latest AV handle holds outlived it).
-			expect(rmCalls).toBe(100);
-			// 99 waits (the 100th attempt throws before sleeping), each at the
-			// full 100 ms cadence (PRR-025).
-			expect(waitArgs.length).toBe(99);
-			expect(waitArgs.every((ms) => ms === 100)).toBe(true);
+			// 21 rmSync attempts: one per schedule delay (20) plus ONE final
+			// attempt after the schedule is exhausted (window history: ~2.1 s
+			// until #3248 raised it to ~10 s; #3260-A re-tied it to the
+			// production schedule, ~15.2 s, one source in
+			// src/commands/close/unlink-schedule.ts).
+			expect(rmCalls).toBe(21);
+			// 20 waits — exactly the production schedule array (the final
+			// attempt never sleeps; PRR-025 cadence pin generalizes to the
+			// full array).
+			expect(waitArgs).toEqual([...ACTIVE_STATE_UNLINK_RETRY_DELAYS_MS]);
+			// No wait after the final failure: the schedule IS the waits.
+			expect(waitArgs.length).toBe(20);
 		} finally {
 			restoreInternals();
 			cleanup();

@@ -9,15 +9,15 @@ import {
 	toLegacyTelemetryLine,
 } from './observability/index.js';
 import type { DelegationCostFields } from './services/cost-accounting.js';
-// Non-fatal best-effort logging for the re-home close path (issue #2472 W9).
-// Cycle-safe: src/utils' barrel (errors/logger/merge/regex) never imports
-// telemetry.
+// Non-fatal re-home close logging (issue #2472 W9). Cycle-safe: src/utils'
+// barrel (errors/logger/merge/regex) never imports telemetry.
 import { log } from './utils';
 // Canonical project-root identity for the re-home same-directory check
 // (issue #2472 / PR #2588 PRR-019): raw string === mis-fires on Windows case
 // differences and symlink/junction spellings of the SAME root, churning the
 // stream. canonical-root.ts imports only node:* builtins — cycle-safe here.
 import { sameProjectRoot } from './utils/canonical-root.js';
+import { isBlankDirectory } from './utils/path-security.js';
 
 // ============================================================================
 // Types
@@ -207,8 +207,8 @@ export type TelemetryEvent =
 	// vocabulary ('plan_recovery' = typed PlanRecoverySupersededError path;
 	// 'coordination_fence' = any generation-fence outcome) — counts only, no
 	// paths, no session or project identity.
-	| 'plan_recovery_superseded';
-
+	| 'plan_recovery_superseded'
+	| 'store_lock_stale_broken'; // #2967: fenced stale store-lock break
 /** Stable classification for how a reviewer-gate decision was established. */
 export type ReviewerGateEvidenceKind =
 	| 'genuine'
@@ -223,8 +223,8 @@ export type ReviewerGateEvidenceKind =
  * analytics, so additions are allowed but existing values must not be renamed.
  */
 export type ReviewerGateReasonCode =
-	| 'lean_turbo_completed_lane'
-	| 'standard_turbo_non_tier3'
+	// Retired in #3165 E, still possible in older telemetry.jsonl rows:
+	// 'lean_turbo_completed_lane', 'standard_turbo_non_tier3'.
 	| 'durable_evidence_complete'
 	| 'workflow_state_complete'
 	| 'stage_b_parallel_complete'
@@ -392,11 +392,11 @@ export function resetTelemetryForTesting(): void {
  * (`sameProjectRoot`), so Windows case differences and symlink/junction
  * spellings of one root do not churn the stream.
  *
- * @param projectDirectory - Absolute path to the project root
+ * @param projectDirectory - Absolute path to the project root (blank: no-op)
  */
 export function initTelemetry(projectDirectory: string): void {
-	if (_disabled) {
-		return;
+	if (_disabled || isBlankDirectory(projectDirectory)) {
+		return; // #3165 B: a blank root would put .swarm/ under the cwd
 	}
 	if (
 		_writeStream !== null &&

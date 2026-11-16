@@ -56,16 +56,24 @@ Look the slug up in `src/config/skill-mirrors.ts`:
   canonical protocol; `.claude/skills/<slug>/SKILL.md` and `.agents/skills/<slug>/SKILL.md`
   are thin shims that reference it via the relative path. See
   `src/config/skill-mirrors.ts` for the `kind: adapter` contract.
-- **No skill-mirrors.ts entry** (qa-sweep, research-first, swarm, unswarm,
-  tech-debt-ci-review, rust-crate-ci, orchestrating-subagents, durable-session-state,
-  editing-skills, …): the `.claude` file is the source protocol and there is
-  no `.opencode` copy, no CI gate, and no npm shipment. **But most are not
-  single-file**: many have a Codex adapter shim in `.agents/skills/<slug>/`
-  that reads "`.claude/skills/<slug>/SKILL.md` is the source protocol"
-  (check `ls .agents/skills/`). Content edits to the `.claude` file are safe
+- **`.claude`-sourced skills** (qa-sweep, research-first, unswarm,
+  tech-debt-ci-review, session-retrospective, rust-crate-ci, editing-skills,
+  …; not swarm, orchestrating-subagents, or durable-session-state, which are
+  `.opencode`-canonical): the
+  `.claude` file is the source protocol and there is no `.opencode` copy and no
+  npm shipment. When the skill also has an adapter shim in
+  `.agents/skills/<slug>/` (which reads "`.claude/skills/<slug>/SKILL.md` is the
+  source protocol"; check `ls .agents/skills/`), it NEEDS a `kind: 'agents-only'`
+  entry in `src/config/skill-mirrors.ts` listing both paths in
+  `extraIdenticalPaths`. Otherwise `drift-check --enforce` fails CI with "exists
+  in .agents/skills but has no contract". Single-tree `.claude`-only skills need
+  no entry. Note that ZCode loads only `.zcode/skills` and `.agents/skills`,
+  never `.claude/skills`, so the `.agents` shim is what makes such a skill
+  reachable there. Content edits to the `.claude` file are safe
   — shims delegate — but **renaming, moving, or removing** one of these
-  skills silently orphans its `.agents` shim with zero drift-check coverage.
-  Update or remove the shim in the same change.
+  skills must update the shim and the `agents-only` entry in the same change.
+  Drift-check verifies that the listed files exist, but not that the shim's
+  pointer text still names the right source file.
 - **Pre-flight for new skills** (blocking): Before authoring any SKILL.md
   content for a skill that should reach npm users, the slug MUST be registered
   in all three places: `src/config/skill-mirrors.ts` (classification),

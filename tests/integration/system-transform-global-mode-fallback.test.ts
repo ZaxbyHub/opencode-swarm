@@ -9,25 +9,24 @@ import {
 } from '../helpers/plugin-host';
 import { withFrozenClock } from '../helpers/test-clock.js';
 
+/**
+ * Sessionless `experimental.chat.system.transform` contract (#3320, AC8).
+ *
+ * DELIBERATELY UPDATED from the pre-#3320 contract this file used to pin
+ * (sessionless calls emitted the TURBO/FULL-AUTO banners and the PLANNING
+ * PROFILE producer using another session's global mode state). The issue
+ * body's Scope sanctions this replacement explicitly: "its sessionless-
+ * emission assertions at :51-85, and the Path-A producer assertion at :87,
+ * are replaced; they are not deleted or weakened without replacement."
+ * The new contract: a sessionless call (title/summary/agent-generation
+ * surfaces) has no request-correlation key and no delivery owner, so it
+ * appends NO swarm-specific system text of any kind. The new-contract
+ * journey is also pinned by the frozen
+ * tests/integration/system-transform-sessionless-no-swarm-text.test.ts.
+ */
 describe('registered system.transform global mode fallback', () => {
 	let directory: string;
 	let host: Awaited<ReturnType<typeof bootSwarmPluginHost>>;
-
-	function materializePinnedHostSystem(
-		header: string,
-		system: string[],
-	): Array<{ role: 'system'; content: string }> {
-		const entries = [...system];
-		// Pinned OpenCode v1.18.3 LLMRequestPrep.prepare: when there are more
-		// than two system entries and the original header remains first, preserve
-		// that header and join the remaining entries into the second message.
-		if (entries.length > 2 && entries[0] === header) {
-			const rest = entries.slice(1);
-			entries.length = 0;
-			entries.push(header, rest.join('\n'));
-		}
-		return entries.map((content) => ({ role: 'system', content }));
-	}
 
 	beforeAll(async () => {
 		directory = createPluginHostProject('system-transform-global-mode');
@@ -48,7 +47,7 @@ describe('registered system.transform global mode fallback', () => {
 		}
 	});
 
-	it('uses another session’s Turbo flag when system.transform has no sessionID', async () => {
+	it('emits no swarm text sessionless even when another session has Turbo active', async () => {
 		const otherSessionId = `global-turbo-${withFrozenClock(() => Date.now())}`;
 		swarmState.agentSessions.set(otherSessionId, {
 			turboMode: true,
@@ -57,8 +56,10 @@ describe('registered system.transform global mode fallback', () => {
 		const output = { system: ['base system seed'] };
 		try {
 			await host.hooks['experimental.chat.system.transform']({}, output);
-			expect(output.system).toContain('base system seed');
-			expect(output.system.join('\n')).toContain('## 🚀 TURBO MODE ACTIVE');
+			// #3320: the sessionless call must leave the system surface
+			// byte-untouched — no banner borrowed from another session's mode.
+			expect(output.system).toEqual(['base system seed']);
+			expect(output.system.join('\n')).not.toContain('## 🚀 TURBO MODE ACTIVE');
 			expect(output.system.join('\n')).not.toContain(
 				'## ⚡ FULL-AUTO MODE ACTIVE',
 			);
@@ -67,7 +68,7 @@ describe('registered system.transform global mode fallback', () => {
 		}
 	});
 
-	it('uses another session’s Full-Auto flag when system.transform has no sessionID', async () => {
+	it('emits no swarm text sessionless even when another session has Full-Auto active', async () => {
 		const otherSessionId = `global-full-auto-${withFrozenClock(() => Date.now())}`;
 		swarmState.agentSessions.set(otherSessionId, {
 			turboMode: false,
@@ -76,19 +77,20 @@ describe('registered system.transform global mode fallback', () => {
 		const output = { system: ['base system seed'] };
 		try {
 			await host.hooks['experimental.chat.system.transform']({}, output);
-			expect(output.system).toContain('base system seed');
-			expect(output.system.join('\n')).toContain('## ⚡ FULL-AUTO MODE ACTIVE');
+			expect(output.system).toEqual(['base system seed']);
+			expect(output.system.join('\n')).not.toContain(
+				'## ⚡ FULL-AUTO MODE ACTIVE',
+			);
 			expect(output.system.join('\n')).not.toContain('## 🚀 TURBO MODE ACTIVE');
 		} finally {
 			swarmState.agentSessions.delete(otherSessionId);
 		}
 	});
 
-	it('runs the registered Path-A producer and collapses strict local models without sessionID', async () => {
+	it('runs no Path-A producer and appends nothing sessionless regardless of model shape', async () => {
 		const baseHeader = 'base system seed';
 		const producerMarker = '[PLANNING PROFILE — CURRENT RUNTIME AUTHORITY]';
-		const strictOutput = { system: [baseHeader] };
-		await host.hooks['experimental.chat.system.transform'](
+		const modelShapes = [
 			{
 				model: {
 					id: 'qwen3.6-32b',
@@ -100,10 +102,6 @@ describe('registered system.transform global mode fallback', () => {
 					},
 				},
 			},
-			strictOutput,
-		);
-		const gemmaOutput = { system: [baseHeader] };
-		await host.hooks['experimental.chat.system.transform'](
 			{
 				model: {
 					id: 'gemma-3-4b',
@@ -115,11 +113,6 @@ describe('registered system.transform global mode fallback', () => {
 					},
 				},
 			},
-			gemmaOutput,
-		);
-
-		const cacheCapableOutput = { system: [baseHeader] };
-		await host.hooks['experimental.chat.system.transform'](
 			{
 				model: {
 					id: 'claude-sonnet-4-6',
@@ -131,45 +124,14 @@ describe('registered system.transform global mode fallback', () => {
 					},
 				},
 			},
-			cacheCapableOutput,
-		);
-
-		const cacheCapableProducer = cacheCapableOutput.system.find((entry) =>
-			entry.includes(producerMarker),
-		);
-		const strictSystemText = strictOutput.system[0] ?? '';
-		expect(strictSystemText).toContain(baseHeader);
-		expect(strictSystemText).toContain(producerMarker);
-		expect(cacheCapableProducer).toBeDefined();
-		expect(strictSystemText).toContain(cacheCapableProducer);
-		const gemmaSystemText = gemmaOutput.system[0] ?? '';
-		expect(gemmaSystemText).toContain(baseHeader);
-		expect(gemmaSystemText).toContain(producerMarker);
-		expect(gemmaSystemText).toContain(cacheCapableProducer);
-
-		const strictMessages = materializePinnedHostSystem(
-			baseHeader,
-			strictOutput.system,
-		);
-		expect(strictMessages).toHaveLength(1);
-		expect(strictMessages[0]?.role).toBe('system');
-		expect(strictMessages[0]?.content).toContain(baseHeader);
-		expect(strictMessages[0]?.content).toContain(cacheCapableProducer);
-		const gemmaMessages = materializePinnedHostSystem(
-			baseHeader,
-			gemmaOutput.system,
-		);
-		expect(gemmaMessages).toHaveLength(1);
-		expect(gemmaMessages[0]?.role).toBe('system');
-		expect(gemmaMessages[0]?.content).toContain(baseHeader);
-		expect(gemmaMessages[0]?.content).toContain(cacheCapableProducer);
-
-		const cacheCapableMessages = materializePinnedHostSystem(
-			baseHeader,
-			cacheCapableOutput.system,
-		);
-		expect(cacheCapableMessages).toHaveLength(2);
-		expect(cacheCapableMessages[0]?.content).toBe(baseHeader);
-		expect(cacheCapableMessages[1]?.content).toContain(cacheCapableProducer);
+		];
+		for (const input of modelShapes) {
+			const output = { system: [baseHeader] };
+			await host.hooks['experimental.chat.system.transform'](input, output);
+			// #3320: no producer output, no strict-vs-cache-capable divergence —
+			// the sessionless path returns before any model-dependent producer.
+			expect(output.system).toEqual([baseHeader]);
+			expect(output.system.join('\n')).not.toContain(producerMarker);
+		}
 	});
 });

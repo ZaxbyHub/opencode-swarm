@@ -8,6 +8,7 @@
  */
 
 export type ProjectDbErrorCategory =
+	| 'invalid_root'
 	| 'mkdir_failed'
 	| 'driver_unavailable'
 	| 'open_failed'

@@ -520,7 +520,6 @@ All tasks in phase done
 │ - Verdict automatically normalized: APPROVED → approved, NEEDS_REVISION → rejected
 │ - Skip this step if no effective spec exists (determined via `/swarm sdd status` or `readEffectiveSpecSync` — native .swarm/spec.md, OpenSpec openspec/, or Spec-Kit .specify/)
 ├── 5.6. Verify mandatory gate evidence exists:
-│         - .swarm/evidence/{phase}/completion-verify.json (auto-written by completion-verify gate)
 │         - .swarm/evidence/{phase}/drift-verifier.json (written by @critic_drift_verifier)
 │         - .swarm/evidence/{phase}/hallucination-guard.json (if hallucination_guard enabled; written by write_hallucination_evidence)
 │         - .swarm/evidence/{phase}/mutation-gate.json (if mutation_test enabled; written by write_mutation_evidence after generate_mutants + mutation_test)
@@ -530,24 +529,26 @@ All tasks in phase done
 │         - .swarm/evidence/final-council.json (if final_council enabled; written by write_final_council_evidence, last phase only)
 │         - .swarm/evidence/{phase}/epic-phase-review.json (only while an epic is open; written by epic_phase_review)
 │         If either missing: run the missing gate first
-│         Note: Gates 1–5 bypassed in turbo mode; architecture-supervisor, explicit auto-review gate mode, and final-council are never bypassed
-├── 6. Call phase_complete (enforces up to nine gates automatically; the ninth, Epic phase readiness, only while an epic is open)
+│         Note: completion-verify (Gate 1) needs no evidence file; phase_complete runs it in-process and does not write completion-verify.json
+│         Note: Gates 1–5 and the todo gate bypassed in turbo mode; architecture-supervisor, explicit auto-review gate mode, and final-council are never bypassed
+├── 6. Call phase_complete (enforces its gates automatically; Epic phase readiness only while an epic is open)
 │         - Gate 1: completion-verify — deterministic identifier check in source files
 │         - Gate 2: drift verifier evidence — reads drift-verifier.json for approved verdict
 │         - Gate 3: hallucination guard — reads hallucination-guard.json for approved verdict (if enabled)
 │         - Gate 4: mutation gate — reads mutation-gate.json for pass/warn/fail verdict (if enabled)
 │         - Gate 5: phase council — reads phase-council.json for approved verdict (if phase_council enabled)
+│         - Todo gate: checks each task's recorded high-priority TODO count against todo_gate.max_high_priority (blocks when exceeded and todo_gate.block_on_threshold is true; otherwise warns)
 │         - Gate 5b: architecture supervisor — reads architecture-supervisor.json (if enabled, never turbo-bypassed)
 │         - Final review: verifies complete content-addressed auto-review evidence (gate mode only, never turbo-bypassed)
 │         - Gate 6: final council — reads final-council.json for approved verdict (if final_council enabled, last phase only, never turbo-bypassed)
 │         - Epic phase readiness — reads epic-phase-review.json for APPROVED reviewer + critic (only while an epic is open; Epic keeps Turbo off)
-│         - Gates 1–5 bypassed when turbo mode is active; Gate 5b, final-review gate mode, and Gate 6 are never bypassed
+│         - Gates 1–5 and the todo gate bypassed when turbo mode is active; Gate 5b, final-review gate mode, and Gate 6 are never bypassed
 └── 7. Ask user: "Ready for Phase [N+1]?"
 ```
 
 ### Phase Completion Gates
 
-The `phase_complete` tool enforces up to nine gates before marking a phase complete (the ninth, `epic_phase_readiness`, applies only while an epic is open). Gates 1–5 and phase council are turbo-bypassed; architecture supervisor, explicit auto-review gate mode, final council and Epic phase readiness are never turbo-bypassed (Epic keeps Turbo off).
+The `phase_complete` tool enforces the gates below before marking a phase complete (`epic_phase_readiness` applies only while an epic is open). Gates 1–5 (phase council is Gate 5) and the todo gate are turbo-bypassed; architecture supervisor, explicit auto-review gate mode, final council and Epic phase readiness are never turbo-bypassed (Epic keeps Turbo off).
 
 Every invocation first returns a versioned structured gate report containing every applicable pass, block, error, and not-applicable result in deterministic order. Gate checks are read-only and individually bounded. A phase transition is committed only after the complete report passes, the evidence/config/plan snapshot remains byte-identical under the plan lock, and the same preflight report is reproduced. A blocker never dispatches a model or performs a partial phase transition. Recovery actions are typed and name registered tools such as `run_phase_review`, `repair_gate_evidence`, and `repair_knowledge_receipt_ledger`.
 
@@ -558,6 +559,7 @@ Every invocation first returns a versioned structured gate report containing eve
 | `hallucination-guard` | Evidence-based check that `critic_hallucination_verifier` approved plan/implementation claims | `HALLUCINATION_VERIFICATION_MISSING` or `HALLUCINATION_VERIFICATION_REJECTED` | Yes |
 | `mutation-test` | Evidence-based check that mutation tests achieved a passing kill rate | `MUTATION_GATE_MISSING` or `MUTATION_GATE_FAIL` | Yes |
 | `phase-council` | Evidence-based check that `submit_phase_council_verdicts` ran and approved (if `phase_council` enabled) | `PHASE_COUNCIL_REQUIRED` — no approved phase-council evidence | Yes |
+| `todo-gate` | Evidence-based check of each task's recorded high-priority TODO count against `todo_gate.max_high_priority` (blocks only when `todo_gate.block_on_threshold` is true; passes when no task has TODO evidence) | `TODO_GATE_THRESHOLD_EXCEEDED` | Yes |
 | `architecture-supervisor` (5b) | Evidence-based check that `critic_architecture_supervisor` approved cross-task coherence | `ARCHITECTURE_SUPERVISION_BLOCKED` | **No** |
 | `final-review` | Evidence-only check that the phase body persisted complete, current structured review and independent validation evidence | `FINAL_REVIEW_*` — missing/stale/incomplete evidence or confirmed anchored HIGH/CRITICAL findings | **No in gate mode** |
 | `final-council` (Gate 6) | Evidence-based check that `write_final_council_evidence` approved project completion | `FINAL_COUNCIL_REQUIRED` — no approved final-council evidence | **No** |
@@ -596,7 +598,7 @@ Every invocation first returns a versioned structured gate report containing eve
 - **Expensive**: requires one LLM call per mutation phase due to LLM-based patch generation; OFF by default to avoid cost on all projects
 
 **Turbo Mode Behavior:**
-When `hasActiveTurboMode()` returns true, Gates 1–5 (completion-verify, drift-verifier, hallucination-guard, mutation-test, phase-council) are automatically bypassed. The `phase_complete` tool logs a warning and proceeds without enforcement. Gate 5b (architecture supervisor), auto-review in explicit `gate` mode, and Gate 6 (final council) are **never** turbo-bypassed. Lean Turbo's own reviewer owns advisory phase review, so the generic advisory pass is skipped to avoid duplicate model calls.
+When `hasActiveTurboMode()` returns true, Gates 1–5 (completion-verify, drift-verifier, hallucination-guard, mutation-test, phase-council) and the todo gate are automatically bypassed. The `phase_complete` tool logs a warning and proceeds without enforcement. Gate 5b (architecture supervisor), auto-review in explicit `gate` mode, and Gate 6 (final council) are **never** turbo-bypassed. Lean Turbo's own reviewer owns advisory phase review, so the generic advisory pass is skipped to avoid duplicate model calls.
 
 ### Independent Auto-Review Engine
 
@@ -607,9 +609,13 @@ The automatic task, phase, plan, Lean, and `/swarm review` paths share one set o
 3. `src/review/engine.ts` owns the shared policy pipeline: reviewer fallback dispatch, tolerant structured parsing, stable finding IDs and deduplication, current-side hunk anchoring, confidence demotion, batched independent validation, receipts/evidence, telemetry/cost accounting, and advisory/gate disposition.
 4. `run_phase_review` owns phase/plan model dispatch and persists `.swarm/evidence/<phase>/auto-review.json`. `phase_complete` and `final-review-gate.ts` never invoke a review model; they only verify a complete version-2 manifest, exact selector, policy, plan requirements, file identities, canonical content hashes, structured output, validation, required receipt, and confirmed-finding policy. Unrelated `HEAD` movement does not invalidate byte-identical scope, while any reviewed-byte, file-set, selector, policy, or plan-requirement change does. Clean-scope evidence is valid without a finding receipt.
 
+### PR-review verdict retry budget disclosure (#3397 RC-20)
+
+Reviewer/critic verdict-lane settlement (`src/pr-review/verdict-settlement.ts`) admits an unclaimed item only when EVERY owner is typed-dead or a consumed-completed attempt, at least one owner is typed-dead, AND the per-item retry budget is exhausted: an item's attempt count is the number of distinct window batches whose lanes declared it, and exhaustion requires `1 + PR_REVIEW_VERDICT_RETRY_BUDGET` attempts (budget 2, so 3). The operator-facing disclosure surfaces are the per-item `attemptsUsed` / `attemptsRequired` / `remaining` fields projected by `pr_workflow_status` (`src/tools/pr-workflow-status.ts`, exposed as the phase-labeled `verdictAttempts` list) and the per-item attempts sentence in the settlement BLOCKED text. Classless terminals (including host-aborted lanes, which are never typed) block typed-dead admission even after budget exhaustion by design — the budget arm never admits on class evidence alone.
+
 ### Evidence repair and re-evaluation
 
-- `repair_gate_evidence` is architect-only. It operates on an exact task, preserves readable recoverable bytes in bounded immutable quarantine metadata, and installs a fresh fail-closed generation from a clean durable task-requirements receipt. A new corrupt or legacy artifact without a receipt is refused without changing evidence or session state because its requirements cannot be reconstructed safely. Legacy recovery without a receipt is restricted to the exact sentinel-only, gate-proof-free, idle reset shape emitted by the historical repair flow, including a valid source digest and an optional source generation older than the reset; mixed or otherwise ambiguous marker artifacts fail closed. Receipt-backed marker evidence also recovers through this tool: every surviving real gate is preserved, the marker and stale proofs are removed, requirements remain unknown, and completion stays blocked until coder settlement records a fresh accepted mutation followed by fresh Stage A and Stage B. If accepted-mutation evidence is already clean but receipt publication was interrupted, repair refuses to demote it; PREPARED/COMMITTED coder-settlement replay idempotently restores the exact hash-linked receipt before reporting settlement success. Unreadable and oversized originals are never overwritten.
+- `repair_gate_evidence` is architect-only. It operates on an exact task, preserves readable recoverable bytes in bounded immutable quarantine metadata, and installs a fresh fail-closed generation from a clean durable task-requirements receipt. A new corrupt or legacy artifact without a receipt is refused without changing evidence or session state because its requirements cannot be reconstructed safely. Legacy recovery without a receipt is restricted to the exact sentinel-only, gate-proof-free, idle reset shape emitted by the historical repair flow, including a valid source digest and an optional source generation older than the reset; mixed or otherwise ambiguous marker artifacts fail closed. Receipt-backed marker evidence also recovers through this tool: every surviving real gate is preserved, the marker and stale proofs are removed, requirements remain unknown, and completion stays blocked until coder settlement records a fresh accepted mutation followed by fresh Stage A and Stage B. If accepted-mutation evidence is already clean but receipt publication was interrupted, repair refuses to demote it; PREPARED/COMMITTED coder-settlement replay idempotently restores the exact hash-linked receipt before reporting settlement success. Unreadable and oversized originals are never overwritten. Task-gate evidence may carry an optional `planId` / `planIdentityHash` stamp naming the plan it was earned under; an absent stamp means unknown and keeps the refusal behaviour above, while otherwise-valid evidence stamped for a *different* plan than the current `.swarm/plan.json` may be rebuilt, and the rebuilt record is stamped with the current plan identity.
 - `repair_knowledge_receipt_ledger` is architect-only and exact phase/session scoped. A readable journal only rebuilds its derived snapshot. A corrupt journal is captured in an append-only bounded quarantine, only the hash-validated prefix is salvaged, and an authoritative uncertainty record blocks that phase/session until a fresh displayed-membership or empty-retrieval commit proves re-evaluation.
 - `record_directive_override` records explicit architect authorization separately from `phase_complete`; it cannot make missing, corrupt, or uncertain authority pass.
 - `write_retro` requires the caller to state `verdict: pass | fail`. A syntactically valid retrospective with `fail` remains a phase blocker; the runtime never pre-fills a passing verdict.
@@ -1303,6 +1309,30 @@ The OpenCode Plugin API allows **one handler per hook type**. When multiple feat
 
 ---
 
+## Dual-Host Plugin Entry (OpenCode 1.x and 2.x)
+
+The plugin's default export is a **dual-shape** object `{ id, server, setup }` (decision record: [ADR-0003](decisions/0003-opencode-v2-plugin-api.md)). OpenCode 1.x hosts call `server()` — the byte-stable v1 path whose registration table is above. OpenCode 2.x hosts decode the same export on the `setup` branch (excess keys ignored) and call `setup(ctx)`. The v2 adapter reuses the SAME initialization core (`runServerInit`) and the SAME v1 hook set — it only translates registration surfaces.
+
+The adapter lives in `src/host/v2/`, one module per domain:
+
+| File | Domain |
+|------|--------|
+| `setup.ts` | `setup(ctx)` entry — builds a synthetic PluginInput (project directory + the session-client shim) injected into the shared `runServerInit` core, seeds v1 session state, registers every domain within bounded budgets, and returns the Cleanup that unwinds them |
+| `tools.ts` | `ctx.tool.transform` per tool from the same `buildPluginToolObject()` map; ToolContext synthesis (`abort` ← `signal`, `metadata` → `progress`, permission `ask` bridged fail-closed) |
+| `hooks.ts` | `ctx.tool.hook("execute.before"/"execute.after")` and the compaction hook — payload translation (`input`↔`args`, `id`↔`callID`) with in-place write-backs |
+| `guidance.ts` | `ctx.session.hook("context")` — the v1 chat-transform chains against a translated view; `swarm-guidance:*` carriers re-homed into `event.system` (`event.system`/`event.messages` mutated in place — the dual of the v1 `output` rule) |
+| `events.ts` | v2→v1 event-name map driving the detached `ctx.event.subscribe()` pump |
+| `agents-commands.ts` | the v1 `config` hook invoked against a synthetic `opencodeConfig`; `.agent` table onto `ctx.agent.transform`, the command table onto `ctx.command.transform` (native dispatch, expanded template as fallback) |
+| `session-client.ts` | the **session-client shim** — a feature-detected `session.{create,prompt,abort,delete,get}` subset over `ctx.session` bridged into the v1 client surface; consumers whose surface the shim does not carry keep their client-absent/typed-refusal paths |
+| `model-apply.ts` | re-applies the chat-boundary model advance on v2 through the registered `ctx.agent.transform` surface |
+| `types.ts` | vendored structural types for `@opencode/plugin@2.0.26` (provenance-headed; deliberately no runtime dependency) |
+
+Every v1 surface the plugin registers has exactly one row in [docs/host/v2-hook-inventory.md](host/v2-hook-inventory.md) — that table is the authority for v2 destinations and per-surface deltas; it is not restated here.
+
+The dual-host contract is enforced by a dedicated CI lane (issue #2910): a merge-queue `v2-host-smoke` cell in `ci.yml` (Node dual-shape load with bounded `setup()` timing in the repro-704 deadline class, a pinned real-host `@opencode/cli@2.0.29` auth-free load/registration proof, and the v1/v2 guidance-parity fixture test), a weekly host-contract v2 digest leg (`scripts/check-host-contract-v2.ts` — a dual-corpus structural digest over the npm `@opencode/plugin`/`schema`/`client` d.ts corpus and the `sst/opencode` host sources, compared against the committed 2.0.26 corpus fixture; advisory on PRs, blocking on the weekly run), and a drift-check vendored-pin freshness notice for the 2.0.26 type pin.
+
+---
+
 ## Intelligence & Audit Tools (v6.5)
 
 Five new tools extend the architect's decision-making capabilities with intelligence gathering and QA auditing, plus a framework detection layer for first-class framework-specific tooling.
@@ -1333,7 +1363,7 @@ Read-only tool to query the gate status of a specific task. Reads `.swarm/eviden
 **Usage**: Any phase to check task completion status without mutating evidence
 
 **Input**: `task_id` (task identifier in N.M, N.M.P, retro-N format, or internal tool ID like "sast_scan", "quality_budget", etc.)  
-**Output**: JSON with `taskId`, `status` (all_passed|incomplete|no_evidence), `required_gates`, `passed_gates`, `missing_gates`, `gates` map, `message`, `todo_scan` (advisory TODO count if available), `secretscan_verdict` (v6.33), and the durable workflow lifecycle snapshot `workflow` (`{state, generation}` or `null`) plus an optional `workflow_attribution_hint` string present only when the task is wedged at `coder_delegated` with no attributed pre-check gate — the read-side diagnostic for the post-`/swarm reset-session` `TASK_WORKFLOW_STAGE_A_REQUIRED` wedge (issue #2315)
+**Output**: JSON with `taskId`, `status` (all_passed|incomplete|no_evidence), `required_gates`, `passed_gates`, `missing_gates`, `gates` map, `message`, `todo_scan` (advisory TODO count if available), `secretscan_verdict` (v6.33), and the durable workflow lifecycle snapshot `workflow` (`{state, generation}` or `null`) plus an optional `workflow_attribution_hint` string present only when the task is wedged at `coder_delegated` with no attributed pre-check gate — the read-side diagnostic for the post-`/swarm reset-session` `TASK_WORKFLOW_STAGE_A_REQUIRED` wedge (issue #2315). An optional `prior_campaign_evidence` string is present only when the evidence's plan-identity stamp names a different plan than the current `.swarm/plan.json`; it is advisory and never changes `status`.
 
 **Secretscan verdict (v6.33, diff-scoped since #3092)**: The tool scans EvidenceBundle entries for `secretscan` type evidence using the `isSecretscanEvidence` type guard. When secretscan entries are found, it reports:
 - `pass` — Zero NEW secrets on changed lines (evidence carries `new_findings_count`; legacy evidence without the counter falls back to the total `findings_count`), no incomplete coverage, and no zero-coverage, counter-contradiction, or truncation condition. A `new + preexisting ≠ total` counter contradiction reverts to the total (fail-closed)
@@ -1879,6 +1909,7 @@ Agent awareness tracks what each agent is doing and shares relevant context acro
 
 `src/state.ts` exports a module-scoped singleton (`swarmState`) with:
 - `activeAgent: Map<sessionId, agentName>` — Which agent is active in each session (updated by chat.message hook; evicted in lockstep with its `agentSessions` entry — stale-session sweep, `endAgentSession`, `/swarm reset-session`, and rehydration ghost-filtering — so entries never outlive their sessions)
+- `primaryOwnerBySession: Map<sessionId, agentName>` — The session's last PRIMARY agent (#3320): the swarm architect or a non-swarm primary (build/plan/general), recorded by chat.message / the v2 seed, restored at Task-completion and agent-less-turn handoffs, and evicted in the same lockstep passes as `activeAgent` (stale-session sweep, session teardown, 1000-entry FIFO, `resetSwarmState`). Swarm subagents and host housekeeping identities never become the owner
 - `agentSessions: Map<sessionId, AgentSessionState>` — Per-session guardrail tracking. Key fields:
   - `toolCallCount`, `startTime`, `delegationActive` — Guardrail counters
   - `taskWorkflowStates: Map<string, TaskWorkflowState>` — Bounded diagnostic projection of the authoritative exact-task state machine. States: `'idle' | 'coder_delegated' | 'pre_check_passed' | 'reviewer_run' | 'tests_run' | 'rework_required' | 'complete' | 'blocked' | 'closed'`. Normal verification transitions are generation-bound; `complete`, `blocked`, and `closed` are terminal, and only the audited exact-CAS repair path returns a settled non-success task to `idle`.

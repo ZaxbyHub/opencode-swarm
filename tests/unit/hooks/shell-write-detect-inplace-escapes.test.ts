@@ -78,10 +78,13 @@ describe('shell-write-detect: characters outside the BMP', () => {
  */
 describe('shell-write-detect: quoted braces are not a brace expansion', () => {
 	rows([
-		['sed -i -e {1d,../v} f', ['{1d,../v}', 'f']],
-		['sed -i {1d,../v} f', ['{1d,../v}', 'f']],
-		["sed -i -e {1d,'../v'} f", ['{1d,../v}', 'f']],
-		['awk -i inplace -e {gsub,x} f', ['{gsub,x}', 'f']],
+		// #3491 closure F-1 re-pins: an UNQUOTED brace region in the operand
+		// expands per-branch (bash hands sed/awk every expanded word); the
+		// QUOTED controls below still report only the literal file.
+		['sed -i -e {1d,../v} f', ['1d', '../v', 'f']],
+		['sed -i {1d,../v} f', ['1d', '../v', 'f']],
+		["sed -i -e {1d,'../v'} f", ['1d', '../v', 'f']],
+		['awk -i inplace -e {gsub,x} f', ['gsub', 'x', 'f']],
 		// Controls
 		["sed -i '{1d,x}' f", ['f']],
 		["sed -i -e '{1d,x}' f", ['f']],

@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.202.0",
+  "tagCommit": "b695d364acf1d8e3a7655be4001ec4902de62b53",
+  "targetCommitish": "b695d364acf1d8e3a7655be4001ec4902de62b53",
+  "releaseBodySha256": "a1edaf0b9874d9f461db4771319aa2b3672e9097f4dd645845623867d9a4d2e7",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/3491-3539-shell-write-gate-g1.md",
+      "sha256": "adb64ea24a5058970a350e240fa80d0a6fdecabe3794db810e945166b538a833"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/3491-3539-shell-write-gate-g2.md",
+      "sha256": "40320c4dad62686710787e9821634ded59d105f9b551ef0ed1f3a7747494e5cc"
+    },
+    {
+      "prNumber": null,
+      "order": 2,
+      "path": "docs/releases/pending/3501-3285-3527-dep-bump-channel.md",
+      "sha256": "0bbf9692b90103eec2614f1f748be75a22d699727442db20c5a4e348d865e988"
+    },
+    {
+      "prNumber": null,
+      "order": 5,
+      "path": "docs/releases/pending/3501-dep-bump-fragments.md",
+      "sha256": "97866b48feb1c7d9061f72d17449955951b128fde968db5708644cbc7839913a"
+    },
+    {
+      "prNumber": null,
+      "order": 4,
+      "path": "docs/releases/pending/3501-dep-bump-ignore-scripts.md",
+      "sha256": "f6eea76b1b9c11992b37656885886d11897815cfda3a4aa37221a7d9ad121908"
+    },
+    {
+      "prNumber": null,
+      "order": 3,
+      "path": "docs/releases/pending/route-invalidation-retirement-ownership-claim-landing.md",
+      "sha256": "9f10191ce15de1536b42b9f1171c3d3a0af88b146d65c4357fa1931f9a33ae2b"
+    }
+  ]
+}

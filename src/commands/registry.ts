@@ -4,7 +4,11 @@ import {
 	syncBundledProjectSkillsIfMissingAsync,
 } from '../config/bundled-skills.js';
 import { loadPluginConfig } from '../config/loader.js';
-import type { AutoReviewConfig, PluginConfig } from '../config/schema.js';
+import {
+	type AutoReviewConfig,
+	type PluginConfig,
+	stripKnownSwarmPrefix,
+} from '../config/schema.js';
 import type { EvaluationModelDispatcher } from '../evaluation/model-dispatcher.js';
 import {
 	activatePrWorkflow,
@@ -28,6 +32,7 @@ import { handleAnalyzeCommand } from './analyze.js';
 import { handleApprovePlanCriticCommand } from './approve-plan-critic.js';
 import { handleApproveWriteCommand } from './approve-write.js';
 import { handleArchiveCommand } from './archive.js';
+import { handleAttestCommand } from './attest.js';
 import { handleAutoProceedCommand } from './auto-proceed.js';
 import { handleBenchmarkCommand } from './benchmark.js';
 import { handleBrainstormCommand } from './brainstorm.js';
@@ -134,6 +139,7 @@ import { handlePrUnsubscribeCommand } from './pr-unsubscribe.js';
 import { handlePreflightCommand } from './preflight.js';
 import { handlePromoteCommand } from './promote.js';
 import { handleQaGatesCommand } from './qa-gates.js';
+import { handleReceiptCommand } from './receipt.js';
 import { handleRecoverCommand } from './recover.js';
 import { handleReportCommand } from './report.js';
 import { handleResetCommand } from './reset.js';
@@ -387,6 +393,7 @@ async function handleModeCommandWithBundledSkills(
 	ctx: CommandContext,
 	handler: (directory: string, args: string[]) => string | CommandResult,
 	mechanicalMode?: PrWorkflowMode,
+	activationOptions?: Parameters<typeof activatePrWorkflow>[3],
 ): CommandResult {
 	if (ctx.packageRoot) {
 		// Backstop for projects that predate init-time materialization (the
@@ -416,10 +423,28 @@ async function handleModeCommandWithBundledSkills(
 		if (mechanicalMode) {
 			await activatePrWorkflow(ctx.directory, ctx.sessionID, mechanicalMode, {
 				requireCheckoutPreflight: true,
+				...activationOptions,
 			});
 		}
 	}
 	return result;
+}
+
+export function parseReleaseReviewArgs(args: string[]) {
+	const [url, flag, head] = args;
+	if (
+		args.length !== 3 ||
+		flag !== '--release-head' ||
+		!url ||
+		!head ||
+		!/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/[1-9][0-9]*$/.test(
+			url,
+		) ||
+		!/^[a-f0-9]{40}$/.test(head)
+	) {
+		return null;
+	}
+	return { url, head };
 }
 
 /**
@@ -464,8 +489,10 @@ async function handlePrFeedbackCommandWithTransition(
 			: `/swarm pr-feedback continue from ${parsed.continuation.handoffPath}`;
 		// Issue #2506 review round 2: the PR_REVIEW→PR_FEEDBACK continuation is
 		// a third settlement entry point, so it resolves the watchdog policy
-		// exactly like the abort/complete tools (fail-open to disabled) and
-		// threads it through — the ONE effective horizon covers this path too.
+		// exactly like the abort/complete tools (a config-read failure keeps
+		// the watchdog off — the explicit opt-out semantics, independent of
+		// the schema default) and threads it through — the ONE effective
+		// horizon covers this path too.
 		let laneLiveness: PrWorkflowLaneLivenessOptions | undefined;
 		try {
 			const config = loadPluginConfig(ctx.directory);
@@ -480,8 +507,9 @@ async function handlePrFeedbackCommandWithTransition(
 						: undefined,
 			};
 		} catch {
-			// Config read failure must not block the continuation; the disabled
-			// default is always safe.
+			// Config read failure must not block the continuation. The
+			// fallback keeps the watchdog off (the explicit opt-out
+			// semantics), independent of the schema's default.
 		}
 		await transitionPrReviewToFeedback(ctx.directory, ctx.sessionID, {
 			runId: parsed.continuation.runId,
@@ -1249,6 +1277,29 @@ export const COMMAND_REGISTRY = {
 		category: 'utility',
 		toolPolicy: 'agent',
 	},
+	receipt: {
+		handler: (ctx) => handleReceiptCommand(ctx.directory, ctx.args),
+		description:
+			'Emit or verify verification receipts <task|phase> <id> [--export] | --verify <bundle>',
+		args: '<task|phase> <id> [--export] | --verify <bundle>',
+		details:
+			'Emits a portable, hash-backed record of the durably recorded gate outcomes for a task or phase (JSON + Markdown under .swarm/evidence/receipts/; --export writes a PR-attachable bundle under .swarm/plan-export/, reaped at close). --verify re-checks every recorded hash in a bundle on any machine (including a fresh clone) and exits nonzero on any mismatch with a typed failure (corrupt_json, unsupported_format_version, schema_mismatch, receipt_hash_mismatch, missing_artifact, digest_mismatch, path_escape).',
+		category: 'utility',
+		// Intentional asymmetry (PR #3550 disposition, critic-reviewed): the
+		// command is agent-reachable while the receipt TOOL's agents list
+		// (src/tools/tool-metadata.ts) names only architect/reviewer/
+		// critic_finding_validator. Receipt content derives solely from
+		// durable state plus emitter constants — the caller cannot influence
+		// what a receipt attests — so broader call-path reachability cannot
+		// forge content, and stamping an emitter identity would be equally
+		// forgeable without an attestation key. Do not narrow the tool's
+		// agents list or the command's toolPolicy (or add an emitter field)
+		// without first deciding emitter authority and the out-of-band
+		// report anchor (trigger: the first consumer that gates on receipt
+		// authenticity). Known attestation gaps tracked separately:
+		// task-arm outcome fidelity — issue #3560.
+		toolPolicy: 'agent',
+	},
 	'evidence summary': {
 		handler: (ctx) => handleEvidenceSummaryCommand(ctx.directory),
 		description: 'Generate evidence summary with completion ratio and blockers',
@@ -1447,7 +1498,7 @@ export const COMMAND_REGISTRY = {
 			'Manage OpenSpec-compatible SDD artifacts and effective spec projection',
 		args: 'status|validate|project [--json] [--change <id>] [--dry-run] [--source <provider>] [--feature <id>|all] [--overwrite]',
 		details:
-			'Parent command for spec-driven development artifacts. Use sdd status to inspect .swarm/spec.md plus openspec/ artifacts, sdd validate to validate OpenSpec-compatible deltas, and sdd project to materialize the effective spec into .swarm/spec.md for planning. Spec-Kit: sdd project projects ALL features with feature-scoped ids (featureId/FR-nnn) when several exist; --feature <id> selects one (v1 bare-id output); --feature all is the explicit multi-feature alias (project only).',
+			'Parent command for spec-driven development artifacts. Use sdd status to inspect .swarm/spec.md plus openspec/ artifacts, sdd validate to validate OpenSpec-compatible deltas, and sdd project to materialize the effective spec into .swarm/spec.md for planning. Spec-Kit: sdd project projects ALL features with feature-scoped ids (featureId/FR-nnn) when several exist; --feature <id> selects one (v1 bare-id output); --feature all is the explicit multi-feature alias (project only). Provider selection precedence: --source <provider> beats SWARM_SDD_SOURCE, which beats sdd.source in the config (.opencode/opencode-swarm.json or the user config), which beats auto-detection; a selection from any non-flag source is final and /swarm sdd status reports where it came from.',
 		category: 'utility',
 		toolPolicy: 'agent',
 	},
@@ -1599,19 +1650,43 @@ export const COMMAND_REGISTRY = {
 		toolPolicy: 'restricted',
 	},
 	'pr-review': {
-		handler: (ctx) =>
-			handleModeCommandWithBundledSkills(
+		handler: async (ctx) => {
+			if (ctx.args.includes('--release-head')) {
+				const releaseReview = parseReleaseReviewArgs(ctx.args);
+				if (
+					stripKnownSwarmPrefix(ctx.activeAgentName ?? '') !== 'architect' ||
+					!releaseReview
+				) {
+					return 'BLOCKED: release review requires the architect, a GitHub PR URL, and an exact head.';
+				}
+				return handleModeCommandWithBundledSkills(
+					ctx,
+					(directory) => {
+						const { url, head } = releaseReview;
+						const signal = handlePrReviewCommand(directory, [url]);
+						if (signal !== `[MODE: PR_REVIEW pr="${url}" council=false]`) {
+							return 'BLOCKED: release review requires a canonical GitHub PR URL.';
+						}
+						return `${signal} Release review requires checkout and binding to ${head}. Complete the native review and submit it before resuming merge admission.`;
+					},
+					'PR_REVIEW',
+					{ releaseReview },
+				);
+			}
+			return handleModeCommandWithBundledSkills(
 				ctx,
 				handlePrReviewCommand,
 				'PR_REVIEW',
-			),
+				{ releaseReview: null },
+			);
+		},
 		description:
 			'Launch deep PR review with multi-lane analysis [url] [--council]',
-		args: '<pr-url|owner/repo#N|N> [--council]',
+		args: '<pr-url|owner/repo#N|N> [--council] | <GitHub PR URL> --release-head <full SHA>',
 		details:
-			'Launches a structured PR review: preserves dirty state, verifies and binds an exact detached PR head, reconstructs PR intent via obligation extraction cascade, computes a depth tier (S/M/L) from the bound merge-base diff, launches the base explorer wave through dispatch_lanes_async (all 6 review dimensions covered on every PR — six singleton lanes at tier L, consolidated owned_workflow_lanes partitions at tiers S/M) while the architect keeps doing non-dependent work, and polls collect_lane_results incrementally. It evaluates an exact 11-row repository-agnostic risk-family ledger, records applicable rows as MATCHED and concretely inapplicable rows as provenance-free NOT_TRIGGERED, always keeps unclassified-risk MATCHED, and dispatches micro work only for MATCHED families (dedicated lanes at tier L, consolidated sweeps at S/M). It then validates findings through independent reviewer confirmation, applies critic challenge to HIGH/CRITICAL findings, and synthesizes only after matched coverage is closed. Failed obligations retry through the same structured async mode and exact PR head; blocking or direct-Task dispatch is not provenance-equivalent, so unclosed matched coverage leaves the review BLOCKED rather than degraded. --council variant fires adversarial multi-model review. Supports full GitHub URL, owner/repo#N shorthand, or bare PR number (resolves against origin remote).',
+			'Launches a structured PR review: preserves dirty state, verifies and binds an exact detached PR head, reconstructs PR intent via obligation extraction cascade, computes a depth tier (S/M/L) from the bound merge-base diff, launches the base explorer wave through dispatch_lanes_async (all 6 review dimensions covered on every PR — six singleton lanes at tier L, consolidated owned_workflow_lanes partitions at tiers S/M) while the architect keeps doing non-dependent work, and polls collect_lane_results incrementally. It evaluates an exact 11-row repository-agnostic risk-family ledger, records applicable rows as MATCHED and concretely inapplicable rows as provenance-free NOT_TRIGGERED, always keeps unclassified-risk MATCHED, and dispatches micro work only for MATCHED families (dedicated lanes at tier L, consolidated sweeps at S/M). It then validates findings through independent reviewer confirmation, applies critic challenge to HIGH/CRITICAL findings, and synthesizes only after matched coverage is closed. Failed obligations retry through the same structured async mode and exact PR head; blocking or direct-Task dispatch is not provenance-equivalent, so unclosed matched coverage leaves the review BLOCKED rather than degraded. --council variant fires adversarial multi-model review. Supports full GitHub URL, owner/repo#N shorthand, or bare PR number (resolves against origin remote). For release admission, the architect uses the full GitHub PR URL and exact head SHA.',
 		category: 'agent',
-		toolPolicy: 'none',
+		toolPolicy: 'agent',
 	},
 	'pr-feedback': {
 		handler: (ctx) => handlePrFeedbackCommandWithTransition(ctx),
@@ -1619,7 +1694,7 @@ export const COMMAND_REGISTRY = {
 			'Ingest and close known PR feedback (review comments, CI failures, conflicts) [pr] [instructions]',
 		args: '[url|owner/repo#N|N] [instructions...]',
 		details:
-			'Triggers MODE: PR_FEEDBACK — ingests existing pull-request feedback (review threads, requested changes, CI/check failures, merge conflicts, stale branch state, pasted notes), verifies every claim against source, clusters related problems, fixes confirmed items, validates the branch, and reports closure status for every ledger item. Distinct from /swarm pr-review, which discovers new findings. The PR reference is optional: with none, the architect builds the ledger from the current PR/branch; text after the reference is forwarded as extra instructions. Supports full GitHub URL, owner/repo#N shorthand, or bare PR number (resolved against origin).',
+			'Triggers MODE: PR_FEEDBACK — ingests existing pull-request feedback (review threads, requested changes, CI/check failures, merge conflicts, stale branch state, pasted notes), verifies every claim against source, clusters related problems, fixes confirmed items, validates the branch, and reports closure status for every ledger item. Distinct from /swarm pr-review, which discovers new findings. On a PR the default run continues to green CI and a monitored merge, then a session retrospective and the memory closeout. It merges only when your own words ask for the merge (for example "/swarm pr-feedback 123 and merge"; a question or mention never counts) or you answer yes to its merge question. "Fixes only" skips CI and the merge; "no merge" skips only the merge. The PR reference is optional: with none, the architect builds the ledger from the current PR/branch; text after the reference is forwarded as extra instructions. Supports full GitHub URL, owner/repo#N shorthand, or bare PR number (resolved against origin).',
 		category: 'agent',
 		toolPolicy: 'none',
 	},
@@ -1640,7 +1715,7 @@ export const COMMAND_REGISTRY = {
 			'Drive an already-reviewed, approved PR to green and merged (monitor CI, fix, merge) [pr]',
 		args: '<pr-url|owner/repo#N|N>',
 		details:
-			'Triggers MODE: CI_MONITOR — takes an already human-reviewed, approved PR, exhaustively researches every CI failure, fixes it end-to-end, iterates until all required checks are green (max 5 fix cycles), then merges via `gh pr merge` with no merge-strategy flag. Invoke only after human review is complete; the skill re-verifies reviewDecision: APPROVED and mergeable state before doing anything destructive. Distinct from /swarm pr-subscribe, which passively watches a PR without a merge terminal. Supports full GitHub URL, owner/repo#N shorthand, or bare PR number (resolved against origin).',
+			'Triggers MODE: CI_MONITOR — takes an already human-reviewed, approved PR, exhaustively researches every CI failure, fixes it end-to-end, iterates until all required checks are green (max 5 fix cycles), then merges via `gh pr merge` (no strategy flag on a merge-queue base; the allowed method on a direct base). Invoke only after human review is complete; the skill re-verifies reviewDecision: APPROVED and mergeable state before doing anything destructive. Distinct from /swarm pr-subscribe, which passively watches a PR without a merge terminal. Supports full GitHub URL, owner/repo#N shorthand, or bare PR number (resolved against origin).',
 		category: 'agent',
 		toolPolicy: 'none',
 	},
@@ -1862,10 +1937,21 @@ export const COMMAND_REGISTRY = {
 		description:
 			'Clear session state while preserving plan, evidence, and knowledge',
 		details:
-			"Deletes only .swarm/session/state.json and other session files. Clears in-memory agent sessions, delegation chains, and active-agent mappings. Preserves plan, evidence, and knowledge. Also releases this session's pending knowledge-gate obligations (#2398) and recovers stale coder settlements so dispatches cannot wedge on CODER_DISPATCH_IN_PROGRESS (#2268). Auto-backs up removed files to .swarm/reset-backups/ (newest 5 kept).",
+			"Deletes .swarm/session/state.json plus other session files; clears in-memory sessions, chains, and active-agent maps. Preserves plan, evidence, and knowledge; releases this session's pending knowledge-gate obligations (#2398); recovers coder settlements wedged on CODER_DISPATCH_IN_PROGRESS (#2268); backs up to .swarm/reset-backups/ (newest 5 kept). If a cleanup step fails, the closing guard stays closed by design, writes pause (an advisory says why), and a reset re-run or restart recovers.",
 		args: '--confirm=<token> (purge dirty/live lanes)',
 		category: 'utility',
 		toolPolicy: 'restricted',
+	},
+	attest: {
+		handler: (ctx) =>
+			handleAttestCommand(ctx.directory, ctx.args, ctx.sessionID),
+		description:
+			'Verify a git-external deliverable with pinned anchors <task_id>',
+		details:
+			"Runs the task's pinned read-only git evidence_anchors (issue #3422) inside the project root and records the durable external-evidence bundle that admits completion — the in-machine exit for tasks whose deliverable (commit/push, gh ops) can never produce a coder settlement. Fail-closed: the plan task must declare evidence_class external_git with 1..16 anchors (expect exact / expect_prefix non-empty), every anchor runs as a bounded no-shell argv spawn (stdin ignored, 10s per anchor, 30s total; output over the 4096-char evidence bound refuses the anchor rather than truncating it), and only positively-known read-only git subcommands/flags (rev-list, log, rev-parse, show, diff) are admitted. Undeclared tasks, mismatched anchors, and non-read-only commands refuse exactly as the completion gate does. Declaration changes revoke stale proofs (a fresh attest is then required). See docs/commands.md and docs/plan-durability.md.",
+		args: '<task_id>',
+		category: 'utility',
+		toolPolicy: 'agent',
 	},
 	recover: {
 		handler: (ctx) =>
@@ -1940,11 +2026,11 @@ export const COMMAND_REGISTRY = {
 			'Control Full-Auto Mode for the active session [on [mode]|off|exit|status|retry-oversight|resume|abort]',
 		args: 'on [assisted|supervised|strict], off|exit, status, retry-oversight, resume, abort',
 		details:
-			'First-class toggle for Full-Auto Mode — a critic gate reviewing escalations on your behalf (the architect still plans and delegates; full-auto never executes tasks itself). No config-level enablement is required: "on" activates immediately (unless full_auto.locked is true in config), "off" disarms the run and returns the session to normal interactive operation, "status" reports the durable run state. ' +
-			'An optional mode after "on" overrides full_auto.mode for this run: assisted (critic consulted only on policy escalations), supervised (default — risky/high-impact actions reviewed by the critic), strict (ALL plan mutations reviewed by the critic). ' +
-			'While active, the critic answers architect questions and reviews phase boundaries, delegations, and risky actions on your behalf; only ESCALATE_TO_HUMAN verdicts halt the run for your input. ' +
-			'`retry-oversight` performs a transport-only health probe for an infrastructure/deadline pause and never replays the denied action. `resume` runs the same authorization preflight as `on` first (readable config; `full_auto.locked` refuses), then requires a recent successful matching probe and no active recovery blockers. `abort` terminates the durable run immediately. ' +
-			'The run state is durable (.swarm/full-auto-state.json) and survives restarts; toggle with no argument flips the current state. ' +
+			'First-class toggle for Full-Auto Mode — a critic gate reviewing escalations on your behalf (the architect still plans and delegates; it never executes tasks itself). No config-level enablement is required: "on" activates immediately (unless full_auto.locked is true in config), "off" disarms the run (back to interactive operation), "status" reports the durable run state. ' +
+			'An optional mode after "on" overrides full_auto.mode for this run (the override holds until the run pauses or ends; `resume` re-derives from live config, so `on strict` resumes supervised under default config): assisted (critic on policy escalations only), supervised (default — risky/high-impact actions reviewed), strict (ALL plan mutations reviewed). ' +
+			'While active, the critic answers architect questions and reviews phase boundaries, delegations, and risky actions; only ESCALATE_TO_HUMAN verdicts halt for your input. ' +
+			'`retry-oversight` performs a transport-only health probe for an infrastructure/deadline pause; it never replays the denied action. `resume` runs the same `on` preflight (readable config; `full_auto.locked` refuses), then requires a recent matching probe and no active recovery blockers. `abort` terminates the durable run immediately. ' +
+			'Run state is durable (.swarm/full-auto-state.json) and survives restarts; a bare toggle flips the current state. ' +
 			'Composes with an open epic (Epic Mode): both the Full-Auto phase approval and the epic_phase_readiness gate apply at phase_complete.',
 		category: 'utility',
 		// An agent running under Full-Auto must not be able to disable its own

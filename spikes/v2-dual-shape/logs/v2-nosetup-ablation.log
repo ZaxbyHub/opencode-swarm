@@ -1,0 +1,7 @@
+HOST: opencode v2.0.29 | C:\Users\<user>\AppData\Roaming\npm\node_modules\@opencode\cli\node_modules\@opencode\cli-windows-x64\bin\opencode.exe
+ABLATION: removed export key 'setup' (wrapper module; pre-validated keys=id,server)
+ABLATION: expected=dropped with the literal decode error (setup required by the v2 schema) observed=host decode error (verbatim literal present) — MATCH
+RUN: 2026-10-17T13:48:28.107Z | exit=0 | host-ran=true | dist sha256 b587ced33a3067303c365d310debd6b9ffec253ca4aa2e52ac50f49840f96363
+--- host output below, filtered to decision-relevant lines and home-path-redacted (not the full stream) ---
+timestamp=2026-10-17T13:48:16.735Z level=INFO run=cc625dce msg="loading plugin" id="C:\\Users\\<user>\\AppData\\Local\\Temp\\2909-scratch-LsH2nh\\2909-v2proj-nKPoRs\\.opencode\\plugins\\local-spike.js" entrypoint=file:///C:/Users/<user>/AppData/Local/Temp/2909-scratch-LsH2nh/2909-v2proj-nKPoRs/.opencode/plugins/local-spike.js http.span=122 role=server
+timestamp=2026-10-17T13:48:17.272Z level=WARN run=cc625dce message="failed to load plugin" target="C:\\Users\\<user>\\AppData\\Local\\Temp\\2909-scratch-LsH2nh\\2909-v2proj-nKPoRs\\.opencode\\plugins\\local-spike.js" ref=err_e344ad94 cause="Cause([Fail(PluginModule.LoadError: Plugin must export a default definition with an id and an effect or setup function. (cause: SchemaError(Missing key\n  at [\"default\"][\"effect\"]\nMissing key\n  at [\"default\"][\"setup\"])))])" http.span=659 role=server

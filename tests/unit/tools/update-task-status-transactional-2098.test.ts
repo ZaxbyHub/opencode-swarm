@@ -247,7 +247,7 @@ describe('issue #2098 transactional update_task_status', () => {
 		).toBe(false);
 	});
 
-	test('force repair is exact-generation, backward-only, audited, and idempotent', async () => {
+	test('force repair is exact-generation, audited, and idempotent (settled-task source)', async () => {
 		seedSettledRepairState(directory);
 		const caller = ensureAgentSession('caller');
 		const peer = ensureAgentSession('peer');

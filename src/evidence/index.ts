@@ -15,3 +15,21 @@ export {
 	sanitizeTaskId,
 	saveEvidence,
 } from './manager';
+export {
+	buildVerificationReceipt,
+	canonicalReceiptJson,
+	RECEIPT_FORMAT_VERSION,
+	renderReceiptMarkdown,
+	VerificationReceiptSchema,
+} from './receipt';
+export {
+	capturePhaseGateReport,
+	writeExportBundle,
+	writeReceiptArtifact,
+} from './receipt-store';
+export {
+	formatReceiptVerifySummary,
+	type ReceiptVerifyFailureKind,
+	type ReceiptVerifyResult,
+	verifyReceiptBundle,
+} from './receipt-verify';

@@ -222,15 +222,15 @@ describe('diagnose-service adversarial tests', () => {
 	});
 
 	describe('Empty string and malformed directory inputs', () => {
+		const BLANK = ['❌Project directory']; // #3165 B: not a cwd diagnosis
 		it('should handle empty string directory', async () => {
-			// Empty string should be handled gracefully
 			const result = await getDiagnoseData('');
-			expect(result).toBeDefined();
+			expect(result.checks.map((c) => c.status + c.name)).toEqual(BLANK);
 		});
 
 		it('should handle directory with only whitespace', async () => {
 			const result = await getDiagnoseData('   \n\t  ');
-			expect(result).toBeDefined();
+			expect(result.checks.map((c) => c.status + c.name)).toEqual(BLANK);
 		});
 
 		it('should handle non-existent directory path', async () => {

@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.203.0",
+  "tagCommit": "22e2f1b3038141ac1c934ce8d288cf40ba27c191",
+  "targetCommitish": "22e2f1b3038141ac1c934ce8d288cf40ba27c191",
+  "releaseBodySha256": "aae6345d71ade9fd1fd77bb20ca9ddfbdd553aa96c978e7849fb641a28757aa3",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/3607-feedback-round-contract.md",
+      "sha256": "9377c997132984774b2cf938f8befbcfafadf324198eadcc285fcd6e79722e4a"
+    },
+    {
+      "prNumber": null,
+      "order": 2,
+      "path": "docs/releases/pending/issue-tracer-rebind-and-mutation-battery.md",
+      "sha256": "b3a5e3128c0b3500045b06e0c356b887da1538d54a36194245cad732dcc3920a"
+    },
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/swarm-pr-feedback-drive-to-merge.md",
+      "sha256": "6c651084dfba0773f5a4e16040f1b60a1d57c2f87f35890620a1991353a298ca"
+    }
+  ]
+}

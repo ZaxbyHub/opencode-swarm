@@ -221,6 +221,23 @@ export const TOOL_METADATA = {
 		description: 'check the gate status of a specific task',
 		agents: ['architect', 'critic_oversight'],
 	},
+	// #2968/#2970: placed AFTER check_gate_status — the evidence_check →
+	// check_gate_status adjacency in TOOL_NAMES is a pinned ordering invariant
+	// (tests/unit/tools/tool-names.adversarial.test.ts).
+	// The agents list below is an INTENT statement (who should emit receipts).
+	// The receipt command's toolPolicy:'agent' (src/commands/registry.ts)
+	// intentionally keeps invocation reachable by every agent, coder included:
+	// receipt content derives solely from durable state plus emitter
+	// constants, so the call path cannot forge what a receipt attests
+	// (PR #3550 disposition, critic-reviewed; task-arm outcome fidelity is
+	// tracked separately at issue #3560). Do not align the two surfaces
+	// without first deciding emitter authority and the out-of-band report
+	// anchor — see the paired registry.ts comment.
+	receipt: {
+		description:
+			'emit a portable verification receipt (JSON + Markdown) recording the durably recorded gate outcomes for a task or phase, with content hashes and snapshot hashes; export writes a self-contained bundle under .swarm/plan-export/ and --verify re-checks every recorded hash in a bundle on any machine, exiting nonzero on any mismatch',
+		agents: ['architect', 'reviewer', 'critic_finding_validator'],
+	},
 	completion_verify: {
 		description: 'verify completed tasks have required evidence',
 		agents: ['architect', 'critic_oversight'],
@@ -395,6 +412,11 @@ export const TOOL_METADATA = {
 			'prepare an exact file scope for one PR-feedback coder Task after immutable feedback verification settles',
 		agents: ['architect'],
 	},
+	prepare_pr_feedback_commit_message: {
+		description:
+			'author a PR_FEEDBACK commit message that cannot go inline (e.g. a Co-Authored-By trailer) into a file OUTSIDE the repository; returns the path for git commit -F',
+		agents: ['architect'],
+	},
 	test_runner: {
 		description: 'auto-detect and run tests',
 		agents: [
@@ -403,10 +425,12 @@ export const TOOL_METADATA = {
 			'critic_finding_validator',
 			'test_engineer',
 		],
-		prWorkflow: {
-			modes: ['PR_REVIEW'],
-			capability: 'validate',
-		},
+		// No prWorkflow capability (issue #3315 E1): test_runner executes test
+		// suites in the working directory, so in a bound PR_REVIEW checkout its
+		// outputs (snapshot files, fixtures) dirty the exact-PR-head tree the
+		// workflow requires clean. The gate refuses it at admission with a
+		// targeted message; validation runs through dispatch_lanes_async lanes
+		// or PR_FEEDBACK Stage A.
 	},
 	test_impact: {
 		description:

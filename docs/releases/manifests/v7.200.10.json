@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.200.10",
+  "tagCommit": "4a6053c53ae09d963ef2e9c01549e6308417823d",
+  "targetCommitish": "4a6053c53ae09d963ef2e9c01549e6308417823d",
+  "releaseBodySha256": "279aac32df8c363fc283606c1057063f01e4189cbe281b27aafe64acb6bb3c64",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/3409-coder-settlement-recovery.md",
+      "sha256": "26c23bc786f0cb8e7bde35b301b5ab57939edd670967f1baa3485e40a54fd44c"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/3462-macos-sbpl-realpath.md",
+      "sha256": "7ab6be99f591b4439a51804f2c78d2c0aa43111032b4c1ba95769d3db89441c5"
+    },
+    {
+      "prNumber": null,
+      "order": 2,
+      "path": "docs/releases/pending/3463-config-doctor-agents-warning.md",
+      "sha256": "cca0cf964109e14afb63a6302d2601e3a28130c6ef7c7c96c493093ff778142b"
+    },
+    {
+      "prNumber": null,
+      "order": 4,
+      "path": "docs/releases/pending/3474-3475-shell-write-detector-residuals.md",
+      "sha256": "85f037dcbc750e5274b1e00688e866b8768205f13dcb4971a32a7ec6c0ad522b"
+    },
+    {
+      "prNumber": null,
+      "order": 6,
+      "path": "docs/releases/pending/merge-queue-failure-diagnostics-3265-3487.md",
+      "sha256": "880be31ee5ea0534cefd037605d217a3580b0c2a74bdf0a37f8821cba8ecf1ce"
+    },
+    {
+      "prNumber": null,
+      "order": 3,
+      "path": "docs/releases/pending/pr-review-verdict-row-integrity-3275-3357-3397-3382.md",
+      "sha256": "ff730bb87a445691088f6c9ddee128a80a5581d6805b0013b04292f7c26970ec"
+    },
+    {
+      "prNumber": null,
+      "order": 5,
+      "path": "docs/releases/pending/shell-write-scope-bare-rmdir.md",
+      "sha256": "040af72ea22af323587e4042ab54e70187f42c9507c744d193e95d8df9b48da6"
+    }
+  ]
+}

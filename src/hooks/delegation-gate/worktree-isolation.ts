@@ -57,6 +57,10 @@ import {
 	SOURCE_WORKTREE_GONE_STAGE,
 	SOURCE_WORKTREE_UNCERTAIN_STAGE,
 } from '../../worktree/merge';
+import {
+	assertSettlementArtifactsRemovable,
+	withSettlementArtifactLifecycle,
+} from '../../worktree/settlement-artifact-lifecycle';
 import type { MergeStrategy } from '../../worktree/types';
 import { verifyReviewerScopeGenerationMergeBack } from '../reviewer-scope-mergeback';
 import { recordDeadLaneReclaim } from './dead-lane-reclaim';
@@ -1486,7 +1490,7 @@ export async function precreateStandardWorktreeSession(args: {
 											if (!verification.ok) {
 												pushAdvisory(
 													ensureAgentSession(args.parentSessionID),
-													`WORKTREE_RECOVERY_CHILD_SESSION_LEAKED: recovery child session ${lateChildSessionId} survived verified teardown (${verification.reason}); it holds the lane swarm.db at ${collision.worktreePath}. Retry the dispatch or restart the host to release it.`,
+													`WORKTREE_RECOVERY_CHILD_SESSION_LEAKED: recovery child session ${lateChildSessionId} was not confirmed deleted by verified teardown (${verification.reason}); it holds the lane swarm.db at ${collision.worktreePath}. Retry the dispatch or restart the host to release it.`,
 												);
 											}
 										}
@@ -1565,7 +1569,7 @@ export async function precreateStandardWorktreeSession(args: {
 						if (!verification.ok) {
 							pushAdvisory(
 								ensureAgentSession(args.parentSessionID),
-								`WORKTREE_RECOVERY_CHILD_SESSION_LEAKED: recovery child session ${recoveredChildSessionId} survived verified teardown (${verification.reason}); it holds the lane swarm.db at ${collision.worktreePath}. Retry the dispatch or restart the host to release it.`,
+								`WORKTREE_RECOVERY_CHILD_SESSION_LEAKED: recovery child session ${recoveredChildSessionId} was not confirmed deleted by verified teardown (${verification.reason}); it holds the lane swarm.db at ${collision.worktreePath}. Retry the dispatch or restart the host to release it.`,
 							);
 						}
 					}
@@ -1922,7 +1926,7 @@ export async function precreateStandardWorktreeSession(args: {
 								lanePath: handle.worktreePath,
 								branchName: handle.branchName,
 								taskId: args.taskId,
-								reason: `late child session ${lateChildSessionId} survived verified teardown (${verification.reason})`,
+								reason: `late child session ${lateChildSessionId} was not confirmed deleted by verified teardown (${verification.reason})`,
 							});
 						}
 					}
@@ -3031,6 +3035,7 @@ export async function cleanupStandardWorktreeForCallId(
 		if (!('error' in result)) {
 			removedWorktree = true;
 		} else if (
+			!result.error.startsWith('CODER_SETTLEMENT_ARTIFACT_REMOVAL_REFUSED:') &&
 			result.error.includes('is not a working tree') &&
 			(await pathExists(worktreePath)) &&
 			isPathUnderSwarmWorktreeBase(
@@ -3040,8 +3045,17 @@ export async function cleanupStandardWorktreeForCallId(
 			)
 		) {
 			try {
-				await fs.rm(worktreePath, { recursive: true, force: true });
-				removedWorktree = !(await pathExists(worktreePath));
+				await _internals.withSettlementArtifactLifecycle(
+					directory,
+					async () => {
+						await _internals.assertSettlementArtifactsRemovable(directory, {
+							path: worktreePath,
+							branch: branchName,
+						});
+						await fs.rm(worktreePath, { recursive: true, force: true });
+						removedWorktree = !(await pathExists(worktreePath));
+					},
+				);
 			} catch (err) {
 				logger.log(
 					`[swarm] cleanupStandardWorktreeForCallId: residual directory cleanup failed for ${callID}: ${err}`,
@@ -3066,7 +3080,7 @@ export async function cleanupStandardWorktreeForCallId(
 		const retainedSession = ensureAgentSession(parentSessionID);
 		pushAdvisory(
 			retainedSession,
-			`STANDARD_WORKTREE_BRANCH_RETAINED: dispatch ${callID} removed worktree ${worktreePath} but retained branch ${branchName} (unstaged landing); the branch is the recovery backup until the landed changes are committed.`,
+			`STANDARD_WORKTREE_BRANCH_RETAINED: dispatch ${callID} removed worktree ${worktreePath} but retained branch ${branchName} as the recovery backup; the landed changes may be unstaged or committed.`,
 		);
 	} else {
 		try {
@@ -3315,6 +3329,23 @@ export async function finishStandardWorktreeDispatch(
 					message: 'Claimed recovery lane is missing immutable Git coordinates',
 				};
 			}
+			// #3494: resolve the landing intent BEFORE provenance construction
+			// and onBeforeMerge — a dirty-index epic refusal must fail preserved
+			// without the provenance callback having fired (the same
+			// resolve-before-merge ordering as the non-claim arm above).
+			const epicLanding =
+				settlement.commitLanding === undefined
+					? _internals.epicCommitLandingFor(directory, dispatch.planTaskId)
+					: undefined;
+			if (epicLanding && 'refused' in epicLanding) {
+				return {
+					failed: true as const,
+					stage: epicLanding.stage,
+					message: epicLanding.message,
+				};
+			}
+			const claimLanding =
+				settlement.commitLanding ?? epicLanding?.commitLanding;
 			const provenance: MergeOperationProvenance = {
 				operationId:
 					settlement.operationId ??
@@ -3331,6 +3362,15 @@ export async function finishStandardWorktreeDispatch(
 				await _internals.recoverMergeBackFromImmutableCoordinates(
 					directory,
 					coordinates,
+					// Same mapping as the reconciliation path (merge.ts): a
+					// 'merge' recovery without a commit landing lands
+					// squash-unstaged — never a merge commit. A landing decision
+					// supplies the commit landing; only an EPIC landing carries a
+					// message (settlement.commitLanding is a boolean — a caller
+					// landing without an epic is a plain `git merge --no-edit`).
+					claimLanding
+						? { landingCommitMessage: epicLanding?.landingCommitMessage }
+						: { landUnstaged: true },
 				);
 			if ('merged' in recovered && recovered.merged) {
 				if (recovered.sourceCommitOrder && recovered.rewrittenCommitOrder) {
@@ -3426,9 +3466,12 @@ export async function finishStandardWorktreeDispatch(
 			// Clean merge supersedes any earlier failure for this task so a
 			// successful re-dispatch re-enables Rule 2's marker commit.
 			// #2508: key retention on the RESULT strategy — never on
-			// dispatch.mergeStrategy (the legacy dispatch value 'merge' also
-			// covers committed recovery merges, which must keep deleting the
-			// branch so the recovery-claim finalize path stays reachable).
+			// dispatch.mergeStrategy. A retained lane branch is ordinary
+			// user-work backup (the unstaged bytes are only recognisable via
+			// it); it is NOT merge-back recovery state, so a retained branch
+			// must not keep the recovery-claim finalize path unreachable
+			// (#3577 PRR-001 — the claim settle below keys the authority
+			// terminal on the settlement outcome, not on branch retention).
 			const cleanupResult = await cleanupStandardWorktreeForCallId(
 				resolvedCallID,
 				'success',
@@ -3446,7 +3489,21 @@ export async function finishStandardWorktreeDispatch(
 					rawToken: dispatch.recoveryClaim.rawToken,
 					settlement: dispatch.recoveryClaim.settlement,
 				};
-				if (cleanupResult.removedWorktree && cleanupResult.cleanedBranch) {
+				// #3577 (PRR-001): the authority terminal keys on the SETTLEMENT
+				// OUTCOME — a landed merge-back finalizes the exact claim even
+				// when #2508 retention deliberately kept the lane branch as
+				// user-work backup (a retained ref is not merge-back recovery
+				// state; keying finalize on branch deletion left every default
+				// squash-unstaged claim landing 'preserved' forever). The
+				// authority stays preserved only when cleanup could not
+				// complete — a failed worktree removal, or a non-squash
+				// landing whose branch deletion failed — so the stuck
+				// cleanup stays recoverable, exactly as before.
+				const landedCleanly =
+					cleanupResult.removedWorktree &&
+					(cleanupResult.cleanedBranch ||
+						mergeResult.strategy === 'squash-unstaged');
+				if (landedCleanly) {
 					const finalized = _internals.finalizeWorktreeRecoveryAuthority(
 						directory,
 						request,
@@ -3755,6 +3812,8 @@ export async function readLaneEnvFileFromDisk(
  * here via getters/setters) to mock worktree provisioning, merge-back, etc.
  */
 export const _internals = {
+	withSettlementArtifactLifecycle,
+	assertSettlementArtifactsRemovable,
 	/** Epic v2 C3: committed landing for a task of the open epic. */
 	epicCommitLandingFor,
 	provisionWorktree,

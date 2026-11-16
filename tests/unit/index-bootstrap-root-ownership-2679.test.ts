@@ -35,6 +35,7 @@ import * as fs from 'node:fs';
 import path from 'node:path';
 import { closeAllProjectDbs } from '../../src/db/project-db';
 import OpenCodeSwarm from '../../src/index';
+import { getDeferredWarnings } from '../../src/services/warning-buffer';
 import { resetSwarmState } from '../../src/state';
 import { resetTelemetryForTesting } from '../../src/telemetry';
 import { safeRmRecursive } from '../helpers/safe-test-dir';
@@ -52,6 +53,16 @@ const ISOLATED_ENV_KEYS = [
 	'LOCALAPPDATA',
 ] as const;
 
+/**
+ * #3405: the retargeted hint assertion scans BOTH captured console streams
+ * for the ownership hint. advisoryWarn's debug leg writes that same text to
+ * stdout under OPENCODE_SWARM_DEBUG=1, so the suite must pin that var OFF
+ * for its own duration (and RESTORE the caller's value afterwards) instead
+ * of inheriting an ambient setting. Saved on entry, restored on exit — never
+ * deleted, so a caller's ambient value survives the suite.
+ */
+const MANAGED_ENV_KEYS = ['OPENCODE_SWARM_DEBUG'] as const;
+
 const fixtureRoots: string[] = [];
 const savedEnv = new Map<string, string | undefined>();
 let isolatedEnvRoot = '';
@@ -62,6 +73,10 @@ beforeAll(() => {
 	for (const key of ISOLATED_ENV_KEYS) {
 		savedEnv.set(key, process.env[key]);
 		process.env[key] = isolatedEnvRoot;
+	}
+	for (const key of MANAGED_ENV_KEYS) {
+		savedEnv.set(key, process.env[key]);
+		delete process.env[key];
 	}
 	restoreEnv = () => {
 		for (const [key, value] of savedEnv) {
@@ -117,34 +132,66 @@ function fixtureRoot(prefix: string): string {
 	return dir;
 }
 
+/**
+ * Every console method the plugin could use to emit a message — the silence
+ * contract covers all of them, so the oracle must observe all of them.
+ * (process.stdout/stderr.write are not wrapped: the test runner writes its
+ * own report there; the source-shape pin in plugin-tui-safety covers those
+ * two forms for the ownership hints.)
+ */
+const CONSOLE_METHODS = [
+	'warn',
+	'error',
+	'log',
+	'info',
+	'debug',
+	'trace',
+] as const;
+
+type ConsoleMethod = (typeof CONSOLE_METHODS)[number];
+
 interface ConsoleCapture {
 	warn: string[];
+	error: string[];
 	log: string[];
+	info: string[];
+	debug: string[];
+	trace: string[];
+	/** Every captured stream, concatenated. */
+	all: string[];
 }
 
 function captureConsole(): { captured: ConsoleCapture; restore: () => void } {
-	const captured: ConsoleCapture = { warn: [], log: [] };
-	const originalWarn = console.warn;
-	const originalLog = console.log;
-	console.warn = (...args: unknown[]) => {
-		captured.warn.push(
-			args
-				.map((a) => (typeof a === 'string' ? a : JSON.stringify(a)))
-				.join(' '),
-		);
+	const captured: ConsoleCapture = {
+		warn: [],
+		error: [],
+		log: [],
+		info: [],
+		debug: [],
+		trace: [],
+		all: [],
 	};
-	console.log = (...args: unknown[]) => {
-		captured.log.push(
-			args
+	const originals = new Map<ConsoleMethod, (...args: unknown[]) => void>();
+	for (const method of CONSOLE_METHODS) {
+		originals.set(method, console[method] as (...args: unknown[]) => void);
+		const sink = captured[method];
+		console[method] = (...args: unknown[]) => {
+			const line = args
 				.map((a) => (typeof a === 'string' ? a : JSON.stringify(a)))
-				.join(' '),
-		);
-	};
+				.join(' ');
+			sink.push(line);
+			captured.all.push(line);
+		};
+	}
 	return {
 		captured,
 		restore: () => {
-			console.warn = originalWarn;
-			console.log = originalLog;
+			for (const method of CONSOLE_METHODS) {
+				const original = originals.get(method);
+				if (original) {
+					(console[method] as (...args: unknown[]) => void) = original;
+				}
+			}
 		},
 	};
 }
@@ -154,22 +201,28 @@ function norm(p: string): string {
 }
 
 /**
- * The redirect-hint contract: some console line mentions BOTH the
+ * The redirect-hint contract: some buffered advisory line mentions BOTH the
  * 'project-root ownership' marker AND the owning parent root — after masking
  * occurrences of the CHILD path, so a child-path mention (which lexically
  * contains the parent) cannot fake a parent-root hint (c1 hygiene).
+ *
+ * #3405: the operator-visible hint channel is the deferred-warning buffer
+ * (`/swarm diagnose`), NOT raw console output — a plugin console.warn
+ * renders as a full-width overlay over the bubbletea TUI. The raw legs are
+ * asserted ABSENT at each call site (both captured streams).
  */
-function hasParentRootHint(
-	captured: ConsoleCapture,
-	parent: string,
-	child: string,
-): boolean {
-	const lines = [...captured.warn, ...captured.log].map((line) => norm(line));
+function hasParentRootHint(parent: string, child: string): boolean {
+	const lines = getDeferredWarnings().map((line) => norm(line));
 	return lines.some(
 		(line) =>
 			line.includes('project-root ownership') &&
 			line.split(norm(child)).join('<CHILD>').includes(norm(parent)),
 	);
+}
+
+/** #3405: no hint text may ride raw stderr/stdout (either captured stream). */
+function hasNoRawHintLine(captured: ConsoleCapture): boolean {
+	return !captured.all.some((line) => line.includes('project-root ownership'));
 }
 
 function swarmExists(dir: string): boolean {
@@ -257,8 +310,10 @@ describe('bootstrap project-root ownership — ordinary child redirect (#2679, A
 		const parentEntries = dirEntryCount(path.join(parent, '.swarm'));
 		expect(parentEntries).toBeGreaterThanOrEqual(1);
 
-		// Operator hint: one console line names the parent root.
-		expect(hasParentRootHint(captured, parent, child)).toBe(true);
+		// Operator hint: a buffered /swarm diagnose line names the parent root.
+		expect(hasParentRootHint(parent, child)).toBe(true);
+		// #3405: the hint must not ride raw stderr/stdout on either stream.
+		expect(hasNoRawHintLine(captured)).toBe(true);
 
 		// Durable redirect record under the owning parent.
 		const advisoryPath = path.join(
@@ -404,7 +459,9 @@ describe('bootstrap project-root ownership — rehydration and attribution (#267
 
 		const { captured } = await bootAndSettle(child);
 
-		expect(hasParentRootHint(captured, parent, child)).toBe(true);
+		expect(hasParentRootHint(parent, child)).toBe(true);
+		// #3405: attribution rides the buffered channel, never raw console.
+		expect(hasNoRawHintLine(captured)).toBe(true);
 	});
 
 	test('telemetry latches to the owning parent, never to the ordinary child', async () => {

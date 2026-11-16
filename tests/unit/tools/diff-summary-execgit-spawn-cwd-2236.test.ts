@@ -42,6 +42,7 @@ import type { ToolContext } from '@opencode-ai/plugin';
 import { _internals, diff_summary } from '../../../src/tools/diff-summary.js';
 import { _internals as bunCompatInternals } from '../../../src/utils/bun-compat.js';
 import { GitBinaryMissingError } from '../../../src/utils/git-binary-missing-error.js';
+import { safeRmRecursive } from '../../helpers/safe-test-dir.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const originalExecFile = _internals.execFile;
@@ -88,7 +89,7 @@ afterEach(() => {
 	_internals.resolveGitExecutableAsync = originalResolveGitExecutableAsync;
 	bunCompatInternals.statSync = originalStatSync;
 	for (const root of roots.splice(0)) {
-		fs.rmSync(root, { recursive: true, force: true });
+		safeRmRecursive(root);
 	}
 });
 

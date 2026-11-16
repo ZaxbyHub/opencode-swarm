@@ -44,6 +44,7 @@ import { telemetry } from '../telemetry.js';
 import { atomicWriteSwarmFileSync } from '../utils/atomic-write';
 import { compositeSessionKey, sessionKeySuffix } from '../utils/canonical-root';
 import * as logger from '../utils/logger.js';
+import { isNonBlankAbsoluteDirectory } from '../utils/path-security.js';
 import type { TrajectoryEntry } from './types';
 
 const MAX_TRACKED_TRAJECTORY_SESSIONS = 500;
@@ -153,11 +154,7 @@ function getTrajectoryPath(sessionId: string, directory: string): string {
  * directory; anything else is a caller bug and fails closed here.
  */
 function trajectorySwarmPath(directory: string, relativePath: string): string {
-	if (
-		typeof directory !== 'string' ||
-		directory.trim() === '' ||
-		!path.isAbsolute(directory)
-	) {
+	if (!isNonBlankAbsoluteDirectory(directory)) {
 		throw new Error(
 			`[trajectory-store] workspace directory must be a non-blank absolute path (got ${JSON.stringify(directory)})`,
 		);

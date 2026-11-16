@@ -128,7 +128,12 @@ export function collectToolRegistrationErrors(
 	// 2) The plugin tool object must register exactly the manifest's tools.
 	//    swarm_command's handler is dependency-injected at plugin init; we check
 	//    key parity, not handler identity, for that key.
-	const pluginKeys = new Set(Object.keys(buildPluginToolObject({})));
+	// The all-tools parity check constructs the object with swarm memory
+	// enabled (issue #3659): memory is opt-in (schema default false), so the
+	// default-config object legitimately omits the three swarm_memory_* tools.
+	const pluginKeys = new Set(
+		Object.keys(buildPluginToolObject({}, { memory: { enabled: true } } as never)),
+	);
 	for (const name of metaKeys) {
 		if (!pluginKeys.has(name)) {
 			errors.push(`Tool "${name}" is not in the plugin tool object.`);

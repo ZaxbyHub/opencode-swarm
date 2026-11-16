@@ -125,7 +125,7 @@ describe('createPhaseMonitorHook - Curator Integration', () => {
 				mockPreflightManager,
 				mockRunCuratorInit,
 			);
-			await hook({}, {});
+			await hook({ sessionID: 's-curat' }, {});
 
 			// runCuratorInit should NOT be called because enabled is explicitly false
 			expect(mockRunCuratorInit).not.toHaveBeenCalled();
@@ -149,7 +149,7 @@ describe('createPhaseMonitorHook - Curator Integration', () => {
 				mockPreflightManager,
 				mockRunCuratorInit,
 			);
-			await hook({}, {});
+			await hook({ sessionID: 's-curat' }, {});
 
 			// runCuratorInit SHOULD be called because enabled && init_enabled
 			// 3rd arg is llmDelegate (undefined in test — no opencodeClient set)
@@ -217,7 +217,7 @@ describe('createPhaseMonitorHook - Curator Integration', () => {
 			);
 
 			// Should NOT throw - error should be caught internally
-			const result = await hook({}, {});
+			const result = await hook({ sessionID: 's-curat' }, {});
 			expect(result).toBeUndefined();
 
 			// runCuratorInit was called and threw
@@ -246,7 +246,7 @@ describe('createPhaseMonitorHook - Curator Integration', () => {
 			);
 
 			// First invocation - curator init should be called
-			await hook({}, {});
+			await hook({ sessionID: 's-curat' }, {});
 			expect(mockRunCuratorInit).toHaveBeenCalledTimes(1);
 
 			mockCheckAndTrigger.mockClear();
@@ -258,7 +258,7 @@ describe('createPhaseMonitorHook - Curator Integration', () => {
 			]);
 
 			// Second invocation - should detect phase transition
-			await hook({}, {});
+			await hook({ sessionID: 's-curat' }, {});
 
 			// checkAndTrigger should be called for phase transition
 			expect(mockCheckAndTrigger).toHaveBeenCalledWith(2, 1, 1);
@@ -285,7 +285,7 @@ describe('createPhaseMonitorHook - Curator Integration', () => {
 			);
 
 			// First invocation
-			await hook({}, {});
+			await hook({ sessionID: 's-curat' }, {});
 			expect(mockRunCuratorInit).toHaveBeenCalledTimes(1);
 
 			// Second invocation - different phase
@@ -295,7 +295,7 @@ describe('createPhaseMonitorHook - Curator Integration', () => {
 			]);
 
 			// Third invocation
-			await hook({}, {});
+			await hook({ sessionID: 's-curat' }, {});
 
 			// runCuratorInit should NOT be called again - only on first invocation
 			expect(mockRunCuratorInit).toHaveBeenCalledTimes(1);
@@ -321,7 +321,7 @@ describe('createPhaseMonitorHook - Curator Integration', () => {
 			);
 
 			// Should NOT throw - error should be caught internally
-			const result = await hook({}, {});
+			const result = await hook({ sessionID: 's-curat' }, {});
 			expect(result).toBeUndefined();
 		});
 
@@ -341,7 +341,7 @@ describe('createPhaseMonitorHook - Curator Integration', () => {
 			);
 
 			// Should NOT throw - error should be caught internally
-			const result = await hook({}, {});
+			const result = await hook({ sessionID: 's-curat' }, {});
 			expect(result).toBeUndefined();
 		});
 
@@ -361,7 +361,7 @@ describe('createPhaseMonitorHook - Curator Integration', () => {
 			);
 
 			// Should NOT throw - error should be caught internally
-			const result = await hook({}, {});
+			const result = await hook({ sessionID: 's-curat' }, {});
 			expect(result).toBeUndefined();
 		});
 
@@ -381,7 +381,7 @@ describe('createPhaseMonitorHook - Curator Integration', () => {
 			);
 
 			// Should NOT throw - error should be caught internally
-			const result = await hook({}, {});
+			const result = await hook({ sessionID: 's-curat' }, {});
 			expect(result).toBeUndefined();
 		});
 
@@ -399,7 +399,7 @@ describe('createPhaseMonitorHook - Curator Integration', () => {
 			);
 
 			// Should NOT throw
-			const result = await hook({}, {});
+			const result = await hook({ sessionID: 's-curat' }, {});
 			expect(result).toBeUndefined();
 
 			// runCuratorInit should NOT be called when curator is explicitly disabled
@@ -449,7 +449,7 @@ describe('Task 5.3: curator-briefing.md persistence', () => {
 				mockPreflightManager,
 				mockRunCuratorInit,
 			);
-			await hook({}, {});
+			await hook({ sessionID: 's-curat' }, {});
 
 			// Verify the briefing file was written
 			const briefingPath = path.join(tempDir, '.swarm', 'curator-briefing.md');
@@ -477,7 +477,7 @@ describe('Task 5.3: curator-briefing.md persistence', () => {
 				mockPreflightManager,
 				mockRunCuratorInit,
 			);
-			await hook({}, {});
+			await hook({ sessionID: 's-curat' }, {});
 
 			// Verify the briefing file was NOT written
 			const briefingPath = path.join(tempDir, '.swarm', 'curator-briefing.md');
@@ -502,7 +502,7 @@ describe('Task 5.3: curator-briefing.md persistence', () => {
 				mockPreflightManager,
 				mockRunCuratorInit,
 			);
-			await hook({}, {});
+			await hook({ sessionID: 's-curat' }, {});
 
 			// Verify the briefing file was NOT written
 			const briefingPath = path.join(tempDir, '.swarm', 'curator-briefing.md');
@@ -527,7 +527,7 @@ describe('Task 5.3: curator-briefing.md persistence', () => {
 				mockPreflightManager,
 				mockRunCuratorInit,
 			);
-			await hook({}, {});
+			await hook({ sessionID: 's-curat' }, {});
 
 			// Verify the briefing file was NOT written
 			const briefingPath = path.join(tempDir, '.swarm', 'curator-briefing.md');
@@ -547,7 +547,7 @@ describe('Task 5.3: curator-briefing.md persistence', () => {
 				mockPreflightManager,
 				mockRunCuratorInit,
 			);
-			await hook({}, {});
+			await hook({ sessionID: 's-curat' }, {});
 
 			// Verify the briefing file was NOT written
 			const briefingPath = path.join(tempDir, '.swarm', 'curator-briefing.md');
@@ -566,7 +566,7 @@ describe('Task 5.3: curator-briefing.md persistence', () => {
 				mockPreflightManager,
 				mockRunCuratorInit,
 			);
-			await hook({}, {});
+			await hook({ sessionID: 's-curat' }, {});
 
 			// Verify the briefing file was NOT written
 			const briefingPath = path.join(tempDir, '.swarm', 'curator-briefing.md');

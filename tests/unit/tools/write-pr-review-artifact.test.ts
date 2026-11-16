@@ -241,6 +241,7 @@ describe('write_pr_review_artifact', () => {
 			[
 				{
 					laneId: 'critic-boundaries',
+					agent: 'critic',
 					workflowLane: 'critic-boundaries',
 					reviewItemIds: candidateIds.slice(1),
 				},

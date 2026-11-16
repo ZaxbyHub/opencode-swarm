@@ -1,9 +1,76 @@
 import { describe, expect, test } from 'bun:test';
-import { readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const read = (relativePath: string): string =>
 	readFileSync(join(process.cwd(), relativePath), 'utf8');
+
+/**
+ * Consumption-aware fragment resolution (issue #3511; tightened per the
+ * #3519 feedback): pending is the sole authority while present; once
+ * consumed, the obligation resolves through the fragment's MANIFEST CLAIM —
+ * the claiming manifest's tag names the materialized body carrying the
+ * obligation — never through a name-blind aggregate of every release body.
+ * No claim → null → the pins fail (never vacuous).
+ */
+function fragmentTextOrArchive(name: string): string | null {
+	// Repo root from this file's location (tests/unit/skills/* → root);
+	// FR-011 forbids new fixture roots anchored at the checkout cwd.
+	const root = join(import.meta.dir, '..', '..', '..');
+	const pendingFragment = join(root, 'docs/releases/pending', name);
+	if (existsSync(pendingFragment)) return readFileSync(pendingFragment, 'utf8');
+	const manifestsDir = join(root, 'docs/releases/manifests');
+	if (!existsSync(manifestsDir)) return null;
+	const claims: Array<{ tag: string; manifest: string }> = [];
+	for (const entry of readdirSync(manifestsDir)) {
+		if (!entry.toLowerCase().endsWith('.json')) continue;
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(readFileSync(join(manifestsDir, entry), 'utf8'));
+		} catch {
+			continue;
+		}
+		const manifest = parsed as {
+			schemaVersion?: unknown;
+			tag?: unknown;
+			fragments?: Array<{ path?: unknown }>;
+		};
+		if (
+			manifest?.schemaVersion !== 1 ||
+			!Array.isArray(manifest.fragments) ||
+			typeof manifest.tag !== 'string'
+		) {
+			continue;
+		}
+		const claimed = manifest.fragments.some(
+			(fragment) => fragment?.path === `docs/releases/pending/${name}`,
+		);
+		if (claimed) claims.push({ tag: manifest.tag, manifest: entry });
+	}
+	if (claims.length === 0) return null;
+	claims.sort(
+		(a, b) =>
+			tagOrderOf(b.tag) - tagOrderOf(a.tag) ||
+			(a.manifest < b.manifest ? 1 : a.manifest > b.manifest ? -1 : 0),
+	);
+	const archivedBody = join(root, 'docs/releases', `${claims[0].tag}.md`);
+	if (!existsSync(archivedBody)) return null;
+	return readFileSync(archivedBody, 'utf8');
+}
+
+/** Parse `v?X.Y.Z` into a comparable number; unparseable tags sort lowest. */
+function tagOrderOf(tag: string): number {
+	const m = /^v?(\d+)\.(\d+)\.(\d+)$/.exec(tag);
+	if (!m) return -1;
+	return Number(m[1]) * 1_000_000 + Number(m[2]) * 1_000 + Number(m[3]);
+}
+
+function pendingText(name: string): string | null {
+	const pendingFragment = join(process.cwd(), 'docs/releases/pending', name);
+	return existsSync(pendingFragment)
+		? readFileSync(pendingFragment, 'utf8')
+		: null;
+}
 
 describe('swarm-pr-review runtime friction guidance', () => {
 	test('uses Windows-portable exact-commit verification on every guidance surface', () => {
@@ -28,13 +95,23 @@ describe('swarm-pr-review runtime friction guidance', () => {
 			'First run: git -C "${directory}" fetch origin <base-branch>. Then run:',
 		);
 
-		const pendingDiagnostic = read(
-			'docs/releases/pending/1931-pr-review-diagnostic-errors.md',
+		// Consumption-aware (#3511 class, #3507 pattern): the positive pin
+		// resolves pending OR materialized history; the negative pin applies to
+		// pending text only (aggregate history can legitimately contain the
+		// scanned phrase in unrelated release notes).
+		const diagnostic = fragmentTextOrArchive(
+			'1931-pr-review-diagnostic-errors.md',
 		);
-		expect(pendingDiagnostic).not.toContain(
-			'git -C "<directory>" switch --detach',
+		expect(diagnostic).not.toBeNull();
+		expect(diagnostic).toContain('git switch --detach <sha>');
+		const pendingDiagnostic = pendingText(
+			'1931-pr-review-diagnostic-errors.md',
 		);
-		expect(pendingDiagnostic).toContain('git switch --detach <sha>');
+		if (pendingDiagnostic !== null) {
+			expect(pendingDiagnostic).not.toContain(
+				'git -C "<directory>" switch --detach',
+			);
+		}
 	});
 
 	test('Profile A keeps context in dispatch prompts instead of requiring blocked scratch writes', () => {

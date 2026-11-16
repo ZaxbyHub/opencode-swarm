@@ -75,9 +75,11 @@ describe('complete release provenance', () => {
 			},
 		]);
 		writeFileSync(path.join(pending, 'duplicate.md'), '# Historical note\n');
-		expect(() =>
-			reconstructPublishedBlockFromWorkspace(repoRoot, body),
-		).toThrow(/2 exact workspace matches/i);
+		expect(
+			() => reconstructPublishedBlockFromWorkspace(repoRoot, body),
+			// #3500: ambiguous workspace provenance now fails closed through the
+			// complete-segmentation matcher (two equally valid segmentations).
+		).toThrow(/no unique exact segmentation/i);
 	});
 
 	test('recognizes GitHub caret rendering of a tagged BEL byte', () => {

@@ -11,6 +11,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { recordPrReviewBudgetExhaustion } from '../../background/pending-delegations.js';
 import { HUMAN_ONLY_SWARM_COMMANDS } from '../../commands/tool-policy.js';
 import {
 	OPENCODE_NATIVE_AGENTS,
@@ -29,7 +30,11 @@ import {
 	clearSandboxWrapOutcome,
 	recordSandboxWrapOutcome,
 } from '../../sandbox/skip-state';
-import { sanitizeDiagnosticText } from '../../scope/path-identity';
+import {
+	isPathIdentityWithin,
+	pathIdentitiesEqual,
+	sanitizeDiagnosticText,
+} from '../../scope/path-identity';
 import type { ScopeLeaseCandidateInput } from '../../scope/scope-lease-renewal';
 import {
 	resolveAuthorizedScopeBindingDetailed,
@@ -40,12 +45,14 @@ import {
 	classifyCommand,
 	getSharedClassifierGuardrailBlock,
 } from '../../security/command-classifier.js';
+import { isPolicyProtectedPath } from '../../security/protected-path-policy.js';
 import {
 	beginInvocation,
 	ensureAgentSession,
 	getActiveWindow,
 	getModifiedFilesForTask,
 	type InvocationWindow,
+	isSwarmOwnedSession,
 	recordModifiedFileForTask,
 	recordReviewerScopeGenerationFile,
 	resetModifiedFilesForTask,
@@ -61,37 +68,52 @@ import { isTaskToolId, normalizeToolName } from '../normalize-tool-name';
 import {
 	CMD_WRAPPER_DECLARATION,
 	declaresWindowsWrapperLoose,
+	getObservedHostShell,
+	hostShellGrammarFamily,
 } from '../shell-executor-context';
 import {
+	DETECTOR_UNWRAP_PARANOID_BOUND,
 	detectInteractiveSession,
 	detectPosixWrites,
 	detectWindowsWrites,
 	isPowerShellReadOnlyPipeline,
 	isPowerShellShaped,
 	mergeWriteAnalyses,
+	procSubSpanBodies,
 	resolveWriteTargets,
+	setDetectionOptionsOverride,
 	type WriteAnalysis,
 } from '../shell-write-detect';
 import {
 	PATCH_PAYLOAD_KEYS,
 	resolveWriteTargets as resolveFileWriteTargets,
 } from '../write-target-resolver';
-import { appendGuardrailDecision } from './audit-log';
+import { appendGuardrailDecision, redactPath } from './audit-log';
 import {
+	DC_SH_C_WITHDRAW_LAYERS_LABEL,
+	DC_UNWRAP_PARANOID_BOUND,
+	dcAnalyzeLauncherUncertainty,
 	dcCheckJunctionCreation,
 	dcEvaluateRecursiveDeleteTargets,
+	dcExpandDestructiveSegments,
 	dcExtractPowerShellTargets,
 	dcExtractRecursiveRmTargets,
-	dcExtractWindowsCmdTargets,
+	dcLauncherTimedTail,
 	dcNormalizeCommand,
+	dcParseWindowsRecursiveDelete,
+	dcPreprocessWrappers,
+	dcRelocateDestructiveTarget,
+	dcSegmentVerbMatch,
+	dcShellFlagClusterUncertain,
+	dcShellPayloadRunsIsolated,
 	dcSplitSegments,
-	dcUnwrapWrappers,
+	dcUnwrapWrappersBounded,
 } from './destructive-command';
 import {
 	enforceExecutionStallDenial,
 	observeExecutionStallToolCall,
 } from './execution-stall';
-import type { AgentRule } from './file-authority';
+import type { AgentRule, AuthorityDecision } from './file-authority';
 import {
 	AUTHORITY_ROLE_CAPABILITIES,
 	checkFileAuthorityWithRules,
@@ -177,6 +199,21 @@ import {
 
 let hasWarnedSandboxUnavailable = false;
 
+// #3120 LEG 2: the verifier-config denial is owner policy for the verification
+// system itself, so it is enforced even when the optional policy switch
+// (guardrails.enabled=false / observe contexts) is off. Discriminated by the
+// deny rule prefix the file-authority layer stamps on AUTHORITY_VERIFIER_CONFIG.
+function isVerifierConfigDenial(
+	decision: unknown,
+): decision is Extract<AuthorityDecision, { allowed: false }> {
+	const candidate = decision as { allowed?: unknown; rule?: unknown };
+	return (
+		candidate?.allowed === false &&
+		typeof candidate.rule === 'string' &&
+		candidate.rule.startsWith('verifier-config:')
+	);
+}
+
 function normalizeSandboxMechanism(mechanism: string): string {
 	return mechanism.toLowerCase().replace(/[^a-z0-9]+/g, '');
 }
@@ -222,6 +259,68 @@ class DestructiveCommandBlockedError extends Error {
 	}
 }
 
+/**
+ * Structured denial from the shell write-scope gate (issue #3495). The
+ * message stays the operator-facing contract; these fields carry the
+ * structured facts the audit row needs (resolved target + write operator) so
+ * the toolBefore catch never re-parses human-readable text to recover them.
+ * Either field may be absent when the denial site does not know it (e.g. the
+ * dynamic-path denial has an operator but no resolvable target).
+ */
+export class ShellWriteBlockedError extends Error {
+	readonly writeTarget?: string;
+	readonly writeOperator?: string;
+
+	constructor(
+		message: string,
+		details: { writeTarget?: string; writeOperator?: string } = {},
+	) {
+		super(message);
+		this.name = 'ShellWriteBlockedError';
+		if (
+			typeof details.writeTarget === 'string' &&
+			details.writeTarget.length > 0
+		) {
+			this.writeTarget = details.writeTarget;
+		}
+		if (
+			typeof details.writeOperator === 'string' &&
+			details.writeOperator.length > 0
+		) {
+			this.writeOperator = details.writeOperator;
+		}
+	}
+}
+
+/**
+ * #3587: bounded, home-redacted rendering for untrusted denial-message text
+ * (the :1763 sibling-site spec, promoted to the shared helper for every
+ * `is not authorised to write` throw). Structured data channels
+ * (`ShellWriteBlockedError.writeTarget`, audit rows) keep exact values; only
+ * the operator-facing MESSAGE interior changes.
+ */
+export const renderDenialTarget = (target: string): string => {
+	// #3587 review round: match denyAuthority's escaping-relative home fold so
+	// the message and reason channels agree for OPERAND-shaped targets (the
+	// non-shell door) in EITHER separator flavor (`../home/<name>/…` and
+	// `..\Users\<name>\…`). Absolute targets — including the shell doors'
+	// resolved paths — fold only their leading profile via the lexical
+	// redactPath; a relative target folds only when its normalized form
+	// starts with `../`, proving it leaves the workspace (`./../…` and
+	// `src/../../…` spellings normalize the same way the reason channel's
+	// path.relative display does).
+	const normalized = path.isAbsolute(target)
+		? target
+		: path.posix.normalize(target.replace(/\\/g, '/'));
+	const display = normalized.startsWith('../')
+		? normalized.replace(/(^|\/)(?:home|Users)\/[^/]+/g, '$1~')
+		: target;
+	return sanitizeDiagnosticText(redactPath(display), 320);
+};
+
+/** Test seam for the denial-render helper (read-only usage in suites). */
+export const _internals = { renderDenialTarget };
+
 function throwDestructiveBlock(
 	destructiveCategory: string,
 	message: string,
@@ -230,11 +329,104 @@ function throwDestructiveBlock(
 }
 
 /**
- * Creates a toolBefore handler with the given shared context.
- *
- * @param ctx Shared configuration and closures from createGuardrailsHooks
- * @returns The toolBefore handler function
+ * Whether the executor that will run a bare `rmdir` has POSIX rmdir(2)
+ * semantics, the only basis for the empty-directory-removal exemption. Under
+ * PowerShell `rmdir` is an alias of Remove-Item (it deletes a file operand and
+ * can recurse), and cmd's `rd` differs too. So: no Windows grammar may own the
+ * command (`windowsShell` from resolveWindowsWriteAuthority; when it is null
+ * the Windows detectors do not run at all), the `shell` tool on a Windows host
+ * is not POSIX, and a Windows wrapper exposed only by unwrapping
+ * (`bash -c 'powershell -Command …'`) also disqualifies it.
  */
+export function isPosixRmdirExecutor(
+	tool: string,
+	windowsShell: 'powershell' | 'cmd' | null,
+	detectionCommand: string,
+	platform: NodeJS.Platform = process.platform,
+): boolean {
+	if (windowsShell !== null) return false;
+	if (tool !== 'bash' && platform === 'win32') return false;
+	return (
+		!declaresWindowsWrapperLoose(detectionCommand) &&
+		!CMD_WRAPPER_DECLARATION.test(detectionCommand)
+	);
+}
+
+/**
+ * Repository control state that the bare-rmdir exemption never covers: the
+ * same `.git` / `.swarm` list file-authority.ts applies to coder writes
+ * (`coder-control-state-protection`), reused through the shared
+ * isPolicyProtectedPath predicate.
+ */
+const RMDIR_EXEMPTION_CONTROL_STATE = ['.git', '.swarm'] as const;
+
+function isControlStateRelativePath(relative: string): boolean {
+	// Folded to lower case on every platform: isPolicyProtectedPath folds only
+	// on win32, but macOS volumes are case-insensitive by default, where
+	// `.SWARM/x` IS `.swarm/x`. Over-matching only withdraws the exemption.
+	return isPolicyProtectedPath(relative.toLowerCase(), {
+		includeDefaults: false,
+		additional: RMDIR_EXEMPTION_CONTROL_STATE,
+	});
+}
+
+/**
+ * Whether a bare `rmdir` target (`WriteTarget.emptyDirectoryRemoval`) may skip
+ * declared-scope membership. `targetPath` is the gate's resolved path, which
+ * is already LEXICALLY normalised (path.resolve collapses `.` and `..`
+ * segments before any symlink is followed); that is safe only because an
+ * operand with a `..` segment is never tagged (shell-write-detect.ts
+ * isBareRmdirOperand). The helper then realpaths the target's PARENT, so
+ * every symlink/junction in the parent chain is resolved, and requires the
+ * result to lie strictly inside the canonical workspace root. Fail-closed:
+ * a resolution error, the root itself, a target outside the root, a target
+ * that exists as a file or symlink, or a target under the workspace's
+ * repository control state (`.git` / `.swarm`, checked on both the lexical
+ * and the canonical location — PR #3456 review FB-007: an architect passes
+ * file authority for control paths, so the exemption must not be what lets
+ * a declared-scope-bound role reach them) returns false. rmdir(2) does not
+ * follow a final symlink, so the parent chain decides containment. There is
+ * deliberately no emptiness check — that would be a TOCTOU race; the
+ * kernel's ENOTEMPTY is the authoritative guard.
+ */
+export function isEmptyDirectoryRemovalWithinWorkspace(
+	targetPath: string,
+	workspace: string,
+): boolean {
+	try {
+		const lexicalRoot = path.resolve(workspace);
+		if (
+			isControlStateRelativePath(
+				path.relative(lexicalRoot, path.resolve(lexicalRoot, targetPath)),
+			)
+		) {
+			return false;
+		}
+		const root = fs.realpathSync.native(lexicalRoot);
+		const absolute = path.resolve(root, targetPath);
+		const parent = fs.realpathSync.native(path.dirname(absolute));
+		const canonical = path.join(parent, path.basename(absolute));
+		if (isControlStateRelativePath(path.relative(root, canonical))) {
+			return false;
+		}
+		// Defence in depth: an existing file or symlink is not an rmdir(2)
+		// candidate, so it falls back to the normal declared-scope check.
+		let stat: fs.Stats | undefined;
+		try {
+			stat = fs.lstatSync(canonical);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return false;
+		}
+		if (stat && (!stat.isDirectory() || stat.isSymbolicLink())) return false;
+		return (
+			!pathIdentitiesEqual(canonical, root) &&
+			isPathIdentityWithin(canonical, root)
+		);
+	} catch {
+		return false;
+	}
+}
+
 /**
  * Issue #3099 R2 (executor context): which grammar OWNS shared constructs.
  *
@@ -262,6 +454,7 @@ export function resolveWindowsWriteAuthority(
 	detectedShellType: 'posix' | 'powershell' | 'cmd' | 'unix' | 'bash',
 	shaped: boolean,
 	platform: NodeJS.Platform = process.platform,
+	hostShell?: string,
 ): 'powershell' | 'cmd' | null {
 	// A wrapper is an executor DECLARATION only at an invocation position: the
 	// very start of the command, or the receiving side of a pipe. A bare
@@ -281,18 +474,44 @@ export function resolveWindowsWriteAuthority(
 	// holds for the `shell` tool off Windows (#3323): there is no cmd.exe or
 	// PowerShell to inherit, so only an explicit wrapper or a shaped body
 	// (steps 1-2) can select a Windows grammar.
+	// #3346: when the v2 host has REPORTED the shell the `shell` tool
+	// actually executes (ctx.shell "create.before" → the observed-host-shell
+	// store), that report is AUTHORITATIVE ACROSS PLATFORMS — a win32 host
+	// whose `shell` tool runs Git Bash must not take cmd/PowerShell grammar
+	// from command content, and a POSIX host running PowerShell is covered by
+	// the wrapper/shaped steps above. Only a Windows-family report
+	// (powershell/pwsh/cmd — hostShellGrammarFamily) keeps the inherited
+	// content-detected grammar; any POSIX-family report disables it. With NO
+	// report yet (v1 host, or the first shell call before any
+	// shell.create.before fired) the platform-keyed interim from #3326
+	// applies: `shell` inherits content-detected Windows grammar on win32
+	// only — never wider than the pre-#3346 behavior.
 	const inheritedWindows =
 		detectedShellType === 'powershell' || detectedShellType === 'cmd';
 	if (cmdWrapper) return 'cmd';
 	if (psWrapper || shaped) return 'powershell';
-	const posixShellTool =
-		tool === 'bash' || (tool === 'shell' && platform !== 'win32');
+	if (tool === 'bash') return null;
+	if (tool === 'shell' && hostShell !== undefined && hostShell !== '') {
+		return hostShellGrammarFamily(hostShell) === 'windows' && inheritedWindows
+			? (detectedShellType as 'powershell' | 'cmd')
+			: null;
+	}
+	const posixShellTool = tool === 'bash' || tool === 'shell';
 	if (inheritedWindows && !posixShellTool) {
+		return detectedShellType as 'powershell' | 'cmd';
+	}
+	if (inheritedWindows && posixShellTool && platform === 'win32') {
 		return detectedShellType as 'powershell' | 'cmd';
 	}
 	return null;
 }
 
+/**
+ * Creates a toolBefore handler with the given shared context.
+ *
+ * @param ctx Shared configuration and closures from createGuardrailsHooks
+ * @returns The toolBefore handler function
+ */
 export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 	const {
 		effectiveDirectory,
@@ -546,16 +765,208 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		// --- Normalize the top-level command (NFKC + evasion collapse) ---
 		const command = dcNormalizeCommand(rawCommand);
 
-		// --- Unwrap all shell wrappers to the innermost command ---
-		const unwrapped = dcUnwrapWrappers(command);
+		// #3491 W3: deny-on-uncertainty for launcher segments — an unknown
+		// launcher option with a remaining execution tail, or an interactive
+		// `sudo -i`/`-s` with no command, is denied outright (the recorded
+		// plan decision; the advisory alone was ruled insufficient).
+		const launcherUncertainty = dcAnalyzeLauncherUncertainty(command);
+		if (launcherUncertainty.deny) {
+			throwDestructiveBlock(
+				'launcher option uncertainty',
+				launcherUncertainty.reason,
+			);
+		}
+
+		// --- Unwrap all shell wrappers to the innermost command (#3491 W3:
+		// cursor-bounded with a paranoid absolute bound — exceedance fails
+		// closed instead of stopping silently with the verb unreached) ---
+		const boundedUnwrap = dcUnwrapWrappersBounded(command);
+		if (boundedUnwrap.depthExceeded) {
+			throwDestructiveBlock(
+				'wrapper unwrap depth',
+				boundedUnwrap.shCWithdrawal === true
+					? `BLOCKED: shell chain nests ${DC_SH_C_WITHDRAW_LAYERS_LABEL} or more sh -c layers whose quote structure cannot be re-parsed faithfully — denying for safety (deny-on-uncertainty; #3570)`
+					: `BLOCKED: shell wrapper nesting exceeds the inspection bound (${DC_UNWRAP_PARANOID_BOUND}) — rejecting for safety`,
+			);
+		}
+		const unwrapped = boundedUnwrap.command;
 
 		// --- Split compound command into segments ---
 		const outerSegments = dcSplitSegments(command);
 		const innerSegments = dcSplitSegments(unwrapped);
-		const perSegmentUnwrapped = outerSegments.map((s) => dcUnwrapWrappers(s));
-		const allSegments = [
-			...new Set([...outerSegments, ...innerSegments, ...perSegmentUnwrapped]),
-		];
+		const perSegmentBounded = outerSegments.map((s) =>
+			dcUnwrapWrappersBounded(s),
+		);
+		// #3491 W3 review (REQUIRED): the WHOLE-command chain stops at the
+		// FIRST non-wrapper segment, so a compound `echo ok; sudo×65 rm …`
+		// never reaches the deep chain — consult the bound PER SEGMENT and
+		// fail closed before any segment evaluation.
+		for (const bounded of perSegmentBounded) {
+			if (bounded.depthExceeded) {
+				throwDestructiveBlock(
+					'wrapper unwrap depth',
+					bounded.shCWithdrawal === true
+						? `BLOCKED: shell chain nests ${DC_SH_C_WITHDRAW_LAYERS_LABEL} or more sh -c layers whose quote structure cannot be re-parsed faithfully — denying for safety (deny-on-uncertainty; #3570)`
+						: `BLOCKED: shell wrapper nesting exceeds the inspection bound (${DC_UNWRAP_PARANOID_BOUND}) — rejecting for safety`,
+				);
+			}
+		}
+		const perSegmentUnwrapped = perSegmentBounded.map((b) => b.command);
+		// #3491 W2: chdir-bearing wrapper segments expand with an EVOLVING
+		// per-segment directory context — the wrapped command's rm/rmdir/del
+		// targets are RELOCATED from the child cwd (and the tracked evolution
+		// of any inner cd) to session-root-relative forms, so containment and
+		// safe-artifact judgment happen against the real workspace. An
+		// unresolvable context (dynamic/expansion DIR operand, or an inner
+		// directory mutation the W1 word-form rules cannot represent)
+		// relocates to an escaping sentinel — any destructive pattern then
+		// denies (fail-closed).
+		// #3491 W2 fix-round-1 (F-2): the child-cwd context is keyed per
+		// OCCURRENCE, never per segment TEXT — `env -C src rm -rf dist;
+		// env -C .. rm -rf dist` yields two `rm -rf dist` occurrences with
+		// DIFFERENT child cwds; a text-keyed first-wins map applied the first
+		// occurrence's context to both and ADMITTED the escaping second one.
+		// Each (segment, context) pair is evaluated once; occurrences from
+		// the raw/legacy unwrap lists carry a null context (base behavior),
+		// and every expanded entry carries its own evolving context.
+		const expandedSegments = dcExpandDestructiveSegments(command, cwd);
+		const segmentOccurrences: Array<{
+			segment: string;
+			resolveFrom: string | 'uncertain' | null;
+		}> = [];
+		const seenOccurrences = new Set<string>();
+		const pushSegmentOccurrence = (
+			segment: string,
+			resolveFrom: string | 'uncertain' | null,
+		): void => {
+			if (segment.length === 0) return;
+			const key = `${resolveFrom ?? ''}\u0000${segment}`;
+			if (seenOccurrences.has(key)) return;
+			seenOccurrences.add(key);
+			segmentOccurrences.push({ segment, resolveFrom });
+		};
+		for (const segment of outerSegments) pushSegmentOccurrence(segment, null);
+		for (const segment of innerSegments) pushSegmentOccurrence(segment, null);
+		for (const segment of perSegmentUnwrapped)
+			pushSegmentOccurrence(segment, null);
+		for (const entry of expandedSegments)
+			pushSegmentOccurrence(entry.segment, entry.resolveFrom);
+		// PR3590 merge: union of both pipelines — this delta's span-body push
+		// (unwrap + depth consult + chdir expansion, both operators) and main's
+		// #3567 P-B isolated-payload push + #3568 F-01 span push + flag-cluster
+		// check. pushSegmentOccurrence dedupes identical (context, segment)
+		// keys, so overlapping pushes collapse safely.
+		// #3569 residual 3: process-substitution span bodies (`>(…)`, `<(…)`)
+		// run their own command text at a verb position the segment-head-
+		// anchored destructive extractors never see (`tee >(rm -rf ../esc)`
+		// admitted at the stacked base). Each body's split segments are
+		// pushed with an uncertain child-cwd context — a subshell inherits
+		// the tracked cwd, which the destructive relocation model cannot
+		// track through a procsub — so any destructive verb in a body
+		// relocates to the escaping sentinel (fail-closed). This restores
+		// the #3568 review F-01 push the g3 restructure dropped, for BOTH
+		// operators.
+		for (const body of procSubSpanBodies(command)) {
+			for (const sub of dcSplitSegments(body)) {
+				pushSegmentOccurrence(sub, 'uncertain');
+				// #3569 4.5 review Critical 2: a body verb may sit behind a
+				// launcher (`command rm …`) or chdir wrapper (`env -C .. rm…`,
+				// `sudo -D .. rm…`) the raw segment push never unwraps — push
+				// the bounded-unwrap product and the chdir-expanded entries
+				// too, all with the uncertain child-cwd context.
+				const unwrappedBody = dcUnwrapWrappersBounded(sub);
+				if (unwrappedBody.depthExceeded) {
+					throwDestructiveBlock(
+						'wrapper unwrap depth',
+						unwrappedBody.shCWithdrawal === true
+							? `BLOCKED: shell chain nests ${DC_SH_C_WITHDRAW_LAYERS_LABEL} or more sh -c layers whose quote structure cannot be re-parsed faithfully — denying for safety (deny-on-uncertainty; #3570)`
+							: `BLOCKED: shell wrapper nesting exceeds the inspection bound (${DC_UNWRAP_PARANOID_BOUND}) — rejecting for safety`,
+					);
+				}
+				if (unwrappedBody.command !== sub) {
+					pushSegmentOccurrence(unwrappedBody.command, 'uncertain');
+				}
+			}
+			for (const entry of dcExpandDestructiveSegments(body, cwd)) {
+				pushSegmentOccurrence(entry.segment, 'uncertain');
+			}
+		}
+		// #3567 review P-B: a MULTI-statement `sh -c` payload runs in a child
+		// shell whose inner `cd` re-bases every LATER payload statement on a
+		// directory the parent-sequence model cannot track (`bash -c 'cd ..;
+		// rm -rf x'` deletes the PARENT's parent). Such payload segments are
+		// pushed with an uncertain child-cwd context so their destructive
+		// targets relocate to the escaping sentinel (fail-closed).
+		for (let i = 0; i < outerSegments.length; i += 1) {
+			const seg = outerSegments[i] as string;
+			if (!dcShellPayloadRunsIsolated(seg)) continue;
+			const unwrappedSeg = perSegmentUnwrapped[i] ?? seg;
+			for (const sub of dcSplitSegments(unwrappedSeg)) {
+				pushSegmentOccurrence(sub, 'uncertain');
+			}
+		}
+		// #3572 review N-02: a GNU `time -o FILE` segment stays WHOLE on the
+		// strip side (unwrapping would erase the cd-tracking context that
+		// resolves the -o target), so the timed command text never reaches a
+		// verb-anchored destructive arm. The timed tail is pushed as an extra
+		// occurrence with the SEGMENT's own directory context — `time` runs
+		// its command in the current shell (no cwd ambiguity), so the tracked
+		// relocation judges it exactly like the bare twin (`cd src && time -o
+		// r.txt rm -rf build` admits the in-scope delete; `/usr/bin/time -o
+		// report rm -rf ../outside` still denies).
+		for (const segment of outerSegments) {
+			const tail = dcLauncherTimedTail(segment);
+			if (tail !== null) {
+				for (const sub of dcSplitSegments(tail)) {
+					pushSegmentOccurrence(sub, null);
+				}
+			}
+		}
+		// #3567 review PRR-003: a shell-family launcher whose flag cluster the
+		// W4 walk cannot model (`bash -oc pipefail 'rm -rf …'` — ground truth:
+		// the payload EXECUTES) leaves the payload invisible to every
+		// verb-anchored destructive arm. Deny on that uncertainty instead of
+		// admitting an uninspectable tail.
+		const uncertainCluster = dcShellFlagClusterUncertain(command);
+		if (uncertainCluster !== null) {
+			throwDestructiveBlock(
+				'shell flag cluster',
+				`BLOCKED: shell interpreter invocation "${uncertainCluster}" carries a flag cluster the guard cannot statically model (unknown option or glued argument) — deny-on-uncertainty.`,
+			);
+		}
+		// #3616 (review r16 finding 2, scoped by review r17 finding 1): a
+		// withdrawal rewrite (dcPreprocessWrappers uncertain / carrying the
+		// synthetic unresolved-cd sentinel) re-homes the wrapped tail at an
+		// unresolvable child cwd. The write detector sees the rewrite, but
+		// the DESTRUCTIVE arm is verb-anchored on raw segments — push the
+		// REWRITTEN segments' sub-segments with the uncertain context so a
+		// destructive verb in the tail (`sudo -i sh -c 'cd src && rm -rf
+		// x'`) relocates to the escaping sentinel (fail-closed). PER
+		// TOP-LEVEL SEGMENT, never whole-command: an unrewritten sibling
+		// (`env -C $DIR true; rm -rf dist`) runs at the parent cwd and must
+		// keep its own verdict (the env-3491 sibling control pins that
+		// admission); the `changed` guard keeps a raw command that merely
+		// CONTAINS the sentinel literal (echo '$__swarm_unresolved_chdir')
+		// from triggering the push with no rewrite at all.
+		for (const segment of dcSplitSegments(command)) {
+			const segWithdrawal = dcPreprocessWrappers(segment);
+			if (!segWithdrawal.changed) continue;
+			if (
+				segWithdrawal.uncertain ||
+				segWithdrawal.command.includes('$__swarm_unresolved_chdir')
+			) {
+				for (const sub of dcSplitSegments(segWithdrawal.command)) {
+					pushSegmentOccurrence(sub, 'uncertain');
+				}
+			}
+		}
+		const relocate = (
+			resolveFrom: string | 'uncertain' | null,
+			targets: string[],
+		): string[] =>
+			resolveFrom === null
+				? targets
+				: targets.map((t) => dcRelocateDestructiveTarget(t, resolveFrom, cwd));
 
 		// Cross-segment shell variable assignments (issue #2033 review): later
 		// segments referencing $NAME are resolved against assignments harvested
@@ -563,8 +974,8 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		// $CMD` cannot dodge the swarm-CLI-bypass probe below.
 		const swarmShellVars = new Map<string, string>();
 
-		for (const segment of allSegments) {
-			const seg = segment.trim();
+		for (const occurrence of segmentOccurrences) {
+			const seg = occurrence.segment.trim();
 			if (!seg) continue;
 
 			// Harvest shell variable assignments (quoted values may contain
@@ -590,7 +1001,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			const rmTargets = dcExtractRecursiveRmTargets(seg);
 			if (rmTargets) {
 				const decision = dcEvaluateRecursiveDeleteTargets({
-					targets: rmTargets,
+					targets: relocate(occurrence.resolveFrom, rmTargets),
 					cwd,
 					verifiedScope,
 				});
@@ -598,30 +1009,70 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 					throwDestructiveBlock('recursive delete', decision.reason);
 			}
 
-			// Windows cmd.exe: rmdir /s, rd /s
-			if (/^(?:rmdir|rd)(?:\.exe)?\s+.*\/[sS]/i.test(seg)) {
-				const targets = dcExtractWindowsCmdTargets(seg);
-				if (targets.length === 0) {
-					throwDestructiveBlock(
-						'recursive directory delete',
-						`BLOCKED: Windows recursive directory delete (rmdir /s or rd /s) detected. Verify the target is not a junction/symlink.`,
-					);
+			// Windows cmd.exe: rmdir/rd — modeled on cmd.exe's actual grammar
+			// (executed ground truth, PR #3499 review round): cmd scans each
+			// UNQUOTED argument for the FIRST `/` — everything after it is
+			// switch text and the text before it is the path. So the switch
+			// may be standalone (`rmdir /s x`), clustered (`/s/q`, `/sq`),
+			// trailing (`rd x /s`), ATTACHED (`rd zzz/s` = `rd zzz /s`),
+			// caret-escaped (`^/^s`), or glued to a quoted operand
+			// (`del /s"file.txt"`). A `/s` substring inside an operand whose
+			// post-slash text is NOT a valid switch cluster (`rmdir
+			// a/share/b` — cmd itself rejects it) is a plain nested path
+			// (issue #3495 item 2).
+			// #3518 P-5: the anchor tolerates leading open-parens/whitespace —
+			// a parenthesized segment `(rd x /s)` runs the same rd as an
+			// unparenthesized one (POSIX subshell), and the delimiter-aware
+			// classifier already fires on it; only these live arms were
+			// segment-start-anchored, leaving the reversed wedge.
+			// #3539 W6: the verb word matches through dcNormalizeVerbWord —
+			// `\rmdir`, `"rd"`, `/bin/rmdir`, `C:\Windows\system32\rmdir.exe`
+			// all resolve to the cmdlet; `./rmdir` stays project-local.
+			const rmdirSwitchVerb = dcSegmentVerbMatch(seg, ['rmdir', 'rd']);
+			if (rmdirSwitchVerb) {
+				const parsed = dcParseWindowsRecursiveDelete(
+					rmdirSwitchVerb.rest.replace(/^\s+/, ''),
+				);
+				if (parsed.fires) {
+					if (parsed.targets.length === 0) {
+						throwDestructiveBlock(
+							'recursive directory delete',
+							`BLOCKED: Windows recursive directory delete (rmdir /s or rd /s) detected. Verify the target is not a junction/symlink.`,
+						);
+					}
+					const decision = dcEvaluateRecursiveDeleteTargets({
+						targets: relocate(occurrence.resolveFrom, parsed.targets),
+						cwd,
+						verifiedScope,
+					});
+					if (!decision.allowed)
+						throwDestructiveBlock(
+							'recursive directory delete',
+							decision.reason,
+						);
 				}
-				const decision = dcEvaluateRecursiveDeleteTargets({
-					targets,
-					cwd,
-					verifiedScope,
-				});
-				if (!decision.allowed)
-					throwDestructiveBlock('recursive directory delete', decision.reason);
 			}
 
-			// Windows cmd.exe: del /s /q /f
-			if (/^del(?:\.exe)?\s+.*\/[sS]/i.test(seg)) {
-				const targets = dcExtractWindowsCmdTargets(seg);
-				if (targets.length > 0) {
+			// Windows cmd.exe: del — the same grammar model as rmdir above
+			// (`del /s /q /f <path>`, `del x/s`, `del /s"file.txt"`); a
+			// recursion switch with no operand fails closed like the rmdir
+			// arm.
+			// #3518 P-5: same leading paren/whitespace tolerance as the rd arm.
+			// #3539 W6: normalized verb word (dcSegmentVerbMatch).
+			const delSwitchVerb = dcSegmentVerbMatch(seg, ['del']);
+			if (delSwitchVerb) {
+				const parsed = dcParseWindowsRecursiveDelete(
+					delSwitchVerb.rest.replace(/^\s+/, ''),
+				);
+				if (parsed.fires) {
+					if (parsed.targets.length === 0) {
+						throwDestructiveBlock(
+							'recursive file delete',
+							`BLOCKED: Windows recursive file delete (del /s) detected. Verify the target is not a junction/symlink.`,
+						);
+					}
 					const decision = dcEvaluateRecursiveDeleteTargets({
-						targets,
+						targets: relocate(occurrence.resolveFrom, parsed.targets),
 						cwd,
 						verifiedScope,
 					});
@@ -630,17 +1081,34 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				}
 			}
 
-			// PowerShell: Remove-Item / aliases with -Recurse
+			// PowerShell: Remove-Item / aliases with -Recurse. The switch must
+			// be a whitespace-delimited token start (`\s-`): a `-r`/`-Recurse`
+			// substring INSIDE a path operand (`rm some-r/x`,
+			// `rm x-Recurse/y`) is a plain delete, not a recursive one — the
+			// same token-vs-substring class as the cmd.exe /s fix (#3495).
+			// #3518 P-5 (class): leading open-parens/whitespace tolerated so a
+			// parenthesized `(Remove-Item x -Recurse)` segment reaches the arm.
+			// #3539 W6: the verb word matches through dcNormalizeVerbWord
+			// (`"ri" -Recurse …`, `/bin/rm -Recurse …` reach the arm); the
+			// `\s-…` switch test applies to the words AFTER the verb.
+			const psRecurseVerb = dcSegmentVerbMatch(seg, [
+				'remove-item',
+				'ri',
+				'rm',
+				'rmdir',
+				'del',
+				'erase',
+				'rd',
+			]);
 			if (
-				/^(?:Remove-Item|ri|rm|rmdir|del|erase|rd)\b.*-[Rr]ecurse\b/i.test(
-					seg,
-				) ||
-				/^(?:Remove-Item|ri|rm|rmdir|del|erase|rd)\b.*-[Rr]\b/i.test(seg)
+				psRecurseVerb &&
+				(/\s-[Rr]ecurse\b/i.test(psRecurseVerb.rest) ||
+					/\s-[Rr]\b/i.test(psRecurseVerb.rest))
 			) {
 				const targets = dcExtractPowerShellTargets(seg);
 				if (targets.length > 0) {
 					const decision = dcEvaluateRecursiveDeleteTargets({
-						targets,
+						targets: relocate(occurrence.resolveFrom, targets),
 						cwd,
 						verifiedScope,
 					});
@@ -671,15 +1139,15 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			// publication protocol (commit-pr) mandates for fork/rebase flows. This
 			// matches full-auto/policy.ts, which already exempts it. Bare `--force`
 			// and `-f` remain blocked. (#1692)
-			// git worktree remove --force: scope-exempt when the target resolves inside
-			// the swarm-managed worktree base directory or a coder's declared scope.
-			// Mirrors the rsync --delete scopeExempt pattern below. Unlike rsync, this
-			// call path often runs with no declared coder scope (orchestrator/cleanup),
-			// so the swarm worktree base directory is also a trusted root — see
-			// isPathUnderSwarmWorktreeBase in src/worktree/core.ts.
-			const worktreeRemoveMatch = /^git\s+worktree\s+remove\s+(.+)$/i.exec(seg);
-			if (worktreeRemoveMatch) {
-				const rawArgs = worktreeRemoveMatch[1]
+			// #3539 W6: the git verb word is normalized (`\git`, `"git"`,
+			// `/usr/bin/git`); the subcommand words `worktree remove` are then
+			// matched on the remainder like the original anchored regex.
+			const gitVerbHead = dcSegmentVerbMatch(seg, ['git']);
+			const worktreeRemoveRest = gitVerbHead
+				? /^\s*worktree\s+remove\s+(.+)$/i.exec(gitVerbHead.rest)
+				: null;
+			if (worktreeRemoveRest) {
+				const rawArgs = worktreeRemoveRest[1]
 					.trim()
 					.split(/\s+/)
 					.filter(Boolean);
@@ -736,9 +1204,14 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				}
 			}
 
-			// rsync mirror / sync with delete
-			if (/^rsync\b.*--delete(?:-after|-before|-during|-delay)?\b/.test(seg)) {
-				const rsyncArgs = seg.split(/\s+/).slice(1);
+			// rsync mirror / sync with delete (#3539 W6: normalized verb word,
+			// case-sensitive as the original anchored regex was)
+			const rsyncVerbHead = dcSegmentVerbMatch(seg, ['rsync'], false);
+			if (
+				rsyncVerbHead &&
+				/--delete(?:-after|-before|-during|-delay)?\b/.test(rsyncVerbHead.rest)
+			) {
+				const rsyncArgs = rsyncVerbHead.rest.trim().split(/\s+/);
 				const rsyncTarget = rsyncArgs
 					.filter((a) => !a.startsWith('-') && !a.includes('@'))
 					.pop();
@@ -755,50 +1228,58 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				}
 			}
 
-			// POSIX mv targeting .swarm/ paths
-			if (/^\\?mv\s/i.test(seg)) {
-				const mvMatch = seg.match(/^\\?mv\s+(.+)$/i);
-				if (mvMatch) {
-					const argsStr = mvMatch[1].replace(/["']/g, '');
-					if (/\.swarm(?:[\x5c/\s]|$)/.test(argsStr)) {
-						throwDestructiveBlock(
-							'swarm path move',
-							`BLOCKED: "mv" targeting .swarm/ detected — move operations under .swarm/ are not allowed from shell commands`,
-						);
-					}
+			// POSIX mv targeting .swarm/ paths (#3539 W6: normalized verb word)
+			const mvVerbHead = dcSegmentVerbMatch(seg, ['mv']);
+			if (mvVerbHead) {
+				const argsStr = mvVerbHead.rest.replace(/["']/g, '');
+				if (/\.swarm(?:[\x5c/\s]|$)/.test(argsStr)) {
+					throwDestructiveBlock(
+						'swarm path move',
+						`BLOCKED: "mv" targeting .swarm/ detected — move operations under .swarm/ are not allowed from shell commands`,
+					);
 				}
 			}
 
-			// Windows cmd move/ren targeting .swarm\ paths
-			if (/^\\?(?:move|ren)(?:\.exe)?\s/i.test(seg)) {
-				const moveMatch = seg.match(/^\\?(?:move|ren)(?:\.exe)?\s+(.+)$/i);
-				if (moveMatch) {
-					const argsStr = moveMatch[1].replace(/["']/g, '');
-					if (/\.swarm(?:[\x5c/\s]|$)/i.test(argsStr)) {
-						throwDestructiveBlock(
-							'move/rename',
-							`BLOCKED: "move" or "ren" targeting .swarm/ detected — move/rename operations under .swarm/ are not allowed from shell commands`,
-						);
-					}
+			// Windows cmd move/ren targeting .swarm\ paths (#3539 W6:
+			// normalized verb word, .exe tolerated)
+			const moveVerbHead = dcSegmentVerbMatch(seg, ['move', 'ren']);
+			if (moveVerbHead) {
+				const argsStr = moveVerbHead.rest.replace(/["']/g, '');
+				if (/\.swarm(?:[\x5c/\s]|$)/i.test(argsStr)) {
+					throwDestructiveBlock(
+						'move/rename',
+						`BLOCKED: "move" or "ren" targeting .swarm/ detected — move/rename operations under .swarm/ are not allowed from shell commands`,
+					);
 				}
 			}
 
-			// PowerShell Move-Item/Rename-Item targeting .swarm/ paths
-			if (
-				/^\\?(?:Move-Item|Rename-Item|move|mi|mv|ren|rni)\b.*\.swarm(?:[\x5c/\s]|$)/i.test(
-					seg,
-				)
-			) {
+			// PowerShell Move-Item/Rename-Item targeting .swarm/ paths (#3539
+			// W6: normalized verb word; the .swarm test spans the whole
+			// segment as before)
+			const psMoveVerbHead = dcSegmentVerbMatch(seg, [
+				'move-item',
+				'rename-item',
+				'move',
+				'mi',
+				'mv',
+				'ren',
+				'rni',
+			]);
+			if (psMoveVerbHead && /\.swarm(?:[\x5c/\s]|$)/i.test(seg)) {
 				throwDestructiveBlock(
 					'move/rename',
 					`BLOCKED: PowerShell Move-Item or Rename-Item targeting .swarm/ detected — move/rename operations under .swarm/ are not allowed from shell commands`,
 				);
 			}
 
-			// Non-recursive rm targeting .swarm/ paths
+			// Non-recursive rm targeting .swarm/ paths (#3539 W6: normalized
+			// verb word — `\rm`, `"rm"`, `/bin/rm` reach the arm)
+			const rmSwarmVerbHead = dcSegmentVerbMatch(seg, ['rm']);
 			if (
-				/^\\?rm\b/i.test(seg) &&
-				!/^\\?rm\s+(?:-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)\b/i.test(seg) &&
+				rmSwarmVerbHead &&
+				!/^\s+-[a-zA-Z]*[rR][a-zA-Z]*\b|^\s+--recursive\b/i.test(
+					rmSwarmVerbHead.rest,
+				) &&
 				/\.swarm(?:[\x5c/\s]|$)/i.test(seg)
 			) {
 				throwDestructiveBlock(
@@ -1138,6 +1619,12 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			command,
 			detectedShellType,
 			shaped,
+			process.platform,
+			// #3346: the v2 host reports the shell the `shell` tool actually
+			// executes (observed-host-shell store); keying inheritance on that
+			// report closes the Git-Bash-on-Windows false positive class. The
+			// `bash` tool and unreported hosts keep the platform interim.
+			normalizedTool === 'shell' ? getObservedHostShell() : undefined,
 		);
 
 		// Shared constructs resolve to the POSIX reading whenever the POSIX
@@ -1158,264 +1645,609 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		const wrapperDeclaredHere = declaresWindowsWrapperLoose(command);
 		const windowsAuthoritative =
 			wrapperDeclaredHere || normalizedTool !== 'bash';
-		const detect = (c: string): WriteAnalysis => {
-			const posix = detectPosixWrites(c);
-			if (windowsShell === null) return posix;
-			return mergeWriteAnalyses(
-				posix,
-				detectWindowsWrites(c, windowsShell),
-				windowsAuthoritative,
-				wrapperDeclaredHere,
-			);
-		};
-
-		// Fail-closed parse gate runs on the ORIGINAL command so a genuinely
-		// malformed command (e.g. an unclosed quote) is still rejected for safety.
-		// The one narrowing: a command positively classified as a read-only
-		// PowerShell pipeline is a read, not a parse failure (issue #3099).
-		const suppressParseError = (c: string) =>
-			enforce && isPowerShellReadOnlyPipeline(c);
-		const primaryAnalysis = detect(command);
-		if (enforce && primaryAnalysis.parseError && !suppressParseError(command)) {
-			throw new Error(
-				`BLOCKED: bash write detection failed to parse command — rejecting for safety`,
-			);
-		}
-
-		// Unwrap shell wrappers (bash -c '…', sh -c '…', eval '…') on the
-		// write-detection path so a redirect hidden inside a one-layer wrapper is
-		// not invisible to the detector (issue #1778 H3). Only take the unwrapped
-		// form when an actual unwrap occurred, so normal (unwrapped) commands are
-		// analyzed byte-for-byte as before. Detection and resolveWriteTargets must
-		// use the SAME string (resolveWriteTargets re-parses it for cwd tracking).
-		const commandSegments = dcSplitSegments(command);
-		const unwrappedSegments = commandSegments.map((s) => dcUnwrapWrappers(s));
-		const didUnwrap = commandSegments.some(
-			(s, i) => unwrappedSegments[i] !== s,
-		);
-		const detectionCommand = didUnwrap ? unwrappedSegments.join('\n') : command;
-
-		const analysis = didUnwrap ? detect(detectionCommand) : primaryAnalysis;
-
-		// A wrapped command whose unwrapped inner form fails to parse is also
-		// rejected for safety.
-		if (
-			enforce &&
-			analysis.parseError &&
-			!suppressParseError(detectionCommand)
-		) {
-			throw new Error(
-				`BLOCKED: bash write detection failed to parse command — rejecting for safety`,
-			);
-		}
-
-		if (!analysis.hasWrites || analysis.writes.length === 0) return;
-
-		const declaredScope = resolveDeclaredScope(sessionID, !enforce);
-
-		const shellWriteAgent = swarmState.activeAgent.get(sessionID);
-		if (!shellWriteAgent) {
-			if (enforce) {
-				throw new Error(
-					`WRITE BLOCKED: No active agent registered for session "${sessionID}". Agent identity must be established (e.g. via a chat message or Task delegation) before shell writes can be authorized.`,
+		// #3616 D9: when the destructive-command policy is disabled, the
+		// detector emits flagged rm operands as ordinary write targets for the
+		// scope layer (see shell-write-detect's rm arm). The override covers
+		// this check's whole synchronous analysis+resolution span; the finally
+		// restores the default so no later caller inherits it.
+		const prevDetectionOptions =
+			cfg.block_destructive_commands === false
+				? ({ destructiveArmDisabled: true } as const)
+				: null;
+		setDetectionOptionsOverride(prevDetectionOptions);
+		try {
+			const detect = (c: string): WriteAnalysis => {
+				const posix = detectPosixWrites(c);
+				if (windowsShell === null) return posix;
+				return mergeWriteAnalyses(
+					posix,
+					detectWindowsWrites(c, windowsShell),
+					windowsAuthoritative,
+					wrapperDeclaredHere,
 				);
-			}
-			// Observe mode cannot determine coder identity without an agent;
-			// lease bookkeeping needs it, so there is nothing to observe.
-			return;
-		}
+			};
 
-		const shellWriteRole = stripKnownSwarmPrefix(shellWriteAgent).toLowerCase();
-		const isArch = shellWriteRole === 'architect';
-		const isCoder = shellWriteRole === 'coder';
-		const shellRoleCapability =
-			AUTHORITY_ROLE_CAPABILITIES[
-				shellWriteRole as keyof typeof AUTHORITY_ROLE_CAPABILITIES
-			];
-		const isImmutableNonWriter =
-			shellRoleCapability === 'read-only' ||
-			shellRoleCapability === 'dedicated-tool-only';
-		if (enforce && isCoder && (!declaredScope || declaredScope.length === 0)) {
-			throw new Error(
-				`SCOPE_NOT_DECLARED: ${shellWriteAgent} cannot perform shell writes without an active Task-correlated scope binding. ACTION[architect]: call declare_scope with the exact workspace-relative paths and replace_existing=true, then dispatch a new Task call.`,
-			);
-		}
-		// Coders fail closed without a Task-correlated scope. Other non-architect
-		// roles retain legacy no-scope leniency, but universal deny prefixes still
-		// apply to them (issue #1778 H3).
-		const noScopeLenient =
-			!isArch &&
-			!isCoder &&
-			!isImmutableNonWriter &&
-			(!declaredScope || declaredScope.length === 0);
-
-		// Issue #2002: a lane coder's shell runs with the lane as cwd and its scope
-		// is lane-rooted. Every path decision in this loop must share that base.
-		const shellDirectory = sessionWorkspaceDirectory(sessionID);
-
-		const resolvedWrites = resolveWriteTargets(
-			detectionCommand,
-			analysis.writes,
-			shellDirectory,
-		);
-
-		for (const write of resolvedWrites) {
-			if (write.resolvedPath === null) {
-				// A null resolved path has three distinct causes that must NOT be
-				// collapsed into one blanket "unresolvable path target" block:
-				if (
-					write.original.category === 'here_doc' &&
-					write.original.path === null
-				) {
-					// A bare here-doc marker (`<< EOF`) feeds stdin, not a file — it is
-					// not itself a write target. Any accompanying `> file` redirect is
-					// detected and scope-checked as its own resolved write, so skip the
-					// phantom marker instead of hard-blocking the whole command.
-					continue;
-				}
-				if (enforce && write.original.category === 'interpreter_eval') {
-					// Inline code (`python -c`, `node -e`, …) can write to arbitrary
-					// files whose targets are not statically knowable, so it cannot be
-					// verified against the declared scope. This stays fail-closed (it is
-					// how the scope/config-zone protections resist an eval bypass), but
-					// with an actionable message — the old text claimed an "unresolvable
-					// path target" that never existed for an eval.
-					throw new Error(
-						`BLOCKED: ${write.original.operator} evaluates inline code whose write targets cannot be verified against the declared scope — rejecting for safety. Write files with the write/edit tools or a checked-in script, and invoke installed tools directly (e.g. \`pytest\`, \`ruff\`) instead of an inline \`python -c\` / \`node -e\` eval.`,
-					);
-				}
-				// A concrete redirect/builtin target that resolved to null because it
-				// uses a shell variable or command substitution ($VAR, $(cmd)) —
-				// genuinely unverifiable, so keep failing closed. Observe mode
-				// skips this write target; the aggregate lease candidate below
-				// is not remembered (targets must be provable, issue #2664).
-				if (enforce) {
-					throw new Error(
-						`BLOCKED: bash/shell write to a dynamic path target${
-							write.original.path ? ` "${write.original.path}"` : ''
-						} that cannot be statically resolved (shell variable or command substitution) — rejecting for safety.`,
-					);
-				}
-				// Observe mode: an unprovable target cannot participate in
-				// exact-bound lease bookkeeping — skip it (issue #2664).
-				continue;
-			}
-
-			if (enforce && noScopeLenient && universalDenyPrefixes.length > 0) {
-				for (const prefix of universalDenyPrefixes) {
-					if (
-						matchesAuthorityDenyPrefix(
-							write.resolvedPath,
-							prefix,
-							shellDirectory,
-						)
-					) {
-						throw new Error(
-							`WRITE BLOCKED: Agent "${shellWriteAgent}" is not authorised to write "${write.resolvedPath}" (via shell). Reason: Path is under universal deny prefix "${prefix}"`,
-						);
-					}
-				}
-			}
-
-			// No-scope agents: enforce only the universal deny list above, then
-			// preserve the prior leniency for the declared-scope authority checks.
-			if (noScopeLenient) continue;
-
-			const authorityCheck = checkFileAuthorityWithRules(
-				shellWriteAgent,
-				write.resolvedPath,
-				shellDirectory,
-				precomputedAuthorityRules,
-				{
-					declaredScope,
-					authorityEnabled: authorityConfig?.enabled,
-					universalDenyPrefixes,
-					verifierConfigPaths: authorityConfig?.verifier_config_paths,
-				},
-			);
-			if (enforce && !authorityCheck.allowed) {
-				const evidenceEventID =
-					authorityCheck.layer === 'protected-path'
-						? recordFullAutoSevereEvidenceEvent({
-								sessionID,
-								childSessionID: sessionID,
-								category: 'protected_state_mutation',
-								paths: [write.resolvedPath],
-							})
-						: undefined;
-				throw new Error(
-					`WRITE BLOCKED: Agent "${shellWriteAgent}" is not authorised to write "${write.resolvedPath}" (via shell). Reason: ${authorityCheck.reason}${evidenceEventID ? ` Evidence event: ${evidenceEventID}.` : ''}`,
-				);
-			}
-
+			// Fail-closed parse gate runs on the ORIGINAL command so a genuinely
+			// malformed command (e.g. an unclosed quote) is still rejected for safety.
+			// The one narrowing: a command positively classified as a read-only
+			// PowerShell pipeline is a read, not a parse failure (issue #3099).
+			const suppressParseError = (c: string) =>
+				enforce && isPowerShellReadOnlyPipeline(c);
+			const primaryAnalysis = detect(command);
 			if (
 				enforce &&
-				declaredScope &&
-				declaredScope.length > 0 &&
-				!isInDeclaredScope(write.resolvedPath, declaredScope, shellDirectory)
+				primaryAnalysis.parseError &&
+				!suppressParseError(command)
 			) {
-				const safeTarget = sanitizeDiagnosticText(write.resolvedPath, 320);
-				const scopeSummary = declaredScope
-					.slice(0, 10)
-					.map((entry) => sanitizeDiagnosticText(entry, 160))
-					.join(', ');
-				const omitted = Math.max(0, declaredScope.length - 10);
+				// F-15 (PR #3651 review): the oversized-word sentinel reports
+				// parseError for a command that never reached the parser —
+				// name the actual cause instead of a parse failure.
+				const oversized = primaryAnalysis.writes.some(
+					(w) => w.operator === 'oversized word',
+				);
 				throw new Error(
-					`WRITE BLOCKED: SCOPE_VIOLATION: shell write target "${safeTarget}" is outside the active scope [${scopeSummary}${omitted > 0 ? `, ... (+${omitted} more)` : ''}]. ACTION[architect]: if the target is intended, call declare_scope for the exact workspace-relative path and redispatch; otherwise correct the command.`,
+					oversized
+						? `BLOCKED: command contains a word over the 4096-character analysis budget — denying before parsing for safety`
+						: `BLOCKED: bash write detection failed to parse command — rejecting for safety`,
 				);
 			}
-			if (isCoder && session?.currentTaskId) {
-				const writeBinding = enforce
-					? resolveActiveScopeBinding(sessionID)
-					: resolveActiveScopeBindingObserving(sessionID);
+
+			// Unwrap shell wrappers (bash -c '…', sh -c '…', eval '…') on the
+			// write-detection path so a redirect hidden inside a one-layer wrapper is
+			// not invisible to the detector (issue #1778 H3). Only take the unwrapped
+			// form when an actual unwrap occurred, so normal (unwrapped) commands are
+			// analyzed byte-for-byte as before. Detection and resolveWriteTargets must
+			// use the SAME string (resolveWriteTargets re-parses it for cwd tracking).
+			// #3491 W2: the preprocessing first REWRITES chdir-bearing wrapper
+			// segments (env -C DIR / env -S with a -C in the split argv /
+			// sudo -D DIR) as correctly-quoted subshells
+			// ( cd -- 'DIR' && <re-unwrapped inner> ), so the wrapped command's
+			// writes resolve under the child cwd while following siblings stay at
+			// the parent cwd (bash-true: env/sudo chdir applies only to the
+			// wrapped exec). Non-chdir segments keep the legacy unwrap. A static
+			// DIR that is empty or contains NUL fails closed; a dynamic DIR
+			// rewrites to the withdrawal form ( cd '<synthetic dynamic operand>'
+			// && inner ) whose inner writes the resolver withdraws
+			// UNCONDITIONALLY (fix-round-1 F-1: `cd -` used to land at a modeled
+			// OLDPWD after a prior cd/pushd and fail open).
+			const preprocessed = dcPreprocessWrappers(command);
+			if (enforce && preprocessed.failClosed) {
+				throw new Error(
+					`BLOCKED: bash write detection failed to parse command — rejecting for safety`,
+				);
+			}
+			const didUnwrap = preprocessed.changed;
+			const detectionCommand = didUnwrap ? preprocessed.command : command;
+
+			let analysis = didUnwrap ? detect(detectionCommand) : primaryAnalysis;
+			// #3491 W3 review (REQUIRED): the substituted analysis runs on the
+			// PREPROCESSED text, whose per-segment unwrap already consumed up to
+			// the bound — the ORIGINAL analysis's depth refusal must survive the
+			// substitution or a compound `echo ok; sudo×65 rm …` launders the
+			// flag through the "no writes detected" early return. OR it through,
+			// mirroring mergeWriteAnalyses.
+			if (didUnwrap && primaryAnalysis.unwrapDepthExceeded) {
+				analysis = { ...analysis, unwrapDepthExceeded: true };
+			}
+			// #3570: a chain nesting >= 3 `sh -c` layers withdraws fail-closed —
+			// the iterative text unwrap degrades same-kind and 4-level quote
+			// structures (a `'\''` splice in a quote-removed payload re-parses as
+			// a delimiter at the next level), so the WRITE arm must refuse such
+			// chains too, not only the destructive arm's bounded unwrap.
+			if (dcUnwrapWrappersBounded(command).depthExceeded) {
+				analysis = { ...analysis, unwrapDepthExceeded: true };
+			}
+			// #3485 (PRR-006 + EXT-2 M2): the unwrapped detection command can
+			// LOSE writes the original analysis saw — dcSplitSegments erases pipe
+			// context (a pipeline-internal wrapper's `[eval stdin]` entry) and an
+			// unwrap can consume a redirect as a launcher option argument
+			// (`stdbuf -o > ../out.txt true`). Union back every ORIGINAL write
+			// EXCEPT the wrapper's own eval-artifact entries — every OTHER
+			// path-null interpreter_eval marker names the wrapper spelling itself
+			// (`bash [eval]`, `PowerShell -EncodedCommand`, the powershell
+			// `unsafe command text` payload marker; re-adding them false-blocks
+			// safe `bash -c "echo hello"` / decoded `-enc` forms) — while keeping
+			// `[eval stdin]` entries (PRR-006) and every path-bearing write (M2).
+			// Duplicate keys collapse downstream.
+			if (didUnwrap) {
+				const regained = primaryAnalysis.writes.filter(
+					(w) =>
+						!(
+							w.category === 'interpreter_eval' &&
+							w.path === null &&
+							!w.operator.endsWith('[eval stdin]')
+						),
+				);
+				if (regained.length > 0) {
+					analysis = {
+						...analysis,
+						writes: [...analysis.writes, ...regained],
+						hasWrites: analysis.hasWrites || regained.length > 0,
+					};
+				}
+				// EXT-2 (PE-a): an unwrap that mangles the inner form (a payload
+				// gluing its own `2>&1 | tail` after it) must not hard-reject a
+				// command the shell parses fine — fall back to the ORIGINAL
+				// command's analysis, which is what actually runs.
+				// #3491 W2: a REWROTE preprocess (generated subshell text) never
+				// falls back — a generated-parse failure fails closed instead of
+				// silently returning to the untransformed analysis.
 				if (
-					writeBinding?.activation === 'active' &&
-					writeBinding.parentOwnerSessionId &&
-					writeBinding.parentCallId
+					analysis.parseError &&
+					!primaryAnalysis.parseError &&
+					!preprocessed.rewrote
 				) {
-					const relativeTarget = path
-						.relative(
-							path.resolve(shellDirectory),
-							path.resolve(shellDirectory, write.resolvedPath),
-						)
-						.replace(/\\/g, '/');
-					const routed = recordReviewerScopeGenerationFile({
-						parentSessionID: writeBinding.parentOwnerSessionId,
-						taskId: writeBinding.taskId,
-						coderCallID: writeBinding.parentCallId,
-						file: relativeTarget,
-					});
-					if (routed) {
-						rememberReviewerScopeWrite?.({
-							callID,
+					analysis = primaryAnalysis;
+				}
+			}
+
+			// A command whose surviving analysis still fails to parse is rejected
+			// for safety; suppression is judged against the command text that
+			// analysis actually describes (the original after an EXT-2 fallback).
+			if (
+				enforce &&
+				analysis.parseError &&
+				!suppressParseError(
+					analysis === primaryAnalysis ? command : detectionCommand,
+				)
+			) {
+				throw new Error(
+					`BLOCKED: bash write detection failed to parse command — rejecting for safety`,
+				);
+			}
+
+			// #3491 W3 (v4 constraint 8): the depth flag is consulted BEFORE every
+			// no-write early return — a wrapper chain beyond the paranoid bound
+			// must deny, never fall through the "no writes detected" exit.
+			if (enforce && analysis.unwrapDepthExceeded) {
+				throw new Error(
+					`BLOCKED: shell wrapper nesting exceeds the inspection bound (${DETECTOR_UNWRAP_PARANOID_BOUND}) — rejecting for safety`,
+				);
+			}
+			// #3491 W3: deny-on-uncertainty launcher shapes on the write path too
+			// (an unknown launcher option hides the execution tail from every
+			// detector — the uncertainty analysis denies where detection cannot).
+			const writePathLauncherUncertainty =
+				dcAnalyzeLauncherUncertainty(command);
+			if (enforce && writePathLauncherUncertainty.deny) {
+				throw new Error(
+					`BLOCKED: ${writePathLauncherUncertainty.reason.slice('BLOCKED: '.length)}`,
+				);
+			}
+
+			if (!analysis.hasWrites || analysis.writes.length === 0) return;
+
+			const declaredScope = resolveDeclaredScope(sessionID, !enforce);
+
+			const shellWriteAgent = swarmState.activeAgent.get(sessionID);
+			if (!shellWriteAgent) {
+				if (enforce) {
+					throw new Error(
+						`WRITE BLOCKED: No active agent registered for session "${sessionID}". Agent identity must be established (e.g. via a chat message or Task delegation) before shell writes can be authorized.`,
+					);
+				}
+				// Observe mode cannot determine coder identity without an agent;
+				// lease bookkeeping needs it, so there is nothing to observe.
+				return;
+			}
+
+			const shellWriteRole =
+				stripKnownSwarmPrefix(shellWriteAgent).toLowerCase();
+			const isArch = shellWriteRole === 'architect';
+			const isCoder = shellWriteRole === 'coder';
+			const shellRoleCapability =
+				AUTHORITY_ROLE_CAPABILITIES[
+					shellWriteRole as keyof typeof AUTHORITY_ROLE_CAPABILITIES
+				];
+			const isImmutableNonWriter =
+				shellRoleCapability === 'read-only' ||
+				shellRoleCapability === 'dedicated-tool-only';
+			if (
+				enforce &&
+				isCoder &&
+				(!declaredScope || declaredScope.length === 0)
+			) {
+				throw new Error(
+					`SCOPE_NOT_DECLARED: ${shellWriteAgent} cannot perform shell writes without an active Task-correlated scope binding. ACTION[architect]: call declare_scope with the exact workspace-relative paths and replace_existing=true, then dispatch a new Task call.`,
+				);
+			}
+			// Coders fail closed without a Task-correlated scope. Other non-architect
+			// roles retain legacy no-scope leniency, but universal deny prefixes still
+			// apply to them (issue #1778 H3).
+			const noScopeLenient =
+				!isArch &&
+				!isCoder &&
+				!isImmutableNonWriter &&
+				(!declaredScope || declaredScope.length === 0);
+
+			// Issue #2002: a lane coder's shell runs with the lane as cwd and its scope
+			// is lane-rooted. Every path decision in this loop must share that base.
+			const shellDirectory = sessionWorkspaceDirectory(sessionID);
+
+			const resolvedWrites = resolveWriteTargets(
+				// #3539 W5: when the analysis came through the procsub-masking
+				// path, its surviving outer writes live in the RESIDUAL command —
+				// re-parse THAT for cwd tracking so `cd …; tee >(…); echo x > f`
+				// resolves the outer write under the tracked post-cd context
+				// (the discriminator from the approved plan; the inner writes
+				// are already withdrawn or resolve at the starting cwd).
+				analysis.residualCommand ?? detectionCommand,
+				analysis.writes,
+				shellDirectory,
+			);
+
+			// #3347: the universal-deny → file-authority → declared-scope tail of
+			// the write loop, shared verbatim by resolved writes and by routed
+			// capability evals (which authorize against the eval's tracked
+			// working directory) so every message shape stays identical by
+			// construction. Returns 'lenient' when the caller must skip the rest
+			// of the loop body for a no-scope lenient agent (resolved writes
+			// `continue`; a routed eval treats leniency like any other write).
+			const enforceWriteAuthorization = (
+				target: string,
+				opts?: {
+					exemptEmptyDirectoryRemoval?: boolean;
+					writeOperator?: string;
+				},
+			): 'lenient' | 'enforced' => {
+				if (enforce && noScopeLenient && universalDenyPrefixes.length > 0) {
+					for (const prefix of universalDenyPrefixes) {
+						if (matchesAuthorityDenyPrefix(target, prefix, shellDirectory)) {
+							throw new ShellWriteBlockedError(
+								`WRITE BLOCKED: Agent "${shellWriteAgent}" is not authorised to write "${renderDenialTarget(target)}" (via shell). Reason: Path is under universal deny prefix "${sanitizeDiagnosticText(prefix, 160)}"`,
+								{ writeTarget: target, writeOperator: opts?.writeOperator },
+							);
+						}
+					}
+				}
+
+				// #3120 LEG 1: no-scope lenient agents (the OpenCode-native roles and
+				// scope-less swarm roles) must still hit the verifier-config deny —
+				// that deny is a property of the protected file class, not of role
+				// capability, so leniency cannot bypass it (and #3120 LEG 2 makes it
+				// fire regardless of the enforcement switch below).
+				if (noScopeLenient) {
+					const lenientAuthorityCheck = checkFileAuthorityWithRules(
+						shellWriteAgent,
+						target,
+						shellDirectory,
+						precomputedAuthorityRules,
+						{
+							declaredScope,
+							authorityEnabled: authorityConfig?.enabled,
+							universalDenyPrefixes,
+							verifierConfigPaths: authorityConfig?.verifier_config_paths,
+						},
+					);
+					if (isVerifierConfigDenial(lenientAuthorityCheck)) {
+						// #3396 feedback (PRR-015): a verifier-config denial is
+						// layer 'protected-path' by construction, so the lenient
+						// branch is the one path to that layer that skipped the
+						// severe evidence event the enforced path always records —
+						// mirror it here (event id appended to the message the
+						// same way).
+						const evidenceEventID =
+							lenientAuthorityCheck.layer === 'protected-path'
+								? recordFullAutoSevereEvidenceEvent({
+										sessionID,
+										childSessionID: sessionID,
+										category: 'protected_state_mutation',
+										paths: [target],
+									})
+								: undefined;
+						throw new ShellWriteBlockedError(
+							`WRITE BLOCKED: Agent "${shellWriteAgent}" is not authorised to write "${renderDenialTarget(target)}" (via shell). Reason: ${lenientAuthorityCheck.reason}${evidenceEventID ? ` Evidence event: ${evidenceEventID}.` : ''}`,
+							{ writeTarget: target, writeOperator: opts?.writeOperator },
+						);
+					}
+					return 'lenient';
+				}
+
+				const authorityCheck = checkFileAuthorityWithRules(
+					shellWriteAgent,
+					target,
+					shellDirectory,
+					precomputedAuthorityRules,
+					{
+						declaredScope,
+						authorityEnabled: authorityConfig?.enabled,
+						universalDenyPrefixes,
+						verifierConfigPaths: authorityConfig?.verifier_config_paths,
+					},
+				);
+				if (
+					(enforce || isVerifierConfigDenial(authorityCheck)) &&
+					!authorityCheck.allowed
+				) {
+					const evidenceEventID =
+						authorityCheck.layer === 'protected-path'
+							? recordFullAutoSevereEvidenceEvent({
+									sessionID,
+									childSessionID: sessionID,
+									category: 'protected_state_mutation',
+									paths: [target],
+								})
+							: undefined;
+					throw new ShellWriteBlockedError(
+						`WRITE BLOCKED: Agent "${shellWriteAgent}" is not authorised to write "${renderDenialTarget(target)}" (via shell). Reason: ${authorityCheck.reason}${evidenceEventID ? ` Evidence event: ${evidenceEventID}.` : ''}`,
+						{ writeTarget: target, writeOperator: opts?.writeOperator },
+					);
+				}
+
+				if (
+					enforce &&
+					declaredScope &&
+					declaredScope.length > 0 &&
+					!isInDeclaredScope(target, declaredScope, shellDirectory) &&
+					// PR #3456: a bare POSIX rmdir cannot remove a non-empty directory
+					// (ENOTEMPTY), so inside the workspace it needs no declared-scope
+					// membership. Windows executors never qualify (Remove-Item alias),
+					// and neither does repository control state (.git/.swarm).
+					!(
+						opts?.exemptEmptyDirectoryRemoval === true &&
+						isPosixRmdirExecutor(
+							normalizedTool,
+							windowsShell,
+							detectionCommand,
+						) &&
+						isEmptyDirectoryRemovalWithinWorkspace(target, shellDirectory)
+					)
+				) {
+					// #3567 review PRR-014: the thrown denial reaches operator and
+					// provider-bound transcripts — render the resolved target with
+					// the same home-redaction class the audit row applies (the W1
+					// HOME-landing targets put absolute user-profile paths here;
+					// sanitizeDiagnosticText alone never redacts them).
+					const safeTarget = sanitizeDiagnosticText(redactPath(target), 320);
+					const scopeSummary = declaredScope
+						.slice(0, 10)
+						.map((entry) => sanitizeDiagnosticText(entry, 160))
+						.join(', ');
+					const omitted = Math.max(0, declaredScope.length - 10);
+					throw new ShellWriteBlockedError(
+						`WRITE BLOCKED [shell-write-scope]: SCOPE_VIOLATION: shell write target "${safeTarget}" is outside the active scope [${scopeSummary}${omitted > 0 ? `, ... (+${omitted} more)` : ''}]. ACTION[architect]: if the target is intended, call declare_scope for the exact workspace-relative path and redispatch; otherwise correct the command.`,
+						{ writeTarget: target, writeOperator: opts?.writeOperator },
+					);
+				}
+				return 'enforced';
+			};
+
+			// PRR-017: the scope binding is per-SESSION and identical for every
+			// write in this command — resolve it ONCE before the loop instead of
+			// per-occurrence (the P-4 occurrence widening otherwise re-reads and
+			// re-parses plan.json N times inside this synchronous loop).
+			const hoistedWriteBinding =
+				isCoder && session?.currentTaskId
+					? enforce
+						? resolveActiveScopeBinding(sessionID)
+						: resolveActiveScopeBindingObserving(sessionID)
+					: null;
+
+			for (const write of resolvedWrites) {
+				if (write.resolvedPath === null) {
+					// A null resolved path has three distinct causes that must NOT be
+					// collapsed into one blanket "unresolvable path target" block:
+					if (
+						write.original.category === 'here_doc' &&
+						write.original.path === null
+					) {
+						// A bare here-doc marker (`<< EOF`) feeds stdin, not a file — it is
+						// not itself a write target. Any accompanying `> file` redirect is
+						// detected and scope-checked as its own resolved write, so skip the
+						// phantom marker instead of hard-blocking the whole command.
+						continue;
+					}
+					if (enforce && write.original.category === 'interpreter_eval') {
+						// Inline code (`python -c`, `node -e`, …) can write to arbitrary
+						// files whose targets are not statically knowable. The OPAQUE
+						// classes (PowerShell -EncodedCommand, nested script blocks,
+						// dynamic `&`/IEX invocation — the writes WITHOUT the
+						// capability flag) stay blanket-blocked: their payloads cannot
+						// be inspected at all.
+						// #3347/#1902 SCOPE-GATED ROUTING for the inspectable
+						// capability class (detectInterpreterEval): read-only /
+						// dedicated-tool-only roles route through file authority at
+						// the eval's working directory (the denial names the role),
+						// and agents WITH a declared scope route through the same
+						// universal-deny/authority/declared-scope checks as any
+						// other write, with the cd-tracked working directory as the
+						// target — an in-scope cwd admits the eval, an out-of-scope
+						// one rejects with the declared-scope error. Scope-less
+						// write-capable roles (architect, reviewer, the lenient
+						// general/build/plan class) KEEP the fail-closed block: no
+						// scope exists to verify the eval's unbounded write
+						// capability against (#3347 AC3 keeps the eval-block pins
+						// green; widening for orchestrator roles is the issue's open
+						// maintainer decision).
+						// #3491 W1: a WITHDRAWN eval (unresolved marker — the
+						// directory-state walk could not stand behind any working
+						// directory) denies BEFORE the routing above and before any
+						// `evalDirectory ?? shellDirectory` fallback.
+						if (
+							write.original.capability === true &&
+							write.unresolved !== true &&
+							(isImmutableNonWriter ||
+								(declaredScope !== null &&
+									declaredScope !== undefined &&
+									declaredScope.length > 0))
+						) {
+							enforceWriteAuthorization(write.evalDirectory ?? shellDirectory, {
+								writeOperator: write.original.operator,
+							});
+							continue;
+						}
+						throw new ShellWriteBlockedError(
+							`BLOCKED: ${write.original.operator} evaluates inline code whose write targets cannot be verified against the declared scope — rejecting for safety. Write files with the write/edit tools or a checked-in script, and invoke installed tools directly (e.g. \`pytest\`, \`ruff\`) instead of an inline \`python -c\` / \`node -e\` eval.`,
+							{ writeOperator: write.original.operator },
+						);
+					}
+					// #3120 LEG 3b: a patch_apply write whose RESOLUTION produced no
+					// targets — stdin patch, unsupported option (the detector's
+					// closed set), or an unreadable/undecodable patch — arrives as
+					// this null-path entry (the resolver expands named targets into
+					// ordinary resolved writes). Fail closed: never authorize blind.
+					if (
+						enforce &&
+						write.original.category === 'patch_apply' &&
+						write.resolvedPath === null
+					) {
+						throw new ShellWriteBlockedError(
+							`BLOCKED: ${write.original.operator} modifies files whose targets cannot be statically verified (stdin patch, unsupported option, or unreadable patch) — rejecting for safety. Apply the patch with an explicit patch file and supported options, or use the write/edit tools.`,
+							{ writeOperator: write.original.operator },
+						);
+					}
+					// A concrete redirect/builtin target that resolved to null because it
+					// uses a shell variable or command substitution ($VAR, $(cmd)) —
+					// genuinely unverifiable, so keep failing closed. Observe mode
+					// skips this write target; the aggregate lease candidate below
+					// is not remembered (targets must be provable, issue #2664).
+					if (enforce) {
+						// #3491 W8 final-critic advisory: for a brace-refused
+						// dynamic write the message renders the user's SOURCE
+						// word (`src/{a..e}`, `src/{a,$(echo b)}`) — the branch
+						// text the expansion would substitute was never typed
+						// verbatim.
+						// #3568 review F-10: the user's SOURCE word is untrusted
+						// text — sanitize control characters and bound its length
+						// before it reaches the operator-facing denial.
+						// FB-017 (#3689 review): an ABSOLUTE-shaped source word
+						// (POSIX /, drive C:/ or C:\, UNC \\) additionally goes
+						// through redactPath so a home/profile prefix renders
+						// folded like the sibling SCOPE_VIOLATION sink — the
+						// xargs arm stores the raw verb word and
+						// `xargs /home/alice/bin/cp` used to leak the profile
+						// path. RELATIVE words (the #3491 source-word rendering
+						// contract, `src/{a,../esc}`, `src/ok.txt`) stay
+						// BYTE-VERBATIM: redactPath normalizes separators and
+						// broke the slash-shaped pins (CI-equivalent importers
+						// brace-3491/brace-sites-3491/launcher-3616).
+						const dynamicRawWord =
+							write.original.path ?? write.original.dynamicSourceWord ?? '';
+						const dynamicTargetLabel = sanitizeDiagnosticText(
+							/^(?:\/|[A-Za-z]:[\\/]|\\\\)/.test(dynamicRawWord)
+								? redactPath(dynamicRawWord)
+								: dynamicRawWord,
+							160,
+						);
+						// #3616 D14 (item 15): class-accurate deny reasons. The
+						// origin is set at the DECISION SITE when the write record
+						// carries one (loop withdrawal, directory-state
+						// withdrawal, wrapper-chdir backstop); tilde is derived
+						// here (textual); everything else keeps the legacy
+						// dynamic-text wording.
+						const originText = write.original.path ?? '';
+						// #3616 feedback round (PR #3651 review PRR-006): when the
+						// denial command carries the withdrawal-rewrite sentinel,
+						// the write came from a wrapper-chdir withdrawal (sudo
+						// -D/-i, env -C) whose rewrite re-derived the record —
+						// a generic directory-withdrawal stamp here would name
+						// popd/cd -/reassignment, which the shape does not have.
+						const origin =
+							write.original.denialOrigin === 'directory-withdrawal' &&
+							preprocessed.command.includes('$__swarm_unresolved_chdir')
+								? 'wrapper-chdir'
+								: (write.original.denialOrigin ??
+									(originText === '~' || originText.startsWith('~/')
+										? 'tilde'
+										: 'dynamic-text'));
+						const originReason: Record<string, string> = {
+							tilde:
+								'tilde target expands against the invoking user home directory — not statically resolvable',
+							'loop-landing':
+								'the loop landing directory is unresolved (withdrawn loop state) — rejecting for safety',
+							'directory-withdrawal':
+								'the directory context was withdrawn (popd/cd -/reassignment) — rejecting for safety',
+							'wrapper-chdir':
+								'wrapper chdir context could not be resolved (sudo -D/-i, env -C) — rejecting for safety',
+							'unverifiable-path':
+								'could not be verified on the filesystem (symlink resolution failed or exceeded the link-hop limit) — rejecting for safety',
+							'dynamic-text':
+								'cannot be statically resolved (shell variable or command substitution) — rejecting for safety',
+						};
+						throw new ShellWriteBlockedError(
+							`BLOCKED: bash/shell write to a dynamic path target${
+								dynamicTargetLabel ? ` "${dynamicTargetLabel}"` : ''
+							} that ${originReason[origin] ?? originReason['dynamic-text']}`,
+							{ writeOperator: write.original.operator },
+						);
+					}
+					// Observe mode: an unprovable target cannot participate in
+					// exact-bound lease bookkeeping — skip it (issue #2664).
+					continue;
+				}
+
+				// #3347: the universal-deny → authority → declared-scope tail now
+				// lives in the shared enforceWriteAuthorization closure (defined
+				// above the loop) so routed capability evals and resolved writes
+				// produce byte-identical message shapes. PR #3456: a tagged bare
+				// rmdir carries its declared-scope exemption through the same
+				// closure (opts thread), so both features share one check order.
+				if (
+					enforceWriteAuthorization(write.resolvedPath, {
+						exemptEmptyDirectoryRemoval:
+							write.original.emptyDirectoryRemoval === true,
+						writeOperator: write.original.operator,
+					}) === 'lenient'
+				) {
+					continue;
+				}
+				if (isCoder && session?.currentTaskId) {
+					const writeBinding = hoistedWriteBinding;
+					if (
+						writeBinding?.activation === 'active' &&
+						writeBinding.parentOwnerSessionId &&
+						writeBinding.parentCallId
+					) {
+						const relativeTarget = path
+							.relative(
+								path.resolve(shellDirectory),
+								path.resolve(shellDirectory, write.resolvedPath),
+							)
+							.replace(/\\/g, '/');
+						const routed = recordReviewerScopeGenerationFile({
 							parentSessionID: writeBinding.parentOwnerSessionId,
 							taskId: writeBinding.taskId,
 							coderCallID: writeBinding.parentCallId,
 							file: relativeTarget,
 						});
+						if (routed) {
+							rememberReviewerScopeWrite?.({
+								callID,
+								parentSessionID: writeBinding.parentOwnerSessionId,
+								taskId: writeBinding.taskId,
+								coderCallID: writeBinding.parentCallId,
+								file: relativeTarget,
+							});
+						}
 					}
 				}
 			}
-		}
-		if (isCoder && session?.currentTaskId) {
-			const binding = enforce
-				? resolveActiveScopeBinding(sessionID)
-				: resolveActiveScopeBindingObserving(sessionID);
-			if (binding) {
-				rememberScopeLeaseCandidate?.({
-					callID,
-					sessionID,
-					tool,
-					directory: shellDirectory,
-					binding,
-					targets: resolvedWrites.flatMap((write) =>
-						write.resolvedPath === null
-							? []
-							: [path.resolve(shellDirectory, write.resolvedPath)],
-					),
-					args,
-				});
+			if (isCoder && session?.currentTaskId) {
+				const binding = enforce
+					? resolveActiveScopeBinding(sessionID)
+					: resolveActiveScopeBindingObserving(sessionID);
+				if (binding) {
+					rememberScopeLeaseCandidate?.({
+						callID,
+						sessionID,
+						tool,
+						directory: shellDirectory,
+						binding,
+						targets: resolvedWrites.flatMap((write) =>
+							write.resolvedPath === null
+								? []
+								: [path.resolve(shellDirectory, write.resolvedPath)],
+						),
+						args,
+					});
+				}
 			}
+		} finally {
+			// #3616 D9 (review round 1): the reset MUST run on every exit path —
+			// the parse gate and every write-authorization throw above occur with
+			// the override set; a bare sequential reset leaked the flag on those
+			// exceptions.
+			setDetectionOptionsOverride(null);
 		}
 	}
 
@@ -1814,6 +2646,11 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			agentConfig.max_tool_calls > 0 &&
 			window.toolCalls >= agentConfig.max_tool_calls
 		) {
+			await recordPrReviewBudgetExhaustion(
+				effectiveDirectory,
+				sessionID,
+				'tool_calls',
+			);
 			window.hardLimitHit = true;
 			telemetry.hardLimitHit(
 				sessionID,
@@ -1838,6 +2675,11 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			agentConfig.max_duration_minutes > 0 &&
 			elapsedMinutes >= agentConfig.max_duration_minutes
 		) {
+			await recordPrReviewBudgetExhaustion(
+				effectiveDirectory,
+				sessionID,
+				'duration',
+			);
 			window.hardLimitHit = true;
 			telemetry.hardLimitHit(
 				sessionID,
@@ -2601,8 +3443,12 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			handleLoopDetection(input.sessionID, input.tool, output.args);
 		}
 
-		// Block full test suite execution without file argument
-		if (enforcePolicy) {
+		// Block full test suite execution without file argument.
+		// #3320: swarm-only enforcement — scoped to swarm-owned sessions
+		// (architect + registered swarm agents). Native agents (build/plan/
+		// general) keep their own tool authority; destructive-command,
+		// containment, and symlink checks below stay universal.
+		if (enforcePolicy && isSwarmOwnedSession(input.sessionID)) {
 			handleTestSuiteBlocking(input.tool, output.args);
 		}
 
@@ -2710,6 +3556,11 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			const pathMatch = /[^\s]+/.exec(
 				err instanceof Error ? err.message : String(err),
 			);
+			// Issue #3495: a structured shell-write denial carries the resolved
+			// target and the write operator as data, so the row never depends on
+			// re-parsing the human-readable message.
+			const structuredWrite =
+				err instanceof ShellWriteBlockedError ? err : undefined;
 			const targetPath = (() => {
 				const p =
 					toolArgs?.filePath ??
@@ -2718,11 +3569,18 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 					toolArgs?.target;
 				if (typeof p === 'string' && p.length > 0) return p;
 
+				if (structuredWrite?.writeTarget) return structuredWrite.writeTarget;
+
 				const rawMessage = err instanceof Error ? err.message : String(err);
 
-				// Extract the violating write target from known guardrail error formats
-				// before falling back to the first error-message token or placeholder.
+				// Extract the violating write target from known guardrail error
+				// formats first — the quoted target in the two canonical denial
+				// shapes — before trying generic label-colon heuristics, whose
+				// first match on a `WRITE BLOCKED: …` message is otherwise the
+				// next bare token (`SCOPE_VIOLATION:`, `Agent`), never the target.
 				const extracted =
+					/shell write target "([^"]+)"/.exec(rawMessage) ??
+					/is not authorised to write "([^"]+)"/.exec(rawMessage) ??
 					/(?:write|target|file|path|scope|prefix)[^:]*:\s*(?:"([^"]+)"|'([^']+)'|(\S+))/i.exec(
 						rawMessage,
 					) ??
@@ -2730,7 +3588,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 						rawMessage,
 					);
 
-				const candidate =
+				const rawCandidate =
 					extracted != null
 						? (extracted[1] ??
 							extracted[2] ??
@@ -2739,6 +3597,10 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 							extracted[5] ??
 							extracted[6])
 						: null;
+				// #3567 review P-R5: strip the quoting the regex fallback can
+				// carry into the audit row (`> "$V:src/ok.ts"` recorded
+				// `src/ok.ts"`) before persisting the extracted target.
+				const candidate = rawCandidate?.replace(/^['"]+|['"]+$/g, '');
 
 				if (candidate && candidate.length > 0 && candidate.length < 200) {
 					return candidate;
@@ -2762,6 +3624,9 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 					declaredScope: declaredScopeText,
 					resolvedScope: resolvedScopeText,
 					action: 'bash',
+					...(structuredWrite?.writeOperator
+						? { operator: structuredWrite.writeOperator }
+						: {}),
 				},
 				{
 					directory: effectiveDirectory,
@@ -3008,11 +3873,15 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 							enabled: shellAuditEnabled,
 						},
 					);
-					if (!enforcePolicy) {
+					// #3120 LEG 2: verifier-config protection is owner policy for the
+					// verification system itself, so its denial fires even when the
+					// optional enforcement switch (guardrails.enabled=false) is off.
+					// Every other authority layer keeps the switchable skip.
+					if (!enforcePolicy && !isVerifierConfigDenial(authorityCheck)) {
 						continue;
 					}
 					throw new Error(
-						`WRITE BLOCKED: Agent "${agentName}" is not authorised to write "${targetPath}". Reason: ${authorityCheck.reason}${evidenceEventID ? ` Evidence event: ${evidenceEventID}.` : ''}`,
+						`WRITE BLOCKED: Agent "${sanitizeDiagnosticText(agentName, 96)}" is not authorised to write "${renderDenialTarget(targetPath)}". Reason: ${authorityCheck.reason}${evidenceEventID ? ` Evidence event: ${evidenceEventID}.` : ''}`,
 					);
 				}
 

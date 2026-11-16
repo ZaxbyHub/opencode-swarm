@@ -8,7 +8,7 @@ Swarm memory is an optional, project-scoped recall system. The current default p
 - `swarm_memory_propose`: proposal-only writes. It creates pending proposals and never writes durable memory directly.
 - `swarm_memory_outcome`: records whether recalled memory or a graph answer was useful, a dead end, or corrected. It can target a memory ID or create a lightweight question result.
 
-Memory is disabled by default. When disabled, default agents are not given the memory tools, direct tool calls return a clear disabled result, reflection artifacts are not regenerated or injected, and existing Swarm behavior is unchanged.
+Memory is disabled by default. When disabled, default agents are not given the memory tools, the `swarm_memory_*` tools are not registered in the main session (an execute-time disabled result remains as a backstop on surfaces that still reach the handlers, e.g. the MCP adapter), reflection artifacts are not regenerated or injected, and existing Swarm behavior is unchanged.
 
 ## Configuration
 
@@ -493,6 +493,13 @@ The detector is intentionally conservative and covers obvious cases:
   `sk_live_`/`rk_live_` keys, Google `AIza...` keys, OpenSSH private key
   blocks, and AWS secret access keys (label-anchored, plus the
   same-line-after-`AKIA` context heuristic) — issue #1466 (DD-05)
+- embedded credential shapes: the fixed-length and token-prefix patterns
+  match a credential glued inside a longer identifier, not only standalone
+  tokens (#3382). Deliberate trade-off: the `aws_secret_access_key_context`
+  arm redacts the whole span between an `AKIA` id and a same-line 40-char
+  token, so interposed non-secret text on that line is removed from redacted
+  output, and `=`-labeled AWS values longer than 40 chars redact only their
+  first 40 characters
 - bare `?key=...` URL query parameters are NOT redacted (the env-secret
   pattern requires at least one uppercase `PREFIX_` segment) — issue #1466
   (DD-06)

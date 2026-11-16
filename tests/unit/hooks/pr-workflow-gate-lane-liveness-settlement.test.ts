@@ -11,6 +11,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { handleAbortPrWorkflowCommand } from '../../../src/commands/abort-pr-workflow.js';
 import { closeProjectDb } from '../../../src/db/project-db.js';
+import { LANE_LIVENESS_WATCHDOG_DEFAULTS } from '../../../src/hooks/lane-liveness-watchdog.js';
 import {
 	abortPrWorkflow,
 	activatePrWorkflow,
@@ -44,6 +45,23 @@ const originals = {
 /** Report exactly these subagent session ids as live/idle to the real probe. */
 function installStatusMap(map: Record<string, { type?: string }>): void {
 	gateInternals.getSessionOps = () => ({ status: async () => ({ data: map }) });
+}
+
+/**
+ * #3313 AC14 supersedes the #2506 AC1 default-off contract: the watchdog is
+ * default-ON, so a fixture whose contract is probe RETENTION on an aged
+ * `busy` lane (the record stays `pending`) is a disabled-path contract. Pin
+ * it explicitly through the project config file the real tool path reads
+ * (`loadPluginConfig(directory)`, the `makeProject` fixture pattern) so the
+ * expectation cannot flip with the schema default.
+ */
+async function pinWatchdogDisabledConfig(): Promise<void> {
+	await fs.mkdir(path.join(directory, '.opencode'), { recursive: true });
+	await fs.writeFile(
+		path.join(directory, '.opencode', 'opencode-swarm.json'),
+		JSON.stringify({ lane_liveness_watchdog: { enabled: false } }),
+		'utf-8',
+	);
 }
 
 beforeEach(() => {
@@ -209,6 +227,11 @@ describe('the escape hatch stays reachable when the probe cannot run', () => {
 		installStatusMap({
 			[laneSubagentSessionId('c-live')]: { type: 'busy' },
 		});
+		// #3313 AC14 supersedes the #2506 AC1 default-off contract: this tool
+		// path resolves the watchdog from the real directory config, so the
+		// retention contract is pinned to the explicit opt-out (the default-on
+		// watchdog would deadline-settle the aged busy lane instead).
+		await pinWatchdogDisabledConfig();
 
 		const parsed = JSON.parse(
 			await executeCompletePrWorkflow(
@@ -257,6 +280,18 @@ describe('a permanently-retained lane still has exactly one human exit (S3)', ()
 		const summary = await abortPrWorkflow(directory, 'sess-force', {
 			kind: 'force',
 			reason: 'lane wedged busy forever',
+			// #3313 AC14 supersedes the #2506 AC1 default-off contract: probe
+			// retention on an aged busy lane is a disabled-path contract. This
+			// direct gate call takes the policy the tool wrappers resolve from
+			// config, so the explicit opt-out is threaded here — with the
+			// default-on watchdog the lane would be deadline-settled before the
+			// override could retain it.
+			laneLiveness: {
+				laneLivenessWatchdog: {
+					...LANE_LIVENESS_WATCHDOG_DEFAULTS,
+					enabled: false,
+				},
+			},
 		});
 
 		expect(summary.openLanes).toBe(1);

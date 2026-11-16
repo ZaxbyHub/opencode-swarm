@@ -27,6 +27,7 @@ import {
 	initTelemetry,
 	resetTelemetryForTesting,
 } from '../../../src/telemetry.js';
+import { safeRmRecursive } from '../../helpers/safe-test-dir.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 /**
@@ -43,7 +44,7 @@ function makeProject(): string {
 
 function cleanup(dir: string): void {
 	closeAllProjectDbs();
-	rmSync(dir, { recursive: true, force: true });
+	safeRmRecursive(dir);
 }
 
 function sampleCanonical(overrides: Record<string, unknown> = {}) {

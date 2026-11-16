@@ -159,6 +159,33 @@ async function establishFivePlusOne(
 	};
 }
 
+/**
+ * #3312 AC10 supersedes #2350's unconsumed-budget admission pins in the
+ * seeded legs below: the partial disclosure admission now refuses a
+ * contract-class dimension while its legacy retry budget remains, so each
+ * leg first consumes the ONE legacy contract retry for the missing
+ * dimension (the enforcePrReviewBaseDimensions prReviewContractRetry
+ * mechanism — the same threading as the unlaunched-retry test above; the
+ * unlaunched retry dispatch contributes no lane evidence, so the derived
+ * FAILED/contract settlement and every asserted downstream failure surface
+ * are unchanged).
+ */
+async function consumeLegacyContractRetry(
+	missingDimension: (typeof PR_REVIEW_BASE_DIMENSION_IDS)[number],
+): Promise<void> {
+	await enforcePrReviewBaseDimensions(
+		directory,
+		PR_ARTIFACT_SESSION_ID,
+		[{ laneId: 'contract-retry', workflowLane: missingDimension }],
+		{
+			batchId: 'contract-retry',
+			prHeadSha: PR_ARTIFACT_HEAD_SHA,
+			prReviewContractRetry: true,
+			prReviewResiliencePolicy: LEGACY_PR_REVIEW_RESILIENCE_POLICY,
+		},
+	);
+}
+
 describe('write_pr_review_artifact partial base coverage adversarial cases (#2350)', () => {
 	test('rolls back an unlaunched contract retry so it can be admitted again', async () => {
 		const { missingDimension } = await establishFivePlusOne();
@@ -264,6 +291,10 @@ describe('write_pr_review_artifact partial base coverage adversarial cases (#235
 
 	test('fails closed when an admitted disclosure is tampered with', async () => {
 		const { missingDimension, records } = await establishFivePlusOne();
+		// #3312 AC10 supersedes #2350's unconsumed-budget admission pin: seed
+		// the consumed legacy retry so the disclosure file this leg tampers
+		// with is actually written.
+		await consumeLegacyContractRetry(missingDimension);
 		await executeWritePrReviewArtifact(
 			{
 				kind: 'findings',
@@ -298,6 +329,10 @@ describe('write_pr_review_artifact partial base coverage adversarial cases (#235
 
 	test('rejects a colliding disclosure path instead of overwriting it', async () => {
 		const { missingDimension, records } = await establishFivePlusOne();
+		// #3312 AC10 supersedes #2350's unconsumed-budget admission pin: seed
+		// the consumed legacy retry so the write reaches the file-write stage
+		// where the collision guard fires.
+		await consumeLegacyContractRetry(missingDimension);
 		const collisionPath = path.join(
 			directory,
 			'.swarm',
@@ -327,6 +362,10 @@ describe('write_pr_review_artifact partial base coverage adversarial cases (#235
 
 	test('rolls back a new admission when the findings checkpoint fails', async () => {
 		const { missingDimension, records } = await establishFivePlusOne();
+		// #3312 AC10 supersedes #2350's unconsumed-budget admission pin: seed
+		// the consumed legacy retry so the admission persists and the injected
+		// findings-disk failure is what rolls it back.
+		await consumeLegacyContractRetry(missingDimension);
 		artifactInternals.atomicWrite = async () => {
 			throw new Error('injected findings disk failure');
 		};
@@ -367,6 +406,13 @@ describe('write_pr_review_artifact partial base coverage adversarial cases (#235
 
 	test('cleans up the disclosure when durable admission state cannot be written', async () => {
 		const { missingDimension, records } = await establishFivePlusOne();
+		// #3312 AC10 supersedes #2350's unconsumed-budget admission pin: seed
+		// the consumed legacy retry so the admission reaches the state-write
+		// stage the injection targets. The seeding MUST precede the
+		// beforeAtomicRename hook install — the retry consumption writes gate
+		// state through writeAtomicJson, so installing the hook first would
+		// consume rename #1 on the seeding path and shift the injection.
+		await consumeLegacyContractRetry(missingDimension);
 		let renameCalls = 0;
 		_test_exports.beforeAtomicRename = async () => {
 			renameCalls += 1;

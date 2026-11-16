@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.199.6",
+  "tagCommit": "a177664efa1b7157e370912087d91fc7a0ef7933",
+  "targetCommitish": "a177664efa1b7157e370912087d91fc7a0ef7933",
+  "releaseBodySha256": "06f65a635b95cf79a2630f9945f92fbc7a1a11863187961ecdd039d4e76f4746",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/3423-v2-context-idless-pairing.md",
+      "sha256": "2755f338aeadd9f8896bd1bd6a4e46abb15c6776c7e69d70be23a038de0beaaa"
+    }
+  ]
+}

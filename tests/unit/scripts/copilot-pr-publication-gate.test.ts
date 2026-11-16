@@ -321,4 +321,66 @@ describe('copilot-pr-publication-gate (issue #2131 criterion D)', () => {
 			assertExpect(output).toContain('does not match this origin');
 		});
 	});
+
+	test('an out-of-order body blocks publish even with otherwise-valid evidence (#3601 AC1)', async () => {
+		await withAssertions(2, async (assertExpect) => {
+			// Same shape as writeValidBaselinePrBody but with Test plan first:
+			// sections present (presence loop passes) yet out of order, so only
+			// the order check can refuse it.
+			await fs.mkdir(path.join(directory, '.swarm', 'evidence'), {
+				recursive: true,
+			});
+			await fs.writeFile(
+				path.join(directory, '.swarm', 'evidence', 'pr_body.md'),
+				[
+					'# T',
+					'',
+					'## Test plan',
+					't',
+					'',
+					'## Summary',
+					's',
+					'',
+					'## Invariant audit',
+					'i',
+					'',
+				].join('\n'),
+				'utf-8',
+			);
+			await fs.writeFile(
+				path.join(directory, '.swarm', 'evidence', 'commit-pr-validation.md'),
+				'ran the suite',
+				'utf-8',
+			);
+			git(directory, ['init', '-q']);
+			git(directory, [
+				'remote',
+				'add',
+				'origin',
+				'https://github.com/example/repo.git',
+			]);
+			git(directory, [
+				'-c',
+				'user.name=test',
+				'-c',
+				'user.email=test@test.com',
+				'-c',
+				'commit.gpgsign=false',
+				'commit',
+				'-q',
+				'--allow-empty',
+				'-m',
+				'init',
+			]);
+			const head = spawnSync('git', ['-C', directory, 'rev-parse', 'HEAD'], {
+				encoding: 'utf-8',
+				stdin: 'ignore',
+				timeout: 10_000,
+			}).stdout.trim();
+			await writeEvidence({ headSha: head });
+			const { status, output } = runGate(PUBLISH_PAYLOAD);
+			assertExpect(status).toBe(1);
+			assertExpect(output).toContain('section order');
+		});
+	});
 });

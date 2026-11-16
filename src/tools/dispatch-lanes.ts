@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import pLimit from 'p-limit';
 import { z } from 'zod';
+import { criticPromptProvenance } from '../agents/critic.js';
 import { getSwarmAgents } from '../agents/index.js';
 import {
 	CANDIDATE_FIELD_COUNT,
@@ -33,7 +34,9 @@ import {
 	DEFAULT_STALE_DELEGATION_TIMEOUT_MS,
 	findByBatchIdDetailed,
 	findByCorrelationIdDetailed,
+	PR_REVIEW_BUDGET_EXHAUSTED,
 	recordPendingDelegationDetailed,
+	supersedeStaleLivenessVerdictLane,
 } from '../background/pending-delegations.js';
 import {
 	encodePrReviewCollectionReceiptFooter,
@@ -50,6 +53,7 @@ import {
 	buildPrReviewContractCard,
 	decodePrReviewWorkflowBinding,
 	encodePrReviewWorkflowBinding,
+	firstPrReviewVerdictRowTemplateLine,
 	PrReviewLaneResultEnvelopeSchema,
 	prReviewLegacyTranscriptCompatibilityEnabled,
 } from '../background/pr-review-contract.js';
@@ -70,10 +74,10 @@ import {
 import { loadPluginConfig } from '../config/loader.js';
 import {
 	DEFAULT_PR_REVIEW_RESILIENCE_CONFIG,
+	deriveSwarmIdentity,
 	isKnownCanonicalRole,
 	type PrReviewResilienceConfig,
 	resolveGeneratedAgentRole,
-	stripKnownSwarmPrefix,
 } from '../config/schema.js';
 import {
 	classifyProviderFailure,
@@ -87,9 +91,8 @@ import {
 	bindPrReviewTriggerLedger,
 	collectPrWorkflowPendingLaneLiveness,
 	declarePrFeedbackInventory,
-	derivePrReviewOrderUnstableItems,
+	derivePrReviewCriticDispatchInputs,
 	derivePrReviewPresentationOrder,
-	derivePrReviewReviewerSeverities,
 	describePrWorkflowRevisionDigestFailure,
 	enforcePrFeedbackVerificationOwnership,
 	enforcePrReviewBaseDimensions,
@@ -98,8 +101,10 @@ import {
 	PR_REVIEW_BASE_DIMENSION_IDS,
 	PR_REVIEW_BASE_LANE_FLOORS,
 	PR_REVIEW_MICRO_LANE_FLOORS,
+	PR_REVIEW_PHASE_ADMITTED_ROLES,
 	PR_WORKFLOW_PROBE_SKIPPED_NO_BUDGET_REASON,
 	type PrReviewDepthTier,
+	type PrReviewLaneValidationFailure,
 	PrReviewResilienceCircuitOpenError,
 	PrReviewResilienceRetryExhaustedError,
 	type PrReviewVerdictCollectionReceipt,
@@ -109,6 +114,8 @@ import {
 	recordPrReviewMicroFamilyDispatch,
 	recordPrReviewValidationBatch,
 	rollbackPrReviewBaseAdmissionIfUnlaunched,
+	rollbackPrReviewValidationBatchIfUnlaunched,
+	validateExactStructuredReceiptCoverage,
 	validatePrReviewDiscoveryLaneCompletion,
 	validatePrWorkflowTransportRecovery,
 } from '../hooks/pr-workflow-gate.js';
@@ -193,6 +200,17 @@ const PR_REVIEW_VERDICT_RESPONSE_PER_ITEM_CHARS = 1_500;
 // swarm-pr-feedback modes, which #2276 leaves on the pre-existing flat cap).
 const PR_WORKFLOW_PROTOCOL_OUTPUT_MAX_CHARS = 12_000;
 const MAX_ZOD_ISSUES_LISTED = 20;
+
+/**
+ * Issue #3358 AC1/AC3: the controller-authored suspension of the critic
+ * agent's default PLAN REVIEW structure. Injected by
+ * `applyPrWorkflowPromptContract` into every bound swarm-pr-review:critic
+ * lane's CONTROLLER-BOUND block — the ONLY activation path (the critic agent's
+ * own prompt no longer carries any PR-review text). Exported so the dispatch
+ * admission belt and tests compare against the exact producer text.
+ */
+export const CRITIC_PROTOCOL_SELECTION_CLAUSE =
+	"PROTOCOL SELECTION (#3358): the critic agent's default PLAN REVIEW output structure does not apply to this lane. Do not begin with PLAN REVIEW and do not call get_approved_plan; emit only the [CRITIC] verdict rows the contract card specifies, exactly one per assigned item id, and nothing else.";
 /**
  * Configured session.create retry cap (issue #1615 / #2473): the 1-based
  * `generation` on a lane result and its delegation record counts create
@@ -986,6 +1004,13 @@ export interface CollectLaneResultsResult {
 	 * unchanged, so existing consumers are unaffected.
 	 */
 	pending_lanes?: CollectPendingLaneIdentity[];
+	/** Host-exhausted attempts. Partial output is context for a fresh retry. */
+	unsettled_coverage?: Array<{
+		lane_id: string;
+		dimension: string;
+		owned_workflow_lanes?: string[];
+		output_ref?: string;
+	}>;
 	/**
 	 * Issue #2971: typed refusal entries present when the caller passed
 	 * cancel_pending: true. The collector is observation-only — it never
@@ -1082,6 +1107,7 @@ export const _internals: {
 	resolvePrWorkflowRevisionDigestAsync: typeof resolvePrWorkflowRevisionDigestAsync;
 	resolveExactMergeBaseAsync: typeof resolveExactMergeBaseAsync;
 	validatePrWorkflowTransportRecovery: typeof validatePrWorkflowTransportRecovery;
+	validateExactStructuredReceiptCoverage: typeof validateExactStructuredReceiptCoverage;
 	now: () => number;
 	sleep: (ms: number) => Promise<void>;
 } = {
@@ -1094,12 +1120,14 @@ export const _internals: {
 	resolvePrWorkflowRevisionDigestAsync,
 	resolveExactMergeBaseAsync,
 	validatePrWorkflowTransportRecovery,
+	validateExactStructuredReceiptCoverage,
 	now: () => Date.now(),
 	sleep,
 };
 
 export const _test_exports = {
 	validatePrReviewMicroDispatch,
+	ownPropertySeverityLookup,
 	resolveCollectExpectedWorkflowIdentity,
 	applyCommonPrompt,
 	applyExplorerFormatSuffix,
@@ -1147,6 +1175,13 @@ export const _test_exports = {
 	// contract builder so budget scaling can be asserted without prompt-text
 	// parsing (file precedent: prompt-construction internals live here).
 	prReviewLaneResponseBudgetChars,
+	// #3710: minimal test-only export. The collect-settlement inlineDetail
+	// redaction seam (the PR_WORKFLOW_CONTRACT_INVALID thrown-cause site)
+	// lives inside settleCollectedLane and is otherwise reachable only
+	// through a full collect orchestration; exporting the pure composer lets
+	// the regression suite drive it (plus its persisted lane-rejection
+	// artifact via persistLaneRejectionDetail) directly.
+	composeLaneRejectionError,
 };
 
 type ReadOnlyToolPermissions = Record<string, boolean> & {
@@ -1560,7 +1595,12 @@ export async function executeDispatchLanesAsync(
 	}
 	// Issue #2906: derive the counterbalancing inputs before prompt assembly.
 	// Both derivations are read-only gate reads, so a failure is still a
-	// side-effect-free invalid request. Reviewer batches receive the
+	// side-effect-free invalid request. Issue #3341: the same per-request
+	// guarantee covers the state-free admission checks (lane roles and
+	// launchability, the staged/contract-retry shape, and unknown modes): those
+	// reject without activating, binding, or otherwise mutating durable workflow
+	// state, and any pre-existing workflow state is preserved unchanged.
+	// State-dependent checks are not covered by this guarantee. Reviewer batches receive the
 	// presentation order the gate will stamp (passed on to
 	// recordPrReviewValidationBatch as expectedPresentationOrder, so the
 	// stamped receipt can never disagree with the rendered prompt); critic
@@ -1594,24 +1634,22 @@ export async function executeDispatchLanesAsync(
 						context.sessionID,
 					);
 				} else {
-					prReviewOrderUnstableItemIds = await derivePrReviewOrderUnstableItems(
+					// #3358 AC6: one gate context and one reviewer composition feed
+					// both critic inputs (order-unstable ids, #2906; reviewer
+					// severities, #3310 — UPHELD keeps that exact rank). An empty
+					// severity map renders nothing extra.
+					const criticInputs = await derivePrReviewCriticDispatchInputs(
 						directory,
 						context.sessionID,
 					);
-					// #3310: the critic needs each assigned item's reviewer severity
-					// (UPHELD keeps that exact rank). Same read-only derivation
-					// shape as the #2906 readers; an empty map renders nothing extra.
-					const derivedSeverities = await derivePrReviewReviewerSeverities(
-						directory,
-						context.sessionID,
-					);
+					prReviewOrderUnstableItemIds = criticInputs.orderUnstableItemIds;
+					const derivedSeverities = criticInputs.reviewerSeverities;
 					if (derivedSeverities.size > 0) {
-						// Own-property lookup only: an assigned item id colliding with a
-						// prototype key must not render inherited members into the block.
-						prReviewReviewerSeverities = Object.assign(
-							Object.create(null),
-							Object.fromEntries(derivedSeverities),
-						);
+						// Own-property lookup only (#3362): an assigned item id
+						// colliding with a prototype key must not render inherited
+						// members into the block.
+						prReviewReviewerSeverities =
+							ownPropertySeverityLookup(derivedSeverities);
 					}
 				}
 			}
@@ -1626,9 +1664,17 @@ export async function executeDispatchLanesAsync(
 		}
 	}
 	// Validate every controller-owned prompt before publishing gate ownership.
-	// A formatting failure must be a side-effect-free invalid request: otherwise
-	// an unlaunchable batch consumes durable workflow state and cannot be retried
-	// with the same identity.
+	// Every rejection raised BEFORE gate activation/binding — the
+	// prompt-contract formatting failures below, the PR_REVIEW phase
+	// role/launchability/critic-prompt admission hoisted into
+	// assertPrReviewPhaseLaneAdmission (#3358), and the state-free
+	// request-shape checks in validatePrWorkflowLaneAdmission (#3341:
+	// lane roles, owned-workflow-lane shape, the staged/contract-retry
+	// shape, and unknown modes) — is a side-effect-free invalid request:
+	// otherwise an unlaunchable batch consumes durable workflow state
+	// and cannot be retried with the same identity. Rejections raised
+	// after activation (batch recording) are not side-effect-free, which
+	// is exactly why admission runs first.
 	const formatExplorerLanes = (input: DispatchLaneSpec[]) =>
 		applyExplorerFormatSuffix(input, {
 			failClosed: Boolean(
@@ -1705,12 +1751,54 @@ export async function executeDispatchLanesAsync(
 		}
 		lanes = formatted.lanes;
 	}
+	// #3358 AC3: the effective critic lane prompt must carry the controller
+	// suspension clause — admission verifies what the model will actually see,
+	// not only the agent name. The clause is controller-authored text, so this
+	// holds for a default AND a customPrompt critic agent.
+	if (parsed.data.mode === 'swarm-pr-review:critic') {
+		const missingClause = lanes.find(
+			(lane) => !lane.prompt.includes(CRITIC_PROTOCOL_SELECTION_CLAUSE),
+		);
+		if (missingClause) {
+			return asyncFailureResult({
+				failure_class: 'invalid_args',
+				message: `BLOCKED: PR_REVIEW critic lane "${missingClause.id}" effective prompt does not carry the PR-contract suspension clause — the controller failed to compose the critic protocol selection block`,
+			});
+		}
+	}
 	if (context.sessionID?.trim()) {
 		try {
 			let gateState = await enforcePrWorkflowDispatchLanesAsync(
 				directory,
 				context.sessionID,
 				'dispatch_lanes_async',
+			);
+			// Issue #3341 / #3358 AC11: run every state-free request-shape
+			// check BEFORE any state mutation for this request: lane roles,
+			// owned-workflow-lane shape, phase-lane agent launchability, the
+			// staged/contract-retry shape, and unknown swarm-pr-review:*
+			// suffixes. enforcePrWorkflowDispatchLanesAsync is read-only, so a
+			// rejection here consumes no durable workflow state; pre-existing
+			// state (any mode) is preserved unchanged. The reachability guard
+			// matches the historical post-binding condition exactly, so the
+			// set of rejected requests is unchanged. Checks that need gate
+			// state or resilience config (lane count and max_concurrent for
+			// tiers M and L, canary-first and fanout order, trigger
+			// evaluation, PR_FEEDBACK verification ownership) still run after
+			// activation. The council/reviewer/critic arm delegates to
+			// assertPrReviewPhaseLaneAdmission (#3358 AC8/AC11), which owns
+			// the phase role table, launchability, and critic-prompt
+			// provenance for those modes.
+			validatePrWorkflowLaneAdmission(
+				parsed.data.mode ?? '',
+				parsed.data.lanes,
+				context,
+				!gateState || gateState.mode === 'PR_REVIEW',
+				{
+					contractRetry: parsed.data.pr_review_contract_retry === true,
+					waveStage: parsed.data.pr_review_wave_stage,
+					waveAttempt: parsed.data.pr_review_wave_attempt,
+				},
 			);
 			if (!gateState && parsed.data.mode?.startsWith('swarm-pr-review:')) {
 				gateState = await activatePrWorkflow(
@@ -1752,6 +1840,10 @@ export async function executeDispatchLanesAsync(
 					workflowLane: lane.workflow_lane,
 					reviewItemIds: lane.review_item_ids,
 					ownedWorkflowLanes: lane.owned_workflow_lanes,
+					// Issue #3340 AC1: thread the declared agent so the gate
+					// recorder can assert the critic-role rule itself instead
+					// of trusting this call site (#3310).
+					agent: lane.agent,
 				}));
 				const depthTier: PrReviewDepthTier = gateState.prReviewDepthTier ?? 'L';
 				if (parsed.data.mode === 'swarm-pr-review:base') {
@@ -1769,19 +1861,9 @@ export async function executeDispatchLanesAsync(
 						| 1
 						| 2
 						| undefined;
-					if (
-						contractRetry &&
-						(waveStage !== undefined || waveAttempt !== undefined)
-					) {
-						throw new Error(
-							'BLOCKED: PR_REVIEW contract retry is mutually exclusive with pr_review_wave_stage and pr_review_wave_attempt',
-						);
-					}
-					if ((waveStage === undefined) !== (waveAttempt === undefined)) {
-						throw new Error(
-							'BLOCKED: PR_REVIEW staged base dispatch requires both pr_review_wave_stage and pr_review_wave_attempt together',
-						);
-					}
+					// The contract-retry exclusion and the wave-stage/attempt pairing
+					// are state-free and are validated before activation in
+					// validatePrWorkflowLaneAdmission (#3341).
 					if (
 						waveStage !== undefined &&
 						waveAttempt !== undefined &&
@@ -1873,18 +1955,8 @@ export async function executeDispatchLanesAsync(
 							);
 						}
 					}
-					for (const lane of parsed.data.lanes) {
-						if (
-							resolveGeneratedAgentRole(
-								lane.agent,
-								swarmState.generatedAgentNames,
-							) !== 'explorer'
-						) {
-							throw new Error(
-								`BLOCKED: PR_REVIEW base lane "${lane.id}" must use the explorer role`,
-							);
-						}
-					}
+					// Lane admission (explorer-role) for base lanes is validated
+					// pre-activation in validatePrWorkflowLaneAdmission (#3341).
 					gateState = await enforcePrReviewBaseDimensions(
 						directory,
 						context.sessionID,
@@ -1912,18 +1984,8 @@ export async function executeDispatchLanesAsync(
 							`BLOCKED: PR_REVIEW head mismatch; expected "${gateState.prHeadSha}", received "${headSha}"`,
 						);
 					}
-					for (const lane of parsed.data.lanes) {
-						if (
-							resolveGeneratedAgentRole(
-								lane.agent,
-								swarmState.generatedAgentNames,
-							) !== 'explorer'
-						) {
-							throw new Error(
-								`BLOCKED: PR_REVIEW micro lane "${lane.id}" must use the explorer role`,
-							);
-						}
-					}
+					// Lane admission (explorer-role) for micro lanes is validated
+					// pre-activation in validatePrWorkflowLaneAdmission (#3341).
 					const effectiveTriggerEvaluation =
 						parsed.data.trigger_evaluation !== undefined
 							? parsed.data.trigger_evaluation
@@ -1968,30 +2030,13 @@ export async function executeDispatchLanesAsync(
 						: parsed.data.mode.endsWith(':reviewer')
 							? 'reviewer'
 							: 'critic';
-					if (parsed.data.lanes.some((lane) => lane.owned_workflow_lanes)) {
-						throw new Error(
-							`BLOCKED: PR_REVIEW ${phase} lanes must not declare owned_workflow_lanes; depth-tier consolidation applies only to base and micro discovery lanes`,
-						);
-					}
-					for (const lane of parsed.data.lanes) {
-						const role = resolveGeneratedAgentRole(
-							lane.agent,
-							swarmState.generatedAgentNames,
-						);
-						if (
-							(phase === 'council' && !role.startsWith('council_')) ||
-							(phase === 'reviewer' && role !== 'reviewer') ||
-							// #3310: PR critic lanes must use the one named critic agent.
-							// Other critic-family roles (critic_finding_validator, critic_sounding_board,
-							// critic_drift_verifier, ...) carry output contracts (strict JSON,
-							// dispositions) that cannot emit [CRITIC] rows.
-							(phase === 'critic' && role !== 'critic')
-						) {
-							throw new Error(
-								`BLOCKED: PR_REVIEW ${phase} lane "${lane.id}" uses invalid role "${role || lane.agent}"${phase === 'critic' ? ' — PR critic lanes must use the critic agent (critic_finding_validator and other critic-family roles cannot emit [CRITIC] rows)' : ''}`,
-							);
-						}
-					}
+					// Lane admission (owned_workflow_lanes, admitted roles,
+					// launchability, critic prompt provenance) ran pre-activation
+					// in validatePrWorkflowLaneAdmission ->
+					// assertPrReviewPhaseLaneAdmission (#3358 AC11 / #3341); the
+					// gate recorder re-asserts the declared-agent rule at the
+					// boundary that persists the batch (assertCriticLaneAgents,
+					// #3340/#3358).
 					await recordPrReviewValidationBatch(
 						directory,
 						context.sessionID,
@@ -2001,6 +2046,11 @@ export async function executeDispatchLanesAsync(
 							batchId,
 							prHeadSha: headSha,
 							expectedPresentationOrder: prReviewPresentationOrder,
+							// Issue #3340 AC1: resolve declared lane agents through
+							// the same registry this call site's admission loop
+							// uses, so the gate's critic-role assertion reaches the
+							// identical verdict for prefixed generated names.
+							generatedAgentNames: swarmState.generatedAgentNames,
 						},
 					);
 				} else {
@@ -2042,7 +2092,12 @@ export async function executeDispatchLanesAsync(
 				) {
 					if (
 						parsed.data.lanes.length !== 1 ||
-						parsed.data.max_concurrent !== 1
+						// Issue #3315 E7: an omitted max_concurrent defaults to the
+						// lane count (PR_REVIEW parity, #2835). lanes.length === 1 is
+						// separately enforced, so the omitted value is unambiguous;
+						// only an explicit non-1 value (or a multi-lane dispatch)
+						// rejects below.
+						(parsed.data.max_concurrent ?? parsed.data.lanes.length) !== 1
 					) {
 						throw new Error(
 							'BLOCKED: each ordered PR_FEEDBACK gate requires exactly one lane and max_concurrent: 1',
@@ -2064,12 +2119,14 @@ export async function executeDispatchLanesAsync(
 							: phase === 'closeout-critic'
 								? 'critic'
 								: 'reviewer';
-					if (
-						lane.workflow_lane !== phase ||
-						(expectedRole === 'critic'
-							? !role.startsWith('critic')
-							: role !== expectedRole)
-					) {
+					// Issue #3340 AC2 (recorded decision): closeout-critic requires
+					// the role to be EXACTLY `critic` — aligned with the PR_REVIEW
+					// critic rule (#3310). The pre-#3340 predicate accepted any
+					// role starting with `critic`, but the closeout gate settles on
+					// one [CLOSEOUT-CRITIC] verdict row per feedback item, the same
+					// row-emission contract the other critic-family agents cannot
+					// produce under their own output contracts.
+					if (lane.workflow_lane !== phase || role !== expectedRole) {
 						throw new Error(
 							`BLOCKED: PR_FEEDBACK ${phase} requires workflow_lane "${phase}" and role "${expectedRole}"`,
 						);
@@ -2175,6 +2232,34 @@ export async function executeDispatchLanesAsync(
 				throw error;
 			}
 		}
+		// Issue #3311 (ghost owners): a reviewer/critic dispatch that launched
+		// ZERO lanes must not leave its validation batch recorded — the declared
+		// owner lanes would have no delegation record and block N-of-M
+		// settlement forever (the silence constraint keeps that fail-closed, so
+		// the batch is rolled back instead). Unlike the base rollback above this
+		// does not rethrow: the structured lane_results below already report
+		// every rejected/failed lane, and replacing them with a raw error would
+		// hide which agents failed.
+		if (
+			(parsed.data.mode === 'swarm-pr-review:reviewer' ||
+				parsed.data.mode === 'swarm-pr-review:critic') &&
+			context.sessionID?.trim() &&
+			!laneResults.some((lane) => lane.status === 'pending')
+		) {
+			try {
+				await rollbackPrReviewValidationBatchIfUnlaunched(
+					directory,
+					context.sessionID,
+					batchId,
+				);
+			} catch (error) {
+				logger.log('pr-review validation-batch rollback failed', {
+					batchId,
+					sessionID: context.sessionID,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+		}
 		const failed = laneResults.filter((lane) => lane.status === 'failed');
 		const rejected = laneResults.filter((lane) => lane.status === 'rejected');
 		const pending = laneResults.filter((lane) => lane.status === 'pending');
@@ -2271,6 +2356,12 @@ export async function executeCollectLaneResults(
 	// wrapped promise would let one starved lane poison every other lane in the
 	// invocation. Each lane wraps the shared promise in its OWN deadline instead.
 	const revisionSnapshots = new Map<string, Promise<string | null>>();
+	// Issue #3312 (AC32): invocation-local supersession-scan bookkeeping. Each
+	// terminal stale/liveness reviewer/critic record gets at most ONE
+	// transcript-fetch attempt per collect invocation, so a `wait: true` poll
+	// loop never re-spends host calls on a record this invocation already
+	// scanned (a later invocation re-evaluates with fresh eyes).
+	const supersessionScannedCorrelationIds = new Set<string>();
 
 	const session = _internals.getSessionOps();
 	if (!session || typeof session.messages !== 'function') {
@@ -2346,6 +2437,10 @@ export async function executeCollectLaneResults(
 		// live: a pass where every record is already terminal (repeat collects
 		// served from the durable delivery cache) must spend ZERO host calls,
 		// so the batched status probe is skipped for it (wait-budget contract).
+		// Deliberate exception (issue #3312): the post-collect supersession
+		// scan below re-scans unscanned stale/liveness verdict lanes once per
+		// invocation even on an all-terminal pass — its transcript fetches are
+		// the one sanctioned host spend for an otherwise terminal batch.
 		if (
 			records.some(
 				(record) => record.status === 'pending' || record.status === 'running',
@@ -2370,6 +2465,21 @@ export async function executeCollectLaneResults(
 			settleFailureLogs,
 			revisionSnapshots,
 		);
+		// Issue #3312 (AC32): after the active-record pass, scan the terminal
+		// stale/liveness reviewer/critic records collectOnce filtered OUT — a
+		// lane the sweep killed as liveness-dead may have since produced a
+		// fully-valid transcript, and the validated rows are claimable evidence
+		// the run should not lose. Bounded by the same deadline and one attempt
+		// per record per invocation.
+		await supersedeStaleLivenessVerdictLanesFromCollect({
+			session,
+			directory,
+			records,
+			deadline,
+			hostTimeouts,
+			revisionSnapshots,
+			scannedCorrelationIds: supersessionScannedCorrelationIds,
+		});
 		await sweepStaleAsyncLaneRecords(
 			session,
 			directory,
@@ -3098,6 +3208,25 @@ async function collectOnce(
 		// other producer.
 		clearLaneDiagnostics(collectionResourceFailures, laneLabel);
 		const transcript = extractAssistantTranscript(messages.data);
+		if (
+			record.prReviewBudgetExhausted &&
+			(readiness === 'idle' || transcript.terminalAssistantProof)
+		) {
+			pendingSettlements.push(
+				settleCollectedLane({
+					directory,
+					record,
+					transcript,
+					deadline,
+					hostTimeouts,
+					revisionDigestBudgetMs: laneBudgets.revisionDigestBudgetMs,
+					receiptAppendFailureLogs,
+					revisionSnapshots,
+					settleFailureLogs,
+				}),
+			);
+			continue;
+		}
 		// Issue #2349: a lane whose backing session died AFTER promptAsync
 		// acceptance (provider quota/billing/auth exhaustion at first inference)
 		// records an assistant message carrying `info.error` and zero text parts.
@@ -3166,6 +3295,19 @@ async function collectOnce(
 						terminalErrorClass: terminalErrorClassFromLaneTerminalError(
 							transcript.terminalError,
 						),
+						// Issue #3311: a provider terminal that settles ERROR (never
+						// the aborted -> cancelled arm) is typed 'resource' so
+						// class-keyed consumers (base-dimension disclosure, N-of-M
+						// admission, micro dead-family) can represent it. Same rule
+						// and same scope as the #2615 launch-rejection stamp: every
+						// lane, not only PR modes — the circuit keys on status, and
+						// an aborted (cancelled) terminal must stay unclassed so a
+						// host abort can never launder into typed-dead evidence.
+						...(settledStatus === 'error'
+							? {
+									workflowLaneFailureClass: 'resource' as const,
+								}
+							: {}),
 					},
 				},
 				// No transcript observation: this branch requires !transcript.text,
@@ -3211,6 +3353,120 @@ async function collectOnce(
 			}
 			continue;
 		}
+		// Issue #3312/#3313 (AC28/AC29): a record that already carries the child's
+		// exactly-once structured result receipt holds durable settlement proof —
+		// it must not wait for a terminal transcript boundary (or the 30-minute
+		// stale sweep) when the fetched window has no assistant text. Settle
+		// straight from the receipt through the #2865 exact-coverage validation;
+		// an unbound receipt (foreign laneId) keeps the lane pending — never a
+		// receipt-launders settle. The settle is a DIRECT typed transition, NOT
+		// settleCollectedLane: this shape has no transcript text, so a receipt
+		// settle that declines falls back to the ordinary empty-text logic below
+		// instead. A lane WITH good transcript text skips this branch entirely
+		// and goes through settleCollectedLane, whose #2865 re-read branch
+		// re-adopts the receipt and credits it (feedback F1: the old
+		// `readiness === 'unknown'` preemption stole that ordinary credit path).
+		if (record.result?.prReviewResultReceipt && !transcript.text) {
+			const receiptSettled = await settleCollectedLaneFromReceipt({
+				directory,
+				record,
+				deadline,
+				hostTimeouts,
+				revisionSnapshots,
+				revisionDigestBudgetMs: laneBudgets.revisionDigestBudgetMs,
+				settleFailureLogs,
+			});
+			// Feedback F1: only an ACCEPTED receipt settle that actually landed is
+			// terminal for this pass. A rejected/absent validation (unbound or
+			// non-discovery mode) or a settle that did not land falls through to
+			// the ordinary idle/empty-text logic below — a declined settle must no
+			// longer suppress the ordinary path.
+			if (receiptSettled) continue;
+		}
+		// Issue #3313 (AC30/AC31): a lane whose window holds NO assistant text is
+		// provably finished when the host affirmatively reports idle, or the
+		// transcript itself carries terminal assistant proof (finite completedAt,
+		// terminal finish, no error). Settle it NOW with the typed 'liveness'
+		// class — the same class the idle stale sweep arm assigns — instead of
+		// wedging it open until the stale horizon. The window must be non-empty:
+		// a lane session always contains its dispatch prompt, so a zero-message
+		// fetch is an observer artifact that says nothing about the child (#2381
+		// discipline — an authorized cancel must still be able to claim the open
+		// lane). Busy readiness never reaches the sequential loop (the fetch
+		// stage skips it), and unknown without proof keeps the pending skip
+		// below: a busy session may still speak and an unobservable one is not
+		// proven dead.
+		if (
+			!transcript.text &&
+			!transcript.terminalError &&
+			messages.data.length > 0 &&
+			(readiness === 'idle' || transcript.terminalAssistantProof === true)
+		) {
+			// Feedback F15: re-read the record fresh before the liveness settle.
+			// The fetch stage ran concurrently with other writers, so a
+			// structured result receipt may have landed on the durable record
+			// AFTER the in-memory `record` was loaded — settling this lane as
+			// textless-liveness now would erase a concurrent receipt credit the
+			// next pass would otherwise take. If the fresh record carries the
+			// receipt, skip: the next pass settles from it (or the fall-through
+			// from a declined receipt settle reaches this same guard).
+			const freshRecordRead = findByCorrelationIdDetailed(
+				directory,
+				record.correlationId,
+			);
+			const freshRecord =
+				freshRecordRead.status === 'ok' ? freshRecordRead.value : null;
+			if (freshRecordRead.status !== 'ok' || !freshRecord) {
+				// Feedback F15 edge: an UNCERTAIN store read must not be read as
+				// absence (#2511 discipline) — the transition cannot be proven
+				// safe, so defer the settle to the next pass rather than risk
+				// erasing a concurrent receipt credit.
+				continue;
+			}
+			if (freshRecord.result?.prReviewResultReceipt) continue;
+			const silentLaneReason =
+				readiness === 'idle'
+					? `lane ${laneLabel} idle with no assistant output: settled as liveness without waiting the stale horizon`
+					: `lane ${laneLabel} ended with a terminal but textless assistant message: settled as liveness`;
+			const silentLivenessResult: BackgroundDelegationResult = record.result
+				? {
+						...record.result,
+						workflowLaneFailureClass: 'liveness',
+					}
+				: {
+						error: silentLaneReason,
+						chars: silentLaneReason.length,
+						truncated: false,
+						digest: digestText(silentLaneReason),
+						workflowLaneFailureClass: 'liveness',
+					};
+			const idleTransitioned = await appendDelegationTransition(
+				directory,
+				record.correlationId,
+				{
+					status: 'stale',
+					result: silentLivenessResult,
+					expectedCurrentStatuses: ['pending', 'running'],
+					terminalResult: buildTypedDelegationTerminal(
+						record,
+						'stale',
+						silentLivenessResult,
+						_internals.now(),
+					),
+				},
+			);
+			if (!idleTransitioned) {
+				// Feedback F8: a refused/uncertain transition must not vanish
+				// silently — record the settle failure so the operator sees why
+				// the lane is still open (mirrors the terminal-error arm).
+				addLaneDiagnostic(
+					settleFailureLogs,
+					laneLabel,
+					`idle liveness settle write did not land for lane "${laneLabel}"; lane left open for retry`,
+				);
+			}
+			continue;
+		}
 		if (!transcript.text) continue;
 		if (readiness === 'unknown' && !transcript.terminalAssistantProof) {
 			continue;
@@ -3233,6 +3489,178 @@ async function collectOnce(
 		);
 	}
 	await Promise.all(pendingSettlements);
+}
+
+/**
+ * Issue #3312 (AC32): the narrow record shape the post-collect supersession
+ * scan targets — terminal `stale`, reviewer/critic verdict mode, typed
+ * `liveness` failure class. Discovery modes, operator cancellations, and any
+ * other class/status are invisible to the scan by construction (AC34/AC35).
+ */
+function isSupersedeableStaleLivenessVerdictRecord(
+	record: BackgroundDelegationRecord,
+): boolean {
+	return (
+		record.status === 'stale' &&
+		(record.mode === 'swarm-pr-review:reviewer' ||
+			record.mode === 'swarm-pr-review:critic') &&
+		(record.result?.workflowLaneFailureClass === 'liveness' ||
+			record.terminalResult?.result.workflowLaneFailureClass === 'liveness')
+	);
+}
+
+/**
+ * Issue #3312 (AC32-AC35, AC44): post-collect supersession scan for terminal
+ * stale/liveness reviewer/critic lanes.
+ *
+ * `collectOnce` only processes pending/running records, so a lane the liveness
+ * sweep killed stays dead even when its host session later finished and the
+ * transcript holds fully-valid verdict rows. For each such record this scan
+ * fetches the session transcript (same session-ops path collectOnce uses; skip
+ * on fetch failure or budget exhaustion), re-validates the rows for the lane's
+ * assigned items through the SAME transport-recovery chain verdict lanes
+ * settle under (the legacy-transcript adapter against the declared batch), and
+ * on a passing validation asks the delegation store's narrow supersession
+ * transition to flip the record to `completed` with the validated rows. Every
+ * refusal — invalid rows, discovery mode, operator cancellation, a persisted
+ * verdict-settlement receipt citing the record — is silent and leaves the
+ * durable record untouched. Bounded: one transcript-fetch attempt per record
+ * per invocation, all host calls under the collect deadline.
+ */
+async function supersedeStaleLivenessVerdictLanesFromCollect(args: {
+	session: SessionOps;
+	directory: string;
+	records: readonly BackgroundDelegationRecord[];
+	deadline: number;
+	hostTimeouts: Set<string>;
+	revisionSnapshots: Map<string, Promise<string | null>>;
+	scannedCorrelationIds: Set<string>;
+}): Promise<void> {
+	if (typeof args.session.messages !== 'function') return;
+	const candidates = args.records
+		.filter(isSupersedeableStaleLivenessVerdictRecord)
+		.filter((record) => !args.scannedCorrelationIds.has(record.correlationId));
+	if (candidates.length === 0) return;
+	const budgets = reserveCollectionLaneCallBudgets(
+		args.deadline,
+		candidates.length,
+		typeof args.session.status === 'function',
+		candidates.some((record) => Boolean(record.workspace?.prHeadSha)),
+	);
+	for (const record of candidates) {
+		if (args.deadline - _internals.now() <= 0) return;
+		// Feedback F11: mark the record scanned only AFTER the deadline check —
+		// a record skipped for budget exhaustion must stay unscanned so a LATER
+		// collect invocation retries it, instead of being silently retired.
+		args.scannedCorrelationIds.add(record.correlationId);
+		const laneLabel = record.laneId ?? record.correlationId;
+		let messages: Awaited<ReturnType<NonNullable<SessionOps['messages']>>>;
+		try {
+			messages = await withCollectionDeadline(
+				() =>
+					args.session.messages!({
+						path: { id: record.subagentSessionId },
+						query: {
+							directory: args.directory,
+							limit: ASYNC_MESSAGE_FETCH_LIMIT,
+						},
+					}),
+				args.deadline,
+				`session.messages for lane "${laneLabel}" (stale-liveness supersession scan)`,
+				args.hostTimeouts,
+				budgets.messagesBudgetMs,
+			);
+		} catch {
+			// Fetch failure or budget timeout: skip silently, a later collect
+			// invocation retries this record.
+			continue;
+		}
+		if (!messages.data) continue;
+		const transcript = extractAssistantTranscript(messages.data);
+		if (!transcript.text) continue;
+		const digestResolution = await resolveCollectLaneRevisionDigest({
+			directory: args.directory,
+			prHeadSha: record.workspace?.prHeadSha,
+			laneLabel,
+			deadline: args.deadline,
+			hostTimeouts: args.hostTimeouts,
+			revisionSnapshots: args.revisionSnapshots,
+			budgetMs: budgets.revisionDigestBudgetMs,
+		});
+		if (digestResolution.status === 'unavailable') continue;
+		const output = prepareLaneOutput({
+			directory: args.directory,
+			batchId: record.batchId ?? record.callID,
+			laneId: record.laneId ?? record.correlationId,
+			agent: record.swarmPrefixedAgent,
+			role: record.normalizedAgent,
+			sessionId: record.subagentSessionId,
+			parentSessionId: record.parentSessionId,
+			mode: record.mode,
+			workflowLane: record.workflowLane,
+			prHeadSha: record.workspace?.prHeadSha ?? undefined,
+			gitHead: record.workspace?.gitHead ?? undefined,
+			revisionDigest: digestResolution.digest,
+			scope: record.workspace?.scope ?? undefined,
+			source: 'collect_lane_results',
+			text: transcript.text,
+			messageCount: transcript.messageCount,
+			transcriptIncomplete: transcript.transcriptIncomplete,
+		});
+		const validatedResult: BackgroundDelegationResult = {
+			text: output.output,
+			chars: output.output_chars,
+			truncated: output.output_truncated,
+			digest: output.output_digest,
+			...(output.output_ref ? { outputRef: output.output_ref } : {}),
+			outputPreviewChars: output.output.length,
+			...(output.output_degraded !== undefined
+				? { outputDegraded: output.output_degraded }
+				: {}),
+			...(output.output_artifact_error
+				? { outputArtifactError: output.output_artifact_error }
+				: {}),
+			...(output.transcript_incomplete !== undefined
+				? { transcriptIncomplete: output.transcript_incomplete }
+				: {}),
+			messageCount: transcript.messageCount,
+		};
+		// The adapter gate (AC33): the supersession is admitted only when the
+		// later transcript's rows are genuinely valid for the lane's assigned
+		// items — the same verdict validation chain the ordinary settle runs.
+		const artifact = output.output_ref
+			? (readLaneOutput(args.directory, output.output_ref)?.artifact ?? null)
+			: null;
+		let validation: Awaited<
+			ReturnType<typeof validatePrWorkflowTransportRecovery>
+		>;
+		try {
+			validation = await withCollectionDeadline(
+				() =>
+					_internals.validatePrWorkflowTransportRecovery({
+						directory: args.directory,
+						record,
+						result: validatedResult,
+						artifact,
+						revisionDigest: digestResolution.digest ?? '',
+					}),
+				args.deadline,
+				`transport recovery validation for lane "${laneLabel}" (stale-liveness supersession scan)`,
+				args.hostTimeouts,
+			);
+		} catch {
+			continue;
+		}
+		if (!validation.ok) continue;
+		try {
+			await supersedeStaleLivenessVerdictLane(args.directory, {
+				correlationId: record.correlationId,
+				validatedResult,
+			});
+		} catch {
+			// Store unavailable: skip silently — a later invocation retries.
+		}
+	}
 }
 
 /**
@@ -3417,6 +3845,368 @@ export function resolveCollectExpectedWorkflowIdentity(
 	return { workflowInstanceId, workflowRevision, baseSha };
 }
 
+/**
+ * Issue #3312 (AC28/U7): bounded revision-digest resolution shared by the
+ * collect-time receipt settle and the stale-liveness supersession scan. Same
+ * memoization/eviction contract as `settleCollectedLane`'s digest block — one
+ * RAW promise per (project root, PR head) so a starved lane degrades only
+ * itself, rejected snapshots evicted so a transient `git` failure is never
+ * terminal for the invocation. An 'unavailable' outcome merely defers the
+ * caller to a later pass: nothing is ever settled from an unresolved digest.
+ */
+async function resolveCollectLaneRevisionDigest(args: {
+	directory: string;
+	prHeadSha: string | null | undefined;
+	laneLabel: string;
+	deadline: number;
+	hostTimeouts: Set<string>;
+	revisionSnapshots: Map<string, Promise<string | null>>;
+	budgetMs: number;
+}): Promise<
+	{ status: 'resolved'; digest: string | undefined } | { status: 'unavailable' }
+> {
+	if (!args.prHeadSha) return { status: 'resolved', digest: undefined };
+	try {
+		const key = revisionSnapshotKey(args.directory, args.prHeadSha);
+		let snapshot = args.revisionSnapshots.get(key);
+		if (snapshot === undefined) {
+			snapshot = _internals.resolvePrWorkflowRevisionDigestAsync(
+				args.directory,
+				args.prHeadSha,
+			);
+			const pending = snapshot;
+			pending.catch(() => {
+				if (args.revisionSnapshots.get(key) === pending) {
+					args.revisionSnapshots.delete(key);
+				}
+			});
+			args.revisionSnapshots.set(key, pending);
+		}
+		const shared = snapshot;
+		const digest =
+			(await withCollectionDeadline(
+				() => shared,
+				args.deadline,
+				`revision digest for lane "${args.laneLabel}"`,
+				args.hostTimeouts,
+				args.budgetMs,
+			)) ?? undefined;
+		return { status: 'resolved', digest };
+	} catch {
+		return { status: 'unavailable' };
+	}
+}
+
+/**
+ * Issue #3312/#3313 (AC28/AC29): settle a receipt-bearing discovery lane
+ * DIRECTLY from its exactly-once structured receipt, inside `collectOnce`.
+ *
+ * Runs the #2865 exact-coverage validation with the expected identity triple
+ * from `resolveCollectExpectedWorkflowIdentity` (without it the validator
+ * rejects every receipt — the #2585 trap). Only an ACCEPTED validation that
+ * lands its transition is terminal for this record's pass (returns true); a
+ * validator 'absent' status (non-base/micro mode), a validation failure, a
+ * degraded artifact store, or a transition that does not land returns false so
+ * `collectOnce` falls through to its ordinary idle/empty-text logic (feedback
+ * F1/F8 — a declined settle must not suppress the ordinary path, and a settle
+ * write that does not land must be diagnosable, not silent). An accepted
+ * receipt stores its serialized form through the lane-output store and settles
+ * with a CREDITABLE result — text/chars/truncated/digest/outputRef mirroring
+ * `prepareLaneOutput`'s field names — so `recordsPassingBatchIntegrity`
+ * accepts the record and the structured-receipt credit branch can credit the
+ * dimension instead of wedging the lane as an uncreditable contract error.
+ */
+async function settleCollectedLaneFromReceipt(args: {
+	directory: string;
+	record: BackgroundDelegationRecord;
+	deadline: number;
+	hostTimeouts: Set<string>;
+	revisionSnapshots: Map<string, Promise<string | null>>;
+	revisionDigestBudgetMs: number;
+	settleFailureLogs: LaneDiagnostics;
+}): Promise<boolean> {
+	const { directory, record } = args;
+	const laneLabel = record.laneId ?? record.correlationId;
+	if (
+		record.mode !== 'swarm-pr-review:base' &&
+		record.mode !== 'swarm-pr-review:micro' &&
+		record.mode !== 'swarm-pr-review:council'
+	) {
+		return false;
+	}
+	const digestResolution = await resolveCollectLaneRevisionDigest({
+		directory,
+		prHeadSha: record.workspace?.prHeadSha,
+		laneLabel,
+		deadline: args.deadline,
+		hostTimeouts: args.hostTimeouts,
+		revisionSnapshots: args.revisionSnapshots,
+		budgetMs: args.revisionDigestBudgetMs,
+	});
+	if (digestResolution.status === 'unavailable') return false;
+	// Fail-open identity read, mirroring settleCollectedLane: an unreadable gate
+	// leaves the triple undefined and the validator keeps its explicit
+	// missing-identity rejection instead of guessing.
+	let collectExpectedIdentity:
+		| ReturnType<typeof resolveCollectExpectedWorkflowIdentity>
+		| undefined;
+	if (record.parentSessionId?.trim()) {
+		try {
+			const parentState =
+				await readPrWorkflowGateStateFromDisk<PrReviewCollectParentGateState>(
+					directory,
+					record.parentSessionId.trim(),
+				);
+			collectExpectedIdentity = resolveCollectExpectedWorkflowIdentity(
+				record,
+				parentState,
+			);
+		} catch {
+			collectExpectedIdentity = undefined;
+		}
+	}
+	const receiptExpected: Parameters<
+		typeof validatePrReviewDiscoveryLaneCompletion
+	>[0]['expected'] = {
+		mode: record.mode,
+		workflowLane: record.workflowLane ?? '',
+		ownedWorkflowLanes: record.ownedWorkflowLanes,
+		prHeadSha: record.workspace?.prHeadSha ?? '',
+		gitHead: record.workspace?.gitHead ?? '',
+		revisionDigest: digestResolution.digest ?? '',
+		reviewScope: record.workspace?.scope ?? undefined,
+		...(collectExpectedIdentity ?? {}),
+	};
+	const receiptProspectiveResult: BackgroundDelegationResult = {
+		// Base fallback mirrors the publish path's ordinary result shape so the
+		// required chars/truncated/digest fields exist even for a bare record.
+		...(record.result ?? {
+			chars: 0,
+			truncated: false,
+			digest: digestText(''),
+		}),
+	};
+	const structuredCoverage = _internals.validateExactStructuredReceiptCoverage({
+		record,
+		result: receiptProspectiveResult,
+		artifact: null,
+		expected: receiptExpected,
+	});
+	if (structuredCoverage.status !== 'accepted') return false;
+	// Feedback F1: an accepted receipt must settle CREDITABLE — serialize the
+	// validated receipt and store it through the lane-output store exactly like
+	// persistLaneRejectionDetail does (same identity fields, source
+	// 'collect_lane_results'), then build the settled result mirroring the
+	// ordinary prepareLaneOutput result field names (text preview / chars /
+	// truncated / digest / outputRef) so the analyzeLaneRecordResultIntegrity
+	// chain (chars > 0, digest, outputRef) accepts it and the gate's
+	// structured-receipt credit branch credits the dimension.
+	const receipt = structuredCoverage.receipt;
+	const receiptText = JSON.stringify(receipt, null, 2);
+	const stored = storeLaneOutput(directory, {
+		batchId: record.batchId ?? record.callID,
+		laneId: record.laneId ?? record.correlationId,
+		agent: record.swarmPrefixedAgent,
+		role: record.normalizedAgent,
+		sessionId: record.subagentSessionId,
+		parentSessionId: record.parentSessionId,
+		mode: record.mode,
+		workflowLane: record.workflowLane,
+		prHeadSha: record.workspace?.prHeadSha ?? undefined,
+		gitHead: record.workspace?.gitHead ?? undefined,
+		revisionDigest: digestResolution.digest ?? undefined,
+		scope: record.workspace?.scope ?? undefined,
+		source: 'collect_lane_results',
+		text: receiptText,
+	});
+	if (!stored.ref || stored.degraded) {
+		// Fail-closed: without a retrievable artifact the result would not be
+		// creditable. Keep the lane pending for a later pass and say why.
+		addLaneDiagnostic(
+			args.settleFailureLogs,
+			laneLabel,
+			`receipt settle deferred for lane "${laneLabel}"; lane-output store degraded (${stored.error ?? 'no artifact ref'}); lane left open for retry`,
+		);
+		return false;
+	}
+	const preview = buildLaneOutputPreview({
+		text: receiptText,
+		ref: stored.ref,
+		degraded: stored.degraded,
+		maxChars: MAX_LANE_OUTPUT_CHARS,
+	});
+	const settledResult: BackgroundDelegationResult = {
+		text: preview.output,
+		chars: stored.chars,
+		truncated: preview.output_truncated,
+		digest: stored.digest,
+		outputRef: stored.ref,
+		prReviewResultReceipt: receipt,
+	};
+	const settled = await appendDelegationTransition(
+		directory,
+		record.correlationId,
+		{
+			status: 'completed',
+			result: settledResult,
+			expectedCurrentStatuses: ['pending', 'running'],
+			terminalResult: buildTypedDelegationTerminal(
+				record,
+				'completed',
+				settledResult,
+				_internals.now(),
+			),
+		},
+	);
+	if (!settled) {
+		// Feedback F8: a null return means the typed transition did not land
+		// (record absent, status raced past the expected set, or the store
+		// rejected the write). Dropping it silently would leave the lane pending
+		// with no trace of why the receipt settle never took.
+		addLaneDiagnostic(
+			args.settleFailureLogs,
+			laneLabel,
+			`receipt settle write did not land for lane "${laneLabel}"; lane left open`,
+		);
+		return false;
+	}
+	return true;
+}
+
+/**
+ * Issue #3313 (AC36): the offending row id for a rejection summary.
+ *
+ * The verdict row contract renders its failure `actual` as a JSON envelope
+ * whose `unexpectedIds` / `invalidOrMissingIds` members name the exact rows
+ * that broke the contract; the discovery row diagnostics name their offending
+ * row by line number instead. Both live inside the bounded failure strings —
+ * extract, never guess, and degrade to an explicit sentinel when neither shape
+ * is recoverable (including a bounded envelope truncated past its members).
+ */
+const LANE_REJECTION_ROW_UNIDENTIFIED = '(unidentified)';
+
+function extractLaneRejectionRowId(failure: {
+	predicate: string;
+	expected: string;
+	actual: string;
+}): string {
+	try {
+		const parsed = JSON.parse(failure.actual) as {
+			unexpectedIds?: unknown;
+			invalidOrMissingIds?: unknown;
+		};
+		const candidate = [
+			...(Array.isArray(parsed.unexpectedIds) ? parsed.unexpectedIds : []),
+			...(Array.isArray(parsed.invalidOrMissingIds)
+				? parsed.invalidOrMissingIds
+				: []),
+		].find((id) => typeof id === 'string' && id.trim().length > 0);
+		if (typeof candidate === 'string') return candidate;
+	} catch {
+		// Not a parseable JSON envelope: fall through to the raw-string scan.
+	}
+	// Feedback F5: the failure `actual` is BOUNDED, so a wide envelope can be
+	// truncated past the point JSON.parse recovers it. The first offending id
+	// is still recoverable from the RAW string whenever the truncation cut it
+	// inside one of the id arrays — regex-scan the original (possibly
+	// truncated) text before degrading to the sentinel.
+	// Priority mirrors the JSON.parse branch (unexpectedIds first, then
+	// invalidOrMissingIds); envelope key order would otherwise surface
+	// invalidOrMissingIds first.
+	const strayId = /"unexpectedIds":\s*\[\s*"([^"]+)"/.exec(failure.actual);
+	if (strayId) return strayId[1]!;
+	const missingId = /"invalidOrMissingIds":\s*\[\s*"([^"]+)"/.exec(
+		failure.actual,
+	);
+	if (missingId) return missingId[1]!;
+	const discoveryRow = /\brow (\d+)\b/.exec(failure.actual);
+	if (discoveryRow) return discoveryRow[1]!;
+	return LANE_REJECTION_ROW_UNIDENTIFIED;
+}
+
+/**
+ * Issue #3313 (AC37): persist the COMPLETE untruncated rejection detail as a
+ * SECOND lane-output artifact for this exact lane — same store, same ref
+ * format, same `retrieve_lane_output` read path as the lane transcript — so
+ * the 1_024-char error slice never has to carry the whole diagnosis.
+ */
+function persistLaneRejectionDetail(
+	directory: string,
+	record: BackgroundDelegationRecord,
+	fullDetail: string,
+): string | undefined {
+	const stored = storeLaneOutput(directory, {
+		batchId: record.batchId ?? record.callID,
+		laneId: record.laneId ?? record.correlationId,
+		agent: record.swarmPrefixedAgent,
+		role: record.normalizedAgent,
+		sessionId: record.subagentSessionId,
+		parentSessionId: record.parentSessionId,
+		mode: record.mode,
+		workflowLane: record.workflowLane,
+		prHeadSha: record.workspace?.prHeadSha ?? undefined,
+		gitHead: record.workspace?.gitHead ?? undefined,
+		scope: record.workspace?.scope ?? undefined,
+		source: 'collect_lane_results',
+		text: fullDetail,
+	});
+	return stored.ref;
+}
+
+/**
+ * Issue #3313 (AC36/AC37): compose a lane-contract rejection error and its
+ * durable detail artifact.
+ *
+ * The summary leads with the error code, the offending row id, and the
+ * violated predicate — with maximal schema-legal batch/lane ids the old
+ * header-first composition exhausted the first 200 characters before the
+ * discriminating content appeared. The complete detail (summary header, lane
+ * identity, the bounded expected/actual render, and any site tail) is stored
+ * via {@link persistLaneRejectionDetail} and its ref is cited in the sliced
+ * error; the bounded rendered detail rides inline after the citation so
+ * short-form consumers keep the predicate evidence, exactly as before.
+ */
+function composeLaneRejectionError(args: {
+	directory: string;
+	record: BackgroundDelegationRecord;
+	errorCode: string;
+	/** The validation failure; omit when the site has none (thrown-cause catch). */
+	failure?: PrReviewLaneValidationFailure;
+	/** Bounded inline detail for sites without a failure object (the thrown cause). */
+	inlineDetail?: string;
+	/** Site tail appended to both the artifact detail and the inline slice. */
+	detailTail?: string;
+}): string {
+	// #3710: the inline detail is raw error text (formatError output); the
+	// persisted lane-rejection artifact and the returned terminal error both
+	// derive from it, so redact once at entry — downstream of every classifier
+	// and discriminator read of the formatted string at the callers.
+	const inlineDetail = args.inlineDetail
+		? sanitizeFailureEvidenceDisplay(args.inlineDetail)
+		: undefined;
+	const rowId = args.failure
+		? extractLaneRejectionRowId(args.failure)
+		: LANE_REJECTION_ROW_UNIDENTIFIED;
+	const predicate = args.failure
+		? args.failure.predicate
+		: LANE_REJECTION_ROW_UNIDENTIFIED;
+	const header = `${args.errorCode}: row=${rowId} predicate=${predicate}`;
+	const identity = `; batch=${args.record.batchId ?? '(missing)'} lane=${args.record.laneId ?? '(missing)'} workflow_lane=${args.record.workflowLane ?? '(missing)'}`;
+	const renderedDetail = args.failure
+		? formatPrReviewLaneValidationFailure(args.failure)
+		: (inlineDetail ?? '');
+	const tail = args.detailTail ? `; ${args.detailTail}` : '';
+	const artifactRef = persistLaneRejectionDetail(
+		args.directory,
+		args.record,
+		`${header}${identity}\n${renderedDetail}${inlineDetail ? `\n${inlineDetail}` : ''}${tail}`,
+	);
+	return `${header}${identity}; detail in artifact ${artifactRef ?? '(unavailable)'}; ${renderedDetail}${tail}`.slice(
+		0,
+		1_024,
+	);
+}
+
 async function settleCollectedLane(args: {
 	directory: string;
 	record: BackgroundDelegationRecord;
@@ -3441,7 +4231,7 @@ async function settleCollectedLane(args: {
 	const laneLabel = record.laneId ?? record.correlationId;
 	let collectedRevisionDigest: string | undefined;
 	const prHeadSha = record.workspace?.prHeadSha;
-	if (prHeadSha) {
+	if (prHeadSha && (transcript.text || !record.prReviewBudgetExhausted)) {
 		try {
 			// Issue #2381: resolve at most once per (project root, PR head) for this
 			// invocation. The map holds the RAW promise; the per-lane deadline wraps
@@ -3543,7 +4333,9 @@ async function settleCollectedLane(args: {
 		chars: output.output_chars,
 		truncated: output.output_truncated,
 		digest: output.output_digest,
-		...(output.output_ref ? { outputRef: output.output_ref } : {}),
+		...(transcript.text && output.output_ref
+			? { outputRef: output.output_ref }
+			: {}),
 		outputPreviewChars: output.output.length,
 		...(output.output_degraded !== undefined
 			? { outputDegraded: output.output_degraded }
@@ -3560,7 +4352,11 @@ async function settleCollectedLane(args: {
 			: {}),
 	};
 	let terminalStatus: 'completed' | 'error' = 'completed';
-	if (
+	if (record.prReviewBudgetExhausted) {
+		terminalStatus = 'error';
+		prospectiveResult.error = PR_REVIEW_BUDGET_EXHAUSTED;
+		prospectiveResult.workflowLaneFailureClass = 'contract';
+	} else if (
 		record.mode === 'swarm-pr-review:base' ||
 		record.mode === 'swarm-pr-review:micro' ||
 		record.mode === 'swarm-pr-review:council'
@@ -3661,10 +4457,17 @@ async function settleCollectedLane(args: {
 			prospectiveResult.workflowLaneFailureClass = 'contract';
 			const family =
 				record.mode === 'swarm-pr-review:base' ? 'base_explorer' : 'micro_lane';
-			prospectiveResult.error =
-				`PR_REVIEW_DISCOVERY_CONTRACT_INVALID: batch=${record.batchId ?? '(missing)'} lane=${record.laneId ?? '(missing)'} workflow_lane=${record.workflowLane ?? '(missing)'} ` +
-				`${formatPrReviewLaneValidationFailure(validation.failure)}; expected candidate row: ${CANDIDATE_HEADERS[family]}; expected clean row: ${CLEAN_TEMPLATES[family]}`;
-			prospectiveResult.error = prospectiveResult.error.slice(0, 1_024);
+			// Issue #3313 (AC36/AC37): summary-first composition — the offending
+			// discovery row id and violated predicate lead the sliced error, and
+			// the complete detail (including the expected row templates) lives in
+			// the lane's durable rejection artifact.
+			prospectiveResult.error = composeLaneRejectionError({
+				directory,
+				record,
+				errorCode: 'PR_REVIEW_DISCOVERY_CONTRACT_INVALID',
+				failure: validation.failure,
+				detailTail: `expected candidate row: ${CANDIDATE_HEADERS[family]}; expected clean row: ${CLEAN_TEMPLATES[family]}`,
+			});
 		}
 	}
 	const isPrReviewVerdictLane =
@@ -3712,10 +4515,31 @@ async function settleCollectedLane(args: {
 				return;
 			}
 			terminalStatus = 'error';
-			prospectiveResult.error =
-				`PR_WORKFLOW_CONTRACT_INVALID: batch=${record.batchId ?? '(missing)'} lane=${record.laneId ?? '(missing)'} workflow_lane=${record.workflowLane ?? '(missing)'} ` +
-				formatError(error);
-			prospectiveResult.error = prospectiveResult.error.slice(0, 1_024);
+			// Issue #3313 (AC36/AC37): summary-first composition; the thrown cause
+			// (the site's discriminating content — no failure object exists for a
+			// crashed validation) rides inline after the artifact citation.
+			prospectiveResult.error = composeLaneRejectionError({
+				directory,
+				record,
+				errorCode: 'PR_WORKFLOW_CONTRACT_INVALID',
+				inlineDetail: formatError(error),
+			});
+			// Issue #3311: a verdict lane whose transport-validation step threw
+			// carries its own typed class so widened N-of-M admission can settle
+			// it once the retry budget is exhausted. PR-feedback modes sharing
+			// this catch keep their classless terminal (AC3 floor).
+			// Issue #3397 (RC-03): a lane the HOST aborted must stay unclassed
+			// even when it produced partial text — an aborted transcript's
+			// contract failure cannot authenticate as typed-dead evidence
+			// (AC26: aborted terminals never typed; classless records block
+			// N-of-M admission by design, verdict-settlement.ts rejects
+			// classless owners before the budget arm).
+			if (
+				isPrReviewVerdictLane &&
+				transcript.terminalError?.kind !== 'aborted'
+			) {
+				prospectiveResult.workflowLaneFailureClass = 'verdict_contract';
+			}
 			await settleDelegationTerminal(
 				directory,
 				record,
@@ -3774,8 +4598,37 @@ async function settleCollectedLane(args: {
 				validation.failure?.predicate === 'critic.verdict_rows'
 					? 'PR_REVIEW_VERDICT_CONTRACT_INVALID'
 					: 'PR_WORKFLOW_CONTRACT_INVALID';
-			prospectiveResult.error = `${errorCode}: batch=${record.batchId ?? '(missing)'} lane=${record.laneId ?? '(missing)'} workflow_lane=${record.workflowLane ?? '(missing)'} ${validation.reason}`;
-			prospectiveResult.error = prospectiveResult.error.slice(0, 1_024);
+			// Issue #3313 (AC36/AC37): summary-first composition — the offending
+			// verdict row id and violated predicate lead the sliced error (with
+			// maximal schema-legal ids the old header-first order exhausted the
+			// first 200 chars before the row id appeared), and the complete
+			// expected/actual render lives in the lane's rejection artifact.
+			prospectiveResult.error = composeLaneRejectionError({
+				directory,
+				record,
+				errorCode,
+				failure: validation.failure,
+				...(validation.failure ? {} : { inlineDetail: validation.reason }),
+			});
+			// Issue #3311: EVERY failed validation of a verdict lane (whatever the
+			// predicate — verdict-row contract, transcript_incomplete, or any
+			// other) carries the typed class, so a persistently failing
+			// reviewer/critic lane can settle through N-of-M admission once the
+			// retry budget is exhausted instead of wedging the run. Scoped to
+			// swarm-pr-review:reviewer|critic only; PR-feedback modes keep their
+			// classless terminal (AC3 floor).
+			// Issue #3397 (RC-03): EXCEPT a lane the host aborted after partial
+			// text — the abort branch above requires !transcript.text, so a
+			// partial-text abort reaches this stamp, and an aborted transcript's
+			// failure is not authentic typed-dead evidence (AC26). Unclassed
+			// keeps blocking N-of-M admission by design (verdict-settlement.ts
+			// rejects classless owners before the budget arm).
+			if (
+				isPrReviewVerdictLane &&
+				transcript.terminalError?.kind !== 'aborted'
+			) {
+				prospectiveResult.workflowLaneFailureClass = 'verdict_contract';
+			}
 		} else if (validation.recoveries?.length) {
 			const workflowLane = record.workflowLane?.trim();
 			if (workflowLane) {
@@ -3831,11 +4684,7 @@ function laneConfiguredModel(
 	>,
 ): string | undefined {
 	const prefixed = record.swarmPrefixedAgent;
-	const baseRole = stripKnownSwarmPrefix(prefixed);
-	const swarmID =
-		baseRole !== prefixed
-			? prefixed.slice(0, prefixed.length - baseRole.length - 1)
-			: undefined;
+	const { role: baseRole, swarmID } = deriveSwarmIdentity(prefixed);
 	return getSwarmAgents(swarmID)?.[baseRole]?.model;
 }
 
@@ -3954,11 +4803,7 @@ async function startAsyncLanePrompt(args: {
 		}
 	}
 	const promptController = new AbortController();
-	const baseRole = stripKnownSwarmPrefix(args.lane.agent);
-	const swarmID =
-		baseRole !== args.lane.agent
-			? args.lane.agent.slice(0, args.lane.agent.length - baseRole.length - 1)
-			: undefined;
+	const { role: baseRole, swarmID } = deriveSwarmIdentity(args.lane.agent);
 	const swarmAgents = getSwarmAgents(swarmID);
 	// Issue #2614 defense-in-depth: when the generated-name registry proves the
 	// lane agent is NOT registered (non-empty registry, no member match) and the
@@ -3975,11 +4820,21 @@ async function startAsyncLanePrompt(args: {
 		!registry.some(
 			(name) => name.toLowerCase() === args.lane.agent.toLowerCase(),
 		);
+	// Issue #3617 review F-05: a PREFIXED spelling whose swarm id no
+	// longer resolves (deriveSwarmIdentity fail-closed, e.g. the
+	// hyphen form 'acme-prod-coder') must refuse even when the
+	// DEFAULT swarm has a matching entry — base refused it because
+	// its derived swarm id did not exist, and launching against the
+	// default-swarm entry would run an agent name the host does not
+	// have. Bare roles (baseRole === raw) keep the legacy path.
+	const prefixedUnresolvable =
+		baseRole !== args.lane.agent && swarmID === undefined;
 	if (
 		registryProvesUnregistered &&
-		!swarmAgents?.[baseRole] &&
-		!lanePrimaryModel &&
-		laneFallbackModels.length === 0
+		(prefixedUnresolvable ||
+			(!swarmAgents?.[baseRole] &&
+				!lanePrimaryModel &&
+				laneFallbackModels.length === 0))
 	) {
 		await appendAsyncLaneLaunchError(
 			args.directory,
@@ -4089,11 +4944,16 @@ async function appendAsyncLaneLaunchError(
 	const record = recordRead.value;
 	// Issue #2615: every launch rejection is typed 'resource' — the lane never
 	// started, so no transcript evidence can exist — not only PR-review lanes.
+	// #3710: the terminal triple (error/chars/truncated/digest) derives from
+	// ONE sanitized message with the established #2045/#2349 semantics, so all
+	// four fields describe the same value; callers already consumed the raw
+	// formatted string for classification before reaching this sink.
+	const sanitizedMessage = sanitizeFailureEvidenceDisplay(message);
 	const launchErrorResult = {
-		error: message,
-		chars: message.length,
-		truncated: false,
-		digest: digestText(message),
+		error: sanitizedMessage.slice(0, MAX_ERROR_CHARS),
+		chars: sanitizedMessage.length,
+		truncated: sanitizedMessage.length > MAX_ERROR_CHARS,
+		digest: digestText(sanitizedMessage),
 		workflowLaneFailureClass: 'resource' as const,
 	};
 	if (record) {
@@ -4365,7 +5225,9 @@ async function sweepStaleAsyncLaneRecords(
 			if (!currentUnknown) continue;
 			if (currentUnknown.result) continue;
 			const laneLabel = currentUnknown.laneId ?? currentUnknown.correlationId;
-			const reason = `lane ${laneLabel} presumed dead: host session unobservable`;
+			const reason = currentUnknown.prReviewBudgetExhausted
+				? PR_REVIEW_BUDGET_EXHAUSTED
+				: `lane ${laneLabel} presumed dead: host session unobservable`;
 			await settleDelegationTerminal(
 				directory,
 				currentUnknown,
@@ -4682,21 +5544,43 @@ function extractAssistantTranscript(
 			: '';
 	const terminalAssistantFinish =
 		finish === 'stop' || finish === 'length' || finish === 'content-filter';
+	const terminalAssistantProof =
+		typeof completedAt === 'number' &&
+		Number.isFinite(completedAt) &&
+		terminalAssistantFinish &&
+		lastAssistantInfo?.error === undefined;
+	// Issue #3313: the count-truncation term keys on the window ENDING at a
+	// terminal assistant message — the same terminal discriminator as
+	// terminalAssistantProof, evaluated on the window's FINAL message of any
+	// role. Only then does the fetch window provably contain the session's
+	// newest output: a terminal assistant message buried under later turns
+	// leaves room for a still-unfetched later assistant reply, so the
+	// "there MAY be unfetched earlier messages" signal stays honest there.
+	const lastMessageInfo = messages[messages.length - 1]?.info;
+	// When the window's final message IS an assistant message, the loop's
+	// lastAssistantInfo is that same message, so terminalAssistantProof
+	// already carries the full error-free terminal discriminator for it —
+	// reuse that derivation rather than re-reading the error channel here.
+	const windowEndsAtTerminalAssistant =
+		lastMessageInfo?.role === 'assistant' && terminalAssistantProof;
 	return {
 		text: assistantTexts.join('\n\n'),
 		messageCount: assistantTexts.length,
-		// Total message count (not just assistant) is the correct signal: the API
-		// limit is applied to all message types, so hitting it means there may be
-		// earlier messages of any role — including assistant — that were not fetched.
+		// Total message count (not just assistant) is the correct signal for the
+		// TRUNCATION term: the API limit is applied to all message types, so
+		// hitting it means there may be earlier messages of any role — including
+		// assistant — that were not fetched. Issue #3313: the count term is a
+		// "there MAY be unfetched earlier messages" signal, not an "unfinished"
+		// signal, so it keys on the window NOT ending at its terminal assistant
+		// message. A 50-message window whose final message is the lane's
+		// terminal assistant turn has proven it holds the newest output and is
+		// NOT incomplete on count alone; the finish terms are untouched.
 		transcriptIncomplete:
-			messages.length >= ASYNC_MESSAGE_FETCH_LIMIT ||
+			(messages.length >= ASYNC_MESSAGE_FETCH_LIMIT &&
+				!windowEndsAtTerminalAssistant) ||
 			finish === 'length' ||
 			finish === 'content-filter',
-		terminalAssistantProof:
-			typeof completedAt === 'number' &&
-			Number.isFinite(completedAt) &&
-			terminalAssistantFinish &&
-			lastAssistantInfo?.error === undefined,
+		terminalAssistantProof,
 		completedAt: typeof completedAt === 'number' ? completedAt : undefined,
 		windowTruncated: messages.length >= ASYNC_MESSAGE_FETCH_LIMIT,
 		terminalError:
@@ -4913,11 +5797,7 @@ async function runLane(
 				return null;
 			});
 		lifecycleRecordPromise = lifecycleRecordPromiseInner;
-		const baseRole = stripKnownSwarmPrefix(lane.agent);
-		const swarmID =
-			baseRole !== lane.agent
-				? lane.agent.slice(0, lane.agent.length - baseRole.length - 1)
-				: undefined;
+		const { role: baseRole, swarmID } = deriveSwarmIdentity(lane.agent);
 		const swarmAgents = getSwarmAgents(swarmID);
 		const dispatched = await dispatchWithModelFallback({
 			dispatch: async (model, context) => {
@@ -5079,7 +5959,12 @@ async function runLane(
 		// landed cannot leave an unhandled rejection.
 		const lifecycleRecord = await lifecycleRecordPromise.catch(() => null);
 		if (lifecycleRecord) {
-			const failureReason = syncClassifiedReason ?? formatError(error);
+			// #3710: the persisted terminal error carries REDACTED provider
+			// text; syncClassifiedReason is an already-classified string and
+			// the formatError path was consumed by the sync classifiers above.
+			const failureReason = sanitizeFailureEvidenceDisplay(
+				syncClassifiedReason ?? formatError(error),
+			);
 			await settleDelegationTerminal(
 				directory,
 				lifecycleRecord,
@@ -5169,6 +6054,26 @@ function buildCollectResult(
 			record.status === 'ingesting',
 	);
 	const consumed = records.filter((record) => record.status === 'consumed');
+	const unsettledCoverage = records.flatMap((record) => {
+		const ref = record.result?.outputRef;
+		const exhausted =
+			record.prReviewBudgetExhausted &&
+			((record.status === 'error' &&
+				record.result?.error === PR_REVIEW_BUDGET_EXHAUSTED) ||
+				record.status === 'stale');
+		return exhausted && record.workflowLane
+			? [
+					{
+						lane_id: record.laneId ?? record.correlationId,
+						dimension: record.workflowLane,
+						...(record.ownedWorkflowLanes
+							? { owned_workflow_lanes: record.ownedWorkflowLanes }
+							: {}),
+						...(ref ? { output_ref: ref } : {}),
+					},
+				]
+			: [];
+	});
 	// Issue #2381: pending identities are derived from the UNFILTERED record set,
 	// so they are reported even when `includePending` excluded these lanes from
 	// `lane_results` (the default under `wait: true`).
@@ -5197,6 +6102,9 @@ function buildCollectResult(
 		all_settled: pending.length === 0,
 		lane_results: laneResults,
 		...(pendingLanes.length > 0 ? { pending_lanes: pendingLanes } : {}),
+		...(unsettledCoverage.length > 0
+			? { unsettled_coverage: unsettledCoverage }
+			: {}),
 	};
 }
 
@@ -5560,6 +6468,111 @@ function getGeneratedAgentPrefix(
 		}
 	}
 	return null;
+}
+
+/**
+ * Issue #3341: state-free request-shape admission validation for PR-workflow
+ * dispatches, run BEFORE activatePrWorkflow/bindPrReviewBase so every
+ * rejection here is side-effect-free for the request — no activation,
+ * binding, or other durable workflow-state mutation happens, and any
+ * pre-existing workflow state is preserved unchanged. Every predicate is a
+ * pure function of the request, the generated-agent registry, and the
+ * launchability probe; nothing here reads gate state. Covered: lane roles,
+ * owned-workflow-lane shape, phase-lane agent launchability, the contract-retry
+ * exclusion, the wave-stage/attempt pairing, and unknown swarm-pr-review:*
+ * suffixes. Not covered (they need gate state or resilience config):
+ * tier-dependent lane count and max_concurrent, canary-first and fanout
+ * order, trigger evaluation, and PR_FEEDBACK verification ownership. `reachable` mirrors the post-binding condition
+ * these checks historically ran under (an active PR_REVIEW gate for this
+ * session): it is false only when a different workflow mode owns the
+ * session, which keeps the pre-fix reachability (and therefore the set of
+ * rejected requests) exactly the same — only the durable-state consumption
+ * changes.
+ */
+function validatePrWorkflowLaneAdmission(
+	mode: string,
+	lanes: ReadonlyArray<DispatchLaneSpec>,
+	context: DispatchLanesExecutionContext,
+	reachable: boolean,
+	waveShape: {
+		contractRetry: boolean;
+		waveStage: unknown;
+		waveAttempt: unknown;
+	},
+): void {
+	if (!reachable) return;
+	if (mode === 'swarm-pr-review:base') {
+		// Staged and contract-retry request shape is a pure function of the
+		// request arguments (no gate state, no resilience config), so it is
+		// rejected here, before any activation, rather than after binding.
+		const { contractRetry, waveStage, waveAttempt } = waveShape;
+		if (
+			contractRetry &&
+			(waveStage !== undefined || waveAttempt !== undefined)
+		) {
+			throw new Error(
+				'BLOCKED: PR_REVIEW contract retry is mutually exclusive with pr_review_wave_stage and pr_review_wave_attempt',
+			);
+		}
+		if ((waveStage === undefined) !== (waveAttempt === undefined)) {
+			throw new Error(
+				'BLOCKED: PR_REVIEW staged base dispatch requires both pr_review_wave_stage and pr_review_wave_attempt together',
+			);
+		}
+		for (const lane of lanes) {
+			if (
+				resolveGeneratedAgentRole(
+					lane.agent,
+					swarmState.generatedAgentNames,
+				) !== 'explorer'
+			) {
+				throw new Error(
+					`BLOCKED: PR_REVIEW base lane "${lane.id}" must use the explorer role`,
+				);
+			}
+		}
+		return;
+	}
+	if (mode === 'swarm-pr-review:micro') {
+		for (const lane of lanes) {
+			if (
+				resolveGeneratedAgentRole(
+					lane.agent,
+					swarmState.generatedAgentNames,
+				) !== 'explorer'
+			) {
+				throw new Error(
+					`BLOCKED: PR_REVIEW micro lane "${lane.id}" must use the explorer role`,
+				);
+			}
+		}
+		return;
+	}
+	if (
+		mode === 'swarm-pr-review:council' ||
+		mode === 'swarm-pr-review:reviewer' ||
+		mode === 'swarm-pr-review:critic'
+	) {
+		// #3358 AC8/AC11: the council/reviewer/critic admission table,
+		// launchability probe, and critic-prompt provenance check live in
+		// assertPrReviewPhaseLaneAdmission — the ONE source the gate recorder
+		// and artifact integrity also read (PR_REVIEW_PHASE_ADMITTED_ROLES) —
+		// so this hoist delegates instead of re-deriving the predicates.
+		assertPrReviewPhaseLaneAdmission(
+			mode,
+			lanes,
+			context,
+			_internals.getGeneratedAgentNames(),
+		);
+		return;
+	}
+	// Any other swarm-pr-review:* suffix is not a structured PR_REVIEW mode.
+	// Rejected here, before activation, so an unknown suffix leaves no gate.
+	if (mode.startsWith('swarm-pr-review:')) {
+		throw new Error(
+			'BLOCKED: active PR_REVIEW requires a structured base, micro, council, reviewer, or critic mode',
+		);
+	}
 }
 
 function buildReadOnlyTools(mode?: string): ReadOnlyToolPermissions {
@@ -6045,6 +7058,20 @@ function prReviewLaneResponseBudgetChars(
 	return undefined;
 }
 
+/**
+ * #3362: the critic preflight's reviewer-severity lookup, deliberately
+ * null-prototype so an assigned item id that collides with an Object
+ * prototype key (toString, constructor, ...) can never resolve an inherited
+ * member — an id WITHOUT a settled severity renders bare. Exported through
+ * _test_exports for the behavioral pin; reverting to a plain
+ * Object.fromEntries object re-fails it.
+ */
+function ownPropertySeverityLookup(
+	derived: Map<string, string>,
+): Record<string, string> {
+	return Object.assign(Object.create(null), Object.fromEntries(derived));
+}
+
 function applyPrWorkflowPromptContract(
 	lanes: DispatchLaneSpec[],
 	options: {
@@ -6072,9 +7099,11 @@ function applyPrWorkflowPromptContract(
 		/**
 		 * Issue #3310: critic lanes only. Assigned item id -> the reviewer
 		 * severity the composed reviewer phase settled for that item, so the
-		 * critic knows the exact rank UPHELD must keep. Rendered per item on the
-		 * assigned_item_ids line (`c1 (HIGH)`); ids without an entry render
-		 * bare. An absent, undefined, or EMPTY map renders the pre-#3310
+		 * critic knows the exact rank UPHELD must keep. Rendered per item on
+		 * its own `reviewer_severity: <id>=<SEVERITY>` line while
+		 * assigned_item_ids keeps bare ids (#3358 AC8; a verbatim copy of the
+		 * old same-line decoration voided the lane). Ids without an entry get
+		 * no line. An absent, undefined, or EMPTY map renders the pre-#3310
 		 * byte-shape exactly.
 		 */
 		reviewerSeverities?: Record<string, string>;
@@ -6096,7 +7125,58 @@ function applyPrWorkflowPromptContract(
 		};
 	}
 	const errors: string[] = [];
+	// #3358 AC7: recognize our OWN output (exactly contractCard + operator
+	// text + one trailing controller block for the current bindings) so
+	// re-applying the contract is idempotent. Recognition is an idempotence
+	// optimization, NEVER authentication: the recognized controller-owned
+	// parts are always discarded and rebuilt from the current options below,
+	// and only the extracted operator remainder is linted and reused — forged
+	// controller text cannot survive into the composed prompt.
+	const contractCardPrefix =
+		mode?.startsWith('swarm-pr-review:') === true
+			? `${buildPrReviewContractCard()}\n\n`
+			: '';
+	const CONTRACT_BLOCK_HEADER = '[CONTROLLER-BOUND PR WORKFLOW CONTRACT]';
+	const CONTRACT_BLOCK_FOOTER = '[END CONTROLLER-BOUND PR WORKFLOW CONTRACT]';
+	const stripControllerOwnedPrompt = (prompt: string): string | null => {
+		if (contractCardPrefix === '' || !prompt.startsWith(contractCardPrefix)) {
+			return null;
+		}
+		const withoutCard = prompt.slice(contractCardPrefix.length);
+		const blockStart = withoutCard.lastIndexOf(CONTRACT_BLOCK_HEADER);
+		if (blockStart < 0) return null;
+		const blockEnd = withoutCard.lastIndexOf(CONTRACT_BLOCK_FOOTER);
+		if (blockEnd < blockStart) return null;
+		const expectedEnd = blockEnd + CONTRACT_BLOCK_FOOTER.length;
+		if (expectedEnd !== withoutCard.length) return null;
+		const block = withoutCard.slice(blockStart, expectedEnd);
+		// The recognized block must bind the CURRENT options; a stale or forged
+		// block fails this and stays operator text. The lints reject verdict-row
+		// template text, not block text; the residual exposure is bounded by
+		// the real block being appended last, where it declares itself
+		// authoritative over conflicting caller text (feedback-round wording
+		// fix: the lints never claimed to reject block text).
+		const modeOk = block.includes(`mode: ${mode}`);
+		const headOk =
+			options.prHeadSha !== undefined &&
+			block.includes(`pr_head_sha: ${options.prHeadSha}`);
+		const digestOk =
+			options.revisionDigest !== undefined &&
+			block.includes(`revision_digest: ${options.revisionDigest}`);
+		if (!modeOk || !headOk || !digestOk) return null;
+		// Feedback F-006: the composition appends exactly "\n\n" before the
+		// block header, so a faithful strip removes exactly that separator;
+		// keeping it made every re-application grow the prompt by two
+		// characters (6882→6890 over five passes in the review probe) while
+		// still passing the exactly-one-block assertion. Removing the exact
+		// separator restores the pre-composition text byte-identically.
+		const remainder = withoutCard.slice(0, blockStart);
+		return remainder.endsWith('\n\n')
+			? remainder.slice(0, remainder.length - 2)
+			: remainder;
+	};
 	const contracted = lanes.map((lane) => {
+		const lanePrompt = stripControllerOwnedPrompt(lane.prompt) ?? lane.prompt;
 		const normalizedMode = classifyControllerTokenField(mode);
 		const workflowLane = classifyControllerTokenField(lane.workflow_lane ?? '');
 		const prHeadSha = classifyControllerTokenField(options.prHeadSha ?? '');
@@ -6148,29 +7228,46 @@ function applyPrWorkflowPromptContract(
 		// verdict-row template embedded in the operator prompt competes with the
 		// injected contract card (wrong-arity retries, #3275 RC4) — reject it
 		// side-effect-free, before any contract is appended or gate ownership is
-		// published. A prose mention of the marker word without the pipe-row
-		// shape is NOT rejected.
+		// published. A mid-sentence prose mention of the marker word — with no
+		// marker-pipe row shape anywhere in the text — is NOT rejected; a line
+		// consisting of the bare marker IS rejected, because the parser accepts
+		// it as an (arity-1) row (#3335).
 		const prReviewVerdictTemplateToken =
 			normalizedMode.token === 'swarm-pr-review:reviewer'
 				? '[REVIEWED]'
 				: normalizedMode.token === 'swarm-pr-review:critic'
 					? '[CRITIC]'
 					: null;
-		// Whitespace-tolerant: the transport splits on the pipe and trims
-		// every field, so a marker followed by any spaces or a tab before the
-		// pipe parses as a canonical row. Checked on every operator-controlled
-		// channel that reaches the lane prompt: lane.prompt AND callerFocus,
-		// which is rendered verbatim after the authoritative card.
+		// Whitespace-tolerant and grammar-derived (#3335): the parser accepts a
+		// marker followed by ANY String.prototype.trim() whitespace run before
+		// the pipe (U+3000, U+00A0, U+FEFF, U+202F, a lone \r, ...), so the row
+		// arm calls the parser itself via firstPrReviewVerdictRowTemplateLine —
+		// any line that parses as a live row rejects the prompt. The second arm
+		// keeps the anywhere-in-text anti-teaching shape (a marker-pipe fragment
+		// mid-sentence teaches the format even though it would not parse as a
+		// row); its whitespace class is trim-whitespace minus `\n` — the one
+		// character the transport's `/\r?\n/` line-split guarantees to break on
+		// (a lone `\r` stays in-line and is trimmable, so it belongs IN the
+		// class; a CRLF `\r` never reaches it because `\n` ends the run).
+		// Checked on every operator-controlled channel that reaches the lane
+		// prompt: lane.prompt AND callerFocus, which is rendered verbatim after
+		// the authoritative card.
 		if (prReviewVerdictTemplateToken) {
-			const rowShape = new RegExp(
-				'\\[' + prReviewVerdictTemplateToken.slice(1, -1) + '\\][ \\t]*\\|',
+			const kind =
+				prReviewVerdictTemplateToken === '[REVIEWED]'
+					? ('reviewer' as const)
+					: ('critic' as const);
+			const markerPipeAnywhere = new RegExp(
+				'\\[' + prReviewVerdictTemplateToken.slice(1, -1) + '\\][^\\S\\n]*\\|',
 			);
 			const operatorChannels: Array<[string, string]> = [
-				['lane prompt', lane.prompt],
+				['lane prompt', lanePrompt],
 				['caller scope', options.callerFocus ?? ''],
 			];
-			const offending = operatorChannels.find(([, text]) =>
-				rowShape.test(text),
+			const offending = operatorChannels.find(
+				([, text]) =>
+					firstPrReviewVerdictRowTemplateLine(text, kind) !== null ||
+					markerPipeAnywhere.test(text),
 			);
 			if (offending) {
 				errors.push(
@@ -6220,20 +7317,28 @@ function applyPrWorkflowPromptContract(
 				? [...assignedIds].sort()
 				: [...assignedIds].sort().reverse()
 			: assignedIds;
-		// #3310: critic lanes render each assigned item's reviewer severity on the
-		// same line as its id when the composed map supplies one; unknown ids render
-		// bare and an absent/empty map keeps the pre-#3310 byte-shape exactly.
+		// #3310 / #3358 AC8: critic lanes see each assigned item's reviewer
+		// severity on its OWN `reviewer_severity:` line, never decorating the id
+		// token (a verbatim copy of `c1 (HIGH)` voided the lane as an
+		// unassigned id). Unknown ids get no line; an absent/empty map keeps the
+		// pre-#3310 byte-shape exactly.
 		const severityEntries =
 			options.reviewerSeverities &&
 			Object.keys(options.reviewerSeverities).length > 0
 				? options.reviewerSeverities
 				: undefined;
-		const severityAnnotatedIds =
+		const severityLines =
 			severityEntries && normalizedModeToken === 'swarm-pr-review:critic'
-				? renderedIds.map((id) =>
-						severityEntries[id] ? `${id} (${severityEntries[id]})` : id,
+				? renderedIds.flatMap((id) =>
+						severityEntries[id]
+							? [`reviewer_severity: ${id}=${severityEntries[id]}`]
+							: [],
 					)
-				: renderedIds;
+				: [];
+		const severityBlock =
+			severityLines.length > 0
+				? `\nreviewer_severity lines annotate assigned ids and are never item ids; UPHELD must keep the listed severity.\n${severityLines.join('\n')}`
+				: '';
 		const orderLine = presentationOrder
 			? `\npresentation_order: ${presentationOrder} (${presentationOrder === 'A' ? 'canonical' : 'reversed'}; order candidate prose in this order)`
 			: '';
@@ -6282,6 +7387,11 @@ function applyPrWorkflowPromptContract(
 			normalizedMode.token === 'swarm-pr-review:micro'
 				? `\nStructured settlement rule (issues #2384, #2835): call \`submit_pr_review_result\` exactly once with the canonical discovery result${batchId.ok && laneId.ok ? `, using batchId \`${batchId.token}\` and laneId \`${laneId.token}\`` : ''}, and pass revisionDigest \`${revisionDigest.token}\` exactly as rendered here — the receipt contract requires that 64-hex value verbatim and rejects the submission without it — and then stop. The authenticated child delegation remains authoritative and resolves the batch and lane identifiers when omitted. Transcript machine rows are deprecated legacy compatibility only for lanes whose snapped contract explicitly enables them, and a present structured result never falls back because of extra prose, truncation, or transcript incompleteness.`
 				: '';
+		const budgetCheckpointParagraph =
+			structuredSubmissionParagraph ||
+			normalizedMode.token === 'swarm-pr-review:council'
+				? '\nIf the host stops your execution on a tool-call or duration limit, stop using tools and return the partial rows you already verified. The host records incomplete coverage for a fresh attempt.'
+				: '';
 		// Pre-seeded statement of the read-only shell classifier's rules
 		// (#2276): the same enforcement already runs at tool time for BOTH the
 		// pr-review and pr-feedback gates; stating it up front saves the 2-4
@@ -6295,6 +7405,42 @@ function applyPrWorkflowPromptContract(
 			normalizedMode.token === 'swarm-pr-review:reviewer'
 				? `\nPROTOCOL SELECTION (#3310): the Stage-B "STRUCTURED VERDICT LINE" mandate does not apply to this lane. Do not emit a [REVIEWED] | task-<taskId> | VERDICT | summary row — that Stage-B task-keyed row is not this lane's contract; settle only via the live [REVIEWED] rows the contract card specifies for your assigned item ids.`
 				: '';
+		// #3358 AC1: the critic counterpart. The critic agent prompt is static
+		// and PR-free; this clause is the only place the PLAN REVIEW structure
+		// is suspended, and only for a bound critic lane.
+		const criticProtocolClause =
+			normalizedMode.token === 'swarm-pr-review:critic'
+				? `\n${CRITIC_PROTOCOL_SELECTION_CLAUSE}`
+				: '';
+		// Feedback round F-001: the phrase-activated overrides removed from the
+		// critic and reviewer agent prompts (#3358 AC1) were also the only
+		// suppression the swarm-pr-feedback verdict lanes had — the base
+		// controller block header activated them on feedback lanes too (base
+		// appended the same header for every mode), so the reviewer Stage-B
+		// mandate and the critic PLAN REVIEW structure were suppressed there.
+		// The replacement clauses above are gated to swarm-pr-review modes
+		// only, which regressed the feedback lanes: the reviewer prompt still
+		// mandates the Stage-B task-keyed row and the critic prompt still
+		// mandates "Begin directly with PLAN REVIEW", while the feedback gate
+		// settles on one phase-specific positive row per item. Re-home the
+		// suppression as controller-authored mode-scoped clauses (stage-b-test
+		// is unaffected: the test_engineer prompt never carried an override).
+		const FEEDBACK_VERDICT_PROTOCOL_CLAUSES: Record<string, string> = {
+			'swarm-pr-feedback:stage-b-reviewer':
+				'\nPROTOCOL SELECTION (feedback stage-b): the reviewer prompt\'s Stage-B "STRUCTURED VERDICT LINE" mandate does not apply to this lane. Do not emit a [REVIEWED] | task-<taskId> | VERDICT | summary row — settle only via one positive [STAGE-B-REVIEW] | <item_id> | APPROVE | <notes> row per assigned feedback item, exactly as the controller block and the [STAGE-B-REVIEW] row family require.',
+			'swarm-pr-feedback:closeout-reviewer':
+				'\nPROTOCOL SELECTION (feedback closeout): the reviewer prompt\'s Stage-B "STRUCTURED VERDICT LINE" mandate does not apply to this lane. Do not emit a [REVIEWED] | task-<taskId> | VERDICT | summary row — settle only via one positive [CLOSEOUT-REVIEW] | <item_id> | APPROVE | <notes> row per assigned feedback item, exactly as the controller block and the [CLOSEOUT-REVIEW] row family require.',
+			'swarm-pr-feedback:closeout-critic':
+				'\nPROTOCOL SELECTION (feedback closeout): the critic prompt\'s default "Begin directly with PLAN REVIEW" structure does not apply to this lane. Do not produce a PLAN REVIEW of a plan document and do not call get_approved_plan — settle only via one positive [CLOSEOUT-CRITIC] | <item_id> | APPROVE | <notes> row per assigned feedback item, exactly as the controller block and the [CLOSEOUT-CRITIC] row family require.',
+			// #3337: the PR_FEEDBACK verification lane runs the base
+			// reviewer agent and settles on [FEEDBACK-VERIFIED] rows, so it
+			// carries the same Stage-B suspension the other feedback
+			// reviewer lanes do.
+			'swarm-pr-feedback:verification':
+				'\nPROTOCOL SELECTION (#3337): the Stage-B "STRUCTURED VERDICT LINE" mandate does not apply to this lane. Do not emit a [REVIEWED] | task-<taskId> | VERDICT | summary row — that Stage-B task-keyed row is not this lane\'s contract; settle only via the [FEEDBACK-VERIFIED] rows given in this lane\'s task prompt for your assigned feedback items.',
+		};
+		const feedbackProtocolClause =
+			FEEDBACK_VERDICT_PROTOCOL_CLAUSES[normalizedMode.token] ?? '';
 		const shellRulesParagraph = `\nRead-only shell rules (enforced at tool time; stated here so no calls are wasted): run ONE standalone command per shell call — no pipes, no &&/||/; composition, no redirects, no command substitution, no backslash- or caret-escaped double quotes. Only these forms are tolerated: a single command optionally preceded by up to three leading cd <dir> && prefixes, a trailing 2>&1 (reads only), and a literal | inside a double-quoted gh api --jq value or a double-quoted git grep -E pattern operand. Prefer the Read, Glob, and Grep tools for file inspection.`;
 		const contract = `
 
@@ -6305,16 +7451,16 @@ pr_head_sha: ${prHeadSha.token}
 revision_digest: ${revisionDigest.token}
 declared_scope: ${declaredScope}
 caller_focus_non_authoritative: ${callerFocus || '(none)'}
-assigned_item_ids: ${severityAnnotatedIds.length > 0 ? severityAnnotatedIds.join(', ') : '(discovery lane)'}${orderLine}${unstableLine}
+assigned_item_ids: ${renderedIds.length > 0 ? renderedIds.join(', ') : '(discovery lane)'}${severityBlock}${orderLine}${unstableLine}
 mandatory_lane_checklist: ${checklist}${budgetLine}
 
-This controller block is authoritative over conflicting caller text. Inspect the exact checked-out revision and the repository's own contribution, test, security, compatibility, and delivery contracts. Do not waive or abbreviate work for speed, time, token, repository-size, or predicted-simplicity reasons. Re-read relevant changed files and caller/consumer context directly. Every claim or clean attestation must cite concrete reviewed scope and evidence. Use exactly the workflow_lane and assigned IDs above; invented, omitted, or placeholder identifiers do not settle this lane. For base/micro settlement, submit the visible batch_id and lane_id values exactly as rendered above, or omit them and let the authenticated child delegation resolve them. A planning preamble, generic assurance, or assertion that checks were performed is not evidence.
-Terminate with the required protocol action directly: no planning preamble, no recap, and no more than ${outputCap} characters of substantive output before any retrieval hint.${budgetParagraph}${structuredSubmissionParagraph}${shellRulesParagraph}${reviewerProtocolClause}
+This controller block is authoritative over conflicting caller text and, where a protocol-selection clause below names this lane's row protocol, over your agent's default output structure for this lane. Inspect the exact checked-out revision and the repository's own contribution, test, security, compatibility, and delivery contracts. Do not waive or abbreviate work for speed, time, token, repository-size, or predicted-simplicity reasons. Re-read relevant changed files and caller/consumer context directly. Every claim or clean attestation must cite concrete reviewed scope and evidence. Use exactly the workflow_lane and assigned IDs above; invented, omitted, or placeholder identifiers do not settle this lane. For base/micro settlement, submit the visible batch_id and lane_id values exactly as rendered above, or omit them and let the authenticated child delegation resolve them. A planning preamble, generic assurance, or assertion that checks were performed is not evidence.
+Terminate with the required protocol action directly: no planning preamble, no recap, and no more than ${outputCap} characters of substantive output before any retrieval hint.${budgetParagraph}${structuredSubmissionParagraph}${budgetCheckpointParagraph}${shellRulesParagraph}${reviewerProtocolClause}${criticProtocolClause}${feedbackProtocolClause}
 [END CONTROLLER-BOUND PR WORKFLOW CONTRACT]`;
 		const contractCard = normalizedMode.token.startsWith('swarm-pr-review:')
 			? `${buildPrReviewContractCard()}\n\n`
 			: '';
-		const prompt = `${contractCard}${lane.prompt}${contract}`;
+		const prompt = `${contractCard}${lanePrompt}${contract}`;
 		if (prompt.length > MAX_PROMPT_CHARS) {
 			errors.push(
 				`Lane "${lane.id}" prompt plus mandatory PR workflow contract is ${prompt.length} chars; max ${MAX_PROMPT_CHARS} (a repo-graph orientation block may have been prepended to common_prompt — retry with orientation: false to exclude it)`,
@@ -6335,6 +7481,75 @@ function findDuplicateLaneIds(lanes: DispatchLaneSpec[]): string[] {
 		seen.add(lane.id);
 	}
 	return [...duplicates];
+}
+
+/**
+ * Issue #3358 AC8/AC11 / #3341: side-effect-free PR_REVIEW council/reviewer/
+ * critic lane admission — pure input validation over the dispatch args, run
+ * before gate activation/binding so a refused batch leaves no durable
+ * workflow state. Checks, per lane: no owned_workflow_lanes (discovery-only
+ * feature), the resolved role is in PR_REVIEW_PHASE_ADMITTED_ROLES[phase]
+ * (exact membership — never a prefix), the agent is launchable on this host
+ * (#3311 ghost owners), and, for the critic phase, that the registered critic
+ * agent was NOT registered with a custom prompt (its output contract cannot
+ * be mechanically verified to emit [CRITIC] rows).
+ */
+function assertPrReviewPhaseLaneAdmission(
+	mode: string,
+	lanes: readonly DispatchLaneSpec[],
+	context: { sessionID?: string },
+	generatedAgentNames: readonly string[],
+): void {
+	const phase = mode.endsWith(':council')
+		? 'council'
+		: mode.endsWith(':reviewer')
+			? 'reviewer'
+			: mode.endsWith(':critic')
+				? 'critic'
+				: null;
+	if (!phase) return;
+	if (lanes.some((lane) => lane.owned_workflow_lanes)) {
+		throw new Error(
+			`BLOCKED: PR_REVIEW ${phase} lanes must not declare owned_workflow_lanes; depth-tier consolidation applies only to base and micro discovery lanes`,
+		);
+	}
+	const admittedRoles = PR_REVIEW_PHASE_ADMITTED_ROLES[phase];
+	for (const lane of lanes) {
+		const role = resolveGeneratedAgentRole(lane.agent, generatedAgentNames);
+		if (!admittedRoles.includes(role)) {
+			throw new Error(
+				`BLOCKED: PR_REVIEW ${phase} lane "${lane.id}" uses invalid role "${role || lane.agent}"${phase === 'critic' ? ' — PR critic lanes must use the critic agent (critic_finding_validator and other critic-family roles cannot emit [CRITIC] rows)' : ` — PR ${phase} lanes must use one of: ${admittedRoles.join(', ')}`}`,
+			);
+		}
+		// Issue #3311 (ghost owners): validate the agent BEFORE the validation
+		// batch is recorded. launchAsyncLane would reject this agent after the
+		// record exists, leaving an owner lane with no delegation record that
+		// N-of-M admission correctly refuses (the #3101 silence constraint)
+		// but that should never have been declared an owner at all.
+		const agentValidation = validateLaneAgent(lane.agent, context);
+		if (!agentValidation.ok) {
+			throw new Error(
+				`BLOCKED: PR_REVIEW ${phase} lane "${lane.id}" agent "${lane.agent}" is not launchable on this host: ${agentValidation.error}`,
+			);
+		}
+		// #3358 AC3: PR critic lanes require the built-in critic prompt. The
+		// provenance record is captured at registration (createAgents), so
+		// this adds no filesystem I/O to the dispatch path; the registry
+		// matches names case-insensitively, so the lookup does too.
+		if (phase === 'critic') {
+			const registeredName = generatedAgentNames.find(
+				(name) => name.toLowerCase() === lane.agent.trim().toLowerCase(),
+			);
+			const provenance = registeredName
+				? criticPromptProvenance(registeredName)
+				: undefined;
+			if (provenance?.replaced || provenance?.appended) {
+				throw new Error(
+					`BLOCKED: PR_REVIEW critic lane "${lane.id}" cannot use agent "${lane.agent}" — it was registered with a custom critic prompt (${provenance.replaced ? 'replacement critic.md' : 'append critic_append.md'}); its output contract cannot be mechanically verified to emit [CRITIC] rows. Remove the custom prompt file from the opencode-swarm prompts directory and restart OpenCode, or run the review without PR critic lanes`,
+				);
+			}
+		}
+	}
 }
 
 function scheduleSessionCleanup(session: SessionOps, sessionId: string): void {
@@ -6547,7 +7762,7 @@ export const dispatch_lanes_async: ReturnType<typeof createSwarmTool> =
 export const collect_lane_results: ReturnType<typeof createSwarmTool> =
 	createSwarmTool({
 		description:
-			'Collect or poll results for a dispatch_lanes_async batch — OBSERVATION ONLY; it can never cancel or abort a lane (issue #2971). A presumed-stale sweep runs on EVERY call: lanes past the stale horizon settle — idle host sessions to stale, unobservable host sessions to a typed liveness error. Supports two modes: (1) non-blocking poll (wait omitted or false) — performs one collection pass (one batched session.status probe, then transcript work under the remaining budget) and returns current lane status plus any settled results while you continue independent work; (2) blocking join (wait: true) — polls until all lanes settle or the collection wait budget expires. The wait budget (timeout_ms) bounds THIS OBSERVER CALL ONLY: its expiry, a missing messages client, or a degraded liveness probe does not cancel, kill, or fail the lanes, is not evidence that a lane died, and never settles anything. timeout_ms: 0 is a valid immediate, non-destructive snapshot. Any unsettled lane is reported in pending_lanes (batch_id, lane_id, stored status, output_ref when one exists) regardless of include_pending, so outstanding work is never silently omitted. If a collection returns pending lanes, poll again first — busy/retry host status is live evidence, not failure. Cancellation is a distinct, explicit, authorized, potentially destructive action: use cancel_lane_batch (confirm: true + reason), never this collector; cancel_pending is a deprecated no-op request answered with typed cancellation_refused guidance. An explicit operator cancellation settles as the distinct operator_cancelled class — never liveness. Busy/retry lanes do not become stale solely because they run for a long time; any lane pending for minutes carries an alert-only pending_liveness diagnostic (lane id, elapsed ms, host session status, stalledSuspect, degradedReason) that never cancels anything or proves provider failure. A lane whose backing session records a terminal provider error (quota/billing/auth) AND produced no output AND has an over turn (a completed timestamp, or an idle host) settles immediately with the classified reason instead of staying pending — as failed, or as cancelled when the host reports the turn was aborted. A lane that produced output, or whose turn may still be retrying, keeps polling. Does not advance workflow gates.',
+			'Collect or poll results for a dispatch_lanes_async batch — OBSERVATION ONLY; it can never cancel or abort a lane (issue #2971). A presumed-stale sweep runs on EVERY call: lanes past the stale horizon settle — idle host sessions to stale, unobservable host sessions to a typed liveness error. Supports two modes: (1) non-blocking poll (wait omitted or false) — performs one collection pass (one batched session.status probe, then transcript work under the remaining budget) and returns current lane status plus any settled results while you continue independent work; (2) blocking join (wait: true) — polls until all lanes settle or the collection wait budget expires. The wait budget (timeout_ms) bounds THIS OBSERVER CALL ONLY: its expiry, a missing messages client, or a degraded liveness probe does not cancel, kill, or fail the lanes, is not evidence that a lane died, and never settles anything. timeout_ms: 0 is a valid immediate, non-destructive snapshot. Any unsettled lane is reported in pending_lanes (batch_id, lane_id, stored status, output_ref when one exists) regardless of include_pending, so outstanding work is never silently omitted. If a collection returns pending lanes, poll again first — busy/retry host status is live evidence, not failure. Cancellation is a distinct, explicit, authorized, potentially destructive action: use cancel_lane_batch (confirm: true + reason), never this collector; cancel_pending is a deprecated no-op request answered with typed cancellation_refused guidance. An explicit operator cancellation settles as the distinct operator_cancelled class — never liveness. Busy/retry lanes do not become stale solely because they run for a long time; any lane pending for minutes carries an alert-only pending_liveness diagnostic (lane id, elapsed ms, host session status, stalledSuspect, degradedReason) that never cancels anything or proves provider failure. A lane whose backing session records a terminal provider error (quota/billing/auth) AND produced no output AND has an over turn (a completed timestamp, or an idle host) settles immediately with the classified reason instead of staying pending — as failed, or as cancelled when the host reports the turn was aborted. A lane that produced output, or whose turn may still be retrying, keeps polling. Host-exhausted PR-review discovery attempts report unsettled_coverage. Retry the same unresolved dimensions on the same head under the workflow retry policy. Any output_ref is partial context for the retry. Does not advance workflow gates.',
 		args: {
 			batch_id: CollectLaneResultsArgsSchema.shape.batch_id,
 			wait: CollectLaneResultsArgsSchema.shape.wait,

@@ -36,6 +36,7 @@ These are invoked as `/swarm <subcommand>`, NOT as bare `/subcommand`. The list 
 - `/swarm dataset export` — HUMAN-ONLY: governed deterministic dataset export (preview + confirm token; manifest with sha256 checksums)
 - `/swarm evidence` — show evidence bundles `[taskId]`
 - `/swarm evidence summary` — generate evidence summary with completion ratio and blockers
+- `/swarm receipt` — emit a portable verification receipt for a task or phase (`--export` writes a PR-attachable bundle; `--verify <bundle>` re-checks every hash and exits nonzero on mismatch)
 - `/swarm evidence-summary` — deprecated alias for `/swarm evidence summary`
 - `/swarm handoff` — prepare state for clean model switch
 - `/swarm archive` — archive old evidence bundles `[--dry-run]`
@@ -43,6 +44,7 @@ These are invoked as `/swarm <subcommand>`, NOT as bare `/subcommand`. The list 
 - `/swarm rollback` — restore swarm state or project files to a checkpoint
 - `/swarm reset` — clear swarm state files `[--confirm]`
 - `/swarm reset-session` — clear session state, preserve plan/evidence/knowledge
+- `/swarm attest` — verify a git-external deliverable with pinned read-only anchors and record the evidence bundle that admits completion `<task_id>`
 - `/swarm recover` — settle wedged coder settlements `[task_id] [--force]` (human-only)
 - `/swarm checkpoint` — manage project checkpoints `[save|restore|delete|list] <label>`
 - `/swarm finalize` — finalize the swarm project and archive evidence

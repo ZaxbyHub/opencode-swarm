@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.202.2",
+  "tagCommit": "358bed4a7e54f9c39e243c5ee56486b1be2cf6f4",
+  "targetCommitish": "358bed4a7e54f9c39e243c5ee56486b1be2cf6f4",
+  "releaseBodySha256": "b951a188b618ab8f10a90d877d0b6a08cdffc15eec649b90055040c338ecfcec",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/3231-3232-observability-append-integrity.md",
+      "sha256": "e302b8529415d21910d3774a29b3945f42cb4f7b16147cda5925fed05a00225f"
+    },
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/3542-residue-inventory-control-chars.md",
+      "sha256": "62ff5ee0136bd182a7a5d9a0a4a9fe46291d166e739c4537c2d0b3b605ba0418"
+    }
+  ]
+}

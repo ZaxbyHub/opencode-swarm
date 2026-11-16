@@ -381,6 +381,7 @@ describe('pr-workflow-gate workflow batch GC', () => {
 				[
 					{
 						laneId: 'critic-retired',
+						agent: 'critic',
 						workflowLane: 'critic-retired',
 						reviewItemIds: REVIEW_ITEM_IDS,
 					},
@@ -412,6 +413,7 @@ describe('pr-workflow-gate workflow batch GC', () => {
 				[
 					{
 						laneId: 'critic-independent',
+						agent: 'critic',
 						workflowLane: 'critic-independent',
 						reviewItemIds: REVIEW_ITEM_IDS,
 					},

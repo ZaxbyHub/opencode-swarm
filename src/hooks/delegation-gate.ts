@@ -83,6 +83,14 @@ import {
 import { derivePlanId } from '../plan/utils.js';
 import { resetPrmSessionState } from '../prm/index.js';
 import {
+	flushRouteRetirementObligation,
+	isRouteBlockedForSettlement as isRouteBlockedForSettlementInRegistry,
+	recordRouteFault,
+	recordRouteInvalidation,
+	retireRouteInvalidationsForCall,
+	retireRouteInvalidationsForCallInDirectory,
+} from '../review/route-invalidation-registry.js';
+import {
 	buildReviewRoutePending,
 	buildReviewRouteReceipt,
 	buildReviewRouteRouterError,
@@ -126,9 +134,11 @@ import {
 	markStageBRouteRequired,
 	recordStageBCompletion,
 	reserveStageBRouteEvidence,
-	setDispatchParent,
+	resolveDispatchParent,
+	restoreDispatchParentEntry,
 	swarmState,
 	updateTaskWorkflowCache,
+	writeDispatchParentEntry,
 } from '../state';
 import { telemetry } from '../telemetry.js';
 import type {
@@ -197,6 +207,8 @@ import {
 	recordWorktreeMergeFailure,
 } from './delegation-gate/worktree-merge-status';
 import { deleteStoredInputArgs, getStoredInputArgs } from './guardrails';
+import { redactEmbeddedPaths } from './guardrails/audit-log';
+import { resolveMessageTransformContext } from './host-boundary';
 import { isTaskToolId, normalizeToolName } from './normalize-tool-name';
 import {
 	insertGuidanceCarrier,
@@ -346,8 +358,7 @@ type PreparedCoderScope =
  * Whether Turbo may skip the Stage A re-delegation block for `taskId`.
  *
  * Tier 3 is defined by the files a task touches (security-sensitive paths,
- * src/parallel/tier3-classifier.ts), the rule update_task_status already
- * applies to Turbo's Stage B bypass. The gate used to guess it from the task
+ * src/parallel/tier3-classifier.ts). The gate used to guess it from the task
  * id (`startsWith('3.')`): every phase-3 task was treated as Tier 3 and a
  * security-sensitive task in any other phase was bypassed. Only a task whose
  * planned `files_touched` are known and contain no Tier 3 path is bypassable;
@@ -1480,6 +1491,67 @@ const ACCEPTANCE_ARGS_FIELDS = [
 	'input',
 	'message',
 ] as const;
+
+/**
+ * Default requirement line written by `hooks.auto_inject_acceptance`. The marker
+ * makes the synthesized origin visible to the coder/reviewer that receives it
+ * (it is otherwise indistinguishable from an architect-authored criterion).
+ */
+const AUTO_INJECTED_ACCEPTANCE_REQUIREMENT =
+	'- Complete verification of changes, tests, and documentation (auto-injected default: no task-specific acceptance criteria were supplied)';
+
+/**
+ * Synthesize a default ACCEPTANCE block into the Task args
+ * (`hooks.auto_inject_acceptance`). Mutates `args` in place, like
+ * {@link injectSpecRequirementsIntoAcceptance}.
+ *
+ * - `acceptance_field_empty`: fills the bare header in the field that actually
+ *   carries it. "First header" follows the validator's field order and its
+ *   `^ACCEPTANCE:` line match, and line endings are preserved, so the rewrite
+ *   always edits the header that {@link validateCoderReviewerAcceptanceField}
+ *   judged empty.
+ * - `acceptance_field_missing`: appends a block to `prompt`, else to the first
+ *   string field.
+ *
+ * @returns the mutated field, or `null` when no string field exists to carry the
+ *   block (the caller then keeps the fail-closed rejection).
+ */
+function injectDefaultAcceptance(
+	args: Record<string, unknown>,
+	reason: 'acceptance_field_missing' | 'acceptance_field_empty',
+): (typeof ACCEPTANCE_ARGS_FIELDS)[number] | null {
+	const stringFields = ACCEPTANCE_ARGS_FIELDS.filter(
+		(field) => typeof args[field] === 'string',
+	);
+	if (reason === 'acceptance_field_empty') {
+		for (const field of stringFields) {
+			// Capturing split keeps each line terminator at the odd indices.
+			const parts = (args[field] as string).split(/(\r?\n)/);
+			for (let i = 0; i < parts.length; i += 2) {
+				// Exactly the validator's header regex (validateCoderReviewerAcceptanceField),
+				// so a line it skips (e.g. `ACCEPTANCE:` + U+2028 or a lone CR, which `.`
+				// does not match) is skipped here too and its text is never rewritten.
+				const header = /^(ACCEPTANCE:)[ \t]*(.*)$/i.exec(parts[i]);
+				if (!header) continue;
+				parts.splice(
+					i,
+					1,
+					header[1],
+					parts[i + 1] ?? '\n',
+					AUTO_INJECTED_ACCEPTANCE_REQUIREMENT,
+				);
+				args[field] = parts.join('');
+				return field;
+			}
+		}
+		return null;
+	}
+	const target = stringFields.includes('prompt') ? 'prompt' : stringFields[0];
+	if (!target) return null;
+	args[target] =
+		`${args[target] as string}\n\nACCEPTANCE:\n${AUTO_INJECTED_ACCEPTANCE_REQUIREMENT}\n`;
+	return target;
+}
 
 export interface AcceptanceInjectionOutcome {
 	/** The args field that carried the ACCEPTANCE header and was mutated. */
@@ -2820,7 +2892,8 @@ async function enforceCoderRetryEscalation(input: {
 			action: 'user_escalation',
 		});
 		throw new Error(
-			`TASK_RETRY_USER_ESCALATION_REQUIRED: task ${input.taskId} failed its critic-guided simplified retry. Stop and ask the user to change scope, authorize repair, or choose a different approach.`,
+			`TASK_RETRY_USER_ESCALATION_REQUIRED: task ${input.taskId} failed its critic-guided simplified retry. Stop and ask the user to change scope, authorize repair, or choose a different approach. ` +
+				`If the user authorizes repair, the architect calls update_task_status on this task with status "in_progress", force true, expected_state set to the task's current workflow state, expected_generation ${input.generation}, target_state "idle", a reason, and a transition_id — the audited repair reopens the task and clears the retry circuit (issue #3389). The task's plan status must already be in_progress; a task still pending in the plan takes one ordinary in_progress status update first.`,
 		);
 	}
 	if (!input.criticSatisfied) {
@@ -3449,6 +3522,49 @@ const maintainBackgroundDelegationsForDispatch: typeof import('../background/pen
  */
 export const _internals = {
 	isEpicOpenForProject,
+	/**
+	 * #3403 (review round 3, AC2): the durable scope-claim is routed through this
+	 * seam so tests can drive a claim that THROWS and pin the throw-path lineage
+	 * rollback. Production code never reassigns it.
+	 */
+	claimScopeBindingForChildDurably,
+	/**
+	 * #3502 review (PRR-007), #3509/#3516: set by createDelegationGateHook so
+	 * tests can observe the settlement-side invalidation gate for a specific
+	 * hook instance (is THIS dispatch's call blocked for this verdict task?).
+	 */
+	routeInvalidationProbe: null as
+		| ((callID: string, sessionId: string, taskId: string) => boolean)
+		| null,
+	/**
+	 * #3516 item 1: the safe binding-context reader is routed through this
+	 * seam so tests can drive sequenced read faults (healthy first read,
+	 * faulting second read) through the REAL wrapper and both REAL call sites
+	 * without touching the fs fixture between them.
+	 */
+	readPrReviewReentryBindingContextSafe: readPrReviewReentryBindingContextSafe,
+	/**
+	 * #3516 item 11 (AC14): the wrapper's inner binding-context read, exposed
+	 * so tests can drive the REAL wrapper's degrade path (catch -> bounded,
+	 * redacted criticalWarn) with crafted faults, including long home-path
+	 * messages the frozen source-scan probe cannot see.
+	 */
+	readPrReviewReentryBindingContextInner: readPrReviewReentryBindingContext,
+	/**
+	 * #3516 item 7 (AC10): the settlement loop's two receipt-enforcement reads
+	 * route through this seam so per-task read faults (fault-on-first-read /
+	 * fault-on-second-read) are injectable deterministically while sibling
+	 * tasks in the same loop still settle.
+	 */
+	enforcePersistedReviewRouteReceiptAtSettlement:
+		enforcePersistedReviewRouteReceipt,
+	/**
+	 * #3516 item 12 (AC12): the routing block's receipt persists route
+	 * through this seam so tests can observe THAT a persist was attempted and
+	 * WHAT it threw (distinguishing attempted-and-threw from never-attempted)
+	 * instead of asserting a constant empty receipt directory.
+	 */
+	persistReviewRouteReceiptAtDispatch: persistReviewRouteReceipt,
 	/** Epic v2 C4: wave-only coder admission + the wave's parallel/isolation policy. */
 	resolveEpicDispatchPolicy,
 	resolveEpicPrFeedbackConflict,
@@ -3534,6 +3650,7 @@ type StageBSettlementDropReason =
 	| 'unbound'
 	| 'route_blocked'
 	| 'route_capacity'
+	| 'route_read_fault'
 	| 'evidence_rejected'
 	| 'rejection_persist_failed';
 
@@ -3546,6 +3663,8 @@ const STAGE_B_SETTLEMENT_DROP_REASONS: Record<
 		'unbound launch generation (the dispatch-generation binding is process-local and was lost)',
 	route_blocked: 'review route receipt enforcement blocked the settlement',
 	route_capacity: 'route evidence capacity exceeded',
+	route_read_fault:
+		'the route receipt read faulted non-ENOENT for this task (isolated drop; sibling tasks still settle)',
 	evidence_rejected:
 		'gate evidence recording rejected the settlement (generation fencing)',
 	rejection_persist_failed: 'the rejection verdict could not be persisted',
@@ -3658,6 +3777,88 @@ function flushStageBSettlementDropWarnings(
 		);
 	}
 	drops.clear();
+}
+
+/**
+ * #3516 item 7 (AC10): is this receipt-read fault the ENOENT class (absence —
+ * degrade to the ordinary fail-closed no-receipt decision) rather than a
+ * genuine read fault (ENOTDIR/EACCES/corruption — drop THIS task with
+ * route_read_fault and let sibling tasks settle)?
+ */
+function isEnoentLikeRouteReadFault(error: unknown): boolean {
+	const code = (error as NodeJS.ErrnoException | undefined)?.code;
+	if (code === 'ENOENT') return true;
+	return error instanceof Error && error.message.includes('ENOENT');
+}
+
+/**
+ * #3502 review (PRR-001) / #3516 item 1: the TASK_GATE block re-reads the
+ * PR-review re-entry binding context OUTSIDE the routing try/catch. Two fault
+ * classes must be told apart here:
+ *
+ *  - DELIBERATE fail-closed corruption refusals from the persistence layer
+ *    (`BLOCKED: … is not valid JSON` / `BLOCKED: … is invalid` —
+ *    src/pr-review/persistence.ts) are RETHROWN. Swallowing them into `null`
+ *    skipped the PR-review re-entry admission machinery entirely (the
+ *    activePrReviewBinding block below), so a dispatch whose gate state was
+ *    CORRUPT sailed past TASK_WORKFLOW_STAGE_A_REQUIRED and flipped task
+ *    attribution to session fallback — the exact authorization the refusal
+ *    exists to withhold.
+ *
+ *  - Genuine fs faults (ENOENT/ENOTDIR/EACCES/EISDIR on a broken or locked
+ *    `.swarm`) degrade locally to `null` — the same "no binding context"
+ *    value the ENOENT path returns — so the dispatch-time gates still run
+ *    (equal-or-tighter than the pre-#3380 skip) and the raw host-path error
+ *    never reaches the model-visible rejection surface (PRR-019).
+ *
+ * Site trade (#3516 item 1, per-site): both call sites below (the
+ * activePrReviewBinding read before resolveEvidenceTaskId, and the
+ * post-reservation re-read guarding the STAGE_A_REQUIRED refusal) sit in the
+ * fail-closed TASK_GATE chain, where the rethrow surfaces as a typed
+ * gate refusal rather than a raw crash.
+ *
+ * The degraded warn is operator-visible (criticalWarn), bounded, and
+ * redacted — never the raw unbounded error.message (#3516 item 11 / AC14).
+ * Routed through `_internals.readPrReviewReentryBindingContextSafe` so tests
+ * can drive sequenced read faults through the real wrapper.
+ */
+async function readPrReviewReentryBindingContextSafe(
+	directory: string,
+	sessionId: string,
+): Promise<Awaited<ReturnType<typeof readPrReviewReentryBindingContext>>> {
+	try {
+		return await _internals.readPrReviewReentryBindingContextInner(
+			directory,
+			sessionId,
+		);
+	} catch (error) {
+		// Bounded + redacted form of the raw error text (#3516 item 11): the
+		// derivation lives in boundedRedactedErrorDetail so this wrapper body
+		// never interpolates raw error text and stays formatting-stable.
+		const detail = boundedRedactedErrorDetail(error);
+		// Note: the prefix check runs on the coerced form, so a non-Error
+		// throw whose String() starts with BLOCKED: also rethrows (fail-closed).
+		if (detail.startsWith('BLOCKED:')) {
+			// Deliberate corruption refusal — fail closed (see doc above).
+			throw error;
+		}
+		logger.criticalWarn(
+			`[delegation-gate] PR-review re-entry binding context unreadable (session ${sanitizeDenialText(sessionId).slice(0, 64)}): ${sanitizeDenialText(detail)}. Routing-surface fs fault degrades locally to no-binding; dispatch-time gates still run (#3380).`,
+		);
+		return null;
+	}
+}
+
+/**
+ * #3516 item 11 / AC14: the single bounded, home-path-redacted form the
+ * wrapper uses for raw error text. Keeping the derivation in one helper
+ * means no caller interpolates error.message unredacted or unbounded, and
+ * the wrapper body itself stays free of raw error interpolation.
+ */
+function boundedRedactedErrorDetail(error: unknown): string {
+	return redactEmbeddedPaths(
+		error instanceof Error ? error.message : String(error),
+	).slice(0, 200);
 }
 
 /**
@@ -3777,6 +3978,8 @@ export function createDelegationGateHook(
 	>();
 	/** Versioned route receipts and the exact slot bound to each Task call. */
 	const reviewRouteByTaskKey = new Map<string, ReviewRouteRecord>();
+	/** #3516 item 13: the callID that last wrote each remembered route record. */
+	const reviewRouteWriterCallIdByTaskKey = new Map<string, string>();
 	const stageBRouteSlotByCallID = new Map<
 		string,
 		Map<string, ReviewRouteEvidence>
@@ -3784,26 +3987,79 @@ export function createDelegationGateHook(
 	const reviewRouteTaskKey = (sessionId: string, taskId: string): string =>
 		`${sessionId}\u0000${taskId}`;
 	const MAX_REVIEW_ROUTE_RECORDS = 128;
-	const rememberReviewRoute = (key: string, route: ReviewRouteRecord): void => {
+	/**
+	 * #3502 + #3516 item 13: remember a route record for a task key, stamped
+	 * with the WRITING callID. Kind-monotonicity closes the sibling-clobber
+	 * window: a PENDING or router-error record from callID X must NOT
+	 * overwrite an existing FULL `review_route_receipt` written by a
+	 * DIFFERENT callID — a concurrent dispatch's live route would otherwise
+	 * be dropped by a sibling whose own persist never landed (the old
+	 * task-scoped forget was removed for exactly this reason: it was dead at
+	 * its only call site — the failed dispatch never remembered a record, so
+	 * the slot's record belonged to a PRIOR dispatch). Same-callID overwrites
+	 * proceed (pending→full, full→router-error after a routing failure,
+	 * retry rewrites).
+	 */
+	const rememberReviewRoute = (
+		key: string,
+		route: ReviewRouteRecord,
+		writerCallID: string,
+	): void => {
+		const existingKind = reviewRouteByTaskKey.get(key)?.kind;
+		const existingWriter = reviewRouteWriterCallIdByTaskKey.get(key);
+		if (
+			route.kind !== 'review_route_receipt' &&
+			existingKind === 'review_route_receipt' &&
+			existingWriter !== undefined &&
+			existingWriter !== writerCallID
+		) {
+			return;
+		}
 		// Route records are needed across sibling Task completions, but must not
 		// grow with the lifetime of the hook. Refreshing an existing key keeps the
 		// most recent receipt at the hot end of the bounded FIFO.
 		reviewRouteByTaskKey.delete(key);
 		reviewRouteByTaskKey.set(key, route);
+		reviewRouteWriterCallIdByTaskKey.delete(key);
+		reviewRouteWriterCallIdByTaskKey.set(key, writerCallID);
 		while (reviewRouteByTaskKey.size > MAX_REVIEW_ROUTE_RECORDS) {
 			const oldest = reviewRouteByTaskKey.keys().next().value as
 				| string
 				| undefined;
 			if (!oldest) break;
 			reviewRouteByTaskKey.delete(oldest);
+			reviewRouteWriterCallIdByTaskKey.delete(oldest);
 		}
 	};
 	const clearReviewRouteStateForSession = (sessionId: string): void => {
 		const prefix = `${sessionId}\u0000`;
 		for (const key of reviewRouteByTaskKey.keys()) {
-			if (key.startsWith(prefix)) reviewRouteByTaskKey.delete(key);
+			if (key.startsWith(prefix)) {
+				reviewRouteByTaskKey.delete(key);
+				reviewRouteWriterCallIdByTaskKey.delete(key);
+			}
 		}
 	};
+	/**
+	 * #3502 review (PRR-007), reworked #3509/#3516: settlement-side gate backed
+	 * by the process-local route-invalidation registry — did THIS dispatch's
+	 * routing fault before its pending receipt persisted? When true, a prior
+	 * (possibly fail-open router-error) receipt on disk must not authorize the
+	 * attempt; the settlement drops it. The whole-call fault marker blocks
+	 * EVERY verdict task of the call and is removed only by whole-call
+	 * retirement (settlement loop end / terminal cleanup / the background
+	 * observer's confirmed commit); per-task keys consume per matched key.
+	 * Exposed via _internals.routeInvalidationProbe for tests.
+	 */
+	const isRouteBlockedForSettlement = (
+		callID: string,
+		sessionId: string,
+		taskId: string,
+	): boolean =>
+		isRouteBlockedForSettlementInRegistry(directory, callID, sessionId, taskId);
+	// #3502 review (PRR-007): expose THIS hook instance's settlement-side
+	// invalidation gate to tests (the maps are per-hook-instance closures).
+	_internals.routeInvalidationProbe = isRouteBlockedForSettlement;
 	const bindReviewRouteSlots = (
 		callID: string,
 		sessionId: string,
@@ -3927,18 +4183,87 @@ export function createDelegationGateHook(
 			clearExactScopeBinding(entry.binding);
 		}
 	};
-	const taskMetadata = async (input: {
+	// #3403 (AC2, review round 3): overlapping taskMetadata attempts for ONE
+	// child are serialized. Each attempt captures `previousParent` and writes
+	// lineage before awaiting its durable claim; without serialization a later
+	// attempt captured the earlier attempt's in-flight write as its previous
+	// parent, so when both claims failed the rollback re-committed the failed
+	// lineage (half-applied activation). Serialized, every attempt captures the
+	// state the previous attempt rolled back to. Chains are per hook instance
+	// and removed as soon as the child's tail settles (bounded).
+	const taskMetadataChainByChild = new Map<string, Promise<void>>();
+	const taskMetadata = (input: {
 		callID: string;
 		parentSessionID: string;
 		childSessionID: string;
 	}): Promise<void> => {
+		const key = input.childSessionID;
+		const prior = taskMetadataChainByChild.get(key) ?? Promise.resolve();
+		const run = prior.then(() => taskMetadataAttempt(input));
+		const settled = run.then(
+			() => undefined,
+			() => undefined,
+		);
+		taskMetadataChainByChild.set(key, settled);
+		void settled.then(() => {
+			if (taskMetadataChainByChild.get(key) === settled) {
+				taskMetadataChainByChild.delete(key);
+			}
+		});
+		return run;
+	};
+	const taskMetadataAttempt = async (input: {
+		callID: string;
+		parentSessionID: string;
+		childSessionID: string;
+	}): Promise<void> => {
+		// #3403 (trust model, PRR-009): field-by-field authority for this
+		// handler —
+		//   HOST-TYPED: `parentSessionID` (the host's `part.sessionID`; never
+		//   tool-controlled), `callID` (the host's Task part id), and the
+		//   dispatch `directory` (plugin-resolved project root).
+		//   TOOL-EMITTED: `childSessionID`. On v1 hosts it arrives in the Task
+		//   part's tool-emitted `state.metadata` (the documented design choice,
+		//   src/index.ts taskMetadata wiring); on v2 hosts the event pump
+		//   synthesizes the same v1 shape from host progress metadata
+		//   (#3401, src/host/v2/events.ts), gated on the tracked tool name so a
+		//   non-subagent tool cannot masquerade.
+		//   WHAT A TOOL-EMITTED CHILD ID CAN CAUSE: while a live `pending_child`
+		//   generation exists for the exact (parentSessionID, callID) pair, the
+		//   named session wins the durable claim — `ensureAgentSession` below
+		//   creates or OVERWRITES that session's identity (agentName → 'coder',
+		//   PRM ladder reset, currentTaskId/declaredCoderScope stamped from the
+		//   architect's declaration). The correlation key is the fence: an id
+		//   that names no live pending generation gets SCOPE_NOT_DECLARED and
+		//   CLAIMS NO SCOPE BINDING AND MUTATES NO SESSION IDENTITY. It is NOT
+		//   inert, though: the #3036 lineage write above records the TOOL-EMITTED
+		//   child against the HOST-TYPED parent and is kept on that benign path
+		//   by design. That lineage grants the child knowledge_receipt filing
+		//   authority for the parent's stamps (src/tools/knowledge-receipt.ts),
+		//   so a tool-emitted child id CAN widen that authority. Every other
+		//   claim failure (SCOPE_BINDING_ALREADY_CLAIMED, SCOPE_BINDING_AMBIGUOUS,
+		//   SCOPE_BINDING_EXPIRED, persistence and store-overload codes) and a
+		//   thrown claim roll that write back. This is the documented v1 host
+		//   contract; the model is stated here so the next reviewer need not
+		//   re-derive it. Changing it is a product decision, not a bug fix.
+		//
 		// Issue #3036: record the host-observed dispatch pair BEFORE any early
 		// return below — reviewer/test-engineer children return at the
 		// SCOPE_NOT_DECLARED guard and never reach ensureAgentSession, yet their
 		// knowledge_receipt filings still need the lineage to authorize against
 		// the architect-stamped membership. The parent id here is the host's
 		// `part.sessionID`, never tool-controlled metadata.
-		setDispatchParent(input.childSessionID, input.parentSessionID);
+		//
+		// #3403 (PRR-006): the write is generation-stamped so a FAILED claim can
+		// roll exactly this write back (see the failure branch below) — no
+		// half-applied activation (lineage committed while the route/full-auto
+		// bindings stay permanently skipped) survives the throw, and the
+		// pre-existing lineage (if any) is restored rather than deleted.
+		const previousParent = resolveDispatchParent(input.childSessionID);
+		const lineageWriteGeneration = writeDispatchParentEntry(
+			input.childSessionID,
+			input.parentSessionID,
+		);
 		const bindRouteChildSession = (): void => {
 			const routeBindings = stageBRouteSlotByCallID.get(input.callID);
 			if (!routeBindings) return;
@@ -3946,19 +4271,53 @@ export function createDelegationGateHook(
 				binding.childSessionId = input.childSessionID;
 			}
 		};
-		const result = await claimScopeBindingForChildDurably({
-			directory,
-			parentSessionId: input.parentSessionID,
-			childSessionId: input.childSessionID,
-			dispatchCallId: input.callID,
-		});
+		// A claim that THROWS (corrupt or unreadable scope artifacts surface as
+		// exceptions) is a failed activation too: roll the lineage write back
+		// before the exception propagates, so the throw path leaves no
+		// half-applied state either (review round 3, AC2).
+		const result = await _internals
+			.claimScopeBindingForChildDurably({
+				directory,
+				parentSessionId: input.parentSessionID,
+				childSessionId: input.childSessionID,
+				dispatchCallId: input.callID,
+			})
+			.catch((error: unknown) => {
+				restoreDispatchParentEntry(
+					input.childSessionID,
+					lineageWriteGeneration,
+					previousParent,
+				);
+				throw error;
+			});
 		if (!result.ok) {
 			if (result.code === 'SCOPE_NOT_DECLARED') {
 				// Reviewer/test-engineer tasks do not own coder scope, but their
 				// route tuple still needs the host-provided child identity.
 				bindRouteChildSession();
+				// #3401 (PR #3402 review PRR-002): the v2 activation path makes
+				// exactly one claim attempt per dispatch (the host emits one
+				// child-identity progress event), so a miss here strands the
+				// dispatch's pending_child generation with no later retry. Log
+				// the dispatch identity (debug-gated) so a recurrence of the
+				// #3401 wedge is distinguishable from this designed non-coder
+				// silent path.
+				logger.log('scope claim: no pending generation for dispatch', {
+					parentSessionId: input.parentSessionID,
+					childSessionId: input.childSessionID,
+					dispatchCallId: input.callID,
+				});
 				return;
 			}
+			// #3403: roll this attempt's lineage write back before surfacing the
+			// failure. Generation-gated: a stale failure (a newer write for the same
+			// child landed while this claim was in flight) no-ops and never clobbers
+			// the newer entry, including the same-parent case.
+			restoreDispatchParentEntry(
+				input.childSessionID,
+				lineageWriteGeneration,
+				previousParent,
+			);
 			throw new Error(`${result.code}: ${result.message}`);
 		}
 		const { previous, claimed } = result.value;
@@ -4062,6 +4421,14 @@ export function createDelegationGateHook(
 			);
 		}
 		stageBDispatchGenerationsByCallID.set(callID, generations);
+		// #3502 review (PRR-011): a dispatch with NO bound tasks has nothing to
+		// persist — the store returns false for an empty binding list, which is
+		// indistinguishable from a genuine write failure and produced a false
+		// "binding write FAILED" CRITICAL-WARN on every such dispatch. Drop
+		// vacuously: there is no binding to lose, so drop-on-restart holds.
+		if (generations.size === 0) {
+			return;
+		}
 		// Issue #2829: durable twin of the in-memory binding. NON-FATAL by
 		// design — the in-memory map remains the primary fence; the durable
 		// record only ADDS post-restart reconstruction (which still feeds the
@@ -4619,7 +4986,7 @@ export function createDelegationGateHook(
 						sessionId: input.sessionID,
 						taskId: routeTaskId,
 					});
-					await persistReviewRouteReceipt({
+					await _internals.persistReviewRouteReceiptAtDispatch({
 						projectRoot: directory,
 						receipt: pendingRoute,
 					});
@@ -4627,6 +4994,7 @@ export function createDelegationGateHook(
 					rememberReviewRoute(
 						reviewRouteTaskKey(input.sessionID, routeTaskId),
 						pendingRoute,
+						input.callID,
 					);
 					if (changedFiles.length === 0) {
 						const routerError = buildReviewRouteRouterError({
@@ -4634,13 +5002,14 @@ export function createDelegationGateHook(
 							sessionId: input.sessionID,
 							taskId: routeTaskId,
 						});
-						await persistReviewRouteReceipt({
+						await _internals.persistReviewRouteReceiptAtDispatch({
 							projectRoot: directory,
 							receipt: routerError,
 						});
 						rememberReviewRoute(
 							reviewRouteTaskKey(input.sessionID, routeTaskId),
 							routerError,
+							input.callID,
 						);
 					} else {
 						const routing = await routeReviewForChanges(
@@ -4664,13 +5033,14 @@ export function createDelegationGateHook(
 								(_, index) => `${routeTaskId}:test_engineer:${index + 1}`,
 							),
 						});
-						await persistReviewRouteReceipt({
+						await _internals.persistReviewRouteReceiptAtDispatch({
 							projectRoot: directory,
 							receipt: routeReceipt,
 						});
 						rememberReviewRoute(
 							reviewRouteTaskKey(input.sessionID, routeTaskId),
 							routeReceipt,
+							input.callID,
 						);
 						if (shouldParallelizeReview(routing)) {
 							pushAdvisory(
@@ -4684,37 +5054,87 @@ export function createDelegationGateHook(
 			} catch (error) {
 				// A route computation failure is fail-open only when an explicit
 				// typed error receipt can be persisted. If persistence itself fails,
-				// the pending marker or missing receipt keeps Stage-B fail closed.
+				// the pending marker or missing receipt keeps Stage-B fail closed
+				// (default review_routing.enforce_receipts). The dispatch-time
+				// gates below (ACCEPTANCE for coder/reviewer, TASK_GATE_AGENTS)
+				// must STILL run: this catch fails the routing bookkeeping
+				// locally, never the whole toolBefore (#3380). The ONE
+				// deliberate exception (#3509): when the invalidation registry
+				// refuses to record the fault at capacity, the catch rethrows
+				// ROUTE_INVALIDATION_CAPACITY — admitting the dispatch without
+				// its invalidation marker would let a stale prior receipt
+				// authorize it, so admission itself fails closed.
 				const detail = error instanceof Error ? error.message : String(error);
 				if (!routeDispatchStarted) {
 					logger.warn(
 						`[delegation-gate] review route dispatch could not establish its pending receipt: ${detail}`,
 					);
-					return;
-				}
-				const routerError = buildReviewRouteRouterError({
-					code: /unavailable|timed out|timeout|not found/i.test(detail)
-						? 'ROUTER_UNAVAILABLE'
-						: 'ROUTER_FAILED',
-					sessionId: input.sessionID,
-					taskId: routedTaskId ?? `unresolved-${input.callID}`,
-					detail,
-				});
-				try {
-					await persistReviewRouteReceipt({
-						projectRoot: directory,
-						receipt: routerError,
-					});
+					// #3509: EVERY pre-persist routing fault — before task
+					// resolution (routedTaskId null), under the
+					// unresolved-<callID> fallback, and after resolution but
+					// before the persist landed — records a call-scoped fault.
+					// The marker is keyed by the WRITING callID in the
+					// process-local registry (not this hook instance), so a
+					// later settlement, foreground or background, refuses the
+					// dispatch regardless of what a stale prior receipt on
+					// disk would otherwise authorize.
+					const faultRecorded = recordRouteFault(
+						directory,
+						input.sessionID,
+						input.callID,
+					);
+					let keyRecorded = true;
 					if (routedTaskId) {
-						rememberReviewRoute(
-							reviewRouteTaskKey(input.sessionID, routedTaskId),
-							routerError,
+						// Keep the per-task key consultable under the routing-time
+						// task id (the verdict task of a settlement for this call
+						// may legitimately differ — unresolved fallback, set
+						// dispatches).
+						keyRecorded = recordRouteInvalidation(
+							directory,
+							input.sessionID,
+							input.callID,
+							routedTaskId,
 						);
 					}
-				} catch (persistError) {
-					logger.warn(
-						`[delegation-gate] review route receipt was not recorded: ${detail}; router-error persistence failed: ${persistError instanceof Error ? persistError.message : String(persistError)}`,
-					);
+					if (!faultRecorded || !keyRecorded) {
+						// Fail-closed admission (#3509): the registry is at a loud
+						// capacity bound and refused the record (the registry
+						// already emitted criticalWarn naming the bound). An
+						// unprotected dispatch is worse than a refused one.
+						// #3564: the message distinguishes the two occupancy kinds
+						// an operator can be facing — live calls (settled by
+						// working the lanes) vs leaked markers whose calls
+						// already ended (terminal; only a reset clears them).
+						throw new Error(
+							`ROUTE_INVALIDATION_CAPACITY: refusing ${targetAgent} dispatch — its routing faulted before the route receipt persisted and the invalidation registry is at capacity, so the dispatch cannot be admitted without its settlement-protection marker (no marker was evicted). Occupancy can mix LIVE calls (settle or retire them) with LEAKED markers whose calls already ended — orphaned terminal markers cannot be settled; restart the plugin or run /swarm close to clear the bound`,
+						);
+					}
+				} else {
+					const routerError = buildReviewRouteRouterError({
+						code: /unavailable|timed out|timeout|not found/i.test(detail)
+							? 'ROUTER_UNAVAILABLE'
+							: 'ROUTER_FAILED',
+						sessionId: input.sessionID,
+						taskId: routedTaskId ?? `unresolved-${input.callID}`,
+						detail,
+					});
+					try {
+						await _internals.persistReviewRouteReceiptAtDispatch({
+							projectRoot: directory,
+							receipt: routerError,
+						});
+						if (routedTaskId) {
+							rememberReviewRoute(
+								reviewRouteTaskKey(input.sessionID, routedTaskId),
+								routerError,
+								input.callID,
+							);
+						}
+					} catch (persistError) {
+						logger.warn(
+							`[delegation-gate] review route receipt was not recorded: ${detail}; router-error persistence failed: ${persistError instanceof Error ? persistError.message : String(persistError)}`,
+						);
+					}
 				}
 			}
 		}
@@ -4733,13 +5153,44 @@ export function createDelegationGateHook(
 			// Reuse the same broad text-field extraction other checks in this file
 			// use (see resolveDelegatedPlanTaskId / taskLooksLikePlanCritic) so the
 			// ACCEPTANCE line is found regardless of which arg carried the prompt.
-			const acceptancePromptText = ACCEPTANCE_ARGS_FIELDS.map(
-				(field) => args[field],
-			)
-				.filter((value): value is string => typeof value === 'string')
-				.join('\n');
-			const acceptanceCheck =
-				validateCoderReviewerAcceptanceField(acceptancePromptText);
+			const joinAcceptancePromptText = (): string =>
+				ACCEPTANCE_ARGS_FIELDS.map((field) => args[field])
+					.filter((value): value is string => typeof value === 'string')
+					.join('\n');
+			let acceptanceCheck = validateCoderReviewerAcceptanceField(
+				joinAcceptancePromptText(),
+			);
+			// Opt-in (hooks.auto_inject_acceptance, default false): synthesize a default
+			// ACCEPTANCE block instead of rejecting. The injection is re-validated
+			// against the exact text the validator reads, and the signal is emitted
+			// only when it actually took effect; otherwise the strict rejection below
+			// stands unchanged.
+			if (
+				!acceptanceCheck.valid &&
+				acceptanceCheck.reason &&
+				config.hooks?.auto_inject_acceptance
+			) {
+				const injectionReason = acceptanceCheck.reason;
+				const originalFields = { ...args };
+				const injectedField = injectDefaultAcceptance(args, injectionReason);
+				if (injectedField) {
+					acceptanceCheck = validateCoderReviewerAcceptanceField(
+						joinAcceptancePromptText(),
+					);
+					if (!acceptanceCheck.valid) {
+						// The injection did not satisfy the gate: leave the rejected
+						// dispatch exactly as the caller sent it.
+						args[injectedField] = originalFields[injectedField];
+					} else {
+						const notice = `ACCEPTANCE AUTO-INJECTED: the ${targetAgent} dispatch carried no usable ACCEPTANCE criteria (${injectionReason}), so hooks.auto_inject_acceptance wrote a generic default into ${injectedField}. State a task-specific ACCEPTANCE line in future dispatches (see ACCEPTANCE FIELD RESOLUTION).`;
+						logger.warn(`[delegation-gate] ${notice}`);
+						// logger.warn is debug-gated, so also surface it to the dispatching
+						// session where it is model-visible.
+						const noticeSession = swarmState.agentSessions.get(input.sessionID);
+						if (noticeSession) pushAdvisory(noticeSession, notice);
+					}
+				}
+			}
 			if (!acceptanceCheck.valid) {
 				const detail =
 					acceptanceCheck.reason === 'acceptance_field_empty'
@@ -4862,8 +5313,14 @@ export function createDelegationGateHook(
 				undefined,
 				directory,
 			);
+			// #3516 item 1: routed through the _internals seam — deliberate
+			// `BLOCKED:` corruption refusals rethrow (fail-closed TASK_GATE);
+			// genuine fs faults degrade to null and the gates below still run.
 			const activePrReviewBinding = isPrReviewReentryAgent
-				? await readPrReviewReentryBindingContext(directory, input.sessionID)
+				? await _internals.readPrReviewReentryBindingContextSafe(
+						directory,
+						input.sessionID,
+					)
 				: null;
 			const resolvedTaskId = await resolveEvidenceTaskId(
 				args,
@@ -4916,6 +5373,25 @@ export function createDelegationGateHook(
 				const { reserveActivePrReviewReentryAuthorization } = await import(
 					'./pr-workflow-gate.js'
 				);
+				// #3502 review (PRR-009), corrected #3516 item 8 (AC9):
+				// pre-flight the capacity fence BEFORE consuming the
+				// one-use token — rememberStageBDispatchGenerations throws
+				// STAGE_B_CONTEXT_CAPACITY when the fence trips, which
+				// would burn a consumed authorization. The pre-flight is
+				// BEST-EFFORT across the reservation await: concurrent
+				// dispatches admitted during the await can fill the fence
+				// between this check and the remember call below, so the
+				// remember-time throw can still fire in that window. The
+				// pre-flight narrows the window; it does not close it.
+				if (
+					!stageBDispatchGenerationsByCallID.has(input.callID) &&
+					stageBDispatchGenerationsByCallID.size >=
+						MAX_PENDING_CODER_CHANGE_CONTEXTS
+				) {
+					throw new Error(
+						`STAGE_B_CONTEXT_CAPACITY: refusing Stage B dispatch because ${MAX_PENDING_CODER_CHANGE_CONTEXTS} live generation bindings are already tracked`,
+					);
+				}
 				const consumed = await reserveActivePrReviewReentryAuthorization(
 					directory,
 					input.sessionID,
@@ -4947,7 +5423,16 @@ export function createDelegationGateHook(
 					return;
 				}
 				if (
-					await readPrReviewReentryBindingContext(directory, input.sessionID)
+					// #3516 item 1 (second read site): after the reservation
+					// await the read runs a second time and CAN fault
+					// independently — a `BLOCKED:` refusal must rethrow (the
+					// one-use authorization is gone AND the state is corrupt),
+					// while an fs fault degrades and this STAGE_A_REQUIRED
+					// refusal fires exactly as before.
+					await _internals.readPrReviewReentryBindingContextSafe(
+						directory,
+						input.sessionID,
+					)
 				) {
 					throw new Error(
 						`TASK_WORKFLOW_STAGE_A_REQUIRED: cannot dispatch ${targetAgent} without a task workflow because its one-use PR-review re-entry authorization was already consumed or is unavailable. Issue a fresh authorization immediately before the direct Task dispatch.`,
@@ -5016,6 +5501,23 @@ export function createDelegationGateHook(
 					const { reserveActivePrReviewReentryAuthorization } = await import(
 						'./pr-workflow-gate.js'
 					);
+					// #3502 review (PRR-009), corrected #3516 item 8 (AC9):
+					// capacity pre-flight before consuming the one-use token
+					// (same rationale as the standalone site) — BEST-EFFORT
+					// across the reservation await below: concurrent
+					// dispatches can fill the fence between this check and
+					// the remember call, so the remember-time
+					// STAGE_B_CONTEXT_CAPACITY throw can still fire and burn
+					// the consumed authorization in that window.
+					if (
+						!stageBDispatchGenerationsByCallID.has(input.callID) &&
+						stageBDispatchGenerationsByCallID.size >=
+							MAX_PENDING_CODER_CHANGE_CONTEXTS
+					) {
+						throw new Error(
+							`STAGE_B_CONTEXT_CAPACITY: refusing Stage B dispatch because ${MAX_PENDING_CODER_CHANGE_CONTEXTS} live generation bindings are already tracked`,
+						);
+					}
 					const consumed = await reserveActivePrReviewReentryAuthorization(
 						directory,
 						input.sessionID,
@@ -5797,8 +6299,16 @@ export function createDelegationGateHook(
 	};
 
 	// toolAfter: resets qaSkip fields and advances task states based on delegation type
+	// #3564: per-call defer signals for the structural retirement backstop.
+	// The background block below adds a callID when (and only when) that
+	// call's marker ownership transfers to the completion observer: a durable
+	// correlation record that is live, gate-bearing, and observer-consumable.
+	// Every other exit path flushes in toolAfter's finally, which consumes its
+	// OWN call's entry — a Set, not a slot, so concurrently-deferring calls can
+	// never overwrite one another's signals.
+	const deferredRouteRetirements = new Set<string>();
 	// Uses stored input args from guardrails when available, falls back to delegationChains
-	const toolAfter = async (
+	const toolAfterInner = async (
 		input: {
 			tool: string;
 			sessionID: string;
@@ -6026,6 +6536,15 @@ export function createDelegationGateHook(
 							clearPublishedScopeBindings(input.callID);
 							clearCoderTaskChangeContext(input.callID);
 							if (storedArgs !== undefined) deleteStoredInputArgs(input.callID);
+							// #3509: this early return skips the generic toolAfter
+							// cleanup below, so retire the call's route-invalidation
+							// marker HERE — a no-correlation background dispatch is
+							// terminal (no settlement will ever consult it), and
+							// settled traffic must leave no registry residue.
+							retireRouteInvalidationsForCallInDirectory(
+								directory,
+								input.callID,
+							);
 							return;
 						}
 						if (subagentSessionId) {
@@ -6140,6 +6659,15 @@ export function createDelegationGateHook(
 									pendingInput,
 									{ staleTimeoutMs: backgroundPendingTimeoutMs },
 								);
+							// #3564: the fallback artifact's record (when the primary write
+							// failed) — the observer-ownership decision below must apply the
+							// SAME consumable/gate-bearing checks to it as to a primary record
+							// (a null-evidence fallback is NOT observer-settleable).
+							let fallbackRecord: Awaited<
+								ReturnType<
+									typeof _internals.writeDelegationFallbackForBackground
+								>
+							> = null;
 							backgroundRecordDurable =
 								primaryOutcome.status === 'recorded' ||
 								primaryOutcome.status === 'duplicate';
@@ -6166,15 +6694,44 @@ export function createDelegationGateHook(
 									`BACKGROUND DELEGATION CORRELATION CONFLICT: ${subagentType} (${subagentSessionId}) collided with a different durable launch owner (parent=${primaryOutcome.record.parentSessionId}, call=${primaryOutcome.record.callID}, agent=${primaryOutcome.record.swarmPrefixedAgent}, task=${primaryOutcome.record.planTaskId ?? 'none'}). Inspect that existing owner and reconcile it before continuing. ${worktreeStatus} ${reservationStatus} No fallback owner was written and no reservation was bound. Do not abort, delete, or re-dispatch this correlation until reconciliation is complete. Do not advance task ${evidenceTaskId ?? 'unknown'} until the collision is resolved.`,
 								);
 							} else if (primaryOutcome.status === 'failed') {
-								backgroundRecordDurable =
-									(await _internals.writeDelegationFallbackForBackground(
+								fallbackRecord =
+									await _internals.writeDelegationFallbackForBackground(
 										directory,
 										pendingInput,
-									)) !== null;
+									);
+								backgroundRecordDurable = fallbackRecord !== null;
 								if (backgroundRecordDurable) {
 									logger.warn(
 										`[delegation-gate] background delegation ${subagentSessionId} persisted to the independent fallback artifact after the primary ledger write failed`,
 									);
+								}
+							}
+							// #3564: observer-ownership decision for the call's
+							// route-invalidation marker. Defer retirement to the
+							// completion observer ONLY when a durable correlation
+							// record exists that is live, gate-bearing, and
+							// observer-consumable (the exact classes the observer's
+							// retire-on-confirmed-consumed and the pending-record
+							// stale sweep now own end-to-end). Output-running shape
+							// is deliberately NOT part of this decision: a
+							// terminal-output background dispatch with a live
+							// durable record is consumed by the observer too.
+							// Recorded/duplicate consult the existing record's
+							// status; a failed primary consults the fallback
+							// record (freshly written, hence pending).
+							if (backgroundRecordDurable) {
+								const recordForOwnership =
+									primaryOutcome.status === 'failed'
+										? fallbackRecord?.record
+										: primaryOutcome.record;
+								const consumable =
+									recordForOwnership?.status === 'pending' ||
+									recordForOwnership?.status === 'running' ||
+									recordForOwnership?.status === 'completed' ||
+									recordForOwnership?.status === 'ingestion_error';
+								const gateBearing = recordForOwnership?.evidenceTaskId != null;
+								if (consumable && gateBearing) {
+									deferredRouteRetirements.add(input.callID);
 								}
 							}
 							if (!backgroundCorrelationConflict && !backgroundRecordDurable) {
@@ -6845,25 +7402,96 @@ export function createDelegationGateHook(
 											: getStageBRouteEvidence(session, taskId);
 										const routeEnforcementEnabled =
 											config.review_routing?.enforce_receipts ?? true;
-										const routeDecision = enforcePersistedReviewRouteReceipt({
-											projectRoot: directory,
-											sessionId: input.sessionID,
+										// #3502 (PRR-007) / #3509: THIS dispatch's routing
+										// faulted before its pending receipt persisted
+										// (registry-recorded at the routing catch) — a prior
+										// fail-open router-error receipt on disk must not
+										// authorize it. Withhold advancement regardless of
+										// disk state. The whole-call fault marker blocks every
+										// verdict task of this call; per-task keys consume per
+										// matched key; the record retires at this loop's end.
+										const routeInvalidatedHere = isRouteBlockedForSettlement(
+											input.callID,
+											input.sessionID,
 											taskId,
-											receipts: prospectiveRouteEvidence,
-											enforcementEnabled: routeEnforcementEnabled,
-											legacyUnrouted,
-											requireEvidenceBindings: true,
-											requireCompleteEvidence: false,
-											expectedDispatch: routeBinding
-												? {
-														role: routeBinding.role,
-														identity: routeBinding.identity,
-														callId: routeBinding.callId,
-														childSessionId: routeBinding.childSessionId,
-														generation: routeBinding.generation,
-													}
-												: undefined,
-										});
+										);
+										if (routeInvalidatedHere && routeEnforcementEnabled) {
+											logger.warn(
+												`[delegation-gate] Stage B route receipt blocked ${taskId}: ROUTE_RECEIPT_INVALIDATED (this dispatch's routing faulted before its receipt persisted; a prior receipt does not authorize it)`,
+											);
+											warnStageBSettlementDropped(session, {
+												taskId,
+												agent: targetAgent,
+												callID: input.callID,
+												reasonClass: 'route_blocked',
+												detail:
+													'route receipt invalidated: this dispatch route persist failed',
+												drops: stageBSettlementDrops,
+											});
+											continue;
+										}
+										// #3516 item 7 (AC10): BOTH receipt reads are
+										// per-task — a non-ENOENT read fault (POSIX ENOTDIR
+										// beneath a file-ancestor, EACCES, corruption
+										// refusals) drops THIS task only (route_read_fault)
+										// so sibling tasks in the same settlement loop still
+										// settle. Routed through the _internals seam so
+										// fault-on-first-read / fault-on-second-read are
+										// deterministically injectable in tests.
+										let routeDecision: ReturnType<
+											typeof enforcePersistedReviewRouteReceipt
+										>;
+										try {
+											routeDecision =
+												_internals.enforcePersistedReviewRouteReceiptAtSettlement(
+													{
+														projectRoot: directory,
+														sessionId: input.sessionID,
+														taskId,
+														receipts: prospectiveRouteEvidence,
+														enforcementEnabled: routeEnforcementEnabled,
+														legacyUnrouted,
+														requireEvidenceBindings: true,
+														requireCompleteEvidence: false,
+														expectedDispatch: routeBinding
+															? {
+																	role: routeBinding.role,
+																	identity: routeBinding.identity,
+																	callId: routeBinding.callId,
+																	childSessionId: routeBinding.childSessionId,
+																	generation: routeBinding.generation,
+																}
+															: undefined,
+													},
+												);
+										} catch (err) {
+											if (!isEnoentLikeRouteReadFault(err)) {
+												// PRR-004 (review pr3553-20261103): the fault text
+												// carries absolute receipt paths — bound and redact
+												// it like every other operator/model-visible fault
+												// detail (same helper the safe wrapper uses).
+												const readFaultDetail = boundedRedactedErrorDetail(err);
+												logger.warn(
+													`[delegation-gate] Stage B route receipt read fault for ${taskId}: ${readFaultDetail}`,
+												);
+												warnStageBSettlementDropped(session, {
+													taskId,
+													agent: targetAgent,
+													callID: input.callID,
+													reasonClass: 'route_read_fault',
+													detail: `route receipt read faulted: ${readFaultDetail}`,
+													drops: stageBSettlementDrops,
+												});
+												continue;
+											}
+											// ENOENT-class absence degrades to the ordinary
+											// fail-closed no-receipt decision.
+											routeDecision = {
+												canAdvance: false,
+												mode: 'enforced',
+												reason: 'ROUTE_RECEIPT_MISSING (read faulted ENOENT)',
+											};
+										}
 										if (!routeDecision.canAdvance) {
 											logger.warn(
 												`[delegation-gate] Stage B route receipt blocked ${taskId}: ${routeDecision.reason ?? 'unknown reason'}`,
@@ -6878,18 +7506,50 @@ export function createDelegationGateHook(
 											});
 											continue;
 										}
-										const routeCompleteDecision =
-											routeEnforcementEnabled && routeBinding
-												? enforcePersistedReviewRouteReceipt({
-														projectRoot: directory,
-														sessionId: input.sessionID,
+										let routeCompleteDecision:
+											| ReturnType<typeof enforcePersistedReviewRouteReceipt>
+											| undefined;
+										if (routeEnforcementEnabled && routeBinding) {
+											try {
+												routeCompleteDecision =
+													_internals.enforcePersistedReviewRouteReceiptAtSettlement(
+														{
+															projectRoot: directory,
+															sessionId: input.sessionID,
+															taskId,
+															receipts: prospectiveRouteEvidence,
+															enforcementEnabled: true,
+															requireEvidenceBindings: true,
+															requireCompleteEvidence: true,
+														},
+													);
+											} catch (err) {
+												if (!isEnoentLikeRouteReadFault(err)) {
+													// PRR-004: bound+redact, matching the read twin.
+													const completenessFaultDetail =
+														boundedRedactedErrorDetail(err);
+													logger.warn(
+														`[delegation-gate] Stage B route completeness read fault for ${taskId}: ${completenessFaultDetail}`,
+													);
+													warnStageBSettlementDropped(session, {
 														taskId,
-														receipts: prospectiveRouteEvidence,
-														enforcementEnabled: true,
-														requireEvidenceBindings: true,
-														requireCompleteEvidence: true,
-													})
-												: undefined;
+														agent: targetAgent,
+														callID: input.callID,
+														reasonClass: 'route_read_fault',
+														detail: `route completeness read faulted: ${completenessFaultDetail}`,
+														drops: stageBSettlementDrops,
+													});
+													continue;
+												}
+												// ENOENT-class absence: no complete route.
+												routeCompleteDecision = {
+													canAdvance: false,
+													mode: 'enforced',
+													reason:
+														'ROUTE_RECEIPT_MISSING (completeness read faulted ENOENT)',
+												};
+											}
+										}
 										const routeComplete =
 											routeEnforcementEnabled && routeBinding
 												? (routeCompleteDecision?.canAdvance ?? false)
@@ -7022,6 +7682,18 @@ export function createDelegationGateHook(
 								// this invocation — session advisories were queued per task
 								// above; this emits the aggregated ungated host-log line(s).
 								flushStageBSettlementDropWarnings(stageBSettlementDrops);
+								// #3509: foreground retirement owner — this loop IS the
+								// terminal outcome for every verdict task of the call
+								// (settled or dropped), so the call-scoped invalidation
+								// marker's work is done and it retires here (empty
+								// session/directory containers are pruned by the registry).
+								// A later healthy dispatch is a different callID and records
+								// nothing.
+								retireRouteInvalidationsForCall(
+									directory,
+									input.sessionID,
+									input.callID,
+								);
 							}
 						}
 					} // end if (!councilActive) — primary Stage B path
@@ -7436,6 +8108,13 @@ export function createDelegationGateHook(
 				stageBRouteSlotByCallID.delete(input.callID);
 				gateDispatchPrimaryTaskByCallID.delete(input.callID);
 				stageBDispatchContextByCallID.delete(input.callID);
+				// #3509: failed-output terminal path (and any settlement-skip):
+				// a reviewer/test_engineer call that returned a terminal failure
+				// never runs the settlement loop above, so this generic cleanup
+				// is its retirement owner — the invalidation marker must not
+				// outlive the call it protects. Session-agnostic sweep because
+				// this path does not re-derive the session key.
+				retireRouteInvalidationsForCallInDirectory(directory, input.callID);
 
 				// ── Completion gate: push advisory if a task awaits completion ──
 				// B3 (issue #1976): the `break` below only caps pushes to one per
@@ -7481,6 +8160,39 @@ export function createDelegationGateHook(
 		}
 	};
 
+	// #3564: structural retirement backstop. toolAfterInner keeps its original
+	// body; this wrapper guarantees every recorded route-invalidation marker
+	// either had a retirement owner run (the legacy sites discharge the
+	// obligation inside the registry retire functions) or its ownership was
+	// deliberately deferred to the completion observer — no early return,
+	// catch arm, or non-registry throw between record and retirement can
+	// leave the marker with no reachable retirement owner.
+	const toolAfter = async (
+		input: {
+			tool: string;
+			sessionID: string;
+			callID: string;
+			args?: Record<string, unknown>;
+		},
+		_output: unknown,
+	): Promise<void> => {
+		try {
+			await toolAfterInner(input, _output);
+		} finally {
+			// Consume THIS call's own entry only: a deferred call's finally
+			// leaves its marker to the completion observer; every other exit
+			// flushes. Concurrent calls each consume their own entry.
+			const deferred = deferredRouteRetirements.delete(input.callID);
+			if (!deferred) {
+				flushRouteRetirementObligation(
+					directory,
+					input.sessionID || undefined,
+					input.callID,
+				);
+			}
+		}
+	};
+
 	return {
 		toolBefore,
 		messagesTransform: async (
@@ -7508,8 +8220,21 @@ export function createDelegationGateHook(
 			// Only operate when architect is the active agent
 			// Check if agent is undefined (main session = architect) or is 'architect' (after stripping prefix)
 			// Skip empty string agent names (invalid/uninitialized state)
-			const agent = lastUserMessage.info?.agent;
-			if (agent === '') return; // Skip empty string explicitly
+			// #3320: identity resolves through the shared message-transform context
+			// (session state first, last user message's info.agent fallback), so v2
+			// sessions seeded with a native agent (plan/build) are not treated as
+			// the architect main session.
+			// #3320 review round: the shared resolver's truthiness filter collapses
+			// an empty-string agent to undefined, so the raw last-user-message
+			// value is checked here first — an explicit empty-string identity is
+			// invalid/uninitialized state and must skip injection (pinned by
+			// tests/unit/hooks/delegation-gate-task-1-5.validation.test.ts).
+			const rawLastUserAgent = lastUserMessage.info?.agent;
+			if (rawLastUserAgent === '') return; // Skip empty string explicitly
+			const mctx = resolveMessageTransformContext(
+				output as Parameters<typeof resolveMessageTransformContext>[0],
+			);
+			const agent = mctx.agent;
 			const strippedAgent = agent ? stripKnownSwarmPrefix(agent) : undefined;
 			if (strippedAgent && strippedAgent !== 'architect') return;
 
@@ -7907,6 +8632,15 @@ ${warningLines.join('\n')}`;
 			// the retry fail closed as unbound (issue #2491, F-001).
 			stageBRouteSlotByCallID.delete(callID);
 			stageBDispatchContextByCallID.delete(callID);
+			// #3509: a denied call never fires toolAfter, so its route
+			// invalidation marker (recorded when its routing faulted) retires
+			// HERE — the dispatch was refused and no settlement will ever
+			// consult the marker again.
+			if (sessionID) {
+				retireRouteInvalidationsForCall(directory, sessionID, callID);
+			} else {
+				retireRouteInvalidationsForCallInDirectory(directory, callID);
+			}
 			// PR #2883 review finding (CRITICAL): the in-memory
 			// dispatch-generation binding is call-scoped state of exactly the
 			// same kind and must drain here too. The map's cap

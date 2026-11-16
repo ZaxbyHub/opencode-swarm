@@ -262,7 +262,16 @@ transition ID. Under plan-lock then task-evidence-lock ordering it writes a
 PREPARED task-repair record before moving the ledger projection, clears only
 that task's QA proof, appends one audited event, and commits. Retrying the same
 transition lazily resumes that exact task; plugin initialization never scans
-repair records.
+repair records. One `in_progress` case shares this exact transaction (issue
+#3389): a task whose coder retry ladder recorded its durable `user_escalation`
+rung for the current retry epoch (with `retryCount` at the threshold) is
+repairable in one audited step — the same CAS fields, WAL, and audit event.
+The `repair_idle` transition that closes every repair — settled reopen and
+this wedge case alike — resets the retry circuit
+(`retryCount`/`retryHistory`/`retryEpoch` reset, generation rotated). Every
+other `in_progress` repair still fails closed with
+`TASK_REPAIR_NOT_BACKWARD`; see the
+[recovery runbook](troubleshooting/recovery-runbook.md).
 
 Close-specific terminal reconciliation is similarly exact-task transactional.
 New ledgers persist a `plan_epoch` in the `plan_created` root payload. When a
@@ -623,6 +632,53 @@ Unlike `execution_profile` (which IS included in `computePlanLedgerHash`), `fr_r
 | `computePlanLedgerHash` / `computePlanStructureHash` / `computePlanContentHash` | ❌ Deliberately excluded (see above) |
 | `migrateLegacyPlan` | Not applicable — legacy markdown plans predate this field |
 
+## Task Fields: `evidence_class` / `evidence_anchors` (Issue #3422)
+
+**v7.x** added two optional task fields for the external-evidence completion
+class: `evidence_class: 'coder_mutation' | 'external_git'` and
+`evidence_anchors: Array<{ command: string; expect?: string; expect_prefix?: string }>`
+(1..16 anchors; `expect` matches trimmed stdout exactly, `expect_prefix` must be
+non-empty and matches a prefix). A task declaring `external_git` completes via
+`/swarm attest <task_id>` — the pinned anchors run as bounded read-only git
+spawns and a durable external-evidence bundle (with a cursor-free
+`declarationDigest` binding the exact declaration + plan identity + workflow
+generation) admits completion without any coder settlement.
+
+### Revision semantics
+
+On a `save_plan` revision, omitting both fields **preserves** the task's prior
+declaration (an ordinary-revision lookup keyed by task id, independent of the
+reconcile-only `existingPhase` path); an explicit `evidence_class:
+'coder_mutation'` **clears** it (and `evidence_anchors` must then be
+absent/empty). A declaration CHANGE (or removing a declared task) revokes the
+task's nonterminal external proof (`external_evidence_revoked` transition)
+before any ledger/projection mutation, so a stale bundle can never become
+current again without a fresh attest; terminal evidence is never revoked
+(audit history), and `repair_idle` reopen already forces a fresh attest.
+
+### Hash coverage — INCLUDED (unlike `fr_refs`)
+
+Both fields ARE included in `computePlanLedgerHash`,
+`computePlanStructureHash`, and `computePlanContentHash`. They are optional
+and omitted-when-unset, so every plan persisted before these fields existed
+still hashes byte-identically; but unlike `fr_refs`, a declaration edit
+changes all three hashes — deliberately, because the declaration gates
+completion admission, so structural snapshots, startup staleness detection,
+and approval drift must all observe it. (Documented trade-off: a plugin
+version predating these fields computes a different hash for a plan that SETS
+them; only new versions author such plans.)
+
+### Round-trip surfaces
+
+| Surface | Carries the declaration? |
+|---------|--------------------------|
+| `plan.json` | Persisted in schema |
+| Ledger replay / snapshot embed | Rides the generic whole-`Plan`-object embed |
+| `checkpoint.ts` import/export | Passes through via `PlanSchema.parse` |
+| `get_approved_plan` tool | Passes through generically |
+| All three hash functions | Included (see above) |
+| `plan.md` / checkpoint markdown | Rendered compactly for declared tasks only (legacy task lines byte-unchanged) |
+
 ## Scope Materialization at Worktree Paths (FR-102)
 
 When Lean Turbo provisions a lane worktree, or the delegation gate provisions an isolated worktree for a coder (standard worktree isolation — always the case for every coder of an open git epic in Epic Mode), the task's declared scope is materialized at:
@@ -751,18 +807,20 @@ scheduling reads only, never write authority.
 
 ## Live-State Ownership and Hydration Fencing (issue #2667)
 
-The in-memory session maps (`agentSessions`, `activeAgent`, `delegationChains`
-— keyed by sessionID — and `toolAggregates`, keyed by tool/aggregate name, all
-in `src/state.ts`) are PROCESS-LOCAL: every consumer reads them through
+The in-memory session maps (`agentSessions`, `activeAgent`, `delegationChains`,
+`primaryOwnerBySession` — keyed by sessionID — and `toolAggregates`, keyed by
+tool/aggregate name, all in `src/state.ts`) are PROCESS-LOCAL: every consumer reads them through
 sessionID- (or aggregate-key-) keyed accessors regardless of project. What
 changed in #2667 is that hydration — restoring one project's snapshot — no
 longer mutates state it does not own.
 
 Three layers, with distinct authority:
 
-- **Process-local** — the four live maps themselves and `pendingRehydrations`
+- **Process-local** — the five live maps themselves and `pendingRehydrations`
   (bounded by their pre-existing lifecycle mechanisms: the 2-hour idle-TTL
-  sweep for sessions, `resetSwarmState` for the rest), plus the per-project
+  sweep for sessions — which since #3320 also reclaims `primaryOwnerBySession`
+  rows — the 1000-entry FIFO on the owner map, and `resetSwarmState` for the
+  rest), plus the per-project
   registries in `src/session/hydration-ownership.ts` (hydration authority
   records, per-project rehydration caches, per-project hydrated-aggregate key
   sets — FIFO-capped at 32 entries each, with the directory→key memo
@@ -826,6 +884,67 @@ bounded raw-spelling memo in `hydration-ownership.ts` — one realpath per
 distinct directory spelling per process; every later resolution on the init or
 chat.message path is a pure Map hit.
 
+## Store integrity report
+
+`/swarm config doctor --integrity` (issue #2969, fix plan 05 v8 §2.6) appends a
+**read-only** crash-consistency audit of the local `.swarm` store to the doctor
+report. It is an interactive surface only — the flag is matched exactly (a
+typo'd longer prefix such as `--integrityy` selects nothing) and the command
+registry's no-args policy blocks agent-passed flags. Every operation under the
+flag is a stat/read/readdir: **this report never mutates, repairs, quarantines,
+or deletes anything** — recovery stays a separate, explicit operator action.
+
+Categories (each bounded: at most 20 listed entries per category; walks are
+entry- and depth-capped; every category fails open to 0 with a note on a
+filesystem error):
+
+| Category | Signal |
+|----------|--------|
+| `ledger_torn_tail` | `.swarm/plan-ledger.jsonl` last line is not newline-terminated or not valid JSON (probes only the final 64 KiB; a missing file is 0) |
+| `events_torn_tail` | Same torn-tail probe for `.swarm/events.jsonl` |
+| `temp_artifacts` | Files under `.swarm` whose basename matches a registered atomic-write temp grammar (`matchTempGrammar`), found by a bounded walk (max 2000 entries, depth 8) that skips the `archive/`, `quarantine/`, and `locks/` subtrees |
+| `stale_locks` | `.swarm/locks` entries past the lock TTL: pid-DEAD or unparsable `.lck` owner payloads, plus legacy proper-lockfile `*.lock.lock` directories |
+| `orphaned_bak` | `*.bak` files under `.swarm` with no sibling canonical file (a `.bak` beside its canonical file is the intentional full-auto backup pattern) |
+| `memory_same_id_divergences` | Only when `.swarm/memory-link.json` exists: same-id rows of the versioned JSONL family members whose version/updated (recency) fields differ between the linked cohort store and the local store. Row identity, versioned membership, and the recency comparison all come from the migration engine's exported helpers, so the report cannot drift from merge semantics. Not linked → 0 with a `not linked` note |
+
+`integrity_issues_total:` is the sum of the **actionable** category counts only.
+
+**Report-only semantics (`stale_locks`):** a `.lck` whose owner pid is ALIVE
+past the TTL is listed with a `(report-only: live owner pid — manual recovery;
+never auto-removed)` note and is deliberately **not counted** toward
+`integrity_issues_total`. This is the PID-reuse corner of the #2967 lock
+substrate: no time window ever converts a live pid into a dead classification,
+so the report can never motivate breaking a live owner. Automatic recovery of
+that corner resumes when the pid exits; until then removal is a manual operator
+action. Disclosed deviation per fix plan 05 v8 §1.1 (critic round 6, item 2).
+
+## Crash-consistency fsync policy
+
+Which durable file classes fsync before their atomic rename, and why. The
+governing rule at the end of this section applies to every change of these
+cells.
+
+| File class | Durability requirement | fsync-before-rename |
+|------------|------------------------|---------------------|
+| Plan ledger append (`.swarm/plan-ledger.jsonl`, `file_shadow`) | A published ledger is never partially written; losing the very last rename on power loss is tolerated (the prior canonical file is intact) | **ON** — `writeFileFsyncedThenRename` (`src/plan/ledger.ts`); the containing-directory fsync is deliberately omitted (see that function's comment) |
+| Events append (`.swarm/events.jsonl`) | Append-only event stream; a torn tail is *tolerated and detected* (`events_torn_tail` above) | **OFF** — plain append through the core-events seam |
+| Full-Auto state (`.swarm/full-auto-state.json`) | Durable fail-closed control state; a crash mid-write must not truncate the canonical file | **ON** — `tmp → fsync → rename` (`src/full-auto/state.ts`; pre-existing) |
+| Plan projections (`plan.json` / `plan.md`) | Derived from the authoritative ledger; rebuildable by replay on hash mismatch | **ON** — the canonical writer fsyncs the temp before rename (`src/utils/atomic-write.ts`), and the plan.json rebuild path fsyncs explicitly (`src/plan/manager.ts:2387`) |
+| OTLP spool + state (`src/observability/otlp-exporter.ts`) | Best-effort telemetry; write failures preserve replay and are accounted per record | **OFF** — rename-retry without fsync |
+
+**Rule — flipping any class to fsync-on requires a Windows cold-filesystem
+latency measurement recorded in the flipping PR.** The repro-704 lesson
+(AGENTS.md invariant 1): `fsync` on a cold Windows filesystem can be several
+times more expensive than on warm POSIX CI, and every awaited write's latency
+counts toward the init deadline even when it is wrapped in a timeout. An fsync
+flip that passes on Linux CI does not prove Windows. The measurement (before
+vs after, on a cold FS) must appear in the PR description next to the invariant
+audit.
+
+**The #2967/#2969 branch changes no fsync behavior** — this section documents
+the policy as-is; the store integrity report above is a read-only audit of
+exactly these file classes' crash residue.
+
 ## Quick Reference
 
 | Operation | Command / Trigger |
@@ -835,6 +954,7 @@ chat.message path is a pure Map hit.
 | Import checkpoint | `importCheckpoint()` function |
 | Rebuild from ledger | Automatic on hash mismatch |
 | View ledger | `cat .swarm/plan-ledger.jsonl` |
+| Store integrity report (read-only audit) | `/swarm config doctor --integrity` |
 | Set execution profile | `save_plan` with `execution_profile` field |
 | Lock execution profile | `save_plan` with `execution_profile.locked: true` |
 | View worktree lanes | `/swarm lanes [--json]` |

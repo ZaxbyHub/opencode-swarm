@@ -26,6 +26,7 @@ import {
 	initTelemetry,
 	resetTelemetryForTesting,
 } from '../../../src/telemetry';
+import { safeRmRecursive } from '../../helpers/safe-test-dir';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 function telemetryPath(dir: string): string {
@@ -95,7 +96,7 @@ describe('telemetry re-home on directory change (#2472 W9)', () => {
 		resetTelemetryForTesting();
 		for (const dir of [dirA, dirB]) {
 			try {
-				fs.rmSync(dir, { recursive: true, force: true });
+				safeRmRecursive(dir);
 			} catch {
 				// best-effort cleanup
 			}

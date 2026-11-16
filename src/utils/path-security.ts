@@ -9,6 +9,30 @@ import { canonicalExistingFilesystemPath } from './filesystem-identity.js';
  */
 
 /**
+ * True when `directory` is missing, not a string, or only whitespace. Such a
+ * value names no project: `path.join(' ', '.swarm')` and `path.resolve('')`
+ * both land under process.cwd(), so a `.swarm/` store must refuse it instead
+ * of writing into whatever directory the process runs in (AGENTS.md
+ * invariant 4; #3165 section B).
+ */
+export function isBlankDirectory(directory: unknown): boolean {
+	return typeof directory !== 'string' || directory.trim() === '';
+}
+
+/**
+ * True when `directory` is a non-blank ABSOLUTE path: the minimum a `.swarm/`
+ * store root needs so it can never resolve against process.cwd(). Pure and
+ * filesystem-free (cheap enough for per-call store paths). Deliberately
+ * narrower than {@link validateProjectDirectory}, which also rejects `..`
+ * segments and system locations and is meant for injected workspace roots.
+ */
+export function isNonBlankAbsoluteDirectory(
+	directory: unknown,
+): directory is string {
+	return !isBlankDirectory(directory) && path.isAbsolute(directory as string);
+}
+
+/**
  * Check if a string contains path traversal patterns.
  * Based on the most comprehensive implementation (test-runner.ts).
  * Checks: basic ../, isolated double dots, URL-encoded traversal,

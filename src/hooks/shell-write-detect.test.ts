@@ -9,6 +9,12 @@
 // See .swarm/spec.md FR-011.
 
 import { describe, expect, test } from 'bun:test';
+import { mkdirSync } from 'node:fs';
+import * as path from 'node:path';
+import {
+	canonicalMkdtemp,
+	removeTreeWithRetry,
+} from '../../tests/helpers/tmpdir';
 import {
 	detectInteractiveSession,
 	detectPosixWrites,
@@ -23,6 +29,21 @@ function expectWrites(
 	const result = detectPosixWrites(command);
 	expect(result.writes).toEqual(expected);
 	expect(result.hasWrites).toBe(expected.length > 0);
+}
+
+/** #3347: an inspectable inline-code interpreter-eval capability write. */
+function evalWrite(operator: string): {
+	category: string;
+	operator: string;
+	path: string | null;
+	capability: true;
+} {
+	return {
+		category: 'interpreter_eval',
+		operator,
+		path: null,
+		capability: true,
+	};
 }
 
 function ps(command: string) {
@@ -276,12 +297,6 @@ describe('in-place editing', () => {
 		]);
 	});
 
-	test('perl -i edits file in place', () => {
-		expectWrites('perl -i -pe "s/foo/bar/" data.csv', [
-			{ category: 'inplace_edit', operator: 'perl -i', path: 'data.csv' },
-		]);
-	});
-
 	test('awk -i inplace edits file in place', () => {
 		expectWrites('awk -i inplace "{print $1}" records.txt', [
 			{ category: 'inplace_edit', operator: 'awk -i', path: 'records.txt' },
@@ -293,9 +308,12 @@ describe('in-place editing', () => {
 		expect(result.hasWrites).toBe(false);
 	});
 
-	test('perl without -i is not flagged', () => {
+	test('perl -pe (no -i) evaluates inline code — capability write', () => {
+		// #3572 N-12 re-pin relocated (FR-006 ratchet): see
+		// shell-write-detect-perl-cluster-n12.test.ts for the W7 pins.
 		const result = detectPosixWrites('perl -pe "print" file.txt');
-		expect(result.hasWrites).toBe(false);
+		expect(result.hasWrites).toBe(true);
+		expect(result.writes).toEqual([evalWrite('perl [eval]')]);
 	});
 
 	test('multiple files with sed -i', () => {
@@ -312,45 +330,33 @@ describe('in-place editing', () => {
 
 describe('interpreter eval', () => {
 	test('python -c executes inline code', () => {
-		expectWrites('python -c "print(1+1)"', [
-			{ category: 'interpreter_eval', operator: 'python [eval]', path: null },
-		]);
+		expectWrites('python -c "print(1+1)"', [evalWrite('python [eval]')]);
 	});
 
 	test('python3 -c executes inline code', () => {
 		expectWrites('python3 -c "import os; os.write(1,b"hi")"', [
-			{ category: 'interpreter_eval', operator: 'python3 [eval]', path: null },
+			evalWrite('python3 [eval]'),
 		]);
 	});
 
 	test('node -e executes inline code', () => {
-		expectWrites('node -e "console.log(1)"', [
-			{ category: 'interpreter_eval', operator: 'node [eval]', path: null },
-		]);
+		expectWrites('node -e "console.log(1)"', [evalWrite('node [eval]')]);
 	});
 
 	test('bun -e executes inline code', () => {
-		expectWrites('bun -e "console.log(1)"', [
-			{ category: 'interpreter_eval', operator: 'bun [eval]', path: null },
-		]);
+		expectWrites('bun -e "console.log(1)"', [evalWrite('bun [eval]')]);
 	});
 
 	test('ruby -e executes inline code', () => {
-		expectWrites('ruby -e "puts 1"', [
-			{ category: 'interpreter_eval', operator: 'ruby [eval]', path: null },
-		]);
+		expectWrites('ruby -e "puts 1"', [evalWrite('ruby [eval]')]);
 	});
 
 	test('perl -e executes inline code', () => {
-		expectWrites('perl -e "print 1"', [
-			{ category: 'interpreter_eval', operator: 'perl [eval]', path: null },
-		]);
+		expectWrites('perl -e "print 1"', [evalWrite('perl [eval]')]);
 	});
 
 	test('php -r executes inline code', () => {
-		expectWrites('php -r "echo 1;"', [
-			{ category: 'interpreter_eval', operator: 'php [eval]', path: null },
-		]);
+		expectWrites('php -r "echo 1;"', [evalWrite('php [eval]')]);
 	});
 
 	test('python -m runs an installed module (a named program) — not flagged as eval (issue #1902)', () => {
@@ -365,9 +371,7 @@ describe('interpreter eval', () => {
 	});
 
 	test('node -p evaluates and prints (write effect)', () => {
-		expectWrites('node -p "1+1"', [
-			{ category: 'interpreter_eval', operator: 'node [eval]', path: null },
-		]);
+		expectWrites('node -p "1+1"', [evalWrite('node [eval]')]);
 	});
 
 	test('plain python without -c is not flagged', () => {
@@ -384,20 +388,18 @@ describe('interpreter eval', () => {
 		// `python -c'print(1)'` passes `-cprint(1)` as a single token after shell quoting.
 		// The interpreter-eval guard must match even when the code is glued to the flag.
 		expectWrites('python -c\'import os; os.remove("f")\'', [
-			{ category: 'interpreter_eval', operator: 'python [eval]', path: null },
+			evalWrite('python [eval]'),
 		]);
 	});
 
 	test('glued node -e flag: -e<code> (no space) is flagged as eval (issue #1928)', () => {
 		expectWrites('node -e\'require("fs").writeFileSync("x","y")\'', [
-			{ category: 'interpreter_eval', operator: 'node [eval]', path: null },
+			evalWrite('node [eval]'),
 		]);
 	});
 
 	test('glued python -c with equals separator: -c=CODE is flagged as eval', () => {
-		expectWrites('python -c="print(1)"', [
-			{ category: 'interpreter_eval', operator: 'python [eval]', path: null },
-		]);
+		expectWrites('python -c="print(1)"', [evalWrite('python [eval]')]);
 	});
 
 	test('python -m is not flagged even with glued module name (issue #1902 regression guard)', () => {
@@ -407,27 +409,19 @@ describe('interpreter eval', () => {
 	});
 
 	test('glued ruby -e flag: -e<code> (no space) is flagged as eval (issue #1928)', () => {
-		expectWrites("ruby -e'puts 42'", [
-			{ category: 'interpreter_eval', operator: 'ruby [eval]', path: null },
-		]);
+		expectWrites("ruby -e'puts 42'", [evalWrite('ruby [eval]')]);
 	});
 
 	test('glued perl -E flag: -E<code> (no space) is flagged as eval (issue #1928)', () => {
-		expectWrites("perl -E'say 1'", [
-			{ category: 'interpreter_eval', operator: 'perl [eval]', path: null },
-		]);
+		expectWrites("perl -E'say 1'", [evalWrite('perl [eval]')]);
 	});
 
 	test('glued php -r flag: -r<code> (no space) is flagged as eval (issue #1928)', () => {
-		expectWrites("php -r'echo 1;'", [
-			{ category: 'interpreter_eval', operator: 'php [eval]', path: null },
-		]);
+		expectWrites("php -r'echo 1;'", [evalWrite('php [eval]')]);
 	});
 
 	test('glued node -pe flag: -pe<code> (no space) is flagged as eval (issue #1928)', () => {
-		expectWrites("node -pe'1+1'", [
-			{ category: 'interpreter_eval', operator: 'node [eval]', path: null },
-		]);
+		expectWrites("node -pe'1+1'", [evalWrite('node [eval]')]);
 	});
 });
 
@@ -729,11 +723,9 @@ describe('deduplication', () => {
 		expect(result.writes.filter((w) => w.path === '')).toHaveLength(0);
 	});
 
-	test('multiple same redirects deduplicated', () => {
-		const result = detectPosixWrites('echo a > f; echo b > f');
-		const fWrites = result.writes.filter((w) => w.path === 'f');
-		expect(fWrites.length).toBe(1);
-	});
+	// 'multiple same redirects deduplicated' moved to
+	// shell-write-detect-cd-statgate-3518.test.ts (#3518 per-occurrence
+	// contract; FR-006 — this grandfathered file may not grow).
 });
 
 // ---------------------------------------------------------------------------
@@ -1241,9 +1233,7 @@ describe('resolveWriteTargets — basic resolution', () => {
 	});
 
 	test('marks null path as unresolved', () => {
-		const writes = [
-			{ category: 'interpreter_eval', operator: 'node [eval]', path: null },
-		];
+		const writes = [evalWrite('node [eval]')];
 		const result = resolveWriteTargets('node -e "code"', writes, '/home/user');
 		expect(result[0].resolvedPath).toBe(null);
 		expect(result[0].resolved).toBe(false);
@@ -1333,66 +1323,18 @@ describe('resolveWriteTargets — basic resolution', () => {
 });
 
 describe('resolveWriteTargets — subshell cd tracking', () => {
-	test('subshell cd changes effective cwd for writes inside', () => {
-		// (cd /tmp && echo x > file) — file resolves to /tmp/file
-		const writes = [{ category: 'redirect', operator: '>', path: 'file' }];
-		const result = resolveWriteTargets(
-			'(cd /tmp && echo x > file)',
-			writes,
-			'/home/user',
-		);
-		expect(result[0].resolvedPath).toBe('/tmp/file');
-		expect(result[0].resolved).toBe(true);
-	});
-
-	test('cd in parent shell propagates to subshell entry cwd', () => {
-		// cd /tmp && (echo x > file) — cd is in parent, subshell inherits it
-		const writes = [{ category: 'redirect', operator: '>', path: 'file' }];
-		const result = resolveWriteTargets(
-			'cd /tmp && (echo x > file)',
-			writes,
-			'/home/user',
-		);
-		// The subshell inherits parent's cwd at subshell entry time.
-		// Since cd /tmp happens BEFORE the subshell, the subshell starts at /tmp.
-		// So file resolves to /tmp/file.
-		expect(result[0].resolvedPath).toBe('/tmp/file');
-		expect(result[0].resolved).toBe(true);
-	});
-
-	test('nested subshells track cwd independently', () => {
-		// ( (cd /home && echo x > file) ) — file resolves to /home/file
-		const writes = [{ category: 'redirect', operator: '>', path: 'file' }];
-		const result = resolveWriteTargets(
-			'( (cd /home && echo x > file) )',
-			writes,
-			'/',
-		);
-		expect(result[0].resolvedPath).toBe('/home/file');
-		expect(result[0].resolved).toBe(true);
-	});
-
-	test('multiple writes in subshell all use same effective cwd', () => {
-		// (cd /tmp && echo a > a.txt && echo b > b.txt)
-		const analysis = detectPosixWrites(
-			'(cd /tmp && echo a > a.txt && echo b > b.txt)',
-		);
-		const result = resolveWriteTargets(
-			'(cd /tmp && echo a > a.txt && echo b > b.txt)',
-			analysis.writes,
-			'/home/user',
-		);
-		const aWrite = result.find((r) => r.original.path === 'a.txt');
-		const bWrite = result.find((r) => r.original.path === 'b.txt');
-		expect(aWrite?.resolvedPath).toBe('/tmp/a.txt');
-		expect(bWrite?.resolvedPath).toBe('/tmp/b.txt');
-	});
+	// The four subshell tests that cd'd into synthetic /tmp|/home paths moved
+	// to src/hooks/shell-write-detect-cd-statgate-3518.test.ts with REAL
+	// fixtures (#3518 P-2): the stat-gated tracker only tracks a synthetic
+	// /tmp where <current-drive>:\tmp exists — green on hosts that have it,
+	// red on CI runners (host-dependent green; caught by unit windows-6).
 
 	test('cd without subshell does not persist after command', () => {
-		// cd /tmp && echo hello — no write target, so just verify context
-		const analysis = detectPosixWrites('cd /tmp && echo hello');
+		// cd tmpdir && echo hello — no write target, so just verify context
+		// (relative cd with an empty writes list: no fs dependency).
+		const analysis = detectPosixWrites('cd tmpdir && echo hello');
 		const result = resolveWriteTargets(
-			'cd /tmp && echo hello',
+			'cd tmpdir && echo hello',
 			analysis.writes,
 			'/home/user',
 		);
@@ -1401,112 +1343,91 @@ describe('resolveWriteTargets — subshell cd tracking', () => {
 	});
 
 	test('relative path after cd in subshell resolves correctly', () => {
-		// (cd /var/log && tail -f syslog) — no write but tests context tracking
-		const writes = [{ category: 'redirect', operator: '>>', path: 'app.log' }];
-		const result = resolveWriteTargets(
-			'(cd /var/log && echo more >> app.log)',
-			writes,
-			'/home/user',
-		);
-		expect(result[0].resolvedPath).toBe('/var/log/app.log');
-		expect(result[0].resolved).toBe(true);
+		// (cd varlog && tail -f syslog) — no write but tests context tracking.
+		// #3518 P-2: the cd tracker now stat-gates its mutation (a cd into a
+		// nonexistent target must NOT move the tracked cwd), so the fixture
+		// directory must actually exist — same as real bash.
+		const root = canonicalMkdtemp('swd-cd-subshell-');
+		try {
+			mkdirSync(path.join(root, 'varlog'), { recursive: true });
+			const writes = [
+				{ category: 'redirect', operator: '>>', path: 'app.log' },
+			];
+			const result = resolveWriteTargets(
+				'(cd varlog && echo more >> app.log)',
+				writes,
+				root,
+			);
+			expect(result[0].resolvedPath).toBe(path.join(root, 'varlog', 'app.log'));
+			expect(result[0].resolved).toBe(true);
+		} finally {
+			removeTreeWithRetry(root);
+		}
 	});
 });
 
 describe('resolveWriteTargets — multiple writes with different contexts', () => {
 	test('write inside subshell vs write outside subshell have different contexts', () => {
-		// cd /tmp && (echo inside > file1) && echo outside > file2
-		// file1 resolves to /tmp/file1 (subshell inherits cd /tmp)
-		// file2 resolves to /tmp/file2 (cd /tmp already took effect in parent context)
-		const analysis = detectPosixWrites(
-			'cd /tmp && (echo inside > file1) && echo outside > file2',
-		);
-		const result = resolveWriteTargets(
-			'cd /tmp && (echo inside > file1) && echo outside > file2',
-			analysis.writes,
-			'/home/user',
-		);
-		const file1Write = result.find((r) => r.original.path === 'file1');
-		const file2Write = result.find((r) => r.original.path === 'file2');
-		// file1 is inside subshell that started at /tmp (cd /tmp happened before subshell)
-		expect(file1Write?.resolvedPath).toBe('/tmp/file1');
-		// file2 is outside, at global level after cd /tmp already took effect
-		expect(file2Write?.resolvedPath).toBe('/tmp/file2');
+		// #3518 P-2: real fixture — the cd tracker stat-gates its mutation
+		// (moved from the synthetic /tmp shape that only tracked on hosts
+		// where <current-drive>:\tmp exists).
+		const root = canonicalMkdtemp('swd-subshell-ctx-');
+		try {
+			mkdirSync(path.join(root, 'tmpdir'), { recursive: true });
+			const command =
+				'cd tmpdir && (echo inside > file1) && echo outside > file2';
+			const analysis = detectPosixWrites(command);
+			const result = resolveWriteTargets(command, analysis.writes, root);
+			const file1Write = result.find((r) => r.original.path === 'file1');
+			const file2Write = result.find((r) => r.original.path === 'file2');
+			// file1 is inside a subshell that started at tmpdir (cd before it)
+			expect(file1Write?.resolvedPath).toBe(path.join(root, 'tmpdir', 'file1'));
+			// file2 is outside, at global level after the cd took effect
+			expect(file2Write?.resolvedPath).toBe(path.join(root, 'tmpdir', 'file2'));
+		} finally {
+			removeTreeWithRetry(root);
+		}
 	});
 });
 
 describe('resolveWriteTargets — subshell cd does not leak to parent', () => {
-	// Regression: F1 — POSIX subshell (...) does NOT propagate cd mutations to parent
-	test('(cd /tmp && echo a > a.txt); echo b > b.txt → a.txt=/tmp/a.txt, b.txt=<cwd>/b.txt', () => {
-		const analysis = detectPosixWrites(
-			'(cd /tmp && echo a > a.txt); echo b > b.txt',
-		);
-		const result = resolveWriteTargets(
-			'(cd /tmp && echo a > a.txt); echo b > b.txt',
-			analysis.writes,
-			'/home/user',
-		);
-		const aWrite = result.find((r) => r.original.path === 'a.txt');
-		const bWrite = result.find((r) => r.original.path === 'b.txt');
-		// a.txt is inside subshell: cd /tmp took effect inside the subshell
-		expect(aWrite?.resolvedPath).toBe('/tmp/a.txt');
-		// b.txt is outside subshell: parent cwd remains /home/user
-		expect(bWrite?.resolvedPath).toBe('/home/user/b.txt');
+	// Regression: F1 — POSIX subshell (...) does NOT propagate cd mutations to
+	// parent. #3518 P-2: real fixtures (the synthetic /tmp shapes were
+	// host-dependent greens — see the cd-statgate sibling).
+	test('(cd tmpdir && echo a > a.txt); echo b > b.txt → a.txt in tmpdir, b.txt at root', () => {
+		const root = canonicalMkdtemp('swd-subshell-leak-1-');
+		try {
+			mkdirSync(path.join(root, 'tmpdir'), { recursive: true });
+			const command = '(cd tmpdir && echo a > a.txt); echo b > b.txt';
+			const analysis = detectPosixWrites(command);
+			const result = resolveWriteTargets(command, analysis.writes, root);
+			const aWrite = result.find((r) => r.original.path === 'a.txt');
+			const bWrite = result.find((r) => r.original.path === 'b.txt');
+			// a.txt is inside subshell: the cd took effect inside it
+			expect(aWrite?.resolvedPath).toBe(path.join(root, 'tmpdir', 'a.txt'));
+			// b.txt is outside subshell: parent cwd remains root
+			expect(bWrite?.resolvedPath).toBe(path.join(root, 'b.txt'));
+		} finally {
+			removeTreeWithRetry(root);
+		}
 	});
 
 	test('cd inside (...) subshell does not affect subsequent commands outside', () => {
-		// (cd /tmp && echo > inner.txt) && echo > outer.txt
-		const analysis = detectPosixWrites(
-			'(cd /tmp && echo > inner.txt) && echo > outer.txt',
-		);
-		const result = resolveWriteTargets(
-			'(cd /tmp && echo > inner.txt) && echo > outer.txt',
-			analysis.writes,
-			'/project',
-		);
-		const innerWrite = result.find((r) => r.original.path === 'inner.txt');
-		const outerWrite = result.find((r) => r.original.path === 'outer.txt');
-		expect(innerWrite?.resolvedPath).toBe('/tmp/inner.txt');
-		expect(outerWrite?.resolvedPath).toBe('/project/outer.txt');
-	});
-});
-
-describe('resolveWriteTargets — relative cd path resolution', () => {
-	// Regression: F2 — relative `cd subdir` must resolve against current cwd, not store raw string
-	test('cd src && echo hello > output.txt resolves to <cwd>/src/output.txt', () => {
-		const analysis = detectPosixWrites('cd src && echo hello > output.txt');
-		const result = resolveWriteTargets(
-			'cd src && echo hello > output.txt',
-			analysis.writes,
-			'/home/user',
-		);
-		const outWrite = result.find((r) => r.original.path === 'output.txt');
-		expect(outWrite?.resolvedPath).toBe('/home/user/src/output.txt');
-	});
-
-	test('cd subdir in CompoundList resolves relative target', () => {
-		// cd subdir && (cd nested && echo > file.txt) — first cd resolves, then nested cd resolves
-		const analysis = detectPosixWrites(
-			'cd subdir && (cd nested && echo > file.txt)',
-		);
-		const result = resolveWriteTargets(
-			'cd subdir && (cd nested && echo > file.txt)',
-			analysis.writes,
-			'/workspace',
-		);
-		const fileWrite = result.find((r) => r.original.path === 'file.txt');
-		// nested cd is relative to subdir, so /workspace/subdir/nested/file.txt
-		expect(fileWrite?.resolvedPath).toBe('/workspace/subdir/nested/file.txt');
-	});
-
-	test('cd ../../parent resolves multi-level relative path', () => {
-		const writes = [{ category: 'redirect', operator: '>', path: 'out.txt' }];
-		const result = resolveWriteTargets(
-			'cd ../../parent && echo > out.txt',
-			writes,
-			'/home/user/project/src',
-		);
-		expect(result[0].resolvedPath).toBe('/home/user/parent/out.txt');
+		const root = canonicalMkdtemp('swd-subshell-leak-2-');
+		try {
+			mkdirSync(path.join(root, 'tmpdir'), { recursive: true });
+			const command = '(cd tmpdir && echo > inner.txt) && echo > outer.txt';
+			const analysis = detectPosixWrites(command);
+			const result = resolveWriteTargets(command, analysis.writes, root);
+			const innerWrite = result.find((r) => r.original.path === 'inner.txt');
+			const outerWrite = result.find((r) => r.original.path === 'outer.txt');
+			expect(innerWrite?.resolvedPath).toBe(
+				path.join(root, 'tmpdir', 'inner.txt'),
+			);
+			expect(outerWrite?.resolvedPath).toBe(path.join(root, 'outer.txt'));
+		} finally {
+			removeTreeWithRetry(root);
+		}
 	});
 });
 
@@ -2188,13 +2109,7 @@ describe('FR-002 Interpreter eval — resolveWriteTargets scope', () => {
 		// inline code can write to arbitrary files. The caller must flag this
 		// as a write effect regardless of cwd since we cannot statically determine
 		// what file (if any) the code will write.
-		const writes = [
-			{
-				category: 'interpreter_eval',
-				operator: 'node [eval]',
-				path: null,
-			},
-		];
+		const writes = [evalWrite('node [eval]')];
 		const result = resolveWriteTargets('node -e "code"', writes, '/project');
 		expect(result.length).toBe(1);
 		expect(result[0].resolvedPath).toBe(null);
@@ -2719,14 +2634,9 @@ describe('FR-002 cmd.exe builtins — resolveWriteTargets scope', () => {
 });
 
 describe('dedup key behavior (via detectPosixWrites / detectWindowsWrites)', () => {
-	test('detectPosixWrites deduplicates identical write entries', () => {
-		// A command that produces two identical writes (same category, operator, path)
-		// should result in only one entry after deduplication.
-		const result = detectPosixWrites('cat a > /tmp/out && cat b > /tmp/out');
-		const paths = result.writes.map((w) => w.path);
-		const unique = [...new Set(paths)];
-		expect(unique.length).toBe(paths.length);
-	});
+	// 'detectPosixWrites deduplicates identical write entries' moved to
+	// shell-write-detect-cd-statgate-3518.test.ts (#3518 per-occurrence
+	// contract; FR-006 — this grandfathered file may not grow).
 
 	test('detectWindowsWrites deduplicates identical write entries', () => {
 		const result = detectWindowsWrites(

@@ -4,16 +4,16 @@ description: >
   Ingest and resolve known pull request feedback with skeptical source verification.
   Use when addressing pasted PR feedback, GitHub review comments or threads,
   requested changes, CI/check failures, merge conflicts, stale PR branches, or
-  PR follow-up work that must close all known issues without dropping findings.
-  Supports multi-round bot reviews when the repo uses an auto-review bot that
-  posts a new review after every push, via the iterative pattern documented in
-  the body. Stage A
+  PR follow-up work that must close all known issues without dropping findings,
+  then drive the PR to green CI, merge, session retrospective, and memory closeout. Supports
+  multi-round bot reviews (a new bot review after every push) via the
+  iterative pattern documented in the body. Stage A
   (structural pre-checks) and Stage B (reviewer + test_engineer) gates and the
   reviewer + critic closeout gate are MANDATORY for any change made as part of
   this process.
 metadata:
   audience: swarm-plugin
-  swarm-contract-digest: "a7fade5b1c40"
+  swarm-contract-digest: "b8dbb685e873"
 ---
 
 # Swarm PR Feedback
@@ -41,12 +41,12 @@ Carry forward the original review finding IDs, classifications, reviewer/critic
 provenance, and any operational blockers instead of renumbering them as new
 discoveries.
 
-Feedback closure is not the end of the PR lifecycle: when PR monitoring is
-enabled (`pr_monitor.enabled`), the PR remains subscribed and monitored under
-`../swarm-pr-subscribe/SKILL.md` until it is merged or closed. Events that
-arrive after closure (a new bot round, a CI change, fresh review activity) are
-triaged through that skill and route back into this discipline when they need
-fixes.
+Feedback closure is not the end of the PR lifecycle. On a PR, the default run is
+`references/drive-to-merge.md`: gates → dispositions → CI green → merge (explicit
+authorization only) → monitor → retro + memory closeout; "fixes only" stops early. With
+`pr_monitor.enabled`, post-closure events (a new bot round, a CI change, fresh
+review activity) are triaged under `../swarm-pr-subscribe/SKILL.md` and route
+back into this discipline when they need fixes.
 
 ## Multi-Round Bot Reviews (Iterative Pattern)
 
@@ -187,6 +187,15 @@ ledger items as `NEEDS_MORE_EVIDENCE` or re-dispatch a narrower read-only lane.
 report directly — a truncated or summary-only report is a preview, not
 verification evidence, and keeps its items open the same way.)
 
+## Pre-flight: Restart Inventory (Profiles B/C)
+
+After a session restart mid-round, record a four-bucket inventory in the
+task-gates artifact before dispatching: reusable artifacts / stale approvals
+(gate verdicts bound to pre-restart digests need re-verification) / dead
+agent ids (SendMessage fails; never retry or wait) / fresh-dispatch work
+(every in-flight lane needs a new standalone packet). Full protocol:
+`references/restart-inventory.md`.
+
 ## Pre-flight: Dirty Worktree Handling
 
 Before staging any files for the PR commit, check the working tree state:
@@ -197,15 +206,13 @@ including pre-existing changes from other branches or prior work.
 **The check:** Run `git status --porcelain` first. If output is non-empty, identify
 which files are PR-related vs pre-existing uncommitted changes.
 
-**The rule:** Stage files explicitly by path when the working tree contains files
-unrelated to the PR. For example:
+**The rule:** Never stage with `git add -A`, `git add .`, or any glob form —
+stage exact paths with the `--` separator, each already inside the
+PR changed set (the gate refuses every other form):
 
 ```bash
-git add src/foo.ts tests/foo.test.ts
+git add -- src/foo.ts tests/foo.test.ts
 ```
-
-Never use `git add -A` when the working tree has pre-existing changes from other
-branches or prior work sessions.
 
 ## Batch Collection (mandatory before any fix)
 
@@ -301,23 +308,8 @@ Rules:
 **Before branch validation (Stage A) can begin, every PR comment that contains feedback
 or findings MUST be integrated into the total feedback ledger as a
 `FB-###` item.** This is a hard requirement, not a best-effort step.
-
-What counts as "feedback or findings":
-- A reviewer request for a code change ("please rename this", "add a test for
-  X", "this should call `_internals.foo`")
-- A reviewer claim about correctness, security, or style ("this is
-  incorrect", "X will leak")
-- A bot reviewer's findings table entries
-- A CI failure with a specific file:line root cause
-- A reviewer question that implies a code change is needed ("why is this
-  static?")
-- PR review summaries or aggregate comments
-
-What does NOT count (and is therefore not required to be a ledger item):
-- Pure acknowledgements ("LGTM", "looks good")
-- PR-level metadata changes (title, label, milestone)
-- Force-push acknowledgements
-
+What counts as feedback/findings (and what does not) is enumerated in
+`references/intake-surfaces.md` (## What counts as feedback or findings).
 Rules:
 - **No finding may be addressed outside the ledger.** If you fix something a
   reviewer mentioned, the corresponding `FB-###` item MUST be in the ledger
@@ -333,21 +325,24 @@ Rules:
     each must be explicitly justified in the closure ledger.
 - **The closure ledger at the end of the run must account for every `FB-###`
   item** with a final status (fixed / disproved / pre-existing / needs user
-  decision / needs more evidence).
+  decision / needs more evidence); each PRE_EXISTING, NEEDS_MORE_EVIDENCE, or NEEDS_USER_DECISION item also gets one disposition (ABSORB / FILE / RECORD / ASK) per `references/followup-dispositions.md`; DISPROVED items need none.
 - **Comments from the latest bot round take precedence over earlier rounds**
   for the same finding; the earlier-round `FB-###` item is updated with the
   new evidence rather than a new item being created.
 - **Multi-round pattern continues to apply** (see "Multi-Round Bot Reviews"
-  section). A new bot round adds new `FB-###` items for findings that
-  weren't in the prior round; the prior round's items are carried forward
-  and updated with the new evidence.
+  section): new bot-round findings get new `FB-###` items; prior items carry
+  forward with the new evidence.
+- **Re-fetch at every round boundary (#3607).** Intake is not one-time:
+  re-fetch issue comments, inline review comments, and reviews at the start of
+  every fix round and again before the closeout gate — a critic NEEDS_REVISION
+  restart counts as a fix round. The fetch is a RECORDED obligation: append a
+  fetch receipt (surfaces, comment ids, timestamp) to the findings ledger at
+  every boundary. Commands, bot markers, field evidence:
+  `references/intake-surfaces.md` (## Round-boundary re-fetch).
 
-Rationale: silently addressing a review comment without a corresponding
-ledger item means the closure summary at the end of the run cannot
-demonstrate that every review comment was considered. The closure summary
-is the only artifact the user/maintainer reads to confirm the PR is ready
-to merge. Missing items in the ledger = missing items in the closure = a
-PR that ships with unreviewed feedback.
+Rationale: the closure summary is the only artifact the user/maintainer reads
+to confirm the PR is ready to merge; a review comment fixed or skipped without
+a ledger item is invisible there, so the PR ships with unreviewed feedback.
 
 ## Verification
 
@@ -403,7 +398,7 @@ or compatibility policy, mark the item `NEEDS_USER_DECISION` and ask.
 - Do not implement speculative cleanup while feedback remains unclosed.
 - Never ship unwired code. Any new command, tool, skill, config, docs surface, or
   generated artifact must be fully registered and validated.
-- Never defer work or declare it out of scope without explicit user instruction.
+- Never defer work or declare it out of scope without explicit user instruction; route every unfixed item through `references/followup-dispositions.md` (RECORD is a visible closure, never a silent drop).
 - Keep invalid or disproved findings in the closure ledger with the evidence.
 - For CI failures, verify the failing job belongs to the current PR head before
   treating it as current evidence.
@@ -473,14 +468,14 @@ Every gate lane emits exactly one fully populated row per feedback ID:
 [CLOSEOUT-CRITIC] | FB-001 | APPROVE|NEEDS_REVISION|BLOCKED | evidence
 ```
 
-Only exact positive verdict fields pass. A sentence containing “not APPROVE,” a
+Only exact positive verdict fields pass — `APPROVE` (or its accepted spelling
+`APPROVED` on the three review/critic markers) for review/critic rows, exact
+`PASS` for test rows; anything else fails. A sentence containing “not APPROVE,” a
 header without item rows, duplicate rows, missing IDs, degraded/truncated
 artifacts, wrong roles, stale content digests, parallel or out-of-order phases,
 and reused pre-edit approvals all fail closed. Any content change after Stage A
-invalidates Stage A and every later gate; restart at step 1. See
-"Re-recording Stage A on an unchanged revision" below for the one retention
-exception, which applies only when the revision digest itself did not change.
-Publication tools
+invalidates Stage A and every later gate; restart at step 1. For an in-scope edit whose moved digest triggers the incomplete-ownership block, re-dispatch `swarm-pr-feedback:verification` on the edited tree (new batch_id, same lane ids) to re-settle coverage; further coder writes need a fresh scope (new task_id), then re-run Stage A and the ordered gates. See
+"Re-recording Stage A on an unchanged revision" below for the one retention exception, which applies only when the revision digest itself did not change. Publication tools
 and `git commit`/`git push` remain blocked until all four ordered lane phases
 settle on the Stage-A digest. After they settle, only one standalone `git commit`
 command may create the reviewed commit; push and remote publication remain
@@ -521,9 +516,12 @@ output as a receipt in the ledger; track the content digest manually (for
 example `git rev-parse HEAD` plus a working-tree diff hash) so stale receipts
 are detectable, and re-run the whole set after any content change. Stage B:
 one fresh reviewer subagent, then one fresh test-engineer-role subagent
-(Profile B), or two strictly separated re-derivation passes (Profile C).
-Closeout: a separate fresh reviewer, then a separate fresh critic, per the
-swarm closeout contract. Emit the same `[STAGE-B-REVIEW]`, `[STAGE-B-TEST]`,
+(Profile B), or two strictly separated re-derivation passes (Profile C);
+each test-engineer verdict must NAME its discriminating probe (mutant /
+source surgery / executed pre-fix failure, with the observed failure mode) —
+a green suite alone is test theater and does not settle the item. Closeout:
+a separate fresh reviewer, then a separate fresh critic, per the swarm
+closeout contract. Emit the same `[STAGE-B-REVIEW]`, `[STAGE-B-TEST]`,
 `[CLOSEOUT-REVIEW]`, and `[CLOSEOUT-CRITIC]` rows, record the verdicts in the
 session task-gates artifact, and disclose Profile C's procedural independence
 in the closure ledger. Any edit after a gate verdict invalidates that verdict
@@ -651,22 +649,35 @@ closeout gate"); because this skill edits code, docs, release notes, or skill fi
 alone does not satisfy it.
 
 - **independent reviewer** (fresh context, separate from the Stage B reviewer)
-  → APPROVE / NEEDS_REVISION / BLOCKED per item.
+  → APPROVE / NEEDS_REVISION / BLOCKED per item; a delta approval is invalid
+  while unreviewed external feedback exists on the PR (#3607).
 - **final critic** (separate fresh context, not a continued conversation with
   the reviewer, dispatched after the reviewer returns APPROVE) → APPROVE /
-  NEEDS_REVISION / BLOCKED per item. The critic challenges: is every original
-  feedback item actually resolved? Any requirement drift, weak evidence, missing
-  sibling-file checks, stale approvals, anything unwired or silently deferred?
+  NEEDS_REVISION / BLOCKED per item. The critic challenges: is every feedback
+  item actually resolved — including items posted after the ledger was built
+  (it fetches all three surfaces fresh — issue comments, inline review
+  comments, and reviews, see `references/intake-surfaces.md` — and reconciles
+  each external finding against the ledger, #3607)? Any requirement drift,
+  weak evidence, missing sibling-file checks, stale approvals, anything
+  unwired or deferred?
 
 Address every NEEDS_REVISION / BLOCKED item, re-review with the reviewer if the
 critic surfaces correctness issues, then re-critic. **Any edit after the
 reviewer's or critic's approval invalidates that approval** — re-run the
-affected gate on the current diff before publishing.
-
-Record both closeout verdicts (reviewer + critic, with HEAD/diff) in the
-runtime's session task-gates artifact using the repository/runtime-specific
-durable-session guidance when one exists. `.swarm/` is the plugin's runtime
-state — never write task artifacts there.
+affected gate on the current diff before publishing. Before dispatching the
+final critic, record the closure ledger in the durable session task-gates
+artifact (bound to the reviewed head SHA and fetch time); the critic
+reconciles it against its own fresh fetch — an input to verify, never a
+substitute for the fetch (#3607). Publish the ledger as a PR comment only
+after the reviewed commit is pushed and the remote head verified: under
+Profile A the gate blocks PR comments until all four phases settle and
+`complete_pr_workflow` arms the push; the B/C invariants likewise forbid
+comment/body writes before the verified push. Open the same task-gates
+artifact at ROUND START — before any PR_FEEDBACK gate binding or after the
+verification lanes settle (the gate blocks writes in between) — and append
+every reviewer/critic verdict (with HEAD/diff) as it lands, so compaction or
+handoff re-enters from disk. (ZCode path: `.zcode/session/tasks/<slug>/gates.md`
+per durable-session-state — never repo root, never `.swarm/`.)
 
 ### Post-publish verification (mandatory after the PR is pushed)
 
@@ -683,8 +694,10 @@ pre-checks and must not be folded into Stage A.
 ## Publishing And Communication
 
 After every ordered local gate passes on one unchanged content digest, create
-the reviewed commit with one standalone `git commit` command. Under Profile A,
-then call
+the reviewed commit with one standalone `git commit` command. A message with
+shell metacharacters (e.g. a `Co-Authored-By: X <...>` trailer) goes through
+`prepare_pr_feedback_commit_message` + `git commit -F <returned path>` (the
+file lives outside the repository). Under Profile A, then call
 `complete_pr_workflow` once with `mode: "PR_FEEDBACK"` and the immutable intake
 `pr_head_sha`. A `ready-to-publish` result arms publication but deliberately
 keeps the durable gate active and binds that post-commit HEAD to the current
@@ -724,9 +737,9 @@ After fixes, update the PR body or comment with a closure ledger:
 ```text
 FB-001 | fixed | commit/test evidence
 FB-002 | disproved | code evidence
-FB-003 | pre-existing | base-branch evidence
-FB-004 | needs user decision | decision required
-FB-005 | needs more evidence | .swarm/evidence/{phase}/phase-council.json missing
+FB-003 | pre-existing | base-branch evidence | ABSORB #NNNN
+FB-004 | needs user decision | decision required | ASK
+FB-005 | needs more evidence | .swarm/evidence/{phase}/phase-council.json missing | ASK
 CONFLICT-001 | fixed | remote mergeability is MERGEABLE/CLEAN
 CI-001 | fixed | current-head check/run evidence
 ```

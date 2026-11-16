@@ -1182,6 +1182,22 @@ export function createSystemEnhancerHook(
 				// the schedule unconditional on every later exit path.
 				let deferMaintenanceScans = false;
 				try {
+					// #3320: a SESSIONLESS system-surface call (title/summary/
+					// agent-generation surfaces) has no request-correlation key
+					// and no delivery owner — emit NO swarm-specific system text on
+					// it. Before this guard, sessionless system calls fell through
+					// the session-keyed skip logic below and emitted the
+					// TURBO/FULL-AUTO banners and the PLANNING PROFILE producer
+					// using whatever global mode state another session had set.
+					// The messages surface is exempt BY DESIGN: its SDK input is `{}`
+					// (identity arrives via output.messages), so keying this return
+					// on !_input.sessionID alone would kill every messages-surface
+					// injection. Pinned by tests/integration/system-transform-sessionless-no-swarm-text.test.ts
+					// (replacing the sessionless-emission cases in
+					// system-transform-global-mode-fallback.test.ts).
+					if (surface === 'system' && !_input.sessionID) {
+						return;
+					}
 					// Skip swarm context injection for native opencode agents (build,
 					// plan, general, explore, compaction, title, summary). These agents
 					// have no use for phase/task/knowledge injection and must not trigger

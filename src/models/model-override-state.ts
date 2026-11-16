@@ -1,3 +1,6 @@
+import { sanitizeDiagnosticScope } from '../utils/diagnostic-scope';
+import { log } from '../utils/logger';
+
 const MAX_SCOPED_MODEL_OVERRIDES = 256;
 const SCOPED_MODEL_OVERRIDE_TTL_MS = 30 * 60_000;
 
@@ -181,6 +184,15 @@ export function resolveScopedModelSelection(
 	const key = entryKey(scope);
 	const current = scopedModelOverrides.get(key);
 	if (!current || current.signature !== chain.signature) {
+		// Issue #3331 (AC2): reseeding a LIVE entry discards a completed
+		// advance (fallbackIndex resets to 0, generation bumps). That must be
+		// observable, never silent. First seeds (no prior entry) stay silent.
+		// Debug-gated and bounded: scope identity only, no model payload.
+		if (current) {
+			log(
+				`scoped model selection reseeded: live selection discarded (chain signature changed; discardedFallbackIndex=${current.fallbackIndex}) scope=${sanitizeDiagnosticScope(key.replaceAll('\u241f', '/'))}`,
+			);
+		}
 		const next: ScopedModelEntry = {
 			key,
 			updatedAt: now,

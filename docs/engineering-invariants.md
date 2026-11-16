@@ -443,8 +443,15 @@ Each entry below points at a release note in `docs/releases/` and the invariant(
   chain, role-filtered and combined with the conditional command banner near
   the end, then appended as one fenced user-role carrier. The system hook still
   captures authoritative model/context metadata, but skips the architect
-  enhancer and command banner for that same request; non-architect and
-  sessionless agent-generation calls retain the system path.
+  enhancer and command banner for that same request; non-architect
+  agent-generation calls retain the system path. As of #3320, SESSIONLESS
+  system.transform calls (no `sessionID`) emit no swarm-specific text at all —
+  the sessionless HF-1b emission this entry originally described was
+  superseded by the sessionless early-return (`#3320` review round; the
+  contract is pinned by
+  `tests/integration/system-transform-sessionless-no-swarm-text.test.ts` and
+  the updated ATTACK-7 cases in
+  `tests/unit/hooks/system-enhancer-hf1b-adversarial.test.ts`).
 - **Ordering contract:** after legacy system materialization, guidance carriers
   are stably partitioned to the message-array tail in place, preserving relative
   order and object identity. Final context accounting runs after that partition
@@ -897,7 +904,7 @@ trust root outside the workspace.
 
 **Bootstrap project-root ownership (issue #2679):** the same boundary policy the tool layer enforces at write time is applied once, synchronously, at plugin bootstrap and at the `mcp serve --dir` boundary, BEFORE any init-path or first-write consumer touches a directory. `resolveProjectRootDecision` (`src/utils/project-boundary.ts`) is the decision form of `assertProjectRoot`'s ancestor walk and shares its implementation, so the two cannot drift. Rules for the directory the host supplies (`ctx.directory`) or the operator supplies (`--dir`):
 
-- **Ordinary child** — a directory with no direct `.git` file/directory and no `.opencode/` directory, whose ancestor (within 20 levels) contains BOTH a `.swarm/` directory and a project indicator (e.g. `.git`, `package.json`): the boot resolves to the owning ancestor root. All project-surface consumers (`.swarm` state, snapshot rehydration, project config under `.opencode/`, telemetry, observability lineage, bundled-skill sync, agent overrides, teardown) use the resolved root; one unconditional bounded `console.warn` hint names the owning root (plus a `/swarm diagnose` advisory and a durable `.swarm/advisories/bootstrap-root-redirect.json` record under the owning root). The plugin manifest stays fail-open (invariant 1): agents and tools still register.
+- **Ordinary child** — a directory with no direct `.git` file/directory and no `.opencode/` directory, whose ancestor (within 20 levels) contains BOTH a `.swarm/` directory and a project indicator (e.g. `.git`, `package.json`): the boot resolves to the owning ancestor root. All project-surface consumers (`.swarm` state, snapshot rehydration, project config under `.opencode/`, telemetry, observability lineage, bundled-skill sync, agent overrides, teardown) use the resolved root; one bounded hint names the owning root in the `/swarm diagnose` advisory buffer and the debug log (plus a durable `.swarm/advisories/bootstrap-root-redirect.json` record under the owning root); the raw stderr leg was removed in issue #3405 because the TUI renders plugin stderr as a full-width overlay. The plugin manifest stays fail-open (invariant 1): agents and tools still register.
 - **Directly declared nested root** — a directory with its own `.git` file (repository, linked worktree, submodule) or `.opencode/` directory stays an independent root; bootstrap writes there exactly as before. Marker symlinks/junctions do not count as declarations.
 - **Standalone root** — a directory with no claiming ancestor (no ancestor owns `.swarm/` state) is its own root; behavior is unchanged. An indicator-only ancestor WITHOUT `.swarm/` does not capture the boot.
 - **Fail-closed** — if ownership cannot be determined (inaccessible ancestor probes, ancestor-depth exhaustion, uncanonicalizable directory), NO runtime state is written anywhere for that boot; the manifest is still delivered and one bounded warning names the reason.
@@ -925,7 +932,7 @@ appendLedgerEvent({ type: 'plan-updated', payload: { ... } });
 - `tests/unit/plan/*.test.ts` — replay round-trip + projection tests.
 - `docs/plan-durability.md` is updated when the schema changes.
 
-**Settled-task re-open guard (FR-005):** `update_task_status` must not silently re-open a settled task (`completed` / `blocked` / `closed`) to `in_progress`. The tool and manager layers reject ordinary backward transitions; the only exception is the exact-task audited repair transaction with explicit force, reason, transition identity, expected state, and expected generation. The legacy `advanceTaskStateAndPersist` wrapper refuses coder and terminal boundaries so it cannot bypass that transaction.
+**Settled-task re-open guard (FR-005):** `update_task_status` must not silently re-open a settled task (`completed` / `blocked` / `closed`) to `in_progress`. The tool and manager layers reject ordinary backward transitions; the only exception is the exact-task audited repair transaction with explicit force, reason, transition identity, expected state, and expected generation. The legacy `advanceTaskStateAndPersist` wrapper refuses coder and terminal boundaries so it cannot bypass that transaction. One wedge-scoped `in_progress` admission shares that same audited transaction (issue #3389): when the durable coder-retry escalation record for the task's current retry epoch contains `user_escalation` (with `retryCount` at the threshold), the force repair is admitted; every other `in_progress` repair fails closed with `TASK_REPAIR_NOT_BACKWARD`, and an unreadable escalation index fails closed with `TASK_REPAIR_ESCALATION_INDEX_UNREADABLE` rather than guessing admission. Residual (conceded in code): retry epochs are not monotonic across a `repair_idle` reset — a stale escalation recorded at a colliding epoch number is indistinguishable from a live one, and only the `retryCount` conjunct bounds that residual.
 
 ### 6. test_runner safety
 
@@ -1031,6 +1038,7 @@ mock.module('node:fs', () => ({
 | `src/hooks/delegation-gate.ts` | `_internals.beforePrFeedbackScopeConsume` | #2469 declaration-replacement interleave tests (pause between scope classification and locked consumption) |
 | `src/hooks/pr-workflow-gate.ts` | `_test_exports.beforePrReviewReentryReservation` | #2469 workflow-lock-held-through-reservation interleave tests |
 | `src/hooks/pr-workflow-response-gate.ts` | `_internals.scanDelegationsForRecovery` | #2469 lane-progress-token tests (inject receipt digests / throwing scans) |
+| `src/hooks/guardrails/file-authority.ts` | `_internals.lstatSync` | #3606 ancestor-walk denial-rendering tests (inject non-ENOENT lstat outcomes for workspaces that do not exist on the host; production gets the real `fsSync.lstatSync`) |
 
 **Delegation-gate split pattern (FR-006 SC-006.1):**
 
@@ -1128,7 +1136,7 @@ Two failures motivated the automated check:
 | `skill-mirror` | `.opencode`↔`.claude` byte identity / divergence / adapter / opencode-only; declared extra identical paths such as `.agents`; unclassified both-tree pairs | `src/config/skill-mirrors.ts` (shared with `tests/unit/skills/skill-mirrors.test.ts`) |
 | `bundled-skill` | `.opencode/skills/` ⊆ `BUNDLED_PROJECT_SKILLS`; no phantom entries; `package.json#files` coverage | `src/config/bundled-skills.ts`, `package.json` |
 | `skill-audience` | tracked static skills declare valid audience metadata (spec `metadata.audience` or legacy top-level, issue #2907); generated lifecycle skills are excluded | static skill frontmatter parsed by `src/hooks/skill-scoring.ts` |
-| `skill-frontmatter` | Agent-Skills-spec conformance (issue #2907): no non-spec top-level frontmatter keys outside the host-consumed allowlist (`disable-model-invocation`, `argument-hint`, `context`, `agent`) in tracked non-generated skills (the generated tree is exempt, matching `skill-audience`); `name` matches the parent directory; `metadata` children carry no bare scalar, flow-collection, or block-list values (string-typed map) | `scripts/drift-check.ts` `detectSkillFrontmatterSpecDrift` |
+| `skill-frontmatter` | Agent-Skills-spec conformance (issue #2907): no non-spec top-level frontmatter keys outside the host-consumed allowlist (`disable-model-invocation`, `argument-hint`, `context`, `agent`) in tracked skills (the generated tree is enforced post-#3216; only `skill-audience` exempts it); `name` matches the parent directory; `metadata` children carry no bare scalar, flow-collection, or block-list values (string-typed map); `metadata:` values use the block form — any non-empty inline value is non-canonical and flagged (issue #3217) | `scripts/drift-check.ts` `detectSkillFrontmatterSpecDrift` |
 | `tool` | metadata / handler / plugin-object / `TOOL_NAMES` / `AGENT_TOOL_MAP` / barrel-export coherence (issue #1643) | reuses `scripts/check-tool-registration.ts` |
 | `command` | `COMMAND_NAME_SET` parity; `subcommandOf` parents exist | `src/commands/registry.ts` |
 | `agent` | `ALL_AGENT_NAMES` ↔ `AGENT_TOOL_MAP`; opt-in maps only reference real agents | `src/config/agent-names.ts`, `src/config/constants.ts` |

@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.200.17",
+  "tagCommit": "bf65b6efb1c81c65553eff1c1d5dff24b65140a8",
+  "targetCommitish": "bf65b6efb1c81c65553eff1c1d5dff24b65140a8",
+  "releaseBodySha256": "881b34ee3cdbc969efcbfeea58c0c66f3ca855ecf6981dfb38135c74bd98c60a",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/3518-3521-shellgate-knowledge-recency.md",
+      "sha256": "a703da230616ef01d1515191426afac8bc4924fe3e5997668adc29b3bb943bb3"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/j20-stale-store-lock-recovery.md",
+      "sha256": "5e5dd0df5c81a9f80d7dee81e0b9eddcc0278b9aabe96b5be8f1e9c2875146b5"
+    },
+    {
+      "prNumber": null,
+      "order": 2,
+      "path": "docs/releases/pending/j21-crash-consistency-ratchet.md",
+      "sha256": "52c262228b8394e959147661ba4be94f9548985b7e0488b7c09b5190995f0440"
+    },
+    {
+      "prNumber": null,
+      "order": 3,
+      "path": "docs/releases/pending/skills-critic-dispatch-binding.md",
+      "sha256": "f935e14fb59d42d718878d24b3b6f25e0eeba1159bed6d832716bf592940811d"
+    }
+  ]
+}

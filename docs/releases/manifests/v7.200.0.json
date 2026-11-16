@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.200.0",
+  "tagCommit": "114912a7f0b2599c11d1f81673d24795aa9bf25e",
+  "targetCommitish": "114912a7f0b2599c11d1f81673d24795aa9bf25e",
+  "releaseBodySha256": "4ba2bdefb684e89fa9b1150094c63211dec9afa54197cc36b27326319354ccf8",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/3422-external-evidence-tasks.md",
+      "sha256": "fdd94685453fd4e93ee93945557699221b46fab97cb8ce69828b45fc1f498a75"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/inherited-key-lookups-and-numeric-entities.md",
+      "sha256": "582425a3c5cbe4d935c18cfc605d1d2a28f5eab5c4d62be200f043f4488e423d"
+    },
+    {
+      "prNumber": null,
+      "order": 2,
+      "path": "docs/releases/pending/web-fetch-decode-entities-prototype-pollution.md",
+      "sha256": "6855320ccd66ec02e8286125442df9c11c4a825654410a9df8939619799d15c3"
+    }
+  ]
+}

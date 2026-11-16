@@ -1,22 +1,29 @@
 /**
  * Issue #2506 acceptance check C1 (AC1, NEW-SURFACE) — the lane-liveness
- * watchdog configuration surface, the gate seam surface, and the default-off
- * no-op contract for the watchdog evaluation itself.
+ * watchdog configuration surface, the gate seam surface, and the no-op
+ * contract for the watchdog evaluation itself while disabled.
+ *
+ * #3313 AC14 supersedes the #2506 AC1 default-off contract: the section is
+ * now DEFAULT-ON (an omitted or empty section resolves `enabled: true`; see
+ * tests/unit/config/lane-liveness-watchdog-default-on.test.ts), and the
+ * disabled path stays reachable only via the explicit `enabled: false`
+ * opt-out (AC39, tests/unit/config/lane-liveness-watchdog-explicit-opt-out
+ * .test.ts).
  *
  * Frozen contract pinned here:
  * - `src/config/schema.ts` gains a top-level `lane_liveness_watchdog` section
  *   backed by `LaneLivenessWatchdogConfigSchema` with the exact defaults and
  *   bounds (0 accepted everywhere; out-of-range rejected; `enabled` defaults
- *   to false).
+ *   to true).
  * - `src/hooks/lane-liveness-watchdog.ts` exports
  *   `LANE_LIVENESS_WATCHDOG_DEFAULTS` carrying those same five defaults.
  * - `src/hooks/pr-workflow-gate.ts` `_test_exports.laneLivenessWatchdog`
  *   exposes `resolveEffectivePrLaneHorizonMs`,
  *   `classifyLaneLivenessCondition`, `evaluateLaneLivenessWatchdog`, and the
  *   budget counters `hostStatusCalls` / `hostAbortCalls` / `evaluations`.
- * - With the watchdog disabled (the default), the watchdog evaluation is a
- *   NO-OP: existing settlement behavior is unchanged and the watchdog emits
- *   no events and records no activity of its own.
+ * - With the watchdog disabled, the watchdog evaluation is a NO-OP: existing
+ *   settlement behavior is unchanged and the watchdog emits no events and
+ *   records no activity of its own.
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs/promises';
@@ -26,7 +33,10 @@ import {
 	PluginConfigSchema,
 } from '../../../src/config/schema.js';
 import { closeProjectDb } from '../../../src/db/project-db.js';
-import { LANE_LIVENESS_WATCHDOG_DEFAULTS } from '../../../src/hooks/lane-liveness-watchdog.js';
+import {
+	LANE_LIVENESS_WATCHDOG_DEFAULTS,
+	laneLivenessWatchdogFeatures,
+} from '../../../src/hooks/lane-liveness-watchdog.js';
 import {
 	_test_exports as gateInternals,
 	settlePresumedStalePrWorkflowLanes,
@@ -58,9 +68,13 @@ type WatchdogSurface = {
 const surface = (): WatchdogSurface =>
 	gateInternals.laneLivenessWatchdog as unknown as WatchdogSurface;
 
-/** The five frozen defaults from issue #2506 AC1 (0 disables the feature). */
+/**
+ * The five frozen defaults from issue #2506 AC1 (0 disables the feature).
+ * #3313 AC14 supersedes the #2506 AC1 default-off contract: `enabled` flips
+ * to `true` with the schema default.
+ */
 const CONTRACT_DEFAULTS = {
-	enabled: false,
+	enabled: true,
 	timeout_ms: 1_800_000,
 	stall_threshold_ms: 300_000,
 	stall_min_steps: 5,
@@ -104,11 +118,22 @@ describe('C1 — lane_liveness_watchdog config schema (AC1)', () => {
 		);
 	});
 
-	test('default-off: an omitted or empty section is never enabled', () => {
+	test('default-on: an omitted or empty section resolves the enabled watchdog', () => {
+		// #3313 AC14 supersedes the #2506 AC1 default-off contract.
 		const omitted = PluginConfigSchema.parse({});
-		expect(omitted.lane_liveness_watchdog?.enabled ?? false).toBe(false);
+		expect(omitted.lane_liveness_watchdog).toBeDefined();
+		expect(omitted.lane_liveness_watchdog?.enabled).toBe(true);
+		expect(
+			laneLivenessWatchdogFeatures(omitted.lane_liveness_watchdog)
+				.deadlineActive,
+		).toBe(true);
 		const empty = PluginConfigSchema.parse({ lane_liveness_watchdog: {} });
-		expect(empty.lane_liveness_watchdog?.enabled).toBe(false);
+		expect(empty.lane_liveness_watchdog?.enabled).toBe(true);
+		// The explicit opt-out is the one shape that keeps the watchdog off.
+		const off = PluginConfigSchema.parse({
+			lane_liveness_watchdog: { enabled: false },
+		});
+		expect(off.lane_liveness_watchdog?.enabled).toBe(false);
 	});
 
 	test('every knob accepts 0 (0 disables the relevant feature)', () => {
@@ -228,9 +253,10 @@ describe('C1 — disabled watchdog is a no-op for the watchdog evaluation itself
 				},
 			}) as unknown as ReturnType<typeof gateInternals.getSessionOps>;
 
-		// Two-argument call: no watchdog options threaded, so the disabled
-		// default applies. This is the exact call shape every existing caller
-		// uses today.
+		// Two-argument call: no watchdog policy threaded, so the settlement
+		// applies none — the direct gate seam does not read config, so the
+		// schema-level default (#3313 AC14) cannot arm the watchdog here. This
+		// is the exact call shape every existing non-tool caller uses today.
 		const settlement = await settlePresumedStalePrWorkflowLanes(
 			directory,
 			'sess-c1-noop',
@@ -338,6 +364,9 @@ describe('C1 — enabled x 0-disables cross-product (32 cells)', () => {
 		}
 	}
 
+	// Per-test timeout note (feedback F18e): the explicit 120_000 argument
+	// below is load-bearing — 32 temp-dir cells measured ~5.7s wall against
+	// bun's 5s default. Keep it when editing; do not trim cells instead.
 	test('every cell matches the frozen inertness truth table', async () => {
 		expect(CELLS.length).toBe(32);
 		for (const cell of CELLS) {

@@ -99,6 +99,14 @@ describe('conservative preset — schema surface (#2504)', () => {
 		};
 		expect(base.auto_review?.enabled).toBe(false);
 	});
+
+	test('CONSERVATIVE_PRESET_BASE pins the pre-flip lane_liveness_watchdog posture', () => {
+		// #3313 default flip — conservative restores the pre-flip default.
+		const base = CONSERVATIVE_PRESET_BASE as {
+			lane_liveness_watchdog?: { enabled?: boolean };
+		};
+		expect(base.lane_liveness_watchdog?.enabled).toBe(false);
+	});
 });
 
 describe('conservative preset — loader materialization (#2504)', () => {
@@ -107,6 +115,9 @@ describe('conservative preset — loader materialization (#2504)', () => {
 		const config = loadPluginConfig(dir);
 		expect(config.preset).toBe('conservative');
 		expect(config.auto_review?.enabled).toBe(false);
+		// #3313 default flip — conservative restores the pre-flip default: the
+		// lane-liveness watchdog resolves OFF through the production loader path.
+		expect(config.lane_liveness_watchdog?.enabled).toBe(false);
 	});
 
 	test('conservative preset survives the user-config-alone fallback (PRR-004)', () => {

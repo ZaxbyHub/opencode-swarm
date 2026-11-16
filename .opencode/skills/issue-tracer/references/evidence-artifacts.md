@@ -18,7 +18,7 @@ freshness: <synced|behind:<n>|fetch-failed:<reason>|user-override:"<quoted user 
 phase0-tree-id: <40-hex or unset>
 checkpoint-tree-id: <40-hex or unset>
 handshake: <MATCH|SHIM|STALE:<path>|ABSENT|unset>
-tools: <comma list, e.g. graphify,zvec_grep,gh,subagents,claude-cli,codex-cli or none>
+tools: <comma list, e.g. graphify,zvec_grep,gh,subagents,claude-cli,codex-cli or none; plus exactly one claim entry: session=<token> or claim: not_applicable (<reason, no commas>)>
 merge: <AWAITING_USER_APPROVAL|APPROVED:<pr-head-sha>|MERGED|not-applicable>
 next-action: <free text, one line>
 
@@ -28,6 +28,18 @@ next-action: <free text, one line>
 ```
 
 Gate rows (`plan-critic`, `implementation-review`, `final-critic`, `merge-approval`) are appended, never edited.
+
+### Rebind rows (post-approval head drift)
+
+When a gate's approval row binds a head that has since moved (typically the `plan-critic` row, approved at the pre-implementation head before implementation commits land), `trace-check.sh rebind --gate <plan-critic|implementation-review|final-critic> --reason <text> --slug <slug>` validates the drift and **prints** the rebind row (the validator stays read-only - the caller appends it to the `## Gates` table verbatim):
+
+```text
+| plan-critic | APPROVE | <new-head> | <new-tree> | 06-critic-review.md rebind(<reason>) |
+```
+
+Rebind rows are append-only like every gate row; the original approval row is never edited or removed, and the printed row is the only sanctioned shape (an `APPROVE` verdict with a `rebind(<reason>)` marker appended to the original artifact cell). A rebind is bookkeeping for head drift, **not a re-approval**: it is valid only while the artifact the critic reviewed (the plan) is unchanged. If the plan, its assumptions, or the reviewed artifact changed, do not rebind - run a fresh critic round and record it in `06b-critic-recheck.md` (or the 09b delta artifact for the implementation/final gates) instead; phase 3's `artifact_identity_matches_gate_or_rebind` accepts the chain (historical APPROVE row matching the artifact's identity pair + a rebind-marked row binding the current head) and phases 4.5/4.6 keep the strict check, so those gates still require a fresh delta artifact when they drift.
+
+The rebind row is the explicit, recorded form of what used to be disclosed as prose next to the two known FAILs (`gate-plan-critic` + `artifact-identity-plan-critic`) that a post-implementation phase-3 re-sweep produced.
 
 ## `01-issue-summary.md`
 
@@ -342,6 +354,17 @@ no-defect-class: true
 [Reason this change has zero behavioral surface - one line.]
 ```
 
+## Mutation battery honesty (when the guardrail demonstration is a mutant suite)
+
+When a guardrail demonstration (or any evidence claim) is backed by a mutation battery - a script that flips one guarded condition per probe and expects the mapped test family to fail - the battery itself is evidence and must be honest:
+
+- **One cwd change.** Run every probe from a single shell state. A `cd` that compounds per probe (for example a second `cd backend` inside the loop) can leave pytest pointed at the wrong directory so no tests run at all; every probe then "passes" vacuously - the PR #1093 failure mode, where a first battery reported 8/8 KILLED while pytest had never run.
+- **Per-probe verdicts from the pytest summary.** KILLED only when the probe's own test id appears in the pytest summary as failed, SURVIVED only when it passes, and PROBE-ERROR when pytest produced no summary line (collection error, harness crash). Never classify PROBE-ERROR as KILLED, and never infer a verdict from a probe script's own exit code alone.
+- **Per-probe logs.** Keep each probe's full output in a file (for example `repro/mutants/<probe>.log`) and cite the directory; a bare "16/16 KILLED" with no logs is not evidence.
+- **Repo-relative capture paths.** Generate probes and logs with paths relative to the repo root so they resolve from the single shell state, and copy repro scripts with repo-relative `--copy` arguments.
+- **Re-anchor after edits.** Any post-battery edit that moves lines (lint `--fix`, formatting, later commits on top) can shift what the probes mutate; re-run the battery and re-record verdicts after such edits, the same way a line-keyed SAST baseline must be re-anchored before the gate re-runs.
+- **Exemplar:** ragappv3 PR #1093's `repro/mutation-battery.sh` (16 probes with per-probe logs under `repro/mutants/`, rebuilt after the original double-`cd` battery was found vacuous).
+
 ## `08b-implementation-review.md`
 
 Use `references/critic-gate.md` (Implementation Review section). The `## Reviewed SHA / diff hash` section records exactly two lines - `reviewed-commit: <40-hex>` and `tree-id: <40-hex>` - and `trace-check.sh` requires both to equal the `implementation-review` row's `reviewed-commit`/`tree-id` cells in `## Gates`. The artifact also records a verdict, `## Independently re-run`, `## Check integrity`, and the `## Deferred / Scoped-Out / Unwired` finding.
@@ -377,7 +400,7 @@ Written when CI rounds occur after publication: one entry per round with the fai
 
 ## `repro/` layout
 
-Lives inside the trace directory (git-excluded, never committed): `checkpoint.manifest` (rows are appended, never edited - a frozen `(path, check-id)` pair is superseded only by a recorded `AMEND` row, while distinct check ids may share a path only when they capture identical current bytes; divergent effective blobs for one path fail closed, and both the header's recorded row count and `seq` continuity are validated on every read and write; header `# issue-tracer checkpoint manifest v1 rows=<N>`, restamped with the row and seeded by `trace-init.sh` as `rows=0`, and see `references/acceptance-checks.md` for what that does and does not guarantee) plus `<check-id>.base.log` and `<check-id>.head.log` per executable check, written by `repro-check.sh run`.
+The git-excluded trace directory stores `checkpoint.manifest` and each executable check's `<check-id>.base.log` and `<check-id>.head.log`. The manifest is seeded by `trace-init.sh` with a v1 header declaring `rows=0`. A successful checkpoint publishes a v2 header and appends the new rows. A frozen `(path, check-id)` pair is superseded only by an `AMEND` row. Distinct check ids may share a path when they capture identical current bytes. Validation checks the header's recorded row count and `seq` continuity. Phase 4 verifies generated replay evidence for v2 manifests. See `references/acceptance-checks.md`.
 
 ## OBE subset
 
@@ -386,3 +409,49 @@ Lives inside the trace directory (git-excluded, never committed): `checkpoint.ma
 ## Test Validation and Drift Review
 
 See `references/full-resolution-contract.md` for this section - kept there as the single copy; this reference only points to it so the requirement is not duplicated and cannot drift.
+
+## Native release review
+
+Record the published `PR URL:` and exact `PR head:` in `10-pr-body.md` before merge admission. This applies to ordinary PRs too, since the merge check reads release applicability from the same GitHub response used to verify PR identity. Mark release-bound PRs with the GitHub `release-bound` label and record `release-bound: yes` in the trace. GitHub's release label and release-please branch identity require review even when a trace omits the marker or says `no`. A positive trace marker can also require review.
+
+Run `bash .opencode/skills/issue-tracer/scripts/trace-check.sh release-review --slug <slug>` from the repository root before seeking merge approval. The `release-review-action-v1` command includes the PR URL and exact head. For `swarm_command`, pass `command: "pr-review"` and `args: [<PR URL>, "--release-head", <exact head>]`. A matching active review resumes. After an APPROVE with complete coverage, call `pr_review_submission` for the completed run. Record `review-id:` and `run-id:` in `10c-broad-review.md` when `native_release_receipt` is true. Rerun the release check. An incomplete or blocking review keeps merge admission closed. After a squash merge, retain this evidence so reconciliation can verify the recorded PR head and the live GitHub merge identity.
+
+## Trace evidence integrity
+
+### Causal-oracle evidence rule
+
+Name the target assertion and its expected failure. Run a pristine control under the same conditions and verify the expected differential.
+
+### Falsifier-first rule
+
+Execute the falsifier first after changing a negative-evidence probe.
+
+### Guard-discrimination rule
+
+Reject skips, crashes, producer-side guard failures, and unrelated assertions as witnesses.
+
+### Disposition-audit rule
+
+Audit disposition severity and reachability before applying an issue-count ceiling.
+
+### Checkout-exclusion rule
+
+Keep mutation probes and concurrent checkout replays in separate worktrees.
+
+### Session-ledger abort criterion
+
+Stop the affected trace when the session ledger loses the owning run, reviewed head, or evidence location. Restore those links before recording another verdict.
+
+### Generator-only authorship and banner rule
+
+Use the checkpoint generator for the replay runner and test inventory. Preserve its GENERATED banners.
+
+### Vendored-copy manifest-pin guidance
+
+Pin vendored copies with a manifest of upstream revision, paths, and content hashes. Verify the manifest when refreshing the copy.
+
+### Trace validation commands
+- Attach committed output or edit evidence to an `- Evidence:` or `- Disposition:` assertion using `[receipt <commit>:<path> blob=<blob>]`. Run `trace-check.sh receipts --slug <slug>` to verify the bindings.
+- For an edit that relies on an exact literal, use `node .opencode/skills/issue-tracer/scripts/apply-edit.mjs --file PATH --find TEXT --replace TEXT --count N` with the expected number of matches. Record the resulting edit evidence after committing it.
+- For a same-tree metadata commit, use `bash .opencode/skills/issue-tracer/scripts/rebind-identities.sh --slug <slug> --reason <reason>` to update the active identities, then run it with `--check`. A changed tree requires fresh review.
+- After a squash merge, capture the output of `trace-check.sh merge-identity <base-sha> <reviewed-head-sha> <squash-sha>` in the trace. The command verifies the squash parent and stable patch ID.

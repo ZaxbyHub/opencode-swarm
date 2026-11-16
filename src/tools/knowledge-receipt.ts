@@ -138,7 +138,7 @@ export const knowledge_receipt: ReturnType<typeof createSwarmTool> =
 	createSwarmTool({
 		allowWorkingDirectoryOverride: true,
 		description:
-			'File a receipt for knowledge surfaced by a retrieval (by trace_id): which entries were applied (with evidence), ignored with a reason (relevant but deliberately not followed — counts against the entry), marked n_a with a reason (not applicable to this task — neutral), or contradicted (with proposed remediation), plus any new lessons. Each item is recorded as an immutable knowledge event. Set no_relevant_knowledge:true when a retrieval surfaced nothing useful.',
+			'File a receipt for knowledge surfaced by a retrieval (by trace_id): which entries were applied (with evidence), ignored with a reason (relevant but deliberately not followed — counts against the entry), marked n_a with a reason (not applicable to this task — neutral), or contradicted (with proposed remediation), plus any new lessons. Each item is recorded as an immutable knowledge event. Set no_relevant_knowledge:true when a retrieval surfaced nothing useful. A second "none" receipt in the same session with a different or omitted task_id/phase is a PERMANENT identity conflict (reason wrong_task or wrong_phase): re-filing that conflicting identity keeps failing — re-file with the originally recorded task_id/phase to succeed idempotently. reason duplicate_conflicting_terminal means the recorded grace window no longer matches (the knowledge.receipt_close_grace_days setting changed): the conflict is NOT in your task/phase and re-filing cannot fix it — an operator must restore the original grace setting. Never treat these reasons as retryable store failures.',
 		args: {
 			trace_id: z
 				.string()

@@ -22,7 +22,6 @@ import {
 	GuardrailsConfigSchema,
 	stripKnownSwarmPrefix,
 } from '../../../src/config/schema';
-import { createGuardrailsHooks } from '../../../src/hooks/guardrails';
 import {
 	beginInvocation,
 	ensureAgentSession,
@@ -31,6 +30,7 @@ import {
 	startAgentSession,
 	swarmState,
 } from '../../../src/state';
+import { createSandboxedGuardrailsHooks } from '../../helpers/sandboxed-guardrails-hooks';
 
 describe('v6.1.2 Guardrails Remediation', () => {
 	// ============================================================
@@ -215,7 +215,7 @@ describe('v6.1.2 Guardrails Remediation', () => {
 				);
 				expect(guardrailsConfig.enabled).toBe(false);
 
-				const hooks = createGuardrailsHooks(guardrailsConfig);
+				const hooks = createSandboxedGuardrailsHooks(guardrailsConfig);
 
 				// All hooks should be no-ops
 				await expect(
@@ -255,7 +255,7 @@ describe('v6.1.2 Guardrails Remediation', () => {
 		it('guardrails toolBefore uses ORCHESTRATOR_NAME fallback when activeAgent is missing', async () => {
 			// Create enabled guardrails config
 			const guardrailsConfig = GuardrailsConfigSchema.parse({ enabled: true });
-			const hooks = createGuardrailsHooks(guardrailsConfig);
+			const hooks = createSandboxedGuardrailsHooks(guardrailsConfig);
 
 			// Clear any pre-existing state
 			resetSwarmState();
@@ -282,7 +282,7 @@ describe('v6.1.2 Guardrails Remediation', () => {
 				enabled: true,
 				max_tool_calls: 5,
 			});
-			const hooks = createGuardrailsHooks(guardrailsConfig);
+			const hooks = createSandboxedGuardrailsHooks(guardrailsConfig);
 
 			resetSwarmState();
 
@@ -306,7 +306,7 @@ describe('v6.1.2 Guardrails Remediation', () => {
 				enabled: true,
 				max_tool_calls: 1, // Very low limit
 			});
-			const hooks = createGuardrailsHooks(guardrailsConfig);
+			const hooks = createSandboxedGuardrailsHooks(guardrailsConfig);
 
 			resetSwarmState();
 
@@ -374,7 +374,7 @@ describe('v6.1.2 Guardrails Remediation', () => {
 				enabled: true,
 				max_tool_calls: 10,
 			});
-			const hooks = createGuardrailsHooks(guardrailsConfig);
+			const hooks = createSandboxedGuardrailsHooks(guardrailsConfig);
 
 			resetSwarmState();
 

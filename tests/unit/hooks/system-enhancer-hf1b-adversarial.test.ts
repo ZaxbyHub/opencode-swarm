@@ -361,26 +361,34 @@ describe('system-enhancer HF-1b - Adversarial Attack Vector Testing', () => {
 	});
 
 	describe('ATTACK 7: Null sessionID', () => {
-		it("null sessionID → get('') → undefined → baseRole null → HF-1b fires", async () => {
+		// #3320 review round — DELIBERATE CONTRACT UPDATE: sessionless
+		// system.transform calls (title/summary/agent-generation surfaces) now
+		// emit NO swarm-specific text at all (`if (surface === 'system' &&
+		// !_input.sessionID) return;` in createSystemEnhancerHook), superseding
+		// the prior contract that a sessionless call fired HF-1b. The guard's
+		// protective value on a surface that executes no tools is nil, and the
+		// sessionless surfaces have no delivery owner for the text. Session-bound
+		// HF-1b behavior is unchanged (ATTACK 1-6 pin it). Disclosed in the
+		// PR #3376 body under the pinned-test replacement discipline.
+		it('null sessionID → sessionless call emits NOTHING (no HF-1b, no swarm text)', async () => {
 			await createSwarmFiles();
 
 			// Don't set any active agent, and use empty sessionID (equivalent to null)
 			const systemOutput = await invokeHook('');
 
-			// No active agent, so baseRole is null
+			// Sessionless: the enhancer returns before any producer runs.
 			expect(hasHF1Injection(systemOutput)).toBe(false);
-			expect(hasHF1bInjection(systemOutput)).toBe(true);
+			expect(hasHF1bInjection(systemOutput)).toBe(false);
 		});
 
-		it("undefined sessionID → get('') → undefined → baseRole null → HF-1b fires", async () => {
+		it('undefined sessionID → sessionless call emits NOTHING (no HF-1b, no swarm text)', async () => {
 			await createSwarmFiles();
 
 			// Invoke hook without sessionID (undefined)
 			const systemOutput = await invokeHook(undefined);
 
-			// No active agent, so baseRole is null
 			expect(hasHF1Injection(systemOutput)).toBe(false);
-			expect(hasHF1bInjection(systemOutput)).toBe(true);
+			expect(hasHF1bInjection(systemOutput)).toBe(false);
 		});
 	});
 });

@@ -1,4 +1,4 @@
-import { stripKnownSwarmPrefix } from '../config/schema.js';
+import { deriveSwarmIdentity } from '../config/schema.js';
 import { throwIfProviderMessageError } from '../failures/provider-message-error';
 import { swarmState } from '../state.js';
 import { telemetry } from '../telemetry.js';
@@ -237,11 +237,8 @@ export function createCuratorLLMDelegate(
 			// naive `_`-split — because curator role names themselves contain an
 			// underscore (`curator_phase`, `curator_consolidation`), which a split
 			// would misread as a swarm prefix. Mirrors src/turbo/lean/reviewer.ts.
-			const baseRole = stripKnownSwarmPrefix(agentName);
-			const swarmId =
-				baseRole !== agentName
-					? agentName.slice(0, agentName.length - baseRole.length - 1)
-					: undefined;
+			const { role: baseRole, swarmID: swarmId } =
+				deriveSwarmIdentity(agentName);
 			const swarmAgents = getSwarmAgents(swarmId);
 			const fallbackModels = resolveConfiguredFallbackModels(
 				baseRole,

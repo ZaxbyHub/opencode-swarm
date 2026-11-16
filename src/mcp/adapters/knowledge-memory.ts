@@ -100,7 +100,8 @@ export const swarmMemoryRecallAdapter: McpReadTool = {
 			return {
 				available: false,
 				reason: 'memory_disabled',
-				message: 'Swarm memory is disabled. Set swarm.memory.enabled=true.',
+				message:
+					'Swarm memory is disabled (the memory.enabled setting is false in opencode-swarm.json). This is an operator configuration; the tool stays inert until an operator enables it.',
 			};
 		}
 		// Probe 2: the configured provider's INITIALIZED store artifact. The

@@ -571,7 +571,7 @@ export const PrReviewRunIdSchema = z
 		'run_id must be a safe relative identifier',
 	);
 
-export const PrReviewFindingSchema = z
+const PrReviewFindingObjectSchema = z
 	.object({
 		finding_id: z.string().trim().min(1).max(128),
 		status: z.enum(PR_REVIEW_FINDING_STATUSES),
@@ -609,26 +609,78 @@ export const PrReviewFindingSchema = z
 		 */
 		order_agreement: z.enum(['agree', 'disagree', 'single']).optional(),
 	})
-	.strict()
-	.superRefine((value, ctx) => {
-		if (value.status !== 'CONFIRMED') return;
-		if (value.risk_impact === undefined) {
-			ctx.addIssue({
-				code: 'custom',
-				path: ['risk_impact'],
-				message:
-					'is required on every newly written CONFIRMED finding (issue #2383 typed critic routing)',
-			});
-		}
-		if (value.risk_tags === undefined) {
-			ctx.addIssue({
-				code: 'custom',
-				path: ['risk_tags'],
-				message:
-					'is required on every newly written CONFIRMED finding (issue #2383 typed critic routing)',
-			});
-		}
-	});
+	.strict();
+
+type PrReviewFindingShape = z.infer<typeof PrReviewFindingObjectSchema>;
+
+function refineConfirmedRiskMetadata(
+	value: PrReviewFindingShape,
+	ctx: z.RefinementCtx,
+): void {
+	if (value.status !== 'CONFIRMED') return;
+	if (value.risk_impact === undefined) {
+		ctx.addIssue({
+			code: 'custom',
+			path: ['risk_impact'],
+			message:
+				'is required on every newly written CONFIRMED finding (issue #2383 typed critic routing)',
+		});
+	}
+	if (value.risk_tags === undefined) {
+		ctx.addIssue({
+			code: 'custom',
+			path: ['risk_tags'],
+			message:
+				'is required on every newly written CONFIRMED finding (issue #2383 typed critic routing)',
+		});
+	}
+}
+
+/**
+ * Issue #3358 AC4: the transport rejects a CONFIRMED reviewer row whose
+ * severity is NONE (#3310), so a findings record carrying that pair would
+ * persist exactly the state the transport refuses. Write boundary only — see
+ * `PrReviewPersistedFindingRecordSchema` for why readers stay tolerant.
+ *
+ * Feedback round: an OMITTED severity on a CONFIRMED record stays under the
+ * #2279 unconditional severity comparison in the aggregated validator
+ * (pr-workflow-gate.ts reportSeverity — "an OMITTED severity is a mismatch,
+ * never a skip"), which names the required value in the one-rejection report.
+ * Enforcing it here at the schema would preempt that aggregated report and
+ * break the documented error-ordering contract, so the schema deliberately
+ * keeps rejecting only the explicit NONE pair.
+ */
+function refineConfirmedSeverity(
+	value: PrReviewFindingShape,
+	ctx: z.RefinementCtx,
+): void {
+	if (value.status === 'CONFIRMED' && value.severity === 'NONE') {
+		ctx.addIssue({
+			code: 'custom',
+			path: ['severity'],
+			message:
+				'CONFIRMED finding severity must not be NONE (the #3310 transport rule)',
+		});
+	}
+}
+
+/** Write contract for findings records (every write-args schema uses this). */
+export const PrReviewFindingSchema = PrReviewFindingObjectSchema.superRefine(
+	(value, ctx) => {
+		refineConfirmedRiskMetadata(value, ctx);
+		refineConfirmedSeverity(value, ctx);
+	},
+);
+
+/**
+ * Read shape for DURABLE findings records. Identical to the write contract
+ * except that it omits the #3358 CONFIRMED/NONE coherence rule: records
+ * written before that rule (the writer once defaulted an absent severity to
+ * NONE) must keep loading, and `.extend()` inherits refinements, so the
+ * persisted reader cannot be derived from `PrReviewFindingSchema`.
+ */
+export const PrReviewPersistedFindingRecordSchema =
+	PrReviewFindingObjectSchema.superRefine(refineConfirmedRiskMetadata);
 
 // Issue #2385: the predicate and its input type moved canonically to
 // `src/pr-review/critic-routing.ts` (the single-routing-authority boundary).
@@ -733,6 +785,84 @@ export const WritePrReviewArtifactArgsSchema = z
 		}
 	});
 
+/**
+ * FB-008 (feedback): committed-replay tolerance for the findings payload. A
+ * retry of a boundary already committed under earlier verdict semantics
+ * carries the persisted rows verbatim (CONFIRMED + NONE), which the live
+ * write contract refuses at parse — so the idempotent replay admission
+ * downstream could never run. This variant keeps every other rule of the
+ * write contract but reads records through the durable read shape
+ * (`PrReviewPersistedFindingRecordSchema`); the writer admits a parse through
+ * it ONLY when the payload canonically equals an already-committed boundary
+ * of the active head-bound workflow, and surfaces the original strict error
+ * for every other failure.
+ */
+function refineWriteArgsShape(
+	value:
+		| {
+				kind: 'findings';
+				boundary: (typeof PR_REVIEW_ARTIFACT_BOUNDARIES)[number];
+				partial_base_coverage?: unknown;
+		  }
+		| { kind: 'handoff' },
+	ctx: z.RefinementCtx,
+): void {
+	if (
+		value.kind === 'findings' &&
+		value.partial_base_coverage !== undefined &&
+		value.boundary !== 'post_explorer'
+	) {
+		ctx.addIssue({
+			code: 'custom',
+			path: ['partial_base_coverage'],
+			message: 'is valid only for the post_explorer boundary',
+		});
+	}
+}
+
+export const WritePrReviewArtifactCommittedReplayArgsSchema = z
+	.discriminatedUnion('kind', [
+		z
+			.object({
+				kind: z.literal('findings'),
+				run_id: PrReviewRunIdSchema.optional(),
+				pr_head_sha: z
+					.string()
+					.trim()
+					.regex(/^[0-9a-f]{6,64}$/i),
+				boundary: z.enum(PR_REVIEW_ARTIFACT_BOUNDARIES),
+				records: z.array(PrReviewPersistedFindingRecordSchema).min(1).max(1000),
+				partial_base_coverage: PrReviewPartialBaseCoverageSchema.optional(),
+			})
+			.strict(),
+		z
+			.object({
+				kind: z.literal('handoff'),
+				run_id: PrReviewRunIdSchema.optional(),
+				pr_head_sha: z
+					.string()
+					.trim()
+					.regex(/^[0-9a-f]{6,64}$/i),
+				handoff: PrReviewHandoffSchema,
+			})
+			.strict(),
+	])
+	.superRefine((value, ctx) => {
+		refineWriteArgsShape(value, ctx);
+		const bytes = serializedPrReviewArtifactInputBytes(value);
+		const maxBytes =
+			value.kind === 'findings'
+				? PR_REVIEW_FINDINGS_WRITE_MAX_BYTES
+				: PR_REVIEW_HANDOFF_WRITE_MAX_BYTES;
+		if (bytes > maxBytes) {
+			ctx.addIssue({
+				code: 'custom',
+				path: [value.kind === 'findings' ? 'records' : 'handoff'],
+				message: `serialized UTF-8 payload must be at most ${maxBytes} bytes (got ${bytes})`,
+			});
+		}
+	});
+
 export type PrReviewVerdictKind = 'reviewer' | 'critic';
 
 export interface PrReviewVerdictDescriptor {
@@ -777,6 +907,20 @@ export function encodePrReviewRiskTagsField(
 	return [...tags].join(',');
 }
 
+/**
+ * Issue #3358 AC4: the reviewer verdict-row semantics this plugin enforces.
+ * v1 admitted a CONFIRMED row with severity NONE; v2 (#3310) rejects it. Lane
+ * artifacts persist raw text with no semantics marker (adding a field to the
+ * strict `LaneOutputArtifactSchema` would make new artifacts unreadable after
+ * a downgrade), so a v1-era row is recognized by its shape at re-parse and
+ * disclosed rather than silently dropped.
+ */
+export const PR_REVIEW_VERDICT_SEMANTICS_VERSION = 2;
+
+/** The single v1→v2 tightening; shared with the replay classifier. */
+export const CONFIRMED_REVIEWER_SEVERITY_NONE_MESSAGE =
+	'CONFIRMED reviewer severity must not be NONE';
+
 export const PrReviewReviewerVerdictFieldsSchema = z
 	.tuple([
 		z.literal('[REVIEWED]'),
@@ -802,11 +946,18 @@ export const PrReviewReviewerVerdictFieldsSchema = z
 		}
 		// #3310: a CONFIRMED finding with no severity is incoherent — it is
 		// the one classification for which even DOWNGRADED is impossible.
+		// #3336 in-flight replay: lane artifacts persist RAW text (no
+		// write-time row validation; validation happens at read), so a
+		// reviewer artifact written BEFORE this tightening re-parses under
+		// the live schema on every composition and its item stays unclaimed
+		// (fail-closed). #3358 AC4: that loss is DISCLOSED, never silent —
+		// composition records the item in `semanticsMismatchedItemIds` and
+		// settlement names it against PR_REVIEW_VERDICT_SEMANTICS_VERSION.
 		if (fields[2] === 'CONFIRMED' && fields[4] === 'NONE') {
 			ctx.addIssue({
 				code: 'custom',
 				path: [4],
-				message: 'CONFIRMED reviewer severity must not be NONE',
+				message: CONFIRMED_REVIEWER_SEVERITY_NONE_MESSAGE,
 			});
 		}
 	});
@@ -844,6 +995,18 @@ export const PrReviewCriticVerdictFieldsSchema = z
 			// rank-equality rule itself lives in the adapter
 			// (validateCriticVerdictFields), which also enforces that UPHELD
 			// keeps the reviewer's exact severity rank.
+			//
+			// #3336 in-flight replay — the ACCEPTING direction: artifacts
+			// persist raw text with no write-time row validation, so a
+			// pre-upgrade critic artifact CAN hold an `UPHELD | LOW/INFO` row
+			// the pre-#3310 read schema rejected (its item was unclaimed and
+			// the phase blocked). After this widening, the same persisted row
+			// becomes CLAIMABLE on the first composition with no re-run —
+			// provided its bound reviewer row still validates under the live
+			// schema. Both replay directions (this acceptance, and the
+			// CONFIRMED+NONE fail-closed flip above) are the documented,
+			// tested consequence of re-parsing durable artifacts through the
+			// live schema with no verdict-semantic version gate (#3358).
 			ctx.addIssue({
 				code: 'custom',
 				path: [3],
@@ -855,6 +1018,28 @@ export const PrReviewCriticVerdictFieldsSchema = z
 				code: 'custom',
 				path: [3],
 				message: 'DOWNGRADED critic severity cannot be CRITICAL',
+			});
+		}
+		if (status === 'DOWNGRADED' && severity === 'NONE') {
+			// F-002: a DOWNGRADED row at NONE is transport-legal at the row
+			// level but its truthful post-critic projection is CONFIRMED+NONE —
+			// exactly the pair the write boundary refuses (refineConfirmedSeverity),
+			// which deadlocked post-critic persistence for that population
+			// (base accepted the projection). NONE means "no real severity", and
+			// a finding with no real severity is not a downgrade target — the
+			// #3310 doctrine is that even a downgrade is impossible at NONE:
+			// a critic dismissing the finding entirely must emit DISPROVED (which
+			// requires NONE). Rejecting here keeps the row vocabulary and the
+			// write boundary coherent end-to-end. Disclosed asymmetry: durable
+			// pre-upgrade DOWNGRADED|NONE critic rows now fail the live schema
+			// (unclaimed, fail-closed, named generically) WITHOUT the #3358
+			// AC4-style dedicated disclosure — that analog exists only for
+			// reviewer rows; adding it is deferred (ask-tracker row).
+			ctx.addIssue({
+				code: 'custom',
+				path: [3],
+				message:
+					'DOWNGRADED critic severity must not be NONE — dismiss the finding with DISPROVED (which requires NONE) instead',
 			});
 		}
 	});
@@ -907,6 +1092,14 @@ export interface ParsedPrReviewVerdictRow {
 	fields: string[];
 	overflowClass: PrReviewVerdictOverflowClass;
 	recoveredOverflow: boolean;
+	/**
+	 * #3357: the raw field count observed immediately BEFORE over-arity
+	 * tail-merge normalization (equals `fields.length` when the row did not
+	 * merge). The quarantine discriminator keys on arrival arity, so callers
+	 * need the pre-merge count as evidence — the post-merge arity is always
+	 * the legal count by construction.
+	 */
+	rawFieldCount: number;
 }
 
 function quoted(value: string): string {
@@ -1061,7 +1254,8 @@ export function buildPrReviewContractCard(): string {
 		'- DISPROVED requires severity NONE.',
 		// #3310: state the cross-row severity rules the transport enforces.
 		"- UPHELD keeps the reviewer's severity exactly and is not permitted at NONE.",
-		"- DOWNGRADED must be strictly lower than the reviewer's severity and never CRITICAL.",
+		"- DOWNGRADED must be strictly lower than the reviewer's severity and never CRITICAL or NONE.",
+		'- A critic dismissing a finding entirely emits DISPROVED (severity NONE), not DOWNGRADED at NONE.',
 		'- NEEDS_MORE_EVIDENCE is not a terminal critic transport row.',
 		'- risk_impact/risk_tags are REQUIRED on every CONFIRMED REVIEWED row; malformed or unknown values fail the row.',
 		'- Critic routing is typed (issue #2383): CRITICAL/HIGH always; MEDIUM only when HIGH_IMPACT or any risk tag; UNKNOWN always; ORDINARY MEDIUMs with no tags are not critic-routed.',
@@ -1105,6 +1299,25 @@ export function encodePrReviewVerdictRow(
 		);
 	}
 	return parsed.data.map(encodePrReviewVerdictField).join(' | ');
+}
+
+/**
+ * Issue #3335: does any LINE of `text` parse as a live verdict row of `kind`?
+ * The reference grammar is `parsePrReviewVerdictRow` itself (fields are
+ * pipe-split and `.trim()`-ed — Unicode whitespace — and the marker matches by
+ * equality), so prompt-side guards derive their verdict-row detection from
+ * THIS function instead of reimplementing a regex that drifts from the parser.
+ * Splits lines exactly like the transport consumer (`indexVerdictRows`:
+ * `/\r?\n/`), so a lone `\r` stays in-line, exactly as the parser sees it.
+ */
+export function firstPrReviewVerdictRowTemplateLine(
+	text: string,
+	kind: PrReviewVerdictKind,
+): string | null {
+	for (const line of text.split(/\r?\n/)) {
+		if (parsePrReviewVerdictRow(line, kind) !== null) return line;
+	}
+	return null;
 }
 
 export function parsePrReviewVerdictRow(
@@ -1154,6 +1367,10 @@ export function parsePrReviewVerdictRow(
 		current += char;
 	}
 	fields.push(current.trim());
+	// #3357: capture the arrival arity BEFORE any normalization mutates
+	// `fields` — the legacy-10 push below means a post-normalization
+	// fields.length would report 12 for a row that arrived with 10.
+	const rawArrivalCount = fields.length;
 	if (fields[0] !== descriptor.marker) return null;
 	if (
 		kind === 'reviewer' &&
@@ -1167,14 +1384,16 @@ export function parsePrReviewVerdictRow(
 		fields.push('UNKNOWN', '');
 	}
 	if (fields.length > descriptor.fieldCount) {
+		const rawFieldCount = rawArrivalCount;
 		const retained = fields.slice(0, descriptor.fieldCount - 1);
 		retained.push(fields.slice(descriptor.fieldCount - 1).join('|'));
 		return {
 			marker: descriptor.marker,
 			fields: retained,
 			recoveredOverflow: true,
+			rawFieldCount,
 			overflowClass:
-				fields.length === descriptor.fieldCount + 1 &&
+				rawFieldCount === descriptor.fieldCount + 1 &&
 				fields[fields.length - 1] === ''
 					? 'legacy-fidelity-safe'
 					: 'legacy-lossy',
@@ -1184,6 +1403,7 @@ export function parsePrReviewVerdictRow(
 		marker: descriptor.marker,
 		fields,
 		recoveredOverflow: false,
+		rawFieldCount: rawArrivalCount,
 		overflowClass:
 			fields.length === descriptor.fieldCount
 				? usedCanonicalEscape

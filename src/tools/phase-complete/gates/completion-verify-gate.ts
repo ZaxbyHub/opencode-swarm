@@ -9,11 +9,11 @@ import type { GateContext, GateResult } from './types';
 export async function runCompletionVerifyGate(
 	ctx: GateContext,
 ): Promise<GateResult> {
-	const { phase, dir, agentsDispatched } = ctx;
+	const { phase, dir, agentsDispatched, sessionID } = ctx;
 
 	try {
 		const completionResultRaw = await executeCompletionVerify(
-			{ phase, writeEvidence: false },
+			{ phase, writeEvidence: false, sessionID },
 			dir,
 		);
 		const completionResult = JSON.parse(completionResultRaw);

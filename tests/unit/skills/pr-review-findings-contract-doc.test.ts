@@ -281,6 +281,23 @@ describe('parser receipt docs match the code that emits them (PRR-005/PRR-006)',
 			expect(doc).toContain(kind);
 		}
 	});
+
+	test('lane-output-recoverability states the in-flight replay contract (#3336)', () => {
+		// #3336 AC2: the durable in-flight replay note must state BOTH
+		// directions of live-schema re-parse — the CONFIRMED+NONE fail-closed
+		// flip and the UPHELD LOW/INFO accepting flip — so producers and
+		// operators debugging an upgrade-spanning run have a documented
+		// answer. The release fragment carries the same note (checked by the
+		// trace's frozen check C6); this pin targets the durable doc because
+		// pending fragments are consumed at release.
+		const doc = fs.readFileSync(RECOVERABILITY_PATH, 'utf8');
+		expect(doc).toMatch(/## In-flight replay across plugin upgrades/);
+		expect(doc).toMatch(/CONFIRMED[^.]*NONE|NONE[^.]*CONFIRMED/);
+		expect(doc).toMatch(/fail-closed/);
+		expect(doc).toMatch(/UPHELD/);
+		expect(doc).toMatch(/LOW/);
+		expect(doc).toMatch(/claimable/);
+	});
 });
 
 describe('swarm-pr-review producer contract matches enforcement (#2279)', () => {

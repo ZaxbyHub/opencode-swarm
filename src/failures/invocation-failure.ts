@@ -117,8 +117,12 @@ function redactUrl(match: string): string {
  * e.g. zero-width space), and default-ignorable code points (`\p{DI}`, e.g.
  * variation selectors and Hangul filler — render as nothing but aren't `Cc`
  * or `Cf`) are all tolerated as "fill" at every inter-token position in the
- * redaction patterns below (keyword letters, keyword-to-separator,
- * separator-to-Bearer, Bearer-to-value, suffix-to-`=`): a byte from any of
+ * KEY-VALUE redaction patterns below (keyword letters, keyword-to-separator,
+ * separator-to-Bearer, Bearer-to-value, suffix-to-`=`) — and inside the bare
+ * VALUE shapes via the deletion sweep in step 6, which consumes invisible
+ * bytes (Cf/DI) that render as nothing; VISIBLE fill inside a bare token
+ * (whitespace, Cc) is a documented residual it does not tolerate (#3165
+ * F-1, PR #3705 review round 2): a byte from any of
  * these classes can sit anywhere provider-controlled text places it, and
  * treating only a subset as fill left the rest free to break a `\b` boundary
  * or truncate a match before the real secret (see PR #2363 review history,
@@ -295,6 +299,93 @@ function screamingKeyContainsSuffix(key: string): boolean {
 }
 
 /**
+ * Bare well-known credential VALUE shapes (#3165 F-1): content-based, so they
+ * fire wherever the token appears — including prose placements with no
+ * adjacent `key[:=]value` span ("Incorrect API key provided: sk-proj-…",
+ * "please rotate ghp_…"), which the KV arms above cannot match (letters
+ * between morpheme and separator defeat FILL, and without a separator neither
+ * KV arm fires at all). MIRRORS the token VALUE shapes of
+ * `redactShellCommand` (src/hooks/guardrails/helpers.ts) — deliberately a
+ * mirror, not a shared module, per the src/training/redact.ts precedent: the
+ * failure-display path keeps its small import graph and its own bounded
+ * pipeline, and the parity suite (invocation-failure-bare-tokens-3165.test.ts)
+ * pins both sites against the same corpus so they cannot drift. ReDoS posture:
+ * like the KV arms, each shape's trailing quantifier is individually
+ * unbounded; total regex work is bounded by the MAX_SANITIZE_INPUT_CHARS
+ * pre-slice. Fill posture: Cf/DI bytes INSIDE a bare token are consumed by
+ * the deletion sweep in sanitizeFailureEvidenceDisplay (step 6), and the
+ * sweep UNIONS the uncondensed matches so an invisible byte that was itself
+ * the \b boundary provider cannot regress head behavior; the residual is a
+ * token whose FOLLOWING word character defeats the trailing \b on BOTH
+ * views (whitespace/Cc-split bodies plus word-char followers — head-
+ * equivalent, still cleartext). VISIBLE fill
+ * (whitespace, Cc, combining marks) splitting a bare token remains an
+ * accepted residual — stated, not pattern-tolerated, because deleting
+ * visible bytes could alter what the reader sees (#2363).
+ */
+const BARE_TOKEN_VALUE_PATTERNS: ReadonlyArray<{
+	family: string;
+	re: RegExp;
+	/** #3712: optional post-match class guard (the base64 arm requires
+	 * upper+lower+digit on the matched run so hex-only digests stay visible). */
+	guard?: (match: string) => boolean;
+}> = [
+	// #3712: specific sk- prefixes BEFORE the openai shape — the openai
+	// pattern subsumes `sk-ant-api03-…` and `sk-or-v1-…`, and both the
+	// sequential mirror chain and this sweep's leftmost-longest selection
+	// keep the FIRST family for identical spans, so ordering (not a
+	// lookahead) assigns the rotation-correct provider label.
+	{ family: 'anthropic', re: /\bsk-ant-[A-Za-z0-9_-]{20,}/g },
+	{ family: 'openrouter', re: /\bsk-or-[A-Za-z0-9_-]{20,}/g },
+	{ family: 'openai', re: /\bsk-[A-Za-z0-9_-]{20,}/g },
+	{
+		family: 'github',
+		re: /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}/g,
+	},
+	{ family: 'github', re: /\bgithub_pat_[A-Za-z0-9_]{22,}/g },
+	{ family: 'aws', re: /\bAKIA[0-9A-Z]{16}\b/g },
+	{ family: 'slack', re: /\bxox[baprs]-[A-Za-z0-9-]{10,}/g },
+	{ family: 'google', re: /\bAIza[A-Za-z0-9_-]{30,}/g },
+	// #3712 F-006: Google OAuth client secrets and GCP access tokens.
+	{ family: 'google', re: /\bGOCSPX-[A-Za-z0-9_-]{20,}/g },
+	{ family: 'google', re: /\bya29\.[A-Za-z0-9_-]{20,}/g },
+	// #3712 F-006: Groq service keys.
+	{ family: 'groq', re: /\bgsk_[A-Za-z0-9]{20,}/g },
+	// #3712 F-006: JWTs (the HEADER segment is base64url of `{"…`, so it
+	// starts with eyJ; the signature closes the token). Matches the WHOLE
+	// three-segment token as one span.
+	//
+	// #3710 review: the PAYLOAD segment is any base64url run, not only a
+	// JSON object — an empty claims object encodes as `e30`, not `eyJ` (and a
+	// `null`/string payload encodes as `bnVsbA`/`Ingi`).
+	{
+		family: 'jwt',
+		re: /\beyJ[A-Za-z0-9_-]{10,1024}\.[A-Za-z0-9_-]{1,}\.[A-Za-z0-9_-]{10,}/g,
+	},
+	// #3712 F-013: base64 credential arm at the display site — mirrors the
+	// shell site's ≥80-char mixed-class run (the class guard keeps hex-only
+	// SHA digests, uppercase-hex runs, and sub-80 payloads visible).
+	{
+		family: 'base64',
+		re: /[A-Za-z0-9+/]{80,}={0,2}/g,
+		guard: (match) =>
+			/[A-Z]/.test(match) && /[a-z]/.test(match) && /[0-9]/.test(match),
+	},
+];
+
+/**
+ * Cf (format) and Default_Ignorable code points (variation selectors,
+ * Hangul filler): bytes that render as NOTHING. A byte from either class
+ * inside a bare credential token splits it past the `\b`-anchored bare
+ * shapes (#3165 F-1 review round), so the display redactor deletes them
+ * from the sweep's view. Deletion is the correct transform for this class —
+ * unlike visible bytes, removing an invisible byte cannot change what the
+ * reader sees.
+ */
+const BARE_TOKEN_ZERO_WIDTH_FILL_RE =
+	/\p{Cf}|\p{Default_Ignorable_Code_Point}/u;
+
+/**
  * Redacts secrets/URLs and strips control chars for terminal/display safety.
  * Order of operations (each step exists to keep a prior fix closed):
  *   1. slice to MAX_SANITIZE_INPUT_CHARS (regex-work bound)
@@ -309,22 +400,39 @@ function screamingKeyContainsSuffix(key: string): boolean {
  *      Digest, …) between separator and credential so `Authorization: Basic
  *      <base64>` redacts the credential, not just the scheme
  *   5. redact SCREAMING_CASE KV pairs (unchanged shape)
- *   6. strip residual control/format/DI runs to spaces
- *   7. sweep residual over-long bare `[<params>m` SGR bodies (the >32-char
+ *   6. redact bare well-known credential VALUE shapes wherever they appear,
+ *      no key=value span needed (#3165 F-1 — see BARE_TOKEN_VALUE_PATTERNS),
+ *      matching on a Cf/DI-deletion condensed view UNIONED with the
+ *      uncondensed matches so an invisible byte can neither split a token
+ *      past the arm NOR regress head behavior when it was itself the \b
+ *      boundary provider (visible fill inside a bare token stays a
+ *      documented residual — see the FILL note above)
+ *   7. strip residual control/format/DI runs to spaces
+ *   8. sweep residual over-long bare `[<params>m` SGR bodies (the >32-char
  *      CSI tail the bounded pre-pass cannot match)
- *   8. trim + 512-byte UTF-8 bound
+ *   9. trim + 512-byte UTF-8 bound
  *
  * Best-effort defense-in-depth for a log-display string, NOT a security
  * boundary: combining marks (U+0300 class) still defeat keyword matching and
  * are deliberately not fixed (#2369 Gap 3 — sweeping `\p{Mn}` would over-redact
  * every legitimate combining accent in non-Latin diagnostics). Glued-key
- * matching (Gap 1) and the CSI pre-pass (Gap 2) were added by #2485.
+ * matching (Gap 1) and the CSI pre-pass (Gap 2) were added by #2485; the
+ * bare-token arm gained the Cf/DI deletion sweep in the PR #3705 review
+ * round (F-1), with visible splits (whitespace/Cc) disclosed above as its
+ * documented residual.
  */
 export function sanitizeFailureEvidenceDisplay(value: string): string {
 	const bounded = value.slice(0, MAX_SANITIZE_INPUT_CHARS);
 	const neutralized = bounded.replace(CSI_SEQUENCE, ' ');
 	const redacted = neutralized
 		.replace(/\bhttps?:\/\/[^\s'"<>]+/gi, (match) => redactUrl(match))
+		// #3712 azure CONTEXTUAL arm: connection-string `AccountKey=<base64>`
+		// material. The WHOLE `key=value` span collapses to the BARE
+		// placeholder (no `AccountKey=` residue): the generic KV arm below
+		// would otherwise consume the value as a family-less `<redacted>`
+		// (plan-critic round-1 probe), and a residue form like
+		// `AccountKey=[REDACTED:azure]` is itself re-matchable KV shape.
+		.replace(/\bAccountKey=[A-Za-z0-9+/]{20,}={0,2}/gi, '[REDACTED:azure]')
 		.replace(
 			CREDENTIAL_KV_PATTERN,
 			(_, key: string) => `${key.replace(CONTROL_CHAR_RUN, '')}=<redacted>`,
@@ -332,10 +440,112 @@ export function sanitizeFailureEvidenceDisplay(value: string): string {
 		.replace(SCREAMING_KV_CANDIDATE_PATTERN, (match, key: string) => {
 			if (!screamingKeyContainsSuffix(key)) return match;
 			return `${key.replace(CONTROL_CHAR_RUN, '').replace(/\s+/g, '')}=<redacted>`;
-		})
+		});
+	// #3165 F-1 (PR #3705 review round 2): the bare shapes above have NO
+	// fill tolerance, so a zero-width byte INSIDE a credential splits it
+	// past this sweep (U+200B inside an sk- token left a 30-char tail in
+	// display output where the KV arms tolerate the same byte as fill).
+	// Cf/DI characters render as nothing, so DELETING them cannot change
+	// what a reader sees — but deleting a byte that was itself PROVIDING a
+	// \b boundary glues its word-char neighbours together and kills the
+	// anchor on the condensed view (wordchar+Cf+token, token+Cf+wordchar;
+	// closeout-critic probes G1/G2). The sweep therefore UNIONS two match
+	// passes: the uncondensed text (exactly what the sequential .replace at
+	// the published head matched — head-dominance) and the condensed view
+	// (fill tolerance), then splices the union back right-to-left. Visible
+	// separators (whitespace, Cc — newlines included — and combining marks)
+	// stay a documented residual: deleting those could merge or reorder
+	// what the reader sees, which the #2363 split/join fixes deliberately
+	// avoid.
+	const condensedChars: string[] = [];
+	const condensedToOriginal: number[] = [];
+	let cursor = 0;
+	for (const char of redacted) {
+		if (!BARE_TOKEN_ZERO_WIDTH_FILL_RE.test(char)) {
+			condensedChars.push(char);
+			// One map entry per UTF-16 CODE UNIT (not per code point):
+			// matchAll's match.index counts code units, so a map indexed by
+			// code-point position misaligns every span after a kept astral
+			// character (emoji/CJK-ext) and maps a token ending at the
+			// input end past the array (NaN end -> slice(NaN) appends the
+			// whole cleartext string). Every unit of a kept char maps to
+			// that char's original index; matches always start/end on char
+			// boundaries, so only whole-char lookups occur.
+			for (let unit = 0; unit < char.length; unit += 1) {
+				condensedToOriginal.push(cursor);
+			}
+		}
+		cursor += char.length;
+	}
+	const condensed = condensedChars.join('');
+	const bareMatches: Array<{
+		family: string;
+		start: number;
+		end: number;
+	}> = [];
+	// Pass A — head-dominance: the UNcondensed text. Every match the
+	// published head's sequential .replace found must stay a candidate.
+	for (const { family, re, guard } of BARE_TOKEN_VALUE_PATTERNS) {
+		re.lastIndex = 0;
+		for (const match of redacted.matchAll(re)) {
+			if (guard && !guard(match[0])) continue;
+			bareMatches.push({
+				family,
+				start: match.index,
+				end: match.index + match[0].length,
+			});
+		}
+	}
+	// Pass B — fill tolerance: the Cf/DI-deleted condensed view, mapped
+	// back to original offsets (a span mapped back INCLUDES any deleted
+	// invisible bytes that sat inside it).
+	for (const { family, re, guard } of BARE_TOKEN_VALUE_PATTERNS) {
+		re.lastIndex = 0;
+		for (const match of condensed.matchAll(re)) {
+			if (guard && !guard(match[0])) continue;
+			bareMatches.push({
+				family,
+				start: condensedToOriginal[match.index],
+				end: condensedToOriginal[match.index + match[0].length - 1] + 1,
+			});
+		}
+	}
+	let swept = redacted;
+	if (bareMatches.length > 0) {
+		// Leftmost-longest greedy selection over the union: maximal
+		// non-overlapping coverage. Identical spans from both passes dedupe;
+		// a longer overlapping span EXTENDS the covered interval (keeps the
+		// earlier start), so output never shows LESS redaction than the
+		// published head (every head match is a candidate from Pass A). Left-to-right
+		// list build, then a right-to-left splice keeps offsets valid.
+		bareMatches.sort((a, b) => a.start - b.start || b.end - a.end);
+		const selected: typeof bareMatches = [];
+		for (const match of bareMatches) {
+			const last = selected[selected.length - 1];
+			if (last === undefined || match.start >= last.end) {
+				selected.push(match);
+			} else if (match.end > last.end) {
+				// EXTEND, not replace: keep last.start/last.family and grow the
+				// end. A replace would keep the LATER start and uncover the
+				// earlier span's exclusive prefix (e.g. a slack match that
+				// stops at '_' while an inner ghp_ match ends later left
+				// 'xoxb-abcdefghij-' cleartext where head and the mirror
+				// redact both — closeout-critic H1).
+				selected[selected.length - 1] = { ...last, end: match.end };
+			}
+		}
+		for (let i = selected.length - 1; i >= 0; i -= 1) {
+			const match = selected[i];
+			swept =
+				swept.slice(0, match.start) +
+				`[REDACTED:${match.family}]` +
+				swept.slice(match.end);
+		}
+	}
+	const stripped = swept
 		.replace(CONTROL_CHAR_RUN, ' ')
 		.replace(BARE_SGR_PARAMETER_RUN, ' ');
-	return boundedUtf8(redacted.trim());
+	return boundedUtf8(stripped.trim());
 }
 
 function signalFrom(value: unknown): string {
@@ -447,6 +657,82 @@ function providerSignal(error: unknown): string {
 }
 
 /**
+ * #3177: the provider-category set `classifyProviderFailure` itself emits
+ * (enumerated per the category docstring above), plus the two early-finish
+ * categories `readEarlyFinish` stamps on its carriers
+ * (provider.output_length / provider.content_filter, review finding F-001:
+ * rejecting them degraded the carrier to text classification and lost the
+ * category/risk the reader had already computed). A carrier snapshot outside
+ * this set is not honored (fail-closed to normal classification).
+ */
+const KNOWN_PROVIDER_CARRIER_CATEGORIES = new Set([
+	'provider.cancelled',
+	'provider.authentication_configuration',
+	'provider.quota_billing',
+	'provider.rate_limit',
+	'provider.unavailable',
+	'provider.context_window',
+	'provider.content_policy',
+	'provider.request_shape',
+	'provider.unknown',
+	'provider.output_length',
+	'provider.content_filter',
+]);
+
+const KNOWN_PROVIDER_CARRIER_RETRY_CLASSES =
+	new Set<InvocationFailureRetryClass>([
+		'retry_same',
+		'retry_fallback',
+		'repair_then_retry',
+		'operator_action',
+		'do_not_retry',
+	]);
+
+const KNOWN_PROVIDER_CARRIER_RISKS = new Set<InvocationFailureRisk>([
+	'low',
+	'medium',
+	'high',
+]);
+
+/**
+ * #3177: read the verified carrier snapshot off an error. Returns null unless
+ * `error.providerError` is an object whose category, retryClass, and risk are
+ * all known enum values — the exact shape `readProviderMessageError` +
+ * `providerMessageErrorToError` produce.
+ */
+function readProviderCarrierSnapshot(error: unknown): {
+	category: string;
+	retryClass: InvocationFailureRetryClass;
+	risk: InvocationFailureRisk;
+} | null {
+	if (typeof error !== 'object' || error === null) return null;
+	const carrier = readOwn(error, 'providerError');
+	if (typeof carrier !== 'object' || carrier === null) return null;
+	const category = readOwn(carrier, 'category');
+	const retryClass = readOwn(carrier, 'retryClass');
+	const risk = readOwn(carrier, 'risk');
+	if (
+		typeof category !== 'string' ||
+		typeof retryClass !== 'string' ||
+		typeof risk !== 'string'
+	)
+		return null;
+	if (
+		!KNOWN_PROVIDER_CARRIER_CATEGORIES.has(category) ||
+		!KNOWN_PROVIDER_CARRIER_RETRY_CLASSES.has(
+			retryClass as InvocationFailureRetryClass,
+		) ||
+		!KNOWN_PROVIDER_CARRIER_RISKS.has(risk as InvocationFailureRisk)
+	)
+		return null;
+	return {
+		category,
+		retryClass: retryClass as InvocationFailureRetryClass,
+		risk: risk as InvocationFailureRisk,
+	};
+}
+
+/**
  * Provider failure categories in use (enumerated per issue #2673 plan-critic
  * finding 6, so downstream category-prefix consumers — telemetry filters,
  * dashboards, circuit thresholds — can discover every leaf):
@@ -473,6 +759,28 @@ export function classifyProviderFailure(
 			risk: 'low',
 			action,
 			display: signal || 'AbortError',
+			code,
+			statusCode,
+		});
+	}
+	// #3177: honor a verified provider-message carrier's read-time snapshot.
+	// `providerMessageErrorToError` attaches `.providerError` (the
+	// ProviderMessageError the reader classified over the UNBOUNDED raw
+	// provider message); the carrier's own message is bounded display text
+	// that can lose the very keyword the text arms below match. Provenance is
+	// the nested carrier object itself — never a bare `.category` property —
+	// and every enum field must be known; anything else falls through to
+	// normal classification (fail-closed). Abort-like errors were already
+	// handled above, so an abort-shaped carrier stays cancelled regardless.
+	const carrierSnapshot = readProviderCarrierSnapshot(error);
+	if (carrierSnapshot) {
+		return buildRecord({
+			source: 'provider',
+			category: carrierSnapshot.category,
+			retryClass: carrierSnapshot.retryClass,
+			risk: carrierSnapshot.risk,
+			action,
+			display: signal || carrierSnapshot.category,
 			code,
 			statusCode,
 		});

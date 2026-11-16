@@ -792,11 +792,16 @@ export interface ReleaseOwnershipInput {
 	event?: string;
 	tagName?: string;
 	releaseAutomation?: boolean;
+	dependencyBumpAutomation?: boolean;
 }
 
 export interface ReleaseOwnershipResult {
 	ok: boolean;
-	code: 'NO_RELEASE_OWNER_EDIT' | 'UNAUTHORIZED_RELEASE_OWNER_EDIT' | 'RELEASE_AUTOMATION_EXCEPTION';
+	code:
+		| 'NO_RELEASE_OWNER_EDIT'
+		| 'UNAUTHORIZED_RELEASE_OWNER_EDIT'
+		| 'RELEASE_AUTOMATION_EXCEPTION'
+		| 'DEPENDENCY_BUMP_AUTOMATION_EXCEPTION';
 	message: string;
 	requiredNotes: string[];
 }
@@ -847,6 +852,231 @@ export function deriveReleaseAutomation(input: {
 	return false;
 }
 
+/**
+ * Dependency-bump channel (issue #3285 / #3501 route (a)): a second trusted
+ * automation identity alongside release-please.  The channel produces exactly
+ * one bot-authored commit per dispatch, and its authorization is bound to that
+ * shape: every commit on the branch must be authored by github-actions[bot]
+ * with the channel trailer set, and the package.json delta must stay inside
+ * the dependency maps.
+ */
+export const DEPENDENCY_BUMP_BRANCH_PREFIX = 'dep-bump--';
+export const DEPENDENCY_BUMP_MAX_COMMITS = 1;
+const DEPENDENCY_BUMP_BOT_NAME = 'github-actions[bot]';
+const DEPENDENCY_BUMP_BOT_EMAIL = '41898282+github-actions[bot]@users.noreply.github.com';
+const DEPENDENCY_BUMP_MERGE_SUBJECT = /^Merge pull request #[0-9]+ from ZaxbyHub\/dep-bump--/;
+
+/**
+ * Type-sensitive recursive equality for the non-dependency sections of
+ * package.json.  JSON.stringify alone cannot distinguish 1e400 (stringifies
+ * to null) from null, so every value carries its typeof tag.
+ */
+function typeSensitiveEqual(a: unknown, b: unknown): boolean {
+	if (typeof a !== typeof b) return false;
+	if (a === null || b === null || typeof a !== 'object' || typeof b !== 'object') {
+		return a === b;
+	}
+	if (Array.isArray(a) || Array.isArray(b)) {
+		if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+		return a.every((item, index) => typeSensitiveEqual(item, b[index]));
+	}
+	const ka = Object.keys(a).sort();
+	const kb = Object.keys(b).sort();
+	if (ka.length !== kb.length || ka.some((key, index) => key !== kb[index])) return false;
+	return ka.every((key) =>
+		typeSensitiveEqual((a as Record<string, unknown>)[key], (b as Record<string, unknown>)[key]),
+	);
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function dependencyMapEntriesAreStrings(value: unknown): boolean {
+	if (!isPlainRecord(value)) return false;
+	return Object.values(value).every((entry) => typeof entry === 'string');
+}
+
+/**
+ * Semantic package.json scope check (the anti-laundering bound): only the
+ * `dependencies` and `devDependencies` maps may differ between the two
+ * revisions.  Any other top-level delta (version field, scripts, new keys)
+ * denies.  Fails closed on missing or unparseable revisions.
+ */
+export function dependencyBumpOwnerScopeOk(root: string, base: string, head: string): boolean {
+	const readRevision = (ref: string): Record<string, unknown> | null => {
+		const result = runGit(['show', `${ref}:package.json`], root);
+		if (result.exitCode !== 0) return null;
+		try {
+			const parsed: unknown = JSON.parse(result.stdout);
+			return isPlainRecord(parsed) ? parsed : null;
+		} catch {
+			return null;
+		}
+	};
+	const baseDoc = readRevision(base);
+	const headDoc = readRevision(head);
+	if (!baseDoc || !headDoc) return false;
+	const baseKeys = Object.keys(baseDoc).sort();
+	const headKeys = Object.keys(headDoc).sort();
+	if (baseKeys.length !== headKeys.length || baseKeys.some((key, index) => key !== headKeys[index])) {
+		return false;
+	}
+	for (const key of baseKeys) {
+		if (key === 'dependencies' || key === 'devDependencies') continue;
+		if (!typeSensitiveEqual(baseDoc[key], headDoc[key])) return false;
+	}
+	for (const mapKey of ['dependencies', 'devDependencies'] as const) {
+		const baseMap = baseDoc[mapKey];
+		const headMap = headDoc[mapKey];
+		if (baseMap === undefined && headMap === undefined) continue;
+		if (!dependencyMapEntriesAreStrings(baseMap)) return false;
+		if (!dependencyMapEntriesAreStrings(headMap)) return false;
+	}
+	return true;
+}
+
+export interface DependencyBumpCommitProvenance {
+	ok: boolean;
+	reason: string;
+}
+
+/**
+ * Per-commit channel provenance: bot author AND committer, plus the full
+ * trailer set — X-Dep-Bump-Channel / -Package / -Version and exactly one of
+ * X-Dep-Bump-Advisory or X-Dep-Bump-Reason (both present or both absent
+ * denies; the workflow's input contract is the same XOR).
+ */
+export function dependencyBumpCommitProvenanceOk(
+	root: string,
+	commitSha: string,
+): DependencyBumpCommitProvenance {
+	const meta = runGit(
+		['show', '-s', '--format=%an%x00%ae%x00%cn%x00%ce%x00%B', commitSha],
+		root,
+	);
+	if (meta.exitCode !== 0) {
+		return { ok: false, reason: `commit ${commitSha} unreadable` };
+	}
+	const fields = meta.stdout.split('\x00');
+	const [author, authorEmail, committer, committerEmail] = fields;
+	const body = fields.slice(4).join('\x00');
+	if (
+		author !== DEPENDENCY_BUMP_BOT_NAME ||
+		authorEmail !== DEPENDENCY_BUMP_BOT_EMAIL ||
+		committer !== DEPENDENCY_BUMP_BOT_NAME ||
+		committerEmail !== DEPENDENCY_BUMP_BOT_EMAIL
+	) {
+		return { ok: false, reason: `commit ${commitSha} is not bot-authored end to end` };
+	}
+	const channel = /^X-Dep-Bump-Channel: dependency-bump$/m.exec(body);
+	if (!channel) return { ok: false, reason: `commit ${commitSha} lacks the channel trailer` };
+	for (const trailer of ['X-Dep-Bump-Package', 'X-Dep-Bump-Version']) {
+		if (!new RegExp(`^${trailer}: .+$`, 'm').test(body)) {
+			return { ok: false, reason: `commit ${commitSha} lacks a non-empty ${trailer} trailer` };
+		}
+	}
+	// Advisory/reason values may be prose (multi-word); the trailer value is
+	// the non-empty remainder of the line.
+	const advisory = /^X-Dep-Bump-Advisory: .+$/m.test(body);
+	const reason = /^X-Dep-Bump-Reason: .+$/m.test(body);
+	if (advisory === reason) {
+		return {
+			ok: false,
+			reason: `commit ${commitSha} must carry exactly one of advisory or reason (got ${advisory ? 'both' : 'neither'})`,
+		};
+	}
+	return { ok: true, reason: 'channel trailers verified' };
+}
+
+/**
+ * Range provenance: the PR side of a channel bump is EXACTLY one commit
+ * (re-dispatch force-replaces the branch), and that commit passes the
+ * per-commit check.  Zero or many commits both deny.
+ */
+export function dependencyBumpBranchProvenanceOk(
+	root: string,
+	base: string,
+	head: string,
+): DependencyBumpCommitProvenance {
+	const count = runGit(['rev-list', '--count', `${base}..${head}`], root);
+	if (count.exitCode !== 0) {
+		return { ok: false, reason: `rev-list ${base}..${head} unreadable` };
+	}
+	const parsed = Number.parseInt(count.stdout.trim(), 10);
+	if (!Number.isFinite(parsed) || parsed !== DEPENDENCY_BUMP_MAX_COMMITS) {
+		return {
+			ok: false,
+			reason: `channel branch must carry exactly ${DEPENDENCY_BUMP_MAX_COMMITS} commit(s), found ${Number.isFinite(parsed) ? parsed : 'unreadable'}`,
+		};
+	}
+	const shas = runGit(['rev-list', `${base}..${head}`], root);
+	if (shas.exitCode !== 0) {
+		return { ok: false, reason: `rev-list ${base}..${head} unreadable` };
+	}
+	const commitSha = shas.stdout.split('\n').map((line) => line.trim()).filter(Boolean)[0];
+	if (!commitSha) return { ok: false, reason: 'channel commit sha missing' };
+	return dependencyBumpCommitProvenanceOk(root, commitSha);
+}
+
+/**
+ * Compose the dependency-bump authorization predicates at the CI boundary.
+ * Mirrors deriveReleaseAutomation's structure (predicate-injection seams
+ * included) so the wiring suite's composition style applies unchanged.  Every
+ * other event — workflow_dispatch included — denies.
+ */
+export function deriveDependencyBumpAutomation(input: {
+	event: string;
+	actor?: string;
+	bumpBranch?: string;
+	trustedProvenance?: boolean;
+	commitProvenance?: boolean;
+	dependencyScope?: boolean;
+	headCommitSubject?: string;
+	bumpPredicate?: boolean;
+}): boolean {
+	if (input.event !== 'pull_request' && input.event !== 'merge_group') return false;
+	// Predicate source differs by event, mirroring deriveReleaseAutomation:
+	// pull_request carries the PR head branch; merge_group carries no branch
+	// ref, so the merge-commit subject is the predicate.
+	const predicate =
+		input.event === 'pull_request'
+			? (input.bumpPredicate ?? (input.bumpBranch ?? '').startsWith(DEPENDENCY_BUMP_BRANCH_PREFIX))
+			: (input.bumpPredicate ?? DEPENDENCY_BUMP_MERGE_SUBJECT.test(input.headCommitSubject ?? ''));
+	// The merge-group predicate intentionally ignores actor, exactly like
+	// deriveReleaseAutomation: GitHub reports the user who queued the group,
+	// not the automation identity that produced the channel commit — the
+	// subject + bot-parent + trailer provenance is the identity there.
+	const actorOk = input.event === 'merge_group' || input.actor === DEPENDENCY_BUMP_BOT_NAME;
+	return (
+		actorOk &&
+		predicate &&
+		input.trustedProvenance !== false &&
+		input.commitProvenance !== false &&
+		input.dependencyScope !== false
+	);
+}
+
+/**
+ * Merge-group provenance for the channel: the group merge subject must name a
+ * dep-bump branch and the PR-side parent (the second parent) must satisfy the
+ * every-commit branch provenance over base..parents[1].
+ */
+export function mergeGroupDependencyBumpProvenance(
+	root: string,
+	context: { event: string; repository: string; headSha: string; baseSha: string },
+): boolean {
+	if (context.event !== 'merge_group' || context.repository !== 'ZaxbyHub/opencode-swarm') return false;
+	const meta = runGit(['show', '-s', '--format=%P%n%s', context.headSha], root);
+	if (meta.exitCode !== 0) return false;
+	const [parentsLine, subject] = meta.stdout.split('\n');
+	const parents = (parentsLine ?? '').split(' ').filter(Boolean);
+	const prParent = parents[1];
+	if (!isCommitSha(prParent)) return false;
+	if (!DEPENDENCY_BUMP_MERGE_SUBJECT.test(subject ?? '')) return false;
+	return dependencyBumpBranchProvenanceOk(root, context.baseSha, prParent).ok;
+}
+
 /** Evaluate only exact root-level release-owned paths. */
 export function evaluateReleaseOwnership(input: ReleaseOwnershipInput): ReleaseOwnershipResult {
 	const changedOwnerFiles = unique(input.changedFiles.map(posix)).filter((file) =>
@@ -865,6 +1095,21 @@ export function evaluateReleaseOwnership(input: ReleaseOwnershipInput): ReleaseO
 			ok: true,
 			code: 'RELEASE_AUTOMATION_EXCEPTION',
 			message: `release automation authorized exact owner files: ${changedOwnerFiles.join(', ')}`,
+			requiredNotes: [],
+		};
+	}
+	// The dependency-bump channel authorizes package.json ONLY — never
+	// CHANGELOG.md or .release-please-manifest.json, which stay exclusively
+	// release-please-owned (the AC3 decision's file-set bound).
+	if (
+		input.dependencyBumpAutomation === true &&
+		changedOwnerFiles.length === 1 &&
+		changedOwnerFiles[0] === 'package.json'
+	) {
+		return {
+			ok: true,
+			code: 'DEPENDENCY_BUMP_AUTOMATION_EXCEPTION',
+			message: 'dependency-bump channel authorized package.json',
 			requiredNotes: [],
 		};
 	}
@@ -1352,11 +1597,54 @@ export function main(argv: string[] = process.argv.slice(2), root = REPO_ROOT): 
 							? mergeGroupReleaseProvenance(root, context)
 							: false,
 			});
+			// Dependency-bump channel (issue #3285 / #3501 route (a)): the
+			// expensive git-walking provenance/scope checks run ONLY when the
+			// cheap predicates already pass (event + branch prefix on
+			// pull_request; merge_group ignores actor for the same reason
+			// deriveReleaseAutomation does), so ordinary PRs pay no extra git
+			// cost.
+			let dependencyBumpAutomation = false;
+			const cheapDepPredicates =
+				(context.event === 'pull_request' || context.event === 'merge_group') &&
+				(context.event === 'merge_group' ||
+					(context.actor === 'github-actions[bot]' &&
+						(context.releaseBranch ?? '').startsWith(DEPENDENCY_BUMP_BRANCH_PREFIX)));
+			if (cheapDepPredicates) {
+				const mergeBaseResult = runGit(['merge-base', '--', context.baseSha, context.headSha], root);
+				const mergeBaseSha = mergeBaseResult.stdout.trim();
+				const depMergeProv =
+					context.event === 'merge_group'
+						? mergeGroupDependencyBumpProvenance(root, context)
+						: false;
+				const commitProvOk =
+					context.event === 'pull_request'
+						? mergeBaseResult.exitCode === 0 &&
+							isCommitSha(mergeBaseSha) &&
+							dependencyBumpBranchProvenanceOk(root, mergeBaseSha, context.headSha).ok
+						: depMergeProv;
+				const depScopeOk =
+					mergeBaseResult.exitCode === 0 &&
+					isCommitSha(mergeBaseSha) &&
+					dependencyBumpOwnerScopeOk(root, mergeBaseSha, context.headSha);
+				dependencyBumpAutomation = deriveDependencyBumpAutomation({
+					event: context.event,
+					actor: context.actor,
+					bumpBranch: context.releaseBranch,
+					trustedProvenance:
+						context.event === 'pull_request'
+							? context.headRepository === context.repository && context.headUser === 'github-actions[bot]'
+							: mergeGroupReleaseProvenance(root, context) || depMergeProv,
+					commitProvenance: commitProvOk,
+					dependencyScope: depScopeOk,
+					headCommitSubject: headSubject(root, context.headSha),
+				});
+			}
 			const result = evaluateReleaseOwnership({
 				changedFiles: changedFilesForGuard(root, context),
 				event: context.event,
 				actor: context.actor,
 				releaseAutomation: automation,
+				dependencyBumpAutomation,
 			});
 			console.log(`[required-check-contract] ${result.message}`);
 			return result.ok ? 0 : 1;

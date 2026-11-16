@@ -10,7 +10,7 @@
  * inside the `try`.
  */
 
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -26,6 +26,8 @@ import {
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const realBunSpawn = _internals.bunSpawn;
+const realLifecycle = _internals.withSettlementArtifactLifecycle;
+const realArtifactCheck = _internals.assertSettlementArtifactsRemovable;
 const roots: string[] = [];
 
 function tempRoot(label: string): string {
@@ -46,12 +48,23 @@ function mockProc(exitCode: number, onKill?: () => void): BunCompatSubprocess {
 
 afterEach(() => {
 	_internals.bunSpawn = realBunSpawn;
+	_internals.withSettlementArtifactLifecycle = realLifecycle;
+	_internals.assertSettlementArtifactsRemovable = realArtifactCheck;
 	for (const root of roots.splice(0)) {
 		fs.rmSync(root, { recursive: true, force: true });
 	}
 });
 
 describe('runGit contains spawn failures (via postMergeCleanup)', () => {
+	beforeEach(() => {
+		// These fixtures deliberately lack a usable project root to exercise the
+		// subprocess boundary. Lifecycle admission is covered by #3409 tests.
+		_internals.withSettlementArtifactLifecycle = async (
+			_directory,
+			operation,
+		) => operation();
+		_internals.assertSettlementArtifactsRemovable = async () => {};
+	});
 	test('a deleted cwd returns a typed failure naming the path, and never throws', async () => {
 		const root = tempRoot('deleted-cwd');
 		const gone = path.join(root, 'gone');

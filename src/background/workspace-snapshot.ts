@@ -354,6 +354,18 @@ async function runGitAsyncDetailed(
 }
 
 /**
+ * Manifest-path allowlist for `git show <rev>:<path>` reads. `./` is admitted
+ * so callers can opt into cwd-relative resolution (git resolves a bare <path>
+ * from the repository toplevel). Any segment — including the final one — may
+ * carry a single leading dot before a name char (`.github/`, dotfiles,
+ * `.pr-validation.json`); `..` never passes: the optional dot must be
+ * followed by a name char, a segment cannot start with a second dot, and the
+ * caller's segment split still rejects any `..` component.
+ */
+const gitSnapshotRelativePathPattern =
+	/^(?:\.\/|\.?(?=[A-Za-z0-9]))(?:\.?[A-Za-z0-9][A-Za-z0-9._-]*\/)*\.?[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+/**
  * Read one bounded repository file from an immutable commit without consulting
  * the mutable checkout. Callers compare this text with the checkout copy before
  * treating a PR-provided contract as authority.
@@ -365,9 +377,13 @@ export function readGitTextAtRevision(
 ): string | null {
 	if (
 		!isSafeGitRevisionToken(revision) ||
-		!/^\.?(?:[A-Za-z0-9][A-Za-z0-9._-]*\/)*[A-Za-z0-9][A-Za-z0-9._-]*$/.test(
-			relativePath,
-		) ||
+		// `./` is admitted so callers can opt into cwd-relative resolution
+		// (git resolves a bare <path> from the repository toplevel); a bare
+		// leading dot before a name char (`.foo/bar`) stays admitted as
+		// before. `../` never passes: the optional prefix only matches a
+		// dot followed by a slash, and the segment split below still rejects
+		// any `..` component.
+		!gitSnapshotRelativePathPattern.test(relativePath) ||
 		relativePath.split('/').includes('..')
 	) {
 		return null;
@@ -922,6 +938,188 @@ export async function resolveIsWorkingTreeCleanAsync(
 		'--untracked-files=all',
 	]);
 	return status === null ? null : status.length === 0;
+}
+
+/**
+ * Sibling of {@link resolveIsWorkingTreeCleanAsync} (issue #3315 E1/AC22): the
+ * same `--porcelain=v1 --untracked-files=all` enumeration, but returning the
+ * dirty PATHS instead of collapsing to a boolean, so refusal messages can name
+ * the offending files (first N plus a count of the rest) instead of leaving the
+ * operator to hunt for them. Never changes the cleanliness verdict itself.
+ */
+export async function resolveWorkingTreeDirtyPathsAsync(
+	directory: string,
+): Promise<string[] | null> {
+	const status = await runGitAsync(directory, [
+		'status',
+		'--porcelain=v1',
+		'-z',
+		'--untracked-files=all',
+	]);
+	if (status === null) return null;
+	const paths: string[] = [];
+	// With -z, a rename/copy record is `XY NEWPATH\0ORIGPATH\0` — the orig
+	// path arrives as a bare record with no status prefix and must be skipped.
+	let skipNextRecord = false;
+	for (const entry of status.split('\0')) {
+		if (entry.length === 0) continue;
+		if (skipNextRecord) {
+			skipNextRecord = false;
+			continue;
+		}
+		if (entry.length < 4) continue;
+		const statusCode = entry.slice(0, 2);
+		if (statusCode.startsWith('R') || statusCode.startsWith('C')) {
+			skipNextRecord = true;
+		}
+		const rawPath = entry.slice(3);
+		if (rawPath.length === 0) continue;
+		paths.push(rawPath);
+	}
+	return paths;
+}
+
+/**
+ * The changed-path set a PR_FEEDBACK revision digest hashes (issue #3315 D3):
+ * tracked changes vs the bound base (`diff --name-only`) plus every untracked
+ * non-ignored file (`status --porcelain --untracked-files=all`). Staging
+ * admission compares `git add --` pathspecs against exactly this set, so
+ * content the digest never hashed (untouched paths, ignored files) can never
+ * be staged through the sanctioned surface. Paths are separator-normalized to
+ * posix-relative form with CASE PRESERVED — the admission side matches exact
+ * first and folds case only when that fold is unambiguous (FB-13/PRR-014: a
+ * POSIX pair of case-variant files must never admit the wrong one).
+ */
+export async function resolvePrWorkflowChangedPathSetAsync(
+	directory: string,
+	baseHeadSha: string,
+): Promise<Set<string> | null> {
+	if (!/^[0-9a-f]{40}$/i.test(baseHeadSha)) return null;
+	const diff = await runGitAsync(directory, [
+		'diff',
+		'--no-ext-diff',
+		'--name-only',
+		'-z',
+		baseHeadSha,
+	]);
+	if (diff === null) return null;
+	const status = await runGitAsync(directory, [
+		'status',
+		'--porcelain=v1',
+		'-z',
+		'--untracked-files=all',
+	]);
+	if (status === null) return null;
+	const set = new Set<string>();
+	const normalize = (value: string): string =>
+		value.replace(/\\/g, '/').replace(/^\.\//, '');
+	for (const name of diff.split('\0')) {
+		if (name.length > 0) set.add(normalize(name));
+	}
+	// With -z, rename/copy records carry the orig path as a bare second
+	// NUL-terminated record (FB-5/PRR-005: the sibling dirty-path parser and
+	// parsePorcelainPaths both skip it — without the skip a truncated phantom
+	// key enters the set and the real orig path never does).
+	let skipNextRecord = false;
+	for (const entry of status.split('\0')) {
+		if (entry.length === 0) continue;
+		if (skipNextRecord) {
+			skipNextRecord = false;
+			continue;
+		}
+		if (entry.length < 4 || entry[2] !== ' ') continue;
+		const statusCode = entry.slice(0, 2);
+		if (statusCode.includes('R') || statusCode.includes('C')) {
+			skipNextRecord = true;
+		}
+		const rawPath = entry.slice(3);
+		if (rawPath.length === 0) continue;
+		set.add(normalize(rawPath));
+	}
+	return set;
+}
+
+/**
+ * Resolve the git repository toplevel for a working directory (FB-13/F-R50:
+ * containment must be measured against the same root the repo-wide clean
+ * check enumerates, not a possibly-subdirectory gate directory). Null when
+ * the probe fails — callers fall back to the gate directory.
+ */
+export async function resolveRepoTopLevelAsync(
+	directory: string,
+): Promise<string | null> {
+	const toplevel = await runGitAsync(directory, [
+		'rev-parse',
+		'--show-toplevel',
+	]);
+	if (toplevel === null || toplevel.length === 0) return null;
+	return toplevel;
+}
+
+/**
+ * Resolve a local ref (e.g. a `refs/remotes/origin/<branch>` tracking ref) to
+ * its commit SHA (issue #3315 D1). Null on any failure — callers treat null as
+ * "no positive fast-forward opportunity" and fall through to their own
+ * assertions, so a missing ref or a broken probe never moves HEAD.
+ */
+export async function resolveLocalRefHeadAsync(
+	directory: string,
+	ref: string,
+): Promise<string | null> {
+	if (!/^[A-Za-z0-9._/-]+$/.test(ref)) return null;
+	const sha = await runGitAsync(directory, [
+		'rev-parse',
+		'--verify',
+		`${ref}^{commit}`,
+	]);
+	return sha && /^[0-9a-f]{40}$/i.test(sha) ? sha.toLowerCase() : null;
+}
+
+/**
+ * `git merge-base --is-ancestor` wrapper (issue #3315 D1; FB-11/PRR-006).
+ * True only on the POSITIVE ancestry answer (exit 0); false is the definitive
+ * no; null means the probe itself failed (timeout/overflow) — the caller
+ * distinguishes them so a probe timeout is never misreported as divergence.
+ */
+export async function resolveIsAncestorAsync(
+	directory: string,
+	ancestor: string,
+	descendant: string,
+): Promise<boolean | null> {
+	if (!/^[0-9a-f]{40}$/i.test(ancestor) || !/^[0-9a-f]{40}$/i.test(descendant))
+		return false;
+	const out = await runGitAsyncDetailed(
+		directory,
+		['merge-base', '--is-ancestor', ancestor, descendant],
+		_internals.gitTimeoutMs,
+	);
+	if (!out.ok) {
+		if (out.reason === 'git-failed') return false;
+		return null; // timeout / buffer-truncated: unverifiable
+	}
+	return true;
+}
+
+/**
+ * Fast-forward the current branch to a local ref with `git merge --ff-only`
+ * (issue #3315 D1; FB-7/PRR-007: this MUTATING verb gets a dedicated 15s
+ * timeout — the 3s read-only snapshot bound could SIGKILL git mid-checkout
+ * and leave an index.lock — and an end-of-options `--` separator). Returns
+ * false on any failure; the caller only invokes this after verifying HEAD is
+ * an ancestor of the ref, so a false here leaves HEAD where it was (git
+ * --ff-only never creates a merge commit).
+ */
+export async function fastForwardToRefAsync(
+	directory: string,
+	ref: string,
+): Promise<boolean> {
+	if (!/^[A-Za-z0-9._/-]+$/.test(ref)) return false;
+	const out = await runGitAsync(
+		directory,
+		['merge', '--ff-only', '--', ref],
+		15_000,
+	);
+	return out !== null;
 }
 
 /** Count commits on the ancestry path from the immutable intake head to HEAD. */
@@ -2118,6 +2316,41 @@ export function committedFilesBetween(
 		fromHead,
 		toHead,
 	]);
+	if (committed === null) return null;
+	return parseNulPaths(committed);
+}
+
+/**
+ * Async twin of {@link committedFilesBetween} (issue #3655). Identical output
+ * contract — repo-relative committed paths between two treeishes, `[]` for an
+ * identical-head pair, `null` when the diff cannot be proven — but routed
+ * through the bounded async git runner. The reviewer-scope completion
+ * lifecycle consumes this from `tool.execute.after`
+ * (completeReviewerScopeLifecycle), a hook-reachable path where the sync
+ * twin's spawnSync would block the host event loop.
+ */
+export async function committedFilesBetweenAsync(
+	directory: string,
+	fromHead: string | null,
+	toHead: string | null,
+	options?: { relative?: boolean },
+): Promise<string[] | null> {
+	if (fromHead === null || toHead === null) return null;
+	if (fromHead === toHead) return [];
+	// Same --no-renames rationale as the sync twin (PR review 2819-r1 PRR-005).
+	// `--relative` (PR #3668 feedback F-1): `git diff --name-only` prints
+	// repo-TOPLEVEL-relative paths even when run under `-C <subdir>`; the
+	// reviewer-scope reconciliation consumes capture-root-relative paths, so
+	// callers whose `directory` may be a project subdirectory of the repo pass
+	// `{ relative: true }` to get paths relative to `directory` itself (paths
+	// outside it are excluded from the diff output entirely, so they cannot
+	// match a declared scope).
+	// The sync twin keeps its toplevel-relative contract (its Stage B callers
+	// compare against whole-tree state).
+	const args = ['diff', '--name-only', '--no-renames'];
+	if (options?.relative === true) args.push('--relative');
+	args.push('-z', fromHead, toHead);
+	const committed = await runGitAsync(directory, args);
 	if (committed === null) return null;
 	return parseNulPaths(committed);
 }

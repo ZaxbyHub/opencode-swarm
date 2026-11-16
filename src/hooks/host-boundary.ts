@@ -258,7 +258,14 @@ function resolveAgentOptional(
 ): string | undefined {
 	if (typeof sessionID === 'string' && sessionID.length > 0) {
 		const mapped = swarmState.activeAgent.get(sessionID);
-		if (mapped) return mapped;
+		// 'unknown' is the placeholder `ensureAgentSession` writes for a session
+		// created without an agent name (startAgentSession's default) — a
+		// sentinel for "not yet known", not an identity (#3320 review round:
+		// returning it here made both message stages treat a not-yet-named
+		// architect session as a non-architect delegate and skip every
+		// injection). Treat it as unmapped so resolution falls through to the
+		// last user message's info.agent and then the stage's own default.
+		if (mapped && mapped !== 'unknown') return mapped;
 	}
 	return undefined;
 }

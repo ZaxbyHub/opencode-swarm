@@ -30,6 +30,20 @@ bun --smol test tests/unit/hooks --timeout 120000
 bun --smol test tests/unit/cli --timeout 120000
 ```
 
+ALWAYS pass an explicit `--timeout` (CI uses 120 s; 30 s is the local floor).
+Bare `bun test` applies bun's 5 s default to afterEach/afterAll hooks, which
+the hardened teardown helpers (`safeRmRecursive`, issue #3260) can legitimately
+exceed on a transient Windows handle hold — the retry then reports as a hook
+timeout instead of completing.
+
+A test's explicit per-test timeout (the third `bun test` argument) overrides
+these CLI values. The receipt-footer aggregate-bounds test
+(`tests/unit/tools/dispatch-lanes-pr-review-receipt-footer.test.ts`) carries
+one such explicit 60 s cap, deliberately equal to the coverage gate's own
+per-test budget in `scripts/ci/run-coverage-gate.sh` — the lockstep is pinned
+by `tests/unit/scripts/ci/ci-coverage-timeout-lockstep.test.ts`, so raising
+either side without the other fails CI (#3263).
+
 ### Reproducible repository validation
 
 Issue #2675's canonical validation command runs the complete, ordered surface
@@ -51,8 +65,11 @@ In diff mode, the selected changes are the committed branch changes in
 records the runtime (`bunVersion`, `platform`, `arch`), exact array-form argv
 and cwd for every item, the `origin/main` diff base, per-surface results, and
 summary counts. A process must end in one of `passed`, `failed`, `crashed`,
-`timed_out`, `missing`, or `skipped`; a crash, timeout, missing item, or skipped
-item cannot be reported as a complete pass. The run-level status is
+`timed_out`, `missing`, `skipped`, or `output_truncated` (a child whose run
+completed with no timeout and no crash — cleanup succeeded, no signal, known
+exit code — but whose bounded reader missed its deadline was only partially
+observed; the row counts as failed (#3664)); a crash, timeout, missing item,
+or skipped item cannot be reported as a complete pass. The run-level status is
 `passed`, `failed`, `incomplete`, or `no_op`; `no_op` is reserved for a diff
 run with no discovered work and is not equivalent to `passed`.
 

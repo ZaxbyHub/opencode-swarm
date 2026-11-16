@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.200.7",
+  "tagCommit": "95c05bcb3a0776fb0840e66e16adfd5fc8cb7c2c",
+  "targetCommitish": "95c05bcb3a0776fb0840e66e16adfd5fc8cb7c2c",
+  "releaseBodySha256": "f74aef93784eeb842b99c0ec2ec7c5cb8253f7d2482bc937b98d4279c40b6bc3",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/task-gate-evidence-plan-identity.md",
+      "sha256": "99d79ef3251a0ffd21bc1b2142c9220057675eb9168b4fe359885a7ffe9d353c"
+    }
+  ]
+}

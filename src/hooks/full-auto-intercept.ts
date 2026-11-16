@@ -13,11 +13,15 @@ import * as fs from 'node:fs';
 import { createCriticAutonomousOversightAgent } from '../agents/critic';
 import { getSwarmAgents, resolveFallbackModel } from '../agents/index.js';
 import type { PluginConfig } from '../config';
-import { stripKnownSwarmPrefix } from '../config/schema.js';
+import {
+	deriveSwarmIdentity,
+	stripKnownSwarmPrefix,
+} from '../config/schema.js';
 import { appendCoreEventSync } from '../events/core-events.js';
 import {
 	classifyProviderFailure,
 	isRetryableProviderFailure,
+	sanitizeFailureEvidenceDisplay,
 } from '../failures/invocation-failure.js';
 import {
 	providerMessageErrorToError,
@@ -27,6 +31,7 @@ import {
 	type ParsedCriticResponse,
 	parseCriticResponseFields,
 } from '../full-auto/critic-response-parser';
+import { FULL_AUTO_CRITIC_DENIED_TOOLS } from '../full-auto/critic-tools';
 import {
 	type FullAutoOversightEvent as V2FullAutoOversightEvent,
 	writeFullAutoOversightEvent as v2WriteOversightEvent,
@@ -661,7 +666,7 @@ export async function dispatchCriticAndWriteEvent(
 							body: {
 								agent: oversightAgentName,
 								...(modelOverride ? { model: modelOverride } : {}),
-								tools: { write: false, edit: false, patch: false },
+								tools: { ...FULL_AUTO_CRITIC_DENIED_TOOLS },
 								parts: [{ type: 'text', text: criticContext }],
 							},
 							signal: promptController.signal,
@@ -723,14 +728,8 @@ export async function dispatchCriticAndWriteEvent(
 	// Mirrors the sibling inline loop in `src/full-auto/oversight.ts` — the
 	// shared advance block lives in `advanceInlineFallback` (see utils/
 	// inline-fallback-advancer.ts) so the two bespoke loops cannot drift.
-	const oversightBaseRole = stripKnownSwarmPrefix(oversightAgentName);
-	const oversightSwarmId =
-		oversightBaseRole !== oversightAgentName
-			? oversightAgentName.slice(
-					0,
-					oversightAgentName.length - oversightBaseRole.length - 1,
-				)
-			: undefined;
+	const { role: oversightBaseRole, swarmID: oversightSwarmId } =
+		deriveSwarmIdentity(oversightAgentName);
 	const oversightSwarmAgents = getSwarmAgents(oversightSwarmId);
 	const oversightFallbackRole = oversightSwarmAgents?.[oversightBaseRole]
 		?.fallback_models?.length
@@ -756,7 +755,7 @@ export async function dispatchCriticAndWriteEvent(
 		}
 		lastDispatchError = result.error;
 		logger.warn(
-			`[full-auto-intercept] dispatch attempt ${attempt + 1}/${maxDispatchRetries + 1} failed: ${lastDispatchError instanceof Error ? lastDispatchError.message : String(lastDispatchError)}`,
+			`[full-auto-intercept] dispatch attempt ${attempt + 1}/${maxDispatchRetries + 1} failed: ${sanitizeFailureEvidenceDisplay(lastDispatchError instanceof Error ? lastDispatchError.message : String(lastDispatchError))}`,
 		);
 		if (attempt < maxDispatchRetries) {
 			// Will retry. #1905: if the failure is transient/quota, advance to the
@@ -795,7 +794,10 @@ export async function dispatchCriticAndWriteEvent(
 			}
 		} else {
 			// Exhausted retries: SC-011 auto-degrade.
-			const infraReason = `oversight infrastructure failure after ${maxDispatchRetries + 1} attempt(s): ${lastDispatchError instanceof Error ? lastDispatchError.message : String(lastDispatchError)}`;
+			// #3710: persisted failure reasons carry redacted provider error text
+			// (applied after every classifier read; the fixed prefix survives the
+			// sanitizer for the recovery/permission pause-reason matchers).
+			const infraReason = `oversight infrastructure failure after ${maxDispatchRetries + 1} attempt(s): ${sanitizeFailureEvidenceDisplay(lastDispatchError instanceof Error ? lastDispatchError.message : String(lastDispatchError))}`;
 			const consecutive = incrementOversightFailureCounter(
 				directory,
 				sessionID ?? '',
@@ -814,7 +816,7 @@ export async function dispatchCriticAndWriteEvent(
 				// Below threshold — pause and allow architect to resolve.
 				pauseFullAutoRun(directory, sessionID ?? '', infraReason);
 				logger.error(
-					`[full-auto-intercept] [ADVISORY] Oversight dispatch exhausted ${maxDispatchRetries + 1} attempts and failed. Intercepting with NEEDS_REVISION. Last error: ${lastDispatchError instanceof Error ? lastDispatchError.message : String(lastDispatchError)}`,
+					`[full-auto-intercept] [ADVISORY] Oversight dispatch exhausted ${maxDispatchRetries + 1} attempts and failed. Intercepting with NEEDS_REVISION. Last error: ${sanitizeFailureEvidenceDisplay(lastDispatchError instanceof Error ? lastDispatchError.message : String(lastDispatchError))}`,
 				);
 			}
 		}
@@ -1114,7 +1116,7 @@ export function createFullAutoInterceptHook(
  * Builds additional context to append to the autonomous oversight prompt.
  * This provides the architect's question/output for the critic to evaluate.
  */
-function buildCriticContext(
+export function buildCriticContext(
 	architectOutput: string,
 	escalationType: 'phase_completion' | 'question',
 ): string {
@@ -1135,6 +1137,8 @@ ${truncatedOutput}
 
 ### YOUR TASK:
 Evaluate the architect's output and provide a response. If this is a question, answer it directly if you have sufficient information. If this is a phase completion, verify all tasks are complete and provide APPROVED or NEEDS_REVISION.
+
+Be brief: make at most 5 tool calls, keep every search inside the project directory (never search or recurse over the home directory), and answer as soon as you have enough evidence. If you cannot verify quickly, say so.
 
 Remember: You are the sole quality gate. Default posture is REJECT unless you have positive evidence of correctness.`;
 }

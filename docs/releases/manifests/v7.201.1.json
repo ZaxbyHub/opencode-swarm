@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.201.1",
+  "tagCommit": "74cdc60ba73f2409ae37c4caa96727effec680ee",
+  "targetCommitish": "74cdc60ba73f2409ae37c4caa96727effec680ee",
+  "releaseBodySha256": "334e8b0fb62cc1755276e9f605307160095c36c0d16f57db0c97efcbe5a0e40a",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/3509-3516-route-receipt-erratum.md",
+      "sha256": "280340356c1ca312e785bc57f535dddc29c946c1034feb8bd532e583fae947fc"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/3509-3516-route-receipt-hardening.md",
+      "sha256": "3cc82906442e583347667c5b507b57ab65894884a13f78f84a3a260121bb6fcc"
+    }
+  ]
+}

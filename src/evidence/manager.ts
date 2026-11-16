@@ -1,4 +1,5 @@
 import {
+	existsSync,
 	mkdirSync,
 	readdirSync,
 	realpathSync,
@@ -28,6 +29,7 @@ import {
 	type EvaluationRetentionResult,
 } from '../evaluation/retention.js';
 import { readSwarmFileAsync, validateSwarmPath } from '../hooks/utils';
+import { SNAPSHOT_EXCLUDED_EVIDENCE_ENTRIES } from '../tools/phase-complete/snapshot-identity';
 import { warn } from '../utils';
 import { bunWrite } from '../utils/bun-compat';
 import {
@@ -36,6 +38,7 @@ import {
 	PROJECT_ROOT_INDICATORS,
 } from '../utils/project-boundary';
 import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache';
+import { isDerivedEvidenceEntry } from './derived-entries';
 import {
 	type DocumentsRetentionResult,
 	pruneEvidenceDocuments,
@@ -536,11 +539,33 @@ export async function listEvidenceTaskIds(
 	// Filter to only valid task ID directories
 	const taskIds: string[] = [];
 	for (const entry of entries) {
+		// FB-008 (#2968): `receipts/` is a DERIVED, non-task subtree of
+		// .swarm/evidence (gate reports + receipts), created unconditionally
+		// by every phase_complete capture. Treating it as a task ID made
+		// /swarm doctor report a false "Orphaned Evidence ❌ [receipts]" in
+		// every project that ever completed a phase. This is the same
+		// reserved-name concept the phase-evidence snapshot already excludes
+		// (snapshot-identity.ts SNAPSHOT_EXCLUDED_EVIDENCE_ENTRIES) — the two
+		// consumers of the .swarm/evidence root must agree on it.
+		if (SNAPSHOT_EXCLUDED_EVIDENCE_ENTRIES.has(entry)) {
+			continue;
+		}
 		const entryPath = path.join(evidenceBasePath, entry);
 		try {
 			// Check if it's a directory
 			const stats = statSync(entryPath);
 			if (!stats.isDirectory()) {
+				continue;
+			}
+
+			// #3554: derived non-task subtrees (gate-audit, task-gate-*,
+			// auto-review, marker-gated phase-numbered dirs) are not task ids —
+			// enumerating them made /swarm doctor report false "Orphaned
+			// Evidence ❌" for legitimate audit evidence. Classification lives
+			// in derived-entries.ts (sibling of the receipts reserved-name
+			// concept above); a real task bundle (root-level evidence.json)
+			// always wins over the derived exemption.
+			if (isDerivedEvidenceEntry(entry, entryPath, existsSync, readdirSync)) {
 				continue;
 			}
 

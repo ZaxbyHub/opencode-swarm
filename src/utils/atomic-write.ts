@@ -95,7 +95,7 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 			'src/commands/handoff.ts (pre-#2035; site=handoff.md; migrated-to=src/commands/handoff.ts:handleHandoffCommand)',
 			'src/commands/handoff.ts (pre-#2035; site=handoff-prompt.md; migrated-to=src/commands/handoff.ts:handleHandoffCommand)',
 			'src/memory/local-jsonl-provider.ts:1288',
-			'src/config/bundled-skills.ts:259',
+			'src/config/bundled-skills.ts:403',
 		],
 	},
 	{
@@ -131,14 +131,14 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 			'src/evidence/task-file.ts (pre-#2035; migrated-to=src/evidence/task-file.ts:atomicWriteFile)',
 			'src/scope/scope-persistence.ts (pre-#2035; migrated-to=src/scope/scope-persistence.ts:atomicWrite)',
 			'src/scope/scope-persistence.ts (pre-#2035; migrated-to=src/scope/scope-persistence.ts:atomicWriteSync)',
-			'src/plan/manager.ts:688',
-			'src/plan/manager.ts:2115',
-			'src/plan/manager.ts:2175',
+			'src/plan/manager.ts:694',
+			'src/plan/manager.ts:2121',
+			'src/plan/manager.ts:2181',
 			'src/review/evidence.ts:179',
 			'src/turbo/lean/evidence.ts:182',
 			'src/summaries/manager.ts:163',
-			'src/evidence/manager.ts:288',
-			'src/evidence/manager.ts:456',
+			'src/evidence/manager.ts:291',
+			'src/evidence/manager.ts:459',
 			'src/tools/sast-baseline.ts:199',
 			'src/tools/repo-graph/storage.ts:543',
 			'src/memory/reflection-service.ts (pre-#2035; migrated-to=src/memory/reflection-service.ts:atomicWrite)',
@@ -147,9 +147,9 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 			'src/hooks/review-receipt.ts:894',
 			'src/knowledge/identity.ts:234',
 			'src/evidence/phase-participation.ts (pre-#2035; migrated-to=src/evidence/phase-participation.ts:atomicWriteBytes)',
-			'src/turbo/lean/integration.ts:429',
-			'src/turbo/lean/reviewer.ts:403',
-			'src/plan/ledger.ts:1474',
+			'src/turbo/lean/integration.ts:427',
+			'src/turbo/lean/reviewer.ts:401',
+			'src/plan/ledger.ts:1486',
 			'src/services/synonym-map.ts:389',
 			'src/services/skill-optimizer/store.ts:340',
 			'src/services/skill-optimizer/store.ts:503',
@@ -168,7 +168,7 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 		producers: [
 			'src/turbo/lean/state.ts:129',
 			'src/turbo/lean/recovery.ts:175',
-			'src/hooks/delegation-gate/worktree-merge-status.ts:110',
+			'src/hooks/delegation-gate/worktree-merge-status.ts:132',
 			'src/plan/ledger.ts:606',
 		],
 	},
@@ -187,12 +187,13 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 			'src/tools/spec-write.ts:98',
 			'src/sdd/effective-spec.ts:1509',
 			'src/background/lane-output-store.ts:353',
-			'src/background/pending-delegations.ts:1520',
+			'src/background/pending-delegations.ts:writeDurableFileSync',
 			'src/background/delegation-health.ts:391',
 			'src/tools/submit-phase-council-verdicts.ts:458',
 			'src/summaries/store.ts (pre-#2035; migrated-to=src/summaries/store.ts:writeRawSidecar)',
 			'src/retention/jsonl-cap.ts:213',
 			'src/services/skill-changelog.ts:58',
+			'src/evidence/receipt-store.ts:414',
 		],
 		note: 'background lane/delegation stores keep bounded-retry rename semantics wired into their callers (#2034/#2276 delivery contracts); migration candidates for a follow-up but grammars registered',
 	},
@@ -236,8 +237,8 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 		quarantineEligible: true,
 		parsesTarget: true,
 		producers: [
-			'src/tools/write-pr-review-artifact.ts:157',
-			'src/tools/write-pr-review-artifact.ts:177',
+			'src/tools/write-pr-review-artifact.ts:159',
+			'src/tools/write-pr-review-artifact.ts:179',
 			// Symbol form: shift-proof against import-order drift in the writer
 			// (issue #3094 re-pin; the old line-form anchor pointed at :105).
 			'src/tools/write-pr-review-trigger-eval.ts:createTriggerReceipt',
@@ -263,7 +264,7 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 		token: 'instance',
 		quarantineEligible: true,
 		parsesTarget: true,
-		producers: ['src/plan/manager.ts:2374', 'src/plan/manager.ts:2436'],
+		producers: ['src/plan/manager.ts:2380', 'src/plan/manager.ts:2442'],
 		note: 'plan-durability (invariant 5) fd-write paths; grammars registered, writers unchanged in this PR',
 	},
 	{
@@ -312,8 +313,8 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 		quarantineEligible: false,
 		parsesTarget: false,
 		producers: [
-			'src/tools/checkpoint.ts:205',
-			'src/full-auto/state.ts:637',
+			'src/tools/checkpoint.ts:224',
+			'src/full-auto/state.ts:638',
 			'src/context-map/persistence.ts:135',
 			'src/context-map/capsule-persistence.ts:111',
 			'src/test-impact/history-store.ts:297',
@@ -324,9 +325,9 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 			'src/hooks/skill-usage-log.ts:1165',
 			'src/hooks/skill-usage-log.ts:1675',
 			'src/hooks/skill-usage-pending.ts:817',
-			'src/parallel/file-locks.ts:113',
+			'src/parallel/file-locks.ts:1075',
 			'src/plan/ledger.ts:607',
-			'src/plan/ledger.ts:1796',
+			'src/plan/ledger.ts:1808',
 		],
 		note: 'constant-name temps: reported when stale, never auto-quarantined. file-locks meta sidecars live under the scanner-skipped .swarm/locks/ subtree; the ledger reconcile temp embeds instance tokens but its .tmp-suffix shape maps here (conservatively report-only)',
 	},
@@ -417,6 +418,10 @@ export const WRITER_CLASSIFICATION: Readonly<
 	'src/hooks/guardrails/shell-audit-store.ts': 'registered-bespoke',
 	'src/evidence/documents-retention.ts': 'registered-bespoke',
 	'src/evidence/manager.ts': 'registered-bespoke',
+	// #2968: verification-receipt export bundle staging dir —
+	// `.${bundleName}.tmp-${pid}-${ts}` (target-suffix-tmp-dash grammar);
+	// receipt artifacts themselves go through writeImmutableArtifact
+	'src/evidence/receipt-store.ts': 'registered-bespoke',
 	'src/full-auto/state.ts': 'registered-bespoke',
 	'src/hooks/delegation-gate/worktree-merge-status.ts': 'registered-bespoke',
 	'src/hooks/delegation-gate/worktree-provisioning-owner.ts': 'migrated',
@@ -724,6 +729,15 @@ export interface AtomicWriteOptions {
 	 * so the bound itself is testable without allocating 256 MiB.
 	 */
 	readonly maxBytes?: number;
+	/**
+	 * Same-tick destination validation (swarm-pr-feedback PR #3550 FB-001
+	 * round 3): invoked AFTER the writer's event-loop yield and IMMEDIATELY
+	 * before the synchronous temp-write/rename sequence. A caller that
+	 * pre-validated its destination still has an in-process interleaving
+	 * window at the writer's `setImmediate`; running the check here — same
+	 * tick as the mutation syscalls — closes it.
+	 */
+	readonly validateTarget?: () => void;
 }
 
 /**
@@ -772,9 +786,22 @@ function syncSleep(ms: number): void {
 	}
 }
 
-function renameWithRetry(tempPath: string, targetPath: string): void {
+/** Bounded rename with the retryable-delay loop (issue #2969: one canonical
+ *  implementation consumed by the full-auto state writer and the OTLP
+ *  exporter instead of per-file raw `renameSync` calls). Semantics are the
+ *  long-standing internal contract: up to 6 attempts, sleeping
+ *  RENAME_RETRY_DELAYS_MS between retryable failures (EPERM/EBUSY/EACCES/
+ *  EEXIST — Windows AV scanners transiently hold freshly written files),
+ *  immediate rethrow for non-retryable errors, rethrow of the last error on
+ *  exhaustion. Routes through the `_internals.renameSync` seam like every
+ *  other write primitive here. */
+export function renameSyncWithRetry(
+	tempPath: string,
+	targetPath: string,
+	delays: readonly number[] = RENAME_RETRY_DELAYS_MS,
+): void {
 	let lastError: unknown;
-	for (let attempt = 0; attempt <= RENAME_RETRY_DELAYS_MS.length; attempt++) {
+	for (let attempt = 0; attempt <= delays.length; attempt++) {
 		try {
 			_internals.renameSync(tempPath, targetPath);
 			return;
@@ -782,8 +809,8 @@ function renameWithRetry(tempPath: string, targetPath: string): void {
 			lastError = err;
 			const code = (err as NodeJS.ErrnoException)?.code;
 			if (!code || !RETRYABLE_RENAME_CODES.has(code)) throw err;
-			if (attempt < RENAME_RETRY_DELAYS_MS.length) {
-				syncSleep(RENAME_RETRY_DELAYS_MS[attempt]);
+			if (attempt < delays.length) {
+				syncSleep(delays[attempt] ?? 0);
 			}
 		}
 	}
@@ -851,7 +878,7 @@ function writeAtomicSync(
 			} finally {
 				fs.closeSync(fd);
 			}
-			renameWithRetry(tempPath, resolvedTarget);
+			renameSyncWithRetry(tempPath, resolvedTarget);
 		} finally {
 			// Exact finally cleanup of THIS invocation's temp only (no-op after a
 			// successful rename — ENOENT is swallowed).
@@ -937,5 +964,11 @@ export async function atomicWriteFileAnyRoot(
 	options?: AtomicWriteOptions,
 ): Promise<void> {
 	await new Promise<void>((resolve) => setImmediate(resolve));
+	// FB-001 (review round 3): run the destination validator on the SAME tick
+	// as the synchronous write, after the writer's event-loop yield — no
+	// awaitable boundary remains between "chain verified link-free" and the
+	// temp-write/rename syscalls, so an in-process task that plants a junction
+	// during the yield is caught here rather than writing through it.
+	options?.validateTarget?.();
 	writeAtomicSync(targetPath, content, { ...options, contained: false });
 }

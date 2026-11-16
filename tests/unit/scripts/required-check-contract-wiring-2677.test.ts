@@ -23,6 +23,7 @@ import {
 	DETECTORS,
 	detectRequiredCheckContractDrift,
 } from '../../../scripts/drift-check';
+import { safeRmRecursive } from '../../helpers/safe-test-dir';
 
 const repoRoot = resolve(import.meta.dir, '../../..');
 
@@ -416,7 +417,7 @@ describe('issue #2677 required-check contract wiring', () => {
 				),
 			).toBe(0);
 		} finally {
-			rmSync(fixture.root, { recursive: true, force: true });
+			safeRmRecursive(fixture.root);
 		}
 	}, 20_000);
 

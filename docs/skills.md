@@ -10,7 +10,7 @@ Repository-native skill roots are project-owned:
 - `.claude/skills/<name>/SKILL.md`
 - `.agents/skills/<name>/SKILL.md`
 
-The plugin does not install its runtime protocols into those roots. Shipped protocols are materialized privately under `.swarm/bundled-skills/<name>/`, so a repository skill may reuse a shipped slug without overwrite or native registry collision. Reachability into that private tree happens through two mechanisms, not one: most shipped skills load explicitly by `/swarm` MODE dispatch (a `/swarm <command>` emits a `[MODE: ...]` signal that an architect stub loads via `file:.swarm/bundled-skills/<name>/SKILL.md`); a smaller set of playbook/support skills (e.g. `ci-failure-batching`, `merge-queue-readiness`, `gate-attribution`, `worktree-retry-cleanup`, `test-file-split`, `skill-edit-validation`) are not MODE-dispatched at all — they load via an explicit `file:` trigger-point reference embedded in the body of the owning skill or contract doc that covers the relevant workflow step (e.g. `execute` references `gate-attribution` before its Stage B gate). `.swarm/bundled-skills` is intentionally excluded from the automatic keyword-scoring skill roots, so a skill placed there is unreachable unless one of these two explicit mechanisms references it (see issue #1806).
+The plugin does not install its runtime protocols into those roots. Shipped protocols are materialized privately under `.swarm/bundled-skills/<name>/`, so a repository skill may reuse a shipped slug without overwrite or native registry collision. Reachability into that private tree happens through three mechanisms, not one: most shipped skills load explicitly by `/swarm` MODE dispatch (a `/swarm <command>` emits a `[MODE: ...]` signal that an architect stub loads via `file:.swarm/bundled-skills/<name>/SKILL.md`); a smaller set of playbook/support skills (e.g. `ci-failure-batching`, `merge-queue-readiness`, `gate-attribution`, `worktree-retry-cleanup`, `test-file-split`, `skill-edit-validation`) are not MODE-dispatched at all — they load via an explicit `file:` trigger-point reference embedded in the body of the owning skill or contract doc that covers the relevant workflow step (e.g. `execute` references `gate-attribution` before its Stage B gate); a third, narrow path is the retirement refusal — when the skill-propagation gate blocks an explicit reference to a retired generated skill, its message names the bundled `file:.swarm/bundled-skills/<slug>/SKILL.md` replacement (issue #2966), so the referenced canon is surfaced at delegation time. `.swarm/bundled-skills` is intentionally excluded from the automatic keyword-scoring skill roots, so a skill placed there is unreachable unless one of these explicit mechanisms references it (see issue #1806).
 
 ### Bundled-skill reachability dispositions (issue #2672)
 
@@ -89,7 +89,14 @@ values**:
 - The reader (`parseSkillFrontmatter` in `src/hooks/skill-scoring.ts`)
   accepts the spec shape and the legacy top-level shape during the
   transition; `metadata.<key>` is preferred, and a metadata-vs-top-level
-  audience conflict fails closed.
+  audience conflict fails closed. An inline value on the `metadata:` key —
+  a flow map (`metadata: {audience: x}`, single- or multi-line), a
+  sequence, or a bare scalar — is resolved when it parses as a flow map and
+  fails closed otherwise (audience invalid — never absent/match-all), but
+  every non-empty inline value is non-canonical for this repo's writer:
+  `drift:check` flags it, and the reviser rewrites it to the block form
+  (issue #3217). A comment-only value (`metadata: # note`) counts as an
+  empty value and takes the block form.
 - The generator (`renderSkillMarkdown`), reviser, and the
   `swarm-contract-digest` stamp writer all emit the spec shape.
 
@@ -100,11 +107,11 @@ them under `metadata:` would delete host behavior. Shipped skills therefore
 remain intentionally non-spec in exactly these four keys; the drift-check
 `skill-frontmatter` detector's `HOST_CONSUMED_TOP_LEVEL_KEYS` allowlist
 documents the same set, and every other non-spec top-level key in a shipped
-(tracked, non-generated) skill is an error under
-`bun run drift:check --enforce`. The generated tree
-(`.opencode/skills/generated/`) is exempt from the detector, matching the
-audience detector's precedent — regenerated skills converge on the spec shape
-through the generator, but legacy keys there are not CI-enforced.
+skill is an error under `bun run drift:check --enforce`. The generated tree
+(`.opencode/skills/generated/`) is enforced by the skill-frontmatter detector
+(post-migration, issue #3216); only the audience detector keeps its
+generated-tree skip — regenerated skills converge on the spec shape through
+the generator, and legacy keys there are now CI-enforced.
 
 **Progressive-disclosure budgets.** The spec recommends keeping `SKILL.md`
 under 500 lines with detail in `references/`. `writing-tests`, `graphify`,
@@ -311,23 +318,20 @@ Agent task / curator review
 
 #### Frontmatter Example
 
-Generated skills inherit trigger phrases and metadata from source knowledge:
+Generated skills inherit trigger phrases and metadata from source knowledge.
+Every non-spec key lives under the `metadata:` map as a quoted string (the
+shape the generator emits and the drift-check detector enforces — including
+in the generated tree):
 
 ```yaml
 ---
 name: declare-scope-before-delegation
 description: Enforce scope declaration before coder/reviewer delegation
-triggers:
-  - coder delegation
-  - scope declaration
-  - declare_scope
-applies_to_agents:
-  - coder
-  - reviewer
-applies_to_tools:
-  - task
-  - Task
-directive_priority: high
+metadata:
+  triggers: '["coder delegation", "scope declaration", "declare_scope"]'
+  applies_to_agents: '["coder", "reviewer"]'
+  applies_to_tools: '["task", "Task"]'
+  directive_priority: "high"
 ---
 
 # Declare Scope Before Delegation

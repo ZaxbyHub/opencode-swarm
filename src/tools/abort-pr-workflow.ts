@@ -102,8 +102,10 @@ export async function executeAbortPrWorkflow(
 					: undefined,
 		};
 	} catch {
-		// Config read failure must not block the abort escape hatch; the
-		// disabled default is always safe.
+		// Config read failure must not block the abort escape hatch. The
+		// fallback keeps the watchdog off (the explicit opt-out semantics),
+		// independent of the schema's default — the fail-open here means
+		// "no policy read", not "safe because the default is disabled".
 	}
 	if (parsed.data.kind === 'armed_recovery') {
 		try {

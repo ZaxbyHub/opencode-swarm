@@ -3,6 +3,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
 	_internals,
+	type CommitEmptyRetrievalResult,
 	commitDisplayedMembership,
 	commitEmptyRetrieval,
 	compactKnowledgeReceiptLedger,
@@ -34,6 +35,14 @@ function unwrap<T>(result: ReceiptLedgerResult<T>): T {
 	return result;
 }
 
+function unwrapEmpty(result: CommitEmptyRetrievalResult): {
+	event_id: string;
+	terminal_event_id: string;
+} {
+	if (!result.ok) throw new Error(`${result.code}: ${result.detail}`);
+	return result;
+}
+
 function journalRows(directory: string): Array<Record<string, unknown>> {
 	return fs
 		.readFileSync(
@@ -48,7 +57,7 @@ function journalRows(directory: string): Array<Record<string, unknown>> {
 describe('knowledge receipt checkpoint audit and empty identity', () => {
 	test('returns a terminal event id carried by a real exact empty terminal row', async () => {
 		const directory = project('receipt-empty-terminal-row-');
-		const committed = unwrap(
+		const committed = unwrapEmpty(
 			await commitEmptyRetrieval(directory, {
 				trace_id: 'empty-trace',
 				session_id: 'empty-session',
@@ -67,7 +76,7 @@ describe('knowledge receipt checkpoint audit and empty identity', () => {
 			},
 		});
 
-		const retry = unwrap(
+		const retry = unwrapEmpty(
 			await commitEmptyRetrieval(directory, {
 				trace_id: 'empty-trace',
 				session_id: 'empty-session',

@@ -1,0 +1,7 @@
+HOST: opencode 1.19.0 | C:\OpenCode\opencode.exe
+ABLATION: removed export key 'setup' (wrapper module; pre-validated keys=id,server)
+ABLATION: expected=loads (key is inert on v1) observed=plugin loaded (banner present, no drop record) — MATCH
+RUN: 2026-10-17T13:47:48.460Z | exit=0 | host-ran=true | dist sha256 b587ced33a3067303c365d310debd6b9ffec253ca4aa2e52ac50f49840f96363
+--- host output below, filtered to decision-relevant lines and home-path-redacted (not the full stream) ---
+architect (primary)
+[opencode-swarm] running v7.197.3

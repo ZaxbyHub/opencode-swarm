@@ -234,6 +234,7 @@ async function establishFindingPolicyEvidence(runId: string): Promise<void> {
 		[
 			{
 				laneId: `${runId}-cr`,
+				agent: 'critic',
 				workflowLane: `${runId}-cr`,
 				reviewItemIds: findingIds.slice(1),
 			},

@@ -161,7 +161,7 @@ describe('Gate Workflow State Machine', () => {
 			expect(result.success).toBe(false);
 			expect(result.message).toContain('Gate check failed');
 			expect(result.errors).toBeDefined();
-			expect(result.errors?.[0]).toContain('QA gates');
+			expect(result.errors?.[0]).toContain('exact-task QA evidence');
 		});
 
 		test('3. Missing reviewer: state at pre_check_passed → update_task_status rejects', async () => {
@@ -187,7 +187,7 @@ describe('Gate Workflow State Machine', () => {
 			expect(result.success).toBe(false);
 			expect(result.message).toContain('Gate check failed');
 			expect(result.errors).toBeDefined();
-			expect(result.errors?.[0]).toContain('QA gates');
+			expect(result.errors?.[0]).toContain('exact-task QA evidence');
 		});
 
 		test('4. Missing test_engineer: state at reviewer_run → update_task_status rejects', async () => {
@@ -214,7 +214,7 @@ describe('Gate Workflow State Machine', () => {
 			expect(result.success).toBe(false);
 			expect(result.message).toContain('Gate check failed');
 			expect(result.errors).toBeDefined();
-			expect(result.errors?.[0]).toContain('QA gates');
+			expect(result.errors?.[0]).toContain('exact-task QA evidence');
 		});
 
 		test('5. All gates passed: state at tests_run → update_task_status succeeds', async () => {

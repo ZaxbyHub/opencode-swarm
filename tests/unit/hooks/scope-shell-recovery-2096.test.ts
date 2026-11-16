@@ -54,7 +54,9 @@ describe('issue #2096 shell scope recovery contract', () => {
 			},
 			{ args: { command: 'echo nope > src/outside.ts' } },
 		);
-		await expect(call).rejects.toThrow(/^WRITE BLOCKED: SCOPE_VIOLATION:/);
+		await expect(call).rejects.toThrow(
+			/^WRITE BLOCKED \[shell-write-scope\]: SCOPE_VIOLATION:/,
+		);
 		await expect(call).rejects.toThrow(/ACTION\[architect\].*declare_scope/i);
 	});
 

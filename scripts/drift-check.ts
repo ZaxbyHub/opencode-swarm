@@ -28,7 +28,9 @@
  *                         GATE_CONFIG_KNOWN_SECTION_KEYS +
  *                         GATE_CONFIG_READERS (issue #2524).
  *  10. dep-freshness    — locked @opencode-ai/* resolution vs npm-latest (issue
- *                         #1899). Env-gated (SWARM_DEP_FRESHNESS_CHECK) and
+ *                         #1899), plus the vendored @opencode/plugin pin in
+ *                         src/host/v2/types.ts vs npm-latest (issue #2910).
+ *                         Both env-gated (SWARM_DEP_FRESHNESS_CHECK) and
  *                         fail-open: emits advisory `notice` findings only, never
  *                         blocks, so a stale lockfile can't silently age again.
  *  11. required-check-contract — exact ruleset-required contexts and workflow
@@ -804,10 +806,91 @@ const SKILL_METADATA_NON_STRING_SCALAR =
 	/^(?:-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?|-?\.[0-9]+|true|false|null|yes|no|on|off|~|\d{4}-\d{2}-\d{2}(?:[T ].*)?)$/i;
 
 /**
- * Agent-Skills-spec conformance for tracked static SKILL.md frontmatter
+ * Strip a trailing YAML comment from a frontmatter value, quote-aware
+ * (PR #3387 follow-up, FB-027; hardened in the follow-up review): a `#`
+ * inside a BALANCED quoted scalar is content, so `[a, "b # c"] # note`
+ * strips to `[a, "b # c"]` — the previous first-char-only check escaped
+ * exactly that shape from the flow-collection and bare-scalar checks.
+ *
+ * A quote opens ONLY at a value start (after a flow-element boundary, or
+ * after `:` when a whitespace/EOL follows — the `:` in a plain flow scalar
+ * like `b:'c` is content, not a mapping separator, so its quote must not
+ * open). A doubled `''` inside a single-quoted scalar is the YAML escape
+ * for a literal quote, so `'it''s # x'` stays quoted through the `#`. If a
+ * quote is still open at end of value (malformed input), the strip falls
+ * back to the naive first-comment scan so those shapes keep firing the way
+ * the pre-quote-aware detector did. That fallback is the parity boundary,
+ * not a guarantee: a malformed value whose quotes CLOSE around the comment
+ * (e.g. `['a] # b' x`) stays unstripped — documented bounded-subset
+ * behavior, the same class as the skill-scoring flow parser. A `#` at
+ * value start is a comment-only value (strips to empty), and `#` must
+ * follow whitespace or start the value to count as a comment opener.
+ */
+function stripFrontmatterValueComment(value: string): string {
+	let quote: '"' | "'" | undefined;
+	let atValueStart = true;
+	for (let i = 0; i < value.length; i++) {
+		const ch = value[i] as string;
+		if (quote) {
+			if (quote === '"' && ch === '\\') {
+				i += 1;
+				continue;
+			}
+			if (ch === quote) {
+				if (quote === "'" && value[i + 1] === "'") {
+					// YAML doubled single-quote escape — content, stay quoted.
+					i += 1;
+					continue;
+				}
+				quote = undefined;
+			}
+			atValueStart = false;
+			continue;
+		}
+		if ((ch === '"' || ch === "'") && atValueStart) {
+			quote = ch;
+			atValueStart = false;
+			continue;
+		}
+		if (ch === '#' && (i === 0 || /\s/.test(value[i - 1] as string))) {
+			return value.slice(0, i).trim();
+		}
+		if (ch === '{' || ch === '[' || ch === ',') {
+			atValueStart = true;
+			continue;
+		}
+		if (ch === ':') {
+			// A mapping separator only when a space/EOL follows; the colon in
+			// `b:'c` sits inside a plain scalar, and the quote after it is
+			// content (follow-up review: base fired there, head must too).
+			const next = value[i + 1];
+			atValueStart = next === undefined || /\s/.test(next);
+			continue;
+		}
+		if (!/\s/.test(ch)) atValueStart = false;
+	}
+	if (quote !== undefined) {
+		// Unterminated quote (malformed YAML): fall back to the naive strip
+		// so those shapes keep firing. Parity boundary only — a malformed
+		// value whose quotes CLOSE around the comment stays unstripped (see
+		// the function docstring).
+		for (let i = 0; i < value.length; i++) {
+			if (value[i] === '#' && (i === 0 || /\s/.test(value[i - 1] as string))) {
+				return value.slice(0, i).trim();
+			}
+		}
+	}
+	return value.trim();
+}
+
+/**
+ * Agent-Skills-spec conformance for tracked SKILL.md frontmatter
  * (issue #2907): non-spec keys must live under the `metadata:` string map,
  * `name` must match the parent directory, and metadata children must be
- * string-typed scalars.
+ * string-typed scalars. The generated tree (`.opencode/skills/generated/`)
+ * is enforced by the skill-frontmatter detector (post-migration, issue
+ * #3216); `metadata:` values must use the block form — inline flow maps are
+ * non-canonical (issue #3217).
  */
 export function detectSkillFrontmatterSpecDrift(
 	root: string = REPO_ROOT,
@@ -816,128 +899,147 @@ export function detectSkillFrontmatterSpecDrift(
 	const findings: DriftFinding[] = [];
 	const category = 'skill-frontmatter';
 
+	const scanTargets: Array<[string, string]> = [];
 	for (const skillRoot of [
 		'.opencode/skills',
 		'.claude/skills',
 		'.agents/skills',
 	]) {
 		for (const slug of listDirNames(skillRoot)) {
-			// The generated tree stays exempt, matching detectSkillAudienceDrift
-			// (:743): generated SKILL.md files are machine-written by
-			// renderSkillMarkdown and their repository audience/provenance
-			// cannot be guessed safely (issue #2907 review — PRR-009).
-			if (skillRoot === '.opencode/skills' && slug === 'generated') {
-				continue;
-			}
-			const skillPath = `${skillRoot}/${slug}/SKILL.md`;
-			if (!fileExists(skillPath)) continue;
-			const content = readFile(skillPath).replace(/\r\n/g, '\n');
-			const lines = content.split('\n');
-			if (lines[0]?.trim() !== '---') continue;
-			const end = lines.findIndex(
-				(line, index) => index > 0 && line.trim() === '---',
-			);
-			if (end === -1) continue;
+			scanTargets.push([`${skillRoot}/${slug}/SKILL.md`, slug]);
+		}
+	}
+	// The generated tree is enforced (issue #3216) — the legacy-key
+	// migrations converged it onto the generator's spec emission; only the
+	// audience detector keeps its generated-tree skip (repository audience
+	// cannot be guessed safely, issue #2907 review — PRR-009).
+	const generatedRoot = '.opencode/skills/generated';
+	for (const child of listDirNames(generatedRoot)) {
+		scanTargets.push([`${generatedRoot}/${child}/SKILL.md`, child]);
+	}
+	for (const [skillPath, slug] of scanTargets) {
+		if (!fileExists(skillPath)) continue;
+		const content = readFile(skillPath).replace(/\r\n/g, '\n');
+		const lines = content.split('\n');
+		if (lines[0]?.trim() !== '---') continue;
+		const end = lines.findIndex(
+			(line, index) => index > 0 && line.trim() === '---',
+		);
+		if (end === -1) continue;
 
-			let inMetadata = false;
-			for (let i = 1; i < end; i++) {
-				const line = lines[i] ?? '';
-				if (!line.trim()) continue;
-				const indented = /^\s/.test(line);
-				if (inMetadata) {
-					if (!indented) {
-						inMetadata = false;
-					} else {
-						const child = line.match(
-							/^(\s+)([A-Za-z_][A-Za-z0-9_-]*)\s*:\s*(.*)$/,
-						);
-						if (child) {
-							// Strip a trailing YAML comment (unquoted scalars
-							// only — a quoted string may contain '#') so
-							// `key: true # note` is still judged as a bare
-							// scalar (PRR-011b).
-							let value = child[3].trim();
-							const startsQuoted =
-								value.startsWith('"') || value.startsWith("'");
-							if (!startsQuoted && value.includes(' #')) {
-								value = value.slice(0, value.indexOf(' #')).trim();
-							}
-							const quoted =
-								(value.startsWith('"') && value.endsWith('"') && value.length >= 2) ||
-								(value.startsWith("'") && value.endsWith("'") && value.length >= 2);
-							// A declared-but-empty child followed by `- item`
-							// lines is a YAML sequence — not a string (PRR-011c).
-							if (value === '') {
-								const childIndent = child[1].length;
-								for (let j = i + 1; j < end; j++) {
-									const next = lines[j] ?? '';
-									if (!next.trim()) continue;
-									if (!/^\s/.test(next)) break;
-									const nextIndent = next.length - next.trimStart().length;
-									if (nextIndent > childIndent && /^\s+-\s/.test(next)) {
-										findings.push({
-											category,
-											severity: 'error',
-											file: skillPath,
-											message: `metadata child "${child[2]}" is a YAML sequence — the spec metadata map is string-typed (serialize lists as JSON array strings)`,
-										});
-									}
-									break;
+		let inMetadata = false;
+		for (let i = 1; i < end; i++) {
+			const line = lines[i] ?? '';
+			if (!line.trim()) continue;
+			const indented = /^\s/.test(line);
+			if (inMetadata) {
+				if (!indented) {
+					inMetadata = false;
+				} else {
+					const child = line.match(
+						/^(\s+)([A-Za-z_][A-Za-z0-9_-]*)\s*:\s*(.*)$/,
+					);
+					if (child) {
+						// Strip a trailing YAML comment, quote-aware (PR #3387
+						// follow-up, FB-027): a `#` inside a BALANCED quoted
+						// scalar is content, so `[a, "b # c"] # note` strips to
+						// `[a, "b # c"]` and still triggers the flow-collection
+						// check — the previous first-char-only check escaped
+						// it. A `#` at value start is a comment-only value
+						// (strips to empty), and `key: true # note` is still
+						// judged a bare scalar (PRR-011b).
+						const value = stripFrontmatterValueComment(child[3].trim());
+						const quoted =
+							(value.startsWith('"') && value.endsWith('"') && value.length >= 2) ||
+							(value.startsWith("'") && value.endsWith("'") && value.length >= 2);
+						// A declared-but-empty child followed by `- item`
+						// lines is a YAML sequence — not a string (PRR-011c).
+						if (value === '') {
+							const childIndent = child[1].length;
+							for (let j = i + 1; j < end; j++) {
+								const next = lines[j] ?? '';
+								if (!next.trim()) continue;
+								if (!/^\s/.test(next)) break;
+								const nextIndent = next.length - next.trimStart().length;
+								if (nextIndent > childIndent && /^\s+-\s/.test(next)) {
+									findings.push({
+										category,
+										severity: 'error',
+										file: skillPath,
+										message: `metadata child "${child[2]}" is a YAML sequence — the spec metadata map is string-typed (serialize lists as JSON array strings)`,
+									});
 								}
-							} else if (
-								!quoted &&
-								(/^\[.*\]$/.test(value) || /^\{.*\}$/.test(value))
-							) {
-								findings.push({
-									category,
-									severity: 'error',
-									file: skillPath,
-									message: `metadata child "${child[2]}" is a flow collection — the spec metadata map is string-typed (serialize lists as JSON array strings)`,
-								});
-							} else if (
-								value !== '' &&
-								!quoted &&
-								SKILL_METADATA_NON_STRING_SCALAR.test(value)
-							) {
-								findings.push({
-									category,
-									severity: 'error',
-									file: skillPath,
-									message: `metadata child "${child[2]}" has a bare non-string scalar value "${value}" — the spec metadata map is string-typed (quote it)`,
-								});
+								break;
 							}
+						} else if (
+							!quoted &&
+							(/^\[.*\]$/.test(value) || /^\{.*\}$/.test(value))
+						) {
+							findings.push({
+								category,
+								severity: 'error',
+								file: skillPath,
+								message: `metadata child "${child[2]}" is a flow collection — the spec metadata map is string-typed (serialize lists as JSON array strings)`,
+							});
+						} else if (
+							value !== '' &&
+							!quoted &&
+							SKILL_METADATA_NON_STRING_SCALAR.test(value)
+						) {
+							findings.push({
+								category,
+								severity: 'error',
+								file: skillPath,
+								message: `metadata child "${child[2]}" has a bare non-string scalar value "${value}" — the spec metadata map is string-typed (quote it)`,
+							});
 						}
-						continue;
 					}
-				}
-				const match = line.match(/^([A-Za-z_][A-Za-z0-9_-]*)\s*:\s*(.*)$/);
-				if (!match) continue;
-				const key = match[1].toLowerCase();
-				if (key === 'metadata') {
-					inMetadata = true;
 					continue;
 				}
-				if (
-					!SKILL_SPEC_FRONTMATTER_KEYS.has(key) &&
-					!HOST_CONSUMED_TOP_LEVEL_KEYS.has(key)
-				) {
+			}
+			const match = line.match(/^([A-Za-z_][A-Za-z0-9_-]*)\s*:\s*(.*)$/);
+			if (!match) continue;
+			const key = match[1].toLowerCase();
+			if (key === 'metadata') {
+				// Strip a trailing comment (unquoted values only, PRR-011b
+				// pattern) so an empty-value `metadata: # note` is not
+				// treated as carrying an inline value — including the
+				// value-is-entirely-comment form (plan-critic Round 3).
+				// Quote-aware for the same reason as the child-value strip
+				// above (FB-027): a `#` inside a BALANCED quoted scalar is
+				// content.
+				const inline = stripFrontmatterValueComment(match[2].trim());
+				if (inline !== '') {
 					findings.push({
 						category,
 						severity: 'error',
 						file: skillPath,
-						message: `non-spec top-level frontmatter key "${match[1]}" — move it under the metadata: map (agentskills.io/specification)`,
+						message: `metadata key "${match[1]}" carries an inline value — use the block form (issue #3217; any non-empty inline value is non-canonical for this repo's writer)`,
 					});
 				}
-				if (key === 'name') {
-					const declared = match[2].trim().replace(/^["']|["']$/g, '');
-					if (declared && declared !== slug) {
-						findings.push({
-							category,
-							severity: 'error',
-							file: skillPath,
-							message: `frontmatter name "${declared}" does not match the parent directory "${slug}" (spec requirement)`,
-						});
-					}
+				inMetadata = true;
+				continue;
+			}
+			if (
+				!SKILL_SPEC_FRONTMATTER_KEYS.has(key) &&
+				!HOST_CONSUMED_TOP_LEVEL_KEYS.has(key)
+			) {
+				findings.push({
+					category,
+					severity: 'error',
+					file: skillPath,
+					message: `non-spec top-level frontmatter key "${match[1]}" — move it under the metadata: map (agentskills.io/specification)`,
+				});
+			}
+			if (key === 'name') {
+				const declared = match[2].trim().replace(/^["']|["']$/g, '');
+				if (declared && declared !== slug) {
+					findings.push({
+						category,
+						severity: 'error',
+						file: skillPath,
+						message: `frontmatter name "${declared}" does not match the parent directory "${slug}" (spec requirement)`,
+					});
 				}
 			}
 		}
@@ -1573,6 +1675,176 @@ export async function detectDependencyFreshnessDrift(
 }
 
 // ---------------------------------------------------------------------------
+// 7b) v2 vendored-pin freshness (issue #2910)
+// ---------------------------------------------------------------------------
+
+/**
+ * The v2 host surface is NOT installed — `src/host/v2/types.ts` vendors the
+ * `@opencode/plugin` types behind a provenance pin in its module header. A
+ * `DEP_FRESHNESS_PACKAGES` append would probe node_modules for a package that
+ * is deliberately absent, permanently resolve null, and silently skip
+ * forever. Instead this detector reads the PIN from the vendored corpus file
+ * and compares it against npm-latest with the same threshold + fail-open
+ * `notice` semantics as the v1 entries above (issue #1899 class).
+ */
+const V2_VENDORED_PIN_FILE = 'src/host/v2/types.ts';
+const V2_VENDORED_PIN_PACKAGE = '@opencode/plugin';
+/** Provenance-pinned version in the types.ts module header (first match). */
+const V2_VENDORED_PIN_VERSION_RE = /@opencode\/plugin@(\d+\.\d+\.\d+)/;
+
+export interface V2VendoredPinDeps {
+	/** Reads the vendored-pin corpus file (src/host/v2/types.ts); null on failure. */
+	readPinCorpus: (root: string) => string | null;
+	/** npm dist-tag latest for the v2 host package; null when unresolved. */
+	fetchLatestVersion: () => Promise<string | null>;
+}
+
+function defaultReadV2PinCorpus(root: string): string | null {
+	const { fileExists, readFile } = makeFs(root);
+	if (!fileExists(V2_VENDORED_PIN_FILE)) return null;
+	try {
+		return readFile(V2_VENDORED_PIN_FILE);
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Resolve npm `latest` for the v2 host package from its dist-tags endpoint
+ * (same bounded-read + AbortController idiom as `fetchNpmLatestVersion`; the
+ * URL is spelled out via `npmDistTagsUrl('@opencode/plugin')` because the
+ * package is deliberately not installed and no lockfile entry names it).
+ */
+export async function fetchV2PluginLatestVersion(
+	fetchImpl: typeof fetch = fetch,
+): Promise<string | null> {
+	const controller = new AbortController();
+	const timer = setTimeout(
+		() => controller.abort(),
+		DEP_FRESHNESS_FETCH_TIMEOUT_MS,
+	);
+	try {
+		const res = await fetchImpl(npmDistTagsUrl('@opencode/plugin'), {
+			signal: controller.signal,
+		});
+		if (!res.ok) return null;
+		const body = await readBounded(res, DEP_FRESHNESS_DIST_TAGS_MAX_BYTES);
+		if (body === null) return null;
+		const tags = JSON.parse(body) as { latest?: unknown };
+		return typeof tags.latest === 'string' ? tags.latest : null;
+	} catch {
+		return null;
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
+/**
+ * Detect the vendored `@opencode/plugin` pin in `src/host/v2/types.ts` aging
+ * past the threshold behind npm-latest (issue #2910 W1.2). Env-gated OFF by
+ * default like the v1 dep-freshness detector (SWARM_DEP_FRESHNESS_CHECK=1 in
+ * CI opts in); every finding is a non-blocking `notice` naming both versions
+ * and the vendored-pin corpus path, so a refresh PR can never be blocked by
+ * an external-world fact. Fail-open on any error.
+ */
+export async function detectV2VendoredPinFreshnessDrift(
+	root: string = REPO_ROOT,
+	deps: Partial<V2VendoredPinDeps> = {},
+): Promise<DriftFinding[]> {
+	if (!isDepFreshnessEnabled()) return [];
+	const category = 'dep-freshness';
+	const readPinCorpus = deps.readPinCorpus ?? defaultReadV2PinCorpus;
+	const fetchLatestVersion =
+		deps.fetchLatestVersion ?? (async () => fetchV2PluginLatestVersion());
+	const threshold = depFreshnessThreshold();
+
+	let corpusText: string | null = null;
+	try {
+		corpusText = readPinCorpus(root);
+	} catch (err) {
+		return [
+			{
+				category,
+				severity: 'notice',
+				file: V2_VENDORED_PIN_FILE,
+				message: `dependency-freshness check errored reading the v2 vendored pin: ${err instanceof Error ? err.message : String(err)} (skipped)`,
+			},
+		];
+	}
+	if (corpusText === null) {
+		return [
+			{
+				category,
+				severity: 'notice',
+				file: V2_VENDORED_PIN_FILE,
+				message: `could not read the v2 vendored-pin corpus ${V2_VENDORED_PIN_FILE} (skipped freshness check)`,
+			},
+		];
+	}
+	const pin = V2_VENDORED_PIN_VERSION_RE.exec(corpusText)?.[1];
+	if (!pin) {
+		return [
+			{
+				category,
+				severity: 'notice',
+				file: V2_VENDORED_PIN_FILE,
+				message: `could not find the ${V2_VENDORED_PIN_PACKAGE} provenance pin in ${V2_VENDORED_PIN_FILE} (skipped freshness check)`,
+			},
+		];
+	}
+
+	let latest: string | null = null;
+	try {
+		latest = await fetchLatestVersion();
+	} catch (err) {
+		return [
+			{
+				category,
+				severity: 'notice',
+				file: V2_VENDORED_PIN_FILE,
+				message: `dependency-freshness check errored for the v2 vendored pin "${V2_VENDORED_PIN_PACKAGE}": ${err instanceof Error ? err.message : String(err)} (skipped)`,
+			},
+		];
+	}
+	if (!latest) {
+		return [
+			{
+				category,
+				severity: 'notice',
+				file: V2_VENDORED_PIN_FILE,
+				message: `could not resolve npm-latest version for "${V2_VENDORED_PIN_PACKAGE}" (vendored pin in ${V2_VENDORED_PIN_FILE}; network/registry unavailable; skipped)`,
+			},
+		];
+	}
+	const behind = minorSeriesBehind(pin, latest);
+	if (behind === null) {
+		return [
+			{
+				category,
+				severity: 'notice',
+				file: V2_VENDORED_PIN_FILE,
+				message: `could not compare versions for the v2 vendored pin "${V2_VENDORED_PIN_PACKAGE}" (pin="${pin}", latest="${latest}")`,
+			},
+		];
+	}
+	if (behind > threshold) {
+		const gap =
+			behind === Number.POSITIVE_INFINITY
+				? 'a major version'
+				: `${behind} minor series`;
+		return [
+			{
+				category,
+				severity: 'notice',
+				file: V2_VENDORED_PIN_FILE,
+				message: `v2 vendored pin "${V2_VENDORED_PIN_PACKAGE}" at ${pin} (${V2_VENDORED_PIN_FILE}) is ${gap} behind npm latest ${latest} (threshold ${threshold}). Re-vendor the types and refresh the provenance header + tests/fixtures/host/expected-structure-v2.json (issue #2910).`,
+			},
+		];
+	}
+	return [];
+}
+
+// ---------------------------------------------------------------------------
 // Config schema / config docs drift (issue #1663)
 // ---------------------------------------------------------------------------
 
@@ -1949,7 +2221,11 @@ export function detectUserGlobalSkillStaleness(
 				file: relativePath,
 				message: `stale ${SKILL_CONTRACT_DIGEST_KEY} stamp for skill '${slug}': frontmatter says ${stampedDigest ?? '<none>'}, body content hashes to ${actualDigest}; run 'bun run scripts/stamp-skill-contracts.ts --write'`,
 			});
-			continue;
+			// NO continue here (PR #3387 follow-up, FB-029): the user-global
+			// shadowing comparison below must run regardless of the repo-side
+			// stamp state — a missing or stale stamp is exactly when the
+			// canonical body is least vouched for, and the old `continue`
+			// let a stale user-global copy escape detection in that case.
 		}
 		for (const userRelative of [
 			`.opencode/skills/${slug}/SKILL.md`,
@@ -2088,6 +2364,11 @@ export async function runAllDetectors(): Promise<DriftFinding[]> {
 	// `notice` only — never blocks a merge.
 	const depFindings = await detectDependencyFreshnessDrift();
 	findings.push(...depFindings);
+	// v2 vendored-pin freshness (issue #2910 W1.2): the same env gate, threshold,
+	// and fail-open notice semantics, over the @opencode/plugin pin in
+	// src/host/v2/types.ts (deliberately NOT installed — see the detector).
+	const v2PinFindings = await detectV2VendoredPinFreshnessDrift();
+	findings.push(...v2PinFindings);
 	return findings;
 }
 

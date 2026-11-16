@@ -228,6 +228,7 @@ describe('pr-workflow-gate item-keyed reviewer/critic coherence', () => {
 				[
 					{
 						laneId: 'critic-all',
+						agent: 'critic',
 						workflowLane: 'critic-all',
 						reviewItemIds: BASE_IDS,
 					},
@@ -243,6 +244,7 @@ describe('pr-workflow-gate item-keyed reviewer/critic coherence', () => {
 				[
 					{
 						laneId: 'critic-rest',
+						agent: 'critic',
 						workflowLane: 'critic-rest',
 						reviewItemIds: BASE_IDS.slice(1),
 					},
@@ -302,6 +304,7 @@ describe('pr-workflow-gate item-keyed reviewer/critic coherence', () => {
 			[
 				{
 					laneId: 'critic-three',
+					agent: 'critic',
 					workflowLane: 'critic-three',
 					reviewItemIds: challenged,
 				},

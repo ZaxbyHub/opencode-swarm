@@ -110,10 +110,10 @@ describe('generate-config-schema — JSON Schema artifact', () => {
 		) as {
 			dependencies?: Record<string, string>;
 		};
-		expect(packageJson.dependencies?.zod).toBe('4.3.6');
+		expect(packageJson.dependencies?.zod).toBe('4.6.7');
 		const lock = fs.readFileSync(BUN_LOCK_PATH, 'utf-8');
-		expect(lock).toContain('"zod": "4.3.6"');
-		expect(lock).toContain('"zod": ["zod@4.3.6"');
+		expect(lock).toContain('"zod": "4.6.7"');
+		expect(lock).toContain('"zod": ["zod@4.6.7"');
 	});
 
 	test('deterministic: two serializations are byte-identical', () => {

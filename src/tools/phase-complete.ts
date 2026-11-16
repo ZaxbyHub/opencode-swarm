@@ -31,6 +31,7 @@ import {
 	readPhaseParticipation,
 	rebindCursorTaggedReceipts,
 } from '../evidence/phase-participation.js';
+import { capturePhaseGateReport } from '../evidence/receipt-store.js';
 import { verifyFullAutoPhaseApproval } from '../full-auto/phase-approval';
 import { hasPassedAllGates } from '../gate-evidence';
 import {
@@ -542,7 +543,7 @@ export async function executePhaseComplete(
 	const warnings: string[] = [];
 	if (hasActiveTurboMode(sessionID)) {
 		warnings.push(
-			`Turbo mode active — skipped completion-verify, drift-verifier, hallucination-guard, mutation-gate, and phase-council gates for phase ${phase}.`,
+			`Turbo mode active — skipped Gates 1–5 (completion-verify, drift-verifier, hallucination-guard, mutation-gate, phase-council) and the todo gate for phase ${phase}.`,
 		);
 	}
 
@@ -1465,6 +1466,22 @@ export async function executePhaseComplete(
 				throw error;
 			}
 			await takeSnapshotEvent(dir, plan).catch(() => undefined);
+			// #2968: durably capture the commit-boundary gate report
+			// (commitPreflight — the authoritative collection whose
+			// snapshot_identity refs preCommitCheck just enforced).
+			// Fail-open by contract: a receipt-substrate failure must never
+			// fail a phase whose gates already passed; the capture is not
+			// a gate.
+			try {
+				await capturePhaseGateReport(dir, commitPreflight);
+			} catch (captureError) {
+				logger.log(
+					'[phase_complete] Receipt capture failed (fail-open):',
+					captureError instanceof Error
+						? captureError.message
+						: String(captureError),
+				);
+			}
 		}
 	} finally {
 		if (phasePlanLock.lock._release) {

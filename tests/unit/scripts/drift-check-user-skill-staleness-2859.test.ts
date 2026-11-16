@@ -161,12 +161,22 @@ describe('skillContractDigest helpers (issue #2859 F6)', () => {
 	test('digest excludes frontmatter and normalizes line endings', () => {
 		const body = '# title\r\n\r\ncontent\r\n';
 		const a = splitSkillFrontmatter(`---\nname: x\n---\n${body}`);
+		// PR #3387 follow-up (FB-028): splitSkillFrontmatter is now
+		// CRLF-tolerant and returns LF-normalized slices — a CRLF file gets
+		// real frontmatter instead of an empty split, and every digest
+		// consumer normalizes the body anyway, so hashes are unchanged.
 		expect(a.frontmatter).toBe('---\nname: x\n---\n');
-		expect(a.body).toBe(body);
+		expect(a.body).toBe(body.replace(/\r\n/g, '\n'));
 		const b = splitSkillFrontmatter(
 			`---\nname: x\n---\n${body.replace(/\r\n/g, '\n')}`,
 		);
 		expect(skillContractDigest(a.body)).toBe(skillContractDigest(b.body));
+	});
+
+	test('a CRLF file yields real frontmatter slices (FB-028)', () => {
+		const split = splitSkillFrontmatter('---\r\nname: x\r\n---\r\nbody\r\n');
+		expect(split.frontmatter).toBe('---\nname: x\n---\n');
+		expect(split.body).toBe('body\n');
 	});
 
 	test('a file without frontmatter is all body', () => {

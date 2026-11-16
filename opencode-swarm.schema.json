@@ -95,13 +95,9 @@
     },
     "auto_select_architect": {
       "description": "Auto-select the swarm architect for new sessions instead of OpenCode built-ins. Omitted or false: manual selection (omitted behaves as false). true: enable auto-select and disable built-in build/plan agents. \"<architect_name>\" (e.g. \"mega_architect\"): enable targeting one architect in multi-swarm setups.",
-      "anyOf": [
-        {
-          "type": "boolean"
-        },
-        {
-          "type": "string"
-        }
+      "type": [
+        "boolean",
+        "string"
       ]
     },
     "swarms": {
@@ -315,6 +311,10 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 1440
+        },
+        "auto_inject_acceptance": {
+          "default": false,
+          "type": "boolean"
         }
       }
     },
@@ -371,11 +371,12 @@
       "additionalProperties": false
     },
     "lane_liveness_watchdog": {
-      "description": "Lane liveness watchdog: execution deadline and stall escalation for PR workflow lanes.",
+      "description": "Lane liveness watchdog (default on; set enabled=false to opt out): execution deadline and stall escalation for PR workflow lanes.",
+      "default": {},
       "type": "object",
       "properties": {
         "enabled": {
-          "default": false,
+          "default": true,
           "type": "boolean"
         },
         "timeout_ms": {
@@ -3643,13 +3644,9 @@
         },
         "model": {
           "default": null,
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
+          "type": [
+            "string",
+            "null"
           ]
         },
         "fallback_models": {
@@ -3862,13 +3859,9 @@
         },
         "model": {
           "default": null,
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
+          "type": [
+            "string",
+            "null"
           ]
         },
         "fallback_models": {
@@ -5099,7 +5092,7 @@
       "additionalProperties": false
     },
     "turbo_mode": {
-      "description": "Turbo mode for rapid iteration (v6.40): skips phase_complete Gates 1–5 and lets a non-Tier-3 task be re-dispatched to the coder before Stage A passes; per-task Stage A and Stage B (reviewer + test_engineer) are still required. When true, new sessions start with turbo mode on (session default); /swarm turbo still toggles per session. Directory-less constructions default off.",
+      "description": "Turbo mode for rapid iteration (v6.40): skips phase_complete Gates 1–5 and the todo gate, and lets a non-Tier-3 task whose planned files_touched are known and non-empty be re-dispatched to the coder before Stage A passes; per-task Stage A still runs, and Stage B (reviewer + test_engineer) is required exactly as without Turbo. When true, new sessions start with turbo mode on (session default); /swarm turbo still toggles per session. Directory-less constructions default off.",
       "default": false,
       "type": "boolean"
     },
@@ -5306,6 +5299,9 @@
             "allow_defaults": {
               "default": true,
               "type": "boolean"
+            },
+            "trust_code_mode_wrapper": {
+              "type": "boolean"
             }
           }
         },
@@ -5417,6 +5413,11 @@
               "type": "integer",
               "minimum": 100,
               "maximum": 10000
+            },
+            "hook_timeout_ms": {
+              "type": "integer",
+              "minimum": 1000,
+              "maximum": 900000
             }
           }
         }

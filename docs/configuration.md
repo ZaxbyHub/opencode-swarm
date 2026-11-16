@@ -44,6 +44,7 @@ Most behavior is controlled by `opencode-swarm.json`. Environment variables are 
 | `TAVILY_API_KEY` | General Council web search | Tavily credential used when `council.general.searchApiKey` is unset and `searchProvider` is `tavily`. |
 | `BRAVE_SEARCH_API_KEY` | General Council web search | Brave Search credential used when `council.general.searchApiKey` is unset and `searchProvider` is `brave`. |
 | `OPENCODE_SWARM_DEBUG=1` | Debug logger | Enables debug-gated log output. Keep disabled for normal use. |
+| `OPENCODE_SWARM_VERSION_BANNER=1` | Startup version banner | Restores the raw stderr `[opencode-swarm] running vX.Y.Z` startup line (default off; the banner otherwise appears only under `OPENCODE_SWARM_DEBUG=1`, in the debug logger's stdout output). Use for headless/CLI stale-cache diagnosis — identifying which cached plugin version actually loaded (issue #2236). The raw stderr leg is off by default because the TUI renders plugin stderr as an overlay (issue #3405). |
 | `DEBUG_SWARM=1` | Startup and hook diagnostics | Enables additional startup, hook, and plan-manager diagnostics. Keep disabled unless debugging plugin behavior. |
 | `OPENCODE_SWARM_ID` | Diagnose service | Identifies the active swarm in diagnostic checks; `/swarm diagnose` reports mismatches between this value and local plan state. |
 | `SWARM_LANG_BACKEND=legacy` | `test_runner` | Opts out of the dispatch language backend. Dispatch is the default. |
@@ -91,7 +92,7 @@ Generated from `PluginConfigSchema` (`src/config/schema.ts`) - do not edit insid
 | `hooks` | object | — | Hook subsystem toggles and settings. | src/commands/registry.ts:handlePrFeedbackCommandWithTransition (+3) |
 | `pr_review_resilience` | object (strict) | — | PR review base-wave staged canary/fanout resilience settings. | src/tools/dispatch-lanes.ts:executeDispatchLanesAsync (+1) |
 | `review_routing` | object (strict) | — | Semantic review routing receipt enforcement for Stage B (default on; set enforce_receipts=false only as a one-release rollback). | src/background/stage-b-gates.ts:ingestBackgroundStageBCompletion (+3) |
-| `lane_liveness_watchdog` | object (strict) | — | Lane liveness watchdog: execution deadline and stall escalation for PR workflow lanes. | src/commands/registry.ts:handlePrFeedbackCommandWithTransition (+3) |
+| `lane_liveness_watchdog` | object (strict) | {} | Lane liveness watchdog (default on; set enabled=false to opt out): execution deadline and stall escalation for PR workflow lanes. | src/commands/registry.ts:handlePrFeedbackCommandWithTransition (+3) |
 | `dispatch_protection` | object (strict) | — | Dispatch protection: action-local spawn-failure circuit breaker and token-bucket rate limiting for native task delegations. | src/index.ts:initializeOpenCodeSwarm (+1) |
 | `pr_review_legacy_transcript_compatibility` | boolean | — | Deprecated migration-only opt-in for transcript-row PR-review base and micro discovery lanes. | src/tools/dispatch-lanes.ts:launchAsyncLane (+1) |
 | `gates` | object | — | Quality gate configuration (v6.9 anti-slop features). | src/config/loader.ts:sanitizeGatesConfig (+2) |
@@ -126,7 +127,7 @@ Generated from `PluginConfigSchema` (`src/config/schema.ts`) - do not edit insid
 | `apply_patch` | object (strict) | — | Apply-patch opt-in fuzzy matching fallback (issue #1718). | src/tools/apply-patch.ts:isUnsupportedPatchFormat (+1) |
 | `automation` | object | — | Background automation mode and per-feature toggles (v6.7 background-first rollout). | src/hooks/system-enhancer.ts:createSystemEnhancerHook (+3) |
 | `knowledge` | object | — | Two-tier cross-project knowledge base (v6.17). | src/commands/close/orchestrator.ts:handleCloseCommand (+3) |
-| `memory` | object | — | Swarm memory substrate — disabled by default so existing flows are unchanged. | src/agents/index.ts:createSwarmAgents (+3) |
+| `memory` | object | — | Swarm memory substrate — disabled by default so existing flows are unchanged. | src/agents/index.ts:createSwarmAgents (+4) |
 | `forge` | object | — | Forge provider (GitHub/GitLab) selection for PR/issue workflows (issue #2733). Ambiguous git remotes (mixed providers, unrecognized self-hosted hosts, or no remote) fail closed and require an explicit selection; forge.base_url passes through the same HTTPS-only / non-private / ASCII-host guards as every forge URL and is never a trust whitelist; combining base_url with provider "github" is rejected as a configuration conflict. | src/providers/forge-provider.ts:resolveForgeContextFromPluginConfig |
 | `observability` | object | — | Observability options — remote OTLP/OpenInference export is opt-in and disabled by default (issue #2485). | src/index.ts:initializeOpenCodeSwarm (+1) |
 | `learning` | object | — | Learning subsystem: real-time admission, PRM persistence, dedup sweep (issue #1821). | src/hooks/knowledge-dedup-sweep.ts:sweepActiveNearDuplicates (+3) |
@@ -150,7 +151,7 @@ Generated from `PluginConfigSchema` (`src/config/schema.ts`) - do not edit insid
 | `worktree` | object | — | Worktree isolation policy for parallel coder dispatch lanes (general surface; Lean Turbo keeps its legacy per-mode fields). | src/background/completion-observer.ts:createBackgroundCompletionObserver (+3) |
 | `turbo` | object | — | Turbo execution strategy block (Phase 1). Absent means current behavior unchanged. | src/agents/index.ts:createSwarmAgents (+4) |
 | `epic` | object (strict) | — | Epic Mode block: one plan = one epic delivered in conflict-free parallel waves. Opt in with `mode.enabled: true`, then `/swarm epic start`. Needs no `turbo` block (legacy `turbo.epic` is still accepted and migrated here). | src/epic/config.ts:resolveEpicConfig (+1) |
-| `turbo_mode` | boolean | false | Turbo mode for rapid iteration (v6.40): skips phase_complete Gates 1–5 and lets a non-Tier-3 task be re-dispatched to the coder before Stage A passes; per-task Stage A and Stage B (reviewer + test_engineer) are still required. When true, new sessions start with turbo mode on (session default); /swarm turbo still toggles per session. Directory-less constructions default off. | src/state.ts:resolveInitialTurboMode (+1) |
+| `turbo_mode` | boolean | false | Turbo mode for rapid iteration (v6.40): skips phase_complete Gates 1–5 and the todo gate, and lets a non-Tier-3 task whose planned files_touched are known and non-empty be re-dispatched to the coder before Stage A passes; per-task Stage A still runs, and Stage B (reviewer + test_engineer) is required exactly as without Turbo. When true, new sessions start with turbo mode on (session default); /swarm turbo still toggles per session. Directory-less constructions default off. | src/state.ts:resolveInitialTurboMode (+1) |
 | `quiet` | boolean | true | Suppress non-critical startup warnings (default true keeps the TUI clean). Set false to restore verbose warnings for debugging. | src/agents/index.ts:createSwarmAgents (+3) |
 | `version_check` | boolean | true | Background staleness check against npm, throttled to once per 24h (issue #675). Set false to fully disable the network call. | src/index.ts:initializeOpenCodeSwarm (+1) |
 | `full_auto` | object | { … } | Full-auto autonomous orchestration with critic oversight: permission policy, denial accounting, oversight cadence triggers (v2 preserves v1 fields so existing configs load unchanged). | src/commands/full-auto.ts:handleFullAutoCommand (+3) |
@@ -172,7 +173,7 @@ Sections marked `(strict)` reject unknown nested keys at config load time - a ty
 ## Architect prompt budget (characters and model tokens)
 
 The architect's built-in prompt composition is bounded by a published
-character ceiling, `ARCHITECT_PROMPT_BUDGET_CHARS` (161,500 chars in
+character ceiling, `ARCHITECT_PROMPT_BUDGET_CHARS` (165,000 chars in
 `src/agents/architect.ts`). Every supported feature combination — the default
 render, the work-complete council on or off, the advisory General Council
 (`council.general.enabled`) composed together with every documented opt-in
@@ -192,7 +193,7 @@ Two separate quantities are measured and recorded for every composition:
 - **Model tokens** — an estimate only (`estimateModelTokens`, roughly 4
   characters per token, rounded up). Real token usage varies by model and
   content; the estimate is reported next to the character count, never instead
-  of it, so a ~40K-token estimate at the 161K-char ceiling is understood as an
+  of it, so a ~41K-token estimate at the 165K-char ceiling is understood as an
   approximation of the system prompt's share of a 128K-token context window.
 
 Overflow policy (deterministic, guidance-preserving):
@@ -522,6 +523,8 @@ Runs a type-checking or linting command after the coder agent completes.
 | `timeoutMs` | number | `30000` | Timeout in milliseconds (1000–300000) |
 | `triggerAgents` | string[] | `["coder"]` | Which agent names trigger the hook |
 
+`triggerAgents` entries match the dispatched subagent name exactly (after trimming surrounding whitespace from the dispatch; configured entries are not trimmed), its canonical role (suffix derivation), or its pre-derivation prefix-stripped form — the text after the first underscore, e.g. `custom` for `acme_custom` (compatibility leg).
+
 **Auto-detection order**: TypeScript → Go → Rust → Python → C#. Python emits a `SKIPPED` advisory if no command is set.
 
 **Example** — Python mypy configuration:
@@ -530,6 +533,24 @@ Runs a type-checking or linting command after the coder agent completes.
 {
   "incremental_verify": {
     "command": ["python", "-m", "mypy", "--config-file", "mypy.ini"]
+  }
+}
+```
+
+### hooks.auto_inject_acceptance
+
+Opt-in relaxation of the coder/reviewer `ACCEPTANCE:` delegation gate.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `auto_inject_acceptance` | boolean | `false` | When `true`, a `coder` or `reviewer` Task dispatch whose prompt has no `ACCEPTANCE:` line (or only an empty one) is not rejected with `ACCEPTANCE_FIELD_REQUIRED`. The gate instead writes a generic default requirement, marked `(auto-injected default: ...)`, into the dispatch and queues an `ACCEPTANCE AUTO-INJECTED` advisory for the dispatching session when that session is registered. |
+
+**Trade-off**: the default requirement is generic, not task-derived, so a dispatch that would have been rejected now reaches the coder/reviewer with a weak criterion. For a single task that maps to spec requirements, the verbatim `FR-###`/`SC-###` text is still appended and coverage-checked as usual. An explicit non-empty `ACCEPTANCE:` block is never modified, and the strict rejection stands, with the dispatch left exactly as sent, whenever the injection cannot be applied to the field the validator inspected (for example the dispatch has no text field, or an empty header is only visible after the fields are joined), or whenever an injected default still fails re-validation and the gate rolls the injection back. Because project config can set this key, treat a repository that enables it like any other repository-committed gate relaxation (compare `hooks.delegation_gate`).
+
+```json
+{
+  "hooks": {
+    "auto_inject_acceptance": true
   }
 }
 ```
@@ -550,10 +571,12 @@ Full-Auto v2 — opencode-swarm's autonomy control plane. Reduces approval frict
 | `denials.max_consecutive` | number | `3` | Pause after N consecutive denials. |
 | `denials.max_total` | number | `20` | Pause after N total denials in the session. |
 | `protected_paths` | string[] | `['.git', '.github/workflows', '.opencode', '.swarm', 'package.json', 'package-lock.json']` | Paths the Full-Auto agent is forbidden from writing. `.opencode` is in the default list to prevent the agent from editing the plugin config that governs it. |
+| `permission_policy.trust_code_mode_wrapper` | boolean | `false` | **OpenCode 2 only.** Let Full-Auto pass the host's Code Mode `execute` wrapper without a critic round trip, but only for a call the v2 adapter marked as that wrapper whose program is exactly one `tools.<path>(<plain data>)` or `search(<plain data>)` call (the sandbox also exposes `fetch` and `Function`, which no hook sees). Off by default: v2 tool events carry no field proving a tool is host-owned, so a third-party tool that merely shares the name `execute` cannot be told apart. Enable only when you control the plugin and MCP set. Nested `tools.<name>()` calls are classified individually either way. |
 | `oversight.max_dispatch_retries` | number | `2` | Same-operation retry cap for transient critic infrastructure failures. |
 | `oversight.max_consecutive_dispatch_failures` | number | `3` | Consecutive infrastructure failures before Full-Auto terminates to manual control. |
 | `oversight.total_timeout_ms` | number | `120000` | Total wall-clock budget (1,000–300,000 ms) shared by critic session creation, prompt, retry/fallback, backoff, parse, and cleanup. |
 | `oversight.cleanup_timeout_ms` | number | `2000` | Short cleanup bound (100–10,000 ms) that cannot extend the total oversight deadline. |
+| `oversight.hook_timeout_ms` | number | _(unset)_ | **OpenCode 2 only.** Budget (1,000–900,000 ms) for the whole `tool.execute.before` guard chain, which contains the oversight dispatch while Full-Auto runs. Unset: while a Full-Auto run is active it follows `oversight.total_timeout_ms` + 30 s (never below 60 s); otherwise 60 s. Before this key the chain was cut off at a fixed 60 s, shorter than the 120 s default oversight deadline, so the host reported `tool.execute.before exceeded budget` while the critic was still working. |
 
 **Fail-closed semantics:**
 - Activation refuses if a config file exists but cannot be loaded (corrupt JSON, oversized, permission error) — `locked` is treated as "unknown", not "false".
@@ -623,13 +646,14 @@ When `auto_review.enabled` is `true`, every returning reviewer Task delegation h
 
 #### Reviewer-scope evidence contract (v2 manifest)
 
-Reviewer evidence is bound to an exact, versioned manifest — `reviewer-task-files-v2` — built from the coder generation's guardrail-observed writes:
+Reviewer evidence is bound to an exact, versioned manifest — `reviewer-task-files-v2` — built from the coder generation's attributed writes: guardrail-observed writes plus declared-scope changes reconciled at completion from the committed diff since dispatch and the declared-scope working tree (PR #3668):
 
 - **Exact manifest identity.** Every file contributes its complete byte count and SHA-256, computed by a bounded-memory streaming capture (fixed 256 KiB chunks, `fstat` identity checks before and after, descriptor-first open with no-follow on POSIX). There are no per-file or aggregate byte caps on file identity: a file of any size is either fingerprinted exactly or the capture fails typed. A partial, sampled, or capped digest can never compare equal.
 - **Automatic vs manual delivery.** `max_diff_kb` is a *delivery* budget only. Files whose bytes fit the budget are marked `inline` in the reviewer prompt manifest block; the rest are marked `manual` and the reviewer is instructed to inspect them through read-only tools against the recorded SHA-256. The budget never changes which files enter the manifest and never changes the manifest digest. The reviewer Task prompt receives a bounded `<reviewer_scope_manifest>` block carrying the manifest hash, HEAD, workspace identity, and per-file state; receipts persist that exact hash.
 - **Root correctness.** The coder generation persists the canonical workspace identity (lane root for worktree-isolated coders, primary root otherwise) at dispatch time, and every capture/equality site reads from that root. Lane generations become reviewable from the primary checkout only after merge-back verification confirms the primary bytes match the lane manifest (`REVIEWER_SCOPE_MERGEBACK_VERIFIED` advisory). A merge conflict or deferred merge retains the generation in a typed `mergeback_pending` state — it is never relabeled as a generic reviewer-stale error.
-- **Retry behavior.** Transient capture classes — HEAD timeout, HEAD movement during capture, file mutation during streaming, capture deadline — get a bounded inline retry (3 attempts / 10 s). Exhausted retries throw a typed `REVIEWER_CAPTURE_RETRY_EXHAUSTED` and RETAIN the generation for an architect retry or explicit manual review; infrastructure failure never discards evidence. A genuine byte change after the coder's post-write capture is `REVIEWER_SCOPE_STALE` and discards the generation — retry can never turn a real change into equality. Permanent classes (symlink/reparse, non-regular, unreadable, outside-workspace, workspace mismatch) are typed `REVIEWER_CAPTURE_FAILED:<code>` with an `ACTION[architect]` recovery step.
-- **No-change semantics.** A successful coder with zero guardrail-observed writes AND a verified clean `git status` completes the generation as `no_change` (`coder_no_change` transition): no reviewer pass is owed, no review debt is created, and reviewer/test/task gates do not advance from it. The architect may re-dispatch the coder if changes were intended. Zero observed writes with a dirty tree stays `collecting` with an actionable `REVIEWER_SCOPE_UNATTRIBUTED_CHANGE` advisory (changes escaped guardrail observation).
+- **Retry behavior.** Transient capture classes — HEAD timeout, HEAD movement during capture, file mutation during streaming, capture deadline — get a bounded inline retry (3 attempts / 10 s). Exhausted retries throw a typed `REVIEWER_CAPTURE_RETRY_EXHAUSTED` and RETAIN the generation for an architect retry or explicit manual review; infrastructure failure never discards evidence. A genuine byte change after the coder's post-write capture is `REVIEWER_SCOPE_STALE` and discards the generation — retry can never turn a real change into equality. Permanent classes (symlink/reparse, non-regular, unreadable, outside-workspace, workspace mismatch) are typed `REVIEWER_CAPTURE_FAILED:<code>` with an `ACTION[architect]` recovery step. Permanent git-environment causes are typed `no_git_workspace` (the workspace has no git repository anywhere up the tree), `git_unavailable` (git executable missing), `git_dubious_ownership` (fix with `git config --global --add safe.directory <path>`), or `git_unhealthy` (corrupt ref/object) — all `retryable=false` with an actionable architect step, on both the capture and the zero-routed attribution paths, so re-dispatching can no longer loop forever; transient causes (unborn HEAD until the first commit, genuine HEAD timeout, oversized output, and a malformed HEAD SHA shape — `rev-parse --verify HEAD^{commit}` exiting 0 with output that is not a 40-64 hex SHA, which is retried on the same arm) keep the retryable `head_timeout` behavior. #3680.
+- **No-change semantics.** A successful coder whose declared scope is proven empty — zero guardrail-observed writes, no committed declared change since the dispatch-time HEAD, and no declared-scope working-tree change — completes the generation as `no_change` (`coder_no_change` transition): no reviewer pass is owed, no review debt is created, and reviewer/test/task gates do not advance from it. The architect may re-dispatch the coder if changes were intended. When reconciliation cannot be proven at all (no dispatch git head, unresolvable current head, or a failed committed diff) the generation stays `collecting` with a `REVIEWER_ATTRIBUTION_DEGRADED` advisory (permanent git-environment causes name the condition: initialize a repository, repair the ref, or exclude the workspace — re-dispatching cannot resolve them) and reviewer dispatch is denied with a typed `REVIEWER_ATTRIBUTION_EMPTY`: retryable for transient HEAD causes (unborn HEAD until the first commit, genuine HEAD timeout, oversized output, and a malformed HEAD SHA shape), `retryable=false` with a named permanent cause (`no_git_workspace`, `git_unavailable`, `git_dubious_ownership`, `git_unhealthy`) otherwise (#3680); declared-scope dirt with zero routed writes stays `collecting` with an actionable `REVIEWER_SCOPE_UNATTRIBUTED_CHANGE` advisory (changes escaped guardrail observation).
+- **Attribution denials.** A collecting generation at reviewer dispatch denies with a typed code instead of generic drift: `REVIEWER_ATTRIBUTION_EMPTY` (retryable for transient HEAD causes; `retryable=false` with a named permanent git-environment cause — nothing routed and nothing provable), `REVIEWER_CAPTURE_INCOMPLETE` (retryable — routed files missing fingerprints; re-dispatch the coder), and `REVIEWER_CAPTURE_FAILED:<code>` (retryable=false — a permanent capture failure; resolve the condition, then re-dispatch the coder so completion recaptures). Declared-scope change sets exceeding the 256-file generation cap are refused up front with a `REVIEWER_SCOPE_GENERATION_OVERFLOW` advisory instead of destroying the generation; genuine post-capture drift remains terminal `REVIEWER_SCOPE_STALE`.
 - **Legacy v1 receipts.** Receipts recorded before the v2 manifest (description `reviewer-task-files-v1`) can never satisfy a v2 rebuild: every scope this build constructs carries the v2 description, and the receipt's content-hash comparison fails closed on any v1-shaped scope. No v1 evidence is reinterpreted or backfilled and no v1 scope object is ever constructed.
 - **Retention bounds.** Unclaimed reviewer-scope generations sweep at the 2-hour idle TTL, EXCEPT the actionable merge-back states (`mergeback_pending` / `mergeback_mismatch`), which are retained until merge-back settles, same-task supersession replaces them, or the 256-generation capacity evicts them.
 - **Capture latency bound.** Capture is synchronous on the tool-after hook: worst-case stall is the 10 s batch deadline plus one 256 KiB chunk read per attempt (self-terminating via the typed `capture_deadline`); a 100 MiB file hashes in ~0.1 s on a warm cache. A lane left with stale untracked files from a prior run can surface `REVIEWER_SCOPE_UNATTRIBUTED_CHANGE` for a coder that wrote nothing — inspect the lane before re-dispatching.
@@ -816,7 +840,7 @@ Optional scoped memory substrate for recall and proposal-only memory writes.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `enabled` | boolean | `false` | Enable agent access to `swarm_memory_recall`, `swarm_memory_propose`, and `swarm_memory_outcome` |
+| `enabled` | boolean | `false` | Enable agent access to `swarm_memory_recall`, `swarm_memory_propose`, and `swarm_memory_outcome`. When false (the default), the three tools are not registered in the main session either; execute-time disabled results remain only on surfaces that still reach the handlers (e.g. the MCP adapter). |
 | `provider` | string | `"sqlite"` | Memory provider. Supports default `"sqlite"` and legacy/debug `"local-jsonl"` |
 | `storageDir` | string | `".swarm/memory"` | Local storage directory under the project root |
 | `sqlite.path` | string | `".swarm/memory/memory.db"` | SQLite database path. Must remain inside `.swarm/` |
@@ -1074,24 +1098,28 @@ Behavior notes:
 ### lane_liveness_watchdog
 
 Controls the lane-liveness watchdog for PR workflow lanes (issue #2506): a
-typed execution deadline and an advisory stall escalation. **Disabled by
-default.** An omitted section, or `enabled: false`, is a full no-op — PR-lane
-settlement stays byte-identical to the pre-#2506 substrate (age-only
-settlement, the fail-open liveness probe, probe retention, and the
-human-only force abort). Each numeric field disables its own feature at `0`
-while leaving the others armed.
+typed execution deadline and an advisory stall escalation. **Enabled by
+default** (flipped from the original #2506 default-off contract by the
+#3312/#3313 settlement-honesty work): an omitted section and an empty
+section `{}` both resolve the enabled watchdog with the frozen defaults
+below, so every PR-lane settlement observes one coherent policy without any
+configuration. `enabled: false` is the full opt-out — with it (and only with
+it, short of a `0` knob) PR-lane settlement is byte-identical to the
+pre-#2506 substrate (age-only settlement, the fail-open liveness probe,
+probe retention, and the human-only force abort). Each numeric field still
+disables its own feature at `0` while leaving the others armed.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `enabled` | boolean | `false` | Arm the watchdog. `false` (or omitted) runs no probes, writes no watchdog events, and never changes the settlement horizon. |
-| `timeout_ms` | number | `1800000` | When enabled and non-zero, the single effective PR-lane settlement horizon in milliseconds (0–86400000). `0` disables the execution deadline and restores the reachability-floor fallback. |
+| `enabled` | boolean | `true` | Arm the watchdog (default). `false` runs no probes, writes no watchdog events, and forces the 30-minute reachability floor as the settlement horizon, overriding any `timeout_ms`. |
+| `timeout_ms` | number | `1800000` | When enabled and non-zero, the single effective PR-lane settlement horizon in milliseconds (0–86400000); the default equals the 30-minute reachability floor. `0` disables the execution deadline and restores the reachability-floor fallback. |
 | `stall_threshold_ms` | number | `300000` | Activity window for stall detection in milliseconds (0–86400000). Stall escalation is active only when this and both thresholds below are non-zero. |
 | `stall_min_steps` | number | `5` | Observable transcript steps within the window that count as progress (0–10000). |
 | `stall_token_threshold` | number | `200` | Estimated tokens within the window that count as progress (0–1000000). |
 
 **The single effective horizon.** An enabled watchdog with `timeout_ms > 0`
-owns the PR-lane settlement horizon. Everything else — no config,
-`enabled: false`, or `timeout_ms: 0` — falls back to the 30-minute
+owns the PR-lane settlement horizon. Everything else — `enabled: false` (the
+opt-out) or `timeout_ms: 0` — falls back to the 30-minute
 reachability floor (`DEFAULT_STALE_DELEGATION_TIMEOUT_MS`), which must never
 disappear: it is the guarantee that abort and completion cannot be
 permanently blocked by a lane whose backing process died. A disagreement
@@ -1147,7 +1175,9 @@ conservative direction for stall escalation (escalate, then let the
 operator inspect). A structured `stall` block on each escalation event
 carries the first escalated lane's observed values beside those thresholds.
 
-**Example** — opt in with the frozen defaults (30-minute horizon, 5-minute stall window, 5 steps / ~200 estimated tokens):
+**Example** — the default: watchdog on with the frozen defaults (30-minute
+horizon, 5-minute stall window, 5 steps / ~200 estimated tokens). An omitted
+or empty section resolves exactly this policy:
 
 ```json
 {
@@ -1157,7 +1187,8 @@ carries the first escalated lane's observed values beside those thresholds.
 }
 ```
 
-**Example** — the default: watchdog off, settlement unchanged:
+**Example** — opt out entirely (settlement falls back to the age-only
+substrate described above):
 
 ```json
 {
@@ -1330,6 +1361,22 @@ lifecycle bookkeeping stays active in BOTH modes (AGENTS.md invariant 9):
 - One structural bound stays fail-closed in both modes: patch payloads over
   1 MB (1,000,000 bytes) are rejected (`WRITE BLOCKED: Patch payload exceeds
   1 MB`) because authority cannot be verified for an unbounded write set.
+- Verifier-config protection is ALSO unconditional (#3120): writes to the
+  built-in verifier-config globs (`**/oxlintrc*`, `**/.oxlintrc*`,
+  `**/.eslintrc*`, `**/eslint.config.*`, `**/.prettierrc*`,
+  `**/prettier.config.*`, `**/biome.json`, `**/biome.jsonc`,
+  `**/tsconfig*.json`, `**/.secretscanignore`, `**/.golangci*` — the exact
+  `BUILT_IN_VERIFIER_CONFIG_GLOBS` set, plus configured
+  `authority.verifier_config_paths`) are denied for EVERY agent role,
+  including the OpenCode-native roles otherwise exempt from swarm write
+  restrictions, and the denial fires even with `guardrails.enabled: false`.
+  These files are owner policy for the verification system itself (the
+  secretscan Stage-A gate trusts `.secretscanignore`), so their integrity is
+  not switchable by the general enforcement knob. Boundary note: script
+  runners (`npm run <script>`, `bun run <script>`, `node <file>`) are not
+  treated as shell write vectors — their targets are not statically
+  knowable and blocking them would break every legitimate build; see the
+  `shell-write-detect` module documentation.
 
 Every completed `pre_check_batch` call also records exactly ONE bounded
 route event (`type: "stage_a_gate_route"`) in `.swarm/events.jsonl`, with
@@ -1509,7 +1556,10 @@ reports the same "executor not available, running unsandboxed" state as
 before. Set it to `true` only after verifying the production SBPL profile on
 a real macOS host — for example, confirming that a command targeting an
 in-scope path succeeds and a command targeting an out-of-scope path is denied
-under a real `sandbox-exec -f <profile>` invocation.
+under a real `sandbox-exec -p <profile>` invocation (the executor passes the
+profile inline, as the probe does). The profile also grants write access to the
+temp directory (`os.tmpdir()`, the per-user `$TMPDIR` on macOS), so that whole
+tree is writable by wrapped commands.
 
 When enabled on macOS, `applySandboxExecution` also applies the DYLD
 injection-variable hardening declared by

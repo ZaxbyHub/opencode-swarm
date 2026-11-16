@@ -24,6 +24,7 @@
 
 import type { Database } from 'bun:sqlite';
 import { warn } from '../utils/logger.js';
+import { isBlankDirectory } from '../utils/path-security.js';
 import { canonicalProjectKey } from './canonical-project.js';
 import {
 	classifyDbWriteError,
@@ -34,7 +35,7 @@ import {
 	applySynchronousForClass,
 	batchDurabilityClass,
 } from './durability.js';
-import { getProjectDb } from './project-db.js';
+import { assertProjectDbRoot, getProjectDb } from './project-db.js';
 
 /** A single durable write, applied inside a flush transaction. */
 export interface GroupCommitOp {
@@ -268,8 +269,13 @@ export class GroupCommitWriter {
 /**
  * Return the group-commit writer for a project root, creating it (and the DB
  * handle) lazily on first use. Never runs at plugin init.
+ *
+ * A blank root throws `ProjectDbError` (`invalid_root`) before the lookup:
+ * `canonicalProjectKey('')` is the cwd, so it would otherwise return (and
+ * write through) the cwd project's cached writer (#3165 B).
  */
 export function getGroupCommitWriter(directory: string): GroupCommitWriter {
+	assertProjectDbRoot(directory);
 	const key = canonicalProjectKey(directory);
 	let writer = _writers.get(key);
 	if (!writer) {
@@ -280,8 +286,12 @@ export function getGroupCommitWriter(directory: string): GroupCommitWriter {
 	return writer;
 }
 
-/** Flush + close the writer for a root (dispose/exit/close paths). */
+/**
+ * Flush + close the writer for a root (dispose/exit/close paths). A blank root
+ * is a no-op: it names no writer, and its canonical key is the cwd project's.
+ */
 export function closeGroupCommitWriter(directory: string): void {
+	if (isBlankDirectory(directory)) return;
 	const key = canonicalProjectKey(directory);
 	const writer = _writers.get(key);
 	if (writer) {

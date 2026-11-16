@@ -143,7 +143,7 @@ function; the group-commit writer consults the same map per batch.
   transactions; pinned by `tests/unit/db/project-db-concurrency.test.ts`).
 - **disk-full / read-only / corrupt**: open-path failures throw typed
   `ProjectDbError`s (`mkdir_failed | driver_unavailable | open_failed |
-  migration_failed`); write failures classify into `DbWriteError` categories
+  migration_failed`, plus `invalid_root` for a blank project root); write failures classify into `DbWriteError` categories
   (`disk_full | read_only | corrupt | busy | unknown`). The group-commit
   writer RETAINS its queue on busy/disk-full/read-only with a cooldown-bounded
   advisory and retries on the next flush; migrated stores keep their

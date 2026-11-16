@@ -101,7 +101,7 @@ describe('wrapCommand() env overrides — command-level application (issue #2590
 		const env = executor.getEnvOverrides();
 		const result = executor.wrapCommand('echo hello', [], undefined, env);
 		expect(result).toContain('sandbox-exec');
-		expect(result).toContain('-f');
+		expect(result).toContain('-p');
 	});
 
 	test('the DYLD_* unsets and the PATH pin are applied by the inner shell BEFORE the user command', () => {

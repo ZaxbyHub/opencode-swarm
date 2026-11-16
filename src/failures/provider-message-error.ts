@@ -12,10 +12,18 @@
  * runner) read `info.error` through it and turn it into an error on their
  * existing error path. Not every `session.prompt` consumer does: the PR
  * wake-prompt senders (`pr-workflow-response-gate.ts`, `pr-event-delivery.ts`)
- * do not read the reply, and `dispatch-lanes.ts` reads `info.error` with its
- * own lane-error mapping.
+ * do not read the reply, and `dispatch-lanes.ts` reads `info.error` (with its
+ * own lane-error mapping) and treats the early `finish` values as
+ * terminal/incomplete only on its asynchronous collect path
+ * (`extractAssistantTranscript`); its blocking `runLane` path checks only
+ * `result.error` and the reply text and never reads `info`.
  */
-import { classifyProviderFailure } from './invocation-failure';
+import {
+	classifyProviderFailure,
+	type InvocationFailureRetryClass,
+	type InvocationFailureRisk,
+	sanitizeFailureEvidenceDisplay,
+} from './invocation-failure';
 
 export type ProviderMessageError = {
 	name: string;
@@ -24,6 +32,21 @@ export type ProviderMessageError = {
 	message: string;
 	/** Provider failure category, e.g. `provider.rate_limit`. */
 	category: string;
+	/**
+	 * #3177: the retry class the canonical classifier derived at READ time
+	 * (over the unbounded raw provider message). The display text above is
+	 * bounded to 512 bytes and can lose the very keyword a later text-based
+	 * reclassification would match, so consumers that need the retry verdict
+	 * must prefer this snapshot (see the snapshot arm in
+	 * `classifyProviderFailure`).
+	 */
+	retryClass: InvocationFailureRetryClass;
+	/**
+	 * #3177: the risk band the canonical classifier derived at read time,
+	 * carried with `retryClass` so the snapshot round-trips the full retry
+	 * semantics without a second mapping.
+	 */
+	risk: InvocationFailureRisk;
 };
 
 /**
@@ -31,7 +54,7 @@ export type ProviderMessageError = {
  * `finish: 'content-filter'` on the assistant message, with the partial text
  * and no `info.error`. A truncated `VERDICT: APPROVED` is still a cut-off
  * reply, so report it as a provider error too. `dispatch-lanes.ts` already
- * treats these two finish values as terminal.
+ * treats these two finish values as terminal on its asynchronous collect path.
  */
 function readEarlyFinish(info: object): ProviderMessageError | null {
 	const finish = (info as { finish?: unknown }).finish;
@@ -41,12 +64,20 @@ function readEarlyFinish(info: object): ProviderMessageError | null {
 			name: 'MessageOutputLengthError',
 			message: 'reply cut off by the output limit (finish=length)',
 			category: 'provider.output_length',
+			// Early-finish shapes are terminal in the shipped consumers
+			// (dispatch-lanes treats both finishes as terminal; the lean runner
+			// nulls them out of the refusal path entirely), so their snapshot
+			// carries the do-not-retry reading.
+			retryClass: 'do_not_retry',
+			risk: 'low',
 		};
 	if (reason === 'content-filter')
 		return {
 			name: 'MessageContentFilterError',
 			message: 'reply withheld by the content filter (finish=content-filter)',
 			category: 'provider.content_filter',
+			retryClass: 'do_not_retry',
+			risk: 'low',
 		};
 	return null;
 }
@@ -86,14 +117,22 @@ export function readProviderMessageError(
 	);
 	return {
 		name:
+			// `name` is provider-chosen: sanitize it like the message (control and
+			// ANSI sequences reach lane evidence and reviewer summaries). A name that
+			// sanitizes to nothing falls back to the constant.
 			typeof name === 'string' && name.length > 0
-				? name.slice(0, 64)
+				? sanitizeFailureEvidenceDisplay(name.slice(0, 64)).trim() ||
+					'UnknownError'
 				: 'UnknownError',
 		...(statusCode === undefined ? {} : { statusCode }),
 		// The sanitized display can be empty (e.g. a message of only control
 		// characters); fall back to a constant, never to the raw text.
 		message: classified.evidence.display || 'no message',
 		category: classified.category,
+		// #3177: round-trip the canonical retry semantics so downstream
+		// reclassification over the bounded display cannot lose the verdict.
+		retryClass: classified.retryClass,
+		risk: classified.risk,
 	};
 }
 

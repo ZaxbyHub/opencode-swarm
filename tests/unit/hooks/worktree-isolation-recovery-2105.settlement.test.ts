@@ -354,9 +354,16 @@ describe('issue #2105 worktree isolation recovery settlement', () => {
 
 		expect(result.outcome).toBe('merged');
 		expect(dirtyMerge).not.toHaveBeenCalled();
+		// #3494: the claim path now threads landing options — no commitLanding
+		// (this settlement is empty) maps to { landUnstaged: true }, the same
+		// mapping as the reconciliation path in merge.ts. (The fixture's
+		// recovery COORDINATES are strategy 'merge'; only the mocked result
+		// says 'cherry-pick' — the option is what the claim path passes, not
+		// evidence about cherry-pick recovery behavior.)
 		expect(exactRecovery).toHaveBeenCalledWith(
 			harness.directory,
 			dispatch.recoveryClaim?.coordinates,
+			{ landUnstaged: true },
 		);
 		expect(renew).toHaveBeenCalledTimes(2);
 		expect(finalize).toHaveBeenCalledTimes(1);

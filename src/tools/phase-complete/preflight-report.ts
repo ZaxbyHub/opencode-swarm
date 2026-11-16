@@ -219,7 +219,15 @@ function retrospectiveGateFrom(result: GateResult):
 	};
 }
 
-function stableReportHash(
+/**
+ * Content digest of a phase gate report. Exported for the receipt substrate
+ * (#2968 FB-004): receipts RE-DERIVE this over the stored report bytes at
+ * build time and over the bundled copy at verify time, instead of trusting
+ * the self-declared `reportHash` field — an unanchored, model-writable
+ * persisted report was otherwise launderable by editing gate entries while
+ * leaving the recorded digest (and the filename stem) untouched.
+ */
+export function stableReportHash(
 	phase: number,
 	entries: readonly PhaseGateEntry[],
 ): string {

@@ -130,6 +130,7 @@ export async function handleLinkCommand(
 
 	const linkDir = resolveLinkDir(linkId);
 	let totalMerged = 0;
+	let totalSuperseded = 0;
 	let totalSkipped = 0;
 	let familySummary = '';
 	try {
@@ -140,10 +141,26 @@ export async function handleLinkCommand(
 		for (const m of result.perMember) {
 			totalMerged += m.merged;
 			totalSkipped += m.skipped;
+			totalSuperseded += m.superseded ?? 0;
 		}
 		familySummary = result.perMember
-			.filter((m) => m.merged > 0 || m.skipped > 0)
-			.map((m) => `    ${m.filename}: ${m.merged} merged, ${m.skipped} kept`)
+			.filter(
+				(m) =>
+					m.merged > 0 ||
+					m.skipped > 0 ||
+					(m.superseded ?? 0) > 0 ||
+					(m.noSignal ?? 0) > 0 ||
+					(m.deduped ?? 0) > 0,
+			)
+			.map((m) => {
+				const recency =
+					(m.superseded ?? 0) > 0 ? `, ${m.superseded} recency-resolved` : '';
+				const noSig =
+					(m.noSignal ?? 0) > 0 ? `, ${m.noSignal} no-recency-signal kept` : '';
+				const dedup =
+					(m.deduped ?? 0) > 0 ? `, ${m.deduped} duplicates collapsed` : '';
+				return `    ${m.filename}: ${m.merged} merged, ${m.skipped} kept${recency}${noSig}${dedup}`;
+			})
 			.join('\n');
 	} catch (error) {
 		return `❌ Failed to migrate the knowledge family into the link store: ${
@@ -215,7 +232,7 @@ export async function handleLinkCommand(
 	const familyNote = familySummary ? `\n${familySummary}` : '';
 	return [
 		`🔗 Linked this worktree to shared knowledge store "${linkId}".`,
-		`  migrated the complete knowledge family (${totalMerged} new, ${totalSkipped} already present).`,
+		`  migrated the complete knowledge family (${totalMerged} new, ${totalSkipped} already present${totalSuperseded > 0 ? `, ${totalSuperseded} resolved by recency` : ''}).`,
 		`  shared at: ${linkDir}`,
 		'All swarms linked to this id now read and write the same knowledge.' +
 			relinkNote +

@@ -15,6 +15,11 @@ const mockProcessExit = spyOn(process, 'exit').mockImplementation(
 
 // Now import after mocks are set up - this will execute main() once
 import { run } from '../../../src/cli/index.js';
+import { useSuiteCwdSandbox } from '../../helpers/suite-cwd-sandbox';
+
+// `run(['status'])` resolves the project from process.cwd() and persists
+// .swarm/learning-health.json there; keep it out of the checkout (#3165 A).
+useSuiteCwdSandbox('main-wiring-cwd-');
 
 describe('Task 1.2: CLI Main Wiring - run command', () => {
 	beforeEach(() => {

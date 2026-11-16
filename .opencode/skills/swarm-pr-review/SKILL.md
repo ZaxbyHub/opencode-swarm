@@ -4,7 +4,7 @@ description: Run a graph-guided, tool-augmented PR review using context packing,
 disable-model-invocation: true
 metadata:
   audience: swarm-plugin
-  swarm-contract-digest: "de6a12ef31aa"
+  swarm-contract-digest: "ddc0e5d29f4e"
 ---
 
 # /swarm-pr-review
@@ -807,15 +807,15 @@ Host transport metadata is not stronger than the durable artifact. A truncated i
 
 Before Phase 4 or synthesis, all base lanes must be settled. `dispatch_lanes_async` accepts a maximum of 8 lanes per call; base lanes (6) and micro-lanes (Phase 4) are dispatched in separate calls by design. Do not let one lane's conclusions bias another lane.
 
-**COVERAGE GATE — zero tolerance for unclosed gaps.** After `collect_lane_results`, verify every lane produced validated output. Two failure modes exist:
+**COVERAGE GATE — zero tolerance for unclosed gaps.** After `collect_lane_results`, verify every lane produced validated output. For each `unsettled_coverage` entry, keep `owned_workflow_lanes` (or its single `dimension`) unresolved and use any `output_ref` only as context for a fresh, exact-head attempt under the existing retry policy below. A missing reference means no partial text was preserved. Require the new attempt’s normal settlement evidence before crediting coverage, and disclose any remaining obligations if admission refuses another attempt. Two failure modes exist:
 - **Mode A (empty output):** Lane returns 0 chars, `status: cancelled`, `output_digest` matches SHA-256 of empty string (`e3b0c442...b855`).
 - **Mode B (invalid structured output):** Under Profile A, collection reports `status: failed` with a named contract predicate while retaining the non-empty preview, digest, and `output_ref`; the artifact has zero valid `[CANDIDATE]` rows and no parseable `[CLEAN] | lane | coverage_scope | evidence` attestation. Under Profiles B/C, treat the equivalent non-empty report as failed when parsing yields zero candidates and no valid clean attestation. The non-empty transcript is diagnostic evidence, never coverage proof.
 
 For ANY lane that failed (either mode):
 1. **Retry** (initial dispatch plus 2 retries — PR_REVIEW_MICRO_FAMILY_RETRY_BUDGET; each micro-family dispatch acknowledgment records one counted attempt in gate state) with materially different parameters — different session or prompt decomposition, while preserving the required structured async mode and exact head provenance.
 2. If a base lane fails under Profile A, retry only the unresolved `workflow_lane` identifiers with `dispatch_lanes_async`, `mode: "swarm-pr-review:base"`, the same exact `pr_head_sha`, explorer agents, and the staged-resilience fields when that policy is enabled: a singleton `pr_review_wave_stage: "canary"` first, then a matching `"fanout"` batch only for the remaining unresolved obligations. The durable gate joins successful provenance across the initial wave and retry batches, carries unresolved obligations forward attempt by attempt, and rejects typed `retry_exhausted` or `circuit_open` outcomes before any new lane is launched. While that controller is active, blocking `dispatch_lanes` and direct Task dispatch are not equivalent because they cannot satisfy the structured provenance gate. Under Profiles B/C, retry only the failed `workflow_lane` identifiers with a fresh subagent or pass, the same exact `pr_head_sha`, and a materially different prompt decomposition.
-3. If no equivalent alternative can be verified AND every launched lane is terminal or explicitly cancelled, **settle N-of-6 truthfully (issue #2383)** instead of discarding validated work: admit the terminal settlement with `write_pr_review_artifact` (`kind: "findings"`, `boundary: "post_explorer"`, the sentinel `CLEAN-REVIEW` record when no candidates exist, and `partial_base_coverage: { unresolved_dimensions: [<exactly the dimensions that are not covered>] }`), run the remaining phases over the covered dimensions' findings, and complete with `complete_pr_workflow` carrying the verdict the settlement allows. NEVER fabricate coverage, NEVER present an unresolved dimension as reviewed, and NEVER let a partial report approve.
-4. **Terminal report kinds (issue #2383):** all six dimensions covered → `COMPLETE` (verdict may be APPROVE, REQUEST_CHANGES, or INCOMPLETE); at least one covered → `PARTIAL` (verdict must be REQUEST_CHANGES or INCOMPLETE; validated findings from covered dimensions remain publishable); zero covered → `NO_COVERAGE` (skip the findings ladder entirely, call `complete_pr_workflow` with `report_verdict: "INCOMPLETE"` directly — the completion returns a truthful operational report with per-dimension reasons and never claims a code-quality review). A still-live lane blocks settlement: poll again, authorize an explicit `cancel_lane_batch` (`confirm: true` + reason; busy/retry lanes are refused), or let the presumed-stale sweep settle it first.
+3. If no equivalent alternative can be verified AND every launched lane is terminal or explicitly cancelled, **settle N-of-6 truthfully (issue #2383)** instead of discarding validated work: admit the terminal settlement with `write_pr_review_artifact` (`kind: "findings"`, `boundary: "post_explorer"`, the sentinel `CLEAN-REVIEW` record when no candidates exist, and `partial_base_coverage: { unresolved_dimensions: [<exactly the dimensions that are not covered>] }`), run the remaining phases over the covered dimensions' findings, and complete with `complete_pr_workflow` carrying the verdict the settlement allows. NEVER fabricate coverage, NEVER present an unresolved dimension as reviewed, and NEVER let a partial report approve. A disclosure refusal naming remaining contract retry budget means exactly that (issue #3312): spend the retry first — legacy policy spends the one singleton `pr_review_contract_retry: true` marker per contract-class failure, while staged resilience spends wave attempts (`pr_review_wave_stage`/`pr_review_wave_attempt`) until that budget exhausts — because admission is retry-first and only discloses once the budget is exhausted.
+4. **Terminal report kinds (issue #2383):** all six dimensions covered → `COMPLETE` (verdict may be APPROVE, REQUEST_CHANGES, or INCOMPLETE); at least one covered → `PARTIAL` (verdict must be REQUEST_CHANGES or INCOMPLETE; validated findings from covered dimensions remain publishable); zero covered → `NO_COVERAGE` (skip the findings ladder entirely, call `complete_pr_workflow` with `report_verdict: "INCOMPLETE"` directly — the completion returns a truthful operational report with per-dimension reasons and never claims a code-quality review). The honest-INCOMPLETE exit (issues #3312/#3313) completes a COMPLETE/PARTIAL run whose reviewer/critic/council validation phases cannot settle — preconditions: every lane settled and the workflow still bound to the head, with the durable validation-skip disclosure (`.swarm/pr-review/<runId>/validation-skip-disclosure.json`) persisted before the terminal clear — skipping the unsettled validation phases and their boundary checkpoints while NEVER admitting APPROVE or REQUEST_CHANGES that way; a NO_COVERAGE completion retry reuses the already-admitted run id, the disclosure replaying idempotently under it. A still-live lane blocks settlement: poll again, authorize an explicit `cancel_lane_batch` (`confirm: true` + reason; busy/retry lanes are refused), or let the presumed-stale sweep settle it first.
 5. Under Profile A, when the bind/checkout path itself is genuinely unreachable or the workflow is publication-armed and exact publication cannot proceed, use the bounded recovery exits: `abort_pr_workflow` with `mode: "PR_REVIEW"`, `kind: "recovery"`, and a non-empty one-line `reason` for an unrecoverable unbound/bound gate, or `kind: "armed_recovery"` (issue #2383) for a publication-armed wedge — then `prepare_pr_workflow_checkout` with `operation: "restore"`. Abort remains a recovery tool for the genuinely unrecoverable, never a shortcut past a settleable coverage obligation.
 
 ### PARTIAL-settlement recovery (all lanes terminal)
@@ -1262,7 +1262,7 @@ binding, and diagnostic contract in
 Under Profile A, dispatch critic chunks with `dispatch_lanes_async`,
 `mode: "swarm-pr-review:critic"`, a unique non-empty `workflow_lane` per
 chunk, `review_item_ids` containing the exact finding IDs assigned to that
-chunk, the `critic` agent (its prompt carries the PR-contract override suspending its default structure under the controller block), and the same exact `pr_head_sha`. The runtime
+chunk, the `critic` agent (the controller block's PROTOCOL SELECTION clause suspends its default PLAN REVIEW structure for the lane; the agent's own prompt is mode-less), and the same exact `pr_head_sha`. The runtime
 requires one parseable `[CRITIC]` row for every structurally assigned ID and
 requires the reviewer phase to have settled — every item in the current
 inventory holding a successful reviewer verdict, composed across batches —
@@ -1274,6 +1274,29 @@ Under Profile B, dispatch each critic chunk to a fresh subagent that was
 neither the explorer nor the reviewer for those findings; under Profile C, run
 a separate critic pass. The one-parseable-`[CRITIC]`-row-per-assigned-ID
 contract and the reviewer-before-critic ordering are universal.
+
+**Critic role binding (all profiles).** The critic dispatch MUST resolve to
+the harness's pinned critic agent type when one exists on the active roster,
+choosing an ELIGIBLE type: one that is not the reviewer's model family where
+the harness exposes model identity. When no eligible pinned critic exists —
+including the default configuration where every pinned critic shares the
+reviewer's family — the dispatch still uses the pinned critic (never a
+generic swap for it), and the synthesis MUST carry the degraded-independence
+disclosure. Under Profiles B/C a generic agent type is additionally a
+FALLBACK only when no pinned critic type exists on the roster at all, or the
+pinned dispatch failed (that failure means the Hard Rule 14 initial attempt
+plus its two retries on the same pinned type); a fallback that also fails
+surfaces BLOCKED per Hard Rule 14 — this fallback is the critic-role
+exception to that rule's BLOCKED-on-retry-exhaustion. Any same-family
+critic — pinned or generic — is disclosed as a degraded independence gate,
+never presented as equivalent. Where the harness does not expose model
+identity, nothing is eligible and no fallback is independent — the pinned
+critic serves with the disclosure (this applies to a generic fallback too). Under Profile A the controller's `critic` role is the pinned
+type and the generic fallback does not apply. This policy binds
+the harness adapters: a condensed/installed skill copy whose routing note
+names a generic agent for this role without this pinned-first rule is
+defective — correct it, do not follow it. The binding is to the role and its
+eligibility requirement, not to any copied literal.
 
 The critic must challenge:
 
@@ -1348,7 +1371,8 @@ Before final output:
 - distinguish PR-introduced from pre-existing,
 - distinguish confirmed from plausible-but-unverified,
 - include disproved agent/tool claims,
-- keep final comments actionable.
+- keep final comments actionable,
+- persist the per-lane cost/yield ledger (`scripts/cost-yield-ledger.sh` over the harness-recovered lane rows; see `references/lane-cost-recovery.md`) to the run artifacts and state the paired per-finding cost aggregate in the synthesis (#3605 AC4).
 
 ### Finding ID format
 
@@ -1389,8 +1413,8 @@ Detailed reference material moved to `.opencode/skills/swarm-pr-review/reference
 
 | Verdict | Condition | `report_verdict` |
 |---|---|---|
-| `APPROVE` | zero unresolved CRITICAL findings, zero unresolved HIGH findings, all blocking obligations MET, no required validation phase failed | `APPROVE` -> APPROVE |
-| `APPROVE_WITH_NOTES` | zero unresolved CRITICAL findings, HIGH findings are downgraded/advisory only, obligations MET or explicitly non-blocking | `APPROVE_WITH_NOTES` -> APPROVE |
+| `APPROVE` | zero unresolved CRITICAL findings, zero unresolved HIGH findings, all blocking obligations MET, no required validation phase failed, and the Pre-Synthesis critic-independence gate is not DEGRADED | `APPROVE` -> APPROVE |
+| `APPROVE_WITH_NOTES` | zero unresolved CRITICAL findings, HIGH findings are downgraded/advisory only, obligations MET or explicitly non-blocking, and the Pre-Synthesis critic-independence gate is not DEGRADED | `APPROVE_WITH_NOTES` -> APPROVE |
 | `REQUEST_CHANGES` | any unresolved HIGH finding, any NOT_MET blocking obligation, multiple MEDIUM findings with the same root cause, or validation/probe evidence indicates user-impacting risk | `REQUEST_CHANGES` -> REQUEST_CHANGES |
 | `BLOCK` | any unresolved CRITICAL finding, unsafe write/git/security issue, evidence integrity break, role/tool permission bypass, or config ratchet violation that can disable required protections | `BLOCK` -> REQUEST_CHANGES |
 | `INCOMPLETE` | machine-only terminal - forced under NO_COVERAGE, permitted under PARTIAL or COMPLETE (issue #2383) | `INCOMPLETE` -> INCOMPLETE |
@@ -1447,6 +1471,7 @@ Before writing the final output, print this checklist with filled values. Every 
 [VALIDATION] findings escalated to critic: ___
 [VALIDATION] critic dispatched: ___ OR "SKIPPED — no typed critic-routed finding (CRITICAL/HIGH, MEDIUM+HIGH_IMPACT, MEDIUM+risk_tags, or UNKNOWN)"
 [VALIDATION] critic returned: ___ OR "N/A"
+[VALIDATION] critic agent type / independence: eligible pinned cross-model | independent generic fallback (Profiles B/C: no pinned critic on the roster, or pinned dispatch failed after Hard Rule 14) | N/A — no critic dispatch | DEGRADED — <reason> (only DEGRADED restricts the verdict, to REQUEST_CHANGES or INCOMPLETE, mirroring the Profile A DEGRADED_DISCLOSED rule)
 [VALIDATION] findings upheld by critic: ___
 [VALIDATION] findings downgraded by critic: ___
 [VALIDATION] findings disproved by critic: ___
@@ -1494,6 +1519,7 @@ Include:
 - micro-lanes triggered,
 - deterministic signals ingested,
 - reviewer identity / role for each finding,
+- critic agent type / model independence for the critic gate,
 - critic result for each escalated finding,
 - findings DISPROVED by reviewer with reason,
 - findings DOWNGRADED by critic with reason,

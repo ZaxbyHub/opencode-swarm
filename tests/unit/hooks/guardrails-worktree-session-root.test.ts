@@ -177,7 +177,7 @@ describe('guardrails toolBefore resolves the executing session workspace root (#
 				{ tool: 'bash', sessionID: 'child-shell-oos', callID: 'sh2' },
 				{ args: { command: 'echo hi > src/forbidden.ts' } },
 			),
-		).rejects.toThrow(/WRITE BLOCKED: SCOPE_VIOLATION:/);
+		).rejects.toThrow(/WRITE BLOCKED \[shell-write-scope\]: SCOPE_VIOLATION:/);
 	});
 
 	test('3. lane coder direct write with an absolute lane path is allowed when in scope', async () => {
@@ -292,7 +292,7 @@ describe('guardrails toolBefore resolves the executing session workspace root (#
 				{ tool: 'bash', sessionID: id, callID: 'sh3' },
 				{ args: { command: 'echo hi > src/forbidden.ts' } },
 			),
-		).rejects.toThrow(/WRITE BLOCKED: SCOPE_VIOLATION:/);
+		).rejects.toThrow(/WRITE BLOCKED \[shell-write-scope\]: SCOPE_VIOLATION:/);
 	});
 
 	test('7a. BASELINE: direct write with no active agent registered fails closed', async () => {

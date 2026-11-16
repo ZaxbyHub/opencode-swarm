@@ -2,12 +2,14 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { captureWorkspaceSnapshot } from '../../../src/background/workspace-snapshot';
 import {
 	beginCoderSettlement,
 	releaseCoderDispatchOwnership,
 	transferCoderSettlementToBackground,
 } from '../../../src/workflow/coder-settlement';
 import { createSafeTestDir } from '../../helpers/safe-test-dir';
+import { git } from '../../helpers/stale-worktree-2236';
 
 describe('coder settlement background ownership transfer', () => {
 	let directory = '';
@@ -36,14 +38,16 @@ describe('coder settlement background ownership transfer', () => {
 			context: {
 				declaredFiles: ['src/feature.ts'],
 				workflowGeneration: 0,
-				baseline: {
-					directory,
-					gitHead: 'a'.repeat(40),
-					dirtyHash: null,
-					prHeadSha: null,
-					scope: null,
-					changedFiles: [],
-				},
+				baseline: worktreePath
+					? captureWorkspaceSnapshot(worktreePath)
+					: {
+							directory,
+							gitHead: 'a'.repeat(40),
+							dirtyHash: null,
+							prHeadSha: null,
+							scope: null,
+							changedFiles: [],
+						},
 			},
 			...(worktreePath
 				? {
@@ -102,8 +106,16 @@ describe('coder settlement background ownership transfer', () => {
 	});
 
 	test('does not physically clean a background-owned worktree', async () => {
+		git(directory, ['init', '--initial-branch=main']);
+		git(directory, ['config', 'user.email', 'tests@example.invalid']);
+		git(directory, ['config', 'user.name', 'Tests']);
+		git(directory, ['config', 'core.autocrlf', 'false']);
+		git(directory, ['config', 'commit.gpgsign', 'false']);
+		fs.writeFileSync(path.join(directory, 'baseline.txt'), 'base\n');
+		git(directory, ['add', 'baseline.txt']);
+		git(directory, ['commit', '-m', 'background worktree baseline']);
 		const worktreePath = path.join(directory, 'background-worktree');
-		fs.mkdirSync(worktreePath, { recursive: true });
+		git(directory, ['worktree', 'add', '-b', 'swarm/lane/1.1', worktreePath]);
 		fs.writeFileSync(path.join(worktreePath, 'preserved.txt'), 'owned\n');
 		await begin(worktreePath);
 

@@ -156,6 +156,10 @@ describe('/swarm recover --coordination (#2481)', () => {
 
 		expect(output).toContain('Recovery refused or failed');
 		expect(output).toContain('import corrupt');
+		// #2963: the settle-wait advice is reserved for the still-settling /
+		// still-unsettled class; an ordinary initialization failure must not
+		// tell the operator to wait for an attempt that already failed.
+		expect(output).not.toContain('wait for that underlying attempt to settle');
 		expect(output).not.toContain('Coder Settlement Recovery');
 	});
 });

@@ -18,7 +18,10 @@ import {
 	handleMemoryUnlinkCommand,
 } from '../../../src/commands/memory-link';
 import { DEFAULT_MEMORY_CONFIG } from '../../../src/memory/config';
-import { readMemoryLinkPointer } from '../../../src/memory/memory-link';
+import {
+	readMemoryLinkPointer,
+	resolveLinkDir,
+} from '../../../src/memory/memory-link';
 import { clearPool } from '../../../src/memory/provider-pool';
 import {
 	computeMemoryContentHash,
@@ -168,5 +171,176 @@ describe('#1850 /swarm memory link + unlink commands', () => {
 		const result = await handleMemoryUnlinkCommand(dir, ['--no-copy']);
 		expect(result).toContain('Unlinked');
 		expect(result).toContain('No local copy was made');
+	});
+
+	// #2958: divergence audit lines in BOTH command outputs (previously the
+	// unlink result was discarded and no audit surface existed anywhere).
+	test('#2958: link reports a destination tombstone resurrected by a newer local row', async () => {
+		const fs = await import('node:fs/promises');
+		await fs.mkdir(path.join(dir, '.opencode'), { recursive: true });
+		await fs.writeFile(
+			path.join(dir, '.opencode', 'opencode-swarm.json'),
+			JSON.stringify({ memory: { enabled: true, link: { enabled: true } } }),
+			'utf-8',
+		);
+		const T1 = '2026-09-20T00:00:00.000Z';
+		const T2 = '2026-09-22T00:00:00.000Z';
+		// Local (source for link) holds a NEWER live row; the cohort store
+		// (destination) is pre-seeded with an OLDER tombstone for the same id.
+		const localMem = path.join(dir, '.swarm', 'memory');
+		await fs.mkdir(localMem, { recursive: true });
+		await fs.writeFile(
+			path.join(localMem, 'memories.jsonl'),
+			`${JSON.stringify({ id: 'M', text: 'back', updatedAt: T2 })}\n`,
+			'utf-8',
+		);
+		const cohortMem = path.join(resolveLinkDir('audit-cohort'), 'memory');
+		await fs.mkdir(cohortMem, { recursive: true });
+		await fs.writeFile(
+			path.join(cohortMem, 'memories.jsonl'),
+			`${JSON.stringify({ id: 'M', text: 'gone', updatedAt: T1, metadata: { deleted: true } })}\n`,
+			'utf-8',
+		);
+		const result = await handleMemoryLinkCommand(dir, ['audit-cohort']);
+		expect(result).toContain('Linked');
+		expect(result).toContain(
+			'deleted in one store were re-added from the other',
+		);
+		expect(result).toContain('M');
+	});
+
+	test('#2958: unlink reports the audit line (result no longer discarded), 5-id cap enforced', async () => {
+		const fs = await import('node:fs/promises');
+		await fs.mkdir(path.join(dir, '.opencode'), { recursive: true });
+		await fs.writeFile(
+			path.join(dir, '.opencode', 'opencode-swarm.json'),
+			JSON.stringify({ memory: { enabled: true, link: { enabled: true } } }),
+			'utf-8',
+		);
+		// Link with a local live rows set, then flip the LOCAL store (the
+		// unlink destination) to older tombstones so the copy-back resurrects.
+		const localMem = path.join(dir, '.swarm', 'memory');
+		await fs.mkdir(localMem, { recursive: true });
+		const ids = ['r1', 'r2', 'r3', 'r4', 'r5', 'r6', 'r7'];
+		const T2 = '2026-09-22T00:00:00.000Z';
+		await fs.writeFile(
+			path.join(localMem, 'memories.jsonl'),
+			ids
+				.map((id) => JSON.stringify({ id, text: `live-${id}`, updatedAt: T2 }))
+				.join('\n') + '\n',
+			'utf-8',
+		);
+		await handleMemoryLinkCommand(dir, ['audit-unlink']);
+		clearPool();
+		// Cohort now holds the live rows. Replace the LOCAL store with OLDER
+		// tombstones: unlink migrates cohort→local, resurrecting all 7.
+		const T1 = '2026-09-20T00:00:00.000Z';
+		await fs.writeFile(
+			path.join(localMem, 'memories.jsonl'),
+			ids
+				.map((id) =>
+					JSON.stringify({
+						id,
+						text: `gone-${id}`,
+						updatedAt: T1,
+						metadata: { deleted: true },
+					}),
+				)
+				.join('\n') + '\n',
+			'utf-8',
+		);
+		const result = await handleMemoryUnlinkCommand(dir, []);
+		expect(result).toContain('Unlinked');
+		expect(result).toContain(
+			'deleted in one store were re-added from the other',
+		);
+		// Bounded: at most 5 ids shown, the rest summarized.
+		expect(result).toContain('+2 more');
+		for (const shown of ids.slice(0, 5)) expect(result).toContain(shown);
+		// r6/r7 are asserted absent via their UNIQUE audit rendering, not the
+		// raw output (the echoed cohort path could coincidentally contain them).
+		const auditLine = result
+			.split('\n')
+			.find((l) => l.includes('deleted in one store were re-added'));
+		expect(auditLine).toBeDefined();
+		expect(auditLine).not.toContain('r6');
+		expect(auditLine).not.toContain('r7');
+		// All 7 events are resurrections — none may double-render as
+		// recency-resolved (#3520 critic).
+		expect(result).not.toContain('resolved by recency');
+	});
+
+	// #3520 critic round 2: the command-level recency-resolved render strings
+	// are load-bearing — pin totals + member + audit wording on a source-wins
+	// merge, and the absence of the retired falsifying strings.
+	test('#2958: link renders recency-resolved supersessions in totals and audit', async () => {
+		const fs = await import('node:fs/promises');
+		await fs.mkdir(path.join(dir, '.opencode'), { recursive: true });
+		await fs.writeFile(
+			path.join(dir, '.opencode', 'opencode-swarm.json'),
+			JSON.stringify({ memory: { enabled: true, link: { enabled: true } } }),
+			'utf-8',
+		);
+		const T1 = '2026-09-20T00:00:00.000Z';
+		const T2 = '2026-09-22T00:00:00.000Z';
+		const localMem = path.join(dir, '.swarm', 'memory');
+		await fs.mkdir(localMem, { recursive: true });
+		await fs.writeFile(
+			path.join(localMem, 'memories.jsonl'),
+			`${JSON.stringify({ id: 'M', text: 'v2', updatedAt: T2 })}
+`,
+			'utf-8',
+		);
+		const cohortMem = path.join(resolveLinkDir('render-cohort'), 'memory');
+		await fs.mkdir(cohortMem, { recursive: true });
+		await fs.writeFile(
+			path.join(cohortMem, 'memories.jsonl'),
+			`${JSON.stringify({ id: 'M', text: 'v1', updatedAt: T1 })}
+`,
+			'utf-8',
+		);
+		const result = await handleMemoryLinkCommand(dir, ['render-cohort']);
+		expect(result).toContain('Linked');
+		expect(result).toContain('1 resolved by recency');
+		expect(result).toContain('1 recency-resolved');
+		expect(result).toContain(
+			'1 record collision(s) resolved by recency — the newer state won.',
+		);
+		expect(result).not.toContain('superseded by newer versions');
+		expect(result).not.toContain('were replaced by newer versions');
+	});
+
+	// PRR-010: the command-level unresolved-collision wording had zero coverage.
+	test('#2958: link reports unresolved collisions (no recency signal) with bounded ids', async () => {
+		const fs = await import('node:fs/promises');
+		await fs.mkdir(path.join(dir, '.opencode'), { recursive: true });
+		await fs.writeFile(
+			path.join(dir, '.opencode', 'opencode-swarm.json'),
+			JSON.stringify({ memory: { enabled: true, link: { enabled: true } } }),
+			'utf-8',
+		);
+		const localMem = path.join(dir, '.swarm', 'memory');
+		await fs.mkdir(localMem, { recursive: true });
+		// Local (source) rows carry NO updatedAt → no recency signal on either
+		// side for the shared id → destination kept + id reported unresolved.
+		const longId = 'u'.repeat(45);
+		await fs.writeFile(
+			path.join(localMem, 'memories.jsonl'),
+			`${JSON.stringify({ id: 'M', text: 'local-new' })}\n${JSON.stringify({ id: longId, text: 'long' })}\n`,
+			'utf-8',
+		);
+		const cohortMem = path.join(resolveLinkDir('unresolved-cohort'), 'memory');
+		await fs.mkdir(cohortMem, { recursive: true });
+		await fs.writeFile(
+			path.join(cohortMem, 'memories.jsonl'),
+			`${JSON.stringify({ id: 'M', text: 'cohort-old' })}\n${JSON.stringify({ id: longId, text: 'cohort-long' })}\n`,
+			'utf-8',
+		);
+		const result = await handleMemoryLinkCommand(dir, ['unresolved-cohort']);
+		expect(result).toContain('Linked');
+		expect(result).toContain('had no recency signal');
+		// The 45-char id renders truncated to 39 chars + ellipsis (PRR-010).
+		expect(result).toContain(`${'u'.repeat(39)}…`);
+		expect(result).toContain('2 collision(s)');
 	});
 });

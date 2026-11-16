@@ -22,11 +22,13 @@ import {
 	type PrFeedbackInventoryAmendmentRecord,
 	type PrWorkflowGateRecoveryRead,
 	type PrWorkflowGateState,
+	prReviewPhaseWindowForStatus,
 	prWorkflowSessionFileStem,
 	readPrWorkflowGateStateForRecovery,
 } from '../hooks/pr-workflow-gate';
 import { resolvePrWorkflowControllerSession } from '../hooks/pr-workflow-session-resolver';
 import { validateSwarmPath } from '../hooks/utils';
+import { deriveVerdictAttemptCounts } from '../pr-review/verdict-settlement.js';
 import { bunSpawn } from '../utils/bun-compat';
 import { resolveGitExecutableAsync } from '../utils/git-executable.js';
 import { createSwarmTool } from './create-tool';
@@ -240,6 +242,21 @@ interface PrReviewStatusProjection {
 	 * can flip it without a shape change.
 	 */
 	laneCoverageAdmission: 'gate-parity' | 'lane-record-only';
+	/**
+	 * Per-item verdict attempt accounting (issue #3311 AC24), one row per item
+	 * declared by the reviewer OR critic phase window: distinct window batches
+	 * whose lanes declare the item, the required total (1 + retry budget), and
+	 * the remaining budget. Rows are phase-labeled because the same item id can
+	 * carry different counts in the two phases. Same derivation as the N-of-M
+	 * BLOCKED text.
+	 */
+	verdictAttempts: Array<{
+		itemId: string;
+		attemptsUsed: number;
+		attemptsRequired: number;
+		remaining: number;
+		phase: 'reviewer' | 'critic';
+	}>;
 	inventory: PrReviewStatusInventory;
 	/**
 	 * Per-section read health (issue #3095, F-04). `boundaries` and
@@ -820,6 +837,28 @@ async function buildPrReviewProjection(
 			? { state: 'unavailable', reason: SALVAGED_PROJECTION_REASON }
 			: { state: 'ok' };
 
+	// Issue #3311 (AC24): per-item verdict attempt accounting over the SAME
+	// phase windows the N-of-M admission reads (single derivation — the window
+	// wrapper is exported by the gate so this projection can never hand-roll a
+	// drifting filter). The BLOCKED text fires per phase (reviewer AND critic),
+	// so rows are derived over BOTH windows and each row carries its phase: an
+	// item id can be declared in both phases with different counts, and the
+	// consumer must be able to match the row to the phase of the message it is
+	// reading. Reviewer rows come first (the common blocked phase).
+	const verdictPhases = ['reviewer', 'critic'] as const;
+	const verdictAttempts = verdictPhases.flatMap((phase) =>
+		deriveVerdictAttemptCounts({
+			window: prReviewPhaseWindowForStatus(state, phase),
+			unclaimed: [
+				...new Set(
+					prReviewPhaseWindowForStatus(state, phase).flatMap((batch) =>
+						batch.lanes.flatMap((lane) => lane.reviewItemIds ?? []),
+					),
+				),
+			],
+		}).map((row) => ({ ...row, phase })),
+	);
+
 	return {
 		boundaries,
 		checkpointScope: 'shared-last-write-wins',
@@ -827,6 +866,7 @@ async function buildPrReviewProjection(
 		laneCoverageTruncated,
 		laneCoverageAdmission: 'lane-record-only',
 		inventory,
+		verdictAttempts,
 		sources: {
 			boundaries: salvagedSource(),
 			laneCoverage: salvagedSource(),

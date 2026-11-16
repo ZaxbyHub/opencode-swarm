@@ -307,6 +307,7 @@ describe('collect_lane_results — regression: reviewer/critic verdict rows vali
 			[
 				{
 					laneId: 'critic-lane',
+					agent: 'critic',
 					workflowLane: 'critic-lane',
 					reviewItemIds: ['C-0', 'C-1'],
 				},
@@ -358,11 +359,13 @@ describe('collect_lane_results — regression: reviewer/critic verdict rows vali
 			[
 				{
 					laneId: 'critic-valid',
+					agent: 'critic',
 					workflowLane: 'critic-valid',
 					reviewItemIds: ['C-0'],
 				},
 				{
 					laneId: 'critic-extra',
+					agent: 'critic',
 					workflowLane: 'critic-extra',
 					reviewItemIds: ['C-1'],
 				},

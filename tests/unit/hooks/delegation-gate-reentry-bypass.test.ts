@@ -20,6 +20,7 @@ import {
 	PR_ARTIFACT_REVISION_DIGEST,
 	PR_ARTIFACT_SESSION_ID,
 } from '../../helpers/pr-review-artifact-fixtures';
+import { safeRmRecursive } from '../../helpers/safe-test-dir';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const config = {
@@ -48,13 +49,18 @@ beforeEach(async () => {
 		PR_ARTIFACT_REVISION_DIGEST;
 });
 
-afterEach(async () => {
+afterEach(() => {
 	resetSwarmState();
 	gateInternals.resetTrackedStateCache();
 	gateInternals.resolveCurrentGitHeadAsync = originalResolveCurrentGitHeadAsync;
 	gateInternals.resolvePrWorkflowRevisionDigest = originalResolveRevisionDigest;
 	closeAllProjectDbs();
-	await fs.rm(tmpDir, { recursive: true, force: true });
+	// Issue #3261/#3203: raw `await fs.rm` here had no EBUSY/EPERM retry,
+	// which hard-failed windows-latest merge-group shards under AV/cold-FS
+	// handle contention (dg-reentry-test-* scratch, PR #3242 run 38617312185
+	// evidence). Route through safeRmRecursive — the bounded retry pattern
+	// proven for the #2190/#2807 class.
+	safeRmRecursive(tmpDir);
 	isolatedEnv?.cleanup();
 	isolatedEnv = undefined;
 });

@@ -414,14 +414,48 @@ ANALYZE RULES:
 - Report the highest-severity findings first within each section.
 - If both spec.md and plan.md are present but empty, report CLEAN with a note that both files are empty.
 `;
-// #3310 (AC14): PR-review critic lanes compose this agent's prompt with the
-// controller's contract card and CONTROLLER-BOUND block; the default
-// PLAN REVIEW structure cannot produce the [CRITIC] rows that transport
-// requires, so the override suspends it for those lanes only. Non-PR use
-// of the critic agent is unchanged.
-const PR_REVIEW_LANE_OVERRIDE = `PR-REVIEW LANE OVERRIDE (#3310): when a CONTROLLER-BOUND PR WORKFLOW CONTRACT block is present in your prompt, the default output structure above is suspended for that lane: do not begin with PLAN REVIEW and do not call get_approved_plan — emit only the [CRITIC] verdict rows that contract specifies, exactly one per assigned item id, and nothing else.`;
+// #3358 AC1: the PR-review critic-lane suspension of the default PLAN REVIEW
+// structure is NOT part of this prompt. It is injected per lane by the
+// controller (dispatch-lanes.ts CRITIC_PROTOCOL_SELECTION_CLAUSE, inside the
+// controller-bound contract block) only for a bound swarm-pr-review:critic
+// dispatch, so non-PR critic runs carry no PR-review text that a quoted
+// phrase could activate.
+export const PLAN_CRITIC_PROMPT = `${PLAN_CRITIC_PROMPT_BASE}\n\n${GRAPH_FIRST_CRITIC_GUIDANCE}`;
 
-export const PLAN_CRITIC_PROMPT = `${PLAN_CRITIC_PROMPT_BASE}\n\n${GRAPH_FIRST_CRITIC_GUIDANCE}\n\n${PR_REVIEW_LANE_OVERRIDE}`;
+/**
+ * Issue #3358 AC3: whether a registered critic agent's prompt was customized
+ * from the user prompts directory (`critic.md` replacement or
+ * `critic_append.md` append; src/config/loader.ts loadAgentPrompt). Captured
+ * at registration so PR critic-lane admission never re-reads the filesystem
+ * on the dispatch path. Keyed by the LOWERCASED registered generated name —
+ * the generated-agent registry matches names case-insensitively — and rebuilt
+ * on every `createAgents` call (bounded by the registered critic count).
+ */
+export interface CriticPromptProvenance {
+	replaced: boolean;
+	appended: boolean;
+}
+
+const criticPromptProvenanceByAgent = new Map<string, CriticPromptProvenance>();
+
+export function recordCriticPromptProvenance(
+	agentName: string,
+	provenance: CriticPromptProvenance,
+): void {
+	criticPromptProvenanceByAgent.set(agentName.toLowerCase(), {
+		...provenance,
+	});
+}
+
+export function criticPromptProvenance(
+	agentName: string,
+): CriticPromptProvenance | undefined {
+	return criticPromptProvenanceByAgent.get(agentName.toLowerCase());
+}
+
+export function clearCriticPromptProvenance(): void {
+	criticPromptProvenanceByAgent.clear();
+}
 
 // ============================================================
 // SOUNDING_BOARD_PROMPT — Pre-escalation filter

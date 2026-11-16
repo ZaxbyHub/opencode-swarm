@@ -6,6 +6,7 @@ import { transitionTaskWorkflowEvidence } from '../../../src/gate-evidence';
 import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
 import { resetSwarmState } from '../../../src/state';
 import { createIsolatedTestEnv } from '../../helpers/isolated-test-env.js';
+import { safeRmRecursive } from '../../helpers/safe-test-dir';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const config = {
@@ -26,10 +27,15 @@ beforeEach(async () => {
 	await fs.mkdir(`${tmpDir}/.opencode`, { recursive: true });
 });
 
-afterEach(async () => {
+afterEach(() => {
 	resetSwarmState();
 	closeAllProjectDbs();
-	await fs.rm(tmpDir, { recursive: true, force: true });
+	// Issue #3261/#3203: raw `await fs.rm` here had no EBUSY/EPERM retry,
+	// which hard-failed windows-latest merge-group shards under AV/cold-FS
+	// handle contention (the #3242/#3261 evidence). Route through
+	// safeRmRecursive — the bounded retry pattern proven for the
+	// #2190/#2807 class.
+	safeRmRecursive(tmpDir);
 	isolatedEnv?.cleanup();
 	isolatedEnv = undefined;
 });

@@ -17,7 +17,7 @@
 import { describe, expect, test } from 'bun:test';
 import { readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
-import { parse } from 'yaml';
+import { load as parse } from 'js-yaml';
 import { MODES_REQUIRING_GH } from '../../../../scripts/release-notes-fragments.mjs';
 
 const root = path.resolve(import.meta.dir, '../../../..');

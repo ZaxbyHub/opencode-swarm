@@ -103,6 +103,42 @@ projection contract.
 - **settlement_wedge** — the workflow label drifted to `idle` (a force-repair's `repair_idle` cleared the gate proofs) or `blocked` while a COMMITTED accepted coder settlement and green post-settlement pre-check proof still justify Stage A (issue #2828). `/swarm recover <task_id>` deterministically writes the settlement-backed `stage_a_passed` (a `settlementRecovery` marker plus a `stage_a_repair` audit event distinguish it from a mechanical pass); the agent-side audited escape hatch is the architect-only `recover_stage_a_task` tool. `--force` does not apply to this class — it only releases in-process settlement-WAL ownership. Background-dispatched coder tasks never write a settlement WAL, so this wedge is unreachable for them by construction; without the receipts the refusal stands (repair never fabricates Stage A justification).
 - **healthy** — terminal receipts agree with the workflow state; reported as a count, nothing to do.
 
+## Retry-escalation user-decision wedge
+
+A task whose coder retry circuit exhausted its critic-guided simplified retry refuses every further coder dispatch with `TASK_RETRY_USER_ESCALATION_REQUIRED` (the ladder's `sounding_board_consultation` → `simplification` → `user_escalation` rungs are durable per `(task, retryEpoch)` in `.swarm/events.jsonl`). This is not a settlement disorder: when a settlement WAL exists for the task, `/swarm diagnose` reports that settlement as terminal; a wedge that accumulated through `dispatch_no_mutation` alone has no settlement WAL to report. None of the settlement classes above apply.
+
+- **Recovery (issue #3389):** the architect runs the audited force repair — `update_task_status` with `status: "in_progress"`, `force: true`, `expected_state` set to the task's current workflow state (commonly `rework_required`), `expected_generation` to the current generation, `target_state: "idle"`, a `reason`, and a `transition_id`. The task's **plan status must already be `in_progress`** — that is the state the ladder leaves behind; a wedged task still `pending` in the plan takes one ordinary (non-force) `in_progress` status update first. The repair is admitted exactly when a durable `user_escalation` exists for the task's current retry epoch (and `retryCount` sits at the threshold); `repair_idle` then reopens the task and clears the whole retry circuit (`retryCount`/`retryHistory`/`retryEpoch` reset, generation rotated), so the next coder dispatch starts a fresh epoch. Every other `in_progress` repair is still refused with `TASK_REPAIR_NOT_BACKWARD` (fail-closed).
+- **When the neighboring tools do not help:** `approve_retry_sounding_board` only helps before the `simplification` rung. `recover_rework_task` exits the wedge only for the no-code-change case — it writes `stage_a_passed`, moving the task onto the Stage A→Stage B path where no coder dispatch (and therefore no escalation check) runs; the retry counters survive, so if Stage B then requires a code change the ladder still refuses the new coder dispatch and the audited repair above is the exit. `/swarm reset-session` intentionally preserves durable retry gates.
+- **Superseded workaround:** before #3389 an undocumented exit was a two-step round trip — set the plan status to `blocked`, then force-repair from `blocked`. It still works but is no longer needed; prefer the one-step audited repair above.
+
+## Never-dispatched wedge (git-external deliverables, issue #3422)
+
+A task whose deliverable is git-external (commit/push, gh ops) and that never
+received a coder dispatch has no settlement WAL, no exact-task workflow
+evidence, and no `coder_settlement` events. `/swarm recover <task_id>` reports
+this shape explicitly (`No coder dispatch or settlement evidence was found for
+task <id>`) instead of a bare dead end, and none of the settlement classes
+above apply — recovery is not the remedy because there is nothing to recover.
+(The neighboring `missing` diagnose category covers the same no-receipt shape;
+this section is its operator guidance.)
+
+Three exits, in order of preference:
+
+1. **`/swarm attest <task_id>`** — if the task declares `evidence_class:
+   external_git` with pinned `evidence_anchors` (or you can re-plan it to),
+   attest runs the pinned read-only git anchors and records the durable
+   external-evidence bundle that admits completion. A task whose PLAN status
+   was left `blocked` as a wedge record first reopens via the audited
+   `blocked → in_progress` transition, then attests, then completes.
+2. **manual close** — flip the task status in the TUI and record the wedge plus
+   the close reason in your execution trace.
+3. **Re-plan as a thin coder dispatch** — the coder executes the pinned-scope
+   git commands, a settlement exists, and the normal completion gate applies.
+
+Related: `save_plan` warns at plan time when a commit/push-shaped task has an
+empty scope and no external declaration, so this wedge is visible before it
+forms.
+
 ## Deterministic repair vs external side effects
 
 Deterministic repair — dead-owner settlement recovery and the wedged Stage A repair — only rewrites local durable state the receipts already justify. It never resolves an external side effect. These stay uncertain even when local state is repaired and need a human to reconcile against the other process or provider:

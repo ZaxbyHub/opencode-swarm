@@ -41,13 +41,11 @@ import * as actualEvidenceManager from '../../../src/evidence/manager.js';
 import * as actualKnowledgeCurator from '../../../src/hooks/knowledge-curator.js';
 import { initLedger } from '../../../src/plan/ledger.js';
 import { derivePlanId } from '../../../src/plan/utils.js';
-// Same rationale as above: enforceSpecDriftGate (used by the regression test
-// below) lives in src/hooks/guardrails/index.ts, which transitively imports
-// src/state.js for exports beyond the ones this suite overrides (e.g.
-// getAgentSession, advanceTaskState, getActiveWindow). Spread the real module
-// and only override the entry points this suite needs deterministic/no-op
-// behavior for.
+// Same rationale as above: enforceSpecDriftGate (regression test below)
+// transitively imports src/state.js for exports beyond the overridden ones.
+// Spread the real module; override only this suite's deterministic no-ops.
 import * as actualState from '../../../src/state.js';
+import { mockGitStatusReadNonRepo } from '../../helpers/close-command-mocks';
 
 // ── Mocks (must precede the dynamic import) ──────────────────────────
 
@@ -103,6 +101,8 @@ mock.module('../../../src/state.js', () => ({
 	hasActiveFullAuto: () => false,
 }));
 
+// #3427: align-stage probe mock (spread-real; only the detailed reader is overridden).
+mockGitStatusReadNonRepo();
 mock.module('../../../src/git/branch.js', () => ({
 	isGitRepo: () => false,
 	getCurrentBranch: () => 'main',

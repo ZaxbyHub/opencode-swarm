@@ -52,13 +52,23 @@ describe('PR workflow explicit capability contract', () => {
 					pr_head_sha: HEAD_SHA,
 				},
 			],
-			['test_runner', { files: ['tests/focused.test.ts'] }],
 			['lint', { mode: 'check' }],
 		] as const) {
 			await expect(
 				enforcePrWorkflowToolBefore(tempDir, SESSION_ID, toolName, args),
 			).resolves.toBeUndefined();
 		}
+		// Issue #3315 E1: test_runner executes in the working directory, so a
+		// bound PR_REVIEW checkout would be dirtied by its outputs. It is
+		// refused at admission with a targeted message; validation runs through
+		// dispatch_lanes_async lanes or PR_FEEDBACK Stage A.
+		await expect(
+			enforcePrWorkflowToolBefore(tempDir, SESSION_ID, 'test_runner', {
+				files: ['tests/focused.test.ts'],
+			}),
+		).rejects.toThrow(
+			/test_runner.*dirty the tree|BLOCKED: PR_REVIEW test_runner/,
+		);
 	});
 
 	test('keeps mutation-capable modes and mode-specific controllers fail-closed', async () => {

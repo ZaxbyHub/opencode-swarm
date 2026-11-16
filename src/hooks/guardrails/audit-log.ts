@@ -28,7 +28,6 @@
  */
 
 import { createHash } from 'node:crypto';
-import * as path from 'node:path';
 
 import { log } from '../../utils/logger';
 import { redactShellCommand } from './helpers';
@@ -88,6 +87,8 @@ export interface ScopeViolationDecision {
 	declaredScope: string;
 	resolvedScope: string;
 	action: string;
+	/** Shell write operator that tripped the gate (issue #3495 item 4). */
+	operator?: string;
 }
 
 export interface DestructiveBlockDecision {
@@ -175,6 +176,7 @@ export const SHELL_AUDIT_FIELD_CLASSES: Readonly<
 	resolvedScope: 'redacted-path',
 	declaredScope: 'redacted-path',
 	action: 'enum',
+	operator: 'free-text-redacted',
 	destructiveCategory: 'enum',
 	executorMechanism: 'enum',
 	skipReason: 'enum',
@@ -267,6 +269,15 @@ function validateEntry(entry: unknown): entry is GuardrailDecisionEntry {
 					return false;
 				}
 			}
+			// `operator` is optional, but a present value must be a string
+			// (issue #3495 item 4).
+			if (entry.operator !== undefined && typeof entry.operator !== 'string') {
+				log(
+					'guardrail audit: rejected scope_violation entry with non-string operator',
+					{ entry },
+				);
+				return false;
+			}
 			break;
 		}
 		case 'destructive_block': {
@@ -340,55 +351,14 @@ export function hashRedactedCommand(redacted: string): string {
 }
 
 /**
- * Best-effort path redaction for audit logs.
- *
- * Replaces leading home/profile segments with a tilde placeholder so
- * absolute paths do not leak user-specific directory names (POSIX
- * `/home/<name>`, macOS `/Users/<name>`, Windows drive profiles
- * `C:\Users\<name>` case-insensitive, and UNC profile shares).
- *
- * This is intentionally minimal on non-home paths — ordinary project paths
- * are diagnostic content and are preserved (over-redaction guards pin it).
+ * Path redaction moved to src/scope/path-identity.ts (#3587) so the
+ * file-authority reason builder can fold home/profile prefixes without
+ * importing the audit subsystem; re-exported here so every existing
+ * importer keeps its source shape.
  */
-export function redactPath(filePath: string): string {
-	// Non-strings can never be safely redacted — coerce to the empty string
-	// instead of passing them through (issue #2040 reviewer round R2: the old
-	// passthrough let an unredacted non-string value reach disk silently).
-	if (typeof filePath !== 'string') return '';
-	if (filePath.length === 0) return filePath;
-
-	// POSIX home: /home/<name>/... -> ~/...
-	const rawPosixHomeMatch = filePath.match(/^(\/home\/[^/]+)(\/.*)$/);
-	if (rawPosixHomeMatch) {
-		return `~${rawPosixHomeMatch[2]}`;
-	}
-
-	// macOS home: /Users/<name>/... -> ~/... (parity with redactShellCommand)
-	const rawMacHomeMatch = filePath.match(/^(\/Users\/[^/]+)(\/.*)$/);
-	if (rawMacHomeMatch) {
-		return `~${rawMacHomeMatch[2]}`;
-	}
-
-	const normalized = path.normalize(filePath);
-
-	// Windows user profile (drive letter case-insensitive): c:\Users\<name>\... -> ~\<rest>\...
-	const windowsHomeMatch = normalized.match(
-		/^([A-Za-z]:\\[Uu][Ss][Ee][Rr][Ss]\\[^\\]+)(\\.*)$/i,
-	);
-	if (windowsHomeMatch) {
-		return `~\\${windowsHomeMatch[2]}`;
-	}
-
-	// Windows UNC profile/share path: \\server\share\user\... -> ~\share\user\...
-	const uncHomeMatch = normalized.match(
-		/^\\\\[^\\]+\\([^\\]+)\\([^\\]+)(\\.*)$/,
-	);
-	if (uncHomeMatch) {
-		return `~\\${uncHomeMatch[1]}\\${uncHomeMatch[2]}${uncHomeMatch[3]}`;
-	}
-
-	return normalized;
-}
+import { redactPath } from '../../scope/path-identity.js';
+// Re-export for existing importers (source-compatible move, #3587).
+export { redactPath };
 
 function redactEmbeddedPaths(text: string): string {
 	return text
@@ -452,6 +422,13 @@ export function redactDecisionLineForArchive(line: string): string {
 			changed = true;
 		}
 	}
+	if (typeof record.operator === 'string') {
+		const redacted = truncateUtf8Safe(redactEmbeddedPaths(record.operator), 32);
+		if (redacted !== record.operator) {
+			record.operator = redacted;
+			changed = true;
+		}
+	}
 	for (const field of ['declaredScope', 'resolvedScope'] as const) {
 		if (typeof record[field] === 'string') {
 			const redacted = redactPath(record[field] as string);
@@ -499,6 +476,7 @@ export async function appendGuardrailDecision(
 
 	const maxCommand = SHELL_AUDIT_LIMITS.maxCommandChars;
 	const maxReason = SHELL_AUDIT_LIMITS.maxReasonChars;
+	const maxPath = SHELL_AUDIT_LIMITS.maxPathChars;
 
 	// Legacy shell entries persist as the exact 5-field shape
 	// {ts, sessionID, agent, tool, command} with the `type` discriminator stripped.
@@ -539,17 +517,38 @@ export async function appendGuardrailDecision(
 		case 'file_write':
 			line = `${JSON.stringify({
 				...entry,
-				path: redactPath(entry.path),
+				path: truncateUtf8Safe(redactPath(entry.path), maxPath),
 				reason: truncateUtf8Safe(redactEmbeddedPaths(entry.reason), maxReason),
-				resolvedScope: redactPath(entry.resolvedScope),
+				resolvedScope: truncateUtf8Safe(
+					redactPath(entry.resolvedScope),
+					maxPath,
+				),
 			})}\n`;
 			break;
 		case 'scope_violation':
 			line = `${JSON.stringify({
 				...entry,
-				path: redactPath(entry.path),
-				declaredScope: redactPath(entry.declaredScope),
-				resolvedScope: redactPath(entry.resolvedScope),
+				path: truncateUtf8Safe(redactPath(entry.path), maxPath),
+				declaredScope: truncateUtf8Safe(
+					redactPath(entry.declaredScope),
+					maxPath,
+				),
+				resolvedScope: truncateUtf8Safe(
+					redactPath(entry.resolvedScope),
+					maxPath,
+				),
+				...(typeof entry.operator === 'string'
+					? {
+							// The operator is parsed-command text (the detector's
+							// first command word, e.g. an absolute interpreter
+							// path), so it is free text: redact embedded paths
+							// and bound it like the other free-text fields.
+							operator: truncateUtf8Safe(
+								redactEmbeddedPaths(entry.operator),
+								32,
+							),
+						}
+					: {}),
 			})}\n`;
 			break;
 	}

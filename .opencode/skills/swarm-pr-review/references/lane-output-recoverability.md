@@ -48,8 +48,17 @@ their exact owned workflow lanes are marked salvaged. Council, reviewer, and
 critic outputs remain fail-closed and require retry when incomplete. `[CLEAN]`
 is absence evidence and therefore requires a complete transcript. One positive
 row in a consolidated lane never salvages a sibling dimension whose only
-evidence is `[CLEAN]` or missing. Recovery reasons are lane-scoped and use six
-kinds: `legacy-verdict-row-recovery`, `parser-normalization`, `parser-row-recovery`,
+evidence is `[CLEAN]` or missing. Recovery reasons are lane-scoped and use seven
+kinds: `legacy-verdict-row-recovery`, `legacy-verdict-row-quarantine` (a verdict
+row quarantined as grammar noise — either the #3310 post-parse-arity arm (any
+row whose post-parse arity differs from the legal count, including duplicates
+naming assigned ids) or the #3357 over-arrival arm (a row that ARRIVED over its
+marker's legal arity and was tail-merged down to it with an unassigned id, such
+as a Stage-B task row or an echoed format line; quarantined on its raw arrival
+arity instead of voiding every valid sibling row) — itemized with a bounded id
+and raw arity on the transport-recovery receipt, capped, so a
+quarantine-influenced settle is distinguishable from a clean one),
+`parser-normalization`, `parser-row-recovery`,
 `truncated-preview-durable-artifact`,
 `transcript-incomplete-terminal-candidate`, and
 `clean-attestation-salvaged` (a `[CLEAN]` attestation conflicting with a
@@ -381,3 +390,28 @@ the coverage gate use a shared row parser, while the gate separately verifies
 durable provenance such as batch, session, lane, role, head, digest, and
 artifact identity. Parser success therefore proves row structure only; it does
 not settle the durable coverage obligation.
+
+## In-flight replay across plugin upgrades (#3336)
+
+Lane artifacts persist RAW row text — nothing validates verdict rows at write
+time; validation happens at read, on every composition pass. When a plugin
+upgrade tightens or widens the verdict-row schema, artifacts written by the
+OLD version re-parse under the NEW (live) schema, with no migration and no
+verdict-semantic version gate:
+
+- FAIL-CLOSED direction (reviewer, #3310 tightening): a persisted reviewer
+  `CONFIRMED` row with severity `NONE`, written before the tightening, fails
+  the live schema on re-read. Its item stays unclaimed, the phase settles
+  fail-closed with "items lack an authenticated verdict", and the run must
+  re-dispatch the affected lane. No forged or silently-dropped claim is
+  possible — an in-flight reviewer run that spans the upgrade simply fails
+  closed and re-runs.
+- ACCEPTING direction (critic, #3310 widening): a persisted `UPHELD | LOW` or
+  `UPHELD | INFO` critic row written before the widening was REJECTED by the
+  old read schema (its item was unclaimed and the phase blocked). After the
+  upgrade the same persisted row becomes claimable on the first composition,
+  with no re-run — provided its bound reviewer row still validates under the
+  live schema (a stale-bound critic row is never admitted).
+
+Both directions are the documented consequence of live-schema re-parse; they
+are pinned by tests/unit/background/pr-review-reviewer-confirmed-none.test.ts.

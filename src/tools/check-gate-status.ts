@@ -13,7 +13,9 @@ import { isSecretscanEvidence, loadEvidence } from '../evidence/manager.js';
 import type { TaskEvidence } from '../gate-evidence.js';
 import {
 	deriveApplicableGateSet,
+	externalProofCurrent,
 	readCurrentTaskDeclaredFiles,
+	resolveCurrentPlanIdentitySync,
 	TASK_WORKFLOW_SCHEMA_MARKER,
 } from '../gate-evidence.js';
 import type { TodoGateConfigBlock } from '../todo/todo-gate.js';
@@ -63,6 +65,7 @@ interface GateStatusResult {
 	 * after /swarm reset-session destroyed the in-memory attribution chain).
 	 */
 	workflow_attribution_hint?: string;
+	prior_campaign_evidence?: string;
 }
 
 // Task ID validation delegated to shared module (#452 item 2)
@@ -282,6 +285,96 @@ export const check_gate_status: ReturnType<typeof tool> = createSwarmTool({
 		const missingGates = derivedGates.missingGates;
 		const readOnlyNoMutation = derivedGates.readOnlyNoMutation;
 
+		// External-evidence declarations (issue #3422): a task that declares
+		// external_git reports its attestation state instead of the Stage B
+		// derivation above. Undeclared tasks keep that derivation untouched.
+		try {
+			const externalPlanPath = path.join(directory, '.swarm', 'plan.json');
+			const externalPlanRaw = fs.readFileSync(externalPlanPath, 'utf-8');
+			const externalPlan = JSON.parse(externalPlanRaw) as {
+				title?: unknown;
+				swarm?: unknown;
+				phases?: Array<{
+					tasks?: Array<{
+						id: string;
+						evidence_class?: string;
+						evidence_anchors?: Array<{
+							command: string;
+							expect?: string;
+							expect_prefix?: string;
+						}>;
+					}>;
+				}>;
+			};
+			const declaredTask = (externalPlan.phases ?? [])
+				.flatMap((phase) => phase.tasks ?? [])
+				.find((task) => task.id === taskIdInput);
+			if (
+				declaredTask &&
+				declaredTask.evidence_class === 'external_git' &&
+				typeof externalPlan.title === 'string' &&
+				typeof externalPlan.swarm === 'string'
+			) {
+				const proofCurrent = externalProofCurrent(
+					{ title: externalPlan.title, swarm: externalPlan.swarm },
+					declaredTask,
+					evidenceData as TaskEvidence,
+				);
+				const externalWorkflowMeta =
+					evidenceData.workflow &&
+					typeof evidenceData.workflow === 'object' &&
+					typeof evidenceData.workflow.state === 'string'
+						? {
+								state: evidenceData.workflow.state,
+								generation:
+									typeof evidenceData.workflow.generation === 'number'
+										? evidenceData.workflow.generation
+										: 0,
+							}
+						: null;
+				const externalResult: GateStatusResult = proofCurrent
+					? {
+							taskId: taskIdInput,
+							status: 'all_passed',
+							required_gates: ['external_attest'],
+							passed_gates: ['external_attest'],
+							missing_gates: [],
+							gates: gatesMap,
+							message: `External evidence attested: task "${taskIdInput}" is satisfied by its pinned external_git anchors (issue #3422).`,
+							todo_scan:
+								(evidenceData.todo_scan as
+									| {
+											priority: string;
+											count: number;
+											details?: string[];
+									  }
+									| undefined) ?? null,
+							workflow: externalWorkflowMeta,
+						}
+					: {
+							taskId: taskIdInput,
+							status: 'incomplete',
+							required_gates: ['external_attest'],
+							passed_gates: [],
+							missing_gates: ['external_attest'],
+							gates: gatesMap,
+							message: `Task "${taskIdInput}" declares external_git evidence but no matched attestation exists yet. Run /swarm attest ${taskIdInput} (or re-plan it as a thin coder dispatch).`,
+							todo_scan:
+								(evidenceData.todo_scan as
+									| {
+											priority: string;
+											count: number;
+											details?: string[];
+									  }
+									| undefined) ?? null,
+							workflow: externalWorkflowMeta,
+						};
+				return JSON.stringify(externalResult, null, 2);
+			}
+		} catch {
+			// plan.json missing or unreadable — keep today's derivation below.
+		}
+
 		// Determine overall status
 		let status: 'all_passed' | 'incomplete' =
 			missingGates.length === 0 &&
@@ -485,6 +578,24 @@ export const check_gate_status: ReturnType<typeof tool> = createSwarmTool({
 								: 0,
 					}
 				: null;
+		// Stage B wedge fix (Class E): flag evidence that predates the current
+		// plan campaign (a plan-identity stamp for a different plan).
+		const currentPlanIdentity = resolveCurrentPlanIdentitySync(
+			dirResult.directory,
+		);
+		const evidencePlanIdentityHash = (
+			evidenceData as { planIdentityHash?: string } | null
+		)?.planIdentityHash;
+		let priorCampaignEvidence: string | undefined;
+		if (
+			currentPlanIdentity != null &&
+			evidencePlanIdentityHash !== undefined &&
+			evidencePlanIdentityHash !== currentPlanIdentity.planIdentityHash
+		) {
+			priorCampaignEvidence =
+				'Evidence for this task predates the current plan campaign (plan-identity stamp names a different plan). Its gates may not satisfy the current campaign receipts (status above is unchanged and advisory only); run repair_gate_evidence for this task to rebuild current-campaign evidence.';
+			message += ` ${priorCampaignEvidence}`;
+		}
 		let workflowAttributionHint: string | undefined;
 		if (
 			status === 'incomplete' &&
@@ -511,6 +622,9 @@ export const check_gate_status: ReturnType<typeof tool> = createSwarmTool({
 			workflow: workflowMeta,
 			...(workflowAttributionHint
 				? { workflow_attribution_hint: workflowAttributionHint }
+				: {}),
+			...(priorCampaignEvidence
+				? { prior_campaign_evidence: priorCampaignEvidence }
 				: {}),
 		};
 

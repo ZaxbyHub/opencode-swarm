@@ -1,0 +1,1 @@
+Bump the actions/upload-artifact GitHub Actions pin from 7.0.1 to 7.0.2 across the CI, drift-check, flake-detection, and release-and-publish workflows. CI-only change; no plugin runtime surface is affected.

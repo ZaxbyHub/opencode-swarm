@@ -262,12 +262,12 @@ describe('destructive command guard', () => {
 	});
 
 	describe('block_destructive_commands disabled', () => {
-		test('rm -rf / allowed when block_destructive_commands is false', async () => {
+		test('rm -rf / hits the write gate with block_destructive_commands false (#3616 item 10)', async () => {
 			const config = defaultConfig({ block_destructive_commands: false });
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
 			const input = makeBashInput('test-session', 'rm -rf /');
-			const output = makeBashOutput('rm -rf /');
-			await expect(hooks.toolBefore(input, output)).resolves.toBeUndefined();
+			const run = hooks.toolBefore(input, makeBashOutput('rm -rf /'));
+			await expect(run).rejects.toThrow(/SCOPE_NOT_DECLARED|WRITE BLOCKED/);
 		});
 
 		test('git push --force allowed when block_destructive_commands is false', async () => {
@@ -481,7 +481,7 @@ describe('destructive command guard', () => {
 				await expect(hooks.toolBefore(input, output)).resolves.toBeUndefined();
 			});
 
-			test('rsync --delete without scope → BLOCKED', async () => {
+			test('rsync --delete without scope → BLOCKED by the scope-gated --delete guard', async () => {
 				const config = defaultConfig();
 				const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
 				const input = makeBashInput(
@@ -489,8 +489,9 @@ describe('destructive command guard', () => {
 					'rsync -av --delete src/ plugins',
 				);
 				const output = makeBashOutput('rsync -av --delete src/ plugins');
+				// PRR-016: message-matched (executed probe; with scope it is ALLOWED).
 				await expect(hooks.toolBefore(input, output)).rejects.toThrow(
-					/BLOCKED/,
+					/"rsync --delete" detected/,
 				);
 			});
 		});

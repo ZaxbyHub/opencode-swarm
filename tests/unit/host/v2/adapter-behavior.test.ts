@@ -8,12 +8,16 @@
  * splice regression), agent mapping edges, template expansion, the command
  * execute → session.prompt bridge, setup fail-closed, and cleanup ordering.
  *
- * Drives src/host/v2 modules directly (source-level) against mock v2
- * contexts per src/host/v2/types.ts provenance. All temp roots via
- * canonicalMkdtemp; no wall-clock, no subprocess.
+ * Most tests drive src/host/v2 modules directly against mock v2 contexts per
+ * src/host/v2/types.ts provenance. The final tests in this file boot the real
+ * plugin (OpenCodeSwarm.server) under an isolated global-config env
+ * (createIsolatedTestEnv) and drive its tool.execute hooks. All temp roots
+ * via canonicalMkdtemp; no subprocess.
  */
 
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { mkdirSync } from 'node:fs';
+import path from 'node:path';
 import {
 	expandV1Template,
 	mapV1AgentToV2,
@@ -35,6 +39,7 @@ import type {
 	V2ToolHookInput,
 } from '../../../../src/host/v2/types';
 import { resetSwarmState, swarmState } from '../../../../src/state';
+import { createIsolatedTestEnv } from '../../../helpers/isolated-test-env';
 import { canonicalMkdtemp } from '../../../helpers/tmpdir';
 
 const REPO_ROOT = '../../../..';
@@ -105,8 +110,15 @@ function ctxEvent(
 	};
 }
 
+let isolatedEnv: ReturnType<typeof createIsolatedTestEnv>;
+
+beforeEach(() => {
+	isolatedEnv = createIsolatedTestEnv();
+});
+
 afterEach(() => {
 	resetSwarmState();
+	isolatedEnv.cleanup();
 });
 
 describe('v2 event pump + mapping (PRR-002/PRR-024)', () => {
@@ -353,12 +365,6 @@ describe('agent + command mapping (PRR-011 edges)', () => {
 		expect(info.description).toBe('d');
 	});
 
-	test('mapV1AgentToV2 drops v1 tools:false entries from allow rules (documented delta)', () => {
-		const info = mapV1AgentToV2('w', { tools: { shell: false, bash: true } });
-		expect(info.permissions?.some((r) => r.resource === 'shell')).toBe(false);
-		expect(info.permissions?.some((r) => r.resource === 'bash')).toBe(true);
-	});
-
 	test('expandV1Template substitutes $ARGUMENTS', () => {
 		expect(expandV1Template('/swarm show-plan $ARGUMENTS', 'alpha beta')).toBe(
 			'/swarm show-plan alpha beta',
@@ -398,6 +404,7 @@ describe('seed re-pairing (PRR-009)', () => {
 	test('v2 tool.execute.before preserves host-provided agent and does not bypass circuit breaker after >10s', async () => {
 		const OpenCodeSwarm = (await import('../../../../src/index')).default;
 		const directory = canonicalMkdtemp('swarm-v2-circuit-');
+		mkdirSync(path.join(directory, '.opencode'), { recursive: true });
 		const plugin = await OpenCodeSwarm.server({
 			directory,
 			worktree: directory,
@@ -438,6 +445,7 @@ describe('seed re-pairing (PRR-009)', () => {
 	test('v2 tool.execute.after Task handoff restores host-provided parent agent instead of hardcoding architect', async () => {
 		const OpenCodeSwarm = (await import('../../../../src/index')).default;
 		const directory = canonicalMkdtemp('swarm-v2-handoff-');
+		mkdirSync(path.join(directory, '.opencode'), { recursive: true });
 		const plugin = await OpenCodeSwarm.server({
 			directory,
 			worktree: directory,

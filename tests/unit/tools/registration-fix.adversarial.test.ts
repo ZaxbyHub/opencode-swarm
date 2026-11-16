@@ -30,7 +30,11 @@ const REPO_ROOT = path.resolve(import.meta.dir, '../../..');
 
 // The real plugin tool object derived from the manifest (swarm_command's DI
 // instance is not needed to enumerate keys).
-const PLUGIN_TOOLS = buildPluginToolObject({});
+// Full-manifest construction — memory enabled (issue #3659 made the
+// swarm_memory_* family opt-in at registration time).
+const PLUGIN_TOOLS = buildPluginToolObject({}, {
+	memory: { enabled: true },
+} as never);
 
 describe('Adversarial: Tool Registration Security', () => {
 	// ========================================================================

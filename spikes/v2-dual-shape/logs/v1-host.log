@@ -1,0 +1,37 @@
+HOST: opencode 1.19.0 | C:\OpenCode\opencode.exe
+PLUGIN: file:E:/ZCode/opencode-swarm-dev | dist sha256 b587ced33a3067303c365d310debd6b9ffec253ca4aa2e52ac50f49840f96363
+RUN: 2026-10-17T13:47:45.107Z | args: agent list --print-logs | env: OPENCODE_SWARM_DEBUG=1, isolated XDG_CONFIG_HOME | exit=0 | host-ran=true
+ENTRYPOINT: server() — the v1 host consulted id/server only; see v1-nosetup-ablation.log / v1-noserver-ablation.log for the ablation proof that setup() is inert on v1
+HOOK-FIRED: config hook — host agent table lists the swarm agents (host output lines, not plugin debug): YES (architect (primary) + subagent entries present)
+WARNINGS: none observed
+--- host output below, filtered to decision-relevant lines and home-path-redacted (not the full stream) ---
+[opencode-swarm 2026-10-17T13:47:44.028Z] init-path I/O completed in 16.8ms (parallel: config+snapshot+git-exclude)
+[opencode-swarm 2026-10-17T13:47:44.946Z] synchronized bundled skill {
+[opencode-swarm 2026-10-17T13:47:44.959Z] synchronized bundled skill {
+[opencode-swarm 2026-10-17T13:47:44.971Z] synchronized bundled skill {
+[opencode-swarm 2026-10-17T13:47:44.973Z] synchronized bundled skill {
+[opencode-swarm 2026-10-17T13:47:44.976Z] synchronized bundled skill {
+explore (subagent)
+general (subagent)
+architect (primary)
+coder (subagent)
+critic (subagent)
+critic_architecture_supervisor (subagent)
+critic_drift_verifier (subagent)
+critic_finding_validator (subagent)
+critic_hallucination_verifier (subagent)
+[opencode-swarm] running v7.197.3
+critic_oversight (subagent)
+critic_sounding_board (subagent)
+curator_consolidation (subagent)
+curator_init (subagent)
+curator_phase (subagent)
+curator_postmortem (subagent)
+docs (subagent)
+explorer (subagent)
+researcher (subagent)
+reviewer (subagent)
+skill_improver (subagent)
+sme (subagent)
+spec_writer (subagent)
+test_engineer (subagent)

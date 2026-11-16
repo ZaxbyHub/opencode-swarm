@@ -1,0 +1,14 @@
+{
+  "label": "v1-run2",
+  "host": "1.19.0",
+  "distSha": "b587ced33a3067303c365d310debd6b9ffec253ca4aa2e52ac50f49840f96363",
+  "attempt": 1,
+  "capturedAt": "2026-10-17T13:09:08.786Z",
+  "exit": 0,
+  "wallMs": 11667,
+  "sessionCreatedToSyncLastMs": 2575,
+  "syncDurationMs": 2026,
+  "sessionCreatedToModelStreamMs": 1505,
+  "firstTurnArrivedBeforeSyncDone": true,
+  "syncCompletionVisible": true
+}

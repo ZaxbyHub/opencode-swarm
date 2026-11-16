@@ -42,9 +42,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.release-please.outputs.tag_name }}
+          persist-credentials: false
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -88,7 +89,7 @@ jobs:
           '
 
       - name: Upload runner artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sandbox-runner-win32-${{ matrix.arch }}
           path: runners/swarm-sandbox-runner/target/${{ matrix.target }}/release/swarm-sandbox-runner.exe
@@ -105,15 +106,16 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.release-please.outputs.tag_name }}
+          persist-credentials: false
 
       # Issue #2475: place the release-built runner executables into the
       # package paths runner-client.ts discovers BEFORE packing/publishing.
       # The .gitkeep placeholders are replaced by the real binaries.
       - name: Download sandbox runner binaries
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: sandbox-runner-artifacts
 
@@ -128,7 +130,7 @@ jobs:
         with:
           bun-version: "1.3.13"
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
@@ -176,9 +178,10 @@ jobs:
       contents: write
       pull-requests: read
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.release-please.outputs.tag_name }}
+          persist-credentials: false
 
       - name: Aggregate pending release-note fragments into the GitHub Release body
         env:
@@ -199,7 +202,7 @@ jobs:
             --apply
 
       - name: Upload exact-tag fragment cleanup plan
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-fragment-cleanup-plan
           path: .release-fragment-cleanup/plan.json
@@ -224,9 +227,9 @@ jobs:
       contents: write
       pull-requests: write
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: main
+          ref: ${{ needs.release-please.outputs.tag_name }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -237,7 +240,7 @@ jobs:
           bun-version: "1.3.13"
 
       - name: Download exact-run cleanup plan
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: release-fragment-cleanup-plan
           path: .release-fragment-cleanup
@@ -267,8 +270,30 @@ jobs:
             echo "Release fragment cleanup is already materialized."
             exit 0
           fi
-          workspace_changes="$(git status --porcelain)"
-          changed_paths="$(printf '%s\n' "$workspace_changes" | cut -c4-)"
+          # NUL-end-to-end path list for the classifier (issue #3299):
+          # `git status --porcelain=v1 -z` emits records verbatim — no
+          # C-quoting, no newline splitting — and the jq reducer turns them
+          # into one JSON string per line (the classifier's jsonl framing;
+          # -c prints each list element as compact JSON). It strips each
+          # status record's 3-char "XY " prefix (two status columns plus the
+          # separator) and carries a rename/copy record's SECOND NUL field
+          # (the source path, emitted unprefixed by porcelain -z) as its own
+          # entry, resetting that state on the next ordinary record. The
+          # snapshot intentionally stays here, before the cleanup branch
+          # checkout/commit below.
+          cleanup_paths="$(mktemp)"
+          trap 'rm -f "${cleanup_paths:-}"' EXIT
+          git status --porcelain=v1 -z | jq -R -s -c '
+            reduce (split("\u0000") | map(select(length > 0)) | .[]) as $r
+              ({out: [], rename_next: false};
+              if .rename_next then
+                (.out += [$r] | .rename_next = false)
+              else
+                (.out += [$r[3:]] |
+                 .rename_next = ($r[0:2] | test("^[RC]")))
+              end)
+              | .out[]
+          ' > "$cleanup_paths"
 
           branch="chore/release-fragments-${TAG_NAME#v}"
           remote_sha=""
@@ -283,7 +308,7 @@ jobs:
             fi
             parent_sha="$(git rev-parse "$remote_sha^")"
             if ! git merge-base --is-ancestor "$parent_sha" HEAD; then
-              echo "::error::Cleanup branch parent is not in current main history: $branch"
+              echo "::error::Cleanup branch parent is not an ancestor of the checked-out release commit ($TAG_NAME): $branch"
               exit 1
             fi
             branch_changed_paths="$(git diff --name-only "$parent_sha" "$remote_sha")"
@@ -352,7 +377,7 @@ jobs:
           # verdict line is parsed because with no --added inputs exit 0
           # would also cover a (never expected) satisfied-required case.
           cleanup_rc=0
-          cleanup_verdict="$(printf '%s\n' "$changed_paths" | bun scripts/check-pending-fragment.ts --print-requirement)" || cleanup_rc=$?
+          cleanup_verdict="$(bun scripts/check-pending-fragment.ts --print-requirement --paths-format jsonl --changed-file "$cleanup_paths")" || cleanup_rc=$?
           case "$cleanup_rc" in
             0|1)
               case "$cleanup_verdict" in
@@ -475,7 +500,7 @@ jobs:
       contents: read
       pull-requests: write
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -490,8 +515,11 @@ jobs:
   # invisible unless someone opened the run page. This summary job runs on every
   # release regardless of the cleanup result and surfaces a non-success
   # conclusion as an ::error:: annotation plus a run-summary line.
+  # Issue #3510: update-release-notes is in needs too — cleanup is SKIPPED (not
+  # failed) when it fails, so a summary that only watches cleanup reports green
+  # while the release strands silently (v7.199.2 / v7.200.1).
   release-health-summary:
-    needs: [release-please, cleanup-release-fragments]
+    needs: [release-please, update-release-notes, cleanup-release-fragments]
     if: ${{ always() && needs.release-please.outputs.releases_created == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 3
@@ -501,9 +529,14 @@ jobs:
       - name: Report release job conclusions
         run: |
           echo "release-please: ${{ needs.release-please.result }}"
+          echo "update-release-notes: ${{ needs.update-release-notes.result }}"
           echo "cleanup-release-fragments: ${{ needs.cleanup-release-fragments.result }}"
-          echo "release-please=${{ needs.release-please.result }} cleanup-release-fragments=${{ needs.cleanup-release-fragments.result }}" >> "$GITHUB_STEP_SUMMARY"
-          if [ "${{ needs.cleanup-release-fragments.result }}" != "success" ] && [ "${{ needs.cleanup-release-fragments.result }}" != "skipped" ]; then
+          echo "release-please=${{ needs.release-please.result }} update-release-notes=${{ needs.update-release-notes.result }} cleanup-release-fragments=${{ needs.cleanup-release-fragments.result }}" >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ needs.update-release-notes.result }}" != "success" ]; then
+            echo "::error::update-release-notes concluded ${{ needs.update-release-notes.result }} — release notes could not be reconciled (docs/releases archive cannot materialize for this release)"
+            exit 1
+          fi
+          if [ "${{ needs.cleanup-release-fragments.result }}" != "success" ]; then
             echo "::error::cleanup-release-fragments concluded ${{ needs.cleanup-release-fragments.result }} — fragment cleanup did not complete (docs/releases archive not materialized for this release)"
             exit 1
           fi

@@ -34,6 +34,7 @@ export { handleAgentsCommand } from './agents';
 export { handleAnalyzeCommand } from './analyze';
 export { handleApproveWriteCommand } from './approve-write';
 export { handleArchiveCommand } from './archive';
+export { handleAttestCommand } from './attest';
 export { handleAutoProceedCommand } from './auto-proceed';
 export { handleBenchmarkCommand } from './benchmark';
 export { handleBrainstormCommand } from './brainstorm';
@@ -387,7 +388,10 @@ async function buildSwarmCommandPrompt(args: {
 	const typedResolved = resolved as ResolvedSwarmCommand;
 	const canonicalKey = canonicalCommandKey(typedResolved);
 	const policy = classifySwarmCommandToolUse(typedResolved);
-	const isV1ToolCommand = SWARM_COMMAND_TOOL_ALLOWLIST.has(canonicalKey);
+	const isV1ToolCommand =
+		SWARM_COMMAND_TOOL_ALLOWLIST.has(canonicalKey) &&
+		(canonicalKey !== 'pr-review' ||
+			typedResolved.remainingArgs.includes('--release-head'));
 	const canUseTool = agentHasSwarmCommandTool(
 		activeAgentName,
 		agents,

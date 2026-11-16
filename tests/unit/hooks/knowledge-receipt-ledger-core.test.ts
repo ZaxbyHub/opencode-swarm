@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
+	type CommitEmptyRetrievalResult,
 	commitDisplayedMembership,
 	commitEmptyRetrieval,
 	commitPhaseClosed,
@@ -39,6 +40,17 @@ function project(prefix: string): string {
 }
 
 function unwrap<T>(result: ReceiptLedgerResult<T>): T {
+	if (!result.ok) throw new Error(`${result.code}: ${result.detail}`);
+	return result;
+}
+
+// #2965: commitEmptyRetrieval's result union carries semantic conflict codes
+// outside `ReceiptUnavailable`'s literal union, so its call sites unwrap
+// through this dedicated helper.
+function unwrapEmpty(result: CommitEmptyRetrievalResult): {
+	event_id: string;
+	terminal_event_id: string;
+} {
 	if (!result.ok) throw new Error(`${result.code}: ${result.detail}`);
 	return result;
 }
@@ -327,7 +339,7 @@ describe('knowledge receipt ledger authority core', () => {
 		);
 		expect(retry.idempotent).toEqual(['entry-batch']);
 
-		const emptyCommit = unwrap(
+		const emptyCommit = unwrapEmpty(
 			await commitEmptyRetrieval(directory, {
 				trace_id: 'trace-empty',
 				session_id: 'session-batch',
@@ -418,7 +430,7 @@ describe('knowledge receipt ledger authority core', () => {
 				items: [{ entry_id: 'entry-archive', outcome: 'applied' }],
 			}),
 		);
-		unwrap(
+		unwrapEmpty(
 			await commitEmptyRetrieval(directory, {
 				trace_id: 'trace-empty-archive',
 				session_id: 'session-a',

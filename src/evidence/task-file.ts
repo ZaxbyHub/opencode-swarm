@@ -61,8 +61,14 @@ export function taskEvidencePath(directory: string, taskId: string): string {
 export async function atomicWriteFile(
 	targetPath: string,
 	content: string,
+	validateTarget?: () => void,
 ): Promise<void> {
-	await atomicWriteFileAnyRoot(targetPath, content);
+	// FB-001 (review round 3): forward an optional same-tick destination
+	// validator to the canonical writer so callers holding a lock can bind
+	// "chain verified link-free" to the exact write syscall (no intervening
+	// event-loop yield). Existing dual-destination callers pass nothing and
+	// are unaffected.
+	await atomicWriteFileAnyRoot(targetPath, content, { validateTarget });
 }
 
 /**

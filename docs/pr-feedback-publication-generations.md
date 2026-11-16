@@ -129,7 +129,11 @@ older readers ignore (never delete) the new record.
   `pr_feedback_publication_armed`, `pr_feedback_publication_migrated`,
   `pr_feedback_publication_invalidated`, `pr_feedback_push_attempt_started`,
   `pr_feedback_push_attempt_result`, `pr_feedback_published`,
-  `pr_feedback_publication_cancelled`.
+  `pr_feedback_publication_cancelled`, and — since the #3316 recovery work —
+  `pr_feedback_publication_reset_soft` (the one sanctioned
+  `git reset --soft <intake head>` admission). The PR_REVIEW→PR_FEEDBACK
+  consent rebind additionally writes a `pr_feedback_consent_rebound` event
+  (workflow-scoped, not publication-scoped).
 - Inspect and export with those two surfaces. **Never hand-edit the gate
   state file** — a manual edit is corruption, is treated fail-closed, and is
   not an authorization path.
