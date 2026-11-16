@@ -9,9 +9,12 @@ pipeline (collated #3700 + #3664 + #3661):
 
 - **pre_check_batch changed-line map (#3700):** the diff-base resolver memo is
   now scoped to one `run_pre_check_batch` invocation and passed explicitly to
-  both consumers, so a direct consumer call always resolves fresh state (a
-  same-HEAD candidate-ref move can no longer serve a stale merge-base that
-  misclassifies genuinely-new SAST findings as PRE-EXISTING). The
+  both consumers, so a direct consumer call always resolves fresh state and a
+  fresh batch re-walks (a same-HEAD candidate-ref move can no longer serve a
+  stale merge-base ACROSS invocations that misclassifies genuinely-new SAST
+  findings as PRE-EXISTING; within ONE batch the two consumers deliberately
+  share the batch's single resolved base — consistency by design, corrected
+  by the next batch). The
   phantom-destination guard now covers two-different-unquoted-path
   `diff --git` headers (an exact two-token split), the diff parser adopts a
   stateful production-mode grammar (structural lines + `GIT binary patch`

@@ -125,30 +125,33 @@ const APP_BASE =
  * Fresh fixture per leg: repo + bare `zaxbyhub` remote whose main sits at the
  * BASE commit, so the committed hop for every later HEAD is non-empty. The
  * nested independent root carries the `.opencode/` marker (#2127) plus
- * `nested/src/app.ts`; `withOutsideFile` also commits a root-level file for
- * the cross-prefix rename leg.
+ * `<dirName>/src/app.ts` (dirName defaults to 'nested'; the F-6 leg passes a
+ * whitespace-LEADING name — legal on every supported filesystem, and the
+ * exact class the trim() corruption silently broke); `withOutsideFile` also
+ * commits a root-level file for the cross-prefix rename leg.
  */
 function buildNestedFixture(
 	prefix: string,
-	options: { withOutsideFile?: boolean } = {},
-): { root: string; repo: string; nested: string } {
+	options: { withOutsideFile?: boolean; dirName?: string } = {},
+): { root: string; repo: string; nested: string; dirName: string } {
+	const dirName = options.dirName ?? 'nested';
 	const root = canonicalMkdtemp(prefix);
 	const repo = path.join(root, 'repo');
-	const nested = path.join(repo, 'nested');
+	const nested = path.join(repo, dirName);
 	const bare = path.join(root, 'zaxbyhub.git');
 	git(root, 'init', '-q', '-b', 'main', repo);
 	git(root, 'init', '-q', '--bare', '-b', 'main', bare);
 	git(repo, 'remote', 'add', 'zaxbyhub', bare);
 	git(repo, 'config', 'core.autocrlf', 'false');
-	write(repo, 'nested/.opencode/marker.txt', '');
-	write(repo, 'nested/src/app.ts', APP_BASE);
+	write(repo, `${dirName}/.opencode/marker.txt`, '');
+	write(repo, `${dirName}/src/app.ts`, APP_BASE);
 	if (options.withOutsideFile) {
 		write(repo, 'outside.ts', 'export const outside = true;\n');
 	}
 	git(repo, 'add', '-A');
 	git(repo, ...IDENTITY, 'commit', '-q', '-m', 'base');
 	git(repo, 'push', '-q', 'zaxbyhub', 'main');
-	return { root, repo, nested };
+	return { root, repo, nested, dirName };
 }
 
 describe('nested-root coordinate system for both diff-base consumers (#3700)', () => {
@@ -310,6 +313,57 @@ describe('nested-root coordinate system for both diff-base consumers (#3700)', (
 				),
 			).toEqual([]);
 			// Drop semantics pin: the untracked file itself is not ambiguous.
+			expect(ambiguous?.has('src/new-file.ts')).toBe(false);
+		} finally {
+			removeTreeWithRetry(root);
+		}
+	}, 60_000);
+
+	// F-6 (PR #3718 mirror review): a whitespace-LEADING top-level directory
+	// name. resolveRepoPathPrefix previously trim()-ed the `--show-prefix`
+	// output, so the prefix lost its leading spaces and EVERY porcelain
+	// record for that directory failed startsWith(prefix) and was silently
+	// dropped — ambiguity disappeared and findings classified PRE-EXISTING
+	// (the critic reproduced the fail-open end to end). This is the
+	// regression pin the fix was claimed to have but lacked: restoring the
+	// trim() reddens BOTH the untracked ALL_LINES_CHANGED assertion and the
+	// modified-record ambiguity assertion below (the records drop before the
+	// parse).
+	test('F-6: a whitespace-leading nested root keeps its porcelain records rebased (no silent drop)', async () => {
+		const { root, repo, nested, dirName } = buildNestedFixture(
+			'pre-check-nested-whitespace-3700-',
+			{ dirName: '  nested' },
+		);
+		try {
+			// Committed edit (line 3) so the ambiguity source is non-empty.
+			write(
+				repo,
+				`${dirName}/src/app.ts`,
+				'export const a = 1;\nexport const b = 2;\nexport const C = 3;\n',
+			);
+			git(repo, 'add', '-A');
+			git(repo, ...IDENTITY, 'commit', '-q', '-m', 'edit');
+			// Uncommitted edit + untracked file inside the whitespace root.
+			write(
+				repo,
+				`${dirName}/src/app.ts`,
+				'export const A = 1;\nexport const b = 2;\nexport const C = 3;\n',
+			);
+			write(repo, `${dirName}/src/new-file.ts`, 'export const fresh = 1;\n');
+
+			const ranges = await getChangedLineRanges(nested);
+			expect(ranges).not.toBeNull();
+			// The untracked record rebases under the CLASSIFIER key — with a
+			// trim()-ed prefix the raw '  nested/src/new-file.ts' never
+			// matches 'nested/' and this assertion goes red.
+			expect([...(ranges?.get('src/new-file.ts') ?? [])]).toEqual([-1]);
+
+			const ambiguous = await getChangedLineAmbiguousFiles(nested);
+			expect(ambiguous).not.toBeNull();
+			// The unstaged ' M' record survives the rebase (trim() mutant:
+			// silently dropped -> this goes red).
+			expect(ambiguous?.has('src/app.ts')).toBe(true);
+			// '??' never joins the ambiguity set (coordinate check for free).
 			expect(ambiguous?.has('src/new-file.ts')).toBe(false);
 		} finally {
 			removeTreeWithRetry(root);

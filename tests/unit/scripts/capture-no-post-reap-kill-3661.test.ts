@@ -64,8 +64,11 @@ describe('capture-required-check-evidence post-reap kill (#3661 AC4)', () => {
 			// the finally block does, not the return shape.
 			expect(result.ok).toBe(false);
 			// The child was already reaped when spawnSync returned; signalling
-			// its pid afterwards must not happen.
-			expect(killed).not.toContain(471_108);
+			// it afterwards must not happen AT ALL (F-008 tightening, PR #3718
+			// review: the previous PID-specific assertion let a
+			// `process.kill(-pid)` group-kill mutant survive — an empty list
+			// is the contract).
+			expect(killed).toEqual([]);
 		} finally {
 			(_internals as { spawnSync?: unknown }).spawnSync = seam;
 			_internals.ghApi = originalGhApi;
