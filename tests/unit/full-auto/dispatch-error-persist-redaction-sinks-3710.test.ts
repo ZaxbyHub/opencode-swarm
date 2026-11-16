@@ -184,7 +184,37 @@ describe('probeFullAutoOversightHealth returns redacted reasons (#3710 D3)', () 
 		expect(probe.attempts).toBe(1);
 		assertRedacted('probe reason (throwing create)', probe.reason);
 	}, 30_000);
+
+	test('a create result with NO error object still yields a reason (#3710 R-07)', async () => {
+		// `JSON.stringify(undefined)` is undefined, so the unguarded
+		// `sanitizeFailureEvidenceDisplay(JSON.stringify(created.error))`
+		// threw a TypeError out of the probe instead of returning a reason.
+		stubClientWithEmptyCreate();
+		const probe = await probeFullAutoOversightHealth({
+			directory: tmpDir,
+			sessionID: SESSION_ID,
+		});
+		expect(probe.healthy).toBe(false);
+		expect(probe.attempts).toBe(1);
+		expect(probe.reason).toContain('health probe create failed');
+		expect(probe.reason).toContain('no error detail');
+	}, 30_000);
 });
+
+/**
+ * Stub SDK client whose session.create resolves with NEITHER data nor an
+ * error object — the health probe's `created.error` is then undefined, so
+ * `JSON.stringify(created.error)` is undefined too. The probe must degrade
+ * to a reason string, not throw a TypeError out of the sanitizer (#3710 R-07).
+ */
+function stubClientWithEmptyCreate(): void {
+	const create = mock().mockResolvedValue({});
+	const prompt = mock().mockResolvedValue({});
+	const deleteSession = mock().mockResolvedValue({});
+	stateInternals.swarmState.opencodeClient = {
+		session: { create, prompt, delete: deleteSession },
+	} as unknown as typeof stateInternals.swarmState.opencodeClient;
+}
 
 // ─── (c) lean reviewer evidence — .swarm/evidence/{phase}/lean-turbo-reviewer.json
 

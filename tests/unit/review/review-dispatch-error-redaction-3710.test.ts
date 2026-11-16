@@ -162,4 +162,49 @@ describe('review engine dispatch failure persists redacted evidence (#3710 R-08)
 		expect(onDisk).not.toContain(SYNTH_TOKEN);
 		expect(onDisk).toContain(SYNTH_PLACEHOLDER);
 	}, 60_000);
+
+	test('the quota classification still reads the RAW detail, not the sanitized one', async () => {
+		// The redaction sits AFTER `isQuotaError(dispatchDetail)` on purpose:
+		// the sanitizer bounds its output to 512 bytes, so a quota keyword
+		// BEYOND that bound is cut from the sanitized value. This row pins
+		// the ordering: the classification still fires because it read the
+		// raw detail. If the sanitizer ever moved upstream of the
+		// classifier, the quota annotation below would disappear.
+		const longDetail = `${'a'.repeat(600)} quota exceeded ${SYNTH_TOKEN}`;
+		const advisories: string[] = [];
+		await runReviewEngine({
+			directory: tmpDir,
+			sessionID: SESSION_ID,
+			trigger: 'manual',
+			config: AutoReviewConfigSchema.parse({
+				enabled: true,
+				validate_findings: false,
+				final_review: { mode: 'advisory' },
+			}),
+			dispatcher: {
+				async dispatch(request: { agentName: string; prompt: string }) {
+					return {
+						status: 'error' as const,
+						agentName: request.agentName,
+						text: '',
+						error: longDetail,
+						durationMs: 1,
+						promptBytes: request.prompt.length,
+						responseBytes: 0,
+					};
+				},
+			},
+			reviewerAgent: 'reviewer',
+			validatorAgent: 'critic_finding_validator',
+			injectAdvisory: (_sessionID: string, message: string) => {
+				advisories.push(message);
+			},
+		} as never);
+
+		const advisory = advisories.join('\n');
+		expect(advisory).toContain(
+			'model quota/usage limit exhausted across all configured fallbacks',
+		);
+		expect(advisory).not.toContain(SYNTH_TOKEN);
+	}, 60_000);
 });

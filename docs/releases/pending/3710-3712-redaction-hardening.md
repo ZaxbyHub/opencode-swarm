@@ -20,16 +20,21 @@ these additional bare well-known credential families, each with its own
   segments stay at 10+): an unbounded segment made the regex quadratic on a
   dense `eyJ-` run at the shell site, which has no input-length bound and
   redacts BEFORE the audit truncation (measured: 256 KB took 30.7–33.3 s at
-  the unbounded arm; 229 ms at the bound). **Disclosed bound:** a JWT whose
-  header segment EXCEEDS 1024 chars is not matched by this arm at either site
-  — the base64 fallback arm's class excludes base64url's `-`/`_`, so such a
-  token is not eliminated by a fallback either (executed probe). A mainstream
-  issuer's header is ~36–100 chars, so the bound has ~10× headroom over a
-  real token. The `jwt` family is NEW in this change: at the PR's base
-  neither site patterned a JWT at all, so the over-long shape was not covered
-  there either — the bound trades coverage of a shape no issuer produces for
-  a bounded scan on a default-on hot path. The over-long shape is tracked as
-  a follow-up.
+  the unbounded arm; 150–229 ms at the bound). **Disclosed bound (verified):**
+  a JWT whose header segment EXCEEDS 1024 chars is NOT matched by this arm
+  at either site, and the base64 fallback arm's class excludes base64url's
+  `-`/`_`, so such a token is not eliminated by a fallback either. A JWS
+  that carries an `x5c` certificate chain (RFC 7515 §4.1.6 — e.g. an Apple
+  App Store Server or Android attestation signed payload) routinely has a
+  header of 1.2–5 KB, so this shape IS produced in practice: the header
+  itself is caught by the base64 arm, but the PAYLOAD and the SIGNATURE
+  survive in clear text at both sites in a bare placement (e.g.
+  `echo <jwt> | jq`); a key/value placement (`token=<jwt>`) is still caught
+  by the generic credential arm at the shell site. The `jwt` family is NEW in
+  this change — at the PR's base neither site patterned a JWT at all, so no
+  JWT (long header or not) was covered there — but the coverage gap is real
+  and is tracked in issue #3723 (the bound stays; the gap needs a
+  single-pass tokenizer that does not scan per start position).
 - `azure` — CONTEXTUAL only: connection-string `AccountKey=<base64>` spans
   collapse to the bare `[REDACTED:azure]` placeholder. The arm is
   case-INSENSITIVE (`accountKey=`, `ACCOUNTKEY=`), matching Azure's
@@ -131,7 +136,8 @@ Redaction can LENGTHEN a message (a URL becomes `<url:hash>`, a credential
 value becomes `<redacted>`), so the persisted value is sliced to the schema cap
 at the consumer seam — the run's schema parse no longer fails and the whole
 evaluation run is no longer discarded over an over-long failure string. The
-pre-existing 160-char cap itself is unchanged; see the follow-up issue.
+pre-existing 160-char cap itself is unchanged; changing it is a schema
+decision and is proposed as a follow-up (not yet filed).
 
 The `oversight infrastructure failure after N attempt(s):` prefix and the
 `deadline` / `opencodeClient unavailable` words survive redaction, so the

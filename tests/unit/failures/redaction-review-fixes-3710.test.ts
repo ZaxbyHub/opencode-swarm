@@ -59,12 +59,25 @@ describe('JWT arm is bounded at the shell site (#3710 review R-19)', () => {
 	test('the over-long-header residual is the DISCLOSED bound, not an accident', () => {
 		// The bound is a deliberate, disclosed trade: a JWT whose header
 		// segment exceeds 1024 chars is NOT matched by the jwt arm. This row
-		// pins that residual so a future change to the bound is a deliberate
-		// decision (and so the release fragment's disclosed bound stays
-		// true). No mainstream issuer produces a header this long, and the
-		// `jwt` family is new in this change — at the PR's base neither site
-		// patterned a JWT at all.
-		const overLongHeaderJwt = `eyJ${'A'.repeat(1100)}-.eyJ${'b'.repeat(40)}.${'c'.repeat(40)}`;
+		// uses the REAL shape that exceeds the bound — a JWS carrying an
+		// `x5c` certificate chain (RFC 7515 §4.1.6; e.g. an Apple App Store
+		// Server or Android attestation signed payload) has a header of
+		// 1.2-5 KB, so it IS produced in practice. The header itself is
+		// still caught by the base64 arm, but the PAYLOAD and the
+		// SIGNATURE survive in clear text in a bare placement at both
+		// sites. The row pins that residual so a future change to the
+		// bound is a deliberate decision and the release fragment's
+		// disclosed bound stays true.
+		const x5cHeader = Buffer.from(
+			JSON.stringify({
+				alg: 'RS256',
+				typ: 'JWT',
+				x5c: ['MII' + 'A'.repeat(900)],
+			}),
+			'utf8',
+		).toString('base64url');
+		expect(x5cHeader.length).toBeGreaterThan(1024);
+		const overLongHeaderJwt = `${x5cHeader}.eyJ${'b'.repeat(40)}.${'c'.repeat(40)}`;
 		expect(sanitizeFailureEvidenceDisplay(overLongHeaderJwt)).not.toContain(
 			'[REDACTED:jwt]',
 		);

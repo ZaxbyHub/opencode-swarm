@@ -139,4 +139,51 @@ describe('epic phase review dispatch failure persists a redacted reason (#3710 R
 		expect(reason).toContain(SYNTH_PLACEHOLDER);
 		expect(reason).toContain('reviewer dispatch failed');
 	}, 60_000);
+
+	test('the transient classification still reads the RAW message, not the sanitized one', async () => {
+		// The redaction sits AFTER the `classify` callback on purpose: the
+		// sanitizer bounds its output to 512 bytes, so a transient marker
+		// BEYOND that bound is cut from the sanitized value. This row pins
+		// the ordering: the classification still reads the raw message, so
+		// the transient failure still advances to the configured fallback
+		// model (two dispatches). If the sanitizer ever moved upstream of
+		// the classifier, the fallback would NOT be tried (one dispatch).
+		const calls: ReviewDispatchRequest[] = [];
+		const longTransientDetail = `${'a'.repeat(600)} HTTP 503 Service Unavailable ${SYNTH_TOKEN}`;
+		const result = await runEpicPhaseReview(dir, 1, 'arch', {
+			dispatcher: {
+				dispatch: async (request) => {
+					calls.push(request);
+					return {
+						agentName: request.agentName,
+						status: 'error' as const,
+						text: '',
+						error: longTransientDetail,
+						durationMs: 5,
+						promptBytes: request.prompt.length,
+						responseBytes: 0,
+					};
+				},
+			},
+			agentModelRegistry: {
+				reviewer: { fallbackModels: ['fallback-provider/fallback-model'] },
+			} as unknown as Parameters<
+				typeof runEpicPhaseReview
+			>[3]['agentModelRegistry'],
+		});
+
+		// The transient classification fired on the RAW message, so the
+		// fallback model was tried as well.
+		expect(calls.length).toBe(2);
+		expect(calls[0]?.model).toBeUndefined();
+		expect(calls[1]?.model).toEqual({
+			providerID: 'fallback-provider',
+			modelID: 'fallback-model',
+		});
+
+		// Fail-closed posture preserved under redaction.
+		expect(result.success && !result.ready).toBe(true);
+		const reviewer = stored().reviewer as { reason?: string } | null;
+		expect(reviewer?.reason).not.toContain(SYNTH_TOKEN);
+	}, 60_000);
 });
