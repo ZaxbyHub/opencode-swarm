@@ -4332,6 +4332,56 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		},
 	},
 	{
+		id: 'retention-control-plane',
+		category: 8,
+		pathGrammar:
+			'.swarm/retention.log + .swarm/retention.d/{owner}.json (one ownership manifest per owner; no shared manifest file)',
+		canonicalRoot: 'project-swarm',
+		writerModules: ['src/retention/unclaimed.ts'],
+		writerCitations: [
+			'src/retention/unclaimed.ts:489 appendRetentionLog — one line per pruned directory (`<ISO-8601> pruned <path> age=<days> size=<bytes>`), then a tail-only rewrite when the append crosses the byte budget; the manifest DIRECTORY is read-only to the plugin (loadOwnerManifests:234) — each owner writes only its own file',
+		],
+		readerCitations: [
+			'loadOwnerManifests (:234) reads every *.json manifest once per sweep, before any deletion; the log is written for humans and agents to read (no in-process reader by design)',
+		],
+		schemaVersion:
+			'manifest schema 1 — { owner: string, preserve: string[], maxAgeDays?: number }; log line grammar `<ISO-8601> pruned <path> age=<days> size=<bytes>`',
+		stateClass: 'operational',
+		privacyClass: 'metadata',
+		writeLimits: {
+			bound:
+				'one line per pruned directory; the log is compacted to the newest lines within RETENTION_LOG_MAX_BYTES 256 KiB on the append that crosses it (src/retention/unclaimed.ts:54,489); each manifest is capped at RETENTION_MANIFEST_MAX_BYTES 64 KiB (:52) and a larger claim is refused as malformed',
+			scope: 'global',
+			citation: 'src/retention/unclaimed.ts:52,54,489',
+		},
+		readBound: {
+			pattern: 'tail (byte-bounded)',
+			bound:
+				'compaction reads only the newest RETENTION_LOG_MAX_BYTES 256 KiB of the log; manifests are read whole but bounded to 64 KiB each',
+			sync: false,
+			citation: 'src/retention/unclaimed.ts:52,54',
+		},
+		lockModel:
+			'append-only O_APPEND line batch; the rare compaction rewrites the tail and the last writer wins (the log is diagnostic, never authority)',
+		crashBehavior:
+			'a torn trailing line is cosmetic — readers treat each line independently and the next append starts a new one',
+		closePolicy:
+			'untouched by close — the log records what the sweep reclaimed, and manifests are owner-authored policy that close must not rewrite',
+		resetPolicy: 'not reset',
+		legacyCompatibility: 'n/a',
+		healthSignal: 'n/a',
+		owner: '#2483 follow-up (unclaimed-directory lifecycle)',
+		closeArrayMembership: {
+			'retention.log': 'neither',
+			'retention.d': 'neither',
+		},
+		disposition: {
+			kind: 'not-a-defect',
+			proof:
+				'Bounded by construction: the log carries one metadata line per pruned path (no file content) and is compacted to RETENTION_LOG_MAX_BYTES 256 KiB (src/retention/unclaimed.ts:54,489-516), so it cannot become the unbounded-growth defect the catch-all exists to fix; manifests are one 64 KiB-capped file per owner and a malformed/ambiguous claim refuses the whole sweep rather than being deleted.',
+		},
+	},
+	{
 		id: 'residue-quarantine',
 		category: 8,
 		pathGrammar: '.swarm/quarantine/{batch}/ (+ per-batch manifest with sha256/original-path/reason)',

@@ -23,6 +23,13 @@
  *  - authoritative streams (plan ledger, knowledge store, council, evidence,
  *    scopes, swarm.db, telemetry) are NOT in any family and are never
  *    touched (negative test).
+ *  - directories under `.swarm/` that no family owns get a lifecycle instead
+ *    of being permanently unreclaimable: a tier-1 preserve allowlist, tier-2
+ *    owner manifests (`.swarm/retention.d/*.json`), then a tier-3 catch-all
+ *    that prunes only unclaimed, non-symlinked, marker-free, wholly-stale
+ *    directories and records each prune in `.swarm/retention.log`
+ *    (see `./unclaimed.ts`). A malformed owner manifest refuses the WHOLE
+ *    sweep (fail closed) before any deletion happens.
  *  - checkout-preparation receipts remain recovery material: the checkout
  *    family only removes old, strictly validated applied+verified receipts
  *    (and abandoned atomic-write temporary files), never a pending receipt or
@@ -45,6 +52,12 @@ import {
 	subtreeNewestFileMtime,
 } from './dir-prune';
 import { readTailJsonlDetailed } from './jsonl-cap';
+import {
+	type ExplainedPrune,
+	loadOwnerManifests,
+	type OwnerManifestSet,
+	pruneUnclaimedDirectories,
+} from './unclaimed';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -77,12 +90,23 @@ export interface RetentionSweepOptions {
 	 * of finishing its full pass after the awaiter already moved on.
 	 */
 	shouldContinue?: () => boolean;
+	/**
+	 * The `--explain` surface: list what the unclaimed-directory catch-all
+	 * WOULD prune (path, age, size, owner) in `result.explained`, and delete
+	 * nothing. Implies a no-delete pass even when `dryRun` is false.
+	 */
+	explain?: boolean;
 }
 
 export interface RetentionSweepResult {
 	pruned: Record<string, number>;
 	disabled?: boolean;
 	dryRun?: boolean;
+	/**
+	 * Populated under `explain` or `dryRun`: every directory the tier-3
+	 * catch-all selected, with the evidence used to select it.
+	 */
+	explained?: ExplainedPrune[];
 	errors: Record<string, string>;
 }
 
@@ -209,6 +233,13 @@ function familiesFor(swarmRoot: string, now: number): Family[] {
  * the summaries retention pass, and prune evolution candidates that reached
  * a terminal lifecycle state (with an age-only backstop). Every family is
  * individually fail-open; the function itself never throws.
+ *
+ * As its final pass it runs the tier-3 catch-all for directories under
+ * `.swarm/` that no family owns and no owner manifest claims
+ * (`./unclaimed.ts`). The one non-fail-open branch is deliberate: an
+ * unparseable `.swarm/retention.d/*.json` ownership claim refuses the whole
+ * sweep before any deletion, because deleting under an ownership map we could
+ * not verify is worse than not reclaiming this run.
  */
 export async function runRetentionSweep(
 	projectRoot: string,
@@ -225,7 +256,10 @@ export async function runRetentionSweep(
 
 	// Containment guard: the resolved swarm root must sit inside the project
 	// root. A symlinked `.swarm` (or a root trick) refuses the whole sweep
-	// rather than deleting through the link.
+	// rather than deleting through the link. This is the OUTER check only —
+	// the tier-3 catch-all re-resolves every candidate immediately before
+	// deleting it (see `./unclaimed.ts`), because a child can be swapped for a
+	// symlink after this point.
 	try {
 		const resolvedRoot = fs.realpathSync(projectRoot);
 		const resolvedSwarm = fs.realpathSync(swarmRoot);
@@ -247,6 +281,25 @@ export async function runRetentionSweep(
 				error instanceof Error ? error.message : String(error);
 		}
 		return result;
+	}
+
+	// Tier-2 ownership claims are read BEFORE anything is deleted. A malformed
+	// or unreadable manifest refuses the WHOLE sweep (fail closed): an
+	// unparseable ownership claim is not a licence to delete, and a partial
+	// sweep would delete under an ownership map we could not verify.
+	let ownership: OwnerManifestSet;
+	try {
+		ownership = loadOwnerManifests(swarmRoot);
+	} catch (error) {
+		result.errors.manifests =
+			error instanceof Error ? error.message : String(error);
+		log('retention sweep: refusing whole sweep on ownership claims', {
+			error: result.errors.manifests,
+		});
+		return result;
+	}
+	if (ownership.files.length > 0) {
+		log('retention sweep: owner manifests loaded', ownership.files);
 	}
 
 	// 1. Directory families (fail-open each). Directory entries are aged by
@@ -474,6 +527,41 @@ export async function runRetentionSweep(
 		}
 	} catch (error) {
 		result.errors['summaries-retention'] =
+			error instanceof Error ? error.message : String(error);
+	}
+
+	// 7. Tier-3 catch-all: directories immediately under `.swarm/` that no
+	// family above owns and no owner manifest claims. Before this pass existed
+	// they had NO lifecycle at all — an agent-written scratch tree grew for the
+	// lifetime of the project and no supported command could reclaim it. It
+	// runs LAST because it is the broadest pass: when the cooperative stop
+	// token has already fired, the specific families get the remaining budget
+	// and the catch-all simply resumes on the next sweep. The tier-1 allowlist
+	// and the tier-2 claims were resolved before any deletion ran (a manifest
+	// error refuses the whole sweep). `dryRun` and `explain` both list the
+	// planned set in `result.explained` and delete nothing.
+	if (cancelled('unclaimed-directories')) return result;
+	try {
+		const outcome = await pruneUnclaimedDirectories(swarmRoot, {
+			now,
+			dryRun,
+			explain: options.explain === true,
+			claims: ownership.claims,
+			shouldContinue: options.shouldContinue,
+		});
+		for (const failure of outcome.failures) {
+			result.errors[failure.path] = failure.message;
+		}
+		const prunedCount =
+			dryRun || options.explain === true
+				? outcome.planned.length
+				: outcome.pruned.length;
+		if (prunedCount > 0) result.pruned['unclaimed-directories'] = prunedCount;
+		if (dryRun || options.explain === true) {
+			result.explained = outcome.planned;
+		}
+	} catch (error) {
+		result.errors['unclaimed-directories'] =
 			error instanceof Error ? error.message : String(error);
 	}
 

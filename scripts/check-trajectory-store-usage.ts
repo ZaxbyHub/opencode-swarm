@@ -87,6 +87,11 @@ export const TRAJECTORY_MENTION_ALLOWLIST: Readonly<
 		reason: 'listTrajectorySessions — the documented read-only enumerator (single readdir, no entry reads; see corpus.ts:367-376)',
 		cls: 'enumerator',
 	},
+	'src/retention/unclaimed.ts': {
+		reason:
+			'tier-1 preserve allowlist only (issue #2483 follow-up): the catch-all names the trajectories directory so it can never be pruned — never reads a trajectory entry',
+		cls: 'lifecycle',
+	},
 });
 
 /** Matches an import of the store module (static or dynamic, .js optional,

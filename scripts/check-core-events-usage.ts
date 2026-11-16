@@ -70,6 +70,11 @@ export const CORE_EVENTS_MENTION_ALLOWLIST: Readonly<
 		reason: 'reset lifecycle ownership of events.jsonl and events-authority-index.json',
 		cls: 'lifecycle',
 	},
+	'src/retention/unclaimed.ts': {
+		reason:
+			'tier-1 preserve allowlist only (issue #2483 follow-up): the catch-all names the authoritative event stream so it can never be pruned — no read, no write, no append',
+		cls: 'lifecycle',
+	},
 	'src/services/session-reflection.ts': {
 		reason: 'reads ARCHIVED events.jsonl copies (immutable validated cuts) with a bounded, symlink-guarded fallback read',
 		cls: 'archive-reader',
