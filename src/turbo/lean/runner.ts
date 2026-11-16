@@ -21,9 +21,15 @@ import { DEFAULT_LEAN_TURBO_CONFIG } from '../../config/constants';
 import type { Plan } from '../../config/plan-schema';
 import type { LeanTurboConfig } from '../../config/schema';
 import { deriveSwarmIdentity } from '../../config/schema';
-import { sanitizeFailureEvidenceDisplay } from '../../failures/invocation-failure';
+import {
+	classifyProviderFailure,
+	isRetryableProviderFailure,
+	sanitizeFailureEvidenceDisplay,
+} from '../../failures/invocation-failure';
 import {
 	formatProviderMessageError,
+	type ProviderMessageError,
+	providerMessageErrorToError,
 	readProviderMessageError,
 } from '../../failures/provider-message-error';
 import { loadFullAutoRunState } from '../../full-auto/state';
@@ -45,10 +51,7 @@ import {
 	dispatchWithModelFallback,
 	type ModelOverride,
 } from '../../utils/model-dispatch-fallback';
-import {
-	isQuotaError,
-	isTransientProviderError,
-} from '../../utils/provider-error-classification';
+import { isQuotaError } from '../../utils/provider-error-classification';
 import type { LaneEvidence, PhaseEvidence } from './evidence';
 import { writeLaneEvidence, writePhaseEvidence } from './evidence';
 import { publishLeanTurboLaneScopeBinding } from './lane-scope';
@@ -124,6 +127,15 @@ export interface LaneDispatchResult {
 	sessionId?: string;
 	/** Error message if ok === false */
 	error?: string;
+	/**
+	 * #3177: the structured provider error behind `error` when the failure was
+	 * a provider-refused `session.prompt` (null for every other failure shape).
+	 * Callers that feed the failure into retry/model-fallback classification
+	 * must prefer this snapshot over re-deriving from the bounded display
+	 * string — the display can lose the transient keyword past its 512-byte
+	 * bound, and deterministic auth/config text can falsely read transient.
+	 */
+	providerError?: ProviderMessageError;
 }
 
 /**
@@ -364,6 +376,9 @@ function pushDirtyTreeDowngradeAdvisory(
 	pushAdvisory(session, advisory);
 }
 
+/** #3177: module-level counter backing per-runner fallback-scope ids. */
+let leanRunnerFallbackScopeRunSeq = 0;
+
 export class LeanTurboRunner {
 	/**
 	 * Test-only dependency-injection seam.
@@ -476,6 +491,15 @@ export class LeanTurboRunner {
 	 * Null when no downgrade is pending.
 	 */
 	private _pendingDowngrade: { reason: string } | null = null;
+
+	/**
+	 * #3177: per-instance ordinal for the scoped model-fallback key. Each
+	 * runner invocation (the lean-turbo-run-phase tool constructs a fresh
+	 * runner per call) gets its own selection scope, so re-running the SAME
+	 * phase after an exhausted chain starts fresh instead of inheriting the
+	 * previous run's exhausted selection.
+	 */
+	private readonly _fallbackScopeRunId = ++leanRunnerFallbackScopeRunSeq;
 
 	constructor(options: {
 		/** Project root directory */
@@ -700,7 +724,13 @@ export class LeanTurboRunner {
 
 		// Process lanes concurrently for maximum throughput
 		const results = await Promise.all(
-			lanePlan.lanes.map((lane) => this._processLane(lane, leanConfig, plan)),
+			lanePlan.lanes.map((lane) =>
+				// #3177: the phase ordinal rides into _processLane so the scoped
+				// fallback selection is keyed per phase (lane ids restart their
+				// numbering every phase and would otherwise resume the previous
+				// phase's advanced/exhausted selection).
+				this._processLane(lane, leanConfig, plan, phaseNumber),
+			),
 		);
 		laneResults.push(...results);
 
@@ -985,6 +1015,10 @@ export class LeanTurboRunner {
 								providerError,
 							)
 						: `session.prompt failed: ${typeof promptResult.error === 'string' ? promptResult.error : JSON.stringify(promptResult.error)}`,
+					// #3177: keep the structured error on the failure result so
+					// the model-fallback chain classifies from the canonical
+					// snapshot instead of the bounded display string.
+					...(providerError ? { providerError } : {}),
 				};
 			}
 
@@ -1296,6 +1330,7 @@ export class LeanTurboRunner {
 		lane: LeanTurboLane,
 		leanConfig: LeanTurboConfig,
 		plan?: Plan,
+		phaseNumber?: number,
 	): Promise<LaneResult> {
 		// Update status to running
 		const laneInState = this._laneStatuses.get(lane.laneId);
@@ -1524,13 +1559,32 @@ export class LeanTurboRunner {
 						model,
 						plan,
 					);
-					if (!r.ok) throw new Error(r.error ?? 'lane dispatch failed');
+					if (!r.ok) {
+						// #3177: preserve the structured provider error as the thrown
+						// carrier so BOTH fallback gates classify from the canonical
+						// snapshot instead of re-deriving from the bounded display
+						// string (a 403 whose text mentions "429" must never burn the
+						// fallback chain; a rate limit truncated past the display
+						// bound must still fail over).
+						throw r.providerError
+							? providerMessageErrorToError(
+									'session.prompt provider error',
+									r.providerError,
+								)
+							: new Error(r.error ?? 'lane dispatch failed');
+					}
 					return r;
 				},
 				scope: this._sessionID
 					? {
 							sessionID: this._sessionID,
-							invocationID: `lean-runner:${lane.laneId}`,
+							// #3177: keyed per phase AND per runner run — lane ids
+							// restart their numbering every phase, so a lane-scoped key
+							// alone would let phase N+1's lane-1 resume phase N's
+							// advanced (or exhausted) fallback selection, and a
+							// phase-only key would let a re-run of the SAME phase
+							// inherit its own exhausted chain.
+							invocationID: `lean-runner:phase-${phaseNumber ?? 'x'}:run-${this._fallbackScopeRunId}:${lane.laneId}`,
 							swarmID: coderSwarmId,
 							role: coderBase,
 						}
@@ -1551,7 +1605,13 @@ export class LeanTurboRunner {
 					// invariant break, never a provider blip. Retrying it on another
 					// model would create another unscoped lane session.
 					if (msg.includes(LANE_SCOPE_DENIED_CODE)) return 'permanent';
-					return isTransientProviderError(msg) ? 'transient' : 'permanent';
+					// #3177: delegate to the canonical provider classifier — a
+					// structured carrier snapshot governs (deterministic
+					// auth/config failures never enter the fallback chain), and
+					// text matching remains only for structure-less errors.
+					return isRetryableProviderFailure(classifyProviderFailure(err))
+						? 'transient'
+						: 'permanent';
 				},
 				onFallback: ({ toModel, fallbackIndex }) => {
 					telemetry.modelFallback(

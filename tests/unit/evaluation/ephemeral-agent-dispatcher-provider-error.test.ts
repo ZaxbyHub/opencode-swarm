@@ -87,6 +87,9 @@ describe('dispatchEphemeralAgent — provider error on the assistant message', (
 			// The classifier's bounded display text (it appends the status).
 			message: 'Forbidden: tool configuration not allowed 403',
 			category: 'provider.authentication_configuration',
+			// #3177: the read-time canonical retry semantics ride the snapshot.
+			retryClass: 'operator_action',
+			risk: 'high',
 		});
 	});
 
@@ -110,6 +113,8 @@ describe('dispatchEphemeralAgent — provider error on the assistant message', (
 			name: 'ProviderAuthError',
 			message: 'invalid api key',
 			category: 'provider.authentication_configuration',
+			retryClass: 'operator_action',
+			risk: 'high',
 		});
 	});
 
