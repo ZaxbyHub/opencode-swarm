@@ -12,8 +12,8 @@
 # the gate; an EXPIRY more than 14 days in the past also fails (inside
 # the grace window it only warns).
 #
-# Active macOS-only quarantine entries are below; each carries the Check
-# 7-enforced OWNER/EXPIRY metadata.
+# No active macOS-only quarantine entries. (An active entry, when present,
+# carries the Check 7-enforced OWNER/EXPIRY metadata.)
 #
 # Retired 2026-11-16 per issue #2973 (quarantine-debt-zero trace, successor to
 # the 2026-11-12 re-anchor): tests/unit/hooks/pr-feedback-scope-controller.test.ts

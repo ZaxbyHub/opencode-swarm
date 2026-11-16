@@ -1,6 +1,11 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { createDelegationGateHook } from '../../../src/hooks/delegation-gate.js';
-import { resolvePrFeedbackScopeDeclaration } from '../../../src/hooks/pr-workflow-gate.js';
+import {
+	activatePrWorkflow,
+	declarePrFeedbackInventory,
+	enforcePrFeedbackVerificationOwnership,
+	resolvePrFeedbackScopeDeclaration,
+} from '../../../src/hooks/pr-workflow-gate.js';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state.js';
 import { executePreparePrFeedbackScope } from '../../../src/tools/prepare-pr-feedback-scope.js';
 import { makeConfig } from './_delegation-gate-helpers.js';
@@ -12,11 +17,6 @@ import {
 	teardownPrWorkflowGateFixtures,
 	tempDir,
 } from './pr-workflow-gate.test-fixtures.js';
-import {
-	activatePrWorkflow,
-	declarePrFeedbackInventory,
-	enforcePrFeedbackVerificationOwnership,
-} from '../../../src/hooks/pr-workflow-gate.js';
 
 // Issue #2973 macos-entry retirement: the "atomically reserves one
 // PR-feedback declaration when Task calls race" case moved here from
