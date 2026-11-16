@@ -218,21 +218,26 @@ type DiffBaseEnvelope = {
 
 /**
  * Single-entry batch memo for the shared diff-base resolver (PR-feedback
- * FB-003): both consumers run back-to-back inside one pre_check_batch on
- * the same directory, and while HEAD is unchanged the resolution is purely
- * HEAD-derived, so the second consumer reuses the first consumer's envelope
- * instead of re-running the full candidate walk. Cleared at the top of
- * runPreCheckBatch (batch scope); the directory+headSha key self-invalidates
- * on any HEAD move. Disclosed residual: a fetch that moves a candidate ref
- * WITHOUT moving HEAD between two direct (non-batch) calls could serve a
- * stale mergeBase — same class as the existing changedLineRangesMemo batch
- * cache.
+ * FB-003, #3700 item 1): both consumers run back-to-back inside ONE
+ * pre_check_batch on the same directory, and while HEAD is unchanged the
+ * resolution is purely HEAD-derived, so the second consumer reuses the first
+ * consumer's envelope instead of re-running the full candidate walk. The
+ * holder is OWNED by the runPreCheckBatch invocation that creates it and
+ * passed explicitly to both consumers — a module-global keyed on
+ * directory+headSha served direct exported-consumer calls a STALE envelope
+ * after a same-HEAD candidate-ref move (force-fetch), the #3700 fail-open.
+ * Direct consumer calls (no memo passed) always resolve fresh.
  */
-let diffBaseResolutionMemo: {
+export interface DiffBaseResolutionMemoEntry {
 	directory: string;
 	headSha: string | null;
 	envelope: DiffBaseEnvelope;
-} | null = null;
+}
+
+/** Mutable single-slot holder threaded through one runPreCheckBatch invocation. */
+export interface DiffBaseMemoHolder {
+	current: DiffBaseResolutionMemoEntry | null;
+}
 
 /**
  * Per-directory cooldown for the always-visible diff-base failure
@@ -291,6 +296,7 @@ const lastDiffBaseFallthroughWarn = new Map<string, number>();
 async function resolveValidatedDiffBase(
 	directory: string,
 	abortSignal?: AbortSignal,
+	memo?: DiffBaseMemoHolder,
 ): Promise<DiffBaseEnvelope> {
 	let executable: string;
 	try {
@@ -336,11 +342,11 @@ async function resolveValidatedDiffBase(
 			: null;
 	if (
 		headSha !== null &&
-		diffBaseResolutionMemo &&
-		diffBaseResolutionMemo.directory === directory &&
-		diffBaseResolutionMemo.headSha === headSha
+		memo?.current &&
+		memo.current.directory === directory &&
+		memo.current.headSha === headSha
 	) {
-		return diffBaseResolutionMemo.envelope;
+		return memo.current.envelope;
 	}
 	const attempted: DiffBaseAttempt[] = [];
 	for (const baseBranch of DIFF_BASE_CANDIDATES) {
@@ -392,6 +398,7 @@ async function resolveValidatedDiffBase(
 				'--submodule=short',
 				'--inter-hunk-context=0',
 				'-U0',
+				'--relative',
 				`${candidate}..HEAD`,
 				'--',
 			],
@@ -436,8 +443,8 @@ async function resolveValidatedDiffBase(
 				committedRawPaths,
 			},
 		};
-		if (headSha !== null) {
-			diffBaseResolutionMemo = { directory, headSha, envelope: resolved };
+		if (headSha !== null && memo) {
+			memo.current = { directory, headSha, envelope: resolved };
 		}
 		return resolved;
 	}
@@ -491,6 +498,7 @@ async function resolveValidatedDiffBase(
 							'--submodule=short',
 							'--inter-hunk-context=0',
 							'-U0',
+							'--relative',
 							`${candidate}..HEAD`,
 							'--',
 						],
@@ -524,8 +532,8 @@ async function resolveValidatedDiffBase(
 									committedRawPaths,
 								},
 							};
-							if (headSha !== null) {
-								diffBaseResolutionMemo = {
+							if (headSha !== null && memo) {
+								memo.current = {
 									directory,
 									headSha,
 									envelope: resolved,
@@ -541,9 +549,9 @@ async function resolveValidatedDiffBase(
 			}
 		}
 	}
-	if (headSha !== null) {
+	if (headSha !== null && memo) {
 		const exhausted = { attempted, resolution: null };
-		diffBaseResolutionMemo = { directory, headSha, envelope: exhausted };
+		memo.current = { directory, headSha, envelope: exhausted };
 	}
 	return { attempted, resolution: null };
 }
@@ -1800,7 +1808,25 @@ function parseGitDiffPair(rest: string): {
 	source: string;
 	destination: string;
 } | null {
-	const pair = splitDiffPathPair(rest, ' ');
+	let pair = splitDiffPathPair(rest, ' ');
+	if (pair === null) {
+		// #3700 item 2: a two-DIFFERENT-unquoted-paths header (the
+		// rename/copy shape) splits on the single space UNAMBIGUOUSLY when
+		// it yields exactly two non-empty tokens. Without this fallback the
+		// pair stays null, the phantom-destination guard below is SKIPPED
+		// for exactly this shape, and `diff --git src/real.ts src/other.ts`
+		// + `+++ src/phantom.ts` admitted a phantom key (the fail-open this
+		// closes). A header yielding MORE than two tokens (a space-containing
+		// unquoted path) also stays null — and that residual is NOT a
+		// rejection: the section keeps parsing and only the header-to-`+++`
+		// correlation (this guard) is skipped for the section, the documented
+		// over-gating trade-off at the `+++ ` branch's phantom guard. Do not
+		// describe it as fail closed.
+		const tokens = rest.split(' ');
+		if (tokens.length === 2 && tokens[0].length > 0 && tokens[1].length > 0) {
+			pair = { source: tokens[0], destination: tokens[1] };
+		}
+	}
 	if (pair === null) return null;
 	// An unparseable side leaves the pair unusable; the caller then skips
 	// every check that depends on it rather than comparing against a bogus
@@ -1874,6 +1900,23 @@ function parseDiffLineRangesChecked(
 	// consumer treats null as "no discount", the safe direction.
 	let oldRemaining = 0;
 	let newRemaining = 0;
+	// #3700 item 3 stateful grammar: once a `GIT binary patch` section opened,
+	// `literal <n>` / `delta <n>` size lines arm binary-payload mode; inside a
+	// fragment, base85 payload lines (which never contain a space) and the
+	// blank fragment terminator are the ONLY accepted shapes — anything else
+	// inside the payload region is junk and fails closed. Outside hunks and
+	// binary payloads, only recognized structural lines are accepted between
+	// sections; an unrecognized line anywhere in a production-mode diff is
+	// output this parser does not understand and fails closed instead of
+	// yielding an authoritative map from partially-understood input.
+	let inBinaryPayload = false;
+	// True from a `GIT binary patch` line until the next `diff --git` section:
+	// fragment size lines (`literal/delta <n>`) and base85 payloads are grammar
+	// ONLY inside such a section (4.5 review finding: without this gate, a
+	// stray `literal 5` after an ordinary section armed payload mode and
+	// admitted space-free junk — the junk-acceptance fail-open through a
+	// different door).
+	let sawBinaryPatchSection = false;
 
 	for (const rawLine of diffOutput.split(/\r?\n/)) {
 		const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
@@ -1914,6 +1957,8 @@ function parseDiffLineRangesChecked(
 			currentFile = null;
 			expectingDestination = false;
 			destinationSeen = false;
+			inBinaryPayload = false;
+			sawBinaryPatchSection = false;
 			// `diff --git <src> <dst>`. The a-side may be /dev/null (a new
 			// file), either side may be quoted when it contains special
 			// characters, and a path containing a space is emitted unquoted
@@ -1968,9 +2013,13 @@ function parseDiffLineRangesChecked(
 			// evidence: with `diff.renames=copies`, the copied file left the
 			// map entirely and its findings classified PRE-EXISTING). If the
 			// same section then carries a hunk, the `+++ ` branch's
-			// `result.has` guard keeps this entry instead of overwriting it,
-			// and the hunk's line numbers are added to the ALL_LINES_CHANGED
-			// set — over-gating, never fail-open.
+			// `result.has` guard keeps this entry instead of overwriting it;
+			// the hunk adds its line numbers, and the EOF copy/rename safety
+			// net then re-commits the destination to the ALL_LINES_CHANGED
+			// sentinel ALONE (executed (j) control: the final set is [-1],
+			// not [-1, hunk..]) — the sentinel dominates every consumer
+			// lookup anyway, so the net effect is identical: the destination
+			// is fully gated. Over-gating, never fail-open.
 			result.set(destination, new Set([ALL_LINES_CHANGED]));
 			if (rawPaths !== undefined) {
 				// `git diff` appends a trailing TAB to an UNQUOTED header
@@ -2006,6 +2055,13 @@ function parseDiffLineRangesChecked(
 			line.startsWith('GIT binary patch')
 		) {
 			if (!inGitFile) return null;
+			if (line.startsWith('GIT binary patch')) {
+				// Binary-payload grammar: the fragments that follow are size
+				// lines + base85 payloads + blank terminators (handled in the
+				// structural fall-through below).
+				inBinaryPayload = true;
+				sawBinaryPatchSection = true;
+			}
 			const binaryFile = line.startsWith('Binary files ')
 				? parseBinaryFilesLine(line)
 				: (gitFilePair?.destination ?? null);
@@ -2138,6 +2194,53 @@ function parseDiffLineRangesChecked(
 			}
 			continue;
 		}
+		// #3700 item 3 — structural-line grammar (production mode, counters
+		// disarmed). Everything a real `git diff` emits between/outside file
+		// sections is enumerated here; ANY other line is junk and fails
+		// closed — before the first section, between sections, or after the
+		// last one. `@@` lines fall through to the hunk branch below; the
+		// header-less public wrapper never reaches this rule
+		// (requireGitFileHeaders false, pinned by 3681b).
+		if (requireGitFileHeaders && !line.startsWith('@@')) {
+			// Blank line: the binary-fragment terminator, or the trailing
+			// split element — accepted, but ends payload mode.
+			if (line === '') {
+				inBinaryPayload = false;
+				continue;
+			}
+			// A fragment size line (re-)arms binary-payload mode — but
+			// ONLY inside a `GIT binary patch` section (4.5 review
+			// finding: a stray `literal 5` after an ordinary section
+			// armed payload mode and admitted space-free junk).
+			if (sawBinaryPatchSection && /^(?:literal|delta) \d+$/.test(line)) {
+				inBinaryPayload = true;
+				continue;
+			}
+			if (inBinaryPayload) {
+				// Real base85 payload lines never contain a space; a
+				// space-bearing line inside the payload region is junk.
+				if (!line.includes(' ')) continue;
+				return null;
+			}
+			if (
+				line.startsWith('index ') ||
+				line.startsWith('old mode ') ||
+				line.startsWith('new mode ') ||
+				line.startsWith('new file mode ') ||
+				line.startsWith('deleted file mode ') ||
+				line.startsWith('similarity index ') ||
+				line.startsWith('dissimilarity index ') ||
+				line.startsWith('rename from ') ||
+				line.startsWith('rename to ') ||
+				line.startsWith('copy from ') ||
+				line.startsWith('copy to ') ||
+				line === '\\ No newline at end of file'
+			) {
+				continue;
+			}
+			// Unrecognized non-body-shaped line — junk (#3700 item 3).
+			return null;
+		}
 		// @@ -old,count +new,count @@ — anchor regex to hunk header structure
 		if (!line.startsWith('@@')) continue;
 		if (
@@ -2225,6 +2328,75 @@ function mergeChangedLines(
 	}
 }
 
+/**
+ * Repo-prefix of the passed directory inside its repository, resolved by GIT
+ * itself (`rev-parse --show-prefix`, #3700 item 4). git emits
+ * repository-top-level-relative paths from every cwd, while
+ * `classifySastFindings` and the ambiguity consumer key
+ * project-directory-relative coordinates — the prefix is what converts
+ * between them. Resolved by git on BOTH sides of that conversion: a
+ * JS-resolved path diverges from git's spelling on Windows 8.3 short forms.
+ * Empty string at the repository root (the no-op case).
+ */
+async function resolveRepoPathPrefix(
+	directory: string,
+	abortSignal?: AbortSignal,
+): Promise<string | null> {
+	const output = await runGit(
+		['rev-parse', '--show-prefix'],
+		directory,
+		abortSignal,
+	);
+	if (output === null) return null;
+	// F-006/F-6 (PR #3718 review): strip ONLY the trailing newline. A broad
+	// trim() would corrupt a legitimate top-level directory whose name
+	// starts with whitespace (legal on every supported filesystem) — the
+	// trimmed prefix then matches no porcelain record, and those findings
+	// silently take the PRE-EXISTING missing-key arm (critic e2e probe).
+	const prefix = output.replace(/\r?\n$/, '');
+	if (prefix.includes('\\')) return null;
+	return prefix.endsWith('/') || prefix === '' ? prefix : `${prefix}/`;
+}
+
+/**
+ * Rewrite `status --porcelain=v1 -z` records into PROJECT-DIRECTORY
+ * coordinates (#3700 item 4): strip the repo prefix from each record path
+ * and DROP records outside the prefix — together with their paired
+ * rename/copy source record, so an outside source can never be parsed as a
+ * new status record (the record stream stays well-formed for the unchanged
+ * downstream parsers). A kept destination's source record is preserved as-is
+ * (the source path itself is never keyed). Structural validation matches the
+ * downstream parsers: a malformed stream returns null.
+ */
+function rebasePorcelainRecordsToProject(
+	output: string,
+	repoPrefix: string,
+): string | null {
+	if (repoPrefix === '') return output;
+	if (output.length > 0 && !output.endsWith('\0')) return null;
+	const records = output.split('\0');
+	const kept: string[] = [];
+	for (let index = 0; index < records.length - 1; index++) {
+		const record = records[index];
+		if (!record || record.length < 4 || record[2] !== ' ') return null;
+		const status = record.slice(0, 2);
+		let sourcePath: string | undefined;
+		if (/[RC]/.test(status)) {
+			const next = records[index + 1];
+			if (next === undefined || next === '' || index + 1 > records.length - 2) {
+				return null;
+			}
+			sourcePath = next;
+			index += 1;
+		}
+		const filePath = record.slice(3);
+		if (!filePath.startsWith(repoPrefix)) continue;
+		kept.push(`${status} ${filePath.slice(repoPrefix.length)}`);
+		if (sourcePath !== undefined) kept.push(sourcePath);
+	}
+	return kept.length > 0 ? `${kept.join('\0')}\0` : '';
+}
+
 function parseUntrackedStatus(
 	output: string,
 	rawPaths?: Map<string, Set<string>>,
@@ -2291,6 +2463,7 @@ export async function getChangedLineAmbiguousFiles(
 	directory: string,
 	abortSignal?: AbortSignal,
 	requestedFiles: string[] = [],
+	memo?: DiffBaseMemoHolder,
 ): Promise<Set<string> | null> {
 	// #3131: same validated base selection as getChangedLineRanges — both
 	// consumers of the diff base must resolve the SAME usable candidate, so a
@@ -2298,7 +2471,7 @@ export async function getChangedLineAmbiguousFiles(
 	// `--name-only` diff below then runs against the resolved mergeBase.
 	// (#3092 PRR-002 HEAD-shadow rejection lives in the resolver itself.)
 	const { attempted, resolution, failureCause } =
-		await resolveValidatedDiffBase(directory, abortSignal);
+		await resolveValidatedDiffBase(directory, abortSignal, memo);
 	if (!resolution) {
 		logDiffBaseResolutionFailure(directory, attempted, failureCause);
 		return null;
@@ -2334,7 +2507,7 @@ export async function getChangedLineAmbiguousFiles(
 		'--untracked-files=all',
 		...(literalPathspecs.length > 0 ? ['--', ...literalPathspecs] : []),
 	];
-	const [committedNames, status] = await Promise.all([
+	const [committedNames, status, repoPrefix] = await Promise.all([
 		runGit(
 			[
 				'-c',
@@ -2344,6 +2517,7 @@ export async function getChangedLineAmbiguousFiles(
 				'--no-ext-diff',
 				'--no-color',
 				'--no-prefix',
+				'--relative',
 				'-z',
 				`${mergeBase}..HEAD`,
 				'--',
@@ -2353,8 +2527,13 @@ export async function getChangedLineAmbiguousFiles(
 			abortSignal,
 		),
 		runGit(statusArgs, directory, abortSignal),
+		resolveRepoPathPrefix(directory, abortSignal),
 	]);
-	if (committedNames === null || status === null) return null;
+	if (committedNames === null || status === null || repoPrefix === null) {
+		return null;
+	}
+	const rebasedStatus = rebasePorcelainRecordsToProject(status, repoPrefix);
+	if (rebasedStatus === null) return null;
 
 	// -z keeps git from C-quoting special names and from newline ambiguity,
 	// so these keys join the raw -z status records below without .trim()
@@ -2370,8 +2549,8 @@ export async function getChangedLineAmbiguousFiles(
 	// precedent); the source path is not itself a worktree-dirty signal.
 	const staged = new Set<string>();
 	const unstaged = new Set<string>();
-	if (status.length > 0 && !status.endsWith('\0')) return null;
-	const records = status.split('\0');
+	if (rebasedStatus.length > 0 && !rebasedStatus.endsWith('\0')) return null;
+	const records = rebasedStatus.split('\0');
 	for (let index = 0; index < records.length - 1; index++) {
 		const record = records[index];
 		if (!record || record.length < 4 || record[2] !== ' ') return null;
@@ -2414,6 +2593,7 @@ export async function getChangedLineRanges(
 	directory: string,
 	abortSignal?: AbortSignal,
 	requestedFiles: string[] = [],
+	memo?: DiffBaseMemoHolder,
 ): Promise<Map<string, Set<number>> | null> {
 	// #3131: the diff base is the first candidate whose committed diff is
 	// actually USABLE — a stale-but-resolvable ref whose diff trips the stdout
@@ -2429,7 +2609,7 @@ export async function getChangedLineRanges(
 	// executed).
 	const rawPaths = new Map<string, Set<string>>();
 	const { attempted, resolution, failureCause } =
-		await resolveValidatedDiffBase(directory, abortSignal);
+		await resolveValidatedDiffBase(directory, abortSignal, memo);
 	if (!resolution) {
 		logDiffBaseResolutionFailure(directory, attempted, failureCause);
 		return null;
@@ -2498,6 +2678,9 @@ export async function getChangedLineRanges(
 		'--submodule=short',
 		'--inter-hunk-context=0',
 		'-U0',
+		// #3700 item 4: emit paths relative to `directory` (and exclude paths
+		// outside it) - the coordinate system classifySastFindings keys.
+		'--relative',
 	];
 	const requestedPathspecs = requestedFiles
 		.map((file) => path.relative(directory, file).replace(/\\/g, '/'))
@@ -2527,7 +2710,7 @@ export async function getChangedLineRanges(
 	// #3131: the committed leg was already acquired and parsed by
 	// resolveValidatedDiffBase (it IS the validation), so only the staged,
 	// unstaged, and status legs run here.
-	const [staged, unstaged, status] = await Promise.all([
+	const [staged, unstaged, status, repoPrefix] = await Promise.all([
 		runGit(
 			[...commonDiffArgs, '--cached', 'HEAD', '--'],
 			directory,
@@ -2535,7 +2718,14 @@ export async function getChangedLineRanges(
 		),
 		runGit([...commonDiffArgs, '--'], directory, abortSignal),
 		runGit(statusArgs, directory, abortSignal),
+		resolveRepoPathPrefix(directory, abortSignal),
 	]);
+	if (repoPrefix === null) {
+		warn(
+			'pre-check: the repo-prefix resolution failed - changed-line classification is fail-closed (all findings treated as new)',
+		);
+		return null;
+	}
 	if (staged === null || unstaged === null || status === null) {
 		// REL-4: the base-resolution failure is loud; keep the leg failure
 		// from being the only silent fail-closed path (debug-gated — the
@@ -2561,7 +2751,9 @@ export async function getChangedLineRanges(
 	mergeChangedLines(result, committedLines);
 	mergeChangedLines(result, stagedLines);
 	mergeChangedLines(result, unstagedLines);
-	const untracked = parseUntrackedStatus(status, rawPaths);
+	const rebasedStatus = rebasePorcelainRecordsToProject(status, repoPrefix);
+	if (rebasedStatus === null) return null;
+	const untracked = parseUntrackedStatus(rebasedStatus, rawPaths);
 	if (untracked === null) return null;
 	const requestedKeys = requestedPathspecs.map(normalizeRepoPathKey);
 	for (const file of untracked) {
@@ -2921,10 +3113,18 @@ export async function runPreCheckBatch(
 	contextDir?: string,
 	abortSignal?: AbortSignal,
 ): Promise<PreCheckBatchResult> {
-	// Batch scope for the shared diff-base memo (FB-003): the two consumers
-	// run back-to-back inside THIS batch; a fresh batch re-walks so a fetch
-	// that moved candidate refs between batches is honored.
-	diffBaseResolutionMemo = null;
+	// Batch scope for the shared diff-base memo (FB-003, #3700 item 1): the
+	// two consumers run back-to-back inside THIS batch and share this holder
+	// BY DESIGN (one batch = one resolved base, so the two consumers can
+	// never disagree). The freshness guarantee is ACROSS invocations: a
+	// fresh batch re-walks, and direct exported-consumer calls (which pass
+	// no holder) always resolve fresh. Disclosed residual (F-11, PR #3718
+	// review): a same-HEAD candidate-ref move BETWEEN the two consumers of
+	// ONE batch is still served the batch's cached envelope within that
+	// batch — intended intra-batch consistency, corrected by the next
+	// batch; the #3700 fail-open (staleness ACROSS invocations) is closed
+	// and pinned by the cross-invocation batch test.
+	const diffBaseMemo: DiffBaseMemoHolder = { current: null };
 	// Use provided workspaceDir or fall back to input directory, then plugin context directory
 	const effectiveWorkspaceDir = (workspaceDir ||
 		input.directory ||
@@ -3160,6 +3360,7 @@ export async function runPreCheckBatch(
 				directory,
 				abortSignal,
 				changedFiles,
+				diffBaseMemo,
 			);
 		}
 		return changedLineRangesMemo;
@@ -3183,6 +3384,7 @@ export async function runPreCheckBatch(
 			directory,
 			abortSignal,
 			changedFiles,
+			diffBaseMemo,
 		);
 		if (ambiguousFiles === null) {
 			secretscanClassification = {

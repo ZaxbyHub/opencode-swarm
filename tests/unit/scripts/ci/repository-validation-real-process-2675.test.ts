@@ -168,6 +168,7 @@ describe('repository-validation authority real-process fixtures — issue #2675'
 				failed: 0,
 				crashed: 0,
 				timedOut: 0,
+				outputTruncated: 0,
 				missing: 1,
 				skipped: 0,
 			});
