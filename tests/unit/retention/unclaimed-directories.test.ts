@@ -83,6 +83,16 @@ function linkDir(target: string, linkPath: string): boolean {
 	}
 }
 
+/** File symlinks need Developer Mode on Windows; caller asserts around it. */
+function linkFile(target: string, linkPath: string): boolean {
+	try {
+		symlinkSync(target, linkPath);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
 afterEach(() => {
 	for (const root of tempRoots) {
 		try {
@@ -365,6 +375,32 @@ describe('unclaimed .swarm directories get a lifecycle', () => {
 			path.join('.swarm', 'junk-dir'),
 		]);
 		expect(existsSync(path.join(root, '.swarm', 'retention.log'))).toBe(false);
+	});
+
+	it('refuses to write the log through a symlink and still prunes', async () => {
+		const root = makeRoot('log-symlink');
+		const target = seedFile(
+			makeRoot('log-symlink-target'),
+			'target.txt',
+			NOW,
+			'do-not-touch',
+		);
+		const logPath = path.join(root, '.swarm', 'retention.log');
+		mkdirSync(path.dirname(logPath), { recursive: true });
+		const linked = linkFile(target, logPath);
+		if (!linked) expect(process.platform).toBe('win32');
+		if (!linked) return;
+		seedSwarmFile(
+			root,
+			path.join('junk-dir', 'old.bin'),
+			NOW - 41 * DAY_MS,
+			'x'.repeat(8),
+		);
+		const result = await runRetentionSweep(root, { now: NOW });
+		// The deletion still happens; only the audit write is refused.
+		expect(result.pruned['unclaimed-directories']).toBe(1);
+		expect(result.errors['.swarm/retention.log']).toContain('symlink');
+		expect(readFileSync(target, 'utf-8')).toBe('do-not-touch');
 	});
 
 	it('compacts the retention log to its byte budget, keeping the newest lines', async () => {

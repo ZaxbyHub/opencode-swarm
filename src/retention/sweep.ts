@@ -99,6 +99,13 @@ export interface RetentionSweepOptions {
 }
 
 export interface RetentionSweepResult {
+	/**
+	 * Per-pass counts. Under `dryRun` (or `explain`) each value is the number
+	 * the pass WOULD prune — the rehearsal convention every family already
+	 * follows (`pruneDirectory` returns its victim count without deleting).
+	 * It is not an "actually deleted" count in that mode; `explained` carries
+	 * the per-directory evidence behind the catch-all's number.
+	 */
 	pruned: Record<string, number>;
 	disabled?: boolean;
 	dryRun?: boolean;

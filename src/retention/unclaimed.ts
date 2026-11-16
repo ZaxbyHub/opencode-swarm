@@ -186,7 +186,11 @@ export interface ExplainedPrune {
 	path: string;
 	/** Whole days since the newest content in the subtree (or the node). */
 	ageDays: number;
-	/** Regular-file bytes in the subtree; symlinks are not followed. */
+	/**
+	 * Regular-file bytes in the subtree. Symlinks are never followed, so a
+	 * link's own size is excluded and its TARGET's content is not counted:
+	 * the target is not ours to reclaim.
+	 */
 	sizeBytes: number;
 	/** Owner whose manifest claim set this directory's horizon, if claimed. */
 	owner?: string;
@@ -404,6 +408,14 @@ async function hasPreserveMarker(dir: string): Promise<boolean> {
  * Per-resolved-path containment. `resolvedSwarmRoot` MUST already be a
  * realpath; the candidate is resolved at call time so a directory swapped for
  * a symlink after enumeration is refused rather than followed.
+ *
+ * `path.relative` (not a string prefix) is what makes this correct on every
+ * platform: it compares case-insensitively on Windows, tolerates a root that
+ * carries a trailing separator, and reports a different drive/volume as an
+ * absolute path. Only an IMMEDIATE child may be deleted — the caller
+ * enumerates direct children, so a multi-segment remainder means the
+ * candidate was re-pointed at a nested path (or out of the root) after it was
+ * enumerated.
  */
 function isContainedInSwarmRoot(
 	resolvedSwarmRoot: string,
@@ -415,7 +427,10 @@ function isContainedInSwarmRoot(
 	} catch {
 		return false;
 	}
-	return resolved.startsWith(resolvedSwarmRoot + path.sep);
+	const relative = path.relative(resolvedSwarmRoot, resolved);
+	if (relative.length === 0 || path.isAbsolute(relative)) return false;
+	if (relative === '..' || relative.startsWith(`..${path.sep}`)) return false;
+	return !relative.includes(path.sep);
 }
 
 /** `<ISO-8601> pruned <path> age=<days> size=<bytes>` — one line per prune. */
@@ -431,8 +446,11 @@ function splitLogLines(text: string): string[] {
 }
 
 /**
- * Read at most the newest `RETENTION_LOG_MAX_BYTES` of the log. Throws when the
- * log is a symlink or not a regular file: never write through a link.
+ * Read at most the newest `RETENTION_LOG_MAX_BYTES` of the log.
+ *
+ * This helper only reads bytes: the CALLER owns target validation
+ * (`assertLogTargetIsWritable` before the append, plus the post-append
+ * re-check before any compaction write). It throws only what fs throws.
  */
 function readRetentionLogTail(logPath: string, size: number): string[] {
 	if (size <= RETENTION_LOG_MAX_BYTES) {
@@ -504,7 +522,13 @@ export async function appendRetentionLog(
 		.join('\n')}\n`;
 	await fs.promises.appendFile(logPath, payload, 'utf-8');
 	const stat = await fs.promises.lstat(logPath).catch(() => null);
-	if (!stat || stat.size <= RETENTION_LOG_MAX_BYTES) return;
+	// Re-validate AFTER the append: the path can be swapped for a symlink
+	// between the pre-append check and this read, and the compaction
+	// `writeFile` below WOULD follow it. A swapped or non-regular target skips
+	// compaction — the append already succeeded, compaction is best-effort,
+	// and the next append re-validates from scratch.
+	if (!stat || stat.isSymbolicLink() || !stat.isFile()) return;
+	if (stat.size <= RETENTION_LOG_MAX_BYTES) return;
 	const kept = trimLogToBudget(readRetentionLogTail(logPath, stat.size));
 	await fs.promises.writeFile(logPath, `${kept.join('\n')}\n`, 'utf-8');
 }
