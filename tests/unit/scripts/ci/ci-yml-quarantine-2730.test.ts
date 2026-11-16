@@ -67,51 +67,29 @@ function activeEntries(ledgerPath: string): string[] {
 		.map((line: string) => line.trim());
 }
 
-// Collect the contiguous comment block directly above an active entry,
-// the same walk scripts/check-invariants.ts Check 7 performs: break at the
-// first blank OR non-comment line (a blank line between an entry and its
-// metadata block must fail the walk exactly as it fails Check 7 — PRR-019).
-function metadataBlock(ledgerPath: string, entry: string): string {
-	const raw = readFileSync(ledgerPath, 'utf8').replace(/\r\n/g, '\n');
-	const lines = raw.split('\n');
-	const entryIdx = lines.findIndex((l: string) => l.trim() === entry);
-	expect(entryIdx).toBeGreaterThan(-1);
-	const blockAbove: string[] = [];
-	for (let i = entryIdx - 1; i >= 0; i -= 1) {
-		const above = lines[i] ?? '';
-		if (above.trim() !== '' && above.trimStart().startsWith('#')) {
-			blockAbove.push(above);
-		} else {
-			break;
-		}
-	}
-	return blockAbove.reverse().join('\n');
-}
-
 describe('ci.yml integration — quarantine ledger disposition for issue #2730 merge-group flake detection', () => {
-	describe('pr-feedback-scope-controller.test.ts (macos-latest, unit-shard 1) — re-anchored per #2973', () => {
-		test('is an active entry in the macOS ledger exactly once', () => {
-			// Without this entry, the flake-detection script keeps
-			// re-filing the candidate (Rule A only drops already-quarantined
-			// files). The flake originated on macos-latest unit-shard 1
-			// (CI run 34670762927, 2026-09-12T03:56:04Z, Attempt 1 failed →
-			// Passed on retry 1) with no other OS showing the same flake.
-			// Re-anchored 2026-11-12: exactly one owning entry remains, so
-			// no second OWNER/EXPIRY block can compete for renewal.
+	describe('pr-feedback-scope-controller.test.ts (macos-latest, unit-shard 1) — retired by the 2026-11-16 #2973 un-quarantine', () => {
+		test('is retired — NOT an active entry in the macOS ledger', () => {
+			// The 2026-09-12 passed-on-retry flake (CI run 34670762927) had its
+			// attempt-1 evidence recovered from the run's repository-validation
+			// artifact: the race test expected exactly one fulfilled Task call
+			// and received zero — a shared fail-closed pre-consumption transient
+			// can reject BOTH racing calls without violating the exactly-once
+			// reservation. The race test was determinism-hardened in the retiring
+			// PR (bounded attempt-counted re-race + designed-loser reason pin)
+			// and a transient-semantics spec pins the fail-closed non-destructive
+			// behavior. Un-quarantined 2026-11-16 per issue #2973; re-adding
+			// requires fresh merge-group macos-latest failure evidence per the
+			// #1782 convention (the per-attempt validation artifact carries
+			// attempt-1 stderr).
 			expect(existsSync(MACOS_LEDGER_PATH)).toBe(true);
-			const entries = activeEntries(MACOS_LEDGER_PATH);
-			expect(entries).toContain(PR_FEEDBACK_SCOPE_CONTROLLER);
-			expect(
-				entries.filter((e) => e === PR_FEEDBACK_SCOPE_CONTROLLER).length,
-			).toBe(1);
+			expect(activeEntries(MACOS_LEDGER_PATH)).not.toContain(
+				PR_FEEDBACK_SCOPE_CONTROLLER,
+			);
 		});
 
-		test('is scoped to the macOS ledger only (not general, not windows, not integration)', () => {
-			// The general ledger applies on every RUNNER_OS — listing it
-			// there would suppress the file on ubuntu/windows too, but the
-			// flake was macos-only; the windows and integration ledgers
-			// apply on their respective runners and would similarly over-
-			// suppress.
+		test('is absent from the general, windows, and integration ledgers', () => {
+			// Retirement must not become a cross-ledger migration.
 			expect(activeEntries(GENERAL_LEDGER_PATH)).not.toContain(
 				PR_FEEDBACK_SCOPE_CONTROLLER,
 			);
@@ -125,28 +103,7 @@ describe('ci.yml integration — quarantine ledger disposition for issue #2730 m
 			}
 		});
 
-		test('carries the re-anchored OWNER (#2973) + EXPIRY 2026-12-20 metadata (issue #2477 Check 7)', () => {
-			// Check 7 hard-fails any active entry missing OWNER/EXPIRY or
-			// with EXPIRY lapsed beyond the grace window. The 2026-11-12
-			// re-anchor moved this entry under the #2973 cohort anchor with
-			// criterion "macos retry-flake diagnosis" and EXPIRY 2026-12-20;
-			// reading the raw file here gives a focused, fast RED signal if
-			// the next entry edit drops the anchor or the date.
-			const block = metadataBlock(
-				MACOS_LEDGER_PATH,
-				PR_FEEDBACK_SCOPE_CONTROLLER,
-			);
-			expect(block).toMatch(/^# OWNER: .*#2973/m);
-			expect(block).toMatch(/^# EXPIRY: 2026-12-20/m);
-		});
-
-		test('the quarantined path exists and is discovered by the ci.yml find chain', () => {
-			// A typo'd ledger path would be a silent no-op: CI's
-			// `comm -23` gated set would never exclude it (the path never
-			// appears in all-tests.txt) and the flake would keep
-			// re-filing. The discovery chain globs tests/unit/**/*.test.ts,
-			// so the on-disk file must exist at exactly the ledger path
-			// relative to the repo root.
+		test('the retired path exists on disk and is discovered by the ci.yml find chain', () => {
 			expect(existsSync(join(REPO_ROOT, PR_FEEDBACK_SCOPE_CONTROLLER))).toBe(
 				true,
 			);
