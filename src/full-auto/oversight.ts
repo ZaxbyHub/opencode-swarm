@@ -937,7 +937,7 @@ export async function probeFullAutoOversightHealth(input: {
 			return {
 				healthy: false,
 				attempts: 1,
-				reason: `health probe create failed: ${sanitizeFailureEvidenceDisplay(JSON.stringify(created.error))}`,
+				reason: `health probe create failed: ${sanitizeFailureEvidenceDisplay(JSON.stringify(created.error) ?? 'no error detail')}`,
 			};
 		}
 		sessionId = created.data.id;

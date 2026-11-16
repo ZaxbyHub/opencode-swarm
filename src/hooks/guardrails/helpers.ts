@@ -252,7 +252,7 @@ export function redactShellCommand(cmd: string): string {
 		.replace(/\bya29\.[A-Za-z0-9_-]{20,}/g, '[REDACTED:google]')
 		.replace(/\bgsk_[A-Za-z0-9]{20,}/g, '[REDACTED:groq]')
 		.replace(
-			/\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g,
+			/\beyJ[A-Za-z0-9_-]{10,1024}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g,
 			'[REDACTED:jwt]',
 		)
 		// #3712 azure CONTEXTUAL arm: connection-string `AccountKey=<base64>`
@@ -260,7 +260,7 @@ export function redactShellCommand(cmd: string): string {
 		// (no `AccountKey=` residue). Bare 32-hex Azure OpenAI keys are
 		// deliberately NOT patterned: they are indistinguishable from hex
 		// digests that must stay visible (disclosed bound, #3712 AC3).
-		.replace(/\bAccountKey=[A-Za-z0-9+/]{20,}={0,2}/g, '[REDACTED:azure]');
+		.replace(/\bAccountKey=[A-Za-z0-9+/]{20,}={0,2}/gi, '[REDACTED:azure]');
 
 	// Long base64-like payload runs (encoded wrappers, heredoc payloads).
 	// Requires ≥80 chars of base64 charset AND at least one uppercase, one

@@ -356,7 +356,7 @@ const BARE_TOKEN_VALUE_PATTERNS: ReadonlyArray<{
 	// token). Matches the WHOLE three-segment token as one span.
 	{
 		family: 'jwt',
-		re: /\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g,
+		re: /\beyJ[A-Za-z0-9_-]{10,1024}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g,
 	},
 	// #3712 F-013: base64 credential arm at the display site — mirrors the
 	// shell site's ≥80-char mixed-class run (the class guard keeps hex-only
@@ -428,7 +428,7 @@ export function sanitizeFailureEvidenceDisplay(value: string): string {
 		// would otherwise consume the value as a family-less `<redacted>`
 		// (plan-critic round-1 probe), and a residue form like
 		// `AccountKey=[REDACTED:azure]` is itself re-matchable KV shape.
-		.replace(/\bAccountKey=[A-Za-z0-9+/]{20,}={0,2}/g, '[REDACTED:azure]')
+		.replace(/\bAccountKey=[A-Za-z0-9+/]{20,}={0,2}/gi, '[REDACTED:azure]')
 		.replace(
 			CREDENTIAL_KV_PATTERN,
 			(_, key: string) => `${key.replace(CONTROL_CHAR_RUN, '')}=<redacted>`,

@@ -15,9 +15,21 @@ these additional bare well-known credential families, each with its own
 - `openrouter` — `sk-or-…` shapes (previously mislabeled `[REDACTED:openai]`)
 - `google` — `GOCSPX-…` (OAuth client secrets) and `ya29.…` (GCP access tokens)
 - `groq` — `gsk_…` service keys
-- `jwt` — whole three-segment JWTs (both leading segments start `eyJ`)
-- `azure` — CONTEXTUAL only: connection-string `AccountKey=<base64>` spans collapse
-  to the bare `[REDACTED:azure]` placeholder
+- `jwt` — whole three-segment JWTs (both leading segments start `eyJ`). The
+  header segment is length-bounded (10–1024 chars; the payload/signature
+  segments stay at 10+): an unbounded segment made the regex quadratic on a
+  dense `eyJ-` run at the shell site, which has no input-length bound and
+  redacts BEFORE the audit truncation (measured: 256 KB took 30.7–33.3 s at
+  the unbounded arm). **Disclosed bound:** a JWT whose header segment EXCEEDS
+  1024 chars is not matched by this arm at either site — the base64 fallback
+  arm's class excludes base64url's `-`/`_`, so such a token is not eliminated
+  by a fallback either (executed probe). A mainstream issuer's header is
+  ~36–100 chars, so the bound has ~10× headroom over a real token; the
+  over-long shape is tracked as a follow-up.
+- `azure` — CONTEXTUAL only: connection-string `AccountKey=<base64>` spans
+  collapse to the bare `[REDACTED:azure]` placeholder. The arm is
+  case-INSENSITIVE (`accountKey=`, `ACCOUNTKEY=`), matching Azure's
+  case-insensitive connection-string key parsing
 - `base64` — the ≥80-char mixed-class base64 arm now also runs at the DISPLAY site
   (previously shell-only); hex-only runs (SHA digests), uppercase-hex runs, and
   sub-80 payloads stay visible at both sites
@@ -29,7 +41,18 @@ carry their correct provider labels. The widened corpus is pinned at both sites 
 a new sibling parity suite (prose elimination, family placeholder, and
 mirror-parity loops) alongside the existing #3165 suite, which is unchanged.
 
-**Disclosed bound (header placements):** credential tokens inside Authorization/Bearer header placements are redacted by the pre-existing context arms with their GENERIC placeholders (the shell Bearer/Basic and -H header arms; the display credential-KV arm) at both sites - byte-identically to base, for every family. The per-family placeholder contract covers prose/bare placements (the placement class with no adjacent key/scheme context the context arms can match); pinned as intended by tests/unit/failures/redaction-bounds-pins-3710.test.ts.
+**Disclosed bound (header placements):** credential tokens inside an
+`-H "...: Bearer ..."` / Bearer / Basic header placement are redacted by the
+pre-existing context arms with their GENERIC placeholders (the shell Bearer/Basic
+and -H header arms; the display credential-KV arm) at both sites. A BARE
+`Authorization: <token>` placement (no `-H`, no Bearer/Basic) is NOT matched by
+those context arms: the shell site applies the family label (e.g.
+`[REDACTED:groq]`) and the display site applies the generic KV form. At base the
+shell site left that token in CLEAR TEXT, so the family label there is new, not
+byte-identical to base. The token is eliminated at both sites in every shape.
+The per-family placeholder contract covers prose/bare placements (the placement
+class with no adjacent key/scheme context the context arms can match); pinned as
+intended by tests/unit/failures/redaction-bounds-pins-3710.test.ts.
 
 **Disclosed bound (path-like base64 false positives):** an >=80-character
 mixed-class run without `.`/`-`/`_` separators — e.g. a flattened long
@@ -77,6 +100,22 @@ behavior is unchanged:
   `chars` = sanitized full length, `truncated` = the bound flag, `digest` =
   SHA-256 of the sanitized value), replacing the hardcoded `truncated: false`
   on the async path
+- `src/review/engine.ts` — the auto-review / final-review dispatch failure
+  detail (`evidence.review.error` -> `.swarm/evidence/<phase>/auto-review.json`
+  and the core events log). Sanitized AFTER the `isQuotaError` classifier has
+  read the raw value, so quota/failover classification is unchanged
+- `src/epic/phase-readiness.ts` — the Epic phase-review dispatch-failure
+  reason (`.swarm/evidence/<phase>/epic-phase-review.json`). Sanitized AFTER
+  the transient/permanent `classify` callback has read the raw message, so
+  the retry classification is unchanged
+
+**Disclosed bound (evaluation `failureCode`):** the evaluation dispatcher's
+sanitized error is persisted as `failureCode`, a schema-capped 160-char field.
+Redaction can LENGTHEN a message (a URL becomes `<url:hash>`, a credential
+value becomes `<redacted>`), so the persisted value is sliced to the schema cap
+at the consumer seam — the run's schema parse no longer fails and the whole
+evaluation run is no longer discarded over an over-long failure string. The
+pre-existing 160-char cap itself is unchanged; see the follow-up issue.
 
 The `oversight infrastructure failure after N attempt(s):` prefix and the
 `deadline` / `opencodeClient unavailable` words survive redaction, so the
@@ -94,6 +133,7 @@ returns 1) — never a traversal-bearing success value.
 
 **Declared behavior changes:** duplicate separators now canonicalize
 (`foo//bar.ts` → `src/foo/bar.ts`); `foo//../bar` normalizes to `src/bar`;
-post-collapse unrewritable forms (e.g. `/../bar`) reject loudly instead of
-hanging or emitting a wrong path. Benign inputs (`src/utils/logger.ts`,
+post-collapse unrewritable forms (e.g. `/../bar`) AND any residual parent
+segment (e.g. `a/../../b`) reject loudly instead of hanging or emitting a
+traversal-bearing path. Benign inputs (`src/utils/logger.ts`,
 `a/b/c.ts`, `../x/y.ts`) are unchanged.

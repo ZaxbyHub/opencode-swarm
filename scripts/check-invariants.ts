@@ -183,6 +183,18 @@ export function normalizeMockTarget(target: string): string {
 		}
 		normalized = next;
 	}
+	// #3710: a multi-hop dotdot chain can leave a residual '..' segment the
+	// rewrite above cannot consume (e.g. 'a/../../b' -> '../b'). A value that
+	// still carries a parent segment is a traversal-bearing path, so it is
+	// rejected rather than returned as a success.
+	if (
+		normalized.startsWith('../') ||
+		normalized.split('/').includes('..')
+	) {
+		throw new Error(
+			`normalizeMockTarget: residual parent segment in target: ${target}`,
+		);
+	}
 	normalized = normalized.replace(/^src\//, '').replace(/\.js$/, '');
 	return `src/${normalized}`;
 }

@@ -22,6 +22,14 @@ normalize_mock_target() {
       return 1
     fi
   done
+  # #3710: a multi-hop dotdot chain can leave a residual '..' segment that
+  # the rewrite above cannot consume (e.g. 'a/../../b' -> '../b'). A value
+  # that still carries a parent segment is a traversal-bearing path, so it is
+  # rejected rather than returned as a success.
+  if [[ "$normalized" == "../"* || "$normalized" == *"/../"* ]]; then
+    echo "normalize_mock_target: rejecting residual parent segment in target: $target" >&2
+    return 1
+  fi
   normalized="$(echo "$normalized" | sed 's|^src/||; s|\.js$||')"
   if [[ "$normalized" != node:* ]]; then
     normalized="src/$normalized"
