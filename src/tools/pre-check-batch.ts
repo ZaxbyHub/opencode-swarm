@@ -2013,9 +2013,13 @@ function parseDiffLineRangesChecked(
 			// evidence: with `diff.renames=copies`, the copied file left the
 			// map entirely and its findings classified PRE-EXISTING). If the
 			// same section then carries a hunk, the `+++ ` branch's
-			// `result.has` guard keeps this entry instead of overwriting it,
-			// and the hunk's line numbers are added to the ALL_LINES_CHANGED
-			// set — over-gating, never fail-open.
+			// `result.has` guard keeps this entry instead of overwriting it;
+			// the hunk adds its line numbers, and the EOF copy/rename safety
+			// net then re-commits the destination to the ALL_LINES_CHANGED
+			// sentinel ALONE (executed (j) control: the final set is [-1],
+			// not [-1, hunk..]) — the sentinel dominates every consumer
+			// lookup anyway, so the net effect is identical: the destination
+			// is fully gated. Over-gating, never fail-open.
 			result.set(destination, new Set([ALL_LINES_CHANGED]));
 			if (rawPaths !== undefined) {
 				// `git diff` appends a trailing TAB to an UNQUOTED header
@@ -2344,7 +2348,12 @@ async function resolveRepoPathPrefix(
 		abortSignal,
 	);
 	if (output === null) return null;
-	const prefix = output.trim();
+	// F-006/F-6 (PR #3718 review): strip ONLY the trailing newline. A broad
+	// trim() would corrupt a legitimate top-level directory whose name
+	// starts with whitespace (legal on every supported filesystem) — the
+	// trimmed prefix then matches no porcelain record, and those findings
+	// silently take the PRE-EXISTING missing-key arm (critic e2e probe).
+	const prefix = output.replace(/\r?\n$/, '');
 	if (prefix.includes('\\')) return null;
 	return prefix.endsWith('/') || prefix === '' ? prefix : `${prefix}/`;
 }
@@ -3105,10 +3114,16 @@ export async function runPreCheckBatch(
 	abortSignal?: AbortSignal,
 ): Promise<PreCheckBatchResult> {
 	// Batch scope for the shared diff-base memo (FB-003, #3700 item 1): the
-	// two consumers run back-to-back inside THIS batch and share this holder;
-	// a fresh batch re-walks, and direct exported-consumer calls (which pass
-	// no holder) always resolve fresh — a same-HEAD candidate-ref move can
-	// never serve a stale envelope.
+	// two consumers run back-to-back inside THIS batch and share this holder
+	// BY DESIGN (one batch = one resolved base, so the two consumers can
+	// never disagree). The freshness guarantee is ACROSS invocations: a
+	// fresh batch re-walks, and direct exported-consumer calls (which pass
+	// no holder) always resolve fresh. Disclosed residual (F-11, PR #3718
+	// review): a same-HEAD candidate-ref move BETWEEN the two consumers of
+	// ONE batch is still served the batch's cached envelope within that
+	// batch — intended intra-batch consistency, corrected by the next
+	// batch; the #3700 fail-open (staleness ACROSS invocations) is closed
+	// and pinned by the cross-invocation batch test.
 	const diffBaseMemo: DiffBaseMemoHolder = { current: null };
 	// Use provided workspaceDir or fall back to input directory, then plugin context directory
 	const effectiveWorkspaceDir = (workspaceDir ||

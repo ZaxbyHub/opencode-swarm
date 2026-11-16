@@ -16,9 +16,9 @@
  * ambiguity consumer stays fail-closed null).
  */
 
-import { describe, expect, test } from 'bun:test';
+import { afterAll, describe, expect, test } from 'bun:test';
 import { execFileSync } from 'node:child_process';
-import { writeFileSync } from 'node:fs';
+import { rmSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
 import {
 	classifySastFindings,
@@ -36,6 +36,21 @@ import {
 // commit). Point GIT_CONFIG_GLOBAL at an EMPTY file so every global key is
 // isolated; identity is supplied inline per commit instead.
 const isolatedGlobalConfigPaths = new Map<string, string>();
+
+// F-008 (PR #3718 review test-quality cluster): the isolated global-config
+// fixture files live in the shared temp root; delete them when the file
+// finishes so runs leave no residue (the GIT_CONFIG_GLOBAL pointer is read
+// by every git spawn here).
+afterAll(() => {
+	for (const target of isolatedGlobalConfigPaths.values()) {
+		try {
+			rmSync(target, { force: true });
+		} catch {
+			// best-effort: an EBUSY on Windows must not fail the suite
+		}
+	}
+	isolatedGlobalConfigPaths.clear();
+});
 let isolatedGlobalConfigCounter = 0;
 function isolatedGlobalConfig(cwd: string): string {
 	const existing = isolatedGlobalConfigPaths.get(cwd);

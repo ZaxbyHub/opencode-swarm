@@ -2,18 +2,24 @@
  * #3661 AC3 — a required context that matches MULTIPLE check runs at a
  * candidate head must bind unambiguously, or the capture refuses.
  *
- * At the current code the candidate-head gate uses
- * `all.find((run) => run.name === name)` — the FIRST same-named run wins —
+ * At the base the candidate-head gate used
+ * `all.find((run) => run.name === name)` — the FIRST same-named run won —
  * so a head carrying TWO runs named like a required context, one
- * completed+success and one completed+failure, passes the gate (the success
- * entry is found first) and the capture never notices the failed sibling.
+ * completed+success and one completed+failure, passed the gate (the success
+ * entry was found first) and the capture never noticed the failed sibling.
  * The failure conclusion is evidence that the context did NOT succeed at
  * that head; every same-named run must be completed+success and the match
  * must bind to the producing app, else the capture must refuse.
  *
- * RED at the current code: the fixture below (success entry listed FIRST)
- * sails through `runCapture` and returns an artifact — no CaptureRefusal is
+ * RED at the base: the fixture below (success entry listed FIRST) sailed
+ * through `runCapture` and returned an artifact — no CaptureRefusal was
  * thrown at all.
+ *
+ * F-008 (PR #3718 review): the former `expect(writes).toEqual([])`
+ * assertions on these runCapture-shaped legs were VACUOUS (runCapture
+ * never writes — only main() does). They are deleted here and replaced by
+ * real write-path pins in the sibling capture-context-write-path-3661
+ * .test.ts, which drives main() with the artifact-write seam stubbed.
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
@@ -285,7 +291,6 @@ describe('capture-required-check-evidence duplicate-name context binding (#3661 
 		// that "some" refusal fired.
 		expect(message).toContain('no recent successful merge-group head');
 		expect(message).toContain('required context');
-		expect(writes).toEqual([]);
 	}, 60_000);
 
 	// FB-002 (review-confirmed): a non-successful duplicate must DISQUALIFY
@@ -428,13 +433,12 @@ describe('capture-required-check-evidence duplicate-name context binding (#3661 
 				CONTRACT.requiredContexts[0] as string,
 			),
 		).toBe(true);
-		expect(writes).toEqual([]);
 	}, 60_000);
 
 	// C14 (critic amendment): same-named runs from DIFFERENT apps cannot bind
 	// to one producing app — the capture must refuse naming the context or
-	// the binding. RED at the current code (app identity is never examined;
-	// find() picks the first success and the capture proceeds).
+	// the binding. RED at the base (app identity was never examined; find()
+	// picked the first success and the capture proceeded).
 	test('C14: same-named successful runs from different apps refuse the capture', () => {
 		duplicateNameApi(duplicatePair('differing-app'));
 		seedLocalWorkflows();
@@ -447,11 +451,10 @@ describe('capture-required-check-evidence duplicate-name context binding (#3661 
 		expect(refusal).toBeInstanceOf(CaptureRefusal);
 		const message = (refusal as Error).message.toLowerCase();
 		expect(/quality|binding/.test(message)).toBe(true);
-		expect(writes).toEqual([]);
 	}, 60_000);
 
 	// C14: an app-less duplicate cannot bind at all — identity is ambiguous.
-	// RED at the current code (same fall-through as above).
+	// RED at the base (same fall-through as above).
 	test('C14: same-named successful runs with a missing app on one refuse the capture', () => {
 		duplicateNameApi(duplicatePair('missing-app'));
 		seedLocalWorkflows();
@@ -464,7 +467,6 @@ describe('capture-required-check-evidence duplicate-name context binding (#3661 
 		expect(refusal).toBeInstanceOf(CaptureRefusal);
 		const message = (refusal as Error).message.toLowerCase();
 		expect(/quality|binding/.test(message)).toBe(true);
-		expect(writes).toEqual([]);
 	}, 60_000);
 
 	// C14 CONTROL leg (green at the base by design — its discrimination comes
@@ -483,6 +485,5 @@ describe('capture-required-check-evidence duplicate-name context binding (#3661 
 			),
 		).toBe(true);
 		// runCapture itself never writes; main() does. Nothing written here.
-		expect(writes).toEqual([]);
 	}, 60_000);
 });

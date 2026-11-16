@@ -11,7 +11,7 @@
  * `!contractWorkflowFiles.includes(run.workflowPath)`) refuses the artifact
  * the capture itself just produced.
  *
- * RED at the current code: runCapture throws a CaptureRefusal (the
+ * RED at the base: runCapture threw a CaptureRefusal (the
  * non-contract run is included). After the fix the capture excludes
  * non-contract runs from observedRuns and completes offline.
  */
@@ -185,7 +185,7 @@ describe('capture-required-check-evidence observed-runs scope (#3661 AC5)', () =
 	test('a merge-group run for a non-contract workflow at the head is excluded from observedRuns and the capture still succeeds', () => {
 		extraRunApi();
 		seedLocalWorkflows();
-		// RED at the current code: the non-contract run lands in observedRuns,
+		// RED at the base: the non-contract run landed in observedRuns,
 		// the offline evaluation reddens with EVIDENCE_MERGE_GROUP_UNKNOWN,
 		// and runCapture refuses.
 		const artifact = runCapture(root);

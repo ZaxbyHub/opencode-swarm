@@ -34,9 +34,9 @@
  * inherit another's envelope.
  */
 
-import { describe, expect, test } from 'bun:test';
+import { afterAll, describe, expect, test } from 'bun:test';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
 import {
 	classifySastFindings,
@@ -52,6 +52,21 @@ import {
 // FB-014: isolate the host's global git config (see
 // pre-check-batch-git-config-shapes-3681b.test.ts for the executed evidence).
 const isolatedGlobalConfigPaths = new Map<string, string>();
+
+// F-008 (PR #3718 review test-quality cluster): the isolated global-config
+// fixture files live in the shared temp root; delete them when the file
+// finishes so runs leave no residue (the GIT_CONFIG_GLOBAL pointer is read
+// by every git spawn here).
+afterAll(() => {
+	for (const target of isolatedGlobalConfigPaths.values()) {
+		try {
+			rmSync(target, { force: true });
+		} catch {
+			// best-effort: an EBUSY on Windows must not fail the suite
+		}
+	}
+	isolatedGlobalConfigPaths.clear();
+});
 let isolatedGlobalConfigCounter = 0;
 function isolatedGlobalConfig(cwd: string): string {
 	const existing = isolatedGlobalConfigPaths.get(cwd);

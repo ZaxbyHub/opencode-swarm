@@ -316,7 +316,6 @@ function artifactCoordinates(artifact: string, prefix: string): { os: string; sh
 function expectedStatus(results: JsonResult[], mode: unknown): string {
 	const passed = results.filter((result) => result.status === 'passed').length;
 	const failed = results.filter((result) => result.status === 'failed' || result.status === 'output_truncated').length;
-	const outputTruncated = results.filter((result) => result.status === 'output_truncated').length;
 	const incomplete = results.some((result) =>
 		result.status === 'crashed' || result.status === 'timed_out' || result.status === 'missing' || result.status === 'skipped',
 	);
@@ -325,7 +324,10 @@ function expectedStatus(results: JsonResult[], mode: unknown): string {
 	if (incomplete) return 'incomplete';
 	// An output_truncated row is a KNOWN failed verdict (incomplete
 	// observation), never unresolved work: the run status is failed.
-	if (failed > 0 || outputTruncated > 0 || passed !== results.length) return 'failed';
+	// No separate `outputTruncated > 0` disjunct (PR #3718 review NIT): the
+	// failed count above already includes output_truncated rows, so it is
+	// implied by `failed > 0`.
+	if (failed > 0 || passed !== results.length) return 'failed';
 	return 'passed';
 }
 

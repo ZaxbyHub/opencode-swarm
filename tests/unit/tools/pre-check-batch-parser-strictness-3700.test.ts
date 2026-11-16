@@ -244,4 +244,45 @@ describe('parseDiffLineRangesChecked grammar controls (#3700 C3/C5)', () => {
 		expect(checked).not.toBeNull();
 		expect([...(checked?.get('a.ts') ?? [])]).toEqual([1]);
 	}, 10_000);
+
+	// F-008 (PR #3718 review test-quality cluster): rename-with-edit control.
+	// A rename section that ALSO carries a `--- `/`+++ ` pair and a hunk
+	// exercises the most stateful composition in the grammar — the eager
+	// `rename to` commit (ALL_LINES_CHANGED, sentinel -1 at pre-check-batch
+	// .ts:58) interacting with hunk accumulation under the phantom guards —
+	// previously unpinned. Written in the PRODUCER form (--no-prefix: every
+	// diff this parser consumes is generated without a//b/ prefixes, and a
+	// literal a//b/ is deliberately treated as part of the repo path — a
+	// prefixed section here is a malformed diff and fails closed; that arm
+	// is pinned by this leg's twin at the copyRenameDestination guard).
+	// Executed green at the head: the destination keys ALL_LINES_CHANGED
+	// (the eager `rename to` commit dominates — consumers short-circuit on
+	// the sentinel, so the hunk's line numbers are immaterial and the set
+	// holds exactly [-1]; over-gating, never fail-open), both correlation
+	// guards pass for the consistent section, and the rename source is
+	// never keyed.
+	test('(j) control: rename-with-edit keys the destination ALL_LINES_CHANGED and never the source', () => {
+		const checked = preCheckBatchInternals.parseDiffLineRangesChecked(
+			[
+				'diff --git old.ts new.ts',
+				'index 1234567..89abcde 92%',
+				'rename from old.ts',
+				'rename to new.ts',
+				'--- old.ts',
+				'+++ new.ts',
+				'@@ -1,2 +1,3 @@',
+				' context one',
+				'+inserted line',
+				' context two',
+			].join('\n'),
+			true,
+		);
+		expect(checked).not.toBeNull();
+		const destination = checked?.get('new.ts');
+		expect(destination).toBeDefined();
+		expect([...(destination ?? [])]).toEqual([-1]);
+		// The rename source is never keyed — a finding attributed to old.ts
+		// takes the missing-key arm like any untouched file.
+		expect(checked?.has('old.ts')).toBe(false);
+	}, 10_000);
 });

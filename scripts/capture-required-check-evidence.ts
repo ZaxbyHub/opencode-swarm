@@ -557,26 +557,36 @@ export function runCapture(cwd = REPO_ROOT): RequiredCheckEvidence {
 }
 
 export function main(argv: string[] = process.argv.slice(2), cwd = REPO_ROOT): number {
-	if (argv.includes('--self-test')) {
-		return runSelfTest() ? 0 : 1;
-	}
 	// Strict argv (#3661 item 1): only the space-separated `--output <path>`
 	// form is recognized. Every other token — unknown flags, the
-	// `--output=<path>` equals form, case-variant spellings, stray positionals
-	// — refuses with exit 2 BEFORE any capture work or write, so a typo can
-	// never silently fall through to the default write of the committed
-	// evidence artifact.
+	// `--output=<path>` equals form, case-variant spellings, stray positionals,
+	// and a bare `--` (no in-repo caller relies on it) — refuses with exit 2
+	// BEFORE any capture work, self-test run, or write, so a typo can never
+	// silently fall through to the default write of the committed evidence
+	// artifact. F-007 (PR #3718 review): the --self-test dispatch ran BEFORE
+	// this loop, so `--self-test --bogus` exited with the self-test verdict
+	// and the strict contract was bypassable; the loop now validates EVERY
+	// token first (the documented behavior: unknown flags exit 2), then
+	// --self-test short-circuits the capture path.
 	let dryRun = false;
 	let outputArg: string | undefined;
+	let selfTest = false;
 	for (let i = 0; i < argv.length; i += 1) {
 		const token = argv[i];
+		if (token === '--self-test') {
+			selfTest = true;
+			continue;
+		}
 		if (token === '--dry-run') {
 			dryRun = true;
 			continue;
 		}
 		if (token === '--output') {
 			const value = argv[i + 1];
-			if (value === undefined || value.startsWith('--')) {
+			// An empty value would resolve to the cwd and only fail later
+			// with exit 1 (F-007) — reject it as a missing path at the
+			// contract boundary instead.
+			if (value === undefined || value.length === 0 || value.startsWith('--')) {
 				console.error('capture-required-check-evidence: --output requires a path');
 				return 2;
 			}
@@ -588,6 +598,9 @@ export function main(argv: string[] = process.argv.slice(2), cwd = REPO_ROOT): n
 			`capture-required-check-evidence: unrecognized argument "${token}" (allowed: --self-test, --dry-run, --output <path>)`,
 		);
 		return 2;
+	}
+	if (selfTest) {
+		return runSelfTest() ? 0 : 1;
 	}
 	try {
 		const artifact = runCapture(cwd);

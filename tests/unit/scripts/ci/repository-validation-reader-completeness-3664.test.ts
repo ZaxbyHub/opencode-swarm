@@ -60,7 +60,7 @@ describe('repository validation reader completeness — issue #3664', () => {
 			});
 			const row = report.results[0];
 			expect(row).toBeDefined();
-			// RED at the current code: the stub is ignored and the row is
+			// RED at the base: the stub was ignored and the row was
 			// 'passed'. The fix ships the exact 'output_truncated' terminal.
 			expect(row?.status).toBe('output_truncated');
 			// The reason must name the channel AND its incompleteness directly
@@ -93,7 +93,7 @@ describe('repository validation reader completeness — issue #3664', () => {
 	// `validationAttempt(prior)` — scripts/ci/repository-validation.ts), so
 	// this leg passes an explicit reportPath under a THROWAWAY root (copied
 	// preload so the harness argv resolves) and reads the persisted JSON back.
-	// RED at the current code at the first assertion (stub inert → 'passed').
+	// RED at the base at the first assertion (the stub was inert -> 'passed').
 	test('C10: a repeated run persists the output_truncated row into attempt history', async () => {
 		const QUICK_FIXTURE = path.resolve(
 			'tests/unit/scripts/ci/fixtures/quick-pass-fixture.ts',
@@ -217,6 +217,44 @@ describe('repository validation reader completeness — issue #3664', () => {
 			_internals.killProcessTree = originalKillProcessTree;
 		}
 	}, 60_000);
+
+	// F-008 (PR #3718 review test-quality cluster): the REAL deadline path —
+	// every completeness leg above injects complete:false through the seam,
+	// so a reader-implementation regression (deadline never firing) would
+	// survive them all. Drive readBoundedWithStatus directly with a stream
+	// that never closes: the deadline arm must report complete:false with
+	// the bytes read so far, and a drained stream must report complete:true
+	// (the cap-vs-completeness sibling file pins the byte-cap arm).
+	test('F-008: readBoundedWithStatus reports complete:false for a never-ending stream past its deadline', async () => {
+		const neverEnding = new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.enqueue(new TextEncoder().encode('partial'));
+				// deliberately never closed
+			},
+		});
+		const partial = await _internals.readBoundedWithStatus(
+			neverEnding,
+			65_536,
+			50,
+		);
+		expect(partial.value).toBe('partial');
+		expect(partial.complete).toBe(false);
+		// The byte cap was never reached — incompleteness came from the
+		// deadline alone (the distinction FB-007's COMPLETENESS-ONLY rule
+		// depends on).
+		expect(partial.truncated).toBe(false);
+
+		const drained = new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.enqueue(new TextEncoder().encode('all-of-it'));
+				controller.close();
+			},
+		});
+		const full = await _internals.readBoundedWithStatus(drained, 65_536, 5_000);
+		expect(full.value).toBe('all-of-it');
+		expect(full.complete).toBe(true);
+		expect(full.truncated).toBe(false);
+	}, 30_000);
 
 	// C10 report-verifier leg (source-pin form): the standalone verifier
 	// (scripts/ci/verify-repository-validation-reports.ts) rejects any result

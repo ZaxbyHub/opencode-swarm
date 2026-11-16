@@ -1205,11 +1205,10 @@ function deriveStatus(mode: ValidationMode, summary: ValidationSummary): Validat
 	// is incomplete: the failed row is known, but the run cannot claim a
 	// complete verdict while crash/timeout/missing/skipped work remains.
 	if (hasIncompleteTerminals) return 'incomplete';
-	if (
-		summary.failed > 0 ||
-		summary.outputTruncated > 0 ||
-		summary.passed !== summary.discovered
-	) {
+	// No separate `summary.outputTruncated > 0` disjunct (PR #3718 review
+	// NIT): the output_truncated arm of summarize() increments failed too,
+	// so the counter is implied by summary.failed > 0.
+	if (summary.failed > 0 || summary.passed !== summary.discovered) {
 		return 'failed';
 	}
 	return 'passed';
