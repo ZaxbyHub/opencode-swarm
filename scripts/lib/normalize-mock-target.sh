@@ -26,10 +26,19 @@ normalize_mock_target() {
   # the rewrite above cannot consume (e.g. 'a/../../b' -> '../b'). A value
   # that still carries a parent segment is a traversal-bearing path, so it is
   # rejected rather than returned as a success.
-  if [[ "$normalized" == "../"* || "$normalized" == *"/../"* ]]; then
-    echo "normalize_mock_target: rejecting residual parent segment in target: $target" >&2
-    return 1
-  fi
+  #
+  # The check is SEGMENT-aware and matches the TS sibling's
+  # `normalized.split('/').includes('..')`: a SOLE '..' segment, a LEADING
+  # '../', an INTERIOR '/../', and a TERMINAL '/..' are all parent segments,
+  # while a '..' INSIDE a segment (e.g. 'a..b.ts') is not. The padded
+  # '/<value>/' form makes the terminal and sole cases visible to the same
+  # '/../' pattern that covers the interior ones.
+  case "/$normalized/" in
+    */../*)
+      echo "normalize_mock_target: rejecting residual parent segment in target: $target" >&2
+      return 1
+      ;;
+  esac
   normalized="$(echo "$normalized" | sed 's|^src/||; s|\.js$||')"
   if [[ "$normalized" != node:* ]]; then
     normalized="src/$normalized"

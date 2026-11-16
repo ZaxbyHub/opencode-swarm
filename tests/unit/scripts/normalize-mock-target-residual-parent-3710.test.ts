@@ -101,7 +101,16 @@ const BASH_CHILD_SCRIPT = [
 	'exit "$rc"',
 ].join('\n');
 
-const RESIDUAL_CASES = ['a/../../b', 'a/b/../../../c'];
+const RESIDUAL_CASES = [
+	'a/../../b',
+	'a/b/../../../c',
+	// A TERMINAL parent segment and a SOLE parent segment: the dotdot rewrite
+	// loop never enters for these (they carry no '/../'), so they are caught
+	// only by the segment-aware residual guard. The bash sibling used to
+	// accept both and return a traversal-bearing value ('src/foo/..').
+	'foo/..',
+	'..',
+];
 
 describe('normalize_mock_target rejects a residual parent segment (#3710 R-02)', () => {
 	for (const target of RESIDUAL_CASES) {

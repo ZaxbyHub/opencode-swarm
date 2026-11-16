@@ -20,12 +20,16 @@ these additional bare well-known credential families, each with its own
   segments stay at 10+): an unbounded segment made the regex quadratic on a
   dense `eyJ-` run at the shell site, which has no input-length bound and
   redacts BEFORE the audit truncation (measured: 256 KB took 30.7–33.3 s at
-  the unbounded arm). **Disclosed bound:** a JWT whose header segment EXCEEDS
-  1024 chars is not matched by this arm at either site — the base64 fallback
-  arm's class excludes base64url's `-`/`_`, so such a token is not eliminated
-  by a fallback either (executed probe). A mainstream issuer's header is
-  ~36–100 chars, so the bound has ~10× headroom over a real token; the
-  over-long shape is tracked as a follow-up.
+  the unbounded arm; 229 ms at the bound). **Disclosed bound:** a JWT whose
+  header segment EXCEEDS 1024 chars is not matched by this arm at either site
+  — the base64 fallback arm's class excludes base64url's `-`/`_`, so such a
+  token is not eliminated by a fallback either (executed probe). A mainstream
+  issuer's header is ~36–100 chars, so the bound has ~10× headroom over a
+  real token. The `jwt` family is NEW in this change: at the PR's base
+  neither site patterned a JWT at all, so the over-long shape was not covered
+  there either — the bound trades coverage of a shape no issuer produces for
+  a bounded scan on a default-on hot path. The over-long shape is tracked as
+  a follow-up.
 - `azure` — CONTEXTUAL only: connection-string `AccountKey=<base64>` spans
   collapse to the bare `[REDACTED:azure]` placeholder. The arm is
   case-INSENSITIVE (`accountKey=`, `ACCOUNTKEY=`), matching Azure's
@@ -41,18 +45,30 @@ carry their correct provider labels. The widened corpus is pinned at both sites 
 a new sibling parity suite (prose elimination, family placeholder, and
 mirror-parity loops) alongside the existing #3165 suite, which is unchanged.
 
-**Disclosed bound (header placements):** credential tokens inside an
-`-H "...: Bearer ..."` / Bearer / Basic header placement are redacted by the
-pre-existing context arms with their GENERIC placeholders (the shell Bearer/Basic
-and -H header arms; the display credential-KV arm) at both sites. A BARE
-`Authorization: <token>` placement (no `-H`, no Bearer/Basic) is NOT matched by
-those context arms: the shell site applies the family label (e.g.
-`[REDACTED:groq]`) and the display site applies the generic KV form. At base the
-shell site left that token in CLEAR TEXT, so the family label there is new, not
-byte-identical to base. The token is eliminated at both sites in every shape.
-The per-family placeholder contract covers prose/bare placements (the placement
-class with no adjacent key/scheme context the context arms can match); pinned as
-intended by tests/unit/failures/redaction-bounds-pins-3710.test.ts.
+**Disclosed bound (header placements):** which placeholder a credential gets
+depends on the placement AND on the site — the two sites do NOT apply the same
+context arms. The executed behaviour (a `gsk_…` token; synthetic material):
+
+| placement | display sweep | shell mirror |
+| --- | --- | --- |
+| `Bearer <token>` / `Basic <token>` | `Bearer [REDACTED:groq]` (FAMILY) | `Bearer [REDACTED]` (generic) |
+| `-H "Authorization: Bearer <token>"` | `-H "Authorization=<redacted>` (generic) | `-H "Authorization: [REDACTED]"` (generic) |
+| `Authorization: Bearer <token>` | `Authorization=<redacted>` (generic) | `Authorization: Bearer [REDACTED]` (generic) |
+| `Authorization: <token>` (bare) | `Authorization=<redacted>` (generic) | `Authorization: [REDACTED:groq]` (FAMILY) |
+
+The display site has a generic credential-KV arm (a key followed by `:` or
+`=`) but NO standalone Bearer/Basic arm, so a bare `Bearer <token>` is owned
+by the FAMILY sweep there; the shell mirror has both a standalone Bearer/Basic
+arm and an `-H` arm, so it owns those with the generic placeholder. A BARE
+`Authorization: <token>` placement is the mirror image: the display KV arm
+takes it, the shell site has no key-value arm for it and applies the family
+label. At base the shell site left that token in CLEAR TEXT, so the family
+label there is new, not byte-identical to base. The TOKEN is eliminated at
+both sites in every shape; only the placeholder label differs by site and
+placement. The per-family placeholder contract covers prose/bare placements
+(the placement class with no adjacent key/scheme context the context arms can
+match); pinned as intended by
+tests/unit/failures/redaction-bounds-pins-3710.test.ts.
 
 **Disclosed bound (path-like base64 false positives):** an >=80-character
 mixed-class run without `.`/`-`/`_` separators — e.g. a flattened long
@@ -134,6 +150,9 @@ returns 1) — never a traversal-bearing success value.
 **Declared behavior changes:** duplicate separators now canonicalize
 (`foo//bar.ts` → `src/foo/bar.ts`); `foo//../bar` normalizes to `src/bar`;
 post-collapse unrewritable forms (e.g. `/../bar`) AND any residual parent
-segment (e.g. `a/../../b`) reject loudly instead of hanging or emitting a
-traversal-bearing path. Benign inputs (`src/utils/logger.ts`,
-`a/b/c.ts`, `../x/y.ts`) are unchanged.
+segment reject loudly instead of hanging or emitting a traversal-bearing path.
+The residual check is SEGMENT-aware and identical in both siblings: a sole
+`..` segment, a leading `../`, an interior `/../`, and a terminal `/..` are
+all rejected (`a/../../b`, `foo/..`, `..`), while a `..` INSIDE a segment
+(`a..b.ts`) is not a parent segment and still normalizes. Benign inputs
+(`src/utils/logger.ts`, `a/b/c.ts`, `../x/y.ts`) are unchanged.

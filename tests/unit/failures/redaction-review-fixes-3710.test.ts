@@ -55,6 +55,23 @@ describe('JWT arm is bounded at the shell site (#3710 review R-19)', () => {
 		);
 		expect(redactShellCommand(longHeaderJwt)).toContain('[REDACTED:jwt]');
 	}, 30_000);
+
+	test('the over-long-header residual is the DISCLOSED bound, not an accident', () => {
+		// The bound is a deliberate, disclosed trade: a JWT whose header
+		// segment exceeds 1024 chars is NOT matched by the jwt arm. This row
+		// pins that residual so a future change to the bound is a deliberate
+		// decision (and so the release fragment's disclosed bound stays
+		// true). No mainstream issuer produces a header this long, and the
+		// `jwt` family is new in this change — at the PR's base neither site
+		// patterned a JWT at all.
+		const overLongHeaderJwt = `eyJ${'A'.repeat(1100)}-.eyJ${'b'.repeat(40)}.${'c'.repeat(40)}`;
+		expect(sanitizeFailureEvidenceDisplay(overLongHeaderJwt)).not.toContain(
+			'[REDACTED:jwt]',
+		);
+		expect(redactShellCommand(overLongHeaderJwt)).not.toContain(
+			'[REDACTED:jwt]',
+		);
+	}, 30_000);
 });
 
 describe('azure contextual arm is case-insensitive at both sites (#3710 review R-06)', () => {
