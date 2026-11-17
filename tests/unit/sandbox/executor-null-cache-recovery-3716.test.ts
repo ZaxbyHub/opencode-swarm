@@ -53,6 +53,21 @@ afterEach(() => {
 });
 
 describe('executor null-cache recovery (#3716 item 3)', () => {
+	test('a null outcome is cached while the TTL is still running', async () => {
+		// #3728 feedback FB-016: use the 60 s default for the within-TTL leg so a
+		// scheduling pause cannot expire the entry between two calls.
+		delete process.env.SWARM_SANDBOX_EXECUTOR_FAILURE_TTL_MS;
+		_resetExecutorCache();
+		let creations = 0;
+		_internals.createPlatformExecutor = async () => {
+			creations += 1;
+			return null;
+		};
+		expect(await getExecutor()).toBeNull();
+		expect(await getExecutor()).toBeNull();
+		expect(creations).toBe(1);
+	}, 30_000);
+
 	test('a null first creation recovers after the TTL once the seam returns a healthy executor', async () => {
 		process.env.SWARM_SANDBOX_EXECUTOR_FAILURE_TTL_MS = '10';
 		_resetExecutorCache();
@@ -63,11 +78,7 @@ describe('executor null-cache recovery (#3716 item 3)', () => {
 		};
 		const first = await getExecutor();
 		expect(first).toBeNull();
-		// Within the TTL: the null outcome is still cached.
-		const immediate = await getExecutor();
-		expect(immediate).toBeNull();
-		expect(creations).toBe(1);
-		// Past the TTL: a healthy re-probe is reflected.
+		// A pause only makes the entry expire sooner; it cannot break this leg.
 		await new Promise((resolve) => setTimeout(resolve, 25));
 		const recovered = await getExecutor();
 		expect(recovered).not.toBeNull();

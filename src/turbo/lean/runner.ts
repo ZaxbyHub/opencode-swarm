@@ -172,6 +172,12 @@ export interface LaneResult {
 	sessionId?: string;
 	/** Error message if status is 'failed' or 'blocked' */
 	error?: string;
+	/**
+	 * #3728 feedback: bounded provider diagnostic retained when a real-output
+	 * lane settles completed despite a provider refusal. Carried on the result
+	 * so a later merge-back failure can preserve it when rewriting lane evidence.
+	 */
+	providerError?: string;
 	/** Merge-back failure info if the coder completed but integration back to primary failed */
 	mergeBackFailure?: MergeBackFailureInfo;
 }
@@ -1034,7 +1040,16 @@ export class LeanTurboRunner {
 				};
 			}
 
-			return { ok: true, sessionId };
+			// #3728 feedback FB-008: keep the real-output carve-out (a reply with
+			// text still settles completed and merges back), but carry the
+			// structured provider refusal on the success result so runPhase can
+			// persist a bounded diagnostic instead of dropping it. The fallback
+			// wrapper only throws on ok === false, so this never re-opens retry.
+			return {
+				ok: true,
+				sessionId,
+				...(providerError ? { providerError } : {}),
+			};
 		} catch (err) {
 			if (sessionId) {
 				abortController?.abort();
@@ -1731,12 +1746,25 @@ export class LeanTurboRunner {
 		}
 		delete this._laneLockMap[lane.laneId];
 
-		// Write evidence for completed lane
+		// #3728 feedback FB-008: a real-output lane can settle completed with a
+		// provider refusal still attached. Keep one bounded, sanitized diagnostic
+		// and carry it on BOTH the evidence and the result — a later merge-back
+		// failure rewrites the same lane evidence file and must preserve it.
+		const providerDiagnostic = dispatchResult.providerError
+			? sanitizeFailureEvidenceDisplay(
+					formatProviderMessageError(
+						'session.prompt provider error',
+						dispatchResult.providerError,
+					),
+				)
+			: undefined;
+
 		await this._writeLaneEvidenceSafely(lane, 'completed', {
 			status: 'completed',
 			agent,
 			sessionId: dispatchResult.sessionId,
 			completedAt,
+			...(providerDiagnostic ? { providerError: providerDiagnostic } : {}),
 		});
 
 		return {
@@ -1745,6 +1773,7 @@ export class LeanTurboRunner {
 			taskIds: lane.taskIds,
 			agent,
 			sessionId: dispatchResult.sessionId,
+			...(providerDiagnostic ? { providerError: providerDiagnostic } : {}),
 		};
 	}
 
@@ -1890,6 +1919,9 @@ export class LeanTurboRunner {
 							{
 								status: 'failed',
 								error: failureInfo.reason,
+								// #3728 feedback: the merge-back rewrite targets the same lane
+								// evidence file - carry the real-output diagnostic forward.
+								providerError: lr.providerError,
 								mergeBackFailure: failureInfo,
 							},
 						);
@@ -1927,6 +1959,9 @@ export class LeanTurboRunner {
 							{
 								status: 'failed',
 								error: failureInfo.reason,
+								// #3728 feedback: the merge-back rewrite targets the same lane
+								// evidence file - carry the real-output diagnostic forward.
+								providerError: lr.providerError,
 								mergeBackFailure: failureInfo,
 							},
 						);
@@ -1966,6 +2001,9 @@ export class LeanTurboRunner {
 						{
 							status: 'failed',
 							error: failureInfo.reason,
+							// #3728 feedback: the merge-back rewrite targets the same lane
+							// evidence file - carry the real-output diagnostic forward.
+							providerError: lr.providerError,
 							mergeBackFailure: failureInfo,
 						},
 					);

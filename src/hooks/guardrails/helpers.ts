@@ -233,7 +233,13 @@ export function redactShellCommand(cmd: string): string {
 	// #3723: whole JWS tokens whose header exceeds the legacy arm's 1024-char
 	// bound (x5c certificate-chain headers are 1.2-5 KB) — linear single-pass
 	// span scan. The legacy bounded jwt arm below stays (fast path + pin
-	// parity); this pre-pass only ADDS coverage the bound left open.
+	// parity). Running FIRST, this pre-pass also claims glued family-prefixed
+	// tokens (e.g. `sk-…-eyJ…`) the family arms would truncate at the header —
+	// the token takes the jwt label and the sub-minimum family fragment stays
+	// visible (the family arms' own disclosed bound) — so it changes outcomes
+	// beyond the 1024 bound. Differential fuzz at #3728 found 0 head-worse
+	// cases at or above each family's own minimum fragment length; shorter
+	// prefixes are outside that guarantee.
 	out = redactJwsTokens(out);
 
 	// Well-known token VALUE shapes (content-based; fires regardless of the

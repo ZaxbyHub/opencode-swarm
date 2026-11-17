@@ -1627,7 +1627,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/turbo/lean/evidence.ts', 'src/turbo/lean/integration.ts', 'src/turbo/lean/reviewer.ts', 'src/epic/phase-readiness.ts'],
 		writerCitations: [
-			'src/turbo/lean/evidence.ts:216 writeLaneEvidence / :269 writePhaseEvidence — atomic',
+			'src/turbo/lean/evidence.ts:222 writeLaneEvidence / :275 writePhaseEvidence — atomic',
 			'src/turbo/lean/integration.ts:403 writeCriticEvidence / src/turbo/lean/reviewer.ts:379 writeReviewerEvidence — atomic',
 			'src/epic/phase-readiness.ts:904 runEpicPhaseReview — one atomic evidence/{phase}/epic-phase-review.json per phase, overwritten on re-review',
 		],

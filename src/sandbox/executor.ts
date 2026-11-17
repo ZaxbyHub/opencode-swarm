@@ -171,8 +171,11 @@ const SWARM_EXECUTOR_FAILURE_TTL_DEFAULT_MS = 60_000;
  * The failure TTL, overridable for tests via
  * SWARM_SANDBOX_EXECUTOR_FAILURE_TTL_MS. Only FINITE POSITIVE values are
  * honored — anything else (unset, NaN, 0, negative, Infinity) falls back to
- * the default, so the override can neither pin a null forever nor force a
- * hot re-probe loop. Parsed per call so tests can adjust it dynamically.
+ * the default, so the override cannot pin a null forever. There is no minimum:
+ * any positive value is honored as-is, so a sub-millisecond override expires
+ * as soon as the clock advances past it (calls inside the same millisecond
+ * still share the cached promise). Test-only knob; production leaves it unset.
+ * Parsed per call so tests can adjust it dynamically.
  */
 export function executorFailureTtlMs(): number {
 	const raw = Number(process.env.SWARM_SANDBOX_EXECUTOR_FAILURE_TTL_MS);

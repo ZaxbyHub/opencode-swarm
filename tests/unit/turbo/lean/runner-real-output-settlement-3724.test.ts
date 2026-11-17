@@ -96,6 +96,11 @@ describe('LeanTurboRunner real-output settlement (#3724 item 3)', () => {
 		expect(result.ok).toBe(true);
 		expect(result.sessionId).toBe('lane-sess');
 		expect(deletes).toBe(0);
+		// #3728 feedback FB-008: the real-output carve-out keeps the structured
+		// refusal on the success result so runPhase can persist a bounded
+		// diagnostic instead of dropping it silently.
+		expect(result.providerError?.name).toBe('APIError');
+		expect(result.providerError?.statusCode).toBe(429);
 	}, 30_000);
 
 	test('dispatchLane: empty text parts + the same provider error still fails closed with teardown', async () => {
@@ -224,10 +229,136 @@ describe('LeanTurboRunner real-output settlement routing (#3724 item 3)', () => 
 				(result as { mergeBackFailures?: unknown[] }).mergeBackFailures
 					?.length ?? 0,
 			).toBe(0);
+			// #3728 feedback FB-008: the completed lane evidence retains a
+			// bounded, sanitized provider diagnostic (the pre-PR path failed and
+			// recorded it under `error`; real output must not lose it).
+			const evidence = JSON.parse(
+				fs.readFileSync(
+					path.join(
+						tmpDir,
+						'.swarm',
+						'evidence',
+						'1',
+						'lean-turbo',
+						'lane-1.json',
+					),
+					'utf-8',
+				),
+			);
+			expect(evidence.status).toBe('completed');
+			expect(String(evidence.providerError ?? '')).toContain('429');
+			expect(String(evidence.providerError ?? '')).toContain(
+				'rate limit exceeded',
+			);
 		} finally {
 			LeanTurboRunner._internals.provisionWorktree = origProvision;
 			LeanTurboRunner._internals.postMergeCleanup = origCleanup;
 			LeanTurboRunner._internals.removeWorktree = origRemove;
+		}
+	}, 120_000);
+
+	test('runPhase: a merge-back failure after a real-output provider refusal preserves the diagnostic in failed evidence', async () => {
+		// #3728 closeout: the merge-back failure rewrites the SAME lane evidence
+		// file; the real-output provider diagnostic must survive that rewrite.
+		fs.writeFileSync(
+			path.join(tmpDir, '.swarm', 'plan.json'),
+			JSON.stringify({
+				schema_version: '1.0.0',
+				title: 'Routing Plan',
+				swarm: 'test-swarm',
+				current_phase: 1,
+				phases: [
+					{
+						id: 1,
+						name: 'Phase 1',
+						status: 'in_progress',
+						tasks: [
+							{
+								id: '1.1',
+								description: 'Task 1',
+								status: 'pending',
+								phase: 1,
+								size: 'small',
+								depends: [],
+								acceptance: 'Done',
+							},
+						],
+					},
+				],
+				lean: {
+					max_parallel_coders: 1,
+					require_declared_scope: false,
+					conflict_policy: 'serialize',
+					degrade_on_risk: true,
+					phase_reviewer: false,
+					phase_critic: false,
+					integrated_diff_required: false,
+					allow_docs_only_without_reviewer: false,
+					worktree_isolation: true,
+				},
+			}),
+			'utf-8',
+		);
+		const scopeDir = path.join(tmpDir, '.swarm', 'scopes');
+		fs.mkdirSync(scopeDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(scopeDir, 'scope-1.1.json'),
+			JSON.stringify({ files: ['src/a.ts'] }),
+			'utf-8',
+		);
+		const runner = new LeanTurboRunner({
+			directory: tmpDir,
+			sessionID: SESSION_ID,
+			generatedAgentNames: ['mega_coder'],
+		} as never);
+		(runner as unknown as { _sessionOps: unknown })._sessionOps = {
+			create: async () => ({ data: { id: 'lane-sess' }, error: null }),
+			prompt: async () => ({
+				data: replyWithData([{ type: 'text', text: 'Real produced output' }]),
+				error: null,
+			}),
+			delete: async () => {},
+		};
+		const origMerge = LeanTurboRunner._internals.attemptMergeBackFromDirty;
+		LeanTurboRunner._internals.attemptMergeBackFromDirty = mock(() =>
+			Promise.resolve({ failed: true, message: 'merge rejected' }),
+		);
+		const origProvision = LeanTurboRunner._internals.provisionWorktree;
+		LeanTurboRunner._internals.provisionWorktree = mock(() =>
+			Promise.resolve({
+				worktreePath: path.join(
+					tmpDir,
+					'.swarm-worktrees',
+					SESSION_ID,
+					'lane-1',
+				),
+				branchName: `swarm-lane/${SESSION_ID}/lane-1`,
+			}),
+		);
+		try {
+			await runner.runPhase(1);
+			const evidence = JSON.parse(
+				fs.readFileSync(
+					path.join(
+						tmpDir,
+						'.swarm',
+						'evidence',
+						'1',
+						'lean-turbo',
+						'lane-1.json',
+					),
+					'utf-8',
+				),
+			);
+			expect(evidence.status).toBe('failed');
+			expect(evidence.error).toContain('merge rejected');
+			expect(String(evidence.providerError ?? '')).toContain('429');
+			expect(String(evidence.providerError ?? '')).toContain(
+				'rate limit exceeded',
+			);
+		} finally {
+			LeanTurboRunner._internals.attemptMergeBackFromDirty = origMerge;
+			LeanTurboRunner._internals.provisionWorktree = origProvision;
 		}
 	}, 120_000);
 });

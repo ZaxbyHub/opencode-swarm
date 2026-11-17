@@ -58,6 +58,11 @@ describe('long-header JWS redaction (#3723 / AC10)', () => {
 		const token = `${longHeader(URL_SAFE)}.${PAYLOAD}.${SIGNATURE}`;
 		const display = sanitizeFailureEvidenceDisplay(token);
 		expect(display.includes(PAYLOAD)).toBe(false);
+		// #3728 feedback FB-009: absence here can be produced by the 512-byte
+		// display bound alone (the dash-bearing alphabet defeats the fallback
+		// base64 arm). Assert the positive redaction label too, so removing the
+		// display span scan turns this leg red instead of passing vacuously.
+		expect(display).toContain(JWS_REDACTION_LABEL);
 		const shell = redactShellCommand(token);
 		expect(shell.includes(PAYLOAD)).toBe(false);
 		expect(shell.includes(SIGNATURE)).toBe(false);
