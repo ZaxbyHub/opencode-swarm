@@ -197,14 +197,15 @@ describe('#3736 D4-rev3 standard-base64 placements', () => {
 		expect(sanitizeFailureEvidenceDisplay(input).includes('e30')).toBe(false);
 	});
 	test('a generic span starting MID-token is dropped (no gluing) — exact output', () => {
-		// FB-002 rebuild (Stage-B corrected mechanism): the DISCRIMINATING
-		// generic candidate is (PAYLOAD, p20, s10) — PAYLOAD (59 alnum chars)
-		// passes GENERIC_HEADER_RE, p20 passes the >=20 payload minimum, s10
-		// passes the >=10 signature minimum — starting MID-token (p20 begins
-		// inside the eyJ span, whose absorption takes p20 via the >=16
-		// tokenLike arm and stops at lowercase s10) and ENDING BEYOND the eyJ
-		// span (at s10.end). A gluing mutant that merges instead of dropping
-		// extends the eyJ span across s10; the exact output fails it.
+		// FB-002 rebuild (Stage-B test-engineer corrected): the generic
+		// candidate (PAYLOAD, SIG, p20) — PAYLOAD (59 alnum chars) passes
+		// GENERIC_HEADER_RE, SIG passes the >=10 signature minimum, p20 the
+		// >=20 payload minimum — starts MID-token and ends exactly AT the eyJ
+		// span end (absorption takes p20 via the >=16 tokenLike arm and stops
+		// at lowercase s10), so the gluing class cannot bite here (sibling
+		// legs pin it). This pin's kill is the ABSORPTION GATE (Stage-B
+		// mutant M6): removing the tokenLike gate absorbs s10 too, and the
+		// exact output below fails.
 		const p20 = 'p'.repeat(20);
 		const s10 = 's'.repeat(10);
 		const input = `pre.${HDR}.${PAYLOAD}.${SIG}.${p20}.${s10}.post`;
