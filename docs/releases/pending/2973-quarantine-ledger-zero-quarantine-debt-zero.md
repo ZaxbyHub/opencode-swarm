@@ -3,6 +3,8 @@ issue: 2973
 title: Quarantine debt reaches zero — last four ledger entries retired
 ---
 
+# Quarantine debt reaches zero — last four ledger entries retired
+
 ## What changed
 
 - All four quarantine ledgers now hold **0 active entries** (windows 3 → 0,

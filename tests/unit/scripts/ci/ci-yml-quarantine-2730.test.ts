@@ -9,9 +9,10 @@ import { join } from 'node:path';
 // Their dispositions, after the 2026-11-12 un-quarantine per issue #2973
 // (collated trace; re-anchors to #3218/#2973):
 //   - tests/unit/hooks/pr-feedback-scope-controller.test.ts
-//     (macos-latest unit-shard 1, passed-on-retry flake — STILL ACTIVE in
-//     scripts/ci/quarantined-tests-macos.txt, re-anchored 2026-11-12 with
-//     OWNER #2973 / EXPIRY 2026-12-20)
+//     (macos-latest unit-shard 1, passed-on-retry flake — was quarantined in
+//     scripts/ci/quarantined-tests-macos.txt and re-anchored 2026-11-12 with
+//     OWNER #2973 / EXPIRY 2026-12-20; RETIRED on 2026-11-16 when the macOS
+//     ledger reached zero active entries — the assertion below pins absence)
 //   - tests/unit/scripts/ci/repository-validation-real-process-2675.test.ts
 //     (macos-latest unit-shard 1, hard fail — was quarantined in
 //     scripts/ci/quarantined-tests-macos.txt by issue #2738, commit

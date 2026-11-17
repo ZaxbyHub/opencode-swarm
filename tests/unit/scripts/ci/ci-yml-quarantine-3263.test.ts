@@ -118,9 +118,10 @@ describe('ci.yml integration — quarantine ledger entries for issue #3263', () 
 	test('windows ledger STATUS header count matches its active-entry count', () => {
 		// The windows ledger's re-add policy tracks its active entry count
 		// in a "# STATUS: N active entries" header line. Post-2026-11-16
-		// count is 0 (the re-anchored #3218 archive + archive-dry-run
-		// pair and the #2973 dispatch-lanes entry); drift between the
-		// declared count and the actual active-entry count (e.g. an
+		// the count is 0: the previously re-anchored #3218 archive pair
+		// and the #2973 dispatch-lanes entry have all been retired.
+		// Drift between the declared count and the actual active-entry
+		// count (e.g. an
 		// entry removed without updating the header, or a count bumped
 		// without the matching entries) makes the header lie to triage.
 		// Note: this only catches count drift; the presence tests above

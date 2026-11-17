@@ -99,9 +99,10 @@ describe('PR_FEEDBACK scope race under an injected pre-consume transient (#2973)
 				),
 			);
 
-		// Leg 1 — deterministic reproduction of the 2026-09-12 failure shape:
+		// Leg 1 — controlled reproduction of the 2026-09-12 failure shape:
 		// the seam fires once per racing call BEFORE any consumption; throwing
-		// on the first two invocations rejects BOTH calls pre-consume.
+		// on the first two invocations rejects BOTH calls pre-consume. The real
+		// incident was an un-retried race; leg 2 below covers recovery separately.
 		let seamInvocations = 0;
 		delegationInternals.beforePrFeedbackScopeConsume = async () => {
 			seamInvocations += 1;
