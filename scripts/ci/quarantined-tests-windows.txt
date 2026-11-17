@@ -12,7 +12,7 @@
 # gate; an EXPIRY more than 14 days in the past also fails (inside the grace
 # window it only warns).
 #
-# STATUS: 3 active entries — re-anchored 2026-11-12 (EXPIRY 2026-12-20): archive.test.ts + archive-dry-run.test.ts (OWNER #3218) and dispatch-lanes-pr-review-resilience-followups (OWNER #2973); OWNER/EXPIRY blocks below. The retired entries were un-quarantined per issue #2973 (post-un-quarantine observation): the 2026-11-18 renewal remainder (j02-failure-rejection-distinct, delegation-gate-background-coder), four of the five 2026-11-20 #3264 cohort entries (archive.test.ts re-anchored below), and delegation-gate-retry-sounding-board-manual of the 2026-12-06 #3263 pair (archive-dry-run.test.ts re-anchored below); the re-add policy line below still governs.
+# STATUS: 0 active entries — retired 2026-11-16 per issues #2973 + #3218 (quarantine-debt-zero trace): the three 2026-11-12 re-anchors (archive.test.ts + archive-dry-run.test.ts OWNER #3218; dispatch-lanes-pr-review-resilience-followups OWNER #2973) were un-quarantined with per-entry retirement bases recorded in the block below. Earlier history: the retired entries were un-quarantined per issue #2973 (post-un-quarantine observation) — the 2026-11-18 renewal remainder (j02-failure-rejection-distinct, delegation-gate-background-coder), four of the five 2026-11-20 #3264 cohort entries, and delegation-gate-retry-sounding-board-manual of the 2026-12-06 #3263 pair; the re-add policy line below still governs.
 # #2973 on 2026-09-27: rows with their named root fixes already in-tree —
 # pr-monitor-status (PR #2190 freezeClock + EBUSY-retry), 2602-lifecycle and
 # phase-complete.lock-adversarial (PR #2807 safeRmRecursive) — and rows whose
@@ -68,14 +68,24 @@
 #
 # Do NOT re-add entries here unless a merge_group run on windows-latest has
 # confirmed a real failure that cannot be fixed at the root.
-# OWNER: zaxbysauce — issue #2973; criterion: windows merge-group stability post-#3640, else obtain the failing-run diagnosis
-# EXPIRY: 2026-12-20 — re-anchored 2026-11-12 (trace 2973-…-quarantine-retirement): no reproducible diagnosis yet; observe post-#3640 stability, capture diagnosis on any windows merge-group failure
-tests/unit/tools/dispatch-lanes-pr-review-resilience-followups.test.ts
-
-# OWNER: zaxbysauce — issue #3218; criterion: 2 consecutive green windows-latest merge-group runs
-# EXPIRY: 2026-12-20 — re-anchored 2026-11-12 per the #3218 disposition: determinism-hardened in this PR (cache invalidation + clock pinning + boundary spec); original CI mechanism unproven
-tests/unit/commands/archive.test.ts
-
-# OWNER: zaxbysauce — issue #3218; criterion: 2 consecutive green windows-latest merge-group runs
-# EXPIRY: 2026-12-20 — re-anchored 2026-11-12 with archive.test.ts (#3218); post-hardening recurrences; same cache-invalidation fix applied
-tests/unit/commands/archive-dry-run.test.ts
+#
+# Retired 2026-11-16 per issues #2973 + #3218 (quarantine-debt-zero trace,
+# successor to the 2026-11-12 re-anchor): the three re-anchored entries below
+# were removed and their files re-execute on windows-latest from the retiring
+# PR's own merge-group run onward. Retirement basis per entry:
+# - tests/unit/tools/dispatch-lanes-pr-review-resilience-followups.test.ts
+#   (#2973): retry-only windows flake (9 detections 2026-09-11..2026-10-13,
+#   zero hard failures, last predating #3640); the raw `await fs.rm` teardown
+#   with zero EBUSY/EPERM retries — the exact class sibling retirements cured
+#   by converting to safeRmRecursive — was converted in the retiring PR;
+#   residual real-git preflight latency is a disclosed watch item (a re-flake
+#   re-quarantines with fresh merge-group evidence per the #1782 convention,
+#   and the per-attempt validation-report artifact carries the attempt-1 text).
+# - tests/unit/commands/archive.test.ts + archive-dry-run.test.ts (#3218):
+#   determinism-hardened in PR #3672 (makeBundleOld cache invalidation,
+#   frozen-clock updated_at pin, archive-retention-boundary spec); the entry
+#   criterion is >=2 consecutive green windows-latest merge-group runs — run 1
+#   is the retiring PR's queue run, run 2 the first post-merge group run;
+#   issue #3218 closes on that evidence.
+# Do NOT re-add any of these files without a fresh merge-group windows-latest
+# failure that cannot be fixed at the root.
