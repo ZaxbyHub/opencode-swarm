@@ -233,8 +233,12 @@ In diff mode, selection is based on committed branch changes in
 exact array-form command and cwd for each item, the `origin/main` diff base,
 per-item terminal status, bounded output, timing, signal, and cleanup outcome.
 Terminal statuses are `passed`, `failed`, `crashed`, `timed_out`, `missing`,
-and `skipped`; a run containing an unresolved crash, timeout, missing item, or
-skip is `incomplete` rather than a complete pass. Run-level statuses are
+`skipped`, and `output_truncated` (a child whose run completed with no
+timeout and no crash — tree cleanup succeeded, no signal, known exit code —
+but whose bounded stdout/stderr reader missed its deadline; the terminal
+evidence was only partially observed, so the row counts as failed (#3664)); a
+run containing an unresolved crash, timeout, missing item, or skip is
+`incomplete` rather than a complete pass. Run-level statuses are
 `passed`, `failed`, `incomplete`, and `no_op`, with `no_op` reserved for an
 empty diff selection.
 

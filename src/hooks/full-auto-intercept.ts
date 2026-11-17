@@ -21,6 +21,7 @@ import { appendCoreEventSync } from '../events/core-events.js';
 import {
 	classifyProviderFailure,
 	isRetryableProviderFailure,
+	sanitizeFailureEvidenceDisplay,
 } from '../failures/invocation-failure.js';
 import {
 	providerMessageErrorToError,
@@ -754,7 +755,7 @@ export async function dispatchCriticAndWriteEvent(
 		}
 		lastDispatchError = result.error;
 		logger.warn(
-			`[full-auto-intercept] dispatch attempt ${attempt + 1}/${maxDispatchRetries + 1} failed: ${lastDispatchError instanceof Error ? lastDispatchError.message : String(lastDispatchError)}`,
+			`[full-auto-intercept] dispatch attempt ${attempt + 1}/${maxDispatchRetries + 1} failed: ${sanitizeFailureEvidenceDisplay(lastDispatchError instanceof Error ? lastDispatchError.message : String(lastDispatchError))}`,
 		);
 		if (attempt < maxDispatchRetries) {
 			// Will retry. #1905: if the failure is transient/quota, advance to the
@@ -793,7 +794,10 @@ export async function dispatchCriticAndWriteEvent(
 			}
 		} else {
 			// Exhausted retries: SC-011 auto-degrade.
-			const infraReason = `oversight infrastructure failure after ${maxDispatchRetries + 1} attempt(s): ${lastDispatchError instanceof Error ? lastDispatchError.message : String(lastDispatchError)}`;
+			// #3710: persisted failure reasons carry redacted provider error text
+			// (applied after every classifier read; the fixed prefix survives the
+			// sanitizer for the recovery/permission pause-reason matchers).
+			const infraReason = `oversight infrastructure failure after ${maxDispatchRetries + 1} attempt(s): ${sanitizeFailureEvidenceDisplay(lastDispatchError instanceof Error ? lastDispatchError.message : String(lastDispatchError))}`;
 			const consecutive = incrementOversightFailureCounter(
 				directory,
 				sessionID ?? '',
@@ -812,7 +816,7 @@ export async function dispatchCriticAndWriteEvent(
 				// Below threshold — pause and allow architect to resolve.
 				pauseFullAutoRun(directory, sessionID ?? '', infraReason);
 				logger.error(
-					`[full-auto-intercept] [ADVISORY] Oversight dispatch exhausted ${maxDispatchRetries + 1} attempts and failed. Intercepting with NEEDS_REVISION. Last error: ${lastDispatchError instanceof Error ? lastDispatchError.message : String(lastDispatchError)}`,
+					`[full-auto-intercept] [ADVISORY] Oversight dispatch exhausted ${maxDispatchRetries + 1} attempts and failed. Intercepting with NEEDS_REVISION. Last error: ${sanitizeFailureEvidenceDisplay(lastDispatchError instanceof Error ? lastDispatchError.message : String(lastDispatchError))}`,
 				);
 			}
 		}

@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.203.3",
+  "tagCommit": "9607b4a0beff61059bf3fe339b25e284a9a7e779",
+  "targetCommitish": "9607b4a0beff61059bf3fe339b25e284a9a7e779",
+  "releaseBodySha256": "ede2faa122d3d45fbe4531f1135907b98b605a1314b394ec906079222f889fe7",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 4,
+      "path": "docs/releases/pending/3165-e-remove-dead-turbo-bypass.md",
+      "sha256": "70d62147421d7b281c0aca51dbdb4559e288819eb6ff19028d16d712ae247ef6"
+    },
+    {
+      "prNumber": null,
+      "order": 2,
+      "path": "docs/releases/pending/3165-stage-b-wording-and-unpublished-notes.md",
+      "sha256": "57144d5fb9df4e59d1ffa04f13055d25a5733e676e261079fc49083f19aff34e"
+    },
+    {
+      "prNumber": null,
+      "order": 6,
+      "path": "docs/releases/pending/3250-2738-merge-queue-ci-reliability.md",
+      "sha256": "764cb29582341b3a1741977f3d5d05f2c482bf85442f2c31791580d1d160e3ca"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/3341-3337-3362-pr-review-dispatch-integrity.md",
+      "sha256": "57cd0d4db33fb85cf6e7549f01045d4fed4e333984b08141fd71fb66eff1458a"
+    },
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/3358-critic-lane-contract.md",
+      "sha256": "e2acfdfde9a34a9e01b18492438985589481c179ef99059cabcf1bbacb4604d7"
+    },
+    {
+      "prNumber": null,
+      "order": 5,
+      "path": "docs/releases/pending/3625-trim-subagent-type-derivations.md",
+      "sha256": "a4a3c33de0c0036cc2513d45f42e663d2dffbb2fafa42ba20b379d2f278d295f"
+    },
+    {
+      "prNumber": null,
+      "order": 7,
+      "path": "docs/releases/pending/3647-3332-3653-bwrap-ci-unwedge.md",
+      "sha256": "f807d04a552c99a5b6dd9ac85e2e24f0bd0d42578adeb0c23602bc38b0486b4d"
+    },
+    {
+      "prNumber": null,
+      "order": 3,
+      "path": "docs/releases/pending/issue-3606-ancestor-denial-redaction.md",
+      "sha256": "8bf85f5f05b97f823eaed261d1bda1e38ba0f09d1751ac5157f7e3187cb80c15"
+    }
+  ]
+}

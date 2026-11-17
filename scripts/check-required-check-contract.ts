@@ -397,6 +397,31 @@ export function evaluateRequiredCheckContract(
 			addFinding(findings, 'CONTRACT_MALFORMED', 'error', `${label} must contain name, workflow, and job records`);
 		}
 	}
+	// #3716 item 1: duplicate owner-record names are ambiguous, not
+	// first-match-wins. `contextRecords` resolves owner records for a context
+	// name with `records.find(...)` across the COMBINED required +
+	// intendedRequired arrays, so two records sharing a name silently discard
+	// the second record's workflow/job anchoring. Reject them at validation
+	// time (strict and non-strict alike) instead of silently first-resolving.
+	{
+		const combinedOwnerRecords = [
+			...(Array.isArray(contract.contexts?.required) ? contract.contexts.required : []),
+			...(Array.isArray(contract.contexts?.intendedRequired) ? contract.contexts.intendedRequired : []),
+		].filter((record): record is Record<string, unknown> => isRecord(record) && typeof record.name === 'string');
+		const ownerNames = combinedOwnerRecords.map((record) => record.name as string);
+		if (hasDuplicateStrings(ownerNames)) {
+			const duplicated = ownerNames.filter(
+				(name, index) => ownerNames.indexOf(name) !== index,
+			);
+			unknown.push('contract');
+			addFinding(
+				findings,
+				'CONTRACT_MALFORMED',
+				'error',
+				`owner records must be unique per context name — duplicate owner record${duplicated.length === 1 ? '' : 's'} for context ${duplicated.map((name) => `"${name}"`).join(', ')} (the first record would silently win the workflow/job anchoring)`,
+			);
+		}
+	}
 	if (contract.workflows !== undefined && (!Array.isArray(contract.workflows) || contract.workflows.some((workflow) =>
 		!isRecord(workflow) || typeof workflow.file !== 'string' || (workflow.events !== undefined && (nonEmptyStringArray(workflow.events) === null || hasDuplicateStrings(workflow.events))) ||
 		(workflow.mergeGroupTypes !== undefined && (nonEmptyStringArray(workflow.mergeGroupTypes) === null || hasDuplicateStrings(workflow.mergeGroupTypes))) ||

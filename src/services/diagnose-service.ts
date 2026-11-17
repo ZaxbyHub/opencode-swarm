@@ -1049,9 +1049,13 @@ async function checkCurator(directory: string): Promise<HealthCheck> {
 /**
  * Get sandbox health-check entry.
  *
- * Consumes the cached sandbox capability probe and, if available,
- * the cached sandbox executor. Never re-probes and never crashes
- * diagnose on sandbox errors.
+ * Consumes the sandbox capability probe and, if available, the cached
+ * sandbox executor. Reuses the probe's memoized result for the process
+ * lifetime EXCEPT after a transient setup-failure probe (#3661 item 5,
+ * PR #3718): a setup-failure answer is never memoized, so a diagnose run
+ * after one re-probes rather than serving the degraded result — "never
+ * re-probes" was false once the memo-skip shipped (F-10, PR #3718 review).
+ * Never crashes diagnose on sandbox errors.
  */
 async function getSandboxStatus(sessionID?: string): Promise<HealthCheck> {
 	try {

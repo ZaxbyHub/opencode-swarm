@@ -124,10 +124,10 @@ describe('ci.yml integration — windows quarantine ledger entries for issue #28
 		// (e.g. an entry removed without updating the header, or a count
 		// bumped without the matching entries) makes the header lie to
 		// triage. Note: this only catches count drift; the presence
-		// tests above are the cross-PR overwrite guard. Post-2026-11-12
-		// count is 3 (the re-anchored #3218 archive + archive-dry-run
-		// pair and the #2973 dispatch-lanes entry; the #2867 cohort was
-		// un-quarantined per issue #2973).
+		// tests above are the cross-PR overwrite guard. Post-2026-11-16
+		// count is 0 (the #3218 archive pair and the #2973 dispatch-lanes
+		// re-anchors were retired per issues #2973 + #3218; the #2867
+		// cohort was un-quarantined per issue #2973).
 		const raw = readFileSync(WINDOWS_LEDGER_PATH, 'utf8').replace(
 			/\r\n/g,
 			'\n',

@@ -1,4 +1,5 @@
 import type { Agent, OpencodeClient } from '@opencode-ai/sdk';
+import { sanitizeFailureEvidenceDisplay } from '../failures/invocation-failure.js';
 import type {
 	DelegationCostFields,
 	PricingConfig,
@@ -271,7 +272,12 @@ export function createEvaluationModelDispatcher(
 				agentName: resolvedAgentName,
 				text: '',
 				durationMs: Date.now() - startedAt,
-				error: quotaMessage,
+				// #3710: the failed run's error is persisted by the evaluation
+				// store (saveEvaluationRun -> .swarm/evolution/runs/<id>.json,
+				// failureCode carries this text), so it must be redacted. The
+				// isQuotaError classification above already consumed the raw
+				// message; no downstream consumer classifies on this field.
+				error: sanitizeFailureEvidenceDisplay(quotaMessage),
 			};
 		} finally {
 			clearTimeout(timeoutHandle);
