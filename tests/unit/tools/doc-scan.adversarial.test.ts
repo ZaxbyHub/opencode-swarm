@@ -9,6 +9,10 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { doc_scan, scanDocIndex } from '../../../src/tools/doc-scan';
+import { executeInDirectory } from '../../helpers/tool-directory';
+
+// An explicit ToolContext directory keeps the manifest write out of the checkout.
+const runDocScan = executeInDirectory(doc_scan);
 
 // Helper to create temp test directories
 function createTempDir(): string {
@@ -325,9 +329,7 @@ describe('doc-scan adversarial tests', () => {
 			createTestFile(tempDir, 'README.md', '# Title\n\nContent.\n');
 
 			// Pass force as string "true" instead of boolean true
-			const result = await doc_scan.execute({ force: 'true' as any }, {
-				cwd: tempDir,
-			} as any);
+			const result = await runDocScan({ force: 'true' as any }, tempDir);
 			const parsed = JSON.parse(result);
 
 			// Should still work - string "true" should not be treated as true
@@ -338,9 +340,7 @@ describe('doc-scan adversarial tests', () => {
 		it('should handle args.force as number 1', async () => {
 			createTestFile(tempDir, 'README.md', '# Title\n\nContent.\n');
 
-			const result = await doc_scan.execute({ force: 1 as any }, {
-				cwd: tempDir,
-			} as any);
+			const result = await runDocScan({ force: 1 as any }, tempDir);
 			const parsed = JSON.parse(result);
 
 			expect(parsed.success).toBe(true);
@@ -355,7 +355,7 @@ describe('doc-scan adversarial tests', () => {
 				largeArgs[`key${i}`] = `value${i}`;
 			}
 
-			const result = await doc_scan.execute(largeArgs, { cwd: tempDir } as any);
+			const result = await runDocScan(largeArgs, tempDir);
 			const parsed = JSON.parse(result);
 
 			expect(parsed.success).toBe(true);
@@ -368,9 +368,7 @@ describe('doc-scan adversarial tests', () => {
 			// Try prototype pollution
 			const maliciousArgs = { force: true, __proto__: { admin: true } } as any;
 
-			const result = await doc_scan.execute(maliciousArgs, {
-				cwd: tempDir,
-			} as any);
+			const result = await runDocScan(maliciousArgs, tempDir);
 			const parsed = JSON.parse(result);
 
 			expect(parsed.success).toBe(true);
@@ -383,9 +381,7 @@ describe('doc-scan adversarial tests', () => {
 
 			const argsWithConstructor = { force: true, constructor: {} } as any;
 
-			const result = await doc_scan.execute(argsWithConstructor, {
-				cwd: tempDir,
-			} as any);
+			const result = await runDocScan(argsWithConstructor, tempDir);
 			const parsed = JSON.parse(result);
 
 			expect(parsed.success).toBe(true);

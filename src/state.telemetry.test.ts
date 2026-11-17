@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { rmSync } from 'node:fs';
+import { canonicalMkdtemp } from '../tests/helpers/tmpdir.js';
 import { advanceTaskState, ensureAgentSession, resetSwarmState } from './state';
 import {
 	addTelemetryListener,
@@ -7,15 +9,25 @@ import {
 } from './telemetry';
 
 describe('state telemetry', () => {
+	// telemetry.jsonl goes under <dir>/.swarm — a temp root, never the checkout.
+	let projectDir: string;
+
 	beforeEach(() => {
 		resetSwarmState();
 		resetTelemetryForTesting();
-		initTelemetry(process.cwd());
+		projectDir = canonicalMkdtemp('state-telemetry-');
+		initTelemetry(projectDir);
 	});
 
 	afterEach(() => {
 		resetSwarmState();
 		resetTelemetryForTesting();
+		rmSync(projectDir, {
+			recursive: true,
+			force: true,
+			maxRetries: 5,
+			retryDelay: 100,
+		});
 	});
 
 	test('advanceTaskState emits task_state_changed with provided telemetry session id', () => {

@@ -110,22 +110,37 @@ describe('checkout drift: pre-existing .swarm', () => {
 });
 
 describe('checkout drift: modes and reporting', () => {
-	test('top level is always enforced; .swarm only warns by default, in CI too', () => {
+	test('both checks are enforced by default, in CI too; warn is an opt-out', () => {
 		expect(resolveDriftMode({})).toEqual({
 			topLevel: 'enforce',
-			swarm: 'warn',
+			swarm: 'enforce',
 		});
 		expect(resolveDriftMode({ CI: 'true' })).toEqual({
 			topLevel: 'enforce',
-			swarm: 'warn',
+			swarm: 'enforce',
 		});
 		expect(
-			resolveDriftMode({ CI: 'true', SWARM_TEST_CHECKOUT_DRIFT: 'enforce' }),
-		).toEqual({ topLevel: 'enforce', swarm: 'enforce' });
+			resolveDriftMode({ CI: 'true', SWARM_TEST_CHECKOUT_DRIFT: 'warn' }),
+		).toEqual({ topLevel: 'warn', swarm: 'warn' });
 		expect(resolveDriftMode({ SWARM_TEST_CHECKOUT_DRIFT: 'OFF' })).toEqual({
 			topLevel: 'off',
 			swarm: 'off',
 		});
+	});
+
+	test('the mode value is trimmed; an empty or unknown value fails closed to enforce', () => {
+		for (const raw of [' warn ', 'Warn\r\n']) {
+			expect(resolveDriftMode({ SWARM_TEST_CHECKOUT_DRIFT: raw })).toEqual({
+				topLevel: 'warn',
+				swarm: 'warn',
+			});
+		}
+		for (const raw of ['', '  ', 'warning', 'bogus', '0']) {
+			expect(resolveDriftMode({ SWARM_TEST_CHECKOUT_DRIFT: raw })).toEqual({
+				topLevel: 'enforce',
+				swarm: 'enforce',
+			});
+		}
 	});
 
 	test('enforced drift throws; warned drift only warns', () => {

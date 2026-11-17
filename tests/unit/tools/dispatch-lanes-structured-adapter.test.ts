@@ -1,10 +1,11 @@
-import { describe, expect, mock, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import {
 	_test_exports,
 	type DispatchLaneSpec,
 	PrReviewStructuredPromptUnsupportedError,
 	type SessionOps,
 } from '../../../src/tools/dispatch-lanes';
+import { createSafeTestDir } from '../../helpers/safe-test-dir.js';
 import { withFrozenClockAsync } from '../../helpers/test-clock.js';
 
 const lane: DispatchLaneSpec = {
@@ -25,13 +26,28 @@ function sessionOps(promptAsync = mock(async () => ({}))): SessionOps {
 }
 
 describe('structured PR-review adapter transport (PRR-002/PRR-003)', () => {
+	// startAsyncLanePrompt persists lane state (swarm.db, locks) under
+	// <directory>/.swarm, so each test gets its own project root.
+	let directory: string;
+	let cleanup: () => void;
+
+	beforeEach(() => {
+		({ dir: directory, cleanup } = createSafeTestDir(
+			'dispatch-lanes-adapter-',
+		));
+	});
+
+	afterEach(() => {
+		cleanup();
+	});
+
 	test('uses the issue-fixed schema-bearing adapter shape', async () => {
 		const promptJsonSchema = mock(async () => ({ accepted: true }));
 		const promptAsync = mock(async () => ({}));
 
 		await _test_exports.startAsyncLanePrompt({
 			session: sessionOps(promptAsync),
-			directory: process.cwd(),
+			directory,
 			sessionId: 'child-1',
 			lane,
 			timeoutMs: 100,
@@ -54,7 +70,7 @@ describe('structured PR-review adapter transport (PRR-002/PRR-003)', () => {
 
 		await _test_exports.startAsyncLanePrompt({
 			session: sessionOps(promptAsync),
-			directory: process.cwd(),
+			directory,
 			sessionId: 'child-1',
 			lane,
 			timeoutMs: 100,
@@ -74,7 +90,7 @@ describe('structured PR-review adapter transport (PRR-002/PRR-003)', () => {
 
 		await _test_exports.startAsyncLanePrompt({
 			session: sessionOps(promptAsync),
-			directory: process.cwd(),
+			directory,
 			sessionId: 'child-1',
 			lane,
 			timeoutMs: 100,
@@ -96,7 +112,7 @@ describe('structured PR-review adapter transport (PRR-002/PRR-003)', () => {
 
 			await _test_exports.startAsyncLanePrompt({
 				session: sessionOps(promptAsync),
-				directory: process.cwd(),
+				directory,
 				sessionId: 'child-1',
 				lane,
 				timeoutMs: 10,

@@ -1,5 +1,5 @@
-import { describe, expect, test } from 'bun:test';
-import { writeFileSync } from 'node:fs';
+import { afterAll, describe, expect, test } from 'bun:test';
+import { rmSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
@@ -29,9 +29,20 @@ import {
 
 const FRAGMENT = 'docs/releases/pending/mine.md';
 
+/** Directories this process created (issue #3308 AC4: exact-list
+ * cleanup — the contract suite's PRR-006 pattern; no cross-process glob). */
+const createdTempDirs: string[] = [];
+
+afterAll(() => {
+	for (const dir of createdTempDirs) {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
 describe('check-pending-fragment transport framing (issue 3290)', () => {
 	test('3290 nul framing: a quote-bearing path classifies like the raw view', () => {
 		const dir = canonicalMkdtemp('cpf-nul-3290-');
+		createdTempDirs.push(dir);
 		const changed = `${dir}/changed.bin`;
 		const added = `${dir}/added.bin`;
 		writeFileSync(changed, Buffer.from('src/we"ird.ts\0docs/x.md\0', 'utf8'));
@@ -57,6 +68,7 @@ describe('check-pending-fragment transport framing (issue 3290)', () => {
 
 	test('3290 jsonl framing: a newline-bearing name classifies like the raw view', () => {
 		const dir = canonicalMkdtemp('cpf-jsonl-3290-');
+		createdTempDirs.push(dir);
 		const changed = `${dir}/changed.jsonl`;
 		const added = `${dir}/added.jsonl`;
 		// JSON-encoded newline inside the path (what `jq -c` emits for such a
@@ -81,6 +93,7 @@ describe('check-pending-fragment transport framing (issue 3290)', () => {
 
 	test('3290 jsonl framing: a non-string or malformed line exits 2, not a verdict', () => {
 		const dir = canonicalMkdtemp('cpf-badjsonl-3290-');
+		createdTempDirs.push(dir);
 		const changed = `${dir}/changed.jsonl`;
 		writeFileSync(changed, 'not-json\n', 'utf8');
 		const result = runCli({
@@ -117,6 +130,7 @@ describe('check-pending-fragment transport framing (issue 3290)', () => {
 
 	test('3290 precedence: --changed-file present means stdin is simply not read', () => {
 		const dir = canonicalMkdtemp('cpf-prec-3290-');
+		createdTempDirs.push(dir);
 		const changed = `${dir}/changed.bin`;
 		writeFileSync(changed, Buffer.from('src/index.ts\0', 'utf8'));
 		const result = runCli({
@@ -138,6 +152,7 @@ describe('check-pending-fragment transport framing (issue 3290)', () => {
 
 	test('3290 byte bound: an oversized file input exits 2 with a stderr message', () => {
 		const dir = canonicalMkdtemp('cpf-cap-3290-');
+		createdTempDirs.push(dir);
 		const changed = `${dir}/big.bin`;
 		// 5 MiB of NUL-framed filler paths — over the 4 MiB bound.
 		const filler = 'src/pad/'.padEnd(96, 'x');
@@ -226,6 +241,7 @@ describe('check-pending-fragment transport framing (issue 3290)', () => {
 		// failed to split on NUL would return the whole blob as one path
 		// starting with docs/ and read required=false.
 		const dir = canonicalMkdtemp('cpf-nulmulti-3290-');
+		createdTempDirs.push(dir);
 		const changed = `${dir}/changed.bin`;
 		const added = `${dir}/added.bin`;
 		writeFileSync(changed, Buffer.from(`docs/only.md\0src/real.ts\0`, 'utf8'));
@@ -248,6 +264,7 @@ describe('check-pending-fragment transport framing (issue 3290)', () => {
 
 	test('3290 file inputs require an explicit --paths-format (PRR-010)', () => {
 		const dir = canonicalMkdtemp('cpf-fmtreq-3290-');
+		createdTempDirs.push(dir);
 		const changed = `${dir}/changed.bin`;
 		writeFileSync(changed, Buffer.from('src/index.ts\0', 'utf8'));
 		const result = runCli({
@@ -261,6 +278,7 @@ describe('check-pending-fragment transport framing (issue 3290)', () => {
 
 	test('3290 error branches: duplicate flags, non-string jsonl, unreadable file exit 2 (PRR-017)', () => {
 		const dir = canonicalMkdtemp('cpf-err-3290-');
+		createdTempDirs.push(dir);
 		const twice = runCli({
 			args: [
 				'--print-requirement',

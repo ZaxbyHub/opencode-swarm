@@ -54,10 +54,26 @@ export function buildPluginToolObject(
 		'knowledge_receipt',
 		'knowledge_archive',
 	]);
+	// Issue #3659: swarm memory is opt-in (schema default false), and the
+	// subagent side already hides the tools unless memory.enabled === true
+	// (MEMORY_AGENT_TOOL_MAP merge path, AGENTS.md invariant 11 opt-in tool
+	// maps). The main session must match that boundary — with the flag off,
+	// three dead tool schemas stay out of every main-session context. Unlike
+	// knowledge (opt-out, `!== false`), memory uses strict opt-in semantics.
+	const memoryEnabled = config?.memory?.enabled === true;
+	const memoryTools = new Set([
+		'swarm_memory_recall',
+		'swarm_memory_propose',
+		'swarm_memory_outcome',
+	]);
 
 	for (const [name, handler] of Object.entries(TOOL_MANIFEST)) {
 		// Skip knowledge tools if knowledge is disabled
 		if (!knowledgeEnabled && knowledgeTools.has(name)) {
+			continue;
+		}
+		// Skip swarm-memory tools unless memory is enabled (issue #3659)
+		if (!memoryEnabled && memoryTools.has(name)) {
 			continue;
 		}
 		// Each manifest value is a lazy thunk — resolve it here, at call time.

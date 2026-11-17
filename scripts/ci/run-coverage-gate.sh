@@ -123,8 +123,8 @@ echo "${quarantined_count} file(s) quarantined repo-wide, issue #1705"
 # Checkout-drift posture alignment (issue #3248 class 1): the unit job
 # pre-writes .swarm/repository-validation/ manifests BEFORE any test file
 # runs, so .swarm/ already exists when each file's bun test process
-# snapshots the checkout (tests/preload/prod-store-tripwire.ts) and the
-# .swarm/ writes made by the writers tracked in #3165-A are warn-only.
+# snapshots the checkout (tests/preload/prod-store-tripwire.ts); since
+# #3165-A a write inside that .swarm/ fails the run like a creation would.
 # This script never created .swarm/, so on a fresh shard the FIRST file
 # whose execution materialized .swarm/ failed attempt 1 under the enforced
 # "creating .swarm where none existed" rule and passed the in-job retry —
@@ -142,8 +142,8 @@ echo "${quarantined_count} file(s) quarantined repo-wide, issue #1705"
 # enforcement for every later local `bun test` until manual deletion. On CI
 # shards the trap is harmless (the workspace is discarded), and the manifest
 # is still present for the whole per-file loop, which is all any consumer
-# needs. The #3165-A end state (retire the writers, flip warn to enforce)
-# is unchanged.
+# needs. #3165-A retired the writers and made .swarm/ writes enforced, so
+# the pre-creation no longer weakens the guard.
 if [ -L .swarm ] || { [ -e .swarm ] && [ ! -d .swarm ]; }; then
 	echo "::error::.swarm must be a real directory; symlinks, junctions, and non-directories are rejected"
 	exit 1

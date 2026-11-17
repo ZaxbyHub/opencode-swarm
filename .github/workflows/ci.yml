@@ -1141,7 +1141,14 @@ jobs:
   # `coverage` check and evict the release. ci-coverage-sharding.test.ts
   # enforces the no-dangling-needs rule file-wide.
   coverage:
-    needs: [coverage-shard, detect-release]
+    # `quality` is a declared direct dependency for the same reason as
+    # detect-release above: the fail-closed step below reads
+    # needs.quality.result, and GitHub's needs context only exposes results of
+    # DIRECT dependencies. A dangling reference silently resolves to null and
+    # the upstream-layer naming added for #3250 would go inert. quality already
+    # gates coverage-shard, so this edge adds no new ordering — it only makes
+    # the aggregator's own failure annotation name its upstream layer.
+    needs: [coverage-shard, detect-release, quality]
     if: always()
     runs-on: ${{ github.event_name == 'merge_group' && fromJSON('["self-hosted","Linux","X64"]') || 'ubuntu-latest' }}
     timeout-minutes: 10
@@ -1170,9 +1177,10 @@ jobs:
         shell: bash
         env:
           COVERAGE_SHARD_RESULT: ${{ needs.coverage-shard.result }}
+          QUALITY_RESULT: ${{ needs.quality.result }}
         run: |
           if [ "$COVERAGE_SHARD_RESULT" != "success" ]; then
-            echo "::error::coverage-shard matrix result was '$COVERAGE_SHARD_RESULT', not 'success'"
+            echo "::error::coverage-shard matrix result was '$COVERAGE_SHARD_RESULT', not 'success' (upstream quality job result: '$QUALITY_RESULT')"
             exit 1
           fi
           echo "All coverage shard matrix cells that ran succeeded."
@@ -1185,6 +1193,7 @@ jobs:
           if-no-files-found: error
       - name: Merge shard reports and enforce threshold
         if: github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true' && needs.detect-release.outputs.docs-only != 'true'
+        id: merge-coverage
         shell: bash
         run: |
           set -euo pipefail
@@ -1217,8 +1226,19 @@ jobs:
             exit 1
           fi
           echo "Coverage gate passed: ${coverage_value}% >= ${threshold}%"
+      # #3250: gate the final upload on the merge step having RUN, not on its
+      # exit status. When the fail-closed step above exits first (skipped or
+      # failed shard matrix), the merge step never executes, coverage/lcov.info
+      # is never produced, and the unconditional always()-upload used to warn
+      # "No files were found with the provided path: coverage/lcov.info" — a
+      # misleading headline that misattributed upstream failures (11 of 14
+      # signature runs were quality-job failures) to a missing file.
+      # `outcome != 'skipped'` keeps the upload for every merge that actually
+      # ran, INCLUDING threshold failures (their report is the diagnostic);
+      # only the never-ran cascade case is suppressed, so if this warning ever
+      # fires again it is a genuine merge-ran-but-no-file event.
       - name: Upload coverage report
-        if: always() && github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true' && needs.detect-release.outputs.docs-only != 'true'
+        if: always() && github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true' && needs.detect-release.outputs.docs-only != 'true' && steps.merge-coverage.outcome != 'skipped'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
 
         with:

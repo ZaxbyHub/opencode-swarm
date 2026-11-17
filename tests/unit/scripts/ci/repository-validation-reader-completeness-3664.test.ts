@@ -1,0 +1,281 @@
+/**
+ * #3664 — a validation row must not record a clean `passed` on the strength
+ * of an INCOMPLETE output reader.
+ *
+ * The contract is pinned DETERMINISTICALLY through the
+ * `_internals.readBoundedWithStatus` seam (the derivation's input) and the
+ * `_internals.killProcessTree` seam (the most adverse cleanup shape), plus
+ * persisted attempt-history and verifier-terminal parity legs. A real-process
+ * pipe-holding fixture variant was removed after CI proved the mechanism
+ * non-portable: on ubuntu-latest the bun-test grandchild's inherited stdout
+ * fd closes when the fixture's bun process exits, so the reader legitimately
+ * observes EOF and the row is `passed` — that tests Linux/bun fd-inheritance
+ * semantics, not the harness derivation (which the seam leg pins exactly and
+ * mutation M2 killed three legs on).
+ */
+
+import { describe, expect, test } from 'bun:test';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import {
+	_internals,
+	exitCodeForValidationStatus,
+	validateRepository,
+} from '../../../../scripts/ci/repository-validation';
+import { canonicalMkdtemp, removeTreeWithRetry } from '../../../helpers/tmpdir';
+
+describe('repository validation reader completeness — issue #3664', () => {
+	// C9/C10 (critic amendment): deterministic seam-driven leg — no dependence
+	// on the real pipe fixture. RED reasoning at the current code:
+	// runDefaultProcess invokes the module-LOCAL readBoundedWithStatus for the
+	// child's stdout/stderr readers (not `_internals.readBoundedWithStatus`),
+	// so the completeness stub below has NO effect today, the quick fixture
+	// reads complete, exits 0, and the row records 'passed' — the exact-terminal
+	// assertion fails. After the fix routes the child readers through the
+	// `_internals` seam (or otherwise honors reader completeness), both
+	// channels report complete:false and the row must be the exact
+	// 'output_truncated' terminal carrying a reason that names the channel and
+	// its incompleteness, the run reports 'failed' with the row counted in the
+	// failed counter, and the derived exit code is 1.
+	test('C9/C10: incomplete reader stubs (both channels) yield the output_truncated terminal with a channel-naming reason', async () => {
+		const QUICK_FIXTURE = path.resolve(
+			'tests/unit/scripts/ci/fixtures/quick-pass-fixture.ts',
+		);
+		const originalRead = _internals.readBoundedWithStatus;
+		const originalKillProcessTree = _internals.killProcessTree;
+		_internals.readBoundedWithStatus = (async () => ({
+			value: 'partial',
+			truncated: false,
+			complete: false,
+		})) as typeof originalRead;
+		_internals.killProcessTree = (async () =>
+			true) as typeof originalKillProcessTree;
+		try {
+			const report = await validateRepository({
+				root: path.resolve('.'),
+				mode: 'full',
+				testFiles: [QUICK_FIXTURE],
+				perItemTimeoutMs: 2_000,
+				suiteTimeoutMs: 10_000,
+			});
+			const row = report.results[0];
+			expect(row).toBeDefined();
+			// RED at the base: the stub was ignored and the row was
+			// 'passed'. The fix ships the exact 'output_truncated' terminal.
+			expect(row?.status).toBe('output_truncated');
+			// The reason must name the channel AND its incompleteness directly
+			// (NOT via JSON.stringify(row), which is vacuous — every row carries
+			// stdout/stderr keys).
+			expect(String(row?.reason)).toMatch(/stdout|stderr/i);
+			expect(String(row?.reason)).toMatch(/incomplete|truncat/i);
+			// FB-004 (review-confirmed): the dedicated summary counter is
+			// pinned here (mutation-kills a dropped/incremented counter) —
+			// exactly one row entered the terminal, and it also counts as
+			// failed.
+			expect(report.summary.outputTruncated).toBe(1);
+			// Run-level derivation: the output_truncated row fails the run.
+			expect(report.status).toBe('failed');
+			expect(report.summary.passed).toBe(0);
+			expect(report.summary.failed).toBeGreaterThanOrEqual(1);
+			// Exit-code leg: a failed validation run must exit 1.
+			expect(exitCodeForValidationStatus(report.status)).toBe(1);
+		} finally {
+			_internals.readBoundedWithStatus = originalRead;
+			_internals.killProcessTree = originalKillProcessTree;
+		}
+	}, 60_000);
+
+	// C10 attempt-history leg: the persisted report must carry the
+	// output_truncated row into the attempts history on a repeated run over
+	// the same destination. Attempt history materializes ONLY through the
+	// report-writing path (`writeValidationReport` reads the previous report
+	// at the destination and `withPreviousAttemptHistory` appends
+	// `validationAttempt(prior)` — scripts/ci/repository-validation.ts), so
+	// this leg passes an explicit reportPath under a THROWAWAY root (copied
+	// preload so the harness argv resolves) and reads the persisted JSON back.
+	// RED at the base at the first assertion (the stub was inert -> 'passed').
+	test('C10: a repeated run persists the output_truncated row into attempt history', async () => {
+		const QUICK_FIXTURE = path.resolve(
+			'tests/unit/scripts/ci/fixtures/quick-pass-fixture.ts',
+		);
+		const tmpRoot = canonicalMkdtemp('reader-completeness-attempts-3664-');
+		fs.mkdirSync(path.join(tmpRoot, 'scripts', 'ci'), { recursive: true });
+		fs.copyFileSync(
+			path.resolve('scripts/ci/bun-32056-keepalive.ts'),
+			path.join(tmpRoot, 'scripts', 'ci', 'bun-32056-keepalive.ts'),
+		);
+		// The harness argv is `bun --smol --preload <root>/... test <file> ...`;
+		// bun resolves the bare `test` token through package.json scripts (the
+		// repo root's own `"test": "bun test"`), so a throwaway root needs the
+		// same script shim or the run fails with `Script not found "test"`
+		// (executed probe) and the row reads 'failed' for the wrong reason.
+		fs.writeFileSync(
+			path.join(tmpRoot, 'package.json'),
+			'{"name":"reader-completeness-fixture-root","private":true,"scripts":{"test":"bun test"}}',
+		);
+		const reportPath = path.join(
+			tmpRoot,
+			'.swarm',
+			'repository-validation.json',
+		);
+		const originalRead = _internals.readBoundedWithStatus;
+		const originalKillProcessTree = _internals.killProcessTree;
+		_internals.readBoundedWithStatus = (async () => ({
+			value: 'partial',
+			truncated: false,
+			complete: false,
+		})) as typeof originalRead;
+		_internals.killProcessTree = (async () =>
+			true) as typeof originalKillProcessTree;
+		try {
+			const options = {
+				root: tmpRoot,
+				mode: 'full' as const,
+				testFiles: [QUICK_FIXTURE],
+				// Generous budgets: the throwaway root runs the fixture through
+				// the package.json script shim (a second bun startup, ~2.5s cold
+				// — executed probe), so the 2s warm-root budget would time the
+				// row out for an unrelated reason. The terminal under test comes
+				// from the reader stubs, not the clock.
+				perItemTimeoutMs: 30_000,
+				suiteTimeoutMs: 60_000,
+				reportPath,
+			};
+			const first = await validateRepository(options);
+			expect(first.results[0]?.status).toBe('output_truncated');
+			// FB-004: the counter is pinned in the persisted path too.
+			expect(first.summary.outputTruncated).toBe(1);
+			const second = await validateRepository(options);
+			expect(second.results[0]?.status).toBe('output_truncated');
+			expect(second.summary.outputTruncated).toBe(1);
+			// The returned report object does not carry the merged history (the
+			// merge happens inside writeValidationReport for the persisted
+			// payload), so read the written artifact back.
+			const persisted = JSON.parse(fs.readFileSync(reportPath, 'utf-8')) as {
+				results?: Array<{
+					status?: string;
+					attempts?: Array<{ status?: string }>;
+				}>;
+			};
+			const attempts = persisted.results[0]?.attempts ?? [];
+			expect(attempts.length).toBe(1);
+			expect(attempts[0]?.status).toBe('output_truncated');
+		} finally {
+			_internals.readBoundedWithStatus = originalRead;
+			_internals.killProcessTree = originalKillProcessTree;
+			removeTreeWithRetry(tmpRoot);
+		}
+	}, 60_000);
+
+	// FB-007 (Copilot review, PR #3718 feedback round): an incomplete reader
+	// must NOT brand a row whose terminal CAUSE is the timeout with a
+	// truncation reason — the kill is the cause and the unread pipes are
+	// incidental to it; labeling the row "terminal evidence is truncated"
+	// misattributes the failure to report consumers. Deterministic through
+	// the same seams: both reader stubs report complete:false and a 1ms
+	// per-item deadline forces the timeout. RED at the intake head: the
+	// reason was derived from reader incompleteness regardless of status, so
+	// the `reason` undefined-assertion below fails.
+	test('FB-007: a timed_out row keeps an undefined reason despite incomplete readers, and the truncated-output counter stays zero', async () => {
+		const QUICK_FIXTURE = path.resolve(
+			'tests/unit/scripts/ci/fixtures/quick-pass-fixture.ts',
+		);
+		const originalRead = _internals.readBoundedWithStatus;
+		const originalKillProcessTree = _internals.killProcessTree;
+		_internals.readBoundedWithStatus = (async () => ({
+			value: 'partial',
+			truncated: false,
+			complete: false,
+		})) as typeof originalRead;
+		_internals.killProcessTree = (async () =>
+			true) as typeof originalKillProcessTree;
+		try {
+			const report = await validateRepository({
+				root: path.resolve('.'),
+				mode: 'full',
+				testFiles: [QUICK_FIXTURE],
+				// 1ms per-item deadline: the child cannot exit before it, so
+				// the terminal cause is the timeout regardless of output.
+				perItemTimeoutMs: 1,
+				suiteTimeoutMs: 60_000,
+			});
+			const row = report.results[0];
+			expect(row).toBeDefined();
+			expect(row?.status).toBe('timed_out');
+			// The FB-007 pin: the truncation reason is reserved for the
+			// output_truncated terminal.
+			expect(row?.reason).toBeUndefined();
+			// The dedicated counter stays out of timeout rows; the timeout
+			// itself is counted in its own bucket.
+			expect(report.summary.outputTruncated).toBe(0);
+			expect(report.summary.timedOut).toBe(1);
+			// A timed-out run is not a complete pass.
+			expect(report.status).not.toBe('passed');
+			expect(exitCodeForValidationStatus(report.status)).toBe(1);
+		} finally {
+			_internals.readBoundedWithStatus = originalRead;
+			_internals.killProcessTree = originalKillProcessTree;
+		}
+	}, 60_000);
+
+	// F-008 (PR #3718 review test-quality cluster): the REAL deadline path —
+	// every completeness leg above injects complete:false through the seam,
+	// so a reader-implementation regression (deadline never firing) would
+	// survive them all. Drive readBoundedWithStatus directly with a stream
+	// that never closes: the deadline arm must report complete:false with
+	// the bytes read so far, and a drained stream must report complete:true
+	// (the cap-vs-completeness sibling file pins the byte-cap arm).
+	test('F-008: readBoundedWithStatus reports complete:false for a never-ending stream past its deadline', async () => {
+		const neverEnding = new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.enqueue(new TextEncoder().encode('partial'));
+				// deliberately never closed
+			},
+		});
+		const partial = await _internals.readBoundedWithStatus(
+			neverEnding,
+			65_536,
+			50,
+		);
+		expect(partial.value).toBe('partial');
+		expect(partial.complete).toBe(false);
+		// The byte cap was never reached — incompleteness came from the
+		// deadline alone (the distinction FB-007's COMPLETENESS-ONLY rule
+		// depends on).
+		expect(partial.truncated).toBe(false);
+
+		const drained = new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.enqueue(new TextEncoder().encode('all-of-it'));
+				controller.close();
+			},
+		});
+		const full = await _internals.readBoundedWithStatus(drained, 65_536, 5_000);
+		expect(full.value).toBe('all-of-it');
+		expect(full.complete).toBe(true);
+		expect(full.truncated).toBe(false);
+	}, 30_000);
+
+	// C10 report-verifier leg (source-pin form): the standalone verifier
+	// (scripts/ci/verify-repository-validation-reports.ts) rejects any result
+	// status outside its module-PRIVATE TERMINAL_STATUSES set and requires the
+	// report's terminalStatuses array to match it exactly, so the fix must add
+	// 'output_truncated' there too or every report the harness writes with the
+	// new terminal fails verification. The constant is NOT exported
+	// (_test_exports exposes only readBoundedText/readBoundedReport), and a
+	// hermetic verifyReports() run needs artifact/inventory scaffolding
+	// (expected-files inventory, artifact directories, report identity
+	// matching) outside this battery's scope — hence the source-shape pin,
+	// with that coverage gap noted for the implementation reviewer.
+	test('C10: the standalone verifier accepts the output_truncated terminal', () => {
+		const verifierSource = fs.readFileSync(
+			path.resolve('scripts/ci/verify-repository-validation-reports.ts'),
+			'utf-8',
+		);
+		const terminalSet = /TERMINAL_STATUSES = new Set\(\[([^\]]*)\]/.exec(
+			verifierSource,
+		);
+		expect(terminalSet).not.toBeNull();
+		expect(terminalSet?.[1]).toContain("'output_truncated'");
+	}, 10_000);
+});

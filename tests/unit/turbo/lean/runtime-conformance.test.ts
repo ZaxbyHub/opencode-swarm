@@ -6,10 +6,10 @@
  *
  * Integration points tested:
  * 1. phase_complete lean gate: verifyLeanTurboPhaseReady called when leanTurboActive is true
- * 2. update_task_status lean bypass: verifyLeanTurboTaskCompletion checked for lane tasks
+ * 2. update_task_status: Stage B applies in every mode — Lean/standard Turbo never bypass it
  * 3. system-enhancer lean banner: LEAN_TURBO_BANNER constant exists with expected content
  * 4. /swarm turbo lean command: handler responds to 'lean on', 'lean off', 'lean status'
- * 5. Standard Turbo regression: standard Turbo behavior unchanged when lean is not active
+ * 5. Standard Turbo regression: lean stays inactive; standard Turbo does not bypass Stage B
  *
  * Uses _internals DI seams for mocking per AGENTS.md invariant #7.
  * All tests use bun:test framework with proper mock isolation.
@@ -37,8 +37,6 @@ import { checkReviewerGate } from '../../../../src/tools/update-task-status';
 import type { verifyLeanTurboPhaseReady } from '../../../../src/turbo/lean/phase-ready';
 import { _internals as phaseReadyInternals } from '../../../../src/turbo/lean/phase-ready';
 import { repairStateUnreadable } from '../../../../src/turbo/lean/state';
-import type { verifyLeanTurboTaskCompletion } from '../../../../src/turbo/lean/task-completion';
-import { _internals as taskCompletionInternals } from '../../../../src/turbo/lean/task-completion';
 
 // --- Dist bundle content check ---
 
@@ -93,6 +91,36 @@ function createPlainSession(sessionId: string): void {
 		session.turboStrategy = undefined;
 		session.leanTurboActive = false;
 	}
+}
+
+function writeSingleTaskPlan(dir: string, filesTouched: string[]): void {
+	fs.writeFileSync(
+		path.join(dir, '.swarm', 'plan.json'),
+		JSON.stringify({
+			schema_version: '1.0.0',
+			title: 'Lean Turbo Test',
+			swarm: 'test',
+			current_phase: 1,
+			phases: [
+				{
+					id: 1,
+					name: 'Phase 1',
+					status: 'in_progress',
+					tasks: [
+						{
+							id: '1.1',
+							phase: 1,
+							status: 'pending',
+							size: 'small',
+							description: 'test task',
+							depends: [],
+							files_touched: filesTouched,
+						},
+					],
+				},
+			],
+		}),
+	);
 }
 
 // ---------------------------------------------------------------------------
@@ -467,35 +495,10 @@ describe('Lean Turbo runtime conformance', () => {
 	});
 
 	// -------------------------------------------------------------------------
-	// Integration point 2: update_task_status lean bypass
+	// Integration point 2: update_task_status applies Stage B in every mode
 	// -------------------------------------------------------------------------
 
-	describe('update_task_status lean bypass — dist/index.js presence (smoke)', () => {
-		// Minimal smoke test: verifies critical function is bundled
-		test('dist/index.js contains verifyLeanTurboTaskCompletion function', () => {
-			expect(distContains('function verifyLeanTurboTaskCompletion')).toBe(true);
-		});
-	});
-
-	describe('update_task_status lean bypass — behavioral test with _internals', () => {
-		test('verifyLeanTurboTaskCompletion _internals seam is replaceable', () => {
-			const original = taskCompletionInternals.verifyLeanTurboTaskCompletion;
-			expect(typeof original).toBe('function');
-
-			// Mock to return eligible
-			taskCompletionInternals.verifyLeanTurboTaskCompletion = mock(() => ({
-				ok: true,
-				reason: 'lane-complete',
-				laneFound: true,
-			})) as typeof verifyLeanTurboTaskCompletion;
-
-			expect(typeof taskCompletionInternals.verifyLeanTurboTaskCompletion).toBe(
-				'function',
-			);
-
-			taskCompletionInternals.verifyLeanTurboTaskCompletion = original;
-		});
-
+	describe('hasActiveLeanTurbo session detection', () => {
 		test('hasActiveLeanTurbo returns false when leanTurboActive is not set', () => {
 			createPlainSession(SESSION_ID);
 			expect(hasActiveLeanTurbo(SESSION_ID)).toBe(false);
@@ -512,86 +515,56 @@ describe('Lean Turbo runtime conformance', () => {
 		});
 	});
 
-	describe('update_task_status lean bypass — behavioral integration', () => {
-		test('checkReviewerGate allows bypass when Lean Turbo active and task in completed lane', () => {
+	describe('update_task_status — Lean Turbo never skips Stage B', () => {
+		// Regression for #3165 E: checkReviewerGate used to return
+		// blocked:false ("Lean Turbo bypass") for a task in a completed lane.
+		test('checkReviewerGate blocks a completed-lane task with no Stage B evidence', () => {
 			const dir = mkdtemp();
 			try {
-				// Set up Lean Turbo session
 				startAgentSession(SESSION_ID, 'architect');
 				const session = swarmState.agentSessions.get(SESSION_ID);
 				session!.turboMode = true;
 				session!.turboStrategy = 'lean';
 				session!.leanTurboActive = true;
+				expect(hasActiveLeanTurbo()).toBe(true);
 
-				// Create turbo-state.json with running lean session and completed lane containing task 1.1
-				const turboState = {
-					version: 1,
-					updatedAt: new Date().toISOString(),
-					sessions: {
-						[SESSION_ID]: {
-							status: 'running',
-							sessionID: SESSION_ID,
-							strategy: 'lean',
-							phase: 1,
-							maxParallelCoders: 2,
-							lanes: [
-								{
-									laneId: 'lane-1',
-									taskIds: ['1.1'],
-									files: [],
-									status: 'completed',
-									startedAt: new Date().toISOString(),
-									completedAt: new Date().toISOString(),
-								},
-							],
-							degradedTasks: [],
-							counters: {
-								lanesPlanned: 1,
-								lanesStarted: 1,
-								lanesCompleted: 1,
-								lanesFailed: 0,
-								tasksSerialized: 0,
-								tasksDegraded: 0,
-							},
-						},
-					},
-				};
+				const now = '2026-01-01T00:00:00.000Z'; // fixed: no clock needed
 				fs.writeFileSync(
 					path.join(dir, '.swarm', 'turbo-state.json'),
-					JSON.stringify(turboState),
-				);
-
-				// Create plan.json with task 1.1
-				const planJson = {
-					schema_version: '1.0.0',
-					title: 'Lean Turbo Test',
-					swarm: 'test',
-					current_phase: 1,
-					phases: [
-						{
-							id: 1,
-							name: 'Phase 1',
-							status: 'in_progress',
-							tasks: [
-								{
-									id: '1.1',
-									phase: 1,
-									status: 'pending',
-									size: 'small',
-									description: 'test task',
-									depends: [],
-									files_touched: ['src/utils.ts'],
+					JSON.stringify({
+						version: 1,
+						updatedAt: now,
+						sessions: {
+							[SESSION_ID]: {
+								status: 'running',
+								sessionID: SESSION_ID,
+								strategy: 'lean',
+								phase: 1,
+								maxParallelCoders: 2,
+								lanes: [
+									{
+										laneId: 'lane-1',
+										taskIds: ['1.1'],
+										files: [],
+										status: 'completed',
+										startedAt: now,
+										completedAt: now,
+									},
+								],
+								degradedTasks: [],
+								counters: {
+									lanesPlanned: 1,
+									lanesStarted: 1,
+									lanesCompleted: 1,
+									lanesFailed: 0,
+									tasksSerialized: 0,
+									tasksDegraded: 0,
 								},
-							],
+							},
 						},
-					],
-				};
-				fs.writeFileSync(
-					path.join(dir, '.swarm', 'plan.json'),
-					JSON.stringify(planJson),
+					}),
 				);
-
-				// Create lane evidence file — required by verifyLeanTurboTaskCompletion
+				writeSingleTaskPlan(dir, ['src/utils.ts']);
 				const laneEvidenceDir = path.join(
 					dir,
 					'.swarm',
@@ -606,185 +579,14 @@ describe('Lean Turbo runtime conformance', () => {
 						laneId: 'lane-1',
 						status: 'completed',
 						taskIds: ['1.1'],
-						completedAt: new Date().toISOString(),
+						completedAt: now,
 					}),
 				);
 
-				// checkReviewerGate with Lean Turbo active and task in completed lane
-				// → should return blocked:false (lean bypass)
-				const result = checkReviewerGate('1.1', dir);
-
-				expect(result.blocked).toBe(false);
-				expect(result.reason).toContain('Lean Turbo bypass');
-			} finally {
-				fs.rmSync(dir, { recursive: true, force: true });
-			}
-		});
-
-		test('checkReviewerGate blocks when Lean Turbo active but task NOT in any lane', () => {
-			const dir = mkdtemp();
-			try {
-				// Set up Lean Turbo session
-				startAgentSession(SESSION_ID, 'architect');
-				const session = swarmState.agentSessions.get(SESSION_ID);
-				session!.turboMode = true;
-				session!.turboStrategy = 'lean';
-				session!.leanTurboActive = true;
-
-				// Create turbo-state.json with running lean session but NO lanes
-				const turboState = {
-					version: 1,
-					updatedAt: new Date().toISOString(),
-					sessions: {
-						[SESSION_ID]: {
-							status: 'running',
-							sessionID: SESSION_ID,
-							strategy: 'lean',
-							phase: 1,
-							maxParallelCoders: 2,
-							lanes: [],
-							degradedTasks: [],
-							counters: {
-								lanesPlanned: 0,
-								lanesStarted: 0,
-								lanesCompleted: 0,
-								lanesFailed: 0,
-								tasksSerialized: 0,
-								tasksDegraded: 0,
-							},
-						},
-					},
-				};
-				fs.writeFileSync(
-					path.join(dir, '.swarm', 'turbo-state.json'),
-					JSON.stringify(turboState),
-				);
-
-				// Create plan.json with task 1.1
-				const planJson = {
-					schema_version: '1.0.0',
-					title: 'Lean Turbo Test',
-					swarm: 'test',
-					current_phase: 1,
-					phases: [
-						{
-							id: 1,
-							name: 'Phase 1',
-							status: 'in_progress',
-							tasks: [
-								{
-									id: '1.1',
-									phase: 1,
-									status: 'pending',
-									size: 'small',
-									description: 'test task',
-									depends: [],
-									files_touched: ['src/utils.ts'],
-								},
-							],
-						},
-					],
-				};
-				fs.writeFileSync(
-					path.join(dir, '.swarm', 'plan.json'),
-					JSON.stringify(planJson),
-				);
-
-				// checkReviewerGate with Lean Turbo active but task not in any lane
-				// → should return blocked:true (task not found in any lane)
-				const result = checkReviewerGate('1.1', dir);
-
-				// When lean check returns laneFound:false, standard turbo bypass IS allowed
-				// (task confirmed not in any lane, apply standard Turbo rules).
-				// Since src/utils.ts is not a Tier-3 file, standard Turbo bypass applies.
-				expect(result.blocked).toBe(false);
-			} finally {
-				fs.rmSync(dir, { recursive: true, force: true });
-			}
-		});
-
-		test('checkReviewerGate blocks when Lean Turbo active and task in incomplete lane', () => {
-			const dir = mkdtemp();
-			try {
-				// Set up Lean Turbo session
-				startAgentSession(SESSION_ID, 'architect');
-				const session = swarmState.agentSessions.get(SESSION_ID);
-				session!.turboMode = true;
-				session!.turboStrategy = 'lean';
-				session!.leanTurboActive = true;
-
-				// Create turbo-state.json with running lean session and INCOMPLETE lane
-				const turboState = {
-					version: 1,
-					updatedAt: new Date().toISOString(),
-					sessions: {
-						[SESSION_ID]: {
-							status: 'running',
-							sessionID: SESSION_ID,
-							strategy: 'lean',
-							phase: 1,
-							maxParallelCoders: 2,
-							lanes: [
-								{
-									laneId: 'lane-1',
-									taskIds: ['1.1'],
-									files: [],
-									status: 'running', // NOT completed
-									startedAt: new Date().toISOString(),
-								},
-							],
-							degradedTasks: [],
-							counters: {
-								lanesPlanned: 1,
-								lanesStarted: 1,
-								lanesCompleted: 0,
-								lanesFailed: 0,
-								tasksSerialized: 0,
-								tasksDegraded: 0,
-							},
-						},
-					},
-				};
-				fs.writeFileSync(
-					path.join(dir, '.swarm', 'turbo-state.json'),
-					JSON.stringify(turboState),
-				);
-
-				// Create plan.json with task 1.1
-				const planJson = {
-					schema_version: '1.0.0',
-					title: 'Lean Turbo Test',
-					swarm: 'test',
-					current_phase: 1,
-					phases: [
-						{
-							id: 1,
-							name: 'Phase 1',
-							status: 'in_progress',
-							tasks: [
-								{
-									id: '1.1',
-									phase: 1,
-									status: 'pending',
-									size: 'small',
-									description: 'test task',
-									depends: [],
-									files_touched: ['src/utils.ts'],
-								},
-							],
-						},
-					],
-				};
-				fs.writeFileSync(
-					path.join(dir, '.swarm', 'plan.json'),
-					JSON.stringify(planJson),
-				);
-
-				// checkReviewerGate with Lean Turbo active and task in INCOMPLETE lane
-				// → should return blocked:true (lane not completed)
 				const result = checkReviewerGate('1.1', dir);
 
 				expect(result.blocked).toBe(true);
+				expect(result.reason).not.toContain('bypass');
 			} finally {
 				fs.rmSync(dir, { recursive: true, force: true });
 			}
@@ -973,9 +775,21 @@ describe('Lean Turbo runtime conformance', () => {
 			createPlainSession(SESSION_ID);
 			expect(hasActiveLeanTurbo(SESSION_ID)).toBe(false);
 		});
-		// Minimal smoke test: verifies standard turbo bypass is bundled
-		test('dist/index.js contains standard turbo bypass path', () => {
-			expect(distContains('hasActiveTurboMode()')).toBe(true);
+		// Regression for #3165 E: a non-Tier-3 task used to get
+		// blocked:false ("Turbo Mode bypass") under standard Turbo.
+		test('checkReviewerGate blocks a non-Tier-3 task with no Stage B evidence', () => {
+			const dir = mkdtemp();
+			try {
+				createStandardTurboSession(SESSION_ID);
+				writeSingleTaskPlan(dir, ['src/utils.ts']);
+
+				const result = checkReviewerGate('1.1', dir);
+
+				expect(result.blocked).toBe(true);
+				expect(result.reason).not.toContain('bypass');
+			} finally {
+				fs.rmSync(dir, { recursive: true, force: true });
+			}
 		});
 	});
 });

@@ -25,6 +25,17 @@ const RETRO_TASK_ID_REGEX = /^retro-\d+$/;
 const INTERNAL_TOOL_ID_REGEX =
 	/^(?:sast_scan|quality_budget|syntax_check|placeholder_scan|sbom_generate|build|secretscan)$/;
 
+/**
+ * Single-source predicate for the reserved fixed tool-evidence ids (#3681
+ * item 5). Consumers that must exempt legitimate non-plan evidence bundles
+ * (the diagnose orphan filter) reuse THIS rather than restating the set —
+ * the writers all route through saveEvidence with one of these ids and are
+ * enumerated at the INTERNAL_TOOL_ID_REGEX definition.
+ */
+export function isInternalToolEvidenceId(taskId: string): boolean {
+	return INTERNAL_TOOL_ID_REGEX.test(taskId);
+}
+
 /** General safe alphanumeric: must start with letter/digit, body allows dots, hyphens, underscores */
 const GENERAL_TASK_ID_REGEX = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
 

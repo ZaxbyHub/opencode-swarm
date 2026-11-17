@@ -70,7 +70,7 @@ describe('v6.1.2 Guardrails — ADVERSARIAL SECURITY TESTS', () => {
 				enabled: true,
 				max_tool_calls: 1, // Very low limit
 			});
-			const hooks = createGuardrailsHooks(guardrailsConfig);
+			const hooks = createGuardrailsHooks(tempDir, guardrailsConfig);
 
 			// Start a session with unknown agent (no built-in profile)
 			startAgentSession('poison-test', 'unknown_agent');
@@ -104,7 +104,7 @@ describe('v6.1.2 Guardrails — ADVERSARIAL SECURITY TESTS', () => {
 				enabled: true,
 				max_tool_calls: 2, // Base config limit
 			});
-			const hooks = createGuardrailsHooks(guardrailsConfig);
+			const hooks = createGuardrailsHooks(tempDir, guardrailsConfig);
 
 			// Use 'unknown_agent' which has no built-in profile, so base config applies
 			startAgentSession('hard-limit-bypass', 'unknown_agent');
@@ -237,7 +237,7 @@ describe('v6.1.2 Guardrails — ADVERSARIAL SECURITY TESTS', () => {
 				enabled: true,
 				max_tool_calls: 5,
 			});
-			const hooks = createGuardrailsHooks(guardrailsConfig);
+			const hooks = createGuardrailsHooks(tempDir, guardrailsConfig);
 
 			// Set up a session with activeAgent pointing to coder
 			startAgentSession('race-session', 'coder');
@@ -265,7 +265,7 @@ describe('v6.1.2 Guardrails — ADVERSARIAL SECURITY TESTS', () => {
 				enabled: true,
 				max_tool_calls: 5,
 			});
-			const hooks = createGuardrailsHooks(guardrailsConfig);
+			const hooks = createGuardrailsHooks(tempDir, guardrailsConfig);
 
 			// No session exists, no activeAgent entry
 			expect(swarmState.activeAgent.has('brand-new-session')).toBe(false);
@@ -315,7 +315,7 @@ describe('v6.1.2 Guardrails — ADVERSARIAL SECURITY TESTS', () => {
 				enabled: true,
 				max_tool_calls: 1, // Very low limit
 			});
-			const hooks = createGuardrailsHooks(guardrailsConfig);
+			const hooks = createGuardrailsHooks(tempDir, guardrailsConfig);
 
 			startAgentSession('hook-exempt', ORCHESTRATOR_NAME);
 
@@ -365,7 +365,7 @@ describe('v6.1.2 Guardrails — ADVERSARIAL SECURITY TESTS', () => {
 				enabled: true,
 				max_tool_calls: 1,
 			});
-			const hooks = createGuardrailsHooks(guardrailsConfig);
+			const hooks = createGuardrailsHooks(tempDir, guardrailsConfig);
 
 			// Start session with prefixed architect
 			startAgentSession('prefixed-exempt', 'mega_architect');
@@ -424,7 +424,7 @@ describe('v6.1.2 Guardrails — ADVERSARIAL SECURITY TESTS', () => {
 				enabled: true,
 				max_tool_calls: 3,
 			});
-			const hooks = createGuardrailsHooks(guardrailsConfig);
+			const hooks = createGuardrailsHooks(tempDir, guardrailsConfig);
 
 			// Start session with empty string
 			startAgentSession('empty-name-session', '');
@@ -612,7 +612,7 @@ describe('v6.1.2 Guardrails — ADVERSARIAL SECURITY TESTS', () => {
 					config.guardrails ?? {},
 				);
 
-				const hooks = createGuardrailsHooks(guardrailsConfig);
+				const hooks = createGuardrailsHooks(tempDir, guardrailsConfig);
 
 				// Hooks should NOT be no-ops - they should enforce limits
 				// Verify hooks exist and are callable
@@ -723,7 +723,7 @@ describe('v6.1.2 Guardrails — ADVERSARIAL SECURITY TESTS', () => {
 				enabled: true,
 				max_tool_calls: 100,
 			});
-			const hooks = createGuardrailsHooks(guardrailsConfig);
+			const hooks = createGuardrailsHooks(tempDir, guardrailsConfig);
 
 			startAgentSession('gate-test-1', ORCHESTRATOR_NAME);
 
@@ -746,7 +746,7 @@ describe('v6.1.2 Guardrails — ADVERSARIAL SECURITY TESTS', () => {
 				enabled: true,
 				max_tool_calls: 100,
 			});
-			const hooks = createGuardrailsHooks(guardrailsConfig);
+			const hooks = createGuardrailsHooks(tempDir, guardrailsConfig);
 
 			startAgentSession('gate-test-2', ORCHESTRATOR_NAME);
 
@@ -769,7 +769,7 @@ describe('v6.1.2 Guardrails — ADVERSARIAL SECURITY TESTS', () => {
 				enabled: true,
 				max_tool_calls: 100,
 			});
-			const hooks = createGuardrailsHooks(guardrailsConfig);
+			const hooks = createGuardrailsHooks(tempDir, guardrailsConfig);
 
 			startAgentSession('gate-test-3', ORCHESTRATOR_NAME);
 
@@ -790,7 +790,7 @@ describe('v6.1.2 Guardrails — ADVERSARIAL SECURITY TESTS', () => {
 				enabled: true,
 				max_tool_calls: 100,
 			});
-			const hooks = createGuardrailsHooks(guardrailsConfig);
+			const hooks = createGuardrailsHooks(tempDir, guardrailsConfig);
 
 			// Session 1: architect runs lint
 			startAgentSession('session-1', ORCHESTRATOR_NAME);
@@ -831,7 +831,7 @@ describe('v6.1.2 Guardrails — ADVERSARIAL SECURITY TESTS', () => {
 				enabled: true,
 				max_tool_calls: 100,
 			});
-			const hooks = createGuardrailsHooks(guardrailsConfig);
+			const hooks = createGuardrailsHooks(tempDir, guardrailsConfig);
 
 			startAgentSession('failure-test', ORCHESTRATOR_NAME);
 
@@ -859,7 +859,7 @@ describe('v6.1.2 Guardrails — ADVERSARIAL SECURITY TESTS', () => {
 				enabled: true,
 				max_tool_calls: 100,
 			});
-			const hooks = createGuardrailsHooks(guardrailsConfig);
+			const hooks = createGuardrailsHooks(tempDir, guardrailsConfig);
 
 			startAgentSession('null-output-test', ORCHESTRATOR_NAME);
 
@@ -877,7 +877,7 @@ describe('v6.1.2 Guardrails — ADVERSARIAL SECURITY TESTS', () => {
 				enabled: true,
 				max_tool_calls: 100,
 			});
-			const hooks = createGuardrailsHooks(guardrailsConfig);
+			const hooks = createGuardrailsHooks(tempDir, guardrailsConfig);
 
 			startAgentSession('undefined-output-test', ORCHESTRATOR_NAME);
 
@@ -895,7 +895,7 @@ describe('v6.1.2 Guardrails — ADVERSARIAL SECURITY TESTS', () => {
 				enabled: true,
 				max_tool_calls: 100,
 			});
-			const hooks = createGuardrailsHooks(guardrailsConfig);
+			const hooks = createGuardrailsHooks(tempDir, guardrailsConfig);
 
 			startAgentSession('warning-once', ORCHESTRATOR_NAME);
 
@@ -932,7 +932,7 @@ describe('v6.1.2 Guardrails — ADVERSARIAL SECURITY TESTS', () => {
 				enabled: true,
 				max_tool_calls: 100,
 			});
-			const hooks = createGuardrailsHooks(guardrailsConfig);
+			const hooks = createGuardrailsHooks(tempDir, guardrailsConfig);
 
 			startAgentSession('all-gates', ORCHESTRATOR_NAME);
 
@@ -977,7 +977,7 @@ describe('v6.1.2 Guardrails — ADVERSARIAL SECURITY TESTS', () => {
 				enabled: true,
 				max_tool_calls: 100,
 			});
-			const hooks = createGuardrailsHooks(guardrailsConfig);
+			const hooks = createGuardrailsHooks(tempDir, guardrailsConfig);
 
 			startAgentSession('missing-one-gate', ORCHESTRATOR_NAME);
 
@@ -1021,7 +1021,7 @@ describe('v6.1.2 Guardrails — ADVERSARIAL SECURITY TESTS', () => {
 				enabled: true,
 				max_tool_calls: 100,
 			});
-			const hooks = createGuardrailsHooks(guardrailsConfig);
+			const hooks = createGuardrailsHooks(tempDir, guardrailsConfig);
 
 			startAgentSession('no-reviewer', ORCHESTRATOR_NAME);
 
@@ -1061,7 +1061,7 @@ describe('v6.1.2 Guardrails — ADVERSARIAL SECURITY TESTS', () => {
 				enabled: true,
 				max_tool_calls: 100,
 			});
-			const hooks = createGuardrailsHooks(guardrailsConfig);
+			const hooks = createGuardrailsHooks(tempDir, guardrailsConfig);
 
 			startAgentSession('gates-passed-false', ORCHESTRATOR_NAME);
 
@@ -1087,7 +1087,7 @@ describe('v6.1.2 Guardrails — ADVERSARIAL SECURITY TESTS', () => {
 				enabled: true,
 				max_tool_calls: 100,
 			});
-			const hooks = createGuardrailsHooks(guardrailsConfig);
+			const hooks = createGuardrailsHooks(tempDir, guardrailsConfig);
 
 			startAgentSession('gates-passed-lowercase', ORCHESTRATOR_NAME);
 
@@ -1113,7 +1113,7 @@ describe('v6.1.2 Guardrails — ADVERSARIAL SECURITY TESTS', () => {
 				enabled: true,
 				max_tool_calls: 100,
 			});
-			const hooks = createGuardrailsHooks(guardrailsConfig);
+			const hooks = createGuardrailsHooks(tempDir, guardrailsConfig);
 
 			startAgentSession('optional-gates', ORCHESTRATOR_NAME);
 
@@ -1178,7 +1178,7 @@ describe('v6.1.2 Guardrails — ADVERSARIAL SECURITY TESTS', () => {
 				enabled: true,
 				max_tool_calls: 100,
 			});
-			const hooks = createGuardrailsHooks(guardrailsConfig);
+			const hooks = createGuardrailsHooks(tempDir, guardrailsConfig);
 
 			// Message without sessionID
 			const messages = [

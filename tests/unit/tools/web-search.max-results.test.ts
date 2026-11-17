@@ -18,6 +18,7 @@ import {
 	WebSearchConfigError,
 	WebSearchError,
 } from '../../../src/council/web-search-provider.js';
+import { canonicalMkdtemp, removeTreeWithRetry } from '../../helpers/tmpdir';
 
 // Mock the provider to capture the maxResults argument
 const mockSearch = vi.fn<
@@ -63,7 +64,12 @@ function buildConfig(overrides: Partial<GeneralCouncilConfig> = {}): {
 }
 
 describe('max_results resolution', () => {
+	// web_search persists fetched results to <directory>/.swarm/evidence-cache;
+	// an explicit ToolContext directory keeps that write out of the checkout.
+	let sandboxDir: string;
+
 	beforeEach(() => {
+		sandboxDir = canonicalMkdtemp('web-search-max-results-');
 		vi.clearAllMocks();
 		globalThis.fetch = ORIGINAL_FETCH;
 		mockSearch.mockResolvedValue([
@@ -73,6 +79,7 @@ describe('max_results resolution', () => {
 
 	afterEach(() => {
 		globalThis.fetch = ORIGINAL_FETCH;
+		removeTreeWithRetry(sandboxDir);
 	});
 
 	test('1. When max_results arg is omitted, uses generalConfig.maxSourcesPerMember', async () => {
@@ -84,10 +91,10 @@ describe('max_results resolution', () => {
 
 		const { web_search } = await import('../../../src/tools/web-search.js');
 		const wrapped = web_search as unknown as {
-			execute: (args: unknown, dir: string) => Promise<string>;
+			execute: (args: unknown, ctx: { directory: string }) => Promise<string>;
 		};
 
-		await wrapped.execute({ query: 'test' }, '/tmp/test');
+		await wrapped.execute({ query: 'test' }, { directory: sandboxDir });
 
 		// Provider should be called with maxSourcesPerMember (7), not hard cap (10)
 		expect(mockSearch).toHaveBeenCalledWith('test', 7, {
@@ -104,10 +111,13 @@ describe('max_results resolution', () => {
 
 		const { web_search } = await import('../../../src/tools/web-search.js');
 		const wrapped = web_search as unknown as {
-			execute: (args: unknown, dir: string) => Promise<string>;
+			execute: (args: unknown, ctx: { directory: string }) => Promise<string>;
 		};
 
-		await wrapped.execute({ query: 'test', max_results: 3 }, '/tmp/test');
+		await wrapped.execute(
+			{ query: 'test', max_results: 3 },
+			{ directory: sandboxDir },
+		);
 
 		// Provider should be called with the arg value (3), not config (5)
 		expect(mockSearch).toHaveBeenCalledWith('test', 3, {
@@ -124,10 +134,13 @@ describe('max_results resolution', () => {
 
 		const { web_search } = await import('../../../src/tools/web-search.js');
 		const wrapped = web_search as unknown as {
-			execute: (args: unknown, dir: string) => Promise<string>;
+			execute: (args: unknown, ctx: { directory: string }) => Promise<string>;
 		};
 
-		await wrapped.execute({ query: 'test', max_results: 20 }, '/tmp/test');
+		await wrapped.execute(
+			{ query: 'test', max_results: 20 },
+			{ directory: sandboxDir },
+		);
 
 		// Should be clamped to MAX_RESULTS_HARD_CAP (10)
 		expect(mockSearch).toHaveBeenCalledWith('test', 10, {
@@ -144,10 +157,10 @@ describe('max_results resolution', () => {
 
 		const { web_search } = await import('../../../src/tools/web-search.js');
 		const wrapped = web_search as unknown as {
-			execute: (args: unknown, dir: string) => Promise<string>;
+			execute: (args: unknown, ctx: { directory: string }) => Promise<string>;
 		};
 
-		await wrapped.execute({ query: 'test' }, '/tmp/test');
+		await wrapped.execute({ query: 'test' }, { directory: sandboxDir });
 
 		// Should be clamped to MAX_RESULTS_HARD_CAP (10)
 		expect(mockSearch).toHaveBeenCalledWith('test', 10, {
@@ -164,10 +177,10 @@ describe('max_results resolution', () => {
 
 		const { web_search } = await import('../../../src/tools/web-search.js');
 		const wrapped = web_search as unknown as {
-			execute: (args: unknown, dir: string) => Promise<string>;
+			execute: (args: unknown, ctx: { directory: string }) => Promise<string>;
 		};
 
-		await wrapped.execute({ query: 'test' }, '/tmp/test');
+		await wrapped.execute({ query: 'test' }, { directory: sandboxDir });
 
 		// Should use config default of 5
 		expect(mockSearch).toHaveBeenCalledWith('test', 5, {
@@ -183,10 +196,13 @@ describe('max_results resolution', () => {
 
 		const { web_search } = await import('../../../src/tools/web-search.js');
 		const wrapped = web_search as unknown as {
-			execute: (args: unknown, dir: string) => Promise<string>;
+			execute: (args: unknown, ctx: { directory: string }) => Promise<string>;
 		};
 
-		await wrapped.execute({ query: 'test', max_results: 1 }, '/tmp/test');
+		await wrapped.execute(
+			{ query: 'test', max_results: 1 },
+			{ directory: sandboxDir },
+		);
 
 		expect(mockSearch).toHaveBeenCalledWith('test', 1, {
 			freshness: undefined,
@@ -201,10 +217,13 @@ describe('max_results resolution', () => {
 
 		const { web_search } = await import('../../../src/tools/web-search.js');
 		const wrapped = web_search as unknown as {
-			execute: (args: unknown, dir: string) => Promise<string>;
+			execute: (args: unknown, ctx: { directory: string }) => Promise<string>;
 		};
 
-		await wrapped.execute({ query: 'test', max_results: 10 }, '/tmp/test');
+		await wrapped.execute(
+			{ query: 'test', max_results: 10 },
+			{ directory: sandboxDir },
+		);
 
 		expect(mockSearch).toHaveBeenCalledWith('test', 10, {
 			freshness: undefined,
@@ -219,10 +238,13 @@ describe('max_results resolution', () => {
 
 		const { web_search } = await import('../../../src/tools/web-search.js');
 		const wrapped = web_search as unknown as {
-			execute: (args: unknown, dir: string) => Promise<string>;
+			execute: (args: unknown, ctx: { directory: string }) => Promise<string>;
 		};
 
-		const result = await wrapped.execute({ query: 'test' }, '/tmp/test');
+		const result = await wrapped.execute(
+			{ query: 'test' },
+			{ directory: sandboxDir },
+		);
 		const parsed = JSON.parse(result);
 
 		expect(parsed.success).toBe(false);
@@ -239,10 +261,13 @@ describe('max_results resolution', () => {
 
 		const { web_search } = await import('../../../src/tools/web-search.js');
 		const wrapped = web_search as unknown as {
-			execute: (args: unknown, dir: string) => Promise<string>;
+			execute: (args: unknown, ctx: { directory: string }) => Promise<string>;
 		};
 
-		const result = await wrapped.execute({ query: 'test' }, '/tmp/test');
+		const result = await wrapped.execute(
+			{ query: 'test' },
+			{ directory: sandboxDir },
+		);
 		const parsed = JSON.parse(result);
 
 		expect(parsed.success).toBe(false);

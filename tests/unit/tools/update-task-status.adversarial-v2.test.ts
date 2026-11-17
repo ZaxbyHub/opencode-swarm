@@ -5,7 +5,7 @@
  * that were added when removing process.cwd() fallbacks.
  *
  * Changes tested:
- * - Line 143: workingDirectory! (non-null assertion in checkReviewerGate - Turbo Mode path)
+ * - Line 143: workingDirectory! (Turbo Mode path; removed in #3165 E)
  * - Line 178: workingDirectory! (non-null assertion in checkReviewerGate - evidence-first path)
  * - Line 263: workingDirectory! (non-null assertion in checkReviewerGate - plan.json fallback path)
  * - Line 356: workingDirectory! (non-null assertion in checkReviewerGateWithScope)
@@ -95,18 +95,16 @@ afterEach(() => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ADVERSARIAL TEST 1: Non-null assertion on undefined workingDirectory
-// checkReviewerGate is called with workingDirectory = undefined
-// Line 143: const resolvedDir = workingDirectory!; → resolvedDir = undefined
-// Line 178: const resolvedDir = workingDirectory!; → resolvedDir = undefined
-// Line 263: const resolvedDir = workingDirectory!; → resolvedDir = undefined
+// checkReviewerGate is called with workingDirectory = undefined. The Turbo
+// bypass branches that dereferenced `workingDirectory!` were removed in
+// #3165 E; these tests now pin that an undefined directory still never
+// throws.
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('ADVERSARIAL: checkReviewerGate with undefined workingDirectory', () => {
 	it('should NOT crash when workingDirectory is undefined (line 143 non-null assertion)', () => {
-		// Line 143 is in the Turbo Mode bypass check
-		// If workingDirectory is undefined, workingDirectory! = undefined
-		// path.join(undefined, '.swarm', 'plan.json') = '[undefined]/.swarm/plan.json'
-		// fs.readFileSync would fail with ENOENT, not crash
+		// Formerly the Turbo Mode bypass check's `workingDirectory!`
+		// (removed in #3165 E). An undefined directory must still not throw.
 
 		expect(() => {
 			const result = checkReviewerGate('1.1', undefined);

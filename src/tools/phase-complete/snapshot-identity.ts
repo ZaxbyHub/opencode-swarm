@@ -67,6 +67,13 @@ export function toPortableRelativePath(root: string, absolute: string): string {
  */
 export const SNAPSHOT_EXCLUDED_EVIDENCE_ENTRIES = new Set(['receipts']);
 
+// The LISTING side of the evidence-root contract (listEvidenceTaskIds /
+// doctor orphan classification) lives in src/evidence/derived-entries.ts and
+// intentionally shares only the receipts name above — this set governs
+// SNAPSHOT membership (see PR #3550's Considered-not-filed) and must stay
+// exactly {'receipts'}; the derived-writer exemptions are a sibling surface,
+// never an extension of this set.
+
 export function computePhaseEvidenceSnapshot(directory: string): string {
 	const root = fs.realpathSync(directory);
 	const evidenceRoot = path.join(root, '.swarm', 'evidence');

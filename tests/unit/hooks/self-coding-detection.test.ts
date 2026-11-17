@@ -10,6 +10,19 @@ import {
 	startAgentSession,
 	swarmState,
 } from '../../../src/state';
+import { canonicalMkdtemp, removeTreeWithRetry } from '../../helpers/tmpdir';
+
+// Hooks get an explicit per-test project dir: the guardrails/delegation-gate
+// session and shell-audit stores write under `<directory>/.swarm/session/`.
+let projectDir: string;
+beforeEach(() => {
+	resetSwarmState();
+	projectDir = canonicalMkdtemp('self-coding-');
+});
+afterEach(() => {
+	resetSwarmState();
+	removeTreeWithRetry(projectDir);
+});
 
 function makeGuardrailsConfig(overrides?: Record<string, unknown>) {
 	return {
@@ -61,17 +74,9 @@ function makeMessages(
 
 // Task 2.1: Architect Self-Coding Detection
 describe('architect self-coding detection (Task 2.1)', () => {
-	beforeEach(() => {
-		resetSwarmState();
-	});
-
-	afterEach(() => {
-		resetSwarmState();
-	});
-
 	it('architect writing to .swarm/ files does NOT trigger warning', async () => {
 		const config = makeGuardrailsConfig();
-		const hook = createGuardrailsHooks(config);
+		const hook = createGuardrailsHooks(projectDir, config);
 
 		// Set up architect session
 		const sessionId = 'test-session';
@@ -93,7 +98,7 @@ describe('architect self-coding detection (Task 2.1)', () => {
 
 	it('architect writing to src/foo.ts DOES trigger warning', async () => {
 		const config = makeGuardrailsConfig();
-		const hook = createGuardrailsHooks(config);
+		const hook = createGuardrailsHooks(projectDir, config);
 
 		// Set up architect session
 		const sessionId = 'test-session';
@@ -129,7 +134,7 @@ describe('architect self-coding detection (Task 2.1)', () => {
 
 	it('coder writing to src/foo.ts does NOT trigger warning', async () => {
 		const config = makeGuardrailsConfig();
-		const hook = createGuardrailsHooks(config);
+		const hook = createGuardrailsHooks(projectDir, config);
 
 		// Set up coder session
 		const sessionId = 'test-session';
@@ -160,7 +165,7 @@ describe('architect self-coding detection (Task 2.1)', () => {
 
 	it('warning includes write count', async () => {
 		const config = makeGuardrailsConfig();
-		const hook = createGuardrailsHooks(config);
+		const hook = createGuardrailsHooks(projectDir, config);
 
 		// Set up architect session
 		const sessionId = 'test-session';
@@ -198,7 +203,7 @@ describe('architect self-coding detection (Task 2.1)', () => {
 
 	it('warning text contains SELF-CODING DETECTED', async () => {
 		const config = makeGuardrailsConfig();
-		const hook = createGuardrailsHooks(config);
+		const hook = createGuardrailsHooks(projectDir, config);
 
 		// Set up architect session
 		const sessionId = 'test-session';
@@ -223,7 +228,7 @@ describe('architect self-coding detection (Task 2.1)', () => {
 
 	it('architectWriteCount increments per write', async () => {
 		const config = makeGuardrailsConfig();
-		const hook = createGuardrailsHooks(config);
+		const hook = createGuardrailsHooks(projectDir, config);
 
 		// Set up architect session
 		const sessionId = 'test-session';
@@ -267,17 +272,9 @@ describe('architect self-coding detection (Task 2.1)', () => {
 
 // Task 2.4: Batch Delegation Detection
 describe('batch delegation detection (Task 2.4)', () => {
-	beforeEach(() => {
-		resetSwarmState();
-	});
-
-	afterEach(() => {
-		resetSwarmState();
-	});
-
 	it('single-task delegation -> no warning', async () => {
 		const config = makeDelegationConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, projectDir);
 
 		const cleanText =
 			'coder\nTASK: Add validation\nFILE: src/test.ts\nINPUT: Validate email';
@@ -293,7 +290,7 @@ describe('batch delegation detection (Task 2.4)', () => {
 
 	it('TASK with AND connecting two actions -> warning', async () => {
 		const config = makeDelegationConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, projectDir);
 
 		const text =
 			'coder\nTASK: Add validation and also add tests\nFILE: src/test.ts';
@@ -308,7 +305,7 @@ describe('batch delegation detection (Task 2.4)', () => {
 
 	it('multiple FILE lines -> warning', async () => {
 		const config = makeDelegationConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, projectDir);
 
 		const text =
 			'coder\nTASK: Add validation\nFILE: src/auth.ts\nFILE: src/login.ts';
@@ -324,7 +321,7 @@ describe('batch delegation detection (Task 2.4)', () => {
 
 	it('"additionally" -> warning', async () => {
 		const config = makeDelegationConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, projectDir);
 
 		const text =
 			'coder\nTASK: Add validation additionally add tests\nFILE: src/test.ts';
@@ -340,7 +337,7 @@ describe('batch delegation detection (Task 2.4)', () => {
 
 	it('"and also" -> warning', async () => {
 		const config = makeDelegationConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, projectDir);
 
 		const text =
 			'coder\nTASK: Add validation and also add tests\nFILE: src/test.ts';
@@ -356,7 +353,7 @@ describe('batch delegation detection (Task 2.4)', () => {
 
 	it('"also" alone (without and) -> no warning (needs "and also" pattern)', async () => {
 		const config = makeDelegationConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, projectDir);
 
 		// "also" alone doesn't match the batching pattern - needs "and also" or "then also"
 		const text =
@@ -373,7 +370,7 @@ describe('batch delegation detection (Task 2.4)', () => {
 
 	it('"while you\'re at it" -> warning', async () => {
 		const config = makeDelegationConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, projectDir);
 
 		const text =
 			"coder\nTASK: Add validation while you're at it add tests\nFILE: src/test.ts";
@@ -389,7 +386,7 @@ describe('batch delegation detection (Task 2.4)', () => {
 
 	it('warning includes matched heuristic name (Detected signal: ...)', async () => {
 		const config = makeDelegationConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, projectDir);
 
 		const text = 'coder\nTASK: Add validation\nFILE: src/a.ts\nFILE: src/b.ts';
 		const messages = makeMessages(text, 'architect');
@@ -405,7 +402,7 @@ describe('batch delegation detection (Task 2.4)', () => {
 
 	it('long single-task delegation under maxChars -> no warning', async () => {
 		const config = makeDelegationConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, projectDir);
 
 		// Long but single task - under 4000 chars
 		const text =
@@ -425,17 +422,9 @@ describe('batch delegation detection (Task 2.4)', () => {
 
 // Task 2.5: Gate Failure Self-Fix Detection
 describe('gate failure self-fix detection (Task 2.5)', () => {
-	beforeEach(() => {
-		resetSwarmState();
-	});
-
-	afterEach(() => {
-		resetSwarmState();
-	});
-
 	it('gate fail -> coder delegation -> no warning', async () => {
 		const config = makeGuardrailsConfig();
-		const hook = createGuardrailsHooks(config);
+		const hook = createGuardrailsHooks(projectDir, config);
 
 		// Set up architect session
 		const sessionId = 'test-session';
@@ -466,7 +455,7 @@ describe('gate failure self-fix detection (Task 2.5)', () => {
 
 	it('gate fail -> architect write to src/ within 2 min -> SELF-FIX warning', async () => {
 		const config = makeGuardrailsConfig();
-		const hook = createGuardrailsHooks(config);
+		const hook = createGuardrailsHooks(projectDir, config);
 
 		// Set up architect session
 		const sessionId = 'test-session';
@@ -503,7 +492,7 @@ describe('gate failure self-fix detection (Task 2.5)', () => {
 
 	it('gate pass -> architect write -> no warning', async () => {
 		const config = makeGuardrailsConfig();
-		const hook = createGuardrailsHooks(config);
+		const hook = createGuardrailsHooks(projectDir, config);
 
 		// Set up architect session
 		const sessionId = 'test-session';
@@ -535,7 +524,7 @@ describe('gate failure self-fix detection (Task 2.5)', () => {
 
 	it('gate fail -> architect write to .swarm/ -> no warning (legit)', async () => {
 		const config = makeGuardrailsConfig();
-		const hook = createGuardrailsHooks(config);
+		const hook = createGuardrailsHooks(projectDir, config);
 
 		// Set up architect session
 		const sessionId = 'test-session';
@@ -571,7 +560,7 @@ describe('gate failure self-fix detection (Task 2.5)', () => {
 
 	it('self-fix warning clears after messagesTransform (no duplicate warnings)', async () => {
 		const config = makeGuardrailsConfig();
-		const hook = createGuardrailsHooks(config);
+		const hook = createGuardrailsHooks(projectDir, config);
 
 		// Set up architect session
 		const sessionId = 'test-session';
@@ -620,7 +609,7 @@ describe('gate failure self-fix detection (Task 2.5)', () => {
 
 	it('2-minute window expires -> no warning', async () => {
 		const config = makeGuardrailsConfig();
-		const hook = createGuardrailsHooks(config);
+		const hook = createGuardrailsHooks(projectDir, config);
 
 		// Set up architect session
 		const sessionId = 'test-session';
@@ -656,7 +645,7 @@ describe('gate failure self-fix detection (Task 2.5)', () => {
 
 	it('architect write after gate failure writes only to src/ triggers warning', async () => {
 		const config = makeGuardrailsConfig();
-		const hook = createGuardrailsHooks(config);
+		const hook = createGuardrailsHooks(projectDir, config);
 
 		// Set up architect session
 		const sessionId = 'test-session';
@@ -693,17 +682,9 @@ describe('gate failure self-fix detection (Task 2.5)', () => {
 
 // Task 2.7: Self-Coding Model-Only Guidance & Debug Leakage
 describe('self-coding warnings model-only (Task 2.7)', () => {
-	beforeEach(() => {
-		resetSwarmState();
-	});
-
-	afterEach(() => {
-		resetSwarmState();
-	});
-
 	it('SELF-CODING warning injected ONLY in system message (not visible in user-facing output)', async () => {
 		const config = makeGuardrailsConfig();
-		const hook = createGuardrailsHooks(config);
+		const hook = createGuardrailsHooks(projectDir, config);
 
 		// Set up architect session
 		const sessionId = 'test-session';
@@ -754,7 +735,7 @@ describe('self-coding warnings model-only (Task 2.7)', () => {
 
 	it('SELF-FIX warning injected ONLY in system message (not visible in user-facing output)', async () => {
 		const config = makeGuardrailsConfig();
-		const hook = createGuardrailsHooks(config);
+		const hook = createGuardrailsHooks(projectDir, config);
 
 		// Set up architect session
 		const sessionId = 'test-session';
@@ -813,7 +794,7 @@ describe('self-coding warnings model-only (Task 2.7)', () => {
 
 	it('stored-args debug text is NOT present in visible output', async () => {
 		const config = makeGuardrailsConfig();
-		const hook = createGuardrailsHooks(config);
+		const hook = createGuardrailsHooks(projectDir, config);
 
 		// Set up architect session
 		const sessionId = 'test-session';
@@ -873,7 +854,7 @@ describe('self-coding warnings model-only (Task 2.7)', () => {
 
 	it('no system message -> warning still injected into created guidance carrier (model-only)', async () => {
 		const config = makeGuardrailsConfig();
-		const hook = createGuardrailsHooks(config);
+		const hook = createGuardrailsHooks(projectDir, config);
 
 		// Set up architect session
 		const sessionId = 'test-session';
@@ -920,7 +901,7 @@ describe('self-coding warnings model-only (Task 2.7)', () => {
 
 	it('MODEL_ONLY_GUIDANCE markers are properly closed in system message', async () => {
 		const config = makeGuardrailsConfig();
-		const hook = createGuardrailsHooks(config);
+		const hook = createGuardrailsHooks(projectDir, config);
 
 		// Set up architect session
 		const sessionId = 'test-session';
@@ -962,18 +943,10 @@ describe('self-coding warnings model-only (Task 2.7)', () => {
 
 // ADVERSARIAL TESTS: Task 2.7 Model-Only & Debug Leakage Gaps
 describe('ADVERSARIAL: Task 2.7 model-only guidance gaps', () => {
-	beforeEach(() => {
-		resetSwarmState();
-	});
-
-	afterEach(() => {
-		resetSwarmState();
-	});
-
 	// GAP 1: Multiple system messages - which one gets the warning?
 	it('multiple system messages: warning injected only in FIRST system message (not others)', async () => {
 		const config = makeGuardrailsConfig();
-		const hook = createGuardrailsHooks(config);
+		const hook = createGuardrailsHooks(projectDir, config);
 
 		const sessionId = 'test-session';
 		swarmState.activeAgent.set(sessionId, ORCHESTRATOR_NAME);
@@ -1029,7 +1002,7 @@ describe('ADVERSARIAL: Task 2.7 model-only guidance gaps', () => {
 	// GAP 2: Role field with different case variations
 	it('message role case sensitivity: "SYSTEM" (uppercase) not recognized as system message', async () => {
 		const config = makeGuardrailsConfig();
-		const hook = createGuardrailsHooks(config);
+		const hook = createGuardrailsHooks(projectDir, config);
 
 		const sessionId = 'test-session';
 		swarmState.activeAgent.set(sessionId, ORCHESTRATOR_NAME);
@@ -1074,7 +1047,7 @@ describe('ADVERSARIAL: Task 2.7 model-only guidance gaps', () => {
 	// GAP 3: Missing info object entirely
 	it('message with missing info object: graceful handling, no crash', async () => {
 		const config = makeGuardrailsConfig();
-		const hook = createGuardrailsHooks(config);
+		const hook = createGuardrailsHooks(projectDir, config);
 
 		const sessionId = 'test-session';
 		swarmState.activeAgent.set(sessionId, ORCHESTRATOR_NAME);
@@ -1112,7 +1085,7 @@ describe('ADVERSARIAL: Task 2.7 model-only guidance gaps', () => {
 	// GAP 4: Message with role but empty info
 	it('message with empty info but role property: handled gracefully', async () => {
 		const config = makeGuardrailsConfig();
-		const hook = createGuardrailsHooks(config);
+		const hook = createGuardrailsHooks(projectDir, config);
 
 		const sessionId = 'test-session';
 		swarmState.activeAgent.set(sessionId, ORCHESTRATOR_NAME);
@@ -1146,7 +1119,7 @@ describe('ADVERSARIAL: Task 2.7 model-only guidance gaps', () => {
 	// GAP 5: Both SELF-CODING and SELF-FIX triggered simultaneously
 	it('both self-coding AND self-fix active: both warnings injected (order matters)', async () => {
 		const config = makeGuardrailsConfig();
-		const hook = createGuardrailsHooks(config);
+		const hook = createGuardrailsHooks(projectDir, config);
 
 		const sessionId = 'test-session';
 		swarmState.activeAgent.set(sessionId, ORCHESTRATOR_NAME);
@@ -1196,7 +1169,7 @@ describe('ADVERSARIAL: Task 2.7 model-only guidance gaps', () => {
 	// GAP 6: Debug leakage - alternative stored-args naming
 	it('debug leakage check: alternative internal variable names not present', async () => {
 		const config = makeGuardrailsConfig();
-		const hook = createGuardrailsHooks(config);
+		const hook = createGuardrailsHooks(projectDir, config);
 
 		const sessionId = 'test-session';
 		swarmState.activeAgent.set(sessionId, ORCHESTRATOR_NAME);
@@ -1243,7 +1216,7 @@ describe('ADVERSARIAL: Task 2.7 model-only guidance gaps', () => {
 	// GAP 7: Self-fix with SELF-CODING - verify debug leakage absence
 	it('self-fix scenario: stored-args debug leakage NOT present in visible output', async () => {
 		const config = makeGuardrailsConfig();
-		const hook = createGuardrailsHooks(config);
+		const hook = createGuardrailsHooks(projectDir, config);
 
 		const sessionId = 'test-session';
 		swarmState.activeAgent.set(sessionId, ORCHESTRATOR_NAME);
@@ -1296,7 +1269,7 @@ describe('ADVERSARIAL: Task 2.7 model-only guidance gaps', () => {
 	// GAP 8: Assistant role should not have warning leaked
 	it('assistant role message: warning not leaked to assistant messages', async () => {
 		const config = makeGuardrailsConfig();
-		const hook = createGuardrailsHooks(config);
+		const hook = createGuardrailsHooks(projectDir, config);
 
 		const sessionId = 'test-session';
 		swarmState.activeAgent.set(sessionId, ORCHESTRATOR_NAME);
@@ -1343,7 +1316,7 @@ describe('ADVERSARIAL: Task 2.7 model-only guidance gaps', () => {
 	// GAP 9: System message at index > 0 - edge case from message consolidation
 	it('system message at index 1 (after user): warning still injected via carrier', async () => {
 		const config = makeGuardrailsConfig();
-		const hook = createGuardrailsHooks(config);
+		const hook = createGuardrailsHooks(projectDir, config);
 
 		const sessionId = 'test-session';
 		swarmState.activeAgent.set(sessionId, ORCHESTRATOR_NAME);
@@ -1393,7 +1366,7 @@ describe('ADVERSARIAL: Task 2.7 model-only guidance gaps', () => {
 	// GAP 10: Verify warning text doesn't contain raw internal data
 	it('warning text is human-readable, no raw tool output leaked', async () => {
 		const config = makeGuardrailsConfig();
-		const hook = createGuardrailsHooks(config);
+		const hook = createGuardrailsHooks(projectDir, config);
 
 		const sessionId = 'test-session';
 		swarmState.activeAgent.set(sessionId, ORCHESTRATOR_NAME);
@@ -1433,7 +1406,7 @@ describe('ADVERSARIAL: Task 2.7 model-only guidance gaps', () => {
 	// GAP 11: parts array missing entirely
 	it('message with missing parts array: graceful handling', async () => {
 		const config = makeGuardrailsConfig();
-		const hook = createGuardrailsHooks(config);
+		const hook = createGuardrailsHooks(projectDir, config);
 
 		const sessionId = 'test-session';
 		swarmState.activeAgent.set(sessionId, ORCHESTRATOR_NAME);
@@ -1471,7 +1444,7 @@ describe('ADVERSARIAL: Task 2.7 model-only guidance gaps', () => {
 	// GAP 12: parts array with non-text item
 	it('message parts with non-text item (image/tool): handled gracefully', async () => {
 		const config = makeGuardrailsConfig();
-		const hook = createGuardrailsHooks(config);
+		const hook = createGuardrailsHooks(projectDir, config);
 
 		const sessionId = 'test-session';
 		swarmState.activeAgent.set(sessionId, ORCHESTRATOR_NAME);
@@ -1508,18 +1481,10 @@ describe('ADVERSARIAL: Task 2.7 model-only guidance gaps', () => {
 
 // ADVERSARIAL TESTS: Attack Vectors
 describe('ADVERSARIAL: attack vectors (Task 4.2)', () => {
-	beforeEach(() => {
-		resetSwarmState();
-	});
-
-	afterEach(() => {
-		resetSwarmState();
-	});
-
 	// Path traversal attacks
 	it('path traversal attempt: ../../../etc/passwd -> triggers self-coding warning AND blocks (not .swarm/)', async () => {
 		const config = makeGuardrailsConfig();
-		const hook = createGuardrailsHooks(config);
+		const hook = createGuardrailsHooks(projectDir, config);
 
 		const sessionId = 'test-session';
 		swarmState.activeAgent.set(sessionId, ORCHESTRATOR_NAME);
@@ -1546,7 +1511,7 @@ describe('ADVERSARIAL: attack vectors (Task 4.2)', () => {
 	// FIXED: Path traversal bypass - .swarm/../ now detected correctly
 	it('FIXED: path traversal with .swarm/ prefix injection: .swarm/../src/evil.ts -> DETECTED correctly', async () => {
 		const config = makeGuardrailsConfig();
-		const hook = createGuardrailsHooks(config);
+		const hook = createGuardrailsHooks(projectDir, config);
 
 		const sessionId = 'test-session';
 		swarmState.activeAgent.set(sessionId, ORCHESTRATOR_NAME);
@@ -1567,7 +1532,7 @@ describe('ADVERSARIAL: attack vectors (Task 4.2)', () => {
 	// Agent identity spoofing
 	it('agent name spoofing: "architect_evil" is blocked by authority (stronger than self-coding warning)', async () => {
 		const config = makeGuardrailsConfig();
-		const hook = createGuardrailsHooks(config);
+		const hook = createGuardrailsHooks(projectDir, config);
 
 		const sessionId = 'test-session';
 		swarmState.activeAgent.set(sessionId, 'architect_evil'); // Fake architect
@@ -1598,7 +1563,7 @@ describe('ADVERSARIAL: attack vectors (Task 4.2)', () => {
 	// Empty/null sessionID is now fail-closed (v6.70.0 #496 hardening).
 	it('empty sessionID fails closed (no agent registered, not silently promoted to architect)', async () => {
 		const config = makeGuardrailsConfig();
-		const hook = createGuardrailsHooks(config);
+		const hook = createGuardrailsHooks(projectDir, config);
 
 		// Empty sessionID - no activeAgent mapping, so the write authority
 		// check fails closed with "No active agent registered". Previously
@@ -1618,7 +1583,7 @@ describe('ADVERSARIAL: attack vectors (Task 4.2)', () => {
 
 	it('null sessionID fails closed with deterministic error (no crash, no silent fallback)', async () => {
 		const config = makeGuardrailsConfig();
-		const hook = createGuardrailsHooks(config);
+		const hook = createGuardrailsHooks(projectDir, config);
 
 		const toolInput = {
 			tool: 'write',
@@ -1637,17 +1602,9 @@ describe('ADVERSARIAL: attack vectors (Task 4.2)', () => {
 });
 
 describe('ADVERSARIAL: malformed inputs (Task 4.2)', () => {
-	beforeEach(() => {
-		resetSwarmState();
-	});
-
-	afterEach(() => {
-		resetSwarmState();
-	});
-
 	it('missing args object does not crash hook (graceful degradation)', async () => {
 		const config = makeGuardrailsConfig();
-		const hook = createGuardrailsHooks(config);
+		const hook = createGuardrailsHooks(projectDir, config);
 
 		const sessionId = 'test-session';
 		swarmState.activeAgent.set(sessionId, ORCHESTRATOR_NAME);
@@ -1665,7 +1622,7 @@ describe('ADVERSARIAL: malformed inputs (Task 4.2)', () => {
 
 	it('null args.filePath does not crash hook (graceful degradation)', async () => {
 		const config = makeGuardrailsConfig();
-		const hook = createGuardrailsHooks(config);
+		const hook = createGuardrailsHooks(projectDir, config);
 
 		const sessionId = 'test-session';
 		swarmState.activeAgent.set(sessionId, ORCHESTRATOR_NAME);
@@ -1683,7 +1640,7 @@ describe('ADVERSARIAL: malformed inputs (Task 4.2)', () => {
 
 	it('undefined args.filePath does not crash hook (graceful degradation)', async () => {
 		const config = makeGuardrailsConfig();
-		const hook = createGuardrailsHooks(config);
+		const hook = createGuardrailsHooks(projectDir, config);
 
 		const sessionId = 'test-session';
 		swarmState.activeAgent.set(sessionId, ORCHESTRATOR_NAME);
@@ -1701,7 +1658,7 @@ describe('ADVERSARIAL: malformed inputs (Task 4.2)', () => {
 
 	it('empty string filePath does not crash hook (no increment)', async () => {
 		const config = makeGuardrailsConfig();
-		const hook = createGuardrailsHooks(config);
+		const hook = createGuardrailsHooks(projectDir, config);
 
 		const sessionId = 'test-session';
 		swarmState.activeAgent.set(sessionId, ORCHESTRATOR_NAME);
@@ -1719,7 +1676,7 @@ describe('ADVERSARIAL: malformed inputs (Task 4.2)', () => {
 
 	it('non-string filePath (number) does not crash hook (type check)', async () => {
 		const config = makeGuardrailsConfig();
-		const hook = createGuardrailsHooks(config);
+		const hook = createGuardrailsHooks(projectDir, config);
 
 		const sessionId = 'test-session';
 		swarmState.activeAgent.set(sessionId, ORCHESTRATOR_NAME);
@@ -1737,7 +1694,7 @@ describe('ADVERSARIAL: malformed inputs (Task 4.2)', () => {
 
 	it('non-string filePath (object) does not crash hook (type check)', async () => {
 		const config = makeGuardrailsConfig();
-		const hook = createGuardrailsHooks(config);
+		const hook = createGuardrailsHooks(projectDir, config);
 
 		const sessionId = 'test-session';
 		swarmState.activeAgent.set(sessionId, ORCHESTRATOR_NAME);
@@ -1758,7 +1715,7 @@ describe('ADVERSARIAL: malformed inputs (Task 4.2)', () => {
 
 	it('messagesTransform with empty messages array does not crash', async () => {
 		const config = makeGuardrailsConfig();
-		const hook = createGuardrailsHooks(config);
+		const hook = createGuardrailsHooks(projectDir, config);
 
 		const output = { messages: [] };
 		// Hook returns early when no messages
@@ -1769,7 +1726,7 @@ describe('ADVERSARIAL: malformed inputs (Task 4.2)', () => {
 
 	it('messagesTransform with undefined messages does not crash', async () => {
 		const config = makeGuardrailsConfig();
-		const hook = createGuardrailsHooks(config);
+		const hook = createGuardrailsHooks(projectDir, config);
 
 		const output = { messages: undefined };
 		// Hook returns early when messages is undefined
@@ -1779,7 +1736,7 @@ describe('ADVERSARIAL: malformed inputs (Task 4.2)', () => {
 
 	it('messagesTransform with missing parts array does not crash', async () => {
 		const config = makeGuardrailsConfig();
-		const hook = createGuardrailsHooks(config);
+		const hook = createGuardrailsHooks(projectDir, config);
 
 		const output = { messages: [{ info: { role: 'user' } }] };
 		// Hook returns early when parts is missing
@@ -1790,18 +1747,10 @@ describe('ADVERSARIAL: malformed inputs (Task 4.2)', () => {
 
 // ADVERSARIAL TESTS: Boundary Cases
 describe('ADVERSARIAL: boundary cases (Task 4.2)', () => {
-	beforeEach(() => {
-		resetSwarmState();
-	});
-
-	afterEach(() => {
-		resetSwarmState();
-	});
-
 	// Exact timing boundaries
 	it('self-fix detection: within 2 min window (60 seconds) -> triggers warning', async () => {
 		const config = makeGuardrailsConfig();
-		const hook = createGuardrailsHooks(config);
+		const hook = createGuardrailsHooks(projectDir, config);
 
 		const sessionId = 'test-session';
 		swarmState.activeAgent.set(sessionId, ORCHESTRATOR_NAME);
@@ -1824,7 +1773,7 @@ describe('ADVERSARIAL: boundary cases (Task 4.2)', () => {
 
 	it('self-fix detection: exactly 2 minutes + 1ms (120001ms) -> NO warning', async () => {
 		const config = makeGuardrailsConfig();
-		const hook = createGuardrailsHooks(config);
+		const hook = createGuardrailsHooks(projectDir, config);
 
 		const sessionId = 'test-session';
 		swarmState.activeAgent.set(sessionId, ORCHESTRATOR_NAME);
@@ -1847,7 +1796,7 @@ describe('ADVERSARIAL: boundary cases (Task 4.2)', () => {
 	// Path boundary cases
 	it('filePath exactly ".swarm/" (no file) -> no warning', async () => {
 		const config = makeGuardrailsConfig();
-		const hook = createGuardrailsHooks(config);
+		const hook = createGuardrailsHooks(projectDir, config);
 
 		const sessionId = 'test-session';
 		swarmState.activeAgent.set(sessionId, ORCHESTRATOR_NAME);
@@ -1863,7 +1812,7 @@ describe('ADVERSARIAL: boundary cases (Task 4.2)', () => {
 
 	it('filePath with mixed separators (Windows): "src\\foo.ts" -> triggers warning', async () => {
 		const config = makeGuardrailsConfig();
-		const hook = createGuardrailsHooks(config);
+		const hook = createGuardrailsHooks(projectDir, config);
 
 		const sessionId = 'test-session';
 		swarmState.activeAgent.set(sessionId, ORCHESTRATOR_NAME);
@@ -1879,7 +1828,7 @@ describe('ADVERSARIAL: boundary cases (Task 4.2)', () => {
 
 	it('filePath with leading "./": "./src/foo.ts" -> triggers warning', async () => {
 		const config = makeGuardrailsConfig();
-		const hook = createGuardrailsHooks(config);
+		const hook = createGuardrailsHooks(projectDir, config);
 
 		const sessionId = 'test-session';
 		swarmState.activeAgent.set(sessionId, ORCHESTRATOR_NAME);
@@ -1895,7 +1844,7 @@ describe('ADVERSARIAL: boundary cases (Task 4.2)', () => {
 
 	it('filePath ".swarm/./state.json" (with ./) -> no warning', async () => {
 		const config = makeGuardrailsConfig();
-		const hook = createGuardrailsHooks(config);
+		const hook = createGuardrailsHooks(projectDir, config);
 
 		const sessionId = 'test-session';
 		swarmState.activeAgent.set(sessionId, ORCHESTRATOR_NAME);
@@ -1914,7 +1863,7 @@ describe('ADVERSARIAL: boundary cases (Task 4.2)', () => {
 	// Unicode and special characters
 	it('filePath with nested path: "src/unicode/test.ts" -> triggers warning', async () => {
 		const config = makeGuardrailsConfig();
-		const hook = createGuardrailsHooks(config);
+		const hook = createGuardrailsHooks(projectDir, config);
 
 		const sessionId = 'test-session';
 		swarmState.activeAgent.set(sessionId, ORCHESTRATOR_NAME);
@@ -1932,7 +1881,7 @@ describe('ADVERSARIAL: boundary cases (Task 4.2)', () => {
 
 	it('filePath with null byte injection: "src/test.ts\x00.swarm/" -> triggers warning AND fails closed at lstat', async () => {
 		const config = makeGuardrailsConfig();
-		const hook = createGuardrailsHooks(config);
+		const hook = createGuardrailsHooks(projectDir, config);
 
 		const sessionId = 'test-session';
 		swarmState.activeAgent.set(sessionId, ORCHESTRATOR_NAME);
@@ -1960,7 +1909,7 @@ describe('ADVERSARIAL: boundary cases (Task 4.2)', () => {
 	// Batch detection boundary cases
 	it('batch detection: exact char limit (4000) -> no warning', async () => {
 		const config = makeDelegationConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, projectDir);
 
 		// Prefix is 42 chars ('coder\nTASK: Test\nFILE: src/test.ts\nINPUT: ')
 		const prefix = 'coder\nTASK: Test\nFILE: src/test.ts\nINPUT: ';
@@ -1977,7 +1926,7 @@ describe('ADVERSARIAL: boundary cases (Task 4.2)', () => {
 
 	it('batch detection: 4001 chars -> triggers oversized warning', async () => {
 		const config = makeDelegationConfig();
-		const hook = createDelegationGateHook(config, process.cwd());
+		const hook = createDelegationGateHook(config, projectDir);
 
 		// Prefix is 42 chars, so need 3959 x's to get 4001 total
 		const prefix = 'coder\nTASK: Test\nFILE: src/test.ts\nINPUT: ';
@@ -1995,7 +1944,7 @@ describe('ADVERSARIAL: boundary cases (Task 4.2)', () => {
 	// Gate failure edge cases
 	it('gate failure with special chars in taskId: "task-<script>alert(1)</script>" -> sanitized in output', async () => {
 		const config = makeGuardrailsConfig();
-		const hook = createGuardrailsHooks(config);
+		const hook = createGuardrailsHooks(projectDir, config);
 
 		const sessionId = 'test-session';
 		swarmState.activeAgent.set(sessionId, ORCHESTRATOR_NAME);
@@ -2023,7 +1972,7 @@ describe('ADVERSARIAL: boundary cases (Task 4.2)', () => {
 	// Concurrent session edge cases
 	it('multiple sessions with same agent -> independent counts', async () => {
 		const config = makeGuardrailsConfig();
-		const hook = createGuardrailsHooks(config);
+		const hook = createGuardrailsHooks(projectDir, config);
 
 		// Session 1
 		const session1 = 'session-1';
@@ -2057,17 +2006,9 @@ describe('ADVERSARIAL: boundary cases (Task 4.2)', () => {
 });
 
 describe('SELF-CODING DETECTED warning contains time-pressure anti-rationalization patterns', () => {
-	beforeEach(() => {
-		resetSwarmState();
-	});
-
-	afterEach(() => {
-		resetSwarmState();
-	});
-
 	async function triggerSelfCodingWarning(sessionId: string) {
 		const config = makeGuardrailsConfig();
-		const hook = createGuardrailsHooks(config);
+		const hook = createGuardrailsHooks(projectDir, config);
 		swarmState.activeAgent.set(sessionId, ORCHESTRATOR_NAME);
 		startAgentSession(sessionId, ORCHESTRATOR_NAME);
 

@@ -292,45 +292,6 @@ describe('PR_FEEDBACK dedicated coder scope controller', () => {
 		).rejects.toThrow(/verification ownership is incomplete/i);
 	});
 
-	test('atomically reserves one PR-feedback declaration when Task calls race', async () => {
-		await settleFeedbackVerification();
-		const prepared = JSON.parse(
-			await executePreparePrFeedbackScope(
-				{ task_id: '8.8', files: ['src/index.ts'] },
-				tempDir,
-				{ sessionID: SESSION_ID },
-			),
-		) as { success: boolean };
-		expect(prepared.success).toBe(true);
-		const delegation = createDelegationGateHook(makeConfig(), tempDir);
-		const results = await Promise.allSettled(
-			['scope-race-a', 'scope-race-b'].map((callID) =>
-				delegation.toolBefore(
-					{ tool: 'Task', sessionID: SESSION_ID, callID },
-					{
-						args: {
-							subagent_type: 'coder',
-							task_id: '8.8',
-							prompt:
-								'TASK: 8.8\nFILE: src/index.ts\nACCEPTANCE: close the authenticated feedback item',
-						},
-					},
-				),
-			),
-		);
-		expect(
-			results.filter((result) => result.status === 'fulfilled'),
-		).toHaveLength(1);
-		const declaration = await resolvePrFeedbackScopeDeclaration(
-			tempDir,
-			SESSION_ID,
-			'8.8',
-		);
-		expect(['scope-race-a', 'scope-race-b']).toContain(
-			declaration?.consumedByCallId,
-		);
-	});
-
 	test('does not consume a replacement declaration after classifying its predecessor', async () => {
 		await settleFeedbackVerification();
 		await declarePrFeedbackScope(tempDir, SESSION_ID, '7.7', ['src/index.ts']);

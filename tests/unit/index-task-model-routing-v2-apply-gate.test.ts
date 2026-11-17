@@ -473,4 +473,28 @@ describe('index task-model routing — v2 apply gate + route swarm-id derivation
 		// The stored spelling is whitespace-trimmed, never stripped to a role.
 		expect(byCall.get('call-padded')?.agentName).toBe('Case_coder');
 	});
+
+	test('padded-role-parity (#3625): padded prefixed dispatch stores the trimmed-derived role and matches the boundary', async () => {
+		// Before #3625 the stored role kept the padded spelling while the
+		// chat boundary derived the trimmed role — a guaranteed mismatch.
+		const swarms = {
+			Case: {
+				name: 'Case',
+				agents: { coder: { model: 'x/y', fallback_models: ['x/z'] } },
+			},
+		};
+		writeAgentsConfig(directory, {}, swarms);
+		writePlan(directory);
+		const plugin = await bootPlugin(directory);
+		await dispatchAndAdvance(plugin, 'call-padded-role', ' Case_coder ');
+		const route = getPendingTaskModelRouteSnapshot()[0];
+		expect(route?.role).toBe('coder'); // undefined role fails: non-vacuous
+		const output: { message: { model?: unknown } } = { message: {} };
+		await plugin['chat.message']?.(
+			{ sessionID: CHILD_SESSION, agent: 'Case_coder' } as never,
+			output as never,
+		);
+		// Boundary matched the route, so the advanced fallback x/z landed.
+		expect(output.message.model).toEqual({ providerID: 'x', modelID: 'z' });
+	});
 });

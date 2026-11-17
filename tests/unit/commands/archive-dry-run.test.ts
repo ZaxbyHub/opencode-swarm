@@ -17,6 +17,7 @@ import * as path from 'node:path';
 import { handleArchiveCommand } from '../../../src/commands/archive.js';
 import type { Evidence } from '../../../src/config/evidence-schema.js';
 import { saveEvidence } from '../../../src/evidence/manager.js';
+import { invalidateCachedArtifact } from '../../../src/utils/swarm-artifact-cache';
 import { safeRmRecursive } from '../../helpers/safe-test-dir';
 
 let tempDir: string;
@@ -66,6 +67,9 @@ async function makeBundleOld(taskId: string, daysOld: number): Promise<void> {
 		'evidence.json',
 	);
 	await Bun.write(evidencePath, JSON.stringify(bundle));
+	// #3218 H2 leg: same-size rewrite must not serve the cached pre-rewrite
+	// bundle (see archive.test.ts and the #1729 defect class).
+	invalidateCachedArtifact(evidencePath);
 }
 
 describe('handleArchiveCommand --dry-run loadEvidence discriminated union', () => {

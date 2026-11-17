@@ -1038,6 +1038,7 @@ mock.module('node:fs', () => ({
 | `src/hooks/delegation-gate.ts` | `_internals.beforePrFeedbackScopeConsume` | #2469 declaration-replacement interleave tests (pause between scope classification and locked consumption) |
 | `src/hooks/pr-workflow-gate.ts` | `_test_exports.beforePrReviewReentryReservation` | #2469 workflow-lock-held-through-reservation interleave tests |
 | `src/hooks/pr-workflow-response-gate.ts` | `_internals.scanDelegationsForRecovery` | #2469 lane-progress-token tests (inject receipt digests / throwing scans) |
+| `src/hooks/guardrails/file-authority.ts` | `_internals.lstatSync` | #3606 ancestor-walk denial-rendering tests (inject non-ENOENT lstat outcomes for workspaces that do not exist on the host; production gets the real `fsSync.lstatSync`) |
 
 **Delegation-gate split pattern (FR-006 SC-006.1):**
 

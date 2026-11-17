@@ -96,6 +96,12 @@ function writeSummary(dir: string, classification = 'VALID') {
 		path.join(dir, '01-issue-summary.md'),
 		`## Source\nx\n## Observed Behavior\nx\n## Expected Behavior\nx\n## Acceptance Criteria\n- [ ] AC1: works\n## Classification\n${classification}\n## Related Issues\nx\n`,
 	);
+	// Phase 1 also requires the cluster-preflight artifact (#3605 AC3): a
+	// recorded-at line plus per-candidate claim and open-PR evidence.
+	fs.writeFileSync(
+		path.join(dir, 'repro', 'cluster-preflight.md'),
+		'recorded-at: 2026-01-01T00:00:00Z\n\n## candidate #1\n\n- claim comments (live): none\n- open PRs naming 1 in:body: none\n- verdict: CLEAR\n',
+	);
 }
 
 describe('trace-check.sh identities, handshake, and early phases', () => {
@@ -260,7 +266,7 @@ describe('trace-check.sh identities, handshake, and early phases', () => {
 		expect(result.out).toContain('OK heading-Fixing Change');
 	}, 60_000);
 
-	test('phase 0 freshness accepts only synced or a valid override, rejects behind/banana', () => {
+	test('phase 0 freshness rejects unknown and behind values', () => {
 		const worktree = repo();
 		const dir = trace(worktree);
 		writeState(worktree, dir, { freshness: 'banana' });
@@ -274,9 +280,13 @@ describe('trace-check.sh identities, handshake, and early phases', () => {
 		expect(result.out).toContain(
 			'FAIL freshness: behind, sync before proceeding',
 		);
+	}, 60_000);
 
+	test('phase 0 freshness accepts synced or a valid override', () => {
+		const worktree = repo();
+		const dir = trace(worktree);
 		writeState(worktree, dir, { freshness: 'synced' });
-		result = run(worktree, ['phase', '0', '--slug', 'issue-1']);
+		let result = run(worktree, ['phase', '0', '--slug', 'issue-1']);
 		expect(result.out).toContain('OK freshness');
 
 		writeState(worktree, dir, {
@@ -284,9 +294,13 @@ describe('trace-check.sh identities, handshake, and early phases', () => {
 		});
 		result = run(worktree, ['phase', '0', '--slug', 'issue-1']);
 		expect(result.out).toContain('OK freshness');
+	}, 60_000);
 
+	test('phase 0 freshness rejects fetch failure and empty override', () => {
+		const worktree = repo();
+		const dir = trace(worktree);
 		writeState(worktree, dir, { freshness: 'fetch-failed:offline' });
-		result = run(worktree, ['phase', '0', '--slug', 'issue-1']);
+		let result = run(worktree, ['phase', '0', '--slug', 'issue-1']);
 		expect(result.code).toBe(1);
 		expect(result.out).toContain('FAIL freshness-fail-closed');
 

@@ -15,21 +15,27 @@
  * a deterministic file under the OS temp directory (outside every repository)
  * and returns the path to hand to `git commit -F`.
  *
- * Hardening (feedback round PRR-011/F-R18/19/21): the write goes through the
- * canonical atomic writer (temp + fsync + rename, mode 0o600) so a concurrent
- * `git commit -F` can never observe a torn file; the resolved target is
- * proven — lexically AND through realpath once the directory exists — to
- * stay inside the dedicated temp subdirectory and OUTSIDE the repository (a
- * TMPDIR pointing into the checkout is refused); files are pruned after
- * MESSAGE_FILE_TTL_MS on each call so the directory stays bounded.
+ * Hardening (feedback round PRR-011/F-R18/19/21 + issue #3486): the write goes
+ * through the canonical atomic writer (temp + fsync + rename, mode 0o600) so a
+ * concurrent `git commit -F` can never observe a torn file; the fixed-name
+ * directory is ACQUIRED with a real proof before any use — lstat refusal for a
+ * planted symlink/junction or non-directory, current-user ownership and a
+ * healed/verified 0700 mode on POSIX, creation at 0700 with a post-create
+ * re-lstat, and a same-tick validateTarget re-proof at the write boundary —
+ * plus the lexical and realpath containment refusals (a TMPDIR pointing into
+ * the checkout is refused); files are pruned after MESSAGE_FILE_TTL_MS on
+ * each call so the directory stays bounded.
  */
 
 import { createHash } from 'node:crypto';
 import {
+	chmodSync,
+	lstatSync,
 	mkdirSync,
 	readdirSync,
 	realpathSync,
 	rmSync,
+	type Stats,
 	statSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -64,6 +70,105 @@ function commitMessageTargetDir(): string {
 	return path.join(tmpdir(), 'swarm-pr-feedback-commit-msg');
 }
 
+/**
+ * Dependency seam for tests (repo DI convention): the fs primitives the
+ * directory guard reasons over, so ownership-mismatch and heal-failure legs
+ * are injectable without mock.module. Restore mutations in afterEach.
+ */
+export const _internals = {
+	lstatSync,
+	mkdirSync,
+	chmodSync,
+	realpathSync,
+};
+
+/** Outcome of {@link acquireCommitMessageDir}: a proven-real directory or a refusal reason. */
+type CommitMessageDirAcquisition =
+	| { ok: true; dir: string }
+	| { ok: false; message: string };
+
+/**
+ * Acquire the fixed-name commit-message directory with a real proof (issue
+ * #3486): the name must be a real directory — never a symlink or junction —
+ * that the current user owns with mode 0700 (POSIX), created fresh at 0700
+ * when absent. The post-create re-lstat is the create-race proof:
+ * mkdirSync(recursive) succeeds over an existing junction on win32 and over
+ * an existing symlink-to-dir elsewhere, so only the re-lstat catches a link
+ * planted between the ENOENT and the mkdir. The guard replaced a re-proof
+ * that was tautological (path.join of a basename always stays inside the
+ * joined directory) plus an insideRepo() check that passed for any
+ * outside-repo target — together they let a planted link redirect both the
+ * TTL prune and the authored write into an attacker-chosen directory.
+ */
+function acquireCommitMessageDir(
+	resolvedDir: string,
+): CommitMessageDirAcquisition {
+	let stats: Stats;
+	try {
+		stats = _internals.lstatSync(resolvedDir);
+	} catch {
+		// First use — create private, then prove what actually exists now.
+		try {
+			_internals.mkdirSync(resolvedDir, { recursive: true, mode: 0o700 });
+		} catch (error) {
+			return {
+				ok: false,
+				message: `could not be created (${error instanceof Error ? error.message : String(error)})`,
+			};
+		}
+		try {
+			stats = _internals.lstatSync(resolvedDir);
+		} catch (error) {
+			return {
+				ok: false,
+				message: `vanished after creation (${error instanceof Error ? error.message : String(error)})`,
+			};
+		}
+	}
+	if (stats.isSymbolicLink()) {
+		return { ok: false, message: 'exists as a symlink' };
+	}
+	if (!stats.isDirectory()) {
+		return { ok: false, message: 'is not a directory' };
+	}
+	// Ownership and mode are enforced on POSIX only: on Windows lstat exposes
+	// neither a meaningful uid (process.getuid is undefined) nor an enforced
+	// mode — the per-user %TEMP% root is the ownership boundary there.
+	if (process.platform !== 'win32') {
+		const uid = process.getuid?.();
+		if (uid !== undefined && stats.uid !== uid) {
+			return {
+				ok: false,
+				message: `is not owned by the current user (remove the existing directory ${resolvedDir} or chown it to the current user, then retry)`,
+			};
+		}
+		// Require EXACTLY 0700, not merely "no group/other bits": a restrictive
+		// 0500/0600 (owner r-x / rw-) passes a & 0o077 test but has no owner
+		// write/execute, so the later file write fails with a confusing EACCES.
+		// Any non-0700 mode (legacy umask defaults like 0755, or a restrictive
+		// 0500/0600) is healed rather than refused: ownership already passed,
+		// so tightening/normalising the mode is safe.
+		if ((stats.mode & 0o777) !== 0o700) {
+			try {
+				_internals.chmodSync(resolvedDir, 0o700);
+				stats = _internals.lstatSync(resolvedDir);
+			} catch (error) {
+				return {
+					ok: false,
+					message: `could not be restricted to mode 0700 (${error instanceof Error ? error.message : String(error)})`,
+				};
+			}
+			if ((stats.mode & 0o777) !== 0o700) {
+				return {
+					ok: false,
+					message: 'could not be restricted to mode 0700',
+				};
+			}
+		}
+	}
+	return { ok: true, dir: resolvedDir };
+}
+
 /** Deterministic, outside-every-repository home for the authored message. */
 function resolvePrFeedbackCommitMessageFilePath(
 	sessionID: string,
@@ -83,11 +188,19 @@ function resolvePrFeedbackCommitMessageFilePath(
 /**
  * FB-9/F-R21: prune authored files older than the TTL so the shared temp
  * directory stays bounded. Best-effort — a prune failure never fails the
- * authoring call.
+ * authoring call. Same-tick re-proof at entry (4.5 review round): the directory
+ * acquired earlier is re-lstat'd before the walk, so a directory swapped for a
+ * link after the acquisition is NEVER pruned through (the stale-file deletions
+ * the TTL performs cannot be redirected into a link target).
  */
-function pruneStaleMessageFiles(): void {
+function pruneStaleMessageFiles(dir: string): void {
 	try {
-		const dir = commitMessageTargetDir();
+		const dirStats = _internals.lstatSync(dir);
+		if (dirStats.isSymbolicLink() || !dirStats.isDirectory()) {
+			// Swapped for a link (or replaced by a non-directory) after the
+			// acquisition — skip the prune rather than walk through it.
+			return;
+		}
 		const now = Date.now();
 		for (const entry of readdirSync(dir)) {
 			if (!entry.endsWith('.txt')) continue;
@@ -174,29 +287,26 @@ export async function executePreparePrFeedbackCommitMessage(
 		});
 	}
 	try {
-		mkdirSync(resolvedDir, { recursive: true });
-		let realpathDir = resolvedDir;
-		try {
-			realpathDir = realpathSync(resolvedDir);
-		} catch {
-			// Directory vanished between mkdir and realpath — mkdir again below
-			// via the atomic writer's own parent handling is not available, so
-			// re-create and continue with the lexical path.
-			mkdirSync(resolvedDir, { recursive: true });
-		}
-		const realpathTarget = path.join(
-			realpathDir,
-			path.basename(resolvedTarget),
-		);
-		if (
-			!realpathTarget.startsWith(realpathDir + path.sep) &&
-			realpathTarget !== realpathDir
-		) {
+		// Acquire the fixed-name directory with a real proof before anything
+		// touches it (issue #3486): refuse a planted symlink/junction, a
+		// non-directory, a foreign owner, or an unrestricable mode — then use
+		// ONLY the proven-real lexical directory for the prune and the write.
+		const acquisition = acquireCommitMessageDir(resolvedDir);
+		if (!acquisition.ok) {
 			return JSON.stringify({
 				success: false,
-				message:
-					'Commit-message file path escaped the swarm-pr-feedback-commit-msg directory through a symlink; refusing to write',
+				message: `The commit-message temp directory ${acquisition.message}; refusing to write`,
 			});
+		}
+		// Ancestor containment re-proof (kept from the original design): a
+		// symlinked ancestor component above the fixed name that resolves
+		// inside the repository must still be refused — the lexical checks
+		// above cannot see through ancestor links, realpath can.
+		let realpathDir = acquisition.dir;
+		try {
+			realpathDir = _internals.realpathSync(acquisition.dir);
+		} catch {
+			// Keep the proven lexical directory.
 		}
 		if (insideRepo(realpathDir)) {
 			return JSON.stringify({
@@ -205,9 +315,25 @@ export async function executePreparePrFeedbackCommitMessage(
 					'The resolved temp directory points inside the repository through a symlink; refusing to write',
 			});
 		}
-		pruneStaleMessageFiles();
-		await atomicWriteFileAnyRoot(realpathTarget, message, {
+		pruneStaleMessageFiles(acquisition.dir);
+		const writeTarget = path.join(
+			acquisition.dir,
+			path.basename(resolvedTarget),
+		);
+		await atomicWriteFileAnyRoot(writeTarget, message, {
 			mode: 0o600,
+			// Same-tick re-proof after the writer's event-loop yield: a
+			// directory swapped for a link after the acquisition is caught at
+			// the last boundary before the temp-write/rename syscalls, instead
+			// of writing through the swapped link.
+			validateTarget: () => {
+				const dirStats = _internals.lstatSync(path.dirname(writeTarget));
+				if (dirStats.isSymbolicLink() || !dirStats.isDirectory()) {
+					throw new Error(
+						'commit-message temp directory was replaced with a link before the write',
+					);
+				}
+			},
 		});
 	} catch (error) {
 		return JSON.stringify({

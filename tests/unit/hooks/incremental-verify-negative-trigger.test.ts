@@ -99,4 +99,24 @@ describe('incremental-verify trigger gate — negative and compat legs (#3617)',
 		makeHook(['code-coder']);
 		expect(await drive('code-coder')).toBe(true);
 	});
+
+	test('padded-trigger (#3625): a whitespace-padded dispatch matches via every trimmed-derived form', async () => {
+		// Before #3625 all three trigger forms derived from the RAW padded
+		// spelling, so ' Case_coder ' matched no unpadded entry on any arm (the
+		// suffix extractor cannot see '_coder' through the trailing space).
+		// Canonical arm: ' mega_local_coder ' resolves only through the
+		// canonical suffix extraction (its base-compat form 'local_coder' is
+		// not 'coder'), so a revert of the canonical-arm trim fails this leg.
+		makeHook(['coder']);
+		expect(await drive(' mega_local_coder ')).toBe(true); // canonical arm
+		expect(await drive(' coder ')).toBe(true); // bare canonical, padded
+		makeHook(['Case_coder']);
+		expect(await drive(' Case_coder ')).toBe(true); // raw arm
+		makeHook(['custom']);
+		expect(await drive(' acme_custom ')).toBe(true); // base-compat arm
+		// Suffix near-miss: 'test_engineer' ends with 'engineer' but is not it,
+		// so a suffix-matching over-matcher would flip this leg to true.
+		makeHook(['engineer']);
+		expect(await drive(' Case_test_engineer ')).toBe(false); // near-miss stays gated
+	});
 });

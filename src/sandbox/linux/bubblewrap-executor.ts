@@ -83,6 +83,12 @@ interface BwrapArgsInput {
 	command: string;
 }
 
+/** True when `child` equals `parent` or lies beneath it (both absolute). */
+function isSameOrDescendant(child: string, parent: string): boolean {
+	const base = parent.endsWith('/') ? parent : `${parent}/`;
+	return child === parent || child.startsWith(base);
+}
+
 /**
  * The bwrap argument list of a wrap — the single source of truth for both
  * `wrapCommand` and the namespace smoke test, so the smoke test can never
@@ -101,6 +107,36 @@ function buildBwrapArgs(input: BwrapArgsInput): string[] {
 	]);
 	// --bind SRC DEST for each scope path.
 	const bindArgs = input.scopes.flatMap((p) => ['--bind', quote(p), quote(p)]);
+	// The size-capped tmpfs hides everything beneath `temp` that was mounted
+	// before it. A scope (or read-only root) UNDER `temp` — e.g. a mkdtemp
+	// workspace under `/tmp`, the default — must therefore be mounted AFTER the
+	// tmpfs, or its writes land in the hidden tmpfs and never reach the host
+	// (observed on ubuntu-26.04: "No such file or directory" on an in-scope
+	// write). The inverse — `temp` equal to or inside a scope or read-only
+	// root — keeps the tmpfs last (the pre-fix order) so the temp directory
+	// stays a private, size-capped tmpfs rather than the host directory.
+	// Known limit: the rule is all-or-nothing, so a scope under `temp` while
+	// `temp` is itself inside another mount stays hidden (writes are lost,
+	// nothing on the host is widened); production `temp` is always `/tmp`.
+	const tempInsideMount = [...input.readonlyRoots, ...input.scopes].some((p) =>
+		isSameOrDescendant(input.temp, p),
+	);
+	const tmpfsArgs = [
+		'--size',
+		String(TMPFS_SIZE_BYTES),
+		'--tmpfs',
+		quote(input.temp),
+	];
+	// #3332: a host without /lib64 (usr-merged or non-multilib images, e.g.
+	// Alpine/musl) cannot mount it — bwrap aborts the whole invocation when a
+	// bind source is missing. Emit the bind only when the host has the
+	// directory so a wrap degrades per-host instead of failing wholesale.
+	// Availability is read HERE (module-load time for the smoke args below,
+	// per-wrap for wrapCommand callers) from node:fs; tests force both host
+	// shapes by mocking node:fs before importing this module.
+	const lib64BindArgs: string[] = existsSync('/lib64')
+		? ['--ro-bind', '/lib64', '/lib64']
+		: [];
 	const args = [
 		'--unshare-user',
 		'--unshare-ipc',
@@ -108,14 +144,12 @@ function buildBwrapArgs(input: BwrapArgsInput): string[] {
 		'--new-session',
 		'--cap-drop',
 		'ALL',
+		...(tempInsideMount ? [] : tmpfsArgs),
 		...roBindArgs,
 		...bindArgs,
 		'--dev',
 		'/dev',
-		'--size',
-		String(TMPFS_SIZE_BYTES),
-		'--tmpfs',
-		quote(input.temp),
+		...(tempInsideMount ? tmpfsArgs : []),
 		'--ro-bind',
 		'/etc',
 		'/etc',
@@ -125,9 +159,7 @@ function buildBwrapArgs(input: BwrapArgsInput): string[] {
 		'--ro-bind',
 		'/lib',
 		'/lib',
-		'--ro-bind',
-		'/lib64',
-		'/lib64',
+		...lib64BindArgs,
 		'--proc',
 		'/proc',
 		'--unshare-pid',
@@ -154,9 +186,11 @@ function buildBwrapArgs(input: BwrapArgsInput): string[] {
  * all — Ubuntu 24.04+ restricts unprivileged user namespaces
  * (`kernel.apparmor_restrict_unprivileged_userns = 1`) and every real
  * invocation fails with "setting up uid map: Permission denied"; unprivileged
- * containers can allow the user namespace but refuse `--proc`; a host
- * without `/lib64` fails the bind. Availability must therefore be proven by
- * running one.
+ * containers can allow the user namespace but refuse `--proc`. Availability
+ * must therefore be proven by running one. A host without `/lib64` no longer
+ * fails the bind — `buildBwrapArgs` emits that bind only when the host has
+ * the directory (#3332) — but every OTHER kernel feature the wrap needs is
+ * still exercised below.
  */
 export const BWRAP_NAMESPACE_SMOKE_ARGS: readonly string[] = buildBwrapArgs({
 	quote: (value) => value,

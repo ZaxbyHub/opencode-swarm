@@ -3,6 +3,7 @@ import type { BigIntStats, Dirent } from 'node:fs';
 import { realpathSync } from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import type { SessionStatus } from '@opencode-ai/sdk';
 import { z } from 'zod';
 import {
@@ -40,6 +41,7 @@ import {
 	PR_REVIEW_BASE_DIMENSION_IDS,
 	PR_REVIEW_FINDINGS_MAX_BYTES,
 	PR_REVIEW_HANDOFF_MAX_BYTES,
+	PR_REVIEW_VERDICT_SEMANTICS_VERSION,
 	type PrReviewLaneResultEnvelope,
 	PrReviewLaneResultEnvelopeSchema,
 	type PrReviewResultReceipt,
@@ -247,6 +249,7 @@ import {
 import { swarmState } from '../state.js';
 import { resolveGhBinary } from '../tools/gh-evidence.js';
 import { getPrWorkflowToolCapability } from '../tools/tool-metadata.js';
+import { atomicWriteSwarmFile } from '../utils/atomic-write.js';
 import { sameProjectRoot } from '../utils/canonical-root.js';
 import { runExternalTool } from '../utils/external-tool-runner.js';
 import { log, warn } from '../utils/logger.js';
@@ -1002,7 +1005,8 @@ export interface PrReviewVerdictRejectionRecord {
 export const MAX_PR_REVIEW_VERDICT_REJECTIONS = 24;
 
 export interface PrWorkflowGateState {
-	schemaVersion: 1;
+	releaseReview?: { url: string; head: string };
+	schemaVersion: 1 | 2;
 	/** Monotonic durable revision used to reject stale same-session transitions. */
 	revision: number;
 	/** Stable identity that prevents revision-only ABA during mode replacement. */
@@ -1242,6 +1246,7 @@ export interface PrWorkflowGateState {
 }
 
 const GATE_SCHEMA_VERSION = 1 as const;
+const RELEASE_GATE_SCHEMA_VERSION = 2 as const;
 const MAX_WORKFLOW_BATCHES = 128;
 /**
  * Every valid PR_REVIEW base batch partitions the fixed six-dimension base
@@ -1748,9 +1753,17 @@ const PrFeedbackReviewHandoffRecordSchema = z
 	})
 	.strict();
 
+const ReleaseReviewGateBindingSchema = z.object({
+	url: z.string().url().max(2000),
+	head: z.string().regex(/^[a-f0-9]{40}$/),
+});
+
 const PrWorkflowGateStateSchema = z
 	.object({
-		schemaVersion: z.literal(GATE_SCHEMA_VERSION),
+		schemaVersion: z.union([
+			z.literal(GATE_SCHEMA_VERSION),
+			z.literal(RELEASE_GATE_SCHEMA_VERSION),
+		]),
 		revision: z.number().int().nonnegative().default(0),
 		workflowInstanceId: z.string().min(1).max(128).optional(),
 		sessionID: z.string().min(1),
@@ -1819,6 +1832,7 @@ const PrWorkflowGateStateSchema = z
 			.optional(),
 		prReviewReservedRunId: z.string().min(1).optional(),
 		prReviewArtifactRunId: z.string().min(1).optional(),
+		releaseReview: ReleaseReviewGateBindingSchema.optional(),
 		prReviewFindingsPath: z.string().min(1).optional(),
 		prReviewPartialBaseCoverage:
 			PrReviewPartialBaseCoverageRecordSchema.optional(),
@@ -2001,7 +2015,21 @@ const PrWorkflowGateStateSchema = z
 	// Passthrough keeps unknown fields opaque but present through any
 	// read-modify-write cycle, so older code degrades to "ignore the field
 	// it doesn't know about" instead of "refuse to read the file at all".
-	.passthrough();
+	.passthrough()
+	.refine(
+		(state) =>
+			state.releaseReview
+				? state.mode === 'PR_REVIEW' &&
+					(state.prHeadSha === undefined ||
+						state.prHeadSha === state.releaseReview.head)
+				: state.schemaVersion === GATE_SCHEMA_VERSION,
+		'Release review state must contain a matching PR_REVIEW binding',
+	)
+	.transform((state) =>
+		state.releaseReview
+			? { ...state, schemaVersion: RELEASE_GATE_SCHEMA_VERSION }
+			: state,
+	);
 
 function formatCheckoutRecoveryBlock(state: PrWorkflowGitState): string {
 	const evidence = JSON.stringify({
@@ -2193,6 +2221,8 @@ export async function activatePrWorkflow(
 	options: {
 		prHeadSha?: string;
 		requireCheckoutPreflight?: boolean;
+		/** Null requests an ordinary review; omitted allows internal reentry. */
+		releaseReview?: PrWorkflowGateState['releaseReview'] | null;
 		prUrl?: string;
 		// #2882 AC5: configured context authorizing a declared generic
 		// self-hosted GitLab MR URL as the PR_FEEDBACK target. Fail-closed
@@ -2294,6 +2324,16 @@ export async function activatePrWorkflow(
 				normalizedSessionID,
 			);
 			if (existing?.mode === mode) {
+				if (
+					options.releaseReview !== undefined &&
+					(existing.releaseReview?.url.toLowerCase() !==
+						options.releaseReview?.url.toLowerCase() ||
+						existing.releaseReview?.head !== options.releaseReview?.head)
+				) {
+					throw new Error(
+						'BLOCKED: active workflow does not match the release PR and head',
+					);
+				}
 				if (mode === 'PR_FEEDBACK' && options.prUrl) {
 					const requestedTarget = canonicalGitHubPrUrl(
 						options.prUrl,
@@ -2472,7 +2512,9 @@ export async function activatePrWorkflow(
 							: undefined;
 			}
 			const nextState: PrWorkflowGateState = {
-				schemaVersion: GATE_SCHEMA_VERSION,
+				schemaVersion: options.releaseReview
+					? RELEASE_GATE_SCHEMA_VERSION
+					: GATE_SCHEMA_VERSION,
 				revision: 0,
 				workflowInstanceId: randomUUID(),
 				sessionID: normalizedSessionID,
@@ -2483,6 +2525,9 @@ export async function activatePrWorkflow(
 					? { skillContractAdvisories: activationAdvisories }
 					: {}),
 				...(initialHead ? { prHeadSha: initialHead } : {}),
+				...(options.releaseReview
+					? { releaseReview: options.releaseReview }
+					: {}),
 				...(feedbackTargetUrl
 					? { prFeedbackTargetUrl: feedbackTargetUrl }
 					: {}),
@@ -3304,34 +3349,87 @@ export async function clearPrWorkflowGateState(
 	directory: string,
 	sessionID: string,
 	expectedRevision?: number,
-	options: { allowSalvagedRead?: boolean } = {},
+	options: {
+		allowSalvagedRead?: boolean;
+		expectedRecoveryRowRevision?: number;
+		releaseApproval?: PrWorkflowGateState;
+	} = {},
 ): Promise<void> {
 	const normalizedSessionID = normalizeSessionID(sessionID);
 	await withSessionStateMutation(directory, normalizedSessionID, async () => {
-		// The CAS-guard read is only meaningful when a caller supplies a
-		// revision to compare against; skip it entirely otherwise so a
-		// genuinely unreadable/malformed state file can still be cleared
-		// (the sole purpose of this escape hatch) instead of the read itself
-		// re-throwing the same failure it exists to recover from.
-		if (expectedRevision !== undefined) {
+		if (expectedRevision !== undefined || options.allowSalvagedRead) {
 			// Issue #2242 R4: the recovery abort path salvaged a revision from a
 			// schema-invalid state and still wants real concurrency protection.
 			// Reading it back through the GENERAL reader would re-throw the very
 			// `is invalid` failure the salvage exists to route around, forcing an
 			// unnecessary CAS drop. Only the abort path sets this flag; every
 			// other caller keeps the strict read byte-for-byte.
+			const recovery = options.allowSalvagedRead
+				? await readPrWorkflowGateStateForRecovery(
+						directory,
+						normalizedSessionID,
+					)
+				: null;
 			const current = options.allowSalvagedRead
-				? ((
-						await readPrWorkflowGateStateForRecovery(
-							directory,
-							normalizedSessionID,
-						)
-					)?.state ?? null)
+				? recovery?.state
 				: await readPrWorkflowGateStateFromDisk(directory, normalizedSessionID);
-			if (!current || current.revision !== expectedRevision) {
+			const changed =
+				expectedRevision === undefined
+					? recovery?.revisionSalvageable !== false ||
+						recovery.coordinationRowRevision !==
+							options.expectedRecoveryRowRevision
+					: current?.revision !== expectedRevision;
+			if (!current || changed) {
 				throw new Error(
 					'BLOCKED: PR workflow gate state changed during terminal completion; revalidate the current session state before retrying',
 				);
+			}
+			const runId = current.prReviewArtifactRunId;
+			const release = current.releaseReview;
+			const releaseReceipt =
+				release && runId && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(runId)
+					? validateSwarmPath(
+							directory,
+							path.join('pr-review', runId, 'native-completion.json'),
+						)
+					: undefined;
+			if (options.releaseApproval) {
+				if (
+					workflowIdentity(current) !==
+					workflowIdentity(options.releaseApproval)
+				) {
+					throw new Error(
+						'BLOCKED: release review workflow changed during completion',
+					);
+				}
+				if (
+					!release ||
+					release.head !== current.prHeadSha ||
+					!runId ||
+					!releaseReceipt
+				) {
+					throw new Error('BLOCKED: no valid release review run to complete');
+				}
+				await atomicWriteSwarmFile(
+					releaseReceipt,
+					JSON.stringify({
+						run_id: runId,
+						head: release.head,
+						url: release.url,
+						session_id: current.sessionID,
+						coverage: 'COMPLETE',
+						verdict: 'APPROVE',
+					}) + '\n',
+				);
+				await _test_exports.afterNativeReleaseReceiptWrite?.();
+			} else if (releaseReceipt) {
+				// A previous APPROVE may have persisted its receipt before an interrupted
+				// clear. A different terminal verdict or abort revokes that receipt.
+				await fsp
+					.unlink(releaseReceipt)
+					.catch((error: NodeJS.ErrnoException) => {
+						if (error.code !== 'ENOENT') throw error;
+					});
 			}
 		}
 		await deleteStateWhileLocked(directory, normalizedSessionID, {
@@ -5199,7 +5297,12 @@ export async function abortPrWorkflow(
 			directory,
 			sessionID,
 			casEscape ? undefined : (cancelRevision ?? state.revision),
-			{ allowSalvagedRead: recovery.salvaged },
+			{
+				allowSalvagedRead: recovery.salvaged,
+				...(casEscape && recovery.coordinationRowRevision !== undefined
+					? { expectedRecoveryRowRevision: recovery.coordinationRowRevision }
+					: {}),
+			},
 		);
 	} catch (error) {
 		// The `pr_workflow_aborted` record above is already durable, and the
@@ -5687,6 +5790,11 @@ async function bindPrWorkflowHeadWhileLocked(
 		throw new Error(
 			`BLOCKED: no active PR workflow gate for session "${normalizedSessionID}". ` +
 				'The gate must be activated before the PR head can be bound.',
+		);
+	}
+	if (state.releaseReview && normalizedHead !== state.releaseReview.head) {
+		throw new Error(
+			'BLOCKED: the requested head differs from the release review head',
 		);
 	}
 	await assertCurrentCheckoutHead(directory, normalizedHead, state.mode);
@@ -8300,34 +8408,58 @@ function derivePrReviewOrderUnstableItemsForState(
 }
 
 /**
- * Issue #3340 AC1: the resolved-role assertion applied by
- * `recordPrReviewValidationBatch` to every lane of a critic-phase batch. Each
- * lane must declare its `agent`, and that agent's canonical role must be
- * exactly `critic` — the same rule the dispatch caller enforces (#3310).
+ * Issue #3358 AC8: the exact role set each PR_REVIEW validation phase admits.
+ * ONE table consumed by dispatch admission (dispatch-lanes.ts), the gate
+ * recorder (recordPrReviewValidationBatch), and artifact integrity — so a
+ * phase's transport row contract decides admission everywhere, never a
+ * prefix-shaped predicate. The factory council agents are the exact set
+ * src/agents/index.ts builds for council.general; a user-defined
+ * `council_*`-prefixed agent is NOT admitted to a council lane.
  */
+export const PR_REVIEW_PHASE_ADMITTED_ROLES: Readonly<
+	// Feedback F-011: the key union is the shared phase type, so a future
+	// fourth verdict phase is compile-forced to declare its admitted roles
+	// here (and every consumer derivation that keys on the phase) instead of
+	// silently skipping admission at the integrity site.
+	Record<PrReviewValidationPhase, readonly string[]>
+> = {
+	council: ['council_generalist', 'council_skeptic', 'council_domain_expert'],
+	reviewer: ['reviewer'],
+	critic: ['critic'],
+};
+
 function assertCriticLaneAgents(
 	phase: PrReviewValidationPhase,
 	lanes: readonly PrWorkflowLaneSpec[],
 	generatedAgentNames: readonly string[] | undefined,
 ): void {
-	if (phase !== 'critic') return;
-	for (const lane of lanes) {
-		const agent = lane.agent?.trim();
-		if (!agent) {
-			throw new Error(
-				`BLOCKED: PR_REVIEW critic lane "${lane.laneId ?? lane.workflowLane ?? '(unknown)'}" must declare its agent — only the critic agent may run critic lanes, so an undeclared agent cannot be admitted`,
-			);
-		}
-		// Mirror the dispatch caller's resolution exactly when the caller
-		// supplies the generated-name registry; without one, fall back to
-		// canonical/suffix extraction so direct gate callers still fail
-		// closed on critic-family roles (they are canonical roles returned
-		// unchanged) and arbitrary non-critic names.
-		const role = resolveGeneratedAgentRoleStrict(agent, generatedAgentNames);
-		if (role !== 'critic') {
-			throw new Error(
-				`BLOCKED: PR_REVIEW critic lane "${lane.laneId ?? lane.workflowLane ?? '(unknown)'}" uses invalid role "${role}" (agent "${agent}") — PR critic lanes must use the critic agent (critic_finding_validator and other critic-family roles cannot emit [CRITIC] rows)`,
-			);
+	if (phase === 'council' || phase === 'reviewer' || phase === 'critic') {
+		const admitted = PR_REVIEW_PHASE_ADMITTED_ROLES[phase];
+		for (const lane of lanes) {
+			const agent = lane.agent?.trim();
+			if (!agent) {
+				// Critic lanes must always declare (the row contract is
+				// single-agent); a declared agent for reviewer/council is
+				// verified when present, and undeclared ones are still policed
+				// at artifact integrity by the launch-time normalizedAgent.
+				if (phase === 'critic') {
+					throw new Error(
+						`BLOCKED: PR_REVIEW ${phase} lane "${lane.laneId ?? lane.workflowLane ?? '(unknown)'}" must declare its agent — only the critic agent may run critic lanes, so an undeclared agent cannot be admitted`,
+					);
+				}
+				continue;
+			}
+			// Mirror the dispatch caller's resolution exactly when the caller
+			// supplies the generated-name registry; without one, fall back to
+			// canonical/suffix extraction so direct gate callers still fail
+			// closed on critic-family roles (they are canonical roles returned
+			// unchanged) and arbitrary non-critic names.
+			const role = resolveGeneratedAgentRoleStrict(agent, generatedAgentNames);
+			if (!admitted.includes(role)) {
+				throw new Error(
+					`BLOCKED: PR_REVIEW ${phase} lane "${lane.laneId ?? lane.workflowLane ?? '(unknown)'}" uses invalid role "${role}" (agent "${agent}") — ${phase === 'critic' ? 'PR critic lanes must use the critic agent (critic_finding_validator and other critic-family roles cannot emit [CRITIC] rows)' : `PR ${phase} lanes must use one of: ${admitted.join(', ')}`}`,
+				);
+			}
 		}
 	}
 }
@@ -8646,6 +8778,27 @@ export async function assertPrReviewValidationSettled(
 			if (!boundPrHeadSha) {
 				throw new Error(
 					'BLOCKED: PR_REVIEW settlement requires a bound PR head SHA',
+				);
+			}
+			// Issue #3358 AC4: an UNCLAIMED item whose lane answered with a row
+			// written under earlier verdict semantics is never N-of-M-admitted —
+			// admission would settle it as typed-dead and hide that a verdict
+			// existed but no longer validates. Claimed items with a stale extra
+			// row (a newer valid claim won) are not blocking; the structured
+			// field still discloses them.
+			const unclaimedSet = new Set(composed.unclaimed);
+			const blockingSemanticsMismatches =
+				composed.semanticsMismatchedItemIds.filter((itemId) =>
+					unclaimedSet.has(itemId),
+				);
+			if (blockingSemanticsMismatches.length > 0) {
+				throw new Error(
+					renderPrReviewSemanticsMismatchGuardMessage({
+						requiredPhase,
+						unclaimed: composed.unclaimed,
+						blockingSemanticsMismatches,
+						diagnostics: composed.diagnostics,
+					}),
 				);
 			}
 			const admission = deriveVerdictSettlementAdmission({
@@ -13892,7 +14045,21 @@ export async function enforcePrWorkflowToolBefore(
 	generatedAgentNames: readonly string[] = [],
 	callID?: string,
 ): Promise<void> {
-	let state = await readPrWorkflowGateState(directory, sessionID);
+	const normalizedTool = toolName.toLowerCase();
+	let state: PrWorkflowGateState | null;
+	try {
+		state = await readPrWorkflowGateState(directory, sessionID);
+	} catch (error) {
+		// These two tools use recovery-only readers and enforce their own
+		// authority. An unreadable gate still blocks every other tool.
+		if (
+			normalizedTool === 'abort_pr_workflow' ||
+			normalizedTool === 'pr_workflow_status'
+		) {
+			return;
+		}
+		throw error;
+	}
 	if (!state) {
 		// Issue #2108 safety boundary: a hand-DELETED gate state file must not
 		// silently reopen arbitrary pushes for a session whose events trail
@@ -13946,7 +14113,6 @@ export async function enforcePrWorkflowToolBefore(
 		state =
 			(await ensurePublicationGenerationCurrent(directory, sessionID)) ?? state;
 	}
-	const normalizedTool = toolName.toLowerCase();
 	const isDirectAgentTask =
 		normalizedTool === 'task' || normalizedTool === 'run_agent';
 	const requestedAgentFields = (['subagent_type', 'agent'] as const).filter(
@@ -14731,6 +14897,27 @@ function probeIncompleteBypassComposablePhase(
 			),
 		),
 	];
+	// Feedback F-003: mirror the ladder's #3358 AC4 guard FIRST — before the
+	// receipt shortcut below. The terminal-ready ladder throws for an
+	// UNCLAIMED item whose lane answered with a row written under earlier
+	// verdict semantics BEFORE it derives N-of-M admission — those rows are
+	// never re-admitted and never settled as typed-dead. A durable
+	// N-of-M receipt covering such an item must NOT flip the probe to
+	// settled: the ladder itself has no receipt reference before the guard,
+	// so a receipt-covered mismatched item would re-wedge completion with no
+	// INCOMPLETE exit (re-gate Finding 1). Report the phase genuinely
+	// unsettled so the bypass discloses the items as skipped — they are
+	// still never settled, which is exactly what AC3/AC4 require.
+	if (composed && composed.semanticsMismatchedItemIds.length > 0) {
+		const unclaimedSet = new Set(composed.unclaimed);
+		if (
+			composed.semanticsMismatchedItemIds.some((itemId) =>
+				unclaimedSet.has(itemId),
+			)
+		) {
+			return { phase, settled: false, admissible: false, unsettledItemIds };
+		}
+	}
 	// Feedback F-7 tail: a phase whose ADMITTED N-of-M verdict-settlement
 	// receipt (anchored on state via prReviewVerdictSettlementDigests) covers
 	// every currently-unclaimed item is SETTLED — composition keeps reporting
@@ -14919,6 +15106,7 @@ export async function completePrWorkflow(
 	// mid-completion, bumping the durable revision; the terminal clear must
 	// CAS against that post-admission revision. Undefined otherwise.
 	let terminalClearRevision: number | undefined;
+	let releaseApproval: PrWorkflowGateState | undefined;
 	if (expectedMode === 'PR_REVIEW') {
 		// Issue #2383: the controller must declare its terminal verdict and the
 		// gate validates it against the settlement-derived coverage kind, so a
@@ -15519,6 +15707,13 @@ export async function completePrWorkflow(
 					`BLOCKED: PR_REVIEW ${ready.settlement.kind} completion allows report_verdict ${policyAllowed.join(' | ')}; got "${verdict}". Final finding policy and coverage do not permit this report.`,
 				);
 			}
+			if (
+				readyState.releaseReview &&
+				ready.settlement.kind === 'COMPLETE' &&
+				verdict === 'APPROVE'
+			) {
+				releaseApproval = readyState;
+			}
 			// Feedback F7: the ladder path completes only with every validation
 			// phase settled through composition or N-of-M admission — the skip
 			// disclosure's condition (an unsettled phase disclosed at an
@@ -15910,11 +16105,13 @@ export async function completePrWorkflow(
 		directory,
 		sessionID,
 		terminalClearRevision ?? state.revision,
+		{ releaseApproval },
 	);
 	return 'completed';
 }
 
 export const _test_exports = {
+	afterNativeReleaseReceiptWrite: undefined as (() => void) | undefined,
 	/**
 	 * Issue #3099 R6: `gh` availability seam. Read at ACTIVATION call time and
 	 * handed to the readiness service, so a test can pin presence or absence.
@@ -15922,6 +16119,11 @@ export const _test_exports = {
 	 * behavioural detection rather than to a null stub.
 	 */
 	resolveGhBinary,
+	// Feedback F-003: the INCOMPLETE bypass phase probe (plus its window
+	// derivation), so the semantics-mismatch × typed-dead × exhausted-budget
+	// interplay is testable without driving the whole completion ladder.
+	probeIncompleteBypassComposablePhase,
+	prReviewPhaseWindow,
 	// #3396 S1: overridable merge-base resolver for PR_FEEDBACK activation
 	// (production: ONE bounded `gh pr view` — see the production resolver
 	// above). Tests monkey-patch this seam exactly like the git resolvers.
@@ -18756,6 +18958,48 @@ function derivePrReviewCandidateSeverities(
 const MAX_UNCLAIMED_ITEMS_IN_MESSAGE = 50;
 
 /**
+ * Issue #3358 AC4: earlier-semantics item ids named in the dedicated
+ * settlement clause before it degrades to "and N more"; the complete set
+ * stays on `PrReviewPhaseComposition.semanticsMismatchedItemIds`.
+ */
+const MAX_SEMANTICS_MISMATCH_IDS_IN_MESSAGE = 16;
+
+/**
+ * Issue #3358 AC4 / feedback PRR-02: the dedicated earlier-semantics
+ * settlement-guard message, extracted so its 16-id display bound (and the
+ * "and N more" overflow suffix) is unit-testable independently of the
+ * six-dimension gate fixtures.
+ */
+export function renderPrReviewSemanticsMismatchGuardMessage(input: {
+	requiredPhase: string;
+	unclaimed: readonly string[];
+	blockingSemanticsMismatches: readonly string[];
+	diagnostics: readonly string[];
+}): string {
+	const unclaimedNamed = input.unclaimed.slice(
+		0,
+		MAX_UNCLAIMED_ITEMS_IN_MESSAGE,
+	);
+	const unclaimedOverflow = input.unclaimed.length - unclaimedNamed.length;
+	const mismatchNamed = input.blockingSemanticsMismatches.slice(
+		0,
+		MAX_SEMANTICS_MISMATCH_IDS_IN_MESSAGE,
+	);
+	const mismatchOverflow =
+		input.blockingSemanticsMismatches.length - mismatchNamed.length;
+	return (
+		`BLOCKED: PR_REVIEW ${input.requiredPhase} items lack an authenticated verdict from any successful lane: ${unclaimedNamed.join(', ')}` +
+		(unclaimedOverflow > 0 ? ` (+${unclaimedOverflow} more)` : '') +
+		`; items ${mismatchNamed.join(', ')}` +
+		(mismatchOverflow > 0 ? ` and ${mismatchOverflow} more` : '') +
+		` carry verdict rows written under earlier verdict semantics (current: v${PR_REVIEW_VERDICT_SEMANTICS_VERSION}; CONFIRMED requires a non-NONE severity since #3310); those rows are not re-admitted and N-of-M settlement is not attempted for them — re-dispatch those items' lanes` +
+		(input.diagnostics.length > 0
+			? `; diagnostics: ${input.diagnostics.join(' | ')}`
+			: '')
+	);
+}
+
+/**
  * The batches a phase composes over.
  *
  * Reviewer is scoped to everything after the latest council batch (a council
@@ -18765,7 +19009,7 @@ const MAX_UNCLAIMED_ITEMS_IN_MESSAGE = 50;
  * was not before — derivation and settlement previously disagreed on the window,
  * and one computation cannot hold two windows.
  */
-function prReviewPhaseWindow(
+export function prReviewPhaseWindow(
 	state: PrWorkflowGateState,
 	phase: PrReviewComposablePhase,
 ): PrReviewValidationBatchRecord[] {
@@ -19492,20 +19736,40 @@ export async function derivePrReviewOrderUnstableItems(
 ): Promise<string[]> {
 	const state = await requireBoundState(directory, sessionID, 'PR_REVIEW');
 	const ctx = await createPrReviewGateContext(directory, state);
-	const composition = composePrReviewPhaseVerdicts(
-		directory,
-		state,
-		'reviewer',
-		ctx,
-	);
+	// #3362: read the reviewer phase through the same fail-closed
+	// authoritative gate the binding path uses
+	// (authoritativeReviewerClaims). An UNCOVERED current reviewer phase
+	// (unsettled/partial with no admitted settlement) yields an empty map
+	// and the derivation returns [] WITHOUT consulting the coherence
+	// stamp: the stamp derives from a prior batch window and would be
+	// stale relative to the current uncovered phase — the severity and
+	// order-unstable preflights must fail closed together.
+	const claims = authoritativeReviewerClaims(directory, state, ctx);
+	return orderUnstableItemsFromClaims(state, claims);
+}
+
+/**
+ * Shared body of `derivePrReviewOrderUnstableItems` and
+ * `derivePrReviewCriticDispatchInputs` (#3358 AC6, #3362): pure over the
+ * authoritative reviewer claims, so one critic dispatch reads them once.
+ */
+function orderUnstableItemsFromClaims(
+	state: PrWorkflowGateState,
+	claims: ReadonlyMap<string, PrReviewItemClaim>,
+): string[] {
+	// #3362: an UNCOVERED reviewer phase fails closed here — [] without
+	// consulting the coherence stamp, which derives from a prior batch
+	// window and would be stale relative to the current uncovered phase.
+	if (claims.size === 0) return [];
 	// The order-unstable ids are STAMPED AT RECORD TIME onto the CRITIC batch's
 	// coherence record (the critic record is the only writer — see
 	// recordPrReviewValidationBatch), so that stamp is the receipt-of-record
 	// for what a critic dispatch is about to be told. Prefer the newest
-	// critic-phase stamp, and recompute from the composed claims only when no
-	// stamped set exists yet (pre-stamping batches, or a critic dispatch that
-	// precedes its own record). Reading the stamp is therefore never stale
-	// relative to the composition: both derive from the same window.
+	// critic-phase stamp, and recompute from the authoritative claims only
+	// when no stamped set exists yet (pre-stamping batches, or a critic
+	// dispatch that precedes its own record). The stamp is only consulted
+	// after the authoritative gate above confirmed a covered reviewer phase,
+	// so it is never stale relative to the CURRENT window.
 	const newestStampedBatchId = [...(state.prReviewValidationBatches ?? [])]
 		.reverse()
 		.find(
@@ -19517,19 +19781,24 @@ export async function derivePrReviewOrderUnstableItems(
 		? state.prReviewBatchCoherence?.[newestStampedBatchId]?.orderUnstableItemIds
 		: undefined;
 	if (stamped && stamped.length > 0) return [...new Set(stamped)].sort();
-	return [...composition.claims.entries()]
+	return [...claims.entries()]
 		.filter(([, claim]) => claim.orderAgreement === 'disagree')
 		.map(([itemId]) => itemId)
 		.sort();
 }
 
 /**
- * Issue #3310: the composed reviewer-phase severities, keyed by item id, so a
- * critic dispatch can tell each assigned item's reviewer severity up front —
- * the critic transport requires UPHELD to keep that exact severity rank.
- * Read-only derivation with the same shape as the #2906 readers; an unset or
- * partially-settled reviewer phase yields an empty/partial map and the
- * dispatch-side caller renders nothing extra for unknown ids.
+ * Issue #3310 / #3362: the authoritative reviewer-phase severities, keyed by
+ * item id, so a critic dispatch can tell each assigned item's reviewer
+ * severity up front — the critic transport requires UPHELD to keep that
+ * exact severity rank. Read through the same fail-closed authoritative gate
+ * the binding path uses (authoritativeReviewerClaims): an UNCOVERED reviewer
+ * phase (unsettled or partially settled with no admitted settlement) yields
+ * an EMPTY map — never a partial one — so the preflight can never annotate
+ * items the binder would refuse. Under an admitted N-of-M settlement that
+ * covers every unclaimed item, the surviving actual claims are returned.
+ * The pre-fix raw-composition shape ("empty/partial map") was a deliberate
+ * contract change in #3362, not a bugfix of this docstring.
  */
 export async function derivePrReviewReviewerSeverities(
 	directory: string,
@@ -19537,17 +19806,44 @@ export async function derivePrReviewReviewerSeverities(
 ): Promise<Map<string, string>> {
 	const state = await requireBoundState(directory, sessionID, 'PR_REVIEW');
 	const ctx = await createPrReviewGateContext(directory, state);
-	const composition = composePrReviewPhaseVerdicts(
-		directory,
-		state,
-		'reviewer',
-		ctx,
-	);
+	const claims = authoritativeReviewerClaims(directory, state, ctx);
+	return reviewerSeveritiesFromClaims(claims);
+}
+
+function reviewerSeveritiesFromClaims(
+	claims: ReadonlyMap<string, PrReviewItemClaim>,
+): Map<string, string> {
 	const severities = new Map<string, string>();
-	for (const [itemId, claim] of composition.claims) {
+	for (const [itemId, claim] of claims) {
 		severities.set(itemId, claim.severity);
 	}
 	return severities;
+}
+
+/**
+ * Issue #3358 AC6: everything a critic dispatch preflight reads from the
+ * reviewer phase, derived from ONE gate context and ONE authoritative
+ * reviewer-claims read. Calling the two single-purpose readers back to back
+ * composed the reviewer phase (and resolved the bounded revision digest)
+ * twice per dispatch. #3362: the single read is the fail-closed
+ * authoritative gate, so both derivations fail closed together — an
+ * UNCOVERED reviewer phase yields `[]` and an empty severity map, never a
+ * partial one.
+ */
+export async function derivePrReviewCriticDispatchInputs(
+	directory: string,
+	sessionID: string,
+): Promise<{
+	orderUnstableItemIds: string[];
+	reviewerSeverities: Map<string, string>;
+}> {
+	const state = await requireBoundState(directory, sessionID, 'PR_REVIEW');
+	const ctx = await createPrReviewGateContext(directory, state);
+	const claims = authoritativeReviewerClaims(directory, state, ctx);
+	return {
+		orderUnstableItemIds: orderUnstableItemsFromClaims(state, claims),
+		reviewerSeverities: reviewerSeveritiesFromClaims(claims),
+	};
 }
 
 /**
@@ -20295,20 +20591,30 @@ function analyzeLaneArtifactIntegrity(args: {
 			artifact.role,
 		);
 	}
-	// Issue #3340 (issue item 2): the artifact/record pair being
-	// self-consistent is not enough — a critic-mode lane whose child record
-	// ran a NON-critic role must fail settlement. `normalizedAgent` is the
-	// resolved canonical role at launch time (not the raw prefixed name), so
-	// the exact comparison admits prefixed critic agents (`mega_critic`
-	// records `normalizedAgent: 'critic'`) while rejecting every other
-	// critic-family role.
+	// Issue #3340 (issue item 2), generalized by #3358 AC8: the
+	// artifact/record pair being self-consistent is not enough — a lane whose
+	// child record ran a role outside its phase's admitted set must fail
+	// settlement. `normalizedAgent` is the resolved canonical role at launch
+	// time (not the raw prefixed name), so the exact table lookup admits
+	// prefixed agents (`mega_critic` records `normalizedAgent: 'critic'`)
+	// while rejecting every critic-family impostor and any user-defined
+	// council_-prefixed agent on a council lane. Launch-time authority: this
+	// holds even when a direct recorder caller omitted `agent`.
+	const expectedAdmittedRole =
+		expected.mode === 'swarm-pr-review:council'
+			? PR_REVIEW_PHASE_ADMITTED_ROLES.council
+			: expected.mode === 'swarm-pr-review:reviewer'
+				? PR_REVIEW_PHASE_ADMITTED_ROLES.reviewer
+				: expected.mode === 'swarm-pr-review:critic'
+					? PR_REVIEW_PHASE_ADMITTED_ROLES.critic
+					: undefined;
 	if (
-		expected.mode === 'swarm-pr-review:critic' &&
-		record.normalizedAgent !== 'critic'
+		expectedAdmittedRole &&
+		!expectedAdmittedRole.includes(record.normalizedAgent)
 	) {
 		return failedLaneValidation(
 			'record.normalized_agent',
-			'critic',
+			expectedAdmittedRole.join('|'),
 			record.normalizedAgent || '(missing)',
 		);
 	}
@@ -21507,6 +21813,8 @@ export interface PrWorkflowGateRecoveryRead {
 	disclosure?: string;
 	/** false when `revision` could not be salvaged — the CAS escape is required. */
 	revisionSalvageable: boolean;
+	/** SQLite row revision available even when the workflow revision is unreadable. */
+	coordinationRowRevision?: number;
 	/**
 	 * true when a `prFeedbackReadyToPublish` key is present in the raw bytes but
 	 * is itself unreadable. Callers MUST treat this as armed: silently dropping
@@ -21540,8 +21848,9 @@ export interface PrWorkflowGateRecoveryRead {
  *   - **Unparseable shadow bytes fail everywhere**, recovery included. There
  *     is nothing to salvage from that projection and guessing would be
  *     fabrication. A coordination payload that is unparseable or otherwise
- *     corrupt is recoverable only when this exact shadow has the same revision
- *     as the row generation, and the disclosure names that degraded source.
+ *     corrupt is recoverable when the shadow matches the row generation. When
+ *     the workflow revision is unreadable, require the parsed payload and shadow
+ *     to agree and use the SQLite row revision to detect a concurrent change.
  *   - **Schema-validation failure on parseable shadow JSON** salvages the
  *     fields abort actually reads — `{sessionID, mode, prHeadSha}` plus
  *     `revision`, `prFeedbackReadyToPublish` and `checkoutRecovery` when each
@@ -21664,15 +21973,22 @@ export async function readPrWorkflowGateStateForRecovery(
 		.nonnegative()
 		.safeParse(rawRecord.revision);
 	const salvagedHead = z.string().min(1).safeParse(rawRecord.prHeadSha);
+	const salvagedRelease = ReleaseReviewGateBindingSchema.safeParse(
+		rawRecord.releaseReview,
+	);
+	const salvagedReleaseRun = PrReviewRunIdSchema.safeParse(
+		rawRecord.prReviewArtifactRunId,
+	);
 	const salvagedActivatedAt = z
 		.string()
 		.min(1)
 		.safeParse(rawRecord.activatedAt);
 	const salvagedUpdatedAt = z.string().min(1).safeParse(rawRecord.updatedAt);
 	if (
-		coordinationGeneration !== undefined &&
-		(!salvagedRevision.success ||
-			salvagedRevision.data !== coordinationGeneration)
+		coordination.kind === 'corrupt' &&
+		(salvagedRevision.success
+			? salvagedRevision.data !== coordination.generation
+			: !isDeepStrictEqual(coordination.parsedPayload, rawRecord))
 	) {
 		throw invalidError;
 	}
@@ -21738,6 +22054,17 @@ export async function readPrWorkflowGateStateForRecovery(
 				: isoNow(),
 			updatedAt: salvagedUpdatedAt.success ? salvagedUpdatedAt.data : isoNow(),
 			...(salvagedHead.success ? { prHeadSha: salvagedHead.data } : {}),
+			...(salvagedMode.data === 'PR_REVIEW' &&
+			salvagedRelease.success &&
+			salvagedHead.success &&
+			salvagedHead.data === salvagedRelease.data.head
+				? {
+						releaseReview: salvagedRelease.data,
+						...(salvagedReleaseRun.success
+							? { prReviewArtifactRunId: salvagedReleaseRun.data }
+							: {}),
+					}
+				: {}),
 			...(salvagedArmed.success
 				? { prFeedbackReadyToPublish: salvagedArmed.data }
 				: {}),
@@ -21752,9 +22079,12 @@ export async function readPrWorkflowGateStateForRecovery(
 		schemaErrors,
 		disclosure,
 		revisionSalvageable: salvagedRevision.success,
+		...(coordination.kind === 'corrupt'
+			? { coordinationRowRevision: coordination.rowRevision }
+			: {}),
 		armedShapeUnreadable,
-		// Every prReview* field was dropped by this minimal reconstruction; the
-		// status projection must not read their absence as "no dispatches yet".
+		// The review coverage projection was dropped by this minimal
+		// reconstruction; status must not read it as "no dispatches yet".
 		prReviewProjectionDropped: true,
 	};
 }

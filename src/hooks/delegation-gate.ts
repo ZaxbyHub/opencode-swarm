@@ -134,9 +134,11 @@ import {
 	markStageBRouteRequired,
 	recordStageBCompletion,
 	reserveStageBRouteEvidence,
-	setDispatchParent,
+	resolveDispatchParent,
+	restoreDispatchParentEntry,
 	swarmState,
 	updateTaskWorkflowCache,
+	writeDispatchParentEntry,
 } from '../state';
 import { telemetry } from '../telemetry.js';
 import type {
@@ -356,8 +358,7 @@ type PreparedCoderScope =
  * Whether Turbo may skip the Stage A re-delegation block for `taskId`.
  *
  * Tier 3 is defined by the files a task touches (security-sensitive paths,
- * src/parallel/tier3-classifier.ts), the rule update_task_status already
- * applies to Turbo's Stage B bypass. The gate used to guess it from the task
+ * src/parallel/tier3-classifier.ts). The gate used to guess it from the task
  * id (`startsWith('3.')`): every phase-3 task was treated as Tier 3 and a
  * security-sensitive task in any other phase was bypassed. Only a task whose
  * planned `files_touched` are known and contain no Tier 3 path is bypassable;
@@ -3522,6 +3523,12 @@ const maintainBackgroundDelegationsForDispatch: typeof import('../background/pen
 export const _internals = {
 	isEpicOpenForProject,
 	/**
+	 * #3403 (review round 3, AC2): the durable scope-claim is routed through this
+	 * seam so tests can drive a claim that THROWS and pin the throw-path lineage
+	 * rollback. Production code never reassigns it.
+	 */
+	claimScopeBindingForChildDurably,
+	/**
 	 * #3502 review (PRR-007), #3509/#3516: set by createDelegationGateHook so
 	 * tests can observe the settlement-side invalidation gate for a specific
 	 * hook instance (is THIS dispatch's call blocked for this verdict task?).
@@ -4176,18 +4183,87 @@ export function createDelegationGateHook(
 			clearExactScopeBinding(entry.binding);
 		}
 	};
-	const taskMetadata = async (input: {
+	// #3403 (AC2, review round 3): overlapping taskMetadata attempts for ONE
+	// child are serialized. Each attempt captures `previousParent` and writes
+	// lineage before awaiting its durable claim; without serialization a later
+	// attempt captured the earlier attempt's in-flight write as its previous
+	// parent, so when both claims failed the rollback re-committed the failed
+	// lineage (half-applied activation). Serialized, every attempt captures the
+	// state the previous attempt rolled back to. Chains are per hook instance
+	// and removed as soon as the child's tail settles (bounded).
+	const taskMetadataChainByChild = new Map<string, Promise<void>>();
+	const taskMetadata = (input: {
 		callID: string;
 		parentSessionID: string;
 		childSessionID: string;
 	}): Promise<void> => {
+		const key = input.childSessionID;
+		const prior = taskMetadataChainByChild.get(key) ?? Promise.resolve();
+		const run = prior.then(() => taskMetadataAttempt(input));
+		const settled = run.then(
+			() => undefined,
+			() => undefined,
+		);
+		taskMetadataChainByChild.set(key, settled);
+		void settled.then(() => {
+			if (taskMetadataChainByChild.get(key) === settled) {
+				taskMetadataChainByChild.delete(key);
+			}
+		});
+		return run;
+	};
+	const taskMetadataAttempt = async (input: {
+		callID: string;
+		parentSessionID: string;
+		childSessionID: string;
+	}): Promise<void> => {
+		// #3403 (trust model, PRR-009): field-by-field authority for this
+		// handler —
+		//   HOST-TYPED: `parentSessionID` (the host's `part.sessionID`; never
+		//   tool-controlled), `callID` (the host's Task part id), and the
+		//   dispatch `directory` (plugin-resolved project root).
+		//   TOOL-EMITTED: `childSessionID`. On v1 hosts it arrives in the Task
+		//   part's tool-emitted `state.metadata` (the documented design choice,
+		//   src/index.ts taskMetadata wiring); on v2 hosts the event pump
+		//   synthesizes the same v1 shape from host progress metadata
+		//   (#3401, src/host/v2/events.ts), gated on the tracked tool name so a
+		//   non-subagent tool cannot masquerade.
+		//   WHAT A TOOL-EMITTED CHILD ID CAN CAUSE: while a live `pending_child`
+		//   generation exists for the exact (parentSessionID, callID) pair, the
+		//   named session wins the durable claim — `ensureAgentSession` below
+		//   creates or OVERWRITES that session's identity (agentName → 'coder',
+		//   PRM ladder reset, currentTaskId/declaredCoderScope stamped from the
+		//   architect's declaration). The correlation key is the fence: an id
+		//   that names no live pending generation gets SCOPE_NOT_DECLARED and
+		//   CLAIMS NO SCOPE BINDING AND MUTATES NO SESSION IDENTITY. It is NOT
+		//   inert, though: the #3036 lineage write above records the TOOL-EMITTED
+		//   child against the HOST-TYPED parent and is kept on that benign path
+		//   by design. That lineage grants the child knowledge_receipt filing
+		//   authority for the parent's stamps (src/tools/knowledge-receipt.ts),
+		//   so a tool-emitted child id CAN widen that authority. Every other
+		//   claim failure (SCOPE_BINDING_ALREADY_CLAIMED, SCOPE_BINDING_AMBIGUOUS,
+		//   SCOPE_BINDING_EXPIRED, persistence and store-overload codes) and a
+		//   thrown claim roll that write back. This is the documented v1 host
+		//   contract; the model is stated here so the next reviewer need not
+		//   re-derive it. Changing it is a product decision, not a bug fix.
+		//
 		// Issue #3036: record the host-observed dispatch pair BEFORE any early
 		// return below — reviewer/test-engineer children return at the
 		// SCOPE_NOT_DECLARED guard and never reach ensureAgentSession, yet their
 		// knowledge_receipt filings still need the lineage to authorize against
 		// the architect-stamped membership. The parent id here is the host's
 		// `part.sessionID`, never tool-controlled metadata.
-		setDispatchParent(input.childSessionID, input.parentSessionID);
+		//
+		// #3403 (PRR-006): the write is generation-stamped so a FAILED claim can
+		// roll exactly this write back (see the failure branch below) — no
+		// half-applied activation (lineage committed while the route/full-auto
+		// bindings stay permanently skipped) survives the throw, and the
+		// pre-existing lineage (if any) is restored rather than deleted.
+		const previousParent = resolveDispatchParent(input.childSessionID);
+		const lineageWriteGeneration = writeDispatchParentEntry(
+			input.childSessionID,
+			input.parentSessionID,
+		);
 		const bindRouteChildSession = (): void => {
 			const routeBindings = stageBRouteSlotByCallID.get(input.callID);
 			if (!routeBindings) return;
@@ -4195,12 +4271,25 @@ export function createDelegationGateHook(
 				binding.childSessionId = input.childSessionID;
 			}
 		};
-		const result = await claimScopeBindingForChildDurably({
-			directory,
-			parentSessionId: input.parentSessionID,
-			childSessionId: input.childSessionID,
-			dispatchCallId: input.callID,
-		});
+		// A claim that THROWS (corrupt or unreadable scope artifacts surface as
+		// exceptions) is a failed activation too: roll the lineage write back
+		// before the exception propagates, so the throw path leaves no
+		// half-applied state either (review round 3, AC2).
+		const result = await _internals
+			.claimScopeBindingForChildDurably({
+				directory,
+				parentSessionId: input.parentSessionID,
+				childSessionId: input.childSessionID,
+				dispatchCallId: input.callID,
+			})
+			.catch((error: unknown) => {
+				restoreDispatchParentEntry(
+					input.childSessionID,
+					lineageWriteGeneration,
+					previousParent,
+				);
+				throw error;
+			});
 		if (!result.ok) {
 			if (result.code === 'SCOPE_NOT_DECLARED') {
 				// Reviewer/test-engineer tasks do not own coder scope, but their
@@ -4220,6 +4309,15 @@ export function createDelegationGateHook(
 				});
 				return;
 			}
+			// #3403: roll this attempt's lineage write back before surfacing the
+			// failure. Generation-gated: a stale failure (a newer write for the same
+			// child landed while this claim was in flight) no-ops and never clobbers
+			// the newer entry, including the same-parent case.
+			restoreDispatchParentEntry(
+				input.childSessionID,
+				lineageWriteGeneration,
+				previousParent,
+			);
 			throw new Error(`${result.code}: ${result.message}`);
 		}
 		const { previous, claimed } = result.value;

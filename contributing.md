@@ -79,6 +79,10 @@ Honest-class rules:
 **NON-EXECUTABLE criteria.** Some criteria have no meaningful executable check — docs-only changes, host-only behavior (GUI/TUI surfaces a check cannot drive), maintainer product decisions, unavailable external services. For those, write `class: NON-EXECUTABLE(<reason>)` with the closed reason enum `DOCS_ONLY | HOST_ONLY | PRODUCT_DECISION | EXTERNAL_SERVICE_UNAVAILABLE`, replace `argv`/`expect` with **named substitute evidence** (a review artifact, a decision recorded on the issue, a captured external state), and get plan-critic approval for the substitution — never force an artificial executable check; that is the vacuous shape the rule above forbids.
 - `argv` is one command, runnable from the repository root, POSIX-safe, deterministic (use the repo's test-runner flags for hermetic runs — see repo notes). `expect` describes what the **base** leg shows; the head leg's pass condition lives in the check's own exit logic.
 
+### Published acceptance commands
+
+The published `argv:` is the command the trace must prove at both revisions. When it cannot witness the fix, disclose the affected criterion, both commands, and their observed outcomes before asking the maintainer to correct the published criterion.
+
 ### Evidence rules
 
 - Every claim is anchored: permalinks embed the full SHA; before filing, re-verify each claim at that commit and say so in the preamble.
@@ -229,8 +233,12 @@ In diff mode, selection is based on committed branch changes in
 exact array-form command and cwd for each item, the `origin/main` diff base,
 per-item terminal status, bounded output, timing, signal, and cleanup outcome.
 Terminal statuses are `passed`, `failed`, `crashed`, `timed_out`, `missing`,
-and `skipped`; a run containing an unresolved crash, timeout, missing item, or
-skip is `incomplete` rather than a complete pass. Run-level statuses are
+`skipped`, and `output_truncated` (a child whose run completed with no
+timeout and no crash — tree cleanup succeeded, no signal, known exit code —
+but whose bounded stdout/stderr reader missed its deadline; the terminal
+evidence was only partially observed, so the row counts as failed (#3664)); a
+run containing an unresolved crash, timeout, missing item, or skip is
+`incomplete` rather than a complete pass. Run-level statuses are
 `passed`, `failed`, `incomplete`, and `no_op`, with `no_op` reserved for an
 empty diff selection.
 
@@ -487,10 +495,11 @@ All tests use `bun:test`. Do not use Jest, Vitest, or any other framework. See `
 Every `bun test` process loads `tests/preload/prod-store-tripwire.ts`, which snapshots the repository root and its `.swarm/` before any test file loads and compares them once all tests have finished. Tests must write only into temp directories (`canonicalMkdtemp`, `createSafeTestDir`) or a `ToolContext` with an explicit directory, never into the checkout:
 
 - a new, removed or changed top-level entry (including creating `.swarm/`) fails the run;
-- a change inside an existing `.swarm/` only prints a `CHECKOUT DRIFT` warning, because some suites still write there (tracked in #3153);
-- `SWARM_TEST_CHECKOUT_DRIFT=enforce|warn|off` sets both checks to one mode, e.g. `enforce` to make `.swarm/` writes fail locally while fixing them;
+- a change inside an existing `.swarm/` fails the run too, in CI and locally;
+- `SWARM_TEST_CHECKOUT_DRIFT=enforce|warn|off` sets both checks to one mode. If you run tests in a checkout where a live opencode-swarm session is writing `.swarm/` state, set `SWARM_TEST_CHECKOUT_DRIFT=warn` so its writes print a `CHECKOUT DRIFT` warning instead of failing your run. `warn` downgrades both checks, so it also stops failing on new top-level entries. The value is matched case-insensitively after trimming, and anything else (including an empty or misspelled value) is treated as `enforce`;
 - a part that cannot be checked (an unreadable root or `.swarm/` directory, a `.swarm/` with more than 20,000 entries) is reported as a warning;
 - writes inside an existing top-level directory such as `src/` or `tests/` are not detected: only top-level names, top-level files and `.swarm/` are compared.
+- the comparison runs 25 ms after the last test, so an un-awaited write a test started still lands in time to be caught; a write that waits on a timer, or takes longer, is not.
 
 The helper is `tests/helpers/checkout-drift.ts`; its wiring is pinned by `tests/helpers/checkout-drift-wiring.test.ts`.
 

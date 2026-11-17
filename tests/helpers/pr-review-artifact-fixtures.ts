@@ -11,6 +11,7 @@ import {
 	encodePrReviewWorkflowBinding,
 	type PrReviewResultReceipt,
 } from '../../src/background/pr-review-contract.js';
+import { buildPrReviewTriggerReceiptV2 } from '../../src/background/pr-review-trigger-contract.js';
 import {
 	activatePrWorkflow,
 	enforcePrReviewBaseDimensions,
@@ -102,10 +103,15 @@ export async function persistPrReviewBatch(
 		const subagentSessionId = options.subagentSessionId ?? defaultCorrelationId;
 		const correlationId = subagentSessionId;
 		// Issue #3340: critic lanes settle only when the child delegation record
-		// ran the `critic` role; mirror the production normalizedAgent for the
-		// mode instead of hardcoding 'reviewer' for every lane.
+		// ran the `critic` role; #3358 AC8 extends the mirror to council lanes
+		// (an admitted factory council role). Mirror the production
+		// normalizedAgent for the mode instead of hardcoding 'reviewer'.
 		const recordAgent =
-			mode === 'swarm-pr-review:critic' ? 'critic' : 'reviewer';
+			mode === 'swarm-pr-review:critic'
+				? 'critic'
+				: mode === 'swarm-pr-review:council'
+					? 'council_generalist'
+					: 'reviewer';
 		await recordPendingDelegation(directory, {
 			correlationId,
 			jobId: options.prReviewResultReceipt
@@ -129,7 +135,7 @@ export async function persistPrReviewBatch(
 				: {}),
 			workspace: {
 				directory,
-				gitHead: PR_ARTIFACT_HEAD_SHA,
+				gitHead: options.head ?? PR_ARTIFACT_HEAD_SHA,
 				dirtyHash: null,
 				prHeadSha: options.head ?? PR_ARTIFACT_HEAD_SHA,
 				scope: null,
@@ -170,7 +176,7 @@ export async function persistPrReviewBatch(
 			mode,
 			workflowLane: lane.workflowLane,
 			prHeadSha: options.head ?? PR_ARTIFACT_HEAD_SHA,
-			gitHead: PR_ARTIFACT_HEAD_SHA,
+			gitHead: options.head ?? PR_ARTIFACT_HEAD_SHA,
 			revisionDigest: PR_ARTIFACT_REVISION_DIGEST,
 			source: 'collect_lane_results',
 			text,
@@ -230,6 +236,7 @@ export async function establishPrReviewPrerequisites(
 		 * mechanically derived `CLEAN-REVIEW` sentinel.
 		 */
 		zeroCandidates?: boolean;
+		versionedTriggerReceipt?: boolean;
 	} = {},
 ): Promise<void> {
 	await activatePrWorkflow(directory, sessionID, 'PR_REVIEW', {
@@ -250,6 +257,7 @@ export async function establishPrReviewPrerequisites(
 		'swarm-pr-review:base',
 		baseLanes,
 		{
+			head: headSha,
 			candidateSeverity: options.candidateSeverity,
 			cleanPerLane: options.zeroCandidates,
 			firstCandidateId: options.firstCandidateId,
@@ -267,6 +275,7 @@ export async function establishPrReviewPrerequisites(
 			'swarm-pr-review:micro',
 			[{ laneId, workflowLane }],
 			{
+				head: headSha,
 				textOverride: `${MICRO_CANDIDATE_HEADER}\n[CLEAN] | ${workflowLane} | exact reviewed diff | no finding after focused invariant review`,
 			},
 		);
@@ -289,7 +298,19 @@ export async function establishPrReviewPrerequisites(
 	await fs.mkdir(path.dirname(triggerAbsolute), { recursive: true });
 	await fs.writeFile(
 		triggerAbsolute,
-		JSON.stringify({ rows: triggerRows }),
+		JSON.stringify(
+			options.versionedTriggerReceipt
+				? buildPrReviewTriggerReceiptV2({
+						run_id: runId,
+						pr_head_sha: headSha,
+						base_ref: 'main',
+						base_sha: headSha,
+						evaluated_at: new Date().toISOString(),
+						dispatched_micro_lane_count: triggerRows.length,
+						rows: triggerRows,
+					})
+				: { rows: triggerRows },
+		),
 		'utf-8',
 	);
 	if (options.skipTriggerEvaluation) return;
@@ -314,10 +335,12 @@ export async function settleReviewerPhase(
 	runId: string,
 	rows: readonly string[],
 	itemIds: readonly string[],
+	sessionID = PR_ARTIFACT_SESSION_ID,
+	headSha = PR_ARTIFACT_HEAD_SHA,
 ): Promise<void> {
 	await recordPrReviewValidationBatch(
 		directory,
-		PR_ARTIFACT_SESSION_ID,
+		sessionID,
 		'reviewer',
 		[
 			{
@@ -326,14 +349,14 @@ export async function settleReviewerPhase(
 				reviewItemIds: [...itemIds],
 			},
 		],
-		{ batchId: `${runId}-rv`, prHeadSha: PR_ARTIFACT_HEAD_SHA },
+		{ batchId: `${runId}-rv`, prHeadSha: headSha },
 	);
 	await persistPrReviewBatch(
 		directory,
 		`${runId}-rv`,
 		'swarm-pr-review:reviewer',
 		[{ laneId: `${runId}-rv`, workflowLane: `${runId}-rv` }],
-		{ textOverride: rows.join('\n') },
+		{ textOverride: rows.join('\n'), head: headSha },
 	);
 }
 

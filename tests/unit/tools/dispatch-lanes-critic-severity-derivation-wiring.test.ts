@@ -97,11 +97,11 @@ function assignedItemIdsLine(prompt: string): string {
 }
 
 describe('option semantics — reviewerSeverities partial and empty maps (issue #3310)', () => {
-	test('an all-present map pairs each assigned item id with its severity on the same line', () => {
+	test('an all-present map pairs each assigned item id with its severity on its own line', () => {
 		const prompt = contractedPrompt(
 			criticOptions({ reviewerSeverities: { c1: 'HIGH', c2: 'LOW' } }),
 		);
-		expect(prompt).toContain('assigned_item_ids:');
+		expect(prompt).toContain('assigned_item_ids: c1, c2');
 		expect(prompt).toMatch(/c1[^\n]*HIGH/);
 		expect(prompt).toMatch(/c2[^\n]*LOW/);
 	});
@@ -111,8 +111,8 @@ describe('option semantics — reviewerSeverities partial and empty maps (issue 
 			criticOptions({ reviewerSeverities: { c1: 'HIGH' } }),
 		);
 		const assignedLine = assignedItemIdsLine(prompt);
-		// The supplied id still gets the same-line pairing...
-		expect(assignedLine).toMatch(/c1[^\n]*HIGH/);
+		// The supplied id still gets its pairing on a reviewer_severity line...
+		expect(prompt).toMatch(/c1[^\n]*HIGH/);
 		// ...while the unsupplied id is the bare terminal token of the
 		// assigned_item_ids line — no severity annotation after c2.
 		expect(assignedLine).toMatch(/\bc2\s*$/);
@@ -145,7 +145,7 @@ const INVENTORY = PR_REVIEW_BASE_DIMENSION_IDS.map(
 	(_dimension, index) => `C-${index}`,
 );
 /** Distinct settled reviewer severities — every token is unique per item so
- * the same-line pairing assertions cannot cross-match another item. */
+ * the per-item reviewer_severity assertions cannot cross-match another item. */
 const ITEM_SEVERITY: Record<string, string> = {
 	'C-0': 'LOW',
 	'C-1': 'HIGH',
@@ -462,8 +462,8 @@ describe('derivation helper and dispatch wiring (issue #3310)', () => {
 			);
 		}
 
-		// (b) A critic-mode dispatch renders each item's severity on the same
-		// line as its id inside the controller-bound block.
+		// (b) A critic-mode dispatch renders each item's severity on its own
+		// reviewer_severity line (#3358 AC8) inside the controller-bound block.
 		const critic = await executeDispatchLanesAsync(
 			{
 				mode: 'swarm-pr-review:critic',
@@ -488,13 +488,12 @@ describe('derivation helper and dispatch wiring (issue #3310)', () => {
 		await awaitPromptCount(3);
 		const criticPrompt = deliveredPrompts[2];
 		expect(criticPrompt).toContain('[CONTROLLER-BOUND PR WORKFLOW CONTRACT]');
-		expect(criticPrompt).toContain('assigned_item_ids:');
-		// Scoped to the assigned_item_ids line so the contract card's positive
+		expect(assignedItemIdsLine(criticPrompt)).not.toContain('(');
+		// Exact controller line shape, so the contract card's positive
 		// REVIEWED example row cannot vacuously satisfy a whole-prompt match.
-		const assignedLine = assignedItemIdsLine(criticPrompt);
-		expect(assignedLine).toMatch(/C-0[^\n]*LOW/);
-		expect(assignedLine).toMatch(/C-1[^\n]*HIGH/);
-		expect(assignedLine).toMatch(/C-2[^\n]*CRITICAL/);
-		expect(assignedLine).toMatch(/C-3[^\n]*MEDIUM/);
+		expect(criticPrompt).toContain('reviewer_severity: C-0=LOW');
+		expect(criticPrompt).toContain('reviewer_severity: C-1=HIGH');
+		expect(criticPrompt).toContain('reviewer_severity: C-2=CRITICAL');
+		expect(criticPrompt).toContain('reviewer_severity: C-3=MEDIUM');
 	}, 60_000);
 });
