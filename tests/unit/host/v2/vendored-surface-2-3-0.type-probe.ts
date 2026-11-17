@@ -297,9 +297,11 @@ const wrongPut = (input: {
 // @ts-expect-error — non-JSON put value must not fit
 const _putBad: V2SessionDomain['instructions']['entry']['put'] = wrongPut;
 
-// @ts-expect-error — excess/foreign property must not satisfy the explicit-field result
 const _compactionBad: V2SessionCompactionResult = {
 	summary: 's',
+	// @ts-expect-error — excess/foreign property must not satisfy the explicit-field
+	// result (directive sits on the property line: tsc reports TS2353 there, and a
+	// directive above the multi-line literal does not cover it — impl-review r2 F1)
 	somethingElse: 1,
 };
 
