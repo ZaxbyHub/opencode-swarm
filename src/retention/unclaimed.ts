@@ -294,15 +294,10 @@ export function loadOwnerManifests(swarmRoot: string): OwnerManifestSet {
 	const owners = new Map<string, string>();
 	const files: string[] = [];
 	for (const name of names) {
-		// Dotfiles and non-JSON names are not manifests: a temp file mid-write
-		// (`x.json` + temp suffix) must not be mistaken for one, and an editor scratch
-		// file must not block a project that is otherwise healthy.
-		if (
-			name.startsWith('.') ||
-			!/^[A-Za-z0-9][A-Za-z0-9._-]*\.json$/i.test(name)
-		) {
-			continue;
-		}
+		// Dotfiles and names that do not end in `.json` are not manifests: a temp
+		// file mid-write (`x.json` + temp suffix) must not be mistaken for one, and
+		// an editor scratch file must not block an otherwise healthy project.
+		if (name.startsWith('.') || !/\.json$/i.test(name)) continue;
 		const manifestPath = path.join(manifestDir, name);
 		const relFile = `.swarm/${RETENTION_MANIFEST_DIR}/${name}`;
 		const fail = (reason: string): never => {
@@ -310,6 +305,13 @@ export function loadOwnerManifests(swarmRoot: string): OwnerManifestSet {
 				`refusing retention sweep: ${relFile}: ${reason}`,
 			);
 		};
+		// A `.json` name outside the manifest grammar is refused, never skipped: a
+		// silently ignored claim would let its directory be pruned.
+		if (!/^[A-Za-z0-9][A-Za-z0-9._-]*\.json$/i.test(name)) {
+			fail(
+				'is not a valid manifest file name (letters, digits, ".", "_" and "-", starting with a letter or digit)',
+			);
+		}
 		let fileStat: fs.Stats;
 		try {
 			fileStat = fs.lstatSync(manifestPath);

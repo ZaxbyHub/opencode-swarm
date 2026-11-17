@@ -4437,7 +4437,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/retention/unclaimed.ts'],
 		writerCitations: [
-			'src/retention/unclaimed.ts:547 appendRetentionLog — one line per pruned directory (`<ISO-8601> pruned <path> age=<days> size=<bytes>`), then a tail-only rewrite when the append crosses the byte budget; the manifest DIRECTORY is read-only to the plugin (loadOwnerManifests:258) — each owner writes only its own file',
+			'src/retention/unclaimed.ts:549 appendRetentionLog — one line per pruned directory (`<ISO-8601> pruned <path> age=<days> size=<bytes>`), then a tail-only rewrite when the append crosses the byte budget; the manifest DIRECTORY is read-only to the plugin (loadOwnerManifests:258) — each owner writes only its own file',
 		],
 		readerCitations: [
 			'loadOwnerManifests (:258) reads every *.json manifest once per sweep, before any deletion; the log is written for humans and agents to read (no in-process reader by design)',
@@ -4448,9 +4448,9 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		privacyClass: 'metadata',
 		writeLimits: {
 			bound:
-				'one line per pruned directory; the log is compacted to the newest lines within RETENTION_LOG_MAX_BYTES 256 KiB on the append that crosses it (src/retention/unclaimed.ts:60,547); each manifest is capped at RETENTION_MANIFEST_MAX_BYTES 64 KiB (:58) and a larger claim is refused as malformed',
+				'one line per pruned directory; the log is compacted to the newest lines within RETENTION_LOG_MAX_BYTES 256 KiB on the append that crosses it (src/retention/unclaimed.ts:60,549); each manifest is capped at RETENTION_MANIFEST_MAX_BYTES 64 KiB (:58) and a larger claim is refused as malformed',
 			scope: 'global',
-			citation: 'src/retention/unclaimed.ts:58,60,547',
+			citation: 'src/retention/unclaimed.ts:58,60,549',
 		},
 		readBound: {
 			pattern: 'tail (byte-bounded)',
@@ -4476,7 +4476,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		disposition: {
 			kind: 'not-a-defect',
 			proof:
-				'Bounded by construction: the log carries one metadata line per pruned path (no file content) and is compacted to RETENTION_LOG_MAX_BYTES 256 KiB (src/retention/unclaimed.ts:60,547-569), so it cannot become the unbounded-growth defect the catch-all exists to fix; manifests are one 64 KiB-capped file per owner and a malformed/ambiguous claim refuses the whole sweep rather than being deleted.',
+				'Bounded by construction: the log carries one metadata line per pruned path (no file content) and is compacted to RETENTION_LOG_MAX_BYTES 256 KiB (src/retention/unclaimed.ts:60,549-571), so it cannot become the unbounded-growth defect the catch-all exists to fix; manifests are one 64 KiB-capped file per owner and a malformed/ambiguous claim refuses the whole sweep rather than being deleted.',
 		},
 	},
 	{

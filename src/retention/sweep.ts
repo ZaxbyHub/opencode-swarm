@@ -260,7 +260,7 @@ export async function runRetentionSweep(
 	// Containment guard: the resolved swarm root must sit inside the project
 	// root. A `.swarm` resolving OUTSIDE the project refuses the whole sweep.
 	// One linked INSIDE it (even to the root) passes, and the family passes
-	// run through it (pre-existing); only the tier-3 catch-all refuses a
+	// run through it (pre-existing, #3734); the tier-3 catch-all refuses a
 	// linked `.swarm` (`./unclaimed.ts`) and re-resolves every candidate right
 	// before deleting it, since a child can be swapped for a symlink later.
 	try {

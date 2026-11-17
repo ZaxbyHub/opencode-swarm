@@ -67,6 +67,54 @@ describe('claim lookup casing (L-4)', () => {
 	});
 });
 
+describe('manifest names are never skipped silently', () => {
+	it.each([
+		[
+			'_reviewer.json',
+			JSON.stringify({ owner: 'r', preserve: ['review-sandbox'] }),
+		],
+		[
+			'my reviewer.json',
+			JSON.stringify({ owner: 'r', preserve: ['review-sandbox'] }),
+		],
+		['_broken.json', '{ this is not json'],
+	])('a misnamed %s refuses the whole sweep and deletes nothing', async (name, body) => {
+		const root = makeRoot('misnamed');
+		const dir = path.join(root, '.swarm', 'retention.d');
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(path.join(dir, name), body);
+		const claimed = seed(
+			root,
+			path.join('.swarm', 'review-sandbox', 'a.bin'),
+			40,
+		);
+		const family = seed(
+			root,
+			path.join('.swarm', 'capsules', 'c1', 'a.bin'),
+			400,
+		);
+		const victim = seed(root, path.join('.swarm', 'zz-scratch', 'a.bin'), 400);
+		const result = await runRetentionSweep(root, { now: NOW });
+		expect(result.errors.manifests).toContain('not a valid manifest file name');
+		expect(result.pruned).toEqual({});
+		for (const file of [claimed, family, victim]) {
+			expect(existsSync(file)).toBe(true);
+		}
+	});
+
+	it('dotfiles and non-.json names in retention.d are still ignored', async () => {
+		const root = makeRoot('ignored');
+		const dir = path.join(root, '.swarm', 'retention.d');
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(path.join(dir, '.hidden.json'), '{ not json');
+		writeFileSync(path.join(dir, 'owner.json.bak'), '{ not json');
+		const victim = seed(root, path.join('.swarm', 'zz-scratch', 'a.bin'), 400);
+		const result = await runRetentionSweep(root, { now: NOW });
+		expect(result.errors.manifests).toBeUndefined();
+		expect(existsSync(victim)).toBe(false);
+	});
+});
+
 describe('empty directories', () => {
 	it('a young empty directory survives (its own mtime is the fallback age)', async () => {
 		const root = makeRoot('empty');

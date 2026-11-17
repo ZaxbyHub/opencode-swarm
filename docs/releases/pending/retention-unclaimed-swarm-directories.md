@@ -23,11 +23,12 @@ Directories immediately under `.swarm/` now have three tiers of ownership:
    a permanent exemption: the claim SETS the directory's horizon to its
    `maxAgeDays` (longer or shorter than the 30-day default), and past it the
    directory becomes reclaimable again, because a claim that never expires
-   would recreate the very defect this fixes. A malformed, ambiguous, or unreadable manifest
-   refuses the **whole** sweep (fail closed) and names the file and the reason.
+   would recreate the very defect this fixes. A malformed, ambiguous, or unreadable manifest, or a `.json` file in
+   `retention.d` whose name is outside the manifest grammar, refuses the **whole**
+   sweep (fail closed) and names the file and the reason.
 3. **Tier 3 — catch-all.** An unclaimed directory is pruned only when it is a
    real directory (never a symlink), has no `.preserve` marker, contains no
-   future-dated entries, and all of its content is older than its horizon
+   future-dated files, and all of its content is older than its horizon
    (30 days by default, or the owning manifest's `maxAgeDays`). The pass
    refuses to run when `.swarm/retention.log` is a link, is not a regular file,
    or cannot be inspected, so a prune is not started against a log it cannot
@@ -80,7 +81,8 @@ No config key and no API removal, but **this release deletes data on upgrade**:
   `retention.enabled: false` (this also disables every other retention
   family; there is no catch-all-only switch).
 - A malformed `retention.d` manifest refuses the whole sweep, family prunes
-  included; the reason is in the debug log.
+  included; the reason is in `result.errors` and, because neither production
+  caller surfaces the result, only in the debug log (`OPENCODE_SWARM_DEBUG=1`).
 - `RetentionSweepResult` gains an optional `explained` field (populated under
   `dryRun`); it is additive.
 
@@ -93,8 +95,8 @@ No config key and no API removal, but **this release deletes data on upgrade**:
   owner that keeps writing into a claimed directory keeps its lease.
 - A directory whose content cannot be enumerated within the bounded subtree
   scan (2000 entries, counting files, directories and links) is treated as in
-  use and kept, and the sweep reports it (`result.errors['.swarm/<name>']`, in
-  the debug log) so an operator can tell why a large stale tree is never
+  use and kept, and the sweep reports it in `result.errors['.swarm/<name>']` (visible
+  only in the debug log, `OPENCODE_SWARM_DEBUG=1`) so an operator can tell why a large stale tree is never
   reclaimed. Large source-tree-like sandboxes exceed this budget: mark them
   with `.preserve` or remove them by hand.
 - Age is the newest regular-file mtime in the tree. Copies that preserve
