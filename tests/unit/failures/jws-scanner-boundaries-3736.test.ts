@@ -119,6 +119,33 @@ describe('#3736 D4-rev3 standard-base64 placements', () => {
 		const input = `src/utils/jws-redaction.${'a'.repeat(20)}.${'b'.repeat(10)}`;
 		expect(redactShellCommand(input)).toBe(input);
 	});
+	test('4.5-F1: an outer generic span starting BEFORE an inner eyJ span is MERGED, its header never left visible (exact)', () => {
+		// Composition from the implementation review: a 40+ standard-base64
+		// header segment, then an eyJ-shaped triple. The generic span starts
+		// earlier — it must extend the eyJ span's coverage backward, not be
+		// discarded.
+		const input = `${'Q'.repeat(40)}.eyJhbGciOiJIUzI1NiJ9.${PAYLOAD}.${SIG}`;
+		expect(redactShellCommand(input)).toBe('[REDACTED:jwt]');
+		expect(sanitizeFailureEvidenceDisplay(input)).toBe('[REDACTED:jwt]');
+	});
+	test('4.5-F2: an eyJ-INITIAL iv/ciphertext tail segment that cannot form a real next token is absorbed (exact)', () => {
+		// 11-char eyJ-initial segment (< MIN_HEADER_TOTAL) followed by the
+		// tag — no complete second token exists, so the guard must treat it
+		// as tail material.
+		const input = `${JWE_HDR}.${'K'.repeat(43)}.${'I'.repeat(22)}.eyJAAAAAAA.YXV0aHRhZw`;
+		expect(redactShellCommand(input)).toBe('[REDACTED:jwt]');
+		expect(sanitizeFailureEvidenceDisplay(input)).toBe('[REDACTED:jwt]');
+		// >=13-char eyJ-initial segment whose remaining run has no payload+sig
+		// pair — still tail material, not a scannable next token.
+		const input2 = `${JWE_HDR}.${'K'.repeat(43)}.${'I'.repeat(22)}.eyJAAAAAAAAAA.Tail1234`;
+		expect(redactShellCommand(input2)).toBe('[REDACTED:jwt]');
+	});
+	test('4.5-F4: mixed _/- boundaries select the EARLIEST boundary (long-header leftmost)', () => {
+		const header = 'eyJ' + 'a'.repeat(600) + '-eyJx' + 'b'.repeat(600);
+		const input = 'x_' + header + `.${PAYLOAD}.${SIG}`;
+		expect(redactShellCommand(input)).toBe('x_[REDACTED:jwt]');
+		expect(redactShellCommand(input).includes('aaaa')).toBe(false);
+	});
 	test('a generic span overlapping an eyJ span is dropped (no gluing)', () => {
 		const a = `eyJhbGciOiJIUzI1NiJ9.${PAYLOAD}.${SIG}`;
 		const input = `pre.${a}.${'e30'}.${SIG}.post`;

@@ -74,6 +74,13 @@ const GENERIC_HEADER_RE = /^[A-Za-z0-9+/]{40,}={0,2}$/;
 const GENERIC_MIN_PAYLOAD = 20;
 const GENERIC_MIN_SIGNATURE = 10;
 const GENERIC_B64_RE = /^[A-Za-z0-9+/_=-]+$/;
+/**
+ * 4.5-review F3: bound on interior `=` separators probed per segment in the
+ * assignment-placement candidate loop — assignment prefixes are short
+ * (`key=`, `token=`), so a pathological `a=b=c=…` segment cannot make the
+ * loop quadratic.
+ */
+const MAX_ASSIGNMENT_SEPARATORS = 8;
 
 export interface JwsTokenSpan {
 	/** Inclusive start index of the header start, in the input string. */
@@ -102,8 +109,15 @@ export interface JwsTokenSpan {
  */
 function headerStart(segment: string): number {
 	if (segment.startsWith(HEADER_PREFIX)) return 0;
-	let idx = segment.indexOf(`-${HEADER_PREFIX}`);
-	if (idx === -1) idx = segment.indexOf(`_${HEADER_PREFIX}`);
+	// 4.5-review F4: take the EARLIEST boundary across BOTH delimiter types —
+	// a later in-segment `-eyJ` must not mask an earlier `_eyJ` boundary (the
+	// leftmost rule above: the earliest boundary is the longest candidate).
+	const hyphen = segment.indexOf(`-${HEADER_PREFIX}`);
+	const underscore = segment.indexOf(`_${HEADER_PREFIX}`);
+	let idx: number;
+	if (hyphen === -1) idx = underscore;
+	else if (underscore === -1) idx = hyphen;
+	else idx = Math.min(hyphen, underscore);
 	if (idx === -1) return -1;
 	return idx + 1;
 }
@@ -221,15 +235,29 @@ export function findJwsTokenSpans(text: string): JwsTokenSpan[] {
 				signature.length >= MIN_SIGNATURE_EYJ
 			) {
 				// Accepted triple; #3736 D2-rev2 absorption of JWE tail
-				// segments (<= 2 further token-like segments, never across an
-				// eyJ-header segment, optionally crossing ONE empty interior
-				// segment).
+				// segments (<= 2 further token-like segments, never across a
+				// segment that starts a REAL next eyJ token, optionally
+				// crossing ONE empty interior segment). 4.5-review F2: an
+				// eyJ-INITIAL iv/ciphertext segment that CANNOT form a
+				// complete triple within the remaining run is tail material,
+				// not a next token — the guard below only stops for a segment
+				// that actually starts a scannable token (header + payload +
+				// signature all present from it).
 				let last = i + 2;
 				let extra = 0;
 				let crossedEmpty = false;
 				while (extra < 2 && last + 1 < segments.length) {
 					const next = segments[last + 1] as string;
-					if (headerStart(next) !== -1) break; // adjacent token header — scan it next
+					const nextStart = headerStart(next);
+					if (
+						nextStart !== -1 &&
+						next.length - nextStart >= MIN_HEADER_TOTAL &&
+						last + 3 < segments.length &&
+						(segments[last + 2] as string).length >= MIN_PAYLOAD &&
+						(segments[last + 3] as string).length >= MIN_SIGNATURE_EYJ
+					) {
+						break; // a REAL adjacent token header — scan it next
+					}
 					if (tokenLike(next)) {
 						last += 1;
 						extra += 1;
@@ -285,9 +313,15 @@ export function findStandardB64TokenSpans(text: string): JwsTokenSpan[] {
 			if (GENERIC_HEADER_RE.test(seg)) {
 				candidateStart = offsets[i] as number;
 			} else {
-				for (let p = 0; p < seg.length; p += 1) {
+				// 4.5-review F3: assignment prefixes are short (`key=`,
+				// `token=`), so at most MAX_ASSIGNMENT_SEPARATORS interior `=`
+				// positions are probed — a pathological `a=b=c=…` segment
+				// cannot make this loop quadratic.
+				let probed = 0;
+				for (let p = 0; p < seg.length && probed < MAX_ASSIGNMENT_SEPARATORS; p += 1) {
 					if (seg[p] !== '=') continue;
 					if (p === 0 || p === seg.length - 1) continue; // empty prefix or suffix
+					probed += 1;
 					if (GENERIC_HEADER_RE.test(seg.slice(p + 1))) {
 						candidateStart = p; // span starts AT the separator
 						break;
@@ -321,20 +355,53 @@ export function findStandardB64TokenSpans(text: string): JwsTokenSpan[] {
 
 /**
  * #3736: combined span producer for consumers that splice both families.
- * A generic (D4) span that OVERLAPS any eyJ-anchored span is dropped: inside
- * a dotted run of JWT material the generic triple can start mid-token (the
- * payload and signature segments of one eyJ token look like a generic
- * header/payload pair) and would otherwise glue two adjacent tokens into one
- * span through the union's extend rule (observed on the #3716 two-token
- * fixture: `pre.<A>.<B>.post` collapsed to a single label). eyJ anchoring is
- * authoritative wherever both passes see the same bytes.
+ * Overlap policy (4.5-review F1/F3): inside a dotted run of JWT material the
+ * generic triple can start MID-token (a payload/signature pair of one eyJ
+ * token looks like a generic header/payload) — such a span is an artifact
+ * and is DROPPED (it would glue two adjacent tokens into one span; observed
+ * on the #3716 two-token fixture). But a generic span that starts BEFORE an
+ * overlapping eyJ span carries real credential material of its own (its
+ * standard-base64 header) — it is MERGED into that eyJ span (the earlier
+ * start wins, the end extends), never discarded. Both lists are sorted by
+ * start, so the resolution is a single linear merge walk.
  */
 export function findRedactableTokenSpans(text: string): JwsTokenSpan[] {
 	const eyJ = findJwsTokenSpans(text);
-	const generic = findStandardB64TokenSpans(text).filter(
-		(g) => !eyJ.some((e) => g.start < e.end && e.start < g.end),
-	);
-	return [...eyJ, ...generic];
+	const generic = findStandardB64TokenSpans(text);
+	if (eyJ.length === 0) return generic;
+	if (generic.length === 0) return eyJ;
+	const merged: JwsTokenSpan[] = [];
+	let e = 0;
+	for (const g of generic) {
+		// advance past eyJ spans that end before g starts
+		while (e < eyJ.length && (eyJ[e] as JwsTokenSpan).end <= g.start) {
+			merged.push(eyJ[e] as JwsTokenSpan);
+			e += 1;
+		}
+		if (e >= eyJ.length) {
+			merged.push(g);
+			continue;
+		}
+		const head = eyJ[e] as JwsTokenSpan;
+		if (head.start < g.end && g.start < head.end) {
+			// overlap
+			if (g.start < head.start) {
+				// F1: the generic span starts earlier — merge its coverage
+				// into the eyJ span (keep the earlier start, extend the end).
+				head.start = g.start;
+				head.end = Math.max(head.end, g.end);
+			}
+			// else: mid-token artifact — drop g
+			continue;
+		}
+		merged.push(g);
+	}
+	while (e < eyJ.length) {
+		merged.push(eyJ[e] as JwsTokenSpan);
+		e += 1;
+	}
+	merged.sort((a, b) => a.start - b.start);
+	return merged;
 }
 
 /**
