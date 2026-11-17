@@ -67,6 +67,20 @@ describe('claim lookup casing (L-4)', () => {
 	});
 });
 
+describe('empty directories', () => {
+	it('a young empty directory survives (its own mtime is the fallback age)', async () => {
+		const root = makeRoot('empty');
+		const young = path.join(root, '.swarm', 'young-empty');
+		mkdirSync(young, { recursive: true });
+		const mtime = new Date(NOW - DAY_MS);
+		utimesSync(young, mtime, mtime);
+		const control = seed(root, path.join('.swarm', 'zz-scratch', 'a.bin'), 50);
+		await runRetentionSweep(root, { now: NOW });
+		expect(existsSync(control)).toBe(false);
+		expect(existsSync(young)).toBe(true);
+	});
+});
+
 describe('dry-run debug log (F-2)', () => {
 	it('writes the explained list to the debug log under dryRun', async () => {
 		const root = makeRoot('debug-log');

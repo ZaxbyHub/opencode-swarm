@@ -4448,7 +4448,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		privacyClass: 'metadata',
 		writeLimits: {
 			bound:
-				'one line per pruned directory; the log is compacted to the newest lines within RETENTION_LOG_MAX_BYTES 256 KiB on the append that crosses it (src/retention/unclaimed.ts:60,546); each manifest is capped at RETENTION_MANIFEST_MAX_BYTES 64 KiB (:58) and a larger claim is refused as malformed',
+				'one line per pruned directory; the log is compacted to the newest lines within RETENTION_LOG_MAX_BYTES 256 KiB on the append that crosses it (src/retention/unclaimed.ts:60,547); each manifest is capped at RETENTION_MANIFEST_MAX_BYTES 64 KiB (:58) and a larger claim is refused as malformed',
 			scope: 'global',
 			citation: 'src/retention/unclaimed.ts:58,60,547',
 		},

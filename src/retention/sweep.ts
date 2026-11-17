@@ -258,11 +258,11 @@ export async function runRetentionSweep(
 	const result: RetentionSweepResult = { pruned: {}, dryRun, errors: {} };
 
 	// Containment guard: the resolved swarm root must sit inside the project
-	// root. A symlinked `.swarm` (or a root trick) refuses the whole sweep
-	// rather than deleting through the link. This is the OUTER check only —
-	// the tier-3 catch-all re-resolves every candidate immediately before
-	// deleting it (see `./unclaimed.ts`), because a child can be swapped for a
-	// symlink after this point.
+	// root. A `.swarm` resolving OUTSIDE the project refuses the whole sweep.
+	// One linked INSIDE it (even to the root) passes, and the family passes
+	// run through it (pre-existing); only the tier-3 catch-all refuses a
+	// linked `.swarm` (`./unclaimed.ts`) and re-resolves every candidate right
+	// before deleting it, since a child can be swapped for a symlink later.
 	try {
 		const resolvedRoot = fs.realpathSync(projectRoot);
 		const resolvedSwarm = fs.realpathSync(swarmRoot);

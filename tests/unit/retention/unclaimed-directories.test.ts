@@ -209,6 +209,9 @@ describe('unclaimed .swarm directories get a lifecycle', () => {
 			NOW - 400 * DAY_MS,
 			'p',
 		);
+		// A FRESH file behind the link: if the sweep followed the link, the
+		// candidate's newest mtime would be NOW and `junk-dir` would be kept.
+		seedFile(outside, 'fresh.json', NOW, 'f');
 		const root = makeRoot('inner-link');
 		seedSwarmFile(root, path.join('junk-dir', 'old.bin'), NOW - 41 * DAY_MS);
 		const topLink = path.join(root, '.swarm', 'linked-out');

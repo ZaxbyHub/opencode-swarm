@@ -40,7 +40,7 @@ Directories immediately under `.swarm/` now have three tiers of ownership:
 `retention.dry_run` (`runRetentionSweep({ dryRun: true })`) keeps its existing
 count-and-report behaviour and now also populates `result.explained` with every
 planned prune (path, age, size, owning manifest) and writes that list to the
-debug log, which is how an operator previews what the catch-all would remove
+debug log (visible only with `OPENCODE_SWARM_DEBUG=1`), which is how an operator previews what the catch-all would remove
 before enabling it. It deletes nothing: no family file and no directory.
 
 Containment has three layers. The catch-all refuses to run at all when `.swarm`
@@ -74,8 +74,9 @@ No config key and no API removal, but **this release deletes data on upgrade**:
   reports — is reclaimable.
 - To keep a directory: put a `.preserve` file in it (permanent), or declare it
   in `.swarm/retention.d/<owner>.json` (a lease with its own `maxAgeDays`).
-- To preview first: set `retention.dry_run: true`; the planned prunes are in
-  the debug log and nothing is deleted. To opt out entirely:
+- To preview first: set `retention.dry_run: true` and run with
+  `OPENCODE_SWARM_DEBUG=1`; the planned prunes are then written to the debug
+  log (without that variable the log is silent) and nothing is deleted. To opt out entirely:
   `retention.enabled: false` (this also disables every other retention
   family; there is no catch-all-only switch).
 - A malformed `retention.d` manifest refuses the whole sweep, family prunes
