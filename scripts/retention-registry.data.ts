@@ -494,16 +494,16 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			'src/hooks/pr-workflow-gate.ts',
 		],
 		writerCitations: [
-			'src/background/pending-delegations.ts:3273 appendRecord — SQLite coordination event+state transaction with post-commit JSON projection',
-			'src/background/pending-delegations.ts:1542 writeDurableFileSync — fsync+rename-with-retry for legacy checkpoint/manifest/rolled-tail compatibility',
+			'src/background/pending-delegations.ts:3276 appendRecord — SQLite coordination event+state transaction with post-commit JSON projection',
+			'src/background/pending-delegations.ts:1545 writeDurableFileSync — fsync+rename-with-retry for legacy checkpoint/manifest/rolled-tail compatibility',
 		],
 		readerCitations: [
-			'src/background/pending-delegations.ts:3162 readDelegations — SQLite authority with bounded legacy compatibility, sync',
-			'src/background/pending-delegations.ts:3177 scanDelegationsForRecovery — strict, fails closed',
+			'src/background/pending-delegations.ts:3165 readDelegations — SQLite authority with bounded legacy compatibility, sync',
+			'src/background/pending-delegations.ts:3180 scanDelegationsForRecovery — strict, fails closed',
 			'pr-workflow-session-resolver / pr-workflow-gate / init-orphan-recovery / delegation-gate worktree-collision-ownership — via readDelegations',
 		],
 		schemaVersion:
-			'RecordSchema schemaVersion 1|2|3|4; checkpoint/manifest literal 1 (:1432,:1453,:1463)',
+			'RecordSchema schemaVersion 1|2|3|4; checkpoint/manifest literal 1 (:1435,:1456,:1466)',
 		stateClass: 'authoritative',
 		privacyClass: 'metadata',
 		directFileExemption: {
@@ -519,11 +519,11 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			pattern: 'indexed (checkpoint+tail) with full-fold fallback',
 			bound: 'legacy/tail reads hard-bounded at 4 MiB (MAX_RECOVERY_LEDGER_BYTES)',
 			sync: true,
-			citation: 'src/background/pending-delegations.ts:119-124,1986',
+			citation: 'src/background/pending-delegations.ts:119-124,1989',
 		},
 		lockModel: 'withEvidenceLock agent=background on every mutation (:177-180); reads lock-free',
 		crashBehavior:
-			'torn append tolerated by lenient fold, strict recovery fails closed; manifest-gated checkpoint publication — checkpoint without manifest ignored (:1714-1726)',
+			'torn append tolerated by lenient fold, strict recovery fails closed; manifest-gated checkpoint publication — checkpoint without manifest ignored (:1717-1729)',
 		closePolicy: 'archived-only — ARCHIVE_ARTIFACTS (src/commands/close/constants.ts:75-77); deliberately NOT cleaned (cross-session store; compaction is the bounded-retention mechanism, src/commands/close/constants.ts:70-78 docblock)',
 		closeArrayMembership: {
 			'background-delegations.jsonl': 'archive-only',
@@ -532,7 +532,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		},
 		resetPolicy: 'reset/reset-session do not delete',
 		legacyCompatibility:
-			'legacy checkpoint/ledger is validated and imported once into SQLite, then cold-archived with JSON retained as a compatibility projection (:1986)',
+			'legacy checkpoint/ledger is validated and imported once into SQLite, then cold-archived with JSON retained as a compatibility projection (:1989)',
 		issue2487Legacy: { path: '.swarm/background-delegations.jsonl (+ checkpoint and manifest)', sourceFile: 'src/background/pending-delegations.ts', tokens: ['BACKGROUND_DELEGATIONS_FILE', 'loadLegacyLedger', 'ensureDelegationCoordinationImported'], readers: ['src/background/pending-delegations.ts:loadLegacyLedger', 'src/background/pending-delegations.ts:ensureDelegationCoordinationImported'], writers: ['src/background/pending-delegations.ts:BACKGROUND_DELEGATIONS_FILE'] },
 		healthSignal: 'delegation-health artifact + #2034 recovery observations',
 		owner: '#2034 (merged)',
@@ -609,12 +609,12 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/background/pending-delegations.ts'],
 		writerCitations: [
-			'src/background/pending-delegations.ts:6217 writeDelegationFallback / :6268 removeDelegationFallback',
-			'src/background/pending-delegations.ts:6731 writeBackgroundCoderReservations',
+			'src/background/pending-delegations.ts:6294 writeDelegationFallback / :6345 removeDelegationFallback',
+			'src/background/pending-delegations.ts:6808 writeBackgroundCoderReservations',
 		],
 		readerCitations: [
-			'src/background/pending-delegations.ts:6072 readDelegationFallback / :6084 listDelegationFallbacks / :6118 scanDelegationFallbacksForRecovery',
-			'src/background/pending-delegations.ts:6709 scanBackgroundCoderReservationsForAdmission',
+			'src/background/pending-delegations.ts:6149 readDelegationFallback / :6161 listDelegationFallbacks / :6195 scanDelegationFallbacksForRecovery',
+			'src/background/pending-delegations.ts:6786 scanBackgroundCoderReservationsForAdmission',
 		],
 		schemaVersion: 'fallback schemaVersion 1 (:1041)',
 		stateClass: 'authoritative',
@@ -719,30 +719,30 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		canonicalRoot: 'outside-swarm',
 		writerModules: ['src/tools/prepare-pr-feedback-commit-message.ts'],
 		writerCitations: [
-			'src/tools/prepare-pr-feedback-commit-message.ts:209 atomicWriteFileAnyRoot — canonical atomic write (temp+fsync+rename, mode 0600)',
-			'src/tools/prepare-pr-feedback-commit-message.ts:177 mkdirSync — dedicated temp subdirectory (recursive)',
-			'src/tools/prepare-pr-feedback-commit-message.ts:98 rmSync — pruneStaleMessageFiles TTL reaper',
+			'src/tools/prepare-pr-feedback-commit-message.ts:323 atomicWriteFileAnyRoot — canonical atomic write (temp+fsync+rename, mode 0600, same-tick validateTarget re-proof)',
+			'src/tools/prepare-pr-feedback-commit-message.ts:112 mkdirSync — dedicated temp subdirectory (recursive, mode 0700, inside acquireCommitMessageDir)',
+			'src/tools/prepare-pr-feedback-commit-message.ts:211 rmSync — pruneStaleMessageFiles TTL reaper (same-tick lstat re-proof at entry)',
 		],
 		readerCitations: [
-			'no plugin reader — the authored path is returned to the caller (:220-225) and consumed by `git commit -F` outside the plugin',
+			'no plugin reader — the authored path is returned to the caller (:346-351) and consumed by `git commit -F` outside the plugin',
 		],
 		schemaVersion: 'plain-text commit message (no schema)',
 		stateClass: 'operational',
 		privacyClass: 'content',
 		writeLimits: {
-			bound: 'MAX_COMMIT_MESSAGE_CHARS 8192 per file (:42,:53-55; whitespace-only and NUL refused); one file per (sanitized sessionID, sha256(message)[:16]) key (:68-81); pruneStaleMessageFiles age-prunes every .txt in the directory at MESSAGE_FILE_TTL_MS 24 h on every authoring call (:44,:88-107)',
+			bound: 'MAX_COMMIT_MESSAGE_CHARS 8192 per file (:48,:56-64; whitespace-only and NUL refused); one file per (sanitized sessionID, sha256(message)[:16]) key (:177-186); pruneStaleMessageFiles age-prunes every .txt in the directory at MESSAGE_FILE_TTL_MS 24 h on every authoring call (:49-50,:196-220)',
 			scope: 'per-key',
 			keyspaceBound:
-				'FINITE BY REAPER: the message-digest key domain has no closed enumeration, but pruneStaleMessageFiles (src/tools/prepare-pr-feedback-commit-message.ts:88-107) walks the whole dedicated directory on EVERY authoring call and removes every file older than the 24 h TTL, so the keyspace cannot outgrow one 24 h window of authored messages.',
+				'FINITE BY REAPER: the message-digest key domain has no closed enumeration, but pruneStaleMessageFiles (src/tools/prepare-pr-feedback-commit-message.ts:196-220) walks the whole dedicated directory on EVERY authoring call and removes every file older than the 24 h TTL, so the keyspace cannot outgrow one 24 h window of authored messages.',
 			citation:
-				'src/tools/prepare-pr-feedback-commit-message.ts:42-44,63-81,88-107,209-211',
+				'src/tools/prepare-pr-feedback-commit-message.ts:48-50,69-71,103-170,173-186,196-220,323-337',
 		},
 		readBound: {
 			pattern: 'write-only',
 			bound: 'never read back by the plugin; the content is written once atomically and handed off by path',
 			sync: false,
 			citation:
-				'src/tools/prepare-pr-feedback-commit-message.ts:209-211 (sole write; git reads the file as the -F argument, outside the plugin)',
+				'src/tools/prepare-pr-feedback-commit-message.ts:323-337 (sole write; git reads the file as the -F argument, outside the plugin)',
 		},
 		lockModel:
 			'none — deterministic per-key filename + atomic write; concurrent authoring of the same message converges to identical bytes',
@@ -757,7 +757,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		disposition: {
 			kind: 'not-a-defect',
 			proof:
-				'Ephemeral authored commit-message files live in a dedicated OS-temp subdirectory OUTSIDE every repository (prepare-pr-feedback-commit-message.ts:63-81); the filename key is (sanitized sessionID, sha256(message)[:16]) and pruneStaleMessageFiles (:88-107) reaps files older than MESSAGE_FILE_TTL_MS=24 h on every authoring call, so there is no unbounded growth axis; writes are atomic with mode 0600 (:209-211) and a TMPDIR resolving inside the repository is refused (:169-175).',
+				'Ephemeral authored commit-message files live in a dedicated OS-temp subdirectory OUTSIDE every repository (prepare-pr-feedback-commit-message.ts:69-71,173-186); the filename key is (sanitized sessionID, sha256(message)[:16]) and pruneStaleMessageFiles (:196-220) reaps files older than MESSAGE_FILE_TTL_MS=24 h on every authoring call, so there is no unbounded growth axis; writes are atomic with mode 0600 with a same-tick link re-proof (:323-337) and a TMPDIR resolving inside the repository is refused (:270-288) or resolved through a link into the repository (:301-317).',
 		},
 	},
 	{
@@ -1067,7 +1067,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		id: 'pr-review-run-artifacts',
 		category: 2,
 		pathGrammar:
-			'.swarm/pr-review/{run_id}/{findings.jsonl, feedback-handoff.json, trigger-eval.json, run-reservation.json, coverage-disclosure.json, verdict-settlement.reviewer.json, verdict-settlement.critic.json, validation-skip-disclosure.json, submission-payload.json, post-abort-export.json} + .swarm/pr-review/route-receipts/{encoded-session}--{encoded-task}.json (or sha256_<pair-hex>.json when the complete basename would exceed 255 bytes)',
+			'.swarm/pr-review/{run_id}/{findings.jsonl, feedback-handoff.json, trigger-eval.json, run-reservation.json, coverage-disclosure.json, verdict-settlement.reviewer.json, verdict-settlement.critic.json, validation-skip-disclosure.json, submission-payload.json, native-completion.json, native-submission.json, post-abort-export.json} + .swarm/pr-review/route-receipts/{encoded-session}--{encoded-task}.json (or sha256_<pair-hex>.json when the complete basename would exceed 255 bytes)',
 		canonicalRoot: 'project-swarm',
 		writerModules: [
 			'src/tools/write-pr-review-artifact.ts',
@@ -1086,7 +1086,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			'src/tools/write-pr-review-trigger-eval.ts createTriggerReceipt — trigger-eval receipt atomic write (temp+link; refuses overwrite on EEXIST)',
 			'src/tools/pr-review-submission.ts executePrReviewSubmission writeFileSync — a run-scoped submission-payload.json provenance copy, overwritten per attempt (validateSwarmPath-contained, run_id-charset-bounded path; direct write, not temp+rename)',
 			'src/tools/export-pr-review-partial-results.ts executeExportPrReviewPartialResults — a run-scoped post-abort-export.json partial-salvage artifact (issue #3097) written through the canonical atomicWriteSwarmFile (fsync + bounded rename retry + cache invalidation), byte-capped (findings cap + 24 MiB margin; typed artifact-too-large refusal beyond), idempotent re-export; the gate re-check runs immediately before the write',
-			'src/hooks/pr-workflow-gate.ts:12560 tryCreatePrReviewRunReservation — create-only (wx) run-reservation.json owned by the reserving session',
+			'src/hooks/pr-workflow-gate.ts:12667 tryCreatePrReviewRunReservation — create-only (wx) run-reservation.json owned by the reserving session',
 			'src/pr-review/completion.ts:1441 — coverage-disclosure.json atomic write via coverageDisclosureRelativePath (:1097), ≤4 KiB',
 			'src/pr-review/verdict-settlement.ts persistVerdictSettlementReceipt — per-phase verdict-settlement.{reviewer,critic}.json atomic write via writeAtomicJson, ≤64 KiB (writer-side byte guard mirrors the bounded reader), ≤128 items, rename-overwritten on re-admission (issue #3101)',
 			'src/background/pr-feedback-event-queue.ts:455 writeQueueRecord — feedback-handoff lock/content writes',
@@ -1260,7 +1260,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			bound: 'max_lines PER-FILE enforced at write time; truncation keeps newest floor(max_lines/2) (:114-133). NOTE (maintainer review #2395, finding on claim 7): the production knob is now `prm.max_trajectory_lines` (src/index.ts passes it to createTrajectoryLoggerHook and the denied-call path), previously a hardcoded 1000 — the writer CODE is unchanged but the evidence truncation budget is config-coupled; default 1000 is identical, so no default-config regression.',
 			scope: 'per-key',
 			keyspaceBound:
-				'FINITE BY REAPER, not by key domain: one key per taskId directory, and taskId is only shape-validated (src/validation/task-id.ts:69-114 admits any /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/ id, explicitly beyond plan task numbers), so the key domain is open. What bounds it is a GLOBAL deleter: ACTIVE_STATE_DIRS_TO_CLEAN contains "evidence" (src/commands/close/constants.ts:253-269) and the close clean loop runs fs.rm(dirPath, {recursive: true}) over the whole .swarm/evidence/ tree (src/commands/close/clean-stage.ts:176-190), dropping every key in one pass on a single session-lifecycle trigger. CAVEAT (verified, do not soften): the trigger is lifecycle-driven rather than size-driven and is archive-first-gated (src/commands/close/clean-stage.ts:176-185 skips the delete when the directory was not archived), and neither /swarm reset nor /swarm reset-session touches this tree — so a session that never closes accumulates one directory per distinct taskId.',
+				'FINITE BY REAPER, not by key domain: one key per taskId directory, and taskId is only shape-validated (src/validation/task-id.ts:80-125 admits any /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/ id, explicitly beyond plan task numbers), so the key domain is open. What bounds it is a GLOBAL deleter: ACTIVE_STATE_DIRS_TO_CLEAN contains "evidence" (src/commands/close/constants.ts:253-269) and the close clean loop runs fs.rm(dirPath, {recursive: true}) over the whole .swarm/evidence/ tree (src/commands/close/clean-stage.ts:176-190), dropping every key in one pass on a single session-lifecycle trigger. CAVEAT (verified, do not soften): the trigger is lifecycle-driven rather than size-driven and is archive-first-gated (src/commands/close/clean-stage.ts:176-185 skips the delete when the directory was not archived), and neither /swarm reset nor /swarm reset-session touches this tree — so a session that never closes accumulates one directory per distinct taskId.',
 			citation: 'src/hooks/trajectory-logger.ts:114-133,466,558',
 		},
 		readBound: { pattern: 'full-file', bound: '≤500 lines per file by write-side truncation', sync: false, citation: 'src/hooks/trajectory-logger.ts:558 + micro-reflector.ts:262' },
@@ -1627,11 +1627,11 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/turbo/lean/evidence.ts', 'src/turbo/lean/integration.ts', 'src/turbo/lean/reviewer.ts', 'src/epic/phase-readiness.ts'],
 		writerCitations: [
-			'src/turbo/lean/evidence.ts:216 writeLaneEvidence / :269 writePhaseEvidence — atomic',
-			'src/turbo/lean/integration.ts:402 writeCriticEvidence / src/turbo/lean/reviewer.ts:378 writeReviewerEvidence — atomic',
-			'src/epic/phase-readiness.ts:886 runEpicPhaseReview — one atomic evidence/{phase}/epic-phase-review.json per phase, overwritten on re-review',
+			'src/turbo/lean/evidence.ts:222 writeLaneEvidence / :275 writePhaseEvidence — atomic',
+			'src/turbo/lean/integration.ts:403 writeCriticEvidence / src/turbo/lean/reviewer.ts:379 writeReviewerEvidence — atomic',
+			'src/epic/phase-readiness.ts:904 runEpicPhaseReview — one atomic evidence/{phase}/epic-phase-review.json per phase, overwritten on re-review',
 		],
-		readerCitations: ['src/turbo/lean/evidence.ts:234,284,320 — per-file + directory listing, sync; integration.ts:247 compileCriticPackage', 'src/epic/phase-readiness.ts:437 verifyEpicPhaseReadiness — single per-phase file read by phase_complete'],
+		readerCitations: ['src/turbo/lean/evidence.ts:234,284,320 — per-file + directory listing, sync; integration.ts:248 compileCriticPackage', 'src/epic/phase-readiness.ts:439 verifyEpicPhaseReadiness — single per-phase file read by phase_complete'],
 		schemaVersion: 'none',
 		stateClass: 'governed-content',
 		privacyClass: 'content',
@@ -1817,7 +1817,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			bound: 'retryHistory ≤3 (schema :347); per-task file; evidence/ archived+cleaned at close',
 			scope: 'per-key',
 			keyspaceBound:
-			'FINITE BY REAPER, not by key domain: one key per taskId — a flat .swarm/evidence/{taskId}.json (src/gate-evidence.ts:1561 getEvidencePath) whose taskId is only shape-validated (src/validation/task-id.ts:69-114), so the domain is open. The GLOBAL deleter is the same one the task-evidence-trajectory row cites: "evidence" is in ACTIVE_STATE_DIRS_TO_CLEAN (src/commands/close/constants.ts:253-269) and the close clean loop recursively removes the whole tree (src/commands/close/clean-stage.ts:176-190), taking every {taskId}.json with it. Note the per-file retryHistory ≤3 cap is NOT the keyspace bound — it caps one key\'s history and says nothing about how many keys exist. CAVEAT: archive-first-gated (src/commands/close/clean-stage.ts:176-185) and untouched by /swarm reset and /swarm reset-session, so an unclosed session holds one file per distinct taskId.',
+			'FINITE BY REAPER, not by key domain: one key per taskId — a flat .swarm/evidence/{taskId}.json (src/gate-evidence.ts:1561 getEvidencePath) whose taskId is only shape-validated (src/validation/task-id.ts:80-125), so the domain is open. The GLOBAL deleter is the same one the task-evidence-trajectory row cites: "evidence" is in ACTIVE_STATE_DIRS_TO_CLEAN (src/commands/close/constants.ts:253-269) and the close clean loop recursively removes the whole tree (src/commands/close/clean-stage.ts:176-190), taking every {taskId}.json with it. Note the per-file retryHistory ≤3 cap is NOT the keyspace bound — it caps one key\'s history and says nothing about how many keys exist. CAVEAT: archive-first-gated (src/commands/close/clean-stage.ts:176-185) and untouched by /swarm reset and /swarm reset-session, so an unclosed session holds one file per distinct taskId.',
 			citation: 'src/gate-evidence.ts:347; src/commands/close/constants.ts:253-269 ACTIVE_STATE_DIRS_TO_CLEAN',
 		},
 		readBound: { pattern: 'full-file', bound: 'single per-task JSON', sync: true, citation: 'src/gate-evidence.ts:1212-1240' },
@@ -2051,7 +2051,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			bound: 'MAX_BASELINE_FINDINGS 2000 (:65); MAX_BASELINE_BYTES 2 MiB (:68) with truncation :690-712,777-795',
 			scope: 'per-key',
 			keyspaceBound:
-				'FINITE BY REAPER ONLY — the key domain is open. `phase` is a positive integer with no upper limit: the tool schema is z.number().int().min(1) with no .max() (src/tools/sast-scan.ts:969-976, duplicated at src/tools/pre-check-batch.ts:1677-1684), validatePhase rejects only phase < 1 (src/tools/sast-baseline.ts:447-452), and PlanSchema.phases is z.array(PhaseSchema).min(1) with no cap on phase count (src/config/plan-schema.ts:110) — there is no closed phase enum anywhere on this path. What bounds it is the close-time evidence wipe: baselineRelPath resolves through validateSwarmPath (src/tools/sast-baseline.ts:191,512) to .swarm/evidence/{phase}/sast-baseline.json, a true subpath of the tree that ACTIVE_STATE_DIRS_TO_CLEAN removes recursively at /swarm close (src/commands/close/constants.ts:253-269; src/commands/close/clean-stage.ts:176-190). CAVEAT (verified): the taskId-keyed archiveEvidence retention does NOT reach these directories — it looks for evidence/{taskId}/evidence.json and silently skips a phase directory that has none (src/evidence/manager.ts:689-751) — so /swarm close is the ONLY reclaim path here, and one directory accumulates per distinct phase number until it runs.',
+					'FINITE BY REAPER ONLY — the key domain is open. `phase` is a positive integer with no upper limit: the tool schema is z.number().int().min(1) with no .max() (src/tools/sast-scan.ts:1010-1017, duplicated at src/tools/pre-check-batch.ts:3464-3471), validatePhase rejects only phase < 1 (src/tools/sast-baseline.ts:447-452), and PlanSchema.phases is z.array(PhaseSchema).min(1) with no cap on phase count (src/config/plan-schema.ts:110) — there is no closed phase enum anywhere on this path. What bounds it is the close-time evidence wipe: baselineRelPath resolves through validateSwarmPath (src/tools/sast-baseline.ts:191,512) to .swarm/evidence/{phase}/sast-baseline.json, a true subpath of the tree that ACTIVE_STATE_DIRS_TO_CLEAN removes recursively at /swarm close (src/commands/close/constants.ts:253-269; src/commands/close/clean-stage.ts:176-190). CAVEAT (verified): the taskId-keyed archiveEvidence retention does NOT reach these directories — it looks for evidence/{taskId}/evidence.json and silently skips a phase directory that has none (src/evidence/manager.ts:689-751) — so /swarm close is the ONLY reclaim path here, and one directory accumulates per distinct phase number until it runs.',
 			citation: 'src/tools/sast-baseline.ts:65-68',
 		},
 		readBound: { pattern: 'full-file', bound: '≤2 MiB by write-side cap', sync: true, citation: 'src/tools/sast-baseline.ts:68,861' },
@@ -2584,20 +2584,20 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/summaries/store.ts'],
 		writerCitations: [
-			'src/summaries/store.ts:56 writeAgentSummary — delegates to locked evidence storage',
-			'src/summaries/store.ts:125 writePhaseArchitectureSummary — atomic sidecar replacement',
-			'src/summaries/store.ts:163 writeSupervisorReport — atomic sidecar replacement',
+			'src/summaries/store.ts:72 writeAgentSummary — delegates to locked evidence storage',
+			'src/summaries/store.ts:141 writePhaseArchitectureSummary — atomic sidecar replacement',
+			'src/summaries/store.ts:179 writeSupervisorReport — atomic sidecar replacement',
 		],
 		readerCitations: [
-			'src/summaries/store.ts:87 listAgentSummaries — evidence inventory',
-			'src/summaries/store.ts:135 readPhaseArchitectureSummary — single-file read',
-			'src/summaries/store.ts:210 readSupervisorReportRaw — single-file read',
+			'src/summaries/store.ts:103 listAgentSummaries — evidence inventory',
+			'src/summaries/store.ts:151 readPhaseArchitectureSummary — single-file read',
+			'src/summaries/store.ts:226 readSupervisorReportRaw — single-file read',
 		],
 		schemaVersion: 'AgentWorkSummarySchema + phase/supervisor summary payloads',
 		stateClass: 'governed-content',
 		privacyClass: 'content',
 		writeLimits: { bound: 'per-task/per-phase artifacts under the close-scoped evidence tree', scope: 'session-scoped', citation: 'src/commands/close.ts ACTIVE_STATE_DIRS_TO_CLEAN evidence entry' },
-		readBound: { pattern: 'indexed', bound: 'single-file sidecars; agent summaries traverse the bounded evidence inventory', sync: false, citation: 'src/summaries/store.ts:87,135,210' },
+		readBound: { pattern: 'indexed', bound: 'single-file sidecars; agent summaries traverse the bounded evidence inventory', sync: false, citation: 'src/summaries/store.ts:103,151,226' },
 		lockModel: 'agent summaries use evidence locks; sidecars use atomic replacement',
 		crashBehavior: 'canonical atomic writes; malformed reads fail open',
 		closePolicy: 'archived+cleaned as part of the evidence/ directory lifecycle',
@@ -4427,6 +4427,56 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			kind: 'not-a-defect',
 			proof:
 				'The #2483 retention sweep\'s review-receipts family age-prunes receipts at 30 d with a keep-newest-1000 cap (REVIEW_RECEIPTS_KEEP_NEWEST, src/retention/sweep.ts:49,96); index entries whose files were pruned resolve to null fail-open (parseReceiptFromIndexEntry, src/hooks/review-receipt.ts:849) and the index reader is capped at MAX_RECEIPTS_READ 1000 newest-first (:904,915) — the accumulation gap behind the #2309 row is closed by the sweep.',
+		},
+	},
+	{
+		id: 'retention-control-plane',
+		category: 8,
+		pathGrammar:
+			'.swarm/retention.log + .swarm/retention.d/{owner}.json (one ownership manifest per owner; no shared manifest file)',
+		canonicalRoot: 'project-swarm',
+		writerModules: ['src/retention/unclaimed.ts'],
+		writerCitations: [
+			'src/retention/unclaimed.ts:547 appendRetentionLog — one line per pruned directory (`<ISO-8601> pruned <path> age=<days> size=<bytes>`), then a tail-only rewrite when the append crosses the byte budget; the manifest DIRECTORY is read-only to the plugin (loadOwnerManifests:258) — each owner writes only its own file',
+		],
+		readerCitations: [
+			'loadOwnerManifests (:258) reads every *.json manifest once per sweep, before any deletion; the log is written for humans and agents to read (no in-process reader by design)',
+		],
+		schemaVersion:
+			'manifest schema 1 — { owner: string, preserve: string[], maxAgeDays?: number }; log line grammar `<ISO-8601> pruned <path> age=<days> size=<bytes>`',
+		stateClass: 'operational',
+		privacyClass: 'metadata',
+		writeLimits: {
+			bound:
+				'one line per pruned directory; the log is compacted to the newest lines within RETENTION_LOG_MAX_BYTES 256 KiB on the append that crosses it (src/retention/unclaimed.ts:60,547); each manifest is capped at RETENTION_MANIFEST_MAX_BYTES 64 KiB (:58) and a larger claim is refused as malformed',
+			scope: 'global',
+			citation: 'src/retention/unclaimed.ts:58,60,547',
+		},
+		readBound: {
+			pattern: 'tail (byte-bounded)',
+			bound:
+				'compaction reads only the newest RETENTION_LOG_MAX_BYTES 256 KiB of the log; manifests are read whole but bounded to 64 KiB each',
+			sync: false,
+			citation: 'src/retention/unclaimed.ts:58,60',
+		},
+		lockModel:
+			'append-only O_APPEND line batch; the rare compaction rewrites the tail and the last writer wins (the log is diagnostic, never authority)',
+		crashBehavior:
+			'a torn trailing line is cosmetic — readers treat each line independently and the next append starts a new one',
+		closePolicy:
+			'untouched by close — the log records what the sweep reclaimed, and manifests are owner-authored policy that close must not rewrite',
+		resetPolicy: 'not reset',
+		legacyCompatibility: 'n/a',
+		healthSignal: 'n/a',
+		owner: '#2483 follow-up (unclaimed-directory lifecycle)',
+		closeArrayMembership: {
+			'retention.log': 'neither',
+			'retention.d': 'neither',
+		},
+		disposition: {
+			kind: 'not-a-defect',
+			proof:
+				'Bounded by construction: the log carries one metadata line per pruned path (no file content) and is compacted to RETENTION_LOG_MAX_BYTES 256 KiB (src/retention/unclaimed.ts:60,547-569), so it cannot become the unbounded-growth defect the catch-all exists to fix; manifests are one 64 KiB-capped file per owner and a malformed/ambiguous claim refuses the whole sweep rather than being deleted.',
 		},
 	},
 	{

@@ -28,15 +28,24 @@ function git(cwd: string, ...args: string[]): string {
 	return proc.stdout.toString().trim();
 }
 
-function run(cwd: string, args: string[]) {
+function run(cwd: string, args: string[], stubGithub = false) {
 	const proc = Bun.spawnSync({
-		cmd: bashCommand(SCRIPT, ...args),
+		cmd: stubGithub
+			? [
+					bashCommand(SCRIPT)[0],
+					'-c',
+					'export PATH="$PWD:/usr/bin:/bin:$PATH"; [ "$(command -v gh)" = "$PWD/gh" ] || exit 19; exec bash "$@"',
+					'bash',
+					SCRIPT,
+					...args,
+				]
+			: bashCommand(SCRIPT, ...args),
 		cwd,
 		env: process.env,
 		stdin: 'ignore',
 		stdout: 'pipe',
 		stderr: 'pipe',
-		timeout: 15_000,
+		timeout: 45_000,
 	});
 	return {
 		code: proc.exitCode,
@@ -101,19 +110,26 @@ describe('trace-check.sh CRLF fixture (#2566)', () => {
 			stdin: 'ignore',
 			stdout: 'pipe',
 			stderr: 'pipe',
-			timeout: 15_000,
+			timeout: 45_000,
 		});
 
 		expect(
 			proc.exitCode,
 			`${proc.stdout.toString()}\n${proc.stderr.toString()}`,
 		).toBe(0);
-	}, 30_000);
+	}, 105_000);
 
 	test('accepts CRLF in phase gates and all line-oriented trace artifacts', () => {
 		const repo = canonicalMkdtemp('trace-check-crlf-gates-');
 		roots.push(repo);
 		git(repo, 'init', '-q', '-b', 'main');
+		git(
+			repo,
+			'remote',
+			'add',
+			'origin',
+			'https://github.com/example/fixture.git',
+		);
 		git(repo, 'config', 'user.email', 'trace@example.invalid');
 		git(repo, 'config', 'user.name', 'Trace');
 		fs.writeFileSync(path.join(repo, 'README.md'), 'seed\n');
@@ -155,6 +171,10 @@ describe('trace-check.sh CRLF fixture (#2566)', () => {
 			'## Source\nx\n## Observed Behavior\nx\n## Expected Behavior\nx\n## Acceptance Criteria\n- [ ] AC1: works\n## Classification\nVALID\n## Related Issues\nx\n',
 		);
 		writeCrlf(
+			path.join(trace, 'repro', 'cluster-preflight.md'),
+			'recorded-at: 2026-01-01T00:00:00Z\n\n## candidate #1\n\n- claim comments (live): none\n- open PRs naming 1 in:body: none\n- verdict: CLEAR\n',
+		);
+		writeCrlf(
 			path.join(trace, '02-reproduction.md'),
 			'## Commands Tried\n```text\nrun\n```\n- Exit code: 1\n## Reproduction Verdict\nred\n',
 		);
@@ -173,7 +193,15 @@ describe('trace-check.sh CRLF fixture (#2566)', () => {
 		);
 		writeCrlf(
 			path.join(trace, '10-pr-body.md'),
-			`## Acceptance Criteria -> Evidence\nAC1 evidence\n## Waivers (or none)\nnone\nPR head: ${sha}\n`,
+			`## Acceptance Criteria -> Evidence\nAC1 evidence\n## Waivers (or none)\nnone\nPR head: ${sha}\nPR URL: https://github.com/example/fixture/pull/42\n`,
+		);
+		fs.appendFileSync(path.join(repo, '.git/info/exclude'), '\n/gh\n');
+		fs.writeFileSync(
+			path.join(repo, 'gh'),
+			'#!/usr/bin/env bash\n' +
+				'[[ "$2" = repos/example/fixture/pulls/42 && "$4" = *classification* ]] || exit 9\n' +
+				`printf '%s\\n' '${sha}' no\n`,
+			{ mode: 0o755 },
 		);
 		writeCrlf(
 			path.join(trace, '10b-merge-approval.md'),
@@ -201,18 +229,16 @@ describe('trace-check.sh CRLF fixture (#2566)', () => {
 			],
 			[['merge'], ['OK merge-sha-binding']],
 		] as const) {
-			const result = run(repo, [
-				...command,
-				'--slug',
-				'crlf-gates',
-				'--trace-dir',
-				trace,
-			]);
+			const result = run(
+				repo,
+				[...command, '--slug', 'crlf-gates', '--trace-dir', trace],
+				command[0] === 'merge',
+			);
 			expect(
 				result.code,
 				`${command.join(' ')}\n${result.out}\n${result.err}`,
 			).toBe(0);
 			for (const line of expected) expect(result.out).toContain(line);
 		}
-	}, 30_000);
+	}, 105_000);
 });

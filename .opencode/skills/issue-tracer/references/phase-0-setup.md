@@ -26,6 +26,39 @@ Re-run steps 1-3 at every freshness re-record (the start of Phase 4 and Phase 5)
 
 This gate complements, not replaces, the mechanical claim tooling: once `zaxbygraph claim` / `release` / `claims --live` / `pr-guard` ship (#77) and the `claimed` gate lands in `triage`/`bundle` (#74), prefer those commands and record their outcomes here.
 
+## Cluster preflight artifact (canonical template)
+
+Phase 1 refuses a trace without `repro/cluster-preflight.md` (#3605 AC3) — write it
+BEFORE `trace-init.sh` or any other setup artifact, while the sweep results are in front
+of you. Shape (validated mechanically; GitHub truth stays human-verified):
+
+```md
+# Cluster Preflight — collated #A + #B
+
+recorded-at: <RFC3339 timestamp of THIS FILE's authoring>
+
+Method: one line naming the live reads performed (per-issue `gh issue view --json
+comments,state,closedByPullRequestsReferences`, `gh pr list --search "<N> in:body"`,
+remote-branch check).
+
+## candidate #A
+
+- claim comments (live, full thread): <result>
+- open PRs naming A in:body: <result>
+- verdict: CLEAR | CLAIMED | PR-IN-FLIGHT
+
+## candidate #B
+
+- claim comments (live, full thread): <result>
+- open PRs naming B in:body: <result>
+- verdict: CLEAR | CLAIMED | PR-IN-FLIGHT
+```
+
+Rules: `recorded-at` must be truthful (write the file when the sweep runs; if you
+reconstruct it later, say so in prose and cite the live evidence — a backdated stamp is a
+fabricated artifact); every candidate section needs BOTH a `claim` line and an `open PR`
+line; rejected candidates (foreign claims, collision risk) stay listed with their verdict.
+
 ## Clean-worktree rule
 
 If the worktree has unrelated user-owned uncommitted changes, never stash or touch them. Create a separate `git worktree` at the synced base and do all trace work there.

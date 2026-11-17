@@ -24,9 +24,10 @@ root="$(git rev-parse --show-toplevel 2>/dev/null)" || { echo "repro-check: not 
 root="$(to_shell_path "$root")"
 root_real="$(cd "$root" && pwd -P)"
 script_dir="$(cd "$(dirname "$0")" && pwd -P)"
+. "$script_dir/github-api.sh"
 trace_root_real=""
 
-usage() { echo "usage: repro-check.sh {run|checkpoint|verify-checkpoint|verify-semantics|anchor|verify-anchor} --slug <slug> ..." >&2; exit 2; }
+usage() { echo "usage: repro-check.sh {run|checkpoint|verify-checkpoint|verify-semantics|verify-generated|anchor|verify-anchor} --slug <slug> ..." >&2; exit 2; }
 valid_slug() { case "$1" in ''|*[!a-z0-9-]*) return 1;; *) return 0;; esac; }
 valid_id() {
   local suffix
@@ -206,6 +207,8 @@ set_trace_root() {
 
 trace_for() {
   [ -n "$trace_dir" ] || trace_dir="$root/.agents/issue-traces/$slug"
+  # A generated runner or Windows caller may supply a native drive path.
+  case "$trace_dir" in [A-Za-z]:/*) trace_dir="$(to_shell_path "$trace_dir")" ;; esac
   validate_trace_dir_prefix
   refuse_ancestor_symlink_escape
 }
@@ -253,7 +256,7 @@ validate_manifest() {
     *$'\r'*) problem="header" ;;
     *) problem="$(awk -F '\t' -v allow_conflicts="$allow_conflicts" -v allow_legacy_format_only="$allow_legacy_format_only" '
     NR == 1 {
-      if ($0 !~ /^# issue-tracer checkpoint manifest v1 rows=[0-9]+$/) { bad = "header"; exit }
+      if ($0 !~ /^# issue-tracer checkpoint manifest v[12] rows=[0-9]+$/) { bad = "header"; exit }
       declared = $0
       sub(/^.*rows=/, "", declared)
       declared = declared + 0
@@ -312,7 +315,7 @@ validate_manifest() {
       counts="${problem#count }"
       echo "repro-check: checkpoint manifest header records ${counts%% *} rows, found ${counts#* } (rows deleted or truncated)" >&2
       ;;
-    *) echo "repro-check: invalid manifest header (want '# issue-tracer checkpoint manifest v1 rows=<N>' on line 1)" >&2 ;;
+    *) echo "repro-check: invalid manifest header (expected version 1 or 2 and row count on line 1)" >&2 ;;
   esac
   exit 2
 }
@@ -324,29 +327,6 @@ manifest_has_pair() {
   trace_path_safe "$1" file || return 1
   awk -F '\t' -v want_path="$2" -v want_check="$3" \
     'NR > 1 && $3 == want_path && $6 == want_check { found = 1; exit } END { exit !found }' "$1"
-}
-
-# Append one data row and restamp the header's recorded count in a single
-# temp-file swap, so the manifest is never observable in a state where the
-# count and the rows disagree - a mid-loop `exit` (an invalid later path, an
-# already-frozen repeat) leaves a consistent file rather than bricking it.
-# Mirrors bound_log's `$log.truncate.tmp` pattern; refuse_nonregular_target
-# guards the temp name as well as the manifest, and `mv` renames over the
-# destination rather than writing through a symlink planted there.
-append_manifest_row() {
-  local file="$1" count="$2" row="$3" temp
-  temp="$file.append.tmp"
-  trace_path_safe "$(dirname "$file")" dir || { echo "repro-check: manifest directory is missing or unsafe" >&2; exit 2; }
-  trace_path_safe "$file" file || true
-  refuse_nonregular_target "$file"
-  open_exclusive_target "$temp" || { echo "repro-check: could not create manifest temp file safely" >&2; exit 2; }
-  {
-    printf '# issue-tracer checkpoint manifest v1 rows=%s\n' "$count"
-    awk 'NR > 1' "$file"
-    printf '%s\n' "$row"
-  } >&"$exclusive_fd"
-  close_exclusive_target
-  mv "$temp" "$file"
 }
 
 # Refuse to redirect/append into a pre-existing path that is not a regular
@@ -561,7 +541,9 @@ quoted_argv() { local arg; for arg in "$@"; do printf '%q ' "$arg"; done; }
 
 do_run() {
   local base="" class="" check_id="" expect="" timeout_seconds=600 deps=link arg base_status head_status base_result head_result verdict exit_code=0
+  local base_only=0
   local copies=()
+  local frozen_paths=() frozen_blobs=() index
   trace_dir=""; slug=""
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -570,6 +552,10 @@ do_run() {
       --id) [ "$#" -ge 2 ] || usage; check_id="$2"; shift 2;;
       --expect) [ "$#" -ge 2 ] || usage; expect="$2"; shift 2;;
       --copy) [ "$#" -ge 2 ] || usage; copies+=("$2"); shift 2;;
+      --frozen-copy)
+        [ "$#" -ge 3 ] && is_sha1 "$3" || usage
+        frozen_paths+=("$2"); frozen_blobs+=("$3"); shift 3;;
+      --base-only) base_only=1; shift;;
       --deps) [ "$#" -ge 2 ] || usage; deps="$2"; shift 2;;
       --timeout) [ "$#" -ge 2 ] || usage; timeout_seconds="$2"; shift 2;;
       --slug) [ "$#" -ge 2 ] || usage; slug="$2"; shift 2;;
@@ -601,9 +587,27 @@ do_run() {
   git worktree add --detach "$worktree" "$base" >/dev/null 2>&1 || { echo "repro-check: could not create disposable worktree" >&2; exit 2; }
   worktree_real="$(cd "$worktree" 2>/dev/null && pwd -P)" || { echo "repro-check: disposable worktree cannot be resolved" >&2; exit 2; }
   for arg in ${copies[@]+"${copies[@]}"}; do copy_path "$arg"; done
+  index=0
+  for arg in ${frozen_paths[@]+"${frozen_paths[@]}"}; do
+    repo_file_safe "$arg" || { echo "repro-check: frozen input is not a regular repository file" >&2; exit 2; }
+    copy_path "$arg"
+    if [ ! -f "$worktree_real/$arg" ] || [ "$(git -C "$root_real" hash-object --path="$arg" "$worktree_real/$arg")" != "${frozen_blobs[$index]}" ]; then
+      echo "repro-check: copied input differs from its frozen blob: $arg" >&2; exit 2
+    fi
+    index=$((index + 1))
+  done
   link_deps
   base_status="$(run_one "$worktree" "$trace_dir/repro/$check_id.base.log" "$timeout_seconds" "$@")"
   trace_path_safe "$trace_dir/repro/$check_id.base.log" file || { echo "repro-check: base log was not created safely" >&2; exit 2; }
+  if [ "$base_only" -eq 1 ]; then
+    printf 'base %s: %s exit=%s log=repro/%s.base.log\n' "$check_id" "$base" "$base_status" "$check_id"
+    case "$class:$base_status" in
+      PRESERVING:0) exit 0;;
+      NEW-SURFACE:126|NEW-SURFACE:127) grep -Eq -- "$expect" "$trace_dir/repro/$check_id.base.log"; exit $?;;
+      *:0|*:124|*:125|*:126|*:127|PRESERVING:*) exit 1;;
+      *) grep -Eq -- "$expect" "$trace_dir/repro/$check_id.base.log"; exit $?;;
+    esac
+  fi
   head_status="$(run_one "$root" "$trace_dir/repro/$check_id.head.log" "$timeout_seconds" "$@")"
   trace_path_safe "$trace_dir/repro/$check_id.head.log" file || { echo "repro-check: head log was not created safely" >&2; exit 2; }
   if [ "$base_status" -eq 124 ] || [ "$head_status" -eq 124 ]; then
@@ -632,6 +636,9 @@ do_run() {
 acceptance_rows() {
   local file="$trace_dir/02-reproduction.md"
   trace_path_safe "$file" file || return 1
+  if [ "$(wc -c < "$file")" -gt 2097152 ]; then
+    echo "repro-check: acceptance source exceeds 2 MiB" >&2; return 1
+  fi
   awk -F '|' '
     # Acceptance tables deliberately accept LF and CRLF files. Remove only
     # the record terminator CR; an embedded CR remains a rejected control byte.
@@ -689,16 +696,18 @@ verify_manifest_semantics() {
       latest_check[pair] = $6
       latest_argv[pair] = $7
       latest_expect[pair] = $8
+      latest_base[pair] = $9
     }
     END {
       for (pair in latest_check) {
         check = latest_check[pair]
-        if (seen[check] && (check_argv[check] != latest_argv[pair] || check_expect[check] != latest_expect[pair])) {
+        if (seen[check] && (check_argv[check] != latest_argv[pair] || check_expect[check] != latest_expect[pair] || check_base[check] != latest_base[pair])) {
           exit 1
         }
         seen[check] = 1
         check_argv[check] = latest_argv[pair]
         check_expect[check] = latest_expect[pair]
+        check_base[check] = latest_base[pair]
       }
       for (check in seen) print check "\t" check_argv[check] "\t" check_expect[check]
     }
@@ -714,8 +723,10 @@ verify_manifest_semantics() {
   return 1
 }
 
-do_checkpoint() {
-  local reason="-" check_id="" argv="" expect="" base="" path manifest seq kind mode blob row
+do_checkpoint() (
+  local reason="-" check_id="" argv="" expect="" base="" path manifest seq=0 kind mode blob row
+  local candidate original="" table="" checked
+  local paths=() rows=()
   trace_dir=""; slug=""
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -745,25 +756,24 @@ do_checkpoint() {
   trace_path_safe "$trace_dir/repro" dir || { echo "repro-check: repro directory is missing or unsafe" >&2; exit 2; }
   trace_path_safe "$manifest" file || true
   refuse_nonregular_target "$manifest"
-  if [ ! -f "$manifest" ]; then
-    open_exclusive_target "$manifest" || { echo "repro-check: could not create checkpoint manifest safely" >&2; exit 2; }
-    printf '# issue-tracer checkpoint manifest v1 rows=0\n' >&"$exclusive_fd"
-    close_exclusive_target
-  fi
   # validate_manifest owns the header check: it is strictly stronger than the
   # old `grep -Fx` (which matched the string on ANY line) and additionally
   # proves the recorded count, the seq run, and the field count.
-  if [ "$kind" = AMEND ]; then
+  if [ -f "$manifest" ]; then
+    original="$(git hash-object --no-filters "$manifest")"
+    seq="$(awk 'END {print NR - 1}' "$manifest")"
+  fi
+  if [ "$kind" = AMEND ] && [ -f "$manifest" ]; then
     # An amendment may be the next step in reconciling two same-path checks
     # that captured different bytes. Strict verification still rejects the
     # intermediate manifest; permit only this targeted append to proceed. The
     # legacy FORMAT_ONLY exception is validation-only: the reason parser above
     # still rejects a newly requested FORMAT_ONLY amendment.
     validate_manifest "$manifest" allow-conflicts allow-legacy-format-only
-  else
+  elif [ -f "$manifest" ]; then
     validate_manifest "$manifest"
   fi
-  seq="$(awk 'END {print NR - 1}' "$manifest")"
+  base="$(git rev-parse "$base^{commit}")"
   for path in "$@"; do
     is_inside_root "$path" || { echo "repro-check: checkpoint path must be repo-relative without ..: $path" >&2; exit 2; }
     has_bad_path "$path" && { echo "repro-check: checkpoint path cannot contain control bytes" >&2; exit 2; }
@@ -772,8 +782,10 @@ do_checkpoint() {
     # would append a fresh CHECKPOINT row that last-writer-wins re-baselines a
     # weakened check to green in do_verify. Refuse it: superseding a frozen
     # pair requires an AMEND row that names a reason and stays in the file.
-    # The manifest is re-read per path, so a pair frozen by an earlier
-    # iteration of this same invocation is already recorded and also refused.
+    for checked in ${paths[@]+"${paths[@]}"}; do
+      [ "$path" != "$checked" ] || { echo "repro-check: $path ($check_id) is already frozen in this invocation" >&2; exit 2; }
+    done
+    paths+=("$path")
     if [ "$kind" = CHECKPOINT ] && manifest_has_pair "$manifest" "$path" "$check_id"; then
       echo "repro-check: $path ($check_id) is already frozen; supersede it with --reason CHECK_WRONG|AC_CHANGED_BY_USER" >&2
       exit 2
@@ -788,13 +800,26 @@ do_checkpoint() {
     mode="$(git ls-files -s -- "$path" | awk 'NR==1 {print $1}')"
     [ -n "$mode" ] || { [ -x "$root_real/$path" ] && mode=100755 || mode=100644; }
     seq=$((seq + 1))
-    # $seq is post-increment, so it is also the new total row count that the
-    # header must record. Row and header land together in one temp-file swap.
-    row="$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "$seq" "$kind" "$path" "$blob" "$mode" "$check_id" "$argv" "$expect" "$(git rev-parse "$base^{commit}")" "$reason")"
-    append_manifest_row "$manifest" "$seq" "$row"
-    echo "checkpoint: $kind $path"
+    row="$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "$seq" "$kind" "$path" "$blob" "$mode" "$check_id" "$argv" "$expect" "$base" "$reason")"
+    rows+=("$row")
   done
-}
+  if trace_path_safe "$trace_dir/02-reproduction.md" file; then
+    table="$(acceptance_rows)" || { echo "repro-check: invalid acceptance table for replay generation" >&2; exit 2; }
+  fi
+  candidate="$(mktemp "$trace_dir/repro/.checkpoint-manifest.XXXXXX")"
+  trap 'rm -f -- "$candidate"' EXIT
+  {
+    printf '# issue-tracer checkpoint manifest v2 rows=%s\n' "$seq"
+    if [ -n "$original" ]; then awk 'NR > 1' "$manifest"; fi
+    printf '%s\n' "${rows[@]}"
+  } >"$candidate"
+  if [ -n "$table" ]; then
+    printf '%s\n' "$table" | node "$script_dir/generate-checkpoint-artifacts.mjs" "$candidate" "$trace_dir" "$slug" --publish "$original"
+  else
+    node "$script_dir/generate-checkpoint-artifacts.mjs" "$candidate" "$trace_dir" "$slug" --publish "$original" </dev/null
+  fi
+  for path in ${paths[@]+"${paths[@]}"}; do echo "checkpoint: $kind $path"; done
+)
 
 do_verify() {
   local manifest line path old check_id new changed=0
@@ -853,6 +878,17 @@ do_verify_semantics() {
   echo "semantics: OK"
 }
 
+do_verify_generated() {
+  local manifest table=""
+  do_verify "$@"
+  manifest="$trace_dir/repro/checkpoint.manifest"
+  if trace_path_safe "$trace_dir/02-reproduction.md" file; then
+    table="$(acceptance_rows)" || { echo "repro-check: invalid acceptance table for replay verification" >&2; exit 2; }
+    verify_manifest_semantics "$manifest"
+  fi
+  printf '%s\n' "$table" | node "$script_dir/generate-checkpoint-artifacts.mjs" "$manifest" "$trace_dir" "$slug" --verify
+}
+
 state_value() {
   local key="$1" state_file="$trace_dir/state.md"
   [ -n "$trace_dir" ] || state_file="$root/.agents/issue-traces/$slug/state.md"
@@ -895,13 +931,14 @@ do_anchor() {
 }
 
 do_verify_anchor() {
-  local receipt="" manifest expected_digest expected_semantics expected_tree parsed_slug parsed_manifest parsed_semantics parsed_tree
+  local receipt="" published="" body="" external="" manifest expected_digest expected_semantics expected_tree parsed_slug parsed_manifest parsed_semantics parsed_tree
   trace_dir=""; slug=""
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --slug) [ "$#" -ge 2 ] || usage; slug="$2"; shift 2;;
       --trace-dir) [ "$#" -ge 2 ] || usage; trace_dir="$2"; shift 2;;
       --receipt) [ "$#" -ge 2 ] || usage; receipt="$2"; shift 2;;
+      --published) [ "$#" -ge 2 ] || usage; published="$2"; shift 2;;
       *) usage;;
     esac
   done
@@ -918,6 +955,31 @@ do_verify_anchor() {
   [ "$parsed_slug" = "$slug" ] || { echo "repro-check: anchor receipt slug does not match --slug" >&2; exit 2; }
   trace_for
   set_trace_root
+  if [ -n "$published" ]; then
+    local comment_pattern='^https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/issues/([1-9][0-9]*)#issuecomment-([1-9][0-9]*)$'
+    [[ "$published" =~ $comment_pattern ]] || { echo "repro-check: invalid published issue comment URL" >&2; exit 2; }
+    local repo="${BASH_REMATCH[1]}" number="${BASH_REMATCH[2]}" comment_id="${BASH_REMATCH[3]}"
+    local bound origin expected_issue remote_issue repo_lower
+    repo_lower="$(printf '%s' "$repo" | tr '[:upper:]' '[:lower:]')"
+    expected_issue="https://github.com/$repo_lower/issues/$number"
+    bound="$(state_value published-issue)"
+    origin="$(git -C "$root_real" config --get remote.origin.url || true)"
+    case "$(printf '%s' "${origin%.git}" | tr '[:upper:]' '[:lower:]')" in
+      "https://github.com/$repo_lower"|"git@github.com:$repo_lower"|"ssh://git@github.com/$repo_lower") ;;
+      *) echo "repro-check: published comment repository differs from origin" >&2; exit 2;;
+    esac
+    if [ -n "$bound" ] && [ "$(printf '%s' "$bound" | tr '[:upper:]' '[:lower:]')" != "$expected_issue" ]; then
+      echo "repro-check: published comment issue differs from trace issue" >&2; exit 2
+    fi
+    body="$(bounded_gh_api 15 "repos/$repo/issues/comments/$comment_id" --jq '.issue_url, .body')" || { echo "repro-check: could not retrieve published receipt" >&2; exit 1; }
+    remote_issue="${body%%$'\n'*}"
+    if [ "$(printf '%s' "$remote_issue" | tr '[:upper:]' '[:lower:]')" != "https://api.github.com/repos/$repo_lower/issues/$number" ]; then
+      echo "repro-check: published comment belongs to a different issue" >&2; exit 1
+    fi
+    body="${body#*$'\n'}"
+    external="$(printf '%s\n' "$body" | awk '/^issue-tracer-checkpoint-v1 / { sub(/\r$/, ""); print; n++ } END { if (n != 1) exit 1 }')" || { echo "repro-check: expected one published receipt" >&2; exit 1; }
+    [ "$external" = "$receipt" ] || { echo "repro-check: published receipt differs" >&2; exit 1; }
+  fi
   manifest="$trace_dir/repro/checkpoint.manifest"
   trace_path_safe "$manifest" file || { echo "repro-check: checkpoint manifest missing or invalid" >&2; exit 2; }
   do_verify --slug "$slug" --trace-dir "$trace_dir"
@@ -937,6 +999,7 @@ case "$command" in
   checkpoint) do_checkpoint "$@";;
   verify-checkpoint) do_verify "$@";;
   verify-semantics) do_verify_semantics "$@";;
+  verify-generated) do_verify_generated "$@";;
   anchor) do_anchor "$@";;
   verify-anchor) do_verify_anchor "$@";;
   *) usage;;

@@ -64,12 +64,15 @@ const CLASSIFIED: Record<string, string> = {
 		'ordering: placeholderCounter sequences placeholder minting; the v2shim-<n>-<random> ids ARE persisted by v2 callers (dispatch_lanes writes them as background-delegations correlationId/subagentSessionId), but durable uniqueness across restarts comes from the random suffix, never the counter — the host-minted session id is tracked only in the in-session placeholder map',
 	'src/config/loader.ts':
 		'metrics: rawConfigReadAttempts (config-path read-attempt observability for the #3354 non-regular-file guard — pure gauge, never persisted, never feeds identity; reset via _internals in tests)',
+	'src/turbo/lean/runner.ts':
+		'ordering: leanRunnerFallbackScopeRunSeq gives each runner instance its own run ordinal for the scoped model-fallback key; scoped overrides are in-memory only (MAX_SCOPED_MODEL_OVERRIDES=256, 30-min TTL, src/models/model-override-state.ts), never persisted, never cross a restart',
 	'src/hooks/shell-write-detect.ts':
 		'bound: procsubRecursionDepth caps synchronous process-substitution body recursion (#3569, 8-level cap, restored in try/finally) — a call-stack depth guard, never persisted, never an identity',
 	'src/telemetry.ts': 'metrics: _emitCount (emit budget telemetry)',
 	'src/index.ts':
 		'metrics: instanceExitCleanupCounter / serverInitInvocations (init telemetry)',
-	'src/state.ts': 'timestamp: _lastIdleSweepAtMs (idle sweep cadence)',
+	'src/state.ts':
+		'timestamp: _lastIdleSweepAtMs (idle sweep cadence); ordering: dispatchParentWriteGeneration stamps per-write generations on dispatch-lineage entries so a failed claim rollback only undoes its own in-memory write (never persisted, never an identity)',
 	'src/background/candidate-contract.ts':
 		'metrics: candidateArtifactCacheHits/Misses (cache statistics)',
 	'src/background/pr-event-delivery.ts':

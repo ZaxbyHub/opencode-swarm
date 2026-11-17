@@ -60,7 +60,11 @@ interface GhApiResult {
 
 /** Test seam: run `gh api <endpoint>` under the full subprocess contract. */
 function ghApiViaCli(endpoint: string, cwd: string): GhApiResult {
-	const proc = spawnSync('gh', ['api', endpoint], {
+	// Routed through _internals.spawnSync (#3661 item 2): spawnSync is
+	// synchronous and reaps the child itself, so there is deliberately no
+	// post-call kill — signalling the returned pid would target a reaped,
+	// potentially recycled process.
+	const proc = _internals.spawnSync('gh', ['api', endpoint], {
 		cwd,
 		input: '',
 		timeout: API_TIMEOUT_MS,
@@ -74,38 +78,26 @@ function ghApiViaCli(endpoint: string, cwd: string): GhApiResult {
 			GH_NO_UPDATE_NOTIFIER: '1',
 		},
 	});
+	if (proc.error) {
+		return { ok: false, status: -1, json: null, error: proc.error.message };
+	}
+	if (proc.status !== 0) {
+		return {
+			ok: false,
+			status: proc.status,
+			json: null,
+			error: (proc.stderr || '').split('\n')[0]?.slice(0, 300) || `gh exited ${proc.status}`,
+		};
+	}
 	try {
-		if (proc.error) {
-			return { ok: false, status: -1, json: null, error: proc.error.message };
-		}
-		if (proc.status !== 0) {
-			return {
-				ok: false,
-				status: proc.status,
-				json: null,
-				error: (proc.stderr || '').split('\n')[0]?.slice(0, 300) || `gh exited ${proc.status}`,
-			};
-		}
-		try {
-			return { ok: true, status: 0, json: JSON.parse(proc.stdout) };
-		} catch (error) {
-			return {
-				ok: false,
-				status: 0,
-				json: null,
-				error: `gh api ${endpoint} returned non-JSON output: ${error instanceof Error ? error.message : String(error)}`,
-			};
-		}
-	} finally {
-		// spawnSync is synchronous; on timeout the child is already reaped.
-		// Best-effort kill for any platform quirk, per AGENTS.md invariant 3.
-		if (proc.error && proc.pid) {
-			try {
-				process.kill(proc.pid);
-			} catch {
-				// already exited
-			}
-		}
+		return { ok: true, status: 0, json: JSON.parse(proc.stdout) };
+	} catch (error) {
+		return {
+			ok: false,
+			status: 0,
+			json: null,
+			error: `gh api ${endpoint} returned non-JSON output: ${error instanceof Error ? error.message : String(error)}`,
+		};
 	}
 }
 
@@ -125,9 +117,11 @@ function writeArtifactAtomic(target: string, contents: string): void {
 export const _internals: {
 	ghApi: typeof ghApiViaCli;
 	writeArtifactAtomic: typeof writeArtifactAtomic;
+	spawnSync: typeof spawnSync;
 } = {
 	ghApi: ghApiViaCli,
 	writeArtifactAtomic,
+	spawnSync,
 };
 
 /** Thrown by refuse(); main() converts it to the exit code. */
@@ -204,6 +198,79 @@ interface CheckRun {
 	name: string;
 	status: string;
 	conclusion: string | null;
+	/** Producing GitHub App (nullable on the wire; used for duplicate-name binding). */
+	app?: { slug?: string | null } | null;
+}
+
+/**
+ * #3716 item 2 / #3661 item 3: the app slug that produces check runs for
+ * workflows in THIS repository. The contract's owner records map every
+ * required context to a workflow file in this repo, so a run carrying an
+ * EXPLICIT different app slug is a foreign producer and cannot satisfy a
+ * required context. Runs with no app field stay acceptable (the legacy
+ * fixture/API tolerance the existing tests pin).
+ */
+export const REPO_WORKFLOW_PRODUCER_APP_SLUG = 'github-actions';
+
+/**
+ * One shared producer-binding rule for required-context satisfaction, used by
+ * BOTH the completeness loop (head qualification) and the captured success-set
+ * derivation (mergeGroup.contexts) so the two can never diverge (#3716 item 2
+ * — the name-only trust surface is gone).
+ *
+ * Rules (the completeness loop's #3661 item-3 rules plus the #3716 item-2
+ * producer-ownership clause):
+ * 1. at least one same-named run, every same-named run completed+success;
+ * 2. duplicates: every run carries a non-empty app slug and all slugs agree —
+ *    ambiguity is a TERMINAL refusal (existing behavior, message preserved);
+ * 3. a run carrying an explicit app slug other than the repo-workflow
+ *    producer does not satisfy the context (foreign producer → the head is
+ *    unqualified, i.e. a head SKIP, not a terminal refusal).
+ *
+ * Returns true when the context is satisfied at this head; throws
+ * CaptureRefusal for rule-2 ambiguity (exact existing messages).
+ */
+export function contextRunsSatisfyBinding(
+	name: string,
+	runs: readonly CheckRun[],
+	head: string,
+): boolean {
+	const matches = runs.filter((run) => run.name === name);
+	if (matches.length === 0) return false;
+	const allSuccessful = matches.every(
+		(run) => run.status === 'completed' && run.conclusion === 'success',
+	);
+	if (!allSuccessful) return false;
+	if (matches.length > 1) {
+		// Duplicates are acceptable only when the producing app is
+		// unambiguous: EVERY same-named run carries a non-empty app slug and
+		// they all agree. Missing identity on any duplicate is ambiguous and
+		// refuses.
+		const slugs = matches.map((run) => run.app?.slug);
+		const allIdentified = slugs.every(
+			(slug) => typeof slug === 'string' && slug.length > 0,
+		);
+		const distinctSlugs = new Set(
+			slugs.filter(
+				(slug): slug is string => typeof slug === 'string' && slug.length > 0,
+			),
+		);
+		if (!allIdentified || distinctSlugs.size !== 1) {
+			throw new CaptureRefusal(
+				`required context "${name}" has ambiguous producer binding at head ${head} (same-named runs must all carry one agreeing app slug)`,
+			);
+		}
+	}
+	// Producer ownership: an explicit foreign app slug cannot satisfy a
+	// context the contract anchors to this repository's workflows.
+	const foreignProducer = matches.some(
+		(run) =>
+			typeof run.app?.slug === 'string' &&
+			run.app.slug.length > 0 &&
+			run.app.slug !== REPO_WORKFLOW_PRODUCER_APP_SLUG,
+	);
+	if (foreignProducer) return false;
+	return true;
 }
 
 interface ActionsRun {
@@ -334,10 +401,21 @@ export function runCapture(cwd = REPO_ROOT): RequiredCheckEvidence {
 			check_runs?: CheckRun[];
 		};
 		const all = checks.check_runs ?? [];
-		const contextsComplete = contract.requiredContexts.every((name) => {
-			const match = all.find((run) => run.name === name);
-			return match !== undefined && match.status === 'completed' && match.conclusion === 'success';
-		});
+		let contextsComplete = true;
+		for (const name of contract.requiredContexts) {
+			// #3661 item 3 + #3716 item 2: one shared producer-binding rule
+			// (contextRunsSatisfyBinding) decides head qualification here and
+			// the mergeGroup.contexts derivation below — the two paths cannot
+			// diverge. Original inline semantics preserved: no match or a
+			// non-success run makes THIS head unqualifying (skip to the next
+			// candidate, F-002); duplicate ambiguity refuses terminally
+			// (exact message); a foreign-producer run (#3716 item 2) makes
+			// the head unqualifying — a skip, not a refusal.
+			if (!contextRunsSatisfyBinding(name, all, head)) {
+				contextsComplete = false;
+				break;
+			}
+		}
 		const runsCoverWorkflows = mergeGroupWorkflows.every((workflow) =>
 			runs.some((run) => run.head_sha === head && run.path === workflow.file),
 		);
@@ -353,12 +431,20 @@ export function runCapture(cwd = REPO_ROOT): RequiredCheckEvidence {
 		);
 	}
 
-	// Step 3 — merge-group evidence from the selected head. The run map must
-	// cover EVERY contract workflow (empty arrays allowed for workflows that
-	// do not run on merge_group), and every mapped/receipted run's endpoint
-	// must appear in sources.
+	// Step 3 — merge-group evidence from the selected head, scoped to CONTRACT
+	// workflows only (#3661 item 4): a merge_group run at the head from a
+	// workflow outside the contract is excluded here, matching the
+	// validator's EVIDENCE_MERGE_GROUP_UNKNOWN rule by construction instead
+	// of failing the offline validation later. The run map must still cover
+	// EVERY contract workflow (empty arrays allowed for workflows that do
+	// not run on merge_group), and every mapped/receipted run's endpoint must
+	// appear in sources.
+	const contractWorkflowFiles = new Set(contract.workflows.map((workflow) => workflow.file));
 	const selectedRuns = runs.filter(
-		(run) => run.head_sha === captureSha && run.event === 'merge_group',
+		(run) =>
+			run.head_sha === captureSha &&
+			run.event === 'merge_group' &&
+			contractWorkflowFiles.has(run.path),
 	);
 	const observedRuns = selectedRuns.map((run) => ({
 		id: run.id,
@@ -387,13 +473,14 @@ export function runCapture(cwd = REPO_ROOT): RequiredCheckEvidence {
 		}
 	}
 	// mergeGroup.contexts stays contract-scoped (the validator rejects
-	// undeclared contexts); every one is verified successful above.
-	const successfulNames = new Set(
-		checkRuns
-			.filter((run) => run.status === 'completed' && run.conclusion === 'success')
-			.map((run) => run.name),
+	// undeclared contexts); every one is verified successful above. #3716
+	// item 2: the derivation goes through the SAME producer-binding rule as
+	// the completeness loop (contextRunsSatisfyBinding) — the name-only
+	// successfulNames Set is gone, so a same-named run from a foreign app can
+	// no longer satisfy a required context on this path either.
+	const contexts = contract.requiredContexts.filter((name) =>
+		contextRunsSatisfyBinding(name, checkRuns, captureSha),
 	);
-	const contexts = contract.requiredContexts.filter((name) => successfulNames.has(name));
 
 	// Step 4 — per-workflow capture: exact Contents endpoint pinned to the
 	// capture SHA, blob SHA, on: events, and the LF-normalized SHA-256 of the
@@ -513,15 +600,50 @@ export function runCapture(cwd = REPO_ROOT): RequiredCheckEvidence {
 }
 
 export function main(argv: string[] = process.argv.slice(2), cwd = REPO_ROOT): number {
-	if (argv.includes('--self-test')) {
-		return runSelfTest() ? 0 : 1;
-	}
-	const dryRun = argv.includes('--dry-run');
-	const outputIndex = argv.indexOf('--output');
-	const outputArg = outputIndex >= 0 ? argv[outputIndex + 1] : undefined;
-	if (outputIndex >= 0 && (outputArg === undefined || outputArg.startsWith('--'))) {
-		console.error('capture-required-check-evidence: --output requires a path');
+	// Strict argv (#3661 item 1): only the space-separated `--output <path>`
+	// form is recognized. Every other token — unknown flags, the
+	// `--output=<path>` equals form, case-variant spellings, stray positionals,
+	// and a bare `--` (no in-repo caller relies on it) — refuses with exit 2
+	// BEFORE any capture work, self-test run, or write, so a typo can never
+	// silently fall through to the default write of the committed evidence
+	// artifact. F-007 (PR #3718 review): the --self-test dispatch ran BEFORE
+	// this loop, so `--self-test --bogus` exited with the self-test verdict
+	// and the strict contract was bypassable; the loop now validates EVERY
+	// token first (the documented behavior: unknown flags exit 2), then
+	// --self-test short-circuits the capture path.
+	let dryRun = false;
+	let outputArg: string | undefined;
+	let selfTest = false;
+	for (let i = 0; i < argv.length; i += 1) {
+		const token = argv[i];
+		if (token === '--self-test') {
+			selfTest = true;
+			continue;
+		}
+		if (token === '--dry-run') {
+			dryRun = true;
+			continue;
+		}
+		if (token === '--output') {
+			const value = argv[i + 1];
+			// An empty value would resolve to the cwd and only fail later
+			// with exit 1 (F-007) — reject it as a missing path at the
+			// contract boundary instead.
+			if (value === undefined || value.length === 0 || value.startsWith('--')) {
+				console.error('capture-required-check-evidence: --output requires a path');
+				return 2;
+			}
+			outputArg = value;
+			i += 1;
+			continue;
+		}
+		console.error(
+			`capture-required-check-evidence: unrecognized argument "${token}" (allowed: --self-test, --dry-run, --output <path>)`,
+		);
 		return 2;
+	}
+	if (selfTest) {
+		return runSelfTest() ? 0 : 1;
 	}
 	try {
 		const artifact = runCapture(cwd);

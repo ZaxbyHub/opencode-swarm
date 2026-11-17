@@ -10,6 +10,7 @@ import * as path from 'node:path';
 import { WRITE_TOOL_NAMES } from '../../config/constants';
 import { classifyFile } from '../../context/zone-classifier';
 import { isPathWithinDeclaredScope } from '../../scope/path-identity';
+import { redactJwsTokens } from '../../utils/jws-redaction';
 import { normalizeToolName } from '../normalize-tool-name';
 import { getGlobMatcher } from './file-authority';
 
@@ -229,16 +230,53 @@ export function redactShellCommand(cmd: string): string {
 		'$1[REDACTED]$3',
 	);
 
+	// #3723: whole JWS tokens whose header exceeds the legacy arm's 1024-char
+	// bound (x5c certificate-chain headers are 1.2-5 KB) — linear single-pass
+	// span scan. The legacy bounded jwt arm below stays (fast path + pin
+	// parity). Running FIRST, this pre-pass also claims glued family-prefixed
+	// tokens (e.g. `sk-…-eyJ…`) the family arms would truncate at the header —
+	// the token takes the jwt label and the sub-minimum family fragment stays
+	// visible (the family arms' own disclosed bound) — so it changes outcomes
+	// beyond the 1024 bound. Differential fuzz at #3728 found 0 head-worse
+	// cases at or above each family's own minimum fragment length; shorter
+	// prefixes are outside that guarantee.
+	out = redactJwsTokens(out);
+
 	// Well-known token VALUE shapes (content-based; fires regardless of the
 	// flag/variable name carrying them). GitHub suffix bound is 20+: real PATs
 	// are 36+, and shorter truncated/pasted fragments stay minimized too.
+	// #3712: the anthropic/openrouter shapes run BEFORE the openai shape —
+	// the openai pattern subsumes `sk-ant-api03-…` and `sk-or-v1-…`, and in a
+	// sequential .replace chain the first matching arm owns the token, so
+	// ordering assigns the rotation-correct provider label.
 	out = out
+		.replace(/\bsk-ant-[A-Za-z0-9_-]{20,}/g, '[REDACTED:anthropic]')
+		.replace(/\bsk-or-[A-Za-z0-9_-]{20,}/g, '[REDACTED:openrouter]')
 		.replace(/\bsk-[A-Za-z0-9_-]{20,}/g, '[REDACTED:openai]')
 		.replace(/\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}/g, '[REDACTED:github]')
 		.replace(/\bgithub_pat_[A-Za-z0-9_]{22,}/g, '[REDACTED:github]')
 		.replace(/\bAKIA[0-9A-Z]{16}\b/g, '[REDACTED:aws]')
 		.replace(/\bxox[baprs]-[A-Za-z0-9-]{10,}/g, '[REDACTED:slack]')
-		.replace(/\bAIza[A-Za-z0-9_-]{30,}/g, '[REDACTED:google]');
+		.replace(/\bAIza[A-Za-z0-9_-]{30,}/g, '[REDACTED:google]')
+		// #3712 F-006: Google OAuth client secrets, GCP access tokens, Groq
+		// service keys, and whole three-segment JWTs (the HEADER segment is
+		// base64url of `{"…`, so it starts with eyJ).
+		.replace(/\bGOCSPX-[A-Za-z0-9_-]{20,}/g, '[REDACTED:google]')
+		.replace(/\bya29\.[A-Za-z0-9_-]{20,}/g, '[REDACTED:google]')
+		.replace(/\bgsk_[A-Za-z0-9]{20,}/g, '[REDACTED:groq]')
+		.replace(
+			// #3710 review: the PAYLOAD segment is any base64url run, not only a
+			// JSON object — an empty claims object encodes as `e30`, not `eyJ`
+			// (and a `null`/string payload encodes as `bnVsbA`/`Ingi`).
+			/\beyJ[A-Za-z0-9_-]{10,1024}\.[A-Za-z0-9_-]{1,}\.[A-Za-z0-9_-]{10,}/g,
+			'[REDACTED:jwt]',
+		)
+		// #3712 azure CONTEXTUAL arm: connection-string `AccountKey=<base64>`
+		// material — the WHOLE span collapses to the bare family placeholder
+		// (no `AccountKey=` residue). Bare 32-hex Azure OpenAI keys are
+		// deliberately NOT patterned: they are indistinguishable from hex
+		// digests that must stay visible (disclosed bound, #3712 AC3).
+		.replace(/\bAccountKey=[A-Za-z0-9+/]{20,}={0,2}/gi, '[REDACTED:azure]');
 
 	// Long base64-like payload runs (encoded wrappers, heredoc payloads).
 	// Requires ≥80 chars of base64 charset AND at least one uppercase, one

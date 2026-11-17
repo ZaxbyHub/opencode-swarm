@@ -159,6 +159,8 @@ describe('v2 session-client errors + lifecycle (issue #3169 Phase 2)', () => {
 				statusCode: 403,
 				message: 'Forbidden: tool configuration not allowed 403',
 				category: 'provider.authentication_configuration',
+				retryClass: 'operator_action',
+				risk: 'high',
 			});
 		} finally {
 			rmSync(directory, { recursive: true, force: true });
