@@ -164,6 +164,18 @@ describe('#3736 D4-rev3 standard-base64 placements', () => {
 		expect(redactShellCommand(input)).toBe('a=b=c=d=e=f=g=h=i[REDACTED:jwt]');
 		expect(sanitizeFailureEvidenceDisplay(input).includes(header)).toBe(false);
 	});
+	test('r3-D: an assignment candidate in a NON-first segment keeps the dotted prefix intact (exact)', () => {
+		// The interior-= candidate lives in the second segment — the span must
+		// anchor at that segment's run offset, not at the whole run's start
+		// (round-3 finding: `foo.key` was being swallowed with the token).
+		const header = 'Q'.repeat(42);
+		const input = `foo.key=${header}.${'e'.repeat(20)}.${'f'.repeat(12)}`;
+		expect(redactShellCommand(input)).toBe('foo.key[REDACTED:jwt]');
+		expect(sanitizeFailureEvidenceDisplay(input).includes(header)).toBe(false);
+		expect(sanitizeFailureEvidenceDisplay(input).startsWith('foo.key')).toBe(
+			true,
+		);
+	});
 	test('r2-C: a signed token followed by an UNSIGNED neighbor never strands the neighbor payload (exact)', () => {
 		const a = `eyJhbGciOiJIUzI1NiJ9.${PAYLOAD}.${SIG}`;
 		const unsigned = 'eyJhbGciOiJub25lIn0.e30.';

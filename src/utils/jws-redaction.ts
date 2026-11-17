@@ -339,30 +339,35 @@ export function findStandardB64TokenSpans(text: string): JwsTokenSpan[] {
 				// interior '=' with a non-empty prefix. A `a=b=c=…=i=<header>`
 				// prefix chain resolves to the same single candidate as a
 				// short `key=`, with no per-separator probing loop at all.
+				// Round 3: b64RunStart is SEGMENT-relative — the emitted span
+				// adds the segment's cumulative run offset (offsets[i]) so a
+				// candidate in a NON-first segment (`foo.key=<header>…`)
+				// anchors correctly instead of swallowing the dotted prefix.
 				let end = seg.length;
 				let pad = 0;
 				while (end > 0 && seg[end - 1] === '=' && pad < 2) {
 					end -= 1;
 					pad += 1;
 				}
-				let runStart = end;
+				let b64RunStart = end;
 				while (
-					runStart > 0 &&
-					/[A-Za-z0-9+/]/.test(seg[runStart - 1] as string)
+					b64RunStart > 0 &&
+					/[A-Za-z0-9+/]/.test(seg[b64RunStart - 1] as string)
 				) {
-					runStart -= 1;
+					b64RunStart -= 1;
 				}
 				// `end` already sits after the last non-padding char, so the
 				// run length needs no further pad subtraction.
-				const runLen = end - runStart;
+				const runLen = end - b64RunStart;
 				if (
 					runLen >= 40 &&
-					runStart > 1 &&
-					(seg[runStart - 1] as string) === '='
+					b64RunStart > 1 &&
+					(seg[b64RunStart - 1] as string) === '='
 				) {
-					// runStart-1 is the interior '=' separator (a non-empty
-					// prefix exists because runStart > 1)
-					candidateStart = runStart - 1; // span starts AT the separator
+					// b64RunStart-1 is the interior '=' separator (a non-empty
+					// prefix exists because b64RunStart > 1); the span starts
+					// AT the separator, run-relative via offsets[i].
+					candidateStart = (offsets[i] as number) + b64RunStart - 1;
 				}
 				if (candidateStart === -1) {
 					i += 1;
