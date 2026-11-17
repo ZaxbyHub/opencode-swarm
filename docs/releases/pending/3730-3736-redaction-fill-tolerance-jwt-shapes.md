@@ -48,10 +48,12 @@ issue: 3730, 3736
   (both default 60 s) — this bounded recovery covers the weak-executor path;
   a `strength === 'none'` executor and the capability-probe/assessment
   memoization still pin as before (pre-existing; tracked). The #2475
-  downgrade warnings now fire at most once per rebuild window while broken
-  (one probe-level warn + one constructor downgrade warn per window — the
-  bounded re-probe cadence IS the recovery mechanism) instead of once per
-  process.
+  downgrade warnings are now bounded per attempt/reconstruction while broken
+  (one warn per failed probe attempt plus one per weak-executor
+  reconstruction; the two TTLs are independently configurable and other
+  callers may probe between reconstructions, so the combined cadence is the
+  sum of those two bounded rates — the bounded re-probe cadence IS the
+  recovery mechanism) instead of once per process.
 - Glued compositions (`sk-abc-<JWT>`) now select the leftmost-longest family
   span at BOTH sites (disclosed behavior change: the old shell pre-pass
   labeled them jwt; the new span is strictly more redaction).
