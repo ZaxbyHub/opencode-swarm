@@ -137,12 +137,18 @@ function acquireCommitMessageDir(
 	if (process.platform !== 'win32') {
 		const uid = process.getuid?.();
 		if (uid !== undefined && stats.uid !== uid) {
-			return { ok: false, message: 'is not owned by the current user' };
+			return {
+				ok: false,
+				message: `is not owned by the current user (remove the existing directory ${resolvedDir} or chown it to the current user, then retry)`,
+			};
 		}
-		if ((stats.mode & 0o077) !== 0) {
-			// Legacy directories (created by pre-hardening versions with the
-			// umask default) are healed rather than refused: ownership already
-			// passed, so tightening the mode is safe.
+		// Require EXACTLY 0700, not merely "no group/other bits": a restrictive
+		// 0500/0600 (owner r-x / rw-) passes a & 0o077 test but has no owner
+		// write/execute, so the later file write fails with a confusing EACCES.
+		// Any non-0700 mode (legacy umask defaults like 0755, or a restrictive
+		// 0500/0600) is healed rather than refused: ownership already passed,
+		// so tightening/normalising the mode is safe.
+		if ((stats.mode & 0o777) !== 0o700) {
 			try {
 				_internals.chmodSync(resolvedDir, 0o700);
 				stats = _internals.lstatSync(resolvedDir);
@@ -152,7 +158,7 @@ function acquireCommitMessageDir(
 					message: `could not be restricted to mode 0700 (${error instanceof Error ? error.message : String(error)})`,
 				};
 			}
-			if ((stats.mode & 0o077) !== 0) {
+			if ((stats.mode & 0o777) !== 0o700) {
 				return {
 					ok: false,
 					message: 'could not be restricted to mode 0700',

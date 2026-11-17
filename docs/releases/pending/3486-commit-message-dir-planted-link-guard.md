@@ -24,15 +24,23 @@ The tool now ACQUIRES the directory with a real proof before any use:
   name; creation at mode `0700` with a post-create re-`lstat` (recursive
   `mkdir` succeeds over an existing junction on Windows, so the re-stat is the
   actual create-race proof);
-- current-user ownership required and legacy modes healed to `0700` on POSIX
-  (on Windows the per-user `%TEMP%` ACL is the ownership boundary; mode bits
-  are not a security boundary there);
+- current-user ownership required and the exact `0700` permission bits (the
+  nine owner/group/other bits, `mode & 0o777`) enforced/healed on POSIX (any
+  deviation in those bits — a legacy `0755` or a restrictive `0500`/`0600`
+  that would break the owner write — is healed to `0700`; POSIX special bits
+  such as setuid/setgid/sticky are outside this directory-ownership contract;
+  on Windows the per-user `%TEMP%` ACL is the ownership boundary and mode bits
+  are not a security boundary);
 - the TTL prune and the write use only the proven-real directory, and the
   write carries a same-tick `validateTarget` re-proof at the atomic writer's
   boundary, so a directory swapped for a link between acquisition and write is
   refused too;
 - the realpath ancestor check (temp root resolving inside the repository) is
-  retained.
+  retained — it runs before the atomic writer yields and is not repeated at
+  the write boundary, so the same-tick re-proof guarantees the leaf directory
+  only; swapping an ancestor to point into the checkout during the yield would
+  require an unsandboxed same-user process with write access to the temp root's
+  parent, which is outside this issue's threat model.
 
 The TTL prune is best-effort hygiene with its OWN same-tick lstat re-proof at
 entry, and the write carries the same-tick validateTarget re-proof the atomic

@@ -127,6 +127,18 @@ function makeDirLink(target: string, linkPath: string): void {
 	);
 }
 
+type AuthorResult = { success: boolean; message: string; path?: string };
+
+/** Drive one authoring call against a fresh redirected temp root; returns the parsed result. */
+async function authorOnce(message: string): Promise<AuthorResult> {
+	const repo = await createBoundFeedbackRepo();
+	return JSON.parse(
+		await executePreparePrFeedbackCommitMessage({ message }, repo, {
+			sessionID: SESSION_ID,
+		}),
+	) as AuthorResult;
+}
+
 afterEach(() => {
 	Object.assign(_internals, savedInternals);
 	if (savedEnv.TMPDIR === undefined) delete process.env.TMPDIR;
@@ -243,13 +255,14 @@ describe('prepare_pr_feedback_commit_message symlink/junction guard (#3486)', ()
 		) as { success: boolean; message: string };
 
 		expect(result.success).toBe(false);
-		expect(result.message).toContain('inside the repository');
+		// Discriminate the realpath ancestor refusal (:315) from the lexical
+		// insideRepo refusal (:286): both contain "inside the repository", but
+		// only the realpath branch says "through a symlink".
+		expect(result.message).toContain('through a symlink');
 	}, 60_000);
 
 	// POSIX-executing legs: ownership and mode semantics are Windows-absent by
 	// design (documented in the guard); these run on the Linux/macOS shards.
-	// POSIX-executing legs: ownership and mode semantics are Windows-absent by
-	// design (documented in the guard) — these run on the Linux/macOS shards.
 	describe.skipIf(process.platform === 'win32')(
 		'POSIX ownership and mode',
 		() => {
@@ -283,11 +296,17 @@ describe('prepare_pr_feedback_commit_message symlink/junction guard (#3486)', ()
 
 				expect(result.success).toBe(false);
 				expect(result.message).toContain('not owned by the current user');
+				expect(result.message).toContain(fixedDir); // FB-004 path+remedy
 			}, 60_000);
 
 			test('heals a legacy 0755 directory we own to 0700 and proceeds', async () => {
 				const fixedDir = redirectTempRoot();
 				mkdirSync(fixedDir, { recursive: true, mode: 0o755 });
+				// Defeat the umask so the heal leg provably engages on every
+				// shard (mkdir mode is masked; under umask 077 a 0755 request
+				// lands as 0700 and the test would pass vacuously).
+				savedInternals.chmodSync(fixedDir, 0o755);
+				expect(savedInternals.lstatSync(fixedDir).mode & 0o777).toBe(0o755);
 
 				const repo = await createBoundFeedbackRepo();
 				const result = JSON.parse(
@@ -305,6 +324,8 @@ describe('prepare_pr_feedback_commit_message symlink/junction guard (#3486)', ()
 			test('refuses when the mode heal fails', async () => {
 				const fixedDir = redirectTempRoot();
 				mkdirSync(fixedDir, { recursive: true, mode: 0o755 });
+				savedInternals.chmodSync(fixedDir, 0o755);
+				expect(savedInternals.lstatSync(fixedDir).mode & 0o777).toBe(0o755);
 				const realChmod = savedInternals.chmodSync;
 				_internals.chmodSync = (() => {
 					throw new Error('chmod unavailable in this leg');
@@ -320,9 +341,38 @@ describe('prepare_pr_feedback_commit_message symlink/junction guard (#3486)', ()
 				) as { success: boolean; message: string };
 
 				expect(result.success).toBe(false);
+				// Discriminate the catch branch (:158, with the probe detail in
+				// parentheses) from the post-heal re-check (:164, bare message)
+				// that the chmod-no-op leg pins below.
 				expect(result.message).toContain(
-					'could not be restricted to mode 0700',
+					'could not be restricted to mode 0700 (chmod unavailable in this leg)',
 				);
+			}, 60_000);
+
+			test('refuses when the mode heal silently fails to change the mode', async () => {
+				const fixedDir = redirectTempRoot();
+				mkdirSync(fixedDir, { recursive: true, mode: 0o755 });
+				savedInternals.chmodSync(fixedDir, 0o755);
+				expect(savedInternals.lstatSync(fixedDir).mode & 0o777).toBe(0o755);
+				const realChmod = savedInternals.chmodSync;
+				// A silent no-op (chmod-ignoring filesystem): only the post-heal
+				// re-check at :161 can refuse, with the BARE message (no parenthetical).
+				_internals.chmodSync = (() => undefined) as typeof realChmod;
+				const result = await authorOnce('silent heal <co-authored-by>');
+				expect(result.success).toBe(false);
+				expect(result.message).toContain(
+					'could not be restricted to mode 0700; refusing',
+				);
+			}, 60_000);
+
+			test('heals a restrictive 0600 directory we own to 0700 and proceeds', async () => {
+				const fixedDir = redirectTempRoot();
+				mkdirSync(fixedDir, { recursive: true, mode: 0o700 });
+				savedInternals.chmodSync(fixedDir, 0o600);
+				expect(savedInternals.lstatSync(fixedDir).mode & 0o777).toBe(0o600);
+				const result = await authorOnce('restrictive heal <co-authored-by>');
+				expect(result.success).toBe(true);
+				expect(savedInternals.lstatSync(fixedDir).mode & 0o777).toBe(0o700);
 			}, 60_000);
 		},
 	);
@@ -370,5 +420,81 @@ describe('prepare_pr_feedback_commit_message symlink/junction guard (#3486)', ()
 		// stale .txt survived the prune (the prune's entry re-proof skipped
 		// the swapped link instead of walking it).
 		expect(readdirSync(victim).sort()).toEqual(['sentinel.txt', 'stale.txt']);
+	}, 60_000);
+
+	// Refusal branches pinned from feedback FB-001 (parallel review F-001):
+	// each was deletable with the suite staying green before these legs.
+	test('refuses when the private directory cannot be created', async () => {
+		redirectTempRoot();
+		const realMkdir = savedInternals.mkdirSync;
+		_internals.mkdirSync = (() => {
+			throw new Error('probe: mkdir unavailable');
+		}) as typeof realMkdir;
+		const result = await authorOnce('create-fail <co-authored-by>');
+		expect(result.success).toBe(false);
+		expect(result.message).toContain('could not be created');
+	}, 60_000);
+
+	test('post-create re-lstat refuses a link planted between lstat and mkdir', async () => {
+		const fixedDir = redirectTempRoot();
+		const victim = canonicalMkdtemp('symlink-3486-race-');
+		createdRoots.push(victim);
+		writeFileSync(join(victim, 'sentinel.txt'), 'sentinel\n');
+		const realMkdir = savedInternals.mkdirSync;
+		// The initial lstat sees ENOENT; mkdirSync plants a junction/link at the
+		// fixed name (recursive mkdir succeeds over it) instead of a real dir.
+		// Only the post-create re-lstat can catch this — a mutation of it to
+		// statSync (which follows the link) would let the write through.
+		_internals.mkdirSync = ((
+			p: string,
+			opts: { recursive?: boolean; mode?: number },
+		) => {
+			makeDirLink(victim, String(p));
+			return realMkdir(p as never, opts as never);
+		}) as typeof realMkdir;
+		const result = await authorOnce('create race <co-authored-by>');
+		expect(result.success).toBe(false);
+		expect(result.message).toContain('exists as a symlink');
+		expect(readdirSync(victim).sort()).toEqual(['sentinel.txt']);
+	}, 60_000);
+
+	test('refuses when the directory vanishes after creation', async () => {
+		const fixedDir = redirectTempRoot();
+		const realLstat = savedInternals.lstatSync;
+		_internals.lstatSync = ((p: string) => {
+			if (path.resolve(String(p)) === path.resolve(fixedDir)) {
+				throw new Error('probe: vanished');
+			}
+			return realLstat(p);
+		}) as typeof realLstat;
+		const result = await authorOnce('vanish <co-authored-by>');
+		expect(result.success).toBe(false);
+		expect(result.message).toContain('vanished after creation');
+	}, 60_000);
+
+	test('refuses a regular file planted at the fixed name', async () => {
+		const fixedDir = redirectTempRoot();
+		writeFileSync(fixedDir, 'not a directory\n');
+		const result = await authorOnce('regular file <co-authored-by>');
+		expect(result.success).toBe(false);
+		expect(result.message).toContain('is not a directory');
+	}, 60_000);
+
+	test('keeps the proven lexical directory when the realpath proof fails', async () => {
+		redirectTempRoot();
+		const realRealpath = savedInternals.realpathSync;
+		let proofAttempted = false;
+		_internals.realpathSync = ((p: string) => {
+			// Prove the containment proof is actually attempted before it falls
+			// back — otherwise this leg passes if the check were deleted whole.
+			if (p) proofAttempted = true;
+			throw new Error('probe: realpath unavailable');
+		}) as typeof realRealpath;
+		const result = await authorOnce('realpath-fail <co-authored-by>');
+		expect(proofAttempted).toBe(true);
+		// The fallback is non-refusing: authoring continues with the lexical dir.
+		expect(result.success).toBe(true);
+		expect(result.path).toBeDefined();
+		expect(existsSync(result.path as string)).toBe(true);
 	}, 60_000);
 });
