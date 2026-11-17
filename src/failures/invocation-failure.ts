@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { findJwsTokenSpans } from '../utils/jws-redaction.js';
 import {
 	extractStatusCode,
 	MODEL_UNAVAILABLE_PATTERN,
@@ -323,18 +324,55 @@ function screamingKeyContainsSuffix(key: string): boolean {
  * accepted residual — stated, not pattern-tolerated, because deleting
  * visible bytes could alter what the reader sees (#2363).
  */
-const BARE_TOKEN_VALUE_PATTERNS: ReadonlyArray<{ family: string; re: RegExp }> =
-	[
-		{ family: 'openai', re: /\bsk-[A-Za-z0-9_-]{20,}/g },
-		{
-			family: 'github',
-			re: /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}/g,
-		},
-		{ family: 'github', re: /\bgithub_pat_[A-Za-z0-9_]{22,}/g },
-		{ family: 'aws', re: /\bAKIA[0-9A-Z]{16}\b/g },
-		{ family: 'slack', re: /\bxox[baprs]-[A-Za-z0-9-]{10,}/g },
-		{ family: 'google', re: /\bAIza[A-Za-z0-9_-]{30,}/g },
-	];
+const BARE_TOKEN_VALUE_PATTERNS: ReadonlyArray<{
+	family: string;
+	re: RegExp;
+	/** #3712: optional post-match class guard (the base64 arm requires
+	 * upper+lower+digit on the matched run so hex-only digests stay visible). */
+	guard?: (match: string) => boolean;
+}> = [
+	// #3712: specific sk- prefixes BEFORE the openai shape — the openai
+	// pattern subsumes `sk-ant-api03-…` and `sk-or-v1-…`, and both the
+	// sequential mirror chain and this sweep's leftmost-longest selection
+	// keep the FIRST family for identical spans, so ordering (not a
+	// lookahead) assigns the rotation-correct provider label.
+	{ family: 'anthropic', re: /\bsk-ant-[A-Za-z0-9_-]{20,}/g },
+	{ family: 'openrouter', re: /\bsk-or-[A-Za-z0-9_-]{20,}/g },
+	{ family: 'openai', re: /\bsk-[A-Za-z0-9_-]{20,}/g },
+	{
+		family: 'github',
+		re: /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}/g,
+	},
+	{ family: 'github', re: /\bgithub_pat_[A-Za-z0-9_]{22,}/g },
+	{ family: 'aws', re: /\bAKIA[0-9A-Z]{16}\b/g },
+	{ family: 'slack', re: /\bxox[baprs]-[A-Za-z0-9-]{10,}/g },
+	{ family: 'google', re: /\bAIza[A-Za-z0-9_-]{30,}/g },
+	// #3712 F-006: Google OAuth client secrets and GCP access tokens.
+	{ family: 'google', re: /\bGOCSPX-[A-Za-z0-9_-]{20,}/g },
+	{ family: 'google', re: /\bya29\.[A-Za-z0-9_-]{20,}/g },
+	// #3712 F-006: Groq service keys.
+	{ family: 'groq', re: /\bgsk_[A-Za-z0-9]{20,}/g },
+	// #3712 F-006: JWTs (the HEADER segment is base64url of `{"…`, so it
+	// starts with eyJ; the signature closes the token). Matches the WHOLE
+	// three-segment token as one span.
+	//
+	// #3710 review: the PAYLOAD segment is any base64url run, not only a
+	// JSON object — an empty claims object encodes as `e30`, not `eyJ` (and a
+	// `null`/string payload encodes as `bnVsbA`/`Ingi`).
+	{
+		family: 'jwt',
+		re: /\beyJ[A-Za-z0-9_-]{10,1024}\.[A-Za-z0-9_-]{1,}\.[A-Za-z0-9_-]{10,}/g,
+	},
+	// #3712 F-013: base64 credential arm at the display site — mirrors the
+	// shell site's ≥80-char mixed-class run (the class guard keeps hex-only
+	// SHA digests, uppercase-hex runs, and sub-80 payloads visible).
+	{
+		family: 'base64',
+		re: /[A-Za-z0-9+/]{80,}={0,2}/g,
+		guard: (match) =>
+			/[A-Z]/.test(match) && /[a-z]/.test(match) && /[0-9]/.test(match),
+	},
+];
 
 /**
  * Cf (format) and Default_Ignorable code points (variation selectors,
@@ -389,6 +427,13 @@ export function sanitizeFailureEvidenceDisplay(value: string): string {
 	const neutralized = bounded.replace(CSI_SEQUENCE, ' ');
 	const redacted = neutralized
 		.replace(/\bhttps?:\/\/[^\s'"<>]+/gi, (match) => redactUrl(match))
+		// #3712 azure CONTEXTUAL arm: connection-string `AccountKey=<base64>`
+		// material. The WHOLE `key=value` span collapses to the BARE
+		// placeholder (no `AccountKey=` residue): the generic KV arm below
+		// would otherwise consume the value as a family-less `<redacted>`
+		// (plan-critic round-1 probe), and a residue form like
+		// `AccountKey=[REDACTED:azure]` is itself re-matchable KV shape.
+		.replace(/\bAccountKey=[A-Za-z0-9+/]{20,}={0,2}/gi, '[REDACTED:azure]')
 		.replace(
 			CREDENTIAL_KV_PATTERN,
 			(_, key: string) => `${key.replace(CONTROL_CHAR_RUN, '')}=<redacted>`,
@@ -441,9 +486,10 @@ export function sanitizeFailureEvidenceDisplay(value: string): string {
 	}> = [];
 	// Pass A — head-dominance: the UNcondensed text. Every match the
 	// published head's sequential .replace found must stay a candidate.
-	for (const { family, re } of BARE_TOKEN_VALUE_PATTERNS) {
+	for (const { family, re, guard } of BARE_TOKEN_VALUE_PATTERNS) {
 		re.lastIndex = 0;
 		for (const match of redacted.matchAll(re)) {
+			if (guard && !guard(match[0])) continue;
 			bareMatches.push({
 				family,
 				start: match.index,
@@ -451,18 +497,39 @@ export function sanitizeFailureEvidenceDisplay(value: string): string {
 			});
 		}
 	}
+	// #3723: linear JWS span scan on the UNCONDENSED view — covers headers of
+	// ANY length (x5c certificate chains exceed the legacy arm's 1024-char
+	// bound). The legacy jwt family entry stays (fast path + pin parity); the
+	// union/splice below dedupes identical spans.
+	for (const span of findJwsTokenSpans(redacted)) {
+		bareMatches.push({ family: 'jwt', start: span.start, end: span.end });
+	}
 	// Pass B — fill tolerance: the Cf/DI-deleted condensed view, mapped
 	// back to original offsets (a span mapped back INCLUDES any deleted
 	// invisible bytes that sat inside it).
-	for (const { family, re } of BARE_TOKEN_VALUE_PATTERNS) {
+	for (const { family, re, guard } of BARE_TOKEN_VALUE_PATTERNS) {
 		re.lastIndex = 0;
 		for (const match of condensed.matchAll(re)) {
+			if (guard && !guard(match[0])) continue;
 			bareMatches.push({
 				family,
 				start: condensedToOriginal[match.index],
 				end: condensedToOriginal[match.index + match[0].length - 1] + 1,
 			});
 		}
+	}
+	// #3723 (critic r2 finding 1): the SAME span scan on the CONDENSED view —
+	// a long-header token WITH an embedded zero-width byte splits the run on
+	// the uncondensed view (the fill byte is not in the run class) AND misses
+	// the legacy condensed arm (its header bound is still 1024), so only this
+	// pass closes the composition case. A mapped-back span INCLUDES the
+	// deleted invisible bytes that sat inside it.
+	for (const span of findJwsTokenSpans(condensed)) {
+		bareMatches.push({
+			family: 'jwt',
+			start: condensedToOriginal[span.start],
+			end: condensedToOriginal[span.end - 1] + 1,
+		});
 	}
 	let swept = redacted;
 	if (bareMatches.length > 0) {
@@ -611,6 +678,82 @@ function providerSignal(error: unknown): string {
 }
 
 /**
+ * #3177: the provider-category set `classifyProviderFailure` itself emits
+ * (enumerated per the category docstring above), plus the two early-finish
+ * categories `readEarlyFinish` stamps on its carriers
+ * (provider.output_length / provider.content_filter, review finding F-001:
+ * rejecting them degraded the carrier to text classification and lost the
+ * category/risk the reader had already computed). A carrier snapshot outside
+ * this set is not honored (fail-closed to normal classification).
+ */
+const KNOWN_PROVIDER_CARRIER_CATEGORIES = new Set([
+	'provider.cancelled',
+	'provider.authentication_configuration',
+	'provider.quota_billing',
+	'provider.rate_limit',
+	'provider.unavailable',
+	'provider.context_window',
+	'provider.content_policy',
+	'provider.request_shape',
+	'provider.unknown',
+	'provider.output_length',
+	'provider.content_filter',
+]);
+
+const KNOWN_PROVIDER_CARRIER_RETRY_CLASSES =
+	new Set<InvocationFailureRetryClass>([
+		'retry_same',
+		'retry_fallback',
+		'repair_then_retry',
+		'operator_action',
+		'do_not_retry',
+	]);
+
+const KNOWN_PROVIDER_CARRIER_RISKS = new Set<InvocationFailureRisk>([
+	'low',
+	'medium',
+	'high',
+]);
+
+/**
+ * #3177: read the verified carrier snapshot off an error. Returns null unless
+ * `error.providerError` is an object whose category, retryClass, and risk are
+ * all known enum values — the exact shape `readProviderMessageError` +
+ * `providerMessageErrorToError` produce.
+ */
+function readProviderCarrierSnapshot(error: unknown): {
+	category: string;
+	retryClass: InvocationFailureRetryClass;
+	risk: InvocationFailureRisk;
+} | null {
+	if (typeof error !== 'object' || error === null) return null;
+	const carrier = readOwn(error, 'providerError');
+	if (typeof carrier !== 'object' || carrier === null) return null;
+	const category = readOwn(carrier, 'category');
+	const retryClass = readOwn(carrier, 'retryClass');
+	const risk = readOwn(carrier, 'risk');
+	if (
+		typeof category !== 'string' ||
+		typeof retryClass !== 'string' ||
+		typeof risk !== 'string'
+	)
+		return null;
+	if (
+		!KNOWN_PROVIDER_CARRIER_CATEGORIES.has(category) ||
+		!KNOWN_PROVIDER_CARRIER_RETRY_CLASSES.has(
+			retryClass as InvocationFailureRetryClass,
+		) ||
+		!KNOWN_PROVIDER_CARRIER_RISKS.has(risk as InvocationFailureRisk)
+	)
+		return null;
+	return {
+		category,
+		retryClass: retryClass as InvocationFailureRetryClass,
+		risk: risk as InvocationFailureRisk,
+	};
+}
+
+/**
  * Provider failure categories in use (enumerated per issue #2673 plan-critic
  * finding 6, so downstream category-prefix consumers — telemetry filters,
  * dashboards, circuit thresholds — can discover every leaf):
@@ -637,6 +780,28 @@ export function classifyProviderFailure(
 			risk: 'low',
 			action,
 			display: signal || 'AbortError',
+			code,
+			statusCode,
+		});
+	}
+	// #3177: honor a verified provider-message carrier's read-time snapshot.
+	// `providerMessageErrorToError` attaches `.providerError` (the
+	// ProviderMessageError the reader classified over the UNBOUNDED raw
+	// provider message); the carrier's own message is bounded display text
+	// that can lose the very keyword the text arms below match. Provenance is
+	// the nested carrier object itself — never a bare `.category` property —
+	// and every enum field must be known; anything else falls through to
+	// normal classification (fail-closed). Abort-like errors were already
+	// handled above, so an abort-shaped carrier stays cancelled regardless.
+	const carrierSnapshot = readProviderCarrierSnapshot(error);
+	if (carrierSnapshot) {
+		return buildRecord({
+			source: 'provider',
+			category: carrierSnapshot.category,
+			retryClass: carrierSnapshot.retryClass,
+			risk: carrierSnapshot.risk,
+			action,
+			display: signal || carrierSnapshot.category,
 			code,
 			statusCode,
 		});

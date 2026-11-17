@@ -22,7 +22,14 @@ import type { Plan } from '../../config/plan-schema';
 import type { LeanTurboConfig } from '../../config/schema';
 import { deriveSwarmIdentity } from '../../config/schema';
 import {
+	classifyProviderFailure,
+	isRetryableProviderFailure,
+	sanitizeFailureEvidenceDisplay,
+} from '../../failures/invocation-failure';
+import {
 	formatProviderMessageError,
+	type ProviderMessageError,
+	providerMessageErrorToError,
 	readProviderMessageError,
 } from '../../failures/provider-message-error';
 import { loadFullAutoRunState } from '../../full-auto/state';
@@ -44,10 +51,7 @@ import {
 	dispatchWithModelFallback,
 	type ModelOverride,
 } from '../../utils/model-dispatch-fallback';
-import {
-	isQuotaError,
-	isTransientProviderError,
-} from '../../utils/provider-error-classification';
+import { isQuotaError } from '../../utils/provider-error-classification';
 import type { LaneEvidence, PhaseEvidence } from './evidence';
 import { writeLaneEvidence, writePhaseEvidence } from './evidence';
 import { publishLeanTurboLaneScopeBinding } from './lane-scope';
@@ -123,6 +127,15 @@ export interface LaneDispatchResult {
 	sessionId?: string;
 	/** Error message if ok === false */
 	error?: string;
+	/**
+	 * #3177: the structured provider error behind `error` when the failure was
+	 * a provider-refused `session.prompt` (null for every other failure shape).
+	 * Callers that feed the failure into retry/model-fallback classification
+	 * must prefer this snapshot over re-deriving from the bounded display
+	 * string — the display can lose the transient keyword past its 512-byte
+	 * bound, and deterministic auth/config text can falsely read transient.
+	 */
+	providerError?: ProviderMessageError;
 }
 
 /**
@@ -159,6 +172,12 @@ export interface LaneResult {
 	sessionId?: string;
 	/** Error message if status is 'failed' or 'blocked' */
 	error?: string;
+	/**
+	 * #3728 feedback: bounded provider diagnostic retained when a real-output
+	 * lane settles completed despite a provider refusal. Carried on the result
+	 * so a later merge-back failure can preserve it when rewriting lane evidence.
+	 */
+	providerError?: string;
 	/** Merge-back failure info if the coder completed but integration back to primary failed */
 	mergeBackFailure?: MergeBackFailureInfo;
 }
@@ -363,6 +382,9 @@ function pushDirtyTreeDowngradeAdvisory(
 	pushAdvisory(session, advisory);
 }
 
+/** #3177: module-level counter backing per-runner fallback-scope ids. */
+let leanRunnerFallbackScopeRunSeq = 0;
+
 export class LeanTurboRunner {
 	/**
 	 * Test-only dependency-injection seam.
@@ -475,6 +497,15 @@ export class LeanTurboRunner {
 	 * Null when no downgrade is pending.
 	 */
 	private _pendingDowngrade: { reason: string } | null = null;
+
+	/**
+	 * #3177: per-instance ordinal for the scoped model-fallback key. Each
+	 * runner invocation (the lean-turbo-run-phase tool constructs a fresh
+	 * runner per call) gets its own selection scope, so re-running the SAME
+	 * phase after an exhausted chain starts fresh instead of inheriting the
+	 * previous run's exhausted selection.
+	 */
+	private readonly _fallbackScopeRunId = ++leanRunnerFallbackScopeRunSeq;
 
 	constructor(options: {
 		/** Project root directory */
@@ -699,7 +730,13 @@ export class LeanTurboRunner {
 
 		// Process lanes concurrently for maximum throughput
 		const results = await Promise.all(
-			lanePlan.lanes.map((lane) => this._processLane(lane, leanConfig, plan)),
+			lanePlan.lanes.map((lane) =>
+				// #3177: the phase ordinal rides into _processLane so the scoped
+				// fallback selection is keyed per phase (lane ids restart their
+				// numbering every phase and would otherwise resume the previous
+				// phase's advanced/exhausted selection).
+				this._processLane(lane, leanConfig, plan, phaseNumber),
+			),
 		);
 		laneResults.push(...results);
 
@@ -960,7 +997,19 @@ export class LeanTurboRunner {
 				readError?.name === 'MessageContentFilterError'
 					? null
 					: readError;
-			if (!promptResult.data || providerError) {
+			// #3724 item 3 (real-output guard, the lean twin of dispatch-lanes'
+			// load-bearing `!transcript.text` term): a reply that produced REAL
+			// OUTPUT (non-empty text parts) plus a provider error is not a
+			// refusal either — the lane keeps the carve-out behavior (settles
+			// completed, worktree merged back) instead of failing and stranding
+			// the produced work in a preserved worktree. Only a reply with NO
+			// real output settles failed below.
+			const replyText = (promptResult.data?.parts ?? [])
+				.filter((part) => part.type === 'text')
+				.map((part) => part.text ?? '')
+				.join('')
+				.trim();
+			if (!promptResult.data || (providerError && !replyText)) {
 				abortController?.abort();
 				void teardownEphemeralSession(session, sessionId);
 				// Issue #2002 (Lean Turbo half): `_publishLaneScope` may have already
@@ -984,10 +1033,23 @@ export class LeanTurboRunner {
 								providerError,
 							)
 						: `session.prompt failed: ${typeof promptResult.error === 'string' ? promptResult.error : JSON.stringify(promptResult.error)}`,
+					// #3177: keep the structured error on the failure result so
+					// the model-fallback chain classifies from the canonical
+					// snapshot instead of the bounded display string.
+					...(providerError ? { providerError } : {}),
 				};
 			}
 
-			return { ok: true, sessionId };
+			// #3728 feedback FB-008: keep the real-output carve-out (a reply with
+			// text still settles completed and merges back), but carry the
+			// structured provider refusal on the success result so runPhase can
+			// persist a bounded diagnostic instead of dropping it. The fallback
+			// wrapper only throws on ok === false, so this never re-opens retry.
+			return {
+				ok: true,
+				sessionId,
+				...(providerError ? { providerError } : {}),
+			};
 		} catch (err) {
 			if (sessionId) {
 				abortController?.abort();
@@ -1295,6 +1357,7 @@ export class LeanTurboRunner {
 		lane: LeanTurboLane,
 		leanConfig: LeanTurboConfig,
 		plan?: Plan,
+		phaseNumber?: number,
 	): Promise<LaneResult> {
 		// Update status to running
 		const laneInState = this._laneStatuses.get(lane.laneId);
@@ -1523,13 +1586,32 @@ export class LeanTurboRunner {
 						model,
 						plan,
 					);
-					if (!r.ok) throw new Error(r.error ?? 'lane dispatch failed');
+					if (!r.ok) {
+						// #3177: preserve the structured provider error as the thrown
+						// carrier so BOTH fallback gates classify from the canonical
+						// snapshot instead of re-deriving from the bounded display
+						// string (a 403 whose text mentions "429" must never burn the
+						// fallback chain; a rate limit truncated past the display
+						// bound must still fail over).
+						throw r.providerError
+							? providerMessageErrorToError(
+									'session.prompt provider error',
+									r.providerError,
+								)
+							: new Error(r.error ?? 'lane dispatch failed');
+					}
 					return r;
 				},
 				scope: this._sessionID
 					? {
 							sessionID: this._sessionID,
-							invocationID: `lean-runner:${lane.laneId}`,
+							// #3177: keyed per phase AND per runner run — lane ids
+							// restart their numbering every phase, so a lane-scoped key
+							// alone would let phase N+1's lane-1 resume phase N's
+							// advanced (or exhausted) fallback selection, and a
+							// phase-only key would let a re-run of the SAME phase
+							// inherit its own exhausted chain.
+							invocationID: `lean-runner:phase-${phaseNumber ?? 'x'}:run-${this._fallbackScopeRunId}:${lane.laneId}`,
 							swarmID: coderSwarmId,
 							role: coderBase,
 						}
@@ -1550,7 +1632,13 @@ export class LeanTurboRunner {
 					// invariant break, never a provider blip. Retrying it on another
 					// model would create another unscoped lane session.
 					if (msg.includes(LANE_SCOPE_DENIED_CODE)) return 'permanent';
-					return isTransientProviderError(msg) ? 'transient' : 'permanent';
+					// #3177: delegate to the canonical provider classifier — a
+					// structured carrier snapshot governs (deterministic
+					// auth/config failures never enter the fallback chain), and
+					// text matching remains only for structure-less errors.
+					return isRetryableProviderFailure(classifyProviderFailure(err))
+						? 'transient'
+						: 'permanent';
 				},
 				onFallback: ({ toModel, fallbackIndex }) => {
 					telemetry.modelFallback(
@@ -1579,6 +1667,17 @@ export class LeanTurboRunner {
 				error: isQuotaError(msg)
 					? `${msg} (model quota/usage limit exhausted across all configured fallbacks)`
 					: msg,
+			};
+		}
+		// #3710: persisted lane/phase/recovery failure reasons carry REDACTED
+		// provider error text. This wrap point sits AFTER every classifier read
+		// (the dispatchWithModelFallback classify callbacks ran inside the
+		// try block and isQuotaError ran in the catch above), covering the
+		// lane-evidence, phase-evidence, and recovery-record sinks below.
+		if (!dispatchResult.ok && dispatchResult.error) {
+			dispatchResult = {
+				...dispatchResult,
+				error: sanitizeFailureEvidenceDisplay(dispatchResult.error),
 			};
 		}
 
@@ -1647,12 +1746,25 @@ export class LeanTurboRunner {
 		}
 		delete this._laneLockMap[lane.laneId];
 
-		// Write evidence for completed lane
+		// #3728 feedback FB-008: a real-output lane can settle completed with a
+		// provider refusal still attached. Keep one bounded, sanitized diagnostic
+		// and carry it on BOTH the evidence and the result — a later merge-back
+		// failure rewrites the same lane evidence file and must preserve it.
+		const providerDiagnostic = dispatchResult.providerError
+			? sanitizeFailureEvidenceDisplay(
+					formatProviderMessageError(
+						'session.prompt provider error',
+						dispatchResult.providerError,
+					),
+				)
+			: undefined;
+
 		await this._writeLaneEvidenceSafely(lane, 'completed', {
 			status: 'completed',
 			agent,
 			sessionId: dispatchResult.sessionId,
 			completedAt,
+			...(providerDiagnostic ? { providerError: providerDiagnostic } : {}),
 		});
 
 		return {
@@ -1661,6 +1773,7 @@ export class LeanTurboRunner {
 			taskIds: lane.taskIds,
 			agent,
 			sessionId: dispatchResult.sessionId,
+			...(providerDiagnostic ? { providerError: providerDiagnostic } : {}),
 		};
 	}
 
@@ -1806,6 +1919,9 @@ export class LeanTurboRunner {
 							{
 								status: 'failed',
 								error: failureInfo.reason,
+								// #3728 feedback: the merge-back rewrite targets the same lane
+								// evidence file - carry the real-output diagnostic forward.
+								providerError: lr.providerError,
 								mergeBackFailure: failureInfo,
 							},
 						);
@@ -1843,6 +1959,9 @@ export class LeanTurboRunner {
 							{
 								status: 'failed',
 								error: failureInfo.reason,
+								// #3728 feedback: the merge-back rewrite targets the same lane
+								// evidence file - carry the real-output diagnostic forward.
+								providerError: lr.providerError,
 								mergeBackFailure: failureInfo,
 							},
 						);
@@ -1882,6 +2001,9 @@ export class LeanTurboRunner {
 						{
 							status: 'failed',
 							error: failureInfo.reason,
+							// #3728 feedback: the merge-back rewrite targets the same lane
+							// evidence file - carry the real-output diagnostic forward.
+							providerError: lr.providerError,
 							mergeBackFailure: failureInfo,
 						},
 					);
