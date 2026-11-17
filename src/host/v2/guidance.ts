@@ -37,10 +37,10 @@ import { withTimeout } from '../../utils/timeout';
 import { normalizeV2AgentRef, seedV1SessionState } from './setup';
 import type {
 	V1HooksSubset,
-	V2Message,
 	V2PluginContext,
 	V2Registration,
 	V2SessionContextEvent,
+	V2SessionRequestMessage,
 } from './types';
 
 /** Guidance-chain budget: these are in-memory transforms over a session view. */
@@ -63,14 +63,16 @@ interface V1PartsMessageView {
 	parts: Array<{ type: string; text?: string }>;
 }
 
-/** `V2Message.content` is typed as an array; tolerate (never split) anything else. */
-function contentParts(message: V2Message): V2Message['content'] {
+/** `V2SessionRequestMessage.content` is typed as an array; tolerate (never split) anything else. */
+function contentParts(
+	message: V2SessionRequestMessage,
+): V2SessionRequestMessage['content'] {
 	return Array.isArray(message.content) ? message.content : [];
 }
 
 /** Translate v2 messages into the v1 parts view the chain expects. */
 function toV1MessageView(
-	message: V2Message,
+	message: V2SessionRequestMessage,
 	sessionID: string,
 	originIndex: number,
 	agentName?: string,
@@ -121,15 +123,18 @@ function toV1MessageView(
  * message when it had none); missing texts drop the trailing text slots.
  */
 function writeBackTextParts(
-	message: V2Message,
+	message: V2SessionRequestMessage,
 	parts: Array<{ type: string; text?: string }>,
-): void {
+): V2SessionRequestMessage {
 	// Out-of-contract (non-array) content is left untouched, never split.
-	if (!Array.isArray(message.content)) return;
+	if (!Array.isArray(message.content)) return message;
 	const texts = parts
 		.filter((p) => p.type === 'text' && typeof p.text === 'string')
 		.map((p) => ({ type: 'text' as const, text: p.text as string }));
-	const content: V2Message['content'] = [];
+	const content: Array<{
+		readonly type: string;
+		readonly text?: string | null;
+	}> = [];
 	let nextText = 0;
 	let afterLastText = 0;
 	for (const part of message.content) {
@@ -141,11 +146,13 @@ function writeBackTextParts(
 		}
 	}
 	content.splice(afterLastText, 0, ...texts.slice(nextText));
-	message.content = content;
+	// @2.3.0: published message content is READONLY — replace the element in
+	// the (mutable) event array instead of mutating the host message in place.
+	return { ...message, content };
 }
 
 /** True when a message carries anything the v1 text-only view cannot see. */
-function hasNonTextParts(message: V2Message): boolean {
+function hasNonTextParts(message: V2SessionRequestMessage): boolean {
 	if (message.content === undefined) return false;
 	// Opaque (non-array) content is kept, not dropped.
 	if (!Array.isArray(message.content)) return true;
@@ -188,7 +195,10 @@ export async function onV2ContextEvent(
 		// the view count (carrier materialization, verdict inserts). Every view is
 		// stamped with its original index (`info.swarmV2Origin`); pairing below is
 		// object identity (stages convert views in place) -> `id` -> that stamp.
-		const originalByView = new Map<V1PartsMessageView, V2Message>();
+		const originalByView = new Map<
+			V1PartsMessageView,
+			V2SessionRequestMessage
+		>();
 		for (let i = 0; i < views.length; i += 1) {
 			originalByView.set(views[i], originalMessages[i]);
 		}
@@ -223,7 +233,7 @@ export async function onV2ContextEvent(
 		// positional pairing. Views with no resolution — chain inserts, which carry
 		// no stamp — are dropped, so on v2 id-less chain inserts (full-auto verdict
 		// and continuation messages) are NOT delivered to the model.
-		const originalById = new Map<string, V2Message>();
+		const originalById = new Map<string, V2SessionRequestMessage>();
 		for (const message of originalMessages) {
 			if (typeof message.id === 'string' && message.id.length > 0) {
 				originalById.set(message.id, message);
@@ -232,9 +242,12 @@ export async function onV2ContextEvent(
 		const isCarrier = (view: V1PartsMessageView): boolean =>
 			typeof view.info.id === 'string' &&
 			view.info.id.startsWith(GUIDANCE_CARRIER_ID_PREFIX);
-		const resolved = new Map<V1PartsMessageView, V2Message>();
-		const taken = new Set<V2Message>();
-		const resolve = (view: V1PartsMessageView, message: V2Message): void => {
+		const resolved = new Map<V1PartsMessageView, V2SessionRequestMessage>();
+		const taken = new Set<V2SessionRequestMessage>();
+		const resolve = (
+			view: V1PartsMessageView,
+			message: V2SessionRequestMessage,
+		): void => {
 			if (taken.has(message)) return;
 			taken.add(message);
 			resolved.set(view, message);
@@ -265,9 +278,9 @@ export async function onV2ContextEvent(
 			resolve(view, original);
 		}
 
-		const consumed = new Set<V2Message>();
+		const consumed = new Set<V2SessionRequestMessage>();
 		const claimed = new Map<
-			V2Message,
+			V2SessionRequestMessage,
 			Array<{ type: string; text?: string }>
 		>();
 		event.system = event.system ?? [];
@@ -295,12 +308,11 @@ export async function onV2ContextEvent(
 		// text now lives in event.system — one destination per guidance unit).
 		// Otherwise it is kept: tool calls/results and media are invisible to the
 		// v1 chain and removing them orphans tool pairs.
-		const kept: V2Message[] = [];
+		const kept: V2SessionRequestMessage[] = [];
 		for (const message of originalMessages) {
 			const parts = claimed.get(message);
 			if (parts) {
-				writeBackTextParts(message, parts);
-				kept.push(message);
+				kept.push(writeBackTextParts(message, parts));
 			} else if (!consumed.has(message) && hasNonTextParts(message)) {
 				kept.push(message);
 			}

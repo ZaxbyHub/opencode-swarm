@@ -1,11 +1,13 @@
 /**
  * Vendored structural types for the OpenCode 2 plugin API.
  *
- * Provenance: distilled from `@opencode/plugin@2.0.26`
+ * Provenance: distilled from `@opencode/plugin@2.3.0`
  * `dist/promise/{plugin,registration,tool,session,worktree,command,agent,event,storage,app,options}.d.ts`
- * and `@opencode/schema@2.0.26` `dist/{tool,agent,location}.d.ts`,
- * `@opencode/client@2.0.26` `dist/promise/generated/{client,types}.d.ts`,
- * `@opencode/ai` `dist/schema/messages.d.ts` (fetched 2026-10-09, issues #3004 / #3169).
+ * and `@opencode/schema@2.3.0` `dist/{tool,agent,location}.d.ts`,
+ * `@opencode/client@2.3.0` `dist/promise/generated/{client,types}.d.ts`,
+ * `@opencode/ai` `dist/schema/messages.d.ts` (fetched 2026-10-09, issues #3004 / #3169;
+ * the 2.3.0 refresh verified the drifted declarations against the tagged tarballs —
+ * issues #3732 / #3552; see the actual-alias probe evidence in that trace).
  * Structural only — deliberately no runtime dependency on `@opencode/plugin`.
  *
  * Flattening note: the client's Effect-generated input types express optional fields as
@@ -24,8 +26,8 @@
  *
  * Only the surfaces this adapter consumes are typed. Unknown fields are
  * intentionally left off; the adapter never relies on their absence.
- * Upstream: @opencode/plugin@2.0.26, @opencode/schema@2.0.26 and
- * @opencode/client@2.0.26 (MIT, sst/opencode).
+ * Upstream: @opencode/plugin@2.3.0, @opencode/schema@2.3.0 and
+ * @opencode/client@2.3.0 (MIT, sst/opencode).
  */
 
 /** v2 `App` — host identity (dist/app.d.ts). */
@@ -170,20 +172,47 @@ export interface V2Message {
 	[key: string]: unknown;
 }
 
+/** v2 `SessionRequestMessage` (@2.3.0 `Message & { readonly metadata? }`). Standalone
+ *  (not extending V2Message): the published Message carries a READONLY content array
+ *  with nullable part text and sealed part interfaces (no index signature), so the
+ *  V2Message-based shape broke published-payload assignability (probe-verified in the
+ *  #3732/#3552 trace). */
+export interface V2SessionRequestMessage {
+	id?: string;
+	role: 'system' | 'user' | 'assistant' | 'tool';
+	readonly content: ReadonlyArray<{
+		readonly type: string;
+		readonly text?: string | null;
+	}>;
+	readonly metadata?: Record<string, unknown>;
+}
+
 /** v2 `SessionContext` event (dist/promise/session.d.ts; DeepMutable in place). */
 export interface V2SessionContextEvent {
 	readonly sessionID: string;
 	readonly agent: unknown;
 	readonly model?: { id?: string; providerID?: string; [key: string]: unknown };
 	system: V2SystemPart[];
-	messages: V2Message[];
+	messages: V2SessionRequestMessage[];
 	options: Record<string, unknown>;
 	tools: Record<string, { description: string; input: unknown }>;
 }
 
+/** v2 `SessionCompactionResult` (@2.3.0) — explicit fields, NO index signature: the
+ *  published interface has none, and the old `[key: string]: unknown` blocked the
+ *  whole published-hook assignment (probe-verified in the #3732/#3552 trace). */
+export interface V2SessionCompactionResult {
+	summary: string;
+	/** Provider replacement window (`SessionMessage.Native` is a plain record at
+	 *  2.3.0); replays instead of `summary` when set. */
+	native?: Record<string, unknown>;
+	metadata?: Record<string, unknown>;
+	tokens?: unknown;
+}
+
 /** v2 `SessionCompaction` event (extends SessionContext + settable result). */
 export interface V2SessionCompactionEvent extends V2SessionContextEvent {
-	result?: { summary: string; [key: string]: unknown };
+	result?: V2SessionCompactionResult;
 }
 
 /** v2 `SessionPrompt` event (dist/promise/session.d.ts). */
@@ -199,8 +228,120 @@ export interface V2SessionPromptEvent {
 	readonly delivery?: string;
 }
 
+/** Tagged client `JsonValue` (@2.3.0), recursive — the input type of
+ *  `session.instructions.entry.put`. */
+export type V2JsonValue =
+	| null
+	| boolean
+	| number
+	| string
+	| V2JsonValue[]
+	| { [key: string]: V2JsonValue };
+
+/** @2.3.0 `SessionRequestKind` — why a Session request is being made. */
+export type V2SessionRequestKind =
+	| 'primary'
+	| 'compaction'
+	| 'title'
+	| 'generate';
+
 /**
- * v2 session-call input types (`@opencode/client@2.0.26` generated types, flattened —
+ * @2.3.0 `SessionModelResolve` (`experimental.model.resolve` hook payload): runs
+ * whenever a Session resolves the model for a request; `model` is mutable — change it
+ * to serve the request with another model while the Session keeps its selection.
+ * Experimental upstream. Adoption is tracked under #3642 (not consumed here).
+ */
+export interface V2SessionModelResolve {
+	readonly sessionID: string;
+	readonly agent: string;
+	readonly kind: V2SessionRequestKind;
+	model: {
+		readonly id: string;
+		readonly providerID: string;
+		[key: string]: unknown;
+	};
+}
+
+/**
+ * @2.3.0 `SessionIdleBackground` — background work still running for the idle Session
+ * or one of its descendants; `sessionID` names the owning Session.
+ */
+export type V2SessionIdleBackground =
+	| {
+			readonly kind: 'shell';
+			readonly sessionID: string;
+			readonly shellID: string;
+			readonly command: string;
+	  }
+	| {
+			readonly kind: 'subagent';
+			readonly sessionID: string;
+			readonly childSessionID: string;
+			readonly agent: string;
+			readonly description: string;
+	  }
+	| {
+			readonly kind: 'image';
+			readonly sessionID: string;
+			readonly path: string;
+			readonly model: string;
+	  };
+
+/**
+ * @2.3.0 `SessionIdle` (`experimental.idle` payload): runs when a Session finishes
+ * model work with no pending input, just before it goes idle. Semantically distinct
+ * from the v1 `session.idle` event the adapter already translates
+ * (src/host/v2/events.ts): the hook carries background-work state and runs on a
+ * different schedule. Adoption is tracked under #3642 (not consumed here).
+ */
+export interface V2SessionIdle {
+	readonly sessionID: string;
+	readonly background: ReadonlyArray<V2SessionIdleBackground>;
+}
+
+/** @2.3.0 client `SessionListInput` (paginated list filters; all optional). */
+export interface V2SessionListInput {
+	readonly limit?: number;
+	readonly order?: 'asc' | 'desc';
+	readonly search?: string;
+	readonly parentID?: string | null;
+	readonly archived?: boolean;
+	readonly directory?: string;
+	readonly project?: string;
+	readonly subpath?: string;
+	readonly cursor?: string;
+}
+
+/** @2.3.0 client `SessionsResponse` — a `data` page plus cursors. */
+export interface V2SessionsResponse {
+	data: V2SessionInfo[];
+	cursor: { previous?: unknown; next?: unknown };
+}
+
+/** Payload map for the session hook names this file types (@2.3.0 `SessionHooks`
+ *  subset + the fork/experimental additions). The adapter registers only
+ *  context/compaction/prompt today. */
+export interface V2SessionHookPayloadMap {
+	context: V2SessionContextEvent;
+	compaction: V2SessionCompactionEvent;
+	prompt: V2SessionPromptEvent;
+	fork: { readonly sessionID: string };
+	'experimental.model.resolve': V2SessionModelResolve;
+	'experimental.idle': V2SessionIdle;
+}
+
+export type V2SessionHookName = keyof V2SessionHookPayloadMap;
+
+/** The @2.3.0 session hook registration function (published ModelHooks shape,
+ *  minus the optional third options parameter — a function with an optional
+ *  parameter stays assignable to this slot). */
+export type V2SessionHook = <Name extends V2SessionHookName>(
+	name: Name,
+	callback: (event: V2SessionHookPayloadMap[Name]) => Promise<void> | void,
+) => Promise<V2Registration>;
+
+/**
+ * v2 session-call input types (`@opencode/client@2.3.0` generated types, flattened —
  * see the module header's flattening note). Only the fields with published evidence
  * are named; the index signature keeps them structural, not exhaustive.
  */
@@ -232,7 +373,7 @@ export interface V2SessionCreateInput {
 }
 
 /**
- * `SessionPromptInput` (`@opencode/client@2.0.26` generated, flattened):
+ * `SessionPromptInput` (`@opencode/client@2.3.0` generated, flattened):
  * `sessionID` and `text` are required; `command`/`args` are NOT members of
  * this input (the command shape is `name` + `text` on `SessionCommandInput` —
  * the earlier fabricated members were removed in the PR-review feedback pass).
@@ -301,18 +442,38 @@ export interface V2SessionMessageInfo {
 }
 
 /**
- * v2 `SessionDomain` (dist/promise/session.d.ts 2.0.26): `Pick<SessionApi, "create" | "get" |
- * "remove" | "switchAgent" | "switchModel" | "prompt" | "generate" | "command" | "compact" |
- * "synthetic" | "interrupt" | "update" | "move" | "wait" | "context"> & { hook }`.
+ * v2 `SessionDomain` (dist/promise/session.d.ts 2.3.0): `Pick<SessionApi, "list" | "create" |
+ * "get" | "remove" | "switchAgent" | "switchModel" | "prompt" | "generate" | "command" |
+ * "compact" | "synthetic" | "interrupt" | "update" | "move" | "context"> &
+ * Pick<ExperimentalSessionApi, "wait" | "instructions"> & { hook }`.
  *
- * `hook` names stay the 2.0.20-era three this adapter registers (context/compaction/prompt;
- * the published SessionHooks map has grown, but the adapter only registers these).
+ * `hook` payload map: the published `SessionHooks` has grown to fork /
+ * experimental.model.resolve / experimental.idle (plus model.request / http / ws / retry /
+ * generate / title, which this file does not type); the adapter registers only
+ * context/compaction/prompt today — the new names are typed so later adoption is
+ * compile-checked (issues #3732 / #3552).
  */
 export interface V2SessionDomain {
-	readonly hook: (
-		name: 'context' | 'compaction' | 'prompt',
-		callback: (event: never) => Promise<void> | void,
-	) => Promise<V2Registration>;
+	readonly hook: V2SessionHook;
+	/** @2.3.0: paginated session list (optional filters + cursor in, `{data, cursor}` out). */
+	readonly list: (input?: V2SessionListInput) => Promise<V2SessionsResponse>;
+	/** @2.3.0 (deprecated upstream: "Removed in the next minor"; still on the domain). */
+	readonly instructions: {
+		readonly entry: {
+			readonly list: (input: {
+				readonly sessionID: string;
+			}) => Promise<ReadonlyArray<{ key: string; value: unknown }>>;
+			readonly put: (input: {
+				readonly sessionID: string;
+				readonly key: string;
+				readonly value: V2JsonValue;
+			}) => Promise<void>;
+			readonly remove: (input: {
+				readonly sessionID: string;
+				readonly key: string;
+			}) => Promise<void>;
+		};
+	};
 	readonly create: (input?: V2SessionCreateInput) => Promise<V2SessionInfo>;
 	readonly get: (input: {
 		readonly sessionID: string;
@@ -354,7 +515,7 @@ export interface V2SessionDomain {
 }
 
 /**
- * v2 worktree types (`@opencode/plugin@2.0.26` + `@opencode/client@2.0.26`).
+ * v2 worktree types (`@opencode/plugin@2.3.0` + `@opencode/client@2.3.0`).
  * The host publishes TWO distinct flavors — the client `WorktreeApi` inputs
  * (project-id keyed) and the plugin `WorktreeDefinition` callback inputs
  * (source-directory keyed) — and they must not be merged (PR-review feedback
@@ -440,7 +601,7 @@ export interface V2WorktreeEditor {
 }
 
 /**
- * v2 `WorktreeDomain` (dist/promise/worktree.d.ts 2.0.26): the client
+ * v2 `WorktreeDomain` (dist/promise/worktree.d.ts 2.3.0): the client
  * `WorktreeApi` (`list`/`create`/`remove`/`refresh`) plus `transform` and
  * `reload`. Consumed by no Phase 1 code path; typed so Phase 2+ (issue #3169)
  * sees the surface with the published requiredness intact.
@@ -497,9 +658,10 @@ export interface V2AgentInfo {
 	}>;
 }
 
-/** v2 `AgentEditor` (dist/promise/agent.d.ts). */
+/** v2 `AgentEditor` (dist/promise/agent.d.ts @2.3.0: `readonly Types.DeepMutable<
+ *  Agent.Info>[]` returns; DeepMutable noted here, the vendored info stays plain). */
 export interface V2AgentEditor {
-	list(): V2AgentInfo[];
+	list(): readonly V2AgentInfo[];
 	get(id: string): V2AgentInfo | undefined;
 	default(id: string | undefined): void;
 	update(id: string, update: (agent: V2AgentInfo) => void): void;
@@ -514,35 +676,44 @@ export interface V2AgentDomain {
 	readonly reload: () => Promise<void>;
 }
 
-/** v2 `EventDomain.subscribe` — async iterable of host events. */
+/** v2 `EventDomain.subscribe` — async iterable of host events. @2.3.0: the published
+ *  generic takes an optional `SubscribeOptions` bag (`types`/`signal`/`onActivity`);
+ *  this distillation types only the NO-ARGUMENT call the adapter makes
+ *  (src/host/v2/events.ts `subscribe()`) — the published function stays assignable
+ *  because its parameter is optional (probe-verified, #3732/#3552). */
 export interface V2EventEnvelope {
 	readonly type?: string;
 	readonly [key: string]: unknown;
 }
 export interface V2EventDomain {
-	readonly subscribe?: (
-		...args: unknown[]
-	) => AsyncIterable<V2EventEnvelope> | Promise<AsyncIterable<V2EventEnvelope>>;
+	readonly subscribe?: () =>
+		| AsyncIterable<V2EventEnvelope>
+		| Promise<AsyncIterable<V2EventEnvelope>>;
 }
 
 /**
  * v2 `PermissionDomain` (only used for the v1 ask() bridge, best-effort).
- * `assert` is documented in `@opencode/plugin@2.0.29`
- * `dist/promise/permission.d.ts` and ABSENT at the 2.0.26 vendored pin —
- * feature-detected (`typeof === 'function'`) at the call site
+ * `assert` is IN the published @2.3.0 domain (`dist/promise/permission.d.ts`
+ * AssertInput: optional `agent`/`save`/`metadata`/`source`, readonly arrays); it
+ * first appeared at 2.0.29, ABSENT at the 2.0.26 pin, and the call site still
+ * feature-detects it (`typeof === 'function'`) for older hosts
  * (src/host/v2/tools.ts buildPermissionBridge, #3351).
  */
 export interface V2PermissionDomain {
 	/**
-	 * Ask-side permission assertion (2.0.29+): input
-	 * `{ sessionID: string; agent: string; action: string; resources: string[] }`;
-	 * a resolution grants the request, a rejection denies it.
+	 * Ask-side permission assertion: input carries `sessionID`/`action`/`resources`
+	 * plus the @2.3.0 optional fields; a resolution grants the request, a rejection
+	 * denies it. Vendored input keeps the published readonly arrays
+	 * (probe-verified, #3732/#3552).
 	 */
 	assert?: (input: {
 		sessionID: string;
-		agent: string;
+		agent?: string;
 		action: string;
-		resources: string[];
+		resources: readonly string[];
+		save?: readonly string[];
+		metadata?: Record<string, unknown>;
+		source?: { type: 'tool'; messageID: string; id: string };
 	}) => Promise<unknown>;
 	/**
 	 * Answer-side RPC `{ requestID, reply, message }` — the host's channel for
@@ -557,6 +728,26 @@ export interface V2PermissionDomain {
 		name: 'evaluate',
 		callback: (input: unknown) => Promise<void> | void,
 	) => Promise<V2Registration>;
+}
+
+/** v2 `CredentialApi` activate member (@2.3.0 `Pick<CredentialApi, "activate">`). */
+export interface V2CredentialDomain {
+	readonly activate: (input: {
+		readonly credentialID: string;
+	}) => Promise<void>;
+}
+
+/** v2 `ExperimentalGenerateApi` text member (@2.3.0) — shared by
+ *  `Context.experimental.generate` and the deprecated top-level `Context.generate`. */
+export interface V2ExperimentalGenerateApi {
+	readonly text: (input: {
+		readonly prompt: string;
+		readonly model?: {
+			readonly id: string;
+			readonly providerID: string;
+			readonly variant?: string;
+		} | null;
+	}) => Promise<{ text: string }>;
 }
 
 /**
@@ -574,7 +765,40 @@ export interface V2PluginContext {
 	readonly session: V2SessionDomain;
 	readonly event: V2EventDomain;
 	readonly permission?: V2PermissionDomain;
-	/** Present on 2.0.26 hosts; no Phase 1 code path consumes it (issue #3169). */
+	/**
+	 * @2.3.0 additions (optional here = the documented older-host deviation; the
+	 * published `Context` requires both). `credential` is `Pick<CredentialApi,
+	 * "activate">`; `experimental` carries terminal read / stateless generate /
+	 * artifact (artifact's shape is a domain the adapter never touches — left
+	 * unknown with this note); `generate` is the DEPRECATED top-level alias of
+	 * `experimental.generate.text`. None consumed by the adapter today; adoption
+	 * assessment lives in docs/host/v2-hook-inventory.md (#3642).
+	 */
+	readonly credential?: V2CredentialDomain;
+	readonly experimental?: {
+		readonly terminal?: {
+			readonly read: (input: {
+				readonly sessionID: string;
+				readonly lines?: number;
+			}) => Promise<{
+				readonly ptyID: string;
+				readonly title: string;
+				readonly cwd: string;
+				readonly foregroundProcess: string | null;
+				readonly screen: {
+					readonly text: string;
+					readonly cols: number;
+					readonly rows: number;
+					readonly cursor: { readonly x: number; readonly y: number };
+				};
+			} | null>;
+		};
+		readonly generate?: V2ExperimentalGenerateApi;
+		readonly artifact?: unknown;
+	};
+	/** @deprecated upstream ("Use `experimental.generate.text`"). @2.3.0 shape. */
+	readonly generate?: V2ExperimentalGenerateApi;
+	/** Present on 2.0.26+ hosts; no Phase 1 code path consumes it (issue #3169). */
 	readonly worktree?: V2WorktreeDomain;
 	/**
 	 * v2 `ShellDomain` (dist/promise/shell.d.ts @2.0.29; the

@@ -478,7 +478,17 @@ describe('in-position write-back', () => {
 			}),
 			tempDir('swarm-inpos-'),
 		);
-		expect(host.content.map((p) => p.type)).toEqual(['reasoning', 'text']);
-		expect(textOf(host)).toBe('t#');
+		// @2.3.0 (#3732/#3552): the published message content is READONLY, so the
+		// adapter replaces the claimed element in the (mutable) event array instead
+		// of mutating the host's message object in place. The behavioral contract —
+		// the host reads transformed text in position from event.messages — is
+		// unchanged; only the original object identity is not preserved for CLAIMED
+		// messages (unclaimed messages still keep identity).
+		const written = ev.messages[0] as unknown as V2Message;
+		expect(written).not.toBe(host);
+		expect(
+			(written.content as Array<{ type: string }>).map((p) => p.type),
+		).toEqual(['reasoning', 'text']);
+		expect(textOf(written)).toBe('t#');
 	});
 });
