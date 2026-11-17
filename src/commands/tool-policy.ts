@@ -8,6 +8,7 @@ import { canonicalCommandKey } from './command-dispatch.js';
 import {
 	COMMAND_REGISTRY,
 	type CommandEntry,
+	parseReleaseReviewArgs,
 	VALID_COMMANDS,
 } from './registry.js';
 import { parseReportArgs } from './report.js';
@@ -163,6 +164,16 @@ export function classifySwarmCommandToolUse(
 			allowed: false,
 			message: `/swarm ${canonicalKey} does not accept arguments through swarm_command.`,
 		};
+	}
+
+	if (canonicalKey === 'pr-review') {
+		return parseReleaseReviewArgs(args)
+			? { allowed: true }
+			: {
+					allowed: false,
+					message:
+						'Usage through swarm_command: pr-review <GitHub PR URL> --release-head <full SHA>',
+				};
 	}
 
 	if (canonicalKey === 'knowledge') {

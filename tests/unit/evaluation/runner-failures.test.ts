@@ -6,6 +6,7 @@ import type {
 	EvaluationCandidateV1,
 	EvaluationTaskV1,
 } from '../../../src/evaluation/contracts.js';
+import { EvaluationResultV1Schema } from '../../../src/evaluation/contracts.js';
 import {
 	computeCandidateInputContentHash,
 	computeTaskInputContentHash,
@@ -226,6 +227,40 @@ describe('evaluation runner failure classification', () => {
 				run.results.every((entry) => entry.failureCode === failureCode),
 			).toBe(true);
 			expect(calls).toBe(outcome === 'infrastructure_failure' ? 4 : 2);
+		} finally {
+			safeRmRecursive(root);
+		}
+	});
+
+	test('bounds a long executor error into the schema-capped failureCode (#3710 R-10)', async () => {
+		const { root, options } = await harness();
+		try {
+			// Redaction can LENGTHEN a provider error (a URL becomes
+			// `<url:hash>`, a credential value becomes `<redacted>`), and
+			// `failureCode` is schema-capped at 160 chars. This row drives
+			// the REAL runner mapping and the REAL result schema: without
+			// the bound, the schema parse fails with too_big and the whole
+			// evaluation run is discarded.
+			const longError = `${'[REDACTED:openai]'} ${'x'.repeat(400)}`;
+			expect(longError.length).toBeGreaterThan(160);
+			options.executor = async () => ({
+				status: 'infrastructure_failure' as const,
+				text: '',
+				durationMs: 1,
+				cost: { source: 'reported' as const, usd: 0 },
+				error: longError,
+			});
+			const run = await runEvaluation(options);
+			expect(run.results.length).toBeGreaterThan(0);
+			for (const entry of run.results) {
+				expect(entry.failureCode).toBeDefined();
+				expect(entry.failureCode?.length).toBeLessThanOrEqual(160);
+				const parsed = EvaluationResultV1Schema.safeParse(entry);
+				expect(
+					parsed.success,
+					`result schema rejected the persisted failureCode: ${JSON.stringify(parsed.error?.issues)}`,
+				).toBe(true);
+			}
 		} finally {
 			safeRmRecursive(root);
 		}

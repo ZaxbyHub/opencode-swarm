@@ -1,7 +1,7 @@
 import type { OpencodeClient } from '@opencode-ai/sdk';
 import {
-	formatProviderMessageError,
 	type ProviderMessageError,
+	providerMessageErrorToError,
 	readProviderMessageError,
 } from '../failures/provider-message-error.js';
 import type { DelegationCostFields } from '../services/cost-accounting.js';
@@ -378,11 +378,14 @@ export async function dispatchEphemeralAgent(
 
 		providerError = readProviderMessageError(response.data.info);
 		if (providerError) {
-			throw new Error(
-				formatProviderMessageError(
-					'Ephemeral agent provider error',
-					providerError,
-				),
+			// #3724 item 2: throw the provider-message carrier (status/category/
+			// providerError snapshot on the Error object), not a flattened
+			// string — the catch below still attaches the carrier to the RESULT,
+			// and downstream classifiers read the snapshot before any bounded
+			// display text.
+			throw providerMessageErrorToError(
+				'Ephemeral agent provider error',
+				providerError,
 			);
 		}
 

@@ -4,7 +4,11 @@ import {
 	syncBundledProjectSkillsIfMissingAsync,
 } from '../config/bundled-skills.js';
 import { loadPluginConfig } from '../config/loader.js';
-import type { AutoReviewConfig, PluginConfig } from '../config/schema.js';
+import {
+	type AutoReviewConfig,
+	type PluginConfig,
+	stripKnownSwarmPrefix,
+} from '../config/schema.js';
 import type { EvaluationModelDispatcher } from '../evaluation/model-dispatcher.js';
 import {
 	activatePrWorkflow,
@@ -389,6 +393,7 @@ async function handleModeCommandWithBundledSkills(
 	ctx: CommandContext,
 	handler: (directory: string, args: string[]) => string | CommandResult,
 	mechanicalMode?: PrWorkflowMode,
+	activationOptions?: Parameters<typeof activatePrWorkflow>[3],
 ): CommandResult {
 	if (ctx.packageRoot) {
 		// Backstop for projects that predate init-time materialization (the
@@ -418,10 +423,28 @@ async function handleModeCommandWithBundledSkills(
 		if (mechanicalMode) {
 			await activatePrWorkflow(ctx.directory, ctx.sessionID, mechanicalMode, {
 				requireCheckoutPreflight: true,
+				...activationOptions,
 			});
 		}
 	}
 	return result;
+}
+
+export function parseReleaseReviewArgs(args: string[]) {
+	const [url, flag, head] = args;
+	if (
+		args.length !== 3 ||
+		flag !== '--release-head' ||
+		!url ||
+		!head ||
+		!/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/[1-9][0-9]*$/.test(
+			url,
+		) ||
+		!/^[a-f0-9]{40}$/.test(head)
+	) {
+		return null;
+	}
+	return { url, head };
 }
 
 /**
@@ -1627,19 +1650,43 @@ export const COMMAND_REGISTRY = {
 		toolPolicy: 'restricted',
 	},
 	'pr-review': {
-		handler: (ctx) =>
-			handleModeCommandWithBundledSkills(
+		handler: async (ctx) => {
+			if (ctx.args.includes('--release-head')) {
+				const releaseReview = parseReleaseReviewArgs(ctx.args);
+				if (
+					stripKnownSwarmPrefix(ctx.activeAgentName ?? '') !== 'architect' ||
+					!releaseReview
+				) {
+					return 'BLOCKED: release review requires the architect, a GitHub PR URL, and an exact head.';
+				}
+				return handleModeCommandWithBundledSkills(
+					ctx,
+					(directory) => {
+						const { url, head } = releaseReview;
+						const signal = handlePrReviewCommand(directory, [url]);
+						if (signal !== `[MODE: PR_REVIEW pr="${url}" council=false]`) {
+							return 'BLOCKED: release review requires a canonical GitHub PR URL.';
+						}
+						return `${signal} Release review requires checkout and binding to ${head}. Complete the native review and submit it before resuming merge admission.`;
+					},
+					'PR_REVIEW',
+					{ releaseReview },
+				);
+			}
+			return handleModeCommandWithBundledSkills(
 				ctx,
 				handlePrReviewCommand,
 				'PR_REVIEW',
-			),
+				{ releaseReview: null },
+			);
+		},
 		description:
 			'Launch deep PR review with multi-lane analysis [url] [--council]',
-		args: '<pr-url|owner/repo#N|N> [--council]',
+		args: '<pr-url|owner/repo#N|N> [--council] | <GitHub PR URL> --release-head <full SHA>',
 		details:
-			'Launches a structured PR review: preserves dirty state, verifies and binds an exact detached PR head, reconstructs PR intent via obligation extraction cascade, computes a depth tier (S/M/L) from the bound merge-base diff, launches the base explorer wave through dispatch_lanes_async (all 6 review dimensions covered on every PR — six singleton lanes at tier L, consolidated owned_workflow_lanes partitions at tiers S/M) while the architect keeps doing non-dependent work, and polls collect_lane_results incrementally. It evaluates an exact 11-row repository-agnostic risk-family ledger, records applicable rows as MATCHED and concretely inapplicable rows as provenance-free NOT_TRIGGERED, always keeps unclassified-risk MATCHED, and dispatches micro work only for MATCHED families (dedicated lanes at tier L, consolidated sweeps at S/M). It then validates findings through independent reviewer confirmation, applies critic challenge to HIGH/CRITICAL findings, and synthesizes only after matched coverage is closed. Failed obligations retry through the same structured async mode and exact PR head; blocking or direct-Task dispatch is not provenance-equivalent, so unclosed matched coverage leaves the review BLOCKED rather than degraded. --council variant fires adversarial multi-model review. Supports full GitHub URL, owner/repo#N shorthand, or bare PR number (resolves against origin remote).',
+			'Launches a structured PR review: preserves dirty state, verifies and binds an exact detached PR head, reconstructs PR intent via obligation extraction cascade, computes a depth tier (S/M/L) from the bound merge-base diff, launches the base explorer wave through dispatch_lanes_async (all 6 review dimensions covered on every PR — six singleton lanes at tier L, consolidated owned_workflow_lanes partitions at tiers S/M) while the architect keeps doing non-dependent work, and polls collect_lane_results incrementally. It evaluates an exact 11-row repository-agnostic risk-family ledger, records applicable rows as MATCHED and concretely inapplicable rows as provenance-free NOT_TRIGGERED, always keeps unclassified-risk MATCHED, and dispatches micro work only for MATCHED families (dedicated lanes at tier L, consolidated sweeps at S/M). It then validates findings through independent reviewer confirmation, applies critic challenge to HIGH/CRITICAL findings, and synthesizes only after matched coverage is closed. Failed obligations retry through the same structured async mode and exact PR head; blocking or direct-Task dispatch is not provenance-equivalent, so unclosed matched coverage leaves the review BLOCKED rather than degraded. --council variant fires adversarial multi-model review. Supports full GitHub URL, owner/repo#N shorthand, or bare PR number (resolves against origin remote). For release admission, the architect uses the full GitHub PR URL and exact head SHA.',
 		category: 'agent',
-		toolPolicy: 'none',
+		toolPolicy: 'agent',
 	},
 	'pr-feedback': {
 		handler: (ctx) => handlePrFeedbackCommandWithTransition(ctx),
@@ -1979,11 +2026,11 @@ export const COMMAND_REGISTRY = {
 			'Control Full-Auto Mode for the active session [on [mode]|off|exit|status|retry-oversight|resume|abort]',
 		args: 'on [assisted|supervised|strict], off|exit, status, retry-oversight, resume, abort',
 		details:
-			'First-class toggle for Full-Auto Mode — a critic gate reviewing escalations on your behalf (the architect still plans and delegates; full-auto never executes tasks itself). No config-level enablement is required: "on" activates immediately (unless full_auto.locked is true in config), "off" disarms the run and returns the session to normal interactive operation, "status" reports the durable run state. ' +
-			'An optional mode after "on" overrides full_auto.mode for this run: assisted (critic consulted only on policy escalations), supervised (default — risky/high-impact actions reviewed by the critic), strict (ALL plan mutations reviewed by the critic). ' +
-			'While active, the critic answers architect questions and reviews phase boundaries, delegations, and risky actions on your behalf; only ESCALATE_TO_HUMAN verdicts halt the run for your input. ' +
-			'`retry-oversight` performs a transport-only health probe for an infrastructure/deadline pause and never replays the denied action. `resume` runs the same authorization preflight as `on` first (readable config; `full_auto.locked` refuses), then requires a recent successful matching probe and no active recovery blockers. `abort` terminates the durable run immediately. ' +
-			'The run state is durable (.swarm/full-auto-state.json) and survives restarts; toggle with no argument flips the current state. ' +
+			'First-class toggle for Full-Auto Mode — a critic gate reviewing escalations on your behalf (the architect still plans and delegates; it never executes tasks itself). No config-level enablement is required: "on" activates immediately (unless full_auto.locked is true in config), "off" disarms the run (back to interactive operation), "status" reports the durable run state. ' +
+			'An optional mode after "on" overrides full_auto.mode for this run (the override holds until the run pauses or ends; `resume` re-derives from live config, so `on strict` resumes supervised under default config): assisted (critic on policy escalations only), supervised (default — risky/high-impact actions reviewed), strict (ALL plan mutations reviewed). ' +
+			'While active, the critic answers architect questions and reviews phase boundaries, delegations, and risky actions; only ESCALATE_TO_HUMAN verdicts halt for your input. ' +
+			'`retry-oversight` performs a transport-only health probe for an infrastructure/deadline pause; it never replays the denied action. `resume` runs the same `on` preflight (readable config; `full_auto.locked` refuses), then requires a recent matching probe and no active recovery blockers. `abort` terminates the durable run immediately. ' +
+			'Run state is durable (.swarm/full-auto-state.json) and survives restarts; a bare toggle flips the current state. ' +
 			'Composes with an open epic (Epic Mode): both the Full-Auto phase approval and the epic_phase_readiness gate apply at phase_complete.',
 		category: 'utility',
 		// An agent running under Full-Auto must not be able to disable its own

@@ -229,7 +229,7 @@ describe('getChangedLineRanges union', () => {
 	test('preserves non-BMP Unicode adjacent to Git path escapes', async () => {
 		const repoPath = 'src/😀\tunsafe.ts';
 		const quotedPath = '"src/😀\\tunsafe.ts"';
-		const diff = `diff --git ${quotedPath} ${quotedPath}\n--- ${quotedPath}\n+++ ${quotedPath}\n@@ -0,0 +1 @@\n`;
+		const diff = `diff --git ${quotedPath} ${quotedPath}\n--- ${quotedPath}\n+++ ${quotedPath}\n@@ -0,0 +1 @@\n+const safety = 1;\n`;
 		_internals.runExternalTool = async (options) => ({
 			status: 'completed',
 			exitCode: 0,
@@ -306,6 +306,16 @@ describe('getChangedLineRanges union', () => {
 		git(root, ['add', '.gitignore', 'tracked.ts']);
 		git(root, ['commit', '-m', 'base']);
 		git(root, ['checkout', '-b', 'feature']);
+		// One commit past main keeps the diff base authoritative (a HEAD-equal
+		// base is non-authoritative and fails closed since the #3131 4.5-round
+		// fix); this test pins the ignored-file expansion, not that geometry.
+		write(
+			root,
+			'tracked.ts',
+			'export const tracked = true;\nexport const b = 2;\n',
+		);
+		git(root, ['add', 'tracked.ts']);
+		git(root, ['commit', '-m', 'branch commit']);
 		write(root, 'ignored-security.ts', 'dangerous();\n');
 
 		const ignoredPath = path.join(root, 'ignored-security.ts');
@@ -333,6 +343,15 @@ describe('getChangedLineRanges union', () => {
 		git(root, ['add', '.gitignore', 'tracked.ts']);
 		git(root, ['commit', '-m', 'base']);
 		git(root, ['checkout', '-b', 'feature']);
+		// Same as the ignored-file leg above: one commit past main keeps the
+		// diff base authoritative under the #3131 HEAD-equal fail-closed fix.
+		write(
+			root,
+			'tracked.ts',
+			'export const tracked = true;\nexport const b = 2;\n',
+		);
+		git(root, ['add', 'tracked.ts']);
+		git(root, ['commit', '-m', 'branch commit']);
 		write(root, 'ignored/security.ts', 'dangerous();\n');
 
 		const ignoredPath = path.join(root, 'ignored', 'security.ts');

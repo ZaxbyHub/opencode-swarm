@@ -44,6 +44,27 @@ Measured 2026-10-16 on a real host, closing the question this ADR's discovery sl
 - **Numbers (final committed batch; 3 runs, captured 2026-10-17 with the review-hardened harness):** the session for the first prompt is created **2575–3612 ms BEFORE** the last bundled skill lands; the copy itself spans 2026–3012 ms (41 bundled skill directories; the sync copies whole directories); the model stream starts 1505–1592 ms after the session is created — i.e. **inside** the still-open window in every run. Across all measurements (one exploratory cold run + five harness 3-run batches on 2026-10-16 + the review-hardened re-capture batch on 2026-10-17, 19 observations total, observed in-session; the committed JSON rows are the final batch) the arrival-before-completion window was positive in 19/19 runs and ranged roughly 0.4–4.2 s (harness-only minimum 1249 ms).
 - **Interpretation:** the race is structural, not cold-start noise — the sync runs from the wrapper-owned post-resolution queue (`src/index.ts:1836`, budget `SYNC_BUNDLED_SKILLS_TIMEOUT_MS = 2_000`), while the host begins processing the first prompt as soon as `server()` resolves; on this host the copy alone takes ~2.8–3.0 s, at/above the await budget. The architect MODE-stub read (`src/agents/architect.ts:908-913`, `SKILL_LOAD_FAILED` when the file is absent) is the failure-relevant consumer; its exact read time is not observable in-band, and the model-call latency (~1.5 s) is the only thing that kept the measured runs from hitting it — timing luck, not an ordering contract. The command-path sync remains the backstop for `/swarm`-initiated flows. Remedy options (read-side await, bounded wait at the first context/chat event, MODE-read retry) are #3364's scope; moving the copy back onto the synchronous init path is not (AGENTS.md invariant 1 / #704).
 - **v2 leg:** first-turn timing is not machine-measurable through this harness on v2 — its `--print-logs` output carries no session lifecycle lines at the default level and does not relay plugin stdout (the per-skill sync timestamps are invisible; the v2 attempt was not retained (its rows parsed no usable timings; the null-field artifacts were removed at review and the limitation is disclosed above)). v2 shares the same deferred-sync code path; its spike legs prove the load/attribution/hook-firing behavior, and the v1 numbers are this ADR's measurement of record.
+- **Remedy record (#3364, 2026-11-14):** the ordering gap is closed by a
+  pre-registered completion handle plus a first-turn gate. The materialization
+  registry (src/config/bundled-skills.ts) tracks materialization SUCCESS per
+  project root — the deferred handle is registered at post-resolution-task
+  ENQUEUE time (before server() resolves; a map write only), and
+  syncBundledProjectSkillsIfMissingAsync adopts it, with settlement owned solely
+  by the sync promise (the outer 2 s await timeout is a race and never fails an
+  adopted entry). A gate composed FIRST in experimental.chat.messages.transform
+  (src/hooks/bundled-skills-first-turn-gate.ts) awaits the registered promise
+  with a single 15 s total budget — every pre-settlement invocation joins the
+  same shared wait, so the CURRENT turn proceeds only after materialization
+  settles, and a copy finishing mid-wait (measured window <= 3.612 s) is
+  observed by that same turn. v2 hosts share the fix through the same v1 chain
+  (no separate wiring). **Disclosed bounds (adopted under the session's standing work authorization; owner confirmation pending — the plan-approval question went unanswered 2026-11-14):**
+  three escapes keep the fail-open command-path backstop for that turn — a copy
+  slower than 15 s, a genuinely failed sync, and registration refusal at the
+  8-root all-pending cap (practically unreachable: one project root per plugin
+  process). The init path adds no awaited I/O (one bounded sync realpath at
+  enqueue-time registration; repro-704 stays green). On v2 the gate budget
+  runs inside the 30 s guidance-chain budget; only the >15 s escape consumes
+  it, and chain exhaustion restores the pre-transform messages (fail-open).
 
 ## Appendix: Invalidation re-check (issue #2909 exit gate) — 2026-10-16
 

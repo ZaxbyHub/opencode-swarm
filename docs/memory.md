@@ -8,7 +8,7 @@ Swarm memory is an optional, project-scoped recall system. The current default p
 - `swarm_memory_propose`: proposal-only writes. It creates pending proposals and never writes durable memory directly.
 - `swarm_memory_outcome`: records whether recalled memory or a graph answer was useful, a dead end, or corrected. It can target a memory ID or create a lightweight question result.
 
-Memory is disabled by default. When disabled, default agents are not given the memory tools, direct tool calls return a clear disabled result, reflection artifacts are not regenerated or injected, and existing Swarm behavior is unchanged.
+Memory is disabled by default. When disabled, default agents are not given the memory tools, the `swarm_memory_*` tools are not registered in the main session (an execute-time disabled result remains as a backstop on surfaces that still reach the handlers, e.g. the MCP adapter), reflection artifacts are not regenerated or injected, and existing Swarm behavior is unchanged.
 
 ## Configuration
 

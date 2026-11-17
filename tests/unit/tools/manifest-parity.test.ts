@@ -65,7 +65,11 @@ describe('tool metadata <-> derived registries', () => {
 });
 
 describe('plugin tool object derives from the manifest (#507 acceptance)', () => {
-	const toolObject = buildPluginToolObject({});
+	// Manifest parity, not memory gating (issue #3659 owns that): build with
+	// memory enabled so the manifest↔object comparison covers every tool.
+	const toolObject = buildPluginToolObject({}, {
+		memory: { enabled: true },
+	} as never);
 	const registered = new Set(Object.keys(toolObject));
 
 	test('every TOOL_NAMES entry is registered with a callable execute', () => {
