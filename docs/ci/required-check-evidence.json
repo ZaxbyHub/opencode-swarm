@@ -53,32 +53,43 @@
 		],
 		"observedRuns": [
 			{
-				"id": 38204222229,
-				"workflow": "CI",
-				"workflowPath": ".github/workflows/ci.yml",
+				"id": 44078540845,
+				"workflow": "drift-check",
+				"workflowPath": ".github/workflows/drift-check.yml",
 				"event": "merge_group",
-				"endpoint": "https://api.github.com/repos/ZaxbyHub/opencode-swarm/actions/runs/38204222229",
-				"headSha": "012c4e40db4a63dd9b771cb99d57c565949d2931",
+				"endpoint": "https://api.github.com/repos/ZaxbyHub/opencode-swarm/actions/runs/44078540845",
+				"headSha": "c12cd853dd61858d17bb4e85ca21739b0169710e",
 				"conclusion": "success"
 			},
 			{
-				"id": 38204222210,
+				"id": 44078540792,
+				"workflow": "CI",
+				"workflowPath": ".github/workflows/ci.yml",
+				"event": "merge_group",
+				"endpoint": "https://api.github.com/repos/ZaxbyHub/opencode-swarm/actions/runs/44078540792",
+				"headSha": "c12cd853dd61858d17bb4e85ca21739b0169710e",
+				"conclusion": "success"
+			},
+			{
+				"id": 44078540677,
 				"workflow": "PR Standards",
 				"workflowPath": ".github/workflows/pr-standards.yml",
 				"event": "merge_group",
-				"endpoint": "https://api.github.com/repos/ZaxbyHub/opencode-swarm/actions/runs/38204222210",
-				"headSha": "012c4e40db4a63dd9b771cb99d57c565949d2931",
+				"endpoint": "https://api.github.com/repos/ZaxbyHub/opencode-swarm/actions/runs/44078540677",
+				"headSha": "c12cd853dd61858d17bb4e85ca21739b0169710e",
 				"conclusion": "success"
 			}
 		],
 		"workflowRunsByWorkflow": {
 			".github/workflows/ci.yml": [
-				38204222229
+				44078540792
 			],
 			".github/workflows/pr-standards.yml": [
-				38204222210
+				44078540677
 			],
-			".github/workflows/drift-check.yml": []
+			".github/workflows/drift-check.yml": [
+				44078540845
+			]
 		}
 	},
 	"workflowEvents": {
@@ -101,16 +112,16 @@
 	},
 	"capturedWorkflowFiles": {
 		".github/workflows/ci.yml": {
-			"contentsEndpoint": "https://api.github.com/repos/ZaxbyHub/opencode-swarm/contents/.github/workflows/ci.yml?ref=012c4e40db4a63dd9b771cb99d57c565949d2931",
-			"blobSha": "e2c912683be2a8549730bdefe75c50e67cd20613"
+			"contentsEndpoint": "https://api.github.com/repos/ZaxbyHub/opencode-swarm/contents/.github/workflows/ci.yml?ref=c12cd853dd61858d17bb4e85ca21739b0169710e",
+			"blobSha": "e7656b107dbc9c5338195513a5aad3076a1eecaf"
 		},
 		".github/workflows/pr-standards.yml": {
-			"contentsEndpoint": "https://api.github.com/repos/ZaxbyHub/opencode-swarm/contents/.github/workflows/pr-standards.yml?ref=012c4e40db4a63dd9b771cb99d57c565949d2931",
-			"blobSha": "33b7eb5e3630e4de0b2a765e56eee74d2b1d0205"
+			"contentsEndpoint": "https://api.github.com/repos/ZaxbyHub/opencode-swarm/contents/.github/workflows/pr-standards.yml?ref=c12cd853dd61858d17bb4e85ca21739b0169710e",
+			"blobSha": "7d2683b674946ffb141201d65c5fe0bbb765908f"
 		},
 		".github/workflows/drift-check.yml": {
-			"contentsEndpoint": "https://api.github.com/repos/ZaxbyHub/opencode-swarm/contents/.github/workflows/drift-check.yml?ref=012c4e40db4a63dd9b771cb99d57c565949d2931",
-			"blobSha": "f26ac3b1ab1121ad3947c25024f4d7bc258ca972"
+			"contentsEndpoint": "https://api.github.com/repos/ZaxbyHub/opencode-swarm/contents/.github/workflows/drift-check.yml?ref=c12cd853dd61858d17bb4e85ca21739b0169710e",
+			"blobSha": "b6a49b60856deca97d2aa6464fe0f148739eb307"
 		}
 	},
 	"localWorkflowHashes": {
@@ -118,8 +129,8 @@
 		".github/workflows/pr-standards.yml": "7ccd16b172121f488ae8031be320649e48b5e8d592a8e6dcb21c65aeb5b101b8",
 		".github/workflows/drift-check.yml": "4c2d721e1de7e18c7b2454c0ef6d5ffecdd7325e529b9615f6f99ac70cff89a3"
 	},
-	"capturedAt": "2026-11-11T14:28:19Z",
-	"captureSha": "012c4e40db4a63dd9b771cb99d57c565949d2931",
+	"capturedAt": "2026-11-17T12:46:00.183Z",
+	"captureSha": "c12cd853dd61858d17bb4e85ca21739b0169710e",
 	"sources": [
 		{
 			"endpoint": "https://api.github.com/repos/ZaxbyHub/opencode-swarm/rulesets/17809658",
@@ -127,31 +138,39 @@
 		},
 		{
 			"endpoint": "https://api.github.com/repos/ZaxbyHub/opencode-swarm/branches/main",
-			"purpose": "branch protection surface and protection type"
+			"purpose": "branch protection state at capture"
+		},
+		{
+			"endpoint": "https://api.github.com/repos/ZaxbyHub/opencode-swarm/rules/branches/main",
+			"purpose": "rules applied to the branch (ruleset applicability evidence)"
 		},
 		{
 			"endpoint": "https://api.github.com/repos/ZaxbyHub/opencode-swarm/actions/runs?event=merge_group",
-			"purpose": "merge-group workflow run receipts"
+			"purpose": "observed merge-group runs at the capture SHA"
 		},
 		{
-			"endpoint": "https://api.github.com/repos/ZaxbyHub/opencode-swarm/actions/runs/38204222229",
-			"purpose": "merge-group run receipt for .github/workflows/ci.yml"
+			"endpoint": "https://api.github.com/repos/ZaxbyHub/opencode-swarm/actions/runs/44078540845",
+			"purpose": "merge-group run receipt 44078540845 (.github/workflows/drift-check.yml)"
 		},
 		{
-			"endpoint": "https://api.github.com/repos/ZaxbyHub/opencode-swarm/actions/runs/38204222210",
-			"purpose": "merge-group run receipt for .github/workflows/pr-standards.yml"
+			"endpoint": "https://api.github.com/repos/ZaxbyHub/opencode-swarm/actions/runs/44078540792",
+			"purpose": "merge-group run receipt 44078540792 (.github/workflows/ci.yml)"
 		},
 		{
-			"endpoint": "https://api.github.com/repos/ZaxbyHub/opencode-swarm/contents/.github/workflows/ci.yml?ref=012c4e40db4a63dd9b771cb99d57c565949d2931",
-			"purpose": "pinned workflow blob capture for .github/workflows/ci.yml"
+			"endpoint": "https://api.github.com/repos/ZaxbyHub/opencode-swarm/actions/runs/44078540677",
+			"purpose": "merge-group run receipt 44078540677 (.github/workflows/pr-standards.yml)"
 		},
 		{
-			"endpoint": "https://api.github.com/repos/ZaxbyHub/opencode-swarm/contents/.github/workflows/pr-standards.yml?ref=012c4e40db4a63dd9b771cb99d57c565949d2931",
-			"purpose": "pinned workflow blob capture for .github/workflows/pr-standards.yml"
+			"endpoint": "https://api.github.com/repos/ZaxbyHub/opencode-swarm/contents/.github/workflows/ci.yml?ref=c12cd853dd61858d17bb4e85ca21739b0169710e",
+			"purpose": "workflow capture pinned to the capture SHA (.github/workflows/ci.yml)"
 		},
 		{
-			"endpoint": "https://api.github.com/repos/ZaxbyHub/opencode-swarm/contents/.github/workflows/drift-check.yml?ref=012c4e40db4a63dd9b771cb99d57c565949d2931",
-			"purpose": "pinned workflow blob capture for .github/workflows/drift-check.yml"
+			"endpoint": "https://api.github.com/repos/ZaxbyHub/opencode-swarm/contents/.github/workflows/pr-standards.yml?ref=c12cd853dd61858d17bb4e85ca21739b0169710e",
+			"purpose": "workflow capture pinned to the capture SHA (.github/workflows/pr-standards.yml)"
+		},
+		{
+			"endpoint": "https://api.github.com/repos/ZaxbyHub/opencode-swarm/contents/.github/workflows/drift-check.yml?ref=c12cd853dd61858d17bb4e85ca21739b0169710e",
+			"purpose": "workflow capture pinned to the capture SHA (.github/workflows/drift-check.yml)"
 		}
 	]
 }

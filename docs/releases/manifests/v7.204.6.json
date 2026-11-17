@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.204.6",
+  "tagCommit": "6bbb4018a4b2a2c91aded1e1d873309c6a90c635",
+  "targetCommitish": "6bbb4018a4b2a2c91aded1e1d873309c6a90c635",
+  "releaseBodySha256": "78e5f5b4a1daa7c1df70bde87a303062d3c2a2a7a7c3434fabe8278f4f83d81b",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/3306-3308-3361-fragment-gate-hardening.md",
+      "sha256": "1cb19ede5cf96c9bc4317fcde6b8bdfcb5aa58cd661ee04d8f90b67cdf6e8713"
+    }
+  ]
+}
