@@ -719,30 +719,30 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		canonicalRoot: 'outside-swarm',
 		writerModules: ['src/tools/prepare-pr-feedback-commit-message.ts'],
 		writerCitations: [
-			'src/tools/prepare-pr-feedback-commit-message.ts:209 atomicWriteFileAnyRoot — canonical atomic write (temp+fsync+rename, mode 0600)',
-			'src/tools/prepare-pr-feedback-commit-message.ts:177 mkdirSync — dedicated temp subdirectory (recursive)',
-			'src/tools/prepare-pr-feedback-commit-message.ts:98 rmSync — pruneStaleMessageFiles TTL reaper',
+			'src/tools/prepare-pr-feedback-commit-message.ts:323 atomicWriteFileAnyRoot — canonical atomic write (temp+fsync+rename, mode 0600, same-tick validateTarget re-proof)',
+			'src/tools/prepare-pr-feedback-commit-message.ts:112 mkdirSync — dedicated temp subdirectory (recursive, mode 0700, inside acquireCommitMessageDir)',
+			'src/tools/prepare-pr-feedback-commit-message.ts:211 rmSync — pruneStaleMessageFiles TTL reaper (same-tick lstat re-proof at entry)',
 		],
 		readerCitations: [
-			'no plugin reader — the authored path is returned to the caller (:220-225) and consumed by `git commit -F` outside the plugin',
+			'no plugin reader — the authored path is returned to the caller (:346-351) and consumed by `git commit -F` outside the plugin',
 		],
 		schemaVersion: 'plain-text commit message (no schema)',
 		stateClass: 'operational',
 		privacyClass: 'content',
 		writeLimits: {
-			bound: 'MAX_COMMIT_MESSAGE_CHARS 8192 per file (:42,:53-55; whitespace-only and NUL refused); one file per (sanitized sessionID, sha256(message)[:16]) key (:68-81); pruneStaleMessageFiles age-prunes every .txt in the directory at MESSAGE_FILE_TTL_MS 24 h on every authoring call (:44,:88-107)',
+			bound: 'MAX_COMMIT_MESSAGE_CHARS 8192 per file (:48,:56-64; whitespace-only and NUL refused); one file per (sanitized sessionID, sha256(message)[:16]) key (:177-186); pruneStaleMessageFiles age-prunes every .txt in the directory at MESSAGE_FILE_TTL_MS 24 h on every authoring call (:49-50,:196-220)',
 			scope: 'per-key',
 			keyspaceBound:
-				'FINITE BY REAPER: the message-digest key domain has no closed enumeration, but pruneStaleMessageFiles (src/tools/prepare-pr-feedback-commit-message.ts:88-107) walks the whole dedicated directory on EVERY authoring call and removes every file older than the 24 h TTL, so the keyspace cannot outgrow one 24 h window of authored messages.',
+				'FINITE BY REAPER: the message-digest key domain has no closed enumeration, but pruneStaleMessageFiles (src/tools/prepare-pr-feedback-commit-message.ts:196-220) walks the whole dedicated directory on EVERY authoring call and removes every file older than the 24 h TTL, so the keyspace cannot outgrow one 24 h window of authored messages.',
 			citation:
-				'src/tools/prepare-pr-feedback-commit-message.ts:42-44,63-81,88-107,209-211',
+				'src/tools/prepare-pr-feedback-commit-message.ts:48-50,69-71,103-170,173-186,196-220,323-337',
 		},
 		readBound: {
 			pattern: 'write-only',
 			bound: 'never read back by the plugin; the content is written once atomically and handed off by path',
 			sync: false,
 			citation:
-				'src/tools/prepare-pr-feedback-commit-message.ts:209-211 (sole write; git reads the file as the -F argument, outside the plugin)',
+				'src/tools/prepare-pr-feedback-commit-message.ts:323-337 (sole write; git reads the file as the -F argument, outside the plugin)',
 		},
 		lockModel:
 			'none — deterministic per-key filename + atomic write; concurrent authoring of the same message converges to identical bytes',
@@ -757,7 +757,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		disposition: {
 			kind: 'not-a-defect',
 			proof:
-				'Ephemeral authored commit-message files live in a dedicated OS-temp subdirectory OUTSIDE every repository (prepare-pr-feedback-commit-message.ts:63-81); the filename key is (sanitized sessionID, sha256(message)[:16]) and pruneStaleMessageFiles (:88-107) reaps files older than MESSAGE_FILE_TTL_MS=24 h on every authoring call, so there is no unbounded growth axis; writes are atomic with mode 0600 (:209-211) and a TMPDIR resolving inside the repository is refused (:169-175).',
+				'Ephemeral authored commit-message files live in a dedicated OS-temp subdirectory OUTSIDE every repository (prepare-pr-feedback-commit-message.ts:69-71,173-186); the filename key is (sanitized sessionID, sha256(message)[:16]) and pruneStaleMessageFiles (:196-220) reaps files older than MESSAGE_FILE_TTL_MS=24 h on every authoring call, so there is no unbounded growth axis; writes are atomic with mode 0600 with a same-tick link re-proof (:323-337) and a TMPDIR resolving inside the repository is refused (:270-288) or resolved through a link into the repository (:301-317).',
 		},
 	},
 	{
@@ -1627,11 +1627,11 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/turbo/lean/evidence.ts', 'src/turbo/lean/integration.ts', 'src/turbo/lean/reviewer.ts', 'src/epic/phase-readiness.ts'],
 		writerCitations: [
-			'src/turbo/lean/evidence.ts:216 writeLaneEvidence / :269 writePhaseEvidence — atomic',
+			'src/turbo/lean/evidence.ts:222 writeLaneEvidence / :275 writePhaseEvidence — atomic',
 			'src/turbo/lean/integration.ts:403 writeCriticEvidence / src/turbo/lean/reviewer.ts:379 writeReviewerEvidence — atomic',
-			'src/epic/phase-readiness.ts:888 runEpicPhaseReview — one atomic evidence/{phase}/epic-phase-review.json per phase, overwritten on re-review',
+			'src/epic/phase-readiness.ts:904 runEpicPhaseReview — one atomic evidence/{phase}/epic-phase-review.json per phase, overwritten on re-review',
 		],
-		readerCitations: ['src/turbo/lean/evidence.ts:234,284,320 — per-file + directory listing, sync; integration.ts:248 compileCriticPackage', 'src/epic/phase-readiness.ts:438 verifyEpicPhaseReadiness — single per-phase file read by phase_complete'],
+		readerCitations: ['src/turbo/lean/evidence.ts:234,284,320 — per-file + directory listing, sync; integration.ts:248 compileCriticPackage', 'src/epic/phase-readiness.ts:439 verifyEpicPhaseReadiness — single per-phase file read by phase_complete'],
 		schemaVersion: 'none',
 		stateClass: 'governed-content',
 		privacyClass: 'content',
@@ -4427,6 +4427,56 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			kind: 'not-a-defect',
 			proof:
 				'The #2483 retention sweep\'s review-receipts family age-prunes receipts at 30 d with a keep-newest-1000 cap (REVIEW_RECEIPTS_KEEP_NEWEST, src/retention/sweep.ts:49,96); index entries whose files were pruned resolve to null fail-open (parseReceiptFromIndexEntry, src/hooks/review-receipt.ts:849) and the index reader is capped at MAX_RECEIPTS_READ 1000 newest-first (:904,915) — the accumulation gap behind the #2309 row is closed by the sweep.',
+		},
+	},
+	{
+		id: 'retention-control-plane',
+		category: 8,
+		pathGrammar:
+			'.swarm/retention.log + .swarm/retention.d/{owner}.json (one ownership manifest per owner; no shared manifest file)',
+		canonicalRoot: 'project-swarm',
+		writerModules: ['src/retention/unclaimed.ts'],
+		writerCitations: [
+			'src/retention/unclaimed.ts:547 appendRetentionLog — one line per pruned directory (`<ISO-8601> pruned <path> age=<days> size=<bytes>`), then a tail-only rewrite when the append crosses the byte budget; the manifest DIRECTORY is read-only to the plugin (loadOwnerManifests:258) — each owner writes only its own file',
+		],
+		readerCitations: [
+			'loadOwnerManifests (:258) reads every *.json manifest once per sweep, before any deletion; the log is written for humans and agents to read (no in-process reader by design)',
+		],
+		schemaVersion:
+			'manifest schema 1 — { owner: string, preserve: string[], maxAgeDays?: number }; log line grammar `<ISO-8601> pruned <path> age=<days> size=<bytes>`',
+		stateClass: 'operational',
+		privacyClass: 'metadata',
+		writeLimits: {
+			bound:
+				'one line per pruned directory; the log is compacted to the newest lines within RETENTION_LOG_MAX_BYTES 256 KiB on the append that crosses it (src/retention/unclaimed.ts:60,547); each manifest is capped at RETENTION_MANIFEST_MAX_BYTES 64 KiB (:58) and a larger claim is refused as malformed',
+			scope: 'global',
+			citation: 'src/retention/unclaimed.ts:58,60,547',
+		},
+		readBound: {
+			pattern: 'tail (byte-bounded)',
+			bound:
+				'compaction reads only the newest RETENTION_LOG_MAX_BYTES 256 KiB of the log; manifests are read whole but bounded to 64 KiB each',
+			sync: false,
+			citation: 'src/retention/unclaimed.ts:58,60',
+		},
+		lockModel:
+			'append-only O_APPEND line batch; the rare compaction rewrites the tail and the last writer wins (the log is diagnostic, never authority)',
+		crashBehavior:
+			'a torn trailing line is cosmetic — readers treat each line independently and the next append starts a new one',
+		closePolicy:
+			'untouched by close — the log records what the sweep reclaimed, and manifests are owner-authored policy that close must not rewrite',
+		resetPolicy: 'not reset',
+		legacyCompatibility: 'n/a',
+		healthSignal: 'n/a',
+		owner: '#2483 follow-up (unclaimed-directory lifecycle)',
+		closeArrayMembership: {
+			'retention.log': 'neither',
+			'retention.d': 'neither',
+		},
+		disposition: {
+			kind: 'not-a-defect',
+			proof:
+				'Bounded by construction: the log carries one metadata line per pruned path (no file content) and is compacted to RETENTION_LOG_MAX_BYTES 256 KiB (src/retention/unclaimed.ts:60,547-569), so it cannot become the unbounded-growth defect the catch-all exists to fix; manifests are one 64 KiB-capped file per owner and a malformed/ambiguous claim refuses the whole sweep rather than being deleted.',
 		},
 	},
 	{

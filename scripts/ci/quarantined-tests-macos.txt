@@ -12,8 +12,18 @@
 # the gate; an EXPIRY more than 14 days in the past also fails (inside
 # the grace window it only warns).
 #
-# Active macOS-only quarantine entries are below; each carries the Check
-# 7-enforced OWNER/EXPIRY metadata.
-# OWNER: zaxbysauce — issue #2973; criterion: macos retry-flake diagnosis
-# EXPIRY: 2026-12-20 — re-anchored 2026-11-12 (trace 2973-…-quarantine-retirement): criterion = obtain a reproducing macos diagnosis or root fix; EXPIRY 2026-12-20
-tests/unit/hooks/pr-feedback-scope-controller.test.ts
+# No active macOS-only quarantine entries. (An active entry, when present,
+# carries the Check 7-enforced OWNER/EXPIRY metadata.)
+#
+# Retired 2026-11-16 per issue #2973 (quarantine-debt-zero trace, successor to
+# the 2026-11-12 re-anchor): tests/unit/hooks/pr-feedback-scope-controller.test.ts
+# was un-quarantined. Retirement basis: the 2026-09-12 passed-on-retry flake's
+# attempt-1 evidence was recovered from the run's repository-validation artifact
+# (run 34670762927 — the race test at :323 expected 1 fulfilled and received 0;
+# a shared fail-closed pre-consumption transient can reject BOTH racing calls
+# without violating the exactly-once reservation), and the race test was
+# determinism-hardened in the retiring PR (bounded attempt-counted re-race with
+# a disjoint outcome classifier + designed-loser reason pin) plus a new
+# transient-semantics spec. Do NOT re-add this file without a fresh merge-group
+# macos-latest failure that cannot be fixed at the root; the per-attempt
+# validation-report artifact carries attempt-1 stderr for any recurrence.

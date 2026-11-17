@@ -419,7 +419,7 @@ per row.
 | `impact-map` | .swarm/cache/impact-map.json | derived-rebuildable | rebuildable via buildImpactMap (:449-455); size bounded by repository file population (session-scoped) | full-file: rebuildable cache; stale entries rejected by mtime che… | untouched (cache/) | not a defect — this-gate |
 | `instruction-pairing-report` | .swarm/memory/instruction-pairing-report.json | derived-rebuildable | single file overwritten whole per command invocation — bounded by the paired task corpus (per-trigger) | write-only: n/a (operator-facing output; re-generated on demand) | untouched (disposable derived output) | not a defect — this-gate |
 
-### Category 8 — Close/reset, worktree, doctor, session, warnings/automation, skills (27 rows)
+### Category 8 — Close/reset, worktree, doctor, session, warnings/automation, skills (28 rows)
 
 | Row id | Path grammar | State class | Write limit (scope) | Read bound | Close policy | Disposition → owner |
 |---|---|---|---|---|---|---|
@@ -450,6 +450,7 @@ per row.
 | `skill-optimizer-evolution` | .swarm/evolution/skills/{slug}/{candidateId}/{lifecycle.jsonl, state.… | authoritative | hash-chained append-only ledgers (never rewritten); terminal candidates pruned by the sweep at 30 d with a 90 d age-only backstop; _eval-input 7 d; quarantine 30 d (global) | full-file: per-candidate ledger replay (candidate population bounded by the terminal-candidate sweep) | untouched by close — the terminal-candidate sweep owns the keyspace | retain by design — #2483; direct-file exemption (#2483) |
 | `outside-swarm-tool-outputs` | .mutation_patch_{id}.diff (workdir) + extract_code_blocks outputs (us… | governed-content | batch-scoped or user-directed outputs outside swarm state; apply-patch temps always clean… (per-trigger) | write-only: n/a | outside .swarm — out of swarm retention scope by defin… | not a defect — this-gate |
 | `residue-quarantine` | .swarm/quarantine/{batch}/ (+ per-batch manifest with sha256/original… | governed-content | bounded by verified stale-residue discovery (old, unlocked, untracked, exact-grammar matc… (per-trigger) | indexed: manifest-driven reads | untouched — recoverable quarantine is preserved across… | retain by design — #2035 (merged) |
+| `retention-control-plane` | .swarm/retention.log + .swarm/retention.d/{owner}.json | operational | one metadata line per pruned directory; log compacted to the newest lines within RETENTION_LOG_MAX_BYTES 256 KiB; each manifest capped at 64 KiB (global) | tail (byte-bounded): compaction reads only the newest 256 KiB; manifests read whole, 64 KiB each | untouched by close — the log records sweep reclamation, manifests are owner-authored policy | not a defect — #2483 follow-up |
 
 ### Category 9 — Planned streams (PRs 19-23) (3 rows)
 

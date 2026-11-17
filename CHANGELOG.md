@@ -1,5 +1,28 @@
 # Changelog
 
+## [7.204.10](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.204.9...v7.204.10) (2026-11-17)
+
+
+### Bug Fixes
+
+* **2973,3218,3251:** close PR feedback on stale quarantine comments and fragment title ([794faf5](https://github.com/ZaxbyHub/opencode-swarm/commit/794faf5ab13dc47e84568476d2b6698bc6487d62))
+* **3486:** address review feedback — exact-0700, refusal-branch tests, citation re-pin ([685bfd4](https://github.com/ZaxbyHub/opencode-swarm/commit/685bfd4f762078c4bf614aa63b6ca47836615ce3))
+* **3486:** refuse planted links on the commit-message temp directory ([9a54300](https://github.com/ZaxbyHub/opencode-swarm/commit/9a54300e125844b4d62bf36d580d1d85f7a5608a))
+* **3486:** refuse planted links on the commit-message temp directory ([b3dda32](https://github.com/ZaxbyHub/opencode-swarm/commit/b3dda32cbc72275ad9d53fffc86f4077f4940cf8))
+* **3486:** review round — prune re-proof at entry, stale-survivor pin ([8d44ac1](https://github.com/ZaxbyHub/opencode-swarm/commit/8d44ac184a4ec41c31233d15bb50ce74b22321e6))
+* **3716,3723,3724:** close PR feedback on diagnostics, redaction pins, disclosure accuracy ([fccc868](https://github.com/ZaxbyHub/opencode-swarm/commit/fccc868de041913aeed759925a8d51c229649c32))
+* **3716,3723,3724:** verification-surface, dispatch-resilience, and redaction residuals from the 3718/3719/3720 rounds ([05f935c](https://github.com/ZaxbyHub/opencode-swarm/commit/05f935cf99672ed962d3bd5c0841fae3d751600c))
+* **3716,3723,3724:** verification-surface, dispatch-resilience, and redaction residuals from the 3718/3719/3720 rounds ([5d691b7](https://github.com/ZaxbyHub/opencode-swarm/commit/5d691b7efbcb5796ba673cb7ce44975d76ed5906))
+* **ci:** repair drifted lean-evidence temp-construction citation (atomic-write ratchet) ([dd9aaa6](https://github.com/ZaxbyHub/opencode-swarm/commit/dd9aaa672189a99016ffc4d8c3d099136caa0b05))
+* **retention:** case-insensitive claim duplicate check, pin claim-lookup casing, correct test reference ([aea0914](https://github.com/ZaxbyHub/opencode-swarm/commit/aea0914fad0f753ed6193b44cfbd331a4bb0138d))
+* **retention:** closeout-critic fixes (F-3 comment, F-6 anchor, F-7 debug env, F-8 fresh outside file, empty-dir pin) ([1d9db2e](https://github.com/ZaxbyHub/opencode-swarm/commit/1d9db2e597c4f846ad58f2989930839f572f2c43))
+* **retention:** give unclaimed .swarm directories a lifecycle ([1558aa9](https://github.com/ZaxbyHub/opencode-swarm/commit/1558aa94dd753cc84130389b1ea9a34bdb7dc710))
+* **retention:** harden log writes and containment against review findings ([17f92cd](https://github.com/ZaxbyHub/opencode-swarm/commit/17f92cd56977e1c79499a3884b7d52d9070a161c))
+* **retention:** keep the .tmp spelling out of unclaimed.ts prose (atomic-write WRITER_CLASSIFICATION ratchet) ([61b702e](https://github.com/ZaxbyHub/opencode-swarm/commit/61b702eb2761a21727813b76e9de5e9257245460))
+* **retention:** prune unclaimed .swarm directories instead of refusing to delete them ([16ed06e](https://github.com/ZaxbyHub/opencode-swarm/commit/16ed06e1132dc13d5bc7fdc9df06213022dbc893))
+* **retention:** resolve PR [#3727](https://github.com/ZaxbyHub/opencode-swarm/issues/3727) review findings F-1..F-9, L-1..L-4 ([0a7a82e](https://github.com/ZaxbyHub/opencode-swarm/commit/0a7a82e57d7f09423d9e4f2a4d07a7facdcdc6ac))
+* **tests:** review round 2 — merge split import (whole-tree biome ci green), refresh macos ledger intro ([4ccadb9](https://github.com/ZaxbyHub/opencode-swarm/commit/4ccadb98894a0895f830d45ff9a2869b943c5459))
+
 ## [7.204.9](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.204.8...v7.204.9) (2026-11-16)
 
 
