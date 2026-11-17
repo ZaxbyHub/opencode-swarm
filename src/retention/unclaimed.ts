@@ -295,7 +295,7 @@ export function loadOwnerManifests(swarmRoot: string): OwnerManifestSet {
 	const files: string[] = [];
 	for (const name of names) {
 		// Dotfiles and non-JSON names are not manifests: a temp file mid-write
-		// (`x.json.tmp`) must not be mistaken for one, and an editor scratch
+		// (`x.json` + temp suffix) must not be mistaken for one, and an editor scratch
 		// file must not block a project that is otherwise healthy.
 		if (
 			name.startsWith('.') ||
