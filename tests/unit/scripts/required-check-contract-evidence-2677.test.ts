@@ -60,7 +60,9 @@ describe('issue #2677 required-check contract evidence', () => {
 		expect(runs.map((run) => run.id)).toEqual(
 			expect.arrayContaining([44078540845, 44078540792]),
 		);
-		expect(runsByWorkflow['.github/workflows/drift-check.yml']).toEqual([]);
+		expect(runsByWorkflow['.github/workflows/drift-check.yml']).toEqual([
+			44078540845,
+		]);
 	});
 
 	test('collector verifies each pinned capture blob against the local Git object', () => {
