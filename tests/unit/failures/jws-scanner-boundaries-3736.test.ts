@@ -214,13 +214,26 @@ describe('#3736 documented residuals (pinned as visible)', () => {
 		const input = `${HDR}.${PAYLOAD}.${SIG}.Snapshot`;
 		expect(redactShellCommand(input)).toBe('[REDACTED:jwt]');
 	});
-	test('an eyJ-INITIAL segment inside a structural JWE tail is guarded (round-3 residual)', () => {
-		// hdr.key.<eyJ-starting iv>.<tail>: the adjacent-header guard stops
-		// absorption and processes the eyJ segment as its own token header;
-		// what follows it may stay visible — documented residual, pinned so a
-		// future change to this behavior is conscious.
+	test('an eyJ-INITIAL tail segment that is NOT a real next token is absorbed (final-critic: residual closed)', () => {
+		// hdr.key.<eyJ-starting iv (11 chars, sub-minimum)>.<tail>: the tail is
+		// absorbed into the JWE span — exact output at both sites.
 		const input = `${JWE_HDR}.${'K'.repeat(43)}.eyJAAAAAAA.YXV0aHRhZw`;
-		const spans = findJwsTokenSpans(input);
-		expect(spans.length).toBeGreaterThanOrEqual(1);
+		expect(redactShellCommand(input)).toBe('[REDACTED:jwt]');
+		expect(sanitizeFailureEvidenceDisplay(input)).toBe('[REDACTED:jwt]');
+	});
+	test('an unsigned token followed by an extra dot is eliminated (final-critic round 1)', () => {
+		// hdr.payload..next — the empty signature segment is NOT the run's
+		// last segment; the unsigned token must still be consumed.
+		const hdrU = 'eyJhbGciOiJub25lIn0';
+		const one = `${hdrU}.${PAYLOAD}..next`;
+		// The span consumes hdr.payload plus both separating dots (the empty
+		// signature slot's own dot included); 'next' survives.
+		expect(redactShellCommand(one)).toBe('[REDACTED:jwt].next');
+		expect(sanitizeFailureEvidenceDisplay(one).includes(PAYLOAD)).toBe(false);
+		// hdr.payload..hdr2.payload2.sig — both tokens redact.
+		const two = `${hdrU}.${PAYLOAD}..${HDR}.${PAYLOAD}.${SIG}`;
+		const outTwo = redactShellCommand(two);
+		expect(outTwo.includes(PAYLOAD)).toBe(false);
+		expect(outTwo.includes(SIG)).toBe(false);
 	});
 });

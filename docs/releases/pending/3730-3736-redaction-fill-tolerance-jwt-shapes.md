@@ -20,9 +20,7 @@ issue: 3730
   assignment, and `=`/`==`-padded placements), `_eyJ` underscore boundaries,
   and ≥1-char signatures. Disclosed residuals (documented in code and pinned
   by tests): a mixed-case ≥8-char English tail directly appended to a token
-  absorbs; an all-lowercase <16-char ciphertext tail stays visible; an
-  eyJ-initial iv/ciphertext segment inside a structural JWE tail is stopped by
-  the adjacent-header guard.
+  absorbs; an all-lowercase <16-char ciphertext tail stays visible.
 - Closes #3736 claim 2: every failed/unavailable win32 runner-probe result is
   now TTL-bounded (`runnerProbeFailureTtlMs()`, env
   `SWARM_SANDBOX_RUNNER_PROBE_FAILURE_TTL_MS`, default 60 s, mirroring

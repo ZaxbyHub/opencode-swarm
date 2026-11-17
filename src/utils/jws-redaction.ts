@@ -41,9 +41,7 @@
  * Disclosed residuals (documented, over-redaction-leaning where marked):
  * a mixed-case >=8-char word directly appended to a token absorbs (e.g.
  * `…sig.Snapshot`); an all-lowercase ciphertext tail with no digit and
- * length <16 stays visible; an eyJ-INITIAL iv/ciphertext segment inside a
- * structural JWE tail is stopped by the adjacent-header guard (#3736
- * critic round 3) and can stay visible.
+ * length <16 stays visible.
  */
 
 /** Maximal dotted base64url-ish runs — single-char class, linear, no backtracking. */
@@ -172,12 +170,10 @@ function canStartTokenAt(segments: string[], j: number): boolean {
 	const payload = segments[j + 1];
 	if (payload === undefined || segments[j + 2] === undefined) return false;
 	const signature = segments[j + 2] as string;
-	// unsigned 2-segment token: empty signature is the run's last segment
-	if (
-		signature === '' &&
-		j + 2 === segments.length - 1 &&
-		payload.length >= MIN_PAYLOAD
-	) {
+	// unsigned 2-segment token: empty signature segment (any position — the
+	// final-critic's `hdr.payload..next` composition previously slipped past
+	// the last-segment-only form)
+	if (signature === '' && payload.length >= MIN_PAYLOAD) {
 		return true;
 	}
 	// empty-key structural JWE header position: payload segment empty
@@ -213,25 +209,28 @@ export function findJwsTokenSpans(text: string): JwsTokenSpan[] {
 			const signature = segments[i + 2] as string;
 			const start = runStart + (offsets[i] as number) + hs;
 
-			// #3736 D3: unsigned 2-segment shape `hdr.payload.` — the
-			// signature segment is EMPTY and is the run's LAST segment. The
-			// span consumes the trailing dot (the token's own syntax).
-			if (
-				signature === '' &&
-				i + 2 === segments.length - 1 &&
-				payload.length >= MIN_PAYLOAD
-			) {
+			// #3736 D3 (final-critic round 1 widened): unsigned 2-segment
+			// shape `hdr.payload.` — the signature segment is EMPTY, whether
+			// or not it is the run's LAST segment (`hdr.payload..next` and
+			// `hdr.payload..hdr2.p2.s2` previously fell through to the signed
+			// check, where a 0-length signature fails, leaving the claims
+			// visible). The span consumes through the separating dot; a
+			// following segment is never part of this token.
+			if (signature === '' && payload.length >= MIN_PAYLOAD) {
 				spans.push({ start, end: runStart + (offsets[i + 2] as number) });
-				i += 3; // consumed hdr + payload + trailing dot
+				i += 3; // consumed hdr + payload + the empty signature slot
 				continue;
 			}
 
 			// #3736 D2-rev2: structural empty-key JWE `hdr..iv.ct.tag` — the
-			// `{1,}` payload minimum cannot hold; accept when the following
-			// segments are token-like (never across a segment that starts a
-			// REAL next token — the shared canStartTokenAt predicate, 4.5
-			// review round 2: the old raw headerStart check stopped on ANY
-			// eyJ-initial tail material, including a non-token ciphertext).
+			// `{1,}` payload minimum cannot hold; accept when at least ONE
+			// token-like segment follows the empty key (the iv), absorbing
+			// further token-like tail segments (never across a segment that
+			// starts a REAL next token — the shared canStartTokenAt
+			// predicate). One follower suffices because a truncated or
+			// adjacent-token composition must still redact the `hdr..iv.`
+			// prefix while the next token scans separately (execution-review
+			// r2-A2 leg).
 			if (payload === '') {
 				let last = i + 1; // the empty segment itself is consumed
 				let guard = i + 2;
@@ -242,8 +241,8 @@ export function findJwsTokenSpans(text: string): JwsTokenSpan[] {
 					last = guard;
 					guard += 1;
 				}
-				if (last >= i + 3) {
-					// at least two token-like segments follow the empty key
+				if (last >= i + 2) {
+					// at least one token-like segment follows the empty key
 					spans.push({
 						start,
 						end:
