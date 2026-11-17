@@ -544,7 +544,7 @@ export async function runRetentionSweep(
 	// error refuses the whole sweep). `dryRun` lists the planned set in
 	// `result.explained` (and the debug log) and deletes nothing. The pass
 	// refuses to run when `.swarm` is itself a link, and when deletes are armed
-	// it refuses unless `retention.log` is writable.
+	// it refuses when `retention.log` is a link or not a regular file.
 	if (cancelled('unclaimed-directories')) return result;
 	try {
 		const outcome = await pruneUnclaimedDirectories(swarmRoot, {

@@ -599,8 +599,9 @@ function swarmRootIsCanonical(swarmRoot: string): boolean {
  * `dryRun` lists the planned set and deletes nothing.
  *
  * The pass is skipped when `.swarm` is itself a link, and when deletes are
- * armed it is skipped unless the retention log is writable: a prune that
- * cannot be recorded is not performed.
+ * armed it is skipped when the retention log is a link, not a regular file or
+ * uninspectable. A permission failure on a regular log is only caught by the
+ * post-delete append and reported in `failures`.
  *
  * Never throws: an unreadable `.swarm` is an empty pass, and a per-directory
  * failure is reported in `failures` without aborting the siblings.

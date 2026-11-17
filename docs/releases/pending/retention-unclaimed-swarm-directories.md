@@ -29,8 +29,10 @@ Directories immediately under `.swarm/` now have three tiers of ownership:
    real directory (never a symlink), has no `.preserve` marker, contains no
    future-dated entries, and all of its content is older than its horizon
    (30 days by default, or the owning manifest's `maxAgeDays`). The pass
-   refuses to run unless `.swarm/retention.log` is writable, so a prune is never
-   performed unrecorded; after the deletes, every pruned path is appended to the
+   refuses to run when `.swarm/retention.log` is a link, is not a regular file,
+   or cannot be inspected, so a prune is not started against a log it cannot
+   record to (a permission failure on a regular log still surfaces only after
+   the deletes, in `result.errors`); after the deletes, every pruned path is appended to the
    log as `<ISO-8601> pruned <path> age=<days> size=<bytes>` (control characters
    in a name are escaped), and the log itself is compacted to its newest
    256 KiB.
