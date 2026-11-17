@@ -723,15 +723,67 @@ export function saveFullAutoRunState(
 	});
 }
 
+/**
+ * Arm (or re-arm) a Full-Auto run for a session.
+ *
+ * CAS precondition (#3106): when `options.expectedPauseGeneration` is provided,
+ * the arm REFUSES (returns `undefined`, writes nothing) unless the persisted
+ * session is still `status === 'paused'` at exactly that pause generation. The
+ * resume command passes the generation it observed BEFORE its probe/blocker
+ * checks, so a second process landing a terminal write (`abort` → terminated,
+ * `off` → idle, a re-pause) inside the check-then-arm window can no longer be
+ * silently resurrected, and interleaved resumes cannot double-bump
+ * `runGeneration`. `disarmFullAutoRun` (off) does not bump the generation —
+ * the status arm of the precondition catches that interleave. Callers that
+ * omit the option keep the unconditional behavior; the overloads keep their
+ * return type non-optional.
+ */
 export function startFullAutoRun(
 	directory: string,
 	sessionID: string,
 	config: FullAutoConfigShape | undefined,
-	options: { planID?: string; phase?: number; taskID?: string } = {},
-): FullAutoRunState {
+	options: {
+		expectedPauseGeneration: number;
+		planID?: string;
+		phase?: number;
+		taskID?: string;
+	},
+): FullAutoRunState | undefined;
+export function startFullAutoRun(
+	directory: string,
+	sessionID: string,
+	config: FullAutoConfigShape | undefined,
+	options?: {
+		expectedPauseGeneration?: number;
+		planID?: string;
+		phase?: number;
+		taskID?: string;
+	},
+): FullAutoRunState;
+export function startFullAutoRun(
+	directory: string,
+	sessionID: string,
+	config: FullAutoConfigShape | undefined,
+	options: {
+		expectedPauseGeneration?: number;
+		planID?: string;
+		phase?: number;
+		taskID?: string;
+	} = {},
+): FullAutoRunState | undefined {
 	return withStateLock(directory, () => {
 		const persisted = _internals.readPersisted(directory);
 		const existing = persisted.sessions[sessionID];
+		if (
+			options.expectedPauseGeneration !== undefined &&
+			(existing === undefined ||
+				existing.status !== 'paused' ||
+				(existing.pauseGeneration ?? 0) !== options.expectedPauseGeneration)
+		) {
+			// CAS refusal (#3106): another writer changed the paused run between
+			// the caller's read and this arm. Refuse without writing anything.
+			return undefined;
+		}
 		const mode = config?.mode ?? existing?.mode ?? 'supervised';
 		const state: FullAutoRunState = existing
 			? {

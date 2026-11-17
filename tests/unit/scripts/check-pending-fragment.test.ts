@@ -57,7 +57,11 @@ describe('isUserVisiblePath', () => {
 describe('isPendingFragment', () => {
 	test('accepts added fragment files', () => {
 		expect(isPendingFragment('docs/releases/pending/my-slug.md')).toBe(true);
-		expect(isPendingFragment('docs\\releases\\pending\\x.md')).toBe(true);
+		// Final-critic round 1: a backslash-bearing name is not a fragment —
+		// the aggregator's collection path cannot resolve the normalized name
+		// (read returns null), so accepting it would pass the gate with no
+		// release note.
+		expect(isPendingFragment('docs\\releases\\pending\\x.md')).toBe(false);
 	});
 	test('rejects non-fragment paths', () => {
 		expect(isPendingFragment('docs/releases/pending/notes.txt')).toBe(false);

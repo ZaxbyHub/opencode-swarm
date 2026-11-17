@@ -5,6 +5,7 @@ import { MAX_EPHEMERAL_PROMPT_BYTE_LIMIT } from '../evaluation/ephemeral-agent-d
 import {
 	classifyProviderFailure,
 	isRetryableProviderFailure,
+	sanitizeFailureEvidenceDisplay,
 } from '../failures/invocation-failure.js';
 import {
 	buildApprovedReceipt,
@@ -1036,16 +1037,23 @@ export async function runReviewEngine(
 		const quotaAnnotation = isQuotaError(dispatchDetail)
 			? ' (model quota/usage limit exhausted across all configured fallbacks)'
 			: '';
+		// #3710: the dispatch failure text reaches durable review evidence
+		// (evidence.review.error -> .swarm/evidence/<phase>/auto-review.json)
+		// and the core events log, so it is redacted HERE — AFTER the
+		// isQuotaError classification above has read the raw value.
+		const redactedDispatchDetail = sanitizeFailureEvidenceDisplay(
+			String(dispatchDetail),
+		);
 		const result = await persistErrorResult(
 			input,
 			diff,
 			emptyResult(
 				'error',
-				`Review dispatch failed${quotaAnnotation}: ${dispatchDetail}`,
+				`Review dispatch failed${quotaAnnotation}: ${redactedDispatchDetail}`,
 				gateMode,
 				gateMode ? 'REVIEW_DISPATCH_FAILED' : undefined,
 			),
-			dispatchDetail,
+			redactedDispatchDetail,
 			dispatched.attempts,
 			promptRequest,
 		);

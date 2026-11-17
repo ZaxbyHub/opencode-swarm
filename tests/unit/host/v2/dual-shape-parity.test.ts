@@ -18,10 +18,12 @@ import { describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import {
 	existsSync,
+	mkdirSync,
 	mkdtempSync,
 	readdirSync,
 	readFileSync,
 	rmSync,
+	writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -211,6 +213,15 @@ describe('v2 dual-shape entrypoint (issue #3004)', () => {
 	test('setup(ctx) registers the v1 tool-name set via ctx.tool.transform', async () => {
 		const directory = canonicalMkdtemp('swarm-v2-parity-');
 		try {
+			// Manifest parity, not memory gating (issue #3659 owns that): the
+			// full-manifest comparison needs every opt-in family enabled, and
+			// the loader reads the project config from
+			// <dir>/.opencode/opencode-swarm.json.
+			mkdirSync(join(directory, '.opencode'), { recursive: true });
+			writeFileSync(
+				join(directory, '.opencode', 'opencode-swarm.json'),
+				'{"memory":{"enabled":true}}',
+			);
 			const mod = (await import(pathToFileURL(ensureBundle()).href)) as {
 				default?: { setup?: (ctx: unknown) => Promise<unknown> };
 			};

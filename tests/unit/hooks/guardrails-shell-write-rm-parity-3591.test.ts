@@ -146,7 +146,10 @@ describe('#3591 parity: flagless in-scope — all surfaces allow', () => {
 		const got = await allSurfaces(command);
 		expect(got.gate).toBe(true);
 		expect(got.explainScope).toBe('allow');
-		expect(got.explainNoScope).toBe('allow');
+		// #3616 D2: a coder explain WITHOUT --scope no longer fabricates the
+		// project-root scope — the scope dimension is unevaluated and the
+		// verdict renders block (the pinned #3591 divergence is closed).
+		expect(got.explainNoScope).toBe('block');
 		expect(got.sv).toBe('allow');
 	}, 30_000);
 });
@@ -224,16 +227,13 @@ describe('#3591 parity: late-flag escape — all deny, naming the escape', () =>
 	);
 });
 
-describe('#3591 brace operands — three-surface agreement + the pre-existing explain-noscope divergence', () => {
-	// Final-critic round 1 disclosure: explain WITHOUT `--scope` excludes the
-	// scope dimension and omits the verified-scope marker
-	// (guardrail-explain-service.ts:341-353), so it can read "allow" for a
-	// command the gate denies. Pinned HONESTLY as the CURRENT pre-existing
-	// behavior (untouched by this PR; tracked as a follow-up): the `rm`
-	// brace shape's no-scope verdict is still block (the #3569 brace-borne
-	// extractor rule fires scope-independently), while the `rmdir` brace
-	// shape — pinned as the 03 Leg-3 split-brain row — is the exact shape
-	// that reads "allow: no rule matched" against the gate's DENY.
+describe('#3591 brace operands — three-surface agreement (no-scope explain re-pinned by D2)', () => {
+	// #3616 D2: explain WITHOUT `--scope` for a write-bearing command now
+	// renders block (scope_unevaluated) — parity with the live gate's
+	// SCOPE_NOT_DECLARED — replacing the pre-D2 "allow" divergence this
+	// describe previously disclosed. Both brace shapes below block: the
+	// `rm` shape via the #3569 brace-borne extractor rule (scope-
+	// independent), the `rmdir` shape via the D2 scope-unevaluated rule.
 	test('rm src/{a,../esc}: gate DENY, explain --scope block, scope_validate deny; explain no-scope stays block (extractor rule is scope-independent)', async () => {
 		const command = 'rm src/{a,../esc}';
 		const got = await allSurfaces(command);
@@ -245,17 +245,15 @@ describe('#3591 brace operands — three-surface agreement + the pre-existing ex
 		expect(got.explainNoScope).toBe('block');
 	}, 30_000);
 
-	test('rmdir src/{a,../esc}: gate DENY, explain --scope block, scope_validate deny, explain WITHOUT --scope "allow" (pre-existing divergence, follow-up)', async () => {
+	test('rmdir src/{a,../esc}: gate DENY, explain --scope block, scope_validate deny, explain WITHOUT --scope block (#3616 D2 scope_unevaluated)', async () => {
 		const command = 'rmdir src/{a,../esc}';
 		const got = await allSurfaces(command);
 		expect(got.gate).toBe(false);
 		expect(got.explainScope).toBe('block');
 		expect(got.sv).toBe('deny');
-		// The pre-existing explain no-scope divergence: the scope dimension is
-		// absent, so no rule matches and the report reads "allow" with an
-		// UNVERIFIED Resolved Scope while the live gate denies the escaping
-		// branch. guardrail-explain-service.ts:341-353 omits verifiedScope
-		// here; tracked as a follow-up, NOT changed by this PR.
-		expect(got.explainNoScope).toBe('allow');
+		// #3616 D2 closed the #3591 explain no-scope divergence: a coder
+		// explain without --scope now renders block (scope-unevaluated)
+		// instead of an unverified "allow" for a gate-denied command.
+		expect(got.explainNoScope).toBe('block');
 	}, 30_000);
 });

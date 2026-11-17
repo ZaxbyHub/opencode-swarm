@@ -520,7 +520,6 @@ All tasks in phase done
 │ - Verdict automatically normalized: APPROVED → approved, NEEDS_REVISION → rejected
 │ - Skip this step if no effective spec exists (determined via `/swarm sdd status` or `readEffectiveSpecSync` — native .swarm/spec.md, OpenSpec openspec/, or Spec-Kit .specify/)
 ├── 5.6. Verify mandatory gate evidence exists:
-│         - .swarm/evidence/{phase}/completion-verify.json (auto-written by completion-verify gate)
 │         - .swarm/evidence/{phase}/drift-verifier.json (written by @critic_drift_verifier)
 │         - .swarm/evidence/{phase}/hallucination-guard.json (if hallucination_guard enabled; written by write_hallucination_evidence)
 │         - .swarm/evidence/{phase}/mutation-gate.json (if mutation_test enabled; written by write_mutation_evidence after generate_mutants + mutation_test)
@@ -530,24 +529,26 @@ All tasks in phase done
 │         - .swarm/evidence/final-council.json (if final_council enabled; written by write_final_council_evidence, last phase only)
 │         - .swarm/evidence/{phase}/epic-phase-review.json (only while an epic is open; written by epic_phase_review)
 │         If either missing: run the missing gate first
-│         Note: Gates 1–5 bypassed in turbo mode; architecture-supervisor, explicit auto-review gate mode, and final-council are never bypassed
-├── 6. Call phase_complete (enforces up to nine gates automatically; the ninth, Epic phase readiness, only while an epic is open)
+│         Note: completion-verify (Gate 1) needs no evidence file; phase_complete runs it in-process and does not write completion-verify.json
+│         Note: Gates 1–5 and the todo gate bypassed in turbo mode; architecture-supervisor, explicit auto-review gate mode, and final-council are never bypassed
+├── 6. Call phase_complete (enforces its gates automatically; Epic phase readiness only while an epic is open)
 │         - Gate 1: completion-verify — deterministic identifier check in source files
 │         - Gate 2: drift verifier evidence — reads drift-verifier.json for approved verdict
 │         - Gate 3: hallucination guard — reads hallucination-guard.json for approved verdict (if enabled)
 │         - Gate 4: mutation gate — reads mutation-gate.json for pass/warn/fail verdict (if enabled)
 │         - Gate 5: phase council — reads phase-council.json for approved verdict (if phase_council enabled)
+│         - Todo gate: checks each task's recorded high-priority TODO count against todo_gate.max_high_priority (blocks when exceeded and todo_gate.block_on_threshold is true; otherwise warns)
 │         - Gate 5b: architecture supervisor — reads architecture-supervisor.json (if enabled, never turbo-bypassed)
 │         - Final review: verifies complete content-addressed auto-review evidence (gate mode only, never turbo-bypassed)
 │         - Gate 6: final council — reads final-council.json for approved verdict (if final_council enabled, last phase only, never turbo-bypassed)
 │         - Epic phase readiness — reads epic-phase-review.json for APPROVED reviewer + critic (only while an epic is open; Epic keeps Turbo off)
-│         - Gates 1–5 bypassed when turbo mode is active; Gate 5b, final-review gate mode, and Gate 6 are never bypassed
+│         - Gates 1–5 and the todo gate bypassed when turbo mode is active; Gate 5b, final-review gate mode, and Gate 6 are never bypassed
 └── 7. Ask user: "Ready for Phase [N+1]?"
 ```
 
 ### Phase Completion Gates
 
-The `phase_complete` tool enforces up to nine gates before marking a phase complete (the ninth, `epic_phase_readiness`, applies only while an epic is open). Gates 1–5 and phase council are turbo-bypassed; architecture supervisor, explicit auto-review gate mode, final council and Epic phase readiness are never turbo-bypassed (Epic keeps Turbo off).
+The `phase_complete` tool enforces the gates below before marking a phase complete (`epic_phase_readiness` applies only while an epic is open). Gates 1–5 (phase council is Gate 5) and the todo gate are turbo-bypassed; architecture supervisor, explicit auto-review gate mode, final council and Epic phase readiness are never turbo-bypassed (Epic keeps Turbo off).
 
 Every invocation first returns a versioned structured gate report containing every applicable pass, block, error, and not-applicable result in deterministic order. Gate checks are read-only and individually bounded. A phase transition is committed only after the complete report passes, the evidence/config/plan snapshot remains byte-identical under the plan lock, and the same preflight report is reproduced. A blocker never dispatches a model or performs a partial phase transition. Recovery actions are typed and name registered tools such as `run_phase_review`, `repair_gate_evidence`, and `repair_knowledge_receipt_ledger`.
 
@@ -558,6 +559,7 @@ Every invocation first returns a versioned structured gate report containing eve
 | `hallucination-guard` | Evidence-based check that `critic_hallucination_verifier` approved plan/implementation claims | `HALLUCINATION_VERIFICATION_MISSING` or `HALLUCINATION_VERIFICATION_REJECTED` | Yes |
 | `mutation-test` | Evidence-based check that mutation tests achieved a passing kill rate | `MUTATION_GATE_MISSING` or `MUTATION_GATE_FAIL` | Yes |
 | `phase-council` | Evidence-based check that `submit_phase_council_verdicts` ran and approved (if `phase_council` enabled) | `PHASE_COUNCIL_REQUIRED` — no approved phase-council evidence | Yes |
+| `todo-gate` | Evidence-based check of each task's recorded high-priority TODO count against `todo_gate.max_high_priority` (blocks only when `todo_gate.block_on_threshold` is true; passes when no task has TODO evidence) | `TODO_GATE_THRESHOLD_EXCEEDED` | Yes |
 | `architecture-supervisor` (5b) | Evidence-based check that `critic_architecture_supervisor` approved cross-task coherence | `ARCHITECTURE_SUPERVISION_BLOCKED` | **No** |
 | `final-review` | Evidence-only check that the phase body persisted complete, current structured review and independent validation evidence | `FINAL_REVIEW_*` — missing/stale/incomplete evidence or confirmed anchored HIGH/CRITICAL findings | **No in gate mode** |
 | `final-council` (Gate 6) | Evidence-based check that `write_final_council_evidence` approved project completion | `FINAL_COUNCIL_REQUIRED` — no approved final-council evidence | **No** |
@@ -596,7 +598,7 @@ Every invocation first returns a versioned structured gate report containing eve
 - **Expensive**: requires one LLM call per mutation phase due to LLM-based patch generation; OFF by default to avoid cost on all projects
 
 **Turbo Mode Behavior:**
-When `hasActiveTurboMode()` returns true, Gates 1–5 (completion-verify, drift-verifier, hallucination-guard, mutation-test, phase-council) are automatically bypassed. The `phase_complete` tool logs a warning and proceeds without enforcement. Gate 5b (architecture supervisor), auto-review in explicit `gate` mode, and Gate 6 (final council) are **never** turbo-bypassed. Lean Turbo's own reviewer owns advisory phase review, so the generic advisory pass is skipped to avoid duplicate model calls.
+When `hasActiveTurboMode()` returns true, Gates 1–5 (completion-verify, drift-verifier, hallucination-guard, mutation-test, phase-council) and the todo gate are automatically bypassed. The `phase_complete` tool logs a warning and proceeds without enforcement. Gate 5b (architecture supervisor), auto-review in explicit `gate` mode, and Gate 6 (final council) are **never** turbo-bypassed. Lean Turbo's own reviewer owns advisory phase review, so the generic advisory pass is skipped to avoid duplicate model calls.
 
 ### Independent Auto-Review Engine
 

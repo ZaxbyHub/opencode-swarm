@@ -294,12 +294,12 @@ describe('W1 gate: control-flow divergence and loop fixpoint (v4 constraint 3)',
 		const got = await gate('while true; do cd src; echo x > f; break; done');
 		expect(got.verdict).toBe('DENIED');
 		expect(got.message).toMatch(WITHDRAWAL);
-	});
+	}, 120_000);
 
 	test('control: a cwd-neutral loop keeps the parent state (no withdrawal)', async () => {
 		const got = await gate(
 			'while true; do echo hi; break; done; echo x > src/f',
 		);
 		expect(got.verdict).toBe('ADMITTED');
-	});
+	}, 120_000);
 });

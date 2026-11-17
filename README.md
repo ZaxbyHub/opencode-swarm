@@ -142,7 +142,7 @@ Swarm has two independent mode systems:
 | Mode | Safety | Speed | When to Use |
 |------|--------|-------|------------|
 | **Balanced** (default) | High | Medium | Everyday development |
-| **Turbo** | Medium | Fast | Rapid iteration; skips phase_complete Gates 1–5 and the pre-Stage-A coder re-dispatch block for non-Tier-3 tasks whose planned `files_touched` are known and non-empty (Stage B applies exactly as without Turbo) |
+| **Turbo** | Medium | Fast | Rapid iteration; skips phase_complete Gates 1–5 and the todo gate, and the pre-Stage-A coder re-dispatch block for non-Tier-3 tasks whose planned `files_touched` are known and non-empty (Stage B applies exactly as without Turbo) |
 | **Lean Turbo** | High | Fast | Parallel lanes for non-conflicting tasks (up to `max_parallel_coders` coders) |
 | **Full-Auto** | Deterministic policy + critic oversight | Fast | Unattended multi-interaction runs |
 | **Epic** (opt-in) | High — per-task QA always runs; Turbo stays off | Fast on plans with many independent tasks | Large plans: one plan = one epic, run phase by phase as parallel waves of tasks with disjoint scopes |
@@ -1242,6 +1242,7 @@ Control how tool outputs are summarized for LLM context.
 | `/swarm council <question> [--spec-review]` | Convene a multi-model General Council for advisory deliberation |
 | `/swarm issue <issue-url\|owner/repo#N\|N> [--plan] [--trace] [--no-repro]` | Ingest a GitHub issue for localization and resolution |
 | `/swarm pr-review <pr-url\|owner/repo#N\|N> [--council] [instructions...]` | Structured deep PR review with parallel lanes, reviewer confirmation, and critic challenge |
+| `/swarm pr-review <GitHub PR URL> --release-head <full SHA>` | Architect-only native review for release admission, constrained to the specified head |
 | `/swarm pr-feedback [<pr-url\|owner/repo#N\|N>] [instructions...]` | Ingest and close known PR feedback (review comments, CI failures, conflicts) without a fresh review |
 | `/swarm ci-monitor <pr-url\|owner/repo#N\|N>` | Drive an already-reviewed, approved PR to green and merged (monitor CI, fix, merge; max 5 fix cycles) |
 | `/swarm ci` `[--timeout-ms <n>] [--json]` | Advisory headless CI: read-only gate/evidence evaluation with machine exit codes (also `bunx opencode-swarm ci`; see docs/ci.md) |
@@ -1277,7 +1278,7 @@ Control how tool outputs are summarized for LLM context.
 | `/swarm memory link status` | Show whether memory is cohort-linked (distinct from knowledge link) |
 | `/swarm memory unlink` | Stop sharing memory; copies cohort family back to local |
 | `/swarm concurrency <set|status|reset>` | Manage session-scoped runtime concurrency override |
-| `/swarm turbo` | Enable turbo mode for the current session (skips phase_complete Gates 1–5; per-task Stage A still runs, and Stage B is required exactly as without Turbo) |
+| `/swarm turbo` | Enable turbo mode for the current session (skips phase_complete Gates 1–5 and the todo gate; per-task Stage A still runs, and Stage B is required exactly as without Turbo) |
 | `/swarm full-auto` | Toggle Full-Auto Mode for the current session [on|off] |
 | `/swarm checkpoint` | Save a git checkpoint for the current state |
 

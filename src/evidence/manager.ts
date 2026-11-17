@@ -1,4 +1,5 @@
 import {
+	existsSync,
 	mkdirSync,
 	readdirSync,
 	realpathSync,
@@ -37,6 +38,7 @@ import {
 	PROJECT_ROOT_INDICATORS,
 } from '../utils/project-boundary';
 import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache';
+import { isDerivedEvidenceEntry } from './derived-entries';
 import {
 	type DocumentsRetentionResult,
 	pruneEvidenceDocuments,
@@ -553,6 +555,17 @@ export async function listEvidenceTaskIds(
 			// Check if it's a directory
 			const stats = statSync(entryPath);
 			if (!stats.isDirectory()) {
+				continue;
+			}
+
+			// #3554: derived non-task subtrees (gate-audit, task-gate-*,
+			// auto-review, marker-gated phase-numbered dirs) are not task ids —
+			// enumerating them made /swarm doctor report false "Orphaned
+			// Evidence ❌" for legitimate audit evidence. Classification lives
+			// in derived-entries.ts (sibling of the receipts reserved-name
+			// concept above); a real task bundle (root-level evidence.json)
+			// always wins over the derived exemption.
+			if (isDerivedEvidenceEntry(entry, entryPath, existsSync, readdirSync)) {
 				continue;
 			}
 

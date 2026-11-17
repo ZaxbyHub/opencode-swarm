@@ -23,7 +23,7 @@
  * @module shell-write-detect
  */
 
-import { readFileSync, statSync } from 'node:fs';
+import { lstatSync, readFileSync, readlinkSync, statSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type {
@@ -144,6 +144,19 @@ export interface WriteTarget {
 	 * `git apply` defaults to 1; explicit `-p<n>` overrides for both tools.
 	 */
 	patchStrip?: number;
+	/**
+	 * #3616 D14 (item 15): why this write's path is null / withdrawn — set at
+	 * the DECISION SITE (loop withdrawal, directory-state withdrawal, wrapper
+	 * chdir backstop), derived at render for tilde/dynamic-text. Renders the
+	 * class-accurate deny reason; 'dynamic-text' is the legacy default.
+	 */
+	denialOrigin?:
+		| 'tilde'
+		| 'loop-landing'
+		| 'directory-withdrawal'
+		| 'wrapper-chdir'
+		| 'unverifiable-path'
+		| 'dynamic-text';
 }
 
 /**
@@ -417,6 +430,25 @@ const REDIRECT_ALL_WRITE_TOKENS = new Set([
 // ---------------------------------------------------------------------------
 
 /** Builtins that copy / move / link / resize files. */
+/**
+ * #3616 D9: detection-options override for the CURRENT synchronous gate pass.
+ * Set by tool-before around its analysis+resolution block (try/finally reset);
+ * the rm arm consults it so flagged operands emit as ordinary writes exactly
+ * when the destructive-command policy is disabled. Module-scoped by design —
+ * the gate is a synchronous single pass and threading a parameter through all
+ * ten collectWritesWithNodes recursion sites would duplicate state the walk
+ * already owns. Explain's dry-run never sets it (mirrors the live default).
+ */
+let detectionOptionsOverride: { destructiveArmDisabled?: boolean } | null =
+	null;
+
+/** Set the detection-options override for the current synchronous pass. */
+export function setDetectionOptionsOverride(
+	options: { destructiveArmDisabled?: boolean } | null,
+): void {
+	detectionOptionsOverride = options;
+}
+
 const BUILTIN_WRITE_COMMANDS = new Set([
 	'cp',
 	'mv',
@@ -436,6 +468,11 @@ const BUILTIN_WRITE_COMMANDS = new Set([
 	// invisible to both walks (`touch ../../esc` admitted at base too; the
 	// procsub-body form inherited the same hole).
 	'touch',
+	// #3648 item 6 (AC6): shred OVERWRITES each named operand in place — an
+	// irreversible data-loss write that was invisible to the gate (its own
+	// arm below reports every operand; recursive/`-u` shapes stay write-scope
+	// judged, not destructive-gate owned).
+	'shred',
 ]);
 
 /**
@@ -464,7 +501,15 @@ function isBareRmdirOperand(word: string): boolean {
 	return BARE_RMDIR_OPERAND.test(word) && !word.split('/').includes('..');
 }
 
-/** Builtins with in-place editing semantics (modify file argument in place). */
+/** Builtins with in-place editing semantics (modify file argument in place).
+ * FB-018 (#3689 review): the awk FAMILY (gawk/mawk/nawk/original-awk) is
+ * routed here through AWK_FAMILY_ALIAS at the leaf (detectInplaceEdit) so
+ * every awk-branch operand/program-slot logic fires uniformly — adding the
+ * aliases to this set directly was WRONG (detectInplaceEdit keys several
+ * branches on the literal 'awk' and would misread the positional program as
+ * a data file). Carve-out safety rests on the program-text gate (FB-005) in
+ * the eval arm: a redirect/system-bearing program still classifies as eval
+ * even under `-i inplace`. */
 const INPLACE_EDIT_COMMANDS = new Set(['sed', 'perl', 'awk']);
 
 /**
@@ -500,7 +545,7 @@ const AWK_LONG_SWITCHES = new Set([
 	'--help',
 ]);
 
-/** Interpreters that accept inline code via -c / -e / -p / -r flags (NOT -m, which runs an installed module — see detectInterpreterEval). deno (#3491 W7) evaluates ONLY at subcommand position (`deno eval CODE`). */
+/** Interpreters that accept inline code via -c / -e / -p / -r flags (NOT -m, which runs an installed module — see detectInterpreterEval). deno (#3491 W7) evaluates ONLY at subcommand position (`deno eval CODE`). awk (#3648 AC2): the program is a POSITIONAL (or gawk `-e/--source=`); see the awk branch in detectInterpreterEval — `awk -f progfile` stays the script-file carve-out. */
 const INTERPRETER_EVAL_COMMANDS = new Set([
 	'python',
 	'python3',
@@ -518,6 +563,30 @@ const INTERPRETER_EVAL_COMMANDS = new Set([
 	'ksh',
 	'deno',
 	'eval',
+	'awk',
+	'gawk',
+	'mawk',
+	// FB-019 (#3689 review): nawk is the BSD/macOS native awk binary and
+	// original-awk the Debian BWK package — same positional-program eval
+	// semantics; omitting them re-opened the #3648 AC2 fail-open under a
+	// renamed binary. busybox awk stays out (subcommand canonicalization is
+	// a separate documented design boundary — Considered, not filed).
+	'nawk',
+	'original-awk',
+]);
+
+/**
+ * #3648 AC2 awk-family alias map: `detectorSetMember` strips NUMERIC
+ * suffixes only, so `gawk`/`mawk` never map to `awk` through version
+ * stripping. Applied AFTER stripping in canonicalInterpreterName (and only
+ * there — the plan critic round-1 blocker 2: no busybox-subcommand mapping;
+ * the leaf canonicalizer returns single basenames only).
+ */
+const AWK_FAMILY_ALIAS = new Map([
+	['gawk', 'awk'],
+	['mawk', 'awk'],
+	['nawk', 'awk'],
+	['original-awk', 'awk'],
 ]);
 
 /** Network downloaders. */
@@ -702,6 +771,9 @@ const POSIX_WRITE_TOKENS = new Set([
 	'truncate',
 	'unlink',
 	'install',
+	// #3648 AC6: shred is an overwrite verb — keeps the PowerShell
+	// read-only-predicate honest alongside the write-verb set above.
+	'shred',
 ]);
 
 /**
@@ -1461,8 +1533,17 @@ function hasUnquotedGlob(word: unknown): boolean {
  * shell expands, i.e. one written outside quotes and backslash escapes
  * (`'{print $1,$2}'` is one word). Without trusted source text the parsed
  * text decides (fail-safe: the parser drops quotes).
+ *
+ * #3616 D11 (item 11): words longer than 4096 characters are treated as
+ * expansion-bearing WITHOUT running the quadratic regex — the same cap
+ * PR #3615 applied to the for-word-list path, now hoisted here so every
+ * call site (sed picker, curl/wget destination, scp destination, for word
+ * list) inherits the short-circuit. Oversized words take the deny direction
+ * at every site (dynamic refusal / expansion-bearing), so the cap is
+ * fail-closed.
  */
 function hasUnquotedBraceExpansion(word: unknown, text: string): boolean {
+	if (text.length > 4096) return true;
 	const projection = unquotedProjection(word);
 	return BRACE_EXPANSION.test(projection === null ? text : projection);
 }
@@ -2251,14 +2332,16 @@ function canonicalInterpreterName(cmd: unknown): string | null {
 	const word = words[i];
 	if (word === undefined) return null;
 	const full = basenameAnySep(word);
-	if (INTERPRETER_EVAL_COMMANDS.has(full)) return full;
+	if (INTERPRETER_EVAL_COMMANDS.has(full)) {
+		return AWK_FAMILY_ALIAS.get(full) ?? full;
+	}
 	const stripped = full.replace(/\d+(\.\d+)*$/, '');
 	if (
 		stripped !== '' &&
 		stripped !== full &&
 		INTERPRETER_EVAL_COMMANDS.has(stripped)
 	) {
-		return stripped;
+		return AWK_FAMILY_ALIAS.get(stripped) ?? stripped;
 	}
 	return null;
 }
@@ -2457,6 +2540,25 @@ export type LauncherWalkOutcome =
 			 * points past it at the timed command.
 			 */
 			chdirTailIndex?: number;
+			/**
+			 * #3616 D6 (item 6): true when the tail runs under `sudo -i`/
+			 * `--login` — sudo chdirs to the target user's home before the
+			 * command, so RELATIVE write targets land there, not at the
+			 * ambient cwd. The consumer withdraws relative write tails
+			 * fail-closed (`-s` keeps the cwd and is unaffected).
+			 */
+			loginShell?: true;
+			/**
+			 * #3648 AC8 (D6): the `-R/--chroot` root captured when the inner
+			 * outcome was decided. sudo exec_setup() does chroot(dir) then
+			 * chdir("/"): BOTH relative and absolute tail targets land under
+			 * it. The consumer (matchSudoChdir) re-bases relative tails via
+			 * the cd-rewrite and withdraws whole tails containing ANY
+			 * absolute write spelling (generic absolute re-rooting was
+			 * rejected by the plan critic — `dd of=/abs` embedded targets
+			 * stay fail-open under it).
+			 */
+			sudoChroot?: string;
 	  }
 	| { kind: 'benign' }
 	| {
@@ -2469,6 +2571,13 @@ export type LauncherWalkOutcome =
 			 * are unaffected and stay absolute).
 			 */
 			sudoChdir?: string;
+			/**
+			 * #3648 AC4 (plan critic rounds 3-4): `sudoedit -h HOST` selects a
+			 * REMOTE host — the edit landing is unmodeled, so EVERY edit
+			 * operand withdraws (never benign: a benign outcome is neither
+			 * unwrapped nor denied and would suppress edit analysis entirely).
+			 */
+			sudoHost?: true;
 	  }
 	| { kind: 'interactive' }
 	| { kind: 'uncertain'; tailIndex: number };
@@ -2498,7 +2607,12 @@ export type LauncherWalkOutcome =
 const SUDO_ARGLESS_EXEC_CHARS = new Set([...'EnBbBAHPSk']);
 const SUDO_QUERY_CHARS = new Set([...'lvVKL']);
 const SUDO_INTERACTIVE_CHARS = new Set([...'is']);
-const SUDO_ARG_TAKING_SHORT = new Set([...'ugprtCTUDR']);
+// #3616 review r17 finding 2: the sudo option tables are exported for the
+// destructive-command login-tail slicer — the option-region skip must consume
+// EXACTLY what walkSudoOptions consumes (exact long names, `=`-glued values,
+// GNU unambiguous prefix abbreviations via longFlagTakesArg, getopt short
+// clusters) from the same tables, never a mirrored copy that can drift.
+export const SUDO_ARG_TAKING_SHORT = new Set([...'ugprtCTUDR']);
 const SUDO_LONG_ARGLESS_EXEC = new Set([
 	'--preserve-env',
 	'--non-interactive',
@@ -2519,7 +2633,7 @@ const SUDO_LONG_QUERY = new Set([
 	'--help',
 ]);
 const SUDO_LONG_INTERACTIVE = new Set(['--login', '--shell']);
-const SUDO_LONG_ARG_TAKING = [
+export const SUDO_LONG_ARG_TAKING = [
 	'--user',
 	'--group',
 	'--prompt',
@@ -2605,14 +2719,21 @@ export function walkLauncherOptions(
 ): LauncherWalkOutcome | null {
 	const base = basenameAnySep(launcherWord);
 	if (base === 'sudo') return walkSudoOptions(words);
-	if (base === 'time') {
+	if (base === 'sudoedit') return walkSudoeditOptions(words);
+	if (base === 'time' || base === 'gtime') {
 		// #3572 N-03: keyword-suppression must be PROVEN by a defined raw
 		// spelling — when the caller cannot supply one (dequoted chain words
 		// in the leaf walk), the GNU binary grammar wins. The GNU grammar
 		// detects the `-o` write target where the keyword grammar emits
 		// nothing, so the unresolved case is deny-direction (an
 		// over-approximated launcher_write, never a lost one).
+		// FB-019 (#3689 closeout review): `gtime` (macOS/Homebrew coreutils
+		// GNU time) is a real executable, NEVER the bash keyword — it rides
+		// the GNU binary grammar unconditionally. Without this site the
+		// write side admitted `gtime -o ../secret echo hi` while
+		// /usr/bin/time blocked.
 		const binaryGrammar =
+			base === 'gtime' ||
 			isAbsolutePathSpelling(launcherWord) ||
 			rawLauncherWord === undefined ||
 			isKeywordSuppressedSpelling(rawLauncherWord, launcherWord);
@@ -2639,10 +2760,15 @@ function splitGluedLong(
 /**
  * Long-option arg-taking match: exact membership, or a glued `--flag=value`,
  * or (GNU getopt) an UNAMBIGUOUS prefix abbreviation of length ≥ 3 — the
- * same rule envFlagConsumesNextWord applies for env. `flag` names the
- * matched canonical flag so callers can distinguish --output from --format.
+ * same rule envFlagConsumesNextWord applies for env. The abbreviation rule
+ * composes with the glue: `--use=root` (prefix head + glued value) matches
+ * `--user` exactly as GNU getopt_long does (#3616 review r18 — a glued
+ * abbreviation must not fall to unknown, which for a SHELL-WRAPPED sudo
+ * strips the launcher and admits the tail; a bare top-level sudo is still
+ * denied by the launcher-uncertainty scan). `flag` names the matched
+ * canonical flag so callers can distinguish --output from --format.
  */
-function longFlagTakesArg(
+export function longFlagTakesArg(
 	token: string,
 	argTaking: readonly string[],
 ): {
@@ -2657,6 +2783,24 @@ function longFlagTakesArg(
 	const glued = splitGluedLong(token);
 	if (glued && argTaking.includes(glued.head))
 		return { takes: true, glued: true, value: glued.value, flag: glued.head };
+	if (glued && token.includes('=')) {
+		// GNU getopt_long: an unambiguous ≥3-char prefix of the head with the
+		// value glued (`--use=root` → --user=root) takes the argument in-token.
+		// token.includes('=') keeps the NON-glued prefix (`--use` alone,
+		// value:null from splitGluedLong) on the plain abbreviation branch
+		// below, where glued stays false so callers skip the NEXT word.
+		const gluedMatches = argTaking.filter((flag) =>
+			flag.startsWith(glued?.head ?? ''),
+		);
+		if ((glued?.head ?? '').length >= 3 && gluedMatches.length === 1) {
+			return {
+				takes: true,
+				glued: true,
+				value: glued?.value ?? null,
+				flag: gluedMatches[0] ?? null,
+			};
+		}
+	}
 	const matches = argTaking.filter((flag) => flag.startsWith(token));
 	if (token.length >= 3 && matches.length === 1) {
 		return { takes: true, glued: false, value: null, flag: matches[0] ?? null };
@@ -2677,7 +2821,12 @@ function nestedTimeTail(
 	words: readonly string[],
 	innerIndex: number,
 ): { innerIndex: number; timeOutputFile: string } | null {
-	if (basenameAnySep(words[innerIndex] ?? '') !== 'time') return null;
+	// FB-019 (closeout round 2): gtime is the Homebrew GNU-time binary — the
+	// nested-time tail detection must recognize it too, or `sudo -i gtime -o
+	// src/t.txt true` loses the wrapper-chdir fail-closed that the `time`
+	// twin gets (the loginShell hop discards the home context).
+	const tailHeadBase = basenameAnySep(words[innerIndex] ?? '');
+	if (tailHeadBase !== 'time' && tailHeadBase !== 'gtime') return null;
 	const gnu = walkGnuTimeOptions(words.slice(innerIndex + 1));
 	if (
 		gnu.kind !== 'inner' ||
@@ -2720,17 +2869,170 @@ function interactiveTailDeniesOnRejoin(
 	return false;
 }
 
+/**
+ * #3648 AC4: the sudoedit(8) option walk — the DOCUMENTED sudoedit synopsis
+ * (sudo.man SUDOEDIT section; plan-critic rounds 2-4 corrected it twice:
+ * NOT ordinary sudo's grammar). Argument-less: -A --askpass, -B --bell,
+ * -k --kill, -N, -n --non-interactive, -S --stdin. Argument-taking (detached
+ * or glued): -a/--auth-type TYPE, -C/--close-from FD, -c/--login-class CLASS,
+ * -D/--chdir DIR, -g/--group GROUP, -h/--host HOST, -p/--prompt PROMPT,
+ * -R/--chroot DIR, -r/--role ROLE, -T/--command-timeout TIMEOUT,
+ * -t/--type TYPE, -u/--user USER. Every other option → `uncertain`
+ * (fail-closed). The operands from the first non-option word are EDIT
+ * TARGETS (`{kind:'edit'}`), landing on the INVOKING cwd (sudo 1.9.15p5
+ * ground truth, same model as `sudo -e`). -h HOST sets `sudoHost` (every
+ * operand withdraws — remote landing unmodeled); -R/--chroot sets
+ * `sudoChdir` (relative operands withdraw via the existing chdirWithdraws
+ * seam — the edit chroot base is unresolvable). --help/--version are
+ * non-execution query modes (benign), verified against the manual.
+ */
+function walkSudoeditOptions(words: readonly string[]): LauncherWalkOutcome {
+	const ARGLESS_SHORT = new Set(['A', 'B', 'k', 'N', 'n', 'S']);
+	const ARG_TAKING_SHORT = new Set([
+		'a',
+		'C',
+		'c',
+		'D',
+		'g',
+		'h',
+		'p',
+		'R',
+		'r',
+		'T',
+		't',
+		'u',
+	]);
+	const ARG_TAKING_LONG = [
+		'--auth-type',
+		'--close-from',
+		'--login-class',
+		'--chdir',
+		'--group',
+		'--host',
+		'--prompt',
+		'--chroot',
+		'--role',
+		'--command-timeout',
+		'--type',
+		'--user',
+	];
+	let chdirDir: string | undefined;
+	let hostSeen = false;
+	for (let i = 0; i < words.length; ) {
+		const token = words[i];
+		if (token === undefined) break;
+		if (token === '--') {
+			return i + 1 < words.length
+				? {
+						kind: 'edit',
+						editStartIndex: i + 1,
+						...(chdirDir !== undefined ? { sudoChdir: chdirDir } : {}),
+						...(hostSeen ? { sudoHost: true as const } : {}),
+					}
+				: { kind: 'benign' };
+		}
+		if (token.startsWith('--') && token.length > 2) {
+			if (token === '--help' || token === '--version')
+				return { kind: 'benign' };
+			if (
+				token === '--askpass' ||
+				token === '--bell' ||
+				token === '--kill' ||
+				token === '--no-update' ||
+				token === '--non-interactive' ||
+				token === '--stdin'
+			) {
+				i += 1;
+				continue;
+			}
+			const arg = longFlagTakesArg(token, ARG_TAKING_LONG);
+			if (arg.takes) {
+				// -R/--chroot re-bases the EDIT landing inside the chroot —
+				// statically unresolvable for edits, so it rides the same
+				// withdraw seam as --chdir (relative operands withdraw).
+				const chdirLike = arg.flag === '--chdir' || arg.flag === '--chroot';
+				if (arg.glued) {
+					if (chdirLike && chdirDir === undefined)
+						chdirDir = arg.value ?? undefined;
+					if (arg.flag === '--host') hostSeen = true;
+					i += 1;
+					continue;
+				}
+				if (i + 1 >= words.length) return { kind: 'benign' };
+				if (chdirLike && chdirDir === undefined) chdirDir = words[i + 1];
+				if (arg.flag === '--host') hostSeen = true;
+				i += 2; // flag word + its value
+				continue;
+			}
+			return { kind: 'uncertain', tailIndex: i + 1 };
+		}
+		if (token.startsWith('-') && token.length > 1) {
+			const members = token.slice(1);
+			let consumedNext = false;
+			let argMember = '';
+			for (let m = 0; m < members.length; m++) {
+				const ch = members[m];
+				if (ch === undefined) break;
+				if (ARG_TAKING_SHORT.has(ch)) {
+					if (m === members.length - 1) consumedNext = true;
+					if (ch === 'D' || ch === 'R') {
+						// -D chdir / -R chroot: both withdraw relative edit
+						// operands (glued tail applied here; detached below).
+						if (m !== members.length - 1 && chdirDir === undefined) {
+							chdirDir = members.slice(m + 1);
+						}
+					}
+					if (ch === 'h') hostSeen = true;
+					argMember = ch;
+					break;
+				}
+				if (ARGLESS_SHORT.has(ch)) continue;
+				return { kind: 'uncertain', tailIndex: i + 1 };
+			}
+			i += 1;
+			if (consumedNext) {
+				if (i >= words.length) return { kind: 'benign' };
+				if (
+					(argMember === 'D' || argMember === 'R') &&
+					chdirDir === undefined
+				) {
+					chdirDir = words[i];
+				}
+				i += 1;
+			}
+			continue;
+		}
+		// First non-option word: the edit operands start here.
+		return {
+			kind: 'edit',
+			editStartIndex: i,
+			...(chdirDir !== undefined ? { sudoChdir: chdirDir } : {}),
+			...(hostSeen ? { sudoHost: true as const } : {}),
+		};
+	}
+	return { kind: 'benign' };
+}
+
 function walkSudoOptions(words: readonly string[]): LauncherWalkOutcome {
 	let i = 0;
 	let edit = false;
 	let interactive = false;
 	let listMode = false;
 	let queryOther = false;
+	// #3616 D6: `-i`/`--login` (target-home chdir) tracked apart from
+	// `-s` (cwd kept) — the inner consumer withdraws relative write tails
+	// only under login.
+	let loginShellMode = false;
 	// #3572 delta-critic: `-k` alone (credential reset) is the documented
 	// no-command NO-OP; any other execution option implies the root shell.
 	let resetOnly = true;
 	let execOrResetSeen = false;
 	let chdirDir: string | undefined;
+	// #3648 AC8 (D6): -R/--chroot root. A REPEAT is a usage error in sudo's
+	// parse_args (the command never executes) — deny-direction `uncertain`,
+	// never first-wins (plan critic round 2).
+	let chrootDir: string | undefined;
+	let chrootSeen = false;
 	while (i < words.length) {
 		const token = words[i];
 		if (token === undefined) break;
@@ -2745,6 +3047,7 @@ function walkSudoOptions(words: readonly string[]): LauncherWalkOutcome {
 							kind: 'edit',
 							editStartIndex: i + 1,
 							...(chdirDir !== undefined ? { sudoChdir: chdirDir } : {}),
+							...(chrootDir !== undefined ? { sudoChroot: chrootDir } : {}),
 						}
 					: { kind: 'benign' };
 			}
@@ -2774,6 +3077,11 @@ function walkSudoOptions(words: readonly string[]): LauncherWalkOutcome {
 			// the literal command, so no assignment scan here.
 			// #3572 delta-critic: the nested GNU `time` lookup runs on the
 			// post-`--` word exactly like the non-sentinel path.
+			// #3616 final-critic round 5: `--` only ends option parsing —
+			// an earlier `-i`/`--login` still chdirs to the target home, so
+			// the post-`--` inner returns carry loginShell exactly like the
+			// non-sentinel returns (dropping it admitted `sudo -i -- tee
+			// src/ok` while the no-`--` twin denied).
 			const nested = nestedTimeTail(words, i + 1);
 			if (nested !== null) {
 				return {
@@ -2782,17 +3090,36 @@ function walkSudoOptions(words: readonly string[]): LauncherWalkOutcome {
 					timeOutputFile: nested.timeOutputFile,
 					chdirTailIndex: i + 1,
 					...(chdirDir !== undefined ? { sudoChdir: chdirDir } : {}),
+					...(chrootDir !== undefined ? { sudoChroot: chrootDir } : {}),
+					...(loginShellMode ? { loginShell: true as const } : {}),
 				};
 			}
 			return {
 				kind: 'inner',
 				innerIndex: i + 1,
 				...(chdirDir !== undefined ? { sudoChdir: chdirDir } : {}),
+				...(chrootDir !== undefined ? { sudoChroot: chrootDir } : {}),
+				...(loginShellMode ? { loginShell: true as const } : {}),
 			};
 		}
 		if (token.startsWith('--') && token.length > 2) {
 			const arg = longFlagTakesArg(token, SUDO_LONG_ARG_TAKING);
 			if (arg.takes) {
+				// #3648 AC8 (D6): --chroot root capture (repeat = usage error,
+				// deny-direction uncertain — sudo parse_args rejects repeats).
+				if (arg.flag === '--chroot') {
+					if (chrootSeen) return { kind: 'uncertain', tailIndex: i + 1 };
+					chrootSeen = true;
+					if (arg.glued) {
+						chrootDir = arg.value ?? undefined;
+						i += 1;
+					} else {
+						if (i + 1 >= words.length) return { kind: 'benign' };
+						chrootDir = words[i + 1];
+						i += 2;
+					}
+					continue;
+				}
 				if (arg.glued) {
 					if (arg.flag === '--chdir' && chdirDir === undefined)
 						chdirDir = arg.value ?? undefined;
@@ -2819,6 +3146,7 @@ function walkSudoOptions(words: readonly string[]): LauncherWalkOutcome {
 			}
 			if (SUDO_LONG_INTERACTIVE.has(token)) {
 				interactive = true;
+				if (token === '--login') loginShellMode = true;
 				i += 1;
 				continue;
 			}
@@ -2863,6 +3191,7 @@ function walkSudoOptions(words: readonly string[]): LauncherWalkOutcome {
 				}
 				if (SUDO_INTERACTIVE_CHARS.has(ch)) {
 					interactive = true;
+					if (ch === 'i') loginShellMode = true;
 					continue;
 				}
 				if (ch === 'e') {
@@ -2875,6 +3204,20 @@ function walkSudoOptions(words: readonly string[]): LauncherWalkOutcome {
 			if (unknown) return { kind: 'uncertain', tailIndex: i + 1 };
 			i += 1;
 			if (mode === 'arg') {
+				// #3648 AC8 (D6): -R chroot capture (repeat = usage error,
+				// deny-direction uncertain).
+				if (argMember === 'R') {
+					if (chrootSeen) return { kind: 'uncertain', tailIndex: i + 1 };
+					chrootSeen = true;
+					if (consumedNext) {
+						if (i >= words.length) return { kind: 'benign' };
+						chrootDir = words[i];
+						i += 1; // the argument word
+					} else {
+						chrootDir = argTail;
+					}
+					continue;
+				}
 				if (consumedNext) {
 					if (i >= words.length) return { kind: 'benign' };
 					if (argMember === 'D' && chdirDir === undefined) chdirDir = words[i];
@@ -2895,6 +3238,7 @@ function walkSudoOptions(words: readonly string[]): LauncherWalkOutcome {
 				kind: 'edit',
 				editStartIndex: i,
 				...(chdirDir !== undefined ? { sudoChdir: chdirDir } : {}),
+				...(chrootDir !== undefined ? { sudoChroot: chrootDir } : {}),
 			};
 		if (listMode) return { kind: 'benign' }; // -l [command]: lists privileges, never executes
 		if (queryOther)
@@ -2941,12 +3285,16 @@ function walkSudoOptions(words: readonly string[]): LauncherWalkOutcome {
 				timeOutputFile: nested.timeOutputFile,
 				chdirTailIndex: i,
 				...(chdirDir !== undefined ? { sudoChdir: chdirDir } : {}),
+				...(chrootDir !== undefined ? { sudoChroot: chrootDir } : {}),
+				...(loginShellMode ? { loginShell: true as const } : {}),
 			};
 		}
 		return {
 			kind: 'inner',
 			innerIndex: i,
 			...(chdirDir !== undefined ? { sudoChdir: chdirDir } : {}),
+			...(chrootDir !== undefined ? { sudoChroot: chrootDir } : {}),
+			...(loginShellMode ? { loginShell: true as const } : {}),
 		};
 	}
 	if (edit) return { kind: 'benign' }; // -e with no operand: usage error, nothing runs
@@ -3258,6 +3606,9 @@ function detectorCommandPartsFromWordsBounded(
 			base !== 'exec' &&
 			base !== 'sudo' &&
 			base !== 'time' &&
+			// FB-019: gtime must reach the shared launcher dispatcher like
+			// time/nice/nohup, not stop the walk as an opaque leaf.
+			base !== 'gtime' &&
 			base !== 'nice' &&
 			base !== 'nohup'
 		) {
@@ -3276,7 +3627,34 @@ function detectorCommandPartsFromWordsBounded(
 					cursor++;
 					continue;
 				}
-				if (token.startsWith('-') && token !== '-') {
+				// A lone `-` is env's obsolete -i spelling (an option, never
+				// the command) — consume it so the wrapped command after it
+				// (`env - time -o FILE …`) still resolves as the leaf.
+				if (token === '-') {
+					cursor++;
+					continue;
+				}
+				if (token.startsWith('-')) {
+					// #3616 feedback round 2 (PR #3651 critic C2): the GLUED
+					// split token (-S<payload>, --split=P) carries its
+					// payload INSIDE the flag — the leaf stays `env` (with
+					// the token in `rest`) so the detector's env -S arm
+					// engages even when words follow the payload
+					// (`env -S'…' bash -c true` previously resolved the leaf
+					// to `true`/`z` and skipped the arm). The separate
+					// `-S PAYLOAD` form keeps the historical consume flow
+					// (envFlagConsumesNextWord), whose controls admit.
+					if (
+						(token.startsWith('-S') && token.length > 2) ||
+						token.startsWith('--split')
+					) {
+						return {
+							leaf: 'env',
+							rest: suffix.slice(cursor),
+							rawLeaf: rawBase,
+							depthExceeded: false,
+						};
+					}
 					cursor++;
 					if (envFlagConsumesNextWord(token) && cursor < suffix.length)
 						cursor++;
@@ -3453,7 +3831,9 @@ function detectLauncherWrites(cmd: unknown): WriteTarget[] {
 		// launcher-write emission gate.
 		if (
 			base === 'sudo' ||
+			base === 'sudoedit' ||
 			base === 'time' ||
+			base === 'gtime' ||
 			base === 'nice' ||
 			base === 'nohup'
 		) {
@@ -3467,11 +3847,16 @@ function detectLauncherWrites(cmd: unknown): WriteTarget[] {
 				// directory. ABSOLUTE or drive-qualified operands name the same
 				// file under both models and are judged as written; TILDE-leading
 				// operands keep the dynamic-path marker and fail closed.
+				// #3648 AC4: `sudoedit -h HOST` (walk.sudoHost) edits on a
+				// REMOTE host — EVERY operand withdraws (the landing is
+				// unmodeled); `sudoedit -R DIR` reaches here as sudoChdir, so
+				// relative operands withdraw through the same seam.
 				const chdirWithdraws = (operandPath: string): boolean =>
-					walk.sudoChdir !== undefined &&
-					operandPath !== '' &&
-					!isAbsolutePathSpelling(operandPath) &&
-					!operandPath.startsWith('~');
+					walk.sudoHost === true ||
+					(walk.sudoChdir !== undefined &&
+						operandPath !== '' &&
+						!isAbsolutePathSpelling(operandPath) &&
+						!operandPath.startsWith('~'));
 				// sudo -e operands are EDIT TARGETS (write-class) — each one
 				// expands per-branch (bash hands sudo every expanded word);
 				// refusal classes land on the unconditional dynamic() path.
@@ -3490,6 +3875,7 @@ function detectLauncherWrites(cmd: unknown): WriteTarget[] {
 										operator: 'sudo -e',
 										path: null,
 										dynamicSourceWord: branchPath,
+										denialOrigin: 'wrapper-chdir',
 									}
 								: {
 										category: 'launcher_write',
@@ -3501,6 +3887,7 @@ function detectLauncherWrites(cmd: unknown): WriteTarget[] {
 							operator: 'sudo -e',
 							path: null,
 							dynamicSourceWord: operand,
+							denialOrigin: 'wrapper-chdir',
 						}),
 					);
 				}
@@ -3547,6 +3934,7 @@ function detectLauncherWrites(cmd: unknown): WriteTarget[] {
 				if (
 					tailBase === 'sudo' ||
 					tailBase === 'time' ||
+					tailBase === 'gtime' ||
 					tailBase === 'nice' ||
 					tailBase === 'nohup'
 				) {
@@ -3558,6 +3946,113 @@ function detectLauncherWrites(cmd: unknown): WriteTarget[] {
 					nameRaw = undefined;
 					cursor = cursor + walk.innerIndex + 1;
 					continue;
+				}
+				// #3616 D6 (item 6): an execution tail under `sudo -i`/`--login`
+				// runs in the TARGET USER'S HOME (sudo chdirs before the
+				// command), so RELATIVE write targets land outside the
+				// workspace — unknowable statically. When the tail contains a
+				// write-vector word (builtin write command or a redirect
+				// operator) with a relative operand, withdraw fail-closed; a
+				// no-write tail (`sudo -i make build`) keeps the ordinary
+				// unwrap, and `-s` tails never reach this arm.
+				if (walk.loginShell === true) {
+					// The walk words exclude the launcher word itself: the tail
+					// starts AT the inner command word (tee …), so the
+					// write-vector scan sees the command AND its operands.
+					const tail = suffix.slice(cursor + walk.innerIndex);
+					// tee/dd write by design but live outside BUILTIN_WRITE_COMMANDS
+					// (detectBuiltinWrites handles them ahead of the set check).
+					const loginWriteWords = LOGIN_TAIL_WRITE_WORDS;
+					const hasWriteVector = tail.some((word, idx) => {
+						if (typeof word !== 'string') return false;
+						if (loginWriteWords.has(basenameAnySep(word))) return true;
+						if (/\S?>\S?/.test(word)) return true; // glued or bare redirect
+						if (idx > 0 && /^[0-9]?>>?$/.test(tail[idx - 1] ?? '')) return true;
+						return false;
+					});
+					// #3616 final-critic round 5: a NESTED GNU time inner word
+					// (`sudo -i time -o src/t.txt true`, with or without `--`)
+					// hides the write in the walk's timeOutputFile — the inner
+					// tail starts past it and carries no write word, so a
+					// RELATIVE -o report file under the login home escaped the
+					// withdrawal (an absolute -o keeps the ordinary judged path).
+					const loginTimeFile =
+						typeof walk.timeOutputFile === 'string' ? walk.timeOutputFile : '';
+					const loginTimeFileRelative =
+						loginTimeFile !== '' &&
+						!loginTimeFile.startsWith('/') &&
+						!loginTimeFile.startsWith('~') &&
+						!/^[A-Za-z]:[/]/.test(loginTimeFile);
+					if (hasWriteVector || loginTimeFileRelative) {
+						const firstRelative = loginTimeFileRelative
+							? loginTimeFile
+							: (tail.find(
+									(word) =>
+										typeof word === 'string' &&
+										!word.startsWith('/') &&
+										!word.startsWith('~') &&
+										!/^[A-Za-z]:[/]/.test(word) &&
+										!/^-/.test(word) &&
+										word !== 'tee',
+								) ?? 'sudo -i tail');
+						results.push({
+							category: 'launcher_write',
+							operator:
+								'sudo -i login-shell tail (relative write under target home)',
+							path: null,
+							// F-23 (PR #3651 review): code-point-safe cut — never
+							// split a surrogate pair in the rendered source word.
+							dynamicSourceWord: Array.from(firstRelative)
+								.slice(0, 64)
+								.join(''),
+							// #3616 (final-critic round 4, finding 2): the
+							// login landing is an unresolvable WRAPPER chdir —
+							// render the class-accurate reason, not the
+							// dynamic-text default.
+							denialOrigin: 'wrapper-chdir',
+						});
+						return results;
+					}
+				}
+				// #3616 D5 (item 7): `env` interposed between launchers stops
+				// the hop filter today (nice env sudo -i …, nice env time -o …),
+				// hiding the inner launcher's writes. Peel the env word AND its
+				// own flags/assignments (the same grammar the transparent-env
+				// walk above uses), then keep hopping. `--` ends env's options
+				// but the following word is still the command — hop to it.
+				if (tailBase === 'env') {
+					let next = cursor + walk.innerIndex + 1;
+					while (next < suffix.length) {
+						const token = suffix[next];
+						if (token === undefined) break;
+						// A lone `-` is env's -i alias (an option, never the
+						// command): consume it and keep hopping (#3616).
+						if (token === '-') {
+							next += 1;
+							continue;
+						}
+						if (token === '--') {
+							next += 1;
+							break;
+						}
+						if (token.startsWith('-')) {
+							next += 1;
+							if (envFlagConsumesNextWord(token) && next < suffix.length)
+								next += 1;
+							continue;
+						}
+						if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(token)) {
+							next += 1;
+							continue;
+						}
+						break;
+					}
+					if (next < suffix.length) {
+						name = suffix[next] ?? null;
+						nameRaw = undefined;
+						cursor = next + 1;
+						continue;
+					}
 				}
 			}
 			return results; // non-launcher tail (or a terminal outcome) — stop here
@@ -3579,7 +4074,14 @@ function detectLauncherWrites(cmd: unknown): WriteTarget[] {
 					cursor++;
 					continue;
 				}
-				if (token.startsWith('-') && token !== '-') {
+				// A lone `-` is env's -i alias (an option, never the
+				// command) — consume it so the wrapped command resolves
+				// (#3616).
+				if (token === '-') {
+					cursor++;
+					continue;
+				}
+				if (token.startsWith('-')) {
 					cursor++;
 					if (envFlagConsumesNextWord(token) && cursor < suffix.length)
 						cursor++;
@@ -4013,6 +4515,44 @@ function isHereDocMarker(node: unknown): node is BashHereDocMarker {
  * detector's non-destructive rm arm (detectBuiltinWrites) and
  * `dcExtractRecursiveRmTargets` so both layers classify identically.
  */
+/**
+ * #3616 D3: GNU rm's verified long-option universe (coreutils manual). Used by
+ * rmLongOptionMatches for unambiguous-prefix classification.
+ */
+const RM_LONG_OPTIONS: readonly string[] = [
+	'--dir',
+	'--force',
+	'--help',
+	'--interactive',
+	'--no-preserve-root',
+	'--one-file-system',
+	'--preserve-root',
+	'--recursive',
+	'--verbose',
+	'--version',
+];
+
+/**
+ * #3616 D3: true when `token` unambiguously abbreviates `option` under GNU
+ * getopt rules — the token is a strict prefix of `option`, at least one
+ * character past `--`, and no OTHER rm long option also starts with the token
+ * (an ambiguous prefix is everyone's prefix, so the uniqueness check rejects
+ * it exactly as GNU's parser errors before deletion).
+ */
+function rmLongOptionMatches(
+	token: string,
+	option: '--recursive' | '--force',
+): boolean {
+	if (!token.startsWith('--') || token.length < 3 || token === option)
+		return token === option;
+	if (!option.startsWith(token)) return false;
+	for (const candidate of RM_LONG_OPTIONS) {
+		if (candidate === option) continue;
+		if (candidate.startsWith(token)) return false; // ambiguous
+	}
+	return true;
+}
+
 export function parseRmOptionTokens(tokens: readonly string[]): {
 	destructive: boolean;
 	targetIndices: number[];
@@ -4031,6 +4571,17 @@ export function parseRmOptionTokens(tokens: readonly string[]): {
 	// (bash-parser rejects them, so the write gate's parse-error deny is
 	// the backstop for those spellings).
 	// Pass 1: option tokens anywhere before `--`, classified.
+	// #3616 D3: GNU getopt accepts UNAMBIGUOUS abbreviations of long options,
+	// so an exact-match compare missed `rm --rec src` (issue item 3). The
+	// RM_LONG_OPTIONS table is the verified GNU rm universe (coreutils manual,
+	// rm invocation): --dir, --force, --interactive, --one-file-system,
+	// --no-preserve-root, --preserve-root, --recursive, --verbose, plus the
+	// universal --help/--version. A `--token` counts as recursive/forced when
+	// it is a prefix of EXACTLY ONE table entry (--rec, --r, --f, --fo all
+	// qualify — rm has no other r-/f-long-option). An ambiguous prefix
+	// (--v/--ve/--ver collide with --verbose/--version) is NOT classified:
+	// GNU rejects the invocation before any deletion, so it falls through as
+	// an ordinary unknown token (no fail-open — the command never deletes).
 	let destructive = false;
 	let separatorIndex = tokens.length;
 	for (let i = 0; i < tokens.length; i += 1) {
@@ -4041,7 +4592,10 @@ export function parseRmOptionTokens(tokens: readonly string[]): {
 			break;
 		}
 		if (!token.startsWith('-') || token === '-') continue;
-		if (token === '--recursive' || token === '--force') {
+		if (
+			rmLongOptionMatches(token, '--recursive') ||
+			rmLongOptionMatches(token, '--force')
+		) {
 			destructive = true;
 			continue;
 		}
@@ -4082,7 +4636,9 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 	const leaf = detectorCommandLeaf(cmd);
 	const lowerName =
 		detectorSetMember(leaf, BUILTIN_WRITE_COMMANDS) ??
-		(leaf === 'dd' || leaf === 'tee' || leaf === 'env' ? leaf : null);
+		(leaf === 'dd' || leaf === 'tee' || leaf === 'env' || leaf === 'xargs'
+			? leaf
+			: null);
 	if (!lowerName) return results;
 
 	// #3485 (PRR-008): dedupe on the RESOLVED real command as spelled — not
@@ -4278,20 +4834,32 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 			// #3572 review (delta): GNU getopt also accepts the GLUED long form
 			// `--split-string=VALUE` — the payload rode in the flag token and
 			// was silently consumed as an env argument.
-			const gluedSplit =
-				word.startsWith('--split-string=') && word.length > 15
-					? word.slice('--split-string='.length)
+			// #3616 (review round 6): an EMPTY payload (`-S ''`,
+			// `--split-string=`) splices nothing, so the command is the words
+			// that follow — `env -S '' sh -c …` IS `env sh -c …`. The old
+			// empty-payload bail left that command unanalyzed.
+			const gluedSplit = word.startsWith('--split-string=')
+				? word.slice('--split-string='.length)
+				: undefined;
+			// #3616 feedback round (PR #3651 review F-02): GNU env also
+			// accepts the GLUED short form `-SPAYLOAD` — the payload rides
+			// inside the flag token and was silently consumed as an opaque
+			// env argument (an ambient-key payload escaped the scan).
+			const gluedShortSplit =
+				gluedSplit === undefined && word.startsWith('-S') && word.length > 2
+					? word.slice(2)
 					: undefined;
 			if (
 				word !== '-S' &&
 				word !== '--split-string' &&
-				gluedSplit === undefined
+				gluedSplit === undefined &&
+				gluedShortSplit === undefined
 			)
 				continue;
-			const payload = gluedSplit ?? suffixWords[w + 1];
-			if (payload === undefined || payload.trim() === '') break;
+			const payload = gluedSplit ?? gluedShortSplit ?? suffixWords[w + 1];
+			if (payload === undefined) break;
 			// Glued form: the payload is INSIDE the token (no next word).
-			const glued = gluedSplit !== undefined;
+			const glued = gluedSplit !== undefined || gluedShortSplit !== undefined;
 			const postStart = glued ? w + 1 : w + 2;
 			const splitWords: string[] = [];
 			{
@@ -4327,6 +4895,15 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 						si += 1;
 						continue;
 					}
+					if (c === '\\' && payload[si + 1] === '_') {
+						// #3616 feedback round (PR #3651 review F-06): GNU env
+						// splits `\_` as a word separator in -S payloads
+						// (executed ground truth: `rm\_-rf\_../v` runs
+						// `rm -rf ../v`). Preserve every other escape.
+						pushW();
+						si += 2;
+						continue;
+					}
 					if (c === '\\' && si + 1 < payload.length) {
 						cur += payload[si + 1];
 						si += 2;
@@ -4350,7 +4927,18 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 						x === '-S' ||
 						x === '--split-string' ||
 						x.startsWith('--split-string='),
-				)
+				) ||
+				// F-02/F-06 (PR #3651 critic round 12): the payload may carry
+				// its own ambient-key assignment (BASH_ENV=/tmp/x) and `\_`
+				// separator spellings — scan the RAW split words BEFORE the
+				// re-serialization re-quotes them (the quoted form defeats the
+				// ambient scan), and refuse the unmodelable `\_` separator.
+				splitWords.some((x: string) =>
+					/^(?:export\s+|env\s+|-x\s+)?(?:BASH_ENV|ENV|BASH_FUNC_[A-Za-z0-9_%]+)=/.test(
+						x,
+					),
+				) ||
+				/\\_/.test(payload)
 			) {
 				// Nested split-string: the payload re-parses again at execution
 				// time and the reconstruction cannot model it — emit the
@@ -4363,6 +4951,51 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 					unresolvedContext: true,
 				});
 				return results;
+			}
+			// #3616 feedback round (PR #3651 review F-05): a payload carrying
+			// its own chdir-bearing wrapper (sudo -D/-i/--login/--chdir or
+			// env -C/--chdir) moves the landing the splice cannot model — the
+			// reconstruction judges the wrapped write at the ambient cwd.
+			// Same unconditional refusal as the nested-split case.
+			const payloadChdirWord = (base: string, w: string): boolean => {
+				if (base === 'sudo')
+					return (
+						w === '-D' ||
+						w.startsWith('-D') ||
+						w === '-i' ||
+						w.startsWith('-i') ||
+						w === '--login' ||
+						w === '--chdir' ||
+						w.startsWith('--chdir=')
+					);
+				return (
+					w === '-C' ||
+					w.startsWith('-C') ||
+					w === '--chdir' ||
+					w.startsWith('--chdir=')
+				);
+			};
+			for (let x = 0; x < splitWords.length; x++) {
+				const sw = splitWords[x] ?? '';
+				const base = sw.replace(/^.*[/\\]/, '');
+				if (base !== 'sudo' && base !== 'env') continue;
+				const region: string[] = [];
+				for (let y = x + 1; y < splitWords.length; y++) {
+					const t = splitWords[y] ?? '';
+					if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(t)) continue;
+					if (!t.startsWith('-') || t === '-') break;
+					if (t === '--') break;
+					region.push(t);
+				}
+				if (region.some((t) => payloadChdirWord(base, t))) {
+					results.push({
+						category: 'redirect',
+						operator: 'env -S',
+						path: null,
+						unresolvedContext: true,
+					});
+					return results;
+				}
 			}
 			// The argv re-parse expands payload words at execution time; a
 			// second -S in the ORIGINAL argv splices after this one and is
@@ -4404,7 +5037,7 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 			const reconstructed = [
 				'env',
 				...suffixWords.slice(0, w),
-				serializedPayload,
+				...(serializedPayload === '' ? [] : [serializedPayload]),
 				...suffixWords.slice(postStart),
 			].join(' ');
 			for (const write of detectPosixWrites(reconstructed).writes) {
@@ -4429,6 +5062,187 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 		}
 	}
 
+	// #3648 AC3 (D2): `xargs [flags] <verb> …` feeds the verb STDIN-SUPPLIED
+	// operands — statically unknowable, so when the verb is a write/delete
+	// verb the composition withdraws fail-closed through the existing
+	// dynamic marker (plan-critic round 1 blocker 4: NO custom denialOrigin —
+	// the origin union and renderer are closed surfaces; the default
+	// dynamic-path-target denial is the sanctioned idiom). xargs getopt:
+	// value-taking short members {a d E e I L l n P s} consume a glued tail
+	// or the next word; flags {0 r t x}; long forms mirror; an UNKNOWN
+	// option falls back to scanning every remaining word for a write verb
+	// (deny-direction over-deny, disclosed).
+	const xargsWords = getSuffixWords(cmd);
+	if (lowerName === 'xargs') {
+		const isWriteVerbWord = (word: string): boolean => {
+			const base = basenameAnySep(word);
+			return (
+				BUILTIN_WRITE_COMMANDS.has(base) || base === 'tee' || base === 'dd'
+			);
+		};
+		// FB-004 (#3689 review): a verb OUTSIDE the write tables is not
+		// automatically benign — an interpreter/shell verb (`sh -c 'rm -rf
+		// ../secret'`, `python3 -c 'open(…,"w")'`, `awk 'BEGIN{print > …}'`,
+		// `perl -e 'unlink …'`, `node -e 'writeFileSync …'`) or a launcher
+		// verb (`env`, `sudo`, `nice`, `time`, `timeout`, another `xargs`)
+		// executes the payload at runtime with STDIN-fed operands — exactly
+		// the unknowable composition this arm exists to withdraw. Classify
+		// those as fail-closed withdraws too (same dynamic marker).
+		const verbWithdraws = (word: string): boolean => {
+			const base = basenameAnySep(word);
+			if (
+				base === 'xargs' ||
+				base === 'env' ||
+				base === 'sudo' ||
+				base === 'nice' ||
+				base === 'nohup' ||
+				base === 'timeout' ||
+				base === 'command' ||
+				base === 'builtin' ||
+				base === 'time' ||
+				base === 'gtime'
+			) {
+				return true;
+			}
+			if (/(^|\/|\\)(g?time)$/.test(base)) return true;
+			return INTERPRETER_EVAL_COMMANDS.has(base);
+		};
+		// FB-010 (#3689 review): an expansion-bearing verb (`"$CMD"`,
+		// `${CMD}`, backticks) selects the command at runtime — the same
+		// unknowable-verb class; withdraw instead of treating it as benign
+		// (the arm already fails closed for UNKNOWN OPTIONS — keep the
+		// deny-direction consistent).
+		const verbIsDynamic = (word: string): boolean =>
+			/[$`]/.test(word) || word === '*' || word.startsWith('*');
+		// FB-003 (#3689 review): anchor the walk on the WRAPPER-CONSUMED
+		// tail. getSuffixWords returns the raw suffix, so under
+		// `sudo xargs cp …` / `(sudo xargs cp …)` the first walked word was
+		// the leaf name `xargs` itself (or wrapper residue) — taken as the
+		// verb, missing the write-table check, and ADMITTED. Sibling arms
+		// read the consumed tail (#3485 PRR-006 window); mirror that: start
+		// after the first token whose basename is `xargs`.
+		const leafIdx = xargsWords.findIndex(
+			(w) => typeof w === 'string' && basenameAnySep(w) === 'xargs',
+		);
+		const walkWords = leafIdx >= 0 ? xargsWords.slice(leafIdx + 1) : xargsWords;
+		let wi = 0;
+		let verbWord: string | undefined;
+		let unknownOption = false;
+		while (wi < walkWords.length) {
+			const t = walkWords[wi];
+			if (t === undefined) break;
+			if (t === '--') {
+				verbWord = walkWords[wi + 1];
+				break;
+			}
+			if (t.startsWith('--')) {
+				if (
+					t === '--null' ||
+					t === '--no-run-if-empty' ||
+					t === '--verbose' ||
+					t === '--exit'
+				) {
+					wi += 1;
+					continue;
+				}
+				if (
+					t.startsWith('--arg-file=') ||
+					t.startsWith('--delimiter=') ||
+					t.startsWith('--replace=') ||
+					t.startsWith('--max-args=') ||
+					t.startsWith('--max-procs=') ||
+					t.startsWith('--max-chars=')
+				) {
+					wi += 1;
+					continue;
+				}
+				// 4.5 review: GNU xargs `--replace[=STR]` takes an OPTIONAL
+				// GLUED value — a bare `--replace` is a single-word flag,
+				// and advancing two words skipped the real verb
+				// (`xargs --replace tee ../esc` admitted).
+				if (t === '--replace') {
+					wi += 1;
+					continue;
+				}
+				if (
+					t === '--arg-file' ||
+					t === '--delimiter' ||
+					t === '--max-args' ||
+					t === '--max-procs' ||
+					t === '--max-chars'
+				) {
+					wi += 2;
+					continue;
+				}
+				unknownOption = true;
+				break;
+			}
+			if (t.startsWith('-') && t !== '-') {
+				const members = t.slice(1);
+				let consumedNext = false;
+				let valueOption = false;
+				for (let mi = 0; mi < members.length; mi++) {
+					const ch = members[mi];
+					if (ch === undefined) break;
+					if (ch === '0' || ch === 'r' || ch === 't' || ch === 'x') continue;
+					if ('adEILnPs'.includes(ch)) {
+						consumedNext = mi === members.length - 1;
+						valueOption = true;
+						break;
+					}
+					if (ch === 'e' || ch === 'l') {
+						// optional glued value only — never consumes the next word
+						valueOption = true;
+						break;
+					}
+					unknownOption = true;
+					break;
+				}
+				if (unknownOption) break;
+				// 4.5 review: a value-taking short option CONSUMES its value
+				// and the walk CONTINUES — breaking here made the following
+				// flag the "verb" (`xargs -n 5 -0 rm -rf` admitted). The
+				// verb is the first non-option word after ALL options.
+				wi += valueOption ? (consumedNext ? 2 : 1) : 1;
+				continue;
+			}
+			verbWord = t;
+			break;
+		}
+		if (unknownOption) {
+			// Unknown option: the verb position is unknowable — scan every
+			// remaining word (deny-direction). FB-004/010: the scan uses the
+			// same expanded predicate as the verb position.
+			const found = walkWords.find(
+				(w) =>
+					typeof w === 'string' &&
+					(isWriteVerbWord(w) || verbWithdraws(w) || verbIsDynamic(w)),
+			);
+			if (found !== undefined) {
+				results.push({
+					category: 'builtin_write',
+					operator: `xargs-fed ${basenameAnySep(found)}`,
+					path: null,
+					dynamicSourceWord: found,
+				});
+			}
+			return results;
+		}
+		if (
+			verbWord !== undefined &&
+			(isWriteVerbWord(verbWord) ||
+				verbWithdraws(verbWord) ||
+				verbIsDynamic(verbWord))
+		) {
+			results.push({
+				category: 'builtin_write',
+				operator: `xargs-fed ${basenameAnySep(verbWord)}`,
+				path: null,
+				dynamicSourceWord: verbWord,
+			});
+		}
+		return results;
+	}
 	if (!BUILTIN_WRITE_COMMANDS.has(lowerName)) return results;
 
 	// `rmdir /s [/q] <path>` is a cmd.exe destructive form.  Let the
@@ -4497,7 +5311,32 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 	// extractor's flagless-null pin keep their current carriers.
 	if (lowerName === 'rm') {
 		const rmParse = parseRmOptionTokens(suffixWords);
-		if (rmParse.destructive) return results;
+		if (rmParse.destructive) {
+			// #3616 D9 (item 10, owner decision 2026-11-09): when the
+			// destructive-command policy is DISABLED, flagged rm operands are
+			// judged by the write-authorization scope layer instead — emit
+			// them as ordinary write targets (the same
+			// modeled-on-unlink/rmdir path the flagless arm uses), so a flag
+			// can never make a delete LESS checked. The destructive
+			// allowlist/protected-path rules stay off.
+			if (detectionOptionsOverride?.destructiveArmDisabled === true) {
+				for (const idx of rmParse.targetIndices) {
+					const operand = suffixWords[idx];
+					if (
+						typeof operand === 'string' &&
+						operand !== '' &&
+						operand !== '--'
+					) {
+						results.push({
+							category: 'builtin_write',
+							operator: 'rm (destructive arm disabled)',
+							path: operand,
+						});
+					}
+				}
+			}
+			return results;
+		}
 		for (const idx of rmParse.targetIndices) {
 			const word = suffixWords[idx];
 			if (word === undefined || word === '') continue;
@@ -4650,6 +5489,95 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 					}),
 				);
 			}
+		}
+	} else if (lowerName === 'shred') {
+		// #3648 AC6: GNU shred overwrites EVERY named operand in place (an
+		// irreversible data-loss write). Modeled on the truncate arm in shape
+		// only — the option grammar is shred's own documented one: value-taking
+		// `-n N` / `--iterations=N`, `-s N` / `--size=N`,
+		// `--random-source=FILE`; flags `-f --force`, `-u --remove`,
+		// `-v --verbose`, `-x --exact`, `-z --zero`; `--remove[=how]` takes an
+		// OPTIONAL GLUED value (a detached following word stays an OPERAND).
+		// NO numeric-name exclusion: a file literally named `1` is a real
+		// operand (unlike truncate, whose detached numeric is a size — shred's
+		// sizes ride options, so a bare numeric is always a file). `--` ends
+		// options (coreutils). An unknown option stops the parse and treats
+		// the REMAINING words as operands (over-report, deny-direction).
+		let endOfOptions = false;
+		for (let w = 0; w < suffixWords.length; w++) {
+			const word = suffixWords[w];
+			if (word === undefined) break;
+			if (!endOfOptions && word === '--') {
+				endOfOptions = true;
+				continue;
+			}
+			if (!endOfOptions && word.startsWith('--')) {
+				if (
+					word === '--force' ||
+					word === '--verbose' ||
+					word === '--exact' ||
+					word === '--zero'
+				) {
+					continue;
+				}
+				if (word === '--remove') continue; // optional value is glued only
+				const gluedMatch =
+					/^--(iterations|size|random-source|remove)=(.*)$/.exec(word);
+				if (gluedMatch) continue;
+				// `--file`-style unknown long with no grammar: stop parsing,
+				// remaining words are operands (deny-direction).
+				endOfOptions = true;
+				continue;
+			}
+			if (!endOfOptions && word.startsWith('-') && word !== '-') {
+				// Short cluster: n and s take a value (glued tail or next
+				// word); f/u/v/x/z are flags; anything else stops the parse.
+				const members = word.slice(1);
+				let stop = false;
+				for (let m = 0; m < members.length; m++) {
+					const ch = members[m];
+					if (
+						ch === 'f' ||
+						ch === 'u' ||
+						ch === 'v' ||
+						ch === 'x' ||
+						ch === 'z'
+					)
+						continue;
+					if (ch === 'n' || ch === 's') {
+						if (m === members.length - 1 && w + 1 < suffixWords.length) w++; // detached value
+						// 4.5 review: a CONSUMED value option does NOT end
+						// option parsing — `shred -s 1024 -z src/a` misread
+						// the trailing -z flag as an out-of-scope operand.
+						// The walk continues over the remaining options.
+						break;
+					}
+					stop = true; // unknown member: remaining words are operands
+					break;
+				}
+				if (stop) {
+					endOfOptions = true;
+				}
+				continue;
+			}
+			// Operand: every non-option word is an overwrite target.
+			pushExpandedDestination(
+				results,
+				suffixNodes[w],
+				word,
+				0,
+				(path) => ({
+					category: 'builtin_write',
+					operator: 'shred',
+					path,
+				}),
+				() => ({
+					category: 'builtin_write',
+					operator: 'shred',
+					path: null,
+					dynamicSourceWord: word,
+				}),
+			);
 		}
 	} else if (lowerName === 'rmdir') {
 		// POSIX `rmdir dir...` removes EVERY operand (#3503): report each
@@ -4844,7 +5772,13 @@ function detectInplaceEdit(cmd: unknown): WriteTarget[] {
 	if (!name) return results;
 
 	const leaf = detectorCommandLeaf(cmd);
-	const lowerName = detectorSetMember(leaf, INPLACE_EDIT_COMMANDS);
+	// FB-018 (#3689 review): route awk-family dialects (gawk/mawk/nawk/
+	// original-awk) through the literal-'awk'-keyed operand logic of this
+	// function via the family alias map — `gawk -i inplace '{print}' src/f`
+	// must keep the same program-slot model (and the same ADMIT) as `awk`.
+	const familyLeaf =
+		typeof leaf === 'string' ? (AWK_FAMILY_ALIAS.get(leaf) ?? leaf) : leaf;
+	const lowerName = detectorSetMember(familyLeaf, INPLACE_EDIT_COMMANDS);
 	if (!lowerName) return [];
 
 	// #3569 4.5 r2: wrapper-consumed suffix window (#3485 PRR-006,
@@ -6061,6 +6995,168 @@ function detectInterpreterEval(cmd: unknown): WriteTarget[] {
 					? RUBY_CLUSTER_GRAMMAR
 					: PYTHON_CLUSTER_GRAMMAR;
 		if (!scanInterpreterEvalCluster(grammar, args)) return results;
+	} else if (canonical === 'awk') {
+		// #3648 AC2: an INLINE awk program (the positional program, or gawk
+		// `-e/--source=`) is an eval — the whole invocation becomes the
+		// interpreter_eval capability (python -c parity: tool-before's
+		// scope-gated routing judges the eval working directory; `print >`
+		// targets and system() payloads are not statically knowable — the
+		// sanctioned withdraw arm). `awk -f progfile data` keeps the
+		// script-file carve-out (parity: `python script.py` is not an eval).
+		// UNKNOWN options classify as eval (deny-on-uncertainty). Plan-critic
+		// rounds 1-2: gawk/mawk alias through AWK_FAMILY_ALIAS; dialect
+		// grammar is the COMMON core (-v/-F value-taking, -f file) plus the
+		// gawk `-e/--source` inline form; benign inline programs are part of
+		// the disclosed over-deny (python-parity contract).
+		let sawProgramFile = false;
+		let sawInline = false;
+		let sawProgram = false;
+		let sawInPlace = false;
+		let denyOnUncertainty = false;
+		// FB-005 (#3689 review): the `-i inplace` carve-out must apply ONLY
+		// to programs without external-effect syntax. Real gawk executes
+		// `print > "file"`, `print | "cmd"`, `system("rm -rf …")` and
+		// `getline < "file"` even under -i inplace — the in-place redirect
+		// does not disable the program (verified by the reviewer executing
+		// gawk). Captured program texts gate the carve-out; any redirect/
+		// pipe/system/getline spelling falls through to the eval
+		// classification (deny direction; comparisons like `$1 > 2`
+		// over-deny into the sanctioned python-parity class).
+		const programTexts: string[] = [];
+		const awkProgramHasExternalEffect = (t: string): boolean =>
+			/[<>|]/.test(t) || /\bsystem\s*\(/.test(t) || /\bgetline\b/.test(t);
+		let i = 0;
+		while (i < suffixWords.length) {
+			const w = suffixWords[i];
+			if (w === undefined) break;
+			if (w === '--') {
+				// gawk: words after `--` are data files; a program not yet
+				// seen can only be the next word — treat it as the program
+				// (deny-direction).
+				if (!sawProgramFile && !sawInline && !sawProgram) sawProgram = true;
+				break;
+			}
+			if (w.startsWith('--')) {
+				if (w.startsWith('--source=')) {
+					sawInline = true;
+					programTexts.push(w.slice('--source='.length));
+					i += 1;
+					continue;
+				}
+				if (w.startsWith('--file=')) {
+					sawProgramFile = true;
+					i += 1;
+					continue;
+				}
+				if (w === '--source' || w === '--file') {
+					const nxt = suffixWords[i + 1];
+					if (nxt !== undefined) {
+						if (w === '--source') {
+							sawInline = true;
+							programTexts.push(nxt);
+						} else sawProgramFile = true;
+						i += 1;
+					}
+					i += 1;
+					continue;
+				}
+				if (
+					w === '--assign' ||
+					w === '--separator' ||
+					w.startsWith('--assign=') ||
+					w.startsWith('--separator=')
+				) {
+					if (w === '--assign' || w === '--separator') i += 1; // detached value
+					i += 1;
+					continue;
+				}
+				// --include/--load: value-taking library loaders. NOT the
+				// in-place carve-out (4.5 review: detectInplaceEdit matches only
+				// -i/-i* spellings, so marking --include as in-place returned
+				// early and ADMITTED `awk --include lib 'BEGIN{...}'`); the value
+				// is consumed and the program classification continues — an
+				// inline program after a library load still classifies as eval.
+				if (w === '--include' || w === '--load') {
+					i += 2;
+					continue;
+				}
+				if (w.startsWith('--include=') || w.startsWith('--load=')) {
+					i += 1;
+					continue;
+				}
+				denyOnUncertainty = true;
+				break;
+			}
+			if (w.startsWith('-') && w !== '-') {
+				// Short cluster, getopt left-to-right: every awk short member is
+				// ARG-TAKING (v F f e i l), so the FIRST member either is last
+				// (argument = next word) or swallows the token tail. An unknown
+				// member denies on uncertainty.
+				const members = w.slice(1);
+				// 4.5 review: validate the FIRST member only — the glued VALUE
+				// tail may contain any characters, and requiring the whole token
+				// to be [vFfeil]+ hung on `-ffile` (all-flag chars, not last, the
+				// cursor never advanced: an infinite loop).
+				if (!/^[vFfeil]/.test(members)) {
+					denyOnUncertainty = true;
+					break;
+				}
+				const ch = members[0];
+				const last = members.length === 1;
+				if (ch === 'f') sawProgramFile = true;
+				else if (ch === 'e') {
+					sawInline = true;
+					programTexts.push(
+						last ? (suffixWords[i + 1] ?? '') : members.slice(1),
+					);
+				} else if (ch === 'i') {
+					// 4.5 r2: `-i` is gawk's --include short form, not solely
+					// in-place — the in-place carve-out applies ONLY when the
+					// value is literally `inplace` (detached `-i inplace` or
+					// glued `-iinplace`); any other library (`-i foo.awk`,
+					// `-ifile.awk`) leaves the program classification live
+					// (an inline program still classifies as eval).
+					const gluedTail = members.slice(1);
+					if (last) {
+						const nxt = suffixWords[i + 1];
+						if (nxt === 'inplace') sawInPlace = true;
+					} else if (gluedTail === 'inplace') {
+						sawInPlace = true;
+					}
+				}
+				// Glued value (-ffile): token alone (+1). Detached (-f file):
+				// token + next word (+2) — the old `if (last) i += 1` skipped
+				// only one slot for detached values (4.5 review Important 5a:
+				// `awk -v x=1 -f prog.awk data` misread x=1 as the program).
+				i += last ? 2 : 1;
+				continue;
+			}
+			// First non-option word: the PROGRAM, unless a -f/--file program
+			// already supplied it (then it is a data file).
+			if (!sawProgramFile && !sawInline) {
+				sawProgram = true;
+				programTexts.push(w);
+			}
+			i += 1;
+		}
+		// 4.5 r3: the in-place carve-out applies ONLY when the in-place
+		// arm actually owns at least one operand target — with an inline
+		// program and ZERO data-file operands, detectInplaceEdit emits
+		// nothing and real gawk still executes the BEGIN block
+		// (`awk -i inplace 'BEGIN{print > "../secret"}'` wrote ../secret
+		// while the gate admitted).
+		// FB-005 (#3689 review): and ONLY when every captured program is
+		// free of external-effect syntax (>, >>, |, system(), getline) —
+		// -i inplace does not disable those; they must reach the eval
+		// classification. A program we never captured text for (after `--`)
+		// counts as opaque (deny direction).
+		const programsOpaque =
+			(sawInline || sawProgram) &&
+			(programTexts.length === 0 ||
+				programTexts.some((t) => awkProgramHasExternalEffect(t)));
+		if (sawInPlace && !programsOpaque && detectInplaceEdit(cmd).length > 0)
+			return results;
+		if (!(sawInline || sawProgram || denyOnUncertainty)) return results;
 	} else {
 		const relevantFlags = evalFlags[canonical] ?? [];
 		// Match exact flag (-c), equals-glued (-c=CODE), or directly-glued (-cCODE / -c'code')
@@ -7879,6 +8975,122 @@ export function detectInteractiveSession(
  * @param command - A POSIX shell command string
  * @returns WriteAnalysis with array of detected write targets; hasWrites is false when array is empty
  */
+/**
+ * #3616 D1: an assignment to an ambient shell-state key. Word-start anchors
+ * cover prefix assignments, `;`/`&&`/`||`-separated and parenthesized
+ * segments, `export KEY=` / `env KEY=` arguments, and sudo VAR= pass rules.
+ * `ENV` matches only as a whole key name (word boundary both sides) so
+ * suffixes like MY_ENV= do not trip it.
+ */
+const AMBIENT_SHELL_STATE_KEY_ASSIGNMENT =
+	/(?:^|[\s;|&()])(?:export\s+|env\s+|-x\s+)?(?:BASH_ENV|ENV|BASH_FUNC_[A-Za-z0-9_%]+)=/;
+
+/**
+ * #3616 D4 (item 4): gather every word-node array a command-bearing node
+ * carries — suffix words, prefix (assignment) words, the name word, a For
+ * word list, a Case clause — so the expansion scan below sees CommandExpansion
+ * bodies in ANY word position.
+ */
+function collectWordNodes(node: unknown): unknown[] {
+	if (!node || typeof node !== 'object') return [];
+	const out: unknown[] = [];
+	const rec = node as Record<string, unknown>;
+	for (const key of ['suffix', 'prefix', 'wordlist'] as const) {
+		const arr = rec[key];
+		if (Array.isArray(arr)) out.push(...arr);
+	}
+	if (rec.name && typeof rec.name === 'object') out.push(rec.name);
+	if (rec.clause && typeof rec.clause === 'object') out.push(rec.clause);
+	return out;
+}
+
+/**
+ * #3616 D4 (item 4): writes inside `$(...)` command substitutions carried in
+ * WORD positions — For word lists, command suffix words, assignment
+ * prefixes, Case subjects. The detection walk descends only command
+ * structure, so a clean-parsing `for i in $(echo x > ../esc); do :; done`
+ * reported ZERO writes (the CommandExpansion walk arm was dead code). This
+ * scan serializes each CommandExpansion body (the parser records the body
+ * text on the expansion node) and re-runs detectPosixWrites on it — the
+ * procsub precedent — emitting the body's writes for the consumer to resolve
+ * against ITS tracked cwd (never the unmatched-write fallback).
+ */
+function expansionWordWrites(
+	words: readonly unknown[],
+	depth: number,
+): WriteTarget[] {
+	if (depth > 8) return [];
+	const results: WriteTarget[] = [];
+	for (const word of words) {
+		if (!word || typeof word !== 'object') continue;
+		const expansions = (word as { expansion?: unknown }).expansion;
+		if (!Array.isArray(expansions)) continue;
+		for (const expansion of expansions) {
+			if (!expansion || typeof expansion !== 'object') continue;
+			const type = (expansion as { type?: unknown }).type;
+			// Only CommandExpansion carries a command body; parameter and
+			// arithmetic expansions never contain writes.
+			if (type !== 'CommandExpansion') continue;
+			const body = (expansion as { command?: unknown }).command;
+			if (typeof body !== 'string' || body === '') {
+				// Unserializable body: withdraw fail-closed.
+				results.push({
+					// opaque interpreter_eval class: no capability flag,
+					// blanket-blocked
+					category: 'interpreter_eval',
+					operator: '$(...) word (unserializable body)',
+					path: null,
+				});
+				continue;
+			}
+			const inner = detectPosixWrites(body, depth + 1);
+			for (const write of inner.writes) {
+				results.push(
+					write.path === null
+						? write
+						: { ...write, operator: `${write.operator} [$()]` },
+				);
+			}
+			if (inner.parseError && inner.writes.length === 0) {
+				results.push({
+					// opaque interpreter_eval class: no capability flag,
+					// blanket-blocked
+					category: 'interpreter_eval',
+					operator: '$(...) word (parse error in body)',
+					path: null,
+				});
+			}
+		}
+	}
+	return results;
+}
+
+/**
+ * #3616 D10: the first whitespace-delimited word longer than `budget`
+ * characters, or null. A linear pre-parse scan (single pass, character class
+ * test only — no regex over the whole command).
+ */
+export function firstWordOverBudget(
+	command: string,
+	budget: number,
+): string | null {
+	let start = -1;
+	const n = command.length;
+	for (let i = 0; i <= n; i += 1) {
+		const ch = i < n ? command.charCodeAt(i) : 32;
+		const isSpace = ch === 32 || ch === 9 || ch === 10 || ch === 13;
+		if (isSpace) {
+			if (start !== -1) {
+				if (i - start > budget) return command.slice(start, i);
+				start = -1;
+			}
+		} else if (start === -1) {
+			start = i;
+		}
+	}
+	return null;
+}
+
 export function detectPosixWrites(
 	command: string,
 	procsubRecursionDepth = 0,
@@ -7906,6 +9118,56 @@ export function detectPosixWrites(
 					category: 'interpreter_eval',
 					operator: 'unsafe command text',
 					path: null,
+				},
+			],
+			hasWrites: true,
+			parseError: true,
+		};
+	}
+
+	// #3616 D1 (item 1): in-command assignment/export/env-prefix naming
+	// BASH_ENV, ENV, or a BASH_FUNC_* key injects ambient shell state the
+	// command-text model cannot bound (a startup file need not look
+	// command-bearing; an imported function executes later) — deny the whole
+	// command regardless of value shape. Text-level scan covers all three
+	// spellings the plan enumerates (assignment prefixes incl. after `;`/`&&`,
+	// `export KEY=...`, `env KEY=...`) plus sudo VAR= pass rules upstream of
+	// the walk.
+	if (AMBIENT_SHELL_STATE_KEY_ASSIGNMENT.test(command)) {
+		return {
+			writes: [
+				{
+					// opaque interpreter_eval class: no capability flag,
+					// blanket-blocked
+					category: 'interpreter_eval',
+					operator: 'ambient shell-state key assignment',
+					path: null,
+				},
+			],
+			hasWrites: true,
+			parseError: true,
+		};
+	}
+
+	// #3616 D10 (item 11): a whitespace-delimited word longer than 4096 chars
+	// cannot be analyzed in budget (the parse itself is the dominant cost;
+	// PR #3615 measured ~1.5s per walk on a 40k unclosed-brace operand). Deny
+	// before parsing: the oversized word is emitted as an opaque eval-class
+	// write the gate blanket-blocks — the same verdict the control operand
+	// (a small unclosed brace) already receives via dynamic refusal, so the
+	// two spellings classify identically (pinned by C11's verdict-equality).
+	const oversizedWord = firstWordOverBudget(command, 4096);
+	if (oversizedWord !== null) {
+		return {
+			writes: [
+				{
+					// opaque interpreter_eval class: no capability flag,
+					// blanket-blocked
+					category: 'interpreter_eval',
+					operator: 'oversized word',
+					path: null,
+					// F-23 (PR #3651 review): code-point-safe cut.
+					dynamicSourceWord: Array.from(oversizedWord).slice(0, 64).join(''),
 				},
 			],
 			hasWrites: true,
@@ -7952,6 +9214,10 @@ export function detectPosixWrites(
 			for (const write of detectGitDestructive(cmd)) allWrites.push(write);
 			for (const write of detectPatchApply(cmd)) allWrites.push(write);
 			for (const write of detectRsyncWrites(cmd)) allWrites.push(write);
+			// #3616 D4: word-position $(...) writes (For word list, suffix,
+			// assignment prefix, Case clause).
+			for (const write of expansionWordWrites(collectWordNodes(cmd), 0))
+				allWrites.push(write);
 			if (
 				detectorCommandPartsFromWordsBounded(
 					getCommandName(cmd),
@@ -8577,13 +9843,143 @@ function resolvePath(pathText: string | null, cwd: string): string | null {
 	// need win32 resolution; POSIX paths use posix resolution.
 	const isWindowsPath = /^[a-zA-Z]:[\\\\/]/.test(cwd) || cwd.includes('\\');
 	if (isWindowsPath) {
-		return path.win32.resolve(cwd, pathText);
+		return resolveThroughSymlinksWin32(pathText, cwd);
 	}
 	const normalizedRelativeWindowsPath =
 		!path.posix.isAbsolute(pathText) && !/^[a-zA-Z]:[\\/]/.test(pathText)
 			? pathText.replace(/\\/g, '/')
 			: pathText;
-	return path.posix.resolve(cwd, normalizedRelativeWindowsPath);
+	return resolveThroughSymlinksPosix(normalizedRelativeWindowsPath, cwd);
+}
+
+/**
+ * #3616 D8 (item 9): POSIX shells resolve `..` through the REAL directory a
+ * symlink component points at, not lexically. `link/../src/x` with
+ * link → another tree names a file in THAT tree while the lexical collapse
+ * names `src/x` (in scope) — the gate admitted and Linux deleted the file in
+ * the other tree (executed by the filing final critic). Left-to-right prefix
+ * resolution: walk the components cumulatively; at each intermediate
+ * component consult lstat — a symlink/junction component substitutes its
+ * real target before the walk continues (bounded by the component count). A
+ * non-ENOENT lstat failure returns null (unresolved → fail-closed deny).
+ * Windows/MSYS resolves `..` lexically too, so BOTH resolvers run the walk
+ * (a junction is a symlink on win32 — the gate-side judgment reproduces on
+ * this host and is pinned by C9).
+ */
+function resolveThroughSymlinksPosix(
+	pathText: string,
+	cwd: string,
+): string | null {
+	const lexical = path.posix.resolve(cwd, pathText);
+	if (!path.posix.isAbsolute(pathText)) {
+		// Relative operand: resolve against cwd with symlink-aware prefix walk.
+		return resolveSymlinkAware(cwd, pathText, path.posix, (p) => p);
+	}
+	return resolveSymlinkAware(cwd, pathText, path.posix, (p) => p) ?? lexical;
+}
+
+function resolveThroughSymlinksWin32(
+	pathText: string,
+	cwd: string,
+): string | null {
+	const walked = resolveSymlinkAware(cwd, pathText, path.win32, (p) => p);
+	// #3616 feedback round (PR #3651 review F-17): on win32 a `..` that
+	// crosses a junction resolves DIFFERENTLY per writer class — bash/MSYS
+	// walks physically (the result above), while native Win32 binaries
+	// (curl, cmd, PowerShell) collapse `..` lexically BEFORE the filesystem
+	// substitutes the junction, so they land where the lexical collapse
+	// names. When the two models disagree, at least one class lands outside
+	// whichever landing the gate judges, so the landing is writer-dependent
+	// and unverifiable — fail closed (null → unverifiable-path deny) instead
+	// of picking one model. Identical results (no junction crossed by the
+	// `..`) keep the walked verdict.
+	if (pathText.includes('..') && walked !== null) {
+		const lexical = path.win32.resolve(cwd, pathText);
+		if (walked.toLowerCase() !== lexical.toLowerCase()) return null;
+	}
+	return walked;
+}
+
+/**
+ * Shared symlink-aware resolution core. Anchored at `anchor` (an absolute
+ * directory), the operand's components are applied left-to-right; every
+ * intermediate accumulated prefix that exists is lstat'd — a symlink/junction
+ * component is replaced by its target (readlink) and the TARGET's own
+ * components are walked before the remaining operand components (realpath
+ * order), so a chain `link1 -> link2 -> real` resolves fully and a later `..`
+ * collapses against the REAL parent. ENOENT prefixes are skipped (the write
+ * may not exist yet); any other lstat/readlink failure, or more than
+ * SYMLINK_HOP_LIMIT link substitutions (an ELOOP-style cycle), fails closed
+ * (null).
+ */
+/**
+ * #3616: the sudo -i login-tail write-vector word set (BUILTIN_WRITE_COMMANDS
+ * + tee/dd) shared by the detector's D6 arm and the destructive-command
+ * login arms (imported there) — one definition, three consumers.
+ */
+export const LOGIN_TAIL_WRITE_WORDS = new Set([
+	...BUILTIN_WRITE_COMMANDS,
+	'tee',
+	'dd',
+]);
+
+const SYMLINK_HOP_LIMIT = 40;
+
+function resolveSymlinkAware(
+	anchor: string,
+	pathText: string,
+	pathImpl: typeof path.posix | typeof path.win32,
+	_normalize: (p: string) => string,
+): string | null {
+	// Fast path: no `..` at all — lexical resolve is exact.
+	if (!pathText.includes('..')) {
+		return pathImpl.resolve(anchor, pathText);
+	}
+	const splitComponents = (text: string): string[] =>
+		text.split(/[\\/]+/).filter((c) => c !== '' && c !== '.');
+	// Split the operand into components; resolve cumulatively from the anchor.
+	const absolute = pathImpl.isAbsolute(pathText);
+	let current = absolute ? pathImpl.parse(pathText).root : anchor;
+	const pending = splitComponents(
+		absolute ? pathText.slice(pathImpl.parse(pathText).root.length) : pathText,
+	);
+	let hops = 0;
+	while (pending.length > 0) {
+		const component = pending.shift() as string;
+		if (component === '..') {
+			const parent = pathImpl.dirname(current);
+			current = parent === current ? current : parent;
+			continue;
+		}
+		const next = pathImpl.join(current, component);
+		// Consult lstat on every intermediate component (the final component
+		// too — a symlink LEAF write target redirects the write).
+		try {
+			const stat = lstatSync(next, { throwIfNoEntry: false });
+			if (stat?.isSymbolicLink()) {
+				hops += 1;
+				if (hops > SYMLINK_HOP_LIMIT) return null;
+				const target = readlinkSync(next);
+				// Re-walk the target's components (it may itself traverse
+				// links) ahead of the operand's remaining components.
+				if (pathImpl.isAbsolute(target)) {
+					const root = pathImpl.parse(target).root;
+					current = root;
+					pending.unshift(...splitComponents(target.slice(root.length)));
+				} else {
+					// A relative target resolves against the link's directory,
+					// which is `current`.
+					pending.unshift(...splitComponents(target));
+				}
+				continue;
+			}
+		} catch {
+			// Non-ENOENT failure (or readlink failure): fail closed.
+			return null;
+		}
+		current = next;
+	}
+	return current;
 }
 
 /**
@@ -8602,6 +9998,13 @@ interface DirectoryState {
 	prevCwd: string | null;
 	dirStack: string[];
 	withdrawn: boolean;
+	/**
+	 * #3616 D14: WHY the withdrawal fired — 'loop' (a For-body landing
+	 * change) or 'directory' (cd -/popd/OLDPWD/function-call). Stamped onto
+	 * later writes by pushWriteWithState so the deny site renders the
+	 * class-accurate reason; undefined means "not yet withdrawn".
+	 */
+	withdrawnOrigin?: 'loop' | 'directory';
 	/** Text-level per-command facts (evaluated once per walk on the raw line). */
 	homeReassigned: boolean;
 	oldpwdReassigned: boolean;
@@ -8613,6 +10016,9 @@ function cloneDirectoryState(state: DirectoryState): DirectoryState {
 		prevCwd: state.prevCwd,
 		dirStack: [...state.dirStack],
 		withdrawn: state.withdrawn,
+		...(state.withdrawnOrigin !== undefined
+			? { withdrawnOrigin: state.withdrawnOrigin }
+			: {}),
 		homeReassigned: state.homeReassigned,
 		oldpwdReassigned: state.oldpwdReassigned,
 	};
@@ -8707,13 +10113,17 @@ function parseDirectoryCommand(cmd: unknown): DirectoryCommand | null {
 /**
  * Move the state to an absolute landing under the mode's proof rules and
  * update prevCwd exactly like the shell (only a directory change that
- * actually happened updates OLDPWD). Returns true when the cwd moved.
+ * actually happened updates OLDPWD). Returns 'moved' when the cwd moved,
+ * 'same' when the landing equals the cwd (#3616 D7: bash `pushd .` pushes a
+ * duplicate stack entry in exactly this case, so pushd must distinguish it
+ * from a failed proof gate), and 'failed' when the gate could not prove the
+ * landing is a directory.
  */
 function landDirectoryState(
 	state: DirectoryState,
 	landing: string,
 	cdMode: 'gate' | 'gate-skip' | 'succeed',
-): boolean {
+): 'moved' | 'same' | 'failed' {
 	if (cdMode === 'gate') {
 		let isDirectory = false;
 		try {
@@ -8722,7 +10132,7 @@ function landDirectoryState(
 		} catch {
 			isDirectory = false;
 		}
-		if (!isDirectory) return false;
+		if (!isDirectory) return 'failed';
 	}
 	if (landing === state.cwd) {
 		// #3567 review PRR-006: bash still refreshes OLDPWD when `cd` lands on
@@ -8732,11 +10142,11 @@ function landDirectoryState(
 		// stale previous directory and judged the following write at a landing
 		// bash never used. Same-directory cd/pushd/popd now model the refresh.
 		state.prevCwd = state.cwd;
-		return false;
+		return 'same';
 	}
 	state.prevCwd = state.cwd;
 	state.cwd = landing;
-	return true;
+	return 'moved';
 }
 
 /** The shell's HOME landing for bare `cd` / `cd ~` / `cd ~/x` (#3491 W1). */
@@ -8840,7 +10250,14 @@ function applyDirectoryTransition(
 			landing = resolveBashCdTarget(operand, state.cwd, landing);
 		}
 		const oldCwd = state.cwd;
-		if (landDirectoryState(state, landing, cdMode)) {
+		const landed = landDirectoryState(state, landing, cdMode);
+		// #3616 D7 (item 8): bash's `pushd <current>` pushes a DUPLICATE entry
+		// even when the landing equals the cwd — landDirectoryState returns
+		// 'same' there, which the old boolean folded into "nothing happened",
+		// so the following popd removed the wrong entry. Push on BOTH moved
+		// and same-landing outcomes; only a failed proof gate ('failed') skips
+		// the push.
+		if (landed !== 'failed') {
 			if (state.dirStack.length >= 32) {
 				state.withdrawn = true;
 				return true;
@@ -9592,6 +11009,12 @@ function collectWritesWithNodes(
 					}
 				}
 			}
+			// #3616 D4: the word list's $(...) bodies resolve at the
+			// loop-ENTRY state (bash expands the list before the first
+			// iteration — a body cd never moves a later sibling's landing).
+			for (const w of expansionWordWrites(collectWordNodes(node), 0)) {
+				pushWriteWithState(out, w, state);
+			}
 			// #3586 Fix 1: same slice capture as While/Until (a For has no
 			// clause — the capture starts at the body walk).
 			const sliceStart = out.length;
@@ -9609,6 +11032,7 @@ function collectWritesWithNodes(
 				);
 				if (!directoryStatesEqual(bodyState, state)) {
 					state.withdrawn = true;
+					state.withdrawnOrigin = 'loop';
 					// #3586 Fix 1 arm (a) — the SINGLE exemption: a For whose
 					// word list is ONE fully-literal word immune to every
 					// word-producing expansion, in a command with no
@@ -9619,7 +11043,7 @@ function collectWritesWithNodes(
 					// change break/continue BEHAVIOR but cannot APPEND items
 					// to a literal one-word list — r12 execution).
 					if (!forWordListIsSingleLiteralWord(node) || familyDynamic) {
-						markWritesUnresolvedFrom(out, sliceStart);
+						markWritesUnresolvedFrom(out, sliceStart, 'loop-landing');
 					}
 				}
 			}
@@ -9633,6 +11057,11 @@ function collectWritesWithNodes(
 						pushWriteWithState(out, w, state);
 					}
 				}
+			}
+			// #3616 D4: the Case subject's $(...) bodies resolve at the
+			// clause-ENTRY state.
+			for (const w of expansionWordWrites(collectWordNodes(node), 0)) {
+				pushWriteWithState(out, w, state);
 			}
 			// Each branch descends on a copy of the clause-entry state; the
 			// no-match outcome keeps the entry state. `;&`/`;;&` fall-through
@@ -9791,6 +11220,12 @@ function collectWritesWithNodes(
 			}
 
 			const rsyncWrites = detectRsyncWrites(node);
+			// #3616 D4: word-position $(...) writes resolve at the TRACKED
+			// walk state (the cd context of the enclosing command), never
+			// the unmatched-write fallback.
+			for (const w of expansionWordWrites(collectWordNodes(node), 0)) {
+				pushWriteWithState(out, w, state);
+			}
 			for (const w of rsyncWrites) {
 				pushWriteWithState(out, w, state);
 			}
@@ -9807,12 +11242,23 @@ function collectWritesWithNodes(
  * withdrawal flag at PUSH time; this closes the already-pushed slice the
  * post-walk divergence retroactively invalidates). Idempotent per write.
  */
-function markWritesUnresolvedFrom(out: WriteWithNode[], start: number): void {
+function markWritesUnresolvedFrom(
+	out: WriteWithNode[],
+	start: number,
+	origin?: WriteTarget['denialOrigin'],
+): void {
 	for (let i = start; i < out.length; i += 1) {
 		const entry = out[i];
 		if (entry === undefined) continue;
-		if (entry.write.unresolvedContext !== true) {
-			entry.write = { ...entry.write, unresolvedContext: true };
+		if (
+			entry.write.unresolvedContext !== true ||
+			entry.write.denialOrigin !== origin
+		) {
+			entry.write = {
+				...entry.write,
+				unresolvedContext: true,
+				...(origin !== undefined ? { denialOrigin: origin } : {}),
+			};
 		}
 	}
 }
@@ -9932,7 +11378,20 @@ function pushWriteWithState(
 	out.push({
 		write:
 			state.withdrawn && write.unresolvedContext !== true
-				? { ...write, unresolvedContext: true }
+				? {
+						...write,
+						unresolvedContext: true,
+						// #3616 D14: a withdrawal without a loop origin IS
+						// directory-class (cd -/popd/OLDPWD/function-call).
+						...(write.denialOrigin === undefined
+							? {
+									denialOrigin:
+										state.withdrawnOrigin === 'loop'
+											? ('loop-landing' as const)
+											: ('directory-withdrawal' as const),
+								}
+							: {}),
+					}
 				: write,
 		context: state.cwd,
 	});
@@ -10250,6 +11709,27 @@ export function resolveWriteTargets(
 		}));
 	}
 
+	// #3616 D11: skip the resolver's own parse for oversized words — the
+	// detection sentinel already denied them, and parsing a 40k-char word
+	// again costs ~100ms on the gate path. The writes resolve against cwd
+	// without subshell tracking (the same shape as the parse-failure path).
+	if (firstWordOverBudget(command, 4096) !== null) {
+		return writes.map((original) => ({
+			original,
+			resolvedPath:
+				original.unresolvedContext === true
+					? null
+					: resolvePath(original.path, cwd),
+			resolved:
+				original.unresolvedContext !== true &&
+				original.path !== null &&
+				!isDynamicPath(original.path),
+			...(original.capability === true &&
+			original.category === 'interpreter_eval'
+				? { evalDirectory: cwd }
+				: {}),
+		}));
+	}
 	let ast: unknown;
 	try {
 		ast = parse(command, { mode: 'posix', insertLOC: true });
@@ -10382,6 +11862,7 @@ export function resolveWriteTargets(
 				evalDirectory?: string;
 				writeContext?: string;
 				unresolved?: true;
+				denialOrigin?: WriteTarget['denialOrigin'];
 			}
 		>();
 		for (const { write, context } of deduplicated) {
@@ -10392,6 +11873,11 @@ export function resolveWriteTargets(
 			const resolvedPath = unresolved ? null : resolvePath(write.path, context);
 			const resolved =
 				!unresolved && write.path !== null && !isDynamicPath(write.path);
+			// #3616 D14: a STATIC path that still resolves to null failed the
+			// symlink-aware walk (non-ENOENT lstat/readlink failure, or a link
+			// chain past SYMLINK_HOP_LIMIT) — render the filesystem-verification
+			// reason, not the dynamic-text one.
+			const unverifiable = resolved && resolvedPath === null;
 			const key = buildDedupeKey(write.category, write.operator, write.path);
 			// A capability eval has no static target; the working directory it
 			// runs at (tracked through any `cd`) IS what the gate authorizes
@@ -10415,6 +11901,11 @@ export function resolveWriteTargets(
 				evalDirectory,
 				writeContext,
 				...(unresolved ? { unresolved: true } : {}),
+				...(write.denialOrigin !== undefined
+					? { denialOrigin: write.denialOrigin }
+					: unverifiable
+						? { denialOrigin: 'unverifiable-path' as const }
+						: {}),
 			});
 		}
 		return { map, colliding };
@@ -10457,8 +11948,15 @@ export function resolveWriteTargets(
 			evalDirectory?: string;
 			writeContext?: string;
 			unresolved?: true;
+			denialOrigin?: WriteTarget['denialOrigin'];
 		}): ResolvedWriteTarget => ({
-			original,
+			// #3616 D14: the resolver walk's decision-site origin rides onto
+			// the output write so the gate's deny site renders it.
+			original:
+				resolved.denialOrigin !== undefined &&
+				original.denialOrigin === undefined
+					? { ...original, denialOrigin: resolved.denialOrigin }
+					: original,
 			resolvedPath: resolved.resolvedPath,
 			resolved: resolved.resolved,
 			...(resolved.evalDirectory !== undefined
