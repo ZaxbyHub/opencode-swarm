@@ -109,8 +109,45 @@ export interface SandboxPolicy {
 	deny_symlink_egress: boolean;
 }
 
-// Session-lifetime cache for probe results
+// Probe result cache (#3736 D7-rev2). A SUCCESSFUL probe (available=true) is
+// cached for the process lifetime — a healthy runner is stable. Every
+// unavailable/failed result (spawn error, nonzero exit, throw, binary not
+// found, protocol mismatch, mode:'none', the not-win32 guard) is cached with
+// a TTL: the next probe() call after the TTL re-runs findRunnerBinary() and
+// the probe, so installing or replacing the runner binary is recoverable and
+// a transient failure (EBUSY/EPERM/timeout) cannot pin the weak executor for
+// the process lifetime. While genuinely broken the re-probe cadence is one
+// bounded attempt (2s spawn budget) per TTL window — that cadence IS the
+// recovery mechanism, and the #2475 downgrade warnings below fire at most
+// once per failed attempt rather than once per process.
 let _cachedProbe: RunnerProbeResult | undefined;
+let _cachedProbeExpiresAt = Number.POSITIVE_INFINITY;
+
+const RUNNER_PROBE_FAILURE_TTL_DEFAULT_MS = 60_000;
+
+/**
+ * #3736 D7-rev2: how long an unavailable/failed probe result stays cached
+ * before the next probe() re-runs, mirroring executorFailureTtlMs() in
+ * src/sandbox/executor.ts (#3716 pattern). Only finite positive values of
+ * SWARM_SANDBOX_RUNNER_PROBE_FAILURE_TTL_MS are honored.
+ */
+export function runnerProbeFailureTtlMs(): number {
+	const raw = Number(process.env.SWARM_SANDBOX_RUNNER_PROBE_FAILURE_TTL_MS);
+	return Number.isFinite(raw) && raw > 0
+		? raw
+		: RUNNER_PROBE_FAILURE_TTL_DEFAULT_MS;
+}
+
+function setCachedProbe(result: RunnerProbeResult): RunnerProbeResult {
+	_cachedProbe = result;
+	// #3736 D7-rev2: only a successful probe is permanent; every
+	// unavailable/failed result expires after the TTL (see the cache comment
+	// above).
+	_cachedProbeExpiresAt = result.available
+		? Number.POSITIVE_INFINITY
+		: Date.now() + runnerProbeFailureTtlMs();
+	return result;
+}
 
 /**
  * DI seam for testability. Exposes internal functions so tests can simulate
@@ -213,35 +250,37 @@ function findRunnerBinary(): string | null {
  * Results are cached for the session lifetime.
  */
 export function probe(): RunnerProbeResult {
-	if (_cachedProbe !== undefined) {
+	if (_cachedProbe !== undefined && Date.now() < _cachedProbeExpiresAt) {
 		return _cachedProbe;
 	}
 
 	if (process.platform !== 'win32') {
-		_cachedProbe = {
+		return setCachedProbe({
 			available: false,
 			mode: 'none',
 			capabilities: null,
 			error: 'not Windows',
-		};
-		return _cachedProbe;
+		});
 	}
 
 	const binary = _internals.findRunnerBinary();
 	if (!binary) {
-		_cachedProbe = {
+		const notFound = setCachedProbe({
 			available: false,
 			mode: 'none',
 			capabilities: null,
 			error: 'runner binary not found',
-		};
+		});
 		// Issue #2475: a security-relevant isolation downgrade must be visible
-		// without OPENCODE_SWARM_DEBUG. Emitted at most once per process because
-		// the failed probe result is cached.
+		// without OPENCODE_SWARM_DEBUG. #3736 D7: the failure is TTL-bounded
+		// (the probe re-runs once per TTL window so an installed or replaced
+		// binary is recoverable), so this emits at most once per TTL window
+		// while the binary stays missing — the bounded cadence IS the
+		// recovery mechanism.
 		criticalWarn(
 			'[sandbox] swarm-sandbox-runner binary not found — native Windows sandbox unavailable; commands fall back to the weak PowerShell wrapper (or run unsandboxed in advisory mode). Run /swarm diagnose for details.',
 		);
-		return _cachedProbe;
+		return notFound;
 	}
 
 	try {
@@ -254,29 +293,29 @@ export function probe(): RunnerProbeResult {
 		});
 
 		if (result.error) {
-			_cachedProbe = {
+			const failed = setCachedProbe({
 				available: false,
 				mode: 'none',
 				capabilities: null,
 				error: `probe spawn error: ${(result.error as NodeJS.ErrnoException).code ?? result.error.message}`,
-			};
+			});
 			criticalWarn(
-				`[sandbox] swarm-sandbox-runner probe failed (${_cachedProbe.error}) — degrading to weak sandbox. This covers wrong-arch and corrupt binaries; run /swarm diagnose for details.`,
+				`[sandbox] swarm-sandbox-runner probe failed (${failed.error}) — degrading to weak sandbox. This covers wrong-arch and corrupt binaries; run /swarm diagnose for details.`,
 			);
-			return _cachedProbe;
+			return failed;
 		}
 
 		if (result.status !== 0) {
-			_cachedProbe = {
+			const failed = setCachedProbe({
 				available: false,
 				mode: 'none',
 				capabilities: null,
 				error: `probe exited with code ${result.status}`,
-			};
+			});
 			criticalWarn(
-				`[sandbox] swarm-sandbox-runner probe failed (${_cachedProbe.error}) — degrading to weak sandbox. Run /swarm diagnose for details.`,
+				`[sandbox] swarm-sandbox-runner probe failed (${failed.error}) — degrading to weak sandbox. Run /swarm diagnose for details.`,
 			);
-			return _cachedProbe;
+			return failed;
 		}
 
 		const capabilities = JSON.parse(result.stdout?.trim() ?? '{}');
@@ -290,16 +329,16 @@ export function probe(): RunnerProbeResult {
 				? capabilities.protocol_schema_version
 				: null;
 		if (reportedProtocol !== RUNNER_PROTOCOL_SCHEMA_VERSION) {
-			_cachedProbe = {
+			const failed = setCachedProbe({
 				available: false,
 				mode: 'none',
 				capabilities,
 				error: `runner protocol mismatch (got ${reportedProtocol ?? 'none'}, expected ${RUNNER_PROTOCOL_SCHEMA_VERSION})`,
-			};
+			});
 			criticalWarn(
-				`[sandbox] ${_cachedProbe.error} at ${path.basename(binary)} — stale or foreign runner binary refused; degrading to weak sandbox. Run /swarm diagnose for details.`,
+				`[sandbox] ${failed.error} at ${path.basename(binary)} — stale or foreign runner binary refused; degrading to weak sandbox. Run /swarm diagnose for details.`,
 			);
-			return _cachedProbe;
+			return failed;
 		}
 
 		let mode: 'app-container' | 'restricted-token' | 'none' = 'none';
@@ -309,24 +348,23 @@ export function probe(): RunnerProbeResult {
 			mode = 'restricted-token';
 		}
 
-		_cachedProbe = {
+		return setCachedProbe({
 			available: mode !== 'none',
 			mode,
 			capabilities,
-		};
-		return _cachedProbe;
+		});
 	} catch (err: unknown) {
 		const msg = err instanceof Error ? err.message : String(err);
-		_cachedProbe = {
+		const failed = setCachedProbe({
 			available: false,
 			mode: 'none',
 			capabilities: null,
 			error: `probe threw: ${msg}`,
-		};
+		});
 		criticalWarn(
 			`[sandbox] swarm-sandbox-runner probe threw (${sanitizeDiagnosticText(msg, 200)}) — degrading to weak sandbox. Run /swarm diagnose for details.`,
 		);
-		return _cachedProbe;
+		return failed;
 	}
 }
 
@@ -435,6 +473,7 @@ export async function execute(
  */
 export function _resetProbeCache(): void {
 	_cachedProbe = undefined;
+	_cachedProbeExpiresAt = Number.POSITIVE_INFINITY;
 }
 
 /**
