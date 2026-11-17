@@ -217,4 +217,23 @@ describe('vendored 2.3.0 surface (#3732/#3552)', () => {
 			'first appeared at 2.0.29, ABSENT at the 2.0.26 pin',
 		);
 	});
+
+	test('docs prose pins track the current corpus pin (class guardrail)', () => {
+		const read = (rel: string) =>
+			fs.readFileSync(path.join(REPO_ROOT, rel), 'utf8');
+		expect(read('docs/installation.md')).toContain('@opencode/plugin@2.3.0');
+		expect(read('docs/architecture.md')).toContain(
+			'vendored structural types for `@opencode/plugin@2.3.0`',
+		);
+		const adr = read('docs/decisions/0003-opencode-v2-plugin-api.md');
+		expect(adr).toContain('to `@opencode/plugin@2.3.0` by issues #3732/#3552');
+		expect(adr).toContain(
+			'vendored `@opencode/plugin@2.3.0` pin in `src/host/v2/types.ts`',
+		);
+		// Anti-stale: the retired active-prose forms must be gone.
+		expect(adr).not.toContain(
+			'trails npm dist-tags by more than five minor series; at the current 2.0.26',
+		);
+		expect(read('docs/installation.md')).not.toContain('at the current 2.0.26');
+	});
 });
