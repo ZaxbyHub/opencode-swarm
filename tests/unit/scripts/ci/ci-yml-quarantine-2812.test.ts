@@ -47,10 +47,13 @@ const INTEGRATION_LEDGER_PATH = join(
 // absence guards now: no silent re-add without fresh merge-group
 // windows-latest failure evidence. tests/unit/commands/archive.test.ts met
 // that bar on 2026-10-18 (merge-group run 39138948653, windows-latest shard
-// 4, passed-on-retry) and was re-added per issue #3264 — it moved out of the
-// retired set below into its own re-add assertion, and its full ledger
-// pinning (presence, scoping, OWNER/EXPIRY, same-basename sibling) now lives
-// in ci-yml-quarantine-3264.test.ts.
+// 4, passed-on-retry), was re-added per issue #3264, re-anchored 2026-11-12
+// under the #3218 disposition, and finally RETIRED 2026-11-16 per issues
+// #2973 + #3218 (determinism hardening landed in PR #3672; the "2
+// consecutive green windows-latest merge-group runs" criterion accumulates
+// from the retiring PR's own queue run) — its retired-absence pinning now
+// lives in ci-yml-quarantine-3264.test.ts.
+
 const ISSUE_2812_RETIRED_PATHS: ReadonlyArray<{ path: string }> = [
 	{ path: 'tests/unit/mcp/write-receipts-feedback-2500.test.ts' },
 	{ path: 'tests/unit/tools/phase-complete.lock-adversarial.test.ts' },
@@ -78,17 +81,15 @@ describe('ci.yml integration — windows quarantine ledger entries for issue #28
 		expect(activeEntries(WINDOWS_LEDGER_PATH)).not.toContain(path);
 	});
 
-	test('tests/unit/commands/archive.test.ts is re-added to the windows ledger (issue #3264)', () => {
-		// The #2973 retirement explicitly permits re-adding a retired row
-		// once fresh merge-group windows-latest failure evidence exists —
-		// that evidence arrived on 2026-10-18 (run 39138948653, shard 4,
-		// passed-on-retry; caveat: inside the worktree-storm window, see
-		// the ledger block). The re-add is NOT silent: its OWNER/EXPIRY
-		// block cites the evidence, and ci-yml-quarantine-3264.test.ts
-		// pins its presence, scoping, and expiry. This assertion
-		// supersedes this file's original absence guard for this one
-		// path; the other four #2812 rows stay retired above.
-		expect(activeEntries(WINDOWS_LEDGER_PATH)).toContain(
+	test('tests/unit/commands/archive.test.ts is retired again — the #3264 re-add ended 2026-11-16 (issues #2973 + #3218)', () => {
+		// Lifecycle: retired by #2812's remedies -> re-added per #3264 (fresh
+		// 2026-10-18 merge-group windows evidence) -> re-anchored 2026-11-12
+		// under #3218 (determinism hardening in PR #3672) -> RETIRED 2026-11-16
+		// per issues #2973 + #3218. The full retired-absence pinning (every
+		// ledger + on-disk existence) lives in ci-yml-quarantine-3264.test.ts;
+		// this guard keeps the #3264-era re-add from silently returning.
+		expect(existsSync(WINDOWS_LEDGER_PATH)).toBe(true);
+		expect(activeEntries(WINDOWS_LEDGER_PATH)).not.toContain(
 			'tests/unit/commands/archive.test.ts',
 		);
 	});

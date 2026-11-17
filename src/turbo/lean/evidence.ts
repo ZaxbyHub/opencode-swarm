@@ -26,6 +26,12 @@ export interface LaneEvidence {
 	startedAt?: string;
 	completedAt?: string;
 	error?: string;
+	/**
+	 * #3728 feedback: bounded provider diagnostic retained when a real-output
+	 * lane settles `completed` despite a provider refusal (no-text refusals take
+	 * the failed branch and use `error` instead).
+	 */
+	providerError?: string;
 	agent?: string;
 	sessionId?: string;
 	mergeBackFailure?: {

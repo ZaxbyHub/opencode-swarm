@@ -19,9 +19,9 @@ import {
 import {
 	recordPendingDispatchAuthorization,
 	resetSwarmState,
-	setDispatchParent,
 	startAgentSession,
 	swarmState,
+	writeDispatchParentEntry,
 } from '../../../src/state';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
@@ -45,7 +45,7 @@ afterEach(() => {
 describe('handleResetSessionCommand', () => {
 	it('#3036 clears the in-memory dispatch lineage with the session maps', async () => {
 		startAgentSession('ses-arch-3036-rs', 'architect');
-		setDispatchParent('ses-child-3036-rs', 'ses-arch-3036-rs');
+		writeDispatchParentEntry('ses-child-3036-rs', 'ses-arch-3036-rs');
 		recordPendingDispatchAuthorization('ses-arch-3036-rs', 'reviewer');
 		expect(swarmState.dispatchParentByChildSession.size).toBe(1);
 		expect(swarmState.pendingDispatchAuthorizations).toHaveLength(1);

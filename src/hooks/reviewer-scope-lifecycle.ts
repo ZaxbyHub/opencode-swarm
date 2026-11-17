@@ -45,6 +45,7 @@ import { isTaskToolId } from './normalize-tool-name.js';
 import { computeScopeFingerprint } from './review-receipt.js';
 import {
 	buildReviewerTaskScope,
+	classifyWorkspaceGitHealth,
 	REVIEWER_TASK_SCOPE_DESCRIPTION,
 	REVIEWER_TASK_SCOPE_HEADER,
 	type ReviewerTaskScope,
@@ -264,6 +265,59 @@ function sleepBounded(ms: number): Promise<void> {
 	return new Promise((resolve) => {
 		setTimeout(resolve, ms);
 	});
+}
+
+/**
+ * #3680: the two zero-routed attribution legs classify workspace git health
+ * synchronously on the hook path. Called without a deadline, that probe's
+ * worst case is ~17s (2s availability + three 5s HEAD-classification
+ * children) against a 10s hook-path batch budget — the probe could outlive
+ * the very batch deadline the surrounding lifecycle honours (FB-010; source
+ * read of review-receipt-scope.ts:498-560). Derive the bound from the batch
+ * deadline already used for the hook path's own git work above.
+ */
+function reviewerScopeGitHealthDeadline(): number {
+	return Date.now() + REVIEWER_SCOPE_CAPTURE_BATCH_DEADLINE_MS;
+}
+
+/**
+ * #3680: per-code architect remedy for a PERMANENT git-environment denial.
+ * docs/configuration.md:654 promises a specific command for
+ * `git_dubious_ownership` (`git config --global --add safe.directory <path>`),
+ * but both terminal denial sites previously emitted one cause-independent
+ * sentence — "resolve git availability for this workspace (initialize a
+ * repository, repair a corrupt ref, or exclude it from reviewer gating)" —
+ * that named none of the four causes and never mentioned safe.directory, so
+ * the documented remedy was unreachable from the runtime message (FB-008).
+ * Single source for both sites so the text and the docs cannot drift apart
+ * again; every arm keeps the "or exclude from reviewer gating" escape that
+ * the original sentence offered.
+ */
+function permanentGitEnvironmentRemedy(
+	code:
+		| 'head_timeout'
+		| 'no_git_workspace'
+		| 'git_unavailable'
+		| 'git_dubious_ownership'
+		| 'git_unhealthy',
+): string {
+	switch (code) {
+		case 'no_git_workspace':
+			return 'initialize a git repository at this workspace root (`git init`), or exclude the workspace from reviewer gating';
+		case 'git_unavailable':
+			return 'make the git executable resolvable (install git, or repair PATH), or exclude the workspace from reviewer gating';
+		case 'git_dubious_ownership':
+			return 'add this workspace to git’s safe-directory set (`git config --global --add safe.directory <path>`), or exclude the workspace from reviewer gating';
+		case 'git_unhealthy':
+			return 'repair the corrupt ref/object in this workspace (`git fsck`, then reset or re-clone), or exclude the workspace from reviewer gating';
+		case 'head_timeout':
+			// Unreachable from either call site: head_timeout is the ONLY
+			// retryable denial code, and both callers guard on `!retryable`
+			// before reaching here. Typed and answered rather than omitted so
+			// the switch stays total — a future retryable code must land on a
+			// real sentence, never on a crash inside an error-message builder.
+			return 'retry the dispatch (the cause is transient); if it persists, verify git availability for the workspace';
+	}
 }
 
 /** Bounded inline retry for typed retryable capture failures (issue #2100 contract E). */
@@ -725,6 +779,23 @@ export async function beginApprovedReviewerScopeLifecycle(input: {
 			});
 			if (collecting) {
 				if (collecting.modifiedFiles.length === 0) {
+					// #3680: a permanent git-environment condition (no git at all, missing
+					// binary, dubious ownership, corrupt ref) must surface as a TERMINAL
+					// denial — re-dispatch can never resolve it. Transient causes keep the
+					// retryable attribution-empty arm unchanged (frozen C10/C13 contract).
+					const zeroRoutedHealth = await classifyWorkspaceGitHealth(
+						collecting.captureDirectory,
+						reviewerScopeGitHealthDeadline(),
+					);
+					if (
+						zeroRoutedHealth.kind === 'denial' &&
+						!zeroRoutedHealth.retryable
+					) {
+						throw typedReviewerScopeError(
+							'REVIEWER_ATTRIBUTION_EMPTY',
+							`task ${taskId} generation ${collecting.generation}: coder attribution was empty and the workspace has a permanent git-environment condition (${zeroRoutedHealth.code}, retryable=false, responsible: architect). ACTION[architect]: ${permanentGitEnvironmentRemedy(zeroRoutedHealth.code)}; re-dispatching the coder cannot resolve a permanent cause`,
+						);
+					}
 					throw typedReviewerScopeError(
 						'REVIEWER_ATTRIBUTION_EMPTY',
 						`task ${taskId} generation ${collecting.generation}: coder attribution was empty — zero guardrail-observed writes were routed and no committed declared change was proven (declaredFiles=${collecting.declaredFiles.length}, routed=0, committed-in-scope=unproven-or-empty, retryable=true, responsible: architect). ACTION[architect]: inspect the workspace for writes that bypassed guardrails, or re-dispatch the coder`,
@@ -1129,11 +1200,15 @@ export async function completeReviewerScopeLifecycle(input: {
 				// guardrail-routed attribution stands; the advisory records
 				// that the committed-diff leg was unproven, and the
 				// completeness/ready path proceeds with what was routed
-				// (over-review, not denial). A workspace with NO git at all
-				// still cannot dispatch the reviewer afterward (review-receipt-
-				// scope.ts resolveHeadSha denies with head_timeout,
-				// retryable=true) — a pre-existing limitation outside this
-				// PR's scope, surfaced to the architect as a retryable denial.
+				// (over-review, not denial). Attribution for the no-git wall:
+				// the ROUTED head_timeout denial pre-dates PR #3668 (the
+				// review-receipt-scope.ts producer is byte-identical across its
+				// merge base — executed); what #3668 changed is the ZERO-ROUTED
+				// leg, which converted the previously terminal REVIEWER_SCOPE_STALE
+				// into a retryable attribution-empty loop. #3680 types both: transient
+				// (unborn HEAD) stays retryable; permanent (no git at all, missing
+				// binary, dubious ownership, corrupt ref) is terminal with an
+				// actionable cause — see classifyWorkspaceGitHealth.
 				pushAdvisory(
 					ensureAgentSession(input.parentSessionID),
 					`REVIEWER_ATTRIBUTION_DEGRADED: task ${taskId} generation ${scoped.generation}: committed-change reconciliation could not be proven (no dispatch git head, unresolvable current head, or failed committed diff); proceeding on the ${scoped.modifiedFiles.length} guardrail-routed file(s). ACTION[architect]: if committed output was expected beyond the routed writes, inspect the workspace manually`,
@@ -1143,9 +1218,19 @@ export async function completeReviewerScopeLifecycle(input: {
 				// Zero-routed completion with an unproven git channel: a clean
 				// working tree is NOT proof of no mutation, and nothing was
 				// routed — retain for the typed reviewer-dispatch denial.
+				const degradedHealth = await classifyWorkspaceGitHealth(
+					scoped.captureDirectory,
+					reviewerScopeGitHealthDeadline(),
+				);
+				const degradedPermanent =
+					degradedHealth.kind === 'denial' && !degradedHealth.retryable;
+				const degradedRemedy =
+					degradedPermanent && degradedHealth.kind === 'denial'
+						? permanentGitEnvironmentRemedy(degradedHealth.code)
+						: '';
 				pushAdvisory(
 					ensureAgentSession(input.parentSessionID),
-					`REVIEWER_ATTRIBUTION_DEGRADED: task ${taskId} generation ${scoped.generation}: committed-change reconciliation could not be proven (no dispatch git head, unresolvable current head, or failed committed diff); the generation is retained for a typed reviewer-dispatch denial. ACTION[architect]: verify git availability for the workspace, then re-dispatch the coder`,
+					`REVIEWER_ATTRIBUTION_DEGRADED: task ${taskId} generation ${scoped.generation}: committed-change reconciliation could not be proven (no dispatch git head, unresolvable current head, or failed committed diff); the generation is retained for a typed reviewer-dispatch denial${degradedPermanent ? ` (${(degradedHealth as { code: string }).code}, permanent). ACTION[architect]: ${degradedRemedy}; re-dispatching the coder cannot resolve a permanent git-environment condition` : `. ACTION[architect]: verify git availability for the workspace, then re-dispatch the coder`}`,
 				);
 				return null;
 			}

@@ -229,7 +229,7 @@ describe('getChangedLineRanges union', () => {
 	test('preserves non-BMP Unicode adjacent to Git path escapes', async () => {
 		const repoPath = 'src/😀\tunsafe.ts';
 		const quotedPath = '"src/😀\\tunsafe.ts"';
-		const diff = `diff --git ${quotedPath} ${quotedPath}\n--- ${quotedPath}\n+++ ${quotedPath}\n@@ -0,0 +1 @@\n`;
+		const diff = `diff --git ${quotedPath} ${quotedPath}\n--- ${quotedPath}\n+++ ${quotedPath}\n@@ -0,0 +1 @@\n+const safety = 1;\n`;
 		_internals.runExternalTool = async (options) => ({
 			status: 'completed',
 			exitCode: 0,

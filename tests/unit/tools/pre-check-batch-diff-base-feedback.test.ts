@@ -16,6 +16,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
 import {
+	type DiffBaseMemoHolder,
 	getChangedLineAmbiguousFiles,
 	getChangedLineRanges,
 	_internals as preCheckInternals,
@@ -216,8 +217,14 @@ describe('diff-base resolver — feedback-round pins (FB-001/002/003)', () => {
 		// PRR-002 HEAD-equal refusal out of the picture (origin/main != HEAD).
 		writeFileSync(path.join(repo, 'tracked.txt'), 'one\ntwo\nthree\n');
 		commitAll('branch commit');
-		// First consumer resolves and populates the batch memo.
-		const first = await getChangedLineRanges(repo, undefined, []);
+		// #3700 item 1: the memo is BATCH-scoped and passed EXPLICITLY — the
+		// direct-call reuse contract this test pinned at the FB-003 fix is the
+		// intentional #3700 change (direct calls now resolve fresh); reuse is
+		// proven through one shared holder, exactly as runPreCheckBatch
+		// threads it to both consumers.
+		const memo: DiffBaseMemoHolder = { current: null };
+		// First consumer resolves and populates the shared memo.
+		const first = await getChangedLineRanges(repo, undefined, [], memo);
 		expect(first).not.toBeNull();
 		const savedRun = preCheckInternals.runExternalTool;
 		let mergeBaseSpawns = 0;
@@ -241,9 +248,14 @@ describe('diff-base resolver — feedback-round pins (FB-001/002/003)', () => {
 			return savedRun(options as never);
 		}) as never;
 		try {
-			// Second consumer: memo hit means zero merge-base probes even with
-			// a stub that would fail every real probe.
-			const ambiguous = await getChangedLineAmbiguousFiles(repo, undefined, []);
+			// Second consumer (same holder): memo hit means zero merge-base
+			// probes even with a stub that would fail every real probe.
+			const ambiguous = await getChangedLineAmbiguousFiles(
+				repo,
+				undefined,
+				[],
+				memo,
+			);
 			expect(ambiguous).not.toBeNull();
 			expect(mergeBaseSpawns).toBe(0);
 		} finally {
@@ -253,11 +265,13 @@ describe('diff-base resolver — feedback-round pins (FB-001/002/003)', () => {
 
 	test('a HEAD move self-invalidates the memo (GREEN after the FB-003 fix)', async () => {
 		initTrunkRepoWithRemote();
-		const first = await getChangedLineRanges(repo, undefined, []);
+		// Same shared-holder contract as the batch: a HEAD move self-invalidates.
+		const memo: DiffBaseMemoHolder = { current: null };
+		const first = await getChangedLineRanges(repo, undefined, [], memo);
 		expect(first).not.toBeNull();
 		writeFileSync(path.join(repo, 'tracked.txt'), 'one\ntwo edited\nthree\n');
 		commitAll('second commit');
-		const second = await getChangedLineRanges(repo, undefined, []);
+		const second = await getChangedLineRanges(repo, undefined, [], memo);
 		expect(second).not.toBeNull();
 		expect(second?.has('tracked.txt')).toBe(true);
 	});

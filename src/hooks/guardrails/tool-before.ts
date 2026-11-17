@@ -11,6 +11,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { recordPrReviewBudgetExhaustion } from '../../background/pending-delegations.js';
 import { HUMAN_ONLY_SWARM_COMMANDS } from '../../commands/tool-policy.js';
 import {
 	OPENCODE_NATIVE_AGENTS,
@@ -2645,6 +2646,11 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			agentConfig.max_tool_calls > 0 &&
 			window.toolCalls >= agentConfig.max_tool_calls
 		) {
+			await recordPrReviewBudgetExhaustion(
+				effectiveDirectory,
+				sessionID,
+				'tool_calls',
+			);
 			window.hardLimitHit = true;
 			telemetry.hardLimitHit(
 				sessionID,
@@ -2669,6 +2675,11 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			agentConfig.max_duration_minutes > 0 &&
 			elapsedMinutes >= agentConfig.max_duration_minutes
 		) {
+			await recordPrReviewBudgetExhaustion(
+				effectiveDirectory,
+				sessionID,
+				'duration',
+			);
 			window.hardLimitHit = true;
 			telemetry.hardLimitHit(
 				sessionID,
