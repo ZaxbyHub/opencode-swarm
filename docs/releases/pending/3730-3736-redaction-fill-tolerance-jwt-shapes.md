@@ -22,8 +22,10 @@ issue: 3730, 3736
   `=`/`==`-padded placements), `_eyJ` underscore boundaries, and ≥1-char
   signatures.
 - Known bounds (documented residuals, tracked for a follow-up): an empty-key
-  JWE whose IV segment is under 16 chars and not mixed-case stays fully
-  visible (the token-like heuristic rejects it; pre-existing — base is
+  JWE whose IV segment fails the token-like check (the segment lacks the
+  uppercase/mixed-case/digit or length-16 composition the heuristic requires
+  — e.g. an all-lowercase or all-digit IV shorter than 16 chars, or any IV
+  shorter than 8 chars) stays fully visible (pre-existing — base is
   byte-identical); a standard-alphabet token whose header is 13-39 chars
   (e.g. the canonical 36-char HS256 header with `+`/`/`/`=` later segments)
   is not covered by the 40+ generic arm and can stay visible (real JWTs are

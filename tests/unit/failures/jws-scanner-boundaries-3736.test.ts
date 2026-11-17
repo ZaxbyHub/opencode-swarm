@@ -51,7 +51,7 @@ describe('#3736 five shapes — exact outputs at both sites', () => {
 });
 
 describe('#3736 D6-rev signature bounds (eyJ-anchored)', () => {
-	test('signatures of 1 and 9 chars are accepted; 0 rejected', () => {
+	test('signed triples accept 1- and 9-char signatures; the unsigned 2-segment shape covers the 0-char case', () => {
 		expect(findJwsTokenSpans(`${HDR}.${PAYLOAD}.s`)).toHaveLength(1);
 		expect(
 			findJwsTokenSpans(`${HDR}.${PAYLOAD}.${'s'.repeat(9)}`),
@@ -197,14 +197,14 @@ describe('#3736 D4-rev3 standard-base64 placements', () => {
 		expect(sanitizeFailureEvidenceDisplay(input).includes('e30')).toBe(false);
 	});
 	test('a generic span starting MID-token is dropped (no gluing) — exact output', () => {
-		// FB-002 rebuild: the generic candidate here is REAL — PAYLOAD (59
-		// alnum chars) passes GENERIC_HEADER_RE, p20 passes the >=20 payload
-		// minimum, s10 passes the >=10 signature minimum — and it starts
-		// MID-token (inside the eyJ span). The eyJ span absorbs p20
-		// (tokenLike via the >=16 arm) and stops at s10 (lowercase <16); the
-		// mid-start generic span must be DROPPED, leaving s10 visible. A
-		// gluing mutant that merges instead of dropping swallows s10 and
-		// fails the exact output.
+		// FB-002 rebuild (Stage-B corrected mechanism): the DISCRIMINATING
+		// generic candidate is (PAYLOAD, p20, s10) — PAYLOAD (59 alnum chars)
+		// passes GENERIC_HEADER_RE, p20 passes the >=20 payload minimum, s10
+		// passes the >=10 signature minimum — starting MID-token (p20 begins
+		// inside the eyJ span, whose absorption takes p20 via the >=16
+		// tokenLike arm and stops at lowercase s10) and ENDING BEYOND the eyJ
+		// span (at s10.end). A gluing mutant that merges instead of dropping
+		// extends the eyJ span across s10; the exact output fails it.
 		const p20 = 'p'.repeat(20);
 		const s10 = 's'.repeat(10);
 		const input = `pre.${HDR}.${PAYLOAD}.${SIG}.${p20}.${s10}.post`;
@@ -212,6 +212,22 @@ describe('#3736 D4-rev3 standard-base64 placements', () => {
 		expect(sanitizeFailureEvidenceDisplay(input)).toBe(
 			`pre.[REDACTED:jwt].${s10}.post`,
 		);
+	});
+	test('an equal-start merge never crosses a distinct following eyJ token (Stage-B clamp)', () => {
+		// FB-006 boundary pin: the standard run carries '+eyJ…', so the
+		// generic scanner sees ONE run whose triple overlaps BOTH the leading
+		// eyJ token (equal start) and a DISTINCT second token. The clamp must
+		// stop the merged span at the second token's start: two labels, no
+		// cleartext, no gluing.
+		const hdr60 = 'eyJ' + 'a'.repeat(57);
+		const payload24 = 'e'.repeat(24);
+		const hdr2 = 'eyJ' + 'b'.repeat(40);
+		const payload2 = 'c'.repeat(24);
+		const sig2 = 'd'.repeat(12);
+		const input = `${hdr60}.${payload24}.f9+${hdr2}.${payload2}.${sig2}`;
+		const expected = '[REDACTED:jwt][REDACTED:jwt]';
+		expect(redactShellCommand(input)).toBe(expected);
+		expect(sanitizeFailureEvidenceDisplay(input)).toBe(expected);
 	});
 	test('an equal-start generic span merges (longest span wins) — exact output', () => {
 		// FB-006 regression pin (parallel-review F2): a standard-alphabet

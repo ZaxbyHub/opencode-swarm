@@ -433,9 +433,17 @@ export function findRedactableTokenSpans(text: string): JwsTokenSpan[] {
 				// at the same index — merge its coverage into the eyJ span
 				// (the longest span wins: keep the earlier/equal start,
 				// extend the end). A strictly-later start is a mid-token
-				// artifact — drop g.
+				// artifact — drop g. Stage-B clamp: the extension must NOT
+				// cross the start of a DISTINCT following eyJ span (the
+				// standard run can carry '+eyJ…' — two real tokens in one
+				// generic run); clamp so the next token keeps its own span
+				// and both emit separate labels.
+				const next = eyJ[e + 1] as JwsTokenSpan | undefined;
 				head.start = g.start;
-				head.end = Math.max(head.end, g.end);
+				head.end = Math.min(
+					Math.max(head.end, g.end),
+					next ? next.start : Number.POSITIVE_INFINITY,
+				);
 			}
 			continue;
 		}
