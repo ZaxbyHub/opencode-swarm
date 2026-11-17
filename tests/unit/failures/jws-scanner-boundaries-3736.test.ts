@@ -176,6 +176,18 @@ describe('#3736 D4-rev3 standard-base64 placements', () => {
 			true,
 		);
 	});
+	test('r2-A2: a REAL next token following an empty-key JWE is scanned separately (over-absorption guard)', () => {
+		// The empty-key walk must STOP at a segment that starts a real next
+		// token (>=13-char eyJ header + payload + signature) — dropping the
+		// canStartTokenAt stop absorbs the neighbor's header and strands its
+		// payload (the survived-mutant gap found by the execution reviewer).
+		const nextHdr = 'eyJhbGciOiJIUzI1NiJ9';
+		const input = `${JWE_HDR}..${'I'.repeat(22)}.${nextHdr}.${PAYLOAD}.${SIG}`;
+		const out = redactShellCommand(input);
+		expect(out).toBe('[REDACTED:jwt].[REDACTED:jwt]');
+		expect(out.includes(PAYLOAD)).toBe(false);
+		expect(sanitizeFailureEvidenceDisplay(input).includes(PAYLOAD)).toBe(false);
+	});
 	test('r2-C: a signed token followed by an UNSIGNED neighbor never strands the neighbor payload (exact)', () => {
 		const a = `eyJhbGciOiJIUzI1NiJ9.${PAYLOAD}.${SIG}`;
 		const unsigned = 'eyJhbGciOiJub25lIn0.e30.';
