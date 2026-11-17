@@ -73,6 +73,7 @@ const issueTracerScripts = [
 	'scan-deferred.sh',
 	'trace-check.sh',
 	'repro-check.sh',
+	'generate-recurrence-table.sh',
 ].map((name) => `.opencode/skills/issue-tracer/scripts/${name}`);
 
 const baseFiles = [

@@ -113,7 +113,13 @@ export function unsafePathTextReason(value: string): string | null {
 	return null;
 }
 
-/** Single-line, bounded rendering for untrusted diagnostic fields. */
+/**
+ * Single-line, bounded rendering for untrusted diagnostic fields.
+ * Truncation is code-point safe (#3616 D13): the cut never splits a surrogate
+ * pair — the boundary backs off to the start of the pair when the `maxLength-1`
+ * unit would land between a high and low surrogate, so the rendered text can
+ * never end on an unpaired surrogate.
+ */
 export function sanitizeDiagnosticText(
 	value: unknown,
 	maxLength = 256,
@@ -129,7 +135,15 @@ export function sanitizeDiagnosticText(
 		.replace(/\s+/gu, ' ')
 		.trim();
 	if (rendered.length <= maxLength) return rendered;
-	return `${rendered.slice(0, Math.max(0, maxLength - 1))}…`;
+	let cut = Math.max(0, maxLength - 1);
+	// Back the cut off when it would land inside a surrogate pair: a high
+	// surrogate at index cut-1 whose low surrogate sits at cut means slicing
+	// there orphans the high half.
+	if (cut > 0) {
+		const prev = rendered.charCodeAt(cut - 1);
+		if (prev >= 0xd800 && prev <= 0xdbff) cut -= 1;
+	}
+	return `${rendered.slice(0, cut)}…`;
 }
 
 /**

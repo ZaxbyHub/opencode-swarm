@@ -21,7 +21,7 @@
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
-import { parse } from 'yaml';
+import { load as parse } from 'js-yaml';
 
 const root = path.resolve(import.meta.dir, '../../..');
 const releaseWorkflowText = readFileSync(

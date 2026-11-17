@@ -15,10 +15,10 @@ import {
 	recordPendingDispatchAuthorization,
 	resetSwarmState,
 	resolveDispatchParent,
-	setDispatchParent,
 	startAgentSession,
 	swarmState,
 	sweepStaleSessions,
+	writeDispatchParentEntry,
 } from '../../../src/state';
 import { freezeClock } from '../../helpers/test-clock.js';
 
@@ -54,7 +54,7 @@ describe('dispatch parent lineage (issue #3036)', () => {
 		recordPendingDispatchAuthorization('ses-arch-B', 'reviewer');
 		// taskMetadata(child1) lands FIRST with the authoritative pair — and
 		// consumes A's pending (round-3 note 1).
-		setDispatchParent('ses-child-1', 'ses-arch-A');
+		writeDispatchParentEntry('ses-child-1', 'ses-arch-A');
 		// child1's own ensureAgentSession create would best-effort adopt — it
 		// must NOT overwrite the authoritative entry (the has-guard skips
 		// adoption wholesale and consumes nothing).
@@ -72,7 +72,7 @@ describe('dispatch parent lineage (issue #3036)', () => {
 	test("authoritative set consumes this parent's pending (round-3 note 1)", () => {
 		recordPendingDispatchAuthorization('ses-arch-A', 'reviewer');
 		recordPendingDispatchAuthorization('ses-arch-B', 'reviewer');
-		setDispatchParent('ses-child-1', 'ses-arch-A');
+		writeDispatchParentEntry('ses-child-1', 'ses-arch-A');
 		expect(
 			swarmState.pendingDispatchAuthorizations.map((p) => p.parentSessionId),
 		).toEqual(['ses-arch-B']);
@@ -120,7 +120,7 @@ describe('dispatch parent lineage (issue #3036)', () => {
 
 	test('stale-session sweep drops the lineage map entry (PRR-009)', () => {
 		startAgentSession('ses-arch-swept', 'architect');
-		setDispatchParent('ses-child-swept', 'ses-arch-swept');
+		writeDispatchParentEntry('ses-child-swept', 'ses-arch-swept');
 		expect(resolveDispatchParent('ses-child-swept')).toBe('ses-arch-swept');
 		// Age the session past the sweep threshold and run the sweep directly.
 		const session = swarmState.agentSessions.get('ses-arch-swept');
@@ -133,7 +133,7 @@ describe('dispatch parent lineage (issue #3036)', () => {
 
 	test('FIFO cap bounds both structures (invariant 8)', () => {
 		for (let i = 0; i < MAX_TRACKED_DISPATCH_PARENTS + 10; i += 1) {
-			setDispatchParent(`ses-child-cap-${i}`, `ses-arch-cap-${i}`);
+			writeDispatchParentEntry(`ses-child-cap-${i}`, `ses-arch-cap-${i}`);
 		}
 		expect(swarmState.dispatchParentByChildSession.size).toBe(
 			MAX_TRACKED_DISPATCH_PARENTS,
@@ -177,8 +177,8 @@ describe('dispatch parent lineage (issue #3036)', () => {
 	});
 
 	test('reset and end-of-session clear the lineage (child-keyed and parent-valued)', () => {
-		setDispatchParent('ses-child-c1', 'ses-arch-parent');
-		setDispatchParent('ses-child-c2', 'ses-arch-parent');
+		writeDispatchParentEntry('ses-child-c1', 'ses-arch-parent');
+		writeDispatchParentEntry('ses-child-c2', 'ses-arch-parent');
 		endAgentSession('ses-child-c1');
 		expect(resolveDispatchParent('ses-child-c1')).toBeUndefined();
 		expect(resolveDispatchParent('ses-child-c2')).toBe('ses-arch-parent');
@@ -191,7 +191,7 @@ describe('dispatch parent lineage (issue #3036)', () => {
 	});
 
 	test('clearDispatchLineageForSession is a no-op-safe direct API', () => {
-		setDispatchParent('ses-child-d', 'ses-arch-d');
+		writeDispatchParentEntry('ses-child-d', 'ses-arch-d');
 		clearDispatchLineageForSession('ses-child-d');
 		expect(resolveDispatchParent('ses-child-d')).toBeUndefined();
 	});

@@ -11,71 +11,10 @@
 # the gate; an EXPIRY more than 14 days in the past also fails (inside
 # the grace window it only warns).
 #
-# Active global quarantine entries are below; each carries the Check
-# 7-enforced OWNER/EXPIRY metadata. (Issue #1908 retired the tracked backlog.)
+# The coverage job runs ubuntu-only and honors ONLY this ledger
+# (scripts/ci/run-coverage-gate.sh never branches per-OS), so ubuntu-only
+# flakes belong here and nowhere else.
 #
-# tests/unit/telemetry/init-rehome.test.ts (issue #2660)
-# ---------------------------------------------------------------------------
-# Tests the telemetry re-home on directory change path (issue #2472 W9):
-# init A then init B produces two telemetry.jsonl files and B receives
-# subsequent events; same-directory re-init stays an idempotent no-op;
-# events emitted before any init are dropped without creating a file;
-# failed new-stream creation retains the previous project's stream (fail-open
-# ownership retention); windows case-variant spelling of the same root keeps
-# the stream destination (canonical same-directory check). Flake observed on
-# ubuntu-latest merge-group coverage-shard 1: CI run 34309871068
-# (merge_group, head e2491c3a729ea6fce5672f228a021e9dada6ebde,
-# 2026-09-09T04:09:35Z) had Attempt 1 fail and Passed on retry 1
-# (passed-on-retry flake); sibling coverage-shards 2/3/4/5/6 were green on
-# this file in the same run, and all six ubuntu/macos/windows unit shards
-# were green or did not run the file. The coverage job runs ubuntu-only
-# and honors ONLY the general ledger (scripts/ci/run-coverage-gate.sh
-# never branches per-OS), so this is the only ledger that reaches the
-# coverage gate. The unit job also consumes this general ledger
-# unconditionally on every RUNNER_OS (ci.yml:628 base grep, with the
-# per-OS ledgers additive at ci.yml:632-636), so this entry skips the
-# file in all unit cells and coverage shards — accepted over-provision
-# because coverage honors only this ledger. The unit job's retry loop
-# ("Run unit tests" step, ci.yml:696-721) reuses one output file across
-# attempts, so attempt-1 output is discarded when a retry passes and no
-# assertion text exists to drive a root-cause fix. Pre-existing, unrelated
-# to any specific PR.
-# Quarantined per issue #2660; tracked under #1782 (test-stability sprint).
-# OWNER: zaxbysauce — issue #2973 (I3 renewal-cohort retirement tracker;
-#   original flake evidence: closed #2660, block history above)
-# EXPIRY: 2026-11-18 — retire when the coverage/isolate retry-flake is
-#   root-fixed or three consecutive coverage-gate runs execute the file green
-#   (#2973 cohort row 12).
-# Renewed 2026-09-25 per issue #2900 (Workstream I3); previous EXPIRY 2026-10-15.
-tests/unit/telemetry/init-rehome.test.ts
-
-# OWNER: zaxbysauce — re-quarantined 2026-10-14 per tracker #3261 comments;
-#   fresh evidence: PR #3242 pull_request run 38623951150, ubuntu-latest
-#   unit-shard 3 — "rapid event publishing without memory leak" heap-growth
-#   probe failed deterministically (3x retries) while the same head passed
-#   this shard in earlier runs; the #2973 remedy (probe budget 2000ms) did
-#   not prevent recurrence under runner load. (#2740 original quarantine;
-#   #2973 retirement 2026-09-27.)
-# EXPIRY: 2026-11-13 — retire when the file passes an ubuntu-latest unit
-#   shard clean across a full merge-group run, or root-fix/retire the
-#   heap-growth probe.
-tests/unit/services/evidence-summary-adversarial.test.ts
-
-# tests/unit/background/plan-sync-worker.test.ts (issue #3264)
-# -----------------------------------------------------------------------
-# Tests PlanSyncWorker construction/options/scheduling (2179-line file,
-# FR-006-era consolidation) for the background plan-sync lane. Passed-on-
-# retry (attempt-1 fail, no assertion text captured — ci.yml discards
-# attempt-1 output when a retry passes) on merge-group unit (ubuntu-latest,
-# 6), run 39389866535 (2026-10-20). Ubuntu has no per-OS ledger and the
-# coverage gate honors ONLY this general ledger (init-rehome precedent,
-# issue #2660), so ubuntu evidence routes here; accepted over-provision —
-# the unit job consumes this ledger unconditionally on every RUNNER_OS
-# with the per-OS ledgers additive. No windows/macos flake annotations for
-# this file across the 11-run 2026-10-14..20 merge-group harvest.
-# Pre-existing, unrelated to any specific PR.
-# OWNER: zaxbysauce — issue #3264 (merge-group flake cohort, Oct 2026)
-# EXPIRY: 2026-11-20 — retire when the file passes three consecutive
-#   merge-group runs green on its executing unit shard, or the attempt-1
-#   failure signature is root-fixed.
-tests/unit/background/plan-sync-worker.test.ts
+# STATUS: 0 active entries — the 2026-11-18 renewal cohort was un-quarantined
+# 2026-11-12 per issue #2973 (post-un-quarantine observation); re-add only
+# with fresh qualifying failure evidence per the #1782 convention.

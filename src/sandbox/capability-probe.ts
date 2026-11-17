@@ -97,6 +97,27 @@ export function assessSandboxRequirements(
 let _cached: SandboxCapabilityV1 | undefined;
 let _cachedProbeSourceIdentity: string | undefined;
 
+// F-001 (PR #3718 review): a transient setup-failure observation is never
+// memoized as the authoritative result (see detect()), but it must remain
+// visible to the synchronous accessors — an ENABLED binary-stage capability
+// has to keep executor availability intact while the behavioral evidence
+// re-probes. Storing it in `_cached` instead would reintroduce #3661 item 5
+// (a transient failure masking healthy probes); not storing it at all let
+// getExecutor() resolve and cache a NULL executor from an enabled capability
+// (advisory-mode shell commands then ran unsandboxed for the process
+// lifetime — the regression this closes). Accessor precedence (pinned by the
+// PR #3718 Stage-B battery legs L4/L5): each slot is consulted only when it
+// was recorded for the CURRENT probe-source identity, memoized result first,
+// transient second — a plain `_cached ?? _cachedTransient` was rejected by
+// the reviewer's counterexample (a healthy DISABLED memo from a previous
+// binary identity would mask a fresh enabled transient re-probe and
+// re-introduce the null-executor class). Reads made outside the documented
+// post-detect() pattern therefore fail closed on a stale identity; the
+// executor creators always detect() first, so their visibility is always
+// the current probe's answer.
+let _cachedTransient: SandboxCapabilityV1 | undefined;
+let _cachedTransientProbeSourceIdentity: string | undefined;
+
 interface BehavioralEvidence {
 	filesystem: SandboxDimensionStrength;
 	network: SandboxDimensionStrength;
@@ -168,6 +189,16 @@ function resolveWindowsCommandProcessorBinary(): string {
 	return comSpec || 'cmd';
 }
 
+/** Bounded errno-style code of a thrown value ('unknown' when absent). */
+function errorCode(error: unknown): string {
+	return typeof error === 'object' &&
+		error !== null &&
+		'code' in error &&
+		typeof (error as { code?: unknown }).code === 'string'
+		? ((error as { code: string }).code ?? 'unknown')
+		: 'unknown';
+}
+
 function cleanupProbeTempRoot(
 	tempRoot: string,
 	mechanism: string,
@@ -176,13 +207,7 @@ function cleanupProbeTempRoot(
 	try {
 		_internals.removeProbeTempRoot(tempRoot, { recursive: true, force: true });
 	} catch (error) {
-		const code =
-			typeof error === 'object' &&
-			error !== null &&
-			'code' in error &&
-			typeof (error as { code?: unknown }).code === 'string'
-				? ((error as { code: string }).code ?? 'unknown')
-				: 'unknown';
+		const code = errorCode(error);
 		reasons.push(`${mechanism} probe temp cleanup failed (${code})`);
 		warn(
 			`[sandbox] ${mechanism} probe temp cleanup failed (${code}); continuing with bounded probe result`,
@@ -293,15 +318,28 @@ function runBoundedSync(
 
 function probeLinuxBehavior(): BehavioralEvidence {
 	const binary = bwrapInternals.resolveBwrapBinary();
-	const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'swarm-bwrap-probe-'));
-	const allowedRoot = path.join(tempRoot, 'allowed');
-	const inScopeFile = path.join(allowedRoot, 'inside.txt');
-	const outOfScopeFile = path.join(tempRoot, 'outside.txt');
-	fs.mkdirSync(allowedRoot, { recursive: true });
 	const reasons: string[] = [];
 	let filesystem: SandboxDimensionStrength = 'weak';
 	let network: SandboxDimensionStrength = 'weak';
+	// #3332: the whole setup phase (temp root creation through the bounded
+	// spawns) lives inside the guarded region — a setup failure (mkdtemp
+	// ENOSPC/EACCES, mkdir EACCES, …) returns a bounded weak probe result and
+	// cleans up whatever it created instead of escaping unhandled and leaking
+	// the temp root. tempRoot stays undefined when mkdtempSync itself fails,
+	// so no cleanup is attempted for a root that was never created.
+	let tempRoot: string | undefined;
 	try {
+		tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'swarm-bwrap-probe-'));
+		const allowedRoot = path.join(tempRoot, 'allowed');
+		const inScopeFile = path.join(allowedRoot, 'inside.txt');
+		const outOfScopeFile = path.join(tempRoot, 'outside.txt');
+		fs.mkdirSync(allowedRoot, { recursive: true });
+		// #3332: /lib64 exists on multilib hosts only (usr-merged and
+		// non-multilib images lack it); bwrap aborts the invocation when a
+		// bind source is missing, so consult the host per probe run.
+		const lib64BindArgs = fs.existsSync('/lib64')
+			? ['--ro-bind', '/lib64', '/lib64']
+			: [];
 		const baseArgs = [
 			'--unshare-user',
 			'--unshare-net',
@@ -327,9 +365,7 @@ function probeLinuxBehavior(): BehavioralEvidence {
 			'--ro-bind',
 			'/lib',
 			'/lib',
-			'--ro-bind',
-			'/lib64',
-			'/lib64',
+			...lib64BindArgs,
 			'--proc',
 			'/proc',
 			'--unshare-pid',
@@ -386,8 +422,14 @@ function probeLinuxBehavior(): BehavioralEvidence {
 				'bubblewrap network namespace isolation was not independently verified',
 			);
 		}
+	} catch (error) {
+		// Bounded probe result on a setup failure (#3332): never propagate.
+		const code = errorCode(error);
+		reasons.push(`bubblewrap probe temp setup failed (${code})`);
 	} finally {
-		cleanupProbeTempRoot(tempRoot, 'bubblewrap', reasons);
+		if (tempRoot !== undefined) {
+			cleanupProbeTempRoot(tempRoot, 'bubblewrap', reasons);
+		}
 	}
 	return {
 		filesystem,
@@ -399,22 +441,23 @@ function probeLinuxBehavior(): BehavioralEvidence {
 
 function probeMacOSBehavior(): BehavioralEvidence {
 	const binary = macosExecutorInternals.resolveSandboxExecBinary();
-	const tempRoot = fs.mkdtempSync(
-		path.join(os.tmpdir(), 'swarm-seatbelt-probe-'),
-	);
-	const allowedRoot = path.join(tempRoot, 'allowed');
-	const sandboxTemp = path.join(tempRoot, 'sandbox-tmp');
-	const inScopeFile = path.join(allowedRoot, 'inside.txt');
-	const outOfScopeFile = path.join(tempRoot, 'outside.txt');
-	fs.mkdirSync(allowedRoot, { recursive: true });
-	fs.mkdirSync(sandboxTemp, { recursive: true });
-	const profile = macosExecutorInternals.buildSandboxProfile(
-		[allowedRoot],
-		sandboxTemp,
-	);
 	const reasons: string[] = [];
 	let filesystem: SandboxDimensionStrength = 'weak';
+	// #3332: setup failures return a bounded probe result (never an unhandled
+	// throw), and the temp root is cleaned only when it was created.
+	let tempRoot: string | undefined;
 	try {
+		tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'swarm-seatbelt-probe-'));
+		const allowedRoot = path.join(tempRoot, 'allowed');
+		const sandboxTemp = path.join(tempRoot, 'sandbox-tmp');
+		const inScopeFile = path.join(allowedRoot, 'inside.txt');
+		const outOfScopeFile = path.join(tempRoot, 'outside.txt');
+		fs.mkdirSync(allowedRoot, { recursive: true });
+		fs.mkdirSync(sandboxTemp, { recursive: true });
+		const profile = macosExecutorInternals.buildSandboxProfile(
+			[allowedRoot],
+			sandboxTemp,
+		);
 		const inScope = runBoundedSync(
 			binary,
 			['-p', profile, '/usr/bin/tee', inScopeFile],
@@ -440,12 +483,18 @@ function probeMacOSBehavior(): BehavioralEvidence {
 				'sandbox-exec denial behavior was not independently verified in a bounded probe',
 			);
 		}
+		reasons.push(
+			'(allow default) leaves network, IPC, and process-spawn behavior outside the boundary',
+		);
+	} catch (error) {
+		// Bounded probe result on a setup failure (#3332): never propagate.
+		const code = errorCode(error);
+		reasons.push(`sandbox-exec probe temp setup failed (${code})`);
 	} finally {
-		cleanupProbeTempRoot(tempRoot, 'sandbox-exec', reasons);
+		if (tempRoot !== undefined) {
+			cleanupProbeTempRoot(tempRoot, 'sandbox-exec', reasons);
+		}
 	}
-	reasons.push(
-		'(allow default) leaves network, IPC, and process-spawn behavior outside the boundary',
-	);
 	return {
 		filesystem,
 		network: 'none',
@@ -494,6 +543,8 @@ function detectBehavioralEvidence(
 export function _resetCapabilityCache(): void {
 	_cached = undefined;
 	_cachedProbeSourceIdentity = undefined;
+	_cachedTransient = undefined;
+	_cachedTransientProbeSourceIdentity = undefined;
 }
 
 /**
@@ -565,12 +616,42 @@ function withProbeTimeout(
  * the tests. See src/sandbox/macos/sandbox-exec-executor.ts's _internals for
  * the sibling sync-probe seam.
  */
+/**
+ * Platform binary-stage probe seam (F-001, PR #3718 review feedback round):
+ * detect() obtains the binary-stage capability through this indirection so
+ * tests can pin the enabled-capability-with-transient-behavioral-failure
+ * shape deterministically on any host. The default is the original switch —
+ * identical dispatch, no behavior change in production.
+ */
+async function probePlatform(
+	platform: 'linux' | 'darwin' | 'win32',
+): Promise<SandboxCapability> {
+	switch (platform) {
+		case 'linux':
+			return probeLinux();
+		case 'darwin':
+			return probeMacOS();
+		case 'win32':
+			return probeWindows();
+		default: {
+			// Unknown platform — treat as unsupported.
+			return {
+				status: 'unsupported',
+				mechanism: 'unknown',
+				platform,
+				error: `unsupported platform: ${platform}`,
+			};
+		}
+	}
+}
+
 export const _internals: {
 	withProbeTimeout: typeof withProbeTimeout;
 	spawnSync: typeof spawnSync;
 	detectBehavioralEvidence: typeof detectBehavioralEvidence;
 	resolveWindowsCommandProcessorBinary: typeof resolveWindowsCommandProcessorBinary;
 	currentProbeSourceIdentity: typeof currentProbeSourceIdentity;
+	probePlatform: typeof probePlatform;
 	removeProbeTempRoot: (target: fs.PathLike, options?: fs.RmOptions) => void;
 } = {
 	withProbeTimeout,
@@ -578,6 +659,7 @@ export const _internals: {
 	detectBehavioralEvidence,
 	resolveWindowsCommandProcessorBinary,
 	currentProbeSourceIdentity,
+	probePlatform,
 	removeProbeTempRoot: (target: fs.PathLike, options?: fs.RmOptions) =>
 		fs.rmSync(target, { recursive: true, force: true, ...options }),
 } as const;
@@ -770,30 +852,70 @@ function probeWindows(): SandboxCapability {
  * Results are cached for the session lifetime (module-level variable).
  */
 /**
+ * The capability the synchronous accessors answer from (F-001, PR #3718
+ * review): each slot is consulted only when it was recorded for the CURRENT
+ * probe-source identity — the memoized authoritative result first, the
+ * transient setup-failure observation second. A plain memoized-outranks-
+ * transient preference (no identity gate) was rejected by the Stage-B
+ * reviewer's counterexample: a healthy DISABLED memo from a previous
+ * probe-source identity would mask a fresh ENABLED transient re-probe after
+ * a binary change, restoring the null-executor class this closes. The
+ * identity gates are pinned by battery legs L4/L5
+ * (tests/unit/sandbox/capability-probe-transient-executor-3661.test.ts);
+ * reads made outside the documented post-detect() pattern fail closed on a
+ * stale identity, and the executor creators always detect() first, so their
+ * visibility is always the current probe's answer. This is deliberately NOT
+ * what detect() returns from cache: only `_cached` short-circuits detect(),
+ * so a transient observation is always re-probed by the next detect() call
+ * (#3661 item 5).
+ */
+function syncVisibleCapability(
+	platform: 'linux' | 'darwin' | 'win32',
+): SandboxCapabilityV1 | undefined {
+	const probeSourceIdentity = _internals.currentProbeSourceIdentity(platform);
+	if (
+		_cached !== undefined &&
+		_cachedProbeSourceIdentity === probeSourceIdentity
+	) {
+		return _cached;
+	}
+	if (
+		_cachedTransient !== undefined &&
+		_cachedTransientProbeSourceIdentity === probeSourceIdentity
+	) {
+		return _cachedTransient;
+	}
+	return undefined;
+}
+
+/**
  * Synchronous check whether Bubblewrap was detected as available.
  * Must be called after detect() has resolved — returns false if detect()
- * has not yet been called or if the cached result is not Linux/enabled.
+ * has not yet been called or if the visible result is not Linux/enabled.
  */
 export function isBubblewrapAvailable(): boolean {
-	return _cached?.status === 'enabled' && _cached?.platform === 'linux';
+	const capability = syncVisibleCapability('linux');
+	return capability?.status === 'enabled' && capability?.platform === 'linux';
 }
 
 /**
  * Synchronous check whether sandbox-exec was detected as available.
  * Must be called after detect() has resolved — returns false if detect()
- * has not yet been called or if the cached result is not macOS/enabled.
+ * has not yet been called or if the visible result is not macOS/enabled.
  */
 export function isSandboxExecAvailable(): boolean {
-	return _cached?.status === 'enabled' && _cached?.platform === 'darwin';
+	const capability = syncVisibleCapability('darwin');
+	return capability?.status === 'enabled' && capability?.platform === 'darwin';
 }
 
 /**
  * Synchronous check whether Windows Restricted Token support is available.
  * Must be called after detect() has resolved — returns false if detect()
- * has not yet been called or if the cached result is not win32/enabled.
+ * has not yet been called or if the visible result is not win32/enabled.
  */
 export function isWindowsSandboxAvailable(): boolean {
-	return _cached?.status === 'enabled' && _cached?.platform === 'win32';
+	const capability = syncVisibleCapability('win32');
+	return capability?.status === 'enabled' && capability?.platform === 'win32';
 }
 
 export class SandboxCapabilityProbe {
@@ -804,44 +926,61 @@ export class SandboxCapabilityProbe {
 	 */
 	async detect(): Promise<SandboxCapabilityV1> {
 		const platform = process.platform as 'linux' | 'darwin' | 'win32';
-		const probeSourceIdentity = currentProbeSourceIdentity(platform);
+		const probeSourceIdentity = _internals.currentProbeSourceIdentity(platform);
 		if (
 			_cached !== undefined &&
 			_cachedProbeSourceIdentity === probeSourceIdentity
 		) {
 			return _cached;
 		}
-		let detected: SandboxCapability;
+		const detected = await _internals.probePlatform(platform);
 
-		switch (platform) {
-			case 'linux':
-				detected = await probeLinux();
-				break;
-			case 'darwin':
-				detected = await probeMacOS();
-				break;
-			case 'win32':
-				detected = probeWindows();
-				break;
-			default: {
-				// Unknown platform — treat as unsupported.
-				detected = {
-					status: 'unsupported',
-					mechanism: 'unknown',
-					platform,
-					error: `unsupported platform: ${platform}`,
-				};
-			}
-		}
-
-		_cached = withProbeIdentity(
+		const result = withProbeIdentity(
 			upgradeCapability(
 				detected,
 				_internals.detectBehavioralEvidence(detected),
 			),
 			probeSourceIdentity,
 		);
-		_cachedProbeSourceIdentity = probeSourceIdentity;
-		return _cached;
+		// A setup-failure result is transient evidence (temp-dir creation or
+		// probe-environment failure, #3661 item 5): never memoize it as the
+		// authoritative result, or a later healthy probe is masked for the
+		// process lifetime. The binary-identity guard above stays the only
+		// healthy-result cache invalidation axis; the local result is always
+		// returned. F-001 (PR #3718 review): the transient observation is
+		// parked in the accessor-visible slot so an enabled binary-stage
+		// capability keeps executor availability — dropping it entirely
+		// memoized a null executor from an ENABLED capability, silently
+		// un-sandboxing advisory-mode shell commands.
+		if (!hasProbeSetupFailureReason(result)) {
+			_cached = result;
+			_cachedProbeSourceIdentity = probeSourceIdentity;
+			// Hygiene, not a separately pinned behavior: the identity-gated
+			// accessor precedence (syncVisibleCapability) already prefers the
+			// current-identity memo; dropping the transient here keeps the
+			// invariant that at most one accessor-visible slot carries state.
+			_cachedTransient = undefined;
+			_cachedTransientProbeSourceIdentity = undefined;
+		} else {
+			_cachedTransient = result;
+			_cachedTransientProbeSourceIdentity = probeSourceIdentity;
+		}
+		return result;
 	}
+}
+
+/**
+ * True when a capability carries a probe temp-setup-failure reason. The linux
+ * bwrap arm (`bubblewrap probe temp setup failed (…)`) and the darwin
+ * sandbox-exec arm (`sandbox-exec probe temp setup failed (…)`) share the
+ * marker core; behavioral evidence passes reasons through upgradeCapability,
+ * so the check runs on the final capability.
+ */
+function hasProbeSetupFailureReason(capability: SandboxCapabilityV1): boolean {
+	const reasons: unknown = (capability as { reasons?: unknown }).reasons;
+	if (!Array.isArray(reasons)) return false;
+	return reasons.some(
+		(reason) =>
+			typeof reason === 'string' && reason.includes('probe temp setup failed'),
+	);
 }

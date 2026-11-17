@@ -8,6 +8,7 @@ import {
 	resetTelemetryForTesting,
 	telemetry,
 } from '../../../src/telemetry';
+import { enterCwdSandbox } from '../../helpers/cwd-sandbox';
 
 // =============================================================================
 // Adversarial Tests for telemetry init + heartbeat (Task 3.9)
@@ -62,9 +63,16 @@ describe('telemetry-init adversarial tests (Task 3.9)', () => {
 	// Attack Vector 2: initTelemetry with empty string directory
 	// -------------------------------------------------------------------------
 	test('2. initTelemetry with empty string directory must not throw', () => {
-		expect(() => {
-			initTelemetry('');
-		}).not.toThrow();
+		// '' resolves `.swarm/` against cwd: run inside a sandbox, not the checkout.
+		const sandbox = enterCwdSandbox('telemetry-init-empty-');
+		try {
+			expect(() => {
+				initTelemetry('');
+			}).not.toThrow();
+		} finally {
+			resetTelemetryForTesting();
+			sandbox.restore();
+		}
 	});
 
 	// -------------------------------------------------------------------------

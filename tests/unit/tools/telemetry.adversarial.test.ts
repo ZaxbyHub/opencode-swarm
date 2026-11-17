@@ -10,6 +10,7 @@ import {
 	resetTelemetryForTesting,
 	rotateTelemetryIfNeeded,
 } from '../../../src/telemetry';
+import { enterCwdSandbox } from '../../helpers/cwd-sandbox';
 
 // =============================================================================
 // Adversarial Tests for telemetry module
@@ -282,9 +283,16 @@ describe('telemetry adversarial tests', () => {
 	// Test 14: initTelemetry with empty string directory — must handle gracefully
 	// -------------------------------------------------------------------------
 	test('14. initTelemetry with empty string directory must handle gracefully', () => {
-		expect(() => {
-			initTelemetry('');
-		}).not.toThrow();
+		// '' resolves `.swarm/` against cwd: run inside a sandbox, not the checkout.
+		const sandbox = enterCwdSandbox('telemetry-adv-empty-');
+		try {
+			expect(() => {
+				initTelemetry('');
+			}).not.toThrow();
+		} finally {
+			resetTelemetryForTesting();
+			sandbox.restore();
+		}
 	});
 
 	// -------------------------------------------------------------------------

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import type { GuardrailsConfig } from '../../../src/config/schema';
 import {
 	_internals,
@@ -9,6 +9,7 @@ import {
 	resetSwarmState,
 	startAgentSession,
 } from '../../../src/state';
+import { canonicalMkdtemp, removeTreeWithRetry } from '../../helpers/tmpdir';
 
 const config: GuardrailsConfig = {
 	enabled: true,
@@ -54,10 +55,17 @@ function input(sessionID: string, callID: string, tool = 'pre_check_batch') {
 }
 
 describe('pre-check task receipt correlation', () => {
-	beforeEach(resetSwarmState);
+	// The guardrails hook appends to `<directory>/.swarm/events.jsonl`; an
+	// explicit per-test project dir keeps that out of the plugin checkout.
+	let projectDir: string;
+	beforeEach(() => {
+		resetSwarmState();
+		projectDir = canonicalMkdtemp('guardrails-pre-check-race-');
+	});
+	afterEach(() => removeTreeWithRetry(projectDir));
 
 	test('late task A failure remains bound to A after currentTaskId moves to B', async () => {
-		const hooks = createGuardrailsHooks(config);
+		const hooks = createGuardrailsHooks(projectDir, config);
 		startAgentSession('session', 'coder');
 		const session = getAgentSession('session')!;
 		session.currentTaskId = 'task-a';
@@ -77,7 +85,7 @@ describe('pre-check task receipt correlation', () => {
 	});
 
 	test('late task A pass advances only A after currentTaskId moves to B', async () => {
-		const hooks = createGuardrailsHooks(config);
+		const hooks = createGuardrailsHooks(projectDir, config);
 		startAgentSession('session', 'coder');
 		const session = getAgentSession('session')!;
 		session.currentTaskId = 'task-a';
@@ -98,7 +106,7 @@ describe('pre-check task receipt correlation', () => {
 	});
 
 	test('missing receipts are non-mutating', async () => {
-		const hooks = createGuardrailsHooks(config);
+		const hooks = createGuardrailsHooks(projectDir, config);
 		startAgentSession('session', 'coder');
 		const session = getAgentSession('session')!;
 		session.currentTaskId = 'task-a';
@@ -111,7 +119,7 @@ describe('pre-check task receipt correlation', () => {
 	});
 
 	test('F-011 isolates live receipt capacity by session and fails closed at the per-session cap', async () => {
-		const hooks = createGuardrailsHooks(config);
+		const hooks = createGuardrailsHooks(projectDir, config);
 		startAgentSession('session-a', 'coder');
 		startAgentSession('session-b', 'coder');
 		const sessionA = getAgentSession('session-a')!;
@@ -145,7 +153,7 @@ describe('pre-check task receipt correlation', () => {
 	});
 
 	test('identical call IDs in concurrent sessions remain isolated', async () => {
-		const hooks = createGuardrailsHooks(config);
+		const hooks = createGuardrailsHooks(projectDir, config);
 		startAgentSession('session-a', 'coder');
 		startAgentSession('session-b', 'coder');
 		const sessionA = getAgentSession('session-a')!;
@@ -170,7 +178,7 @@ describe('pre-check task receipt correlation', () => {
 	});
 
 	test('a successful informational gate cannot clear a pre-check failure', async () => {
-		const hooks = createGuardrailsHooks(config);
+		const hooks = createGuardrailsHooks(projectDir, config);
 		startAgentSession('session', 'coder');
 		const session = getAgentSession('session')!;
 		session.currentTaskId = 'task-a';

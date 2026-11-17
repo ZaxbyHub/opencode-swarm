@@ -744,6 +744,20 @@ export const DEFAULT_AGENT_AUTHORITY_RULES: Record<string, AgentRule> = {
 };
 
 /**
+ * #3606 test seam for the ancestor lstat walk: suites inject lstat
+ * outcomes (non-ENOENT failures, symlink stats) for workspaces that do
+ * not exist on the host, keeping the denial-rendering pins
+ * host-independent. Production callers get the real `fsSync.lstatSync`
+ * (arrow-wrapped so the single-arg overload keeps its `Stats` return —
+ * `.bind` would widen it to the options-overload union).
+ */
+export const _internals: {
+	lstatSync: (path: fsSync.PathLike) => fsSync.Stats;
+} = {
+	lstatSync: (ancestorPath) => fsSync.lstatSync(ancestorPath),
+};
+
+/**
  * Checks whether a write target path (or any ancestor strictly inside cwd)
  * is a symlink. Writing through a symlink can redirect the write to a
  * location outside the working directory, bypassing scope containment.
@@ -761,6 +775,38 @@ export const DEFAULT_AGENT_AUTHORITY_RULES: Record<string, AgentRule> = {
  *
  * @returns A block reason string if a symlink is detected, null if all clear.
  */
+/**
+ * #3606 D15: compose an ancestor denial within a whole-message bound of 320.
+ * The ancestor is home-redacted (redactPath) and sanitized; the error detail
+ * renders the error CODE only (never String(err) — the raw message embeds
+ * paths); the class text is preserved inside the bound.
+ */
+function renderAncestorDenial(
+	kind: 'lstat-failed' | 'symlink-junction',
+	ancestor: string,
+	err?: unknown,
+): string {
+	// F-22 (PR #3651 review): the ancestor detail is capped harder than the
+	// whole-message bound so the trailing class text survives the 320-char
+	// compose (a 280-char ancestor previously consumed the budget and the
+	// message ended mid-class).
+	const safeAncestor = sanitizeDiagnosticText(redactPath(ancestor), 200);
+	if (kind === 'lstat-failed') {
+		const code =
+			(err as NodeJS.ErrnoException | undefined)?.code ??
+			(err instanceof Error ? err.name : 'UNKNOWN');
+		const safeCode = sanitizeDiagnosticText(code, 40);
+		return sanitizeDiagnosticText(
+			`WRITE BLOCKED: lstat failed on "${safeAncestor}": ${safeCode} — refusing write on unverifiable path`,
+			320,
+		);
+	}
+	return sanitizeDiagnosticText(
+		`WRITE BLOCKED: "${safeAncestor}" is a symlink/junction — writing through a symlink or junction could redirect the write outside the working directory`,
+		320,
+	);
+}
+
 export function checkWriteTargetForSymlink(
 	targetPath: string,
 	cwd: string,
@@ -789,17 +835,17 @@ export function checkWriteTargetForSymlink(
 	}
 
 	for (const ancestor of ancestors) {
-		let stat: ReturnType<typeof fsSync.lstatSync> | null = null;
+		let stat: fsSync.Stats | null = null;
 		try {
-			stat = fsSync.lstatSync(ancestor);
+			stat = _internals.lstatSync(ancestor);
 		} catch (err: unknown) {
 			const code = (err as NodeJS.ErrnoException).code;
 			if (code === 'ENOENT') continue; // not yet created — OK for writes
 			// Unexpected error: fail closed
-			return `WRITE BLOCKED: lstat failed on "${ancestor}": ${String(err)} — refusing write on unverifiable path`;
+			return renderAncestorDenial('lstat-failed', ancestor, err);
 		}
-		if (stat.isSymbolicLink()) {
-			return `WRITE BLOCKED: "${ancestor}" is a symlink/junction — writing through a symlink or junction could redirect the write outside the working directory`;
+		if (stat?.isSymbolicLink()) {
+			return renderAncestorDenial('symlink-junction', ancestor);
 		}
 	}
 
@@ -1233,7 +1279,7 @@ export function checkFileAuthorityWithRules(
 				code: 'AUTHORITY_ROOT_ESCAPE',
 				layer: 'containment',
 				rule: 'workspace-containment',
-				detail: `re-rooted target crosses symlink/junction "${plantedLink}" inside the matched worktree`,
+				detail: `re-rooted target crosses symlink/junction "${sanitizeDiagnosticText(redactPath(plantedLink), 320)}" inside the matched worktree`,
 			});
 		}
 	} else if (normalizedPath === '..' || normalizedPath.startsWith('../')) {
@@ -1254,7 +1300,7 @@ export function checkFileAuthorityWithRules(
 				code: 'AUTHORITY_ROOT_ESCAPE',
 				layer: 'containment',
 				rule: 'workspace-containment',
-				detail: `re-rooted target crosses symlink/junction "${plantedLink}" inside the matched worktree`,
+				detail: `re-rooted target crosses symlink/junction "${sanitizeDiagnosticText(redactPath(plantedLink), 320)}" inside the matched worktree`,
 			});
 		}
 	}

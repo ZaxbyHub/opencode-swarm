@@ -26,17 +26,18 @@ const ALL_LEDGER_PATHS: ReadonlyArray<string> = [
 
 // The two paths quarantined for issue #3263 (merge-group flake cohort,
 // Nov 2026), both attributed windows-latest-only passed-on-retry via the
-// triggering runs' check-run annotations (per-entry rationale and evidence
-// live in the OWNER/EXPIRY comment blocks of the windows ledger):
+// triggering runs' check-run annotations.
 //
+// DISPOSITION (2026-11-12, per issue #2973's collated trace):
 //   - tests/unit/hooks/delegation-gate-retry-sounding-board-manual.test.ts
-//     is a CORE-TREE entry (tests/unit/hooks/**, detector rule C) routed to
-//     the windows ledger after documented review, per the #2867
-//     delegation-gate-background-coder precedent;
-//   - tests/unit/commands/archive-dry-run.test.ts fired the ledger-entry
-//     branch of the rule pre-recorded in the #3263 2026-10-30 triage note
-//     (four windows-only passed-on-retry detections, two of them on heads
-//     that already contain the #3252 safeRmRecursive conversion).
+//     was un-quarantined (never reproduced post-observation) — now pinned
+//     with the retired-absence shape below;
+//   - tests/unit/commands/archive-dry-run.test.ts was re-anchored
+//     2026-11-12 under the #3218 disposition and RETIRED 2026-11-16 per
+//     issues #2973 + #3218 (determinism hardening landed in the
+//     re-anchoring PR; the entry criterion of 2 consecutive green
+//     windows-latest merge-group runs accumulates from the retiring PR's
+//     own queue run) — now pinned with the retired-absence shape below.
 //
 // The other five files named in the issue body (the ubuntu coverage-shard
 // `.swarm/`-posture wave: src/__tests__/cli-version.test.ts,
@@ -52,9 +53,7 @@ const ALL_LEDGER_PATHS: ReadonlyArray<string> = [
 // interpolates the actual path into each test title (sibling pinning
 // tests ci-yml-quarantine-2761/2812/2867/3264 use the same destructured
 // object form).
-const THIS_PR_ENTRIES: ReadonlyArray<{
-	path: string;
-}> = [
+const RETIRED_PATHS: ReadonlyArray<{ path: string }> = [
 	{
 		path: 'tests/unit/hooks/delegation-gate-retry-sounding-board-manual.test.ts',
 	},
@@ -85,43 +84,24 @@ function activeEntries(ledgerPath: string): string[] {
 		.filter((line: string) => !/^\s*#/.test(line) && !/^\s*$/.test(line));
 }
 
-describe('ci.yml integration — quarantine ledger entries for issue #3263 (this PR)', () => {
+describe('ci.yml integration — quarantine ledger entries for issue #3263', () => {
 	test.each(
-		THIS_PR_ENTRIES,
-	)('$path is an active entry in the windows ledger', ({ path }) => {
-		// Regression guard for the two net-new #3263 entries added by
-		// this PR: without them, the attributed windows-latest unit
-		// shards keep running these files and Rule A of the flake
-		// detector keeps re-filing duplicate issues (it only drops
-		// candidates already present in a ledger).
-		expect(existsSync(WINDOWS_LEDGER_PATH)).toBe(true);
-		expect(activeEntries(WINDOWS_LEDGER_PATH)).toContain(path);
-	});
-
-	test.each(
-		THIS_PR_ENTRIES,
-	)('$path is scoped to the windows ledger only (no cross-ledger duplicate)', ({
-		path,
-	}) => {
-		// Cross-ledger duplicates would falsely imply cross-OS
-		// evidence: both entries are single-OS windows-latest flakes
-		// (zero ubuntu/macos annotations for these files in any of
-		// the six triggering runs), so a stray duplicate — most
-		// plausibly in the general ledger, which applies on every
-		// RUNNER_OS — would suppress the file on OSes where it has
-		// never flaked. The integration ledger covers the
-		// `integration` job.
-		for (const ledger of [
-			GENERAL_LEDGER_PATH,
-			MACOS_LEDGER_PATH,
-			INTEGRATION_LEDGER_PATH,
-		]) {
+		RETIRED_PATHS,
+	)('$path is retired — NOT an active entry in any ledger', ({ path }) => {
+		// Retirement guard for the #2973 un-quarantine (2026-11-12): the
+		// entry must stay ABSENT from the windows ledger and every other
+		// ledger so the attributed windows-latest unit shards keep running
+		// the file; re-adding it requires a fresh merge-group
+		// windows-latest failure per the #1782 convention. Every ledger
+		// must exist so the negative assertion cannot pass vacuously.
+		for (const ledger of ALL_LEDGER_PATHS) {
+			expect(existsSync(ledger)).toBe(true);
 			expect(activeEntries(ledger)).not.toContain(path);
 		}
 	});
 
 	test.each(
-		THIS_PR_ENTRIES,
+		RETIRED_PATHS,
 	)('$path exists on disk and is discovered by the ci.yml find chain', ({
 		path,
 	}) => {
@@ -130,49 +110,22 @@ describe('ci.yml integration — quarantine ledger entries for issue #3263 (this
 		// all-tests.txt) and the flake-detection workflow would keep
 		// re-filing. The unit discovery chain globs
 		// tests/unit/**/*.test.ts, so the on-disk file must exist at
-		// exactly the ledger path relative to the repo root.
+		// exactly the ledger path relative to the repo root — existence
+		// is what keeps the now-ungated file running in CI.
 		expect(existsSync(join(REPO_ROOT, path))).toBe(true);
-	});
-
-	test.each(
-		THIS_PR_ENTRIES,
-	)('$path carries the issue #2477 OWNER + EXPIRY metadata block', ({
-		path,
-	}) => {
-		// Every active entry in scripts/ci/quarantined-tests*.txt must
-		// carry, in the comment block directly above it, an OWNER and
-		// an EXPIRY line. scripts/check-invariants.ts Check 7 fails
-		// the gate if either is missing. The grep window is the
-		// contiguous comment block (lines starting with `#`) directly
-		// preceding the non-comment path line — bounded to the
-		// entry's own header so the test does not spuriously pass
-		// against metadata that belongs to a neighbour entry.
-		const raw = readFileSync(WINDOWS_LEDGER_PATH, 'utf8').replace(
-			/\r\n/g,
-			'\n',
-		);
-		const lines = raw.split('\n');
-		const entryIndex = lines.findIndex((line: string) => line.trim() === path);
-		expect(entryIndex).toBeGreaterThan(0);
-		let blockStart = entryIndex;
-		while (blockStart > 0 && lines[blockStart - 1]?.startsWith('#')) {
-			blockStart -= 1;
-		}
-		const block = lines.slice(blockStart, entryIndex).join('\n');
-		expect(block).toMatch(/^# OWNER: .*#3263/m);
-		expect(block).toMatch(/^# EXPIRY: 2026-12-06/m);
 	});
 
 	test('windows ledger STATUS header count matches its active-entry count', () => {
 		// The windows ledger's re-add policy tracks its active entry count
-		// in a "# STATUS: N active entries" header line. This PR grew it
-		// 8 -> 10 (the five #3264 cohort entries plus the three earlier
-		// actives pre-date it); drift between the declared count and the
-		// actual active-entry count (e.g. an entry removed without
-		// updating the header, or a count bumped without the matching
-		// entries) makes the header lie to triage. Note: this only
-		// catches count drift; the presence tests above are the
-		// cross-PR overwrite guard.
+		// in a "# STATUS: N active entries" header line. Post-2026-11-16
+		// the count is 0: the previously re-anchored #3218 archive pair
+		// and the #2973 dispatch-lanes entry have all been retired.
+		// Drift between the declared count and the actual active-entry
+		// count (e.g. an
+		// entry removed without updating the header, or a count bumped
+		// without the matching entries) makes the header lie to triage.
+		// Note: this only catches count drift; the presence tests above
+		// are the cross-PR overwrite guard.
 		const raw = readFileSync(WINDOWS_LEDGER_PATH, 'utf8').replace(
 			/\r\n/g,
 			'\n',

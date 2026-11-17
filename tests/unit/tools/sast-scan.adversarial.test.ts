@@ -9,7 +9,9 @@
  */
 
 import {
+	afterAll,
 	afterEach,
+	beforeAll,
 	beforeEach,
 	describe,
 	expect,
@@ -18,15 +20,28 @@ import {
 	spyOn,
 } from 'bun:test';
 import * as fs from 'node:fs';
-import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { sastScan } from '../../../src/tools/sast-scan';
+import { canonicalMkdtemp, removeTreeWithRetry } from '../../helpers/tmpdir';
 
 const BASELINE_COVERAGE_ERROR =
 	'capture_baseline requires changed_files to produce a non-empty baseline';
 
 describe('SAST Scan - Adversarial Tests (R2)', () => {
-	const MOCK_DIR = process.cwd();
+	// sastScan persists evidence (and its lock) under <directory>/.swarm, so the
+	// project root is a throwaway sandbox rather than the plugin checkout. The
+	// `.git` marker makes it an explicit project root, as the checkout was, so
+	// the evidence-lock boundary walk never runs against the mocked statSync.
+	let MOCK_DIR: string;
+
+	beforeAll(() => {
+		MOCK_DIR = canonicalMkdtemp('sast-adversarial-');
+		fs.mkdirSync(path.join(MOCK_DIR, '.git'));
+	});
+
+	afterAll(() => {
+		removeTreeWithRetry(MOCK_DIR);
+	});
 
 	beforeEach(() => {
 		// Mock fs.existsSync to return false for non-existent paths
@@ -129,9 +144,7 @@ describe('SAST Scan - Adversarial Tests (R2)', () => {
 
 	it('baseline capture allows a supported file with zero findings', async () => {
 		mock.restore();
-		const tempDir = fs.mkdtempSync(
-			path.join(tmpdir(), 'sast-valid-baseline-test-'),
-		);
+		const tempDir = canonicalMkdtemp('sast-valid-baseline-test-');
 		const testFile = path.join(tempDir, 'valid.ts');
 		fs.writeFileSync(testFile, 'const answer = 42;');
 

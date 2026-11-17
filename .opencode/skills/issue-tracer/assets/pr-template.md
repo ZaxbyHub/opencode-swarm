@@ -66,6 +66,7 @@ Any Full-Resolution Contract clause waived by the interactive user or a checked-
 Awaiting explicit user approval; not merged.
 
 PR head: [40-hex sha of the branch head this PR body describes]
+PR URL: [published GitHub pull request URL, required in the trace before merge admission]
 
 ## Issue Closure
 

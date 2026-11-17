@@ -24,15 +24,27 @@ afterEach(() => {
 });
 
 describe('issue #3495 explain/enforcement switch parity', () => {
+	// `del` stays allow: not a write-bearing command in the explain
+	// analysis, so #3616 D2 (no-scope coder write → scope_unevaluated
+	// block, parity with the live gate's SCOPE_NOT_DECLARED) does not
+	// fire. The rm/rmdir twins below ARE write-bearing, so their no-scope
+	// explains render block with the same D2 firing rule — re-pinned from
+	// the pre-D2 split-brain allow (CI round 1 of PR #3651, review r20).
 	test.each([
-		['rmdir', 'keg/share/opencode2'],
-		['rmdir', 'a/share/b'],
 		['del', 'a/share/b'],
-		['rm', 'some-r/x'],
-		['rm', 'x-Recurse/y'],
 	])('%s %s explains as allow (path operand, not a switch)', async (...args) => {
 		const explained = await handleGuardrailExplain(workspace(), [...args]);
 		expect(explained).toMatch(/\| *Decision *\| *allow */i);
+	});
+	test.each([
+		['rmdir', 'keg/share/opencode2'],
+		['rmdir', 'a/share/b'],
+		['rm', 'some-r/x'],
+		['rm', 'x-Recurse/y'],
+	])('%s %s explains as block (#3616 D2: no-scope write → scope_unevaluated)', async (...args) => {
+		const explained = await handleGuardrailExplain(workspace(), [...args]);
+		expect(explained).toMatch(/\| *Decision *\| *block */i);
+		expect(explained).toMatch(/scope_unevaluated/);
 	});
 
 	test.each([

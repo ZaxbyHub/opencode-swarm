@@ -152,7 +152,13 @@ describe('ci.yml coverage sharding — CI-004 + issue #2341', () => {
 		// silently resolves to null, the is-release clause goes inert, and a
 		// release-please merge group (shards skipped, zero artifacts) would
 		// fail the download step and evict the release (final-critic F1).
-		expect(coverageAggJob).toContain('needs: [coverage-shard, detect-release]');
+		// `quality` is direct for the same reason (#3250): the fail-closed
+		// step echoes needs.quality.result so a cascade failure names its
+		// upstream layer; quality already gates coverage-shard, so the edge
+		// adds naming, not ordering.
+		expect(coverageAggJob).toContain(
+			'needs: [coverage-shard, detect-release, quality]',
+		);
 		expect(coverageAggJob).toContain('if: always()');
 		expect(coverageAggJob).toContain('timeout-minutes: 10');
 	});

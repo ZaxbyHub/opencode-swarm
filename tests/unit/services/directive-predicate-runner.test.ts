@@ -11,6 +11,7 @@ import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { runDirectivePredicate } from '../../../src/services/directive-predicate-runner.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 function git(dir: string, args: string[]): void {
 	execFileSync('git', args, {
@@ -33,9 +34,8 @@ describe('runDirectivePredicate', () => {
 	let dir: string;
 
 	beforeEach(() => {
-		const scratch = path.join(process.cwd(), '.swarm', 'test-tmp');
-		fs.mkdirSync(scratch, { recursive: true });
-		dir = fs.realpathSync(fs.mkdtempSync(path.join(scratch, 'predicate-')));
+		// Canonical temp root, never `<checkout>/.swarm/test-tmp`.
+		dir = canonicalMkdtemp('predicate-');
 		fs.mkdirSync(path.join(dir, 'src'), { recursive: true });
 	});
 

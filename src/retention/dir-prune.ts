@@ -54,33 +54,40 @@ export interface PruneCandidate {
 	mtimeMs: number;
 }
 
+export interface SubtreeContentStats {
+	/** Newest regular-file mtime in the subtree; `null` when it holds no files. */
+	newestFileMtime: number | null;
+	/** Sum of regular-file sizes in the subtree; symlinks are never followed. */
+	bytes: number;
+}
+
 /**
- * Effective mtime of a subtree: the newest regular-file mtime found inside
- * (never traversing symlinks), or `null` when the subtree contains no files.
- * `POSITIVE_INFINITY` signals "could not verify within budget" — callers must
- * treat that as unprunable. The walk is bounded by `maxScan` stat operations
- * total, so a pathological subtree degrades to keep, never to an unbounded
- * scan.
+ * Content stats for a subtree: the newest regular-file mtime AND the total
+ * regular-file bytes, collected in one bounded, symlink-refusing walk.
+ * `null` signals "could not verify within budget" (unreadable level, or
+ * `maxScan` stat operations exhausted) — callers must treat that as
+ * unprunable, never as empty.
  */
-export function subtreeNewestFileMtime(
+export function subtreeContentStats(
 	root: string,
 	maxScan: number,
-): number | null {
+): SubtreeContentStats | null {
 	let budget = maxScan;
 	let newest: number | null = null;
+	let bytes = 0;
 	const stack: string[] = [root];
 	while (stack.length > 0) {
-		if (budget <= 0) return Number.POSITIVE_INFINITY;
+		if (budget <= 0) return null;
 		const dir = stack.pop() as string;
 		let names: string[];
 		try {
 			names = fs.readdirSync(dir);
 		} catch {
 			// Unreadable level: content cannot be verified — refuse to prune.
-			return Number.POSITIVE_INFINITY;
+			return null;
 		}
 		for (const name of names) {
-			if (budget <= 0) return Number.POSITIVE_INFINITY;
+			if (budget <= 0) return null;
 			const entryPath = path.join(dir, name);
 			let stat: fs.Stats;
 			try {
@@ -98,12 +105,29 @@ export function subtreeNewestFileMtime(
 				stack.push(entryPath);
 				continue;
 			}
-			if (stat.isFile() && stat.mtimeMs > (newest ?? -Infinity)) {
-				newest = stat.mtimeMs;
+			if (stat.isFile()) {
+				bytes += stat.size;
+				if (stat.mtimeMs > (newest ?? -Infinity)) newest = stat.mtimeMs;
 			}
 		}
 	}
-	return newest;
+	return { newestFileMtime: newest, bytes };
+}
+
+/**
+ * Effective mtime of a subtree: the newest regular-file mtime found inside
+ * (never traversing symlinks), or `null` when the subtree contains no files.
+ * `POSITIVE_INFINITY` signals "could not verify within budget" — callers must
+ * treat that as unprunable. The walk is bounded by `maxScan` stat operations
+ * total, so a pathological subtree degrades to keep, never to an unbounded
+ * scan.
+ */
+export function subtreeNewestFileMtime(
+	root: string,
+	maxScan: number,
+): number | null {
+	const content = subtreeContentStats(root, maxScan);
+	return content === null ? Number.POSITIVE_INFINITY : content.newestFileMtime;
 }
 
 /**

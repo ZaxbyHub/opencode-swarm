@@ -17,6 +17,8 @@
 
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import type * as child_process from 'node:child_process';
+import { canonicalMkdtemp, removeTreeWithRetry } from '../../helpers/tmpdir';
+import { executeInDirectory } from '../../helpers/tool-directory';
 
 // Track call count across all spawnSync invocations
 let callCount = 0;
@@ -75,6 +77,11 @@ const originalReadDetailed = _internals.readGitRepositoryStatusDetailedAsync;
 // value so only `gitExec`'s own spawn calls are counted.
 const originalResolveGitExecutable = _internals.resolveGitExecutable;
 
+// An explicit project root: with no ToolContext, checkpoint falls back to
+// process.cwd() and the save path's lock files land in the checkout's .swarm/.
+const runCheckpoint = executeInDirectory(checkpoint);
+let projectDir: string;
+
 function setupMock(...values: Array<child_process.SpawnSyncReturns<string>>) {
 	callCount = 0;
 	returnValues = values;
@@ -103,6 +110,7 @@ function setupReader(isRepo: boolean) {
 }
 
 beforeEach(() => {
+	projectDir = canonicalMkdtemp('checkpoint-git-failure-');
 	_internals.resolveGitExecutable = () => 'git';
 });
 
@@ -114,6 +122,7 @@ afterEach(() => {
 	_internals.resolveGitExecutable = originalResolveGitExecutable;
 	_internals.readGitStatusAsync = originalReadGitStatusAsync;
 	_internals.readGitRepositoryStatusDetailedAsync = originalReadDetailed;
+	removeTreeWithRetry(projectDir);
 });
 
 // =============================================================================
@@ -125,7 +134,7 @@ describe('entry preflight rides the async reader', () => {
 		setupReader(false);
 		setupMock();
 
-		const result = await checkpoint.execute({ action: 'list' });
+		const result = await runCheckpoint({ action: 'list' }, projectDir);
 
 		const parsed = JSON.parse(result);
 		expect(parsed.success).toBe(false);
@@ -145,7 +154,7 @@ describe('entry preflight rides the async reader', () => {
 		setupReader(true);
 		setupMock();
 
-		const result = await checkpoint.execute({ action: 'list' });
+		const result = await runCheckpoint({ action: 'list' }, projectDir);
 
 		const parsed = JSON.parse(result);
 		expect(parsed.success).toBe(true);
@@ -172,10 +181,10 @@ describe('entry guard blocks save on reader-false directory', () => {
 			error: undefined,
 		});
 
-		const result = await checkpoint.execute({
-			action: 'save',
-			label: 'should-not-save',
-		});
+		const result = await runCheckpoint(
+			{ action: 'save', label: 'should-not-save' },
+			projectDir,
+		);
 
 		const parsed = JSON.parse(result);
 		expect(parsed.success).toBe(false);
@@ -218,10 +227,10 @@ describe('gitExec transient retry (via handleSave)', () => {
 			etimedoutError,
 		);
 
-		const result = await checkpoint.execute({
-			action: 'save',
-			label: 'retry-exhaustion-probe',
-		});
+		const result = await runCheckpoint(
+			{ action: 'save', label: 'retry-exhaustion-probe' },
+			projectDir,
+		);
 
 		const parsed = JSON.parse(result);
 		expect(parsed.success).toBe(false);
@@ -239,10 +248,10 @@ describe('gitExec transient retry (via handleSave)', () => {
 			error: undefined,
 		});
 
-		const result = await checkpoint.execute({
-			action: 'save',
-			label: 'permanent-failure-probe',
-		});
+		const result = await runCheckpoint(
+			{ action: 'save', label: 'permanent-failure-probe' },
+			projectDir,
+		);
 
 		const parsed = JSON.parse(result);
 		expect(parsed.success).toBe(false);
@@ -263,10 +272,10 @@ describe('gitExec transient retry (via handleSave)', () => {
 			} as NodeJS.ErrnoException,
 		});
 
-		const result = await checkpoint.execute({
-			action: 'save',
-			label: 'spawn-error-probe',
-		});
+		const result = await runCheckpoint(
+			{ action: 'save', label: 'spawn-error-probe' },
+			projectDir,
+		);
 
 		const parsed = JSON.parse(result);
 		expect(parsed.success).toBe(false);

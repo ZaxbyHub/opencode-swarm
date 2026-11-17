@@ -197,7 +197,11 @@ describe('#3586 Fix 1 arm (a): the single fully-literal-word For exemption', () 
 			`cd src; for i in ${bigWord}; do echo x > f; cd ..; done`,
 		);
 		expect(got.verdict).toBe('DENIED');
-		expect(got.message).toMatch(WITHDRAWAL);
+		// #3616 D10: the pre-parse oversized-word sentinel now denies this
+		// shape BEFORE the parse (same fail-closed outcome, earlier stage) —
+		// the message names the oversized-word budget (F-15 fix: the sentinel
+		// no longer reports a misleading parse failure).
+		expect(got.message).toMatch(/4096-character analysis budget/);
 	}, 30_000);
 
 	test('a brace word disqualifies ({a,b} is one Word, two items)', async () => {

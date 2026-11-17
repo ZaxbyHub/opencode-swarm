@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { spawnSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -23,14 +24,35 @@ const realResolveGitExecutable = _internals.resolveGitExecutable;
 let directory = '';
 const SUCCESS_OUTPUT = { status: 'completed', output: 'done' };
 
-/** Minimal fake ChildProcess: emits a clean (exit 0, empty stdout) close. */
-function fakeCleanChild(): ReturnType<typeof _internals.spawn> {
+function git(args: string[]): void {
+	const result = spawnSync('git', args, {
+		cwd: directory,
+		encoding: 'utf-8',
+		timeout: 10_000,
+		maxBuffer: 1024 * 1024,
+		stdio: ['ignore', 'pipe', 'pipe'],
+		windowsHide: true,
+	});
+	if (result.status !== 0) {
+		throw new Error(result.stderr || `git ${args.join(' ')} failed`);
+	}
+}
+
+/**
+ * Minimal fake ChildProcess. `stdoutText` is emitted before a clean
+ * (exit 0) close; per-call output lets the stub answer the toplevel probe
+ * and the porcelain probe differently (PR #3668 two-probe verdict).
+ */
+function fakeCleanChild(stdoutText = ''): ReturnType<typeof _internals.spawn> {
 	const emitter = new EventEmitter() as unknown as ReturnType<
 		typeof _internals.spawn
 	> & { stdout: EventEmitter; kill: () => void };
 	emitter.stdout = new EventEmitter();
 	emitter.kill = () => {};
 	queueMicrotask(() => {
+		if (stdoutText.length > 0) {
+			emitter.stdout.emit('data', Buffer.from(stdoutText));
+		}
 		emitter.emit('close', 0);
 	});
 	return emitter;
@@ -40,6 +62,16 @@ beforeEach(() => {
 	resetSwarmState();
 	directory = canonicalMkdtemp('reviewer-scope-lifecycle-spawn-');
 	fs.mkdirSync(path.join(directory, 'src'), { recursive: true });
+	// Issue #3655 made completion reconcile committed changes before the
+	// working-tree verdict, and a null dispatch HEAD degrades fail-closed —
+	// so this fixture needs a real committed baseline for the spawn seam's
+	// clean verdict to be reached at all.
+	fs.writeFileSync(path.join(directory, 'README.md'), 'baseline\n');
+	git(['init']);
+	git(['config', 'user.email', 'test@example.com']);
+	git(['config', 'user.name', 'Test']);
+	git(['add', 'README.md']);
+	git(['commit', '-m', 'baseline']);
 	startAgentSession('parent', 'architect', directory);
 	startAgentSession('fixture-child', 'coder', directory);
 	installActiveScopeBinding({
@@ -67,14 +99,17 @@ describe('reviewer-scope-lifecycle no-change status probe (issue #2236 regressio
 		const RESOLVED_GIT = 'C:\\Program Files\\Git\\cmd\\git.exe';
 		_internals.resolveGitExecutable = () => RESOLVED_GIT;
 
-		let spawnCalls = 0;
-		let capturedCommand: string | undefined;
-		let capturedArgs: readonly string[] | undefined;
+		const calls: Array<{ command: string; args: readonly string[] }> = [];
 		_internals.spawn = ((command: string, args: readonly string[]) => {
-			spawnCalls += 1;
-			capturedCommand = command;
-			capturedArgs = args;
-			return fakeCleanChild();
+			calls.push({ command, args });
+			// PR #3668: the verdict is a two-probe sequence — capture-prefix
+			// resolution first (`rev-parse --show-prefix`; FB-026: resolved by
+			// git, never lexically — 8.3 short-form cwd vs canonical toplevel),
+			// then porcelain status with per-file untracked enumeration.
+			if (args[0] === 'rev-parse') {
+				return fakeCleanChild('');
+			}
+			return fakeCleanChild('');
 		}) as typeof _internals.spawn;
 
 		const childSessionID = 'child-nochange';
@@ -119,10 +154,24 @@ describe('reviewer-scope-lifecycle no-change status probe (issue #2236 regressio
 
 		// Non-vacuous: prove the spawn seam actually fired before trusting its
 		// captured arguments — a path that never spawns must not pass silently.
-		expect(spawnCalls).toBeGreaterThan(0);
-		expect(capturedCommand).toBe(RESOLVED_GIT);
-		// Array form, not a collapsed shell string — proves the fix did not
-		// regress into string-concatenation of the space-containing path.
-		expect(capturedArgs).toEqual(['status', '--porcelain']);
-	});
+		// PR #3668 feedback: the zero-routed flow probes twice — once inside
+		// reconciliation (committed-diff union) and once for the proved-empty
+		// clean verdict. Each probe is a capture-prefix resolution + porcelain
+		// pair (FB-026: the prefix comes from `rev-parse --show-prefix`, never
+		// from a lexical path.relative against `--show-toplevel` — the lexical
+		// form misclassifies 8.3 short-form cwd spellings on Windows runners).
+		expect(calls.length).toBe(4);
+		for (const call of calls) {
+			expect(call.command).toBe(RESOLVED_GIT);
+			// Array form, not a collapsed shell string — proves the fix did not
+			// regress into string-concatenation of the space-containing path.
+			expect(Array.isArray(call.args)).toBe(true);
+		}
+		expect(calls[0].args).toEqual(['rev-parse', '--show-prefix']);
+		expect(calls[1].args).toContain('status');
+		expect(calls[1].args).toContain('--porcelain');
+		// PR #3668 feedback F-4: per-file untracked enumeration keeps a wholly
+		// untracked .swarm/ directory from collapsing out of the verdict.
+		expect(calls[1].args).toContain('--untracked-files=all');
+	}, 60_000);
 });

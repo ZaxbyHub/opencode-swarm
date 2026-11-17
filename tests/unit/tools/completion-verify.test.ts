@@ -622,7 +622,6 @@ describe('completion-verify unit tests', () => {
 		});
 
 		test('returns passed with turbo bypass reason when turbo mode is active', async () => {
-			// Set up a session with turbo mode enabled
 			swarmState.agentSessions = new Map([
 				['test-session', { turboMode: true } as any],
 			]);
@@ -643,9 +642,11 @@ describe('completion-verify unit tests', () => {
 				],
 			};
 			createPlanFile(testDir, plan);
-			// Do NOT create the source file - turbo mode should bypass this check
-
-			const result = await executeCompletionVerify({ phase: 1 }, testDir);
+			// No source file: the caller's own Turbo session bypasses this check.
+			const result = await executeCompletionVerify(
+				{ phase: 1, sessionID: 'test-session' },
+				testDir,
+			);
 			const parsed = JSON.parse(result);
 
 			expect(parsed.status).toBe('passed');
@@ -682,7 +683,6 @@ describe('completion-verify unit tests', () => {
 			const result = await executeCompletionVerify({ phase: 1 }, testDir);
 			const parsed = JSON.parse(result);
 
-			// Without turbo mode, missing file should block
 			expect(parsed.status).toBe('blocked');
 			expect(parsed.tasksBlocked).toBe(1);
 		});

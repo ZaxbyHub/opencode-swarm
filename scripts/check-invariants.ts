@@ -165,9 +165,35 @@ export function normalizeMockTarget(target: string): string {
 	if (target.startsWith('node:')) {
 		return target;
 	}
-	let normalized = target.replace(/^(?:\.\.\/)+/, '').replace(/^(?:\.\/)+/, '');
+	// #3710: collapse duplicate separators BEFORE the dotdot loop — the
+	// rewrite pattern requires a non-empty non-slash run immediately before
+	// `/../`, so `foo//../bar` could never match it and the loop span forever
+	// (rewrite-without-progress). A rewrite that makes no progress is a
+	// diagnosed bounded rejection, never a traversal-bearing success value.
+	let normalized = target
+		.replace(/^(?:\.\.\/)+/, '')
+		.replace(/^(?:\.\/)+/, '')
+		.replace(/\/{2,}/g, '/');
 	while (normalized.includes('/../')) {
-		normalized = normalized.replace(/[^/]+\/\.\.\//, '');
+		const next = normalized.replace(/[^/]+\/\.\.\//, '');
+		if (next === normalized) {
+			throw new Error(
+				`normalizeMockTarget: unresolvable dotdot segment in target: ${target}`,
+			);
+		}
+		normalized = next;
+	}
+	// #3710: a multi-hop dotdot chain can leave a residual '..' segment the
+	// rewrite above cannot consume (e.g. 'a/../../b' -> '../b'). A value that
+	// still carries a parent segment is a traversal-bearing path, so it is
+	// rejected rather than returned as a success.
+	if (
+		normalized.startsWith('../') ||
+		normalized.split('/').includes('..')
+	) {
+		throw new Error(
+			`normalizeMockTarget: residual parent segment in target: ${target}`,
+		);
 	}
 	normalized = normalized.replace(/^src\//, '').replace(/\.js$/, '');
 	return `src/${normalized}`;

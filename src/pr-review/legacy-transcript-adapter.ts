@@ -1397,9 +1397,12 @@ function verdictRowIdsMatchExactly(
 }
 
 /**
- * Settlement composes valid assigned siblings item-by-item, but an invented ID
- * invalidates the entire artifact because no declared ownership can authorize
- * that row. Missing or duplicate assigned rows remain per-item parse failures.
+ * Membership-only check: true when every marker row names an assigned item id.
+ * An invented ID invalidates the entire artifact because no declared ownership
+ * can authorize that row. This predicate does not handle missing or duplicate
+ * rows: those are per-item parse failures (parsePrReviewVerdictRows for both
+ * phases; parseCriticVerdict applies the same one-row rule), and illegal-
+ * arity duplicates are quarantined in indexVerdictRows.
  */
 function verdictRowsContainOnlyAssignedIds(
 	markerRows: readonly string[][],
