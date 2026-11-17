@@ -174,6 +174,14 @@ For subsequent complex tasks in this session:
 - synthesize outputs with explicit status labels such as candidate, confirmed, disproved, unverified, or pre-existing when useful
 - keep the main context clean by pushing reading-heavy work into subagents
 
+## Quota-degradation coverage
+
+If a quota or provider limit blocks a lane, retry within the applicable workflow budget. Track each assigned file with its coverage status and evidence. Reassign unresolved files when capacity returns, and disclose remaining gaps in the final coverage report.
+
+## Wave accounting
+
+Keep a per-wave ledger of dispatched, settled, retried, and unresolved lane IDs. Record each retry under the same obligation.
+
 ## Suggested subagent prompts
 When you need an explorer-style subagent, tell it:
 - map the assigned scope quickly

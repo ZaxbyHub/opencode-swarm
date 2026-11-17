@@ -30,66 +30,29 @@ function activeEntries(ledgerPath: string): string[] {
 		.filter((line: string) => !/^\s*#/.test(line) && !/^\s*$/.test(line));
 }
 
-// The SAME contiguous-comment-block walk scripts/check-invariants.ts
-// Check 7 performs (break at the first blank or non-comment line — PRR-019
-// parity): the block directly above the entry must carry OWNER + EXPIRY.
-function metadataBlock(ledgerPath: string, entry: string): string {
-	const raw = readFileSync(ledgerPath, 'utf8').replace(/\r\n/g, '\n');
-	const lines = raw.split('\n');
-	const entryIdx = lines.findIndex((l: string) => l.trim() === entry);
-	expect(entryIdx).toBeGreaterThan(-1);
-	const blockAbove: string[] = [];
-	for (let i = entryIdx - 1; i >= 0; i -= 1) {
-		const above = lines[i] ?? '';
-		if (above.trim() !== '' && above.trimStart().startsWith('#')) {
-			blockAbove.unshift(above);
-		} else {
-			break;
-		}
-	}
-	return blockAbove.join('\n');
-}
-
 /**
- * Pins the windows-ledger entry added by issue #3248 (PR #3254 review
- * PRR-028): every active ledger entry carries a dedicated per-issue pin (the
- * 2826/2867 precedent); without one, an entry + STATUS-count edit could be
- * removed together with every test green. The entry quarantines
- * dispatch-lanes-pr-review-resilience-followups on windows-latest only,
- * based on retry-only evidence (windows/unit `Passed on retry 1` notices in
- * 5 sampled failed merge-group runs of 2026-10-13/14, zero hard failures,
- * zero macos/ubuntu annotations; the delegation-gate-background-coder
- * retry-only precedent), OWNER/EXPIRY 2026-11-15.
+ * Pins the RETIRED state of the windows-ledger entry that issue #3248 added
+ * (PR #3254 review PRR-028) and the 2026-11-16 un-quarantine removed. The
+ * entry quarantined dispatch-lanes-pr-review-resilience-followups on
+ * windows-latest only, based on retry-only evidence (windows/unit `Passed on
+ * retry 1` notices in 5 sampled failed merge-group runs of 2026-10-13/14,
+ * zero hard failures, zero macos/ubuntu annotations). Retired 2026-11-16 per
+ * issue #2973 after the raw `await fs.rm` teardown (zero EBUSY/EPERM retries
+ * over a live WAL SQLite DB — the exact class sibling retirements cured via
+ * safeRmRecursive) was converted in the retiring PR; the un-stubbed real-git
+ * preflight latency is a disclosed watch item, and re-adding the entry
+ * requires fresh merge-group windows-latest failure evidence per the #1782
+ * convention.
  */
 describe('ci.yml integration — windows ledger entry for issue #3248', () => {
-	test(`${DISPATCH_LANES_RESILIENCE} is an active entry in the windows ledger`, () => {
+	test(`${DISPATCH_LANES_RESILIENCE} is retired — NOT an active entry in the windows ledger`, () => {
 		expect(existsSync(WINDOWS_LEDGER_PATH)).toBe(true);
-		expect(activeEntries(WINDOWS_LEDGER_PATH)).toContain(
+		expect(activeEntries(WINDOWS_LEDGER_PATH)).not.toContain(
 			DISPATCH_LANES_RESILIENCE,
 		);
 	});
 
-	test(`${DISPATCH_LANES_RESILIENCE} is present exactly once in its ledger`, () => {
-		const dupes = activeEntries(WINDOWS_LEDGER_PATH).filter(
-			(entry) => entry === DISPATCH_LANES_RESILIENCE,
-		);
-		expect(dupes.length).toBe(1);
-	});
-
-	test(`${DISPATCH_LANES_RESILIENCE} carries the re-anchored OWNER/EXPIRY metadata (2026-11-12 #2973 trace)`, () => {
-		const block = metadataBlock(WINDOWS_LEDGER_PATH, DISPATCH_LANES_RESILIENCE);
-		// Re-anchored shape: OWNER ref #2973, EXPIRY 2026-12-20, and the
-		// criterion token — asserted as VALUES, not generic presence (impl
-		// review round 1: the old `toContain('#3248')` matched unrelated
-		// header text when the walk crossed into the ledger header).
-		expect(block).toMatch(/^#\s*OWNER:.*#2973/m);
-		expect(block).toMatch(/^#\s*EXPIRY:\s*2026-12-20\b/m);
-		expect(block).toContain(
-			'criterion: windows merge-group stability post-#3640',
-		);
-	});
-
-	test(`${DISPATCH_LANES_RESILIENCE} is scoped to the windows ledger only (no cross-ledger duplicate)`, () => {
+	test(`${DISPATCH_LANES_RESILIENCE} is absent from the general, macos, and integration ledgers (no cross-ledger migration)`, () => {
 		const otherLedgers = [
 			GENERAL_LEDGER_PATH,
 			MACOS_LEDGER_PATH,

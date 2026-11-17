@@ -54,7 +54,15 @@ jobs:
           key: ${{ runner.os }}-bun-${{ hashFiles('**/bun.lock') }}
           restore-keys: ${{ runner.os }}-bun-
       - name: Install dependencies
-        run: bun install --frozen-lockfile
+        # #3724 item 1: --ignore-scripts keeps bun from running the root
+        # `prepare` (bun run build) on this install — that build regenerates
+        # opencode-swarm.schema.json via scripts/generate-config-schema.ts
+        # BEFORE the drift check below reads the committed artifact, so a
+        # drifted committed schema was silently overwritten to green and the
+        # gate could never fail. Precedent: dependency-bump.yml. The jobs that
+        # legitimately need the generated artifact (build, package-check in
+        # ci.yml) still run it explicitly.
+        run: bun install --frozen-lockfile --ignore-scripts
       - name: Run drift check
         id: drift
         env:

@@ -3,6 +3,7 @@ import type { BigIntStats, Dirent } from 'node:fs';
 import { realpathSync } from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import type { SessionStatus } from '@opencode-ai/sdk';
 import { z } from 'zod';
 import {
@@ -248,6 +249,7 @@ import {
 import { swarmState } from '../state.js';
 import { resolveGhBinary } from '../tools/gh-evidence.js';
 import { getPrWorkflowToolCapability } from '../tools/tool-metadata.js';
+import { atomicWriteSwarmFile } from '../utils/atomic-write.js';
 import { sameProjectRoot } from '../utils/canonical-root.js';
 import { runExternalTool } from '../utils/external-tool-runner.js';
 import { log, warn } from '../utils/logger.js';
@@ -1003,7 +1005,8 @@ export interface PrReviewVerdictRejectionRecord {
 export const MAX_PR_REVIEW_VERDICT_REJECTIONS = 24;
 
 export interface PrWorkflowGateState {
-	schemaVersion: 1;
+	releaseReview?: { url: string; head: string };
+	schemaVersion: 1 | 2;
 	/** Monotonic durable revision used to reject stale same-session transitions. */
 	revision: number;
 	/** Stable identity that prevents revision-only ABA during mode replacement. */
@@ -1243,6 +1246,7 @@ export interface PrWorkflowGateState {
 }
 
 const GATE_SCHEMA_VERSION = 1 as const;
+const RELEASE_GATE_SCHEMA_VERSION = 2 as const;
 const MAX_WORKFLOW_BATCHES = 128;
 /**
  * Every valid PR_REVIEW base batch partitions the fixed six-dimension base
@@ -1749,9 +1753,17 @@ const PrFeedbackReviewHandoffRecordSchema = z
 	})
 	.strict();
 
+const ReleaseReviewGateBindingSchema = z.object({
+	url: z.string().url().max(2000),
+	head: z.string().regex(/^[a-f0-9]{40}$/),
+});
+
 const PrWorkflowGateStateSchema = z
 	.object({
-		schemaVersion: z.literal(GATE_SCHEMA_VERSION),
+		schemaVersion: z.union([
+			z.literal(GATE_SCHEMA_VERSION),
+			z.literal(RELEASE_GATE_SCHEMA_VERSION),
+		]),
 		revision: z.number().int().nonnegative().default(0),
 		workflowInstanceId: z.string().min(1).max(128).optional(),
 		sessionID: z.string().min(1),
@@ -1820,6 +1832,7 @@ const PrWorkflowGateStateSchema = z
 			.optional(),
 		prReviewReservedRunId: z.string().min(1).optional(),
 		prReviewArtifactRunId: z.string().min(1).optional(),
+		releaseReview: ReleaseReviewGateBindingSchema.optional(),
 		prReviewFindingsPath: z.string().min(1).optional(),
 		prReviewPartialBaseCoverage:
 			PrReviewPartialBaseCoverageRecordSchema.optional(),
@@ -2002,7 +2015,21 @@ const PrWorkflowGateStateSchema = z
 	// Passthrough keeps unknown fields opaque but present through any
 	// read-modify-write cycle, so older code degrades to "ignore the field
 	// it doesn't know about" instead of "refuse to read the file at all".
-	.passthrough();
+	.passthrough()
+	.refine(
+		(state) =>
+			state.releaseReview
+				? state.mode === 'PR_REVIEW' &&
+					(state.prHeadSha === undefined ||
+						state.prHeadSha === state.releaseReview.head)
+				: state.schemaVersion === GATE_SCHEMA_VERSION,
+		'Release review state must contain a matching PR_REVIEW binding',
+	)
+	.transform((state) =>
+		state.releaseReview
+			? { ...state, schemaVersion: RELEASE_GATE_SCHEMA_VERSION }
+			: state,
+	);
 
 function formatCheckoutRecoveryBlock(state: PrWorkflowGitState): string {
 	const evidence = JSON.stringify({
@@ -2194,6 +2221,8 @@ export async function activatePrWorkflow(
 	options: {
 		prHeadSha?: string;
 		requireCheckoutPreflight?: boolean;
+		/** Null requests an ordinary review; omitted allows internal reentry. */
+		releaseReview?: PrWorkflowGateState['releaseReview'] | null;
 		prUrl?: string;
 		// #2882 AC5: configured context authorizing a declared generic
 		// self-hosted GitLab MR URL as the PR_FEEDBACK target. Fail-closed
@@ -2295,6 +2324,16 @@ export async function activatePrWorkflow(
 				normalizedSessionID,
 			);
 			if (existing?.mode === mode) {
+				if (
+					options.releaseReview !== undefined &&
+					(existing.releaseReview?.url.toLowerCase() !==
+						options.releaseReview?.url.toLowerCase() ||
+						existing.releaseReview?.head !== options.releaseReview?.head)
+				) {
+					throw new Error(
+						'BLOCKED: active workflow does not match the release PR and head',
+					);
+				}
 				if (mode === 'PR_FEEDBACK' && options.prUrl) {
 					const requestedTarget = canonicalGitHubPrUrl(
 						options.prUrl,
@@ -2473,7 +2512,9 @@ export async function activatePrWorkflow(
 							: undefined;
 			}
 			const nextState: PrWorkflowGateState = {
-				schemaVersion: GATE_SCHEMA_VERSION,
+				schemaVersion: options.releaseReview
+					? RELEASE_GATE_SCHEMA_VERSION
+					: GATE_SCHEMA_VERSION,
 				revision: 0,
 				workflowInstanceId: randomUUID(),
 				sessionID: normalizedSessionID,
@@ -2484,6 +2525,9 @@ export async function activatePrWorkflow(
 					? { skillContractAdvisories: activationAdvisories }
 					: {}),
 				...(initialHead ? { prHeadSha: initialHead } : {}),
+				...(options.releaseReview
+					? { releaseReview: options.releaseReview }
+					: {}),
 				...(feedbackTargetUrl
 					? { prFeedbackTargetUrl: feedbackTargetUrl }
 					: {}),
@@ -3305,34 +3349,87 @@ export async function clearPrWorkflowGateState(
 	directory: string,
 	sessionID: string,
 	expectedRevision?: number,
-	options: { allowSalvagedRead?: boolean } = {},
+	options: {
+		allowSalvagedRead?: boolean;
+		expectedRecoveryRowRevision?: number;
+		releaseApproval?: PrWorkflowGateState;
+	} = {},
 ): Promise<void> {
 	const normalizedSessionID = normalizeSessionID(sessionID);
 	await withSessionStateMutation(directory, normalizedSessionID, async () => {
-		// The CAS-guard read is only meaningful when a caller supplies a
-		// revision to compare against; skip it entirely otherwise so a
-		// genuinely unreadable/malformed state file can still be cleared
-		// (the sole purpose of this escape hatch) instead of the read itself
-		// re-throwing the same failure it exists to recover from.
-		if (expectedRevision !== undefined) {
+		if (expectedRevision !== undefined || options.allowSalvagedRead) {
 			// Issue #2242 R4: the recovery abort path salvaged a revision from a
 			// schema-invalid state and still wants real concurrency protection.
 			// Reading it back through the GENERAL reader would re-throw the very
 			// `is invalid` failure the salvage exists to route around, forcing an
 			// unnecessary CAS drop. Only the abort path sets this flag; every
 			// other caller keeps the strict read byte-for-byte.
+			const recovery = options.allowSalvagedRead
+				? await readPrWorkflowGateStateForRecovery(
+						directory,
+						normalizedSessionID,
+					)
+				: null;
 			const current = options.allowSalvagedRead
-				? ((
-						await readPrWorkflowGateStateForRecovery(
-							directory,
-							normalizedSessionID,
-						)
-					)?.state ?? null)
+				? recovery?.state
 				: await readPrWorkflowGateStateFromDisk(directory, normalizedSessionID);
-			if (!current || current.revision !== expectedRevision) {
+			const changed =
+				expectedRevision === undefined
+					? recovery?.revisionSalvageable !== false ||
+						recovery.coordinationRowRevision !==
+							options.expectedRecoveryRowRevision
+					: current?.revision !== expectedRevision;
+			if (!current || changed) {
 				throw new Error(
 					'BLOCKED: PR workflow gate state changed during terminal completion; revalidate the current session state before retrying',
 				);
+			}
+			const runId = current.prReviewArtifactRunId;
+			const release = current.releaseReview;
+			const releaseReceipt =
+				release && runId && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(runId)
+					? validateSwarmPath(
+							directory,
+							path.join('pr-review', runId, 'native-completion.json'),
+						)
+					: undefined;
+			if (options.releaseApproval) {
+				if (
+					workflowIdentity(current) !==
+					workflowIdentity(options.releaseApproval)
+				) {
+					throw new Error(
+						'BLOCKED: release review workflow changed during completion',
+					);
+				}
+				if (
+					!release ||
+					release.head !== current.prHeadSha ||
+					!runId ||
+					!releaseReceipt
+				) {
+					throw new Error('BLOCKED: no valid release review run to complete');
+				}
+				await atomicWriteSwarmFile(
+					releaseReceipt,
+					JSON.stringify({
+						run_id: runId,
+						head: release.head,
+						url: release.url,
+						session_id: current.sessionID,
+						coverage: 'COMPLETE',
+						verdict: 'APPROVE',
+					}) + '\n',
+				);
+				await _test_exports.afterNativeReleaseReceiptWrite?.();
+			} else if (releaseReceipt) {
+				// A previous APPROVE may have persisted its receipt before an interrupted
+				// clear. A different terminal verdict or abort revokes that receipt.
+				await fsp
+					.unlink(releaseReceipt)
+					.catch((error: NodeJS.ErrnoException) => {
+						if (error.code !== 'ENOENT') throw error;
+					});
 			}
 		}
 		await deleteStateWhileLocked(directory, normalizedSessionID, {
@@ -5200,7 +5297,12 @@ export async function abortPrWorkflow(
 			directory,
 			sessionID,
 			casEscape ? undefined : (cancelRevision ?? state.revision),
-			{ allowSalvagedRead: recovery.salvaged },
+			{
+				allowSalvagedRead: recovery.salvaged,
+				...(casEscape && recovery.coordinationRowRevision !== undefined
+					? { expectedRecoveryRowRevision: recovery.coordinationRowRevision }
+					: {}),
+			},
 		);
 	} catch (error) {
 		// The `pr_workflow_aborted` record above is already durable, and the
@@ -5688,6 +5790,11 @@ async function bindPrWorkflowHeadWhileLocked(
 		throw new Error(
 			`BLOCKED: no active PR workflow gate for session "${normalizedSessionID}". ` +
 				'The gate must be activated before the PR head can be bound.',
+		);
+	}
+	if (state.releaseReview && normalizedHead !== state.releaseReview.head) {
+		throw new Error(
+			'BLOCKED: the requested head differs from the release review head',
 		);
 	}
 	await assertCurrentCheckoutHead(directory, normalizedHead, state.mode);
@@ -13938,7 +14045,21 @@ export async function enforcePrWorkflowToolBefore(
 	generatedAgentNames: readonly string[] = [],
 	callID?: string,
 ): Promise<void> {
-	let state = await readPrWorkflowGateState(directory, sessionID);
+	const normalizedTool = toolName.toLowerCase();
+	let state: PrWorkflowGateState | null;
+	try {
+		state = await readPrWorkflowGateState(directory, sessionID);
+	} catch (error) {
+		// These two tools use recovery-only readers and enforce their own
+		// authority. An unreadable gate still blocks every other tool.
+		if (
+			normalizedTool === 'abort_pr_workflow' ||
+			normalizedTool === 'pr_workflow_status'
+		) {
+			return;
+		}
+		throw error;
+	}
 	if (!state) {
 		// Issue #2108 safety boundary: a hand-DELETED gate state file must not
 		// silently reopen arbitrary pushes for a session whose events trail
@@ -13992,7 +14113,6 @@ export async function enforcePrWorkflowToolBefore(
 		state =
 			(await ensurePublicationGenerationCurrent(directory, sessionID)) ?? state;
 	}
-	const normalizedTool = toolName.toLowerCase();
 	const isDirectAgentTask =
 		normalizedTool === 'task' || normalizedTool === 'run_agent';
 	const requestedAgentFields = (['subagent_type', 'agent'] as const).filter(
@@ -14986,6 +15106,7 @@ export async function completePrWorkflow(
 	// mid-completion, bumping the durable revision; the terminal clear must
 	// CAS against that post-admission revision. Undefined otherwise.
 	let terminalClearRevision: number | undefined;
+	let releaseApproval: PrWorkflowGateState | undefined;
 	if (expectedMode === 'PR_REVIEW') {
 		// Issue #2383: the controller must declare its terminal verdict and the
 		// gate validates it against the settlement-derived coverage kind, so a
@@ -15586,6 +15707,13 @@ export async function completePrWorkflow(
 					`BLOCKED: PR_REVIEW ${ready.settlement.kind} completion allows report_verdict ${policyAllowed.join(' | ')}; got "${verdict}". Final finding policy and coverage do not permit this report.`,
 				);
 			}
+			if (
+				readyState.releaseReview &&
+				ready.settlement.kind === 'COMPLETE' &&
+				verdict === 'APPROVE'
+			) {
+				releaseApproval = readyState;
+			}
 			// Feedback F7: the ladder path completes only with every validation
 			// phase settled through composition or N-of-M admission — the skip
 			// disclosure's condition (an unsettled phase disclosed at an
@@ -15977,11 +16105,13 @@ export async function completePrWorkflow(
 		directory,
 		sessionID,
 		terminalClearRevision ?? state.revision,
+		{ releaseApproval },
 	);
 	return 'completed';
 }
 
 export const _test_exports = {
+	afterNativeReleaseReceiptWrite: undefined as (() => void) | undefined,
 	/**
 	 * Issue #3099 R6: `gh` availability seam. Read at ACTIVATION call time and
 	 * handed to the readiness service, so a test can pin presence or absence.
@@ -21683,6 +21813,8 @@ export interface PrWorkflowGateRecoveryRead {
 	disclosure?: string;
 	/** false when `revision` could not be salvaged — the CAS escape is required. */
 	revisionSalvageable: boolean;
+	/** SQLite row revision available even when the workflow revision is unreadable. */
+	coordinationRowRevision?: number;
 	/**
 	 * true when a `prFeedbackReadyToPublish` key is present in the raw bytes but
 	 * is itself unreadable. Callers MUST treat this as armed: silently dropping
@@ -21716,8 +21848,9 @@ export interface PrWorkflowGateRecoveryRead {
  *   - **Unparseable shadow bytes fail everywhere**, recovery included. There
  *     is nothing to salvage from that projection and guessing would be
  *     fabrication. A coordination payload that is unparseable or otherwise
- *     corrupt is recoverable only when this exact shadow has the same revision
- *     as the row generation, and the disclosure names that degraded source.
+ *     corrupt is recoverable when the shadow matches the row generation. When
+ *     the workflow revision is unreadable, require the parsed payload and shadow
+ *     to agree and use the SQLite row revision to detect a concurrent change.
  *   - **Schema-validation failure on parseable shadow JSON** salvages the
  *     fields abort actually reads — `{sessionID, mode, prHeadSha}` plus
  *     `revision`, `prFeedbackReadyToPublish` and `checkoutRecovery` when each
@@ -21840,15 +21973,22 @@ export async function readPrWorkflowGateStateForRecovery(
 		.nonnegative()
 		.safeParse(rawRecord.revision);
 	const salvagedHead = z.string().min(1).safeParse(rawRecord.prHeadSha);
+	const salvagedRelease = ReleaseReviewGateBindingSchema.safeParse(
+		rawRecord.releaseReview,
+	);
+	const salvagedReleaseRun = PrReviewRunIdSchema.safeParse(
+		rawRecord.prReviewArtifactRunId,
+	);
 	const salvagedActivatedAt = z
 		.string()
 		.min(1)
 		.safeParse(rawRecord.activatedAt);
 	const salvagedUpdatedAt = z.string().min(1).safeParse(rawRecord.updatedAt);
 	if (
-		coordinationGeneration !== undefined &&
-		(!salvagedRevision.success ||
-			salvagedRevision.data !== coordinationGeneration)
+		coordination.kind === 'corrupt' &&
+		(salvagedRevision.success
+			? salvagedRevision.data !== coordination.generation
+			: !isDeepStrictEqual(coordination.parsedPayload, rawRecord))
 	) {
 		throw invalidError;
 	}
@@ -21914,6 +22054,17 @@ export async function readPrWorkflowGateStateForRecovery(
 				: isoNow(),
 			updatedAt: salvagedUpdatedAt.success ? salvagedUpdatedAt.data : isoNow(),
 			...(salvagedHead.success ? { prHeadSha: salvagedHead.data } : {}),
+			...(salvagedMode.data === 'PR_REVIEW' &&
+			salvagedRelease.success &&
+			salvagedHead.success &&
+			salvagedHead.data === salvagedRelease.data.head
+				? {
+						releaseReview: salvagedRelease.data,
+						...(salvagedReleaseRun.success
+							? { prReviewArtifactRunId: salvagedReleaseRun.data }
+							: {}),
+					}
+				: {}),
 			...(salvagedArmed.success
 				? { prFeedbackReadyToPublish: salvagedArmed.data }
 				: {}),
@@ -21928,9 +22079,12 @@ export async function readPrWorkflowGateStateForRecovery(
 		schemaErrors,
 		disclosure,
 		revisionSalvageable: salvagedRevision.success,
+		...(coordination.kind === 'corrupt'
+			? { coordinationRowRevision: coordination.rowRevision }
+			: {}),
 		armedShapeUnreadable,
-		// Every prReview* field was dropped by this minimal reconstruction; the
-		// status projection must not read their absence as "no dispatches yet".
+		// The review coverage projection was dropped by this minimal
+		// reconstruction; status must not read it as "no dispatches yet".
 		prReviewProjectionDropped: true,
 	};
 }

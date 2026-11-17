@@ -101,13 +101,14 @@ describe('Command registration parity — classification baselines', () => {
 		// After the fix, only these additions are permitted to differ.
 		// `pr subscribe` / `pr unsubscribe` moved from human-only to agent
 		// Newer agent-callable commands added to the allowlist since the
-		// pre-fix baseline was frozen. All are read-only/diagnostic and
-		// therefore agent-appropriate: costs (token/cost totals), ci-simulate
+		// pre-fix baseline was frozen. pr-review activates review workflow
+		// state. Diagnostic commands include costs (token/cost totals), ci-simulate
 		// (dry-run CI), guardrail explain (dry-run guardrail preview),
 		// guardrail-log (read decision log), lanes (list worktree lanes),
 		// memory consolidation-log (read consolidation log), gate-audit (bounded
 		// production audit), and gate-stats (offline audit reducer). `review`
 		const NEWER_ALLOWLIST_ADDITIONS = [
+			'pr-review',
 			'ci-simulate',
 			'costs',
 			'guardrail explain',

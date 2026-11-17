@@ -135,6 +135,8 @@ describe('epic phase review bash retry: each refusal arm alone', () => {
 				name: 'APIError',
 				message: 'forbidden',
 				category: 'provider.authentication_configuration',
+				retryClass: 'operator_action',
+				risk: 'high',
 			},
 		],
 		[
@@ -144,6 +146,8 @@ describe('epic phase review bash retry: each refusal arm alone', () => {
 				statusCode: 403,
 				message: 'free tier',
 				category: 'provider.unknown',
+				retryClass: 'do_not_retry',
+				risk: 'medium',
 			},
 		],
 		[
@@ -152,6 +156,8 @@ describe('epic phase review bash retry: each refusal arm alone', () => {
 				name: 'ProviderAuthError',
 				message: 'no credentials',
 				category: 'provider.unknown',
+				retryClass: 'do_not_retry',
+				risk: 'medium',
 			},
 		],
 	];
@@ -176,6 +182,8 @@ describe('epic phase review bash retry: each refusal arm alone', () => {
 			name: 'APIError',
 			message: 'upstream exploded',
 			category: 'provider.unknown',
+			retryClass: 'do_not_retry',
+			risk: 'medium',
 		});
 		// Exactly one dispatch: no bash retry, and a failed reviewer ends the review.
 		expect(calls).toHaveLength(1);

@@ -18,7 +18,10 @@
  *   - AC-008: absolute 250ms/call ceiling instead of a <10% percentage over
  *     a trivial echo baseline (per-command sandbox cost is fixed; CI measured
  *     191.73% overhead) + positive control that the wrapped write landed.
- *   - AC-010: writes under os.homedir() instead of root-owned /Users.
+ *   - AC-010: writes land in a test-created sandbox home, NOT the real
+ *     homedir (the pre-fix variant wrote under os.homedir() — the exact
+ *     anti-pattern AC-010 forbids — so this bullet documents the
+ *     correction's direction, not a permission to write the real home).
  *   - Recovery: resets the probe memo AFTER executor1's construction seals
  *     it, so the false-probe mock actually reaches executor2.
  *
@@ -28,7 +31,7 @@
 
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { existsSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { SandboxError } from '../../../src/sandbox/executor';
@@ -200,35 +203,49 @@ describe('macOS sandbox-exec activation tests (issue #2590 follow-ups)', () => {
 			async () => {
 				const Executor = await getMacExecutor();
 
-				// Use the user's home directory (broad scope on macOS). The
-				// previous /Users target failed on hosted CI runners regardless
-				// of the sandbox: /Users is root-owned (755), so the runner user
-				// gets EACCES at the OS layer even when the sandbox allows the
-				// subpath (issue #2590 CI, 2026-09-07).
-				const broadScope = os.homedir();
+				// #3165 C-3: the broad scope is a test-created sandbox home
+				// (with a nested subdir so the scope is genuinely broad), NEVER
+				// the developer's real home — the pre-fix version wrote a probe
+				// file under the real os.homedir() on every darwin run (the
+				// original /Users target from #2590 was replaced by homedir();
+				// both write outside the test's sandbox).
+				const broadScope = canonicalMkdtemp('ac010-broad-');
+				mkdirSync(path.join(broadScope, 'nested-scope'));
 
-				const executor = new Executor([broadScope]);
-
-				if (!executor.isAvailable()) {
-					return;
-				}
-
-				// Write to a path inside the broad scope — should succeed
-				const testFile = path.join(
-					broadScope,
-					`ac010-broad-scope-${process.pid}.txt`,
-				);
-				// The probe file lands in the developer's real home: remove it in
-				// a finally so a failed assertion cannot leave it behind.
 				try {
+					const executor = new Executor([broadScope]);
+
+					if (!executor.isAvailable()) {
+						// Fail, do not skip: a vacuous pass cannot validate AC-010
+						// (plan-critic round 2). macOS runners ship sandbox-exec.
+						// (Inside the try so the finally still cleans the sandbox
+						// on this throw — plan-critic round 4.)
+						throw new Error(
+							'AC-010 requires an available macOS executor; availability probe failed — refusing to pass vacuously',
+						);
+					}
+
+					// Write to a path inside the broad scope — should succeed.
+					// The mkdtemp basename is already unique per run, so the
+					// probe name inherits it without a clock read (check:test-
+					// clock; plan-critic round 5).
+					const probeName = `ac010-${path.basename(broadScope)}.txt`;
+					const testFile = path.join(broadScope, probeName);
 					const result = spawnWrapped(
 						executor,
 						`echo "ac010 legitimate" > "${testFile}"`,
 						[broadScope],
 					);
+					// Positive: the sandbox write landed.
+					expect(existsSync(testFile), 'sandbox probe file exists').toBe(true);
+					// Negative: nothing leaked into the real home.
+					expect(
+						existsSync(path.join(os.homedir(), probeName)),
+						'no probe file under the real home',
+					).toBe(false);
 					expect(result.success).toBe(true);
 				} finally {
-					rmSync(testFile, { force: true });
+					rmSync(broadScope, { recursive: true, force: true });
 				}
 			},
 		);

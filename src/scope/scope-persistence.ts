@@ -1903,6 +1903,23 @@ interface ScopeClaimReceipt {
 /**
  * Cross-process, successor-first claim transaction. All contenders for one
  * pending generation lock the same stable receipt path.
+ *
+ * #3403 (trust model): the claim correlates a live `pending_child` generation
+ * on the (parentSessionId, dispatchCallId) pair — both host-typed (host session
+ * id / Task part id). `childSessionId` is TOOL-EMITTED metadata on v1 hosts
+ * (v2 synthesizes it from host progress, #3401), so whatever child id the
+ * metadata names can become the claim winner. Outcomes, all typed:
+ *   - no live pending generation for the pair → SCOPE_NOT_DECLARED (no scope
+ *     binding claimed, no session identity mutated; the caller's #3036 lineage
+ *     write is separate and is kept on this path);
+ *   - an active successor already owned by the same child → ok (idempotent);
+ *   - a different child already owns it → SCOPE_BINDING_ALREADY_CLAIMED;
+ *   - more than one live generation matches → SCOPE_BINDING_AMBIGUOUS;
+ *   - the generation has expired → SCOPE_BINDING_EXPIRED;
+ *   - storage failures → SCOPE_BINDING_PERSISTENCE_FAILED / store-overload codes.
+ * The caller (delegation-gate taskMetadata) stamps the winner's session
+ * identity after a successful claim and rolls its lineage write back on every
+ * other outcome, including a throw.
  */
 export async function claimScopeBindingForChildDurably(input: {
 	directory: string;

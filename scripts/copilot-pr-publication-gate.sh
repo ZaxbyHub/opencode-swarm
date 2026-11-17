@@ -44,6 +44,15 @@ if [[ -f .swarm/evidence/pr_body.md ]]; then
       missing=1
     fi
   done
+  # Local mirror of the remote pr-standards ORDER contract (#3601): the three
+  # sections must also appear in the order Summary -> Invariant audit ->
+  # Test plan. Resolved relative to this script so a temp-repo cwd cannot
+  # shadow it; guarded so the aggregate missing-evidence handling below still
+  # runs (set -e safe).
+  gate_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  if ! bash "$gate_dir/check-publication-body-order.sh" .swarm/evidence/pr_body.md; then
+    missing=1
+  fi
 else
   echo "Blocked: missing .swarm/evidence/pr_body.md (write the exact PR body you intend to publish)."
   missing=1
