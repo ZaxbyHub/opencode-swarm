@@ -16,6 +16,7 @@ import {
 	_internals as dispatchInternals,
 	executeDispatchLanesAsync,
 } from '../../../src/tools/dispatch-lanes.js';
+import { safeRmRecursive } from '../../helpers/safe-test-dir.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 import { initializeGitRepository } from '../helpers/git-repository.js';
 
@@ -128,8 +129,13 @@ afterEach(async () => {
 	gateInternals.resolvePrReviewDiffStats = originalResolveDiffStats;
 	gateInternals.resolvePrReviewDiffStatsAsync = originalResolveDiffStatsAsync;
 	gateInternals.nowMs = originalNowMs;
-	await fs.rm(directory, { recursive: true, force: true });
-});
+	// Raw recursive fs.rm over a live WAL SQLite DB + git-init tree has ZERO
+	// EBUSY/EPERM retry budget — the exact windows teardown class sibling
+	// retirements cured (issue #2973 quarantine-debt-zero; precedent
+	// dispatch-lanes-critic-severity-authoritative-3362.test.ts). Sync, with
+	// the sibling's 30s hook budget.
+	safeRmRecursive(directory);
+}, 30_000);
 
 describe('dispatch_lanes PR review resilience follow-ups', () => {
 	test('rolls back a staged canary admission when session.create fails before any child record exists', async () => {

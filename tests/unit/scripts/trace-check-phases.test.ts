@@ -92,6 +92,43 @@ function replaceTree(dir: string, tree: string) {
 }
 
 describe('trace-check.sh later phases', () => {
+	test('phase 2.5 checks uniqueness only for executable IDs', () => {
+		const worktree = repo();
+		const dir = setup(worktree);
+		const tree = git(worktree, 'rev-parse', 'HEAD^{tree}');
+		const summary = path.join(dir, '01-issue-summary.md');
+		fs.writeFileSync(
+			summary,
+			fs
+				.readFileSync(summary, 'utf8')
+				.replace(
+					'## Classification',
+					'- [ ] AC3: documented\n## Classification',
+				),
+		);
+		const first =
+			'| AC1 | DISCRIMINATING | C1 | cmd | fail | RED | pending | evidence |';
+		const docs =
+			'| AC2 | NON-EXECUTABLE | DOCS_ONLY | - | - | - | pending | docs |';
+		manifest(dir);
+		fs.writeFileSync(path.join(dir, 'repro/C1.base.log'), 'fail\n');
+		reproduction(dir, [first, docs, docs.replace('AC2', 'AC3')].join('\n'));
+		replaceTree(dir, tree);
+		const args = ['phase', '2.5', '--slug', 'issue-1'];
+		const valid = run(worktree, args);
+		expect(valid.code, valid.out).toBe(0);
+		expect(valid.out).toContain('OK acceptance-check-ids');
+		reproduction(
+			dir,
+			[first, first.replace('AC1', 'AC2'), docs.replace('AC2', 'AC3')].join(
+				'\n',
+			),
+		);
+		replaceTree(dir, tree);
+		const duplicate = run(worktree, args);
+		expect(duplicate.code).toBe(1);
+		expect(duplicate.out).toContain('duplicate check id C1');
+	}, 30000);
 	test('phase 2.5 rejects table and checkpoint integrity failures', () => {
 		// note: multiple sequential script invocations under Windows Git Bash;
 		// extend beyond the default per-test budget on Windows Git Bash.

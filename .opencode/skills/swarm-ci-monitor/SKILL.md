@@ -10,7 +10,7 @@ description: >
 disable-model-invocation: true
 metadata:
   audience: swarm-plugin
-  swarm-contract-digest: "db0fcef20ebe"
+  swarm-contract-digest: "e428ab09ce23"
 ---
 
 # Swarm CI Monitor
@@ -60,7 +60,7 @@ MCP tools and verify availability first:
 
 | Capability needed | `gh` CLI | Example remote-MCP shape (resolve the real names via ToolSearch) |
 |---|---|
-| `gh pr checks <N>` | `mcp__github__pull_request_read` method `get_check_runs` |
+| Exact-head check runs | A paginated commit check-runs operation, such as `get_check_runs` when it exposes revision and pagination evidence |
 | `gh pr view <N> --json mergeable,mergeStateStatus,reviewDecision` | `mcp__github__pull_request_read` method `get` |
 | `gh run view <run> --log` | `mcp__github__get_job_logs` with `job_id`, `return_content: true` |
 
@@ -105,6 +105,30 @@ the active durable task/plan checkpoint and reload it on resume. Never reset
 the counter to 5 after compaction.
 
 ### 2a. Fetch check runs for the PR head SHA
+
+Resolve the PR number, repository, target base and full head SHA together. On
+a host with `gh`, Git and Bun, run `bun <skill-dir>/scripts/observe-ci.ts
+<owner>/<repo> <N> <head-sha>`. Save the JSON in the active task checkpoint. It
+reports the exact-head census as `complete` or `incomplete` with a reason and
+any validated partial results. A JSON result exits zero, including an
+incomplete result. Refresh the PR identity on resume and obtain a new
+observation when the head or base changed.
+
+On an MCP-only host, enumerate all check-run pages for the exact head. Require
+the same head, a consistent total, unique check IDs and an exhausted listing.
+Record an incomplete observation with its reason when a page, identity, or
+completeness evidence is missing.
+
+On either host, record the census state and any reason it is incomplete. To
+advance, independently verify all applicable required checks and legacy status
+contexts for the exact PR head and target base. Use `gh pr checks --required`
+with exact-head verification, or equivalent GitHub MCP and protection evidence.
+The partial census and a zero observer exit code supply no required-check verdict.
+An incomplete census may advance with sufficient required-green evidence. If
+requiredness or current status cannot be established, retry the missing read
+within the existing bounds or stop and report what is missing. If an unchanged
+page or suite limit makes the census incomplete, keep that result and use the
+required-check evidence without repeatedly fetching the same census.
 
 Determine green state by these rules (re-stated here so this merge gate does
 not depend on ci-fix-monitor's generated file being regenerated unchanged):
@@ -229,14 +253,19 @@ gate is Step 4b. Run this step fresh every time control reaches Step 4 —
 including after a Step 2 loop-back — never skip it because an earlier pass
 already ran once in this invocation.
 
-1. Re-fetch check runs for the **current** PR head SHA, and record that SHA:
-   Step 4a merges only that commit. If any required check
-   is stale (ran against an older SHA) → `gh run rerun --failed` for the
-   transient/failed run, or wait and re-fetch at most 3× (~1 min apart); if
-   still stale after that, escalate per Step 5. Never merge on a stale-green
-   check. This is the one failure type Step 2's fix loop can actually address
-   — on failure, go back to Step 2 (counts as a new iteration against the
-   budget); abort per Step 5 if the budget is exhausted.
+1. Resolve the repository, PR number, target base and current head SHA again.
+   Re-fetch authoritative requiredness and status evidence for that identity
+   using Step 2a's rule, and record that SHA:
+   Step 4a merges only that commit. A changed head or base requires new
+   evidence for the applicable checks. An incomplete census may
+   proceed with fresh, independently verified required-green evidence. Stop
+   before Step 4 if requiredness or current status is unknown or any required
+   check is non-green under Step 2a's rules.
+   If any required check ran against an older SHA, rerun a transient failed
+   run with `gh run rerun --failed`, or wait and re-fetch at most 3× (~1 min
+   apart). If the evidence is still stale, escalate per Step 5. On a check
+   failure, return to Step 2 within the existing iteration budget, or abort
+   per Step 5 if the budget is exhausted.
 2. Re-verify `mergeable: MERGEABLE` + `mergeStateStatus: CLEAN` (a base push
    or merge-queue entry can change this between green-detection and merge). If
    this regresses, Step 2 has no mechanism to fix a mergeable-state
@@ -314,6 +343,11 @@ direct base. If the call fails, ask the user; never guess.
    "queue timeout" terminal (distinct from "post-merge mismatch") only after
    90 minutes with no resolution. Once `state == "MERGED"`, take
    `mergeCommit.oid` as the merge SHA and proceed to 4b.
+   Record a known candidate Actions run ID with the task when available. Re-run
+   the observation with `--candidate-run <run-id>` to report its distinct SHA
+   and status. The run must be a `merge_group` run in the same repository with
+   the target base and PR number in its queue branch. Stale or unavailable
+   candidate status leaves terminal proof to the PR and independent Git check.
 3. **Error.** "not mergeable", "merge conflict", or any other error → **do not
    retry blindly.** Abort and report. A clean merge/enqueue is expected
    because Step 3 just confirmed `CLEAN`; an error here means state changed
@@ -325,6 +359,13 @@ local-git check first: if the base tip already reflects a merge, treat it as
 case 1/2 above; if not, treat the ambiguous response as an error per case 3.
 
 ### 4b. Post-merge confirmation (the independent gate)
+
+The saved read-only observation reports `merged` when the exact PR reports its
+merge SHA and that SHA is independently proven to be on the advertised target
+base by local Git ancestry. If the needed objects or Git capability are
+unavailable, record `unconfirmed`. MCP-only hosts need equivalent independent
+Git proof to report a terminal merge. Apply the independent gate below before
+declaring this workflow complete.
 
 Confirm the merge via a **different system** than the GitHub API — the local
 git object DB — so this gate does not share the stale-fetch failure mode of

@@ -79,6 +79,10 @@ Honest-class rules:
 **NON-EXECUTABLE criteria.** Some criteria have no meaningful executable check — docs-only changes, host-only behavior (GUI/TUI surfaces a check cannot drive), maintainer product decisions, unavailable external services. For those, write `class: NON-EXECUTABLE(<reason>)` with the closed reason enum `DOCS_ONLY | HOST_ONLY | PRODUCT_DECISION | EXTERNAL_SERVICE_UNAVAILABLE`, replace `argv`/`expect` with **named substitute evidence** (a review artifact, a decision recorded on the issue, a captured external state), and get plan-critic approval for the substitution — never force an artificial executable check; that is the vacuous shape the rule above forbids.
 - `argv` is one command, runnable from the repository root, POSIX-safe, deterministic (use the repo's test-runner flags for hermetic runs — see repo notes). `expect` describes what the **base** leg shows; the head leg's pass condition lives in the check's own exit logic.
 
+### Published acceptance commands
+
+The published `argv:` is the command the trace must prove at both revisions. When it cannot witness the fix, disclose the affected criterion, both commands, and their observed outcomes before asking the maintainer to correct the published criterion.
+
 ### Evidence rules
 
 - Every claim is anchored: permalinks embed the full SHA; before filing, re-verify each claim at that commit and say so in the preamble.
@@ -229,8 +233,12 @@ In diff mode, selection is based on committed branch changes in
 exact array-form command and cwd for each item, the `origin/main` diff base,
 per-item terminal status, bounded output, timing, signal, and cleanup outcome.
 Terminal statuses are `passed`, `failed`, `crashed`, `timed_out`, `missing`,
-and `skipped`; a run containing an unresolved crash, timeout, missing item, or
-skip is `incomplete` rather than a complete pass. Run-level statuses are
+`skipped`, and `output_truncated` (a child whose run completed with no
+timeout and no crash — tree cleanup succeeded, no signal, known exit code —
+but whose bounded stdout/stderr reader missed its deadline; the terminal
+evidence was only partially observed, so the row counts as failed (#3664)); a
+run containing an unresolved crash, timeout, missing item, or skip is
+`incomplete` rather than a complete pass. Run-level statuses are
 `passed`, `failed`, `incomplete`, and `no_op`, with `no_op` reserved for an
 empty diff selection.
 

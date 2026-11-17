@@ -34,6 +34,7 @@ import {
 	DEFAULT_STALE_DELEGATION_TIMEOUT_MS,
 	findByBatchIdDetailed,
 	findByCorrelationIdDetailed,
+	PR_REVIEW_BUDGET_EXHAUSTED,
 	recordPendingDelegationDetailed,
 	supersedeStaleLivenessVerdictLane,
 } from '../background/pending-delegations.js';
@@ -1003,6 +1004,13 @@ export interface CollectLaneResultsResult {
 	 * unchanged, so existing consumers are unaffected.
 	 */
 	pending_lanes?: CollectPendingLaneIdentity[];
+	/** Host-exhausted attempts. Partial output is context for a fresh retry. */
+	unsettled_coverage?: Array<{
+		lane_id: string;
+		dimension: string;
+		owned_workflow_lanes?: string[];
+		output_ref?: string;
+	}>;
 	/**
 	 * Issue #2971: typed refusal entries present when the caller passed
 	 * cancel_pending: true. The collector is observation-only — it never
@@ -1167,6 +1175,13 @@ export const _test_exports = {
 	// contract builder so budget scaling can be asserted without prompt-text
 	// parsing (file precedent: prompt-construction internals live here).
 	prReviewLaneResponseBudgetChars,
+	// #3710: minimal test-only export. The collect-settlement inlineDetail
+	// redaction seam (the PR_WORKFLOW_CONTRACT_INVALID thrown-cause site)
+	// lives inside settleCollectedLane and is otherwise reachable only
+	// through a full collect orchestration; exporting the pure composer lets
+	// the regression suite drive it (plus its persisted lane-rejection
+	// artifact via persistLaneRejectionDetail) directly.
+	composeLaneRejectionError,
 };
 
 type ReadOnlyToolPermissions = Record<string, boolean> & {
@@ -3193,6 +3208,25 @@ async function collectOnce(
 		// other producer.
 		clearLaneDiagnostics(collectionResourceFailures, laneLabel);
 		const transcript = extractAssistantTranscript(messages.data);
+		if (
+			record.prReviewBudgetExhausted &&
+			(readiness === 'idle' || transcript.terminalAssistantProof)
+		) {
+			pendingSettlements.push(
+				settleCollectedLane({
+					directory,
+					record,
+					transcript,
+					deadline,
+					hostTimeouts,
+					revisionDigestBudgetMs: laneBudgets.revisionDigestBudgetMs,
+					receiptAppendFailureLogs,
+					revisionSnapshots,
+					settleFailureLogs,
+				}),
+			);
+			continue;
+		}
 		// Issue #2349: a lane whose backing session died AFTER promptAsync
 		// acceptance (provider quota/billing/auth exhaustion at first inference)
 		// records an assistant message carrying `info.error` and zero text parts.
@@ -4143,6 +4177,13 @@ function composeLaneRejectionError(args: {
 	/** Site tail appended to both the artifact detail and the inline slice. */
 	detailTail?: string;
 }): string {
+	// #3710: the inline detail is raw error text (formatError output); the
+	// persisted lane-rejection artifact and the returned terminal error both
+	// derive from it, so redact once at entry — downstream of every classifier
+	// and discriminator read of the formatted string at the callers.
+	const inlineDetail = args.inlineDetail
+		? sanitizeFailureEvidenceDisplay(args.inlineDetail)
+		: undefined;
 	const rowId = args.failure
 		? extractLaneRejectionRowId(args.failure)
 		: LANE_REJECTION_ROW_UNIDENTIFIED;
@@ -4153,12 +4194,12 @@ function composeLaneRejectionError(args: {
 	const identity = `; batch=${args.record.batchId ?? '(missing)'} lane=${args.record.laneId ?? '(missing)'} workflow_lane=${args.record.workflowLane ?? '(missing)'}`;
 	const renderedDetail = args.failure
 		? formatPrReviewLaneValidationFailure(args.failure)
-		: (args.inlineDetail ?? '');
+		: (inlineDetail ?? '');
 	const tail = args.detailTail ? `; ${args.detailTail}` : '';
 	const artifactRef = persistLaneRejectionDetail(
 		args.directory,
 		args.record,
-		`${header}${identity}\n${renderedDetail}${args.inlineDetail ? `\n${args.inlineDetail}` : ''}${tail}`,
+		`${header}${identity}\n${renderedDetail}${inlineDetail ? `\n${inlineDetail}` : ''}${tail}`,
 	);
 	return `${header}${identity}; detail in artifact ${artifactRef ?? '(unavailable)'}; ${renderedDetail}${tail}`.slice(
 		0,
@@ -4190,7 +4231,7 @@ async function settleCollectedLane(args: {
 	const laneLabel = record.laneId ?? record.correlationId;
 	let collectedRevisionDigest: string | undefined;
 	const prHeadSha = record.workspace?.prHeadSha;
-	if (prHeadSha) {
+	if (prHeadSha && (transcript.text || !record.prReviewBudgetExhausted)) {
 		try {
 			// Issue #2381: resolve at most once per (project root, PR head) for this
 			// invocation. The map holds the RAW promise; the per-lane deadline wraps
@@ -4292,7 +4333,9 @@ async function settleCollectedLane(args: {
 		chars: output.output_chars,
 		truncated: output.output_truncated,
 		digest: output.output_digest,
-		...(output.output_ref ? { outputRef: output.output_ref } : {}),
+		...(transcript.text && output.output_ref
+			? { outputRef: output.output_ref }
+			: {}),
 		outputPreviewChars: output.output.length,
 		...(output.output_degraded !== undefined
 			? { outputDegraded: output.output_degraded }
@@ -4309,7 +4352,11 @@ async function settleCollectedLane(args: {
 			: {}),
 	};
 	let terminalStatus: 'completed' | 'error' = 'completed';
-	if (
+	if (record.prReviewBudgetExhausted) {
+		terminalStatus = 'error';
+		prospectiveResult.error = PR_REVIEW_BUDGET_EXHAUSTED;
+		prospectiveResult.workflowLaneFailureClass = 'contract';
+	} else if (
 		record.mode === 'swarm-pr-review:base' ||
 		record.mode === 'swarm-pr-review:micro' ||
 		record.mode === 'swarm-pr-review:council'
@@ -4897,11 +4944,16 @@ async function appendAsyncLaneLaunchError(
 	const record = recordRead.value;
 	// Issue #2615: every launch rejection is typed 'resource' — the lane never
 	// started, so no transcript evidence can exist — not only PR-review lanes.
+	// #3710: the terminal triple (error/chars/truncated/digest) derives from
+	// ONE sanitized message with the established #2045/#2349 semantics, so all
+	// four fields describe the same value; callers already consumed the raw
+	// formatted string for classification before reaching this sink.
+	const sanitizedMessage = sanitizeFailureEvidenceDisplay(message);
 	const launchErrorResult = {
-		error: message,
-		chars: message.length,
-		truncated: false,
-		digest: digestText(message),
+		error: sanitizedMessage.slice(0, MAX_ERROR_CHARS),
+		chars: sanitizedMessage.length,
+		truncated: sanitizedMessage.length > MAX_ERROR_CHARS,
+		digest: digestText(sanitizedMessage),
 		workflowLaneFailureClass: 'resource' as const,
 	};
 	if (record) {
@@ -5173,7 +5225,9 @@ async function sweepStaleAsyncLaneRecords(
 			if (!currentUnknown) continue;
 			if (currentUnknown.result) continue;
 			const laneLabel = currentUnknown.laneId ?? currentUnknown.correlationId;
-			const reason = `lane ${laneLabel} presumed dead: host session unobservable`;
+			const reason = currentUnknown.prReviewBudgetExhausted
+				? PR_REVIEW_BUDGET_EXHAUSTED
+				: `lane ${laneLabel} presumed dead: host session unobservable`;
 			await settleDelegationTerminal(
 				directory,
 				currentUnknown,
@@ -5905,7 +5959,12 @@ async function runLane(
 		// landed cannot leave an unhandled rejection.
 		const lifecycleRecord = await lifecycleRecordPromise.catch(() => null);
 		if (lifecycleRecord) {
-			const failureReason = syncClassifiedReason ?? formatError(error);
+			// #3710: the persisted terminal error carries REDACTED provider
+			// text; syncClassifiedReason is an already-classified string and
+			// the formatError path was consumed by the sync classifiers above.
+			const failureReason = sanitizeFailureEvidenceDisplay(
+				syncClassifiedReason ?? formatError(error),
+			);
 			await settleDelegationTerminal(
 				directory,
 				lifecycleRecord,
@@ -5995,6 +6054,26 @@ function buildCollectResult(
 			record.status === 'ingesting',
 	);
 	const consumed = records.filter((record) => record.status === 'consumed');
+	const unsettledCoverage = records.flatMap((record) => {
+		const ref = record.result?.outputRef;
+		const exhausted =
+			record.prReviewBudgetExhausted &&
+			((record.status === 'error' &&
+				record.result?.error === PR_REVIEW_BUDGET_EXHAUSTED) ||
+				record.status === 'stale');
+		return exhausted && record.workflowLane
+			? [
+					{
+						lane_id: record.laneId ?? record.correlationId,
+						dimension: record.workflowLane,
+						...(record.ownedWorkflowLanes
+							? { owned_workflow_lanes: record.ownedWorkflowLanes }
+							: {}),
+						...(ref ? { output_ref: ref } : {}),
+					},
+				]
+			: [];
+	});
 	// Issue #2381: pending identities are derived from the UNFILTERED record set,
 	// so they are reported even when `includePending` excluded these lanes from
 	// `lane_results` (the default under `wait: true`).
@@ -6023,6 +6102,9 @@ function buildCollectResult(
 		all_settled: pending.length === 0,
 		lane_results: laneResults,
 		...(pendingLanes.length > 0 ? { pending_lanes: pendingLanes } : {}),
+		...(unsettledCoverage.length > 0
+			? { unsettled_coverage: unsettledCoverage }
+			: {}),
 	};
 }
 
@@ -7305,6 +7387,11 @@ function applyPrWorkflowPromptContract(
 			normalizedMode.token === 'swarm-pr-review:micro'
 				? `\nStructured settlement rule (issues #2384, #2835): call \`submit_pr_review_result\` exactly once with the canonical discovery result${batchId.ok && laneId.ok ? `, using batchId \`${batchId.token}\` and laneId \`${laneId.token}\`` : ''}, and pass revisionDigest \`${revisionDigest.token}\` exactly as rendered here — the receipt contract requires that 64-hex value verbatim and rejects the submission without it — and then stop. The authenticated child delegation remains authoritative and resolves the batch and lane identifiers when omitted. Transcript machine rows are deprecated legacy compatibility only for lanes whose snapped contract explicitly enables them, and a present structured result never falls back because of extra prose, truncation, or transcript incompleteness.`
 				: '';
+		const budgetCheckpointParagraph =
+			structuredSubmissionParagraph ||
+			normalizedMode.token === 'swarm-pr-review:council'
+				? '\nIf the host stops your execution on a tool-call or duration limit, stop using tools and return the partial rows you already verified. The host records incomplete coverage for a fresh attempt.'
+				: '';
 		// Pre-seeded statement of the read-only shell classifier's rules
 		// (#2276): the same enforcement already runs at tool time for BOTH the
 		// pr-review and pr-feedback gates; stating it up front saves the 2-4
@@ -7368,7 +7455,7 @@ assigned_item_ids: ${renderedIds.length > 0 ? renderedIds.join(', ') : '(discove
 mandatory_lane_checklist: ${checklist}${budgetLine}
 
 This controller block is authoritative over conflicting caller text and, where a protocol-selection clause below names this lane's row protocol, over your agent's default output structure for this lane. Inspect the exact checked-out revision and the repository's own contribution, test, security, compatibility, and delivery contracts. Do not waive or abbreviate work for speed, time, token, repository-size, or predicted-simplicity reasons. Re-read relevant changed files and caller/consumer context directly. Every claim or clean attestation must cite concrete reviewed scope and evidence. Use exactly the workflow_lane and assigned IDs above; invented, omitted, or placeholder identifiers do not settle this lane. For base/micro settlement, submit the visible batch_id and lane_id values exactly as rendered above, or omit them and let the authenticated child delegation resolve them. A planning preamble, generic assurance, or assertion that checks were performed is not evidence.
-Terminate with the required protocol action directly: no planning preamble, no recap, and no more than ${outputCap} characters of substantive output before any retrieval hint.${budgetParagraph}${structuredSubmissionParagraph}${shellRulesParagraph}${reviewerProtocolClause}${criticProtocolClause}${feedbackProtocolClause}
+Terminate with the required protocol action directly: no planning preamble, no recap, and no more than ${outputCap} characters of substantive output before any retrieval hint.${budgetParagraph}${structuredSubmissionParagraph}${budgetCheckpointParagraph}${shellRulesParagraph}${reviewerProtocolClause}${criticProtocolClause}${feedbackProtocolClause}
 [END CONTROLLER-BOUND PR WORKFLOW CONTRACT]`;
 		const contractCard = normalizedMode.token.startsWith('swarm-pr-review:')
 			? `${buildPrReviewContractCard()}\n\n`
@@ -7675,7 +7762,7 @@ export const dispatch_lanes_async: ReturnType<typeof createSwarmTool> =
 export const collect_lane_results: ReturnType<typeof createSwarmTool> =
 	createSwarmTool({
 		description:
-			'Collect or poll results for a dispatch_lanes_async batch — OBSERVATION ONLY; it can never cancel or abort a lane (issue #2971). A presumed-stale sweep runs on EVERY call: lanes past the stale horizon settle — idle host sessions to stale, unobservable host sessions to a typed liveness error. Supports two modes: (1) non-blocking poll (wait omitted or false) — performs one collection pass (one batched session.status probe, then transcript work under the remaining budget) and returns current lane status plus any settled results while you continue independent work; (2) blocking join (wait: true) — polls until all lanes settle or the collection wait budget expires. The wait budget (timeout_ms) bounds THIS OBSERVER CALL ONLY: its expiry, a missing messages client, or a degraded liveness probe does not cancel, kill, or fail the lanes, is not evidence that a lane died, and never settles anything. timeout_ms: 0 is a valid immediate, non-destructive snapshot. Any unsettled lane is reported in pending_lanes (batch_id, lane_id, stored status, output_ref when one exists) regardless of include_pending, so outstanding work is never silently omitted. If a collection returns pending lanes, poll again first — busy/retry host status is live evidence, not failure. Cancellation is a distinct, explicit, authorized, potentially destructive action: use cancel_lane_batch (confirm: true + reason), never this collector; cancel_pending is a deprecated no-op request answered with typed cancellation_refused guidance. An explicit operator cancellation settles as the distinct operator_cancelled class — never liveness. Busy/retry lanes do not become stale solely because they run for a long time; any lane pending for minutes carries an alert-only pending_liveness diagnostic (lane id, elapsed ms, host session status, stalledSuspect, degradedReason) that never cancels anything or proves provider failure. A lane whose backing session records a terminal provider error (quota/billing/auth) AND produced no output AND has an over turn (a completed timestamp, or an idle host) settles immediately with the classified reason instead of staying pending — as failed, or as cancelled when the host reports the turn was aborted. A lane that produced output, or whose turn may still be retrying, keeps polling. Does not advance workflow gates.',
+			'Collect or poll results for a dispatch_lanes_async batch — OBSERVATION ONLY; it can never cancel or abort a lane (issue #2971). A presumed-stale sweep runs on EVERY call: lanes past the stale horizon settle — idle host sessions to stale, unobservable host sessions to a typed liveness error. Supports two modes: (1) non-blocking poll (wait omitted or false) — performs one collection pass (one batched session.status probe, then transcript work under the remaining budget) and returns current lane status plus any settled results while you continue independent work; (2) blocking join (wait: true) — polls until all lanes settle or the collection wait budget expires. The wait budget (timeout_ms) bounds THIS OBSERVER CALL ONLY: its expiry, a missing messages client, or a degraded liveness probe does not cancel, kill, or fail the lanes, is not evidence that a lane died, and never settles anything. timeout_ms: 0 is a valid immediate, non-destructive snapshot. Any unsettled lane is reported in pending_lanes (batch_id, lane_id, stored status, output_ref when one exists) regardless of include_pending, so outstanding work is never silently omitted. If a collection returns pending lanes, poll again first — busy/retry host status is live evidence, not failure. Cancellation is a distinct, explicit, authorized, potentially destructive action: use cancel_lane_batch (confirm: true + reason), never this collector; cancel_pending is a deprecated no-op request answered with typed cancellation_refused guidance. An explicit operator cancellation settles as the distinct operator_cancelled class — never liveness. Busy/retry lanes do not become stale solely because they run for a long time; any lane pending for minutes carries an alert-only pending_liveness diagnostic (lane id, elapsed ms, host session status, stalledSuspect, degradedReason) that never cancels anything or proves provider failure. A lane whose backing session records a terminal provider error (quota/billing/auth) AND produced no output AND has an over turn (a completed timestamp, or an idle host) settles immediately with the classified reason instead of staying pending — as failed, or as cancelled when the host reports the turn was aborted. A lane that produced output, or whose turn may still be retrying, keeps polling. Host-exhausted PR-review discovery attempts report unsettled_coverage. Retry the same unresolved dimensions on the same head under the workflow retry policy. Any output_ref is partial context for the retry. Does not advance workflow gates.',
 		args: {
 			batch_id: CollectLaneResultsArgsSchema.shape.batch_id,
 			wait: CollectLaneResultsArgsSchema.shape.wait,

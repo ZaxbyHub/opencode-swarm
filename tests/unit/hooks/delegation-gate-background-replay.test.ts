@@ -1,5 +1,4 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import {
@@ -14,6 +13,7 @@ import { resetStandardWorktreeIsolationState } from '../../../src/hooks/delegati
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
 import { canonicalRootKey } from '../../../src/utils/canonical-root';
 import { writeApprovedPlan } from '../../helpers/approved-plan';
+import { initProject } from '../../helpers/git-init-project';
 import { createSafeTestDir } from '../../helpers/safe-test-dir';
 
 const config = {
@@ -28,18 +28,9 @@ const config = {
 	worktree: { policy: 'disabled' },
 } as PluginConfig;
 
-function initProject(directory: string): void {
-	const result = spawnSync('git', ['init'], {
-		cwd: directory,
-		stdin: 'ignore',
-		stdout: 'pipe',
-		stderr: 'pipe',
-		encoding: 'utf8',
-		timeout: 5_000,
-		maxBuffer: 128 * 1024,
-	});
-	if (result.status !== 0) throw new Error(result.stderr || result.stdout);
-}
+// #3691: initProject comes from tests/helpers/git-init-project.ts (full spawn
+// diagnostics — result.error/status/signal in the thrown text) so a transient
+// process-level spawn failure can never again surface as a bare `Error: `.
 
 function ledgerLineCount(directory: string): number {
 	const ledgerPath = path.join(
