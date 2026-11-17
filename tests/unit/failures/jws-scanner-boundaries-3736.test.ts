@@ -146,6 +146,32 @@ describe('#3736 D4-rev3 standard-base64 placements', () => {
 		expect(redactShellCommand(input)).toBe('x_[REDACTED:jwt]');
 		expect(redactShellCommand(input).includes('aaaa')).toBe(false);
 	});
+	test('r2-A: an empty-key JWE with an eyJ-INITIAL tail is fully eliminated (exact)', () => {
+		// hdr..iv.<eyJ-initial ciphertext>.<tag> — the structural empty-key
+		// walk must absorb the eyJ-initial tail that cannot start a real
+		// next token.
+		const input = `${JWE_HDR}..${'I'.repeat(22)}.eyJAAAAAAA.YXV0aHRhZw`;
+		expect(redactShellCommand(input)).toBe('[REDACTED:jwt]');
+		expect(sanitizeFailureEvidenceDisplay(input)).toBe('[REDACTED:jwt]');
+	});
+	test('r2-B: a long =-chain assignment still anchors at the separator (linear trailing-run candidate)', () => {
+		// Nine single-char assignments before a 40+ standard-base64 header —
+		// the exact trailing-run computation must find the ninth separator
+		// candidate without any per-separator probing.
+		const prefix = 'a=b=c=d=e=f=g=h=i=';
+		const header = 'Q'.repeat(42);
+		const input = `${prefix}${header}.${'e'.repeat(20)}.${'f'.repeat(12)}`;
+		expect(redactShellCommand(input)).toBe('a=b=c=d=e=f=g=h=i[REDACTED:jwt]');
+		expect(sanitizeFailureEvidenceDisplay(input).includes(header)).toBe(false);
+	});
+	test('r2-C: a signed token followed by an UNSIGNED neighbor never strands the neighbor payload (exact)', () => {
+		const a = `eyJhbGciOiJIUzI1NiJ9.${PAYLOAD}.${SIG}`;
+		const unsigned = 'eyJhbGciOiJub25lIn0.e30.';
+		const input = `${a}.${unsigned}`;
+		expect(redactShellCommand(input)).toBe('[REDACTED:jwt].[REDACTED:jwt]');
+		expect(redactShellCommand(input).includes('e30')).toBe(false);
+		expect(sanitizeFailureEvidenceDisplay(input).includes('e30')).toBe(false);
+	});
 	test('a generic span overlapping an eyJ span is dropped (no gluing)', () => {
 		const a = `eyJhbGciOiJIUzI1NiJ9.${PAYLOAD}.${SIG}`;
 		const input = `pre.${a}.${'e30'}.${SIG}.post`;

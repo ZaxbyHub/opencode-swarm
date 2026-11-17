@@ -74,13 +74,6 @@ const GENERIC_HEADER_RE = /^[A-Za-z0-9+/]{40,}={0,2}$/;
 const GENERIC_MIN_PAYLOAD = 20;
 const GENERIC_MIN_SIGNATURE = 10;
 const GENERIC_B64_RE = /^[A-Za-z0-9+/_=-]+$/;
-/**
- * 4.5-review F3: bound on interior `=` separators probed per segment in the
- * assignment-placement candidate loop — assignment prefixes are short
- * (`key=`, `token=`), so a pathological `a=b=c=…` segment cannot make the
- * loop quadratic.
- */
-const MAX_ASSIGNMENT_SEPARATORS = 8;
 
 export interface JwsTokenSpan {
 	/** Inclusive start index of the header start, in the input string. */
@@ -162,6 +155,37 @@ function splitRun(match: RegExpMatchArray): RunSegments {
 }
 
 /**
+ * 4.5-review round 2 (class fix): does a REAL token start at segment j?
+ * Uses the SAME acceptance shapes the scanner itself accepts — a signed
+ * triple (header >=13, payload >=1, signature >=1), an unsigned 2-segment
+ * token (payload >=1, empty LAST signature), or an empty-key structural
+ * JWE header position (payload segment empty). Both absorption guards use
+ * this one predicate so every acceptance shape is also a stopping shape
+ * (round-2 findings: an unsigned neighbor's header and an empty-key JWE
+ * tail were swallowed because the guard only recognized signed triples).
+ */
+function canStartTokenAt(segments: string[], j: number): boolean {
+	const headerSeg = segments[j];
+	if (headerSeg === undefined) return false;
+	const hs = headerStart(headerSeg);
+	if (hs === -1 || headerSeg.length - hs < MIN_HEADER_TOTAL) return false;
+	const payload = segments[j + 1];
+	if (payload === undefined || segments[j + 2] === undefined) return false;
+	const signature = segments[j + 2] as string;
+	// unsigned 2-segment token: empty signature is the run's last segment
+	if (
+		signature === '' &&
+		j + 2 === segments.length - 1 &&
+		payload.length >= MIN_PAYLOAD
+	) {
+		return true;
+	}
+	// empty-key structural JWE header position: payload segment empty
+	if (payload === '') return true;
+	return payload.length >= MIN_PAYLOAD && signature.length >= MIN_SIGNATURE_EYJ;
+}
+
+/**
  * Find every whole eyJ-anchored token span in `text` (leftmost,
  * non-overlapping, per maximal dotted run), including the #3736 widened
  * shapes (n-part JWE absorption incl. empty-key, unsigned 2-segment,
@@ -204,13 +228,17 @@ export function findJwsTokenSpans(text: string): JwsTokenSpan[] {
 
 			// #3736 D2-rev2: structural empty-key JWE `hdr..iv.ct.tag` — the
 			// `{1,}` payload minimum cannot hold; accept when the following
-			// segments are token-like (never across an eyJ-header segment).
+			// segments are token-like (never across a segment that starts a
+			// REAL next token — the shared canStartTokenAt predicate, 4.5
+			// review round 2: the old raw headerStart check stopped on ANY
+			// eyJ-initial tail material, including a non-token ciphertext).
 			if (payload === '') {
 				let last = i + 1; // the empty segment itself is consumed
 				let guard = i + 2;
 				while (guard < segments.length && guard - i <= 4) {
 					const seg = segments[guard] as string;
-					if (seg === '' || headerStart(seg) !== -1 || !tokenLike(seg)) break;
+					if (seg === '' || canStartTokenAt(segments, guard) || !tokenLike(seg))
+						break;
 					last = guard;
 					guard += 1;
 				}
@@ -236,27 +264,16 @@ export function findJwsTokenSpans(text: string): JwsTokenSpan[] {
 			) {
 				// Accepted triple; #3736 D2-rev2 absorption of JWE tail
 				// segments (<= 2 further token-like segments, never across a
-				// segment that starts a REAL next eyJ token, optionally
-				// crossing ONE empty interior segment). 4.5-review F2: an
-				// eyJ-INITIAL iv/ciphertext segment that CANNOT form a
-				// complete triple within the remaining run is tail material,
-				// not a next token — the guard below only stops for a segment
-				// that actually starts a scannable token (header + payload +
-				// signature all present from it).
+				// segment that starts a REAL next token of ANY accepted shape
+				// — the shared canStartTokenAt predicate, 4.5 review round 2 —
+				// optionally crossing ONE empty interior segment).
 				let last = i + 2;
 				let extra = 0;
 				let crossedEmpty = false;
 				while (extra < 2 && last + 1 < segments.length) {
 					const next = segments[last + 1] as string;
-					const nextStart = headerStart(next);
-					if (
-						nextStart !== -1 &&
-						next.length - nextStart >= MIN_HEADER_TOTAL &&
-						last + 3 < segments.length &&
-						(segments[last + 2] as string).length >= MIN_PAYLOAD &&
-						(segments[last + 3] as string).length >= MIN_SIGNATURE_EYJ
-					) {
-						break; // a REAL adjacent token header — scan it next
+					if (canStartTokenAt(segments, last + 1)) {
+						break; // a REAL adjacent token (any shape) — scan it next
 					}
 					if (tokenLike(next)) {
 						last += 1;
@@ -313,19 +330,39 @@ export function findStandardB64TokenSpans(text: string): JwsTokenSpan[] {
 			if (GENERIC_HEADER_RE.test(seg)) {
 				candidateStart = offsets[i] as number;
 			} else {
-				// 4.5-review F3: assignment prefixes are short (`key=`,
-				// `token=`), so at most MAX_ASSIGNMENT_SEPARATORS interior `=`
-				// positions are probed — a pathological `a=b=c=…` segment
-				// cannot make this loop quadratic.
-				let probed = 0;
-				for (let p = 0; p < seg.length && probed < MAX_ASSIGNMENT_SEPARATORS; p += 1) {
-					if (seg[p] !== '=') continue;
-					if (p === 0 || p === seg.length - 1) continue; // empty prefix or suffix
-					probed += 1;
-					if (GENERIC_HEADER_RE.test(seg.slice(p + 1))) {
-						candidateStart = p; // span starts AT the separator
-						break;
-					}
+				// 4.5-review round 2 (F3 class fix): because the header shape
+				// forbids INTERIOR '=', at most ONE interior '=' can carry a
+				// valid candidate — the one directly before the trailing
+				// standard-base64 run. Compute it exactly and linearly from
+				// the end: strip <=2 trailing '=' padding, walk left over the
+				// base64 class, and require the char before that run to be an
+				// interior '=' with a non-empty prefix. A `a=b=c=…=i=<header>`
+				// prefix chain resolves to the same single candidate as a
+				// short `key=`, with no per-separator probing loop at all.
+				let end = seg.length;
+				let pad = 0;
+				while (end > 0 && seg[end - 1] === '=' && pad < 2) {
+					end -= 1;
+					pad += 1;
+				}
+				let runStart = end;
+				while (
+					runStart > 0 &&
+					/[A-Za-z0-9+/]/.test(seg[runStart - 1] as string)
+				) {
+					runStart -= 1;
+				}
+				// `end` already sits after the last non-padding char, so the
+				// run length needs no further pad subtraction.
+				const runLen = end - runStart;
+				if (
+					runLen >= 40 &&
+					runStart > 1 &&
+					(seg[runStart - 1] as string) === '='
+				) {
+					// runStart-1 is the interior '=' separator (a non-empty
+					// prefix exists because runStart > 1)
+					candidateStart = runStart - 1; // span starts AT the separator
 				}
 				if (candidateStart === -1) {
 					i += 1;
