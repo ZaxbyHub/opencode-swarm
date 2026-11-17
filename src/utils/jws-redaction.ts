@@ -396,15 +396,17 @@ export function findStandardB64TokenSpans(text: string): JwsTokenSpan[] {
 
 /**
  * #3736: combined span producer for consumers that splice both families.
- * Overlap policy (4.5-review F1/F3): inside a dotted run of JWT material the
- * generic triple can start MID-token (a payload/signature pair of one eyJ
- * token looks like a generic header/payload) — such a span is an artifact
- * and is DROPPED (it would glue two adjacent tokens into one span; observed
- * on the #3716 two-token fixture). But a generic span that starts BEFORE an
+ * Overlap policy (4.5-review F1/F3 + parallel-review F2): inside a dotted
+ * run of JWT material the generic triple can start MID-token (a
+ * payload/signature pair of one eyJ token looks like a generic
+ * header/payload) — such a span is an artifact and is DROPPED (it would glue
+ * two adjacent tokens into one span; observed on the #3716 two-token
+ * fixture). But a generic span that starts BEFORE or AT the same index as an
  * overlapping eyJ span carries real credential material of its own (its
- * standard-base64 header) — it is MERGED into that eyJ span (the earlier
- * start wins, the end extends), never discarded. Both lists are sorted by
- * start, so the resolution is a single linear merge walk.
+ * standard-base64 header) — it is MERGED into that eyJ span (the longest
+ * span wins: earlier/equal start kept, end extended), never discarded. Both
+ * lists are sorted by start, so the resolution is a single linear merge
+ * walk.
  */
 export function findRedactableTokenSpans(text: string): JwsTokenSpan[] {
 	const eyJ = findJwsTokenSpans(text);
@@ -426,13 +428,15 @@ export function findRedactableTokenSpans(text: string): JwsTokenSpan[] {
 		const head = eyJ[e] as JwsTokenSpan;
 		if (head.start < g.end && g.start < head.end) {
 			// overlap
-			if (g.start < head.start) {
-				// F1: the generic span starts earlier — merge its coverage
-				// into the eyJ span (keep the earlier start, extend the end).
+			if (g.start <= head.start) {
+				// F1 + parallel-review F2: the generic span starts earlier OR
+				// at the same index — merge its coverage into the eyJ span
+				// (the longest span wins: keep the earlier/equal start,
+				// extend the end). A strictly-later start is a mid-token
+				// artifact — drop g.
 				head.start = g.start;
 				head.end = Math.max(head.end, g.end);
 			}
-			// else: mid-token artifact — drop g
 			continue;
 		}
 		merged.push(g);

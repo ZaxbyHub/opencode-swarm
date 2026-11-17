@@ -69,13 +69,14 @@ describe('#3730 shell condensed union — family × invisible-byte matrix', () =
 				expect(out.includes('A'.repeat(20))).toBe(false);
 				expect(out.includes(family.label)).toBe(true);
 			});
-			test(`${family.name} split near-tail by ${filler.name} leaves no secret tail`, () => {
+			test(`${family.name} split near-tail by ${filler.name} is fully eliminated at the shell site`, () => {
 				const input =
 					family.token.slice(0, -4) + filler.char + family.token.slice(-4);
 				const out = redactShellCommand(input);
-				// tail fragments may remain visible (sub-minimum), but no
-				// long run of the secret body survives
-				expect(out.includes('A'.repeat(20))).toBe(false);
+				// Discriminating oracle (FB-003): the condensed view reunites
+				// the split token, so the WHOLE token is eliminated — unchanged
+				// input or a partial-tail survival must fail this assertion.
+				expect(out).toBe(family.label);
 			});
 		}
 	}

@@ -57,11 +57,13 @@ export class NativeWindowsSandboxExecutor implements SandboxExecutor {
 			this.mechanism = 'powershell-wrapper';
 			// Issue #2475: a strong -> weak isolation downgrade must be visible
 			// without OPENCODE_SWARM_DEBUG. #3736 D8: a weak executor is
-			// TTL-bounded in getExecutor() and reconstructed once per TTL
-			// window while the runner probe keeps failing, so this emits at
-			// most once per TTL window (the re-probe cadence is the recovery
-			// mechanism — see runner-client.ts #3736 D7), not once per
-			// session.
+			// TTL-bounded in getExecutor() and reconstructed once per executor
+			// TTL window while the runner probe keeps failing, so this
+			// constructor warn fires at most once per executor TTL window —
+			// TOGETHER WITH the probe()'s own per-attempt warn this means a
+			// persistently broken runner emits up to two downgrade warns per
+			// window (the bounded re-probe cadence is the recovery mechanism —
+			// see runner-client.ts #3736 D7), not once per session.
 			criticalWarn(
 				`[sandbox] native Windows sandbox runner unavailable (${sanitizeDiagnosticText(this._probeResult.error ?? 'unknown', 200)}); falling back to PowerShell environment restrictions (weak sandbox). Run /swarm diagnose for details.`,
 			);

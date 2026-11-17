@@ -247,7 +247,9 @@ function findRunnerBinary(): string | null {
  * Probe the runner binary for capabilities.
  *
  * Bounded to 2s timeout per Invariant 1 (fast, bounded, fail-open).
- * Results are cached for the session lifetime.
+ * Results are cached: a SUCCESSFUL probe for the process lifetime; a failed
+ * probe until the runner-probe failure TTL elapses (#3736 D7-rev2), after
+ * which the next call re-probes.
  */
 export function probe(): RunnerProbeResult {
 	if (_cachedProbe !== undefined && Date.now() < _cachedProbeExpiresAt) {

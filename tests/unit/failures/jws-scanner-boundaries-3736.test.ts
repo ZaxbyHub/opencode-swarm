@@ -196,16 +196,36 @@ describe('#3736 D4-rev3 standard-base64 placements', () => {
 		expect(redactShellCommand(input).includes('e30')).toBe(false);
 		expect(sanitizeFailureEvidenceDisplay(input).includes('e30')).toBe(false);
 	});
-	test('a generic span overlapping an eyJ span is dropped (no gluing)', () => {
-		const a = `eyJhbGciOiJIUzI1NiJ9.${PAYLOAD}.${SIG}`;
-		const input = `pre.${a}.${'e30'}.${SIG}.post`;
-		// The eyJ token redacts; the generic pass must not produce a span
-		// glued across it (regression pin for the #3716 two-token collapse).
-		const spans = findRedactableTokenSpans(input);
-		expect(spans.length).toBeGreaterThanOrEqual(1);
-		for (const s of spans) {
-			expect(input.slice(s.start, s.end).startsWith('eyJ')).toBe(true);
-		}
+	test('a generic span starting MID-token is dropped (no gluing) — exact output', () => {
+		// FB-002 rebuild: the generic candidate here is REAL — PAYLOAD (59
+		// alnum chars) passes GENERIC_HEADER_RE, p20 passes the >=20 payload
+		// minimum, s10 passes the >=10 signature minimum — and it starts
+		// MID-token (inside the eyJ span). The eyJ span absorbs p20
+		// (tokenLike via the >=16 arm) and stops at s10 (lowercase <16); the
+		// mid-start generic span must be DROPPED, leaving s10 visible. A
+		// gluing mutant that merges instead of dropping swallows s10 and
+		// fails the exact output.
+		const p20 = 'p'.repeat(20);
+		const s10 = 's'.repeat(10);
+		const input = `pre.${HDR}.${PAYLOAD}.${SIG}.${p20}.${s10}.post`;
+		expect(redactShellCommand(input)).toBe(`pre.[REDACTED:jwt].${s10}.post`);
+		expect(sanitizeFailureEvidenceDisplay(input)).toBe(
+			`pre.[REDACTED:jwt].${s10}.post`,
+		);
+	});
+	test('an equal-start generic span merges (longest span wins) — exact output', () => {
+		// FB-006 regression pin (parallel-review F2): a standard-alphabet
+		// signature breaks the eyJ dotted run, but the generic scanner sees
+		// the whole triple starting at the SAME index as the eyJ span. The
+		// merge must extend the eyJ span to the longer generic end (longest
+		// span wins) instead of dropping the generic span as a mid-token
+		// artifact — otherwise the '+'-bearing signature tail survives.
+		const hdr60 = 'eyJ' + 'a'.repeat(57); // 60 chars, eyJ-prefixed
+		const payload24 = 'e'.repeat(24); // >= GENERIC_MIN_PAYLOAD(20)
+		const sig = 'f'.repeat(9) + '+' + 'g'.repeat(30); // '+' breaks the eyJ run
+		const input = `${hdr60}.${payload24}.${sig}`;
+		expect(redactShellCommand(input)).toBe('[REDACTED:jwt]');
+		expect(sanitizeFailureEvidenceDisplay(input)).toBe('[REDACTED:jwt]');
 	});
 });
 
