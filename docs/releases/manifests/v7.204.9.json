@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.204.9",
+  "tagCommit": "0daf2f43bd4734682334b8c5e2eaa681001ca121",
+  "targetCommitish": "0daf2f43bd4734682334b8c5e2eaa681001ca121",
+  "releaseBodySha256": "b76ddbb7e25caaa6dadae163f6e1b1cc366cdfb5e7309ac6a32f9a15b029069b",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 3,
+      "path": "docs/releases/pending/3177-3403-dispatch-state-integrity.md",
+      "sha256": "0df9748b6642b4b16789b2e2cd4b28b519be0c036791a144b1564b03d7c878e2"
+    },
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/3364-3106-3691-lifecycle-races.md",
+      "sha256": "d8b4fd7144672f0fcf5348b608e4695b1de7e407f16eefd749305a7cf779efa0"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/3700-3664-3661-ci-harness-failopens.md",
+      "sha256": "1389690d11523acd9162a226d79d4a791bef73b3f89bbd96622aa618d5f1648e"
+    },
+    {
+      "prNumber": null,
+      "order": 2,
+      "path": "docs/releases/pending/3710-3712-redaction-hardening.md",
+      "sha256": "6cb4cbdd8c071e94d1ef9447fc2cf9819560faf4c6652df519dd427372a48c27"
+    }
+  ]
+}
