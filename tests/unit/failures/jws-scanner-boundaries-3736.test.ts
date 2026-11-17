@@ -196,7 +196,7 @@ describe('#3736 D4-rev3 standard-base64 placements', () => {
 		expect(redactShellCommand(input).includes('e30')).toBe(false);
 		expect(sanitizeFailureEvidenceDisplay(input).includes('e30')).toBe(false);
 	});
-	test('a generic span starting MID-token is dropped (no gluing) — exact output', () => {
+	test('absorption stops at a non-tokenLike trailing segment (exact output)', () => {
 		// FB-002 rebuild (Stage-B test-engineer corrected): the generic
 		// candidate (PAYLOAD, SIG, p20) — PAYLOAD (59 alnum chars) passes
 		// GENERIC_HEADER_RE, SIG passes the >=10 signature minimum, p20 the
