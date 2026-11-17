@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.204.3",
+  "tagCommit": "567cdd2676808f7f50156bb572ef56827b3add45",
+  "targetCommitish": "567cdd2676808f7f50156bb572ef56827b3add45",
+  "releaseBodySha256": "9bb9cb2ed1e7400bec638bd39e2c6c70f57e18922f2cae327d9d1194fa955739",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/3131-3662-3554-verification-surface-authority.md",
+      "sha256": "f21c4e62d7f158e01b1a96b97e11ce6ad23e5f24c5429a4b3007a60e2335e5e1"
+    }
+  ]
+}
