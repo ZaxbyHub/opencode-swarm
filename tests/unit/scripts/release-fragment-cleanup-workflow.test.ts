@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { parse } from 'yaml';
+import { load as parse } from 'js-yaml';
 import { bashCommand } from '../../helpers/bash';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 

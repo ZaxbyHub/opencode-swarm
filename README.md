@@ -1242,6 +1242,7 @@ Control how tool outputs are summarized for LLM context.
 | `/swarm council <question> [--spec-review]` | Convene a multi-model General Council for advisory deliberation |
 | `/swarm issue <issue-url\|owner/repo#N\|N> [--plan] [--trace] [--no-repro]` | Ingest a GitHub issue for localization and resolution |
 | `/swarm pr-review <pr-url\|owner/repo#N\|N> [--council] [instructions...]` | Structured deep PR review with parallel lanes, reviewer confirmation, and critic challenge |
+| `/swarm pr-review <GitHub PR URL> --release-head <full SHA>` | Architect-only native review for release admission, constrained to the specified head |
 | `/swarm pr-feedback [<pr-url\|owner/repo#N\|N>] [instructions...]` | Ingest and close known PR feedback (review comments, CI failures, conflicts) without a fresh review |
 | `/swarm ci-monitor <pr-url\|owner/repo#N\|N>` | Drive an already-reviewed, approved PR to green and merged (monitor CI, fix, merge; max 5 fix cycles) |
 | `/swarm ci` `[--timeout-ms <n>] [--json]` | Advisory headless CI: read-only gate/evidence evaluation with machine exit codes (also `bunx opencode-swarm ci`; see docs/ci.md) |

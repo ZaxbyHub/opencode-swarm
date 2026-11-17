@@ -461,7 +461,14 @@ describe('#3162 lane dispatch timeout race', () => {
 	});
 });
 
-/** The production `classify` callback shape (`_processLane` in runner.ts). */
+/**
+ * LEGACY direct-helper double of the pre-#3177 classify shape (text
+ * matching only). The production `_processLane` callback now delegates to
+ * isRetryableProviderFailure(classifyProviderFailure(err)) and throws the
+ * providerMessageErrorToError carrier; the production chain is covered by
+ * the runner-3177 suites. Kept for the direct dispatchWithModelFallback
+ * harness below.
+ */
 function productionClassify(err: unknown): 'transient' | 'permanent' {
 	const msg = err instanceof Error ? err.message : String(err);
 	if (/Lane dispatch timed out/i.test(msg)) return 'permanent';

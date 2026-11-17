@@ -11,10 +11,14 @@ Two shared-root workflow fixes:
 
 - A coder delegation whose declared output was committed, left uncommitted, or
   otherwise missed guardrail write-routing now reaches the reviewer gate (in
-  git workspaces; a workspace with no git at all still cannot dispatch the
-  reviewer — the pre-existing `head_timeout` denial — but guardrail-routed
+  git workspaces; a workspace where git is permanently unavailable still
+  cannot dispatch the reviewer, but it now denies with a typed terminal code
+  instead of looping — `no_git_workspace`, `git_unavailable`,
+  `git_dubious_ownership` or `git_unhealthy`, all `retryable=false`, per the
+  #3680 change in this same release; only transient causes such as an unborn
+  HEAD keep the retryable `head_timeout` arm) and guardrail-routed
   completions now proceed when the git channel is merely degraded, e.g. the
-  coder dispatched into a repo before its first commit). At
+  coder dispatched into a repo before its first commit. At
   every coder completion whose declared scope still has unrouted files, the
   reviewer-scope generation reconciles declared-scope changes from two sources
   — the committed diff since the dispatch-time HEAD and the declared-scope
