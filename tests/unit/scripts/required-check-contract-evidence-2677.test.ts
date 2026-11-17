@@ -48,17 +48,17 @@ describe('issue #2677 required-check contract evidence', () => {
 		).workflowRunsByWorkflow;
 
 		expect(evidence.captureSha).toBe(
-			'012c4e40db4a63dd9b771cb99d57c565949d2931',
+			'c12cd853dd61858d17bb4e85ca21739b0169710e',
 		);
 		expect(
 			captured['.github/workflows/drift-check.yml'].contentsEndpoint,
-		).toContain('?ref=012c4e40db4a63dd9b771cb99d57c565949d2931');
+		).toContain('?ref=c12cd853dd61858d17bb4e85ca21739b0169710e');
 		expect(captured['.github/workflows/drift-check.yml'].blobSha).toBe(
-			'f26ac3b1ab1121ad3947c25024f4d7bc258ca972',
+			'b6a49b60856deca97d2aa6464fe0f148739eb307',
 		);
 		expect(local['.github/workflows/drift-check.yml']).toHaveLength(64);
 		expect(runs.map((run) => run.id)).toEqual(
-			expect.arrayContaining([38204222229, 38204222210]),
+			expect.arrayContaining([44078540845, 44078540792]),
 		);
 		expect(runsByWorkflow['.github/workflows/drift-check.yml']).toEqual([]);
 	});
