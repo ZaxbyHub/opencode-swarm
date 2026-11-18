@@ -24,6 +24,7 @@ import type {
 	V2ExperimentalGenerateApi,
 	V2JsonValue,
 	V2PermissionDomain,
+	V2PluginContext,
 	V2SessionCompactionResult,
 	V2SessionDomain,
 	V2SessionHook,
@@ -101,26 +102,12 @@ const _credSlot: V2CredentialDomain['activate'] =
 const _generateSlot: V2ExperimentalGenerateApi['text'] =
 	null as unknown as PublishedGenerateText;
 
-const _terminalReadSlot: V2ExperimentalTerminalReadSlot = null as unknown as {
-	read: PublishedTerminalRead;
-};
-interface V2ExperimentalTerminalReadSlot {
-	read: (input: {
-		readonly sessionID: string;
-		readonly lines?: number;
-	}) => Promise<{
-		readonly ptyID: string;
-		readonly title: string;
-		readonly cwd: string;
-		readonly foregroundProcess: string | null;
-		readonly screen: {
-			readonly text: string;
-			readonly cols: number;
-			readonly rows: number;
-			readonly cursor: { readonly x: number; readonly y: number };
-		};
-	} | null>;
-}
+// F-002 fix: the positive row now constrains the SHIPPED vendored slot
+// (V2PluginContext['experimental']['terminal']['read']) instead of a probe-local
+// interface, so a regression in the shipped terminal-read shape fails this gate.
+const _terminalReadSlot: NonNullable<
+	NonNullable<NonNullable<V2PluginContext['experimental']>['terminal']>
+>['read'] = null as unknown as PublishedTerminalRead;
 
 const _subscribeSlot: V2EventDomain['subscribe'] =
 	null as unknown as PublishedSubscribe;

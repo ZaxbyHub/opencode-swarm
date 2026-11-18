@@ -187,7 +187,7 @@ export interface V2SessionRequestMessage {
 	readonly metadata?: Record<string, unknown>;
 }
 
-/** v2 `SessionContext` event (dist/promise/session.d.ts; DeepMutable in place). */
+/** v2 `SessionContext` event (dist/promise/session.d.ts). The published message content is readonly @2.3.0; the adapter mutates the `system`/`messages` ARRAYS in place and replaces claimed message elements inside them. */
 export interface V2SessionContextEvent {
 	readonly sessionID: string;
 	readonly agent: unknown;

@@ -11,7 +11,7 @@ host-contract corpus (`tests/fixtures/host/expected-structure-v2.json`) were pin
 2.2.5 snapshot). Both now pin 2.3.0 and the weekly check reports `STRUCTURE_MATCH`.
 
 The vendored surface now carries the 2.1–2.3 additions, compiler-verified against the
-tagged tarballs: `Context.credential` (activate), `Context.experimental` (terminal read,
+tagged tarballs (the surfaces the adapter and type-probe cover): `Context.credential` (activate), `Context.experimental` (terminal read,
 stateless generate, artifact) and the deprecated top-level `Context.generate`;
 `SessionRequestMessage` (readonly nullable-text content, wired into the context event);
 `SessionCompactionResult.native` (replacing the providerState era); the

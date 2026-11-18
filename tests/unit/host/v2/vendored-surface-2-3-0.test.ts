@@ -126,28 +126,34 @@ describe('vendored 2.3.0 surface (#3732/#3552)', () => {
 
 	test('session domain: paginated list, instructions entries, payload-typed hook', () => {
 		const block = interfaceBlock('V2SessionDomain');
-		expect(block).toContain(
-			'list: (input?: V2SessionListInput) => Promise<V2SessionsResponse>',
+		// Wrap-tolerant (biome may reflow multi-token signatures): match the
+		// member shape with whitespace-flexible regexes, not exact single lines.
+		expect(block).toMatch(
+			/list:\s*\(\s*input\?:\s*V2SessionListInput,?\s*\)\s*=>\s*Promise<V2SessionsResponse>/,
 		);
 		// Anti-vacuity: an array-returning list must not be present.
 		expect(block).not.toContain('Promise<V2SessionInfo[]>');
 		expect(block).toContain('value: V2JsonValue');
-		expect(block).toContain('readonly hook: V2SessionHook;');
+		expect(block).toMatch(/readonly\s+hook:\s*V2SessionHook;/);
 		const hookType = typeAliasBlock('V2SessionHook');
 		expect(hookType).toContain('V2SessionHookPayloadMap[Name]');
 		const payloadMap = interfaceBlock('V2SessionHookPayloadMap');
 		expect(payloadMap).toContain('fork:');
 		expect(payloadMap).toContain("'experimental.model.resolve'");
 		expect(payloadMap).toContain("'experimental.idle'");
-		// list and instructions are REQUIRED (no '?' after the member name).
-		expect(block).toMatch(/readonly list: \(input\?/);
-		expect(block).toMatch(/readonly instructions: \{/);
+		// list and instructions are REQUIRED (no '?' after the member name);
+		// wrap-tolerant so a formatter line break cannot false-fail the pin.
+		expect(block).toMatch(/readonly\s+list:\s*\(\s*input\?/);
+		expect(block).toMatch(/readonly\s+instructions:\s*\{/);
 	});
 
 	test('SessionsResponse is the paginated {data, cursor} object', () => {
 		const block = interfaceBlock('V2SessionsResponse');
 		expect(block).toContain('data: V2SessionInfo[]');
-		expect(block).toContain('cursor: { previous?: unknown; next?: unknown }');
+		// Wrap-tolerant: biome may split the cursor member across lines.
+		expect(block).toMatch(
+			/cursor:\s*\{\s*previous\?:\s*unknown;\s*next\?:\s*unknown\s*\}/,
+		);
 	});
 
 	test('plugin context: credential + experimental + deprecated generate wired', () => {
@@ -179,8 +185,9 @@ describe('vendored 2.3.0 surface (#3732/#3552)', () => {
 		expect(block).toContain('save?: readonly string[]');
 		expect(block).toContain('agent?: string');
 		expect(block).toContain('metadata?: Record<string, unknown>');
-		expect(block).toContain(
-			"source?: { type: 'tool'; messageID: string; id: string }",
+		// Wrap-tolerant: biome may split the source member across lines.
+		expect(block).toMatch(
+			/source\?:\s*\{\s*type:\s*'tool';\s*messageID:\s*string;\s*id:\s*string\s*\}/,
 		);
 	});
 
@@ -188,26 +195,6 @@ describe('vendored 2.3.0 surface (#3732/#3552)', () => {
 		const block = typeAliasBlock('V2JsonValue');
 		expect(block).toContain('V2JsonValue[]');
 		expect(block).toContain('[key: string]: V2JsonValue');
-	});
-
-	test('runtime probes: JsonValue recursion and idle/model-resolve payload shapes', () => {
-		type V2JsonValue =
-			| null
-			| boolean
-			| number
-			| string
-			| V2JsonValue[]
-			| { [key: string]: V2JsonValue };
-		const json: V2JsonValue = { a: [1, 'two', null, { b: true }] };
-		expect(json).toEqual({ a: [1, 'two', null, { b: true }] });
-		const idle: {
-			readonly sessionID: string;
-			readonly background: ReadonlyArray<{
-				readonly kind: string;
-				readonly sessionID: string;
-			}>;
-		} = { sessionID: 's1', background: [{ kind: 'shell', sessionID: 's1' }] };
-		expect(idle.background).toHaveLength(1);
 	});
 
 	test('historical 2.0.26 verification comments are preserved, not rewritten', () => {
