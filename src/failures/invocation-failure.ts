@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { findJwsTokenSpans } from '../utils/jws-redaction.js';
+import { findRedactableTokenSpans } from '../utils/jws-redaction.js';
 import {
 	extractStatusCode,
 	MODEL_UNAVAILABLE_PATTERN,
@@ -500,8 +500,11 @@ export function sanitizeFailureEvidenceDisplay(value: string): string {
 	// #3723: linear JWS span scan on the UNCONDENSED view — covers headers of
 	// ANY length (x5c certificate chains exceed the legacy arm's 1024-char
 	// bound). The legacy jwt family entry stays (fast path + pin parity); the
-	// union/splice below dedupes identical spans.
-	for (const span of findJwsTokenSpans(redacted)) {
+	// union/splice below dedupes identical spans. #3736: the combined
+	// producer also carries the standard-base64 dotted-token spans and drops
+	// any generic span overlapping an eyJ span (mid-token generic starts
+	// would otherwise glue adjacent tokens through the extend rule).
+	for (const span of findRedactableTokenSpans(redacted)) {
 		bareMatches.push({ family: 'jwt', start: span.start, end: span.end });
 	}
 	// Pass B — fill tolerance: the Cf/DI-deleted condensed view, mapped
@@ -524,7 +527,9 @@ export function sanitizeFailureEvidenceDisplay(value: string): string {
 	// the legacy condensed arm (its header bound is still 1024), so only this
 	// pass closes the composition case. A mapped-back span INCLUDES the
 	// deleted invisible bytes that sat inside it.
-	for (const span of findJwsTokenSpans(condensed)) {
+	// #3736: the combined span producer on the CONDENSED view (a long-header
+	// or standard-base64 token split by an invisible byte closes here).
+	for (const span of findRedactableTokenSpans(condensed)) {
 		bareMatches.push({
 			family: 'jwt',
 			start: condensedToOriginal[span.start],

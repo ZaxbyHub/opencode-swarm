@@ -87,6 +87,16 @@ export interface SandboxExecutor {
 	/** Human-readable name of the sandbox mechanism */
 	readonly mechanism: string;
 
+	/**
+	 * #3736 D8: isolation strength this executor provides. Optional — the
+	 * win32 native executor reports it (its constructor reads the runner
+	 * probe once); executors without the concept leave it undefined and the
+	 * executor cache pins them for the process lifetime as before. A 'weak'
+	 * executor is TTL-bounded in getExecutor() so a transient probe failure
+	 * cannot pin the PowerShell fallback forever.
+	 */
+	readonly strength?: 'strong' | 'weak' | 'none';
+
 	/** Whether this executor is available on the current platform */
 	isAvailable(): boolean;
 
@@ -343,7 +353,16 @@ export async function getExecutor(): Promise<SandboxExecutor | null> {
 	const entry: ExecutorCacheEntry = {
 		promise: _internals.createPlatformExecutor().then(
 			(executor) => {
-				if (executor === null) {
+				// #3736 D8: a NULL creation and a WEAK executor are both
+				// bounded failures — a weak executor exists only because the
+				// native runner probe failed, and with the probe's own TTL
+				// (runner-client.ts #3736 D7) the failure may be transient.
+				// Bounding it here means the next getExecutor() call past the
+				// TTL reconstructs the executor, which re-probes and can
+				// recover STRONG after the runner binary is installed or the
+				// transient error clears. Strong/unstated executors stay
+				// pinned for the process lifetime.
+				if (executor === null || executor.strength === 'weak') {
 					entry.expiresAt = Date.now() + executorFailureTtlMs();
 				}
 				return executor;

@@ -10,7 +10,10 @@ import * as path from 'node:path';
 import { WRITE_TOOL_NAMES } from '../../config/constants';
 import { classifyFile } from '../../context/zone-classifier';
 import { isPathWithinDeclaredScope } from '../../scope/path-identity';
-import { redactJwsTokens } from '../../utils/jws-redaction';
+import {
+	findRedactableTokenSpans,
+	JWS_REDACTION_LABEL,
+} from '../../utils/jws-redaction';
 import { normalizeToolName } from '../normalize-tool-name';
 import { getGlobMatcher } from './file-authority';
 
@@ -155,6 +158,72 @@ export function isInDeclaredScope(
  * the audit `commandHash` relies on it). No pattern retains any reversible
  * secret material.
  */
+/**
+ * Cf (format) and Default_Ignorable code points: bytes that render as
+ * NOTHING. A byte from either class inside a bare credential token splits it
+ * past every `\b`-anchored bare shape (#3730 — the display site gained this
+ * deletion view in the #3165/#3705 work; the shell mirror mirrors it here).
+ * Deletion is the correct transform for this class: unlike visible bytes,
+ * removing an invisible byte cannot change what the reader sees — and the
+ * deletion happens only in the MATCHING view, never in the output.
+ */
+const ZERO_WIDTH_FILL_RE = /\p{Cf}|\p{Default_Ignorable_Code_Point}/u;
+
+/**
+ * Bare well-known token VALUE shapes for the shell audit site (#3730: the
+ * sequential .replace chain is replaced by the two-view union sweep below;
+ * pattern order preserves the chain's first-arm-owns label semantics —
+ * the anthropic/openrouter shapes run BEFORE the openai shape so
+ * `sk-ant-api03-…` keeps its provider label). Mirrors
+ * BARE_TOKEN_VALUE_PATTERNS at the display site; the parity corpus
+ * (invocation-failure-bare-tokens-3165 + the #3730/#3736 suites) pins both
+ * sites against the same fixtures so they cannot drift.
+ */
+const SHELL_BARE_TOKEN_VALUE_PATTERNS: ReadonlyArray<{
+	label: string;
+	re: RegExp;
+	/** #3712: optional post-match class guard (the base64 arm requires
+	 * upper+lower+digit on the matched run so hex-only digests stay visible). */
+	guard?: (match: string) => boolean;
+}> = [
+	{ label: '[REDACTED:anthropic]', re: /\bsk-ant-[A-Za-z0-9_-]{20,}/g },
+	{ label: '[REDACTED:openrouter]', re: /\bsk-or-[A-Za-z0-9_-]{20,}/g },
+	{ label: '[REDACTED:openai]', re: /\bsk-[A-Za-z0-9_-]{20,}/g },
+	{
+		label: '[REDACTED:github]',
+		re: /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}/g,
+	},
+	{ label: '[REDACTED:github]', re: /\bgithub_pat_[A-Za-z0-9_]{22,}/g },
+	{ label: '[REDACTED:aws]', re: /\bAKIA[0-9A-Z]{16}\b/g },
+	{ label: '[REDACTED:slack]', re: /\bxox[baprs]-[A-Za-z0-9-]{10,}/g },
+	{ label: '[REDACTED:google]', re: /\bAIza[A-Za-z0-9_-]{30,}/g },
+	{ label: '[REDACTED:google]', re: /\bGOCSPX-[A-Za-z0-9_-]{20,}/g },
+	{ label: '[REDACTED:google]', re: /\bya29\.[A-Za-z0-9_-]{20,}/g },
+	{ label: '[REDACTED:groq]', re: /\bgsk_[A-Za-z0-9]{20,}/g },
+	// #3710 review: the PAYLOAD segment is any base64url run, not only a JSON
+	// object — an empty claims object encodes as `e30`, not `eyJ`.
+	{
+		label: '[REDACTED:jwt]',
+		re: /\beyJ[A-Za-z0-9_-]{10,1024}\.[A-Za-z0-9_-]{1,}\.[A-Za-z0-9_-]{10,}/g,
+	},
+	// #3712 F-013: base64 credential arm — ≥80-char mixed-class run (the
+	// guard keeps hex-only SHA digests, uppercase-hex runs, and sub-80
+	// payloads visible).
+	{
+		label: '[REDACTED:base64]',
+		re: /[A-Za-z0-9+/]{80,}={0,2}/g,
+		guard: (match) =>
+			/[A-Z]/.test(match) && /[a-z]/.test(match) && /[0-9]/.test(match),
+	},
+	// #3712 azure CONTEXTUAL arm: connection-string `AccountKey=<base64>`
+	// material — the WHOLE span collapses to the bare family placeholder
+	// (no `AccountKey=` residue: a residue form is itself re-matchable KV
+	// shape). Bare 32-hex Azure OpenAI keys are deliberately NOT patterned:
+	// they are indistinguishable from hex digests that must stay visible
+	// (disclosed bound, #3712 AC3).
+	{ label: '[REDACTED:azure]', re: /\bAccountKey=[A-Za-z0-9+/]{20,}={0,2}/gi },
+];
+
 export function redactShellCommand(cmd: string): string {
 	if (typeof cmd !== 'string') return '';
 	let out = cmd
@@ -230,67 +299,100 @@ export function redactShellCommand(cmd: string): string {
 		'$1[REDACTED]$3',
 	);
 
-	// #3723: whole JWS tokens whose header exceeds the legacy arm's 1024-char
-	// bound (x5c certificate-chain headers are 1.2-5 KB) — linear single-pass
-	// span scan. The legacy bounded jwt arm below stays (fast path + pin
-	// parity). Running FIRST, this pre-pass also claims glued family-prefixed
-	// tokens (e.g. `sk-…-eyJ…`) the family arms would truncate at the header —
-	// the token takes the jwt label and the sub-minimum family fragment stays
-	// visible (the family arms' own disclosed bound) — so it changes outcomes
-	// beyond the 1024 bound. Differential fuzz at #3728 found 0 head-worse
-	// cases at or above each family's own minimum fragment length; shorter
-	// prefixes are outside that guarantee.
-	out = redactJwsTokens(out);
-
-	// Well-known token VALUE shapes (content-based; fires regardless of the
-	// flag/variable name carrying them). GitHub suffix bound is 20+: real PATs
-	// are 36+, and shorter truncated/pasted fragments stay minimized too.
-	// #3712: the anthropic/openrouter shapes run BEFORE the openai shape —
-	// the openai pattern subsumes `sk-ant-api03-…` and `sk-or-v1-…`, and in a
-	// sequential .replace chain the first matching arm owns the token, so
-	// ordering assigns the rotation-correct provider label.
-	out = out
-		.replace(/\bsk-ant-[A-Za-z0-9_-]{20,}/g, '[REDACTED:anthropic]')
-		.replace(/\bsk-or-[A-Za-z0-9_-]{20,}/g, '[REDACTED:openrouter]')
-		.replace(/\bsk-[A-Za-z0-9_-]{20,}/g, '[REDACTED:openai]')
-		.replace(/\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}/g, '[REDACTED:github]')
-		.replace(/\bgithub_pat_[A-Za-z0-9_]{22,}/g, '[REDACTED:github]')
-		.replace(/\bAKIA[0-9A-Z]{16}\b/g, '[REDACTED:aws]')
-		.replace(/\bxox[baprs]-[A-Za-z0-9-]{10,}/g, '[REDACTED:slack]')
-		.replace(/\bAIza[A-Za-z0-9_-]{30,}/g, '[REDACTED:google]')
-		// #3712 F-006: Google OAuth client secrets, GCP access tokens, Groq
-		// service keys, and whole three-segment JWTs (the HEADER segment is
-		// base64url of `{"…`, so it starts with eyJ).
-		.replace(/\bGOCSPX-[A-Za-z0-9_-]{20,}/g, '[REDACTED:google]')
-		.replace(/\bya29\.[A-Za-z0-9_-]{20,}/g, '[REDACTED:google]')
-		.replace(/\bgsk_[A-Za-z0-9]{20,}/g, '[REDACTED:groq]')
-		.replace(
-			// #3710 review: the PAYLOAD segment is any base64url run, not only a
-			// JSON object — an empty claims object encodes as `e30`, not `eyJ`
-			// (and a `null`/string payload encodes as `bnVsbA`/`Ingi`).
-			/\beyJ[A-Za-z0-9_-]{10,1024}\.[A-Za-z0-9_-]{1,}\.[A-Za-z0-9_-]{10,}/g,
-			'[REDACTED:jwt]',
-		)
-		// #3712 azure CONTEXTUAL arm: connection-string `AccountKey=<base64>`
-		// material — the WHOLE span collapses to the bare family placeholder
-		// (no `AccountKey=` residue). Bare 32-hex Azure OpenAI keys are
-		// deliberately NOT patterned: they are indistinguishable from hex
-		// digests that must stay visible (disclosed bound, #3712 AC3).
-		.replace(/\bAccountKey=[A-Za-z0-9+/]{20,}={0,2}/gi, '[REDACTED:azure]');
-
-	// Long base64-like payload runs (encoded wrappers, heredoc payloads).
-	// Requires ≥80 chars of base64 charset AND at least one uppercase, one
-	// lowercase, and one digit — hex-only SHAs (lowercase+digit) and short
-	// payloads stay visible (no-over-redaction guards pin them).
-	// Two-stage on purpose: a single /g match consumes each candidate run
-	// linearly (no per-position lookaheads — the previous three-lookahead form
-	// was O(n²) on long non-matching runs, 7.6 s/100 KB), and the class check
-	// runs only on the matched span.
-	out = out.replace(/[A-Za-z0-9+/]{80,}={0,2}/g, (run) =>
-		/[A-Z]/.test(run) && /[a-z]/.test(run) && /[0-9]/.test(run)
-			? '[REDACTED:base64]'
-			: run,
-	);
+	// #3730/#3736: bare well-known token VALUE shapes, matched on a two-view
+	// UNION so a Cf/DI zero-width byte inside a token can no longer split it
+	// past redaction (the display site's mechanism — see
+	// sanitizeFailureEvidenceDisplay). Pass A is the RAW text: every match the
+	// old sequential chain found stays a candidate (head-dominance). Pass B is
+	// the Cf/DI-deletion condensed view (fill tolerance), mapped back to
+	// original offsets. JWS spans from src/utils/jws-redaction.ts join both
+	// passes WITHOUT pre-pass dominance, matching the display site's
+	// leftmost-longest selection. Disclosed behavior change on glued
+	// compositions (`sk-abc-<JWT>`): the old shell pre-pass labeled the token
+	// `sk-abc-[REDACTED:jwt]`; both sites now select the leftmost-longest
+	// family span (`[REDACTED:openai]`, consuming the prefix fragment —
+	// strictly MORE redaction; pinned by the #3730/#3736 suites at both
+	// sites). Benign Cf/DI bytes OUTSIDE any token survive byte-identical:
+	// the condensed view exists only for matching, never for output.
+	const condensedChars: string[] = [];
+	const condensedToOriginal: number[] = [];
+	let zwCursor = 0;
+	for (const char of out) {
+		if (!ZERO_WIDTH_FILL_RE.test(char)) {
+			condensedChars.push(char);
+			// One map entry per UTF-16 CODE UNIT (not per code point):
+			// matchAll's match.index counts code units, so a map indexed by
+			// code-point position misaligns every span after a kept astral
+			// character (emoji/CJK-ext) and maps a token ending at the input
+			// end past the array (NaN end -> slice(NaN) appends the whole
+			// cleartext string). Every unit of a kept char maps to that
+			// char's original index; matches always start/end on char
+			// boundaries, so only whole-char lookups occur.
+			for (let unit = 0; unit < char.length; unit += 1) {
+				condensedToOriginal.push(zwCursor);
+			}
+		}
+		zwCursor += char.length;
+	}
+	const condensed = condensedChars.join('');
+	const bareMatches: Array<{ label: string; start: number; end: number }> = [];
+	const collectBareMatches = (text: string, map: number[] | null) => {
+		for (const { label, re, guard } of SHELL_BARE_TOKEN_VALUE_PATTERNS) {
+			re.lastIndex = 0;
+			for (const match of text.matchAll(re)) {
+				if (guard && !guard(match[0])) continue;
+				bareMatches.push({
+					label,
+					start:
+						map === null ? (match.index ?? 0) : (map[match.index ?? 0] ?? 0),
+					end:
+						map === null
+							? (match.index ?? 0) + match[0].length
+							: (map[(match.index ?? 0) + match[0].length - 1] ?? 0) + 1,
+				});
+			}
+		}
+		// #3736: eyJ-anchored spans (widened shapes) plus non-overlapping
+		// standard-base64 dotted-token spans — the combined producer drops a
+		// generic span that overlaps an eyJ span (mid-token generic starts
+		// would otherwise glue adjacent tokens through the extend rule).
+		for (const span of findRedactableTokenSpans(text)) {
+			bareMatches.push({
+				label: JWS_REDACTION_LABEL,
+				start: map === null ? span.start : (map[span.start] ?? span.start),
+				end: map === null ? span.end : (map[span.end - 1] ?? span.end - 1) + 1,
+			});
+		}
+	};
+	collectBareMatches(out, null);
+	collectBareMatches(condensed, condensedToOriginal);
+	if (bareMatches.length > 0) {
+		// Leftmost-longest greedy selection over the union: maximal
+		// non-overlapping coverage. Identical spans from both passes dedupe;
+		// a longer overlapping span EXTENDS the covered interval (keeps the
+		// earlier start and its label), so output never shows LESS redaction
+		// than the sequential chain produced. Left-to-right list build, then
+		// a right-to-left splice keeps offsets valid.
+		bareMatches.sort((a, b) => a.start - b.start || b.end - a.end);
+		const selected: typeof bareMatches = [];
+		for (const match of bareMatches) {
+			const last = selected[selected.length - 1];
+			if (last === undefined || match.start >= last.end) {
+				selected.push(match);
+			} else if (match.end > last.end) {
+				last.end = match.end;
+			}
+		}
+		let swept = '';
+		let spliceCursor = 0;
+		for (const match of selected) {
+			if (match.start < spliceCursor) continue; // contained in an earlier span
+			swept += out.slice(spliceCursor, match.start) + match.label;
+			spliceCursor = match.end;
+		}
+		swept += out.slice(spliceCursor);
+		out = swept;
+	}
 
 	return out;
 }
