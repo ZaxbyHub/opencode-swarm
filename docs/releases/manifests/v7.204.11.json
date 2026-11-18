@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.204.11",
+  "tagCommit": "abd68f19d2fef6b19302c7cf49e4548627cdf9a7",
+  "targetCommitish": "abd68f19d2fef6b19302c7cf49e4548627cdf9a7",
+  "releaseBodySha256": "18594f3fb4be13dd441fff2350c19be8bc66040c0780d6045e04153c1273c8c9",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/3730-3736-redaction-fill-tolerance-jwt-shapes.md",
+      "sha256": "dc99006eeb39fbf80f4acb96948e81036019242f2ddbbf03b74f9edbe1332989"
+    }
+  ]
+}
