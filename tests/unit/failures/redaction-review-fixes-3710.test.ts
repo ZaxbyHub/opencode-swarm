@@ -72,18 +72,15 @@ describe('JWT arm is bounded at the shell site (#3710 review R-19)', () => {
 		expect(redactShellCommand(longHeaderJwt)).toContain('[REDACTED:jwt]');
 	}, 30_000);
 
-	test('the over-long-header residual is the DISCLOSED bound, not an accident', () => {
-		// The bound is a deliberate, disclosed trade: a JWT whose header
-		// segment exceeds 1024 chars is NOT matched by the jwt arm. This row
-		// uses the REAL shape that exceeds the bound — a JWS carrying an
-		// `x5c` certificate chain (RFC 7515 §4.1.6; e.g. an Apple App Store
-		// Server or Android attestation signed payload) has a header of
-		// 1.2-5 KB, so it IS produced in practice. The header itself is
-		// still caught by the base64 arm, but the PAYLOAD and the
-		// SIGNATURE survive in clear text in a bare placement at both
-		// sites. The row pins that residual so a future change to the
-		// bound is a deliberate decision and the release fragment's
-		// disclosed bound stays true.
+	test('the over-long-header residual is CLOSED by the #3723 linear span scan (formerly the disclosed bound)', () => {
+		// #3710 review R-19 disclosed this as a deliberate residual: a JWT
+		// whose header segment exceeded 1024 chars escaped the jwt arm and
+		// its payload/signature survived in clear text in a bare placement.
+		// #3723 closed it — a linear single-pass span scan
+		// (src/utils/jws-redaction.ts) covers headers of ANY length at both
+		// sites, with the legacy bounded arm retained as the fast path. This
+		// row (flipped with the fix, real x5c shape) now pins the COVERAGE
+		// so the residual cannot silently return.
 		const x5cHeader = Buffer.from(
 			JSON.stringify({
 				alg: 'RS256',
@@ -93,12 +90,15 @@ describe('JWT arm is bounded at the shell site (#3710 review R-19)', () => {
 			'utf8',
 		).toString('base64url');
 		expect(x5cHeader.length).toBeGreaterThan(1024);
-		const overLongHeaderJwt = `${x5cHeader}.eyJ${'b'.repeat(40)}.${'c'.repeat(40)}`;
+		const payload = `eyJ${'b'.repeat(40)}`;
+		const signature = 'c'.repeat(40);
+		const overLongHeaderJwt = `${x5cHeader}.${payload}.${signature}`;
+		expect(redactShellCommand(overLongHeaderJwt)).toContain('[REDACTED:jwt]');
+		expect(redactShellCommand(overLongHeaderJwt)).not.toContain(signature);
+		// The display output is byte-bounded (512), so assert the payload
+		// elimination on the display sweep rather than the label span.
 		expect(sanitizeFailureEvidenceDisplay(overLongHeaderJwt)).not.toContain(
-			'[REDACTED:jwt]',
-		);
-		expect(redactShellCommand(overLongHeaderJwt)).not.toContain(
-			'[REDACTED:jwt]',
+			signature,
 		);
 	}, 30_000);
 });

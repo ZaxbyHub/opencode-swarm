@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.204.8",
+  "tagCommit": "349caaa81ba1c6009df747e69eb0b68db3a3ce97",
+  "targetCommitish": "349caaa81ba1c6009df747e69eb0b68db3a3ce97",
+  "releaseBodySha256": "cf50c4fb9f06b2db6458f5695fb44385cc2e3772e2ccff42fa7550abf59cd444",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/ci-monitor-exact-head-observation.md",
+      "sha256": "4969e2068eda6d4f5f094755f9a9167a21735b772573278fa5b4ba9e2f2853a8"
+    }
+  ]
+}

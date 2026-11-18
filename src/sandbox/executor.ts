@@ -87,6 +87,16 @@ export interface SandboxExecutor {
 	/** Human-readable name of the sandbox mechanism */
 	readonly mechanism: string;
 
+	/**
+	 * #3736 D8: isolation strength this executor provides. Optional — the
+	 * win32 native executor reports it (its constructor reads the runner
+	 * probe once); executors without the concept leave it undefined and the
+	 * executor cache pins them for the process lifetime as before. A 'weak'
+	 * executor is TTL-bounded in getExecutor() so a transient probe failure
+	 * cannot pin the PowerShell fallback forever.
+	 */
+	readonly strength?: 'strong' | 'weak' | 'none';
+
 	/** Whether this executor is available on the current platform */
 	isAvailable(): boolean;
 
@@ -147,11 +157,42 @@ export interface SandboxPolicyOptions {
  */
 export type SandboxConfigPolicy = Omit<SandboxPolicyOptions, 'readonly_roots'>;
 
-// Cached executor promise — set once at first getExecutor() call.
-// This ensures the capability probe runs only once even if getExecutor()
-// is called multiple times.
-// undefined = not yet initialized, Promise<null> = initialized but no executor available
-let _cachedExecutorPromise: Promise<SandboxExecutor | null> | undefined;
+// Cached executor entry (#3716 item 3). A HEALTHY executor is pinned for the
+// process lifetime (expiresAt = Infinity — the capability probe runs only
+// once). A NULL or REJECTED creation outcome is a bounded failure: it is
+// re-probed after SWARM_SANDBOX_EXECUTOR_FAILURE_TTL_MS (default 60s,
+// mirroring src/sandbox/macos/sandbox-exec-executor.ts PROBE_FAILURE_TTL_MS —
+// "success permanent, failure bounded retry"). That TTL is the named
+// invalidation trigger: a degraded first observation (disabled probe,
+// construction failure) no longer pins null forever. The expiry is written
+// ONLY to this entry-local record when the promise settles — never to the
+// module variable — so a settled late entry can never overwrite a newer
+// cache entry installed after _resetExecutorCache().
+interface ExecutorCacheEntry {
+	promise: Promise<SandboxExecutor | null>;
+	expiresAt: number;
+}
+let _executorCache: ExecutorCacheEntry | undefined;
+
+/** Default re-probe budget for a null/rejected executor outcome (ms). */
+const SWARM_EXECUTOR_FAILURE_TTL_DEFAULT_MS = 60_000;
+
+/**
+ * The failure TTL, overridable for tests via
+ * SWARM_SANDBOX_EXECUTOR_FAILURE_TTL_MS. Only FINITE POSITIVE values are
+ * honored — anything else (unset, NaN, 0, negative, Infinity) falls back to
+ * the default, so the override cannot pin a null forever. There is no minimum:
+ * any positive value is honored as-is, so a sub-millisecond override expires
+ * as soon as the clock advances past it (calls inside the same millisecond
+ * still share the cached promise). Test-only knob; production leaves it unset.
+ * Parsed per call so tests can adjust it dynamically.
+ */
+export function executorFailureTtlMs(): number {
+	const raw = Number(process.env.SWARM_SANDBOX_EXECUTOR_FAILURE_TTL_MS);
+	return Number.isFinite(raw) && raw > 0
+		? raw
+		: SWARM_EXECUTOR_FAILURE_TTL_DEFAULT_MS;
+}
 const MAX_SANDBOX_ASSESSMENT_CACHE = 8;
 const _sandboxAssessmentCache = new Map<
 	string,
@@ -164,8 +205,10 @@ function detectSandboxCapability(): Promise<SandboxCapabilityV1> {
 
 export const _internals: {
 	detectSandboxCapability: typeof detectSandboxCapability;
+	createPlatformExecutor: typeof _platformDispatch;
 } = {
 	detectSandboxCapability,
+	createPlatformExecutor: _platformDispatch,
 } as const;
 
 export interface SandboxEnforcementAssessment {
@@ -299,19 +342,54 @@ export async function assessSandboxEnforcement(
  * failures on platforms where they don't exist.
  */
 export async function getExecutor(): Promise<SandboxExecutor | null> {
-	if (_cachedExecutorPromise !== undefined) {
-		return _cachedExecutorPromise;
+	if (_executorCache !== undefined && Date.now() < _executorCache.expiresAt) {
+		return _executorCache.promise;
 	}
 
-	_cachedExecutorPromise = _createExecutor();
-	return _cachedExecutorPromise;
+	// #3716 item 3: entry-local record — concurrent callers share the
+	// in-flight promise (expiresAt stays Infinity until it settles); the
+	// settle callback writes ONLY this record, so it can never clobber a
+	// newer entry installed after _resetExecutorCache().
+	const entry: ExecutorCacheEntry = {
+		promise: _internals.createPlatformExecutor().then(
+			(executor) => {
+				// #3736 D8: a NULL creation and a WEAK executor are both
+				// bounded failures — a weak executor exists only because the
+				// native runner probe failed, and with the probe's own TTL
+				// (runner-client.ts #3736 D7) the failure may be transient.
+				// Bounding it here means the next getExecutor() call past the
+				// TTL reconstructs the executor, which re-probes and can
+				// recover STRONG after the runner binary is installed or the
+				// transient error clears. Strong/unstated executors stay
+				// pinned for the process lifetime.
+				if (executor === null || executor.strength === 'weak') {
+					entry.expiresAt = Date.now() + executorFailureTtlMs();
+				}
+				return executor;
+			},
+			(error) => {
+				// A rejected creation is also a bounded failure: the rejection
+				// propagates to callers unchanged, and the next caller past the
+				// TTL gets a fresh creation attempt.
+				entry.expiresAt = Date.now() + executorFailureTtlMs();
+				throw error;
+			},
+		),
+		expiresAt: Number.POSITIVE_INFINITY,
+	};
+	_executorCache = entry;
+	return entry.promise;
 }
 
 /**
- * Create the appropriate executor for this platform.
- * Internal — called once and cached.
+ * Create the appropriate executor for this platform. Exposed through
+ * `_internals` (issue #3716 item 3) as the construction DI seam: production
+ * behavior is the plain platform dispatch below, and tests inject outcome
+ * queues to exercise the cache-lifetime contract (the "documented
+ * equivalent" clause of the issue's AC3) without fabricating capability-probe
+ * states production cannot generate.
  */
-async function _createExecutor(): Promise<SandboxExecutor | null> {
+async function _platformDispatch(): Promise<SandboxExecutor | null> {
 	const platform = process.platform;
 
 	if (platform === 'linux') {
@@ -441,7 +519,7 @@ async function _createWindowsExecutor(): Promise<SandboxExecutor | null> {
  * @internal
  */
 export function _resetExecutorCache(): void {
-	_cachedExecutorPromise = undefined;
+	_executorCache = undefined;
 }
 
 /** @internal test seam */

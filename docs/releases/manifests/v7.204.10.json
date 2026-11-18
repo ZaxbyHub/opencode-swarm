@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.204.10",
+  "tagCommit": "c12cd853dd61858d17bb4e85ca21739b0169710e",
+  "targetCommitish": "c12cd853dd61858d17bb4e85ca21739b0169710e",
+  "releaseBodySha256": "19c2ce9b6e56987928a0ce54c24e2c27a0d43d8de75ab516d41865ee72891bf9",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 2,
+      "path": "docs/releases/pending/2973-quarantine-ledger-zero-quarantine-debt-zero.md",
+      "sha256": "bba61c9c4bb1d3ee8e25c98a7b8219197a7a04a8bd230a344eeaf12fa901adb0"
+    },
+    {
+      "prNumber": null,
+      "order": 3,
+      "path": "docs/releases/pending/3486-commit-message-dir-planted-link-guard.md",
+      "sha256": "7e80487157307b4505e1a9d307d90c899abb6762c76999a4c6d2765ee14340fc"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/3716-3723-3724-residuals-verification-dispatch-redaction.md",
+      "sha256": "f0630928485ade595762703366a8b9339640a40f1bf781863b471cebfc01dc22"
+    },
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/retention-unclaimed-swarm-directories.md",
+      "sha256": "e40571ff53f9a8dfe6eb09a390bd4dc60f03b9f73db9983b6df4f39077ba4b65"
+    }
+  ]
+}
