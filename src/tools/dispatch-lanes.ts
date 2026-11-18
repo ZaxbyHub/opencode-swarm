@@ -116,6 +116,7 @@ import {
 	rollbackPrReviewBaseAdmissionIfUnlaunched,
 	rollbackPrReviewValidationBatchIfUnlaunched,
 	validateExactStructuredReceiptCoverage,
+	validatePrFeedbackVerificationOwnershipShape,
 	validatePrReviewDiscoveryLaneCompletion,
 	validatePrWorkflowTransportRecovery,
 } from '../hooks/pr-workflow-gate.js';
@@ -1667,10 +1668,13 @@ export async function executeDispatchLanesAsync(
 	// Every rejection raised BEFORE gate activation/binding — the
 	// prompt-contract formatting failures below, the PR_REVIEW phase
 	// role/launchability/critic-prompt admission hoisted into
-	// assertPrReviewPhaseLaneAdmission (#3358), and the state-free
-	// request-shape checks in validatePrWorkflowLaneAdmission (#3341:
-	// lane roles, owned-workflow-lane shape, the staged/contract-retry
-	// shape, and unknown modes) — is a side-effect-free invalid request:
+	// assertPrReviewPhaseLaneAdmission (#3358), the base/micro
+	// launchability probe added to validatePrWorkflowLaneAdmission (#3644
+	// AC2), the request-pure PR_FEEDBACK verification ownership-shape
+	// preflight (#3644 AC1), and the state-free request-shape checks in
+	// validatePrWorkflowLaneAdmission (#3341: lane roles,
+	// owned-workflow-lane shape, the staged/contract-retry shape, and
+	// unknown modes) — is a side-effect-free invalid request:
 	// otherwise an unlaunchable batch consumes durable workflow state
 	// and cannot be retried with the same identity. Rejections raised
 	// after activation (batch recording) are not side-effect-free, which
@@ -1800,6 +1804,31 @@ export async function executeDispatchLanesAsync(
 					waveAttempt: parsed.data.pr_review_wave_attempt,
 				},
 			);
+			// Issue #3644 AC1: the request-pure verification ownership shape
+			// (lane ownership vs the requested inventory, and in-request
+			// exclusivity) is validated BEFORE any state mutation for this
+			// request — before PR_FEEDBACK activation on a fresh session and
+			// before the inventory declaration on an active one — so a request
+			// rejected here leaves the gate state null (fresh) or byte-for-byte
+			// unchanged (active), and the corrected retry is not wedged by the
+			// append-only inventory amendment rule. The stateful predicates in
+			// enforcePrFeedbackVerificationOwnership still run after the
+			// declaration, by design: they need durable state and do not wedge
+			// a same-inventory correction. Foreign-mode sessions keep their
+			// historical error path (the guard matches the verification modes
+			// that can own the session).
+			if (
+				parsed.data.mode === 'swarm-pr-feedback:verification' &&
+				(!gateState || gateState.mode === 'PR_FEEDBACK')
+			) {
+				validatePrFeedbackVerificationOwnershipShape(
+					parsed.data.feedback_inventory ?? [],
+					parsed.data.lanes.map((lane) => ({
+						laneId: lane.id,
+						ownedItemIds: lane.feedback_item_ids ?? [],
+					})),
+				);
+			}
 			if (!gateState && parsed.data.mode?.startsWith('swarm-pr-review:')) {
 				gateState = await activatePrWorkflow(
 					directory,
@@ -6478,11 +6507,18 @@ function getGeneratedAgentPrefix(
  * pre-existing workflow state is preserved unchanged. Every predicate is a
  * pure function of the request, the generated-agent registry, and the
  * launchability probe; nothing here reads gate state. Covered: lane roles,
- * owned-workflow-lane shape, phase-lane agent launchability, the contract-retry
+ * owned-workflow-lane shape, phase-lane agent launchability, base/micro lane
+ * agent launchability (#3644 AC2), the contract-retry
  * exclusion, the wave-stage/attempt pairing, and unknown swarm-pr-review:*
- * suffixes. Not covered (they need gate state or resilience config):
+ * suffixes. The request-pure PR_FEEDBACK verification ownership SHAPE runs as a
+ * sibling pre-activation check at the same call site (#3644 AC1). Not covered
+ * (they need gate state or resilience config):
  * tier-dependent lane count and max_concurrent, canary-first and fanout
- * order, trigger evaluation, and PR_FEEDBACK verification ownership. `reachable` mirrors the post-binding condition
+ * order, trigger evaluation, and the STATEFUL PR_FEEDBACK verification
+ * ownership predicates (batch-id duplicate, capacity, cross-batch
+ * exclusivity — they read durable records and stay in
+ * enforcePrFeedbackVerificationOwnership after the declaration).
+ * `reachable` mirrors the post-binding condition
  * these checks historically ran under (an active PR_REVIEW gate for this
  * session): it is false only when a different workflow mode owns the
  * session, which keeps the pre-fix reachability (and therefore the set of
@@ -6530,6 +6566,21 @@ function validatePrWorkflowLaneAdmission(
 					`BLOCKED: PR_REVIEW base lane "${lane.id}" must use the explorer role`,
 				);
 			}
+			// Issue #3644 AC2: probe launchability pre-activation with the SAME
+			// validateLaneAgent call launchAsyncLane runs later — including the
+			// #2614 bare-canonical-role registry refusal. Role resolution alone
+			// admits a bare 'explorer' on a prefixed-only host (the name is
+			// itself a canonical role), so without this probe an unlaunchable
+			// batch activates the workflow and binds the base before launch
+			// rejects it. The rejected-request set is unchanged (launch would
+			// refuse the same agent anyway); only the durable-state consumption
+			// moves, matching the #3341 admission contract.
+			const agentValidation = validateLaneAgent(lane.agent, context);
+			if (!agentValidation.ok) {
+				throw new Error(
+					`BLOCKED: PR_REVIEW base lane "${lane.id}" agent "${lane.agent}" is not launchable on this host: ${agentValidation.error}`,
+				);
+			}
 		}
 		return;
 	}
@@ -6543,6 +6594,15 @@ function validatePrWorkflowLaneAdmission(
 			) {
 				throw new Error(
 					`BLOCKED: PR_REVIEW micro lane "${lane.id}" must use the explorer role`,
+				);
+			}
+			// Issue #3644 AC2: same pre-activation launchability probe as the
+			// base arm above — micro batches otherwise record the trigger
+			// ledger and family dispatches before launch refuses the agent.
+			const agentValidation = validateLaneAgent(lane.agent, context);
+			if (!agentValidation.ok) {
+				throw new Error(
+					`BLOCKED: PR_REVIEW micro lane "${lane.id}" agent "${lane.agent}" is not launchable on this host: ${agentValidation.error}`,
 				);
 			}
 		}
@@ -7423,11 +7483,24 @@ function applyPrWorkflowPromptContract(
 		// mandates the Stage-B task-keyed row and the critic prompt still
 		// mandates "Begin directly with PLAN REVIEW", while the feedback gate
 		// settles on one phase-specific positive row per item. Re-home the
-		// suppression as controller-authored mode-scoped clauses (stage-b-test
-		// is unaffected: the test_engineer prompt never carried an override).
+		// suppression as controller-authored mode-scoped clauses. Stage-b-test
+		// originally carried no arm because the test_engineer prompt never had
+		// a phrase-activated override (no #3358 regression existed there), but
+		// #3645 closed the pre-existing conflict: the test_engineer STATIC
+		// prompt mandates task-keyed [TESTED] "STRUCTURED VERDICT LINE" rows
+		// while the gate settles stage-b-test lanes on item-keyed [STAGE-B-TEST]
+		// rows — the same conflict class that voided reviewer lanes before
+		// #3310 built this mechanism — so it now carries the same suspension.
 		const FEEDBACK_VERDICT_PROTOCOL_CLAUSES: Record<string, string> = {
 			'swarm-pr-feedback:stage-b-reviewer':
 				'\nPROTOCOL SELECTION (feedback stage-b): the reviewer prompt\'s Stage-B "STRUCTURED VERDICT LINE" mandate does not apply to this lane. Do not emit a [REVIEWED] | task-<taskId> | VERDICT | summary row — settle only via one positive [STAGE-B-REVIEW] | <item_id> | APPROVE | <notes> row per assigned feedback item, exactly as the controller block and the [STAGE-B-REVIEW] row family require.',
+			// #3645: the fourth ordered PR-feedback gate. The test_engineer
+			// static prompt's task-keyed [TESTED] verdict mandate conflicts
+			// with this gate's item-keyed [STAGE-B-TEST] PASS settlement; the
+			// clause is the only controller-authored suppression surface
+			// (PR-feedback lanes receive no contract card).
+			'swarm-pr-feedback:stage-b-test':
+				'\nPROTOCOL SELECTION (feedback stage-b): the test_engineer prompt\'s task-keyed [TESTED] "STRUCTURED VERDICT LINE" mandate does not apply to this lane. Do not emit a [TESTED] | task-<taskId> | VERDICT | summary row — settle only via one positive [STAGE-B-TEST] | <item_id> | PASS | <notes> row per assigned feedback item, exactly as the controller block and the [STAGE-B-TEST] row family require.',
 			'swarm-pr-feedback:closeout-reviewer':
 				'\nPROTOCOL SELECTION (feedback closeout): the reviewer prompt\'s Stage-B "STRUCTURED VERDICT LINE" mandate does not apply to this lane. Do not emit a [REVIEWED] | task-<taskId> | VERDICT | summary row — settle only via one positive [CLOSEOUT-REVIEW] | <item_id> | APPROVE | <notes> row per assigned feedback item, exactly as the controller block and the [CLOSEOUT-REVIEW] row family require.',
 			'swarm-pr-feedback:closeout-critic':

@@ -303,6 +303,13 @@
 			"note": "Pre-existing debt, not approved drift: \"savePlan\" exists in src/plan/manager.ts but not inside src/plan/manager.ts:1721 (plan-projections.writerCitations[0])."
 		},
 		{
+			"rowId": "pr-review-run-artifacts",
+			"file": "src/hooks/pr-workflow-gate.ts",
+			"identifier": "tryCreatePrReviewRunReservation",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"tryCreatePrReviewRunReservation\" exists in src/hooks/pr-workflow-gate.ts but not inside src/hooks/pr-workflow-gate.ts:12667 (pr-review-run-artifacts.writerCitations[4])."
+		},
+		{
 			"rowId": "recommendation-ledger",
 			"file": "src/services/recommendation-ledger.ts",
 			"identifier": "checkRecommendations",

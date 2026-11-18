@@ -9132,6 +9132,73 @@ async function prunePrFeedbackVerificationsForCapacity(
 	}
 }
 
+/**
+ * Issue #3644 AC1: the single-item ownership assertions shared by
+ * `enforcePrFeedbackVerificationOwnership`'s loop and the request-pure
+ * `validatePrFeedbackVerificationOwnershipShape` preflight, so the predicate has
+ * one definition and the two surfaces cannot drift. Messages are identical to the
+ * pre-#3644 inline throws.
+ */
+function assertFeedbackItemDeclared(
+	laneId: string,
+	itemId: string,
+	inventorySet: ReadonlySet<string>,
+): void {
+	if (!inventorySet.has(itemId)) {
+		throw new Error(
+			`BLOCKED: PR_FEEDBACK verification lane "${laneId}" owns undeclared item "${itemId}"`,
+		);
+	}
+}
+
+function assertFeedbackItemExclusivity(
+	itemId: string,
+	previousLane: string | undefined,
+	laneId: string,
+): void {
+	if (previousLane && previousLane !== laneId) {
+		throw new Error(
+			`BLOCKED: PR_FEEDBACK verification item "${itemId}" is owned by both "${previousLane}" and "${laneId}"`,
+		);
+	}
+}
+
+/**
+ * Issue #3644 AC1: request-pure validation of a verification dispatch's
+ * inventory/ownership SHAPE — a pure function of the request arguments (no reads,
+ * no writes, no gate state). The dispatch path runs this BEFORE any state mutation
+ * for the request (before PR_FEEDBACK activation on a fresh session and before the
+ * inventory declaration on an active one), so a request rejected here consumes no
+ * durable workflow state and a corrected retry is not wedged by the append-only
+ * inventory amendment rule. Every normalization rejection the two normalizers
+ * perform is deliberately moved with it (empty/blank/duplicate inventory ids,
+ * missing lane declarations, empty lane ids, empty owned-item lists, duplicate
+ * lane ids). The STATEFUL predicates (duplicate batch id, capacity GC, cross-batch
+ * and retired-ownership exclusivity) stay in
+ * `enforcePrFeedbackVerificationOwnership`, which keeps its original
+ * stateful-before-shape ordering for direct callers.
+ */
+export function validatePrFeedbackVerificationOwnershipShape(
+	inventoryIds: readonly string[],
+	ownership: readonly PrFeedbackLaneOwnership[],
+): void {
+	const normalizedInventory = normalizeInventoryIds(inventoryIds);
+	const normalizedOwnership = normalizeOwnership(ownership);
+	const inventorySet = new Set(normalizedInventory);
+	const claimedByItemId = new Map<string, string>();
+	for (const lane of normalizedOwnership) {
+		for (const itemId of lane.ownedItemIds) {
+			assertFeedbackItemDeclared(lane.laneId, itemId, inventorySet);
+			assertFeedbackItemExclusivity(
+				itemId,
+				claimedByItemId.get(itemId),
+				lane.laneId,
+			);
+			claimedByItemId.set(itemId, lane.laneId);
+		}
+	}
+}
+
 export async function enforcePrFeedbackVerificationOwnership(
 	directory: string,
 	sessionID: string,
@@ -9208,17 +9275,16 @@ export async function enforcePrFeedbackVerificationOwnership(
 
 	for (const lane of normalizedOwnership) {
 		for (const itemId of lane.ownedItemIds) {
-			if (!inventorySet.has(itemId)) {
-				throw new Error(
-					`BLOCKED: PR_FEEDBACK verification lane "${lane.laneId}" owns undeclared item "${itemId}"`,
-				);
-			}
-			const previousLane = claimedByItemId.get(itemId);
-			if (previousLane && previousLane !== lane.laneId) {
-				throw new Error(
-					`BLOCKED: PR_FEEDBACK verification item "${itemId}" is owned by both "${previousLane}" and "${lane.laneId}"`,
-				);
-			}
+			// #3644 AC1: shared single-item assertions (same messages, same
+			// position) so the request-pure preflight and this stateful loop
+			// cannot drift; this loop's ordering is unchanged for direct
+			// callers (stateful checks above still run first).
+			assertFeedbackItemDeclared(lane.laneId, itemId, inventorySet);
+			assertFeedbackItemExclusivity(
+				itemId,
+				claimedByItemId.get(itemId),
+				lane.laneId,
+			);
 			claimedByItemId.set(itemId, lane.laneId);
 		}
 	}
