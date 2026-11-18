@@ -134,7 +134,7 @@ describe('findJwsTokenSpans semantics (leftmost, non-overlapping, linear)', () =
 		expect(sanitizeFailureEvidenceDisplay(token)).not.toContain(SIGNATURE);
 	});
 
-	test('boundary segment lengths: 12-char header rejected, 13 accepted; 0-char payload rejected, 1 accepted; 9-char signature rejected, 10 accepted', () => {
+	test('boundary segment lengths: 12-char header rejected, 13 accepted; 0-char payload rejected, 1 accepted; signatures >= 1 accepted (#3736 D6-rev)', () => {
 		expect(
 			findJwsTokenSpans(`eyJ${'a'.repeat(9)}.pay.${'s'.repeat(10)}`),
 		).toHaveLength(0);
@@ -147,9 +147,14 @@ describe('findJwsTokenSpans semantics (leftmost, non-overlapping, linear)', () =
 		expect(
 			findJwsTokenSpans(`eyJ${'a'.repeat(10)}.p.${'s'.repeat(10)}`),
 		).toHaveLength(1);
+		// #3736 D6-rev (plan v3, critic-approved): the eyJ-anchored triple's
+		// signature minimum dropped 10 -> 1 so `hdr.payload.sig` (alg:none /
+		// truncated-signature tokens leaking their claims) redacts; the old
+		// {10,} bound this leg pinned is the legacy bound the issue removes.
+		// The generic (D4) triple KEEPS the >=10 signature minimum.
 		expect(
 			findJwsTokenSpans(`eyJ${'a'.repeat(10)}.pay.${'s'.repeat(9)}`),
-		).toHaveLength(0);
+		).toHaveLength(1);
 		expect(
 			findJwsTokenSpans(`eyJ${'a'.repeat(10)}.pay.${'s'.repeat(10)}`),
 		).toHaveLength(1);

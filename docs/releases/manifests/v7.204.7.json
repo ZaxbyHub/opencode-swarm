@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.204.7",
+  "tagCommit": "dd6590983c2833200a445e99b2fe8e2311e6f137",
+  "targetCommitish": "dd6590983c2833200a445e99b2fe8e2311e6f137",
+  "releaseBodySha256": "f37db0f3eceb41f07366fe1efe5745923e3d6ecc0fbe446ef82bb83362332517",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 3,
+      "path": "docs/releases/pending/3165-2910-backlog-remainder.md",
+      "sha256": "1acdc20008c0323cbabccb6a4c7ed9c618ad5ed4b47cde36b01e735f782ccc21"
+    },
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/3600-3576-3621-trace-evidence.md",
+      "sha256": "992f9dbf2c51e006a0c2cf2bb21a9f23565e0a1f5b30ee62396ebebd4488f707"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/3655-3659-attribution-memory-gating.md",
+      "sha256": "caf30b681fe5eaaeec30404818b9e9b2470fd6f15e9169839ea6d31f68b08a38"
+    },
+    {
+      "prNumber": null,
+      "order": 2,
+      "path": "docs/releases/pending/3681-3680-verification-surface-authority-residuals.md",
+      "sha256": "3dd5d48a39a4fd5fab0073ecc431d5ce33edfdcf24abd302bcfbf04cef55dacd"
+    }
+  ]
+}
