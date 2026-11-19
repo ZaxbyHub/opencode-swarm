@@ -30,8 +30,15 @@
 // resolveRemoteRefsContainingHead(Async), and
 // resolvePrWorkflowRevisionDigest. No mock.module anywhere.
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
+import { storeLaneOutput } from '../../../src/background/lane-output-store.js';
+import {
+	appendDelegationTransition,
+	recordPendingDelegation,
+} from '../../../src/background/pending-delegations.js';
 import {
 	activatePrWorkflow,
+	declarePrFeedbackInventory,
+	enforcePrFeedbackVerificationOwnership,
 	_test_exports as gateInternals,
 	readPrWorkflowGateState,
 } from '../../../src/hooks/pr-workflow-gate.js';
@@ -333,5 +340,121 @@ describe('PR_FEEDBACK verification rejection consumes no inventory state (issue 
 		expect(result.success).toBe(false);
 		expect(String(result.message)).toContain('owned by both');
 		expect(await readPrWorkflowGateState(directory, session)).toEqual(before);
+	}, 60_000);
+
+	test('W1 (#3752 AC1): a duplicate-batch rejection after an inventory amendment consumes no state and the corrected retry succeeds', async () => {
+		// Discriminating leg (RED at base). Batch A is seeded via DIRECT gate
+		// calls (no delegation-store row for A, so the dispatch-level
+		// batch-uniqueness guard passes and the GATE duplicate rejection is the
+		// one that fires). The amended dispatch reuses batch id A: at base the
+		// amendment persists before the rejection (state diff) and the corrected
+		// retry is then blocked by the append-only rule; post-fix neither write
+		// lands and the retry succeeds.
+		const session = 'wedge-duplicate-3752';
+		await activatePrWorkflow(directory, session, 'PR_FEEDBACK', {
+			prHeadSha: 'abc123',
+		});
+		await declarePrFeedbackInventory(directory, session, ['FB-001'], {
+			prHeadSha: 'abc123',
+		});
+		await enforcePrFeedbackVerificationOwnership(
+			directory,
+			session,
+			[{ laneId: 'wedge-lane-a', ownedItemIds: ['FB-001'] }],
+			{ batchId: 'wedge-batch-a', prHeadSha: 'abc123' },
+		);
+		const before = await readPrWorkflowGateState(directory, session);
+		expect(before?.prFeedbackInventory).toEqual(['FB-001']);
+		const amended = await executeDispatchLanesAsync(
+			{
+				mode: 'swarm-pr-feedback:verification',
+				pr_head_sha: 'abc123',
+				batch_id: 'wedge-batch-a',
+				feedback_inventory: ['FB-001', 'FB-00X'],
+				lanes: [
+					{
+						id: 'wedge-lane-b',
+						agent: 'reviewer',
+						prompt: 'Verify FB-00X.',
+						workflow_lane: 'verification',
+						feedback_item_ids: ['FB-00X'],
+					},
+				],
+			},
+			directory,
+			{ sessionID: session },
+		);
+		expect(amended.success).toBe(false);
+		expect(String(amended.message)).toContain(
+			'verification batch id "wedge-batch-a" is already recorded',
+		);
+		expect(String(amended.message)).not.toContain('batch already exists');
+		// Discriminator: the rejected amended request leaves the gate state
+		// byte-for-byte unchanged (at base the amendment persisted first).
+		expect(await readPrWorkflowGateState(directory, session)).toEqual(before);
+		// Corrected retry on a fresh batch id succeeds (at base it is blocked
+		// by the append-only rule because FB-00X became durable).
+		const corrected = await executeDispatchLanesAsync(
+			{
+				mode: 'swarm-pr-feedback:verification',
+				pr_head_sha: 'abc123',
+				batch_id: 'wedge-batch-c',
+				feedback_inventory: ['FB-001'],
+				lanes: [
+					{
+						id: 'wedge-lane-a',
+						agent: 'reviewer',
+						prompt: 'Re-verify FB-001.',
+						workflow_lane: 'verification',
+						feedback_item_ids: ['FB-001'],
+					},
+				],
+			},
+			directory,
+			{ sessionID: session },
+		);
+		expect(corrected.success).toBe(true);
+	}, 60_000);
+
+	test('W3 (#3752 AC1): preserving — a valid amended dispatch persists both the amendment and the verification record', async () => {
+		const session = 'amend-success-3752';
+		await activatePrWorkflow(directory, session, 'PR_FEEDBACK', {
+			prHeadSha: 'abc123',
+		});
+		await declarePrFeedbackInventory(directory, session, ['FB-001'], {
+			prHeadSha: 'abc123',
+		});
+		const result = await executeDispatchLanesAsync(
+			{
+				mode: 'swarm-pr-feedback:verification',
+				pr_head_sha: 'abc123',
+				batch_id: 'amend-success-batch',
+				feedback_inventory: ['FB-001', 'FB-002'],
+				lanes: [
+					{
+						id: 'amend-success-lane',
+						agent: 'reviewer',
+						prompt: 'Verify FB-002.',
+						workflow_lane: 'verification',
+						feedback_item_ids: ['FB-002'],
+					},
+				],
+			},
+			directory,
+			{ sessionID: session },
+		);
+		expect(result.success).toBe(true);
+		const state = await readPrWorkflowGateState(directory, session);
+		expect(state?.prFeedbackInventory).toEqual(['FB-001', 'FB-002']);
+		expect(
+			state?.prFeedbackInventoryAmendments?.some(
+				(amendment) => amendment.entry === 'FB-002',
+			),
+		).toBe(true);
+		expect(
+			state?.prFeedbackVerifications?.some(
+				(record) => record.batchId === 'amend-success-batch',
+			),
+		).toBe(true);
 	}, 60_000);
 });

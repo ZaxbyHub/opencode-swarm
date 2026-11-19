@@ -90,11 +90,10 @@ import {
 	bindPrReviewBase,
 	bindPrReviewTriggerLedger,
 	collectPrWorkflowPendingLaneLiveness,
-	declarePrFeedbackInventory,
+	declareAndEnforcePrFeedbackVerification,
 	derivePrReviewCriticDispatchInputs,
 	derivePrReviewPresentationOrder,
 	describePrWorkflowRevisionDigestFailure,
-	enforcePrFeedbackVerificationOwnership,
 	enforcePrReviewBaseDimensions,
 	enforcePrWorkflowDispatchLanesAsync,
 	formatPrReviewLaneValidationFailure,
@@ -1811,12 +1810,9 @@ export async function executeDispatchLanesAsync(
 			// before the inventory declaration on an active one — so a request
 			// rejected here leaves the gate state null (fresh) or byte-for-byte
 			// unchanged (active), and the corrected retry is not wedged by the
-			// append-only inventory amendment rule. The stateful predicates in
-			// enforcePrFeedbackVerificationOwnership still run after the
-			// declaration, by design: they need durable state and do not wedge
-			// a same-inventory correction. Foreign-mode sessions keep their
-			// historical error path (the guard matches the verification modes
-			// that can own the session).
+			// append-only inventory amendment rule. Foreign-mode sessions keep
+			// their historical error path (the guard matches the verification
+			// modes that can own the session).
 			if (
 				parsed.data.mode === 'swarm-pr-feedback:verification' &&
 				(!gateState || gateState.mode === 'PR_FEEDBACK')
@@ -1828,6 +1824,35 @@ export async function executeDispatchLanesAsync(
 						ownedItemIds: lane.feedback_item_ids ?? [],
 					})),
 				);
+			}
+			// Issue #3752 AC2: every RECOGNIZED PR_FEEDBACK lane mode (the five
+			// above; unknown suffixes keep their historical error) probes lane
+			// agent launchability here, at the admission site — before the
+			// verification record (declare/enforce transaction), before the
+			// ordered-gate batch (recordPrFeedbackGateBatch), and before lane
+			// launch itself would refuse the agent. The probe is the SAME
+			// validateLaneAgent call launchAsyncLane runs, so the
+			// rejected-request set is unchanged (launch would refuse the same
+			// agents); only the durable-state consumption moves. For a request
+			// failing both this probe and the in-branch ordered-role check,
+			// this error wins (both are pre-record invalid_args rejections —
+			// an intended, documented precedence).
+			if (
+				(parsed.data.mode === 'swarm-pr-feedback:verification' ||
+					parsed.data.mode === 'swarm-pr-feedback:stage-b-reviewer' ||
+					parsed.data.mode === 'swarm-pr-feedback:stage-b-test' ||
+					parsed.data.mode === 'swarm-pr-feedback:closeout-reviewer' ||
+					parsed.data.mode === 'swarm-pr-feedback:closeout-critic') &&
+				(!gateState || gateState.mode === 'PR_FEEDBACK')
+			) {
+				for (const lane of parsed.data.lanes) {
+					const agentValidation = validateLaneAgent(lane.agent, context);
+					if (!agentValidation.ok) {
+						throw new Error(
+							`BLOCKED: PR_FEEDBACK ${parsed.data.mode.slice('swarm-pr-feedback:'.length)} lane "${lane.id}" agent "${lane.agent}" is not launchable on this host: ${agentValidation.error}`,
+						);
+					}
+				}
 			}
 			if (!gateState && parsed.data.mode?.startsWith('swarm-pr-review:')) {
 				gateState = await activatePrWorkflow(
@@ -2098,20 +2123,23 @@ export async function executeDispatchLanesAsync(
 					);
 				}
 				if (parsed.data.mode === 'swarm-pr-feedback:verification') {
-					await declarePrFeedbackInventory(
+					// Issue #3752 AC1: the declare and the enforce run as ONE
+					// transaction — every rejection (declaration-shaped or
+					// stateful) throws before any inventory-amendment,
+					// publication-invalidation, capacity-prune,
+					// retired-ownership-ledger, or verification-record write, so
+					// a rejected verification dispatch consumes no durable state
+					// and the corrected retry is never wedged by the
+					// append-only amendment rule.
+					await declareAndEnforcePrFeedbackVerification(
 						directory,
 						context.sessionID,
 						parsed.data.feedback_inventory ?? [],
-						{ prHeadSha: headSha },
-					);
-					await enforcePrFeedbackVerificationOwnership(
-						directory,
-						context.sessionID,
 						parsed.data.lanes.map((lane) => ({
 							laneId: lane.id,
 							ownedItemIds: lane.feedback_item_ids ?? [],
 						})),
-						{ batchId, prHeadSha: headSha },
+						{ prHeadSha: headSha, batchId },
 					);
 				} else if (
 					parsed.data.mode === 'swarm-pr-feedback:stage-b-reviewer' ||
@@ -6516,8 +6544,9 @@ function getGeneratedAgentPrefix(
  * tier-dependent lane count and max_concurrent, canary-first and fanout
  * order, trigger evaluation, and the STATEFUL PR_FEEDBACK verification
  * ownership predicates (batch-id duplicate, capacity, cross-batch
- * exclusivity — they read durable records and stay in
- * enforcePrFeedbackVerificationOwnership after the declaration).
+ * exclusivity — they read durable records and run inside the single-write
+ * declareAndEnforcePrFeedbackVerification transaction, so a rejection
+ * leaves nothing durable).
  * `reachable` mirrors the post-binding condition
  * these checks historically ran under (an active PR_REVIEW gate for this
  * session): it is false only when a different workflow mode owns the

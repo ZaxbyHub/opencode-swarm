@@ -8931,6 +8931,31 @@ export async function declarePrFeedbackInventory(
 	if (state.mode !== 'PR_FEEDBACK') {
 		throw wrongModeError(state, 'PR_FEEDBACK');
 	}
+	const computed = computePrFeedbackInventoryDeclaration(state, inventoryIds);
+	if (!computed.changed) return state;
+	await persistState(directory, computed.next);
+	if (computed.event) {
+		appendPublicationEvent(directory, computed.event);
+	}
+	return computed.next;
+}
+
+/**
+ * Issue #3752 AC1: the pure declaration computation shared by
+ * `declarePrFeedbackInventory` and the transactional
+ * `declareAndEnforcePrFeedbackVerification`. Everything here throws BEFORE any
+ * durable write — handoff coverage, the append-only amendment rules, the
+ * amendment ledger cap — and the publication invalidation event is RETURNED
+ * for the caller to append only after its single persistState lands.
+ */
+function computePrFeedbackInventoryDeclaration(
+	state: PrWorkflowGateState,
+	inventoryIds: readonly string[],
+): {
+	next: PrWorkflowGateState;
+	event: Record<string, unknown> | null;
+	changed: boolean;
+} {
 	const normalizedInventory = normalizeInventoryIds(inventoryIds);
 	const requiredHandoffIds = state.prFeedbackReviewHandoff?.findingIds ?? [];
 	const inventorySet = new Set(normalizedInventory);
@@ -8944,7 +8969,9 @@ export async function declarePrFeedbackInventory(
 	}
 	if (state.prFeedbackInventory) {
 		const existing = state.prFeedbackInventory;
-		if (sameStringArray(existing, normalizedInventory)) return state;
+		if (sameStringArray(existing, normalizedInventory)) {
+			return { next: state, event: null, changed: false };
+		}
 		// Issue #2242 R3 (wedge W-2): hard immutability made a late-discovered
 		// finding unrecoverable — the only exit was abort + full restart, which
 		// also discarded every completed verification for correctly-declared
@@ -9015,11 +9042,11 @@ export async function declarePrFeedbackInventory(
 			amendedState,
 			'inventory-amended',
 		);
-		await persistState(directory, superseded.state);
-		if (superseded.invalidationEvent) {
-			appendPublicationEvent(directory, superseded.invalidationEvent);
-		}
-		return superseded.state;
+		return {
+			next: superseded.state,
+			event: superseded.invalidationEvent,
+			changed: true,
+		};
 	}
 	const nextState: PrWorkflowGateState = {
 		...state,
@@ -9027,8 +9054,7 @@ export async function declarePrFeedbackInventory(
 		prFeedbackInventory: normalizedInventory,
 		prFeedbackVerifications: [],
 	};
-	await persistState(directory, nextState);
-	return nextState;
+	return { next: nextState, event: null, changed: true };
 }
 
 /**
@@ -9205,22 +9231,51 @@ export async function enforcePrFeedbackVerificationOwnership(
 	ownership: readonly PrFeedbackLaneOwnership[],
 	options: { batchId: string; prHeadSha: string },
 ): Promise<PrWorkflowGateState> {
-	let state = await bindPrWorkflowHead(directory, sessionID, options.prHeadSha);
+	const state = await bindPrWorkflowHead(
+		directory,
+		sessionID,
+		options.prHeadSha,
+	);
 	if (state.mode !== 'PR_FEEDBACK') {
 		throw wrongModeError(state, 'PR_FEEDBACK');
 	}
-	const inventory = state.prFeedbackInventory;
+	const nextState = await computePrFeedbackVerification(
+		directory,
+		state,
+		ownership,
+		options.batchId,
+	);
+	await persistState(directory, nextState);
+	return nextState;
+}
+
+/**
+ * Issue #3752 AC1: the pure enforcement computation shared by
+ * `enforcePrFeedbackVerificationOwnership` and the transactional
+ * `declareAndEnforcePrFeedbackVerification` — every stateful predicate
+ * (duplicate batch id, capacity prune, retired/current exclusivity, the
+ * shared shape assertions) throws BEFORE any durable write, and the prune
+ * mutates only the in-memory state it returns.
+ */
+async function computePrFeedbackVerification(
+	directory: string,
+	state: PrWorkflowGateState,
+	ownership: readonly PrFeedbackLaneOwnership[],
+	batchIdInput: string,
+): Promise<PrWorkflowGateState> {
+	let working = state;
+	const inventory = working.prFeedbackInventory;
 	if (!inventory || inventory.length === 0) {
 		throw new Error(
-			`BLOCKED: PR_FEEDBACK verification for session "${state.sessionID}" requires a declared feedback inventory before dispatch`,
+			`BLOCKED: PR_FEEDBACK verification for session "${working.sessionID}" requires a declared feedback inventory before dispatch`,
 		);
 	}
 
 	const normalizedOwnership = normalizeOwnership(ownership);
 	const inventorySet = new Set(inventory);
 	const claimedByItemId = new Map<string, string>();
-	let previous = state.prFeedbackVerifications ?? [];
-	const batchId = normalizeBatchId(options.batchId);
+	let previous = working.prFeedbackVerifications ?? [];
+	const batchId = normalizeBatchId(batchIdInput);
 	if (previous.some((record) => record.batchId === batchId)) {
 		throw new Error(
 			`BLOCKED: PR_FEEDBACK verification batch id "${batchId}" is already recorded`,
@@ -9236,14 +9291,14 @@ export async function enforcePrFeedbackVerificationOwnership(
 		// prune so the re-claim rejection is preserved. Same transaction shape as
 		// the PR_REVIEW GC: prune the in-memory state first, re-read `previous`
 		// from it, and let the single persistState downstream commit both.
-		state = await prunePrFeedbackVerificationsForCapacity(directory, state);
-		previous = state.prFeedbackVerifications ?? [];
+		working = await prunePrFeedbackVerificationsForCapacity(directory, working);
+		previous = working.prFeedbackVerifications ?? [];
 		if (previous.length >= MAX_WORKFLOW_BATCHES) {
 			throw new Error('BLOCKED: PR_FEEDBACK verification batch limit reached');
 		}
 	}
 	for (const [itemId, laneId] of Object.entries(
-		state.prFeedbackRetiredItemOwnership ?? {},
+		working.prFeedbackRetiredItemOwnership ?? {},
 	)) {
 		claimedByItemId.set(itemId, laneId);
 	}
@@ -9256,12 +9311,12 @@ export async function enforcePrFeedbackVerificationOwnership(
 	// above keeps GC-pruned bindings exclusive.
 	const currentDigestForOwnership = await currentPrFeedbackRevisionDigest(
 		directory,
-		state,
+		working,
 	);
 	for (const record of previous) {
 		const batchCovered = prFeedbackBatchCoveredItems(
 			directory,
-			state,
+			working,
 			record,
 			currentDigestForOwnership,
 		);
@@ -9295,14 +9350,59 @@ export async function enforcePrFeedbackVerificationOwnership(
 		validatedAt: isoNow(),
 	};
 
-	const nextState: PrWorkflowGateState = {
-		...state,
+	return {
+		...working,
 		updatedAt: isoNow(),
 		prFeedbackVerifications: [...previous, record],
 		prFeedbackVerification: record,
 	};
-	await persistState(directory, nextState);
-	return nextState;
+}
+
+/**
+ * Issue #3752 AC1: the transactional verification declaration+enforcement the
+ * dispatch path uses. ONE bind, ONE mode check, the declaration computation,
+ * the enforcement computation (run on the DECLARED next-state so its stateful
+ * predicates see the freshly declared/amended inventory, the amendment ledger,
+ * and any publication-driven clearing), ONE persistState of the combined
+ * result, and only THEN the publication invalidation event append. EVERY
+ * rejection — declaration-shaped OR stateful — throws before any
+ * inventory-amendment, publication-invalidation, capacity-prune,
+ * retired-ownership-ledger, or verification-record write after the head
+ * binding, so a rejected verification dispatch consumes no durable state and
+ * the corrected retry is never wedged by the append-only amendment rule.
+ * (bindPrWorkflowHead may still persist the initial head binding — pre-existing
+ * behavior, unchanged here. Intended consequences of the single bind: the gate
+ * revision advances once per successful dispatch instead of twice, and the
+ * second checkout/tracking revalidation is eliminated; the combined write's
+ * optimistic-concurrency CAS still rejects stale snapshots.)
+ */
+export async function declareAndEnforcePrFeedbackVerification(
+	directory: string,
+	sessionID: string,
+	inventoryIds: readonly string[],
+	ownership: readonly PrFeedbackLaneOwnership[],
+	options: { prHeadSha: string; batchId: string },
+): Promise<PrWorkflowGateState> {
+	const state = await bindPrWorkflowHead(
+		directory,
+		sessionID,
+		options.prHeadSha,
+	);
+	if (state.mode !== 'PR_FEEDBACK') {
+		throw wrongModeError(state, 'PR_FEEDBACK');
+	}
+	const declared = computePrFeedbackInventoryDeclaration(state, inventoryIds);
+	const verified = await computePrFeedbackVerification(
+		directory,
+		declared.next,
+		ownership,
+		options.batchId,
+	);
+	await persistState(directory, verified);
+	if (declared.event) {
+		appendPublicationEvent(directory, declared.event);
+	}
+	return verified;
 }
 
 /**
