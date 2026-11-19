@@ -1,5 +1,18 @@
 # Changelog
 
+## [7.204.12](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.204.11...v7.204.12) (2026-11-19)
+
+
+### Bug Fixes
+
+* **citations:** re-anchor tryCreatePrReviewRunReservation at source, shrink baseline back ([ec913f7](https://github.com/ZaxbyHub/opencode-swarm/commit/ec913f7df79ea89f9aebd3dfdc76e7fcee4804b2))
+* **host/v2:** refresh vendored plugin types and host-contract corpus to @opencode/plugin@2.3.0 ([c19726a](https://github.com/ZaxbyHub/opencode-swarm/commit/c19726a796b54f5c692d7be90d2fd6d54a15c156))
+* **pr-review:** stateless verification rejections, pre-activation base/micro launchability, stage-b-test verdict clause ([dfc2e73](https://github.com/ZaxbyHub/opencode-swarm/commit/dfc2e733c44eab55a124d169311112f6d9077a8d))
+* **pr-review:** stateless verification rejections, pre-activation base/micro launchability, stage-b-test verdict clause ([ebf3480](https://github.com/ZaxbyHub/opencode-swarm/commit/ebf3480a5eb80b1ebac25396aeae56fc6737726a))
+* **pr-review:** transactional verification declaration, PR_FEEDBACK lane launchability admission ([f5162e4](https://github.com/ZaxbyHub/opencode-swarm/commit/f5162e46b6f7c42a8c1f97372486169c9bf7cec1))
+* **test/docs:** close review findings F-002..F-005 from the PR [#3741](https://github.com/ZaxbyHub/opencode-swarm/issues/3741) swarm-pr-review ([53da2fa](https://github.com/ZaxbyHub/opencode-swarm/commit/53da2faf2cfd6fb9b19673281604987b15207ab4))
+* **test/docs:** parallel-review F-3/F-7 closures — host.content untouched pin, JSDoc wording, fragment frontmatter ([19b490c](https://github.com/ZaxbyHub/opencode-swarm/commit/19b490c9645a09ffce9afc7d98a0b35ed8f6592f))
+
 ## [7.204.11](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.204.10...v7.204.11) (2026-11-18)
 
 
