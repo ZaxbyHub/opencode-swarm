@@ -16,7 +16,6 @@ const SURFACES = [
 	'.opencode/skills/deep-research/SKILL.md',
 	'.opencode/skills/brainstorm/SKILL.md',
 	'.opencode/skills/swarm-plan/SKILL.md',
-	'src/agents/architect.ts',
 	'src/tools/tool-metadata.ts',
 	'src/agents/sme.ts',
 	'src/agents/researcher.ts',
@@ -74,6 +73,16 @@ describe('Keenable wiring surfaces (PR #3753)', () => {
 			);
 			expect(text).not.toContain('no search API key is configured');
 		}
+	});
+
+	test('architect prompt gates on web-search availability (kept character-neutral for the prompt budget)', () => {
+		const architect = read('src/agents/architect.ts');
+		expect(architect).toContain(
+			'or web search is unavailable, surface that and STOP',
+		);
+		expect(architect).toContain(
+			'is true and web search is available. If the user accepts',
+		);
 	});
 
 	test('docs/council/README.md documents Keenable freshness, privacy and limits', () => {
