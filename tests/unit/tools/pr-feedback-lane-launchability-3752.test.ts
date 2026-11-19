@@ -236,6 +236,104 @@ describe('PR_FEEDBACK lane launchability admission (issue #3752 AC2)', () => {
 		expect(message).toContain('is not launchable on this host');
 	}, 60_000);
 
+	test.each([
+		{
+			mode: 'swarm-pr-feedback:stage-b-test' as const,
+			agent: 'test_engineer',
+			label: 'stage-b-test',
+		},
+		{
+			mode: 'swarm-pr-feedback:closeout-reviewer' as const,
+			agent: 'reviewer',
+			label: 'closeout-reviewer',
+		},
+		{
+			mode: 'swarm-pr-feedback:closeout-critic' as const,
+			agent: 'critic',
+			label: 'closeout-critic',
+		},
+	])('L4: an unregistered $label agent is refused before the ordered-gate batch is recorded', async ({
+		mode,
+		agent,
+		label,
+	}) => {
+		// Same shape as L1 for the three remaining ordered modes the probe
+		// covers: the production admission probe lists five PR_FEEDBACK modes
+		// (dispatch-lanes.ts), and a mutant deleting one of these three mode
+		// disjuncts must redden here (the refusal text reaches this fixture via
+		// the launch-prerequisite throw's message; L1 additionally pins the
+		// state byte-for-byte) instead of leaving that mode's admission
+		// coverage unpinned with the suite green.
+		const session = `${label}-launch-3752`;
+		await activatePrWorkflow(directory, session, 'PR_FEEDBACK', {
+			prHeadSha: HEAD_SHA,
+		});
+		await declarePrFeedbackInventory(directory, session, [...ITEM_IDS], {
+			prHeadSha: HEAD_SHA,
+		});
+		await seedVerification(session, `seed-${label}`);
+		await recordPrFeedbackStageA(directory, session, REVISION_DIGEST, [
+			{
+				category: 'diff-check',
+				command: ['git', 'diff', '--check'],
+				durationMs: 1,
+			},
+			{
+				category: 'reproduction',
+				command: ['test', 'feedback'],
+				targets: ['feedback'],
+				feedbackTargets: ITEM_IDS.map((itemId) => ({
+					feedbackItemId: itemId,
+					target: 'feedback',
+					expectedBehavior: `fixed ${itemId}`,
+				})),
+				durationMs: 1,
+			},
+		]);
+		const before = await readPrWorkflowGateState(directory, session);
+		expect(before).not.toBeNull();
+		dispatchInternals.getGeneratedAgentNames = () => [
+			'mega_reviewer',
+			'mega_test_engineer',
+			'mega_critic',
+		];
+		const result = await executeDispatchLanesAsync(
+			{
+				mode,
+				pr_head_sha: HEAD_SHA,
+				max_concurrent: 1,
+				batch_id: `${label}-launch-3752`,
+				lanes: [
+					{
+						id: `${label}-lane-3752`,
+						agent,
+						prompt: `Review the feedback fix for FB-001 (${label}).`,
+						workflow_lane: label,
+						feedback_item_ids: ['FB-001'],
+					},
+				],
+			},
+			directory,
+			{ sessionID: session },
+		);
+		expect(result.success).toBe(false);
+		const message = [
+			String(result.message ?? ''),
+			...(result.lane_results ?? []).map((lane) =>
+				String((lane as { error?: unknown }).error ?? ''),
+			),
+		].join('\n');
+		// Reachability control: the raw registry refusal appears (the same
+		// text launchAsyncLane would emit).
+		expect(message).toContain('not registered on this host');
+		// Defense-in-depth pin (live at L1 whose prerequisites are fully
+		// seeded; for these modes the predecessor-phase prerequisite throws
+		// before any persist, so the state is trivially unchanged here too).
+		expect(await readPrWorkflowGateState(directory, session)).toEqual(before);
+		// HEAD behavior: the admission wrapper names the refusal.
+		expect(message).toContain('is not launchable on this host');
+	}, 60_000);
+
 	test('L2: an unregistered verification-lane agent is refused before the verification record is written', async () => {
 		const session = 'verify-launch-3752';
 		await activatePrWorkflow(directory, session, 'PR_FEEDBACK', {

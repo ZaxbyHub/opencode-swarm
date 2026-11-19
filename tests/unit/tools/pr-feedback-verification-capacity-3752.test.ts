@@ -225,13 +225,35 @@ describe('PR_FEEDBACK verification amendment-at-capacity wedge (issue #3752 AC1)
 		const message = String(wedged.message);
 		expect(message).toContain('owned by both');
 		expect(message).not.toContain('verification batch limit reached');
-		// Nothing persisted: no amendment, no prune, no retired-ownership
-		// growth, no new record (at base the amendment persisted first).
+		// Nothing persisted: the rejected request leaves the gate state
+		// BYTE-FOR-BYTE unchanged (the same whole-state pin the W1 leg uses —
+		// at base the amendment persisted first, so this comparison fails
+		// there).
 		const after = await readPrWorkflowGateState(directory, session);
-		expect(after?.prFeedbackInventory).toEqual(['FB-001']);
-		expect(after?.prFeedbackVerifications?.length).toBe(MAX_BATCHES);
-		expect(after?.prFeedbackRetiredItemOwnership ?? {}).toEqual(
-			before?.prFeedbackRetiredItemOwnership ?? {},
+		expect(after).toEqual(before);
+		// Corrected retry (O-004): the sanctioned recovery reuses the covered
+		// lane id (#3316 D7a — exclusivity is per item per LANE, so the lane
+		// that owns FB-001 may re-record it under a fresh batch id even after
+		// the capacity prune carried its binding into retired ownership).
+		const corrected = await executeDispatchLanesAsync(
+			{
+				mode: 'swarm-pr-feedback:verification',
+				pr_head_sha: 'abc123',
+				batch_id: 'wedge-capacity-retry',
+				feedback_inventory: ['FB-001'],
+				lanes: [
+					{
+						id: 'covered-lane',
+						agent: 'reviewer',
+						prompt: 'Re-verify FB-001.',
+						workflow_lane: 'verification',
+						feedback_item_ids: ['FB-001'],
+					},
+				],
+			},
+			directory,
+			{ sessionID: session },
 		);
+		expect(corrected.success).toBe(true);
 	}, 120_000);
 });
