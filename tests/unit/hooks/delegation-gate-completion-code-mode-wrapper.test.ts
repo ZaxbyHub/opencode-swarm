@@ -11,7 +11,6 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import type { PluginConfig } from '../../../src/config';
 import type { Plan } from '../../../src/config/plan-schema';
@@ -26,6 +25,7 @@ import type {
 	V2ToolHookInput,
 } from '../../../src/host/v2/types';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 import {
 	recordPlanCriticApproval,
 	seedAuthoritativeTaskWorkflow,
@@ -98,9 +98,7 @@ describe('completion gate: Code Mode execute wrapper', () => {
 	beforeEach(async () => {
 		resetSwarmState();
 		resetCodeModeWrapperCalls();
-		dir = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'completion-code-mode-')),
-		);
+		dir = canonicalMkdtemp('completion-code-mode-');
 		fs.mkdirSync(path.join(dir, '.swarm'), { recursive: true });
 		await writePlan(dir);
 		ensureAgentSession(SESSION);
@@ -154,6 +152,66 @@ describe('completion gate: Code Mode execute wrapper', () => {
 			),
 		);
 		expect(message).toContain('TASK_COMPLETION_GATE_VIOLATION');
+	});
+
+	// Each admission clause is pinned on its own: the mark alone must not admit
+	// a call that is not the `execute` wrapper or does not carry a program.
+	it('does not admit a marked call whose tool is not execute, even with a string code arg', async () => {
+		recordCodeModeWrapperCall(SESSION, 'call-wrapper');
+		const message = await denial(() =>
+			hook.toolBefore(
+				{ tool: 'save_plan', sessionID: SESSION, callID: 'call-wrapper' },
+				{ args: { title: 'x', code: 'return 1;' } },
+			),
+		);
+		expect(message).toContain('TASK_COMPLETION_GATE_VIOLATION');
+	});
+
+	it('does not admit a marked execute call without a string code program', async () => {
+		recordCodeModeWrapperCall(SESSION, 'call-wrapper');
+		for (const args of [{}, { code: 42 }, { code: null }]) {
+			const message = await denial(() =>
+				hook.toolBefore(
+					{ tool: 'execute', sessionID: SESSION, callID: 'call-wrapper' },
+					{ args },
+				),
+			);
+			expect(message).toContain('TASK_COMPLETION_GATE_VIOLATION');
+		}
+	});
+
+	// The admission does not inspect the program (single-call shape is only
+	// enforced by the Full-Auto classifier). Pinned so a future tightening or an
+	// accidental change is a deliberate, visible test edit.
+	it('admits any marked wrapper program: the gate does not inspect program shape', async () => {
+		recordCodeModeWrapperCall(SESSION, 'call-wrapper');
+		const message = await denial(() =>
+			hook.toolBefore(
+				{ tool: 'execute', sessionID: SESSION, callID: 'call-wrapper' },
+				{
+					args: {
+						code: 'const r = await tools.update_task_status({ task_id: "1.1", status: "blocked" }); return r;',
+					},
+				},
+			),
+		);
+		expect(message).toBeNull();
+	});
+
+	it('releases the gate once the awaiting task is blocked (the exit the message names)', async () => {
+		const planPath = path.join(dir, '.swarm', 'plan.json');
+		const plan = JSON.parse(fs.readFileSync(planPath, 'utf-8')) as Plan;
+		const task = plan.phases[0].tasks.find((t) => t.id === '1.1');
+		expect(task).toBeDefined();
+		if (task) task.status = 'blocked';
+		fs.writeFileSync(planPath, JSON.stringify(plan, null, 2));
+		const message = await denial(() =>
+			hook.toolBefore(
+				{ tool: 'save_plan', sessionID: SESSION, callID: 'call-after-blocked' },
+				{ args: { title: 'x' } },
+			),
+		);
+		expect(message).toBeNull();
 	});
 
 	it('end to end through the v2 adapter: wrapper admitted, nested save_plan denied', async () => {

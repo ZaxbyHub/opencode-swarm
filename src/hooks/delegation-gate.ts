@@ -2975,8 +2975,12 @@ export function canRunWhileTaskAwaitsCompletion(input: {
 	const normalizedTool = input.normalizedTool.toLowerCase();
 	// The wrapper only carries a program; each nested `tools.<name>()` call
 	// re-enters this gate under its own name and is judged there. Gating the
-	// wrapper denied the prescribed update_task_status remedy itself. Nested
-	// calls share the wrapper's call id, so the shape is re-checked too.
+	// wrapper denied the prescribed update_task_status remedy itself. The tool
+	// name and program shape are re-checked as defence in depth: the adapter
+	// clears the mark before the program runs, so nested calls normally never
+	// see it. The program body is NOT inspected here (unlike the Full-Auto
+	// classifier), so unhooked sandbox effects such as fetch are not gated by
+	// this check, and the mark is not proof of provenance.
 	if (
 		input.codeModeWrapper === true &&
 		normalizedTool === 'execute' &&
