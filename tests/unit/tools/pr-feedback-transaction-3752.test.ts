@@ -6,6 +6,8 @@
 // invalidation event appends only AFTER the single persist (round-4/5 critic
 // edge coverage).
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
+import { existsSync, readFileSync } from 'node:fs';
+import { coreEventsFilePath } from '../../../src/events/core-events.js';
 import {
 	activatePrWorkflow,
 	declareAndEnforcePrFeedbackVerification,
@@ -70,6 +72,51 @@ afterEach(async () => {
 });
 
 describe('declareAndEnforcePrFeedbackVerification transaction (issue #3752 AC1)', () => {
+	const readEventsFile = (path: string): string =>
+		existsSync(path) ? readFileSync(path, 'utf-8') : '';
+	// Arm a LIVE publication GENERATION (prFeedbackPublication.active in state
+	// 'armed'). supersedeLivePublicationInPendingState only produces an
+	// invalidation event when an active generation exists — a bare
+	// prFeedbackReadyToPublish record clears state but emits no event.
+	const armLivePublicationGeneration = async (session: string) => {
+		const current = await readPrWorkflowGateState(directory, session);
+		expect(current).not.toBeNull();
+		await writeAuthoritativePrWorkflowState(directory, {
+			...(current as Record<string, unknown>),
+			prFeedbackPublication: {
+				schemaVersion: 1,
+				active: {
+					schemaVersion: 1,
+					generation: 1,
+					state: 'armed',
+					workspaceIdentity: 'workspace-identity-1',
+					sessionID: session,
+					intakeHeadSha: 'abc123',
+					localHeadRef: 'refs/heads/pr-head',
+					localHead: 'abc123',
+					remoteName: 'origin',
+					remoteBranchRef: 'refs/heads/pr-head',
+					remoteRef: 'refs/remotes/origin/pr-head',
+					revisionDigest: 'revision-1',
+					evidence: {
+						stageAValidatedAt: '2026-11-19T00:00:00.000Z',
+						batches: [
+							{
+								phase: 'stage-b-reviewer',
+								batchId: 'gen1-sbr-batch',
+								laneId: 'gen1-sbr-lane',
+							},
+						],
+					},
+					createdAt: '2026-11-19T00:00:00.000Z',
+					armedAt: '2026-11-19T00:00:00.000Z',
+				},
+				history: [],
+				attempts: [],
+			},
+		} as Parameters<typeof writeAuthoritativePrWorkflowState>[1]);
+	};
+
 	test('the executed wedge sequence leaves no durable state and the corrected retry succeeds', async () => {
 		const session = 'transaction-probe-3752';
 		await activatePrWorkflow(directory, session, 'PR_FEEDBACK', {
@@ -154,6 +201,148 @@ describe('declareAndEnforcePrFeedbackVerification transaction (issue #3752 AC1)'
 		expect(
 			state?.prFeedbackVerifications?.some((r) => r.batchId === 'fresh-batch'),
 		).toBe(true);
+	}, 60_000);
+
+	test('a live-publication amendment appends exactly one inventory-amended event on success and NONE on rejection', async () => {
+		// Event-store observation: .swarm/events.jsonl. The success leg of the
+		// armed-publication pair appends EXACTLY ONE invalidation event
+		// (reason inventory-amended); the rejection leg appends NONE. Combined
+		// with the persist-failure ordering leg below, this closes the
+		// event-contract coverage the round-5 reviewer required.
+		const session = 'transaction-events-3752';
+		await activatePrWorkflow(directory, session, 'PR_FEEDBACK', {
+			prHeadSha: 'abc123',
+		});
+		await declareAndEnforcePrFeedbackVerification(
+			directory,
+			session,
+			['FB-001'],
+			[{ laneId: 'events-lane-a', ownedItemIds: ['FB-001'] }],
+			{ prHeadSha: 'abc123', batchId: 'events-batch-a' },
+		);
+		await armLivePublicationGeneration(session);
+		const eventsPath = coreEventsFilePath(directory);
+		const eventsBefore = readEventsFile(eventsPath);
+		// Rejection first: two lanes in the same ownership array claim FB-002.
+		// (The duplicate-batch rejection is unusable here because compute1's
+		// publication supersession clears prFeedbackVerifications before
+		// compute2 reads it — stateful exclusivity is the surviving rejection.)
+		let threw: string | null = null;
+		try {
+			await declareAndEnforcePrFeedbackVerification(
+				directory,
+				session,
+				['FB-001', 'FB-002'],
+				[
+					{ laneId: 'events-lane-b', ownedItemIds: ['FB-002'] },
+					{ laneId: 'events-lane-b2', ownedItemIds: ['FB-002'] },
+				],
+				{ prHeadSha: 'abc123', batchId: 'events-batch-b' },
+			);
+		} catch (error) {
+			threw = String((error as Error).message);
+		}
+		expect(threw).toContain('owned by both');
+		expect(readEventsFile(eventsPath)).toBe(eventsBefore);
+		// Success: a fresh batch id amends the inventory.
+		await declareAndEnforcePrFeedbackVerification(
+			directory,
+			session,
+			['FB-001', 'FB-002'],
+			[{ laneId: 'events-lane-c', ownedItemIds: ['FB-002'] }],
+			{ prHeadSha: 'abc123', batchId: 'events-batch-c' },
+		);
+		const eventsAfter = readEventsFile(eventsPath);
+		expect(eventsAfter.length).toBeGreaterThan(eventsBefore.length);
+		const newLines = eventsAfter
+			.slice(eventsBefore.length)
+			.split('\n')
+			.filter((line) => line.length > 0);
+		const appendedEvents = newLines.map(
+			(line) => JSON.parse(line) as Record<string, unknown>,
+		);
+		// The store bootstrap may prepend a manifest header when the file is
+		// created; every OTHER appended record must be exactly the one
+		// invalidation event.
+		const invalidations = appendedEvents.filter(
+			(event) => event.type === 'pr_feedback_publication_invalidated',
+		);
+		const nonManifest = appendedEvents.filter(
+			(event) => event.type !== 'swarm-events-manifest',
+		);
+		expect(nonManifest).toHaveLength(1);
+		expect(invalidations).toHaveLength(1);
+		expect(invalidations[0].reason).toBe('inventory-amended');
+		expect(invalidations[0].generation).toBe(1);
+		expect(invalidations[0].previousState).toBe('armed');
+		expect(invalidations[0].supersededBatchIds).toEqual(['gen1-sbr-batch']);
+	}, 60_000);
+
+	test('a persist failure appends NO event (append follows the persist, not precedes it)', async () => {
+		// Ordering discriminator: force the transaction's single persistState to
+		// throw STRICTLY AFTER compute1/compute2 (so the invalidation event
+		// candidate already exists in memory) but BEFORE any append could run.
+		// Reads keep working, so both the no-state and no-event halves are
+		// directly assertable. An append-before-persist implementation would
+		// leave an orphaned event in the store.
+		const session = 'transaction-order-3752';
+		await activatePrWorkflow(directory, session, 'PR_FEEDBACK', {
+			prHeadSha: 'abc123',
+		});
+		await declareAndEnforcePrFeedbackVerification(
+			directory,
+			session,
+			['FB-001'],
+			[{ laneId: 'order-lane-a', ownedItemIds: ['FB-001'] }],
+			{ prHeadSha: 'abc123', batchId: 'order-batch-a' },
+		);
+		await armLivePublicationGeneration(session);
+		const eventsPath = coreEventsFilePath(directory);
+		const eventsBefore = readEventsFile(eventsPath);
+		// Inject the persist failure through the module's own call-time hook.
+		// The failing dispatch makes exactly TWO session-state mutations: the
+		// bind revalidation's tracking write (assertPrFeedbackTrackingCheckout
+		// persists its validation), then the transaction's single persistState.
+		// Mutation #1 passes, mutation #2 (the persist) throws — strictly AFTER
+		// compute1 produced the invalidation event candidate and BEFORE any
+		// append could run. (The append-before-persist mutant is what proves
+		// this test discriminates: it would leave an orphaned event.)
+		let mutationsSinceArm = 0;
+		gateInternals.beforeSessionStateLockWrite = async () => {
+			mutationsSinceArm += 1;
+			if (mutationsSinceArm >= 2) {
+				throw new Error('INJECTED-PERSIST-FAILURE: ordering discriminator');
+			}
+		};
+		let threw: unknown = null;
+		try {
+			await declareAndEnforcePrFeedbackVerification(
+				directory,
+				session,
+				['FB-001', 'FB-002'],
+				[{ laneId: 'order-lane-b', ownedItemIds: ['FB-002'] }],
+				{ prHeadSha: 'abc123', batchId: 'order-batch-b' },
+			);
+		} catch (error) {
+			threw = error;
+		} finally {
+			gateInternals.beforeSessionStateLockWrite = undefined;
+		}
+		// The throw must be the INJECTED persist failure (self-verifying the
+		// injection point), never an earlier bind/compute rejection, and the
+		// mutation count must be exactly bind-write + persist (a drift to more
+		// writes means the fixture premise changed and must be revisited).
+		expect(String((threw as Error | null)?.message ?? '')).toContain(
+			'INJECTED-PERSIST-FAILURE',
+		);
+		expect(mutationsSinceArm).toBe(2);
+		// NO event was appended despite compute1 having produced one, and no
+		// state landed (the amendment never persisted; the publication stays
+		// armed and the inventory stays single-item).
+		expect(readEventsFile(eventsPath)).toBe(eventsBefore);
+		const after = await readPrWorkflowGateState(directory, session);
+		expect(after?.prFeedbackInventory).toEqual(['FB-001']);
+		expect(after?.prFeedbackPublication?.active?.state).toBe('armed');
 	}, 60_000);
 
 	test('a live-publication amendment persists the cleared state BEFORE the invalidation event (success pair)', async () => {
