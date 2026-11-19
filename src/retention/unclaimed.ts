@@ -23,8 +23,8 @@
  *     shorter than the 30-day default); it is a LEASE, not a permanent
  *     exemption, because a claim that never expires would recreate the very
  *     defect this module fixes.
- *     A malformed or unreadable manifest refuses the ENTIRE sweep (fail
- *     closed): an unparseable ownership claim is not a licence to delete.
+ *     A malformed, unreadable or misnamed (outside the name grammar) manifest
+ *     refuses the ENTIRE sweep (fail closed); an unparseable claim is no licence.
  *  3. TIER 3 — the catch-all. An unclaimed, non-symlinked directory with no
  *     `.preserve` marker whose entire content is older than its horizon is
  *     pruned. The retention log is validated BEFORE the first delete and every
@@ -294,15 +294,15 @@ export function loadOwnerManifests(swarmRoot: string): OwnerManifestSet {
 	const owners = new Map<string, string>();
 	const files: string[] = [];
 	for (const name of names) {
-		// Dotfiles and names that do not end in `.json` are not manifests: a temp
-		// file mid-write (`x.json` + temp suffix) must not be mistaken for one, and
-		// an editor scratch file must not block an otherwise healthy project.
-		if (name.startsWith('.') || !/\.json$/i.test(name)) continue;
+		// Dotfiles and names that do not end in `.json` are not manifests (a temp
+		// file mid-write must not be mistaken for one). `.json` plus trailing dots
+		// or whitespace is still a claim attempt: refused below, never skipped.
+		if (name.startsWith('.') || !/\.json[.\s]*$/i.test(name)) continue;
 		const manifestPath = path.join(manifestDir, name);
 		const relFile = `.swarm/${RETENTION_MANIFEST_DIR}/${name}`;
 		const fail = (reason: string): never => {
 			throw new RetentionManifestError(
-				`refusing retention sweep: ${relFile}: ${reason}`,
+				`refusing retention sweep: ${escapeLogPath(relFile)}: ${reason}`,
 			);
 		};
 		// A `.json` name outside the manifest grammar is refused, never skipped: a

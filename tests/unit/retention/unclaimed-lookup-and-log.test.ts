@@ -77,7 +77,20 @@ describe('manifest names are never skipped silently', () => {
 			'my reviewer.json',
 			JSON.stringify({ owner: 'r', preserve: ['review-sandbox'] }),
 		],
+		// Name refusal fires before the body is read, so this row proves the name
+		// path only; a validly named malformed body is pinned in unclaimed-directories.
 		['_broken.json', '{ this is not json'],
+		['café.json', JSON.stringify({ owner: 'r', preserve: ['review-sandbox'] })],
+		['_x.JSON', JSON.stringify({ owner: 'r', preserve: ['review-sandbox'] })],
+		// Trailing space or dot after `.json`: a claim attempt, not a non-manifest.
+		[
+			'reviewer.json ',
+			JSON.stringify({ owner: 'r', preserve: ['review-sandbox'] }),
+		],
+		[
+			'reviewer.json.',
+			JSON.stringify({ owner: 'r', preserve: ['review-sandbox'] }),
+		],
 	])('a misnamed %s refuses the whole sweep and deletes nothing', async (name, body) => {
 		const root = makeRoot('misnamed');
 		const dir = path.join(root, '.swarm', 'retention.d');
@@ -96,11 +109,66 @@ describe('manifest names are never skipped silently', () => {
 		const victim = seed(root, path.join('.swarm', 'zz-scratch', 'a.bin'), 400);
 		const result = await runRetentionSweep(root, { now: NOW });
 		expect(result.errors.manifests).toContain('not a valid manifest file name');
+		// The refusal names the offending file (the migration remedy relies on it).
+		expect(result.errors.manifests).toContain(`.swarm/retention.d/${name}`);
 		expect(result.pruned).toEqual({});
 		for (const file of [claimed, family, victim]) {
 			expect(existsSync(file)).toBe(true);
 		}
 	});
+
+	it('a misnamed file next to a valid manifest still refuses the whole sweep', async () => {
+		const root = makeRoot('coexist');
+		manifest(root, 'owner.json', {
+			owner: 'r',
+			preserve: ['review-sandbox'],
+			maxAgeDays: 100,
+		});
+		manifest(root, '_x.json', { owner: 'x', preserve: ['other'] });
+		const claimed = seed(
+			root,
+			path.join('.swarm', 'review-sandbox', 'a.bin'),
+			40,
+		);
+		const family = seed(
+			root,
+			path.join('.swarm', 'capsules', 'c1', 'a.bin'),
+			400,
+		);
+		const victim = seed(root, path.join('.swarm', 'zz-scratch', 'a.bin'), 400);
+		const result = await runRetentionSweep(root, { now: NOW });
+		expect(result.errors.manifests).toContain('.swarm/retention.d/_x.json');
+		expect(result.pruned).toEqual({});
+		for (const file of [claimed, family, victim]) {
+			expect(existsSync(file)).toBe(true);
+		}
+	});
+
+	it('a directory named like a manifest refuses the sweep as not a regular file', async () => {
+		const root = makeRoot('dir-named-json');
+		mkdirSync(path.join(root, '.swarm', 'retention.d', 'x.json'), {
+			recursive: true,
+		});
+		const victim = seed(root, path.join('.swarm', 'zz-scratch', 'a.bin'), 400);
+		const result = await runRetentionSweep(root, { now: NOW });
+		expect(result.errors.manifests).toContain('not a regular file');
+		expect(existsSync(victim)).toBe(true);
+	});
+
+	// A control character in a file name cannot exist on NTFS, so this leg only
+	// runs on POSIX hosts (the ubuntu and macos CI cells exercise it).
+	it.skipIf(process.platform === 'win32')(
+		'a control character in a manifest name is escaped in the refusal',
+		async () => {
+			const root = makeRoot('ctrl-name');
+			const dir = path.join(root, '.swarm', 'retention.d');
+			mkdirSync(dir, { recursive: true });
+			writeFileSync(path.join(dir, `a${String.fromCharCode(10)}b.json`), '{}');
+			const result = await runRetentionSweep(root, { now: NOW });
+			expect(result.errors.manifests).toContain('retention.d/a\\x0ab.json');
+			expect(result.errors.manifests).not.toContain(String.fromCharCode(10));
+		},
+	);
 
 	it('dotfiles and non-.json names in retention.d are still ignored', async () => {
 		const root = makeRoot('ignored');
@@ -108,6 +176,7 @@ describe('manifest names are never skipped silently', () => {
 		mkdirSync(dir, { recursive: true });
 		writeFileSync(path.join(dir, '.hidden.json'), '{ not json');
 		writeFileSync(path.join(dir, 'owner.json.bak'), '{ not json');
+		writeFileSync(path.join(dir, '.my reviewer.json'), '{ not json');
 		const victim = seed(root, path.join('.swarm', 'zz-scratch', 'a.bin'), 400);
 		const result = await runRetentionSweep(root, { now: NOW });
 		expect(result.errors.manifests).toBeUndefined();

@@ -240,9 +240,9 @@ function familiesFor(swarmRoot: string, now: number): Family[] {
  * As its final pass it runs the tier-3 catch-all for directories under
  * `.swarm/` that no family owns and no owner manifest claims
  * (`./unclaimed.ts`). The one non-fail-open branch is deliberate: an
- * unparseable `.swarm/retention.d/*.json` ownership claim refuses the whole
- * sweep before any deletion, because deleting under an ownership map we could
- * not verify is worse than not reclaiming this run.
+ * unparseable or misnamed `.swarm/retention.d/*.json` ownership claim refuses
+ * the whole sweep before any deletion, because deleting under an ownership map
+ * we could not verify is worse than not reclaiming this run.
  */
 export async function runRetentionSweep(
 	projectRoot: string,
