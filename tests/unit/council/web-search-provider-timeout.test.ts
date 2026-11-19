@@ -33,9 +33,9 @@ describe('web-search provider fetch timeout (#2476 AC6)', () => {
 	});
 
 	// Per-test budget 9s: SEARCH_TIMEOUT_MS is 6s, so the abort must land
-	// between bun's 5s default budget and 9s — this budget is also the guard
-	// that fails the test if the signal is ever removed (a per-test budget
-	// overrides CI's --timeout 120000).
+	// between bun's 5s default budget and 9s (a per-test budget overrides CI's
+	// --timeout 120000). The message assertions pin the deadline; removing the
+	// abort signal alone is caught only where a test asserts it was aborted.
 	test('TavilyProvider rejects with WebSearchError within 8s', async () => {
 		const provider = new TavilyProvider('test-key');
 		const startedAt = performance.now();
