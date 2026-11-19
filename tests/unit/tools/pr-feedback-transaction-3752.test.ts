@@ -16,6 +16,7 @@ import {
 	_internals as dispatchInternals,
 	executeDispatchLanesAsync,
 } from '../../../src/tools/dispatch-lanes.js';
+import { writeAuthoritativePrWorkflowState } from '../../helpers/pr-workflow-state-authority.js';
 import { safeRmRecursive } from '../../helpers/safe-test-dir.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 import { initializeGitRepository } from '../helpers/git-repository.js';
@@ -153,6 +154,105 @@ describe('declareAndEnforcePrFeedbackVerification transaction (issue #3752 AC1)'
 		expect(
 			state?.prFeedbackVerifications?.some((r) => r.batchId === 'fresh-batch'),
 		).toBe(true);
+	}, 60_000);
+
+	test('a live-publication amendment persists the cleared state BEFORE the invalidation event (success pair)', async () => {
+		const session = 'transaction-livepub-3752';
+		await activatePrWorkflow(directory, session, 'PR_FEEDBACK', {
+			prHeadSha: 'abc123',
+		});
+		await declareAndEnforcePrFeedbackVerification(
+			directory,
+			session,
+			['FB-001'],
+			[{ laneId: 'livepub-lane-a', ownedItemIds: ['FB-001'] }],
+			{ prHeadSha: 'abc123', batchId: 'livepub-batch-a' },
+		);
+		// Arm a live publication (the #2108 shape supersedeLivePublicationInPendingState
+		// reacts to): prFeedbackReadyToPublish set on the authoritative state.
+		const armed = await readPrWorkflowGateState(directory, session);
+		expect(armed).not.toBeNull();
+		await writeAuthoritativePrWorkflowState(directory, {
+			...(armed as Record<string, unknown>),
+			prFeedbackReadyToPublish: {
+				revisionDigest: 'revision-1',
+				localHead: 'abc123',
+				remoteName: 'origin',
+				remoteBranchRef: 'refs/heads/pr-head',
+				remoteRef: 'refs/remotes/origin/pr-head',
+				validatedAt: '2026-11-19T00:00:00.000Z',
+			},
+		} as Parameters<typeof writeAuthoritativePrWorkflowState>[1]);
+		const before = await readPrWorkflowGateState(directory, session);
+		expect(before?.prFeedbackReadyToPublish).toBeDefined();
+		// A valid AMENDED dispatch through the transaction: the combined write
+		// persists the amended inventory + the cleared publication state + the
+		// new verification record in ONE persist, then appends the event.
+		await declareAndEnforcePrFeedbackVerification(
+			directory,
+			session,
+			['FB-001', 'FB-002'],
+			[{ laneId: 'livepub-lane-b', ownedItemIds: ['FB-002'] }],
+			{ prHeadSha: 'abc123', batchId: 'livepub-batch-b' },
+		);
+		const after = await readPrWorkflowGateState(directory, session);
+		expect(after?.prFeedbackInventory).toEqual(['FB-001', 'FB-002']);
+		expect(after?.prFeedbackReadyToPublish).toBeUndefined();
+		expect(
+			after?.prFeedbackVerifications?.some(
+				(record) => record.batchId === 'livepub-batch-b',
+			),
+		).toBe(true);
+	}, 60_000);
+
+	test('a live-publication amendment that is REJECTED leaves neither state nor event (rejection pair)', async () => {
+		const session = 'transaction-livepub-rej-3752';
+		await activatePrWorkflow(directory, session, 'PR_FEEDBACK', {
+			prHeadSha: 'abc123',
+		});
+		await declareAndEnforcePrFeedbackVerification(
+			directory,
+			session,
+			['FB-001'],
+			[{ laneId: 'livepub-rej-lane-a', ownedItemIds: ['FB-001'] }],
+			{ prHeadSha: 'abc123', batchId: 'livepub-rej-batch-a' },
+		);
+		const armed = await readPrWorkflowGateState(directory, session);
+		expect(armed).not.toBeNull();
+		await writeAuthoritativePrWorkflowState(directory, {
+			...(armed as Record<string, unknown>),
+			prFeedbackReadyToPublish: {
+				revisionDigest: 'revision-1',
+				localHead: 'abc123',
+				remoteName: 'origin',
+				remoteBranchRef: 'refs/heads/pr-head',
+				remoteRef: 'refs/remotes/origin/pr-head',
+				validatedAt: '2026-11-19T00:00:00.000Z',
+			},
+		} as Parameters<typeof writeAuthoritativePrWorkflowState>[1]);
+		const before = await readPrWorkflowGateState(directory, session);
+		expect(before?.prFeedbackReadyToPublish).toBeDefined();
+		// The amended dispatch reuses batch A: the stateful duplicate rejection
+		// fires inside the transaction — nothing persists and no event lands.
+		let threw: string | null = null;
+		try {
+			await declareAndEnforcePrFeedbackVerification(
+				directory,
+				session,
+				['FB-001', 'FB-00X'],
+				[{ laneId: 'livepub-rej-lane-b', ownedItemIds: ['FB-00X'] }],
+				{ prHeadSha: 'abc123', batchId: 'livepub-rej-batch-a' },
+			);
+		} catch (error) {
+			threw = String((error as Error).message);
+		}
+		expect(threw).toContain(
+			'verification batch id "livepub-rej-batch-a" is already recorded',
+		);
+		const after = await readPrWorkflowGateState(directory, session);
+		expect(after).toEqual(before);
+		// The armed publication is untouched: no invalidation was recorded.
+		expect(after?.prFeedbackReadyToPublish).toBeDefined();
 	}, 60_000);
 
 	test('the dispatch path wires the transaction (a well-formed amended dispatch succeeds end to end)', async () => {
