@@ -4476,7 +4476,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		disposition: {
 			kind: 'not-a-defect',
 			proof:
-				'Bounded by construction: the log carries one metadata line per pruned path (no file content) and is compacted to RETENTION_LOG_MAX_BYTES 256 KiB (src/retention/unclaimed.ts:60,549-571), so it cannot become the unbounded-growth defect the catch-all exists to fix; manifests are one 64 KiB-capped file per owner and a malformed/ambiguous claim refuses the whole sweep rather than being deleted.',
+				'Bounded by construction: the log carries one metadata line per pruned path (no file content) and is compacted to RETENTION_LOG_MAX_BYTES 256 KiB (src/retention/unclaimed.ts:60,549-571), so it cannot become the unbounded-growth defect the catch-all exists to fix; manifests are one 64 KiB-capped file per owner and a malformed/ambiguous claim skips the catch-all pass rather than being guessed at.',
 		},
 	},
 	{

@@ -91,7 +91,7 @@ describe('manifest names are never skipped silently', () => {
 			'reviewer.json.',
 			JSON.stringify({ owner: 'r', preserve: ['review-sandbox'] }),
 		],
-	])('a misnamed %s refuses the whole sweep and deletes nothing', async (name, body) => {
+	])('a misnamed %s skips the catch-all, runs the families, and deletes no unclaimed directory', async (name, body) => {
 		const root = makeRoot('misnamed');
 		const dir = path.join(root, '.swarm', 'retention.d');
 		mkdirSync(dir, { recursive: true });
@@ -111,13 +111,16 @@ describe('manifest names are never skipped silently', () => {
 		expect(result.errors.manifests).toContain('not a valid manifest file name');
 		// The refusal names the offending file (the migration remedy relies on it).
 		expect(result.errors.manifests).toContain(`.swarm/retention.d/${name}`);
-		expect(result.pruned).toEqual({});
-		for (const file of [claimed, family, victim]) {
-			expect(existsSync(file)).toBe(true);
-		}
+		// The claims are unverifiable, so the catch-all deletes nothing (the claimed
+		// directory is past the 30-day default and would be pruned without its
+		// claim); the family pass does not read the claims and still runs.
+		expect(result.pruned['unclaimed-directories']).toBeUndefined();
+		expect(existsSync(claimed)).toBe(true);
+		expect(existsSync(victim)).toBe(true);
+		expect(existsSync(family)).toBe(false);
 	});
 
-	it('a misnamed file next to a valid manifest still refuses the whole sweep', async () => {
+	it('a misnamed file next to a valid manifest still skips the catch-all', async () => {
 		const root = makeRoot('coexist');
 		manifest(root, 'owner.json', {
 			owner: 'r',
@@ -138,13 +141,23 @@ describe('manifest names are never skipped silently', () => {
 		const victim = seed(root, path.join('.swarm', 'zz-scratch', 'a.bin'), 400);
 		const result = await runRetentionSweep(root, { now: NOW });
 		expect(result.errors.manifests).toContain('.swarm/retention.d/_x.json');
-		expect(result.pruned).toEqual({});
-		for (const file of [claimed, family, victim]) {
-			expect(existsSync(file)).toBe(true);
-		}
+		expect(result.pruned['unclaimed-directories']).toBeUndefined();
+		expect(existsSync(claimed)).toBe(true);
+		expect(existsSync(victim)).toBe(true);
+		expect(existsSync(family)).toBe(false);
 	});
 
-	it('a directory named like a manifest refuses the sweep as not a regular file', async () => {
+	it('a misnamed manifest also skips the catch-all in a dry run and plans nothing for it', async () => {
+		const root = makeRoot('dry-run-misnamed');
+		manifest(root, '_x.json', { owner: 'x', preserve: ['other'] });
+		const victim = seed(root, path.join('.swarm', 'zz-scratch', 'a.bin'), 400);
+		const result = await runRetentionSweep(root, { now: NOW, dryRun: true });
+		expect(result.errors.manifests).toContain('.swarm/retention.d/_x.json');
+		expect(result.explained ?? []).toEqual([]);
+		expect(existsSync(victim)).toBe(true);
+	});
+
+	it('a directory named like a manifest skips the catch-all as not a regular file', async () => {
 		const root = makeRoot('dir-named-json');
 		mkdirSync(path.join(root, '.swarm', 'retention.d', 'x.json'), {
 			recursive: true,

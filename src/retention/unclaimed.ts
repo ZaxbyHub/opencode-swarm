@@ -24,7 +24,7 @@
  *     exemption, because a claim that never expires would recreate the very
  *     defect this module fixes.
  *     A malformed, unreadable or misnamed (outside the name grammar) manifest
- *     refuses the ENTIRE sweep (fail closed); an unparseable claim is no licence.
+ *     skips this catch-all (fail closed); an unparseable claim is no licence.
  *  3. TIER 3 — the catch-all. An unclaimed, non-symlinked directory with no
  *     `.preserve` marker whose entire content is older than its horizon is
  *     pruned. The retention log is validated BEFORE the first delete and every
@@ -189,7 +189,7 @@ export interface OwnerManifestSet {
 	files: readonly string[];
 }
 
-/** A malformed or unreadable ownership claim. Refuses the whole sweep. */
+/** A malformed or unreadable ownership claim. Skips the catch-all pass. */
 export class RetentionManifestError extends Error {
 	constructor(message: string) {
 		super(message);
@@ -253,7 +253,7 @@ function describeError(error: unknown): string {
  * Read and validate every owner manifest. THROWS `RetentionManifestError` on
  * anything ambiguous — a malformed claim, a symlinked manifest, a duplicate
  * claim, or two files declaring the same owner — because the caller's contract
- * is to refuse the whole sweep rather than guess at ownership.
+ * is to skip the catch-all pass rather than guess at ownership.
  */
 export function loadOwnerManifests(swarmRoot: string): OwnerManifestSet {
 	const manifestDir = path.join(swarmRoot, RETENTION_MANIFEST_DIR);
