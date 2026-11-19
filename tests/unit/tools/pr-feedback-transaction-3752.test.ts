@@ -300,13 +300,14 @@ describe('declareAndEnforcePrFeedbackVerification transaction (issue #3752 AC1)'
 		const eventsPath = coreEventsFilePath(directory);
 		const eventsBefore = readEventsFile(eventsPath);
 		// Inject the persist failure through the module's own call-time hook.
-		// The failing dispatch makes exactly TWO session-state mutations: the
-		// bind revalidation's tracking write (assertPrFeedbackTrackingCheckout
-		// persists its validation), then the transaction's single persistState.
-		// Mutation #1 passes, mutation #2 (the persist) throws — strictly AFTER
-		// compute1 produced the invalidation event candidate and BEFORE any
-		// append could run. (The append-before-persist mutant is what proves
-		// this test discriminates: it would leave an orphaned event.)
+		// The failing dispatch makes exactly TWO session-state lock
+		// acquisitions: bind's session-state lock (the head is already bound,
+		// so bind is a read + lock cycle, not a tracking validation write), then
+		// the transaction's single persistState. Acquisition #1 passes,
+		// acquisition #2 (the persist) throws — strictly AFTER compute1
+		// produced the invalidation event candidate and BEFORE any append could
+		// run. (The append-before-persist mutant is what proves this test
+		// discriminates: it would leave an orphaned event.)
 		let mutationsSinceArm = 0;
 		gateInternals.beforeSessionStateLockWrite = async () => {
 			mutationsSinceArm += 1;
