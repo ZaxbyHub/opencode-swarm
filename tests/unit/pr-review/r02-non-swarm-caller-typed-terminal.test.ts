@@ -286,7 +286,12 @@ describe('r02 non-swarm caller typed terminal (issue 2585, C2/AC1/R02)', () => {
 			prHeadSha: HEAD_SHA,
 		});
 		// A structurally valid all-six partition (the tier-M gate must pass so
-		// the refusal comes from lane-agent validation, not arg validation).
+		// the refusal comes from agent validation, not arg validation). Since
+		// #3644 AC2 the base admission arm probes launchability
+		// PRE-ACTIVATION, so the refusal is the typed admission rejection
+		// (invalid_args, no lanes launched, no host session) rather than three
+		// launch-time lane rejections; the embedded registry text is the same
+		// #2614 refusal validateLaneAgent produces.
 		const result = await dispatch(
 			'r02-prefixed-refusal',
 			'swarm-pr-review:base',
@@ -295,18 +300,17 @@ describe('r02 non-swarm caller typed terminal (issue 2585, C2/AC1/R02)', () => {
 				PR_REVIEW_BASE_DIMENSION_IDS.slice(2, 4),
 				PR_REVIEW_BASE_DIMENSION_IDS.slice(4),
 			],
-			{ agent: 'explorer', expectRejected: 3 },
+			{ agent: 'explorer', expectRejected: 0 },
 		);
-		const lanes = result.lane_results as Array<Record<string, unknown>>;
-		expect(lanes).toHaveLength(3);
-		for (const lane of lanes) {
-			expect(lane.status).toBe('rejected');
-			expect(String(lane.error)).toContain(
-				'Agent "explorer" is not registered on this host',
-			);
-			expect(String(lane.error)).toContain(PREFIXED_NAMES.join(', '));
-		}
-		// No host session was created: the refusal is typed and immediate.
+		expect(result.success).toBe(false);
+		expect(result.failure_class).toBe('invalid_args');
+		expect(String(result.message)).toContain('is not launchable on this host');
+		expect(String(result.message)).toContain(
+			'Agent "explorer" is not registered on this host',
+		);
+		expect(String(result.message)).toContain(PREFIXED_NAMES.join(', '));
+		// No host session was created: the refusal is typed, immediate, and
+		// pre-activation.
 		expect(deliveredPrompts.size).toBe(0);
 	});
 
