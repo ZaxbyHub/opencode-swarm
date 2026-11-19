@@ -85,6 +85,25 @@ describe('Keenable wiring surfaces (PR #3753)', () => {
 		);
 	});
 
+	test('every command help line that says "Requires council.general.enabled" mentions Keenable', () => {
+		let checked = 0;
+		for (const rel of [
+			'src/commands/registry.ts',
+			'src/commands/council.ts',
+			'src/commands/deep-research.ts',
+		]) {
+			const lines = read(rel)
+				.split('\n')
+				.filter((l) => l.includes('Requires council.general.enabled'));
+			for (const line of lines) {
+				expect(line.toLowerCase()).toContain('keenable');
+				checked++;
+			}
+		}
+		// council + deep-research entries in registry.ts, plus the two command files.
+		expect(checked).toBeGreaterThanOrEqual(4);
+	});
+
 	test('docs/council/README.md documents Keenable freshness, privacy and limits', () => {
 		const doc = read('docs/council/README.md');
 		expect(doc).toContain('freshness is not mapped for Keenable');

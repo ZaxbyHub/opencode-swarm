@@ -1818,7 +1818,7 @@ export const COMMAND_REGISTRY = {
 			'Launch a multi-source, fact-checked deep research pass and synthesize a cited report [question]',
 		args: '<question> [--depth standard|exhaustive] [--max-researchers 1..6] [--rounds 1..4] [--brief]',
 		details:
-			'Runs the orchestrator-worker deep-research protocol: the architect decomposes the question into subtopics, gathers evidence with web_search and web_fetch across up to N iterative rounds, dispatches parallel sme synthesis workers, verifies every claim against cited sources with dual reviewers, challenges high-stakes claims with the critic, and presents a cited report in chat. Read-only — does not mutate source code, delegate to coder, or call declare_scope. Requires council.general.enabled and a search API key.',
+			'Runs the orchestrator-worker deep-research protocol: the architect decomposes the question into subtopics, gathers evidence with web_search and web_fetch across up to N iterative rounds, dispatches parallel sme synthesis workers, verifies every claim against cited sources with dual reviewers, challenges high-stakes claims with the critic, and presents a cited report in chat. Read-only — does not mutate source code, delegate to coder, or call declare_scope. Requires council.general.enabled and a search key (Keenable: none).',
 		category: 'agent',
 		toolPolicy: 'none',
 	},

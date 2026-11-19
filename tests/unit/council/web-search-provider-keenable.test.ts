@@ -90,6 +90,22 @@ describe('KeenableProvider request shape', () => {
 		);
 		expect((err as WebSearchError).cause).toBe(cause);
 	});
+
+	test('a runtime that reports the refusal only through the error code is still recognised', async () => {
+		const cause = Object.assign(new TypeError('fetch failed'), {
+			code: 'UnexpectedRedirect',
+		});
+		globalThis.fetch = (async () => {
+			throw cause;
+		}) as unknown as typeof fetch;
+		const err = await new KeenableProvider()
+			.search('q', 1)
+			.catch((e: unknown) => e);
+		expect((err as WebSearchError).message).toBe(
+			'Keenable request was redirected (refused)',
+		);
+		expect((err as WebSearchError).cause).toBe(cause);
+	});
 });
 
 describe('KeenableProvider failures', () => {

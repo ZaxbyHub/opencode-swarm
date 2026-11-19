@@ -302,7 +302,11 @@ export class KeenableProvider implements WebSearchProvider {
 			);
 		} catch (err) {
 			if (err === timeoutError) throw err;
-			if (err instanceof Error && /redirect/i.test(err.message)) {
+			if (
+				err instanceof Error &&
+				((err as { code?: unknown }).code === 'UnexpectedRedirect' ||
+					/redirect/i.test(err.message))
+			) {
 				throw new WebSearchError(
 					'Keenable request was redirected (refused)',
 					err,
