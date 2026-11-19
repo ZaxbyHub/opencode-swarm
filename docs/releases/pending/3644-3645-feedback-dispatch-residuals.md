@@ -27,6 +27,15 @@ type: fixed
   item-keyed `[STAGE-B-TEST] | <item_id> | PASS` settlement rows — closing the same
   conflict class that voided reviewer lanes before the clause mechanism existed.
 
+- **Both #3752 residual paths are fixed in this PR** (maintainer decision, option
+  (b)): a verification dispatch rejected for a STATEFUL reason after an inventory
+  amendment (duplicate batch id, capacity after prune, cross-batch exclusivity)
+  no longer persists the amendment — the dispatch path runs
+  `declareAndEnforcePrFeedbackVerification`, a single-bind/single-write
+  transaction, so the corrected retry is never wedged; and every recognized
+  PR_FEEDBACK lane mode (verification + the four ordered gates) probes agent
+  launchability at the admission site before any gate record is written.
+
 ## Why
 
 Follow-ups from PR #3632's post-delivery breadth review (closure-ledger rows FB-010
