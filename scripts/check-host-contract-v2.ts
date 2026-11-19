@@ -3,7 +3,7 @@
  * Issue #2910 (W1.3) — v2 host-contract drift check.
  *
  * `src/host/v2/types.ts` vendors the OpenCode 2 plugin API types behind a
- * provenance pin (`@opencode/plugin@2.0.26`) instead of installing the package.
+ * provenance pin (`@opencode/plugin@2.3.0`) instead of installing the package.
  * Before this check existed, nothing watched the REAL published surface: a
  * `@opencode/plugin` release that renamed a domain member, moved a host file,
  * or changed the v1→v2 permission migration table would land silently and only
@@ -21,7 +21,7 @@
  * Corpus A (npm): the `@opencode/plugin` tarball's promise d.ts domains named
  * by the types.ts provenance — `dist/promise/{plugin,registration,tool,session,
  * worktree,command,agent,event,storage,permission}.d.ts` plus `dist/app.d.ts`
- * and `dist/options.d.ts` (those two live at the dist root at 2.0.26) — PLUS
+ * and `dist/options.d.ts` (those two live at the dist root, 2.0.26 through 2.3.0) — PLUS
  * `@opencode/schema`'s `dist/agent.d.ts` (Agent.Info permission/default
  * shapes) and `@opencode/client`'s `dist/promise/generated/client.d.ts` (the
  * permission-bearing API surface: request/create/list/get/reply), with the

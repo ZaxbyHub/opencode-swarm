@@ -1325,11 +1325,11 @@ The adapter lives in `src/host/v2/`, one module per domain:
 | `agents-commands.ts` | the v1 `config` hook invoked against a synthetic `opencodeConfig`; `.agent` table onto `ctx.agent.transform`, the command table onto `ctx.command.transform` (native dispatch, expanded template as fallback) |
 | `session-client.ts` | the **session-client shim** — a feature-detected `session.{create,prompt,abort,delete,get}` subset over `ctx.session` bridged into the v1 client surface; consumers whose surface the shim does not carry keep their client-absent/typed-refusal paths |
 | `model-apply.ts` | re-applies the chat-boundary model advance on v2 through the registered `ctx.agent.transform` surface |
-| `types.ts` | vendored structural types for `@opencode/plugin@2.0.26` (provenance-headed; deliberately no runtime dependency) |
+| `types.ts` | vendored structural types for `@opencode/plugin@2.3.0` (provenance-headed; deliberately no runtime dependency) |
 
 Every v1 surface the plugin registers has exactly one row in [docs/host/v2-hook-inventory.md](host/v2-hook-inventory.md) — that table is the authority for v2 destinations and per-surface deltas; it is not restated here.
 
-The dual-host contract is enforced by a dedicated CI lane (issue #2910): a merge-queue `v2-host-smoke` cell in `ci.yml` (Node dual-shape load with bounded `setup()` timing in the repro-704 deadline class, a pinned real-host `@opencode/cli@2.0.29` auth-free load/registration proof, and the v1/v2 guidance-parity fixture test), a weekly host-contract v2 digest leg (`scripts/check-host-contract-v2.ts` — a dual-corpus structural digest over the npm `@opencode/plugin`/`schema`/`client` d.ts corpus and the `sst/opencode` host sources, compared against the committed 2.0.26 corpus fixture; advisory on PRs, blocking on the weekly run), and a drift-check vendored-pin freshness notice for the 2.0.26 type pin.
+The dual-host contract is enforced by a dedicated CI lane (issue #2910): a merge-queue `v2-host-smoke` cell in `ci.yml` (Node dual-shape load with bounded `setup()` timing in the repro-704 deadline class, a pinned real-host `@opencode/cli@2.0.29` auth-free load/registration proof, and the v1/v2 guidance-parity fixture test), a weekly host-contract v2 digest leg (`scripts/check-host-contract-v2.ts` — a dual-corpus structural digest over the npm `@opencode/plugin`/`schema`/`client` d.ts corpus and the `sst/opencode` host sources, compared against the committed corpus fixture (2.3.0 since the #3732/#3552 refresh); advisory on PRs, blocking on the weekly run), and a drift-check vendored-pin freshness notice for the 2.3.0 type pin.
 
 ---
 
