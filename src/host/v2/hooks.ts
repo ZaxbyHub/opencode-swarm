@@ -231,9 +231,9 @@ async function onV2ToolBefore(
 	// real tool id, so it marks the call for the Full-Auto classifier and the
 	// delegation gate's completion check. Nested `tools.<name>()` calls arrive
 	// as their own events under their own names.
-	// The mark is consumed by those hooks inside this before chain, so
-	// it is cleared in `finally` — a rejected or timed-out chain must not leave
-	// it behind (the after hook may never fire for a rejected before).
+	// Those hooks only read the mark (a non-destructive check) inside this
+	// before chain, so it is cleared in `finally` — a rejected or timed-out chain
+	// must not leave it behind (the after hook may never fire for a rejected before).
 	const wrapperMarked = isV2CodeModeWrapper(event);
 	if (wrapperMarked) {
 		recordCodeModeWrapperCall(event.sessionID, event.id);

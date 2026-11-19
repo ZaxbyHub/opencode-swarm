@@ -12,9 +12,11 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import type { ToolContext } from '@opencode-ai/plugin/tool';
 import type { PluginConfig } from '../../../src/config';
 import type { Plan } from '../../../src/config/plan-schema';
 import {
+	isCodeModeWrapperCall,
 	recordCodeModeWrapperCall,
 	resetCodeModeWrapperCalls,
 } from '../../../src/hooks/code-mode-wrapper';
@@ -25,6 +27,7 @@ import type {
 	V2ToolHookInput,
 } from '../../../src/host/v2/types';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
+import { executeUpdateTaskStatus } from '../../../src/tools/update-task-status';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 import {
 	recordPlanCriticApproval,
@@ -112,7 +115,7 @@ describe('completion gate: Code Mode execute wrapper', () => {
 		fs.rmSync(dir, { recursive: true, force: true });
 	});
 
-	it('admits the adapter-marked wrapper so the prescribed update_task_status can run', async () => {
+	it('admits the adapter-marked wrapper call whose program carries the prescribed update_task_status', async () => {
 		recordCodeModeWrapperCall(SESSION, 'call-wrapper');
 		const message = await denial(() =>
 			hook.toolBefore(
@@ -141,14 +144,18 @@ describe('completion gate: Code Mode execute wrapper', () => {
 			),
 		);
 		expect(message).toContain('status="blocked"');
+		expect(message).toContain('releases this gate');
 	});
 
-	it('still gates a mutating nested call under its own name', async () => {
+	it('does not extend the wrapper mark to an execute call under a different call id', async () => {
+		// The mark is recorded under the wrapper's own call id; a nested
+		// tools.<name>() call is a separate event with its own call id and is
+		// judged on its own, even when it also names execute and carries code.
 		recordCodeModeWrapperCall(SESSION, 'call-wrapper');
 		const message = await denial(() =>
 			hook.toolBefore(
-				{ tool: 'save_plan', sessionID: SESSION, callID: 'call-wrapper' },
-				{ args: { title: 'x' } },
+				{ tool: 'execute', sessionID: SESSION, callID: 'call-nested' },
+				{ args: { code: WRAPPER_CODE } },
 			),
 		);
 		expect(message).toContain('TASK_COMPLETION_GATE_VIOLATION');
@@ -201,7 +208,10 @@ describe('completion gate: Code Mode execute wrapper', () => {
 		}
 	});
 
-	it('releases the gate once the awaiting task is blocked (the exit the message names)', async () => {
+	it('releases the gate on plan status alone once the awaiting task is blocked', async () => {
+		// Pins the plan-status skip in findTaskAwaitingCompletion on its own: the
+		// real blocked call below also moves task evidence off tests_run, which
+		// releases the gate independently of this skip.
 		const planPath = path.join(dir, '.swarm', 'plan.json');
 		const plan = JSON.parse(fs.readFileSync(planPath, 'utf-8')) as Plan;
 		const task = plan.phases[0].tasks.find((t) => t.id === '1.1');
@@ -210,21 +220,78 @@ describe('completion gate: Code Mode execute wrapper', () => {
 		fs.writeFileSync(planPath, JSON.stringify(plan, null, 2));
 		const message = await denial(() =>
 			hook.toolBefore(
-				{ tool: 'save_plan', sessionID: SESSION, callID: 'call-after-blocked' },
+				{ tool: 'save_plan', sessionID: SESSION, callID: 'call-plan-blocked' },
 				{ args: { title: 'x' } },
 			),
 		);
 		expect(message).toBeNull();
 	});
 
+	it('releases the gate through the real update_task_status blocked call the message names', async () => {
+		const engaged = await denial(() =>
+			hook.toolBefore(
+				{
+					tool: 'save_plan',
+					sessionID: SESSION,
+					callID: 'call-before-blocked',
+				},
+				{ args: { title: 'x' } },
+			),
+		);
+		expect(engaged).toContain('TASK_COMPLETION_GATE_VIOLATION');
+		const result = await executeUpdateTaskStatus(
+			{ task_id: '1.1', status: 'blocked' },
+			dir,
+			{ sessionID: SESSION } as ToolContext,
+		);
+		expect(result.success).toBe(true);
+		// The audit trail the message calls "audited": the terminal WAL for the
+		// task is committed. This also keeps the test from passing through the
+		// plan-status skip alone (pinned separately above).
+		const wal = JSON.parse(
+			fs.readFileSync(
+				path.join(dir, '.swarm', 'task-terminals', '1.1.json'),
+				'utf-8',
+			),
+		) as { state?: string };
+		expect(wal.state).toBe('COMMITTED');
+		// The plan itself must record the status: task evidence and the WAL release
+		// the gate even if plan.json never reads blocked.
+		const persistedPlan = JSON.parse(
+			fs.readFileSync(path.join(dir, '.swarm', 'plan.json'), 'utf-8'),
+		) as Plan;
+		expect(
+			persistedPlan.phases[0].tasks.find((t) => t.id === '1.1')?.status,
+		).toBe('blocked');
+		const released = await denial(() =>
+			hook.toolBefore(
+				{ tool: 'save_plan', sessionID: SESSION, callID: 'call-after-blocked' },
+				{ args: { title: 'x' } },
+			),
+		);
+		expect(released).toBeNull();
+	});
+
 	it('end to end through the v2 adapter: wrapper admitted, nested save_plan denied', async () => {
+		// The mark only lives while the adapter's before chain runs, so observe it
+		// mid-chain: the adapter must mark the wrapper (execute with a string
+		// code) and nothing else.
+		const observedMarks: boolean[] = [];
 		const hooks = {
 			tool: {},
 			agent: {},
 			config: async () => {},
 			event: async () => {},
 			dispose: async () => {},
-			'tool.execute.before': hook.toolBefore,
+			'tool.execute.before': async (
+				input: { tool: string; sessionID: string; callID: string },
+				output: { args: unknown },
+			) => {
+				observedMarks.push(
+					isCodeModeWrapperCall(input.sessionID, input.callID),
+				);
+				return hook.toolBefore(input, output);
+			},
 		} as unknown as V1HooksSubset;
 		let before: ((event: V2ToolHookInput) => unknown) | undefined;
 		const ctx = {
@@ -254,6 +321,14 @@ describe('completion gate: Code Mode execute wrapper', () => {
 				before?.(event('execute', { code: WRAPPER_CODE })),
 			),
 		).toBeNull();
+		// Adapter-level control: an execute event without a string code is not
+		// marked as the wrapper, so it stays denied.
+		expect(
+			await denial(async () => before?.(event('execute', { notCode: 1 }))),
+		).toContain('TASK_COMPLETION_GATE_VIOLATION');
+		expect(observedMarks).toEqual([true, false]);
+		// Control, not discriminating for this change: update_task_status for the
+		// awaiting task is also admitted by the pre-existing same-task allowance.
 		expect(
 			await denial(async () =>
 				before?.(

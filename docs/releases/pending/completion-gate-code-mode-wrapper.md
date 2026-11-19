@@ -6,9 +6,10 @@ fix(delegation-gate): the completion gate no longer wedges OpenCode v2 Code Mode
   judged the wrapper itself as an opaque, non-read-only tool, so once a task
   reached `tests_run` it denied every plugin call — including the
   `update_task_status` remedy its own message prescribes and the exempt
-  `check_gate_status` — and the task could never leave the gate. Observed on a
-  live session: 11 consecutive `TASK_COMPLETION_GATE_VIOLATION` denials for one
-  task over 11 hours.
+  `check_gate_status` — and the task could never leave the gate. The PR author
+  reported this on a live session (11 consecutive
+  `TASK_COMPLETION_GATE_VIOLATION` denials for one task over about 11 hours);
+  that observation is not reproducible from the repository.
 - The wrapper call that the v2 adapter marked (`execute` with a string `code`
   program) now passes the completion gate. Each nested `tools.<name>()` call is
   still gated under its own name, so hooked mutating tools remain blocked while
@@ -21,8 +22,8 @@ fix(delegation-gate): the completion gate no longer wedges OpenCode v2 Code Mode
   classifies the wrapper separately.
 - The violation message now also names the audited escape for a task that
   cannot complete: `update_task_status` with `status="blocked"` (recorded in
-  the plan ledger and task evidence) releases the gate. A blocked task can be
-  reopened with an audited `blocked` to `in_progress` transition (see the
-  recovery runbook). `/swarm recover` and `/swarm reset-session` do not release
-  the gate: the awaiting state lives in task evidence and `plan.json`, not in
-  session state.
+  the plan ledger and task evidence) releases the gate. Reopening a blocked
+  task takes the audited `blocked` to `in_progress` repair, which requires
+  `force: true` with the exact CAS and audit fields (see the recovery runbook).
+  `/swarm recover` and `/swarm reset-session` do not release the gate: the
+  awaiting state lives in task evidence and `plan.json`, not in session state.
