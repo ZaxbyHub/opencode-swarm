@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import http from 'node:http';
 import {
 	BraveProvider,
+	KeenableProvider,
 	TavilyProvider,
 	WebSearchError,
 } from '../../../src/council/web-search-provider';
@@ -53,6 +54,27 @@ describe('web-search provider fetch timeout (#2476 AC6)', () => {
 			/Brave search timed out after 6000ms/,
 		);
 		expect(performance.now() - startedAt).toBeLessThan(8_000);
+	}, 9_000);
+
+	test('KeenableProvider rejects within 8s and aborts the fetch signal', async () => {
+		const signals: AbortSignal[] = [];
+		const hangingFetch = globalThis.fetch;
+		globalThis.fetch = ((url: string | URL | Request, init?: RequestInit) => {
+			if (init?.signal) signals.push(init.signal);
+			return hangingFetch(url, init);
+		}) as typeof fetch;
+		try {
+			const provider = new KeenableProvider();
+			const startedAt = performance.now();
+			await expect(provider.search('query', 1)).rejects.toThrow(
+				/Keenable search timed out after 6000ms/,
+			);
+			expect(performance.now() - startedAt).toBeLessThan(8_000);
+			expect(signals).toHaveLength(1);
+			expect(signals[0].aborted).toBe(true);
+		} finally {
+			globalThis.fetch = hangingFetch;
+		}
 	}, 9_000);
 
 	test('a fast successful response still parses normally', async () => {

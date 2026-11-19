@@ -828,7 +828,7 @@ export const TOOL_METADATA = {
 	},
 	web_search: {
 		description:
-			'External web search (Tavily or Brave) for architect-driven council research, SME domain research, researcher auto-research, and skill-improver research. Returns titled results with snippets, URLs, normalized query metadata, temporal intent, freshness, and removed stale years. Config-gated on council.general.enabled in the resolved config: global ~/.config/opencode/opencode-swarm.json, then project .opencode/opencode-swarm.json overrides. Requires a search API key. Used by the architect in MODE: COUNCIL to gather a RESEARCH CONTEXT before dispatching council agents, by SME for opt-in external skill/source evaluation, and by the researcher agent for multi-source auto-research.',
+			'External web search (Tavily, Brave, or keyless Keenable) for architect-driven council research, SME domain research, researcher auto-research, and skill-improver research. Returns titled results with snippets, URLs, normalized query metadata, temporal intent, freshness, and removed stale years. Config-gated on council.general.enabled in the resolved config: global ~/.config/opencode/opencode-swarm.json, then project .opencode/opencode-swarm.json overrides. Requires a search API key for Tavily or Brave (searchProvider "keenable" needs none; KEENABLE_API_KEY optional). Used by the architect in MODE: COUNCIL to gather a RESEARCH CONTEXT before dispatching council agents, by SME for opt-in external skill/source evaluation, and by the researcher agent for multi-source auto-research.',
 		agents: ['sme', 'researcher', 'skill_improver'],
 	},
 	web_fetch: {

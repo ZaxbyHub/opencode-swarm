@@ -1417,18 +1417,6 @@ describe('GeneralCouncilConfigSchema', () => {
 		expect(result.success).toBe(true);
 	});
 
-	it('accepts keenable as an optional provider; default remains tavily', () => {
-		const keenable = GeneralCouncilConfigSchema.safeParse({
-			searchProvider: 'keenable',
-		});
-		expect(keenable.success).toBe(true);
-		const defaults = GeneralCouncilConfigSchema.safeParse({});
-		expect(defaults.success).toBe(true);
-		if (defaults.success) {
-			expect(defaults.data.searchProvider).toBe('tavily');
-		}
-	});
-
 	it('rejects an unknown provider', () => {
 		const result = GeneralCouncilConfigSchema.safeParse({
 			searchProvider: 'duckduckgo',

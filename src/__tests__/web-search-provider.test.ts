@@ -193,9 +193,12 @@ describe('BraveProvider', () => {
 });
 
 describe('KeenableProvider', () => {
-	test('keyless request posts to /v1/search/public with X-Keenable-Title and no X-API-Key', async () => {
+	test('keyless request posts to /v1/search/public with X-Keenable-Title, no X-API-Key, and no redirects', async () => {
 		const calls: Array<{ url: string; init?: RequestInit }> = [];
-		globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+		globalThis.fetch = (async (
+			url: string | URL | Request,
+			init?: RequestInit,
+		) => {
 			calls.push({ url: String(url), init });
 			return new Response(
 				JSON.stringify({
@@ -226,12 +229,15 @@ describe('KeenableProvider', () => {
 		const headers = calls[0].init?.headers as Record<string, string>;
 		expect(headers['X-Keenable-Title']).toBe('opencode-swarm');
 		expect(headers['X-API-Key']).toBeUndefined();
-		expect(calls[0].init?.redirect).toBeUndefined();
+		expect(calls[0].init?.redirect).toBe('error');
 	});
 
 	test('keyed request posts to /v1/search with X-API-Key and does not follow redirects', async () => {
 		const calls: Array<{ url: string; init?: RequestInit }> = [];
-		globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+		globalThis.fetch = (async (
+			url: string | URL | Request,
+			init?: RequestInit,
+		) => {
 			calls.push({ url: String(url), init });
 			return new Response(JSON.stringify({ results: [] }), { status: 200 });
 		}) as unknown as typeof fetch;

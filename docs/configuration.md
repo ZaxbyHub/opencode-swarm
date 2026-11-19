@@ -43,7 +43,7 @@ Most behavior is controlled by `opencode-swarm.json`. Environment variables are 
 |---|---|---|
 | `TAVILY_API_KEY` | General Council web search | Tavily credential used when `council.general.searchApiKey` is unset and `searchProvider` is `tavily`. |
 | `BRAVE_SEARCH_API_KEY` | General Council web search | Brave Search credential used when `council.general.searchApiKey` is unset and `searchProvider` is `brave`. |
-| `KEENABLE_API_KEY` | General Council web search | Optional Keenable credential used when `council.general.searchApiKey` is unset and `searchProvider` is `keenable`. Keenable also works with no key. |
+| `KEENABLE_API_KEY` | General Council web search | Optional Keenable credential, the only source of the Keenable key (`council.general.searchApiKey` is never forwarded to Keenable). Blank or whitespace-only values count as unset. Without it, requests use Keenable's keyless public endpoint. See the Privacy note under `council.general`. |
 | `OPENCODE_SWARM_DEBUG=1` | Debug logger | Enables debug-gated log output. Keep disabled for normal use. |
 | `OPENCODE_SWARM_VERSION_BANNER=1` | Startup version banner | Restores the raw stderr `[opencode-swarm] running vX.Y.Z` startup line (default off; the banner otherwise appears only under `OPENCODE_SWARM_DEBUG=1`, in the debug logger's stdout output). Use for headless/CLI stale-cache diagnosis — identifying which cached plugin version actually loaded (issue #2236). The raw stderr leg is off by default because the TUI renders plugin stderr as an overlay (issue #3405). |
 | `DEBUG_SWARM=1` | Startup and hook diagnostics | Enables additional startup, hook, and plan-manager diagnostics. Keep disabled unless debugging plugin behavior. |
@@ -1992,7 +1992,7 @@ For a full configuration reference, see the [Full Configuration Reference](../RE
 
 Distinct from the Work Complete Council above. Where the Work Complete Council is a **verdict-based QA gate** that blocks task completion, the General Council is an **advisory deliberation system**: a fixed three-agent council (`council_generalist`, `council_skeptic`, `council_domain_expert`) reviews a question using an architect-supplied RESEARCH CONTEXT block, with one optional disagreement-targeted reconciliation round. The architect synthesizes the final answer directly using inline output rules.
 
-The three council agents derive their models from the `reviewer`, `critic`, and `sme` swarm config entries respectively (generalist→reviewer, skeptic→critic, domain_expert→SME). They have no tools — for General Council dispatch, the architect runs `web_search` 1–3 times before dispatch and passes the results in. Separately, SME agents may call `web_search` directly for external skill/source research when `council.general.enabled=true` and a Tavily or Brave API key is configured.
+The three council agents derive their models from the `reviewer`, `critic`, and `sme` swarm config entries respectively (generalist→reviewer, skeptic→critic, domain_expert→SME). They have no tools — for General Council dispatch, the architect runs `web_search` 1–3 times before dispatch and passes the results in. Separately, SME agents may call `web_search` directly for external skill/source research when `council.general.enabled=true` and a Tavily or Brave API key is configured (Keenable works without a key).
 
 Triggered by `/swarm council <question>` (see [Commands](commands.md#swarm-council-question---spec-review)) or offered as an early workflow option in MODE: BRAINSTORM (Phase 1b) and MODE: PLAN before `save_plan` when enabled.
 
@@ -2000,9 +2000,11 @@ Triggered by `/swarm council <question>` (see [Commands](commands.md#swarm-counc
 |-------|------|---------|-------------|
 | `enabled` | boolean | `false` | Master switch for the General Council feature |
 | `searchProvider` | `'tavily' \| 'brave' \| 'keenable'` | `'tavily'` | Web search backend used by the architect's pre-search pass |
-| `searchApiKey` | string? | undefined | API key for the chosen provider. Falls back to `TAVILY_API_KEY` / `BRAVE_SEARCH_API_KEY` / `KEENABLE_API_KEY` when unset. Keenable also works with no key. |
+| `searchApiKey` | string? | undefined | API key for `tavily` or `brave`. Falls back to `TAVILY_API_KEY` / `BRAVE_SEARCH_API_KEY` when unset. Not used for `keenable`: a shared key is intentionally not forwarded to another vendor; the Keenable key comes only from `KEENABLE_API_KEY`, and Keenable works with no key. |
 | `deliberate` | boolean | `true` | When `true`, the architect routes Round 1 disagreements back to disputing agents for a single Round 2 reconciliation |
 | `maxSourcesPerMember` | number | `5` | Hard cap on results per `web_search` call (1–20) |
+
+**Privacy note (Keenable).** Without `KEENABLE_API_KEY`, requests go to the keyless endpoint `https://api.keenable.ai/v1/search/public`. Per Keenable's documentation ([rate limits](https://docs.keenable.ai/rate-limits)), Keenable logs the query and the client IP on that endpoint, and keyless use is limited to 1,000 requests per hour and 10 per second per IP. Freshness is not mapped for Keenable (the provider sends no time-range filter), so `freshness` is not reported as applied in `web_search` output.
 
 **Deprecated fields** (retained on the strict schema for backward compatibility; ignored at runtime):
 

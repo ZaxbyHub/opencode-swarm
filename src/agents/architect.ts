@@ -1081,7 +1081,7 @@ HARD CONSTRAINTS (apply regardless of skill load success):
 - In MODE: DEEP_RESEARCH, you (architect) coordinate \`web_search\` and own \`web_fetch\`; sme synthesis workers receive gathered evidence in their dispatch message — do NOT expect sme to fetch in this mode. Outside DEEP_RESEARCH, SME and researcher prompts may use \`web_search\` directly when that tool is granted and configured.
 - Every claim in the final report MUST cite a source from the gathered evidence; reviewers verify claim↔citation before a claim is reported
 - Critics challenge only high-stakes / contested claims — do NOT waste cycles on well-supported ones
-- If council.general.enabled is false or no search API key is configured, surface that and STOP — do not produce ungrounded research
+- If council.general.enabled is false or web search is unavailable (Keenable needs no key), surface that and STOP — do not produce ungrounded research
 
 - For async synthesis lanes, record the \`batch_id\`, keep doing non-dependent architect work, poll with \`collect_lane_results\` without \`wait\`, process settled lanes immediately, and use \`wait: true\` only when no independent work remains.
 
@@ -1221,7 +1221,7 @@ Purpose: Create or ingest the implementation plan, persist QA gates against its 
 ACTION: Load skill ${bundledProjectSkillFileReference('swarm-plan')} immediately. Follow the protocol defined there.
 
 HARD CONSTRAINTS (apply regardless of skill load success):
-- Before drafting or saving a plan, offer the loaded skill's General Council advisory option when \`council.general.enabled\` is true and a search API key is configured. If the user accepts, use the council output as context before calling \`save_plan\` and before any critic pre-plan review.
+- Before drafting or saving a plan, offer the loaded skill's General Council advisory option when \`council.general.enabled\` is true and web search is available (Keenable needs no key). If the user accepts, use the council output as context before calling \`save_plan\` and before any critic pre-plan review.
 - Use the \`save_plan\` tool as the primary plan writer. Required fields include \`title\`, \`swarm_id\`, and \`phases\` with concrete task descriptions.
 - Every coding task SHOULD include \`files_touched\` with the exact normalized project-relative files or directories it may modify; include generated outputs and lockfiles.
 - Example call:

@@ -145,7 +145,7 @@ Enter architect MODE: COUNCIL — multi-model deliberation [question] [--spec-re
 
 **Args:** `<question> [--spec-review]`
 
-Triggers the architect to convene a three-agent General Council: Generalist (reviewer model), Skeptic (critic model), and Domain Expert (SME model). The architect first runs 1–3 targeted web searches and passes a compiled RESEARCH CONTEXT to all three agents before dispatching them in parallel. Agents deliberate using the NSED peer-review protocol (Round 1 independent analysis, Round 2 MAINTAIN/CONCEDE/NUANCE for disagreements). The architect synthesizes the final answer directly from convene_general_council output. --spec-review switches to single-pass advisory mode for spec review. Requires council.general.enabled: true and a search API key in the resolved config: global ~/.config/opencode/opencode-swarm.json, then project .opencode/opencode-swarm.json overrides.
+Triggers the architect to convene a three-agent General Council: Generalist (reviewer model), Skeptic (critic model), and Domain Expert (SME model). The architect first runs 1–3 targeted web searches and passes a compiled RESEARCH CONTEXT to all three agents before dispatching them in parallel. Agents deliberate using the NSED peer-review protocol (Round 1 independent analysis, Round 2 MAINTAIN/CONCEDE/NUANCE for disagreements). The architect synthesizes the final answer directly from convene_general_council output. --spec-review switches to single-pass advisory mode for spec review. Requires council.general.enabled: true and either searchProvider "keenable" (no key needed) or a search API key in the resolved config: global ~/.config/opencode/opencode-swarm.json, then project .opencode/opencode-swarm.json overrides.
 
 ### `/swarm pr-review`
 
