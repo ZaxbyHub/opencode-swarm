@@ -1,5 +1,5 @@
 ---
-issue: 3732
+issue: 3732, 3552
 ---
 
 ## Host contract drift (v2): vendored types and corpus refreshed to @opencode/plugin@2.3.0

@@ -114,7 +114,10 @@ function toV1MessageView(
 }
 
 /**
- * Write the (non-carrier) transformed text parts back onto a v2 message.
+ * Build the message that replaces a claimed v2 message carrying the transformed
+ * text parts (the caller swaps it into the in-place `event.messages` array; the
+ * host's original message object is left untouched — its content is readonly at
+ * @2.3.0).
  *
  * Text parts are replaced IN POSITION: the v1 chain only sees text, so every
  * non-text part (tool-call, tool-result, media, reasoning) keeps its slot

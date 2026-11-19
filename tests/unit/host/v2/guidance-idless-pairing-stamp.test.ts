@@ -486,6 +486,10 @@ describe('in-position write-back', () => {
 		// messages (unclaimed messages still keep identity).
 		const written = ev.messages[0] as unknown as V2Message;
 		expect(written).not.toBe(host);
+		// The host's ORIGINAL message object must be left untouched (parallel-review
+		// F-3: a frozen/readonly host message is the motivating case for the
+		// element-replacement change).
+		expect(host.content).toEqual([{ type: 'reasoning' }, text('t')]);
 		expect(
 			(written.content as Array<{ type: string }>).map((p) => p.type),
 		).toEqual(['reasoning', 'text']);
