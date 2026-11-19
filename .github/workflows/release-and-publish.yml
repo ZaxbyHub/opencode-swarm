@@ -213,12 +213,15 @@ jobs:
     needs: [release-please, update-release-notes]
     if: ${{ needs.release-please.outputs.releases_created == 'true' }}
     runs-on: ubuntu-latest
-    # Issue #2952: the three dispatched-run waits below declare 30 + 10 + 10 = 50 min
-    # of poll budget; at the observed ~1.2x per-iteration gh round-trip overhead the
-    # job needs ceil(50 x 1.2) + 5 min of margin = 65 min, so 70 min keeps 5 min of
-    # slack beyond the formula. The previous value (10) was below a single wait's own
-    # budget and killed the job mid-wait on every release.
-    timeout-minutes: 70
+    # Issues #2952/#3259: the three dispatched-run waits below declare 40 + 10
+    # + 10 = 60 min of poll budget (the ci.yml wait now covers the dispatched
+    # unit matrix's declared 40-min per-shard ceiling, not just its 16m05s
+    # observed duration); at the observed ~1.2x per-iteration gh round-trip
+    # overhead the job needs ceil(60 x 1.2) + 5 min of margin = 77 min, so 80
+    # min keeps 3 min of slack beyond the formula. The previous value (70)
+    # matched only the pre-#3259 50-min sum and would kill the job mid-wait on
+    # a healthy-but-slow dispatched ci.yml run.
+    timeout-minutes: 80
     concurrency:
       group: cleanup-release-fragments
       cancel-in-progress: false
@@ -432,6 +435,23 @@ jobs:
             workflow="$1"
             max_attempts="${2:-120}"
             poll_seconds="${3:-5}"
+            # PRR-012 (issue #3259): a non-numeric budget makes `seq` fail
+            # inside the for-list below, skipping the poll loop entirely and
+            # reporting a false "Timed out" — fail loudly on the real defect
+            # instead. Shipped call sites are literal numbers; this is
+            # defense in depth for future parameterized callers.
+            case "$max_attempts" in
+              ''|*[!0-9]*)
+                echo "::error::wait_for_dispatched_run: non-numeric max_attempts '$max_attempts' for $workflow" >&2
+                return 1
+                ;;
+            esac
+            case "$poll_seconds" in
+              ''|*[!0-9]*)
+                echo "::error::wait_for_dispatched_run: non-numeric poll_seconds '$poll_seconds' for $workflow" >&2
+                return 1
+                ;;
+            esac
             for _attempt in $(seq 1 "$max_attempts"); do
               record="$(gh run list \
                 --workflow "$workflow" \
@@ -457,8 +477,8 @@ jobs:
             return 1
           }
 
-          # target-duration: 30 — dispatched ci.yml observed 16m05s (workflow_dispatch runs the ubuntu-only 6-shard matrix, 40m per-shard ceiling)
-          ci_record="$(wait_for_dispatched_run ci.yml 360 5)"
+          # target-duration: 40 — dispatched ci.yml observed 16m05s; budget now covers the unit matrix's declared 40m per-shard ceiling (issue #3259)
+          ci_record="$(wait_for_dispatched_run ci.yml 480 5)"
           # target-duration: 10 — dispatched pr-standards.yml observed 46s
           standards_record="$(wait_for_dispatched_run pr-standards.yml 120 5)"
           # target-duration: 10 — dispatched drift-check.yml observed 42s
