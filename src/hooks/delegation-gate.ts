@@ -2786,7 +2786,7 @@ function completionGateViolationMessage(
 	return (
 		`TASK_COMPLETION_GATE_VIOLATION: Task ${taskAwaitingCompletion} reached tests_run but is not marked completed in plan.json/plan.md. ` +
 		`Call update_task_status with task_id="${taskAwaitingCompletion}" and status="completed". ` +
-		`If completion is refused and the task cannot finish, call update_task_status with task_id="${taskAwaitingCompletion}" and status="blocked" (an audited terminal transition that releases this gate). ` +
+		`If completion is refused and the task cannot finish, call update_task_status with task_id="${taskAwaitingCompletion}" and status="blocked" (an audited transition that releases this gate). ` +
 		'Read-only inspection remains available; a proven-disjoint task may continue; if plan.json is ledger-stale, retry save_plan with reconcile_ledger_projection=true and otherwise-unchanged plan content.'
 	);
 }

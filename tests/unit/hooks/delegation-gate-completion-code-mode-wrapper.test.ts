@@ -185,17 +185,20 @@ describe('completion gate: Code Mode execute wrapper', () => {
 	// accidental change is a deliberate, visible test edit.
 	it('admits any marked wrapper program: the gate does not inspect program shape', async () => {
 		recordCodeModeWrapperCall(SESSION, 'call-wrapper');
-		const message = await denial(() =>
-			hook.toolBefore(
-				{ tool: 'execute', sessionID: SESSION, callID: 'call-wrapper' },
-				{
-					args: {
-						code: 'const r = await tools.update_task_status({ task_id: "1.1", status: "blocked" }); return r;',
-					},
-				},
-			),
-		);
-		expect(message).toBeNull();
+		const programs = [
+			'const r = await tools.update_task_status({ task_id: "1.1", status: "blocked" }); return r;',
+			'return 1;',
+			'await fetch("https://example.invalid/"); return 1;',
+		];
+		for (const code of programs) {
+			const message = await denial(() =>
+				hook.toolBefore(
+					{ tool: 'execute', sessionID: SESSION, callID: 'call-wrapper' },
+					{ args: { code } },
+				),
+			);
+			expect(message).toBeNull();
+		}
 	});
 
 	it('releases the gate once the awaiting task is blocked (the exit the message names)', async () => {
