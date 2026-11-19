@@ -43,6 +43,7 @@ Most behavior is controlled by `opencode-swarm.json`. Environment variables are 
 |---|---|---|
 | `TAVILY_API_KEY` | General Council web search | Tavily credential used when `council.general.searchApiKey` is unset and `searchProvider` is `tavily`. |
 | `BRAVE_SEARCH_API_KEY` | General Council web search | Brave Search credential used when `council.general.searchApiKey` is unset and `searchProvider` is `brave`. |
+| `KEENABLE_API_KEY` | General Council web search | Optional Keenable credential used when `council.general.searchApiKey` is unset and `searchProvider` is `keenable`. Keenable also works with no key. |
 | `OPENCODE_SWARM_DEBUG=1` | Debug logger | Enables debug-gated log output. Keep disabled for normal use. |
 | `OPENCODE_SWARM_VERSION_BANNER=1` | Startup version banner | Restores the raw stderr `[opencode-swarm] running vX.Y.Z` startup line (default off; the banner otherwise appears only under `OPENCODE_SWARM_DEBUG=1`, in the debug logger's stdout output). Use for headless/CLI stale-cache diagnosis — identifying which cached plugin version actually loaded (issue #2236). The raw stderr leg is off by default because the TUI renders plugin stderr as an overlay (issue #3405). |
 | `DEBUG_SWARM=1` | Startup and hook diagnostics | Enables additional startup, hook, and plan-manager diagnostics. Keep disabled unless debugging plugin behavior. |
@@ -1998,8 +1999,8 @@ Triggered by `/swarm council <question>` (see [Commands](commands.md#swarm-counc
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `enabled` | boolean | `false` | Master switch for the General Council feature |
-| `searchProvider` | `'tavily' \| 'brave'` | `'tavily'` | Web search backend used by the architect's pre-search pass |
-| `searchApiKey` | string? | undefined | API key for the chosen provider. Falls back to `TAVILY_API_KEY` / `BRAVE_SEARCH_API_KEY` env vars when unset. |
+| `searchProvider` | `'tavily' \| 'brave' \| 'keenable'` | `'tavily'` | Web search backend used by the architect's pre-search pass |
+| `searchApiKey` | string? | undefined | API key for the chosen provider. Falls back to `TAVILY_API_KEY` / `BRAVE_SEARCH_API_KEY` / `KEENABLE_API_KEY` when unset. Keenable also works with no key. |
 | `deliberate` | boolean | `true` | When `true`, the architect routes Round 1 disagreements back to disputing agents for a single Round 2 reconciliation |
 | `maxSourcesPerMember` | number | `5` | Hard cap on results per `web_search` call (1–20) |
 

@@ -1,10 +1,11 @@
 /**
  * Web search provider abstraction for the General Council Mode.
  *
- * Two concrete providers (Tavily, Brave) plus a factory that selects one
- * based on `GeneralCouncilConfig.searchProvider`. Pure HTTP layer — no tool
- * wiring or prompt rendering. Uses the native `fetch` API (Bun-compatible);
- * no external HTTP libraries.
+ * Three concrete providers (Tavily, Brave, Keenable) plus a factory that
+ * selects one based on `GeneralCouncilConfig.searchProvider`. Pure HTTP
+ * layer — no tool wiring or prompt rendering. Uses the native `fetch` API
+ * (Bun-compatible); no external HTTP libraries. Keenable is opt-in and
+ * works without a key.
  *
  * Errors are surfaced as typed exceptions:
  *   - WebSearchConfigError — missing API key (factory)
@@ -250,15 +251,107 @@ function toBraveFreshness(freshness?: SearchFreshness): string | undefined {
  * Resolve the API key from config first, then env var fallback. Returns
  * undefined if neither is set so callers can decide how to surface that.
  */
+interface KeenableResponse {
+	results?: Array<{
+		title?: string;
+		url?: string;
+		snippet?: string;
+		description?: string;
+	}>;
+}
+
+export class KeenableProvider implements WebSearchProvider {
+	constructor(private readonly apiKey?: string) {}
+
+	async search(
+		query: string,
+		maxResults: number,
+		_options: WebSearchOptions = {},
+	): Promise<WebSearchResult[]> {
+		const keyed = typeof this.apiKey === 'string' && this.apiKey.length > 0;
+		const url = keyed
+			? 'https://api.keenable.ai/v1/search'
+			: 'https://api.keenable.ai/v1/search/public';
+		const headers: Record<string, string> = {
+			Accept: 'application/json',
+			'Content-Type': 'application/json',
+			'X-Keenable-Title': 'opencode-swarm',
+		};
+		if (keyed) headers['X-API-Key'] = this.apiKey as string;
+
+		let response: Response;
+		const timeoutError = new WebSearchError(
+			`Keenable search timed out after ${SEARCH_TIMEOUT_MS}ms`,
+		);
+		try {
+			response = await withTimeoutSignal(
+				(signal) =>
+					fetch(url, {
+						method: 'POST',
+						headers,
+						body: JSON.stringify({ query, max_results: maxResults }),
+						signal,
+						...(keyed ? { redirect: 'error' as RequestRedirect } : {}),
+					}),
+				SEARCH_TIMEOUT_MS,
+				timeoutError,
+			);
+		} catch (err) {
+			if (err === timeoutError) throw err;
+			throw new WebSearchError(
+				`Keenable network error for query "${query}"`,
+				err,
+			);
+		}
+
+		if (!response.ok) {
+			throw new WebSearchError(
+				`Keenable HTTP ${response.status} for query "${query}"`,
+			);
+		}
+
+		let body: unknown;
+		try {
+			body = await response.json();
+		} catch (err) {
+			throw new WebSearchError('Keenable returned non-JSON response', err);
+		}
+
+		const results = (body as KeenableResponse | null)?.results;
+		if (!Array.isArray(results)) {
+			return [];
+		}
+
+		return results
+			.filter(
+				(r): r is { title: string; url: string; snippet?: string; description?: string } =>
+					typeof r?.title === 'string' && typeof r?.url === 'string',
+			)
+			.map((r) => ({
+				title: r.title,
+				url: r.url,
+				snippet:
+					(typeof r.snippet === 'string' && r.snippet) ||
+					(typeof r.description === 'string' && r.description) ||
+					'',
+				query,
+			}));
+	}
+}
+
 function resolveApiKey(
-	provider: 'tavily' | 'brave',
+	provider: 'tavily' | 'brave' | 'keenable',
 	configKey?: string,
 ): string | undefined {
 	if (configKey && configKey.length > 0) {
 		return configKey;
 	}
 	const envName =
-		provider === 'tavily' ? 'TAVILY_API_KEY' : 'BRAVE_SEARCH_API_KEY';
+		provider === 'tavily'
+			? 'TAVILY_API_KEY'
+			: provider === 'brave'
+				? 'BRAVE_SEARCH_API_KEY'
+				: 'KEENABLE_API_KEY';
 	const fromEnv = process.env[envName];
 	return fromEnv && fromEnv.length > 0 ? fromEnv : undefined;
 }
@@ -266,6 +359,11 @@ function resolveApiKey(
 export function createWebSearchProvider(
 	config: GeneralCouncilConfig,
 ): WebSearchProvider {
+	if (config.searchProvider === 'keenable') {
+		return new KeenableProvider(
+			resolveApiKey('keenable', config.searchApiKey),
+		);
+	}
 	const apiKey = resolveApiKey(config.searchProvider, config.searchApiKey);
 	if (!apiKey) {
 		const envName =
