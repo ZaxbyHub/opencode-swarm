@@ -268,17 +268,17 @@ export function loadOwnerManifests(swarmRoot: string): OwnerManifestSet {
 			return { claims: new Map(), files: [] };
 		}
 		throw new RetentionManifestError(
-			`refusing retention sweep: cannot inspect .swarm/${RETENTION_MANIFEST_DIR}/ (${describeError(error)})`,
+			`skipping unclaimed-directory catch-all: cannot inspect .swarm/${RETENTION_MANIFEST_DIR}/ (${describeError(error)})`,
 		);
 	}
 	if (dirStat.isSymbolicLink()) {
 		throw new RetentionManifestError(
-			`refusing retention sweep: .swarm/${RETENTION_MANIFEST_DIR} is a symlink; ownership manifests must be real files inside the project`,
+			`skipping unclaimed-directory catch-all: .swarm/${RETENTION_MANIFEST_DIR} is a symlink; ownership manifests must be real files inside the project`,
 		);
 	}
 	if (!dirStat.isDirectory()) {
 		throw new RetentionManifestError(
-			`refusing retention sweep: .swarm/${RETENTION_MANIFEST_DIR} is not a directory`,
+			`skipping unclaimed-directory catch-all: .swarm/${RETENTION_MANIFEST_DIR} is not a directory`,
 		);
 	}
 	let names: string[];
@@ -286,7 +286,7 @@ export function loadOwnerManifests(swarmRoot: string): OwnerManifestSet {
 		names = fs.readdirSync(manifestDir).sort();
 	} catch (error) {
 		throw new RetentionManifestError(
-			`refusing retention sweep: cannot read .swarm/${RETENTION_MANIFEST_DIR}/ (${describeError(error)})`,
+			`skipping unclaimed-directory catch-all: cannot read .swarm/${RETENTION_MANIFEST_DIR}/ (${describeError(error)})`,
 		);
 	}
 
@@ -302,7 +302,7 @@ export function loadOwnerManifests(swarmRoot: string): OwnerManifestSet {
 		const relFile = `.swarm/${RETENTION_MANIFEST_DIR}/${name}`;
 		const fail = (reason: string): never => {
 			throw new RetentionManifestError(
-				`refusing retention sweep: ${escapeLogPath(relFile)}: ${reason}`,
+				`skipping unclaimed-directory catch-all: ${escapeLogPath(relFile)}: ${reason}`,
 			);
 		};
 		// A `.json` name outside the manifest grammar is refused, never skipped: a

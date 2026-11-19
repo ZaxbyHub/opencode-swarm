@@ -436,7 +436,9 @@ describe('audit log (L-1) and manifests (L-3)', () => {
 		}
 		const victim = seed(root, path.join('.swarm', 'zz-scratch', 'old.bin'));
 		const result = await runRetentionSweep(root, { now: NOW });
-		expect(result.errors.manifests).toContain('refusing retention sweep');
+		expect(result.errors.manifests).toContain(
+			'skipping unclaimed-directory catch-all',
+		);
 		expect(existsSync(victim)).toBe(true);
 	});
 });
