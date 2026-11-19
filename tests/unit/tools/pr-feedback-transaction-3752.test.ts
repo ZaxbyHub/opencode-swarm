@@ -346,7 +346,7 @@ describe('declareAndEnforcePrFeedbackVerification transaction (issue #3752 AC1)'
 		expect(after?.prFeedbackPublication?.active?.state).toBe('armed');
 	}, 60_000);
 
-	test('a live-publication amendment persists the cleared state BEFORE the invalidation event (success pair)', async () => {
+	test('a live-publication amendment persists the cleared state in one write (success pair)', async () => {
 		const session = 'transaction-livepub-3752';
 		await activatePrWorkflow(directory, session, 'PR_FEEDBACK', {
 			prHeadSha: 'abc123',
@@ -358,8 +358,11 @@ describe('declareAndEnforcePrFeedbackVerification transaction (issue #3752 AC1)'
 			[{ laneId: 'livepub-lane-a', ownedItemIds: ['FB-001'] }],
 			{ prHeadSha: 'abc123', batchId: 'livepub-batch-a' },
 		);
-		// Arm a live publication (the #2108 shape supersedeLivePublicationInPendingState
-		// reacts to): prFeedbackReadyToPublish set on the authoritative state.
+		// Arm a ready-to-publish record (a #2108 liveness marker: it makes
+		// supersedeLivePublicationInPendingState's `live` predicate true so the
+		// amendment CLEARS it in the same write, but with NO active generation
+		// it emits NO invalidation event — gate :11144. The event contract is
+		// covered by the armed-GENERATION legs above.)
 		const armed = await readPrWorkflowGateState(directory, session);
 		expect(armed).not.toBeNull();
 		await writeAuthoritativePrWorkflowState(directory, {
@@ -376,8 +379,9 @@ describe('declareAndEnforcePrFeedbackVerification transaction (issue #3752 AC1)'
 		const before = await readPrWorkflowGateState(directory, session);
 		expect(before?.prFeedbackReadyToPublish).toBeDefined();
 		// A valid AMENDED dispatch through the transaction: the combined write
-		// persists the amended inventory + the cleared publication state + the
-		// new verification record in ONE persist, then appends the event.
+		// persists the amended inventory + the cleared ready-to-publish record
+		// + the new verification record in ONE persist (no event is produced by
+		// this fixture — see the comment above).
 		await declareAndEnforcePrFeedbackVerification(
 			directory,
 			session,
@@ -395,7 +399,7 @@ describe('declareAndEnforcePrFeedbackVerification transaction (issue #3752 AC1)'
 		).toBe(true);
 	}, 60_000);
 
-	test('a live-publication amendment that is REJECTED leaves neither state nor event (rejection pair)', async () => {
+	test('a live-publication amendment that is REJECTED leaves no durable state (rejection pair)', async () => {
 		const session = 'transaction-livepub-rej-3752';
 		await activatePrWorkflow(directory, session, 'PR_FEEDBACK', {
 			prHeadSha: 'abc123',
@@ -407,6 +411,10 @@ describe('declareAndEnforcePrFeedbackVerification transaction (issue #3752 AC1)'
 			[{ laneId: 'livepub-rej-lane-a', ownedItemIds: ['FB-001'] }],
 			{ prHeadSha: 'abc123', batchId: 'livepub-rej-batch-a' },
 		);
+		// Same ready-to-publish arming as the success pair (liveness marker
+		// only; no active generation, so no invalidation event is in play —
+		// the event-rejection contract is covered by the armed-GENERATION
+		// events leg above).
 		const armed = await readPrWorkflowGateState(directory, session);
 		expect(armed).not.toBeNull();
 		await writeAuthoritativePrWorkflowState(directory, {
@@ -423,7 +431,7 @@ describe('declareAndEnforcePrFeedbackVerification transaction (issue #3752 AC1)'
 		const before = await readPrWorkflowGateState(directory, session);
 		expect(before?.prFeedbackReadyToPublish).toBeDefined();
 		// The amended dispatch reuses batch A: the stateful duplicate rejection
-		// fires inside the transaction — nothing persists and no event lands.
+		// fires inside the transaction — nothing persists.
 		let threw: string | null = null;
 		try {
 			await declareAndEnforcePrFeedbackVerification(
