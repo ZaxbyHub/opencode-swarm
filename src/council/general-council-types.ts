@@ -136,10 +136,13 @@ export interface GeneralCouncilResult {
  */
 export interface GeneralCouncilConfig {
 	enabled: boolean;
-	searchProvider: 'tavily' | 'brave';
+	searchProvider: 'tavily' | 'brave' | 'keenable';
 	/**
-	 * Optional API key. When omitted, falls back to `TAVILY_API_KEY` or
-	 * `BRAVE_SEARCH_API_KEY` env vars depending on `searchProvider`.
+	 * Optional API key for `tavily` and `brave`. When omitted, falls back to
+	 * `TAVILY_API_KEY` or `BRAVE_SEARCH_API_KEY`. Not used for `keenable`: the
+	 * Keenable key comes only from `KEENABLE_API_KEY` (a shared key is
+	 * intentionally not forwarded to another vendor); with no env key Keenable
+	 * uses its keyless public endpoint.
 	 */
 	searchApiKey?: string;
 	/**

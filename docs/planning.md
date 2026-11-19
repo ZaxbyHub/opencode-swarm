@@ -259,7 +259,7 @@ When your repository has a `.specify/` marker directory and `specs/<feature-dir>
 When you enter PLAN mode without an effective spec (confirmed via `/swarm sdd status`), the architect offers to create one first or skip. If you skip the offer, `save_plan` will reject with `SPEC_REQUIRED` — PLAN will diagnose the situation via `/swarm sdd status`, guide you through materializing an effective spec with explicit consent steps, and stop if you decline. To bypass the spec gate entirely, set `SWARM_SKIP_SPEC_GATE=1` in your environment (tests and CI only).
 
 **Using General Council before planning:**
-When `council.general.enabled` is true and a Tavily or Brave search API key is configured, MODE: PLAN asks whether to use the three-agent General Council before `save_plan`. If accepted, the architect gathers current external context, records the council consensus/disagreements in `.swarm/context.md`, and uses that input before writing the plan and before critic pre-plan review.
+When `council.general.enabled` is true and web search is available (`searchProvider: "keenable"` needs no key; Tavily or Brave need a configured API key), MODE: PLAN asks whether to use the three-agent General Council before `save_plan`. If accepted, the architect gathers current external context, records the council consensus/disagreements in `.swarm/context.md`, and uses that input before writing the plan and before critic pre-plan review.
 
 ### Spec-Kit SDD support
 
