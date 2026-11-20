@@ -202,6 +202,15 @@ function evaluateDestructiveDecision(
 	}
 
 	const command = dcNormalizeCommand(rawCommand);
+	// #3761/#3754: parity with the gate's destructive arm — the procsub span
+	// extraction below scans raw command TEXT; for the provably-inert
+	// quoted-heredoc cat shape an inert body line like `>(rm -rf ../esc)`
+	// would otherwise be extracted from the ORIGINAL bytes here while the
+	// gate sees the neutralized analysis command (explain/gate split-brain
+	// on exactly the shapes the fix legalizes). Every other consumer of
+	// `command` in this section is a destructive-model scan of what RUNS
+	// and keeps the normalized command, exactly like the gate.
+	const procsubAnalysisCommand = neutralizeQuotedHeredocBodies(command);
 
 	// #3491 W3 parity: deny-on-uncertainty launcher shapes and the paranoid
 	// unwrap-depth bound mirror the live destructive arm's early denies.
@@ -278,7 +287,7 @@ function evaluateDestructiveDecision(
 	// command text — push each body's split segments with an uncertain
 	// child-cwd context (the #3568 review F-01 shape; restores parity with
 	// the gate's destructive pipeline, both `>` and `<` operators).
-	for (const body of procSubSpanBodies(command)) {
+	for (const body of procSubSpanBodies(procsubAnalysisCommand)) {
 		for (const sub of dcSplitSegments(body)) {
 			pushSegmentOccurrence(sub, 'uncertain');
 			// #3569 4.5 review Critical 2 (explain parity): unwrap launcher/
