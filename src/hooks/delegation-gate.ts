@@ -12,6 +12,7 @@ import { ZodError, z } from 'zod';
 import type {
 	BackgroundCoderReservation,
 	BackgroundDelegationRecord,
+	BackgroundPlanCriticDispatch,
 	BackgroundTaskChangeContext,
 	BackgroundWorktreeDescriptor,
 	RecordPendingInput,
@@ -71,6 +72,12 @@ import {
 	routeReviewForChanges,
 	shouldParallelizeReview,
 } from '../parallel/review-router.js';
+import {
+	recordVerifiedPlanCriticApproval,
+	taskLooksLikePlanCritic,
+	extractPlanCriticVerdict,
+	PLAN_CRITIC_TASK_SIGNALS,
+} from '../plan/critic-approval.js';
 import {
 	approvedSnapshotCoversPlan,
 	computePlanStructureHash,
@@ -1758,131 +1765,6 @@ function outputText(output: unknown): string {
 	return '';
 }
 
-function extractPlanCriticVerdict(
-	output: unknown,
-): 'APPROVED' | 'NEEDS_REVISION' | 'REJECTED' | null {
-	const text = outputText(output);
-	if (!text) return null;
-
-	// Primary signal (highest confidence): a `VERDICT: <TOKEN>` line. The critic
-	// system prompt (src/agents/critic.ts) instructs this exact shape, so a
-	// conforming critic always matches here. Also tolerates markdown-bold labels
-	// (`**VERDICT**:`) which LLMs frequently emit despite the plain instruction.
-	const primary =
-		/^\s*(?:\*\*)?VERDICT(?:\*\*)?\s*:\s*(APPROVED|NEEDS_REVISION|REJECTED)\b/im.exec(
-			text,
-		);
-	if (primary) {
-		return primary[1].toUpperCase() as
-			| 'APPROVED'
-			| 'NEEDS_REVISION'
-			| 'REJECTED';
-	}
-
-	// Fallback 1: a `## Verdict` (or `### Verdict`, …) heading followed (within
-	// 2 lines) by a line whose only non-whitespace content is the verdict token.
-	// Matches critics that emit the verdict under a markdown heading instead of
-	// the `VERDICT:` label. The heading must be the verdict section specifically
-	// (not e.g. `## PLAN REVIEW`), so the `Verdict` word is required.
-	const heading = /^(#{1,6})\s*Verdict\s*$/im.exec(text);
-	if (heading && heading.index !== undefined) {
-		const after = text.slice(heading.index + heading[0].length);
-		const nextLines = after.split('\n').slice(0, 3).join('\n');
-		const headingMatch = /^\s*(APPROVED|NEEDS_REVISION|REJECTED)\s*$/im.exec(
-			nextLines,
-		);
-		if (headingMatch) {
-			return headingMatch[1].toUpperCase() as
-				| 'APPROVED'
-				| 'NEEDS_REVISION'
-				| 'REJECTED';
-		}
-	}
-
-	// Fallback 2: a BARE verdict token on its own line — but ONLY in the final
-	// few lines of output (so a mid-review mention like "this is approved for
-	// execution" cannot trigger it) and ONLY when the line does not contain a
-	// `|` separator (which marks the critic-rubric template line
-	// `VERDICT: APPROVED | NEEDS_REVISION | REJECTED`, an enumeration rather
-	// than a real verdict) and is not inside a fenced code block.
-	//
-	// Issue #2012: real critics do not always emit the `VERDICT:` label, and a
-	// missing snapshot here permanently wedges every coder delegation because
-	// the gate is ratchet-tighter with no escape hatch. The tail-only + no-pipe
-	// + no-code-fence guards keep false positives out while recovering the
-	// common "the critic just wrote APPROVED at the end" case.
-	const lines = text.split('\n');
-	const tailStart = Math.max(0, lines.length - 6);
-	let inFence = false;
-	for (let i = 0; i < lines.length; i++) {
-		// Match 3+ backticks so a 4-backtick fenced block (common for nested
-		// code blocks) also toggles the fence state, not just exactly ```.
-		// The regex is "3 or more backtick characters" — the {3,} quantifier
-		// applies to the single preceding backtick literal.
-		if (/^\s*(?:`{3,})/.test(lines[i])) inFence = !inFence;
-		if (i < tailStart) continue;
-		if (inFence) continue;
-		const line = lines[i];
-		if (line.includes('|')) continue;
-		const bare = /^\s*(APPROVED|NEEDS_REVISION|REJECTED)\s*$/i.exec(line);
-		if (bare) {
-			return bare[1].toUpperCase() as
-				| 'APPROVED'
-				| 'NEEDS_REVISION'
-				| 'REJECTED';
-		}
-	}
-
-	return null;
-}
-
-function taskLooksLikePlanCritic(args: Record<string, unknown>): boolean {
-	const text = [
-		args.prompt,
-		args.task,
-		args.description,
-		args.message,
-		args.input,
-	]
-		.filter((value): value is string => typeof value === 'string')
-		.join('\n')
-		.toLowerCase();
-	if (!text) return false;
-	// Broad-recall-biased on purpose: the caller already narrows to
-	// `subagent_type === 'critic'` (a target the trusted architect controls), so
-	// a false positive is low-risk, while a false negative silently blocks ALL
-	// EXECUTE-phase coder work with no auto-recovery. Any single signal below —
-	// drawn from the phrasings the critic-gate/plan skills tell the architect to
-	// send — is therefore sufficient; no AND-pairing.
-	return PLAN_CRITIC_TASK_SIGNALS.some((signal) => text.includes(signal));
-}
-
-// Substrings that, in a dispatch to `subagent_type: 'critic'`, mark it as a
-// plan critic-gate review. Kept lowercase (text is lowercased before matching).
-const PLAN_CRITIC_TASK_SIGNALS = [
-	'critic-gate', // "MODE: CRITIC-GATE", "critic-gate protocol/review"
-	'plan critic',
-	'review plan',
-	'review the plan',
-	'plan.md', // critic-gate/SKILL.md: "Send the full plan.md content"
-	'approve the plan',
-	'plan approval',
-	// Issue #2012: realistic architect phrasings that the original 7 signals
-	// silently missed, wedging the ratchet-tighter critic_pre_plan gate with
-	// no recovery. These are safe to add: the caller already narrows to
-	// `subagent_type === 'critic'` (a target the trusted architect controls),
-	// so a false positive is low-risk, while a false negative silently blocks
-	// ALL EXECUTE-phase coder work with no auto-recovery.
-	'pre-implementation review',
-	'evaluate this plan',
-	'evaluate the plan',
-	'assess this plan',
-	'assess the plan',
-	'plan soundness',
-	'before implementation',
-	'review the plan below',
-] as const;
-
 /**
  * Returns whether the plan in the given directory has a valid plan-critic
  * approval. Does not throw — returns `false` for any failure (fail-closed).
@@ -2036,48 +1918,34 @@ async function recordPlanCriticApprovalSnapshotIfApplicable(
 	if (!taskLooksLikePlanCritic(args)) return;
 	if (extractPlanCriticVerdict(output) !== 'APPROVED') return;
 
-	// Issue #2012: a critic APPROVED verdict that fails to record a snapshot
-	// permanently wedges the ratchet-tighter critic_pre_plan gate (no escape
-	// hatch). loadPlanJsonOnly can transiently return null if the critic
-	// dispatch landed microseconds before a concurrent save_plan flush. The
-	// architect skill ordering (save_plan → CRITIC-GATE) is the primary
-	// guarantee; this bounded retry is cheap insurance against the race so a
-	// legitimate APPROVED is not silently dropped. Keep attempts tiny — the
-	// common path resolves on the first read.
-	let plan = await loadPlanJsonOnly(directory);
-	if (!plan) {
-		for (let attempt = 0; attempt < 2 && !plan; attempt++) {
-			await new Promise((resolve) => setTimeout(resolve, 150));
-			plan = await loadPlanJsonOnly(directory);
-		}
-	}
-	if (!plan) {
-		logger.warn(
-			`[delegation-gate] plan critic APPROVED verdict could not be recorded: ` +
-				`plan.json not readable after retry. The critic_pre_plan gate will ` +
-				`block coder delegation until a snapshot exists. Call ` +
-				`approve_plan_critic (or /swarm approve-plan-critic) with a reason ` +
-				`to record a manual approval if the critic genuinely approved.`,
+	// Single shared approval implementation (src/plan/critic-approval.ts):
+	// the native-async completion observer calls the exact same recorder with
+	// the dispatch-time plan-structure hash, so both transports write the
+	// identical ledger snapshot shape and share the replay fence.
+	const recording = await recordVerifiedPlanCriticApproval(directory, {
+		parentSessionId: input.sessionID,
+		callId: input.callID,
+		verdictText: output,
+		transport: 'sync_task',
+	});
+	if (recording.outcome === 'recorded') return;
+	if (recording.outcome === 'skipped') {
+		// A prior approval for this exact dispatch already exists (replay), or
+		// the plan changed since the dispatch. Neither records a new snapshot;
+		// the skip is diagnostic only.
+		logger.log(
+			`[delegation-gate] plan critic APPROVED verdict not re-recorded for call ${input.callID}: ${recording.reason}`,
 		);
 		return;
 	}
-
-	// Store the STRUCTURAL hash (status-excluded) as the snapshot's payload_hash
-	// so `assertPlanCriticApprovedForExecution` can match this approval after the
-	// architect flips the current task to `in_progress` before delegating its
-	// coder. This MUST be the same hash function the gate compares against
-	// (`computePlanStructureHash`), or the staleness check would never match.
-	await takeSnapshotEvent(directory, plan, {
-		source: 'critic_approved',
-		approvalMetadata: {
-			verdict: 'APPROVED',
-			source: 'plan_critic_gate',
-			session_id: input.sessionID,
-			call_id: input.callID,
-			approved_at: new Date().toISOString(),
-		},
-		payloadHashOverride: computePlanStructureHash(plan),
-	});
+	if (recording.outcome === 'not_approved') return;
+	logger.warn(
+		`[delegation-gate] plan critic APPROVED verdict could not be recorded: ` +
+			`${recording.reason}. The critic_pre_plan gate will ` +
+			`block coder delegation until a snapshot exists. Call ` +
+			`approve_plan_critic (or /swarm approve-plan-critic) with a reason ` +
+			`to record a manual approval if the critic genuinely approved.`,
+	);
 }
 
 /**
@@ -3001,23 +2869,6 @@ function evidenceTaskResolutionOptions(
 	return undefined;
 }
 
-// The outer OpenCode Code Mode `execute` is not the tool that mutates a
-// plan. It can contain arbitrary JavaScript, so NEVER treat all execute calls
-// as safe. Only the host-marked, explicitly operator-trusted wrapper around
-// ONE statically parsed, plain-data tool call may reach the nested tool's
-// own tool.execute.before gate. This mirrors the full-auto classifier.
-const COMPLETION_CODE_MODE_RECOVERY_CALL =
-	/^\s*(?:return\s+)?(?:await\s+)?tools\.(?:update_task_status|save_plan|check_gate_status|get_approved_plan|get_qa_gate_profile)\s*\(/;
-
-function isBoundedCompletionCodeModeRecovery(code: unknown): boolean {
-	return (
-		typeof code === 'string' &&
-		code.length <= 8192 &&
-		COMPLETION_CODE_MODE_RECOVERY_CALL.test(code) &&
-		isSingleToolCallProgram(code)
-	);
-}
-
 export function canRunWhileTaskAwaitsCompletion(input: {
 	directory: string | undefined;
 	normalizedTool: string;
@@ -3553,6 +3404,13 @@ function hydrateBackgroundReplayInput(
 		worktree: existing.worktree,
 		coderReservationId: existing.coderReservationId,
 		prompt: existing.prompt,
+		// r11: preserve the ORIGINAL dispatch-time plan-critic binding. A
+		// replay recomputes the draft against the CURRENT plan; if the plan
+		// changed since the first launch, the replayed draft's hash would
+		// differ and the completion-time approval verification would compare
+		// against the wrong baseline. The existing record's binding is the
+		// authoritative one for this immutable launch.
+		planCriticDispatch: existing.planCriticDispatch,
 		generation: existing.generation ?? 1,
 	};
 }
@@ -3997,9 +3855,9 @@ export function createDelegationGateHook(
 	// inferring the flag from the v2 host would persist a pending delegation
 	// without ANY enabled observer to consume its terminal event.
 	const nativeV2AsyncSubagents = isNativeV2AsyncSubagentHost(directory);
-	const configuredBackgroundSubagents =
-		(config.hooks as Record<string, unknown> | undefined)
-			?.background_subagents;
+	const configuredBackgroundSubagents = (
+		config.hooks as Record<string, unknown> | undefined
+	)?.background_subagents;
 	const backgroundSubagentsEnabled = configuredBackgroundSubagents === true;
 	const backgroundPendingTimeoutMs =
 		(((config.hooks as Record<string, unknown> | undefined)
@@ -4259,16 +4117,22 @@ export function createDelegationGateHook(
 		if (process.env.SWARM_SCOPE_REVOKE_TRACE === '1') {
 			for (const entry of entries) {
 				if (entry.binding.activation !== 'active') continue;
-				console.error('[SWARM_SCOPE_REVOKE_TRACE] ' + JSON.stringify({
-					at: new Date().toISOString(),
-					origin: 'clearPublishedScopeBindings',
-					callID,
-					sessionID: entry.binding.ownerSessionId,
-					worktree: entry.directory !== directory,
-					leaseAgeMs: Date.now() - entry.binding.leaseStartedAt,
-					remainingTtlMs: entry.binding.expiresAt - Date.now(),
-					stack: new Error().stack?.split('\n').slice(2, 6).map((x) => x.trim()),
-				}));
+				console.error(
+					'[SWARM_SCOPE_REVOKE_TRACE] ' +
+						JSON.stringify({
+							at: new Date().toISOString(),
+							origin: 'clearPublishedScopeBindings',
+							callID,
+							sessionID: entry.binding.ownerSessionId,
+							worktree: entry.directory !== directory,
+							leaseAgeMs: Date.now() - entry.binding.leaseStartedAt,
+							remainingTtlMs: entry.binding.expiresAt - Date.now(),
+							stack: new Error().stack
+								?.split('\n')
+								.slice(2, 6)
+								.map((x) => x.trim()),
+						}),
+				);
 			}
 		}
 		publishedScopeBindingsByCallID.delete(callID);
@@ -4464,19 +4328,29 @@ export function createDelegationGateHook(
 		if (!sessionID) return;
 		if (process.env.SWARM_SCOPE_REVOKE_TRACE === '1') {
 			const matching = [...publishedScopeBindingsByCallID.entries()]
-				.filter(([, entries]) => entries.some((entry) =>
-					entry.binding.ownerSessionId === sessionID ||
-					(includeOwnedChildren && entry.binding.parentOwnerSessionId === sessionID),
-				))
+				.filter(([, entries]) =>
+					entries.some(
+						(entry) =>
+							entry.binding.ownerSessionId === sessionID ||
+							(includeOwnedChildren &&
+								entry.binding.parentOwnerSessionId === sessionID),
+					),
+				)
 				.map(([callID]) => callID);
-			console.error('[SWARM_SCOPE_REVOKE_TRACE] ' + JSON.stringify({
-				at: new Date().toISOString(),
-				origin: 'sessionEnded',
-				sessionID,
-				includeOwnedChildren,
-				matchingCallIDs: matching.slice(0, 8),
-				stack: new Error().stack?.split('\n').slice(2, 6).map((x) => x.trim()),
-			}));
+			console.error(
+				'[SWARM_SCOPE_REVOKE_TRACE] ' +
+					JSON.stringify({
+						at: new Date().toISOString(),
+						origin: 'sessionEnded',
+						sessionID,
+						includeOwnedChildren,
+						matchingCallIDs: matching.slice(0, 8),
+						stack: new Error().stack
+							?.split('\n')
+							.slice(2, 6)
+							.map((x) => x.trim()),
+					}),
+			);
 		}
 		clearReviewRouteStateForSession(sessionID);
 		const removed = clearScopeBindings(
@@ -4642,9 +4516,16 @@ export function createDelegationGateHook(
 		// silently lose the clean-baseline guarantee that this exact task had
 		// before the protocol adaptation. Other explicitly opted-in v1 background
 		// tasks retain their existing (separate) background admission policy.
-		const nativeBackground = nativeV2AsyncSubagents &&
-			backgroundSubagentsEnabled && isBackgroundTrue(background);
-		if (backgroundSubagentsEnabled && isBackgroundTrue(background) && !nativeBackground) return;
+		const nativeBackground =
+			nativeV2AsyncSubagents &&
+			backgroundSubagentsEnabled &&
+			isBackgroundTrue(background);
+		if (
+			backgroundSubagentsEnabled &&
+			isBackgroundTrue(background) &&
+			!nativeBackground
+		)
+			return;
 		const context = coderTaskChangeContextByCallID.get(input.callID);
 		if (!context || context.workflowGeneration === undefined) {
 			throw new Error(
@@ -5040,15 +4921,6 @@ export function createDelegationGateHook(
 					codeModeWrapper: isCodeModeWrapperCall(input.sessionID, input.callID),
 				});
 				if (!permitted) {
-					if (normalized === 'execute' && typeof completionArgs.code === 'string') {
-						throw new Error(
-							`TASK_COMPLETION_CODE_MODE_WRAPPER_DENIED: Task ${taskAwaitingCompletion} awaits completion. ` +
-								'The outer execute program is opaque to this gate. Do not retry the same multi-call script. ' +
-								'Use ONE literal tools.update_task_status({task_id: "' + taskAwaitingCompletion + '", status: "completed", working_directory: "..."}) call, without try/catch or other statements. ' +
-								'Code Mode pass-through additionally requires full_auto.permission_policy.trust_code_mode_wrapper=true and the v2 host call marker. ' +
-								'The nested tool will still be checked. Direct native tool calls require no Code Mode opt-in.',
-						);
-					}
 					throw new Error(
 						completionGateViolationMessage(taskAwaitingCompletion),
 					);
@@ -5086,10 +4958,10 @@ export function createDelegationGateHook(
 			if (nativeV2AsyncSubagents) {
 				throw new Error(
 					'SWARM_V2_NATIVE_ASYNC_REQUIRES_TRACKING: OpenCode 2.3.x always launches native subagents in the background. ' +
-					'Explicit hooks.background_subagents=false disables durable completion tracking. ' +
-					'Set hooks.background_subagents=true in the effective Swarm configuration, ' +
-					'then restart OpenCode so BOTH the gate and backgroundCompletionObserver are initialized; ' +
-					'the dispatch was not started.',
+						'Explicit hooks.background_subagents=false disables durable completion tracking. ' +
+						'Set hooks.background_subagents=true in the effective Swarm configuration, ' +
+						'then restart OpenCode so BOTH the gate and backgroundCompletionObserver are initialized; ' +
+						'the dispatch was not started.',
 				);
 			}
 			throw new Error(SWARM_BACKGROUND_TASK_BLOCKED_MESSAGE);
@@ -6734,6 +6606,33 @@ export function createDelegationGateHook(
 										prHeadSha,
 										scope,
 									});
+							// r11 (async lifecycle F1): bind a plan-critic dispatch to the
+							// plan structure the critic was actually sent. Field PRESENCE
+							// encodes the dispatch-time classification (critic agent +
+							// taskLooksLikePlanCritic args), so the native async
+							// completion path never has to re-derive it from a
+							// possibly-compacted prompt snapshot. Fail closed: an
+							// unreadable plan records NO binding — without a
+							// dispatch-time baseline an async APPROVED verdict cannot
+							// be verified and must not auto-approve (the audited manual
+							// escape hatch approve_plan_critic remains).
+							let planCriticDispatch: BackgroundPlanCriticDispatch | undefined;
+							if (
+								normalizedSubagentType === 'critic' &&
+								taskLooksLikePlanCritic(mergedArgs)
+							) {
+								const planAtDispatch = await loadPlanJsonOnly(directory);
+								if (planAtDispatch) {
+									planCriticDispatch = {
+										planStructureHash: computePlanStructureHash(planAtDispatch),
+										recordedAt: Date.now(),
+									};
+								} else {
+									logger.warn(
+										'[delegation-gate] background plan-critic dispatch could not bind a plan-structure baseline (plan.json unreadable); a later async APPROVED verdict will not auto-approve',
+									);
+								}
+							}
 							const pendingInputDraft: RecordPendingInput = {
 								correlationId: subagentSessionId,
 								jobId,
@@ -6777,6 +6676,7 @@ export function createDelegationGateHook(
 									typeof mergedArgs.prompt === 'string'
 										? buildPromptSnapshot(mergedArgs.prompt, delegationMaxChars)
 										: undefined,
+								planCriticDispatch,
 								generation: 1,
 							};
 							// Issue #2511: owner-replay verification — an unreadable

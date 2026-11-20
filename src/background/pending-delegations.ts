@@ -325,6 +325,8 @@ export interface BackgroundDelegationRecord {
 	/** Stable pre-launch background-coder capacity reservation. */
 	coderReservationId?: string;
 	prompt?: BackgroundPromptSnapshot;
+	/** Dispatch-time plan-critic binding; see {@link BackgroundPlanCriticDispatch}. */
+	planCriticDispatch?: BackgroundPlanCriticDispatch;
 	generation?: number;
 	/** Immutable trusted terminal event. Established exactly once. */
 	terminalResult?: BackgroundTerminalResult;
@@ -388,6 +390,25 @@ export interface BackgroundPromptSnapshot {
 	chars: number;
 	truncated: boolean;
 	digest: string;
+}
+
+/**
+ * Dispatch-time plan-critic binding (async lifecycle repair r11, finding F1).
+ * Present ONLY on launches that were classified AT DISPATCH as a plan-critic
+ * review (critic agent + `taskLooksLikePlanCritic` args). Carries the plan's
+ * structural hash at dispatch time so a completion-time APPROVED verdict can
+ * be verified against the plan the critic actually reviewed — a plan edited
+ * after the dispatch must not be approvable by the old verdict.
+ *
+ * Deliberately NOT part of `pendingLaunchIdentity`: it is completion-path
+ * provenance, not launch identity, and its absence on a replayed or
+ * summary-compacted record must not turn a host replay into a conflict.
+ */
+export interface BackgroundPlanCriticDispatch {
+	/** `computePlanStructureHash` of the plan at dispatch time (sha256 hex). */
+	planStructureHash: string;
+	/** Dispatch-time epoch (ms) — audit only. */
+	recordedAt: number;
 }
 
 export type BackgroundDelegationRecoveryKind =
@@ -758,6 +779,13 @@ const TaskChangeContextSchema = z
 	})
 	.strict();
 
+const PlanCriticDispatchSchema = z
+	.object({
+		planStructureHash: z.string().regex(/^[0-9a-f]{64}$/),
+		recordedAt: z.number().int().nonnegative(),
+	})
+	.strict();
+
 const WorktreeDescriptorSchema = z
 	.object({
 		callID: z.string().min(1).max(256),
@@ -1036,6 +1064,7 @@ const RecordSchema = z
 		promptHash: z.string().optional(),
 		workspace: WorkspaceSchema.optional(),
 		taskChangeContext: TaskChangeContextSchema.optional(),
+		planCriticDispatch: PlanCriticDispatchSchema.optional(),
 		workflowGeneration: z.number().int().nonnegative().optional(),
 		worktree: WorktreeDescriptorSchema.optional(),
 		coderReservationId: z.string().min(1).max(256).optional(),
@@ -3342,6 +3371,8 @@ export interface RecordPendingInput {
 	promptHash?: string;
 	workspace?: BackgroundWorkspaceSnapshot;
 	taskChangeContext?: BackgroundTaskChangeContext;
+	/** Dispatch-time plan-critic binding; see {@link BackgroundPlanCriticDispatch}. */
+	planCriticDispatch?: BackgroundPlanCriticDispatch;
 	workflowGeneration?: number;
 	worktree?: BackgroundWorktreeDescriptor;
 	coderReservationId?: string;
@@ -3384,6 +3415,9 @@ function buildPendingRecord(
 		...(input.workspace ? { workspace: input.workspace } : {}),
 		...(input.taskChangeContext
 			? { taskChangeContext: input.taskChangeContext }
+			: {}),
+		...(input.planCriticDispatch
+			? { planCriticDispatch: input.planCriticDispatch }
 			: {}),
 		...(input.workflowGeneration !== undefined
 			? { workflowGeneration: input.workflowGeneration }

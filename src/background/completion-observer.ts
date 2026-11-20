@@ -84,6 +84,32 @@ import {
 	resolveIsWorkingTreeCleanAsync,
 } from './workspace-snapshot.js';
 
+// r11: the shared plan-critic approval recorder pulls the plan-ledger module
+// graph (ledger, manager). Resolving it lazily — memoized once, on the first
+// plan-critic completion — keeps that graph off the observer's load path for
+// every non-critic completion (and out of the module cache in co-run test
+// processes where an early node:fs mock would otherwise capture it). A
+// rejected import must not poison the memo: reset so the next critic
+// completion retries instead of skipping approval forever.
+let criticApprovalModulePromise: Promise<
+	typeof import('../plan/critic-approval.js')
+> | null = null;
+function resolveCriticApprovalModule(): Promise<
+	typeof import('../plan/critic-approval.js')
+> {
+	let modulePromise = criticApprovalModulePromise;
+	if (modulePromise === null) {
+		modulePromise = import('../plan/critic-approval.js').catch(
+			(err: unknown) => {
+				criticApprovalModulePromise = null;
+				throw err;
+			},
+		);
+		criticApprovalModulePromise = modulePromise;
+	}
+	return modulePromise;
+}
+
 interface ObserverConfig {
 	enabled: boolean;
 }
@@ -470,6 +496,62 @@ export function createBackgroundCompletionObserver(opts: {
 				return;
 			}
 
+			// r11 (async lifecycle F1): a verified plan-critic completion must record
+			// its approval snapshot exactly like the synchronous Task transport does
+			// (recordPlanCriticApprovalSnapshotIfApplicable in the delegation gate —
+			// both call the SAME shared recorder in src/plan/critic-approval.ts). The
+			// dispatch-time binding (record.planCriticDispatch) exists only when the
+			// launch was classified at dispatch as a plan-critic review; its hash is
+			// the plan the critic actually reviewed. Every negative case — non-critic
+			// agent, no dispatch binding, non-APPROVED verdict, plan edited since the
+			// dispatch, unreadable ledger — fails closed: no snapshot, the
+			// critic_pre_plan gate stays blocked, and the audited manual escape hatch
+			// (approve_plan_critic) remains the only alternative. The shared recorder
+			// is replay-safe (ledger dedup by call id), so duplicate terminal delivery
+			// and crash-recovery replays cannot approve twice.
+			if (record.normalizedAgent === 'critic' && record.planCriticDispatch) {
+				try {
+					const { recordVerifiedPlanCriticApproval } =
+						await resolveCriticApprovalModule();
+					const recording = await recordVerifiedPlanCriticApproval(directory, {
+						parentSessionId: record.parentSessionId,
+						callId: record.callID,
+						verdictText: result.text,
+						dispatchPlanStructureHash:
+							record.planCriticDispatch.planStructureHash,
+						transport: 'async_completion',
+					});
+					if (recording.outcome === 'recorded') {
+						logger.log(
+							`[background] plan critic approval snapshot recorded for call ${record.callID} (${terminal.eventId})`,
+						);
+					} else if (recording.outcome !== 'not_approved') {
+						// skipped (replay / stale plan) or failed (unreadable plan.json):
+						// surface it — a lost APPROVED wedges the coder gate.
+						logger.warn(
+							`[background] plan critic approval not recorded for call ${record.callID}: ${recording.reason}`,
+						);
+						const session = swarmState.agentSessions.get(
+							record.parentSessionId,
+						);
+						if (session) {
+							pushAdvisory(
+								session,
+								`[PLAN CRITIC] The async critic returned APPROVED but no approval snapshot was recorded for call ${record.callID}: ${recording.reason}. ` +
+									(recording.reason.includes('changed')
+										? 'The plan changed since the critic dispatch — re-run the critic gate against the current plan.'
+										: 'The critic_pre_plan gate remains blocked; re-dispatch the critic, or record a manual approval via approve_plan_critic with a reason.'),
+							);
+						}
+					}
+				} catch (error) {
+					logger.warn(
+						`[background] plan critic approval processing failed for call ${record.callID}: ${
+							error instanceof Error ? error.message : String(error)
+						}`,
+					);
+				}
+			}
 			if (record.normalizedAgent === 'coder') {
 				const settled = await settleCoder(directory, record, terminal.eventId);
 				record = settled.record;
