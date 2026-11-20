@@ -243,7 +243,7 @@ describe('guardrails quoted-heredoc neutralization (#3761)', () => {
 				const msg = err instanceof Error ? err.message : String(err);
 				// The body is inert data for cat; a destructive-arm trip on
 				// the body text is exactly the neutralization-threading bug.
-				expect(msg).not.toMatch(/[Dd]estructive|recursi|rm -rf|remove-tree/);
+				expect(msg).not.toMatch(/destructive|recursi|rm -rf|remove-tree/i);
 			}
 		}, 60_000);
 
