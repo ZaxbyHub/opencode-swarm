@@ -425,6 +425,78 @@ export function capSessionMap<K, V>(
 }
 
 // ---------------------------------------------------------------------------
+// r13 (async lifecycle F5): event fan-out isolation
+// ---------------------------------------------------------------------------
+//
+// Defect class being closed: the `event` hook ran every independent consumer
+// (PR-workflow session resolver, PR-workflow response gate, PR idle delivery,
+// the durable background completion observer) inside ONE try/catch. A
+// throwing sibling consumer aborted the rest of the fan-out — in particular a
+// throwing prWorkflowResponseGate.event() starved backgroundCompletionObserver
+// .event(), so a trusted subagent completion was never durably processed.
+//
+// Every consumer now runs through dispatchEventConsumerIsolated: a failure is
+// contained to that consumer, surfaced through the deferred warning buffer
+// (advisoryWarn — operator-visible, not silently swallowed), and rate-limited
+// per consumer name so a persistently failing consumer cannot spam the buffer
+// on every event. The observer's own durable replay (maintenance points,
+// reconcilePending) remains the crash-recovery net for a completion whose
+// processing died mid-flight.
+
+/** Per-consumer failure-report cooldown (AGENTS.md invariant 8 convention). */
+const EVENT_CONSUMER_FAILURE_COOLDOWN_MS = 60_000;
+/** Bounded consumer-failure registry (FIFO eviction at the cap). */
+const MAX_TRACKED_EVENT_CONSUMERS = 32;
+const eventConsumerFailureAtByName = new Map<string, number>();
+
+/**
+ * Report an event-consumer failure visibly (deferred warning buffer) with a
+ * per-consumer cooldown. Exported for unit testing of the isolation contract.
+ */
+export function reportEventConsumerFailure(
+	consumer: string,
+	error: unknown,
+): void {
+	const now = Date.now();
+	const last = eventConsumerFailureAtByName.get(consumer);
+	if (last !== undefined && now - last < EVENT_CONSUMER_FAILURE_COOLDOWN_MS) {
+		return;
+	}
+	eventConsumerFailureAtByName.delete(consumer);
+	while (eventConsumerFailureAtByName.size >= MAX_TRACKED_EVENT_CONSUMERS) {
+		const oldest = eventConsumerFailureAtByName.keys().next().value;
+		if (oldest === undefined) break;
+		eventConsumerFailureAtByName.delete(oldest);
+	}
+	eventConsumerFailureAtByName.set(consumer, now);
+	advisoryWarn(
+		`[swarm] event consumer '${consumer}' failed and was isolated; downstream event consumers still ran: ${
+			error instanceof Error ? error.message : String(error)
+		}`,
+	);
+}
+
+/**
+ * Run one independent event consumer so its failure can neither abort the
+ * remaining fan-out nor disappear silently. Exported for unit testing.
+ */
+export async function dispatchEventConsumerIsolated(
+	consumer: string,
+	run: () => Promise<void> | void,
+): Promise<void> {
+	try {
+		await run();
+	} catch (error) {
+		reportEventConsumerFailure(consumer, error);
+	}
+}
+
+/** Test seam: clear the per-consumer failure cooldown registry. */
+export function resetEventConsumerFailureRegistryForTests(): void {
+	eventConsumerFailureAtByName.clear();
+}
+
+// ---------------------------------------------------------------------------
 // Process-exit cleanup registry (issue #2472 W9 — lifecycle ownership)
 // ---------------------------------------------------------------------------
 //
@@ -4190,127 +4262,154 @@ async function initializeOpenCodeSwarm(
 							(typeof lifecycleStatus === 'object' &&
 								(lifecycleStatus.type === 'idle' ||
 									lifecycleStatus.type === 'error'))));
-				if (isTerminalSessionEvent) {
-					const properties = lifecycleEvent.properties;
-					const sessionID =
-						properties?.sessionID ??
-						properties?.sessionId ??
-						properties?.info?.sessionID ??
-						properties?.info?.id ??
-						properties?.id;
-					if (sessionID) {
-						delegationGateHooks.sessionEnded(
-							sessionID,
-							lifecycleEvent.type === 'session.deleted' ||
-								lifecycleEvent.type === 'session.removed',
-						);
-						if (
-							lifecycleEvent.type === 'session.deleted' ||
-							lifecycleEvent.type === 'session.removed'
-						) {
-							// Exact-owner cleanup: a deleted session can never consume the
-							// one-shot bridge marker, so release it at the terminal event.
-							_architectCompactionPending.delete(sessionID);
-							// Session deletion is an exact-owner terminal boundary. Keep gate
-							// terminalization and receipt cleanup independent and fail-open so a
-							// foreign active gate or unavailable stash inventory cannot undo the
-							// durable owner-state cleanup.
-							try {
-								await terminalizePrWorkflowGateForSession(
-									bootstrapRoot,
+				// r13 (F5): each independent event consumer is isolated — a throwing
+				// sibling must never starve the durable completion observer (or any
+				// other consumer) of this event. Failures surface through the
+				// deferred warning buffer with a per-consumer cooldown.
+				await dispatchEventConsumerIsolated(
+					'terminal-session-event',
+					async () => {
+						if (isTerminalSessionEvent) {
+							const properties = lifecycleEvent.properties;
+							const sessionID =
+								properties?.sessionID ??
+								properties?.sessionId ??
+								properties?.info?.sessionID ??
+								properties?.info?.id ??
+								properties?.id;
+							if (sessionID) {
+								delegationGateHooks.sessionEnded(
 									sessionID,
+									lifecycleEvent.type === 'session.deleted' ||
+										lifecycleEvent.type === 'session.removed',
 								);
-							} catch {
-								warn(
-									'PR workflow gate terminalization on session deletion failed (non-fatal)',
-								);
+								if (
+									lifecycleEvent.type === 'session.deleted' ||
+									lifecycleEvent.type === 'session.removed'
+								) {
+									// Exact-owner cleanup: a deleted session can never consume the
+									// one-shot bridge marker, so release it at the terminal event.
+									_architectCompactionPending.delete(sessionID);
+									// Session deletion is an exact-owner terminal boundary. Keep gate
+									// terminalization and receipt cleanup independent and fail-open so a
+									// foreign active gate or unavailable stash inventory cannot undo the
+									// durable owner-state cleanup.
+									try {
+										await terminalizePrWorkflowGateForSession(
+											bootstrapRoot,
+											sessionID,
+										);
+									} catch {
+										warn(
+											'PR workflow gate terminalization on session deletion failed (non-fatal)',
+										);
+									}
+									try {
+										const reconciliation = reconcilePrWorkflowCheckoutReceipts(
+											bootstrapRoot,
+											sessionID,
+										);
+										const summary = await withTimeout(
+											reconciliation,
+											SESSION_DELETION_RECEIPT_RECONCILIATION_EVENT_DEADLINE_MS,
+											new Error(
+												'PR workflow checkout receipt reconciliation exceeded the session-deletion event budget',
+											),
+										);
+										log(
+											'PR workflow checkout receipts reconciled on session deletion',
+											{
+												inspected: summary.inspectedReceiptCount,
+												collected: summary.collectedStashOids.length,
+												retiredMissing: summary.retiredMissingStashOids.length,
+												preserved: summary.preservedStashOids.length,
+												failures: summary.failures.length,
+											},
+										);
+									} catch {
+										warn(
+											'PR workflow checkout receipt reconciliation on session deletion failed or exceeded its event budget (non-fatal)',
+										);
+									}
+									if (bootstrapStateWritesEnabled) {
+										deleteSnapshotSessionRows(bootstrapRoot, sessionID);
+									}
+									clearPendingTaskModelRoutesForSession(sessionID);
+									clearSessionActionCircuits(sessionID);
+									clearFullAutoSevereSession(sessionID);
+								}
+								// Issue #2104 — maintenance point P3: a closed/idle
+								// session is a listed runtime maintenance trigger (a
+								// parent that dies without a later dispatch must not
+								// strand reservations). Opt-in only; bounded by the
+								// maintenance service's own tight lock bound and
+								// fail-open — failures are recorded in the durable
+								// facts ring, never fatal to the event hook.
+								if (backgroundSubagentsEnabled && bootstrapStateWritesEnabled) {
+									try {
+										await maintainBackgroundDelegationsOnSessionEvent();
+									} catch {
+										// observation only; the facts ring records it
+									}
+								}
+								// Issue #2045 crash recovery (blocking lanes): NOT gated
+								// on backgroundSubagentsEnabled — blocking dispatch_lanes
+								// runs regardless of that flag, so its only terminal-receipt
+								// recovery path must too. Bounded (64-record cap + 5s
+								// admission budget), fail-open, near-zero cost on an empty
+								// or fully-recovered ledger.
+								try {
+									const { recoverTerminalLaneReceipts } = await import(
+										'./background/delegation-lifecycle.js'
+									);
+									await recoverTerminalLaneReceipts(bootstrapRoot);
+								} catch {
+									// fail-open — recovery must never break the event hook
+								}
 							}
-							try {
-								const reconciliation = reconcilePrWorkflowCheckoutReceipts(
-									bootstrapRoot,
-									sessionID,
-								);
-								const summary = await withTimeout(
-									reconciliation,
-									SESSION_DELETION_RECEIPT_RECONCILIATION_EVENT_DEADLINE_MS,
-									new Error(
-										'PR workflow checkout receipt reconciliation exceeded the session-deletion event budget',
-									),
-								);
-								log(
-									'PR workflow checkout receipts reconciled on session deletion',
-									{
-										inspected: summary.inspectedReceiptCount,
-										collected: summary.collectedStashOids.length,
-										retiredMissing: summary.retiredMissingStashOids.length,
-										preserved: summary.preservedStashOids.length,
-										failures: summary.failures.length,
-									},
-								);
-							} catch {
-								warn(
-									'PR workflow checkout receipt reconciliation on session deletion failed or exceeded its event budget (non-fatal)',
-								);
-							}
-							if (bootstrapStateWritesEnabled) {
-								deleteSnapshotSessionRows(bootstrapRoot, sessionID);
-							}
-							clearPendingTaskModelRoutesForSession(sessionID);
-							clearSessionActionCircuits(sessionID);
-							clearFullAutoSevereSession(sessionID);
 						}
-						// Issue #2104 — maintenance point P3: a closed/idle
-						// session is a listed runtime maintenance trigger (a
-						// parent that dies without a later dispatch must not
-						// strand reservations). Opt-in only; bounded by the
-						// maintenance service's own tight lock bound and
-						// fail-open — failures are recorded in the durable
-						// facts ring, never fatal to the event hook.
-						if (backgroundSubagentsEnabled && bootstrapStateWritesEnabled) {
-							try {
-								await maintainBackgroundDelegationsOnSessionEvent();
-							} catch {
-								// observation only; the facts ring records it
-							}
-						}
-						// Issue #2045 crash recovery (blocking lanes): NOT gated
-						// on backgroundSubagentsEnabled — blocking dispatch_lanes
-						// runs regardless of that flag, so its only terminal-receipt
-						// recovery path must too. Bounded (64-record cap + 5s
-						// admission budget), fail-open, near-zero cost on an empty
-						// or fully-recovered ledger.
-						try {
-							const { recoverTerminalLaneReceipts } = await import(
-								'./background/delegation-lifecycle.js'
-							);
-							await recoverTerminalLaneReceipts(bootstrapRoot);
-						} catch {
-							// fail-open — recovery must never break the event hook
-						}
-					}
-				}
-				prWorkflowSessionResolver.observeEvent(input);
-				await prWorkflowResponseGate.event(input);
+					},
+				);
+				await dispatchEventConsumerIsolated(
+					'pr-workflow-session-resolver',
+					() => prWorkflowSessionResolver.observeEvent(input),
+				);
+				// r13 (F5): a throwing PR-workflow gate must never starve the
+				// durable completion observer below — isolate it.
+				await dispatchEventConsumerIsolated('pr-workflow-response-gate', () =>
+					prWorkflowResponseGate.event(input),
+				);
 				// PR wake delivery: session.idle flushes that session's queued PR
 				// events. No-op unless prompt-mode delivery is registered.
-				if (prEventDelivery) {
-					const evt = input.event as
-						| {
-								type?: string;
-								properties?: { sessionID?: string };
-								data?: { sessionID?: string };
-						  }
-						| undefined;
-					const idleSessionID =
-						evt?.properties?.sessionID ?? evt?.data?.sessionID;
-					if (
-						evt?.type === 'session.idle' &&
-						typeof idleSessionID === 'string'
-					) {
-						prEventDelivery.noteSessionIdle(idleSessionID, ctx.directory);
-					}
-				}
-				await backgroundCompletionObserver.event(input);
+				await dispatchEventConsumerIsolated(
+					'pr-event-idle-delivery',
+					async () => {
+						if (prEventDelivery) {
+							const evt = input.event as
+								| {
+										type?: string;
+										properties?: { sessionID?: string };
+										data?: { sessionID?: string };
+								  }
+								| undefined;
+							const idleSessionID =
+								evt?.properties?.sessionID ?? evt?.data?.sessionID;
+							if (
+								evt?.type === 'session.idle' &&
+								typeof idleSessionID === 'string'
+							) {
+								prEventDelivery.noteSessionIdle(idleSessionID, ctx.directory);
+							}
+						}
+					},
+				);
+				// The durable completion consumer — isolated like every sibling so a
+				// failure here is contained and VISIBLE (its own replay machinery
+				// recovers the completion later).
+				await dispatchEventConsumerIsolated(
+					'background-completion-observer',
+					() => backgroundCompletionObserver.event(input),
+				);
 			} catch (err) {
 				warn(
 					`[swarm] event hook error: ${err instanceof Error ? err.message : String(err)}`,

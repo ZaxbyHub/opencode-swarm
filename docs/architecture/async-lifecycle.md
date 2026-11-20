@@ -90,8 +90,8 @@ resumable, and the terminal claim deduplicates replays.
 | Pipeline continuation advisory (reviewer/test_engineer/critic) | Task handoff | observer closeout (fresh claim only) | ✅ r12 |
 | Knowledge receipt reconciliation (lane parity) | lane collector | `reconcileDelegationKnowledgeReceipts` (ledger-idempotent, replay-safe) | ✅ r12 |
 | Usage/cost accounting | r8 usage bridge + `consumeAssistantUsageForTask` at handoff | bridge accumulates; consumption happens at the placeholder handoff (dispatch time) | F4 (cost) |
-| **Event fan-out isolation** | n/a | one try/catch around the whole fan-out: a throwing `prWorkflowResponseGate.event` prevents the observer from ever seeing the completion | **F5** |
-| Knowledge ACKs / micro-reflection / auto-review | after-hook chain | audited in r13 (F6) | F6 |
+| **Event fan-out isolation** | n/a | per-consumer isolation (`dispatchEventConsumerIsolated`, r13) | ✅ r13 |
+| Knowledge ACKs / micro-reflection / auto-review | after-hook chain | section 8 matrix (ACKs ✅ r12; micro-reflector documented gap; auto-review n/a) | ✅ audited |
 
 ## 5. Security invariants of the async completion path
 
@@ -146,7 +146,9 @@ These are the properties every change to this area must preserve:
   `settleDelegationTerminal`), so nothing double-books.
 - **r13 (F5/F6):** fan-out isolation (a failing sibling consumer must not
   starve the durable completion observer, visibly), and a completeness audit
-  of every terminal-bound after-hook action.
+  of every terminal-bound after-hook action. Both delivered: F5 isolates each
+  event consumer behind `dispatchEventConsumerIsolated` (deferred-warning
+  surfacing, per-consumer cooldown); F6's matrix is section 8 below.
 
 ## 7. Terminal consumers (business closeout), by transport
 
@@ -160,3 +162,56 @@ These are the properties every change to this area must preserve:
 | Knowledge receipts | lane: `reconcileLaneKnowledgeReceipts`; Task: transform-path scans | r12 | Ledger-idempotent, replay-safe |
 | Stage-B / reviewer receipts | after-hook | `ingestBackgroundStageBCompletion` | claim-guarded |
 | Coder settlement / worktree | after-hook | `settleCoder` | claim-guarded, durable provenance |
+
+## 8. F6 completeness audit — every terminal-bound after-hook action (r13)
+
+Legend: **sync** = `tool.execute.after` path; **async** = native-async
+completion path (background completion observer unless noted). "n/a" = not
+delegation-terminal-bound (runs at another boundary by design).
+
+| Closeout action | Sync path | Async path | Verdict |
+| --- | --- | --- | --- |
+| Coder settlement / merge-back / reservation release | delegation-gate after-hook | `settleCoder` + release (observer) | ✅ claim-guarded |
+| Stage-B ingestion (verdicts, gate evidence, task state) | after-hook | `ingestBackgroundStageBCompletion` (stage-b-gates) | ✅ |
+| Reviewer receipts (`collectReviewerReceiptFromTranscript`) | after-hook | stage-b-gates ingestion (reviewer arm) | ✅ |
+| Review-route receipt enforcement | after-hook | stage-b-gates (sites A–D) | ✅ |
+| Docs phase participation | after-hook | `completeBackgroundPhaseParticipation` (observer) | ✅ |
+| Epic residue commit (non-coder writers) | after-hook | `commitEpicResidueAfterDelegation` seam (observer) | ✅ |
+| Reviewer/coder scope discard | after-hook | `discardScopeForRecord` (observer) | ✅ |
+| Parent advisory publication | after-hook | durable advisory inbox (observer) | ✅ |
+| Plan-critic approval snapshot | after-hook | shared recorder + dispatch binding (r11) | ✅ |
+| Context-map post-agent update | after-hook (r12: gated on non-placeholder) | observer closeout (r12) | ✅ |
+| Sounding-board verdict policy + advisory | Task handoff | shared policy module (r12) | ✅ |
+| `delegation_begin`/`delegation_end` telemetry pair | toolBefore / Task handoff | toolBefore / `emitTaskDelegationTerminalEnd` (r12; lanes via `settleDelegationTerminal`) | ✅ |
+| Execution-attempt records | Task handoff / lane observations | `emitTaskDelegationTerminalEnd` (r12) | ✅ |
+| Knowledge ACK receipts (`collectDelegateAcksAfter`) | after-hook | `reconcileDelegationKnowledgeReceipts` (r12; ledger-idempotent) | ✅ |
+| Reviewer DIRECTIVE_COMPLIANCE verdicts (`collectReviewerVerdictsAfter`) | after-hook | `reconcileReviewerVerdicts` via the same reconciliation (r12) | ✅ |
+| Pipeline continuation advisory | Task handoff | observer closeout (r12) | ✅ |
+| PR-workflow response gate / session resolver / idle delivery | event hook | same event hook, r13 isolation | ✅ (F5) |
+| Event fan-out isolation | n/a | per-consumer isolation (r13) | ✅ (F5) |
+| Auto-review (task_completion trigger) | `update_task_status` toolAfter (architect action) | n/a — not delegation-terminal-bound | ✅ n/a |
+| Session reflection | `/swarm close` finalize stage | n/a | ✅ n/a |
+| Usage/cost accounting | r8 usage bridge + handoff consumption | bridge accumulates per child session | ⚠️ see below |
+| Micro-reflector (insight candidates on failed/partial delegates) | after-hook (`microReflectorAfter`) | **gap** | ⚠️ documented |
+| Trajectory completion marker for the delegation | trajectory logger (tool-call record) | dispatch-time record only | ⚠️ documented |
+| Snapshot writer / tool summarizer / knowledge curator / compaction / repo-graph / spiral detection | per-tool-call hooks | run at dispatch on the placeholder (their designed boundary — they are tool-call hooks, not completion hooks) | ✅ by design |
+
+### Documented, deliberate non-ports (with rationale)
+
+- **Usage attribution for async children**: the r8 usage bridge aggregates
+  each child session's per-step usage (idempotent by host event id), but no
+  consumer currently drains the child's total into a `delegation_end` cost
+  record on the async path — the r12 end emission is unknown-honest about cost
+  axes. Nothing is double-billed (the bridge is neither bypassed nor
+  re-counted), but async delegation cost evidence is thinner than sync. A
+  future fix should drain the bridge total at the observer's terminal (the
+  consumption seam lives in src/index.ts) rather than fabricating estimates.
+- **Micro-reflector**: quota-gated, enrichment-only insight-candidate
+  generation on delegate failure/partial returns. No gate, settlement, or
+  state machine depends on it, and porting it means wiring the curator LLM
+  delegate into the observer. Left as a documented gap; the durable learning
+  append remains the crash backstop for the sync path.
+- **Trajectory completion marker**: sync Task completions appear in the
+  trajectory as the tool-call record; async dispatches record the placeholder
+  call at dispatch time. Adding a completion entry would introduce a shape
+  with no sync twin; deferred until a consumer needs it.
