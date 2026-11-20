@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.205.0",
+  "tagCommit": "7fb699debb40e60005e8952e2914e95a3de36647",
+  "targetCommitish": "7fb699debb40e60005e8952e2914e95a3de36647",
+  "releaseBodySha256": "e5c8c1ed8e243f8d639465cf0e08a70510f7b2b3625c83ab101621690b05fc19",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 2,
+      "path": "docs/releases/pending/add-keenable-council-search-provider.md",
+      "sha256": "7c3f81e0b7131fc0ebdfb6090e7869285782c35d1ceb6f9f6c25481465f6feb8"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/completion-gate-code-mode-wrapper.md",
+      "sha256": "5b3f9d154b7c86554b184fc479b4e358913b3b7af6ec9c9e0d7d36cac40c95a3"
+    },
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/retention-manifest-names-fail-closed.md",
+      "sha256": "192fe749ea23be6e14e6a55439fdf58fd3676e2635327c918e1bc40f4b697440"
+    }
+  ]
+}
