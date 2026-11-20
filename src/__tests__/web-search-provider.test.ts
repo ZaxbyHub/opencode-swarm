@@ -13,6 +13,7 @@ import type { GeneralCouncilConfig } from '../council/general-council-types.js';
 import {
 	BraveProvider,
 	createWebSearchProvider,
+	KeenableProvider,
 	TavilyProvider,
 	WebSearchConfigError,
 	WebSearchError,
@@ -24,6 +25,7 @@ afterEach(() => {
 	globalThis.fetch = ORIGINAL_FETCH;
 	delete process.env.TAVILY_API_KEY;
 	delete process.env.BRAVE_SEARCH_API_KEY;
+	delete process.env.KEENABLE_API_KEY;
 });
 
 function mockFetchOk(body: unknown): void {
@@ -190,6 +192,64 @@ describe('BraveProvider', () => {
 	});
 });
 
+describe('KeenableProvider', () => {
+	test('keyless request posts to /v1/search/public with X-Keenable-Title, no X-API-Key, and no redirects', async () => {
+		const calls: Array<{ url: string; init?: RequestInit }> = [];
+		globalThis.fetch = (async (
+			url: string | URL | Request,
+			init?: RequestInit,
+		) => {
+			calls.push({ url: String(url), init });
+			return new Response(
+				JSON.stringify({
+					results: [
+						{
+							title: 'A',
+							url: 'https://a.example',
+							snippet: 'alpha',
+							acquired_at: '2026-11-19T00:00:00Z',
+						},
+						{
+							title: 'B',
+							url: 'https://b.example',
+							description: 'beta',
+						},
+					],
+				}),
+				{ status: 200 },
+			);
+		}) as unknown as typeof fetch;
+
+		const results = await new KeenableProvider().search('q', 5);
+		expect(results).toEqual([
+			{ title: 'A', url: 'https://a.example', snippet: 'alpha', query: 'q' },
+			{ title: 'B', url: 'https://b.example', snippet: 'beta', query: 'q' },
+		]);
+		expect(calls[0].url).toBe('https://api.keenable.ai/v1/search/public');
+		const headers = calls[0].init?.headers as Record<string, string>;
+		expect(headers['X-Keenable-Title']).toBe('opencode-swarm');
+		expect(headers['X-API-Key']).toBeUndefined();
+		expect(calls[0].init?.redirect).toBe('error');
+	});
+
+	test('keyed request posts to /v1/search with X-API-Key and does not follow redirects', async () => {
+		const calls: Array<{ url: string; init?: RequestInit }> = [];
+		globalThis.fetch = (async (
+			url: string | URL | Request,
+			init?: RequestInit,
+		) => {
+			calls.push({ url: String(url), init });
+			return new Response(JSON.stringify({ results: [] }), { status: 200 });
+		}) as unknown as typeof fetch;
+
+		await new KeenableProvider('secret').search('q', 3);
+		expect(calls[0].url).toBe('https://api.keenable.ai/v1/search');
+		const headers = calls[0].init?.headers as Record<string, string>;
+		expect(headers['X-API-Key']).toBe('secret');
+		expect(calls[0].init?.redirect).toBe('error');
+	});
+});
+
 describe('createWebSearchProvider', () => {
 	const baseConfig: GeneralCouncilConfig = {
 		enabled: true,
@@ -216,6 +276,14 @@ describe('createWebSearchProvider', () => {
 			searchApiKey: 'inline-key',
 		});
 		expect(provider).toBeInstanceOf(BraveProvider);
+	});
+
+	test('selects KeenableProvider without a key', () => {
+		const provider = createWebSearchProvider({
+			...baseConfig,
+			searchProvider: 'keenable',
+		});
+		expect(provider).toBeInstanceOf(KeenableProvider);
 	});
 
 	test('falls back to TAVILY_API_KEY env when no inline key', () => {

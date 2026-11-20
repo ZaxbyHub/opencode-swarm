@@ -1086,7 +1086,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			'src/tools/write-pr-review-trigger-eval.ts createTriggerReceipt — trigger-eval receipt atomic write (temp+link; refuses overwrite on EEXIST)',
 			'src/tools/pr-review-submission.ts executePrReviewSubmission writeFileSync — a run-scoped submission-payload.json provenance copy, overwritten per attempt (validateSwarmPath-contained, run_id-charset-bounded path; direct write, not temp+rename)',
 			'src/tools/export-pr-review-partial-results.ts executeExportPrReviewPartialResults — a run-scoped post-abort-export.json partial-salvage artifact (issue #3097) written through the canonical atomicWriteSwarmFile (fsync + bounded rename retry + cache invalidation), byte-capped (findings cap + 24 MiB margin; typed artifact-too-large refusal beyond), idempotent re-export; the gate re-check runs immediately before the write',
-			'src/hooks/pr-workflow-gate.ts:12667 tryCreatePrReviewRunReservation — create-only (wx) run-reservation.json owned by the reserving session',
+			'src/hooks/pr-workflow-gate.ts:12833 tryCreatePrReviewRunReservation — create-only (wx) run-reservation.json owned by the reserving session',
 			'src/pr-review/completion.ts:1441 — coverage-disclosure.json atomic write via coverageDisclosureRelativePath (:1097), ≤4 KiB',
 			'src/pr-review/verdict-settlement.ts persistVerdictSettlementReceipt — per-phase verdict-settlement.{reviewer,critic}.json atomic write via writeAtomicJson, ≤64 KiB (writer-side byte guard mirrors the bounded reader), ≤128 items, rename-overwritten on re-admission (issue #3101)',
 			'src/background/pr-feedback-event-queue.ts:455 writeQueueRecord — feedback-handoff lock/content writes',
@@ -4437,7 +4437,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/retention/unclaimed.ts'],
 		writerCitations: [
-			'src/retention/unclaimed.ts:547 appendRetentionLog — one line per pruned directory (`<ISO-8601> pruned <path> age=<days> size=<bytes>`), then a tail-only rewrite when the append crosses the byte budget; the manifest DIRECTORY is read-only to the plugin (loadOwnerManifests:258) — each owner writes only its own file',
+			'src/retention/unclaimed.ts:549 appendRetentionLog — one line per pruned directory (`<ISO-8601> pruned <path> age=<days> size=<bytes>`), then a tail-only rewrite when the append crosses the byte budget; the manifest DIRECTORY is read-only to the plugin (loadOwnerManifests:258) — each owner writes only its own file',
 		],
 		readerCitations: [
 			'loadOwnerManifests (:258) reads every *.json manifest once per sweep, before any deletion; the log is written for humans and agents to read (no in-process reader by design)',
@@ -4448,9 +4448,9 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		privacyClass: 'metadata',
 		writeLimits: {
 			bound:
-				'one line per pruned directory; the log is compacted to the newest lines within RETENTION_LOG_MAX_BYTES 256 KiB on the append that crosses it (src/retention/unclaimed.ts:60,547); each manifest is capped at RETENTION_MANIFEST_MAX_BYTES 64 KiB (:58) and a larger claim is refused as malformed',
+				'one line per pruned directory; the log is compacted to the newest lines within RETENTION_LOG_MAX_BYTES 256 KiB on the append that crosses it (src/retention/unclaimed.ts:60,549); each manifest is capped at RETENTION_MANIFEST_MAX_BYTES 64 KiB (:58) and a larger claim is refused as malformed',
 			scope: 'global',
-			citation: 'src/retention/unclaimed.ts:58,60,547',
+			citation: 'src/retention/unclaimed.ts:58,60,549',
 		},
 		readBound: {
 			pattern: 'tail (byte-bounded)',
@@ -4476,7 +4476,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		disposition: {
 			kind: 'not-a-defect',
 			proof:
-				'Bounded by construction: the log carries one metadata line per pruned path (no file content) and is compacted to RETENTION_LOG_MAX_BYTES 256 KiB (src/retention/unclaimed.ts:60,547-569), so it cannot become the unbounded-growth defect the catch-all exists to fix; manifests are one 64 KiB-capped file per owner and a malformed/ambiguous claim refuses the whole sweep rather than being deleted.',
+				'Bounded by construction: the log carries one metadata line per pruned path (no file content) and is compacted to RETENTION_LOG_MAX_BYTES 256 KiB (src/retention/unclaimed.ts:60,549-571), so it cannot become the unbounded-growth defect the catch-all exists to fix; manifests are one 64 KiB-capped file per owner and a malformed/ambiguous claim skips the catch-all pass rather than being guessed at.',
 		},
 	},
 	{

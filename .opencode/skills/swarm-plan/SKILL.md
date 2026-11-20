@@ -85,7 +85,7 @@ Run CODEBASE REALITY CHECK scoped to codebase elements referenced in the effecti
 
 ### GENERAL COUNCIL ADVISORY OPTION (pre-save_plan)
 
-In `strict`, before drafting or saving the plan, the architect MUST offer General Council advisory input when `council.general.enabled` is true in the resolved opencode-swarm config and a search API key is configured. In `balanced`, offer it only when current external facts could materially change the plan; do not introduce a pause merely because the feature is configured.
+In `strict`, before drafting or saving the plan, the architect MUST offer General Council advisory input when `council.general.enabled` is true in the resolved opencode-swarm config and web search is available (searchProvider "keenable" needs no key; otherwise a key is configured for the selected provider). In `balanced`, offer it only when current external facts could materially change the plan; do not introduce a pause merely because the feature is configured.
 
 - Ask the user: "Use General Council advisory input before I write the plan? The 3-agent council (generalist, skeptic, domain expert) will gather current external context and provide perspectives that I will fold into the plan before critic review. (default: no)"
 - If the user declines, proceed to the clarification funnel and planning normally.

@@ -4,7 +4,10 @@
  *
  * - F-001: every swarm-pr-feedback verdict mode receives a mode-scoped
  *   PROTOCOL SELECTION clause naming its own row family; PR-review modes keep
- *   their clauses; stage-b-test gets none (no override ever lived there).
+ *   their clauses. Originally stage-b-test got none (no override ever lived
+ *   there); issue #3645 supersedes that pin — the stage-b-test lane now MUST
+ *   carry a clause suspending the test_engineer prompt's static [TESTED]
+ *   mandate (see the amended F-001 stage-b-test leg below).
  * - F-002: a transport-legal critic DOWNGRADED|NONE row is refused (its
  *   truthful post-critic projection CONFIRMED+NONE is exactly the pair the
  *   write boundary refuses), with DISPROVED|NONE still legal and the contract
@@ -104,10 +107,18 @@ describe('PR #3631 feedback contract riders', () => {
 		}
 	});
 
-	test('F-001: stage-b-test carries no protocol clause and PR-review clauses are unchanged', () => {
+	test('F-001 (amended per #3645): stage-b-test carries the [TESTED] suspension clause', () => {
+		// Originally this leg pinned "stage-b-test gets no protocol clause".
+		// Issue #3645 supersedes that: the test_engineer prompt's static
+		// "STRUCTURED VERDICT LINE (MANDATORY)" section keeps mandating
+		// task-keyed [TESTED] rows the feedback gate never settles, so the
+		// composed stage-b-test prompt must now carry the suspension clause.
+		// RED at base (no stage-b-test arm in FEEDBACK_VERDICT_PROTOCOL_CLAUSES).
 		const stageBTest = applyContract('swarm-pr-feedback:stage-b-test');
 		expect(stageBTest.hasBlock).toBe(true);
-		expect(stageBTest.prompt).not.toContain('PROTOCOL SELECTION');
+		expect(stageBTest.prompt).toContain('PROTOCOL SELECTION');
+		expect(stageBTest.prompt).toContain('Do not emit a [TESTED]');
+		expect(stageBTest.prompt).toContain('[STAGE-B-TEST]');
 		const reviewer = applyContract('swarm-pr-review:reviewer');
 		expect(reviewer.prompt).toContain('PROTOCOL SELECTION (#3310)');
 		const critic = applyContract('swarm-pr-review:critic');
@@ -270,4 +281,32 @@ describe('PR #3631 feedback contract riders', () => {
 		expect(builtin.config.prompt).toBe(PLAN_CRITIC_PROMPT);
 		expect(custom.config.prompt).toBe('custom body');
 	});
+});
+
+describe('issue #3645: stage-b-test carries the [TESTED] mandate suspension', () => {
+	test('stage-b-test composed lane prompt carries a PROTOCOL SELECTION clause naming the suspended mandate', () => {
+		// #3645 AC3: FEEDBACK_VERDICT_PROTOCOL_CLAUSES
+		// (src/tools/dispatch-lanes.ts) has four sibling arms —
+		// stage-b-reviewer, closeout-reviewer, closeout-critic, and
+		// verification — each naming its row family and the phrase "does not
+		// apply to this lane", but NO stage-b-test arm. The test_engineer
+		// agent prompt carries a static "STRUCTURED VERDICT LINE (MANDATORY)"
+		// section mandating [TESTED] | task-<taskId> rows, so a stage-b-test
+		// lane without a suspension clause keeps emitting task-keyed [TESTED]
+		// rows the feedback gate never settles. DISCRIMINATING — RED at
+		// base; the fix adds the stage-b-test clause naming its [STAGE-B-TEST]
+		// row family and the suspended mandate.
+		const { hasBlock, prompt } = applyContract(
+			'swarm-pr-feedback:stage-b-test',
+		);
+		expect(hasBlock).toBe(true);
+		expect(prompt).toContain('PROTOCOL SELECTION');
+		expect(prompt).toContain('does not apply to this lane');
+		expect(prompt).toContain('Do not emit a [TESTED]');
+		expect(prompt).toContain('[STAGE-B-TEST]');
+		expect(prompt).toContain('[STAGE-B-TEST] | <item_id> | PASS');
+		// The clause must name the suspended mandate: the test_engineer
+		// prompt's "STRUCTURED VERDICT LINE (MANDATORY)" [TESTED] section.
+		expect(prompt).toContain('STRUCTURED VERDICT LINE');
+	}, 60_000);
 });

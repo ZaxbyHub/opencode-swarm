@@ -4,7 +4,7 @@ description: Run a graph-guided, tool-augmented PR review using context packing,
 disable-model-invocation: true
 metadata:
   audience: swarm-plugin
-  swarm-contract-digest: "ddc0e5d29f4e"
+  swarm-contract-digest: "0adf22fe58e1"
 ---
 
 # /swarm-pr-review
@@ -1198,7 +1198,7 @@ For each candidate, the reviewer must determine:
 | Type | Definition |
 |---|---|
 | `STRUCTURALLY_PROVEN` | File:line evidence directly demonstrates the bug or violated invariant |
-| `EXECUTION_PROVEN` | A test, trace, reproduction, or command demonstrates failure |
+| `EXECUTION_PROVEN` | A test, trace, reproduction, or command demonstrates failure — **with probe provenance**: say in `probe` who executed it (a proposed / b packet-supplied / c reviewer-executed / d unavailable; execution claims without a transcript reference are UNVERIFIED). Detail and bounds: `references/probe-provenance.md`. |
 | `STATIC_TRACE_PROVEN` | Static analysis plus reviewed path/context demonstrates reachability |
 | `PLAUSIBLE_BUT_UNVERIFIED` | Pattern suggests risk, but reachability or mitigation is unresolved |
 

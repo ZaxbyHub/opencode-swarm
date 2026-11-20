@@ -22,7 +22,19 @@ Issues in this repository are not prose requests: they are **executable contract
 ### Two issue types
 
 1. **Standalone issues** (feature, bug, investigation): the required core below, no title convention beyond a clear outcome-oriented statement.
-2. **Workstream program issues**: when a program spans multiple PRs, it is decomposed as one issue per PR with the title ``[Workstream <letter>] PR <n> of <m>: <outcome statement>`` — workstreams are parallel-capable tracks, PRs within a workstream are sequential, and **one issue = one PR**. Each body carries a `## Sequence` section naming the full chain (`#A -> #B -> ...`) and its depends-on/blocks relationships. The umbrella tracker/epic issue (workstream table, closure ledger, maintainer-gated items, checklist) is repo-specific; see the repo notes at the end of this file.
+2. **Workstream program issues**: when a program spans multiple PRs, give each issue one accountable PR slot and use the title ``[Workstream <letter>] PR <n> of <m>: <outcome statement>`` — workstreams are parallel-capable tracks, PRs within a workstream are sequential, and related issues may share a reviewable PR when the maintainer authorizes it. Each body carries a `## Sequence` section naming the full chain (`#A -> #B -> ...`) and its depends-on/blocks relationships. The umbrella tracker/epic issue (workstream table, closure ledger, maintainer-gated items, checklist) is repo-specific; see the repo notes at the end of this file.
+
+### Issue triage with ZaxbyGraph
+
+Include the affected area, observed impact, target branch, and any real prerequisites in the issue body. Link related issues, findings, and pull requests. Issue authors can leave the tagging to their authorized coding harness.
+
+Before selecting work, refresh the existing ZaxbyGraph cache incrementally. Use the repository's configured queue query when it has one. Otherwise use `zaxbygraph triage` with the repository's open issues and PRs. Check the live issue comments for active claims and inspect open PRs for overlaps. Prioritize demonstrated impact and work that unblocks other issues. If a required tool fails or returns inconsistent results, report the failure and pause the affected workflow.
+
+Apply the label families the repository already uses. Record the issue type, severity for impact, scheduling priority, relevant areas and platforms, and target branch or workstream where applicable. Keep one severity and one priority when those label families exist. Record unavailable label metadata in the issue body or claim comment. Where a managed queue is configured, give each lead one active stage. Keep leads with unresolved decisions, missing acceptance evidence, or open prerequisites held. Related issues and duplicates should not compete for dispatch.
+
+Use native GitHub **Blocked by** links for genuine prerequisites and explain why each must land first. If a prerequisite closes without delivery, keep its successors held until the dependency is replaced or shown to be unnecessary. After changing dispatch labels or blockers, refresh the same graph and verify the updated issue. If the repository has a managed queue, also verify that the issue appears at the expected stage or is excluded while held.
+
+Recheck live comments and assignees immediately before claiming. Claim each issue you take on by posting a comment with the harness session ID and intended scope. Skip issues another session already owns. When the maintainer authorizes a shared PR, claim each included issue and keep separate acceptance evidence for each. Share a PR only when the combined change is reviewable.
 
 ### Body anatomy (required core)
 
@@ -104,7 +116,7 @@ The core is the required minimum. For issues whose fix has real design surface, 
 - [ ] ACs sequential, each exactly five sub-bullets, one-AC-one-check
 - [ ] Classes honest (DISCRIMINATING genuinely red at base; NEW-SURFACE deterministic absence; PRESERVING green-both-ends)
 - [ ] No vacuous checks; argv runnable from repo root; expect describes the base leg
-- [ ] Program issues: title `[Workstream <letter>] PR n of m`, Sequence section, one issue = one PR
+- [ ] Program issues: title `[Workstream <letter>] PR n of m`, Sequence section, and one accountable PR slot per issue
 - [ ] Any NON-EXECUTABLE criterion carries a closed-enum reason and named substitute evidence (not a forced check)
 - [ ] Follow-up issues: passed the necessity gate below, collated into at most two issues per source PR (more needs the maintainer's go-ahead, Priority items excepted), titled `Follow-up from PR #N: <theme>`
 
@@ -152,6 +164,12 @@ This section covers work found during a PR review or a PR-feedback round that th
 - A `NEW-SURFACE` argv naming a spec that does not exist at base fails with bun's literal `The following filters did not match any test files:` (or `Test filter "./..." had no matches` for the path form) — that is the deterministic absence signature; write it in `expect` verbatim.
 
 ---
+
+## Managed issue dispatch
+
+For the managed replacement backlog, use the configured polling edition and apply `dispatch:lead` to the issue that owns the implementation contract. Set one `queue:*` stage. Use `hold` for missing evidence, prerequisites, or decisions, `investigate` for bounded diagnosis, `qualify` for acceptance verification, `implement` after the evidence is accepted, and `active-pr` once a PR owns the work.
+
+Record the stable contract key, PR slot, and prerequisite contract keys in a single `dispatch-v1` marker. For an independent slot, set `needs` to `"|"` and `count` to `0`. For a dependent slot, list the distinct prerequisite keys between pipes and record their count. Use matching native GitHub blocker links and preserve the source issue links and finding IDs in the body. After syncing ZaxbyGraph, check that eligible leads appear once at the expected stage and held leads are excluded.
 
 ## End-to-end PR workflow
 
