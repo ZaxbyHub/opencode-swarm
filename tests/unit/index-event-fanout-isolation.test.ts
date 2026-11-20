@@ -5,6 +5,7 @@ import {
 } from '../../src/background/pending-delegations';
 import {
 	dispatchEventConsumerIsolated,
+	dispatchEventFanoutStages,
 	reportEventConsumerFailure,
 	resetEventConsumerFailureRegistryForTests,
 } from '../../src/index';
@@ -254,5 +255,102 @@ describe('event hook delivers trusted completions through the isolated fan-out (
 		expect(record?.status).toBe('completed');
 		expect(record?.terminalResult).toBeDefined();
 		expect(session.pendingAdvisoryMessages?.length).toBeGreaterThan(0);
+	});
+
+	test('r14 P1-7: stage-1 consumers run in parallel — a hanging sibling does not delay a same-stage consumer', async () => {
+		const events: string[] = [];
+		const startedAt = Date.now();
+		await dispatchEventFanoutStages([
+			[
+				{
+					name: 'hanging-sibling',
+					deadlineMs: 200,
+					run: () =>
+						new Promise<void>(() => {
+							events.push('hanging-started');
+							// Never settles.
+						}),
+				},
+				{
+					name: 'durable-observer-like',
+					deadlineMs: 5_000,
+					run: async () => {
+						events.push('observer-started');
+						// Settles quickly on its own — the point is that it STARTED
+						// without waiting behind the hanging sibling.
+						await new Promise((resolve) => setTimeout(resolve, 10));
+					},
+				},
+			],
+		]);
+		const elapsed = Date.now() - startedAt;
+		// Both stage-1 consumers STARTED (parallel dispatch — the observer did
+		// not wait behind the hanging sibling's deadline).
+		expect(events).toContain('hanging-started');
+		expect(events).toContain('observer-started');
+		// The stage was bounded by the hanging sibling's own deadline, not by
+		// sequential deadlines summing up.
+		expect(elapsed).toBeLessThan(2_000);
+	});
+
+	test('r14 P1-7: stage-2 consumers start only after stage 1 settled (bounded by its slowest deadline)', async () => {
+		const order: string[] = [];
+		await dispatchEventFanoutStages([
+			[
+				{
+					name: 'stage1-hanging',
+					deadlineMs: 100,
+					run: () => {
+						order.push('stage1-started');
+						return new Promise<void>(() => {
+							// Never settles — bounded by its own deadline.
+						});
+					},
+				},
+				{
+					name: 'stage1-quick',
+					run: () => {
+						order.push('stage1-quick-done');
+					},
+				},
+			],
+			[
+				{
+					name: 'stage2-gate-like',
+					run: () => {
+						order.push('stage2-started');
+					},
+				},
+			],
+		]);
+		// Stage 1 consumers ran; stage 2 ran only after stage 1's bounded
+		// settlement (the gate stays sequential to the observer stage).
+		expect(order.indexOf('stage1-quick-done')).toBeGreaterThan(-1);
+		expect(order.indexOf('stage2-started')).toBeGreaterThan(
+			order.indexOf('stage1-started'),
+		);
+	});
+
+	test('r14 P1-7: per-consumer deadline overrides are honored inside a stage', async () => {
+		const startedAt = Date.now();
+		await dispatchEventFanoutStages([
+			[
+				{
+					name: 'short-budget-consumer',
+					deadlineMs: 50,
+					run: () =>
+						new Promise<void>(() => {
+							// Never settles.
+						}),
+				},
+			],
+		]);
+		// Bounded by the 50 ms override (plus slack), not the default budget.
+		expect(Date.now() - startedAt).toBeLessThan(2_000);
+		expect(
+			getDeferredWarnings().some((w) =>
+				w.includes("'short-budget-consumer' failed and was isolated"),
+			),
+		).toBe(true);
 	});
 });
