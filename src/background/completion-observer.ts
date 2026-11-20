@@ -427,8 +427,17 @@ export function createBackgroundCompletionObserver(opts: {
 	 * r14 audit repair (P1-4): this observer instance's durable identity for
 	 * closeout-step execution leases (stable across the instance's lifetime,
 	 * distinct per instance/process).
+	 *
+	 * r15 audit repair (P1): this id is the observer's IDENTITY only — it is
+	 * deliberately NOT used as the lease claimant. Each runCloseoutStep
+	 * ATTEMPT derives its own claimant id (`<observerId>:<random>`), because
+	 * claimTerminalCloseoutStep treats an unexpired lease held by the SAME
+	 * claimant as an idempotent re-claim returning the SAME token: reusing the
+	 * instance id let two parallel events inside one observer both "own" the
+	 * lease and double-execute the effect. Per-attempt claimants make the
+	 * second parallel attempt hit the 'busy' fence instead.
 	 */
-	const closeoutClaimantId = `bg-closeout-${cryptoRandomId()}`;
+	const closeoutObserverId = `bg-closeout-${cryptoRandomId()}`;
 	/**
 	 * r14 audit repair (P0-2): ack a closeout step and VERIFY the ack — a
 	 * false return means the durable journal write failed (or, with a lease
@@ -690,12 +699,20 @@ export function createBackgroundCompletionObserver(opts: {
 				}
 				// r14 (P1-4): durably claim the step's execution lease BEFORE
 				// the effect runs — the ack is fenced on this token.
+				// r15 (P1): the claimant id is unique per ATTEMPT. The store
+				// idempotently re-claims an unexpired lease for the SAME
+				// claimant (same token), which would let a parallel event in
+				// this same observer double-execute the effect; a per-attempt
+				// claimant is fenced out as 'busy' instead. Lease release and
+				// expiry still make the step re-drivable after a failure.
 				const claim = await claimStep(
 					directory,
 					target.correlationId,
 					terminalEventId,
 					step,
-					{ claimantId: closeoutClaimantId },
+					{
+						claimantId: `${closeoutObserverId}:${cryptoRandomId()}`,
+					},
 				);
 				if (claim === null) {
 					logger.warn(
