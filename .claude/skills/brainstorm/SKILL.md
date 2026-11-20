@@ -24,7 +24,7 @@ MODE: BRAINSTORM runs seven phases in strict order. Do not skip phases. Do not c
 - Exit when you have a confident map of: (a) existing code and patterns, (b) relevant prior decisions, (c) what is actually unknown.
 
 **Phase 1b: GENERAL COUNCIL ADVISORY (optional, architect).**
-If `council.general.enabled` is true in the resolved opencode-swarm config AND a search API key is configured:
+If `council.general.enabled` is true in the resolved opencode-swarm config AND web search is available (searchProvider "keenable" needs no key; otherwise a key is configured for the selected provider):
 - Ask the user: "Enable General Council advisory input? The 3-agent council (generalist, skeptic, domain expert) will research the problem domain and provide diverse perspectives to inform the specification and plan. (default: no)"
 - If the user declines or config is not enabled, skip to Phase 2.
 - If the user accepts:

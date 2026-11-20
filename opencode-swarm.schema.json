@@ -4196,7 +4196,8 @@
               "type": "string",
               "enum": [
                 "tavily",
-                "brave"
+                "brave",
+                "keenable"
               ]
             },
             "searchApiKey": {

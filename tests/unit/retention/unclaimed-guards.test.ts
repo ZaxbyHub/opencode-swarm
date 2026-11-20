@@ -419,7 +419,7 @@ describe('audit log (L-1) and manifests (L-3)', () => {
 		['two manifests declare one owner', 'dup'],
 		['maxAgeDays below 1', 'low'],
 		['maxAgeDays above 36500', 'high'],
-	])('refuses the whole sweep when %s', async (_label, kind) => {
+	])('skips the catch-all when %s', async (_label, kind) => {
 		const root = makeRoot(`manifest-${kind}`);
 		const dir = path.join(root, '.swarm', 'retention.d');
 		mkdirSync(dir, { recursive: true });
@@ -436,7 +436,9 @@ describe('audit log (L-1) and manifests (L-3)', () => {
 		}
 		const victim = seed(root, path.join('.swarm', 'zz-scratch', 'old.bin'));
 		const result = await runRetentionSweep(root, { now: NOW });
-		expect(result.errors.manifests).toContain('refusing retention sweep');
+		expect(result.errors.manifests).toContain(
+			'skipping unclaimed-directory catch-all',
+		);
 		expect(existsSync(victim)).toBe(true);
 	});
 });
