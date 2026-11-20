@@ -196,9 +196,15 @@ describe('background completion observer — shared terminal closeout (F2/F3/F4,
 		expect(map).not.toBeNull();
 		const summary = map?.task_history['1.1'];
 		expect(summary).toBeDefined();
-		// deriveFinalStatus maps a verified successful completion to
-		// 'approved' — the same mapping the sync handoff produces.
-		expect(summary?.final_status).toBe('approved');
+		// r14 (P1-5): a verified CHILD-level completion is NOT a full task
+		// release — this fixture's plan task stays 'pending' and only the
+		// reviewer gate is recorded, so the summary carries the NON-FINAL
+		// 'pending' status. The authoritative promotion to 'approved' happens
+		// at update_task_status (promoteContextMapTaskRelease); the dedicated
+		// r14 P1-5 suite (completion-observer-context-map-release.test.ts)
+		// pins that progression. (r15 Phase 6: this expectation was left
+		// stale by the r14 change and failed even in isolation.)
+		expect(summary?.final_status).toBe('pending');
 		// implementation_summary carries the verified result text (bounded).
 		expect(summary?.implementation_summary).toContain('[REVIEWED]');
 	});
