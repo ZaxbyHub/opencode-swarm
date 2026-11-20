@@ -31,7 +31,7 @@ Run a multi-source, fact-checked deep research pass and synthesize a cited repor
 Examples:
   /swarm deep-research "What are the tradeoffs of WASM vs native plugins?"
   /swarm deep research "current state of deep research agents" --depth exhaustive
-  /swarm deep-research "is Tavily or Brave better for our use case" --rounds 3 --brief
+  /swarm deep-research "is Tavily, Brave or Keenable better for our use case" --rounds 3 --brief
 
 Flags:
   --depth <name>          standard (focused) or exhaustive (broader fan-out)
@@ -39,7 +39,7 @@ Flags:
   --rounds <N>            max iterative research rounds, 1..4
   --brief                 emit a short brief instead of a full cited report
 
-Requires council.general.enabled: true and a configured search API key (Tavily or Brave)
+Requires council.general.enabled: true and either searchProvider "keenable" (no key needed) or a configured search API key (Tavily or Brave)
 in the resolved config: global ~/.config/opencode/opencode-swarm.json, then project
 .opencode/opencode-swarm.json overrides.`;
 

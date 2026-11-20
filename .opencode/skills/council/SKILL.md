@@ -38,13 +38,14 @@ workflow option in MODE: BRAINSTORM (Phase 1b) and MODE: PLAN before
    is global first (`~/.config/opencode/opencode-swarm.json`), then project
    override (`.opencode/opencode-swarm.json`). A global config is valid and must
    be used when no project override is present; do not fail after checking only
-   the project file. If `council.general.enabled` is not true OR no search API
-   key is configured (neither `council.general.searchApiKey` nor the
-   corresponding env var `TAVILY_API_KEY` / `BRAVE_SEARCH_API_KEY`),
-   surface to the user: "General Council is not enabled. Set
-   council.general.enabled: true and configure a search API key in
-   global ~/.config/opencode/opencode-swarm.json or project
-   .opencode/opencode-swarm.json." Then STOP.
+   the project file. If `council.general.enabled` is not true OR web search is
+   unavailable, surface to the user: "General Council is not enabled. Set
+   council.general.enabled: true and either searchProvider: "keenable" (no key
+   needed) or a search API key in global ~/.config/opencode/opencode-swarm.json
+   or project .opencode/opencode-swarm.json." Then STOP. Web search is available
+   when `council.general.searchProvider` is `"keenable"` (no key required;
+   `KEENABLE_API_KEY` optional) or a key exists for the selected provider
+   (`council.general.searchApiKey`, `TAVILY_API_KEY`, `BRAVE_SEARCH_API_KEY`).
 
 #### Research Phase (always run before dispatching council agents)
 

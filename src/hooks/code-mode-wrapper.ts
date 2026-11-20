@@ -10,7 +10,11 @@
  * tool that shares the name `execute` and takes a string `code` is marked too.
  * That is why the Full-Auto classifier only honours the mark when the operator
  * opts in (`permission_policy.trust_code_mode_wrapper`, default false) and the
- * program is exactly one plain-data tool call. On a v1 host nothing is marked.
+ * program is exactly one plain-data tool call. The delegation gate's completion
+ * check (`canRunWhileTaskAwaitsCompletion`) also honours the mark, WITHOUT that
+ * opt-in or program-shape check: it is workflow discipline, not a permission
+ * boundary, and Full-Auto still classifies the wrapper separately. On a v1 host
+ * nothing is marked.
  *
  * Side-channel shape mirrors `src/sandbox/skip-state.ts` (keyed by
  * session + call, bounded, FIFO-evicted) so session state stays bounded

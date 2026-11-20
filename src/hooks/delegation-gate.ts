@@ -176,6 +176,7 @@ import {
 } from '../workflow/coder-settlement.js';
 import { recoverPreparedTaskRepair } from '../workflow/task-repair.js';
 import { recoverPreparedTaskTerminal } from '../workflow/task-terminal.js';
+import { isCodeModeWrapperCall } from './code-mode-wrapper';
 import { recordDeadLaneReclaim } from './delegation-gate/dead-lane-reclaim';
 import {
 	assertTaskIdNotForeignLaneSession,
@@ -2785,6 +2786,7 @@ function completionGateViolationMessage(
 	return (
 		`TASK_COMPLETION_GATE_VIOLATION: Task ${taskAwaitingCompletion} reached tests_run but is not marked completed in plan.json/plan.md. ` +
 		`Call update_task_status with task_id="${taskAwaitingCompletion}" and status="completed". ` +
+		`If completion is refused and the task cannot finish, call update_task_status with task_id="${taskAwaitingCompletion}" and status="blocked" (an audited transition that releases this gate). ` +
 		'Read-only inspection remains available; a proven-disjoint task may continue; if plan.json is ledger-stale, retry save_plan with reconcile_ledger_projection=true and otherwise-unchanged plan content.'
 	);
 }
@@ -2966,8 +2968,26 @@ export function canRunWhileTaskAwaitsCompletion(input: {
 	args: Record<string, unknown>;
 	awaitingTaskId: string;
 	requestedTaskId: string | null;
+	/** True only when the v2 adapter marked this exact call as the host's
+	 * Code Mode `execute` wrapper (see code-mode-wrapper.ts). */
+	codeModeWrapper?: boolean;
 }): boolean {
 	const normalizedTool = input.normalizedTool.toLowerCase();
+	// The wrapper only carries a program; each nested `tools.<name>()` call
+	// re-enters this gate under its own name and is judged there. Gating the
+	// wrapper denied the prescribed update_task_status remedy itself. The tool
+	// name and program shape are re-checked as defence in depth: the adapter
+	// clears the mark when its before chain ends (host dispatch order is not
+	// verifiable here), so nested calls normally never see it. The program body
+	// is NOT inspected (unlike the Full-Auto classifier): unhooked sandbox
+	// effects such as fetch are not gated, and the mark is not proof of provenance.
+	if (
+		input.codeModeWrapper === true &&
+		normalizedTool === 'execute' &&
+		typeof input.args.code === 'string'
+	) {
+		return true;
+	}
 	if (isReadOnlyTool(normalizedTool)) return true;
 	if (COMPLETION_RECOVERY_TOOLS.has(normalizedTool)) return true;
 	if (
@@ -4916,6 +4936,7 @@ export function createDelegationGateHook(
 					args: completionArgs,
 					awaitingTaskId: taskAwaitingCompletion,
 					requestedTaskId,
+					codeModeWrapper: isCodeModeWrapperCall(input.sessionID, input.callID),
 				});
 				if (!permitted) {
 					throw new Error(

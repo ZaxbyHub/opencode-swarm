@@ -1,10 +1,11 @@
 /**
  * Web search provider abstraction for the General Council Mode.
  *
- * Two concrete providers (Tavily, Brave) plus a factory that selects one
- * based on `GeneralCouncilConfig.searchProvider`. Pure HTTP layer — no tool
- * wiring or prompt rendering. Uses the native `fetch` API (Bun-compatible);
- * no external HTTP libraries.
+ * Three concrete providers (Tavily, Brave, Keenable) plus a factory that
+ * selects one based on `GeneralCouncilConfig.searchProvider`. Pure HTTP
+ * layer — no tool wiring or prompt rendering. Uses the native `fetch` API
+ * (Bun-compatible); no external HTTP libraries. Keenable is opt-in and
+ * works without a key.
  *
  * Errors are surfaced as typed exceptions:
  *   - WebSearchConfigError — missing API key (factory)
@@ -37,6 +38,12 @@ export class WebSearchConfigError extends Error {
 }
 
 export interface WebSearchProvider {
+	/**
+	 * Whether the provider honors `WebSearchOptions.freshness`. Undefined means
+	 * supported (Tavily, Brave); `false` means the provider sends no time-range
+	 * filter, so callers must not report freshness as applied.
+	 */
+	readonly supportsFreshness?: boolean;
 	search(
 		query: string,
 		maxResults: number,
@@ -246,14 +253,121 @@ function toBraveFreshness(freshness?: SearchFreshness): string | undefined {
 	}
 }
 
+interface KeenableResponse {
+	results?: Array<{
+		title?: string;
+		url?: string;
+		snippet?: string;
+		description?: string;
+	}>;
+}
+
+export class KeenableProvider implements WebSearchProvider {
+	readonly supportsFreshness = false;
+
+	constructor(private readonly apiKey?: string) {}
+
+	async search(
+		query: string,
+		maxResults: number,
+		_options: WebSearchOptions = {},
+	): Promise<WebSearchResult[]> {
+		const keyed = typeof this.apiKey === 'string' && this.apiKey.length > 0;
+		const url = keyed
+			? 'https://api.keenable.ai/v1/search'
+			: 'https://api.keenable.ai/v1/search/public';
+		const headers: Record<string, string> = {
+			Accept: 'application/json',
+			'Content-Type': 'application/json',
+			'X-Keenable-Title': 'opencode-swarm',
+		};
+		if (keyed) headers['X-API-Key'] = this.apiKey as string;
+
+		let response: Response;
+		const timeoutError = new WebSearchError(
+			`Keenable search timed out after ${SEARCH_TIMEOUT_MS}ms`,
+		);
+		try {
+			response = await withTimeoutSignal(
+				(signal) =>
+					fetch(url, {
+						method: 'POST',
+						headers,
+						body: JSON.stringify({ query, max_results: maxResults }),
+						signal,
+						redirect: 'error',
+					}),
+				SEARCH_TIMEOUT_MS,
+				timeoutError,
+			);
+		} catch (err) {
+			if (err === timeoutError) throw err;
+			if (
+				err instanceof Error &&
+				((err as { code?: unknown }).code === 'UnexpectedRedirect' ||
+					/redirect/i.test(err.message))
+			) {
+				throw new WebSearchError(
+					'Keenable request was redirected (refused)',
+					err,
+				);
+			}
+			throw new WebSearchError(
+				`Keenable network error for query "${query}"`,
+				err,
+			);
+		}
+
+		if (!response.ok) {
+			throw new WebSearchError(
+				`Keenable HTTP ${response.status} for query "${query}"`,
+			);
+		}
+
+		let body: unknown;
+		try {
+			body = await response.json();
+		} catch (err) {
+			throw new WebSearchError('Keenable returned non-JSON response', err);
+		}
+
+		const results = (body as KeenableResponse | null)?.results;
+		if (!Array.isArray(results)) {
+			return [];
+		}
+
+		const mapped: WebSearchResult[] = [];
+		for (const r of results) {
+			if (typeof r?.title !== 'string' || typeof r?.url !== 'string') continue;
+			const snippet =
+				(typeof r.snippet === 'string' && r.snippet) ||
+				(typeof r.description === 'string' && r.description) ||
+				'';
+			// Parity with Tavily/Brave: results without a snippet are dropped.
+			if (snippet === '') continue;
+			mapped.push({ title: r.title, url: r.url, snippet, query });
+		}
+		return mapped;
+	}
+}
+
 /**
- * Resolve the API key from config first, then env var fallback. Returns
- * undefined if neither is set so callers can decide how to surface that.
+ * Resolve the API key from config first, then env var fallback (Tavily and
+ * Brave). Keenable is env-only (see below). Returns undefined if no key is
+ * set so callers can decide how to surface that.
  */
 function resolveApiKey(
-	provider: 'tavily' | 'brave',
+	provider: 'tavily' | 'brave' | 'keenable',
 	configKey?: string,
 ): string | undefined {
+	// Credential scoping: `council.general.searchApiKey` is a single shared
+	// field, so a key a user set for Tavily/Brave must never be forwarded to
+	// Keenable (e.g. when a project config only flips searchProvider). Keenable
+	// reads KEENABLE_API_KEY only; blank/whitespace means keyless.
+	if (provider === 'keenable') {
+		const fromEnv = process.env.KEENABLE_API_KEY?.trim();
+		return fromEnv && fromEnv.length > 0 ? fromEnv : undefined;
+	}
 	if (configKey && configKey.length > 0) {
 		return configKey;
 	}
@@ -266,6 +380,9 @@ function resolveApiKey(
 export function createWebSearchProvider(
 	config: GeneralCouncilConfig,
 ): WebSearchProvider {
+	if (config.searchProvider === 'keenable') {
+		return new KeenableProvider(resolveApiKey('keenable'));
+	}
 	const apiKey = resolveApiKey(config.searchProvider, config.searchApiKey);
 	if (!apiKey) {
 		const envName =
