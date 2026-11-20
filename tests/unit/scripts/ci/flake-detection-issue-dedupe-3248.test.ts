@@ -155,4 +155,13 @@ describe('flake-detection tracking-issue dedupe (issue #3248)', () => {
 			'DETECTION_RUN_URL: ${{ github.event.workflow_run.html_url }}',
 		);
 	});
+
+	test('the upstream workflow pins the replacement issue and standalone callers retain discovery', () => {
+		const workflow = fs.readFileSync(WORKFLOW, 'utf-8');
+		expect(workflow).toContain(
+			"FLAKE_TRACKING_ISSUE: ${{ github.repository == 'ZaxbyHub/opencode-swarm' && '3852' || '' }}",
+		);
+		expect(script).toContain('repos/$REPO/issues/$FLAKE_TRACKING_ISSUE');
+		expect(script).toContain('elif issue_matches="$(gh issue list');
+	});
 });
