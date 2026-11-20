@@ -214,9 +214,10 @@ jobs:
     if: ${{ needs.release-please.outputs.releases_created == 'true' }}
     runs-on: ubuntu-latest
     # Issues #2952/#3259: the three dispatched-run waits below declare 40 + 10
-    # + 10 = 60 min of poll budget (the ci.yml wait now covers the dispatched
-    # unit matrix's declared 40-min per-shard ceiling, not just its 16m05s
-    # observed duration); at the observed ~1.2x per-iteration gh round-trip
+    # + 10 = 60 min of poll budget (the ci.yml wait is raised to numerically
+    # equal the dispatched unit matrix's declared 40-min per-shard ceiling,
+    # not just its 16m05s observed duration; whole-run critical-path residual
+    # disclosed in the #3259 release fragment); at the observed ~1.2x per-iteration gh round-trip
     # overhead the job needs ceil(60 x 1.2) + 5 min of margin = 77 min, so 80
     # min keeps 3 min of slack beyond the formula. The previous value (70)
     # matched only the pre-#3259 50-min sum and would kill the job mid-wait on
@@ -477,7 +478,7 @@ jobs:
             return 1
           }
 
-          # target-duration: 40 — dispatched ci.yml observed 16m05s; budget now covers the unit matrix's declared 40m per-shard ceiling (issue #3259)
+          # target-duration: 40 — dispatched ci.yml observed 16m05s; budget numerically equals the unit matrix's declared 40m per-shard ceiling; the whole-run serial critical path (queue → quality → unit → unit-passed) is a disclosed #3259 residual (issue #3259)
           ci_record="$(wait_for_dispatched_run ci.yml 480 5)"
           # target-duration: 10 — dispatched pr-standards.yml observed 46s
           standards_record="$(wait_for_dispatched_run pr-standards.yml 120 5)"
