@@ -813,14 +813,29 @@ export const _internals = {
 	readPlanOpenTaskState,
 };
 
+/**
+ * Production reset for the module-scoped execution-stall state (issue #3608).
+ *
+ * `stallStates` (per-session armed episode + non-progress counter) and
+ * `pendingDispatchRoles` (per-callID dispatch role) are process-local,
+ * session-keyed state on the guardrail tool path. A `/swarm` reset or a fresh
+ * test process must not inherit an episode armed under a sessionID that no
+ * longer exists — otherwise a later session reusing the same sessionID (every
+ * suite uses 'test-session') silently counts against a stale episode and can
+ * be denied by {@link enforceExecutionStallDenial} at the 60-call threshold
+ * with no visible cause. Cleared from `resetSwarmState()` alongside the
+ * route-invalidation registry precedent (src/state.ts, issues #3509/#3516).
+ */
+export function resetExecutionStallState(): void {
+	stallStates.clear();
+	pendingDispatchRoles.clear();
+}
+
 export const _test_exports = {
 	WORKSPACE_PROBE_EVERY_CALLS,
 	stateCount: (): number => stallStates.size,
 	peekState: (sessionID: string): Readonly<ExecutionStallState> | undefined =>
 		stallStates.get(sessionID),
 	pendingDispatchRoleCount: (): number => pendingDispatchRoles.size,
-	reset: (): void => {
-		stallStates.clear();
-		pendingDispatchRoles.clear();
-	},
+	reset: resetExecutionStallState,
 } as const;

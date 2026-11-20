@@ -12,8 +12,7 @@
  * after the same number of calls.
  */
 
-import { beforeEach, describe, expect, it } from 'bun:test';
-import * as os from 'node:os';
+import { beforeEach, describe, expect, it, onTestFinished } from 'bun:test';
 import { OPENCODE_NATIVE_AGENTS } from '../../../src/config/constants.js';
 import type { GuardrailsConfig } from '../../../src/config/schema.js';
 import { createGuardrailsHooks } from '../../../src/hooks/guardrails.js';
@@ -22,8 +21,23 @@ import {
 	startAgentSession,
 	swarmState,
 } from '../../../src/state.js';
+import { canonicalMkdtemp, removeTreeWithRetry } from '../../helpers/tmpdir.js';
 
-const TEST_DIR = os.tmpdir();
+/**
+ * Issue #3608 (plan R2/R8): this suite used to pass the ambient temp root itself
+ * as the guard root, so the denied build-agent write landed the shell-audit record at
+ * `%TEMP%\.swarm\session\shell-audit.jsonl` — ambient pollution that slows and
+ * destabilizes every later bun test process on the host (executed A/B: with the
+ * artifact present, guardrails.test.ts runs 4-6x slower and its Attack-Vector-4
+ * leg flakes). Each test now gets its own canonical temp root, removed when the
+ * test finishes. Register onTestFinished from the factory invoked in the test
+ * body — bun:test cannot register it from a describe block or a hook.
+ */
+function makeSandboxedHooks(overrides?: Parameters<typeof cfg>[0]) {
+	const root = canonicalMkdtemp('guardrails-native-agents-');
+	onTestFinished(() => removeTreeWithRetry(root));
+	return createGuardrailsHooks(root, undefined, cfg(overrides));
+}
 
 function cfg(overrides?: Partial<GuardrailsConfig>): GuardrailsConfig {
 	return {
@@ -61,7 +75,7 @@ describe('Native agent write-authority pass-through via toolBefore (issue #559)'
 
 	it('build agent writing eslint.config.mts is denied as verifier config (#3120 supersedes #559)', async () => {
 		const sid = 'native-build-session';
-		const hooks = createGuardrailsHooks(TEST_DIR, undefined, cfg());
+		const hooks = makeSandboxedHooks();
 		startAgentSession(sid, 'build');
 
 		await expect(
@@ -74,7 +88,7 @@ describe('Native agent write-authority pass-through via toolBefore (issue #559)'
 
 	it('plan agent write is not blocked', async () => {
 		const sid = 'native-plan-session';
-		const hooks = createGuardrailsHooks(TEST_DIR, undefined, cfg());
+		const hooks = makeSandboxedHooks();
 		startAgentSession(sid, 'plan');
 
 		await hooks.toolBefore(
@@ -85,7 +99,7 @@ describe('Native agent write-authority pass-through via toolBefore (issue #559)'
 
 	it('general agent write is not blocked', async () => {
 		const sid = 'native-general-session';
-		const hooks = createGuardrailsHooks(TEST_DIR, undefined, cfg());
+		const hooks = makeSandboxedHooks();
 		startAgentSession(sid, 'general');
 
 		await hooks.toolBefore(
@@ -96,7 +110,7 @@ describe('Native agent write-authority pass-through via toolBefore (issue #559)'
 
 	it('explore agent write is not blocked', async () => {
 		const sid = 'native-explore-session';
-		const hooks = createGuardrailsHooks(TEST_DIR, undefined, cfg());
+		const hooks = makeSandboxedHooks();
 		startAgentSession(sid, 'explore');
 
 		await hooks.toolBefore(
@@ -114,14 +128,10 @@ describe('Native agent circuit-breaker exemption via toolBefore', () => {
 	it('swarm agent (coder) is blocked after exceeding max_tool_calls', async () => {
 		const limit = 3;
 		const sid = 'cb-swarm-session';
-		const hooks = createGuardrailsHooks(
-			TEST_DIR,
-			undefined,
-			cfg({
-				max_tool_calls: limit,
-				profiles: { coder: { max_tool_calls: limit } },
-			}),
-		);
+		const hooks = makeSandboxedHooks({
+			max_tool_calls: limit,
+			profiles: { coder: { max_tool_calls: limit } },
+		});
 		startAgentSession(sid, 'coder');
 
 		// Fill to one below the limit (the limit-th call is the one that throws)
@@ -144,11 +154,7 @@ describe('Native agent circuit-breaker exemption via toolBefore', () => {
 	it('build agent is NOT blocked after exceeding swarm max_tool_calls limit', async () => {
 		const limit = 3;
 		const sid = 'cb-build-session';
-		const hooks = createGuardrailsHooks(
-			TEST_DIR,
-			undefined,
-			cfg({ max_tool_calls: limit }),
-		);
+		const hooks = makeSandboxedHooks({ max_tool_calls: limit });
 		startAgentSession(sid, 'build');
 
 		// Make more calls than the limit — native agents must never be blocked

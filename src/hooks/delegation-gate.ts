@@ -957,6 +957,43 @@ export function appendDelegationEnvelopeAdvisory(
  *   otherwise `{ valid: false, reason }` with a diagnosable reason the caller
  *   turns into a blocking, pre-dispatch error.
  */
+/**
+ * Emptiness test for ACCEPTANCE content (issue #3381).
+ *
+ * `String.prototype.trim()` strips Unicode whitespace (Zs) but NOT format
+ * (Cf) or control (Cc) code points — U+200B ZERO WIDTH SPACE, U+FEFF, bidi
+ * marks and stray control bytes all survive as "content that is not content",
+ * letting a criteria-free header through the pre-dispatch gate. A genuine
+ * criterion keeps at least one visible character after this strip, so Cf/Cc
+ * removal cannot reject real content.
+ */
+function hasAcceptanceContent(text: string): boolean {
+	return text.replace(/[\p{Cc}\p{Cf}]/gu, '').trim().length > 0;
+}
+
+/**
+ * Resolve which text field carries the ACCEPTANCE header (issue #3381).
+ *
+ * The gate validates the Task text fields joined with '\n', so a bare
+ * `ACCEPTANCE:` ending one field can borrow the NEXT field's first line as
+ * its criteria (and the lone-CR spelling `ACCEPTANCE:\r` borrows it while no
+ * field even recognizes its own header). Returns the field whose own text
+ * independently satisfies the validator, or null when none does — the caller
+ * fails closed in the latter case (see the ACCEPTANCE_FIELD_REQUIRED arm).
+ */
+export function resolveAcceptanceCarrierField(
+	textFields: ReadonlyArray<string>,
+): { index: number; text: string } | null {
+	for (let i = 0; i < textFields.length; i++) {
+		const text = textFields[i];
+		if (typeof text !== 'string') continue;
+		if (validateCoderReviewerAcceptanceField(text).valid) {
+			return { index: i, text };
+		}
+	}
+	return null;
+}
+
 export function validateCoderReviewerAcceptanceField(promptText: string): {
 	valid: boolean;
 	reason?: 'acceptance_field_missing' | 'acceptance_field_empty';
@@ -979,14 +1016,14 @@ export function validateCoderReviewerAcceptanceField(promptText: string): {
 		if (!match) continue;
 
 		// Inline content on the header line itself (the common same-line format).
-		if (match[1].trim().length > 0) {
+		if (hasAcceptanceContent(match[1])) {
 			return { valid: true };
 		}
 		// Bare `ACCEPTANCE:` — accept content on the following lines up to the
 		// next field header / end of input (multi-line verbatim-copy format).
 		for (let j = i + 1; j < lines.length; j++) {
 			if (nextFieldRe.test(lines[j])) break; // next field starts
-			if (lines[j].trim().length > 0) {
+			if (hasAcceptanceContent(lines[j])) {
 				return { valid: true };
 			}
 		}
@@ -5153,13 +5190,31 @@ export function createDelegationGateHook(
 			// Reuse the same broad text-field extraction other checks in this file
 			// use (see resolveDelegatedPlanTaskId / taskLooksLikePlanCritic) so the
 			// ACCEPTANCE line is found regardless of which arg carried the prompt.
-			const joinAcceptancePromptText = (): string =>
-				ACCEPTANCE_ARGS_FIELDS.map((field) => args[field])
-					.filter((value): value is string => typeof value === 'string')
-					.join('\n');
-			let acceptanceCheck = validateCoderReviewerAcceptanceField(
-				joinAcceptancePromptText(),
-			);
+			// Issue #3381 (AC3, plan R7): the joined-text validation stays the
+			// primary decision (auto-injection semantics unchanged), but when the
+			// JOINED text passes we additionally require SOME field to
+			// independently satisfy the validator — a bare `ACCEPTANCE:` ending
+			// one field must not borrow the next field's text (and the
+			// lone-CR spelling `ACCEPTANCE:\r` must not borrow it while no field
+			// even recognizes its own header). Fails closed: no independently
+			// valid carrier -> acceptance_field_empty.
+			const acceptanceFieldTexts = (): string[] =>
+				ACCEPTANCE_ARGS_FIELDS.map((field) => args[field]).filter(
+					(value): value is string => typeof value === 'string',
+				);
+			const joinedAcceptanceCheck = (): {
+				valid: boolean;
+				reason?: 'acceptance_field_missing' | 'acceptance_field_empty';
+			} => {
+				const joined = validateCoderReviewerAcceptanceField(
+					acceptanceFieldTexts().join('\n'),
+				);
+				if (!joined.valid) return joined;
+				return resolveAcceptanceCarrierField(acceptanceFieldTexts()) === null
+					? { valid: false, reason: 'acceptance_field_empty' }
+					: joined;
+			};
+			let acceptanceCheck = joinedAcceptanceCheck();
 			// Opt-in (hooks.auto_inject_acceptance, default false): synthesize a default
 			// ACCEPTANCE block instead of rejecting. The injection is re-validated
 			// against the exact text the validator reads, and the signal is emitted
@@ -5174,9 +5229,7 @@ export function createDelegationGateHook(
 				const originalFields = { ...args };
 				const injectedField = injectDefaultAcceptance(args, injectionReason);
 				if (injectedField) {
-					acceptanceCheck = validateCoderReviewerAcceptanceField(
-						joinAcceptancePromptText(),
-					);
+					acceptanceCheck = joinedAcceptanceCheck();
 					if (!acceptanceCheck.valid) {
 						// The injection did not satisfy the gate: leave the rejected
 						// dispatch exactly as the caller sent it.
