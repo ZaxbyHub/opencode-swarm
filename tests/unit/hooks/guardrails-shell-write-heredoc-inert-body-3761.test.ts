@@ -15,6 +15,7 @@ import { rmSync } from 'node:fs';
 import * as path from 'node:path';
 import type { GuardrailsConfig } from '../../../src/config/schema';
 import { createGuardrailsHooks } from '../../../src/hooks/guardrails';
+import { checkFileAuthority } from '../../../src/hooks/guardrails/file-authority';
 import {
 	detectPosixWrites,
 	neutralizeQuotedHeredocBodies,
@@ -224,37 +225,27 @@ describe('guardrails quoted-heredoc neutralization (#3761)', () => {
 			).rejects.toThrow(/BLOCKED|WRITE BLOCKED/);
 		}, 60_000);
 
-		it(
-			'inert procsub-shaped body text does not trip the destructive arm (r2 N2)',
-			async () => {
-				const hooks = createGuardrailsHooks(
-					TEST_DIR,
-					undefined,
-					defaultConfig(),
-				);
-				coderSession('heredoc-e2e-3b');
-				setDeclaredScope('heredoc-e2e-3b', ['notes/']);
-				try {
-					await hooks.toolBefore(
-						{ tool: 'bash', sessionID: 'heredoc-e2e-3b', callID: 'c1' },
-						{
-							args: {
-								command:
-									"cat > notes/procsub.md <<'EOF'\ndocumenting tee >(rm -rf ../esc) usage\nEOF",
-							},
+		it('inert procsub-shaped body text does not trip the destructive arm (r2 N2)', async () => {
+			const hooks = createGuardrailsHooks(TEST_DIR, undefined, defaultConfig());
+			coderSession('heredoc-e2e-3b');
+			setDeclaredScope('heredoc-e2e-3b', ['notes/']);
+			try {
+				await hooks.toolBefore(
+					{ tool: 'bash', sessionID: 'heredoc-e2e-3b', callID: 'c1' },
+					{
+						args: {
+							command:
+								"cat > notes/procsub.md <<'EOF'\ndocumenting tee >(rm -rf ../esc) usage\nEOF",
 						},
-					);
-				} catch (err) {
-					const msg = err instanceof Error ? err.message : String(err);
-					// The body is inert data for cat; a destructive-arm trip on
-					// the body text is exactly the neutralization-threading bug.
-					expect(msg).not.toMatch(
-						/[Dd]estructive|recursi|rm -rf|remove-tree/,
-					);
-				}
-			},
-			60_000,
-		);
+					},
+				);
+			} catch (err) {
+				const msg = err instanceof Error ? err.message : String(err);
+				// The body is inert data for cat; a destructive-arm trip on
+				// the body text is exactly the neutralization-threading bug.
+				expect(msg).not.toMatch(/[Dd]estructive|recursi|rm -rf|remove-tree/);
+			}
+		}, 60_000);
 
 		it('genuine parse failures carry the not-a-policy-refusal clause', async () => {
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, defaultConfig());
@@ -311,6 +302,23 @@ describe('guardrails quoted-heredoc neutralization (#3761)', () => {
 				expect(msg).toContain('AUTHORITY_ROOT_ESCAPE');
 				expect(msg).toContain('layer=containment');
 				expect(msg).toContain('permission.external_directory');
+			}
+		}, 60_000);
+
+		it('non-escape authority denials keep the historical reason shape (conditional renderer)', () => {
+			const result = checkFileAuthority(
+				'architect',
+				'.swarm/plan.md',
+				TEST_DIR,
+			);
+			expect(result.allowed).toBe(false);
+			if (result.allowed === false) {
+				expect(result.reason).toContain('Path blocked');
+				// The layer annotation is conditional on AUTHORITY_ROOT_ESCAPE
+				// only — every other authority code keeps its exact
+				// historical reason shape (zero blast radius).
+				expect(result.code).not.toBe('AUTHORITY_ROOT_ESCAPE');
+				expect(result.reason).not.toContain('[layer=');
 			}
 		}, 60_000);
 	});
