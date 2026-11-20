@@ -41,6 +41,13 @@ issue: 3754,3761
 - The destructive arm's shell-flag-cluster raw scan can still trip on
   heredoc body text documenting an interpreter invocation (pre-existing;
   same class as the absorbed #3616 items).
+-  refuses every heredoc cat write with
+  UNRESOLVED_TARGET (it does not skip the path-null here-doc marker the
+  gate skips) — pre-existing, fail-closed direction, unchanged by this
+  fix.
+- Tab-indented  bodies are neutralized by the helper but the gate's
+  existing control-character rule still refuses tab-bearing commands, so
+   shapes remain blocked end-to-end (fail-closed, pre-existing).
 - The read-only inline interpreter eval relaxation (#3754 Finding 1) is a
   recorded by-design decision (#3347); the discussion host is
   issue #3878.

@@ -940,7 +940,7 @@ export async function handleGuardrailExplain(
 		// `env -C src echo hi > /tmp/x` (hoist-less shapes) where the gate
 		// unions the redirect back and denies.
 		if (didUnwrap) {
-			const primaryAnalysis = detectPosixWrites(shellCommand);
+			const primaryAnalysis = detectPosixWrites(analysisCommandExplain);
 			const regained = primaryAnalysis.writes.filter(
 				(w) =>
 					!(
@@ -958,23 +958,29 @@ export async function handleGuardrailExplain(
 			}
 		}
 
-		// The gate runs its fail-closed parse gate on the ORIGINAL command as
+		// The gate runs its fail-closed parse gate on the ANALYSIS command as
 		// well as the unwrapped form (tool-before.ts): a wrapper must not
 		// launder a malformed payload — `cmd /c "echo hi` (unclosed quote)
 		// must block even though the unwrapped `echo hi` parses cleanly.
 		// Mirror both parse gates, raw first (round-7 review finding).
-		const rawPosix = detectPosixWrites(shellCommand);
+		// #3761 final-critic: these mirrors run on the SAME neutralized
+		// analysis string the gate parses — the raw shellCommand would
+		// re-report parse errors for the dense quoted-heredoc body the gate
+		// just blanked (explain said parse_error for exactly the shapes the
+		// fix admits).
+		const rawPosix = detectPosixWrites(analysisCommandExplain);
 		const rawAnalysis =
 			authority === null
 				? rawPosix
 				: mergeWriteAnalyses(
 						rawPosix,
-						detectWindowsWrites(shellCommand, authority),
+						detectWindowsWrites(analysisCommandExplain, authority),
 						true,
 						wrapperDeclaredHere,
 					);
 		const rawParseFailure =
-			rawAnalysis.parseError && !isPowerShellReadOnlyPipeline(shellCommand);
+			rawAnalysis.parseError &&
+			!isPowerShellReadOnlyPipeline(analysisCommandExplain);
 
 		if (rawParseFailure) {
 			decision = 'block';

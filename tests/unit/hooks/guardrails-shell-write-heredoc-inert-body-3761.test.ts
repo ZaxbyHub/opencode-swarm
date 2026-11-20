@@ -204,15 +204,27 @@ describe('guardrails quoted-heredoc neutralization (#3761)', () => {
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, defaultConfig());
 			coderSession('heredoc-e2e-1');
 			setDeclaredScope('heredoc-e2e-1', ['notes/']);
+			// Strengthened per final-critic: the write gate must actually
+			// ADMIT the command (any thrown block fails the leg, not just a
+			// parse-shaped one). On hosts where the downstream sandbox
+			// wrapper rejects multiline bodies, that wrapper stage runs
+			// AFTER the write gate — so the discriminator here is that no
+			// WRITE-gate denial fires: parse the outcome and require either
+			// resolution or a non-write-gate (sandbox) failure class.
+			let resolved = false;
+			let blockMessage = '';
 			try {
 				await hooks.toolBefore(
 					{ tool: 'bash', sessionID: 'heredoc-e2e-1', callID: 'c1' },
 					{ args: { command: denseCatCommand('notes/findings.md') } },
 				);
+				resolved = true;
 			} catch (err) {
-				const msg = err instanceof Error ? err.message : String(err);
-				expect(msg).not.toContain('failed to parse command');
+				blockMessage = err instanceof Error ? err.message : String(err);
 			}
+			const writeGateDenial =
+				/failed to parse command|SCOPE_VIOLATION|AUTHORITY_ROOT_ESCAPE|WRITE BLOCKED/;
+			expect(resolved || !writeGateDenial.test(blockMessage)).toBe(true);
 		}, 60_000);
 
 		it('dense quoted heredoc to an out-of-scope target blocks with a scope/authority denial', async () => {
@@ -340,4 +352,36 @@ describe('guardrails quoted-heredoc neutralization (#3761)', () => {
 			}
 		}, 60_000);
 	});
+
+describe('guardrail-explain parity for the heredoc shape (#3761 final critic)', () => {
+	it('explain does not report parse_error for the in-scope dense heredoc the gate admits', async () => {
+		const { handleGuardrailExplain } = await import(
+			'../../../src/services/guardrail-explain-service'
+		);
+		const result = await handleGuardrailExplain(TEST_DIR, [
+			'cat',
+			'>',
+			'notes/findings.md',
+			`<<'EOF'\n${DENSE_BODY.join('\n')}\nEOF`,
+		]);
+		expect(typeof result).toBe('string');
+		expect(result).not.toContain('parse_error');
+	}, 60_000);
+
+	it('explain gives the scope/authority reason (not parse_error) for the out-of-scope dense heredoc', async () => {
+		const { handleGuardrailExplain } = await import(
+			'../../../src/services/guardrail-explain-service'
+		);
+		const result = await handleGuardrailExplain(TEST_DIR, [
+			'cat',
+			'>',
+			'../outside/esc.md',
+			`<<'EOF'\n${DENSE_BODY.join('\n')}\nEOF`,
+		]);
+		expect(typeof result).toBe('string');
+		expect(result).not.toContain('parse_error');
+		expect(result).toMatch(/SCOPE_VIOLATION|AUTHORITY_ROOT_ESCAPE|block/);
+	}, 60_000);
+});
+
 });
