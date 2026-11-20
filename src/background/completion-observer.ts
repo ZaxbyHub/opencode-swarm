@@ -612,6 +612,9 @@ export function createBackgroundCompletionObserver(opts: {
 						parentSessionId: record.parentSessionId,
 						callId: record.callID,
 						verdictText: result.text,
+						// Audit P0-1 item 10: a truncated terminal text cannot prove
+						// a final verdict — the VERDICT line may be cut off mid-token.
+						verdictTruncated: result.truncated === true,
 						dispatchPlanStructureHash:
 							record.planCriticDispatch.planStructureHash,
 						transport: 'async_completion',

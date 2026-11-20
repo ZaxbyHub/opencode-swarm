@@ -407,8 +407,29 @@ export interface BackgroundPromptSnapshot {
 export interface BackgroundPlanCriticDispatch {
 	/** `computePlanStructureHash` of the plan at dispatch time (sha256 hex). */
 	planStructureHash: string;
-	/** Dispatch-time epoch (ms) — audit only. */
+	/**
+	 * Dispatch-time epoch (ms) — audit only. NOTE (audit P0-2): for records
+	 * written since the r13 repair this is the epoch of the PRE-EXECUTION
+	 * capture in the delegation gate's `tool.execute.before` hook, taken
+	 * BEFORE the critic child started; legacy r11–r12 records captured it in
+	 * the after-hook (after the child had already started) — those records
+	 * still verify their hash at completion time, but the capture point is
+	 * not provably pre-execution.
+	 */
 	recordedAt: number;
+	/**
+	 * `derivePlanId` of the plan bound at dispatch time (audit P0-2 binding:
+	 * parent session, call id, child session, critic role live on the record
+	 * itself; the plan identity lives here). Optional for r11–r12 record
+	 * compatibility; its absence never weakens the hash fence.
+	 */
+	planId?: string;
+	/**
+	 * sha256 of the FULL dispatch prompt captured pre-execution (audit P0-2:
+	 * the binding must describe what the critic was actually sent, not just
+	 * what plan.json contained). Optional for r11–r12 record compatibility.
+	 */
+	promptContentDigest?: string;
 }
 
 export type BackgroundDelegationRecoveryKind =
@@ -783,6 +804,11 @@ const PlanCriticDispatchSchema = z
 	.object({
 		planStructureHash: z.string().regex(/^[0-9a-f]{64}$/),
 		recordedAt: z.number().int().nonnegative(),
+		planId: z.string().min(1).max(256).optional(),
+		promptContentDigest: z
+			.string()
+			.regex(/^[0-9a-f]{64}$/)
+			.optional(),
 	})
 	.strict();
 

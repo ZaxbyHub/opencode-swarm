@@ -11,6 +11,7 @@ import {
 	computePlanStructureHash,
 	initLedger,
 	loadLastPlanCriticApprovedSnapshot,
+	readLedgerEventsWithIntegrity,
 } from '../../../src/plan/ledger';
 import { resetStartupLedgerCheck } from '../../../src/plan/manager';
 import { derivePlanId } from '../../../src/plan/utils';
@@ -252,4 +253,5 @@ describe('plan-critic-approval shared recorder', () => {
 		});
 		expect(second.outcome).toBe('recorded');
 	});
+
 });

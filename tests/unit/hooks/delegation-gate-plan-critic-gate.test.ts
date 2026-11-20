@@ -208,33 +208,29 @@ describe('delegation gate plan critic approval', () => {
 		expect(approved?.approval?.source).toBe('plan_critic_gate');
 	});
 
-	// F-B1: the recorder's heuristic (`taskLooksLikePlanCritic`) must have high
-	// recall for realistic freeform architect phrasings of "review this plan
-	// before execution" — NOT just the hand-crafted "MODE: CRITIC-GATE" +
-	// "review plan"+"execute" shape the original test happened to match. Each
-	// variant below deliberately omits the old narrow trigger pairing.
+	// F-B1 (superseded by the r13 audit repair, P2-1): automatic approval
+	// recording now requires EXPLICIT plan-gate intent (`MODE: CRITIC-GATE`,
+	// i.e. the `critic-gate` signal). The #2012 recall-biased substring
+	// heuristic (`taskLooksLikePlanCritic`) remains for non-security
+	// classification only — an ordinary critic review that merely mentions
+	// plan.md / "review the plan" / "evaluate this plan" can never release
+	// the `critic_pre_plan` gate. A missed gate dispatch is recoverable
+	// (re-run CRITIC-GATE with the explicit marker, or the audited
+	// approve_plan_critic escape hatch); a false positive is not.
 	const planCriticPromptVariants: Array<{ name: string; prompt: string }> = [
 		{
-			name: 'plan.md content reference without MODE header or execute pairing',
+			name: 'explicit MODE: CRITIC-GATE marker',
 			prompt:
-				'Please review the plan.md content below before we proceed to implementation.\n\n<plan contents>',
+				'MODE: CRITIC-GATE\nTASK: Review plan before EXECUTE',
 		},
 		{
 			name: 'critic-gate prefix on pasted plan content',
 			prompt: 'Critic-gate review:\n\n# Phase 1\n- Task 1.1 do the thing',
 		},
-		{
-			name: '"plan critic" phrasing',
-			prompt: 'You are the plan critic. Assess this plan for coverage gaps.',
-		},
-		{
-			name: '"approve the plan" phrasing',
-			prompt: 'Review and, if sound, approve the plan for the swarm.',
-		},
 	];
 
 	for (const variant of planCriticPromptVariants) {
-		test(`records an approved snapshot for realistic variant: ${variant.name}`, async () => {
+		test(`records an approved snapshot for gate-intent variant: ${variant.name}`, async () => {
 			const plan = makePlan();
 			await writePlan(dir, plan);
 			ensureAgentSession('session-plan-critic-variant', 'architect');
@@ -260,6 +256,7 @@ describe('delegation gate plan critic approval', () => {
 			expect(approved?.payloadHash).toBe(computePlanStructureHash(plan));
 		});
 	}
+
 
 	test('does NOT record a plan-critic snapshot for an unrelated critic dispatch even when output is APPROVED', async () => {
 		// A generic (non-plan) critic dispatch whose prompt contains none of the
@@ -351,24 +348,27 @@ describe('delegation gate plan critic approval', () => {
 		await hook.toolBefore(input, output);
 	});
 
-	// F-B1 coupling guard: critic-gate/SKILL.md tells the architect to
-	// reference "plan.md" or "critic-gate" in its dispatch. If a future edit to
-	// either the skill wording or PLAN_CRITIC_TASK_SIGNALS drops one of these
-	// tokens from the other side, the recording heuristic silently stops
-	// matching the documented dispatch shape and the total-block bug (F-B1)
-	// regresses. This test fails loudly instead.
-	test('SKILL.md-recommended detection tokens stay a subset of the heuristic signals (F-B1 coupling guard)', () => {
+	// F-B1 coupling guard (r13 audit repair): critic-gate/SKILL.md tells the
+	// architect to mark the dispatch with `MODE: CRITIC-GATE`. The automatic
+	// approval path keys on the EXPLICIT gate-intent signal
+	// (PLAN_CRITIC_GATE_INTENT_SIGNALS), not the broad #2012 recall heuristic.
+	// If a future edit to the skill wording or the gate-intent signals drops
+	// the marker from one side, gate dispatches silently stop auto-approving
+	// and the total-block bug (F-B1) regresses. This test fails loudly instead.
+	test('SKILL.md gate-intent marker stays a subset of the gate-intent signals (F-B1 coupling guard)', () => {
 		const skillPath = join(
 			__dirname,
 			'../../../.opencode/skills/critic-gate/SKILL.md',
 		);
 		const skillText = readFileSync(skillPath, 'utf8').toLowerCase();
-		const recommendedTokens = ['plan.md', 'critic-gate'];
-		const signals = delegationGateInternals.PLAN_CRITIC_TASK_SIGNALS;
+		const recommendedTokens = ['mode: critic-gate'];
+		const signals = delegationGateInternals.PLAN_CRITIC_GATE_INTENT_SIGNALS;
 
 		for (const token of recommendedTokens) {
 			expect(skillText.includes(token)).toBe(true);
-			expect(signals.some((signal) => signal.includes(token))).toBe(true);
+			expect(
+				signals.some((signal) => token.includes(signal)),
+			).toBe(true);
 		}
 	});
 
@@ -439,13 +439,19 @@ describe('delegation gate plan critic approval', () => {
 		test('NEGATIVE: rubric template enumeration does NOT false-positive', () => {
 			// The critic's own output-format template line contains
 			// "VERDICT: APPROVED | NEEDS_REVISION | REJECTED" as an enumeration.
-			// The primary regex matches APPROVED here (correct — it IS a VERDICT:
-			// line), but the bare-line fallback must NOT additionally misfire on
-			// a mid-output bare token. This pins the behavior: a VERDICT: line
-			// with a pipe-separated enumeration still resolves to APPROVED (the
-			// first token), which is the documented behavior.
+			// r13 audit repair (P0-1 case A): a model echoing the rubric template
+			// must NEVER read as a verdict — an alternatives list is not a
+			// decision. This pins the fail-closed behavior: null.
 			const template = 'VERDICT: APPROVED | NEEDS_REVISION | REJECTED';
-			expect(extractPlanCriticVerdict(template)).toBe('APPROVED');
+			expect(extractPlanCriticVerdict(template)).toBeNull();
+		});
+
+		test('NEGATIVE: contradictory verdicts resolve to null (P0-1 case C)', () => {
+			expect(
+				extractPlanCriticVerdict(
+					'Example:\nVERDICT: APPROVED\n\nActual:\nVERDICT: REJECTED',
+				),
+			).toBeNull();
 		});
 
 		test('NEGATIVE: bare token mid-output (not in tail) does NOT match', () => {
@@ -483,48 +489,10 @@ describe('delegation gate plan critic approval', () => {
 		});
 	});
 
-	// ── Issue #2012: broadened dispatch signals (Change C) ─────────────────
-	const broadenedPromptVariants: Array<{ name: string; prompt: string }> = [
-		{
-			name: '"evaluate this plan" phrasing',
-			prompt: 'Evaluate this plan for soundness before we proceed.',
-		},
-		{
-			name: '"pre-implementation review" phrasing',
-			prompt: 'Perform the pre-implementation review on the plan below.',
-		},
-		{
-			name: '"assess the plan" phrasing',
-			prompt: 'Assess the plan for coverage gaps and risks.',
-		},
-	];
-
-	for (const variant of broadenedPromptVariants) {
-		test(`records an approved snapshot for broadened signal: ${variant.name}`, async () => {
-			const plan = makePlan();
-			await writePlan(dir, plan);
-			ensureAgentSession('session-broadened', 'architect');
-			const hook = createDelegationGateHook(makeConfig(), dir);
-
-			await hook.toolAfter(
-				{
-					tool: 'Task',
-					sessionID: 'session-broadened',
-					callID: 'critic-broadened',
-					args: {
-						subagent_type: 'critic',
-						prompt: variant.prompt,
-					},
-				},
-				{ output: 'VERDICT: APPROVED\nThe plan is ready.' },
-			);
-
-			const approved = await loadLastApprovedPlan(dir, derivePlanId(plan));
-			expect(approved).not.toBeNull();
-			expect(approved?.approval?.verdict).toBe('APPROVED');
-			expect(approved?.approval?.source).toBe('plan_critic_gate');
-		});
-	}
+	// ── Issue #2012: broadened dispatch signals (Change C) — superseded by
+	// the r13 audit repair (P2-1). The former recall-broadening variants
+	// ("evaluate this plan", "pre-implementation review", "assess the plan")
+	// are pinned as NON-approving ordinary reviews in the P2-1 block above.
 
 	// ── Issue #2012: escape hatch (Change A) ──────────────────────────────
 	describe('forceRecordPlanCriticApproval escape hatch (issue #2012)', () => {

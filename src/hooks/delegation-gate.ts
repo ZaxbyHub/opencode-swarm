@@ -6,6 +6,7 @@
  */
 
 import { isNativeV2AsyncSubagentHost } from '../host/v2/native-async-mode';
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { ZodError, z } from 'zod';
@@ -74,9 +75,10 @@ import {
 } from '../parallel/review-router.js';
 import {
 	recordVerifiedPlanCriticApproval,
-	taskLooksLikePlanCritic,
+	taskIsExplicitPlanCriticGate,
 	extractPlanCriticVerdict,
 	PLAN_CRITIC_TASK_SIGNALS,
+	PLAN_CRITIC_GATE_INTENT_SIGNALS,
 } from '../plan/critic-approval.js';
 import {
 	approvedSnapshotCoversPlan,
@@ -1909,13 +1911,26 @@ async function recordPlanCriticApprovalSnapshotIfApplicable(
 	input: { sessionID: string; callID: string },
 	args: Record<string, unknown>,
 	output: unknown,
+	/**
+	 * The PRE-EXECUTION plan baseline captured by this gate's toolBefore hook
+	 * (audit P0-2): the structural hash of the plan as it stood BEFORE the
+	 * critic child started. When present it is passed to the shared recorder
+	 * so a plan edited while the critic ran can no longer be approved by the
+	 * now-stale verdict. When absent (legacy replays, tests without a
+	 * toolBefore pass) the recorder falls back to its own in-fence plan check.
+	 */
+	baseline?: { planStructureHash: string },
 ): Promise<void> {
 	const targetAgent =
 		typeof args.subagent_type === 'string'
 			? stripKnownSwarmPrefix(args.subagent_type)
 			: null;
 	if (targetAgent !== 'critic') return;
-	if (!taskLooksLikePlanCritic(args)) return;
+	// Audit P2-1: only an EXPLICIT plan-gate dispatch (`MODE: CRITIC-GATE`)
+	// may auto-record a plan-critic approval. Ordinary critic reviews that
+	// merely mention plan.md / "review the plan" never release the gate —
+	// the audited manual escape hatch (approve_plan_critic) remains.
+	if (!taskIsExplicitPlanCriticGate(args)) return;
 	if (extractPlanCriticVerdict(output) !== 'APPROVED') return;
 
 	// Single shared approval implementation (src/plan/critic-approval.ts):
@@ -1926,6 +1941,7 @@ async function recordPlanCriticApprovalSnapshotIfApplicable(
 		parentSessionId: input.sessionID,
 		callId: input.callID,
 		verdictText: output,
+		...(baseline ? { dispatchPlanStructureHash: baseline.planStructureHash } : {}),
 		transport: 'sync_task',
 	});
 	if (recording.outcome === 'recorded') return;
@@ -3525,6 +3541,8 @@ export const _internals = {
 	maintainBackgroundDelegationsForDispatch,
 	resetStandardWorktreeIsolationState,
 	PLAN_CRITIC_TASK_SIGNALS,
+	PLAN_CRITIC_GATE_INTENT_SIGNALS,
+	taskIsExplicitPlanCriticGate,
 	extractPlanCriticVerdict,
 	extractPlanTaskId,
 	forceRecordPlanCriticApproval,
@@ -3868,6 +3886,42 @@ export function createDelegationGateHook(
 		string,
 		BackgroundTaskChangeContext
 	>();
+	// r13 repair (audit P0-2): the authoritative plan baseline for a plan
+	// critic-gate dispatch, captured in toolBefore — BEFORE the critic child
+	// starts. The after-hook (which builds the durable background record)
+	// consumes this baseline instead of re-reading plan.json, so the hash on
+	// the record provably describes the plan that existed before the child
+	// could have received anything else. Fail-closed bounded map: silent FIFO
+	// eviction would drop a binding and silently wedge the async approval;
+	// a loud capacity error rejects the dispatch instead (sibling pattern:
+	// begunCoderSettlementsByCallID / PRR-002).
+	interface PlanCriticDispatchBaseline {
+		parentSessionId: string;
+		planId: string;
+		planStructureHash: string;
+		promptContentDigest: string | null;
+		capturedAt: number;
+	}
+	const MAX_PLAN_CRITIC_DISPATCH_BASELINES = 64;
+	const planCriticDispatchBaselinesByCallID = new Map<
+		string,
+		PlanCriticDispatchBaseline
+	>();
+	const capturePlanCriticDispatchBaseline = (
+		callID: string,
+		baseline: PlanCriticDispatchBaseline,
+	): void => {
+		if (
+			!planCriticDispatchBaselinesByCallID.has(callID) &&
+			planCriticDispatchBaselinesByCallID.size >=
+				MAX_PLAN_CRITIC_DISPATCH_BASELINES
+		) {
+			throw new Error(
+				`PLAN_CRITIC_BASELINE_CAPACITY: refusing plan-critic dispatch because ${MAX_PLAN_CRITIC_DISPATCH_BASELINES} live dispatch baselines are already tracked`,
+			);
+		}
+		planCriticDispatchBaselinesByCallID.set(callID, baseline);
+	};
 	// Issue #2214: callID → the settlement this dispatch durably began. Used by
 	// (a) the toolBefore denial rollback when a LATER fail-closed hook rejects
 	// the Task call after the delegation gate already wrote the DISPATCHED WAL
@@ -4578,6 +4632,7 @@ export function createDelegationGateHook(
 		stageBRouteSlotByCallID.delete(callID);
 		gateDispatchPrimaryTaskByCallID.delete(callID);
 		stageBDispatchContextByCallID.delete(callID);
+		planCriticDispatchBaselinesByCallID.delete(callID);
 		deleteStoredInputArgs(callID);
 	};
 
@@ -4965,6 +5020,36 @@ export function createDelegationGateHook(
 				);
 			}
 			throw new Error(SWARM_BACKGROUND_TASK_BLOCKED_MESSAGE);
+		}
+
+		// r13 repair (audit P0-2): capture the authoritative plan baseline for
+		// an explicit plan critic-gate dispatch BEFORE the child starts. The
+		// Task tool has NOT executed yet at this point — a later plan edit can
+		// no longer re-anchor the binding (the r11 bug: the after-hook hashed
+		// whatever plan.json contained AFTER the critic was already running).
+		// The prompt content digest binds WHAT the critic was sent (the full
+		// prompt string), not just what plan.json happened to contain.
+		// Fail closed: an unreadable plan records NO baseline, and without a
+		// pre-execution baseline an async APPROVED verdict can never
+		// auto-approve (the audited manual escape hatch remains).
+		if (targetAgent === 'critic' && taskIsExplicitPlanCriticGate(args)) {
+			const planAtDispatch = await loadPlanJsonOnly(directory);
+			if (planAtDispatch) {
+				capturePlanCriticDispatchBaseline(input.callID, {
+					parentSessionId: input.sessionID,
+					planId: derivePlanId(planAtDispatch),
+					planStructureHash: computePlanStructureHash(planAtDispatch),
+					promptContentDigest:
+						typeof args.prompt === 'string'
+							? createHash('sha256').update(args.prompt).digest('hex')
+							: null,
+					capturedAt: Date.now(),
+				});
+			} else {
+				logger.warn(
+					'[delegation-gate] plan critic-gate dispatch could not bind a pre-execution plan baseline (plan.json unreadable); a later APPROVED verdict will not auto-approve',
+				);
+			}
 		}
 
 		// Review routing: every Stage-B dispatch receives a durable route receipt.
@@ -6606,32 +6691,43 @@ export function createDelegationGateHook(
 										prHeadSha,
 										scope,
 									});
-							// r11 (async lifecycle F1): bind a plan-critic dispatch to the
-							// plan structure the critic was actually sent. Field PRESENCE
-							// encodes the dispatch-time classification (critic agent +
-							// taskLooksLikePlanCritic args), so the native async
-							// completion path never has to re-derive it from a
-							// possibly-compacted prompt snapshot. Fail closed: an
-							// unreadable plan records NO binding — without a
-							// dispatch-time baseline an async APPROVED verdict cannot
-							// be verified and must not auto-approve (the audited manual
-							// escape hatch approve_plan_critic remains).
+							// r13 repair (audit P0-2): the binding is the PRE-EXECUTION
+							// baseline captured by this gate's toolBefore hook BEFORE
+							// the critic child started. The after-hook NEVER re-reads
+							// plan.json here — the r11 code did exactly that, so a plan
+							// edited between child start and this record write would
+							// have re-anchored the binding to the edited plan and let
+							// the critic's older APPROVED verdict release it. Fail
+							// closed: without a provable pre-execution baseline there
+							// is NO binding, and an async APPROVED verdict can never
+							// auto-approve (the audited manual escape hatch
+							// approve_plan_critic remains).
 							let planCriticDispatch: BackgroundPlanCriticDispatch | undefined;
 							if (
 								normalizedSubagentType === 'critic' &&
-								taskLooksLikePlanCritic(mergedArgs)
+								taskIsExplicitPlanCriticGate(mergedArgs)
 							) {
-								const planAtDispatch = await loadPlanJsonOnly(directory);
-								if (planAtDispatch) {
+								const baseline = planCriticDispatchBaselinesByCallID.get(
+									input.callID,
+								);
+								if (
+									baseline &&
+									baseline.parentSessionId === input.sessionID
+								) {
 									planCriticDispatch = {
-										planStructureHash: computePlanStructureHash(planAtDispatch),
-										recordedAt: Date.now(),
+										planStructureHash: baseline.planStructureHash,
+										recordedAt: baseline.capturedAt,
+										planId: baseline.planId,
+										...(baseline.promptContentDigest
+											? { promptContentDigest: baseline.promptContentDigest }
+											: {}),
 									};
 								} else {
 									logger.warn(
-										'[delegation-gate] background plan-critic dispatch could not bind a plan-structure baseline (plan.json unreadable); a later async APPROVED verdict will not auto-approve',
+										'[delegation-gate] background plan-critic dispatch has no provable pre-execution plan baseline (missing or foreign baseline for this call); a later async APPROVED verdict will not auto-approve',
 									);
 								}
+								planCriticDispatchBaselinesByCallID.delete(input.callID);
 							}
 							const pendingInputDraft: RecordPendingInput = {
 								correlationId: subagentSessionId,
@@ -6909,12 +7005,24 @@ export function createDelegationGateHook(
 				if (typeof subagentType === 'string') {
 					try {
 						const mergedArgs = { ...(storedArgs ?? {}), ...(directArgs ?? {}) };
+						// Audit P0-2: hand the PRE-EXECUTION baseline (captured by
+						// toolBefore for this exact call) to the sync recorder so a
+						// plan edited while the critic ran cannot be approved by
+						// the stale verdict.
+						const criticBaseline = planCriticDispatchBaselinesByCallID.get(
+							input.callID,
+						);
 						await recordPlanCriticApprovalSnapshotIfApplicable(
 							directory,
 							input,
 							mergedArgs,
 							_output,
+							criticBaseline &&
+								criticBaseline.parentSessionId === input.sessionID
+								? { planStructureHash: criticBaseline.planStructureHash }
+								: undefined,
 						);
+						planCriticDispatchBaselinesByCallID.delete(input.callID);
 					} catch (err) {
 						logger.warn(
 							`[delegation-gate] plan critic approval snapshot failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -8746,6 +8854,7 @@ ${warningLines.join('\n')}`;
 				clearPublishedScopeBindings(callID);
 				stageBDispatchGenerationsByCallID.delete(callID);
 				gateDispatchPrimaryTaskByCallID.delete(callID);
+				planCriticDispatchBaselinesByCallID.delete(callID);
 				deleteStoredInputArgs(callID);
 			}
 		},

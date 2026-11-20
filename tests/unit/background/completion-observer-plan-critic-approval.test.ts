@@ -338,4 +338,129 @@ describe('background completion observer — async plan critic approval (F1/r11)
 		expect(await countPlanCriticGateSnapshots(directory)).toBe(1);
 		expect(await isPlanCriticApproved(directory)).toBe(true);
 	});
+
+	test('P0-1 item 10: a truncated terminal result never records an approval', async () => {
+		await initLedger(directory, derivePlanId(plan));
+		await recordCriticPendingDelegation(directory, {
+			planStructureHash: computePlanStructureHash(plan),
+		});
+		const observer = createBackgroundCompletionObserver({
+			config: { enabled: true },
+			directory,
+		});
+		// Exceeds the 20 000-char task-envelope bound, so the delivered result
+		// is TRUNCATED — the text visibly ends in "VERDICT: APPROV", exactly
+		// the cut-off-mid-token shape a real truncation produces. Even a full
+		// "VERDICT: APPROVED" before the cut must not count: a truncated text
+		// cannot prove the final verdict.
+		const padding = 'x'.repeat(20_100);
+		const truncatedBody = `<task_result>${padding}\nVERDICT: APPROV</task_result>`;
+		await observer.event(
+			completionEvent('ses_child_critic_1', 'completed', truncatedBody),
+		);
+		expect(await countPlanCriticGateSnapshots(directory)).toBe(0);
+		expect(await isPlanCriticApproved(directory)).toBe(false);
+	});
+
+	test('P0-2: parallel critic reviews approve independently — no identity swap', async () => {
+		await initLedger(directory, derivePlanId(plan));
+		const dispatchHash = computePlanStructureHash(plan);
+		await recordCriticPendingDelegation(directory, {
+			childSessionId: 'ses_child_critic_a',
+			parentSessionId: 'ses_parent_a',
+			callId: 'call-critic-a',
+			planStructureHash: dispatchHash,
+		});
+		await recordCriticPendingDelegation(directory, {
+			childSessionId: 'ses_child_critic_b',
+			parentSessionId: 'ses_parent_b',
+			callId: 'call-critic-b',
+			planStructureHash: dispatchHash,
+		});
+		const observer = createBackgroundCompletionObserver({
+			config: { enabled: true },
+			directory,
+		});
+		await observer.event(
+			completionEvent(
+				'ses_child_critic_a',
+				'completed',
+				APPROVED_BODY,
+				'ses_parent_a',
+			),
+		);
+		await observer.event(
+			completionEvent(
+				'ses_child_critic_b',
+				'completed',
+				'<task_result>VERDICT: NEEDS_REVISION</task_result>',
+				'ses_parent_b',
+			),
+		);
+
+		// Exactly one approval: the APPROVED critic-a; critic-b's negative
+		// verdict records nothing — and never contaminates critic-a's snapshot.
+		expect(await countPlanCriticGateSnapshots(directory)).toBe(1);
+		const integrity = await readLedgerEventsWithIntegrity(directory);
+		const approval = integrity.events.find(
+			(event) =>
+				event.event_type === 'snapshot' &&
+				(event.payload as { approval?: { source?: string } })?.approval
+					?.source === 'plan_critic_gate',
+		);
+		const approvalPayload = approval?.payload as {
+			approval?: { call_id?: string; session_id?: string };
+		};
+		expect(approvalPayload?.approval?.call_id).toBe('call-critic-a');
+		expect(approvalPayload?.approval?.session_id).toBe('ses_parent_a');
+	});
+
+	test('P0-2: a completion for a different critic child never approves another call', async () => {
+		await initLedger(directory, derivePlanId(plan));
+		const dispatchHash = computePlanStructureHash(plan);
+		await recordCriticPendingDelegation(directory, {
+			childSessionId: 'ses_child_critic_real',
+			parentSessionId: 'ses_parent_1',
+			callId: 'call-critic-real',
+			planStructureHash: dispatchHash,
+		});
+		const observer = createBackgroundCompletionObserver({
+			config: { enabled: true },
+			directory,
+		});
+		// A terminal for an UNKNOWN child session — no durable record exists
+		// for it, so nothing may be approved on the real call's behalf.
+		await observer.event(
+			completionEvent(
+				'ses_child_critic_imposter',
+				'completed',
+				APPROVED_BODY,
+			),
+		);
+		expect(await countPlanCriticGateSnapshots(directory)).toBe(0);
+		expect(await isPlanCriticApproved(directory)).toBe(false);
+	});
+
+	test('P0-2: identical plan structure with a different task status still approves', async () => {
+		await initLedger(directory, derivePlanId(plan));
+		const dispatchHash = computePlanStructureHash(plan);
+		// The architect flips a task status while the critic runs — the
+		// STRUCTURAL hash excludes status fields, so the approval remains
+		// valid for the same structure.
+		const statusFlipped = makePlan('Async Plan Critic Plan');
+		statusFlipped.phases[0].tasks[0].status = 'in_progress';
+		writePlan(directory, statusFlipped);
+		await recordCriticPendingDelegation(directory, {
+			planStructureHash: dispatchHash,
+		});
+		const observer = createBackgroundCompletionObserver({
+			config: { enabled: true },
+			directory,
+		});
+		await observer.event(
+			completionEvent('ses_child_critic_1', 'completed', APPROVED_BODY),
+		);
+		expect(await countPlanCriticGateSnapshots(directory)).toBe(1);
+		expect(await isPlanCriticApproved(directory)).toBe(true);
+	});
 });
