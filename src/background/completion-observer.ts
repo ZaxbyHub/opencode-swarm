@@ -171,18 +171,48 @@ let contextMapModulePromise: Promise<
 	typeof import('../context-map/post-agent-update.js')
 > | null = null;
 /**
- * r14 audit repair (P0-2): static read-back verifier for the context-map
- * closeout effect — `loadContextMap` is side-effect free (node builtins +
- * types only), so a static import adds no cycle and lets the effect PROVE the
- * write persisted instead of trusting `void` (updateContextMapAfterAgent
- * swallows internal errors and returns a fallback map).
+ * r15 audit repair (P2): the read-back verifier must prove the CURRENT
+ * change persisted, not merely that SOME entry for the task id exists.
+ * `updateContextMapAfterAgent` swallows internal errors (save failures) and
+ * returns a fallback map — a stale OLD entry would otherwise ack a NEW
+ * completion whose write never landed.
+ *
+ * Accepted as proof that the obligation is durably established:
+ * - the freshly read-back entry carries THIS completion's implementation
+ *   summary (a fresh write, or an idempotent replay of an identical effect);
+ *   when the whole-task release is already proven, the terminal
+ *   'approved' (or evidence-merged 'rejected') status must be reflected too;
+ * - OR (non-release path only) the entry holds a TERMINAL verdict: the r14
+ *   (P1-5) non-overwrite guard deliberately preserves it against a pending
+ *   child-level summary — the preserved verdict IS the intended state.
+ * Anything else — a missing entry, an unchanged stale summary on a pending
+ * entry, an unreadable map — is NOT proof (the caller reports retryable).
  */
 function verifyContextMapWrite(
 	directory: string,
 	taskId: string,
+	expected: { implementationSummary: string; releaseProven: boolean },
 ): boolean {
 	try {
-		return loadContextMap(directory)?.task_history[taskId] !== undefined;
+		const entry = loadContextMap(directory)?.task_history[taskId];
+		if (entry === undefined) return false;
+		if (
+			entry.implementation_summary === expected.implementationSummary &&
+			(!expected.releaseProven ||
+				entry.final_status === 'approved' ||
+				entry.final_status === 'rejected')
+		) {
+			return true;
+		}
+		if (
+			!expected.releaseProven &&
+			entry.final_status !== 'pending'
+		) {
+			// Terminal non-overwrite guard: a pending child-level summary
+			// correctly left an existing terminal verdict in place.
+			return true;
+		}
+		return false;
 	} catch {
 		return false;
 	}
@@ -1797,13 +1827,21 @@ export function createBackgroundCompletionObserver(opts: {
 							// r14 audit repair (P0-2): `void` (no exception) is
 							// NOT proof — updateContextMapAfterAgent swallows
 							// internal errors and returns a fallback map. Verify
-							// the write actually persisted by reading it back;
-							// the summary is keyed (upserted) by task id, so a
-							// present entry proves the durable obligation.
-							if (!verifyContextMapWrite(directory, closeoutTaskId)) {
+							// the CURRENT change persisted by reading it back
+							// and comparing THIS completion's summary (r15 P2:
+							// an old stale entry must not ack a new completion).
+							if (
+								!verifyContextMapWrite(directory, closeoutTaskId, {
+									implementationSummary: (result.text ?? '').slice(
+										0,
+										500,
+									),
+									releaseProven: taskReleaseStatus === 'completed',
+								})
+							) {
 								return {
 									status: 'retryable_error',
-									reason: `context-map summary for task ${closeoutTaskId} did not persist (read-back found no entry)`,
+									reason: `context-map summary for task ${closeoutTaskId} did not persist (read-back mismatch)`,
 								};
 							}
 							return { status: 'persisted' };
