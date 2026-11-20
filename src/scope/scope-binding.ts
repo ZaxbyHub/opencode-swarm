@@ -14,6 +14,17 @@ import {
 export const MAX_PENDING_SCOPE_BINDINGS = 256;
 export const DEFAULT_SCOPE_BINDING_TTL_MS = 60 * 60 * 1000;
 export const MAX_SCOPE_BINDING_TOMBSTONES = 256;
+/**
+ * Hard cap on how long a binding may occupy the in-memory admission map,
+ * regardless of lease renewal. refreshScopeBindingLease extends expiresAt on
+ * every successful in-scope write (issue #3889); without a hard age cap a
+ * long-lived plugin process accumulates renewed entries until
+ * MAX_PENDING_SCOPE_BINDINGS is reached and every admission fails with
+ * SCOPE_BINDING_STORE_OVERLOADED. A binding older than this cap cannot
+ * correlate to a live dispatch anyway (lane-liveness watchdog is 30 min;
+ * the nominal TTL is 1 h), so evicting it changes no live behaviour.
+ */
+export const MAX_SCOPE_BINDING_AGE_MS = 24 * 60 * 60 * 1000;
 
 export type ScopeBindingLifecycleState =
 	| 'live'
@@ -190,7 +201,10 @@ export function createScopeBinding(input: {
 
 function sweepExpired(now = Date.now()): void {
 	for (const [key, binding] of pendingScopeBindings) {
-		if (binding.expiresAt <= now) {
+		if (
+			binding.expiresAt <= now ||
+			now - binding.declaredAt > MAX_SCOPE_BINDING_AGE_MS
+		) {
 			pendingScopeBindings.delete(key);
 			const expired: ScopeBinding = {
 				...binding,
