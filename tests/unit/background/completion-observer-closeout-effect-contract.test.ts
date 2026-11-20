@@ -177,9 +177,10 @@ describe('background completion observer — closeout effect contract (r14 P0-2)
 		);
 		const record = findByCorrelationId(directory, 'ses_p2_ctxmap_fail');
 		expect(record?.closeout?.steps.context_map?.state).toBe('completed');
+		// r14 (P1-5): child-level success — non-final until the task release.
 		expect(
 			loadContextMap(directory)?.task_history['1.2']?.final_status,
-		).toBe('approved');
+		).toBe('pending');
 	});
 
 	test('a failed journal initialization defers every journal-gated effect — no unjournaled side effects', async () => {
@@ -227,9 +228,10 @@ describe('background completion observer — closeout effect contract (r14 P0-2)
 		);
 		expect(record?.closeout?.steps.context_map?.state).toBe('completed');
 		expect(record?.closeout?.steps.parent_advisory?.state).toBe('completed');
+		// r14 (P1-5): child-level success — non-final until the task release.
 		expect(
 			loadContextMap(directory)?.task_history['1.3']?.final_status,
-		).toBe('approved');
+		).toBe('pending');
 		expect(record?.advisoryInbox?.state).toBe('pending');
 	});
 
@@ -256,9 +258,10 @@ describe('background completion observer — closeout effect contract (r14 P0-2)
 		);
 		// The business obligations DID land (idempotent effects).
 		expect(afterFailure?.advisoryInbox?.state).toBe('pending');
+		// r14 (P1-5): child-level success — non-final until the task release.
 		expect(
 			loadContextMap(directory)?.task_history['1.4']?.final_status,
-		).toBe('approved');
+		).toBe('pending');
 
 		// Restart: steps are re-driven idempotently — one advisory slot, one
 		// task-history entry — and now acked.
@@ -342,9 +345,10 @@ describe('background completion observer — closeout effect contract (r14 P0-2)
 		expect(record?.advisoryInbox?.eventId).toBe(
 			afterCrash?.advisoryInbox?.eventId,
 		);
+		// r14 (P1-5): child-level success — non-final until the task release.
 		expect(
 			loadContextMap(directory)?.task_history['1.5']?.final_status,
-		).toBe('approved');
+		).toBe('pending');
 	});
 
 	test('a rejected telemetry sink does not wedge the observer — delegation_end is documented best-effort', async () => {

@@ -255,8 +255,10 @@ describe('async lifecycle integration matrix (r11-r13)', () => {
 		expect(record?.status).toBe('consumed');
 		expect(record?.terminalResult?.status).toBe('completed');
 		expect(ends.count()).toBe(1);
+		// r14 (P1-5): the child-level success writes the NON-FINAL summary —
+		// 'approved' only after the authoritative task release.
 		expect(loadContextMap(directory)?.task_history['1.1']?.final_status).toBe(
-			'approved',
+			'pending',
 		);
 		const session = swarmState.agentSessions.get(PARENT);
 		const completions =
@@ -431,8 +433,10 @@ describe('async lifecycle integration matrix (r11-r13)', () => {
 		const record = findByCorrelationId(directory, 'ses_m_restart');
 		expect(record?.status).toBe('consumed');
 		expect(record?.terminalResult?.status).toBe('completed');
+		// r14 (P1-5): the child-level success writes the NON-FINAL summary —
+		// 'approved' only after the authoritative task release.
 		expect(loadContextMap(directory)?.task_history['1.1']?.final_status).toBe(
-			'approved',
+			'pending',
 		);
 	});
 

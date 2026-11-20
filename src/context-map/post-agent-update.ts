@@ -102,7 +102,19 @@ export interface PostAgentUpdateParams {
 	/** Task goal description */
 	task_goal: string;
 	/** Final status of the task */
-	final_status: 'completed' | 'failed' | 'blocked' | 'cancelled';
+	/**
+	 * The release status of the WHOLE TASK, not the individual child:
+	 *
+	 * - `'completed'` — ONLY when the authoritative task release is proven
+	 *   (plan task status completed AND every required QA gate satisfied).
+	 *   Maps to the final `'approved'` context-map status.
+	 * - `'in_progress'` — r14 audit repair (P1-5): a single successful child
+	 *   or gate ingestion is NOT a full task release. Maps to the non-final
+	 *   `'pending'` context-map status; the authoritative promotion happens
+	 *   later (update_task_status / promoteContextMapTaskRelease).
+	 * - `'failed' | 'blocked' | 'cancelled'` — terminal negative outcomes.
+	 */
+	final_status: 'completed' | 'in_progress' | 'failed' | 'blocked' | 'cancelled';
 	/** Reviewer rejection reasons (if any) */
 	rejection_reasons?: string[];
 	/** Review findings (if any) */
@@ -264,6 +276,10 @@ function deriveFinalStatus(
 	switch (params.final_status) {
 		case 'completed':
 			return 'approved';
+		// r14 audit repair (P1-5): a child/gate-level success while the task
+		// is not yet authoritatively released — the NON-FINAL status.
+		case 'in_progress':
+			return 'pending';
 		case 'failed':
 			return 'rejected';
 		case 'blocked':
@@ -671,7 +687,19 @@ export function updateContextMapAfterAgent(
 					: deriveFinalStatus(params),
 		};
 
-		map = _internals.appendTaskHistory(map, taskSummary);
+		// r14 audit repair (P1-5): a NON-FINAL child-level update must never
+		// overwrite a terminal task verdict in the context map — a later
+		// positive reviewer completion (status 'pending') cannot erase an
+		// already-recorded negative test-engineer verdict ('rejected'), an
+		// authoritative release ('approved'), or a blocked task.
+		const existingSummary = map.task_history[params.task_id];
+		const wouldOverwriteTerminal =
+			existingSummary !== undefined &&
+			existingSummary.final_status !== 'pending' &&
+			taskSummary.final_status === 'pending';
+		if (!wouldOverwriteTerminal) {
+			map = _internals.appendTaskHistory(map, taskSummary);
+		}
 
 		// 4. Append decisions (idempotent: exact-text duplicates are skipped so
 		// re-syncing `.swarm/context.md` on every task completion does not
@@ -738,5 +766,83 @@ export function updateContextMapAfterAgent(
 		} catch {
 			return _internals.createEmptyContextMap();
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Task-release verification and authoritative promotion (r14 audit P1-5)
+// ---------------------------------------------------------------------------
+
+/**
+ * Whether the WHOLE TASK is authoritatively released: the plan's task status
+ * is `completed` AND every required QA gate has a recorded (satisfied) result.
+ * A single successful child or gate ingestion proves nothing about the task
+ * release — that is exactly the conflation this repair removes.
+ *
+ * Fail-closed: any read error or missing proof yields `'in_progress'`.
+ */
+export async function resolveContextMapTaskReleaseStatus(
+	directory: string,
+	taskId: string,
+): Promise<'completed' | 'in_progress'> {
+	try {
+		const { readTaskEvidence } = await import('../gate-evidence.js');
+		const evidence = await readTaskEvidence(directory, taskId);
+		const required = evidence?.required_gates ?? [];
+		const gates = evidence?.gates ?? {};
+		if (!required.every((gate) => gates[gate] !== undefined)) {
+			return 'in_progress';
+		}
+		const { loadPlanJsonOnly } = await import('../plan/manager.js');
+		const plan = await loadPlanJsonOnly(directory);
+		const task = plan?.phases
+			.flatMap((phase) => phase.tasks)
+			.find((t) => t.id === taskId);
+		return task?.status === 'completed' ? 'completed' : 'in_progress';
+	} catch {
+		return 'in_progress';
+	}
+}
+
+/**
+ * r14 audit repair (P1-5): the AUTHORITATIVE task-release promotion. The
+ * background completion observer (and the sync Task handoff) deliberately
+ * write only the non-final `'pending'` summary until the task is released;
+ * this function runs at the authoritative release point
+ * (update_task_status with status `completed`) and promotes the summary to
+ * `'approved'`.
+ *
+ * Never overwrites a terminal `'rejected'` entry (a positive verdict cannot
+ * erase an already-recorded negative one); idempotent; creates a minimal
+ * summary when no child ever recorded one.
+ */
+export function promoteContextMapTaskRelease(
+	directory: string,
+	taskId: string,
+): void {
+	try {
+		const map =
+			_internals.loadContextMap(directory) ??
+			_internals.createEmptyContextMap();
+		const existing = map.task_history[taskId];
+		if (existing?.final_status === 'approved') return; // idempotent
+		if (existing?.final_status === 'rejected') {
+			// A terminal negative verdict is never overwritten by the release
+			// promotion — the negative result stays durably diagnosable.
+			return;
+		}
+		const summary: TaskContextSummary = existing
+			? { ...existing, final_status: 'approved' }
+			: {
+					task_id: taskId,
+					goal: '',
+					files_touched: [],
+					implementation_summary: '',
+					final_status: 'approved',
+				};
+		const next = _internals.appendTaskHistory(map, summary);
+		_internals.saveContextMap(next, directory);
+	} catch {
+		// The promotion must never block the authoritative status update.
 	}
 }

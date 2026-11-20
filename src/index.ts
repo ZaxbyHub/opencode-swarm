@@ -94,6 +94,7 @@ import { createRoleFilterSystemHook } from './context/role-filter.js';
 import {
 	extractContextDecisionsFromContextMd,
 	updateContextMapAfterAgent,
+	resolveContextMapTaskReleaseStatus,
 } from './context-map/post-agent-update.js';
 import {
 	closeDashboardServerForRootIfOwner,
@@ -5644,6 +5645,15 @@ async function initializeOpenCodeSwarm(
 						if (contextMapTaskId) {
 							const agentOutput =
 								typeof output.output === 'string' ? output.output : '';
+							// r14 audit repair (P1-5): a child completion is not a task
+							// release. The sync handoff writes the same NON-FINAL status
+							// as the async observer until the authoritative release
+							// (update_task_status) promotes the summary.
+							const syncReleaseStatus =
+								await resolveContextMapTaskReleaseStatus(
+									bootstrapRoot,
+									contextMapTaskId,
+								);
 							updateContextMapAfterAgent({
 								task_id: contextMapTaskId,
 								agent_role:
@@ -5651,7 +5661,7 @@ async function initializeOpenCodeSwarm(
 								files_touched: [],
 								implementation_summary: agentOutput.slice(0, 500),
 								task_goal: '',
-								final_status: 'completed',
+								final_status: syncReleaseStatus,
 								decisions: extractContextDecisionsFromContextMd(bootstrapRoot, {
 									agent_role:
 										resolveSessionChatAgent(input.sessionID) ??

@@ -1735,7 +1735,20 @@ export function createBackgroundCompletionObserver(opts: {
 							const {
 								extractContextDecisionsFromContextMd,
 								updateContextMapAfterAgent,
+								resolveContextMapTaskReleaseStatus,
 							} = await resolveContextMapModule();
+							// r14 audit repair (P1-5): a single successful child
+							// ingestion is NOT a full task release. The summary only
+							// maps to 'approved' when the AUTHORITATIVE task status
+							// and every required QA gate prove the release; until
+							// then the entry stays non-final ('pending') and the
+							// authoritative promotion happens at update_task_status
+							// (promoteContextMapTaskRelease).
+							const taskReleaseStatus =
+								await resolveContextMapTaskReleaseStatus(
+									directory,
+									closeoutTaskId,
+								);
 							updateContextMapAfterAgent({
 								task_id: closeoutTaskId,
 								agent_role: record.normalizedAgent,
@@ -1746,8 +1759,10 @@ export function createBackgroundCompletionObserver(opts: {
 									record.taskChangeContext?.declaredFiles ?? [],
 								implementation_summary: (result.text ?? '').slice(0, 500),
 								task_goal: '',
-								// Only reached on verified business success.
-								final_status: 'completed',
+								// Only the PROVEN whole-task release maps to 'completed';
+								// a child-level success is 'in_progress' (the non-final
+								// 'pending' context-map status).
+								final_status: taskReleaseStatus,
 								decisions: extractContextDecisionsFromContextMd(directory, {
 									agent_role: record.normalizedAgent,
 								}),

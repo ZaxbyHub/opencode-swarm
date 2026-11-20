@@ -370,7 +370,7 @@ describe('background completion observer — negative stage-b outcomes survive r
 		);
 	});
 
-	test('an accepted outcome still writes the approved context-map summary across replay', async () => {
+	test('an accepted outcome still writes the context-map summary across replay (non-final until the task release)', async () => {
 		await seedReviewer(directory, '1.6', 'call-r14-accepted', 'ses_r14_ok');
 		const body =
 			'<task_result>[REVIEWED] | 1.6 | APPROVED | no issues</task_result>';
@@ -398,7 +398,10 @@ describe('background completion observer — negative stage-b outcomes survive r
 
 		const summary = loadContextMap(directory)?.task_history['1.6'];
 		expect(summary).toBeDefined();
-		expect(summary?.final_status).toBe('approved');
+		// r14 (P1-5): a lone accepted reviewer is a child-level success — the
+		// summary is written but stays NON-FINAL ('pending') until the
+		// authoritative task release (update_task_status).
+		expect(summary?.final_status).toBe('pending');
 		const record = findByCorrelationId(directory, 'ses_r14_ok');
 		expect(record?.closeout?.steps.context_map?.state).toBe('completed');
 	});
@@ -478,7 +481,9 @@ describe('background completion observer — negative stage-b outcomes survive r
 
 		const history = loadContextMap(directory)?.task_history ?? {};
 		expect(history['1.8']).toBeUndefined(); // rejected stays rejected
-		expect(history['1.9']?.final_status).toBe('approved'); // approved stays approved
+		// r14 (P1-5): the accepted record's summary exists but is NON-FINAL
+		// ('pending') — a lone reviewer approval is not a task release.
+		expect(history['1.9']?.final_status).toBe('pending'); // accepted stays accepted (non-final)
 		expect(
 			findByCorrelationId(directory, 'ses_r14_neg')?.ingestion?.outcome,
 		).toBe('rejected');

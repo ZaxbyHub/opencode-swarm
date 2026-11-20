@@ -353,7 +353,11 @@ describe('background completion observer — durable closeout recovery (r13 P0-3
 			const map = loadContextMap(directory);
 			const summary = map?.task_history['1.1'];
 			expect(summary).toBeDefined();
-			expect(summary?.final_status).toBe('approved');
+			// r14 (P1-5): the recovered summary is the child-level success —
+			// NON-FINAL ('pending') until the authoritative task release; the
+			// old 'approved' expectation was exactly the conflation this repair
+			// removes (a reviewer approval alone is not a task release).
+			expect(summary?.final_status).toBe('pending');
 			// No double telemetry across the restart.
 			expect(capture.count()).toBe(1);
 			// The terminal advisory exists exactly once (single eventId slot).
