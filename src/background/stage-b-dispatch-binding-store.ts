@@ -32,6 +32,7 @@ import {
 	fstatSync,
 	openSync,
 	readdirSync,
+	readFileSync,
 	readSync,
 	rmdirSync,
 	rmSync,
@@ -59,6 +60,30 @@ export const STAGE_B_BINDING_SWEEP_INTERVAL_MS = 60_000;
 export const MAX_STAGE_B_SWEEP_THROTTLE_ROOTS = 32;
 
 const lastSweepCompletedAtByRoot = new Map<string, number>();
+
+/**
+ * r14 audit repair (P1-8): per-session-dir monotonic write-order counter
+ * backing the persisted `seq`. FIFO-bounded per AGENTS.md invariant 8
+ * (realistic processes see a handful of active session dirs).
+ */
+const MAX_SEQ_TRACKED_SESSION_DIRS = 512;
+const lastSeqBySessionDir = new Map<string, number>();
+
+function allocateSeq(sessionDir: string): number {
+	const last = lastSeqBySessionDir.get(sessionDir) ?? 0;
+	// The wall-clock floor keeps the counter monotonic across restarts; the
+	// increment keeps it strictly increasing within bursts (where Date.now()
+	// is constant and file mtimes collide).
+	const next = Math.max(last + 1, Date.now());
+	lastSeqBySessionDir.delete(sessionDir);
+	lastSeqBySessionDir.set(sessionDir, next);
+	while (lastSeqBySessionDir.size > MAX_SEQ_TRACKED_SESSION_DIRS) {
+		const oldest = lastSeqBySessionDir.keys().next().value;
+		if (oldest === undefined) break;
+		lastSeqBySessionDir.delete(oldest);
+	}
+	return next;
+}
 
 function rememberSweepCompletedAt(storeRoot: string, now: number): void {
 	// delete-then-set refreshes recency (Map insertion order = FIFO order).
@@ -106,6 +131,19 @@ interface PersistedStageBBindings {
 	sessionID: string;
 	callID: string;
 	recordedAt: number;
+	/**
+	 * r14 audit repair (P1-8, baseline defect): monotonically increasing
+	 * write-order key. File mtimes are UNRELIABLE as an LRU signal — on
+	 * coarse-granularity filesystems (tmpfs and others) a burst of writes
+	 * lands within one timestamp tick, all files share an mtime, and the
+	 * cap eviction's mtime sort degenerates to readdir order (which on tmpfs
+	 * is typically reverse creation order — evicting the NEWEST record, even
+	 * the just-written one). `seq` is allocated per session dir as
+	 * max(lastSeq + 1, Date.now()) — strictly increasing within a process
+	 * (bursts included) and monotonic across restarts (the wall-clock floor).
+	 * Optional on read for legacy records; such records sort oldest.
+	 */
+	seq?: number;
 	bindings: StageBDispatchBinding[];
 }
 
@@ -198,24 +236,29 @@ export function recordStageBDispatchBindings(
 	);
 	if (bindings.length === 0) return false;
 	const nowMs = options.nowMs ?? Date.now;
+	const target = recordPath(directory, sessionID, callID);
 	const record: PersistedStageBBindings = {
 		schemaVersion: STAGE_B_BINDING_SCHEMA_VERSION,
 		sessionID,
 		callID,
 		recordedAt: nowMs(),
+		// r14 (P1-8): true write-order key — mtime bursts collide on coarse
+		// filesystems; seq keeps the cap eviction's LRU correct.
+		seq: allocateSeq(path.dirname(target)),
 		bindings: bindings.map((b) => ({
 			taskId: b.taskId,
 			generation: b.generation,
 		})),
 	};
 	try {
-		const target = recordPath(directory, sessionID, callID);
 		atomicWriteSwarmFileSync(target, JSON.stringify(record));
 		// Per-dispatch cost stays bounded (review finding 3): only the OWNING
 		// session's directory is stat'd/pruned on every write; the
 		// cross-session sweep is throttled to at most one pass per sweep
 		// interval. Both are injectable via nowMs for deterministic tests.
-		pruneSessionDir(directory, sessionID, nowMs());
+		// r14 (P1-8): the just-written record is PROTECTED from cap eviction —
+		// with colliding mtimes the old sort could evict it immediately.
+		pruneSessionDir(directory, sessionID, nowMs(), { protectPath: target });
 		// Final-critic round-1 finding 2: the session-dir cap must be
 		// enforced on EVERY write — the 60 s sweep throttle alone let new
 		// session dirs accumulate unbounded between sweeps. One cheap
@@ -404,6 +447,7 @@ export function pruneSessionDir(
 	directory: string,
 	sessionID: string,
 	nowMs: number,
+	options: { protectPath?: string } = {},
 ): { dirPath: string; newest: number } | null {
 	let dirPath: string;
 	try {
@@ -411,20 +455,43 @@ export function pruneSessionDir(
 	} catch {
 		return null;
 	}
-	return pruneDirEntries(dirPath, nowMs);
+	return pruneDirEntries(dirPath, nowMs, options);
+}
+
+/**
+ * r14 audit repair (P1-8): best-effort read of a record's persisted
+ * write-order `seq` for the cap-eviction sort. Any anomaly (missing,
+ * unparsable, no seq — legacy records) yields undefined; such records sort
+ * oldest, never newest. Never throws.
+ */
+function readRecordSeq(filePath: string): number | undefined {
+	try {
+		const stats = statSync(filePath);
+		if (!stats.isFile() || stats.size > STAGE_B_BINDING_MAX_BYTES) {
+			return undefined;
+		}
+		const parsed = JSON.parse(
+			readFileSync(filePath, 'utf-8'),
+		) as PersistedStageBBindings;
+		return typeof parsed.seq === 'number' && Number.isFinite(parsed.seq)
+			? parsed.seq
+			: undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 function pruneDirEntries(
 	dirPath: string,
 	nowMs: number,
+	options: { protectPath?: string } = {},
 ): { dirPath: string; newest: number } | null {
 	let entries: string[];
 	try {
 		entries = readdirSync(dirPath);
 	} catch {
 		return null;
-	}
-	// Atomic-write temp files (target + suffix, always carrying `.tmp`) are
+	}	// Atomic-write temp files (target + suffix, always carrying `.tmp`) are
 	// crash leftovers: TTL-prune them so they cannot accumulate outside every
 	// bound, but NEVER while fresh — a fresh temp is an in-flight write and the
 	// dir must be left alone for it.
@@ -462,8 +529,28 @@ function pruneDirEntries(
 		}
 	}
 	if (fresh.length > MAX_STAGE_B_BINDING_FILES_PER_SESSION_DIR) {
-		const ordered = fresh.sort((a, b) => a.mtime - b.mtime);
-		for (const old of ordered.slice(
+		// r14 audit repair (P1-8): order by the records' persisted write-order
+		// `seq` (read from the payloads — bounded: at most cap+1 tiny reads,
+		// only when the cap is actually exceeded), tie-broken by mtime and
+		// then by path for full determinism. Legacy records without a seq
+		// sort oldest. The just-written record (protectPath) is never evicted
+		// by the cap — on coarse-mtime filesystems the pre-fix sort could
+		// evict it the moment it landed.
+		const stampedWithSeq = fresh.map((entry) => ({
+			...entry,
+			seq: readRecordSeq(entry.file),
+		}));
+		const ordered = stampedWithSeq.sort((a, b) => {
+			const seqA = a.seq ?? Number.NEGATIVE_INFINITY;
+			const seqB = b.seq ?? Number.NEGATIVE_INFINITY;
+			if (seqA !== seqB) return seqA - seqB;
+			if (a.mtime !== b.mtime) return a.mtime - b.mtime;
+			return a.file < b.file ? -1 : a.file > b.file ? 1 : 0;
+		});
+		const evictable = ordered.filter(
+			(entry) => entry.file !== options.protectPath,
+		);
+		for (const old of evictable.slice(
 			0,
 			fresh.length - MAX_STAGE_B_BINDING_FILES_PER_SESSION_DIR,
 		)) {
