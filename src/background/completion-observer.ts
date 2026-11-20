@@ -110,6 +110,66 @@ function resolveCriticApprovalModule(): Promise<
 	return modulePromise;
 }
 
+// r12: the terminal-closeout collaborators (delegation-lifecycle telemetry,
+// sounding-board policy, context map) are resolved lazily and memoized once —
+// the same shape as resolveCriticApprovalModule above. Keeps their module
+// graphs off the observer's load path for non-matching completions, and a
+// rejected import never poisons the memo.
+let delegationLifecycleModulePromise: Promise<
+	typeof import('./delegation-lifecycle.js')
+> | null = null;
+function resolveDelegationLifecycleModule(): Promise<
+	typeof import('./delegation-lifecycle.js')
+> {
+	let modulePromise = delegationLifecycleModulePromise;
+	if (modulePromise === null) {
+		modulePromise = import('./delegation-lifecycle.js').catch(
+			(err: unknown) => {
+				delegationLifecycleModulePromise = null;
+				throw err;
+			},
+		);
+		delegationLifecycleModulePromise = modulePromise;
+	}
+	return modulePromise;
+}
+let soundingBoardPolicyModulePromise: Promise<
+	typeof import('../agents/sounding-board-policy.js')
+> | null = null;
+function resolveSoundingBoardPolicyModule(): Promise<
+	typeof import('../agents/sounding-board-policy.js')
+> {
+	let modulePromise = soundingBoardPolicyModulePromise;
+	if (modulePromise === null) {
+		modulePromise = import('../agents/sounding-board-policy.js').catch(
+			(err: unknown) => {
+				soundingBoardPolicyModulePromise = null;
+				throw err;
+			},
+		);
+		soundingBoardPolicyModulePromise = modulePromise;
+	}
+	return modulePromise;
+}
+let contextMapModulePromise: Promise<
+	typeof import('../context-map/post-agent-update.js')
+> | null = null;
+function resolveContextMapModule(): Promise<
+	typeof import('../context-map/post-agent-update.js')
+> {
+	let modulePromise = contextMapModulePromise;
+	if (modulePromise === null) {
+		modulePromise = import('../context-map/post-agent-update.js').catch(
+			(err: unknown) => {
+				contextMapModulePromise = null;
+				throw err;
+			},
+		);
+		contextMapModulePromise = modulePromise;
+	}
+	return modulePromise;
+}
+
 interface ObserverConfig {
 	enabled: boolean;
 }
@@ -183,6 +243,13 @@ export function createBackgroundCompletionObserver(opts: {
 	// Accepted from caller for API compatibility; reviewer receipt validation
 	// is handled internally by the completion observer when enabled.
 	reviewerReceiptOptions?: Record<string, unknown>;
+	/**
+	 * r12 (async lifecycle F2): context-map post-agent update configuration.
+	 * Mirrors the sync Task handoff's config.context_map.enabled gate so the
+	 * async completion writes the SAME context-map summary the sync transport
+	 * writes — never more often.
+	 */
+	contextMap?: { enabled: boolean };
 }): {
 	event: (input: { event: unknown }) => Promise<void>;
 	reconcilePending: (record: BackgroundDelegationRecord) => Promise<boolean>;
@@ -233,6 +300,15 @@ export function createBackgroundCompletionObserver(opts: {
 			let record: BackgroundDelegationRecord;
 			let text: string;
 			let isDuplicate = false;
+			// r12: TRUE only when THIS invocation established the immutable
+			// terminal event (claim disposition 'claimed'). `isDuplicate` covers
+			// only the strict 'duplicate' disposition — a record in
+			// ingestion_error replies 'retry_ingestion' and a replayed
+			// trustedTerminal is pre-marked duplicate, so `!isDuplicate` is NOT
+			// an exactly-once gate. Exactly-once-at-emit closeout side effects
+			// (delegation_end telemetry, context map, sounding-board/pipeline
+			// advisories) key on THIS flag instead.
+			let isFreshTerminalClaim = false;
 			if (input.trustedTerminal) {
 				pending = input.trustedTerminal.record;
 				result = input.trustedTerminal.result;
@@ -353,6 +429,7 @@ export function createBackgroundCompletionObserver(opts: {
 					return;
 				}
 				isDuplicate = terminalClaim.disposition === 'duplicate';
+				isFreshTerminalClaim = terminalClaim.disposition === 'claimed';
 				record = terminalClaim.record;
 			}
 			opts.onTerminalClaimed?.(record);
@@ -390,6 +467,24 @@ export function createBackgroundCompletionObserver(opts: {
 					record.parentSessionId,
 					record.callID,
 				);
+				// r12 (F4): close the delegation_begin/delegation_end pair for a
+				// FAILED/CANCELLED native-async Task terminal — exactly-once on the
+				// FRESH claim that established the terminal event. Lane records are
+				// excluded: their terminals settle through
+				// settleDelegationTerminal, which already emits the pairing end.
+				if (isFreshTerminalClaim && record.batchId === undefined) {
+					try {
+						const { emitTaskDelegationTerminalEnd } =
+							await resolveDelegationLifecycleModule();
+						emitTaskDelegationTerminalEnd(record, terminal.status);
+					} catch (error) {
+						logger.warn(
+							`[background] delegation_end emission failed for ${record.correlationId}: ${
+								error instanceof Error ? error.message : String(error)
+							}`,
+						);
+					}
+				}
 				if (isDuplicate && record.normalizedAgent !== 'coder') {
 					// Non-coder failure cleanup has no durable sub-transition to resume.
 					return;
@@ -547,6 +642,159 @@ export function createBackgroundCompletionObserver(opts: {
 				} catch (error) {
 					logger.warn(
 						`[background] plan critic approval processing failed for call ${record.callID}: ${
+							error instanceof Error ? error.message : String(error)
+						}`,
+					);
+				}
+			}
+			// r12 (async lifecycle F2/F3/F4): the shared BUSINESS closeout for a
+			// verified native-async completion — the terminal-record twin of the
+			// synchronous Task handoff in src/index.ts. Everything here keys on the
+			// durable record identity (parent/child/call/role/terminal event) that
+			// was verified and claimed above. Exactly-once side effects (context map,
+			// sounding-board verdict advisory, pipeline advisory, delegation_end
+			// telemetry) run only on a FRESH claim; the ledger-idempotent knowledge
+			// receipt reconciliation runs on replays too (crash recovery), with the
+			// replay flag suppressing the audit-only observation. Coder settlement,
+			// worktree merge-back, and Stage-B ingestion are NOT here — they stay
+			// claim-guarded above/below and must never run twice.
+			// LANE records (dispatch_lanes) are excluded: their terminals are
+			// settled through settleDelegationTerminal, which already emits the
+			// pairing delegation_end and reconciles knowledge receipts — a second
+			// emission here would double-book the pair.
+			if (isFreshTerminalClaim && record.batchId === undefined) {
+				// F4: delegation_end pairing observation (cost axes unknown-honest;
+				// the r8 usage bridge stays the usage authority — no double billing).
+				try {
+					const { emitTaskDelegationTerminalEnd } =
+						await resolveDelegationLifecycleModule();
+					emitTaskDelegationTerminalEnd(record, terminal.status);
+				} catch (error) {
+					logger.warn(
+						`[background] delegation_end emission failed for ${record.correlationId}: ${
+							error instanceof Error ? error.message : String(error)
+						}`,
+					);
+				}
+				// F2: context-map post-agent update — the same summary the sync
+				// handoff writes, gated on the same feature flag, only on a real
+				// (verified) success. Errors/cancellations never appear as completed.
+				if (opts.contextMap?.enabled === true) {
+					const closeoutTaskId = record.evidenceTaskId ?? record.planTaskId;
+					if (closeoutTaskId) {
+						try {
+							const {
+								extractContextDecisionsFromContextMd,
+								updateContextMapAfterAgent,
+							} = await resolveContextMapModule();
+							updateContextMapAfterAgent({
+								task_id: closeoutTaskId,
+								agent_role: record.normalizedAgent,
+								files_touched: [],
+								implementation_summary: (result.text ?? '').slice(0, 500),
+								task_goal: '',
+								final_status: 'completed',
+								decisions: extractContextDecisionsFromContextMd(directory, {
+									agent_role: record.normalizedAgent,
+								}),
+								directory,
+							});
+						} catch (error) {
+							// Post-agent update must never block the closeout chain
+							logger.warn(
+								`[background] context-map closeout failed for ${record.correlationId}: ${
+									error instanceof Error ? error.message : String(error)
+								}`,
+							);
+						}
+					}
+				}
+				// F3: sounding-board verdict — reuse the EXACT policy the sync handoff
+				// applies (src/agents/sounding-board-policy.ts). Unparseable output is
+				// treated conservatively (treat-as-REPHRASE warning), never approval.
+				if (record.normalizedAgent === 'critic_sounding_board') {
+					try {
+						const { applySoundingBoardResponsePolicy } =
+							await resolveSoundingBoardPolicyModule();
+						const rawResponse = result.text ?? '';
+						const session = swarmState.agentSessions.get(
+							record.parentSessionId,
+						);
+						if (session) {
+							const parsed = applySoundingBoardResponsePolicy(rawResponse);
+							if (parsed) {
+								let verdictMsg = `[SOUNDING_BOARD] Verdict: ${parsed.verdict}. ${parsed.reasoning}`;
+								if (parsed.category)
+									verdictMsg += ` Category: ${parsed.category}`;
+								if (parsed.improvedQuestion)
+									verdictMsg += ` Rephrase to: ${parsed.improvedQuestion}`;
+								if (parsed.answer) verdictMsg += ` Answer: ${parsed.answer}`;
+								if (parsed.warning) verdictMsg += ` WARNING: ${parsed.warning}`;
+								pushAdvisory(session, verdictMsg);
+								session.lastDelegationReason = 'critic_consultation';
+							} else {
+								pushAdvisory(
+									session,
+									`[SOUNDING_BOARD] WARNING: Could not parse a structured verdict from ` +
+										`critic_sounding_board response (${rawResponse.length} chars). ` +
+										`Treat as REPHRASE — review the raw response before surfacing to user or escalating. ` +
+										`Do not silently accept as resolved.`,
+								);
+							}
+						}
+					} catch (error) {
+						logger.warn(
+							`[background] sounding-board verdict closeout failed for ${record.correlationId}: ${
+								error instanceof Error ? error.message : String(error)
+							}`,
+						);
+					}
+				}
+				// F3/F4 parity: pipeline continuation advisory — same roles and message
+				// shape as the sync Task handoff, so the architect resumes the QA gate
+				// pipeline after an async completion too.
+				if (
+					[
+						'reviewer',
+						'test_engineer',
+						'critic',
+						'critic_sounding_board',
+					].includes(record.normalizedAgent)
+				) {
+					const session = swarmState.agentSessions.get(record.parentSessionId);
+					if (session) {
+						pushAdvisory(
+							session,
+							`[PIPELINE] ${record.normalizedAgent} delegation complete for task ${
+								record.evidenceTaskId ?? record.planTaskId ?? 'unknown'
+							}. ` +
+								`Resume the QA gate pipeline — check your task pipeline steps for the next required action. ` +
+								`Do not stop here.`,
+						);
+					}
+				}
+			}
+			// F4: knowledge receipt reconciliation — ledger-idempotent, so it also
+			// runs on duplicate/replay delivery (crash recovery); the replay flag
+			// suppresses the audit-only unacknowledged observation. Lane records
+			// are excluded for the same double-booking reason as above.
+			if (result.text && record.batchId === undefined) {
+				try {
+					const { reconcileDelegationKnowledgeReceipts } =
+						await resolveDelegationLifecycleModule();
+					await reconcileDelegationKnowledgeReceipts(
+						directory,
+						record,
+						result.text,
+						// Replay = anything other than the claim that established
+						// this terminal (strict duplicates AND retry_ingestion
+						// redelivery).
+						!isFreshTerminalClaim,
+					);
+				} catch (error) {
+					// fail-open — reconciliation must never break the settle path
+					logger.warn(
+						`[background] knowledge receipt reconciliation failed for ${record.correlationId}: ${
 							error instanceof Error ? error.message : String(error)
 						}`,
 					);

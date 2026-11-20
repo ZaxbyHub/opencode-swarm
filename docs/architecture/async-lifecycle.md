@@ -83,12 +83,12 @@ resumable, and the terminal claim deduplicates replays.
 | Epic residue commit (non-coder) | after-hook | `commitEpicResidueAfterDelegation` seam | ✅ |
 | Reviewer scope discard | after-hook | `discardScopeForRecord` | ✅ |
 | Parent advisory publication | after-hook | durable advisory inbox | ✅ |
-| **Plan-critic approval snapshot** (`recordPlanCriticApprovalSnapshotIfApplicable`) | after-hook | **MISSING** | **F1** |
-| **Context-map post-agent update** | after-hook (runs even for running placeholders, writing `final_status: 'completed'` at dispatch time) | **MISSING on real completion** | **F2** |
-| **Sounding-board verdict policy** (`applySoundingBoardResponsePolicy` + advisory) | after-hook | **MISSING** | **F3** |
-| **`delegation_end` telemetry + cost identity + execution attempt** | Task handoff (skipped for running placeholders) | **MISSING** (observer claims terminal directly, never emits the pairing end) | **F4** |
-| Pipeline continuation advisory (reviewer/test_engineer/critic) | Task handoff | missing (covered by r12 closeout) | F3/F4 |
-| Knowledge receipt reconciliation (lane parity) | lane collector | Task records bypass `settleDelegationTerminal` (no reconciliation) | F4 |
+| **Plan-critic approval snapshot** (`recordPlanCriticApprovalSnapshotIfApplicable`) | after-hook | shared recorder `src/plan/critic-approval.ts` + dispatch-time binding (`planCriticDispatch`), replay-fenced by call id | ✅ r11 |
+| **Context-map post-agent update** | after-hook (r12: skipped for running placeholders) | observer closeout on fresh claim, feature-gated | ✅ r12 |
+| **Sounding-board verdict policy** (`applySoundingBoardResponsePolicy` + advisory) | after-hook | shared policy module `src/agents/sounding-board-policy.ts` + observer closeout | ✅ r12 |
+| **`delegation_end` telemetry + cost identity + execution attempt** | Task handoff (skipped for running placeholders) | observer closeout via `emitTaskDelegationTerminalEnd` (fresh claim only; lanes stay on `settleDelegationTerminal`) | ✅ r12 |
+| Pipeline continuation advisory (reviewer/test_engineer/critic) | Task handoff | observer closeout (fresh claim only) | ✅ r12 |
+| Knowledge receipt reconciliation (lane parity) | lane collector | `reconcileDelegationKnowledgeReceipts` (ledger-idempotent, replay-safe) | ✅ r12 |
 | Usage/cost accounting | r8 usage bridge + `consumeAssistantUsageForTask` at handoff | bridge accumulates; consumption happens at the placeholder handoff (dispatch time) | F4 (cost) |
 | **Event fan-out isolation** | n/a | one try/catch around the whole fan-out: a throwing `prWorkflowResponseGate.event` prevents the observer from ever seeing the completion | **F5** |
 | Knowledge ACKs / micro-reflection / auto-review | after-hook chain | audited in r13 (F6) | F6 |
@@ -133,10 +133,17 @@ These are the properties every change to this area must preserve:
   classification + plan-structure hash on the delegation record; completion-
   time verification; ledger-level dedup by `call_id`; the existing
   `takeSnapshotEvent` API stays the single write choke point.
-- **r12 (F2/F3/F4):** a shared, typed terminal closeout record so context-map,
-  sounding-board, telemetry and knowledge reconciliation run exactly once on
-  the verified async completion — without duplicating coder settlement,
-  worktree merge-back, or Stage-B (which stay claim-guarded in the observer).
+- **r12 (F2/F3/F4):** the durable `BackgroundDelegationRecord` +
+  `BackgroundTerminalResult` already carry the full typed terminal identity
+  (parent/child/call/role/status/eventId/result/dispatch binding), so no
+  second closeout DTO was introduced. Instead the observer gained a shared
+  business-closeout block keyed on that identity: exactly-once-at-emit effects
+  (context map, sounding-board verdict, pipeline advisory, `delegation_end`)
+  run only on the FRESH terminal claim (`isFreshTerminalClaim` — stricter than
+  `!isDuplicate`, which a `retry_ingestion` redelivery would slip past); the
+  ledger-idempotent knowledge reconciliation runs on every delivery with the
+  replay flag. Lane records are excluded (they settle through
+  `settleDelegationTerminal`), so nothing double-books.
 - **r13 (F5/F6):** fan-out isolation (a failing sibling consumer must not
   starve the durable completion observer, visibly), and a completeness audit
   of every terminal-bound after-hook action.

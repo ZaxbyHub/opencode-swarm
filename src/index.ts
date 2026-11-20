@@ -1,4 +1,3 @@
-import { ingestV2StepUsage, forgetV2StepUsage, clearV2StepUsage } from './host/v2/usage-bridge.js';
 import { createHash } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
@@ -13,11 +12,17 @@ import {
 	getSwarmAgents,
 	resetArchitectPromptBudgetAdvisories,
 } from './agents';
+import { applySoundingBoardResponsePolicy } from './agents/sounding-board-policy.js';
 import {
-	applyAlwaysSurfacePolicy,
-	parseSoundingBoardResponse,
-	type SoundingBoardResponse,
-} from './agents/critic.js';
+	clearV2StepUsage,
+	forgetV2StepUsage,
+	ingestV2StepUsage,
+} from './host/v2/usage-bridge.js';
+// r12 (async lifecycle F3): re-exported for existing consumers (the policy was
+// extracted from this module so the background completion observer applies
+// the EXACT same contract to native-async completions).
+export { applySoundingBoardResponsePolicy };
+
 import {
 	type BackgroundAutomationManager,
 	createAutomationManager,
@@ -417,55 +422,6 @@ export function capSessionMap<K, V>(
 		if (oldest === undefined || oldest === justInserted) break;
 		map.delete(oldest);
 	}
-}
-
-/**
- * Resolve a category from the architect-owned sounding-board dispatch packet.
- * Only the explicit `category` field is caller metadata.  Prompt, description,
- * task, and context are model-controlled/free-text surfaces and must never be
- * scanned for a protocol category (issue #2491 F-004).
- */
-function resolveSoundingBoardCallerCategory(args: unknown): {
-	supplied: boolean;
-	value?: unknown;
-} {
-	if (!args || typeof args !== 'object' || Array.isArray(args)) {
-		return { supplied: false };
-	}
-	const record = args as Record<string, unknown>;
-	if (Object.hasOwn(record, 'category')) {
-		return { supplied: true, value: record.category };
-	}
-	return { supplied: false };
-}
-
-/**
- * Apply the sounding-board response contract at the host handoff boundary.
- * Missing/malformed category metadata may never preserve UNNECESSARY: the
- * response is surfaced as APPROVED with an observable warning. A caller-owned
- * category is passed separately so a model cannot relabel a sticky decision.
- */
-export function applySoundingBoardResponsePolicy(
-	rawResponse: string,
-	args?: unknown,
-): SoundingBoardResponse | null {
-	const callerCategory = resolveSoundingBoardCallerCategory(args);
-	const parsed = parseSoundingBoardResponse(
-		rawResponse,
-		callerCategory.supplied ? { category: callerCategory.value } : undefined,
-	);
-	if (!parsed) return null;
-	const guarded = applyAlwaysSurfacePolicy(parsed);
-	if (guarded.protocolError && guarded.verdict === 'UNNECESSARY') {
-		return {
-			...guarded,
-			verdict: 'APPROVED',
-			warning:
-				guarded.warning ??
-				'Invalid or missing Category metadata; verdict was surfaced as APPROVED.',
-		};
-	}
-	return guarded;
 }
 
 // ---------------------------------------------------------------------------
@@ -2375,6 +2331,12 @@ async function initializeOpenCodeSwarm(
 					?.background_subagents === true,
 		},
 		directory: bootstrapRoot,
+		// r12 (F2): the async completion path writes the SAME context-map
+		// post-agent summary the sync Task handoff writes — gated on the same
+		// feature flag, never more often.
+		contextMap: {
+			enabled: config.context_map?.enabled === true,
+		},
 		reviewerReceiptOptions: {
 			dispatcher: reviewModelDispatcher,
 			config: autoReviewConfig,
@@ -5111,6 +5073,13 @@ async function initializeOpenCodeSwarm(
 				);
 
 			const isTaskTool = isTaskToolId(input.tool);
+			// r12 (async lifecycle F2): a native-async Task dispatch returns a
+			// running placeholder, not a terminal result. Classify it ONCE here,
+			// before the hook chain, so terminal-only side effects (the context-map
+			// post-agent update below and the Task-handoff telemetry) gate on it —
+			// the child has not finished, so nothing may record a final status yet.
+			const taskOutputIsRunningPlaceholder =
+				isTaskTool && outputLooksLikeBackgroundRunning(output);
 			// (#1849) Resolve tool.execute.after args ONCE from the callID snapshot
 			// (the SDK toolAfter input has NO args). Reused by the knowledge ack/
 			// verdict/receipt collectors below so they see the delegation prompt +
@@ -5505,6 +5474,11 @@ async function initializeOpenCodeSwarm(
 				// Context Map: post-agent update after Task tool completes
 				if (
 					isTaskTool &&
+					// r12 (F2): a native-async running placeholder is a dispatch
+					// boundary, not a completion — writing final_status here would
+					// mark the task completed the moment the child STARTS. The real
+					// completion is processed by the background completion observer.
+					!taskOutputIsRunningPlaceholder &&
 					config.context_map?.enabled === true &&
 					input.sessionID
 				) {
@@ -5594,8 +5568,9 @@ async function initializeOpenCodeSwarm(
 			// Hooks must see the original subagent identity to record evidence
 			// correctly. The handoff restores architect identity afterward.
 			if (isTaskTool) {
-				const backgroundResultIsRunning =
-					outputLooksLikeBackgroundRunning(output);
+				// r12: reuse the pre-hook-chain classification (same pure
+				// predicate) instead of recomputing it after the hooks.
+				const backgroundResultIsRunning = taskOutputIsRunningPlaceholder;
 				const sessionId = input.sessionID;
 				// Delegated-agent identity for this whole handoff (model resolution for
 				// cost fields, pipeline advisories, and the delegation_end emit).
