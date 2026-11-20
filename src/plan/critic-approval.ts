@@ -509,11 +509,26 @@ export async function hasPlanCriticApprovalSnapshotForCall(
  * (via takeSnapshotEvent's preCommitCheck) so a concurrent writer can never
  * interleave a check-then-write cycle; the recorder maps each code to a
  * distinct typed outcome.
+ *
+ * r15 audit repair (P4): `plan_unreadable` is DISTINCT from `conflict` — a
+ * null/unreadable plan.json at the fence (e.g. a concurrent save_plan's
+ * atomic tmp→rename swap) is an unclear storage state, NOT a proven plan
+ * change. It fails closed (nothing is written) but stays retryable so
+ * recovery re-drives the recorder instead of durably destroying a valid
+ * APPROVED verdict.
  */
 class PlanCriticApprovalFenceError extends Error {
-	readonly code: 'already_recorded' | 'conflict' | 'ledger_unreadable';
+	readonly code:
+		| 'already_recorded'
+		| 'conflict'
+		| 'ledger_unreadable'
+		| 'plan_unreadable';
 	constructor(
-		code: 'already_recorded' | 'conflict' | 'ledger_unreadable',
+		code:
+			| 'already_recorded'
+			| 'conflict'
+			| 'ledger_unreadable'
+			| 'plan_unreadable',
 		message: string,
 	) {
 		super(message);
@@ -723,11 +738,16 @@ export async function recordVerifiedPlanCriticApproval(
 					}
 					// (2) plan-structure fence — the plan the verdict covers
 					// must still be the current plan at commit time.
+					// r15 (P4): a null read here is an UNREADABLE plan, not a
+					// proven change — `conflict` is reserved for a provably
+					// different structure/identity. Unreadable fails closed
+					// (this throw aborts the commit) but maps to a retryable
+					// outcome so recovery re-drives the recorder.
 					const planNow = await loadPlanJsonOnly(directory);
 					if (!planNow) {
 						throw new PlanCriticApprovalFenceError(
-							'conflict',
-							'plan.json disappeared before the approval commit',
+							'plan_unreadable',
+							'plan.json unreadable at the approval commit fence (unclear storage state, not a proven plan change); nothing was written — retryable',
 						);
 					}
 					if (computePlanStructureHash(planNow) !== expectedStructureHash) {
@@ -768,6 +788,19 @@ export async function recordVerifiedPlanCriticApproval(
 			return {
 				outcome: 'failed',
 				reasonCode: 'ledger_unreadable',
+				reason: error.message,
+			};
+		}
+		if (
+			error instanceof PlanCriticApprovalFenceError &&
+			error.code === 'plan_unreadable'
+		) {
+			// r15 (P4): retryable — the plan was unreadable at the fence, NOT
+			// provably changed. Fail-closed held (nothing was written); the
+			// step stays pending and recovery re-drives the recorder.
+			return {
+				outcome: 'failed',
+				reasonCode: 'plan_unreadable',
 				reason: error.message,
 			};
 		}
