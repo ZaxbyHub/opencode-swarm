@@ -475,8 +475,14 @@ export const TERMINAL_CLOSEOUT_STEPS = [
 export type TerminalCloseoutStep = (typeof TERMINAL_CLOSEOUT_STEPS)[number];
 
 export interface BackgroundDelegationCloseoutStepState {
-	state: 'pending' | 'completed';
+	state: 'pending' | 'completed' | 'failed';
 	completedAt?: number;
+	/**
+	 * r14 audit repair (P0-2): durable failure reason when
+	 * `state === 'failed'` — a permanent effect failure is terminally visible
+	 * in the journal instead of being silently re-driven forever.
+	 */
+	reason?: string;
 	updatedAt: number;
 }
 
@@ -1248,11 +1254,28 @@ const RecordSchema = z
 					z.enum(TERMINAL_CLOSEOUT_STEPS),
 					z
 						.object({
-							state: z.enum(['pending', 'completed']),
+							state: z.enum(['pending', 'completed', 'failed']),
 							completedAt: z.number().int().nonnegative().optional(),
+							reason: z.string().min(1).max(512).optional(),
 							updatedAt: z.number().int().nonnegative(),
 						})
-						.strict(),
+						.strict()
+						.superRefine((value, context) => {
+							// r14 audit repair (P0-2): a failure reason belongs to a
+							// failed step; a completed step never carries one.
+							if (value.state === 'failed' && value.reason === undefined) {
+								context.addIssue({
+									code: z.ZodIssueCode.custom,
+									message: 'failed closeout step requires a reason',
+								});
+							}
+							if (value.state !== 'failed' && value.reason !== undefined) {
+								context.addIssue({
+									code: z.ZodIssueCode.custom,
+									message: 'closeout step reason is only allowed on a failed step',
+								});
+							}
+						}),
 				),
 				updatedAt: z.number().int().nonnegative(),
 			})
@@ -5356,7 +5379,9 @@ function getTerminalCloseoutReconciler(
 /**
  * Whether the record's terminal closeout still has un-acked steps (or has a
  * trusted terminal but no journal yet — the crash-between-claim-and-initialize
- * shape, and every pre-repair legacy record).
+ * shape, and every pre-repair legacy record). r14 (P0-2): a step durably
+ * marked `failed` is terminally closed — it does not keep the record in the
+ * recovery set.
  */
 export function hasPendingTerminalCloseout(
 	record: BackgroundDelegationRecord,
@@ -5367,7 +5392,7 @@ export function hasPendingTerminalCloseout(
 	const closeout = record.closeout;
 	if (!closeout) return true;
 	if (closeout.terminalEventId !== terminal.eventId) return true;
-	return Object.values(closeout.steps).some((step) => step.state !== 'completed');
+	return Object.values(closeout.steps).some((step) => step.state === 'pending');
 }
 
 /**
@@ -6018,9 +6043,96 @@ export async function markTerminalCloseoutStepCompleted(
 }
 
 /**
+ * r14 audit repair (P0-2): mark one closeout step as PERMANENTLY failed.
+ * Event-fenced CAS under the store lock, mirroring
+ * {@link markTerminalCloseoutStepCompleted}. A failed step is terminally
+ * visible in the journal (with its reason) and is NOT re-driven by recovery —
+ * the durable failure state is the recovery record. Returns false when the
+ * failure state itself could not be persisted (the step then stays pending,
+ * which is the conservative fallback: recovery keeps re-driving it).
+ */
+export async function markTerminalCloseoutStepFailed(
+	directory: string,
+	correlationId: string,
+	terminalEventId: string,
+	step: TerminalCloseoutStep,
+	reason: string,
+): Promise<boolean> {
+	if (!correlationId || !terminalEventId || !reason) return false;
+	const now = Date.now();
+	let ok = false;
+	try {
+		await withEvidenceLock(
+			directory,
+			BACKGROUND_DELEGATIONS_FILE,
+			STORE_LOCK_AGENT,
+			STORE_LOCK_TASK,
+			async () => {
+				const records = loadRecordsForWrite(directory);
+				if (records === null) return;
+				const current = findRecordForWrite(records, correlationId);
+				if (
+					!current?.terminalResult ||
+					current.terminalResult.eventId !== terminalEventId
+				) {
+					return;
+				}
+				const closeout: BackgroundDelegationCloseout =
+					current.closeout && current.closeout.terminalEventId === terminalEventId
+						? current.closeout
+						: {
+								schemaVersion: 1,
+								terminalEventId,
+								steps: {},
+								updatedAt: now,
+							};
+				const existing = closeout.steps[step];
+				if (existing?.state === 'failed') {
+					ok = true;
+					return;
+				}
+				if (existing?.state === 'completed') {
+					// A completed step cannot be retroactively failed.
+					return;
+				}
+				const next: BackgroundDelegationRecord = {
+					...current,
+					schemaVersion: current.schemaVersion === 4 ? 4 : 3,
+					closeout: {
+						...closeout,
+						steps: {
+							...closeout.steps,
+							[step]: {
+								state: 'failed',
+								reason: reason.slice(0, 512),
+								updatedAt: now,
+							},
+						},
+						updatedAt: now,
+					},
+					updatedAt: now,
+				};
+				appendRecord(directory, next);
+				maybeCompactDelegationsLocked(directory);
+				ok = true;
+			},
+		);
+	} catch (err) {
+		logger.warn(
+			`[background] markTerminalCloseoutStepFailed failed: ${
+				err instanceof Error ? err.message : String(err)
+			}`,
+		);
+	}
+	return ok;
+}
+
+/**
  * Pure check: is this closeout step still pending for the exact terminal
- * event? True unless the durable journal acked it (crash-safety: a missing
- * journal, a foreign terminal event, or an unacked step all re-drive).
+ * event? True when the durable journal has not acked it (crash-safety: a
+ * missing journal, a foreign terminal event, or an unacked step all
+ * re-drive). A step marked `failed` (r14 P0-2) is terminally closed — it is
+ * NOT re-driven; its durable failure state is the recovery record.
  */
 export function isTerminalCloseoutStepPending(
 	record: BackgroundDelegationRecord,
@@ -6030,7 +6142,8 @@ export function isTerminalCloseoutStepPending(
 	if (record.batchId !== undefined) return false; // lane records never journal here
 	const closeout = record.closeout;
 	if (!closeout || closeout.terminalEventId !== terminalEventId) return true;
-	return closeout.steps[step]?.state !== 'completed';
+	const state = closeout.steps[step]?.state;
+	return state === undefined || state === 'pending';
 }
 
 /**

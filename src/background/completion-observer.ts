@@ -12,6 +12,10 @@ import { lstat } from 'node:fs/promises';
 import { epicSentinelExists } from '../epic/lifecycle.js';
 import { commitEpicResidueAfterDelegation } from '../epic/residue-commit.js';
 import { completeBackgroundPhaseParticipation } from '../evidence/phase-participation.js';
+// r14 audit repair (P0-2): side-effect-free read-back verifier for the
+// context-map closeout effect (persistence.ts imports node builtins + types
+// only — no cycle, no load cost).
+import { loadContextMap } from '../context-map/persistence.js';
 import { transitionTaskWorkflowEvidence } from '../gate-evidence.js';
 import {
 	abortStandardWorktreeDispatch,
@@ -44,6 +48,7 @@ import { validateSettlementLane } from '../worktree/settlement-source-recovery.j
 import {
 	acknowledgeObservedBackgroundAdvisories,
 	appendDelegationTransition,
+	type BackgroundAdvisoryInboxEntry,
 	type BackgroundDelegationRecord,
 	type BackgroundDelegationResult,
 	type BackgroundTerminalResult,
@@ -64,6 +69,7 @@ import {
 	maintainBackgroundDelegations,
 	markLegacyCoderSettlementTransferPending,
 	markTerminalCloseoutStepCompleted,
+	markTerminalCloseoutStepFailed,
 	preparePendingBackgroundAdvisories,
 	promoteDelegationFallback,
 	putPendingBackgroundAdvisory,
@@ -162,6 +168,23 @@ function resolveSoundingBoardPolicyModule(): Promise<
 let contextMapModulePromise: Promise<
 	typeof import('../context-map/post-agent-update.js')
 > | null = null;
+/**
+ * r14 audit repair (P0-2): static read-back verifier for the context-map
+ * closeout effect — `loadContextMap` is side-effect free (node builtins +
+ * types only), so a static import adds no cycle and lets the effect PROVE the
+ * write persisted instead of trusting `void` (updateContextMapAfterAgent
+ * swallows internal errors and returns a fallback map).
+ */
+function verifyContextMapWrite(
+	directory: string,
+	taskId: string,
+): boolean {
+	try {
+		return loadContextMap(directory)?.task_history[taskId] !== undefined;
+	} catch {
+		return false;
+	}
+}
 function resolveContextMapModule(): Promise<
 	typeof import('../context-map/post-agent-update.js')
 > {
@@ -243,11 +266,53 @@ const observerInternals = {
 /** Test-only dependency seam; production callers should use the observer API. */
 export const _internals = observerInternals;
 
+/**
+ * r14 audit repair (P0-2): the explicit contract of a journal-gated closeout
+ * effect. `void`/no-exception is NOT proof that the business obligation was
+ * fulfilled — an effect must REPORT its durable outcome:
+ *
+ * - `persisted`           — the obligation was durably established now.
+ * - `already_persisted`   — an idempotent effect found the obligation already
+ *                           durably established (same success class).
+ * - `retryable_error`     — the obligation was NOT established; a later
+ *                           recovery pass may re-drive the step (it stays
+ *                           pending in the journal).
+ * - `permanent_failure`   — the obligation can provably never be established
+ *                           (deterministic refusal, not an I/O error). The
+ *                           step is durably marked failed in the journal —
+ *                           the visible recovery record — instead of being
+ *                           silently re-driven forever. Classification
+ *                           requires PROOF of determinism; an unknown null
+ *                           from a store is a retryable_error, never a
+ *                           permanent_failure.
+ *
+ * WEAKER (best-effort) contract: the `delegation_end` telemetry step ACKs the
+ * EMISSION ATTEMPT only — the telemetry sink swallows write failures by
+ * design, so the journal proves the attempt and NOTHING about durable
+ * delivery. No delivery guarantee is claimed for that step.
+ */
+export type CloseoutEffectResult =
+	| { status: 'persisted' }
+	| { status: 'already_persisted' }
+	| { status: 'retryable_error'; reason: string }
+	| { status: 'permanent_failure'; reason: string };
+
 export function createBackgroundCompletionObserver(opts: {
 	config: ObserverConfig;
 	directory: string;
 	onTerminalClaimed?: (record: BackgroundDelegationRecord) => void;
 	recordIngestionResult?: typeof recordDelegationIngestionResult;
+	/**
+	 * r14 audit repair (P0-2): test seams for the journal-gated closeout
+	 * machinery. Each performs the real work by default; tests inject
+	 * controlled failures (null advisory stores, journal write failures) to
+	 * prove the effect contract.
+	 */
+	initializeTerminalCloseoutImpl?: typeof initializeTerminalCloseout;
+	markTerminalCloseoutStepCompletedImpl?: typeof markTerminalCloseoutStepCompleted;
+	markTerminalCloseoutStepFailedImpl?: typeof markTerminalCloseoutStepFailed;
+	putPendingBackgroundAdvisoryImpl?: typeof putPendingBackgroundAdvisory;
+	putTerminalCloseoutAdvisoryImpl?: typeof putTerminalCloseoutAdvisory;
 	// Accepted from caller for API compatibility; reviewer receipt validation
 	// is handled internally by the completion observer when enabled.
 	reviewerReceiptOptions?: Record<string, unknown>;
@@ -319,39 +384,41 @@ export function createBackgroundCompletionObserver(opts: {
 		}
 		return steps;
 	};
+	// r14 audit repair (P0-2): seam-routed store calls so tests can inject
+	// controlled failures (journal write failures, advisory store nulls).
+	const initializeJournal =
+		opts.initializeTerminalCloseoutImpl ?? initializeTerminalCloseout;
+	const markStepCompleted =
+		opts.markTerminalCloseoutStepCompletedImpl ??
+		markTerminalCloseoutStepCompleted;
+	const markStepFailed =
+		opts.markTerminalCloseoutStepFailedImpl ?? markTerminalCloseoutStepFailed;
+	const putAdvisory =
+		opts.putPendingBackgroundAdvisoryImpl ?? putPendingBackgroundAdvisory;
+	const putCloseoutAdvisory =
+		opts.putTerminalCloseoutAdvisoryImpl ?? putTerminalCloseoutAdvisory;
 	/**
-	 * Journal-gated closeout effect: run `effect` only when the durable
-	 * journal has not acked this step for this exact terminal event, and ack
-	 * it only AFTER the effect ran. An effect that throws leaves the step
-	 * pending — the next recovery pass re-drives it (audit P0-3: "ein
-	 * fehlerhafter Schritt bleibt wiederaufnehmbar").
+	 * r14 audit repair (P0-2): ack a closeout step and VERIFY the ack — a
+	 * false return means the durable journal write failed; the step stays
+	 * pending and recovery re-drives the (idempotent) effect. Never silent.
 	 */
-	const runCloseoutStep = async (
+	const ackCloseoutStep = async (
 		record: BackgroundDelegationRecord,
 		terminalEventId: string,
 		step: TerminalCloseoutStep,
-		effect: () => Promise<void>,
 	): Promise<boolean> => {
-		if (!isTerminalCloseoutStepPending(record, terminalEventId, step)) {
-			return false;
-		}
-		try {
-			await effect();
-		} catch (error) {
-			logger.warn(
-				`[background] closeout step '${step}' failed for ${record.correlationId} (stays pending for recovery): ${
-					error instanceof Error ? error.message : String(error)
-				}`,
-			);
-			return false;
-		}
-		await markTerminalCloseoutStepCompleted(
+		const acked = await markStepCompleted(
 			directory,
 			record.correlationId,
 			terminalEventId,
 			step,
 		);
-		return true;
+		if (!acked) {
+			logger.warn(
+				`[background] closeout step '${step}' ack failed for ${record.correlationId} (${terminalEventId}); the step stays pending and recovery re-drives the idempotent effect`,
+			);
+		}
+		return acked;
 	};
 	const notifyLegacyCoderSettlementAdvisoryReplaced = (
 		record: BackgroundDelegationRecord,
@@ -522,12 +589,94 @@ export function createBackgroundCompletionObserver(opts: {
 			// acks each closeout effect, so a crash between claim and effect is
 			// recoverable instead of silently losing the effect. Idempotent: a
 			// replay keeps existing step states.
-			await initializeTerminalCloseout(
+			//
+			// r14 audit repair (P0-2): the RESULT is checked. A false return
+			// (journal could not be established — lock/IO failure, or a stale
+			// writer whose terminal no longer matches) must not silently lead
+			// to UNJOURNALED closeout effects: without the journal a crash
+			// cannot re-drive the step, and a stale writer's acks are refused
+			// forever (unbounded duplicate side effects). When initialization
+			// fails, every journal-gated step below is DEFERRED to recovery —
+			// hasPendingTerminalCloseout keeps the record in the recovery set
+			// while the journal is missing or unfenced.
+			const closeoutJournalReady = await initializeJournal(
 				directory,
 				record.correlationId,
 				terminal.eventId,
 				requiredCloseoutSteps(record, terminal.status),
 			);
+			if (!closeoutJournalReady) {
+				logger.warn(
+					`[background] terminal closeout journal could not be established for ${record.correlationId} (${terminal.eventId}); journal-gated closeout effects are deferred to recovery instead of running unjournaled`,
+				);
+			}
+			/**
+			 * Journal-gated closeout effect under the explicit r14 (P0-2)
+			 * effect contract: run `effect` only when the durable journal has
+			 * not acked this step for this exact terminal event, and ack it
+			 * only AFTER the effect REPORTED a durable success (`persisted` |
+			 * `already_persisted`). A thrown error or a `retryable_error`
+			 * leaves the step pending — the next recovery pass re-drives it.
+			 * A `permanent_failure` is durably marked failed in the journal
+			 * (terminally visible, not re-driven). The ACK itself is verified:
+			 * a failed journal write leaves the step pending and the effect
+			 * MUST be idempotent (recovery re-drives it).
+			 */
+			const runCloseoutStep = async (
+				target: BackgroundDelegationRecord,
+				terminalEventId: string,
+				step: TerminalCloseoutStep,
+				effect: () => Promise<CloseoutEffectResult>,
+			): Promise<boolean> => {
+				if (!isTerminalCloseoutStepPending(target, terminalEventId, step)) {
+					return false;
+				}
+				if (!closeoutJournalReady) {
+					logger.warn(
+						`[background] closeout journal is not established for ${target.correlationId} (${terminalEventId}); step '${step}' deferred to recovery instead of running unjournaled`,
+					);
+					return false;
+				}
+				let effectResult: CloseoutEffectResult;
+				try {
+					effectResult = await effect();
+				} catch (error) {
+					logger.warn(
+						`[background] closeout step '${step}' failed for ${target.correlationId} (stays pending for recovery): ${
+							error instanceof Error ? error.message : String(error)
+						}`,
+					);
+					return false;
+				}
+				if (effectResult.status === 'retryable_error') {
+					logger.warn(
+						`[background] closeout step '${step}' effect for ${target.correlationId} not durably established (stays pending for recovery): ${effectResult.reason}`,
+					);
+					return false;
+				}
+				if (effectResult.status === 'permanent_failure') {
+					logger.error(
+						`[background] closeout step '${step}' effect for ${target.correlationId} failed permanently: ${effectResult.reason}`,
+					);
+					const marked = await markStepFailed(
+						directory,
+						target.correlationId,
+						terminalEventId,
+						step,
+						effectResult.reason,
+					);
+					if (!marked) {
+						logger.warn(
+							`[background] closeout step '${step}' failure state for ${target.correlationId} could not be persisted; the step stays pending as the conservative fallback`,
+						);
+					}
+					return false;
+				}
+				// persisted | already_persisted: the obligation is durably
+				// established — now ACK it and verify the ack itself.
+				await ackCloseoutStep(target, terminalEventId, step);
+				return true;
+			};
 
 			// Maintenance point P2 (issue #2104): a trusted terminal (or the
 			// ingestion rejection handled below) is exactly when orphaned
@@ -588,7 +737,12 @@ export function createBackgroundCompletionObserver(opts: {
 						async () => {
 							const { emitTaskDelegationTerminalEnd } =
 								await resolveDelegationLifecycleModule();
+							// r14 (P0-2) BEST-EFFORT contract: the telemetry sink
+							// swallows write failures by design. The journal ACK
+							// below proves the EMISSION ATTEMPT only — no durable
+							// delivery guarantee is claimed for this step.
 							emitTaskDelegationTerminalEnd(record, terminal.status);
+							return { status: 'persisted' };
 						},
 					);
 				}
@@ -599,27 +753,21 @@ export function createBackgroundCompletionObserver(opts: {
 					// failure message FOREVER on the replay (this early return
 					// skipped it). The journal-gated advisory below closes that
 					// hole: only return early when the durable parent advisory
-					// for this exact terminal is already acked.
-					if (
-						!isTerminalCloseoutStepPending(
-							record,
-							terminal.eventId,
-							'parent_advisory',
-						)
-					) {
-						return;
-					}
-					await publishAdvisory(
-						directory,
+					// for this exact terminal is already acked. r14 (P0-2): the
+					// advisory runs under the explicit effect contract — a null
+					// store result leaves the step pending (recovery re-drives)
+					// instead of acking a lost message.
+					await runCloseoutStep(
 						record,
 						terminal.eventId,
-						terminal.status === 'cancelled' ? 'cancelled' : 'failed',
-					);
-					await markTerminalCloseoutStepCompleted(
-						directory,
-						record.correlationId,
-						terminal.eventId,
 						'parent_advisory',
+						parentAdvisoryEffect(
+							directory,
+							record,
+							terminal.eventId,
+							terminal.status === 'cancelled' ? 'cancelled' : 'failed',
+							putAdvisory,
+						),
 					);
 					return;
 				}
@@ -730,18 +878,17 @@ export function createBackgroundCompletionObserver(opts: {
 						record,
 						terminal.eventId,
 						'parent_advisory',
-						async () => {
-							await publishAdvisory(
-								directory,
-								record,
-								terminal.eventId,
-								legacyTransferRequiresManualRecovery
-									? `${terminal.status === 'cancelled' ? 'cancelled' : 'failed'}; legacy coder settlement requires manual recovery; run /swarm recover for this task (or /swarm reset-session)`
-									: terminal.status === 'cancelled'
-										? 'cancelled'
-										: 'failed',
-							);
-						},
+						parentAdvisoryEffect(
+							directory,
+							record,
+							terminal.eventId,
+							legacyTransferRequiresManualRecovery
+								? `${terminal.status === 'cancelled' ? 'cancelled' : 'failed'}; legacy coder settlement requires manual recovery; run /swarm recover for this task (or /swarm reset-session)`
+								: terminal.status === 'cancelled'
+									? 'cancelled'
+									: 'failed',
+							putAdvisory,
+						),
 					);
 				}
 				if (!legacyTransferPending) {
@@ -844,7 +991,12 @@ export function createBackgroundCompletionObserver(opts: {
 					async () => {
 						const { emitTaskDelegationTerminalEnd } =
 							await resolveDelegationLifecycleModule();
+						// r14 (P0-2) BEST-EFFORT contract: the telemetry sink
+						// swallows write failures by design. The journal ACK below
+						// proves the EMISSION ATTEMPT only — no durable delivery
+						// guarantee is claimed for this step.
 						emitTaskDelegationTerminalEnd(record, terminal.status);
+						return { status: 'persisted' };
 					},
 				);
 				// F2 (r13 audit repair P1-2): the context-map success summary MOVED
@@ -900,9 +1052,11 @@ export function createBackgroundCompletionObserver(opts: {
 									`Do not silently accept as resolved.`;
 							}
 							// Durable first: the step is only acked after the
-							// advisory is durably established. The in-memory
-							// push is the fast path for a live session.
-							const stored = await putTerminalCloseoutAdvisory(
+							// advisory is durably established (r14 P0-2: a null
+							// store result is a retryable error, not a silent
+							// success). The in-memory push is the fast path for
+							// a live session.
+							const stored = await putCloseoutAdvisory(
 								directory,
 								record.correlationId,
 								{
@@ -912,14 +1066,16 @@ export function createBackgroundCompletionObserver(opts: {
 								},
 							);
 							if (stored === null) {
-								throw new Error(
-									'sounding-board advisory could not be durably established',
-								);
+								return {
+									status: 'retryable_error',
+									reason: `sounding-board advisory could not be durably established for ${record.correlationId}`,
+								};
 							}
 							if (session) {
 								pushAdvisory(session, stored.message);
 								session.lastDelegationReason = 'critic_consultation';
 							}
+							return { status: 'persisted' };
 						},
 					);
 				}
@@ -946,7 +1102,7 @@ export function createBackgroundCompletionObserver(opts: {
 								}. ` +
 								`Resume the QA gate pipeline — check your task pipeline steps for the next required action. ` +
 								`Do not stop here.`;
-							const stored = await putTerminalCloseoutAdvisory(
+							const stored = await putCloseoutAdvisory(
 								directory,
 								record.correlationId,
 								{
@@ -956,9 +1112,13 @@ export function createBackgroundCompletionObserver(opts: {
 								},
 							);
 							if (stored === null) {
-								throw new Error(
-									'pipeline advisory could not be durably established',
-								);
+								// r14 (P0-2): a null store result is a retryable
+								// error — the step stays pending and recovery
+								// re-drives the idempotent eventId-keyed put.
+								return {
+									status: 'retryable_error',
+									reason: `pipeline advisory could not be durably established for ${record.correlationId}`,
+								};
 							}
 							const session = swarmState.agentSessions.get(
 								record.parentSessionId,
@@ -966,6 +1126,7 @@ export function createBackgroundCompletionObserver(opts: {
 							if (session) {
 								pushAdvisory(session, stored.message);
 							}
+							return { status: 'persisted' };
 						},
 					);
 				}
@@ -1201,14 +1362,13 @@ export function createBackgroundCompletionObserver(opts: {
 								record,
 								terminal.eventId,
 								'parent_advisory',
-								async () => {
-									await publishAdvisory(
-										directory,
-										record,
-										terminal.eventId,
-										outcomeMessage,
-									);
-								},
+								parentAdvisoryEffect(
+									directory,
+									record,
+									terminal.eventId,
+									outcomeMessage,
+									putAdvisory,
+								),
 							);
 						}
 						// r13 (P1-2): the ingestion outcome is terminally negative
@@ -1216,14 +1376,11 @@ export function createBackgroundCompletionObserver(opts: {
 						// will NEVER reach business success, so no context-map success
 						// summary may ever be written for it. Ack the context_map step
 						// as closed so recovery does not re-drive a success write for a
-						// rejected outcome forever.
+						// rejected outcome forever. r14 (P0-2): the ack is verified —
+						// a failed journal write leaves the step pending (recovery
+						// re-drives the ack; it is itself idempotent).
 						if (applied.consumed) {
-							await markTerminalCloseoutStepCompleted(
-								directory,
-								record.correlationId,
-								terminal.eventId,
-								'context_map',
-							);
+							await ackCloseoutStep(record, terminal.eventId, 'context_map');
 						}
 						// Maintenance point P2b (issue #2104): the ingestion
 						// rejection has just been durably recorded — reconcile now
@@ -1300,26 +1457,22 @@ export function createBackgroundCompletionObserver(opts: {
 							record,
 							terminal.eventId,
 							'parent_advisory',
-							async () => {
-								await publishAdvisory(
-									directory,
-									record,
-									terminal.eventId,
-									outcomeMessage,
-								);
-							},
+							parentAdvisoryEffect(
+								directory,
+								record,
+								terminal.eventId,
+								outcomeMessage,
+								putAdvisory,
+							),
 						);
 						// Mirror the live negative path (r13 P1-2): the durable
 						// outcome is terminally negative — no success context-map
 						// summary may EVER be written for this record. Ack the
 						// context_map step as closed so recovery does not re-drive
-						// a success write for a negative outcome forever.
-						await markTerminalCloseoutStepCompleted(
-							directory,
-							record.correlationId,
-							terminal.eventId,
-							'context_map',
-						);
+						// a success write for a negative outcome forever. r14
+						// (P0-2): the ack is verified (a failed journal write
+						// leaves the step pending; the ack is idempotent).
+						await ackCloseoutStep(record, terminal.eventId, 'context_map');
 						return;
 					}
 					// persistedOutcome.kind === 'accepted': the verified success
@@ -1424,6 +1577,19 @@ export function createBackgroundCompletionObserver(opts: {
 								}),
 								directory,
 							});
+							// r14 audit repair (P0-2): `void` (no exception) is
+							// NOT proof — updateContextMapAfterAgent swallows
+							// internal errors and returns a fallback map. Verify
+							// the write actually persisted by reading it back;
+							// the summary is keyed (upserted) by task id, so a
+							// present entry proves the durable obligation.
+							if (!verifyContextMapWrite(directory, closeoutTaskId)) {
+								return {
+									status: 'retryable_error',
+									reason: `context-map summary for task ${closeoutTaskId} did not persist (read-back found no entry)`,
+								};
+							}
+							return { status: 'persisted' };
 						},
 					);
 				}
@@ -1456,18 +1622,17 @@ export function createBackgroundCompletionObserver(opts: {
 					record,
 					terminal.eventId,
 					'parent_advisory',
-					async () => {
-						await publishAdvisory(
-							directory,
-							record,
-							terminal.eventId,
-							record.normalizedAgent === 'coder'
-								? legacyTransferRequiresManualRecovery
-									? 'completed and settled; legacy coder settlement requires manual recovery; run /swarm recover for this task (or /swarm reset-session)'
-									: 'completed and settled'
-								: 'completed',
-						);
-					},
+					parentAdvisoryEffect(
+						directory,
+						record,
+						terminal.eventId,
+						record.normalizedAgent === 'coder'
+							? legacyTransferRequiresManualRecovery
+								? 'completed and settled; legacy coder settlement requires manual recovery; run /swarm recover for this task (or /swarm reset-session)'
+								: 'completed and settled'
+							: 'completed',
+						putAdvisory,
+					),
 				);
 			}
 			logger.log(
@@ -2459,12 +2624,27 @@ function settlementResume(
 	};
 }
 
-async function publishAdvisory(
+/** The durable result of establishing a terminal advisory (r14 P0-2). */
+interface AdvisoryEstablishment {
+	/** The durably stored advisory entry; null = NOT established. */
+	stored: BackgroundAdvisoryInboxEntry | null;
+	/** Replacement metadata when a legacy transfer advisory was corrected. */
+	replacement: ReplacePendingBackgroundAdvisoryResult | null;
+}
+
+/**
+ * Establish the durable parent advisory for a terminal event (r14 audit
+ * repair P0-2). Returns the stored entry — or `stored: null` when the
+ * advisory could NOT be durably established (lock/IO failure). Null is a
+ * FAILURE signal: the caller must not treat it as success.
+ */
+async function establishBackgroundAdvisory(
 	directory: string,
 	record: BackgroundDelegationRecord,
 	eventId: string,
 	outcome: string,
-): Promise<void> {
+	putAdvisory: typeof putPendingBackgroundAdvisory,
+): Promise<AdvisoryEstablishment> {
 	const message =
 		`[BACKGROUND COMPLETION ${eventId}] ${record.normalizedAgent} task ` +
 		`${taskLabel(record)} ${outcome}.`;
@@ -2486,12 +2666,24 @@ async function publishAdvisory(
 			: null) ?? null;
 	const stored =
 		replacement?.advisory ??
-		(await putPendingBackgroundAdvisory(
-			directory,
-			record.correlationId,
-			input,
-		));
-	if (!stored) return;
+		(await putAdvisory(directory, record.correlationId, input));
+	return { stored, replacement };
+}
+
+/**
+ * Best-effort in-memory delivery of an established advisory to a live parent
+ * session (fast path only — the durable store is the obligation).
+ */
+function deliverAdvisoryToSession(
+	record: BackgroundDelegationRecord,
+	eventId: string,
+	establishment: AdvisoryEstablishment,
+): void {
+	if (!establishment.stored) return;
+	const message = establishment.stored.message;
+	const needsCorrection = !message.includes(
+		LEGACY_CODER_SETTLEMENT_PENDING_ADVISORY_MARKER,
+	);
 	const session = swarmState.agentSessions.get(record.parentSessionId);
 	if (session) {
 		if (needsCorrection) {
@@ -2499,14 +2691,63 @@ async function publishAdvisory(
 				session.pendingAdvisoryMessages,
 				eventId,
 			);
-			if (replacement?.replacedMessage) {
+			if (establishment.replacement?.replacedMessage) {
 				removeQueuedAdvisoryMessage(session.pendingAdvisoryMessages, [
-					replacement.replacedMessage,
+					establishment.replacement.replacedMessage,
 				]);
 			}
 		}
-		pushAdvisory(session, stored.message);
+		pushAdvisory(session, message);
 	}
+}
+
+async function publishAdvisory(
+	directory: string,
+	record: BackgroundDelegationRecord,
+	eventId: string,
+	outcome: string,
+): Promise<void> {
+	const establishment = await establishBackgroundAdvisory(
+		directory,
+		record,
+		eventId,
+		outcome,
+		putPendingBackgroundAdvisory,
+	);
+	if (!establishment.stored) return;
+	deliverAdvisoryToSession(record, eventId, establishment);
+}
+
+/**
+ * r14 audit repair (P0-2): the parent_advisory closeout effect under the
+ * explicit effect contract. A null store result is a RETRYABLE error (the
+ * step stays pending; recovery re-drives the idempotent eventId-keyed put) —
+ * never a silent success.
+ */
+function parentAdvisoryEffect(
+	directory: string,
+	record: BackgroundDelegationRecord,
+	eventId: string,
+	outcome: string,
+	putAdvisory: typeof putPendingBackgroundAdvisory,
+): () => Promise<CloseoutEffectResult> {
+	return async () => {
+		const establishment = await establishBackgroundAdvisory(
+			directory,
+			record,
+			eventId,
+			outcome,
+			putAdvisory,
+		);
+		if (!establishment.stored) {
+			return {
+				status: 'retryable_error',
+				reason: `parent advisory could not be durably established for ${record.correlationId} (advisory store returned null)`,
+			};
+		}
+		deliverAdvisoryToSession(record, eventId, establishment);
+		return { status: 'persisted' };
+	};
 }
 
 function errorCode(error: unknown): string | null {
