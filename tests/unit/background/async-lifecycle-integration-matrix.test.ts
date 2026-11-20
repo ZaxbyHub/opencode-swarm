@@ -25,6 +25,7 @@ import {
 } from '../../../src/state';
 import { telemetry } from '../../../src/telemetry';
 import { createSafeTestDir } from '../../helpers/safe-test-dir';
+import { seedStageAPassed } from '../../helpers/task-workflow-evidence';
 
 /**
  * r11-r13 integration matrix: the async lifecycle states from the repair
@@ -110,6 +111,7 @@ async function recordChild(
 		taskId?: string | null;
 		planCritic?: boolean;
 		plan?: Plan;
+		workflowGeneration?: number;
 	},
 ): Promise<void> {
 	await recordPendingDelegation(directory, {
@@ -125,7 +127,14 @@ async function recordChild(
 		// Gate-bearing roles require a dispatch-time workflow generation for
 		// Stage-B ingestion (same fixture shape as the docs-participation
 		// observer tests).
-		...(options.taskId ? { workflowGeneration: 0 } : {}),
+		...(options.taskId
+			? {
+					workflowGeneration:
+						options.workflowGeneration !== undefined
+							? options.workflowGeneration
+							: 0,
+				}
+			: {}),
 		workspace: captureWorkspaceSnapshot(directory),
 		...(options.planCritic && options.plan
 			? {
@@ -208,11 +217,18 @@ describe('async lifecycle integration matrix (r11-r13)', () => {
 
 	test('successful completion: exactly-once closeout across telemetry, context map, and advisory', async () => {
 		await initLedger(directory, derivePlanId(plan));
+		// r13 (P1-2): the context-map success summary requires a REAL Stage-B
+		// success — seed the accepted-mutation state and bind the launch
+		// generation, so the reviewer's APPROVED verdict genuinely ingests.
+		const parent = ensureAgentSession(PARENT, 'architect', directory);
+		parent.taskWorkflowStates.set('1.1', 'coder_delegated');
+		const generation = await seedStageAPassed(directory, '1.1');
 		await recordChild(directory, {
 			child: 'ses_m_ok',
 			callId: 'c-ok',
 			agent: 'reviewer',
 			taskId: '1.1',
+			workflowGeneration: generation,
 		});
 		const ends = captureEnds();
 		try {
@@ -360,11 +376,16 @@ describe('async lifecycle integration matrix (r11-r13)', () => {
 
 	test('process restart and replay: a fresh observer instance resumes without double effects', async () => {
 		await initLedger(directory, derivePlanId(plan));
+		// r13 (P1-2): same real-Stage-B seeding as the success test above.
+		const parent = ensureAgentSession(PARENT, 'architect', directory);
+		parent.taskWorkflowStates.set('1.1', 'coder_delegated');
+		const generation = await seedStageAPassed(directory, '1.1');
 		await recordChild(directory, {
 			child: 'ses_m_restart',
 			callId: 'c-restart',
 			agent: 'reviewer',
 			taskId: '1.1',
+			workflowGeneration: generation,
 		});
 		const ends = captureEnds();
 		try {

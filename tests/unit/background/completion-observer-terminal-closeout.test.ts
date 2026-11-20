@@ -18,6 +18,7 @@ import {
 } from '../../../src/state';
 import { telemetry } from '../../../src/telemetry';
 import { createSafeTestDir } from '../../helpers/safe-test-dir';
+import { seedStageAPassed } from '../../helpers/task-workflow-evidence';
 
 function writePlan(directory: string): void {
 	const plan: Plan = {
@@ -81,6 +82,7 @@ async function recordPending(
 		agent?: string;
 		batchId?: string;
 		planTaskId?: string | null;
+		workflowGeneration?: number;
 	} = {},
 ): Promise<void> {
 	const child = options.childSessionId ?? 'ses_closeout_child';
@@ -97,6 +99,9 @@ async function recordPending(
 		evidenceTaskId:
 			options.planTaskId === undefined ? '1.1' : options.planTaskId,
 		...(options.batchId ? { batchId: options.batchId } : {}),
+		...(options.workflowGeneration !== undefined
+			? { workflowGeneration: options.workflowGeneration }
+			: {}),
 		workspace: captureWorkspaceSnapshot(directory),
 	});
 }
@@ -162,8 +167,18 @@ describe('background completion observer — shared terminal closeout (F2/F3/F4,
 		cleanup();
 	});
 
-	test('F2: a verified async completion writes the context-map summary exactly once', async () => {
-		await recordPending(directory, { agent: 'reviewer' });
+	test('F2 (r13 P1-2): a verified non-gate async completion writes the context-map summary exactly once', async () => {
+		// A REAL Stage-B reviewer success: Stage A passed, the task is
+		// coder_delegated, the reviewer returns the structured APPROVED
+		// verdict. Only a completion whose settlement AND Stage-B ingestion
+		// proved the business outcome may write the success summary.
+		const parent = ensureAgentSession('ses_closeout_parent', 'architect', directory);
+		parent.taskWorkflowStates.set('1.1', 'coder_delegated');
+		const generation = await seedStageAPassed(directory, '1.1');
+		await recordPending(directory, {
+			agent: 'reviewer',
+			workflowGeneration: generation,
+		});
 		const observer = createBackgroundCompletionObserver({
 			config: { enabled: true },
 			directory,
@@ -172,10 +187,9 @@ describe('background completion observer — shared terminal closeout (F2/F3/F4,
 		const event = completionEvent(
 			'ses_closeout_child',
 			'completed',
-			COMPLETED_BODY,
+			'<task_result>[REVIEWED] | 1.1 | APPROVED | no issues</task_result>',
 		);
 		await observer.event(event);
-		// Duplicate delivery (host replay) must not double-append.
 		await observer.event(event);
 
 		const map = loadContextMap(directory);
@@ -189,7 +203,12 @@ describe('background completion observer — shared terminal closeout (F2/F3/F4,
 		expect(summary?.implementation_summary).toContain('[REVIEWED]');
 	});
 
-	test('F2: a coder completion records the same approved mapping as the sync handoff', async () => {
+	test('P1-2: a coder completion whose settlement does not prove success writes NO summary', async () => {
+		// This fixture has no coder evidence/settlement machinery, so
+		// settleCoder cannot prove the coder's work was accepted. Under the
+		// pre-r13 code the context-map summary was written anyway (before
+		// settlement) — exactly the P1-2 "success before workflow completion"
+		// bug. Now: no provable settlement, no 'approved' summary.
 		await recordPending(directory, { agent: 'coder' });
 		const observer = createBackgroundCompletionObserver({
 			config: { enabled: true },
@@ -203,9 +222,47 @@ describe('background completion observer — shared terminal closeout (F2/F3/F4,
 				'<task_result>Implemented the change.</task_result>',
 			),
 		);
-		const summary = loadContextMap(directory)?.task_history['1.1'];
-		expect(summary).toBeDefined();
-		expect(summary?.final_status).toBe('approved');
+		const map = loadContextMap(directory);
+		expect(map?.task_history['1.1']).toBeUndefined();
+	});
+
+	test('P1-2: a negative reviewer verdict never appears as approved', async () => {
+		// The reviewer returns REJECTED. Stage-B ingestion durably refuses the
+		// completion — the task did NOT pass its gate, so no context-map
+		// success summary may exist for it.
+		await recordPending(directory, { agent: 'reviewer' });
+		const observer = createBackgroundCompletionObserver({
+			config: { enabled: true },
+			directory,
+			contextMap: { enabled: true },
+		});
+		await observer.event(
+			completionEvent(
+				'ses_closeout_child',
+				'completed',
+				'<task_result>[REVIEWED] | 1.1 | REJECTED | fundamental flaws</task_result>',
+			),
+		);
+		const map = loadContextMap(directory);
+		expect(map?.task_history['1.1']).toBeUndefined();
+	});
+
+	test('P1-2: a retryable Stage-B ingestion writes no summary yet', async () => {
+		// This reviewer fixture has no route/evidence machinery, so ingestion
+		// lands in the retryable ingestion_error state — the completion is NOT
+		// finally successful and the summary must not be written yet (the
+		// pending context_map step is re-driven when the retry succeeds).
+		await recordPending(directory, { agent: 'reviewer' });
+		const observer = createBackgroundCompletionObserver({
+			config: { enabled: true },
+			directory,
+			contextMap: { enabled: true },
+		});
+		await observer.event(
+			completionEvent('ses_closeout_child', 'completed', COMPLETED_BODY),
+		);
+		const map = loadContextMap(directory);
+		expect(map?.task_history['1.1']).toBeUndefined();
 	});
 
 	test('F2: no context-map write when the feature is disabled', async () => {

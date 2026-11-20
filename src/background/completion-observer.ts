@@ -56,19 +56,25 @@ import {
 	claimTerminalResult,
 	clearLegacyCoderSettlementTransferPending,
 	findDelegationForCompletion,
+	initializeTerminalCloseout,
+	isTerminalCloseoutStepPending,
 	LEGACY_CODER_SETTLEMENT_PENDING_ADVISORY_MARKER,
 	type LegacyCoderSettlementTransfer,
 	maintainBackgroundDelegations,
 	markLegacyCoderSettlementTransferPending,
+	markTerminalCloseoutStepCompleted,
 	preparePendingBackgroundAdvisories,
 	promoteDelegationFallback,
 	putPendingBackgroundAdvisory,
+	putTerminalCloseoutAdvisory,
 	type ReplacePendingBackgroundAdvisoryResult,
 	recordDelegationIngestionResult,
 	registerLegacyCoderSettlementReconciler,
+	registerTerminalCloseoutReconciler,
 	releaseBackgroundCoderReservation,
 	releasePreparedBackgroundAdvisories,
 	replacePendingBackgroundAdvisory,
+	type TerminalCloseoutStep,
 	updateCoderSettlement,
 } from './pending-delegations.js';
 import {
@@ -271,6 +277,80 @@ export function createBackgroundCompletionObserver(opts: {
 } {
 	const { config, directory } = opts;
 	let replayInProgress = false;
+	// r13 audit repair (P0-3): correlation ids whose closeout this observer
+	// instance is currently driving. The maintenance recovery pass must not
+	// re-enter them from inside their own live processing (the nested call
+	// would race the very steps the live pass is about to run).
+	const inFlightCloseoutCorrelationIds = new Set<string>();
+	/**
+	 * The applicability set for one terminal: which closeout steps this
+	 * record's role and outcome require. Everything else is never journaled,
+	 * so recovery never re-drives a non-applicable step forever.
+	 */
+	const requiredCloseoutSteps = (
+		record: BackgroundDelegationRecord,
+		terminalStatus: string,
+	): TerminalCloseoutStep[] => {
+		if (record.batchId !== undefined) return []; // lanes settle elsewhere
+		const steps: TerminalCloseoutStep[] = [
+			'delegation_end',
+			'parent_advisory',
+		];
+		if (terminalStatus === 'completed') {
+			const taskId = record.evidenceTaskId ?? record.planTaskId;
+			if (opts.contextMap?.enabled === true && taskId) {
+				steps.push('context_map');
+			}
+			if (record.normalizedAgent === 'critic_sounding_board') {
+				steps.push('sounding_board');
+			}
+			if (
+				[
+					'reviewer',
+					'test_engineer',
+					'critic',
+					'critic_sounding_board',
+				].includes(record.normalizedAgent)
+			) {
+				steps.push('pipeline_advisory');
+			}
+		}
+		return steps;
+	};
+	/**
+	 * Journal-gated closeout effect: run `effect` only when the durable
+	 * journal has not acked this step for this exact terminal event, and ack
+	 * it only AFTER the effect ran. An effect that throws leaves the step
+	 * pending — the next recovery pass re-drives it (audit P0-3: "ein
+	 * fehlerhafter Schritt bleibt wiederaufnehmbar").
+	 */
+	const runCloseoutStep = async (
+		record: BackgroundDelegationRecord,
+		terminalEventId: string,
+		step: TerminalCloseoutStep,
+		effect: () => Promise<void>,
+	): Promise<boolean> => {
+		if (!isTerminalCloseoutStepPending(record, terminalEventId, step)) {
+			return false;
+		}
+		try {
+			await effect();
+		} catch (error) {
+			logger.warn(
+				`[background] closeout step '${step}' failed for ${record.correlationId} (stays pending for recovery): ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			);
+			return false;
+		}
+		await markTerminalCloseoutStepCompleted(
+			directory,
+			record.correlationId,
+			terminalEventId,
+			step,
+		);
+		return true;
+	};
 	const notifyLegacyCoderSettlementAdvisoryReplaced = (
 		record: BackgroundDelegationRecord,
 		replacement: ReplacePendingBackgroundAdvisoryResult,
@@ -434,12 +514,27 @@ export function createBackgroundCompletionObserver(opts: {
 			}
 			opts.onTerminalClaimed?.(record);
 
+			// r13 audit repair (P0-3): initialize the durable closeout journal
+			// for this terminal BEFORE any business effect runs. The immutable
+			// terminal claim above proves the terminal; this journal separately
+			// acks each closeout effect, so a crash between claim and effect is
+			// recoverable instead of silently losing the effect. Idempotent: a
+			// replay keeps existing step states.
+			await initializeTerminalCloseout(
+				directory,
+				record.correlationId,
+				terminal.eventId,
+				requiredCloseoutSteps(record, terminal.status),
+			);
+
 			// Maintenance point P2 (issue #2104): a trusted terminal (or the
 			// ingestion rejection handled below) is exactly when orphaned
 			// reservations and stale records become provably reclaimable. One
 			// bounded, lock-limited pass; best-effort — the settlement paths
-			// below must proceed regardless.
+			// below must proceed regardless. The closeout recovery inside this
+			// pass must not re-enter THIS record (it is in flight right here).
 			if (!input.trustedTerminal?.skipMaintenance) {
+				inFlightCloseoutCorrelationIds.add(record.correlationId);
 				try {
 					await maintainBackgroundDelegations(directory, {
 						lockTimeoutMs: 1_000,
@@ -447,9 +542,17 @@ export function createBackgroundCompletionObserver(opts: {
 						onLegacyCoderSettlementReconciled: reconcilePending,
 						onLegacyCoderSettlementAdvisoryReplaced:
 							notifyLegacyCoderSettlementAdvisoryReplaced,
+						onTerminalCloseoutPending: async (pendingRecord) => {
+							if (inFlightCloseoutCorrelationIds.has(pendingRecord.correlationId)) {
+								return;
+							}
+							await reconcilePending(pendingRecord);
+						},
 					});
 				} catch {
 					// observation only; another maintenance point will finish
+				} finally {
+					inFlightCloseoutCorrelationIds.delete(record.correlationId);
 				}
 			}
 
@@ -467,26 +570,55 @@ export function createBackgroundCompletionObserver(opts: {
 					record.parentSessionId,
 					record.callID,
 				);
-				// r12 (F4): close the delegation_begin/delegation_end pair for a
-				// FAILED/CANCELLED native-async Task terminal — exactly-once on the
-				// FRESH claim that established the terminal event. Lane records are
-				// excluded: their terminals settle through
-				// settleDelegationTerminal, which already emits the pairing end.
-				if (isFreshTerminalClaim && record.batchId === undefined) {
-					try {
-						const { emitTaskDelegationTerminalEnd } =
-							await resolveDelegationLifecycleModule();
-						emitTaskDelegationTerminalEnd(record, terminal.status);
-					} catch (error) {
-						logger.warn(
-							`[background] delegation_end emission failed for ${record.correlationId}: ${
-								error instanceof Error ? error.message : String(error)
-							}`,
-						);
-					}
+				// r12 (F4) + r13 repair (P0-3/P1-5): close the delegation_begin/
+				// delegation_end pair for a FAILED/CANCELLED native-async Task
+				// terminal. Exactly-once via the durable closeout journal (a
+				// crash between claim and emission re-drives it on recovery),
+				// NOT via the fresh-claim flag (a crash after the claim lost
+				// the emission forever). Lane records are excluded: their
+				// terminals settle through settleDelegationTerminal, which
+				// already emits the pairing end.
+				if (record.batchId === undefined) {
+					await runCloseoutStep(
+						record,
+						terminal.eventId,
+						'delegation_end',
+						async () => {
+							const { emitTaskDelegationTerminalEnd } =
+								await resolveDelegationLifecycleModule();
+							emitTaskDelegationTerminalEnd(record, terminal.status);
+						},
+					);
 				}
 				if (isDuplicate && record.normalizedAgent !== 'coder') {
-					// Non-coder failure cleanup has no durable sub-transition to resume.
+					// Non-coder failure cleanup has no durable sub-transition to
+					// resume. r13 repair (P0-3 special case): a crash between the
+					// terminal claim and the parent advisory used to lose the
+					// failure message FOREVER on the replay (this early return
+					// skipped it). The journal-gated advisory below closes that
+					// hole: only return early when the durable parent advisory
+					// for this exact terminal is already acked.
+					if (
+						!isTerminalCloseoutStepPending(
+							record,
+							terminal.eventId,
+							'parent_advisory',
+						)
+					) {
+						return;
+					}
+					await publishAdvisory(
+						directory,
+						record,
+						terminal.eventId,
+						terminal.status === 'cancelled' ? 'cancelled' : 'failed',
+					);
+					await markTerminalCloseoutStepCompleted(
+						directory,
+						record.correlationId,
+						terminal.eventId,
+						'parent_advisory',
+					);
 					return;
 				}
 				if (record.normalizedAgent === 'coder') {
@@ -570,18 +702,46 @@ export function createBackgroundCompletionObserver(opts: {
 					}
 				}
 				discardScopeForRecord(record);
-				await publishAdvisory(
-					directory,
-					record,
-					terminal.eventId,
-					legacyTransferPending
-						? `${terminal.status === 'cancelled' ? 'cancelled' : 'failed'}; legacy coder settlement transfer is pending; durable reconciliation will retry`
-						: legacyTransferRequiresManualRecovery
-							? `${terminal.status === 'cancelled' ? 'cancelled' : 'failed'}; legacy coder settlement requires manual recovery; run /swarm recover for this task (or /swarm reset-session)`
-							: terminal.status === 'cancelled'
-								? 'cancelled'
-								: 'failed',
-				);
+				// r13 repair (P0-3): journal-gated — a crash before this
+				// publish must not permanently lose the failure advisory.
+				// EXCEPTION: while a legacy coder settlement transfer is still
+				// pending, the advisory text is NOT final — the step stays
+				// un-acked so the transfer reconciler's replay re-publishes
+				// the corrected (final) message and only then acks it.
+				if (legacyTransferPending) {
+					if (
+						isTerminalCloseoutStepPending(
+							record,
+							terminal.eventId,
+							'parent_advisory',
+						)
+					) {
+						await publishAdvisory(
+							directory,
+							record,
+							terminal.eventId,
+							`${terminal.status === 'cancelled' ? 'cancelled' : 'failed'}; legacy coder settlement transfer is pending; durable reconciliation will retry`,
+						);
+					}
+				} else {
+					await runCloseoutStep(
+						record,
+						terminal.eventId,
+						'parent_advisory',
+						async () => {
+							await publishAdvisory(
+								directory,
+								record,
+								terminal.eventId,
+								legacyTransferRequiresManualRecovery
+									? `${terminal.status === 'cancelled' ? 'cancelled' : 'failed'}; legacy coder settlement requires manual recovery; run /swarm recover for this task (or /swarm reset-session)`
+									: terminal.status === 'cancelled'
+										? 'cancelled'
+										: 'failed',
+							);
+						},
+					);
+				}
 				if (!legacyTransferPending) {
 					await clearLegacyCoderSettlementTransferPending(
 						directory,
@@ -654,108 +814,103 @@ export function createBackgroundCompletionObserver(opts: {
 			// verified native-async completion — the terminal-record twin of the
 			// synchronous Task handoff in src/index.ts. Everything here keys on the
 			// durable record identity (parent/child/call/role/terminal event) that
-			// was verified and claimed above. Exactly-once side effects (context map,
-			// sounding-board verdict advisory, pipeline advisory, delegation_end
-			// telemetry) run only on a FRESH claim; the ledger-idempotent knowledge
-			// receipt reconciliation runs on replays too (crash recovery), with the
-			// replay flag suppressing the audit-only observation. Coder settlement,
-			// worktree merge-back, and Stage-B ingestion are NOT here — they stay
-			// claim-guarded above/below and must never run twice.
-			// LANE records (dispatch_lanes) are excluded: their terminals are
-			// settled through settleDelegationTerminal, which already emits the
-			// pairing delegation_end and reconciles knowledge receipts — a second
-			// emission here would double-book the pair.
-			if (isFreshTerminalClaim && record.batchId === undefined) {
+			// was verified and claimed above.
+			//
+			// r13 audit repair (P0-3/P1-2/P1-5/P2-2): every closeout effect is
+			// gated on the DURABLE CLOSEOUT JOURNAL (keyed by the exact terminal
+			// event), not on the in-process fresh-claim flag — a crash between
+			// the claim and an effect is re-driven by recovery instead of being
+			// lost forever. The context-map success summary (F2) moved BELOW
+			// coder settlement and Stage-B ingestion and now only records a
+			// VERIFIED business success (audit P1-2: a child answering is not
+			// the same as its work being accepted). The ledger-idempotent
+			// knowledge receipt reconciliation still runs on replays too (crash
+			// recovery), with the replay flag suppressing the audit-only
+			// observation. LANE records (dispatch_lanes) are excluded: their
+			// terminals are settled through settleDelegationTerminal, which
+			// already emits the pairing delegation_end and reconciles knowledge
+			// receipts — a second emission here would double-book the pair.
+			if (record.batchId === undefined) {
 				// F4: delegation_end pairing observation (cost axes unknown-honest;
-				// the r8 usage bridge stays the usage authority — no double billing).
-				try {
-					const { emitTaskDelegationTerminalEnd } =
-						await resolveDelegationLifecycleModule();
-					emitTaskDelegationTerminalEnd(record, terminal.status);
-				} catch (error) {
-					logger.warn(
-						`[background] delegation_end emission failed for ${record.correlationId}: ${
-							error instanceof Error ? error.message : String(error)
-						}`,
-					);
-				}
-				// F2: context-map post-agent update — the same summary the sync
-				// handoff writes, gated on the same feature flag, only on a real
-				// (verified) success. Errors/cancellations never appear as completed.
-				if (opts.contextMap?.enabled === true) {
-					const closeoutTaskId = record.evidenceTaskId ?? record.planTaskId;
-					if (closeoutTaskId) {
-						try {
-							const {
-								extractContextDecisionsFromContextMd,
-								updateContextMapAfterAgent,
-							} = await resolveContextMapModule();
-							updateContextMapAfterAgent({
-								task_id: closeoutTaskId,
-								agent_role: record.normalizedAgent,
-								files_touched: [],
-								implementation_summary: (result.text ?? '').slice(0, 500),
-								task_goal: '',
-								final_status: 'completed',
-								decisions: extractContextDecisionsFromContextMd(directory, {
-									agent_role: record.normalizedAgent,
-								}),
-								directory,
-							});
-						} catch (error) {
-							// Post-agent update must never block the closeout chain
-							logger.warn(
-								`[background] context-map closeout failed for ${record.correlationId}: ${
-									error instanceof Error ? error.message : String(error)
-								}`,
-							);
-						}
-					}
-				}
+				// the r8 usage bridge stays the usage authority — no double
+				// billing). Journal-gated exactly-once (audit P1-5): a crash
+				// after the claim no longer loses the pairing end.
+				await runCloseoutStep(
+					record,
+					terminal.eventId,
+					'delegation_end',
+					async () => {
+						const { emitTaskDelegationTerminalEnd } =
+							await resolveDelegationLifecycleModule();
+						emitTaskDelegationTerminalEnd(record, terminal.status);
+					},
+				);
+				// F2 (r13 audit repair P1-2): the context-map success summary MOVED
+				// below — it runs only after coder settlement and Stage-B ingestion
+				// proved the business outcome, never on the bare child answer.
 				// F3: sounding-board verdict — reuse the EXACT policy the sync handoff
 				// applies (src/agents/sounding-board-policy.ts). Unparseable output is
 				// treated conservatively (treat-as-REPHRASE warning), never approval.
+				// r13 (P2-2): the advisory is DURABLE (closeout advisory list, deduped
+				// by terminal event id) — it no longer depends on the parent session
+				// being live in memory, and it cannot clobber the terminal advisory.
 				if (record.normalizedAgent === 'critic_sounding_board') {
-					try {
-						const { applySoundingBoardResponsePolicy } =
-							await resolveSoundingBoardPolicyModule();
-						const rawResponse = result.text ?? '';
-						const session = swarmState.agentSessions.get(
-							record.parentSessionId,
-						);
-						if (session) {
+					await runCloseoutStep(
+						record,
+						terminal.eventId,
+						'sounding_board',
+						async () => {
+							const { applySoundingBoardResponsePolicy } =
+								await resolveSoundingBoardPolicyModule();
+							const rawResponse = result.text ?? '';
+							const session = swarmState.agentSessions.get(
+								record.parentSessionId,
+							);
 							const parsed = applySoundingBoardResponsePolicy(rawResponse);
+							let verdictMsg: string;
 							if (parsed) {
-								let verdictMsg = `[SOUNDING_BOARD] Verdict: ${parsed.verdict}. ${parsed.reasoning}`;
+								verdictMsg = `[SOUNDING_BOARD] Verdict: ${parsed.verdict}. ${parsed.reasoning}`;
 								if (parsed.category)
 									verdictMsg += ` Category: ${parsed.category}`;
 								if (parsed.improvedQuestion)
 									verdictMsg += ` Rephrase to: ${parsed.improvedQuestion}`;
 								if (parsed.answer) verdictMsg += ` Answer: ${parsed.answer}`;
 								if (parsed.warning) verdictMsg += ` WARNING: ${parsed.warning}`;
-								pushAdvisory(session, verdictMsg);
-								session.lastDelegationReason = 'critic_consultation';
 							} else {
-								pushAdvisory(
-									session,
+								verdictMsg =
 									`[SOUNDING_BOARD] WARNING: Could not parse a structured verdict from ` +
-										`critic_sounding_board response (${rawResponse.length} chars). ` +
-										`Treat as REPHRASE — review the raw response before surfacing to user or escalating. ` +
-										`Do not silently accept as resolved.`,
+									`critic_sounding_board response (${rawResponse.length} chars). ` +
+									`Treat as REPHRASE — review the raw response before surfacing to user or escalating. ` +
+									`Do not silently accept as resolved.`;
+							}
+							// Durable first: the step is only acked after the
+							// advisory is durably established. The in-memory
+							// push is the fast path for a live session.
+							const stored = await putTerminalCloseoutAdvisory(
+								directory,
+								record.correlationId,
+								{
+									eventId: `${terminal.eventId}:sounding-board`,
+									parentSessionId: record.parentSessionId,
+									message: verdictMsg,
+								},
+							);
+							if (stored === null) {
+								throw new Error(
+									'sounding-board advisory could not be durably established',
 								);
 							}
-						}
-					} catch (error) {
-						logger.warn(
-							`[background] sounding-board verdict closeout failed for ${record.correlationId}: ${
-								error instanceof Error ? error.message : String(error)
-							}`,
-						);
-					}
+							if (session) {
+								pushAdvisory(session, stored.message);
+								session.lastDelegationReason = 'critic_consultation';
+							}
+						},
+					);
 				}
-				// F3/F4 parity: pipeline continuation advisory — same roles and message
-				// shape as the sync Task handoff, so the architect resumes the QA gate
-				// pipeline after an async completion too.
+				// F3/F4 parity: pipeline continuation advisory — same roles and
+				// message shape as the sync Task handoff, so the architect resumes
+				// the QA gate pipeline after an async completion too. r13 (P2-2):
+				// durable + deduped, independent of a live parent session.
 				if (
 					[
 						'reviewer',
@@ -764,17 +919,39 @@ export function createBackgroundCompletionObserver(opts: {
 						'critic_sounding_board',
 					].includes(record.normalizedAgent)
 				) {
-					const session = swarmState.agentSessions.get(record.parentSessionId);
-					if (session) {
-						pushAdvisory(
-							session,
-							`[PIPELINE] ${record.normalizedAgent} delegation complete for task ${
-								record.evidenceTaskId ?? record.planTaskId ?? 'unknown'
-							}. ` +
+					await runCloseoutStep(
+						record,
+						terminal.eventId,
+						'pipeline_advisory',
+						async () => {
+							const message =
+								`[PIPELINE] ${record.normalizedAgent} delegation complete for task ${
+									record.evidenceTaskId ?? record.planTaskId ?? 'unknown'
+								}. ` +
 								`Resume the QA gate pipeline — check your task pipeline steps for the next required action. ` +
-								`Do not stop here.`,
-						);
-					}
+								`Do not stop here.`;
+							const stored = await putTerminalCloseoutAdvisory(
+								directory,
+								record.correlationId,
+								{
+									eventId: `${terminal.eventId}:pipeline`,
+									parentSessionId: record.parentSessionId,
+									message,
+								},
+							);
+							if (stored === null) {
+								throw new Error(
+									'pipeline advisory could not be durably established',
+								);
+							}
+							const session = swarmState.agentSessions.get(
+								record.parentSessionId,
+							);
+							if (session) {
+								pushAdvisory(session, stored.message);
+							}
+						},
+					);
 				}
 			}
 			// F4: knowledge receipt reconciliation — ledger-idempotent, so it also
@@ -960,24 +1137,67 @@ export function createBackgroundCompletionObserver(opts: {
 						);
 					}
 					if (!applied.ok) {
-						await publishAdvisory(
-							directory,
-							record,
-							terminal.eventId,
-							applied.skipped
-								? 'skipped (tests not run) — re-dispatch the test gate; reviewer proof preserved; task remains Stage B eligible'
-								: legacyTransferPending
-									? 'ingestion failed; legacy coder settlement transfer is pending; durable reconciliation will retry'
-									: legacyTransferRequiresManualRecovery
-										? 'ingestion failed; legacy coder settlement requires manual recovery; run /swarm recover for this task (or /swarm reset-session)'
-										: applied.stale
-											? 'stale'
-											: 'ingestion failed',
-						);
+						// r13 (P0-3): journal-gated; a pending legacy transfer keeps
+						// the step un-acked (not-final message, corrected by the
+						// transfer reconciler's replay).
+						const outcomeMessage = applied.skipped
+							? 'skipped (tests not run) — re-dispatch the test gate; reviewer proof preserved; task remains Stage B eligible'
+							: legacyTransferPending
+								? 'ingestion failed; legacy coder settlement transfer is pending; durable reconciliation will retry'
+								: legacyTransferRequiresManualRecovery
+									? 'ingestion failed; legacy coder settlement requires manual recovery; run /swarm recover for this task (or /swarm reset-session)'
+									: applied.stale
+										? 'stale'
+										: 'ingestion failed';
+						if (legacyTransferPending) {
+							if (
+								isTerminalCloseoutStepPending(
+									record,
+									terminal.eventId,
+									'parent_advisory',
+								)
+							) {
+								await publishAdvisory(
+									directory,
+									record,
+									terminal.eventId,
+									outcomeMessage,
+								);
+							}
+						} else {
+							await runCloseoutStep(
+								record,
+								terminal.eventId,
+								'parent_advisory',
+								async () => {
+									await publishAdvisory(
+										directory,
+										record,
+										terminal.eventId,
+										outcomeMessage,
+									);
+								},
+							);
+						}
+						// r13 (P1-2): the ingestion outcome is terminally negative
+						// (rejected/skipped/stale verdict, durably consumed) — this task
+						// will NEVER reach business success, so no context-map success
+						// summary may ever be written for it. Ack the context_map step
+						// as closed so recovery does not re-drive a success write for a
+						// rejected outcome forever.
+						if (applied.consumed) {
+							await markTerminalCloseoutStepCompleted(
+								directory,
+								record.correlationId,
+								terminal.eventId,
+								'context_map',
+							);
+						}
 						// Maintenance point P2b (issue #2104): the ingestion
 						// rejection has just been durably recorded — reconcile now
 						// so the rejected record and any orphaned reservation are
 						// handled at this listed point, not only at the next one.
+						inFlightCloseoutCorrelationIds.add(record.correlationId);
 						try {
 							await maintainBackgroundDelegations(directory, {
 								lockTimeoutMs: 1_000,
@@ -985,9 +1205,21 @@ export function createBackgroundCompletionObserver(opts: {
 								skipLegacyCoderSettlementReconciliation: legacyTransferPending,
 								onLegacyCoderSettlementAdvisoryReplaced:
 									notifyLegacyCoderSettlementAdvisoryReplaced,
+								onTerminalCloseoutPending: async (pendingRecord) => {
+									if (
+										inFlightCloseoutCorrelationIds.has(
+											pendingRecord.correlationId,
+										)
+									) {
+										return;
+									}
+									await reconcilePending(pendingRecord);
+								},
 							});
 						} catch {
 							// observation only; the facts ring records it
+						} finally {
+							inFlightCloseoutCorrelationIds.delete(record.correlationId);
 						}
 						return;
 					}
@@ -1061,18 +1293,94 @@ export function createBackgroundCompletionObserver(opts: {
 					);
 				}
 			}
-			await publishAdvisory(
-				directory,
-				record,
-				terminal.eventId,
-				record.normalizedAgent === 'coder'
-					? legacyTransferPending
-						? 'completed and settled; legacy coder settlement transfer is pending; durable reconciliation will retry'
-						: legacyTransferRequiresManualRecovery
-							? 'completed and settled; legacy coder settlement requires manual recovery; run /swarm recover for this task (or /swarm reset-session)'
-							: 'completed and settled'
-					: 'completed',
-			);
+
+			// r13 audit repair (P1-2): the context-map success summary now runs
+			// HERE — after coder settlement, worktree merge-back, and Stage-B
+			// ingestion all proved the business outcome. A child that merely
+			// ANSWERED never reaches this point on a negative path (its flow
+			// returned above), so a rejected reviewer verdict, a failed
+			// test-engineer run, a failed settlement, or a retryable ingestion
+			// can never appear as 'approved'. Journal-gated (P0-3): a crash
+			// between settlement and this write is re-driven by recovery; the
+			// write itself is idempotent (task_history is keyed by task id).
+			if (
+				opts.contextMap?.enabled === true &&
+				record.batchId === undefined
+			) {
+				const closeoutTaskId = record.evidenceTaskId ?? record.planTaskId;
+				if (closeoutTaskId) {
+					await runCloseoutStep(
+						record,
+						terminal.eventId,
+						'context_map',
+						async () => {
+							const {
+								extractContextDecisionsFromContextMd,
+								updateContextMapAfterAgent,
+							} = await resolveContextMapModule();
+							updateContextMapAfterAgent({
+								task_id: closeoutTaskId,
+								agent_role: record.normalizedAgent,
+								// Best-effort reconstruction from the original
+								// delegation (P1-2): the coder's declared files
+								// when present, else no attribution.
+								files_touched:
+									record.taskChangeContext?.declaredFiles ?? [],
+								implementation_summary: (result.text ?? '').slice(0, 500),
+								task_goal: '',
+								// Only reached on verified business success.
+								final_status: 'completed',
+								decisions: extractContextDecisionsFromContextMd(directory, {
+									agent_role: record.normalizedAgent,
+								}),
+								directory,
+							});
+						},
+					);
+				}
+			}
+
+			// r13 repair (P0-3): journal-gated terminal advisory — a crash
+			// before this publish is re-driven instead of lost. A pending
+			// legacy transfer keeps the step un-acked (the message is not
+			// final until the transfer reconciler's replay publishes the
+			// corrected outcome).
+			if (legacyTransferPending) {
+				if (
+					isTerminalCloseoutStepPending(
+						record,
+						terminal.eventId,
+						'parent_advisory',
+					)
+				) {
+					await publishAdvisory(
+						directory,
+						record,
+						terminal.eventId,
+						record.normalizedAgent === 'coder'
+							? 'completed and settled; legacy coder settlement transfer is pending; durable reconciliation will retry'
+							: 'completed',
+					);
+				}
+			} else {
+				await runCloseoutStep(
+					record,
+					terminal.eventId,
+					'parent_advisory',
+					async () => {
+						await publishAdvisory(
+							directory,
+							record,
+							terminal.eventId,
+							record.normalizedAgent === 'coder'
+								? legacyTransferRequiresManualRecovery
+									? 'completed and settled; legacy coder settlement requires manual recovery; run /swarm recover for this task (or /swarm reset-session)'
+									: 'completed and settled'
+								: 'completed',
+						);
+					},
+				);
+			}
 			logger.log(
 				`[background] trusted completion settled: agent=${record.normalizedAgent} task=${taskLabel(record)} parent=${record.parentSessionId}`,
 			);
@@ -1117,6 +1425,17 @@ export function createBackgroundCompletionObserver(opts: {
 
 	if (config.enabled) {
 		registerLegacyCoderSettlementReconciler(directory, reconcilePending);
+		// r13 audit repair (P0-3): register the terminal-closeout reconciler so
+		// maintenance passes (admission, status, background-maintenance) re-drive
+		// crashed closeouts WITHOUT depending on a new host completion event.
+		// The in-flight guard prevents re-entering a record this observer is
+		// currently processing live.
+		registerTerminalCloseoutReconciler(directory, async (pendingRecord) => {
+			if (inFlightCloseoutCorrelationIds.has(pendingRecord.correlationId)) {
+				return;
+			}
+			await reconcilePending(pendingRecord);
+		});
 	}
 
 	const prepareAdvisories = async (
