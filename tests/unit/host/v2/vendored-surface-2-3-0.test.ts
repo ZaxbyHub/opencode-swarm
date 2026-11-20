@@ -3,11 +3,17 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 /**
- * Vendored 2.3.0 surface pins (issues #3732 + #3552).
+ * Vendored 2.3.0 surface pins (issues #3732 + #3552 + #3756 T3).
  *
  * Source-scan + runtime suite only — compile-time assignability lives in the
  * sibling `vendored-surface-2-3-0.type-probe.ts` gated by a real `tsc --noEmit`
  * run (bun test does not typecheck; see the trace for the probe evidence).
+ *
+ * #3756 T3 (AC10): the two rows at the bottom pin the C3 negatives the
+ * compile-time probe guards — `V2JsonValue` must not admit `undefined`, and
+ * `V2ExperimentalGenerateApi` must keep `readonly prompt: string`. At base
+ * 6864cd83b these rows do not exist, so the mutations they reject were
+ * invisible to `bun test` (the type probe itself was ungated — AC8).
  */
 
 const REPO_ROOT = path.resolve(import.meta.dir, '..', '..', '..', '..');
@@ -195,6 +201,26 @@ describe('vendored 2.3.0 surface (#3732/#3552)', () => {
 		const block = typeAliasBlock('V2JsonValue');
 		expect(block).toContain('V2JsonValue[]');
 		expect(block).toContain('[key: string]: V2JsonValue');
+	});
+
+	test('V2JsonValue rejects undefined widening (#3756 T3 / AC10)', () => {
+		const block = typeAliasBlock('V2JsonValue');
+		// Anti-vacuity: the union must still carry its recursive arms.
+		expect(block).toContain('V2JsonValue[]');
+		expect(block).toContain('[key: string]: V2JsonValue');
+		// The mutation `| boolean | undefined` (and any other undefined
+		// admission) must FAIL this row — the runtime mirror of the type
+		// probe's `@ts-expect-error` _jsonBad negative.
+		expect(block).not.toContain('undefined');
+	});
+
+	test('V2ExperimentalGenerateApi pins readonly prompt: string (#3756 T3 / AC10)', () => {
+		const block = interfaceBlock('V2ExperimentalGenerateApi');
+		expect(block).toContain('readonly prompt: string;');
+		expect(block).toContain('Promise<{ text: string }>');
+		// The retype mutation `readonly prompt: number;` must FAIL this row —
+		// the runtime mirror of the type probe's _generateBad negative.
+		expect(block).not.toContain('readonly prompt: number;');
 	});
 
 	test('historical 2.0.26 verification comments are preserved, not rewritten', () => {

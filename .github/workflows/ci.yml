@@ -359,6 +359,9 @@ jobs:
       - name: Type check
         if: needs.detect-release.outputs.is-release != 'true'
         run: bun run typecheck
+      - name: Vendored surface type probe
+        if: needs.detect-release.outputs.is-release != 'true'
+        run: bun run scripts/check-vendored-surface-probe.ts
       - name: Biome CI
         if: needs.detect-release.outputs.is-release != 'true'
         run: bunx biome ci .

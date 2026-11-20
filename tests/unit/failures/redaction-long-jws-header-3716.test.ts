@@ -141,9 +141,16 @@ describe('findJwsTokenSpans semantics (leftmost, non-overlapping, linear)', () =
 		expect(
 			findJwsTokenSpans(`eyJ${'a'.repeat(10)}.pay.${'s'.repeat(10)}`),
 		).toHaveLength(1);
+		// #3743 (AC3): an empty-key dir-JWE whose IV fails tokenLike is now
+		// ACCEPTED — the IV position is structural (dotted shape with an
+		// empty second segment after a >=13-char header), so a 10-char
+		// all-lowercase IV no longer leaves the whole token visible (the
+		// length-0 rejection this leg pinned at base is the old behavior).
+		// An EMPTY IV is still rejected (the leg after next).
 		expect(
 			findJwsTokenSpans(`eyJ${'a'.repeat(10)}..${'s'.repeat(10)}`),
-		).toHaveLength(0);
+		).toHaveLength(1);
+		expect(findJwsTokenSpans(`eyJ${'a'.repeat(10)}...ct.tag`)).toHaveLength(0);
 		expect(
 			findJwsTokenSpans(`eyJ${'a'.repeat(10)}.p.${'s'.repeat(10)}`),
 		).toHaveLength(1);

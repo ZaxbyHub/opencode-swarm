@@ -122,9 +122,13 @@ const SECRET_PATTERNS: SecretPattern[] = [
  * done for #3382: fixed-length credential families match embedded
  * (non-word-boundary) shapes and the AWS-secret arms now run before the bare
  * access-key arm, so durable-secret rejection decisions differ between
- * members on opposite sides of the change).
+ * members on opposite sides of the change; done for #3743: Cf/DI fill
+ * tolerance — findSecrets/containsSecret/redactSecrets now also match a
+ * condensed (zero-width-byte-deleted) view, so a credential split by an
+ * invisible byte is rejected/redacted the same as its plain form, changing
+ * durable-secret rejection decisions across the change).
  */
-export const REDACTION_POLICY_SALT = 3;
+export const REDACTION_POLICY_SALT = 4;
 /**
  * #1466: redaction-policy input. `detectPii`/`rejectDurablePii`/`piiDetector`
  * are optional so non-memory callers (e.g. the consensus miner, which applies
@@ -195,6 +199,13 @@ export interface MemoryCohortFingerprintInput {
  * detection and the AWS-secret arm reorder). Same remedy: legacy files
  * surface as "re-run `/swarm memory link`".
  *
+ * Version 4 (#3743): again no change to canonicalization, hashing, or
+ * truncation — bumped because `redaction_policy_version` changed for
+ * unchanged user config (REDACTION_POLICY_SALT 3→4 with the Cf/DI fill
+ * tolerance: secret detection/redaction now also matches the condensed
+ * zero-width-deleted view). Same remedy: legacy files surface as
+ * "re-run `/swarm memory link`".
+ *
  * BUMP THIS whenever a change would alter the digest for an unchanged input —
  * e.g. a different hash, a different truncation length, a change to
  * `stableCanonicalStringify`'s output for a reachable input, or a change to the
@@ -202,7 +213,7 @@ export interface MemoryCohortFingerprintInput {
  * comparing fingerprints, so a bump surfaces as "re-run `/swarm memory link`"
  * instead of being misreported as a real provider/embedding config mismatch.
  */
-export const FINGERPRINT_ALGORITHM_VERSION = 3;
+export const FINGERPRINT_ALGORITHM_VERSION = 4;
 
 /**
  * #2062 F-012 (R3 fix): the algorithm version implied by a persisted cohort
@@ -348,8 +359,8 @@ export function findSecrets(text: string): SecretFinding[] {
 	const findings: SecretFinding[] = [];
 	for (const { type, pattern } of SECRET_PATTERNS) {
 		pattern.lastIndex = 0;
-		for (const match of text.matchAll(pattern)) {
-			if (match[0]) findings.push({ type, match: match[0] });
+		for (const span of selectedSecretSpans(text, pattern)) {
+			findings.push({ type, match: text.slice(span.start, span.end) });
 		}
 	}
 	return findings;
@@ -362,8 +373,104 @@ export function containsSecret(text: string): boolean {
 export function redactSecrets(text: string): string {
 	let redacted = text;
 	for (const { type, pattern } of SECRET_PATTERNS) {
+		// #3743: each pattern operates on the CURRENT (already spliced) string —
+		// sequential-priority semantics are preserved exactly (earlier patterns'
+		// placeholders contain `[`/`:`, outside every body class, so later arms
+		// can never match inside them). The two-view span set is rebuilt from
+		// the current string each iteration because offsets from earlier
+		// splices are invalid.
 		pattern.lastIndex = 0;
-		redacted = redacted.replace(pattern, `[REDACTED:${type}]`);
+		const spans = selectedSecretSpans(redacted, pattern);
+		for (let i = spans.length - 1; i >= 0; i--) {
+			const { start, end } = spans[i];
+			redacted = `${redacted.slice(0, start)}[REDACTED:${type}]${redacted.slice(end)}`;
+		}
 	}
 	return redacted;
+}
+
+// #3743: Cf/DI fill tolerance for the memory secret scanner. A zero-width or
+// default-ignorable byte inside a credential (e.g. `sk-AAA\u200BBBB…`) splits
+// every alphabet-anchored body run, so the raw-text pass misses the token.
+// Mirrors the #3730 fix shape at the two failure-evidence sites
+// (src/failures/invocation-failure.ts and src/hooks/guardrails/helpers.ts) —
+// deliberately an inline mirror per that precedent, not a shared module: this
+// scanner keeps its small import graph, and the parity discipline lives in the
+// per-family test suites.
+const SECRET_ZERO_WIDTH_FILL_RE = /\p{Cf}|\p{Default_Ignorable_Code_Point}/u;
+
+interface SecretSpan {
+	start: number;
+	end: number;
+}
+
+/**
+ * #3743: per-pattern two-view span selection. Collects the pattern's matches
+ * on the raw text AND on a Cf/DI-deleted condensed view (mapped back to
+ * original offsets — a mapped-back span INCLUDES the invisible bytes inside
+ * it), deduplicates byte-identical spans, then selects non-overlapping
+ * leftmost-longest (sort start asc / end desc; overlapping later spans extend
+ * the kept span's end). One span per selected match: a plain token identical
+ * in both views yields exactly one finding.
+ */
+function selectedSecretSpans(text: string, pattern: RegExp): SecretSpan[] {
+	const spans: SecretSpan[] = [];
+	pattern.lastIndex = 0;
+	for (const match of text.matchAll(pattern)) {
+		if (match[0] && match.index !== undefined) {
+			spans.push({ start: match.index, end: match.index + match[0].length });
+		}
+	}
+	const { condensed, condensedToOriginal } = condenseSecretView(text);
+	if (condensed !== text) {
+		pattern.lastIndex = 0;
+		for (const match of condensed.matchAll(pattern)) {
+			if (!match[0] || match.index === undefined) continue;
+			const last = condensedToOriginal[match.index + match[0].length - 1];
+			const start = condensedToOriginal[match.index];
+			if (start === undefined || last === undefined) continue;
+			spans.push({ start, end: Math.min(last + 1, text.length) });
+		}
+	}
+	spans.sort((a, b) => a.start - b.start || b.end - a.end);
+	const selected: SecretSpan[] = [];
+	for (const span of spans) {
+		const last = selected[selected.length - 1];
+		if (!last || span.start >= last.end) {
+			selected.push({ ...span });
+		} else if (span.end > last.end) {
+			// Overlapping but longer: EXTEND the earlier span (keep the earlier
+			// start — a replace would uncover the earlier span's exclusive
+			// prefix; same rule as the #3730 mirror's union walk).
+			last.end = span.end;
+		}
+	}
+	return selected;
+}
+
+/** #3743: build the Cf/DI-deleted view plus its code-unit offset map. */
+function condenseSecretView(text: string): {
+	condensed: string;
+	condensedToOriginal: number[];
+} {
+	const condensedChars: string[] = [];
+	const condensedToOriginal: number[] = [];
+	let cursor = 0;
+	for (const char of text) {
+		if (!SECRET_ZERO_WIDTH_FILL_RE.test(char)) {
+			condensedChars.push(char);
+			// One map entry per UTF-16 code unit, each carrying its OWN
+			// absolute original offset (cursor + k) — the map stays unit-
+			// aligned across astral characters AND a match's end offset
+			// (map[lastUnit] + 1) lands after the full astral char instead
+			// of splitting the surrogate pair (#3743 implementation review:
+			// the start-only mapping truncated a match ending in an astral
+			// char and corrupted redactSecrets output with a lone low
+			// surrogate).
+			for (let k = 0; k < char.length; k++)
+				condensedToOriginal.push(cursor + k);
+		}
+		cursor += char.length;
+	}
+	return { condensed: condensedChars.join(''), condensedToOriginal };
 }

@@ -88,12 +88,14 @@ export interface SandboxExecutor {
 	readonly mechanism: string;
 
 	/**
-	 * #3736 D8: isolation strength this executor provides. Optional — the
-	 * win32 native executor reports it (its constructor reads the runner
+	 * #3736 D8 / #3743: isolation strength this executor provides. Optional —
+	 * the win32 native executor reports it (its constructor reads the runner
 	 * probe once); executors without the concept leave it undefined and the
 	 * executor cache pins them for the process lifetime as before. A 'weak'
-	 * executor is TTL-bounded in getExecutor() so a transient probe failure
-	 * cannot pin the PowerShell fallback forever.
+	 * OR 'none' executor is TTL-bounded in getExecutor() so a transient probe
+	 * failure cannot pin the PowerShell fallback (weak) or the unavailable
+	 * state (none — both the runner probe and the fallback failed during
+	 * construction) forever.
 	 */
 	readonly strength?: 'strong' | 'weak' | 'none';
 
@@ -353,16 +355,25 @@ export async function getExecutor(): Promise<SandboxExecutor | null> {
 	const entry: ExecutorCacheEntry = {
 		promise: _internals.createPlatformExecutor().then(
 			(executor) => {
-				// #3736 D8: a NULL creation and a WEAK executor are both
-				// bounded failures — a weak executor exists only because the
-				// native runner probe failed, and with the probe's own TTL
-				// (runner-client.ts #3736 D7) the failure may be transient.
-				// Bounding it here means the next getExecutor() call past the
-				// TTL reconstructs the executor, which re-probes and can
-				// recover STRONG after the runner binary is installed or the
-				// transient error clears. Strong/unstated executors stay
-				// pinned for the process lifetime.
-				if (executor === null || executor.strength === 'weak') {
+				// #3736 D8 / #3743: a NULL creation, a WEAK executor, and a
+				// NONE-strength executor are all bounded failures — a weak or
+				// none executor exists only because the native runner probe
+				// (and, for 'none', the PowerShell fallback) failed, and with
+				// the probe's own TTL (runner-client.ts #3736 D7) the failure
+				// may be transient. Bounding it here means the next
+				// getExecutor() call past the TTL reconstructs the executor,
+				// which re-probes and can recover STRONG after the runner
+				// binary is installed or the transient error clears.
+				// Strong/unstated executors stay pinned for the process
+				// lifetime. (A post-construction disable() flipping a strong
+				// executor to 'none' is an explicit runtime decision, not a
+				// transient failure — it stays out of this TTL class by
+				// design; see the #3743 trace's 08a disposition.)
+				if (
+					executor === null ||
+					executor.strength === 'weak' ||
+					executor.strength === 'none'
+				) {
 					entry.expiresAt = Date.now() + executorFailureTtlMs();
 				}
 				return executor;

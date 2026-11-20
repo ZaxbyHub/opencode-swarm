@@ -41,7 +41,6 @@ describe('#1850 cohort config fingerprint inputs (acceptance #10, #13)', () => {
 		expect(a).toBe(b);
 		expect(a).toMatch(/^[a-f0-9]{12}$/);
 	});
-
 	test('different provider configs produce different fingerprints', () => {
 		const sqliteFp = computeMemoryCohortFingerprint(
 			buildMemoryCohortFingerprintInput({
@@ -57,7 +56,6 @@ describe('#1850 cohort config fingerprint inputs (acceptance #10, #13)', () => {
 		);
 		expect(sqliteFp).not.toBe(jsonlFp);
 	});
-
 	/**
 	 * #2062 F-007: golden digest. `computeMemoryCohortFingerprint` uses
 	 * `node:crypto` `createHash('sha256')` (redaction.ts) — NOT the
@@ -93,9 +91,8 @@ describe('#1850 cohort config fingerprint inputs (acceptance #10, #13)', () => {
 			embedding_version: 'v1',
 		};
 		expect(computeMemoryCohortFingerprint(golden)).toBe('125223b54843');
-		expect(FINGERPRINT_ALGORITHM_VERSION).toBe(3);
+		expect(FINGERPRINT_ALGORITHM_VERSION).toBe(4);
 	});
-
 	test('golden digest is independent of key insertion order', () => {
 		const reordered = {
 			embedding_version: 'v1',
@@ -132,15 +129,17 @@ describe('#2062 F-012 classifyStoredFingerprintAlgorithmVersion', () => {
 		// byte-compare. (#1466 made the real current version >1, so the no-arg
 		// call now also mismatches: legacy files fail open with the advisory;
 		// #3382 moved the real current to 3.)
-		expect(classifyStoredFingerprintAlgorithmVersion(undefined, 3)).toEqual({
+		expect(classifyStoredFingerprintAlgorithmVersion(undefined, 4)).toEqual({
 			status: 'mismatch',
 			storedVersion: 1,
-			currentVersion: 3,
+			currentVersion: 4,
 		});
 		expect(classifyStoredFingerprintAlgorithmVersion(undefined)).toEqual({
 			status: 'mismatch',
 			storedVersion: 1,
-			currentVersion: 3,
+			// #3743: current algorithm version is 4 (salt bump with the
+			// Cf/DI fill tolerance).
+			currentVersion: 4,
 		});
 	});
 
@@ -219,12 +218,13 @@ describe('#1850 SQLite provider fingerprint enforcement (acceptance #10 fail-clo
 		// takes the fail-open path — see the legacy tests below).
 		// #3382: the current version is now 3; a stored 2 is a KNOWN OLD
 		// version and would take the mismatch/fail-open re-link path, so the
-		// fixture must carry 3 to keep exercising the fail-closed compare.
+		// fixture must carry 4 (#3743 salt bump) to keep exercising the
+		// fail-closed compare.
 		writeFileSync(
 			path.join(cohortRoot, 'memory-cohort-config.json'),
 			JSON.stringify({
 				fingerprint: 'deadbeefdead',
-				algorithm_version: 3,
+				algorithm_version: 4,
 			}),
 			'utf-8',
 		);

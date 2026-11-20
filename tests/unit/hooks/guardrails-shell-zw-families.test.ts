@@ -119,4 +119,23 @@ describe('#3730 glued compositions — decided display-union semantics (both sit
 		expect(shell.includes(PAYLOAD)).toBe(false);
 		expect(display.includes(PAYLOAD)).toBe(false);
 	});
+
+	test('display site: astral char after a split token stays intact - no lone surrogate (#3743 R3)', () => {
+		const token = `sk-${'A'.repeat(10)}${ZW}${'B'.repeat(12)}\u{1F600}`;
+		const out = sanitizeFailureEvidenceDisplay(`failed: ${token}`);
+		for (let i = 0; i < out.length; i += 1) {
+			const code = out.charCodeAt(i);
+			const prev = i > 0 ? out.charCodeAt(i - 1) : 0;
+			const next = i + 1 < out.length ? out.charCodeAt(i + 1) : 0;
+			const isHigh = code >= 0xd800 && code <= 0xdbff;
+			const isLow = code >= 0xdc00 && code <= 0xdfff;
+			const prevIsHigh = prev >= 0xd800 && prev <= 0xdbff;
+			const nextIsLow = next >= 0xdc00 && next <= 0xdfff;
+			if ((isHigh && !nextIsLow) || (isLow && !prevIsHigh)) {
+				throw new Error(
+					`lone surrogate at index ${i} in ${JSON.stringify(out)}`,
+				);
+			}
+		}
+	});
 });

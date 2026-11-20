@@ -103,6 +103,8 @@ const CLASSIFIED: Record<string, string> = {
 		'metrics: _appendCount / _lastWarnAt (append budget telemetry)',
 	'src/prm/trajectory-store.ts':
 		'metrics/timestamp: skippedLockAppends / lastAppendSkipEventAtMs / lastCleanupScheduledAtMs (store telemetry cadence)',
+	'src/sandbox/capability-probe.ts':
+		'cache: _cachedExpiresAt memo-expiry deadline for the win32 degraded-probe memo (#3743: Date.now ms, SWARM_SANDBOX_CAPABILITY_FAILURE_TTL_MS-bounded; process-local memoization only — never persisted, never an identity; capability identity is the derivation itself)',
 	'src/sast/semgrep.ts': 'cache: semgrepAvailabilityGeneration (probe epoch)',
 	'src/services/injection-budget.ts':
 		'ordering: turnGenerationCounter (in-memory turn epoch)',

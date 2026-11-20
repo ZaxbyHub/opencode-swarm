@@ -170,6 +170,7 @@ Run both linter AND formatter — e.g., `bunx @biomejs/biome@<version> check --w
 
 ```bash
 bun run typecheck
+bun run scripts/check-vendored-surface-probe.ts
 bun run lint:ci
 bun run scripts/check-tool-registration.ts
 bun run check:mock-cleanup
@@ -370,7 +371,7 @@ and `gh pr ready` until publication evidence exists. Before publishing, write:
     "repository": "$(git remote get-url origin)",
     "head_sha": "$(git rev-parse HEAD)",
     "body_sha256": "$BODY_SHA256",
-    "validation_commands": ["bun run typecheck", "bun run lint:ci"],
+    "validation_commands": ["bun run typecheck","bun run scripts/check-vendored-surface-probe.ts","bun run lint:ci"],
     "recorded_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   }
   EOF

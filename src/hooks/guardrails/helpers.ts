@@ -279,13 +279,17 @@ export function redactShellCommand(cmd: string): string {
 		'$1$2$3=[REDACTED]',
 	);
 
+	// #3743: the two dash-flag arms are bounded ({0,64} around the keyword,
+	// same convention as the KV arm above) — the unbounded classes made the
+	// case-insensitive scan quadratic on long dash runs (~4.9-7.4 s per
+	// redactShellCommand call at 20k dashes; bounded is linear).
 	out = out.replace(
-		/--([a-zA-Z-]*(?:token|secret|password|passwd|api[_-]?key|apikey|auth|credential|private[_-]?key|access[_-]?key)[a-zA-Z-]*)=(\S+)/gi,
+		/--([a-zA-Z-]{0,64}(?:token|secret|password|passwd|api[_-]?key|apikey|auth|credential|private[_-]?key|access[_-]?key)[a-zA-Z-]{0,64})=(\S+)/gi,
 		'--$1=[REDACTED]',
 	);
 
 	out = out.replace(
-		/(--[a-zA-Z-]*(?:token|secret|password|passwd|api[_-]?key|apikey|auth|credential|private[_-]?key|access[_-]?key)[a-zA-Z-]*)(\s+)(?!--)(\S+)/gi,
+		/(--[a-zA-Z-]{0,64}(?:token|secret|password|passwd|api[_-]?key|apikey|auth|credential|private[_-]?key|access[_-]?key)[a-zA-Z-]{0,64})(\s+)(?!--)(\S+)/gi,
 		'$1$2[REDACTED]',
 	);
 
@@ -325,11 +329,13 @@ export function redactShellCommand(cmd: string): string {
 			// code-point position misaligns every span after a kept astral
 			// character (emoji/CJK-ext) and maps a token ending at the input
 			// end past the array (NaN end -> slice(NaN) appends the whole
-			// cleartext string). Every unit of a kept char maps to that
-			// char's original index; matches always start/end on char
-			// boundaries, so only whole-char lookups occur.
+			// cleartext string). Each unit carries its OWN absolute offset
+			// (zwCursor + unit) so a span END lookup (map[lastUnit]+1) lands
+			// after the full astral char instead of splitting the surrogate
+			// pair (#3743 implementation review); matches always start/end
+			// on char boundaries.
 			for (let unit = 0; unit < char.length; unit += 1) {
-				condensedToOriginal.push(zwCursor);
+				condensedToOriginal.push(zwCursor + unit);
 			}
 		}
 		zwCursor += char.length;

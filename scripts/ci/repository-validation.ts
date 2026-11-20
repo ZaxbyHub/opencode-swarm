@@ -263,6 +263,7 @@ const SURFACE_DEFINITIONS: SurfaceDefinition[] = [
 			command('error-channel-discard', () => ['bun', 'run', 'check:error-channel-discard'], ['bun']),
 			command('path-identity', () => ['bun', 'run', 'check:path-identity'], ['bun']),
 			command('token-formula', () => ['bun', 'run', 'check:token-formula'], ['bun']),
+			command('vendored-surface', () => ['bun', 'run', 'scripts/check-vendored-surface-probe.ts'], ['bun']),
 			command('test-tmpdir', () => ['bun', 'run', 'check:test-tmpdir'], ['bun']),
 			command('bash-portability', () => ['bun', 'run', 'check:bash-portability'], ['bun']),
 			command('swarm-model', () => ['node', '--test'], ['node'], (root) => path.join(root, 'scripts', 'swarm-model')),

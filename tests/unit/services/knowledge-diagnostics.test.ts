@@ -387,7 +387,7 @@ describe('knowledge-diagnostics', () => {
 		});
 
 		it('#1466 legacy config with no algorithm_version is skipped after the v2 bump (no strand)', async () => {
-			// FINGERPRINT_ALGORITHM_VERSION is 3 since #3382 (was 2 after
+			// FINGERPRINT_ALGORITHM_VERSION is 4 since #3743 (was 3 after #3382 (was 2 after
 			// #1466), so an absent version means legacy v1: digests are not
 			// comparable and the debug payload reports null (fail-open with
 			// the re-link
