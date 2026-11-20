@@ -14,8 +14,14 @@
  * The repair (r15): eviction orders by mtime FIRST (the real recency signal),
  * with seq demoted to a coarse-mtime TIE-BREAKER (its originally-intended
  * role — a deterministic, roughly-write-ordered tie-break within one mtime
- * tick). The just-written record stays protected by protectPath, and the
- * docs no longer claim cross-restart monotonicity.
+ * tick). The just-written record stays protected by protectPath.
+ *
+ * r16 follow-up: allocateSeq additionally continues the counter from the
+ * dir's persisted records at a restarted writer's first allocation, so the
+ * post-restart seqs stay above every surviving record's seq even when old
+ * and new records share one coarse mtime tick (the identical-mtime case is
+ * covered by stage-b-dispatch-binding-store-restart-seq-r16.test.ts). The
+ * precondition assertion below pins that continuation.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
@@ -67,9 +73,9 @@ function record(
 
 function readSeq(sessionID: string, callID: string): number {
 	return (
-		JSON.parse(
-			fs.readFileSync(recordPathFor(sessionID, callID), 'utf-8'),
-		) as { seq: number }
+		JSON.parse(fs.readFileSync(recordPathFor(sessionID, callID), 'utf-8')) as {
+			seq: number;
+		}
 	).seq;
 }
 
@@ -86,11 +92,14 @@ describe('stage-b-dispatch-binding-store — eviction order across restarts (r15
 		// Phase A (pre-restart): a burst of `cap` records in ONE frozen
 		// millisecond tick — seqs W..W+127, all pinned to one deterministic
 		// mtime (W - 100s, well within the 24h TTL).
-		withFrozenClock(() => {
-			for (let i = 0; i < cap; i++) {
-				expect(record(SESSION, `old-${i}`, () => W)).toBe(true);
-			}
-		}, { fixedNow: W });
+		withFrozenClock(
+			() => {
+				for (let i = 0; i < cap; i++) {
+					expect(record(SESSION, `old-${i}`, () => W)).toBe(true);
+				}
+			},
+			{ fixedNow: W },
+		);
 		for (let i = 0; i < cap; i++) {
 			pinMtime(recordPathFor(SESSION, `old-${i}`), W - 100_000);
 		}
@@ -101,33 +110,44 @@ describe('stage-b-dispatch-binding-store — eviction order across restarts (r15
 		// (FIFO bound) via distinct throwaway session dirs. Their records are
 		// pinned OLDER than the target dir's so the cross-dir LRU sweep never
 		// reaps the target dir itself.
-		withFrozenClock(() => {
-			for (let d = 0; d < MAP_FIFO_BOUND; d++) {
-				const dummy = `sess-r15-dummy-${d}`;
-				expect(record(dummy, 'call-1', () => W)).toBe(true);
-				pinMtime(recordPathFor(dummy, 'call-1'), W - 200_000);
-			}
-		}, { fixedNow: W });
+		withFrozenClock(
+			() => {
+				for (let d = 0; d < MAP_FIFO_BOUND; d++) {
+					const dummy = `sess-r15-dummy-${d}`;
+					expect(record(dummy, 'call-1', () => W)).toBe(true);
+					pinMtime(recordPathFor(dummy, 'call-1'), W - 200_000);
+				}
+			},
+			{ fixedNow: W },
+		);
 
 		// Phase B (post-restart): 60 more records in the target dir at a
-		// frozen clock only 50 ms "later" — the wall-clock floor gives them
-		// seqs W+50..W+109, strictly below the surviving burst's tail
-		// (W+51..W+127). Their mtimes are the real (later) write times.
+		// frozen clock only 50 ms "later". r16: allocateSeq continues the
+		// counter from the dir's persisted records (bounded one-time
+		// reconstruction at the first allocation per dir per process), so
+		// the post-restart seqs stay ABOVE the burst's tail (W+128..)
+		// instead of restarting at the wall-clock floor (W+50). Their
+		// mtimes are the real (later) write times.
 		let new1Seq = 0;
-		withFrozenClock(() => {
-			for (let j = 1; j <= 60; j++) {
-				expect(record(SESSION, `new-${j}`, () => W + 50)).toBe(true);
-				if (j === 1) {
-					// Capture BEFORE later writes' prunes can evict it.
-					new1Seq = readSeq(SESSION, 'new-1');
+		withFrozenClock(
+			() => {
+				for (let j = 1; j <= 60; j++) {
+					expect(record(SESSION, `new-${j}`, () => W + 50)).toBe(true);
+					if (j === 1) {
+						// Capture BEFORE later writes' prunes can evict it.
+						new1Seq = readSeq(SESSION, 'new-1');
+					}
 				}
-			}
-		}, { fixedNow: W + 50 });
+			},
+			{ fixedNow: W + 50 },
+		);
 
-		// Restart precondition proven: the first post-restart record did NOT
-		// continue the burst's sequence — its seq is the wall-clock floor.
-		expect(new1Seq).toBe(W + 50);
-		expect(new1Seq).toBeLessThan(readSeq(SESSION, `old-${cap - 1}`));
+		// r16 continuation precondition proven: the first post-restart
+		// record continued the burst's sequence instead of dropping to the
+		// wall-clock floor (W+50, which sat below the surviving burst's
+		// tail — the pre-r16 defect mechanism this test originally pinned).
+		expect(new1Seq).toBe(W + 128);
+		expect(new1Seq).toBeGreaterThan(readSeq(SESSION, `old-${cap - 1}`));
 
 		// The dir is back at the cap: 128 + 60 written, 60 evicted.
 		const sessionDir = path.dirname(recordPathFor(SESSION, 'old-0'));
@@ -148,24 +168,23 @@ describe('stage-b-dispatch-binding-store — eviction order across restarts (r15
 		expect(fs.existsSync(recordPathFor(SESSION, 'old-0'))).toBe(false);
 		expect(fs.existsSync(recordPathFor(SESSION, 'old-59'))).toBe(false);
 		// ...and the newest pre-restart record survives (both orders agree).
-		expect(
-			fs.existsSync(recordPathFor(SESSION, `old-${cap - 1}`)),
-		).toBe(true);
+		expect(fs.existsSync(recordPathFor(SESSION, `old-${cap - 1}`))).toBe(true);
 	});
 
 	it('within one mtime tick, seq still breaks ties deterministically (oldest callID evicted at the cap)', () => {
 		const W = Date.now();
 		const cap = MAX_STAGE_B_BINDING_FILES_PER_SESSION_DIR;
-		withFrozenClock(() => {
-			for (let i = 0; i <= cap; i++) {
-				expect(record(SESSION, `call-cap-${i}`, () => W)).toBe(true);
-			}
-		}, { fixedNow: W });
+		withFrozenClock(
+			() => {
+				for (let i = 0; i <= cap; i++) {
+					expect(record(SESSION, `call-cap-${i}`, () => W)).toBe(true);
+				}
+			},
+			{ fixedNow: W },
+		);
 		// All records share (roughly) one mtime tick; the seq tie-break must
 		// evict the FIRST-written record, never the just-written one.
 		expect(fs.existsSync(recordPathFor(SESSION, 'call-cap-0'))).toBe(false);
-		expect(
-			fs.existsSync(recordPathFor(SESSION, `call-cap-${cap}`)),
-		).toBe(true);
+		expect(fs.existsSync(recordPathFor(SESSION, `call-cap-${cap}`))).toBe(true);
 	});
 });
