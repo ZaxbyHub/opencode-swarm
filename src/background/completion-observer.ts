@@ -381,6 +381,18 @@ export function createBackgroundCompletionObserver(opts: {
 			) {
 				steps.push('pipeline_advisory');
 			}
+			// r14 audit repair (P0-3): the plan-critic approval snapshot is a
+			// recoverable closeout step of its own — but ONLY for a
+			// host-verified critic record whose dispatch carried the plan
+			// binding (planCriticDispatch). A critic record without a provable
+			// plan binding (legacy pre-binding records) never gets the step and
+			// can never auto-approve.
+			if (
+				record.normalizedAgent === 'critic' &&
+				record.planCriticDispatch !== undefined
+			) {
+				steps.push('plan_critic_approval');
+			}
 		}
 		return steps;
 	};
@@ -913,51 +925,109 @@ export function createBackgroundCompletionObserver(opts: {
 			// (approve_plan_critic) remains the only alternative. The shared recorder
 			// is replay-safe (ledger dedup by call id), so duplicate terminal delivery
 			// and crash-recovery replays cannot approve twice.
+			//
+			// r14 audit repair (P0-3): the approval is now a JOURNALED closeout
+			// step (plan_critic_approval). A transient failure (unreadable
+			// ledger/plan.json, snapshot write failure) no longer log-and-loses a
+			// legitimate APPROVED verdict — the step stays pending and recovery
+			// re-drives the recorder, which re-applies EVERY authorization check
+			// (verdict, plan binding, hash fence, ledger dedup) on each replay.
+			// Terminal outcomes close the step: recorded / already recorded /
+			// not_approved complete it (no approval required is NOT a retry), a
+			// plan-hash conflict is a durable, visible final rejection
+			// (permanent_failure), and the manual approve_plan_critic escape hatch
+			// is never invoked automatically.
 			if (record.normalizedAgent === 'critic' && record.planCriticDispatch) {
-				try {
-					const { recordVerifiedPlanCriticApproval } =
-						await resolveCriticApprovalModule();
-					const recording = await recordVerifiedPlanCriticApproval(directory, {
-						parentSessionId: record.parentSessionId,
-						callId: record.callID,
-						verdictText: result.text,
-						// Audit P0-1 item 10: a truncated terminal text cannot prove
-						// a final verdict — the VERDICT line may be cut off mid-token.
-						verdictTruncated: result.truncated === true,
-						dispatchPlanStructureHash:
-							record.planCriticDispatch.planStructureHash,
-						transport: 'async_completion',
-					});
-					if (recording.outcome === 'recorded') {
-						logger.log(
-							`[background] plan critic approval snapshot recorded for call ${record.callID} (${terminal.eventId})`,
-						);
-					} else if (recording.outcome !== 'not_approved') {
-						// skipped (replay / stale plan) or failed (unreadable plan.json):
-						// surface it — a lost APPROVED wedges the coder gate.
-						logger.warn(
-							`[background] plan critic approval not recorded for call ${record.callID}: ${recording.reason}`,
-						);
-						const session = swarmState.agentSessions.get(
-							record.parentSessionId,
-						);
-						if (session) {
-							pushAdvisory(
-								session,
-								`[PLAN CRITIC] The async critic returned APPROVED but no approval snapshot was recorded for call ${record.callID}: ${recording.reason}. ` +
-									(recording.reason.includes('changed')
-										? 'The plan changed since the critic dispatch — re-run the critic gate against the current plan.'
-										: 'The critic_pre_plan gate remains blocked; re-dispatch the critic, or record a manual approval via approve_plan_critic with a reason.'),
-							);
-						}
-					}
-				} catch (error) {
+				const surfaceCriticApprovalIssue = (
+					reason: string,
+					permanent: boolean,
+				): void => {
 					logger.warn(
-						`[background] plan critic approval processing failed for call ${record.callID}: ${
-							error instanceof Error ? error.message : String(error)
-						}`,
+						`[background] plan critic approval not recorded for call ${record.callID}: ${reason}`,
 					);
-				}
+					const session = swarmState.agentSessions.get(
+						record.parentSessionId,
+					);
+					if (session) {
+						pushAdvisory(
+							session,
+							`[PLAN CRITIC] The async critic returned APPROVED but no approval snapshot was recorded for call ${record.callID}: ${reason}. ` +
+								(permanent
+									? 'The plan changed since the critic dispatch — re-run the critic gate against the current plan.'
+									: 'The approval step stays pending; durable recovery will retry. If it keeps failing, re-dispatch the critic, or record a manual approval via approve_plan_critic with a reason.'),
+						);
+					}
+				};
+				await runCloseoutStep(
+					record,
+					terminal.eventId,
+					'plan_critic_approval',
+					async (): Promise<CloseoutEffectResult> => {
+						const { recordVerifiedPlanCriticApproval } =
+							await resolveCriticApprovalModule();
+						let recording: Awaited<
+							ReturnType<typeof recordVerifiedPlanCriticApproval>
+						>;
+						try {
+							recording = await recordVerifiedPlanCriticApproval(directory, {
+								parentSessionId: record.parentSessionId,
+								callId: record.callID,
+								verdictText: result.text,
+								// Audit P0-1 item 10: a truncated terminal text cannot prove
+								// a final verdict — the VERDICT line may be cut off mid-token.
+								verdictTruncated: result.truncated === true,
+								dispatchPlanStructureHash:
+									record.planCriticDispatch?.planStructureHash,
+								transport: 'async_completion',
+							});
+						} catch (error) {
+							// The recorder never throws in contract; an exception is
+							// an unexpected fault — retryable, never a silent loss.
+							return {
+								status: 'retryable_error',
+								reason: `plan critic approval recorder threw for call ${record.callID}: ${
+									error instanceof Error ? error.message : String(error)
+								}`,
+							};
+						}
+						if (recording.outcome === 'recorded') {
+							logger.log(
+								`[background] plan critic approval snapshot recorded for call ${record.callID} (${terminal.eventId})`,
+							);
+							return { status: 'persisted' };
+						}
+						if (recording.outcome === 'not_approved') {
+							// Finally no approval required (verdict not APPROVED /
+							// truncated) — NOT a retry error. The step closes.
+							logger.log(
+								`[background] plan critic verdict for call ${record.callID} requires no approval snapshot: ${recording.reason}`,
+							);
+							return { status: 'persisted' };
+						}
+						if (recording.outcome === 'skipped') {
+							if (recording.reasonCode === 'already_recorded') {
+								// The identical approval is already durably stored.
+								return { status: 'already_persisted' };
+							}
+							// reasonCode 'conflict': the plan hash changed since the
+							// dispatch — a FINAL rejection, durably visible in the
+							// journal as a failed step with its reason.
+							surfaceCriticApprovalIssue(recording.reason, true);
+							return {
+								status: 'permanent_failure',
+								reason: recording.reason,
+							};
+						}
+						// outcome 'failed' (ledger_unreadable / plan.json not
+						// readable / write_failed): transient — the step MUST stay
+						// pending; recovery re-drives the recorder.
+						surfaceCriticApprovalIssue(recording.reason, false);
+						return {
+							status: 'retryable_error',
+							reason: `plan critic approval transiently failed for call ${record.callID}: ${recording.reason}`,
+						};
+					},
+				);
 			}
 			// r12 (async lifecycle F2/F3/F4): the shared BUSINESS closeout for a
 			// verified native-async completion — the terminal-record twin of the

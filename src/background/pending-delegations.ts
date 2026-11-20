@@ -470,6 +470,16 @@ export const TERMINAL_CLOSEOUT_STEPS = [
 	'sounding_board',
 	'pipeline_advisory',
 	'parent_advisory',
+	/**
+	 * r14 audit repair (P0-3): the plan-critic approval snapshot is its own
+	 * recoverable closeout step. A transient ledger/plan read failure used to
+	 * log-and-lose a legitimate APPROVED verdict (restoring the original
+	 * PLAN_CRITIC_GATE_VIOLATION wedge). Only a host-verified critic record
+	 * with a dispatch-time plan binding (planCriticDispatch) may carry this
+	 * step; every replay re-applies the same authorization checks inside the
+	 * shared recorder.
+	 */
+	'plan_critic_approval',
 ] as const;
 
 export type TerminalCloseoutStep = (typeof TERMINAL_CLOSEOUT_STEPS)[number];
