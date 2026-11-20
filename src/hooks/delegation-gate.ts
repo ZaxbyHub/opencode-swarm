@@ -5,6 +5,7 @@
  * Uses experimental.chat.messages.transform to provide non-blocking guidance.
  */
 
+import { isNativeV2AsyncSubagentHost } from '../host/v2/native-async-mode';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { ZodError, z } from 'zod';
@@ -63,6 +64,7 @@ import {
 	readTaskGateRequirementsReceiptsSync,
 } from '../evidence/task-gate-requirements.js';
 import { isReadOnlyTool } from '../full-auto/policy';
+import { isSingleToolCallProgram } from '../full-auto/code-mode-program';
 import { compareTaskWorkflowStateRank } from '../gate-evidence';
 import { isMarkdownOnlyTaskChange } from '../gate-evidence-classification.js';
 import {
@@ -2999,6 +3001,23 @@ function evidenceTaskResolutionOptions(
 	return undefined;
 }
 
+// The outer OpenCode Code Mode `execute` is not the tool that mutates a
+// plan. It can contain arbitrary JavaScript, so NEVER treat all execute calls
+// as safe. Only the host-marked, explicitly operator-trusted wrapper around
+// ONE statically parsed, plain-data tool call may reach the nested tool's
+// own tool.execute.before gate. This mirrors the full-auto classifier.
+const COMPLETION_CODE_MODE_RECOVERY_CALL =
+	/^\s*(?:return\s+)?(?:await\s+)?tools\.(?:update_task_status|save_plan|check_gate_status|get_approved_plan|get_qa_gate_profile)\s*\(/;
+
+function isBoundedCompletionCodeModeRecovery(code: unknown): boolean {
+	return (
+		typeof code === 'string' &&
+		code.length <= 8192 &&
+		COMPLETION_CODE_MODE_RECOVERY_CALL.test(code) &&
+		isSingleToolCallProgram(code)
+	);
+}
+
 export function canRunWhileTaskAwaitsCompletion(input: {
 	directory: string | undefined;
 	normalizedTool: string;
@@ -3936,6 +3955,8 @@ export function createDelegationGateHook(
 			tool: string;
 			sessionID: string;
 			callID: string;
+			/** Untrusted by itself; combined with explicit operator opt-in. */
+			hostCodeModeWrapper?: boolean;
 		},
 		output: { args: unknown },
 	) => Promise<void>;
@@ -3970,12 +3991,16 @@ export function createDelegationGateHook(
 		((config.hooks as Record<string, unknown> | undefined)
 			?.delegation_max_chars as number | undefined) ?? 4000;
 
-	// Opt-in background-subagent support. When false (default), background swarm
-	// Task dispatches remain fail-closed-blocked. When true, running placeholders
-	// are durably tracked for later trusted completion settlement.
-	const backgroundSubagentsEnabled =
+	// Opt-in background-subagent support. The core initializes the separate
+	// backgroundCompletionObserver only when config.hooks.background_subagents
+	// is explicitly true. The dispatch gate MUST use that exact condition too:
+	// inferring the flag from the v2 host would persist a pending delegation
+	// without ANY enabled observer to consume its terminal event.
+	const nativeV2AsyncSubagents = isNativeV2AsyncSubagentHost(directory);
+	const configuredBackgroundSubagents =
 		(config.hooks as Record<string, unknown> | undefined)
-			?.background_subagents === true;
+			?.background_subagents;
+	const backgroundSubagentsEnabled = configuredBackgroundSubagents === true;
 	const backgroundPendingTimeoutMs =
 		(((config.hooks as Record<string, unknown> | undefined)
 			?.background_pending_timeout_minutes as number | undefined) ?? 30) *
@@ -4231,6 +4256,21 @@ export function createDelegationGateHook(
 	};
 	const clearPublishedScopeBindings = (callID: string): void => {
 		const entries = publishedScopeBindingsByCallID.get(callID) ?? [];
+		if (process.env.SWARM_SCOPE_REVOKE_TRACE === '1') {
+			for (const entry of entries) {
+				if (entry.binding.activation !== 'active') continue;
+				console.error('[SWARM_SCOPE_REVOKE_TRACE] ' + JSON.stringify({
+					at: new Date().toISOString(),
+					origin: 'clearPublishedScopeBindings',
+					callID,
+					sessionID: entry.binding.ownerSessionId,
+					worktree: entry.directory !== directory,
+					leaseAgeMs: Date.now() - entry.binding.leaseStartedAt,
+					remainingTtlMs: entry.binding.expiresAt - Date.now(),
+					stack: new Error().stack?.split('\n').slice(2, 6).map((x) => x.trim()),
+				}));
+			}
+		}
 		publishedScopeBindingsByCallID.delete(callID);
 		for (const entry of entries) {
 			clearScopeBindingFromDisk({
@@ -4422,6 +4462,22 @@ export function createDelegationGateHook(
 		includeOwnedChildren = false,
 	): void => {
 		if (!sessionID) return;
+		if (process.env.SWARM_SCOPE_REVOKE_TRACE === '1') {
+			const matching = [...publishedScopeBindingsByCallID.entries()]
+				.filter(([, entries]) => entries.some((entry) =>
+					entry.binding.ownerSessionId === sessionID ||
+					(includeOwnedChildren && entry.binding.parentOwnerSessionId === sessionID),
+				))
+				.map(([callID]) => callID);
+			console.error('[SWARM_SCOPE_REVOKE_TRACE] ' + JSON.stringify({
+				at: new Date().toISOString(),
+				origin: 'sessionEnded',
+				sessionID,
+				includeOwnedChildren,
+				matchingCallIDs: matching.slice(0, 8),
+				stack: new Error().stack?.split('\n').slice(2, 6).map((x) => x.trim()),
+			}));
+		}
 		clearReviewRouteStateForSession(sessionID);
 		const removed = clearScopeBindings(
 			(binding) =>
@@ -4582,7 +4638,13 @@ export function createDelegationGateHook(
 		background: unknown,
 		worktree?: BackgroundWorktreeDescriptor,
 	): Promise<void> => {
-		if (backgroundSubagentsEnabled && isBackgroundTrue(background)) return;
+		// The native 2.3 bridge uses background settlement, but it must NOT
+		// silently lose the clean-baseline guarantee that this exact task had
+		// before the protocol adaptation. Other explicitly opted-in v1 background
+		// tasks retain their existing (separate) background admission policy.
+		const nativeBackground = nativeV2AsyncSubagents &&
+			backgroundSubagentsEnabled && isBackgroundTrue(background);
+		if (backgroundSubagentsEnabled && isBackgroundTrue(background) && !nativeBackground) return;
 		const context = coderTaskChangeContextByCallID.get(input.callID);
 		if (!context || context.workflowGeneration === undefined) {
 			throw new Error(
@@ -4682,6 +4744,8 @@ export function createDelegationGateHook(
 			tool: string;
 			sessionID: string;
 			callID: string;
+			/** Untrusted by itself; combined with explicit operator opt-in. */
+			hostCodeModeWrapper?: boolean;
 		},
 		output: { args: unknown },
 	): Promise<void> => {
@@ -4976,6 +5040,15 @@ export function createDelegationGateHook(
 					codeModeWrapper: isCodeModeWrapperCall(input.sessionID, input.callID),
 				});
 				if (!permitted) {
+					if (normalized === 'execute' && typeof completionArgs.code === 'string') {
+						throw new Error(
+							`TASK_COMPLETION_CODE_MODE_WRAPPER_DENIED: Task ${taskAwaitingCompletion} awaits completion. ` +
+								'The outer execute program is opaque to this gate. Do not retry the same multi-call script. ' +
+								'Use ONE literal tools.update_task_status({task_id: "' + taskAwaitingCompletion + '", status: "completed", working_directory: "..."}) call, without try/catch or other statements. ' +
+								'Code Mode pass-through additionally requires full_auto.permission_policy.trust_code_mode_wrapper=true and the v2 host call marker. ' +
+								'The nested tool will still be checked. Direct native tool calls require no Code Mode opt-in.',
+						);
+					}
 					throw new Error(
 						completionGateViolationMessage(taskAwaitingCompletion),
 					);
@@ -5010,6 +5083,15 @@ export function createDelegationGateHook(
 			isBackgroundTrue(args.background) &&
 			isKnownCanonicalRole(targetAgent)
 		) {
+			if (nativeV2AsyncSubagents) {
+				throw new Error(
+					'SWARM_V2_NATIVE_ASYNC_REQUIRES_TRACKING: OpenCode 2.3.x always launches native subagents in the background. ' +
+					'Explicit hooks.background_subagents=false disables durable completion tracking. ' +
+					'Set hooks.background_subagents=true in the effective Swarm configuration, ' +
+					'then restart OpenCode so BOTH the gate and backgroundCompletionObserver are initialized; ' +
+					'the dispatch was not started.',
+				);
+			}
 			throw new Error(SWARM_BACKGROUND_TASK_BLOCKED_MESSAGE);
 		}
 

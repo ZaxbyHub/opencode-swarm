@@ -1,3 +1,4 @@
+import { ingestV2StepUsage, forgetV2StepUsage, clearV2StepUsage } from './host/v2/usage-bridge.js';
 import { createHash } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
@@ -579,6 +580,7 @@ export function _resetDelegationTelemetryPairingForTesting(): void {
 	pendingCostCorrectionByChildSession.clear();
 	scheduledCostCorrectionRecoveryBySession.clear();
 	latestAssistantUsageBySession.clear();
+	clearV2StepUsage();
 }
 
 import { applyLanePermissions } from './config/lane-permissions.js';
@@ -1138,6 +1140,15 @@ function rememberAssistantUsageEvent(
 			: undefined;
 		const part = isPlainRecord(properties?.part) ? properties.part : undefined;
 		if (part?.type === 'step-finish') {
+			// Native v2 steps are INDIVIDUAL durable model executions. Accumulate
+			// by verified session and event ID; a last-step-wins Map.set loses
+			// multi-step usage, and replay must not bill a step twice.
+			if (part.swarmV2UsageStep === true) {
+				const aggregate = ingestV2StepUsage(part);
+				if (!aggregate) return undefined;
+				rememberAssistantUsage(aggregate.sessionID, aggregate);
+				return { sessionId: aggregate.sessionID, raw: aggregate };
+			}
 			rememberAssistantUsage(part.sessionID, part);
 			return typeof part.sessionID === 'string'
 				? { sessionId: part.sessionID, raw: part }
@@ -1171,6 +1182,7 @@ function consumeAssistantUsageForTask(
 		const usage = latestAssistantUsageBySession.get(sessionID);
 		if (usage !== undefined) {
 			latestAssistantUsageBySession.delete(sessionID);
+			forgetV2StepUsage(sessionID);
 			return usage;
 		}
 	}
