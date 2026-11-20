@@ -23,8 +23,8 @@
  *     shorter than the 30-day default); it is a LEASE, not a permanent
  *     exemption, because a claim that never expires would recreate the very
  *     defect this module fixes.
- *     A malformed or unreadable manifest refuses the ENTIRE sweep (fail
- *     closed): an unparseable ownership claim is not a licence to delete.
+ *     A malformed, unreadable or misnamed (outside the name grammar) manifest
+ *     skips this catch-all (fail closed); an unparseable claim is no licence.
  *  3. TIER 3 — the catch-all. An unclaimed, non-symlinked directory with no
  *     `.preserve` marker whose entire content is older than its horizon is
  *     pruned. The retention log is validated BEFORE the first delete and every
@@ -189,7 +189,7 @@ export interface OwnerManifestSet {
 	files: readonly string[];
 }
 
-/** A malformed or unreadable ownership claim. Refuses the whole sweep. */
+/** A malformed or unreadable ownership claim. Skips the catch-all pass. */
 export class RetentionManifestError extends Error {
 	constructor(message: string) {
 		super(message);
@@ -253,7 +253,7 @@ function describeError(error: unknown): string {
  * Read and validate every owner manifest. THROWS `RetentionManifestError` on
  * anything ambiguous — a malformed claim, a symlinked manifest, a duplicate
  * claim, or two files declaring the same owner — because the caller's contract
- * is to refuse the whole sweep rather than guess at ownership.
+ * is to skip the catch-all pass rather than guess at ownership.
  */
 export function loadOwnerManifests(swarmRoot: string): OwnerManifestSet {
 	const manifestDir = path.join(swarmRoot, RETENTION_MANIFEST_DIR);
@@ -268,17 +268,17 @@ export function loadOwnerManifests(swarmRoot: string): OwnerManifestSet {
 			return { claims: new Map(), files: [] };
 		}
 		throw new RetentionManifestError(
-			`refusing retention sweep: cannot inspect .swarm/${RETENTION_MANIFEST_DIR}/ (${describeError(error)})`,
+			`skipping unclaimed-directory catch-all: cannot inspect .swarm/${RETENTION_MANIFEST_DIR}/ (${describeError(error)})`,
 		);
 	}
 	if (dirStat.isSymbolicLink()) {
 		throw new RetentionManifestError(
-			`refusing retention sweep: .swarm/${RETENTION_MANIFEST_DIR} is a symlink; ownership manifests must be real files inside the project`,
+			`skipping unclaimed-directory catch-all: .swarm/${RETENTION_MANIFEST_DIR} is a symlink; ownership manifests must be real files inside the project`,
 		);
 	}
 	if (!dirStat.isDirectory()) {
 		throw new RetentionManifestError(
-			`refusing retention sweep: .swarm/${RETENTION_MANIFEST_DIR} is not a directory`,
+			`skipping unclaimed-directory catch-all: .swarm/${RETENTION_MANIFEST_DIR} is not a directory`,
 		);
 	}
 	let names: string[];
@@ -286,7 +286,7 @@ export function loadOwnerManifests(swarmRoot: string): OwnerManifestSet {
 		names = fs.readdirSync(manifestDir).sort();
 	} catch (error) {
 		throw new RetentionManifestError(
-			`refusing retention sweep: cannot read .swarm/${RETENTION_MANIFEST_DIR}/ (${describeError(error)})`,
+			`skipping unclaimed-directory catch-all: cannot read .swarm/${RETENTION_MANIFEST_DIR}/ (${describeError(error)})`,
 		);
 	}
 
@@ -294,22 +294,24 @@ export function loadOwnerManifests(swarmRoot: string): OwnerManifestSet {
 	const owners = new Map<string, string>();
 	const files: string[] = [];
 	for (const name of names) {
-		// Dotfiles and non-JSON names are not manifests: a temp file mid-write
-		// (`x.json` + temp suffix) must not be mistaken for one, and an editor scratch
-		// file must not block a project that is otherwise healthy.
-		if (
-			name.startsWith('.') ||
-			!/^[A-Za-z0-9][A-Za-z0-9._-]*\.json$/i.test(name)
-		) {
-			continue;
-		}
+		// Dotfiles and names that do not end in `.json` are not manifests (a temp
+		// file mid-write must not be mistaken for one). `.json` plus trailing dots
+		// or whitespace is still a claim attempt: refused below, never skipped.
+		if (name.startsWith('.') || !/\.json[.\s]*$/i.test(name)) continue;
 		const manifestPath = path.join(manifestDir, name);
 		const relFile = `.swarm/${RETENTION_MANIFEST_DIR}/${name}`;
 		const fail = (reason: string): never => {
 			throw new RetentionManifestError(
-				`refusing retention sweep: ${relFile}: ${reason}`,
+				`skipping unclaimed-directory catch-all: ${escapeLogPath(relFile)}: ${reason}`,
 			);
 		};
+		// A `.json` name outside the manifest grammar is refused, never skipped: a
+		// silently ignored claim would let its directory be pruned.
+		if (!/^[A-Za-z0-9][A-Za-z0-9._-]*\.json$/i.test(name)) {
+			fail(
+				'is not a valid manifest file name (letters, digits, ".", "_" and "-", starting with a letter or digit)',
+			);
+		}
 		let fileStat: fs.Stats;
 		try {
 			fileStat = fs.lstatSync(manifestPath);
