@@ -128,10 +128,28 @@ describe('guardrails quoted-heredoc neutralization (#3761)', () => {
 				"cat > notes/x.md <<'EOF'\nnever terminated\n",
 				// CRLF terminator does not match
 				"cat > notes/x.md <<'EOF'\nbody\r\nEOF\r",
+				// EARLY terminator (4.5-review CRITICAL): POSIX ends the
+				// heredoc at the FIRST delimiter line — every line after it
+				// is a LIVE command; blanking them would hide real writes.
+				"cat > notes/x.md <<'EOF'\nEOF\ncat /etc/passwd > ../esc.md\nEOF",
+				// early terminator, <<- form
+				"cat > notes/x.md <<-'EOF'\n\tEOF\nrm -rf ../esc\nEOF",
 			];
 			for (const cmd of unchanged) {
 				expect(neutralizeQuotedHeredocBodies(cmd)).toBe(cmd);
 			}
+		}, 60_000);
+
+		it('early-terminator body: the live tail stays visible to detection (4.5 CRITICAL)', () => {
+			const cmd =
+				"cat > notes/x.md <<'EOF'\nEOF\ncat /etc/passwd > ../esc.md\nEOF";
+			const analysis = detectPosixWrites(cmd);
+			const paths = analysis.writes
+				.map((w) => w.path)
+				.filter((p): p is string => typeof p === 'string');
+			expect(
+				paths.some((p) => p.endsWith('../esc.md') || p.endsWith('esc.md')),
+			).toBe(true);
 		}, 60_000);
 
 		it('accepts the <<- tab-stripped terminator and a trailing newline', () => {

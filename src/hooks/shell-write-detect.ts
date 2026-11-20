@@ -9155,11 +9155,18 @@ export function neutralizeQuotedHeredocBodies(command: string): string {
 	// Terminator: the FINAL line equals the delimiter exactly (leading tabs
 	// stripped only for `<<-`); no CR normalization — a `\r` tail means the
 	// line is not the terminator and the shape is refused (unclosed).
+	// 4.5-review CRITICAL fix: POSIX terminates the heredoc at the FIRST
+	// line equal to the delimiter — a delimiter line occurring EARLIER in
+	// the body makes every line after it a LIVE command (the final-line
+	// check alone blanked them). Refuse unless the first matching line IS
+	// the final line.
+	const stripTerminatorForm = (line: string): string =>
+		stripLeadingTabs ? line.replace(/^\t+/, '') : line;
 	const finalLine = lines[lines.length - 1];
-	const terminatorCandidate = stripLeadingTabs
-		? finalLine.replace(/^\t+/, '')
-		: finalLine;
-	if (terminatorCandidate !== delimiter) return command;
+	if (stripTerminatorForm(finalLine) !== delimiter) return command;
+	for (let b = 1; b <= lines.length - 2; b += 1) {
+		if (stripTerminatorForm(lines[b]) === delimiter) return command;
+	}
 	// Length- and line-structure-preserving blank: one space per UTF-16
 	// code unit of each body line. Parse and annotateRawWordText both see
 	// this SAME string, so offset systems stay internally consistent.
