@@ -25,6 +25,21 @@ import { _internals as planManagerInternals } from '../../../src/plan/manager';
 // Within-module DI seam: mock functions assigned to _internals
 const mockLoadPlan = mock(async () => null);
 
+// r15 audit repair (Phase 6 — test isolation): snapshot of the seam's
+// ORIGINALS. The afterEach blocks below previously RE-INSTALLED the mock
+// instead of restoring the originals (their comments claimed "Restore
+// mocks"), leaving loadPlan mocked process-wide after this file — a
+// deterministic polluter for later-running test files (the context-map
+// release suite's update_task_status failed with it).
+const planManagerSeamSnapshot = { ...planManagerInternals };
+
+/** r15 (Phase 6): restore the seam's REAL originals. */
+function restoreSeam(): void {
+	mockLoadPlan.mockImplementation(async () => null);
+	mockLoadPlan.mockClear();
+	Object.assign(planManagerInternals, planManagerSeamSnapshot);
+}
+
 // Static import (mock is hoisted by Bun, so this receives the mocked module).
 // Using static import avoids `await import(...)` inside tests, which hangs in
 // Bun v1.3.9 when the event loop is saturated after many fs.watch create/destroy cycles.
@@ -437,8 +452,9 @@ describe('ADVERSARIAL: Initialization Failure Injection', () => {
 	});
 
 	afterEach(async () => {
-		// Restore mocks to _internals seam
-		planManagerInternals.loadPlan = mockLoadPlan;
+		// r15 (Phase 6): restore the seam's REAL originals (previously this
+		// re-installed the mock, leaking it process-wide).
+		restoreSeam();
 		try {
 			fs.rmSync?.(tempDir, { recursive: true, force: true }) ??
 				fs.rmdirSync(tempDir, { recursive: true });
@@ -588,8 +604,8 @@ describe('ADVERSARIAL: Lifecycle Abuse Scenarios', () => {
 	});
 
 	afterEach(async () => {
-		// Restore mocks to _internals seam
-		planManagerInternals.loadPlan = mockLoadPlan;
+		// r15 (Phase 6): restore the seam's REAL originals.
+		restoreSeam();
 		try {
 			fs.rmSync?.(tempDir, { recursive: true, force: true }) ??
 				fs.rmdirSync(tempDir, { recursive: true });
@@ -918,8 +934,8 @@ describe('ADVERSARIAL: Edge Case Attack Vectors', () => {
 	});
 
 	afterEach(() => {
-		// Restore mocks to _internals seam
-		planManagerInternals.loadPlan = mockLoadPlan;
+		// r15 (Phase 6): restore the seam's REAL originals.
+		restoreSeam();
 	});
 
 	describe('Extreme value attacks', () => {

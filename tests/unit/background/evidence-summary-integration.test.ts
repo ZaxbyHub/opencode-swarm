@@ -1,4 +1,5 @@
 import {
+	afterAll,
 	afterEach,
 	beforeEach,
 	describe,
@@ -16,6 +17,20 @@ import {
 	type EvidenceSummaryIntegrationConfig,
 } from '../../../src/background/evidence-summary-integration';
 import type { AutomationConfig } from '../../../src/config/schema';
+import * as realEventBusModule from '../../../src/background/event-bus';
+import * as realEvidenceSummaryServiceModule from '../../../src/services/evidence-summary-service';
+
+// r15 audit repair (Phase 6 — test isolation): the ORIGINAL exports captured
+// BEFORE the mock.module calls below. Bun's mock.module retroactively patches
+// the original module's export slots and mock.restore() does NOT undo the
+// replacement (verified by a minimal two-file reproducer) — the afterAll at
+// the bottom re-installs these captured originals so later test files in this
+// process see the real modules, not this file's fakes.
+const realGetGlobalEventBus = realEventBusModule.getGlobalEventBus;
+const realResetGlobalEventBus = realEventBusModule.resetGlobalEventBus;
+const RealAutomationEventBus = realEventBusModule.AutomationEventBus;
+const realBuildEvidenceSummary = realEvidenceSummaryServiceModule.buildEvidenceSummary;
+const realIsAutoSummaryEnabled = realEvidenceSummaryServiceModule.isAutoSummaryEnabled;
 
 // Mock the event bus
 const mockSubscribers: Map<
@@ -83,6 +98,26 @@ beforeEach(() => {
 afterEach(() => {
 	rmSync(tempDir, { recursive: true, force: true });
 	mock.restore();
+});
+
+// r15 audit repair (Phase 6): mock.restore() does NOT undo mock.module
+// replacements — without this afterAll, the fakes above stay installed for
+// EVERY later test file in the process (proven: event-bus.test.ts's "should
+// provide global instance" fails when co-located with this file). Re-install
+// the REAL exports captured before the mocks. Runs once after this file's
+// own tests, so the in-file mocks stay effective for every test above.
+afterAll(() => {
+	mock.module('../../../src/background/event-bus', () => ({
+		...realEventBusModule,
+		getGlobalEventBus: realGetGlobalEventBus,
+		resetGlobalEventBus: realResetGlobalEventBus,
+		AutomationEventBus: RealAutomationEventBus,
+	}));
+	mock.module('../../../src/services/evidence-summary-service', () => ({
+		...realEvidenceSummaryServiceModule,
+		buildEvidenceSummary: realBuildEvidenceSummary,
+		isAutoSummaryEnabled: realIsAutoSummaryEnabled,
+	}));
 });
 
 function createMockAutomationConfig(
