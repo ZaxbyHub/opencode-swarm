@@ -1084,6 +1084,15 @@ export function createBackgroundCompletionObserver(opts: {
 								verdictTruncated: result.truncated === true,
 								dispatchPlanStructureHash:
 									record.planCriticDispatch?.planStructureHash,
+								// r14 (P1-6.2): bind the plan identity and the dispatch
+								// prompt payload — the record's stored prompt snapshot
+								// digest (sha256 over the FULL prompt) must match the
+								// digest bound at dispatch; a mismatch or an
+								// unobservable payload is a final refusal.
+								dispatchPlanId: record.planCriticDispatch?.planId,
+								dispatchPromptDigest:
+									record.planCriticDispatch?.promptContentDigest ?? null,
+								observedPromptDigest: record.prompt?.digest ?? null,
 								transport: 'async_completion',
 							});
 						} catch (error) {

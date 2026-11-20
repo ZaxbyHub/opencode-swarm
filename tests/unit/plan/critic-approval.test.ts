@@ -180,29 +180,53 @@ describe('plan-critic-approval shared recorder', () => {
 		expect(gateSnapshots.length).toBe(1);
 	});
 
-	test('sync transport (no dispatch hash) records exactly like the legacy after-hook', async () => {
+	test('sync transport records with a pre-execution binding; without one it is refused (r14 P1-6.3)', async () => {
 		await initLedger(dir, derivePlanId(plan));
-		const result = await recordVerifiedPlanCriticApproval(dir, {
+		const bound = await recordVerifiedPlanCriticApproval(dir, {
 			parentSessionId: 'ses_parent_sync',
 			callId: 'call-critic-sync',
 			verdictText: { output: APPROVED_TEXT },
+			dispatchPlanStructureHash: computePlanStructureHash(plan),
 			transport: 'sync_task',
 		});
-		expect(result.outcome).toBe('recorded');
+		expect(bound.outcome).toBe('recorded');
 		const approved = await loadLastPlanCriticApprovedSnapshot(
 			dir,
 			derivePlanId(plan),
 		);
 		expect(approved?.approval?.call_id).toBe('call-critic-sync');
 		expect(approved?.approval?.transport).toBe('sync_task');
+
+		// r14 audit repair (P1-6.3): WITHOUT the pre-execution binding the
+		// recorder must REFUSE — no unproven automatic approval (the audited
+		// manual escape hatch approve_plan_critic remains the only path).
+		const unbound = await recordVerifiedPlanCriticApproval(dir, {
+			parentSessionId: 'ses_parent_sync',
+			callId: 'call-critic-sync-unbound',
+			verdictText: { output: APPROVED_TEXT },
+			transport: 'sync_task',
+		});
+		expect(unbound.outcome).toBe('skipped');
+		expect(unbound.outcome === 'skipped' && unbound.reasonCode).toBe(
+			'unbound_dispatch',
+		);
+		expect(
+			await hasPlanCriticApprovalSnapshotForCall(
+				dir,
+				'call-critic-sync-unbound',
+			),
+		).toBe(false);
 	});
 
-	test('reports failed (never records) when no plan exists', async () => {
-		// No plan.json written in this test; a clean .swarm dir exists.
+	test('reports failed (never records) when no ledger exists', async () => {
+		// The plan exists (beforeEach writes it) and the dispatch binding
+		// matches — the failure is the missing/unusable ledger, not a missing
+		// binding.
 		const result = await recordVerifiedPlanCriticApproval(dir, {
 			parentSessionId: 'ses_parent_1',
 			callId: 'call-critic-5',
 			verdictText: APPROVED_TEXT,
+			dispatchPlanStructureHash: computePlanStructureHash(plan),
 			transport: 'async_completion',
 		});
 		expect(result.outcome).toBe('failed');

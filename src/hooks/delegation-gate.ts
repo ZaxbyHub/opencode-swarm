@@ -1917,10 +1917,18 @@ async function recordPlanCriticApprovalSnapshotIfApplicable(
 	 * (audit P0-2): the structural hash of the plan as it stood BEFORE the
 	 * critic child started. When present it is passed to the shared recorder
 	 * so a plan edited while the critic ran can no longer be approved by the
-	 * now-stale verdict. When absent (legacy replays, tests without a
-	 * toolBefore pass) the recorder falls back to its own in-fence plan check.
+	 * now-stale verdict.
+	 *
+	 * r14 audit repair (P1-6.3): when ABSENT (legacy replays, tests without
+	 * a toolBefore pass) the recorder now REFUSES to record — no unproven
+	 * automatic approval. The audited manual escape hatch
+	 * (approve_plan_critic) remains.
 	 */
-	baseline?: { planStructureHash: string },
+	baseline?: {
+		planStructureHash: string;
+		planId?: string;
+		promptContentDigest?: string | null;
+	},
 ): Promise<void> {
 	const targetAgent =
 		typeof args.subagent_type === 'string'
@@ -1934,6 +1942,14 @@ async function recordPlanCriticApprovalSnapshotIfApplicable(
 	if (!taskIsExplicitPlanCriticGate(args)) return;
 	if (extractPlanCriticVerdict(output) !== 'APPROVED') return;
 
+	// r14 audit repair (P1-6.2): re-observe the dispatch prompt at approval
+	// time and hand both digests to the recorder — the payload bound at
+	// dispatch must be the payload observed at approval.
+	const observedPromptDigest =
+		typeof args.prompt === 'string'
+			? createHash('sha256').update(args.prompt).digest('hex')
+			: null;
+
 	// Single shared approval implementation (src/plan/critic-approval.ts):
 	// the native-async completion observer calls the exact same recorder with
 	// the dispatch-time plan-structure hash, so both transports write the
@@ -1942,7 +1958,18 @@ async function recordPlanCriticApprovalSnapshotIfApplicable(
 		parentSessionId: input.sessionID,
 		callId: input.callID,
 		verdictText: output,
-		...(baseline ? { dispatchPlanStructureHash: baseline.planStructureHash } : {}),
+		...(baseline
+			? { dispatchPlanStructureHash: baseline.planStructureHash }
+			: {}),
+		...(baseline?.planId !== undefined
+			? { dispatchPlanId: baseline.planId }
+			: {}),
+		...(baseline
+			? {
+					dispatchPromptDigest: baseline.promptContentDigest ?? null,
+					observedPromptDigest,
+				}
+			: {}),
 		transport: 'sync_task',
 	});
 	if (recording.outcome === 'recorded') return;
@@ -7025,9 +7052,8 @@ export function createDelegationGateHook(
 						// toolBefore for this exact call) to the sync recorder so a
 						// plan edited while the critic ran cannot be approved by
 						// the stale verdict.
-						const criticBaseline = planCriticDispatchBaselinesByCallID.get(
-							input.callID,
-						);
+						const criticBaseline =
+							planCriticDispatchBaselinesByCallID.get(input.callID);
 						await recordPlanCriticApprovalSnapshotIfApplicable(
 							directory,
 							input,
@@ -7035,7 +7061,11 @@ export function createDelegationGateHook(
 							_output,
 							criticBaseline &&
 								criticBaseline.parentSessionId === input.sessionID
-								? { planStructureHash: criticBaseline.planStructureHash }
+								? {
+										planStructureHash: criticBaseline.planStructureHash,
+										planId: criticBaseline.planId,
+										promptContentDigest: criticBaseline.promptContentDigest,
+									}
 								: undefined,
 						);
 						planCriticDispatchBaselinesByCallID.delete(input.callID);

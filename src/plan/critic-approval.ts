@@ -20,11 +20,19 @@
  *  - Only an `APPROVED` verdict ({@link extractPlanCriticVerdict}) records a
  *    snapshot. `NEEDS_REVISION`, `REJECTED`, missing, or unparseable verdicts
  *    never approve anything.
+ *  - r14 audit repair (P1-6.3): a MISSING pre-execution binding
+ *    (`dispatchPlanStructureHash` absent) records NOTHING — an unproven
+ *    automatic approval is refused; the audited manual escape hatch
+ *    (approve_plan_critic) remains the only alternative.
  *  - When the caller supplies `dispatchPlanStructureHash` (the async
  *    transport, captured at dispatch time and persisted on the delegation
  *    record), the CURRENT plan's structural hash must still equal it. A plan
  *    edited after the critic was dispatched cannot be approved by the old
  *    verdict — the caller is told to re-run the critic instead.
+ *  - r14 audit repair (P1-6.2): the plan IDENTITY (`dispatchPlanId`) and the
+ *    dispatch prompt payload digest (`dispatchPromptDigest` vs
+ *    `observedPromptDigest`) are verified when the dispatch binding carries
+ *    them; a mismatch or an unobservable payload is a final refusal.
  *  - Replay safety: before writing, the ledger is scanned for an existing
  *    `plan_critic_gate` approval snapshot bound to the same `call_id`. A
  *    replay of the same terminal (crash recovery, duplicate completion event)
@@ -34,6 +42,17 @@
  *    payload) — the exact shape `assertPlanCriticApprovedForExecution` and
  *    `loadLastPlanCriticApprovedSnapshot` already verify. No competing
  *    approval implementation exists.
+ *
+ * HONEST guarantee statement (r14 P1-6.2 — no guarantee is claimed beyond
+ * what the code proves): the binding chain proves (a) WHICH plan content the
+ * critic was dispatched against (structure hash + plan id, re-verified at
+ * approval and again inside the ledger write fence), and (b) — when the
+ * dispatch stored a prompt digest — that the prompt payload bound at
+ * dispatch matches the observed approval-time payload. It does NOT and
+ * cannot prove that the child model read that prompt and no other copy of
+ * the plan: the child's internal attention is unprovable by construction.
+ * A legacy binding without a prompt digest proceeds on the structure-hash
+ * fence alone.
  */
 
 import type { Plan } from '../config/plan-schema';
@@ -185,9 +204,32 @@ const BARE_VERDICT_LINE = /^[ \t]*(APPROVED|NEEDS_REVISION|REJECTED)[ \t]*$/i;
 const FENCE_OPEN = /^[ \t]*(`{3,}|~{3,})/;
 
 /**
+ * r14 audit repair (P1-6.1): the leading indent of a line in CommonMark
+ * column terms — a tab advances to the next 4-space stop.
+ */
+function leadingIndentColumns(line: string): number {
+	let columns = 0;
+	for (const char of line) {
+		if (char === ' ') columns += 1;
+		else if (char === '\t') columns += 4 - (columns % 4);
+		else break;
+	}
+	return columns;
+}
+
+/**
  * Remove every region that can never carry the authoritative verdict:
  * fenced code blocks (``` and ~~~ with proper open/close marker pairing),
- * markdown blockquote lines, and table/enumeration rows containing `|`.
+ * INDENTED lines (r14 audit repair P1-6.1: any line indented by ≥4 columns
+ * — the CommonMark indented-code threshold — is excluded: an "Example:"
+ * template with an indented `VERDICT: APPROVED` line, whether it follows a
+ * blank line (a true indented code block) or a prose line (a lazy
+ * continuation), can never carry the critic's own verdict. This is
+ * deliberately MORE conservative than CommonMark: a critic that indents
+ * its real verdict ≥4 columns fails closed (no approval, re-run the gate)
+ * — a missed approval is recoverable, a false one is not. Shallow indents
+ * (<4 columns) and nested-list headers keep working), markdown blockquote
+ * lines, and table/enumeration rows containing `|`.
  * Returns the surviving lines joined with `\n`.
  *
  * Closing-fence pairing follows the CommonMark rule: a closing fence must
@@ -220,6 +262,9 @@ function stripVerdictExclusionZones(text: string): string {
 			fenceLength = fenceMatch[1].length;
 			continue;
 		}
+		// r14 (P1-6.1): deep-indented lines (≥4 columns) never carry the
+		// authoritative verdict — indented examples/code are excluded.
+		if (leadingIndentColumns(line) >= 4) continue;
 		// Markdown blockquote (incl. nested `>>`) — quoted output templates.
 		if (/^[ \t]*>/.test(line)) continue;
 		// Table rows AND the rubric enumeration
@@ -325,8 +370,36 @@ export interface PlanCriticApprovalRequest {
 	 * the delegation record (async transport). When present, the current plan
 	 * must still match it; a plan edited after the dispatch cannot be approved
 	 * by the old verdict.
+	 *
+	 * r14 audit repair (P1-6.3): when ABSENT, no automatic approval is
+	 * recorded at all — an unproven pre-execution binding fails closed
+	 * (outcome `skipped`/`unbound_dispatch`); the audited manual escape hatch
+	 * (approve_plan_critic) remains the only alternative.
 	 */
 	dispatchPlanStructureHash?: string;
+	/**
+	 * r14 audit repair (P1-6.2): the plan identity (`derivePlanId`) captured
+	 * at dispatch time. When present, the plan being approved must still
+	 * carry the same identity — a re-created plan under the same structure
+	 * hash is refused.
+	 */
+	dispatchPlanId?: string;
+	/**
+	 * r14 audit repair (P1-6.2): sha256 of the FULL dispatch prompt captured
+	 * at dispatch time (the payload handed to the critic child), or null when
+	 * the dispatch stored no digest (legacy bindings). When present, the
+	 * approval-time prompt observation must match it.
+	 */
+	dispatchPromptDigest?: string | null;
+	/**
+	 * r14 audit repair (P1-6.2): the sha256 of the prompt payload OBSERVED at
+	 * approval time (the delegation record's stored prompt snapshot digest,
+	 * or the tool args' prompt re-hash on the sync path), or null when no
+	 * prompt payload is observable. Verification proves the durable binding
+	 * chain is consistent — it does NOT prove the child's attention (which is
+	 * unprovable by construction and never claimed).
+	 */
+	observedPromptDigest?: string | null;
 	transport: PlanCriticApprovalTransport;
 }
 
@@ -335,13 +408,16 @@ export type PlanCriticApprovalRecording =
 	/** The verdict is not an approval (or absent) — nothing to record. */
 	| { outcome: 'not_approved'; reason: string }
 	/**
-	 * A verified approval exists already (replay, `alreadyRecorded`) or the
-	 * plan changed concurrently (`conflict`). Nothing is recorded.
+	 * A verified approval exists already (replay, `alreadyRecorded`), the
+	 * plan changed concurrently (`conflict`), or — r14 audit repair
+	 * (P1-6.3) — the dispatch carried no provable pre-execution plan binding
+	 * (`unbound_dispatch`): an unproven automatic approval is refused.
+	 * Nothing is recorded.
 	 */
 	| {
 			outcome: 'skipped';
 			reason: string;
-			reasonCode?: 'already_recorded' | 'conflict';
+			reasonCode?: 'already_recorded' | 'conflict' | 'unbound_dispatch';
 	  }
 	/**
 	 * The approval could not be persisted; the gate stays blocked. A
@@ -479,6 +555,20 @@ export async function recordVerifiedPlanCriticApproval(
 		return { outcome: 'not_approved', reason: 'verdict is not APPROVED' };
 	}
 
+	// r14 audit repair (P1-6.3): fail-closed pre-execution binding. Without
+	// the dispatch-time plan-structure hash there is NO proof which plan the
+	// critic reviewed — the recorder must not fall back to the CURRENT plan
+	// hash (a post-hoc edited plan could then be approved by a stale verdict).
+	// The audited manual escape hatch (approve_plan_critic) remains.
+	if (request.dispatchPlanStructureHash === undefined) {
+		return {
+			outcome: 'skipped',
+			reasonCode: 'unbound_dispatch',
+			reason:
+				'no pre-execution plan binding: the dispatch-time plan-structure hash is missing, so an unproven automatic approval is refused (fail-closed) — re-dispatch the critic gate, or record a manual approval via approve_plan_critic with a reason',
+		};
+	}
+
 	// Issue #2012: a critic APPROVED verdict that fails to record a snapshot
 	// permanently wedges the ratchet-tighter critic_pre_plan gate (no escape
 	// hatch). loadPlanJsonOnly can transiently return null if the critic
@@ -506,18 +596,51 @@ export async function recordVerifiedPlanCriticApproval(
 	// changed since, this APPROVED verdict is stale — it must not approve the
 	// edited plan. The architect must re-run the critic (or use the audited
 	// manual escape hatch).
-	const expectedStructureHash =
-		request.dispatchPlanStructureHash ?? computePlanStructureHash(plan);
-	if (
-		request.dispatchPlanStructureHash !== undefined &&
-		computePlanStructureHash(plan) !== request.dispatchPlanStructureHash
-	) {
+	const expectedStructureHash = request.dispatchPlanStructureHash;
+	if (computePlanStructureHash(plan) !== expectedStructureHash) {
 		return {
 			outcome: 'skipped',
 			reasonCode: 'conflict',
 			reason:
 				'plan structure changed since the critic dispatch — the APPROVED verdict no longer covers the current plan; re-run the critic gate',
 		};
+	}
+
+	// r14 audit repair (P1-6.2): bind the plan IDENTITY, not only the
+	// content — the plan being approved must be the same plan (same
+	// derivePlanId) the critic was dispatched against.
+	if (
+		request.dispatchPlanId !== undefined &&
+		derivePlanId(plan) !== request.dispatchPlanId
+	) {
+		return {
+			outcome: 'skipped',
+			reasonCode: 'conflict',
+			reason:
+				'plan identity changed since the critic dispatch — the APPROVED verdict is bound to a different plan; re-run the critic gate',
+		};
+	}
+
+	// r14 audit repair (P1-6.2): verify the dispatch prompt payload binding.
+	// When the dispatch stored a prompt digest, the approval-time observation
+	// must match it; a mismatch means the durable binding chain is
+	// inconsistent and the approval is refused (final, deterministic). When
+	// the dispatch stored a digest but NO payload is observable at approval
+	// time, the binding is incomplete — fail closed rather than guess. A
+	// legacy binding without a digest proceeds on the structure-hash fence
+	// alone (documented weaker guarantee — see the module docstring).
+	if (request.dispatchPromptDigest != null) {
+		if (
+			request.observedPromptDigest == null ||
+			request.observedPromptDigest !== request.dispatchPromptDigest
+		) {
+			return {
+				outcome: 'skipped',
+				reasonCode: 'conflict',
+				reason:
+					'dispatch prompt binding mismatch: the critic dispatch prompt digest does not match the observed payload (or no payload is observable) — the approval is refused; re-dispatch the critic gate',
+			};
+		}
 	}
 
 	// Fast-path replay fence (diagnostic only — the authoritative dedup runs

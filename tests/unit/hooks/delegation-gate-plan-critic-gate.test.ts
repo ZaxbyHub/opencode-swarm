@@ -182,22 +182,24 @@ describe('delegation gate plan critic approval', () => {
 		await writePlan(dir, plan);
 		ensureAgentSession('session-plan-critic-record', 'architect');
 		const hook = createDelegationGateHook(makeConfig(), dir);
+		const criticInput = {
+			tool: 'Task',
+			sessionID: 'session-plan-critic-record',
+			callID: 'critic-call',
+			args: {
+				subagent_type: 'critic',
+				prompt: 'MODE: CRITIC-GATE\nTASK: Review plan before EXECUTE',
+			},
+		};
 
-		await hook.toolAfter(
-			{
-				tool: 'Task',
-				sessionID: 'session-plan-critic-record',
-				callID: 'critic-call',
-				args: {
-					subagent_type: 'critic',
-					prompt: 'MODE: CRITIC-GATE\nTASK: Review plan before EXECUTE',
-				},
-			},
-			{
-				output:
-					'VERDICT: APPROVED\nThe plan is mechanically covered and ready.',
-			},
-		);
+		// r14 (P1-6.3): the production sequence — toolBefore captures the
+		// PRE-EXECUTION plan baseline (the tool CALL args ride in output.args);
+		// without it the approval is refused (unbound_dispatch, fail-closed).
+		await hook.toolBefore(criticInput, { args: criticInput.args });
+		await hook.toolAfter(criticInput, {
+			output:
+				'VERDICT: APPROVED\nThe plan is mechanically covered and ready.',
+		});
 
 		const approved = await loadLastApprovedPlan(dir, derivePlanId(plan));
 		expect(approved).not.toBeNull();
@@ -235,19 +237,23 @@ describe('delegation gate plan critic approval', () => {
 			await writePlan(dir, plan);
 			ensureAgentSession('session-plan-critic-variant', 'architect');
 			const hook = createDelegationGateHook(makeConfig(), dir);
-
-			await hook.toolAfter(
-				{
-					tool: 'Task',
-					sessionID: 'session-plan-critic-variant',
-					callID: 'critic-call-variant',
-					args: {
-						subagent_type: 'critic',
-						prompt: variant.prompt,
-					},
+			const criticInput = {
+				tool: 'Task',
+				sessionID: 'session-plan-critic-variant',
+				callID: 'critic-call-variant',
+				args: {
+					subagent_type: 'critic',
+					prompt: variant.prompt,
 				},
-				{ output: 'VERDICT: APPROVED\nThe plan is ready.' },
-			);
+			};
+
+			// r14 (P1-6.3): the production sequence — toolBefore captures the
+			// PRE-EXECUTION plan baseline (the tool CALL args ride in
+			// output.args); without it the approval is refused.
+			await hook.toolBefore(criticInput, { args: criticInput.args });
+			await hook.toolAfter(criticInput, {
+				output: 'VERDICT: APPROVED\nThe plan is ready.',
+			});
 
 			const approved = await loadLastApprovedPlan(dir, derivePlanId(plan));
 			expect(approved).not.toBeNull();
@@ -300,18 +306,22 @@ describe('delegation gate plan critic approval', () => {
 		const hook = createDelegationGateHook(makeConfig(), dir);
 
 		// Record the plan-critic approval via the real production recorder path.
-		await hook.toolAfter(
-			{
-				tool: 'Task',
-				sessionID: 'session-fa1',
-				callID: 'critic-call',
-				args: {
-					subagent_type: 'critic',
-					prompt: 'MODE: CRITIC-GATE\nTASK: Review plan before EXECUTE',
-				},
+		// r14 (P1-6.3): the production sequence — toolBefore captures the
+		// PRE-EXECUTION plan baseline (the tool CALL args ride in output.args);
+		// without it the approval is refused.
+		const criticInput = {
+			tool: 'Task',
+			sessionID: 'session-fa1',
+			callID: 'critic-call',
+			args: {
+				subagent_type: 'critic',
+				prompt: 'MODE: CRITIC-GATE\nTASK: Review plan before EXECUTE',
 			},
-			{ output: 'VERDICT: APPROVED\nThe plan is ready for EXECUTE.' },
-		);
+		};
+		await hook.toolBefore(criticInput, { args: criticInput.args });
+		await hook.toolAfter(criticInput, {
+			output: 'VERDICT: APPROVED\nThe plan is ready for EXECUTE.',
+		});
 
 		// Architect advances the current task before delegating its coder.
 		await updateTaskStatus(dir, '1.1', 'in_progress');
