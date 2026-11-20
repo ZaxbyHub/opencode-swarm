@@ -58,6 +58,7 @@ import {
 	buildBackgroundCompletionEventId,
 	claimCoderSettlement,
 	claimDelegationIngestion,
+	claimTerminalCloseoutStep,
 	claimTerminalResult,
 	clearLegacyCoderSettlementTransferPending,
 	type DurableIngestionOutcome,
@@ -75,6 +76,7 @@ import {
 	putPendingBackgroundAdvisory,
 	putTerminalCloseoutAdvisory,
 	readDurableIngestionOutcome,
+	releaseTerminalCloseoutStepLease,
 	type ReplacePendingBackgroundAdvisoryResult,
 	recordDelegationIngestionResult,
 	registerLegacyCoderSettlementReconciler,
@@ -313,6 +315,12 @@ export function createBackgroundCompletionObserver(opts: {
 	markTerminalCloseoutStepFailedImpl?: typeof markTerminalCloseoutStepFailed;
 	putPendingBackgroundAdvisoryImpl?: typeof putPendingBackgroundAdvisory;
 	putTerminalCloseoutAdvisoryImpl?: typeof putTerminalCloseoutAdvisory;
+	/**
+	 * r14 audit repair (P1-4): test seams for the closeout-step execution
+	 * lease machinery (durable worker fencing).
+	 */
+	claimTerminalCloseoutStepImpl?: typeof claimTerminalCloseoutStep;
+	releaseTerminalCloseoutStepLeaseImpl?: typeof releaseTerminalCloseoutStepLease;
 	// Accepted from caller for API compatibility; reviewer receipt validation
 	// is handled internally by the completion observer when enabled.
 	reviewerReceiptOptions?: Record<string, unknown>;
@@ -409,25 +417,50 @@ export function createBackgroundCompletionObserver(opts: {
 		opts.putPendingBackgroundAdvisoryImpl ?? putPendingBackgroundAdvisory;
 	const putCloseoutAdvisory =
 		opts.putTerminalCloseoutAdvisoryImpl ?? putTerminalCloseoutAdvisory;
+	// r14 audit repair (P1-4): seam-routed closeout-step lease machinery.
+	const claimStep =
+		opts.claimTerminalCloseoutStepImpl ?? claimTerminalCloseoutStep;
+	const releaseStepLease =
+		opts.releaseTerminalCloseoutStepLeaseImpl ??
+		releaseTerminalCloseoutStepLease;
+	/**
+	 * r14 audit repair (P1-4): this observer instance's durable identity for
+	 * closeout-step execution leases (stable across the instance's lifetime,
+	 * distinct per instance/process).
+	 */
+	const closeoutClaimantId = `bg-closeout-${cryptoRandomId()}`;
 	/**
 	 * r14 audit repair (P0-2): ack a closeout step and VERIFY the ack — a
-	 * false return means the durable journal write failed; the step stays
-	 * pending and recovery re-drives the (idempotent) effect. Never silent.
+	 * false return means the durable journal write failed (or, with a lease
+	 * token, the ack was fenced out as stale); the step stays pending and
+	 * recovery re-drives the (idempotent) effect. Never silent.
 	 */
 	const ackCloseoutStep = async (
 		record: BackgroundDelegationRecord,
 		terminalEventId: string,
 		step: TerminalCloseoutStep,
+		leaseToken?: string,
 	): Promise<boolean> => {
-		const acked = await markStepCompleted(
-			directory,
-			record.correlationId,
-			terminalEventId,
-			step,
-		);
+		let acked = false;
+		try {
+			acked = await markStepCompleted(
+				directory,
+				record.correlationId,
+				terminalEventId,
+				step,
+				leaseToken === undefined ? {} : { leaseToken },
+			);
+		} catch (error) {
+			logger.warn(
+				`[background] closeout step '${step}' ack failed for ${record.correlationId} (${terminalEventId}); the step stays pending and recovery re-drives the idempotent effect: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			);
+			return false;
+		}
 		if (!acked) {
 			logger.warn(
-				`[background] closeout step '${step}' ack failed for ${record.correlationId} (${terminalEventId}); the step stays pending and recovery re-drives the idempotent effect`,
+				`[background] closeout step '${step}' ack was refused for ${record.correlationId} (${terminalEventId}); the step stays pending and recovery re-drives the idempotent effect`,
 			);
 		}
 		return acked;
@@ -624,15 +657,21 @@ export function createBackgroundCompletionObserver(opts: {
 			}
 			/**
 			 * Journal-gated closeout effect under the explicit r14 (P0-2)
-			 * effect contract: run `effect` only when the durable journal has
-			 * not acked this step for this exact terminal event, and ack it
-			 * only AFTER the effect REPORTED a durable success (`persisted` |
-			 * `already_persisted`). A thrown error or a `retryable_error`
-			 * leaves the step pending — the next recovery pass re-drives it.
-			 * A `permanent_failure` is durably marked failed in the journal
-			 * (terminally visible, not re-driven). The ACK itself is verified:
-			 * a failed journal write leaves the step pending and the effect
-			 * MUST be idempotent (recovery re-drives it).
+			 * effect contract and the r14 (P1-4) durable step lease:
+			 *
+			 * 1. pending check on the journal (exact terminal event),
+			 * 2. durable CAS claim of the step's execution lease (a live
+			 *    foreign worker → busy skip; a stale worker → refused),
+			 * 3. effect execution (idempotent, stable idempotency key),
+			 * 4. durable result interpretation: persisted/already_persisted →
+			 *    lease-fenced ACK; retryable → lease released, step pending;
+			 *    permanent → lease-fenced durable failure mark.
+			 *
+			 * Guarantee class (documented): at-least-once EXECUTION with
+			 * exactly-once ACK. Exactly-once execution against
+			 * non-transactional sinks is impossible (a lease steal after a
+			 * crash can re-run an effect the crashed worker already ran) —
+			 * which is why every effect is required to be idempotent.
 			 */
 			const runCloseoutStep = async (
 				target: BackgroundDelegationRecord,
@@ -649,6 +688,39 @@ export function createBackgroundCompletionObserver(opts: {
 					);
 					return false;
 				}
+				// r14 (P1-4): durably claim the step's execution lease BEFORE
+				// the effect runs — the ack is fenced on this token.
+				const claim = await claimStep(
+					directory,
+					target.correlationId,
+					terminalEventId,
+					step,
+					{ claimantId: closeoutClaimantId },
+				);
+				if (claim === null) {
+					logger.warn(
+						`[background] closeout step '${step}' lease claim failed for ${target.correlationId}; deferred to recovery`,
+					);
+					return false;
+				}
+				if (claim.disposition === 'busy') {
+					// A live worker owns this step — it alone may run the effect
+					// and ack. This instance skips (no duplicate ack race).
+					logger.log(
+						`[background] closeout step '${step}' for ${target.correlationId} is leased by another live worker; skipped`,
+					);
+					return false;
+				}
+				if (claim.disposition === 'closed') {
+					return false;
+				}
+				if (claim.disposition === 'stale') {
+					logger.warn(
+						`[background] closeout step '${step}' claim for ${target.correlationId} was fenced out (stale terminal); skipped`,
+					);
+					return false;
+				}
+				const leaseToken = claim.leaseToken ?? '';
 				let effectResult: CloseoutEffectResult;
 				try {
 					effectResult = await effect();
@@ -658,11 +730,25 @@ export function createBackgroundCompletionObserver(opts: {
 							error instanceof Error ? error.message : String(error)
 						}`,
 					);
+					await releaseStepLease(
+						directory,
+						target.correlationId,
+						terminalEventId,
+						step,
+						leaseToken,
+					);
 					return false;
 				}
 				if (effectResult.status === 'retryable_error') {
 					logger.warn(
 						`[background] closeout step '${step}' effect for ${target.correlationId} not durably established (stays pending for recovery): ${effectResult.reason}`,
+					);
+					await releaseStepLease(
+						directory,
+						target.correlationId,
+						terminalEventId,
+						step,
+						leaseToken,
 					);
 					return false;
 				}
@@ -676,6 +762,7 @@ export function createBackgroundCompletionObserver(opts: {
 						terminalEventId,
 						step,
 						effectResult.reason,
+						{ leaseToken },
 					);
 					if (!marked) {
 						logger.warn(
@@ -685,8 +772,27 @@ export function createBackgroundCompletionObserver(opts: {
 					return false;
 				}
 				// persisted | already_persisted: the obligation is durably
-				// established — now ACK it and verify the ack itself.
-				await ackCloseoutStep(target, terminalEventId, step);
+				// established — now ACK it (lease-fenced) and verify the ack.
+				const acked = await ackCloseoutStep(
+					target,
+					terminalEventId,
+					step,
+					leaseToken,
+				);
+				if (!acked) {
+					// The effect is durably established but THIS worker's ack
+					// was refused or failed (journal write error / lease lost).
+					// Release the lease so recovery can retry the idempotent
+					// effect-and-ack immediately; a hard process crash (no
+					// release possible) still recovers via lease expiry.
+					await releaseStepLease(
+						directory,
+						target.correlationId,
+						terminalEventId,
+						step,
+						leaseToken,
+					);
+				}
 				return true;
 			};
 

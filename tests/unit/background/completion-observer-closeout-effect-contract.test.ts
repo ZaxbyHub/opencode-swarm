@@ -297,6 +297,7 @@ describe('background completion observer — closeout effect contract (r14 P0-2)
 				correlationId,
 				eventId,
 				step,
+				options,
 			) => {
 				if (step === 'parent_advisory' && !crashed) {
 					crashed = true;
@@ -307,6 +308,7 @@ describe('background completion observer — closeout effect contract (r14 P0-2)
 					correlationId,
 					eventId,
 					step,
+					options,
 				);
 			},
 		});

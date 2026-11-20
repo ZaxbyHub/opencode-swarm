@@ -248,6 +248,7 @@ describe('background completion observer — recoverable plan critic approval cl
 				correlationId,
 				eventId,
 				step,
+				options,
 			) => {
 				if (step === 'plan_critic_approval' && !crashed) {
 					crashed = true;
@@ -258,6 +259,7 @@ describe('background completion observer — recoverable plan critic approval cl
 					correlationId,
 					eventId,
 					step,
+					options,
 				);
 			},
 		});

@@ -182,6 +182,14 @@ const RESERVATION_LOCK_TASK = 'background-coder-reservations';
 const ADVISORY_PREPARE_LEASE_MS = 30_000;
 const INGESTION_CLAIM_LEASE_MS = 30_000;
 
+/**
+ * r14 audit repair (P1-4): default lease for one closeout-step execution
+ * claim. The journal-gated effects are bounded file writes (advisories,
+ * context map, approval ledger), so a short lease bounds crash recovery;
+ * an abandoned lease is stolen after this interval.
+ */
+export const TERMINAL_CLOSEOUT_LEASE_MS = 30_000;
+
 /** An abandoned ingestion lease may be reclaimed after this bounded interval. */
 export const BACKGROUND_INGESTION_LEASE_MS = 30_000;
 
@@ -487,6 +495,16 @@ export type TerminalCloseoutStep = (typeof TERMINAL_CLOSEOUT_STEPS)[number];
 export interface BackgroundDelegationCloseoutStepState {
 	state: 'pending' | 'completed' | 'failed';
 	completedAt?: number;
+	/**
+	 * r14 audit repair (P1-4): durable execution lease for a pending step.
+	 * A worker must CAS-claim the step (claimTerminalCloseoutStep) before
+	 * running its effect; the ack must carry the lease token, so a stale
+	 * worker whose lease expired (or was stolen) can never ack a step a live
+	 * worker owns. Absent on completed/failed steps and on legacy steps.
+	 */
+	leaseClaimant?: string;
+	leaseToken?: string;
+	leaseExpiresAt?: number;
 	/**
 	 * r14 audit repair (P0-2): durable failure reason when
 	 * `state === 'failed'` — a permanent effect failure is terminally visible
@@ -1266,6 +1284,9 @@ const RecordSchema = z
 						.object({
 							state: z.enum(['pending', 'completed', 'failed']),
 							completedAt: z.number().int().nonnegative().optional(),
+							leaseClaimant: z.string().min(1).max(256).optional(),
+							leaseToken: z.string().min(1).max(256).optional(),
+							leaseExpiresAt: z.number().int().nonnegative().optional(),
 							reason: z.string().min(1).max(512).optional(),
 							updatedAt: z.number().int().nonnegative(),
 						})
@@ -1283,6 +1304,19 @@ const RecordSchema = z
 								context.addIssue({
 									code: z.ZodIssueCode.custom,
 									message: 'closeout step reason is only allowed on a failed step',
+								});
+							}
+							// r14 audit repair (P1-4): a lease belongs to a pending
+							// step; terminal steps never carry one.
+							if (
+								value.state !== 'pending' &&
+								(value.leaseClaimant !== undefined ||
+									value.leaseToken !== undefined ||
+									value.leaseExpiresAt !== undefined)
+							) {
+								context.addIssue({
+									code: z.ZodIssueCode.custom,
+									message: 'closeout step lease is only allowed on a pending step',
 								});
 							}
 						}),
@@ -5410,6 +5444,35 @@ export function hasPendingTerminalCloseout(
  * pending steps. Runs OUTSIDE the store locks (the reconciler takes its own
  * locks), bounded by maxRecords — no O(all-records) work per ordinary event.
  */
+/**
+ * r14 audit repair (P1-4): per-directory recovery rotation cursor. The naive
+ * `slice(0, maxRecords)` selection starves later records forever when the
+ * head records cannot complete (persistently failing effects). The cursor
+ * rotates the start position through the candidate list each pass, so every
+ * pending record is eventually examined even with a stuck head.
+ */
+const terminalCloseoutRecoveryCursors = new Map<string, string>();
+
+function rotateCloseoutCandidates<T extends { correlationId: string }>(
+	directory: string,
+	candidates: T[],
+): T[] {
+	if (candidates.length <= 1) return candidates;
+	const cursor = terminalCloseoutRecoveryCursors.get(
+		canonicalRootKeyFresh(directory),
+	);
+	if (!cursor) return candidates;
+	const startIndex = candidates.findIndex(
+		(record) => record.correlationId === cursor,
+	);
+	if (startIndex < 0) return candidates;
+	const rotated = [
+		...candidates.slice(startIndex + 1),
+		...candidates.slice(0, startIndex + 1),
+	];
+	return rotated;
+}
+
 async function reconcileTerminalCloseouts(
 	directory: string,
 	maxRecords: number,
@@ -5417,9 +5480,10 @@ async function reconcileTerminalCloseouts(
 ): Promise<number> {
 	const reconciler = onRecord ?? getTerminalCloseoutReconciler(directory);
 	if (!reconciler) return 0;
-	const candidates = readDelegations(directory)
-		.filter(hasPendingTerminalCloseout)
-		.slice(0, maxRecords);
+	const candidates = rotateCloseoutCandidates(
+		directory,
+		readDelegations(directory).filter(hasPendingTerminalCloseout),
+	).slice(0, maxRecords);
 	if (candidates.length === 0) return 0;
 	let reDriven = 0;
 	for (const record of candidates) {
@@ -5434,6 +5498,12 @@ async function reconcileTerminalCloseouts(
 			);
 		}
 	}
+	// Advance the rotation cursor to the LAST examined record: the next pass
+	// starts after it, so head-of-line starvation cannot pin later records.
+	terminalCloseoutRecoveryCursors.set(
+		canonicalRootKeyFresh(directory),
+		candidates[candidates.length - 1].correlationId,
+	);
 	return reDriven;
 }
 
@@ -5980,12 +6050,20 @@ export async function initializeTerminalCloseout(
  * the step is ONLY acked for the exact terminal event the caller processed.
  * A crash between the business effect and this ack leaves the step pending
  * (re-drivable); a late mark for a superseded terminal is refused.
+ *
+ * r14 audit repair (P1-4): when `options.leaseToken` is provided, the ack is
+ * ADDITIONALLY fenced on the step's durable execution lease — a stale worker
+ * whose lease was stolen (or whose step is leased by a live worker) can
+ * never ack. Without a token (pure acks that ran no effect, and legacy
+ * callers), a step carrying a live foreign lease is refused (busy); a step
+ * without a lease keeps the pre-r14 eventId-fenced behavior.
  */
 export async function markTerminalCloseoutStepCompleted(
 	directory: string,
 	correlationId: string,
 	terminalEventId: string,
 	step: TerminalCloseoutStep,
+	options: { leaseToken?: string } = {},
 ): Promise<boolean> {
 	if (!correlationId || !terminalEventId) return false;
 	const now = Date.now();
@@ -6018,6 +6096,25 @@ export async function markTerminalCloseoutStepCompleted(
 				const existing = closeout.steps[step];
 				if (existing?.state === 'completed') {
 					ok = true;
+					return;
+				}
+				if (existing?.state === 'failed') {
+					// A durably failed step is terminally closed — it cannot be
+					// retroactively completed (r14 P0-2).
+					return;
+				}
+				if (options.leaseToken !== undefined) {
+					// Lease-fenced ack (r14 P1-4): only the current lease holder
+					// may complete the step it claimed.
+					if (existing?.leaseToken !== options.leaseToken) {
+						return;
+					}
+				} else if (
+					existing?.leaseToken !== undefined &&
+					(existing.leaseExpiresAt ?? 0) > now
+				) {
+					// A pure ack (no effect ran) must not complete a step a live
+					// worker currently owns; the lease owner resolves it.
 					return;
 				}
 				const next: BackgroundDelegationRecord = {
@@ -6067,6 +6164,7 @@ export async function markTerminalCloseoutStepFailed(
 	terminalEventId: string,
 	step: TerminalCloseoutStep,
 	reason: string,
+	options: { leaseToken?: string } = {},
 ): Promise<boolean> {
 	if (!correlationId || !terminalEventId || !reason) return false;
 	const now = Date.now();
@@ -6105,6 +6203,14 @@ export async function markTerminalCloseoutStepFailed(
 					// A completed step cannot be retroactively failed.
 					return;
 				}
+				// r14 (P1-4): a lease-fenced failure mark — only the current
+				// lease holder may terminally fail the step it claimed.
+				if (
+					options.leaseToken !== undefined &&
+					existing?.leaseToken !== options.leaseToken
+				) {
+					return;
+				}
 				const next: BackgroundDelegationRecord = {
 					...current,
 					schemaVersion: current.schemaVersion === 4 ? 4 : 3,
@@ -6130,6 +6236,230 @@ export async function markTerminalCloseoutStepFailed(
 	} catch (err) {
 		logger.warn(
 			`[background] markTerminalCloseoutStepFailed failed: ${
+				err instanceof Error ? err.message : String(err)
+			}`,
+		);
+	}
+	return ok;
+}
+
+/** Disposition of a closeout-step lease claim (r14 audit repair P1-4). */
+export interface TerminalCloseoutStepClaim {
+	disposition:
+		| 'claimed'
+		/** Another live worker holds an unexpired lease on this step. */
+		| 'busy'
+		/** The step is terminally closed (completed or durably failed). */
+		| 'closed'
+		/** The record's terminal no longer matches — the caller is stale. */
+		| 'stale';
+	/** The CAS token for the acquired lease (disposition 'claimed' only). */
+	leaseToken?: string;
+}
+
+/**
+ * r14 audit repair (P1-4): durably claim the execution lease of ONE pending
+ * closeout step before its effect runs. Event-fenced CAS under the store
+ * lock: the record's terminal must match exactly (a stale worker is
+ * refused), a terminally closed step is not claimable, and an unexpired
+ * foreign lease is busy. An expired lease is stolen (crash recovery): the
+ * previous holder's later ack fails its token CAS and can never complete a
+ * step the new holder owns. The same claimant re-claiming its own unexpired
+ * lease is idempotent (same token returned).
+ *
+ * GUARANTEE CLASS (documented, not exactly-once): the lease prevents
+ * DUPLICATE ACKS and stale-worker writes; duplicate effect EXECUTION across
+ * a lease steal remains possible in the crash window (claim expired → new
+ * worker runs the effect while the old one still does) — every journal-gated
+ * effect is therefore required to be idempotent with a stable idempotency
+ * key (advisories dedupe by eventId, the context map upserts by task id,
+ * telemetry dedupes by record id, the critic-approval ledger dedupes by call
+ * id). Exactly-once execution against non-transactional sinks is impossible;
+ * the documented guarantee is at-least-once-execution + exactly-once-ack.
+ */
+export async function claimTerminalCloseoutStep(
+	directory: string,
+	correlationId: string,
+	terminalEventId: string,
+	step: TerminalCloseoutStep,
+	options: { claimantId: string; now?: number; leaseMs?: number },
+): Promise<TerminalCloseoutStepClaim | null> {
+	if (!correlationId || !terminalEventId || !step || !options.claimantId) {
+		return null;
+	}
+	const now = options.now ?? Date.now();
+	const leaseMs = Math.max(
+		1_000,
+		Math.min(options.leaseMs ?? TERMINAL_CLOSEOUT_LEASE_MS, 5 * 60_000),
+	);
+	let claim: TerminalCloseoutStepClaim | null = null;
+	try {
+		await withEvidenceLock(
+			directory,
+			BACKGROUND_DELEGATIONS_FILE,
+			STORE_LOCK_AGENT,
+			STORE_LOCK_TASK,
+			async () => {
+				const records = loadRecordsForWrite(directory);
+				if (records === null) return;
+				const current = findRecordForWrite(records, correlationId);
+				if (
+					!current?.terminalResult ||
+					current.terminalResult.eventId !== terminalEventId
+				) {
+					claim = { disposition: 'stale' };
+					return;
+				}
+				const closeout: BackgroundDelegationCloseout =
+					current.closeout &&
+					current.closeout.terminalEventId === terminalEventId
+						? current.closeout
+						: {
+								schemaVersion: 1,
+								terminalEventId,
+								steps: {},
+								updatedAt: now,
+							};
+				const existing = closeout.steps[step];
+				if (existing?.state === 'completed' || existing?.state === 'failed') {
+					claim = { disposition: 'closed' };
+					return;
+				}
+				if (
+					existing?.leaseToken !== undefined &&
+					existing.leaseClaimant !== options.claimantId &&
+					(existing.leaseExpiresAt ?? 0) > now
+				) {
+					claim = { disposition: 'busy' };
+					return;
+				}
+				if (
+					existing?.leaseToken !== undefined &&
+					existing.leaseClaimant === options.claimantId &&
+					(existing.leaseExpiresAt ?? 0) > now
+				) {
+					// Idempotent re-claim by the same live worker.
+					claim = {
+						disposition: 'claimed',
+						leaseToken: existing.leaseToken,
+					};
+					return;
+				}
+				// No lease, an expired lease, or a foreign expired lease: claim
+				// (or steal) it with a fresh token.
+				const leaseToken = createHash('sha256')
+					.update(
+						JSON.stringify([
+							correlationId,
+							terminalEventId,
+							step,
+							options.claimantId,
+							now,
+						]),
+					)
+					.digest('hex');
+				const next: BackgroundDelegationRecord = {
+					...current,
+					schemaVersion: current.schemaVersion === 4 ? 4 : 3,
+					closeout: {
+						...closeout,
+						steps: {
+							...closeout.steps,
+							[step]: {
+								state: 'pending',
+								leaseClaimant: options.claimantId,
+								leaseToken,
+								leaseExpiresAt: now + leaseMs,
+								updatedAt: now,
+							},
+						},
+						updatedAt: now,
+					},
+					updatedAt: now,
+				};
+				appendRecord(directory, next);
+				maybeCompactDelegationsLocked(directory);
+				claim = { disposition: 'claimed', leaseToken };
+			},
+		);
+		return claim;
+	} catch (err) {
+		logger.warn(
+			`[background] claimTerminalCloseoutStep failed: ${
+				err instanceof Error ? err.message : String(err)
+			}`,
+		);
+		return null;
+	}
+}
+
+/**
+ * r14 audit repair (P1-4): release a step's execution lease after a
+ * retryable failure so recovery can retry immediately instead of waiting
+ * for the lease to expire. Token-fenced CAS: a stale worker cannot release a
+ * lease another worker owns.
+ */
+export async function releaseTerminalCloseoutStepLease(
+	directory: string,
+	correlationId: string,
+	terminalEventId: string,
+	step: TerminalCloseoutStep,
+	leaseToken: string,
+): Promise<boolean> {
+	if (!correlationId || !terminalEventId || !step || !leaseToken) {
+		return false;
+	}
+	const now = Date.now();
+	let ok = false;
+	try {
+		await withEvidenceLock(
+			directory,
+			BACKGROUND_DELEGATIONS_FILE,
+			STORE_LOCK_AGENT,
+			STORE_LOCK_TASK,
+			async () => {
+				const records = loadRecordsForWrite(directory);
+				if (records === null) return;
+				const current = findRecordForWrite(records, correlationId);
+				if (
+					!current?.terminalResult ||
+					current.terminalResult.eventId !== terminalEventId
+				) {
+					return;
+				}
+				const closeout = current.closeout;
+				if (!closeout || closeout.terminalEventId !== terminalEventId) return;
+				const existing = closeout.steps[step];
+				if (
+					existing?.state !== 'pending' ||
+					existing.leaseToken !== leaseToken
+				) {
+					return;
+				}
+				const next: BackgroundDelegationRecord = {
+					...current,
+					schemaVersion: current.schemaVersion === 4 ? 4 : 3,
+					closeout: {
+						...closeout,
+						steps: {
+							...closeout.steps,
+							[step]: {
+								state: 'pending',
+								updatedAt: now,
+							},
+						},
+						updatedAt: now,
+					},
+					updatedAt: now,
+				};
+				appendRecord(directory, next);
+				maybeCompactDelegationsLocked(directory);
+				ok = true;
+			},
+		);
+	} catch (err) {
+		logger.warn(
+			`[background] releaseTerminalCloseoutStepLease failed: ${
 				err instanceof Error ? err.message : String(err)
 			}`,
 		);
