@@ -80,6 +80,7 @@ import {
 	PLAN_CRITIC_TASK_SIGNALS,
 	PLAN_CRITIC_GATE_INTENT_SIGNALS,
 } from '../plan/critic-approval.js';
+import { validSoundingBoardCallerCategory } from '../agents/sounding-board-policy.js';
 import {
 	approvedSnapshotCoversPlan,
 	computePlanStructureHash,
@@ -6741,6 +6742,21 @@ export function createDelegationGateHook(
 								evidenceTaskId,
 								workspace: fallbackWorkspace,
 								taskChangeContext,
+								// r13 audit repair (P1-3): persist the VALIDATED
+								// caller-owned sounding-board category at dispatch,
+								// bound to this exact call/child identity, so the
+								// async completion path applies the SAME policy input
+								// as the sync transport (free text can never override
+								// architect metadata; invalid values fall back
+								// conservatively).
+								...(normalizedSubagentType === 'critic_sounding_board'
+									? (() => {
+											const category = validSoundingBoardCallerCategory(
+												mergedArgs,
+											);
+											return category ? { soundingBoardCategory: category } : {};
+										})()
+									: {}),
 								workflowGeneration: TASK_GATE_AGENTS.has(normalizedSubagentType)
 									? stageBDispatchGenerationsByCallID
 											.get(input.callID)

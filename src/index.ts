@@ -12,7 +12,10 @@ import {
 	getSwarmAgents,
 	resetArchitectPromptBudgetAdvisories,
 } from './agents';
-import { applySoundingBoardResponsePolicy } from './agents/sounding-board-policy.js';
+import {
+	applySoundingBoardResponsePolicy,
+	validSoundingBoardCallerCategory,
+} from './agents/sounding-board-policy.js';
 import {
 	clearV2StepUsage,
 	forgetV2StepUsage,
@@ -21,7 +24,7 @@ import {
 // r12 (async lifecycle F3): re-exported for existing consumers (the policy was
 // extracted from this module so the background completion observer applies
 // the EXACT same contract to native-async completions).
-export { applySoundingBoardResponsePolicy };
+export { applySoundingBoardResponsePolicy, validSoundingBoardCallerCategory };
 
 import {
 	type BackgroundAutomationManager,
@@ -477,17 +480,67 @@ export function reportEventConsumerFailure(
 }
 
 /**
+ * Execution budget for one independent event consumer (audit P1-4): a
+ * consumer that neither settles nor throws within this bound cannot starve
+ * the remaining fan-out — most importantly the durable background completion
+ * observer. The abandoned consumer keeps running in the background; its
+ * eventual outcome is observed (a late rejection is reported, never an
+ * unhandled rejection).
+ */
+export const EVENT_CONSUMER_DEADLINE_MS = 10_000;
+
+/**
+ * The durable completion observer gets a larger budget than advisory
+ * siblings: its settlement/ingestion chain performs real durable work, and
+ * its own replay machinery recovers anything the budget abandons.
+ */
+export const BACKGROUND_COMPLETION_CONSUMER_DEADLINE_MS = 60_000;
+
+/**
  * Run one independent event consumer so its failure can neither abort the
- * remaining fan-out nor disappear silently. Exported for unit testing.
+ * remaining fan-out nor disappear silently, and so a HANGING consumer cannot
+ * block the consumers behind it (audit P1-4): the wait is bounded by
+ * {@link EVENT_CONSUMER_DEADLINE_MS} (or the per-consumer override). Exported
+ * for unit testing.
  */
 export async function dispatchEventConsumerIsolated(
 	consumer: string,
 	run: () => Promise<void> | void,
+	deadlineMs: number = EVENT_CONSUMER_DEADLINE_MS,
 ): Promise<void> {
+	// Normalize to a promise that NEVER rejects — the outcome travels as a
+	// value — so an abandoned consumer can never surface as an unhandled
+	// rejection after the fan-out has moved on.
+	const outcome = (async (): Promise<
+		{ kind: 'ok' } | { kind: 'error'; error: unknown }
+	> => {
+		try {
+			await run();
+			return { kind: 'ok' };
+		} catch (error) {
+			return { kind: 'error', error };
+		}
+	})();
 	try {
-		await run();
+		const result = await withTimeout(
+			outcome,
+			deadlineMs,
+			new Error(
+				`event consumer '${consumer}' did not settle within ${deadlineMs}ms; the fan-out continues (the consumer may still be running)`,
+			),
+		);
+		if (result.kind === 'error') {
+			reportEventConsumerFailure(consumer, result.error);
+		}
 	} catch (error) {
 		reportEventConsumerFailure(consumer, error);
+		// Late settlement of the abandoned consumer: visible through the same
+		// bounded reporting path, never silent, never unhandled.
+		void outcome.then((result) => {
+			if (result.kind === 'error') {
+				reportEventConsumerFailure(`${consumer} (late)`, result.error);
+			}
+		});
 	}
 }
 
@@ -4405,10 +4458,12 @@ async function initializeOpenCodeSwarm(
 				);
 				// The durable completion consumer — isolated like every sibling so a
 				// failure here is contained and VISIBLE (its own replay machinery
-				// recovers the completion later).
+				// recovers the completion later). It runs on a LARGER budget:
+				// its settlement/ingestion chain performs real durable work.
 				await dispatchEventConsumerIsolated(
 					'background-completion-observer',
 					() => backgroundCompletionObserver.event(input),
+					BACKGROUND_COMPLETION_CONSUMER_DEADLINE_MS,
 				);
 			} catch (err) {
 				warn(

@@ -866,7 +866,21 @@ export function createBackgroundCompletionObserver(opts: {
 							const session = swarmState.agentSessions.get(
 								record.parentSessionId,
 							);
-							const parsed = applySoundingBoardResponsePolicy(rawResponse);
+							// r13 audit repair (P1-3): pass the SAME caller-owned
+							// category metadata as the sync transport — the
+							// validated category persisted at dispatch time,
+							// bound to this exact call/child identity. Model free
+							// text can never override it; a legacy record without
+							// a persisted category falls back conservatively
+							// (identical to a sync dispatch without a category).
+							const callerArgs =
+								record.soundingBoardCategory !== undefined
+									? { category: record.soundingBoardCategory }
+									: undefined;
+							const parsed = applySoundingBoardResponsePolicy(
+								rawResponse,
+								callerArgs,
+							);
 							let verdictMsg: string;
 							if (parsed) {
 								verdictMsg = `[SOUNDING_BOARD] Verdict: ${parsed.verdict}. ${parsed.reasoning}`;

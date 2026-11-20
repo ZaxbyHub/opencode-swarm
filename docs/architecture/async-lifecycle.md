@@ -126,29 +126,126 @@ These are the properties every change to this area must preserve:
    async terminal handling must not fabricate a second cost record for the
    same steps.
 
-## 6. Open questions resolved by r11–r13
+## 6. Open questions resolved by r11–r13 (as revised by the r13 audit repair)
 
-- **r11 (F1):** where does the async approval snapshot come from, and how is
-  it bound to the plan the critic actually reviewed? → Dispatch-time
+- **r11 (F1):** where does the async approval snapshot come from, and how is it
+  bound to the plan the critic actually reviewed? → Dispatch-time
   classification + plan-structure hash on the delegation record; completion-
   time verification; ledger-level dedup by `call_id`; the existing
-  `takeSnapshotEvent` API stays the single write choke point.
+  `takeSnapshotEvent` API stays the single write choke point. **The r13 audit
+  repair (P0-1/P0-2/P1-1/P2-1) tightened this:** the verdict parser requires a
+  fully valid `VERDICT:` line outside code fences/quotes/tables and fails
+  closed on ambiguity, contradictions, or a host-truncated result; the plan
+  baseline (structure hash, plan id, prompt digest) is captured in
+  `tool.execute.before` — BEFORE the child starts — and the after-hook
+  consumes exactly that baseline (it never re-reads plan.json); the approval
+  existence check and the commit run under ONE serialization boundary (the
+  ledger evidence lock via `preCommitCheck`) with typed `already_recorded` /
+  `conflict` / `ledger_unreadable` outcomes; and only an EXPLICIT gate-intent
+  dispatch (`MODE: CRITIC-GATE`) can ever auto-approve — an ordinary critic
+  review that merely mentions `plan.md` cannot.
 - **r12 (F2/F3/F4):** the durable `BackgroundDelegationRecord` +
   `BackgroundTerminalResult` already carry the full typed terminal identity
   (parent/child/call/role/status/eventId/result/dispatch binding), so no
-  second closeout DTO was introduced. Instead the observer gained a shared
-  business-closeout block keyed on that identity: exactly-once-at-emit effects
-  (context map, sounding-board verdict, pipeline advisory, `delegation_end`)
-  run only on the FRESH terminal claim (`isFreshTerminalClaim` — stricter than
-  `!isDuplicate`, which a `retry_ingestion` redelivery would slip past); the
-  ledger-idempotent knowledge reconciliation runs on every delivery with the
-  replay flag. Lane records are excluded (they settle through
-  `settleDelegationTerminal`), so nothing double-books.
+  second closeout DTO was introduced. The r12 code ran its closeout effects
+  only on the FRESH terminal claim; **the r13 audit repair (P0-3) superseded
+  that with a durable closeout journal** (section 6a) — a fresh-claim flag is
+  an in-process property, and every effect a crash leaves behind it was lost.
 - **r13 (F5/F6):** fan-out isolation (a failing sibling consumer must not
   starve the durable completion observer, visibly), and a completeness audit
   of every terminal-bound after-hook action. Both delivered: F5 isolates each
   event consumer behind `dispatchEventConsumerIsolated` (deferred-warning
-  surfacing, per-consumer cooldown); F6's matrix is section 8 below.
+  surfacing, per-consumer cooldown); F6's matrix is section 8 below. **The
+  r13 audit repair (P1-4) additionally bounds the WAIT per consumer:** a
+  consumer that never settles cannot block the remaining fan-out either, and
+  its eventual late failure is observed and reported — never an unhandled
+  rejection.
+
+## 6a. The durable closeout journal (r13 audit repair, P0-3)
+
+The terminal claim and the business closeout are separate durable concerns.
+Every delegation record carries an optional versioned journal:
+
+```
+closeout: {
+  schemaVersion: 1,
+  terminalEventId: <the exact terminal event this journal acks>,
+  steps: {
+    delegation_end | context_map | sounding_board | pipeline_advisory |
+      parent_advisory: { state: 'pending' | 'completed', completedAt?, updatedAt }
+  }
+}
+```
+
+**Which transitions are durable**
+
+- Terminal claim (`claimTerminalResult`): immutable, exactly-once per event id.
+- Journal initialization: at the start of terminal processing, with the
+  APPLICABLE step set for the record's role/outcome (event-fenced CAS under
+  the store lock; a replay keeps existing step states, a foreign terminal is
+  refused).
+- Step ack (`markTerminalCloseoutStepCompleted`): event-fenced CAS; a step is
+  ONLY acked AFTER its business effect was durably established. A failed
+  effect stays pending and is re-driven.
+
+**Which side effects are transactional / idempotent / best-effort**
+
+- *Idempotent-durable (exactly-once per terminal, crash-safe):* the
+  plan-critic approval snapshot (ledger dedup by call id under the evidence
+  lock), the parent advisory (`advisoryInbox`, single slot, event-id keyed),
+  sounding-board and pipeline advisories (`closeoutAdvisories`, bounded,
+  event-id deduped — they never clobber the terminal advisory slot and never
+  depend on the parent session being live in memory), the context-map
+  success summary (`task_history` is keyed by task id — a re-drive
+  overwrites, never double-appends), knowledge receipts (ledger-idempotent).
+- *Durable claim-guarded (own WAL/lease machinery, re-driven by replay):*
+  coder settlement, worktree merge-back, Stage-B ingestion.
+- *At-least-once telemetry (best-effort):* `delegation_end` and its
+  execution-attempt record. The journal guarantees at most one emission per
+  terminal per process; a genuine multi-observer race could still
+  double-emit. Cost rollups stay deduped by the deterministic `record_id`,
+  and the r8 usage bridge remains the usage authority — no fabricated or
+  double-billed cost data.
+
+**Recovery triggers** (no dependence on a new host completion event)
+
+1. Every background maintenance point (`maintainBackgroundDelegations`:
+   admission, trusted-terminal, ingestion-rejection, status) runs a bounded
+   `reconcileTerminalCloseouts` pass over records with pending journal steps
+   and re-drives them through the registered observer reconciler.
+2. `reconcilePending` (maintenance/duplicate delivery) re-enters the full
+   closeout; journal-completed steps are skipped, pending steps re-run.
+3. Records already `consumed` can still carry pending steps — the scan looks
+   at the journal, not at the status.
+4. The record currently being processed live is excluded (in-flight guard),
+   so recovery can never re-enter itself.
+
+**Behavior on corrupted stores**
+
+- An unreadable delegation store never fabricates effects: reads report
+  `uncertain`, recovery skips the record, and the maintenance facts ring
+  records the failure for diagnosis.
+- A journal whose `terminalEventId` no longer matches the record's terminal
+  is treated as pending (re-driven once, then re-journaled).
+- Legacy records (pre-repair, no journal) are re-driven exactly once; the
+  pass then journals them, so the scan cannot loop.
+
+**Guarantees NOT claimed (honest limits)**
+
+- No general exactly-once across non-transactional sinks — telemetry is
+  at-least-once per journal step.
+- If the dispatch prompt embedded a DIFFERENT plan copy than plan.json held
+  at dispatch time, the plan-critic binding verifies against plan.json (the
+  authoritative plan store); an architect inlining a stale plan into the
+  prompt is not detected. The full prompt digest is recorded in the binding
+  for audit.
+- The async context-map summary keeps `task_goal` empty (plan-based
+  reconstruction is future work); `files_touched` carries the coder's
+  declared files when the dispatch captured them, else no attribution.
+- A pending legacy coder settlement transfer keeps the parent-advisory step
+  un-acked until the transfer reconciler replays the corrected (final)
+  message — the intermediate "transfer pending" message is deliberately
+  replaceable.
 
 ## 7. Terminal consumers (business closeout), by transport
 
@@ -178,17 +275,17 @@ delegation-terminal-bound (runs at another boundary by design).
 | Docs phase participation | after-hook | `completeBackgroundPhaseParticipation` (observer) | ✅ |
 | Epic residue commit (non-coder writers) | after-hook | `commitEpicResidueAfterDelegation` seam (observer) | ✅ |
 | Reviewer/coder scope discard | after-hook | `discardScopeForRecord` (observer) | ✅ |
-| Parent advisory publication | after-hook | durable advisory inbox (observer) | ✅ |
-| Plan-critic approval snapshot | after-hook | shared recorder + dispatch binding (r11) | ✅ |
-| Context-map post-agent update | after-hook (r12: gated on non-placeholder) | observer closeout (r12) | ✅ |
-| Sounding-board verdict policy + advisory | Task handoff | shared policy module (r12) | ✅ |
-| `delegation_begin`/`delegation_end` telemetry pair | toolBefore / Task handoff | toolBefore / `emitTaskDelegationTerminalEnd` (r12; lanes via `settleDelegationTerminal`) | ✅ |
+| Parent advisory publication | after-hook | durable advisory inbox (observer; journal-gated, crash-recoverable — r13 audit repair P0-3) | ✅ |
+| Plan-critic approval snapshot | after-hook | shared recorder + pre-execution dispatch binding (r11; strict verdict parser, pre-child-start baseline, in-lock atomic dedup — r13 audit repair) | ✅ |
+| Context-map post-agent update | after-hook (r12: gated on non-placeholder) | observer closeout — AFTER settlement + Stage-B ingestion, verified success only, journal-gated (r13 audit repair P1-2) | ✅ |
+| Sounding-board verdict policy + advisory | Task handoff | shared policy module with the persisted caller category; durable closeout advisory (r13 audit repair P1-3/P2-2) | ✅ |
+| `delegation_begin`/`delegation_end` telemetry pair | toolBefore / Task handoff | toolBefore / `emitTaskDelegationTerminalEnd` (r12; lanes via `settleDelegationTerminal`; journal-gated exactly-once per terminal — r13 audit repair P1-5) | ✅ |
 | Execution-attempt records | Task handoff / lane observations | `emitTaskDelegationTerminalEnd` (r12) | ✅ |
 | Knowledge ACK receipts (`collectDelegateAcksAfter`) | after-hook | `reconcileDelegationKnowledgeReceipts` (r12; ledger-idempotent) | ✅ |
 | Reviewer DIRECTIVE_COMPLIANCE verdicts (`collectReviewerVerdictsAfter`) | after-hook | `reconcileReviewerVerdicts` via the same reconciliation (r12) | ✅ |
-| Pipeline continuation advisory | Task handoff | observer closeout (r12) | ✅ |
+| Pipeline continuation advisory | Task handoff | observer closeout; durable closeout advisory (r13 audit repair P2-2) | ✅ |
 | PR-workflow response gate / session resolver / idle delivery | event hook | same event hook, r13 isolation | ✅ (F5) |
-| Event fan-out isolation | n/a | per-consumer isolation (r13) | ✅ (F5) |
+| Event fan-out isolation | n/a | per-consumer isolation + bounded wait (r13 audit repair P1-4) | ✅ (F5) |
 | Auto-review (task_completion trigger) | `update_task_status` toolAfter (architect action) | n/a — not delegation-terminal-bound | ✅ n/a |
 | Session reflection | `/swarm close` finalize stage | n/a | ✅ n/a |
 | Usage/cost accounting | r8 usage bridge + handoff consumption | bridge accumulates per child session | ⚠️ see below |

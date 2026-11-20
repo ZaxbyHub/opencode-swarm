@@ -14,7 +14,9 @@
 
 import {
 	applyAlwaysSurfacePolicy,
+	isSoundingBoardCategory,
 	parseSoundingBoardResponse,
+	type SoundingBoardCategory,
 	type SoundingBoardResponse,
 } from './critic.js';
 
@@ -36,6 +38,23 @@ export function resolveSoundingBoardCallerCategory(args: unknown): {
 		return { supplied: true, value: record.category };
 	}
 	return { supplied: false };
+}
+
+/**
+ * The VALIDATED caller-owned category for persistence (r13 audit P1-3): the
+ * explicit `category` field of the dispatch packet, normalized, and only when
+ * it is a real protocol category. Missing, malformed, or free-text values
+ * return null — the async transport then applies the conservative fallback
+ * (identical to a sync dispatch that carried no category metadata).
+ */
+export function validSoundingBoardCallerCategory(
+	args: unknown,
+): SoundingBoardCategory | null {
+	const caller = resolveSoundingBoardCallerCategory(args);
+	if (!caller.supplied || !isSoundingBoardCategory(caller.value)) {
+		return null;
+	}
+	return (caller.value as string).trim().toLowerCase() as SoundingBoardCategory;
 }
 
 /**

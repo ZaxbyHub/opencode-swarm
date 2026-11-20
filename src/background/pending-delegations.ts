@@ -327,6 +327,15 @@ export interface BackgroundDelegationRecord {
 	prompt?: BackgroundPromptSnapshot;
 	/** Dispatch-time plan-critic binding; see {@link BackgroundPlanCriticDispatch}. */
 	planCriticDispatch?: BackgroundPlanCriticDispatch;
+	/**
+	 * r13 audit repair (P1-3): the VALIDATED caller-owned sounding-board
+	 * category captured at dispatch time (the explicit `category` field of
+	 * the architect's Task call). Bound to the exact call/child identity this
+	 * record carries; the async completion path feeds it to the SAME policy
+	 * parser as the sync transport, so an architect-owned category can never
+	 * be lost or overwritten by model free text.
+	 */
+	soundingBoardCategory?: string;
 	generation?: number;
 	/** Immutable trusted terminal event. Established exactly once. */
 	terminalResult?: BackgroundTerminalResult;
@@ -1140,6 +1149,12 @@ const RecordSchema = z
 		workspace: WorkspaceSchema.optional(),
 		taskChangeContext: TaskChangeContextSchema.optional(),
 		planCriticDispatch: PlanCriticDispatchSchema.optional(),
+		soundingBoardCategory: z
+			.string()
+			.min(1)
+			.max(64)
+			.regex(/^[a-z0-9_]+$/)
+			.optional(),
 		workflowGeneration: z.number().int().nonnegative().optional(),
 		worktree: WorktreeDescriptorSchema.optional(),
 		coderReservationId: z.string().min(1).max(256).optional(),
@@ -3470,6 +3485,8 @@ export interface RecordPendingInput {
 	taskChangeContext?: BackgroundTaskChangeContext;
 	/** Dispatch-time plan-critic binding; see {@link BackgroundPlanCriticDispatch}. */
 	planCriticDispatch?: BackgroundPlanCriticDispatch;
+	/** Validated caller-owned sounding-board category (r13 audit P1-3). */
+	soundingBoardCategory?: string;
 	workflowGeneration?: number;
 	worktree?: BackgroundWorktreeDescriptor;
 	coderReservationId?: string;
@@ -3515,6 +3532,9 @@ function buildPendingRecord(
 			: {}),
 		...(input.planCriticDispatch
 			? { planCriticDispatch: input.planCriticDispatch }
+			: {}),
+		...(input.soundingBoardCategory
+			? { soundingBoardCategory: input.soundingBoardCategory }
 			: {}),
 		...(input.workflowGeneration !== undefined
 			? { workflowGeneration: input.workflowGeneration }

@@ -96,6 +96,105 @@ describe('event fan-out isolation (F5)', () => {
 			getDeferredWarnings().some((w) => w.includes("'async-failing'")),
 		).toBe(true);
 	});
+
+	test('P1-4: a permanently hanging consumer cannot block the fan-out', async () => {
+		const ran: string[] = [];
+		const startedAt = Date.now();
+		await dispatchEventConsumerIsolated(
+			'hanging-consumer',
+			() =>
+				new Promise<void>(() => {
+					// Never settles — the audit's `prWorkflowResponseGate.event`
+					// shape.
+				}),
+			50,
+		);
+		const elapsed = Date.now() - startedAt;
+		// The wait was bounded by the deadline (plus scheduling slack), not
+		// the hung promise.
+		expect(elapsed).toBeLessThan(2_000);
+		// The failure is VISIBLE through the deferred warning buffer.
+		expect(
+			getDeferredWarnings().some((w) =>
+				w.includes("'hanging-consumer' failed and was isolated"),
+			),
+		).toBe(true);
+		// The consumer behind it still runs.
+		await dispatchEventConsumerIsolated('after-hang', () => {
+			ran.push('after-hang');
+		}, 1_000);
+		expect(ran).toEqual(['after-hang']);
+	});
+
+	test('P1-4: a consumer settling late after the deadline reports its late failure without an unhandled rejection', async () => {
+		let lateReject: ((error: Error) => void) | undefined;
+		const dispatched = dispatchEventConsumerIsolated(
+			'late-settling-consumer',
+			() =>
+				new Promise<void>((_resolve, reject) => {
+					lateReject = reject;
+				}),
+			50,
+		);
+		await dispatched;
+		clearDeferredWarnings();
+		// The abandoned consumer rejects AFTER the fan-out moved on.
+		expect(lateReject).toBeDefined();
+		lateReject?.(new Error('late boom'));
+		// Give the observation chain a microtask turn to report.
+		await Promise.resolve();
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(
+			getDeferredWarnings().some((w) =>
+				w.includes("'late-settling-consumer (late)'"),
+			),
+		).toBe(true);
+	});
+
+	test('P1-4: a consumer that settles after the deadline but successfully reports nothing', async () => {
+		let lateResolve: (() => void) | undefined;
+		const dispatched = dispatchEventConsumerIsolated(
+			'late-ok-consumer',
+			() =>
+				new Promise<void>((resolve) => {
+					lateResolve = resolve;
+				}),
+			50,
+		);
+		await dispatched;
+		clearDeferredWarnings();
+		lateResolve?.();
+		await Promise.resolve();
+		await Promise.resolve();
+		// A late SUCCESS is not a failure — no warning beyond the deadline
+		// notice that was already reported at timeout time.
+		expect(
+			getDeferredWarnings().some((w) => w.includes('(late)')),
+		).toBe(false);
+	});
+
+	test('P1-4: several events fan out concurrently without serializing on a hung sibling', async () => {
+		// Two event-hook invocations in flight: the first carries a hung
+		// independent consumer; the second (a fresh event, e.g. a completion)
+		// must not wait behind it.
+		const hung = dispatchEventConsumerIsolated(
+			'hung-sibling',
+			() => new Promise<void>(() => {}),
+			50,
+		);
+		const healthy = dispatchEventConsumerIsolated(
+			'concurrent-healthy',
+			async () => {
+				await Promise.resolve();
+			},
+			1_000,
+		);
+		await Promise.all([hung, healthy]);
+		expect(
+			getDeferredWarnings().some((w) => w.includes("'hung-sibling'")),
+		).toBe(true);
+	});
 });
 
 describe('event hook delivers trusted completions through the isolated fan-out (F5 integration)', () => {
