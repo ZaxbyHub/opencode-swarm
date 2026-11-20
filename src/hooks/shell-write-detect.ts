@@ -9091,6 +9091,87 @@ export function firstWordOverBudget(
 	return null;
 }
 
+// #3761: bash-parser 0.5.0 has NO here-document body lexing — body lines are
+// tokenized as ordinary shell, so a body line carrying shell metacharacters
+// (two single-quote pairs, bare parentheses) makes the parse throw at ANY
+// body length, and body text like `echo x > /etc/passwd` is misclassified
+// as a live redirect. For the ONE provably-safe shape — a single literal
+// `cat` command feeding one WHOLE-WORD-QUOTED heredoc (POSIX: no expansion
+// in a quoted heredoc body; `cat` never interprets its stdin) — the body is
+// inert data and can be blanked before parsing. Every other shape
+// (executing receivers like `bash <<EOF`, compounds, pipes, unquoted or
+// partial-quoted delimiters, comments `cat # <<'EOF'`, glued assignments
+// `cat=foo bash <<'EOF'`, multiple openers, here-strings, escaped `<`,
+// missing/CRLF terminator) returns the command UNCHANGED and keeps today's
+// fail-closed analysis. Callers own the transformation: it is applied once
+// per analysis path (detection, resolution, procsub extraction, explain)
+// so every consumer parses the SAME string; the executor keeps the original.
+const HEREDOC_PLAIN_OPERAND = /^[^\s<>|;&()$`'"\\#]+$/;
+const HEREDOC_OPENER_TOKEN = /^(<<-?)(['"])([^\s'"\\]+)\2$/;
+
+export function neutralizeQuotedHeredocBodies(command: string): string {
+	if (!command.includes('<<')) return command;
+	// A single trailing newline after the terminator is legal; work without
+	// it and re-append at the end.
+	const hadTrailingNewline = command.endsWith('\n');
+	const body0 = hadTrailingNewline ? command.slice(0, -1) : command;
+	const lines = body0.split('\n');
+	// Need opener + at least one body line + terminator; an empty body needs
+	// no neutralization.
+	if (lines.length < 3) return command;
+	const opener = lines[0].replace(/^[ \t]+/, '');
+	// Exact shell token: `cat` followed by whitespace (never a `\bcat\b`
+	// match — `cat=foo bash <<'EOF'` runs `bash` with an env assignment and
+	// EXECUTES the body).
+	if (!/^(cat)([ \t]|$)/.test(opener)) return command;
+	const tokens = opener
+		.slice(3)
+		.split(/[ \t]+/)
+		.filter(Boolean);
+	if (tokens.length === 0) return command;
+	const openerMatch = HEREDOC_OPENER_TOKEN.exec(tokens[tokens.length - 1]);
+	if (openerMatch === null) return command;
+	const stripLeadingTabs = openerMatch[1] === '<<-';
+	const delimiter = openerMatch[3];
+	// Every token before the heredoc opener: plain operand, or `<`/`>`/`>>`
+	// (separated form) followed by a plain operand — the real write target
+	// stays visible. Anything else (quotes, `$`, operators, `#`, a second
+	// `<`-token, glued redirects) refuses the shape.
+	const rest = tokens.slice(0, -1);
+	let i = 0;
+	while (i < rest.length) {
+		const tok = rest[i];
+		if (tok === '<' || tok === '>' || tok === '>>') {
+			i += 1;
+			const operand = rest[i];
+			if (operand === undefined) return command;
+			if (!HEREDOC_PLAIN_OPERAND.test(operand)) return command;
+			i += 1;
+			continue;
+		}
+		if (!HEREDOC_PLAIN_OPERAND.test(tok)) return command;
+		i += 1;
+	}
+	// Terminator: the FINAL line equals the delimiter exactly (leading tabs
+	// stripped only for `<<-`); no CR normalization — a `\r` tail means the
+	// line is not the terminator and the shape is refused (unclosed).
+	const finalLine = lines[lines.length - 1];
+	const terminatorCandidate = stripLeadingTabs
+		? finalLine.replace(/^\t+/, '')
+		: finalLine;
+	if (terminatorCandidate !== delimiter) return command;
+	// Length- and line-structure-preserving blank: one space per UTF-16
+	// code unit of each body line. Parse and annotateRawWordText both see
+	// this SAME string, so offset systems stay internally consistent.
+	const out: string[] = [lines[0]];
+	for (let b = 1; b <= lines.length - 2; b += 1) {
+		out.push(' '.repeat(lines[b].length));
+	}
+	out.push(lines[lines.length - 1]);
+	const joined = out.join('\n');
+	return hadTrailingNewline ? `${joined}\n` : joined;
+}
+
 export function detectPosixWrites(
 	command: string,
 	procsubRecursionDepth = 0,

@@ -40,6 +40,7 @@ import {
 	isPowerShellReadOnlyPipeline,
 	isPowerShellShaped,
 	mergeWriteAnalyses,
+	neutralizeQuotedHeredocBodies,
 	procSubSpanBodies,
 	resolveWriteTargets,
 } from '../hooks/shell-write-detect.js';
@@ -854,11 +855,16 @@ export async function handleGuardrailExplain(
 	// correctly-quoted subshells so the wrapped writes resolve under the child
 	// cwd. A fail-closed DIR (empty/NUL static operand) blocks here exactly
 	// like the gate's parse-error rejection.
-	const preprocessed = dcPreprocessWrappers(shellCommand);
+	// #3761/#3754: mirror the gate's analysis-command threading — the
+	// provably-inert quoted-heredoc cat shape is neutralized BEFORE
+	// preprocess/detect/resolve so explain and the gate parse the SAME
+	// string (parity with tool-before.ts's write path).
+	const analysisCommandExplain = neutralizeQuotedHeredocBodies(shellCommand);
+	const preprocessed = dcPreprocessWrappers(analysisCommandExplain);
 	if (preprocessed.failClosed) {
 		decision = 'block';
 		firingRule =
-			'parse_error: write detection failed to parse command — rejecting for safety';
+			'parse_error: write detection failed to parse command (parse failure, not a policy refusal) — rejecting for safety';
 	}
 	// #3567 final-critic round: mirror the gate's shell flag-cluster
 	// deny-on-uncertainty channel (tool-before.ts) — without it explain
@@ -870,7 +876,9 @@ export async function handleGuardrailExplain(
 		firingRule = `inline_eval: shell interpreter invocation "${uncertainCluster}" carries a flag cluster the guard cannot statically model (unknown option or glued argument) — deny-on-uncertainty`;
 	}
 	const didUnwrap = preprocessed.changed;
-	const detectionCommand = didUnwrap ? preprocessed.command : shellCommand;
+	const detectionCommand = didUnwrap
+		? preprocessed.command
+		: analysisCommandExplain;
 
 	if (decision === 'allow') {
 		const detected = resolveShellType(shellCommand) as
@@ -962,14 +970,14 @@ export async function handleGuardrailExplain(
 		if (rawParseFailure) {
 			decision = 'block';
 			firingRule =
-				'parse_error: write detection failed to parse command — rejecting for safety';
+				'parse_error: write detection failed to parse command (parse failure, not a policy refusal) — rejecting for safety';
 		} else if (
 			analysis.parseError &&
 			!isPowerShellReadOnlyPipeline(detectionCommand)
 		) {
 			decision = 'block';
 			firingRule =
-				'parse_error: write detection failed to parse command — rejecting for safety';
+				'parse_error: write detection failed to parse command (parse failure, not a policy refusal) — rejecting for safety';
 		} else if (
 			analysis.unwrapDepthExceeded ||
 			rawPosix.unwrapDepthExceeded ||

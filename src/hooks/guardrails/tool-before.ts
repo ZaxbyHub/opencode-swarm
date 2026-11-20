@@ -79,6 +79,7 @@ import {
 	isPowerShellReadOnlyPipeline,
 	isPowerShellShaped,
 	mergeWriteAnalyses,
+	neutralizeQuotedHeredocBodies,
 	procSubSpanBodies,
 	resolveWriteTargets,
 	setDetectionOptionsOverride,
@@ -764,6 +765,13 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 
 		// --- Normalize the top-level command (NFKC + evasion collapse) ---
 		const command = dcNormalizeCommand(rawCommand);
+		// #3761/#3754: the procsub span extraction below scans raw command
+		// TEXT; for the provably-inert quoted-heredoc cat shape an inert body
+		// line like `>(rm -rf ../esc)` would otherwise be extracted from the
+		// ORIGINAL bytes and fed here as a live span. Feed the neutralized
+		// analysis command to the procsub scan only — every other destructive
+		// scan keeps the destructive path's own normalized command.
+		const analysisCommandDestructive = neutralizeQuotedHeredocBodies(command);
 
 		// #3491 W3: deny-on-uncertainty for launcher segments — an unknown
 		// launcher option with a remaining execution tail, or an interactive
@@ -866,7 +874,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		// relocates to the escaping sentinel (fail-closed). This restores
 		// the #3568 review F-01 push the g3 restructure dropped, for BOTH
 		// operators.
-		for (const body of procSubSpanBodies(command)) {
+		for (const body of procSubSpanBodies(analysisCommandDestructive)) {
 			for (const sub of dcSplitSegments(body)) {
 				pushSegmentOccurrence(sub, 'uncertain');
 				// #3569 4.5 review Critical 2: a body verb may sit behind a
@@ -1667,28 +1675,47 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				);
 			};
 
-			// Fail-closed parse gate runs on the ORIGINAL command so a genuinely
+			// #3761/#3754: analysis threads ONE command string through
+			// detection, preprocessing, and resolution — for the provably
+			// inert quoted-heredoc cat shape the body bytes are blanked so
+			// bash-parser neither throws on them nor misreads them as live
+			// commands; every other shape is returned unchanged (fail-closed
+			// exactly as before). The executor keeps the ORIGINAL command.
+			const analysisCommand = neutralizeQuotedHeredocBodies(command);
+			// Fail-closed parse gate runs on the ANALYSIS command so a genuinely
 			// malformed command (e.g. an unclosed quote) is still rejected for safety.
 			// The one narrowing: a command positively classified as a read-only
 			// PowerShell pipeline is a read, not a parse failure (issue #3099).
 			const suppressParseError = (c: string) =>
 				enforce && isPowerShellReadOnlyPipeline(c);
-			const primaryAnalysis = detect(command);
+			const primaryAnalysis = detect(analysisCommand);
 			if (
 				enforce &&
 				primaryAnalysis.parseError &&
-				!suppressParseError(command)
+				!suppressParseError(analysisCommand)
 			) {
-				// F-15 (PR #3651 review): the oversized-word sentinel reports
-				// parseError for a command that never reached the parser —
-				// name the actual cause instead of a parse failure.
+				// Origin-aware denial (#3761 Expected behaviour / #3754 F2 UX):
+				// a parseError synthesized by a POLICY sentinel is a policy
+				// refusal and must say so; only a genuine bash-parser
+				// exception is a parse failure. The oversized-word sentinel
+				// (F-15, PR #3651 review) keeps its dedicated message.
 				const oversized = primaryAnalysis.writes.some(
 					(w) => w.operator === 'oversized word',
+				);
+				const ambientState = primaryAnalysis.writes.some(
+					(w) => w.operator === 'ambient shell-state key assignment',
+				);
+				const unsafeText = primaryAnalysis.writes.some(
+					(w) => w.operator === 'unsafe command text',
 				);
 				throw new Error(
 					oversized
 						? `BLOCKED: command contains a word over the 4096-character analysis budget — denying before parsing for safety`
-						: `BLOCKED: bash write detection failed to parse command — rejecting for safety`,
+						: ambientState
+							? `BLOCKED: command assigns ambient shell-state key (BASH_ENV/ENV/BASH_FUNC_*) — policy refusal`
+							: unsafeText
+								? `BLOCKED: command text is unsafe for shell analysis — policy refusal`
+								: `BLOCKED: bash write detection failed to parse command (parse failure, not a policy refusal) — rejecting for safety; use a simpler command shape or the write/edit tools`,
 				);
 			}
 
@@ -1710,14 +1737,16 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			// && inner ) whose inner writes the resolver withdraws
 			// UNCONDITIONALLY (fix-round-1 F-1: `cd -` used to land at a modeled
 			// OLDPWD after a prior cd/pushd and fail open).
-			const preprocessed = dcPreprocessWrappers(command);
+			const preprocessed = dcPreprocessWrappers(analysisCommand);
 			if (enforce && preprocessed.failClosed) {
 				throw new Error(
-					`BLOCKED: bash write detection failed to parse command — rejecting for safety`,
+					`BLOCKED: bash write detection failed to parse command (parse failure, not a policy refusal) — rejecting for safety; use a simpler command shape or the write/edit tools`,
 				);
 			}
 			const didUnwrap = preprocessed.changed;
-			const detectionCommand = didUnwrap ? preprocessed.command : command;
+			const detectionCommand = didUnwrap
+				? preprocessed.command
+				: analysisCommand;
 
 			let analysis = didUnwrap ? detect(detectionCommand) : primaryAnalysis;
 			// #3491 W3 review (REQUIRED): the substituted analysis runs on the
@@ -1788,11 +1817,11 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				enforce &&
 				analysis.parseError &&
 				!suppressParseError(
-					analysis === primaryAnalysis ? command : detectionCommand,
+					analysis === primaryAnalysis ? analysisCommand : detectionCommand,
 				)
 			) {
 				throw new Error(
-					`BLOCKED: bash write detection failed to parse command — rejecting for safety`,
+					`BLOCKED: bash write detection failed to parse command (parse failure, not a policy refusal) — rejecting for safety; use a simpler command shape or the write/edit tools`,
 				);
 			}
 
