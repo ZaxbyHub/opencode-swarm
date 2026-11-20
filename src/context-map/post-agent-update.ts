@@ -33,6 +33,7 @@ import {
 	appendTaskHistory,
 	createEmptyContextMap,
 	loadContextMap,
+	readContextMapState,
 	saveContextMap,
 } from './persistence';
 
@@ -352,6 +353,7 @@ export const _internals = {
 	loadContextMap,
 	saveContextMap,
 	createEmptyContextMap,
+	readContextMapState,
 	extractFileSummary,
 	existsSync: fs.existsSync,
 	readFileSync: fs.readFileSync,
@@ -897,9 +899,23 @@ export function promoteContextMapTaskRelease(
 	taskId: string,
 ): void {
 	try {
+		// r16 audit repair (P1): a rebuild is only legitimate for a GENUINELY
+		// missing map. An existing-but-corrupt map must be preserved
+		// byte-for-byte — overwriting it with a fresh map would destroy the
+		// operator's recovery path for the damaged decisions/task history.
+		// The promotion is best-effort by contract; a skipped promotion is
+		// recovered by reconciliation once the map is repaired.
+		const readState = _internals.readContextMapState(directory);
+		if (readState.kind === 'unreadable') {
+			logger.warn(
+				`[context-map] ${directory}/.swarm/context-map.json exists but is corrupt or unreadable — preserving the original file; task-release promotion for task ${taskId} skipped (repair the map, then the next maintenance pass re-drives the promotion)`,
+			);
+			return;
+		}
 		const map =
-			_internals.loadContextMap(directory) ??
-			_internals.createEmptyContextMap();
+			readState.kind === 'ok'
+				? readState.map
+				: _internals.createEmptyContextMap();
 		const existing = map.task_history[taskId];
 		if (existing?.final_status === 'approved') return; // idempotent
 		if (existing?.final_status === 'rejected') {
@@ -970,9 +986,23 @@ export async function reconcileContextMapTaskReleases(
 			.flatMap((phase) => phase.tasks)
 			.filter((task) => task.status === 'completed');
 		if (completedTasks.length === 0) return;
+		// r16 audit repair (P1): reconcile may rebuild ONLY a genuinely
+		// missing map. An existing-but-corrupt map is preserved untouched —
+		// no promotion is derived from a damaged file, and the original bytes
+		// stay available for recovery. The condition is logged so the damage
+		// is diagnosable; reconciliation retries at the next maintenance
+		// point once the map is repaired.
+		const readState = _internals.readContextMapState(directory);
+		if (readState.kind === 'unreadable') {
+			logger.warn(
+				`[context-map] ${directory}/.swarm/context-map.json exists but is corrupt or unreadable — reconciliation skipped, original file preserved for recovery`,
+			);
+			return;
+		}
 		const map =
-			_internals.loadContextMap(directory) ??
-			_internals.createEmptyContextMap();
+			readState.kind === 'ok'
+				? readState.map
+				: _internals.createEmptyContextMap();
 		for (const task of completedTasks) {
 			const existing = map.task_history[task.id];
 			if (existing !== undefined && existing.final_status !== 'pending') {

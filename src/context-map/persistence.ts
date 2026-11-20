@@ -124,6 +124,44 @@ export function loadContextMap(directory: string): ContextMap | null {
 }
 
 /**
+ * Discriminated context-map read (r16 audit P1): distinguishes "no file
+ * exists" (`missing`) from "the file exists but is corrupt, unreadable, or
+ * structurally invalid" (`unreadable`).
+ *
+ * `loadContextMap` collapses both cases into `null`, which is the right
+ * contract for its existing callers — but rebuild-on-null callers must NOT
+ * treat them the same: a genuinely missing map may be rebuilt from
+ * authoritative state, while an EXISTING corrupt map must be preserved
+ * byte-for-byte so an operator can still recover decisions, task history,
+ * and file summaries from the damaged file. Overwriting it with a fresh
+ * empty map destroys that recovery path.
+ *
+ * `loadContextMap`'s null-returning contract is deliberately unchanged.
+ */
+export type ContextMapReadState =
+	| { kind: 'ok'; map: ContextMap }
+	| { kind: 'missing' }
+	| { kind: 'unreadable' };
+
+export function readContextMapState(directory: string): ContextMapReadState {
+	const filePath = path.join(directory, '.swarm', 'context-map.json');
+	try {
+		if (!_internals.existsSync(filePath)) {
+			return { kind: 'missing' };
+		}
+	} catch {
+		// existsSync threw (e.g. invalid path) — absence is not provable, so
+		// fail toward preservation rather than rebuild.
+		return { kind: 'unreadable' };
+	}
+	const map = loadContextMap(directory);
+	if (map === null) {
+		return { kind: 'unreadable' };
+	}
+	return { kind: 'ok', map };
+}
+
+/**
  * Save the Context Map to `.swarm/context-map.json` using an atomic
  * temp-then-rename write pattern to avoid partial-write corruption.
  *
