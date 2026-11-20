@@ -38,12 +38,15 @@ If the header is malformed or the question is empty, report the error and stop.
 Read `council.general` from the resolved opencode-swarm config (global
 `~/.config/opencode/opencode-swarm.json` first, then project
 `.opencode/opencode-swarm.json` override). If `council.general.enabled` is not
-true OR no search API key is configured (neither `council.general.searchApiKey`
-nor `TAVILY_API_KEY` / `BRAVE_SEARCH_API_KEY`), surface to the user:
+true OR web search is unavailable, surface to the user. Web search is available
+when `council.general.searchProvider` is `"keenable"` (no key required;
+`KEENABLE_API_KEY` optional) or a key exists for the selected provider
+(`council.general.searchApiKey`, `TAVILY_API_KEY`, `BRAVE_SEARCH_API_KEY`).
+Message:
 
 "Deep research needs external search. Set council.general.enabled: true and
-configure a search API key (Tavily or Brave) in global
-~/.config/opencode/opencode-swarm.json or project
+either searchProvider: "keenable" (no key needed) or a search API key (Tavily
+or Brave) in global ~/.config/opencode/opencode-swarm.json or project
 .opencode/opencode-swarm.json."
 
 Then STOP. Do NOT produce ungrounded research from training memory.

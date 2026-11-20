@@ -352,6 +352,12 @@ You can also supply API keys via env vars instead of inlining them: set
 `TAVILY_API_KEY` or `BRAVE_SEARCH_API_KEY` in your shell. Inline `searchApiKey`
 takes precedence when both are set.
 
+`"searchProvider": "keenable"` needs no key; `KEENABLE_API_KEY` is optional and is
+read only from the environment. Per Keenable's documentation
+(https://docs.keenable.ai/rate-limits), keyless requests go to api.keenable.ai,
+which logs the query and IP, and are limited to 1,000 requests/hour and
+10/second per IP.
+
 > 🛈 **Deprecated fields.** Older configs may carry `members`, `presets`,
 > `moderator`, and `moderatorModel` under `council.general`. These are
 > retained on the strict schema for backward compatibility but are ignored
@@ -392,7 +398,8 @@ feeds the council's consensus and disagreements back into the draft spec.
 
 General Council advisory input is available as an early workflow option in
 MODE: BRAINSTORM (Phase 1b) and MODE: PLAN before `save_plan` when
-`council.general.enabled` is true and a search API key is configured. The
+`council.general.enabled` is true and web search is available (Keenable needs no key; otherwise a search API key is
+configured). The
 architect offers to convene the General Council for advisory deliberation
 before approach selection in BRAINSTORM, or before drafting/saving the
 implementation plan in PLAN so current input can inform plan writing before the
@@ -419,13 +426,14 @@ dispatch:
   generated query such as `latest multi-agent debate research 2025` is searched
   as `latest multi-agent debate research` when the current year is later;
 - Tavily receives `time_range` for inferred freshness, and Brave receives its
-  equivalent `freshness` parameter;
+  equivalent `freshness` parameter; freshness is not mapped for Keenable (the
+  provider sends no time-range filter), so it is not reported as applied;
 - the tool response includes `originalQuery`, normalized `query`,
   `temporalIntent`, `freshness`, and `removedStaleYears` so the architect can
   include that audit metadata in the RESEARCH CONTEXT.
 
 1. **Pre-flight.** The architect verifies `council.general.enabled: true` and
-   that a search API key is reachable. Stops with a clear user-facing message
+   that web search is available (Keenable, or a reachable search API key). Stops with a clear user-facing message
    if either is missing.
 2. **Research Phase.** The architect formulates 1–3 targeted `web_search`
    queries and compiles the results into a `RESEARCH CONTEXT` block. If
@@ -469,8 +477,8 @@ Council's evidence path so the two systems never collide.
 
 ### Limitations
 
-- Requires a search API key (Tavily or Brave). Without it, members fail
-  with a structured "missing_api_key" error.
+- Requires a search API key for Tavily or Brave (Keenable needs none). Without a
+  required key, members fail with a structured "missing_api_key" error.
 - Each council agent needs runtime access to its underlying model
   (reviewer / critic / SME) — the council does not validate model
   availability at config-load time.

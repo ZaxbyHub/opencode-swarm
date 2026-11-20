@@ -9,6 +9,8 @@ import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import {
 	activatePrWorkflow,
 	_test_exports as gateInternals,
+	PR_REVIEW_BASE_DIMENSION_IDS,
+	PR_REVIEW_REQUIRED_MICRO_LANE_IDS,
 	readPrWorkflowGateState,
 } from '../../../src/hooks/pr-workflow-gate.js';
 import {
@@ -21,6 +23,8 @@ import { initializeGitRepository } from '../helpers/git-repository.js';
 import {
 	installLegacyPrReviewPolicy,
 	restorePrReviewPolicy,
+	settleDispatchedBaseLanes,
+	uniqueSessionOps,
 } from './dispatch-lanes-pr-workflow-gate.test-fixtures.js';
 
 let directory = '';
@@ -278,4 +282,203 @@ describe('state-free request-shape rejection before activation (issue #3341)', (
 		);
 		expect(await readPrWorkflowGateState(directory, session)).toBeNull();
 	});
+});
+
+describe('pre-activation agent launchability for base and critic lanes (issue #3644 AC2)', () => {
+	// #3644 AC2: on a prefixed-only multi-swarm host (only mega_explorer and
+	// mega_critic registered) a bare "explorer" lane agent resolves to its
+	// canonical ROLE, so the base/micro admission arms — which check the
+	// explorer role only — wave an otherwise-VALID request through. The #2614
+	// registry check inside validateLaneAgent ("not registered on this host")
+	// then runs only inside launchAsyncLane, AFTER activation, base binding,
+	// and the base/micro batch recording consumed durable gate state. Both
+	// discovery legs below are otherwise-valid requests that provably REACH
+	// that launch-time refusal at base, and pin the fix's contract: the probe
+	// rejects pre-activation with the "is not launchable on this host"
+	// phrasing the council/reviewer/critic phases already use.
+	const originalGetGeneratedAgentNames =
+		dispatchInternals.getGeneratedAgentNames;
+	const originalGateResolveRevisionDigest =
+		gateInternals.resolvePrWorkflowRevisionDigest;
+
+	beforeEach(() => {
+		// Keep the gate's own digest seam on the dispatch's stubbed digest so
+		// the seeded-base settlement derivation stays accurate.
+		gateInternals.resolvePrWorkflowRevisionDigest = () => 'revision-1';
+	});
+
+	afterEach(() => {
+		dispatchInternals.getGeneratedAgentNames = originalGetGeneratedAgentNames;
+		gateInternals.resolvePrWorkflowRevisionDigest =
+			originalGateResolveRevisionDigest;
+	});
+
+	function stubPrefixedOnlyRegistry(): void {
+		dispatchInternals.getGeneratedAgentNames = () => [
+			'mega_explorer',
+			'mega_critic',
+		];
+	}
+
+	// The async lane-rejection return shape carries no top-level message —
+	// the raw launch-time refusal text lives in lane_results[].error. Post-fix
+	// the rejection moves into admission, which DOES set message; reading
+	// message first keeps the reachability control meaningful at base.
+	function dispatchMessageText(result: {
+		message?: string;
+		lane_results?: Array<{ error?: string }>;
+	}): string {
+		return String(
+			result.message ??
+				(result.lane_results ?? []).map((lane) => lane.error ?? '').join('; '),
+		);
+	}
+
+	const baseDimensionLanes = (prefix: string) =>
+		PR_REVIEW_BASE_DIMENSION_IDS.map((dimension) => ({
+			id: `${prefix}-${dimension}`,
+			agent: 'explorer',
+			prompt: `Explore ${dimension}`,
+			workflow_lane: dimension,
+		}));
+
+	test('an otherwise-valid tier-L base dispatch with an unregistered agent is refused BEFORE activation', async () => {
+		stubPrefixedOnlyRegistry();
+		const session = 'base-unlaunchable-3644';
+		const result = await executeDispatchLanesAsync(
+			{
+				mode: 'swarm-pr-review:base',
+				pr_head_sha: 'abc123',
+				base_sha: 'def456',
+				base_ref: 'origin/main',
+				max_concurrent: 6,
+				lanes: baseDimensionLanes('base-unlaunchable-3644'),
+			},
+			directory,
+			{ sessionID: session },
+		);
+		expect(result.success).toBe(false);
+		// Reachability control: PASSES at base — the raw launch-time refusal
+		// proves the valid request reached launchAsyncLane.
+		expect(dispatchMessageText(result)).toContain(
+			'not registered on this host',
+		);
+		// Discriminating (RED at base): the refusal must arrive as a
+		// pre-activation admission rejection wrapping the registry error.
+		expect(dispatchMessageText(result)).toContain(
+			'is not launchable on this host',
+		);
+		expect(await readPrWorkflowGateState(directory, session)).toBeNull();
+	}, 60_000);
+
+	test('an otherwise-valid micro dispatch with an unregistered agent leaves the gate state unchanged', async () => {
+		const session = 'micro-unlaunchable-3644';
+		// Seed an established tier-L base via a real dispatch. The seed uses
+		// the REAL (empty-in-tests) agent registry with bare 'explorer' — the
+		// admission ROLE check reads swarmState directly (not the _internals
+		// seam), so a prefixed name like 'mega_explorer' would fail it — and
+		// unique session ids so all six lanes can launch.
+		uniqueSessionOps();
+		const seedConfig = dispatchInternals.loadPluginConfig;
+		dispatchInternals.loadPluginConfig = (dir: string) => ({
+			...seedConfig(dir),
+			pr_review_legacy_transcript_compatibility: true,
+		});
+		const seed = await executeDispatchLanesAsync(
+			{
+				mode: 'swarm-pr-review:base',
+				pr_head_sha: 'abc123',
+				base_sha: 'def456',
+				base_ref: 'origin/main',
+				max_concurrent: 6,
+				lanes: baseDimensionLanes('micro-seed-3644'),
+			},
+			directory,
+			{ sessionID: session },
+		);
+		dispatchInternals.loadPluginConfig = seedConfig;
+		expect(seed.success).toBe(true);
+		await settleDispatchedBaseLanes(directory, String(seed.batch_id), session, {
+			expectedLaneCount: 6,
+			revisionDigest: 'revision-1',
+			scope: 'complete PR diff def456...abc123',
+		});
+		// NOW stub the registry: the bare 'explorer' micro lane agent passes
+		// the admission ROLE check but must be refused as unlaunchable without
+		// consuming any further state.
+		stubPrefixedOnlyRegistry();
+		const before = await readPrWorkflowGateState(directory, session);
+		expect(before).not.toBeNull();
+		const result = await executeDispatchLanesAsync(
+			{
+				mode: 'swarm-pr-review:micro',
+				pr_head_sha: 'abc123',
+				base_sha: 'def456',
+				base_ref: 'origin/main',
+				max_concurrent: 1,
+				trigger_evaluation: PR_REVIEW_REQUIRED_MICRO_LANE_IDS.map(
+					(triggerId) => ({
+						trigger_id: triggerId,
+						result:
+							// 'unclassified-risk' (the fallback family) must stay MATCHED.
+							triggerId === 'test-infrastructure' ||
+							triggerId === 'unclassified-risk'
+								? ('MATCHED' as const)
+								: ('NOT_TRIGGERED' as const),
+						evidence: `Focused diff evaluation for ${triggerId}`,
+					}),
+				),
+				lanes: [
+					{
+						id: 'micro-unlaunchable-3644',
+						agent: 'explorer',
+						prompt: 'Review the exact PR diff for this risk family.',
+						// Schema: micro workflow_lane must be a micro trigger id.
+						workflow_lane: 'test-infrastructure',
+					},
+				],
+			},
+			directory,
+			{ sessionID: session },
+		);
+		expect(result.success).toBe(false);
+		// At base this snapshot comparison is the leg's frozen failure
+		// signature: the launch-time refusal runs only AFTER the trigger-ledger
+		// bind and micro family-dispatch recording have mutated the state.
+		expect(await readPrWorkflowGateState(directory, session)).toEqual(before);
+		expect(dispatchMessageText(result)).toContain(
+			'is not launchable on this host',
+		);
+	}, 60_000);
+
+	test('a swarm-pr-review:critic lane agent unregistered on a prefixed-only host is already refused pre-activation (ABSORB pin)', async () => {
+		// Preserving leg: the critic phase already probes launchability inside
+		// assertPrReviewPhaseLaneAdmission BEFORE activation (#3358 AC8/AC11),
+		// so this leg is GREEN at base — it pins that ordering so the #3644
+		// fix cannot regress it while extending the probe to base/micro.
+		stubPrefixedOnlyRegistry();
+		const session = 'critic-unlaunchable-3644';
+		const result = await executeDispatchLanesAsync(
+			{
+				mode: 'swarm-pr-review:critic',
+				pr_head_sha: 'abc123',
+				base_sha: 'def456',
+				base_ref: 'origin/main',
+				lanes: [
+					{
+						id: 'critic-unlaunchable-3644',
+						agent: 'critic',
+						prompt: 'Challenge the assigned reviewer verdicts',
+						workflow_lane: 'critic-chunk-1',
+						review_item_ids: ['c1'],
+					},
+				],
+			},
+			directory,
+			{ sessionID: session },
+		);
+		expect(result.success).toBe(false);
+		expect(String(result.message)).toContain('is not launchable on this host');
+		expect(await readPrWorkflowGateState(directory, session)).toBeNull();
+	}, 60_000);
 });

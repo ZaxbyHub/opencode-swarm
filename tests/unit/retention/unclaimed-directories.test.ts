@@ -5,8 +5,8 @@
  * had no lifecycle at all and no supported command could reclaim it.
  *
  * Coverage: tier-1 preservation, tier-2 owner manifests (claim + expiry +
- * duplicate-claim refusal), malformed-manifest fail-closed (the WHOLE sweep,
- * not just the catch-all), per-resolved-path containment for a symlinked
+ * duplicate-claim refusal), malformed-manifest fail-closed (catch-all skipped,
+ * families still run), per-resolved-path containment for a symlinked
  * `.swarm` and for links inside it, `.preserve` markers, young-entry keep,
  * `dryRun` rehearsal (which must also keep family files), and the retention.log line grammar.
  */
@@ -155,13 +155,14 @@ describe('unclaimed .swarm directories get a lifecycle', () => {
 		expect(result.errors).toEqual({});
 	});
 
-	it('a malformed manifest refuses the whole sweep and names the file', async () => {
+	it('a malformed manifest skips the catch-all, still runs the families, and names the file', async () => {
 		const root = makeRoot('malformed');
 		writeManifest(root, 'broken.json', {
 			owner: 'broken',
 			preserve: 'not-an-array',
 		});
-		// Both of these WOULD be pruned by their own pass if the sweep ran.
+		// The family victim is pruned by its own pass (families do not read the
+		// claims); the catch-all victim would be pruned only if the claims loaded.
 		const familyVictim = seedSwarmFile(
 			root,
 			path.join('capsules', 'old.json'),
@@ -176,8 +177,8 @@ describe('unclaimed .swarm directories get a lifecycle', () => {
 		const result = await runRetentionSweep(root, { now: NOW });
 		expect(result.errors.manifests).toContain('retention.d/broken.json');
 		expect(result.errors.manifests).toContain('preserve');
-		expect(result.pruned).toEqual({});
-		expect(existsSync(familyVictim)).toBe(true);
+		expect(result.pruned['unclaimed-directories']).toBeUndefined();
+		expect(existsSync(familyVictim)).toBe(false);
 		expect(existsSync(catchAllVictim)).toBe(true);
 	});
 
@@ -445,7 +446,7 @@ describe('unclaimed .swarm directories get a lifecycle', () => {
 		expect(existsSync(victim)).toBe(false);
 	});
 
-	it('two manifests claiming one directory refuse the sweep', async () => {
+	it('two manifests claiming one directory skip the catch-all', async () => {
 		const root = makeRoot('claim-conflict');
 		writeManifest(root, 'a.json', {
 			owner: 'owner-a',
