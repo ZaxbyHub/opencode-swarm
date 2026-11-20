@@ -9,13 +9,13 @@
 
 import { createHash } from 'node:crypto';
 import { lstat } from 'node:fs/promises';
-import { epicSentinelExists } from '../epic/lifecycle.js';
-import { commitEpicResidueAfterDelegation } from '../epic/residue-commit.js';
-import { completeBackgroundPhaseParticipation } from '../evidence/phase-participation.js';
 // r14 audit repair (P0-2): side-effect-free read-back verifier for the
 // context-map closeout effect (persistence.ts imports node builtins + types
 // only — no cycle, no load cost).
 import { loadContextMap } from '../context-map/persistence.js';
+import { epicSentinelExists } from '../epic/lifecycle.js';
+import { commitEpicResidueAfterDelegation } from '../epic/residue-commit.js';
+import { completeBackgroundPhaseParticipation } from '../evidence/phase-participation.js';
 import { transitionTaskWorkflowEvidence } from '../gate-evidence.js';
 import {
 	abortStandardWorktreeDispatch,
@@ -75,14 +75,14 @@ import {
 	promoteDelegationFallback,
 	putPendingBackgroundAdvisory,
 	putTerminalCloseoutAdvisory,
-	readDurableIngestionOutcome,
-	releaseTerminalCloseoutStepLease,
 	type ReplacePendingBackgroundAdvisoryResult,
+	readDurableIngestionOutcome,
 	recordDelegationIngestionResult,
 	registerLegacyCoderSettlementReconciler,
 	registerTerminalCloseoutReconciler,
 	releaseBackgroundCoderReservation,
 	releasePreparedBackgroundAdvisories,
+	releaseTerminalCloseoutStepLease,
 	replacePendingBackgroundAdvisory,
 	type TerminalCloseoutStep,
 	updateCoderSettlement,
@@ -187,15 +187,48 @@ let contextMapModulePromise: Promise<
  *   child-level summary — the preserved verdict IS the intended state.
  * Anything else — a missing entry, an unchanged stale summary on a pending
  * entry, an unreadable map — is NOT proof (the caller reports retryable).
+ *
+ * r16 audit repair (P2): the terminal-verdict branch above acked even when
+ * the CURRENT completion's write failed entirely — a suppressed
+ * saveContextMap error left the preserved verdict as the only survivor while
+ * this completion's DECISIONS (the fresh mandatory payload the non-overwrite
+ * guard branch still owes) were lost. Decisions are therefore verified in
+ * every branch: each of this completion's decision texts must be present in
+ * the read-back map (exact-text presence — the writer's dedup semantics make
+ * presence the idempotent-correct check). FILE SUMMARIES are deliberately
+ * NOT verified: they are best-effort enrichment (refreshed from declared
+ * files), and the closeout obligation does not depend on them — documented
+ * weaker guarantee, kept separate from the task-status/decision release.
  */
 function verifyContextMapWrite(
 	directory: string,
 	taskId: string,
-	expected: { implementationSummary: string; releaseProven: boolean },
+	expected: {
+		implementationSummary: string;
+		releaseProven: boolean;
+		decisionTexts: readonly string[];
+	},
 ): boolean {
 	try {
-		const entry = loadContextMap(directory)?.task_history[taskId];
+		const map = loadContextMap(directory);
+		const entry = map?.task_history[taskId];
 		if (entry === undefined) return false;
+		// r16: this completion's decisions are mandatory closeout payload in
+		// every branch (the writer persists them in the same save as the
+		// task history; the non-overwrite-guard branch owes them as its only
+		// fresh data). A missing decision text means the write did not land
+		// (or was trimmed by the bounded log beyond this batch's own cap —
+		// the caller bounds the expectation to the writer's cap).
+		const presentDecisionTexts = new Set(
+			(map?.decisions ?? []).map((decision) =>
+				String(decision?.decision ?? '').trim(),
+			),
+		);
+		if (
+			!expected.decisionTexts.every((text) => presentDecisionTexts.has(text))
+		) {
+			return false;
+		}
 		if (
 			entry.implementation_summary === expected.implementationSummary &&
 			(!expected.releaseProven ||
@@ -204,12 +237,11 @@ function verifyContextMapWrite(
 		) {
 			return true;
 		}
-		if (
-			!expected.releaseProven &&
-			entry.final_status !== 'pending'
-		) {
+		if (!expected.releaseProven && entry.final_status !== 'pending') {
 			// Terminal non-overwrite guard: a pending child-level summary
-			// correctly left an existing terminal verdict in place.
+			// correctly left an existing terminal verdict in place — and the
+			// decision check above proved this completion's fresh payload is
+			// durably present.
 			return true;
 		}
 		return false;
@@ -397,10 +429,7 @@ export function createBackgroundCompletionObserver(opts: {
 		terminalStatus: string,
 	): TerminalCloseoutStep[] => {
 		if (record.batchId !== undefined) return []; // lanes settle elsewhere
-		const steps: TerminalCloseoutStep[] = [
-			'delegation_end',
-			'parent_advisory',
-		];
+		const steps: TerminalCloseoutStep[] = ['delegation_end', 'parent_advisory'];
 		if (terminalStatus === 'completed') {
 			const taskId = record.evidenceTaskId ?? record.planTaskId;
 			if (opts.contextMap?.enabled === true && taskId) {
@@ -859,7 +888,9 @@ export function createBackgroundCompletionObserver(opts: {
 						onLegacyCoderSettlementAdvisoryReplaced:
 							notifyLegacyCoderSettlementAdvisoryReplaced,
 						onTerminalCloseoutPending: async (pendingRecord) => {
-							if (inFlightCloseoutCorrelationIds.has(pendingRecord.correlationId)) {
+							if (
+								inFlightCloseoutCorrelationIds.has(pendingRecord.correlationId)
+							) {
 								return;
 							}
 							await reconcilePending(pendingRecord);
@@ -1112,9 +1143,7 @@ export function createBackgroundCompletionObserver(opts: {
 					logger.warn(
 						`[background] plan critic approval not recorded for call ${record.callID}: ${reason}`,
 					);
-					const session = swarmState.agentSessions.get(
-						record.parentSessionId,
-					);
+					const session = swarmState.agentSessions.get(record.parentSessionId);
 					if (session) {
 						pushAdvisory(
 							session,
@@ -1791,10 +1820,7 @@ export function createBackgroundCompletionObserver(opts: {
 			// can never appear as 'approved'. Journal-gated (P0-3): a crash
 			// between settlement and this write is re-driven by recovery; the
 			// write itself is idempotent (task_history is keyed by task id).
-			if (
-				opts.contextMap?.enabled === true &&
-				record.batchId === undefined
-			) {
+			if (opts.contextMap?.enabled === true && record.batchId === undefined) {
 				const closeoutTaskId = record.evidenceTaskId ?? record.planTaskId;
 				if (closeoutTaskId) {
 					await runCloseoutStep(
@@ -1806,6 +1832,7 @@ export function createBackgroundCompletionObserver(opts: {
 								extractContextDecisionsFromContextMd,
 								updateContextMapAfterAgent,
 								resolveContextMapTaskReleaseStatus,
+								MAX_PERSISTED_DECISIONS,
 							} = await resolveContextMapModule();
 							// r14 audit repair (P1-5): a single successful child
 							// ingestion is NOT a full task release. The summary only
@@ -1819,23 +1846,38 @@ export function createBackgroundCompletionObserver(opts: {
 									directory,
 									closeoutTaskId,
 								);
+							// r16 (P2): extract this completion's decisions ONCE —
+							// they are mandatory closeout payload and the read-back
+							// verifier must prove they persisted, not just the
+							// task-status effect. The expectation mirrors the
+							// writer's own filter (empty-text bullets carry no
+							// identity) and is bounded to the writer's persisted-
+							// decisions cap so a pathological >cap batch cannot
+							// wedge the step in an endless retry.
+							const decisions = extractContextDecisionsFromContextMd(
+								directory,
+								{
+									agent_role: record.normalizedAgent,
+								},
+							);
+							const expectedDecisionTexts = decisions
+								.map((entry) => (entry.decision ?? '').trim())
+								.filter((text) => text !== '')
+								.slice(-MAX_PERSISTED_DECISIONS);
 							updateContextMapAfterAgent({
 								task_id: closeoutTaskId,
 								agent_role: record.normalizedAgent,
 								// Best-effort reconstruction from the original
 								// delegation (P1-2): the coder's declared files
 								// when present, else no attribution.
-								files_touched:
-									record.taskChangeContext?.declaredFiles ?? [],
+								files_touched: record.taskChangeContext?.declaredFiles ?? [],
 								implementation_summary: (result.text ?? '').slice(0, 500),
 								task_goal: '',
 								// Only the PROVEN whole-task release maps to 'completed';
 								// a child-level success is 'in_progress' (the non-final
 								// 'pending' context-map status).
 								final_status: taskReleaseStatus,
-								decisions: extractContextDecisionsFromContextMd(directory, {
-									agent_role: record.normalizedAgent,
-								}),
+								decisions,
 								directory,
 							});
 							// r14 audit repair (P0-2): `void` (no exception) is
@@ -1843,14 +1885,15 @@ export function createBackgroundCompletionObserver(opts: {
 							// internal errors and returns a fallback map. Verify
 							// the CURRENT change persisted by reading it back
 							// and comparing THIS completion's summary (r15 P2:
-							// an old stale entry must not ack a new completion).
+							// an old stale entry must not ack a new completion;
+							// r16 P2: this completion's decisions must be present
+							// in every branch — a preserved terminal verdict alone
+							// must not ack a write that lost them).
 							if (
 								!verifyContextMapWrite(directory, closeoutTaskId, {
-									implementationSummary: (result.text ?? '').slice(
-										0,
-										500,
-									),
+									implementationSummary: (result.text ?? '').slice(0, 500),
 									releaseProven: taskReleaseStatus === 'completed',
+									decisionTexts: expectedDecisionTexts,
 								})
 							) {
 								return {
