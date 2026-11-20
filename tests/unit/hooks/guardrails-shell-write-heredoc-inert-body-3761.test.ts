@@ -353,35 +353,40 @@ describe('guardrails quoted-heredoc neutralization (#3761)', () => {
 		}, 60_000);
 	});
 
-describe('guardrail-explain parity for the heredoc shape (#3761 final critic)', () => {
-	it('explain does not report parse_error for the in-scope dense heredoc the gate admits', async () => {
-		const { handleGuardrailExplain } = await import(
-			'../../../src/services/guardrail-explain-service'
-		);
-		const result = await handleGuardrailExplain(TEST_DIR, [
-			'cat',
-			'>',
-			'notes/findings.md',
-			`<<'EOF'\n${DENSE_BODY.join('\n')}\nEOF`,
-		]);
-		expect(typeof result).toBe('string');
-		expect(result).not.toContain('parse_error');
-	}, 60_000);
+	describe('guardrail-explain parity for the heredoc shape (#3761 final critic)', () => {
+		it('explain does not report parse_error for the in-scope dense heredoc the gate admits', async () => {
+			const { handleGuardrailExplain } = await import(
+				'../../../src/services/guardrail-explain-service'
+			);
+			const result = await handleGuardrailExplain(TEST_DIR, [
+				'cat',
+				'>',
+				'notes/findings.md',
+				`<<'EOF'\n${DENSE_BODY.join('\n')}\nEOF`,
+			]);
+			expect(typeof result).toBe('string');
+			expect(result).not.toContain('parse_error');
+		}, 60_000);
 
-	it('explain gives the scope/authority reason (not parse_error) for the out-of-scope dense heredoc', async () => {
-		const { handleGuardrailExplain } = await import(
-			'../../../src/services/guardrail-explain-service'
-		);
-		const result = await handleGuardrailExplain(TEST_DIR, [
-			'cat',
-			'>',
-			'../outside/esc.md',
-			`<<'EOF'\n${DENSE_BODY.join('\n')}\nEOF`,
-		]);
-		expect(typeof result).toBe('string');
-		expect(result).not.toContain('parse_error');
-		expect(result).toMatch(/SCOPE_VIOLATION|AUTHORITY_ROOT_ESCAPE|block/);
-	}, 60_000);
-});
-
+		it('explain gives the scope/authority reason (not parse_error) for the out-of-scope dense heredoc', async () => {
+			const { handleGuardrailExplain } = await import(
+				'../../../src/services/guardrail-explain-service'
+			);
+			const result = await handleGuardrailExplain(TEST_DIR, [
+				'--scope',
+				'notes/',
+				'cat',
+				'>',
+				'../outside/esc.md',
+				`<<'EOF'\n${DENSE_BODY.join('\n')}\nEOF`,
+			]);
+			expect(typeof result).toBe('string');
+			expect(result).not.toContain('parse_error');
+			// Meaningful discriminator (round-2 critic note): with --scope declared,
+			// the refusal must be the scope violation itself, not a generic block.
+			expect(result).toMatch(
+				/scope_violation|SCOPE_VIOLATION|out-of-scope|outside/,
+			);
+		}, 60_000);
+	});
 });

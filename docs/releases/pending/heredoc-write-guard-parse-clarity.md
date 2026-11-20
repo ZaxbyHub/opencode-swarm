@@ -41,7 +41,7 @@ issue: 3754,3761
 - The destructive arm's shell-flag-cluster raw scan can still trip on
   heredoc body text documenting an interpreter invocation (pre-existing;
   same class as the absorbed #3616 items).
--  refuses every heredoc cat write with
+- `scope_validate` refuses every heredoc cat write with
   UNRESOLVED_TARGET (it does not skip the path-null here-doc marker the
   gate skips) — pre-existing, fail-closed direction, unchanged by this
   fix.
