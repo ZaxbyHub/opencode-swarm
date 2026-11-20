@@ -1,5 +1,25 @@
 # Changelog
 
+## [7.205.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.204.12...v7.205.0) (2026-11-20)
+
+
+### Features
+
+* **council:** add keenable as an optional web search provider ([98570f1](https://github.com/ZaxbyHub/opencode-swarm/commit/98570f1b9b9480eeb36169cb641906c5a9fc7b5e))
+
+
+### Bug Fixes
+
+* **council:** finish the keyless wiring (deep-research help) and recognise redirect refusals by error code ([fc8640e](https://github.com/ZaxbyHub/opencode-swarm/commit/fc8640e7875e3d98f937c6d62359516b0832a8a6))
+* **council:** keep the council wording character-neutral for the architect prompt budget ([bb63fb5](https://github.com/ZaxbyHub/opencode-swarm/commit/bb63fb57bd5dc246f15ed0fbe2471941720d99f2))
+* **council:** resolve swarm-pr-review findings for the keenable provider ([f7cc955](https://github.com/ZaxbyHub/opencode-swarm/commit/f7cc955976216209efe48a7729f7b67e89c44fc4))
+* **delegation-gate:** close PR 3750 review feedback on the Code Mode wrapper exemption ([69cf31a](https://github.com/ZaxbyHub/opencode-swarm/commit/69cf31a4b9c64d2cc8826f5b20ab200b028fd57f))
+* **delegation-gate:** let the Code Mode execute wrapper through the completion gate ([0bffc05](https://github.com/ZaxbyHub/opencode-swarm/commit/0bffc050cf3913268a4ad9f276217cb70a359ebf))
+* **retention:** a misnamed or malformed manifest skips only the catch-all, families still run ([38107f2](https://github.com/ZaxbyHub/opencode-swarm/commit/38107f20decedbbff2e6c19ebb13e054ce700fa9))
+* **retention:** manifest error messages say the catch-all is skipped, not the sweep refused ([21dbd28](https://github.com/ZaxbyHub/opencode-swarm/commit/21dbd286a8ca639d765d930cb9fc9edf63d6a809))
+* **retention:** refuse a misnamed retention.d manifest instead of skipping it silently ([94f5e98](https://github.com/ZaxbyHub/opencode-swarm/commit/94f5e983bce8df9442a5c9c3292196e303bd049a))
+* **retention:** refuse trailing-dot/space manifest names, name the file in tests, correct comments and fragment ([a25fbaa](https://github.com/ZaxbyHub/opencode-swarm/commit/a25fbaae7bdb916381e6dae773d5739ede383fbd))
+
 ## [7.204.12](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.204.11...v7.204.12) (2026-11-19)
 
 
