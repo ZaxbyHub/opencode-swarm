@@ -1935,6 +1935,14 @@ async function initializeOpenCodeSwarm(
 						onLegacyCoderSettlementAdvisoryReplaced:
 							backgroundCompletionObserver.notifyLegacyCoderSettlementAdvisoryReplaced,
 					}),
+				).then(() =>
+					// r15 audit repair (P3): recover context-map task-release
+					// promotions lost to a best-effort promotion failure at
+					// update_task_status. Idempotent, config-gated, fail-closed
+					// on QA proof; best-effort like the maintenance above.
+					import('./context-map/post-agent-update.js').then((m) =>
+						m.reconcileContextMapTaskReleases(bootstrapRoot),
+					),
 				),
 				BACKGROUND_MAINTENANCE_INIT_TIMEOUT_MS,
 				new Error(

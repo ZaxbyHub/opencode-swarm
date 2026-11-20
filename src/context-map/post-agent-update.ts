@@ -19,6 +19,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { sanitizeContextText } from '../hooks/context-sanitizer';
+import * as logger from '../utils/logger.js';
 import type {
 	ContextMap,
 	DecisionEntry,
@@ -844,5 +845,81 @@ export function promoteContextMapTaskRelease(
 		_internals.saveContextMap(next, directory);
 	} catch {
 		// The promotion must never block the authoritative status update.
+	}
+}
+
+/**
+ * r15 audit repair (P3): idempotent reconciliation of context-map task
+ * releases after a lost promotion.
+ *
+ * `promoteContextMapTaskRelease` (and its caller in update_task_status) is
+ * best-effort by contract — the authoritative task release in the plan must
+ * never be rolled back by a context-map write failure. But before this
+ * repair, a failed promotion left the context map 'pending' FOREVER: the
+ * child closeout steps were already completed, so no closeout replay re-drove
+ * the promotion.
+ *
+ * This reconciliation reconstructs the promotion from the AUTHORITATIVE
+ * durable state alone — the plan's task status plus the recorded QA-gate
+ * evidence (the exact proof `resolveContextMapTaskReleaseStatus` applies,
+ * fail-closed: no promotion without full QA proof). It runs at existing
+ * maintenance points (observer maintenance pass, /swarm status, post-init
+ * background maintenance), so any later runtime recovers a lost promotion.
+ *
+ * Guarantees:
+ * - the plan stays authoritative — this never touches plan state;
+ * - idempotent: `appendTaskHistory` upserts by task id, so repeated
+ *   reconciliations never duplicate task-history entries;
+ * - a terminal 'rejected' entry is never overwritten (same guard as the
+ *   promotion itself). NOTE (r15): the context-map data model carries no
+ *   workflow-generation identity on task entries, so a later reworked and
+ *   re-released task cannot be distinguished from the generation that was
+ *   rejected — per the audit, the negative-protection guard is NOT weakened
+ *   without a reproduced rework test; a rejected entry stays rejected;
+ * - gated on the context_map config — no context map is invented for
+ *   projects with the context map disabled;
+ * - failures are diagnosable (logged) and never throw.
+ */
+export async function reconcileContextMapTaskReleases(
+	directory: string,
+): Promise<void> {
+	try {
+		const { loadPluginConfig } = await import('../config/loader.js');
+		if (loadPluginConfig(directory).context_map?.enabled !== true) {
+			return;
+		}
+		const { loadPlanJsonOnly } = await import('../plan/manager.js');
+		const plan = await loadPlanJsonOnly(directory);
+		if (!plan) return;
+		const completedTasks = plan.phases
+			.flatMap((phase) => phase.tasks)
+			.filter((task) => task.status === 'completed');
+		if (completedTasks.length === 0) return;
+		const map =
+			_internals.loadContextMap(directory) ??
+			_internals.createEmptyContextMap();
+		for (const task of completedTasks) {
+			const existing = map.task_history[task.id];
+			if (existing !== undefined && existing.final_status !== 'pending') {
+				// 'approved' is already done; 'rejected'/'blocked' are terminal
+				// verdicts the reconciliation must preserve.
+				continue;
+			}
+			// Fail-closed release proof: plan status AND every required QA
+			// gate recorded. Anything unreadable or unproven stays untouched.
+			const releaseStatus = await resolveContextMapTaskReleaseStatus(
+				directory,
+				task.id,
+			);
+			if (releaseStatus === 'completed') {
+				promoteContextMapTaskRelease(directory, task.id);
+			}
+		}
+	} catch (error) {
+		logger.warn(
+			`[context-map] task-release reconciliation failed (non-fatal; retried at the next maintenance point): ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		);
 	}
 }

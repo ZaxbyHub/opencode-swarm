@@ -870,6 +870,20 @@ export function createBackgroundCompletionObserver(opts: {
 				} finally {
 					inFlightCloseoutCorrelationIds.delete(record.correlationId);
 				}
+				// r15 audit repair (P3): recover context-map task-release
+				// promotions lost to a best-effort promotion failure at
+				// update_task_status. Idempotent, fail-closed on QA proof,
+				// plan stays authoritative. Best-effort here too — the closeout
+				// paths below proceed regardless.
+				if (opts.contextMap?.enabled === true) {
+					try {
+						const { reconcileContextMapTaskReleases } =
+							await resolveContextMapModule();
+						await reconcileContextMapTaskReleases(directory);
+					} catch {
+						// observation only; the next maintenance point retries
+					}
+				}
 			}
 
 			let legacyTransferPending = false;
