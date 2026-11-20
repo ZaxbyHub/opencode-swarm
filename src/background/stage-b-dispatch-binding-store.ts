@@ -36,6 +36,7 @@ import {
 	readSync,
 	rmdirSync,
 	rmSync,
+	lstatSync,
 	statSync,
 } from 'node:fs';
 import * as path from 'node:path';
@@ -71,9 +72,14 @@ const lastSeqBySessionDir = new Map<string, number>();
 
 function allocateSeq(sessionDir: string): number {
 	const last = lastSeqBySessionDir.get(sessionDir) ?? 0;
-	// The wall-clock floor keeps the counter monotonic across restarts; the
-	// increment keeps it strictly increasing within bursts (where Date.now()
-	// is constant and file mtimes collide).
+	// r15 (P5) — corrected claim: the counter is strictly increasing WITHIN
+	// a process (the increment covers same-tick bursts where Date.now() is
+	// constant and mtimes collide). It is NOT monotonic across restarts: a
+	// same-tick burst can push seq above the wall clock (W, W+1, ... W+127),
+	// and a restarted process (empty map) floors its first seq at
+	// Date.now() — potentially BELOW surviving pre-restart seqs. The seq is
+	// therefore only a coarse-mtime TIE-BREAKER in the eviction sort, never
+	// a global order; mtime stays the primary recency signal.
 	const next = Math.max(last + 1, Date.now());
 	lastSeqBySessionDir.delete(sessionDir);
 	lastSeqBySessionDir.set(sessionDir, next);
@@ -132,16 +138,17 @@ interface PersistedStageBBindings {
 	callID: string;
 	recordedAt: number;
 	/**
-	 * r14 audit repair (P1-8, baseline defect): monotonically increasing
-	 * write-order key. File mtimes are UNRELIABLE as an LRU signal — on
-	 * coarse-granularity filesystems (tmpfs and others) a burst of writes
-	 * lands within one timestamp tick, all files share an mtime, and the
-	 * cap eviction's mtime sort degenerates to readdir order (which on tmpfs
-	 * is typically reverse creation order — evicting the NEWEST record, even
-	 * the just-written one). `seq` is allocated per session dir as
-	 * max(lastSeq + 1, Date.now()) — strictly increasing within a process
-	 * (bursts included) and monotonic across restarts (the wall-clock floor).
-	 * Optional on read for legacy records; such records sort oldest.
+	 * r14 audit repair (P1-8, baseline defect) — corrected by r15 (P5):
+	 * per-session-dir write-order key. On coarse-granularity filesystems a
+	 * burst of writes lands within one mtime tick, so the eviction sort needs
+	 * a deterministic tie-break. `seq` is allocated per session dir as
+	 * max(lastSeq + 1, Date.now()) — strictly increasing WITHIN a process
+	 * (bursts included). It is NOT monotonic across restarts: a same-tick
+	 * burst can outrun a restarted process's Date.now() floor, so
+	 * post-restart records may carry LOWER seqs than surviving pre-restart
+	 * records. The eviction sort therefore orders by mtime FIRST and uses
+	 * `seq` only as the tie-break WITHIN one mtime tick. Optional on read
+	 * for legacy records; such records sort oldest within their tick.
 	 */
 	seq?: number;
 	bindings: StageBDispatchBinding[];
@@ -462,11 +469,16 @@ export function pruneSessionDir(
  * r14 audit repair (P1-8): best-effort read of a record's persisted
  * write-order `seq` for the cap-eviction sort. Any anomaly (missing,
  * unparsable, no seq — legacy records) yields undefined; such records sort
- * oldest, never newest. Never throws.
+ * oldest within their mtime tick, never newest. Never throws.
+ *
+ * r15 (P5): lstat — a symlinked `.json` must not be FOLLOWED into content
+ * outside the store (unsafe symlink-follow in the pruning inspection); a
+ * symlink is not a regular file and sorts as a legacy no-seq record. The
+ * eviction itself only ever unlinks the LINK (rmSync never follows).
  */
 function readRecordSeq(filePath: string): number | undefined {
 	try {
-		const stats = statSync(filePath);
+		const stats = lstatSync(filePath);
 		if (!stats.isFile() || stats.size > STAGE_B_BINDING_MAX_BYTES) {
 			return undefined;
 		}
@@ -529,22 +541,28 @@ function pruneDirEntries(
 		}
 	}
 	if (fresh.length > MAX_STAGE_B_BINDING_FILES_PER_SESSION_DIR) {
-		// r14 audit repair (P1-8): order by the records' persisted write-order
-		// `seq` (read from the payloads — bounded: at most cap+1 tiny reads,
-		// only when the cap is actually exceeded), tie-broken by mtime and
-		// then by path for full determinism. Legacy records without a seq
-		// sort oldest. The just-written record (protectPath) is never evicted
-		// by the cap — on coarse-mtime filesystems the pre-fix sort could
-		// evict it the moment it landed.
+		// r15 audit repair (P5): order by MTIME first (the real recency
+		// signal), with the persisted write-order `seq` demoted to a
+		// coarse-mtime TIE-BREAKER. seq is NOT monotonic across restarts (a
+		// same-tick burst outruns a later process's Date.now() floor, so
+		// post-restart records can carry LOWER seqs than surviving
+		// pre-restart records) — a seq-primary sort evicted newer records
+		// while retaining older ones. Within one mtime tick, seq is still a
+		// deterministic, roughly-write-ordered tie-break (r14 P1-8's original
+		// intent), and the path comparison keeps the order fully
+		// deterministic. Bounded: at most cap+1 tiny reads, only when the cap
+		// is actually exceeded. Legacy records without a seq sort oldest
+		// within their mtime tick. The just-written record (protectPath) is
+		// never evicted by the cap.
 		const stampedWithSeq = fresh.map((entry) => ({
 			...entry,
 			seq: readRecordSeq(entry.file),
 		}));
 		const ordered = stampedWithSeq.sort((a, b) => {
+			if (a.mtime !== b.mtime) return a.mtime - b.mtime;
 			const seqA = a.seq ?? Number.NEGATIVE_INFINITY;
 			const seqB = b.seq ?? Number.NEGATIVE_INFINITY;
 			if (seqA !== seqB) return seqA - seqB;
-			if (a.mtime !== b.mtime) return a.mtime - b.mtime;
 			return a.file < b.file ? -1 : a.file > b.file ? 1 : 0;
 		});
 		const evictable = ordered.filter(
