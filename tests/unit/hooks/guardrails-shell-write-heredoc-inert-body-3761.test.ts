@@ -224,6 +224,38 @@ describe('guardrails quoted-heredoc neutralization (#3761)', () => {
 			).rejects.toThrow(/BLOCKED|WRITE BLOCKED/);
 		}, 60_000);
 
+		it(
+			'inert procsub-shaped body text does not trip the destructive arm (r2 N2)',
+			async () => {
+				const hooks = createGuardrailsHooks(
+					TEST_DIR,
+					undefined,
+					defaultConfig(),
+				);
+				coderSession('heredoc-e2e-3b');
+				setDeclaredScope('heredoc-e2e-3b', ['notes/']);
+				try {
+					await hooks.toolBefore(
+						{ tool: 'bash', sessionID: 'heredoc-e2e-3b', callID: 'c1' },
+						{
+							args: {
+								command:
+									"cat > notes/procsub.md <<'EOF'\ndocumenting tee >(rm -rf ../esc) usage\nEOF",
+							},
+						},
+					);
+				} catch (err) {
+					const msg = err instanceof Error ? err.message : String(err);
+					// The body is inert data for cat; a destructive-arm trip on
+					// the body text is exactly the neutralization-threading bug.
+					expect(msg).not.toMatch(
+						/[Dd]estructive|recursi|rm -rf|remove-tree/,
+					);
+				}
+			},
+			60_000,
+		);
+
 		it('genuine parse failures carry the not-a-policy-refusal clause', async () => {
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, defaultConfig());
 			coderSession('heredoc-e2e-4');
