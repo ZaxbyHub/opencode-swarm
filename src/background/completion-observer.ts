@@ -55,6 +55,7 @@ import {
 	claimDelegationIngestion,
 	claimTerminalResult,
 	clearLegacyCoderSettlementTransferPending,
+	type DurableIngestionOutcome,
 	findDelegationForCompletion,
 	initializeTerminalCloseout,
 	isTerminalCloseoutStepPending,
@@ -67,6 +68,7 @@ import {
 	promoteDelegationFallback,
 	putPendingBackgroundAdvisory,
 	putTerminalCloseoutAdvisory,
+	readDurableIngestionOutcome,
 	type ReplacePendingBackgroundAdvisoryResult,
 	recordDelegationIngestionResult,
 	registerLegacyCoderSettlementReconciler,
@@ -1097,6 +1099,21 @@ export function createBackgroundCompletionObserver(opts: {
 						);
 						return;
 					}
+					// r14 audit repair (P0-1): derive the semantic outcome of this
+					// ingestion and commit it ATOMICALLY with the consumed flip.
+					// `applied.ok || applied.consumed` remains the commit condition
+					// (a terminal-negative drop is durably consumed too), but the
+					// OUTCOME is what a replay routes on — never `consumed` alone.
+					const ingestionOutcome: DurableIngestionOutcome | undefined =
+						applied.ok
+							? 'accepted'
+							: applied.consumed
+								? applied.skipped
+									? 'skipped'
+									: applied.stale
+										? 'stale'
+										: 'rejected'
+								: undefined;
 					const ingestionCommit = await (
 						opts.recordIngestionResult ?? recordDelegationIngestionResult
 					)(
@@ -1115,6 +1132,7 @@ export function createBackgroundCompletionObserver(opts: {
 						// successful no-task completion still durably consumes
 						// per its own contract (stage-b-gates no-task return).
 						applied.ok || applied.consumed,
+						{ outcome: ingestionOutcome },
 					);
 					if (!ingestionCommit) {
 						logger.warn(
@@ -1249,6 +1267,63 @@ export function createBackgroundCompletionObserver(opts: {
 						'ingestion pending',
 					);
 					return;
+				} else {
+					// r14 audit repair (P0-1): this is a REPLAY of an already
+					// durably-consumed ingestion (crash between the ingestion commit
+					// and the context-map/parent-advisory closeout, or a duplicate
+					// host delivery). `consumed` alone is NOT proof of success —
+					// the semantic outcome stored atomically with the consumed
+					// commit decides the route. A legacy record without a provable
+					// outcome is fail-closed: it must never reach the success
+					// context-map closeout below.
+					record = ingestion.record;
+					const persistedOutcome = readDurableIngestionOutcome(record);
+					// The live path retires the call's route-invalidation marker
+					// right after a durably confirmed commit (success OR
+					// terminal-negative). A crash in that window leaves the marker
+					// stranded; retiring here too is idempotent and closes it.
+					retireRouteInvalidationsForCall(
+						directory,
+						record.parentSessionId,
+						record.callID,
+					);
+					if (persistedOutcome.kind !== 'accepted') {
+						const outcomeMessage =
+							persistedOutcome.kind === 'unverifiable'
+								? 'ingestion consumed without a provable semantic outcome (legacy record); fail-closed — not treated as success'
+								: persistedOutcome.kind === 'skipped'
+									? 'skipped (durable semantic outcome preserved across replay) — re-dispatch the test gate; task remains Stage B eligible'
+									: persistedOutcome.kind === 'stale'
+										? 'stale (durable semantic outcome preserved across replay)'
+										: 'rejected (durable semantic outcome preserved across replay)';
+						await runCloseoutStep(
+							record,
+							terminal.eventId,
+							'parent_advisory',
+							async () => {
+								await publishAdvisory(
+									directory,
+									record,
+									terminal.eventId,
+									outcomeMessage,
+								);
+							},
+						);
+						// Mirror the live negative path (r13 P1-2): the durable
+						// outcome is terminally negative — no success context-map
+						// summary may EVER be written for this record. Ack the
+						// context_map step as closed so recovery does not re-drive
+						// a success write for a negative outcome forever.
+						await markTerminalCloseoutStepCompleted(
+							directory,
+							record.correlationId,
+							terminal.eventId,
+							'context_map',
+						);
+						return;
+					}
+					// persistedOutcome.kind === 'accepted': the verified success
+					// replay continues into the shared success closeout below.
 				}
 			}
 

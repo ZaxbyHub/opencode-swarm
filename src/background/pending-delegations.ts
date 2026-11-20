@@ -700,12 +700,71 @@ export interface BackgroundAdvisoryInboxEntry {
 	deliveredAt?: number;
 }
 
+/**
+ * r14 audit repair (P0-1): the durable semantic outcome of a consumed
+ * stage-B ingestion. `consumed` alone never proves success — a
+ * terminal-negative drop (rejected/skipped verdict, stale workspace)
+ * commits consumed too. The outcome is stored ATOMICALLY with the
+ * `consumed` flip (same persistence boundary) so a replay can route on
+ * the provable semantics instead of guessing from `consumed`.
+ */
+export type DurableIngestionOutcome =
+	| 'accepted'
+	| 'rejected'
+	| 'skipped'
+	| 'stale';
+
+/**
+ * The provable outcome of a consumed ingestion as read back from the
+ * ledger. `unverifiable` = a legacy consumed record (pre-r14) without a
+ * stored semantic outcome — fail-closed: it must NEVER be interpreted as
+ * success (audit P0-1: "Legacy-Records ohne beweisbares Ergebnis dürfen
+ * nicht als Erfolg interpretiert werden").
+ */
+export type PersistedIngestionOutcome =
+	| { kind: 'accepted' }
+	| { kind: 'rejected' }
+	| { kind: 'skipped' }
+	| { kind: 'stale' }
+	| { kind: 'unverifiable' };
+
 export interface BackgroundDelegationIngestion {
 	state: 'claimed' | 'retryable' | 'consumed';
 	attempt: number;
 	updatedAt: number;
 	claimToken: string;
 	leaseExpiresAt?: number;
+	/**
+	 * r14 audit repair (P0-1): semantic outcome of the consumed ingestion.
+	 * Only meaningful (and only allowed) when `state === 'consumed'`.
+	 * Absent on legacy records written before r14.
+	 */
+	outcome?: DurableIngestionOutcome;
+}
+
+/**
+ * Read the provable semantic outcome of a consumed ingestion (r14 audit
+ * repair P0-1). Anything other than `{ kind: 'accepted' }` — including a
+ * legacy record without a stored outcome — is NOT success.
+ */
+export function readDurableIngestionOutcome(
+	record: BackgroundDelegationRecord,
+): PersistedIngestionOutcome {
+	if (record.status !== 'consumed') return { kind: 'unverifiable' };
+	const ingestion = record.ingestion;
+	if (!ingestion || ingestion.state !== 'consumed') {
+		return { kind: 'unverifiable' };
+	}
+	switch (ingestion.outcome) {
+		case 'accepted':
+		case 'rejected':
+		case 'skipped':
+		case 'stale':
+			return { kind: ingestion.outcome };
+		default:
+			// Legacy consumed record without a provable semantic outcome.
+			return { kind: 'unverifiable' };
+	}
 }
 
 export interface BackgroundCoderReservation {
@@ -1008,6 +1067,7 @@ const DelegationIngestionSchema = z
 		updatedAt: z.number().int().nonnegative(),
 		claimToken: z.string().min(1).max(256),
 		leaseExpiresAt: z.number().int().nonnegative().optional(),
+		outcome: z.enum(['accepted', 'rejected', 'skipped', 'stale']).optional(),
 	})
 	.strict()
 	.superRefine((value, context) => {
@@ -1021,6 +1081,14 @@ const DelegationIngestionSchema = z
 			context.addIssue({
 				code: z.ZodIssueCode.custom,
 				message: 'completed ingestion cannot retain a claim lease',
+			});
+		}
+		// r14 audit repair (P0-1): the semantic outcome is a property of the
+		// CONSUMED commit only — a claim or a retryable error has no outcome.
+		if (value.state !== 'consumed' && value.outcome !== undefined) {
+			context.addIssue({
+				code: z.ZodIssueCode.custom,
+				message: 'ingestion outcome is only allowed on a consumed state',
 			});
 		}
 	});
@@ -5566,13 +5634,21 @@ export async function claimDelegationIngestion(
 	}
 }
 
-/** Commit an ingestion claim to consumed or retryable ingestion_error. */
+/** Commit an ingestion claim to consumed or retryable ingestion_error.
+ *
+ * r14 audit repair (P0-1): the semantic outcome of the consumed commit is
+ * stored under the SAME atomic persistence boundary as the `consumed`
+ * flip — never in a second write. A `success` commit without an explicit
+ * outcome is recorded as `accepted` (the caller asserts success); a
+ * retryable commit never carries an outcome. Replays route on the stored
+ * outcome via {@link readDurableIngestionOutcome}, never on `consumed`
+ * alone. */
 export async function recordDelegationIngestionResult(
 	directory: string,
 	correlationId: string,
 	claimToken: string,
 	success: boolean,
-	options: { now?: number } = {},
+	options: { now?: number; outcome?: DurableIngestionOutcome } = {},
 ): Promise<BackgroundDelegationRecord | null> {
 	if (!correlationId || !claimToken) return null;
 	let result: BackgroundDelegationRecord | null = null;
@@ -5623,6 +5699,13 @@ export async function recordDelegationIngestionResult(
 						attempt: current.ingestion.attempt,
 						claimToken,
 						updatedAt,
+						// r14 audit repair (P0-1): the semantic outcome rides the
+						// SAME atomic commit as the consumed flip, so a crash can
+						// never leave a consumed record without its provable
+						// outcome (or vice versa).
+						...(success
+							? { outcome: options.outcome ?? ('accepted' as const) }
+							: {}),
 					},
 					updatedAt,
 				};
