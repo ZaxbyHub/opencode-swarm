@@ -19,7 +19,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { sanitizeContextText } from '../hooks/context-sanitizer';
-import * as logger from '../utils/logger.js';
 import type {
 	ContextMap,
 	DecisionEntry,
@@ -27,6 +26,7 @@ import type {
 	TaskContextSummary,
 } from '../types/context-map';
 import { extractContextDecisions } from '../utils/context-decisions';
+import * as logger from '../utils/logger.js';
 import { extractFileSummary } from './file-summary';
 import {
 	appendDecision,
@@ -115,7 +115,12 @@ export interface PostAgentUpdateParams {
 	 *   later (update_task_status / promoteContextMapTaskRelease).
 	 * - `'failed' | 'blocked' | 'cancelled'` — terminal negative outcomes.
 	 */
-	final_status: 'completed' | 'in_progress' | 'failed' | 'blocked' | 'cancelled';
+	final_status:
+		| 'completed'
+		| 'in_progress'
+		| 'failed'
+		| 'blocked'
+		| 'cancelled';
 	/** Reviewer rejection reasons (if any) */
 	rejection_reasons?: string[];
 	/** Review findings (if any) */
@@ -781,17 +786,87 @@ export function updateContextMapAfterAgent(
  * release — that is exactly the conflation this repair removes.
  *
  * Fail-closed: any read error or missing proof yields `'in_progress'`.
+ *
+ * r16 audit repair (P1): the release proof now applies the same durable
+ * authority rules as the real task completion (`update_task_status` /
+ * `checkReviewerGate`) instead of a raw `required_gates.every(...)` scan:
+ *
+ * - `readTaskEvidenceState` (not `readTaskEvidence`): a missing OR
+ *   unparseable/corrupt evidence file both fail closed. The previous code
+ *   coerced `null` into an EMPTY required-gate list, and `[].every(...)`
+ *   passed vacuously — a plan that merely claimed `completed` released the
+ *   context map with no QA evidence at all.
+ * - `deriveApplicableGateSet`: the single authoritative gate derivation.
+ *   Empty `required_gates` are only legitimate with the exact generation-0
+ *   no-mutation settlement proof (or a matched external-evidence attest);
+ *   otherwise Stage A (`pre_check`) remains applicable and is reported
+ *   missing. Do NOT require `required_gates.length > 0` literally — the
+ *   settlement/attest cases are the repository's legitimate empty-gate
+ *   authorizations.
+ * - the workflow metadata must be authoritative and terminal
+ *   (`tests_run`/`complete`) or a legitimate read-only no-mutation
+ *   settlement. A `forcedCompletion` marker is durable proof that the task
+ *   did NOT pass the gates and never releases the map.
+ * - evidence stamped (planIdentityHash) for a different plan is prior
+ *   campaign evidence and fails closed; an absent stamp is "unknown" and
+ *   keeps the pre-existing non-blocking behavior (same semantics as
+ *   `evidenceStampedForDifferentPlan`).
  */
 export async function resolveContextMapTaskReleaseStatus(
 	directory: string,
 	taskId: string,
 ): Promise<'completed' | 'in_progress'> {
 	try {
-		const { readTaskEvidence } = await import('../gate-evidence.js');
-		const evidence = await readTaskEvidence(directory, taskId);
-		const required = evidence?.required_gates ?? [];
-		const gates = evidence?.gates ?? {};
-		if (!required.every((gate) => gates[gate] !== undefined)) {
+		const {
+			readTaskEvidenceState,
+			getTaskWorkflowSnapshot,
+			deriveApplicableGateSet,
+			evidenceStampedForDifferentPlan,
+			resolveCurrentPlanIdentitySync,
+			readCurrentTaskDeclaredFiles,
+		} = await import('../gate-evidence.js');
+		// Fail closed on missing AND unparseable evidence — a vacuous
+		// empty-gate pass is never a release proof.
+		const state = await readTaskEvidenceState(directory, taskId);
+		if (state.kind !== 'ok') {
+			return 'in_progress';
+		}
+		const evidence = state.evidence;
+		// Prior-campaign evidence (positive plan-identity mismatch only).
+		if (
+			evidenceStampedForDifferentPlan(
+				evidence,
+				resolveCurrentPlanIdentitySync(directory)?.planIdentityHash,
+			)
+		) {
+			return 'in_progress';
+		}
+		const workflow = getTaskWorkflowSnapshot(evidence);
+		// Legacy evidence without an authoritative workflow generation cannot
+		// prove the release (same refusal as checkReviewerGate).
+		if (!workflow.authoritative) {
+			return 'in_progress';
+		}
+		// A QA-exempt (forced) completion is durable proof the gates were NOT
+		// passed — it must not release the context map.
+		if (workflow.forcedCompletion === true) {
+			return 'in_progress';
+		}
+		// The authoritative applicable-gate derivation: empty required gates
+		// are honored only with the exact no-mutation settlement proof (or a
+		// matched external attest); everything else still owes Stage A.
+		const derivedGates = deriveApplicableGateSet(evidence, {
+			currentDeclaredFiles: readCurrentTaskDeclaredFiles(directory, taskId),
+		});
+		if (derivedGates.missingGates.length > 0) {
+			return 'in_progress';
+		}
+		// The workflow itself must have reached a terminal QA state (or be a
+		// legitimate read-only settlement) — recorded gates alone do not prove
+		// the lifecycle finished.
+		const workflowComplete =
+			workflow.state === 'tests_run' || workflow.state === 'complete';
+		if (!workflowComplete && !derivedGates.readOnlyNoMutation) {
 			return 'in_progress';
 		}
 		const { loadPlanJsonOnly } = await import('../plan/manager.js');
