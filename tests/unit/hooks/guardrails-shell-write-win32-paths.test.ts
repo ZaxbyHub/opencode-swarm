@@ -65,14 +65,14 @@ afterAll(() => rmSync(TEST_DIR, { recursive: true, force: true }));
 
 const rootEscape = (role: string, name: string) =>
 	new RegExp(
-		`^WRITE BLOCKED: Agent "${role}" is not authorised to write "[^"]*${name}" \\(via shell\\)\\. Reason: AUTHORITY_ROOT_ESCAPE: `,
+		`^WRITE BLOCKED: Agent "${role}" is not authorised to write "[^"]*${name}" \\(via shell\\)\\. Reason: AUTHORITY_ROOT_ESCAPE`,
 	);
 // The coder is blocked on every platform: a root escape on win32, a scope
 // violation on POSIX (the word is an in-root file outside src/ there). The
 // scope denial carries the stable gate identifier (issue #3495 item 3).
 const coderBlocked = (name: string) =>
 	new RegExp(
-		`^WRITE BLOCKED(?:: Agent "coder" is not authorised to write "[^"]*${name}" \\(via shell\\)\\. Reason: AUTHORITY_ROOT_ESCAPE: | \\[shell-write-scope\\]: SCOPE_VIOLATION: shell write target "[^"]*${name}" is outside the active scope)`,
+		`^WRITE BLOCKED(?:: Agent "coder" is not authorised to write "[^"]*${name}" \\(via shell\\)\\. Reason: AUTHORITY_ROOT_ESCAPE| \\[shell-write-scope\\]: SCOPE_VIOLATION: shell write target "[^"]*${name}" is outside the active scope)`,
 	);
 
 // [command, end of the file name the block message names]
