@@ -56,6 +56,7 @@ import {
 	readOwnerLockPayload,
 	releaseOwnerLock,
 } from '../parallel/file-locks.js';
+import { redactEvidenceText } from '../security/evidence-redaction.js';
 import { telemetry } from '../telemetry.js';
 import { renameSyncWithRetry } from '../utils/atomic-write.js';
 import { warn } from '../utils/logger.js';
@@ -156,6 +157,37 @@ const RETRY_ACTIONS: ReadonlySet<string> = new Set([
 	'user_escalation',
 	'sounding_board_manual_approval',
 ]);
+
+/**
+ * #3844 fold-in (closes #3899 AC5): the string-valued free-text carrier
+ * fields every producer may put on an event. The writer redacts these BY
+ * DEFAULT before the durable append (appendCoreEventSync); structural
+ * fields — ids, types, numbers, nested authority payloads — pass through
+ * unchanged, and authority-key/dedupe comparisons always run against the
+ * ORIGINAL event so at-most-once semantics stay byte-stable.
+ */
+const CORE_EVENT_FREE_TEXT_FIELDS = new Set([
+	'detail',
+	'message',
+	'summary',
+	'reason',
+]);
+
+function redactCoreEventFreeText(
+	event: Record<string, unknown>,
+): Record<string, unknown> {
+	let mutated = false;
+	const clone: Record<string, unknown> = {};
+	for (const [key, value] of Object.entries(event)) {
+		if (CORE_EVENT_FREE_TEXT_FIELDS.has(key) && typeof value === 'string') {
+			clone[key] = redactEvidenceText(value);
+			mutated = true;
+		} else {
+			clone[key] = value;
+		}
+	}
+	return mutated ? clone : event;
+}
 
 /** The authority key for an event, or null when the event is not in the
  *  closed authority set (or lacks the identity fields the key needs). */
@@ -1057,7 +1089,16 @@ export function appendCoreEventSync(
 	options?: { dedupeOnAuthorityKey?: boolean; ensureSwarmDir?: boolean },
 ): void {
 	assertCoreEventRoot(directory);
-	const line = `${JSON.stringify(event)}\n`;
+	// #3844 fold-in (closes #3899 AC5): the events writer is the last durable
+	// boundary every producer funnels through, so string-valued FREE-TEXT
+	// carriers (detail/message/summary/reason) are redacted BY DEFAULT — a
+	// producer that forgets to sanitize its own prose cannot leak a
+	// credential into .swarm/events.jsonl. Structural fields (ids, types,
+	// numbers, nested authority payloads) pass through unchanged; the
+	// authority key and dedupe comparisons below still run against the
+	// ORIGINAL event so at-most-once semantics are byte-stable.
+	const persisted = redactCoreEventFreeText(event);
+	const line = `${JSON.stringify(persisted)}\n`;
 	const lineBytes = Buffer.byteLength(line);
 	if (lineBytes - 1 > _internals.limits.maxLineBytes) {
 		throw new Error(CORE_EVENT_LINE_TOO_LARGE);

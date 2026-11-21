@@ -131,3 +131,31 @@ export function redactEvidenceText(text: string): string {
 		return '[REDACTED:evidence-redaction-failed]';
 	}
 }
+
+/**
+ * #3844 fold-in (owner-directed; closes #3899): recursively redact every
+ * STRING value inside an arbitrary JSON-shaped payload (objects and arrays;
+ * non-string leaves pass through unchanged). Structural identity (keys,
+ * array order, numbers, booleans, null) is preserved so consumers that
+ * destructure the persisted shape keep working. Used at durable boundaries
+ * whose free text lives in producer-controlled fields (gate-evidence
+ * passthrough extras).
+ */
+export function redactEvidenceDeep<T>(value: T): T {
+	if (typeof value === 'string') {
+		return redactEvidenceText(value) as unknown as T;
+	}
+	if (Array.isArray(value)) {
+		return value.map((item) => redactEvidenceDeep(item)) as unknown as T;
+	}
+	if (value !== null && typeof value === 'object') {
+		const out: Record<string, unknown> = {};
+		for (const [key, item] of Object.entries(
+			value as Record<string, unknown>,
+		)) {
+			out[key] = redactEvidenceDeep(item);
+		}
+		return out as unknown as T;
+	}
+	return value;
+}

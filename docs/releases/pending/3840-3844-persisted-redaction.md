@@ -91,3 +91,16 @@ docs/training-vault-remediation.md.
   (the claim is immutable for the run's life — a possibly-committed
   identity is never silently taken over); operator recovery for an
   abandoned run is archiving/deleting `.swarm/pr-review/<runId>/`.
+
+## Fold-in: the remaining persisted-evidence boundaries (owner-directed, closes #3899)
+
+By owner decision at the plan's ratification gate the six census-deferred
+sites joined this PR instead of the filed follow-up: completion-verify's
+persisted blocked-task fields (parsed from model-authored plan text), the
+drift/hallucination/mutation evidence summaries (including the drift
+critic-approval snapshot metadata), the core-events writer's free-text
+carriers (detail/message/summary/reason redacted by default, authority
+keys computed on the original event so at-most-once semantics are
+unchanged), and the gate-evidence passthrough extras (redacted at the
+single persist boundary; the declared structural fields pass verbatim).
+A shared redactEvidenceDeep helper carries the recursive form.

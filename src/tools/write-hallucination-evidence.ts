@@ -17,6 +17,7 @@ import {
 	VERDICT_SET_2,
 } from '../evidence/normalize-verdict';
 import { validateSwarmPath } from '../hooks/utils';
+import { redactEvidenceText } from '../security/evidence-redaction';
 import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache';
 import { createSwarmTool } from './create-tool';
 
@@ -85,7 +86,9 @@ export async function executeWriteHallucinationEvidence(
 	const evidenceEntry = {
 		type: 'hallucination-verification',
 		verdict: normalizedVerdict,
-		summary: summary.trim(),
+		// #3844 fold-in (closes #3899 AC3): persisted summary is model
+		// free text — redact at the write boundary.
+		summary: redactEvidenceText(summary.trim()),
 		timestamp: new Date().toISOString(),
 		findings: args.findings,
 	};
