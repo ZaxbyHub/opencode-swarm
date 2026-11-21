@@ -5,11 +5,11 @@
  * content preserves byte-identically. Synthetic tokens only.
  */
 import { describe, expect, test } from 'bun:test';
-import { mkdtempSync, readFileSync, realpathSync } from 'node:fs';
-import * as os from 'node:os';
+import { readFileSync } from 'node:fs';
 import * as path from 'node:path';
 import { redactSecrets } from '../../../src/memory/redaction';
 import { redactEvidenceText } from '../../../src/security/evidence-redaction';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 describe('#3844 redactEvidenceText superset contract', () => {
 	const displayFamilies: Array<[string, string]> = [
@@ -118,9 +118,7 @@ describe('#3844 redactEvidenceText superset contract', () => {
 		// tool's handoff path catches exactly this to abort creation — the
 		// round-1 catch-and-continue would have created the artifact).
 		const { mkdirSync, writeFileSync, existsSync } = await import('node:fs');
-		const dir = realpathSync(
-			mkdtempSync(path.join(os.tmpdir(), 'sw-3844-hoff-')),
-		);
+		const dir = canonicalMkdtemp('sw-3844-hoff-');
 		const saltPath = path.join(
 			dir,
 			'.swarm',
@@ -153,12 +151,8 @@ describe('#3844 redactEvidenceText superset contract', () => {
 		const { trainingQuarantinePath } = await import(
 			'../../../src/training/paths'
 		);
-		const dirA = realpathSync(
-			mkdtempSync(path.join(os.tmpdir(), 'sw-3844-dedupA-')),
-		);
-		const dirB = realpathSync(
-			mkdtempSync(path.join(os.tmpdir(), 'sw-3844-dedupB-')),
-		);
+		const dirA = canonicalMkdtemp('sw-3844-dedupA-');
+		const dirB = canonicalMkdtemp('sw-3844-dedupB-');
 		const corrupt = 'not json at all\n';
 		for (const d of [dirA, dirB]) {
 			const target = path.join(
