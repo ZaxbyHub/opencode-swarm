@@ -172,7 +172,7 @@ export const _internals = {
  * quota/failover classification is unchanged. Deep-clones; the caller's
  * in-memory object is untouched.
  */
-export function redactAutoReviewEvidenceForPersistence(
+export function redactAutoReviewEvidenceForCapture(
 	evidence: AutoReviewEvidence,
 ): AutoReviewEvidence {
 	const clone = structuredClone(evidence);
@@ -215,7 +215,7 @@ export async function persistAutoReviewEvidence(
 	try {
 		await _internals.bunWrite(
 			tempPath,
-			`${JSON.stringify(redactAutoReviewEvidenceForPersistence(evidence), null, 2)}\n`,
+			`${JSON.stringify(redactAutoReviewEvidenceForCapture(evidence), null, 2)}\n`,
 		);
 		const safeTemp = validateSwarmPath(
 			directory,

@@ -36,6 +36,7 @@ import {
 	materializeAutoReviewManifest,
 	persistAutoReviewEvidence,
 	readAutoReviewEvidenceForPhase,
+	redactAutoReviewEvidenceForCapture,
 	validateAutoReviewEvidenceIntegrity,
 } from './evidence.js';
 import {
@@ -1246,6 +1247,13 @@ export async function runReviewEngine(
 		(finding) => finding.finding_id,
 	);
 	addCost(evidence, allDispatches);
+	// #3844: redact the free-text fields AT ASSEMBLY so the in-memory
+	// evidence and the persisted artifact are byte-identical — downstream
+	// hash comparisons (phase-complete preflight staleness) must not see a
+	// pre-redaction in-memory form diverge from the post-redaction stored
+	// one. Runs after the engine's raw-value classifiers (#3710 ordering);
+	// idempotent, so the persistence-boundary pass is a no-op re-application.
+	redactAutoReviewEvidenceForCapture(evidence);
 
 	let receiptPath: string | undefined;
 	let receiptId: string | undefined;
