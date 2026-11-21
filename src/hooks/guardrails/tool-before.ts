@@ -72,7 +72,9 @@ import {
 	hostShellGrammarFamily,
 } from '../shell-executor-context';
 import {
+	classifyWriteParseFailure,
 	DETECTOR_UNWRAP_PARANOID_BOUND,
+	describeWriteParseFailure,
 	detectInteractiveSession,
 	detectPosixWrites,
 	detectWindowsWrites,
@@ -1694,28 +1696,14 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				primaryAnalysis.parseError &&
 				!suppressParseError(analysisCommand)
 			) {
-				// Origin-aware denial (#3761 Expected behaviour / #3754 F2 UX):
-				// a parseError synthesized by a POLICY sentinel is a policy
-				// refusal and must say so; only a genuine bash-parser
-				// exception is a parse failure. The oversized-word sentinel
-				// (F-15, PR #3651 review) keeps its dedicated message.
-				const oversized = primaryAnalysis.writes.some(
-					(w) => w.operator === 'oversized word',
-				);
-				const ambientState = primaryAnalysis.writes.some(
-					(w) => w.operator === 'ambient shell-state key assignment',
-				);
-				const unsafeText = primaryAnalysis.writes.some(
-					(w) => w.operator === 'unsafe command text',
-				);
+				// Origin-aware denial (#3761 Expected behaviour / #3754 F2 UX /
+				// #3881 F-001): a parseError synthesized by a POLICY sentinel is
+				// a policy refusal and must say so; only a genuine bash-parser
+				// exception is a parse failure. The classifier and wording are
+				// shared with every other gate here and every explain mirror
+				// (shell-write-detect.ts), so they cannot drift apart.
 				throw new Error(
-					oversized
-						? `BLOCKED: command contains a word over the 4096-character analysis budget — denying before parsing for safety`
-						: ambientState
-							? `BLOCKED: command assigns ambient shell-state key (BASH_ENV/ENV/BASH_FUNC_*) — policy refusal`
-							: unsafeText
-								? `BLOCKED: command text is unsafe for shell analysis — policy refusal`
-								: `BLOCKED: bash write detection failed to parse command (parse failure, not a policy refusal) — rejecting for safety; use a simpler command shape or the write/edit tools`,
+					`BLOCKED: ${describeWriteParseFailure(classifyWriteParseFailure(primaryAnalysis)).message}`,
 				);
 			}
 
@@ -1739,8 +1727,10 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			// OLDPWD after a prior cd/pushd and fail open).
 			const preprocessed = dcPreprocessWrappers(analysisCommand);
 			if (enforce && preprocessed.failClosed) {
+				// #3881 F-001: failClosed is a POLICY bound (empty/NUL chdir DIR,
+				// ambiguous wrapper shape, depth) — never a bash-parser failure.
 				throw new Error(
-					`BLOCKED: bash write detection failed to parse command (parse failure, not a policy refusal) — rejecting for safety; use a simpler command shape or the write/edit tools`,
+					`BLOCKED: ${describeWriteParseFailure('analysis_bound').message}`,
 				);
 			}
 			const didUnwrap = preprocessed.changed;
@@ -1820,8 +1810,11 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 					analysis === primaryAnalysis ? analysisCommand : detectionCommand,
 				)
 			) {
+				// #3881 F-001: origin-aware like gate 1 — the surviving analysis can
+				// carry a policy sentinel (oversized word, ambient state, unsafe
+				// text) rather than a bash-parser exception.
 				throw new Error(
-					`BLOCKED: bash write detection failed to parse command (parse failure, not a policy refusal) — rejecting for safety; use a simpler command shape or the write/edit tools`,
+					`BLOCKED: ${describeWriteParseFailure(classifyWriteParseFailure(analysis)).message}`,
 				);
 			}
 

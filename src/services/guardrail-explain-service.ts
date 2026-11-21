@@ -35,6 +35,8 @@ import {
 import { declaresWindowsWrapperLoose } from '../hooks/shell-executor-context';
 import { getObservedHostShell } from '../hooks/shell-executor-context.js';
 import {
+	classifyWriteParseFailure,
+	describeWriteParseFailure,
 	detectPosixWrites,
 	detectWindowsWrites,
 	isPowerShellReadOnlyPipeline,
@@ -872,8 +874,10 @@ export async function handleGuardrailExplain(
 	const preprocessed = dcPreprocessWrappers(analysisCommandExplain);
 	if (preprocessed.failClosed) {
 		decision = 'block';
-		firingRule =
-			'parse_error: write detection failed to parse command (parse failure, not a policy refusal) — rejecting for safety';
+		// #3881 F-001: failClosed is a policy bound, not a parser failure — the
+		// wording is the one the gate's failClosed branch emits.
+		const bound = describeWriteParseFailure('analysis_bound');
+		firingRule = `${bound.label}: ${bound.message}`;
 	}
 	// #3567 final-critic round: mirror the gate's shell flag-cluster
 	// deny-on-uncertainty channel (tool-before.ts) — without it explain
@@ -982,17 +986,24 @@ export async function handleGuardrailExplain(
 			rawAnalysis.parseError &&
 			!isPowerShellReadOnlyPipeline(analysisCommandExplain);
 
+		// #3881 F-001: origin-aware wording shared with the gate
+		// (describeWriteParseFailure) — a BASH_ENV / unsafe-text / oversized-word
+		// sentinel is a policy refusal, never "parse failure".
 		if (rawParseFailure) {
 			decision = 'block';
-			firingRule =
-				'parse_error: write detection failed to parse command (parse failure, not a policy refusal) — rejecting for safety';
+			const failure = describeWriteParseFailure(
+				classifyWriteParseFailure(rawAnalysis),
+			);
+			firingRule = `${failure.label}: ${failure.message}`;
 		} else if (
 			analysis.parseError &&
 			!isPowerShellReadOnlyPipeline(detectionCommand)
 		) {
 			decision = 'block';
-			firingRule =
-				'parse_error: write detection failed to parse command (parse failure, not a policy refusal) — rejecting for safety';
+			const failure = describeWriteParseFailure(
+				classifyWriteParseFailure(analysis),
+			);
+			firingRule = `${failure.label}: ${failure.message}`;
 		} else if (
 			analysis.unwrapDepthExceeded ||
 			rawPosix.unwrapDepthExceeded ||

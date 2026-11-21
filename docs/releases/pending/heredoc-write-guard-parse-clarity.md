@@ -22,10 +22,15 @@ issue: 3754,3761
   heredocs, and CRLF terminators all keep today's fail-closed analysis.
 - **Parse denials now say what they are** (#3761 expected behaviour,
   #3754 F2 UX half): genuine bash-parser failures read "parse failure, not
-  a policy refusal" with a remedy hint, at all three gates and in the
+  a policy refusal" with a remedy hint, at all three gates and in every
   explain mirror; synthetic POLICY denials (ambient BASH_ENV/ENV/
   BASH_FUNC_* assignment, unsafe command text) get accurate policy
-  messages instead of masquerading as parse errors.
+  messages, the oversized-word budget keeps its dedicated message, and the
+  wrapper-preprocessing bound (empty/NUL chdir directory, ambiguous
+  wrapper shape) reads "could not safely model this command" instead of
+  masquerading as a parse error. One shared classifier
+  (`classifyWriteParseFailure` / `describeWriteParseFailure`) drives the
+  gates and `/swarm guardrail-explain`, so their wording cannot drift.
 - **AUTHORITY_ROOT_ESCAPE names the deciding layer** (#3754 F3): the
   denial now carries `[layer=containment; rule=…]` and states that the
   host `permission.external_directory` setting does not bind the plugin
@@ -45,8 +50,25 @@ issue: 3754,3761
   UNRESOLVED_TARGET (it does not skip the path-null here-doc marker the
   gate skips) — pre-existing, fail-closed direction, unchanged by this
   fix.
-- Tab-indented dash-heredoc bodies are neutralized by the helper but the gate's
-  existing control-character rule still refuses tab-bearing commands, so tab-indented heredoc shapes remain blocked end-to-end (fail-closed, pre-existing).
+- Control characters (tab included) inside a NEUTRALIZED body are now admitted:
+  the gate's control-character rule runs on the analysis string, where the
+  inert body is blanked, so `cat > f <<-'EOF'` with a tab-indented body line
+  is no longer refused (previously blocked). A tab-indented opener or
+  terminator line, a tab-bearing command outside a neutralized body, and
+  every non-neutralized shape remain refused (fail-closed). An out-of-scope
+  redirect target is still denied `AUTHORITY_ROOT_ESCAPE`.
+- The destructive arm still scans the RAW heredoc body for its own
+  segmentation, so a body line such as `rm -rf ../x` inside a neutralized
+  quoted heredoc is denied even though the body is inert data to `cat`
+  (over-deny, fail-closed direction, pre-existing raw segmentation; only
+  the process-substitution scan uses the neutralized string).
+- A heredoc whose body carries a single whitespace-delimited word over the
+  4096-character analysis budget is not neutralized and keeps the pre-existing
+  oversized-word denial (the budget is checked on the original text).
+- A large dense neutralized body costs a full parser walk of the blanked
+  command (linear: about 206 ms at 42 KB and about 1.3 s at 429 KB, versus a
+  fast parse-error exit before neutralization). No total-length bound is
+  added, because one would re-deny the large inert bodies this fix admits.
 - The read-only inline interpreter eval relaxation (#3754 Finding 1) is a
   recorded by-design decision (#3347); the discussion host is
   issue #3878.

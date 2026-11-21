@@ -26,6 +26,9 @@ import { gate } from './_shell-write-3616-fixtures';
 
 const T = 60_000;
 const PARSE_DENY = /failed to parse command/;
+// #3881 F-001: wrapper-preprocessing bounds (preprocessed.failClosed) are a
+// POLICY bound, not a bash-parser failure, and say so.
+const BOUND_DENY = /could not safely model this command/;
 // #3761/#3754: ambient-state denials are POLICY refusals with their own
 // message (origin-aware parse gates) — no longer the generic parse text.
 const AMBIENT_DENY = /ambient shell-state key .* policy refusal/;
@@ -251,7 +254,8 @@ describe('#3616 env split-string family: every spelling reaches the payload walk
 			async () => {
 				const r = await gate(command);
 				expect(r.verdict).toBe('BLOCKED');
-				expect(r.message).toMatch(PARSE_DENY);
+				expect(r.message).toMatch(BOUND_DENY);
+				expect(r.message).not.toMatch(PARSE_DENY);
 			},
 			T,
 		);

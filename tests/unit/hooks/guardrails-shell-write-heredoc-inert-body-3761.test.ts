@@ -89,10 +89,13 @@ describe('guardrails quoted-heredoc neutralization (#3761)', () => {
 			// opener + terminator verbatim, body blanked
 			expect(out.split('\n')[0]).toBe(cmd.split('\n')[0]);
 			expect(out.split('\n').at(-1)).toBe('EOF');
-			expect(out).not.toContain('/etc/passwd');
+			// every body line is blanked to whitespace (no body text survives)
+			for (const bodyLine of out.split('\n').slice(1, -1)) {
+				expect(bodyLine.trim()).toBe('');
+			}
 		}, 60_000);
 
-		it('refuses an astral body preserves UTF-16 length (emoji body)', () => {
+		it('preserves UTF-16 length when blanking an astral (emoji) body', () => {
 			const cmd = "cat > notes/x.md <<'EOF'\nemoji 🌍 body line\nEOF";
 			const out = neutralizeQuotedHeredocBodies(cmd);
 			expect(out.length).toBe(cmd.length);
@@ -231,7 +234,7 @@ describe('guardrails quoted-heredoc neutralization (#3761)', () => {
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, defaultConfig());
 			coderSession('heredoc-e2e-2');
 			setDeclaredScope('heredoc-e2e-2', ['notes/']);
-			expect(
+			await expect(
 				hooks.toolBefore(
 					{ tool: 'bash', sessionID: 'heredoc-e2e-2', callID: 'c1' },
 					{ args: { command: denseCatCommand('../outside/esc.md') } },
@@ -239,20 +242,21 @@ describe('guardrails quoted-heredoc neutralization (#3761)', () => {
 			).rejects.toThrow(/SCOPE_VIOLATION|AUTHORITY_ROOT_ESCAPE/);
 		}, 60_000);
 
-		it('receiver-execution shapes stay blocked (bash stdin, cat|bash)', async () => {
+		it('receiver-execution shapes stay blocked end-to-end (bash stdin, cat|bash)', async () => {
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, defaultConfig());
 			coderSession('heredoc-e2e-3');
 			setDeclaredScope('heredoc-e2e-3', ['notes/']);
-			await expect(
-				hooks.toolBefore(
-					{ tool: 'bash', sessionID: 'heredoc-e2e-3', callID: 'c1' },
-					{
-						args: {
-							command: "bash <<'EOF'\necho pwn > ../outside/esc.md\nEOF",
-						},
-					},
-				),
-			).rejects.toThrow(/BLOCKED|WRITE BLOCKED/);
+			for (const command of [
+				"bash <<'EOF'\necho pwn > ../outside/esc.md\nEOF",
+				"cat <<'EOF' | bash\necho pwn > ../outside/esc.md\nEOF",
+			]) {
+				await expect(
+					hooks.toolBefore(
+						{ tool: 'bash', sessionID: 'heredoc-e2e-3', callID: 'c1' },
+						{ args: { command } },
+					),
+				).rejects.toThrow(/BLOCKED|WRITE BLOCKED/);
+			}
 		}, 60_000);
 
 		it('inert procsub-shaped body text does not trip the destructive arm (r2 N2)', async () => {
@@ -281,13 +285,13 @@ describe('guardrails quoted-heredoc neutralization (#3761)', () => {
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, defaultConfig());
 			coderSession('heredoc-e2e-4');
 			setDeclaredScope('heredoc-e2e-4', ['notes/']);
-			expect(
+			await expect(
 				hooks.toolBefore(
 					{ tool: 'bash', sessionID: 'heredoc-e2e-4', callID: 'c1' },
 					{ args: { command: "echo 'unclosed quote" } },
 				),
 			).rejects.toThrow(
-				/parse failure, not a policy refusal|failed to parse command \(parse failure/,
+				/failed to parse command \(parse failure, not a policy refusal\)/,
 			);
 		}, 60_000);
 
@@ -295,7 +299,7 @@ describe('guardrails quoted-heredoc neutralization (#3761)', () => {
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, defaultConfig());
 			coderSession('heredoc-e2e-5');
 			setDeclaredScope('heredoc-e2e-5', ['notes/']);
-			expect(
+			await expect(
 				hooks.toolBefore(
 					{ tool: 'bash', sessionID: 'heredoc-e2e-5', callID: 'c1' },
 					{ args: { command: 'BASH_ENV=/tmp/x.sh cat notes/a.md' } },
@@ -384,9 +388,7 @@ describe('guardrails quoted-heredoc neutralization (#3761)', () => {
 			expect(result).not.toContain('parse_error');
 			// Meaningful discriminator (round-2 critic note): with --scope declared,
 			// the refusal must be the scope violation itself, not a generic block.
-			expect(result).toMatch(
-				/scope_violation|SCOPE_VIOLATION|out-of-scope|outside/,
-			);
+			expect(result).toContain('scope_violation: write outside declared scope');
 		}, 60_000);
 	});
 });

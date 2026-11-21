@@ -1287,7 +1287,7 @@ export function checkFileAuthorityWithRules(
 				code: 'AUTHORITY_ROOT_ESCAPE',
 				layer: 'containment',
 				rule: 'workspace-containment',
-				detail: `re-rooted target crosses symlink/junction "${sanitizeDiagnosticText(redactPath(plantedLink), 320)}"  — decided by the opencode-swarm file-authority (containment) layer; the host permission.external_directory setting does not bind this layer`,
+				detail: `re-rooted target crosses symlink/junction "${sanitizeDiagnosticText(redactPath(plantedLink), 320)}" — decided by the opencode-swarm file-authority (containment) layer; the host permission.external_directory setting does not bind this layer`,
 			});
 		}
 	} else if (normalizedPath === '..' || normalizedPath.startsWith('../')) {
@@ -1309,7 +1309,7 @@ export function checkFileAuthorityWithRules(
 				code: 'AUTHORITY_ROOT_ESCAPE',
 				layer: 'containment',
 				rule: 'workspace-containment',
-				detail: `re-rooted target crosses symlink/junction "${sanitizeDiagnosticText(redactPath(plantedLink), 320)}"  — decided by the opencode-swarm file-authority (containment) layer; the host permission.external_directory setting does not bind this layer`,
+				detail: `re-rooted target crosses symlink/junction "${sanitizeDiagnosticText(redactPath(plantedLink), 320)}" — decided by the opencode-swarm file-authority (containment) layer; the host permission.external_directory setting does not bind this layer`,
 			});
 		}
 	}
