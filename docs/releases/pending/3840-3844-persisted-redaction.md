@@ -68,3 +68,21 @@ docs/training-vault-remediation.md.
 - `redactSecrets`' family set remains the persisted-store floor at its 12
   existing consumer sites; the new superset redactor is applied at the
   #3844-named boundaries, not retroactively across every store.
+
+## Round-5 hardening (plan-critic convergence)
+
+- The pr-review handoff replay identity is now CLAIM-ONCE
+  (`.swarm/pr-review/<runId>/replay-identity.handoff.claim`, create-only
+  `wx`): a concurrent losing writer can no longer overwrite the winner's
+  fingerprint and then validate its own raw summary against it — a foreign
+  claim with different raw content is refused before any artifact bytes.
+- Retained version-only-quarantined vault lines no longer consume the append
+  quota's maxRecords (matching the read-side status accounting); malformed
+  lines still charge it.
+- The per-project quarantine journal-dedup cache is bounded (16 projects,
+  FIFO eviction with journal rehydration) per the bounded-global-state
+  invariant.
+- Executor-level pins now cover the handoff/claim race, both comparators'
+  missing/corrupt fail-closed legs, the token-bearing severity-only
+  committed replay through the sidecar, the documented inert residue after a
+  failed artifact create, and same-family different-secret conflicts.

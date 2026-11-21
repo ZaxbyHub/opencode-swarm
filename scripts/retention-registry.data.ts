@@ -4602,7 +4602,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		writerCitations: [
 			'src/training/consent.ts:148 (grantTrainingConsent — consent.json)',
 			'src/training/vault.ts:353 (appendTrainingVaultRecord — records.jsonl, only consented path)',
-			'src/training/vault.ts:724 purgeTrainingVaultContent — withdrawal rewrite + tombstones',
+			'src/training/vault.ts:763 purgeTrainingVaultContent — withdrawal rewrite + tombstones',
 		],
 		readerCitations: [
 			'/swarm dataset export — deterministic reads via previewTrainingExport (src/training/exporter.ts)',

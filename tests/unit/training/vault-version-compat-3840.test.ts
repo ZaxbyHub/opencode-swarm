@@ -209,4 +209,135 @@ describe('#3840 vault version compatibility', () => {
 		expect(refused.stopReason).toBe('quota_bytes');
 		expect(existsSync(trainingVaultRecordsPath(d))).toBe(false);
 	});
+
+	test('round-5 F2: retained version-only-quarantined lines do NOT consume maxRecords', () => {
+		const d = freshDir();
+		// One valid slot only.
+		const cst = grantTrainingConsent(d, {
+			now: NOW,
+			quotas: { maxBytes: 1_000_000, maxRecords: 1, retentionDays: 30 },
+		});
+		const template = record(d, cst, 'future version line');
+		const v99 = (content: string) =>
+			`${JSON.stringify({
+				...record(d, cst, content),
+				redaction: {
+					...template.redaction,
+					version: 99,
+				},
+			})}\n`;
+		const target = trainingVaultRecordsPath(d);
+		mkdirSync(path.dirname(target), { recursive: true });
+		writeFileSync(target, v99('future a') + v99('future b'), 'utf8');
+		// Two retained future-version lines, zero valid records — the append
+		// quota still sees a free valid-record slot.
+		const appended = appendTrainingVaultRecord(
+			d,
+			record(d, cst, 'valid append'),
+		);
+		expect(appended.appended).toBe(true);
+		// Fill the one valid slot, then the next valid append must refuse.
+		const refused = appendTrainingVaultRecord(
+			d,
+			record(d, cst, 'one too many'),
+		);
+		expect(refused.appended).toBe(false);
+		expect(refused.stopReason).toBe('quota_records');
+	});
+
+	test('round-5 F2: malformed lines STILL charge the append record quota', () => {
+		const d = freshDir();
+		const cst = grantTrainingConsent(d, {
+			now: NOW,
+			quotas: { maxBytes: 1_000_000, maxRecords: 1, retentionDays: 30 },
+		});
+		const target = trainingVaultRecordsPath(d);
+		mkdirSync(path.dirname(target), { recursive: true });
+		writeFileSync(target, 'definitely not json\n', 'utf8');
+		const refused = appendTrainingVaultRecord(
+			d,
+			record(d, cst, 'valid append'),
+		);
+		expect(refused.appended).toBe(false);
+		expect(refused.stopReason).toBe('quota_records');
+	});
+
+	test('round-5 F4: per-project journal cache eviction rehydrates from disk (no duplicate entries)', () => {
+		const projectA = freshDir();
+		const cst = consent(projectA);
+		const current = record(projectA, cst, 'eviction probe');
+		const v99 = `${JSON.stringify({
+			...current,
+			redaction: { ...current.redaction, version: 99 },
+		})}\n`;
+		mkdirSync(path.dirname(trainingVaultRecordsPath(projectA)), {
+			recursive: true,
+		});
+		writeFileSync(trainingVaultRecordsPath(projectA), v99, 'utf8');
+		readTrainingVault(projectA); // hydrate project A (journal entry 1)
+		// Push MAX_JOURNALED_PROJECTS more projects through the cache so A is
+		// FIFO-evicted, then touch A again — rehydration re-reads the durable
+		// journal, so A's line must NOT be journaled a second time.
+		for (let i = 0; i < 16; i += 1) {
+			const other = freshDir();
+			const otherCst = consent(other);
+			const otherLine = `${JSON.stringify({
+				...record(other, otherCst, `other ${i}`),
+				redaction: { ...current.redaction, version: 99 },
+			})}\n`;
+			mkdirSync(path.dirname(trainingVaultRecordsPath(other)), {
+				recursive: true,
+			});
+			writeFileSync(trainingVaultRecordsPath(other), otherLine, 'utf8');
+			readTrainingVault(other);
+		}
+		readTrainingVault(projectA);
+		const journal = readFileSync(trainingQuarantinePath(projectA), 'utf8');
+		const entries = journal.split('\n').filter((line) => line.length > 0);
+		expect(entries).toHaveLength(1);
+	});
+
+	test('round-5 F4: cross-project isolation survives eviction churn', () => {
+		const a = freshDir();
+		const b = freshDir();
+		const cstA = consent(a);
+		const cstB = consent(b);
+		const mkLine = (
+			d: string,
+			cst: ReturnType<typeof consent>,
+			tag: string,
+		) => {
+			const current = record(d, cst, tag);
+			return `${JSON.stringify({
+				...current,
+				redaction: { ...current.redaction, version: 99 },
+			})}\n`;
+		};
+		for (const [d, cst] of [
+			[a, cstA],
+			[b, cstB],
+		] as const) {
+			mkdirSync(path.dirname(trainingVaultRecordsPath(d)), {
+				recursive: true,
+			});
+			writeFileSync(
+				trainingVaultRecordsPath(d),
+				mkLine(d, cst, d === a ? 'alpha line' : 'beta line'),
+				'utf8',
+			);
+		}
+		readTrainingVault(a);
+		readTrainingVault(b);
+		readTrainingVault(a); // re-touch after interleave
+		expect(
+			readFileSync(trainingQuarantinePath(a), 'utf8')
+				.split('\n')
+				.filter((line) => line.length > 0),
+		).toHaveLength(1);
+		expect(
+			readFileSync(trainingQuarantinePath(b), 'utf8')
+				.split('\n')
+				.filter((line) => line.length > 0),
+		).toHaveLength(1); // B never suppressed by A
+	});
 });

@@ -42,7 +42,8 @@ import {
 } from '../pr-review/finding-policy.js';
 import { redactEvidenceText } from '../security/evidence-redaction';
 import {
-	ReplayIdentityUnavailableError,
+	claimReplayIdentityFingerprint,
+	readReplayIdentityClaim,
 	readReplayIdentitySidecar,
 	replayFingerprint,
 	writeReplayIdentityFingerprint,
@@ -323,7 +324,7 @@ function matchesPersistedFindingsRawIdentity(
 	runId: string,
 	boundary: string,
 	incomingRawCanonical: string,
-	storedBoundaryRecords: readonly unknown[],
+	_storedBoundaryRecords: readonly unknown[],
 	storedRawCanonical: string,
 ): boolean {
 	let sidecarFingerprint: string | undefined;
@@ -1279,15 +1280,28 @@ export async function executeWritePrReviewArtifact(
 		provenance: record.provenance,
 	});
 	const handoffsMatch = (existing: PersistedHandoff): boolean => {
-		// Sidecar carries the raw handoff identity when present; legacy runs
-		// (no sidecar) store the raw summary, so the direct comparison of
-		// comparableHandoff(existing) against the RAW comparable still works.
+		// The claim file is the authoritative raw handoff identity for runs
+		// written since #3844 round-5 (create-only: the FIRST writer's
+		// fingerprint owns it and can never be overwritten by a loser). The
+		// shared sidecar carries the same value for readers of the map form;
+		// legacy runs (neither present) store the raw summary, so the direct
+		// comparison of comparableHandoff(existing) against the RAW comparable
+		// still works.
 		let sidecarFingerprint: string | undefined;
 		try {
-			sidecarFingerprint = readReplayIdentitySidecar(directory, resolvedRunId)
-				?.fingerprints['handoff'];
+			const claimFingerprint = readReplayIdentityClaim(
+				directory,
+				resolvedRunId,
+				'handoff',
+			);
+			if (claimFingerprint !== null) {
+				sidecarFingerprint = claimFingerprint;
+			} else {
+				sidecarFingerprint = readReplayIdentitySidecar(directory, resolvedRunId)
+					?.fingerprints.handoff;
+			}
 		} catch {
-			return false; // corrupt sidecar — fail closed
+			return false; // corrupt claim or sidecar — fail closed
 		}
 		if (sidecarFingerprint !== undefined) {
 			try {
@@ -1359,6 +1373,47 @@ export async function executeWritePrReviewArtifact(
 				),
 			);
 		}
+		// #3844 round-5 (plan-critic Critical): claim the identity BEFORE any
+		// bytes land. The claim is create-only — a concurrent loser can never
+		// overwrite the winner's fingerprint and then validate its own raw
+		// payload against that losing fingerprint. A foreign claim with
+		// different raw content is a conflict and is refused BEFORE the
+		// artifact is created; identical raw (same fingerprint) proceeds.
+		let handoffClaim: ReturnType<typeof claimReplayIdentityFingerprint>;
+		let handoffFingerprint: string;
+		try {
+			handoffFingerprint = replayFingerprint(
+				directory,
+				JSON.stringify({
+					...comparableHandoff(handoffRecord),
+					summary: rawHandoffSummary,
+				}),
+			);
+			handoffClaim = claimReplayIdentityFingerprint(
+				directory,
+				resolvedRunId,
+				'handoff',
+				handoffFingerprint,
+			);
+		} catch (error) {
+			return operationFailure(
+				'create',
+				handoffPath,
+				'handoff replay-identity claim',
+				error instanceof Error ? error.message : String(error),
+			);
+		}
+		if (
+			!handoffClaim.claimed &&
+			handoffClaim.effective !== handoffFingerprint
+		) {
+			// A different raw payload already owns this run's handoff identity
+			// (the claim's first writer wins and is immutable) → conflict,
+			// refused before any artifact bytes are written.
+			return await reject(
+				'field handoff: expected an exact retry of the persisted handoff, got conflicting concurrent handoff content',
+			);
+		}
 		let created: boolean;
 		try {
 			// #3844 sidecar-first (Y2): raw identity BEFORE the artifact; failure ABORTS.
@@ -1367,13 +1422,7 @@ export async function executeWritePrReviewArtifact(
 					directory,
 					resolvedRunId,
 					'handoff',
-					replayFingerprint(
-						directory,
-						JSON.stringify({
-							...comparableHandoff(handoffRecord),
-							summary: rawHandoffSummary,
-						}),
-					),
+					handoffClaim.effective,
 				);
 			} catch (error) {
 				return operationFailure(

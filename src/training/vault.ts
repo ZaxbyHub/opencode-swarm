@@ -385,7 +385,7 @@ export function appendTrainingVaultRecord(
 		noteStop(directory, 'quota_bytes', health);
 		return { appended: false, stopReason: 'quota_bytes' };
 	}
-	const currentRecords = countRecordLines(directory);
+	const currentRecords = countAppendChargeableRecordLines(directory);
 	if (currentRecords >= consent.quotas.maxRecords) {
 		const health = readHealth(directory);
 		noteStop(directory, 'quota_records', health);
@@ -430,16 +430,43 @@ export function appendTrainingVaultRecord(
 	return { appended: true };
 }
 
-function countRecordLines(directory: string): number {
+/**
+ * #3840 round-5 (plan-critic): the append quota's record count excludes
+ * RETAINED version-only-quarantined lines, matching the read-side status
+ * accounting (recordCount excludes them) — enough retained future-version
+ * lines must not manufacture a quota_records stop while valid-record slots
+ * remain. Malformed JSON lines and other schema-invalid lines keep the
+ * historical treatment (they still charge the quota). Tombstone lines are
+ * not records and were never counted by the raw line count either way.
+ */
+function countAppendChargeableRecordLines(directory: string): number {
 	const target = trainingVaultRecordsPath(directory);
 	try {
 		const text = _internals.readFile(target);
 		if (text.length === 0) return 0;
-		let count = 0;
-		for (let i = 0; i < text.length; i += 1) {
-			if (text.charCodeAt(i) === 10 /* \n */) count += 1;
+		let chargeable = 0;
+		for (const rawLine of text.split('\n')) {
+			if (rawLine.length === 0) continue;
+			try {
+				const parsed: unknown = JSON.parse(rawLine);
+				// isVersionOnlyQuarantine answers "is the version the ONLY
+				// problem" — meaningful solely for schema-FAILING lines (the
+				// read path calls it on quarantine candidates). A line that is
+				// already valid (including v1 records under the tolerant
+				// range) charges normally.
+				const alreadyValid =
+					typeof parsed === 'object' &&
+					parsed !== null &&
+					TrainingVaultRecordSchema.safeParse(parsed).success;
+				if (!alreadyValid && isVersionOnlyQuarantine(parsed)) {
+					continue; // retained future-version line — not chargeable
+				}
+			} catch {
+				// malformed JSON — keeps the historical charge
+			}
+			chargeable += 1;
 		}
-		return count;
+		return chargeable;
 	} catch {
 		return 0;
 	}
@@ -457,6 +484,12 @@ function countRecordLines(directory: string): number {
 // absent from the hydrated set and their line may be journaled once more.
 const journaledQuarantineLinesByProject = new Map<string, Set<string>>();
 const MAX_JOURNALED = 4096;
+// #3844 round-5 (plan-critic): the per-project cache itself must be bounded
+// (invariant 8 — module-level global state carries an explicit eviction
+// strategy). FIFO on insertion order; an evicted project's next access
+// rehydrates its dedup set from the durable journal (idempotent: re-journaling
+// is what the hydrated set prevents, and rehydration re-reads the same hashes).
+const MAX_JOURNALED_PROJECTS = 16;
 
 function hydrateQuarantineJournal(directory: string): void {
 	// Dedup state is PER PROJECT (a process may read more than one project's
@@ -465,6 +498,12 @@ function hydrateQuarantineJournal(directory: string): void {
 	// first (#3844 round-5 review finding).
 	const projectKey = canonicalRootKeyFresh(directory);
 	if (journaledQuarantineLinesByProject.has(projectKey)) return;
+	if (journaledQuarantineLinesByProject.size >= MAX_JOURNALED_PROJECTS) {
+		const oldest = journaledQuarantineLinesByProject.keys().next().value;
+		if (oldest !== undefined) {
+			journaledQuarantineLinesByProject.delete(oldest);
+		}
+	}
 	const set = new Set<string>();
 	journaledQuarantineLinesByProject.set(projectKey, set);
 	try {

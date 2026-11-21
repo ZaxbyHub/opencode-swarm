@@ -192,3 +192,109 @@ export function writeReplayIdentityFingerprint(
 	fs.mkdirSync(path.dirname(target), { recursive: true });
 	atomicWriteSwarmFileSync(target, JSON.stringify(sidecar, null, 2));
 }
+
+/**
+ * #3844 round-5 (plan-critic Critical): claim-once identity for
+ * create-only artifacts. The shared sidecar map cannot express "first writer
+ * wins" — a losing concurrent writer could overwrite the winner's
+ * fingerprint key and then validate its own raw payload against that losing
+ * fingerprint. A claim file written with create-only 'wx' semantics is
+ * immutable for the artifact's life: the FIRST writer's fingerprint owns the
+ * identity, every later writer reads and compares against it.
+ */
+export function replayIdentityClaimPath(
+	directory: string,
+	runId: string,
+	key: string,
+): string {
+	return path.join(
+		directory,
+		'.swarm',
+		'pr-review',
+		runId,
+		`replay-identity.${key}.claim`,
+	);
+}
+
+/**
+ * Read a claim file. Returns null when absent. Throws
+ * ReplayIdentityUnavailableError when present but corrupt (not 64-hex) —
+ * callers fail closed on comparisons they need it for.
+ */
+export function readReplayIdentityClaim(
+	directory: string,
+	runId: string,
+	key: string,
+): string | null {
+	const target = replayIdentityClaimPath(directory, runId, key);
+	let text: string;
+	try {
+		text = fs.readFileSync(target, 'utf8');
+	} catch {
+		return null;
+	}
+	const claim = text.trim();
+	if (!/^[0-9a-f]{64}$/.test(claim)) {
+		throw new ReplayIdentityUnavailableError('identity claim is corrupt');
+	}
+	return claim;
+}
+
+export interface ReplayIdentityClaimResult {
+	/** True when THIS caller created the claim (it owns the identity). */
+	claimed: boolean;
+	/** The fingerprint that owns the identity — the prior winner's on EEXIST,
+	 * the caller's own when claimed. */
+	effective: string;
+}
+
+/**
+ * Atomically claim a replay-identity key for a create-only artifact: the
+ * first writer's fingerprint is written with 'wx' and never overwritten. On
+ * a lost race the existing winner's fingerprint is returned so the caller
+ * can compare (identical raw → proceed; different raw → conflict, before
+ * any artifact bytes are written). Corrupt claims throw (fail closed).
+ */
+export function claimReplayIdentityFingerprint(
+	directory: string,
+	runId: string,
+	key: string,
+	fingerprint: string,
+): ReplayIdentityClaimResult {
+	const target = replayIdentityClaimPath(directory, runId, key);
+	try {
+		const existing = readReplayIdentityClaim(directory, runId, key);
+		if (existing !== null) {
+			return { claimed: false, effective: existing };
+		}
+	} catch (error) {
+		if (error instanceof ReplayIdentityUnavailableError) {
+			throw error; // corrupt claim — fail closed
+		}
+		throw error;
+	}
+	const claimBody = `${fingerprint}\n`;
+	try {
+		fs.mkdirSync(path.dirname(target), { recursive: true });
+		const fd = fs.openSync(target, 'wx', 0o600);
+		try {
+			fs.writeFileSync(fd, claimBody, 'utf8');
+		} finally {
+			fs.closeSync(fd);
+		}
+		return { claimed: true, effective: fingerprint };
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
+			throw new ReplayIdentityUnavailableError(
+				`cannot create identity claim: ${(error as Error).message}`,
+			);
+		}
+		const winner = readReplayIdentityClaim(directory, runId, key);
+		if (winner === null) {
+			throw new ReplayIdentityUnavailableError(
+				'identity claim vanished after create race',
+			);
+		}
+		return { claimed: false, effective: winner };
+	}
+}
