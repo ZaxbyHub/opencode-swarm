@@ -1166,6 +1166,31 @@ export async function recoverCoderSettlement(
 		if (existingWal === null) return null;
 		let wal: CoderSettlementWal = existingWal;
 		if (wal.state === 'ABORTED') {
+			// #3888 r3: a self-healed abort may still carry an INCOMPLETE worktree
+			// cleanup (ownership was uncertain at heal time). Retry it here —
+			// completion only when cleanup actually ran; uncertainty leaves the
+			// WAL retryable again rather than stranding the lane teardown.
+			// Only retry when residue is actually present: an uncertain skip
+			// always LEFT THE LANE ON DISK, while a historical self-healed WAL
+			// (its lane long gone) must stay byte-stable (#3409 contract).
+			if (
+				wal.worktree &&
+				wal.cleanupComplete !== true &&
+				existsSync(wal.worktree.worktreePath)
+			) {
+				if (
+					(await cleanupRecoveredWorktree(directory, wal.worktree)) !==
+					'skipped-uncertain'
+				) {
+					const abortedWal = await readWal(filePath, taskId);
+					if (abortedWal !== null) {
+						await writeWal(filePath, {
+							...abortedWal,
+							cleanupComplete: true,
+						});
+					}
+				}
+			}
 			// Earlier releases could declare a missing lane unrecoverable while its
 			// persisted source object survived. Preserve that historical work without
 			// reviving a stale task generation or automatically applying its changes.

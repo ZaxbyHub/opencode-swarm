@@ -162,7 +162,6 @@ import {
 
 export { resolveDelegatedPlanTaskId } from './task-id-resolver.js';
 
-import { closeProjectDb } from '../db/project-db';
 import {
 	abortCoderSettlement,
 	abortCoderSettlementIfDoomed,
@@ -7183,41 +7182,38 @@ export function createDelegationGateHook(
 						// preservation helper looks the dispatch up by callID in the maps
 						// (worktree-isolation preserveDirtyWorktreeForCallId) and would
 						// otherwise report {outcome:"clean"} without ever inspecting dirty
-						// work. The entry is deleted at the END of the destructive tail.
+						// work. The entry is deleted by the cleanup itself.
 						const reason = (
 							outputTerminalState === 'cancelled' ? 'cancelled' : 'denied'
 						) as 'cancelled' | 'denied';
-						await _wtiInternals.preserveDirtyWorktreeForCallId(
-							input.callID,
-							reason,
-							directory,
-						);
-						// Issue #2599 AC5: release the lane DB handle before removal.
-						closeProjectDb(standardDispatch.handle.worktreePath);
-						const removal = await _wtiInternals
-							.removeWorktree(standardDispatch.handle.worktreePath, directory)
-							.catch((cleanupError: unknown) => ({
-								error:
-									cleanupError instanceof Error
-										? cleanupError.message
-										: String(cleanupError),
-							}));
-						const removalError =
-							typeof removal === 'object' &&
-							removal !== null &&
-							'error' in removal &&
-							typeof removal.error === 'string'
-								? removal.error
-								: undefined;
-						if (removalError) {
-							// Issue #2599 AC6: typed strand record + diagnostic instead of
-							// a silently wedged lane.
+						// #3888 r3: route the destructive tail through
+						// cleanupStandardWorktreeForCallId so it runs UNDER the
+						// provisioning lifecycle lock across the ENTIRE tail —
+						// including removeWorktree's residual-directory deletion —
+						// and re-classifies ownership under that lock, catching any
+						// re-provision that landed between the G2 classification
+						// above and this call. The inline preserve/remove/postMerge
+						// sequence previously released its lock before the tail.
+						const terminalCleanup =
+							await _wtiInternals.cleanupStandardWorktreeForCallId(
+								input.callID,
+								reason,
+								directory,
+								standardDispatch.worktree_dir,
+							);
+						if (
+							!terminalCleanup.removedWorktree &&
+							!terminalCleanup.skippedReprovisioned &&
+							!terminalCleanup.skippedOwnershipUncertain
+						) {
+							// Issue #2599 AC6: typed strand record + diagnostic
+							// instead of a silently wedged lane.
 							recordDeadLaneReclaim(directory, {
 								lanePath: standardDispatch.handle.worktreePath,
 								branchName: standardDispatch.handle.branchName,
 								parentSessionId: standardDispatch.parentSessionID,
 								taskId: standardDispatch.taskId,
-								reason: removalError,
+								reason: 'worktree removal failed at terminal teardown',
 							});
 							pushAdvisory(
 								ensureAgentSession(
@@ -7225,15 +7221,11 @@ export function createDelegationGateHook(
 									undefined,
 									directory,
 								),
-								`WORKTREE_LANE_STRANDED: lane ${standardDispatch.handle.worktreePath} could not be removed (${removalError}). ` +
-									'A child session or system process may hold .swarm/swarm.db (WAL); its DB handle was released via closeProjectDb before this attempt. ' +
+								`WORKTREE_LANE_STRANDED: lane ${standardDispatch.handle.worktreePath} could not be removed at terminal teardown. ` +
+									'A child session or system process may hold .swarm/swarm.db (WAL); its DB handle was released via closeProjectDb inside the cleanup attempt. ' +
 									'reclaim scheduled at next start.',
 							);
 						}
-						await _wtiInternals.postMergeCleanup(
-							directory,
-							standardDispatch.handle.branchName,
-						);
 						awaitingMergeByCallID.delete(input.callID);
 						standardWorktreeByCallID.delete(input.callID);
 						recordWorktreeMergeFailure(
