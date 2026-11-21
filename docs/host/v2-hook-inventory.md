@@ -68,6 +68,11 @@ Text parts map 1:1. Non-text v2 content kinds (`media`, `tool-call`, `tool-resul
 
 ## Per-consumer OpencodeClient dispositions (row 17)
 
+PR review and PR feedback refuse activation on the v2 session shim if
+`promptAsync`, `messages`, or `status` is unavailable. The command names
+each missing operation before publishing workflow state. Existing review
+sessions also need those capabilities to transition into feedback.
+
 | Consumer | Guard proof | v2 behavior (since the #3169 Phase 2 session-client shim) |
 |---|---|---|
 | model preflight (`src/services/model-preflight.ts`) | `client?:` optional param; null-guarded; since #3022 v2 setup ALSO runs the clientless `collectModelRosterWarnings` against the checked-in verified keyless roster (inline at the setup tail, withTimeout-bounded, fail-open — the plugin realm runs no post-setup timers) | The shim carries no `provider` domain, so the catalog fetch fails closed to null (try/catch) — same behavior as client-absent; the roster warnings remain the v2 startup surface |

@@ -113,6 +113,7 @@ import {
 	classifyPrWorkflowGitState,
 	type PrWorkflowGitState,
 } from '../git/pr-workflow-state.js';
+import { isV2SessionClient } from '../host/v2/session-client.js';
 import { redactSecrets } from '../memory/redaction.js';
 import {
 	bindPrReviewReentryBindingReader,
@@ -2214,6 +2215,20 @@ function resolvedBaseHeadMatches(
 	return resolvedHead.toLowerCase() === boundHead.toLowerCase();
 }
 
+function assertPrWorkflowHostCapabilities(mode: PrWorkflowMode): void {
+	const client = swarmState.opencodeClient;
+	if (!isV2SessionClient(client)) return;
+
+	const missing = (['promptAsync', 'messages', 'status'] as const).filter(
+		(operation) => typeof client.session[operation] !== 'function',
+	);
+	if (missing.length > 0) {
+		throw new Error(
+			`BLOCKED: ${mode} cannot activate on OpenCode v2. Missing host capabilities: ${missing.join(', ')}.`,
+		);
+	}
+}
+
 export async function activatePrWorkflow(
 	directory: string,
 	sessionID: string,
@@ -2230,6 +2245,7 @@ export async function activatePrWorkflow(
 		forge?: ForgeContext;
 	} = {},
 ): Promise<PrWorkflowGateState> {
+	assertPrWorkflowHostCapabilities(mode);
 	const normalizedSessionID = normalizeSessionID(sessionID);
 	const initiallyActive = await readPrWorkflowGateState(
 		directory,
@@ -13609,6 +13625,7 @@ export async function transitionPrReviewToFeedback(
 		laneLiveness?: PrWorkflowLaneLivenessOptions;
 	},
 ): Promise<PrWorkflowGateState> {
+	assertPrWorkflowHostCapabilities('PR_FEEDBACK');
 	const normalizedSessionID = normalizeSessionID(sessionID);
 	const normalizedHandoff = normalizePrReviewFeedbackHandoffPath(
 		request.handoffPath,
