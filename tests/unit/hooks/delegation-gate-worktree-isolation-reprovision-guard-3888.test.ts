@@ -9,7 +9,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { spawn } from 'node:child_process';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import {
 	reclaimDeadLanes,
@@ -28,6 +27,7 @@ import { recordWorktreeProvisioningOwner } from '../../../src/hooks/delegation-g
 import { recordLiveLaneOwner } from '../../../src/parallel/lane-owners';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
 import type { WorktreeHandle } from '../../../src/worktree';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 const SESSION = 'ses_3888t';
 const BRANCH = 'swarm-lane/ses_3888t/1.1';
@@ -97,9 +97,7 @@ function ownerDir(): string {
 beforeEach(async () => {
 	resetStandardWorktreeIsolationState();
 	resetSwarmState();
-	project = fs.realpathSync(
-		fs.mkdtempSync(path.join(os.tmpdir(), 'wt3888-guard-')),
-	);
+	project = canonicalMkdtemp('wt3888-guard-');
 	fs.mkdirSync(path.join(project, '.swarm'), { recursive: true });
 	await gitSpawn(['init', '-q'], project);
 	await gitSpawn(['config', 'user.email', 't@t.test'], project);
