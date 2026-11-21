@@ -393,8 +393,11 @@ describe('issue #2677 local workflow hash is line-ending independent', () => {
 	}
 
 	// Commits the workflows as LF (the blob the Linux runner checks out), then
-	// rewrites the working copy as CRLF exactly the way a Windows checkout with
-	// core.autocrlf=true does. Returns the LF hashes the evidence records.
+	// rewrites the working-copy bytes to CRLF directly with writeFileSync —
+	// core.autocrlf stays false, so no git conversion path runs. The rewrite
+	// produces the byte-level state a CRLF checkout would serve; the test
+	// below exercises sha256()'s normalization of that state, not git's own
+	// smudge filter. Returns the LF hashes the evidence records.
 	function crlfCheckoutFixture(): {
 		root: string;
 		evidence: Record<string, unknown>;
