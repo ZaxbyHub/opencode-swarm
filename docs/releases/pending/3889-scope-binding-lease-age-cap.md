@@ -1,21 +1,41 @@
-# Scope bindings no longer wedge the swarm after long plugin sessions
+# Scope-binding admission map now has a 24 h hard age cap
 
 ## What
 
-The in-memory scope-binding admission map now evicts entries whose original
-declaration is older than 24 hours (`MAX_SCOPE_BINDING_AGE_MS`), in addition to
-the existing expiry sweep. Previously, every successful in-scope write renewed
-a binding's lease (extending its `expiresAt` by another hour), so a binding
-that kept being renewed never expired. On a long-lived plugin process with
-heavy multi-project swarm use, the map eventually reached its 256-entry
-capacity, after which **every** `declare_scope` / coder write was denied with
-`SCOPE_BINDING_STORE_OVERLOADED` until the plugin process was restarted.
+`refreshScopeBindingLease` re-sets a binding's in-memory admission-map entry
+with an extended `expiresAt` on every successful in-scope write, and the
+sweep only evicted on `expiresAt` — so a continuously renewed binding never
+expired. The map (module-global, 256-entry capacity) can therefore grow to
+capacity in a long-lived plugin process, after which every admission fails
+with `SCOPE_BINDING_CAPACITY` (surfaced as `SCOPE_BINDING_STORE_OVERLOADED`
+on the coder-write path). This was observed 2026-11-20 with a healthy
+durable store and a `/swarm reset-session` that did not clear it; the
+map-saturation mechanism is the leading hypothesis rather than a proven root
+cause.
+
+The sweep now also evicts entries whose ORIGINAL declaration is older than
+24 hours (`MAX_SCOPE_BINDING_AGE_MS`), regardless of lease renewal. The
+durable store and its tombstone pruning are unchanged.
 
 ## Why
 
-A binding that old cannot correlate to a live dispatch anyway (the nominal
-binding TTL is 1 hour and the lane-liveness watchdog is 30 minutes), so
-evicting it changes no live behaviour — it only stops the wedge. Once the cap
-is in place, a wedged process self-heals on the next `declare_scope` call
-instead of requiring a restart. Regression-tested in
-`tests/unit/scope/scope-binding-lease-age-cap.test.ts` (issue #3889).
+The cap bounds a process-lifetime leak without touching the durable
+authority or the 1 h nominal TTL. Documented trade-off: a binding is evicted
+at the cap EVEN WHILE its lease is renewed, so a coder session continuously
+writing into one declared scope for over 24 hours loses its in-memory
+admission and the next write is denied; the remedy is a fresh `declare_scope`
+(new generation). 24 h is 24x the nominal TTL and far above the 30 min
+lane-liveness watchdog, so no realistic single dispatch reaches the cap.
+
+## Known caveats
+
+- A pre-existing sweep behaviour (tombstone writes can overwrite a
+  deliberate revocation tombstone) is unchanged; this cap adds one more
+  write class to that pre-existing path.
+- A pre-existing diagnostic gap remains: any durable read failure on the
+  admission path also surfaces as `SCOPE_BINDING_STORE_OVERLOADED`. Both are
+  recorded on issue #3889 for a follow-up.
+
+Regression-tested in `tests/unit/scope/scope-binding-lease-age-cap.test.ts`
+(includes the real `refreshScopeBindingLease` renewal path, the 24 h
+boundary, and the tombstone shape). Refs #3889.

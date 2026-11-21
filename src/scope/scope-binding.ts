@@ -15,14 +15,24 @@ export const MAX_PENDING_SCOPE_BINDINGS = 256;
 export const DEFAULT_SCOPE_BINDING_TTL_MS = 60 * 60 * 1000;
 export const MAX_SCOPE_BINDING_TOMBSTONES = 256;
 /**
- * Hard cap on how long a binding may occupy the in-memory admission map,
- * regardless of lease renewal. refreshScopeBindingLease extends expiresAt on
- * every successful in-scope write (issue #3889); without a hard age cap a
- * long-lived plugin process accumulates renewed entries until
+ * Hard cap on how long a scope binding may occupy the in-memory admission
+ * map, measured from the ORIGINAL declaration and independent of lease
+ * renewal. refreshScopeBindingLease re-sets the in-map entry with an
+ * extended expiresAt on every successful in-scope write, so without a hard
+ * age cap a long-lived plugin process can accumulate renewed entries until
  * MAX_PENDING_SCOPE_BINDINGS is reached and every admission fails with
- * SCOPE_BINDING_STORE_OVERLOADED. A binding older than this cap cannot
- * correlate to a live dispatch anyway (lane-liveness watchdog is 30 min;
- * the nominal TTL is 1 h), so evicting it changes no live behaviour.
+ * SCOPE_BINDING_CAPACITY (surfaced as SCOPE_BINDING_STORE_OVERLOADED on the
+ * coder-write path; observed 2026-11-20 — the store stayed healthy and
+ * /swarm reset-session did not clear it, and the map-saturation mechanism
+ * is the leading hypothesis rather than a proven root cause).
+ *
+ * Documented trade-off: a binding is evicted at this cap EVEN WHILE its
+ * lease is renewed. A coder session continuously writing into one declared
+ * scope for over 24 h loses its in-memory admission and its next write is
+ * denied; the remedy is a fresh declare_scope (new generation). The cap is
+ * 24x the nominal 1 h TTL and far above the 30 min lane-liveness watchdog,
+ * so no realistic single dispatch reaches it — it bounds a process-lifetime
+ * leak, not ordinary work.
  */
 export const MAX_SCOPE_BINDING_AGE_MS = 24 * 60 * 60 * 1000;
 
