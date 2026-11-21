@@ -883,7 +883,16 @@ async function cleanupRecoveredWorktree(
 	 * cleanup pass (completeCoderSettlementCleanup, recovery scans, resume)
 	 * retains consistently; an explicit option overrides.
 	 */
-	options?: { retainBranch?: boolean },
+	options?: {
+		retainBranch?: boolean;
+		/**
+		 * #3888 r7: G1 runs fail-closed dirty-work preservation only for
+		 * denied/cancelled. The ABORTED-recovery retry passes 'cancelled' so a
+		 * lane that was left dirty by an uncertain first attempt is preserved
+		 * (or the retry aborts) rather than force-removed unpreserved.
+		 */
+		cleanupReason?: 'success' | 'cancelled';
+	},
 ): Promise<'completed' | 'skipped-uncertain'> {
 	const retainBranch =
 		options?.retainBranch ?? descriptor.landedUnstaged === true;
@@ -910,7 +919,7 @@ async function cleanupRecoveredWorktree(
 	if (hasResidue) {
 		const cleanupResult = await cleanupStandardWorktreeForCallId(
 			descriptor.callID,
-			'success',
+			options?.cleanupReason ?? 'success',
 			directory,
 			descriptor.worktreeDir ?? undefined,
 			retainBranch ? { retainBranch: true } : undefined,
@@ -1179,8 +1188,9 @@ export async function recoverCoderSettlement(
 				existsSync(wal.worktree.worktreePath)
 			) {
 				if (
-					(await cleanupRecoveredWorktree(directory, wal.worktree)) !==
-					'skipped-uncertain'
+					(await cleanupRecoveredWorktree(directory, wal.worktree, {
+						cleanupReason: 'cancelled',
+					})) !== 'skipped-uncertain'
 				) {
 					const abortedWal = await readWal(filePath, taskId);
 					if (abortedWal !== null) {
