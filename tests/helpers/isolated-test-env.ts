@@ -22,8 +22,7 @@ import { closeProjectDb } from '../../src/db/project-db.js';
  * both sides (tests/unit/helpers/isolated-test-env-homedir.test.ts): on
  * Windows (Bun 1.3.14) `os.homedir()` FOLLOWS a redirected HOME/USERPROFILE
  * and returns the isolated home, while on POSIX (CI ubuntu runners; macOS is
- * the same libuv family) it does NOT — libuv resolves the passwd entry, so the
- * result stays the real home. The universal false part of the old claim (the
+ * the same libuv family) it does NOT — the result stays the real home. The universal false part of the old claim (the
  * Bun 1.3.11 note asserting homedir() never reads the environment) is the
  * Windows arm.
  * On hosts where the redirect DOES take effect, a fixture whose workspace sits

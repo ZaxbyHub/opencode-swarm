@@ -316,7 +316,7 @@ describe('delegation-gate acceptance auto-injection', () => {
 			).toBe(false);
 		});
 
-		test('an empty header only the cross-field join can see is rejected and left untouched (issue 3381 AC3 will revisit)', async () => {
+		test('an empty header only the cross-field join can see is rejected and left untouched (issue 3381 AC3)', async () => {
 			// The validator joins fields with a newline, so description "ACCEPTANCE:\r"
 			// plus the next field reads as a CRLF-terminated empty header, while the
 			// per-field injector sees no header line in any single field. The strict

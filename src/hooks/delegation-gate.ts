@@ -5191,9 +5191,8 @@ export function createDelegationGateHook(
 			// use (see resolveDelegatedPlanTaskId / taskLooksLikePlanCritic) so the
 			// ACCEPTANCE line is found regardless of which arg carried the prompt.
 			// Issue #3381 (AC3, plan R7): the joined-text validation stays the
-			// primary decision (auto-injection semantics unchanged), but when the
-			// JOINED text passes we additionally require SOME field to
-			// independently satisfy the validator — a bare `ACCEPTANCE:` ending
+			// primary decision, but when the JOINED text passes we additionally
+			// require SOME field to independently satisfy the validator — a bare `ACCEPTANCE:` ending
 			// one field must not borrow the next field's text (and the
 			// lone-CR spelling `ACCEPTANCE:\r` must not borrow it while no field
 			// even recognizes its own header). Fails closed: no independently

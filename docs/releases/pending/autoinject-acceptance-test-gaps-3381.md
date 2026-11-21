@@ -7,4 +7,4 @@
 
 ## Known caveats
 
-- No runtime behavior changes. The last pinned case is the current behavior; the field-joining criterion in #3381 will revisit it.
+- No runtime behavior changes. The last pinned case is the behavior after the #3381 cross-field join hardening.

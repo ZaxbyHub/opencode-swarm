@@ -71,8 +71,8 @@ describe('createIsolatedTestEnv homedir behavior pin (#3381 AC1)', () => {
 		} else {
 			// Verified on CI ubuntu (run 44762902376, Bun 1.3.x): os.homedir()
 			// does NOT follow the redirected HOME/USERPROFILE on POSIX —
-			// libuv resolves the passwd entry, so the value stays the
-			// pre-redirect real home. Pin the not-followed arm so a Bun
+			// the value stays the pre-redirect real
+			// home. Pin the not-followed arm so a Bun
 			// change that makes POSIX follow too (or Windows stop
 			// following) trips this leg loudly.
 			expect(path.resolve(during)).toBe(path.resolve(realHomeBefore));
