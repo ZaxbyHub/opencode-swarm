@@ -10,7 +10,7 @@ import { z } from 'zod';
 import { loadPluginConfig } from '../config/loader';
 import type { RuntimePlan, TaskStatus } from '../config/plan-schema';
 import { stripKnownSwarmPrefix } from '../config/schema';
-import { promoteContextMapTaskRelease } from '../context-map/post-agent-update.js';
+import { promoteContextMapTaskReleaseLocked } from '../context-map/post-agent-update.js';
 import { getProfileLookupForIdentity } from '../db/qa-gate-profile.js';
 import {
 	isLegacyTaskGateRequirementsChain,
@@ -2385,7 +2385,10 @@ export async function executeUpdateTaskStatus(
 			try {
 				const config = loadPluginConfig(directory);
 				if (config.context_map?.enabled === true) {
-					promoteContextMapTaskRelease(directory, args.task_id);
+					// r16 (P2): the coordinated promotion — the whole
+					// load→promote→save cycle runs under the cross-process
+					// context-map lock so a concurrent writer cannot lose it.
+					await promoteContextMapTaskReleaseLocked(directory, args.task_id);
 				}
 			} catch {
 				// observation only — the release itself already succeeded

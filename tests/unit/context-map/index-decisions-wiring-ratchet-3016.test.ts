@@ -31,7 +31,10 @@ describe('src/index.ts context-map decisions wiring (#3016)', () => {
 	});
 
 	test('the hook call site binds decisions to the extraction helper', () => {
-		const callStart = indexSrc.indexOf('updateContextMapAfterAgent({');
+		// r16 (P2): the sync handoff goes through the COORDINATED entry point
+		// (updateContextMapAfterAgentLocked — the whole load→update→save
+		// cycle under the cross-process context-map lock).
+		const callStart = indexSrc.indexOf('updateContextMapAfterAgentLocked({');
 		expect(callStart).toBeGreaterThanOrEqual(0);
 		const terminator = indexSrc.indexOf('});', callStart);
 		expect(terminator).toBeGreaterThanOrEqual(0); // bounded slice, no EOF scan
@@ -42,7 +45,7 @@ describe('src/index.ts context-map decisions wiring (#3016)', () => {
 	});
 
 	test('the gate passes a session agent role to the helper', () => {
-		const callStart = indexSrc.indexOf('updateContextMapAfterAgent({');
+		const callStart = indexSrc.indexOf('updateContextMapAfterAgentLocked({');
 		const terminator = indexSrc.indexOf('});', callStart);
 		const callSite = indexSrc.slice(callStart, terminator);
 		expect(callSite).toMatch(/agent_role:\s*resolveSessionChatAgent\(/);

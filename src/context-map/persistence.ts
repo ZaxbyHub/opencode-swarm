@@ -16,7 +16,6 @@
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-
 import type {
 	ContentHash,
 	ContextMap,
@@ -24,6 +23,7 @@ import type {
 	DecisionEntry,
 	TaskContextSummary,
 } from '../types/context-map';
+import { atomicWriteSwarmFileSync } from '../utils/atomic-write';
 
 // ---------------------------------------------------------------------------
 // DI seam — tests override these functions without touching real modules
@@ -44,6 +44,16 @@ export const _internals = {
 	existsSync: fs.existsSync,
 	statSync: fs.statSync,
 	createHash: crypto.createHash.bind(crypto),
+	/**
+	 * r16 (P2): the canonical atomic swarm writer (unique registered temp,
+	 * fsync, bounded Windows rename retry, artifact-cache invalidation).
+	 * Seamed so tests can capture the persisted bytes without real I/O —
+	 * the same pattern the previous writeFileSync/renameSync seam served.
+	 */
+	atomicWriteSwarmFileSync: atomicWriteSwarmFileSync as (
+		targetPath: string,
+		content: string,
+	) => void,
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -162,19 +172,25 @@ export function readContextMapState(directory: string): ContextMapReadState {
 }
 
 /**
- * Save the Context Map to `.swarm/context-map.json` using an atomic
- * temp-then-rename write pattern to avoid partial-write corruption.
+ * Save the Context Map to `.swarm/context-map.json` using the canonical
+ * atomic write (unique registered temp file + fsync + rename).
+ *
+ * r16 audit repair (P2): the previous hand-rolled write used a FIXED temp
+ * name (`.swarm/context-map.tmp`) with no cross-process coordination — two
+ * concurrent writers could clobber each other's temp file (one rename then
+ * failed with ENOENT, or installed the OTHER writer's bytes). The canonical
+ * writer gives every write its own unique temp, so unlocked writers can no
+ * longer collide on the temp artifact; cross-process lost UPDATES (both
+ * writers extending a map they both loaded earlier) are prevented by the
+ * coordinating lock at the mutation entry points
+ * (`withContextMapLock` in post-agent-update.ts) — a unique temp alone does
+ * not serialize read-modify-write cycles.
  *
  * Updates `generated_at` to the current timestamp before writing.
  * Creates the `.swarm/` directory if it does not exist.
  */
 export function saveContextMap(map: ContextMap, directory: string): void {
-	const swarmDir = path.join(directory, '.swarm');
-	const tmpPath = path.join(swarmDir, 'context-map.tmp');
-	const finalPath = path.join(swarmDir, 'context-map.json');
-
-	// Ensure .swarm/ directory exists
-	_internals.mkdirSync(swarmDir, { recursive: true });
+	const finalPath = path.join(directory, '.swarm', 'context-map.json');
 
 	// Update generated_at timestamp
 	const updated: ContextMap = {
@@ -183,8 +199,7 @@ export function saveContextMap(map: ContextMap, directory: string): void {
 	};
 
 	const json = JSON.stringify(updated, null, 2);
-	_internals.writeFileSync(tmpPath, json, 'utf-8');
-	_internals.renameSync(tmpPath, finalPath);
+	_internals.atomicWriteSwarmFileSync(finalPath, json);
 }
 
 // ---------------------------------------------------------------------------

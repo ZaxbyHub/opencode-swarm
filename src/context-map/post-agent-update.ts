@@ -777,9 +777,79 @@ export function updateContextMapAfterAgent(
 	}
 }
 
+/**
+ * r16 audit repair (P2): the COORDINATED post-agent update. Wraps the whole
+ * load→update→save cycle of {@link updateContextMapAfterAgent} in the
+ * cross-process context-map write lock, so two concurrent completions (the
+ * background observer in one process, the sync Task handoff hook in another)
+ * cannot both extend a map they loaded before either saved — the loser's
+ * task summary, decisions, and file summaries would silently vanish.
+ * Best-effort by the same contract as the sync variant.
+ */
+export async function updateContextMapAfterAgentLocked(
+	params: PostAgentUpdateParams,
+): Promise<ContextMap> {
+	const result = await withContextMapLock(
+		params.directory,
+		params.agent_role || 'unknown',
+		params.task_id,
+		() => updateContextMapAfterAgent(params),
+	);
+	return result.ok
+		? result.value
+		: (_internals.loadContextMap(params.directory) ??
+				_internals.createEmptyContextMap());
+}
+
 // ---------------------------------------------------------------------------
 // Task-release verification and authoritative promotion (r14 audit P1-5)
 // ---------------------------------------------------------------------------
+
+/**
+ * r16 audit repair (P2): the evidence-lock key coordinating every
+ * context-map read-modify-write cycle. `saveContextMap`'s atomic write makes
+ * each individual persist torn-write-safe, but two processes that both
+ * LOADED the map before either saved still lose one writer's update (last
+ * rename wins). The mutation entry points below wrap their whole
+ * load→mutate→save cycle in the EXISTING cross-process evidence lock
+ * (`withEvidenceLock`, the same coordinating layer the pr-subscription and
+ * evidence stores use) so participating writers serialize. The lock is
+ * coordinating, not a sandbox: unlocked legacy writers can still clobber —
+ * they could before r16 too.
+ */
+const CONTEXT_MAP_LOCK_KEY = 'context-map.json';
+
+/**
+ * Run `fn` under the cross-process context-map write lock. Never throws:
+ * a lock failure (timeout, project-root rejection) is logged and reported
+ * via the return value so best-effort callers can skip — the reconciliation
+ * at the next maintenance point recovers a skipped promotion.
+ */
+export async function withContextMapLock<T>(
+	directory: string,
+	agent: string,
+	taskId: string,
+	fn: () => T | Promise<T>,
+): Promise<{ ok: true; value: T } | { ok: false }> {
+	try {
+		const { withEvidenceLock } = await import('../evidence/lock.js');
+		const value = await withEvidenceLock(
+			directory,
+			CONTEXT_MAP_LOCK_KEY,
+			agent,
+			taskId,
+			async () => fn(),
+		);
+		return { ok: true, value };
+	} catch (error) {
+		logger.warn(
+			`[context-map] write lock for task ${taskId} failed (skipped; retried at the next maintenance point): ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		);
+		return { ok: false };
+	}
+}
 
 /**
  * Whether the WHOLE TASK is authoritatively released: the plan's task status
@@ -940,6 +1010,25 @@ export function promoteContextMapTaskRelease(
 }
 
 /**
+ * r16 audit repair (P2): the COORDINATED task-release promotion. Wraps the
+ * whole load→promote→save cycle of {@link promoteContextMapTaskRelease} in
+ * the cross-process context-map write lock so a concurrent writer (the
+ * observer's child summary, the sync handoff, another process's
+ * reconciliation) cannot interleave its own read-modify-write and lose this
+ * promotion — or vice versa. Best-effort by the same contract as the sync
+ * variant: a lock failure skips the promotion (logged), and the next
+ * maintenance-point reconciliation recovers it.
+ */
+export async function promoteContextMapTaskReleaseLocked(
+	directory: string,
+	taskId: string,
+): Promise<void> {
+	await withContextMapLock(directory, 'update_task_status', taskId, () => {
+		promoteContextMapTaskRelease(directory, taskId);
+	});
+}
+
+/**
  * r15 audit repair (P3): idempotent reconciliation of context-map task
  * releases after a lost promotion.
  *
@@ -1017,7 +1106,10 @@ export async function reconcileContextMapTaskReleases(
 				task.id,
 			);
 			if (releaseStatus === 'completed') {
-				promoteContextMapTaskRelease(directory, task.id);
+				// r16 (P2): the coordinated promotion — the whole
+				// load→promote→save cycle runs under the cross-process
+				// context-map lock so a concurrent writer cannot lose it.
+				await promoteContextMapTaskReleaseLocked(directory, task.id);
 			}
 		}
 	} catch (error) {

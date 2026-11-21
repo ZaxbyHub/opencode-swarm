@@ -93,8 +93,8 @@ import {
 import { createRoleFilterSystemHook } from './context/role-filter.js';
 import {
 	extractContextDecisionsFromContextMd,
-	updateContextMapAfterAgent,
 	resolveContextMapTaskReleaseStatus,
+	updateContextMapAfterAgentLocked,
 } from './context-map/post-agent-update.js';
 import {
 	closeDashboardServerForRootIfOwner,
@@ -1926,24 +1926,26 @@ async function initializeOpenCodeSwarm(
 			// the post-resolution queue can observe completion. The scheduler
 			// already treats tasks as void | Promise<void>.
 			return withTimeout(
-				import('./background/pending-delegations.js').then((m) =>
-					m.maintainBackgroundDelegations(bootstrapRoot, {
-						lockTimeoutMs: 5_000,
-						reason: 'post-init',
-						onLegacyCoderSettlementReconciled:
-							backgroundCompletionObserver.reconcilePending,
-						onLegacyCoderSettlementAdvisoryReplaced:
-							backgroundCompletionObserver.notifyLegacyCoderSettlementAdvisoryReplaced,
-					}),
-				).then(() =>
-					// r15 audit repair (P3): recover context-map task-release
-					// promotions lost to a best-effort promotion failure at
-					// update_task_status. Idempotent, config-gated, fail-closed
-					// on QA proof; best-effort like the maintenance above.
-					import('./context-map/post-agent-update.js').then((m) =>
-						m.reconcileContextMapTaskReleases(bootstrapRoot),
+				import('./background/pending-delegations.js')
+					.then((m) =>
+						m.maintainBackgroundDelegations(bootstrapRoot, {
+							lockTimeoutMs: 5_000,
+							reason: 'post-init',
+							onLegacyCoderSettlementReconciled:
+								backgroundCompletionObserver.reconcilePending,
+							onLegacyCoderSettlementAdvisoryReplaced:
+								backgroundCompletionObserver.notifyLegacyCoderSettlementAdvisoryReplaced,
+						}),
+					)
+					.then(() =>
+						// r15 audit repair (P3): recover context-map task-release
+						// promotions lost to a best-effort promotion failure at
+						// update_task_status. Idempotent, config-gated, fail-closed
+						// on QA proof; best-effort like the maintenance above.
+						import('./context-map/post-agent-update.js').then((m) =>
+							m.reconcileContextMapTaskReleases(bootstrapRoot),
+						),
 					),
-				),
 				BACKGROUND_MAINTENANCE_INIT_TIMEOUT_MS,
 				new Error(
 					`background maintenance exceeded ${BACKGROUND_MAINTENANCE_INIT_TIMEOUT_MS}ms post-init budget; continuing without it (other maintenance points remain)`,
@@ -4443,10 +4445,11 @@ async function initializeOpenCodeSwarm(
 												);
 											}
 											try {
-												const reconciliation = reconcilePrWorkflowCheckoutReceipts(
-													bootstrapRoot,
-													sessionID,
-												);
+												const reconciliation =
+													reconcilePrWorkflowCheckoutReceipts(
+														bootstrapRoot,
+														sessionID,
+													);
 												const summary = await withTimeout(
 													reconciliation,
 													SESSION_DELETION_RECEIPT_RECONCILIATION_EVENT_DEADLINE_MS,
@@ -4459,7 +4462,8 @@ async function initializeOpenCodeSwarm(
 													{
 														inspected: summary.inspectedReceiptCount,
 														collected: summary.collectedStashOids.length,
-														retiredMissing: summary.retiredMissingStashOids.length,
+														retiredMissing:
+															summary.retiredMissingStashOids.length,
 														preserved: summary.preservedStashOids.length,
 														failures: summary.failures.length,
 													},
@@ -4535,7 +4539,10 @@ async function initializeOpenCodeSwarm(
 										evt?.type === 'session.idle' &&
 										typeof idleSessionID === 'string'
 									) {
-										prEventDelivery.noteSessionIdle(idleSessionID, ctx.directory);
+										prEventDelivery.noteSessionIdle(
+											idleSessionID,
+											ctx.directory,
+										);
 									}
 								}
 							},
@@ -5742,7 +5749,22 @@ async function initializeOpenCodeSwarm(
 									bootstrapRoot,
 									contextMapTaskId,
 								);
-							updateContextMapAfterAgent({
+							// r16 (P2): the COORDINATED write — the whole
+							// load→update→save cycle runs under the cross-process
+							// context-map lock. Awaited so the hook chain (and the
+							// test hosts that drive it) observe the completed write;
+							// the surrounding try/catch keeps it non-blocking.
+							// r16 (P2): the COORDINATED write — the whole
+							// load→update→save cycle runs under the cross-process
+							// context-map lock. Awaited so the hook chain (and the
+							// test hosts that drive it) observe the completed write;
+							// the surrounding try/catch keeps it non-blocking.
+							// r16 (P2): the COORDINATED write — the whole
+							// load→update→save cycle runs under the cross-process
+							// context-map lock. Awaited so the hook chain (and the
+							// test hosts that drive it) observe the completed write;
+							// the surrounding try/catch keeps it non-blocking.
+							await updateContextMapAfterAgentLocked({
 								task_id: contextMapTaskId,
 								agent_role:
 									swarmState.activeAgent.get(input.sessionID) ?? 'unknown',

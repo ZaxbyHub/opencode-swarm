@@ -1830,7 +1830,7 @@ export function createBackgroundCompletionObserver(opts: {
 						async () => {
 							const {
 								extractContextDecisionsFromContextMd,
-								updateContextMapAfterAgent,
+								updateContextMapAfterAgentLocked,
 								resolveContextMapTaskReleaseStatus,
 								MAX_PERSISTED_DECISIONS,
 							} = await resolveContextMapModule();
@@ -1864,7 +1864,15 @@ export function createBackgroundCompletionObserver(opts: {
 								.map((entry) => (entry.decision ?? '').trim())
 								.filter((text) => text !== '')
 								.slice(-MAX_PERSISTED_DECISIONS);
-							updateContextMapAfterAgent({
+							// r16 (P2): the COORDINATED write — the whole
+							// load→update→save cycle runs under the cross-process
+							// context-map lock (awaited so the read-back verification
+							// below observes the completed write).
+							// r16 (P2): the COORDINATED write — the whole
+							// load→update→save cycle runs under the cross-process
+							// context-map lock (awaited so the read-back verification
+							// below observes the completed write).
+							await updateContextMapAfterAgentLocked({
 								task_id: closeoutTaskId,
 								agent_role: record.normalizedAgent,
 								// Best-effort reconstruction from the original
