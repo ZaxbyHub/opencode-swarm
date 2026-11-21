@@ -7274,8 +7274,8 @@ export function createDelegationGateHook(
 									: !terminalCleanup.removedWorktree
 										? 'worktree preserved; removal did not complete (see cleanup advisories).'
 										: terminalCleanup.cleanedBranch
-											? 'worktree preserved and cleaned without merge-back.'
-											: 'worktree removed; lane branch retained.';
+											? 'dirty work preserved pre-removal; worktree and lane branch removed.'
+											: 'dirty work preserved pre-removal; worktree removed, lane branch retained.';
 							pushAdvisory(
 								dispatchSession,
 								`STANDARD_WORKTREE_TASK_FAILED: task ${standardDispatch.taskId} terminated with ${outputTerminalState ?? 'terminal-failure'}; ${terminalOutcomeNote}`,
