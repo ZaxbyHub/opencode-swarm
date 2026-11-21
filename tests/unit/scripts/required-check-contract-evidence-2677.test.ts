@@ -392,9 +392,9 @@ describe('issue #2677 local workflow hash is line-ending independent', () => {
 		return proc.stdout.toString().trim();
 	}
 
-	// Commits the workflows as LF (the blob the Linux runner checks out), then
-	// rewrites the working copy as CRLF exactly the way a Windows checkout with
-	// core.autocrlf=true does. Returns the LF hashes the evidence records.
+	// Commits LF workflows and returns their hashes for the evidence record.
+	// With core.autocrlf disabled, writeFileSync rewrites the working copy to
+	// CRLF so the test exercises byte-level hash normalization.
 	function crlfCheckoutFixture(): {
 		root: string;
 		evidence: Record<string, unknown>;
