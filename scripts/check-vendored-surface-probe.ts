@@ -18,12 +18,12 @@
  * not met), 2 usage or infrastructure error (unknown flag, no local
  * TypeScript install, spawn failure).
  *
- * `--self-test` mutates src/host/v2/types.ts (summary: string -> number),
- * expects the gate to FAIL with a compiler violation, and restores the file
- * in a finally block. The backup is written to a temp file first so an
- * in-memory-only restore cannot lose it, the restore is byte-compared
- * (Buffer), and the CI step that invokes it (the quality job) also runs
- * `git checkout -- src/host/v2/types.ts` afterward as a second restore layer.
+ * `--self-test` (and the CI-only CHECK_VENDORED_SELFTEST env, which runs it
+ * after the gate) mutate src/host/v2/types.ts (summary: string -> number),
+ * expect the gate to FAIL with a compiler violation, and restore the file. The
+ * backup is written to a temp file first so an in-memory-only restore cannot
+ * lose it, the restore is byte-compared (Buffer), and a failed restore returns
+ * 2 while keeping the backup for recovery.
  */
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -104,6 +104,84 @@ function classify(result: GateResult): GateOutcome {
 	return result.tscStatus === 0 ? { kind: 'pass' } : { kind: 'violation' };
 }
 
+/**
+ * #3882: prove the gate bites — mutate src/host/v2/types.ts (summary: string ->
+ * number), expect runGate to fail with a compiler VIOLATION, and restore the
+ * file. An infrastructure failure (missing/timed-out tsc) is NOT evidence the
+ * gate works, so it fails the self-test too. The backup is written to a temp
+ * file and the restore is byte-verified (Buffer), so a normal exit always
+ * leaves types.ts untouched; a failed restore returns 2 and keeps the backup.
+ */
+function runSelfTest(repoRoot: string): number {
+	const typesPath = path.join(repoRoot, TYPES_REL);
+	if (!existsSync(typesPath)) {
+		console.error(`check-vendored-surface: ${TYPES_REL} not found`);
+		return 2;
+	}
+	const backup = readFileSync(typesPath);
+	const anchor = 'summary: string;';
+	if (!backup.includes(anchor)) {
+		console.error(
+			'check-vendored-surface: self-test anchor "summary: string;" not found in src/host/v2/types.ts — update the self-test',
+		);
+		return 2;
+	}
+	const tmpDir = mkdtempSync(path.join(os.tmpdir(), 'vendored-surface-selftest-'));
+	const backupPath = path.join(tmpDir, 'types.ts.bak');
+	writeFileSync(backupPath, backup);
+	let restoreFailed = false;
+	try {
+		const mutated = backup.toString('utf-8').replace(anchor, 'summary: number;');
+		if (mutated === backup.toString('utf-8')) {
+			console.error('check-vendored-surface: self-test mutation was a no-op');
+			return 1;
+		}
+		writeFileSync(typesPath, mutated, 'utf-8');
+		const outcome = classify(runGate(repoRoot));
+		if (outcome.kind === 'pass') {
+			console.error(
+				'check-vendored-surface: self-test FAILED — the gate passed a deliberately broken types.ts (the probe does not bite)',
+			);
+			return 1;
+		}
+		if (outcome.kind !== 'violation') {
+			console.error(
+				`check-vendored-surface: self-test INCONCLUSIVE — the gate did not run to a compiler violation (outcome: ${outcome.kind}); a missing/timed-out tsc must not count as a passing self-test`,
+			);
+			return 2;
+		}
+		console.log(
+			'check-vendored-surface: self-test ok — gate failed as expected on the mutated surface (violation)',
+		);
+		return 0;
+	} finally {
+		// Restore first (always — even if typesPath vanished, re-writing the
+		// backup leaves the tracked file correct), byte-verified. Only a
+		// verified-restore path removes the on-disk backup; a failed restore
+		// keeps it for recovery and reports the failure.
+		try {
+			writeFileSync(typesPath, backup);
+			const restored = readFileSync(typesPath);
+			if (!restored.equals(backup)) restoreFailed = true;
+		} catch {
+			restoreFailed = true;
+		}
+		if (restoreFailed) {
+			console.error(
+				'check-vendored-surface: self-test RESTORE FAILED — types.ts is not byte-identical to its pre-test state; the temp backup survives at ' +
+					backupPath,
+			);
+		} else {
+			try {
+				rmSync(tmpDir, { recursive: true, force: true });
+			} catch {
+				// best-effort temp cleanup
+			}
+		}
+		if (restoreFailed) return 2;
+	}
+}
+
 export function main(
 	startDir: string = process.cwd(),
 	argv: string[] = process.argv.slice(2),
@@ -117,81 +195,8 @@ export function main(
 	}
 	const selfTest = argv.includes('--self-test');
 	const repoRoot = resolveRepoRoot(startDir);
-
 	if (selfTest) {
-		const typesPath = path.join(repoRoot, TYPES_REL);
-		if (!existsSync(typesPath)) {
-			console.error(`check-vendored-surface: ${TYPES_REL} not found`);
-			return 2;
-		}
-		const backup = readFileSync(typesPath);
-		const anchor = 'summary: string;';
-		if (!backup.includes(anchor)) {
-			console.error(
-				'check-vendored-surface: self-test anchor "summary: string;" not found in src/host/v2/types.ts — update the self-test',
-			);
-			return 2;
-		}
-		// Interruption-safe restore: the backup lives on disk (temp file) so a
-		// throw between the mutation and the restore cannot lose it, and the
-		// restore is byte-compared (Buffer, not UTF-8 string).
-		const tmpDir = mkdtempSync(path.join(os.tmpdir(), 'vendored-surface-selftest-'));
-		const backupPath = path.join(tmpDir, 'types.ts.bak');
-		writeFileSync(backupPath, backup);
-		let restoreFailed = false;
-		try {
-			const mutated = backup.toString('utf-8').replace(anchor, 'summary: number;');
-			if (mutated === backup.toString('utf-8')) {
-				console.error('check-vendored-surface: self-test mutation was a no-op');
-				return 1;
-			}
-			writeFileSync(typesPath, mutated, 'utf-8');
-			const outcome = classify(runGate(repoRoot));
-			// Only a real compiler VIOLATION proves the probe bites. An
-			// infrastructure failure (missing/timed-out tsc) is NOT evidence the
-			// gate works, so it must fail the self-test rather than pass on it.
-			if (outcome.kind === 'pass') {
-				console.error(
-					'check-vendored-surface: self-test FAILED — the gate passed a deliberately broken types.ts (the probe does not bite)',
-				);
-				return 1;
-			}
-			if (outcome.kind !== 'violation') {
-				console.error(
-					`check-vendored-surface: self-test INCONCLUSIVE — the gate did not run to a compiler violation (outcome: ${outcome.kind}); a missing/timed-out tsc must not count as a passing self-test`,
-				);
-				return 2;
-			}
-			console.log(
-				'check-vendored-surface: self-test ok — gate failed as expected on the mutated surface (violation)',
-			);
-			return 0;
-		} finally {
-			// Restore first (always — even if typesPath vanished, re-writing the
-			// backup leaves the tracked file correct), byte-verified. Only a
-			// verified-restore path removes the on-disk backup; a failed restore
-			// keeps it for recovery and reports the failure.
-			try {
-				writeFileSync(typesPath, backup);
-				const restored = readFileSync(typesPath);
-				if (!restored.equals(backup)) restoreFailed = true;
-			} catch {
-				restoreFailed = true;
-			}
-			if (restoreFailed) {
-				console.error(
-					'check-vendored-surface: self-test RESTORE FAILED — types.ts is not byte-identical to its pre-test state; the temp backup survives at ' +
-						backupPath,
-				);
-			} else {
-				try {
-					rmSync(tmpDir, { recursive: true, force: true });
-				} catch {
-					// best-effort temp cleanup
-				}
-			}
-			if (restoreFailed) return 2;
-		}
+		return runSelfTest(repoRoot);
 	}
 
 	const result = runGate(repoRoot);
@@ -202,6 +207,12 @@ export function main(
 		console.log(
 			`check-vendored-surface: ok — ${PROBE_REL} compiles clean under the pinned local TypeScript`,
 		);
+		// CI env-gated self-test: prove the gate bites before the job passes.
+		// The self-test restores types.ts in-process, so the mapped command
+		// string is unchanged.
+		if (process.env.CHECK_VENDORED_SELFTEST) {
+			return runSelfTest(repoRoot);
+		}
 		return 0;
 	}
 	if (outcome.kind === 'infra') {
