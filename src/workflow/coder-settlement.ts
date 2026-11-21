@@ -1070,8 +1070,14 @@ export async function completeCoderSettlementCleanup(
 			return;
 		if (!wal.worktree || wal.cleanupComplete === true) return;
 		if (
-			(await cleanupRecoveredWorktree(directory, wal.worktree)) ===
-			'skipped-uncertain'
+			(await cleanupRecoveredWorktree(directory, wal.worktree, {
+				// #3888 r8: an ABORTED settlement's retryable cleanup must use
+				// fail-closed dirty-work preservation (G1 runs preservation only
+				// for denied/cancelled); COMMITTED settlements keep the landed
+				// 'success' semantics. Covers every entry point into this
+				// function (abortCoderSettlement retry included).
+				cleanupReason: wal.state === 'ABORTED' ? 'cancelled' : 'success',
+			})) === 'skipped-uncertain'
 		) {
 			// #3888: ownership was uncertain — destruction skipped, lane and
 			// tracking retained. Do NOT mark cleanupComplete: a later retry
