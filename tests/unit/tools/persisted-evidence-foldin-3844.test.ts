@@ -182,10 +182,7 @@ describe('#3844 fold-in: six persisted-evidence boundaries (#3899 AC1-6)', () =>
 		]);
 		const lines = readFileSync(path.join(dir, '.swarm', 'events.jsonl'), 'utf8')
 			.split('\n')
-			.filter(
-				(l) =>
-					l.length > 0 && !l.includes('swarm-events-manifest'),
-			);
+			.filter((l) => l.length > 0 && !l.includes('swarm-events-manifest'));
 		expect(lines).toHaveLength(2);
 		const first = lines[0] as string;
 		expect(first.includes(TOKEN)).toBe(false);
@@ -229,10 +226,7 @@ describe('#3844 fold-in: six persisted-evidence boundaries (#3899 AC1-6)', () =>
 		);
 		const after = readFileSync(path.join(dir, '.swarm', 'events.jsonl'), 'utf8')
 			.split('\n')
-			.filter(
-				(l) =>
-					l.length > 0 && !l.includes('swarm-events-manifest'),
-			);
+			.filter((l) => l.length > 0 && !l.includes('swarm-events-manifest'));
 		expect(after).toHaveLength(3); // 2 provider + ONE deduped authority line
 		expect(after.join('\n').includes(TOKEN)).toBe(false);
 	}, 60_000);
