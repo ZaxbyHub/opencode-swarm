@@ -13,6 +13,7 @@ import {
 	canonicalForgePrUrl,
 	type ForgeContext,
 } from '../providers/forge-provider.js';
+import { redactEvidenceText } from '../security/evidence-redaction.js';
 import { canonicalRootKeyFresh } from '../utils/canonical-root.js';
 
 const PR_FEEDBACK_EVENT_QUEUE_DIR = 'pr-feedback-events';
@@ -463,8 +464,14 @@ async function writeQueueRecord(
 	);
 	const diskRecord = QueueRecordDiskSchema.parse({
 		...record,
+		// #3844: redact at the WRITE boundary so every queue mutation (enqueue,
+		// claim, clear, release — including rewrites of legacy pre-redaction
+		// events seeded on disk) stores a credential-free message.
 		events: record.events.map(
-			({ headRefOid: _, claimedOwnerPid: __, ...event }) => event,
+			({ headRefOid: _, claimedOwnerPid: __, ...event }) => ({
+				...event,
+				message: redactEvidenceText(event.message),
+			}),
 		),
 	});
 	// Write the sidecar first. If the legacy-compatible primary write fails (or

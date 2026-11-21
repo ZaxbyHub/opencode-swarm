@@ -8,6 +8,8 @@
  * module without submission authority.
  */
 
+import { redactEvidenceText } from '../security/evidence-redaction';
+
 export const PR_REVIEW_INLINE_COMMENT_CAP = 20;
 
 /** GitHub rejects oversized review bodies (~64 KiB); cap the rendered body below it. */
@@ -234,7 +236,7 @@ export function renderPrReviewSubmissionBody(
 				entry.finding.order_agreement === 'disagree' ? ' (order-unstable)' : '';
 			if (orderUnstable) orderUnstableCount += 1;
 			lines.push(
-				`- [${id}]${status}${orderUnstable} ${location} — ${singleLine(entry.finding.evidence ?? '', 400)}`,
+				`- [${id}]${status}${orderUnstable} ${location} — ${redactEvidenceText(singleLine(entry.finding.evidence ?? '', 400))}`,
 			);
 		}
 	}
@@ -257,7 +259,7 @@ export function renderPrReviewSubmissionBody(
 			const location = singleLine(finding.file_line ?? '', 200);
 			const status = singleLine(finding.status ?? '', 64).toLowerCase();
 			lines.push(
-				`- [${id}] (order-unstable, ${status}) ${location} — ${singleLine(finding.evidence ?? '', 400)}`,
+				`- [${id}] (order-unstable, ${status}) ${location} — ${redactEvidenceText(singleLine(finding.evidence ?? '', 400))}`,
 			);
 		}
 	}
@@ -320,7 +322,7 @@ export function renderPrReviewSubmissionBody(
 	const inlineComments: RenderedInlineComment[] = capped.map((entry) => ({
 		path: singleLine(entry.location!.path, 300),
 		line: entry.location!.line,
-		body: `[${singleLine(entry.finding.finding_id ?? '', 128)}] ${singleLine(entry.finding.evidence ?? '', 400)}`,
+		body: `[${singleLine(entry.finding.finding_id ?? '', 128)}] ${redactEvidenceText(singleLine(entry.finding.evidence ?? '', 400))}`,
 		finding_id: entry.finding.finding_id,
 	}));
 

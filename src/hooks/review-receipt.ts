@@ -37,6 +37,82 @@ import type {
 	ReviewFinding,
 } from '../agents/agent-output-schema.js';
 import { resolveRetentionCap } from '../retention/caps.js';
+import { redactEvidenceText } from '../security/evidence-redaction.js';
+
+/**
+ * #3844: redact credential material from the free-text fields of a review
+ * receipt BEFORE it reaches the durable store. Deep-clones; the caller's
+ * in-memory receipt is untouched. Placeholders preserve every schema bound
+ * (non-empty, within max lengths).
+ */
+function redactFindingValidationForPersistence(
+	validation: FindingValidation,
+): FindingValidation {
+	return { ...validation, evidence: redactEvidenceText(validation.evidence) };
+}
+
+function redactStructuredFindingsForPersistence(
+	findings: ReviewFinding[] | undefined,
+): ReviewFinding[] | undefined {
+	if (findings === undefined) return undefined;
+	return findings.map((finding) => ({
+		...finding,
+		title: redactEvidenceText(finding.title),
+		body: redactEvidenceText(finding.body),
+	}));
+}
+
+export function redactReviewReceiptForPersistence<T extends ReviewReceipt>(
+	receipt: T,
+): T {
+	const clone = structuredClone(receipt);
+	if (clone.receipt_type === 'rejected') {
+		const rejected = clone as RejectedReviewReceipt;
+		for (const finding of rejected.blocking_findings) {
+			finding.summary = redactEvidenceText(finding.summary);
+			if (finding.title !== undefined) {
+				finding.title = redactEvidenceText(finding.title);
+			}
+			if (finding.body !== undefined) {
+				finding.body = redactEvidenceText(finding.body);
+			}
+			if (finding.validator_evidence !== undefined) {
+				finding.validator_evidence = redactEvidenceText(
+					finding.validator_evidence,
+				);
+			}
+			if (finding.anchor_reason !== undefined) {
+				finding.anchor_reason = redactEvidenceText(finding.anchor_reason);
+			}
+		}
+		rejected.pass_conditions = rejected.pass_conditions.map((condition) =>
+			redactEvidenceText(condition),
+		);
+		if (rejected.summary !== undefined) {
+			rejected.summary = redactEvidenceText(rejected.summary);
+		}
+		rejected.structured_findings = redactStructuredFindingsForPersistence(
+			rejected.structured_findings,
+		);
+	} else {
+		const approved = clone as ApprovedReviewReceipt;
+		approved.validated_claims = approved.validated_claims.map((claim) =>
+			redactEvidenceText(claim),
+		);
+		if (approved.caveats !== undefined) {
+			approved.caveats = approved.caveats.map((caveat) =>
+				redactEvidenceText(caveat),
+			);
+		}
+		approved.structured_findings = redactStructuredFindingsForPersistence(
+			approved.structured_findings,
+		);
+	}
+	clone.finding_validations = clone.finding_validations?.map(
+		redactFindingValidationForPersistence,
+	);
+	return clone;
+}
 
 // ============================================================================
 // Types
@@ -678,7 +754,7 @@ export async function persistReviewReceipt(
 	try {
 		await fs.promises.writeFile(
 			tmpPath,
-			JSON.stringify(receipt, null, 2),
+			JSON.stringify(redactReviewReceiptForPersistence(receipt), null, 2),
 			'utf-8',
 		);
 		assertDirectReceiptFile(context, tmpPath, true);
@@ -877,10 +953,19 @@ export async function updateReviewReceiptValidations(
 	) {
 		throw new Error('review receipt identity changed before validation update');
 	}
-	receipt.finding_validations = validations;
+	// #3844: the NEW validation content is redacted before persistence (the
+	// future-write contract — legacy pre-redaction content already on disk is
+	// left as-is; operators may delete stale receipts).
+	const redactedValidations = validations.map(
+		redactFindingValidationForPersistence,
+	);
+	receipt.finding_validations = redactedValidations;
 	if (receipt.receipt_type === 'rejected') {
 		const byId = new Map(
-			validations.map((validation) => [validation.finding_id, validation]),
+			redactedValidations.map((validation) => [
+				validation.finding_id,
+				validation,
+			]),
 		);
 		for (const finding of receipt.blocking_findings) {
 			if (!finding.finding_id) continue;

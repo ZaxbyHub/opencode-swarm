@@ -19,6 +19,7 @@ import {
 import { validateSwarmPath } from '../hooks/utils.js';
 import { ledgerExists, replayFromLedgerWithStatus } from '../plan/ledger.js';
 import { loadPlanJsonOnly } from '../plan/manager.js';
+import { redactEvidenceText } from '../security/evidence-redaction.js';
 import type {
 	CostEvidence,
 	CostEvidenceReason,
@@ -162,6 +163,40 @@ export const _internals = {
 	renameSync: fs.renameSync,
 };
 
+/**
+ * #3844: redact credential material from the free-text fields of auto-review
+ * evidence BEFORE it reaches the durable `.swarm` artifact. Model-authored
+ * finding prose routinely quotes source lines; a credential in the reviewed
+ * diff must not land verbatim in durable evidence. Runs at the PERSISTENCE
+ * boundary — after the engine's raw-value classifiers (#3710 ordering), so
+ * quota/failover classification is unchanged. Deep-clones; the caller's
+ * in-memory object is untouched.
+ */
+export function redactAutoReviewEvidenceForPersistence(
+	evidence: AutoReviewEvidence,
+): AutoReviewEvidence {
+	const clone = structuredClone(evidence);
+	for (const finding of clone.findings) {
+		finding.body = redactEvidenceText(finding.body);
+		finding.title = redactEvidenceText(finding.title);
+		if (finding.anchor_rejection !== undefined) {
+			finding.anchor_rejection = redactEvidenceText(finding.anchor_rejection);
+		}
+		if (finding.validation?.evidence !== undefined) {
+			finding.validation.evidence = redactEvidenceText(
+				finding.validation.evidence,
+			);
+		}
+	}
+	if (clone.validation_error !== undefined) {
+		clone.validation_error = redactEvidenceText(clone.validation_error);
+	}
+	if (clone.review.error !== undefined) {
+		clone.review.error = redactEvidenceText(clone.review.error);
+	}
+	return clone;
+}
+
 export async function persistAutoReviewEvidence(
 	directory: string,
 	evidence: AutoReviewEvidence,
@@ -180,7 +215,7 @@ export async function persistAutoReviewEvidence(
 	try {
 		await _internals.bunWrite(
 			tempPath,
-			`${JSON.stringify(evidence, null, 2)}\n`,
+			`${JSON.stringify(redactAutoReviewEvidenceForPersistence(evidence), null, 2)}\n`,
 		);
 		const safeTemp = validateSwarmPath(
 			directory,

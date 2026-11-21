@@ -14,6 +14,7 @@ import {
 	type RendererFinding,
 	renderPrReviewSubmissionBody,
 } from '../pr-review/render-review-body.js';
+import { redactEvidenceText } from '../security/evidence-redaction';
 import { atomicWriteSwarmFile } from '../utils/atomic-write.js';
 import { createSwarmTool } from './create-tool.js';
 
@@ -883,10 +884,17 @@ export async function executeExportPrReviewPartialResults(
 			receipt_run_id: receiptRunId ?? '',
 			receipt_pr_head_sha: receiptHead,
 		},
+		// #3844: post-fix rows are redacted at their own write boundary;
+		// pre-fix rows still on disk can be raw, so the exporter normalizes
+		// every row again at ITS write (idempotent over placeholders).
 		findings: rows.map((row) => {
 			const { boundary: lane, pr_head_sha: _boundHead, ...rest } = row;
 			return {
 				...rest,
+				evidence: redactEvidenceText(row.evidence),
+				...(row.next_action !== undefined
+					? { next_action: redactEvidenceText(row.next_action) }
+					: {}),
 				severity: row.severity ?? 'NONE',
 				lane,
 			};
@@ -907,7 +915,7 @@ export async function executeExportPrReviewPartialResults(
 			body_truncated: renderedSummary.bodyTruncated,
 			truncated_inline_comments: renderedSummary.truncatedInlineComments,
 		},
-		summary: renderedSummary.text,
+		summary: redactEvidenceText(renderedSummary.text),
 	};
 	const serialized = `${JSON.stringify(artifact, null, 2)}\n`;
 	const serializedBytes = Buffer.byteLength(serialized, 'utf8');

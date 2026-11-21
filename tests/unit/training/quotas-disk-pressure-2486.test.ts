@@ -14,6 +14,7 @@
  */
 import { afterEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
+import { existsSync } from 'node:fs';
 import {
 	grantTrainingConsent,
 	revokeTrainingConsent,
@@ -113,23 +114,24 @@ describe('AC4 quotas - record-count cap stops capture without eviction', () => {
 	test('byte cap stops capture with quota_bytes and keeps existing records', () => {
 		const dir = canonicalMkdtemp('training-ac4-bytes-');
 		try {
-			// maxBytes: 1 — the first line makes vault bytes >= 1, so the second
-			// append must refuse (vault-bytes check is evaluated before writing).
+			// #3840 preflight-exact byte cap: the append is refused when
+			// current bytes + the serialized line's bytes would CROSS maxBytes
+			// (exact fit allowed). maxBytes: 1 — even the FIRST line exceeds
+			// the ceiling, so it must refuse with quota_bytes and keep the
+			// vault empty (no overshoot; re-pinned from the old
+			// threshold-with-overshoot contract).
 			const consent = grantTrainingConsent(dir, {
 				now: NOW,
 				quotas: { maxBytes: 1, maxRecords: 100, retentionDays: 30 },
 			});
-			expect(
-				appendTrainingVaultRecord(dir, record(dir, consent, 'only line'))
-					.appended,
-			).toBe(true);
-			const second = appendTrainingVaultRecord(
+			const first = appendTrainingVaultRecord(
 				dir,
-				record(dir, consent, 'must be refused'),
+				record(dir, consent, 'only line'),
 			);
-			expect(second.appended).toBe(false);
-			expect(second.stopReason).toBe('quota_bytes');
-			expect(vaultLines(dir)).toHaveLength(1);
+			expect(first.appended).toBe(false);
+			expect(first.stopReason).toBe('quota_bytes');
+			// Preflight refusal never creates the vault file.
+			expect(existsSync(trainingVaultRecordsPath(dir))).toBe(false);
 		} finally {
 			rmDir(dir);
 		}

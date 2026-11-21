@@ -1,5 +1,6 @@
 import type { ToolDefinition } from '@opencode-ai/plugin/tool';
 import { z } from 'zod';
+import { redactEvidenceText } from '../security/evidence-redaction.js';
 import {
 	resolveExecutableFromPath,
 	runExternalTool,
@@ -456,7 +457,9 @@ export const gh_evidence: ToolDefinition = createSwarmTool({
 				{
 					error: true,
 					type: 'unknown',
-					message: run.stderr.split('\n')[0] || `gh exited ${run.exitCode}`,
+					message: redactEvidenceText(
+						run.stderr.split('\n')[0] || `gh exited ${run.exitCode}`,
+					),
 				} satisfies GhEvidenceError,
 				null,
 				2,
@@ -472,9 +475,11 @@ export const gh_evidence: ToolDefinition = createSwarmTool({
 
 		if (isLogFailedMode) {
 			// For --log-failed, output is raw text (not JSON)
-			data = neutralizeUntrustedMarkdown(
-				run.stdout,
-				'GitHub Actions failed-job log',
+			data = redactEvidenceText(
+				neutralizeUntrustedMarkdown(
+					run.stdout,
+					'GitHub Actions failed-job log',
+				),
 			);
 		} else {
 			// Parse JSON output and extract run-specific metadata
@@ -492,7 +497,7 @@ export const gh_evidence: ToolDefinition = createSwarmTool({
 					2,
 				);
 			}
-			data = sanitizeParsedJson(parsed);
+			data = redactEvidenceText(String(sanitizeParsedJson(parsed)));
 			// Extract run metadata if available
 			if (
 				target === 'run' &&

@@ -205,8 +205,8 @@ describe('AC5 deterministic export - manifest, checksums, and split', () => {
 			expect(manifest.counts.deduped).toBe(1);
 			expect(manifest.counts.quarantined_excluded).toBe(0);
 			expect(manifest.counts.expired_excluded).toBe(0);
-			expect(manifest.redaction_version).toBe(1);
-			expect(manifest.consent_version).toBe(1);
+			expect(manifest.redaction_version).toBe(2);
+			expect(manifest.consent_version).toBe(1); // terms version unchanged by #3840
 			expect(manifest.split).toEqual({
 				method: 'session-digest-v1',
 				ratio: 0.5,

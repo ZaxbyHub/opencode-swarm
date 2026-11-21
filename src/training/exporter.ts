@@ -16,8 +16,12 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { z } from 'zod';
 import { atomicWriteSwarmFileSync } from '../utils/atomic-write';
-import { TRAINING_EXPORT_QUOTA_CEILINGS } from './consent';
+import {
+	TRAINING_CONSENT_CURRENT_VERSION,
+	TRAINING_EXPORT_QUOTA_CEILINGS,
+} from './consent';
 import { trainingExportsDir, trainingPendingOpPath } from './paths';
+import { TRAINING_REDACTION_VERSION } from './redact';
 import {
 	listTrainingTombstones,
 	readTrainingVault,
@@ -220,8 +224,21 @@ export function buildTrainingExportBundle(
 			'train.jsonl': sha256(trainFile),
 			'validation.jsonl': sha256(validationFile),
 		},
-		redaction_version: 1,
-		consent_version: 1,
+		// #3840: GUARANTEED-MINIMUM redaction floor — the minimum
+		// redaction.version among the RETAINED (post-filter, post-dedup)
+		// records; a manifest that says N guarantees no exported content below
+		// N's protection. An empty-after-filter export stamps the writer's
+		// running version (documented empty-semantics: no records, so the
+		// floor is the redactor that would have produced them).
+		redaction_version:
+			kept.length > 0
+				? kept.reduce(
+						(min, record) => Math.min(min, record.redaction.version),
+						Number.MAX_SAFE_INTEGER,
+					)
+				: TRAINING_REDACTION_VERSION,
+		// The consent TERMS version the writer runs (not per-record).
+		consent_version: TRAINING_CONSENT_CURRENT_VERSION,
 		split: { method: 'session-digest-v1', ratio: normalized.validationRatio },
 		lineage_summary: {
 			sessions: sessions.size,

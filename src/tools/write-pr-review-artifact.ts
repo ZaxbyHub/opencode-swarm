@@ -40,6 +40,13 @@ import {
 	settleCriticFinding,
 	synthesizePrReviewFindings,
 } from '../pr-review/finding-policy.js';
+import { redactEvidenceText } from '../security/evidence-redaction';
+import {
+	ReplayIdentityUnavailableError,
+	readReplayIdentitySidecar,
+	replayFingerprint,
+	writeReplayIdentityFingerprint,
+} from '../security/replay-identity';
 import { createSwarmTool } from './create-tool.js';
 
 /**
@@ -260,6 +267,69 @@ function canonicalFindingRecords(
 }
 
 type FindingsBoundary = 'post_explorer' | 'post_reviewer' | 'post_critic';
+
+/**
+ * #3844: normalize a finding record for PERSISTENCE — credential material is
+ * redacted from the model-authored free-text fields before the row reaches
+ * findings.jsonl. The RAW canonical identity is preserved separately via the
+ * replay-identity sidecar (see matchesPersistedFindingsRawIdentity), so an
+ * identical raw retry still dedups and any different raw input still
+ * conflicts after redaction.
+ */
+function normalizeFindingForPersistence<
+	T extends { evidence: string; next_action?: string },
+>(record: T): T {
+	return {
+		...record,
+		evidence: redactEvidenceText(record.evidence),
+		...(record.next_action !== undefined
+			? { next_action: redactEvidenceText(record.next_action) }
+			: {}),
+	};
+}
+
+function findingsIdentityKey(boundary: string): string {
+	return `findings:${boundary}`;
+}
+
+/**
+ * Raw-replay identity comparison (#3844): when the sidecar carries a
+ * fingerprint for this boundary, compare the INCOMING raw canonical payload's
+ * fingerprint against it (identical raw dedups; any different raw input,
+ * including two same-family tokens that redact to one placeholder,
+ * conflicts). Legacy pre-#3844 runs have no sidecar — their stored rows are
+ * raw, so the direct raw canonical comparison is exact for them. A corrupt
+ * salt or sidecar FAILS CLOSED (not a replay).
+ */
+function matchesPersistedFindingsRawIdentity(
+	directory: string,
+	runId: string,
+	boundary: string,
+	incomingRawCanonical: string,
+	storedBoundaryRecords: readonly unknown[],
+	storedRawCanonical: string,
+): boolean {
+	let sidecarFingerprint: string | undefined;
+	try {
+		sidecarFingerprint = readReplayIdentitySidecar(directory, runId)
+			?.fingerprints[findingsIdentityKey(boundary)];
+	} catch {
+		return false; // corrupt sidecar — fail closed
+	}
+	if (sidecarFingerprint !== undefined) {
+		try {
+			return (
+				replayFingerprint(directory, incomingRawCanonical) ===
+				sidecarFingerprint
+			);
+		} catch {
+			return false; // salt unavailable — fail closed
+		}
+	}
+	// Legacy run (no sidecar): stored rows are raw, compare directly.
+	return incomingRawCanonical === storedRawCanonical;
+}
+
 type FindingsRecord = z.infer<typeof PrReviewFindingSchema>;
 
 function policyLocation(fileLine: string): {
@@ -505,8 +575,14 @@ export async function executeWritePrReviewArtifact(
 			);
 			return (
 				probeBoundaryRecords.length > 0 &&
-				canonicalFindingRecords(probeBoundaryRecords) ===
-					canonicalFindingRecords(tolerantData.records)
+				matchesPersistedFindingsRawIdentity(
+					directory,
+					runId,
+					tolerantData.boundary,
+					canonicalFindingRecords(tolerantData.records),
+					probeBoundaryRecords,
+					canonicalFindingRecords(probeBoundaryRecords),
+				)
 			);
 		} catch {
 			return false;
@@ -653,10 +729,19 @@ export async function executeWritePrReviewArtifact(
 			(record) => record.boundary === findingsInput.boundary,
 		);
 		const hasExistingBoundaryRecords = existingBoundaryRecords.length > 0;
+		// #3844: the raw canonical identity drives exact-replay detection
+		// (persisted rows are redacted; the sidecar keeps the raw identity).
+		const incomingRawCanonical = canonicalFindingRecords(findingsInput.records);
 		const isExactReplay =
 			hasExistingBoundaryRecords &&
-			canonicalFindingRecords(existingBoundaryRecords) ===
-				canonicalFindingRecords(findingsInput.records);
+			matchesPersistedFindingsRawIdentity(
+				directory,
+				resolvedRunId,
+				findingsInput.boundary,
+				incomingRawCanonical,
+				existingBoundaryRecords,
+				canonicalFindingRecords(existingBoundaryRecords),
+			);
 		const boundaryCommitted =
 			state.prReviewArtifactRunId === resolvedRunId &&
 			(state.prReviewArtifactBoundaries ?? []).includes(findingsInput.boundary);
@@ -929,7 +1014,7 @@ export async function executeWritePrReviewArtifact(
 		const appended: PersistedFinding[] = isExactReplay
 			? []
 			: findingsInput.records.map((record) => ({
-					...record,
+					...normalizeFindingForPersistence(record),
 					boundary: findingsInput.boundary,
 					pr_head_sha: state!.prHeadSha!,
 					recorded_at: recordedAt,
@@ -991,6 +1076,30 @@ export async function executeWritePrReviewArtifact(
 						),
 					),
 				);
+			}
+			// #3844 sidecar-first ordering: the raw-replay identity lands BEFORE
+			// the artifact, so artifact success implies the sidecar exists. A
+			// sidecar failure aborts the write (salt unavailable = fail closed —
+			// the row would otherwise be stranded without raw-replay identity).
+			if (!isExactReplay && appended.length > 0) {
+				try {
+					writeReplayIdentityFingerprint(
+						directory,
+						resolvedRunId,
+						findingsIdentityKey(findingsInput.boundary),
+						replayFingerprint(directory, incomingRawCanonical),
+					);
+				} catch (error) {
+					return withPartialAdmissionRollback(
+						await reject(
+							formatPrReviewRuntimeFieldError(
+								'records',
+								'a replay-identity sidecar write before persisting findings',
+								error instanceof Error ? error.message : String(error),
+							),
+						),
+					);
+				}
 			}
 			try {
 				await _internals.atomicWrite(findingsPath, serializedFindings);
@@ -1126,12 +1235,17 @@ export async function executeWritePrReviewArtifact(
 			error,
 		);
 	}
+	// #3844: the persisted handoff carries a REDACTED summary; the raw
+	// summary's identity is kept in the replay sidecar so an identical raw
+	// retry still dedups and a different raw summary still conflicts.
+	const rawHandoffSummary = parsed.data.handoff.summary;
 	const handoffRecord = {
 		schema_version: 1 as const,
 		run_id: resolvedRunId,
 		pr_head_sha: state.prHeadSha,
 		created_at: new Date().toISOString(),
 		...parsed.data.handoff,
+		summary: redactEvidenceText(parsed.data.handoff.summary),
 	};
 	const comparableHandoff = (record: PersistedHandoff) => ({
 		schema_version: record.schema_version,
@@ -1142,9 +1256,37 @@ export async function executeWritePrReviewArtifact(
 		summary: record.summary,
 		provenance: record.provenance,
 	});
-	const handoffsMatch = (existing: PersistedHandoff): boolean =>
-		JSON.stringify(comparableHandoff(existing)) ===
-		JSON.stringify(comparableHandoff(handoffRecord));
+	const handoffsMatch = (existing: PersistedHandoff): boolean => {
+		// Sidecar carries the raw handoff identity when present; legacy runs
+		// (no sidecar) store the raw summary, so the direct comparison of
+		// comparableHandoff(existing) against the RAW comparable still works.
+		let sidecarFingerprint: string | undefined;
+		try {
+			sidecarFingerprint = readReplayIdentitySidecar(directory, resolvedRunId)
+				?.fingerprints['handoff'];
+		} catch {
+			return false; // corrupt sidecar — fail closed
+		}
+		if (sidecarFingerprint !== undefined) {
+			try {
+				const rawComparable = JSON.stringify({
+					...comparableHandoff(handoffRecord),
+					summary: rawHandoffSummary,
+				});
+				return (
+					replayFingerprint(directory, rawComparable) === sidecarFingerprint
+				);
+			} catch {
+				return false; // salt unavailable — fail closed
+			}
+		}
+		const rawIncoming = {
+			...comparableHandoff(handoffRecord),
+			summary: rawHandoffSummary,
+		};
+		const storedComparable = comparableHandoff(existing);
+		return JSON.stringify(storedComparable) === JSON.stringify(rawIncoming);
+	};
 	const readPersistedHandoff = async (): Promise<PersistedHandoff> => {
 		const raw = await readBoundedUtf8File(
 			handoffPath,
@@ -1197,6 +1339,25 @@ export async function executeWritePrReviewArtifact(
 		}
 		let created: boolean;
 		try {
+			// #3844 sidecar-first: persist the raw handoff identity before the artifact.
+			try {
+				writeReplayIdentityFingerprint(
+					directory,
+					resolvedRunId,
+					'handoff',
+					replayFingerprint(
+						directory,
+						JSON.stringify({
+							...comparableHandoff(handoffRecord),
+							summary: rawHandoffSummary,
+						}),
+					),
+				);
+			} catch {
+				// A missing handoff sidecar degrades retries to the legacy
+				// comparison (stored rows are redacted post-fix, so a retry will
+				// surface as a conflict — fail-closed, disclosed).
+			}
 			created = await _internals.atomicCreate(handoffPath, serializedHandoff);
 		} catch (error) {
 			return operationFailure(

@@ -90,7 +90,12 @@ export const TrainingVaultRecordSchema = z
 			.strict(),
 		redaction: z
 			.object({
-				version: z.literal(TRAINING_REDACTION_VERSION),
+				// #3840: tolerant range — every record written by a redactor at
+				// or below the running version stays valid, exportable, and
+				// survives the expiry sweep. A record from a NEWER redactor
+				// quarantines schema_invalid (fail-closed forward) but the
+				// sweep retains it (see sweepTrainingVaultExpiry).
+				version: z.number().int().min(1).max(TRAINING_REDACTION_VERSION),
 				applied: z.boolean(),
 				redactions: z.number().int().min(0),
 			})
@@ -367,8 +372,14 @@ export function appendTrainingVaultRecord(
 		return { appended: false, stopReason: 'disk_floor' };
 	}
 	const target = trainingVaultRecordsPath(directory);
+	// #3840: preflight-exact physical byte cap — serialize FIRST and refuse
+	// when the append would CROSS the ceiling (exact fit allowed). The byte
+	// bound counts every physically retained byte of records.jsonl, including
+	// retained version-only-quarantined lines, so nothing on disk escapes it.
+	const line = `${JSON.stringify(record)}\n`;
+	const lineBytes = Buffer.byteLength(line, 'utf8');
 	const vaultBytes = fileSizeOf(target);
-	if (vaultBytes >= consent.quotas.maxBytes) {
+	if (vaultBytes + lineBytes > consent.quotas.maxBytes) {
 		const health = readHealth(directory);
 		noteStop(directory, 'quota_bytes', health);
 		return { appended: false, stopReason: 'quota_bytes' };
@@ -379,7 +390,6 @@ export function appendTrainingVaultRecord(
 		noteStop(directory, 'quota_records', health);
 		return { appended: false, stopReason: 'quota_records' };
 	}
-	const line = `${JSON.stringify(record)}\n`;
 	fs.mkdirSync(path.dirname(target), { recursive: true });
 	const sizeBefore = fileSizeOf(target);
 	try {
@@ -437,18 +447,48 @@ function countRecordLines(directory: string): number {
 // ---------------------------------------------------------------------------
 // Read path + quarantine
 
-// Process-lifetime dedup of quarantine journal entries (bounded at
-// MAX_JOURNALED by raw-line hash): the SAME corrupt line is journaled only
-// on first sight per process, so journal reads are per-process, not a
-// per-read guarantee.
+// Durable dedup of quarantine journal entries (bounded at MAX_JOURNALED by
+// raw-line hash): the SAME corrupt line is journaled only ONCE EVER, not once
+// per process — the first journal touch in a process hydrates the dedup set
+// from the journal file's recorded hashes (#3840: retained version-only lines
+// would otherwise be re-journaled on every restart, growing the file without
+// bound). Entries written before #3840 carry no `hash` field; they are simply
+// absent from the hydrated set and their line may be journaled once more.
 const journaledQuarantineLines = new Set<string>();
 const MAX_JOURNALED = 4096;
+let quarantineJournalHydrated = false;
+
+function hydrateQuarantineJournal(directory: string): void {
+	if (quarantineJournalHydrated) return;
+	quarantineJournalHydrated = true;
+	try {
+		const target = trainingQuarantinePath(directory);
+		const text = fs.readFileSync(target, 'utf8');
+		for (const entry of text.split('\n')) {
+			if (entry.length === 0) continue;
+			try {
+				const parsed = JSON.parse(entry) as { hash?: string };
+				if (
+					typeof parsed.hash === 'string' &&
+					/^[0-9a-f]{64}$/.test(parsed.hash)
+				) {
+					journaledQuarantineLines.add(parsed.hash);
+				}
+			} catch {
+				// pre-#3840 or corrupt entry — nothing to hydrate
+			}
+		}
+	} catch {
+		// no journal yet — nothing to hydrate
+	}
+}
 
 function journalQuarantine(
 	directory: string,
 	item: QuarantinedItem,
 	rawLine: string,
 ): void {
+	hydrateQuarantineJournal(directory);
 	const key = sha256(rawLine);
 	if (journaledQuarantineLines.has(key)) return;
 	if (journaledQuarantineLines.size >= MAX_JOURNALED) return;
@@ -458,7 +498,7 @@ function journalQuarantine(
 		fs.mkdirSync(path.dirname(target), { recursive: true });
 		fs.appendFileSync(
 			target,
-			`${JSON.stringify({ line: item.line, reason: item.reason })}\n`,
+			`${JSON.stringify({ line: item.line, reason: item.reason, hash: key })}\n`,
 			'utf8',
 		);
 	} catch {
@@ -555,8 +595,34 @@ export function getTrainingVaultStatus(directory: string): VaultStatus {
 // Expiry sweep
 
 /**
+ * A line is a VERSION-ONLY quarantine when the record schema fails solely on
+ * the redaction.version bound: re-parsing a clone with the version replaced
+ * by the running version succeeds. Those records came from a NEWER redactor
+ * (a future plugin downgraded, or forward-written state); they are not
+ * corrupt, so the sweep RETAINS them (#3840 — the read path still quarantines
+ * them schema_invalid; only the destructive rewrite spares them).
+ */
+function isVersionOnlyQuarantine(parsed: unknown): boolean {
+	if (typeof parsed !== 'object' || parsed === null) return false;
+	const clone = structuredClone(parsed) as {
+		redaction?: { version?: unknown };
+	};
+	if (typeof clone.redaction !== 'object' || clone.redaction === null) {
+		return false;
+	}
+	clone.redaction.version = TRAINING_REDACTION_VERSION;
+	return TrainingVaultRecordSchema.safeParse(clone).success;
+}
+
+/**
  * Physically purge records past their retention expiry (honored retention —
  * distinct from quota stops, which never delete). Tombstones are untouched.
+ * #3840 sweep semantics: EXPIRY WINS over every retention rule; malformed
+ * JSON lines and non-version schema-invalid lines keep the historical
+ * purge-on-sweep class; unexpired version-only-quarantined lines are RETAINED
+ * in-file (read-side quarantine still applies) in their original order. The
+ * physical byte quota counts them (see the append preflight), so retention
+ * cannot grow the file without bound.
  */
 export function sweepTrainingVaultExpiry(
 	directory: string,
@@ -570,17 +636,51 @@ export function sweepTrainingVaultExpiry(
 	} catch {
 		return { purged: 0 };
 	}
-	const { records, quarantined } = parseVaultText(directory, text, false);
-	const kept = records.filter(
-		(record) => Date.parse(record.retention.expires_at) > now.getTime(),
-	);
-	if (kept.length === records.length && quarantined.length === 0) {
-		return { purged: 0 };
+	const keptLines: string[] = [];
+	let purged = 0;
+	let changed = false;
+	for (const rawLine of text.split('\n')) {
+		if (rawLine.length === 0) continue;
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(rawLine);
+		} catch {
+			purged += 1; // malformed JSON — historical purge class
+			changed = true;
+			continue;
+		}
+		const valid = TrainingVaultRecordSchema.safeParse(parsed);
+		if (valid.success) {
+			if (Date.parse(valid.data.retention.expires_at) > now.getTime()) {
+				keptLines.push(rawLine);
+			} else {
+				purged += 1; // expired
+				changed = true;
+			}
+			continue;
+		}
+		if (isVersionOnlyQuarantine(parsed)) {
+			const retention = (parsed as { retention?: { expires_at?: string } })
+				.retention;
+			if (
+				retention?.expires_at !== undefined &&
+				Date.parse(retention.expires_at) <= now.getTime()
+			) {
+				purged += 1; // expired future-version record — expiry wins
+				changed = true;
+				continue;
+			}
+			keptLines.push(rawLine); // unexpired version-only — retained
+			continue;
+		}
+		purged += 1; // other schema-invalid — historical purge class
+		changed = true;
 	}
-	const body = kept.map((record) => `${JSON.stringify(record)}\n`).join('');
+	if (!changed) return { purged: 0 };
+	const body = keptLines.map((line) => `${line}\n`).join('');
 	fs.mkdirSync(path.dirname(target), { recursive: true });
 	atomicWriteSwarmFileSync(target, body);
-	return { purged: records.length - kept.length };
+	return { purged };
 }
 
 // ---------------------------------------------------------------------------

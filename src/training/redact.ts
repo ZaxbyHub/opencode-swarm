@@ -1,20 +1,34 @@
 /**
- * Issue #2486: capture-time defense-in-depth redaction for training content.
+ * Issue #2486/#3701/#3840: capture-time defense-in-depth redaction for training
+ * content.
  *
- * Mirrors the URL / credential-pattern classes of
- * `sanitizeFailureEvidenceDisplay` (`src/failures/invocation-failure.ts`)
- * WITHOUT that function's 512-byte display bounding — vault records keep the
- * contracted 4096-char content budget. This is defense-in-depth, not a
- * security boundary (same honest framing as #2369): the human consenting to
+ * The placement classes (URL spans, credential key/value spans, quoted-JSON
+ * keys, Bearer/Basic schemes) still cover the same shapes as the display
+ * sanitizer `sanitizeFailureEvidenceDisplay` (`src/failures/invocation-failure.ts`).
+ * Since #3840 the VALUE-shape side is a widened corpus: the bare well-known
+ * credential families mirrored from the shell site
+ * (`src/hooks/guardrails/helpers.ts` `SHELL_BARE_TOKEN_VALUE_PATTERNS`,
+ * labels restyled to this site's angle-bracket form) PLUS the shared JWS
+ * scanner (`src/utils/jws-redaction.ts`), whose spans win over any overlapping
+ * bare arm (whole-span union — a bare arm only fires on spans disjoint from
+ * scanner spans). Deliberately NOT mirrored here: the display site's
+ * Cf/DI condensed-view sweep and its 512-byte display bounding — vault records
+ * keep the contracted 4096-char content budget. This is defense-in-depth, not
+ * a security boundary (same honest framing as #2369): the human consenting to
  * capture is trusting the redactor class, and the recorded
  * `redaction.version` pins which revision produced each stored record.
  */
 
-/** Bumped when the pattern set changes; recorded on every vault record.
- * v1's pattern set was extended pre-release (quoted-JSON credential shapes,
- * scheme-prefixed tokens) before any v1 record shipped, so the first released
- * revision covers the full set and no migration surface exists. */
-export const TRAINING_REDACTION_VERSION = 1;
+/**
+ * Bumped when the pattern set changes; recorded on every vault record.
+ * v2 (#3840): added the bare well-known credential families (anthropic,
+ * openrouter, openai, github, aws, slack, google, groq, jwt, base64, azure)
+ * plus the shared JWS scanner. Reads accept every version 1..CURRENT so
+ * pre-v2 records stay valid, exportable, and survive the expiry sweep.
+ */
+import { findRedactableTokenSpans } from '../utils/jws-redaction.js';
+
+export const TRAINING_REDACTION_VERSION = 2;
 
 const URL_PATTERN = /\bhttps?:\/\/[^\s'"<>]+/g;
 
@@ -38,9 +52,101 @@ const QUOTED_JSON_CREDENTIAL_PATTERN =
 // Scheme-prefixed token with no key morpheme at all: `Bearer <token>`.
 const SCHEME_TOKEN_PATTERN = /\b(bearer|basic)(\s+)([A-Za-z0-9._~+/=-]{8,})/gi;
 
-// Out of scope for v1 (documented, not silently omitted): base64-encoded
-// secrets and OS paths that merely contain sensitive directory names — both
-// carry unbounded false-positive rates against 4096 chars of tool output.
+/**
+ * Bare well-known credential VALUE shapes — mirrored (families and bounds
+ * identical) from the shell site `SHELL_BARE_TOKEN_VALUE_PATTERNS`
+ * (`src/hooks/guardrails/helpers.ts`), with this site's angle-bracket labels.
+ * Mirrored arms must stay in lockstep with the display/shell corpus; the
+ * family-parity suites pin all three sites against the same fixtures.
+ */
+const TRAINING_BARE_TOKEN_VALUE_PATTERNS: ReadonlyArray<{
+	label: string;
+	re: RegExp;
+	/** Optional post-match class guard (the base64 arm requires
+	 * upper+lower+digit on the matched run so hex-only digests stay visible). */
+	guard?: (match: string) => boolean;
+}> = [
+	{ label: '<redacted:anthropic>', re: /\bsk-ant-[A-Za-z0-9_-]{20,}/g },
+	{ label: '<redacted:openrouter>', re: /\bsk-or-[A-Za-z0-9_-]{20,}/g },
+	{ label: '<redacted:openai>', re: /\bsk-[A-Za-z0-9_-]{20,}/g },
+	{
+		label: '<redacted:github>',
+		re: /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}/g,
+	},
+	{ label: '<redacted:github>', re: /\bgithub_pat_[A-Za-z0-9_]{22,}/g },
+	{ label: '<redacted:aws>', re: /\bAKIA[0-9A-Z]{16}\b/g },
+	{ label: '<redacted:slack>', re: /\bxox[baprs]-[A-Za-z0-9-]{10,}/g },
+	{ label: '<redacted:google>', re: /\bAIza[A-Za-z0-9_-]{30,}/g },
+	{ label: '<redacted:google>', re: /\bGOCSPX-[A-Za-z0-9_-]{20,}/g },
+	{ label: '<redacted:google>', re: /\bya29\.[A-Za-z0-9_-]{20,}/g },
+	{ label: '<redacted:groq>', re: /\bgsk_[A-Za-z0-9]{20,}/g },
+	{
+		// Payload segment is any base64url run — an empty claims object
+		// encodes as `e30`, not `eyJ` (#3710).
+		label: '<redacted:jwt>',
+		re: /\beyJ[A-Za-z0-9_-]{10,1024}\.[A-Za-z0-9_-]{1,}\.[A-Za-z0-9_-]{10,}/g,
+	},
+	{
+		// ≥80-char mixed-class run; the guard keeps hex-only SHA digests,
+		// uppercase-hex runs, and sub-80 payloads visible (#3712 F-013).
+		label: '<redacted:base64>',
+		re: /[A-Za-z0-9+/]{80,}={0,2}/g,
+		guard: (match) =>
+			/[A-Z]/.test(match) && /[a-z]/.test(match) && /[0-9]/.test(match),
+	},
+	// Azure connection-string `AccountKey=<base64>` contextual arm — the whole
+	// span collapses to the family placeholder (no re-matchable residue).
+	{
+		label: '<redacted:azure>',
+		re: /\bAccountKey=[A-Za-z0-9+/]{20,}={0,2}/gi,
+	},
+];
+
+interface Replacement {
+	start: number;
+	end: number;
+	label: string;
+}
+
+/**
+ * Whole-span union pass (#3840): the shared JWS scanner's spans are collected
+ * FIRST and win over any overlapping bare-arm match; a bare arm only fires on
+ * a span disjoint from every scanner span. Leftmost-longest selection among
+ * the remaining candidates; application splices from the end so earlier
+ * indices stay valid.
+ */
+function redactBareValueShapes(content: string): {
+	text: string;
+	redactions: number;
+} {
+	const scannerSpans = findRedactableTokenSpans(content);
+	const planned: Replacement[] = scannerSpans.map((span) => ({
+		start: span.start,
+		end: span.end,
+		label: '<redacted:jwt>',
+	}));
+	const overlapsPlanned = (start: number, end: number) =>
+		planned.some((r) => start < r.end && end > r.start);
+	for (const arm of TRAINING_BARE_TOKEN_VALUE_PATTERNS) {
+		arm.re.lastIndex = 0;
+		for (const match of content.matchAll(arm.re)) {
+			if (!match[0]) continue;
+			if (arm.guard && !arm.guard(match[0])) continue;
+			const start = match.index ?? 0;
+			const end = start + match[0].length;
+			if (overlapsPlanned(start, end)) continue;
+			planned.push({ start, end, label: arm.label });
+		}
+	}
+	if (planned.length === 0) return { text: content, redactions: 0 };
+	planned.sort((a, b) => a.start - b.start || b.end - a.end);
+	let text = content;
+	for (let i = planned.length - 1; i >= 0; i -= 1) {
+		const r = planned[i] as Replacement;
+		text = text.slice(0, r.start) + r.label + text.slice(r.end);
+	}
+	return { text, redactions: planned.length };
+}
 
 export interface RedactionResult {
 	content: string;
@@ -49,11 +155,11 @@ export interface RedactionResult {
 }
 
 /**
- * Redact URL and credential patterns from already-bounded capture content
- * (callers bound FIRST — a placeholder can be longer than the span it
- * replaces, and truncating after redaction would collapse distinct inputs
- * onto one identity). Pure; never throws (on internal failure the content is
- * withheld rather than stored raw).
+ * Redact URL, credential-placement, and bare-value credential patterns from
+ * already-bounded capture content (callers bound FIRST — a placeholder can be
+ * longer than the span it replaces, and truncating after redaction would
+ * collapse distinct inputs onto one identity). Pure; never throws (on internal
+ * failure the content is withheld rather than stored raw).
  */
 export function redactTrainingContent(content: string): RedactionResult {
 	if (typeof content !== 'string' || content.length === 0) {
@@ -87,6 +193,9 @@ export function redactTrainingContent(content: string): RedactionResult {
 				return `${scheme}${space}<redacted>`;
 			},
 		);
+		const bare = redactBareValueShapes(working);
+		working = bare.text;
+		redactions += bare.redactions;
 	} catch {
 		return {
 			content: '<redacted:redaction-failed>',
