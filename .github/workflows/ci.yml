@@ -359,6 +359,17 @@ jobs:
       - name: Type check
         if: needs.detect-release.outputs.is-release != 'true'
         run: bun run typecheck
+      - name: Vendored surface type probe
+        if: needs.detect-release.outputs.is-release != 'true'
+        # CHECK_VENDORED_SELFTEST makes the probe additionally run its
+        # --self-test (mutate src/host/v2/types.ts, expect the gate to fail with a
+        # compiler violation, restore in-process) so CI proves the gate actually
+        # bites, not just that tsc runs. It is CI-only (env-gated, never a
+        # contributor command) and restores types.ts in-process, so the mapped
+        # command string is unchanged.
+        env:
+          CHECK_VENDORED_SELFTEST: '1'
+        run: bun run scripts/check-vendored-surface-probe.ts
       - name: Biome CI
         if: needs.detect-release.outputs.is-release != 'true'
         run: bunx biome ci .

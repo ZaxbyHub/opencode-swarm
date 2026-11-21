@@ -32,6 +32,8 @@ const CI_COMMAND_TO_SKILL_STRING: Record<string, string> = {
 	'if [[ "$DETECT_RELEASE_RESULT" != "success" || "$RELEASE_OWNER_RESULT" != "success" ]]; then && echo "::error::required dependency failed: detect-release=$DETECT_RELEASE_RESULT, release-owner-guard=$RELEASE_OWNER_RESULT" && exit 1 && fi':
 		'if [[ "$DETECT_RELEASE_RESULT" != "success" || "$RELEASE_OWNER_RESULT" != "success" ]]; then',
 	'bun run typecheck': 'bun run typecheck',
+	'bun run scripts/check-vendored-surface-probe.ts':
+		'bun run scripts/check-vendored-surface-probe.ts',
 	'bunx biome ci .': 'bun run lint:ci',
 	'bun run scripts/check-tool-registration.ts':
 		'bun run scripts/check-tool-registration.ts',

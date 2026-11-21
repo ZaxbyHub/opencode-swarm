@@ -57,7 +57,7 @@ afterAll(() => rmSync(TEST_DIR, { recursive: true, force: true }));
 
 const rootEscape = (role: string, path: string) =>
 	new RegExp(
-		`^WRITE BLOCKED: Agent "${role}" is not authorised to write "[^"]*${path}" \\(via shell\\)\\. Reason: AUTHORITY_ROOT_ESCAPE: `,
+		`^WRITE BLOCKED: Agent "${role}" is not authorised to write "[^"]*${path}" \\(via shell\\)\\. Reason: AUTHORITY_ROOT_ESCAPE`,
 	);
 
 // [command, path pattern the root-escape message names ("/etc/passwd" on

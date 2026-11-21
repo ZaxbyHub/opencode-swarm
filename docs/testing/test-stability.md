@@ -255,6 +255,19 @@ The script:
    finishing concurrently can still race a duplicate into existence; that is
    an accepted, warn-only limitation.
 
+   The description above is the standalone (title-discovery) behaviour. On the
+   upstream repository the workflow sets `FLAKE_TRACKING_ISSUE` (currently
+   `3852`, the testing workstream issue) as a constant in
+   `.github/workflows/flake-detection.yml`. When it is set the script skips
+   title discovery and the `is_bot` check, verifies through `gh api` that the
+   issue is open, is not a pull request, and belongs to this repository, and
+   comments the candidate list on it. It never creates an issue in this mode:
+   if the issue is closed, invalid, or unreachable, or the comment fails, the
+   job stays green with a `::warning::` and the `flake-suggestions` artifact is
+   the only record. The number must remain a workflow constant (never derived
+   from artifacts or issue titles), because it is the root of trust for this
+   path. Move the pin to the replacement issue before closing #3852.
+
 **The detection is advisory — it never fails a run.** A maintainer reviews the
 suggestion and, if warranted, appends the line to the appropriate quarantine
 file in a follow-up PR. Auto-appending directly to the quarantine file would

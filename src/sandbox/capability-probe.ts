@@ -93,9 +93,51 @@ export function assessSandboxRequirements(
 	return { satisfied: missing.length === 0, missing };
 }
 
-// Session-lifetime cache so repeated calls never re-probe.
+// Session-lifetime cache so repeated calls never re-probe — EXCEPT a degraded
+// win32 PowerShell-fallback memo (#3743): a transient runner-probe failure
+// (EBUSY/EPERM) degrades the capability to the advisory wrapper while the
+// binary identity is unchanged, and without a time axis that memo would pin
+// the weak answer for the process lifetime — leaving policy assessment and
+// /swarm diagnose stale, and tripping the executor-mechanism-drift hard block
+// in tool-before.ts after the executor's own TTL recovery. Such memos expire
+// after CAPABILITY_FAILURE_TTL_MS and force a fresh probe; every other result
+// (including strong native-runner answers and disabled results) keeps the
+// permanent, identity-keyed memoization.
 let _cached: SandboxCapabilityV1 | undefined;
 let _cachedProbeSourceIdentity: string | undefined;
+// 0 = the current memo does not expire (undefined semantics are impossible to
+// distinguish from "never written" for the reset path, so a sentinel it is).
+let _cachedExpiresAt = 0;
+
+/**
+ * #3743: default TTL for the degraded win32 PowerShell-fallback capability
+ * memo (mirrors the executor/runner-probe failure TTLs at 60 s). Test-only
+ * knob; production leaves it unset.
+ */
+const CAPABILITY_FAILURE_TTL_DEFAULT_MS = 60_000;
+
+function capabilityFailureTtlMs(): number {
+	const raw = Number(process.env.SWARM_SANDBOX_CAPABILITY_FAILURE_TTL_MS);
+	return Number.isFinite(raw) && raw > 0
+		? raw
+		: CAPABILITY_FAILURE_TTL_DEFAULT_MS;
+}
+
+/**
+ * #3743: a result is the degraded win32 fallback iff it is an enabled win32
+ * capability whose mechanism is the PowerShell wrapper (not the native
+ * app-container/restricted-token runner). Only this class is TTL-bounded: a
+ * strong result cannot come from a transient failure, and a disabled result
+ * is governed by binary-identity invalidation, not transient recovery.
+ */
+function isDegradedWin32Fallback(result: SandboxCapabilityV1): boolean {
+	if (result.platform !== 'win32' || result.status !== 'enabled') return false;
+	const mechanism = result.mechanism.toLowerCase();
+	return (
+		!mechanism.includes('app-container') &&
+		!mechanism.includes('restricted-token')
+	);
+}
 
 // F-001 (PR #3718 review): a transient setup-failure observation is never
 // memoized as the authoritative result (see detect()), but it must remain
@@ -545,6 +587,7 @@ export function _resetCapabilityCache(): void {
 	_cachedProbeSourceIdentity = undefined;
 	_cachedTransient = undefined;
 	_cachedTransientProbeSourceIdentity = undefined;
+	_cachedExpiresAt = 0;
 }
 
 /**
@@ -929,7 +972,14 @@ export class SandboxCapabilityProbe {
 		const probeSourceIdentity = _internals.currentProbeSourceIdentity(platform);
 		if (
 			_cached !== undefined &&
-			_cachedProbeSourceIdentity === probeSourceIdentity
+			_cachedProbeSourceIdentity === probeSourceIdentity &&
+			// #3743: an expired degraded-fallback memo must not be served — fall
+			// through to a fresh probe so a recovered environment is re-derived
+			// within a bounded interval (the identity is NOT stamped with an
+			// epoch: a genuine recovery changes mechanism/strength, which the
+			// identity already embeds, and an unchanged degraded re-derivation
+			// keeps a stable identity for strict Full-Auto correlation).
+			(_cachedExpiresAt === 0 || Date.now() < _cachedExpiresAt)
 		) {
 			return _cached;
 		}
@@ -955,6 +1005,13 @@ export class SandboxCapabilityProbe {
 		if (!hasProbeSetupFailureReason(result)) {
 			_cached = result;
 			_cachedProbeSourceIdentity = probeSourceIdentity;
+			// #3743: only the degraded win32 fallback expires; every other
+			// memoized result clears the expiry slot so a recovered strong
+			// answer (or a disabled answer) memoizes permanently — an inherited
+			// expired timestamp would force endless re-probing.
+			_cachedExpiresAt = isDegradedWin32Fallback(result)
+				? Date.now() + capabilityFailureTtlMs()
+				: 0;
 			// Hygiene, not a separately pinned behavior: the identity-gated
 			// accessor precedence (syncVisibleCapability) already prefers the
 			// current-identity memo; dropping the transient here keeps the

@@ -1099,10 +1099,19 @@ async function getSandboxStatus(sessionID?: string): Promise<HealthCheck> {
 			// containment as green (issue #1778 H2). Prefer the executor's own
 			// strength when it exposes one, else the probe's.
 			const executorStrength = (
-				executor as { strength?: 'strong' | 'weak' | 'advisory' } | null
+				executor as {
+					strength?: 'strong' | 'weak' | 'advisory' | 'none';
+				} | null
 			)?.strength;
+			// #3743: a 'none'-strength executor (both the runner probe and the
+			// PowerShell fallback were unavailable at construction) must NEVER
+			// surface as green — the old cast omitted 'none', so the fallback
+			// `capability.strength ?? executorStrength ?? 'strong'` could report
+			// an unavailable executor as 'strong'.
 			const strength =
-				executorStrength === 'weak' || executorStrength === 'advisory'
+				executorStrength === 'weak' ||
+				executorStrength === 'advisory' ||
+				executorStrength === 'none'
 					? 'advisory'
 					: (capability.strength ?? executorStrength ?? 'strong');
 

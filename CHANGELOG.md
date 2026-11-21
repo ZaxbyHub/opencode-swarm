@@ -1,5 +1,23 @@
 # Changelog
 
+## [7.205.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.205.2...v7.205.3) (2026-11-21)
+
+
+### Bug Fixes
+
+* **guardrails:** quoted-heredoc body neutralization, origin-aware parse denials, root-escape layer naming ([#3754](https://github.com/ZaxbyHub/opencode-swarm/issues/3754), [#3761](https://github.com/ZaxbyHub/opencode-swarm/issues/3761)) ([c9e9bd5](https://github.com/ZaxbyHub/opencode-swarm/commit/c9e9bd58dda502da9bea7b3a70aa21a8e4a0bee6))
+
+## [7.205.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.205.1...v7.205.2) (2026-11-21)
+
+
+### Bug Fixes
+
+* **ci:** run vendored-surface self-test env-gated to satisfy parity gate ([82c29c1](https://github.com/ZaxbyHub/opencode-swarm/commit/82c29c1338cef067d0215115d9fb0405f20ca6f9))
+* memory-scanner Cf/DI fill tolerance, JWS residual closures, capability/none TTL recovery, dash-flag bounding, vendored-surface type-probe gate ([#3743](https://github.com/ZaxbyHub/opencode-swarm/issues/3743), [#3756](https://github.com/ZaxbyHub/opencode-swarm/issues/3756)) ([04365db](https://github.com/ZaxbyHub/opencode-swarm/commit/04365dbdae3534144d589ee853f87ba65beb2ac0))
+* resolve swarm-pr-review feedback on redaction/dash-flag/probe ([#3743](https://github.com/ZaxbyHub/opencode-swarm/issues/3743), [#3756](https://github.com/ZaxbyHub/opencode-swarm/issues/3756)) ([4c370b0](https://github.com/ZaxbyHub/opencode-swarm/commit/4c370b0e645a4cbbbed70a7751efc8f6c0403d72))
+* **test-infra:** clear execution-stall module state on resetSwarmState; harden acceptance validator ([#3381](https://github.com/ZaxbyHub/opencode-swarm/issues/3381), [#3608](https://github.com/ZaxbyHub/opencode-swarm/issues/3608)) ([90398a1](https://github.com/ZaxbyHub/opencode-swarm/commit/90398a1237c0401cfe257695c4799bedb68c1d96))
+* **test-infra:** clear execution-stall module state on resetSwarmState; harden acceptance validator and isolated-test-env docblock (issues [#3381](https://github.com/ZaxbyHub/opencode-swarm/issues/3381), [#3608](https://github.com/ZaxbyHub/opencode-swarm/issues/3608)) ([6139359](https://github.com/ZaxbyHub/opencode-swarm/commit/6139359a906243ad53074b1ca9aab0c1548e1ef9))
+
 ## [7.205.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.205.0...v7.205.1) (2026-11-21)
 
 

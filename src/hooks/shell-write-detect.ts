@@ -9091,6 +9091,195 @@ export function firstWordOverBudget(
 	return null;
 }
 
+/**
+ * #3616 D10: the longest whitespace-delimited word (in UTF-16 code units) the
+ * write detectors will parse. Longer words are denied before parsing as an
+ * opaque `oversized word` sentinel (single source of truth for the detector,
+ * the heredoc neutralizer's pre-neutralization check, and the denial text).
+ */
+export const WRITE_ANALYSIS_WORD_BUDGET = 4096;
+
+/**
+ * Origin of a write-detection denial that reports `parseError` (#3881
+ * review F-001). Only `parser` is a genuine bash-parser exception; the other
+ * origins are POLICY sentinels (or an analysis bound) that deny a command the
+ * parser may well parse fine, so the operator-facing wording must not call
+ * them a parse failure.
+ */
+export type WriteParseFailureOrigin =
+	| 'parser'
+	| 'oversized_word'
+	| 'ambient_state'
+	| 'unsafe_text'
+	| 'analysis_bound';
+
+/** Sentinel operators the detectors emit alongside `parseError: true`. */
+const WRITE_PARSE_SENTINEL_ORIGINS: ReadonlyArray<
+	readonly [operator: string, origin: WriteParseFailureOrigin]
+> = [
+	['oversized word', 'oversized_word'],
+	['ambient shell-state key assignment', 'ambient_state'],
+	['unsafe command text', 'unsafe_text'],
+];
+
+/**
+ * Classify why an analysis carries `parseError`. A policy sentinel's origin
+ * wins (priority: oversized word, ambient state, unsafe text — the order the
+ * gate has always used); an analysis with none of them is a genuine parser
+ * failure. `analysis_bound` is never returned here — it describes the
+ * wrapper-preprocessing `failClosed` channel, which has no analysis object
+ * (callers name it explicitly).
+ */
+export function classifyWriteParseFailure(
+	analysis: Pick<WriteAnalysis, 'writes'>,
+): WriteParseFailureOrigin {
+	for (const [operator, origin] of WRITE_PARSE_SENTINEL_ORIGINS) {
+		if (analysis.writes.some((w) => w.operator === operator)) return origin;
+	}
+	return 'parser';
+}
+
+const WRITE_PARSE_FAILURE_REMEDY =
+	'rejecting for safety; use a simpler command shape or the write/edit tools';
+
+/**
+ * The single source of truth for the denial wording of a `parseError`
+ * analysis, shared by every gate in tool-before.ts and every explain mirror
+ * in guardrail-explain-service.ts (#3754 F2 UX / #3881 F-001): `message` is
+ * the human sentence (the gate prefixes `BLOCKED: `), `label` is the stable
+ * explain firing-rule prefix.
+ */
+export function describeWriteParseFailure(origin: WriteParseFailureOrigin): {
+	label: string;
+	message: string;
+} {
+	switch (origin) {
+		case 'oversized_word':
+			return {
+				label: 'analysis_budget',
+				message: `command contains a word over the ${WRITE_ANALYSIS_WORD_BUDGET}-character analysis budget — denying before parsing for safety`,
+			};
+		case 'ambient_state':
+			return {
+				label: 'policy_refusal',
+				message:
+					'command assigns ambient shell-state key (BASH_ENV/ENV/BASH_FUNC_*) — policy refusal',
+			};
+		case 'unsafe_text':
+			return {
+				label: 'policy_refusal',
+				message: 'command text is unsafe for shell analysis — policy refusal',
+			};
+		case 'analysis_bound':
+			return {
+				label: 'analysis_bound',
+				message: `bash write detection could not safely model this command (a wrapper or chdir shape outside the analysis bounds, not necessarily a bash parser error) — ${WRITE_PARSE_FAILURE_REMEDY}`,
+			};
+		default:
+			return {
+				label: 'parse_error',
+				message: `bash write detection failed to parse command (parse failure, not a policy refusal) — ${WRITE_PARSE_FAILURE_REMEDY}`,
+			};
+	}
+}
+
+// #3761: bash-parser 0.5.0 has NO here-document body lexing — body lines are
+// tokenized as ordinary shell, so a body line carrying shell metacharacters
+// (two single-quote pairs, bare parentheses) makes the parse throw at ANY
+// body length, and body text like `echo x > /etc/passwd` is misclassified
+// as a live redirect. For the ONE provably-safe shape — a single literal
+// `cat` command feeding one WHOLE-WORD-QUOTED heredoc (POSIX: no expansion
+// in a quoted heredoc body; `cat` never interprets its stdin) — the body is
+// inert data and can be blanked before parsing. Every other shape
+// (executing receivers like `bash <<EOF`, compounds, pipes, unquoted or
+// partial-quoted delimiters, comments `cat # <<'EOF'`, glued assignments
+// `cat=foo bash <<'EOF'`, multiple openers, here-strings, escaped `<`,
+// missing/CRLF terminator) returns the command UNCHANGED and keeps today's
+// fail-closed analysis. Callers own the transformation: it is applied once
+// per analysis path (detection, resolution, procsub extraction, explain)
+// so every consumer parses the SAME string; the executor keeps the original.
+const HEREDOC_PLAIN_OPERAND = /^[^\s<>|;&()$`'"\\#]+$/;
+const HEREDOC_OPENER_TOKEN = /^(<<-?)(['"])([^\s'"\\]+)\2$/;
+
+export function neutralizeQuotedHeredocBodies(command: string): string {
+	if (!command.includes('<<')) return command;
+	// A single trailing newline after the terminator is legal; work without
+	// it and re-append at the end.
+	const hadTrailingNewline = command.endsWith('\n');
+	const body0 = hadTrailingNewline ? command.slice(0, -1) : command;
+	const lines = body0.split('\n');
+	// Need opener + at least one body line + terminator; an empty body needs
+	// no neutralization.
+	if (lines.length < 3) return command;
+	const opener = lines[0].replace(/^[ \t]+/, '');
+	// Exact shell token: `cat` followed by whitespace (never a `\bcat\b`
+	// match — `cat=foo bash <<'EOF'` runs `bash` with an env assignment and
+	// EXECUTES the body).
+	if (!/^(cat)([ \t]|$)/.test(opener)) return command;
+	const tokens = opener
+		.slice(3)
+		.split(/[ \t]+/)
+		.filter(Boolean);
+	if (tokens.length === 0) return command;
+	const openerMatch = HEREDOC_OPENER_TOKEN.exec(tokens[tokens.length - 1]);
+	if (openerMatch === null) return command;
+	const stripLeadingTabs = openerMatch[1] === '<<-';
+	const delimiter = openerMatch[3];
+	// Every token before the heredoc opener: plain operand, or `<`/`>`/`>>`
+	// (separated form) followed by a plain operand — the real write target
+	// stays visible. Anything else (quotes, `$`, operators, `#`, a second
+	// `<`-token, glued redirects) refuses the shape.
+	const rest = tokens.slice(0, -1);
+	let i = 0;
+	while (i < rest.length) {
+		const tok = rest[i];
+		if (tok === '<' || tok === '>' || tok === '>>') {
+			i += 1;
+			const operand = rest[i];
+			if (operand === undefined) return command;
+			if (!HEREDOC_PLAIN_OPERAND.test(operand)) return command;
+			i += 1;
+			continue;
+		}
+		if (!HEREDOC_PLAIN_OPERAND.test(tok)) return command;
+		i += 1;
+	}
+	// Terminator: the FINAL line equals the delimiter exactly (leading tabs
+	// stripped only for `<<-`); no CR normalization — a `\r` tail means the
+	// line is not the terminator and the shape is refused (unclosed).
+	// 4.5-review CRITICAL fix: POSIX terminates the heredoc at the FIRST
+	// line equal to the delimiter — a delimiter line occurring EARLIER in
+	// the body makes every line after it a LIVE command (the final-line
+	// check alone blanked them). Refuse unless the first matching line IS
+	// the final line.
+	const stripTerminatorForm = (line: string): string =>
+		stripLeadingTabs ? line.replace(/^\t+/, '') : line;
+	const finalLine = lines[lines.length - 1];
+	if (stripTerminatorForm(finalLine) !== delimiter) return command;
+	for (let b = 1; b <= lines.length - 2; b += 1) {
+		if (stripTerminatorForm(lines[b]) === delimiter) return command;
+	}
+	// #3881 review F-003: the D10 oversized-word budget (detectPosixWrites,
+	// 4096) must keep seeing the PRE-neutralization text — blanking the body
+	// would otherwise let an oversized single-word body parse (568 ms @ 200k)
+	// instead of the pre-PR fast deny. Refuse the shape (fail-closed,
+	// unchanged text) so the detector's oversized-word sentinel fires exactly
+	// as it did before neutralization existed. Run last so non-matching shapes
+	// never pay for the scan.
+	if (firstWordOverBudget(command, WRITE_ANALYSIS_WORD_BUDGET) !== null)
+		return command;
+	// Length- and line-structure-preserving blank: one space per UTF-16
+	// code unit of each body line. Parse and annotateRawWordText both see
+	// this SAME string, so offset systems stay internally consistent.
+	const out: string[] = [lines[0]];
+	for (let b = 1; b <= lines.length - 2; b += 1) {
+		out.push(' '.repeat(lines[b].length));
+	}
+	out.push(lines[lines.length - 1]);
+	const joined = out.join('\n');
+	return hadTrailingNewline ? `${joined}\n` : joined;
+}
+
 export function detectPosixWrites(
 	command: string,
 	procsubRecursionDepth = 0,
@@ -9156,7 +9345,10 @@ export function detectPosixWrites(
 	// write the gate blanket-blocks — the same verdict the control operand
 	// (a small unclosed brace) already receives via dynamic refusal, so the
 	// two spellings classify identically (pinned by C11's verdict-equality).
-	const oversizedWord = firstWordOverBudget(command, 4096);
+	const oversizedWord = firstWordOverBudget(
+		command,
+		WRITE_ANALYSIS_WORD_BUDGET,
+	);
 	if (oversizedWord !== null) {
 		return {
 			writes: [
@@ -11713,7 +11905,7 @@ export function resolveWriteTargets(
 	// detection sentinel already denied them, and parsing a 40k-char word
 	// again costs ~100ms on the gate path. The writes resolve against cwd
 	// without subshell tracking (the same shape as the parse-failure path).
-	if (firstWordOverBudget(command, 4096) !== null) {
+	if (firstWordOverBudget(command, WRITE_ANALYSIS_WORD_BUDGET) !== null) {
 		return writes.map((original) => ({
 			original,
 			resolvedPath:

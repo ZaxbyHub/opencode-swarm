@@ -14,8 +14,8 @@
 #   1. Extracts candidate test file paths from the annotations.
 #   2. Applies conservative detection rules (see RULES below).
 #   3. Writes surviving candidates to flake-suggestions.txt (an artifact).
-#   4. Best-effort opens a tracking issue via `gh issue create` (may fail if the
-#      repo's Actions token lacks issues:write — see plan critic C2). The
+#   4. Best-effort reports to the configured tracking issue. Standalone callers
+#      without a configured issue retain title-based discovery. The
 #      suggestions artifact is the durable fallback.
 #
 # Detection RULES (a candidate is DROPPED if any rule matches):
@@ -154,9 +154,15 @@ echo "Suggestions written to:       $SUGGESTIONS_FILE"
 # issue.
 # Trust rule (PRR-001, the v7.188.0 lookalike-issue class — see
 # scripts/check-host-contract.ts and scripts/ci/quarantine-aging.ts
-# isBotAuthored): only adopt issues authored by this workflow's own bot
-# identity. Issue titles are user-controllable in a public repo; a lookalike
-# issue MUST NOT absorb the bot's detection comments.
+# isBotAuthored): TITLE DISCOVERY only adopts issues authored by this
+# workflow's own bot identity. Issue titles are user-controllable in a public
+# repo; a lookalike issue MUST NOT absorb the bot's detection comments.
+# The explicit FLAKE_TRACKING_ISSUE pin (PR #3883) is the one exception: it
+# does not use title discovery and never checks is_bot (the pinned issue may be
+# human-authored). Its root of trust is that the number is a constant set by the
+# default-branch workflow, never derived from artifacts or issue titles, so it
+# MUST stay a workflow constant; see the pinned branch below for the
+# open/not-a-PR/same-repository validation.
 # Known limitation (accepted, warn-only): two detection runs finishing
 # concurrently can both find no open issue and both create — a rare duplicate
 # that the next run's comment merges back onto one thread.
@@ -184,7 +190,27 @@ if [ "$suggestion_count" -gt 0 ]; then
     # matches only one serializer; quarantine-aging.ts:13-14 observed the
     # same). A forged selection can therefore only route to an issue whose
     # REAL author is then checked — a hijacker's own issue fails the check.
-    if issue_matches="$(gh issue list --repo "$REPO" --state open \
+    # (All of the above applies to the title-discovery branch only; the pinned
+    # FLAKE_TRACKING_ISSUE branch below skips discovery and the author check.)
+    if [ -n "${FLAKE_TRACKING_ISSUE:-}" ]; then
+        # This explicit issue number comes from the trusted workflow, not from
+        # the triggering run's artifacts or a search of user-editable titles.
+        # If it is unusable, keep the artifact and do not revive the old tracker.
+        case "$FLAKE_TRACKING_ISSUE" in
+            0*|*[!0-9]*)
+                echo "::warning::Invalid configured flake tracking issue number."
+                ;;
+            *)
+                if open_issue="$(gh api "repos/$REPO/issues/$FLAKE_TRACKING_ISSUE" \
+                    --jq 'select(.state == "open" and (.pull_request | not)) | [.number, .repository_url] | @tsv' 2>/dev/null)" && \
+                    [ "$open_issue" = "$FLAKE_TRACKING_ISSUE"$'\t'"https://api.github.com/repos/$REPO" ]; then
+                    existing_issue="$FLAKE_TRACKING_ISSUE"
+                else
+                    echo "::warning::Configured flake tracking issue is unavailable or closed."
+                fi
+                ;;
+        esac
+    elif issue_matches="$(gh issue list --repo "$REPO" --state open \
         --search "in:title \"Auto-detected flaky tests (merge-group)\"" \
         --json number,title --limit 20 \
         --template '{{range .}}{{.number}}	{{.title}}
@@ -251,7 +277,7 @@ EOF
         fi
         if [ -n "$existing_issue" ]; then
             echo "This comment was added automatically by the flake-detection"
-            echo "workflow (new detections from a later merge-group run; issue #3248 dedupe)."
+            echo "workflow with new detections from a merge-group run."
         else
             echo "This issue was filed automatically by the flake-detection workflow."
         fi
@@ -265,6 +291,8 @@ EOF
             echo "::warning::gh issue comment #${existing_issue} failed (likely token permissions)."
             echo "            The flake-suggestions.txt artifact is the durable fallback."
         fi
+    elif [ -n "${FLAKE_TRACKING_ISSUE:-}" ]; then
+        echo "The flake-suggestions.txt artifact is the durable fallback."
     elif gh issue create --repo "$REPO" \
         --title "$TRACKING_TITLE" \
         --body-file "$issue_body_file" \

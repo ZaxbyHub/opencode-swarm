@@ -43,7 +43,11 @@ const ENTRY_SKILL_BASELINES: Record<string, number> = {
 	// edits to existing lines (no line growth).
 	'.opencode/skills/issue-tracer/SKILL.md': 202,
 	'.claude/skills/graphify/SKILL.md': 420,
-	'.claude/skills/commit-pr/SKILL.md': 478,
+	// #3756: 478 -> 479 — the commit-pr skill's Tier-1 battery gains the wired
+	// vendored-surface gate line (one line; same binding-policy precedent as the
+	// 12ca05ef9 bump). The new command's presence in the skill is content-pinned
+	// by tests/unit/skills/commit-pr-validation-parity.test.ts (CI_COMMAND_TO_SKILL_STRING).
+	'.claude/skills/commit-pr/SKILL.md': 479,
 };
 
 describe('progressive-disclosure ratchet (issue #2131 G)', () => {

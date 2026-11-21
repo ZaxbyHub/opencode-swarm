@@ -274,12 +274,15 @@
 
 Any agent that silenced stderr the usual way, for example
 `ls -la .swarm 2>/dev/null`, had the whole bash call rejected with
-`WRITE BLOCKED ... AUTHORITY_ROOT_ESCAPE: Path blocked: target resolves outside
-the working directory [agent=architect; path=../../../../dev/null]` (the `..`
-depth depends on the workspace location). One swarm session recorded 18 such
-rejections across the architect, coder, critic and sme roles. The containment
-check runs before per-agent authority rules by design, so no `authority`
-config entry could admit the path; the fix has to be in the detector.
+`WRITE BLOCKED ... AUTHORITY_ROOT_ESCAPE [layer=containment;
+rule=workspace-containment]: Path blocked: target resolves outside the working
+directory ... [agent=architect; path=../../../../dev/null]` (the `..` depth
+depends on the workspace location; the `[layer=...]` annotation and the trailing
+explanation are the current wording, added alongside this release). One
+swarm session recorded 18 such rejections across the architect, coder, critic
+and sme roles. The containment check runs before per-agent authority rules by
+design, so no `authority` config entry could admit the path; the fix has to be
+in the detector.
 
 ## Safety
 

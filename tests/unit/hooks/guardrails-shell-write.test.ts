@@ -668,7 +668,7 @@ describe('guardrails shell write scope enforcement', () => {
 					makeOutput("echo 'unclosed quote"),
 				),
 			).rejects.toThrow(
-				'BLOCKED: bash write detection failed to parse command — rejecting for safety',
+				'BLOCKED: bash write detection failed to parse command (parse failure, not a policy refusal) — rejecting for safety',
 			);
 		});
 
@@ -685,7 +685,7 @@ describe('guardrails shell write scope enforcement', () => {
 					makeOutput('bash -c "unclosed quote'),
 				),
 			).rejects.toThrow(
-				'BLOCKED: bash write detection failed to parse command — rejecting for safety',
+				'BLOCKED: bash write detection failed to parse command (parse failure, not a policy refusal) — rejecting for safety',
 			);
 		});
 	});

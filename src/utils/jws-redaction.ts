@@ -42,6 +42,15 @@
  * a mixed-case >=8-char word directly appended to a token absorbs (e.g.
  * `…sig.Snapshot`); an all-lowercase ciphertext tail with no digit and
  * length <16 stays visible.
+ *
+ * #3743 closures: a dir-JWE whose IV fails tokenLike no longer stays fully
+ * visible (the IV position is accepted structurally); a 13-39-char standard
+ * header that strictly base64-decodes to a JSON object is redacted (the 40+
+ * floor remains for non-JSON-decoding headers, so benign dotted paths stay
+ * visible); glued-composition tails are recovered by candidate enumeration +
+ * the header-overreach clamp (an approved widening: two adjacent spans may
+ * merge across an internal separator dot — same disclosed over-redaction
+ * class as the Snapshot absorption above; coverage is never reduced).
  */
 
 /** Maximal dotted base64url-ish runs — single-char class, linear, no backtracking. */
@@ -72,6 +81,38 @@ const GENERIC_HEADER_RE = /^[A-Za-z0-9+/]{40,}={0,2}$/;
 const GENERIC_MIN_PAYLOAD = 20;
 const GENERIC_MIN_SIGNATURE = 10;
 const GENERIC_B64_RE = /^[A-Za-z0-9+/_=-]+$/;
+
+/**
+ * #3743: a 13-39-char standard-alphabet header below the 40-char floor is a
+ * candidate iff it is STRICTLY valid base64 (standard alphabet only, at most
+ * two trailing padding chars, no interior separator junk) AND decodes to a
+ * JSON OBJECT (every real JWS/JWE header is a JSON object; version strings,
+ * dotted paths, and prose never decode to one). The floor stays for
+ * non-JSON-decoding headers, so benign path-like dotted runs stay visible.
+ */
+const SHORT_HEADER_MIN = MIN_HEADER_TOTAL; // 13
+const SHORT_HEADER_MAX = 39;
+
+function isShortJsonHeader(seg: string): boolean {
+	if (seg.length < SHORT_HEADER_MIN || seg.length > SHORT_HEADER_MAX)
+		return false;
+	if (!/^[A-Za-z0-9+/]+={0,2}$/.test(seg)) return false;
+	let decoded: string;
+	try {
+		decoded = Buffer.from(seg, 'base64').toString('utf8');
+	} catch {
+		return false;
+	}
+	if (!decoded.startsWith('{')) return false;
+	try {
+		const parsed: unknown = JSON.parse(decoded);
+		return (
+			typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+		);
+	} catch {
+		return false;
+	}
+}
 
 export interface JwsTokenSpan {
 	/** Inclusive start index of the header start, in the input string. */
@@ -236,8 +277,23 @@ export function findJwsTokenSpans(text: string): JwsTokenSpan[] {
 				let guard = i + 2;
 				while (guard < segments.length && guard - i <= 4) {
 					const seg = segments[guard] as string;
-					if (seg === '' || canStartTokenAt(segments, guard) || !tokenLike(seg))
+					// #3743: the FIRST guarded segment is the IV position — the
+					// structural evidence (5-part dotted shape with an EMPTY
+					// second segment after a >=13-char header) identifies the
+					// token, so the IV's own character mix is not evidence
+					// against it: accept any NON-EMPTY IV that does not itself
+					// start a real next token. Every segment AFTER the IV keeps
+					// the tokenLike gate (tail absorption semantics unchanged —
+					// `.build2024`/`s10`/`.next` stay visible).
+					if (guard === i + 2) {
+						if (seg === '' || canStartTokenAt(segments, guard)) break;
+					} else if (
+						seg === '' ||
+						canStartTokenAt(segments, guard) ||
+						!tokenLike(seg)
+					) {
 						break;
+					}
 					last = guard;
 					guard += 1;
 				}
@@ -262,14 +318,18 @@ export function findJwsTokenSpans(text: string): JwsTokenSpan[] {
 				signature.length >= MIN_SIGNATURE_EYJ
 			) {
 				// Accepted triple; #3736 D2-rev2 absorption of JWE tail
-				// segments (<= 2 further token-like segments, never across a
-				// segment that starts a REAL next token of ANY accepted shape
-				// — the shared canStartTokenAt predicate, 4.5 review round 2 —
-				// optionally crossing ONE empty interior segment).
+				// segments (<= 3 further token-like segments — #3743 widens 2
+				// -> 3 so a fully base64url-compatible glued token's third
+				// trailing segment is covered; the pinned controls stay
+				// visible because `.build2024`/`s10`/`.next` all FAIL
+				// tokenLike — never across a segment that starts a REAL next
+				// token of ANY accepted shape — the shared canStartTokenAt
+				// predicate, 4.5 review round 2 — optionally crossing ONE
+				// empty interior segment).
 				let last = i + 2;
 				let extra = 0;
 				let crossedEmpty = false;
-				while (extra < 2 && last + 1 < segments.length) {
+				while (extra < 3 && last + 1 < segments.length) {
 					const next = segments[last + 1] as string;
 					if (canStartTokenAt(segments, last + 1)) {
 						break; // a REAL adjacent token (any shape) — scan it next
@@ -309,14 +369,88 @@ export function findJwsTokenSpans(text: string): JwsTokenSpan[] {
 
 /**
  * #3736 D4-rev3: standard-base64 dotted-token spans — headers of 40+
- * standard base64 chars (no eyJ requirement) followed by a >=20-char
- * payload and a >=10-char signature. Candidate headers are the WHOLE
- * segment first (bare placement, trailing `=` padding included), then the
- * suffix after interior `=` separators with non-empty prefix AND suffix
- * (assignment placement: the span starts AT the separator, so a `key`-style
- * prefix stays visible and the separator is consumed — no re-matchable
- * `key=[REDACTED:jwt]` residue). Earliest valid separator wins.
+ * standard base64 chars (no eyJ requirement; #3743: or a 13-39-char header
+ * that strictly decodes to a JSON object) followed by a >=20-char payload and
+ * a >=10-char signature. Candidate headers are the WHOLE segment first (bare
+ * placement, trailing `=` padding included), then the suffix after interior
+ * `=` separators with non-empty prefix AND suffix (assignment placement: the
+ * span starts AT the separator, so a `key`-style prefix stays visible and the
+ * separator is consumed — no re-matchable `key=[REDACTED:jwt]` residue).
+ * Earliest valid separator wins. This is the GREEDY base scan (accept and
+ * advance past the consumed triple) whose output is pinned by suites; the
+ * #3743 enumeration variant below reuses the same acceptance test.
  */
+interface RichCandidate {
+	start: number;
+	end: number;
+	/** End of the candidate's first (header) segment — the clamp boundary. */
+	headerEnd: number;
+}
+
+function genericCandidateAt(
+	segments: string[],
+	offsets: number[],
+	runStart: number,
+	i: number,
+): RichCandidate | null {
+	const seg = segments[i] as string;
+	let candidateStart = -1;
+	if (GENERIC_HEADER_RE.test(seg) || isShortJsonHeader(seg)) {
+		candidateStart = offsets[i] as number;
+	} else {
+		// 4.5-review round 2 (F3 class fix): because the header shape
+		// forbids INTERIOR '=', at most ONE interior '=' can carry a valid
+		// candidate — the one directly before the trailing standard-base64
+		// run. Compute it exactly and linearly from the end: strip <=2
+		// trailing '=' padding, walk left over the base64 class, and require
+		// the char before that run to be an interior '=' with a non-empty
+		// prefix. A `a=b=c=…=i=<header>` prefix chain resolves to the same
+		// single candidate as a short `key=`, with no per-separator probing
+		// loop at all. Round 3: b64RunStart is SEGMENT-relative — the
+		// emitted span adds the segment's cumulative run offset (offsets[i])
+		// so a candidate in a NON-first segment (`foo.key=<header>…`)
+		// anchors correctly instead of swallowing the dotted prefix.
+		let end = seg.length;
+		let pad = 0;
+		while (end > 0 && seg[end - 1] === '=' && pad < 2) {
+			end -= 1;
+			pad += 1;
+		}
+		let b64RunStart = end;
+		while (
+			b64RunStart > 0 &&
+			/[A-Za-z0-9+/]/.test(seg[b64RunStart - 1] as string)
+		) {
+			b64RunStart -= 1;
+		}
+		const runLen = end - b64RunStart;
+		if (
+			(runLen >= 40 || isShortJsonHeader(seg.slice(b64RunStart, end))) &&
+			b64RunStart > 1 &&
+			(seg[b64RunStart - 1] as string) === '='
+		) {
+			candidateStart = (offsets[i] as number) + b64RunStart - 1;
+		}
+	}
+	if (candidateStart === -1) return null;
+	const payload = segments[i + 1] as string;
+	const signature = segments[i + 2] as string;
+	if (
+		payload.length >= GENERIC_MIN_PAYLOAD &&
+		GENERIC_B64_RE.test(payload) &&
+		signature.length >= GENERIC_MIN_SIGNATURE &&
+		GENERIC_B64_RE.test(signature)
+	) {
+		return {
+			start: runStart + candidateStart,
+			end: runStart + (offsets[i + 2] as number) + signature.length,
+			// The header segment ends where the payload segment begins.
+			headerEnd: runStart + (offsets[i + 1] as number),
+		};
+	}
+	return null;
+}
+
 export function findStandardB64TokenSpans(text: string): JwsTokenSpan[] {
 	const spans: JwsTokenSpan[] = [];
 	STANDARD_B64_DOTTED_RUN_RE.lastIndex = 0;
@@ -324,67 +458,9 @@ export function findStandardB64TokenSpans(text: string): JwsTokenSpan[] {
 		const { segments, offsets, runStart } = splitRun(run);
 		let i = 0;
 		while (i + 2 < segments.length) {
-			const seg = segments[i] as string;
-			let candidateStart = -1;
-			if (GENERIC_HEADER_RE.test(seg)) {
-				candidateStart = offsets[i] as number;
-			} else {
-				// 4.5-review round 2 (F3 class fix): because the header shape
-				// forbids INTERIOR '=', at most ONE interior '=' can carry a
-				// valid candidate — the one directly before the trailing
-				// standard-base64 run. Compute it exactly and linearly from
-				// the end: strip <=2 trailing '=' padding, walk left over the
-				// base64 class, and require the char before that run to be an
-				// interior '=' with a non-empty prefix. A `a=b=c=…=i=<header>`
-				// prefix chain resolves to the same single candidate as a
-				// short `key=`, with no per-separator probing loop at all.
-				// Round 3: b64RunStart is SEGMENT-relative — the emitted span
-				// adds the segment's cumulative run offset (offsets[i]) so a
-				// candidate in a NON-first segment (`foo.key=<header>…`)
-				// anchors correctly instead of swallowing the dotted prefix.
-				let end = seg.length;
-				let pad = 0;
-				while (end > 0 && seg[end - 1] === '=' && pad < 2) {
-					end -= 1;
-					pad += 1;
-				}
-				let b64RunStart = end;
-				while (
-					b64RunStart > 0 &&
-					/[A-Za-z0-9+/]/.test(seg[b64RunStart - 1] as string)
-				) {
-					b64RunStart -= 1;
-				}
-				// `end` already sits after the last non-padding char, so the
-				// run length needs no further pad subtraction.
-				const runLen = end - b64RunStart;
-				if (
-					runLen >= 40 &&
-					b64RunStart > 1 &&
-					(seg[b64RunStart - 1] as string) === '='
-				) {
-					// b64RunStart-1 is the interior '=' separator (a non-empty
-					// prefix exists because b64RunStart > 1); the span starts
-					// AT the separator, run-relative via offsets[i].
-					candidateStart = (offsets[i] as number) + b64RunStart - 1;
-				}
-				if (candidateStart === -1) {
-					i += 1;
-					continue;
-				}
-			}
-			const payload = segments[i + 1] as string;
-			const signature = segments[i + 2] as string;
-			if (
-				payload.length >= GENERIC_MIN_PAYLOAD &&
-				GENERIC_B64_RE.test(payload) &&
-				signature.length >= GENERIC_MIN_SIGNATURE &&
-				GENERIC_B64_RE.test(signature)
-			) {
-				spans.push({
-					start: runStart + candidateStart,
-					end: runStart + (offsets[i + 2] as number) + signature.length,
-				});
+			const candidate = genericCandidateAt(segments, offsets, runStart, i);
+			if (candidate) {
+				spans.push({ start: candidate.start, end: candidate.end });
 				i += 3;
 			} else {
 				i += 1;
@@ -395,66 +471,180 @@ export function findStandardB64TokenSpans(text: string): JwsTokenSpan[] {
 }
 
 /**
- * #3736: combined span producer for consumers that splice both families.
- * Overlap policy (4.5-review F1/F3 + parallel-review F2): inside a dotted
- * run of JWT material the generic triple can start MID-token (a
- * payload/signature pair of one eyJ token looks like a generic
- * header/payload) — such a span is an artifact and is DROPPED (it would glue
- * two adjacent tokens into one span; observed on the #3716 two-token
- * fixture). But a generic span that starts BEFORE or AT the same index as an
- * overlapping eyJ span carries real credential material of its own (its
- * standard-base64 header) — it is MERGED into that eyJ span (the longest
- * span wins: earlier/equal start kept, end extended), never discarded. Both
- * lists are sorted by start, so the resolution is a single linear merge
- * walk.
+ * #3743: enumeration variant — a valid candidate at EVERY segment anchor.
+ * The greedy scan above advances past a consumed triple, which SUPPRESSES a
+ * real glued-header candidate that starts inside the consumed span (the
+ * greedy artifact accepted a mid-token triple and skipped the true anchor).
+ * Enumeration surfaces every candidate; the resolver decides.
+ */
+function enumerateStandardB64Candidates(text: string): RichCandidate[] {
+	const candidates: RichCandidate[] = [];
+	STANDARD_B64_DOTTED_RUN_RE.lastIndex = 0;
+	for (const run of text.matchAll(STANDARD_B64_DOTTED_RUN_RE)) {
+		const { segments, offsets, runStart } = splitRun(run);
+		for (let i = 0; i + 2 < segments.length; i++) {
+			const candidate = genericCandidateAt(segments, offsets, runStart, i);
+			if (candidate) candidates.push(candidate);
+		}
+	}
+	return candidates;
+}
+
+/**
+ * #3736 + #3743: combined span producer for consumers that splice both
+ * families, with a non-overlapping output contract.
+ *
+ * #3743 pipeline (base-survivor architecture — greedy base first, clamp
+ * candidates added without evicting base survivors, family-aware
+ * normalization last):
+ *
+ * 1. Base survivor set B = the ORIGINAL greedy generic scan (accept and
+ *    advance) — byte-for-byte base-preserving by construction.
+ * 2. Clamp candidate set C = enumerated candidates (every segment anchor)
+ *    that are NOT already in B and whose HEADER overreach overlaps an eyJ
+ *    span's tail: the greedy skip suppressed exactly these — a real
+ *    glued-header candidate whose anchor sits inside a greedy-consumed
+ *    triple.
+ * 3. Clamp application: each C candidate clamps the overreached eyJ span's
+ *    end to the candidate's start (the eyJ span yields its absorbed
+ *    glued-header prefix; only the eyJ span is adjusted, never a B member).
+ * 4. Final normalization (family-aware, coverage-preserving): sorted by
+ *    start; a later overlapping span is DROPPED only when it is generic AND
+ *    the kept span is a non-clamp generic (base-preserving — no widening);
+ *    every other overlap EXTENDS the kept span to the union end, so coverage
+ *    is never narrower than the pre-normalization union. The one approved
+ *    widening (#3743 R26): two clamp-adjacent spans may merge across an
+ *    internal separator dot (placeholder count can drop; coverage cannot).
  */
 export function findRedactableTokenSpans(text: string): JwsTokenSpan[] {
 	const eyJ = findJwsTokenSpans(text);
-	const generic = findStandardB64TokenSpans(text);
-	if (eyJ.length === 0) return generic;
-	if (generic.length === 0) return eyJ;
-	const merged: JwsTokenSpan[] = [];
-	let e = 0;
-	for (const g of generic) {
-		// advance past eyJ spans that end before g starts
-		while (e < eyJ.length && (eyJ[e] as JwsTokenSpan).end <= g.start) {
-			merged.push(eyJ[e] as JwsTokenSpan);
-			e += 1;
-		}
-		if (e >= eyJ.length) {
-			merged.push(g);
-			continue;
-		}
-		const head = eyJ[e] as JwsTokenSpan;
-		if (head.start < g.end && g.start < head.end) {
-			// overlap
-			if (g.start <= head.start) {
-				// F1 + parallel-review F2: the generic span starts earlier OR
-				// at the same index — merge its coverage into the eyJ span
-				// (the longest span wins: keep the earlier/equal start,
-				// extend the end). A strictly-later start is a mid-token
-				// artifact — drop g. Stage-B clamp: the extension must NOT
-				// cross the start of a DISTINCT following eyJ span (the
-				// standard run can carry '+eyJ…' — two real tokens in one
-				// generic run); clamp so the next token keeps its own span
-				// and both emit separate labels.
-				const next = eyJ[e + 1] as JwsTokenSpan | undefined;
-				head.start = g.start;
-				head.end = Math.min(
-					Math.max(head.end, g.end),
-					next ? next.start : Number.POSITIVE_INFINITY,
-				);
+	const base = findStandardB64TokenSpans(text);
+	if (eyJ.length === 0) {
+		return base;
+	}
+	// Even when the greedy base found no generic span, enumerated clamp
+	// candidates may exist (they only need an overreached eyJ span) — the
+	// shared pipeline below handles that.
+
+	const enumerated = enumerateStandardB64Candidates(text);
+	const baseKeys = new Set(base.map((b) => `${b.start}:${b.end}`));
+	// Clamp-eligible: strictly-later start than an overlapping eyJ span,
+	// with the overlap lying entirely within the candidate's first (header)
+	// segment — the header-overreach case. Per the plan-critic round-7
+	// clarification this applies to candidates from BOTH the greedy base set
+	// and the enumerated additions (an eyJ span's absorption can overreach
+	// into a glued header the greedy scan DID discover — dropping it as a
+	// mid-token artifact is what leaked the tail).
+	const isClampEligible = (c: RichCandidate): boolean =>
+		eyJ.some(
+			(head) =>
+				head.start < c.end &&
+				c.start < head.end &&
+				c.start > head.start &&
+				Math.min(head.end, c.end) <= c.headerEnd,
+		);
+	const clampedKeys = new Set<string>();
+	// Apply clamps: each clamp candidate yields its prefix from the FIRST eyJ
+	// span it overreaches. Candidates are enumerated left-to-right, so the
+	// earliest candidate per head wins (re-check the overlap against the
+	// CURRENT end — a later candidate clamps an already-clamped head only if
+	// it still overreaches).
+	for (const c of enumerated) {
+		if (!isClampEligible(c)) continue;
+		for (const head of eyJ) {
+			if (
+				head.start < c.end &&
+				c.start < head.end &&
+				c.start > head.start &&
+				Math.min(head.end, c.end) <= c.headerEnd
+			) {
+				head.end = c.start;
+				clampedKeys.add(`${c.start}:${c.end}`);
+				break;
 			}
+		}
+	}
+
+	interface NamedSpan extends JwsTokenSpan {
+		eyJFamily: boolean;
+		clampEmitted: boolean;
+		/** True once an eyJ span has merged into this kept generic span. */
+		mergedEyJ?: boolean;
+	}
+	const all: NamedSpan[] = [
+		...eyJ.map((s) => ({ ...s, eyJFamily: true, clampEmitted: false })),
+		...base.map(
+			(s): NamedSpan => ({
+				...s,
+				eyJFamily: false,
+				clampEmitted: clampedKeys.has(`${s.start}:${s.end}`),
+			}),
+		),
+		// Enumerated additions beyond the greedy base — the candidates the
+		// greedy accept-and-advance skip-suppressed. ALL of them enter the
+		// arbitration (not only clamp-eligible ones): the normalization below
+		// is base-preserving for plain generic overlaps (the later one is
+		// dropped — no widening), while a suppressed candidate that extends
+		// coverage past a clamp-emitted span unions forward (#3743 extended
+		// composition: the P40-anchored survivor must not be evicted).
+		...enumerated
+			.filter((c) => !baseKeys.has(`${c.start}:${c.end}`))
+			.map((s): NamedSpan => ({ ...s, eyJFamily: false, clampEmitted: false })),
+	];
+	all.sort((a, b) => a.start - b.start || b.end - a.end);
+
+	const kept: NamedSpan[] = [];
+	for (const span of all) {
+		const last = kept[kept.length - 1];
+		if (!last || span.start >= last.end) {
+			kept.push(span);
 			continue;
 		}
-		merged.push(g);
+		if (last.eyJFamily && !span.eyJFamily && !span.clampEmitted) {
+			// #3736 artifact rule (base behavior): a strictly-later generic
+			// span overlapping an eyJ span is a mid-token artifact — dropped.
+			continue;
+		}
+		if (!last.eyJFamily && span.eyJFamily) {
+			if (!last.mergedEyJ) {
+				// First eyJ span this generic leads into — #3736 F1/F2 merge
+				// (base rule a): full union, the generic's own leading header
+				// material is real credential coverage.
+				last.mergedEyJ = true;
+				last.end = Math.max(last.end, span.end);
+				continue;
+			}
+			if (last.clampEmitted) {
+				// #3743: a subsequent eyJ span starting inside a clamp-emitted
+				// candidate's territory — the coverage-preserving union keeps
+				// the wider end (the approved R26 widening surface).
+				last.end = Math.max(last.end, span.end);
+				continue;
+			}
+			// #3736 Stage-B clamp (base behavior): after the first merge, a
+			// plain generic span never extends across the start of a DISTINCT
+			// following eyJ token — that token reclaims its territory and
+			// both keep separate spans (and separate placeholders).
+			last.end = span.start;
+			kept.push(span);
+			continue;
+		}
+		if (
+			!last.eyJFamily &&
+			!span.eyJFamily &&
+			!last.clampEmitted &&
+			!span.clampEmitted
+		) {
+			// #3743 base-preserving rule: two plain generic spans never widen
+			// — the later one is dropped (the greedy base could only ever
+			// produce the earlier).
+			continue;
+		}
+		// Coverage-preserving union (#3743 R24): never narrower than the
+		// pre-normalization union within the Stage-B eyJ boundaries above.
+		last.end = Math.max(last.end, span.end);
 	}
-	while (e < eyJ.length) {
-		merged.push(eyJ[e] as JwsTokenSpan);
-		e += 1;
-	}
-	merged.sort((a, b) => a.start - b.start);
-	return merged;
+	return kept;
 }
 
 /**

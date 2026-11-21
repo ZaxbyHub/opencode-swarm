@@ -8,10 +8,13 @@
  * OPEN bot-authored issue with the exact title and comments there instead.
  *
  * Trust rule pinned here (the v7.188.0 lookalike-issue class): issue titles
- * are user-controllable in a public repo, so adoption requires BOTH the
- * byte-exact title AND author == github-actions[bot], and the routed issue
- * number must be bare numeric. Source-text pins (executing the script needs
- * a gh binary + network; precedent: ci-yml-integration.test.ts).
+ * are user-controllable in a public repo, so title DISCOVERY adopts only an
+ * issue with BOTH the byte-exact title AND a bot author (author.is_bot), and
+ * the routed issue number must be bare numeric. The explicit
+ * FLAKE_TRACKING_ISSUE pin (PR #3883) bypasses discovery and the author check:
+ * its trust root is a workflow constant. Its behaviour is exercised against a
+ * stub `gh` in flake-detection-pinned-issue-behavior-3883.test.ts. The pins
+ * in this file are source-text pins.
  */
 import { describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
@@ -154,5 +157,14 @@ describe('flake-detection tracking-issue dedupe (issue #3248)', () => {
 		expect(workflow).toContain(
 			'DETECTION_RUN_URL: ${{ github.event.workflow_run.html_url }}',
 		);
+	});
+
+	test('the upstream workflow pins the replacement issue and standalone callers retain discovery', () => {
+		const workflow = fs.readFileSync(WORKFLOW, 'utf-8');
+		expect(workflow).toContain(
+			"FLAKE_TRACKING_ISSUE: ${{ github.repository == 'ZaxbyHub/opencode-swarm' && '3852' || '' }}",
+		);
+		expect(script).toContain('repos/$REPO/issues/$FLAKE_TRACKING_ISSUE');
+		expect(script).toContain('elif issue_matches="$(gh issue list');
 	});
 });

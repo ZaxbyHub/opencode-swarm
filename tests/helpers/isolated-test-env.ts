@@ -17,12 +17,21 @@ import { closeProjectDb } from '../../src/db/project-db.js';
  * src/config/cache-paths.ts. Without it, booting the plugin in a test wrote
  * into the developer's real `~/.cache/opencode-swarm/version-check.json`.
  *
- * `HOME` and `USERPROFILE` are defence in depth ONLY. Verified on Bun 1.3.11:
- * `os.homedir()` ignores `process.env` entirely — mutating either one, even
- * before the first `os.homedir()` call, does not change its result (Node does
- * honour it). Never rely on these to redirect a homedir()-derived path under
- * `bun test`; rely on the XDG_* / APPDATA / LOCALAPPDATA vars, which every path
- * helper in this repo consults ahead of `os.homedir()`.
+ * `HOME` and `USERPROFILE` are defence in depth ONLY. The behavior of
+ * `os.homedir()` under a redirect is PLATFORM-SPLIT, verified by execution on
+ * both sides (tests/unit/helpers/isolated-test-env-homedir.test.ts): on
+ * Windows (Bun 1.3.14) `os.homedir()` FOLLOWS a redirected HOME/USERPROFILE
+ * and returns the isolated home, while on POSIX (CI ubuntu runners; macOS is
+ * the same libuv family) it does NOT — the result stays the real home. The universal false part of the old claim (the
+ * Bun 1.3.11 note asserting homedir() never reads the environment) is the
+ * Windows arm.
+ * On hosts where the redirect DOES take effect, a fixture whose workspace sits
+ * under the isolated home can inherit a real-home `.swarm`/`.opencode` claim
+ * from a home that carries them: always give dispatched fixtures an explicit
+ * project marker (`.opencode` or a `.git` marker directory) inside the fixture
+ * root. Never rely on these two vars ALONE to redirect a homedir()-derived
+ * path under `bun test`; rely on the XDG_* / APPDATA / LOCALAPPDATA vars,
+ * which every path helper in this repo consults ahead of `os.homedir()`.
  *
  * `HOMEDRIVE`/`HOMEPATH` are deliberately NOT set: a POSIX-shaped temp path is
  * not a valid `HOMEDRIVE` (`"C:"`) and would hand malformed values to any

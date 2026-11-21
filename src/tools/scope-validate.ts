@@ -21,6 +21,7 @@ import {
 import {
 	detectPosixWrites,
 	detectWindowsWrites,
+	neutralizeQuotedHeredocBodies,
 	resolveWriteTargets,
 } from '../hooks/shell-write-detect';
 import {
@@ -106,13 +107,18 @@ function detectWrites(args: ScopeValidateArgs): {
 			command: args.command,
 		};
 	}
-	const analysis = detectPosixWrites(args.command);
+	// #3761/#3754 (4.5-review MEDIUM): parity with the live gate — the
+	// provably-inert quoted-heredoc cat shape is neutralized BEFORE
+	// detection/resolution so this preview answers on the same analysis
+	// string the gate parses.
+	const analysisCommand = neutralizeQuotedHeredocBodies(args.command);
+	const analysis = detectPosixWrites(analysisCommand);
 	return {
 		analysis,
 		command:
 			analysis.residualCommand !== undefined
 				? analysis.residualCommand
-				: args.command,
+				: analysisCommand,
 	};
 }
 

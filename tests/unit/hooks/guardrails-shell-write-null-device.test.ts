@@ -19,7 +19,7 @@ const TEST_DIR = canonicalMkdtemp('guardrails-shell-write-null-device-');
 // a path echoed elsewhere in the text, and pinned to the root /etc/passwd so
 // a workspace path ending in etc/passwd does not satisfy it.
 const ETC_PASSWD_ROOT_ESCAPE =
-	/^WRITE BLOCKED: Agent "[^"]+" is not authorised to write "(?:[A-Za-z]:)?[\\/]etc[\\/]passwd" \(via shell\)\. Reason: AUTHORITY_ROOT_ESCAPE: /;
+	/^WRITE BLOCKED: Agent "[^"]+" is not authorised to write "(?:[A-Za-z]:)?[\\/]etc[\\/]passwd" \(via shell\)\. Reason: AUTHORITY_ROOT_ESCAPE[^:]*: /;
 
 function config(): GuardrailsConfig {
 	return {
@@ -328,7 +328,7 @@ describe('guardrails shell writes: in-place edits with attached script flags', (
 			hooks.toolBefore(bashInput('arch-multi-file'), output(command)),
 		).rejects.toThrow(
 			new RegExp(
-				`^WRITE BLOCKED: Agent "architect" is not authorised to write "${target}" \\(via shell\\)\\. Reason: AUTHORITY_ROOT_ESCAPE: `,
+				`^WRITE BLOCKED: Agent "architect" is not authorised to write "${target}" \\(via shell\\)\\. Reason: AUTHORITY_ROOT_ESCAPE`,
 			),
 		);
 	});
@@ -342,7 +342,7 @@ describe('guardrails shell writes: in-place edits with attached script flags', (
 			hooks.toolBefore(bashInput('coder-multi-file'), output(command)),
 		).rejects.toThrow(
 			new RegExp(
-				`^WRITE BLOCKED: Agent "coder" is not authorised to write "${target}" \\(via shell\\)\\. Reason: AUTHORITY_ROOT_ESCAPE: `,
+				`^WRITE BLOCKED: Agent "coder" is not authorised to write "${target}" \\(via shell\\)\\. Reason: AUTHORITY_ROOT_ESCAPE`,
 			),
 		);
 	});
@@ -366,7 +366,7 @@ describe('guardrails shell writes: sed script and suffix placement', () => {
 			hooks.toolBefore(bashInput(`arch-placement-${command}`), output(command)),
 		).rejects.toThrow(
 			new RegExp(
-				`^WRITE BLOCKED: Agent "architect" is not authorised to write "${OUTSIDE_X}" \\(via shell\\)\\. Reason: AUTHORITY_ROOT_ESCAPE: `,
+				`^WRITE BLOCKED: Agent "architect" is not authorised to write "${OUTSIDE_X}" \\(via shell\\)\\. Reason: AUTHORITY_ROOT_ESCAPE`,
 			),
 		);
 	});
@@ -381,7 +381,7 @@ describe('guardrails shell writes: sed script and suffix placement', () => {
 			),
 		).rejects.toThrow(
 			new RegExp(
-				`^WRITE BLOCKED: Agent "coder" is not authorised to write "${OUTSIDE_X}" \\(via shell\\)\\. Reason: AUTHORITY_ROOT_ESCAPE: `,
+				`^WRITE BLOCKED: Agent "coder" is not authorised to write "${OUTSIDE_X}" \\(via shell\\)\\. Reason: AUTHORITY_ROOT_ESCAPE`,
 			),
 		);
 	});
@@ -424,7 +424,7 @@ describe('guardrails shell writes: sed script and suffix placement', () => {
 				output("sed -i '' 's-x-/../../victim-1' src/a.ts -n"),
 			),
 		).rejects.toThrow(
-			/^WRITE BLOCKED: Agent "architect" is not authorised to write "[^"]*[\\/]victim-1" \(via shell\)\. Reason: AUTHORITY_ROOT_ESCAPE: /,
+			/^WRITE BLOCKED: Agent "architect" is not authorised to write "[^"]*[\\/]victim-1" \(via shell\)\. Reason: AUTHORITY_ROOT_ESCAPE[^:]*: /,
 		);
 	});
 
