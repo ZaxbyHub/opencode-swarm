@@ -884,7 +884,7 @@ async function cleanupRecoveredWorktree(
 	 * retains consistently; an explicit option overrides.
 	 */
 	options?: { retainBranch?: boolean },
-): Promise<void> {
+): Promise<'completed' | 'skipped-uncertain'> {
 	const retainBranch =
 		options?.retainBranch ?? descriptor.landedUnstaged === true;
 	const branchExists = (): boolean =>
@@ -908,15 +908,32 @@ async function cleanupRecoveredWorktree(
 			queuedAt: Date.now(),
 		});
 	if (hasResidue) {
-		await cleanupStandardWorktreeForCallId(
+		const cleanupResult = await cleanupStandardWorktreeForCallId(
 			descriptor.callID,
 			'success',
 			directory,
 			descriptor.worktreeDir ?? undefined,
 			retainBranch ? { retainBranch: true } : undefined,
 		);
-	}
-	if (
+		if (cleanupResult.skippedOwnershipUncertain) {
+			// #3888: the ownership inventory was unreadable, so destruction was
+			// skipped and the tracking entry retained. Leave the WAL incomplete
+			// (retryable) and return before both the UNVERIFIED throw and the
+			// marker/cleanupComplete completion below.
+			return 'skipped-uncertain';
+		}
+		if (!cleanupResult.skippedReprovisioned) {
+			if (
+				existsSync(descriptor.worktreePath) ||
+				(branchExists() && !retainBranch)
+			) {
+				throw new Error('CODER_SETTLEMENT_WORKTREE_CLEANUP_UNVERIFIED');
+			}
+		}
+		// #3888 confirmed supersession: the surviving lane/branch belongs to a
+		// LIVE dispatch — not this WAL's verification debt. Fall through to
+		// marker removal + cleanupComplete.
+	} else if (
 		existsSync(descriptor.worktreePath) ||
 		(branchExists() && !retainBranch)
 	) {
@@ -941,6 +958,7 @@ async function cleanupRecoveredWorktree(
 	) {
 		throw new Error('CODER_SETTLEMENT_OWNER_CLEANUP_FAILED');
 	}
+	return 'completed';
 }
 
 /**
@@ -1042,7 +1060,15 @@ export async function completeCoderSettlementCleanup(
 		if ((await preserveHistoricalSelfHealedSource(directory, wal)) === 'orphan')
 			return;
 		if (!wal.worktree || wal.cleanupComplete === true) return;
-		await cleanupRecoveredWorktree(directory, wal.worktree);
+		if (
+			(await cleanupRecoveredWorktree(directory, wal.worktree)) ===
+			'skipped-uncertain'
+		) {
+			// #3888: ownership was uncertain — destruction skipped, lane and
+			// tracking retained. Do NOT mark cleanupComplete: a later retry
+			// re-runs this pass once the inventory is readable again.
+			return;
+		}
 		await writeWal(filePath, { ...wal, cleanupComplete: true });
 	});
 }

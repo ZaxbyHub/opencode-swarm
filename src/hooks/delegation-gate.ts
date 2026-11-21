@@ -7094,75 +7094,133 @@ export function createDelegationGateHook(
 				if (standardDispatch && isStandardWorktreeFailure) {
 					// Terminal failure: preserve the worktree for inspection, clean up
 					// the lane without merge-back, and record the failure.
-					standardWorktreeByCallID.delete(input.callID);
-					const reason = (
-						outputTerminalState === 'cancelled' ? 'cancelled' : 'denied'
-					) as 'cancelled' | 'denied';
-					await _wtiInternals.preserveDirtyWorktreeForCallId(
-						input.callID,
-						reason,
-						directory,
-					);
-					// Issue #2599 AC5: release the lane DB handle before removal.
-					closeProjectDb(standardDispatch.handle.worktreePath);
-					const removal = await _wtiInternals
-						.removeWorktree(standardDispatch.handle.worktreePath, directory)
-						.catch((cleanupError: unknown) => ({
-							error:
-								cleanupError instanceof Error
-									? cleanupError.message
-									: String(cleanupError),
-						}));
-					const removalError =
-						typeof removal === 'object' &&
-						removal !== null &&
-						'error' in removal &&
-						typeof removal.error === 'string'
-							? removal.error
-							: undefined;
-					if (removalError) {
-						// Issue #2599 AC6: typed strand record + diagnostic instead of
-						// a silently wedged lane.
-						recordDeadLaneReclaim(directory, {
-							lanePath: standardDispatch.handle.worktreePath,
-							branchName: standardDispatch.handle.branchName,
-							parentSessionId: standardDispatch.parentSessionID,
-							taskId: standardDispatch.taskId,
-							reason: removalError,
-						});
+					//
+					// #3888 G2: this branch deletes the active map entry FIRST and
+					// then destroys the lane directly — the exact window where a
+					// same-task re-dispatch can provision the identical path/branch
+					// (its pre-provision collision check no longer sees this
+					// dispatch). Re-validate lane ownership BEFORE the map delete,
+					// preservation, or any destructive step.
+					const terminalSuperseding =
+						await _wtiInternals.findSupersedingLaneDispatch(
+							directory,
+							input.callID,
+							standardDispatch.handle.worktreePath,
+							standardDispatch.handle.branchName,
+						);
+					if (terminalSuperseding && terminalSuperseding.kind !== 'uncertain') {
+						// Confirmed re-provision: the lane belongs to a live
+						// dispatch. Skip preserve/remove/postMerge entirely
+						// (preserve would `git add -A` + commit inside the LIVE
+						// lane); drop only our own tracking entries.
+						standardWorktreeByCallID.delete(input.callID);
+						awaitingMergeByCallID.delete(input.callID);
+						recordWorktreeMergeFailure(
+							standardDispatch.planTaskId ?? standardDispatch.taskId,
+							{
+								outcome: 'failed',
+								stage: 'task-result',
+								message: `task terminated with ${outputTerminalState ?? 'terminal-failure'} (lane re-provisioned by ${terminalSuperseding.kind} ${terminalSuperseding.callID}; teardown skipped)`,
+							},
+						);
 						pushAdvisory(
 							ensureAgentSession(
 								standardDispatch.parentSessionID,
 								undefined,
 								directory,
 							),
-							`WORKTREE_LANE_STRANDED: lane ${standardDispatch.handle.worktreePath} could not be removed (${removalError}). ` +
-								'A child session or system process may hold .swarm/swarm.db (WAL); its DB handle was released via closeProjectDb before this attempt. ' +
-								'reclaim scheduled at next start.',
+							`STANDARD_WORKTREE_CLEANUP_SKIPPED_REPROVISIONED: dispatch ${input.callID} skipped teardown of lane ${standardDispatch.handle.worktreePath} (${standardDispatch.handle.branchName}) — now owned by ${terminalSuperseding.kind} ${terminalSuperseding.callID}; worktree, branch and live-owner record preserved.`,
+						);
+					} else if (terminalSuperseding) {
+						// Uncertain ownership inventory: fail closed — keep the
+						// tracking entries for a later retry, destroy nothing.
+						recordWorktreeMergeFailure(
+							standardDispatch.planTaskId ?? standardDispatch.taskId,
+							{
+								outcome: 'failed',
+								stage: 'task-result',
+								message: `task terminated with ${outputTerminalState ?? 'terminal-failure'} (teardown deferred: ownership inventory uncertain: ${terminalSuperseding.reason})`,
+							},
+						);
+						pushAdvisory(
+							ensureAgentSession(
+								standardDispatch.parentSessionID,
+								undefined,
+								directory,
+							),
+							`STANDARD_WORKTREE_CLEANUP_SKIPPED_REPROVISIONED_OWNERSHIP_UNCERTAIN: dispatch ${input.callID} skipped teardown of lane ${standardDispatch.handle.worktreePath} (${standardDispatch.handle.branchName}) — the ownership inventory was unreadable (${terminalSuperseding.reason}); retry later.`,
+						);
+					} else {
+						standardWorktreeByCallID.delete(input.callID);
+						const reason = (
+							outputTerminalState === 'cancelled' ? 'cancelled' : 'denied'
+						) as 'cancelled' | 'denied';
+						await _wtiInternals.preserveDirtyWorktreeForCallId(
+							input.callID,
+							reason,
+							directory,
+						);
+						// Issue #2599 AC5: release the lane DB handle before removal.
+						closeProjectDb(standardDispatch.handle.worktreePath);
+						const removal = await _wtiInternals
+							.removeWorktree(standardDispatch.handle.worktreePath, directory)
+							.catch((cleanupError: unknown) => ({
+								error:
+									cleanupError instanceof Error
+										? cleanupError.message
+										: String(cleanupError),
+							}));
+						const removalError =
+							typeof removal === 'object' &&
+							removal !== null &&
+							'error' in removal &&
+							typeof removal.error === 'string'
+								? removal.error
+								: undefined;
+						if (removalError) {
+							// Issue #2599 AC6: typed strand record + diagnostic instead of
+							// a silently wedged lane.
+							recordDeadLaneReclaim(directory, {
+								lanePath: standardDispatch.handle.worktreePath,
+								branchName: standardDispatch.handle.branchName,
+								parentSessionId: standardDispatch.parentSessionID,
+								taskId: standardDispatch.taskId,
+								reason: removalError,
+							});
+							pushAdvisory(
+								ensureAgentSession(
+									standardDispatch.parentSessionID,
+									undefined,
+									directory,
+								),
+								`WORKTREE_LANE_STRANDED: lane ${standardDispatch.handle.worktreePath} could not be removed (${removalError}). ` +
+									'A child session or system process may hold .swarm/swarm.db (WAL); its DB handle was released via closeProjectDb before this attempt. ' +
+									'reclaim scheduled at next start.',
+							);
+						}
+						await _wtiInternals.postMergeCleanup(
+							directory,
+							standardDispatch.handle.branchName,
+						);
+						awaitingMergeByCallID.delete(input.callID);
+						recordWorktreeMergeFailure(
+							standardDispatch.planTaskId ?? standardDispatch.taskId,
+							{
+								outcome: 'failed',
+								stage: 'task-result',
+								message: `task terminated with ${outputTerminalState ?? 'terminal-failure'}`,
+							},
+						);
+						const dispatchSession = ensureAgentSession(
+							standardDispatch.parentSessionID,
+							undefined,
+							directory,
+						);
+						pushAdvisory(
+							dispatchSession,
+							`STANDARD_WORKTREE_TASK_FAILED: task ${standardDispatch.taskId} terminated with ${outputTerminalState ?? 'terminal-failure'}; worktree preserved and cleaned without merge-back.`,
 						);
 					}
-					await _wtiInternals.postMergeCleanup(
-						directory,
-						standardDispatch.handle.branchName,
-					);
-					awaitingMergeByCallID.delete(input.callID);
-					recordWorktreeMergeFailure(
-						standardDispatch.planTaskId ?? standardDispatch.taskId,
-						{
-							outcome: 'failed',
-							stage: 'task-result',
-							message: `task terminated with ${outputTerminalState ?? 'terminal-failure'}`,
-						},
-					);
-					const dispatchSession = ensureAgentSession(
-						standardDispatch.parentSessionID,
-						undefined,
-						directory,
-					);
-					pushAdvisory(
-						dispatchSession,
-						`STANDARD_WORKTREE_TASK_FAILED: task ${standardDispatch.taskId} terminated with ${outputTerminalState ?? 'terminal-failure'}; worktree preserved and cleaned without merge-back.`,
-					);
 				}
 
 				// Track if we detected reviewer and/or test_engineer via stored args

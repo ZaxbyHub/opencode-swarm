@@ -72,6 +72,7 @@ import type { WorktreeProvisioningOwnerRemovalIdentity } from './worktree-provis
 import {
 	recordWorktreeProvisioningOwner,
 	removeWorktreeProvisioningOwner,
+	scanWorktreeProvisioningOwnersForRecovery,
 	WORKTREE_LIFECYCLE_LOCK_FILE,
 } from './worktree-provisioning-owner';
 import type {
@@ -254,6 +255,10 @@ export interface StandardWorktreeMergedSettlement {
 	cleaned: boolean;
 	reconciled: boolean;
 	provenance?: MergeOperationProvenance;
+	/** #3888: cleanup skipped — a different live dispatch owns the lane (confirmed). */
+	skippedReprovisioned?: boolean;
+	/** #3888: cleanup skipped — ownership inventory unreadable (retryable). */
+	skippedOwnershipUncertain?: boolean;
 }
 
 export interface StandardWorktreePartialSettlement {
@@ -541,6 +546,102 @@ interface CleanupStandardWorktreeResult {
 	removedWorktree: boolean;
 	cleanedBranch: boolean;
 	preservedRecoveryLane: boolean;
+	/**
+	 * #3888: a CONFIRMED re-provision skip — another live dispatch owns the lane
+	 * (map entry or valid provisioning-owner marker), so no destructive step ran.
+	 * Success-equivalent for callers; own tracking entries were dropped.
+	 */
+	skippedReprovisioned?: boolean;
+	/**
+	 * #3888: the ownership inventory was unreadable/uncertain (or the lifecycle
+	 * lock could not be acquired), so no destructive step ran and the caller must
+	 * NOT mark cleanup complete — own tracking entries are retained for retry.
+	 */
+	skippedOwnershipUncertain?: boolean;
+}
+
+/**
+ * #3888: the ownership evidence that a DIFFERENT dispatch now owns a lane whose
+ * (worktreePath, branchName) identity was captured by an older dispatch.
+ *
+ * The teardown side of the lane lifecycle previously trusted its captured identity
+ * unconditionally: same-task re-dispatch deterministically re-creates the identical
+ * path/branch (`provisionWorktree` keys both on (sessionId, taskId)), so a delayed
+ * teardown destroyed the live lane (and cleared its durable live-owner record).
+ * This predicate is the teardown-side counterpart of the provisioning-side
+ * `inspectStandardWorktreeCollisionOwnership` gate.
+ */
+export type SupersedingLaneOwner =
+	| {
+			kind:
+				| 'active-dispatch'
+				| 'awaiting-merge-dispatch'
+				| 'provisioning-owner';
+			callID: string;
+	  }
+	| { kind: 'uncertain'; reason: string };
+
+/**
+ * Find a DIFFERENT dispatch that currently owns the lane at `worktreePath` /
+ * `branchName`. Never throws; a degraded ownership inventory degrades to the
+ * `uncertain` arm (callers fail closed — skip destruction, keep retry state).
+ *
+ * Evidence, in order:
+ * 1. The in-memory dispatch maps (`standardWorktreeByCallID`,
+ *    `awaitingMergeByCallID`) — the only same-process identity that discriminates
+ *    dispatch generations, since path/branch/session/task are identical across
+ *    same-task re-dispatches. Path comparison uses `sameProjectRoot` (recovery
+ *    fixtures carry raw `git worktree list` spellings, fresh provisioning uses
+ *    `path.resolve`).
+ * 2. The durable provisioning-owner store — covers the in-flight window between
+ *    marker publication (`recordWorktreeProvisioningOwner`, under the lifecycle
+ *    lock, before `provisionWorktree`) and map registration. NO age test: the
+ *    collision-ownership contract is path-liveness-wins, and a false skip only
+ *    retains a lane (never destroys one).
+ */
+export function findSupersedingLaneDispatch(
+	directory: string,
+	callID: string,
+	worktreePath: string,
+	branchName: string,
+): SupersedingLaneOwner | undefined {
+	for (const [otherCallID, dispatch] of standardWorktreeByCallID) {
+		if (otherCallID === callID) continue;
+		if (
+			sameProjectRoot(dispatch.handle.worktreePath, worktreePath) ||
+			dispatch.handle.branchName === branchName
+		) {
+			return { kind: 'active-dispatch', callID: otherCallID };
+		}
+	}
+	for (const [otherCallID, record] of awaitingMergeByCallID) {
+		if (otherCallID === callID) continue;
+		if (
+			sameProjectRoot(record.worktreePath, worktreePath) ||
+			record.branch === branchName
+		) {
+			return { kind: 'awaiting-merge-dispatch', callID: otherCallID };
+		}
+	}
+	const scan = scanWorktreeProvisioningOwnersForRecovery(directory);
+	if (scan.status === 'uncertain') {
+		return { kind: 'uncertain', reason: scan.reason };
+	}
+	for (const owner of scan.owners) {
+		if (owner.callID === callID) continue;
+		// v3 markers carry the exact lane identity; older markers cannot name this
+		// lane's branch, and a same-session same-task marker for another callID is
+		// exactly the re-provision signal (ignore markers for other lanes).
+		if (
+			owner.schemaVersion === 3 &&
+			owner.branchName === branchName &&
+			owner.taskId !== undefined &&
+			owner.branchName.length > 0
+		) {
+			return { kind: 'provisioning-owner', callID: owner.callID };
+		}
+	}
+	return undefined;
 }
 
 function rememberStandardWorktreeDispatch(
@@ -627,6 +728,13 @@ function handleStandardWorktreeFailure(
 const WORKTREE_LIFECYCLE_LOCK_WAIT_MARGIN_MS = 5_000;
 /** Shortest wait, even when a large session-create budget leaves no room. */
 const WORKTREE_LIFECYCLE_LOCK_WAIT_MIN_MS = 10_000;
+/**
+ * #3888: bounded wait for the worktree lifecycle lock during standard-worktree
+ * TEARDOWN (classification + destructive tail). Teardown is not inside the v2
+ * tool.execute.before budget (the v2 hook timeout is applied non-fatally), so a
+ * fixed 15 s ceiling that fails toward preservation is safe.
+ */
+const WORKTREE_CLEANUP_LOCK_WAIT_MS = 15_000;
 /**
  * The OpenCode 2 host bounds `tool.execute.before` at 60 s
  * (`V2_HOOK_TIMEOUT_MS` in src/host/v2/hooks.ts; alignment pinned by
@@ -2945,6 +3053,80 @@ export async function cleanupStandardWorktreeForCallId(
 		};
 	}
 
+	// #3888 G1: ownership re-validation BEFORE any destructive or mutating step.
+	//
+	// The lane identity above was captured at dispatch time; same-task re-dispatch
+	// deterministically re-creates the identical path/branch, so a delayed teardown
+	// would destroy the live dispatch's lane (and clear its durable live-owner
+	// record via removeWorktree). Classification runs UNDER the provisioning
+	// lifecycle lock — the same lock a re-dispatch's collision resolution and
+	// owner-marker publication hold — so publication and destruction are mutually
+	// exclusive. Lock acquisition failure fails TOWARD PRESERVATION (no destructive
+	// step, tracking entries retained for retry); the file lock's own TTL heals a
+	// lock leaked by an exceptional escape between the explicit releases below.
+	const cleanupLock = await acquireWorktreeLifecycleLockWithin(
+		directory,
+		callID,
+		WORKTREE_CLEANUP_LOCK_WAIT_MS,
+	);
+	if (!cleanupLock.acquired) {
+		const busySession = ensureAgentSession(parentSessionID);
+		pushAdvisory(
+			busySession,
+			`STANDARD_WORKTREE_CLEANUP_LOCK_BUSY_PRESERVED: dispatch ${callID} could not acquire the worktree lifecycle lock for lane ${worktreePath} (${branchName}); teardown was skipped and the lane preserved (retryable).`,
+		);
+		return {
+			removedWorktree: false,
+			cleanedBranch: false,
+			preservedRecoveryLane: false,
+			skippedOwnershipUncertain: true,
+		};
+	}
+	const releaseCleanupLock = (): void => {
+		void cleanupLock.lock._release?.();
+	};
+	const superseding = _internals.findSupersedingLaneDispatch(
+		directory,
+		callID,
+		worktreePath,
+		branchName,
+	);
+	if (superseding && superseding.kind !== 'uncertain') {
+		// Confirmed re-provision: the lane belongs to a different live dispatch.
+		// Skip preservation too — it would `git add -A` + commit inside the live
+		// dispatch's lane — and drop only OUR tracking entries.
+		standardWorktreeByCallID.delete(callID);
+		awaitingMergeByCallID.delete(callID);
+		releaseCleanupLock();
+		const skipSession = ensureAgentSession(parentSessionID);
+		pushAdvisory(
+			skipSession,
+			`STANDARD_WORKTREE_CLEANUP_SKIPPED_REPROVISIONED: dispatch ${callID} skipped teardown of lane ${worktreePath} (${branchName}) — now owned by ${superseding.kind} ${superseding.callID}; worktree, branch and live-owner record preserved.`,
+		);
+		return {
+			removedWorktree: false,
+			cleanedBranch: false,
+			preservedRecoveryLane: false,
+			skippedReprovisioned: true,
+		};
+	}
+	if (superseding) {
+		// Uncertain ownership inventory: fail closed — no destructive step, keep
+		// OUR tracking entries so a later cleanup retry can find this dispatch.
+		releaseCleanupLock();
+		const uncertainSession = ensureAgentSession(parentSessionID);
+		pushAdvisory(
+			uncertainSession,
+			`STANDARD_WORKTREE_CLEANUP_SKIPPED_REPROVISIONED_OWNERSHIP_UNCERTAIN: dispatch ${callID} skipped teardown of lane ${worktreePath} (${branchName}) — the ownership inventory was unreadable (${superseding.reason}); retry later.`,
+		);
+		return {
+			removedWorktree: false,
+			cleanedBranch: false,
+			preservedRecoveryLane: false,
+			skippedOwnershipUncertain: true,
+		};
+	}
+
 	// FR-001c: Preserve dirty work before cleanup on denial or cancellation.
 	// The success path uses attemptMergeBackFromDirty which handles state differently.
 	let preserveResult:
@@ -3006,6 +3188,7 @@ export async function cleanupStandardWorktreeForCallId(
 		// Remove ONLY the in-memory tracking entries so a future retry can pick up the worktree state.
 		standardWorktreeByCallID.delete(callID);
 		awaitingMergeByCallID.delete(callID);
+		releaseCleanupLock();
 
 		const session = ensureAgentSession(parentSessionID);
 		pushAdvisory(
@@ -3096,6 +3279,7 @@ export async function cleanupStandardWorktreeForCallId(
 	// Remove entries from in-memory tracking maps.
 	standardWorktreeByCallID.delete(callID);
 	awaitingMergeByCallID.delete(callID);
+	releaseCleanupLock();
 
 	const session = ensureAgentSession(parentSessionID);
 	pushAdvisory(
@@ -3417,6 +3601,10 @@ export async function finishStandardWorktreeDispatch(
 				cleaned: mergeResult.cleaned ?? false,
 				reconciled: mergeResult.reconciled ?? false,
 				provenance: mergeResult.provenance,
+				// #3888: surface the cleanup skip outcome so enclosing callers
+				// (completion observer, settleCoder verification) can distinguish
+				// confirmed supersession (success-equivalent) from uncertainty
+				// (retryable debt). Stamped after the cleanup call below.
 			};
 
 			if (settlement.onMerged) {
@@ -3481,6 +3669,12 @@ export async function finishStandardWorktreeDispatch(
 					retainBranch: mergeResult.strategy === 'squash-unstaged',
 				},
 			);
+			if (cleanupResult.skippedOwnershipUncertain) {
+				mergedSettlement.skippedOwnershipUncertain = true;
+			}
+			if (cleanupResult.skippedReprovisioned) {
+				mergedSettlement.skippedReprovisioned = true;
+			}
 			if (dispatch.recoveryClaim) {
 				const request = {
 					authorityDigest: dispatch.recoveryClaim.authorityDigest,
@@ -3744,7 +3938,10 @@ export async function finishStandardWorktreeDispatch(
 	// NOTE: This is now redundant since cleanupStandardWorktreeForCallId also
 	// deletes from awaitingMergeByCallID, but kept for safety in case
 	// cleanupStandardWorktreeForCallId was never called (e.g., early throw).
-	if (resolvedCallID) {
+	if (
+		resolvedCallID &&
+		!(result.outcome === 'merged' && result.skippedOwnershipUncertain)
+	) {
 		awaitingMergeByCallID.delete(resolvedCallID);
 	}
 	return result;
@@ -3838,6 +4035,8 @@ export const _internals = {
 	cleanupOrphanedBranches,
 	/** FR-001a: cleanup entry point for finishStandardWorktreeDispatch. */
 	cleanupStandardWorktreeForCallId,
+	/** #3888: teardown-side lane ownership re-validation. */
+	findSupersedingLaneDispatch,
 	/** FR-001c: preserves dirty worktree state before cleanup on denial/cancellation. */
 	preserveDirtyWorktreeForCallId,
 	/** Background launch durability fallback: tag ownership without racing the child. */
