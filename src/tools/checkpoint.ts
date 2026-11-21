@@ -401,7 +401,14 @@ function listNonSwarmDirtyPaths(directory: string): string[] {
 				);
 			}
 			if (!toIsSwarm) {
-				paths.push(to, from);
+				// Stage ONLY the destination: a rename's source no longer
+				// exists on disk AND is already gone from the index, so a
+				// literal `git add --all -- <source>` is a fatal "did not
+				// match any files" (4.5 review round 1); the index already
+				// carries the removal, and staging `to` completes the
+				// rename. A copy's source is unchanged — staging the
+				// destination alone is sufficient there too.
+				paths.push(to);
 			}
 			continue;
 		}

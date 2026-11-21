@@ -221,6 +221,33 @@ describe('checkpoint staging literal + scoped (#3763)', () => {
 		expect(git(['rev-parse', ':.swarm/runtime.json'])).toBe(stagedBlob);
 	}, 30000);
 
+	test('an ordinary staged rename saves cleanly (4.5 review round 1 regression)', async () => {
+		fixture();
+		fs.writeFileSync(loc('sample.txt'), 'edited');
+		git(['mv', 'sample.txt', 'renamed.txt']);
+		const result = await save('staged-rename');
+		expect(result.success).toBe(true);
+		const files = committedFiles(String(result.sha));
+		expect(files).toContain('renamed.txt');
+		expect(files).toContain('sample.txt'); // the deletion side of the rename
+		expect(git(['show', `${result.sha}:renamed.txt`])).toBe('edited');
+	}, 30000);
+
+	test('a staged copy saves cleanly (source untouched, destination staged)', async () => {
+		fixture();
+		// Copies need rename/copy detection on a STAGED pair.
+		git(['config', 'status.renames', 'true']);
+		fs.writeFileSync(loc('sample.txt'), 'edited');
+		git(['add', 'sample.txt']);
+		fs.copyFileSync(loc('sample.txt'), loc('copied.txt'));
+		git(['add', 'copied.txt']);
+		const result = await save('staged-copy');
+		expect(result.success).toBe(true);
+		const files = committedFiles(String(result.sha));
+		expect(files).toContain('copied.txt');
+		expect(files).toContain('sample.txt');
+	}, 30000);
+
 	test('a staged rename crossing the .swarm boundary refuses the save before any mutation', async () => {
 		fixture();
 		fs.writeFileSync(loc('sample.txt'), 'edited');
