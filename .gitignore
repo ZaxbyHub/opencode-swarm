@@ -80,3 +80,9 @@ events.jsonl
 graphify-out/
 .zvec-grep/
 .tmp-host-contract-*/
+
+# OpenCode session transcripts (conversation content — local only, never commit)
+session-*.json
+
+# Local build artifacts (release tarballs are built by CI from source)
+*.tgz
