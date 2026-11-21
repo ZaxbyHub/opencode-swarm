@@ -9,7 +9,10 @@
 import { describe, expect, test } from 'bun:test';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
-import { appendCoreEventSync } from '../../../src/events/core-events';
+import {
+	appendCoreEventSync,
+	appendCoreEventsSync,
+} from '../../../src/events/core-events';
 import { withTaskEvidenceTransaction } from '../../../src/gate-evidence';
 import { completion_verify } from '../../../src/tools/completion-verify';
 import { write_drift_evidence } from '../../../src/tools/write-drift-evidence';
@@ -142,6 +145,7 @@ describe('#3844 fold-in: six persisted-evidence boundaries (#3899 AC1-6)', () =>
 			sessionId: 's-1',
 			detail: `provider said ${TOKEN} in its error body`,
 			message: `fallback message with ${SISTER} too`,
+			description: `observation description quoting ${TOKEN} (round-9 carrier)`,
 			attempt: 3,
 			nested: { note: 'structural payload stays reachable' },
 		});
@@ -156,6 +160,81 @@ describe('#3844 fold-in: six persisted-evidence boundaries (#3899 AC1-6)', () =>
 		expect(line).toContain(
 			'"nested":{"note":"structural payload stays reachable"}',
 		);
+	}, 60_000);
+
+	test('AC5: BATCH writer redacts the same carriers; benign batch lines byte-identical; authority dedupe on originals', () => {
+		const dir = canonicalMkdtemp('foldin-3844-evbatch-');
+		// Round-9 finding leg 1: the batch writer previously serialized raw.
+		appendCoreEventsSync(dir, [
+			{
+				type: 'provider_failure',
+				sessionId: 's-b1',
+				detail: `batch detail carrying ${TOKEN}`,
+				description: `batch description carrying ${SISTER}`,
+				attempt: 1,
+			},
+			{
+				type: 'provider_failure',
+				sessionId: 's-b2',
+				detail: 'benign batch detail',
+				attempt: 2,
+			},
+		]);
+		const lines = readFileSync(path.join(dir, '.swarm', 'events.jsonl'), 'utf8')
+			.split('\n')
+			.filter(
+				(l) =>
+					l.length > 0 && !l.includes('swarm-events-manifest'),
+			);
+		expect(lines).toHaveLength(2);
+		const first = lines[0] as string;
+		expect(first.includes(TOKEN)).toBe(false);
+		expect(first.includes(SISTER)).toBe(false);
+		expect(first).toContain('[REDACTED:github]');
+		expect(first).toContain('[REDACTED:anthropic]');
+		// Benign batch line round-trips byte-identically.
+		expect(lines[1]).toBe(
+			'{"type":"provider_failure","sessionId":"s-b2","detail":"benign batch detail","attempt":2}',
+		);
+		// Authority dedupe still keys on the ORIGINAL events: a second,
+		// token-bearing-but-same-key append is SKIPPED, and the persisted
+		// line count stays 2 (the first, redacted copy won).
+		appendCoreEventsSync(
+			dir,
+			[
+				{
+					type: 'coder_retry_circuit_breaker',
+					sessionId: 's-auth',
+					taskId: '1.1',
+					retryEpoch: 0,
+					action: 'sounding_board_consultation',
+					detail: `retry detail with ${TOKEN}`,
+				},
+			],
+			{ dedupeOnAuthorityKey: true },
+		);
+		appendCoreEventsSync(
+			dir,
+			[
+				{
+					type: 'coder_retry_circuit_breaker',
+					sessionId: 's-auth',
+					taskId: '1.1',
+					retryEpoch: 0,
+					action: 'sounding_board_consultation',
+					detail: 'different raw detail, same authority key',
+				},
+			],
+			{ dedupeOnAuthorityKey: true },
+		);
+		const after = readFileSync(path.join(dir, '.swarm', 'events.jsonl'), 'utf8')
+			.split('\n')
+			.filter(
+				(l) =>
+					l.length > 0 && !l.includes('swarm-events-manifest'),
+			);
+		expect(after).toHaveLength(3); // 2 provider + ONE deduped authority line
+		expect(after.join('\n').includes(TOKEN)).toBe(false);
 	}, 60_000);
 
 	test('AC6: gate-evidence passthrough extras redacted at persist; in-memory untouched', async () => {

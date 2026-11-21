@@ -18,8 +18,12 @@
  *            CORE_EVENT_LIMITS.activeMaxBytes / activeMaxEntries / ageMaxMs.
  *
  * Lifetime totals = folded aggregate (header) + retained window (file). Event
- * lines are preserved byte-for-byte (both `event:` and `type:` discriminators
- * pass through untouched — the store never normalizes producer schemas).
+ * lines are preserved byte-for-byte for every field EXCEPT the designated
+ * string free-text carriers (#3844 fold-in: detail/message/summary/reason/
+ * description are redacted at both append writers — a forgetting producer
+ * cannot persist credential prose). Both `event:` and `type:` discriminators
+ * and every structural field pass through untouched — the store never
+ * normalizes producer schemas.
  *
  * AUTHORITATIVE PARTITION (issue #2039 requirement 2/5): the four
  * correctness-relevant event types (`coder_retry_circuit_breaker`,
@@ -161,16 +165,28 @@ const RETRY_ACTIONS: ReadonlySet<string> = new Set([
 /**
  * #3844 fold-in (closes #3899 AC5): the string-valued free-text carrier
  * fields every producer may put on an event. The writer redacts these BY
- * DEFAULT before the durable append (appendCoreEventSync); structural
- * fields — ids, types, numbers, nested authority payloads — pass through
- * unchanged, and authority-key/dedupe comparisons always run against the
- * ORIGINAL event so at-most-once semantics stay byte-stable.
+ * DEFAULT before the durable append (appendCoreEventSync AND the batch
+ * appendCoreEventsSync — round-9 review finding: the batch writer initially
+ * bypassed the redaction); structural fields — ids, types, numbers, nested
+ * authority payloads — pass through unchanged, and authority-key/dedupe
+ * comparisons always run against the ORIGINAL event so at-most-once
+ * semantics stay byte-stable.
+ *
+ * Producer-carried prose audit (round-9): detail/message/summary/reason are
+ * the carrier names used across hooks/background producers; `description`
+ * is additionally carried by observation-shaped batch producers
+ * (src/hooks/curator.ts persists obs.description through the batch writer).
+ * This set is a deliberate, audited allowlist of FREE-TEXT CARRIERS — not
+ * an exhaustive description of every event field; a producer adding a NEW
+ * prose carrier should extend this set (the #3844 fold-in suite pins the
+ * current four+description contract).
  */
 const CORE_EVENT_FREE_TEXT_FIELDS = new Set([
 	'detail',
 	'message',
 	'summary',
 	'reason',
+	'description',
 ]);
 
 function redactCoreEventFreeText(
@@ -1191,7 +1207,12 @@ export function appendCoreEventsSync(
 ): void {
 	if (events.length === 0) return;
 	assertCoreEventRoot(directory);
-	const lines = events.map((event) => `${JSON.stringify(event)}\n`);
+	// #3844 fold-in (closes #3899 AC5): the batch writer carries the SAME
+	// default free-text redaction as the single writer — identical semantics
+	// per event, as the docblock promises. Authority keys and dedupe
+	// comparisons below run against each ORIGINAL event.
+	const persistedEvents = events.map((event) => redactCoreEventFreeText(event));
+	const lines = persistedEvents.map((event) => `${JSON.stringify(event)}\n`);
 	for (const line of lines) {
 		if (Buffer.byteLength(line) - 1 > _internals.limits.maxLineBytes) {
 			throw new Error(CORE_EVENT_LINE_TOO_LARGE);
