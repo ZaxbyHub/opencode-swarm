@@ -487,15 +487,20 @@ export function reportEventConsumerFailure(
  * observer. The abandoned consumer keeps running in the background; its
  * eventual outcome is observed (a late rejection is reported, never an
  * unhandled rejection).
+ *
+ * r16: deliberately NOT exported — a number-valued top-level export breaks
+ * OpenCode's getLegacyPlugins (TypeError, silently dropped plugin, issue
+ * #675 / invariant 2, pinned by bundle-plugin-shape.test.ts).
  */
-export const EVENT_CONSUMER_DEADLINE_MS = 10_000;
+const EVENT_CONSUMER_DEADLINE_MS = 10_000;
 
 /**
  * The durable completion observer gets a larger budget than advisory
  * siblings: its settlement/ingestion chain performs real durable work, and
- * its own replay machinery recovers anything the budget abandons.
+ * its own replay machinery recovers anything the budget abandons. Not
+ * exported for the same legacy-shape reason as EVENT_CONSUMER_DEADLINE_MS.
  */
-export const BACKGROUND_COMPLETION_CONSUMER_DEADLINE_MS = 60_000;
+const BACKGROUND_COMPLETION_CONSUMER_DEADLINE_MS = 60_000;
 
 /**
  * Run one independent event consumer so its failure can neither abort the
