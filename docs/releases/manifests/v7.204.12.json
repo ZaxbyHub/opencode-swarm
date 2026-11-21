@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.204.12",
+  "tagCommit": "6864cd83bdf39ba6c9e4bd7a94773d038abfa7b2",
+  "targetCommitish": "6864cd83bdf39ba6c9e4bd7a94773d038abfa7b2",
+  "releaseBodySha256": "bf74137eebedf585c5d99533fb0787d9954d365e275b6050c9e694998ab689ae",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/3644-3645-feedback-dispatch-residuals.md",
+      "sha256": "1b40a84fee038a6d2d09cb1759a1eb8c478d9c220291247ed59c387001ce6a7d"
+    },
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/host-contract-v2-corpus-2-3-0.md",
+      "sha256": "a95189467cdeac6d39fdf71106260ba027df6f1def733ecf8fac62b52de2f76a"
+    }
+  ]
+}

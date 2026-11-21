@@ -49,9 +49,10 @@ function runMain(
 	}
 }
 
-// The exact shipped helper shape (issue #2952 fix): parameterized poll loop
-// with ${N:-default} expansions, three directive-carrying call sites, job
-// timeout 70. timeout-minutes: 70 covers three waits (3,000 s declared ->
+// The #2952-era shipped helper shape (pre-#3259: ci.yml wait 360 x 5 s under
+// target-duration 30, job timeout 70), retained as a parser fixture. The
+// live post-#3259 shape's ratchet lives in check-workflow-timeouts-issue-3259.test.ts.
+// timeout-minutes: 70 covers three waits (3,000 s declared ->
 // required 3,900 s) but NOT four (adding the definition line as a fourth
 // 600 s call would push required to 4,620 s) — so this fixture passing green
 // also proves the definition line is not counted as a call site.
