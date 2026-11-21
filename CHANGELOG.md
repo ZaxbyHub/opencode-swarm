@@ -1,5 +1,14 @@
 # Changelog
 
+## [7.205.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.205.0...v7.205.1) (2026-11-21)
+
+
+### Bug Fixes
+
+* [Workstream J follow-up] ci.yml wait budget covers the dispatched run's 40-min ceiling — coupled timeout bump ([#2952](https://github.com/ZaxbyHub/opencode-swarm/issues/2952) residual) ([#3259](https://github.com/ZaxbyHub/opencode-swarm/issues/3259)) ([0fd1963](https://github.com/ZaxbyHub/opencode-swarm/commit/0fd196384e975f38641365b0b40a920b1ac3b585))
+* **3755:** critic round — honest residual disclosure in fragment + workflow comments ([5739e7b](https://github.com/ZaxbyHub/opencode-swarm/commit/5739e7b20f8b6d87d4a0a2b65e56b2137fa7c1a9))
+* redaction-surfaces-3710 unit pin reads the rotating docs/releases/pending dir — repo-wide unit gate breaks when the last matching fragment is consumed ([#3745](https://github.com/ZaxbyHub/opencode-swarm/issues/3745)) ([e69c782](https://github.com/ZaxbyHub/opencode-swarm/commit/e69c782cfdd24da044f2e9f2b73b7376cb7cd47d))
+
 ## [7.205.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.204.12...v7.205.0) (2026-11-20)
 
 
