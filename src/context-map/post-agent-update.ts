@@ -605,11 +605,34 @@ export function updateContextMapAfterAgent(
 	params: PostAgentUpdateParams,
 ): ContextMap {
 	try {
-		// 1. Load existing map or create empty
-		let map = _internals.loadContextMap(params.directory);
-		if (map === null) {
-			map = _internals.createEmptyContextMap();
+		// 1. Load existing map or create empty — but ONLY rebuild for a
+		// GENUINELY missing map (r17 audit repair, P1). An existing-but-corrupt
+		// or unreadable map must be preserved byte-for-byte: the previous
+		// `loadContextMap(...) ?? createEmptyContextMap()` collapsed "missing"
+		// and "corrupt" into the same null, so a child completion on a damaged
+		// file manufactured a fresh, nearly-empty map and — via
+		// `saveContextMap` — REPLACED the damaged file, destroying the
+		// operator's recovery path (the same hole the r16 repairs closed for
+		// `promoteContextMapTaskRelease` and the reconciliation; this is the
+		// remaining normal child-update path). The whole update is SKIPPED:
+		// no in-memory rebuild, no save, no fake task history. The skipped
+		// write is never acked as persisted — the completion observer's
+		// read-back verifier (`verifyContextMapWrite`) fails on an unreadable
+		// map, so the closeout obligation stays resumable until the map is
+		// repaired. Return contract unchanged (never throws; a detached empty
+		// map is returned without persisting it, mirroring the outer-catch
+		// fallback).
+		const readState = _internals.readContextMapState(params.directory);
+		if (readState.kind === 'unreadable') {
+			logger.warn(
+				`[context-map] ${params.directory}/.swarm/context-map.json exists but is corrupt or unreadable — preserving the original file; child completion update for task ${params.task_id} skipped (repair the map; the closeout stays resumable)`,
+			);
+			return _internals.createEmptyContextMap();
 		}
+		let map =
+			readState.kind === 'ok'
+				? readState.map
+				: _internals.createEmptyContextMap();
 
 		// 2. Refresh file summaries for touched files
 		const root = path.resolve(params.directory);

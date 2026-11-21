@@ -53,6 +53,12 @@ function wireInternals(initial: ContextMap): ContextMap[] {
 	_internals.loadContextMap = mock(
 		() => initial,
 	) as typeof _internals.loadContextMap;
+	// r17 (P1): the update path reads through the discriminated
+	// `readContextMapState` seam first — wire it coherently with the mocked
+	// loadContextMap so the seeded map is actually observed as `ok`.
+	_internals.readContextMapState = mock(
+		() => ({ kind: 'ok', map: initial }),
+	) as typeof _internals.readContextMapState;
 	_internals.saveContextMap = mock((map: ContextMap) => {
 		saved.push(map);
 	}) as typeof _internals.saveContextMap;

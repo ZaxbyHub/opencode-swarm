@@ -89,6 +89,13 @@ describe('updateContextMapAfterAgent survives corrupt decision entries', () => {
 		_internals.loadContextMap = mock(
 			() => corrupt,
 		) as typeof _internals.loadContextMap;
+		// r17 (P1): the update path reads through the discriminated
+		// `readContextMapState` seam first — the structurally-valid map with
+		// the null decision entry is `ok` (the null entry is tolerated by
+		// allocation, not by the structural validator).
+		_internals.readContextMapState = mock(
+			() => ({ kind: 'ok', map: corrupt }),
+		) as typeof _internals.readContextMapState;
 		_internals.saveContextMap = mock((map: ContextMap) => {
 			saved.push(map);
 		}) as typeof _internals.saveContextMap;
