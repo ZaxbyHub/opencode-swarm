@@ -11,6 +11,7 @@ import { resolveGitExecutable } from '../../utils/git-executable.js';
 import * as logger from '../../utils/logger.js';
 import { removeWorktree } from '../../worktree/core';
 import { validateSwarmPath } from '../utils';
+import { findSupersedingLaneDispatch } from './worktree-isolation';
 
 /**
  * Issue #2599: deferred dead-lane reclaim.
@@ -297,6 +298,29 @@ export async function reclaimDeadLanes(
 			result.retained.push({
 				lanePath: entry.lanePath,
 				reason: 'dirty-lane-preserved',
+			});
+			continue;
+		}
+		// #3888 (recurrence sweep): a stranded-lane record targets a lane path
+		// that a later same-task re-dispatch can legitimately re-provision (the
+		// path is keyed by session+task). Re-validate current ownership before
+		// the deferred removal — a live dispatch map entry, a v3
+		// provisioning-owner marker for the lane branch, or an unreadable owner
+		// inventory all retain the entry instead of destroying a live lane.
+		const superseding = findSupersedingLaneDispatch(
+			directory,
+			`dead-lane-reclaim:${entry.lanePath}`,
+			entry.lanePath,
+			entry.branchName,
+		);
+		if (superseding) {
+			retained.push(entry);
+			result.retained.push({
+				lanePath: entry.lanePath,
+				reason:
+					superseding.kind === 'uncertain'
+						? `ownership-inventory-uncertain: ${superseding.reason}`
+						: `re-provisioned-by-${superseding.kind}:${superseding.callID}`,
 			});
 			continue;
 		}

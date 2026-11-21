@@ -12,6 +12,10 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
+	reclaimDeadLanes,
+	recordDeadLaneReclaim,
+} from '../../../src/hooks/delegation-gate/dead-lane-reclaim';
+import {
 	_internals,
 	awaitingMergeByCallID,
 	cleanupStandardWorktreeForCallId,
@@ -282,4 +286,44 @@ describe('#3888 cleanup guard (G1)', () => {
 			await acquired.lock._release?.();
 		}
 	}, 60_000);
+});
+
+describe('#3888 recurrence sweep: dead-lane reclaim guard', () => {
+	it('retains a stranded lane whose branch has a live v3 provisioning-owner marker', async () => {
+		recordDeadLaneReclaim(project, {
+			lanePath,
+			branchName: BRANCH,
+			parentSessionId: SESSION,
+			taskId: '1.1',
+			reason: 'synthetic EBUSY',
+		});
+		recordWorktreeProvisioningOwner(project, {
+			callID: 'call-b',
+			parentSessionId: SESSION,
+			worktreeSessionId: SESSION,
+			taskId: '1.1',
+			reservationId: 'res-b',
+			generation: 2,
+			branchName: BRANCH,
+		});
+		const result = await reclaimDeadLanes(project, { activeSessionIds: [] });
+		expect(result.retained.length).toBe(1);
+		expect(result.retained[0]?.reason).toBe(
+			're-provisioned-by-provisioning-owner:call-b',
+		);
+		expect(fs.existsSync(lanePath)).toBe(true);
+	}, 30_000);
+
+	it('still reclaims a stranded lane with no other owner', async () => {
+		recordDeadLaneReclaim(project, {
+			lanePath,
+			branchName: BRANCH,
+			parentSessionId: SESSION,
+			taskId: '1.1',
+			reason: 'synthetic EBUSY',
+		});
+		const result = await reclaimDeadLanes(project, { activeSessionIds: [] });
+		expect(result.reclaimed.length).toBe(1);
+		expect(fs.existsSync(lanePath)).toBe(false);
+	}, 30_000);
 });
