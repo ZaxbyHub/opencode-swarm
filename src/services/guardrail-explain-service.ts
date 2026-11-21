@@ -35,11 +35,14 @@ import {
 import { declaresWindowsWrapperLoose } from '../hooks/shell-executor-context';
 import { getObservedHostShell } from '../hooks/shell-executor-context.js';
 import {
+	classifyWriteParseFailure,
+	describeWriteParseFailure,
 	detectPosixWrites,
 	detectWindowsWrites,
 	isPowerShellReadOnlyPipeline,
 	isPowerShellShaped,
 	mergeWriteAnalyses,
+	neutralizeQuotedHeredocBodies,
 	procSubSpanBodies,
 	resolveWriteTargets,
 } from '../hooks/shell-write-detect.js';
@@ -201,6 +204,15 @@ function evaluateDestructiveDecision(
 	}
 
 	const command = dcNormalizeCommand(rawCommand);
+	// #3761/#3754: parity with the gate's destructive arm — the procsub span
+	// extraction below scans raw command TEXT; for the provably-inert
+	// quoted-heredoc cat shape an inert body line like `>(rm -rf ../esc)`
+	// would otherwise be extracted from the ORIGINAL bytes here while the
+	// gate sees the neutralized analysis command (explain/gate split-brain
+	// on exactly the shapes the fix legalizes). Every other consumer of
+	// `command` in this section is a destructive-model scan of what RUNS
+	// and keeps the normalized command, exactly like the gate.
+	const procsubAnalysisCommand = neutralizeQuotedHeredocBodies(command);
 
 	// #3491 W3 parity: deny-on-uncertainty launcher shapes and the paranoid
 	// unwrap-depth bound mirror the live destructive arm's early denies.
@@ -277,7 +289,7 @@ function evaluateDestructiveDecision(
 	// command text — push each body's split segments with an uncertain
 	// child-cwd context (the #3568 review F-01 shape; restores parity with
 	// the gate's destructive pipeline, both `>` and `<` operators).
-	for (const body of procSubSpanBodies(command)) {
+	for (const body of procSubSpanBodies(procsubAnalysisCommand)) {
 		for (const sub of dcSplitSegments(body)) {
 			pushSegmentOccurrence(sub, 'uncertain');
 			// #3569 4.5 review Critical 2 (explain parity): unwrap launcher/
@@ -854,11 +866,18 @@ export async function handleGuardrailExplain(
 	// correctly-quoted subshells so the wrapped writes resolve under the child
 	// cwd. A fail-closed DIR (empty/NUL static operand) blocks here exactly
 	// like the gate's parse-error rejection.
-	const preprocessed = dcPreprocessWrappers(shellCommand);
+	// #3761/#3754: mirror the gate's analysis-command threading — the
+	// provably-inert quoted-heredoc cat shape is neutralized BEFORE
+	// preprocess/detect/resolve so explain and the gate parse the SAME
+	// string (parity with tool-before.ts's write path).
+	const analysisCommandExplain = neutralizeQuotedHeredocBodies(shellCommand);
+	const preprocessed = dcPreprocessWrappers(analysisCommandExplain);
 	if (preprocessed.failClosed) {
 		decision = 'block';
-		firingRule =
-			'parse_error: write detection failed to parse command — rejecting for safety';
+		// #3881 F-001: failClosed is a policy bound, not a parser failure — the
+		// wording is the one the gate's failClosed branch emits.
+		const bound = describeWriteParseFailure('analysis_bound');
+		firingRule = `${bound.label}: ${bound.message}`;
 	}
 	// #3567 final-critic round: mirror the gate's shell flag-cluster
 	// deny-on-uncertainty channel (tool-before.ts) — without it explain
@@ -870,7 +889,9 @@ export async function handleGuardrailExplain(
 		firingRule = `inline_eval: shell interpreter invocation "${uncertainCluster}" carries a flag cluster the guard cannot statically model (unknown option or glued argument) — deny-on-uncertainty`;
 	}
 	const didUnwrap = preprocessed.changed;
-	const detectionCommand = didUnwrap ? preprocessed.command : shellCommand;
+	const detectionCommand = didUnwrap
+		? preprocessed.command
+		: analysisCommandExplain;
 
 	if (decision === 'allow') {
 		const detected = resolveShellType(shellCommand) as
@@ -923,7 +944,7 @@ export async function handleGuardrailExplain(
 		// `env -C src echo hi > /tmp/x` (hoist-less shapes) where the gate
 		// unions the redirect back and denies.
 		if (didUnwrap) {
-			const primaryAnalysis = detectPosixWrites(shellCommand);
+			const primaryAnalysis = detectPosixWrites(analysisCommandExplain);
 			const regained = primaryAnalysis.writes.filter(
 				(w) =>
 					!(
@@ -941,35 +962,48 @@ export async function handleGuardrailExplain(
 			}
 		}
 
-		// The gate runs its fail-closed parse gate on the ORIGINAL command as
+		// The gate runs its fail-closed parse gate on the ANALYSIS command as
 		// well as the unwrapped form (tool-before.ts): a wrapper must not
 		// launder a malformed payload — `cmd /c "echo hi` (unclosed quote)
 		// must block even though the unwrapped `echo hi` parses cleanly.
 		// Mirror both parse gates, raw first (round-7 review finding).
-		const rawPosix = detectPosixWrites(shellCommand);
+		// #3761 final-critic: these mirrors run on the SAME neutralized
+		// analysis string the gate parses — the raw shellCommand would
+		// re-report parse errors for the dense quoted-heredoc body the gate
+		// just blanked (explain said parse_error for exactly the shapes the
+		// fix admits).
+		const rawPosix = detectPosixWrites(analysisCommandExplain);
 		const rawAnalysis =
 			authority === null
 				? rawPosix
 				: mergeWriteAnalyses(
 						rawPosix,
-						detectWindowsWrites(shellCommand, authority),
+						detectWindowsWrites(analysisCommandExplain, authority),
 						true,
 						wrapperDeclaredHere,
 					);
 		const rawParseFailure =
-			rawAnalysis.parseError && !isPowerShellReadOnlyPipeline(shellCommand);
+			rawAnalysis.parseError &&
+			!isPowerShellReadOnlyPipeline(analysisCommandExplain);
 
+		// #3881 F-001: origin-aware wording shared with the gate
+		// (describeWriteParseFailure) — a BASH_ENV / unsafe-text / oversized-word
+		// sentinel is a policy refusal, never "parse failure".
 		if (rawParseFailure) {
 			decision = 'block';
-			firingRule =
-				'parse_error: write detection failed to parse command — rejecting for safety';
+			const failure = describeWriteParseFailure(
+				classifyWriteParseFailure(rawAnalysis),
+			);
+			firingRule = `${failure.label}: ${failure.message}`;
 		} else if (
 			analysis.parseError &&
 			!isPowerShellReadOnlyPipeline(detectionCommand)
 		) {
 			decision = 'block';
-			firingRule =
-				'parse_error: write detection failed to parse command — rejecting for safety';
+			const failure = describeWriteParseFailure(
+				classifyWriteParseFailure(analysis),
+			);
+			firingRule = `${failure.label}: ${failure.message}`;
 		} else if (
 			analysis.unwrapDepthExceeded ||
 			rawPosix.unwrapDepthExceeded ||

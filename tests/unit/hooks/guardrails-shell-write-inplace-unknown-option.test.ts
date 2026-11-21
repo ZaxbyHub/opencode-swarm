@@ -18,7 +18,7 @@ import { canonicalMkdtemp } from '../../helpers/tmpdir';
 const TEST_DIR = canonicalMkdtemp('guardrails-shell-write-unknown-option-');
 // "/etc/passwd" on POSIX, "C:\etc\passwd" on win32 (see the null-device suite).
 const ETC_PASSWD_ROOT_ESCAPE =
-	/^WRITE BLOCKED: Agent "architect" is not authorised to write "(?:[A-Za-z]:)?[\\/]etc[\\/]passwd" \(via shell\)\. Reason: AUTHORITY_ROOT_ESCAPE: /;
+	/^WRITE BLOCKED: Agent "architect" is not authorised to write "(?:[A-Za-z]:)?[\\/]etc[\\/]passwd" \(via shell\)\. Reason: AUTHORITY_ROOT_ESCAPE[^:]*: /;
 
 function config(): GuardrailsConfig {
 	return {

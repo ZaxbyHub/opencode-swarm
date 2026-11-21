@@ -1070,7 +1070,14 @@ function denyAuthority(
 		path: safePath,
 		agent: safeAgent,
 		reason: sanitizeDiagnosticText(
-			`${input.code}: Path blocked: ${safeDetail} [agent=${safeAgent}; path=${safeReasonPath}]`,
+			// #3754 F3: AUTHORITY_ROOT_ESCAPE denials name the deciding
+			// layer so an operator whose host config says
+			// permission.external_directory "allow" can tell this is the
+			// plugin authority layer, not the host setting. Other
+			// authority codes keep the exact historical reason shape.
+			input.code === 'AUTHORITY_ROOT_ESCAPE'
+				? `${input.code} [layer=${input.layer}; rule=${sanitizeDiagnosticText(input.rule, 128)}]: Path blocked: ${safeDetail} [agent=${safeAgent}; path=${safeReasonPath}]`
+				: `${input.code}: Path blocked: ${safeDetail} [agent=${safeAgent}; path=${safeReasonPath}]`,
 			1024,
 		),
 		recovery: input.recovery,
@@ -1270,7 +1277,8 @@ export function checkFileAuthorityWithRules(
 				code: 'AUTHORITY_ROOT_ESCAPE',
 				layer: 'containment',
 				rule: 'same-filesystem-root',
-				detail: 'target is on a different drive or filesystem root',
+				detail:
+					'target is on a different drive or filesystem root — decided by the opencode-swarm file-authority (containment) layer; the host permission.external_directory setting does not bind this layer',
 			});
 		}
 		const plantedLink = findPlantedLinkBelow(matchedWorktree);
@@ -1279,7 +1287,7 @@ export function checkFileAuthorityWithRules(
 				code: 'AUTHORITY_ROOT_ESCAPE',
 				layer: 'containment',
 				rule: 'workspace-containment',
-				detail: `re-rooted target crosses symlink/junction "${sanitizeDiagnosticText(redactPath(plantedLink), 320)}" inside the matched worktree`,
+				detail: `re-rooted target crosses symlink/junction "${sanitizeDiagnosticText(redactPath(plantedLink), 320)}" — decided by the opencode-swarm file-authority (containment) layer; the host permission.external_directory setting does not bind this layer`,
 			});
 		}
 	} else if (normalizedPath === '..' || normalizedPath.startsWith('../')) {
@@ -1291,7 +1299,8 @@ export function checkFileAuthorityWithRules(
 				code: 'AUTHORITY_ROOT_ESCAPE',
 				layer: 'containment',
 				rule: 'workspace-containment',
-				detail: 'target resolves outside the working directory',
+				detail:
+					'target resolves outside the working directory — decided by the opencode-swarm file-authority (containment) layer; the host permission.external_directory setting does not bind this layer',
 			});
 		}
 		const plantedLink = findPlantedLinkBelow(matchedWorktree);
@@ -1300,7 +1309,7 @@ export function checkFileAuthorityWithRules(
 				code: 'AUTHORITY_ROOT_ESCAPE',
 				layer: 'containment',
 				rule: 'workspace-containment',
-				detail: `re-rooted target crosses symlink/junction "${sanitizeDiagnosticText(redactPath(plantedLink), 320)}" inside the matched worktree`,
+				detail: `re-rooted target crosses symlink/junction "${sanitizeDiagnosticText(redactPath(plantedLink), 320)}" — decided by the opencode-swarm file-authority (containment) layer; the host permission.external_directory setting does not bind this layer`,
 			});
 		}
 	}
