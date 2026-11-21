@@ -7264,9 +7264,21 @@ export function createDelegationGateHook(
 								undefined,
 								directory,
 							);
+							// #3888 r5: report the ACTUAL cleanup outcome — never
+							// claim removal completed when the helper skipped or
+							// preserved.
+							const terminalOutcomeNote = terminalCleanup.skippedReprovisioned
+								? 'lane teardown skipped: re-provisioned by a live dispatch; lane preserved.'
+								: terminalCleanup.preservedRecoveryLane
+									? 'lane preserved as a recovery lane; no removal performed.'
+									: !terminalCleanup.removedWorktree
+										? 'worktree preserved; removal did not complete (see cleanup advisories).'
+										: terminalCleanup.cleanedBranch
+											? 'worktree preserved and cleaned without merge-back.'
+											: 'worktree removed; lane branch retained.';
 							pushAdvisory(
 								dispatchSession,
-								`STANDARD_WORKTREE_TASK_FAILED: task ${standardDispatch.taskId} terminated with ${outputTerminalState ?? 'terminal-failure'}; worktree preserved and cleaned without merge-back.`,
+								`STANDARD_WORKTREE_TASK_FAILED: task ${standardDispatch.taskId} terminated with ${outputTerminalState ?? 'terminal-failure'}; ${terminalOutcomeNote}`,
 							);
 						}
 					}
