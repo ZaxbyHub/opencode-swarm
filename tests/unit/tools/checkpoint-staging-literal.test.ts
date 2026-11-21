@@ -221,6 +221,34 @@ describe('checkpoint staging literal + scoped (#3763)', () => {
 		expect(git(['rev-parse', ':.swarm/runtime.json'])).toBe(stagedBlob);
 	}, 30000);
 
+	test('a staged deletion (git rm) saves cleanly (4.5 review round 2 regression)', async () => {
+		fixture();
+		fs.writeFileSync(loc('sample.txt'), 'edited');
+		git(['add', 'sample.txt']);
+		git(['rm', '-q', '--cached', '--', 'sample.txt']);
+		fs.unlinkSync(loc('sample.txt'));
+		// Status shows 'D ' — path absent from BOTH disk and index.
+		expect(git(['status', '--porcelain'])).toContain('D ');
+		const result = await save('staged-deletion');
+		expect(result.success).toBe(true);
+		const files = committedFiles(String(result.sha));
+		expect(files).toContain('sample.txt'); // the staged removal commits
+	}, 30000);
+
+	test('a git-rm staged deletion (both flavors) saves cleanly', async () => {
+		fixture();
+		fs.writeFileSync(loc('victim.txt'), 'bye');
+		git(['add', 'victim.txt']);
+		git(['commit', '-qm', 'add victim']);
+		git(['rm', '-q', 'victim.txt']);
+		fs.writeFileSync(loc('sample.txt'), 'edited');
+		const result = await save('git-rm');
+		expect(result.success).toBe(true);
+		const files = committedFiles(String(result.sha));
+		expect(files).toContain('victim.txt');
+		expect(files).toContain('sample.txt');
+	}, 30000);
+
 	test('an ordinary staged rename saves cleanly (4.5 review round 1 regression)', async () => {
 		fixture();
 		fs.writeFileSync(loc('sample.txt'), 'edited');

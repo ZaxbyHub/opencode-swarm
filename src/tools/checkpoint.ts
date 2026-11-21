@@ -412,6 +412,16 @@ function listNonSwarmDirtyPaths(directory: string): string[] {
 			}
 			continue;
 		}
+		if (xy[0] === 'D') {
+			// A STAGED deletion (`D `, e.g. after `git rm`): the path is in
+			// neither the worktree nor the index, so a literal
+			// `git add --all -- <path>` is a fatal "did not match any files"
+			// (4.5 review round 2) — and there is nothing to stage: the
+			// index already carries the removal and the scoped commit
+			// includes it. Unstaged worktree deletions (` D`) still stage
+			// through the push below (the index still holds the path).
+			continue;
+		}
 		if (!isSwarmRuntimePath(to)) {
 			paths.push(to);
 		}
