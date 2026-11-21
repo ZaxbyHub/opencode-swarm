@@ -169,6 +169,109 @@ export function isInDeclaredScope(
  */
 const ZERO_WIDTH_FILL_RE = /\p{Cf}|\p{Default_Ignorable_Code_Point}/u;
 
+/** Sensitive dash-flag keyword set (lockstep with the KV/`$env`/`set` name arms). */
+const DASH_FLAG_KEYWORD_RE =
+	/token|secret|password|passwd|api[_-]?key|apikey|auth|credential|private[_-]?key|access[_-]?key/i;
+
+function isDashFlagNameChar(c: string): boolean {
+	return (
+		(c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c === '-' || c === '_'
+	);
+}
+
+/**
+ * #3743 / #3882: redact `--keyword value` / `--keyword=value` dash flags whose
+ * flag name contains a sensitive keyword.
+ *
+ * A manual left-to-right scan, NOT a single regex, for two reasons:
+ * - Correctness on embedded/nested flags. A keyword flag is redacted wherever
+ *   it appears — including inside a non-keyword flag's value
+ *   (`--cfg=prefix--api-key=SECRET`: the `--cfg=` token is not a keyword flag,
+ *   so the scan keeps going and redacts the inner `--api-key`) and nested
+ *   arbitrarily deep (`--a=--b=--private-key=SECRET`). A global `.replace` that
+ *   matched a non-keyword `--cfg=` would consume and skip the embedded flag.
+ * - Linear time. A regex keyword-in-pattern scan is O(name × keywords) per `--`
+ *   start — a DoS on a keyword-flooded command. The manual scan reads each flag
+ *   name once and tests it for a keyword once, so the whole pass is O(n); the
+ *   keyword pre-check short-circuits any command with no sensitive keyword.
+ *
+ * The flag name is `[a-zA-Z_-]+` read to its delimiter (`=`, whitespace, or a
+ * non-name char) with no length cap, so a keyword anywhere in the name is found
+ * and a non-keyword flag never re-scans its own name. A digit between the
+ * keyword and the value (`--token2=x`) stops the name, so it is not treated as a
+ * `token` flag — exactly as the base arms did.
+ */
+function redactDashFlags(input: string): string {
+	if (!DASH_FLAG_KEYWORD_RE.test(input)) return input;
+	let out = '';
+	let i = 0;
+	while (i < input.length) {
+		const dash = input.indexOf('--', i);
+		if (dash < 0) {
+			out += input.slice(i);
+			break;
+		}
+		out += input.slice(i, dash);
+		// Read the full flag name [a-zA-Z_-]+ (to its delimiter or the end).
+		let k = dash + 2;
+		while (k < input.length && isDashFlagNameChar(input[k])) k++;
+		const name = input.slice(dash + 2, k);
+		if (name.length > 0 && DASH_FLAG_KEYWORD_RE.test(name)) {
+			if (input[k] === '=') {
+				// `--name=value`: the value is the non-space run; redact it whole.
+				let v = k + 1;
+				while (v < input.length && !/\s/.test(input[v])) v++;
+				if (v > k + 1) {
+					out += `--${name}=[REDACTED]`;
+					i = v;
+					continue;
+				}
+				// Empty value (`--name=`): nothing to redact, leave it intact.
+				out += `--${name}=`;
+				i = v;
+				continue;
+			}
+			if (k < input.length && /\s/.test(input[k])) {
+				// `--name<ws>value`: skip the WHOLE whitespace run, then the value
+				// is the next token (must be non-empty and not itself a `--` flag,
+				// mirroring the old `(\s+)(?!--)(\S+)` arm). Consuming the full ws
+				// run is what keeps `--name  value` (multiple spaces) redacting —
+				// a single-char advance would land the value scan on a space and
+				// wrongly take the empty-value branch, leaking the value.
+				let wsEnd = k;
+				while (wsEnd < input.length && /\s/.test(input[wsEnd])) wsEnd++;
+				if (
+					wsEnd < input.length &&
+					!(input[wsEnd] === '-' && input[wsEnd + 1] === '-')
+				) {
+					let v = wsEnd;
+					while (v < input.length && !/\s/.test(input[v])) v++;
+					out += `--${name}${input.slice(k, wsEnd)}[REDACTED]`;
+					i = v;
+					continue;
+				}
+				// No value (end of input, or the next token is another flag):
+				// emit the flag and its trailing whitespace unchanged.
+				out += `--${name}${input.slice(k, wsEnd)}`;
+				i = wsEnd;
+				continue;
+			}
+			// Keyword flag with no `=`/whitespace delimiter (`--name` at end of
+			// input, or `--name/path`): nothing to redact, emit it unchanged.
+			out += `--${name}`;
+			i = k;
+			continue;
+		}
+		// Not a keyword flag: emit the `--name` token whole and continue from its
+		// end (O(n) — the name is read once). An embedded `--keyword` later in the
+		// same value is still found because the name stops at `=`/whitespace, so
+		// the delimiter and remainder are re-scanned on the next iteration.
+		out += `--${name}`;
+		i = k;
+	}
+	return out;
+}
+
 /**
  * Bare well-known token VALUE shapes for the shell audit site (#3730: the
  * sequential .replace chain is replaced by the two-view union sweep below;
@@ -279,19 +382,10 @@ export function redactShellCommand(cmd: string): string {
 		'$1$2$3=[REDACTED]',
 	);
 
-	// #3743: the two dash-flag arms are bounded ({0,64} around the keyword,
-	// same convention as the KV arm above) — the unbounded classes made the
-	// case-insensitive scan quadratic on long dash runs (~4.9-7.4 s per
-	// redactShellCommand call at 20k dashes; bounded is linear).
-	out = out.replace(
-		/--([a-zA-Z-]{0,64}(?:token|secret|password|passwd|api[_-]?key|apikey|auth|credential|private[_-]?key|access[_-]?key)[a-zA-Z-]{0,64})=(\S+)/gi,
-		'--$1=[REDACTED]',
-	);
-
-	out = out.replace(
-		/(--[a-zA-Z-]{0,64}(?:token|secret|password|passwd|api[_-]?key|apikey|auth|credential|private[_-]?key|access[_-]?key)[a-zA-Z-]{0,64})(\s+)(?!--)(\S+)/gi,
-		'$1$2[REDACTED]',
-	);
+	// #3743 / #3882: dash-flag redaction lives in the redactDashFlags helper
+	// (see its docblock). A digit between the keyword and the value
+	// (e.g. `--token2=x`) is not a keyword flag, exactly as the base arms did.
+	out = redactDashFlags(out);
 
 	out = out.replace(
 		/\b(Bearer|Basic)\s+[A-Za-z0-9+/=._-]{4,}/gi,

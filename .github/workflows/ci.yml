@@ -362,6 +362,20 @@ jobs:
       - name: Vendored surface type probe
         if: needs.detect-release.outputs.is-release != 'true'
         run: bun run scripts/check-vendored-surface-probe.ts
+      - name: Vendored surface type probe self-test
+        if: needs.detect-release.outputs.is-release != 'true'
+        # Proves the gate bites: mutate src/host/v2/types.ts, expect the probe
+        # to fail, restore. The self-test restores in a finally (byte-verified);
+        # the trailing checkout is a belt-and-suspenders cleanup that runs even
+        # if the restore path fails, and `exit $rc` preserves the self-test's
+        # own exit code so a non-biting gate still fails CI.
+        run: |
+          set +e
+          bun run scripts/check-vendored-surface-probe.ts --self-test
+          rc=$?
+          set -e
+          git checkout -- src/host/v2/types.ts
+          exit $rc
       - name: Biome CI
         if: needs.detect-release.outputs.is-release != 'true'
         run: bunx biome ci .

@@ -357,9 +357,15 @@ export function buildMemoryCohortFingerprintInput(config: {
 
 export function findSecrets(text: string): SecretFinding[] {
 	const findings: SecretFinding[] = [];
+	// #3882 perf: build the Cf/DI condensed view ONCE per call (this function
+	// never mutates `text`, so all 14 patterns share it), and skip it entirely
+	// when the text has no zero-width/default-ignorable byte — the common case.
+	const condensed = SECRET_ZERO_WIDTH_FILL_RE.test(text)
+		? condenseSecretView(text)
+		: null;
 	for (const { type, pattern } of SECRET_PATTERNS) {
 		pattern.lastIndex = 0;
-		for (const span of selectedSecretSpans(text, pattern)) {
+		for (const span of selectedSecretSpans(text, pattern, condensed)) {
 			findings.push({ type, match: text.slice(span.start, span.end) });
 		}
 	}
@@ -371,22 +377,41 @@ export function containsSecret(text: string): boolean {
 }
 
 export function redactSecrets(text: string): string {
-	let redacted = text;
+	// #3882 perf: the presence of a Cf/DI byte is invariant across the per-
+	// pattern iterations (placeholders contain no such byte), so decide once.
+	// When absent, every iteration skips the condensed view — this is the
+	// no-secret / no-fill common case that previously paid 14× O(n) builds.
+	const hasCfDi = SECRET_ZERO_WIDTH_FILL_RE.test(text);
+	let work = text;
 	for (const { type, pattern } of SECRET_PATTERNS) {
-		// #3743: each pattern operates on the CURRENT (already spliced) string —
-		// sequential-priority semantics are preserved exactly (earlier patterns'
-		// placeholders contain `[`/`:`, outside every body class, so later arms
-		// can never match inside them). The two-view span set is rebuilt from
-		// the current string each iteration because offsets from earlier
-		// splices are invalid.
+		// #3743: each pattern operates on the CURRENT (already rewritten) string
+		// — sequential-priority semantics are preserved exactly (earlier
+		// patterns' placeholders contain `[`/`:`, outside every body class, so
+		// later arms can never match inside them). The two-view span set is
+		// rebuilt from the current string each iteration because offsets from
+		// earlier rewrites are invalid.
 		pattern.lastIndex = 0;
-		const spans = selectedSecretSpans(redacted, pattern);
-		for (let i = spans.length - 1; i >= 0; i--) {
-			const { start, end } = spans[i];
-			redacted = `${redacted.slice(0, start)}[REDACTED:${type}]${redacted.slice(end)}`;
+		const spans = selectedSecretSpans(
+			work,
+			pattern,
+			hasCfDi ? condenseSecretView(work) : null,
+		);
+		if (spans.length === 0) continue;
+		// #3882 perf: build the rewritten string with a single join instead of
+		// one full-string splice per span (was O(n·spans), ~18 s on a dense
+		// 1.4 MB blob); this is O(n) per pattern and produces byte-identical
+		// output.
+		const parts: string[] = [];
+		let last = 0;
+		for (const { start, end } of spans) {
+			parts.push(work.slice(last, start));
+			parts.push(`[REDACTED:${type}]`);
+			last = end;
 		}
+		parts.push(work.slice(last));
+		work = parts.join('');
 	}
-	return redacted;
+	return work;
 }
 
 // #3743: Cf/DI fill tolerance for the memory secret scanner. A zero-width or
@@ -413,7 +438,18 @@ interface SecretSpan {
  * the kept span's end). One span per selected match: a plain token identical
  * in both views yields exactly one finding.
  */
-function selectedSecretSpans(text: string, pattern: RegExp): SecretSpan[] {
+/**
+ * #3882 perf: `condensed` is the caller-prebuilt Cf/DI-deleted view (and its
+ * offset map) when the text has zero-width/default-ignorable bytes, or `null`
+ * when it does not. Passing it in lets `findSecrets` build it once for all 14
+ * patterns and lets the no-fill common case skip the build entirely; the
+ * `condensed === text` guard below keeps the raw-only path exact.
+ */
+function selectedSecretSpans(
+	text: string,
+	pattern: RegExp,
+	condensed: ReturnType<typeof condenseSecretView> | null,
+): SecretSpan[] {
 	const spans: SecretSpan[] = [];
 	pattern.lastIndex = 0;
 	for (const match of text.matchAll(pattern)) {
@@ -421,13 +457,13 @@ function selectedSecretSpans(text: string, pattern: RegExp): SecretSpan[] {
 			spans.push({ start: match.index, end: match.index + match[0].length });
 		}
 	}
-	const { condensed, condensedToOriginal } = condenseSecretView(text);
-	if (condensed !== text) {
+	if (condensed && condensed.condensed !== text) {
 		pattern.lastIndex = 0;
-		for (const match of condensed.matchAll(pattern)) {
+		for (const match of condensed.condensed.matchAll(pattern)) {
 			if (!match[0] || match.index === undefined) continue;
-			const last = condensedToOriginal[match.index + match[0].length - 1];
-			const start = condensedToOriginal[match.index];
+			const last =
+				condensed.condensedToOriginal[match.index + match[0].length - 1];
+			const start = condensed.condensedToOriginal[match.index];
 			if (start === undefined || last === undefined) continue;
 			spans.push({ start, end: Math.min(last + 1, text.length) });
 		}
@@ -453,24 +489,35 @@ function condenseSecretView(text: string): {
 	condensed: string;
 	condensedToOriginal: number[];
 } {
+	// One matchAll scan finds every Cf/DI run (the `u` flag keeps this correct
+	// for astral code points too — a few Cf chars live above the BMP), and the
+	// verbatim runs between them are copied with their per-code-unit offset map.
+	// This avoids a per-code-point regex test over long fill-dense text.
 	const condensedChars: string[] = [];
 	const condensedToOriginal: number[] = [];
 	let cursor = 0;
-	for (const char of text) {
-		if (!SECRET_ZERO_WIDTH_FILL_RE.test(char)) {
-			condensedChars.push(char);
-			// One map entry per UTF-16 code unit, each carrying its OWN
-			// absolute original offset (cursor + k) — the map stays unit-
-			// aligned across astral characters AND a match's end offset
-			// (map[lastUnit] + 1) lands after the full astral char instead
-			// of splitting the surrogate pair (#3743 implementation review:
-			// the start-only mapping truncated a match ending in an astral
-			// char and corrupted redactSecrets output with a lone low
-			// surrogate).
-			for (let k = 0; k < char.length; k++)
-				condensedToOriginal.push(cursor + k);
+	// Local global regex: matchAll requires `g`, and the shared
+	// SECRET_ZERO_WIDTH_FILL_RE stays non-global so the `.test()` fast paths
+	// above never trip over a mutated lastIndex.
+	for (const m of text.matchAll(/\p{Cf}|\p{Default_Ignorable_Code_Point}/gu)) {
+		const run = text.slice(cursor, m.index);
+		for (let k = 0; k < run.length; k++) {
+			condensedChars.push(run[k]);
+			// One map entry per UTF-16 code unit, each carrying its OWN absolute
+			// original offset (cursor + k) — the map stays unit-aligned across
+			// astral characters AND a match's end offset (map[lastUnit] + 1)
+			// lands after the full astral char instead of splitting the
+			// surrogate pair (#3743 implementation review: the start-only
+			// mapping truncated a match ending in an astral char and corrupted
+			// redactSecrets output with a lone low surrogate).
+			condensedToOriginal.push(cursor + k);
 		}
-		cursor += char.length;
+		cursor = (m.index as number) + m[0].length;
+	}
+	const tail = text.slice(cursor);
+	for (let k = 0; k < tail.length; k++) {
+		condensedChars.push(tail[k]);
+		condensedToOriginal.push(cursor + k);
 	}
 	return { condensed: condensedChars.join(''), condensedToOriginal };
 }

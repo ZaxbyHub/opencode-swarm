@@ -77,12 +77,12 @@ describe('#1850 cohort config fingerprint inputs (acceptance #10, #13)', () => {
 	 * family), so per the bump rule legacy v1 files fail open via the version
 	 * gate with a re-link advisory. The golden below pins the v2 algorithm.
 	 *
-	 * #3382: version 3 — REDACTION_POLICY_SALT 2→3 with embedded-shape
-	 * detection and the AWS-secret arm reorder. The algorithm (canonicalize +
-	 * hash + truncate) is unchanged, so the same golden input still hashes to
-	 * the same digest; only the CLAIMED version moves.
+	 * #3382: version 3 — REDACTION_POLICY_SALT 2→3 (embedded-shape detection +
+	 * AWS arm reorder); algorithm unchanged, golden digest identical.
+	 * #3743/#3882: version 4 — REDACTION_POLICY_SALT 3→4 (Cf/DI fill tolerance);
+	 * algorithm unchanged, golden digest identical to the v2/v3 pin.
 	 */
-	test('golden digest pins the fingerprint algorithm (version 3)', () => {
+	test('golden digest pins the fingerprint algorithm (version 4)', () => {
 		const golden: MemoryCohortFingerprintInput = {
 			provider: 'sqlite',
 			redaction_policy_version: 2000029,
