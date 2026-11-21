@@ -39,6 +39,7 @@ import { log } from '../../utils';
 import { withTimeout } from '../../utils/timeout';
 import { resolveV2ToolBeforeBudgetMs } from './hook-budget';
 import { recordV2SessionTiming, recordV2ToolTiming } from './timing-trace';
+import { noteDispatchRunning } from './delegation-trace';
 import { normalizeV2AgentRef, seedV1SessionState } from './setup';
 import type {
 	V1HooksSubset,
@@ -437,6 +438,10 @@ async function onV2ToolAfter(
 		if (rememberVerifiedNativeChild(event.result.output.sessionID, event.sessionID)) {
 			recordV2SessionTiming(event.result.output.sessionID, 'native_child_verified');
 		}
+		// r17 §8: open the delegation critical-path window at the `running`
+		// report (the status-chatter hypothesis: parent turns inside this
+		// window with no real tool work are wasted-turn candidates).
+		noteDispatchRunning(event.sessionID, event.id);
 	}
 	if (isSubagent && process.env.SWARM_SCOPE_REVOKE_TRACE === '1') {
 		// Opt-in metadata only: never log model-generated content or tool inputs.

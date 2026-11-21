@@ -43,6 +43,10 @@ import { withTimeout } from '../../utils/timeout';
 import { isPlainObject, isV2SubagentToolId, renderV1TaskEnvelopeFromV2 } from './hooks.js';
 import { isTrackedNativeChildSession, rememberVerifiedNativeChild, verifiedNativeChildParent } from './native-async-mode';
 import { recordV2SessionTiming } from './timing-trace';
+import {
+	noteDelegationHostEvent,
+	noteDelegationToolEvent,
+} from './delegation-trace';
 import { recordV2SessionErrorFromEnvelope } from './session-client';
 import type { V1HooksSubset, V2EventEnvelope, V2PluginContext } from './types';
 
@@ -108,6 +112,66 @@ function isBoundedId(value: string): boolean {
  */
 const MAX_TRACKED_TOOL_NAMES = 512;
 const toolNameByDispatchKey = new Map<string, string>();
+
+/**
+ * r17 §8: feed host session events into the opt-in delegation tracer.
+ * Metadata only — sessionID, event type, and (for tool events) the tool
+ * NAME resolved through the same bounded lookup the dispatch synthesis
+ * uses. Never payload text, arguments, results, or model output.
+ */
+function noteDelegationTraceEnvelope(
+	envelope: V2EventEnvelope,
+	lookupToolName: (sessionID: string, callID: string) => string | undefined,
+): void {
+	if (process.env.SWARM_DELEGATION_TRACE !== '1') return;
+	try {
+		const type = typeof envelope?.type === 'string' ? envelope.type : undefined;
+		if (type === undefined) return;
+		const payload = envelopePayload(envelope);
+		const sessionID =
+			typeof payload.sessionID === 'string' ? payload.sessionID : undefined;
+		if (!sessionID) return;
+		switch (type) {
+			case 'session.created':
+			case 'session.text.delta':
+			case 'session.step.ended':
+			case 'session.inbox.enqueued':
+			case 'session.execution.succeeded':
+			case 'session.execution.interrupted':
+			case 'session.execution.failed':
+			case 'session.error':
+				noteDelegationHostEvent(
+					sessionID,
+					type as Parameters<typeof noteDelegationHostEvent>[1],
+				);
+				return;
+			case 'session.tool.called':
+			case 'session.tool.success':
+			case 'session.tool.failed': {
+				const callID =
+					typeof payload.id === 'string' ? payload.id : undefined;
+				const tool =
+					(callID !== undefined ? lookupToolName(sessionID, callID) : undefined) ??
+					(typeof payload.name === 'string' ? payload.name : 'unknown');
+				noteDelegationToolEvent(
+					sessionID,
+					tool,
+					type === 'session.tool.called'
+						? 'called'
+						: type === 'session.tool.success'
+							? 'success'
+							: 'failed',
+				);
+				return;
+			}
+			default:
+				return;
+		}
+	} catch {
+		/* the tracer must never alter the event pump */
+	}
+}
+
 /**
  * The tool-name gate is checked before this mapping is produced. Only the
  * emitted trusted tool-progress shape can register a child identity.
@@ -550,6 +614,9 @@ export function startDeferredEventPump(
 			for await (const envelope of iterable as AsyncIterable<V2EventEnvelope>) {
 				if (stopped) break;
 				seedSessionIdentityFromEnvelope(envelope);
+				// r17 §8: opt-in delegation critical-path tracer (metadata only:
+				// sessionID + event type + tool NAME; never payload text).
+				noteDelegationTraceEnvelope(envelope, lookupToolNameForDispatch);
 				// #3169 Phase 2 (C4): v2 surfaces provider errors only via the
 				// event stream (no error text in context()); record them for the
 				// session-client shim's result translation. Sync, bounded, O(1).
