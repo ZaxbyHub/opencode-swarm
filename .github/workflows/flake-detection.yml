@@ -80,6 +80,8 @@ jobs:
         env:
           GH_REPO: ${{ github.repository }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The upstream workstream issue replaces the historical #3726 tracker.
+          FLAKE_TRACKING_ISSUE: ${{ github.repository == 'ZaxbyHub/opencode-swarm' && '3852' || '' }}
           # Issue #3248: the report body cites the triggering CI run so a
           # deduped comment thread still points at per-run evidence.
           DETECTION_RUN_URL: ${{ github.event.workflow_run.html_url }}
