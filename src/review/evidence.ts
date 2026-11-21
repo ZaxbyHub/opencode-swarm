@@ -167,10 +167,10 @@ export const _internals = {
  * #3844: redact credential material from the free-text fields of auto-review
  * evidence BEFORE it reaches the durable `.swarm` artifact. Model-authored
  * finding prose routinely quotes source lines; a credential in the reviewed
- * diff must not land verbatim in durable evidence. Runs at the PERSISTENCE
- * boundary — after the engine's raw-value classifiers (#3710 ordering), so
- * quota/failover classification is unchanged. Deep-clones; the caller's
- * in-memory object is untouched.
+ * diff must not land verbatim in durable evidence. Called at ASSEMBLY (the
+ * engine, after its raw-value classifiers — #3710 ordering, so quota/failover
+ * classification is unchanged) and re-applied idempotently at the PERSISTENCE
+ * boundary. Mutates the passed object in place and returns it.
  */
 export function redactAutoReviewEvidenceForCapture(
 	evidence: AutoReviewEvidence,
