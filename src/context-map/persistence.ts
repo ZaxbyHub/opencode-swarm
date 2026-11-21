@@ -43,6 +43,13 @@ export const _internals = {
 	renameSync: fs.renameSync,
 	existsSync: fs.existsSync,
 	statSync: fs.statSync,
+	/**
+	 * r17 (P1): lstat-based classification for the discriminated read —
+	 * symlink/dir/permission states must be distinguished from provable
+	 * absence without following the link. Seamed so tests can inject
+	 * metadata failures (EACCES) and vanish-between-stat-and-read races.
+	 */
+	lstatSync: fs.lstatSync,
 	createHash: crypto.createHash.bind(crypto),
 	/**
 	 * r16 (P2): the canonical atomic swarm writer (unique registered temp,
@@ -153,15 +160,49 @@ export type ContextMapReadState =
 	| { kind: 'missing' }
 	| { kind: 'unreadable' };
 
+/**
+ * Whether an fs error is an exact ENOENT — the ONLY signal that proves a
+ * path is absent. Typed narrow check (mirrors the atomic-write.ts errno
+ * pattern); any other code (EACCES, ENOTDIR, EPERM, unknown shapes) is NOT
+ * absence.
+ */
+function isExactNotFoundError(error: unknown): boolean {
+	return (
+		typeof error === 'object' &&
+		error !== null &&
+		'code' in error &&
+		(error as NodeJS.ErrnoException).code === 'ENOENT'
+	);
+}
+
 export function readContextMapState(directory: string): ContextMapReadState {
 	const filePath = path.join(directory, '.swarm', 'context-map.json');
+	// r17 audit repair (P1): `existsSync()` is not proof of absence — it
+	// FOLLOWS symlinks, so a PRESENT dangling symlink reports `false` and the
+	// previous classification returned `missing`, the one state the r16/r17
+	// repairs treat as "rebuild is legitimate". A rebuild persists via
+	// atomic-rename, which REPLACES the link itself: a filesystem object
+	// whose identity was never verified gets clobbered. A symlink to a
+	// foreign VALID json file was likewise accepted as a normal readable map
+	// (`ok`) — reading arbitrary foreign files with no explicit contract.
+	//
+	// Classify by lstat instead: only an exact ENOENT proves absence; every
+	// other observable state — symlink (dangling or not), directory, fifo,
+	// non-regular file, or any metadata-access failure — is `unreadable`
+	// (fail toward preservation). The residual swap-between-lstat-and-read
+	// race is inherent to path-based APIs and is documented fail-closed: the
+	// read that follows goes through the same filePath and a failure there
+	// still lands in `unreadable`, never `missing`.
+	let stat: fs.Stats;
 	try {
-		if (!_internals.existsSync(filePath)) {
+		stat = _internals.lstatSync(filePath);
+	} catch (error) {
+		if (isExactNotFoundError(error)) {
 			return { kind: 'missing' };
 		}
-	} catch {
-		// existsSync threw (e.g. invalid path) — absence is not provable, so
-		// fail toward preservation rather than rebuild.
+		return { kind: 'unreadable' };
+	}
+	if (!stat.isFile() || stat.isSymbolicLink()) {
 		return { kind: 'unreadable' };
 	}
 	const map = loadContextMap(directory);
