@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.205.2",
+  "tagCommit": "c450e20a8b209979a3829be7522064ef6b44dba3",
+  "targetCommitish": "c450e20a8b209979a3829be7522064ef6b44dba3",
+  "releaseBodySha256": "8646d8199c66967a97fd252ad1c5c9c57ea93d3fcb8f25b785aeb5088941d8d3",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/3381-3608-test-infra-reliability.md",
+      "sha256": "9fcced9e179850e4d74a25d8095e77d7f18a6547cd55d38626547d44fdbd4553"
+    },
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/3743-3756-redaction-zwsplit-capability-ttl-type-probe.md",
+      "sha256": "1fc753324792fc075ab0337f1122adb0a59e5c89a5d50f1169895ab777f7ee71"
+    },
+    {
+      "prNumber": null,
+      "order": 2,
+      "path": "docs/releases/pending/autoinject-acceptance-test-gaps-3381.md",
+      "sha256": "57d0b1da2fd20eea24e28f3f526df01a4ea92b1ad2097c731fc4700706fb6348"
+    }
+  ]
+}
