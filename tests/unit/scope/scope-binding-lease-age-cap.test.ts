@@ -1,13 +1,13 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test';
 import type { Plan } from '../../../src/config/plan-schema';
 import {
-	MAX_PENDING_SCOPE_BINDINGS,
-	MAX_SCOPE_BINDING_AGE_MS,
 	clearScopeBindings,
 	createScopeBinding,
 	getScopeBinding,
 	hasDeliberateScopeBindingDenyOverlay,
 	hasScopeBindingDenyOverlay,
+	MAX_PENDING_SCOPE_BINDINGS,
+	MAX_SCOPE_BINDING_AGE_MS,
 	registerScopeBinding,
 	type ScopeBinding,
 } from '../../../src/scope/scope-binding';
@@ -137,9 +137,9 @@ test('fresh entries at capacity still fail closed (the cap must not evict fresh 
 });
 
 test('renewed entries older than the cap are swept, reopening admission (issue #3889)', () => {
-	// Fill the admission map with entries shaped like continuously-renewed
-	// live bindings: expiresAt in the future, but declared 25h ago (one slot
-	// holds a 23h-old binding, which the age cap must NOT touch).
+	// Admit one 23h-old and one 25h-old binding shaped like continuously
+	// renewed live bindings (expiresAt in the future; the 23h entry must NOT
+	// be touched by the age cap), then fresh entries up to the map's capacity.
 	const retained = renewedOldBinding(freshBinding(directory), 23 * HOUR_MS);
 	expect(registerScopeBinding(retained).ok).toBe(true);
 	const aged = renewedOldBinding(freshBinding(directory), 25 * HOUR_MS);
@@ -148,9 +148,8 @@ test('renewed entries older than the cap are swept, reopening admission (issue #
 		expect(registerScopeBinding(freshBinding(directory)).ok).toBe(true);
 	}
 	// The next declare_scope must be admitted: sweepExpired runs at the top
-	// of registerScopeBinding and must evict the 25h entries instead of
-	// refusing with SCOPE_BINDING_STORE_OVERLOADED (the child-seen diagnosis
-	// of this capacity failure).
+	// of registerScopeBinding and must evict the 25h entry instead of
+	// leaving them to accumulate toward SCOPE_BINDING_CAPACITY.
 	const reopened = registerScopeBinding(freshBinding(directory));
 	expect(reopened.ok).toBe(true);
 	// The 25h entry is gone; the 23h entry is retained; the new binding
