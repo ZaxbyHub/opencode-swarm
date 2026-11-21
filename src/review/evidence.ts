@@ -175,8 +175,11 @@ export const _internals = {
 export function redactAutoReviewEvidenceForCapture(
 	evidence: AutoReviewEvidence,
 ): AutoReviewEvidence {
-	const clone = structuredClone(evidence);
-	for (const finding of clone.findings) {
+	// Mutates the passed object IN PLACE and returns it (the engine calls
+	// this as a statement at assembly; the persistence boundary uses the
+	// return value). No clone: the object is freshly built by the engine at
+	// this point, and the persistence pass re-applies idempotently.
+	for (const finding of evidence.findings) {
 		finding.body = redactEvidenceText(finding.body);
 		finding.title = redactEvidenceText(finding.title);
 		if (finding.anchor_rejection !== undefined) {
@@ -188,13 +191,13 @@ export function redactAutoReviewEvidenceForCapture(
 			);
 		}
 	}
-	if (clone.validation_error !== undefined) {
-		clone.validation_error = redactEvidenceText(clone.validation_error);
+	if (evidence.validation_error !== undefined) {
+		evidence.validation_error = redactEvidenceText(evidence.validation_error);
 	}
-	if (clone.review.error !== undefined) {
-		clone.review.error = redactEvidenceText(clone.review.error);
+	if (evidence.review.error !== undefined) {
+		evidence.review.error = redactEvidenceText(evidence.review.error);
 	}
-	return clone;
+	return evidence;
 }
 
 export async function persistAutoReviewEvidence(

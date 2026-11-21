@@ -288,6 +288,23 @@ function normalizeFindingForPersistence<
 	};
 }
 
+/**
+ * #3844: legacy pre-redaction rows on disk can still be raw — re-redact the
+ * synthesis inputs (idempotent over placeholders), consistent with the
+ * post-abort exporter; preserves the row's exact type.
+ */
+function redactPersistedFindingForSynthesis<
+	T extends { evidence: string; next_action?: string },
+>(row: T): T {
+	return {
+		...row,
+		evidence: redactEvidenceText(row.evidence),
+		...(row.next_action !== undefined
+			? { next_action: redactEvidenceText(row.next_action) }
+			: {}),
+	};
+}
+
 function findingsIdentityKey(boundary: string): string {
 	return `findings:${boundary}`;
 }
@@ -1120,9 +1137,14 @@ export async function executeWritePrReviewArtifact(
 				// The critic boundary is the authoritative settlement point. Route
 				// every admitted row through the shared settlement adapter before the
 				// final policy evidence is synthesized and persisted.
+				// #3844: legacy pre-redaction rows on disk can still be raw —
+				// re-redact the synthesis inputs (idempotent over
+				// placeholders), consistent with the post-abort exporter.
 				const synthesis = synthesizePrReviewFindings({
 					candidates: policyCandidates(
-						[...latest.values()],
+						[...latest.values()].map((row) =>
+							redactPersistedFindingForSynthesis(row),
+						),
 						sessionID,
 						findingsInput.boundary,
 					),

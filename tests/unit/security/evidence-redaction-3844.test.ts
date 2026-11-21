@@ -5,6 +5,9 @@
  * content preserves byte-identically. Synthetic tokens only.
  */
 import { describe, expect, test } from 'bun:test';
+import { mkdtempSync, readFileSync, realpathSync } from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { redactSecrets } from '../../../src/memory/redaction';
 import { redactEvidenceText } from '../../../src/security/evidence-redaction';
 
@@ -107,6 +110,74 @@ describe('#3844 redactEvidenceText superset contract', () => {
 			'https://ci.example.invalid/log?access_token=abc123def456&x=1',
 		);
 		expect(out).not.toContain('abc123def456');
+	});
+
+	test('handoff sidecar failure ABORTS creation (round-1 fix 1 pin): no artifact when the salt is corrupt', async () => {
+		// The unit-level pin of the sidecar-first abort contract:
+		// writeReplayIdentityFingerprint with a CORRUPT salt MUST throw (the
+		// tool's handoff path catches exactly this to abort creation — the
+		// round-1 catch-and-continue would have created the artifact).
+		const { mkdirSync, writeFileSync, existsSync } = await import('node:fs');
+		const dir = realpathSync(
+			mkdtempSync(path.join(os.tmpdir(), 'sw-3844-hoff-')),
+		);
+		const saltPath = path.join(
+			dir,
+			'.swarm',
+			'pr-review',
+			'replay-identity.salt',
+		);
+		mkdirSync(path.dirname(saltPath), { recursive: true });
+		writeFileSync(saltPath, 'corrupt-not-hex', 'utf8');
+		const { replayFingerprint, writeReplayIdentityFingerprint } = await import(
+			'../../../src/security/replay-identity'
+		);
+		let threw = false;
+		try {
+			// The handoff path computes the fingerprint FIRST; a corrupt salt
+			// makes exactly this call throw, which the tool catches to ABORT.
+			const fp = replayFingerprint(dir, 'summary mentioning nothing');
+			writeReplayIdentityFingerprint(dir, 'run-x', 'handoff', fp);
+		} catch {
+			threw = true;
+		}
+		expect(threw).toBe(true);
+		expect(existsSync(path.join(dir, '.swarm', 'pr-review', 'run-x'))).toBe(
+			false,
+		);
+	});
+
+	test('per-project journal dedup (round-1 fix 4 pin): identical corrupt lines journal once per PROJECT', async () => {
+		const { mkdirSync, writeFileSync } = await import('node:fs');
+		const { readTrainingVault } = await import('../../../src/training/vault');
+		const { trainingQuarantinePath } = await import(
+			'../../../src/training/paths'
+		);
+		const dirA = realpathSync(
+			mkdtempSync(path.join(os.tmpdir(), 'sw-3844-dedupA-')),
+		);
+		const dirB = realpathSync(
+			mkdtempSync(path.join(os.tmpdir(), 'sw-3844-dedupB-')),
+		);
+		const corrupt = 'not json at all\n';
+		for (const d of [dirA, dirB]) {
+			const target = path.join(
+				d,
+				'.swarm',
+				'training',
+				'v1',
+				'vault',
+				'records.jsonl',
+			);
+			mkdirSync(path.dirname(target), { recursive: true });
+			writeFileSync(target, corrupt, 'utf8');
+			readTrainingVault(d);
+			readTrainingVault(d);
+		}
+		const journalA = readFileSync(trainingQuarantinePath(dirA), 'utf8');
+		const journalB = readFileSync(trainingQuarantinePath(dirB), 'utf8');
+		expect(journalA.trim().split('\n')).toHaveLength(1);
+		expect(journalB.trim().split('\n')).toHaveLength(1); // B NOT suppressed by A
 	});
 
 	test('JWS scanner shapes beyond the bare arms', () => {

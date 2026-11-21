@@ -1,6 +1,23 @@
 import type { ToolDefinition } from '@opencode-ai/plugin/tool';
 import { z } from 'zod';
 import { redactEvidenceText } from '../security/evidence-redaction.js';
+
+/**
+ * #3844: recursively redact every STRING inside a parsed gh JSON payload
+ * (arrays, objects, nested) — String(obj) would collapse the whole payload
+ * to "[object Object]". Non-string leaves pass through untouched.
+ */
+function redactEvidenceJson(value: unknown): unknown {
+	if (typeof value === 'string') return redactEvidenceText(value);
+	if (Array.isArray(value)) return value.map(redactEvidenceJson);
+	if (value && typeof value === 'object') {
+		const out: Record<string, unknown> = {};
+		for (const [k, v] of Object.entries(value)) out[k] = redactEvidenceJson(v);
+		return out;
+	}
+	return value;
+}
+
 import {
 	resolveExecutableFromPath,
 	runExternalTool,
@@ -497,7 +514,7 @@ export const gh_evidence: ToolDefinition = createSwarmTool({
 					2,
 				);
 			}
-			data = redactEvidenceText(String(sanitizeParsedJson(parsed)));
+			data = redactEvidenceJson(sanitizeParsedJson(parsed));
 			// Extract run metadata if available
 			if (
 				target === 'run' &&
