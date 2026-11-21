@@ -341,7 +341,7 @@ describe('#3844 round-5 executor-level replay-identity pins', () => {
 		await expect(fs.stat(handoffPath(runId))).rejects.toThrow();
 	}, 120_000);
 
-	test('artifact-create failure after the identity landed leaves ONLY the documented inert residue', async () => {
+	test('artifact-create failure after the identity landed leaves the IDENTITY-RESERVING residue (round-6 contract)', async () => {
 		const runId = 'claims-residue';
 		await commitFullReview(runId);
 		artifactInternals.atomicCreate = async () => {
@@ -356,7 +356,9 @@ describe('#3844 round-5 executor-level replay-identity pins', () => {
 				),
 			);
 			expect(rejected).toContain('operation create');
-			// Inert residue: claim + sidecar exist; the artifact does not.
+			// Identity-reserving residue: claim + sidecar exist; the artifact
+			// does not. The claim is immutable — a possibly-committed identity
+			// is never silently taken over by foreign content.
 			expect(readReplayIdentityClaim(directory, runId, 'handoff')).toMatch(
 				/^[0-9a-f]{64}$/,
 			);
@@ -367,13 +369,49 @@ describe('#3844 round-5 executor-level replay-identity pins', () => {
 		} finally {
 			artifactInternals.atomicCreate = originalAtomicCreate;
 		}
-		// The residue is inert: an IDENTICAL-raw retry still succeeds through it.
+		// DIFFERENT-raw retry after the failed create CONFLICTS on the
+		// reserved identity (the round-6 fail-closed amendment).
+		const foreign = await rejectionMessage(
+			executeWritePrReviewArtifact(
+				handoffArgs(runId, `residue summary ${`ghp_${'y'.repeat(30)}`}`),
+				directory,
+				{ sessionID: SESSION_ID },
+			),
+		);
+		expect(foreign).toContain('conflicting concurrent handoff content');
+		await expect(fs.stat(handoffPath(runId))).rejects.toThrow();
+		// An IDENTICAL-raw retry still succeeds through the residue.
 		const retry = await executeWritePrReviewArtifact(
 			handoffArgs(runId, `residue summary ${TOKEN}`),
 			directory,
 			{ sessionID: SESSION_ID },
 		);
 		expect(retry).toContain('"success": true');
+	}, 120_000);
+
+	test('claim succeeds but the SIDECAR write fails: no artifact, claim retained (round-6 Y2 leg)', async () => {
+		const runId = 'claims-sidecar-fail';
+		await commitFullReview(runId);
+		// Pre-existing CORRUPT sidecar: the claim step succeeds (fresh claim
+		// file), then writeReplayIdentityFingerprint reads the corrupt sidecar
+		// and throws — aborting BEFORE the artifact write.
+		const sidecarPath = replaySidecarPath(directory, runId);
+		nodeFs.mkdirSync(path.dirname(sidecarPath), { recursive: true });
+		nodeFs.writeFileSync(sidecarPath, 'not json', 'utf8');
+		const rejected = await rejectionMessage(
+			executeWritePrReviewArtifact(
+				handoffArgs(runId, `sidecar fail summary ${TOKEN}`),
+				directory,
+				{ sessionID: SESSION_ID },
+			),
+		);
+		expect(rejected).toContain('handoff replay-identity sidecar');
+		await expect(fs.stat(handoffPath(runId))).rejects.toThrow();
+		// The successful claim survived the sidecar failure and still owns
+		// the identity (fail-closed: fail both ways, never ambiguous).
+		expect(readReplayIdentityClaim(directory, runId, 'handoff')).toMatch(
+			/^[0-9a-f]{64}$/,
+		);
 	}, 120_000);
 
 	test('existing artifact: different raw summary conflicts; identical raw dedups byte-stably', async () => {

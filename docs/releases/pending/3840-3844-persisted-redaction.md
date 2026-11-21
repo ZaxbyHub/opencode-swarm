@@ -84,5 +84,10 @@ docs/training-vault-remediation.md.
   invariant.
 - Executor-level pins now cover the handoff/claim race, both comparators'
   missing/corrupt fail-closed legs, the token-bearing severity-only
-  committed replay through the sidecar, the documented inert residue after a
-  failed artifact create, and same-family different-secret conflicts.
+  committed replay through the sidecar, post-claim sidecar-write failure,
+  and same-family different-secret conflicts. The claim/sidecar residue a
+  failed artifact create leaves behind is IDENTITY-RESERVING, not inert: an
+  identical-raw retry succeeds through it, a different-raw retry conflicts
+  (the claim is immutable for the run's life — a possibly-committed
+  identity is never silently taken over); operator recovery for an
+  abandoned run is archiving/deleting `.swarm/pr-review/<runId>/`.
