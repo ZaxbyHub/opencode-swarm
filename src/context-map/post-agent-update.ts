@@ -997,6 +997,38 @@ export async function resolveContextMapTaskReleaseStatus(
 }
 
 /**
+ * r17 audit repair (P1): read the task's CURRENT status from the plan.json
+ * projection with a single RAW read — deliberately NOT through the plan
+ * artifact cache (each cached load costs a stat plus a structuredClone of the
+ * entire plan, which would re-create the per-task plan-load budget the r16
+ * repair removed) and not through a schema-validated parse (the fence only
+ * needs one field). Fail-closed: any read/parse error, missing task, or
+ * non-string status yields null and the caller skips the promotion.
+ */
+function readCurrentTaskStatusFromPlan(
+	directory: string,
+	taskId: string,
+): string | null {
+	try {
+		const planPath = path.join(directory, '.swarm', 'plan.json');
+		const raw = _internals.readFileSync(planPath, 'utf-8');
+		const parsed = JSON.parse(raw) as {
+			phases?: Array<{ tasks?: Array<{ id?: unknown; status?: unknown }> }>;
+		};
+		for (const phase of parsed.phases ?? []) {
+			for (const task of phase.tasks ?? []) {
+				if (task?.id === taskId) {
+					return typeof task.status === 'string' ? task.status : null;
+				}
+			}
+		}
+		return null;
+	} catch {
+		return null;
+	}
+}
+
+/**
  * r14 audit repair (P1-5): the AUTHORITATIVE task-release promotion. The
  * background completion observer (and the sync Task handoff) deliberately
  * write only the non-final `'pending'` summary until the task is released;
@@ -1007,6 +1039,12 @@ export async function resolveContextMapTaskReleaseStatus(
  * Never overwrites a terminal `'rejected'` entry (a positive verdict cannot
  * erase an already-recorded negative one); idempotent; creates a minimal
  * summary when no child ever recorded one.
+ *
+ * CONTRACT: the CALLER owns the release authority. This sync primitive
+ * promotes what it is told; the stale-plan fence (r17) lives in the
+ * production entry point {@link promoteContextMapTaskReleaseLocked}, which
+ * re-verifies the current authoritative task status under the context-map
+ * lock immediately before calling this function.
  */
 export function promoteContextMapTaskRelease(
 	directory: string,
@@ -1068,6 +1106,40 @@ export async function promoteContextMapTaskReleaseLocked(
 	taskId: string,
 ): Promise<void> {
 	await withContextMapLock(directory, 'update_task_status', taskId, () => {
+		// r17 audit repair (P1): STALE-PLAN FENCE. The reconciliation selects
+		// its candidates from a plan loaded BEFORE the per-task (async)
+		// evidence proof, and the authoritative task status can change in
+		// between — a rework flips completed → in_progress under a new
+		// workflow generation. The existing plan-identity fence does not
+		// catch this: `planIdentityHash` derives from `swarm` + `title` only,
+		// so a task-status change never changes it, and unstamped legacy
+		// evidence skips the mismatch check entirely. Re-read the task's
+		// CURRENT status here — under the context-map lock, immediately
+		// before the write — and skip the promotion unless it is still
+		// `completed`. No fresh `approved` marking is created for a task that
+		// is no longer released; the pending entry survives for the next
+		// maintenance pass.
+		//
+		// The fence is a single RAW plan.json read (not the artifact cache) —
+		// a cached load costs a stat plus a structuredClone of the ENTIRE
+		// plan per promoted task, which would re-create the per-task
+		// plan-load budget the r16 repair removed.
+		//
+		// RESIDUAL RACE (documented, deliberately not claimed closed): the
+		// plan ledger's writes are not serialized against this context-map
+		// lock — no common authority boundary exists between the two stores.
+		// The fence closes the wide window (the evidence proof plus the lock
+		// wait) but a plan write racing inside the read→promote→save window
+		// itself can still interleave. A skipped promotion is fail-closed and
+		// recovered: the next maintenance-point reconciliation re-drives it
+		// once the task is released again.
+		const currentStatus = readCurrentTaskStatusFromPlan(directory, taskId);
+		if (currentStatus !== 'completed') {
+			logger.warn(
+				`[context-map] task-release promotion for task ${taskId} skipped — the authoritative plan status is '${currentStatus ?? 'task-missing'}' (not completed) at promotion time; the next maintenance pass re-drives it once the task is released`,
+			);
+			return;
+		}
 		promoteContextMapTaskRelease(directory, taskId);
 	});
 }
