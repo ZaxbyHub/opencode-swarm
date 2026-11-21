@@ -469,11 +469,13 @@ export function sanitizeFailureEvidenceDisplay(value: string): string {
 			// code-point position misaligns every span after a kept astral
 			// character (emoji/CJK-ext) and maps a token ending at the
 			// input end past the array (NaN end -> slice(NaN) appends the
-			// whole cleartext string). Every unit of a kept char maps to
-			// that char's original index; matches always start/end on char
-			// boundaries, so only whole-char lookups occur.
+			// whole cleartext string). Each unit carries its OWN absolute
+			// offset (cursor + unit) so a span END lookup (map[lastUnit]+1)
+			// lands after the full astral char instead of splitting the
+			// surrogate pair (#3743 implementation review); matches always
+			// start/end on char boundaries.
 			for (let unit = 0; unit < char.length; unit += 1) {
-				condensedToOriginal.push(cursor);
+				condensedToOriginal.push(cursor + unit);
 			}
 		}
 		cursor += char.length;

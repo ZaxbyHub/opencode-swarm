@@ -6,7 +6,15 @@
  * types against FAITHFUL aliases of the published @opencode/*@2.3.0 shapes (the
  * tagged packages themselves are deliberately not repo dependencies; the
  * pre-implementation actual-alias probe against the real tarballs lives in the
- * issue trace). Gate:
+ * issue trace).
+ *
+ * WIRED GATE (#3756): this probe is compiled on every PR by the ci.yml quality
+ * job through scripts/check-vendored-surface-probe.ts (invoked directly — the
+ * release-owner-guard treats package.json as release-please-owned for
+ * non-release PRs, #2677, so no script alias exists), which
+ * runs the pinned LOCAL TypeScript (node_modules/typescript, lockfile 5.9.3;
+ * a globally resolved `bunx tsc` fetches TS 6.x and refuses this argv with
+ * TS5112). The historical manual command was:
  *
  *   bunx tsc --noEmit --strict --skipLibCheck --module esnext \
  *     --moduleResolution bundler --target es2022 \

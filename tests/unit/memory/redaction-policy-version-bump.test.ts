@@ -57,12 +57,12 @@ describe('computeRedactionPolicyVersion (#1466 object form)', () => {
 	// families x 2 + 1 (rejectDurableSecrets). A salt-only revert (or an
 	// unnoticed pattern-family removal) must flip this, not just the relative
 	// deltas above.
-	test('#3382 current policy version is pinned (salt 3, 14 families)', () => {
+	test('#3382/#3743 current policy version is pinned (salt 4 (#3743 Cf/DI fill tolerance), 14 families)', () => {
 		expect(computeRedactionPolicyVersion({ rejectDurableSecrets: true })).toBe(
-			3_000_029,
+			4_000_029,
 		);
 		expect(computeRedactionPolicyVersion({ rejectDurableSecrets: false })).toBe(
-			3_000_028,
+			4_000_028,
 		);
 	});
 });
