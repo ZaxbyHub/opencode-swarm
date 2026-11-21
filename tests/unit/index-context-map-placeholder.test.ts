@@ -88,7 +88,13 @@ describe('context map: running placeholder is not a completion (F2)', () => {
 
 		const map = loadContextMap(directory);
 		expect(map?.task_history['1.1']).toBeDefined();
-		// deriveFinalStatus maps a successful completion to 'approved'.
-		expect(map?.task_history['1.1']?.final_status).toBe('approved');
+		// r14 audit repair (P1-5), pinned since r17 test hygiene: a single
+		// child completion is NOT a whole-task release. The sync handoff
+		// writes the same NON-FINAL 'pending' status as the background
+		// observer; the terminal 'approved' promotion happens only at the
+		// authoritative release point (update_task_status →
+		// promoteContextMapTaskRelease). The pre-r14 'approved' expectation
+		// here was stale and failed identically on unmodified HEAD.
+		expect(map?.task_history['1.1']?.final_status).toBe('pending');
 	});
 });
