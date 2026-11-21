@@ -21,6 +21,7 @@ Delegate plan to the active swarm's critic agent for review BEFORE any implement
 - **APPROVED** → Proceed to MODE: EXECUTE
 - **NEEDS_REVISION** → Revise the plan based on critic feedback, then resubmit (max 2 cycles)
 - **REJECTED** → Inform the user of fundamental issues and ask for guidance before proceeding
+- **FRESH DISPATCH EVERY ROUND**: every CRITIC-GATE dispatch — the first review AND every re-review after NEEDS_REVISION or a material plan change — must launch a FRESH critic child. Never resume a prior critic child session (never pass `sessionID` to the subagent/Task tool, even though the host invites follow-ups). The durable delegation store tracks one launch per child session: a resumed round of a completed child can never be durably tracked, so its verdict is silently lost and the approval recorder never fires (`no_approved_snapshot`). The delegation gate rejects such resumes with `SWARM_CHILD_RESUME_UNTRACKABLE` — omit `sessionID` and dispatch a fresh child instead.
 
 ⛔ HARD STOP — Print this checklist before advancing to MODE: EXECUTE:
   [ ] the active swarm's critic agent returned a verdict

@@ -5050,6 +5050,56 @@ export function createDelegationGateHook(
 			throw new Error(SWARM_BACKGROUND_TASK_BLOCKED_MESSAGE);
 		}
 
+		// Native-async resume guard (issue #2012's silent-loss class, observed
+		// live on @opencode/cli 2.x): on a native v2 async host the model may
+		// pass `sessionID` to RESUME a prior child session — the host's own
+		// subagent tool invites exactly that ("call subagent again with this
+		// sessionID"), and a CRITIC-GATE re-review after NEEDS_REVISION is the
+		// natural moment to do it. The durable delegation store models ONE
+		// immutable launch per child session: once the record is terminal,
+		// the resumed round can never be re-tracked — toolAfter records a
+		// correlation `conflict` for the new callID, and the follow-up
+		// terminal is rejected as a late terminal (claimTerminalResult), so
+		// the resumed round's verdict is SILENTLY LOST. For a MODE:
+		// CRITIC-GATE re-review this wedges EXECUTE at
+		// `no_approved_snapshot`, and the approve_plan_critic escape hatch
+		// is architect-session-only — a non-architect orchestrator deadlocks.
+		// Fail loud BEFORE the child launches: a standard canonical-role
+		// dispatch that resumes a TERMINAL child is refused with an
+		// actionable message. Non-terminal (pending/running) records stay
+		// resumable — their single terminal is still consumable. Lane/batch
+		// and PR-review records (batchId/laneId/mode/workflowLane set) manage
+		// their own resume semantics and never block here; an uncertain store
+		// read degrades open (the toolAfter conflict advisory still applies).
+		const resumeChildSessionId =
+			typeof args.sessionID === 'string' && args.sessionID.trim() !== ''
+				? args.sessionID.trim()
+				: null;
+		if (resumeChildSessionId && isKnownCanonicalRole(targetAgent)) {
+			const { findByCorrelationIdDetailed, isTerminalDelegationStatus } =
+				await import('../background/pending-delegations.js');
+			const existingRead = findByCorrelationIdDetailed(
+				directory,
+				resumeChildSessionId,
+			);
+			const existingRecord =
+				existingRead.status === 'ok' ? existingRead.value : null;
+			if (
+				existingRecord &&
+				isTerminalDelegationStatus(existingRecord.status) &&
+				existingRecord.batchId === undefined &&
+				existingRecord.laneId === undefined &&
+				existingRecord.mode === undefined &&
+				existingRecord.workflowLane === undefined
+			) {
+				throw new Error(
+					`SWARM_CHILD_RESUME_UNTRACKABLE: this ${targetAgent} dispatch resumes child session ${resumeChildSessionId}, whose durable delegation record is already terminal (${existingRecord.status}). ` +
+						'A resumed round of a completed child can never be durably tracked: the completion verdict of the follow-up round would be silently lost (one terminal per launch), and for a plan-critic gate that wedges execution at no_approved_snapshot. ' +
+						'Launch a FRESH child for this round instead — omit the sessionID argument. Never resume a completed swarm child for a gate-bearing dispatch.',
+				);
+			}
+		}
+
 		// r13 repair (audit P0-2): capture the authoritative plan baseline for
 		// an explicit plan critic-gate dispatch BEFORE the child starts. The
 		// Task tool has NOT executed yet at this point — a later plan edit can
