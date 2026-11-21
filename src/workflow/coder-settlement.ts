@@ -1126,7 +1126,14 @@ async function selfHealMissingLaneWorktree(
 	// un-abort the settlement, and must never re-wedge update_task_status —
 	// re-wedging is exactly the deadlock this change removes.
 	try {
-		await cleanupRecoveredWorktree(directory, descriptor);
+		if (
+			(await cleanupRecoveredWorktree(directory, descriptor)) ===
+			'skipped-uncertain'
+		) {
+			// #3888: ownership uncertain - do NOT mark cleanup complete; the
+			// next recovery pass retries once the inventory is readable.
+			return false;
+		}
 		const healedWal = await readWal(filePath, taskId);
 		if (healedWal !== null) {
 			await writeWal(filePath, { ...healedWal, cleanupComplete: true });

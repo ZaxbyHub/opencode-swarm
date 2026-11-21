@@ -3279,7 +3279,6 @@ export async function cleanupStandardWorktreeForCallId(
 		// Remove entries from in-memory tracking maps.
 		standardWorktreeByCallID.delete(callID);
 		awaitingMergeByCallID.delete(callID);
-		releaseCleanupLock();
 
 		const session = ensureAgentSession(parentSessionID);
 		pushAdvisory(

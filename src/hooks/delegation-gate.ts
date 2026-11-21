@@ -7179,7 +7179,11 @@ export function createDelegationGateHook(
 							`STANDARD_WORKTREE_CLEANUP_SKIPPED_REPROVISIONED_OWNERSHIP_UNCERTAIN: dispatch ${input.callID} skipped teardown of lane ${standardDispatch.handle.worktreePath} (${standardDispatch.handle.branchName}) — the ownership inventory was unreadable (${terminalSuperseding.reason}); retry later.`,
 						);
 					} else {
-						standardWorktreeByCallID.delete(input.callID);
+						// #3888 r2: preserve BEFORE deleting the active entry - the
+						// preservation helper looks the dispatch up by callID in the maps
+						// (worktree-isolation preserveDirtyWorktreeForCallId) and would
+						// otherwise report {outcome:"clean"} without ever inspecting dirty
+						// work. The entry is deleted at the END of the destructive tail.
 						const reason = (
 							outputTerminalState === 'cancelled' ? 'cancelled' : 'denied'
 						) as 'cancelled' | 'denied';
@@ -7231,6 +7235,7 @@ export function createDelegationGateHook(
 							standardDispatch.handle.branchName,
 						);
 						awaitingMergeByCallID.delete(input.callID);
+						standardWorktreeByCallID.delete(input.callID);
 						recordWorktreeMergeFailure(
 							standardDispatch.planTaskId ?? standardDispatch.taskId,
 							{
