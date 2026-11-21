@@ -7101,13 +7101,41 @@ export function createDelegationGateHook(
 					// (its pre-provision collision check no longer sees this
 					// dispatch). Re-validate lane ownership BEFORE the map delete,
 					// preservation, or any destructive step.
-					const terminalSuperseding =
-						await _wtiInternals.findSupersedingLaneDispatch(
+					// #3888 G2 atomicity: hold the provisioning lifecycle lock across
+					// classification (a re-dispatch's marker publication takes the
+					// same lock, so classification cannot interleave with a
+					// publication). Lock failure degrades to the uncertain arm
+					// (preservation, retryable).
+					const terminalLock =
+						await _wtiInternals.tryAcquireWorktreeLifecycleLock(
 							directory,
+							'.swarm/locks/init-orphan-recovery.lock',
+							'worktree-teardown',
 							input.callID,
-							standardDispatch.handle.worktreePath,
-							standardDispatch.handle.branchName,
 						);
+					let terminalSuperseding:
+						| Awaited<
+								ReturnType<typeof _wtiInternals.findSupersedingLaneDispatch>
+						  >
+						| undefined;
+					if (!terminalLock.acquired) {
+						terminalSuperseding = {
+							kind: 'uncertain',
+							reason: 'worktree lifecycle lock busy (teardown classification)',
+						};
+					} else {
+						try {
+							terminalSuperseding =
+								await _wtiInternals.findSupersedingLaneDispatch(
+									directory,
+									input.callID,
+									standardDispatch.handle.worktreePath,
+									standardDispatch.handle.branchName,
+								);
+						} finally {
+							await terminalLock.lock._release?.();
+						}
+					}
 					if (terminalSuperseding && terminalSuperseding.kind !== 'uncertain') {
 						// Confirmed re-provision: the lane belongs to a live
 						// dispatch. Skip preserve/remove/postMerge entirely

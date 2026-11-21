@@ -3085,81 +3085,58 @@ export async function cleanupStandardWorktreeForCallId(
 	const releaseCleanupLock = (): void => {
 		void cleanupLock.lock._release?.();
 	};
-	const superseding = _internals.findSupersedingLaneDispatch(
-		directory,
-		callID,
-		worktreePath,
-		branchName,
-	);
-	if (superseding && superseding.kind !== 'uncertain') {
-		// Confirmed re-provision: the lane belongs to a different live dispatch.
-		// Skip preservation too — it would `git add -A` + commit inside the live
-		// dispatch's lane — and drop only OUR tracking entries.
-		standardWorktreeByCallID.delete(callID);
-		awaitingMergeByCallID.delete(callID);
-		releaseCleanupLock();
-		const skipSession = ensureAgentSession(parentSessionID);
-		pushAdvisory(
-			skipSession,
-			`STANDARD_WORKTREE_CLEANUP_SKIPPED_REPROVISIONED: dispatch ${callID} skipped teardown of lane ${worktreePath} (${branchName}) — now owned by ${superseding.kind} ${superseding.callID}; worktree, branch and live-owner record preserved.`,
+	try {
+		const superseding = _internals.findSupersedingLaneDispatch(
+			directory,
+			callID,
+			worktreePath,
+			branchName,
 		);
-		return {
-			removedWorktree: false,
-			cleanedBranch: false,
-			preservedRecoveryLane: false,
-			skippedReprovisioned: true,
-		};
-	}
-	if (superseding) {
-		// Uncertain ownership inventory: fail closed — no destructive step, keep
-		// OUR tracking entries so a later cleanup retry can find this dispatch.
-		releaseCleanupLock();
-		const uncertainSession = ensureAgentSession(parentSessionID);
-		pushAdvisory(
-			uncertainSession,
-			`STANDARD_WORKTREE_CLEANUP_SKIPPED_REPROVISIONED_OWNERSHIP_UNCERTAIN: dispatch ${callID} skipped teardown of lane ${worktreePath} (${branchName}) — the ownership inventory was unreadable (${superseding.reason}); retry later.`,
-		);
-		return {
-			removedWorktree: false,
-			cleanedBranch: false,
-			preservedRecoveryLane: false,
-			skippedOwnershipUncertain: true,
-		};
-	}
-
-	// FR-001c: Preserve dirty work before cleanup on denial or cancellation.
-	// The success path uses attemptMergeBackFromDirty which handles state differently.
-	let preserveResult:
-		| {
-				outcome: 'clean' | 'preserved' | 'preserve-failed';
-				preserved: boolean;
-				ref?: string;
-				error?: string;
-		  }
-		| undefined;
-	if (reason === 'denied' || reason === 'cancelled') {
-		try {
-			preserveResult = await _internals.preserveDirtyWorktreeForCallId(
-				callID,
-				reason,
-				directory,
-				worktree_dir,
+		if (superseding && superseding.kind !== 'uncertain') {
+			// Confirmed re-provision: the lane belongs to a different live dispatch.
+			// Skip preservation too — it would `git add -A` + commit inside the live
+			// dispatch's lane — and drop only OUR tracking entries.
+			standardWorktreeByCallID.delete(callID);
+			awaitingMergeByCallID.delete(callID);
+			const skipSession = ensureAgentSession(parentSessionID);
+			pushAdvisory(
+				skipSession,
+				`STANDARD_WORKTREE_CLEANUP_SKIPPED_REPROVISIONED: dispatch ${callID} skipped teardown of lane ${worktreePath} (${branchName}) — now owned by ${superseding.kind} ${superseding.callID}; worktree, branch and live-owner record preserved.`,
 			);
-		} catch (err) {
-			logger.log(
-				`[swarm] cleanupStandardWorktreeForCallId: preserveDirtyWorktreeForCallId threw for ${callID}: ${err}`,
+			return {
+				removedWorktree: false,
+				cleanedBranch: false,
+				preservedRecoveryLane: false,
+				skippedReprovisioned: true,
+			};
+		}
+		if (superseding) {
+			// Uncertain ownership inventory: fail closed — no destructive step, keep
+			// OUR tracking entries so a later cleanup retry can find this dispatch.
+			const uncertainSession = ensureAgentSession(parentSessionID);
+			pushAdvisory(
+				uncertainSession,
+				`STANDARD_WORKTREE_CLEANUP_SKIPPED_REPROVISIONED_OWNERSHIP_UNCERTAIN: dispatch ${callID} skipped teardown of lane ${worktreePath} (${branchName}) — the ownership inventory was unreadable (${superseding.reason}); retry later.`,
 			);
-			preserveResult = {
-				outcome: 'preserve-failed',
-				preserved: false,
-				error: String(err),
+			return {
+				removedWorktree: false,
+				cleanedBranch: false,
+				preservedRecoveryLane: false,
+				skippedOwnershipUncertain: true,
 			};
 		}
 
-		// F-FB013: a dispatch can modify its worktree after the first clean
-		// snapshot but before force-removal begins. Re-check immediately before
-		// destructive cleanup so a late write is committed or fails closed.
-		if (preserveResult.outcome === 'clean') {
+		// FR-001c: Preserve dirty work before cleanup on denial or cancellation.
+		// The success path uses attemptMergeBackFromDirty which handles state differently.
+		let preserveResult:
+			| {
+					outcome: 'clean' | 'preserved' | 'preserve-failed';
+					preserved: boolean;
+					ref?: string;
+					error?: string;
+			  }
+			| undefined;
+		if (reason === 'denied' || reason === 'cancelled') {
 			try {
 				preserveResult = await _internals.preserveDirtyWorktreeForCallId(
 					callID,
@@ -3169,7 +3146,7 @@ export async function cleanupStandardWorktreeForCallId(
 				);
 			} catch (err) {
 				logger.log(
-					`[swarm] cleanupStandardWorktreeForCallId: final preservation check threw for ${callID}: ${err}`,
+					`[swarm] cleanupStandardWorktreeForCallId: preserveDirtyWorktreeForCallId threw for ${callID}: ${err}`,
 				);
 				preserveResult = {
 					outcome: 'preserve-failed',
@@ -3177,15 +3154,129 @@ export async function cleanupStandardWorktreeForCallId(
 					error: String(err),
 				};
 			}
-		}
-	}
 
-	// FR-001c fail-closed: if dirty state was detected AND preservation did NOT succeed,
-	// do NOT remove the worktree or branch — return early with a clear advisory.
-	if (preserveResult && preserveResult.outcome === 'preserve-failed') {
-		// Dirty work was present but could not be preserved — ABORT cleanup to protect uncommitted work.
-		// Do NOT call removeWorktree or postMergeCleanup.
-		// Remove ONLY the in-memory tracking entries so a future retry can pick up the worktree state.
+			// F-FB013: a dispatch can modify its worktree after the first clean
+			// snapshot but before force-removal begins. Re-check immediately before
+			// destructive cleanup so a late write is committed or fails closed.
+			if (preserveResult.outcome === 'clean') {
+				try {
+					preserveResult = await _internals.preserveDirtyWorktreeForCallId(
+						callID,
+						reason,
+						directory,
+						worktree_dir,
+					);
+				} catch (err) {
+					logger.log(
+						`[swarm] cleanupStandardWorktreeForCallId: final preservation check threw for ${callID}: ${err}`,
+					);
+					preserveResult = {
+						outcome: 'preserve-failed',
+						preserved: false,
+						error: String(err),
+					};
+				}
+			}
+		}
+
+		// FR-001c fail-closed: if dirty state was detected AND preservation did NOT succeed,
+		// do NOT remove the worktree or branch — return early with a clear advisory.
+		if (preserveResult && preserveResult.outcome === 'preserve-failed') {
+			// Dirty work was present but could not be preserved — ABORT cleanup to protect uncommitted work.
+			// Do NOT call removeWorktree or postMergeCleanup.
+			// Remove ONLY the in-memory tracking entries so a future retry can pick up the worktree state.
+			standardWorktreeByCallID.delete(callID);
+			awaitingMergeByCallID.delete(callID);
+
+			const session = ensureAgentSession(parentSessionID);
+			pushAdvisory(
+				session,
+				`STANDARD_WORKTREE_PRESERVATION_FAILED_ABORT_CLEANUP: dispatch ${callID} has dirty uncommitted work but preservation failed (${preserveResult.error}). ` +
+					`Cleanup aborted to protect uncommitted work. Investigate and resolve manually. ` +
+					`Worktree=${worktreePath}; branch=${branchName}.`,
+			);
+			return {
+				removedWorktree: false,
+				cleanedBranch: false,
+				preservedRecoveryLane: false,
+			};
+		}
+
+		// Remove the worktree directory.
+		let removedWorktree = false;
+		try {
+			// Issue #2599 AC5: release this process's handle on the lane DB
+			// before deletion (Windows WAL lock ⇒ EBUSY), covering the residual
+			// fs.rm fallback below as well.
+			closeProjectDb(worktreePath);
+			const result = await _internals.removeWorktree(worktreePath, directory, {
+				force: true,
+				worktreeDir: worktree_dir,
+			});
+			if (!('error' in result)) {
+				removedWorktree = true;
+			} else if (
+				!result.error.startsWith(
+					'CODER_SETTLEMENT_ARTIFACT_REMOVAL_REFUSED:',
+				) &&
+				result.error.includes('is not a working tree') &&
+				(await pathExists(worktreePath)) &&
+				isPathUnderSwarmWorktreeBase(
+					worktreePath,
+					directory,
+					worktree_dir ? [worktree_dir] : [],
+				)
+			) {
+				try {
+					await _internals.withSettlementArtifactLifecycle(
+						directory,
+						async () => {
+							await _internals.assertSettlementArtifactsRemovable(directory, {
+								path: worktreePath,
+								branch: branchName,
+							});
+							await fs.rm(worktreePath, { recursive: true, force: true });
+							removedWorktree = !(await pathExists(worktreePath));
+						},
+					);
+				} catch (err) {
+					logger.log(
+						`[swarm] cleanupStandardWorktreeForCallId: residual directory cleanup failed for ${callID}: ${err}`,
+					);
+				}
+			}
+		} catch (err) {
+			logger.log(
+				`[swarm] cleanupStandardWorktreeForCallId: removeWorktree failed for ${callID}: ${err}`,
+			);
+		}
+
+		// BRANCH DELETION: on every dispatch outcome unless #2508 branch
+		// retention is active (squash-unstaged landing — the branch is the
+		// recovery backup for unstaged bytes).
+		// The branch is deleted on success (merge-back completed cleanly), denied
+		// (orchestrator denied the dispatch), and cancelled (user/system cancelled).
+		// Branch deletion is safe in all non-retained cases — the user's work is
+		// preserved in the commit history via the lane branch reflog until GC.
+		let cleanedBranch = false;
+		if (options?.retainBranch) {
+			const retainedSession = ensureAgentSession(parentSessionID);
+			pushAdvisory(
+				retainedSession,
+				`STANDARD_WORKTREE_BRANCH_RETAINED: dispatch ${callID} removed worktree ${worktreePath} but retained branch ${branchName} as the recovery backup; the landed changes may be unstaged or committed.`,
+			);
+		} else {
+			try {
+				const result = await _internals.postMergeCleanup(directory, branchName);
+				cleanedBranch = !('error' in result);
+			} catch (err) {
+				logger.log(
+					`[swarm] cleanupStandardWorktreeForCallId: postMergeCleanup failed for ${callID}: ${err}`,
+				);
+			}
+		}
+
+		// Remove entries from in-memory tracking maps.
 		standardWorktreeByCallID.delete(callID);
 		awaitingMergeByCallID.delete(callID);
 		releaseCleanupLock();
@@ -3193,104 +3284,18 @@ export async function cleanupStandardWorktreeForCallId(
 		const session = ensureAgentSession(parentSessionID);
 		pushAdvisory(
 			session,
-			`STANDARD_WORKTREE_PRESERVATION_FAILED_ABORT_CLEANUP: dispatch ${callID} has dirty uncommitted work but preservation failed (${preserveResult.error}). ` +
-				`Cleanup aborted to protect uncommitted work. Investigate and resolve manually. ` +
-				`Worktree=${worktreePath}; branch=${branchName}.`,
+			`STANDARD_WORKTREE_CLEANUP: dispatch ${callID} cleaned up (reason: ${reason}); worktree=${worktreePath}; branch=${branchName}.`,
 		);
 		return {
-			removedWorktree: false,
-			cleanedBranch: false,
+			removedWorktree,
+			cleanedBranch,
 			preservedRecoveryLane: false,
 		};
+	} finally {
+		// #3888: a live-PID lifecycle lock never TTL-heals
+		// (file-locks.ts), so the release is exception-safe by construction.
+		releaseCleanupLock();
 	}
-
-	// Remove the worktree directory.
-	let removedWorktree = false;
-	try {
-		// Issue #2599 AC5: release this process's handle on the lane DB
-		// before deletion (Windows WAL lock ⇒ EBUSY), covering the residual
-		// fs.rm fallback below as well.
-		closeProjectDb(worktreePath);
-		const result = await _internals.removeWorktree(worktreePath, directory, {
-			force: true,
-			worktreeDir: worktree_dir,
-		});
-		if (!('error' in result)) {
-			removedWorktree = true;
-		} else if (
-			!result.error.startsWith('CODER_SETTLEMENT_ARTIFACT_REMOVAL_REFUSED:') &&
-			result.error.includes('is not a working tree') &&
-			(await pathExists(worktreePath)) &&
-			isPathUnderSwarmWorktreeBase(
-				worktreePath,
-				directory,
-				worktree_dir ? [worktree_dir] : [],
-			)
-		) {
-			try {
-				await _internals.withSettlementArtifactLifecycle(
-					directory,
-					async () => {
-						await _internals.assertSettlementArtifactsRemovable(directory, {
-							path: worktreePath,
-							branch: branchName,
-						});
-						await fs.rm(worktreePath, { recursive: true, force: true });
-						removedWorktree = !(await pathExists(worktreePath));
-					},
-				);
-			} catch (err) {
-				logger.log(
-					`[swarm] cleanupStandardWorktreeForCallId: residual directory cleanup failed for ${callID}: ${err}`,
-				);
-			}
-		}
-	} catch (err) {
-		logger.log(
-			`[swarm] cleanupStandardWorktreeForCallId: removeWorktree failed for ${callID}: ${err}`,
-		);
-	}
-
-	// BRANCH DELETION: on every dispatch outcome unless #2508 branch
-	// retention is active (squash-unstaged landing — the branch is the
-	// recovery backup for unstaged bytes).
-	// The branch is deleted on success (merge-back completed cleanly), denied
-	// (orchestrator denied the dispatch), and cancelled (user/system cancelled).
-	// Branch deletion is safe in all non-retained cases — the user's work is
-	// preserved in the commit history via the lane branch reflog until GC.
-	let cleanedBranch = false;
-	if (options?.retainBranch) {
-		const retainedSession = ensureAgentSession(parentSessionID);
-		pushAdvisory(
-			retainedSession,
-			`STANDARD_WORKTREE_BRANCH_RETAINED: dispatch ${callID} removed worktree ${worktreePath} but retained branch ${branchName} as the recovery backup; the landed changes may be unstaged or committed.`,
-		);
-	} else {
-		try {
-			const result = await _internals.postMergeCleanup(directory, branchName);
-			cleanedBranch = !('error' in result);
-		} catch (err) {
-			logger.log(
-				`[swarm] cleanupStandardWorktreeForCallId: postMergeCleanup failed for ${callID}: ${err}`,
-			);
-		}
-	}
-
-	// Remove entries from in-memory tracking maps.
-	standardWorktreeByCallID.delete(callID);
-	awaitingMergeByCallID.delete(callID);
-	releaseCleanupLock();
-
-	const session = ensureAgentSession(parentSessionID);
-	pushAdvisory(
-		session,
-		`STANDARD_WORKTREE_CLEANUP: dispatch ${callID} cleaned up (reason: ${reason}); worktree=${worktreePath}; branch=${branchName}.`,
-	);
-	return {
-		removedWorktree,
-		cleanedBranch,
-		preservedRecoveryLane: false,
-	};
 }
 
 /**

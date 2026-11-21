@@ -1169,7 +1169,13 @@ export async function recoverCoderSettlement(
 		}
 		if (wal.state === 'COMMITTED') {
 			if (wal.worktree && wal.cleanupComplete !== true) {
-				await cleanupRecoveredWorktree(directory, wal.worktree);
+				if (
+					(await cleanupRecoveredWorktree(directory, wal.worktree)) ===
+					'skipped-uncertain'
+				) {
+					// #3888: ownership uncertain — leave the WAL retryable.
+					return null;
+				}
 				await writeWal(filePath, { ...wal, cleanupComplete: true });
 			}
 			return null;
@@ -1257,9 +1263,16 @@ export async function recoverCoderSettlement(
 						const committed = await commitPrepared(directory, wal, {
 							landedUnstaged,
 						});
-						await cleanupRecoveredWorktree(directory, worktree, {
-							retainBranch: landedUnstaged,
-						});
+						if (
+							(await cleanupRecoveredWorktree(directory, worktree, {
+								retainBranch: landedUnstaged,
+							})) === 'skipped-uncertain'
+						) {
+							// #3888: ownership uncertain — return the committed
+							// settlement WITHOUT marking cleanup complete; the
+							// WAL stays retryable for a later pass.
+							return committed;
+						}
 						// Re-read before the terminal write so commitPrepared's
 						// durable landedUnstaged stamp is not clobbered by this
 						// spread of the older in-memory wal (mirrors the resume
@@ -1387,11 +1400,16 @@ export async function recoverCoderSettlement(
 						`CODER_SETTLEMENT_MERGE_RECOVERY_REQUIRED: transition ${wal.transitionId} for task ${taskId} worktree merge-back did not reach merged (${filePath}, state ${wal.state}, outcome ${mergeResult.outcome}${mergeResult.outcome === 'failed' && mergeResult.message ? `: ${mergeResult.message}` : ''}). Run /swarm recover ${taskId} (or /swarm reset-session), then retry; do not remove the WAL by hand.`,
 					);
 				}
-				await cleanupRecoveredWorktree(directory, descriptor, {
-					// #2508: a squash-unstaged landing intentionally keeps the lane
-					// branch as the backup for the unstaged bytes.
-					retainBranch: mergeResult.strategy === 'squash-unstaged',
-				});
+				if (
+					(await cleanupRecoveredWorktree(directory, descriptor, {
+						// #2508: a squash-unstaged landing intentionally keeps the lane
+						// branch as the backup for the unstaged bytes.
+						retainBranch: mergeResult.strategy === 'squash-unstaged',
+					})) === 'skipped-uncertain'
+				) {
+					// #3888: ownership uncertain — WAL stays retryable.
+					return recovered;
+				}
 				const committedWal = await readWal(filePath, taskId);
 				if (committedWal === null) {
 					throw new Error('CODER_SETTLEMENT_WAL_MISSING');
@@ -1477,7 +1495,13 @@ export async function recoverCoderSettlement(
 		}
 		const committed = await commitPrepared(directory, wal);
 		if (wal.worktree) {
-			await cleanupRecoveredWorktree(directory, wal.worktree);
+			if (
+				(await cleanupRecoveredWorktree(directory, wal.worktree)) ===
+				'skipped-uncertain'
+			) {
+				// #3888: ownership uncertain — WAL stays retryable.
+				return committed;
+			}
 			const committedWal = await readWal(filePath, taskId);
 			if (committedWal === null) {
 				throw new Error('CODER_SETTLEMENT_WAL_MISSING');
