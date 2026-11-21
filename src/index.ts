@@ -92,6 +92,7 @@ import {
 } from './config/schema';
 import { createRoleFilterSystemHook } from './context/role-filter.js';
 import {
+	CONTEXT_MAP_LOCK_BUDGET_MS,
 	extractContextDecisionsFromContextMd,
 	resolveContextMapTaskReleaseStatus,
 	updateContextMapAfterAgentLocked,
@@ -5759,16 +5760,13 @@ async function initializeOpenCodeSwarm(
 							// context-map lock. Awaited so the hook chain (and the
 							// test hosts that drive it) observe the completed write;
 							// the surrounding try/catch keeps it non-blocking.
-							// r16 (P2): the COORDINATED write — the whole
-							// load→update→save cycle runs under the cross-process
-							// context-map lock. Awaited so the hook chain (and the
-							// test hosts that drive it) observe the completed write;
-							// the surrounding try/catch keeps it non-blocking.
-							// r16 (P2): the COORDINATED write — the whole
-							// load→update→save cycle runs under the cross-process
-							// context-map lock. Awaited so the hook chain (and the
-							// test hosts that drive it) observe the completed write;
-							// the surrounding try/catch keeps it non-blocking.
+							// r17 (P1): the acquisition wait is BOUNDED to the hook
+							// budget — an optional context-map write must not delay
+							// a delegation's completion signal by the evidence
+							// lock's 60 s default. On budget timeout the update is
+							// skipped whole (the callback never started — no
+							// partial write) and the background observer's journaled
+							// closeout re-drives it.
 							await updateContextMapAfterAgentLocked({
 								task_id: contextMapTaskId,
 								agent_role:
@@ -5784,7 +5782,7 @@ async function initializeOpenCodeSwarm(
 										'unknown',
 								}),
 								directory: bootstrapRoot,
-							});
+							}, CONTEXT_MAP_LOCK_BUDGET_MS.hook);
 						}
 					} catch {
 						// Post-agent update must never block the hook chain

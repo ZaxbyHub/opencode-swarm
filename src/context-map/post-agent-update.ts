@@ -811,12 +811,14 @@ export function updateContextMapAfterAgent(
  */
 export async function updateContextMapAfterAgentLocked(
 	params: PostAgentUpdateParams,
+	lockTimeoutMs: number = CONTEXT_MAP_LOCK_BUDGET_MS.background,
 ): Promise<ContextMap> {
 	const result = await withContextMapLock(
 		params.directory,
 		params.agent_role || 'unknown',
 		params.task_id,
 		() => updateContextMapAfterAgent(params),
+		lockTimeoutMs,
 	);
 	return result.ok
 		? result.value
@@ -843,16 +845,56 @@ export async function updateContextMapAfterAgentLocked(
 const CONTEXT_MAP_LOCK_KEY = 'context-map.json';
 
 /**
+ * r17 audit repair (P1): bounded lock-ACQUISITION budgets for the
+ * context-map paths, replacing the inherited 60 000 ms evidence-lock
+ * default. `withEvidenceLock`'s timeout bounds only the ACQUISITION wait —
+ * on timeout the callback never started, so there is no uncontrolled
+ * continuation and no partial write (this is precisely why the budget is
+ * passed through `withEvidenceLock`'s `timeoutMs` instead of a
+ * `Promise.race` around the write, which would leave the operation running
+ * after the racer returned).
+ *
+ * The context-map write is OPTIONAL enrichment: a skipped write is
+ * fail-closed and recovered — the completion observer's `context_map`
+ * closeout step stays un-acked (retryable) and the maintenance-point
+ * reconciliation re-drives the promotion. A tool completion (and the whole
+ * hook chain behind it) must never wait minutes on it.
+ */
+export const CONTEXT_MAP_LOCK_BUDGET_MS = {
+	/**
+	 * The critical synchronous `tool.execute.after` path: an optional
+	 * context-map write must not delay a delegation's completion signal.
+	 */
+	hook: 1_500,
+	/**
+	 * Background closeout steps and the authoritative promotion from
+	 * update_task_status: bounded (journaled retries recover a skip; the
+	 * task release itself never rolls back).
+	 */
+	background: 5_000,
+	/**
+	 * Maintenance reconciliation (status service, post-init maintenance,
+	 * observer maintenance pass): still bounded — an unattended pass must
+	 * not sit on the lock for a minute.
+	 */
+	maintenance: 10_000,
+} as const;
+
+/**
  * Run `fn` under the cross-process context-map write lock. Never throws:
  * a lock failure (timeout, project-root rejection) is logged and reported
  * via the return value so best-effort callers can skip — the reconciliation
  * at the next maintenance point recovers a skipped promotion.
+ *
+ * `timeoutMs` bounds only the lock ACQUISITION (r17): on timeout `fn` never
+ * ran, so the mutation is skipped whole — no partial write is possible.
  */
 export async function withContextMapLock<T>(
 	directory: string,
 	agent: string,
 	taskId: string,
 	fn: () => T | Promise<T>,
+	timeoutMs: number = 60_000,
 ): Promise<{ ok: true; value: T } | { ok: false }> {
 	try {
 		const { withEvidenceLock } = await import('../evidence/lock.js');
@@ -862,6 +904,7 @@ export async function withContextMapLock<T>(
 			agent,
 			taskId,
 			async () => fn(),
+			timeoutMs,
 		);
 		return { ok: true, value };
 	} catch (error) {
@@ -1104,8 +1147,13 @@ export function promoteContextMapTaskRelease(
 export async function promoteContextMapTaskReleaseLocked(
 	directory: string,
 	taskId: string,
+	lockTimeoutMs: number = CONTEXT_MAP_LOCK_BUDGET_MS.background,
 ): Promise<void> {
-	await withContextMapLock(directory, 'update_task_status', taskId, () => {
+	await withContextMapLock(
+		directory,
+		'update_task_status',
+		taskId,
+		() => {
 		// r17 audit repair (P1): STALE-PLAN FENCE. The reconciliation selects
 		// its candidates from a plan loaded BEFORE the per-task (async)
 		// evidence proof, and the authoritative task status can change in
@@ -1238,7 +1286,15 @@ export async function reconcileContextMapTaskReleases(
 				// r16 (P2): the coordinated promotion — the whole
 				// load→promote→save cycle runs under the cross-process
 				// context-map lock so a concurrent writer cannot lose it.
-				await promoteContextMapTaskReleaseLocked(directory, task.id);
+				// r17 (P1): the acquisition wait is bounded to the maintenance
+				// budget — an unattended maintenance pass must not sit on a
+				// contended lock; a skipped promotion is re-driven by the
+				// next maintenance point.
+				await promoteContextMapTaskReleaseLocked(
+					directory,
+					task.id,
+					CONTEXT_MAP_LOCK_BUDGET_MS.maintenance,
+				);
 			}
 		}
 	} catch (error) {
