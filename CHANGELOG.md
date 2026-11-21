@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.205.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.205.2...v7.205.3) (2026-11-21)
+
+
+### Bug Fixes
+
+* **guardrails:** quoted-heredoc body neutralization, origin-aware parse denials, root-escape layer naming ([#3754](https://github.com/ZaxbyHub/opencode-swarm/issues/3754), [#3761](https://github.com/ZaxbyHub/opencode-swarm/issues/3761)) ([c9e9bd5](https://github.com/ZaxbyHub/opencode-swarm/commit/c9e9bd58dda502da9bea7b3a70aa21a8e4a0bee6))
+
 ## [7.205.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.205.1...v7.205.2) (2026-11-21)
 
 
