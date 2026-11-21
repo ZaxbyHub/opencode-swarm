@@ -7226,25 +7226,49 @@ export function createDelegationGateHook(
 									'reclaim scheduled at next start.',
 							);
 						}
-						awaitingMergeByCallID.delete(input.callID);
-						standardWorktreeByCallID.delete(input.callID);
-						recordWorktreeMergeFailure(
-							standardDispatch.planTaskId ?? standardDispatch.taskId,
-							{
-								outcome: 'failed',
-								stage: 'task-result',
-								message: `task terminated with ${outputTerminalState ?? 'terminal-failure'}`,
-							},
-						);
-						const dispatchSession = ensureAgentSession(
-							standardDispatch.parentSessionID,
-							undefined,
-							directory,
-						);
-						pushAdvisory(
-							dispatchSession,
-							`STANDARD_WORKTREE_TASK_FAILED: task ${standardDispatch.taskId} terminated with ${outputTerminalState ?? 'terminal-failure'}; worktree preserved and cleaned without merge-back.`,
-						);
+						if (terminalCleanup.skippedOwnershipUncertain) {
+							// #3888 r4: the inner (locked) classification came back
+							// UNCERTAIN — no destructive step ran and the helper
+							// RETAINED both tracking entries for a later retry.
+							// Keep them: do not delete, do not claim cleanup ran;
+							// record the failure and surface the deferral.
+							recordWorktreeMergeFailure(
+								standardDispatch.planTaskId ?? standardDispatch.taskId,
+								{
+									outcome: 'failed',
+									stage: 'task-result',
+									message: `task terminated with ${outputTerminalState ?? 'terminal-failure'} (teardown deferred: ownership inventory uncertain; tracking retained for retry)`,
+								},
+							);
+							pushAdvisory(
+								ensureAgentSession(
+									standardDispatch.parentSessionID,
+									undefined,
+									directory,
+								),
+								`STANDARD_WORKTREE_TASK_FAILED: task ${standardDispatch.taskId} terminated with ${outputTerminalState ?? 'terminal-failure'}; lane teardown deferred (ownership uncertain) and retained for retry.`,
+							);
+						} else {
+							awaitingMergeByCallID.delete(input.callID);
+							standardWorktreeByCallID.delete(input.callID);
+							recordWorktreeMergeFailure(
+								standardDispatch.planTaskId ?? standardDispatch.taskId,
+								{
+									outcome: 'failed',
+									stage: 'task-result',
+									message: `task terminated with ${outputTerminalState ?? 'terminal-failure'}`,
+								},
+							);
+							const dispatchSession = ensureAgentSession(
+								standardDispatch.parentSessionID,
+								undefined,
+								directory,
+							);
+							pushAdvisory(
+								dispatchSession,
+								`STANDARD_WORKTREE_TASK_FAILED: task ${standardDispatch.taskId} terminated with ${outputTerminalState ?? 'terminal-failure'}; worktree preserved and cleaned without merge-back.`,
+							);
+						}
 					}
 				}
 
