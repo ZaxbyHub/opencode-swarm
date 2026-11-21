@@ -188,20 +188,87 @@ function pruneOldResetBackups(
 	}
 }
 
+/** One entry of the rollback backup's `recovery.json` manifest (#3763). */
+export interface RecoveryManifestEntry {
+	/** Staged (index) state captured before the destructive reset. */
+	index?: { mode: string; bytes: string };
+	/** Working-tree state captured (or recorded as deleted) before reset. */
+	worktree: { kind: 'file'; bytes: string } | { kind: 'deleted' };
+}
+
+/** The `recovery.json` manifest written at the rollback-backup root. */
+export interface RecoveryManifest {
+	entries: Record<string, RecoveryManifestEntry>;
+}
+
+/**
+ * Rollback-specific backup result (#3763 AC3/AC4): carries the exact set of
+ * recorded deletions and an explicit recovery-completeness flag so the
+ * restore gate can fail closed on ANY incompleteness (critic round 1
+ * blocker 3) instead of inferring safety from aggregate counts.
+ */
+export interface TrackedBackupResult extends ResetBackupResult {
+	/** Dirty paths recorded as deletions in recovery.json (exact set). */
+	recordedDeletions: string[];
+	/** True iff every capture step completed: copies, index capture, manifest. */
+	recoveryComplete: boolean;
+}
+
+/**
+ * Test seam (repo `_internals` convention): the manifest writer is injectable
+ * so tests can deterministically fail the recovery manifest AFTER successful
+ * file copies (#3763 — the fail-closed refusal must not depend on filesystem
+ * permission races).
+ */
+export const _internals: {
+	writeRecoveryManifest: typeof writeRecoveryManifest;
+} = {
+	writeRecoveryManifest,
+};
+
+function writeRecoveryManifest(
+	backupDir: string,
+	manifest: RecoveryManifest,
+): void {
+	fs.writeFileSync(
+		path.join(backupDir, 'recovery.json'),
+		JSON.stringify(manifest, null, 2),
+		'utf8',
+	);
+}
+
 /**
  * Back up the current bytes of each dirty tracked file a git-checkpoint
- * rollback is about to destroy via `git reset --hard` (#2946). Files are
- * copied by their REPO-RELATIVE paths into
- * `.swarm/rollback-backups/rollback-git-<ISO>/tracked/<repo-rel-path>`, so a
- * confirmed rollback is recoverable by copying the files back. Fail-open by
- * contract (same as the swarm-state backup): per-entry failures are warnings.
+ * rollback is about to destroy via `git reset --hard` (#2946), plus the
+ * staged (index) bytes and mode and deletion records (#3763 AC3/AC4).
+ *
+ * Layout: `.swarm/rollback-backups/rollback-git-<ISO>/` with
+ * `tracked/<repo-rel-path>` (working bytes), `index/<repo-rel-path>` (staged
+ * blob bytes), and `recovery.json` (the manifest mapping each dirty path to
+ * what was captured). Deletion-only dirty paths are RECORDED in the manifest
+ * (`worktree.kind === "deleted"`) so a restore can proceed honestly over
+ * them instead of refusing with "nothing was backed up" (#3763 AC4).
+ *
+ * Per-entry failures are warnings AND flip `recoveryComplete` to false — the
+ * caller's gate refuses the destructive reset (AC5 preserved: a writer
+ * failure yields `backupDir: null` or an incomplete result, never a
+ * half-covered destruction).
  */
 export function backupTrackedChangesBeforeRollback(
 	directory: string,
 	repoRelPaths: string[],
-): ResetBackupResult {
+	opts?: {
+		captureIndexEntry?: (input: {
+			backupDir: string;
+			rel: string;
+		}) => { mode: string } | null;
+	},
+): TrackedBackupResult {
 	const warnings: string[] = [];
 	const copied: string[] = [];
+	const recordedDeletions: string[] = [];
+	const entries: Record<string, RecoveryManifestEntry> = {};
+	let incomplete = false;
 
 	const swarmDir = path.join(directory, '.swarm');
 	try {
@@ -210,13 +277,25 @@ export function backupTrackedChangesBeforeRollback(
 			warnings.push(
 				'backup skipped: .swarm is a symlink or not a directory — nothing was backed up',
 			);
-			return { backupDir: null, copied, warnings };
+			return {
+				backupDir: null,
+				copied,
+				warnings,
+				recordedDeletions,
+				recoveryComplete: false,
+			};
 		}
 	} catch {
 		warnings.push(
 			'backup skipped: .swarm directory is missing — nothing was backed up',
 		);
-		return { backupDir: null, copied, warnings };
+		return {
+			backupDir: null,
+			copied,
+			warnings,
+			recordedDeletions,
+			recoveryComplete: false,
+		};
 	}
 
 	const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -231,24 +310,75 @@ export function backupTrackedChangesBeforeRollback(
 		}
 	};
 
-	for (const rel of repoRelPaths) {
-		if (!rel) continue;
-		const src = path.join(directory, rel);
-		if (!fs.existsSync(src)) continue;
+	const dirty: string[] = repoRelPaths.filter((rel) => rel !== '');
+
+	if (dirty.length > 0) {
 		try {
 			ensureBackupDir();
-			const dest = path.join(backupDir, 'tracked', rel);
-			fs.mkdirSync(path.dirname(dest), { recursive: true });
-			fs.cpSync(src, dest, { recursive: true });
-			copied.push(rel);
 		} catch (err) {
 			warnings.push(
-				`failed to back up ${rel}: ${err instanceof Error ? err.message : String(err)}`,
+				`failed to create rollback backup directory: ${err instanceof Error ? err.message : String(err)}`,
+			);
+			return {
+				backupDir: null,
+				copied,
+				warnings,
+				recordedDeletions,
+				recoveryComplete: false,
+			};
+		}
+	}
+
+	for (const rel of dirty) {
+		const src = path.join(directory, rel);
+		const entry: RecoveryManifestEntry = {
+			worktree: fs.existsSync(src)
+				? { kind: 'file', bytes: `tracked/${rel}` }
+				: { kind: 'deleted' },
+		};
+		if (!fs.existsSync(src)) {
+			recordedDeletions.push(rel);
+		} else {
+			try {
+				const dest = path.join(backupDir, 'tracked', rel);
+				fs.mkdirSync(path.dirname(dest), { recursive: true });
+				fs.cpSync(src, dest, { recursive: true });
+				copied.push(rel);
+			} catch (err) {
+				incomplete = true;
+				warnings.push(
+					`failed to back up ${rel}: ${err instanceof Error ? err.message : String(err)}`,
+				);
+			}
+		}
+		if (opts?.captureIndexEntry) {
+			try {
+				const captured = opts.captureIndexEntry({ backupDir, rel });
+				if (captured) {
+					entry.index = { mode: captured.mode, bytes: `index/${rel}` };
+				}
+			} catch (err) {
+				incomplete = true;
+				warnings.push(
+					`failed to capture index state for ${rel}: ${err instanceof Error ? err.message : String(err)}`,
+				);
+			}
+		}
+		entries[rel] = entry;
+	}
+
+	if (dirty.length > 0) {
+		try {
+			_internals.writeRecoveryManifest(backupDir, { entries });
+		} catch (err) {
+			incomplete = true;
+			warnings.push(
+				`failed to write recovery manifest: ${err instanceof Error ? err.message : String(err)}`,
 			);
 		}
 	}
 
-	if (copied.length === 0) {
+	if (dirty.length === 0) {
 		if (backupDirCreated) {
 			try {
 				fs.rmSync(backupDir, { recursive: true, force: true });
@@ -256,9 +386,21 @@ export function backupTrackedChangesBeforeRollback(
 				// best-effort
 			}
 		}
-		return { backupDir: null, copied, warnings };
+		return {
+			backupDir: null,
+			copied,
+			warnings,
+			recordedDeletions,
+			recoveryComplete: false,
+		};
 	}
 
 	pruneOldResetBackups(backupsRoot, warnings, path.basename(backupDir));
-	return { backupDir, copied, warnings };
+	return {
+		backupDir,
+		copied,
+		warnings,
+		recordedDeletions,
+		recoveryComplete: !incomplete,
+	};
 }

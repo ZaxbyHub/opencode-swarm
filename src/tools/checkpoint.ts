@@ -123,6 +123,8 @@ export const _internals: {
 	 */
 	readGitStatusAsync: typeof readGitStatusAsync;
 	readGitRepositoryStatusDetailedAsync: typeof readGitRepositoryStatusDetailedAsync;
+	/** #3763 AC3: staged-state capture seam (tests stub to force failures). */
+	captureIndexEntryForBackup: typeof captureIndexEntryForBackup;
 } = {
 	tryAcquireLock,
 	loadPlan,
@@ -134,6 +136,7 @@ export const _internals: {
 	measureGitDestruction,
 	readGitStatusAsync,
 	readGitRepositoryStatusDetailedAsync,
+	captureIndexEntryForBackup,
 };
 
 function serializeResult(
@@ -320,10 +323,93 @@ function upsertTaskCompletionCheckpointEntry(
 }
 
 function stageAllExcludingSwarm(directory: string): void {
-	_internals.gitExec(
-		['add', '--all', '--', ...NON_SWARM_COMMIT_PATHSPEC],
+	const paths = listNonSwarmDirtyPaths(directory);
+	// Literal pathspecs are load-bearing (#3763): a plain `git add -- <path>`
+	// treats the argument as a glob, so a real file named `[.]swarm/marker.txt`
+	// would also stage the ignored `.swarm` tree. `--literal-pathspecs` (a
+	// global git flag) makes every argument match itself only.
+	const CHUNK = 50;
+	for (let i = 0; i < paths.length; i += CHUNK) {
+		_internals.gitExec(
+			[
+				'--literal-pathspecs',
+				'add',
+				'--all',
+				'--',
+				...paths.slice(i, i + CHUNK),
+			],
+			directory,
+		);
+	}
+}
+
+/** Porcelain XY codes that mean "unmerged" — staging one would silently
+ * resolve a conflict, so ordinary checkpoint save refuses them instead
+ * (#3763 plan v3, critic round 2). */
+const UNMERGED_STATUS = new Set(['DD', 'AU', 'UD', 'UA', 'DU', 'AA', 'UU']);
+
+function isSwarmRuntimePath(rel: string): boolean {
+	return rel === '.swarm' || rel.startsWith('.swarm/');
+}
+
+/**
+ * Enumerate dirty paths EXCLUDING `.swarm` runtime state (#3763 AC1/AC2).
+ *
+ * Parses `git status --porcelain -z --untracked-files=all` as a complete
+ * record state machine: rename/copy records carry TWO NUL-separated tokens
+ * (destination first, source second); both sides are classified against
+ * `.swarm` independently. Cross-`.swarm`-boundary renames/copies and any
+ * unmerged (conflicted) record REFUSE the staging before any mutation —
+ * a partial rename staging or a silently-resolved conflict is never
+ * acceptable from an ordinary checkpoint save.
+ */
+function listNonSwarmDirtyPaths(directory: string): string[] {
+	const out = _internals.gitExec(
+		['status', '--porcelain', '-z', '--untracked-files=all', '--', '.'],
 		directory,
 	);
+	const tokens = out.split('\0');
+	const paths: string[] = [];
+	for (let i = 0; i < tokens.length; i++) {
+		const record = tokens[i];
+		if (!record) continue;
+		const xy = record.slice(0, 2);
+		if (record.length < 4 || record.charCodeAt(2) !== 32 /* space */) {
+			throw new Error(
+				`checkpoint staging refused: unparsable git status record ${JSON.stringify(record.slice(0, 40))}`,
+			);
+		}
+		if (UNMERGED_STATUS.has(xy)) {
+			throw new Error(
+				`checkpoint staging refused: ${record.slice(3)} has unresolved conflicts (${xy}); resolve them before saving a checkpoint`,
+			);
+		}
+		const to = record.slice(3);
+		if (xy[0] === 'R' || xy[0] === 'C' || xy[1] === 'R' || xy[1] === 'C') {
+			const from = tokens[i + 1] ?? '';
+			if (!from) {
+				throw new Error(
+					`checkpoint staging refused: truncated rename/copy record for ${to}`,
+				);
+			}
+			i += 1; // consume the source token
+			const toIsSwarm = isSwarmRuntimePath(to);
+			const fromIsSwarm = isSwarmRuntimePath(from);
+			if (toIsSwarm !== fromIsSwarm) {
+				throw new Error(
+					`checkpoint staging refused: rename/copy crosses the .swarm boundary (${from} -> ${to}); move or revert it before saving a checkpoint`,
+				);
+			}
+			if (!toIsSwarm) {
+				paths.push(to, from);
+			}
+			continue;
+		}
+		if (!isSwarmRuntimePath(to)) {
+			paths.push(to);
+		}
+	}
+	return [...new Set(paths)];
 }
 
 function gitExec(args: string[], cwd: string): string {
@@ -390,6 +476,73 @@ function gitExec(args: string[], cwd: string): string {
 
 function getCurrentSha(directory: string): string {
 	return gitExec(['rev-parse', 'HEAD'], directory).trim();
+}
+
+/**
+ * Binary-safe capture of one dirty path's STAGED (index) state into
+ * `<backupDir>/index/<rel>` (#3763 AC3). Returns the recorded mode, or null
+ * when the path has no index entry. Any failure THROWS — the backup producer
+ * converts it into `recoveryComplete: false` so the restore gate refuses
+ * (never a partial silent capture).
+ */
+function captureIndexEntryForBackup(input: {
+	directory: string;
+	backupDir: string;
+	rel: string;
+}): { mode: string } | null {
+	const stageOut = _internals.gitExec(
+		['--literal-pathspecs', 'ls-files', '--stage', '-z', '--', input.rel],
+		input.directory,
+	);
+	const records = stageOut
+		.split('\0')
+		.filter((record) => record.length > 0)
+		.map((record) => {
+			const tab = record.indexOf('\t');
+			if (tab <= 0) {
+				throw new Error(`unparsable ls-files --stage record for ${input.rel}`);
+			}
+			const meta = record.slice(0, tab).split(' ');
+			return { mode: meta[0], sha: meta[1], stage: Number(meta[2]) };
+		})
+		.filter((entry) => entry.mode && entry.sha);
+	if (records.length === 0) return null;
+	if (records.length > 1 || records[0].stage !== 0) {
+		throw new Error(
+			`unmerged index records for ${input.rel} (${records.length} entries) — staged-state capture is incomplete`,
+		);
+	}
+	const { mode, sha } = records[0];
+	// Binary-safe blob capture: `encoding: 'buffer'` keeps arbitrary byte
+	// sequences intact (the string-typed gitExec would corrupt non-UTF-8
+	// staged content — critic round 1 blocker 4).
+	const result = child_process.spawnSync(
+		_internals.resolveGitExecutable(),
+		['cat-file', 'blob', sha],
+		{
+			cwd: input.directory,
+			timeout: GIT_TIMEOUT_MS,
+			maxBuffer: GIT_MAX_BUFFER_BYTES,
+			stdio: ['ignore', 'pipe', 'pipe'],
+			windowsHide: true,
+			encoding: 'buffer',
+		},
+	);
+	if (result.error || result.status !== 0 || !Buffer.isBuffer(result.stdout)) {
+		throw new Error(
+			`cat-file capture failed for ${input.rel}@${sha}${
+				result.error
+					? `: ${result.error.message}`
+					: result.status !== 0
+						? ` (exit ${result.status})`
+						: ''
+			}`,
+		);
+	}
+	const dest = path.join(input.backupDir, 'index', input.rel);
+	fs.mkdirSync(path.dirname(dest), { recursive: true });
+	fs.writeFileSync(dest, result.stdout);
+	return { mode };
 }
 
 function findCommitByExactSubject(
@@ -663,9 +816,16 @@ function handleSave(label: string, directory: string): string {
 
 		const timestamp = new Date().toISOString();
 		_internals.stageAllExcludingSwarm(directory);
+		// Scoped to non-`.swarm` paths (#3763): a pre-staged `.swarm` entry
+		// must neither trigger the "has staged changes" probe nor enter an
+		// ordinary checkpoint commit through EITHER commit arm — the same
+		// pathspec scoping save_task_completion's commit already uses.
 		const hasStagedChanges = (() => {
 			try {
-				gitExec(['diff', '--cached', '--quiet'], directory);
+				gitExec(
+					['diff', '--cached', '--quiet', '--', ...NON_SWARM_COMMIT_PATHSPEC],
+					directory,
+				);
 				return false;
 			} catch {
 				return true;
@@ -673,10 +833,26 @@ function handleSave(label: string, directory: string): string {
 		})();
 
 		if (hasStagedChanges) {
-			gitExec(['commit', '-m', `checkpoint: ${label}`], directory);
+			gitExec(
+				[
+					'commit',
+					'-m',
+					`checkpoint: ${label}`,
+					'--',
+					...NON_SWARM_COMMIT_PATHSPEC,
+				],
+				directory,
+			);
 		} else if (allowEmptyCommits) {
 			gitExec(
-				['commit', '--allow-empty', '-m', `checkpoint: ${label}`],
+				[
+					'commit',
+					'--allow-empty',
+					'-m',
+					`checkpoint: ${label}`,
+					'--',
+					...NON_SWARM_COMMIT_PATHSPEC,
+				],
 				directory,
 			);
 		}
@@ -891,19 +1067,43 @@ async function handleRestore(
 			const backup = backupTrackedChangesBeforeRollback(
 				directory,
 				measurement.dirtyRelPaths,
+				{
+					captureIndexEntry: (input) =>
+						_internals.captureIndexEntryForBackup({
+							directory,
+							...input,
+						}),
+				},
 			);
 			// Fail closed when the safety net is incomplete: a destructive
 			// restore never proceeds over files whose current bytes were not
-			// actually copied (#2976 review F-3). Only paths that exist on
-			// disk owe a copy — a rename record's ORIG side has no live bytes
-			// (the file moved), so requiring it would refuse every rename.
+			// actually copied (#2976 review F-3), over deletions that were
+			// not honestly recorded (#3763 AC4), or when ANY recovery capture
+			// step (copies, staged-state capture, manifest) reported failure
+			// (#3763 — AC5 generalized: a recovery writer failure refuses
+			// the reset even when the file copies themselves succeeded).
+			const copiedSet = new Set(backup.copied);
+			const deletedSet = new Set(backup.recordedDeletions);
 			const atRiskExisting = measurement.dirtyRelPaths.filter((rel) =>
 				fs.existsSync(path.join(directory, rel)),
-			).length;
-			if (!backup.backupDir || backup.copied.length < atRiskExisting) {
+			);
+			const uncovered = measurement.dirtyRelPaths.filter((rel) =>
+				fs.existsSync(path.join(directory, rel))
+					? !copiedSet.has(rel)
+					: !deletedSet.has(rel),
+			);
+			if (
+				!backup.backupDir ||
+				!backup.recoveryComplete ||
+				uncovered.length > 0
+			) {
 				return serializeResult('restore', {
 					success: false,
-					error: `backup incomplete (${backup.copied.length}/${atRiskExisting} at-risk file(s) copied) — restore refused so nothing is destroyed.${
+					error: `backup incomplete (${backup.copied.length}/${atRiskExisting.length} at-risk file(s) copied${
+						uncovered.length > 0
+							? `, ${uncovered.length} uncovered: ${uncovered.slice(0, 5).join(', ')}${uncovered.length > 5 ? '…' : ''}`
+							: ''
+					}${backup.recoveryComplete ? '' : ', recovery capture incomplete'}) — restore refused so nothing is destroyed.${
 						backup.warnings.length > 0
 							? ` Warnings: ${backup.warnings.join('; ')}`
 							: ''

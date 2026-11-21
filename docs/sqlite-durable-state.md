@@ -182,6 +182,20 @@ transaction. Backpressure: the queue is hard-bounded at `MAX_QUEUED_OPS`
 (1024) — reaching the bound forces a synchronous flush rather than dropping
 writes. Nothing here runs at plugin init.
 
+**Truthful rejection and per-op outcomes (#3772).** A failed flush DROPS its
+batch — for permanent failures AND retryable ones (busy/disk-full/read-only)
+alike — fires every op's optional `onDrop({category, error})` callback
+exactly once, and throws the typed `DbWriteError` so the caller owns the
+retry. A rejection therefore never means "queued and will be reapplied": the
+pre-#3772 behavior retained a retryable batch while reporting rejection,
+which made a caller's honest retry a duplicate commit. Exactly-once failure
+accounting: `onDrop` owns accepted-then-dropped ops; when an enqueue's inline
+threshold flush drops a batch that includes that call's just-accepted op, the
+thrown `DbWriteError` carries `droppedAcceptedOp: true` so listeners (the
+observability sink) do not count it twice; not-accepted failures (pre-push
+hard-bound flush, closed writer) throw unflagged and stay listener-owned.
+`enqueue` throwing now always means the op was NOT accepted.
+
 **Self-healing against a closed handle.** A close site that evicts the DB
 handle without closing the writer (the pre-#2480-fix `/swarm close` shape)
 would leave the writer flushing against a dead handle. Every production

@@ -43,6 +43,16 @@ export interface GroupCommitOp {
 	durability: 'full' | 'normal';
 	/** Apply the write. Must only touch `.swarm/swarm.db` via the given handle. */
 	run: (db: Database) => void;
+	/**
+	 * Observable failure channel for ACCEPTED-then-dropped operations
+	 * (#3772 AC6). Invoked exactly once when the op's batch is dropped
+	 * (permanent failures AND retryable ones — both arms drop). A throwing
+	 * callback never masks the original flush failure. This is the AC's
+	 * "expose its own observable failure" arm: acceptance (`enqueue`)
+	 * otherwise returns void, so a dropped earlier op would be silently
+	 * lost to its originator (the frozen AC6 probe: 0 rows, outcome none).
+	 */
+	onDrop?: (failure: { category: DbWriteErrorCategory; error: string }) => void;
 }
 
 /**
@@ -132,24 +142,36 @@ export class GroupCommitWriter {
 			throw new DbWriteError('unknown', 'group-commit writer is closed');
 		}
 		// Hard bound FIRST (#2480 review F-01): at/over the cap, force a
-		// flush attempt BEFORE accepting more work. If that flush fails
-		// (busy/disk-full/read-only), this throws WITHOUT pushing, so the
-		// queue is genuinely bounded at MAX_QUEUED_OPS even when every
-		// flush fails; the caller's fail-open handling owns the loss.
+		// flush attempt BEFORE accepting more work. If that flush fails, this
+		// throws WITHOUT pushing (the incoming op is NOT accepted and its
+		// onDrop never ran — the error carries no droppedAcceptedOp flag), so
+		// the caller's fail-open handling owns the loss.
 		if (this.queue.length >= MAX_QUEUED_OPS) {
 			this.flushSync();
 		}
 		this.queue.push(op);
 		if (this.queue.length >= FLUSH_THRESHOLD_OPS) {
-			this.flushSync();
+			try {
+				this.flushSync();
+			} catch (err) {
+				// Truthful acceptance contract (#3772): the threshold flush
+				// runs AFTER the push, so a dropped batch includes THIS op —
+				// its onDrop already fired. Mark the error so exactly-once
+				// accounting (e.g. the observability sink) does not count it
+				// twice, then rethrow: the op is NOT accepted.
+				if (err instanceof DbWriteError) err.droppedAcceptedOp = true;
+				throw err;
+			}
 		}
 	}
 
 	/**
 	 * Apply every queued op in ONE immediate transaction. On op failure the
-	 * transaction rolls back and the error rethrows (queue emptied — the ops
-	 * are not idempotently retryable by this layer). On busy/disk-full/
-	 * read-only the queue is RETAINED and a typed `DbWriteError` throws.
+	 * transaction rolls back and the error rethrows; on ANY classified
+	 * failure the batch is DROPPED (never retained for automatic
+	 * reapplication — a rejection must be truthful, #3772), each op's
+	 * `onDrop` fires, and a typed `DbWriteError` throws so the caller owns
+	 * the retry.
 	 *
 	 * Self-healing (#2480): if the underlying handle was CLOSED underneath
 	 * this writer (a close site evicted the DB handle without closing the
@@ -182,23 +204,23 @@ export class GroupCommitWriter {
 				this.close();
 				if (this.registryKey !== null) _writers.delete(this.registryKey);
 			}
-			if (
-				category === 'busy' ||
-				category === 'disk_full' ||
-				category === 'read_only'
-			) {
-				// Retryable/environmental: retain the batch for the next flush
-				// and coalesce the advisory.
-				this.queue = [...batch, ...this.queue];
-				this.noteDegraded(category);
-			} else {
-				this.noteDegraded(category);
-			}
+			// Truthful rejection (#3772): a rejection must mean the operations
+			// are NOT queued and will NOT be reapplied — a retained batch that
+			// later commits makes the caller's retry a duplicate commit (the
+			// frozen AC7 probe: 2 rows for a logically-once insert). Both the
+			// retryable and the permanent arms DROP the batch and notify each
+			// op's onDrop; only the advisory text differs.
+			this.notifyDropped(batch, category, err);
+			this.noteDegraded(category);
 			throw new DbWriteError(
 				category,
-				`swarm.db group-commit flush failed (${category}): ${
-					err instanceof Error ? err.message : String(err)
-				}`,
+				`swarm.db group-commit flush failed (${category})${
+					category === 'busy' ||
+					category === 'disk_full' ||
+					category === 'read_only'
+						? ' — batch dropped, callers own the retry'
+						: ''
+				}: ${err instanceof Error ? err.message : String(err)}`,
 			);
 		} finally {
 			this.flushing = false;
@@ -214,6 +236,28 @@ export class GroupCommitWriter {
 	close(): void {
 		this.closed = true;
 		this.queue = [];
+	}
+
+	/**
+	 * Invoke each dropped op's onDrop (#3772 AC6) with the classified
+	 * failure. Per-op try/catch: a callback failure is swallowed (the
+	 * original flush error must win) — observability callbacks must never
+	 * turn a data-path failure into a different one.
+	 */
+	private notifyDropped(
+		batch: GroupCommitOp[],
+		category: DbWriteErrorCategory,
+		cause: unknown,
+	): void {
+		const error = cause instanceof Error ? cause.message : String(cause);
+		for (const op of batch) {
+			if (typeof op.onDrop !== 'function') continue;
+			try {
+				op.onDrop({ category, error });
+			} catch {
+				// Swallow: the original flush failure is the signal.
+			}
+		}
 	}
 
 	private applyBatch(batch: GroupCommitOp[]): void {
@@ -252,9 +296,13 @@ export class GroupCommitWriter {
 		this.degraded = { category, until: now + DEGRADED_COOLDOWN_MS };
 		if (now - this.lastAdvisoryAt < DEGRADED_COOLDOWN_MS) return;
 		this.lastAdvisoryAt = now;
-		// Bounded advisory — no SQL text, no paths, no payloads.
+		// Bounded advisory — no SQL text, no paths, no payloads. #3772: the
+		// text states the truthful contract — a failed flush DROPS its batch
+		// (every op's onDrop fires) and reports the typed error; callers own
+		// the retry. The pre-#3772 text ("queued writes retry on the next
+		// flush") described the retain-and-reject conflation this fix removed.
 		warn(
-			`[swarm.db] durable-state writer degraded (category=${category}); queued writes retry on the next flush`,
+			`[swarm.db] durable-state writer degraded (category=${category}); failed-flush batches are dropped and reported — callers own the retry`,
 		);
 	}
 

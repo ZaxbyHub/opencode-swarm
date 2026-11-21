@@ -34,6 +34,16 @@ export class ProjectDbError extends Error {
 export class DbWriteError extends Error {
 	readonly category: DbWriteErrorCategory;
 
+	/**
+	 * Exactly-once drop accounting marker (#3772): set when the error's
+	 * dropped batch included the throwing `enqueue` call's own just-accepted
+	 * operation — its `onDrop` already fired, so failure-accounting listeners
+	 * (the observability sink) must NOT count it again. Unset when the
+	 * incoming operation was never accepted (pre-push hard-bound flush,
+	 * closed writer): the listener owns that count.
+	 */
+	droppedAcceptedOp?: boolean;
+
 	constructor(category: DbWriteErrorCategory, message: string) {
 		super(message);
 		this.name = 'DbWriteError';
