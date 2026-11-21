@@ -26,6 +26,7 @@ import type {
 	TaskContextSummary,
 } from '../types/context-map';
 import { extractContextDecisions } from '../utils/context-decisions';
+import { derivePlanIdentityHash } from '../plan/utils';
 import * as logger from '../utils/logger.js';
 import { extractFileSummary } from './file-summary';
 import {
@@ -831,6 +832,101 @@ export async function updateContextMapAfterAgentLocked(
 // ---------------------------------------------------------------------------
 
 /**
+ * r17 (§6): lazily-bound raw plan readers used by the per-task release proof
+ * when NO snapshot is supplied. Seamed so the I/O-budget regression can
+ * count (or replace) the physical plan.json reads without mocking `node:fs`
+ * (mock.module on node:fs wedges Bun 1.4.4's module machinery — measured,
+ * see reconcile-io-budget.test.ts). Production binds the real gate-evidence
+ * functions on first use; each invocation is one physical plan.json read.
+ */
+export const _planProofReaders: {
+	resolveCurrentPlanIdentitySync: null | ((
+		directory: string,
+	) => { planId: string; planIdentityHash: string } | null);
+	readCurrentTaskDeclaredFiles: null | ((
+		directory: string,
+		taskId: string,
+	) => string[] | null);
+} = {
+	resolveCurrentPlanIdentitySync: null,
+	readCurrentTaskDeclaredFiles: null,
+};
+
+/** Lazily bind the raw plan readers from gate-evidence (once per process). */
+async function bindPlanProofReaders(): Promise<void> {
+	if (
+		_planProofReaders.resolveCurrentPlanIdentitySync !== null &&
+		_planProofReaders.readCurrentTaskDeclaredFiles !== null
+	) {
+		return;
+	}
+	const gate = await import('../gate-evidence.js');
+	_planProofReaders.resolveCurrentPlanIdentitySync ??=
+		gate.resolveCurrentPlanIdentitySync;
+	_planProofReaders.readCurrentTaskDeclaredFiles ??=
+		gate.readCurrentTaskDeclaredFiles;
+}
+
+/**
+ * r17 (§6): a once-loaded, READ-ONLY plan snapshot the reconciliation pass
+ * derives from the plan it already loaded — so the per-task evidence proof
+ * does not re-read and re-parse the ENTIRE plan.json twice per candidate
+ * (`resolveCurrentPlanIdentitySync` + `readCurrentTaskDeclaredFiles` both
+ * raw-read plan.json; measured pre-repair: ~4000 physical plan opens for a
+ * 1000-task first pass).
+ *
+ * SECURITY CONTRACT: the snapshot is only used for repeatable, read-only
+ * proof computation. It never replaces an authority check at a mandatory
+ * write point — the promotion fence
+ * (`promoteContextMapTaskReleaseLocked`) re-reads the CURRENT plan under
+ * the context-map lock and re-verifies BOTH the task status AND the plan
+ * identity hash before writing, so a plan that changed identity mid-pass
+ * fails closed and the next maintenance pass re-drives the promotions.
+ *
+ * Residual (documented): `planIdentityHash` derives from `swarm` + `title`
+ * only — a same-identity plan.json edit limited to a completed task's
+ * `files_touched` between the pass's plan load and the promotion is not
+ * detected by the identity fence. The status fence plus the fail-closed
+ * evidence gates bound that window; no exactly-once guarantee is claimed.
+ */
+export interface TaskReleaseProofSnapshot {
+	/** Identity hash of the plan the snapshot was derived from (never undefined). */
+	planIdentityHash: string | null;
+	/**
+	 * The task's declared files, with `readCurrentTaskDeclaredFiles`
+	 * semantics: null when the task is absent, duplicated, or its
+	 * files_touched is not a string[].
+	 */
+	declaredFiles: string[] | null;
+}
+
+/** Derive the declared-files map from an already-loaded plan (once per pass). */
+function deriveDeclaredFilesByTask(
+	plan: import('../config/plan-schema').Plan,
+): Map<string, string[] | null> {
+	const byTask = new Map<string, string[] | null>();
+	for (const phase of plan.phases) {
+		for (const task of phase.tasks) {
+			if (byTask.has(task.id)) {
+				// Duplicate task id: not proof (readCurrentTaskDeclaredFiles
+				// returns null for a second match).
+				byTask.set(task.id, null);
+				continue;
+			}
+			const files = (task as { files_touched?: unknown }).files_touched;
+			byTask.set(
+				task.id,
+				Array.isArray(files) &&
+					files.every((file) => typeof file === 'string')
+					? [...(files as string[])]
+					: null,
+			);
+		}
+	}
+	return byTask;
+}
+
+/**
  * r16 audit repair (P2): the evidence-lock key coordinating every
  * context-map read-modify-write cycle. `saveContextMap`'s atomic write makes
  * each individual persist torn-write-safe, but two processes that both
@@ -963,15 +1059,15 @@ export async function withContextMapLock<T>(
 export async function resolveTaskReleaseEvidenceProof(
 	directory: string,
 	taskId: string,
+	snapshot?: TaskReleaseProofSnapshot,
 ): Promise<boolean> {
 	try {
+		await bindPlanProofReaders();
 		const {
 			readTaskEvidenceState,
 			getTaskWorkflowSnapshot,
 			deriveApplicableGateSet,
 			evidenceStampedForDifferentPlan,
-			resolveCurrentPlanIdentitySync,
-			readCurrentTaskDeclaredFiles,
 		} = await import('../gate-evidence.js');
 		// Fail closed on missing AND unparseable evidence — a vacuous
 		// empty-gate pass is never a release proof.
@@ -981,11 +1077,16 @@ export async function resolveTaskReleaseEvidenceProof(
 		}
 		const evidence = state.evidence;
 		// Prior-campaign evidence (positive plan-identity mismatch only).
+		// r17 (§6): with a pass snapshot the identity comes from the snapshot
+		// (zero per-task plan reads); the write-point promotion fence
+		// re-verifies the CURRENT plan identity before any write.
+		const currentIdentityHash =
+			snapshot?.planIdentityHash ??
+			_planProofReaders.resolveCurrentPlanIdentitySync!(directory)
+				?.planIdentityHash ??
+			null;
 		if (
-			evidenceStampedForDifferentPlan(
-				evidence,
-				resolveCurrentPlanIdentitySync(directory)?.planIdentityHash,
-			)
+			evidenceStampedForDifferentPlan(evidence, currentIdentityHash)
 		) {
 			return false;
 		}
@@ -1003,8 +1104,12 @@ export async function resolveTaskReleaseEvidenceProof(
 		// The authoritative applicable-gate derivation: empty required gates
 		// are honored only with the exact no-mutation settlement proof (or a
 		// matched external attest); everything else still owes Stage A.
+		// r17 (§6): declared files come from the pass snapshot when supplied.
+		const currentDeclaredFiles =
+			snapshot?.declaredFiles ??
+			_planProofReaders.readCurrentTaskDeclaredFiles!(directory, taskId);
 		const derivedGates = deriveApplicableGateSet(evidence, {
-			currentDeclaredFiles: readCurrentTaskDeclaredFiles(directory, taskId),
+			currentDeclaredFiles,
 		});
 		if (derivedGates.missingGates.length > 0) {
 			return false;
@@ -1040,28 +1145,43 @@ export async function resolveContextMapTaskReleaseStatus(
 }
 
 /**
- * r17 audit repair (P1): read the task's CURRENT status from the plan.json
- * projection with a single RAW read — deliberately NOT through the plan
- * artifact cache (each cached load costs a stat plus a structuredClone of the
- * entire plan, which would re-create the per-task plan-load budget the r16
- * repair removed) and not through a schema-validated parse (the fence only
- * needs one field). Fail-closed: any read/parse error, missing task, or
- * non-string status yields null and the caller skips the promotion.
+ * r17 audit repair (P1): read the task's CURRENT status and the plan's
+ * CURRENT identity hash from the plan.json projection with a single RAW
+ * read — deliberately NOT through the plan artifact cache (each cached load
+ * costs a stat plus a structuredClone of the entire plan, which would
+ * re-create the per-task plan-load budget the r16 repair removed) and not
+ * through a schema-validated parse (the fence only needs two fields).
+ * Fail-closed: any read/parse error, missing task, or non-string status
+ * yields null and the caller skips the promotion.
  */
-function readCurrentTaskStatusFromPlan(
+function readCurrentTaskStatusAndIdentityFromPlan(
 	directory: string,
 	taskId: string,
-): string | null {
+): { status: string; planIdentityHash: string } | null {
 	try {
 		const planPath = path.join(directory, '.swarm', 'plan.json');
 		const raw = _internals.readFileSync(planPath, 'utf-8');
 		const parsed = JSON.parse(raw) as {
-			phases?: Array<{ tasks?: Array<{ id?: unknown; status?: unknown }> }>;
+			swarm?: unknown;
+			title?: unknown;
+			phases?: Array<{
+				tasks?: Array<{ id?: unknown; status?: unknown }>;
+			}>;
 		};
+		if (typeof parsed.swarm !== 'string' || typeof parsed.title !== 'string') {
+			return null;
+		}
 		for (const phase of parsed.phases ?? []) {
 			for (const task of phase.tasks ?? []) {
 				if (task?.id === taskId) {
-					return typeof task.status === 'string' ? task.status : null;
+					if (typeof task.status !== 'string') return null;
+					return {
+						status: task.status,
+						planIdentityHash: derivePlanIdentityHash({
+							swarm: parsed.swarm,
+							title: parsed.title,
+						}),
+					};
 				}
 			}
 		}
@@ -1148,48 +1268,69 @@ export async function promoteContextMapTaskReleaseLocked(
 	directory: string,
 	taskId: string,
 	lockTimeoutMs: number = CONTEXT_MAP_LOCK_BUDGET_MS.background,
+	expectedPlanIdentityHash?: string,
 ): Promise<void> {
 	await withContextMapLock(
 		directory,
 		'update_task_status',
 		taskId,
 		() => {
-		// r17 audit repair (P1): STALE-PLAN FENCE. The reconciliation selects
-		// its candidates from a plan loaded BEFORE the per-task (async)
-		// evidence proof, and the authoritative task status can change in
-		// between — a rework flips completed → in_progress under a new
-		// workflow generation. The existing plan-identity fence does not
-		// catch this: `planIdentityHash` derives from `swarm` + `title` only,
-		// so a task-status change never changes it, and unstamped legacy
-		// evidence skips the mismatch check entirely. Re-read the task's
-		// CURRENT status here — under the context-map lock, immediately
-		// before the write — and skip the promotion unless it is still
-		// `completed`. No fresh `approved` marking is created for a task that
-		// is no longer released; the pending entry survives for the next
-		// maintenance pass.
-		//
-		// The fence is a single RAW plan.json read (not the artifact cache) —
-		// a cached load costs a stat plus a structuredClone of the ENTIRE
-		// plan per promoted task, which would re-create the per-task
-		// plan-load budget the r16 repair removed.
-		//
-		// RESIDUAL RACE (documented, deliberately not claimed closed): the
-		// plan ledger's writes are not serialized against this context-map
-		// lock — no common authority boundary exists between the two stores.
-		// The fence closes the wide window (the evidence proof plus the lock
-		// wait) but a plan write racing inside the read→promote→save window
-		// itself can still interleave. A skipped promotion is fail-closed and
-		// recovered: the next maintenance-point reconciliation re-drives it
-		// once the task is released again.
-		const currentStatus = readCurrentTaskStatusFromPlan(directory, taskId);
-		if (currentStatus !== 'completed') {
-			logger.warn(
-				`[context-map] task-release promotion for task ${taskId} skipped — the authoritative plan status is '${currentStatus ?? 'task-missing'}' (not completed) at promotion time; the next maintenance pass re-drives it once the task is released`,
+			// r17 audit repair (P1): STALE-PLAN FENCE. The reconciliation selects
+			// its candidates from a plan loaded BEFORE the per-task (async)
+			// evidence proof, and the authoritative task status can change in
+			// between — a rework flips completed → in_progress under a new
+			// workflow generation. The existing plan-identity fence does not
+			// catch this: `planIdentityHash` derives from `swarm` + `title` only,
+			// so a task-status change never changes it, and unstamped legacy
+			// evidence skips the mismatch check entirely. Re-read the task's
+			// CURRENT status here — under the context-map lock, immediately
+			// before the write — and skip the promotion unless it is still
+			// `completed`. No fresh `approved` marking is created for a task that
+			// is no longer released; the pending entry survives for the next
+			// maintenance pass.
+			//
+			// r17 (§6): when the caller derived its proofs from a pass snapshot
+			// (the reconciliation), it passes the snapshot's
+			// `expectedPlanIdentityHash`; the fence re-derives the CURRENT
+			// identity from the same raw read and skips on mismatch — a
+			// snapshot never replaces the authority check at the write point.
+			//
+			// The fence is a single RAW plan.json read (not the artifact cache) —
+			// a cached load costs a stat plus a structuredClone of the ENTIRE
+			// plan per promoted task, which would re-create the per-task
+			// plan-load budget the r16 repair removed.
+			//
+			// RESIDUAL RACE (documented, deliberately not claimed closed): the
+			// plan ledger's writes are not serialized against this context-map
+			// lock — no common authority boundary exists between the two stores.
+			// The fence closes the wide window (the evidence proof plus the lock
+			// wait) but a plan write racing inside the read→promote→save window
+			// itself can still interleave. A skipped promotion is fail-closed and
+			// recovered: the next maintenance-point reconciliation re-drives it
+			// once the task is released again.
+			const current = readCurrentTaskStatusAndIdentityFromPlan(
+				directory,
+				taskId,
 			);
-			return;
-		}
-		promoteContextMapTaskRelease(directory, taskId);
-	});
+			if (current?.status !== 'completed') {
+				logger.warn(
+					`[context-map] task-release promotion for task ${taskId} skipped — the authoritative plan status is '${current?.status ?? 'task-missing'}' (not completed) at promotion time; the next maintenance pass re-drives it once the task is released`,
+				);
+				return;
+			}
+			if (
+				expectedPlanIdentityHash !== undefined &&
+				current.planIdentityHash !== expectedPlanIdentityHash
+			) {
+				logger.warn(
+					`[context-map] task-release promotion for task ${taskId} skipped — the plan identity changed since the reconciliation pass loaded it (stale proofs); the next maintenance pass re-derives everything`,
+				);
+				return;
+			}
+			promoteContextMapTaskRelease(directory, taskId);
+		},
+		lockTimeoutMs,
+	);
 }
 
 /**
@@ -1262,6 +1403,21 @@ export async function reconcileContextMapTaskReleases(
 			readState.kind === 'ok'
 				? readState.map
 				: _internals.createEmptyContextMap();
+		// r17 (§6): the once-per-pass READ-ONLY proof snapshot. The per-task
+		// proof previously raw-read plan.json TWICE per candidate
+		// (`resolveCurrentPlanIdentitySync` + `readCurrentTaskDeclaredFiles`);
+		// measured pre-repair: ~4000 physical plan.json opens for a
+		// 1000-task first pass. The snapshot supplies both values from the
+		// plan loaded ONCE above. Security: the snapshot is used only for
+		// this read-only proof computation — the promotion fence below
+		// re-verifies the CURRENT task status AND plan identity at the
+		// mandatory write point, so a plan that changed mid-pass fails
+		// closed.
+		const passPlanIdentityHash = derivePlanIdentityHash({
+			swarm: plan.swarm,
+			title: plan.title,
+		});
+		const declaredFilesByTask = deriveDeclaredFilesByTask(plan);
 		for (const task of completedTasks) {
 			const existing = map.task_history[task.id];
 			if (existing !== undefined && existing.final_status !== 'pending') {
@@ -1281,6 +1437,10 @@ export async function reconcileContextMapTaskReleases(
 			const evidenceProven = await resolveTaskReleaseEvidenceProof(
 				directory,
 				task.id,
+				{
+					planIdentityHash: passPlanIdentityHash,
+					declaredFiles: declaredFilesByTask.get(task.id) ?? null,
+				},
 			);
 			if (evidenceProven) {
 				// r16 (P2): the coordinated promotion — the whole
@@ -1290,10 +1450,14 @@ export async function reconcileContextMapTaskReleases(
 				// budget — an unattended maintenance pass must not sit on a
 				// contended lock; a skipped promotion is re-driven by the
 				// next maintenance point.
+				// r17 (§6): the pass identity is passed to the promotion fence —
+				// a plan whose identity changed since the pass load fails
+				// closed at the write point (stale proofs are never written).
 				await promoteContextMapTaskReleaseLocked(
 					directory,
 					task.id,
 					CONTEXT_MAP_LOCK_BUDGET_MS.maintenance,
+					passPlanIdentityHash,
 				);
 			}
 		}
