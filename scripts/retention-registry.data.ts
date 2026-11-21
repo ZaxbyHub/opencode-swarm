@@ -953,11 +953,11 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/hooks/delegation-gate/dead-lane-reclaim.ts'],
 		writerCitations: [
-			'src/hooks/delegation-gate/dead-lane-reclaim.ts:139 recordDeadLaneReclaim — dedupe-by-lanePath merge, then writeStore (:112) rewrites the bounded store atomically via atomicWriteSwarmFileSync (:131); the only writer — the three strand sites (worktree-isolation handleStrandedLane, delegation-gate terminal-failure path, reset-session EBUSY bulk-clean path) all call this one seam (issue #2599)',
-			'src/hooks/delegation-gate/dead-lane-reclaim.ts:250 reclaimDeadLanes — the consuming pass at next start; fs.rmSync force removes the store file once no entries remain (:329)',
+			'src/hooks/delegation-gate/dead-lane-reclaim.ts:140 recordDeadLaneReclaim — dedupe-by-lanePath merge, then writeStore (:112) rewrites the bounded store atomically via atomicWriteSwarmFileSync (:131); the only writer — the three strand sites (worktree-isolation handleStrandedLane, delegation-gate terminal-failure path, reset-session EBUSY bulk-clean path) all call this one seam (issue #2599)',
+			'src/hooks/delegation-gate/dead-lane-reclaim.ts:251 reclaimDeadLanes — the consuming pass at next start; fs.rmSync force removes the store file once no entries remain (:329)',
 		],
 		readerCitations: [
-			'src/hooks/delegation-gate/dead-lane-reclaim.ts:89 readStore — single file, sync readFileSync bounded by MAX_DEAD_LANE_RECLAIM_BYTES (:91-93); missing/oversized/malformed reads fail to the empty store, never throw',
+			'src/hooks/delegation-gate/dead-lane-reclaim.ts:90 readStore — single file, sync readFileSync bounded by MAX_DEAD_LANE_RECLAIM_BYTES (:91-93); missing/oversized/malformed reads fail to the empty store, never throw',
 			'src/hooks/init-orphan-recovery.ts reclaimDeadLanes (Step 3) — withTimeout-bounded startup pass; retained/preserved outcomes logged, never fatal to init',
 		],
 		schemaVersion: '1 (DeadLaneReclaimStore.schemaVersion, dead-lane-reclaim.ts:52)',
