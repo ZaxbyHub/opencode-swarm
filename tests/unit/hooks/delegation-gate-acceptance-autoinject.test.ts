@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdir, rm } from 'node:fs/promises';
+import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { HooksConfigSchema } from '../../../src/config/schema';
 import {
@@ -8,7 +8,7 @@ import {
 	swarmState,
 } from '../../../src/state';
 import { createIsolatedTestEnv } from '../../helpers/isolated-test-env.js';
-import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
+import { canonicalMkdtemp, removeTreeWithRetry } from '../../helpers/tmpdir.js';
 import {
 	createDelegationGateHook,
 	makeConfig,
@@ -38,7 +38,7 @@ describe('delegation-gate acceptance auto-injection', () => {
 	afterEach(async () => {
 		resetSwarmState();
 		if (directory) {
-			await rm(directory, { recursive: true, force: true });
+			removeTreeWithRetry(directory);
 		}
 		isolatedEnv?.cleanup();
 		isolatedEnv = undefined;
@@ -316,7 +316,7 @@ describe('delegation-gate acceptance auto-injection', () => {
 			).toBe(false);
 		});
 
-		test('an empty header only the cross-field join can see is rejected and left untouched (issue 3381 AC3 will revisit)', async () => {
+		test('an empty header only the cross-field join can see is rejected and left untouched (issue 3381 AC3)', async () => {
 			// The validator joins fields with a newline, so description "ACCEPTANCE:\r"
 			// plus the next field reads as a CRLF-terminated empty header, while the
 			// per-field injector sees no header line in any single field. The strict

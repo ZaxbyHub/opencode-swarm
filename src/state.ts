@@ -49,6 +49,7 @@ import {
 	clearPendingCoderScope,
 	resetStandardWorktreeIsolationState,
 } from './hooks/delegation-gate.js';
+import { resetExecutionStallState } from './hooks/guardrails/execution-stall.js';
 import {
 	clearRealtimeLearningNudgeSession,
 	resetRealtimeLearningNudgeState,
@@ -1255,6 +1256,13 @@ export function resetSwarmState(): void {
 	// module-scoped bounded state — clear it with the rest so every test suite
 	// and /swarm reset-session starts from an empty registry (invariant 8).
 	routeInvalidationRegistryTestExports.reset();
+	// Issue #3608: the execution-stall monitor keeps module-scoped
+	// session-keyed state (armed episode + non-progress counter, pending
+	// dispatch roles). Without this clear, a later session reusing the same
+	// sessionID counts against a stale episode and can be denied at the
+	// stall threshold with no visible cause. Same class as the route-invalidation
+	// registry above (invariant 8: explicit reset path for bounded global state).
+	resetExecutionStallState();
 	resetRealtimeLearningNudgeState();
 	// v6.71+ Clear the council-mode disagreement warn-once memo so tests and
 	// fresh sessions observe consistent first-time warnings.
