@@ -154,9 +154,15 @@ echo "Suggestions written to:       $SUGGESTIONS_FILE"
 # issue.
 # Trust rule (PRR-001, the v7.188.0 lookalike-issue class — see
 # scripts/check-host-contract.ts and scripts/ci/quarantine-aging.ts
-# isBotAuthored): only adopt issues authored by this workflow's own bot
-# identity. Issue titles are user-controllable in a public repo; a lookalike
-# issue MUST NOT absorb the bot's detection comments.
+# isBotAuthored): TITLE DISCOVERY only adopts issues authored by this
+# workflow's own bot identity. Issue titles are user-controllable in a public
+# repo; a lookalike issue MUST NOT absorb the bot's detection comments.
+# The explicit FLAKE_TRACKING_ISSUE pin (PR #3883) is the one exception: it
+# does not use title discovery and never checks is_bot (the pinned issue may be
+# human-authored). Its root of trust is that the number is a constant set by the
+# default-branch workflow, never derived from artifacts or issue titles, so it
+# MUST stay a workflow constant; see the pinned branch below for the
+# open/not-a-PR/same-repository validation.
 # Known limitation (accepted, warn-only): two detection runs finishing
 # concurrently can both find no open issue and both create — a rare duplicate
 # that the next run's comment merges back onto one thread.
@@ -184,6 +190,8 @@ if [ "$suggestion_count" -gt 0 ]; then
     # matches only one serializer; quarantine-aging.ts:13-14 observed the
     # same). A forged selection can therefore only route to an issue whose
     # REAL author is then checked — a hijacker's own issue fails the check.
+    # (All of the above applies to the title-discovery branch only; the pinned
+    # FLAKE_TRACKING_ISSUE branch below skips discovery and the author check.)
     if [ -n "${FLAKE_TRACKING_ISSUE:-}" ]; then
         # This explicit issue number comes from the trusted workflow, not from
         # the triggering run's artifacts or a search of user-editable titles.

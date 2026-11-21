@@ -8,10 +8,13 @@
  * OPEN bot-authored issue with the exact title and comments there instead.
  *
  * Trust rule pinned here (the v7.188.0 lookalike-issue class): issue titles
- * are user-controllable in a public repo, so adoption requires BOTH the
- * byte-exact title AND author == github-actions[bot], and the routed issue
- * number must be bare numeric. Source-text pins (executing the script needs
- * a gh binary + network; precedent: ci-yml-integration.test.ts).
+ * are user-controllable in a public repo, so title DISCOVERY adopts only an
+ * issue with BOTH the byte-exact title AND a bot author (author.is_bot), and
+ * the routed issue number must be bare numeric. The explicit
+ * FLAKE_TRACKING_ISSUE pin (PR #3883) bypasses discovery and the author check:
+ * its trust root is a workflow constant. Its behaviour is exercised against a
+ * stub `gh` in flake-detection-pinned-issue-behavior-3883.test.ts. The pins
+ * in this file are source-text pins.
  */
 import { describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
