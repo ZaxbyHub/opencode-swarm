@@ -65,17 +65,26 @@ function redactBareAndScanner(content: string): EvidenceRedactionResult {
 	const planned: Replacement[] = findRedactableTokenSpans(content).map(
 		(span) => ({ start: span.start, end: span.end, label: '[REDACTED:jwt]' }),
 	);
-	const overlapsPlanned = (start: number, end: number) =>
-		planned.some((r) => start < r.end && end > r.start);
 	for (const arm of EVIDENCE_BARE_TOKEN_VALUE_PATTERNS) {
 		arm.re.lastIndex = 0;
 		for (const match of content.matchAll(arm.re)) {
 			if (!match[0]) continue;
 			if (arm.guard && !arm.guard(match[0])) continue;
 			const start = match.index ?? 0;
-			const end = start + match[0].length;
-			if (overlapsPlanned(start, end)) continue;
-			planned.push({ start, end, label: arm.label });
+			let end = start + match[0].length;
+			// Overlap policy (#3844 round-5): a bare match overlapping a
+			// scanner span is CLIPPED to its non-overlapping head rather than
+			// dropped — a secret-bearing prefix before an eyJ run keeps its
+			// family label on the covered portion instead of surviving clear.
+			const overlap = planned.find((r) => start < r.end && end > r.start);
+			if (overlap && overlap.start > start) {
+				end = overlap.start;
+			} else if (overlap) {
+				continue;
+			}
+			if (end - start >= 12) {
+				planned.push({ start, end, label: arm.label });
+			}
 		}
 	}
 	if (planned.length === 0) return { text: content, redactions: 0 };
@@ -96,9 +105,18 @@ function redactBareAndScanner(content: string): EvidenceRedactionResult {
 export function redactEvidenceText(text: string): string {
 	if (typeof text !== 'string' || text.length === 0) return text;
 	try {
-		// Context corpus first (private-key blocks, KV shapes, etc.) — the
-		// sequential composition mirrors the persisted-store precedent.
-		let working = redactSecrets(text);
+		// Span-union pass FIRST, on the ORIGINAL text: computing scanner spans
+		// after the context corpus would let redactSecrets' three-part JWT
+		// regex consume the head of a five-part JWE, stranding its tail
+		// segments (#3844 round-5 review finding; executed probe confirmed
+		// segments 4-5 survived under context-first ordering). Placeholders
+		// are inert for every later context arm.
+		const bare = redactBareAndScanner(text);
+		let working = bare.text;
+		// Context corpus (private-key blocks, KV shapes, bearer, etc.) runs
+		// over the placeholder-bearing union output — placeholders are inert
+		// for every context arm.
+		working = redactSecrets(working);
 		working = working.replace(
 			URL_CREDENTIALS_PATTERN,
 			(_m, scheme: string, _user: string, _pass: string, host: string) =>
@@ -108,12 +126,7 @@ export function redactEvidenceText(text: string): string {
 			URL_QUERY_CREDENTIALS_PATTERN,
 			(_m, sep: string, key: string) => `${sep}${key}[REDACTED]`,
 		);
-		// Span-union pass runs on the already-context-redacted text: URL and
-		// KV spans are consumed above, so remaining bare values and JWS shapes
-		// are disjoint from them by construction; the scanner still wins over
-		// the bare arms.
-		const bare = redactBareAndScanner(working);
-		return bare.text;
+		return working;
 	} catch {
 		return '[REDACTED:evidence-redaction-failed]';
 	}

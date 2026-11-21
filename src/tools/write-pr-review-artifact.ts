@@ -1339,7 +1339,7 @@ export async function executeWritePrReviewArtifact(
 		}
 		let created: boolean;
 		try {
-			// #3844 sidecar-first: persist the raw handoff identity before the artifact.
+			// #3844 sidecar-first (Y2): raw identity BEFORE the artifact; failure ABORTS.
 			try {
 				writeReplayIdentityFingerprint(
 					directory,
@@ -1353,10 +1353,13 @@ export async function executeWritePrReviewArtifact(
 						}),
 					),
 				);
-			} catch {
-				// A missing handoff sidecar degrades retries to the legacy
-				// comparison (stored rows are redacted post-fix, so a retry will
-				// surface as a conflict — fail-closed, disclosed).
+			} catch (error) {
+				return operationFailure(
+					'create',
+					handoffPath,
+					'handoff replay-identity sidecar',
+					error instanceof Error ? error.message : String(error),
+				);
 			}
 			created = await _internals.atomicCreate(handoffPath, serializedHandoff);
 		} catch (error) {

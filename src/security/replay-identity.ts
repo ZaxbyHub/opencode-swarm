@@ -24,8 +24,8 @@
 
 import { createHmac, randomBytes } from 'node:crypto';
 import * as fs from 'node:fs';
-import { atomicWriteSwarmFileSync } from '../utils/atomic-write';
 import * as path from 'node:path';
+import { atomicWriteSwarmFileSync } from '../utils/atomic-write';
 
 const DOMAIN = 'swarm-pr-review-replay-identity-v1';
 const SALT_BYTES = 32;
@@ -41,6 +41,12 @@ function saltPath(directory: string): string {
 	return path.join(directory, '.swarm', 'pr-review', 'replay-identity.salt');
 }
 
+/** Test seam for simulating the create-race (first read misses, wx then
+ * collides with a concurrent winner). Production defaults unchanged. */
+export const _internals = {
+	readSaltFileSync: (target: string): string => fs.readFileSync(target, 'utf8'),
+};
+
 function isValidSaltHex(value: string): boolean {
 	return /^[0-9a-f]{64}$/.test(value);
 }
@@ -54,7 +60,7 @@ function isValidSaltHex(value: string): boolean {
 export function loadOrCreateReplayIdentitySalt(directory: string): Buffer {
 	const target = saltPath(directory);
 	try {
-		const existing = fs.readFileSync(target, 'utf8').trim();
+		const existing = _internals.readSaltFileSync(target).trim();
 		if (isValidSaltHex(existing)) {
 			return Buffer.from(existing, 'hex');
 		}

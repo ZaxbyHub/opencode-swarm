@@ -71,6 +71,29 @@ describe('#3844 redactEvidenceText superset contract', () => {
 		expect(out.includes('B'.repeat(64))).toBe(false);
 	});
 
+	test('five-part JWE: EVERY segment is redacted (no stranded tail — round-5 regression pin)', () => {
+		const parts = [
+			`eyJ${'a'.repeat(24)}`,
+			`eyJ${'b'.repeat(24)}`,
+			'c'.repeat(24),
+			'd'.repeat(40),
+			'e'.repeat(43),
+		];
+		const jwe = parts.join('.');
+		const out = redactEvidenceText(`leaked ${jwe} in CI log`);
+		for (const part of parts) {
+			expect(out.includes(part)).toBe(false);
+		}
+	});
+
+	test('overlap clip: a secret prefix before an eyJ run keeps its family label', () => {
+		const jws = `eyJ${'g'.repeat(30)}.${'p'.repeat(12)}.${'s'.repeat(30)}`;
+		const prefix = `sk-ant-${'q'.repeat(24)}`;
+		const out = redactEvidenceText(`saw ${prefix}${jws} inline`);
+		expect(out.includes(prefix)).toBe(false); // clipped prefix is redacted
+		expect(out.includes(jws)).toBe(false);
+	});
+
 	test('URL userinfo credentials are stripped, host preserved', () => {
 		const out = redactEvidenceText(
 			'clone https://user:hunter2@example.invalid/repo.git now',

@@ -125,17 +125,23 @@ function redactBareValueShapes(content: string): {
 		end: span.end,
 		label: '<redacted:jwt>',
 	}));
-	const overlapsPlanned = (start: number, end: number) =>
-		planned.some((r) => start < r.end && end > r.start);
 	for (const arm of TRAINING_BARE_TOKEN_VALUE_PATTERNS) {
 		arm.re.lastIndex = 0;
 		for (const match of content.matchAll(arm.re)) {
 			if (!match[0]) continue;
 			if (arm.guard && !arm.guard(match[0])) continue;
 			const start = match.index ?? 0;
-			const end = start + match[0].length;
-			if (overlapsPlanned(start, end)) continue;
-			planned.push({ start, end, label: arm.label });
+			let end = start + match[0].length;
+			// Same clip policy as the evidence site (#3844 round-5).
+			const overlap = planned.find((r) => start < r.end && end > r.start);
+			if (overlap && overlap.start > start) {
+				end = overlap.start;
+			} else if (overlap) {
+				continue;
+			}
+			if (end - start >= 12) {
+				planned.push({ start, end, label: arm.label });
+			}
 		}
 	}
 	if (planned.length === 0) return { text: content, redactions: 0 };

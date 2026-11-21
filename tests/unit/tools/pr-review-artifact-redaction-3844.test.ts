@@ -7,6 +7,7 @@
  */
 import { describe, expect, test } from 'bun:test';
 import {
+	mkdirSync,
 	mkdtempSync,
 	readFileSync,
 	realpathSync,
@@ -18,9 +19,11 @@ import * as path from 'node:path';
 import { redactEvidenceText } from '../../../src/security/evidence-redaction';
 import {
 	loadOrCreateReplayIdentitySalt,
+	loadOrCreateReplayIdentitySalt as loadOrCreateWithSeam,
 	ReplayIdentityUnavailableError,
 	readReplayIdentitySidecar,
 	replayFingerprint,
+	_internals as replayIdentityInternals,
 	replaySidecarPath,
 	writeReplayIdentityFingerprint,
 } from '../../../src/security/replay-identity';
@@ -30,14 +33,70 @@ function freshDir(): string {
 }
 
 describe('#3844 replay identity salt lifecycle (Y2)', () => {
-	test('create-only: generated once, reused thereafter; concurrent writer does not overwrite', () => {
+	test('create-only: generated once, reused thereafter', () => {
 		const dir = freshDir();
 		const first = loadOrCreateReplayIdentitySalt(dir);
 		const second = loadOrCreateReplayIdentitySalt(dir);
 		expect(second.equals(first)).toBe(true);
-		// Simulate a concurrent creator: existing file wins (wx fails, winner read).
-		const third = loadOrCreateReplayIdentitySalt(dir);
-		expect(third.equals(first)).toBe(true);
+	});
+
+	test('EEXIST race: first read misses, wx collides with a concurrent VALID winner — winner is used', () => {
+		const dir = freshDir();
+		const winner = 'ab'.repeat(32); // 64-hex valid salt
+		const target = path.join(
+			dir,
+			'.swarm',
+			'pr-review',
+			'replay-identity.salt',
+		);
+		mkdirSync(path.dirname(target), { recursive: true });
+		// Between our missed read and the wx create, the concurrent writer
+		// lands the file (simulated via the read seam: first call misses).
+		let firstRead = true;
+		const realRead = replayIdentityInternals.readSaltFileSync;
+		replayIdentityInternals.readSaltFileSync = (p: string): string => {
+			if (firstRead) {
+				firstRead = false;
+				throw Object.assign(new Error('ENOENT sim'), { code: 'ENOENT' });
+			}
+			return realRead(p);
+		};
+		try {
+			// Pre-place the winner so the wx open fails with EEXIST.
+			writeFileSync(target, `${winner}\n`, 'utf8');
+			const salt = loadOrCreateWithSeam(dir);
+			expect(salt.toString('hex')).toBe(winner);
+		} finally {
+			replayIdentityInternals.readSaltFileSync = realRead;
+		}
+	});
+
+	test('EEXIST race with a corrupt concurrent winner FAILS CLOSED', () => {
+		const dir = freshDir();
+		const target = path.join(
+			dir,
+			'.swarm',
+			'pr-review',
+			'replay-identity.salt',
+		);
+		mkdirSync(path.dirname(target), { recursive: true });
+		let firstRead = true;
+		const realRead = replayIdentityInternals.readSaltFileSync;
+		replayIdentityInternals.readSaltFileSync = (p: string): string => {
+			if (firstRead) {
+				firstRead = false;
+				throw Object.assign(new Error('ENOENT sim'), { code: 'ENOENT' });
+			}
+			return realRead(p);
+		};
+		try {
+			writeFileSync(target, 'not-hex-corrupt\n', 'utf8');
+			expect(() => loadOrCreateWithSeam(dir)).toThrow(
+				ReplayIdentityUnavailableError,
+			);
+		} finally {
+			replayIdentityInternals.readSaltFileSync = realRead;
+		}
 	});
 
 	test('corrupt salt FAILS CLOSED (fingerprinting throws)', () => {

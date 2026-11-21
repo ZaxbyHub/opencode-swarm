@@ -18,6 +18,7 @@ import * as path from 'node:path';
 import { z } from 'zod';
 import { telemetry } from '../telemetry';
 import { atomicWriteSwarmFileSync } from '../utils/atomic-write';
+import { canonicalRootKeyFresh } from '../utils/canonical-root.js';
 import {
 	computeProjectBinding,
 	readGrantedTrainingConsent,
@@ -454,13 +455,18 @@ function countRecordLines(directory: string): number {
 // would otherwise be re-journaled on every restart, growing the file without
 // bound). Entries written before #3840 carry no `hash` field; they are simply
 // absent from the hydrated set and their line may be journaled once more.
-const journaledQuarantineLines = new Set<string>();
+const journaledQuarantineLinesByProject = new Map<string, Set<string>>();
 const MAX_JOURNALED = 4096;
-let quarantineJournalHydrated = false;
 
 function hydrateQuarantineJournal(directory: string): void {
-	if (quarantineJournalHydrated) return;
-	quarantineJournalHydrated = true;
+	// Dedup state is PER PROJECT (a process may read more than one project's
+	// vault — direct callers and tests do); a process-global set would
+	// suppress project B's journal entry solely because project A hydrated
+	// first (#3844 round-5 review finding).
+	const projectKey = canonicalRootKeyFresh(directory);
+	if (journaledQuarantineLinesByProject.has(projectKey)) return;
+	const set = new Set<string>();
+	journaledQuarantineLinesByProject.set(projectKey, set);
 	try {
 		const target = trainingQuarantinePath(directory);
 		const text = fs.readFileSync(target, 'utf8');
@@ -472,7 +478,7 @@ function hydrateQuarantineJournal(directory: string): void {
 					typeof parsed.hash === 'string' &&
 					/^[0-9a-f]{64}$/.test(parsed.hash)
 				) {
-					journaledQuarantineLines.add(parsed.hash);
+					set.add(parsed.hash);
 				}
 			} catch {
 				// pre-#3840 or corrupt entry — nothing to hydrate
@@ -490,9 +496,12 @@ function journalQuarantine(
 ): void {
 	hydrateQuarantineJournal(directory);
 	const key = sha256(rawLine);
-	if (journaledQuarantineLines.has(key)) return;
-	if (journaledQuarantineLines.size >= MAX_JOURNALED) return;
-	journaledQuarantineLines.add(key);
+	const projectSet = journaledQuarantineLinesByProject.get(
+		canonicalRootKeyFresh(directory),
+	);
+	if (!projectSet || projectSet.has(key)) return;
+	if (projectSet.size >= MAX_JOURNALED) return;
+	projectSet.add(key);
 	try {
 		const target = trainingQuarantinePath(directory);
 		fs.mkdirSync(path.dirname(target), { recursive: true });
