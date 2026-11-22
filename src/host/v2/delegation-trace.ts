@@ -107,9 +107,10 @@ function stateFor(sessionID: string): SessionTraceState {
 
 function emit(record: Record<string, unknown>): void {
 	try {
-		console.error(
+		process.stderr.write(
 			'[SWARM_DELEGATION_TRACE] ' +
-				JSON.stringify({ at: new Date(now()).toISOString(), ...record }),
+				JSON.stringify({ at: new Date(now()).toISOString(), ...record }) +
+				'\n',
 		);
 	} catch {
 		/* best-effort only */
@@ -153,7 +154,10 @@ export function noteDelegationHostEvent(
 					emit({
 						event: 'child_or_session_first_token_estimate',
 						sessionID,
-						ttftEstimatedMs: Math.max(0, state.firstTokenAtMs - state.turnStartedAtMs),
+						ttftEstimatedMs: Math.max(
+							0,
+							state.firstTokenAtMs - state.turnStartedAtMs,
+						),
 						unobserved: 'model_request_start',
 					});
 				}
@@ -317,8 +321,7 @@ export function emitDelegationTraceSummary(): void {
 			parentTurnsDuringDispatchWindow:
 				cumulative.parentTurnsDuringDispatchWindow,
 			wasted_parent_turns: cumulative.wastedParentTurns,
-			wastedParentTurnsEstimatedMs:
-				cumulative.wastedParentTurnsEstimatedMs,
+			wastedParentTurnsEstimatedMs: cumulative.wastedParentTurnsEstimatedMs,
 			wastedEstimateNote:
 				'SUM IS AN ESTIMATE — turn durations include model inference the trace cannot attribute',
 			dispatchWindows: cumulative.dispatchWindowsTotal,

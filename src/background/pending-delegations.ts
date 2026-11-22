@@ -1303,7 +1303,8 @@ const RecordSchema = z
 							if (value.state !== 'failed' && value.reason !== undefined) {
 								context.addIssue({
 									code: z.ZodIssueCode.custom,
-									message: 'closeout step reason is only allowed on a failed step',
+									message:
+										'closeout step reason is only allowed on a failed step',
 								});
 							}
 							// r14 audit repair (P1-4): a lease belongs to a pending
@@ -1316,7 +1317,8 @@ const RecordSchema = z
 							) {
 								context.addIssue({
 									code: z.ZodIssueCode.custom,
-									message: 'closeout step lease is only allowed on a pending step',
+									message:
+										'closeout step lease is only allowed on a pending step',
 								});
 							}
 						}),
@@ -5387,8 +5389,13 @@ function getLegacyCoderSettlementReconciler(
 // r13 audit repair (P0-3): per-directory terminal-closeout reconcilers. The
 // live completion observer registers itself so maintenance passes can re-drive
 // crashed closeouts WITHOUT depending on a new host completion event arriving.
-type TerminalCloseoutReconciler = (record: BackgroundDelegationRecord) => Promise<void>;
-const terminalCloseoutReconcilers = new Map<string, TerminalCloseoutReconciler>();
+type TerminalCloseoutReconciler = (
+	record: BackgroundDelegationRecord,
+) => Promise<void>;
+const terminalCloseoutReconcilers = new Map<
+	string,
+	TerminalCloseoutReconciler
+>();
 const terminalCloseoutReconcilerOrder: string[] = [];
 const MAX_TERMINAL_CLOSEOUT_RECONCILERS = 8;
 
@@ -5406,7 +5413,9 @@ export function registerTerminalCloseoutReconciler(
 		terminalCloseoutReconcilers.set(key, reconciler);
 		return;
 	}
-	if (terminalCloseoutReconcilerOrder.length >= MAX_TERMINAL_CLOSEOUT_RECONCILERS) {
+	if (
+		terminalCloseoutReconcilerOrder.length >= MAX_TERMINAL_CLOSEOUT_RECONCILERS
+	) {
 		const evicted = terminalCloseoutReconcilerOrder.shift();
 		if (evicted) terminalCloseoutReconcilers.delete(evicted);
 	}
@@ -6085,7 +6094,8 @@ export async function markTerminalCloseoutStepCompleted(
 					return;
 				}
 				const closeout: BackgroundDelegationCloseout =
-					current.closeout && current.closeout.terminalEventId === terminalEventId
+					current.closeout &&
+					current.closeout.terminalEventId === terminalEventId
 						? current.closeout
 						: {
 								schemaVersion: 1,
@@ -6186,7 +6196,8 @@ export async function markTerminalCloseoutStepFailed(
 					return;
 				}
 				const closeout: BackgroundDelegationCloseout =
-					current.closeout && current.closeout.terminalEventId === terminalEventId
+					current.closeout &&
+					current.closeout.terminalEventId === terminalEventId
 						? current.closeout
 						: {
 								schemaVersion: 1,
@@ -6605,7 +6616,11 @@ export async function preparePendingBackgroundAdvisories(
 							index: 0,
 						});
 					}
-					for (let index = 0; index < (current.closeoutAdvisories ?? []).length; index++) {
+					for (
+						let index = 0;
+						index < (current.closeoutAdvisories ?? []).length;
+						index++
+					) {
 						const entry = current.closeoutAdvisories?.[index];
 						if (entry) {
 							candidates.push({ entry, slot: 'closeoutAdvisories', index });
@@ -6708,7 +6723,11 @@ async function releaseBackgroundAdvisoryPreparation(
 							});
 						}
 					}
-					for (let index = 0; index < (current.closeoutAdvisories ?? []).length; index++) {
+					for (
+						let index = 0;
+						index < (current.closeoutAdvisories ?? []).length;
+						index++
+					) {
 						const entry = current.closeoutAdvisories?.[index];
 						if (
 							entry &&
@@ -8658,7 +8677,9 @@ export interface MaintainBackgroundDelegationsOptions {
 	 * claim and a business side effect). Falls back to the directory's
 	 * registered terminal-closeout reconciler (the live completion observer).
 	 */
-	onTerminalCloseoutPending?: (record: BackgroundDelegationRecord) => Promise<void>;
+	onTerminalCloseoutPending?: (
+		record: BackgroundDelegationRecord,
+	) => Promise<void>;
 }
 
 export interface MaintainBackgroundDelegationsResult {

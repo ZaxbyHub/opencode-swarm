@@ -25,13 +25,13 @@
 import { describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import { join } from 'node:path';
+import { ProjectDbError } from '../../../src/db/db-errors';
 import {
 	assertProjectDbRoot,
 	closeAllProjectDbs,
 	getProjectDb,
 	projectDbExists,
 } from '../../../src/db/project-db';
-import { ProjectDbError } from '../../../src/db/db-errors';
 import { looksLikeWindowsDrivePath } from '../../../src/utils/path-security';
 
 const HOSTILE = 'C:\\Users\\Administrator\\.aws\\credentials';

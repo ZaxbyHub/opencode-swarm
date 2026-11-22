@@ -38,10 +38,10 @@ import {
 import * as fs from 'node:fs';
 import { join } from 'node:path';
 import {
-	loadContextMap,
-	saveContextMap,
 	appendTaskHistory,
 	createEmptyContextMap,
+	loadContextMap,
+	saveContextMap,
 } from '../../../src/context-map/persistence';
 import {
 	_planProofReaders,
@@ -303,12 +303,7 @@ describe('context-map reconciliation — real plan.json I/O per pass (r17 §6)',
 		current.title = 'restarted campaign';
 		fs.writeFileSync(planPath, JSON.stringify(current));
 
-		await promoteContextMapTaskReleaseLocked(
-			directory,
-			'1.1',
-			5_000,
-			passHash,
-		);
+		await promoteContextMapTaskReleaseLocked(directory, '1.1', 5_000, passHash);
 		expect(
 			loadContextMap(directory)?.task_history['1.1']?.final_status ?? 'absent',
 		).toBe('absent');

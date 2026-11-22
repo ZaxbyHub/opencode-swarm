@@ -3,9 +3,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Plan } from '../../../src/config/plan-schema';
 import { closeAllProjectDbs } from '../../../src/db/project-db';
-import {
-	recordVerifiedPlanCriticApproval,
-} from '../../../src/plan/critic-approval';
+import { recordVerifiedPlanCriticApproval } from '../../../src/plan/critic-approval';
 import {
 	computePlanStructureHash,
 	initLedger,

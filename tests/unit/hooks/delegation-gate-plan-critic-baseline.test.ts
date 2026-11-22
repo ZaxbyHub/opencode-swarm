@@ -7,8 +7,8 @@
  * older APPROVED verdict release an edited plan).
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { findByCorrelationId } from '../../../src/background/pending-delegations';
 import type { Plan } from '../../../src/config/plan-schema';
@@ -135,9 +135,7 @@ describe('plan critic-gate pre-execution baseline binding (r13 P0-2)', () => {
 		const record = findByCorrelationId(dir, 'critic-child');
 		expect(record).not.toBeNull();
 		expect(record?.planCriticDispatch).toBeDefined();
-		expect(record?.planCriticDispatch?.planStructureHash).toBe(
-			hashAtDispatch,
-		);
+		expect(record?.planCriticDispatch?.planStructureHash).toBe(hashAtDispatch);
 		// The binding carries the plan identity and the full prompt digest
 		// captured pre-execution.
 		expect(record?.planCriticDispatch?.planId).toBe(derivePlanId(plan));
@@ -211,10 +209,7 @@ describe('plan critic-gate pre-execution baseline binding (r13 P0-2)', () => {
 		);
 		// The after-hook claims a different parent session than the one that
 		// captured the baseline: not provable → no binding.
-		await hook.toolAfter(
-			{ ...input, sessionID: 'parent-imposter' },
-			output,
-		);
+		await hook.toolAfter({ ...input, sessionID: 'parent-imposter' }, output);
 
 		const record = findByCorrelationId(dir, 'critic-child');
 		expect(record?.planCriticDispatch).toBeUndefined();
@@ -319,7 +314,10 @@ describe('plan critic-gate pre-execution baseline binding (r13 P0-2)', () => {
 				'../../../src/plan/ledger'
 			);
 			expect(
-				await loadLastPlanCriticApprovedSnapshot(dir, derivePlanId(ordinaryPlan)),
+				await loadLastPlanCriticApprovedSnapshot(
+					dir,
+					derivePlanId(ordinaryPlan),
+				),
 			).toBeNull();
 		});
 	}

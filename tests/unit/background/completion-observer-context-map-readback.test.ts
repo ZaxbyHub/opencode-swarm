@@ -36,13 +36,10 @@ import {
 	saveContextMap,
 } from '../../../src/context-map/persistence';
 import { _internals as postAgentInternals } from '../../../src/context-map/post-agent-update';
-import type { TaskContextSummary } from '../../../src/types/context-map';
 import { closeAllProjectDbs } from '../../../src/db/project-db';
 import { resetStartupLedgerCheck } from '../../../src/plan/manager';
-import {
-	ensureAgentSession,
-	resetSwarmState,
-} from '../../../src/state';
+import { ensureAgentSession, resetSwarmState } from '../../../src/state';
+import type { TaskContextSummary } from '../../../src/types/context-map';
 import { createSafeTestDir } from '../../helpers/safe-test-dir';
 import { seedStageAPassed } from '../../helpers/task-workflow-evidence';
 
@@ -186,9 +183,7 @@ describe('background completion observer — context-map read-back proves the cu
 		// stay pending (retryable), NOT be acked off the stale OLD entry.
 		const record = findByCorrelationId(directory, 'ses_r15p2_rev');
 		expect(record?.closeout?.steps.context_map?.state).toBe('pending');
-		expect(
-			record?.closeout?.steps.context_map?.leaseToken,
-		).toBeUndefined();
+		expect(record?.closeout?.steps.context_map?.leaseToken).toBeUndefined();
 		expect(
 			loadContextMap(directory)?.task_history['1.1']?.implementation_summary,
 		).toBe('OLD');

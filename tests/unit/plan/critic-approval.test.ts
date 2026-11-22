@@ -277,5 +277,4 @@ describe('plan-critic-approval shared recorder', () => {
 		});
 		expect(second.outcome).toBe('recorded');
 	});
-
 });

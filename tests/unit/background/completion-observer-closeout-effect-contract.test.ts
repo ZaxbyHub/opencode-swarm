@@ -23,8 +23,8 @@ import {
 	recordPendingDelegation,
 } from '../../../src/background/pending-delegations';
 import { captureWorkspaceSnapshot } from '../../../src/background/workspace-snapshot';
-import { _internals as postAgentUpdateInternals } from '../../../src/context-map/post-agent-update';
 import { loadContextMap } from '../../../src/context-map/persistence';
+import { _internals as postAgentUpdateInternals } from '../../../src/context-map/post-agent-update';
 import { closeAllProjectDbs } from '../../../src/db/project-db';
 import { resetStartupLedgerCheck } from '../../../src/plan/manager';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
@@ -107,9 +107,7 @@ describe('background completion observer — closeout effect contract (r14 P0-2)
 			contextMap: { enabled: true },
 			putPendingBackgroundAdvisoryImpl: async () => null,
 		});
-		await failingObserver.event(
-			completionEvent('ses_p2_advisory_null', body),
-		);
+		await failingObserver.event(completionEvent('ses_p2_advisory_null', body));
 
 		const afterFailure = findByCorrelationId(directory, 'ses_p2_advisory_null');
 		expect(afterFailure?.status).toBe('consumed');
@@ -125,9 +123,7 @@ describe('background completion observer — closeout effect contract (r14 P0-2)
 			directory,
 			contextMap: { enabled: true },
 		});
-		await restartObserver.event(
-			completionEvent('ses_p2_advisory_null', body),
-		);
+		await restartObserver.event(completionEvent('ses_p2_advisory_null', body));
 		const record = findByCorrelationId(directory, 'ses_p2_advisory_null');
 		expect(record?.closeout?.steps.parent_advisory?.state).toBe('completed');
 		expect(record?.advisoryInbox?.state).toBe('pending');
@@ -152,18 +148,14 @@ describe('background completion observer — closeout effect contract (r14 P0-2)
 				directory,
 				contextMap: { enabled: true },
 			});
-			await failingObserver.event(
-				completionEvent('ses_p2_ctxmap_fail', body),
-			);
+			await failingObserver.event(completionEvent('ses_p2_ctxmap_fail', body));
 		} finally {
 			postAgentUpdateInternals.saveContextMap = realSave;
 		}
 
 		const afterFailure = findByCorrelationId(directory, 'ses_p2_ctxmap_fail');
 		expect(afterFailure?.closeout?.steps.context_map?.state).toBe('pending');
-		expect(
-			loadContextMap(directory)?.task_history['1.2'],
-		).toBeUndefined();
+		expect(loadContextMap(directory)?.task_history['1.2']).toBeUndefined();
 
 		// Restart with a healthy store: the step is re-driven and the
 		// read-back verification proves persistence before the ack.
@@ -172,15 +164,13 @@ describe('background completion observer — closeout effect contract (r14 P0-2)
 			directory,
 			contextMap: { enabled: true },
 		});
-		await restartObserver.event(
-			completionEvent('ses_p2_ctxmap_fail', body),
-		);
+		await restartObserver.event(completionEvent('ses_p2_ctxmap_fail', body));
 		const record = findByCorrelationId(directory, 'ses_p2_ctxmap_fail');
 		expect(record?.closeout?.steps.context_map?.state).toBe('completed');
 		// r14 (P1-5): child-level success — non-final until the task release.
-		expect(
-			loadContextMap(directory)?.task_history['1.2']?.final_status,
-		).toBe('pending');
+		expect(loadContextMap(directory)?.task_history['1.2']?.final_status).toBe(
+			'pending',
+		);
 	});
 
 	test('a failed journal initialization defers every journal-gated effect — no unjournaled side effects', async () => {
@@ -207,9 +197,7 @@ describe('background completion observer — closeout effect contract (r14 P0-2)
 		);
 		// No journal-gated effect ran: no advisory, no context-map summary.
 		expect(afterFailure?.advisoryInbox).toBeUndefined();
-		expect(
-			loadContextMap(directory)?.task_history['1.3'],
-		).toBeUndefined();
+		expect(loadContextMap(directory)?.task_history['1.3']).toBeUndefined();
 		// The record stays in the recovery set (no journal at all).
 		expect(hasPendingTerminalCloseout(afterFailure!)).toBe(true);
 
@@ -222,16 +210,13 @@ describe('background completion observer — closeout effect contract (r14 P0-2)
 		await restartObserver.event(
 			completionEvent('ses_p2_journal_init_fail', body),
 		);
-		const record = findByCorrelationId(
-			directory,
-			'ses_p2_journal_init_fail',
-		);
+		const record = findByCorrelationId(directory, 'ses_p2_journal_init_fail');
 		expect(record?.closeout?.steps.context_map?.state).toBe('completed');
 		expect(record?.closeout?.steps.parent_advisory?.state).toBe('completed');
 		// r14 (P1-5): child-level success — non-final until the task release.
-		expect(
-			loadContextMap(directory)?.task_history['1.3']?.final_status,
-		).toBe('pending');
+		expect(loadContextMap(directory)?.task_history['1.3']?.final_status).toBe(
+			'pending',
+		);
 		expect(record?.advisoryInbox?.state).toBe('pending');
 	});
 
@@ -259,9 +244,9 @@ describe('background completion observer — closeout effect contract (r14 P0-2)
 		// The business obligations DID land (idempotent effects).
 		expect(afterFailure?.advisoryInbox?.state).toBe('pending');
 		// r14 (P1-5): child-level success — non-final until the task release.
-		expect(
-			loadContextMap(directory)?.task_history['1.4']?.final_status,
-		).toBe('pending');
+		expect(loadContextMap(directory)?.task_history['1.4']?.final_status).toBe(
+			'pending',
+		);
 
 		// Restart: steps are re-driven idempotently — one advisory slot, one
 		// task-history entry — and now acked.
@@ -315,18 +300,14 @@ describe('background completion observer — closeout effect contract (r14 P0-2)
 				);
 			},
 		});
-		await crashingObserver.event(
-			completionEvent('ses_p2_crash_pre_ack', body),
-		);
+		await crashingObserver.event(completionEvent('ses_p2_crash_pre_ack', body));
 
 		const afterCrash = findByCorrelationIdRequired(
 			directory,
 			'ses_p2_crash_pre_ack',
 		);
 		// At least one step is un-acked (the crash hit its ack).
-		expect(
-			hasPendingTerminalCloseout(afterCrash),
-		).toBe(true);
+		expect(hasPendingTerminalCloseout(afterCrash)).toBe(true);
 		expect(afterCrash?.advisoryInbox?.state).toBe('pending');
 
 		// Restart: re-drive is idempotent — same advisory eventId, same single
@@ -336,9 +317,7 @@ describe('background completion observer — closeout effect contract (r14 P0-2)
 			directory,
 			contextMap: { enabled: true },
 		});
-		await restartObserver.event(
-			completionEvent('ses_p2_crash_pre_ack', body),
-		);
+		await restartObserver.event(completionEvent('ses_p2_crash_pre_ack', body));
 		const record = findByCorrelationId(directory, 'ses_p2_crash_pre_ack');
 		expect(record?.closeout?.steps.context_map?.state).toBe('completed');
 		expect(record?.closeout?.steps.parent_advisory?.state).toBe('completed');
@@ -346,9 +325,9 @@ describe('background completion observer — closeout effect contract (r14 P0-2)
 			afterCrash?.advisoryInbox?.eventId,
 		);
 		// r14 (P1-5): child-level success — non-final until the task release.
-		expect(
-			loadContextMap(directory)?.task_history['1.5']?.final_status,
-		).toBe('pending');
+		expect(loadContextMap(directory)?.task_history['1.5']?.final_status).toBe(
+			'pending',
+		);
 	});
 
 	test('a rejected telemetry sink does not wedge the observer — delegation_end is documented best-effort', async () => {
@@ -398,25 +377,20 @@ describe('background completion observer — closeout effect contract (r14 P0-2)
 			evidenceTaskId: '1.7',
 			workspace: captureWorkspaceSnapshot(directory),
 		});
-		const body =
-			'Verdict: APPROVED\nCategory: architecture\nReasoning: sound';
+		const body = 'Verdict: APPROVED\nCategory: architecture\nReasoning: sound';
 
 		const failingObserver = createBackgroundCompletionObserver({
 			config: { enabled: true },
 			directory,
 			putTerminalCloseoutAdvisoryImpl: async () => null,
 		});
-		await failingObserver.event(
-			completionEvent('ses_p2_sounding_board', body),
-		);
+		await failingObserver.event(completionEvent('ses_p2_sounding_board', body));
 
 		const afterFailure = findByCorrelationId(
 			directory,
 			'ses_p2_sounding_board',
 		);
-		expect(afterFailure?.closeout?.steps.sounding_board?.state).toBe(
-			'pending',
-		);
+		expect(afterFailure?.closeout?.steps.sounding_board?.state).toBe('pending');
 		expect(afterFailure?.closeout?.steps.pipeline_advisory?.state).toBe(
 			'pending',
 		);
@@ -426,14 +400,10 @@ describe('background completion observer — closeout effect contract (r14 P0-2)
 			config: { enabled: true },
 			directory,
 		});
-		await restartObserver.event(
-			completionEvent('ses_p2_sounding_board', body),
-		);
+		await restartObserver.event(completionEvent('ses_p2_sounding_board', body));
 		const record = findByCorrelationId(directory, 'ses_p2_sounding_board');
 		expect(record?.closeout?.steps.sounding_board?.state).toBe('completed');
-		expect(record?.closeout?.steps.pipeline_advisory?.state).toBe(
-			'completed',
-		);
+		expect(record?.closeout?.steps.pipeline_advisory?.state).toBe('completed');
 		expect((record?.closeoutAdvisories ?? []).length).toBe(2);
 	});
 });
@@ -553,12 +523,10 @@ describe('terminal closeout journal — permanent failure state (r14 P0-2 store 
 		// initializeTerminalCloseout for the SAME terminal keeps the failed
 		// step states (a re-drive must not reset them).
 		expect(
-			await initializeTerminalCloseout(
-				directory,
-				'ses_p2_store',
-				eventId,
-				['parent_advisory', 'sounding_board'],
-			),
+			await initializeTerminalCloseout(directory, 'ses_p2_store', eventId, [
+				'parent_advisory',
+				'sounding_board',
+			]),
 		).toBe(true);
 		const afterInit = findByCorrelationId(directory, 'ses_p2_store');
 		expect(afterInit?.closeout?.steps.sounding_board?.state).toBe('failed');
@@ -566,10 +534,7 @@ describe('terminal closeout journal — permanent failure state (r14 P0-2 store 
 });
 
 /** Small helper with a clear failure message. */
-function findByCorrelationIdRequired(
-	directory: string,
-	correlationId: string,
-) {
+function findByCorrelationIdRequired(directory: string, correlationId: string) {
 	const record = findByCorrelationId(directory, correlationId);
 	if (!record) throw new Error(`record ${correlationId} not found`);
 	return record;

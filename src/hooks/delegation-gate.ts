@@ -4196,7 +4196,7 @@ export function createDelegationGateHook(
 		if (process.env.SWARM_SCOPE_REVOKE_TRACE === '1') {
 			for (const entry of entries) {
 				if (entry.binding.activation !== 'active') continue;
-				console.error(
+				process.stderr.write(
 					'[SWARM_SCOPE_REVOKE_TRACE] ' +
 						JSON.stringify({
 							at: new Date().toISOString(),
@@ -4210,7 +4210,8 @@ export function createDelegationGateHook(
 								?.split('\n')
 								.slice(2, 6)
 								.map((x) => x.trim()),
-						}),
+						}) +
+						'\n',
 				);
 			}
 		}
@@ -4416,7 +4417,7 @@ export function createDelegationGateHook(
 					),
 				)
 				.map(([callID]) => callID);
-			console.error(
+			process.stderr.write(
 				'[SWARM_SCOPE_REVOKE_TRACE] ' +
 					JSON.stringify({
 						at: new Date().toISOString(),
@@ -4428,7 +4429,8 @@ export function createDelegationGateHook(
 							?.split('\n')
 							.slice(2, 6)
 							.map((x) => x.trim()),
-					}),
+					}) +
+					'\n',
 			);
 		}
 		clearReviewRouteStateForSession(sessionID);

@@ -47,7 +47,8 @@ export function recordV2ToolTiming(
 			sessionID: event.sessionID,
 			agent: typeof event.agent === 'string' ? event.agent : null,
 		};
-		if (last !== undefined) data.sinceLastSessionEventMs = Math.max(0, now - last);
+		if (last !== undefined)
+			data.sinceLastSessionEventMs = Math.max(0, now - last);
 		if (phase === 'tool_before_begin') {
 			if (pending.size >= MAX_TIMING_CALLS) {
 				// Strict cap: a missing tool-after must not grow diagnostic memory.
@@ -71,18 +72,23 @@ export function recordV2ToolTiming(
 			if (prior) data.totalCallMs = Math.max(0, now - prior.beforeBeginMs);
 			pending.delete(key);
 		}
-		if (extra.translatedState !== undefined) data.translatedState = extra.translatedState;
-		if (extra.resultStatus !== undefined) data.resultStatus = extra.resultStatus;
+		if (extra.translatedState !== undefined)
+			data.translatedState = extra.translatedState;
+		if (extra.resultStatus !== undefined)
+			data.resultStatus = extra.resultStatus;
 		peakPendingCalls = Math.max(peakPendingCalls, pending.size);
 		data.pendingToolCalls = pending.size;
 		data.peakPendingToolCalls = peakPendingCalls;
-		if (!lastSessionStamp.has(event.sessionID) && lastSessionStamp.size >= MAX_TIMING_SESSIONS) {
+		if (
+			!lastSessionStamp.has(event.sessionID) &&
+			lastSessionStamp.size >= MAX_TIMING_SESSIONS
+		) {
 			const first = lastSessionStamp.keys().next().value;
 			if (first !== undefined) lastSessionStamp.delete(first);
 		}
 		lastSessionStamp.delete(event.sessionID);
 		lastSessionStamp.set(event.sessionID, now);
-		console.error('[SWARM_TIMING_TRACE] ' + JSON.stringify(data));
+		process.stderr.write(`[SWARM_TIMING_TRACE] ${JSON.stringify(data)}\n`);
 	} catch {
 		// Diagnostic output must never alter the authorization or dispatch path.
 	}
@@ -91,25 +97,38 @@ export function recordV2ToolTiming(
 /** Lightweight prompt/compaction marks to expose long pauses before a tool. */
 export function recordV2SessionTiming(
 	sessionID: string,
-	event: 'prompt_begin' | 'prompt_end' | 'compaction_begin' | 'compaction_end'
-		| 'native_child_verified' | 'execution_succeeded' | 'execution_interrupted'
-		| 'execution_failed' | 'execution_ignored',
+	event:
+		| 'prompt_begin'
+		| 'prompt_end'
+		| 'compaction_begin'
+		| 'compaction_end'
+		| 'native_child_verified'
+		| 'execution_succeeded'
+		| 'execution_interrupted'
+		| 'execution_failed'
+		| 'execution_ignored',
 ): void {
 	if (process.env.SWARM_TIMING_TRACE !== '1') return;
 	try {
 		const now = Date.now();
 		const last = lastSessionStamp.get(sessionID);
 		const data: Record<string, unknown> = {
-			at: new Date(now).toISOString(), event, sessionID,
+			at: new Date(now).toISOString(),
+			event,
+			sessionID,
 		};
-		if (last !== undefined) data.sinceLastSessionEventMs = Math.max(0, now - last);
-		if (!lastSessionStamp.has(sessionID) && lastSessionStamp.size >= MAX_TIMING_SESSIONS) {
+		if (last !== undefined)
+			data.sinceLastSessionEventMs = Math.max(0, now - last);
+		if (
+			!lastSessionStamp.has(sessionID) &&
+			lastSessionStamp.size >= MAX_TIMING_SESSIONS
+		) {
 			const first = lastSessionStamp.keys().next().value;
 			if (first !== undefined) lastSessionStamp.delete(first);
 		}
 		lastSessionStamp.delete(sessionID);
 		lastSessionStamp.set(sessionID, now);
-		console.error('[SWARM_TIMING_TRACE] ' + JSON.stringify(data));
+		process.stderr.write(`[SWARM_TIMING_TRACE] ${JSON.stringify(data)}\n`);
 	} catch {
 		// Best-effort only.
 	}

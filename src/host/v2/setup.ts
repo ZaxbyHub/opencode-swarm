@@ -185,7 +185,6 @@ import {
 	setV2OperatorQuietForOwner,
 } from './agents-commands';
 import { clearToolNameRegistry, startDeferredEventPump } from './events';
-import { isKnownNativeAsyncSubagentVersion, registerNativeV2AsyncSubagents } from './native-async-mode';
 import { registerV2ContextHook } from './guidance';
 import {
 	configureV2ToolBeforeBudget,
@@ -200,6 +199,10 @@ import {
 	clearV2AgentTransformSurface,
 	registerV2AgentTransformSurface,
 } from './model-apply';
+import {
+	isKnownNativeAsyncSubagentVersion,
+	registerNativeV2AsyncSubagents,
+} from './native-async-mode';
 import {
 	clearV2SessionClientState,
 	createV2SessionClient,
@@ -386,7 +389,10 @@ export async function openCodeSwarmV2Setup(
 		// while constructing its dispatch/settlement hooks. Unknown host
 		// versions deliberately retain the legacy foreground semantics.
 		if (isKnownNativeAsyncSubagentVersion(ctx.app?.version)) {
-			releaseNativeAsyncMode = registerNativeV2AsyncSubagents(directory, ownerToken);
+			releaseNativeAsyncMode = registerNativeV2AsyncSubagents(
+				directory,
+				ownerToken,
+			);
 		}
 
 		// v1 PluginInput view — the init core consumes only `directory` and

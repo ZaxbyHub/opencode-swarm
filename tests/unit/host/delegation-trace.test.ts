@@ -36,11 +36,11 @@ beforeEach(() => {
 	_resetDelegationTraceForTesting();
 	process.env.SWARM_DELEGATION_TRACE = '1';
 	lines = [];
-	errSpy = spyOn(console, 'error').mockImplementation(
+	errSpy = spyOn(process.stderr, 'write').mockImplementation(
 		(...args: unknown[]) => {
-			for (const arg of args) {
-				if (typeof arg === 'string') lines.push(arg);
-			}
+			const chunk = args[0];
+			if (typeof chunk === 'string') lines.push(chunk);
+			return true;
 		},
 	);
 });
@@ -64,7 +64,9 @@ describe('delegation critical-path tracer (r17 §8)', () => {
 		// The parent model turn runs but performs no real tool work.
 		noteDelegationHostEvent(PARENT, 'session.step.ended');
 
-		const wasted = records().filter((r) => r.event === 'wasted_parent_turn_candidate');
+		const wasted = records().filter(
+			(r) => r.event === 'wasted_parent_turn_candidate',
+		);
 		expect(wasted).toHaveLength(1);
 		expect(wasted[0].callID).toBe('call-1');
 
@@ -82,7 +84,9 @@ describe('delegation critical-path tracer (r17 §8)', () => {
 		noteDelegationToolEvent(PARENT, 'search', 'success');
 		noteDelegationHostEvent(PARENT, 'session.step.ended');
 
-		const wasted = records().filter((r) => r.event === 'wasted_parent_turn_candidate');
+		const wasted = records().filter(
+			(r) => r.event === 'wasted_parent_turn_candidate',
+		);
 		expect(wasted).toHaveLength(0);
 
 		noteDelegationHostEvent(PARENT, 'session.inbox.enqueued');
@@ -98,7 +102,9 @@ describe('delegation critical-path tracer (r17 §8)', () => {
 		noteDispatchRunning(PARENT, 'call-2');
 		noteDelegationHostEvent(PARENT, 'session.step.ended');
 
-		const wasted = records().filter((r) => r.event === 'wasted_parent_turn_candidate');
+		const wasted = records().filter(
+			(r) => r.event === 'wasted_parent_turn_candidate',
+		);
 		// TurnTools contains only 'Task' — the conservative rule counts
 		// dispatch-only turns as candidates ONLY when they carry no second
 		// dispatch window... (documented conservative direction: a Task-only
@@ -120,7 +126,9 @@ describe('delegation critical-path tracer (r17 §8)', () => {
 		// Establish a turn boundary first (TTFT is estimated from it).
 		noteDelegationHostEvent(CHILD, 'session.step.ended');
 		noteDelegationHostEvent(CHILD, 'session.text.delta');
-		const ttft = records().filter((r) => r.event === 'child_or_session_first_token_estimate');
+		const ttft = records().filter(
+			(r) => r.event === 'child_or_session_first_token_estimate',
+		);
 		expect(ttft).toHaveLength(1);
 		expect(ttft[0].unobserved).toBe('model_request_start');
 	});

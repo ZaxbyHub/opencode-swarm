@@ -5767,22 +5767,28 @@ async function initializeOpenCodeSwarm(
 							// skipped whole (the callback never started — no
 							// partial write) and the background observer's journaled
 							// closeout re-drives it.
-							await updateContextMapAfterAgentLocked({
-								task_id: contextMapTaskId,
-								agent_role:
-									swarmState.activeAgent.get(input.sessionID) ?? 'unknown',
-								files_touched: [],
-								implementation_summary: agentOutput.slice(0, 500),
-								task_goal: '',
-								final_status: syncReleaseStatus,
-								decisions: extractContextDecisionsFromContextMd(bootstrapRoot, {
+							await updateContextMapAfterAgentLocked(
+								{
+									task_id: contextMapTaskId,
 									agent_role:
-										resolveSessionChatAgent(input.sessionID) ??
-										swarmState.activeAgent.get(input.sessionID) ??
-										'unknown',
-								}),
-								directory: bootstrapRoot,
-							}, CONTEXT_MAP_LOCK_BUDGET_MS.hook);
+										swarmState.activeAgent.get(input.sessionID) ?? 'unknown',
+									files_touched: [],
+									implementation_summary: agentOutput.slice(0, 500),
+									task_goal: '',
+									final_status: syncReleaseStatus,
+									decisions: extractContextDecisionsFromContextMd(
+										bootstrapRoot,
+										{
+											agent_role:
+												resolveSessionChatAgent(input.sessionID) ??
+												swarmState.activeAgent.get(input.sessionID) ??
+												'unknown',
+										},
+									),
+									directory: bootstrapRoot,
+								},
+								CONTEXT_MAP_LOCK_BUDGET_MS.hook,
+							);
 						}
 					} catch {
 						// Post-agent update must never block the hook chain

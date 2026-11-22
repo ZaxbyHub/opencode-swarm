@@ -197,8 +197,7 @@ describe('delegation gate plan critic approval', () => {
 		// without it the approval is refused (unbound_dispatch, fail-closed).
 		await hook.toolBefore(criticInput, { args: criticInput.args });
 		await hook.toolAfter(criticInput, {
-			output:
-				'VERDICT: APPROVED\nThe plan is mechanically covered and ready.',
+			output: 'VERDICT: APPROVED\nThe plan is mechanically covered and ready.',
 		});
 
 		const approved = await loadLastApprovedPlan(dir, derivePlanId(plan));
@@ -222,8 +221,7 @@ describe('delegation gate plan critic approval', () => {
 	const planCriticPromptVariants: Array<{ name: string; prompt: string }> = [
 		{
 			name: 'explicit MODE: CRITIC-GATE marker',
-			prompt:
-				'MODE: CRITIC-GATE\nTASK: Review plan before EXECUTE',
+			prompt: 'MODE: CRITIC-GATE\nTASK: Review plan before EXECUTE',
 		},
 		{
 			name: 'critic-gate prefix on pasted plan content',
@@ -262,7 +260,6 @@ describe('delegation gate plan critic approval', () => {
 			expect(approved?.payloadHash).toBe(computePlanStructureHash(plan));
 		});
 	}
-
 
 	test('does NOT record a plan-critic snapshot for an unrelated critic dispatch even when output is APPROVED', async () => {
 		// A generic (non-plan) critic dispatch whose prompt contains none of the
@@ -376,9 +373,7 @@ describe('delegation gate plan critic approval', () => {
 
 		for (const token of recommendedTokens) {
 			expect(skillText.includes(token)).toBe(true);
-			expect(
-				signals.some((signal) => token.includes(signal)),
-			).toBe(true);
+			expect(signals.some((signal) => token.includes(signal))).toBe(true);
 		}
 	});
 

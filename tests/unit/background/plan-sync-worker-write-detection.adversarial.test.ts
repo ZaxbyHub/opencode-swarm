@@ -18,6 +18,7 @@ import { _internals as planManagerInternals } from '../../../src/plan/manager';
 // (beforeEach/afterEach) and the REAL module snapshot is re-installed after
 // each test (mock.restore() does NOT undo mock.module).
 import * as realUtilsModule from '../../../src/utils';
+
 const utilsSnapshot = { ...realUtilsModule };
 const planManagerSeamSnapshot = { ...planManagerInternals };
 

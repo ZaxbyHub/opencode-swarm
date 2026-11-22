@@ -9,13 +9,13 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { applySoundingBoardResponsePolicy } from '../../../src/agents/sounding-board-policy';
 import { createBackgroundCompletionObserver } from '../../../src/background/completion-observer';
 import {
 	findByCorrelationId,
 	recordPendingDelegation,
 } from '../../../src/background/pending-delegations';
 import { captureWorkspaceSnapshot } from '../../../src/background/workspace-snapshot';
-import { applySoundingBoardResponsePolicy } from '../../../src/agents/sounding-board-policy';
 import { closeAllProjectDbs } from '../../../src/db/project-db';
 import { resetStartupLedgerCheck } from '../../../src/plan/manager';
 import { resetSwarmState } from '../../../src/state';
@@ -65,7 +65,10 @@ async function recordSoundingBoard(
 	});
 }
 
-function soundingAdvisory(child: string, directory: string): string | undefined {
+function soundingAdvisory(
+	child: string,
+	directory: string,
+): string | undefined {
 	const record = findByCorrelationId(directory, child);
 	return (record?.closeoutAdvisories ?? []).find((entry) =>
 		entry.message.includes('[SOUNDING_BOARD]'),
@@ -214,10 +217,8 @@ describe('sounding-board caller-category parity (r13 P1-3)', () => {
 	});
 
 	test('two parallel sounding-board children keep their own categories (no swap)', async () => {
-		const responseA =
-			'Verdict: APPROVED\nReasoning: a';
-		const responseB =
-			'Verdict: REPHRASE\nReasoning: b';
+		const responseA = 'Verdict: APPROVED\nReasoning: a';
+		const responseB = 'Verdict: REPHRASE\nReasoning: b';
 		await recordSoundingBoard(directory, {
 			child: 'ses_sb_e1',
 			callId: 'c-e1',

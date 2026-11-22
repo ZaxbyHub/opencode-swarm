@@ -321,18 +321,21 @@ export function verifiedWorktreeChildForV2Call(input: {
 	agent: unknown;
 }): string | null {
 	const dispatch = standardWorktreeByCallID.get(input.callID);
-	if (!dispatch || dispatch.parentSessionID !== input.parentSessionID) return null;
+	if (!dispatch || dispatch.parentSessionID !== input.parentSessionID)
+		return null;
 	if (
 		typeof input.agent !== 'string' ||
 		stripKnownSwarmPrefix(input.agent).toLowerCase() !== 'coder'
-	) return null;
+	)
+		return null;
 	const id = dispatch.childSessionId;
 	if (
 		typeof id !== 'string' ||
 		!/^ses_[A-Za-z0-9_-]{1,252}$/.test(id) ||
 		id === input.parentSessionID ||
 		laneChildSessionAgents.get(id) !== 'coder'
-	) return null;
+	)
+		return null;
 	return id;
 }
 

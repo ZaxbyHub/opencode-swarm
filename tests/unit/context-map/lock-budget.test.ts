@@ -25,16 +25,16 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import * as fs from 'node:fs';
 import { join } from 'node:path';
 import {
-	loadContextMap,
-	saveContextMap,
 	appendTaskHistory,
 	createEmptyContextMap,
+	loadContextMap,
+	saveContextMap,
 } from '../../../src/context-map/persistence';
 import {
 	CONTEXT_MAP_LOCK_BUDGET_MS,
+	type PostAgentUpdateParams,
 	updateContextMapAfterAgentLocked,
 	withContextMapLock,
-	type PostAgentUpdateParams,
 } from '../../../src/context-map/post-agent-update';
 import { closeAllProjectDbs } from '../../../src/db/project-db';
 import { resetSwarmState } from '../../../src/state';
@@ -61,7 +61,10 @@ function makeProject(): string {
 
 let currentCleanup: (() => void) | null = null;
 
-function childParams(directory: string, taskId = TASK_ID): PostAgentUpdateParams {
+function childParams(
+	directory: string,
+	taskId = TASK_ID,
+): PostAgentUpdateParams {
 	return {
 		task_id: taskId,
 		agent_role: 'coder',
@@ -223,9 +226,9 @@ describe('context-map — bounded lock waits for the optional write (r17 P1)', (
 			TEST_BUDGET_MS,
 		);
 		expect(Date.now() - startedAt).toBeLessThan(BUDGET_EXPIRY_SLACK_MS);
-		expect(
-			loadContextMap(directory)?.task_history[TASK_ID]?.final_status,
-		).toBe('pending');
+		expect(loadContextMap(directory)?.task_history[TASK_ID]?.final_status).toBe(
+			'pending',
+		);
 	});
 
 	test('replay: a budget-skipped write is recovered by the next attempt, exactly once', async () => {
@@ -243,13 +246,19 @@ describe('context-map — bounded lock waits for the optional write (r17 P1)', (
 		);
 
 		// First attempt: skipped on the budget.
-		await updateContextMapAfterAgentLocked(childParams(directory), TEST_BUDGET_MS);
+		await updateContextMapAfterAgentLocked(
+			childParams(directory),
+			TEST_BUDGET_MS,
+		);
 		expect(loadContextMap(directory)?.task_history[TASK_ID]).toBeUndefined();
 
 		// Lock free again: the replay lands the pending write.
 		releaseHolder?.();
 		await holderDone;
-		await updateContextMapAfterAgentLocked(childParams(directory), TEST_BUDGET_MS);
+		await updateContextMapAfterAgentLocked(
+			childParams(directory),
+			TEST_BUDGET_MS,
+		);
 
 		const history = loadContextMap(directory)?.task_history ?? {};
 		expect(history[TASK_ID]?.final_status).toBe('pending');
@@ -290,10 +299,13 @@ describe('context-map — bounded lock waits for the optional write (r17 P1)', (
 		}
 
 		// A's own write still completes normally once it finishes.
-		await updateContextMapAfterAgentLocked(childParams(directory, '2.1'), TEST_BUDGET_MS);
-		expect(
-			loadContextMap(directory)?.task_history['2.1']?.final_status,
-		).toBe('pending');
+		await updateContextMapAfterAgentLocked(
+			childParams(directory, '2.1'),
+			TEST_BUDGET_MS,
+		);
+		expect(loadContextMap(directory)?.task_history['2.1']?.final_status).toBe(
+			'pending',
+		);
 	});
 
 	test('nested context-map locks cannot deadlock: the inner acquire skips on its budget', async () => {

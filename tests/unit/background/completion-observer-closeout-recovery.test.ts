@@ -10,6 +10,7 @@
  * instance — a process restart — re-drives exactly the missing steps.
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { createHash } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createBackgroundCompletionObserver } from '../../../src/background/completion-observer';
@@ -25,9 +26,8 @@ import {
 	recordDelegationIngestionResult,
 	recordPendingDelegation,
 } from '../../../src/background/pending-delegations';
-import { captureWorkspaceSnapshot } from '../../../src/background/workspace-snapshot';
 import { parseTaskEnvelope } from '../../../src/background/task-envelope';
-import { createHash } from 'node:crypto';
+import { captureWorkspaceSnapshot } from '../../../src/background/workspace-snapshot';
 import type { Plan } from '../../../src/config/plan-schema';
 import { loadContextMap } from '../../../src/context-map/persistence';
 import { closeAllProjectDbs } from '../../../src/db/project-db';
@@ -122,9 +122,7 @@ async function recordPending(
  * eventId), so a manually claimed terminal is byte-identical to the one the
  * observer would claim from the same completion event.
  */
-function manualTerminal(
-	body: string,
-): {
+function manualTerminal(body: string): {
 	eventId: string;
 	status: 'completed' | 'error' | 'cancelled';
 	recordedAt: number;
@@ -207,7 +205,11 @@ describe('background completion observer — durable closeout recovery (r13 P0-3
 		const terminal = manualTerminal(errorBody);
 		expect(terminal).not.toBeNull();
 		if (!terminal) return;
-		const claim = await claimTerminalResult(directory, 'ses_recovery_child', terminal);
+		const claim = await claimTerminalResult(
+			directory,
+			'ses_recovery_child',
+			terminal,
+		);
 		expect(claim?.disposition).toBe('claimed');
 		await initializeTerminalCloseout(
 			directory,
@@ -238,9 +240,7 @@ describe('background completion observer — durable closeout recovery (r13 P0-3
 		const record = findByCorrelationId(directory, 'ses_recovery_child');
 		expect(record?.advisoryInbox?.state).toBe('pending');
 		expect(record?.advisoryInbox?.message).toContain('failed');
-		expect(record?.closeout?.steps.parent_advisory?.state).toBe(
-			'completed',
-		);
+		expect(record?.closeout?.steps.parent_advisory?.state).toBe('completed');
 
 		// A further replay changes nothing: no duplicate advisory.
 		await observer.event(deliveredEvent);
@@ -257,7 +257,11 @@ describe('background completion observer — durable closeout recovery (r13 P0-3
 		const terminal = manualTerminal(completedBody);
 		expect(terminal).not.toBeNull();
 		if (!terminal) return;
-		const claim = await claimTerminalResult(directory, 'ses_recovery_child', terminal);
+		const claim = await claimTerminalResult(
+			directory,
+			'ses_recovery_child',
+			terminal,
+		);
 		expect(claim?.disposition).toBe('claimed');
 		// Journal initialized, NOTHING acked yet (crash right after init).
 		await initializeTerminalCloseout(
@@ -292,14 +296,19 @@ describe('background completion observer — durable closeout recovery (r13 P0-3
 	});
 
 	test('P1-2 recovery: crash after the ingestion commit but before the context-map write — recovery adds the missing summary', async () => {
-		const parent = ensureAgentSession('ses_recovery_parent', 'architect', directory);
+		const parent = ensureAgentSession(
+			'ses_recovery_parent',
+			'architect',
+			directory,
+		);
 		parent.taskWorkflowStates.set('1.1', 'coder_delegated');
 		const generation = await seedStageAPassed(directory, '1.1');
 		await recordPending(directory, {
 			agent: 'reviewer',
 			workflowGeneration: generation,
 		});
-		const body = '<task_result>[REVIEWED] | 1.1 | APPROVED | no issues</task_result>';
+		const body =
+			'<task_result>[REVIEWED] | 1.1 | APPROVED | no issues</task_result>';
 
 		const capture = captureDelegationEnds();
 		try {
@@ -432,17 +441,25 @@ describe('background completion observer — durable closeout recovery (r13 P0-3
 		if (terminal) {
 			await claimTerminalResult(directory, 'ses_recovery_child', terminal);
 		}
-		const first = await putTerminalCloseoutAdvisory(directory, 'ses_recovery_child', {
-			eventId: 'evt-1:pipeline',
-			parentSessionId: 'ses_recovery_parent',
-			message: '[PIPELINE] reviewer delegation complete.',
-		});
+		const first = await putTerminalCloseoutAdvisory(
+			directory,
+			'ses_recovery_child',
+			{
+				eventId: 'evt-1:pipeline',
+				parentSessionId: 'ses_recovery_parent',
+				message: '[PIPELINE] reviewer delegation complete.',
+			},
+		);
 		expect(first).not.toBeNull();
-		const second = await putTerminalCloseoutAdvisory(directory, 'ses_recovery_child', {
-			eventId: 'evt-1:pipeline',
-			parentSessionId: 'ses_recovery_parent',
-			message: '[PIPELINE] reviewer delegation complete.',
-		});
+		const second = await putTerminalCloseoutAdvisory(
+			directory,
+			'ses_recovery_child',
+			{
+				eventId: 'evt-1:pipeline',
+				parentSessionId: 'ses_recovery_parent',
+				message: '[PIPELINE] reviewer delegation complete.',
+			},
+		);
 		expect(second?.eventId).toBe(first?.eventId);
 		const record = findByCorrelationId(directory, 'ses_recovery_child');
 		expect(record?.closeoutAdvisories?.length).toBe(1);
@@ -473,10 +490,18 @@ describe('background completion observer — durable closeout recovery (r13 P0-3
 		if (record) {
 			// The completed step is not pending; the unacked one is.
 			expect(
-				isTerminalCloseoutStepPending(record, terminal.eventId, 'delegation_end'),
+				isTerminalCloseoutStepPending(
+					record,
+					terminal.eventId,
+					'delegation_end',
+				),
 			).toBe(false);
 			expect(
-				isTerminalCloseoutStepPending(record, terminal.eventId, 'parent_advisory'),
+				isTerminalCloseoutStepPending(
+					record,
+					terminal.eventId,
+					'parent_advisory',
+				),
 			).toBe(true);
 			// A FOREIGN terminal event id never satisfies the fence.
 			expect(

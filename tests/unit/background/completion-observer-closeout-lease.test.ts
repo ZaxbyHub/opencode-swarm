@@ -30,10 +30,7 @@ import { captureWorkspaceSnapshot } from '../../../src/background/workspace-snap
 import { loadContextMap } from '../../../src/context-map/persistence';
 import { closeAllProjectDbs } from '../../../src/db/project-db';
 import { resetStartupLedgerCheck } from '../../../src/plan/manager';
-import {
-	ensureAgentSession,
-	resetSwarmState,
-} from '../../../src/state';
+import { ensureAgentSession, resetSwarmState } from '../../../src/state';
 import { telemetry } from '../../../src/telemetry';
 import { createSafeTestDir } from '../../helpers/safe-test-dir';
 import { seedStageAPassed } from '../../helpers/task-workflow-evidence';

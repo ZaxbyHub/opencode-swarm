@@ -431,11 +431,7 @@ describe('background completion observer — async plan critic approval (F1/r11)
 		// A terminal for an UNKNOWN child session — no durable record exists
 		// for it, so nothing may be approved on the real call's behalf.
 		await observer.event(
-			completionEvent(
-				'ses_child_critic_imposter',
-				'completed',
-				APPROVED_BODY,
-			),
+			completionEvent('ses_child_critic_imposter', 'completed', APPROVED_BODY),
 		);
 		expect(await countPlanCriticGateSnapshots(directory)).toBe(0);
 		expect(await isPlanCriticApproved(directory)).toBe(false);

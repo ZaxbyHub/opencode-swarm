@@ -20,9 +20,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import { join } from 'node:path';
 import { createBackgroundCompletionObserver } from '../../../src/background/completion-observer';
-import {
-	recordPendingDelegation,
-} from '../../../src/background/pending-delegations';
+import { recordPendingDelegation } from '../../../src/background/pending-delegations';
 import { captureWorkspaceSnapshot } from '../../../src/background/workspace-snapshot';
 import type { Plan } from '../../../src/config/plan-schema';
 import {
@@ -37,10 +35,7 @@ import {
 } from '../../../src/context-map/post-agent-update';
 import { closeAllProjectDbs } from '../../../src/db/project-db';
 import { resetStartupLedgerCheck } from '../../../src/plan/manager';
-import {
-	ensureAgentSession,
-	resetSwarmState,
-} from '../../../src/state';
+import { ensureAgentSession, resetSwarmState } from '../../../src/state';
 import { executeUpdateTaskStatus } from '../../../src/tools/update-task-status';
 import { createSafeTestDir } from '../../helpers/safe-test-dir';
 import { seedStageAPassed } from '../../helpers/task-workflow-evidence';

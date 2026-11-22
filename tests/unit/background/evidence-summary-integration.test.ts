@@ -11,13 +11,13 @@ import {
 import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import * as realEventBusModule from '../../../src/background/event-bus';
 import {
 	createEvidenceSummaryIntegration,
 	EvidenceSummaryIntegration,
 	type EvidenceSummaryIntegrationConfig,
 } from '../../../src/background/evidence-summary-integration';
 import type { AutomationConfig } from '../../../src/config/schema';
-import * as realEventBusModule from '../../../src/background/event-bus';
 import * as realEvidenceSummaryServiceModule from '../../../src/services/evidence-summary-service';
 
 // r15 audit repair (Phase 6 — test isolation): the ORIGINAL exports captured
@@ -29,8 +29,10 @@ import * as realEvidenceSummaryServiceModule from '../../../src/services/evidenc
 const realGetGlobalEventBus = realEventBusModule.getGlobalEventBus;
 const realResetGlobalEventBus = realEventBusModule.resetGlobalEventBus;
 const RealAutomationEventBus = realEventBusModule.AutomationEventBus;
-const realBuildEvidenceSummary = realEvidenceSummaryServiceModule.buildEvidenceSummary;
-const realIsAutoSummaryEnabled = realEvidenceSummaryServiceModule.isAutoSummaryEnabled;
+const realBuildEvidenceSummary =
+	realEvidenceSummaryServiceModule.buildEvidenceSummary;
+const realIsAutoSummaryEnabled =
+	realEvidenceSummaryServiceModule.isAutoSummaryEnabled;
 
 // Mock the event bus
 const mockSubscribers: Map<

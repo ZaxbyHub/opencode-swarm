@@ -21,6 +21,7 @@ import { _internals as planManagerInternals } from '../../../src/plan/manager';
 // The mock is now installed per-test in beforeEach and the snapshot is
 // re-installed in afterEach.
 import * as realUtilsModule from '../../../src/utils';
+
 const utilsSnapshot = { ...realUtilsModule };
 const planManagerSeamSnapshot = { ...planManagerInternals };
 

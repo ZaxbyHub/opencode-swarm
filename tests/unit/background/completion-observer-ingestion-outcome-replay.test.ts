@@ -17,8 +17,8 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { createBackgroundCompletionObserver } from '../../../src/background/completion-observer';
 import {
 	claimDelegationIngestion,
-	findByCorrelationId,
 	type DurableIngestionOutcome,
+	findByCorrelationId,
 	readDurableIngestionOutcome,
 	recordDelegationIngestionResult,
 	recordPendingDelegation,
@@ -197,17 +197,13 @@ describe('background completion observer — negative stage-b outcomes survive r
 			contextMap: { enabled: true },
 			recordIngestionResult: crashingCommitSeam(),
 		});
-		await firstObserver.event(
-			completionEvent('ses_r14_child', body),
-		);
+		await firstObserver.event(completionEvent('ses_r14_child', body));
 
 		const committed = findByCorrelationId(directory, 'ses_r14_child');
 		expect(committed?.status).toBe('consumed');
 		expect(committed?.ingestion?.state).toBe('consumed');
 		expect(committed?.ingestion?.outcome).toBe('rejected');
-		expect(
-			loadContextMap(directory)?.task_history['1.1'],
-		).toBeUndefined();
+		expect(loadContextMap(directory)?.task_history['1.1']).toBeUndefined();
 
 		// Restart: a fresh observer instance replays the same terminal.
 		const replayObserver = createBackgroundCompletionObserver({
@@ -221,9 +217,7 @@ describe('background completion observer — negative stage-b outcomes survive r
 		expect(record?.status).toBe('consumed');
 		expect(record?.ingestion?.outcome).toBe('rejected');
 		// THE regression: a consumed replay must never become approved.
-		expect(
-			loadContextMap(directory)?.task_history['1.1'],
-		).toBeUndefined();
+		expect(loadContextMap(directory)?.task_history['1.1']).toBeUndefined();
 		expect(record?.closeout?.steps.context_map?.state).toBe('completed');
 		expect(record?.closeout?.steps.parent_advisory?.state).toBe('completed');
 		expect(record?.advisoryInbox?.message).toContain('rejected');
@@ -232,7 +226,12 @@ describe('background completion observer — negative stage-b outcomes survive r
 	});
 
 	test('CONCERNS reviewer verdict produces no approval across a crash-restart replay', async () => {
-		await seedReviewer(directory, '1.2', 'call-r14-concerns', 'ses_r14_concerns');
+		await seedReviewer(
+			directory,
+			'1.2',
+			'call-r14-concerns',
+			'ses_r14_concerns',
+		);
 		const body =
 			'<task_result>[REVIEWED] | 1.2 | CONCERNS | needs discussion</task_result>';
 
@@ -255,9 +254,7 @@ describe('background completion observer — negative stage-b outcomes survive r
 		});
 		await replayObserver.event(completionEvent('ses_r14_concerns', body));
 
-		expect(
-			loadContextMap(directory)?.task_history['1.2'],
-		).toBeUndefined();
+		expect(loadContextMap(directory)?.task_history['1.2']).toBeUndefined();
 		const record = findByCorrelationId(directory, 'ses_r14_concerns');
 		expect(record?.closeout?.steps.context_map?.state).toBe('completed');
 		expect(record?.advisoryInbox?.message).toContain('rejected');
@@ -287,9 +284,7 @@ describe('background completion observer — negative stage-b outcomes survive r
 		});
 		await replayObserver.event(completionEvent('ses_r14_fail', body));
 
-		expect(
-			loadContextMap(directory)?.task_history['1.3'],
-		).toBeUndefined();
+		expect(loadContextMap(directory)?.task_history['1.3']).toBeUndefined();
 		const record = findByCorrelationId(directory, 'ses_r14_fail');
 		expect(record?.ingestion?.outcome).toBe('rejected');
 		expect(record?.closeout?.steps.context_map?.state).toBe('completed');
@@ -320,9 +315,7 @@ describe('background completion observer — negative stage-b outcomes survive r
 		});
 		await replayObserver.event(completionEvent('ses_r14_skip', body));
 
-		expect(
-			loadContextMap(directory)?.task_history['1.4'],
-		).toBeUndefined();
+		expect(loadContextMap(directory)?.task_history['1.4']).toBeUndefined();
 		const record = findByCorrelationId(directory, 'ses_r14_skip');
 		expect(record?.ingestion?.outcome).toBe('skipped');
 		expect(record?.closeout?.steps.context_map?.state).toBe('completed');
@@ -360,9 +353,7 @@ describe('background completion observer — negative stage-b outcomes survive r
 		});
 		await replayObserver.event(completionEvent('ses_r14_legacy', body));
 
-		expect(
-			loadContextMap(directory)?.task_history['1.5'],
-		).toBeUndefined();
+		expect(loadContextMap(directory)?.task_history['1.5']).toBeUndefined();
 		const record = findByCorrelationId(directory, 'ses_r14_legacy');
 		expect(record?.closeout?.steps.context_map?.state).toBe('completed');
 		expect(record?.advisoryInbox?.message).toContain(
@@ -385,9 +376,7 @@ describe('background completion observer — negative stage-b outcomes survive r
 
 		const committed = findByCorrelationId(directory, 'ses_r14_ok');
 		expect(committed?.ingestion?.outcome).toBe('accepted');
-		expect(
-			loadContextMap(directory)?.task_history['1.6'],
-		).toBeUndefined();
+		expect(loadContextMap(directory)?.task_history['1.6']).toBeUndefined();
 
 		const replayObserver = createBackgroundCompletionObserver({
 			config: { enabled: true },
@@ -425,10 +414,7 @@ describe('background completion observer — negative stage-b outcomes survive r
 			contextMap: { enabled: true },
 		});
 		await replayObserver.event(completionEvent('ses_r14_double', body));
-		const afterFirstReplay = findByCorrelationId(
-			directory,
-			'ses_r14_double',
-		);
+		const afterFirstReplay = findByCorrelationId(directory, 'ses_r14_double');
 		const evidenceAfterFirst = await readTaskEvidence(directory, '1.7');
 		const advisoryEventId = afterFirstReplay?.advisoryInbox?.eventId;
 
@@ -436,19 +422,14 @@ describe('background completion observer — negative stage-b outcomes survive r
 		// duplicate advisory slot, no success summary.
 		await replayObserver.event(completionEvent('ses_r14_double', body));
 
-		const afterSecondReplay = findByCorrelationId(
-			directory,
-			'ses_r14_double',
-		);
+		const afterSecondReplay = findByCorrelationId(directory, 'ses_r14_double');
 		const evidenceAfterSecond = await readTaskEvidence(directory, '1.7');
 		expect(evidenceAfterSecond).toEqual(evidenceAfterFirst);
 		expect(afterSecondReplay?.advisoryInbox?.eventId).toBe(advisoryEventId);
 		expect(afterSecondReplay?.ingestion?.attempt).toBe(
 			afterFirstReplay?.ingestion?.attempt,
 		);
-		expect(
-			loadContextMap(directory)?.task_history['1.7'],
-		).toBeUndefined();
+		expect(loadContextMap(directory)?.task_history['1.7']).toBeUndefined();
 	});
 
 	test('competing completions are not crossed: one rejected and one approved record in the same replay', async () => {
@@ -549,7 +530,12 @@ describe('durable ingestion outcome — store semantics (r14 P0-1)', () => {
 				},
 			} as never),
 		).toEqual({ kind: 'unverifiable' });
-		for (const outcome of ['rejected', 'skipped', 'stale', 'accepted'] as const) {
+		for (const outcome of [
+			'rejected',
+			'skipped',
+			'stale',
+			'accepted',
+		] as const) {
 			expect(
 				readDurableIngestionOutcome({
 					status: 'consumed',

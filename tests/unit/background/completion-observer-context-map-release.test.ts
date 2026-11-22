@@ -168,9 +168,9 @@ describe('background completion observer — context-map status follows the full
 			),
 		);
 		expect(status(directory, '1.1')).toBe('pending');
-		expect(getTaskState(ensureAgentSession(PARENT, 'architect', directory), '1.1')).toBe(
-			'reviewer_run',
-		);
+		expect(
+			getTaskState(ensureAgentSession(PARENT, 'architect', directory), '1.1'),
+		).toBe('reviewer_run');
 
 		// Test engineer second: both gates satisfied, task state 'tests_run',
 		// but the task is NOT released — still non-final.
@@ -181,9 +181,9 @@ describe('background completion observer — context-map status follows the full
 			),
 		);
 		expect(status(directory, '1.1')).toBe('pending');
-		expect(getTaskState(ensureAgentSession(PARENT, 'architect', directory), '1.1')).toBe(
-			'tests_run',
-		);
+		expect(
+			getTaskState(ensureAgentSession(PARENT, 'architect', directory), '1.1'),
+		).toBe('tests_run');
 
 		// The authoritative release promotes the summary to 'approved'.
 		const result = await executeUpdateTaskStatus(
@@ -217,9 +217,9 @@ describe('background completion observer — context-map status follows the full
 			),
 		);
 		expect(status(directory, '1.1')).toBe('pending');
-		expect(getTaskState(ensureAgentSession(PARENT, 'architect', directory), '1.1')).toBe(
-			'tests_run',
-		);
+		expect(
+			getTaskState(ensureAgentSession(PARENT, 'architect', directory), '1.1'),
+		).toBe('tests_run');
 
 		const result = await executeUpdateTaskStatus(
 			{ task_id: '1.1', status: 'completed' },
@@ -253,9 +253,9 @@ describe('background completion observer — context-map status follows the full
 			),
 		);
 		expect(status(directory, '1.1')).toBe('pending');
-		expect(getTaskState(ensureAgentSession(PARENT, 'architect', directory), '1.1')).toBe(
-			'rework_required',
-		);
+		expect(
+			getTaskState(ensureAgentSession(PARENT, 'architect', directory), '1.1'),
+		).toBe('rework_required');
 		expect(
 			findByCorrelationId(directory, 'ses_p5_te3')?.ingestion?.outcome,
 		).toBe('rejected');

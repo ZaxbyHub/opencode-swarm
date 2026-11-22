@@ -163,7 +163,9 @@ describe('floating-promise scanner fixtures (r17 §7)', () => {
 		];
 		// ~4000 filler lines of handled awaits.
 		for (let i = 0; i < 4000; i++) {
-			lines.push(`export async function filler${i}(): Promise<void> { await pad(1); }`);
+			lines.push(
+				`export async function filler${i}(): Promise<void> { await pad(1); }`,
+			);
 		}
 		const bigPath = path.join(dir, 'big.ts');
 		fs.writeFileSync(bigPath, lines.join('\n'));

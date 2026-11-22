@@ -44,8 +44,8 @@ import { resetSwarmState } from '../../../src/state';
 import {
 	addTelemetryListener,
 	initTelemetry,
-	resetTelemetryForTesting,
 	removeTelemetryListener,
+	resetTelemetryForTesting,
 } from '../../../src/telemetry';
 import { createSafeTestDir } from '../../helpers/safe-test-dir';
 
@@ -53,10 +53,7 @@ const TASK_ID = '1.1';
 
 type TaskStatus = Plan['phases'][0]['tasks'][0]['status'];
 
-function writePlan(
-	directory: string,
-	taskStatus: TaskStatus,
-): void {
+function writePlan(directory: string, taskStatus: TaskStatus): void {
 	const plan: Plan = {
 		schema_version: '1.0.0',
 		title: 'r17 Stale Promotion Plan',
@@ -253,9 +250,9 @@ describe('context-map — stale task-release promotion fence (r17 P1)', () => {
 
 		await reconcileContextMapTaskReleases(directory);
 
-		expect(
-			loadContextMap(directory)?.task_history[TASK_ID]?.final_status,
-		).toBe('approved');
+		expect(loadContextMap(directory)?.task_history[TASK_ID]?.final_status).toBe(
+			'approved',
+		);
 	});
 
 	test('evidence stamped for a different plan generation is not promoted', async () => {
@@ -271,9 +268,9 @@ describe('context-map — stale task-release promotion fence (r17 P1)', () => {
 
 		await reconcileContextMapTaskReleases(directory);
 
-		expect(
-			loadContextMap(directory)?.task_history[TASK_ID]?.final_status,
-		).toBe('pending');
+		expect(loadContextMap(directory)?.task_history[TASK_ID]?.final_status).toBe(
+			'pending',
+		);
 	});
 
 	test('a terminal rejected entry is never overwritten by a later promotion', async () => {
@@ -292,9 +289,9 @@ describe('context-map — stale task-release promotion fence (r17 P1)', () => {
 
 		await reconcileContextMapTaskReleases(directory);
 
-		expect(
-			loadContextMap(directory)?.task_history[TASK_ID]?.final_status,
-		).toBe('rejected');
+		expect(loadContextMap(directory)?.task_history[TASK_ID]?.final_status).toBe(
+			'rejected',
+		);
 	});
 
 	test('two concurrent reconciliations promote once, idempotently', async () => {
@@ -323,14 +320,14 @@ describe('context-map — stale task-release promotion fence (r17 P1)', () => {
 		seedPendingMapEntry(directory);
 
 		await reconcileContextMapTaskReleases(directory);
-		expect(
-			loadContextMap(directory)?.task_history[TASK_ID]?.final_status,
-		).toBe('pending');
+		expect(loadContextMap(directory)?.task_history[TASK_ID]?.final_status).toBe(
+			'pending',
+		);
 
 		writePlan(directory, 'completed');
 		await reconcileContextMapTaskReleases(directory);
-		expect(
-			loadContextMap(directory)?.task_history[TASK_ID]?.final_status,
-		).toBe('approved');
+		expect(loadContextMap(directory)?.task_history[TASK_ID]?.final_status).toBe(
+			'approved',
+		);
 	});
 });

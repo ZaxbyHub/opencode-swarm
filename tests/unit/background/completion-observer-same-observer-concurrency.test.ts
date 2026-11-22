@@ -31,10 +31,7 @@ import { captureWorkspaceSnapshot } from '../../../src/background/workspace-snap
 import { loadContextMap } from '../../../src/context-map/persistence';
 import { closeAllProjectDbs } from '../../../src/db/project-db';
 import { resetStartupLedgerCheck } from '../../../src/plan/manager';
-import {
-	ensureAgentSession,
-	resetSwarmState,
-} from '../../../src/state';
+import { ensureAgentSession, resetSwarmState } from '../../../src/state';
 import { telemetry } from '../../../src/telemetry';
 import { createSafeTestDir } from '../../helpers/safe-test-dir';
 import { seedStageAPassed } from '../../helpers/task-workflow-evidence';
@@ -186,16 +183,12 @@ describe('background completion observer — same-observer closeout concurrency 
 
 			const record = findByCorrelationId(directory, 'ses_r15_race');
 			// Exactly-once durable state: every step completed exactly once.
-			expect(record?.closeout?.steps.delegation_end?.state).toBe(
-				'completed',
-			);
+			expect(record?.closeout?.steps.delegation_end?.state).toBe('completed');
 			expect(record?.closeout?.steps.pipeline_advisory?.state).toBe(
 				'completed',
 			);
 			expect(record?.closeout?.steps.context_map?.state).toBe('completed');
-			expect(record?.closeout?.steps.parent_advisory?.state).toBe(
-				'completed',
-			);
+			expect(record?.closeout?.steps.parent_advisory?.state).toBe('completed');
 			// Exactly one business effect: ONE telemetry pairing end, ONE
 			// advisory slot, ONE context-map task entry.
 			expect(capture.count()).toBe(1);
@@ -219,9 +212,9 @@ describe('background completion observer — same-observer closeout concurrency 
 			config: { enabled: true },
 			directory,
 			contextMap: { enabled: true },
-			putPendingBackgroundAdvisoryImpl: async (...args: Parameters<
-				typeof putPendingBackgroundAdvisory
-			>) => {
+			putPendingBackgroundAdvisoryImpl: async (
+				...args: Parameters<typeof putPendingBackgroundAdvisory>
+			) => {
 				advisoryCalls += 1;
 				if (advisoryCalls === 1) return null;
 				return putPendingBackgroundAdvisory(...args);
@@ -230,9 +223,7 @@ describe('background completion observer — same-observer closeout concurrency 
 		await observer.event(completionEvent('ses_r15_retry', body));
 		let record = findByCorrelationId(directory, 'ses_r15_retry');
 		expect(record?.closeout?.steps.parent_advisory?.state).toBe('pending');
-		expect(
-			record?.closeout?.steps.parent_advisory?.leaseToken,
-		).toBeUndefined();
+		expect(record?.closeout?.steps.parent_advisory?.leaseToken).toBeUndefined();
 
 		// A later replay (same observer, NEW attempt) must be able to claim a
 		// fresh lease and complete the step.
@@ -272,9 +263,7 @@ describe('background completion observer — same-observer closeout concurrency 
 			}
 			for (const child of ['ses_r15_childA', 'ses_r15_childB']) {
 				const record = findByCorrelationId(directory, child);
-				expect(record?.closeout?.steps.delegation_end?.state).toBe(
-					'completed',
-				);
+				expect(record?.closeout?.steps.delegation_end?.state).toBe('completed');
 				expect(record?.closeout?.steps.parent_advisory?.state).toBe(
 					'completed',
 				);

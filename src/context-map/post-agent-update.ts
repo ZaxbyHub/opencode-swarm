@@ -19,6 +19,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { sanitizeContextText } from '../hooks/context-sanitizer';
+import { derivePlanIdentityHash } from '../plan/utils';
 import type {
 	ContextMap,
 	DecisionEntry,
@@ -26,7 +27,6 @@ import type {
 	TaskContextSummary,
 } from '../types/context-map';
 import { extractContextDecisions } from '../utils/context-decisions';
-import { derivePlanIdentityHash } from '../plan/utils';
 import * as logger from '../utils/logger.js';
 import { extractFileSummary } from './file-summary';
 import {
@@ -840,13 +840,14 @@ export async function updateContextMapAfterAgentLocked(
  * functions on first use; each invocation is one physical plan.json read.
  */
 export const _planProofReaders: {
-	resolveCurrentPlanIdentitySync: null | ((
-		directory: string,
-	) => { planId: string; planIdentityHash: string } | null);
-	readCurrentTaskDeclaredFiles: null | ((
-		directory: string,
-		taskId: string,
-	) => string[] | null);
+	resolveCurrentPlanIdentitySync:
+		| null
+		| ((
+				directory: string,
+		  ) => { planId: string; planIdentityHash: string } | null);
+	readCurrentTaskDeclaredFiles:
+		| null
+		| ((directory: string, taskId: string) => string[] | null);
 } = {
 	resolveCurrentPlanIdentitySync: null,
 	readCurrentTaskDeclaredFiles: null,
@@ -916,8 +917,7 @@ function deriveDeclaredFilesByTask(
 			const files = (task as { files_touched?: unknown }).files_touched;
 			byTask.set(
 				task.id,
-				Array.isArray(files) &&
-					files.every((file) => typeof file === 'string')
+				Array.isArray(files) && files.every((file) => typeof file === 'string')
 					? [...(files as string[])]
 					: null,
 			);
@@ -1085,9 +1085,7 @@ export async function resolveTaskReleaseEvidenceProof(
 			_planProofReaders.resolveCurrentPlanIdentitySync!(directory)
 				?.planIdentityHash ??
 			null;
-		if (
-			evidenceStampedForDifferentPlan(evidence, currentIdentityHash)
-		) {
+		if (evidenceStampedForDifferentPlan(evidence, currentIdentityHash)) {
 			return false;
 		}
 		const workflow = getTaskWorkflowSnapshot(evidence);

@@ -33,9 +33,9 @@ import {
 	readContextMapState,
 } from '../../../src/context-map/persistence';
 import {
+	type PostAgentUpdateParams,
 	updateContextMapAfterAgent,
 	updateContextMapAfterAgentLocked,
-	type PostAgentUpdateParams,
 } from '../../../src/context-map/post-agent-update';
 import { closeAllProjectDbs } from '../../../src/db/project-db';
 import { resetSwarmState } from '../../../src/state';
@@ -184,9 +184,7 @@ describe('context-map — corrupt map preservation on the normal child update pa
 		// is not a task release).
 		expect(map?.task_history[TASK_ID]?.final_status).toBe('pending');
 		expect(
-			map?.decisions.some(
-				(entry) => entry.decision === 'r17-child-decision',
-			),
+			map?.decisions.some((entry) => entry.decision === 'r17-child-decision'),
 		).toBe(true);
 	});
 
@@ -205,9 +203,7 @@ describe('context-map — corrupt map preservation on the normal child update pa
 		// ...and the new child result appended.
 		expect(map?.task_history[TASK_ID]?.final_status).toBe('pending');
 		expect(
-			map?.decisions.some(
-				(entry) => entry.decision === 'r17-child-decision',
-			),
+			map?.decisions.some((entry) => entry.decision === 'r17-child-decision'),
 		).toBe(true);
 	});
 

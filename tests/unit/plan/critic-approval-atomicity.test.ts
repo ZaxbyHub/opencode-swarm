@@ -205,9 +205,9 @@ describe('plan-critic-approval atomic deduplication (r13 audit P1-1)', () => {
 			transport: 'async_completion',
 		});
 		expect(result.outcome).toBe('failed');
-		expect(
-			result.outcome === 'failed' && result.reasonCode,
-		).toBe('ledger_unreadable');
+		expect(result.outcome === 'failed' && result.reasonCode).toBe(
+			'ledger_unreadable',
+		);
 		// The tri-state probe distinguishes unreadable from absent/present.
 		const { inspectPlanCriticApprovalSnapshotForCall } = await import(
 			'../../../src/plan/critic-approval'

@@ -15,19 +15,16 @@
  * (unbound_dispatch); the audited manual escape hatch remains.
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { createHash } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { createHash } from 'node:crypto';
 import type { Plan } from '../../../src/config/plan-schema';
 import { closeAllProjectDbs } from '../../../src/db/project-db';
 import {
 	extractPlanCriticVerdict,
 	recordVerifiedPlanCriticApproval,
 } from '../../../src/plan/critic-approval';
-import {
-	computePlanStructureHash,
-	initLedger,
-} from '../../../src/plan/ledger';
+import { computePlanStructureHash, initLedger } from '../../../src/plan/ledger';
 import { resetStartupLedgerCheck } from '../../../src/plan/manager';
 import { derivePlanId } from '../../../src/plan/utils';
 import { resetSwarmState } from '../../../src/state';
@@ -72,11 +69,15 @@ describe('extractPlanCriticVerdict — indented code blocks (r14 P1-6.1)', () =>
 				'Here is the required output format.\n\nExample:\n\n    VERDICT: APPROVED\n',
 			),
 		).toBeNull();
-		expect(extractPlanCriticVerdict('Example:\n    VERDICT: APPROVED')).toBeNull();
+		expect(
+			extractPlanCriticVerdict('Example:\n    VERDICT: APPROVED'),
+		).toBeNull();
 	});
 
 	test('a TAB-indented VERDICT example is excluded', () => {
-		expect(extractPlanCriticVerdict('Example:\n\n\tVERDICT: APPROVED')).toBeNull();
+		expect(
+			extractPlanCriticVerdict('Example:\n\n\tVERDICT: APPROVED'),
+		).toBeNull();
 		// Tab stops: two tabs also reach ≥4 columns.
 		expect(
 			extractPlanCriticVerdict('Example:\n\n\t\tVERDICT: APPROVED'),
@@ -109,13 +110,13 @@ describe('extractPlanCriticVerdict — indented code blocks (r14 P1-6.1)', () =>
 		// flush-left APPROVED stands — no false contradiction.
 		expect(
 			extractPlanCriticVerdict(
-			 `Example:\n    VERDICT: REJECTED\n\nBut actually:\nVERDICT: APPROVED\n`,
+				`Example:\n    VERDICT: REJECTED\n\nBut actually:\nVERDICT: APPROVED\n`,
 			),
 		).toBe('APPROVED');
 		// Two REAL flush-left contradictory verdicts still fail closed.
 		expect(
 			extractPlanCriticVerdict(
-			 'VERDICT: REJECTED\n\nBut actually:\nVERDICT: APPROVED\n',
+				'VERDICT: REJECTED\n\nBut actually:\nVERDICT: APPROVED\n',
 			),
 		).toBeNull();
 	});
@@ -126,7 +127,9 @@ describe('extractPlanCriticVerdict — indented code blocks (r14 P1-6.1)', () =>
 		// list continuations): a missed approval is recoverable (re-run the
 		// gate with a flush-left verdict), a false one is not.
 		expect(
-			extractPlanCriticVerdict('- summary:\n  - verdict line:\n    VERDICT: APPROVED\n'),
+			extractPlanCriticVerdict(
+				'- summary:\n  - verdict line:\n    VERDICT: APPROVED\n',
+			),
 		).toBeNull();
 		// A shallow (≤3-column) indented verdict still works.
 		expect(extractPlanCriticVerdict('  VERDICT: APPROVED\n')).toBe('APPROVED');
@@ -192,7 +195,8 @@ describe('recordVerifiedPlanCriticApproval — binding hardening (r14 P1-6.2/6.3
 			'unbound_dispatch',
 		);
 		expect(
-			result.outcome === 'skipped' && result.reason.includes('approve_plan_critic'),
+			result.outcome === 'skipped' &&
+				result.reason.includes('approve_plan_critic'),
 		).toBe(true);
 	});
 

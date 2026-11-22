@@ -427,10 +427,7 @@ export type PlanCriticApprovalRecording =
 	| {
 			outcome: 'failed';
 			reason: string;
-			reasonCode?:
-				| 'ledger_unreadable'
-				| 'plan_unreadable'
-				| 'write_failed';
+			reasonCode?: 'ledger_unreadable' | 'plan_unreadable' | 'write_failed';
 	  };
 
 /** Durable replay-fence probe result for one dispatch (call id). */
@@ -474,8 +471,7 @@ export async function inspectPlanCriticApprovalSnapshotForCall(
 		}
 		return { status: 'absent' };
 	} catch (error) {
-		const reason =
-			error instanceof Error ? error.message : String(error);
+		const reason = error instanceof Error ? error.message : String(error);
 		warn(
 			`[plan-critic-approval] ledger read failed while checking for prior approval of call ${callId}: ${reason}`,
 		);
@@ -696,69 +692,64 @@ export async function recordVerifiedPlanCriticApproval(
 		//  2. the current plan still hashes to the structure the verdict
 		//     covers. A concurrent plan edit between the outer check and the
 		//     commit aborts with `conflict` — a stale approval can never land.
-		await takeSnapshotEvent(
-			directory,
-			plan,
-			{
-				source: 'critic_approved',
-				approvalMetadata: {
-					verdict: 'APPROVED',
-					source: 'plan_critic_gate',
-					session_id: request.parentSessionId,
-					call_id: request.callId,
-					approved_at: new Date().toISOString(),
-					transport: request.transport,
-				},
-				payloadHashOverride: expectedStructureHash,
-				preCommitCheck: async () => {
-					// Deterministic fault-injection seam for the exact race
-					// point (between the outer checks and the in-lock fence).
-					// Production leaves this null; tests use it to mutate the
-					// plan (or the store) while the writer holds the lock.
-					if (_internals.onPreCommitFence) {
-						await _internals.onPreCommitFence(directory, request.callId);
-					}
-					// (1) durable replay fence — re-scan under the lock.
-					const current =
-						await inspectPlanCriticApprovalSnapshotForCall(
-							directory,
-							request.callId,
-						);
-					if (current.status === 'present') {
-						throw new PlanCriticApprovalFenceError(
-							'already_recorded',
-							'an approval snapshot for this dispatch was committed concurrently',
-						);
-					}
-					if (current.status === 'unreadable') {
-						throw new PlanCriticApprovalFenceError(
-							'ledger_unreadable',
-							`ledger unreadable under the write lock: ${current.reason}`,
-						);
-					}
-					// (2) plan-structure fence — the plan the verdict covers
-					// must still be the current plan at commit time.
-					// r15 (P4): a null read here is an UNREADABLE plan, not a
-					// proven change — `conflict` is reserved for a provably
-					// different structure/identity. Unreadable fails closed
-					// (this throw aborts the commit) but maps to a retryable
-					// outcome so recovery re-drives the recorder.
-					const planNow = await loadPlanJsonOnly(directory);
-					if (!planNow) {
-						throw new PlanCriticApprovalFenceError(
-							'plan_unreadable',
-							'plan.json unreadable at the approval commit fence (unclear storage state, not a proven plan change); nothing was written — retryable',
-						);
-					}
-					if (computePlanStructureHash(planNow) !== expectedStructureHash) {
-						throw new PlanCriticApprovalFenceError(
-							'conflict',
-							'plan structure changed before the approval commit — the APPROVED verdict no longer covers the current plan; re-run the critic gate',
-						);
-					}
-				},
+		await takeSnapshotEvent(directory, plan, {
+			source: 'critic_approved',
+			approvalMetadata: {
+				verdict: 'APPROVED',
+				source: 'plan_critic_gate',
+				session_id: request.parentSessionId,
+				call_id: request.callId,
+				approved_at: new Date().toISOString(),
+				transport: request.transport,
 			},
-		);
+			payloadHashOverride: expectedStructureHash,
+			preCommitCheck: async () => {
+				// Deterministic fault-injection seam for the exact race
+				// point (between the outer checks and the in-lock fence).
+				// Production leaves this null; tests use it to mutate the
+				// plan (or the store) while the writer holds the lock.
+				if (_internals.onPreCommitFence) {
+					await _internals.onPreCommitFence(directory, request.callId);
+				}
+				// (1) durable replay fence — re-scan under the lock.
+				const current = await inspectPlanCriticApprovalSnapshotForCall(
+					directory,
+					request.callId,
+				);
+				if (current.status === 'present') {
+					throw new PlanCriticApprovalFenceError(
+						'already_recorded',
+						'an approval snapshot for this dispatch was committed concurrently',
+					);
+				}
+				if (current.status === 'unreadable') {
+					throw new PlanCriticApprovalFenceError(
+						'ledger_unreadable',
+						`ledger unreadable under the write lock: ${current.reason}`,
+					);
+				}
+				// (2) plan-structure fence — the plan the verdict covers
+				// must still be the current plan at commit time.
+				// r15 (P4): a null read here is an UNREADABLE plan, not a
+				// proven change — `conflict` is reserved for a provably
+				// different structure/identity. Unreadable fails closed
+				// (this throw aborts the commit) but maps to a retryable
+				// outcome so recovery re-drives the recorder.
+				const planNow = await loadPlanJsonOnly(directory);
+				if (!planNow) {
+					throw new PlanCriticApprovalFenceError(
+						'plan_unreadable',
+						'plan.json unreadable at the approval commit fence (unclear storage state, not a proven plan change); nothing was written — retryable',
+					);
+				}
+				if (computePlanStructureHash(planNow) !== expectedStructureHash) {
+					throw new PlanCriticApprovalFenceError(
+						'conflict',
+						'plan structure changed before the approval commit — the APPROVED verdict no longer covers the current plan; re-run the critic gate',
+					);
+				}
+			},
+		});
 		return { outcome: 'recorded', planId: derivePlanId(plan) };
 	} catch (error) {
 		if (
@@ -824,10 +815,9 @@ export async function recordVerifiedPlanCriticApproval(
  * exact point a concurrent mutation would interleave in production.
  */
 export const _internals: {
-	onPreCommitFence: null | ((
-		directory: string,
-		callId: string,
-	) => Promise<void> | void);
+	onPreCommitFence:
+		| null
+		| ((directory: string, callId: string) => Promise<void> | void);
 } = {
 	onPreCommitFence: null,
 };

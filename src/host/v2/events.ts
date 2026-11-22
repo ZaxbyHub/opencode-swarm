@@ -40,14 +40,22 @@
 import { recordSessionChatAgent } from '../../models/task-model-routing';
 import { log } from '../../utils';
 import { withTimeout } from '../../utils/timeout';
-import { isPlainObject, isV2SubagentToolId, renderV1TaskEnvelopeFromV2 } from './hooks.js';
-import { isTrackedNativeChildSession, rememberVerifiedNativeChild, verifiedNativeChildParent } from './native-async-mode';
-import { recordV2SessionTiming } from './timing-trace';
 import {
 	noteDelegationHostEvent,
 	noteDelegationToolEvent,
 } from './delegation-trace';
+import {
+	isPlainObject,
+	isV2SubagentToolId,
+	renderV1TaskEnvelopeFromV2,
+} from './hooks.js';
+import {
+	isTrackedNativeChildSession,
+	rememberVerifiedNativeChild,
+	verifiedNativeChildParent,
+} from './native-async-mode';
 import { recordV2SessionErrorFromEnvelope } from './session-client';
+import { recordV2SessionTiming } from './timing-trace';
 import type { V1HooksSubset, V2EventEnvelope, V2PluginContext } from './types';
 
 const V2_EVENT_BATCH_TIMEOUT_MS = 60_000;
@@ -148,10 +156,11 @@ function noteDelegationTraceEnvelope(
 			case 'session.tool.called':
 			case 'session.tool.success':
 			case 'session.tool.failed': {
-				const callID =
-					typeof payload.id === 'string' ? payload.id : undefined;
+				const callID = typeof payload.id === 'string' ? payload.id : undefined;
 				const tool =
-					(callID !== undefined ? lookupToolName(sessionID, callID) : undefined) ??
+					(callID !== undefined
+						? lookupToolName(sessionID, callID)
+						: undefined) ??
 					(typeof payload.name === 'string' ? payload.name : 'unknown');
 				noteDelegationToolEvent(
 					sessionID,
@@ -177,14 +186,14 @@ function noteDelegationTraceEnvelope(
  * emitted trusted tool-progress shape can register a child identity.
  */
 function rememberNativeChildFromProgress(mapped: MappedEvent): void {
-  const part = mapped.properties.part;
-  if (!isPlainObject(part) || part.tool !== 'task') return;
-  const state = part.state;
-  if (!isPlainObject(state) || !isPlainObject(state.metadata)) return;
-  const child = state.metadata.sessionId;
-  const parent = part.sessionID;
-  if (typeof child !== 'string' || typeof parent !== 'string') return;
-  rememberVerifiedNativeChild(child, parent);
+	const part = mapped.properties.part;
+	if (!isPlainObject(part) || part.tool !== 'task') return;
+	const state = part.state;
+	if (!isPlainObject(state) || !isPlainObject(state.metadata)) return;
+	const child = state.metadata.sessionId;
+	const parent = part.sessionID;
+	if (typeof child !== 'string' || typeof parent !== 'string') return;
+	rememberVerifiedNativeChild(child, parent);
 }
 
 function rememberToolNameFromEnvelope(envelope: V2EventEnvelope): void {
@@ -280,60 +289,86 @@ function readProgressChildSessionID(
  * completion evidence: it has no final agent result/verdict text.
  */
 export function mapV2NativeSubagentCompletion(
-  envelope: V2EventEnvelope,
-  getVerifiedParent: (child: string) => string | undefined = verifiedNativeChildParent,
+	envelope: V2EventEnvelope,
+	getVerifiedParent: (
+		child: string,
+	) => string | undefined = verifiedNativeChildParent,
 ): MappedEvent | undefined {
-  const type = envelope?.type;
-  if (type !== 'session.inbox.enqueued' && type !== 'session.synthetic') return undefined;
-  // A throwing metadata/text accessor must not terminate the detached
-  // event pump; fail closed for this notification and continue the stream.
-  try {
-    const data = envelopePayload(envelope);
-    const parent = data.sessionID;
-    if (typeof parent !== 'string' || !isBoundedId(parent)) return undefined;
+	const type = envelope?.type;
+	if (type !== 'session.inbox.enqueued' && type !== 'session.synthetic')
+		return undefined;
+	// A throwing metadata/text accessor must not terminate the detached
+	// event pump; fail closed for this notification and continue the stream.
+	try {
+		const data = envelopePayload(envelope);
+		const parent = data.sessionID;
+		if (typeof parent !== 'string' || !isBoundedId(parent)) return undefined;
 
-    let message: Record<string, unknown>;
-    if (type === 'session.inbox.enqueued') {
-      const item = data.item;
-      if (!isPlainObject(item) || item.type !== 'synthetic' || !isPlainObject(item.payload)) return undefined;
-      message = item.payload;
-    } else {
-      message = data;
-    }
-    const metadata = message.metadata;
-    if (!isPlainObject(metadata) || metadata.source !== 'subagent') return undefined;
-    const child = metadata.childID;
-    const state = metadata.state;
-    const text = message.text;
-    if (typeof child !== 'string' || !/^ses_[A-Za-z0-9_-]{1,252}$/.test(child)) return undefined;
-    if (state !== 'completed' && state !== 'error' && state !== 'cancelled') return undefined;
-    if (typeof text !== 'string' || text.length > 131_072) return undefined;
-    if (getVerifiedParent(child) !== parent) return undefined;
+		let message: Record<string, unknown>;
+		if (type === 'session.inbox.enqueued') {
+			const item = data.item;
+			if (
+				!isPlainObject(item) ||
+				item.type !== 'synthetic' ||
+				!isPlainObject(item.payload)
+			)
+				return undefined;
+			message = item.payload;
+		} else {
+			message = data;
+		}
+		const metadata = message.metadata;
+		if (!isPlainObject(metadata) || metadata.source !== 'subagent')
+			return undefined;
+		const child = metadata.childID;
+		const state = metadata.state;
+		const text = message.text;
+		if (typeof child !== 'string' || !/^ses_[A-Za-z0-9_-]{1,252}$/.test(child))
+			return undefined;
+		if (state !== 'completed' && state !== 'error' && state !== 'cancelled')
+			return undefined;
+		if (typeof text !== 'string' || text.length > 131_072) return undefined;
+		if (getVerifiedParent(child) !== parent) return undefined;
 
-    // The host's notification has ordered sessionID/state attributes and an
-    // optional description; its body is result text, not status evidence.
-    const wrapper = /^<subagent sessionID="(ses_[A-Za-z0-9_-]{1,252})" state="(completed|error|cancelled)"(?: [a-zA-Z][\w-]*="[^"<>\r\n]*")*>\r?\n?([\s\S]*?)\r?\n?<\/subagent>\s*$/.exec(text);
-    if (!wrapper || wrapper[1] !== child || wrapper[2] !== state) return undefined;
+		// The host's notification has ordered sessionID/state attributes and an
+		// optional description; its body is result text, not status evidence.
+		const wrapper =
+			/^<subagent sessionID="(ses_[A-Za-z0-9_-]{1,252})" state="(completed|error|cancelled)"(?: [a-zA-Z][\w-]*="[^"<>\r\n]*")*>\r?\n?([\s\S]*?)\r?\n?<\/subagent>\s*$/.exec(
+				text,
+			);
+		if (!wrapper || wrapper[1] !== child || wrapper[2] !== state)
+			return undefined;
 
-    // Reuse the EXACT legacy renderer, including truncation and escaping of
-    // structural task_result/task_error/summary tokens from model output.
-    const normalized = renderV1TaskEnvelopeFromV2({ sessionID: child, state, inner: wrapper[3] });
-    return {
-      type: 'message.part.updated',
-      properties: {
-        part: { type: 'text', synthetic: true, sessionID: parent, text: normalized },
-      },
-    };
-  } catch {
-    return undefined;
-  }
+		// Reuse the EXACT legacy renderer, including truncation and escaping of
+		// structural task_result/task_error/summary tokens from model output.
+		const normalized = renderV1TaskEnvelopeFromV2({
+			sessionID: child,
+			state,
+			inner: wrapper[3],
+		});
+		return {
+			type: 'message.part.updated',
+			properties: {
+				part: {
+					type: 'text',
+					synthetic: true,
+					sessionID: parent,
+					text: normalized,
+				},
+			},
+		};
+	} catch {
+		return undefined;
+	}
 }
 
 /** Map a v2 event envelope onto the v1 handler input (or undefined). */
 export function mapV2EventToV1(
 	envelope: V2EventEnvelope,
 	lookupToolName?: (sessionID: string, callID: string) => string | undefined,
-	isTrackedNativeChild: (sessionID: string) => boolean = isTrackedNativeChildSession,
+	isTrackedNativeChild: (
+		sessionID: string,
+	) => boolean = isTrackedNativeChildSession,
 ): MappedEvent | undefined {
 	const type = typeof envelope?.type === 'string' ? envelope.type : undefined;
 	if (type === undefined) return undefined;
@@ -360,10 +395,20 @@ export function mapV2EventToV1(
 			// after restart. `superseded` means a replacement turn is running.
 			// Neither is a terminal child result: revocation here would strand
 			// an authorized task and reintroduce SCOPE_BINDING_EXPIRED.
-			if (data.reason === 'superseded' || data.reason === 'shutdown') return undefined;
-			return sessionID && isBoundedId(sessionID) &&
+			if (data.reason === 'superseded' || data.reason === 'shutdown')
+				return undefined;
+			return sessionID &&
+				isBoundedId(sessionID) &&
 				(data.reason === 'user' || data.reason === 'inactivity')
-				? { type: 'session.status', properties: { sessionID, status: { type: 'idle' }, interrupted: true, reason: data.reason } }
+				? {
+						type: 'session.status',
+						properties: {
+							sessionID,
+							status: { type: 'idle' },
+							interrupted: true,
+							reason: data.reason,
+						},
+					}
 				: undefined;
 		case 'session.step.ended':
 		case 'session.step.failed': {
@@ -376,22 +421,45 @@ export function mapV2EventToV1(
 				const stepID = envelope.id;
 				const assistantMessageID = data.assistantMessageID;
 				const tokens = data.tokens;
-				const good = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v >= 0;
-				if (typeof stepID !== 'string' || !isBoundedId(stepID) ||
-					typeof assistantMessageID !== 'string' || !isBoundedId(assistantMessageID) ||
-					!isPlainObject(tokens) || !isPlainObject(tokens.cache) ||
-					!good(data.cost) || !good(tokens.input) || !good(tokens.output) ||
-					!good(tokens.reasoning) || !good(tokens.cache.read) || !good(tokens.cache.write)) return undefined;
-				return { type: 'message.part.updated', properties: {
-					part: { type: 'step-finish', sessionID, assistantMessageID,
-						swarmV2UsageStep: true, swarmV2EventId: stepID,
-						cost: data.cost, tokens: {
-							input: tokens.input, output: tokens.output, reasoning: tokens.reasoning,
-							cache: { read: tokens.cache.read, write: tokens.cache.write },
+				const good = (v: unknown): v is number =>
+					typeof v === 'number' && Number.isFinite(v) && v >= 0;
+				if (
+					typeof stepID !== 'string' ||
+					!isBoundedId(stepID) ||
+					typeof assistantMessageID !== 'string' ||
+					!isBoundedId(assistantMessageID) ||
+					!isPlainObject(tokens) ||
+					!isPlainObject(tokens.cache) ||
+					!good(data.cost) ||
+					!good(tokens.input) ||
+					!good(tokens.output) ||
+					!good(tokens.reasoning) ||
+					!good(tokens.cache.read) ||
+					!good(tokens.cache.write)
+				)
+					return undefined;
+				return {
+					type: 'message.part.updated',
+					properties: {
+						part: {
+							type: 'step-finish',
+							sessionID,
+							assistantMessageID,
+							swarmV2UsageStep: true,
+							swarmV2EventId: stepID,
+							cost: data.cost,
+							tokens: {
+								input: tokens.input,
+								output: tokens.output,
+								reasoning: tokens.reasoning,
+								cache: { read: tokens.cache.read, write: tokens.cache.write },
+							},
 						},
 					},
-				} };
-			} catch { return undefined; }
+				};
+			} catch {
+				return undefined;
+			}
 		}
 		case 'session.idle':
 			return {
@@ -448,14 +516,33 @@ export function mapV2EventToV1(
 				const msg = data.assistantMessageID;
 				const ordinal = data.ordinal;
 				const text = data.text;
-				if (!sessionID || !isBoundedId(sessionID) ||
-					typeof msg !== 'string' || !isBoundedId(msg) ||
-					typeof ordinal !== 'number' || !Number.isSafeInteger(ordinal) ||
-					ordinal < 0 || typeof text !== 'string' || text.length > 131_072) return undefined;
-				return { type: 'message.part.updated', properties: {
-					part: { type: 'text', sessionID, id: `${msg}:${ordinal}`, text, synthetic: false },
-				} };
-			} catch { return undefined; }
+				if (
+					!sessionID ||
+					!isBoundedId(sessionID) ||
+					typeof msg !== 'string' ||
+					!isBoundedId(msg) ||
+					typeof ordinal !== 'number' ||
+					!Number.isSafeInteger(ordinal) ||
+					ordinal < 0 ||
+					typeof text !== 'string' ||
+					text.length > 131_072
+				)
+					return undefined;
+				return {
+					type: 'message.part.updated',
+					properties: {
+						part: {
+							type: 'text',
+							sessionID,
+							id: `${msg}:${ordinal}`,
+							text,
+							synthetic: false,
+						},
+					},
+				};
+			} catch {
+				return undefined;
+			}
 		}
 		case 'session.tool.called':
 		case 'session.tool.success':
@@ -466,20 +553,36 @@ export function mapV2EventToV1(
 			// synthesize an agent completion or child scope activation.
 			try {
 				const callID = data.id;
-				if (!sessionID || !isBoundedId(sessionID) ||
-					typeof callID !== 'string' || !isBoundedId(callID) ||
-					!lookupToolName) return undefined;
+				if (
+					!sessionID ||
+					!isBoundedId(sessionID) ||
+					typeof callID !== 'string' ||
+					!isBoundedId(callID) ||
+					!lookupToolName
+				)
+					return undefined;
 				const tool = lookupToolName(sessionID, callID);
-				if (!tool || tool.length > MAX_TRACKED_TOOL_NAME_CHARS ||
-					isV2SubagentToolId(tool)) return undefined;
-				const status = type === 'session.tool.called' ? 'running'
-					: type === 'session.tool.success' ? 'completed' : 'error';
-				return { type: 'message.part.updated', properties: {
-					part: { type: 'tool', tool, callID, sessionID,
-						state: { status },
+				if (
+					!tool ||
+					tool.length > MAX_TRACKED_TOOL_NAME_CHARS ||
+					isV2SubagentToolId(tool)
+				)
+					return undefined;
+				const status =
+					type === 'session.tool.called'
+						? 'running'
+						: type === 'session.tool.success'
+							? 'completed'
+							: 'error';
+				return {
+					type: 'message.part.updated',
+					properties: {
+						part: { type: 'tool', tool, callID, sessionID, state: { status } },
 					},
-				} };
-			} catch { return undefined; }
+				};
+			} catch {
+				return undefined;
+			}
 		}
 		case 'session.tool.progress': {
 			// Issue #3401: the v2 subagent tool publishes the CHILD session id
@@ -627,13 +730,24 @@ export function startDeferredEventPump(
 				// Host event timestamps: distinguish a slow child from a slow host
 				// tool hook. No prompts, results, filenames, or child content logged.
 				const hostType = envelope.type;
-				if (typeof hostType === 'string' && hostType.startsWith('session.execution.')) {
+				if (
+					typeof hostType === 'string' &&
+					hostType.startsWith('session.execution.')
+				) {
 					const payload = envelopePayload(envelope);
 					if (typeof payload.sessionID === 'string') {
-						const kind = hostType === 'session.execution.succeeded' ? 'execution_succeeded'
-							: hostType === 'session.execution.interrupted' ? 'execution_interrupted'
-							: hostType === 'session.execution.failed' ? 'execution_failed' : 'execution_ignored';
-						recordV2SessionTiming(payload.sessionID, mapped ? kind : 'execution_ignored');
+						const kind =
+							hostType === 'session.execution.succeeded'
+								? 'execution_succeeded'
+								: hostType === 'session.execution.interrupted'
+									? 'execution_interrupted'
+									: hostType === 'session.execution.failed'
+										? 'execution_failed'
+										: 'execution_ignored';
+						recordV2SessionTiming(
+							payload.sessionID,
+							mapped ? kind : 'execution_ignored',
+						);
 					}
 				}
 				if (envelope.type === 'session.tool.progress' && mapped !== undefined) {

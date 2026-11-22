@@ -121,9 +121,13 @@ describe('event fan-out isolation (F5)', () => {
 			),
 		).toBe(true);
 		// The consumer behind it still runs.
-		await dispatchEventConsumerIsolated('after-hang', () => {
-			ran.push('after-hang');
-		}, 1_000);
+		await dispatchEventConsumerIsolated(
+			'after-hang',
+			() => {
+				ran.push('after-hang');
+			},
+			1_000,
+		);
 		expect(ran).toEqual(['after-hang']);
 	});
 
@@ -170,9 +174,7 @@ describe('event fan-out isolation (F5)', () => {
 		await Promise.resolve();
 		// A late SUCCESS is not a failure — no warning beyond the deadline
 		// notice that was already reported at timeout time.
-		expect(
-			getDeferredWarnings().some((w) => w.includes('(late)')),
-		).toBe(false);
+		expect(getDeferredWarnings().some((w) => w.includes('(late)'))).toBe(false);
 	});
 
 	test('P1-4: several events fan out concurrently without serializing on a hung sibling', async () => {

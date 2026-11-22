@@ -172,7 +172,11 @@ describe('background completion observer — shared terminal closeout (F2/F3/F4,
 		// coder_delegated, the reviewer returns the structured APPROVED
 		// verdict. Only a completion whose settlement AND Stage-B ingestion
 		// proved the business outcome may write the success summary.
-		const parent = ensureAgentSession('ses_closeout_parent', 'architect', directory);
+		const parent = ensureAgentSession(
+			'ses_closeout_parent',
+			'architect',
+			directory,
+		);
 		parent.taskWorkflowStates.set('1.1', 'coder_delegated');
 		const generation = await seedStageAPassed(directory, '1.1');
 		await recordPending(directory, {

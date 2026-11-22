@@ -22,7 +22,10 @@ import {
 	lexicalRootAliasKey,
 } from '../utils/canonical-root.js';
 import { canonicalExistingFilesystemPath } from '../utils/filesystem-identity.js';
-import { isBlankDirectory, looksLikeWindowsDrivePath } from '../utils/path-security.js';
+import {
+	isBlankDirectory,
+	looksLikeWindowsDrivePath,
+} from '../utils/path-security.js';
 import { ProjectDbError } from './db-errors.js';
 import { loadDatabaseCtor } from './sqlite-loader.js';
 
