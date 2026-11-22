@@ -14,12 +14,17 @@
  *   transaction runs with `PRAGMA synchronous = FULL` (authoritative state
  *   never inherits the rebuildable-index setting); otherwise NORMAL.
  * - Backpressure: the queue is bounded; overflow forces a synchronous flush
- *   rather than dropping writes.
- * - Failure handling: a `BEGIN IMMEDIATE` busy or a disk-full/read-only
- *   failure keeps the queue intact, classifies the error (`db-errors.ts`),
- *   and coalesces to ONE advisory/telemetry signal per degradation episode
- *   (cooldown); the next flush retries. Ops themselves throwing rolls the
- *   transaction back and rethrows (the enqueuing store decides fail-open).
+ *   attempt BEFORE accepting more work (a failed attempt throws without
+ *   enqueuing the incoming op).
+ * - Failure handling (#3772 truthful rejection): a failed flush — busy,
+ *   disk-full, read-only, or permanent — DROPS its batch, fires every op's
+ *   `onDrop` exactly once, and throws a typed `DbWriteError` (`db-errors.ts`).
+ *   Nothing is retained for automatic reapplication, so an honest caller
+ *   retry can never duplicate a commit; in-tree stores do not re-queue a
+ *   dropped batch (their fail-open arms log the loss). Degradation coalesces
+ *   to ONE advisory/telemetry signal per episode (cooldown). Ops themselves
+ *   throwing roll the transaction back (the enqueuing store decides
+ *   fail-open).
  */
 
 import type { Database } from 'bun:sqlite';
@@ -134,8 +139,12 @@ export class GroupCommitWriter {
 	 * Queue a write op. A synchronous flush runs immediately when the queue
 	 * reaches the flush threshold (backpressure), and again at the hard
 	 * `MAX_QUEUED_OPS` bound. Throws `DbWriteError` from an inline flush
-	 * (threshold or hard bound) when the flush fails — the op is then NOT
-	 * accepted; the caller's fail-open handling owns the loss.
+	 * (threshold or hard bound) when the flush fails. The two arms differ:
+	 * at the HARD bound the incoming op was never pushed (the error carries
+	 * no `droppedAcceptedOp`); at the THRESHOLD the op WAS pushed and the
+	 * dropped batch includes it (its `onDrop` fired and the error is flagged
+	 * `droppedAcceptedOp: true`). Either way the caller's fail-open handling
+	 * owns the loss — nothing is requeued automatically.
 	 */
 	enqueue(op: GroupCommitOp): void {
 		if (this.closed) {
@@ -218,7 +227,7 @@ export class GroupCommitWriter {
 					category === 'busy' ||
 					category === 'disk_full' ||
 					category === 'read_only'
-						? ' — batch dropped, callers own the retry'
+						? ' — batch dropped and reported; in-tree callers do not re-queue'
 						: ''
 				}: ${err instanceof Error ? err.message : String(err)}`,
 			);
@@ -298,11 +307,12 @@ export class GroupCommitWriter {
 		this.lastAdvisoryAt = now;
 		// Bounded advisory — no SQL text, no paths, no payloads. #3772: the
 		// text states the truthful contract — a failed flush DROPS its batch
-		// (every op's onDrop fires) and reports the typed error; callers own
-		// the retry. The pre-#3772 text ("queued writes retry on the next
-		// flush") described the retain-and-reject conflation this fix removed.
+		// (every op's onDrop fires) and reports the typed error; no in-tree
+		// caller re-queues the dropped rows. The pre-#3772 text ("queued
+		// writes retry on the next flush") described the retain-and-reject
+		// conflation this fix removed.
 		warn(
-			`[swarm.db] durable-state writer degraded (category=${category}); failed-flush batches are dropped and reported — callers own the retry`,
+			`[swarm.db] durable-state writer degraded (category=${category}); failed-flush batches are dropped and reported — in-tree callers do not re-queue`,
 		);
 	}
 

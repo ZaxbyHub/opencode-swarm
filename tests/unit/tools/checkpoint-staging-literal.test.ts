@@ -22,9 +22,15 @@ import { canonicalMkdtemp } from '../../helpers/tmpdir';
 let dir: string | undefined;
 
 afterEach(() => {
-	if (dir) fs.rmSync(dir, { recursive: true, force: true });
-	dir = undefined;
-	resetSwarmGitExcludedState();
+	// FB-016 (#3763 feedback round): the module-global reset must run even if
+	// scratch cleanup throws (Windows EBUSY) — otherwise the flag leaks into
+	// sibling suites sharing this Bun process.
+	try {
+		if (dir) fs.rmSync(dir, { recursive: true, force: true });
+	} finally {
+		dir = undefined;
+		resetSwarmGitExcludedState();
+	}
 });
 
 function git(args: string[]): string {
@@ -44,7 +50,10 @@ function loc(rel: string): string {
 
 function fixture(): void {
 	dir = canonicalMkdtemp('ckpt-literal-');
-	git(['init', '-q']);
+	// FB-007 (#3763 feedback round): pin the initial branch explicitly —
+	// `git init` alone follows the host's init.defaultBranch, and the
+	// unmerged-refusal fixture below checks `master` out by name.
+	git(['init', '-q', '-b', 'master']);
 	git(['config', 'user.email', 'test@example.invalid']);
 	git(['config', 'user.name', 'Fixture']);
 	git(['config', 'commit.gpgsign', 'false']);
@@ -191,33 +200,39 @@ describe('checkpoint staging literal + scoped (#3763)', () => {
 		expect(git(['rev-parse', ':.swarm/runtime.json'])).toBe(stagedBlob);
 	}, 30000);
 
-	test('allow_empty_commits=true with only pre-staged .swarm: an empty commit may exist but its tree excludes .swarm and the entry survives', async () => {
+	test('allow_empty_commits=true with only pre-staged .swarm: an empty commit is created and its tree excludes .swarm', async () => {
 		fixture();
 		fs.mkdirSync(path.join(dir, '.opencode'), { recursive: true });
 		fs.writeFileSync(
 			path.join(dir, '.opencode', 'opencode-swarm.json'),
 			JSON.stringify({ checkpoint: { allow_empty_commits: true } }),
 		);
+		// FB-008 round 2: the config MUST be committed into the baseline. Left
+		// untracked it is a non-swarm dirty path, so the HEAD-moved assertion
+		// would pass through the ORDINARY commit arm and leave the allow-empty
+		// arm unpinned (the round-1 reviewer's finding).
+		git(['add', '.opencode/opencode-swarm.json']);
+		git(['commit', '-qm', 'allow-empty config baseline']);
 		fs.mkdirSync(loc('.swarm'), { recursive: true });
 		fs.writeFileSync(loc('.swarm/runtime.json'), 'staged bytes');
 		git(['add', '-f', '.swarm/runtime.json']);
 		const headBefore = git(['rev-parse', 'HEAD']);
+		const treeBefore = git(['rev-parse', 'HEAD^{tree}']);
 		const stagedBlob = git(['rev-parse', ':.swarm/runtime.json']);
 		const result = await save('allow-empty-prestaged');
 		expect(result.success).toBe(true);
 		const headAfter = git(['rev-parse', 'HEAD']);
-		// An empty checkpoint commit MAY be created (allow-empty arm)…
-		expect(['no-commit', 'empty-commit']).toContain(
-			headAfter === headBefore ? 'no-commit' : 'empty-commit',
+		// Deterministic — the scoped probe sees no non-swarm staged work and
+		// the allow-empty arm ALWAYS commits (the pre-fix ternary could never
+		// fail).
+		expect(headAfter).not.toBe(headBefore);
+		// The commit is EMPTY: its tree equals the pre-save tree, so .swarm is
+		// excluded entirely (any committed .swarm entry would change the tree)…
+		expect(git(['rev-parse', `${headAfter}^{tree}`])).toBe(treeBefore);
+		expect(git(['ls-tree', '-r', '--name-only', headAfter])).not.toContain(
+			'.swarm/runtime.json',
 		);
-		if (headAfter !== headBefore) {
-			// …but its tree must exclude .swarm entirely.
-			expect(committedFiles(headAfter)).not.toContain('.swarm/runtime.json');
-			expect(git(['ls-tree', '-r', '--name-only', headAfter])).not.toContain(
-				'.swarm/runtime.json',
-			);
-		}
-		// The staged entry is preserved byte-exactly either way.
+		// …and the staged entry survives byte-exactly.
 		expect(git(['rev-parse', ':.swarm/runtime.json'])).toBe(stagedBlob);
 	}, 30000);
 
@@ -261,19 +276,157 @@ describe('checkpoint staging literal + scoped (#3763)', () => {
 		expect(git(['show', `${result.sha}:renamed.txt`])).toBe('edited');
 	}, 30000);
 
-	test('a staged copy saves cleanly (source untouched, destination staged)', async () => {
+	test('a REAL staged C record (one deletion, two identical adds) parses and saves cleanly (FB-012)', async () => {
 		fixture();
-		// Copies need rename/copy detection on a STAGED pair.
-		git(['config', 'status.renames', 'true']);
-		fs.writeFileSync(loc('sample.txt'), 'edited');
-		git(['add', 'sample.txt']);
-		fs.copyFileSync(loc('sample.txt'), loc('copied.txt'));
-		git(['add', 'copied.txt']);
-		const result = await save('staged-copy');
+		// Ground truth (git 2.54 probe): porcelain emits C records only when
+		// ONE deleted source pairs with TWO identical additions and
+		// `status.renames=copies` is set — two fresh identical adds stay 'A'.
+		// The previous fixture (`status.renames=true`, M+A) never produced a
+		// C record, so the copy branch and its two-token consumption were
+		// unexercised (#3763 feedback round X-F08c).
+		fs.writeFileSync(loc('orig.txt'), 'identical-bytes');
+		git(['add', 'orig.txt']);
+		git(['commit', '-qm', 'add orig']);
+		fs.copyFileSync(loc('orig.txt'), loc('keep1.txt'));
+		fs.copyFileSync(loc('orig.txt'), loc('keep2.txt'));
+		fs.unlinkSync(loc('orig.txt'));
+		git(['config', 'status.renames', 'copies']);
+		git(['add', '-A']);
+		// The index really carries a copy + a rename pair over orig.txt:
+		expect(git(['status', '--porcelain', '-z'])).toContain('C  keep1.txt');
+		const result = await save('staged-copy-c');
 		expect(result.success).toBe(true);
 		const files = committedFiles(String(result.sha));
-		expect(files).toContain('copied.txt');
-		expect(files).toContain('sample.txt');
+		expect(files).toContain('keep1.txt');
+		expect(files).toContain('keep2.txt');
+		// Second tokens (sources) were consumed, not parsed as records.
+		expect(files).not.toContain('orig.txt');
+	}, 30000);
+
+	test('a copy crossing the .swarm boundary refuses the save (FB-012 inbound direction)', async () => {
+		fixture();
+		fs.mkdirSync(loc('.swarm'), { recursive: true });
+		fs.writeFileSync(loc('.swarm/secret.txt'), 'identical-bytes');
+		git(['add', '-f', '.swarm/secret.txt']);
+		git(['commit', '-qm', 'track swarm secret']);
+		fs.copyFileSync(loc('.swarm/secret.txt'), loc('out1.txt'));
+		fs.copyFileSync(loc('.swarm/secret.txt'), loc('out2.txt'));
+		fs.unlinkSync(loc('.swarm/secret.txt'));
+		git(['config', 'status.renames', 'copies']);
+		git(['add', '-f', '-A']);
+		// FB-012 round 2: pin that the refusal fires on a REAL C record whose
+		// SOURCE is inside .swarm — not on a rename-shaped record that would
+		// exercise only the R branch. (Non-z porcelain renders copies as
+		// `C  <src> -> <dst>`.)
+		const porcelain = git(['status', '--porcelain']);
+		expect(porcelain).toMatch(/^C {2}\.swarm\/secret\.txt -> out[12]\.txt$/m);
+		const headBefore = git(['rev-parse', 'HEAD']);
+		const result = await save('cross-copy');
+		expect(result.success).toBe(false);
+		expect(String(result.error)).toContain('.swarm boundary');
+		expect(git(['rev-parse', 'HEAD'])).toBe(headBefore);
+	}, 30000);
+
+	test('subdirectory project root: save stages the subtree and excludes its .swarm (FB-002)', async () => {
+		fixture();
+		fs.mkdirSync(path.join(dir, 'pkg'), { recursive: true });
+		fs.writeFileSync(loc('pkg/a.txt'), 'package work');
+		git(['add', 'pkg/a.txt']);
+		git(['commit', '-qm', 'pkg base']);
+		fs.mkdirSync(path.join(dir, 'pkg', '.opencode'), { recursive: true });
+		fs.mkdirSync(loc('pkg/.swarm'), { recursive: true });
+		fs.writeFileSync(loc('pkg/.swarm/runtime.json'), 'runtime state');
+		fs.writeFileSync(loc('pkg/a.txt'), 'edited in place');
+		const result = await checkpoint.execute(
+			{ action: 'save', label: 'subdir-root' },
+			{
+				directory: path.join(dir, 'pkg'),
+				worktree: path.join(dir, 'pkg'),
+				sessionID: 'subdir-fixture',
+			} as ToolContext,
+		);
+		const parsed = JSON.parse(
+			typeof result === 'string' ? result : result.output,
+		);
+		expect(parsed.success).toBe(true);
+		// Before the fix this died on `fatal: pathspec 'pkg/a.txt' did not
+		// match any files` (porcelain root-relative vs cwd=directory add).
+		const files = git(['show', '--name-only', '--format=', String(parsed.sha)])
+			.split('\n')
+			.map((l) => l.trim())
+			.filter(Boolean);
+		expect(files).toContain('pkg/a.txt');
+		expect(files.some((f) => f.startsWith('pkg/.swarm/'))).toBe(false);
+	}, 30000);
+
+	test('subdirectory project root: restore refuses (parent-repo reset hazard, FB-004)', async () => {
+		fixture();
+		fs.mkdirSync(path.join(dir, 'pkg'), { recursive: true });
+		fs.writeFileSync(loc('pkg/a.txt'), 'v1');
+		git(['add', 'pkg/a.txt']);
+		git(['commit', '-qm', 'pkg base']);
+		fs.mkdirSync(path.join(dir, 'pkg', '.opencode'), { recursive: true });
+		const sub = path.join(dir, 'pkg');
+		const saved = await checkpoint.execute(
+			{ action: 'save', label: 'sub-ckpt' },
+			{
+				directory: sub,
+				worktree: sub,
+				sessionID: 'subdir-fixture',
+			} as ToolContext,
+		);
+		const savedParsed = JSON.parse(
+			typeof saved === 'string' ? saved : saved.output,
+		);
+		expect(savedParsed.success).toBe(true);
+		// Uncommitted work in the PARENT repo must not be destroyed by a
+		// subdirectory restore: the guard refuses before any reset. The
+		// parent file is TRACKED (a reset --hard would revert it) so the
+		// content assertion discriminates the guard, unlike an untracked
+		// file which no reset deletes (critic r1 fix).
+		fs.writeFileSync(loc('parent-tracked.txt'), 'committed parent base');
+		git(['add', 'parent-tracked.txt']);
+		git(['commit', '-qm', 'parent tracked base']);
+		fs.writeFileSync(loc('parent-tracked.txt'), 'DIRTY-PARENT-UNCOMMITTED');
+		const result = await checkpoint.execute(
+			{ action: 'restore', label: 'sub-ckpt' },
+			{
+				directory: sub,
+				worktree: sub,
+				sessionID: 'subdir-fixture',
+			} as ToolContext,
+		);
+		const parsed = JSON.parse(
+			typeof result === 'string' ? result : result.output,
+		);
+		expect(parsed.success).toBe(false);
+		expect(String(parsed.error)).toContain(
+			'not supported from a subdirectory project root yet',
+		);
+		expect(fs.readFileSync(loc('parent-tracked.txt'), 'utf8')).toBe(
+			'DIRTY-PARENT-UNCOMMITTED',
+		);
+	}, 30000);
+
+	test('a project directory whose name contains pathspec metacharacters refuses the save (FB-002 guard)', async () => {
+		fixture();
+		fs.mkdirSync(path.join(dir, 'pk[g]'), { recursive: true });
+		fs.writeFileSync(loc('pk[g]/a.txt'), 'work');
+		git(['add', 'pk[g]/a.txt']);
+		git(['commit', '-qm', 'meta base']);
+		fs.mkdirSync(path.join(dir, 'pk[g]', '.opencode'), { recursive: true });
+		fs.writeFileSync(loc('pk[g]/a.txt'), 'edited');
+		const sub = path.join(dir, 'pk[g]');
+		const result = await checkpoint.execute({ action: 'save', label: 'meta' }, {
+			directory: sub,
+			worktree: sub,
+			sessionID: 'meta-fixture',
+		} as ToolContext);
+		const parsed = JSON.parse(
+			typeof result === 'string' ? result : result.output,
+		);
+		expect(parsed.success).toBe(false);
+		expect(String(parsed.error)).toContain('metacharacters');
 	}, 30000);
 
 	test('a staged rename crossing the .swarm boundary refuses the save before any mutation', async () => {

@@ -53,7 +53,9 @@ function loc(rel: string): string {
 
 function fixture(): void {
 	dir = canonicalMkdtemp('rbrec-');
-	git(['init', '-q']);
+	// FB-007/FB-014 (#3763 feedback round): pin the initial branch — the
+	// unmerged-capture test checks `master` out by name.
+	git(['init', '-q', '-b', 'master']);
 	git(['config', 'user.email', 'test@example.invalid']);
 	git(['config', 'user.name', 'Fixture']);
 	git(['config', 'commit.gpgsign', 'false']);
@@ -134,7 +136,7 @@ describe('rollback recovery backup (#3763)', () => {
 		expect(git(['show', ':sample.txt'])).toBe('work C');
 	}, 30000);
 
-	test('a deletion-only backup with a manifest failure refuses the restore', async () => {
+	test('a deletion-only backup with a manifest failure refuses the restore (FB-010: cause pinned)', async () => {
 		fixture();
 		await call({ action: 'save', label: 'base' });
 		fs.unlinkSync(loc('sample.txt'));
@@ -150,6 +152,10 @@ describe('rollback recovery backup (#3763)', () => {
 			confirm_token: String(preview.confirm_token),
 		});
 		expect(result.success).toBe(false);
+		// FB-010: pin the SPECIFIC fail-closed cause, not just success=false —
+		// an unrelated refusal must not satisfy this oracle.
+		expect(String(result.error)).toContain('recovery capture incomplete');
+		expect(String(result.error)).toContain('failed to write recovery manifest');
 		// The deletion was NOT consumed.
 		expect(fs.existsSync(loc('sample.txt'))).toBe(false);
 	}, 30000);
@@ -176,9 +182,11 @@ describe('rollback recovery backup (#3763)', () => {
 		fixture();
 		fs.mkdirSync(loc('.swarm'), { recursive: true });
 		fs.unlinkSync(loc('sample.txt'));
-		const result = backupTrackedChangesBeforeRollback(dir as string, [
-			'sample.txt',
-		]);
+		const result = backupTrackedChangesBeforeRollback(
+			dir as string,
+			['sample.txt'],
+			{ confirmDeletion: (rel) => gitDeletionSet().has(rel) },
+		);
 		expect(result.backupDir).not.toBeNull();
 		expect(result.recoveryComplete).toBe(true);
 		expect(result.recordedDeletions).toEqual(['sample.txt']);
@@ -191,11 +199,170 @@ describe('rollback recovery backup (#3763)', () => {
 		expect(manifest.entries['sample.txt'].worktree.kind).toBe('deleted');
 	}, 30000);
 
+	// FB-001 (#3763 feedback round): deletions must be git-CONFIRMED. A path
+	// that is simply invisible to fs — e.g. a name corrupted by lossy
+	// non-UTF-8 decoding of porcelain bytes (POSIX class) — must NOT be
+	// recorded as deleted; it flips recoveryComplete and the restore refuses.
+	function gitDeletionSet(): Set<string> {
+		const out = execFileSync(
+			'git',
+			['status', '--porcelain', '-z', '--untracked-files=all'],
+			{
+				cwd: dir as string,
+				encoding: 'utf8',
+				timeout: 15000,
+				maxBuffer: 32768,
+			},
+		);
+		const set = new Set<string>();
+		for (const token of out.split('\0')) {
+			if (!token) continue;
+			const xy = token.slice(0, 2);
+			if (xy[0] === 'D' || xy[1] === 'D') set.add(token.slice(3));
+		}
+		return set;
+	}
+
+	test('an UNCONFIRMED missing path refuses recovery instead of recording a deletion (FB-001)', () => {
+		fixture();
+		fs.mkdirSync(loc('.swarm'), { recursive: true });
+		// 'ghost\uFFFD.txt' imitates a lossy-decoded name: absent from disk
+		// AND from any git deletion record.
+		const result = backupTrackedChangesBeforeRollback(
+			dir as string,
+			['ghost\uFFFD.txt'],
+			{ confirmDeletion: () => false },
+		);
+		expect(result.recoveryComplete).toBe(false);
+		expect(result.recordedDeletions).toEqual([]);
+		expect(
+			result.warnings.some((w) => w.includes('cannot confirm worktree state')),
+		).toBe(true);
+	}, 30000);
+
+	test('copies and confirmed deletions coexist in one honest capture pass', () => {
+		fixture();
+		fs.mkdirSync(loc('.swarm'), { recursive: true });
+		fs.writeFileSync(loc('sample.txt'), 'edited');
+		const mixed = backupTrackedChangesBeforeRollback(
+			dir as string,
+			['sample.txt', 'ghost.txt'],
+			{ confirmDeletion: (rel) => rel === 'ghost.txt' },
+		);
+		expect(mixed.recoveryComplete).toBe(true);
+		expect(mixed.copied).toEqual(['sample.txt']);
+		expect(mixed.recordedDeletions).toEqual(['ghost.txt']);
+	}, 30000);
+
+	test('end-to-end: an unconfirmable dirty path refuses the restore with the cause named (FB-001/FB-010)', async () => {
+		fixture();
+		await call({ action: 'save', label: 'base' });
+		fs.writeFileSync(loc('sample.txt'), 'work C');
+		const realMeasure = checkpointInternals.measureGitDestruction;
+		checkpointInternals.measureGitDestruction = (async (
+			_directory: string,
+			_sha: string,
+		) => ({
+			kind: 'ok' as const,
+			dirtyRelPaths: ['sample.txt', 'ghost\uFFFD.txt'],
+			excludedOutOfRoot: [],
+		})) as typeof realMeasure;
+		try {
+			const preview = await call({ action: 'restore', label: 'base' });
+			expect(preview.requires_confirm).toBe(true);
+			const result = await call({
+				action: 'restore',
+				label: 'base',
+				confirm_token: String(preview.confirm_token),
+			});
+			expect(result.success).toBe(false);
+			expect(String(result.error)).toContain('recovery capture incomplete');
+			expect(String(result.error)).toContain('cannot confirm worktree state');
+			// Nothing destroyed: the working edit survives the refusal.
+			expect(fs.readFileSync(loc('sample.txt'), 'utf8')).toBe('work C');
+		} finally {
+			checkpointInternals.measureGitDestruction = realMeasure;
+		}
+	}, 30000);
+
+	test('end-to-end restore backs up BINARY staged and working bytes exactly (FB-015)', async () => {
+		fixture();
+		const binaryCommitted = Buffer.from([0xde, 0xad, 0x00, 0xbe, 0x01]);
+		fs.writeFileSync(loc('sample.txt'), binaryCommitted);
+		git(['add', 'sample.txt']);
+		git(['commit', '-qm', 'binary base']);
+		const saved = await call({ action: 'save', label: 'bin' });
+		expect(saved.success).toBe(true);
+		// FB-015 round 2: make INDEX, WORKTREE, and CHECKPOINT bytes three
+		// DISTINCT binary blobs — with index==HEAD the old shape could not
+		// tell an honest index capture from a HEAD copy.
+		const binaryStaged = Buffer.from([0x00, 0x80, 0xfe, 0xff, 0x02, 0x00]);
+		fs.writeFileSync(loc('sample.txt'), binaryStaged);
+		git(['add', 'sample.txt']);
+		const binaryWork = Buffer.from([0x01, 0x02, 0x03, 0xf0, 0x0d, 0x00, 0x7f]);
+		fs.writeFileSync(loc('sample.txt'), binaryWork);
+		const preview = await call({ action: 'restore', label: 'bin' });
+		expect(preview.requires_confirm).toBe(true);
+		const result = await call({
+			action: 'restore',
+			label: 'bin',
+			confirm_token: String(preview.confirm_token),
+		});
+		expect(result.success).toBe(true);
+		// backup_dir is absolute (backupTrackedChanges returns absolute paths).
+		const backupDir = String(result.backup_dir);
+		expect(
+			Buffer.compare(
+				fs.readFileSync(path.join(backupDir, 'tracked', 'sample.txt')),
+				binaryWork,
+			),
+		).toBe(0);
+		expect(
+			Buffer.compare(
+				fs.readFileSync(path.join(backupDir, 'index', 'sample.txt')),
+				binaryStaged,
+			),
+		).toBe(0);
+		// The reset applied: working bytes are the checkpoint's committed
+		// content — not the staged bytes and not the destroyed dirty bytes.
+		expect(
+			Buffer.compare(fs.readFileSync(loc('sample.txt')), binaryCommitted),
+		).toBe(0);
+	}, 60000);
+
 	test('an empty dirty set keeps the null-dir behavior', () => {
 		fixture();
 		fs.mkdirSync(loc('.swarm'), { recursive: true });
 		const result = backupTrackedChangesBeforeRollback(dir as string, []);
 		expect(result.backupDir).toBeNull();
 		expect(result.recoveryComplete).toBe(false);
+	}, 30000);
+
+	test('an UNREADABLE (EACCES-class) gitlink worktree entry fails closed — never a covered gitlink (FB-003 round 4)', () => {
+		fixture();
+		fs.mkdirSync(loc('.swarm'), { recursive: true });
+		// Index reports a gitlink; the worktree entry exists but lstat fails
+		// with a non-ENOENT error. Round-3 treated ANY lstat error as absent →
+		// directory-like → covered unbacked; round 4 only ENOENT/ENOTDIR count
+		// as absent, an errored stat fails closed.
+		const eacces = Object.assign(new Error('EACCES: permission denied'), {
+			code: 'EACCES',
+		});
+		const result = backupTrackedChangesBeforeRollback(dir as string, ['mod'], {
+			captureIndexEntry: () => ({
+				mode: '160000',
+				gitlink: true,
+				sha: 'f'.repeat(40),
+			}),
+			confirmDeletion: () => false,
+			lstatImpl: () => {
+				throw eacces;
+			},
+		});
+		expect(result.gitlinkPaths).toEqual([]);
+		expect(result.recoveryComplete).toBe(false);
+		expect(
+			result.warnings.some((w) => w.includes('cannot stat worktree entry')),
+		).toBe(true);
 	}, 30000);
 });

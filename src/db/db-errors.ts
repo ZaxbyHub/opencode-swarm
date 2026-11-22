@@ -36,11 +36,12 @@ export class DbWriteError extends Error {
 
 	/**
 	 * Exactly-once drop accounting marker (#3772): set when the error's
-	 * dropped batch included the throwing `enqueue` call's own just-accepted
-	 * operation — its `onDrop` already fired, so failure-accounting listeners
-	 * (the observability sink) must NOT count it again. Unset when the
-	 * incoming operation was never accepted (pre-push hard-bound flush,
-	 * closed writer): the listener owns that count.
+	 * dropped batch included the throwing `enqueue` call's own operation —
+	 * it was PUSHED, then dropped with the batch, and its `onDrop` already
+	 * fired, so failure-accounting listeners (the observability sink) must
+	 * NOT count it again. Unset when the incoming operation was NEVER
+	 * pushed (pre-push hard-bound flush, closed writer): the listener owns
+	 * that count. Neither arm leaves the operation queued.
 	 */
 	droppedAcceptedOp?: boolean;
 

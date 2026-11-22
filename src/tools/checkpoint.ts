@@ -11,7 +11,11 @@ import {
 	readGitRepositoryStatusDetailedAsync,
 	readGitStatusAsync,
 } from '../commands/git-status-read';
-import { backupTrackedChangesBeforeRollback } from '../commands/reset-backup';
+import {
+	backupTrackedChangesBeforeRollback,
+	isUnsafeDirtyRelPath,
+	sanitizeDiagnosticText,
+} from '../commands/reset-backup';
 import {
 	describeUnreadableCause,
 	formatExcludedRecord,
@@ -55,11 +59,6 @@ const CHECKPOINT_LOCK_MAX_ATTEMPTS = 20;
 const CHECKPOINT_LOCK_DELAY_MS = 250;
 const CHECKPOINT_LOCK_DEADLINE_MS = 45_000;
 const CHECKPOINT_RECEIPT_LOOKUP_LIMIT = 25;
-const NON_SWARM_COMMIT_PATHSPEC = [
-	'.',
-	':(exclude,top).swarm',
-	':(exclude,top).swarm/**',
-] as const;
 
 const SHELL_METACHARACTERS = /[;|&$`(){}<>!'"]/;
 const SAFE_LABEL_PATTERN = /^[a-zA-Z0-9_ -]+$/;
@@ -125,6 +124,13 @@ export const _internals: {
 	readGitRepositoryStatusDetailedAsync: typeof readGitRepositoryStatusDetailedAsync;
 	/** #3763 AC3: staged-state capture seam (tests stub to force failures). */
 	captureIndexEntryForBackup: typeof captureIndexEntryForBackup;
+	/**
+	 * FB-001 (#3763 feedback round): the authoritative porcelain read that
+	 * confirms deletions is a seam so a test can force the lossy/unreadable
+	 * status the restore gate must fail closed on (non-UTF-8 names cannot be
+	 * created on Windows, so the branch is otherwise untestable there).
+	 */
+	statusTokensFatal: typeof statusTokensFatal;
 } = {
 	tryAcquireLock,
 	loadPlan,
@@ -137,6 +143,7 @@ export const _internals: {
 	readGitStatusAsync,
 	readGitRepositoryStatusDetailedAsync,
 	captureIndexEntryForBackup,
+	statusTokensFatal,
 };
 
 function serializeResult(
@@ -353,6 +360,102 @@ function isSwarmRuntimePath(rel: string): boolean {
 }
 
 /**
+ * Project-directory-relative prefix of the repo root's path space
+ * (FB-002, #3763 feedback round). `git status --porcelain` emits paths
+ * relative to the REPO ROOT even when run with `-- .` from a subdirectory
+ * project root (a legitimate nested `.opencode/` root per AGENTS.md #2127),
+ * while `git add`/`commit` below run with `cwd=directory`. Both sides must
+ * speak the same base: the parser strips this prefix from every porcelain
+ * path, and the commit arms re-anchor the `.swarm` exclusion at it.
+ * Returns '' for the ordinary repo-root project, 'pkg/' for a subdirectory
+ * root, and refuses pathspec-metacharacter prefixes fail-closed.
+ */
+function projectRootPrefix(directory: string): string {
+	// The prefix comes from GIT (`rev-parse --show-prefix`), never from
+	// mixing a git-emitted toplevel with the JS-resolved directory: on
+	// Windows CI runners `os.tmpdir()` resolves to the 8.3 short form while
+	// `--show-toplevel` prints the long form, and lexical path math between
+	// the two silently misclassifies every porcelain path (the #3668 FB-026
+	// class). `--show-prefix` is printed by the same git invocation that
+	// prints the porcelain paths, so the base is always consistent: '' at
+	// the repo root, 'pkg/' for a subdirectory project root.
+	// FB-002 (#3763 feedback round): strip ONLY the trailing line terminator.
+	// A `.trim()` would also eat a legitimate leading-space directory name and
+	// desync the prefix from git's porcelain spelling.
+	const raw = gitExec(['rev-parse', '--show-prefix'], directory).replace(
+		/[\r\n]+$/,
+		'',
+	);
+	if (raw === '') return '';
+	const posixRel = raw.replace(/\/+$/, '');
+	// A directory name containing pathspec magic would corrupt the
+	// exclusion patterns — refuse rather than mis-scope.
+	// biome-ignore lint/suspicious/noControlCharactersInRegex: intentional pathspec-metachar containment guard
+	if (/[\\[\]?*]|\.\.|:\(/.test(posixRel)) {
+		throw new Error(
+			'checkpoint refused: the project directory path contains git-pathspec metacharacters — move the project to a plain path',
+		);
+	}
+	return `${posixRel}/`;
+}
+
+/**
+ * One fatal-decoded `git status --porcelain -z` read of the project subtree
+ * (FB-001 save side + X-F03 companion, #3763 feedback round). Reading as a
+ * buffer and decoding with `fatal: true` means a repo-controlled name whose
+ * bytes are not valid UTF-8 (git emits raw bytes on POSIX) REFUSES the
+ * operation instead of arriving as a U+FFFD-corrupted string that could
+ * neither be staged faithfully nor matched against `.swarm`.
+ */
+/**
+ * Commit-arm pathspec scope (#3763 AC2 + FB-002 feedback round): commit only
+ * the project subtree and never let `.swarm` runtime state enter the
+ * checkpoint commit through EITHER commit arm. The exclusion patterns are
+ * re-anchored at the git-provided project prefix so a subdirectory project
+ * root excludes ITS `.swarm` (`:(exclude,top)pkg/.swarm`), while the
+ * repo-root case stays byte-identical to `:(exclude,top).swarm`.
+ */
+function nonSwarmCommitPathspec(directory: string): string[] {
+	const prefix = projectRootPrefix(directory);
+	return [
+		'.',
+		`:(exclude,top)${prefix}.swarm`,
+		`:(exclude,top)${prefix}.swarm/**`,
+	];
+}
+
+function statusTokensFatal(directory: string): string[] {
+	// Transient spawn failures RETRY exactly like every other git call in
+	// this module (runGitBounded); only a committedly unreadable status or a
+	// lossy-decoded name refuses.
+	let raw: Buffer;
+	try {
+		raw = runGitBounded(
+			['status', '--porcelain', '-z', '--untracked-files=all', '--', '.'],
+			directory,
+			'buffer',
+		);
+	} catch (err) {
+		const message = err instanceof Error ? err.message : String(err);
+		if (/ENOBUFS/i.test(message)) {
+			throw new Error(
+				'checkpoint refused: git status output exceeded the 5 MB capture limit (an extremely large dirty tree) — commit or clean files and retry',
+			);
+		}
+		throw new Error(
+			`git status could not be read: ${sanitizeDiagnosticText(message)}`,
+		);
+	}
+	try {
+		return new TextDecoder('utf-8', { fatal: true }).decode(raw).split('\0');
+	} catch {
+		throw new Error(
+			'checkpoint refused: git status reported file names that are not valid UTF-8 — rename or commit them before saving',
+		);
+	}
+}
+
+/**
  * Enumerate dirty paths EXCLUDING `.swarm` runtime state (#3763 AC1/AC2).
  *
  * Parses `git status --porcelain -z --untracked-files=all` as a complete
@@ -364,11 +467,33 @@ function isSwarmRuntimePath(rel: string): boolean {
  * acceptable from an ordinary checkpoint save.
  */
 function listNonSwarmDirtyPaths(directory: string): string[] {
-	const out = _internals.gitExec(
-		['status', '--porcelain', '-z', '--untracked-files=all', '--', '.'],
-		directory,
-	);
-	const tokens = out.split('\0');
+	const tokens = statusTokensFatal(directory);
+	// FB-002 (#3763 feedback round): porcelain paths are repo-ROOT-relative;
+	// add/commit below run with `cwd=directory`. Normalize every path to the
+	// PROJECT base by stripping the git-provided prefix.
+	const prefix = projectRootPrefix(directory);
+	const toProjectRel = (rel: string): string => {
+		if (prefix) {
+			if (!rel.startsWith(prefix)) {
+				// The `-- .` scoping guarantees every record lives under the
+				// project directory; anything else is unparsable state.
+				throw new Error(
+					`checkpoint staging refused: git status reported ${sanitizeDiagnosticText(rel)} outside the project subtree (${sanitizeDiagnosticText(prefix)}…)`,
+				);
+			}
+			rel = rel.slice(prefix.length);
+		}
+		// FB-018 defense-in-depth (round 5): single shared platform-aware
+		// containment predicate — exported sink and staging parser cannot
+		// drift apart (the round-4 mixed-separator hole was the separate
+		// inline copies disagreeing under Windows union splitting).
+		if (isUnsafeDirtyRelPath(rel)) {
+			throw new Error(
+				`checkpoint staging refused: git status reported a path outside the project root (${sanitizeDiagnosticText(rel)})`,
+			);
+		}
+		return rel;
+	};
 	const paths: string[] = [];
 	for (let i = 0; i < tokens.length; i++) {
 		const record = tokens[i];
@@ -381,23 +506,24 @@ function listNonSwarmDirtyPaths(directory: string): string[] {
 		}
 		if (UNMERGED_STATUS.has(xy)) {
 			throw new Error(
-				`checkpoint staging refused: ${record.slice(3)} has unresolved conflicts (${xy}); resolve them before saving a checkpoint`,
+				`checkpoint staging refused: ${sanitizeDiagnosticText(record.slice(3))} has unresolved conflicts (${xy}); resolve them before saving a checkpoint`,
 			);
 		}
-		const to = record.slice(3);
+		const to = toProjectRel(record.slice(3));
 		if (xy[0] === 'R' || xy[0] === 'C' || xy[1] === 'R' || xy[1] === 'C') {
 			const from = tokens[i + 1] ?? '';
 			if (!from) {
 				throw new Error(
-					`checkpoint staging refused: truncated rename/copy record for ${to}`,
+					`checkpoint staging refused: truncated rename/copy record for ${sanitizeDiagnosticText(to)}`,
 				);
 			}
 			i += 1; // consume the source token
+			const fromChecked = toProjectRel(from);
 			const toIsSwarm = isSwarmRuntimePath(to);
-			const fromIsSwarm = isSwarmRuntimePath(from);
+			const fromIsSwarm = isSwarmRuntimePath(fromChecked);
 			if (toIsSwarm !== fromIsSwarm) {
 				throw new Error(
-					`checkpoint staging refused: rename/copy crosses the .swarm boundary (${from} -> ${to}); move or revert it before saving a checkpoint`,
+					`checkpoint staging refused: rename/copy crosses the .swarm boundary (${sanitizeDiagnosticText(fromChecked)} -> ${sanitizeDiagnosticText(to)}); move or revert it before saving a checkpoint`,
 				);
 			}
 			if (!toIsSwarm) {
@@ -429,14 +555,28 @@ function listNonSwarmDirtyPaths(directory: string): string[] {
 	return [...new Set(paths)];
 }
 
-function gitExec(args: string[], cwd: string): string {
+/**
+ * Shared bounded git runner (invariant 3): array-form spawn, explicit cwd,
+ * stdin ignored, timeout, bounded output, transient-retry classification —
+ * the discipline `gitExec` always had, extracted so the buffer-decoded
+ * porcelain read (FB-001) keeps the SAME retry semantics as the string path
+ * instead of failing a save on the first transient ETIMEDOUT (round-2
+ * regression caught by checkpoint.git-failure.test.ts).
+ */
+function runGitBounded(args: string[], cwd: string, encoding: 'utf-8'): string;
+function runGitBounded(args: string[], cwd: string, encoding: 'buffer'): Buffer;
+function runGitBounded(
+	args: string[],
+	cwd: string,
+	encoding: 'utf-8' | 'buffer',
+): string | Buffer {
 	for (let attempt = 0; attempt < MAX_TRANSIENT_RETRIES; attempt++) {
 		const result = child_process.spawnSync(
 			_internals.resolveGitExecutable(),
 			args,
 			{
 				cwd,
-				encoding: 'utf-8',
+				encoding,
 				timeout: GIT_TIMEOUT_MS,
 				stdio: ['ignore', 'pipe', 'pipe'],
 				windowsHide: true,
@@ -480,15 +620,25 @@ function gitExec(args: string[], cwd: string): string {
 		}
 
 		if (result.status === 0) {
-			return result.stdout ?? '';
+			return encoding === 'buffer'
+				? ((result.stdout as Buffer | null) ?? Buffer.alloc(0))
+				: ((result.stdout as string | null) ?? '');
 		}
 
-		throw new Error(
-			result.stderr?.trim() || `git exited with code ${result.status}`,
-		);
+		const stderrText =
+			typeof result.stderr === 'string'
+				? result.stderr.trim()
+				: Buffer.isBuffer(result.stderr)
+					? result.stderr.toString('utf-8').trim()
+					: '';
+		throw new Error(stderrText || `git exited with code ${result.status}`);
 	}
 
 	throw new Error('git command failed after transient retries');
+}
+
+function gitExec(args: string[], cwd: string): string {
+	return runGitBounded(args, cwd, 'utf-8');
 }
 
 function getCurrentSha(directory: string): string {
@@ -506,7 +656,7 @@ function captureIndexEntryForBackup(input: {
 	directory: string;
 	backupDir: string;
 	rel: string;
-}): { mode: string } | null {
+}): { mode: string; gitlink?: boolean; sha?: string } | null {
 	const stageOut = _internals.gitExec(
 		['--literal-pathspecs', 'ls-files', '--stage', '-z', '--', input.rel],
 		input.directory,
@@ -530,35 +680,65 @@ function captureIndexEntryForBackup(input: {
 		);
 	}
 	const { mode, sha } = records[0];
-	// Binary-safe blob capture: `encoding: 'buffer'` keeps arbitrary byte
-	// sequences intact (the string-typed gitExec would corrupt non-UTF-8
-	// staged content — critic round 1 blocker 4).
-	const result = child_process.spawnSync(
-		_internals.resolveGitExecutable(),
-		['cat-file', 'blob', sha],
-		{
-			cwd: input.directory,
-			timeout: GIT_TIMEOUT_MS,
-			maxBuffer: GIT_MAX_BUFFER_BYTES,
-			stdio: ['ignore', 'pipe', 'pipe'],
-			windowsHide: true,
-			encoding: 'buffer',
-		},
-	);
-	if (result.error || result.status !== 0 || !Buffer.isBuffer(result.stdout)) {
+	if (mode === '160000') {
+		// FB-003 (#3763 feedback round): a gitlink (submodule pointer) has no
+		// blob object — `cat-file blob <commit-sha>` exits 128 and used to
+		// refuse the whole restore over a dirty submodule. Record the sha
+		// honestly; the reset restores the pointer itself.
+		return { mode, gitlink: true, sha };
+	}
+	// FB-020: the sha is repo/index-derived data feeding an operand position —
+	// shape-validate it (git emits lowercase hex, but the capture is a sink).
+	if (!/^[0-9a-f]{40,64}$/.test(sha)) {
 		throw new Error(
-			`cat-file capture failed for ${input.rel}@${sha}${
-				result.error
-					? `: ${result.error.message}`
-					: result.status !== 0
-						? ` (exit ${result.status})`
-						: ''
-			}`,
+			`unparsable index blob sha for ${input.rel} — staged-state capture is incomplete`,
 		);
 	}
 	const dest = path.join(input.backupDir, 'index', input.rel);
 	fs.mkdirSync(path.dirname(dest), { recursive: true });
-	fs.writeFileSync(dest, result.stdout);
+	// FB-003: stream the blob STRAIGHT into the destination fd instead of
+	// buffering it through maxBuffer — a staged blob larger than the old 5 MB
+	// pipe cap used to ENOBUFS and refuse the restore of any dirty tree
+	// containing it (#3763 feedback round). Binary-safe by construction (raw
+	// fd write, no decoding — replaces the encoding:'buffer' spawnSync).
+	const fd = fs.openSync(dest, 'w');
+	let captureError: Error | null = null;
+	try {
+		const result = child_process.spawnSync(
+			_internals.resolveGitExecutable(),
+			['cat-file', 'blob', sha],
+			{
+				cwd: input.directory,
+				timeout: GIT_TIMEOUT_MS,
+				maxBuffer: 64 * 1024, // stderr only; stdout flows to the fd
+				stdio: ['ignore', fd, 'pipe'],
+				windowsHide: true,
+				encoding: 'buffer',
+			},
+		);
+		if (result.error || result.status !== 0) {
+			captureError = new Error(
+				`cat-file capture failed for ${input.rel}@${sha}${
+					result.error
+						? `: ${(result.error as NodeJS.ErrnoException).code === 'ENOBUFS' ? 'stderr overflow' : result.error.message}`
+						: result.status !== 0
+							? ` (exit ${result.status})`
+							: ''
+				}`,
+			);
+		}
+	} finally {
+		fs.closeSync(fd);
+	}
+	if (captureError) {
+		// Never leave a half-written staged blob in a backup humans read.
+		try {
+			fs.rmSync(dest, { force: true });
+		} catch {
+			// best-effort
+		}
+		throw captureError;
+	}
 	return { mode };
 }
 
@@ -621,9 +801,9 @@ async function withTaskCompletionLocksResult<T>(input: {
 			}
 			return serializeResult('save_task_completion', {
 				success: false,
-				error: `save_task_completion failed: ${
-					error instanceof Error ? error.message : String(error)
-				}`,
+				error: `save_task_completion failed: ${sanitizeDiagnosticText(
+					error instanceof Error ? error.message : String(error),
+				)}`,
 			}) as T;
 		}
 
@@ -653,9 +833,9 @@ async function withTaskCompletionLocksResult<T>(input: {
 				}
 				return serializeResult('save_task_completion', {
 					success: false,
-					error: `save_task_completion failed: ${
-						error instanceof Error ? error.message : String(error)
-					}`,
+					error: `save_task_completion failed: ${sanitizeDiagnosticText(
+						error instanceof Error ? error.message : String(error),
+					)}`,
 				}) as T;
 			}
 
@@ -678,9 +858,9 @@ async function withTaskCompletionLocksResult<T>(input: {
 				}
 				return serializeResult('save_task_completion', {
 					success: false,
-					error: `save_task_completion failed: ${
-						error instanceof Error ? error.message : String(error)
-					}`,
+					error: `save_task_completion failed: ${sanitizeDiagnosticText(
+						error instanceof Error ? error.message : String(error),
+					)}`,
 				}) as T;
 			} finally {
 				if (checkpointLockResult.lock._release) {
@@ -760,9 +940,9 @@ async function withCheckpointMutationLockResult<T>(input: {
 			}
 			return serializeResult(input.action, {
 				success: false,
-				error: `${input.action} failed: ${
-					error instanceof Error ? error.message : String(error)
-				}`,
+				error: `${input.action} failed: ${sanitizeDiagnosticText(
+					error instanceof Error ? error.message : String(error),
+				)}`,
 			}) as T;
 		}
 
@@ -776,9 +956,9 @@ async function withCheckpointMutationLockResult<T>(input: {
 					}
 					return serializeResult(input.action, {
 						success: false,
-						error: `${input.action} failed: ${
-							error instanceof Error ? error.message : String(error)
-						}`,
+						error: `${input.action} failed: ${sanitizeDiagnosticText(
+							error instanceof Error ? error.message : String(error),
+						)}`,
 					}) as T;
 				}
 			} finally {
@@ -837,10 +1017,13 @@ function handleSave(label: string, directory: string): string {
 		// must neither trigger the "has staged changes" probe nor enter an
 		// ordinary checkpoint commit through EITHER commit arm — the same
 		// pathspec scoping save_task_completion's commit already uses.
+		// FB-002: the exclusion anchors at the git-provided project prefix
+		// so a subdirectory project root excludes ITS .swarm.
+		const commitScope = nonSwarmCommitPathspec(directory);
 		const hasStagedChanges = (() => {
 			try {
 				gitExec(
-					['diff', '--cached', '--quiet', '--', ...NON_SWARM_COMMIT_PATHSPEC],
+					['diff', '--cached', '--quiet', '--', ...commitScope],
 					directory,
 				);
 				return false;
@@ -851,13 +1034,7 @@ function handleSave(label: string, directory: string): string {
 
 		if (hasStagedChanges) {
 			gitExec(
-				[
-					'commit',
-					'-m',
-					`checkpoint: ${label}`,
-					'--',
-					...NON_SWARM_COMMIT_PATHSPEC,
-				],
+				['commit', '-m', `checkpoint: ${label}`, '--', ...commitScope],
 				directory,
 			);
 		} else if (allowEmptyCommits) {
@@ -868,7 +1045,7 @@ function handleSave(label: string, directory: string): string {
 					'-m',
 					`checkpoint: ${label}`,
 					'--',
-					...NON_SWARM_COMMIT_PATHSPEC,
+					...commitScope,
 				],
 				directory,
 			);
@@ -898,7 +1075,7 @@ function handleSave(label: string, directory: string): string {
 			success: false,
 			error:
 				e instanceof Error
-					? `save failed: ${e.message}`
+					? `save failed: ${sanitizeDiagnosticText(e.message)}`
 					: 'save failed: unknown error',
 		});
 	}
@@ -978,7 +1155,10 @@ export async function saveCheckpointRecord(
 		}),
 		onFailure: (error) => ({
 			success: false,
-			error: error instanceof Error ? error.message : 'unknown error',
+			error:
+				error instanceof Error
+					? sanitizeDiagnosticText(error.message)
+					: 'unknown error',
 		}),
 	});
 }
@@ -997,6 +1177,22 @@ async function handleRestore(
 			return serializeResult('restore', {
 				success: false,
 				error: `checkpoint not found: "${label}"`,
+			});
+		}
+
+		// FB-004 (#3763 feedback round, pre-existing hazard X-MN): restoring
+		// from a SUBDIRECTORY project root runs `git reset --hard` against
+		// the PARENT repository — the scope measurement sees no tracked
+		// changes there (a nested root has no real `.git` of its own), so
+		// the reset destroys every uncommitted tracked change in the parent
+		// with no preview, token, or backup. Fail closed until toplevel
+		// measurement lands (follow-up issue): checkpoint restore is only
+		// safe at the repository root.
+		const restorePrefix = projectRootPrefix(directory);
+		if (restorePrefix) {
+			return serializeResult('restore', {
+				success: false,
+				error: `checkpoint restore is not supported from a subdirectory project root yet: ${sanitizeDiagnosticText(directory)} is the subdirectory "${sanitizeDiagnosticText(restorePrefix)}" of a parent repository, where a hard reset would destroy the parent's uncommitted work unbacked. The checkpoint "${sanitizeDiagnosticText(label)}" was saved as a real commit and is recorded under this subdirectory's ${sanitizeDiagnosticText(path.join('.swarm', 'checkpoints.json'))} — to recover it manually, from the repository root first commit or stash the parent's own uncommitted work, then use a SCOPED command that does not move HEAD: git restore --source=<checkpoint-sha> -- ${sanitizeDiagnosticText(restorePrefix)} (add --staged to restore the index too). Do NOT run a bare git reset --hard at the root — it would also discard the parent's later commits and uncommitted work, the very hazard this refusal prevents. Or await durable toplevel measurement (follow-up from PR #3901). Do NOT just rerun the restore from the repository root: that root reads a DIFFERENT checkpoint log and would not find this label.`,
 			});
 		}
 
@@ -1059,7 +1255,7 @@ async function handleRestore(
 					requires_confirm: true,
 					preview: [
 						`Restoring to checkpoint "${label}" runs a hard git reset and would DESTROY ${candidates.length} uncommitted tracked file(s):`,
-						...shown.map((p) => `  - ${p}`),
+						...shown.map((p) => `  - ${sanitizeDiagnosticText(p)}`),
 						...(overflow > 0 ? [`  (+${overflow} more)`] : []),
 						...(exclusionNote ? [`⚠ ${exclusionNote}`] : []),
 						'Backups are taken automatically once confirmed.',
@@ -1081,6 +1277,43 @@ async function handleRestore(
 					error: verdict.reason,
 				});
 			}
+			// FB-001 (#3763 feedback round): deletions are only recorded when
+			// a fresh fatal-decoded porcelain read reports a D in the XY code.
+			// An unreadable/lossy status read confirms NOTHING — every
+			// fs-invisible path then lands uncovered and the gate refuses.
+			const gitDeletions = (() => {
+				try {
+					const set = new Set<string>();
+					const tokens = _internals.statusTokensFatal(directory);
+					for (let i = 0; i < tokens.length; i++) {
+						const token = tokens[i];
+						if (!token) continue;
+						if (token.length < 4 || token.charCodeAt(2) !== 32) {
+							throw new Error('unparsable git status record');
+						}
+						const xy = token.slice(0, 2);
+						if (xy[0] === 'D' || xy[1] === 'D') {
+							set.add(token.slice(3));
+						}
+						if (/[RC]/.test(xy)) {
+							// Two-token record: the DESTINATION exists (it is
+							// backed up as a file), and the SOURCE is absent
+							// from disk with its content living at the
+							// destination — an honest, git-confirmed absence,
+							// covering the #2976 intent-to-add rename shape.
+							const source = tokens[i + 1] ?? '';
+							if (!source) {
+								throw new Error('truncated rename/copy record');
+							}
+							i += 1;
+							set.add(source);
+						}
+					}
+					return set;
+				} catch {
+					return null;
+				}
+			})();
 			const backup = backupTrackedChangesBeforeRollback(
 				directory,
 				measurement.dirtyRelPaths,
@@ -1090,6 +1323,7 @@ async function handleRestore(
 							directory,
 							...input,
 						}),
+					confirmDeletion: (rel) => gitDeletions?.has(rel) ?? false,
 				},
 			);
 			// Fail closed when the safety net is incomplete: a destructive
@@ -1099,30 +1333,48 @@ async function handleRestore(
 			// step (copies, staged-state capture, manifest) reported failure
 			// (#3763 — AC5 generalized: a recovery writer failure refuses
 			// the reset even when the file copies themselves succeeded).
+			// FB-001 (#3763 feedback round): the gate is pure set coverage
+			// against what the backup ACTUALLY captured — a dirty path must
+			// appear in copied (file or symlink bytes) or in the
+			// git-confirmed recordedDeletions. No third `fs.existsSync`
+			// judgment sits between "missing" and "deleted": anything the
+			// backup could not classify is uncovered by construction and the
+			// restore refuses.
 			const copiedSet = new Set(backup.copied);
 			const deletedSet = new Set(backup.recordedDeletions);
-			const atRiskExisting = measurement.dirtyRelPaths.filter((rel) =>
-				fs.existsSync(path.join(directory, rel)),
-			);
-			const uncovered = measurement.dirtyRelPaths.filter((rel) =>
-				fs.existsSync(path.join(directory, rel))
-					? !copiedSet.has(rel)
-					: !deletedSet.has(rel),
+			// FB-003: gitlink (submodule) pointers are honestly covered — no
+			// bytes to copy, no deletion, the reset moves the pointer itself.
+			const gitlinkSet = new Set(backup.gitlinkPaths);
+			const atRiskExisting =
+				measurement.dirtyRelPaths.length - deletedSet.size - gitlinkSet.size;
+			const uncovered = measurement.dirtyRelPaths.filter(
+				(rel) =>
+					!copiedSet.has(rel) && !deletedSet.has(rel) && !gitlinkSet.has(rel),
 			);
 			if (
 				!backup.backupDir ||
 				!backup.recoveryComplete ||
+				gitDeletions === null ||
 				uncovered.length > 0
 			) {
 				return serializeResult('restore', {
 					success: false,
-					error: `backup incomplete (${backup.copied.length}/${atRiskExisting.length} at-risk file(s) copied${
+					error: `backup incomplete (${backup.copied.length}/${atRiskExisting} at-risk file(s) copied${
 						uncovered.length > 0
-							? `, ${uncovered.length} uncovered: ${uncovered.slice(0, 5).join(', ')}${uncovered.length > 5 ? '…' : ''}`
+							? `, ${uncovered.length} uncovered: ${uncovered
+									.slice(0, 5)
+									.map((rel) => sanitizeDiagnosticText(rel))
+									.join(', ')}${uncovered.length > 5 ? '…' : ''}`
 							: ''
-					}${backup.recoveryComplete ? '' : ', recovery capture incomplete'}) — restore refused so nothing is destroyed.${
+					}${
+						backup.recoveryComplete && gitDeletions !== null
+							? ''
+							: gitDeletions === null
+								? ', authoritative git status unreadable for deletion confirmation'
+								: ', recovery capture incomplete'
+					}) — restore refused so nothing is destroyed.${
 						backup.warnings.length > 0
-							? ` Warnings: ${backup.warnings.join('; ')}`
+							? ` Warnings: ${backup.warnings.map((w) => sanitizeDiagnosticText(w)).join('; ')}`
 							: ''
 					}`,
 				});
@@ -1136,15 +1388,19 @@ async function handleRestore(
 				sha: checkpoint.sha,
 				backup_dir: backup.backupDir,
 				...(backup.warnings.length > 0
-					? { backup_warnings: backup.warnings }
+					? {
+							backup_warnings: backup.warnings.map((w) =>
+								sanitizeDiagnosticText(w),
+							),
+						}
 					: {}),
 				message: `Restored to checkpoint: "${label}" (hard reset)${
 					backup.backupDir
-						? `; destroyed bytes backed up to ${path.relative(directory, backup.backupDir)}`
+						? `; destroyed bytes backed up to ${sanitizeDiagnosticText(path.relative(directory, backup.backupDir))}`
 						: ''
 				}${
 					backup.warnings.length > 0
-						? `; warnings: ${backup.warnings.join('; ')}`
+						? `; warnings: ${backup.warnings.map((w) => sanitizeDiagnosticText(w)).join('; ')}`
 						: ''
 				}${
 					// #3442: the confirmed destructive restore carries the
@@ -1176,7 +1432,7 @@ async function handleRestore(
 			success: false,
 			error:
 				e instanceof Error
-					? `restore failed: ${e.message}`
+					? `restore failed: ${sanitizeDiagnosticText(e.message)}`
 					: 'restore failed: unknown error',
 		});
 	}
@@ -1218,7 +1474,7 @@ function handleDelete(label: string, directory: string): string {
 			success: false,
 			error:
 				e instanceof Error
-					? `delete failed: ${e.message}`
+					? `delete failed: ${sanitizeDiagnosticText(e.message)}`
 					: 'delete failed: unknown error',
 		});
 	}
@@ -1247,13 +1503,13 @@ async function handleSaveTaskCompletion(
 			if (!task) {
 				return serializeResult('save_task_completion', {
 					success: false,
-					error: `save_task_completion failed: task "${taskId}" was not found in the current plan`,
+					error: `save_task_completion failed: task "${sanitizeDiagnosticText(taskId)}" was not found in the current plan`,
 				});
 			}
 			if (task.status !== 'completed') {
 				return serializeResult('save_task_completion', {
 					success: false,
-					error: `save_task_completion failed: task "${taskId}" is ${task.status}, not completed`,
+					error: `save_task_completion failed: task "${sanitizeDiagnosticText(taskId)}" is ${sanitizeDiagnosticText(String(task.status))}, not completed`,
 				});
 			}
 			await _internals.afterTaskEligibilityRead?.(directory, task.id);
@@ -1326,7 +1582,7 @@ async function handleSaveTaskCompletion(
 					label: receipt.label,
 					sha: receipt.sha,
 					receipt_state: receipt.state,
-					message: `Checkpoint task completion already logged for "${descriptor.taskId}"`,
+					message: `Checkpoint task completion already logged for "${sanitizeDiagnosticText(descriptor.taskId)}"`,
 				});
 			}
 
@@ -1349,7 +1605,7 @@ async function handleSaveTaskCompletion(
 						'-m',
 						descriptor.subject,
 						'--',
-						...NON_SWARM_COMMIT_PATHSPEC,
+						...nonSwarmCommitPathspec(directory),
 					],
 					directory,
 				);
@@ -1357,7 +1613,7 @@ async function handleSaveTaskCompletion(
 			}
 			if (!committedSha) {
 				throw new Error(
-					`save_task_completion failed: could not resolve commit SHA for task "${descriptor.taskId}"`,
+					`save_task_completion failed: could not resolve commit SHA for task "${sanitizeDiagnosticText(descriptor.taskId)}"`,
 				);
 			}
 
@@ -1392,7 +1648,7 @@ async function handleSaveTaskCompletion(
 				label: logged.label,
 				sha: committedSha,
 				receipt_state: logged.state,
-				message: `Checkpoint task completion saved for "${descriptor.taskId}"`,
+				message: `Checkpoint task completion saved for "${sanitizeDiagnosticText(descriptor.taskId)}"`,
 			});
 		},
 	});
@@ -1444,7 +1700,7 @@ export const checkpoint: ToolDefinition = createSwarmTool({
 					? 'not a git repository'
 					: repoStatus.reason === 'git_unavailable'
 						? 'git executable is not available'
-						: `git probe failed (${repoStatus.message})`;
+						: `git probe failed (${sanitizeDiagnosticText(repoStatus.message ?? '')})`;
 			return serializeResult('unknown', {
 				success: false,
 				error: `${reason} - checkpoint tools require a git repository`,
