@@ -147,6 +147,40 @@ describe('#3773 memory-family merge destination refusal', () => {
 		expect(hasRow(destDb, 'src-row-3773')).toBe(false);
 	});
 
+	test('unreadable schema_migrations refuses AND releases the handle (fail closed, no leak)', async () => {
+		const destDir = path.join(tempDir, 'dest-broken');
+		const srcDir = path.join(tempDir, 'src-broken');
+		const seed = new SQLiteMemoryProvider(destDir);
+		await seed.initialize();
+		seed.close?.();
+		const destDb = path.join(destDir, '.swarm', 'memory', 'memory.db');
+		// Break the version read: schema_migrations exists but its shape makes
+		// SELECT MAX(version) fail (version is not a column).
+		const Db = loadDatabaseCtor();
+		const breaker = new Db(destDb);
+		breaker.run('DROP TABLE schema_migrations');
+		breaker.run('CREATE TABLE schema_migrations (notaversion TEXT)');
+		breaker.close();
+		const src = new SQLiteMemoryProvider(srcDir);
+		await src.initialize();
+		src.close?.();
+
+		let refusal: unknown = null;
+		try {
+			await migrateMemoryFamily(localRoot(destDir), localRoot(srcDir));
+		} catch (error) {
+			refusal = error;
+		}
+		expect(refusal).toBeInstanceOf(Error);
+		// Fail closed: the refusal must not be the newer-schema message with a
+		// fabricated 0 version — it must be the propagated read failure.
+		const message = (refusal as Error).message;
+		expect(message).not.toContain('is newer than this client supports');
+		// Handle released: the DB file is removable immediately after (no
+		// leaked pre-check connection holds it on Windows).
+		expect(() => fs.rmSync(destDb, { force: true })).not.toThrow();
+	});
+
 	test('current-version destination merges the source row (preserving leg)', async () => {
 		const destDir = path.join(tempDir, 'dest-ok');
 		const srcDir = path.join(tempDir, 'src-ok');

@@ -528,22 +528,32 @@ async function mergeStagedSqlite(
 		// table simply does not exist — probe its presence explicitly). Any
 		// OTHER read failure leaves the recorded version UNKNOWN and fails
 		// CLOSED: an unchecked merge into a store we cannot classify is the
-		// exact risk the guard exists to prevent.
+		// exact risk the guard exists to prevent. The pre-check handle is
+		// closed on EVERY exit path (try/finally) so a failed query can never
+		// leak it (R3 review: an untracked live handle on the refusal path
+		// obstructs repair/retry, especially on Windows).
 		let currentVersion = 0;
-		const tablePresent = checkDb
-			.query<{ present: number }, []>(
-				"SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'",
-			)
-			.get();
-		if (tablePresent) {
-			const recorded = checkDb
-				.query<{ version: number | null }, []>(
-					'SELECT MAX(version) as version FROM schema_migrations',
+		try {
+			const tablePresent = checkDb
+				.query<{ present: number }, []>(
+					"SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'",
 				)
 				.get();
-			currentVersion = recorded?.version ?? 0;
+			if (tablePresent) {
+				const recorded = checkDb
+					.query<{ version: number | null }, []>(
+						'SELECT MAX(version) as version FROM schema_migrations',
+					)
+					.get();
+				currentVersion = recorded?.version ?? 0;
+			}
+		} finally {
+			try {
+				checkDb.close();
+			} catch {
+				// Preserve the query failure if close also fails.
+			}
 		}
-		checkDb.close();
 		if (currentVersion > highestSupported) {
 			throw new Error(
 				`memory.db schema version ${currentVersion} is newer than this client supports (${highestSupported}); merge into this destination refused to preserve schema and rows — upgrade opencode-swarm before linking`,
