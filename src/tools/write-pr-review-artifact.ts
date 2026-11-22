@@ -414,14 +414,17 @@ function matchesPersistedFindingsRawIdentity(
 			// incoming payload — otherwise the next identical retry would
 			// read the stale identity as "already persisted", skip the write
 			// and SILENTLY DROP the new content.
-			return (
-				canonicalFindingRecords(storedBoundaryRecords as PersistedFinding[]) ===
-				canonicalFindingRecords(
-					incomingRecords.map((record) =>
-						normalizeFindingForPersistence(record),
-					),
-				)
+			// The persisted rows may be RAW (a pre-#3844 artifact) or
+			// REDACTED (a post-#3844 one), so the rows must correspond to
+			// the incoming payload in whichever form they were stored.
+			const storedCanonical = canonicalFindingRecords(
+				storedBoundaryRecords as PersistedFinding[],
 			);
+			if (storedCanonical === incomingRawCanonical) return true;
+			const incomingRedactedCanonical = canonicalFindingRecords(
+				incomingRecords.map((record) => normalizeFindingForPersistence(record)),
+			);
+			return storedCanonical === incomingRedactedCanonical;
 		} catch {
 			return false; // salt unavailable — fail closed
 		}
