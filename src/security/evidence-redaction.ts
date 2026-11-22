@@ -96,10 +96,11 @@ const EVIDENCE_SCHEME_TOKEN_PATTERN =
  * The training redactor replaces a WHOLE URL, so a `?password=...` (or an
  * Azure SAS `&sig=...`, or an S3 `X-Amz-Signature=...`) is covered there; the
  * evidence path redacts the credential PARAMETER instead of the whole URL, so
- * the parameter names have to be enumerated here.
+ * the parameter names have to be enumerated here — including the
+ * vendor-prefixed ones (`X-Amz-*`, `X-Goog-*`) and the URL FRAGMENT form.
  */
 const URL_QUERY_CREDENTIALS_PATTERN =
-	/([?&])((?:access_token|api_key|apikey|token|secret|password|passwd|credential|signature|sig|client_secret)=)([^\s&'"<>]+)/gi;
+	/([?&#])((?:access_token|api_key|apikey|token|secret|password|passwd|credential|signature|sig|client_secret|x-amz-signature|x-amz-credential|x-amz-security-token|x-goog-signature|x-goog-credential)=)([^\s&'"<>]+)/gi;
 
 const EVIDENCE_BARE_TOKEN_VALUE_PATTERNS: ReadonlyArray<{
 	label: string;

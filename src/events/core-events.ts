@@ -269,7 +269,14 @@ function trimRedactedCarrier(value: string, maxChars: number): string {
 	if (markerStart >= 0) {
 		const tail = cut.slice(markerStart);
 		const head = tail.startsWith('<') ? '<redacted' : '[REDACTED';
-		if (head.startsWith(tail) && !tail.includes(']') && !tail.includes('>')) {
+		// The tail is a fragment when it is a prefix of a marker head OR it
+		// starts with one (a cut inside the head leaves '[RED', or — with a
+		// family suffix — '[REDACTED:git').
+		if (
+			(head.startsWith(tail) || tail.startsWith(head)) &&
+			!tail.includes(']') &&
+			!tail.includes('>')
+		) {
 			cut = cut.slice(0, markerStart);
 		}
 	}

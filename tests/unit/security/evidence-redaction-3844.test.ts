@@ -397,10 +397,16 @@ describe('#3844 the shared redactor is idempotent and covers the training famili
 		for (const url of [
 			'https://example.com/login?user=bob&password=Hunter2Synthetic',
 			'https://example.com/blob?sv=2024&sig=AbCdEf0123456789',
+			'https://example.com/bucket?X-Amz-Signature=Fedcba9876543210',
+			'https://example.com/bucket?X-Amz-Security-Token=Token0123456789',
+			'https://example.com/bucket?X-Goog-Signature=GoogSig0123456789',
 		]) {
 			const out = redactEvidenceText(url);
 			expect(out).not.toContain('Hunter2Synthetic');
 			expect(out).not.toContain('AbCdEf0123456789');
+			expect(out).not.toContain('Fedcba9876543210');
+			expect(out).not.toContain('Token0123456789');
+			expect(out).not.toContain('GoogSig0123456789');
 		}
 	});
 

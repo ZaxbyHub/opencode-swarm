@@ -235,7 +235,11 @@ docs/training-vault-remediation.md.
   location, the evidence references and the structured findings of BOTH
   verdicts. The redaction happens BEFORE the receipt, the finding identity and
   the validation candidates are derived from it, so the persisted receipt and
-  the identity describe the same content.
+  the identity describe the same content. The evidence references are redacted
+  at the receipt boundary, which does not know the review scope's own paths —
+  so a range diff's target-side path is redacted there like any other
+  unresolved path (a cosmetic difference in a display string; nothing reads
+  the field).
 - The evidence path redacts a URL's credential PARAMETERS (`?password=…`, an
   Azure SAS `&sig=…`, an S3 `X-Amz-Signature=…`): the training redactor
   replaces a whole URL, so without the parameter names a URL-embedded

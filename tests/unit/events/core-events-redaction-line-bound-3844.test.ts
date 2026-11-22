@@ -120,6 +120,34 @@ describe('#3844 the core-events writer fits a redacted line to the bound', () =>
 		}
 	}, 60_000);
 
+	test('a cut inside the marker head leaves no fragment', () => {
+		// The credential sits at the END, so the fitter's cut lands inside
+		// the marker the redaction produced.
+		const dir = canonicalMkdtemp('sw-3844-core-events-');
+		try {
+			const base =
+				Buffer.byteLength(`${JSON.stringify(event(''))}\n`, 'utf8') - 1;
+			const detail = `${'y'.repeat(LIMIT - base - USERINFO.length - 8)} ${USERINFO}`;
+			expect(() =>
+				appendCoreEventSync(dir, event(detail) as never),
+			).not.toThrow();
+			const written = fs
+				.readFileSync(path.join(dir, '.swarm', 'events.jsonl'), 'utf-8')
+				.split('\n')
+				.filter((line) => line.trim() !== '')
+				.map((line) => JSON.parse(line) as Record<string, unknown>);
+			const record = written.find(
+				(entry) => (entry.type as string) === 'probe.event',
+			);
+			const persistedDetail = String(record?.detail ?? '');
+			expect(persistedDetail).not.toContain('[REDACTED:ur');
+			expect(persistedDetail).not.toMatch(/\[REDA?C?T?E?D?$/);
+			expect(persistedDetail.endsWith('[')).toBe(false);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	}, 60_000);
+
 	test('an event whose UN-redacted line is over the bound is still refused', () => {
 		const dir = canonicalMkdtemp('sw-3844-core-events-');
 		try {
