@@ -1,6 +1,9 @@
 import type { ToolDefinition } from '@opencode-ai/plugin/tool';
 import { z } from 'zod';
-import { redactEvidenceText } from '../security/evidence-redaction.js';
+import {
+	clampRedactedText,
+	redactEvidenceText,
+} from '../security/evidence-redaction.js';
 
 /**
  * #3844: recursively redact every STRING inside a parsed gh JSON payload
@@ -292,10 +295,15 @@ function sanitizeParsedJson(value: unknown): unknown {
 		const out: Record<string, unknown> = {};
 		for (const [key, entry] of Object.entries(value)) {
 			if (typeof entry === 'string') {
+				// Redact BEFORE bounding. Slicing first can cut a credential in
+				// half, and the surviving prefix can be shorter than the
+				// redactor's family minimum — so it would survive in the
+				// clear in exactly the 20 000-character boundary case.
+				const redacted = redactEvidenceText(entry);
 				const bounded =
-					entry.length > 20_000
-						? `${entry.slice(0, 20_000)}... [truncated]`
-						: entry;
+					redacted.length > 20_000
+						? `${clampRedactedText(redacted, 20_000)}... [truncated]`
+						: redacted;
 				out[key] =
 					key === 'body'
 						? neutralizeUntrustedMarkdown(bounded, 'GitHub body')

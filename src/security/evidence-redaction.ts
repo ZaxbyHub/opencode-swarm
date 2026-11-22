@@ -11,17 +11,51 @@
  * (src/utils/jws-redaction.ts). Unlike the display sanitizer it applies NO
  * 512-byte display bound — evidence keeps its full content budget.
  *
- * Ordering: scanner spans first (they win over any overlapping arm), then
- * context arms (private-key blocks / KV via redactSecrets, URL credentials),
- * then the bare families. Fail-closed: on internal error the text is
- * withheld (placeholder), never returned raw.
+ * Ordering: the scanner spans and the bare credential-family arms are
+ * collected TOGETHER and merged into disjoint ranges, so an overlapping arm
+ * can neither strand a tail nor drop a head (a secret-bearing prefix before
+ * an eyJ run keeps its family label). Then the context arms run over that
+ * placeholder-bearing output: the persisted-store corpus (`redactSecrets`),
+ * the credential PLACEMENT shapes (key/value, quoted-JSON, scheme-prefixed),
+ * and URL credential stripping (userinfo + credential-bearing query).
+ * Fail-closed: on internal error the text is withheld (placeholder), never
+ * returned raw.
  */
 
 import { redactSecrets } from '../memory/redaction';
 import { findRedactableTokenSpans } from '../utils/jws-redaction';
 
+/**
+ * URL userinfo credentials. The scheme is matched GENERICALLY, not just
+ * http/https: a `postgres://`, `mongodb+srv://`, `ssh://` or `redis://`
+ * connection string carries its password in the userinfo the same way, and
+ * the shell site's `[a-zA-Z][a-zA-Z0-9+.-]{0,32}://` is the precedent.
+ */
 const URL_CREDENTIALS_PATTERN =
-	/(\bhttps?:\/\/)([^\s/@:]+):([^\s/@]+)@([^\s'"<>]+)/gi;
+	/(\b[a-zA-Z][a-zA-Z0-9+.-]{0,32}:\/\/)([^\s/@:]+):([^\s/@]+)@([^\s'"<>]+)/gi;
+
+/**
+ * Credential PLACEMENT shapes, mirrored from the training redactor
+ * (src/training/redact.ts) so the evidence path stays a true superset of the
+ * surfaces the training vault already covers. The persisted-store corpus
+ * (`redactSecrets`) only matches a key with a PREFIX_ segment, so an
+ * unprefixed `password=`, `password:`, `{"password": "..."}`, `PASSWORD=`,
+ * `passwd=`, `token=` or `api_key:` survived on the evidence path.
+ */
+const EVIDENCE_CREDENTIAL_KV_PATTERN =
+	/(?:^|[\s,;"'([{])([A-Za-z0-9_ -]{0,40}(?:token|secret|password|passwd|authorization|credential|bearer|api[-_ ]?key|access[-_ ]?key)[A-Za-z0-9_ -]{0,40}\s*[=:]\s*)(?:bearer|basic|digest|negotiate|apikey)?\s*(?:["'][^"'\n]*["']|[^\s,;"'}\]]+)/gi;
+
+/** The quoted-JSON key form the loose key/value pattern cannot bridge. */
+const EVIDENCE_QUOTED_JSON_CREDENTIAL_PATTERN =
+	/(["'])([A-Za-z0-9_ -]{0,40}(?:token|secret|password|passwd|authorization|credential|bearer|api[-_ ]?key|access[-_ ]?key)[A-Za-z0-9_ -]{0,40})\1(\s*:\s*)(["'])([^"'\n]{4,})\4/gi;
+
+/**
+ * A scheme-prefixed token with no key morpheme (`Bearer <token>`). The value
+ * class cannot start at `[`, so an already-inserted placeholder is never
+ * re-matched.
+ */
+const EVIDENCE_SCHEME_TOKEN_PATTERN =
+	/\b(bearer|basic)(\s+)([A-Za-z0-9._~+/=-]{8,})/gi;
 const URL_QUERY_CREDENTIALS_PATTERN =
 	/([?&])((?:access_token|api_key|apikey|token|secret|signature|client_secret)=)([^\s&'"<>]+)/gi;
 
@@ -54,6 +88,8 @@ interface Replacement {
 	start: number;
 	end: number;
 	label: string;
+	/** 'scanner' = the shared JWS scanner; 'bare' = a credential-family arm. */
+	origin: 'scanner' | 'bare';
 }
 
 export interface EvidenceRedactionResult {
@@ -61,40 +97,134 @@ export interface EvidenceRedactionResult {
 	redactions: number;
 }
 
-function redactBareAndScanner(content: string): EvidenceRedactionResult {
-	const planned: Replacement[] = findRedactableTokenSpans(content).map(
-		(span) => ({ start: span.start, end: span.end, label: '[REDACTED:jwt]' }),
+/**
+ * Merge overlapping planned ranges into DISJOINT ranges.
+ *
+ * A credential-family arm and a JWS scanner span can overlap three ways, and
+ * the previous clip policy mishandled two of them:
+ *   - the arm starts BEFORE the scanner span -> the prefix was clipped and
+ *     redacted under the family label (that part was intended);
+ *   - the arm starts INSIDE the scanner span and extends PAST it -> the whole
+ *     arm match was DROPPED, so the tail (the actual secret value) survived;
+ *   - the arm starts INSIDE the scanner span and is SHORTER -> the arm match
+ *     was dropped, and the 12-character floor then dropped the clipped head
+ *     too, so a short family prefix survived in the clear.
+ * The union of two OVERLAPPING credential spans is credential material, so
+ * merging them into one range removes the clip entirely: no stranded tail,
+ * no dropped head, and no duplicate-range corruption (two arms matching the
+ * same text used to push two overlapping ranges, and the reverse splice ate
+ * the first placeholder). Building the output from the merged, disjoint
+ * ranges in ONE pass also removes the per-range string rebuild that made the
+ * pass quadratic in the number of matches.
+ */
+function mergePlannedRanges(raw: Replacement[]): Replacement[] {
+	raw.sort(
+		(a, b) =>
+			a.start - b.start ||
+			b.end - a.end ||
+			(a.origin === b.origin ? 0 : a.origin === 'scanner' ? -1 : 1),
 	);
+	const merged: Replacement[] = [];
+	for (const r of raw) {
+		const last = merged[merged.length - 1];
+		if (last && r.start < last.end) {
+			if (r.end > last.end) last.end = r.end;
+			// A credential-family label is more specific than the scanner's
+			// generic 'jwt' label, so a bare arm wins the merged label.
+			if (last.origin === 'scanner' && r.origin === 'bare') {
+				last.label = r.label;
+				last.origin = 'bare';
+			}
+			continue;
+		}
+		merged.push({ ...r });
+	}
+	return merged;
+}
+
+function redactBareAndScanner(content: string): EvidenceRedactionResult {
+	const raw: Replacement[] = findRedactableTokenSpans(content).map((span) => ({
+		start: span.start,
+		end: span.end,
+		label: '[REDACTED:jwt]',
+		origin: 'scanner',
+	}));
 	for (const arm of EVIDENCE_BARE_TOKEN_VALUE_PATTERNS) {
 		arm.re.lastIndex = 0;
 		for (const match of content.matchAll(arm.re)) {
 			if (!match[0]) continue;
 			if (arm.guard && !arm.guard(match[0])) continue;
 			const start = match.index ?? 0;
-			let end = start + match[0].length;
-			// Overlap policy (#3844 round-5): a bare match overlapping a
-			// scanner span is CLIPPED to its non-overlapping head rather than
-			// dropped — a secret-bearing prefix before an eyJ run keeps its
-			// family label on the covered portion instead of surviving clear.
-			const overlap = planned.find((r) => start < r.end && end > r.start);
-			if (overlap && overlap.start > start) {
-				end = overlap.start;
-			} else if (overlap) {
-				continue;
-			}
-			if (end - start >= 12) {
-				planned.push({ start, end, label: arm.label });
-			}
+			raw.push({
+				start,
+				end: start + match[0].length,
+				label: arm.label,
+				origin: 'bare',
+			});
 		}
 	}
+	const planned = mergePlannedRanges(raw);
 	if (planned.length === 0) return { text: content, redactions: 0 };
-	planned.sort((a, b) => a.start - b.start || b.end - a.end);
-	let text = content;
-	for (let i = planned.length - 1; i >= 0; i -= 1) {
-		const r = planned[i] as Replacement;
-		text = text.slice(0, r.start) + r.label + text.slice(r.end);
+	let text = '';
+	let cursor = 0;
+	for (const r of planned) {
+		text += content.slice(cursor, r.start) + r.label;
+		cursor = r.end;
 	}
+	text += content.slice(cursor);
 	return { text, redactions: planned.length };
+}
+
+/**
+ * Test seam: lets a test make the context-corpus pass throw so the
+ * fail-closed catch path can be exercised. Production defaults unchanged.
+ */
+export const _internals = {
+	redactSecrets,
+};
+
+/**
+ * Clamp a REDACTED free-text field back inside its schema bound.
+ *
+ * A redaction placeholder can be LONGER than the secret it replaces — a
+ * short `?token=abc` value becomes `?token=[REDACTED]` (+7) and a URL
+ * userinfo grows by 23 characters — so a value that sat exactly on its
+ * schema max can be pushed PAST it by the redaction itself. The persisted
+ * artifact would then fail its schema on read (a receipt whose validations
+ * exceed `FindingValidationSchema`'s 2000-character evidence bound reads
+ * back as missing).
+ *
+ * The value is already secret-free at this point, so truncating it is safe.
+ * A trailing PARTIAL placeholder fragment is dropped with it, so the
+ * persisted value never shows half a marker.
+ */
+export function clampRedactedText(value: string, max: number): string {
+	if (value.length <= max) return value;
+	let cut = value.slice(0, max);
+	// A cut can land INSIDE a redaction marker ('[REDACTED]' -> '[RE'). A
+	// half-written marker is not a usable value, so the fragment is dropped
+	// rather than persisted.
+	const square = cut.lastIndexOf('[');
+	if (square !== -1) {
+		const tail = cut.slice(square);
+		if (
+			tail !== '[REDACTED]' &&
+			('[REDACTED'.startsWith(tail) || tail.startsWith('[REDACTED'))
+		) {
+			cut = cut.slice(0, square);
+		}
+	}
+	const angle = cut.lastIndexOf('<');
+	if (angle !== -1) {
+		const tail = cut.slice(angle);
+		if (
+			!tail.endsWith('>') &&
+			('<redacted'.startsWith(tail) || tail.startsWith('<redacted'))
+		) {
+			cut = cut.slice(0, angle);
+		}
+	}
+	return cut;
 }
 
 /**
@@ -116,7 +246,24 @@ export function redactEvidenceText(text: string): string {
 		// Context corpus (private-key blocks, KV shapes, bearer, etc.) runs
 		// over the placeholder-bearing union output — placeholders are inert
 		// for every context arm.
-		working = redactSecrets(working);
+		working = _internals.redactSecrets(working);
+		// Credential PLACEMENT shapes (key/value, quoted-JSON, scheme) — the
+		// persisted-store corpus only matches a PREFIXED key, so these are
+		// ported from the training redactor to keep the evidence path a
+		// superset of the surface the training vault already covers.
+		working = working.replace(
+			EVIDENCE_CREDENTIAL_KV_PATTERN,
+			(_m, prefix: string) => `${prefix}[REDACTED]`,
+		);
+		working = working.replace(
+			EVIDENCE_QUOTED_JSON_CREDENTIAL_PATTERN,
+			(_m, openQuote: string, key: string, sep: string) =>
+				`${openQuote}${key}${openQuote}${sep}${openQuote}[REDACTED]${openQuote}`,
+		);
+		working = working.replace(
+			EVIDENCE_SCHEME_TOKEN_PATTERN,
+			(_m, scheme: string, space: string) => `${scheme}${space}[REDACTED]`,
+		);
 		working = working.replace(
 			URL_CREDENTIALS_PATTERN,
 			(_m, scheme: string, _user: string, _pass: string, host: string) =>

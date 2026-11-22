@@ -40,7 +40,10 @@ import {
 	settleCriticFinding,
 	synthesizePrReviewFindings,
 } from '../pr-review/finding-policy.js';
-import { redactEvidenceText } from '../security/evidence-redaction';
+import {
+	clampRedactedText,
+	redactEvidenceText,
+} from '../security/evidence-redaction';
 import {
 	claimReplayIdentityFingerprint,
 	readReplayIdentityClaim,
@@ -276,15 +279,68 @@ type FindingsBoundary = 'post_explorer' | 'post_reviewer' | 'post_critic';
  * replay-identity sidecar (see matchesPersistedFindingsRawIdentity), so an
  * identical raw retry still dedups and any different raw input still
  * conflicts after redaction.
+ *
+ * `finding_id` stays RAW on purpose: it is the row's identity key and the
+ * reviewer contract matches on it. `next_action` is a z.enum
+ * (PR_REVIEW_FINDING_ACTIONS), so it can never carry credential material.
+ *
+ * The bounds below mirror `PrReviewFindingObjectSchema`
+ * (src/background/pr-review-contract.ts): a redaction placeholder can be
+ * LONGER than the secret it replaces, so the redacted value is clamped back
+ * inside its bound — otherwise the persisted row fails its schema on read.
  */
+const PR_REVIEW_FINDING_EVIDENCE_MAX = 20_000;
+const PR_REVIEW_FINDING_FILE_LINE_MAX = 1_000;
+const PR_REVIEW_FINDING_CATEGORY_MAX = 128;
+const PR_REVIEW_FINDING_PROVENANCE_MAX = 256;
+
+/**
+ * Bounds mirroring `PrReviewHandoffSchema`
+ * (src/background/pr-review-contract.ts).
+ */
+const PR_REVIEW_HANDOFF_SUMMARY_MAX = 20_000;
+const PR_REVIEW_HANDOFF_PR_URL_MAX = 2_000;
+const PR_REVIEW_HANDOFF_PROVENANCE_MAX = 4_000;
 function normalizeFindingForPersistence<
-	T extends { evidence: string; next_action?: string },
+	T extends {
+		evidence: string;
+		next_action?: string;
+		file_line?: string;
+		category?: string;
+		provenance?: string[];
+	},
 >(record: T): T {
 	return {
 		...record,
-		evidence: redactEvidenceText(record.evidence),
-		...(record.next_action !== undefined
-			? { next_action: redactEvidenceText(record.next_action) }
+		evidence: clampRedactedText(
+			redactEvidenceText(record.evidence),
+			PR_REVIEW_FINDING_EVIDENCE_MAX,
+		),
+		...(record.file_line !== undefined
+			? {
+					file_line: clampRedactedText(
+						redactEvidenceText(record.file_line),
+						PR_REVIEW_FINDING_FILE_LINE_MAX,
+					),
+				}
+			: {}),
+		...(record.category !== undefined
+			? {
+					category: clampRedactedText(
+						redactEvidenceText(record.category),
+						PR_REVIEW_FINDING_CATEGORY_MAX,
+					),
+				}
+			: {}),
+		...(record.provenance !== undefined
+			? {
+					provenance: record.provenance.map((entry) =>
+						clampRedactedText(
+							redactEvidenceText(entry),
+							PR_REVIEW_FINDING_PROVENANCE_MAX,
+						),
+					),
+				}
 			: {}),
 	};
 }
@@ -295,15 +351,15 @@ function normalizeFindingForPersistence<
  * post-abort exporter; preserves the row's exact type.
  */
 function redactPersistedFindingForSynthesis<
-	T extends { evidence: string; next_action?: string },
+	T extends {
+		evidence: string;
+		next_action?: string;
+		file_line?: string;
+		category?: string;
+		provenance?: string[];
+	},
 >(row: T): T {
-	return {
-		...row,
-		evidence: redactEvidenceText(row.evidence),
-		...(row.next_action !== undefined
-			? { next_action: redactEvidenceText(row.next_action) }
-			: {}),
-	};
+	return normalizeFindingForPersistence(row);
 }
 
 function findingsIdentityKey(boundary: string): string {
@@ -1261,14 +1317,32 @@ export async function executeWritePrReviewArtifact(
 	// #3844: the persisted handoff carries a REDACTED summary; the raw
 	// summary's identity is kept in the replay sidecar so an identical raw
 	// retry still dedups and a different raw summary still conflicts.
-	const rawHandoffSummary = parsed.data.handoff.summary;
+	const rawHandoff = parsed.data.handoff;
+	const rawHandoffSummary = rawHandoff.summary;
 	const handoffRecord = {
 		schema_version: 1 as const,
 		run_id: resolvedRunId,
 		pr_head_sha: state.prHeadSha,
 		created_at: new Date().toISOString(),
-		...parsed.data.handoff,
-		summary: redactEvidenceText(parsed.data.handoff.summary),
+		...rawHandoff,
+		summary: clampRedactedText(
+			redactEvidenceText(rawHandoff.summary),
+			PR_REVIEW_HANDOFF_SUMMARY_MAX,
+		),
+		// The PR URL and the provenance entries are model-authored free text
+		// as well - a PR URL can carry an access token in its userinfo. They
+		// are redacted for PERSISTENCE while the RAW values keep owning the
+		// replay identity below.
+		pr_url: clampRedactedText(
+			redactEvidenceText(rawHandoff.pr_url),
+			PR_REVIEW_HANDOFF_PR_URL_MAX,
+		),
+		provenance: rawHandoff.provenance.map((entry) =>
+			clampRedactedText(
+				redactEvidenceText(entry),
+				PR_REVIEW_HANDOFF_PROVENANCE_MAX,
+			),
+		),
 	};
 	const comparableHandoff = (record: PersistedHandoff) => ({
 		schema_version: record.schema_version,
@@ -1279,6 +1353,18 @@ export async function executeWritePrReviewArtifact(
 		summary: record.summary,
 		provenance: record.provenance,
 	});
+	// The RAW comparable owns the replay identity. A REDACTED pr_url or
+	// provenance entry would collapse two different raw secrets onto one
+	// placeholder and turn a conflict into a false dedup.
+	const rawHandoffComparable = {
+		schema_version: handoffRecord.schema_version,
+		run_id: handoffRecord.run_id,
+		pr_head_sha: handoffRecord.pr_head_sha,
+		pr_url: rawHandoff.pr_url,
+		finding_ids: handoffRecord.finding_ids,
+		summary: rawHandoffSummary,
+		provenance: rawHandoff.provenance,
+	};
 	const handoffsMatch = (existing: PersistedHandoff): boolean => {
 		// The claim file is the authoritative raw handoff identity for runs
 		// written since #3844 round-5 (create-only: the FIRST writer's
@@ -1305,10 +1391,7 @@ export async function executeWritePrReviewArtifact(
 		}
 		if (sidecarFingerprint !== undefined) {
 			try {
-				const rawComparable = JSON.stringify({
-					...comparableHandoff(handoffRecord),
-					summary: rawHandoffSummary,
-				});
+				const rawComparable = JSON.stringify(rawHandoffComparable);
 				return (
 					replayFingerprint(directory, rawComparable) === sidecarFingerprint
 				);
@@ -1316,12 +1399,10 @@ export async function executeWritePrReviewArtifact(
 				return false; // salt unavailable — fail closed
 			}
 		}
-		const rawIncoming = {
-			...comparableHandoff(handoffRecord),
-			summary: rawHandoffSummary,
-		};
 		const storedComparable = comparableHandoff(existing);
-		return JSON.stringify(storedComparable) === JSON.stringify(rawIncoming);
+		return (
+			JSON.stringify(storedComparable) === JSON.stringify(rawHandoffComparable)
+		);
 	};
 	const readPersistedHandoff = async (): Promise<PersistedHandoff> => {
 		const raw = await readBoundedUtf8File(

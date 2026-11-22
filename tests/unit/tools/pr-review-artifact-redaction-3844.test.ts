@@ -7,6 +7,7 @@
  */
 import { describe, expect, test } from 'bun:test';
 import {
+	existsSync,
 	mkdirSync,
 	mkdtempSync,
 	readFileSync,
@@ -27,6 +28,7 @@ import {
 	replaySidecarPath,
 	writeReplayIdentityFingerprint,
 } from '../../../src/security/replay-identity';
+import { _internals as atomicWriteInternals } from '../../../src/utils/atomic-write';
 
 function freshDir(): string {
 	return realpathSync(mkdtempSync(path.join(os.tmpdir(), 'sw-3844-identity-')));
@@ -40,7 +42,37 @@ describe('#3844 replay identity salt lifecycle (Y2)', () => {
 		expect(second.equals(first)).toBe(true);
 	});
 
+	test('an interrupted salt write leaves NO residue and the next call succeeds', () => {
+		// The salt is published by linking a complete, fsync'd temp file into
+		// place, so a failure during the write never leaves a partial (or
+		// empty) salt at the final path. A writer that opened the final path
+		// first would leave a 0-byte salt that fails the 64-hex check on every
+		// later call - a project-wide wedge needing operator repair.
+		const dir = freshDir();
+		const target = path.join(
+			dir,
+			'.swarm',
+			'pr-review',
+			'replay-identity.salt',
+		);
+		const realWrite = atomicWriteInternals.writeSync;
+		atomicWriteInternals.writeSync = () => {
+			throw Object.assign(new Error('ENOSPC sim'), { code: 'ENOSPC' });
+		};
+		try {
+			expect(() => loadOrCreateReplayIdentitySalt(dir)).toThrow();
+		} finally {
+			atomicWriteInternals.writeSync = realWrite;
+		}
+		expect(existsSync(target)).toBe(false);
+		// No manual repair: the next call publishes a whole salt.
+		const salt = loadOrCreateReplayIdentitySalt(dir);
+		expect(salt.toString('hex')).toMatch(/^[0-9a-f]{64}$/);
+	});
+
 	test('EEXIST race: first read misses, wx collides with a concurrent VALID winner — winner is used', () => {
+		// The salt is published by LINKING a complete, fsync'd temp file into
+		// place, so the final path never exists in a partial state.
 		const dir = freshDir();
 		const winner = 'ab'.repeat(32); // 64-hex valid salt
 		const target = path.join(

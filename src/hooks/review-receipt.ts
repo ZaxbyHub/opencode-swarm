@@ -37,18 +37,41 @@ import type {
 	ReviewFinding,
 } from '../agents/agent-output-schema.js';
 import { resolveRetentionCap } from '../retention/caps.js';
-import { redactEvidenceText } from '../security/evidence-redaction.js';
+import {
+	clampRedactedText,
+	redactEvidenceText,
+} from '../security/evidence-redaction.js';
+
+/**
+ * Schema bounds for the agent-output-derived parts of a receipt. The receipt
+ * reader re-validates these with `FindingValidationSchema` /
+ * `ReviewFindingSchema` (src/agents/agent-output-schema.ts), so a redacted
+ * value must stay inside them.
+ */
+const VALIDATION_EVIDENCE_MAX = 2000;
+const FINDING_TITLE_MAX = 200;
+const FINDING_BODY_MAX = 2000;
 
 /**
  * #3844: redact credential material from the free-text fields of a review
  * receipt BEFORE it reaches the durable store. Deep-clones; the caller's
- * in-memory receipt is untouched. Placeholders preserve every schema bound
- * (non-empty, within max lengths).
+ * in-memory receipt is untouched.
+ *
+ * A redaction placeholder can be LONGER than the secret it replaces, so the
+ * redacted value is clamped back inside its schema bound — otherwise a field
+ * that sat exactly on the bound is pushed past it by the redaction itself
+ * and the persisted receipt fails its schema on read.
  */
 function redactFindingValidationForPersistence(
 	validation: FindingValidation,
 ): FindingValidation {
-	return { ...validation, evidence: redactEvidenceText(validation.evidence) };
+	return {
+		...validation,
+		evidence: clampRedactedText(
+			redactEvidenceText(validation.evidence),
+			VALIDATION_EVIDENCE_MAX,
+		),
+	};
 }
 
 function redactStructuredFindingsForPersistence(
@@ -57,8 +80,11 @@ function redactStructuredFindingsForPersistence(
 	if (findings === undefined) return undefined;
 	return findings.map((finding) => ({
 		...finding,
-		title: redactEvidenceText(finding.title),
-		body: redactEvidenceText(finding.body),
+		title: clampRedactedText(
+			redactEvidenceText(finding.title),
+			FINDING_TITLE_MAX,
+		),
+		body: clampRedactedText(redactEvidenceText(finding.body), FINDING_BODY_MAX),
 	}));
 }
 

@@ -106,24 +106,64 @@ interface Replacement {
 	start: number;
 	end: number;
 	label: string;
+	/** 'scanner' = the shared JWS scanner; 'bare' = a credential-family arm. */
+	origin: 'scanner' | 'bare';
 }
 
 /**
- * Whole-span union pass (#3840): the shared JWS scanner's spans are collected
- * FIRST and win over any overlapping bare-arm match; a bare arm only fires on
- * a span disjoint from every scanner span. Leftmost-longest selection among
- * the remaining candidates; application splices from the end so earlier
- * indices stay valid.
+ * Merge overlapping planned ranges into DISJOINT ranges.
+ *
+ * Same policy as the evidence site (src/security/evidence-redaction.ts): the
+ * union of two OVERLAPPING credential spans is credential material, so
+ * merging them removes the old clip policy's two failures — an arm match
+ * starting inside a scanner span and extending past it used to be DROPPED
+ * whole (stranding the secret tail), and a clipped head shorter than 12
+ * characters used to be dropped as well. Merging also removes the
+ * duplicate-range corruption (two arms matching the same text pushed two
+ * overlapping ranges and the reverse splice ate the first placeholder) and
+ * lets the output be built in ONE pass instead of rebuilding the string per
+ * range (which was quadratic in the number of matches).
+ */
+function mergePlannedRanges(raw: Replacement[]): Replacement[] {
+	raw.sort(
+		(a, b) =>
+			a.start - b.start ||
+			b.end - a.end ||
+			(a.origin === b.origin ? 0 : a.origin === 'scanner' ? -1 : 1),
+	);
+	const merged: Replacement[] = [];
+	for (const r of raw) {
+		const last = merged[merged.length - 1];
+		if (last && r.start < last.end) {
+			if (r.end > last.end) last.end = r.end;
+			// A credential-family label is more specific than the scanner's
+			// generic 'jwt' label, so a bare arm wins the merged label.
+			if (last.origin === 'scanner' && r.origin === 'bare') {
+				last.label = r.label;
+				last.origin = 'bare';
+			}
+			continue;
+		}
+		merged.push({ ...r });
+	}
+	return merged;
+}
+
+/**
+ * Whole-span union pass (#3840): the shared JWS scanner's spans and the bare
+ * credential-family arms are collected together and merged into disjoint
+ * ranges, so no overlapping span can strand a tail or drop a head.
  */
 function redactBareValueShapes(content: string): {
 	text: string;
 	redactions: number;
 } {
 	const scannerSpans = findRedactableTokenSpans(content);
-	const planned: Replacement[] = scannerSpans.map((span) => ({
+	const raw: Replacement[] = scannerSpans.map((span) => ({
 		start: span.start,
 		end: span.end,
 		label: '<redacted:jwt>',
+		origin: 'scanner',
 	}));
 	for (const arm of TRAINING_BARE_TOKEN_VALUE_PATTERNS) {
 		arm.re.lastIndex = 0;
@@ -131,26 +171,23 @@ function redactBareValueShapes(content: string): {
 			if (!match[0]) continue;
 			if (arm.guard && !arm.guard(match[0])) continue;
 			const start = match.index ?? 0;
-			let end = start + match[0].length;
-			// Same clip policy as the evidence site (#3844 round-5).
-			const overlap = planned.find((r) => start < r.end && end > r.start);
-			if (overlap && overlap.start > start) {
-				end = overlap.start;
-			} else if (overlap) {
-				continue;
-			}
-			if (end - start >= 12) {
-				planned.push({ start, end, label: arm.label });
-			}
+			raw.push({
+				start,
+				end: start + match[0].length,
+				label: arm.label,
+				origin: 'bare',
+			});
 		}
 	}
+	const planned = mergePlannedRanges(raw);
 	if (planned.length === 0) return { text: content, redactions: 0 };
-	planned.sort((a, b) => a.start - b.start || b.end - a.end);
-	let text = content;
-	for (let i = planned.length - 1; i >= 0; i -= 1) {
-		const r = planned[i] as Replacement;
-		text = text.slice(0, r.start) + r.label + text.slice(r.end);
+	let text = '';
+	let cursor = 0;
+	for (const r of planned) {
+		text += content.slice(cursor, r.start) + r.label;
+		cursor = r.end;
 	}
+	text += content.slice(cursor);
 	return { text, redactions: planned.length };
 }
 
@@ -159,6 +196,25 @@ export interface RedactionResult {
 	applied: boolean;
 	redactions: number;
 }
+
+/**
+ * The withheld-content marker the fail-closed catch returns.
+ *
+ * A record whose content carries this marker was NOT safely redacted - the
+ * redactor failed internally and withheld the content instead of storing it
+ * raw. Export surfaces treat that as a hard failure (the bundle is not
+ * published) rather than shipping a withheld record as if it were redacted.
+ */
+export const TRAINING_REDACTION_FAILED_PLACEHOLDER =
+	'<redacted:redaction-failed>';
+
+/**
+ * Test seam: lets a test make the bare-value pass throw so the fail-closed
+ * catch path can be exercised. Production defaults unchanged.
+ */
+export const _internals = {
+	redactBareValueShapes,
+};
 
 /**
  * Redact URL, credential-placement, and bare-value credential patterns from
@@ -199,12 +255,12 @@ export function redactTrainingContent(content: string): RedactionResult {
 				return `${scheme}${space}<redacted>`;
 			},
 		);
-		const bare = redactBareValueShapes(working);
+		const bare = _internals.redactBareValueShapes(working);
 		working = bare.text;
 		redactions += bare.redactions;
 	} catch {
 		return {
-			content: '<redacted:redaction-failed>',
+			content: TRAINING_REDACTION_FAILED_PLACEHOLDER,
 			applied: true,
 			redactions: 1,
 		};

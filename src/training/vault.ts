@@ -33,7 +33,11 @@ import {
 	trainingTombstonesPath,
 	trainingVaultRecordsPath,
 } from './paths';
-import { redactTrainingContent, TRAINING_REDACTION_VERSION } from './redact';
+import {
+	type RedactionResult,
+	redactTrainingContent,
+	TRAINING_REDACTION_VERSION,
+} from './redact';
 
 export const TRAINING_VAULT_SCHEMA_VERSION = 1;
 /** Re-exported alias recorded on every vault record (see `./redact.ts`). */
@@ -327,6 +331,9 @@ export const _internals: {
 	appendFile: (target: string, data: string) => void | Promise<void>;
 	readFile: (target: string) => string;
 	now: () => Date;
+	/** Failure-injection seam: lets a test make the current redaction fail so
+	 * the "cannot be safely redacted" export refusal can be exercised. */
+	redactTrainingContent: (content: string) => RedactionResult;
 } = {
 	statfsCheck: checkTrainingDiskFloor,
 	appendFile: (target, data) => {
@@ -334,6 +341,7 @@ export const _internals: {
 	},
 	readFile: (target) => fs.readFileSync(target, 'utf8'),
 	now: () => new Date(Date.now()),
+	redactTrainingContent,
 };
 
 function fileSizeOf(target: string): number {
@@ -610,6 +618,48 @@ export function readTrainingVault(directory: string): VaultRead {
 	return parseVaultText(directory, text, true);
 }
 
+/**
+ * AC5a (owner decision, 2026-11-22): the CURRENT-redaction VIEW of a stored
+ * record — what an OUTPUT surface (preview, display, export) shows.
+ *
+ * The AT-REST bytes are untouched: the record keeps its original content,
+ * digest and redaction.version until the user elects migration. The view
+ * re-redacts the content with the RUNNING redactor, re-slices it to the
+ * content bound (a placeholder can outgrow the span it replaces) and
+ * recomputes the content digest and the record id, because the record id
+ * binds the digest — so the emitted record stays internally consistent.
+ *
+ * A record whose content carries the fail-closed withheld marker was NOT
+ * safely redacted; the export surfaces refuse to publish such a bundle.
+ */
+export function applyCurrentRedactionToRecord(
+	record: TrainingVaultRecord,
+): TrainingVaultRecord {
+	const redacted = _internals.redactTrainingContent(record.content);
+	const content = redacted.content.slice(0, MAX_CONTENT_CHARS);
+	if (
+		content === record.content &&
+		redacted.redactions === record.redaction.redactions
+	) {
+		return record;
+	}
+	const contentDigest = sha256(content);
+	return {
+		...record,
+		content,
+		content_digest: contentDigest,
+		record_id: sha256(
+			`training-record-v1\0${record.lineage.project_ref}\0${record.lineage.session_id}\0${record.kind}\0${record.role}\0${contentDigest}`,
+		),
+		redaction: {
+			...record.redaction,
+			version: TRAINING_REDACTION_VERSION,
+			applied: redacted.applied,
+			redactions: redacted.redactions,
+		},
+	};
+}
+
 /** Current valid + quarantined counts without journaling (status surfaces). */
 export function getTrainingVaultStatus(directory: string): VaultStatus {
 	const target = trainingVaultRecordsPath(directory);
@@ -649,6 +699,12 @@ export function getTrainingVaultStatus(directory: string): VaultStatus {
  * (a future plugin downgraded, or forward-written state); they are not
  * corrupt, so the sweep RETAINS them (#3840 — the read path still quarantines
  * them schema_invalid; only the destructive rewrite spares them).
+ *
+ * The ORIGINAL version must be STRICTLY GREATER than the running one. A
+ * version BELOW the minimum (0, a negative, a fraction) is invalid state,
+ * not a future redactor's record: treating it as a version-only spare would
+ * retain it past its expiry AND exempt it from the append record-count
+ * charge, so it keeps the historical purge-on-sweep class.
  */
 function isVersionOnlyQuarantine(parsed: unknown): boolean {
 	if (typeof parsed !== 'object' || parsed === null) return false;
@@ -656,6 +712,14 @@ function isVersionOnlyQuarantine(parsed: unknown): boolean {
 		redaction?: { version?: unknown };
 	};
 	if (typeof clone.redaction !== 'object' || clone.redaction === null) {
+		return false;
+	}
+	const originalVersion = clone.redaction.version;
+	if (
+		typeof originalVersion !== 'number' ||
+		!Number.isInteger(originalVersion) ||
+		originalVersion <= TRAINING_REDACTION_VERSION
+	) {
 		return false;
 	}
 	clone.redaction.version = TRAINING_REDACTION_VERSION;

@@ -153,11 +153,24 @@ describe('#3840 vault version compatibility', () => {
 			readTrainingVault(${JSON.stringify(d)});
 		`;
 		for (let i = 0; i < 2; i += 1) {
-			await Bun.spawn({
+			const child = Bun.spawn({
 				cmd: [process.execPath, '-e', script],
+				// Explicit cwd, an IGNORED stdin (a never-closed stdin pipe can
+				// block the child from exiting), and bounded output.
+				cwd: d,
+				stdin: 'ignore',
 				stdout: 'ignore',
 				stderr: 'inherit',
-			}).exited;
+			});
+			// Bound the child: a hung reader must not hang the suite.
+			const timer = setTimeout(() => {
+				child.kill();
+			}, 30_000);
+			try {
+				expect(await child.exited).toBe(0);
+			} finally {
+				clearTimeout(timer);
+			}
 		}
 		const journal = readFileSync(trainingQuarantinePath(d), 'utf8');
 		const entries = journal.split('\n').filter((line) => line.length > 0);

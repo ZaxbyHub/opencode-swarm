@@ -1,5 +1,5 @@
 ---
-issue: 3840, 3844, 3701
+issue: 3840, 3844, 3701, 3899
 ---
 
 # Persisted-redaction widening: training vault bare-token families, read-compatible versioning, and evidence/forge boundary redaction
@@ -10,39 +10,51 @@ Two security gaps closed in one delivery. First, the training-content redactor
 (`src/training/redact.ts`) gains the bare well-known credential VALUE families
 (anthropic, openrouter, openai, github, aws, slack, google, groq, jwt, base64
 with the mixed-class guard, azure `AccountKey=`) mirrored from the shell site,
-plus the shared JWS scanner (`src/utils/jws-redaction.ts`) whose spans win over
-overlapping bare arms — a bare provider token in prose no longer reaches the
-persisted training vault. The redaction version moves to 2 with a READ-COMPATIBLE
+plus the shared JWS scanner (`src/utils/jws-redaction.ts`). The scanner spans
+and the bare arms are collected together and MERGED into disjoint ranges, so an
+overlapping arm can neither strand a tail nor drop a head. A bare provider
+token of one of those families, in prose, no longer reaches the persisted
+training vault. The redaction version moves to 2 with a READ-COMPATIBLE
 contract: the vault record schema accepts every version 1..2 (pre-v2 records
 stay valid, exportable, and — because the expiry sweep now RETAINS
 version-only-quarantined lines while purging only expired/malformed/other-invalid
 ones — survive rewrites; the physical byte quota is preflight-exact and counts
 every retained byte). The consent surface treats `redaction_version` as
 informational redactor provenance (the authorization terms are unchanged by a
-redactor bump, so older consents stay valid); the export manifest reports a
-guaranteed-minimum redaction version over the retained set. Second, the review
-and forge evidence boundaries gain a shared superset redactor
-(`src/security/evidence-redaction.ts`: `redactSecrets` ∪ display bare families ∪
-URL-credential stripping ∪ the shared JWS scanner) applied BEFORE durable writes
-and outputs: auto-review evidence, review receipts, the forge event queue (every
-rewrite path), the agent wake message, the subscriber advisory construction
-point, the PR-feedback loop terminal reasons, the gh-evidence tool result, the
-published PR-review submission body, the findings/handoff artifacts (with a
-salted HMAC raw-replay identity sidecar preserving exact-replay semantics after
-redaction), finding-policy synthesis, and the post-abort partial export.
+redactor bump, so older consents stay valid); the export manifest reports the
+SOURCE redaction versions represented by the included records SEPARATELY from
+the floor every emitted record was verified at, every exported record is
+re-redacted by the running redactor (the AT-REST bytes stay as they are until
+the user elects migration), and an export that cannot safely redact a record
+publishes nothing. Second, the review and forge evidence boundaries gain a
+shared superset redactor (`src/security/evidence-redaction.ts`: `redactSecrets`
+∪ display bare families ∪ credential-placement shapes ∪ URL-credential
+stripping ∪ the shared JWS scanner) applied BEFORE durable writes and outputs:
+auto-review evidence, review receipts, the forge event queue (every rewrite
+path), the agent wake message, the subscriber advisory construction point, the
+PR-feedback loop terminal reasons, the gh-evidence tool result, the published
+PR-review submission body, the findings/handoff artifacts (with a salted HMAC
+raw-replay identity sidecar preserving exact-replay semantics after redaction),
+finding-policy synthesis, and the post-abort partial export.
 
-## Semantics decisions (pending final ratification, non-destructive defaults)
+## Semantics decisions (owner-ratified 2026-11-22)
 
-- Consent compatibility: tolerant-read (v1 consents valid under the v2
-  redactor; provenance semantics documented in the consent preview and
-  docs/commands.md).
-- Export manifest: guaranteed-minimum redaction version over the retained
-  post-filter post-dedup set; empty exports stamp the running version.
+- Consent compatibility: tolerant-read (v1 consents stay valid under the v2
+  redactor and capture continues; provenance semantics documented in the
+  consent preview and docs/commands.md). The redaction version is
+  informational provenance, NOT a consent-terms boundary — the terms
+  (purpose, content classes, quotas, retention, expiry) are the authorization
+  surface.
+- Export manifest: the SOURCE redaction versions represented by the included
+  records are reported separately from the floor every emitted record was
+  verified at (the running redactor, because every exported record is
+  re-redacted on output). Empty exports carry the running version.
 - Already-stored v1 content: document-and-retain with a truthful remediation
   runbook (docs/training-vault-remediation.md: already-stored v1,
   append-triggered sweep with no timer guarantee, exports + copy-outside
   before withdrawal, credential ROTATION as the real remedy, downgrade
-  procedure).
+  procedure). The EXPORT path re-redacts legacy records on output; the
+  at-rest record is never rewritten unless the user opts into migration.
 
 ## Safe downgrade (vault)
 
@@ -62,6 +74,18 @@ docs/training-vault-remediation.md.
   condensed-view sweep (two-view fill-tolerance) — same bound as pre-#3882 at
   the memory site; the family corpus and JWS scanner are mirrored, the
   condensed-view machinery is not.
+- The training redactor still does NOT compose the `redactSecrets` floor, so
+  a PEM private-key block and the Stripe (`sk_live_`/`rk_live_`) and GitLab
+  (`glpat-`) families are still stored verbatim by the TRAINING path (the
+  evidence path redacts them). Pre-existing; tracked by the follow-up issue
+  filed with this PR.
+- Two persisted-evidence sinks are still outside the #3844 boundary set: the
+  council evidence writers (`src/tools/write-final-council-evidence.ts`,
+  `src/tools/submit-phase-council-verdicts.ts`) and the task-level council
+  evidence writer (`src/council/council-evidence-writer.ts`). They persist
+  model-authored free text raw. Pre-existing; tracked by the follow-up issue
+  filed with this PR, and the PR body's coverage claim is narrowed to the
+  enumerated boundary set.
 - Legacy pre-fix queue events, receipts, and review artifacts on disk keep
   their historical bytes (future-write redaction only; operator remediation
   = delete stale `.swarm` artifacts if desired).
@@ -72,13 +96,18 @@ docs/training-vault-remediation.md.
 ## Round-5 hardening (plan-critic convergence)
 
 - The pr-review handoff replay identity is now CLAIM-ONCE
-  (`.swarm/pr-review/<runId>/replay-identity.handoff.claim`, create-only
-  `wx`): a concurrent losing writer can no longer overwrite the winner's
-  fingerprint and then validate its own raw summary against it — a foreign
-  claim with different raw content is refused before any artifact bytes.
+  (`.swarm/pr-review/<runId>/replay-identity.handoff.claim`): a concurrent
+  losing writer can no longer overwrite the winner's fingerprint and then
+  validate its own raw summary against it — a foreign claim with different
+  raw content is refused before any artifact bytes. The salt and the claim
+  are published create-only via a temp+fsync+link publication, so the final
+  path never exists in a partial state and an interrupted write leaves no
+  corrupt artifact behind (a bare create-only open did).
 - Retained version-only-quarantined vault lines no longer consume the append
   quota's maxRecords (matching the read-side status accounting); malformed
-  lines still charge it.
+  lines still charge it. Only a record from a STRICTLY NEWER redactor is a
+  version-only spare — a sub-minimum version is invalid state and keeps the
+  historical purge-on-sweep class.
 - The per-project quarantine journal-dedup cache is bounded (16 projects,
   FIFO eviction with journal rehydration) per the bounded-global-state
   invariant.
@@ -99,8 +128,8 @@ sites joined this PR instead of the filed follow-up: completion-verify's
 persisted blocked-task fields (parsed from model-authored plan text), the
 drift/hallucination/mutation evidence summaries (including the drift
 critic-approval snapshot metadata), the core-events writer's free-text
-carriers (detail/message/summary/reason redacted by default, authority
-keys computed on the original event so at-most-once semantics are
+carriers (detail/message/summary/reason/description redacted by default,
+authority keys computed on the original event so at-most-once semantics are
 unchanged), and the gate-evidence passthrough extras (redacted at the
 single persist boundary; the declared structural fields pass verbatim).
 A shared redactEvidenceDeep helper carries the recursive form.

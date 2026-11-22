@@ -8,7 +8,10 @@ import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import * as path from 'node:path';
 import { redactSecrets } from '../../../src/memory/redaction';
-import { redactEvidenceText } from '../../../src/security/evidence-redaction';
+import {
+	_internals,
+	redactEvidenceText,
+} from '../../../src/security/evidence-redaction';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 describe('#3844 redactEvidenceText superset contract', () => {
@@ -60,7 +63,6 @@ describe('#3844 redactEvidenceText superset contract', () => {
 			// SECRET part is absent from both outputs.
 			expect(superset.includes(secret)).toBe(false);
 			expect(baseline.includes(secret)).toBe(false);
-			expect(`${name} fixture handled`).toBe(`${name} fixture handled`);
 		}
 	});
 
@@ -95,6 +97,40 @@ describe('#3844 redactEvidenceText superset contract', () => {
 		const out = redactEvidenceText(`saw ${prefix}${jws} inline`);
 		expect(out.includes(prefix)).toBe(false); // clipped prefix is redacted
 		expect(out.includes(jws)).toBe(false);
+	});
+
+	test('overlap: a credential family arm that starts INSIDE a scanner span does not strand its tail', () => {
+		// The azure AccountKey value is the third segment of an eyJ-shaped run.
+		// The arm match starts inside the scanner span and extends past it, so
+		// a policy that DROPS an overlapping arm match would leave the key
+		// value in the clear.
+		const keyValue = 'Zm9vYmFy+mF6c29tZS1rZXktdmFsdWUtMDAwMDA=';
+		const out = redactEvidenceText(
+			`eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.AccountKey=${keyValue}`,
+		);
+		expect(out).not.toContain(keyValue);
+		expect(out).not.toContain('Zm9vYmFy');
+	});
+
+	test('overlap: a short credential family prefix before a scanner span is redacted', () => {
+		// The prefix is shorter than the old 12-character clip floor, so a
+		// policy that dropped a clipped head would leave it visible.
+		const prefix = 'sk-ant-abc_';
+		const jws = `eyJ${'g'.repeat(30)}.${'p'.repeat(12)}.${'s'.repeat(30)}`;
+		const out = redactEvidenceText(`saw ${prefix}${jws} inline`);
+		expect(out).not.toContain(prefix);
+		expect(out).not.toContain('sk-ant-abc');
+	});
+
+	test('overlap: two arms matching the same text emit ONE placeholder', () => {
+		// The anthropic and openai arms both match this shape. Two overlapping
+		// planned ranges used to be spliced in reverse order, eating the first
+		// placeholder and leaving a malformed marker in the output.
+		const jws = `eyJ${'g'.repeat(30)}.${'p'.repeat(12)}.${'s'.repeat(30)}`;
+		const out = redactEvidenceText(`sk-ant-api03-abcd_${jws}`);
+		expect(out).not.toContain('sk-ant-api03');
+		expect(out).not.toContain('REDACTED:jwt]REDACTED:');
+		expect(out).not.toContain(']REDACTED');
 	});
 
 	test('URL userinfo credentials are stripped, host preserved', () => {
@@ -191,10 +227,27 @@ describe('#3844 redactEvidenceText superset contract', () => {
 		}
 	});
 
-	test('fail-closed: never returns raw on internal error', () => {
-		// Exercise the catch path via a null-prototype string trick is not
-		// possible on a plain string API; assert the contract instead: a
-		// non-string input passes through the guard unchanged.
+	test('empty input passes the guard unchanged', () => {
 		expect(redactEvidenceText('')).toBe('');
+	});
+
+	test('fail-closed: an internal failure withholds the text instead of returning it raw', () => {
+		// The catch path is unreachable through the public API (a plain string
+		// argument cannot make the context corpus throw), so the seam is used
+		// to inject the failure. A variant that returned the RAW text on an
+		// internal error would fail this assertion.
+		const real = _internals.redactSecrets;
+		_internals.redactSecrets = () => {
+			throw new Error('injected context-corpus failure');
+		};
+		try {
+			const out = redactEvidenceText(
+				'credential material that must not survive',
+			);
+			expect(out).toBe('[REDACTED:evidence-redaction-failed]');
+			expect(out).not.toContain('credential material');
+		} finally {
+			_internals.redactSecrets = real;
+		}
 	});
 });

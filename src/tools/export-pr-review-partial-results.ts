@@ -14,7 +14,10 @@ import {
 	type RendererFinding,
 	renderPrReviewSubmissionBody,
 } from '../pr-review/render-review-body.js';
-import { redactEvidenceText } from '../security/evidence-redaction';
+import {
+	clampRedactedText,
+	redactEvidenceText,
+} from '../security/evidence-redaction';
 import { atomicWriteSwarmFile } from '../utils/atomic-write.js';
 import { createSwarmTool } from './create-tool.js';
 
@@ -72,6 +75,17 @@ type ExportRefusalType =
 const POST_ABORT_EXPORT_MAX_BYTES =
 	PR_REVIEW_FINDINGS_MAX_BYTES + 24 * 1024 * 1024;
 const RESERVATION_MAX_BYTES = 16 * 1024;
+
+/**
+ * Bounds mirroring `PrReviewFindingObjectSchema`
+ * (src/background/pr-review-contract.ts) — a redaction placeholder can be
+ * LONGER than the secret it replaces, so the redacted value is clamped back
+ * inside its bound or the exported row fails its schema on read.
+ */
+const PR_REVIEW_FINDING_EVIDENCE_MAX = 20_000;
+const PR_REVIEW_FINDING_FILE_LINE_MAX = 1_000;
+const PR_REVIEW_FINDING_CATEGORY_MAX = 128;
+const PR_REVIEW_FINDING_PROVENANCE_MAX = 256;
 /** The disclosure writer caps the file at 4 KiB (src/pr-review/completion.ts). */
 const DISCLOSURE_MAX_BYTES = 4 * 1024;
 
@@ -891,9 +905,35 @@ export async function executeExportPrReviewPartialResults(
 			const { boundary: lane, pr_head_sha: _boundHead, ...rest } = row;
 			return {
 				...rest,
-				evidence: redactEvidenceText(row.evidence),
-				...(row.next_action !== undefined
-					? { next_action: redactEvidenceText(row.next_action) }
+				evidence: clampRedactedText(
+					redactEvidenceText(row.evidence),
+					PR_REVIEW_FINDING_EVIDENCE_MAX,
+				),
+				...(typeof row.file_line === 'string'
+					? {
+							file_line: clampRedactedText(
+								redactEvidenceText(row.file_line),
+								PR_REVIEW_FINDING_FILE_LINE_MAX,
+							),
+						}
+					: {}),
+				...(typeof row.category === 'string'
+					? {
+							category: clampRedactedText(
+								redactEvidenceText(row.category),
+								PR_REVIEW_FINDING_CATEGORY_MAX,
+							),
+						}
+					: {}),
+				...(Array.isArray(row.provenance)
+					? {
+							provenance: row.provenance.map((entry) =>
+								clampRedactedText(
+									redactEvidenceText(entry),
+									PR_REVIEW_FINDING_PROVENANCE_MAX,
+								),
+							),
+						}
 					: {}),
 				severity: row.severity ?? 'NONE',
 				lane,

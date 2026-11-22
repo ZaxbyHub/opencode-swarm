@@ -6,8 +6,8 @@
  * passthrough extras. Each leg asserts token ABSENCE from the durable
  * artifact plus benign byte-identity. Synthetic tokens only.
  */
-import { describe, expect, test } from 'bun:test';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { afterEach, describe, expect, test } from 'bun:test';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
 import {
 	appendCoreEventSync,
@@ -20,6 +20,27 @@ import { write_hallucination_evidence } from '../../../src/tools/write-hallucina
 import { write_mutation_evidence } from '../../../src/tools/write-mutation-evidence';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
+/** Every temp dir this suite creates, removed after each test so the
+ * fixtures do not accumulate on the host. */
+const createdDirs: string[] = [];
+
+function freshDir(prefix: string): string {
+	const dir = canonicalMkdtemp(prefix);
+	createdDirs.push(dir);
+	return dir;
+}
+
+afterEach(() => {
+	while (createdDirs.length > 0) {
+		const dir = createdDirs.pop() as string;
+		try {
+			rmSync(dir, { recursive: true, force: true });
+		} catch {
+			// best-effort cleanup
+		}
+	}
+});
+
 const TOKEN = `ghp_${'k'.repeat(30)}`;
 const SISTER = `sk-ant-${'m'.repeat(24)}`;
 
@@ -29,7 +50,7 @@ function ctx(directory: string) {
 
 describe('#3844 fold-in: six persisted-evidence boundaries (#3899 AC1-6)', () => {
 	test('AC1: completion-verify persists blocked tasks redacted, result keeps raw', async () => {
-		const dir = canonicalMkdtemp('foldin-3844-cv-');
+		const dir = freshDir('foldin-3844-cv-');
 		const planDir = path.join(dir, '.swarm');
 		mkdirSync(planDir, { recursive: true });
 		writeFileSync(
@@ -70,7 +91,7 @@ describe('#3844 fold-in: six persisted-evidence boundaries (#3899 AC1-6)', () =>
 	}, 60_000);
 
 	test('AC2: drift evidence summary redacted in the durable artifact', async () => {
-		const dir = canonicalMkdtemp('foldin-3844-drift-');
+		const dir = freshDir('foldin-3844-drift-');
 		mkdirSync(path.join(dir, '.swarm'), { recursive: true });
 		const out = (await write_drift_evidence.execute(
 			{
@@ -93,7 +114,7 @@ describe('#3844 fold-in: six persisted-evidence boundaries (#3899 AC1-6)', () =>
 	}, 60_000);
 
 	test('AC3: hallucination evidence summary redacted in the durable artifact', async () => {
-		const dir = canonicalMkdtemp('foldin-3844-hall-');
+		const dir = freshDir('foldin-3844-hall-');
 		mkdirSync(path.join(dir, '.swarm'), { recursive: true });
 		const out = (await write_hallucination_evidence.execute(
 			{
@@ -116,7 +137,7 @@ describe('#3844 fold-in: six persisted-evidence boundaries (#3899 AC1-6)', () =>
 	}, 60_000);
 
 	test('AC4: mutation evidence summary redacted in the durable artifact', async () => {
-		const dir = canonicalMkdtemp('foldin-3844-mut-');
+		const dir = freshDir('foldin-3844-mut-');
 		mkdirSync(path.join(dir, '.swarm'), { recursive: true });
 		const out = (await write_mutation_evidence.execute(
 			{
@@ -139,7 +160,7 @@ describe('#3844 fold-in: six persisted-evidence boundaries (#3899 AC1-6)', () =>
 	}, 60_000);
 
 	test('AC5: core-events writer redacts free-text carriers by default; structure unchanged', () => {
-		const dir = canonicalMkdtemp('foldin-3844-ev-');
+		const dir = freshDir('foldin-3844-ev-');
 		appendCoreEventSync(dir, {
 			type: 'provider_failure',
 			sessionId: 's-1',
@@ -163,7 +184,7 @@ describe('#3844 fold-in: six persisted-evidence boundaries (#3899 AC1-6)', () =>
 	}, 60_000);
 
 	test('AC5: BATCH writer redacts the same carriers; benign batch lines byte-identical; authority dedupe on originals', () => {
-		const dir = canonicalMkdtemp('foldin-3844-evbatch-');
+		const dir = freshDir('foldin-3844-evbatch-');
 		// Round-9 finding leg 1: the batch writer previously serialized raw.
 		appendCoreEventsSync(dir, [
 			{
@@ -232,7 +253,7 @@ describe('#3844 fold-in: six persisted-evidence boundaries (#3899 AC1-6)', () =>
 	}, 60_000);
 
 	test('AC6: gate-evidence passthrough extras redacted at persist; in-memory untouched', async () => {
-		const dir = canonicalMkdtemp('foldin-3844-gate-');
+		const dir = freshDir('foldin-3844-gate-');
 		mkdirSync(path.join(dir, '.swarm', 'evidence'), { recursive: true });
 		await withTaskEvidenceTransaction(dir, '1.1', 'reviewer', async (tx) => {
 			await tx.save({

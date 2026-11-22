@@ -82,6 +82,9 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 			// The any-root variant shares the same writeAtomicSync core and
 			// emits the identical grammar (PR review PRR-018):
 			'src/utils/atomic-write.ts:atomicWriteFileAnyRoot',
+			// The create-only variant emits the identical grammar and
+			// publishes it with link() instead of rename():
+			'src/utils/atomic-write.ts:createExclusiveSwarmFileSync',
 		],
 	},
 	{
@@ -940,6 +943,79 @@ export function atomicWriteSwarmFileSync(
 	options?: AtomicWriteOptions,
 ): void {
 	writeAtomicSync(targetPath, content, options);
+}
+
+/**
+ * CREATE-ONLY atomic write for a durable identity artifact.
+ *
+ * `atomicWriteSwarmFileSync` REPLACES its target, which would break the
+ * first-writer-wins semantics a create-only artifact needs (a replay-identity
+ * salt or claim must never be overwritten by a later writer).
+ *
+ * This variant publishes the content with the SAME canonical temp grammar
+ * (`<target>.<hex32>.tmp`), the same fsync-before-publish discipline and the
+ * same own-temp cleanup — and then HARD-LINKS the temp into place instead of
+ * renaming it. `link()` fails with EEXIST when the target already exists, so
+ * the loser of a race observes the winner's file instead of replacing it, and
+ * a reader never observes a partially written target (the temp is complete and
+ * fsync'd before the link publishes it).
+ *
+ * Returns true when THIS caller created the target, false when the target
+ * already existed (the caller lost the race).
+ */
+export function createExclusiveSwarmFileSync(
+	targetPath: string,
+	content: string | Uint8Array,
+	options?: AtomicWriteOptions,
+): boolean {
+	assertSwarmContainedTarget(targetPath);
+	const resolvedTarget = path.resolve(targetPath);
+	noteRecentWriteActivity(resolvedTarget);
+	const buffer = toBuffer(content);
+	const maxBytes = options?.maxBytes ?? MAX_ATOMIC_WRITE_BYTES;
+	if (buffer.byteLength > maxBytes) {
+		throw new Error(
+			`atomic write exceeds ${maxBytes} byte bound: ${buffer.byteLength}`,
+		);
+	}
+	const tempPath = `${resolvedTarget}.${_internals.randomSuffix()}.tmp`;
+	fs.mkdirSync(path.dirname(tempPath), { recursive: true });
+	try {
+		const fd = fs.openSync(tempPath, 'wx', options?.mode);
+		try {
+			let written = 0;
+			while (written < buffer.byteLength) {
+				written += _internals.writeSync(
+					fd,
+					buffer,
+					written,
+					buffer.byteLength - written,
+				);
+			}
+			if (options?.skipFsync !== true) {
+				try {
+					_internals.fsyncSync(fd);
+				} catch {
+					// fsync unsupported on this FS — durability is best-effort
+				}
+			}
+		} finally {
+			fs.closeSync(fd);
+		}
+		try {
+			fs.linkSync(tempPath, resolvedTarget);
+			return true;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === 'EEXIST') return false;
+			throw error;
+		}
+	} finally {
+		try {
+			fs.rmSync(tempPath, { force: true });
+		} catch {
+			// best-effort own-temp cleanup
+		}
+	}
 }
 
 /**

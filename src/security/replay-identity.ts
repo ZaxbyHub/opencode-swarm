@@ -25,7 +25,10 @@
 import { createHmac, randomBytes } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { atomicWriteSwarmFileSync } from '../utils/atomic-write';
+import {
+	atomicWriteSwarmFileSync,
+	createExclusiveSwarmFileSync,
+} from '../utils/atomic-write';
 
 const DOMAIN = 'swarm-pr-review-replay-identity-v1';
 const SALT_BYTES = 32;
@@ -73,32 +76,34 @@ export function loadOrCreateReplayIdentitySalt(directory: string): Buffer {
 			throw error;
 		}
 	}
-	// First use: create-only. EEXIST (a concurrent first-use writer won) →
-	// read and validate the winner.
+	// First use: create-only. The content is published by LINKING a complete,
+	// fsync'd temp file into place (createExclusiveSwarmFileSync), so the
+	// target path never exists in a partial state: a reader either sees no
+	// file yet or sees the whole salt. A lost race (EEXIST) means a
+	// concurrent first-use writer won, so its salt is read and validated.
 	const salt = randomBytes(SALT_BYTES);
+	let created = false;
 	try {
-		fs.mkdirSync(path.dirname(target), { recursive: true });
-		const fd = fs.openSync(target, 'wx', 0o600);
-		try {
-			fs.writeFileSync(fd, `${salt.toString('hex')}\n`, 'utf8');
-		} finally {
-			fs.closeSync(fd);
-		}
-		return salt;
+		created = createExclusiveSwarmFileSync(
+			target,
+			`${salt.toString('hex')}\n`,
+			{
+				mode: 0o600,
+			},
+		);
 	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
-			throw new ReplayIdentityUnavailableError(
-				`cannot create salt: ${(error as Error).message}`,
-			);
-		}
-		const winner = fs.readFileSync(target, 'utf8').trim();
-		if (!isValidSaltHex(winner)) {
-			throw new ReplayIdentityUnavailableError(
-				'concurrently created salt is corrupt',
-			);
-		}
-		return Buffer.from(winner, 'hex');
+		throw new ReplayIdentityUnavailableError(
+			`cannot create salt: ${(error as Error).message}`,
+		);
 	}
+	if (created) return salt;
+	const winner = _internals.readSaltFileSync(target).trim();
+	if (!isValidSaltHex(winner)) {
+		throw new ReplayIdentityUnavailableError(
+			'concurrently created salt is corrupt',
+		);
+	}
+	return Buffer.from(winner, 'hex');
 }
 
 /**
@@ -274,27 +279,20 @@ export function claimReplayIdentityFingerprint(
 		throw error;
 	}
 	const claimBody = `${fingerprint}\n`;
+	let created = false;
 	try {
-		fs.mkdirSync(path.dirname(target), { recursive: true });
-		const fd = fs.openSync(target, 'wx', 0o600);
-		try {
-			fs.writeFileSync(fd, claimBody, 'utf8');
-		} finally {
-			fs.closeSync(fd);
-		}
-		return { claimed: true, effective: fingerprint };
+		created = createExclusiveSwarmFileSync(target, claimBody, { mode: 0o600 });
 	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
-			throw new ReplayIdentityUnavailableError(
-				`cannot create identity claim: ${(error as Error).message}`,
-			);
-		}
-		const winner = readReplayIdentityClaim(directory, runId, key);
-		if (winner === null) {
-			throw new ReplayIdentityUnavailableError(
-				'identity claim vanished after create race',
-			);
-		}
-		return { claimed: false, effective: winner };
+		throw new ReplayIdentityUnavailableError(
+			`cannot create identity claim: ${(error as Error).message}`,
+		);
 	}
+	if (created) return { claimed: true, effective: fingerprint };
+	const winner = readReplayIdentityClaim(directory, runId, key);
+	if (winner === null) {
+		throw new ReplayIdentityUnavailableError(
+			'identity claim vanished after create race',
+		);
+	}
+	return { claimed: false, effective: winner };
 }

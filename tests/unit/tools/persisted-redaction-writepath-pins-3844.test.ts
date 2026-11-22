@@ -89,6 +89,45 @@ describe('#3844 write-path pins (final-critic round 2)', () => {
 		assertNoTokensUnder(path.join(dir, '.swarm'));
 	}, 60_000);
 
+	test('R2-4: a near-cap validation stays inside its schema bound after redaction', async () => {
+		// A redaction placeholder can be LONGER than the secret it replaces
+		// (`?token=abc` -> `?token=[REDACTED]`), so a value that sat exactly
+		// on FindingValidationSchema's 2000-character evidence bound is
+		// pushed PAST it by the redaction itself - and the persisted receipt
+		// then fails its schema on read (receipt_missing).
+		const dir = canonicalMkdtemp('r2pins-3844-cap-');
+		const nearCap = `${'x'.repeat(2000 - '?token=abc'.length)}?token=abc`;
+		expect(nearCap.length).toBe(2000);
+		const receipt = {
+			schema_version: 1,
+			id: 'rr-cap',
+			receipt_type: 'rejected',
+			verdict: 'rejected',
+			reviewer: { name: 'reviewer', session_id: 's' },
+			reviewed_at: '2026-01-01T00:00:00.000Z',
+			scope_fingerprint: { algorithm: 'sha256', value: '0'.repeat(64) },
+			blocking_findings: [],
+			evidence_references: [],
+			pass_conditions: ['reviewer approves'],
+			finding_validations: [
+				{
+					finding_id: 'f-cap',
+					disposition: 'CONFIRMED',
+					confidence: 1,
+					evidence: nearCap,
+				},
+			],
+		} as never;
+		const receiptPath = await persistReviewReceipt(dir, receipt);
+		const persisted = JSON.parse(readFileSync(receiptPath, 'utf-8'));
+		const evidence = persisted.finding_validations[0].evidence as string;
+		expect(evidence.length).toBeLessThanOrEqual(2000);
+		// The redaction still happened, and the cut never persisted a
+		// half-written placeholder marker.
+		expect(evidence).not.toContain('?token=abc');
+		expect(/\[REDACTED?$/.test(evidence)).toBe(false);
+	}, 60_000);
+
 	test('R2-1: persistAutoReviewEvidence writes the DURABLE evidence redacted', async () => {
 		const dir = canonicalMkdtemp('r2pins-3844-evidence-');
 		const evidence = {

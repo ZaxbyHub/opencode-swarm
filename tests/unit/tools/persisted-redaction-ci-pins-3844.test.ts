@@ -54,6 +54,11 @@ describe('#3844 CI pins: main redaction call sites (final-critic F3)', () => {
 	});
 
 	test('rendered PR review body redacts published interpolation sites (redact-before-truncate)', () => {
+		// The evidence STRADDLES the 400-character singleLine cap: a
+		// truncate-first mutant would cut the token and publish the PREFIX that
+		// survives the cut (14-19 characters of it), so the fixture must place
+		// the token past the cap rather than in a 40-character string.
+		const filler = 'x'.repeat(375);
 		const body = renderPrReviewSubmissionBody({
 			verdict: 'REQUEST_CHANGES',
 			findings: [
@@ -63,13 +68,25 @@ describe('#3844 CI pins: main redaction call sites (final-critic F3)', () => {
 					severity: 'high',
 					confidence: 0.9,
 					file: 'src/a.ts',
+					// A file_line is what reaches the inline-comment site.
+					file_line: 'src/a.ts:12',
 					line_start: 1,
 					line_end: 2,
-					evidence: `evidence quoting ${GH} in prose`,
+					evidence: `${filler} ${GH}`,
 					next_action: 'fix it',
 					effective_severity: 'high',
 					duplicate_count: 1,
 					anchored: true,
+				},
+			],
+			// A suppressed entry reaches the order-unstable site.
+			order_unstable_suppressed: [
+				{
+					finding_id: 'F-2',
+					status: 'confirmed',
+					severity: 'low',
+					file_line: 'src/b.ts:3',
+					evidence: `${filler} ${ANT}`,
 				},
 			],
 			summary: `review summary mentions ${ANT}`,
@@ -77,6 +94,10 @@ describe('#3844 CI pins: main redaction call sites (final-critic F3)', () => {
 		const text = typeof body === 'string' ? body : JSON.stringify(body);
 		expect(text.includes(GH)).toBe(false);
 		expect(text.includes(ANT)).toBe(false);
+		// No token PREFIX may survive: the family prefix is the observable,
+		// not just the full token.
+		expect(text.includes('ghp_')).toBe(false);
+		expect(text.includes('sk-ant-')).toBe(false);
 	});
 
 	test('auto-review evidence capture mutates in place, removing tokens from every prose field', () => {

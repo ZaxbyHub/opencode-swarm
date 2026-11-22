@@ -5,6 +5,7 @@
  */
 import { describe, expect, test } from 'bun:test';
 import {
+	_internals,
 	redactTrainingContent,
 	TRAINING_REDACTION_VERSION,
 } from '../../../src/training/redact';
@@ -75,6 +76,59 @@ describe('#3840 training redaction families', () => {
 		const result = redactTrainingContent(`saw ${glued} inline`);
 		expect(result.content.includes(glued)).toBe(false);
 		expect(result.content).not.toContain(jwt);
+	});
+
+	test('overlap: a credential family arm that starts INSIDE a scanner span does not strand its tail', () => {
+		// The azure AccountKey value is the third segment of an eyJ-shaped run.
+		// The arm match starts inside the scanner span and extends past it, so
+		// a policy that DROPS an overlapping arm match would leave the key
+		// value in the clear.
+		const keyValue = 'Zm9vYmFy+mF6c29tZS1rZXktdmFsdWUtMDAwMDA=';
+		const result = redactTrainingContent(
+			`eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.AccountKey=${keyValue}`,
+		);
+		expect(result.content).not.toContain(keyValue);
+		expect(result.content).not.toContain('Zm9vYmFy');
+	});
+
+	test('overlap: a short credential family prefix before a scanner span is redacted', () => {
+		// The prefix is shorter than the old 12-character clip floor, so a
+		// policy that dropped a clipped head would leave it visible.
+		const prefix = 'sk-ant-abc_';
+		const jws = `eyJ${'g'.repeat(30)}.${'p'.repeat(12)}.${'s'.repeat(30)}`;
+		const result = redactTrainingContent(`saw ${prefix}${jws} inline`);
+		expect(result.content).not.toContain(prefix);
+		expect(result.content).not.toContain('sk-ant-abc');
+	});
+
+	test('overlap: two arms matching the same text emit ONE placeholder', () => {
+		// The anthropic and openai arms both match this shape. Two overlapping
+		// planned ranges used to be spliced in reverse order, eating the first
+		// placeholder and leaving a malformed marker in the output.
+		const jws = `eyJ${'g'.repeat(30)}.${'p'.repeat(12)}.${'s'.repeat(30)}`;
+		const result = redactTrainingContent(`sk-ant-api03-abcd_${jws}`);
+		expect(result.content).not.toContain('sk-ant-api03');
+		expect(result.content).not.toContain('redacted:jwt]REDACTED:');
+		expect(result.content).not.toContain('>REDACTED');
+	});
+
+	test('fail-closed: an internal failure withholds the content instead of storing it raw', () => {
+		// The catch path is unreachable through the public API, so the seam
+		// injects the failure. A variant that returned the RAW content on an
+		// internal error would fail this assertion.
+		const real = _internals.redactBareValueShapes;
+		_internals.redactBareValueShapes = () => {
+			throw new Error('injected bare-value failure');
+		};
+		try {
+			const result = redactTrainingContent(
+				'credential material that must not survive',
+			);
+			expect(result.content).toBe('<redacted:redaction-failed>');
+			expect(result.content).not.toContain('credential material');
+		} finally {
+			_internals.redactBareValueShapes = real;
+		}
 	});
 
 	test('near-misses stay visible (no over-redaction)', () => {
