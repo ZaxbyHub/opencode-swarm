@@ -242,7 +242,11 @@ describe('#3844 FB-008: the handoff replay identity uses ONE comparable', () => 
 			`${tempDir}/.swarm/pr-review/${RUN_ID}/feedback-handoff.json`,
 		).text();
 		expect(persisted).not.toContain(GH);
-		expect(persisted).toContain('[REDACTED]');
+		// The family arm labels the placeholder specifically
+		// ([REDACTED:github]); the round-9 placeholder guard stopped the
+		// query arm from re-matching the family placeholder into the
+		// generic [REDACTED]. Pin the placeholder PREFIX, not one label.
+		expect(persisted).toContain('[REDACTED');
 
 		// The SAME raw payload again: the replay identity must recognise it.
 		const retry = await executeWritePrReviewArtifact(
