@@ -23,15 +23,15 @@ Nothing is silently dropped.
 Run the disposition candidates against the repo's open-issue corpus BEFORE the
 disposition table is published — an ABSORB check is cheap before publishing and
 expensive to retrofit after RECORD rows are live. Sweep the repo's open issues
-(and their bodies, not just titles) for every residual; title match is not
-coverage. Verified 2026-11-22 (ragappv3 PR #1193 retrospective): three
-RECORD-d residuals mapped to OPEN workstream issues only when a user-directed
-pass checked the open-issue corpus after the dispositions were already
-published — the rows had to be re-opened and re-filed as follow-up issues
-(#1201/#1202) instead of pointing at live tracking. When the sweep finds
-coverage, upgrade the row to `ABSORB` and comment on the covering issue with
-the new evidence; when it finds none and the item fails the necessity gate,
-`RECORD` stands.
+and verify coverage against their BODIES, not just titles — title match is not
+coverage. Verified 2026-11-22 (ragappv3 PR #1193 retrospective): a post-publish
+open-issue pass surfaced title-level matches on three workstream issues
+(#1159/#1166/#1155), but body verification showed none covered the residuals,
+so the rows stayed RECORD with those issues named as re-evaluation triggers,
+and the genuinely uncovered residuals were filed fresh as #1201/#1202. When
+the sweep finds genuine body coverage, upgrade the row to `ABSORB` and comment
+on the covering issue with the new evidence; when it finds none and the item
+fails the necessity gate, `RECORD` stands.
 
 In practice `FILE` means Priority items plus items the user approved. Every other item that passes the gate is an Improvement, which is an `ASK`.
 
