@@ -14,6 +14,30 @@ import {
 export const MAX_PENDING_SCOPE_BINDINGS = 256;
 export const DEFAULT_SCOPE_BINDING_TTL_MS = 60 * 60 * 1000;
 export const MAX_SCOPE_BINDING_TOMBSTONES = 256;
+/**
+ * Hard cap on how long a scope binding may occupy the in-memory admission
+ * map, measured from the ORIGINAL declaration and independent of lease
+ * renewal. refreshScopeBindingLease re-sets the in-map entry with an
+ * extended expiresAt on every successful in-scope write, so without a hard
+ * age cap a long-lived plugin process can accumulate renewed entries until
+ * MAX_PENDING_SCOPE_BINDINGS is reached and every admission fails with
+ * SCOPE_BINDING_CAPACITY (declare_scope reports that code; the coder-write
+ * resolution path renders the same failure as
+ * SCOPE_BINDING_STORE_OVERLOADED). A wedge was observed 2026-11-20, but
+ * map saturation is not shown to be its cause; this cap is defensive
+ * hardening for the in-memory map.
+ *
+ * Documented trade-off: a binding is evicted at this cap EVEN WHILE its
+ * lease is renewed. A coder session continuously writing into one declared
+ * scope for over 24 h loses its in-memory admission; writes may then be
+ * denied intermittently (idle revival can re-authorize after a lease lapse),
+ * so the cap does not bound authority lifetime. The remedy for a denial is a
+ * fresh declare_scope (new generation). The cap is
+ * 24x the nominal 1 h TTL and far above the 30 min lane-liveness watchdog,
+ * so no realistic single dispatch reaches it — it bounds a process-lifetime
+ * leak, not ordinary work.
+ */
+export const MAX_SCOPE_BINDING_AGE_MS = 24 * 60 * 60 * 1000;
 
 export type ScopeBindingLifecycleState =
 	| 'live'
@@ -190,7 +214,10 @@ export function createScopeBinding(input: {
 
 function sweepExpired(now = Date.now()): void {
 	for (const [key, binding] of pendingScopeBindings) {
-		if (binding.expiresAt <= now) {
+		if (
+			binding.expiresAt <= now ||
+			now - binding.declaredAt > MAX_SCOPE_BINDING_AGE_MS
+		) {
 			pendingScopeBindings.delete(key);
 			const expired: ScopeBinding = {
 				...binding,
