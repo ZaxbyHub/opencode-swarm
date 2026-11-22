@@ -134,7 +134,7 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 			'src/plan/manager.ts:694',
 			'src/plan/manager.ts:2121',
 			'src/plan/manager.ts:2181',
-			'src/review/evidence.ts:179',
+			'src/review/evidence.ts:217',
 			'src/turbo/lean/evidence.ts:188',
 			'src/summaries/manager.ts:163',
 			'src/evidence/manager.ts:291',
@@ -142,9 +142,7 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 			'src/tools/sast-baseline.ts:199',
 			'src/tools/repo-graph/storage.ts:543',
 			'src/memory/reflection-service.ts (pre-#2035; migrated-to=src/memory/reflection-service.ts:atomicWrite)',
-			'src/hooks/review-receipt.ts:609',
-			'src/hooks/review-receipt.ts:675',
-			'src/hooks/review-receipt.ts:894',
+			'src/hooks/review-receipt.ts:694',
 			'src/knowledge/identity.ts:234',
 			'src/evidence/phase-participation.ts (pre-#2035; migrated-to=src/evidence/phase-participation.ts:atomicWriteBytes)',
 			'src/turbo/lean/integration.ts:427',
@@ -237,8 +235,8 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 		quarantineEligible: true,
 		parsesTarget: true,
 		producers: [
-			'src/tools/write-pr-review-artifact.ts:159',
-			'src/tools/write-pr-review-artifact.ts:179',
+			'src/tools/write-pr-review-artifact.ts:167',
+			'src/tools/write-pr-review-artifact.ts:187',
 			// Symbol form: shift-proof against import-order drift in the writer
 			// (issue #3094 re-pin; the old line-form anchor pointed at :105).
 			'src/tools/write-pr-review-trigger-eval.ts:createTriggerReceipt',
@@ -298,9 +296,9 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 		quarantineEligible: false,
 		parsesTarget: false,
 		producers: [
-			'src/tools/write-drift-evidence.ts:275',
-			'src/tools/write-mutation-evidence.ts:169',
-			'src/tools/write-hallucination-evidence.ts:121',
+			'src/tools/write-drift-evidence.ts:286',
+			'src/tools/write-mutation-evidence.ts:172',
+			'src/tools/write-hallucination-evidence.ts:129',
 			'src/tools/write-final-council-evidence.ts:403',
 		],
 		note: 'constant-name temps: no per-invocation token — reported when stale, never auto-quarantined (may be an in-flight writer of any process)',
