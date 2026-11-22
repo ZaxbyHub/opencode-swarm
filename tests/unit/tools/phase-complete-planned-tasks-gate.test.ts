@@ -23,6 +23,10 @@ import {
 	resetSwarmState,
 	swarmState,
 } from '../../../src/state';
+import {
+	PLANNED_TASKS_BLOCKED_REASON,
+	runPlannedTasksGate,
+} from '../../../src/tools/phase-complete/gates/planned-tasks-gate';
 import { canonicalMkdtemp, removeTreeWithRetry } from '../../helpers/tmpdir';
 
 const mockRunCuratorPhase = mock(async () => ({
@@ -407,6 +411,71 @@ describe('#3770 planned-tasks refusal', () => {
 		session!.turboStrategy = 'standard';
 		const parsed = await execute();
 		expect(parsed.reason).toBe('PLANNED_TASKS_PENDING');
+	});
+});
+
+describe('#3770 planned-tasks gate layer (direct unit legs)', () => {
+	let tempDir: string;
+	let originalCwd: string;
+
+	beforeEach(() => {
+		resetSwarmState();
+		tempDir = canonicalMkdtemp('planned-tasks-gate-unit-');
+		originalCwd = process.cwd();
+		process.chdir(tempDir);
+		fs.mkdirSync(path.join(tempDir, '.swarm'), { recursive: true });
+	});
+
+	afterEach(() => {
+		process.chdir(originalCwd);
+		removeTreeWithRetry(tempDir);
+		resetSwarmState();
+	});
+
+	test('gate refuses on its own with pending tasks (no early refusal involved)', async () => {
+		fs.writeFileSync(
+			path.join(tempDir, '.swarm', 'plan.json'),
+			JSON.stringify(
+				planWithTasks([
+					{ id: '1.1', status: 'completed' },
+					{ id: '1.2', status: 'pending' },
+				]),
+			),
+		);
+		const result = await runPlannedTasksGate({
+			phase: 1,
+			dir: tempDir,
+			sessionID: 'sess-gate',
+			pluginConfig: {} as never,
+			agentsDispatched: [],
+			safeWarn: () => undefined,
+			preflightNowMs: 0,
+		});
+		expect(result.blocked).toBe(true);
+		expect(result.reason).toBe(PLANNED_TASKS_BLOCKED_REASON);
+		expect(result.message).toContain('1.2');
+	});
+
+	test('gate passes on its own with completed/closed tasks', async () => {
+		fs.writeFileSync(
+			path.join(tempDir, '.swarm', 'plan.json'),
+			JSON.stringify(
+				planWithTasks([
+					{ id: '1.1', status: 'completed' },
+					{ id: '1.2', status: 'closed' },
+				]),
+			),
+		);
+		const result = await runPlannedTasksGate({
+			phase: 1,
+			dir: tempDir,
+			sessionID: 'sess-gate',
+			pluginConfig: {} as never,
+			agentsDispatched: [],
+			safeWarn: () => undefined,
+			preflightNowMs: 0,
+		});
+		expect(result.blocked).toBe(false);
 	});
 });
 
