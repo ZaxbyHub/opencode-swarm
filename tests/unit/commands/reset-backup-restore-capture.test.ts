@@ -21,6 +21,7 @@ import {
 	checkpoint,
 	_internals as checkpointInternals,
 } from '../../../src/tools/checkpoint';
+import { buildSubmoduleFixture, gitIn } from '../../helpers/submodule-fixture';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 let dir: string | undefined;
@@ -184,48 +185,9 @@ describe('rollback recovery capture-heavy legs (#3763 feedback round)', () => {
 
 	test('a dirty gitlink (mode 160000) records its sha instead of refusing the capture (FB-003)', () => {
 		fixture();
-		const sub = path.join(dir as string, 'subsrc');
-		fs.mkdirSync(sub, { recursive: true });
-		const subGit = (args: string[]) =>
-			execFileSync('git', args, {
-				cwd: sub,
-				encoding: 'utf8',
-				stdio: ['ignore', 'pipe', 'pipe'],
-				timeout: 15000,
-			});
-		subGit(['init', '-q']);
-		subGit(['config', 'user.email', 'test@example.invalid']);
-		subGit(['config', 'user.name', 'Fixture']);
-		fs.writeFileSync(path.join(sub, 'f.txt'), 's1');
-		subGit(['add', '-A']);
-		subGit(['commit', '-qm', 'sub base']);
-		execFileSync(
-			'git',
-			[
-				'-c',
-				'protocol.file.allow=always',
-				'submodule',
-				'add',
-				'-q',
-				sub,
-				'mod',
-			],
-			{
-				cwd: dir as string,
-				encoding: 'utf8',
-				stdio: ['ignore', 'pipe', 'pipe'],
-				timeout: 30000,
-			},
-		);
-		git(['add', '-A']);
-		git(['commit', '-qm', 'super base']);
-		fs.writeFileSync(path.join(dir, 'mod', 'f.txt'), 's2');
-		execFileSync('git', ['commit', '-qam', 'sub moved'], {
-			cwd: path.join(dir, 'mod'),
-			encoding: 'utf8',
-			stdio: ['ignore', 'pipe', 'pipe'],
-			timeout: 15000,
-		});
+		buildSubmoduleFixture(dir as string);
+		fs.writeFileSync(path.join(dir as string, 'mod', 'f.txt'), 's2');
+		gitIn(path.join(dir as string, 'mod'), ['commit', '-qam', 'sub moved']);
 		const result = capture('mod');
 		expect(result).not.toBeNull();
 		expect(result?.mode).toBe('160000');
@@ -343,47 +305,9 @@ describe('rollback recovery capture-heavy legs (#3763 feedback round)', () => {
 
 	// --- round 3 (stage B round-2 findings) ---------------------------------
 
-	function buildSubmodule(): void {
-		const sub = path.join(dir as string, 'subsrc');
-		fs.mkdirSync(sub, { recursive: true });
-		const subGit = (args: string[]) =>
-			execFileSync('git', args, {
-				cwd: sub,
-				encoding: 'utf8',
-				stdio: ['ignore', 'pipe', 'pipe'],
-				timeout: 15000,
-			});
-		subGit(['init', '-q']);
-		subGit(['config', 'user.email', 'test@example.invalid']);
-		subGit(['config', 'user.name', 'Fixture']);
-		fs.writeFileSync(path.join(sub, 'f.txt'), 's1');
-		subGit(['add', '-A']);
-		subGit(['commit', '-qm', 'sub base']);
-		execFileSync(
-			'git',
-			[
-				'-c',
-				'protocol.file.allow=always',
-				'submodule',
-				'add',
-				'-q',
-				sub.split('\\').join('/'),
-				'mod',
-			],
-			{
-				cwd: dir as string,
-				encoding: 'utf8',
-				stdio: ['ignore', 'pipe', 'pipe'],
-				timeout: 30000,
-			},
-		);
-		git(['add', '-A']);
-		git(['commit', '-qm', 'super base']);
-	}
-
 	test('a gitlink whose worktree entry is a regular FILE (typechange) backs up the bytes — never a phantom gitlink (FB-003 round 3)', () => {
 		fixture();
-		buildSubmodule();
+		buildSubmoduleFixture(dir as string);
 		// Submodule DIRECTORY replaced by a regular file (index still
 		// 160000): a gitlink shortcut trusting the index would fake coverage.
 		fs.rmSync(loc('mod'), { recursive: true, force: true });
@@ -419,17 +343,12 @@ describe('rollback recovery capture-heavy legs (#3763 feedback round)', () => {
 
 	test('restore proceeds end-to-end over a dirty real submodule (gitlink) — gate coverage without stubs (FB-003 round 3)', async () => {
 		fixture();
-		buildSubmodule();
+		buildSubmoduleFixture(dir as string);
 		const saved = await call({ action: 'save', label: 'subckpt' });
 		expect(saved.success).toBe(true);
 		// Advance the submodule HEAD so the superproject sees ' M mod'.
 		fs.writeFileSync(path.join(dir as string, 'mod', 'f.txt'), 's2');
-		execFileSync('git', ['commit', '-qam', 'sub moved'], {
-			cwd: path.join(dir as string, 'mod'),
-			encoding: 'utf8',
-			stdio: ['ignore', 'pipe', 'pipe'],
-			timeout: 15000,
-		});
+		gitIn(path.join(dir as string, 'mod'), ['commit', '-qam', 'sub moved']);
 		expect(git(['status', '--porcelain'])).toContain('mod');
 		const preview = await call({ action: 'restore', label: 'subckpt' });
 		expect(preview.requires_confirm).toBe(true);
