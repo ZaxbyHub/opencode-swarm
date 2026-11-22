@@ -85,11 +85,18 @@ const EVIDENCE_BARE_TOKEN_VALUE_PATTERNS: ReadonlyArray<{
 	re: RegExp;
 	guard?: (match: string) => boolean;
 	/**
-	 * The exact replacement for the matched span. Used by the AWS context
-	 * arm, which keeps the prose between the access-key id and the secret
-	 * (unlike the memory site's whole-span replacement, which deletes it).
+	 * The exact replacement for the matched span.
 	 */
 	replace?: (match: string, ...groups: string[]) => string;
+	/**
+	 * When set, the arm's RANGE is this capture group's span inside the
+	 * match rather than the whole match. The AWS context arm uses it to
+	 * redact the 40-character secret WITHOUT swallowing the prose between
+	 * the access-key id and the secret: that prose can itself carry a
+	 * credential, and a range that covered it would replace it with raw
+	 * text (the other arms would never see it).
+	 */
+	group?: number;
 }> = [
 	{ label: '[REDACTED:anthropic]', re: /\bsk-ant-[A-Za-z0-9_-]{20,}/g },
 	{ label: '[REDACTED:openrouter]', re: /\bsk-or-[A-Za-z0-9_-]{20,}/g },
@@ -101,17 +108,15 @@ const EVIDENCE_BARE_TOKEN_VALUE_PATTERNS: ReadonlyArray<{
 	{ label: '[REDACTED:github]', re: /\bgithub_pat_[A-Za-z0-9_]{22,}/g },
 	{
 		// The AWS secret CONTEXT: the 40-character secret is only
-		// recognizable NEXT TO its access-key id. This arm must come BEFORE
-		// the bare id arm below — the bare arm consumed the anchor first,
-		// so `redactSecrets`' context arm could never fire and the adjacent
-		// secret survived raw (the memory path redacts the same input).
-		//
-		// The id and the secret are both redacted; the prose between them
-		// is kept (the memory site's whole-span replacement deletes it).
+		// recognizable NEXT TO its access-key id. The arm's RANGE is the
+		// SECRET alone (the `group` field) — the prose between the id
+		// and the secret is left alone, because it can itself carry a
+		// credential that the other arms must still see (re-inserting it
+		// verbatim inside this arm's replacement put it back in the clear).
+		// The id is redacted by the bare id arm below.
 		label: '[REDACTED:aws-secret]',
-		re: /(AKIA[0-9A-Z]{16})([^\n]{0,200}?)\b([A-Za-z0-9/+=]{40})\b/g,
-		replace: (_match: string, id: string, middle: string) =>
-			`[REDACTED:aws]${middle}[REDACTED:aws-secret]`,
+		re: /(AKIA[0-9A-Z]{16})([^\n]{0,200}?)\b([A-Za-z0-9/+=]{40})\b/dg,
+		group: 3,
 	},
 	{ label: '[REDACTED:aws]', re: /\bAKIA[0-9A-Z]{16}\b/g },
 	{ label: '[REDACTED:slack]', re: /\bxox[baprs]-[A-Za-z0-9-]{10,}/g },
@@ -202,10 +207,13 @@ function redactBareAndScanner(content: string): EvidenceRedactionResult {
 		for (const match of content.matchAll(arm.re)) {
 			if (!match[0]) continue;
 			if (arm.guard && !arm.guard(match[0])) continue;
-			const start = match.index ?? 0;
+			const groupSpan =
+				arm.group !== undefined ? match.indices?.[arm.group] : undefined;
+			const start = groupSpan ? groupSpan[0] : (match.index ?? 0);
+			const end = groupSpan ? groupSpan[1] : start + match[0].length;
 			raw.push({
 				start,
-				end: start + match[0].length,
+				end,
 				label: arm.label,
 				origin: 'bare',
 				...(arm.replace

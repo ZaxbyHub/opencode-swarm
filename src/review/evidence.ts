@@ -19,7 +19,10 @@ import {
 import { validateSwarmPath } from '../hooks/utils.js';
 import { ledgerExists, replayFromLedgerWithStatus } from '../plan/ledger.js';
 import { loadPlanJsonOnly } from '../plan/manager.js';
-import { redactEvidenceText } from '../security/evidence-redaction.js';
+import {
+	clampRedactedText,
+	redactEvidenceText,
+} from '../security/evidence-redaction.js';
 import type {
 	CostEvidence,
 	CostEvidenceReason,
@@ -179,15 +182,22 @@ export function redactAutoReviewEvidenceForCapture(
 	// this as a statement at assembly; the persistence boundary uses the
 	// return value). No clone: the object is freshly built by the engine at
 	// this point, and the persistence pass re-applies idempotently.
+	// A redaction placeholder can be LONGER than the secret it replaces,
+	// so each field is clamped back inside the schema bound it is read
+	// back against (ReviewFindingSchema: title <= 200, body <= 2000;
+	// FindingValidationSchema: evidence <= 2000). Without the clamp a
+	// near-limit field that the redaction lengthens fails its schema on
+	// read-back and the finding is silently dropped.
 	for (const finding of evidence.findings) {
-		finding.body = redactEvidenceText(finding.body);
-		finding.title = redactEvidenceText(finding.title);
+		finding.body = clampRedactedText(redactEvidenceText(finding.body), 2000);
+		finding.title = clampRedactedText(redactEvidenceText(finding.title), 200);
 		if (finding.anchor_rejection !== undefined) {
 			finding.anchor_rejection = redactEvidenceText(finding.anchor_rejection);
 		}
 		if (finding.validation?.evidence !== undefined) {
-			finding.validation.evidence = redactEvidenceText(
-				finding.validation.evidence,
+			finding.validation.evidence = clampRedactedText(
+				redactEvidenceText(finding.validation.evidence),
+				2000,
 			);
 		}
 	}

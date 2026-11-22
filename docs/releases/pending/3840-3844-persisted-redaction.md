@@ -95,6 +95,12 @@ docs/training-vault-remediation.md.
 - Legacy pre-fix queue events, receipts, and review artifacts on disk keep
   their historical bytes (future-write redaction only; operator remediation
   = delete stale `.swarm` artifacts if desired).
+- The replay-identity salt and handoff claim are published by LINKING a
+  complete, fsync'd temp file into place, so the target path never exists in
+  a partial state. A filesystem without hard links (FAT/exFAT, some network
+  shares) cannot link, and salt creation then fails closed there — the
+  pr-review findings and handoff writes refuse rather than write an
+  unprotected file.
 - `redactSecrets`' family set remains the persisted-store floor at its 12
   existing consumer sites; the new superset redactor is applied at the
   #3844-named boundaries, not retroactively across every store.
@@ -127,20 +133,31 @@ docs/training-vault-remediation.md.
   identity is never silently taken over); operator recovery for an
   abandoned run is archiving/deleting `.swarm/pr-review/<runId>/`.
 
-## Round-7 hardening (the Stage B sweep of the full diff)
+## Redaction scan and evidence-path hardening
 
 - The AWS secret CONTEXT arm now runs BEFORE the bare AKIA arm on the
   evidence path: the bare arm used to consume the access-key id first, so
   `redactSecrets`' context arm could never fire and the 40-character AWS
-  secret next to the id survived raw. The anchor and the interposed prose
-  are kept (unlike the memory site's whole-span replacement).
+  secret next to the id survived raw. The arm redacts the SECRET alone — the
+  prose between the id and the secret is left alone, because that prose can
+  itself carry a credential the other arms must still see.
 - The gh_evidence run METADATA (`runHtmlUrl`, `runHeadBranch`, ...) is
   redacted like `data` is — the metadata fields are copied from the raw
   parsed object, so a token in the run URL was a second leak path.
-- The replay-identity rollback now distinguishes an ABSENT sidecar (nothing
-  to restore) from an UNREADABLE one (fail closed), and a failed rollback
-  WRITE discards the sidecar so no stale identity can make the next
-  identical retry look like an exact replay.
+- The replay-identity rollback distinguishes an ABSENT sidecar (nothing to
+  restore) from an UNREADABLE one (fail closed). A failed rollback WRITE
+  leaves the sidecar in place — discarding it would throw away the identity
+  of every other committed boundary. A stale key is fail-closed instead:
+  the replay decision also cross-checks the PERSISTED ROWS, so a sidecar
+  that still claims an uncommitted payload cannot make the next identical
+  retry drop that content silently.
+- The auto-review evidence path CLAMPS the fields it redacts, so a
+  near-limit field that the redaction lengthens cannot fail its schema on
+  read-back and lose the finding.
+- The URL-credential arm is generic (any scheme character, any length) and
+  scans in linear time: an unbounded or word-boundary-anchored scheme class
+  restarted the scan at every word boundary, which measured 4.2 s for 64 KB
+  of colon-free input.
 
 ## Fold-in: the remaining persisted-evidence boundaries
 

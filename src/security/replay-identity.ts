@@ -149,8 +149,17 @@ export function readReplayIdentitySidecar(
 	let text: string;
 	try {
 		text = fs.readFileSync(target, 'utf8');
-	} catch {
-		return null;
+	} catch (error) {
+		// ONLY an absent sidecar is "no sidecar". An unreadable one (a
+		// transient I/O failure, a permission problem) must NOT be treated as
+		// absence: a write would then rewrite the sidecar with only its own
+		// key and silently drop every other boundary's identity.
+		if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+		throw new ReplayIdentityUnavailableError(
+			`sidecar could not be read: ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		);
 	}
 	let parsed: unknown;
 	try {
@@ -216,10 +225,12 @@ export function writeReplayIdentityFingerprint(
  * the state the rollback exists to remove. A CORRUPT sidecar throws as well
  * (fail closed — the caller must not overwrite it).
  *
- * If the restore WRITE fails, the sidecar is DISCARDED (best effort) so no
- * stale identity survives: a sidecar that still claims the new payload
- * would make the next identical retry look like an exact replay and drop
- * the content silently. The write error is then rethrown.
+ * If the restore WRITE fails, the sidecar is left in place: discarding it
+ * would throw away the identity of every OTHER committed boundary (their
+ * identical retries would then be refused). A stale key is fail-closed
+ * instead — the replay decision also cross-checks the PERSISTED ROWS, so a
+ * sidecar that still claims an uncommitted payload cannot make the next
+ * identical retry drop that content silently.
  */
 export function restoreReplayIdentityFingerprint(
 	directory: string,

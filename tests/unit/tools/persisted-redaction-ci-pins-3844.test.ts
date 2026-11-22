@@ -153,6 +153,83 @@ describe('#3844 CI pins: main redaction call sites (final-critic F3)', () => {
 		expect(text.includes(ANT)).toBe(false);
 	});
 
+	test('the auto-review evidence path CLAMPS the fields it redacts (a near-limit field stays inside its schema bound)', async () => {
+		// A redaction placeholder can be LONGER than the secret it replaces, so
+		// a near-limit title/body/evidence is pushed past the bound it is read
+		// back against — and the finding is dropped on read-back.
+		const { redactAutoReviewEvidenceForCapture } = await import(
+			'../../../src/review/evidence'
+		);
+		const nearCapTitle = `${'x'.repeat(195)}?token=abc`;
+		const nearCapBody = `${'y'.repeat(1990)}?token=abc`;
+		const evidence = {
+			schema_version: 2,
+			timestamp: '2026-01-01T00:00:00.000Z',
+			trigger: 'manual',
+			session_id: 's',
+			scope: {
+				hash: 'h',
+				selector: { mode: 'head_tree' },
+				head_sha: '0'.repeat(40),
+				review_text_bytes: 1,
+				completeness: 'complete',
+			},
+			policy: {
+				mode: 'advisory',
+				min_confidence: 0,
+				structured_findings: true,
+				validate_findings: true,
+			},
+			review: { status: 'completed' },
+			findings: [
+				{
+					finding_id: 'f-clamp',
+					title: nearCapTitle,
+					body: nearCapBody,
+					severity: 'low',
+					confidence: 0.9,
+					file: 'src/a.ts',
+					line_start: 1,
+					line_end: 2,
+					effective_severity: 'low',
+					duplicate_count: 1,
+					anchored: true,
+				},
+			],
+		} as never;
+		const returned = redactAutoReviewEvidenceForCapture(evidence);
+		const finding = returned.findings[0]!;
+		expect(finding.title.length).toBeLessThanOrEqual(200);
+		expect(finding.body.length).toBeLessThanOrEqual(2000);
+		expect(finding.title.length).toBeGreaterThan(0);
+		expect(finding.body.length).toBeGreaterThan(0);
+		expect(finding.title).not.toContain('?token=abc');
+	});
+
+	test('the mutation evidence redacts the surviving mutant ids', async () => {
+		const { write_mutation_evidence } = await import(
+			'../../../src/tools/write-mutation-evidence'
+		);
+		const dir = canonicalMkdtemp('pins-3844-mutation-');
+		const secret = `ghp_${'m'.repeat(30)}`;
+		const result = await write_mutation_evidence.execute(
+			{
+				phase: 1,
+				verdict: 'PASS',
+				killRate: 100,
+				adjustedKillRate: 100,
+				summary: 'gate summary',
+				survivedMutants: `survivor ${secret}`,
+			},
+			{ directory: dir } as never,
+		);
+		expect(String(result)).toContain('"success": true');
+		const written = await Bun.file(
+			`${dir}/.swarm/evidence/1/mutation-gate.json`,
+		).text();
+		expect(written).not.toContain(secret);
+	}, 30_000);
+
 	test('forge queue write redacts the event message durably', async () => {
 		const dir = canonicalMkdtemp('pins-3844-queue-');
 		mkdirSync(path.join(dir, '.swarm'), { recursive: true });

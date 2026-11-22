@@ -138,7 +138,8 @@ export async function executeWriteMutationEvidence(
 	};
 
 	if (args.survivedMutants !== undefined) {
-		evidenceEntry.survivedMutants = args.survivedMutants;
+		// The surviving mutant ids are model-authored free text too.
+		evidenceEntry.survivedMutants = redactEvidenceText(args.survivedMutants);
 	}
 
 	const evidenceContent = {

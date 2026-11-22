@@ -227,6 +227,19 @@ describe('#3844 redactEvidenceText superset contract', () => {
 		expect(out).toContain('secret');
 	});
 
+	test('FB-30: the AWS context arm never re-inserts a credential from the interposed prose', () => {
+		// The arm's RANGE is the secret alone. When it covered the whole span
+		// (id + prose + secret) and re-inserted the prose verbatim, every
+		// credential inside that prose came back in the clear.
+		const groq = `gsk_${'a'.repeat(30)}`;
+		const out = redactEvidenceText(
+			`AKIAABCDEFGHIJKLMNOP x ${groq} y ${'B'.repeat(40)}`,
+		);
+		expect(out).not.toContain(groq);
+		expect(out).not.toContain('B'.repeat(40));
+		expect(out).not.toContain('AKIAABCDEFGHIJKLMNOP');
+	});
+
 	test('the clamp keeps a COMPLETE marker and drops only a half-written one', () => {
 		// A COMPLETE marker at the HEAD of an over-long value is real
 		// content: the clamp used to treat it as a fragment and emptied the
