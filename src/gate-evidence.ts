@@ -2216,3 +2216,32 @@ export function compareTaskWorkflowStateRank(
 ): number {
 	return WORKFLOW_STATE_RANK[left] - WORKFLOW_STATE_RANK[right];
 }
+
+/**
+ * Single shared predicate: is this task durably exempt from the test-engineer
+ * gate? Every consumption site (route allocation, completion gate, recovery,
+ * foreground settlement, Stage-B ingest) MUST use this so they agree.
+ *
+ * Both conditions are required. `test_engineer_exempt` is recomputed only on
+ * coder events, while `required_gates` only ever grows. A task that was exempt
+ * at coder settlement can therefore later gain a required `test_engineer`
+ * gate while the flag is still true; the flag alone would then let reviewer-only
+ * evidence advance it with the test-engineer gate missing.
+ *
+ * The flag is read from the unauthenticated `.swarm/evidence/<task>.json`
+ * (no MAC); nullish evidence is never exempt.
+ */
+export function isTestEngineerDurablyExempt(
+	evidence:
+		| {
+				test_engineer_exempt?: boolean;
+				required_gates?: readonly string[];
+		  }
+		| null
+		| undefined,
+): boolean {
+	return (
+		evidence?.test_engineer_exempt === true &&
+		!(evidence.required_gates ?? []).includes('test_engineer')
+	);
+}

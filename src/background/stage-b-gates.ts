@@ -5,6 +5,7 @@ import {
 } from '../evidence/task-gate-requirements.js';
 import {
 	getTaskWorkflowSnapshot,
+	isTestEngineerDurablyExempt,
 	readTaskEvidence,
 	recordGateEvidence,
 	transitionTaskWorkflowEvidence,
@@ -923,7 +924,7 @@ export async function ingestBackgroundStageBCompletion(args: {
 						// an unrouted complexity fallback) must not pin the durable
 						// workflow at reviewer_run when the durable evidence
 						// proves the sanctioned exemption.
-						testEngineerExempt: existingEvidence?.test_engineer_exempt === true,
+						testEngineerExempt: isTestEngineerDurablyExempt(existingEvidence),
 					}).canAdvance;
 				}
 			} else {
@@ -1027,7 +1028,7 @@ export async function ingestBackgroundStageBCompletion(args: {
 					transitionId: `background-gate:${args.record.correlationId}`,
 					// Missing/non-exempt provenance is conservative: require the full
 					// Stage B pair without fabricating a new coder mutation/generation.
-					ensureDefaultStageB: existingEvidence?.test_engineer_exempt !== true,
+					ensureDefaultStageB: !isTestEngineerDurablyExempt(existingEvidence),
 					routeBinding: preparedRoute?.binding,
 					routeComplete: routeCompleteForPersistence,
 				},
@@ -1063,7 +1064,7 @@ export async function ingestBackgroundStageBCompletion(args: {
 				taskId,
 				args.record.normalizedAgent,
 				args.record.parentSessionId,
-				existingEvidence?.test_engineer_exempt === true,
+				isTestEngineerDurablyExempt(existingEvidence),
 				args.directory,
 				args.record.callID,
 				args.record.subagentSessionId,

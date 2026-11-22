@@ -5074,22 +5074,24 @@ export function createDelegationGateHook(
 							directory,
 							changedFiles,
 						);
-						// Durable test-engineer exemption: the receipt-backed
-						// `test_engineer_exempt` proof (granted at coder settlement
-						// via the declared+observed Markdown-only classification in
-						// isMarkdownOnlyTaskChange) is the independent declared-scope
-						// signal. Unlike observed attribution, it may legitimately
-						// zero the test-engineer requirement: an exempt task never
+						// Durable test-engineer exemption: the durable
+						// `test_engineer_exempt` evidence flag (set at coder
+						// settlement from the declared+observed Markdown-only
+						// classification in isMarkdownOnlyTaskChange) is the
+						// independent declared-scope signal. It is read from the
+						// unauthenticated .swarm/evidence/<task>.json (no MAC).
+						// Unlike observed attribution, it may legitimately zero
+						// the test-engineer requirement: an exempt task never
 						// dispatches a test engineer, so a route receipt demanding
 						// one can never reach completeness and wedges the workflow
 						// at reviewer_run with "all required proof exists".
-						const { readTaskEvidence } = await import('../gate-evidence');
+						const { readTaskEvidence, isTestEngineerDurablyExempt } =
+							await import('../gate-evidence');
 						const routedEvidence = reviewTaskId
 							? await readTaskEvidence(directory, reviewTaskId)
 							: null;
 						const durableTestEngineerExempt =
-							routedEvidence?.test_engineer_exempt === true &&
-							!(routedEvidence.required_gates ?? []).includes('test_engineer');
+							isTestEngineerDurablyExempt(routedEvidence);
 						const routeReceipt = buildReviewRouteReceipt({
 							sessionId: input.sessionID,
 							taskId: routeTaskId,
@@ -5106,7 +5108,7 @@ export function createDelegationGateHook(
 										// independent declared scope. Require the routed
 										// count here so an all-Markdown change cannot
 										// self-prove its exemption — only the durable
-										// receipt-backed exemption above may zero it.
+										// evidence flag above may zero it.
 										{ length: routing.testEngineerCount },
 										(_, index) => `${routeTaskId}:test_engineer:${index + 1}`,
 									),
@@ -7290,6 +7292,7 @@ export function createDelegationGateHook(
 
 									const {
 										getTaskWorkflowSnapshot,
+										isTestEngineerDurablyExempt,
 										readTaskEvidence,
 										transitionTaskWorkflowEvidence,
 									} = await import('../gate-evidence');
@@ -7605,9 +7608,9 @@ export function createDelegationGateHook(
 										if (routeEnforcementEnabled && routeBinding) {
 											try {
 												// Exempt wedge: honor the durable test-engineer
-												// exemption (receipt-backed proof) so a receipt that
+												// exemption (evidence flag, no MAC) so a receipt that
 												// still lists test-engineer slots cannot block the
-												// reviewer-only Stage B barrier of a docs-only task.
+												// reviewer-only Stage B barrier of a Markdown-only task.
 												const exemptEvidence = await readTaskEvidence(
 													directory,
 													taskId,
@@ -7623,7 +7626,7 @@ export function createDelegationGateHook(
 															requireEvidenceBindings: true,
 															requireCompleteEvidence: true,
 															testEngineerExempt:
-																exemptEvidence?.test_engineer_exempt === true,
+																isTestEngineerDurablyExempt(exemptEvidence),
 														},
 													);
 											} catch (err) {
@@ -7725,7 +7728,7 @@ export function createDelegationGateHook(
 										);
 										const reviewerCompletesStageB =
 											targetAgent === 'reviewer' &&
-											taskEvidence?.test_engineer_exempt === true;
+											isTestEngineerDurablyExempt(taskEvidence);
 										if (
 											routeComplete &&
 											(hasBothStageBCompletions(session, taskId) ||

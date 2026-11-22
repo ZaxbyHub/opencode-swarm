@@ -140,10 +140,10 @@ export interface EnforceReviewRouteReceiptArgs {
 	 */
 	requireCompleteEvidence?: boolean;
 	/**
-	 * Durable test-engineer exemption for the routed task (the receipt-backed
-	 * `test_engineer_exempt` proof granted at coder settlement from the
-	 * declared+observed Markdown-only classification — never observed
-	 * attribution alone). When true, the completeness barrier requires only the
+	 * Durable test-engineer exemption for the routed task (the durable
+	 * `test_engineer_exempt` evidence flag set at coder settlement from the
+	 * declared+observed Markdown-only classification, never observed
+	 * attribution alone; unauthenticated, no MAC). When true, the completeness barrier requires only the
 	 * reviewer identities: an exempt task never dispatches a test engineer, so
 	 * a receipt that still lists test-engineer slots (allocated by a build
 	 * predating exemption-aware allocation) must not wedge the task at
@@ -822,6 +822,15 @@ export function enforceReviewRouteReceipt(
 		}
 	}
 	if (input.requireCompleteEvidence !== false) {
+		// The router floors the test-engineer count at 1, so a zero-slot receipt
+		// for a non-exempt context is a stale exempt-time receipt (required_gates
+		// grew afterwards): reviewer-only evidence must not complete it.
+		if (
+			input.testEngineerExempt !== true &&
+			route.required.testEngineers === 0
+		) {
+			return fail('ROUTE_RECEIPT_INCOMPLETE');
+		}
 		// Exemption-aware completeness (see EnforceReviewRouteReceiptArgs):
 		// an exempt task's barrier covers only the reviewer identities. The
 		// non-exempt check stays the exact set equality it always was (seen is

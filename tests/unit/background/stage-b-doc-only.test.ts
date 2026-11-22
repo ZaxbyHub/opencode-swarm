@@ -209,6 +209,107 @@ describe('background doc-only gate evidence', () => {
 		).toBe('tests_run');
 	});
 
+	test('pin: flag true but test_engineer in required_gates is not advanced on reviewer-only evidence', async () => {
+		// The flag is recomputed only on coder events while required_gates only
+		// grows, so a task exempt at coder settlement can later require a test
+		// engineer. The shared predicate (flag AND test_engineer not required)
+		// must then keep the full Stage-B pair mandatory at ingest.
+		swarmState.agentSessions
+			.get('parent-session')
+			?.taskWorkflowStates?.set('1.10', 'coder_delegated');
+		const baseline = captureWorkspaceSnapshot(testDirectory);
+		fs.writeFileSync(path.join(testDirectory, 'AGENTS.md'), '# docs rule\n');
+		const coder = record('coder', '1.10', baseline);
+		coder.taskChangeContext = {
+			declaredFiles: ['AGENTS.md'],
+			baseline,
+			workflowGeneration: 0,
+		};
+		await ingestBackgroundStageBCompletion({
+			directory: testDirectory,
+			record: coder,
+			result: { text: 'done', chars: 4, truncated: false, digest: 'coder' },
+		});
+		await transitionTaskWorkflowEvidence(testDirectory, '1.10', {
+			type: 'stage_a_passed',
+			expectedGeneration: 1,
+			transitionId: 'stage-a:1.10',
+		});
+		const evidenceFile = path.join(
+			testDirectory,
+			'.swarm',
+			'evidence',
+			'1.10.json',
+		);
+		const raw = JSON.parse(fs.readFileSync(evidenceFile, 'utf-8'));
+		expect(raw.test_engineer_exempt).toBe(true);
+		raw.required_gates = ['reviewer', 'test_engineer'];
+		fs.writeFileSync(evidenceFile, JSON.stringify(raw, null, 2));
+		await persistReviewRouteReceipt({
+			projectRoot: testDirectory,
+			receipt: buildReviewRouteReceipt({
+				sessionId: 'parent-session',
+				taskId: '1.10',
+				complexity: 'single',
+				semanticRisk: 'Standard complexity: 1 files, 0 functions',
+				requiredReviewers: ['1.10:reviewer:1'],
+				requiredTestEngineers: ['1.10:test_engineer:1'],
+			}),
+		});
+
+		const reviewer = record('reviewer', '1.10');
+		reviewer.workflowGeneration = 1;
+		await ingestBackgroundStageBCompletion({
+			directory: testDirectory,
+			record: reviewer,
+			result: {
+				text: '[REVIEWED] | task-1.10 | APPROVED | docs are correct',
+				chars: 54,
+				truncated: false,
+				digest: 'reviewer',
+			},
+		});
+
+		const evidence = await readTaskEvidence(testDirectory, '1.10');
+		expect(evidence?.gates.reviewer).toBeDefined();
+		expect(evidence?.workflow.state).not.toBe('tests_run');
+		expect(
+			swarmState.agentSessions
+				.get('parent-session')
+				?.taskWorkflowStates?.get('1.10'),
+		).not.toBe('tests_run');
+	});
+
+	test('non-exempt evidence (docs mutation) still gets the full Stage-B pair ensured at reviewer ingest', async () => {
+		await transitionTaskWorkflowEvidence(testDirectory, '1.11', {
+			type: 'accepted_mutation',
+			agentType: 'docs',
+			expectedGeneration: 0,
+			transitionId: 'docs:1.11',
+		});
+		await transitionTaskWorkflowEvidence(testDirectory, '1.11', {
+			type: 'stage_a_passed',
+			expectedGeneration: 1,
+			transitionId: 'stage-a:1.11',
+		});
+		const reviewer = record('reviewer', '1.11');
+		reviewer.workflowGeneration = 1;
+		await ingestBackgroundStageBCompletion({
+			directory: testDirectory,
+			record: reviewer,
+			result: {
+				text: '[REVIEWED] | task-1.11 | APPROVED | docs are correct',
+				chars: 54,
+				truncated: false,
+				digest: 'reviewer',
+			},
+		});
+
+		const evidence = await readTaskEvidence(testDirectory, '1.11');
+		expect(evidence?.test_engineer_exempt).not.toBe(true);
+		expect(evidence?.required_gates).toContain('test_engineer');
+	});
+
 	test('prior non-coder evidence cannot suppress the full coder gates', async () => {
 		await recordGateEvidence(testDirectory, '1.5', 'critic', 'critic-session');
 		await transitionTaskWorkflowEvidence(testDirectory, '1.5', {

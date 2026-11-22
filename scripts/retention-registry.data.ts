@@ -2051,7 +2051,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			bound: 'MAX_BASELINE_FINDINGS 2000 (:65); MAX_BASELINE_BYTES 2 MiB (:68) with truncation :690-712,777-795',
 			scope: 'per-key',
 			keyspaceBound:
-					'FINITE BY REAPER ONLY — the key domain is open. `phase` is a positive integer with no upper limit: the tool schema is z.number().int().min(1) with no .max() (src/tools/sast-scan.ts:1010-1017, duplicated at src/tools/pre-check-batch.ts:3464-3471), validatePhase rejects only phase < 1 (src/tools/sast-baseline.ts:447-452), and PlanSchema.phases is z.array(PhaseSchema).min(1) with no cap on phase count (src/config/plan-schema.ts:110) — there is no closed phase enum anywhere on this path. What bounds it is the close-time evidence wipe: baselineRelPath resolves through validateSwarmPath (src/tools/sast-baseline.ts:191,512) to .swarm/evidence/{phase}/sast-baseline.json, a true subpath of the tree that ACTIVE_STATE_DIRS_TO_CLEAN removes recursively at /swarm close (src/commands/close/constants.ts:253-269; src/commands/close/clean-stage.ts:176-190). CAVEAT (verified): the taskId-keyed archiveEvidence retention does NOT reach these directories — it looks for evidence/{taskId}/evidence.json and silently skips a phase directory that has none (src/evidence/manager.ts:689-751) — so /swarm close is the ONLY reclaim path here, and one directory accumulates per distinct phase number until it runs.',
+					'FINITE BY REAPER ONLY — the key domain is open. `phase` is a positive integer with no upper limit: the tool schema is z.number().int().min(1) with no .max() (src/tools/sast-scan.ts:1016-1023, duplicated at src/tools/pre-check-batch.ts:3464-3471), validatePhase rejects only phase < 1 (src/tools/sast-baseline.ts:447-452), and PlanSchema.phases is z.array(PhaseSchema).min(1) with no cap on phase count (src/config/plan-schema.ts:110) — there is no closed phase enum anywhere on this path. What bounds it is the close-time evidence wipe: baselineRelPath resolves through validateSwarmPath (src/tools/sast-baseline.ts:191,512) to .swarm/evidence/{phase}/sast-baseline.json, a true subpath of the tree that ACTIVE_STATE_DIRS_TO_CLEAN removes recursively at /swarm close (src/commands/close/constants.ts:253-269; src/commands/close/clean-stage.ts:176-190). CAVEAT (verified): the taskId-keyed archiveEvidence retention does NOT reach these directories — it looks for evidence/{taskId}/evidence.json and silently skips a phase directory that has none (src/evidence/manager.ts:689-751) — so /swarm close is the ONLY reclaim path here, and one directory accumulates per distinct phase number until it runs.',
 			citation: 'src/tools/sast-baseline.ts:65-68',
 		},
 		readBound: { pattern: 'full-file', bound: '≤2 MiB by write-side cap', sync: true, citation: 'src/tools/sast-baseline.ts:68,861' },
@@ -2919,11 +2919,11 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		canonicalRoot: 'platform-config',
 		writerModules: ['src/review/routing-enforcement.ts'],
 		writerCitations: [
-			'src/review/routing-enforcement.ts:364-400 readRouteReceiptSecret — user-scoped key read/creation; exclusive wx write with 0o600 mode (:385-389)',
+			'src/review/routing-enforcement.ts:376-412 readRouteReceiptSecret — user-scoped key read/creation; exclusive wx write with 0o600 mode (:397-401)',
 		],
 		readerCitations: [
-			'src/review/routing-enforcement.ts:364-378 readRouteReceiptSecret — regular-file check and exact 64-hex parse',
-			'src/review/routing-enforcement.ts:403-418 readRouteReceiptSecretSync — synchronous regular-file check and parse',
+			'src/review/routing-enforcement.ts:376-390 readRouteReceiptSecret — regular-file check and exact 64-hex parse',
+			'src/review/routing-enforcement.ts:415-430 readRouteReceiptSecretSync — synchronous regular-file check and parse',
 		],
 		schemaVersion: 'v1 route-receipt MAC key: exactly 32 random bytes stored as 64 lowercase hex characters',
 		stateClass: 'operational',
@@ -2931,13 +2931,13 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		writeLimits: {
 			bound: 'single fixed-size 64-byte ASCII secret; first-use creation is exclusive (flag wx) and never appends or grows',
 			scope: 'global',
-			citation: 'src/review/routing-enforcement.ts:339-356,380-400',
+			citation: 'src/review/routing-enforcement.ts:351-368,392-412',
 		},
 		readBound: {
 			pattern: 'full-file',
 			bound: 'single key file parsed only when it is a regular file and matches exactly 64 lowercase hex characters',
 			sync: true,
-			citation: 'src/review/routing-enforcement.ts:359-378,403-418',
+			citation: 'src/review/routing-enforcement.ts:371-390,415-430',
 		},
 		lockModel:
 			'exclusive first-use creation (wx) plus platform user-profile ACLs; concurrent losers re-read the winner key',

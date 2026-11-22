@@ -3,12 +3,13 @@
  * dispatch-time review route allocation demanded the complexity-routed
  * test-engineer count even when the task's durable evidence proved the
  * sanctioned test_engineer exemption (docs-only declared+observed Markdown
- * change, receipt-backed at coder settlement). An exempt task never
+ * change, durable evidence flag set at coder settlement). An exempt task never
  * dispatches a test engineer, so its route receipt could never reach
  * completeness and the workflow wedged at reviewer_run with "all required
  * proof exists". The allocation must zero the test-engineer requirement when
  * the DURABLE evidence proves the exemption — observed attribution alone
- * still may not self-prove one (the anti-forgery property is unchanged).
+ * still may not self-prove one (the flag is read from the unauthenticated
+ * evidence file, so it is not MAC-backed).
  *
  * Env isolation: createIsolatedTestEnv redirects the hive/app-data roots the
  * route-receipt MAC secret lives under (never the developer's real app-data).
@@ -164,6 +165,28 @@ describe('review route allocation — durable test-engineer exemption', () => {
 		const receipt = await readReviewRouteReceipt({
 			projectRoot: dir,
 			sessionId: 'sess-alloc-control',
+			taskId: '1.1',
+		});
+		expect(receipt?.kind).toBe('review_route_receipt');
+		if (receipt?.kind !== 'review_route_receipt') return;
+		expect(receipt.required).toEqual({ reviewers: 1, testEngineers: 1 });
+	});
+
+	it('pin: flag true but test_engineer in required_gates does not zero the test-engineer slots', async () => {
+		const dir = gateDir();
+		await seedEvidence(dir, true);
+		// Reachable state: the flag is recomputed only on coder events while
+		// required_gates only grows, so a later gate can add test_engineer.
+		const evidenceFile = path.join(dir, '.swarm', 'evidence', '1.1.json');
+		const evidence = JSON.parse(fs.readFileSync(evidenceFile, 'utf-8'));
+		evidence.required_gates = ['reviewer', 'test_engineer'];
+		fs.writeFileSync(evidenceFile, JSON.stringify(evidence, null, 2));
+
+		await dispatchReviewer(dir, 'sess-alloc-te-required');
+
+		const receipt = await readReviewRouteReceipt({
+			projectRoot: dir,
+			sessionId: 'sess-alloc-te-required',
 			taskId: '1.1',
 		});
 		expect(receipt?.kind).toBe('review_route_receipt');

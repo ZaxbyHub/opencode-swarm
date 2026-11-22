@@ -125,6 +125,36 @@ describe('sast_scan zero-coverage payload (#2210 + #2271 bug 3)', () => {
 		expect(result.failure_kind).toBe('coverage');
 	});
 
+	test('capture mode with only non-code inputs still hard-fails (invalid_input, no empty baseline)', async () => {
+		// The non-code pass applies to legacy and baseline diff mode only.
+		// Capturing a baseline from nothing scannable would store an empty
+		// baseline as if coverage existed, so capture mode keeps a hard fail
+		// (its own failure kind, handled before the zero-coverage branch).
+		const doc = path.join(tempDir, 'README.md');
+		fs.writeFileSync(doc, '# Docs\n');
+		const result = await sastScan(
+			{ changed_files: [doc], capture_baseline: true, phase: 1 },
+			tempDir,
+		);
+		expect(result.verdict).toBe('fail');
+		expect(result.failure_kind).toBe('invalid_input');
+		expect(result.error).toBe(
+			'capture_baseline requires changed_files to produce a non-empty baseline',
+		);
+		expect(result.status).toBeUndefined();
+		expect(result.summary.files_skipped_non_code).toBeUndefined();
+	});
+
+	test('a missing (deleted) Markdown input is skipped, not non-code, and still hard-fails', async () => {
+		const result = await sastScan(
+			{ changed_files: ['docs/deleted.md'], severity_threshold: 'medium' },
+			tempDir,
+		);
+		expect(result.verdict).toBe('fail');
+		expect(result.failure_kind).toBe('coverage');
+		expect(result.summary.files_skipped_non_code).toBeUndefined();
+	});
+
 	test('scannable-but-unscannable input (oversized code file) still fails closed', async () => {
 		// A real code file that cannot be scanned (size cap) is a coverage
 		// failure, not a non-code pass.

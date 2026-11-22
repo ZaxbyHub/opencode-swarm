@@ -658,7 +658,7 @@ Each entry below points at a release note in `docs/releases/` and the invariant(
   (`path.join(directory, file)` + `git show HEAD:<file>`) — repaired
   upstream by canonical storage (raw absolute entries previously produced
   doubled-root joins); `update-task-status` (`getModifiedFilesForTask` at
-  src/tools/update-task-status.ts:1181 feeds `validateDiffScope` and the
+  src/tools/update-task-status.ts:1205 feeds `validateDiffScope` and the
   #2926 advisory) — pass-through, covered by the diff-scope disposition; `full-auto-permission`'s `changedFiles` classifier field is dead
   (`src/full-auto/policy.ts` declares it, nothing reads it) — disclosed,
   unchanged. Future cased-path test fixtures must expect the win32-folded
@@ -671,6 +671,47 @@ Each entry below points at a release note in `docs/releases/` and the invariant(
   gate the RED→GREEN transitions.
 - **Maps to AGENTS.md:** invariant 8 (session state — the record stays
   session-keyed and bounded; the helper is pure).
+
+### PR 3909 — exempt tasks wedged at `reviewer_run` on a route receipt that demanded a test engineer
+
+- **Failure:** a task durably exempt from the `test_engineer` gate (a
+  Markdown-only coder change) still got a dispatch-time route receipt that
+  listed at least one test-engineer slot, so the Stage-B completeness barrier
+  (`requireCompleteEvidence`) could never be satisfied and the workflow stayed
+  at `reviewer_run` with "all required proof exists".
+- **Rule:** completeness is exemption-aware. A durably exempt task gets a
+  route receipt with zero test-engineer slots, and the completeness barrier
+  covers the reviewer identities only (identity, role, and duplicate
+  validation stays authoritative). Observed attribution alone never zeroes
+  the slots.
+- **One predicate:** every consumption site (route allocation, foreground
+  settlement, Stage-B ingest and persistence, completion gate, recovery sync)
+  decides the exemption through `isTestEngineerDurablyExempt` in
+  `src/gate-evidence.ts`: the `test_engineer_exempt` flag is set AND
+  `test_engineer` is not in `required_gates`. The flag is only recomputed on
+  coder events while `required_gates` only grows, so the flag alone is not
+  sufficient. A zero-test-engineer receipt is only valid for an exempt
+  context: `enforceReviewRouteReceipt` fails a zero-TE receipt as
+  `ROUTE_RECEIPT_INCOMPLETE` when the exemption is not passed (the router
+  floors the TE count at 1), so a stale exempt-time receipt cannot complete
+  after `required_gates` grows; a reviewer re-dispatch rebuilds it with a TE
+  slot. The flag lives in the unauthenticated
+  `.swarm/evidence/<task>.json` (no MAC); do not describe it as
+  receipt-backed.
+- **Guardrail:** `tests/unit/review/routing-enforcement-test-engineer-exempt.test.ts`,
+  `tests/unit/hooks/review-route-exempt-allocation.test.ts`,
+  `tests/unit/hooks/review-route-exempt-foreground-settlement.test.ts`,
+  `tests/unit/hooks/review-route-exempt-lifecycle.test.ts` (the zero-TE rule
+  and the `reviewer_run` exit after `required_gates` grows; the residual
+  `tests_run` exit is untested and tracked in the follow-up issue), `tests/unit/background/stage-b-doc-only.test.ts`,
+  and the predicate suites that pin the `required_gates` conjunct at every
+  site (`tests/unit/tools/update-task-status-exempt-te-gate.test.ts`,
+  `tests/unit/tools/update-task-status-exempt-recovery.test.ts`). The release
+  fragment `docs/releases/pending/test-engineer-exempt-route-completeness-wedge.md`
+  records the shipped behavior and the disclosed residual stuck state.
+- **Maps to AGENTS.md:** invariant 9 (guardrails/retry — the Stage-B route
+  gate fails closed) and invariant 7 (test writing — each site is pinned by a
+  mutation-checked bun:test).
 
 
 ## Invariants — anti-pattern, required pattern, verification

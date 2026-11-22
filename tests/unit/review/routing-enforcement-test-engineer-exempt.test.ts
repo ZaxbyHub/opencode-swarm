@@ -12,8 +12,8 @@ afterEach(() => {
 
 /**
  * Regression (session 29b8ccea / Wirtschaftssimulation task 1.8): a
- * test-engineer-exempt task (docs-only, durable receipt-backed
- * `test_engineer_exempt` proof) whose dispatch-time route receipt still
+ * test-engineer-exempt task (docs-only, durable evidence flag
+ * `test_engineer_exempt`, unauthenticated) whose dispatch-time route receipt still
  * listed a test-engineer slot could never reach route completeness — the
  * reviewer passed everything that can ever pass, and the workflow pinned at
  * `reviewer_run` with "all required proof exists but workflow state is
@@ -149,5 +149,45 @@ describe('routing enforcement — durable test-engineer exemption completeness',
 			testEngineerExempt: true,
 		});
 		expect(result).toMatchObject({ canAdvance: true });
+	});
+
+	describe('zero-test-engineer receipt (stale exempt-time allocation)', () => {
+		const zeroTeReceipt = buildReviewRouteReceipt({
+			sessionId: 'session-exempt',
+			taskId: '1.8',
+			complexity: 'single',
+			semanticRisk: 'Standard complexity: 1 files, 0 functions',
+			requiredReviewers: ['1.8:reviewer:1'],
+			requiredTestEngineers: [],
+		});
+
+		test('non-exempt context with a zero-TE receipt is incomplete on reviewer-only evidence', () => {
+			for (const testEngineerExempt of [false, undefined]) {
+				const result = enforceReviewRouteReceipt({
+					enforcementEnabled: true,
+					routeReceipt: zeroTeReceipt,
+					receipts: [reviewerEvidence],
+					requireEvidenceBindings: true,
+					requireCompleteEvidence: true,
+					testEngineerExempt,
+				});
+				expect(result).toMatchObject({
+					canAdvance: false,
+					reason: 'ROUTE_RECEIPT_INCOMPLETE',
+				});
+			}
+		});
+
+		test('exempt context with a zero-TE receipt completes on reviewer-only evidence', () => {
+			const result = enforceReviewRouteReceipt({
+				enforcementEnabled: true,
+				routeReceipt: zeroTeReceipt,
+				receipts: [reviewerEvidence],
+				requireEvidenceBindings: true,
+				requireCompleteEvidence: true,
+				testEngineerExempt: true,
+			});
+			expect(result).toMatchObject({ canAdvance: true, mode: 'enforced' });
+		});
 	});
 });
