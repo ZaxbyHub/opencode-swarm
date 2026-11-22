@@ -75,6 +75,14 @@ docs/training-vault-remediation.md.
 
 ## Known bounds
 
+- A composite credential on a single KEY=VALUE line — a bare family token
+  immediately followed by more non-delimiter secret material, e.g.
+  `password=<token>.tail` — keeps the tail: the key/value arm's value class
+  stops at the placeholder's closing bracket, and skipping already-inserted
+  placeholders is what keeps that arm idempotent. The URL form (where
+  composite query secrets actually occur) is fully covered: the query arm
+  consumes a family placeholder together with its tail into its own
+  placeholder.
 - The training redactor still does NOT mirror the display site's Cf/DI
   condensed-view sweep (two-view fill-tolerance) — same bound as pre-#3882 at
   the memory site; the family corpus and JWS scanner are mirrored, the
@@ -244,7 +252,9 @@ docs/training-vault-remediation.md.
   the field).
 - The evidence path redacts a URL's credential PARAMETERS (`?password=…`,
   `?pwd=…`, `?api-key=…`, `?jwt=…`, an Azure SAS `&sig=…`, an S3
-  `X-Amz-Signature=…`): the training redactor
+  `X-Amz-Signature=…`), stopping only at the fragment delimiter (a value
+  that runs into surrounding prose is consumed with it — a value keeps no
+  delimiter-sized gap where a credential tail could hide). The training redactor
   replaces a whole URL, so without the parameter names a URL-embedded
   password persisted in the clear in review evidence.
 - The training export preserves the capture-time redaction history: a record

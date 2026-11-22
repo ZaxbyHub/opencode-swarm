@@ -741,6 +741,11 @@ export async function executePrReviewSubmission(
 	const rendererInput: RenderReviewBodyInput = {
 		run_id: runId,
 		pr_head_sha: headSha,
+		// #3844 round-10: the location follows the path-aware rule, which
+		// needs the project directory; without it the renderer falls back
+		// to the plain redactor and re-mangles the deep repository paths
+		// the artifact writer preserved.
+		directory,
 		verdict: event,
 		base_verification:
 			typeof receipt.base_verification === 'string'

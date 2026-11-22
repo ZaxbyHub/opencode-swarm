@@ -2,8 +2,11 @@
  * Pure PR-review submission body renderer (issue #3096, Workstream C PR 1/2).
  *
  * Renders settled PR-review findings into the GitHub PR Review submission body
- * plus the inline-comment plan. STRICTLY pure: no filesystem, no network, no
- * clock — authorization and transport live in `src/tools/pr-review-submission.ts`
+ * plus the inline-comment plan. Pure over its INPUTS (no network, no clock,
+ * no ambient state); when the caller supplies a project directory it
+ * additionally resolves finding-location paths against that directory
+ * (read-only `fs.realpathSync` — #3844 round-9). Authorization and transport
+ * live in `src/tools/pr-review-submission.ts`
  * so any future preview surface (e.g. #3097 post-abort export) can reuse this
  * module without submission authority.
  */
@@ -199,9 +202,12 @@ function selectSurvivors(
 				? rawLocation
 				: null;
 		const evidence = singleLine(finding.evidence ?? '', 400);
+		// The dedupe key is the RAW location (identity): two findings in
+		// different files whose paths redact to the same placeholder must
+		// not collapse into one. The redacted text is display-only.
 		const locationKey = location
 			? `${location.path}:${location.line}:${evidence}`
-			: `${fileLine}:::${evidence}`;
+			: `${rawFileLine}:::${evidence}`;
 		if (seenLocations.has(locationKey)) continue;
 		seenLocations.add(locationKey);
 		survivors.push({ finding, location });

@@ -425,16 +425,33 @@ describe('#3844 the shared redactor is idempotent and covers the training famili
 
 	test('a benign fragment AFTER a credential parameter survives', () => {
 		// The value class stops at the fragment delimiter, so a location
-		// hash after a redacted parameter keeps its anchor; and the class
-		// stops at the prose delimiters, so parenthesized prose survives.
+		// hash after a redacted parameter keeps its anchor.
 		const fragmented = redactEvidenceText(
 			'https://example.invalid/?token=abc#section',
 		);
 		expect(fragmented).not.toContain('abc');
 		expect(fragmented).toContain('#section');
-		const parenthesized = redactEvidenceText('(see ?token=abc) for details');
-		expect(parenthesized).not.toContain('abc');
-		expect(parenthesized).toContain(') for details');
+		// Round 10: the class keeps ONLY the fragment delimiter. A value
+		// that legally contains `)`, a backtick or `]` is consumed WHOLE
+		// (the round-9 delimiters leaked `)def` from `?pwd=abc)def`);
+		// surrounding prose that runs into the value is consumed with it
+		// (a cosmetic over-redaction, disclosed).
+		const inner = redactEvidenceText('https://x.invalid/?pwd=abc)def');
+		expect(inner).not.toContain('abc');
+		expect(inner).not.toContain(')def');
+		// A COMPOSITE value (a family token followed by more secret
+		// material) is consumed whole: the family arm labels its token and
+		// the query arm then consumes the placeholder together with the
+		// tail into its own generic placeholder (round 10; the round-9
+		// guard used to skip the arm and leak the tail).
+		const composite = redactEvidenceText(
+			`https://x.invalid/?token=ghp_${'g'.repeat(30)}.ExtraSecretTail42`,
+		);
+		expect(composite).not.toContain('ghp_');
+		expect(composite).not.toContain('ExtraSecretTail42');
+		// Re-applying the redactor is a fixed point (the generic
+		// placeholder is not grown or re-consumed).
+		expect(redactEvidenceText(composite)).toBe(composite);
 	});
 
 	test('the key/value arm preserves the separator it consumed', () => {

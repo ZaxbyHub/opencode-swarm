@@ -423,6 +423,35 @@ describe('#3844 round-9: the published body keeps a REAL deep path (path-aware l
 		}
 	});
 
+	test('findings in different files whose paths redact alike do NOT collapse (round 10)', () => {
+		// The survivor dedupe keys on the RAW location (identity). Three
+		// findings in three different unresolvable files with the same
+		// evidence redact to the same placeholder text but must all three
+		// be published (the round-9 tree collapsed them into one, with no
+		// disclosure of the dropped ids).
+		const DEEP =
+			'src/main/java/org/springframework/security/oauth2/server/authorization/OAuth2AuthorizationCodeRequestAuthenticationProvider';
+		const rendered = renderPrReviewSubmissionBody({
+			verdict: 'REQUEST_CHANGES',
+			findings: ['DeepBeanOne', 'DeepBeanTwo', 'DeepBeanThree'].map(
+				(bean, index) => ({
+					finding_id: `F-D${index + 1}`,
+					status: 'confirmed',
+					severity: 'high',
+					file: `${DEEP}${bean}.java`,
+					file_line: `${DEEP}${bean}.java:42`,
+					evidence: 'the same benign evidence',
+					next_action: 'fix it',
+				}),
+			),
+		} as never);
+		const text =
+			typeof rendered === 'string' ? rendered : JSON.stringify(rendered);
+		expect(text).toContain('F-D1');
+		expect(text).toContain('F-D2');
+		expect(text).toContain('F-D3');
+	});
+
 	test('a path that names no real file stays redacted at render (directory known)', () => {
 		const dir = canonicalMkdtemp('pins-3844-render-miss-');
 		try {
