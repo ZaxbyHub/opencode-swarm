@@ -31,14 +31,20 @@ import { findRedactableTokenSpans } from '../utils/jws-redaction';
  * connection string carries its password in the userinfo the same way.
  *
  * RFC 3986 bounds the scheme's SYNTAX, not its length, so the quantifier is
- * unbounded (`*`) rather than the shell site's `{0,32}` — a scheme longer
- * than 33 characters is exotic but legal, and a bounded scheme class would
- * silently leave that URL's userinfo unredacted. The scan stays linear: the
- * class excludes `:`, so the greedy run stops at the first colon and never
- * backtracks, and the leading `\b` restricts the attempts to word starts.
+ * unbounded (`*`) — a bounded scheme class would silently leave a long
+ * scheme's userinfo unredacted.
+ *
+ * The scan is linear because the scheme may only START where the preceding
+ * character cannot be part of a scheme (`(?<![A-Za-z0-9+.-])`). A leading
+ * `\b` was NOT enough: `\b` matches at every word start, so a colon-free
+ * run like `a.a.a...` restarted the scheme scan at each `a` and rescanned the
+ * remaining suffix — quadratic (measured: 64 KB of `a.` took 4.2 s). The
+ * lookbehind rejects those interior positions in O(1), leaving one attempt
+ * per scheme run. The negative lookbehind is a fixed-width lookbehind, so it
+ * is portable (the repo already uses lookbehind in src/).
  */
 const URL_CREDENTIALS_PATTERN =
-	/(\b[a-zA-Z][a-zA-Z0-9+.-]*:\/\/)([^\s/@:]+):([^\s/@]+)@([^\s'"<>]+)/gi;
+	/(?<![A-Za-z0-9+.-])([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)([^\s/@:]+):([^\s/@]+)@([^\s'"<>]+)/gi;
 
 /**
  * Credential PLACEMENT shapes, mirrored from the training redactor

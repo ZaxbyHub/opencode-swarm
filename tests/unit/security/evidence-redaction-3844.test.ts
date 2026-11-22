@@ -168,6 +168,20 @@ describe('#3844 redactEvidenceText superset contract', () => {
 		}
 	});
 
+	test('FB-006: the URL arm scans LINEARLY on colon-free input', () => {
+		// A leading \b is not enough: it matches at every word start, so a
+		// colon-free run restarted the scheme scan at each word and rescanned
+		// the remaining suffix — quadratic (measured: 64 KB of `a.` took
+		// 4.2 s). The negative lookbehind rejects the interior positions in
+		// O(1). This is the RUNTIME property, not a source shape: the
+		// unbounded class took ~17 s on this input, the linear one ~20 ms.
+		const colonFree = 'a.'.repeat(64 * 1024);
+		const started = performance.now();
+		redactEvidenceText(colonFree);
+		const elapsed = performance.now() - started;
+		expect(elapsed).toBeLessThan(1000);
+	}, 30_000);
+
 	test('the clamp keeps a COMPLETE marker and drops only a half-written one', () => {
 		// A COMPLETE marker at the HEAD of an over-long value is real
 		// content: the clamp used to treat it as a fragment and emptied the

@@ -12,6 +12,8 @@
  * Synthetic tokens only.
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { readFileSync, rmSync } from 'node:fs';
+import * as path from 'node:path';
 import {
 	_test_exports,
 	PR_REVIEW_BASE_DIMENSION_IDS,
@@ -29,9 +31,25 @@ import {
 } from '../hooks/pr-workflow-gate.test-fixtures.js';
 
 const GH = `ghp_${'h'.repeat(30)}`;
+const GH_X = `ghp_${'x'.repeat(30)}`;
+const GH_Y = `ghp_${'y'.repeat(30)}`;
 // The fixture's established review run id — the artifact tool refuses a
 // run_id that does not match the workflow's own lane identity.
 const RUN_ID = 'test-run';
+
+/** The handoff replay-identity CLAIM this run owns (64-hex fingerprint). */
+function readClaim(directory: string): string {
+	return readFileSync(
+		path.join(
+			directory,
+			'.swarm',
+			'pr-review',
+			RUN_ID,
+			'replay-identity.handoff.claim',
+		),
+		'utf-8',
+	).trim();
+}
 
 beforeEach(setupPrWorkflowGateFixtures);
 afterEach(async () => {
@@ -253,5 +271,38 @@ describe('#3844 FB-008: the handoff replay identity uses ONE comparable', () => 
 		};
 		expect(conflictResult.success).toBe(false);
 		expect(String(conflictResult.message ?? '')).toContain('conflicting');
+	}, 60_000);
+
+	test('the claim binds the RAW payload: two secrets that redact alike get different claims', async () => {
+		// Two DIFFERENT credentials of the same shape redact to the SAME
+		// text. If the claim fingerprint were computed over the REDACTED
+		// payload, both would hash to one fingerprint and a second writer
+		// would be admitted as the owner of the first writer's identity.
+		// The claim is a function of the RAW payload, so the two runs below
+		// MUST produce different claim fingerprints.
+		const dirX = tempDir;
+		await writeHandoff([
+			'review-boundaries',
+			`critic-boundaries?token=${GH_X}`,
+		]);
+		const claimX = readClaim(dirX);
+
+		// A second, INDEPENDENT run whose only difference is the secret's
+		// VALUE (the fixture re-points tempDir at a fresh root).
+		setupPrWorkflowGateFixtures();
+		const dirY = tempDir;
+		await writeHandoff([
+			'review-boundaries',
+			`critic-boundaries?token=${GH_Y}`,
+		]);
+		const claimY = readClaim(dirY);
+
+		expect(claimX).toMatch(/^[0-9a-f]{64}$/);
+		expect(claimY).toMatch(/^[0-9a-f]{64}$/);
+		expect(claimY).not.toBe(claimX);
+
+		// The first run's root is no longer the fixture's current one, so the
+		// fixture teardown would not remove it.
+		rmSync(dirX, { recursive: true, force: true });
 	}, 60_000);
 });
