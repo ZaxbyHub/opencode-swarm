@@ -112,18 +112,23 @@ describe('#3773 memory-family merge destination refusal', () => {
 	test('newer-schema destination refuses before mutation, rows preserved', async () => {
 		const destDir = path.join(tempDir, 'dest');
 		const srcDir = path.join(tempDir, 'src');
-		// Build a real current destination through the provider's own writer,
-		// then upgrade it "by a newer client".
+		// Build a real current destination through the provider's own writer
+		// with a SENTINEL row, then upgrade it "by a newer client".
 		const seed = new SQLiteMemoryProvider(destDir);
 		await seed.initialize();
 		seed.close?.();
 		const destDb = path.join(destDir, '.swarm', 'memory', 'memory.db');
+		insertSentinelRow(destDb, 'dest-sentinel-3773');
 		const supported = maxVersion(destDb);
 		plantFutureRow(destDb, supported + 1);
-		// Source: a real current store with one row to merge.
+		// Source: a real current store with its own distinct row to merge.
 		const src = new SQLiteMemoryProvider(srcDir);
 		await src.initialize();
 		src.close?.();
+		insertSentinelRow(
+			path.join(srcDir, '.swarm', 'memory', 'memory.db'),
+			'src-row-3773',
+		);
 
 		let refusal: unknown = null;
 		try {
@@ -135,11 +140,14 @@ describe('#3773 memory-family merge destination refusal', () => {
 		const message = (refusal as Error).message;
 		expect(message).toContain(String(supported + 1));
 		expect(message).toContain(String(supported));
-		// The recorded version is untouched (no mutation happened).
+		// The recorded version is untouched AND the sentinel row survives.
 		expect(maxVersion(destDb)).toBe(supported + 1);
+		expect(hasRow(destDb, 'dest-sentinel-3773')).toBe(true);
+		// The source row must NOT have arrived (the merge never ran).
+		expect(hasRow(destDb, 'src-row-3773')).toBe(false);
 	});
 
-	test('current-version destination merges normally (preserving leg)', async () => {
+	test('current-version destination merges the source row (preserving leg)', async () => {
 		const destDir = path.join(tempDir, 'dest-ok');
 		const srcDir = path.join(tempDir, 'src-ok');
 		const destSeed = new SQLiteMemoryProvider(destDir);
@@ -148,14 +156,48 @@ describe('#3773 memory-family merge destination refusal', () => {
 		const srcSeed = new SQLiteMemoryProvider(srcDir);
 		await srcSeed.initialize();
 		srcSeed.close?.();
+		insertSentinelRow(
+			path.join(srcDir, '.swarm', 'memory', 'memory.db'),
+			'src-merge-proof-3773',
+		);
 
 		const result = await migrateMemoryFamily(
 			localRoot(destDir),
 			localRoot(srcDir),
 		);
 		expect(Array.isArray(result.perMember)).toBe(true);
-		for (const member of result.perMember) {
-			expect(typeof member.merged).toBe('number');
-		}
+		const destDb = path.join(destDir, '.swarm', 'memory', 'memory.db');
+		// The transfer actually happened — the source row is in the
+		// destination after a supported merge.
+		expect(hasRow(destDb, 'src-merge-proof-3773')).toBe(true);
 	});
 });
+
+function insertSentinelRow(dbPath: string, id: string): void {
+	const Db = loadDatabaseCtor();
+	const db = new Db(dbPath);
+	try {
+		db.run(
+			`INSERT OR REPLACE INTO memory_items (id, scope_key, kind, updated_at, expires_at, superseded_by, deleted, record_json) VALUES (?, 'global', 'fact', '2026-01-01T00:00:00.000Z', NULL, NULL, 0, ?)`,
+			[id, JSON.stringify({ id, sentinel: true })],
+		);
+	} finally {
+		db.close();
+	}
+}
+
+function hasRow(dbPath: string, id: string): boolean {
+	const Db = loadDatabaseCtor();
+	const db = new Db(dbPath, { readonly: true });
+	try {
+		return (
+			db
+				.query<{ present: number }, [string]>(
+					'SELECT 1 AS present FROM memory_items WHERE id = ?',
+				)
+				.get(id)?.present === 1
+		);
+	} finally {
+		db.close();
+	}
+}

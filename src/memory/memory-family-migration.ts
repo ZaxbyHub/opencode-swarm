@@ -524,17 +524,24 @@ async function mergeStagedSqlite(
 		const { loadDatabaseCtor } = await import('../db/sqlite-loader.js');
 		const CheckDb = loadDatabaseCtor();
 		const checkDb = new CheckDb(destDbPath);
-		// A legacy destination predating schema_migrations reads as v0.
+		// A legacy destination predating schema_migrations reads as v0 (the
+		// table simply does not exist — probe its presence explicitly). Any
+		// OTHER read failure leaves the recorded version UNKNOWN and fails
+		// CLOSED: an unchecked merge into a store we cannot classify is the
+		// exact risk the guard exists to prevent.
 		let currentVersion = 0;
-		try {
+		const tablePresent = checkDb
+			.query<{ present: number }, []>(
+				"SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'",
+			)
+			.get();
+		if (tablePresent) {
 			const recorded = checkDb
 				.query<{ version: number | null }, []>(
 					'SELECT MAX(version) as version FROM schema_migrations',
 				)
 				.get();
 			currentVersion = recorded?.version ?? 0;
-		} catch {
-			currentVersion = 0;
 		}
 		checkDb.close();
 		if (currentVersion > highestSupported) {
