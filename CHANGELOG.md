@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.205.6](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.205.5...v7.205.6) (2026-11-22)
+
+
+### Bug Fixes
+
+* **swarm:** close PR 3909 review findings (shared exemption predicate, zero-TE receipt rule, tests, citations, docs) ([055ecea](https://github.com/ZaxbyHub/opencode-swarm/commit/055ecea448b1d956ca95a4cfb5870b4af3a60160))
+* **swarm:** docs-only SAST baseline pass + test-engineer-exempt route completeness wedge ([8d4242a](https://github.com/ZaxbyHub/opencode-swarm/commit/8d4242acb2936c612aaf9ad45b33862b11c4d8e4))
+
 ## [7.205.5](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.205.4...v7.205.5) (2026-11-22)
 
 
