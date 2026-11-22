@@ -115,15 +115,11 @@ export function redactReviewReceiptForPersistence<T extends ReviewReceipt>(
 		rejected.pass_conditions = rejected.pass_conditions.map((condition) =>
 			redactEvidenceText(condition),
 		);
-		// #3844 final-critic write-path pin: evidence references are
-		// reviewer-produced free text (paths + prose) — redacted like every
-		// other string array on the receipt (tolerant of legacy receipts
-		// that omitted the field).
-		if (rejected.evidence_references !== undefined) {
-			rejected.evidence_references = rejected.evidence_references.map((ref) =>
-				redactEvidenceText(ref),
-			);
-		}
+		// #3844: the evidence references are `path:line` strings whose PATH
+		// is model-authored free text. They are redacted where the project
+		// directory is known (the collectors, by the same rule the finding's
+		// file uses), NOT here: a plain redaction here would mangle a REAL
+		// deep path (the redactor's long mixed-class base64 rule matches one).
 		if (rejected.summary !== undefined) {
 			rejected.summary = redactEvidenceText(rejected.summary);
 		}

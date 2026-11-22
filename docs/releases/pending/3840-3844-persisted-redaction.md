@@ -114,12 +114,14 @@ docs/training-vault-remediation.md.
   finding's `duplicate_count`). A persisted review cannot tell them apart
   without persisting the secret, and the validator receives the same
   redacted text either way.
-- The two redactors are independently maintained pattern lists, and the
-  EVIDENCE redactor is the superset: the training path still stores a PEM
-  private-key block, a Stripe live key and a GitLab personal access token
-  verbatim (the evidence path redacts them). Every export re-redacts the
-  record content; the exported redaction counters count only the
-  redactions an export pass actually made.
+- The two redactors are independently maintained pattern lists. The EVIDENCE
+  redactor covers the TRAINING redactor's credential FAMILIES (it also
+  redacts a PEM private-key block, a Stripe live key and a GitLab personal
+  access token, which the training path still stores verbatim), but the two
+  differ on URL handling: the training redactor replaces a whole URL, while
+  the evidence path redacts the credential PARAMETERS of a URL. Every export
+  re-redacts the record content; the exported redaction counters count only
+  the redactions an export pass actually made.
 
 ## Replay-identity hardening
 
@@ -211,11 +213,12 @@ docs/training-vault-remediation.md.
   comparison used to reject every approved review with an unanchored
   finding.
 - The evidence path covers the training path's >=80-character mixed-class
-  base64 family, so the EVIDENCE redactor is a superset of the TRAINING one:
-  an undotted base64 secret that the training vault redacts before export no
-  longer survives in the clear in a review artifact. (The reverse does not
-  hold — the training path still stores a PEM block, a Stripe live key and a
-  GitLab token verbatim; the evidence path redacts them.)
+  base64 family, so an undotted base64 secret that the training vault
+  redacts before export no longer survives in the clear in a review artifact.
+  (The two redactors are not supersets of one another: the evidence path
+  also redacts a PEM block, a Stripe live key and a GitLab token, which the
+  training path stores verbatim, while the training path replaces a whole
+  URL and the evidence path redacts the credential parameters of one.)
 - The forge queue clamps the redacted event message to the bound its own
   disk schema enforces: a redaction placeholder is LONGER than the secret it
   replaces, so a message that sat exactly on the bound was pushed past it by
@@ -227,6 +230,16 @@ docs/training-vault-remediation.md.
   credential in it. When the redaction changed the PATH, the finding stays a
   body-only entry — an inline comment would name a file that does not exist
   in the repository.
+- The reviewer receipt's free text is redacted where the project directory
+  is known: the finding's title, body and file, a LEGACY issue's `path:line`
+  location, the evidence references and the structured findings of BOTH
+  verdicts. The redaction happens BEFORE the receipt, the finding identity and
+  the validation candidates are derived from it, so the persisted receipt and
+  the identity describe the same content.
+- The evidence path redacts a URL's credential PARAMETERS (`?password=…`, an
+  Azure SAS `&sig=…`, an S3 `X-Amz-Signature=…`): the training redactor
+  replaces a whole URL, so without the parameter names a URL-embedded
+  password persisted in the clear in review evidence.
 - The training export preserves the capture-time redaction history: a record
   whose credential was already replaced at capture has no new match on
   export, and overwriting the counters with the export pass's own result

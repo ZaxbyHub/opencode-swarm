@@ -90,8 +90,16 @@ const EVIDENCE_QUOTED_JSON_CREDENTIAL_PATTERN =
  */
 const EVIDENCE_SCHEME_TOKEN_PATTERN =
 	/\b(bearer|basic)(\s+)([A-Za-z0-9._~+/=-]{8,})/gi;
+/**
+ * The credential-bearing query parameters of a URL.
+ *
+ * The training redactor replaces a WHOLE URL, so a `?password=...` (or an
+ * Azure SAS `&sig=...`, or an S3 `X-Amz-Signature=...`) is covered there; the
+ * evidence path redacts the credential PARAMETER instead of the whole URL, so
+ * the parameter names have to be enumerated here.
+ */
 const URL_QUERY_CREDENTIALS_PATTERN =
-	/([?&])((?:access_token|api_key|apikey|token|secret|signature|client_secret)=)([^\s&'"<>]+)/gi;
+	/([?&])((?:access_token|api_key|apikey|token|secret|password|passwd|credential|signature|sig|client_secret)=)([^\s&'"<>]+)/gi;
 
 const EVIDENCE_BARE_TOKEN_VALUE_PATTERNS: ReadonlyArray<{
 	label: string;

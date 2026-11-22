@@ -20,6 +20,7 @@ import {
 	_internals,
 	collectReviewerReceiptAfter as collectReviewerReceiptAfterRaw,
 } from '../../../src/hooks/review-receipt-collector';
+import { canonicalizeValidationCandidates } from '../../../src/review/finding-validator';
 import { redactReviewFilePath } from '../../../src/review/review-file-path';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
@@ -68,6 +69,134 @@ describe('#3844 a review finding file path is redacted only when it names no rea
 		// not contain.
 		const known = new Set([DEEP_PATH]);
 		expect(redactReviewFilePath(projectDir, DEEP_PATH, known)).toBe(DEEP_PATH);
+	});
+
+	test('a LEGACY ISSUES line carries no raw token in its location', async () => {
+		// A reviewer that omits the JSON block reports its findings as
+		// ISSUES lines, and the location in that line is model-authored free
+		// text like any other.
+		const output = [
+			'VERDICT: REJECTED',
+			'REUSE_RE_VERIFICATION: SKIPPED',
+			'RISK: HIGH',
+			'ISSUES:',
+			`- [HIGH] src/${GH}.ts:42 the credential is committed`,
+			'SKILL_COMPLIANCE: COMPLIANT',
+			'DIRECTIVE_COMPLIANCE: none',
+			'FIXES:',
+			'- remove the credential',
+		].join('\n');
+
+		const receiptPath = await collectReviewerReceiptAfterRaw(
+			projectDir,
+			{
+				tool: 'Task',
+				args: reviewerArgs('TASK: Review y'),
+				sessionID: 's1',
+			},
+			{ output },
+			{ config: enabledConfig },
+		);
+		expect(receiptPath).not.toBeNull();
+		const receiptText = fs.readFileSync(receiptPath as string, 'utf-8');
+		expect(receiptText).not.toContain(GH);
+		const receipt = JSON.parse(receiptText);
+		for (const finding of receipt.blocking_findings ?? []) {
+			expect(String(finding.location)).not.toContain(GH);
+		}
+		for (const reference of receipt.evidence_references ?? []) {
+			expect(String(reference)).not.toContain(GH);
+		}
+	});
+
+	test('an APPROVED receipt redacts its structured findings too', async () => {
+		const output = [
+			'VERDICT: APPROVED',
+			'REUSE_RE_VERIFICATION: SKIPPED (no new exports)',
+			'RISK: LOW',
+			'ISSUES: none (see structured findings)',
+			'DIRECTIVE_COMPLIANCE: none',
+			'FIXES: none',
+			'```json',
+			JSON.stringify({
+				findings: [
+					{
+						title: 'hardcoded credential in a path',
+						body: `the path holds ${GH}`,
+						severity: 'high',
+						confidence: 0.93,
+						file: `src/${GH}.ts`,
+						line_start: 42,
+						line_end: 43,
+					},
+				],
+				verdict: 'APPROVED',
+				overall_confidence: 0.91,
+			}),
+			'```',
+		].join('\n');
+
+		const receiptPath = await collectReviewerReceiptAfterRaw(
+			projectDir,
+			{
+				tool: 'Task',
+				args: reviewerArgs('TASK: Review z'),
+				sessionID: 's1',
+			},
+			{ output },
+			{ config: enabledConfig },
+		);
+		expect(receiptPath).not.toBeNull();
+		const receiptText = fs.readFileSync(receiptPath as string, 'utf-8');
+		expect(receiptText).not.toContain(GH);
+	});
+
+	test('the collector finding id describes the PERSISTED finding', async () => {
+		// The id is a hash of the title, the body and the file, so it must
+		// be derived from the SAME (redacted) payload the receipt persists.
+		const output = [
+			'VERDICT: REJECTED',
+			'REUSE_RE_VERIFICATION: SKIPPED',
+			'RISK: HIGH',
+			'ISSUES: none (see structured findings)',
+			'DIRECTIVE_COMPLIANCE: none',
+			'FIXES: remove the credential',
+			'```json',
+			JSON.stringify({
+				findings: [
+					{
+						title: 'hardcoded credential',
+						body: `the path holds ${GH}`,
+						severity: 'high',
+						confidence: 0.93,
+						file: `src/${GH}.ts`,
+						line_start: 42,
+						line_end: 43,
+					},
+				],
+				verdict: 'REJECTED',
+				overall_confidence: 0.91,
+			}),
+			'```',
+		].join('\n');
+
+		const receiptPath = await collectReviewerReceiptAfterRaw(
+			projectDir,
+			{
+				tool: 'Task',
+				args: reviewerArgs('TASK: Review w'),
+				sessionID: 's1',
+			},
+			{ output },
+			{ config: enabledConfig },
+		);
+		expect(receiptPath).not.toBeNull();
+		const receipt = JSON.parse(fs.readFileSync(receiptPath as string, 'utf-8'));
+		const persisted = (receipt.structured_findings ?? [])[0];
+		expect(persisted).toBeDefined();
+		const [canonical] = canonicalizeValidationCandidates([persisted]);
+		const blocking = (receipt.blocking_findings ?? [])[0];
+		expect(blocking.finding_id).toBe(canonical.finding_id);
 	});
 
 	test('the persisted reviewer receipt carries no raw token in its file or location', async () => {

@@ -390,6 +390,20 @@ describe('#3844 the shared redactor is idempotent and covers the training famili
 		}
 	});
 
+	test('a URL query credential is redacted', () => {
+		// The training redactor replaces a whole URL; the evidence path
+		// redacts the credential PARAMETER, so the parameter names have to
+		// be covered.
+		for (const url of [
+			'https://example.com/login?user=bob&password=Hunter2Synthetic',
+			'https://example.com/blob?sv=2024&sig=AbCdEf0123456789',
+		]) {
+			const out = redactEvidenceText(url);
+			expect(out).not.toContain('Hunter2Synthetic');
+			expect(out).not.toContain('AbCdEf0123456789');
+		}
+	});
+
 	test('the key/value arm preserves the separator it consumed', () => {
 		// The separator used to be part of the match but not of the
 		// replacement, so the words were glued together. The fixture puts

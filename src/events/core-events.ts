@@ -261,16 +261,17 @@ function fitRedactedEventToLineLimit(
 function trimRedactedCarrier(value: string, maxChars: number): string {
 	if (maxChars <= 0) return '';
 	let cut = value.length <= maxChars ? value : value.slice(0, maxChars);
-	const markerStart = Math.max(
-		cut.lastIndexOf('[REDACTED'),
-		cut.lastIndexOf('<redacted'),
-	);
-	if (
-		markerStart >= 0 &&
-		!cut.slice(markerStart).includes(']') &&
-		!cut.slice(markerStart).includes('>')
-	) {
-		cut = cut.slice(0, markerStart);
+	// A cut that lands INSIDE a marker's head ('[RED', '[REDACTE') leaves a
+	// fragment that is neither the secret nor a usable value: the tail is
+	// dropped when it is a PREFIX of a marker head and the marker was never
+	// closed.
+	const markerStart = Math.max(cut.lastIndexOf('['), cut.lastIndexOf('<'));
+	if (markerStart >= 0) {
+		const tail = cut.slice(markerStart);
+		const head = tail.startsWith('<') ? '<redacted' : '[REDACTED';
+		if (head.startsWith(tail) && !tail.includes(']') && !tail.includes('>')) {
+			cut = cut.slice(0, markerStart);
+		}
 	}
 	return cut;
 }

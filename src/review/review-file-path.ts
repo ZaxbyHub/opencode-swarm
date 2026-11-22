@@ -105,3 +105,21 @@ export function redactReviewFilePath(
 	if (pathResolvesInsideProject(directory, file)) return file;
 	return redactEvidenceField(file, EVIDENCE_FINDING_FILE_MAX);
 }
+
+/**
+ * A `path:line` location: the path part is redacted by the same rule, the
+ * line suffix is untouched.
+ *
+ * A LEGACY (non-JSON) review issue carries its location in the ISSUES
+ * line, so the path in it is model-authored free text like any other.
+ */
+export function redactLocationPath(
+	directory: string,
+	location: string,
+): string {
+	if (typeof location !== 'string' || location.length === 0) return location;
+	const separator = location.lastIndexOf(':');
+	if (separator <= 0) return location;
+	const file = location.slice(0, separator);
+	return `${redactReviewFilePath(directory, file)}${location.slice(separator)}`;
+}
