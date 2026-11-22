@@ -404,7 +404,8 @@ export function enforceSpecDriftGate(
 
 		let message =
 			`SPEC_DRIFT_BLOCK: tool "${toolName}" is blocked because .swarm/spec-staleness.json exists. ` +
-			'Run /swarm clarify to enter spec repair mode. Clarify alone does not clear drift: rewrite the spec so recovery can reconcile it, or run /swarm acknowledge-spec-drift to dismiss, then retry.';
+			'Repair: persist the accepted spec through the canonical spec_write tool (dispatch the spec_writer agent with the accepted content) — its drift recovery reconciles the plan hash and clears this marker; then retry. ' +
+			'The user may instead run /swarm clarify to enter spec repair mode (clarify alone does not clear drift) or /swarm acknowledge-spec-drift to dismiss the drift.';
 
 		if (diffInfo) {
 			const sectionSummary =

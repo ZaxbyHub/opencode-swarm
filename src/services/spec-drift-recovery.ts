@@ -369,6 +369,18 @@ export async function reconcileSpecDrift(
 		actor: RecoveryActor;
 		/** Caller already holds the spec.md lock across the canonical spec write. */
 		specLockAlreadyHeld?: boolean;
+		/**
+		 * Canonical spec_write only: reconcile the plan's specHash even when the
+		 * drift marker has not materialized yet. The marker is written lazily by
+		 * the next loadPlan — which runs AFTER the spec write — so without this
+		 * path the FIRST canonical spec change always leaves plan.json at the
+		 * old hash, the subsequent loadPlan writes the marker, and every
+		 * plan-mutating tool wedges with SPEC_DRIFT_BLOCK (the marker-exists
+		 * repair could only clear it via a second spec_write nobody asks for).
+		 * With this flag the canonical write synthesizes the drift state from
+		 * the plan itself and runs the same audited repair transaction.
+		 */
+		reconcilePlanHashWithoutMarker?: boolean;
 	},
 ): Promise<SpecDriftRecoveryResult> {
 	_internals.assertProjectRoot(directory);
@@ -387,7 +399,7 @@ export async function reconcileSpecDrift(
 	);
 
 	const markerMaybe = await _internals.readFileText(markerPath);
-	if (markerMaybe === null) {
+	if (markerMaybe === null && !options.reconcilePlanHashWithoutMarker) {
 		return {
 			status: 'no_marker',
 			mode: options.mode,
@@ -449,21 +461,58 @@ export async function reconcileSpecDrift(
 	try {
 		try {
 			const authoritativeMarkerRaw = await _internals.readFileText(markerPath);
+			let marker: SpecStalenessMarker | null = null;
+			let markerHash: string;
+			let markerSynthesized = false;
 			if (authoritativeMarkerRaw === null) {
-				return {
-					status: 'no_marker',
-					mode: options.mode,
-					message: 'No spec drift detected.',
+				// Pre-marker window (canonical spec_write only): the drift marker
+				// materializes lazily on the next loadPlan, which runs AFTER this
+				// spec write. Synthesize the drift state from the plan itself so
+				// the canonical write reconciles the plan hash now, through the
+				// same audited repair transaction, instead of letting the marker
+				// wedge save_plan later. Without a plan, without a stored
+				// specHash, or with an already-consistent hash there is nothing
+				// to reconcile — behave exactly like the no-marker case.
+				if (!options.reconcilePlanHashWithoutMarker) {
+					return {
+						status: 'no_marker',
+						mode: options.mode,
+						message: 'No spec drift detected.',
+					};
+				}
+				const planNow = await _internals.loadPlanJsonOnly(directory);
+				const specNow = _internals.readEffectiveSpecSync(directory);
+				const planHashNow = planNow?.specHash ?? null;
+				if (
+					!planNow ||
+					planHashNow === null ||
+					planHashNow === (specNow?.hash ?? null)
+				) {
+					return {
+						status: 'no_marker',
+						mode: options.mode,
+						message: 'No spec drift detected.',
+					};
+				}
+				marker = {
+					planTitle: planNow.title,
+					phase: planNow.current_phase ?? 1,
+					specHash_plan: planHashNow,
+					specHash_current: specNow?.hash ?? null,
+					reason:
+						'canonical spec write rebound the plan spec hash before the drift marker materialized',
+					timestamp: _internals.now(),
 				};
-			}
-
-			const marker = _internals.parseMarker(authoritativeMarkerRaw);
-			if (!marker) {
-				return buildCorruptMarkerResult(options.mode);
+				markerHash = sha256(JSON.stringify(marker));
+				markerSynthesized = true;
+			} else {
+				marker = _internals.parseMarker(authoritativeMarkerRaw);
+				if (!marker) {
+					return buildCorruptMarkerResult(options.mode);
+				}
+				markerHash = sha256(authoritativeMarkerRaw);
 			}
 			errorMarker = marker;
-
-			const markerHash = sha256(authoritativeMarkerRaw);
 			const existingWalRaw = await _internals.readFileText(walPath);
 			const existingWal =
 				existingWalRaw === null ? null : _internals.parseWal(existingWalRaw);
@@ -659,8 +708,9 @@ export async function reconcileSpecDrift(
 			return {
 				status: 'applied',
 				mode: wal.mode,
-				message:
-					wal.mode === 'repair'
+				message: markerSynthesized
+					? `Plan spec hash rebound to the canonical spec for plan "${wal.planTitle}" (phase ${wal.phase}) before a drift marker materialized.`
+					: wal.mode === 'repair'
 						? `Spec drift repaired for plan "${wal.planTitle}" (phase ${wal.phase}).`
 						: `Spec drift acknowledged for plan "${wal.planTitle}" (phase ${wal.phase}).`,
 				phase: wal.phase,

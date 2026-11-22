@@ -128,6 +128,7 @@ export const spec_write: ReturnType<typeof createSwarmTool> = createSwarmTool({
 					mode: 'repair',
 					actor: 'spec_write',
 					specLockAlreadyHeld: true,
+					reconcilePlanHashWithoutMarker: true,
 				});
 			} catch (error) {
 				specDriftRecovery = {

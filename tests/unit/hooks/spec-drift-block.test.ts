@@ -97,10 +97,13 @@ describe('enforceSpecDriftGate', () => {
 		}
 	});
 
-	test('explains that clarify alone does not clear drift', async () => {
+	test('explains the agent-executable repair path and that clarify alone does not clear drift', async () => {
 		await writeStalenessFile();
 		expect(() => enforceSpecDriftGate(tmpDir, 'save_plan')).toThrow(
-			/Clarify alone does not clear drift/,
+			/clarify alone does not clear drift/i,
+		);
+		expect(() => enforceSpecDriftGate(tmpDir, 'save_plan')).toThrow(
+			/canonical spec_write/,
 		);
 	});
 
