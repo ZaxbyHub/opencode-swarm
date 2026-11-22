@@ -118,8 +118,11 @@ export function redactLocationPath(
 	location: string,
 ): string {
 	if (typeof location !== 'string' || location.length === 0) return location;
-	const separator = location.lastIndexOf(':');
-	if (separator <= 0) return location;
-	const file = location.slice(0, separator);
-	return `${redactReviewFilePath(directory, file)}${location.slice(separator)}`;
+	const match = /^(.*):(\d+)$/.exec(location);
+	if (!match) {
+		// No `path:line` shape: the whole string is free text, and it is
+		// redacted by the same rule.
+		return redactReviewFilePath(directory, location);
+	}
+	return `${redactReviewFilePath(directory, match[1])}:${match[2]}`;
 }

@@ -37,6 +37,7 @@ import type {
 	ReviewFinding,
 } from '../agents/agent-output-schema.js';
 import { resolveRetentionCap } from '../retention/caps.js';
+import { redactLocationPath } from '../review/review-file-path.js';
 import {
 	EVIDENCE_FINDING_BODY_MAX,
 	EVIDENCE_FINDING_TITLE_MAX,
@@ -91,6 +92,7 @@ function redactStructuredFindingsForPersistence(
 
 export function redactReviewReceiptForPersistence<T extends ReviewReceipt>(
 	receipt: T,
+	directory?: string,
 ): T {
 	const clone = structuredClone(receipt);
 	if (clone.receipt_type === 'rejected') {
@@ -116,10 +118,18 @@ export function redactReviewReceiptForPersistence<T extends ReviewReceipt>(
 			redactEvidenceText(condition),
 		);
 		// #3844: the evidence references are `path:line` strings whose PATH
-		// is model-authored free text. They are redacted where the project
-		// directory is known (the collectors, by the same rule the finding's
-		// file uses), NOT here: a plain redaction here would mangle a REAL
-		// deep path (the redactor's long mixed-class base64 rule matches one).
+		// is model-authored free text. When the project directory is known
+		// the path part is redacted by the same rule the finding's file uses
+		// (a plain redaction would mangle a REAL deep path — the redactor's
+		// long mixed-class base64 rule matches one); without it the plain
+		// redaction still removes a credential from the reference.
+		if (rejected.evidence_references !== undefined) {
+			rejected.evidence_references = rejected.evidence_references.map((ref) =>
+				typeof directory === 'string'
+					? redactLocationPath(directory, ref)
+					: redactEvidenceText(ref),
+			);
+		}
 		if (rejected.summary !== undefined) {
 			rejected.summary = redactEvidenceText(rejected.summary);
 		}
@@ -786,7 +796,11 @@ export async function persistReviewReceipt(
 	try {
 		await fs.promises.writeFile(
 			tmpPath,
-			JSON.stringify(redactReviewReceiptForPersistence(receipt), null, 2),
+			JSON.stringify(
+				redactReviewReceiptForPersistence(receipt, directory),
+				null,
+				2,
+			),
 			'utf-8',
 		);
 		assertDirectReceiptFile(context, tmpPath, true);
