@@ -308,6 +308,7 @@ describe('#3770 planned-tasks refusal', () => {
 	});
 
 	test('truncated ledger defers in both projection directions without mutation', async () => {
+		// Direction 1: projection shows COMPLETED tasks.
 		fs.writeFileSync(
 			path.join(tempDir, '.swarm', 'plan.json'),
 			JSON.stringify(planWithTasks([{ id: '1.1', status: 'completed' }])),
@@ -316,10 +317,18 @@ describe('#3770 planned-tasks refusal', () => {
 			path.join(tempDir, '.swarm', 'plan-ledger.jsonl'),
 			'{"seq":1,"broken"\n',
 		);
-		const before = snapshotSwarmTree(tempDir);
-		const unfinished = await readUnfinishedPlannedTasks(tempDir, 1);
-		expect(unfinished).toBeNull();
-		expect(treesEqual(before, snapshotSwarmTree(tempDir))).toBe(true);
+		const beforeCompleted = snapshotSwarmTree(tempDir);
+		expect(await readUnfinishedPlannedTasks(tempDir, 1)).toBeNull();
+		expect(treesEqual(beforeCompleted, snapshotSwarmTree(tempDir))).toBe(true);
+		// Direction 2: projection shows PENDING tasks (a corrupt authority may
+		// hold the opposite truth — the helper must defer, not decide).
+		fs.writeFileSync(
+			path.join(tempDir, '.swarm', 'plan.json'),
+			JSON.stringify(planWithTasks([{ id: '1.1', status: 'pending' }])),
+		);
+		const beforePending = snapshotSwarmTree(tempDir);
+		expect(await readUnfinishedPlannedTasks(tempDir, 1)).toBeNull();
+		expect(treesEqual(beforePending, snapshotSwarmTree(tempDir))).toBe(true);
 	});
 
 	test('ledger-ahead-completed passes (stale pending projection)', async () => {
