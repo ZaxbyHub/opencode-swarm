@@ -88,6 +88,15 @@ export function redactReviewReceiptForPersistence<T extends ReviewReceipt>(
 		rejected.pass_conditions = rejected.pass_conditions.map((condition) =>
 			redactEvidenceText(condition),
 		);
+		// #3844 final-critic write-path pin: evidence references are
+		// reviewer-produced free text (paths + prose) — redacted like every
+		// other string array on the receipt (tolerant of legacy receipts
+		// that omitted the field).
+		if (rejected.evidence_references !== undefined) {
+			rejected.evidence_references = rejected.evidence_references.map(
+				(ref) => redactEvidenceText(ref),
+			);
+		}
 		if (rejected.summary !== undefined) {
 			rejected.summary = redactEvidenceText(rejected.summary);
 		}
