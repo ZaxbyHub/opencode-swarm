@@ -953,26 +953,26 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/hooks/delegation-gate/dead-lane-reclaim.ts'],
 		writerCitations: [
-			'src/hooks/delegation-gate/dead-lane-reclaim.ts:139 recordDeadLaneReclaim — dedupe-by-lanePath merge, then writeStore (:112) rewrites the bounded store atomically via atomicWriteSwarmFileSync (:131); the only writer — the three strand sites (worktree-isolation handleStrandedLane, delegation-gate terminal-failure path, reset-session EBUSY bulk-clean path) all call this one seam (issue #2599)',
-			'src/hooks/delegation-gate/dead-lane-reclaim.ts:250 reclaimDeadLanes — the consuming pass at next start; fs.rmSync force removes the store file once no entries remain (:329)',
+			'src/hooks/delegation-gate/dead-lane-reclaim.ts:140 recordDeadLaneReclaim — dedupe-by-lanePath merge, then writeStore (:113) rewrites the bounded store atomically via atomicWriteSwarmFileSync (:132); the only writer — the three strand sites (worktree-isolation handleStrandedLane, delegation-gate terminal-failure path, reset-session EBUSY bulk-clean path) all call this one seam (issue #2599)',
+			'src/hooks/delegation-gate/dead-lane-reclaim.ts:251 reclaimDeadLanes — the consuming pass at next start; fs.rmSync force removes the store file once no entries remain (:353)',
 		],
 		readerCitations: [
-			'src/hooks/delegation-gate/dead-lane-reclaim.ts:89 readStore — single file, sync readFileSync bounded by MAX_DEAD_LANE_RECLAIM_BYTES (:91-93); missing/oversized/malformed reads fail to the empty store, never throw',
+			'src/hooks/delegation-gate/dead-lane-reclaim.ts:90 readStore — single file, sync readFileSync bounded by MAX_DEAD_LANE_RECLAIM_BYTES (:92-93); missing/oversized/malformed reads fail to the empty store, never throw',
 			'src/hooks/init-orphan-recovery.ts reclaimDeadLanes (Step 3) — withTimeout-bounded startup pass; retained/preserved outcomes logged, never fatal to init',
 		],
-		schemaVersion: '1 (DeadLaneReclaimStore.schemaVersion, dead-lane-reclaim.ts:52)',
+		schemaVersion: '1 (DeadLaneReclaimStore.schemaVersion, dead-lane-reclaim.ts:53)',
 		stateClass: 'operational',
 		privacyClass: 'metadata',
 		writeLimits: {
-			bound: 'MAX_DEAD_LANE_RECLAIMS=512 entries + MAX_DEAD_LANE_RECLAIM_BYTES=256 KiB serialized, drop-oldest enforced on BOTH axes in writeStore (dead-lane-reclaim.ts:35-36,112-134)',
+			bound: 'MAX_DEAD_LANE_RECLAIMS=512 entries + MAX_DEAD_LANE_RECLAIM_BYTES=256 KiB serialized, drop-oldest enforced on BOTH axes in writeStore (dead-lane-reclaim.ts:36-37,113-135)',
 			scope: 'global',
-			citation: 'src/hooks/delegation-gate/dead-lane-reclaim.ts:35-36,116-134',
+			citation: 'src/hooks/delegation-gate/dead-lane-reclaim.ts:36-37,117-135',
 		},
 		readBound: {
 			pattern: 'full-file',
 			bound: 'single ≤256 KiB JSON, read once per recordDeadLaneReclaim and once per startup reclaim pass',
 			sync: true,
-			citation: 'src/hooks/delegation-gate/dead-lane-reclaim.ts:89-110',
+			citation: 'src/hooks/delegation-gate/dead-lane-reclaim.ts:90-111',
 		},
 		lockModel: 'in-process; atomic temp+rename last-writer-wins rewrite — a raced record at worst drops one lane from a later reclaim pass, and replay is fail-closed (ownership + dirty gates make every reclaim idempotent)',
 		crashBehavior: 'atomic temp+rename; a torn read fails to the empty store and the stranded lane directory itself remains visible to init-orphan-recovery\u2019s orphan sweep — no state is only-recoverable from this file',
@@ -986,7 +986,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		owner: '#2599',
 		disposition: {
 			kind: 'not-a-defect',
-			proof: 'Hard dual bound 512 entries / 256 KiB serialized with drop-oldest on both axes (src/hooks/delegation-gate/dead-lane-reclaim.ts:35-36,116-134); the store is a transient pending-reclaim queue — entries are consumed at the next start and the file deleted when empty (:250,:329), with fail-closed ownership/dirty gates preventing destructive replay (issue #2599 acceptance).',
+			proof: 'Hard dual bound 512 entries / 256 KiB serialized with drop-oldest on both axes (src/hooks/delegation-gate/dead-lane-reclaim.ts:36-37,117-135); the store is a transient pending-reclaim queue — entries are consumed at the next start and the file deleted when empty (:251,:353), with fail-closed ownership/dirty gates preventing destructive replay (issue #2599 acceptance).',
 		},
 	},
 	{

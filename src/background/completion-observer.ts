@@ -1222,11 +1222,27 @@ async function finishPublishedCoderWorktree(
 			descriptor.worktreeDir ?? undefined,
 			{ retainBranch: true },
 		);
+		// #3888: a CONFIRMED re-provision skip is success-equivalent — the
+		// surviving lane is owned by a live dispatch, not cleanup debt. An
+		// UNCERTAIN skip keeps the lane and stays retryable (the tracking entry
+		// was retained by the cleanup itself), so report it as debt, not
+		// removal failure.
+		if (cleanup.skippedReprovisioned) {
+			return {
+				ok: true,
+				record,
+				outcome:
+					'completed and settled (lane re-provisioned by a live dispatch)',
+				legacyTransferred: true,
+			};
+		}
 		if ((await settlementLaneState(descriptor.worktreePath)) !== 'absent')
 			return failure(
-				cleanup.removedWorktree
-					? 'lane still exists after cleanup'
-					: 'lane removal failed',
+				cleanup.skippedOwnershipUncertain
+					? 'lane ownership was uncertain; cleanup retryable'
+					: cleanup.removedWorktree
+						? 'lane still exists after cleanup'
+						: 'lane removal failed',
 			);
 		return {
 			ok: true,
@@ -1630,8 +1646,24 @@ async function settleCoder(
 		},
 	);
 	if (mergeResult.outcome === 'merged') {
+		// #3888: a CONFIRMED re-provision skip is success-equivalent — the
+		// surviving lane is owned by a live dispatch, not cleanup debt. An
+		// UNCERTAIN skip stays retryable debt (reported below as before).
+		if (mergeResult.skippedReprovisioned) {
+			const latestSkip =
+				(await findDelegationForCompletion(directory, record.correlationId))
+					?.record ?? record;
+			return {
+				ok: true,
+				record: latestSkip,
+				outcome:
+					'completed and settled (lane re-provisioned by a live dispatch)',
+			};
+		}
 		const cleanupDebt = record.planTaskId
-			? 'worktree cleanup debt remains; durable reconciliation will retry'
+			? mergeResult.skippedOwnershipUncertain
+				? 'lane ownership was uncertain; cleanup retryable by durable reconciliation'
+				: 'worktree cleanup debt remains; durable reconciliation will retry'
 			: 'worktree cleanup requires manual recovery';
 		try {
 			if ((await settlementLaneState(descriptor.worktreePath)) !== 'absent')

@@ -108,6 +108,10 @@ export const _internals: {
 	scanWorktreeProvisioningLifecycleJournalForRecovery: typeof scanWorktreeProvisioningLifecycleJournalForRecovery;
 	scanRegisteredWorktreeLiveness: typeof scanRegisteredWorktreeLiveness;
 	removeWorktreeProvisioningOwner: typeof removeWorktreeProvisioningOwner;
+	/** #3903 FB-018: injectable so a timeout/interleaving probe can settle it. */
+	reclaimDeadLanes: typeof reclaimDeadLanes;
+	/** #3903 FB-018: shortens the Step 3 budget in falsification tests. */
+	initOrphanRecoveryTimeoutMs: number;
 } = {
 	rmSync: fs.rmSync,
 	removeWorktree,
@@ -125,6 +129,8 @@ export const _internals: {
 	scanWorktreeProvisioningLifecycleJournalForRecovery,
 	scanRegisteredWorktreeLiveness,
 	removeWorktreeProvisioningOwner,
+	reclaimDeadLanes,
+	initOrphanRecoveryTimeoutMs: INIT_ORPHAN_RECOVERY_TIMEOUT_MS,
 };
 
 export interface InitOrphanRecoveryResult {
@@ -372,6 +378,11 @@ export async function runInitOrphanRecovery(
 ): Promise<InitOrphanRecoveryResult> {
 	let result: InitOrphanRecoveryResult;
 	let recoveryLockRelease: (() => Promise<void>) | undefined;
+	// #3903 FB-018: withTimeout never cancels the reclaim promise. Track its
+	// settlement so the lifecycle exclusion is released only once the in-flight
+	// reclaim is quiescent — otherwise a re-dispatch can publish a lane owner
+	// between the reclaim's classification and its destructive removal.
+	let reclaimSettled: Promise<void> = Promise.resolve();
 	const recoveryReplayWarnings: string[] = [];
 
 	try {
@@ -854,14 +865,19 @@ export async function runInitOrphanRecovery(
 		// on a held handle (EBUSY). Bounded and fail-open like every other
 		// step: per-lane failures retain their reclaim record for the next
 		// start instead of blocking init.
+		const reclaimPromise = _internals.reclaimDeadLanes(directory, {
+			activeSessionIds,
+			protectedWorktreePaths,
+		});
+		reclaimSettled = reclaimPromise.then(
+			() => undefined,
+			() => undefined,
+		);
 		const reclaimResult = await withTimeout(
-			reclaimDeadLanes(directory, {
-				activeSessionIds,
-				protectedWorktreePaths,
-			}),
-			INIT_ORPHAN_RECOVERY_TIMEOUT_MS,
+			reclaimPromise,
+			_internals.initOrphanRecoveryTimeoutMs,
 			new Error(
-				`runInitOrphanRecovery exceeded ${INIT_ORPHAN_RECOVERY_TIMEOUT_MS}ms budget during dead-lane reclaim; continuing without reclaim`,
+				`runInitOrphanRecovery exceeded ${_internals.initOrphanRecoveryTimeoutMs}ms budget during dead-lane reclaim; continuing without reclaim`,
 			),
 		).catch((error: unknown) => ({
 			reclaimed: [] as string[],
@@ -924,11 +940,18 @@ export async function runInitOrphanRecovery(
 			[],
 		);
 	} finally {
-		try {
-			await recoveryLockRelease?.();
-		} catch {
-			// Best-effort release; proper-lockfile has a stale timeout fallback.
-		}
+		// #3903 FB-018: release only AFTER the reclaim pass is quiescent. The
+		// init budget bounds how long we WAIT for its result, not the lifetime of
+		// the lifecycle exclusion; releasing on timeout would let a re-dispatch
+		// publish an owner while reclaim still classifies/removes lanes.
+		const releaseAfterReclaim = async (): Promise<void> => {
+			try {
+				await recoveryLockRelease?.();
+			} catch {
+				// Best-effort release; proper-lockfile has a stale timeout fallback.
+			}
+		};
+		void reclaimSettled.then(releaseAfterReclaim, releaseAfterReclaim);
 	}
 
 	return result;
