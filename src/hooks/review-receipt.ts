@@ -85,7 +85,10 @@ function redactStructuredFindingsForPersistence(
 		// The file path is model-authored free text (for an unanchored
 		// finding it is whatever the model wrote), so it is redacted like
 		// the other free-text fields.
-		file: redactEvidenceField(finding.file, EVIDENCE_FINDING_FILE_MAX),
+		file:
+			typeof finding.file === 'string'
+				? redactEvidenceField(finding.file, EVIDENCE_FINDING_FILE_MAX)
+				: finding.file,
 	}));
 }
 

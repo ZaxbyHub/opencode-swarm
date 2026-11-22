@@ -12,15 +12,14 @@
  * Synthetic tokens only.
  */
 import { describe, expect, test } from 'bun:test';
-import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
-import * as os from 'node:os';
-import * as path from 'node:path';
+import { rmSync } from 'node:fs';
 import {
 	appendCoreEventSync,
 	appendCoreEventsSync,
 	CORE_EVENT_LINE_TOO_LARGE,
 	_internals as coreInternals,
 } from '../../../src/events/core-events';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 const LIMIT = coreInternals.limits.maxLineBytes;
 // A URL userinfo GROWS the text (the placeholder is longer than the
@@ -44,9 +43,7 @@ function nearLimitDetail(): string {
 
 describe('#3844 the core-events writer fits a redacted line to the bound', () => {
 	test('an event whose un-redacted line fits is still written', () => {
-		const dir = realpathSync(
-			mkdtempSync(path.join(os.tmpdir(), 'sw-3844-core-events-')),
-		);
+		const dir = canonicalMkdtemp('sw-3844-core-events-');
 		try {
 			const detail = nearLimitDetail();
 			const rawBytes =
@@ -63,9 +60,7 @@ describe('#3844 the core-events writer fits a redacted line to the bound', () =>
 	}, 60_000);
 
 	test('an event whose UN-redacted line is over the bound is still refused', () => {
-		const dir = realpathSync(
-			mkdtempSync(path.join(os.tmpdir(), 'sw-3844-core-events-')),
-		);
+		const dir = canonicalMkdtemp('sw-3844-core-events-');
 		try {
 			const detail = 'y'.repeat(LIMIT + 16);
 			expect(() => appendCoreEventSync(dir, event(detail) as never)).toThrow(
@@ -77,9 +72,7 @@ describe('#3844 the core-events writer fits a redacted line to the bound', () =>
 	}, 60_000);
 
 	test('the batch writer fits a redacted line the same way', () => {
-		const dir = realpathSync(
-			mkdtempSync(path.join(os.tmpdir(), 'sw-3844-core-events-')),
-		);
+		const dir = canonicalMkdtemp('sw-3844-core-events-');
 		try {
 			const detail = nearLimitDetail();
 			expect(() =>
