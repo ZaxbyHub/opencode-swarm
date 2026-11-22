@@ -18,6 +18,21 @@ Nothing is silently dropped.
 
 `ASK` takes precedence over fixing in the PR when the fix itself needs a product or compatibility decision. `ABSORB` takes precedence over `RECORD` when an open issue already covers the item.
 
+### Open-issue corpus check before dispositions are published
+
+Run the disposition candidates against the repo's open-issue corpus BEFORE the
+disposition table is published — an ABSORB check is cheap before publishing and
+expensive to retrofit after RECORD rows are live. Sweep the repo's open issues
+(and their bodies, not just titles) for every residual; title match is not
+coverage. Verified 2026-11-22 (ragappv3 PR #1193 retrospective): three
+RECORD-d residuals mapped to OPEN workstream issues only when a user-directed
+pass checked the open-issue corpus after the dispositions were already
+published — the rows had to be re-opened and re-filed as follow-up issues
+(#1201/#1202) instead of pointing at live tracking. When the sweep finds
+coverage, upgrade the row to `ABSORB` and comment on the covering issue with
+the new evidence; when it finds none and the item fails the necessity gate,
+`RECORD` stands.
+
 In practice `FILE` means Priority items plus items the user approved. Every other item that passes the gate is an Improvement, which is an `ASK`.
 
 ## Critic review before the user sees it
