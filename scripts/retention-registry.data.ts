@@ -1067,7 +1067,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		id: 'pr-review-run-artifacts',
 		category: 2,
 		pathGrammar:
-			'.swarm/pr-review/{run_id}/{findings.jsonl, feedback-handoff.json, trigger-eval.json, run-reservation.json, coverage-disclosure.json, verdict-settlement.reviewer.json, verdict-settlement.critic.json, validation-skip-disclosure.json, submission-payload.json, native-completion.json, native-submission.json, post-abort-export.json} + .swarm/pr-review/route-receipts/{encoded-session}--{encoded-task}.json (or sha256_<pair-hex>.json when the complete basename would exceed 255 bytes)',
+			'.swarm/pr-review/{run_id}/{findings.jsonl, feedback-handoff.json, trigger-eval.json, run-reservation.json, coverage-disclosure.json, verdict-settlement.reviewer.json, verdict-settlement.critic.json, validation-skip-disclosure.json, submission-payload.json, native-completion.json, native-submission.json, post-abort-export.json, replay-identity.json, replay-identity.handoff.claim} + .swarm/pr-review/replay-identity.salt (project-scoped, #3844) + .swarm/pr-review/route-receipts/{encoded-session}--{encoded-task}.json (or sha256_<pair-hex>.json when the complete basename would exceed 255 bytes)',
 		canonicalRoot: 'project-swarm',
 		writerModules: [
 			'src/tools/write-pr-review-artifact.ts',
@@ -1080,6 +1080,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			'src/background/pr-feedback-event-queue.ts',
 			'src/review/evidence.ts',
 			'src/review/routing-enforcement.ts',
+			'src/security/replay-identity.ts',
 		],
 		writerCitations: [
 			'src/tools/write-pr-review-artifact.ts:715-727 — findings JSONL append (≤1000 records/call at :1002) + handoff JSON create at :931, atomic',
@@ -1091,6 +1092,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			'src/pr-review/verdict-settlement.ts persistVerdictSettlementReceipt — per-phase verdict-settlement.{reviewer,critic}.json atomic write via writeAtomicJson, ≤64 KiB (writer-side byte guard mirrors the bounded reader), ≤128 items, rename-overwritten on re-admission (issue #3101)',
 			'src/background/pr-feedback-event-queue.ts:456 writeQueueRecord — feedback-handoff lock/content writes',
 			'src/review/routing-enforcement.ts:481 persistReviewRouteReceipt — schema-validated route-receipt replacement, atomic, ≤64 KiB',
+			'src/security/replay-identity.ts loadOrCreateReplayIdentitySalt/writeReplayIdentityFingerprint/claimReplayIdentityFingerprint (#3844) — project-scoped salt (create-only wx, 64-hex, fail-closed on corruption), per-run replay-identity.json sidecar via atomicWriteSwarmFileSync (non-secret HMAC fingerprints only), and the create-only handoff claim file (immutable for the run life; identity-reserving residue after a failed artifact create)',
 		],
 		readerCitations: [
 			'src/tools/write-pr-review-artifact.ts readFindings — 10 MiB read guard',
@@ -1098,6 +1100,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			'src/review/routing-enforcement.ts:589 readReviewRouteReceiptSync — bounded regular-file read, ≤64 KiB',
 			'src/tools/pr-review-submission.ts readFindingsRecords/readJsonFile — run-artifact reads for the submission ladder (unbounded readFileSync; files are writer-cap-bounded and validateSwarmPath-contained)',
 			'src/tools/export-pr-review-partial-results.ts readBoundedJson/stat — post-abort export ladder reads: run-reservation.json ≤16 KiB, trigger-eval.json ≤2 MiB, findings.jsonl ≤10 MiB, coverage-disclosure.json ≤4 KiB, all bounded regular-file reads with post-read byte re-checks',
+			'src/security/replay-identity.ts readReplayIdentitySidecar/readReplayIdentityClaim — bounded single-file reads; corrupt sidecar/claim throws (fail-closed), values are non-secret 64-hex fingerprints',
 		],
 		schemaVersion: 'per-artifact schemas (Zod-validated rows); review route receipts schema version 1',
 		stateClass: 'governed-content',
