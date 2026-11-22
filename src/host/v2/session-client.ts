@@ -106,6 +106,14 @@ import type {
 	V2SessionPermission,
 } from './types';
 
+const v2SessionClients = new WeakSet<OpencodeClient>();
+
+export function isV2SessionClient(
+	client: OpencodeClient | null,
+): client is OpencodeClient {
+	return client !== null && v2SessionClients.has(client);
+}
+
 /** The #2526 provenance fence opener — fenced system parts survive replacement. */
 const SYSTEM_DIRECTIVE_FENCE_OPEN = '<swarm_system_directive';
 
@@ -917,7 +925,9 @@ export function createV2SessionClient(
 			},
 		},
 	};
-	return client as unknown as OpencodeClient;
+	const shim = client as unknown as OpencodeClient;
+	v2SessionClients.add(shim);
+	return shim;
 }
 
 /** Bound for a host-reported/caller-supplied path inside a typed error message. */
