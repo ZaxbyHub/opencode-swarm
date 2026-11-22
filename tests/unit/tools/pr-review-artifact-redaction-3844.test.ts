@@ -29,6 +29,7 @@ import {
 	restoreReplayIdentityFingerprint,
 	writeReplayIdentityFingerprint,
 } from '../../../src/security/replay-identity';
+import { _internals as artifactInternals } from '../../../src/tools/write-pr-review-artifact';
 import { _internals as atomicWriteInternals } from '../../../src/utils/atomic-write';
 
 function freshDir(): string {
@@ -126,13 +127,19 @@ describe('#3844 replay identity salt lifecycle (Y2)', () => {
 		).toThrow();
 	});
 
-	test('FB-32: a failed restore WRITE discards the sidecar (no stale identity survives)', () => {
+	test('FB-32: a failed restore WRITE throws and leaves the OTHER identities intact', () => {
 		const dir = freshDir();
 		writeReplayIdentityFingerprint(
 			dir,
 			'run-1',
 			'findings:post_explorer',
 			'a'.repeat(64),
+		);
+		writeReplayIdentityFingerprint(
+			dir,
+			'run-1',
+			'findings:post_reviewer',
+			'b'.repeat(64),
 		);
 		const target = replaySidecarPath(dir, 'run-1');
 		const realWrite = atomicWriteInternals.writeSync;
@@ -151,9 +158,70 @@ describe('#3844 replay identity salt lifecycle (Y2)', () => {
 		} finally {
 			atomicWriteInternals.writeSync = realWrite;
 		}
-		// The sidecar is gone: no identity survives that could make the next
-		// identical retry look like an exact replay.
-		expect(existsSync(target)).toBe(false);
+		// The sidecar SURVIVES: discarding it would throw away the identity of
+		// every other committed boundary (their identical retries would then
+		// be refused). The stale key is fail-closed instead — the replay
+		// decision also cross-checks the artifact content (the next leg).
+		expect(existsSync(target)).toBe(true);
+		const sidecar = readReplayIdentitySidecar(dir, 'run-1');
+		expect(sidecar?.fingerprints['findings:post_reviewer']).toBe(
+			'b'.repeat(64),
+		);
+	});
+
+	test('FB-32: a STALE sidecar cannot assert "persisted" for rows the artifact does not hold', () => {
+		// The sidecar is written BEFORE the artifact it describes, so a failed
+		// artifact write leaves it claiming an identity the artifact never
+		// committed. The replay decision must cross-check the persisted rows,
+		// or the next identical retry would skip the write and SILENTLY DROP
+		// the new content.
+		const dir = freshDir();
+		const incoming = [
+			{
+				finding_id: 'f-1',
+				status: 'PENDING',
+				file_line: 'src/a.ts:1',
+				evidence: 'the NEW evidence',
+				next_action: 'route_to_reviewer',
+				severity: 'HIGH',
+			},
+		];
+		const incomingCanonical = artifactInternals.canonicalFindingRecords(
+			incoming as never,
+		);
+		// The sidecar claims the incoming payload's identity ...
+		writeReplayIdentityFingerprint(
+			dir,
+			'run-1',
+			'findings:post_explorer',
+			replayFingerprint(dir, incomingCanonical),
+		);
+		// ... but the artifact holds DIFFERENT rows (the write that would have
+		// committed them failed).
+		const stored = [{ ...incoming[0], evidence: 'the OLD evidence' }];
+		expect(
+			artifactInternals.matchesPersistedFindingsRawIdentity(
+				dir,
+				'run-1',
+				'post_explorer',
+				incomingCanonical,
+				stored as never,
+				artifactInternals.canonicalFindingRecords(stored as never),
+				incoming as never,
+			),
+		).toBe(false);
+		// The matching rows ARE a replay.
+		expect(
+			artifactInternals.matchesPersistedFindingsRawIdentity(
+				dir,
+				'run-1',
+				'post_explorer',
+				incomingCanonical,
+				incoming as never,
+				incomingCanonical,
+				incoming as never,
+			),
+		).toBe(true);
 	});
 
 	test('EEXIST race: first read misses, wx collides with a concurrent VALID winner — winner is used', () => {

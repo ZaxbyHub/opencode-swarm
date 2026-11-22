@@ -17,12 +17,12 @@ nothing is deleted or quarantined by the upgrade itself.
 `sweepTrainingVaultExpiry` runs only every **256 accepted appends**. There is
 NO timer: if capture stops (consent withdrawn, quota reached, plugin unused),
 expired records — including old v1 records — remain on disk indefinitely.
-Operators who want them gone should withdraw (see below) or delete the vault
-file manually while capture is off.
+Operators who want them gone should withdraw (see below) — deleting the vault
+file by hand bypasses the withdrawal tombstone and the export revocation.
 
 ## Exports, withdrawal, and copies outside plugin control
 
-- `/swarm dataset export` copies records to `.swarm/training/exports/…`;
+- `/swarm dataset export` copies records to `.swarm/training/v1/exports/…`;
   those exports are bound to plugin control — **withdrawal REVOKES them**
   (`REVOKED.json` markers) rather than deleting them.
 - Withdrawal (`/swarm dataset consent --revoke`) stops capture immediately;
@@ -52,7 +52,15 @@ without losing v2 records:
 4. run the withdraw/purge so no v2 records remain;
 5. now downgrade safely.
 
+Step 3 also covers the consent record itself: a v2 consent file stamps
+`redaction_version: 2`, and the downgraded v1 reader (a literal `1`) treats
+that consent as ABSENT — capture stays off until the consent is granted
+again. Withdrawing and re-granting after the downgrade restores it.
+
 The alternative is to **accept the loss**: skip steps 1-4 and let the next
-sweep delete the v2 records. Replay-identity sidecar files
+sweep delete the v2 records. The replay-identity sidecar files
 (`.swarm/pr-review/<runId>/replay-identity.json`) are inert under downgrade
-and can be deleted at will.
+and can be deleted at will — but the SALT file
+(`.swarm/pr-review/replay-identity.salt`) is not: deleting it makes every
+stored fingerprint unreproducible, so the next run generates a new salt and
+the old fingerprints no longer match.

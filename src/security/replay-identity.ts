@@ -264,13 +264,12 @@ export function restoreReplayIdentityFingerprint(
 		fs.mkdirSync(path.dirname(target), { recursive: true });
 		atomicWriteSwarmFileSync(target, JSON.stringify(sidecar, null, 2));
 	} catch (error) {
-		// The restore did not land: discard the sidecar so the stale identity
-		// cannot be read as "already persisted" by the next retry.
-		try {
-			fs.rmSync(target, { force: true });
-		} catch {
-			// best effort — the original error is the one that matters
-		}
+		// The restore did not land. The sidecar is NOT discarded: that
+		// would throw away the identities of every other committed
+		// boundary (their identical retries would then be refused). A
+		// stale key is fail-closed instead — the replay decision also
+		// cross-checks the ARTIFACT content, so a sidecar that claims an
+		// uncommitted payload cannot make the next retry drop it silently.
 		throw error;
 	}
 }

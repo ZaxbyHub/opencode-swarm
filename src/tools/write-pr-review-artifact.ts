@@ -214,6 +214,13 @@ export const _internals = {
 	assertCriticSettlements,
 	/** Exposed so the #2383 read/migration boundary is testable directly. */
 	readFindings,
+	/**
+	 * The exact-replay predicate and the canonical projection it compares.
+	 * Exposed so the stale-identity contract (the sidecar alone may not
+	 * assert "persisted") is directly testable.
+	 */
+	matchesPersistedFindingsRawIdentity,
+	canonicalFindingRecords,
 };
 
 function operationFailure(
@@ -381,8 +388,9 @@ function matchesPersistedFindingsRawIdentity(
 	runId: string,
 	boundary: string,
 	incomingRawCanonical: string,
-	_storedBoundaryRecords: readonly unknown[],
+	storedBoundaryRecords: readonly unknown[],
 	storedRawCanonical: string,
+	incomingRecords: readonly z.infer<typeof PrReviewFindingSchema>[],
 ): boolean {
 	let sidecarFingerprint: string | undefined;
 	try {
@@ -393,9 +401,26 @@ function matchesPersistedFindingsRawIdentity(
 	}
 	if (sidecarFingerprint !== undefined) {
 		try {
-			return (
-				replayFingerprint(directory, incomingRawCanonical) ===
+			if (
+				replayFingerprint(directory, incomingRawCanonical) !==
 				sidecarFingerprint
+			) {
+				return false;
+			}
+			// The sidecar alone may not assert "persisted": it is written
+			// BEFORE the artifact it describes, so a failed artifact write
+			// leaves it claiming an identity the artifact never committed.
+			// The persisted rows must ALSO be the persisted form of the
+			// incoming payload — otherwise the next identical retry would
+			// read the stale identity as "already persisted", skip the write
+			// and SILENTLY DROP the new content.
+			return (
+				canonicalFindingRecords(storedBoundaryRecords as PersistedFinding[]) ===
+				canonicalFindingRecords(
+					incomingRecords.map((record) =>
+						normalizeFindingForPersistence(record),
+					),
+				)
 			);
 		} catch {
 			return false; // salt unavailable — fail closed
@@ -657,6 +682,7 @@ export async function executeWritePrReviewArtifact(
 					canonicalFindingRecords(tolerantData.records),
 					probeBoundaryRecords,
 					canonicalFindingRecords(probeBoundaryRecords),
+					tolerantData.records,
 				)
 			);
 		} catch {
@@ -816,6 +842,7 @@ export async function executeWritePrReviewArtifact(
 				incomingRawCanonical,
 				existingBoundaryRecords,
 				canonicalFindingRecords(existingBoundaryRecords),
+				findingsInput.records,
 			);
 		const boundaryCommitted =
 			state.prReviewArtifactRunId === resolvedRunId &&

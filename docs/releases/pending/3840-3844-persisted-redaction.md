@@ -37,7 +37,7 @@ PR-review submission body, the findings/handoff artifacts (with a salted HMAC
 raw-replay identity sidecar preserving exact-replay semantics after redaction),
 finding-policy synthesis, and the post-abort partial export.
 
-## Semantics decisions (owner-ratified 2026-11-22)
+## Semantics decisions
 
 - Consent compatibility: tolerant-read (v1 consents stay valid under the v2
   redactor and capture continues; provenance semantics documented in the
@@ -99,7 +99,7 @@ docs/training-vault-remediation.md.
   existing consumer sites; the new superset redactor is applied at the
   #3844-named boundaries, not retroactively across every store.
 
-## Round-5 hardening (plan-critic convergence)
+## Replay-identity hardening
 
 - The pr-review handoff replay identity is now CLAIM-ONCE
   (`.swarm/pr-review/<runId>/replay-identity.handoff.claim`): a concurrent
@@ -142,10 +142,9 @@ docs/training-vault-remediation.md.
   WRITE discards the sidecar so no stale identity can make the next
   identical retry look like an exact replay.
 
-## Fold-in: the remaining persisted-evidence boundaries (owner-directed, closes #3899)
+## Fold-in: the remaining persisted-evidence boundaries
 
-By owner decision at the plan's ratification gate the six census-deferred
-sites joined this PR instead of the filed follow-up: completion-verify's
+The six census-deferred sites joined this PR: completion-verify's
 persisted blocked-task fields (parsed from model-authored plan text), the
 drift/hallucination/mutation evidence summaries (including the drift
 critic-approval snapshot metadata), the core-events writer's free-text

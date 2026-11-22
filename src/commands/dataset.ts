@@ -148,6 +148,7 @@ export async function handleDatasetConsentCommand(
 		`Current state: ${status.consentState}; vault records: ${status.recordCount}.`,
 		'Withdrawal: /swarm dataset consent --revoke stops capture; /swarm dataset withdraw deletes content and revokes exports.',
 		`To grant, re-run: /swarm dataset consent --confirm=${token} (valid 15 minutes).`,
+		'Already-stored records and the safe-downgrade procedure: docs/training-vault-remediation.md.',
 	].join('\n');
 }
 
