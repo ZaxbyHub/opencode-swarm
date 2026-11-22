@@ -918,6 +918,12 @@ export async function ingestBackgroundStageBCompletion(args: {
 						legacyUnrouted: preparedRoute.legacyUnrouted,
 						requireEvidenceBindings: true,
 						requireCompleteEvidence: true,
+						// Exempt wedge: a receipt that still lists test-engineer
+						// slots (allocated before exemption-aware routing, or by
+						// an unrouted complexity fallback) must not pin the durable
+						// workflow at reviewer_run when the durable evidence
+						// proves the sanctioned exemption.
+						testEngineerExempt: existingEvidence?.test_engineer_exempt === true,
 					}).canAdvance;
 				}
 			} else {
@@ -1314,6 +1320,10 @@ function applyStageBStateCompletion(
 			legacyUnrouted,
 			requireEvidenceBindings: true,
 			requireCompleteEvidence: true,
+			// Exempt wedge (see the persistence-site comment): the completeness
+			// barrier must not demand test-engineer evidence the sanctioned
+			// exemption says will never exist.
+			testEngineerExempt,
 		});
 		const routeComplete = advancementDecision.canAdvance;
 

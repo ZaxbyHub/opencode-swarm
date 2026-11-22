@@ -11,10 +11,15 @@ import {
 	transitionTaskWorkflowEvidence,
 } from '../../../src/gate-evidence';
 import {
+	buildReviewRouteReceipt,
+	persistReviewRouteReceipt,
+} from '../../../src/review/routing-enforcement.js';
+import {
 	resetSwarmState,
 	startAgentSession,
 	swarmState,
 } from '../../../src/state';
+import { createIsolatedTestEnv } from '../../helpers/isolated-test-env.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 function git(directory: string, args: string[]): void {
@@ -53,9 +58,11 @@ function record(
 }
 
 let testDirectory = '';
+let isolatedEnv: ReturnType<typeof createIsolatedTestEnv> | undefined;
 
 describe('background doc-only gate evidence', () => {
 	beforeEach(() => {
+		isolatedEnv = createIsolatedTestEnv();
 		resetSwarmState();
 		testDirectory = canonicalMkdtemp('background-doc-gate-');
 		git(testDirectory, ['init']);
@@ -70,6 +77,8 @@ describe('background doc-only gate evidence', () => {
 	afterEach(() => {
 		resetSwarmState();
 		fs.rmSync(testDirectory, { recursive: true, force: true });
+		isolatedEnv?.cleanup();
+		isolatedEnv = undefined;
 	});
 
 	test('coder provenance makes reviewer-only evidence durable', async () => {
@@ -119,6 +128,84 @@ describe('background doc-only gate evidence', () => {
 			swarmState.agentSessions
 				.get('parent-session')
 				?.taskWorkflowStates?.get('1.1'),
+		).toBe('tests_run');
+	});
+
+	test('regression: exempt task with a test-engineer-demanding route receipt is not wedged at reviewer_run', async () => {
+		// Production shape (Wirtschaftssimulation session 29b8ccea, task 1.8):
+		// the dispatch-time route receipt demanded 1 reviewer + 1 test engineer
+		// even though the durable evidence proves test_engineer_exempt
+		// (docs-only AGENTS.md change). The Stage-B completeness barrier then
+		// pinned the durable workflow at reviewer_run with "all required proof
+		// exists" — the reviewer had passed everything that can ever pass for
+		// an exempt task, and completion was blocked forever. Previous code:
+		// routeCompleteForPersistence=false → durable state reviewer_run.
+		swarmState.agentSessions
+			.get('parent-session')
+			?.taskWorkflowStates?.set('1.9', 'coder_delegated');
+		const baseline = captureWorkspaceSnapshot(testDirectory);
+		fs.writeFileSync(path.join(testDirectory, 'AGENTS.md'), '# docs rule\n');
+		const coder = record('coder', '1.9', baseline);
+		coder.taskChangeContext = {
+			declaredFiles: ['AGENTS.md'],
+			baseline,
+			workflowGeneration: 0,
+		};
+
+		expect(
+			(
+				await ingestBackgroundStageBCompletion({
+					directory: testDirectory,
+					record: coder,
+					result: { text: 'done', chars: 4, truncated: false, digest: 'coder' },
+				})
+			).consumed,
+		).toBe(true);
+		await transitionTaskWorkflowEvidence(testDirectory, '1.9', {
+			type: 'stage_a_passed',
+			expectedGeneration: 1,
+			transitionId: 'stage-a:1.9',
+		});
+		const exemptEvidence = await readTaskEvidence(testDirectory, '1.9');
+		expect(exemptEvidence?.test_engineer_exempt).toBe(true);
+
+		// The pre-fix route allocation shape: complexity-routed test-engineer
+		// slot persisted for the parent session exactly as the dispatch hook
+		// would have written it before the exemption-aware allocation fix.
+		await persistReviewRouteReceipt({
+			projectRoot: testDirectory,
+			receipt: buildReviewRouteReceipt({
+				sessionId: 'parent-session',
+				taskId: '1.9',
+				complexity: 'single',
+				semanticRisk: 'Standard complexity: 1 files, 0 functions',
+				requiredReviewers: ['1.9:reviewer:1'],
+				requiredTestEngineers: ['1.9:test_engineer:1'],
+			}),
+		});
+
+		const reviewer = record('reviewer', '1.9');
+		reviewer.workflowGeneration = 1;
+		await ingestBackgroundStageBCompletion({
+			directory: testDirectory,
+			record: reviewer,
+			result: {
+				text: '[REVIEWED] | task-1.9 | APPROVED | docs are correct',
+				chars: 54,
+				truncated: false,
+				digest: 'reviewer',
+			},
+		});
+
+		const evidence = await readTaskEvidence(testDirectory, '1.9');
+		expect(evidence?.gates.reviewer).toBeDefined();
+		// The durable workflow must advance past reviewer_run — the wedge the
+		// completeness barrier previously caused for exempt tasks.
+		expect(evidence?.workflow.state).toBe('tests_run');
+		expect(
+			swarmState.agentSessions
+				.get('parent-session')
+				?.taskWorkflowStates?.get('1.9'),
 		).toBe('tests_run');
 	});
 
