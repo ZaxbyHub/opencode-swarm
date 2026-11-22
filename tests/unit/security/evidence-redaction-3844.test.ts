@@ -392,8 +392,13 @@ describe('#3844 the shared redactor is idempotent and covers the training famili
 
 	test('the key/value arm preserves the separator it consumed', () => {
 		// The separator used to be part of the match but not of the
-		// replacement, so the words were glued together.
-		expect(redactEvidenceText('the token=abcdef')).toBe('the token=[REDACTED]');
+		// replacement, so the words were glued together. The fixture puts
+		// the key AFTER a word the key class cannot swallow, so the arm
+		// starts at the separator (and consumes it) rather than at the
+		// string start — the shape that loses the separator.
+		expect(redactEvidenceText('value; token=abcdef')).toBe(
+			'value; token=[REDACTED]',
+		);
 		expect(redactEvidenceText('password=hunter2')).toBe('password=[REDACTED]');
 	});
 
