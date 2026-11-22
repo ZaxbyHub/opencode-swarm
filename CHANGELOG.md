@@ -1,5 +1,15 @@
 # Changelog
 
+## [7.205.5](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.205.4...v7.205.5) (2026-11-22)
+
+
+### Bug Fixes
+
+* **checkpoint,db:** durable write integrity — literal staging, staged-state recovery backups, truthful queued-write outcomes ([#3763](https://github.com/ZaxbyHub/opencode-swarm/issues/3763), [#3772](https://github.com/ZaxbyHub/opencode-swarm/issues/3772)) ([aa80d33](https://github.com/ZaxbyHub/opencode-swarm/commit/aa80d334f12c30e2c6efb603ba0422e0431e386e))
+* **checkpoint,db:** feedback round — honest deletion confirmation, subdirectory-root staging, streamed capture, parent-reset guard, truthful requeues wording ([#3763](https://github.com/ZaxbyHub/opencode-swarm/issues/3763), [#3772](https://github.com/ZaxbyHub/opencode-swarm/issues/3772)) ([c28e32c](https://github.com/ZaxbyHub/opencode-swarm/commit/c28e32caed1c4c2c0a4ffd9abeb93138a0514cce))
+* **worktree:** close PR feedback on settlement recovery and teardown guards ([#3888](https://github.com/ZaxbyHub/opencode-swarm/issues/3888)) ([10fa5fb](https://github.com/ZaxbyHub/opencode-swarm/commit/10fa5fb5a727592ac2abcd2b5b4ab36815a5a754))
+* **worktree:** re-validate lane ownership at every destructive teardown site ([#3888](https://github.com/ZaxbyHub/opencode-swarm/issues/3888)) ([06609f7](https://github.com/ZaxbyHub/opencode-swarm/commit/06609f7cb2108774704779b0ddde9d0ffca3f1cd))
+
 ## [7.205.4](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.205.3...v7.205.4) (2026-11-22)
 
 
