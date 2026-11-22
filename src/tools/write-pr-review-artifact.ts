@@ -49,6 +49,7 @@ import {
 	readReplayIdentityClaim,
 	readReplayIdentitySidecar,
 	replayFingerprint,
+	restoreReplayIdentityFingerprint,
 	writeReplayIdentityFingerprint,
 } from '../security/replay-identity';
 import { createSwarmTool } from './create-tool.js';
@@ -1155,12 +1156,24 @@ export async function executeWritePrReviewArtifact(
 			// the artifact, so artifact success implies the sidecar exists. A
 			// sidecar failure aborts the write (salt unavailable = fail closed —
 			// the row would otherwise be stranded without raw-replay identity).
+			// The identity the boundary held BEFORE this write is remembered
+			// so a failed artifact write can roll it back (the artifact would
+			// otherwise keep the old rows under the new identity).
+			let previousIdentity: string | null = null;
 			if (!isExactReplay && appended.length > 0) {
+				const identityKey = findingsIdentityKey(findingsInput.boundary);
 				try {
+					// Remember the identity this boundary held BEFORE the write:
+					// the artifact write below can fail, and the sidecar must
+					// then be rolled back to it (see the catch arm).
+					previousIdentity =
+						readReplayIdentitySidecar(directory, resolvedRunId)?.fingerprints[
+							identityKey
+						] ?? null;
 					writeReplayIdentityFingerprint(
 						directory,
 						resolvedRunId,
-						findingsIdentityKey(findingsInput.boundary),
+						identityKey,
 						replayFingerprint(directory, incomingRawCanonical),
 					);
 				} catch (error) {
@@ -1178,12 +1191,35 @@ export async function executeWritePrReviewArtifact(
 			try {
 				await _internals.atomicWrite(findingsPath, serializedFindings);
 			} catch (error) {
+				// The artifact write failed, so the artifact still holds the
+				// PREVIOUS rows while the sidecar already claims the NEW
+				// identity. Left that way, the next identical retry would
+				// read the sidecar as "already persisted", skip the write and
+				// silently DROP the new content while reporting success. Roll
+				// the identity back to what it held before this write.
+				let rollbackNote = '';
+				if (!isExactReplay && appended.length > 0) {
+					try {
+						restoreReplayIdentityFingerprint(
+							directory,
+							resolvedRunId,
+							findingsIdentityKey(findingsInput.boundary),
+							previousIdentity,
+						);
+					} catch (rollbackError) {
+						rollbackNote = `; the replay-identity rollback ALSO failed (${
+							rollbackError instanceof Error
+								? rollbackError.message
+								: String(rollbackError)
+						}) — this run's identity is inconsistent with the persisted rows`;
+					}
+				}
 				return withPartialAdmissionRollback(
 					operationFailure(
 						'write',
 						relativeFindingsPath.split(path.sep).join('/'),
 						'an atomic findings checkpoint write',
-						error,
+						`${error instanceof Error ? error.message : String(error)}${rollbackNote}`,
 					),
 				);
 			}

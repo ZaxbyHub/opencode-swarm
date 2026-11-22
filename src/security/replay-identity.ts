@@ -199,6 +199,47 @@ export function writeReplayIdentityFingerprint(
 }
 
 /**
+ * Restore a sidecar key to a PREVIOUS value — the rollback counterpart of
+ * {@link writeReplayIdentityFingerprint}.
+ *
+ * The sidecar-first ordering means the identity lands BEFORE the artifact
+ * it describes. If the artifact write then fails, the sidecar would keep
+ * claiming an identity the artifact never committed, and the next identical
+ * retry would read that identity as "already persisted" and silently skip
+ * the write — dropping the new content while reporting success. The caller
+ * therefore rolls the key back to the value it held before the write.
+ *
+ * `previous === null` means the key did not exist: the rollback REMOVES it.
+ * A missing sidecar is a no-op (there is nothing to restore); a CORRUPT
+ * sidecar throws (fail closed — the caller must not overwrite it).
+ */
+export function restoreReplayIdentityFingerprint(
+	directory: string,
+	runId: string,
+	key: string,
+	previous: string | null,
+): void {
+	const target = replaySidecarPath(directory, runId);
+	let sidecar: ReplayIdentitySidecar | null;
+	try {
+		sidecar = readReplayIdentitySidecar(directory, runId);
+	} catch (error) {
+		if (error instanceof ReplayIdentityUnavailableError) {
+			throw error; // corrupt sidecar — fail closed
+		}
+		throw error;
+	}
+	if (sidecar === null) return; // no sidecar — nothing was written
+	if (previous === null) {
+		delete sidecar.fingerprints[key];
+	} else {
+		sidecar.fingerprints[key] = previous;
+	}
+	fs.mkdirSync(path.dirname(target), { recursive: true });
+	atomicWriteSwarmFileSync(target, JSON.stringify(sidecar, null, 2));
+}
+
+/**
  * #3844 round-5 (plan-critic Critical): claim-once identity for
  * create-only artifacts. The shared sidecar map cannot express "first writer
  * wins" — a losing concurrent writer could overwrite the winner's

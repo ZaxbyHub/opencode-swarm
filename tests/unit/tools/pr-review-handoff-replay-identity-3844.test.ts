@@ -19,7 +19,11 @@ import {
 	PR_REVIEW_BASE_DIMENSION_IDS,
 	recordPrReviewValidationBatch,
 } from '../../../src/hooks/pr-workflow-gate.js';
-import { executeWritePrReviewArtifact } from '../../../src/tools/write-pr-review-artifact.js';
+import { readReplayIdentitySidecar } from '../../../src/security/replay-identity';
+import {
+	_internals as artifactInternals,
+	executeWritePrReviewArtifact,
+} from '../../../src/tools/write-pr-review-artifact.js';
 import {
 	establishReviewPrerequisites,
 	HEAD_SHA,
@@ -328,5 +332,80 @@ describe('#3844 FB-008: the handoff replay identity uses ONE comparable', () => 
 			// the fixture teardown would not remove it.
 			rmSync(dirX, { recursive: true, force: true });
 		}
+	}, 60_000);
+
+	test('a failed findings write rolls the identity back, so the retry is NOT a silent replay', async () => {
+		// The sidecar-first ordering lands the raw-replay identity BEFORE the
+		// artifact it describes. If the artifact write then fails, the sidecar
+		// would keep claiming an identity the artifact never committed, and
+		// the next identical retry would read it as "already persisted", skip
+		// the write and SILENTLY DROP the new content while reporting
+		// success. The failed write must therefore ROLL the identity back.
+		await establishReviewPrerequisites();
+		const candidateIds = PR_REVIEW_BASE_DIMENSION_IDS.map(
+			(_dimension, index) => `C-${index}`,
+		);
+		const explorerRecords = candidateIds.map((id) => ({
+			finding_id: id,
+			status: 'PENDING' as const,
+			file_line: 'src/index.ts:1',
+			evidence: `explorer evidence for ${id}`,
+			next_action: 'route_to_reviewer' as const,
+			severity: 'HIGH' as const,
+		}));
+		const writeExplorer = () =>
+			executeWritePrReviewArtifact(
+				{
+					kind: 'findings',
+					run_id: RUN_ID,
+					pr_head_sha: HEAD_SHA,
+					boundary: 'post_explorer',
+					records: explorerRecords,
+				},
+				tempDir,
+				{ sessionID: SESSION_ID },
+			);
+
+		// 1. The artifact write fails.
+		const realWrite = artifactInternals.atomicWrite;
+		artifactInternals.atomicWrite = (async () => {
+			throw new Error('ENOSPC simulated artifact write failure');
+		}) as typeof artifactInternals.atomicWrite;
+		let failed: Record<string, unknown>;
+		try {
+			failed = JSON.parse(await writeExplorer()) as Record<string, unknown>;
+		} finally {
+			artifactInternals.atomicWrite = realWrite;
+		}
+		expect(failed.success).toBe(false);
+
+		// 2. The identity the failed write had landed was ROLLED BACK: the
+		// sidecar must not claim a boundary whose rows were never persisted.
+		// (The sidecar key is `findings:<boundary>` — a wrong key here would
+		// make the assertion vacuous.)
+		const sidecar = readReplayIdentitySidecar(tempDir, RUN_ID);
+		expect(sidecar?.fingerprints['findings:post_explorer']).toBeUndefined();
+		expect(
+			Object.keys(sidecar?.fingerprints ?? {}).filter((key) =>
+				key.startsWith('findings:'),
+			),
+		).toEqual([]);
+
+		// 3. The retry WRITES the content (it is not read as a replay).
+		const retried = JSON.parse(await writeExplorer()) as {
+			success?: boolean;
+			replayed?: boolean;
+			appended?: number;
+		};
+		expect(retried.success, JSON.stringify(retried)).toBe(true);
+		expect(retried.replayed).toBe(false);
+		expect(retried.appended).toBe(explorerRecords.length);
+
+		// 4. The persisted artifact really carries the rows.
+		const findings = readFileSync(
+			path.join(tempDir, '.swarm', 'pr-review', RUN_ID, 'findings.jsonl'),
+			'utf-8',
+		);
+		expect(findings).toContain('C-0');
 	}, 60_000);
 });
