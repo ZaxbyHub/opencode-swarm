@@ -40,8 +40,17 @@ const URL_PATTERN = /\bhttps?:\/\/[^\s'"<>]+/g;
 // The scheme group consumes its trailing whitespace so the value class
 // reaches the token itself — without it the engine backtracks and redacts
 // only the word "Bearer", leaving the token in the clear.
+//
+// Two properties the arm MUST hold:
+//   - The leading separator is captured and re-emitted. It used to be part of
+//     the match but not of the replacement, so the words around the value
+//     were glued together (`password=<redacted>then` lost `then`).
+//   - A value that starts with this redactor's own placeholder is not
+//     matched. The export re-redacts every record, so a non-idempotent arm
+//     corrupted the exported content (and counted a redaction that removed
+//     nothing).
 const CREDENTIAL_KV_PATTERN =
-	/(?:^|[\s,;"'([{])([A-Za-z0-9_ -]{0,40}(?:token|secret|password|passwd|authorization|credential|bearer|api[-_ ]?key|access[-_ ]?key)[A-Za-z0-9_ -]{0,40}\s*[=:]\s*)(?:bearer|basic|digest|negotiate|apikey)?\s*(?:["'][^"'\n]*["']|[^\s,;"'}\]]+)/gi;
+	/(^|[\s,;"'([{])([A-Za-z0-9_ -]{0,40}(?:token|secret|password|passwd|authorization|credential|bearer|api[-_ ]?key|access[-_ ]?key)[A-Za-z0-9_ -]{0,40}\s*[=:]\s*)(?:bearer|basic|digest|negotiate|apikey)?\s*(?!<redacted)("[^"'\n]*"|'[^'\n]*'|[^\s,;"'}\]]+)/gi;
 
 // JSON-quoted key form the loose pattern cannot bridge: `"api_key": "v"` —
 // the closing quote of the key and the opening quote of the value fall
@@ -236,9 +245,16 @@ export function redactTrainingContent(content: string): RedactionResult {
 		});
 		working = working.replace(
 			CREDENTIAL_KV_PATTERN,
-			(_match, prefix: string) => {
+			(_match, separator: string, prefix: string, value: string) => {
 				redactions += 1;
-				return `${prefix}<redacted>`;
+				const quoted =
+					value.length >= 2 &&
+					(value.startsWith('"') || value.startsWith("'")) &&
+					value.endsWith(value[0]);
+				const placeholder = quoted
+					? `${value[0]}<redacted>${value[0]}`
+					: '<redacted>';
+				return `${separator}${prefix}${placeholder}`;
 			},
 		);
 		working = working.replace(

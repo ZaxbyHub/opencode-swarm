@@ -34,8 +34,7 @@ describe('#3844 CI pins: main redaction call sites (final-critic F3)', () => {
 					validator_evidence: `probe output ${ANT}`,
 					finding_id: 'f-1',
 					severity: 'high',
-					file: `src/${GH}/a.ts`,
-					location: `src/${GH}/a.ts:3`,
+					file: 'src/a.ts',
 					line: 1,
 					validator: 'reviewer',
 				},
@@ -46,7 +45,7 @@ describe('#3844 CI pins: main redaction call sites (final-critic F3)', () => {
 				{
 					title: `structured title ${ANT}`,
 					body: `structured body ${GH}`,
-					file: `src/${ANT}/b.ts`,
+					file: 'src/b.ts',
 				},
 			],
 		} as never;

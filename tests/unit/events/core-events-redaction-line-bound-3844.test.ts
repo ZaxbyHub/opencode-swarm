@@ -12,7 +12,9 @@
  * Synthetic tokens only.
  */
 import { describe, expect, test } from 'bun:test';
+import * as fs from 'node:fs';
 import { rmSync } from 'node:fs';
+import * as path from 'node:path';
 import {
 	appendCoreEventSync,
 	appendCoreEventsSync,
@@ -38,7 +40,10 @@ function event(detail: string): Record<string, unknown> {
 
 function nearLimitDetail(): string {
 	const base = Buffer.byteLength(`${JSON.stringify(event(''))}\n`, 'utf8') - 1;
-	return 'y'.repeat(LIMIT - base - USERINFO.length - 1) + ' ' + USERINFO;
+	// The credential sits in the MIDDLE, so the redaction it produces
+	// survives the fit (the fitter only trims the tail).
+	const half = Math.floor((LIMIT - base - USERINFO.length - 2) / 2);
+	return `${'y'.repeat(half)} ${USERINFO} ${'y'.repeat(half)}`;
 }
 
 describe('#3844 the core-events writer fits a redacted line to the bound', () => {
@@ -54,6 +59,32 @@ describe('#3844 the core-events writer fits a redacted line to the bound', () =>
 			expect(() =>
 				appendCoreEventSync(dir, event(detail) as never),
 			).not.toThrow();
+
+			// The PERSISTED line: it fits the bound, it keeps the content
+			// the redaction did not have to remove, and it carries no
+			// half-written marker.
+			const written = fs
+				.readFileSync(path.join(dir, '.swarm', 'events.jsonl'), 'utf8')
+				.split('\n')
+				.filter((line) => line.trim() !== '')
+				.map((line) => JSON.parse(line) as Record<string, unknown>);
+			const record = written.find(
+				(entry) => (entry.type as string) === 'probe.event',
+			);
+			expect(record).toBeDefined();
+			const persistedDetail = String(record?.detail ?? '');
+			// The credential is gone and the marker is complete.
+			expect(persistedDetail.includes(USERINFO)).toBe(false);
+			expect(persistedDetail.includes('[REDACTED:url-credentials]')).toBe(true);
+			expect(persistedDetail.endsWith('[')).toBe(false);
+			expect(persistedDetail.endsWith('<')).toBe(false);
+			// The line fits the bound.
+			expect(
+				Buffer.byteLength(`${JSON.stringify(record)}\n`, 'utf8') - 1,
+			).toBeLessThanOrEqual(LIMIT);
+			// The fitter keeps the maximum practical amount: the detail is
+			// still nearly as long as the bound allows.
+			expect(persistedDetail.length).toBeGreaterThan(LIMIT - 256);
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}

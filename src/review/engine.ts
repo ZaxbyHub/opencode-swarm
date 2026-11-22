@@ -499,6 +499,40 @@ function anchorExactRangeFinding(
 	return undefined;
 }
 
+/**
+ * Whether a finding's file names a path that RESOLVES inside the project.
+ *
+ * A real repository path is not a secret, and it MUST be used verbatim for
+ * the anchoring: the redactor's >=80-character mixed-class base64 rule counts
+ * `/` as a base64 character, so an ordinary deep path (a Java/Kotlin service
+ * or a TypeScript monorepo package) matches it — and a redacted path does
+ * not resolve, so the finding would silently stop anchoring (and stop
+ * blocking the phase gate). Only a path that does NOT resolve is
+ * model-invented free text, and only that is redacted.
+ */
+function pathResolvesInsideProject(directory: string, file: string): boolean {
+	const normalized = normalizedRelativePath(file);
+	if (!normalized) return false;
+	try {
+		const root = fs.realpathSync(directory);
+		const currentPath = fs.realpathSync(
+			path.resolve(root, ...normalized.split('/')),
+		);
+		return isWithinRoot(root, currentPath);
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * The file path as it is PERSISTED: the model's path when it names a real
+ * file inside the project, and the redacted form otherwise.
+ */
+function reviewFileForPersistence(directory: string, file: string): string {
+	if (pathResolvesInsideProject(directory, file)) return file;
+	return redactEvidenceField(file, EVIDENCE_FINDING_FILE_MAX);
+}
+
 function anchorFinding(
 	directory: string,
 	diff: Extract<ReviewDiffResult, { status: 'ok' }>,
@@ -1132,13 +1166,14 @@ export async function runReviewEngine(
 		...finding,
 		title: redactEvidenceField(finding.title, EVIDENCE_FINDING_TITLE_MAX),
 		body: redactEvidenceField(finding.body, EVIDENCE_FINDING_BODY_MAX),
-		// The file is model-authored free text for an UNANCHORED finding
-		// (and the model's own path for an anchored one), so it is redacted
-		// here — before the identity is derived — so the evidence, the
-		// receipt and the identity all carry the same path. A path that
-		// carried a credential does not exist in the repository, so its
-		// anchoring fails honestly.
-		file: redactEvidenceField(finding.file, EVIDENCE_FINDING_FILE_MAX),
+		// The file is model-authored free text when it names no real file
+		// in the project, so THAT case is redacted here — before the
+		// identity is derived — so the evidence, the receipt and the
+		// identity all carry the same path. A path that resolves inside
+		// the project is kept verbatim: redacting it would break the
+		// anchoring (the redactor's base64 rule matches ordinary deep
+		// paths), and a real repository path is not a secret.
+		file: reviewFileForPersistence(input.directory, finding.file),
 	}));
 	const candidates = canonicalizeValidationCandidates(structuredFindings ?? []);
 	let findings = candidates.map((candidate) =>

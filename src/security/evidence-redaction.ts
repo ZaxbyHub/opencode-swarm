@@ -494,10 +494,19 @@ export const EVIDENCE_FINDING_FILE_MAX = 500;
  * The canonical persisted form of one redacted free-text field: redact, then
  * clamp back inside the schema bound the field is read back against.
  *
- * Idempotent by construction: the redactor never re-matches its own
- * placeholder, and the clamp only ever shortens a value that is already at
- * or over its bound.
+ * The pair runs to a FIXED POINT: the clamp can cut a value where a
+ * credential-shaped run begins (a cut that ends in `sk_live_…` makes the
+ * Stripe arm match on the NEXT application), so a single pass is not
+ * idempotent. The field's identity is derived from this value, and the
+ * evidence copy and the receipt copy of one finding must be byte-identical,
+ * so the value has to be stable under re-application.
  */
 export function redactEvidenceField(value: string, max: number): string {
-	return clampRedactedText(redactEvidenceText(value), max);
+	let current = value;
+	for (let pass = 0; pass < MAX_REDACTION_PASSES; pass++) {
+		const next = clampRedactedText(redactEvidenceText(current), max);
+		if (next === current) return current;
+		current = next;
+	}
+	return current;
 }

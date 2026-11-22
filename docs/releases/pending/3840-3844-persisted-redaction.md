@@ -172,7 +172,10 @@ docs/training-vault-remediation.md.
   scans in linear time: an unbounded or word-boundary-anchored scheme class
   restarted the scan at every word boundary, which measured 4.2 s for 64 KB
   of colon-free input.
-- The shared redactor reaches a FIXED POINT. The same value is redacted more
+- The shared redactor reaches a FIXED POINT, and so does the redacted-field
+  form (redact, then clamp): the clamp can cut a value where a
+  credential-shaped run begins, so the pair runs until its output stops
+  changing. The same value is redacted more
   than once (the review evidence is redacted at assembly and again at
   persistence, the receipt is redacted again when it is persisted, and the
   forge queue re-redacts a stored message on every rewrite), so a redactor
@@ -222,18 +225,22 @@ docs/training-vault-remediation.md.
   export, and overwriting the counters with the export pass's own result
   would claim that no redaction was applied to a record whose content IS
   redacted. The exported counters count only the redactions the export pass
-  actually made.
+  actually made — the training redactor no longer re-matches its own
+  placeholder, so an export neither corrupts the record nor counts a
+  redaction that removed nothing.
 - The core-events writer fits a redacted line to its own 256 KiB bound. A
   redaction placeholder can be longer than the credential it replaces, so an
   event whose free text sat exactly on the bound was refused after the
   redaction; the refusal contract is unchanged (an event that was already
   over the bound is still refused) and the redacted, secret-free carriers
   are truncated until the line fits.
-- The review receipt redacts the finding's file and location like every
-  other free-text field, and the finding's file is redacted before the
-  review identity is derived, so the evidence, the receipt and the identity
-  carry the same path. A path that carried a credential does not exist in
-  the repository, so its anchoring fails honestly.
+- A finding's file path is redacted only when it names NO real file inside
+  the project (model-invented free text). A path that resolves is persisted
+  verbatim: a real repository path is not a secret, and redacting one would
+  break the anchoring — the redactor's long mixed-class base64 rule counts
+  `/` as a base64 character, so an ordinary deep path matches it, and a
+  redacted path does not resolve, so the finding would silently stop
+  blocking the phase gate.
 
 ## Fold-in: the remaining persisted-evidence boundaries
 

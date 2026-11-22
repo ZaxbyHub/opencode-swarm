@@ -122,7 +122,10 @@ describe('#3701 AC4/AC5 export current-redaction contract', () => {
 		const dir = freshDir();
 		const cst = consent(dir);
 		const current = buildTrainingVaultRecord({
-			content: `the literal ${GH} is committed`,
+			// A KEY/VALUE credential: its capture placeholder is a
+			// re-matchable form, so the export pass would count it again
+			// without the fix (a bare family token's placeholder is not).
+			content: 'the literal password=hunter2 is committed',
 			kind: 'user_message',
 			role: 'user',
 			capturedAt: NOW,
@@ -145,6 +148,28 @@ describe('#3701 AC4/AC5 export current-redaction contract', () => {
 		// The export pass re-matches the capture-time placeholder, so it
 		// must not be COUNTED again: the exported count is the capture count.
 		expect(emitted.redaction.redactions).toBe(current.redaction.redactions);
+	});
+
+	test('the export counts ONLY the credential it newly redacted (a re-matched placeholder is not a redaction)', () => {
+		// A legacy record whose stored content carries BOTH a re-matchable
+		// placeholder and a raw credential. The export redacts the raw
+		// credential (ONE redaction); the placeholder it re-matches is not a
+		// new redaction, so the exported counter is the capture count plus
+		// ONE.
+		const dir = freshDir();
+		const cst = consent(dir);
+		const { record: legacy } = seedLegacyRecord(
+			dir,
+			cst,
+			1,
+			`password=<redacted> and a raw ${GH} token`,
+		);
+		const bundle = buildTrainingExportBundle([legacy]);
+		const emitted = JSON.parse(bundle.files['records.jsonl'] ?? '');
+		expect(emitted.redaction.applied).toBe(true);
+		// Exactly ONE new redaction: the raw token.
+		expect(emitted.redaction.redactions).toBe(legacy.redaction.redactions + 1);
+		expect(emitted.content).not.toContain(GH);
 	});
 
 	test('AC4a: the manifest reports the SOURCE versions separately from the verified floor', () => {

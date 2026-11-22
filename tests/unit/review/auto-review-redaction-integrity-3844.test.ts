@@ -88,6 +88,7 @@ function reviewerOutput(
 		verdict?: 'APPROVED' | 'REJECTED';
 		title?: string;
 		line?: number;
+		file?: string;
 	} = {},
 ): string {
 	const verdict = options.verdict ?? 'REJECTED';
@@ -104,7 +105,7 @@ function reviewerOutput(
 					body,
 					severity: 'high',
 					confidence: 0.95,
-					file: 'src/state.ts',
+					file: options.file ?? 'src/state.ts',
 					line_start: line,
 					line_end: line,
 				},
@@ -190,6 +191,14 @@ afterEach(() => {
 	fs.rmSync(projectDir, { recursive: true, force: true });
 });
 
+// A real repository path is NOT a secret, and it must survive the redaction
+// verbatim: the redactor's >=80-character mixed-class base64 rule counts
+// `/` as a base64 character, so an ordinary deep path matches it — and a
+// redacted path does not resolve, so the finding would silently stop
+// anchoring (and stop blocking the phase gate).
+const DEEP_PATH =
+	'src/main/java/com/companyname/productname/module/submodule/service/impl/OAuth2TokenService.java';
+
 describe('#3844 the auto-review evidence stays internally consistent when a finding quotes a credential', () => {
 	// Both legs use a credential SHAPE the redactor rewrites: a bare family
 	// token (the placeholder replaces the secret) and a key/value assignment
@@ -248,6 +257,52 @@ describe('#3844 the auto-review evidence stays internally consistent when a find
 			expect(integrity.ok).toBe(true);
 		}, 30_000);
 	}
+
+	// The deep path resolves inside the project, so it is persisted
+	// verbatim and the finding still anchors (a redacted path would not
+	// resolve and the finding would silently stop blocking).
+	test('a REAL deep path is persisted verbatim and still anchors', async () => {
+		fs.mkdirSync(path.join(projectDir, 'src', 'main', 'java'), {
+			recursive: true,
+		});
+		const deepFile = path.join(projectDir, DEEP_PATH);
+		fs.mkdirSync(path.dirname(deepFile), { recursive: true });
+		fs.writeFileSync(deepFile, 'class OAuth2TokenService {}\n'.repeat(10));
+		engineInternals.collectReviewDiff = async () =>
+			({
+				...diffResult(),
+				changedLines: new Map([[DEEP_PATH, [{ start: 3, end: 3 }]]]),
+				files: new Map([
+					[
+						DEEP_PATH,
+						{ kind: 'modified', oldPath: DEEP_PATH, newPath: DEEP_PATH },
+					],
+				]),
+			}) as never;
+
+		const { evidence, evidenceText } = await runReviewWithOutput(
+			reviewerOutput('the deep path finding', { file: DEEP_PATH, line: 3 }),
+		);
+		const findings = evidence.findings as Array<{
+			file: string;
+			anchored: boolean;
+		}>;
+		expect(findings[0].file).toBe(DEEP_PATH);
+		expect(findings[0].anchored).toBe(true);
+		expect(evidenceText).toContain('OAuth2TokenService');
+	});
+
+	// A path that names NO real file is model-invented free text, so it is
+	// redacted.
+	test('a model-invented path is redacted', async () => {
+		const invented = `src/${GH}/invented.ts`;
+		const { evidence, evidenceText } = await runReviewWithOutput(
+			reviewerOutput('the invented path finding', { file: invented }),
+		);
+		const findings = evidence.findings as Array<{ file: string }>;
+		expect(findings[0].file).not.toContain(GH);
+		expect(evidenceText.includes(GH)).toBe(false);
+	});
 
 	// The APPROVED receipt's caveat is COMPOSED from the finding's title and
 	// its anchor rejection, and the receipt persists the composed string

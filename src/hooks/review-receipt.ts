@@ -39,7 +39,6 @@ import type {
 import { resolveRetentionCap } from '../retention/caps.js';
 import {
 	EVIDENCE_FINDING_BODY_MAX,
-	EVIDENCE_FINDING_FILE_MAX,
 	EVIDENCE_FINDING_TITLE_MAX,
 	EVIDENCE_VALIDATION_EVIDENCE_MAX,
 	redactEvidenceField,
@@ -82,13 +81,11 @@ function redactStructuredFindingsForPersistence(
 		...finding,
 		title: redactEvidenceField(finding.title, EVIDENCE_FINDING_TITLE_MAX),
 		body: redactEvidenceField(finding.body, EVIDENCE_FINDING_BODY_MAX),
-		// The file path is model-authored free text (for an unanchored
-		// finding it is whatever the model wrote), so it is redacted like
-		// the other free-text fields.
-		file:
-			typeof finding.file === 'string'
-				? redactEvidenceField(finding.file, EVIDENCE_FINDING_FILE_MAX)
-				: finding.file,
+		// The file path is NOT redacted here: the engine already redacted a
+		// path that names no real file in the project, and the evidence copy
+		// of the same finding carries that form — redacting it again (the
+		// redactor's base64 rule matches ordinary deep paths) would make the
+		// two copies differ and the integrity check would reject the pair.
 	}));
 }
 
@@ -113,15 +110,6 @@ export function redactReviewReceiptForPersistence<T extends ReviewReceipt>(
 			}
 			if (finding.anchor_reason !== undefined) {
 				finding.anchor_reason = redactEvidenceText(finding.anchor_reason);
-			}
-			// The location and the file are model-authored free text (the
-			// path of an unanchored finding is whatever the model wrote), so
-			// they are redacted like every other string on the receipt.
-			if (finding.location !== undefined) {
-				finding.location = redactEvidenceText(finding.location);
-			}
-			if (finding.file !== undefined) {
-				finding.file = redactEvidenceText(finding.file);
 			}
 		}
 		rejected.pass_conditions = rejected.pass_conditions.map((condition) =>

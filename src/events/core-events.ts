@@ -60,10 +60,7 @@ import {
 	readOwnerLockPayload,
 	releaseOwnerLock,
 } from '../parallel/file-locks.js';
-import {
-	clampRedactedText,
-	redactEvidenceText,
-} from '../security/evidence-redaction.js';
+import { redactEvidenceText } from '../security/evidence-redaction.js';
 import { telemetry } from '../telemetry.js';
 import { renameSyncWithRetry } from '../utils/atomic-write.js';
 import { warn } from '../utils/logger.js';
@@ -223,21 +220,57 @@ function fitRedactedEventToLineLimit(
 	for (const key of carriers) emptied[key] = '';
 	const overhead = Buffer.byteLength(`${JSON.stringify(emptied)}\n`) - 1;
 	if (overhead > limit) return null;
-	let budget = limit - overhead;
-	for (let round = 0; round < 24; round++) {
-		const fitted: Record<string, unknown> = { ...event };
-		let remaining = budget;
-		for (const key of carriers) {
-			const value = event[key] as string;
-			const take = Math.min(value.length, Math.max(remaining, 0));
-			fitted[key] = clampRedactedText(value, take);
-			remaining -= take;
-		}
-		const line = `${JSON.stringify(fitted)}\n`;
-		if (Buffer.byteLength(line) - 1 <= limit) return { event: fitted, line };
-		budget = Math.floor(budget / 2);
+	const budget = limit - overhead;
+	const lengths = carriers.map((key) =>
+		Buffer.byteLength(event[key] as string, 'utf8'),
+	);
+	const total = lengths.reduce((sum, length) => sum + length, 0);
+	if (total <= budget) {
+		const line = `${JSON.stringify(event)}\n`;
+		return Buffer.byteLength(line) - 1 <= limit ? { event, line } : null;
 	}
+	// The carriers share the budget PROPORTIONALLY, so a long carrier does
+	// not wipe the short ones: only the growth the redaction itself caused
+	// is lost.
+	const fitted: Record<string, unknown> = { ...event };
+	carriers.forEach((key, index) => {
+		const share = Math.floor((lengths[index] * budget) / total);
+		fitted[key] = trimRedactedCarrier(event[key] as string, share);
+	});
+	const line = `${JSON.stringify(fitted)}\n`;
+	if (Buffer.byteLength(line) - 1 <= limit) return { event: fitted, line };
 	return null;
+}
+
+/**
+ * Trim a redacted free-text carrier to a byte budget.
+ *
+ * The cut lands on a character boundary, and a trailing PARTIAL marker is
+ * dropped (a persisted `[REDACTED:git` is neither the secret nor a usable
+ * value). Unlike the schema-bound clamp, an event carrier may end up EMPTY:
+ * the event's free text has no minimum length, and an empty value is better
+ * than a half-written marker.
+ */
+function trimRedactedCarrier(value: string, budgetBytes: number): string {
+	if (budgetBytes <= 0) return '';
+	if (Buffer.byteLength(value, 'utf8') <= budgetBytes) return value;
+	let cut = Buffer.from(value, 'utf8')
+		.subarray(0, budgetBytes)
+		.toString('utf8');
+	// A cut inside a multi-byte character leaves a replacement character.
+	if (cut.endsWith('�')) cut = cut.slice(0, -1);
+	const markerStart = Math.max(
+		cut.lastIndexOf('[REDACTED'),
+		cut.lastIndexOf('<redacted'),
+	);
+	if (
+		markerStart >= 0 &&
+		!cut.slice(markerStart).includes(']') &&
+		!cut.slice(markerStart).includes('>')
+	) {
+		cut = cut.slice(0, markerStart);
+	}
+	return cut;
 }
 
 function redactCoreEventFreeText(
