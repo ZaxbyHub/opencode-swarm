@@ -14,6 +14,7 @@ import {
 	type RendererFinding,
 	renderPrReviewSubmissionBody,
 } from '../pr-review/render-review-body.js';
+import { redactFindingFileLine } from '../review/review-file-path.js';
 import {
 	clampRedactedText,
 	redactEvidenceText,
@@ -436,6 +437,7 @@ function renderSummary(input: {
 	boundariesReached: string[];
 	baseCoverage: BaseCoverageState;
 	abortEvent: AbortEvent;
+	directory?: string;
 }): {
 	text: string;
 	bodyTruncated: boolean;
@@ -508,6 +510,7 @@ function renderSummary(input: {
 	const rendered = renderPrReviewSubmissionBody({
 		run_id: input.runId,
 		pr_head_sha: input.head,
+		directory: input.directory,
 		coverage,
 		findings: rendererFindings,
 		...(asString(input.receipt.base_verification) === 'bound_fallback'
@@ -865,6 +868,7 @@ export async function executeExportPrReviewPartialResults(
 	const boundariesReached = [...new Set(rows.map((row) => row.boundary))];
 	const silence = computeSilence(receipt, abortEvent, receiptVersion);
 	const renderedSummary = renderSummary({
+		directory,
 		runId,
 		head: declaredHead,
 		workflowInstanceId,
@@ -912,7 +916,7 @@ export async function executeExportPrReviewPartialResults(
 				...(typeof row.file_line === 'string'
 					? {
 							file_line: clampRedactedText(
-								redactEvidenceText(row.file_line),
+								redactFindingFileLine(directory, row.file_line),
 								PR_REVIEW_FINDING_FILE_LINE_MAX,
 							),
 						}

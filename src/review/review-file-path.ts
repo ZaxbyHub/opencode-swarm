@@ -19,6 +19,7 @@ import * as path from 'node:path';
 import {
 	EVIDENCE_FINDING_FILE_MAX,
 	redactEvidenceField,
+	redactEvidenceText,
 } from '../security/evidence-redaction.js';
 
 function hasControlCharacter(value: string): boolean {
@@ -118,11 +119,27 @@ export function redactLocationPath(
 	location: string,
 ): string {
 	if (typeof location !== 'string' || location.length === 0) return location;
-	const match = /^(.*):(\d+)$/.exec(location);
+	const match = /^(.*):(\d+(?:-\d+)?)$/.exec(location);
 	if (!match) {
 		// No `path:line` shape: the whole string is free text, and it is
 		// redacted by the same rule.
 		return redactReviewFilePath(directory, location);
 	}
+	return `${redactReviewFilePath(directory, match[1])}:${match[2]}`;
+}
+
+/**
+ * A finding's `file_line` free text (`path:line`, `path:start-end`, or
+ * unparseable prose). The path part follows the path rule; the line suffix
+ * is untouched; text with no location shape falls back to the plain
+ * evidence rule (a credential quoted in the prose must still go).
+ */
+export function redactFindingFileLine(
+	directory: string,
+	fileLine: string,
+): string {
+	if (typeof fileLine !== 'string' || fileLine.length === 0) return fileLine;
+	const match = /^(.*):(\d+(?:-\d+)?)$/.exec(fileLine);
+	if (!match) return redactEvidenceText(fileLine);
 	return `${redactReviewFilePath(directory, match[1])}:${match[2]}`;
 }

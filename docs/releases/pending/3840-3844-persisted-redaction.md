@@ -223,13 +223,15 @@ docs/training-vault-remediation.md.
   disk schema enforces: a redaction placeholder is LONGER than the secret it
   replaces, so a message that sat exactly on the bound was pushed past it by
   the redaction and the queue write failed.
-- The published PR-review body redacts the finding LOCATION (the path and
-  the prose beside it) and the finding status, not just the evidence field.
-  The location reaches both the published body line and the inline-comment
-  path, and a review artifact written before this change can carry a
-  credential in it. When the redaction changed the PATH, the finding stays a
-  body-only entry — an inline comment would name a file that does not exist
-  in the repository.
+- The published PR-review body redacts the finding LOCATION (the prose in
+  it) and the finding status, not just the evidence field. The PATH part of
+  the location follows the same path-aware rule as every other persisted
+  finding path (kept verbatim when it names a real file, redacted
+  otherwise), so a finding anchored on an ordinary deep repository path
+  keeps its inline-comment anchor; the prose beside the path (and any path
+  that names no real file) is still redacted, and a finding whose PATH was
+  redacted stays a body-only entry — an inline comment would name a file
+  that does not exist in the repository.
 - The reviewer receipt's free text is redacted where the project directory
   is known: the finding's title, body and file, a LEGACY issue's `path:line`
   location, the evidence references and the structured findings of BOTH
@@ -240,8 +242,9 @@ docs/training-vault-remediation.md.
   so a range diff's target-side path is redacted there like any other
   unresolved path (a cosmetic difference in a display string; nothing reads
   the field).
-- The evidence path redacts a URL's credential PARAMETERS (`?password=…`, an
-  Azure SAS `&sig=…`, an S3 `X-Amz-Signature=…`): the training redactor
+- The evidence path redacts a URL's credential PARAMETERS (`?password=…`,
+  `?pwd=…`, `?api-key=…`, `?jwt=…`, an Azure SAS `&sig=…`, an S3
+  `X-Amz-Signature=…`): the training redactor
   replaces a whole URL, so without the parameter names a URL-embedded
   password persisted in the clear in review evidence.
 - The training export preserves the capture-time redaction history: a record
@@ -266,7 +269,10 @@ docs/training-vault-remediation.md.
   redactor's long mixed-class base64 rule counts `/` as a base64 character,
   so an ordinary deep path matches it, and a redacted path does not resolve,
   so the finding would silently stop blocking the phase gate. The review
-  receipt's file and location are redacted by the same rule.
+  receipt's file and location are redacted by the same rule, and so are the
+  forge PR-review artifact rows (`file_line`), their post-abort export and
+  the published body's location: a real repository path survives them all
+  verbatim, so the submission can anchor an inline comment on the file.
 
 ## Fold-in: the remaining persisted-evidence boundaries
 

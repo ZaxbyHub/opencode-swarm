@@ -21,7 +21,10 @@ import {
 	collectReviewerReceiptAfter as collectReviewerReceiptAfterRaw,
 } from '../../../src/hooks/review-receipt-collector';
 import { canonicalizeValidationCandidates } from '../../../src/review/finding-validator';
-import { redactReviewFilePath } from '../../../src/review/review-file-path';
+import {
+	redactFindingFileLine,
+	redactReviewFilePath,
+} from '../../../src/review/review-file-path';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 const GH = `ghp_${'q'.repeat(30)}`;
@@ -246,6 +249,49 @@ describe('#3844 a review finding file path is redacted only when it names no rea
 		}
 		for (const finding of receipt.structured_findings ?? []) {
 			expect(String(finding.file)).not.toContain(GH);
+		}
+	});
+});
+
+describe('#3844 round-9: redactFindingFileLine (the file_line free-text rule)', () => {
+	const DEEP =
+		'src/main/java/org/springframework/security/oauth2/server/authorization/OAuth2AuthorizationCodeRequestAuthenticationProvider.java';
+
+	test('a real path:line keeps the path and the line suffix', () => {
+		const dir = canonicalMkdtemp('fileline-3844-');
+		try {
+			fs.mkdirSync(path.dirname(path.join(dir, DEEP)), { recursive: true });
+			fs.writeFileSync(path.join(dir, DEEP), 'class X {}\n');
+			expect(redactFindingFileLine(dir, `${DEEP}:42`)).toBe(`${DEEP}:42`);
+			expect(redactFindingFileLine(dir, `${DEEP}:12-40`)).toBe(`${DEEP}:12-40`);
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test('a path that names no real file is redacted; the line suffix survives', () => {
+		const dir = canonicalMkdtemp('fileline-3844-');
+		try {
+			const out = redactFindingFileLine(dir, `${DEEP}:42`);
+			expect(out).toContain('[REDACTED:base64]');
+			expect(out.endsWith('.java:42')).toBe(true);
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test('text with no location shape falls back to the plain evidence rule', () => {
+		const dir = canonicalMkdtemp('fileline-3844-');
+		try {
+			const secret = `ghp_${'t'.repeat(30)}`;
+			const out = redactFindingFileLine(
+				dir,
+				`see src/a.ts:12 quoting ${secret}`,
+			);
+			expect(out).not.toContain(secret);
+			expect(out).not.toContain('ghp_');
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
 		}
 	});
 });

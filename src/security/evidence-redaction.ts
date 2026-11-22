@@ -100,7 +100,7 @@ const EVIDENCE_SCHEME_TOKEN_PATTERN =
  * vendor-prefixed ones (`X-Amz-*`, `X-Goog-*`) and the URL FRAGMENT form.
  */
 const URL_QUERY_CREDENTIALS_PATTERN =
-	/([?&#])((?:access_token|api_key|apikey|token|secret|password|passwd|credential|signature|sig|client_secret|x-amz-signature|x-amz-credential|x-amz-security-token|x-goog-signature|x-goog-credential)=)([^\s&'"<>]+)/gi;
+	/([?&#])((?:access_token|api_key|apikey|api-key|x-api-key|token|secret|password|passwd|pass|pwd|credential|signature|sig|auth|jwt|client_secret|x-amz-signature|x-amz-credential|x-amz-security-token|x-goog-signature|x-goog-credential)=)(?!\[REDACTED)([^\s&'"<>#)`\]]+)/gi;
 
 const EVIDENCE_BARE_TOKEN_VALUE_PATTERNS: ReadonlyArray<{
 	label: string;

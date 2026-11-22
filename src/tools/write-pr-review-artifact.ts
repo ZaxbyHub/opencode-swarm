@@ -40,6 +40,7 @@ import {
 	settleCriticFinding,
 	synthesizePrReviewFindings,
 } from '../pr-review/finding-policy.js';
+import { redactFindingFileLine } from '../review/review-file-path.js';
 import {
 	clampRedactedText,
 	redactEvidenceText,
@@ -215,6 +216,11 @@ export const _internals = {
 	/** Exposed so the #2383 read/migration boundary is testable directly. */
 	readFindings,
 	/**
+	 * The persistence-time field normalization, exposed so the path-aware
+	 * `file_line` rule (#3844 round 9) is directly pinned.
+	 */
+	normalizeFindingForPersistence,
+	/**
 	 * The exact-replay predicate and the canonical projection it compares.
 	 * Exposed so the stale-identity contract (the sidecar alone may not
 	 * assert "persisted") is directly testable.
@@ -317,17 +323,24 @@ function normalizeFindingForPersistence<
 		category?: string;
 		provenance?: string[];
 	},
->(record: T): T {
+>(record: T, directory?: string): T {
 	return {
 		...record,
 		evidence: clampRedactedText(
 			redactEvidenceText(record.evidence),
 			PR_REVIEW_FINDING_EVIDENCE_MAX,
 		),
+		// #3844 round-9: the location follows the path-aware rule — a path
+		// that names a file in the checkout is kept verbatim (redacting an
+		// ordinary deep path breaks the submission anchor); a path that
+		// names no real file (or quotes a credential) is redacted. Without
+		// a directory the legacy plain rule applies.
 		...(record.file_line !== undefined
 			? {
 					file_line: clampRedactedText(
-						redactEvidenceText(record.file_line),
+						directory !== undefined
+							? redactFindingFileLine(directory, record.file_line)
+							: redactEvidenceText(record.file_line),
 						PR_REVIEW_FINDING_FILE_LINE_MAX,
 					),
 				}
@@ -366,8 +379,8 @@ function redactPersistedFindingForSynthesis<
 		category?: string;
 		provenance?: string[];
 	},
->(row: T): T {
-	return normalizeFindingForPersistence(row);
+>(row: T, directory?: string): T {
+	return normalizeFindingForPersistence(row, directory);
 }
 
 function findingsIdentityKey(boundary: string): string {
@@ -422,7 +435,9 @@ function matchesPersistedFindingsRawIdentity(
 			);
 			if (storedCanonical === incomingRawCanonical) return true;
 			const incomingRedactedCanonical = canonicalFindingRecords(
-				incomingRecords.map((record) => normalizeFindingForPersistence(record)),
+				incomingRecords.map((record) =>
+					normalizeFindingForPersistence(record, directory),
+				),
 			);
 			return storedCanonical === incomingRedactedCanonical;
 		} catch {
@@ -1119,7 +1134,7 @@ export async function executeWritePrReviewArtifact(
 		const appended: PersistedFinding[] = isExactReplay
 			? []
 			: findingsInput.records.map((record) => ({
-					...normalizeFindingForPersistence(record),
+					...normalizeFindingForPersistence(record, directory),
 					boundary: findingsInput.boundary,
 					pr_head_sha: state!.prHeadSha!,
 					recorded_at: recordedAt,
@@ -1266,7 +1281,7 @@ export async function executeWritePrReviewArtifact(
 				const synthesis = synthesizePrReviewFindings({
 					candidates: policyCandidates(
 						[...latest.values()].map((row) =>
-							redactPersistedFindingForSynthesis(row),
+							redactPersistedFindingForSynthesis(row, directory),
 						),
 						sessionID,
 						findingsInput.boundary,

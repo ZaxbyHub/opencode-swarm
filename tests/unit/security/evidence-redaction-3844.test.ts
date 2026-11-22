@@ -400,6 +400,13 @@ describe('#3844 the shared redactor is idempotent and covers the training famili
 			'https://example.com/bucket?X-Amz-Signature=Fedcba9876543210',
 			'https://example.com/bucket?X-Amz-Security-Token=Token0123456789',
 			'https://example.com/bucket?X-Goog-Signature=GoogSig0123456789',
+			// Round-9: the additional vendor-agnostic parameter names.
+			'https://example.com/api?api-key=KeyValue123456',
+			'https://example.com/api?x-api-key=XKey7890abcdef',
+			'https://example.com/db?pwd=Pwd1234567890',
+			'https://example.com/db?pass=Pass1234567890',
+			'https://example.com/oauth?auth=Auth1234567890',
+			'https://example.com/jwt?jwt=Jwt1234567890ab',
 		]) {
 			const out = redactEvidenceText(url);
 			expect(out).not.toContain('Hunter2Synthetic');
@@ -407,7 +414,27 @@ describe('#3844 the shared redactor is idempotent and covers the training famili
 			expect(out).not.toContain('Fedcba9876543210');
 			expect(out).not.toContain('Token0123456789');
 			expect(out).not.toContain('GoogSig0123456789');
+			expect(out).not.toContain('KeyValue123456');
+			expect(out).not.toContain('XKey7890abcdef');
+			expect(out).not.toContain('Pwd1234567890');
+			expect(out).not.toContain('Pass1234567890');
+			expect(out).not.toContain('Auth1234567890');
+			expect(out).not.toContain('Jwt1234567890ab');
 		}
+	});
+
+	test('a benign fragment AFTER a credential parameter survives', () => {
+		// The value class stops at the fragment delimiter, so a location
+		// hash after a redacted parameter keeps its anchor; and the class
+		// stops at the prose delimiters, so parenthesized prose survives.
+		const fragmented = redactEvidenceText(
+			'https://example.invalid/?token=abc#section',
+		);
+		expect(fragmented).not.toContain('abc');
+		expect(fragmented).toContain('#section');
+		const parenthesized = redactEvidenceText('(see ?token=abc) for details');
+		expect(parenthesized).not.toContain('abc');
+		expect(parenthesized).toContain(') for details');
 	});
 
 	test('the key/value arm preserves the separator it consumed', () => {

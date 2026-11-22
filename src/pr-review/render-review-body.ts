@@ -8,6 +8,7 @@
  * module without submission authority.
  */
 
+import { redactLocationPath } from '../review/review-file-path';
 import { redactEvidenceText } from '../security/evidence-redaction';
 
 export const PR_REVIEW_INLINE_COMMENT_CAP = 20;
@@ -48,6 +49,14 @@ export interface RendererCoverage {
 
 export interface RenderReviewBodyInput {
 	run_id: string;
+	/**
+	 * #3844 round-9: the project directory, when the caller knows it. The
+	 * finding LOCATION then follows the path-aware rule (a path that names
+	 * a file in the checkout is kept verbatim so the inline comment can
+	 * anchor; everything else is redacted). Without it the location is
+	 * redacted by the plain evidence rule.
+	 */
+	directory?: string;
 	pr_head_sha: string;
 	verdict?: string;
 	base_verification?: string;
@@ -148,6 +157,7 @@ function postedMarker(findingId: string): string {
 function selectSurvivors(
 	findings: readonly RendererFinding[],
 	existingComments: readonly string[],
+	directory?: string,
 ): { survivors: SurvivingFinding[]; skippedAsPosted: string[] } {
 	const skippedAsPosted: string[] = [];
 	const seenIds = new Set<string>();
@@ -168,7 +178,10 @@ function selectSurvivors(
 		// BEFORE it is parsed, so neither the published body line nor the
 		// inline-comment path can carry one.
 		const rawFileLine = finding.file_line ?? '';
-		const fileLine = redactEvidenceText(rawFileLine);
+		const fileLine =
+			directory !== undefined
+				? redactLocationPath(directory, rawFileLine)
+				: redactEvidenceText(rawFileLine);
 		// An inline comment targets a REAL repository path. When the
 		// redaction CHANGED the path, the path itself carried a
 		// credential-shaped component, so the redacted path names a file
@@ -209,6 +222,7 @@ export function renderPrReviewSubmissionBody(
 	const { survivors, skippedAsPosted } = selectSurvivors(
 		liveFindings,
 		existingComments,
+		input.directory,
 	);
 
 	// Stable severity grouping: rank first, input order within a group.
@@ -241,7 +255,9 @@ export function renderPrReviewSubmissionBody(
 		for (const entry of group) {
 			const id = singleLine(entry.finding.finding_id ?? '', 128);
 			const location = singleLine(
-				redactEvidenceText(entry.finding.file_line ?? ''),
+				input.directory !== undefined
+					? redactLocationPath(input.directory, entry.finding.file_line ?? '')
+					: redactEvidenceText(entry.finding.file_line ?? ''),
 				200,
 			);
 			// status is findings.jsonl-derived like every other interpolated
@@ -281,7 +297,9 @@ export function renderPrReviewSubmissionBody(
 		for (const finding of suppressedUnstable) {
 			const id = singleLine(finding.finding_id ?? '', 128);
 			const location = singleLine(
-				redactEvidenceText(finding.file_line ?? ''),
+				input.directory !== undefined
+					? redactLocationPath(input.directory, finding.file_line ?? '')
+					: redactEvidenceText(finding.file_line ?? ''),
 				200,
 			);
 			const status = singleLine(

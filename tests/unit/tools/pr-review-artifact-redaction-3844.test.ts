@@ -355,3 +355,83 @@ describe('#3844 normalization preserves benign content and removes secrets', () 
 		expect(twice).toBe(once);
 	});
 });
+
+describe('#3844 round-9: the path-aware file_line rule at the artifact boundary', () => {
+	const DEEP =
+		'src/main/java/org/springframework/security/oauth2/server/authorization/OAuth2AuthorizationCodeRequestAuthenticationProvider.java';
+
+	function baseRecord(fileLine: string) {
+		return {
+			evidence: 'benign evidence',
+			file_line: fileLine,
+		};
+	}
+
+	test('a REAL deep path keeps its exact form in the persisted file_line', () => {
+		const dir = freshDir();
+		try {
+			mkdirSync(path.dirname(path.join(dir, DEEP)), { recursive: true });
+			writeFileSync(path.join(dir, DEEP), 'class X {}\n');
+			const normalized = artifactInternals.normalizeFindingForPersistence(
+				baseRecord(`${DEEP}:42`),
+				dir,
+			);
+			expect(normalized.file_line).toBe(`${DEEP}:42`);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test('a path that names NO real file is redacted by the same boundary', () => {
+		const dir = freshDir();
+		try {
+			const normalized = artifactInternals.normalizeFindingForPersistence(
+				baseRecord(`${DEEP}:42`),
+				dir,
+			);
+			expect(normalized.file_line).not.toContain(
+				'OAuth2AuthorizationCodeRequestAuthenticationProvider',
+			);
+			expect(normalized.file_line).toContain('[REDACTED:base64].java:42');
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test('the path:start-end range shape keeps a real path too', () => {
+		const dir = freshDir();
+		try {
+			mkdirSync(path.dirname(path.join(dir, DEEP)), { recursive: true });
+			writeFileSync(path.join(dir, DEEP), 'class X {}\n');
+			const normalized = artifactInternals.normalizeFindingForPersistence(
+				baseRecord(`${DEEP}:12-40`),
+				dir,
+			);
+			expect(normalized.file_line).toBe(`${DEEP}:12-40`);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test('free-text file_line with a credential is still redacted (no location shape)', () => {
+		const dir = freshDir();
+		try {
+			const secret = `ghp_${'r'.repeat(30)}`;
+			const normalized = artifactInternals.normalizeFindingForPersistence(
+				baseRecord(`see src/a.ts:12 quoting ${secret}`),
+				dir,
+			);
+			expect(normalized.file_line).not.toContain(secret);
+			expect(normalized.file_line).not.toContain('ghp_');
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test('without a directory the legacy plain rule applies (documented fallback)', () => {
+		const normalized = artifactInternals.normalizeFindingForPersistence(
+			baseRecord(`${DEEP}:42`),
+		);
+		expect(normalized.file_line).toContain('[REDACTED:base64]');
+	});
+});
