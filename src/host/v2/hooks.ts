@@ -337,7 +337,6 @@ async function onV2ToolBefore(
 						callID: event.id,
 						agent: normalizeV2AgentRef(event.agent),
 						messageID: event.messageID,
-						...(wrapperMarked ? { hostCodeModeWrapper: true } : {}),
 					},
 					output,
 				),

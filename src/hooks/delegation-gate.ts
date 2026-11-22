@@ -5,11 +5,11 @@
  * Uses experimental.chat.messages.transform to provide non-blocking guidance.
  */
 
-import { isNativeV2AsyncSubagentHost } from '../host/v2/native-async-mode';
 import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { ZodError, z } from 'zod';
+import { validSoundingBoardCallerCategory } from '../agents/sounding-board-policy.js';
 import type {
 	BackgroundCoderReservation,
 	BackgroundDelegationRecord,
@@ -66,21 +66,20 @@ import {
 	readTaskGateRequirementsReceiptsSync,
 } from '../evidence/task-gate-requirements.js';
 import { isReadOnlyTool } from '../full-auto/policy';
-import { isSingleToolCallProgram } from '../full-auto/code-mode-program';
 import { compareTaskWorkflowStateRank } from '../gate-evidence';
 import { isMarkdownOnlyTaskChange } from '../gate-evidence-classification.js';
+import { isNativeV2AsyncSubagentHost } from '../host/v2/native-async-mode';
 import {
 	routeReviewForChanges,
 	shouldParallelizeReview,
 } from '../parallel/review-router.js';
 import {
+	extractPlanCriticVerdict,
+	PLAN_CRITIC_GATE_INTENT_SIGNALS,
+	PLAN_CRITIC_TASK_SIGNALS,
 	recordVerifiedPlanCriticApproval,
 	taskIsExplicitPlanCriticGate,
-	extractPlanCriticVerdict,
-	PLAN_CRITIC_TASK_SIGNALS,
-	PLAN_CRITIC_GATE_INTENT_SIGNALS,
 } from '../plan/critic-approval.js';
-import { validSoundingBoardCallerCategory } from '../agents/sounding-board-policy.js';
 import {
 	approvedSnapshotCoversPlan,
 	computePlanStructureHash,
@@ -3859,8 +3858,6 @@ export function createDelegationGateHook(
 			tool: string;
 			sessionID: string;
 			callID: string;
-			/** Untrusted by itself; combined with explicit operator opt-in. */
-			hostCodeModeWrapper?: boolean;
 		},
 		output: { args: unknown },
 	) => Promise<void>;
@@ -4708,8 +4705,6 @@ export function createDelegationGateHook(
 			tool: string;
 			sessionID: string;
 			callID: string;
-			/** Untrusted by itself; combined with explicit operator opt-in. */
-			hostCodeModeWrapper?: boolean;
 		},
 		output: { args: unknown },
 	): Promise<void> => {
@@ -6788,10 +6783,7 @@ export function createDelegationGateHook(
 								const baseline = planCriticDispatchBaselinesByCallID.get(
 									input.callID,
 								);
-								if (
-									baseline &&
-									baseline.parentSessionId === input.sessionID
-								) {
+								if (baseline && baseline.parentSessionId === input.sessionID) {
 									planCriticDispatch = {
 										planStructureHash: baseline.planStructureHash,
 										recordedAt: baseline.capturedAt,
@@ -6828,10 +6820,11 @@ export function createDelegationGateHook(
 								// conservatively).
 								...(normalizedSubagentType === 'critic_sounding_board'
 									? (() => {
-											const category = validSoundingBoardCallerCategory(
-												mergedArgs,
-											);
-											return category ? { soundingBoardCategory: category } : {};
+											const category =
+												validSoundingBoardCallerCategory(mergedArgs);
+											return category
+												? { soundingBoardCategory: category }
+												: {};
 										})()
 									: {}),
 								workflowGeneration: TASK_GATE_AGENTS.has(normalizedSubagentType)
@@ -7102,8 +7095,9 @@ export function createDelegationGateHook(
 						// toolBefore for this exact call) to the sync recorder so a
 						// plan edited while the critic ran cannot be approved by
 						// the stale verdict.
-						const criticBaseline =
-							planCriticDispatchBaselinesByCallID.get(input.callID);
+						const criticBaseline = planCriticDispatchBaselinesByCallID.get(
+							input.callID,
+						);
 						await recordPlanCriticApprovalSnapshotIfApplicable(
 							directory,
 							input,
