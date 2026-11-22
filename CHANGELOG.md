@@ -1,5 +1,15 @@
 # Changelog
 
+## [7.205.4](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.205.3...v7.205.4) (2026-11-22)
+
+
+### Bug Fixes
+
+* **host:** refuse unsupported v2 pr workflow activation ([e935613](https://github.com/ZaxbyHub/opencode-swarm/commit/e9356133358d463509070351a9c671955164c36a))
+* **host:** refuse unsupported v2 pr workflow activation ([a85209e](https://github.com/ZaxbyHub/opencode-swarm/commit/a85209e26b59467fa2e46a2d98545e9c1413a8eb))
+* **scope:** evict admission-map entries past a 24h hard age cap ([#3889](https://github.com/ZaxbyHub/opencode-swarm/issues/3889)) ([16c214d](https://github.com/ZaxbyHub/opencode-swarm/commit/16c214dc71063527f56c99fe6191042a865d9736))
+* test: required-check CRLF fixture comment overstates what it exercises; scope Migration and Behavior change wording ([#3304](https://github.com/ZaxbyHub/opencode-swarm/issues/3304)) ([4d559d1](https://github.com/ZaxbyHub/opencode-swarm/commit/4d559d1fe28fff16efad17a3df4eed93bcd6f5e6))
+
 ## [7.205.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.205.2...v7.205.3) (2026-11-21)
 
 
