@@ -43,16 +43,17 @@ import { findRedactableTokenSpans } from '../utils/jws-redaction';
  *   - the scheme may only START where the preceding character cannot be part
  *     of a scheme (`(?<![A-Za-z0-9+.-])`), which rejects the interior
  *     positions in O(1) and leaves one attempt per scheme run;
- *   - the scheme class may begin with `.` or `-`, so the attempt that
- *     survives always consumes the WHOLE scheme run. A URL that follows an
- *     ellipsis (`...https://user:pass@host`) or a dash is therefore still
- *     matched — rejecting it would lose coverage the `\b` arm had.
+ *   - the scheme class covers EVERY scheme character (not just a leading
+ *     letter), so the attempt that survives always consumes the WHOLE run
+ *     before `://`. A URL that follows an ellipsis (`...https://...`), a
+ *     dash, a plus or a digit (`1.https://...`) is therefore still matched —
+ *     the `\b` arm matched those, and rejecting them would lose coverage.
  *
  * The negative lookbehind is fixed-width, so it is portable (the repo
  * already uses lookbehind in src/).
  */
 const URL_CREDENTIALS_PATTERN =
-	/(?<![A-Za-z0-9+.-])([-.a-zA-Z][a-zA-Z0-9+.-]*:\/\/)([^\s/@:]+):([^\s/@]+)@([^\s'"<>]+)/gi;
+	/(?<![A-Za-z0-9+.-])([a-zA-Z0-9+.-]+:\/\/)([^\s/@:]+):([^\s/@]+)@([^\s'"<>]+)/gi;
 
 /**
  * Credential PLACEMENT shapes, mirrored from the training redactor

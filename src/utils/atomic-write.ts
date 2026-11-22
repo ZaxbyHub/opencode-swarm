@@ -329,10 +329,9 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 			'src/hooks/skill-usage-log.ts:1675',
 			'src/hooks/skill-usage-pending.ts:817',
 			'src/parallel/file-locks.ts:1075',
-			'src/plan/ledger.ts:607',
 			'src/plan/ledger.ts:1808',
 		],
-		note: 'constant-name temps: reported when stale, never auto-quarantined. file-locks meta sidecars live under the scanner-skipped .swarm/locks/ subtree; the ledger reconcile temp embeds instance tokens but its .tmp-suffix shape maps here (conservatively report-only)',
+		note: 'constant-name temps: reported when stale, never auto-quarantined. file-locks meta sidecars live under the scanner-skipped .swarm/locks/ subtree; the ledger reconcile temp embeds instance tokens but its .tmp-suffix shape maps here (conservatively report-only). The ledger ARCHIVE temp (src/plan/ledger.ts:607) is NOT listed here — its shape is `<path>.tmp.<token>`, which belongs to the target-suffix-tmp-token grammar',
 	},
 ];
 

@@ -187,6 +187,9 @@ describe('#3844 redactEvidenceText superset contract', () => {
 			'https://user:hunter2@example.invalid/x',
 			'(https://user:hunter2@example.invalid/x)',
 			'url=https://user:hunter2@example.invalid/x',
+			'see +https://user:hunter2@example.invalid/x',
+			'see 1.https://user:hunter2@example.invalid/x',
+			'git+https://user:hunter2@example.invalid/x',
 		];
 		for (const input of cases) {
 			const out = redactEvidenceText(input);
