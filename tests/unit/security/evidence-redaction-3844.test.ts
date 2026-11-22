@@ -10,6 +10,7 @@ import * as path from 'node:path';
 import { redactSecrets } from '../../../src/memory/redaction';
 import {
 	_internals,
+	clampRedactedText,
 	redactEvidenceText,
 } from '../../../src/security/evidence-redaction';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
@@ -146,6 +147,46 @@ describe('#3844 redactEvidenceText superset contract', () => {
 			'https://ci.example.invalid/log?access_token=abc123def456&x=1',
 		);
 		expect(out).not.toContain('abc123def456');
+	});
+
+	test('FB-006: the scheme class is GENERIC — a long legal scheme is covered too', () => {
+		// RFC 3986 bounds the scheme's SYNTAX, not its length. A bounded
+		// scheme class ({0,32}) silently left a longer scheme's userinfo
+		// unredacted.
+		const longScheme = `x${'y'.repeat(40)}`;
+		const out = redactEvidenceText(
+			`clone ${longScheme}://user:hunter2@example.invalid/repo.git now`,
+		);
+		expect(out).not.toContain('hunter2');
+		expect(out).toContain('example.invalid/repo.git');
+		// The short, everyday schemes stay covered (the control).
+		for (const scheme of ['postgres', 'mongodb+srv', 'ssh', 'redis', 'https']) {
+			const covered = redactEvidenceText(
+				`${scheme}://user:hunter2@example.invalid/x`,
+			);
+			expect(covered).not.toContain('hunter2');
+		}
+	});
+
+	test('the clamp keeps a COMPLETE marker and drops only a half-written one', () => {
+		// A COMPLETE marker at the HEAD of an over-long value is real
+		// content: the clamp used to treat it as a fragment and emptied the
+		// whole field, which then failed the schema's `.min(1)` floor and
+		// dropped the finding.
+		const withHead = clampRedactedText(
+			`[REDACTED:anthropic]${'z '.repeat(200)}`,
+			200,
+		);
+		expect(withHead.length).toBeGreaterThan(0);
+		expect(withHead.startsWith('[REDACTED:anthropic]')).toBe(true);
+		expect(withHead.length).toBeLessThanOrEqual(200);
+		// A cut landing INSIDE a marker drops the fragment.
+		const partial = clampRedactedText(`${'z '.repeat(99)}[REDACTED]`, 200);
+		expect(partial).not.toContain('[');
+		expect(partial.endsWith('[REDACTED')).toBe(false);
+		// The training placeholder family behaves the same way.
+		const angle = clampRedactedText(`${'z '.repeat(99)}<redacted:github>`, 200);
+		expect(angle).not.toContain('<redacted');
 	});
 
 	test('handoff sidecar failure ABORTS creation (round-1 fix 1 pin): no artifact when the salt is corrupt', async () => {

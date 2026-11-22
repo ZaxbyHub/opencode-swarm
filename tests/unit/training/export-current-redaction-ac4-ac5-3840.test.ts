@@ -137,6 +137,30 @@ describe('#3701 AC4/AC5 export current-redaction contract', () => {
 		expect(manifest.redaction_version).toBe(TRAINING_REDACTION_VERSION);
 	});
 
+	test('FB-012: an inconsistent stored digest is REPAIRED on output', () => {
+		const dir = freshDir();
+		const cst = consent(dir);
+		const { record: legacy } = seedLegacyRecord(dir, cst, 1, 'legacy content');
+		// The vault's schema validates the digest only as HEX, so a record
+		// whose stored digest does not match its content still reaches the
+		// export. The emitted record must carry a digest that binds its own
+		// content and a record id that binds that digest.
+		const corrupted = {
+			...legacy,
+			content_digest: digestOf('a different content'),
+		};
+		const bundle = buildTrainingExportBundle([corrupted as never]);
+		const emitted = JSON.parse(bundle.files['records.jsonl'] ?? '{}');
+		expect(emitted.content_digest).toBe(digestOf(emitted.content));
+		expect(emitted.record_id).not.toBe(legacy.record_id);
+		// The repaired id is the deterministic binding of the repaired digest.
+		expect(emitted.record_id).toBe(
+			digestOf(
+				`training-record-v1\0${emitted.lineage.project_ref}\0${emitted.lineage.session_id}\0${emitted.kind}\0${emitted.role}\0${emitted.content_digest}`,
+			),
+		);
+	});
+
 	test('AC4c: a record that cannot be safely redacted fails the export and publishes nothing', () => {
 		const dir = freshDir();
 		const cst = consent(dir);

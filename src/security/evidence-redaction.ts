@@ -28,11 +28,17 @@ import { findRedactableTokenSpans } from '../utils/jws-redaction';
 /**
  * URL userinfo credentials. The scheme is matched GENERICALLY, not just
  * http/https: a `postgres://`, `mongodb+srv://`, `ssh://` or `redis://`
- * connection string carries its password in the userinfo the same way, and
- * the shell site's `[a-zA-Z][a-zA-Z0-9+.-]{0,32}://` is the precedent.
+ * connection string carries its password in the userinfo the same way.
+ *
+ * RFC 3986 bounds the scheme's SYNTAX, not its length, so the quantifier is
+ * unbounded (`*`) rather than the shell site's `{0,32}` — a scheme longer
+ * than 33 characters is exotic but legal, and a bounded scheme class would
+ * silently leave that URL's userinfo unredacted. The scan stays linear: the
+ * class excludes `:`, so the greedy run stops at the first colon and never
+ * backtracks, and the leading `\b` restricts the attempts to word starts.
  */
 const URL_CREDENTIALS_PATTERN =
-	/(\b[a-zA-Z][a-zA-Z0-9+.-]{0,32}:\/\/)([^\s/@:]+):([^\s/@]+)@([^\s'"<>]+)/gi;
+	/(\b[a-zA-Z][a-zA-Z0-9+.-]*:\/\/)([^\s/@:]+):([^\s/@]+)@([^\s'"<>]+)/gi;
 
 /**
  * Credential PLACEMENT shapes, mirrored from the training redactor
@@ -184,6 +190,45 @@ export const _internals = {
 };
 
 /**
+ * Drop a trailing INCOMPLETE redaction-marker fragment from a cut value.
+ *
+ * A cut can land INSIDE a marker ('[REDACTED]' -> '[RE',
+ * '[REDACTED:github]' -> '[REDACTED:gi'). A half-written marker is not a
+ * usable value, so the fragment is dropped rather than persisted.
+ *
+ * A COMPLETE marker is NOT a fragment and is KEPT. The earlier test dropped
+ * any tail merely STARTING with the marker head, which emptied the whole
+ * value whenever the text began with a redacted secret — and an empty
+ * `FindingValidationSchema`/`ReviewFindingSchema` field fails its
+ * `.min(1)` bound, so the finding disappeared from the persisted receipt
+ * (the very failure this clamp exists to prevent).
+ *
+ * @param cut the already-truncated value
+ * @param open the marker's opening delimiter
+ * @param close the marker's closing delimiter
+ * @param head the marker head a fragment starts with
+ */
+function stripIncompleteMarkerFragment(
+	cut: string,
+	open: string,
+	close: string,
+	head: string,
+): string {
+	for (let i = cut.length - 1; i >= 0; i -= 1) {
+		if (cut[i] !== open) continue;
+		const tail = cut.slice(i);
+		const markerish =
+			tail.length >= 2 && (head.startsWith(tail) || tail.startsWith(head));
+		if (!markerish) continue;
+		// A closing delimiter inside the tail means the marker is COMPLETE
+		// in the cut — it is real content, not a fragment.
+		if (tail.includes(close)) return cut;
+		return cut.slice(0, i);
+	}
+	return cut;
+}
+
+/**
  * Clamp a REDACTED free-text field back inside its schema bound.
  *
  * A redaction placeholder can be LONGER than the secret it replaces — a
@@ -196,35 +241,25 @@ export const _internals = {
  *
  * The value is already secret-free at this point, so truncating it is safe.
  * A trailing PARTIAL placeholder fragment is dropped with it, so the
- * persisted value never shows half a marker.
+ * persisted value never shows half a marker; a COMPLETE placeholder is kept,
+ * and the result is never emptied (a schema-bound field has a `.min(1)`
+ * floor, so an empty value would drop the finding instead of bounding it).
  */
 export function clampRedactedText(value: string, max: number): string {
 	if (value.length <= max) return value;
-	let cut = value.slice(0, max);
-	// A cut can land INSIDE a redaction marker ('[REDACTED]' -> '[RE'). A
-	// half-written marker is not a usable value, so the fragment is dropped
-	// rather than persisted.
-	const square = cut.lastIndexOf('[');
-	if (square !== -1) {
-		const tail = cut.slice(square);
-		if (
-			tail !== '[REDACTED]' &&
-			('[REDACTED'.startsWith(tail) || tail.startsWith('[REDACTED'))
-		) {
-			cut = cut.slice(0, square);
-		}
-	}
-	const angle = cut.lastIndexOf('<');
-	if (angle !== -1) {
-		const tail = cut.slice(angle);
-		if (
-			!tail.endsWith('>') &&
-			('<redacted'.startsWith(tail) || tail.startsWith('<redacted'))
-		) {
-			cut = cut.slice(0, angle);
-		}
-	}
-	return cut;
+	const cut = value.slice(0, max);
+	const stripped = stripIncompleteMarkerFragment(
+		stripIncompleteMarkerFragment(cut, '<', '>', '<redacted'),
+		'[',
+		']',
+		'[REDACTED',
+	);
+	// A stripped fragment that would leave NOTHING behind is worse than a
+	// half marker: a schema-bound field has a `.min(1)` floor, so an empty
+	// value drops the finding instead of bounding it. (Unreachable for the
+	// real bounds — every marker is shorter than every field's max — but the
+	// clamp is a shared helper and must not be able to empty a value.)
+	return stripped.length > 0 ? stripped : cut;
 }
 
 /**

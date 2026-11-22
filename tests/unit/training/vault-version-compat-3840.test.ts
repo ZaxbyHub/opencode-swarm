@@ -223,6 +223,54 @@ describe('#3840 vault version compatibility', () => {
 		expect(existsSync(trainingVaultRecordsPath(d))).toBe(false);
 	});
 
+	test('FB-009: a SUB-MINIMUM version (0) keeps the historical purge-on-sweep class', () => {
+		const d = freshDir();
+		const cst = consent(d);
+		const current = record(d, cst, 'sub-minimum version line');
+		const v0 = `${JSON.stringify({
+			...current,
+			redaction: { ...current.redaction, version: 0 },
+		})}\n`;
+		const target = trainingVaultRecordsPath(d);
+		mkdirSync(path.dirname(target), { recursive: true });
+		writeFileSync(target, v0, 'utf8');
+		// The read path rejects it (the schema's version floor is 1).
+		const read = readTrainingVault(d);
+		expect(read.records).toHaveLength(0);
+		expect(read.quarantined).toHaveLength(1);
+		expect(read.quarantined[0]?.reason).toBe('schema_invalid');
+		// The sweep purges it: only a STRICTLY NEWER redactor's version is a
+		// version-only spare, a sub-minimum version is invalid state.
+		const sweep = sweepTrainingVaultExpiry(d, { now: NOW });
+		expect(sweep.purged).toBe(1);
+		expect(readFileSync(target, 'utf8')).toBe('');
+	});
+
+	test('FB-009: a SUB-MINIMUM version line DOES consume the append record quota', () => {
+		const d = freshDir();
+		// One valid slot only.
+		const cst = grantTrainingConsent(d, {
+			now: NOW,
+			quotas: { maxBytes: 1_000_000, maxRecords: 1, retentionDays: 30 },
+		});
+		const current = record(d, cst, 'sub-minimum quota line');
+		const v0 = `${JSON.stringify({
+			...current,
+			redaction: { ...current.redaction, version: 0 },
+		})}\n`;
+		const target = trainingVaultRecordsPath(d);
+		mkdirSync(path.dirname(target), { recursive: true });
+		writeFileSync(target, v0, 'utf8');
+		// The retained-future-version exemption must NOT cover it: it
+		// charges the quota like a malformed line.
+		const refused = appendTrainingVaultRecord(
+			d,
+			record(d, cst, 'one too many'),
+		);
+		expect(refused.appended).toBe(false);
+		expect(refused.stopReason).toBe('quota_records');
+	});
+
 	test('round-5 F2: retained version-only-quarantined lines do NOT consume maxRecords', () => {
 		const d = freshDir();
 		// One valid slot only.

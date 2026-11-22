@@ -637,12 +637,14 @@ export function applyCurrentRedactionToRecord(
 ): TrainingVaultRecord {
 	const redacted = _internals.redactTrainingContent(record.content);
 	const content = redacted.content.slice(0, MAX_CONTENT_CHARS);
-	if (
-		content === record.content &&
-		redacted.redactions === record.redaction.redactions
-	) {
-		return record;
-	}
+	// The digest and the record id are ALWAYS recomputed — never skipped
+	// because the content happens to be unchanged. The vault's schema
+	// validates the digest and the id only as hex, so a record whose stored
+	// digest does not match its content passes the read path; an early
+	// return would then publish that inconsistent record unchanged, and the
+	// exported record id would not bind the exported content. Recomputing is
+	// a no-op for a consistent record (the digest is a pure function of the
+	// content) and repairs an inconsistent one.
 	const contentDigest = sha256(content);
 	return {
 		...record,

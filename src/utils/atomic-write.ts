@@ -145,7 +145,9 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 			'src/tools/sast-baseline.ts:199',
 			'src/tools/repo-graph/storage.ts:543',
 			'src/memory/reflection-service.ts (pre-#2035; migrated-to=src/memory/reflection-service.ts:atomicWrite)',
-			'src/hooks/review-receipt.ts:694',
+			'src/hooks/review-receipt.ts:720',
+			'src/hooks/review-receipt.ts:786',
+			'src/hooks/review-receipt.ts:1014',
 			'src/knowledge/identity.ts:234',
 			'src/evidence/phase-participation.ts (pre-#2035; migrated-to=src/evidence/phase-participation.ts:atomicWriteBytes)',
 			'src/turbo/lean/integration.ts:427',
@@ -238,8 +240,8 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 		quarantineEligible: true,
 		parsesTarget: true,
 		producers: [
-			'src/tools/write-pr-review-artifact.ts:167',
-			'src/tools/write-pr-review-artifact.ts:187',
+			'src/tools/write-pr-review-artifact.ts:170',
+			'src/tools/write-pr-review-artifact.ts:190',
 			// Symbol form: shift-proof against import-order drift in the writer
 			// (issue #3094 re-pin; the old line-form anchor pointed at :105).
 			'src/tools/write-pr-review-trigger-eval.ts:createTriggerReceipt',

@@ -1465,10 +1465,14 @@ export async function executeWritePrReviewArtifact(
 		try {
 			handoffFingerprint = replayFingerprint(
 				directory,
-				JSON.stringify({
-					...comparableHandoff(handoffRecord),
-					summary: rawHandoffSummary,
-				}),
+				// The RAW comparable — the SAME identity the comparison path
+				// (`handoffsMatch`) checks. Computing the claim over the
+				// REDACTED comparable made the two disagree: an identical
+				// retry then compared its raw fingerprint against a
+				// redacted-derived claim and was refused as a conflict, and
+				// two different raw payloads that redact to the same text
+				// shared one claim.
+				JSON.stringify(rawHandoffComparable),
 			);
 			handoffClaim = claimReplayIdentityFingerprint(
 				directory,

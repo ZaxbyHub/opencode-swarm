@@ -11,6 +11,10 @@
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import * as path from 'node:path';
+import {
+	FindingValidationSchema,
+	ReviewFindingSchema,
+} from '../../../src/agents/agent-output-schema';
 import { buildWakeMessage } from '../../../src/background/pr-event-delivery';
 import { handleDatasetConsentCommand } from '../../../src/commands/dataset';
 import { persistReviewReceipt } from '../../../src/hooks/review-receipt';
@@ -98,6 +102,21 @@ describe('#3844 write-path pins (final-critic round 2)', () => {
 		const dir = canonicalMkdtemp('r2pins-3844-cap-');
 		const nearCap = `${'x'.repeat(2000 - '?token=abc'.length)}?token=abc`;
 		expect(nearCap.length).toBe(2000);
+		// The SAME shape for the finding title/body bounds, but the value
+		// must actually EXCEED its bound after the redaction, or the clamp
+		// never runs and the pin is vacuous. The title STARTS with the
+		// secret: the redaction puts the marker at the HEAD of the value,
+		// and a clamp that mistakes a COMPLETE marker for a fragment
+		// empties the field, which then fails ReviewFindingSchema's
+		// `.min(1)` and drops the finding from the persisted receipt.
+		//
+		// The filler carries a SPACE: the token classes are greedy over
+		// [A-Za-z0-9_-], so a letter-only filler would be swallowed INTO the
+		// token and the whole field would collapse to the bare marker.
+		const nearCapTitle = `${ANT}${'z '.repeat(130)}`;
+		const nearCapBody = `${GH}${'y '.repeat(1050)}`;
+		expect(nearCapTitle.length).toBeGreaterThan(200);
+		expect(nearCapBody.length).toBeGreaterThan(2000);
 		const receipt = {
 			schema_version: 1,
 			id: 'rr-cap',
@@ -109,6 +128,17 @@ describe('#3844 write-path pins (final-critic round 2)', () => {
 			blocking_findings: [],
 			evidence_references: [],
 			pass_conditions: ['reviewer approves'],
+			structured_findings: [
+				{
+					title: nearCapTitle,
+					body: nearCapBody,
+					severity: 'high',
+					confidence: 0.9,
+					file: 'src/a.ts',
+					line_start: 1,
+					line_end: 1,
+				},
+			],
 			finding_validations: [
 				{
 					finding_id: 'f-cap',
@@ -126,6 +156,30 @@ describe('#3844 write-path pins (final-critic round 2)', () => {
 		// half-written placeholder marker.
 		expect(evidence).not.toContain('?token=abc');
 		expect(/\[REDACTED?$/.test(evidence)).toBe(false);
+		// The title/body bounds hold, and neither field was EMPTIED.
+		const title = persisted.structured_findings[0].title as string;
+		const body = persisted.structured_findings[0].body as string;
+		expect(title.length).toBeLessThanOrEqual(200);
+		expect(body.length).toBeLessThanOrEqual(2000);
+		expect(title.length).toBeGreaterThan(0);
+		expect(body.length).toBeGreaterThan(0);
+		expect(title).not.toContain(ANT);
+		expect(body).not.toContain(GH);
+		// The COMPLETE marker at the head SURVIVED the clamp: it is real
+		// content, not a half-written fragment.
+		expect(title.startsWith('[REDACTED')).toBe(true);
+		expect(body.startsWith('[REDACTED')).toBe(true);
+		// The schema-validating reader must ACCEPT the persisted structures:
+		// this is the surface that drops a receipt whose field misses its
+		// bound (or was emptied), and a length assertion alone would not
+		// notice a field that fails the schema for another reason.
+		expect(
+			FindingValidationSchema.safeParse(persisted.finding_validations[0])
+				.success,
+		).toBe(true);
+		expect(
+			ReviewFindingSchema.safeParse(persisted.structured_findings[0]).success,
+		).toBe(true);
 	}, 60_000);
 
 	test('R2-1: persistAutoReviewEvidence writes the DURABLE evidence redacted', async () => {

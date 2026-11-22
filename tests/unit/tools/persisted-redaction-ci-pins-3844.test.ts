@@ -79,13 +79,18 @@ describe('#3844 CI pins: main redaction call sites (final-critic F3)', () => {
 					anchored: true,
 				},
 			],
-			// A suppressed entry reaches the order-unstable site.
+			// A suppressed entry reaches the order-unstable site. The render
+			// path FILTERS the suppressed list down to the rows that actually
+			// disagree between the presentation orders, so an entry without
+			// `order_agreement: 'disagree'` never reaches that site and the
+			// pin would be vacuous.
 			order_unstable_suppressed: [
 				{
 					finding_id: 'F-2',
 					status: 'confirmed',
 					severity: 'low',
 					file_line: 'src/b.ts:3',
+					order_agreement: 'disagree',
 					evidence: `${filler} ${ANT}`,
 				},
 			],
@@ -98,6 +103,11 @@ describe('#3844 CI pins: main redaction call sites (final-critic F3)', () => {
 		// not just the full token.
 		expect(text.includes('ghp_')).toBe(false);
 		expect(text.includes('sk-ant-')).toBe(false);
+		// The suppressed (order-unstable) render site was actually reached —
+		// without this the two token assertions above could be satisfied by a
+		// site that never rendered the suppressed entry at all.
+		expect(text).toContain('Order-unstable (not published as findings)');
+		expect(text).toContain('F-2');
 	});
 
 	test('auto-review evidence capture mutates in place, removing tokens from every prose field', () => {
