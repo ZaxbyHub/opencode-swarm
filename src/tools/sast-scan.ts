@@ -109,6 +109,8 @@ export interface SastScanResult {
 		 * Issue #2271 bug 3: present when every input was skipped for having no
 		 * SAST language profile (non-code diff) — the scan passed because there
 		 * was nothing to scan, and this counts the skipped non-code inputs.
+		 * Applies in legacy AND baseline diff mode: a loaded baseline cannot
+		 * make non-code files scannable, so a docs-only diff passes in both.
 		 */
 		files_skipped_non_code?: number;
 	};
@@ -895,16 +897,17 @@ export async function computeSastScan(
 	// Issue #2271 bug 3: a normal-mode scan whose EVERY input file was skipped
 	// for having no language profile (markdown-only / JSON-only diffs) passes
 	// instead of failing — there is no code to scan and no coverage was lost.
+	// This applies in baseline diff mode too: a loaded baseline cannot make
+	// non-code files scannable, and with zero scannable inputs there can be no
+	// new findings, so a docs-only diff wedged in `rework_required` when the
+	// `!baselineUsed` guard routed it into the coverage hard fail (issue #2271
+	// bug 3 follow-up, session 43d6d1c3 task 1.8: AGENTS.md-only scope).
 	// The hard fail stays for capture mode (handled above), for empty input,
 	// and for scannable files that could not be scanned (size/binary/missing).
 	let zeroCoverageError: string | undefined;
 	let nonCodeOnly = false;
 	if (filesScanned === 0) {
-		if (
-			!baselineUsed &&
-			nonCodeSkipped > 0 &&
-			nonCodeSkipped === changed_files.length
-		) {
+		if (nonCodeSkipped > 0 && nonCodeSkipped === changed_files.length) {
 			nonCodeOnly = true;
 		} else {
 			verdict = 'fail';

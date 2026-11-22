@@ -70,6 +70,61 @@ describe('sast_scan zero-coverage payload (#2210 + #2271 bug 3)', () => {
 		expect(result.summary.files_skipped_non_code).toBe(3);
 	});
 
+	test('non-code-only input passes in baseline diff mode too (docs-only task with captured baseline)', async () => {
+		// Session 43d6d1c3 task 1.8 regression: a docs-only scope (AGENTS.md)
+		// scanned through pre_check_batch passes `phase`, so a phase baseline
+		// captured by earlier code tasks is loaded (baseline_used=true). The
+		// non-code-only pass must still apply — a baseline cannot make
+		// markdown scannable, and zero scannable inputs cannot produce new
+		// findings. The old `!baselineUsed` guard routed this into the
+		// zero-coverage hard fail and wedged the task in rework_required.
+		const codeFile = path.join(tempDir, 'model.py');
+		fs.writeFileSync(codeFile, 'x = 1\n');
+		const capture = await sastScan(
+			{ changed_files: [codeFile], capture_baseline: true, phase: 1 },
+			tempDir,
+		);
+		expect(capture.status).toBe('baseline_captured');
+
+		const doc = path.join(tempDir, 'AGENTS.md');
+		fs.writeFileSync(doc, '# Docs-only change\n');
+		const result = await sastScan(
+			{ changed_files: [doc], phase: 1, severity_threshold: 'medium' },
+			tempDir,
+		);
+		expect(result.verdict).toBe('pass');
+		expect(result.error).toBeUndefined();
+		expect(result.failure_kind).toBeUndefined();
+		expect(result.baseline_used).toBe(true);
+		expect(result.new_findings).toEqual([]);
+		expect(result.summary.files_scanned).toBe(0);
+		expect(result.summary.files_skipped_non_code).toBe(1);
+	});
+
+	test('mixed input in baseline diff mode (markdown + missing code file) still fails closed', async () => {
+		// The baseline-mode pass above must not leak into genuine coverage
+		// gaps: a missing .ts next to the markdown is still a hard fail.
+		const codeFile = path.join(tempDir, 'other.py');
+		fs.writeFileSync(codeFile, 'y = 2\n');
+		const capture = await sastScan(
+			{ changed_files: [codeFile], capture_baseline: true, phase: 1 },
+			tempDir,
+		);
+		expect(capture.status).toBe('baseline_captured');
+
+		const doc = path.join(tempDir, 'README.md');
+		fs.writeFileSync(doc, '# Docs\n');
+		const result = await sastScan(
+			{ changed_files: [doc, 'src/missing.ts'], phase: 1 },
+			tempDir,
+		);
+		expect(result.verdict).toBe('fail');
+		expect(result.error).toBe(
+			'SAST requires at least one file to scan; zero files were scanned',
+		);
+		expect(result.failure_kind).toBe('coverage');
+	});
+
 	test('scannable-but-unscannable input (oversized code file) still fails closed', async () => {
 		// A real code file that cannot be scanned (size cap) is a coverage
 		// failure, not a non-code pass.
