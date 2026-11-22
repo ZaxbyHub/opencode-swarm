@@ -137,7 +137,7 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 			'src/plan/manager.ts:694',
 			'src/plan/manager.ts:2121',
 			'src/plan/manager.ts:2181',
-			'src/review/evidence.ts:217',
+			'src/review/evidence.ts:227',
 			'src/turbo/lean/evidence.ts:188',
 			'src/summaries/manager.ts:163',
 			'src/evidence/manager.ts:291',
@@ -302,7 +302,7 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 		parsesTarget: false,
 		producers: [
 			'src/tools/write-drift-evidence.ts:286',
-			'src/tools/write-mutation-evidence.ts:172',
+			'src/tools/write-mutation-evidence.ts:173',
 			'src/tools/write-hallucination-evidence.ts:129',
 			'src/tools/write-final-council-evidence.ts:403',
 		],
