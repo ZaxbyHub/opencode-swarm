@@ -292,6 +292,41 @@ describe('#3844 the auto-review evidence stays internally consistent when a find
 		expect(evidenceText).toContain('OAuth2TokenService');
 	});
 
+	// A RANGE diff's paths come from the resolved TARGET commit, not from
+	// the current checkout, so a target-side path is real even when the
+	// checkout does not contain it — and the finding must still anchor.
+	test('a RANGE-diff target path is persisted verbatim and still anchors', async () => {
+		// The path is deliberately NOT created in the checkout.
+		engineInternals.collectReviewDiff = async () =>
+			({
+				...diffResult(),
+				selector: { kind: 'range' },
+				rangeToSha: 'a'.repeat(40),
+				changedLines: new Map([[DEEP_PATH, [{ start: 3, end: 3 }]]]),
+				files: new Map([
+					[
+						DEEP_PATH,
+						{
+							kind: 'modified',
+							oldPath: DEEP_PATH,
+							newPath: DEEP_PATH,
+						},
+					],
+				]),
+			}) as never;
+
+		const { evidence, evidenceText } = await runReviewWithOutput(
+			reviewerOutput('the range finding', { file: DEEP_PATH, line: 3 }),
+		);
+		const findings = evidence.findings as Array<{
+			file: string;
+			anchored: boolean;
+		}>;
+		expect(findings[0].file).toBe(DEEP_PATH);
+		expect(findings[0].anchored).toBe(true);
+		expect(evidenceText).toContain('OAuth2TokenService');
+	});
+
 	// A path that names NO real file is model-invented free text, so it is
 	// redacted.
 	test('a model-invented path is redacted', async () => {

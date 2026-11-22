@@ -220,45 +220,47 @@ function fitRedactedEventToLineLimit(
 	for (const key of carriers) emptied[key] = '';
 	const overhead = Buffer.byteLength(`${JSON.stringify(emptied)}\n`) - 1;
 	if (overhead > limit) return null;
-	const budget = limit - overhead;
-	const lengths = carriers.map((key) =>
-		Buffer.byteLength(event[key] as string, 'utf8'),
-	);
-	const total = lengths.reduce((sum, length) => sum + length, 0);
-	if (total <= budget) {
-		const line = `${JSON.stringify(event)}\n`;
-		return Buffer.byteLength(line) - 1 <= limit ? { event, line } : null;
-	}
-	// The carriers share the budget PROPORTIONALLY, so a long carrier does
-	// not wipe the short ones: only the growth the redaction itself caused
-	// is lost.
+	// The line is JSON, so a quote, a backslash or a control character costs
+	// 2-6 bytes in the SERIALIZED line and one byte in the text. The fit is
+	// therefore measured on the serialized line itself: the longest carrier
+	// is trimmed by the overflow until the line fits, and the serialized
+	// size is re-checked on every round.
 	const fitted: Record<string, unknown> = { ...event };
-	carriers.forEach((key, index) => {
-		const share = Math.floor((lengths[index] * budget) / total);
-		fitted[key] = trimRedactedCarrier(event[key] as string, share);
-	});
-	const line = `${JSON.stringify(fitted)}\n`;
-	if (Buffer.byteLength(line) - 1 <= limit) return { event: fitted, line };
+	for (let round = 0; round < 64; round++) {
+		const line = `${JSON.stringify(fitted)}\n`;
+		const size = Buffer.byteLength(line) - 1;
+		if (size <= limit) return { event: fitted, line };
+		const overflow = size - limit;
+		let longestKey = carriers[0];
+		for (const key of carriers) {
+			if (
+				String(fitted[key] ?? '').length >
+				String(fitted[longestKey] ?? '').length
+			) {
+				longestKey = key;
+			}
+		}
+		const value = String(fitted[longestKey] ?? '');
+		if (value.length === 0) return null;
+		fitted[longestKey] = trimRedactedCarrier(
+			value,
+			Math.max(0, value.length - overflow),
+		);
+	}
 	return null;
 }
 
 /**
- * Trim a redacted free-text carrier to a byte budget.
+ * Trim a redacted free-text carrier to a character budget.
  *
- * The cut lands on a character boundary, and a trailing PARTIAL marker is
- * dropped (a persisted `[REDACTED:git` is neither the secret nor a usable
- * value). Unlike the schema-bound clamp, an event carrier may end up EMPTY:
- * the event's free text has no minimum length, and an empty value is better
- * than a half-written marker.
+ * A trailing PARTIAL marker is dropped (a persisted `[REDACTED:git` is
+ * neither the secret nor a usable value). Unlike the schema-bound clamp, an
+ * event carrier may end up EMPTY: the event's free text has no minimum
+ * length, and an empty value is better than a half-written marker.
  */
-function trimRedactedCarrier(value: string, budgetBytes: number): string {
-	if (budgetBytes <= 0) return '';
-	if (Buffer.byteLength(value, 'utf8') <= budgetBytes) return value;
-	let cut = Buffer.from(value, 'utf8')
-		.subarray(0, budgetBytes)
-		.toString('utf8');
-	// A cut inside a multi-byte character leaves a replacement character.
-	if (cut.endsWith('�')) cut = cut.slice(0, -1);
+function trimRedactedCarrier(value: string, maxChars: number): string {
+	if (maxChars <= 0) return '';
+	let cut = value.length <= maxChars ? value : value.slice(0, maxChars);
 	const markerStart = Math.max(
 		cut.lastIndexOf('[REDACTED'),
 		cut.lastIndexOf('<redacted'),

@@ -172,6 +172,26 @@ describe('#3701 AC4/AC5 export current-redaction contract', () => {
 		expect(emitted.content).not.toContain(GH);
 	});
 
+	test('the export counts only the credential it newly redacted (a QUOTED placeholder is not a redaction)', () => {
+		// A legacy record whose stored content carries a QUOTED placeholder and
+		// a raw credential. The quoted form is re-matchable by the training
+		// redactor's JSON arm, so without the guard the export counted the
+		// placeholder as a new redaction.
+		const dir = freshDir();
+		const cst = consent(dir);
+		const { record: legacy } = seedLegacyRecord(
+			dir,
+			cst,
+			1,
+			`"password": "<redacted>" and a raw ${GH} token`,
+		);
+		const bundle = buildTrainingExportBundle([legacy]);
+		const emitted = JSON.parse(bundle.files['records.jsonl'] ?? '');
+		expect(emitted.redaction.applied).toBe(true);
+		expect(emitted.redaction.redactions).toBe(legacy.redaction.redactions + 1);
+		expect(emitted.content).not.toContain(GH);
+	});
+
 	test('AC4a: the manifest reports the SOURCE versions separately from the verified floor', () => {
 		const dir = freshDir();
 		const cst = consent(dir);

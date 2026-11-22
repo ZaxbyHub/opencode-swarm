@@ -49,6 +49,11 @@ import {
 	canonicalizeValidationCandidates,
 	runFindingValidation,
 } from './finding-validator.js';
+import {
+	isWithinRoot,
+	normalizedRelativePath,
+	redactReviewFilePath,
+} from './review-file-path.js';
 
 export type ReviewEngineTrigger =
 	| 'task_completion'
@@ -420,47 +425,6 @@ export function buildReviewPrompt(input: BuildReviewPromptInput): string {
 	return buildReviewPromptRequest(input).prompt;
 }
 
-function hasControlCharacter(value: string): boolean {
-	for (let index = 0; index < value.length; index++) {
-		const code = value.charCodeAt(index);
-		if (code <= 0x1f || code === 0x7f) return true;
-	}
-	return false;
-}
-
-function normalizedRelativePath(file: string): string | null {
-	if (
-		file.length === 0 ||
-		file.length > 500 ||
-		hasControlCharacter(file) ||
-		/^[A-Za-z]:[\\/]/.test(file) ||
-		file.startsWith('\\\\') ||
-		file.startsWith('//') ||
-		path.isAbsolute(file)
-	) {
-		return null;
-	}
-	const normalized = file.replaceAll('\\', '/');
-	const segments = normalized.split('/');
-	if (
-		segments.some((segment) => segment === '..' || segment === '') ||
-		normalized.startsWith('/')
-	) {
-		return null;
-	}
-	return normalized.replace(/^\.\//, '');
-}
-
-function isWithinRoot(root: string, candidate: string): boolean {
-	const relative = path.relative(root, candidate);
-	return (
-		relative.length > 0 &&
-		relative !== '..' &&
-		!relative.startsWith(`..${path.sep}`) &&
-		!path.isAbsolute(relative)
-	);
-}
-
 function rangesOverlap(
 	start: number,
 	end: number,
@@ -500,37 +464,26 @@ function anchorExactRangeFinding(
 }
 
 /**
- * Whether a finding's file names a path that RESOLVES inside the project.
+ * The paths the review scope knows to be real.
  *
- * A real repository path is not a secret, and it MUST be used verbatim for
- * the anchoring: the redactor's >=80-character mixed-class base64 rule counts
- * `/` as a base64 character, so an ordinary deep path (a Java/Kotlin service
- * or a TypeScript monorepo package) matches it — and a redacted path does
- * not resolve, so the finding would silently stop anchoring (and stop
- * blocking the phase gate). Only a path that does NOT resolve is
- * model-invented free text, and only that is redacted.
+ * For a RANGE diff the paths come from the resolved TARGET commit, not from
+ * the current checkout — so a target-side path is real even when the
+ * checkout does not contain it (the anchoring must not depend on the
+ * checkout's state).
  */
-function pathResolvesInsideProject(directory: string, file: string): boolean {
-	const normalized = normalizedRelativePath(file);
-	if (!normalized) return false;
-	try {
-		const root = fs.realpathSync(directory);
-		const currentPath = fs.realpathSync(
-			path.resolve(root, ...normalized.split('/')),
-		);
-		return isWithinRoot(root, currentPath);
-	} catch {
-		return false;
+function reviewScopePaths(
+	diff: Extract<ReviewDiffResult, { status: 'ok' }>,
+): ReadonlySet<string> {
+	const paths = new Set<string>();
+	for (const key of diff.changedLines.keys()) {
+		const normalized = normalizedRelativePath(key);
+		if (normalized) paths.add(normalized);
 	}
-}
-
-/**
- * The file path as it is PERSISTED: the model's path when it names a real
- * file inside the project, and the redacted form otherwise.
- */
-function reviewFileForPersistence(directory: string, file: string): string {
-	if (pathResolvesInsideProject(directory, file)) return file;
-	return redactEvidenceField(file, EVIDENCE_FINDING_FILE_MAX);
+	for (const key of diff.files.keys()) {
+		const normalized = normalizedRelativePath(key);
+		if (normalized) paths.add(normalized);
+	}
+	return paths;
 }
 
 function anchorFinding(
@@ -1173,7 +1126,11 @@ export async function runReviewEngine(
 		// the project is kept verbatim: redacting it would break the
 		// anchoring (the redactor's base64 rule matches ordinary deep
 		// paths), and a real repository path is not a secret.
-		file: reviewFileForPersistence(input.directory, finding.file),
+		file: redactReviewFilePath(
+			input.directory,
+			finding.file,
+			reviewScopePaths(diff),
+		),
 	}));
 	const candidates = canonicalizeValidationCandidates(structuredFindings ?? []);
 	let findings = candidates.map((candidate) =>

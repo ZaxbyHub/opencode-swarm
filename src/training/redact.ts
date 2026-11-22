@@ -50,13 +50,16 @@ const URL_PATTERN = /\bhttps?:\/\/[^\s'"<>]+/g;
 //     corrupted the exported content (and counted a redaction that removed
 //     nothing).
 const CREDENTIAL_KV_PATTERN =
-	/(^|[\s,;"'([{])([A-Za-z0-9_ -]{0,40}(?:token|secret|password|passwd|authorization|credential|bearer|api[-_ ]?key|access[-_ ]?key)[A-Za-z0-9_ -]{0,40}\s*[=:]\s*)(?:bearer|basic|digest|negotiate|apikey)?\s*(?!<redacted)("[^"'\n]*"|'[^'\n]*'|[^\s,;"'}\]]+)/gi;
+	/(^|[\s,;"'([{])([A-Za-z0-9_ -]{0,40}(?:token|secret|password|passwd|authorization|credential|bearer|api[-_ ]?key|access[-_ ]?key)[A-Za-z0-9_ -]{0,40}\s*[=:]\s*)(?:bearer|basic|digest|negotiate|apikey)?\s*(?!(?:"|')?<redacted)("[^"'\n]*"|'[^'\n]*'|[^\s,;"'}\]]+)/gi;
 
 // JSON-quoted key form the loose pattern cannot bridge: `"api_key": "v"` —
 // the closing quote of the key and the opening quote of the value fall
-// outside the loose key/value classes, so this needs its own pass.
+// outside the loose key/value classes, so this needs its own pass. The
+// value may not be this redactor's own placeholder (quoted or not): the
+// export re-redacts every record, so a re-match counts a redaction that
+// removed nothing.
 const QUOTED_JSON_CREDENTIAL_PATTERN =
-	/(["'])([A-Za-z0-9_ -]{0,40}(?:token|secret|password|passwd|authorization|credential|bearer|api[-_ ]?key|access[-_ ]?key)[A-Za-z0-9_ -]{0,40})\1(\s*:\s*)(["'])([^"'\n]{4,})\4/gi;
+	/(["'])([A-Za-z0-9_ -]{0,40}(?:token|secret|password|passwd|authorization|credential|bearer|api[-_ ]?key|access[-_ ]?key)[A-Za-z0-9_ -]{0,40})\1(\s*:\s*)(["'])((?!<redacted>)[^"'\n]{4,})\4/gi;
 
 // Scheme-prefixed token with no key morpheme at all: `Bearer <token>`.
 const SCHEME_TOKEN_PATTERN = /\b(bearer|basic)(\s+)([A-Za-z0-9._~+/=-]{8,})/gi;

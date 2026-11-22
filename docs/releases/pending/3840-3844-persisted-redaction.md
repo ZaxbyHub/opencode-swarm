@@ -114,9 +114,11 @@ docs/training-vault-remediation.md.
   finding's `duplicate_count`). A persisted review cannot tell them apart
   without persisting the secret, and the validator receives the same
   redacted text either way.
-- The training redactor is still not idempotent (it re-matches its own
-  placeholder), and every export re-redacts the record content. The
-  exported redaction counters account for that: they count only the
+- The two redactors are independently maintained pattern lists, and the
+  EVIDENCE redactor is the superset: the training path still stores a PEM
+  private-key block, a Stripe live key and a GitLab personal access token
+  verbatim (the evidence path redacts them). Every export re-redacts the
+  record content; the exported redaction counters count only the
   redactions an export pass actually made.
 
 ## Replay-identity hardening
@@ -185,7 +187,10 @@ docs/training-vault-remediation.md.
   that starts with an existing placeholder (and it keeps the separator it
   consumed instead of gluing the surrounding words together). The loop also
   closes a single-pass leak: a bare-family credential GLUED to a preceding
-  word character has no word boundary, so only a later pass saw it.
+  word character has no word boundary, so it is redacted once the
+  neighbouring token is itself replaced. (A credential glued to a word that
+  is NOT itself redacted keeps its own boundary rules — the family arms are
+  anchored on purpose.)
 - The persisted-store corpus runs over the WHOLE text. Its private-key arm
   needs both delimiters in ONE match, so a placeholder inserted inside a
   key block must not split the span.
@@ -206,9 +211,11 @@ docs/training-vault-remediation.md.
   comparison used to reject every approved review with an unanchored
   finding.
 - The evidence path covers the training path's >=80-character mixed-class
-  base64 family, so the two redactors are supersets of one another: an
-  undotted base64 secret that the training vault redacts before export no
-  longer survives in the clear in a review artifact.
+  base64 family, so the EVIDENCE redactor is a superset of the TRAINING one:
+  an undotted base64 secret that the training vault redacts before export no
+  longer survives in the clear in a review artifact. (The reverse does not
+  hold — the training path still stores a PEM block, a Stripe live key and a
+  GitLab token verbatim; the evidence path redacts them.)
 - The forge queue clamps the redacted event message to the bound its own
   disk schema enforces: a redaction placeholder is LONGER than the secret it
   replaces, so a message that sat exactly on the bound was pushed past it by
@@ -234,13 +241,15 @@ docs/training-vault-remediation.md.
   redaction; the refusal contract is unchanged (an event that was already
   over the bound is still refused) and the redacted, secret-free carriers
   are truncated until the line fits.
-- A finding's file path is redacted only when it names NO real file inside
-  the project (model-invented free text). A path that resolves is persisted
-  verbatim: a real repository path is not a secret, and redacting one would
-  break the anchoring — the redactor's long mixed-class base64 rule counts
-  `/` as a base64 character, so an ordinary deep path matches it, and a
-  redacted path does not resolve, so the finding would silently stop
-  blocking the phase gate.
+- A finding's file path is redacted only when it names NO real file: a path
+  that resolves inside the project, or a path the review scope knows to be
+  real (for a range diff its paths come from the resolved target commit, not
+  from the current checkout), is persisted verbatim. A real repository path
+  is not a secret, and redacting one would break the anchoring — the
+  redactor's long mixed-class base64 rule counts `/` as a base64 character,
+  so an ordinary deep path matches it, and a redacted path does not resolve,
+  so the finding would silently stop blocking the phase gate. The review
+  receipt's file and location are redacted by the same rule.
 
 ## Fold-in: the remaining persisted-evidence boundaries
 

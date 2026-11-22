@@ -90,6 +90,36 @@ describe('#3844 the core-events writer fits a redacted line to the bound', () =>
 		}
 	}, 60_000);
 
+	test('a near-limit event whose text ESCAPES in JSON still fits', () => {
+		// A quote, a backslash or a newline costs 2-6 bytes in the
+		// SERIALIZED line and one byte in the text, so the fit has to be
+		// measured on the serialized line.
+		const dir = canonicalMkdtemp('sw-3844-core-events-');
+		try {
+			const base =
+				Buffer.byteLength(`${JSON.stringify(event(''))}\n`, 'utf8') - 1;
+			// Three raw characters, five serialized bytes.
+			const escaped = '"\\n';
+			let repeat = Math.floor((LIMIT - base - USERINFO.length - 64) / 5);
+			let detail = '';
+			let rawBytes = 0;
+			for (;;) {
+				detail = `${'y'.repeat(64)} ${USERINFO} ${escaped.repeat(repeat)}`;
+				rawBytes =
+					Buffer.byteLength(`${JSON.stringify(event(detail))}\n`, 'utf8') - 1;
+				if (rawBytes <= LIMIT - 2 || repeat <= 0) break;
+				repeat -= 1;
+			}
+			expect(rawBytes).toBeLessThanOrEqual(LIMIT);
+			// The redaction grows the line, so the writer has to FIT it.
+			expect(() =>
+				appendCoreEventSync(dir, event(detail) as never),
+			).not.toThrow();
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	}, 60_000);
+
 	test('an event whose UN-redacted line is over the bound is still refused', () => {
 		const dir = canonicalMkdtemp('sw-3844-core-events-');
 		try {

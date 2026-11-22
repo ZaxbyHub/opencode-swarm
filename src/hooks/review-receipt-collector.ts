@@ -33,6 +33,7 @@ import {
 	runFindingValidation,
 	type ValidationCandidate,
 } from '../review/finding-validator.js';
+import { redactReviewFilePath } from '../review/review-file-path.js';
 import {
 	optionalModelOverride,
 	type ReviewAgentModelRegistry,
@@ -581,9 +582,19 @@ export async function collectReviewerReceiptFromTranscript(
 						sessionId: sessionID,
 						scopeContent: scope.content,
 						scopeDescription: scope.description,
-						blockingFindings: parsed.issues.map(
-							(i): BlockingFinding => ({
-								location: i.location ?? 'unknown',
+						blockingFindings: parsed.issues.map((i): BlockingFinding => {
+							// The finding's file is model-authored free text:
+							// a path that names no real file inside the
+							// project is redacted before it is persisted.
+							const file =
+								typeof i.finding?.file === 'string'
+									? redactReviewFilePath(directory, i.finding.file)
+									: i.finding?.file;
+							return {
+								location:
+									file && typeof i.finding?.line_start === 'number'
+										? `${file}:${i.finding.line_start}`
+										: (i.location ?? 'unknown'),
 								summary: i.text,
 								severity: i.severity,
 								finding_id: findingId(i.finding),
@@ -591,20 +602,26 @@ export async function collectReviewerReceiptFromTranscript(
 								title: i.finding?.title,
 								body: i.finding?.body,
 								confidence: i.finding?.confidence,
-								file: i.finding?.file,
+								file,
 								line_start: i.finding?.line_start,
 								line_end: i.finding?.line_end,
 								effective_severity: i.finding
 									? effectiveSeverityForFinding(i.finding, minConfidence)
 									: undefined,
-							}),
-						),
+							};
+						}),
 						evidenceReferences: parsed.issues
 							.map((i) => i.location)
 							.filter((loc): loc is string => Boolean(loc)),
 						passConditions: parsed.fixes,
 						summary: `Reviewer REJECTED${parsed.risk ? ` (risk ${parsed.risk})` : ''}`,
-						structuredFindings: parsed.structuredFindings,
+						structuredFindings: parsed.structuredFindings?.map((finding) => ({
+							...finding,
+							file:
+								typeof finding.file === 'string'
+									? redactReviewFilePath(directory, finding.file)
+									: finding.file,
+						})),
 						reviewOverallConfidence: parsed.overallConfidence,
 					});
 
