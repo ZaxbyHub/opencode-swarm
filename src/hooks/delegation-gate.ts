@@ -61,6 +61,7 @@ import {
 import {
 	isLegacyTaskGateRequirementsChain,
 	readTaskGateRequirementsReceiptsSync,
+	routeEvidenceFromTaskGateRequirements,
 } from '../evidence/task-gate-requirements.js';
 import { isReadOnlyTool } from '../full-auto/policy';
 import { compareTaskWorkflowStateRank } from '../gate-evidence';
@@ -4174,9 +4175,31 @@ export function createDelegationGateHook(
 					occupiedSlots.add(other.slotId);
 				}
 			}
-			const slotIndex = existing
+			let slotIndex = existing
 				? slots.indexOf(existing.slotId ?? '')
 				: slots.findIndex((slotId) => !occupiedSlots.has(slotId));
+			// Stage-B re-dispatch slot reclamation (the reviewer_run wedge
+			// class — see the twin comment in resolveBackgroundStageBRoute):
+			// when every slot of this role is occupied by a DIFFERENT dispatch,
+			// those occupants are obsolete attempts of the same gate cycle
+			// (an unsettled settlement that never advanced the workflow, or a
+			// pre-rotation generation). The fresh re-dispatch replaces the
+			// obsolete binding's slot instead of allocating nothing — otherwise
+			// the settlement later drops it with ROUTE_RECEIPT_DISPATCH_REQUIRED
+			// and the wedge can never clear. Identity count stays exact.
+			if (!existing && slotIndex < 0) {
+				for (const entry of session
+					? getStageBRouteEvidence(session, taskId)
+					: []) {
+					if (entry.role !== role || !entry.slotId) continue;
+					if (!identities.includes(entry.identity)) continue;
+					const candidateIndex = slots.indexOf(entry.slotId);
+					if (candidateIndex >= 0 && candidateIndex < slots.length) {
+						slotIndex = candidateIndex;
+						break;
+					}
+				}
+			}
 			if (slotIndex < 0 || slotIndex >= slots.length) continue;
 			const slotId = slots[slotIndex];
 			bindings.set(taskId, {
@@ -7625,25 +7648,54 @@ export function createDelegationGateHook(
 													return false;
 												}
 											})();
-										const existingRouteEvidence = getStageBRouteEvidence(
-											session,
-											taskId,
-										);
+										const existingRouteEvidence = (() => {
+											// Post-restart durable fallback (the #2829 class): the
+											// in-memory route evidence is process-local; when it is
+											// empty but the durable requirements chain holds this
+											// task's route bindings, reconstruct from disk so the
+											// completeness barrier sees the sibling identities the
+											// same dispatch cycle already settled (mirrors
+											// resolveBackgroundStageBRoute).
+											const live = getStageBRouteEvidence(session, taskId);
+											if (live.length > 0) return live;
+											try {
+												return routeEvidenceFromTaskGateRequirements(
+													readTaskGateRequirementsReceiptsSync(
+														directory,
+														taskId,
+													),
+												);
+											} catch {
+												return live;
+											}
+										})();
 										const prospectiveRouteEvidence = routeBinding
 											? [
+													// Same-identity supersede (the Stage-B re-dispatch
+													// wedge class): an existing entry of this role bound
+													// to the SAME route identity belongs to an obsolete
+													// attempt of this gate cycle — an unsettled
+													// settlement that never advanced the workflow, or a
+													// pre-rotation generation. The fresh dispatch
+													// replaces it; keeping both would fail every
+													// downstream barrier with ROUTE_RECEIPT_DUPLICATE.
+													// Different identities (sibling slots) and other
+													// dispatches are preserved untouched.
 													...existingRouteEvidence.filter(
 														(entry) =>
 															entry.role !== routeBinding.role ||
-															entry.sessionId !== routeBinding.sessionId ||
-															entry.taskId !== routeBinding.taskId ||
-															entry.callId !== routeBinding.callId ||
-															entry.childSessionId !==
-																routeBinding.childSessionId ||
-															entry.generation !== routeBinding.generation,
+															(entry.identity !== routeBinding.identity &&
+																(entry.sessionId !== routeBinding.sessionId ||
+																	entry.taskId !== routeBinding.taskId ||
+																	entry.callId !== routeBinding.callId ||
+																	entry.childSessionId !==
+																		routeBinding.childSessionId ||
+																	entry.generation !==
+																		routeBinding.generation)),
 													),
 													routeBinding,
 												]
-											: getStageBRouteEvidence(session, taskId);
+											: existingRouteEvidence;
 										const routeEnforcementEnabled =
 											config.review_routing?.enforce_receipts ?? true;
 										// #3502 (PRR-007) / #3509: THIS dispatch's routing

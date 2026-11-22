@@ -1186,9 +1186,37 @@ function resolveBackgroundStageBRoute(input: {
 				)
 				.map((entry) => entry.slotId as string),
 		);
-		const slotIndex = retry
+		let slotIndex = retry
 			? slots.indexOf(retry.slotId ?? '')
 			: slots.findIndex((slot) => !usedSlots.has(slot));
+		// Stage-B re-dispatch slot reclamation (the reviewer_run wedge class):
+		// when every slot of this role is already occupied by a DIFFERENT
+		// dispatch, the prior attempt is an obsolete review of the same gate
+		// cycle — either its settlement never advanced the workflow (the
+		// pre-exemption wedge: all proof recorded, state pinned at
+		// reviewer_run) or the generation rotated past it (rework). The
+		// sanctioned unwedging path is to re-dispatch the Stage-B agent, so the
+		// fresh dispatch must be able to re-earn the identity: it REPLACES the
+		// obsolete binding instead of finding the slot occupied forever. The
+		// replacement preserves the exact identity count (no extra identity is
+		// invented) and tightens the binding to the dispatch actually being
+		// verified; the durable requirements chain keeps both rows for audit
+		// and collapses them per identity on read.
+		let superseded: ReviewRouteEvidence | undefined;
+		if (!retry && slotIndex < 0) {
+			for (const entry of evidence) {
+				if (entry.role !== input.role || entry === retry || !entry.slotId) {
+					continue;
+				}
+				if (!identities.includes(entry.identity)) continue;
+				const candidateIndex = slots.indexOf(entry.slotId);
+				if (candidateIndex >= 0 && candidateIndex < identities.length) {
+					superseded = entry;
+					slotIndex = candidateIndex;
+					break;
+				}
+			}
+		}
 		if (slotIndex >= 0 && slotIndex < identities.length) {
 			const slotId = slots[slotIndex];
 			const identity = identities[slotIndex];
@@ -1204,7 +1232,9 @@ function resolveBackgroundStageBRoute(input: {
 			};
 			prospective = retry
 				? evidence.map((entry) => (entry === retry ? binding! : entry))
-				: [...evidence, binding];
+				: superseded
+					? evidence.map((entry) => (entry === superseded ? binding! : entry))
+					: [...evidence, binding];
 		}
 	}
 	return { route, binding, prospective, legacyUnrouted };
