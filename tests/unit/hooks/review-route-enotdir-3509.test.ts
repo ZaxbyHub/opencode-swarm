@@ -31,7 +31,6 @@ import {
 } from '../../../src/review/routing-enforcement';
 import {
 	advanceTaskState,
-	ensureAgentSession,
 	getTaskState,
 	recordModifiedFilesForTask,
 	resetSwarmState,
@@ -39,6 +38,7 @@ import {
 } from '../../../src/state';
 import { createIsolatedTestEnv } from '../../helpers/isolated-test-env.js';
 import { canonicalMkdtemp, removeTreeWithRetry } from '../../helpers/tmpdir';
+import { ensureSessionDrained } from './_session-rehydration-drain';
 
 const SESSION = 'sess-enotdir';
 const FAULTED = '1.1';
@@ -167,7 +167,7 @@ describe('route-receipt read-fault isolation (#3516 item 7 / AC10)', () => {
 		fs.mkdirSync(path.join(dir, '.swarm'), { recursive: true });
 		fs.mkdirSync(path.join(dir, '.opencode'), { recursive: true });
 		writePlan(dir);
-		ensureAgentSession(SESSION, 'architect', dir);
+		await ensureSessionDrained(SESSION, dir);
 		await prepareBoth(dir);
 		await seedSiblingReceipt(dir);
 		const session = swarmState.agentSessions.get(SESSION)!;
@@ -234,7 +234,7 @@ describe('route-receipt read-fault isolation (#3516 item 7 / AC10)', () => {
 		fs.mkdirSync(path.join(dir, '.swarm'), { recursive: true });
 		fs.mkdirSync(path.join(dir, '.opencode'), { recursive: true });
 		writePlan(dir);
-		ensureAgentSession(SESSION, 'architect', dir);
+		await ensureSessionDrained(SESSION, dir);
 		await prepareBoth(dir);
 		await seedSiblingReceipt(dir);
 		const session = swarmState.agentSessions.get(SESSION)!;
