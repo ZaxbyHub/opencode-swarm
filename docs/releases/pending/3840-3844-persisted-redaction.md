@@ -109,6 +109,15 @@ docs/training-vault-remediation.md.
 - `redactSecrets`' family set remains the persisted-store floor at its 12
   existing consumer sites; the new superset redactor is applied at the
   #3844-named boundaries, not retroactively across every store.
+- Two review findings that differ ONLY in the secret they quote collapse into
+  one candidate once the secret is redacted (the count is preserved in the
+  finding's `duplicate_count`). A persisted review cannot tell them apart
+  without persisting the secret, and the validator receives the same
+  redacted text either way.
+- The training redactor is still not idempotent (it re-matches its own
+  placeholder), and every export re-redacts the record content. The
+  exported redaction counters account for that: they count only the
+  redactions an export pass actually made.
 
 ## Replay-identity hardening
 
@@ -212,7 +221,19 @@ docs/training-vault-remediation.md.
   whose credential was already replaced at capture has no new match on
   export, and overwriting the counters with the export pass's own result
   would claim that no redaction was applied to a record whose content IS
-  redacted.
+  redacted. The exported counters count only the redactions the export pass
+  actually made.
+- The core-events writer fits a redacted line to its own 256 KiB bound. A
+  redaction placeholder can be longer than the credential it replaces, so an
+  event whose free text sat exactly on the bound was refused after the
+  redaction; the refusal contract is unchanged (an event that was already
+  over the bound is still refused) and the redacted, secret-free carriers
+  are truncated until the line fits.
+- The review receipt redacts the finding's file and location like every
+  other free-text field, and the finding's file is redacted before the
+  review identity is derived, so the evidence, the receipt and the identity
+  carry the same path. A path that carried a credential does not exist in
+  the repository, so its anchoring fails honestly.
 
 ## Fold-in: the remaining persisted-evidence boundaries
 

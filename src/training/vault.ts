@@ -662,9 +662,15 @@ export function applyCurrentRedactionToRecord(
 			// export — overwriting the counters with the export pass's own
 			// result would claim "no redaction applied" for a record whose
 			// content IS redacted. The exported counters are the capture
-			// count plus the redactions this export pass made.
-			applied: record.redaction.applied || redacted.applied,
-			redactions: record.redaction.redactions + redacted.redactions,
+			// count plus the redactions this export pass ACTUALLY made:
+			// the training redactor re-matches its own placeholder, so a
+			// pass that changed nothing contributes no redaction.
+			applied:
+				record.redaction.applied ||
+				(redacted.applied && content !== record.content),
+			redactions:
+				record.redaction.redactions +
+				(content === record.content ? 0 : redacted.redactions),
 		},
 	};
 }

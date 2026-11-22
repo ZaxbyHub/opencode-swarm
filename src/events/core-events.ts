@@ -60,7 +60,10 @@ import {
 	readOwnerLockPayload,
 	releaseOwnerLock,
 } from '../parallel/file-locks.js';
-import { redactEvidenceText } from '../security/evidence-redaction.js';
+import {
+	clampRedactedText,
+	redactEvidenceText,
+} from '../security/evidence-redaction.js';
 import { telemetry } from '../telemetry.js';
 import { renameSyncWithRetry } from '../utils/atomic-write.js';
 import { warn } from '../utils/logger.js';
@@ -188,6 +191,54 @@ const CORE_EVENT_FREE_TEXT_FIELDS = new Set([
 	'reason',
 	'description',
 ]);
+
+/**
+ * Fit a REDACTED event to the line bound.
+ *
+ * A redaction placeholder can be LONGER than the credential it replaces (a
+ * URL userinfo grows by ten characters), so an event whose free text sat
+ * exactly on the line bound can be pushed PAST it by the redaction — and
+ * the append would then refuse an event the un-redacted writer accepted.
+ * The redacted value is secret-free, so shortening it is safe: the
+ * free-text carriers are truncated (the clamp drops a half-written marker)
+ * until the serialized line fits.
+ *
+ * The refusal contract is unchanged: the caller checks the UN-redacted line
+ * first, so an event that was already over the bound is still refused. This
+ * only absorbs the growth the redaction itself caused.
+ */
+function fitRedactedEventToLineLimit(
+	event: Record<string, unknown>,
+	limit: number,
+): { event: Record<string, unknown>; line: string } | null {
+	const carriers = Object.keys(event).filter(
+		(key) =>
+			CORE_EVENT_FREE_TEXT_FIELDS.has(key) && typeof event[key] === 'string',
+	);
+	if (carriers.length === 0) {
+		const line = `${JSON.stringify(event)}\n`;
+		return Buffer.byteLength(line) - 1 <= limit ? { event, line } : null;
+	}
+	const emptied: Record<string, unknown> = { ...event };
+	for (const key of carriers) emptied[key] = '';
+	const overhead = Buffer.byteLength(`${JSON.stringify(emptied)}\n`) - 1;
+	if (overhead > limit) return null;
+	let budget = limit - overhead;
+	for (let round = 0; round < 24; round++) {
+		const fitted: Record<string, unknown> = { ...event };
+		let remaining = budget;
+		for (const key of carriers) {
+			const value = event[key] as string;
+			const take = Math.min(value.length, Math.max(remaining, 0));
+			fitted[key] = clampRedactedText(value, take);
+			remaining -= take;
+		}
+		const line = `${JSON.stringify(fitted)}\n`;
+		if (Buffer.byteLength(line) - 1 <= limit) return { event: fitted, line };
+		budget = Math.floor(budget / 2);
+	}
+	return null;
+}
 
 function redactCoreEventFreeText(
 	event: Record<string, unknown>,
@@ -1113,12 +1164,23 @@ export function appendCoreEventSync(
 	// numbers, nested authority payloads) pass through unchanged; the
 	// authority key and dedupe comparisons below still run against the
 	// ORIGINAL event so at-most-once semantics are byte-stable.
-	const persisted = redactCoreEventFreeText(event);
-	const line = `${JSON.stringify(persisted)}\n`;
-	const lineBytes = Buffer.byteLength(line);
-	if (lineBytes - 1 > _internals.limits.maxLineBytes) {
+	// The refusal contract is the UN-redacted line: an event that was
+	// already over the bound is refused exactly as before. The redacted
+	// line is then fitted, because a redaction placeholder can be longer
+	// than the credential it replaces (see fitRedactedEventToLineLimit).
+	const rawLine = `${JSON.stringify(event)}\n`;
+	if (Buffer.byteLength(rawLine) - 1 > _internals.limits.maxLineBytes) {
 		throw new Error(CORE_EVENT_LINE_TOO_LARGE);
 	}
+	const persisted = redactCoreEventFreeText(event);
+	const fitted = fitRedactedEventToLineLimit(
+		persisted,
+		_internals.limits.maxLineBytes,
+	);
+	if (!fitted) {
+		throw new Error(CORE_EVENT_LINE_TOO_LARGE);
+	}
+	const line = fitted.line;
 	const filePath = coreEventsFilePath(directory);
 	const swarmDir = path.join(directory, '.swarm');
 
@@ -1211,12 +1273,26 @@ export function appendCoreEventsSync(
 	// default free-text redaction as the single writer — identical semantics
 	// per event, as the docblock promises. Authority keys and dedupe
 	// comparisons below run against each ORIGINAL event.
-	const persistedEvents = events.map((event) => redactCoreEventFreeText(event));
-	const lines = persistedEvents.map((event) => `${JSON.stringify(event)}\n`);
-	for (const line of lines) {
-		if (Buffer.byteLength(line) - 1 > _internals.limits.maxLineBytes) {
+	const persistedEvents: Record<string, unknown>[] = [];
+	const lines: string[] = [];
+	for (const event of events) {
+		// The refusal contract is the UN-redacted line (unchanged); the
+		// redacted line is fitted, because a redaction placeholder can be
+		// longer than the credential it replaces.
+		const rawLine = `${JSON.stringify(event)}\n`;
+		if (Buffer.byteLength(rawLine) - 1 > _internals.limits.maxLineBytes) {
 			throw new Error(CORE_EVENT_LINE_TOO_LARGE);
 		}
+		const persisted = redactCoreEventFreeText(event);
+		const fitted = fitRedactedEventToLineLimit(
+			persisted,
+			_internals.limits.maxLineBytes,
+		);
+		if (!fitted) {
+			throw new Error(CORE_EVENT_LINE_TOO_LARGE);
+		}
+		persistedEvents.push(fitted.event);
+		lines.push(fitted.line);
 	}
 	const filePath = coreEventsFilePath(directory);
 	const swarmDir = path.join(directory, '.swarm');

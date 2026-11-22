@@ -23,13 +23,18 @@ file by hand bypasses the withdrawal tombstone and the export revocation.
 ## Exports, withdrawal, and copies outside plugin control
 
 - `/swarm dataset export` copies records to `.swarm/training/v1/exports/…`;
-  those exports are bound to plugin control — **withdrawal REVOKES them**
-  (`REVOKED.json` markers) rather than deleting them.
-- Withdrawal (`/swarm dataset consent --revoke`) stops capture immediately;
-  `/swarm dataset withdraw` deletes the vault content and revokes exports.
+  those exports are bound to plugin control — **withdrawal MARKS them
+  revoked** rather than deleting them: a `REVOKED.json` marker is written
+  beside each export, and that marker write is best-effort per export. The
+  export's own data files (`records.jsonl`, `train.jsonl`,
+  `validation.jsonl`) STAY on disk — treat a revoked export as untrusted and
+  delete it yourself if you do not want it there.
+- `/swarm dataset consent --revoke` stops capture immediately; it does NOT
+  revoke the exports. `/swarm dataset withdraw` deletes the vault content and
+  writes the export revocation markers.
 - **Copy anything you need OUTSIDE plugin control (e.g. a plain copy in a
-  private directory) BEFORE withdrawing** — after withdrawal the plugin-side
-  exports are revoked markers.
+  private directory) BEFORE withdrawing** — the plugin-side export files
+  remain in place after withdrawal, marked revoked.
 
 ## Credential rotation is the real remedy
 
@@ -46,10 +51,12 @@ then be **physically deleted at the next 256-append sweep**. To downgrade
 without losing v2 records:
 
 1. `export` the vault;
-2. **copy the export outside plugin control** (withdrawal will revoke the
-   plugin-side copy);
-3. withdraw consent (`REVOKED.json` markers appear; capture stops);
-4. run the withdraw/purge so no v2 records remain;
+2. **copy the export outside plugin control** (withdrawal marks the
+   plugin-side copy revoked);
+3. withdraw consent (`/swarm dataset consent --revoke`; capture stops — the
+   export revocation markers come from the withdraw in step 4);
+4. run the withdraw/purge so no v2 records remain and the exports are marked
+   revoked;
 5. now downgrade safely.
 
 Step 3 also covers the consent record itself: a v2 consent file stamps
@@ -58,9 +65,15 @@ that consent as ABSENT — capture stays off until the consent is granted
 again. Withdrawing and re-granting after the downgrade restores it.
 
 The alternative is to **accept the loss**: skip steps 1-4 and let the next
-sweep delete the v2 records. The replay-identity sidecar files
-(`.swarm/pr-review/<runId>/replay-identity.json`) are inert under downgrade
-and can be deleted at will — but the SALT file
-(`.swarm/pr-review/replay-identity.salt`) is not: deleting it makes every
-stored fingerprint unreproducible, so the next run generates a new salt and
-the old fingerprints no longer match.
+sweep delete the v2 records. The replay-identity sidecar and claim files
+(`.swarm/pr-review/<runId>/replay-identity.json` and
+`.swarm/pr-review/<runId>/replay-identity.handoff.claim`) are inert under
+the downgraded build — it neither reads nor writes them — so they can be
+removed WHILE the downgraded build is in use. Keep them if an upgrade is
+planned: with the sidecar gone, the next identical retry falls back to
+comparing the incoming raw payload with the PERSISTED rows, and for
+REDACTED rows the two forms no longer compare equal, so an identical raw
+retry can be refused. The SALT file
+(`.swarm/pr-review/replay-identity.salt`) is not removable at all: deleting
+it makes every stored fingerprint unreproducible, so the next run generates
+a new salt and the old fingerprints no longer match.

@@ -123,12 +123,12 @@ describe('#3701 AC4/AC5 export current-redaction contract', () => {
 		const cst = consent(dir);
 		const current = buildTrainingVaultRecord({
 			content: `the literal ${GH} is committed`,
-			kind: 'conversation',
+			kind: 'user_message',
 			role: 'user',
 			capturedAt: NOW,
 			consent: cst,
 			pluginVersion: '0.0.0-test',
-			source: 'test',
+			source: 'chat',
 			retentionMs: 60_000,
 			projectRef: 'p1',
 			sessionId: 's1',
@@ -142,6 +142,9 @@ describe('#3701 AC4/AC5 export current-redaction contract', () => {
 		expect(emitted.redaction.applied).toBe(true);
 		expect(emitted.redaction.redactions).toBeGreaterThan(0);
 		expect(emitted.redaction.version).toBe(TRAINING_REDACTION_VERSION);
+		// The export pass re-matches the capture-time placeholder, so it
+		// must not be COUNTED again: the exported count is the capture count.
+		expect(emitted.redaction.redactions).toBe(current.redaction.redactions);
 	});
 
 	test('AC4a: the manifest reports the SOURCE versions separately from the verified floor', () => {

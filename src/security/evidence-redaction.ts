@@ -483,6 +483,12 @@ export function redactEvidenceDeep<T>(value: T): T {
 export const EVIDENCE_FINDING_TITLE_MAX = 200;
 export const EVIDENCE_FINDING_BODY_MAX = 2000;
 export const EVIDENCE_VALIDATION_EVIDENCE_MAX = 2000;
+/**
+ * The finding's FILE path is model-authored free text (for an unanchored
+ * finding it is whatever the model wrote), so it is redacted like the other
+ * free-text fields. The bound is `ReviewFindingSchema`'s (`file` <= 500).
+ */
+export const EVIDENCE_FINDING_FILE_MAX = 500;
 
 /**
  * The canonical persisted form of one redacted free-text field: redact, then

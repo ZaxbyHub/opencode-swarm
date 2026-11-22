@@ -18,6 +18,7 @@ import {
 import { parseReviewerOutput } from '../hooks/review-receipt-collector.js';
 import {
 	EVIDENCE_FINDING_BODY_MAX,
+	EVIDENCE_FINDING_FILE_MAX,
 	EVIDENCE_FINDING_TITLE_MAX,
 	redactEvidenceField,
 } from '../security/evidence-redaction.js';
@@ -1131,6 +1132,13 @@ export async function runReviewEngine(
 		...finding,
 		title: redactEvidenceField(finding.title, EVIDENCE_FINDING_TITLE_MAX),
 		body: redactEvidenceField(finding.body, EVIDENCE_FINDING_BODY_MAX),
+		// The file is model-authored free text for an UNANCHORED finding
+		// (and the model's own path for an anchored one), so it is redacted
+		// here — before the identity is derived — so the evidence, the
+		// receipt and the identity all carry the same path. A path that
+		// carried a credential does not exist in the repository, so its
+		// anchoring fails honestly.
+		file: redactEvidenceField(finding.file, EVIDENCE_FINDING_FILE_MAX),
 	}));
 	const candidates = canonicalizeValidationCandidates(structuredFindings ?? []);
 	let findings = candidates.map((candidate) =>
