@@ -6,7 +6,6 @@
  *    refuses fail-closed), whole-call retirement, cleanup, reset isolation.
  *  - 'sibling-clobber': the rememberReviewRoute monotonicity interleaving.
  *
- *
  * Env isolation: createIsolatedTestEnv redirects the hive/app-data roots the
  * route-receipt MAC secret lives under. Cross-platform claims are scoped to
  * the fault classes these legs drive (plain-file `.swarm/pr-review`, EISDIR
@@ -42,7 +41,6 @@ import {
 } from '../../../src/review/route-invalidation-registry';
 import {
 	advanceTaskState,
-	ensureAgentSession,
 	getStageBRouteEvidence,
 	getTaskState,
 	recordModifiedFilesForTask,
@@ -51,6 +49,7 @@ import {
 } from '../../../src/state';
 import { createIsolatedTestEnv } from '../../helpers/isolated-test-env.js';
 import { canonicalMkdtemp, removeTreeWithRetry } from '../../helpers/tmpdir';
+import { ensureSessionDrained } from './_session-rehydration-drain';
 
 const SESSION = 'sess-3516';
 const HEAD_SHA = 'abc123003516';
@@ -168,7 +167,9 @@ describe('route-receipt hardening legs (#3516)', () => {
 		isolatedEnv = undefined;
 	});
 
-	function fixture(o: { taskIds?: string[]; persistFails?: boolean } = {}) {
+	async function fixture(
+		o: { taskIds?: string[]; persistFails?: boolean } = {},
+	) {
 		const dir = canonicalMkdtemp('route-harden-3516-');
 		dirs.push(dir);
 		fs.mkdirSync(path.join(dir, '.swarm'), { recursive: true });
@@ -180,7 +181,7 @@ describe('route-receipt hardening legs (#3516)', () => {
 				'not a directory',
 			);
 		}
-		ensureAgentSession(SESSION, 'architect', dir);
+		await ensureSessionDrained(SESSION, dir);
 		return dir;
 	}
 
@@ -214,7 +215,7 @@ describe('route-receipt hardening legs (#3516)', () => {
 		}
 
 		it('a re-entry dispatch with no bound tasks resolves without a false binding-write warning', async () => {
-			const dir = fixture();
+			const dir = await fixture();
 			await seedReentryArm(dir);
 			const hook = createDelegationGateHook(makeConfig(), dir);
 			const warnCapture = captureCriticalWarn();
@@ -241,7 +242,7 @@ describe('route-receipt hardening legs (#3516)', () => {
 		});
 
 		it('a full generation fence refuses the next re-entry dispatch BEFORE the one-use token is consumed', async () => {
-			const dir = fixture({ taskIds: ['1.1', '2.2'] });
+			const dir = await fixture({ taskIds: ['1.1', '2.2'] });
 			await prepareTask(dir, '2.2');
 			fs.writeFileSync(
 				path.join(dir, '.swarm', 'pr-review'),
@@ -277,8 +278,8 @@ describe('route-receipt hardening legs (#3516)', () => {
 	});
 
 	describe('fifo-consumption — registry markers are per-key, never evicted, and retire at terminal outcomes', () => {
-		it('per-key consumption: a matched task key blocks exactly once; other keys and calls are untouched', () => {
-			const dir = fixture();
+		it('per-key consumption: a matched task key blocks exactly once; other keys and calls are untouched', async () => {
+			const dir = await fixture();
 			recordRouteInvalidation(dir, SESSION, 'call-k1', '1.1');
 			recordRouteInvalidation(dir, SESSION, 'call-k1', '1.2');
 			expect(blocked(dir, 'call-k1', SESSION, '1.1')).toBe(true);
@@ -288,7 +289,7 @@ describe('route-receipt hardening legs (#3516)', () => {
 		});
 
 		it('a full call bound refuses the dispatch (ROUTE_INVALIDATION_CAPACITY) with every prior marker consultable', async () => {
-			const dir = fixture({ taskIds: ['1.1'], persistFails: true });
+			const dir = await fixture({ taskIds: ['1.1'], persistFails: true });
 			expect(recordRouteInvalidation(dir, SESSION, 'call-live-a', '1.1')).toBe(
 				true,
 			);
@@ -322,8 +323,8 @@ describe('route-receipt hardening legs (#3516)', () => {
 			expect(capacityLine!.includes('CRITICAL-WARN')).toBe(true);
 		});
 
-		it('cap-plus-one at the session and directory bounds fails closed without eviction', () => {
-			const dir = fixture();
+		it('cap-plus-one at the session and directory bounds fails closed without eviction', async () => {
+			const dir = await fixture();
 			for (let index = 0; index < MAX_LIVE_SESSIONS_PER_DIRECTORY; index += 1) {
 				expect(recordRouteFault(dir, `sess-${index}`, 'call-s')).toBe(true);
 			}
@@ -338,7 +339,7 @@ describe('route-receipt hardening legs (#3516)', () => {
 		});
 
 		it('whole-call retirement: denied and failed-output calls retire their marker', async () => {
-			const dir = fixture({ taskIds: ['1.1'] });
+			const dir = await fixture({ taskIds: ['1.1'] });
 			await prepareTask(dir, '1.1');
 			const hook = createDelegationGateHook(makeConfig(), dir);
 			fs.mkdirSync(workflowGateStatePath(dir, SESSION), { recursive: true });
@@ -366,8 +367,8 @@ describe('route-receipt hardening legs (#3516)', () => {
 			);
 		});
 
-		it('empty containers are pruned on retirement and resetSwarmState clears the registry', () => {
-			const dir = fixture();
+		it('empty containers are pruned on retirement and resetSwarmState clears the registry', async () => {
+			const dir = await fixture();
 			expect(recordRouteFault(dir, SESSION, 'call-only')).toBe(true);
 			expect(registryInternals.size()).toBe(1);
 			expect(registryInternals.sessionCount(dir)).toBe(1);
@@ -389,7 +390,7 @@ describe('route-receipt hardening legs (#3516)', () => {
 			// with a crafted fault whose message embeds a home path plus
 			// >200 chars of padding, then assert the degraded warn is
 			// capped and redacted.
-			const dir = fixture();
+			const dir = await fixture();
 			const realInner = _internals.readPrReviewReentryBindingContextInner;
 			const realWrapper = _internals.readPrReviewReentryBindingContextSafe;
 			const homePath = 'C:\\Users\\brett\\project\\thing\\src';
@@ -416,7 +417,7 @@ describe('route-receipt hardening legs (#3516)', () => {
 			expect(line!.includes('~\\')).toBe(true);
 		});
 		it('a sibling non-full remember cannot clobber a healthy full record', async () => {
-			const dir = fixture({ taskIds: ['1.1'] });
+			const dir = await fixture({ taskIds: ['1.1'] });
 			await prepareTask(dir, '1.1');
 			const hook = createDelegationGateHook(makeConfig(), dir);
 			const session = swarmState.agentSessions.get(SESSION)!;
@@ -449,7 +450,7 @@ describe('route-receipt hardening legs (#3516)', () => {
 		});
 
 		it('runtime warn channel: the degraded wrapper warn is on the operator channel and bounded (AC14 runtime half)', async () => {
-			const dir = fixture({ taskIds: ['1.1'] });
+			const dir = await fixture({ taskIds: ['1.1'] });
 			await prepareTask(dir, '1.1');
 			const hook = createDelegationGateHook(makeConfig(), dir);
 			fs.mkdirSync(workflowGateStatePath(dir, SESSION), { recursive: true });
@@ -467,8 +468,8 @@ describe('route-receipt hardening legs (#3516)', () => {
 			expect(line!.length).toBeLessThan(800);
 		});
 
-		it('runtime redaction: the registry capacity warn redacts the project path while naming the bound (AC14 redaction half)', () => {
-			const dir = fixture();
+		it('runtime redaction: the registry capacity warn redacts the project path while naming the bound (AC14 redaction half)', async () => {
+			const dir = await fixture();
 			for (let index = 0; index < MAX_LIVE_CALLS_PER_SESSION; index += 1) {
 				recordRouteFault(dir, SESSION, `call-f-${index}`);
 			}

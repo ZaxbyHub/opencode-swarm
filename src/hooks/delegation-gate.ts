@@ -5073,6 +5073,24 @@ export function createDelegationGateHook(
 							directory,
 							changedFiles,
 						);
+						// Durable test-engineer exemption: the durable
+						// `test_engineer_exempt` evidence flag (set at coder
+						// settlement from the declared+observed Markdown-only
+						// classification in isMarkdownOnlyTaskChange) is the
+						// independent declared-scope signal. It is read from the
+						// unauthenticated .swarm/evidence/<task>.json (no MAC).
+						// Unlike observed attribution, it may legitimately zero
+						// the test-engineer requirement: an exempt task never
+						// dispatches a test engineer, so a route receipt demanding
+						// one can never reach completeness and wedges the workflow
+						// at reviewer_run with "all required proof exists".
+						const { readTaskEvidence, isTestEngineerDurablyExempt } =
+							await import('../gate-evidence');
+						const routedEvidence = reviewTaskId
+							? await readTaskEvidence(directory, reviewTaskId)
+							: null;
+						const durableTestEngineerExempt =
+							isTestEngineerDurablyExempt(routedEvidence);
 						const routeReceipt = buildReviewRouteReceipt({
 							sessionId: input.sessionID,
 							taskId: routeTaskId,
@@ -5082,13 +5100,17 @@ export function createDelegationGateHook(
 								{ length: routing.reviewerCount },
 								(_, index) => `${routeTaskId}:reviewer:${index + 1}`,
 							),
-							requiredTestEngineers: Array.from(
-								// `changedFiles` is observed attribution, not an independent
-								// declared scope. Require the routed count here so an
-								// all-Markdown change cannot self-prove its exemption.
-								{ length: routing.testEngineerCount },
-								(_, index) => `${routeTaskId}:test_engineer:${index + 1}`,
-							),
+							requiredTestEngineers: durableTestEngineerExempt
+								? []
+								: Array.from(
+										// `changedFiles` is observed attribution, not an
+										// independent declared scope. Require the routed
+										// count here so an all-Markdown change cannot
+										// self-prove its exemption — only the durable
+										// evidence flag above may zero it.
+										{ length: routing.testEngineerCount },
+										(_, index) => `${routeTaskId}:test_engineer:${index + 1}`,
+									),
 						});
 						await _internals.persistReviewRouteReceiptAtDispatch({
 							projectRoot: directory,
@@ -7418,6 +7440,7 @@ export function createDelegationGateHook(
 
 									const {
 										getTaskWorkflowSnapshot,
+										isTestEngineerDurablyExempt,
 										readTaskEvidence,
 										transitionTaskWorkflowEvidence,
 									} = await import('../gate-evidence');
@@ -7732,6 +7755,14 @@ export function createDelegationGateHook(
 											| undefined;
 										if (routeEnforcementEnabled && routeBinding) {
 											try {
+												// Exempt wedge: honor the durable test-engineer
+												// exemption (evidence flag, no MAC) so a receipt that
+												// still lists test-engineer slots cannot block the
+												// reviewer-only Stage B barrier of a Markdown-only task.
+												const exemptEvidence = await readTaskEvidence(
+													directory,
+													taskId,
+												);
 												routeCompleteDecision =
 													_internals.enforcePersistedReviewRouteReceiptAtSettlement(
 														{
@@ -7742,6 +7773,8 @@ export function createDelegationGateHook(
 															enforcementEnabled: true,
 															requireEvidenceBindings: true,
 															requireCompleteEvidence: true,
+															testEngineerExempt:
+																isTestEngineerDurablyExempt(exemptEvidence),
 														},
 													);
 											} catch (err) {
@@ -7843,7 +7876,7 @@ export function createDelegationGateHook(
 										);
 										const reviewerCompletesStageB =
 											targetAgent === 'reviewer' &&
-											taskEvidence?.test_engineer_exempt === true;
+											isTestEngineerDurablyExempt(taskEvidence);
 										if (
 											routeComplete &&
 											(hasBothStageBCompletions(session, taskId) ||

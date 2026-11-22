@@ -43,6 +43,7 @@ import {
 } from '../../../src/state';
 import { createIsolatedTestEnv } from '../../helpers/isolated-test-env.js';
 import { canonicalMkdtemp, removeTreeWithRetry } from '../../helpers/tmpdir';
+import { ensureSessionDrained } from './_session-rehydration-drain';
 
 const SESSION = 'sess-3380';
 
@@ -148,7 +149,7 @@ async function dispatch(
 	callID = 'call-1',
 	hook = makeHook(dir),
 ): Promise<unknown> {
-	ensureAgentSession(sessionID, 'architect', dir);
+	await ensureSessionDrained(sessionID, dir);
 	return hook.toolBefore({ tool: 'Task', sessionID, callID }, { args });
 }
 
@@ -159,7 +160,7 @@ async function seedFullReceipt(
 	callID: string,
 	hook = makeHook(dir),
 ): Promise<void> {
-	ensureAgentSession(sessionID, 'architect', dir);
+	await ensureSessionDrained(sessionID, dir);
 	recordModifiedFilesForTask(
 		swarmState.agentSessions.get(sessionID)!,
 		'1.1',
@@ -477,7 +478,7 @@ async function prepareTask(
 	taskId: string,
 	sessionID = SESSION,
 ): Promise<void> {
-	ensureAgentSession(sessionID, 'architect', dir);
+	await ensureSessionDrained(sessionID, dir);
 	await transitionTaskWorkflowEvidence(dir, taskId, {
 		type: 'accepted_mutation',
 		agentType: 'coder',

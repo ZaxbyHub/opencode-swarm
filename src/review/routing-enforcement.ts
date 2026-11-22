@@ -139,6 +139,18 @@ export interface EnforceReviewRouteReceiptArgs {
 	 * completion; the full-route check remains the advancement barrier.
 	 */
 	requireCompleteEvidence?: boolean;
+	/**
+	 * Durable test-engineer exemption for the routed task (the durable
+	 * `test_engineer_exempt` evidence flag set at coder settlement from the
+	 * declared+observed Markdown-only classification, never observed
+	 * attribution alone; unauthenticated, no MAC). When true, the completeness barrier requires only the
+	 * reviewer identities: an exempt task never dispatches a test engineer, so
+	 * a receipt that still lists test-engineer slots (allocated by a build
+	 * predating exemption-aware allocation) must not wedge the task at
+	 * `reviewer_run` forever. Test-engineer identities stay listed for
+	 * identity/role validation; they simply never gate completeness.
+	 */
+	testEngineerExempt?: boolean;
 }
 
 export interface EnforceReviewRouteReceiptResult {
@@ -809,8 +821,30 @@ export function enforceReviewRouteReceipt(
 			return fail('ROUTE_RECEIPT_DISPATCH_MISMATCH');
 		}
 	}
-	if (input.requireCompleteEvidence !== false && seen.size !== expected.size) {
-		return fail('ROUTE_RECEIPT_INCOMPLETE');
+	if (input.requireCompleteEvidence !== false) {
+		// The router floors the test-engineer count at 1, so a zero-slot receipt
+		// for a non-exempt context is a stale exempt-time receipt (required_gates
+		// grew afterwards): reviewer-only evidence must not complete it.
+		if (
+			input.testEngineerExempt !== true &&
+			route.required.testEngineers === 0
+		) {
+			return fail('ROUTE_RECEIPT_INCOMPLETE');
+		}
+		// Exemption-aware completeness (see EnforceReviewRouteReceiptArgs):
+		// an exempt task's barrier covers only the reviewer identities. The
+		// non-exempt check stays the exact set equality it always was (seen is
+		// a duplicate-free subset of expected at this point, so "every
+		// expected identity seen" is equivalent to seen.size === expected.size).
+		const completenessIdentities =
+			input.testEngineerExempt === true
+				? [...expected.entries()]
+						.filter(([, role]) => role === 'reviewer')
+						.map(([identity]) => identity)
+				: [...expected.keys()];
+		if (completenessIdentities.some((identity) => !seen.has(identity))) {
+			return fail('ROUTE_RECEIPT_INCOMPLETE');
+		}
 	}
 	return { canAdvance: true, mode: 'enforced' };
 }
@@ -839,6 +873,8 @@ export function enforcePersistedReviewRouteReceipt(input: {
 	requireEvidenceBindings?: boolean;
 	expectedDispatch?: EnforceReviewRouteReceiptArgs['expectedDispatch'];
 	requireCompleteEvidence?: boolean;
+	/** Durable test-engineer exemption; passed through to the route check. */
+	testEngineerExempt?: boolean;
 }): EnforceReviewRouteReceiptResult {
 	if (!input.enforcementEnabled) {
 		return { canAdvance: true, mode: 'disabled' };
@@ -875,5 +911,6 @@ export function enforcePersistedReviewRouteReceipt(input: {
 		requireEvidenceBindings: input.requireEvidenceBindings,
 		expectedDispatch: input.expectedDispatch,
 		requireCompleteEvidence: input.requireCompleteEvidence,
+		testEngineerExempt: input.testEngineerExempt,
 	});
 }
