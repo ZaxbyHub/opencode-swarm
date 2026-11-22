@@ -119,7 +119,7 @@ function setupBaseDir(dir: string): void {
 				status: 'in_progress',
 				type: 'code',
 				tasks: [
-					{ id: '1.1', phase: 1, status: 'pending', description: 'Test task' },
+					{ id: '1.1', phase: 1, status: 'completed', description: 'Test task' },
 				],
 			},
 		],
@@ -1031,7 +1031,7 @@ describe('phase-complete drift_check adversarial tests', () => {
 					{
 						id: 2,
 						name: 'Phase 2',
-						status: 'pending',
+						status: 'completed',
 						type: 'code',
 						tasks: [],
 					},

@@ -1739,9 +1739,12 @@ describe('phase_complete tool', () => {
 			});
 			const parsed = JSON.parse(result);
 
+			// #3770: unfinished planned tasks now refuse BEFORE the agents
+			// fallback is ever consulted — the old REQUIRED_AGENTS_MISSING
+			// contract for incomplete tasks is subsumed by the refusal.
 			expect(parsed.success).toBe(false);
-			expect(parsed.status).toBe('incomplete');
-			expect(parsed.agentsMissing).toContain('coder');
+			expect(parsed.status).toBe('blocked');
+			expect(parsed.reason).toBe('PLANNED_TASKS_PENDING');
 			// Fallback should NOT trigger - no fallback warning
 			expect(
 				parsed.warnings.some((w: string) =>
@@ -2014,9 +2017,10 @@ describe('phase_complete tool', () => {
 			const parsed = JSON.parse(result);
 
 			// .every() returns false because task status is not 'completed'
+			// (#3770: the refusal fires before the agents fallback).
 			expect(parsed.success).toBe(false);
-			expect(parsed.status).toBe('incomplete');
-			expect(parsed.agentsMissing).toContain('coder');
+			expect(parsed.status).toBe('blocked');
+			expect(parsed.reason).toBe('PLANNED_TASKS_PENDING');
 			// Fallback should NOT activate because .every() returns false
 			expect(
 				parsed.warnings.some((w: string) =>

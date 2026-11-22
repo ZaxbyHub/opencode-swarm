@@ -278,18 +278,14 @@ describe('Task 2.4: Tighten missing-spec enforcement in phase-complete', () => {
 			});
 			const parsed = JSON.parse(result);
 
-			// Phase should succeed (advisory-only mode)
-			expect(parsed.success).toBe(true);
-			expect(parsed.status).toBe('success');
-
-			// Warning should mention incomplete tasks and suggest running critic_drift_verifier
-			const warning = parsed.warnings.find((w: string) =>
-				w.includes('incomplete task'),
-			);
-			expect(warning).toBeDefined();
-			expect(warning).toContain('incomplete task(s)');
-			expect(warning).toContain('consider running critic_drift_verifier');
-			expect(warning).toContain('3 incomplete task(s)'); // all 3 tasks are non-completed
+			// #3770: completion with unfinished planned tasks is now REFUSED
+			// (the drift gate's advisory warning was the pinned defect).
+			expect(parsed.success).toBe(false);
+			expect(parsed.status).toBe('blocked');
+			expect(parsed.reason).toBe('PLANNED_TASKS_PENDING');
+			expect(String(parsed.message)).toContain('1.1');
+			expect(String(parsed.message)).toContain('1.1');
+			expect(String(parsed.message)).toContain('1.3');
 		});
 
 		test('phase with incomplete tasks shows correct count', async () => {
@@ -325,12 +321,10 @@ describe('Task 2.4: Tighten missing-spec enforcement in phase-complete', () => {
 			});
 			const parsed = JSON.parse(result);
 
-			expect(parsed.success).toBe(true);
-
-			const warning = parsed.warnings.find((w: string) =>
-				w.includes('incomplete task'),
-			);
-			expect(warning).toContain('1 incomplete task(s)');
+			// #3770: refused with the unfinished task ID.
+			expect(parsed.success).toBe(false);
+			expect(parsed.reason).toBe('PLANNED_TASKS_PENDING');
+			expect(String(parsed.message)).toContain('1.1');
 		});
 	});
 
