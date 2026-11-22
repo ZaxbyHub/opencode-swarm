@@ -142,7 +142,7 @@ export async function handleDatasetConsentCommand(
 		'Training-content capture is OFF until a consent record exists.',
 		`Purpose: ${CONSENT_PURPOSE}`,
 		`Content classes: user_message, assistant_message, tool_call, tool_result (plugin-injected guidance is never captured).`,
-		`Redaction: defense-in-depth vTRAINING_REDACTION_VERSION (URL/credential placements + bare well-known credential families + JWS shapes) applied at capture and recorded per record; redaction_version is informational redactor provenance — stronger redactors keep prior consents valid.`,
+		`Redaction: defense-in-depth v${TRAINING_REDACTION_VERSION} (URL/credential placements + bare well-known credential families + JWS shapes) applied at capture and recorded per record; redaction_version is informational redactor provenance — stronger redactors keep prior consents valid.`,
 		`Hard ceilings (you may choose LOWER): ${TRAINING_QUOTA_CEILINGS.maxBytes} bytes, ${TRAINING_QUOTA_CEILINGS.maxRecords} records, ${TRAINING_QUOTA_CEILINGS.retentionDays} days.`,
 		`Requested quotas: ${JSON.stringify(quotas)}`,
 		`Current state: ${status.consentState}; vault records: ${status.recordCount}.`,

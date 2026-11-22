@@ -90,7 +90,12 @@ export async function executeWriteHallucinationEvidence(
 		// free text — redact at the write boundary.
 		summary: redactEvidenceText(summary.trim()),
 		timestamp: new Date().toISOString(),
-		findings: args.findings,
+		// #3844 final-critic F2: findings is model free text too — redact
+		// at the write boundary alongside the summary.
+		findings:
+			args.findings !== undefined
+				? redactEvidenceText(args.findings)
+				: undefined,
 	};
 
 	const evidenceContent = {

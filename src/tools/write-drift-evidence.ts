@@ -242,7 +242,12 @@ export async function executeWriteDriftEvidence(
 		// raw verdict prose for the calling agent).
 		summary: redactEvidenceText(summary.trim()),
 		timestamp: new Date().toISOString(),
-		requirementCoverage: args.requirementCoverage,
+		// #3844 final-critic F2: requirementCoverage is model free text —
+		// redact at the write boundary alongside the summary.
+		requirementCoverage:
+			args.requirementCoverage !== undefined
+				? redactEvidenceText(args.requirementCoverage)
+				: undefined,
 		...(provenance ? { provenance } : {}),
 	};
 
