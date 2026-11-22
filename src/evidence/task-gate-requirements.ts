@@ -376,27 +376,27 @@ export async function latestAcceptedMutationReceipt(
 
 /**
  * Reconstructs exact route evidence from the append-only durable requirement
- * chain. A retry for the same call/child/generation replaces that dispatch's
- * row; distinct dispatch identities retain distinct route slots.
+ * chain. Rows collapse to one entry per (role, identity), latest row winning:
+ * a retry for the same call/child/generation rewrites that dispatch's row, and
+ * a Stage-B re-dispatch of the same gate cycle appends a NEW row for the SAME
+ * route identity with a different call/child (the reclamation path in
+ * resolveBackgroundStageBRoute). The chain keeps both rows for audit, but the
+ * reconstructed evidence must never present one identity twice — duplicate
+ * identities fail every downstream barrier with ROUTE_RECEIPT_DUPLICATE.
+ * Latest-wins mirrors the in-memory "a retry replaces the same deterministic
+ * slot binding" contract in reserveStageBRouteEvidence; distinct identities
+ * (distinct route slots) always remain distinct entries.
  */
 export function routeEvidenceFromTaskGateRequirements(
 	receipts: readonly TaskGateRequirementsReceipt[],
 ): ReviewRouteEvidence[] {
-	const latestByDispatch = new Map<string, ReviewRouteEvidence>();
+	const latestByIdentity = new Map<string, ReviewRouteEvidence>();
 	for (const receipt of receipts) {
 		const binding = receipt.routeBinding;
 		if (!binding) continue;
-		const dispatchKey = [
-			binding.role,
-			binding.sessionId,
-			binding.taskId,
-			binding.callId,
-			binding.childSessionId,
-			String(binding.generation),
-		].join('\u0000');
-		latestByDispatch.set(dispatchKey, binding);
+		latestByIdentity.set(`${binding.role}\u0000${binding.identity}`, binding);
 	}
-	return [...latestByDispatch.values()];
+	return [...latestByIdentity.values()];
 }
 
 /** Positive proof that an evidence chain predates v1 route-bound receipts. */
