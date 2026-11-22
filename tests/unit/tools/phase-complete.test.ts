@@ -34,7 +34,6 @@ function writeRetroBundle(
 		`retro-${phaseNumber}`,
 	);
 	fs.mkdirSync(retroDir, { recursive: true });
-
 	const retroBundle = {
 		schema_version: '1.0.0',
 		task_id: `retro-${phaseNumber}`,
@@ -63,7 +62,6 @@ function writeRetroBundle(
 		created_at: new Date().toISOString(),
 		updated_at: new Date().toISOString(),
 	};
-
 	fs.writeFileSync(
 		path.join(retroDir, 'evidence.json'),
 		JSON.stringify(retroBundle, null, 2),
@@ -127,11 +125,9 @@ function mockCtx(sessionID: string, directory: string): ToolContext {
 		ask: async () => {},
 	};
 }
-
 describe('phase_complete tool', () => {
 	let tempDir: string;
 	let originalCwd: string;
-
 	beforeEach(() => {
 		// Reset state before each test
 		resetSwarmState();

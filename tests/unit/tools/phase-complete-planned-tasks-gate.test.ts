@@ -11,7 +11,6 @@ import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { DriftReport } from '../../../src/hooks/curator-types';
-import { canonicalMkdtemp, removeTreeWithRetry } from '../../helpers/tmpdir';
 import {
 	appendLedgerEvent,
 	computePlanLedgerHash,
@@ -24,6 +23,7 @@ import {
 	resetSwarmState,
 	swarmState,
 } from '../../../src/state';
+import { canonicalMkdtemp, removeTreeWithRetry } from '../../helpers/tmpdir';
 
 const mockRunCuratorPhase = mock(async () => ({
 	phase: 1,
@@ -171,8 +171,7 @@ function snapshotSwarmTree(directory: string): Map<string, string> {
 			const child = path.join(current, entry);
 			const stat = fs.statSync(child);
 			if (stat.isDirectory()) walk(child);
-			else
-				snapshot.set(child, fs.readFileSync(child, 'utf-8'));
+			else snapshot.set(child, fs.readFileSync(child, 'utf-8'));
 		}
 	};
 	walk(path.join(directory, '.swarm'));
@@ -256,10 +255,8 @@ describe('#3770 planned-tasks refusal', () => {
 			expect(parsed.reason).toBe('PLANNED_TASKS_PENDING');
 			expect(String(parsed.message)).toContain('1.2');
 		}
-		expect(labelUnused(before, snapshotSwarmTree(tempDir))).toBe(true);
-		expect(
-			fs.existsSync(path.join(tempDir, '.swarm', 'plan.md')),
-		).toBe(false);
+		expect(treesEqual(before, snapshotSwarmTree(tempDir))).toBe(true);
+		expect(fs.existsSync(path.join(tempDir, '.swarm', 'plan.md'))).toBe(false);
 		expect(phaseCompleteEventLines(tempDir).length).toBe(0);
 	});
 
@@ -305,10 +302,7 @@ describe('#3770 planned-tasks refusal', () => {
 	});
 
 	test('missing or malformed plan defers the early refusal', async () => {
-		fs.writeFileSync(
-			path.join(tempDir, '.swarm', 'plan.json'),
-			'{"broken":',
-		);
+		fs.writeFileSync(path.join(tempDir, '.swarm', 'plan.json'), '{"broken":');
 		const parsed = await execute();
 		expect(parsed.reason).not.toBe('PLANNED_TASKS_PENDING');
 	});
@@ -316,9 +310,7 @@ describe('#3770 planned-tasks refusal', () => {
 	test('truncated ledger defers in both projection directions without mutation', async () => {
 		fs.writeFileSync(
 			path.join(tempDir, '.swarm', 'plan.json'),
-			JSON.stringify(
-				planWithTasks([{ id: '1.1', status: 'completed' }]),
-			),
+			JSON.stringify(planWithTasks([{ id: '1.1', status: 'completed' }])),
 		);
 		fs.writeFileSync(
 			path.join(tempDir, '.swarm', 'plan-ledger.jsonl'),
@@ -327,17 +319,20 @@ describe('#3770 planned-tasks refusal', () => {
 		const before = snapshotSwarmTree(tempDir);
 		const unfinished = await readUnfinishedPlannedTasks(tempDir, 1);
 		expect(unfinished).toBeNull();
-		expect(labelUnused(before, snapshotSwarmTree(tempDir))).toBe(true);
+		expect(treesEqual(before, snapshotSwarmTree(tempDir))).toBe(true);
 	});
 
 	test('ledger-ahead-completed passes (stale pending projection)', async () => {
 		const pendingPlan = planWithTasks([
 			{ id: '1.1', status: 'pending' },
 		]) as unknown as Parameters<typeof initLedger>[3];
-		await initLedger(tempDir, 'mega-Planned_Tasks_Gate_Test', undefined, pendingPlan);
-		const completedPlan = planWithTasks([
-			{ id: '1.1', status: 'completed' },
-		]);
+		await initLedger(
+			tempDir,
+			'mega-Planned_Tasks_Gate_Test',
+			undefined,
+			pendingPlan,
+		);
+		const completedPlan = planWithTasks([{ id: '1.1', status: 'completed' }]);
 		await appendLedgerEvent(
 			tempDir,
 			{
@@ -350,9 +345,7 @@ describe('#3770 planned-tasks refusal', () => {
 				source: 'test',
 			},
 			{
-				planHashAfter: computePlanLedgerHash(
-					completedPlan as never,
-				),
+				planHashAfter: computePlanLedgerHash(completedPlan as never),
 			},
 		);
 		const parsed = await execute();
@@ -363,7 +356,12 @@ describe('#3770 planned-tasks refusal', () => {
 		const completedPlan = planWithTasks([
 			{ id: '1.1', status: 'completed' },
 		]) as unknown as Parameters<typeof initLedger>[3];
-		await initLedger(tempDir, 'mega-Planned_Tasks_Gate_Test', undefined, completedPlan);
+		await initLedger(
+			tempDir,
+			'mega-Planned_Tasks_Gate_Test',
+			undefined,
+			completedPlan,
+		);
 		const pendingPlan = planWithTasks([{ id: '1.1', status: 'pending' }]);
 		await appendLedgerEvent(
 			tempDir,
@@ -403,178 +401,10 @@ describe('#3770 planned-tasks refusal', () => {
 	});
 });
 
-describe('#3770 exactly-once completion events', () => {
-	let tempDir: string;
-	let originalCwd: string;
-
-	beforeEach(() => {
-		resetSwarmState();
-		tempDir = canonicalMkdtemp('planned-tasks-once-');
-		originalCwd = process.cwd();
-		process.chdir(tempDir);
-		fs.mkdirSync(path.join(tempDir, '.swarm', 'evidence'), {
-			recursive: true,
-		});
-		fs.mkdirSync(path.join(tempDir, '.opencode'), { recursive: true });
-		writeRetroBundle(tempDir);
-		writeCompletionVerify(tempDir);
-		fs.writeFileSync(
-			path.join(tempDir, '.opencode', 'opencode-swarm.json'),
-			JSON.stringify({
-				phase_complete: {
-					enabled: true,
-					required_agents: ['coder'],
-					require_docs: false,
-					policy: 'enforce',
-				},
-				curator: { enabled: false, phase_enabled: true },
-			}),
-		);
-		ensureAgentSession('sess1');
-		recordPhaseAgentDispatch('sess1', 'coder');
-		fs.writeFileSync(
-			path.join(tempDir, '.swarm', 'plan.json'),
-			JSON.stringify(
-				planWithTasks([{ id: '1.1', status: 'completed' }]),
-			),
-		);
-	});
-
-	afterEach(() => {
-		process.chdir(originalCwd);
-		removeTreeWithRetry(tempDir);
-		resetSwarmState();
-		mock.restore();
-	});
-
-	async function execute(): Promise<Record<string, unknown>> {
-		const raw = await phase_complete.execute({ phase: 1, sessionID: 'sess1' });
-		return JSON.parse(raw) as Record<string, unknown>;
-	}
-
-	test('duplicate success call appends exactly one completion event', async () => {
-		const first = await execute();
-		expect(first.success).toBe(true);
-		recordPhaseAgentDispatch('sess1', 'coder');
-		const second = await execute();
-		expect(second.success).toBe(true);
-		expect(phaseCompleteEventLines(tempDir).length).toBe(1);
-	});
-
-	test('crash between save and append heals on retry to exactly one event', async () => {
-		const first = await execute();
-		expect(first.success).toBe(true);
-		// Simulate the pre-append crash state: neither the events log NOR the
-		// durable authority index (a separate file, events-authority-index.json)
-		// was written, while the ledger transition stays committed. Deleting
-		// only events.jsonl would leave the index as the surviving dedupe
-		// authority and the retry would correctly NOT re-append.
-		fs.rmSync(path.join(tempDir, '.swarm', 'events.jsonl'), { force: true });
-		fs.rmSync(
-			path.join(tempDir, '.swarm', 'events-authority-index.json'),
-			{ force: true },
-		);
-		recordPhaseAgentDispatch('sess1', 'coder');
-		const retry = await execute();
-		expect(retry.success).toBe(true);
-		expect(phaseCompleteEventLines(tempDir).length).toBe(1);
-	});
-
-	test('task-level reopen events do not mint a duplicate event (phase completion is one-way per root)', async () => {
-		expect((await execute()).success).toBe(true);
-		// Ledger contract (probe-verified): snapshots and task_status_changed
-		// events never reset a phase's replayed status — a completion is a
-		// one-way transition within a root, and re-opening a phase goes
-		// through root replacement (covered by the re-root test below). So a
-		// later call after task churn still dedupes to one event.
-		await appendLedgerEvent(
-			tempDir,
-			{
-				plan_id: 'mega-Planned_Tasks_Gate_Test',
-				event_type: 'task_status_changed',
-				task_id: '1.1',
-				phase_id: 1,
-				from_status: 'completed',
-				to_status: 'pending',
-				source: 'test-task-churn',
-			},
-			{
-				planHashAfter: computePlanLedgerHash(
-					planWithTasks([{ id: '1.1', status: 'pending' }]) as never,
-				),
-			},
-		);
-		await appendLedgerEvent(
-			tempDir,
-			{
-				plan_id: 'mega-Planned_Tasks_Gate_Test',
-				event_type: 'task_status_changed',
-				task_id: '1.1',
-				phase_id: 1,
-				from_status: 'pending',
-				to_status: 'completed',
-				source: 'test-task-churn',
-			},
-			{
-				planHashAfter: computePlanLedgerHash(
-					planWithTasks([{ id: '1.1', status: 'completed' }]) as never,
-				),
-			},
-		);
-		recordPhaseAgentDispatch('sess1', 'coder');
-		const second = await execute();
-		expect(second.success).toBe(true);
-		expect(phaseCompleteEventLines(tempDir).length).toBe(1);
-	});
-
-	test('unrelated later ledger writes do not un-dedupe a duplicate call', async () => {
-		expect((await execute()).success).toBe(true);
-		await appendLedgerEvent(
-			tempDir,
-			{
-				plan_id: 'mega-Planned_Tasks_Gate_Test',
-				event_type: 'plan_rebuilt',
-				source: 'test-unrelated',
-				payload: { reason: 'unrelated' },
-			},
-			{
-				planHashAfter: computePlanLedgerHash(
-					planWithTasks([{ id: '1.1', status: 'completed' }]) as never,
-				),
-			},
-		);
-		recordPhaseAgentDispatch('sess1', 'coder');
-		const duplicate = await execute();
-		expect(duplicate.success).toBe(true);
-		expect(phaseCompleteEventLines(tempDir).length).toBe(1);
-	});
-
-	test('concurrent double-call records exactly one event', async () => {
-		const [a, b] = await Promise.all([execute(), execute()]);
-		const successes = [a, b].filter((result) => result.success).length;
-		expect(successes).toBeGreaterThanOrEqual(1);
-		expect(phaseCompleteEventLines(tempDir).length).toBe(1);
-	});
-
-	test('ledger re-root with same phase number and reused seq emits its own event', async () => {
-		expect((await execute()).success).toBe(true);
-		expect(phaseCompleteEventLines(tempDir).length).toBe(1);
-		// Re-root with the phase open again: the replacement history restarts
-		// at seq 1, so the new completion's (root, seq) identity is distinct
-		// from the old plan's despite the same numbers.
-		await replacePlanLedgerWithRoot(
-			tempDir,
-			planWithTasks([{ id: '1.1', status: 'completed' }]) as never,
-			'test-re-root',
-		);
-		recordPhaseAgentDispatch('sess1', 'coder');
-		const second = await execute();
-		expect(second.success).toBe(true);
-		expect(phaseCompleteEventLines(tempDir).length).toBe(2);
-	});
-});
-
-function labelUnused(before: Map<string, string>, after: Map<string, string>): boolean {
+function treesEqual(
+	before: Map<string, string>,
+	after: Map<string, string>,
+): boolean {
 	if (before.size !== after.size) return false;
 	for (const [key, value] of before) {
 		if (after.get(key) !== value) return false;

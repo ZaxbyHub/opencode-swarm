@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-
 import {
 	ensureAgentSession,
 	recordPhaseAgentDispatch,
@@ -28,7 +27,6 @@ function writeRetroBundle(
 		`retro-${phaseNumber}`,
 	);
 	fs.mkdirSync(retroDir, { recursive: true });
-
 	const retroBundle = {
 		schema_version: '1.0.0',
 		task_id: `retro-${phaseNumber}`,
@@ -57,7 +55,6 @@ function writeRetroBundle(
 		created_at: new Date().toISOString(),
 		updated_at: new Date().toISOString(),
 	};
-
 	fs.writeFileSync(
 		path.join(retroDir, 'evidence.json'),
 		JSON.stringify(retroBundle, null, 2),
@@ -80,7 +77,6 @@ function writeDriftEvidence(
 		String(phaseNumber),
 	);
 	fs.mkdirSync(driftDir, { recursive: true });
-
 	const driftEvidence = {
 		schema_version: '1.0.0',
 		task_id: `drift-verifier-${phaseNumber}`,
@@ -97,7 +93,6 @@ function writeDriftEvidence(
 		created_at: new Date().toISOString(),
 		updated_at: new Date().toISOString(),
 	};
-
 	fs.writeFileSync(
 		path.join(driftDir, 'drift-verifier.json'),
 		JSON.stringify(driftEvidence, null, 2),
@@ -144,7 +139,12 @@ function setupPermissiveConfig(tempDir: string): void {
 				name: 'Phase 1',
 				status: 'pending',
 				tasks: [
-					{ id: '1.1', phase: 1, status: 'completed', description: 'Test task' },
+					{
+						id: '1.1',
+						phase: 1,
+						status: 'completed',
+						description: 'Test task',
+					},
 				],
 			},
 		],

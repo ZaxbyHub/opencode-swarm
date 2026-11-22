@@ -1518,19 +1518,19 @@ export async function executePhaseComplete(
 			!['complete', 'completed', 'closed'].includes(phaseObject.status)
 		) {
 			phaseObject.status = 'complete';
-				try {
-					const saveDurability = await phaseCompleteCommitInternals.savePlan(
-						dir,
-						plan,
-						{
-							preserveCompletedStatuses: true,
-							planLockAlreadyHeld: true,
-							// #3770: this save is the phase-status transition —
-							// record the durable `phase_completed` ledger event (and
-							// with it the transition identity the completion event's
-							// exactly-once dedupe keys on).
-							completedPhaseIds: [phase],
-							preCommitCheck: () => {
+			try {
+				const saveDurability = await phaseCompleteCommitInternals.savePlan(
+					dir,
+					plan,
+					{
+						preserveCompletedStatuses: true,
+						planLockAlreadyHeld: true,
+						// #3770: this save is the phase-status transition —
+						// record the durable `phase_completed` ledger event (and
+						// with it the transition identity the completion event's
+						// exactly-once dedupe keys on).
+						completedPhaseIds: [phase],
+						preCommitCheck: () => {
 							const currentPolicyHash = createHash('sha256')
 								.update(JSON.stringify(loadPluginConfigWithMeta(dir).config))
 								.digest('hex');

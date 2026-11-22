@@ -58,7 +58,12 @@ function setupSwarmDir(dir: string): void {
 				name: 'Phase 1',
 				status: 'pending',
 				tasks: [
-					{ id: '1.1', phase: 1, status: 'completed', description: 'Test task' },
+					{
+						id: '1.1',
+						phase: 1,
+						status: 'completed',
+						description: 'Test task',
+					},
 				],
 			},
 		],

@@ -21,9 +21,9 @@
  * completion flow's own recovery owns that case.
  */
 
+import type { Plan } from '../../../config/plan-schema';
 import { ledgerExists, peekPlanFromLedger } from '../../../plan/ledger';
 import { loadPlanJsonOnly } from '../../../plan/manager';
-import type { Plan } from '../../../config/plan-schema';
 import type { GateContext, GateResult } from './types';
 
 export const PLANNED_TASKS_BLOCKED_REASON = 'PLANNED_TASKS_PENDING';
@@ -32,13 +32,14 @@ export const PLANNED_TASKS_BLOCKED_REASON = 'PLANNED_TASKS_PENDING';
  * Unfinished task IDs of one phase under the readiness predicate, or null
  * when the phase is not in the plan (defer; other machinery owns that).
  */
-export function unfinishedTaskIdsOf(plan: Plan, phase: number): string[] | null {
+export function unfinishedTaskIdsOf(
+	plan: Plan,
+	phase: number,
+): string[] | null {
 	const target = plan.phases.find((candidate) => candidate.id === phase);
 	if (!target) return null;
 	return target.tasks
-		.filter(
-			(task) => task.status !== 'completed' && task.status !== 'closed',
-		)
+		.filter((task) => task.status !== 'completed' && task.status !== 'closed')
 		.map((task) => task.id)
 		.sort();
 }

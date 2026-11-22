@@ -2064,7 +2064,11 @@ export async function peekPlanFromLedger(
 ): Promise<ReplayStatusResult> {
 	const peeked = peekLedgerEventsExact(directory);
 	if (peeked.events.length === 0) {
-		return { plan: null, truncated: peeked.truncated, badSuffix: peeked.badSuffix };
+		return {
+			plan: null,
+			truncated: peeked.truncated,
+			badSuffix: peeked.badSuffix,
+		};
 	}
 	return {
 		plan: reconstructPlanFromEvents(directory, peeked.events),

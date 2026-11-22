@@ -5,18 +5,19 @@
  * and supported-older versions keep opening/migrating; read-only and
  * archival/diagnostic paths stay available.
  */
+
+import { Database } from 'bun:sqlite';
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { Database } from 'bun:sqlite';
-import { canonicalMkdtemp, removeTreeWithRetry } from '../../helpers/tmpdir';
 import { ProjectDbError } from '../../../src/db/db-errors';
+import { closeGlobalDb, getGlobalDb } from '../../../src/db/global-db';
 import {
 	closeProjectDb,
 	getProjectDb,
 	withProjectDbReadOnly,
 } from '../../../src/db/project-db';
-import { closeGlobalDb, getGlobalDb } from '../../../src/db/global-db';
+import { canonicalMkdtemp, removeTreeWithRetry } from '../../helpers/tmpdir';
 
 function maxVersion(db: Database): number {
 	const row = db
@@ -30,7 +31,7 @@ function maxVersion(db: Database): number {
 function sqliteMaster(db: Database): string {
 	return db
 		.query<{ sql: string }[], []>(
-			"SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY name",
+			'SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY name',
 		)
 		.all()
 		.map((row) => row.sql)
@@ -39,10 +40,10 @@ function sqliteMaster(db: Database): string {
 
 function plantFutureRow(dbFile: string, version: number): void {
 	const raw = new Database(dbFile);
-	raw.run(
-		'INSERT INTO schema_migrations (version, name) VALUES (?, ?)',
-		[version, 'future_migration_written_by_newer_client'],
-	);
+	raw.run('INSERT INTO schema_migrations (version, name) VALUES (?, ?)', [
+		version,
+		'future_migration_written_by_newer_client',
+	]);
 	raw.close();
 }
 
@@ -155,9 +156,7 @@ describe('#3773 project-db newer-schema refusal', () => {
 		db.run(
 			'CREATE TABLE legacy_sentinel (id INTEGER PRIMARY KEY, note TEXT NOT NULL)',
 		);
-		db.run(
-			"INSERT INTO legacy_sentinel (id, note) VALUES (3, 'old-data')",
-		);
+		db.run("INSERT INTO legacy_sentinel (id, note) VALUES (3, 'old-data')");
 		closeProjectDb(tempDir);
 		const raw = new Database(path.join(tempDir, '.swarm', 'swarm.db'));
 		raw.run('DROP TABLE IF EXISTS qa_gate_session_override');
@@ -248,9 +247,7 @@ describe('#3773 global-db newer-schema refusal (public opener)', () => {
 		} catch (error) {
 			secondRefusal = error;
 		}
-		expect((secondRefusal as Error).message).toBe(
-			(refusal as Error).message,
-		);
+		expect((secondRefusal as Error).message).toBe((refusal as Error).message);
 	});
 });
 
