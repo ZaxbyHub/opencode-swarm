@@ -3,8 +3,10 @@
  * REAL write paths (not just the exported helpers) — persistReviewReceipt
  * and persistAutoReviewEvidence file read-backs, the wake-message builder
  * (including a legacy raw stored event), the subscriber advisory fan-out,
- * the pr-feedback-loop terminal reason, the F2 sibling fields, and the
- * consent command's version line. Synthetic tokens only.
+ * the F2 sibling fields, and the consent command's version line. The
+ * pr-feedback-loop terminal reason has its own tracked suite
+ * (tests/unit/background/pr-feedback-loop-terminal-reason-3844.test.ts,
+ * final-critic R3-2). Synthetic tokens only.
  */
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';

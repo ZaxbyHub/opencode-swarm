@@ -93,8 +93,8 @@ export function redactReviewReceiptForPersistence<T extends ReviewReceipt>(
 		// other string array on the receipt (tolerant of legacy receipts
 		// that omitted the field).
 		if (rejected.evidence_references !== undefined) {
-			rejected.evidence_references = rejected.evidence_references.map(
-				(ref) => redactEvidenceText(ref),
+			rejected.evidence_references = rejected.evidence_references.map((ref) =>
+				redactEvidenceText(ref),
 			);
 		}
 		if (rejected.summary !== undefined) {
