@@ -176,6 +176,9 @@ describe('#3773 memory-family merge destination refusal', () => {
 		// fabricated 0 version — it must be the propagated read failure.
 		const message = (refusal as Error).message;
 		expect(message).not.toContain('is newer than this client supports');
+		// The refusal IS the propagated version-read failure (sqlite reports
+		// the missing `version` column), wrapped by the migration's catch.
+		expect(message).toContain('no such column');
 		// Handle released: the DB file is removable immediately after (no
 		// leaked pre-check connection holds it on Windows).
 		expect(() => fs.rmSync(destDb, { force: true })).not.toThrow();
