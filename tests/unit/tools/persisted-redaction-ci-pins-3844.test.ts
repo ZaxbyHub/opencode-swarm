@@ -258,6 +258,80 @@ describe('#3844 CI pins: main redaction call sites (final-critic F3)', () => {
 		expect(queueText.includes(ANT)).toBe(false);
 	}, 30_000);
 
+	test('a near-limit forge queue message survives the redaction (the queue clamps it to its own disk bound)', async () => {
+		// A redaction placeholder is LONGER than the secret it replaces, so a
+		// message that sat exactly on the queue's 20 000-character disk bound
+		// was pushed past it by the redaction itself and the schema parse
+		// threw before the queue write.
+		const dir = canonicalMkdtemp('pins-3844-queue-clamp-');
+		mkdirSync(path.join(dir, '.swarm'), { recursive: true });
+		await enqueuePrFeedbackMonitorEvent(
+			dir,
+			'sess-clamp',
+			{
+				type: 'pr.new.comment',
+				repoFullName: 'team/proj',
+				prNumber: 7,
+				prUrl: 'https://gitlab.example.com/team/proj/-/merge_requests/7',
+				message: `${'y'.repeat(19_990)}?token=abc`,
+				dedupToken: 'pin-clamp',
+				authorized: false,
+				queuedAt: '2026-11-21T00:00:00.000Z',
+			},
+			{
+				forge: 'gitlab',
+				apiBaseUrl: 'https://gitlab.example.com/api/v4',
+				repoFullName: 'team/proj',
+			},
+		);
+		const queue = await readPrFeedbackMonitorQueue(dir, 'sess-clamp');
+		const stored = queue?.events?.[0]?.message ?? '';
+		expect(stored.length).toBeGreaterThan(0);
+		expect(stored.length).toBeLessThanOrEqual(20_000);
+	}, 30_000);
+
+	test('the published review body redacts a credential in the finding LOCATION', () => {
+		// The location is reviewer-authored free text ("path:line" plus prose)
+		// and it reaches BOTH the published body line and the inline-comment
+		// path. A legacy artifact written before the redaction can carry a
+		// credential in it.
+		const rendered = renderPrReviewSubmissionBody({
+			verdict: 'REQUEST_CHANGES',
+			findings: [
+				{
+					finding_id: 'F-1',
+					status: 'confirmed',
+					severity: 'high',
+					confidence: 0.9,
+					file: 'src/a.ts',
+					file_line: `src/a.ts:12 the literal ${GH}`,
+					line_start: 1,
+					line_end: 2,
+					evidence: 'benign evidence',
+					next_action: 'fix it',
+				},
+			],
+			order_unstable_suppressed: [
+				{
+					finding_id: 'F-2',
+					status: 'confirmed',
+					severity: 'low',
+					file_line: `src/b.ts:3 the literal ${ANT}`,
+					order_agreement: 'disagree',
+					evidence: 'benign evidence',
+				},
+			],
+		} as never);
+		const text =
+			typeof rendered === 'string' ? rendered : JSON.stringify(rendered);
+		expect(text.includes(GH)).toBe(false);
+		expect(text.includes(ANT)).toBe(false);
+		expect(text.includes('ghp_')).toBe(false);
+		expect(text.includes('sk-ant-')).toBe(false);
+		// The suppressed (order-unstable) render site was actually reached.
+		expect(text).toContain('Order-unstable (not published as findings)');
+	});
+
 	test('shared redactor sanity: the five bare families + JWE stay covered through this suite', () => {
 		// Cheap guard that the pins above depend on a LIVE redactor: if the
 		// shared superset regresses, this leg (and every leg above) goes red.

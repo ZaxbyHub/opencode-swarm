@@ -20,7 +20,10 @@ import { validateSwarmPath } from '../hooks/utils.js';
 import { ledgerExists, replayFromLedgerWithStatus } from '../plan/ledger.js';
 import { loadPlanJsonOnly } from '../plan/manager.js';
 import {
-	clampRedactedText,
+	EVIDENCE_FINDING_BODY_MAX,
+	EVIDENCE_FINDING_TITLE_MAX,
+	EVIDENCE_VALIDATION_EVIDENCE_MAX,
+	redactEvidenceField,
 	redactEvidenceText,
 } from '../security/evidence-redaction.js';
 import type {
@@ -189,15 +192,21 @@ export function redactAutoReviewEvidenceForCapture(
 	// near-limit field that the redaction lengthens fails its schema on
 	// read-back and the finding is silently dropped.
 	for (const finding of evidence.findings) {
-		finding.body = clampRedactedText(redactEvidenceText(finding.body), 2000);
-		finding.title = clampRedactedText(redactEvidenceText(finding.title), 200);
+		finding.body = redactEvidenceField(
+			finding.body,
+			EVIDENCE_FINDING_BODY_MAX,
+		);
+		finding.title = redactEvidenceField(
+			finding.title,
+			EVIDENCE_FINDING_TITLE_MAX,
+		);
 		if (finding.anchor_rejection !== undefined) {
 			finding.anchor_rejection = redactEvidenceText(finding.anchor_rejection);
 		}
 		if (finding.validation?.evidence !== undefined) {
-			finding.validation.evidence = clampRedactedText(
-				redactEvidenceText(finding.validation.evidence),
-				2000,
+			finding.validation.evidence = redactEvidenceField(
+				finding.validation.evidence,
+				EVIDENCE_VALIDATION_EVIDENCE_MAX,
 			);
 		}
 	}

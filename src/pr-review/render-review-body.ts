@@ -163,11 +163,16 @@ function selectSurvivors(
 		}
 		if (seenIds.has(id)) continue;
 		seenIds.add(id);
-		const location = parseLocation(finding.file_line ?? '');
+		// #3844: the location is reviewer-authored free text ("path:line"
+		// plus prose), and the prose can quote a credential. It is redacted
+		// BEFORE it is parsed, so neither the published body line nor the
+		// inline-comment path can carry one.
+		const fileLine = redactEvidenceText(finding.file_line ?? '');
+		const location = parseLocation(fileLine);
 		const evidence = singleLine(finding.evidence ?? '', 400);
 		const locationKey = location
 			? `${location.path}:${location.line}:${evidence}`
-			: `${finding.file_line ?? ''}:::${evidence}`;
+			: `${fileLine}:::${evidence}`;
 		if (seenLocations.has(locationKey)) continue;
 		seenLocations.add(locationKey);
 		survivors.push({ finding, location });
@@ -219,7 +224,10 @@ export function renderPrReviewSubmissionBody(
 		lines.push(`### ${severity}`);
 		for (const entry of group) {
 			const id = singleLine(entry.finding.finding_id ?? '', 128);
-			const location = singleLine(entry.finding.file_line ?? '', 200);
+			const location = singleLine(
+				redactEvidenceText(entry.finding.file_line ?? ''),
+				200,
+			);
 			// status is findings.jsonl-derived like every other interpolated
 			// field, so it gets the same singleLine flattening/cap before it
 			// can reach the published body.
@@ -227,7 +235,7 @@ export function renderPrReviewSubmissionBody(
 				typeof entry.finding.status === 'string' &&
 				entry.finding.status !== '' &&
 				entry.finding.status.toUpperCase() !== 'CONFIRMED'
-					? ` (${singleLine(entry.finding.status, 64).toLowerCase()})`
+					? ` (${singleLine(redactEvidenceText(entry.finding.status), 64).toLowerCase()})`
 					: '';
 			// Issue #2906: only a flipping verdict (order_agreement 'disagree')
 			// renders the order-unstable marker; when nothing is unstable the
@@ -256,8 +264,14 @@ export function renderPrReviewSubmissionBody(
 		);
 		for (const finding of suppressedUnstable) {
 			const id = singleLine(finding.finding_id ?? '', 128);
-			const location = singleLine(finding.file_line ?? '', 200);
-			const status = singleLine(finding.status ?? '', 64).toLowerCase();
+			const location = singleLine(
+				redactEvidenceText(finding.file_line ?? ''),
+				200,
+			);
+			const status = singleLine(
+				redactEvidenceText(finding.status ?? ''),
+				64,
+			).toLowerCase();
 			lines.push(
 				`- [${id}] (order-unstable, ${status}) ${location} — ${singleLine(redactEvidenceText(finding.evidence ?? ''), 400)}`,
 			);

@@ -38,19 +38,12 @@ import type {
 } from '../agents/agent-output-schema.js';
 import { resolveRetentionCap } from '../retention/caps.js';
 import {
-	clampRedactedText,
+	EVIDENCE_FINDING_BODY_MAX,
+	EVIDENCE_FINDING_TITLE_MAX,
+	EVIDENCE_VALIDATION_EVIDENCE_MAX,
+	redactEvidenceField,
 	redactEvidenceText,
 } from '../security/evidence-redaction.js';
-
-/**
- * Schema bounds for the agent-output-derived parts of a receipt. The receipt
- * reader re-validates these with `FindingValidationSchema` /
- * `ReviewFindingSchema` (src/agents/agent-output-schema.ts), so a redacted
- * value must stay inside them.
- */
-const VALIDATION_EVIDENCE_MAX = 2000;
-const FINDING_TITLE_MAX = 200;
-const FINDING_BODY_MAX = 2000;
 
 /**
  * #3844: redact credential material from the free-text fields of a review
@@ -61,15 +54,21 @@ const FINDING_BODY_MAX = 2000;
  * redacted value is clamped back inside its schema bound — otherwise a field
  * that sat exactly on the bound is pushed past it by the redaction itself
  * and the persisted receipt fails its schema on read.
+ *
+ * The bounds and the redaction+clamp helper come from
+ * `src/security/evidence-redaction.ts`: the receipt and the auto-review
+ * evidence persist TWO copies of the same finding and the evidence-integrity
+ * check compares them byte-for-byte, so both sides must apply the SAME bound
+ * to the SAME text.
  */
 function redactFindingValidationForPersistence(
 	validation: FindingValidation,
 ): FindingValidation {
 	return {
 		...validation,
-		evidence: clampRedactedText(
-			redactEvidenceText(validation.evidence),
-			VALIDATION_EVIDENCE_MAX,
+		evidence: redactEvidenceField(
+			validation.evidence,
+			EVIDENCE_VALIDATION_EVIDENCE_MAX,
 		),
 	};
 }
@@ -80,11 +79,8 @@ function redactStructuredFindingsForPersistence(
 	if (findings === undefined) return undefined;
 	return findings.map((finding) => ({
 		...finding,
-		title: clampRedactedText(
-			redactEvidenceText(finding.title),
-			FINDING_TITLE_MAX,
-		),
-		body: clampRedactedText(redactEvidenceText(finding.body), FINDING_BODY_MAX),
+		title: redactEvidenceField(finding.title, EVIDENCE_FINDING_TITLE_MAX),
+		body: redactEvidenceField(finding.body, EVIDENCE_FINDING_BODY_MAX),
 	}));
 }
 

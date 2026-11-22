@@ -62,9 +62,22 @@ const URL_CREDENTIALS_PATTERN =
  * (`redactSecrets`) only matches a key with a PREFIX_ segment, so an
  * unprefixed `password=`, `password:`, `{"password": "..."}`, `PASSWORD=`,
  * `passwd=`, `token=` or `api_key:` survived on the evidence path.
+ *
+ * Three properties the arm MUST hold:
+ *   - The leading separator is CAPTURED and re-emitted. It used to be part of
+ *     the match but not of the replacement, so `the token=abc` came back as
+ *     `thetoken=[REDACTED]` — the words were glued together.
+ *   - The value may not START with `[REDACTED`. The value class excluded `]`
+ *     but allowed `[`, so the arm re-matched its OWN placeholder on a second
+ *     pass: `password=[REDACTED]` became `password=[REDACTED]]`. The
+ *     redactor is applied more than once on the same text (the review
+ *     evidence is redacted at assembly AND at persistence), so a
+ *     non-idempotent arm grew the value by one character per pass and made
+ *     the evidence copy and the receipt copy of one finding differ.
+ *   - A quoted value keeps its quotes.
  */
 const EVIDENCE_CREDENTIAL_KV_PATTERN =
-	/(?:^|[\s,;"'([{])([A-Za-z0-9_ -]{0,40}(?:token|secret|password|passwd|authorization|credential|bearer|api[-_ ]?key|access[-_ ]?key)[A-Za-z0-9_ -]{0,40}\s*[=:]\s*)(?:bearer|basic|digest|negotiate|apikey)?\s*(?:["'][^"'\n]*["']|[^\s,;"'}\]]+)/gi;
+	/(^|[\s,;"'([{])([A-Za-z0-9_ -]{0,40}(?:token|secret|password|passwd|authorization|credential|bearer|api[-_ ]?key|access[-_ ]?key)[A-Za-z0-9_ -]{0,40}\s*[=:]\s*)(?:bearer|basic|digest|negotiate|apikey)?\s*(?!\[REDACTED)("[^"'\n]*"|'[^'\n]*'|[^\s,;"'}\]]+)/gi;
 
 /** The quoted-JSON key form the loose key/value pattern cannot bridge. */
 const EVIDENCE_QUOTED_JSON_CREDENTIAL_PATTERN =
@@ -127,6 +140,21 @@ const EVIDENCE_BARE_TOKEN_VALUE_PATTERNS: ReadonlyArray<{
 	{
 		label: '[REDACTED:azure]',
 		re: /\bAccountKey=[A-Za-z0-9+/]{20,}={0,2}/gi,
+	},
+	{
+		// The training redactor's >=80-char mixed-class base64 family
+		// (src/training/redact.ts). The evidence path must stay a true
+		// SUPERSET of the surfaces the training vault already covers: an
+		// undotted base64 secret that the vault redacts before export used
+		// to survive in the clear on the evidence path, because neither the
+		// persisted-store corpus (no standalone mixed-class base64 arm) nor
+		// the display families below match it. The guard keeps hex-only SHA
+		// digests, uppercase-hex runs and sub-80 payloads visible (the same
+		// #3712 F-013 rule the training path applies).
+		label: '[REDACTED:base64]',
+		re: /[A-Za-z0-9+/]{80,}={0,2}/g,
+		guard: (match) =>
+			/[A-Z]/.test(match) && /[a-z]/.test(match) && /[0-9]/.test(match),
 	},
 ];
 
@@ -243,6 +271,45 @@ export const _internals = {
 };
 
 /**
+ * A redaction placeholder, in either spelling family the corpus emits
+ * (`[REDACTED]` / `[REDACTED:<family>]`).
+ */
+const EVIDENCE_PLACEHOLDER_PATTERN = /\[REDACTED[^\]\n]{0,64}\]/g;
+
+/**
+ * Run the context corpus (redactSecrets) with the redaction placeholders
+ * split OUT, so a placeholder is never re-matched.
+ *
+ * The corpus matches a value whose class allows `[`, so `api_key=[REDACTED]`
+ * — the output of the key/value placement arm — came back as
+ * `[REDACTED:env_secret]` on the second pass. That made the redactor
+ * NON-IDEMPOTENT, and idempotency is a hard requirement here: the review
+ * evidence is redacted at assembly AND at persistence, the receipt is
+ * redacted again when it is persisted, and the forge queue re-redacts a
+ * stored message on every rewrite. A redactor that changes its output on the
+ * second pass makes the evidence copy and the receipt copy of one finding
+ * DIFFER, which the auto-review evidence integrity check rejects — and it
+ * grows the persisted value by a character on every pass.
+ */
+function redactContextOutsidePlaceholders(text: string): string {
+	// The scan is an explicit exec loop rather than `split`: the placeholder
+	// must be re-emitted VERBATIM, and the split-with-capture-group form is
+	// not dependable across runtimes.
+	let out = '';
+	let cursor = 0;
+	EVIDENCE_PLACEHOLDER_PATTERN.lastIndex = 0;
+	let match: RegExpExecArray | null = EVIDENCE_PLACEHOLDER_PATTERN.exec(text);
+	while (match !== null) {
+		out += _internals.redactSecrets(text.slice(cursor, match.index));
+		out += match[0];
+		cursor = match.index + match[0].length;
+		match = EVIDENCE_PLACEHOLDER_PATTERN.exec(text);
+	}
+	out += _internals.redactSecrets(text.slice(cursor));
+	return out;
+}
+
+/**
  * Drop a trailing INCOMPLETE redaction-marker fragment from a cut value.
  *
  * A cut can land INSIDE a marker ('[REDACTED]' -> '[RE',
@@ -327,16 +394,31 @@ export function redactEvidenceText(text: string): string {
 		const bare = redactBareAndScanner(text);
 		let working = bare.text;
 		// Context corpus (private-key blocks, KV shapes, bearer, etc.) runs
-		// over the placeholder-bearing union output — placeholders are inert
-		// for every context arm.
-		working = _internals.redactSecrets(working);
+		// over the placeholder-bearing union output — the placeholders are
+		// split OUT so the corpus cannot re-match one (see
+		// redactContextOutsidePlaceholders).
+		working = redactContextOutsidePlaceholders(working);
 		// Credential PLACEMENT shapes (key/value, quoted-JSON, scheme) — the
 		// persisted-store corpus only matches a PREFIXED key, so these are
 		// ported from the training redactor to keep the evidence path a
 		// superset of the surface the training vault already covers.
 		working = working.replace(
 			EVIDENCE_CREDENTIAL_KV_PATTERN,
-			(_m, prefix: string) => `${prefix}[REDACTED]`,
+			(
+				_m: string,
+				separator: string,
+				prefix: string,
+				value: string,
+			) => {
+				const quoted =
+					value.length >= 2 &&
+					(value.startsWith('"') || value.startsWith("'")) &&
+					value.endsWith(value[0]);
+				const placeholder = quoted
+					? `${value[0]}[REDACTED]${value[0]}`
+					: '[REDACTED]';
+				return `${separator}${prefix}${placeholder}`;
+			},
 		);
 		working = working.replace(
 			EVIDENCE_QUOTED_JSON_CREDENTIAL_PATTERN,
@@ -388,4 +470,31 @@ export function redactEvidenceDeep<T>(value: T): T {
 		return out as unknown as T;
 	}
 	return value;
+}
+
+/**
+ * The schema bounds a redacted review finding is read back against:
+ * `ReviewFindingSchema` (title <= 200, body <= 2000) and
+ * `FindingValidationSchema` (evidence <= 2000).
+ *
+ * The evidence path and the receipt path persist TWO copies of the same
+ * finding, and the auto-review evidence integrity check compares them. Both
+ * copies must therefore be produced by the SAME function with the SAME
+ * bound — otherwise the two copies differ and the check rejects the pair.
+ * These constants are the single source of truth for both sides.
+ */
+export const EVIDENCE_FINDING_TITLE_MAX = 200;
+export const EVIDENCE_FINDING_BODY_MAX = 2000;
+export const EVIDENCE_VALIDATION_EVIDENCE_MAX = 2000;
+
+/**
+ * The canonical persisted form of one redacted free-text field: redact, then
+ * clamp back inside the schema bound the field is read back against.
+ *
+ * Idempotent by construction: the redactor never re-matches its own
+ * placeholder, and the clamp only ever shortens a value that is already at
+ * or over its bound.
+ */
+export function redactEvidenceField(value: string, max: number): string {
+	return clampRedactedText(redactEvidenceText(value), max);
 }

@@ -364,3 +364,52 @@ describe('#3844 redactEvidenceText superset contract', () => {
 		}
 	});
 });
+
+describe('#3844 the shared redactor is idempotent and covers the training families', () => {
+	// The review evidence is redacted at assembly AND at persistence, and the
+	// forge queue re-redacts a message on every rewrite. A redactor that is
+	// not idempotent grows the value by one character per pass and makes the
+	// evidence copy and the receipt copy of one finding DIFFER — which the
+	// auto-review evidence integrity check rejects.
+	const corpus = [
+		'x password=hunter2',
+		'the token=abcdef',
+		'api_key=XYZ123',
+		'Authorization: Bearer abcdefghijklmnopqrst',
+		'https://user:pass@example.com/path',
+		'see https://example.com/x?token=abc end',
+		'"password":"hunter2"',
+		`literal ghp_${'g'.repeat(30)} here`,
+		`literal sk-ant-${'a'.repeat(24)} here`,
+	];
+
+	test('applying the redactor twice changes nothing', () => {
+		for (const value of corpus) {
+			const once = redactEvidenceText(value);
+			expect(redactEvidenceText(once)).toBe(once);
+		}
+	});
+
+	test('the key/value arm preserves the separator it consumed', () => {
+		// The separator used to be part of the match but not of the
+		// replacement, so the words were glued together.
+		expect(redactEvidenceText('the token=abcdef')).toBe(
+			'the token=[REDACTED]',
+		);
+		expect(redactEvidenceText('password=hunter2')).toBe(
+			'password=[REDACTED]',
+		);
+	});
+
+	test('the >=80-char mixed-class base64 family is redacted (the training superset contract)', () => {
+		const secret = 'Ab3'.repeat(30);
+		const out = redactEvidenceText(`blob ${secret} end`);
+		expect(out.includes(secret)).toBe(false);
+		expect(out).toContain('[REDACTED:base64]');
+	});
+
+	test('a hex-only run stays visible (the base64 arm keeps the #3712 guard)', () => {
+		const digest = 'a1'.repeat(40);
+		expect(redactEvidenceText(`digest ${digest}`)).toBe(`digest ${digest}`);
+	});
+});

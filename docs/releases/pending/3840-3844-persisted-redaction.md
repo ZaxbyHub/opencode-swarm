@@ -64,8 +64,13 @@ and then be physically deleted at the next 256-append sweep. The safe
 procedure: **export the vault, copy the export outside plugin control
 (withdrawal revokes plugin-side exports with REVOKED.json markers), withdraw
 consent, withdraw-purge the vault content, then downgrade** — or **accept the
-loss** and let the next sweep delete the v2 records. Replay-identity sidecar
-files are inert under downgrade and can be deleted at will. Full runbook:
+loss** and let the next sweep delete the v2 records. The replay-identity sidecar
+and the handoff claim are inert under downgrade (the downgraded build neither
+reads nor writes them), so they can be removed WHILE the downgraded build is
+in use — but keep them if an upgrade is planned: with the sidecar gone, the
+next identical retry falls back to comparing the incoming raw payload with
+the PERSISTED rows, and for REDACTED rows the two forms no longer compare
+equal, so an identical raw retry can be refused. Full runbook:
 docs/training-vault-remediation.md.
 
 ## Known bounds
@@ -158,6 +163,38 @@ docs/training-vault-remediation.md.
   scans in linear time: an unbounded or word-boundary-anchored scheme class
   restarted the scan at every word boundary, which measured 4.2 s for 64 KB
   of colon-free input.
+- The shared redactor is IDEMPOTENT. The same value is redacted more than
+  once (the review evidence is redacted at assembly and again at
+  persistence, the receipt is redacted again when it is persisted, and the
+  forge queue re-redacts a stored message on every rewrite), so an arm that
+  re-matched its own output made the value grow on every pass and made the
+  evidence copy and the receipt copy of one finding differ. Two causes are
+  fixed: the key/value placement arm no longer matches a value that starts
+  with an existing placeholder (and it keeps the separator it consumed
+  instead of gluing the surrounding words together), and the persisted-store
+  corpus runs with the placeholders split out so it cannot re-match one.
+- The auto-review finding identity is derived from the REDACTED content. The
+  `finding_id` is a hash of the finding's title and body, and the
+  evidence-integrity check re-derives it from the persisted copy; redacting
+  after the id was derived left the stored id describing content that no
+  longer existed, so a review finding that quoted a credential (exactly what
+  a security review produces) was reported as invalid and the
+  phase-completion gate failed closed on every such phase. The parsed
+  findings are now redacted once, before the identity is derived, so the
+  evidence, the receipt and the identity all describe the same content.
+- The evidence path covers the training path's >=80-character mixed-class
+  base64 family, so the two redactors are supersets of one another: an
+  undotted base64 secret that the training vault redacts before export no
+  longer survives in the clear in a review artifact.
+- The forge queue clamps the redacted event message to the bound its own
+  disk schema enforces: a redaction placeholder is LONGER than the secret it
+  replaces, so a message that sat exactly on the bound was pushed past it by
+  the redaction and the queue write failed.
+- The published PR-review body redacts the finding LOCATION (the path and
+  the prose beside it) and the finding status, not just the evidence field.
+  The location reaches both the published body line and the inline-comment
+  path, and a review artifact written before this change can carry a
+  credential in it.
 
 ## Fold-in: the remaining persisted-evidence boundaries
 

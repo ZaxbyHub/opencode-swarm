@@ -43,6 +43,11 @@ import {
 	canonicalizeValidationCandidates,
 	runFindingValidation,
 } from './finding-validator.js';
+import {
+	EVIDENCE_FINDING_BODY_MAX,
+	EVIDENCE_FINDING_TITLE_MAX,
+	redactEvidenceField,
+} from '../security/evidence-redaction.js';
 
 export type ReviewEngineTrigger =
 	| 'task_completion'
@@ -1108,8 +1113,27 @@ export async function runReviewEngine(
 		return result;
 	}
 
+	// #3844: redact the parsed findings ONCE, BEFORE the canonicalization
+	// that derives their `finding_id`.
+	//
+	// The finding_id is a hash of the finding's title and body, and the
+	// auto-review evidence integrity check RE-DERIVES it from the persisted
+	// copy. Redacting after the canonicalization therefore left the stored id
+	// describing content that no longer existed: a finding that quotes a
+	// credential (exactly what a security review produces) was reported as
+	// "finding IDs or duplicate counts are invalid", and the phase-completion
+	// gate failed closed on every such phase.
+	//
+	// Redacting first makes ONE redacted form the source of every copy —
+	// the canonical findings, the persisted evidence and the receipt's
+	// structured findings — so the id and the content agree.
+	const structuredFindings = parsed.structuredFindings?.map((finding) => ({
+		...finding,
+		title: redactEvidenceField(finding.title, EVIDENCE_FINDING_TITLE_MAX),
+		body: redactEvidenceField(finding.body, EVIDENCE_FINDING_BODY_MAX),
+	}));
 	const candidates = canonicalizeValidationCandidates(
-		parsed.structuredFindings ?? [],
+		structuredFindings ?? [],
 	);
 	let findings = candidates.map((candidate) =>
 		anchorFinding(
@@ -1273,7 +1297,7 @@ export async function runReviewEngine(
 								(finding) =>
 									`${finding.title}: ${finding.anchor_rejection ?? 'unanchored'}`,
 							),
-						structuredFindings: parsed.structuredFindings,
+						structuredFindings: structuredFindings,
 						reviewOverallConfidence: parsed.overallConfidence,
 						findingValidations: findings
 							.map((finding) => finding.validation)
@@ -1310,7 +1334,7 @@ export async function runReviewEngine(
 						),
 						passConditions: parsed.fixes,
 						summary: `${input.trigger} review`,
-						structuredFindings: parsed.structuredFindings,
+						structuredFindings: structuredFindings,
 						reviewOverallConfidence: parsed.overallConfidence,
 						findingValidations: findings
 							.map((finding) => finding.validation)
