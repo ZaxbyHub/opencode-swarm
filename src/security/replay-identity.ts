@@ -210,8 +210,16 @@ export function writeReplayIdentityFingerprint(
  * therefore rolls the key back to the value it held before the write.
  *
  * `previous === null` means the key did not exist: the rollback REMOVES it.
- * A missing sidecar is a no-op (there is nothing to restore); a CORRUPT
- * sidecar throws (fail closed — the caller must not overwrite it).
+ * A MISSING sidecar is a no-op (there is nothing to restore); an UNREADABLE
+ * sidecar (a transient I/O failure, not ENOENT) throws — treating it as
+ * absence would silently leave the new identity in place, which is exactly
+ * the state the rollback exists to remove. A CORRUPT sidecar throws as well
+ * (fail closed — the caller must not overwrite it).
+ *
+ * If the restore WRITE fails, the sidecar is DISCARDED (best effort) so no
+ * stale identity survives: a sidecar that still claims the new payload
+ * would make the next identical retry look like an exact replay and drop
+ * the content silently. The write error is then rethrown.
  */
 export function restoreReplayIdentityFingerprint(
 	directory: string,
@@ -220,23 +228,51 @@ export function restoreReplayIdentityFingerprint(
 	previous: string | null,
 ): void {
 	const target = replaySidecarPath(directory, runId);
-	let sidecar: ReplayIdentitySidecar | null;
+	let text: string;
 	try {
-		sidecar = readReplayIdentitySidecar(directory, runId);
+		text = fs.readFileSync(target, 'utf8');
 	} catch (error) {
-		if (error instanceof ReplayIdentityUnavailableError) {
-			throw error; // corrupt sidecar — fail closed
-		}
-		throw error;
+		const code = (error as NodeJS.ErrnoException).code;
+		if (code === 'ENOENT') return; // no sidecar — nothing was written
+		throw error; // unreadable — fail closed rather than treat as absence
 	}
-	if (sidecar === null) return; // no sidecar — nothing was written
+	let sidecar: ReplayIdentitySidecar;
+	try {
+		const parsed = JSON.parse(text) as Partial<ReplayIdentitySidecar>;
+		if (
+			parsed.schema_version !== 1 ||
+			typeof parsed.fingerprints !== 'object' ||
+			parsed.fingerprints === null
+		) {
+			throw new ReplayIdentityUnavailableError('sidecar is not valid JSON');
+		}
+		sidecar = parsed as ReplayIdentitySidecar;
+	} catch (error) {
+		if (error instanceof ReplayIdentityUnavailableError) throw error;
+		throw new ReplayIdentityUnavailableError(
+			`sidecar could not be parsed: ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		);
+	}
 	if (previous === null) {
 		delete sidecar.fingerprints[key];
 	} else {
 		sidecar.fingerprints[key] = previous;
 	}
-	fs.mkdirSync(path.dirname(target), { recursive: true });
-	atomicWriteSwarmFileSync(target, JSON.stringify(sidecar, null, 2));
+	try {
+		fs.mkdirSync(path.dirname(target), { recursive: true });
+		atomicWriteSwarmFileSync(target, JSON.stringify(sidecar, null, 2));
+	} catch (error) {
+		// The restore did not land: discard the sidecar so the stale identity
+		// cannot be read as "already persisted" by the next retry.
+		try {
+			fs.rmSync(target, { force: true });
+		} catch {
+			// best effort — the original error is the one that matters
+		}
+		throw error;
+	}
 }
 
 /**

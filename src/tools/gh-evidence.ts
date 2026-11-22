@@ -543,22 +543,32 @@ export const gh_evidence: ToolDefinition = createSwarmTool({
 			}
 			if (target === 'run' && parsed && typeof parsed === 'object') {
 				const runData = parsed as Record<string, unknown>;
+				// The run metadata is copied from the RAW parsed object, so it
+				// must be redacted like `data` is: `htmlUrl` can carry an
+				// access token in its query string, and a branch name is
+				// model-authored free text.
 				runStatus =
-					typeof runData.status === 'string' ? runData.status : undefined;
+					typeof runData.status === 'string'
+						? redactEvidenceText(runData.status)
+						: undefined;
 				runConclusion =
 					runData.conclusion === null
 						? null
 						: typeof runData.conclusion === 'string'
-							? runData.conclusion
+							? redactEvidenceText(runData.conclusion)
 							: undefined;
 				runHtmlUrl =
-					typeof runData.htmlUrl === 'string' ? runData.htmlUrl : undefined;
+					typeof runData.htmlUrl === 'string'
+						? redactEvidenceText(runData.htmlUrl)
+						: undefined;
 				runHeadBranch =
 					typeof runData.headBranch === 'string'
-						? runData.headBranch
+						? redactEvidenceText(runData.headBranch)
 						: undefined;
 				runHeadSha =
-					typeof runData.headSha === 'string' ? runData.headSha : undefined;
+					typeof runData.headSha === 'string'
+						? redactEvidenceText(runData.headSha)
+						: undefined;
 			}
 		}
 

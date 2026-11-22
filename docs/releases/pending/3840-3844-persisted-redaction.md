@@ -79,6 +79,12 @@ docs/training-vault-remediation.md.
   (`glpat-`) families are still stored verbatim by the TRAINING path (the
   evidence path redacts them). Pre-existing; tracked by the follow-up issue
   filed with this PR.
+- The training capture bound (4096 characters) is applied BEFORE the
+  redaction, so a credential that STRADDLES the bound leaves its prefix in
+  the vault (the token itself never does — the prefix is shorter than every
+  arm's minimum, so it is not usable). The order is deliberate: bounding
+  after the redaction would let a placeholder outgrow the bound and collapse
+  two different captures onto one record id.
 - Two persisted-evidence sinks are still outside the #3844 boundary set: the
   council evidence writers (`src/tools/write-final-council-evidence.ts`,
   `src/tools/submit-phase-council-verdicts.ts`) and the task-level council
@@ -120,6 +126,21 @@ docs/training-vault-remediation.md.
   (the claim is immutable for the run's life — a possibly-committed
   identity is never silently taken over); operator recovery for an
   abandoned run is archiving/deleting `.swarm/pr-review/<runId>/`.
+
+## Round-7 hardening (the Stage B sweep of the full diff)
+
+- The AWS secret CONTEXT arm now runs BEFORE the bare AKIA arm on the
+  evidence path: the bare arm used to consume the access-key id first, so
+  `redactSecrets`' context arm could never fire and the 40-character AWS
+  secret next to the id survived raw. The anchor and the interposed prose
+  are kept (unlike the memory site's whole-span replacement).
+- The gh_evidence run METADATA (`runHtmlUrl`, `runHeadBranch`, ...) is
+  redacted like `data` is — the metadata fields are copied from the raw
+  parsed object, so a token in the run URL was a second leak path.
+- The replay-identity rollback now distinguishes an ABSENT sidecar (nothing
+  to restore) from an UNREADABLE one (fail closed), and a failed rollback
+  WRITE discards the sidecar so no stale identity can make the next
+  identical retry look like an exact replay.
 
 ## Fold-in: the remaining persisted-evidence boundaries (owner-directed, closes #3899)
 

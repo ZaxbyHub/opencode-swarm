@@ -85,6 +85,40 @@ describe('gh_evidence — #3844 evidence redaction pins', () => {
 		expect(parsed.data.headBranch).toBe('main');
 	});
 
+	test('FB-31: the run METADATA is redacted too (it is copied from the RAW parsed object)', async () => {
+		ghInternals.resolveGhBinary = () => 'gh';
+		const secret = `ghp_${'q'.repeat(30)}`;
+		ghInternals.runExternalTool = mock(async () => {
+			return {
+				status: 'completed',
+				exitCode: 0,
+				stdout: JSON.stringify({
+					status: 'completed',
+					conclusion: 'success',
+					htmlUrl: `https://github.com/owner/repo/actions/runs/9?token=${secret}`,
+					headBranch: `feature/${secret}`,
+					headSha: 'abc123',
+				}),
+				stderr: '',
+				stdoutTruncated: false,
+				stderrTruncated: false,
+			};
+		}) as typeof realRunGh;
+
+		const parsed = await executeTool(
+			gh_evidence,
+			{ target: 'run', number: 9, repo: 'owner/repo' },
+			tmpDir,
+		);
+		// The metadata fields are top-level copies of the RAW parsed values,
+		// so they are a second leak path beside `data`.
+		expect(String(parsed.runHtmlUrl)).not.toContain(secret);
+		expect(String(parsed.runHeadBranch)).not.toContain(secret);
+		// Benign metadata survives.
+		expect(parsed.runStatus).toBe('completed');
+		expect(parsed.runHeadSha).toBe('abc123');
+	});
+
 	test('auto-review assembly redaction applies IN PLACE at the engine boundary (round-2 F2 pin)', async () => {
 		const { redactAutoReviewEvidenceForCapture } = await import(
 			'../../../src/review/evidence'

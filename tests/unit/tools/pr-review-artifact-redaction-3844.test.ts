@@ -26,6 +26,7 @@ import {
 	replayFingerprint,
 	_internals as replayIdentityInternals,
 	replaySidecarPath,
+	restoreReplayIdentityFingerprint,
 	writeReplayIdentityFingerprint,
 } from '../../../src/security/replay-identity';
 import { _internals as atomicWriteInternals } from '../../../src/utils/atomic-write';
@@ -68,6 +69,91 @@ describe('#3844 replay identity salt lifecycle (Y2)', () => {
 		// No manual repair: the next call publishes a whole salt.
 		const salt = loadOrCreateReplayIdentitySalt(dir);
 		expect(salt.toString('hex')).toMatch(/^[0-9a-f]{64}$/);
+	});
+
+	test('FB-32: the rollback restores an EXISTING identity to its previous value', () => {
+		const dir = freshDir();
+		writeReplayIdentityFingerprint(
+			dir,
+			'run-1',
+			'findings:post_explorer',
+			'a'.repeat(64),
+		);
+		writeReplayIdentityFingerprint(
+			dir,
+			'run-1',
+			'findings:post_reviewer',
+			'b'.repeat(64),
+		);
+		// The boundary's identity moves on, then rolls back.
+		writeReplayIdentityFingerprint(
+			dir,
+			'run-1',
+			'findings:post_explorer',
+			'c'.repeat(64),
+		);
+		restoreReplayIdentityFingerprint(
+			dir,
+			'run-1',
+			'findings:post_explorer',
+			'a'.repeat(64),
+		);
+		const sidecar = readReplayIdentitySidecar(dir, 'run-1');
+		expect(sidecar?.fingerprints['findings:post_explorer']).toBe(
+			'a'.repeat(64),
+		);
+		// The OTHER key is untouched.
+		expect(sidecar?.fingerprints['findings:post_reviewer']).toBe(
+			'b'.repeat(64),
+		);
+	});
+
+	test('FB-32: an UNREADABLE sidecar throws (it is not treated as absence)', () => {
+		const dir = freshDir();
+		const target = replaySidecarPath(dir, 'run-1');
+		mkdirSync(path.dirname(target), { recursive: true });
+		// A directory where the sidecar file belongs: the read fails with a
+		// non-ENOENT error. Treating that as "no sidecar" would silently leave
+		// the new identity in place — the state the rollback exists to remove.
+		mkdirSync(target, { recursive: true });
+		expect(() =>
+			restoreReplayIdentityFingerprint(
+				dir,
+				'run-1',
+				'findings:post_explorer',
+				null,
+			),
+		).toThrow();
+	});
+
+	test('FB-32: a failed restore WRITE discards the sidecar (no stale identity survives)', () => {
+		const dir = freshDir();
+		writeReplayIdentityFingerprint(
+			dir,
+			'run-1',
+			'findings:post_explorer',
+			'a'.repeat(64),
+		);
+		const target = replaySidecarPath(dir, 'run-1');
+		const realWrite = atomicWriteInternals.writeSync;
+		atomicWriteInternals.writeSync = () => {
+			throw Object.assign(new Error('ENOSPC sim'), { code: 'ENOSPC' });
+		};
+		try {
+			expect(() =>
+				restoreReplayIdentityFingerprint(
+					dir,
+					'run-1',
+					'findings:post_explorer',
+					null,
+				),
+			).toThrow();
+		} finally {
+			atomicWriteInternals.writeSync = realWrite;
+		}
+		// The sidecar is gone: no identity survives that could make the next
+		// identical retry look like an exact replay.
+		expect(existsSync(target)).toBe(false);
 	});
 
 	test('EEXIST race: first read misses, wx collides with a concurrent VALID winner — winner is used', () => {

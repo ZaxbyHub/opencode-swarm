@@ -212,6 +212,21 @@ describe('#3844 redactEvidenceText superset contract', () => {
 		expect(elapsed).toBeLessThan(1000);
 	}, 30_000);
 
+	test('FB-30: the AWS secret CONTEXT is redacted (the bare AKIA arm must not shadow it)', () => {
+		// The 40-char AWS secret is only recognizable NEXT TO its AKIA id.
+		// The evidence path's bare AKIA arm used to consume that anchor
+		// first, so redactSecrets' context arm could never fire and the
+		// secret survived raw (the memory path redacts the same input).
+		const akia = 'AKIAIOSFODNN7EXAMPLE';
+		const secret = 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY';
+		const out = redactEvidenceText(`id ${akia} secret ${secret}`);
+		expect(out).not.toContain(secret);
+		expect(out).not.toContain(akia);
+		// The interposed prose survives (unlike the memory site's whole-span
+		// replacement, which deletes it).
+		expect(out).toContain('secret');
+	});
+
 	test('the clamp keeps a COMPLETE marker and drops only a half-written one', () => {
 		// A COMPLETE marker at the HEAD of an over-long value is real
 		// content: the clamp used to treat it as a fragment and emptied the

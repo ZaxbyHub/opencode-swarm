@@ -80,6 +80,16 @@ const EVIDENCE_SCHEME_TOKEN_PATTERN =
 const URL_QUERY_CREDENTIALS_PATTERN =
 	/([?&])((?:access_token|api_key|apikey|token|secret|signature|client_secret)=)([^\s&'"<>]+)/gi;
 
+/**
+ * The AWS secret CONTEXT shape: an AKIA access-key id followed (within 200
+ * characters on the same line) by a 40-character secret. Mirrors
+ * `redactSecrets`' `aws_secret_access_key_context` arm — but it must run
+ * BEFORE the bare AKIA arm, which would otherwise consume the anchor and
+ * leave the secret raw.
+ */
+const EVIDENCE_AWS_SECRET_CONTEXT_PATTERN =
+	/(AKIA[0-9A-Z]{16})([^\n]{0,200}?)\b[A-Za-z0-9/+=]{40}\b/g;
+
 const EVIDENCE_BARE_TOKEN_VALUE_PATTERNS: ReadonlyArray<{
 	label: string;
 	re: RegExp;
@@ -285,13 +295,28 @@ export function clampRedactedText(value: string, max: number): string {
 export function redactEvidenceText(text: string): string {
 	if (typeof text !== 'string' || text.length === 0) return text;
 	try {
+		// AWS secret CONTEXT, before the bare pass: the 40-char AWS secret is
+		// only recognizable NEXT TO its AKIA access-key id. `redactSecrets`
+		// owns that context arm (it runs before its own bare id arm), but the
+		// evidence path's bare AKIA arm below would consume the anchor
+		// FIRST — so the context arm could never fire and the adjacent secret
+		// survived raw (executed probe: the memory path redacts the same
+		// input, the evidence path did not). The anchor and the interposed
+		// text are kept here: the bare arm still labels the id, and unlike
+		// the context arm's whole-span replacement this keeps the prose
+		// between the id and the secret.
+		const withAwsContext = text.replace(
+			EVIDENCE_AWS_SECRET_CONTEXT_PATTERN,
+			(_match, id: string, middle: string) =>
+				`${id}${middle}[REDACTED:aws-secret]`,
+		);
 		// Span-union pass FIRST, on the ORIGINAL text: computing scanner spans
 		// after the context corpus would let redactSecrets' three-part JWT
 		// regex consume the head of a five-part JWE, stranding its tail
 		// segments (#3844 round-5 review finding; executed probe confirmed
 		// segments 4-5 survived under context-first ordering). Placeholders
 		// are inert for every later context arm.
-		const bare = redactBareAndScanner(text);
+		const bare = redactBareAndScanner(withAwsContext);
 		let working = bare.text;
 		// Context corpus (private-key blocks, KV shapes, bearer, etc.) runs
 		// over the placeholder-bearing union output — placeholders are inert
