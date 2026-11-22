@@ -163,16 +163,20 @@ docs/training-vault-remediation.md.
   scans in linear time: an unbounded or word-boundary-anchored scheme class
   restarted the scan at every word boundary, which measured 4.2 s for 64 KB
   of colon-free input.
-- The shared redactor is IDEMPOTENT. The same value is redacted more than
-  once (the review evidence is redacted at assembly and again at
+- The shared redactor reaches a FIXED POINT. The same value is redacted more
+  than once (the review evidence is redacted at assembly and again at
   persistence, the receipt is redacted again when it is persisted, and the
-  forge queue re-redacts a stored message on every rewrite), so an arm that
-  re-matched its own output made the value grow on every pass and made the
-  evidence copy and the receipt copy of one finding differ. Two causes are
-  fixed: the key/value placement arm no longer matches a value that starts
-  with an existing placeholder (and it keeps the separator it consumed
-  instead of gluing the surrounding words together), and the persisted-store
-  corpus runs with the placeholders split out so it cannot re-match one.
+  forge queue re-redacts a stored message on every rewrite), so a redactor
+  that changes its output on the second pass made the evidence copy and the
+  receipt copy of one finding differ. The redaction now runs until the output
+  stops changing, and the key/value placement arm no longer matches a value
+  that starts with an existing placeholder (and it keeps the separator it
+  consumed instead of gluing the surrounding words together). The loop also
+  closes a single-pass leak: a bare-family credential GLUED to a preceding
+  word character has no word boundary, so only a later pass saw it.
+- The persisted-store corpus runs over the WHOLE text. Its private-key arm
+  needs both delimiters in ONE match, so a placeholder inserted inside a
+  key block must not split the span.
 - The auto-review finding identity is derived from the REDACTED content. The
   `finding_id` is a hash of the finding's title and body, and the
   evidence-integrity check re-derives it from the persisted copy; redacting
@@ -182,6 +186,13 @@ docs/training-vault-remediation.md.
   phase-completion gate failed closed on every such phase. The parsed
   findings are now redacted once, before the identity is derived, so the
   evidence, the receipt and the identity all describe the same content.
+- The approved receipt's anchoring caveat is compared the way it is BUILT:
+  the caveat is composed from the finding's title and its anchor rejection
+  and the receipt persists the composed string after redacting it as a
+  whole, so the expectation has to be composed and redacted the same way —
+  composing two redacted parts can create a new credential shape, and the
+  comparison used to reject every approved review with an unanchored
+  finding.
 - The evidence path covers the training path's >=80-character mixed-class
   base64 family, so the two redactors are supersets of one another: an
   undotted base64 secret that the training vault redacts before export no
@@ -194,7 +205,14 @@ docs/training-vault-remediation.md.
   the prose beside it) and the finding status, not just the evidence field.
   The location reaches both the published body line and the inline-comment
   path, and a review artifact written before this change can carry a
-  credential in it.
+  credential in it. When the redaction changed the PATH, the finding stays a
+  body-only entry — an inline comment would name a file that does not exist
+  in the repository.
+- The training export preserves the capture-time redaction history: a record
+  whose credential was already replaced at capture has no new match on
+  export, and overwriting the counters with the export pass's own result
+  would claim that no redaction was applied to a record whose content IS
+  redacted.
 
 ## Fold-in: the remaining persisted-evidence boundaries
 

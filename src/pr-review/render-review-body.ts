@@ -167,8 +167,24 @@ function selectSurvivors(
 		// plus prose), and the prose can quote a credential. It is redacted
 		// BEFORE it is parsed, so neither the published body line nor the
 		// inline-comment path can carry one.
-		const fileLine = redactEvidenceText(finding.file_line ?? '');
-		const location = parseLocation(fileLine);
+		const rawFileLine = finding.file_line ?? '';
+		const fileLine = redactEvidenceText(rawFileLine);
+		// An inline comment targets a REAL repository path. When the
+		// redaction CHANGED the path, the path itself carried a
+		// credential-shaped component, so the redacted path names a file
+		// that does not exist — publishing it would make the submission
+		// invalid (GitHub rejects a comment on a nonexistent path). The
+		// finding then stays a body-only entry: the body line shows the
+		// redacted location and no inline comment is emitted.
+		const rawLocation = parseLocation(rawFileLine);
+		const redactedLocation = parseLocation(fileLine);
+		const location =
+			rawLocation &&
+			redactedLocation &&
+			rawLocation.path === redactedLocation.path &&
+			rawLocation.line === redactedLocation.line
+				? rawLocation
+				: null;
 		const evidence = singleLine(finding.evidence ?? '', 400);
 		const locationKey = location
 			? `${location.path}:${location.line}:${evidence}`

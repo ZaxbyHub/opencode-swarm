@@ -82,25 +82,34 @@ function diffResult(): Extract<ReviewDiffResult, { status: 'ok' }> {
 	} as unknown as Extract<ReviewDiffResult, { status: 'ok' }>;
 }
 
-function reviewerOutput(body: string): string {
+function reviewerOutput(
+	body: string,
+	options: {
+		verdict?: 'APPROVED' | 'REJECTED';
+		title?: string;
+		line?: number;
+	} = {},
+): string {
+	const verdict = options.verdict ?? 'REJECTED';
+	const line = options.line ?? 10;
 	return [
-		'VERDICT: REJECTED',
+		`VERDICT: ${verdict}`,
 		'RISK: HIGH',
 		'ISSUES: none',
 		'```json',
 		JSON.stringify({
 			findings: [
 				{
-					title: 'hardcoded credential',
+					title: options.title ?? 'hardcoded credential',
 					body,
 					severity: 'high',
 					confidence: 0.95,
 					file: 'src/state.ts',
-					line_start: 10,
-					line_end: 10,
+					line_start: line,
+					line_end: line,
 				},
 			],
-			verdict: 'REJECTED',
+			verdict,
 			overall_confidence: 0.95,
 		}),
 		'```',
@@ -112,7 +121,14 @@ async function runReview(body: string): Promise<{
 	receiptText: string;
 	evidenceText: string;
 }> {
-	const output = reviewerOutput(body);
+	return runReviewWithOutput(reviewerOutput(body));
+}
+
+async function runReviewWithOutput(output: string): Promise<{
+	evidence: Record<string, unknown>;
+	receiptText: string;
+	evidenceText: string;
+}> {
 	const dispatcher: ReviewModelDispatcher = {
 		async dispatch(request) {
 			return {
@@ -232,4 +248,35 @@ describe('#3844 the auto-review evidence stays internally consistent when a find
 			expect(integrity.ok).toBe(true);
 		}, 30_000);
 	}
+
+	// The APPROVED receipt's caveat is COMPOSED from the finding's title and
+	// its anchor rejection, and the receipt persists the composed string
+	// after redacting it as a whole. Composing two redacted parts can create
+	// a NEW credential shape — `Session token never expires:
+	// line_range_does_not_overlap_diff` is a key/value match — so the
+	// integrity check has to build the expectation the same way the receipt
+	// builds it. The finding here is UNANCHORED (its line does not overlap
+	// the diff), which is the only shape that produces a caveat.
+	test('an APPROVED receipt with an unanchored finding keeps the evidence consistent', async () => {
+		const { evidence, receiptText } = await runReviewWithOutput(
+			reviewerOutput('the finding is outside the diff', {
+				verdict: 'APPROVED',
+				title: 'Session token never expires',
+				line: 15,
+			}),
+		);
+		expect(receiptText).toContain('Session token');
+		const integrity = validateAutoReviewEvidenceIntegrity(
+			projectDir,
+			evidence as never,
+			{
+				scopeHash: SCOPE_HASH,
+				phase: 1,
+				trigger: 'phase_completion',
+				policy: evidence.policy as never,
+				scopeContent: CANONICAL_TEXT,
+			},
+		);
+		expect(integrity).toMatchObject({ ok: true });
+	}, 30_000);
 });

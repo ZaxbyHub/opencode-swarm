@@ -656,8 +656,15 @@ export function applyCurrentRedactionToRecord(
 		redaction: {
 			...record.redaction,
 			version: TRAINING_REDACTION_VERSION,
-			applied: redacted.applied,
-			redactions: redacted.redactions,
+			// The capture-time history is PRESERVED. The export re-verifies
+			// the content with the running redactor, but a record whose
+			// credential was already replaced at CAPTURE has no new match on
+			// export — overwriting the counters with the export pass's own
+			// result would claim "no redaction applied" for a record whose
+			// content IS redacted. The exported counters are the capture
+			// count plus the redactions this export pass made.
+			applied: record.redaction.applied || redacted.applied,
+			redactions: record.redaction.redactions + redacted.redactions,
 		},
 	};
 }

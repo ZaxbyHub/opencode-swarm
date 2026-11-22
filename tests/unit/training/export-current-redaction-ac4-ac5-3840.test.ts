@@ -114,6 +114,36 @@ describe('#3701 AC4/AC5 export current-redaction contract', () => {
 		expect(readFileSync(target, 'utf-8')).toBe(before);
 	});
 
+	test('the export PRESERVES the capture-time redaction history', () => {
+		// A record whose credential was already replaced at CAPTURE has no
+		// new match on export — overwriting the counters with the export
+		// pass's own result would claim "no redaction applied" for a record
+		// whose content IS redacted.
+		const dir = freshDir();
+		const cst = consent(dir);
+		const current = buildTrainingVaultRecord({
+			content: `the literal ${GH} is committed`,
+			kind: 'conversation',
+			role: 'user',
+			capturedAt: NOW,
+			consent: cst,
+			pluginVersion: '0.0.0-test',
+			source: 'test',
+			retentionMs: 60_000,
+			projectRef: 'p1',
+			sessionId: 's1',
+			labels: [],
+		});
+		expect(current.redaction.applied).toBe(true);
+		expect(current.redaction.redactions).toBeGreaterThan(0);
+
+		const bundle = buildTrainingExportBundle([current]);
+		const emitted = JSON.parse(bundle.files['records.jsonl'] ?? '');
+		expect(emitted.redaction.applied).toBe(true);
+		expect(emitted.redaction.redactions).toBeGreaterThan(0);
+		expect(emitted.redaction.version).toBe(TRAINING_REDACTION_VERSION);
+	});
+
 	test('AC4a: the manifest reports the SOURCE versions separately from the verified floor', () => {
 		const dir = freshDir();
 		const cst = consent(dir);

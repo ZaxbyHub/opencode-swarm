@@ -271,45 +271,6 @@ export const _internals = {
 };
 
 /**
- * A redaction placeholder, in either spelling family the corpus emits
- * (`[REDACTED]` / `[REDACTED:<family>]`).
- */
-const EVIDENCE_PLACEHOLDER_PATTERN = /\[REDACTED[^\]\n]{0,64}\]/g;
-
-/**
- * Run the context corpus (redactSecrets) with the redaction placeholders
- * split OUT, so a placeholder is never re-matched.
- *
- * The corpus matches a value whose class allows `[`, so `api_key=[REDACTED]`
- * — the output of the key/value placement arm — came back as
- * `[REDACTED:env_secret]` on the second pass. That made the redactor
- * NON-IDEMPOTENT, and idempotency is a hard requirement here: the review
- * evidence is redacted at assembly AND at persistence, the receipt is
- * redacted again when it is persisted, and the forge queue re-redacts a
- * stored message on every rewrite. A redactor that changes its output on the
- * second pass makes the evidence copy and the receipt copy of one finding
- * DIFFER, which the auto-review evidence integrity check rejects — and it
- * grows the persisted value by a character on every pass.
- */
-function redactContextOutsidePlaceholders(text: string): string {
-	// The scan is an explicit exec loop rather than `split`: the placeholder
-	// must be re-emitted VERBATIM, and the split-with-capture-group form is
-	// not dependable across runtimes.
-	let out = '';
-	let cursor = 0;
-	EVIDENCE_PLACEHOLDER_PATTERN.lastIndex = 0;
-	let match: RegExpExecArray | null = EVIDENCE_PLACEHOLDER_PATTERN.exec(text);
-	while (match !== null) {
-		out += _internals.redactSecrets(text.slice(cursor, match.index));
-		out += match[0];
-		cursor = match.index + match[0].length;
-		match = EVIDENCE_PLACEHOLDER_PATTERN.exec(text);
-	}
-	out += _internals.redactSecrets(text.slice(cursor));
-	return out;
-}
-
-/**
  * Drop a trailing INCOMPLETE redaction-marker fragment from a cut value.
  *
  * A cut can land INSIDE a marker ('[REDACTED]' -> '[RE',
@@ -337,8 +298,10 @@ function stripIncompleteMarkerFragment(
 	for (let i = cut.length - 1; i >= 0; i -= 1) {
 		if (cut[i] !== open) continue;
 		const tail = cut.slice(i);
-		const markerish =
-			tail.length >= 2 && (head.startsWith(tail) || tail.startsWith(head));
+		// A one-character tail IS a fragment: a cut that lands right after the
+		// marker's opening delimiter leaves a bare `[` (or `<`), which is
+		// the head of a marker, not usable content.
+		const markerish = head.startsWith(tail) || tail.startsWith(head);
 		if (!markerish) continue;
 		// A closing delimiter inside the tail means the marker is COMPLETE
 		// in the cut — it is real content, not a fragment.
@@ -383,56 +346,95 @@ export function clampRedactedText(value: string, max: number): string {
 }
 
 /**
+ * One redaction pass over the text.
+ *
+ * The order matters: the span-union pass runs FIRST on the original text
+ * (computing the scanner spans and the bare credential-family arms together),
+ * then the persisted-store context corpus runs over the whole
+ * placeholder-bearing output, then the credential PLACEMENT shapes run.
+ */
+function redactEvidenceOnce(text: string): string {
+	// Span-union pass FIRST, on the ORIGINAL text: computing scanner spans
+	const bare = redactBareAndScanner(text);
+	let working = bare.text;
+	// Context corpus (private-key blocks, KV shapes, bearer, etc.) runs
+	// over the placeholder-bearing union output — over the WHOLE text,
+	// because a corpus pattern can span several lines (a private-key
+	// block needs both delimiters in ONE match) and a placeholder in
+	// the middle of such a span must not break the match.
+	working = _internals.redactSecrets(working);
+	// Credential PLACEMENT shapes (key/value, quoted-JSON, scheme) — the
+	// persisted-store corpus only matches a PREFIXED key, so these are
+	// ported from the training redactor to keep the evidence path a
+	// superset of the surface the training vault already covers.
+	working = working.replace(
+		EVIDENCE_CREDENTIAL_KV_PATTERN,
+		(_m: string, separator: string, prefix: string, value: string) => {
+			const quoted =
+				value.length >= 2 &&
+				(value.startsWith('"') || value.startsWith("'")) &&
+				value.endsWith(value[0]);
+			const placeholder = quoted
+				? `${value[0]}[REDACTED]${value[0]}`
+				: '[REDACTED]';
+			return `${separator}${prefix}${placeholder}`;
+		},
+	);
+	working = working.replace(
+		EVIDENCE_QUOTED_JSON_CREDENTIAL_PATTERN,
+		(_m, openQuote: string, key: string, sep: string) =>
+			`${openQuote}${key}${openQuote}${sep}${openQuote}[REDACTED]${openQuote}`,
+	);
+	working = working.replace(
+		EVIDENCE_SCHEME_TOKEN_PATTERN,
+		(_m, scheme: string, space: string) => `${scheme}${space}[REDACTED]`,
+	);
+	working = working.replace(
+		URL_CREDENTIALS_PATTERN,
+		(_m, scheme: string, _user: string, _pass: string, host: string) =>
+			`${scheme}[REDACTED:url-credentials]@${host}`,
+	);
+	working = working.replace(
+		URL_QUERY_CREDENTIALS_PATTERN,
+		(_m, sep: string, key: string) => `${sep}${key}[REDACTED]`,
+	);
+	return working;
+}
+
+/**
+ * How many times the pass may run before the result is returned as-is.
+ *
+ * One pass is not always enough: a bare credential-family arm is anchored on
+ * a word boundary, so a credential GLUED to a preceding word character
+ * (`creds AKIA…sk-ant-…`) has no boundary and is skipped; the context corpus
+ * then replaces the neighbouring token with a placeholder that ENDS the word,
+ * so the NEXT pass sees the boundary the credential needed. The loop runs
+ * until the output stops changing, which makes the result a FIXED POINT —
+ * re-applying the redactor to it changes nothing.
+ */
+const MAX_REDACTION_PASSES = 4;
+
+/**
  * Redact credential material from evidence free text. Pure; never throws —
  * on internal failure the WHOLE text is withheld (fail-closed), never
  * returned raw.
+ *
+ * The result is a fixed point of the redaction: the same value is redacted
+ * more than once on this path (the review evidence is redacted at assembly
+ * and again at persistence, the receipt is redacted again when it is
+ * persisted, the forge queue re-redacts a stored message on every rewrite),
+ * and the evidence copy and the receipt copy of one finding must be
+ * byte-identical.
  */
 export function redactEvidenceText(text: string): string {
 	if (typeof text !== 'string' || text.length === 0) return text;
 	try {
-		// Span-union pass FIRST, on the ORIGINAL text: computing scanner spans
-		const bare = redactBareAndScanner(text);
-		let working = bare.text;
-		// Context corpus (private-key blocks, KV shapes, bearer, etc.) runs
-		// over the placeholder-bearing union output — the placeholders are
-		// split OUT so the corpus cannot re-match one (see
-		// redactContextOutsidePlaceholders).
-		working = redactContextOutsidePlaceholders(working);
-		// Credential PLACEMENT shapes (key/value, quoted-JSON, scheme) — the
-		// persisted-store corpus only matches a PREFIXED key, so these are
-		// ported from the training redactor to keep the evidence path a
-		// superset of the surface the training vault already covers.
-		working = working.replace(
-			EVIDENCE_CREDENTIAL_KV_PATTERN,
-			(_m: string, separator: string, prefix: string, value: string) => {
-				const quoted =
-					value.length >= 2 &&
-					(value.startsWith('"') || value.startsWith("'")) &&
-					value.endsWith(value[0]);
-				const placeholder = quoted
-					? `${value[0]}[REDACTED]${value[0]}`
-					: '[REDACTED]';
-				return `${separator}${prefix}${placeholder}`;
-			},
-		);
-		working = working.replace(
-			EVIDENCE_QUOTED_JSON_CREDENTIAL_PATTERN,
-			(_m, openQuote: string, key: string, sep: string) =>
-				`${openQuote}${key}${openQuote}${sep}${openQuote}[REDACTED]${openQuote}`,
-		);
-		working = working.replace(
-			EVIDENCE_SCHEME_TOKEN_PATTERN,
-			(_m, scheme: string, space: string) => `${scheme}${space}[REDACTED]`,
-		);
-		working = working.replace(
-			URL_CREDENTIALS_PATTERN,
-			(_m, scheme: string, _user: string, _pass: string, host: string) =>
-				`${scheme}[REDACTED:url-credentials]@${host}`,
-		);
-		working = working.replace(
-			URL_QUERY_CREDENTIALS_PATTERN,
-			(_m, sep: string, key: string) => `${sep}${key}[REDACTED]`,
-		);
+		let working = text;
+		for (let pass = 0; pass < MAX_REDACTION_PASSES; pass++) {
+			const next = redactEvidenceOnce(working);
+			if (next === working) return working;
+			working = next;
+		}
 		return working;
 	} catch {
 		return '[REDACTED:evidence-redaction-failed]';

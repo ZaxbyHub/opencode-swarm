@@ -734,11 +734,18 @@ export function validateAutoReviewEvidenceIntegrity(
 			}
 		}
 	} else {
+		// The caveat is COMPOSED from the finding's title and its anchor
+		// rejection, and the receipt persists the composed string after
+		// redacting it as a whole. Composing two redacted parts can create a
+		// NEW credential shape (`Session token never expires: <reason>` is a
+		// key/value match), so the expectation has to be built the same way
+		// the receipt builds it — compose, then redact the composition.
 		const expectedCaveats = evidence.findings
 			.filter((finding) => !finding.anchored)
-			.map(
-				(finding) =>
+			.map((finding) =>
+				redactEvidenceText(
 					`${finding.title}: ${finding.anchor_rejection ?? 'unanchored'}`,
+				),
 			)
 			.sort();
 		const receiptCaveats = [...(receipt.caveats ?? [])].sort();

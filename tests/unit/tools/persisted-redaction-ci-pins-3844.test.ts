@@ -332,6 +332,39 @@ describe('#3844 CI pins: main redaction call sites (final-critic F3)', () => {
 		expect(text).toContain('Order-unstable (not published as findings)');
 	});
 
+	test('a credential-shaped PATH keeps the finding body-only (no inline comment on a nonexistent path)', () => {
+		// An inline comment targets a REAL repository path. When the
+		// redaction changed the path, the path itself carried a
+		// credential-shaped component, so the redacted path names a file
+		// that does not exist — publishing it would make the submission
+		// invalid. The finding then stays a body-only entry.
+		const rendered = renderPrReviewSubmissionBody({
+			verdict: 'REQUEST_CHANGES',
+			findings: [
+				{
+					finding_id: 'F-1',
+					status: 'confirmed',
+					severity: 'high',
+					confidence: 0.9,
+					file: 'src/a.ts',
+					file_line: `src/${GH}.ts:12`,
+					line_start: 1,
+					line_end: 2,
+					evidence: 'benign evidence',
+					next_action: 'fix it',
+				},
+			],
+		} as never);
+		const text =
+			typeof rendered === 'string' ? rendered : JSON.stringify(rendered);
+		expect(text.includes(GH)).toBe(false);
+		// The finding is still published in the body.
+		expect(text).toContain('F-1');
+		// No inline comment targets the redacted path: the inline comment
+		// would name a file that does not exist in the repository.
+		expect(rendered.inlineComments).toHaveLength(0);
+	});
+
 	test('shared redactor sanity: the five bare families + JWE stay covered through this suite', () => {
 		// Cheap guard that the pins above depend on a LIVE redactor: if the
 		// shared superset regresses, this leg (and every leg above) goes red.
