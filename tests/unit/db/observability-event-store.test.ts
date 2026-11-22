@@ -9,6 +9,7 @@ import {
 } from 'node:fs';
 import { join } from 'node:path';
 import { emitDelegationEventlessTerminalEnd } from '../../../src/background/delegation-lifecycle.js';
+import { DbWriteError } from '../../../src/db/db-errors.js';
 import {
 	_internals,
 	appendObservabilityEventDb,
@@ -287,6 +288,47 @@ describe('observability-event-store', () => {
 		} finally {
 			rmSync(fresh, { recursive: true, force: true });
 		}
+	});
+
+	test('#3772 exactly-once sink accounting: droppedAcceptedOp skips the catch-site count and the op onDrop counts the drop once (FB-013)', () => {
+		registerObservabilityEventSink(dir);
+		initTelemetry(dir);
+		const orig = _internals.getGroupCommitWriter;
+		_internals.getGroupCommitWriter = (() => ({
+			enqueue: (op: {
+				onDrop?: (failure: { category: string; error?: string }) => void;
+			}) => {
+				// Threshold-inline drop shape (#3772): the batch INCLUDING
+				// this call's op was dropped and its onDrop already fired;
+				// the thrown error is flagged so the listener's catch must
+				// not count it a second time.
+				op.onDrop?.({ category: 'busy' });
+				const err = new DbWriteError(
+					'busy',
+					'threshold flush dropped the accepted batch',
+				);
+				err.droppedAcceptedOp = true;
+				throw err;
+			},
+			flush: async () => {},
+		})) as unknown as typeof _internals.getGroupCommitWriter;
+		try {
+			expect(() =>
+				emit('gate_passed', {
+					sessionId: 'sess-acct',
+					taskId: 't1',
+					gate: 'review',
+				}),
+			).not.toThrow();
+		} finally {
+			_internals.getGroupCommitWriter = orig;
+			resetTelemetryForTesting();
+		}
+		// Removing the skip branch (mutant) makes dropped === 2 — this is
+		// the branch's pin (feedback round B-TST-03).
+		const health = readObservabilitySinkHealth(dir);
+		expect(health?.dropped).toBe(1);
+		expect(health?.last_error_category).toBe('busy');
 	});
 
 	test('health counters persist through the throttled upsert path (PRR-006)', () => {

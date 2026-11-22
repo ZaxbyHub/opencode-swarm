@@ -95,12 +95,17 @@ describe('GroupCommitWriter', () => {
 		expect(writer.queuedOpCount).toBe(0); // non-retryable: queue emptied
 	});
 
-	test('a busy failure retains the batch as retryable', () => {
+	test('a busy failure drops the batch and reports the typed rejection (#3772)', () => {
 		const writer = new GroupCommitWriter(db);
+		let dropped = 0;
 		writer.enqueue({
 			durability: 'normal',
 			run: () => {
 				throw new Error('database is locked (SQLITE_BUSY)');
+			},
+			// #3772: the drop is observable per-op.
+			onDrop: () => {
+				dropped += 1;
 			},
 		});
 		let caught: unknown;
@@ -110,10 +115,16 @@ describe('GroupCommitWriter', () => {
 			caught = err;
 		}
 		// busy is thrown at op-execution (post-BEGIN): the batch was
-		// classified busy and retained for the next flush.
+		// classified busy and — since #3772 — DROPPED, not retained. A
+		// rejection must be truthful: the op is NOT queued for automatic
+		// reapplication (a retained batch that later commits makes the
+		// caller's retry a duplicate). The drop is observable via onDrop.
 		expect(caught).toBeDefined();
-		// The op fails deterministically here; the writer must not lose it.
-		expect(writer.queuedOpCount).toBe(1);
+		expect(
+			caught instanceof Error && caught.message.includes('(busy)'),
+		).toBeTrue();
+		expect(writer.queuedOpCount).toBe(0);
+		expect(dropped).toBe(1);
 	});
 
 	test('backpressure: reaching the threshold forces a synchronous flush', () => {
@@ -294,13 +305,15 @@ describe('GroupCommitWriter', () => {
 		expect(n).toBe(1);
 	});
 
-	test('#2480 review F-01: the hard bound is real — the queue never exceeds MAX_QUEUED_OPS under persistent flush failure', () => {
-		// Busy ops make every flush fail and RETAIN the batch. Once the queue
-		// is at MAX_QUEUED_OPS, further enqueues attempt the bound flush
-		// BEFORE pushing and throw without accepting the op — so the count
-		// pins at exactly MAX_QUEUED_OPS no matter how long the loop runs.
-		// Falsifiable: deleting the pre-push bound check lets the queue grow
-		// to MAX+500 and this test fails.
+	test('#2480 review F-01 / #3772: the queue never exceeds FLUSH_THRESHOLD_OPS under persistent flush failure', () => {
+		// Busy ops make every flush fail — and since #3772 the failed batch is
+		// DROPPED, not retained. Every 64th enqueue (FLUSH_THRESHOLD_OPS) hits
+		// the threshold flush, drops its 64-op batch (each onDrop fires), and
+		// throws; the queue then refills from zero. Over MAX+500 = 1524
+		// attempts that is 23 throwing enqueues and 1501 returning ones,
+		// leaving 52 queued ops — the queue is bounded by construction at the
+		// threshold. The pre-push hard-bound guard remains as defense-in-depth
+		// for configurations where the threshold exceeds the cap.
 		const writer = new GroupCommitWriter(db);
 		const busyOp = {
 			durability: 'normal' as const,
@@ -309,19 +322,23 @@ describe('GroupCommitWriter', () => {
 			},
 		};
 		let accepted = 0;
+		let threw = 0;
+		let maxQueued = 0;
 		for (let attempt = 0; attempt < MAX_QUEUED_OPS + 500; attempt++) {
 			try {
 				writer.enqueue({ ...busyOp });
 				accepted++;
 			} catch {
-				// expected once flushes start failing at/over the cap
+				threw++;
+			}
+			if (writer.queuedOpCount > maxQueued) {
+				maxQueued = writer.queuedOpCount;
 			}
 		}
-		// The 64th op is pushed then the threshold flush throws, so 'accepted'
-		// counts FLUSH_THRESHOLD_OPS-1 pre-throw pushes; the load-bearing pin
-		// is the QUEUE: it sits at exactly MAX_QUEUED_OPS after 1524 attempts.
-		expect(accepted).toBe(FLUSH_THRESHOLD_OPS - 1);
-		expect(writer.queuedOpCount).toBe(MAX_QUEUED_OPS);
+		expect(threw).toBe(23);
+		expect(accepted).toBe(1501);
+		expect(writer.queuedOpCount).toBe(52);
+		expect(maxQueued).toBeLessThanOrEqual(FLUSH_THRESHOLD_OPS);
 		writer.close();
 	});
 

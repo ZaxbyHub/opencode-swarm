@@ -212,27 +212,6 @@
 			"note": "Pre-existing debt, not approved drift: \"readPhaseParticipation\" exists in src/evidence/phase-participation.ts but not inside src/evidence/phase-participation.ts:845 (phase-participation.readerCitations[0])."
 		},
 		{
-			"rowId": "plan-checkpoints-exports",
-			"file": "src/tools/checkpoint.ts",
-			"identifier": "appendRetentionEvent",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"appendRetentionEvent\" exists in src/tools/checkpoint.ts but not inside :206 (plan-checkpoints-exports.writerCitations[1])."
-		},
-		{
-			"rowId": "plan-checkpoints-exports",
-			"file": "src/tools/checkpoint.ts",
-			"identifier": "readCheckpointLog",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"readCheckpointLog\" exists in src/tools/checkpoint.ts but not inside src/tools/checkpoint.ts:175 (plan-checkpoints-exports.readerCitations[0])."
-		},
-		{
-			"rowId": "plan-checkpoints-exports",
-			"file": "src/tools/checkpoint.ts",
-			"identifier": "writeCheckpointLog",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"writeCheckpointLog\" exists in src/tools/checkpoint.ts but not inside src/tools/checkpoint.ts:195 (plan-checkpoints-exports.writerCitations[1])."
-		},
-		{
 			"rowId": "plan-ledger",
 			"file": "src/plan/ledger.ts",
 			"identifier": "appendLedgerEvent",
