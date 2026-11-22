@@ -393,12 +393,8 @@ describe('#3844 the shared redactor is idempotent and covers the training famili
 	test('the key/value arm preserves the separator it consumed', () => {
 		// The separator used to be part of the match but not of the
 		// replacement, so the words were glued together.
-		expect(redactEvidenceText('the token=abcdef')).toBe(
-			'the token=[REDACTED]',
-		);
-		expect(redactEvidenceText('password=hunter2')).toBe(
-			'password=[REDACTED]',
-		);
+		expect(redactEvidenceText('the token=abcdef')).toBe('the token=[REDACTED]');
+		expect(redactEvidenceText('password=hunter2')).toBe('password=[REDACTED]');
 	});
 
 	test('the >=80-char mixed-class base64 family is redacted (the training superset contract)', () => {

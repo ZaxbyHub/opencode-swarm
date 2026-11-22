@@ -16,6 +16,11 @@ import {
 	removeReviewReceipt,
 } from '../hooks/review-receipt.js';
 import { parseReviewerOutput } from '../hooks/review-receipt-collector.js';
+import {
+	EVIDENCE_FINDING_BODY_MAX,
+	EVIDENCE_FINDING_TITLE_MAX,
+	redactEvidenceField,
+} from '../security/evidence-redaction.js';
 import { sumKnownAxis } from '../services/cost-accounting.js';
 import { telemetry } from '../telemetry.js';
 import type { ModelOverride } from '../utils/model-dispatch-fallback.js';
@@ -43,11 +48,6 @@ import {
 	canonicalizeValidationCandidates,
 	runFindingValidation,
 } from './finding-validator.js';
-import {
-	EVIDENCE_FINDING_BODY_MAX,
-	EVIDENCE_FINDING_TITLE_MAX,
-	redactEvidenceField,
-} from '../security/evidence-redaction.js';
 
 export type ReviewEngineTrigger =
 	| 'task_completion'
@@ -1132,9 +1132,7 @@ export async function runReviewEngine(
 		title: redactEvidenceField(finding.title, EVIDENCE_FINDING_TITLE_MAX),
 		body: redactEvidenceField(finding.body, EVIDENCE_FINDING_BODY_MAX),
 	}));
-	const candidates = canonicalizeValidationCandidates(
-		structuredFindings ?? [],
-	);
+	const candidates = canonicalizeValidationCandidates(structuredFindings ?? []);
 	let findings = candidates.map((candidate) =>
 		anchorFinding(
 			input.directory,

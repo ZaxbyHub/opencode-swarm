@@ -192,10 +192,7 @@ export function redactAutoReviewEvidenceForCapture(
 	// near-limit field that the redaction lengthens fails its schema on
 	// read-back and the finding is silently dropped.
 	for (const finding of evidence.findings) {
-		finding.body = redactEvidenceField(
-			finding.body,
-			EVIDENCE_FINDING_BODY_MAX,
-		);
+		finding.body = redactEvidenceField(finding.body, EVIDENCE_FINDING_BODY_MAX);
 		finding.title = redactEvidenceField(
 			finding.title,
 			EVIDENCE_FINDING_TITLE_MAX,

@@ -63,7 +63,7 @@ function diffResult(): Extract<ReviewDiffResult, { status: 'ok' }> {
 		]),
 		completeness: { complete: true, truncated: false, skipReasons: [] },
 		staleness: {
-			collectedAt: new Date().toISOString(),
+			collectedAt: '2026-01-01T00:00:00.000Z',
 			headSha: HEAD_SHA,
 			selectorKey: 'default',
 			includesWorkingTree: true,
@@ -162,7 +162,10 @@ beforeEach(() => {
 	projectDir = canonicalMkdtemp('sw-3844-auto-review-');
 	fs.mkdirSync(path.join(projectDir, '.swarm'), { recursive: true });
 	fs.mkdirSync(path.join(projectDir, 'src'), { recursive: true });
-	fs.writeFileSync(path.join(projectDir, 'src', 'state.ts'), 'line\n'.repeat(20));
+	fs.writeFileSync(
+		path.join(projectDir, 'src', 'state.ts'),
+		'line\n'.repeat(20),
+	);
 	engineInternals.collectReviewDiff = async () => diffResult();
 });
 

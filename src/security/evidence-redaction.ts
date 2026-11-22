@@ -404,12 +404,7 @@ export function redactEvidenceText(text: string): string {
 		// superset of the surface the training vault already covers.
 		working = working.replace(
 			EVIDENCE_CREDENTIAL_KV_PATTERN,
-			(
-				_m: string,
-				separator: string,
-				prefix: string,
-				value: string,
-			) => {
+			(_m: string, separator: string, prefix: string, value: string) => {
 				const quoted =
 					value.length >= 2 &&
 					(value.startsWith('"') || value.startsWith("'")) &&
