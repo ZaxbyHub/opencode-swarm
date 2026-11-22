@@ -12,7 +12,7 @@
  * Synthetic tokens only.
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
 import {
 	_test_exports,
@@ -49,6 +49,21 @@ function readClaim(directory: string): string {
 		),
 		'utf-8',
 	).trim();
+}
+
+/**
+ * Copy the replay-identity SALT from one project root to another.
+ *
+ * The fingerprint is an HMAC over a per-project random salt, so two roots
+ * have incomparable fingerprints unless they share the salt. A test that
+ * compares fingerprints across roots MUST pin the salt, or the comparison
+ * proves nothing about the payload.
+ */
+function copySalt(fromDir: string, toDir: string): void {
+	const relative = path.join('.swarm', 'pr-review', 'replay-identity.salt');
+	const target = path.join(toDir, relative);
+	mkdirSync(path.dirname(target), { recursive: true });
+	writeFileSync(target, readFileSync(path.join(fromDir, relative), 'utf-8'));
 }
 
 beforeEach(setupPrWorkflowGateFixtures);
@@ -280,29 +295,38 @@ describe('#3844 FB-008: the handoff replay identity uses ONE comparable', () => 
 		// would be admitted as the owner of the first writer's identity.
 		// The claim is a function of the RAW payload, so the two runs below
 		// MUST produce different claim fingerprints.
+		//
+		// The fingerprint is an HMAC over a PER-PROJECT random salt, so the
+		// two runs must share the salt: with different salts the claims
+		// would differ for reasons that have nothing to do with the
+		// payload, and the assertion would prove nothing.
 		const dirX = tempDir;
-		await writeHandoff([
-			'review-boundaries',
-			`critic-boundaries?token=${GH_X}`,
-		]);
-		const claimX = readClaim(dirX);
+		try {
+			await writeHandoff([
+				'review-boundaries',
+				`critic-boundaries?token=${GH_X}`,
+			]);
+			const claimX = readClaim(dirX);
 
-		// A second, INDEPENDENT run whose only difference is the secret's
-		// VALUE (the fixture re-points tempDir at a fresh root).
-		setupPrWorkflowGateFixtures();
-		const dirY = tempDir;
-		await writeHandoff([
-			'review-boundaries',
-			`critic-boundaries?token=${GH_Y}`,
-		]);
-		const claimY = readClaim(dirY);
+			// A second, INDEPENDENT run whose only difference is the secret's
+			// VALUE (the fixture re-points tempDir at a fresh root), with
+			// the SAME salt so the two fingerprints are comparable.
+			setupPrWorkflowGateFixtures();
+			const dirY = tempDir;
+			copySalt(dirX, dirY);
+			await writeHandoff([
+				'review-boundaries',
+				`critic-boundaries?token=${GH_Y}`,
+			]);
+			const claimY = readClaim(dirY);
 
-		expect(claimX).toMatch(/^[0-9a-f]{64}$/);
-		expect(claimY).toMatch(/^[0-9a-f]{64}$/);
-		expect(claimY).not.toBe(claimX);
-
-		// The first run's root is no longer the fixture's current one, so the
-		// fixture teardown would not remove it.
-		rmSync(dirX, { recursive: true, force: true });
+			expect(claimX).toMatch(/^[0-9a-f]{64}$/);
+			expect(claimY).toMatch(/^[0-9a-f]{64}$/);
+			expect(claimY).not.toBe(claimX);
+		} finally {
+			// The first run's root is no longer the fixture's current one, so
+			// the fixture teardown would not remove it.
+			rmSync(dirX, { recursive: true, force: true });
+		}
 	}, 60_000);
 });

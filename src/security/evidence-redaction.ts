@@ -34,17 +34,25 @@ import { findRedactableTokenSpans } from '../utils/jws-redaction';
  * unbounded (`*`) — a bounded scheme class would silently leave a long
  * scheme's userinfo unredacted.
  *
- * The scan is linear because the scheme may only START where the preceding
- * character cannot be part of a scheme (`(?<![A-Za-z0-9+.-])`). A leading
- * `\b` was NOT enough: `\b` matches at every word start, so a colon-free
- * run like `a.a.a...` restarted the scheme scan at each `a` and rescanned the
- * remaining suffix — quadratic (measured: 64 KB of `a.` took 4.2 s). The
- * lookbehind rejects those interior positions in O(1), leaving one attempt
- * per scheme run. The negative lookbehind is a fixed-width lookbehind, so it
- * is portable (the repo already uses lookbehind in src/).
+ * The scan is LINEAR. A leading `\b` was not enough: `\b` matches at every
+ * word start, so a colon-free run like `a.a.a...` restarted the scheme scan
+ * at each word and rescanned the remaining suffix — quadratic (measured:
+ * 64 KB of `a.` took 4.2 s, 128 KB ~17 s).
+ *
+ * Two rules make it linear AND keep the coverage `\b` had:
+ *   - the scheme may only START where the preceding character cannot be part
+ *     of a scheme (`(?<![A-Za-z0-9+.-])`), which rejects the interior
+ *     positions in O(1) and leaves one attempt per scheme run;
+ *   - the scheme class may begin with `.` or `-`, so the attempt that
+ *     survives always consumes the WHOLE scheme run. A URL that follows an
+ *     ellipsis (`...https://user:pass@host`) or a dash is therefore still
+ *     matched — rejecting it would lose coverage the `\b` arm had.
+ *
+ * The negative lookbehind is fixed-width, so it is portable (the repo
+ * already uses lookbehind in src/).
  */
 const URL_CREDENTIALS_PATTERN =
-	/(?<![A-Za-z0-9+.-])([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)([^\s/@:]+):([^\s/@]+)@([^\s'"<>]+)/gi;
+	/(?<![A-Za-z0-9+.-])([-.a-zA-Z][a-zA-Z0-9+.-]*:\/\/)([^\s/@:]+):([^\s/@]+)@([^\s'"<>]+)/gi;
 
 /**
  * Credential PLACEMENT shapes, mirrored from the training redactor

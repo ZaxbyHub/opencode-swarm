@@ -168,6 +168,33 @@ describe('#3844 redactEvidenceText superset contract', () => {
 		}
 	});
 
+	test('FB-006: every URL boundary the \\b arm matched is still covered', () => {
+		// The linear-scan change must not LOSE coverage. A scheme may be
+		// preceded by an ellipsis, a dash, an underscore, a dot-run or
+		// nothing at all — each of these was matched by the previous `\b`
+		// arm and must stay matched.
+		const cases = [
+			'clone https://user:hunter2@example.invalid/repo.git now',
+			'postgres://user:hunter2@example.invalid/db',
+			'mongodb+srv://user:hunter2@example.invalid/db',
+			'ssh://user:hunter2@example.invalid/repo',
+			'redis://user:hunter2@example.invalid/0',
+			'see ...https://user:hunter2@example.invalid/x',
+			'see -https://user:hunter2@example.invalid/x',
+			'a.b://user:hunter2@example.invalid/x',
+			'_https://user:hunter2@example.invalid/x',
+			'see https://user:hunter2@example.invalid/x',
+			'https://user:hunter2@example.invalid/x',
+			'(https://user:hunter2@example.invalid/x)',
+			'url=https://user:hunter2@example.invalid/x',
+		];
+		for (const input of cases) {
+			const out = redactEvidenceText(input);
+			expect(out).not.toContain('hunter2');
+			expect(out).toContain('example.invalid');
+		}
+	});
+
 	test('FB-006: the URL arm scans LINEARLY on colon-free input', () => {
 		// A leading \b is not enough: it matches at every word start, so a
 		// colon-free run restarted the scheme scan at each word and rescanned
