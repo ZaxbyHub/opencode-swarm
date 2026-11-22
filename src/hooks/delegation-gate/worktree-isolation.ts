@@ -547,6 +547,12 @@ interface CleanupStandardWorktreeResult {
 	cleanedBranch: boolean;
 	preservedRecoveryLane: boolean;
 	/**
+	 * #3903 FB-004: dirty work was detected but preservation failed; the lane is
+	 * intentionally left in place and must not be reported as a strand/removal
+	 * failure at the terminal teardown site.
+	 */
+	preservationFailed?: boolean;
+	/**
 	 * #3888: a CONFIRMED re-provision skip — another live dispatch owns the lane
 	 * (map entry or valid provisioning-owner marker), so no destructive step ran.
 	 * Success-equivalent for callers; own tracking entries were dropped.
@@ -3199,6 +3205,7 @@ export async function cleanupStandardWorktreeForCallId(
 				removedWorktree: false,
 				cleanedBranch: false,
 				preservedRecoveryLane: false,
+				preservationFailed: true,
 			};
 		}
 
@@ -3729,17 +3736,25 @@ export async function finishStandardWorktreeDispatch(
 			clearWorktreeMergeStatus(statusKey);
 
 			// FR-205 SC-134: Remove lane profile at successful merge-back teardown.
+			// #3903 FB-007: a skip means a LIVE sibling owns this same lane
+			// path/branch, so deleting the profile here would mutate the newer
+			// dispatch's state. Skip profile removal on both skip outcomes.
 			// Best-effort — non-fatal if removal fails (e.g. file already gone).
-			try {
-				const { removeLaneProfileFromDiskReal } = await import(
-					'../../worktree/core'
-				);
-				await removeLaneProfileFromDiskReal(
-					dispatch.handle.worktreePath,
-					dispatch.laneIndex,
-				);
-			} catch {
-				/* non-fatal */
+			if (
+				!cleanupResult.skippedReprovisioned &&
+				!cleanupResult.skippedOwnershipUncertain
+			) {
+				try {
+					const { removeLaneProfileFromDiskReal } = await import(
+						'../../worktree/core'
+					);
+					await removeLaneProfileFromDiskReal(
+						dispatch.handle.worktreePath,
+						dispatch.laneIndex,
+					);
+				} catch {
+					/* non-fatal */
+				}
 			}
 
 			// FR-104 SC-111: Increment successful-dispatch counter and check release
@@ -4047,6 +4062,8 @@ export const _internals = {
 	preserveBackgroundWorktreeOwnershipForCallId,
 	tryAcquireWorktreeLifecycleLock: tryAcquireLock,
 	acquireWorktreeLifecycleLockWithin,
+	/** #3903 FB-001: same bounded teardown wait G1 uses, for G2's acquisition. */
+	worktreeCleanupLockWaitMs: WORKTREE_CLEANUP_LOCK_WAIT_MS,
 	/** Bounded wait for the lifecycle lock, derived from the session-create budget. */
 	resolveWorktreeLifecycleLockWaitMs,
 	now: () => Date.now(),

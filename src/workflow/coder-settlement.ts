@@ -1193,11 +1193,27 @@ export async function recoverCoderSettlement(
 				wal.cleanupComplete !== true &&
 				existsSync(wal.worktree.worktreePath)
 			) {
-				if (
-					(await cleanupRecoveredWorktree(directory, wal.worktree, {
-						cleanupReason: 'cancelled',
-					})) !== 'skipped-uncertain'
-				) {
+				// #3903 FB-002: cleanup of an ABORTED settlement is best-effort.
+				// cleanupRecoveredWorktree throws when a preserved lane or branch
+				// survives (preservation commit rejected, Windows EBUSY, ...); an
+				// uncaught throw here wedges update_task_status, close-terminal and
+				// every later re-dispatch — the same deadlock
+				// selfHealMissingLaneWorktree already avoids. Record the failure,
+				// leave cleanupComplete unset (retryable), and continue to null.
+				let abortedCleanupCompleted = false;
+				try {
+					abortedCleanupCompleted =
+						(await cleanupRecoveredWorktree(directory, wal.worktree, {
+							cleanupReason: 'cancelled',
+						})) !== 'skipped-uncertain';
+				} catch (error) {
+					logger.criticalWarn(
+						`[coder-settlement] aborted task ${taskId} retry cleanup failed; settlement stays retryable: ${
+							error instanceof Error ? error.message : String(error)
+						}`,
+					);
+				}
+				if (abortedCleanupCompleted) {
 					const abortedWal = await readWal(filePath, taskId);
 					if (abortedWal !== null) {
 						await writeWal(filePath, {
@@ -1218,8 +1234,13 @@ export async function recoverCoderSettlement(
 		if (wal.state === 'COMMITTED') {
 			if (wal.worktree && wal.cleanupComplete !== true) {
 				if (
-					(await cleanupRecoveredWorktree(directory, wal.worktree)) ===
-					'skipped-uncertain'
+					(await cleanupRecoveredWorktree(directory, wal.worktree, {
+						// #3903 FB-001: this is a RETRY of an incomplete WAL, not the
+						// original successful landing. 'success' would skip FR-001c
+						// dirty-work preservation and force-remove a failed/cancelled
+						// lane plus branch -D; retries must fail closed instead.
+						cleanupReason: 'cancelled',
+					})) === 'skipped-uncertain'
 				) {
 					// #3888: ownership uncertain — leave the WAL retryable.
 					return null;

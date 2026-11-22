@@ -10,9 +10,10 @@ the live child's lane directory mid-run — every filesystem access in the lane
 then failed with `disk I/O error` (EIO) — and delete the shared lane branch.
 
 Teardown now re-validates lane ownership under the worktree lifecycle lock
-before any destructive step, at both destructive sites: the standard cleanup
-entry point (before dirty-preservation, so preservation can also never commit
-inside a re-provisioned lane) and the delegation-gate terminal-failure branch.
+before any destructive step, at all three standard teardown sites: the standard
+cleanup entry point (before dirty-preservation, so preservation can also never
+commit inside a re-provisioned lane), the delegation-gate terminal-failure
+branch, and the startup dead-lane reclaim sweep for stranded lanes.
 A confirmed re-provision (a live dispatch map entry, or a provisioning-owner
 marker for the lane) skips worktree removal, branch deletion and the durable
 live-owner-record clear, drops only the superseded dispatch's own tracking,

@@ -7105,22 +7105,44 @@ export function createDelegationGateHook(
 					// same lock, so classification cannot interleave with a
 					// publication). Lock failure degrades to the uncertain arm
 					// (preservation, retryable).
-					const terminalLock =
-						await _wtiInternals.tryAcquireWorktreeLifecycleLock(
-							directory,
-							'.swarm/locks/init-orphan-recovery.lock',
-							'worktree-teardown',
-							input.callID,
-						);
+					// #3903 FB-001/FB-017: use the SAME bounded-wait acquisition as
+					// G1 (15s) instead of a single ~150ms try. A short try made
+					// ordinary contention deterministically take the uncertain
+					// arm, retaining the dead dispatch's map entry and hard-stopping
+					// a same-task re-dispatch with PREPROVISION_COLLISION_ACTIVE.
+					// The helper uses WORKTREE_LIFECYCLE_LOCK_FILE internally, so
+					// there is no duplicated lock-path literal. A synchronous
+					// acquisition failure fails closed to the uncertain arm.
 					let terminalSuperseding:
 						| Awaited<
 								ReturnType<typeof _wtiInternals.findSupersedingLaneDispatch>
 						  >
 						| undefined;
-					if (!terminalLock.acquired) {
+					let terminalLock:
+						| Awaited<
+								ReturnType<
+									typeof _wtiInternals.acquireWorktreeLifecycleLockWithin
+								>
+						  >
+						| undefined;
+					let terminalLockFailure: string | undefined;
+					try {
+						terminalLock =
+							await _wtiInternals.acquireWorktreeLifecycleLockWithin(
+								directory,
+								input.callID,
+								_wtiInternals.worktreeCleanupLockWaitMs,
+							);
+					} catch (error) {
+						terminalLockFailure =
+							error instanceof Error ? error.message : String(error);
+					}
+					if (!terminalLock?.acquired) {
 						terminalSuperseding = {
 							kind: 'uncertain',
-							reason: 'worktree lifecycle lock busy (teardown classification)',
+							reason: terminalLockFailure
+								? `worktree lifecycle lock acquisition failed: ${terminalLockFailure}`
+								: 'worktree lifecycle lock busy after bounded wait (teardown classification)',
 						};
 					} else {
 						try {
@@ -7204,7 +7226,14 @@ export function createDelegationGateHook(
 						if (
 							!terminalCleanup.removedWorktree &&
 							!terminalCleanup.skippedReprovisioned &&
-							!terminalCleanup.skippedOwnershipUncertain
+							!terminalCleanup.skippedOwnershipUncertain &&
+							// #3903 FB-004: a preserved recovery lane OR a
+							// preservation failure is intentional (the lane was
+							// left in place to protect dirty work), not a removal
+							// failure. Without both exclusions the strand store
+							// and WORKTREE_LANE_STRANDED advisory misreport them.
+							!terminalCleanup.preservedRecoveryLane &&
+							!terminalCleanup.preservationFailed
 						) {
 							// Issue #2599 AC6: typed strand record + diagnostic
 							// instead of a silently wedged lane.

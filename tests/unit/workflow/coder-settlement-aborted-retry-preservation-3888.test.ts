@@ -11,7 +11,6 @@
  * where the unpreserved data loss actually manifests.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import { spawn } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type {
@@ -24,6 +23,7 @@ import {
 	abortCoderSettlement,
 	beginCoderSettlement,
 } from '../../../src/workflow/coder-settlement';
+import { gitSpawnBounded } from '../../helpers/git-spawn-bounded';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 const TASK_ID = '1.1';
@@ -33,23 +33,8 @@ function git(
 	cwd: string,
 	args: string[],
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-	return new Promise((resolve) => {
-		const proc = spawn('git', args, {
-			cwd,
-			stdio: ['ignore', 'pipe', 'pipe'],
-		});
-		let stdout = '';
-		let stderr = '';
-		proc.stdout.on('data', (d) => {
-			stdout += d;
-		});
-		proc.stderr.on('data', (d) => {
-			stderr += d;
-		});
-		proc.on('close', (exitCode) => {
-			resolve({ exitCode: exitCode ?? 1, stdout, stderr });
-		});
-	});
+	// #3903 FB-006/FB-013: bounded, error-handled, config-isolated shared helper.
+	return gitSpawnBounded(args, cwd);
 }
 
 let root: string;
@@ -62,16 +47,18 @@ beforeEach(async () => {
 	root = canonicalMkdtemp(`coder-wt3888-abort-${LABEL}-`);
 	repo = path.join(root, 'repo');
 	fs.mkdirSync(repo);
-	await git(repo, ['init', '-q']);
-	await git(repo, ['config', 'user.email', 't@t.test']);
-	await git(repo, ['config', 'user.name', 'T']);
+	expect((await git(repo, ['init', '-q'])).exitCode).toBe(0);
+	expect((await git(repo, ['config', 'user.email', 't@t.test'])).exitCode).toBe(
+		0,
+	);
+	expect((await git(repo, ['config', 'user.name', 'T'])).exitCode).toBe(0);
 	fs.mkdirSync(path.join(repo, 'src', 'nested'), { recursive: true });
 	fs.writeFileSync(
 		path.join(repo, 'src', 'nested', 'feature.ts'),
 		'export const feature = 1;\n',
 	);
-	await git(repo, ['add', '.']);
-	await git(repo, ['commit', '-q', '-m', 'seed']);
+	expect((await git(repo, ['add', '.'])).exitCode).toBe(0);
+	expect((await git(repo, ['commit', '-q', '-m', 'seed'])).exitCode).toBe(0);
 	// Lane under the repo's trusted .swarm-worktrees base (force-removal
 	// fallback reachable).
 	branch = `swarm-lane/session-${LABEL}/lane-1`;
@@ -98,6 +85,8 @@ beforeEach(async () => {
 		mergeStrategy: 'merge',
 		laneIndex: 1,
 		worktreeDir: null,
+		reservationId: `reservation-${LABEL}`,
+		generation: 1,
 	};
 	await beginCoderSettlement({
 		directory: repo,
@@ -108,11 +97,16 @@ beforeEach(async () => {
 		context,
 		worktree: descriptor,
 	});
+	// #3903 FB-013: a v3 marker is required for the predicate under test; a
+	// taskId-only marker would be schemaVersion 2 and inert for the v3 guard.
 	recordWorktreeProvisioningOwner(repo, {
 		callID,
 		parentSessionId: descriptor.parentSessionId,
 		worktreeSessionId: descriptor.worktreeSessionId,
 		taskId: TASK_ID,
+		reservationId: `reservation-${LABEL}`,
+		generation: 1,
+		branchName: branch,
 	});
 });
 
@@ -126,7 +120,7 @@ describe('#3888 aborted-retry dirty preservation', () => {
 		// the WAL is left with cleanup incomplete and the lane on disk.
 		const ownersDir = path.join(repo, '.swarm', 'worktree-provisioning-owners');
 		fs.mkdirSync(ownersDir, { recursive: true });
-		fs.writeFileSync(path.join(ownersDir, 'garbage.json'), 'x'.repeat(600));
+		fs.writeFileSync(path.join(ownersDir, 'garbage.json'), 'x'.repeat(17_000));
 		const first = await abortCoderSettlement({
 			directory: repo,
 			taskId: TASK_ID,
@@ -153,9 +147,18 @@ describe('#3888 aborted-retry dirty preservation', () => {
 		// lane with no preserve attempt at all.
 		const tags = await git(repo, ['tag', '-l', 'swarm-preserved-*']);
 		const preserved = tags.stdout.trim().length > 0;
-		const laneSurvived =
-			fs.existsSync(worktree) &&
-			fs.existsSync(path.join(worktree, 'src', 'precious.txt'));
-		expect(laneSurvived || preserved).toBe(true);
+		const preciousPath = path.join(worktree, 'src', 'precious.txt');
+		if (fs.existsSync(preciousPath)) {
+			// Fail-closed retention: the lane survived, so its bytes must be intact.
+			expect(fs.readFileSync(preciousPath, 'utf8')).toBe('precious\n');
+		} else {
+			// Removal is only admissible after a preservation commit/tag whose
+			// tree actually contains the dirty bytes.
+			expect(preserved).toBe(true);
+			const tag = tags.stdout.trim().split(/\s+/)[0];
+			const shown = await git(repo, ['show', `${tag}:src/precious.txt`]);
+			expect(shown.exitCode).toBe(0);
+			expect(shown.stdout).toBe('precious\n');
+		}
 	}, 45_000);
 });

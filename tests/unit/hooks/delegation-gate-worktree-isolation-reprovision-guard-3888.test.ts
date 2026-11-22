@@ -7,7 +7,6 @@
  * outcomes, and lock-busy preservation.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import { spawn } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
@@ -27,6 +26,7 @@ import { recordWorktreeProvisioningOwner } from '../../../src/hooks/delegation-g
 import { recordLiveLaneOwner } from '../../../src/parallel/lane-owners';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
 import type { WorktreeHandle } from '../../../src/worktree';
+import { gitSpawnBounded } from '../../helpers/git-spawn-bounded';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 const SESSION = 'ses_3888t';
@@ -36,23 +36,8 @@ function gitSpawn(
 	args: string[],
 	cwd: string,
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-	return new Promise((resolve) => {
-		const proc = spawn('git', args, {
-			cwd,
-			stdio: ['ignore', 'pipe', 'pipe'],
-		});
-		let stdout = '';
-		let stderr = '';
-		proc.stdout.on('data', (d) => {
-			stdout += d;
-		});
-		proc.stderr.on('data', (d) => {
-			stderr += d;
-		});
-		proc.on('close', (exitCode) => {
-			resolve({ exitCode: exitCode ?? 1, stdout, stderr });
-		});
-	});
+	// #3903 FB-006/FB-013: bounded, error-handled, config-isolated shared helper.
+	return gitSpawnBounded(args, cwd);
 }
 
 let project: string;
@@ -99,12 +84,18 @@ beforeEach(async () => {
 	resetSwarmState();
 	project = canonicalMkdtemp('wt3888-guard-');
 	fs.mkdirSync(path.join(project, '.swarm'), { recursive: true });
-	await gitSpawn(['init', '-q'], project);
-	await gitSpawn(['config', 'user.email', 't@t.test'], project);
-	await gitSpawn(['config', 'user.name', 'T'], project);
+	expect((await gitSpawn(['init', '-q'], project)).exitCode).toBe(0);
+	expect(
+		(await gitSpawn(['config', 'user.email', 't@t.test'], project)).exitCode,
+	).toBe(0);
+	expect((await gitSpawn(['config', 'user.name', 'T'], project)).exitCode).toBe(
+		0,
+	);
 	fs.writeFileSync(path.join(project, 'README.md'), 'x\n');
-	await gitSpawn(['add', 'README.md'], project);
-	await gitSpawn(['commit', '-q', '-m', 'init'], project);
+	expect((await gitSpawn(['add', 'README.md'], project)).exitCode).toBe(0);
+	expect(
+		(await gitSpawn(['commit', '-q', '-m', 'init'], project)).exitCode,
+	).toBe(0);
 	lanePath = path.join(project, '.swarm-worktrees', SESSION, '1.1');
 	fs.mkdirSync(path.dirname(lanePath), { recursive: true });
 	const add = await gitSpawn(
@@ -157,7 +148,7 @@ describe('#3888 findSupersedingLaneDispatch', () => {
 
 	it('fails closed (uncertain) when the owner store is unreadable', () => {
 		fs.mkdirSync(ownerDir(), { recursive: true });
-		fs.writeFileSync(path.join(ownerDir(), 'garbage.json'), 'x'.repeat(600));
+		fs.writeFileSync(path.join(ownerDir(), 'garbage.json'), 'x'.repeat(17_000));
 		const found = findSupersedingLaneDispatch(
 			project,
 			'call-a',
@@ -242,7 +233,7 @@ describe('#3888 cleanup guard (G1)', () => {
 	it('uncertain store skips destruction and retains the tracking entry', async () => {
 		seedAwaiting('call-a');
 		fs.mkdirSync(ownerDir(), { recursive: true });
-		fs.writeFileSync(path.join(ownerDir(), 'garbage.json'), 'x'.repeat(600));
+		fs.writeFileSync(path.join(ownerDir(), 'garbage.json'), 'x'.repeat(17_000));
 		const result = await cleanupStandardWorktreeForCallId(
 			'call-a',
 			'success',

@@ -11,7 +11,7 @@ import { resolveGitExecutable } from '../../utils/git-executable.js';
 import * as logger from '../../utils/logger.js';
 import { removeWorktree } from '../../worktree/core';
 import { validateSwarmPath } from '../utils';
-import { findSupersedingLaneDispatch } from './worktree-isolation';
+import { _internals as _wtiInternals } from './worktree-isolation';
 
 /**
  * Issue #2599: deferred dead-lane reclaim.
@@ -307,7 +307,7 @@ export async function reclaimDeadLanes(
 		// the deferred removal — a live dispatch map entry, a v3
 		// provisioning-owner marker for the lane branch, or an unreadable owner
 		// inventory all retain the entry instead of destroying a live lane.
-		const superseding = findSupersedingLaneDispatch(
+		const superseding = _wtiInternals.findSupersedingLaneDispatch(
 			directory,
 			`dead-lane-reclaim:${entry.lanePath}`,
 			entry.lanePath,
