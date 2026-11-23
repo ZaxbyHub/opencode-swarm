@@ -500,7 +500,7 @@ describe('phase_complete integration — events.jsonl', () => {
 	});
 
 	describe('8. Multiple sessions write to same events.jsonl', () => {
-		it('appends events from different sessions', async () => {
+		it('appends events from different sessions (#3770: distinct phases — a same-phase second session dedupes to one event)', async () => {
 			writeConfig({
 				phase_complete: {
 					enabled: true,
@@ -517,16 +517,25 @@ describe('phase_complete integration — events.jsonl', () => {
 			writeGateEvidence(1);
 			await executePhaseComplete({ phase: 1, sessionID: session1 }, tempDir);
 
-			// Session 2
+			// Session 2 — distinct phase so each call is a distinct transition
+			// (the exactly-once dedupe collapses same-phase duplicates, pinned
+			// separately below)
 			const session2 = 'sess2';
 			ensureAgentSession(session2);
-			writeRetro(1);
-			writeGateEvidence(1);
-			await executePhaseComplete({ phase: 1, sessionID: session2 }, tempDir);
+			writeRetro(2);
+			writeGateEvidence(2);
+			await executePhaseComplete({ phase: 2, sessionID: session2 }, tempDir);
 
-			// Should have 2 phase_complete events
+			// Should have 2 phase_complete events (one per distinct transition)
 			const events = readEvents('phase_complete');
 			expect(events.length).toBe(2);
+			expect(events[0].phase).toBe(1);
+			expect(events[1].phase).toBe(2);
+
+			// #3770 exactly-once: session 2 replays phase 1 — the same
+			// transition dedupes to the existing event, still exactly 2.
+			await executePhaseComplete({ phase: 1, sessionID: session2 }, tempDir);
+			expect(readEvents('phase_complete').length).toBe(2);
 		});
 	});
 });

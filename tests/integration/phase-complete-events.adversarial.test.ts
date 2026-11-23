@@ -626,34 +626,15 @@ describe('phase_complete integration — adversarial scenarios', () => {
 				tempDir,
 			);
 
-			// Session 2, Phase 1
+			// Session 2, Phase 2 (#3770 exactly-once: the sessions alternate
+			// DISTINCT phases so every call is a distinct transition — a
+			// same-phase second call from another session would dedupe to one
+			// event, which its own leg below pins)
 			const session2 = 'sess2';
 			ensureAgentSession(session2);
 			recordPhaseAgentDispatch(session2, 'reviewer');
-			await executePhaseComplete(
-				{
-					phase: 1,
-					sessionID: session2,
-					summary: 'Session 2, Phase 1',
-				},
-				tempDir,
-			);
-
-			// Session 1, Phase 2 (back to session 1)
-			recordPhaseAgentDispatch(session1, 'coder');
 			writeRetro(2);
 			writeGateEvidence(2);
-			await executePhaseComplete(
-				{
-					phase: 2,
-					sessionID: session1,
-					summary: 'Session 1, Phase 2',
-				},
-				tempDir,
-			);
-
-			// Session 2, Phase 2
-			recordPhaseAgentDispatch(session2, 'reviewer');
 			await executePhaseComplete(
 				{
 					phase: 2,
@@ -663,7 +644,34 @@ describe('phase_complete integration — adversarial scenarios', () => {
 				tempDir,
 			);
 
-			// All 4 phase_complete events should be present in the order they were called
+			// Session 1, Phase 3 (back to session 1)
+			recordPhaseAgentDispatch(session1, 'coder');
+			writeRetro(3);
+			writeGateEvidence(3);
+			await executePhaseComplete(
+				{
+					phase: 3,
+					sessionID: session1,
+					summary: 'Session 1, Phase 3',
+				},
+				tempDir,
+			);
+
+			// Session 2, Phase 4
+			recordPhaseAgentDispatch(session2, 'reviewer');
+			writeRetro(4);
+			writeGateEvidence(4);
+			await executePhaseComplete(
+				{
+					phase: 4,
+					sessionID: session2,
+					summary: 'Session 2, Phase 4',
+				},
+				tempDir,
+			);
+
+			// All 4 phase_complete events should be present in the order they
+			// were called
 			const events = readEvents('phase_complete');
 			expect(events.length).toBe(4);
 
@@ -671,14 +679,27 @@ describe('phase_complete integration — adversarial scenarios', () => {
 			expect(events[0].phase).toBe(1);
 			expect(events[0].summary).toBe('Session 1, Phase 1');
 
-			expect(events[1].phase).toBe(1);
-			expect(events[1].summary).toBe('Session 2, Phase 1');
+			expect(events[1].phase).toBe(2);
+			expect(events[1].summary).toBe('Session 2, Phase 2');
 
-			expect(events[2].phase).toBe(2);
-			expect(events[2].summary).toBe('Session 1, Phase 2');
+			expect(events[2].phase).toBe(3);
+			expect(events[2].summary).toBe('Session 1, Phase 3');
 
-			expect(events[3].phase).toBe(2);
-			expect(events[3].summary).toBe('Session 2, Phase 2');
+			expect(events[3].phase).toBe(4);
+			expect(events[3].summary).toBe('Session 2, Phase 4');
+
+			// #3770 exactly-once: a same-phase completion from another session
+			// dedupes to the existing transition — still exactly 4 events.
+			recordPhaseAgentDispatch(session1, 'coder');
+			await executePhaseComplete(
+				{
+					phase: 4,
+					sessionID: session1,
+					summary: 'Session 1 replays Phase 4',
+				},
+				tempDir,
+			);
+			expect(readEvents('phase_complete').length).toBe(4);
 		});
 	});
 
