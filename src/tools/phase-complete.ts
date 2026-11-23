@@ -1464,6 +1464,55 @@ export async function executePhaseComplete(
 				gate_report: lockedPreflight,
 			});
 		}
+		// #3770 feedback round: an independent readiness re-read at the commit
+		// boundary, after the locked freshness checks and before ANY mutation
+		// (including the close intent). An indeterminate authority (torn tail,
+		// resetting marker, duplicate phase ids) or an unfinished task observed
+		// HERE refuses the whole completion with its own reason — the early
+		// check alone cannot, because state can change between the two reads
+		// and the mutating path does not reliably fail on a degraded authority.
+		const commitReadiness = await readUnfinishedPlannedTasks(dir, phase);
+		if (commitReadiness.kind === 'indeterminate') {
+			return JSON.stringify({
+				success: false,
+				phase,
+				status: 'blocked' as const,
+				reason: PLANNED_TASKS_UNKNOWN_REASON,
+				message: plannedTasksUnknownMessage(phase, commitReadiness.detail),
+				agentsDispatched,
+				agentsMissing: [],
+				warnings,
+				gate_report: lockedPreflight,
+				recovery: { kind: 'retry', action: 'phase_complete' },
+			});
+		}
+		if (
+			commitReadiness.kind === 'ok' &&
+			commitReadiness.unfinishedIds.length > 0
+		) {
+			return JSON.stringify({
+				success: false,
+				phase,
+				status: 'blocked' as const,
+				reason: PLANNED_TASKS_BLOCKED_REASON,
+				message: plannedTasksBlockedMessage(
+					phase,
+					commitReadiness.unfinishedIds,
+				),
+				agentsDispatched,
+				agentsMissing: [],
+				warnings,
+				gate_report: lockedPreflight,
+				recovery: {
+					kind: 'tool',
+					action: 'update_task_status',
+					args: {
+						task_id: commitReadiness.unfinishedIds[0],
+						status: 'completed',
+					},
+				},
+			});
+		}
 		// The close intent is the WAL record for the plan transition. Persist it
 		// only after the locked freshness and authoritative-plan validation, but
 		// before mutation, so rejected plans cannot publish misleading intents.
@@ -1537,55 +1586,6 @@ export async function executePhaseComplete(
 				warnings,
 				gate_report: commitPreflight,
 				recovery: { kind: 'retry', action: 'phase_complete' },
-			});
-		}
-		// #3770 feedback round: an independent readiness re-read at the commit
-		// boundary, after the locked freshness checks and before ANY mutation.
-		// An indeterminate authority (torn tail, resetting marker, duplicate
-		// phase ids) or an unfinished task observed HERE refuses the whole
-		// completion — the early check alone cannot, because state can change
-		// between the two reads and the mutating path does not reliably fail on
-		// a degraded authority.
-		const commitReadiness = await readUnfinishedPlannedTasks(dir, phase);
-		if (commitReadiness.kind === 'indeterminate') {
-			return JSON.stringify({
-				success: false,
-				phase,
-				status: 'blocked' as const,
-				reason: PLANNED_TASKS_UNKNOWN_REASON,
-				message: plannedTasksUnknownMessage(phase, commitReadiness.detail),
-				agentsDispatched,
-				agentsMissing: [],
-				warnings,
-				gate_report: commitPreflight,
-				recovery: { kind: 'retry', action: 'phase_complete' },
-			});
-		}
-		if (
-			commitReadiness.kind === 'ok' &&
-			commitReadiness.unfinishedIds.length > 0
-		) {
-			return JSON.stringify({
-				success: false,
-				phase,
-				status: 'blocked' as const,
-				reason: PLANNED_TASKS_BLOCKED_REASON,
-				message: plannedTasksBlockedMessage(
-					phase,
-					commitReadiness.unfinishedIds,
-				),
-				agentsDispatched,
-				agentsMissing: [],
-				warnings,
-				gate_report: commitPreflight,
-				recovery: {
-					kind: 'tool',
-					action: 'update_task_status',
-					args: {
-						task_id: commitReadiness.unfinishedIds[0],
-						status: 'completed',
-					},
-				},
 			});
 		}
 		if (

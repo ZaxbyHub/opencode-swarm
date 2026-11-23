@@ -227,7 +227,7 @@ describe('Task 2.4: Tighten missing-spec enforcement in phase-complete', () => {
 	});
 
 	describe('1. Missing spec.md + missing drift evidence + plan.json with incomplete tasks', () => {
-		test('warning mentions "incomplete task(s)" and "consider running critic_drift_verifier", phase succeeds', async () => {
+		test('refusal names the incomplete task(s) (PLANNED_TASKS_PENDING)', async () => {
 			// Write plan.json with phase 1 having incomplete tasks
 			// No tasks are 'completed' to avoid triggering completion-verify blocks
 			const planJson = {

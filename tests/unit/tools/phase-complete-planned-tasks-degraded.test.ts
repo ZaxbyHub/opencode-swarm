@@ -34,6 +34,7 @@ import { canonicalMkdtemp, removeTreeWithRetry } from '../../helpers/tmpdir';
 interface TaskFixture {
 	id: string;
 	status: string;
+	description?: string;
 }
 
 function planWithTasks(tasks: TaskFixture[]): Record<string, unknown> {
