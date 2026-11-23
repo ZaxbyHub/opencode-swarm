@@ -1251,11 +1251,31 @@ export function createGuardrailsHooks(
 						// still re-classifies as duplicate by design.
 						emitStageARoute('duplicate_result', sessionTaskId);
 					} else {
-						emitStageARoute(
+						const route =
 							takePendingGateRoute(input.sessionID, input.callID) ??
-								'no_task_correlation',
-							null,
-						);
+							'no_task_correlation';
+						// A PASS verdict with no task correlation is the silent
+						// Stage A wedge: the architect sees `gates_passed: true`
+						// while the receipt is dropped, so Stage B dispatches
+						// are later denied with TASK_WORKFLOW_STAGE_A_REQUIRED —
+						// and without a committed settlement (background-
+						// dispatched coder rounds write no settlement WAL)
+						// /swarm recover cannot repair it either. Surface the
+						// dropped receipt as a visible, cooldown-gated advisory
+						// in addition to the bounded route event. The
+						// attribution_ambiguous route is excluded: it already
+						// emitted its own, more specific advisory at
+						// toolBefore time. A FAIL needs no advisory here: the
+						// failure is already the tool's own visible output, so
+						// no signal is silently lost.
+						if (verdict.kind === 'pass' && route === 'no_task_correlation') {
+							emitDurableAttributionAdvisory(
+								input.sessionID,
+								`${effectiveDirectory}\u0000stage-a-unattributed-pass`,
+								'STAGE A RECEIPT NOT ATTRIBUTED: pre_check_batch passed but the result could not be attributed to any task — no session task correlation (in-memory state wiped by a restart or reset) and no durable settlement candidate (background-dispatched coder rounds write no settlement WAL). The green result was NOT recorded as Stage A evidence; reviewer/test_engineer dispatches will be denied with TASK_WORKFLOW_STAGE_A_REQUIRED, and /swarm recover cannot repair this wedge class without a committed settlement. Remediation: dispatch a coder round that performs a real in-scope mutation (its accepted settlement re-arms attribution), then re-run pre_check_batch. If this was an ad-hoc gate run with no task in flight, no action is needed.',
+							);
+						}
+						emitStageARoute(route, null);
 					}
 				} catch (routeError) {
 					warn('Stage A route classification failed', {

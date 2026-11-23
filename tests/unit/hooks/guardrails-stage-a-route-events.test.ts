@@ -185,6 +185,28 @@ describe('stage-a-route-events', () => {
 			expect(events[0]?.guardrailsEnabled).toBe(enabled);
 		});
 
+		test(`unattributed pass surfaces the STAGE A RECEIPT NOT ATTRIBUTED advisory (guardrails ${enabled ? 'on' : 'off'})`, async () => {
+			// The silent-wedge communication fix: a green pre_check_batch with
+			// no task correlation must not look like success. The receipt is
+			// still dropped (fail-open, bounded route event unchanged), but a
+			// visible, cooldown-gated advisory now tells the architect what
+			// was NOT recorded, why Stage B will be denied, and the
+			// settlement-based remediation.
+			await drive(enabled, 'c-nocorr-adv', PASS_PAYLOAD, 'none');
+			const events = routeEvents(directory);
+			expect(events).toHaveLength(1);
+			expect(events[0]?.route).toBe('no_task_correlation');
+			expect(events[0]?.taskId).toBeNull();
+			const session = ensureAgentSession('architect');
+			const advisory = session.pendingAdvisoryMessages?.find((m) =>
+				m.includes('STAGE A RECEIPT NOT ATTRIBUTED'),
+			);
+			expect(advisory).toBeDefined();
+			expect(advisory).toContain('TASK_WORKFLOW_STAGE_A_REQUIRED');
+			expect(advisory).toContain('no settlement WAL');
+			expect(advisory).toContain('re-run pre_check_batch');
+		});
+
 		test(`duplicate replay is idempotent: valid_pass then duplicate_result, state frozen (guardrails ${enabled ? 'on' : 'off'})`, async () => {
 			await drive(enabled, 'c-dup', PASS_PAYLOAD, 'correlated');
 			// Second delivery of the SAME callID after the pending receipt was
@@ -329,6 +351,51 @@ describe('stage-a-route-events', () => {
 		expect(events).toHaveLength(1);
 		expect(events[0]?.route).toBe('attribution_ambiguous');
 		expect(events[0]?.taskId).toBeNull();
+		// The attribution_ambiguous route already carries its own specific
+		// toolBefore advisory (STAGE A ATTRIBUTION UNBOUND above); the
+		// no-correlation pass advisory must not double-advise here.
+		const session = ensureAgentSession('architect');
+		expect(
+			session.pendingAdvisoryMessages?.some((m) =>
+				m.includes('STAGE A RECEIPT NOT ATTRIBUTED'),
+			),
+		).toBeFalsy();
+	});
+
+	test('unattributed fail stays advisory-silent: the failure is the visible tool output', async () => {
+		// A FAIL verdict that cannot be attributed drops no successful-looking
+		// signal: gates_passed: false is the tool's own output, so the
+		// receipt-not-attributed advisory (which exists to correct a false
+		// success impression) must stay silent.
+		const FAIL_PAYLOAD = JSON.stringify({
+			gates_passed: false,
+			total_duration_ms: 1,
+			batch_status: 'completed',
+			lint: { ran: true, duration_ms: 1 },
+			secretscan: {
+				ran: true,
+				duration_ms: 1,
+				result: {
+					count: 0,
+					findings: [],
+					files_scanned: 5,
+					incomplete_files: 0,
+					incomplete_paths: [],
+				},
+			},
+			sast_scan: { ran: true, duration_ms: 1, result: { verdict: 'fail' } },
+			quality_budget: { ran: false, duration_ms: 0 },
+		});
+		await drive(true, 'c-nocorr-fail', FAIL_PAYLOAD, 'none');
+		const events = routeEvents(directory);
+		expect(events).toHaveLength(1);
+		expect(events[0]?.route).toBe('no_task_correlation');
+		const session = ensureAgentSession('architect');
+		expect(
+			session.pendingAdvisoryMessages?.some((m) =>
+				m.includes('STAGE A RECEIPT NOT ATTRIBUTED'),
+			),
+		).toBeFalsy();
 	});
 
 	test('event lines stay within the 2048-byte contract bound', async () => {
