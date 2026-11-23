@@ -75,6 +75,15 @@ docs/training-vault-remediation.md.
 
 ## Known bounds
 
+- The key/value arm's bounded placeholder bodies (64 characters) trade a
+  shaped gap for linearity: a HAND-WRITTEN placeholder label longer than
+  64 characters ends the value at its bracket, so a tail after it
+  survives (`password=[REDACTED:<65+ chars>]tail`). The redactor's own
+  labels are at most 36 characters, so text the arms themselves produce
+  never hits the shape; the alternative was the quadratic arm.
+- A KEY=VALUE value longer than roughly 300k characters is not redacted
+  at all (pre-existing: the JS engine silently declines the match past
+  that size). Chunking the value match is the fix.
 - On the TRAINING vault path the key/value arm still skips a value that
   starts with the capture-time `<redacted` marker: that skip is
   load-bearing for the capture-history redaction count, so a composite
