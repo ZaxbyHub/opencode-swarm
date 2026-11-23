@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.205.6",
+  "tagCommit": "40d3e53d88861c51f248431e0166f488f4873ab6",
+  "targetCommitish": "40d3e53d88861c51f248431e0166f488f4873ab6",
+  "releaseBodySha256": "88202c043fbc5cf4adac2c02a2e8daa2b27ebe8f9209627e590aaeb5b5b767d8",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/sast-docs-only-baseline-coverage-fix.md",
+      "sha256": "b6443a03a1b72c9c11cd8f50ca1b0bd7d7c45157d6ad3acd1ae6118124607116"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/test-engineer-exempt-route-completeness-wedge.md",
+      "sha256": "561a9af7233bb5d0a2f1807de599bc04e9e2e3fcc088f38219df7d0867991592"
+    }
+  ]
+}
