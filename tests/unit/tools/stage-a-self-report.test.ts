@@ -234,4 +234,92 @@ describe('stage-a-self-report', () => {
 		).toBeFalsy();
 		expect(routeEvents(directory)).toHaveLength(0);
 	});
+
+	test('a mis-settled background no-mutation reconciles and records stage_a_passed in the same gate run', async () => {
+		// The exact pre-fix directory-scope wedge shape: the workflow's last
+		// transition is a background-coder dispatch_no_mutation although the
+		// delegation record's baseline shows real in-scope changes in the
+		// working tree. The self-report must reconcile the accepted mutation
+		// and then record stage_a_passed — no fresh coder round, no recover.
+		const { spawnSync } = await import('node:child_process');
+		const os = await import('node:os');
+		const git = (...args: string[]) => {
+			const result = spawnSync('git', args, {
+				cwd: directory,
+				stdio: 'ignore',
+				timeout: 5_000,
+				windowsHide: true,
+			});
+			if (result.status !== 0) throw new Error(`git ${args.join(' ')} failed`);
+		};
+		git('init', '-b', 'main');
+		git('config', 'user.email', 'test@example.com');
+		git('config', 'user.name', 'Test');
+		fs.mkdirSync(path.join(directory, 'context'), { recursive: true });
+		fs.writeFileSync(path.join(directory, 'context/entry-a.md'), 'v1\n');
+		fs.writeFileSync(path.join(directory, 'context/entry-b.md'), 'v1\n');
+		git('add', 'context/entry-a.md', 'context/entry-b.md');
+		git('commit', '-m', 'fixture');
+		const { captureWorkspaceSnapshot } = await import(
+			'../../../src/background/workspace-snapshot'
+		);
+		const baseline = captureWorkspaceSnapshot(directory);
+		// The coder's real (uncommitted) changes under the declared directory.
+		fs.writeFileSync(path.join(directory, 'context/entry-a.md'), 'v2\n');
+
+		const correlationId = 'child-reconcile-1';
+		fs.mkdirSync(path.join(directory, '.swarm'), { recursive: true });
+		fs.writeFileSync(
+			path.join(directory, '.swarm', 'background-delegations.jsonl'),
+			`${JSON.stringify({
+				schemaVersion: 3,
+				correlationId,
+				jobId: null,
+				subagentSessionId: correlationId,
+				parentSessionId: 'architect-parent',
+				callID: 'call-reconcile-1',
+				normalizedAgent: 'coder',
+				swarmPrefixedAgent: 'astra_coder',
+				planTaskId: '1.1',
+				evidenceTaskId: '1.1',
+				status: 'consumed',
+				createdAt: Date.now() - 60_000,
+				updatedAt: Date.now(),
+				taskChangeContext: {
+					baseline,
+					declaredFiles: ['context'],
+				},
+			})}\n`,
+		);
+
+		// Wedge shape: idle with the background no-mutation as last transition.
+		await settle('1.1');
+		await transitionTaskWorkflowEvidence(directory, '1.1', {
+			type: 'repair_idle',
+			expectedGeneration: 1,
+			transitionId: 'repair:reconcile-test',
+		});
+		await transitionTaskWorkflowEvidence(directory, '1.1', {
+			type: 'dispatch_no_mutation',
+			agentType: 'coder',
+			expectedGeneration: 2,
+			transitionId: `background-coder:${correlationId}`,
+		});
+
+		await report(PASS_PAYLOAD, { sessionTaskId: '1.1' });
+
+		const snapshot = getTaskWorkflowSnapshot(
+			await readTaskEvidence(directory, '1.1'),
+		);
+		expect(snapshot.state).toBe('pre_check_passed');
+		expect(snapshot.lastOutcome).toBe('stage_a_passed');
+		const session = ensureAgentSession('architect');
+		const advisory = session.pendingAdvisoryMessages?.find((m) =>
+			m.includes('STAGE A RECONCILED'),
+		);
+		expect(advisory).toBeDefined();
+		expect(advisory).toContain('1.1');
+		const events = routeEvents(directory);
+		expect(events.some((event) => event.route === 'valid_pass')).toBe(true);
+	});
 });
