@@ -179,9 +179,12 @@ describe('#3773 memory-family merge destination refusal', () => {
 		// The refusal IS the propagated version-read failure (sqlite reports
 		// the missing `version` column), wrapped by the migration's catch.
 		expect(message).toContain('no such column');
-		// Handle released: the DB file is removable immediately after (no
-		// leaked pre-check connection holds it on Windows).
-		expect(() => fs.rmSync(destDb, { force: true })).not.toThrow();
+		// Handle released: the DB file is removable right after (no leaked
+		// pre-check connection holds it on Windows — removeTreeWithRetry
+		// throws once its retry budget is exhausted if any handle persists,
+		// so a leaked connection still fails this leg; routed through the
+		// shared helper per the #2969 raw-rm crash-consistency ratchet).
+		expect(() => removeTreeWithRetry(destDb)).not.toThrow();
 	});
 
 	test('current-version destination merges the source row (preserving leg)', async () => {
