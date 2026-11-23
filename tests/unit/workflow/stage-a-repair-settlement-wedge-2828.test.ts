@@ -22,6 +22,7 @@ import { createSafeTestDir } from '../../helpers/safe-test-dir';
 import {
 	readRepairEvents,
 	settleAt,
+	stripRequirementsLedger,
 	writeCommittedWal,
 	writeGreenBundles,
 } from './_settlement-recovery-2828-helpers';
@@ -121,8 +122,9 @@ describe('repairWedgedStageA settlement wedge (issue #2828)', () => {
 		expect(readRepairEvents(directory)).toHaveLength(1);
 	});
 
-	test('idle without a settlement WAL is still refused (nothing justifies repair)', async () => {
+	test('idle without any durable settlement receipt is still refused (nothing justifies repair)', async () => {
 		await settleAt(directory, '5.5', 'idle');
+		stripRequirementsLedger(directory, '5.5');
 		await writeGreenBundles(directory);
 
 		const { results } = await repairWedgedStageA(directory, {
@@ -139,8 +141,9 @@ describe('repairWedgedStageA settlement wedge (issue #2828)', () => {
 		expect(readRepairEvents(directory)).toHaveLength(0);
 	});
 
-	test('idle with only a not-accepted settlement WAL is still refused', async () => {
+	test('idle with only a not-accepted settlement WAL and no receipt is still refused', async () => {
 		await settleAt(directory, '5.6', 'idle');
+		stripRequirementsLedger(directory, '5.6');
 		writeCommittedWal(directory, '5.6', false);
 		await writeGreenBundles(directory);
 
@@ -263,8 +266,9 @@ describe('scanWedgedStageA classification (issue #2828)', () => {
 		});
 	});
 
-	test('classifies a receipts-less idle task healthy, not settlement_wedge', async () => {
+	test('classifies a receipt-less idle task healthy, not settlement_wedge', async () => {
 		await settleAt(directory, '6.3', 'idle');
+		stripRequirementsLedger(directory, '6.3');
 		await writeGreenBundles(directory);
 
 		const scan = await scanWedgedStageA(directory, { taskIds: ['6.3'] });
