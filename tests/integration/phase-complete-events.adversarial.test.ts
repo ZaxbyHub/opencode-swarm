@@ -12,7 +12,6 @@ import { executePhaseComplete } from '../../src/tools/phase-complete';
 
 describe('phase_complete integration — adversarial scenarios', () => {
 	let tempDir: string;
-
 	beforeEach(() => {
 		resetSwarmState();
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-adv-test-'));
@@ -23,7 +22,6 @@ describe('phase_complete integration — adversarial scenarios', () => {
 		fs.rmSync(tempDir, { recursive: true, force: true });
 		resetSwarmState();
 	});
-
 	/**
 	 * Helper to read events.jsonl and parse all lines
 	 * @param eventType - Optional filter to only return events of this type
@@ -57,7 +55,6 @@ describe('phase_complete integration — adversarial scenarios', () => {
 		}
 		return events;
 	}
-
 	function writeConfig(config: Record<string, unknown>): void {
 		config.knowledge ??= { enabled: false, sweep_enabled: false };
 		config.curator ??= { enabled: false };
@@ -67,7 +64,6 @@ describe('phase_complete integration — adversarial scenarios', () => {
 			JSON.stringify(config, null, 2),
 		);
 	}
-
 	/**
 	 * Helper to write pre-existing content to events.jsonl
 	 */
@@ -75,7 +71,6 @@ describe('phase_complete integration — adversarial scenarios', () => {
 		const eventsPath = path.join(tempDir, '.swarm', 'events.jsonl');
 		fs.writeFileSync(eventsPath, content, 'utf-8');
 	}
-
 	/**
 	 * Helper to write retrospective evidence bundle for a phase
 	 */
@@ -116,7 +111,6 @@ describe('phase_complete integration — adversarial scenarios', () => {
 			JSON.stringify(evidence, null, 2),
 		);
 	}
-
 	/**
 	 * Helper to write gate evidence files for Phase 4 mandatory gates
 	 */
@@ -157,7 +151,6 @@ describe('phase_complete integration — adversarial scenarios', () => {
 			JSON.stringify(driftVerifier, null, 2),
 		);
 	}
-
 	describe('1. Concurrent event appends', () => {
 		it('two phase_complete calls back-to-back to same session — both events appear, no corruption', async () => {
 			// Config: no required agents to simplify
@@ -169,7 +162,6 @@ describe('phase_complete integration — adversarial scenarios', () => {
 					policy: 'enforce',
 				},
 			});
-
 			const sessionID = 'sess1';
 			ensureAgentSession(sessionID);
 
@@ -192,7 +184,6 @@ describe('phase_complete integration — adversarial scenarios', () => {
 			// For the second call, we need to record agents again since state resets
 			recordPhaseAgentDispatch(sessionID, 'coder');
 			recordPhaseAgentDispatch(sessionID, 'reviewer');
-
 			writeRetro(2);
 			writeGateEvidence(2);
 			const result2 = await executePhaseComplete(
@@ -203,7 +194,6 @@ describe('phase_complete integration — adversarial scenarios', () => {
 				},
 				tempDir,
 			);
-
 			const parsed1 = JSON.parse(result1);
 			const parsed2 = JSON.parse(result2);
 
@@ -219,13 +209,11 @@ describe('phase_complete integration — adversarial scenarios', () => {
 			expect(events[0].event).toBe('phase_complete');
 			expect(events[0].phase).toBe(1);
 			expect(events[0].summary).toBe('First phase complete');
-
 			expect(events[1].event).toBe('phase_complete');
 			expect(events[1].phase).toBe(2);
 			expect(events[1].summary).toBe('Second phase complete');
 		});
 	});
-
 	describe('2. Events.jsonl already has content', () => {
 		it('pre-existing content in events.jsonl is preserved (append, not overwrite)', async () => {
 			writeConfig({
@@ -248,7 +236,6 @@ describe('phase_complete integration — adversarial scenarios', () => {
 			// Now call phase_complete
 			const sessionID = 'sess1';
 			ensureAgentSession(sessionID);
-
 			writeRetro(1);
 			writeGateEvidence(1);
 			const result = await executePhaseComplete(
@@ -259,7 +246,6 @@ describe('phase_complete integration — adversarial scenarios', () => {
 				},
 				tempDir,
 			);
-
 			const parsed = JSON.parse(result);
 			expect(parsed.success).toBe(true);
 
@@ -274,7 +260,6 @@ describe('phase_complete integration — adversarial scenarios', () => {
 			expect(phaseEvents[0].phase).toBe(1);
 		});
 	});
-
 	describe('3. Events.jsonl with no newline at end', () => {
 		it('events appended after content without trailing newline produce valid JSONL', async () => {
 			writeConfig({
@@ -298,7 +283,6 @@ describe('phase_complete integration — adversarial scenarios', () => {
 			// Now call phase_complete - it should append correctly
 			const sessionID = 'sess1';
 			ensureAgentSession(sessionID);
-
 			writeRetro(1);
 			writeGateEvidence(1);
 			const result = await executePhaseComplete(
@@ -309,7 +293,6 @@ describe('phase_complete integration — adversarial scenarios', () => {
 				},
 				tempDir,
 			);
-
 			const parsed = JSON.parse(result);
 			expect(parsed.success).toBe(true);
 
@@ -324,14 +307,12 @@ describe('phase_complete integration — adversarial scenarios', () => {
 			expect(phaseEvents[0].phase).toBe(1);
 		});
 	});
-
 	describe('4. Read-only .swarm directory', () => {
 		it('fails closed before event write when the phase commit lock cannot be created', async () => {
 			// Skip on Windows as file permissions are different
 			if (process.platform === 'win32') {
 				return; // Test skipped on Windows
 			}
-
 			writeConfig({
 				phase_complete: {
 					enabled: true,
@@ -340,7 +321,6 @@ describe('phase_complete integration — adversarial scenarios', () => {
 					policy: 'enforce',
 				},
 			});
-
 			const sessionID = 'sess1';
 			ensureAgentSession(sessionID);
 
@@ -375,7 +355,6 @@ describe('phase_complete integration — adversarial scenarios', () => {
 				);
 				return;
 			}
-
 			try {
 				// Does not throw — a read-only .swarm directory must not crash
 				// phase_complete, regardless of which write path ultimately
