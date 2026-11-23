@@ -31,6 +31,9 @@
  * beyond its own bounded I/O — every error path is warn-only.
  */
 
+import { readDelegations } from '../background/pending-delegations';
+import { scopeSetContainsFile } from '../background/stage-b-gates';
+import { changedFilesSinceSnapshot } from '../background/workspace-snapshot';
 import {
 	getTaskWorkflowSnapshot,
 	readTaskEvidence,
@@ -134,15 +137,42 @@ export async function reportToolSideStageA(
 			await readTaskEvidence(input.directory, taskId),
 		);
 
+		// Mis-settled background completion reconciliation: the pre-fix
+		// directory-scope attribution bug recorded real mutations as
+		// dispatch_no_mutation (the durable evidence still shows it), leaving
+		// the task wedged at idle with the coder's changes in the working
+		// tree and no path to Stage A. When the last workflow transition is a
+		// background-coder no-mutation settlement, re-derive that record's
+		// attribution with the fixed predicate and record the accepted
+		// mutation it should have carried — the wedge then heals on this very
+		// gate run instead of demanding a fresh coder round or a human
+		// /swarm recover.
+		let effectiveSnapshot = snapshot;
+		if (
+			verdict.kind === 'pass' &&
+			snapshot.state === 'idle' &&
+			snapshot.lastOutcome === 'dispatch_no_mutation' &&
+			typeof snapshot.lastTransitionId === 'string' &&
+			snapshot.lastTransitionId.startsWith('background-coder:')
+		) {
+			const reconciled = await reconcileMisSettledBackgroundMutation(
+				input.directory,
+				taskId,
+				snapshot,
+				input,
+			);
+			if (reconciled) effectiveSnapshot = reconciled;
+		}
+
 		// Duplicate guard (hook-path idempotency): a Stage A pass already
 		// recorded for this generation by either producer needs no second
 		// transition.
 		if (
 			verdict.kind === 'pass' &&
-			snapshot.state === 'pre_check_passed' &&
-			snapshot.lastOutcome === 'stage_a_passed' &&
-			typeof snapshot.lastTransitionId === 'string' &&
-			snapshot.lastTransitionId.startsWith('pre-check')
+			effectiveSnapshot.state === 'pre_check_passed' &&
+			effectiveSnapshot.lastOutcome === 'stage_a_passed' &&
+			typeof effectiveSnapshot.lastTransitionId === 'string' &&
+			effectiveSnapshot.lastTransitionId.startsWith('pre-check')
 		) {
 			emitRoute(input, 'duplicate_result', taskId);
 			return;
@@ -151,7 +181,7 @@ export async function reportToolSideStageA(
 		try {
 			await transitionTaskWorkflowEvidence(input.directory, taskId, {
 				type: verdict.kind === 'pass' ? 'stage_a_passed' : 'stage_a_failed',
-				expectedGeneration: snapshot.generation,
+				expectedGeneration: effectiveSnapshot.generation,
 				transitionId: `pre-check-tool:${input.toolCallId}`,
 			});
 			emitRoute(
@@ -196,5 +226,75 @@ export async function reportToolSideStageA(
 					? error.message.slice(0, 120)
 					: String(error).slice(0, 120),
 		});
+	}
+}
+
+/**
+ * Reconcile a mis-settled background coder completion: the last workflow
+ * transition is a `background-coder:*` `dispatch_no_mutation`, but the
+ * delegation record's baseline re-derived with the fixed directory-aware
+ * attribution shows real in-scope changes. Records the accepted mutation the
+ * completion should have carried and returns the updated snapshot — or null
+ * when nothing reconciles (record missing, later dispatch exists, baseline
+ * unreadable, or genuinely no in-scope change). Fail-open, never throws.
+ */
+async function reconcileMisSettledBackgroundMutation(
+	directory: string,
+	taskId: string,
+	snapshot: ReturnType<typeof getTaskWorkflowSnapshot>,
+	input: ToolSideStageAInput,
+): Promise<ReturnType<typeof getTaskWorkflowSnapshot> | null> {
+	try {
+		const correlationId = snapshot.lastTransitionId!.slice(
+			'background-coder:'.length,
+		);
+		const taskRecords = readDelegations(directory).filter(
+			(record) =>
+				record.evidenceTaskId === taskId || record.planTaskId === taskId,
+		);
+		const record = taskRecords.find(
+			(candidate) => candidate.correlationId === correlationId,
+		);
+		if (!record?.taskChangeContext) return null;
+		// Only the LATEST dispatch for the task may reconcile: a later
+		// delegation (in flight or completed) owns the working tree now.
+		const laterExists = taskRecords.some(
+			(candidate) => candidate.updatedAt > record.updatedAt,
+		);
+		if (laterExists) return null;
+		const observed = changedFilesSinceSnapshot(
+			directory,
+			record.taskChangeContext.baseline,
+		);
+		if (observed === null) return null;
+		const declared = new Set(record.taskChangeContext.declaredFiles ?? []);
+		const attributed = observed.filter((file) =>
+			scopeSetContainsFile(declared, file),
+		);
+		if (attributed.length === 0) return null;
+		const updated = await transitionTaskWorkflowEvidence(directory, taskId, {
+			type: 'accepted_mutation',
+			agentType: 'coder',
+			expectedGeneration: snapshot.generation,
+			transitionId: `background-coder-reconcile:${correlationId}`,
+		});
+		emitDurableAttributionAdvisory(
+			input.sessionID,
+			`${directory}\u0000stage-a-reconciled`,
+			`STAGE A RECONCILED for task ${taskId}: its last background coder completion had been mis-settled as dispatch_no_mutation (the pre-fix directory-scope attribution bug); ${attributed.length} changed file(s) under the declared scope are now recorded as the accepted mutation, and this green pre_check_batch records stage_a_passed. No /swarm recover or fresh coder round needed.`,
+		);
+		return getTaskWorkflowSnapshot(updated);
+	} catch (error) {
+		warn(
+			'pre_check_batch: mis-settled background completion reconciliation skipped (fail-open)',
+			{
+				taskId,
+				error:
+					error instanceof Error
+						? error.message.slice(0, 120)
+						: String(error).slice(0, 120),
+			},
+		);
+		return null;
 	}
 }

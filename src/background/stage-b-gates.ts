@@ -171,6 +171,8 @@ function scopeSetContainsFile(scope: Set<string>, file: string): boolean {
 	return false;
 }
 
+export { scopeSetContainsFile };
+
 /** Nullable twin of {@link scopeSetContainsFile}: a missing scope contains nothing. */
 function scopeSetMaybeContainsFile(
 	scope: Set<string> | null | undefined,
