@@ -883,8 +883,17 @@ async function cleanupRecoveredWorktree(
 	 * cleanup pass (completeCoderSettlementCleanup, recovery scans, resume)
 	 * retains consistently; an explicit option overrides.
 	 */
-	options?: { retainBranch?: boolean },
-): Promise<void> {
+	options?: {
+		retainBranch?: boolean;
+		/**
+		 * #3888 r7: G1 runs fail-closed dirty-work preservation only for
+		 * denied/cancelled. The ABORTED-recovery retry passes 'cancelled' so a
+		 * lane that was left dirty by an uncertain first attempt is preserved
+		 * (or the retry aborts) rather than force-removed unpreserved.
+		 */
+		cleanupReason?: 'success' | 'cancelled';
+	},
+): Promise<'completed' | 'skipped-uncertain'> {
 	const retainBranch =
 		options?.retainBranch ?? descriptor.landedUnstaged === true;
 	const branchExists = (): boolean =>
@@ -908,15 +917,32 @@ async function cleanupRecoveredWorktree(
 			queuedAt: Date.now(),
 		});
 	if (hasResidue) {
-		await cleanupStandardWorktreeForCallId(
+		const cleanupResult = await cleanupStandardWorktreeForCallId(
 			descriptor.callID,
-			'success',
+			options?.cleanupReason ?? 'success',
 			directory,
 			descriptor.worktreeDir ?? undefined,
 			retainBranch ? { retainBranch: true } : undefined,
 		);
-	}
-	if (
+		if (cleanupResult.skippedOwnershipUncertain) {
+			// #3888: the ownership inventory was unreadable, so destruction was
+			// skipped and the tracking entry retained. Leave the WAL incomplete
+			// (retryable) and return before both the UNVERIFIED throw and the
+			// marker/cleanupComplete completion below.
+			return 'skipped-uncertain';
+		}
+		if (!cleanupResult.skippedReprovisioned) {
+			if (
+				existsSync(descriptor.worktreePath) ||
+				(branchExists() && !retainBranch)
+			) {
+				throw new Error('CODER_SETTLEMENT_WORKTREE_CLEANUP_UNVERIFIED');
+			}
+		}
+		// #3888 confirmed supersession: the surviving lane/branch belongs to a
+		// LIVE dispatch — not this WAL's verification debt. Fall through to
+		// marker removal + cleanupComplete.
+	} else if (
 		existsSync(descriptor.worktreePath) ||
 		(branchExists() && !retainBranch)
 	) {
@@ -941,6 +967,7 @@ async function cleanupRecoveredWorktree(
 	) {
 		throw new Error('CODER_SETTLEMENT_OWNER_CLEANUP_FAILED');
 	}
+	return 'completed';
 }
 
 /**
@@ -1042,7 +1069,21 @@ export async function completeCoderSettlementCleanup(
 		if ((await preserveHistoricalSelfHealedSource(directory, wal)) === 'orphan')
 			return;
 		if (!wal.worktree || wal.cleanupComplete === true) return;
-		await cleanupRecoveredWorktree(directory, wal.worktree);
+		if (
+			(await cleanupRecoveredWorktree(directory, wal.worktree, {
+				// #3888 r8: an ABORTED settlement's retryable cleanup must use
+				// fail-closed dirty-work preservation (G1 runs preservation only
+				// for denied/cancelled); COMMITTED settlements keep the landed
+				// 'success' semantics. Covers every entry point into this
+				// function (abortCoderSettlement retry included).
+				cleanupReason: wal.state === 'ABORTED' ? 'cancelled' : 'success',
+			})) === 'skipped-uncertain'
+		) {
+			// #3888: ownership was uncertain — destruction skipped, lane and
+			// tracking retained. Do NOT mark cleanupComplete: a later retry
+			// re-runs this pass once the inventory is readable again.
+			return;
+		}
 		await writeWal(filePath, { ...wal, cleanupComplete: true });
 	});
 }
@@ -1100,7 +1141,14 @@ async function selfHealMissingLaneWorktree(
 	// un-abort the settlement, and must never re-wedge update_task_status —
 	// re-wedging is exactly the deadlock this change removes.
 	try {
-		await cleanupRecoveredWorktree(directory, descriptor);
+		if (
+			(await cleanupRecoveredWorktree(directory, descriptor)) ===
+			'skipped-uncertain'
+		) {
+			// #3888: ownership uncertain - do NOT mark cleanup complete; the
+			// next recovery pass retries once the inventory is readable.
+			return false;
+		}
 		const healedWal = await readWal(filePath, taskId);
 		if (healedWal !== null) {
 			await writeWal(filePath, { ...healedWal, cleanupComplete: true });
@@ -1133,6 +1181,48 @@ export async function recoverCoderSettlement(
 		if (existingWal === null) return null;
 		let wal: CoderSettlementWal = existingWal;
 		if (wal.state === 'ABORTED') {
+			// #3888 r3: a self-healed abort may still carry an INCOMPLETE worktree
+			// cleanup (ownership was uncertain at heal time). Retry it here —
+			// completion only when cleanup actually ran; uncertainty leaves the
+			// WAL retryable again rather than stranding the lane teardown.
+			// Only retry when residue is actually present: an uncertain skip
+			// always LEFT THE LANE ON DISK, while a historical self-healed WAL
+			// (its lane long gone) must stay byte-stable (#3409 contract).
+			if (
+				wal.worktree &&
+				wal.cleanupComplete !== true &&
+				existsSync(wal.worktree.worktreePath)
+			) {
+				// #3903 FB-002: cleanup of an ABORTED settlement is best-effort.
+				// cleanupRecoveredWorktree throws when a preserved lane or branch
+				// survives (preservation commit rejected, Windows EBUSY, ...); an
+				// uncaught throw here wedges update_task_status, close-terminal and
+				// every later re-dispatch — the same deadlock
+				// selfHealMissingLaneWorktree already avoids. Record the failure,
+				// leave cleanupComplete unset (retryable), and continue to null.
+				let abortedCleanupCompleted = false;
+				try {
+					abortedCleanupCompleted =
+						(await cleanupRecoveredWorktree(directory, wal.worktree, {
+							cleanupReason: 'cancelled',
+						})) !== 'skipped-uncertain';
+				} catch (error) {
+					logger.criticalWarn(
+						`[coder-settlement] aborted task ${taskId} retry cleanup failed; settlement stays retryable: ${
+							error instanceof Error ? error.message : String(error)
+						}`,
+					);
+				}
+				if (abortedCleanupCompleted) {
+					const abortedWal = await readWal(filePath, taskId);
+					if (abortedWal !== null) {
+						await writeWal(filePath, {
+							...abortedWal,
+							cleanupComplete: true,
+						});
+					}
+				}
+			}
 			// Earlier releases could declare a missing lane unrecoverable while its
 			// persisted source object survived. Preserve that historical work without
 			// reviving a stale task generation or automatically applying its changes.
@@ -1143,7 +1233,18 @@ export async function recoverCoderSettlement(
 		}
 		if (wal.state === 'COMMITTED') {
 			if (wal.worktree && wal.cleanupComplete !== true) {
-				await cleanupRecoveredWorktree(directory, wal.worktree);
+				if (
+					(await cleanupRecoveredWorktree(directory, wal.worktree, {
+						// #3903 FB-001: this is a RETRY of an incomplete WAL, not the
+						// original successful landing. 'success' would skip FR-001c
+						// dirty-work preservation and force-remove a failed/cancelled
+						// lane plus branch -D; retries must fail closed instead.
+						cleanupReason: 'cancelled',
+					})) === 'skipped-uncertain'
+				) {
+					// #3888: ownership uncertain — leave the WAL retryable.
+					return null;
+				}
 				await writeWal(filePath, { ...wal, cleanupComplete: true });
 			}
 			return null;
@@ -1231,9 +1332,16 @@ export async function recoverCoderSettlement(
 						const committed = await commitPrepared(directory, wal, {
 							landedUnstaged,
 						});
-						await cleanupRecoveredWorktree(directory, worktree, {
-							retainBranch: landedUnstaged,
-						});
+						if (
+							(await cleanupRecoveredWorktree(directory, worktree, {
+								retainBranch: landedUnstaged,
+							})) === 'skipped-uncertain'
+						) {
+							// #3888: ownership uncertain — return the committed
+							// settlement WITHOUT marking cleanup complete; the
+							// WAL stays retryable for a later pass.
+							return committed;
+						}
 						// Re-read before the terminal write so commitPrepared's
 						// durable landedUnstaged stamp is not clobbered by this
 						// spread of the older in-memory wal (mirrors the resume
@@ -1361,11 +1469,16 @@ export async function recoverCoderSettlement(
 						`CODER_SETTLEMENT_MERGE_RECOVERY_REQUIRED: transition ${wal.transitionId} for task ${taskId} worktree merge-back did not reach merged (${filePath}, state ${wal.state}, outcome ${mergeResult.outcome}${mergeResult.outcome === 'failed' && mergeResult.message ? `: ${mergeResult.message}` : ''}). Run /swarm recover ${taskId} (or /swarm reset-session), then retry; do not remove the WAL by hand.`,
 					);
 				}
-				await cleanupRecoveredWorktree(directory, descriptor, {
-					// #2508: a squash-unstaged landing intentionally keeps the lane
-					// branch as the backup for the unstaged bytes.
-					retainBranch: mergeResult.strategy === 'squash-unstaged',
-				});
+				if (
+					(await cleanupRecoveredWorktree(directory, descriptor, {
+						// #2508: a squash-unstaged landing intentionally keeps the lane
+						// branch as the backup for the unstaged bytes.
+						retainBranch: mergeResult.strategy === 'squash-unstaged',
+					})) === 'skipped-uncertain'
+				) {
+					// #3888: ownership uncertain — WAL stays retryable.
+					return recovered;
+				}
 				const committedWal = await readWal(filePath, taskId);
 				if (committedWal === null) {
 					throw new Error('CODER_SETTLEMENT_WAL_MISSING');
@@ -1451,7 +1564,13 @@ export async function recoverCoderSettlement(
 		}
 		const committed = await commitPrepared(directory, wal);
 		if (wal.worktree) {
-			await cleanupRecoveredWorktree(directory, wal.worktree);
+			if (
+				(await cleanupRecoveredWorktree(directory, wal.worktree)) ===
+				'skipped-uncertain'
+			) {
+				// #3888: ownership uncertain — WAL stays retryable.
+				return committed;
+			}
 			const committedWal = await readWal(filePath, taskId);
 			if (committedWal === null) {
 				throw new Error('CODER_SETTLEMENT_WAL_MISSING');

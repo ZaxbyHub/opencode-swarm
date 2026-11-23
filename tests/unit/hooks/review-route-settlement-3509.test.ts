@@ -37,7 +37,6 @@ import {
 import { workflowGateStatePath } from '../../../src/pr-review/persistence';
 import {
 	advanceTaskState,
-	ensureAgentSession,
 	getStageBRouteEvidence,
 	getTaskState,
 	recordModifiedFilesForTask,
@@ -46,6 +45,7 @@ import {
 } from '../../../src/state';
 import { createIsolatedTestEnv } from '../../helpers/isolated-test-env.js';
 import { canonicalMkdtemp, removeTreeWithRetry } from '../../helpers/tmpdir';
+import { ensureSessionDrained } from './_session-rehydration-drain';
 
 const SESSION = 'sess-3509';
 
@@ -159,19 +159,19 @@ describe('review route settlement (#3509/#3516)', () => {
 		isolatedEnv = undefined;
 	});
 
-	const fixture = (taskIds: string[]): string => {
+	const fixture = async (taskIds: string[]): Promise<string> => {
 		const dir = canonicalMkdtemp('route-settle-3509-');
 		dirs.push(dir);
 		fs.mkdirSync(path.join(dir, '.swarm'), { recursive: true });
 		fs.mkdirSync(path.join(dir, '.opencode'), { recursive: true });
 		writePlan(dir, taskIds);
-		ensureAgentSession(SESSION, 'architect', dir);
+		await ensureSessionDrained(SESSION, dir);
 		return dir;
 	};
 
 	describe('settlement-integration — real toolAfter consults the invalidation registry', () => {
 		it('healthy control: a dispatch whose receipt persisted settles and advances (fail-open router-error receipt)', async () => {
-			const dir = fixture(['1.1']);
+			const dir = await fixture(['1.1']);
 			await prepareTask(dir, '1.1');
 			const hook = createDelegationGateHook(makeConfig(), dir);
 			await before(hook, 'call-h0', reviewerArgs('1.1'));
@@ -181,7 +181,7 @@ describe('review route settlement (#3509/#3516)', () => {
 		});
 
 		it("a pre-assignment routing fault does not settle on the prior dispatch's stale receipt", async () => {
-			const dir = fixture(['1.1']);
+			const dir = await fixture(['1.1']);
 			await prepareTask(dir, '1.1');
 			const hook = createDelegationGateHook(makeConfig(), dir);
 			const session = swarmState.agentSessions.get(SESSION)!;
@@ -200,7 +200,7 @@ describe('review route settlement (#3509/#3516)', () => {
 		});
 
 		it('the call marker retires at settlement loop end (a later healthy dispatch re-routes)', async () => {
-			const dir = fixture(['1.1']);
+			const dir = await fixture(['1.1']);
 			await prepareTask(dir, '1.1');
 			const hook = createDelegationGateHook(makeConfig(), dir);
 			const session = swarmState.agentSessions.get(SESSION)!;
@@ -221,9 +221,9 @@ describe('review route settlement (#3509/#3516)', () => {
 	describe('call-site — enforcement wired at the real settlement call site', () => {
 		it('healthy-valid dispatch (full receipt, bound evidence) settles identically under both enforcement settings', async () => {
 			for (const enforce of [true, false]) {
-				const dir = fixture(['1.1']);
+				const dir = await fixture(['1.1']);
 				await prepareTask(dir, '1.1');
-				ensureAgentSession(SESSION, 'architect', dir);
+				await ensureSessionDrained(SESSION, dir);
 				recordModifiedFilesForTask(
 					swarmState.agentSessions.get(SESSION)!,
 					'1.1',
@@ -259,7 +259,7 @@ describe('review route settlement (#3509/#3516)', () => {
 
 		it('invalidation-free ROUTE-VIOLATING settlement (full receipt on disk, no dispatch binding): refused under true, advances only under the flipped call site', async () => {
 			for (const enforce of [true, false]) {
-				const dir = fixture(['1.1']);
+				const dir = await fixture(['1.1']);
 				await prepareTask(dir, '1.1');
 				recordModifiedFilesForTask(
 					swarmState.agentSessions.get(SESSION)!,
@@ -302,7 +302,7 @@ describe('review route settlement (#3509/#3516)', () => {
 
 	describe('single-instance — one hook instance across dispatches', () => {
 		it('cross-dispatch isolation: the healthy dispatch settles with bound evidence while the faulted dispatch is blocked', async () => {
-			const dir = fixture(['1.1']);
+			const dir = await fixture(['1.1']);
 			await prepareTask(dir, '1.1');
 			const hook = createDelegationGateHook(makeConfig(), dir);
 			const session = swarmState.agentSessions.get(SESSION)!;
@@ -327,7 +327,7 @@ describe('review route settlement (#3509/#3516)', () => {
 		});
 
 		it('monotonicity interleaving: healthy full receipt survives a sibling non-full overwrite; a later dispatch binds on the SURVIVED record; a faulted sibling records its own marker', async () => {
-			const dir = fixture(['1.1']);
+			const dir = await fixture(['1.1']);
 			await prepareTask(dir, '1.1');
 			const hook = createDelegationGateHook(makeConfig(), dir);
 			const session = swarmState.agentSessions.get(SESSION)!;
@@ -375,7 +375,7 @@ describe('review route settlement (#3509/#3516)', () => {
 
 		it('multi-task two-verdict settlement is blocked for BOTH tasks in both verdict orders; the marker retires only after the whole call settles', async () => {
 			for (const order of ['1.1-first', '1.2-first'] as const) {
-				const dir = fixture(['1.1', '1.2']);
+				const dir = await fixture(['1.1', '1.2']);
 				await prepareTask(dir, '1.1');
 				await prepareTask(dir, '1.2');
 				const hook = createDelegationGateHook(makeConfig(), dir);
@@ -460,7 +460,7 @@ describe('review route settlement (#3509/#3516)', () => {
 			dirs.push(dir);
 			fs.mkdirSync(path.join(dir, '.swarm'), { recursive: true });
 			fs.mkdirSync(path.join(dir, '.opencode'), { recursive: true });
-			ensureAgentSession(SESSION, 'architect', dir);
+			await ensureSessionDrained(SESSION, dir);
 			const headSha = 'abc123003509';
 			gateInternals.resolveCurrentGitHead = () => headSha;
 			gateInternals.resolveCurrentGitHeadAsync = async () => headSha;

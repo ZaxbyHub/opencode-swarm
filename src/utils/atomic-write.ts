@@ -316,7 +316,7 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 		quarantineEligible: false,
 		parsesTarget: false,
 		producers: [
-			'src/tools/checkpoint.ts:224',
+			'src/tools/checkpoint.ts:234',
 			'src/full-auto/state.ts:638',
 			'src/context-map/persistence.ts:135',
 			'src/context-map/capsule-persistence.ts:111',

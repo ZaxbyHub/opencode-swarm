@@ -109,6 +109,11 @@ export interface SastScanResult {
 		 * Issue #2271 bug 3: present when every input was skipped for having no
 		 * SAST language profile (non-code diff) — the scan passed because there
 		 * was nothing to scan, and this counts the skipped non-code inputs.
+		 * Applies in legacy AND baseline diff mode: a loaded baseline cannot
+		 * make non-code files scannable, so a diff whose inputs all have no
+		 * SAST language profile (Markdown is the headline case; also .json,
+		 * .yml, .toml, .tf, .sql, ...) passes in both. Never set in capture
+		 * mode; a missing/deleted input counts as skipped, not non-code.
 		 */
 		files_skipped_non_code?: number;
 	};
@@ -893,18 +898,22 @@ export async function computeSastScan(
 	// it, pre_check_batch assumed findings above threshold and logged a
 	// misleading "found new findings" message for a zero-file scan.
 	// Issue #2271 bug 3: a normal-mode scan whose EVERY input file was skipped
-	// for having no language profile (markdown-only / JSON-only diffs) passes
-	// instead of failing — there is no code to scan and no coverage was lost.
+	// for having no SAST language profile ("non-code": Markdown is the headline
+	// case, but .json/.yml/.toml/.tf/.sql etc. qualify too) passes instead of
+	// failing — there is no code to scan and no coverage was lost. This
+	// applies in legacy AND baseline diff mode: a loaded baseline cannot make
+	// non-code files scannable, and with zero scannable inputs there can be no
+	// new findings, so such a diff wedged in `rework_required` when the
+	// `!baselineUsed` guard routed it into the coverage hard fail (issue #2271
+	// bug 3 follow-up, session 43d6d1c3 task 1.8: AGENTS.md-only scope).
 	// The hard fail stays for capture mode (handled above), for empty input,
-	// and for scannable files that could not be scanned (size/binary/missing).
+	// and for scannable files that could not be scanned (size/binary). A
+	// missing/deleted input is counted as skipped (not non-code), so a scope
+	// containing one still hard-fails.
 	let zeroCoverageError: string | undefined;
 	let nonCodeOnly = false;
 	if (filesScanned === 0) {
-		if (
-			!baselineUsed &&
-			nonCodeSkipped > 0 &&
-			nonCodeSkipped === changed_files.length
-		) {
+		if (nonCodeSkipped > 0 && nonCodeSkipped === changed_files.length) {
 			nonCodeOnly = true;
 		} else {
 			verdict = 'fail';

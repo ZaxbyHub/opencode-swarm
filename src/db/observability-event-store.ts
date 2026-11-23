@@ -305,6 +305,12 @@ export function registerObservabilityEventSink(directory: string): void {
 				appendObservabilityEventDb(dir, canonical, canonicalContent);
 			} catch (err) {
 				// Fail-open: the sink never propagates failures into emit().
+				// Exactly-once drop accounting (#3772): when the error's
+				// dropped batch included THIS call's just-accepted op, its
+				// onDrop already counted the drop — do not count it twice.
+				if (err instanceof DbWriteError && err.droppedAcceptedOp === true) {
+					return;
+				}
 				// Typed DB write errors surface their classified category
 				// (disk_full / read_only / corrupt / busy / unknown) so a
 				// permanent failure is distinguishable from a transient one;
@@ -616,6 +622,15 @@ export function appendObservabilityEventDb(
 				_eventsSinceHealthUpsert.set(root, 0);
 				upsertHealthDelta(db, root, true);
 			}
+		},
+		// #3772: observability events are enqueued WITHOUT a flush, so a
+		// batch dropped later (read-path flush, close, another store's
+		// failure) would otherwise vanish with no signal at all. onDrop is
+		// the exactly-once accounting owner for accepted-then-dropped
+		// events; the sink listener's catch only counts failures of THIS
+		// call (see the droppedAcceptedOp check there).
+		onDrop: (failure) => {
+			noteDropped(root, failure.category);
 		},
 	});
 }

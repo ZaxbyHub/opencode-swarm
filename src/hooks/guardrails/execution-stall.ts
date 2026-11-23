@@ -47,9 +47,9 @@
  *   - immediately after a successful `update_task_status` to a NON-`in_progress`
  *     status (the in-band signal — `plan.json` is current there, because
  *     `plan/manager.savePlan` writes the projection as its LAST step
- *     (`src/plan/manager.ts:215` documents this) and `updateTaskStatus` awaits
- *     it (`:2144`) before `executeUpdateTaskStatus` builds the `success: true`
- *     payload (`src/tools/update-task-status.ts:1329`) this hook reads); and
+ *     (`src/plan/manager.ts:265` documents this) and `updateTaskStatus` awaits
+ *     it (`:2862`) before `executeUpdateTaskStatus` builds the `success: true`
+ *     payload (`src/tools/update-task-status.ts:2434`) this hook reads); and
  *   - inside the periodic workspace probe, so an OUT-OF-BAND plan change (the
  *     plan file edited directly, a sub-agent path that settles the last task)
  *     eventually disarms too. The probe already does I/O once per
@@ -759,7 +759,7 @@ export async function recordExecutionStallToolAfter(params: {
 /**
  * Read whether an `update_task_status` call actually succeeded, and to which
  * status. The tool returns a JSON string carrying `success` and `new_status`
- * (`src/tools/update-task-status.ts:1384`); the requested status from the input
+ * (`src/tools/update-task-status.ts:2434-2437`); the requested status from the input
  * args is the fallback when the projection omits `new_status`.
  *
  * A non-JSON or `success: false` payload is NOT progress — a status update the

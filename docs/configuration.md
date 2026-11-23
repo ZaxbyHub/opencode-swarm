@@ -1016,7 +1016,10 @@ clean reset.
 
 Controls the issue #2491 semantic-review route receipt gate. Newly routed
 Stage-B work is checked against a versioned receipt naming the exact reviewer
-and test-engineer identities required by the semantic router. Missing,
+and test-engineer identities required by the semantic router. A task durably
+exempt from the `test_engineer` gate (see the exemption notes in the "QA
+gates reference" section) gets a receipt with zero test-engineer slots, and completeness
+then covers the reviewer identities only. Missing,
 malformed, duplicate, foreign, or wrong-role receipts block advancement.
 Router failures are fail-open only when the producer writes an explicit typed
 router-error receipt (including `NO_CHANGED_FILES`); the outcome remains
@@ -2748,6 +2751,14 @@ case-sensitive `.md` final extensions, and the observed paths remain within
 the declaration. Missing Git provenance, mixed files, scope mismatches, legacy
 background records, and any non-`.md` path keep the full gate. `reviewer` and
 `council_mode` behavior are unchanged.
+
+The exemption is a durable `test_engineer_exempt` flag in the task's evidence
+file, set at coder settlement from that classification; it is read from the
+unauthenticated `.swarm/evidence/<task>.json` (no MAC), and it only applies
+while `test_engineer` is not in the task's `required_gates`. A durably exempt
+task gets a review route receipt with zero test-engineer slots, so route
+completeness covers the reviewers only and a reviewer-only completion can
+advance the task.
 
 | Gate | Default | Description |
 |------|---------|-------------|

@@ -145,8 +145,10 @@ function; the group-commit writer consults the same map per batch.
   `ProjectDbError`s (`mkdir_failed | driver_unavailable | open_failed |
   migration_failed`, plus `invalid_root` for a blank project root); write failures classify into `DbWriteError` categories
   (`disk_full | read_only | corrupt | busy | unknown`). The group-commit
-  writer RETAINS its queue on busy/disk-full/read-only with a cooldown-bounded
-  advisory and retries on the next flush; migrated stores keep their
+  writer DROPS the failed batch on every category (#3772 truthful rejection),
+  fires each op's `onDrop`, throws the typed error, and emits a
+  cooldown-bounded advisory; nothing is retained for automatic retry, and
+  in-tree stores do not re-queue a dropped batch. Migrated stores keep their
   fail-open semantics (an insight append or phase report failing must never
   block a phase).
 
@@ -178,9 +180,29 @@ issues a deferred BEGIN that deadlocks into SQLITE_BUSY under two-windows
 contention — the qa-gate-profile immediate-transaction precedent is the
 model). Migrated stores `await flush()` so write durability matches the
 legacy awaited file appends; concurrent callers' ops coalesce into one
-transaction. Backpressure: the queue is hard-bounded at `MAX_QUEUED_OPS`
-(1024) — reaching the bound forces a synchronous flush rather than dropping
-writes. Nothing here runs at plugin init.
+transaction. Backpressure: the queue is bounded at `MAX_QUEUED_OPS` (1024) —
+reaching the bound attempts a synchronous flush BEFORE accepting more work; a
+failed attempt throws without enqueuing the incoming op. The bound is
+best-effort defense-in-depth: ops enqueued reentrantly from inside a running
+flush's `run` bypass it (the flush is already in progress), so the queue can
+transiently exceed the cap until the next non-reentrant `enqueue` triggers the
+bound flush. Nothing here runs at plugin init.
+
+**Truthful rejection and per-op outcomes (#3772).** A failed flush DROPS its
+batch — for permanent failures AND retryable ones (busy/disk-full/read-only)
+alike — fires every op's optional `onDrop({category, error})` callback
+exactly once, and throws the typed `DbWriteError`. A rejection therefore
+never means "queued and will be reapplied": the pre-#3772 behavior retained
+a retryable batch while reporting rejection, which made a caller's honest
+retry a duplicate commit. In-tree callers do not re-queue dropped batches —
+their fail-open arms log the loss; a caller that wants another attempt must
+re-enqueue the write itself. Exactly-once failure accounting distinguishes
+the two enqueue arms: `onDrop` owns accepted-then-dropped ops; when an
+enqueue's inline THRESHOLD flush drops a batch that includes that call's own
+pushed op, the thrown `DbWriteError` carries `droppedAcceptedOp: true` so
+listeners (the observability sink) do not count it twice; not-accepted
+failures (pre-push hard-bound flush, closed writer) throw unflagged and stay
+listener-owned. In no arm does a rejected op remain in the queue.
 
 **Self-healing against a closed handle.** A close site that evicts the DB
 handle without closing the writer (the pre-#2480-fix `/swarm close` shape)
