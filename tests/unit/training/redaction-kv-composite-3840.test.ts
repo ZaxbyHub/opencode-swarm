@@ -78,6 +78,10 @@ describe('#3840 the training key/value arm consumes composite values whole', () 
 			[`password=${GH}.TailSecret99`, 'password=<redacted>'],
 			['value; token=abcdef', 'value; token=<redacted>'],
 			['api_key: s3cr3t-value', 'api_key: <redacted>'],
+			// The frozen preserving contract: a quoted loose value stores the
+			// UNQUOTED placeholder, exactly as the merge base did.
+			['api_key="s3cr3t"', 'api_key=<redacted>'],
+			["api_key='s3cr3t'", 'api_key=<redacted>'],
 		];
 		for (const [input, expected] of cases) {
 			const out = redact(input);

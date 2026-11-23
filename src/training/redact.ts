@@ -54,6 +54,9 @@ const URL_PATTERN = /\bhttps?:\/\/[^\s'"<>]+/g;
 //     earlier guard skipped those values and retained the tail). Each
 //     placeholder body is bounded at 64 characters so a run of unclosed
 //     openers stays linear.
+//   - The placeholder is emitted UNQUOTED, whatever the value's quoting:
+//     `api_key="v"` stores `api_key=<redacted>`, exactly as the merge base
+//     did (the frozen preserving contract pins those bytes).
 const CREDENTIAL_KV_PATTERN =
 	/(^|[\s,;"'([{])([A-Za-z0-9_ -]{0,40}(?:token|secret|password|passwd|authorization|credential|bearer|api[-_ ]?key|access[-_ ]?key)[A-Za-z0-9_ -]{0,40}\s*[=:]\s*)(?:bearer|basic|digest|negotiate|apikey)?\s*("[^"'\n]*"|'[^'\n]*'|(?:\[REDACTED[^\]\s]{0,64}\]|<redacted[^>\s]{0,64}>|[^\s,;"'}\]])(?:\[REDACTED[^\]\s]{0,64}\]|<redacted[^>\s]{0,64}>|[^\s,;"'}\]])*)/gi;
 
@@ -62,8 +65,9 @@ const PLACEHOLDER_OR_QUOTE =
 	/\[REDACTED[^\]\s]{0,64}\]|<redacted[^>\s]{0,64}>|["']/g;
 
 /**
- * Whether a matched key/value value is nothing but complete placeholders —
- * already redacted, so the arm leaves its bytes alone and counts nothing.
+ * Whether a matched key/value value is nothing but complete placeholders
+ * (its surrounding quotes ignored) — already redacted, so the arm leaves its
+ * bytes alone and counts nothing.
  */
 function isPlaceholderOnly(value: string): boolean {
 	return value.replace(PLACEHOLDER_OR_QUOTE, '') === '';
@@ -269,14 +273,11 @@ export function redactTrainingContent(content: string): RedactionResult {
 				// Already redacted: keep the bytes, count nothing.
 				if (isPlaceholderOnly(value)) return _match;
 				redactions += 1;
-				const quoted =
-					value.length >= 2 &&
-					(value.startsWith('"') || value.startsWith("'")) &&
-					value.endsWith(value[0]);
-				const placeholder = quoted
-					? `${value[0]}<redacted>${value[0]}`
-					: '<redacted>';
-				return `${separator}${prefix}${placeholder}`;
+				// The placeholder is UNQUOTED even for a quoted value: the
+				// merge base stores `api_key=<redacted>` for `api_key="v"`, and
+				// the frozen preserving contract pins those bytes. (Keeping the
+				// quotes was an incidental change that broke it.)
+				return `${separator}${prefix}<redacted>`;
 			},
 		);
 		working = working.replace(
