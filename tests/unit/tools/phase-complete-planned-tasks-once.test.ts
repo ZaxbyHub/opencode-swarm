@@ -222,7 +222,7 @@ describe('#3770 exactly-once completion events', () => {
 		expect(phaseCompleteEventLines(tempDir).length).toBe(1);
 	});
 
-	test('transient ledger-read failure fails closed: no fallback-namespace event (review F-002)', async () => {
+	test('transient ledger-read failure refuses the completion; retry heals to exactly one event (review F-002)', async () => {
 		expect((await execute()).success).toBe(true);
 		expect(phaseCompleteEventLines(tempDir).length).toBe(1);
 		// Sabotage ONLY the read authority: a directory in the ledger path
@@ -233,11 +233,14 @@ describe('#3770 exactly-once completion events', () => {
 		fs.rmSync(ledgerPath);
 		fs.mkdirSync(ledgerPath);
 		recordPhaseAgentDispatch('sess1', 'coder');
+		// Feedback round: the outage call now REFUSES outright (the commit
+		// readiness re-read is indeterminate) — pre-r2-fix it completed with
+		// a warning, and pre-r1 it appended a duplicate fallback-namespace
+		// event. No completion, no new core event.
 		const duringOutage = await execute();
-		expect(duringOutage.success).toBe(true);
-		// Fail-closed: the outage call must NOT append a noledger-keyed core
-		// event (pre-fix it re-keyed into the fallback namespace and the
-		// healthy retry then recorded a second, duplicate event).
+		expect(duringOutage.success).toBe(false);
+		expect(duringOutage.status).toBe('blocked');
+		expect(duringOutage.reason).toBe('PLANNED_TASKS_UNKNOWN');
 		expect(phaseCompleteEventLines(tempDir).length).toBe(1);
 		// Restore the authority and retry: the healthy retry resolves the
 		// ledger identity and the dedupe keeps the total at exactly one.

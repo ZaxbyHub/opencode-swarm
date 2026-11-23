@@ -1672,12 +1672,12 @@ export async function savePlan(
 		 */
 		preCommitCheck?: () => void;
 		/**
-		 * Phase IDs whose status transitioned to complete in THIS save (issue
-		 * #3770). For each, a `phase_completed` ledger event is appended inside
-		 * the same managed write — parity with the close-terminal path
-		 * (closePlanTerminalState) — so the completion is a durable,
-		 * transition-scoped record the completion event can key its exactly-once
-		 * identity on (root digest + this event's seq).
+		 * Phase IDs to record as durably completed in THIS save (issue
+		 * #3770; feedback round: caller decides when — one `phase_completed`
+		 * event per id appends unconditionally, transition or backfill) —
+		 * parity with the close-terminal path (closePlanTerminalState) — so
+		 * the completion is a durable, transition-scoped record the
+		 * completion event can key its exactly-once identity on.
 		 */
 		completedPhaseIds?: number[];
 	},

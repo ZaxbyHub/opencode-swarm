@@ -11,7 +11,13 @@ import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+// Spread-real-exports pattern (AGENTS.md invariant 7): capture the real
+// modules BEFORE mock.module so the factories override only the entry
+// points these suites fake.
+import * as actualCurator from '../../../src/hooks/curator';
+import * as actualCuratorDrift from '../../../src/hooks/curator-drift';
 import type { DriftReport } from '../../../src/hooks/curator-types';
+import * as actualKnowledgeCurator from '../../../src/hooks/knowledge-curator.js';
 import {
 	appendLedgerEvent,
 	computePlanLedgerHash,
@@ -67,16 +73,19 @@ const mockRunDeterministicDriftCheck = mock(async () => ({
 const mockReadPriorDriftReports = mock(async (): Promise<DriftReport[]> => []);
 
 mock.module('../../../src/hooks/curator', () => ({
+	...actualCurator,
 	runCuratorPhase: mockRunCuratorPhase,
 	applyCuratorKnowledgeUpdates: mockApplyCuratorKnowledgeUpdates,
 }));
 
 mock.module('../../../src/hooks/curator-drift', () => ({
+	...actualCuratorDrift,
 	runDeterministicDriftCheck: mockRunDeterministicDriftCheck,
 	readPriorDriftReports: mockReadPriorDriftReports,
 }));
 
 mock.module('../../../src/hooks/knowledge-curator.js', () => ({
+	...actualKnowledgeCurator,
 	curateAndStoreSwarm: mock(async () => {}),
 }));
 
@@ -320,8 +329,10 @@ describe('#3770 planned-tasks refusal', () => {
 		expect(parsed.reason).not.toBe('PLANNED_TASKS_PENDING');
 	});
 
-	test('truncated ledger defers in both projection directions without mutation', async () => {
-		// Direction 1: projection shows COMPLETED tasks.
+	test('truncated ledger is indeterminate (refuses) in both projection directions without mutation', async () => {
+		// Feedback round: a truncated/damaged ledger authority is INDETERMINATE
+		// (both call sites refuse) — deferring let completion succeed over an
+		// unreadable authority. Direction 1: projection shows COMPLETED tasks.
 		fs.writeFileSync(
 			path.join(tempDir, '.swarm', 'plan.json'),
 			JSON.stringify(planWithTasks([{ id: '1.1', status: 'completed' }])),
@@ -331,16 +342,19 @@ describe('#3770 planned-tasks refusal', () => {
 			'{"seq":1,"broken"\n',
 		);
 		const beforeCompleted = snapshotSwarmTree(tempDir);
-		expect(await readUnfinishedPlannedTasks(tempDir, 1)).toBeNull();
+		const completedRead = await readUnfinishedPlannedTasks(tempDir, 1);
+		expect(completedRead.kind).toBe('indeterminate');
 		expect(treesEqual(beforeCompleted, snapshotSwarmTree(tempDir))).toBe(true);
-		// Direction 2: projection shows PENDING tasks (a corrupt authority may
-		// hold the opposite truth — the helper must defer, not decide).
+		// Direction 2: projection shows PENDING tasks — same indeterminate
+		// outcome; the reader never decides from the projection when a ledger
+		// authority exists.
 		fs.writeFileSync(
 			path.join(tempDir, '.swarm', 'plan.json'),
 			JSON.stringify(planWithTasks([{ id: '1.1', status: 'pending' }])),
 		);
 		const beforePending = snapshotSwarmTree(tempDir);
-		expect(await readUnfinishedPlannedTasks(tempDir, 1)).toBeNull();
+		const pendingRead = await readUnfinishedPlannedTasks(tempDir, 1);
+		expect(pendingRead.kind).toBe('indeterminate');
 		expect(treesEqual(beforePending, snapshotSwarmTree(tempDir))).toBe(true);
 	});
 
@@ -353,6 +367,12 @@ describe('#3770 planned-tasks refusal', () => {
 			'mega-Planned_Tasks_Gate_Test',
 			undefined,
 			pendingPlan,
+		);
+		// The stale projection is real: plan.json still shows the pre-ledger
+		// pending status (the ledger event carries the newer truth).
+		fs.writeFileSync(
+			path.join(tempDir, '.swarm', 'plan.json'),
+			JSON.stringify(planWithTasks([{ id: '1.1', status: 'pending' }])),
 		);
 		const completedPlan = planWithTasks([{ id: '1.1', status: 'completed' }]);
 		await appendLedgerEvent(
@@ -383,6 +403,10 @@ describe('#3770 planned-tasks refusal', () => {
 			'mega-Planned_Tasks_Gate_Test',
 			undefined,
 			completedPlan,
+		);
+		fs.writeFileSync(
+			path.join(tempDir, '.swarm', 'plan.json'),
+			JSON.stringify(planWithTasks([{ id: '1.1', status: 'completed' }])),
 		);
 		const pendingPlan = planWithTasks([{ id: '1.1', status: 'pending' }]);
 		await appendLedgerEvent(
@@ -417,76 +441,18 @@ describe('#3770 planned-tasks refusal', () => {
 		);
 		const session = swarmState.agentSessions.get('sess1');
 		expect(session).toBeDefined();
+		// hasActiveTurboMode (src/state.ts) reads turboMode === true — set the
+		// real flag so this leg genuinely runs under Turbo, not merely with a
+		// strategy label.
+		session!.turboMode = true;
 		session!.turboStrategy = 'standard';
 		const parsed = await execute();
 		expect(parsed.reason).toBe('PLANNED_TASKS_PENDING');
 	});
 });
 
-describe('#3770 planned-tasks gate layer (direct unit legs)', () => {
-	let tempDir: string;
-	let originalCwd: string;
-
-	beforeEach(() => {
-		resetSwarmState();
-		tempDir = canonicalMkdtemp('planned-tasks-gate-unit-');
-		originalCwd = process.cwd();
-		process.chdir(tempDir);
-		fs.mkdirSync(path.join(tempDir, '.swarm'), { recursive: true });
-	});
-
-	afterEach(() => {
-		process.chdir(originalCwd);
-		removeTreeWithRetry(tempDir);
-		resetSwarmState();
-	});
-
-	test('gate refuses on its own with pending tasks (no early refusal involved)', async () => {
-		fs.writeFileSync(
-			path.join(tempDir, '.swarm', 'plan.json'),
-			JSON.stringify(
-				planWithTasks([
-					{ id: '1.1', status: 'completed' },
-					{ id: '1.2', status: 'pending' },
-				]),
-			),
-		);
-		const result = await runPlannedTasksGate({
-			phase: 1,
-			dir: tempDir,
-			sessionID: 'sess-gate',
-			pluginConfig: {} as never,
-			agentsDispatched: [],
-			safeWarn: () => undefined,
-			preflightNowMs: 0,
-		});
-		expect(result.blocked).toBe(true);
-		expect(result.reason).toBe(PLANNED_TASKS_BLOCKED_REASON);
-		expect(result.message).toContain('1.2');
-	});
-
-	test('gate passes on its own with completed/closed tasks', async () => {
-		fs.writeFileSync(
-			path.join(tempDir, '.swarm', 'plan.json'),
-			JSON.stringify(
-				planWithTasks([
-					{ id: '1.1', status: 'completed' },
-					{ id: '1.2', status: 'closed' },
-				]),
-			),
-		);
-		const result = await runPlannedTasksGate({
-			phase: 1,
-			dir: tempDir,
-			sessionID: 'sess-gate',
-			pluginConfig: {} as never,
-			agentsDispatched: [],
-			safeWarn: () => undefined,
-			preflightNowMs: 0,
-		});
-		expect(result.blocked).toBe(false);
-	});
-});
+// The direct gate-layer unit legs moved to
+// phase-complete-planned-tasks-degraded.test.ts (FR-006 line cap).
 
 function treesEqual(
 	before: Map<string, string>,

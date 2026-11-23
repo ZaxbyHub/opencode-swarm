@@ -290,7 +290,7 @@ describe('Task 2.4: Tighten missing-spec enforcement in phase-complete', () => {
 			expect(String(parsed.message)).toContain('1.3');
 		});
 
-		test('phase with incomplete tasks shows correct count', async () => {
+		test('phase with incomplete tasks names them in the refusal', async () => {
 			const planJson = {
 				schema_version: '1.0.0',
 				title: 'Test Plan',

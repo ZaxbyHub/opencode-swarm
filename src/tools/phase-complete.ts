@@ -113,7 +113,9 @@ import {
 } from './phase-complete/gates/index.js';
 import {
 	PLANNED_TASKS_BLOCKED_REASON,
+	PLANNED_TASKS_UNKNOWN_REASON,
 	plannedTasksBlockedMessage,
+	plannedTasksUnknownMessage,
 	readUnfinishedPlannedTasks,
 } from './phase-complete/gates/planned-tasks-gate.js';
 import {
@@ -700,13 +702,34 @@ export async function executePhaseComplete(
 	// state-mutating step (the loadPlan below regenerates a missing plan.md, so
 	// a preflight-only refusal would already have mutated state). The view is
 	// read-only and authority-resolved (ledger peek when a ledger authority
-	// exists; plan.json only when none does), and defers — no decision, no
-	// writes — when the authority is corrupt/truncated/unreadable. The gate
-	// registered in preflightChecks re-checks the same predicate at the commit
-	// boundary. `phase_complete.enabled === false` above remains the documented
-	// operator bypass of completion enforcement.
-	const unfinishedPlannedTaskIds = await readUnfinishedPlannedTasks(dir, phase);
-	if (unfinishedPlannedTaskIds && unfinishedPlannedTaskIds.length > 0) {
+	// exists; plan.json only when none does). A ledger authority that exists
+	// but cannot be trusted (torn tail, resetting marker, unreadable, no plan,
+	// duplicate phase ids) is INDETERMINATE and refuses — completing over an
+	// unreadable authority is the #3770 symptom in a realistic crash state.
+	// The gate registered in preflightChecks re-checks the same predicate at
+	// the commit boundary. `phase_complete.enabled === false` above remains the
+	// documented operator bypass of completion enforcement.
+	const plannedTasksRead = await readUnfinishedPlannedTasks(dir, phase);
+	if (plannedTasksRead.kind === 'indeterminate') {
+		return JSON.stringify(
+			{
+				success: false,
+				phase,
+				status: 'blocked' as const,
+				reason: PLANNED_TASKS_UNKNOWN_REASON,
+				message: plannedTasksUnknownMessage(phase, plannedTasksRead.detail),
+				agentsDispatched,
+				agentsMissing: [],
+				warnings,
+				recovery: { kind: 'retry', action: 'phase_complete' },
+			},
+			null,
+			2,
+		);
+	}
+	const unfinishedPlannedTaskIds =
+		plannedTasksRead.kind === 'ok' ? plannedTasksRead.unfinishedIds : [];
+	if (unfinishedPlannedTaskIds.length > 0) {
 		return JSON.stringify(
 			{
 				success: false,
@@ -1516,6 +1539,55 @@ export async function executePhaseComplete(
 				recovery: { kind: 'retry', action: 'phase_complete' },
 			});
 		}
+		// #3770 feedback round: an independent readiness re-read at the commit
+		// boundary, after the locked freshness checks and before ANY mutation.
+		// An indeterminate authority (torn tail, resetting marker, duplicate
+		// phase ids) or an unfinished task observed HERE refuses the whole
+		// completion — the early check alone cannot, because state can change
+		// between the two reads and the mutating path does not reliably fail on
+		// a degraded authority.
+		const commitReadiness = await readUnfinishedPlannedTasks(dir, phase);
+		if (commitReadiness.kind === 'indeterminate') {
+			return JSON.stringify({
+				success: false,
+				phase,
+				status: 'blocked' as const,
+				reason: PLANNED_TASKS_UNKNOWN_REASON,
+				message: plannedTasksUnknownMessage(phase, commitReadiness.detail),
+				agentsDispatched,
+				agentsMissing: [],
+				warnings,
+				gate_report: commitPreflight,
+				recovery: { kind: 'retry', action: 'phase_complete' },
+			});
+		}
+		if (
+			commitReadiness.kind === 'ok' &&
+			commitReadiness.unfinishedIds.length > 0
+		) {
+			return JSON.stringify({
+				success: false,
+				phase,
+				status: 'blocked' as const,
+				reason: PLANNED_TASKS_BLOCKED_REASON,
+				message: plannedTasksBlockedMessage(
+					phase,
+					commitReadiness.unfinishedIds,
+				),
+				agentsDispatched,
+				agentsMissing: [],
+				warnings,
+				gate_report: commitPreflight,
+				recovery: {
+					kind: 'tool',
+					action: 'update_task_status',
+					args: {
+						task_id: commitReadiness.unfinishedIds[0],
+						status: 'completed',
+					},
+				},
+			});
+		}
 		if (
 			plan &&
 			phaseObject &&
@@ -1598,6 +1670,72 @@ export async function executePhaseComplete(
 						? captureError.message
 						: String(captureError),
 				);
+			}
+		} else if (plan && phaseObject && (await ledgerExists(dir))) {
+			// #3770 feedback round (review F-2): a NORMAL flow reaches
+			// phase_complete with the phase already complete — the last task
+			// was completed through update_task_status/savePlan, whose
+			// projection derives the phase status, so the transition guard
+			// above never runs and the durable `phase_completed` event would
+			// never be recorded (the exactly-once identity would collapse to
+			// the no-event `:none` namespace the docs do not describe). When
+			// a ledger authority exists and the current root has no
+			// `phase_completed` event for this phase yet, record it through
+			// the same managed save. Repeat calls resolve the existing
+			// event's seq and skip; a fresh root after a re-open records its
+			// own event, exactly as the plan-durability docs describe.
+			const existingIdentity = await phaseCompletionIdentity(dir, phase);
+			if (existingIdentity?.endsWith(':none') === true) {
+				try {
+					const backfillDurability =
+						await phaseCompleteCommitInternals.savePlan(dir, plan, {
+							preserveCompletedStatuses: true,
+							planLockAlreadyHeld: true,
+							completedPhaseIds: [phase],
+							preCommitCheck: () => {
+								const currentPolicyHash = createHash('sha256')
+									.update(JSON.stringify(loadPluginConfigWithMeta(dir).config))
+									.digest('hex');
+								if (
+									computePhaseEvidenceSnapshot(dir) !==
+										expectedCommitEvidenceHash ||
+									currentPolicyHash !== expectedCommitPolicyHash
+								) {
+									throw new Error(
+										'PHASE_PREFLIGHT_STALE: evidence changed at the authoritative transition boundary',
+									);
+								}
+							},
+						});
+					if (backfillDurability.durability === 'incomplete') {
+						warnings.push(
+							`Plan saved with incomplete durability; degraded surfaces: ${backfillDurability.degraded_surfaces.join(', ')}` +
+								(backfillDurability.md_write_error
+									? ` (${backfillDurability.md_write_error})`
+									: ''),
+						);
+					}
+				} catch (error) {
+					if (
+						error instanceof Error &&
+						error.message.startsWith('PHASE_PREFLIGHT_STALE:')
+					) {
+						return JSON.stringify({
+							success: false,
+							phase,
+							status: 'blocked' as const,
+							reason: 'PHASE_PREFLIGHT_STALE',
+							message:
+								'Phase evidence changed at the authoritative completion boundary. No completion event was written.',
+							agentsDispatched,
+							agentsMissing: [],
+							warnings,
+							gate_report: commitPreflight,
+							recovery: { kind: 'retry', action: 'phase_complete' },
+						});
+					}
+					throw error;
+				}
 			}
 		}
 	} finally {
