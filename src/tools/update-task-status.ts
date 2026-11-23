@@ -24,6 +24,7 @@ import {
 	getTaskWorkflowSnapshot,
 	isExternalEvidenceInitialCompletionEligible,
 	isReadOnlyNoMutationEligible,
+	isTestEngineerDurablyExempt,
 	readCurrentTaskDeclaredFiles,
 	readTaskEvidenceRaw,
 	resolveCurrentPlanIdentitySync,
@@ -395,6 +396,20 @@ function routeGateAllowsTask(
 	// pre-v1 compatibility state. This branch is deliberately narrower than
 	// `route === null`: any positively marked task still fails closed below.
 	if (!routeRequired && requirementReceipts.length === 0) return true;
+	// Durable test-engineer exemption for the routed task (durable evidence
+	// flag read from the unauthenticated evidence file, no MAC). An exempt task
+	// never dispatches a test engineer, so route completeness must not demand
+	// one — otherwise a test-engineer-listing receipt wedges completion forever.
+	const durableTestEngineerExempt = (() => {
+		try {
+			return isTestEngineerDurablyExempt(
+				readTaskEvidenceRaw(directory, taskId),
+			);
+		} catch {
+			// Unreadable/corrupt evidence or an invalid task id fails closed.
+			return false;
+		}
+	})();
 	const durableEvidence =
 		routeEvidenceFromTaskGateRequirements(requirementReceipts);
 	const routeAllowsSession = (
@@ -421,6 +436,7 @@ function routeGateAllowsTask(
 			enforcementEnabled: true,
 			legacyUnrouted: false,
 			requireEvidenceBindings: true,
+			testEngineerExempt: durableTestEngineerExempt,
 		}).canAdvance;
 	};
 	if (sessionID) return routeAllowsSession(sessionID, session);
@@ -1359,6 +1375,21 @@ export function recoverTaskStateFromDelegations(
 				}
 			})()
 		: false;
+	// Durable test-engineer exemption (durable evidence flag, no MAC): an
+	// exempt task never dispatches a test engineer, so the recovery route check
+	// must not demand one and the reviewer alone may advance reviewer_run →
+	// tests_run (mirroring the (testEngineerExempt && agent === 'reviewer')
+	// clause in applyStageBStateCompletion).
+	const recoveryTestEngineerExempt = (() => {
+		if (!directory) return false;
+		try {
+			return isTestEngineerDurablyExempt(
+				readTaskEvidenceRaw(directory, taskId),
+			);
+		} catch {
+			return false;
+		}
+	})();
 	// Advance the specific task state in all sessions
 	for (const [sessionId, session] of swarmState.agentSessions) {
 		if (!(session.taskWorkflowStates instanceof Map)) continue;
@@ -1385,6 +1416,7 @@ export function recoverTaskStateFromDelegations(
 				taskId,
 				receipts: routeEvidence,
 				enforcementEnabled: true,
+				testEngineerExempt: recoveryTestEngineerExempt,
 				legacyUnrouted: (() => {
 					try {
 						return (
@@ -1441,8 +1473,12 @@ export function recoverTaskStateFromDelegations(
 			}
 		}
 
-		// Advance reviewer_run → tests_run
-		if (hasTestEngineer) {
+		// Advance reviewer_run → tests_run. A durably exempt task (Markdown-only,
+		// durable evidence flag) has no test-engineer gate to satisfy: the
+		// reviewer's own recorded completion is the full Stage B barrier, so
+		// hasReviewer alone advances — otherwise exempt tasks wedge at
+		// reviewer_run with "all required proof exists".
+		if (hasTestEngineer || (recoveryTestEngineerExempt && hasReviewer)) {
 			const stateNow = getTaskState(session, taskId);
 			if (stateNow === 'reviewer_run') {
 				try {

@@ -5,6 +5,7 @@ import {
 } from '../evidence/task-gate-requirements.js';
 import {
 	getTaskWorkflowSnapshot,
+	isTestEngineerDurablyExempt,
 	readTaskEvidence,
 	recordGateEvidence,
 	transitionTaskWorkflowEvidence,
@@ -918,6 +919,12 @@ export async function ingestBackgroundStageBCompletion(args: {
 						legacyUnrouted: preparedRoute.legacyUnrouted,
 						requireEvidenceBindings: true,
 						requireCompleteEvidence: true,
+						// Exempt wedge: a receipt that still lists test-engineer
+						// slots (allocated before exemption-aware routing, or by
+						// an unrouted complexity fallback) must not pin the durable
+						// workflow at reviewer_run when the durable evidence
+						// proves the sanctioned exemption.
+						testEngineerExempt: isTestEngineerDurablyExempt(existingEvidence),
 					}).canAdvance;
 				}
 			} else {
@@ -1021,7 +1028,7 @@ export async function ingestBackgroundStageBCompletion(args: {
 					transitionId: `background-gate:${args.record.correlationId}`,
 					// Missing/non-exempt provenance is conservative: require the full
 					// Stage B pair without fabricating a new coder mutation/generation.
-					ensureDefaultStageB: existingEvidence?.test_engineer_exempt !== true,
+					ensureDefaultStageB: !isTestEngineerDurablyExempt(existingEvidence),
 					routeBinding: preparedRoute?.binding,
 					routeComplete: routeCompleteForPersistence,
 				},
@@ -1057,7 +1064,7 @@ export async function ingestBackgroundStageBCompletion(args: {
 				taskId,
 				args.record.normalizedAgent,
 				args.record.parentSessionId,
-				existingEvidence?.test_engineer_exempt === true,
+				isTestEngineerDurablyExempt(existingEvidence),
 				args.directory,
 				args.record.callID,
 				args.record.subagentSessionId,
@@ -1314,6 +1321,10 @@ function applyStageBStateCompletion(
 			legacyUnrouted,
 			requireEvidenceBindings: true,
 			requireCompleteEvidence: true,
+			// Exempt wedge (see the persistence-site comment): the completeness
+			// barrier must not demand test-engineer evidence the sanctioned
+			// exemption says will never exist.
+			testEngineerExempt,
 		});
 		const routeComplete = advancementDecision.canAdvance;
 
