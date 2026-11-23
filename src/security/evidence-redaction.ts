@@ -78,11 +78,13 @@ const URL_CREDENTIALS_PATTERN =
  *     non-idempotent arm made the evidence copy and the receipt copy of
  *     one finding differ. The repetition also consumes a composite value
  *     (a placeholder followed by more secret material, anywhere in the
- *     value) whole.
+ *     value) whole, and each placeholder body is bounded at 64
+ *     characters so a run of unclosed openers stays linear (the labels
+ *     the arms emit are far shorter).
  *   - A quoted value keeps its quotes.
  */
 const EVIDENCE_CREDENTIAL_KV_PATTERN =
-	/(^|[\s,;"'([{])([A-Za-z0-9_ -]{0,40}(?:token|secret|password|passwd|authorization|credential|bearer|api[-_ ]?key|access[-_ ]?key)[A-Za-z0-9_ -]{0,40}\s*[=:]\s*)(?:bearer|basic|digest|negotiate|apikey)?\s*("[^"'\n]*"|'[^'\n]*'|(?:\[REDACTED[^\]\s]*\]|<redacted[^>\s]*>|[^\s,;"'}\]])(?:\[REDACTED[^\]\s]*\]|<redacted[^>\s]*>|[^\s,;"'}\]])*)/gi;
+	/(^|[\s,;"'([{])([A-Za-z0-9_ -]{0,40}(?:token|secret|password|passwd|authorization|credential|bearer|api[-_ ]?key|access[-_ ]?key)[A-Za-z0-9_ -]{0,40}\s*[=:]\s*)(?:bearer|basic|digest|negotiate|apikey)?\s*("[^"'\n]*"|'[^'\n]*'|(?:\[REDACTED[^\]\s]{0,64}\]|<redacted[^>\s]{0,64}>|[^\s,;"'}\]])(?:\[REDACTED[^\]\s]{0,64}\]|<redacted[^>\s]{0,64}>|[^\s,;"'}\]])*)/gi;
 
 /** The quoted-JSON key form the loose key/value pattern cannot bridge. */
 const EVIDENCE_QUOTED_JSON_CREDENTIAL_PATTERN =

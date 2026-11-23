@@ -159,4 +159,20 @@ describe('#3844 the shared redactor is idempotent and covers the training famili
 		const digest = 'a1'.repeat(40);
 		expect(redactEvidenceText(`digest ${digest}`)).toBe(`digest ${digest}`);
 	});
+
+	test('a run of unclosed placeholder openers stays LINEAR (round 13)', () => {
+		// The placeholder bodies are bounded at 64 characters: unbounded, an
+		// attempt at every opener scanned to the end of the whitespace-free
+		// run and the arm went quadratic (76.7s at 360k chars). The pin
+		// kills removing the bound.
+		const input = 'password=' + '[REDACTED'.repeat(6000);
+		const started = performance.now();
+		const out = redactEvidenceText(input);
+		const elapsed = performance.now() - started;
+		expect(elapsed).toBeLessThan(250);
+		expect(out.startsWith('password=[REDACTED')).toBe(true);
+		expect(out).not.toContain('password=' + '[REDACTED'.repeat(6000));
+		// Still a fixed point.
+		expect(redactEvidenceText(out)).toBe(out);
+	});
 });
