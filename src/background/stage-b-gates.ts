@@ -148,6 +148,37 @@ function pathSetsEqual(left: Set<string>, right: Set<string>): boolean {
 	return left.size === right.size && [...left].every((file) => right.has(file));
 }
 
+/**
+ * Scope-membership test for a file against a declared scope set.
+ *
+ * A declared entry may be a DIRECTORY (e.g. `declare_scope` called with
+ * `files: ["context"]`): the coder write-scope guard treats such a scope as
+ * covering everything beneath it, so a coder scoped to a directory can
+ * legitimately edit `context/<file>`. The attribution filters here must not
+ * be stricter than the write gate — with exact-path matching only, every
+ * file a directory-scoped background coder changed fell out of
+ * `attributedFiles`, the completion settled as `dispatch_no_mutation`
+ * despite real mutations, and the task wedged at Stage A forever (the
+ * observed task-1.13 background settlement wedge). Directory-prefix
+ * matching cannot false-positive: a declared FILE entry has no children, so
+ * `file.startsWith(entry + '/')` is false for every other path.
+ */
+function scopeSetContainsFile(scope: Set<string>, file: string): boolean {
+	if (scope.has(file)) return true;
+	for (const entry of scope) {
+		if (entry.length > 0 && file.startsWith(`${entry}/`)) return true;
+	}
+	return false;
+}
+
+/** Nullable twin of {@link scopeSetContainsFile}: a missing scope contains nothing. */
+function scopeSetMaybeContainsFile(
+	scope: Set<string> | null | undefined,
+	file: string,
+): boolean {
+	return scope ? scopeSetContainsFile(scope, file) : false;
+}
+
 function hasDistinctBackgroundOwner(input: {
 	parentSessionID: string;
 	taskId: string;
@@ -435,7 +466,7 @@ export async function ingestBackgroundStageBCompletion(args: {
 				// declared scope so concurrent background coders don't cross-attribute.
 				if (observedSet && declaredSet) {
 					attributedFiles = [...observedSet].filter((file) =>
-						declaredSet.has(file),
+						scopeSetContainsFile(declaredSet, file),
 					);
 				}
 			}
@@ -449,7 +480,7 @@ export async function ingestBackgroundStageBCompletion(args: {
 					};
 				}
 				attributedFiles = [...observedSet].filter((file) =>
-					declaredSet.has(file),
+					scopeSetContainsFile(declaredSet, file),
 				);
 				const generation = getReviewerScopeGenerationForCoderCall({
 					parentSessionID: args.record.parentSessionId,
@@ -516,11 +547,13 @@ export async function ingestBackgroundStageBCompletion(args: {
 				}
 				const changedWithinDeclaredScope = new Set(
 					[...observedSet].filter(
-						(file) => declaredSet.has(file) && generationScope?.has(file),
+						(file) =>
+							scopeSetContainsFile(declaredSet, file) &&
+							scopeSetMaybeContainsFile(generationScope, file),
 					),
 				);
 				const observedOutsideCurrentScope = [...observedSet].filter(
-					(file) => !generationScope?.has(file),
+					(file) => !scopeSetMaybeContainsFile(generationScope, file),
 				);
 				if (
 					(generation?.status !== 'collecting' &&
@@ -557,8 +590,8 @@ export async function ingestBackgroundStageBCompletion(args: {
 						const observedFingerprint = observedFingerprints.get(file);
 						return (
 							!observedSet.has(file) ||
-							!declaredSet.has(file) ||
-							!generationScope.has(file) ||
+							!scopeSetContainsFile(declaredSet, file) ||
+							!scopeSetContainsFile(generationScope, file) ||
 							fingerprints.length !== 1 ||
 							!observedFingerprint ||
 							!reviewerScopeFileFingerprintsEqual(
