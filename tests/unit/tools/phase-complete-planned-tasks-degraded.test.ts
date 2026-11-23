@@ -122,6 +122,7 @@ const STATIC_NOW = '2026-01-01T00:00:00.000Z';
 interface TaskFixture {
 	id: string;
 	status: string;
+	description?: string;
 }
 
 function planFromPhases(phases: unknown[]): Record<string, unknown> {
@@ -384,6 +385,65 @@ describe('#3770 degraded plan-ledger authorities refuse', () => {
 				.filter((line) => line.includes('"phase_completed"')).length,
 		).toBe(1);
 		expect(phaseCompleteCoreEventCount(tempDir)).toBe(1);
+	});
+
+	test('authority degraded MID-FLIGHT refuses at the commit-boundary re-read (review F-1, Stage B)', async () => {
+		// Healthy authority at the early read — the early refusal passes with
+		// zero unfinished tasks — then the ledger is torn DURING the run (the
+		// drift-check preflight mock tears it on its first fire, between the
+		// early check and the locked commit boundary). The moved readiness
+		// re-read must refuse with PLANNED_TASKS_UNKNOWN; with that branch
+		// disabled this test fails because completion succeeds.
+		const completedPlan = planFromPhases([
+			phaseFixture(1, [{ id: '1.1', status: 'completed' }]),
+		]) as unknown as Parameters<typeof initLedger>[3];
+		await initLedger(
+			tempDir,
+			'mega-Degraded_Authority_Test',
+			undefined,
+			completedPlan,
+		);
+		fs.writeFileSync(
+			path.join(tempDir, '.swarm', 'plan.json'),
+			JSON.stringify(
+				planFromPhases([
+					phaseFixture(1, [{ id: '1.1', status: 'completed' }]),
+				]),
+			),
+		);
+		const ledgerPath = path.join(tempDir, '.swarm', 'plan-ledger.jsonl');
+		// Deterministic mid-flight tear: the preflight-gate seam runs once for
+		// preflightReport (before the lock) and again for lockedPreflight
+		// (inside the lock, immediately before the commit-boundary re-read).
+		// Tearing on the SECOND invocation means the early check and the
+		// pre-lock gate both saw a healthy authority, and only the locked
+		// re-read observes the torn tail.
+		const { phaseCompletePreflightInternals } = await import(
+			'../../../src/tools/phase-complete'
+		);
+		const originalGate = phaseCompletePreflightInternals.runPlannedTasksGate;
+		let gateInvocations = 0;
+		phaseCompletePreflightInternals.runPlannedTasksGate = async (ctx) => {
+			gateInvocations += 1;
+			const result = await originalGate(ctx);
+			if (gateInvocations >= 2) {
+				// Tear AFTER lockedPreflight's gate returned healthy — the
+				// window between the last gate check inside the lock and the
+				// commit-boundary re-read is exactly what the re-read covers.
+				fs.appendFileSync(ledgerPath, '\n{"seq":99,"event_type":"task_stat');
+			}
+			return result;
+		};
+		try {
+			const parsed = await execute();
+			expect(parsed.success).toBe(false);
+			expect(parsed.status).toBe('blocked');
+			expect(parsed.reason).toBe('PLANNED_TASKS_UNKNOWN');
+			expect(String(parsed.message)).toContain('truncated');
+			expect(phaseCompleteCoreEventCount(tempDir)).toBe(0);
+		} finally {
+			phaseCompletePreflightInternals.runPlannedTasksGate = originalGate;
+		}
 	});
 });
 
