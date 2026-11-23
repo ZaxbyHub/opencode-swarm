@@ -439,6 +439,11 @@ describe('#3844 the shared redactor is idempotent and covers the training famili
 		const inner = redactEvidenceText('https://x.invalid/?pwd=abc)def');
 		expect(inner).not.toContain('abc');
 		expect(inner).not.toContain(')def');
+		// An apostrophe is an RFC-legal sub-delimiter too (round 11): a
+		// value containing one is consumed whole.
+		const quoted = redactEvidenceText("https://x.invalid/?pwd=abc'def");
+		expect(quoted).not.toContain('abc');
+		expect(quoted).not.toContain("'def");
 		// A COMPOSITE value (a family token followed by more secret
 		// material) is consumed whole: the family arm labels its token and
 		// the query arm then consumes the placeholder together with the
@@ -464,6 +469,16 @@ describe('#3844 the shared redactor is idempotent and covers the training famili
 			'value; token=[REDACTED]',
 		);
 		expect(redactEvidenceText('password=hunter2')).toBe('password=[REDACTED]');
+		// Round 11: a COMPOSITE value (a family placeholder followed by
+		// more secret material) is consumed whole, and a bare placeholder
+		// is a fixed point.
+		const composite = `password=ghp_${'k'.repeat(30)}.TailSecret99`;
+		const once = redactEvidenceText(composite);
+		expect(once).toBe('password=[REDACTED]');
+		expect(redactEvidenceText(once)).toBe(once);
+		expect(redactEvidenceText('password=[REDACTED]')).toBe(
+			'password=[REDACTED]',
+		);
 	});
 
 	test('the >=80-char mixed-class base64 family is redacted (the training superset contract)', () => {

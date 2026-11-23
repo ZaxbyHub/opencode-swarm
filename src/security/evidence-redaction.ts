@@ -77,7 +77,7 @@ const URL_CREDENTIALS_PATTERN =
  *   - A quoted value keeps its quotes.
  */
 const EVIDENCE_CREDENTIAL_KV_PATTERN =
-	/(^|[\s,;"'([{])([A-Za-z0-9_ -]{0,40}(?:token|secret|password|passwd|authorization|credential|bearer|api[-_ ]?key|access[-_ ]?key)[A-Za-z0-9_ -]{0,40}\s*[=:]\s*)(?:bearer|basic|digest|negotiate|apikey)?\s*(?!\[REDACTED)("[^"'\n]*"|'[^'\n]*'|[^\s,;"'}\]]+)/gi;
+	/(^|[\s,;"'([{])([A-Za-z0-9_ -]{0,40}(?:token|secret|password|passwd|authorization|credential|bearer|api[-_ ]?key|access[-_ ]?key)[A-Za-z0-9_ -]{0,40}\s*[=:]\s*)(?:bearer|basic|digest|negotiate|apikey)?\s*(?!(?:"|')?<redacted)("[^"'\n]*"|'[^'\n]*'|(?:\[REDACTED[^\]]*\])?[^\s,;"'}\]]*)/gi;
 
 /** The quoted-JSON key form the loose key/value pattern cannot bridge. */
 const EVIDENCE_QUOTED_JSON_CREDENTIAL_PATTERN =
@@ -100,7 +100,7 @@ const EVIDENCE_SCHEME_TOKEN_PATTERN =
  * vendor-prefixed ones (`X-Amz-*`, `X-Goog-*`) and the URL FRAGMENT form.
  */
 const URL_QUERY_CREDENTIALS_PATTERN =
-	/([?&#])((?:access_token|api_key|apikey|api-key|x-api-key|token|secret|password|passwd|pass|pwd|credential|signature|sig|auth|jwt|client_secret|x-amz-signature|x-amz-credential|x-amz-security-token|x-goog-signature|x-goog-credential)=)([^\s&'"<>#]+)/gi;
+	/([?&#])((?:access_token|api_key|apikey|api-key|x-api-key|token|secret|password|passwd|pass|pwd|credential|signature|sig|auth|jwt|client_secret|x-amz-signature|x-amz-credential|x-amz-security-token|x-goog-signature|x-goog-credential)=)([^\s&"<>#]+)/gi;
 
 const EVIDENCE_BARE_TOKEN_VALUE_PATTERNS: ReadonlyArray<{
 	label: string;
