@@ -390,10 +390,13 @@ describe('#3770 degraded plan-ledger authorities refuse', () => {
 	test('authority degraded MID-FLIGHT refuses at the commit-boundary re-read (review F-1, Stage B)', async () => {
 		// Healthy authority at the early read — the early refusal passes with
 		// zero unfinished tasks — then the ledger is torn DURING the run (the
-		// drift-check preflight mock tears it on its first fire, between the
-		// early check and the locked commit boundary). The moved readiness
-		// re-read must refuse with PLANNED_TASKS_UNKNOWN; with that branch
-		// disabled this test fails because completion succeeds.
+		// seam wrapper tears it after lockedPreflight's planned-tasks gate
+		// returns healthy, before the commit-boundary re-read). The re-read
+		// must refuse with PLANNED_TASKS_UNKNOWN; with that branch disabled
+		// the tear still refuses via the commitPreflight gate, but as
+		// PHASE_PREFLIGHT_STALE AFTER the close intent was already persisted
+		// — the re-read's contribution is the specific reason plus refusing
+		// before that write (critic-verified mutant behavior).
 		const completedPlan = planFromPhases([
 			phaseFixture(1, [{ id: '1.1', status: 'completed' }]),
 		]) as unknown as Parameters<typeof initLedger>[3];
