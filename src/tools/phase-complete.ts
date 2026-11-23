@@ -2233,9 +2233,13 @@ export async function executePhaseComplete(
 			// the SAME transition identity and the append is skipped; a
 			// genuine reopen+re-complete records a new `phase_completed`
 			// ledger event and therefore a distinct identity that appends.
-			appendCoreEventSync(dir, { ...event }, {
-				dedupeOnAuthorityKey: true,
-			});
+			appendCoreEventSync(
+				dir,
+				{ ...event },
+				{
+					dedupeOnAuthorityKey: true,
+				},
+			);
 		} catch (writeError) {
 			warnings.push(
 				`Warning: failed to write phase complete event: ${writeError instanceof Error ? writeError.message : String(writeError)}`,
