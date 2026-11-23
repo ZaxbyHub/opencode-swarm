@@ -259,7 +259,11 @@ describe('Lean Turbo runtime conformance', () => {
 								{
 									id: '1.1',
 									phase: 1,
-									status: 'pending',
+									// #3770: the planned-tasks early refusal fires
+									// before the lean gate, so this fixture's task
+									// must be completed for the lean readiness
+									// refusal to remain the blocker under test.
+									status: 'completed',
 									size: 'small',
 									description: 'test task',
 									depends: [],
