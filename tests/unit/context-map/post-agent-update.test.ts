@@ -60,6 +60,19 @@ function setLoadContextMap(
 ): ReturnType<typeof mock> {
 	const mockFn = mock(fn);
 	_internals.loadContextMap = mockFn as typeof _internals.loadContextMap;
+	// r17 (P1): the update path reads through the discriminated
+	// `readContextMapState` seam FIRST. Keep the two reads coherent for
+	// seam-based tests: a mocked map is a valid readable map (`ok`), a mocked
+	// null is the rebuild-legitimate `missing` case (the semantics these
+	// tests encoded before the discriminated read existed). A genuinely
+	// unreadable existing map is covered by the integration-style
+	// child-update-corrupt-preservation.test.ts on the real filesystem.
+	_internals.readContextMapState = mock((directory: string) => {
+		const map = fn(directory);
+		return map === null
+			? { kind: 'missing' as const }
+			: { kind: 'ok' as const, map };
+	}) as typeof _internals.readContextMapState;
 	return mockFn;
 }
 

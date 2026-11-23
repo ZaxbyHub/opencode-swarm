@@ -200,6 +200,10 @@ import {
 	registerV2AgentTransformSurface,
 } from './model-apply';
 import {
+	isKnownNativeAsyncSubagentVersion,
+	registerNativeV2AsyncSubagents,
+} from './native-async-mode';
+import {
 	clearV2SessionClientState,
 	createV2SessionClient,
 } from './session-client';
@@ -355,6 +359,7 @@ export async function openCodeSwarmV2Setup(
 	// so every later owner-scoped write (preflight quiet, registration
 	// snapshot) attaches to this token and cleanup unregisters exactly these.
 	const ownerToken = nextV2OwnerToken();
+	let releaseNativeAsyncMode: (() => void) | undefined;
 	registerV2ConfigRebuildSourceForOwner(
 		ownerToken,
 		deps.buildV2RegistrationTables,
@@ -380,6 +385,15 @@ export async function openCodeSwarmV2Setup(
 					? rootDecision.directory
 					: rawDirectory;
 		const state: CollectedState = createRegistrationSink();
+		// This must precede runInit: the shared v1 gate reads the v2 host mode
+		// while constructing its dispatch/settlement hooks. Unknown host
+		// versions deliberately retain the legacy foreground semantics.
+		if (isKnownNativeAsyncSubagentVersion(ctx.app?.version)) {
+			releaseNativeAsyncMode = registerNativeV2AsyncSubagents(
+				directory,
+				ownerToken,
+			);
+		}
 
 		// v1 PluginInput view — the init core consumes only `directory` and
 		// `client`. #3169 Phase 2: the session-client shim bridges the v2
@@ -520,6 +534,7 @@ export async function openCodeSwarmV2Setup(
 		});
 
 		return async function cleanupV2Plugin(): Promise<void> {
+			releaseNativeAsyncMode?.();
 			state.closeRegistrations();
 			if (typeof state.pumpStop === 'function') state.pumpStop();
 			// #3169 Phase 2: drop the shim's bounded registries immediately after
@@ -580,6 +595,7 @@ export async function openCodeSwarmV2Setup(
 			}
 		};
 	} catch (err) {
+		releaseNativeAsyncMode?.();
 		// #PRR-017 (swarm-pr-review pr3444-20261025): a REJECTED setup must not
 		// leak this instance's owner state — the cleanup closure above never
 		// exists on this path, so the owner-scoped unregistration runs here

@@ -30,13 +30,20 @@ import {
 	clearCodeModeWrapperCall,
 	recordCodeModeWrapperCall,
 } from '../../hooks/code-mode-wrapper';
+import { verifiedWorktreeChildForV2Call } from '../../hooks/delegation-gate/worktree-isolation';
 import { normalizeToolNameLowerCase } from '../../hooks/normalize-tool-name';
 import { recordObservedHostShell } from '../../hooks/shell-executor-context';
 import { addDeferredWarning } from '../../services/warning-buffer';
 import { log } from '../../utils';
 import { withTimeout } from '../../utils/timeout';
+import { noteDispatchRunning } from './delegation-trace';
 import { resolveV2ToolBeforeBudgetMs } from './hook-budget';
+import {
+	isNativeV2AsyncSubagentHost,
+	rememberVerifiedNativeChild,
+} from './native-async-mode';
 import { normalizeV2AgentRef, seedV1SessionState } from './setup';
+import { recordV2SessionTiming, recordV2ToolTiming } from './timing-trace';
 import type {
 	V1HooksSubset,
 	V2PluginContext,
@@ -105,26 +112,59 @@ export function isPlainObject(
 	return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-/** v2 arg names → v1 arg names (`agent`→`subagent_type`, `sessionID`→`task_id`). */
-function mapV2SubagentArgsToV1(input: unknown): unknown {
+/**
+ * OpenCode 2.3 `sessionID` is the CHILD session to resume, not a Swarm
+ * plan-task identifier like `1.1`. The older v2 wrapper dialect treated it
+ * as v1 `task_id`, so retain that behavior ONLY outside verified 2.3.x hosts.
+ *
+ * In native async mode `sessionID` stays an opaque resume token for OpenCode;
+ * v1 plan scope is resolved from the task envelope and declared plan instead.
+ */
+export function mapV2SubagentArgsToV1(
+	input: unknown,
+	nativeAsync = false,
+): unknown {
 	if (!isPlainObject(input)) return input;
 	const mapped: Record<string, unknown> = {};
 	for (const [key, value] of Object.entries(input)) {
 		if (key === 'agent') mapped.subagent_type = value;
-		else if (key === 'sessionID') mapped.task_id = value;
+		else if (key === 'sessionID' && !nativeAsync) mapped.task_id = value;
 		else mapped[key] = value;
 	}
 	return mapped;
 }
 
-/** v1 arg names → v2 arg names (inverse of the forward map). */
-function mapV1TaskArgsToV2(args: unknown): unknown {
+/**
+ * Inverse bridge for the legacy host. Native OpenCode 2.3 never accepts
+ * a plan `task_id` as `sessionID`. The ONLY exception is a host-created
+ * worktree child with verified parent/call ownership, explicitly passed by
+ * the bridge (not derived from model-controlled text).
+ */
+export function mapV1TaskArgsToV2(
+	args: unknown,
+	nativeAsync = false,
+	verifiedWorktreeSessionID: string | null = null,
+): unknown {
 	if (!isPlainObject(args)) return args;
 	const mapped: Record<string, unknown> = {};
 	for (const [key, value] of Object.entries(args)) {
 		if (key === 'subagent_type') mapped.agent = value;
-		else if (key === 'task_id') mapped.sessionID = value;
+		else if (key === 'task_id' && !nativeAsync) mapped.sessionID = value;
+		else if (key === 'task_id' && nativeAsync) continue;
 		else mapped[key] = value;
+	}
+	if (nativeAsync && verifiedWorktreeSessionID !== null) {
+		if (
+			!/^ses_[A-Za-z0-9_-]{1,252}$/.test(verifiedWorktreeSessionID) ||
+			args.task_id !== verifiedWorktreeSessionID
+		) {
+			throw new Error(
+				'SWARM_V2_WORKTREE_CHILD_IDENTITY_MISMATCH: the gate did not provide its verified lane child',
+			);
+		}
+		// Resume the exact session for which the gate published a lane scope.
+		// Override any unrelated native sessionID in the original tool input.
+		mapped.sessionID = verifiedWorktreeSessionID;
 	}
 	return mapped;
 }
@@ -178,6 +218,46 @@ function parseV2SubagentWrapper(content: unknown): V2SubagentWrapper | null {
 }
 
 /**
+ * OpenCode 2.3.0 subagent results are structured, not XML wrappers:
+ *   result.output = { sessionID: "ses_...", status: "running", output: "..." }
+ *   result.content = [{ type: "text", text: "The subagent is working..." }]
+ * The outer execute.after status is `completed` because launching the child
+ * succeeded; it says nothing about the child's state. The session ID/status
+ * from the native subagent output, not model-generated prose, are authoritative.
+ *
+ * Strict validation is deliberate: an unexpected/malformed payload must not
+ * keep a coder write lease alive. Prior text-wrapper support stays available.
+ */
+function parseV2StructuredSubagentResult(
+	value: unknown,
+): V2SubagentWrapper | null {
+	if (!isPlainObject(value)) return null;
+	const sessionID = value.sessionID;
+	const status = value.status;
+	const inner = value.output;
+	if (
+		typeof sessionID !== 'string' ||
+		sessionID.length > 256 ||
+		!/^ses_[A-Za-z0-9_-]+$/.test(sessionID) ||
+		typeof inner !== 'string'
+	)
+		return null;
+	if (
+		status !== 'running' &&
+		status !== 'completed' &&
+		status !== 'error' &&
+		status !== 'cancelled' &&
+		status !== 'canceled'
+	)
+		return null;
+	return {
+		sessionID,
+		state: status === 'canceled' ? 'cancelled' : status,
+		inner,
+	};
+}
+
+/**
  * Matches the tag sequences `parseTaskEnvelope` gives structural meaning
  * (result/error/summary open+close). Inside the re-rendered envelope these
  * must only exist where WE put them, or the non-greedy extraction truncates
@@ -193,7 +273,7 @@ const V2_WRAPPER_STRUCTURAL_TAG_RE = /<\/?(?:task_result|task_error|summary)>/g;
  * keeps working unchanged. Non-wrapper text passes through as-is; never throws
  * (same discipline as `src/background/task-envelope.ts`).
  */
-function renderV1TaskEnvelopeFromV2(wrapper: V2SubagentWrapper): string {
+export function renderV1TaskEnvelopeFromV2(wrapper: V2SubagentWrapper): string {
 	// Length-bounded at the render site: the raw inner is otherwise copied
 	// ~3x (parse match, this template, the downstream envelope re-parse).
 	let inner = wrapper.inner;
@@ -223,8 +303,13 @@ async function onV2ToolBefore(
 	hooks: V1HooksSubset,
 	directory: string,
 ): Promise<void> {
+	recordV2ToolTiming(event, 'tool_before_begin');
+	let beforeSucceeded = false;
 	const handler = hooks['tool.execute.before'];
-	if (typeof handler !== 'function') return;
+	if (typeof handler !== 'function') {
+		recordV2ToolTiming(event, 'tool_before_end');
+		return;
+	}
 	seedV1SessionState(event.sessionID, event.agent, directory);
 	const isSubagent = isV2SubagentToolId(event.tool);
 	// The host's Code Mode wrapper (#3446): only this adapter sees the host's
@@ -239,9 +324,17 @@ async function onV2ToolBefore(
 		recordCodeModeWrapperCall(event.sessionID, event.id);
 	}
 	try {
-		const output = {
-			args: isSubagent ? mapV2SubagentArgsToV1(event.input) : event.input,
-		};
+		const nativeAsyncSubagent =
+			isSubagent && isNativeV2AsyncSubagentHost(directory);
+		const argsForV1 = isSubagent
+			? mapV2SubagentArgsToV1(event.input, nativeAsyncSubagent)
+			: event.input;
+		if (nativeAsyncSubagent && isPlainObject(argsForV1)) {
+			// Internal v1 semantics only: the native v2 schema has no `background`
+			// parameter. All of its subagents nevertheless run asynchronously.
+			argsForV1.background = true;
+		}
+		const output = { args: argsForV1 };
 		const budgetMs = resolveV2ToolBeforeBudgetMs(
 			isFullAutoRunActive(directory, event.sessionID),
 			directory,
@@ -265,10 +358,37 @@ async function onV2ToolBefore(
 			),
 		);
 		if (isSubagent) {
+			const verifiedLaneChild =
+				nativeAsyncSubagent && isPlainObject(output.args)
+					? verifiedWorktreeChildForV2Call({
+							callID: event.id,
+							parentSessionID: event.sessionID,
+							agent: output.args.subagent_type,
+						})
+					: null;
 			// Write back IN PLACE onto the retained original input object: the v2
 			// host may hold its own reference to the event payload (the v1
 			// invariant-10 class), so reassignment could be invisible to it.
-			const mapped = mapV1TaskArgsToV2(output.args);
+			const mapped = mapV1TaskArgsToV2(
+				output.args,
+				nativeAsyncSubagent,
+				verifiedLaneChild,
+			);
+			if (verifiedLaneChild && process.env.SWARM_SCOPE_REVOKE_TRACE === '1') {
+				process.stderr.write(
+					'[SWARM_SCOPE_REVOKE_TRACE] ' +
+						JSON.stringify({
+							at: new Date().toISOString(),
+							origin: 'v2_before_worktree_resume',
+							callID: event.id,
+							verifiedWorktreeChild: true,
+						}) +
+						'\n',
+				);
+			}
+			if (nativeAsyncSubagent && isPlainObject(mapped)) {
+				delete mapped.background; // never send an invented host argument
+			}
 			if (isPlainObject(event.input) && isPlainObject(mapped)) {
 				for (const key of Object.keys(event.input)) {
 					delete (event.input as Record<string, unknown>)[key];
@@ -278,7 +398,12 @@ async function onV2ToolBefore(
 		} else {
 			event.input = output.args;
 		}
+		beforeSucceeded = true;
 	} finally {
+		recordV2ToolTiming(
+			event,
+			beforeSucceeded ? 'tool_before_end' : 'tool_before_error',
+		);
 		if (wrapperMarked) clearCodeModeWrapperCall(event.sessionID, event.id);
 	}
 }
@@ -289,14 +414,115 @@ async function onV2ToolAfter(
 	hooks: V1HooksSubset,
 	directory: string,
 ): Promise<void> {
+	recordV2ToolTiming(event, 'tool_after_begin');
 	// The Code Mode wrapper mark is only read by the before chain; drop it now
 	// the call has completed, whether or not an after handler is registered.
 	clearCodeModeWrapperCall(event.sessionID, event.id);
 	const handler = hooks['tool.execute.after'];
-	if (typeof handler !== 'function') return;
+	if (typeof handler !== 'function') {
+		recordV2ToolTiming(event, 'tool_after_end');
+		return;
+	}
 	seedV1SessionState(event.sessionID, event.agent, directory);
 	const isSubagent = isV2SubagentToolId(event.tool);
-	const output = translateV2ResultToV1Output(event, isSubagent);
+	const nativeAsyncSubagent =
+		isSubagent && isNativeV2AsyncSubagentHost(directory);
+	const v1AfterArgs = isSubagent
+		? mapV2SubagentArgsToV1(event.input, nativeAsyncSubagent)
+		: undefined;
+	if (nativeAsyncSubagent && isPlainObject(v1AfterArgs))
+		v1AfterArgs.background = true;
+	const output = translateV2ResultToV1Output(
+		event,
+		isSubagent,
+		nativeAsyncSubagent,
+	);
+	const expectedWorktreeChild =
+		nativeAsyncSubagent && isPlainObject(event.input)
+			? verifiedWorktreeChildForV2Call({
+					callID: event.id,
+					parentSessionID: event.sessionID,
+					agent: event.input.agent,
+				})
+			: null;
+	// If the native host ignored sessionID and spawned a fresh child, its
+	// unscoped session MUST NOT be promoted to a successfully delegated coder.
+	if (expectedWorktreeChild && output.state !== 'error') {
+		const actualID = isPlainObject(event.result?.output)
+			? event.result.output.sessionID
+			: undefined;
+		if (actualID !== expectedWorktreeChild) {
+			output.state = 'error';
+			output.title = 'error';
+			output.output =
+				'SWARM_V2_WORKTREE_CHILD_SESSION_MISMATCH: host did not resume the precreated scoped worktree child';
+		}
+	}
+	// A host-validated *running* structured result also proves the child ID.
+	// This recovers correlation if the ephemeral tool.progress event was lost;
+	// neither text content nor an invalid result can register child identity.
+	if (
+		nativeAsyncSubagent &&
+		output.state === 'running' &&
+		isPlainObject(event.result?.output) &&
+		event.result.output.status === 'running' &&
+		typeof event.result.output.sessionID === 'string'
+	) {
+		if (
+			rememberVerifiedNativeChild(
+				event.result.output.sessionID,
+				event.sessionID,
+			)
+		) {
+			recordV2SessionTiming(
+				event.result.output.sessionID,
+				'native_child_verified',
+			);
+		}
+		// r17 §8: open the delegation critical-path window at the `running`
+		// report (the status-chatter hypothesis: parent turns inside this
+		// window with no real tool work are wasted-turn candidates).
+		noteDispatchRunning(event.sessionID, event.id);
+	}
+	if (isSubagent && process.env.SWARM_SCOPE_REVOKE_TRACE === '1') {
+		// Opt-in metadata only: never log model-generated content or tool inputs.
+		const structured = isPlainObject(event.result?.output)
+			? event.result.output
+			: null;
+		process.stderr.write(
+			'[SWARM_SCOPE_REVOKE_TRACE] ' +
+				JSON.stringify({
+					at: new Date().toISOString(),
+					origin: 'v2_tool_after',
+					callID: event.id,
+					parentSessionID: event.sessionID,
+					eventStatus: event.status ?? null,
+					translatedState: output.state,
+					contentKind: Array.isArray(event.result?.content)
+						? 'array'
+						: typeof event.result?.content,
+					outputKind: typeof event.result?.output,
+					structuredStatus:
+						typeof structured?.status === 'string'
+							? [
+									'running',
+									'completed',
+									'error',
+									'cancelled',
+									'canceled',
+								].includes(structured.status)
+								? structured.status
+								: 'unexpected'
+							: null,
+					structuredSessionPresent: typeof structured?.sessionID === 'string',
+					worktreeChildExpected: expectedWorktreeChild !== null,
+					worktreeChildMatched: expectedWorktreeChild
+						? structured?.sessionID === expectedWorktreeChild
+						: null,
+				}) +
+				'\n',
+		);
+	}
 	await withTimeout(
 		Promise.resolve(
 			handler(
@@ -309,24 +535,31 @@ async function onV2ToolAfter(
 					// The v1 after chain reads `input.args` as the authoritative
 					// arg source (delegation-gate.ts); the adapter previously
 					// omitted it entirely on v2 (fidelity gap closed by #3169).
-					...(isSubagent ? { args: mapV2SubagentArgsToV1(event.input) } : {}),
+					...(isSubagent ? { args: v1AfterArgs } : {}),
 				},
 				output,
 			),
 		),
 		V2_HOOK_TIMEOUT_MS,
 		new Error('[opencode-swarm] v2: tool.execute.after exceeded budget'),
-	).catch((err: unknown) => {
-		log('v2 tool.execute.after failed (non-fatal)', {
-			tool: event.tool,
-			error: err instanceof Error ? err.message : String(err),
-		});
-	});
+	)
+		.catch((err: unknown) => {
+			log('v2 tool.execute.after failed (non-fatal)', {
+				tool: event.tool,
+				error: err instanceof Error ? err.message : String(err),
+			});
+		})
+		.finally(() =>
+			recordV2ToolTiming(event, 'tool_after_end', {
+				translatedState: output.state,
+			}),
+		);
 }
 
-function translateV2ResultToV1Output(
+export function translateV2ResultToV1Output(
 	event: V2ToolHookInput,
 	isSubagent: boolean,
+	nativeAsync = false,
 ): {
 	title: string;
 	state: 'running' | 'error' | 'completed' | 'cancelled';
@@ -355,8 +588,30 @@ function translateV2ResultToV1Output(
 						.map((p) => p.text)
 						.join('\n')
 				: '';
+	// OpenCode v2 exposes both `content` and `output` on Tool.Result.
+	// Some hosts carry the authoritative subagent wrapper in `output` only.
+	// Ignoring it misclassifies a running child as completed and causes the
+	// v1 delegation gate to revoke the child's one-hour scope immediately.
+	const outputFallback =
+		isSubagent && typeof result?.output === 'string' ? result.output : '';
 	if (isSubagent) {
-		const wrapper = parseV2SubagentWrapper(content);
+		// OpenCode 2.3.0 returns structured output with a running child,
+		// while the tool call itself has event.status === 'completed'. Prefer
+		// this host-produced state over legacy text wrappers (which may contain
+		// child-produced text); neither plain prose nor execute.after completion
+		// may be used to conclude that a child has finished.
+		// If the host supplied a structured result, it is authoritative.
+		// Do not fall back to a spoofable textual running wrapper when the
+		// structured object itself fails validation (fail closed).
+		const wrapper = isPlainObject(result?.output)
+			? parseV2StructuredSubagentResult(result.output)
+			: nativeAsync
+				? // In the verified OpenCode 2.3 dialect only the structured host
+					// result is proof of child identity/state. Legacy markup can be
+					// model-authored, so it cannot grant a running scope lease.
+					null
+				: (parseV2SubagentWrapper(content) ??
+					parseV2SubagentWrapper(outputFallback));
 		if (wrapper) {
 			// 'cancelled' keeps its own structured state (v1 parity): the
 			// spawn-failure circuit counts only state === 'error'
@@ -377,19 +632,44 @@ function translateV2ResultToV1Output(
 				metadata: (result?.metadata as Record<string, unknown>) ?? {},
 			};
 		}
-		if (content.includes('<subagent')) {
+		if (isPlainObject(result?.output)) {
+			// The host asserted a structured result, but not one we can verify.
+			// Never invent a terminal SUCCESS or allow stale XML fallback:
+			// that could mark an unexecuted coder/reviewer as completed.
+			return {
+				title: 'invalid subagent protocol',
+				state: 'error',
+				output:
+					'SWARM_V2_SUBAGENT_PROTOCOL_INVALID: invalid structured subagent result; no completion evidence accepted',
+				metadata: {},
+			};
+		}
+		if (nativeAsync) {
+			// OpenCode 2.3.x contract: the host, not model-produced text,
+			// supplies the child identity and running state as a structured
+			// result. A missing structure is a protocol failure, not evidence
+			// that the Coder (or Critic) finished successfully.
+			return {
+				title: 'missing native subagent result',
+				state: 'error',
+				output:
+					'SWARM_V2_SUBAGENT_PROTOCOL_INVALID: native OpenCode 2.3 subagent returned no verifiable structured result',
+				metadata: {},
+			};
+		}
+		if (content.includes('<subagent') || outputFallback.includes('<subagent')) {
 			// The text looks like the wrapper but did not parse (attribute
 			// drift). Bounded debug note — never chat-visible noise — instead
 			// of a silent completed classification.
 			log('v2 subagent wrapper not recognized; passing result text through', {
-				chars: content.length,
+				chars: Math.max(content.length, outputFallback.length),
 			});
 		}
 	}
 	return {
 		title: '',
 		state: 'completed',
-		output: content,
+		output: content || outputFallback,
 		metadata: (result?.metadata as Record<string, unknown>) ?? {},
 	};
 }
@@ -402,6 +682,7 @@ async function onV2Compaction(
 ): Promise<void> {
 	const handler = hooks['experimental.session.compacting'];
 	if (typeof handler !== 'function') return;
+	recordV2SessionTiming(event.sessionID, 'compaction_begin');
 	seedV1SessionState(event.sessionID, event.agent, directory);
 	const model = event.model as { id?: string; providerID?: string } | undefined;
 	const output: Record<string, unknown> = {};
@@ -421,11 +702,13 @@ async function onV2Compaction(
 		),
 		V2_HOOK_TIMEOUT_MS,
 		new Error('[opencode-swarm] v2: compaction hook exceeded budget'),
-	).catch((err: unknown) => {
-		log('v2 compaction hook failed (non-fatal)', {
-			error: err instanceof Error ? err.message : String(err),
-		});
-	});
+	)
+		.catch((err: unknown) => {
+			log('v2 compaction hook failed (non-fatal)', {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		})
+		.finally(() => recordV2SessionTiming(event.sessionID, 'compaction_end'));
 	// The v1 customizer's directive fields have no v2 mapping yet (inventory row).
 }
 
@@ -436,6 +719,7 @@ async function onV2Prompt(
 ): Promise<void> {
 	const handler = hooks['chat.message'];
 	if (typeof handler !== 'function') return;
+	recordV2SessionTiming(event.sessionID, 'prompt_begin');
 	const text = event.prompt?.text ?? '';
 	const message = {
 		id: event.messageID,
@@ -462,11 +746,13 @@ async function onV2Prompt(
 		Promise.resolve(handler(input, output)),
 		V2_HOOK_TIMEOUT_MS,
 		new Error('[opencode-swarm] v2: prompt hook exceeded budget'),
-	).catch((err: unknown) => {
-		log('v2 prompt (chat.message) hook failed (non-fatal)', {
-			error: err instanceof Error ? err.message : String(err),
-		});
-	});
+	)
+		.catch((err: unknown) => {
+			log('v2 prompt (chat.message) hook failed (non-fatal)', {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		})
+		.finally(() => recordV2SessionTiming(event.sessionID, 'prompt_end'));
 	// The v1 chain mutates output.message/output.parts in place; the v2
 	// SessionPrompt's own fields stay authoritative (model override is
 	// v1-only until an equivalent v2 surface is confirmed — inventory row).

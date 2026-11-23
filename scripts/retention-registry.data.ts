@@ -494,12 +494,12 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			'src/hooks/pr-workflow-gate.ts',
 		],
 		writerCitations: [
-			'src/background/pending-delegations.ts:3276 appendRecord — SQLite coordination event+state transaction with post-commit JSON projection',
-			'src/background/pending-delegations.ts:1545 writeDurableFileSync — fsync+rename-with-retry for legacy checkpoint/manifest/rolled-tail compatibility',
+			'src/background/pending-delegations.ts:3552 appendRecord — SQLite coordination event+state transaction with post-commit JSON projection',
+			'src/background/pending-delegations.ts:1821 writeDurableFileSync — fsync+rename-with-retry for legacy checkpoint/manifest/rolled-tail compatibility',
 		],
 		readerCitations: [
-			'src/background/pending-delegations.ts:3165 readDelegations — SQLite authority with bounded legacy compatibility, sync',
-			'src/background/pending-delegations.ts:3180 scanDelegationsForRecovery — strict, fails closed',
+			'src/background/pending-delegations.ts:3441 readDelegations — SQLite authority with bounded legacy compatibility, sync',
+			'src/background/pending-delegations.ts:3456 scanDelegationsForRecovery — strict, fails closed',
 			'pr-workflow-session-resolver / pr-workflow-gate / init-orphan-recovery / delegation-gate worktree-collision-ownership — via readDelegations',
 		],
 		schemaVersion:
@@ -609,12 +609,12 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/background/pending-delegations.ts'],
 		writerCitations: [
-			'src/background/pending-delegations.ts:6294 writeDelegationFallback / :6345 removeDelegationFallback',
-			'src/background/pending-delegations.ts:6808 writeBackgroundCoderReservations',
+			'src/background/pending-delegations.ts:7403 writeDelegationFallback / :7454 removeDelegationFallback',
+			'src/background/pending-delegations.ts:7917 writeBackgroundCoderReservations',
 		],
 		readerCitations: [
-			'src/background/pending-delegations.ts:6149 readDelegationFallback / :6161 listDelegationFallbacks / :6195 scanDelegationFallbacksForRecovery',
-			'src/background/pending-delegations.ts:6786 scanBackgroundCoderReservationsForAdmission',
+			'src/background/pending-delegations.ts:7258 readDelegationFallback / :7270 listDelegationFallbacks / :7304 scanDelegationFallbacksForRecovery',
+			'src/background/pending-delegations.ts:7895 scanBackgroundCoderReservationsForAdmission',
 		],
 		schemaVersion: 'fallback schemaVersion 1 (:1041)',
 		stateClass: 'authoritative',

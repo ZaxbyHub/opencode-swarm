@@ -16,7 +16,6 @@
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-
 import type {
 	ContentHash,
 	ContextMap,
@@ -24,6 +23,7 @@ import type {
 	DecisionEntry,
 	TaskContextSummary,
 } from '../types/context-map';
+import { atomicWriteSwarmFileSync } from '../utils/atomic-write';
 
 // ---------------------------------------------------------------------------
 // DI seam — tests override these functions without touching real modules
@@ -43,7 +43,24 @@ export const _internals = {
 	renameSync: fs.renameSync,
 	existsSync: fs.existsSync,
 	statSync: fs.statSync,
+	/**
+	 * r17 (P1): lstat-based classification for the discriminated read —
+	 * symlink/dir/permission states must be distinguished from provable
+	 * absence without following the link. Seamed so tests can inject
+	 * metadata failures (EACCES) and vanish-between-stat-and-read races.
+	 */
+	lstatSync: fs.lstatSync,
 	createHash: crypto.createHash.bind(crypto),
+	/**
+	 * r16 (P2): the canonical atomic swarm writer (unique registered temp,
+	 * fsync, bounded Windows rename retry, artifact-cache invalidation).
+	 * Seamed so tests can capture the persisted bytes without real I/O —
+	 * the same pattern the previous writeFileSync/renameSync seam served.
+	 */
+	atomicWriteSwarmFileSync: atomicWriteSwarmFileSync as (
+		targetPath: string,
+		content: string,
+	) => void,
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -124,19 +141,97 @@ export function loadContextMap(directory: string): ContextMap | null {
 }
 
 /**
- * Save the Context Map to `.swarm/context-map.json` using an atomic
- * temp-then-rename write pattern to avoid partial-write corruption.
+ * Discriminated context-map read (r16 audit P1): distinguishes "no file
+ * exists" (`missing`) from "the file exists but is corrupt, unreadable, or
+ * structurally invalid" (`unreadable`).
+ *
+ * `loadContextMap` collapses both cases into `null`, which is the right
+ * contract for its existing callers — but rebuild-on-null callers must NOT
+ * treat them the same: a genuinely missing map may be rebuilt from
+ * authoritative state, while an EXISTING corrupt map must be preserved
+ * byte-for-byte so an operator can still recover decisions, task history,
+ * and file summaries from the damaged file. Overwriting it with a fresh
+ * empty map destroys that recovery path.
+ *
+ * `loadContextMap`'s null-returning contract is deliberately unchanged.
+ */
+export type ContextMapReadState =
+	| { kind: 'ok'; map: ContextMap }
+	| { kind: 'missing' }
+	| { kind: 'unreadable' };
+
+/**
+ * Whether an fs error is an exact ENOENT — the ONLY signal that proves a
+ * path is absent. Typed narrow check (mirrors the atomic-write.ts errno
+ * pattern); any other code (EACCES, ENOTDIR, EPERM, unknown shapes) is NOT
+ * absence.
+ */
+function isExactNotFoundError(error: unknown): boolean {
+	return (
+		typeof error === 'object' &&
+		error !== null &&
+		'code' in error &&
+		(error as NodeJS.ErrnoException).code === 'ENOENT'
+	);
+}
+
+export function readContextMapState(directory: string): ContextMapReadState {
+	const filePath = path.join(directory, '.swarm', 'context-map.json');
+	// r17 audit repair (P1): `existsSync()` is not proof of absence — it
+	// FOLLOWS symlinks, so a PRESENT dangling symlink reports `false` and the
+	// previous classification returned `missing`, the one state the r16/r17
+	// repairs treat as "rebuild is legitimate". A rebuild persists via
+	// atomic-rename, which REPLACES the link itself: a filesystem object
+	// whose identity was never verified gets clobbered. A symlink to a
+	// foreign VALID json file was likewise accepted as a normal readable map
+	// (`ok`) — reading arbitrary foreign files with no explicit contract.
+	//
+	// Classify by lstat instead: only an exact ENOENT proves absence; every
+	// other observable state — symlink (dangling or not), directory, fifo,
+	// non-regular file, or any metadata-access failure — is `unreadable`
+	// (fail toward preservation). The residual swap-between-lstat-and-read
+	// race is inherent to path-based APIs and is documented fail-closed: the
+	// read that follows goes through the same filePath and a failure there
+	// still lands in `unreadable`, never `missing`.
+	let stat: fs.Stats;
+	try {
+		stat = _internals.lstatSync(filePath);
+	} catch (error) {
+		if (isExactNotFoundError(error)) {
+			return { kind: 'missing' };
+		}
+		return { kind: 'unreadable' };
+	}
+	if (!stat.isFile() || stat.isSymbolicLink()) {
+		return { kind: 'unreadable' };
+	}
+	const map = loadContextMap(directory);
+	if (map === null) {
+		return { kind: 'unreadable' };
+	}
+	return { kind: 'ok', map };
+}
+
+/**
+ * Save the Context Map to `.swarm/context-map.json` using the canonical
+ * atomic write (unique registered temp file + fsync + rename).
+ *
+ * r16 audit repair (P2): the previous hand-rolled write used a FIXED temp
+ * name (`.swarm/context-map.tmp`) with no cross-process coordination — two
+ * concurrent writers could clobber each other's temp file (one rename then
+ * failed with ENOENT, or installed the OTHER writer's bytes). The canonical
+ * writer gives every write its own unique temp, so unlocked writers can no
+ * longer collide on the temp artifact; cross-process lost UPDATES (both
+ * writers extending a map they both loaded earlier) are prevented by the
+ * coordinating lock at the mutation entry points
+ * (`withContextMapLock` in post-agent-update.ts) — a unique temp alone does
+ * not serialize read-modify-write cycles.
  *
  * Updates `generated_at` to the current timestamp before writing.
  * Creates the `.swarm/` directory if it does not exist.
  */
 export function saveContextMap(map: ContextMap, directory: string): void {
-	const swarmDir = path.join(directory, '.swarm');
-	const tmpPath = path.join(swarmDir, 'context-map.tmp');
-	const finalPath = path.join(swarmDir, 'context-map.json');
-
-	// Ensure .swarm/ directory exists
-	_internals.mkdirSync(swarmDir, { recursive: true });
+	const finalPath = path.join(directory, '.swarm', 'context-map.json');
 
 	// Update generated_at timestamp
 	const updated: ContextMap = {
@@ -145,8 +240,7 @@ export function saveContextMap(map: ContextMap, directory: string): void {
 	};
 
 	const json = JSON.stringify(updated, null, 2);
-	_internals.writeFileSync(tmpPath, json, 'utf-8');
-	_internals.renameSync(tmpPath, finalPath);
+	_internals.atomicWriteSwarmFileSync(finalPath, json);
 }
 
 // ---------------------------------------------------------------------------

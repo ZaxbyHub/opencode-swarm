@@ -28,6 +28,16 @@ const planSyncWorkerPrototype = PlanSyncWorker.prototype as unknown as {
 const originalStart = planSyncWorkerPrototype.start;
 const originalSetupNativeWatcher = planSyncWorkerPrototype.setupNativeWatcher;
 
+// r15 audit repair (Phase 6 — test isolation): snapshot of the seam's
+// ORIGINALS (the same §7/RC-3/#2305 pattern plan-sync-worker.test.ts uses).
+// The previous afterEach RE-INSTALLED the mocks instead of restoring the
+// originals (its comment claimed "Restore original functions"), so the LAST
+// test's mockImplementation leaked process-wide: every later test file's
+// loadPlanJsonOnly call hit the "reject-resolve-race" implementation and
+// failed with "Manual rejection" ~60 ms later (15+ full-suite failures in
+// the WAL-transfer suite, the context-map release suite, and others).
+const seamSnapshot = { ...planManagerInternals };
+
 // File watcher timing varies across platforms. Skip on non-Linux.
 describe.skipIf(process.platform !== 'linux')(
 	'ADVERSARIAL: Task 3.6 Timeout Safeguards',
@@ -103,10 +113,18 @@ describe.skipIf(process.platform !== 'linux')(
 		afterEach(async () => {
 			planSyncWorkerPrototype.start = originalStart;
 			planSyncWorkerPrototype.setupNativeWatcher = originalSetupNativeWatcher;
-			// Restore original functions to _internals seam
-			planManagerInternals.loadPlan = mockLoadPlan;
-			planManagerInternals.loadPlanJsonOnly = mockLoadPlanJsonOnly;
-			planManagerInternals.regeneratePlanMarkdown = mockRegeneratePlanMarkdown;
+			// r15 (Phase 6): restore the seam's ORIGINALS (the previous code
+			// re-installed the mocks here, leaking the last test's
+			// implementation process-wide). Reset the mock implementations to
+			// their benign defaults first so even a later re-install of the
+			// same mock objects cannot replay a stale racing implementation.
+			mockLoadPlanJsonOnly.mockImplementation(async () => null);
+			mockLoadPlan.mockImplementation(async () => null);
+			mockRegeneratePlanMarkdown.mockImplementation(async () => {});
+			mockLoadPlanJsonOnly.mockClear();
+			mockLoadPlan.mockClear();
+			mockRegeneratePlanMarkdown.mockClear();
+			Object.assign(planManagerInternals, seamSnapshot);
 			if (worker) {
 				worker.dispose();
 				worker = null;
@@ -1181,6 +1199,12 @@ describe.skipIf(process.platform !== 'linux')(
 				await setupTempDir(true, true);
 
 				const events: string[] = [];
+				// r15 (Phase 6): every timer created by the racing
+				// implementation is tracked and cleared at test end — an
+				// uncleared 60/80 ms timer from the worker's LAST poll (10 ms
+				// interval) would otherwise fire into the NEXT test file's
+				// promises in the same process.
+				const raceTimers: ReturnType<typeof setTimeout>[] = [];
 
 				// Promise that races between reject (timeout) and resolve
 				mockLoadPlanJsonOnly.mockImplementation(async () => {
@@ -1196,11 +1220,13 @@ describe.skipIf(process.platform !== 'linux')(
 								migration_status: 'none',
 							});
 						}, 80);
+						raceTimers.push(resolveTimer);
 
 						const rejectTimer = setTimeout(() => {
 							events.push('reject');
 							reject(new Error('Manual rejection'));
 						}, 60);
+						raceTimers.push(rejectTimer);
 
 						// Clear the other timer when one fires
 						// This simulates a race condition
@@ -1226,6 +1252,8 @@ describe.skipIf(process.platform !== 'linux')(
 
 				// Worker should survive race condition
 				expect(worker.getStatus()).toBe('running');
+				// Leave no racing timer behind for later test files.
+				for (const timer of raceTimers) clearTimeout(timer);
 			});
 		});
 	},

@@ -22,7 +22,10 @@ import {
 	lexicalRootAliasKey,
 } from '../utils/canonical-root.js';
 import { canonicalExistingFilesystemPath } from '../utils/filesystem-identity.js';
-import { isBlankDirectory } from '../utils/path-security.js';
+import {
+	isBlankDirectory,
+	looksLikeWindowsDrivePath,
+} from '../utils/path-security.js';
 import { ProjectDbError } from './db-errors.js';
 import { loadDatabaseCtor } from './sqlite-loader.js';
 
@@ -838,6 +841,18 @@ export function assertProjectDbRoot(directory: string): void {
 			`Project root must be a non-blank path (got ${sanitizeDiagnosticText(JSON.stringify(directory), 120)})`,
 		);
 	}
+	// r17 (§9.2): a WINDOWS drive-absolute path on a non-Windows host is not
+	// a project directory — the POSIX resolver treats it as a RELATIVE path
+	// and the create-on-first-open contract below would materialize
+	// `.swarm/swarm.db` under `<cwd>/C:\...` (observed in a repository root
+	// after a combined services test run). Refuse it with the same typed
+	// error before any filesystem access.
+	if (process.platform !== 'win32' && looksLikeWindowsDrivePath(directory)) {
+		throw new ProjectDbError(
+			'invalid_root',
+			`Project root is a Windows drive path on a ${process.platform} host — refusing to resolve it relative to the process cwd (got ${sanitizeDiagnosticText(JSON.stringify(directory), 120)})`,
+		);
+	}
 }
 
 /**
@@ -857,6 +872,14 @@ export function projectDbPath(directory: string): string {
  */
 export function projectDbExists(directory: string): boolean {
 	if (isBlankDirectory(directory)) return false;
+	// r17 (§9.2): a foreign-platform drive path can never host the DB; say
+	// "no" instead of resolving it relative to the cwd (and never throw from
+	// this boolean predicate — a leaked existsSync mock in a shared test
+	// runner previously made this return true for such paths, and the
+	// create-on-first-open DB then materialized under the repo root).
+	if (process.platform !== 'win32' && looksLikeWindowsDrivePath(directory)) {
+		return false;
+	}
 	return existsSync(projectDbPath(directory));
 }
 

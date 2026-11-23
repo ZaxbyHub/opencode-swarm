@@ -1104,13 +1104,34 @@ describe('SC-025 / FR-021 — appendToSidecar does not mutate caller objects', (
 // ---------------------------------------------------------------------------
 // SC-023 — Append failure handling (MUST run LAST — uses mock.module)
 // ---------------------------------------------------------------------------
-// NOTE: These tests use mock.module('node:fs') which pollutes Bun's module
-// cache. Running them LAST ensures they don't corrupt state for earlier tests.
-// See: tests/unit/background/candidate-sidecar-store.test.ts (isolated at end)
+// NOTE: These tests use mock.module('node:fs'). Bun's mock.module patches the
+// ORIGINAL module's export slots retroactively, and mock.restore() does NOT
+// undo the replacement — the describe's afterEach therefore re-installs the
+// ORIGINAL appendFileSync (captured before any mock) via mock.module, so the
+// pollution cannot leak into later-loaded test files in the same process.
+// The tests still run LAST within this file so the in-file top-level
+// parseAndPersist import never captures a mocked fs binding.
 
 describe('SC-023 — sidecar append failure does not fail the parse', () => {
+	// r15 audit repair (Phase 6 — test isolation): Bun's mock.module
+	// retroactively patches the ORIGINAL module's export slots, and
+	// mock.restore() does NOT undo a mock.module replacement (verified by a
+	// minimal two-file reproducer). Spreading `...realFs` after a previous
+	// mock therefore re-installs the MOCKED functions — the previous
+	// afterEach left the throwing appendFileSync in place for every
+	// later-loaded module in the process, polluting unrelated test files
+	// (94 artificial failures in the full background suite). Restoring the
+	// ORIGINAL function reference captured BEFORE any mock — re-installed
+	// via mock.module in afterEach — puts the real export slots back for
+	// all holders (Bun patches the same slots in place again).
+	const realAppendFileSync = realFs.appendFileSync;
+
 	afterEach(() => {
 		mock.restore();
+		mock.module('node:fs', () => ({
+			...realFs,
+			appendFileSync: realAppendFileSync,
+		}));
 	});
 
 	// We use mock.module to replace node:fs BEFORE parseAndPersist runs.

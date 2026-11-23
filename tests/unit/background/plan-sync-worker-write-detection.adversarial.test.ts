@@ -10,21 +10,20 @@ const logCalls: { message: string; data?: unknown }[] = [];
 // Import _internals seam for plan/manager (within-module)
 import { _internals as planManagerInternals } from '../../../src/plan/manager';
 
+// r15 audit repair (Phase 6 — test isolation): same defect and same fix as
+// plan-sync-worker-write-detection.test.ts — the previous top-level
+// mock.module('../../../src/utils') replaced the whole utils module with
+// ONLY log/warn/error (every other export undefined process-wide from
+// Bun's test-file preloading onward). The mock is now per-test
+// (beforeEach/afterEach) and the REAL module snapshot is re-installed after
+// each test (mock.restore() does NOT undo mock.module).
+import * as realUtilsModule from '../../../src/utils';
+
+const utilsSnapshot = { ...realUtilsModule };
+const planManagerSeamSnapshot = { ...planManagerInternals };
+
 // Within-module DI seam: mock functions assigned to _internals
 const mockLoadPlan = mock(async () => null);
-
-// Cross-module mock: Mock the utils module's re-exports since warn is called directly
-// from ../utils (not via _internals in logger.ts)
-mock.module('../../../src/utils', () => ({
-	log: (message: string, data?: unknown) => {
-		logCalls.push({ message, data });
-	},
-	warn: (message: string, data?: unknown) => {
-		// Also track warns
-		logCalls.push({ message, data });
-	},
-	error: () => {}, // Don't track errors
-}));
 
 // Helper to create temp directory structure
 function setupTempDir(): {
@@ -86,6 +85,20 @@ describe('checkForUnauthorizedWrite - ADVERSARIAL TESTS', () => {
 	beforeEach(() => {
 		// Install mock functions onto _internals seam for plan/manager
 		planManagerInternals.loadPlan = mockLoadPlan;
+		// Per-test cross-module mock (r15 Phase 6): installed HERE, not at
+		// file top level, so Bun's test-file preloading cannot leak it into
+		// earlier-running test files.
+		mock.module('../../../src/utils', () => ({
+			...utilsSnapshot,
+			log: (message: string, data?: unknown) => {
+				logCalls.push({ message, data });
+			},
+			warn: (message: string, data?: unknown) => {
+				// Also track warns
+				logCalls.push({ message, data });
+			},
+			error: () => {}, // Don't track errors
+		}));
 
 		const dirs = setupTempDir();
 		tempDir = dirs.tempDir;
@@ -98,9 +111,13 @@ describe('checkForUnauthorizedWrite - ADVERSARIAL TESTS', () => {
 	});
 
 	afterEach(() => {
-		// Restore original function to _internals seam
-		planManagerInternals.loadPlan = mockLoadPlan;
-		mock.restore(); // Clean up cross-module mocks
+		// r15 (Phase 6): restore the REAL utils module and the plan-manager
+		// seam's originals (the previous code re-installed the mock here).
+		mock.module('../../../src/utils', () => ({ ...utilsSnapshot }));
+		Object.assign(planManagerInternals, planManagerSeamSnapshot);
+		mockLoadPlan.mockImplementation(async () => null);
+		mockLoadPlan.mockClear();
+		mock.restore(); // Clean up function mocks
 		cleanupTempDir(tempDir);
 	});
 
