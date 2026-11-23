@@ -84,13 +84,6 @@ docs/training-vault-remediation.md.
 - A KEY=VALUE value longer than roughly 300k characters is not redacted
   at all (pre-existing: the JS engine silently declines the match past
   that size). Chunking the value match is the fix.
-- On the TRAINING vault path the key/value arm still skips a value that
-  starts with the capture-time `<redacted` marker: that skip is
-  load-bearing for the capture-history redaction count, so a composite
-  value there (`password=<redacted:github>.tail`) keeps its tail in a
-  vault record. The EVIDENCE path consumes both placeholder
-  vocabularies whole, so such a record re-redacts when it reaches an
-  evidence surface.
 - A COMPOSITE value whose credential part is JWT-shaped keeps its tail:
   in `?token=<JWT>.<more>`, the shared JWS scanner's span semantics consume
   the `=` together with the token (the parameter name is redacted as part
@@ -208,9 +201,11 @@ docs/training-vault-remediation.md.
   forge queue re-redacts a stored message on every rewrite), so a redactor
   that changes its output on the second pass made the evidence copy and the
   receipt copy of one finding differ. The redaction now runs until the output
-  stops changing, and the key/value placement arm no longer matches a value
-  that starts with an existing placeholder (and it keeps the separator it
-  consumed instead of gluing the surrounding words together). The loop also
+  stops changing, and the key/value placement arm keeps the separator it
+  consumed (instead of gluing the surrounding words together). The arm
+  consumes a COMPOSITE value — a placeholder followed by more secret
+  material — whole, so no tail survives; a value made only of placeholders
+  is a fixed point. The loop also
   closes a single-pass leak: a bare-family credential GLUED to a preceding
   word character has no word boundary, so it is redacted once the
   neighbouring token is itself replaced. (A credential glued to a word that
@@ -279,9 +274,11 @@ docs/training-vault-remediation.md.
   export, and overwriting the counters with the export pass's own result
   would claim that no redaction was applied to a record whose content IS
   redacted. The exported counters count only the redactions the export pass
-  actually made — the training redactor no longer re-matches its own
-  placeholder, so an export neither corrupts the record nor counts a
-  redaction that removed nothing.
+  actually made — the training redactor treats a value made only of
+  placeholders as a fixed point, so an export neither corrupts the record
+  nor counts a redaction that removed nothing; every other value,
+  including a placeholder followed by more secret material, is consumed
+  whole (a placeholder-led value used to keep its tail).
 - The core-events writer fits a redacted line to its own 256 KiB bound. A
   redaction placeholder can be longer than the credential it replaces, so an
   event whose free text sat exactly on the bound was refused after the

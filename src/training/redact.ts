@@ -45,12 +45,29 @@ const URL_PATTERN = /\bhttps?:\/\/[^\s'"<>]+/g;
 //   - The leading separator is captured and re-emitted. It used to be part of
 //     the match but not of the replacement, so the words around the value
 //     were glued together (`password=<redacted>then` lost `then`).
-//   - A value that starts with this redactor's own placeholder is not
-//     matched. The export re-redacts every record, so a non-idempotent arm
-//     corrupted the exported content (and counted a redaction that removed
-//     nothing).
+//   - A value made ONLY of complete placeholders (this redactor's
+//     `<redacted…>` or the evidence path's `[REDACTED…]`) is a FIXED POINT:
+//     the export re-redacts every record, so a non-idempotent arm corrupted
+//     the exported content (and counted a redaction that removed nothing).
+//     Every OTHER value is consumed whole, placeholders included — a
+//     placeholder followed by more secret material keeps no tail (an
+//     earlier guard skipped those values and retained the tail). Each
+//     placeholder body is bounded at 64 characters so a run of unclosed
+//     openers stays linear.
 const CREDENTIAL_KV_PATTERN =
-	/(^|[\s,;"'([{])([A-Za-z0-9_ -]{0,40}(?:token|secret|password|passwd|authorization|credential|bearer|api[-_ ]?key|access[-_ ]?key)[A-Za-z0-9_ -]{0,40}\s*[=:]\s*)(?:bearer|basic|digest|negotiate|apikey)?\s*(?!(?:"|')?<redacted)("[^"'\n]*"|'[^'\n]*'|[^\s,;"'}\]]+)/gi;
+	/(^|[\s,;"'([{])([A-Za-z0-9_ -]{0,40}(?:token|secret|password|passwd|authorization|credential|bearer|api[-_ ]?key|access[-_ ]?key)[A-Za-z0-9_ -]{0,40}\s*[=:]\s*)(?:bearer|basic|digest|negotiate|apikey)?\s*("[^"'\n]*"|'[^'\n]*'|(?:\[REDACTED[^\]\s]{0,64}\]|<redacted[^>\s]{0,64}>|[^\s,;"'}\]])(?:\[REDACTED[^\]\s]{0,64}\]|<redacted[^>\s]{0,64}>|[^\s,;"'}\]])*)/gi;
+
+/** A complete placeholder (either vocabulary) or a surrounding quote. */
+const PLACEHOLDER_OR_QUOTE =
+	/\[REDACTED[^\]\s]{0,64}\]|<redacted[^>\s]{0,64}>|["']/g;
+
+/**
+ * Whether a matched key/value value is nothing but complete placeholders —
+ * already redacted, so the arm leaves its bytes alone and counts nothing.
+ */
+function isPlaceholderOnly(value: string): boolean {
+	return value.replace(PLACEHOLDER_OR_QUOTE, '') === '';
+}
 
 // JSON-quoted key form the loose pattern cannot bridge: `"api_key": "v"` —
 // the closing quote of the key and the opening quote of the value fall
@@ -249,6 +266,8 @@ export function redactTrainingContent(content: string): RedactionResult {
 		working = working.replace(
 			CREDENTIAL_KV_PATTERN,
 			(_match, separator: string, prefix: string, value: string) => {
+				// Already redacted: keep the bytes, count nothing.
+				if (isPlaceholderOnly(value)) return _match;
 				redactions += 1;
 				const quoted =
 					value.length >= 2 &&
