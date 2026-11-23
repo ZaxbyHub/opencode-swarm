@@ -479,6 +479,28 @@ describe('#3844 the shared redactor is idempotent and covers the training famili
 		expect(redactEvidenceText('password=[REDACTED]')).toBe(
 			'password=[REDACTED]',
 		);
+		// Round 12: BOTH placeholder vocabularies consume, anywhere in the
+		// value, and a bare placeholder is a fixed point. The aca8f1183
+		// interim guard leaked the tail of a composite <redacted> value
+		// (442d08ddd redacted it whole); the consuming repetition closes
+		// that regression and the class it names.
+		expect(redactEvidenceText('password=<redacted>Hunter2Secret')).toBe(
+			'password=[REDACTED]',
+		);
+		expect(
+			redactEvidenceText('password=<redacted:github>.TailSecret'),
+		).toBe('password=[REDACTED]');
+		expect(redactEvidenceText('password=x-[REDACTED:github].Tail')).toBe(
+			'password=[REDACTED]',
+		);
+		expect(
+			redactEvidenceText(`password=ghp_${'k'.repeat(30)}.ghp_${'k'.repeat(30)}.Tail`),
+		).toBe('password=[REDACTED]');
+		// An EMPTY value matches nothing (no placeholder appended to prose).
+		expect(redactEvidenceText('Reset your password:')).toBe(
+			'Reset your password:',
+		);
+		expect(redactEvidenceText('token=,next')).toBe('token=,next');
 	});
 
 	test('the >=80-char mixed-class base64 family is redacted (the training superset contract)', () => {

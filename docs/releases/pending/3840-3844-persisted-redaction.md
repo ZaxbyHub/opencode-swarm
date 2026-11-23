@@ -75,6 +75,13 @@ docs/training-vault-remediation.md.
 
 ## Known bounds
 
+- On the TRAINING vault path the key/value arm still skips a value that
+  starts with the capture-time `<redacted` marker: that skip is
+  load-bearing for the capture-history redaction count, so a composite
+  value there (`password=<redacted:github>.tail`) keeps its tail in a
+  vault record. The EVIDENCE path consumes both placeholder
+  vocabularies whole, so such a record re-redacts when it reaches an
+  evidence surface.
 - A COMPOSITE value whose credential part is JWT-shaped keeps its tail:
   in `?token=<JWT>.<more>`, the shared JWS scanner's span semantics consume
   the `=` together with the token (the parameter name is redacted as part

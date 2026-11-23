@@ -67,17 +67,22 @@ const URL_CREDENTIALS_PATTERN =
  *   - The leading separator is CAPTURED and re-emitted. It used to be part of
  *     the match but not of the replacement, so `the token=abc` came back as
  *     `thetoken=[REDACTED]` — the words were glued together.
- *   - The value may not START with `[REDACTED`. The value class excluded `]`
- *     but allowed `[`, so the arm re-matched its OWN placeholder on a second
- *     pass: `password=[REDACTED]` became `password=[REDACTED]]`. The
- *     redactor is applied more than once on the same text (the review
- *     evidence is redacted at assembly AND at persistence), so a
- *     non-idempotent arm grew the value by one character per pass and made
- *     the evidence copy and the receipt copy of one finding differ.
+ *   - A value made ONLY of complete placeholders (the bracket form this
+ *     arm emits, or the training vault's `<redacted...>` form) is a FIXED
+ *     point: the bare value class is a repetition whose alternatives are
+ *     those two placeholders and any non-delimiter character, and the
+ *     replacement re-emits one generic placeholder. Earlier, the value
+ *     class excluded `]` but allowed `[`, so the arm re-matched its own
+ *     placeholder and `password=[REDACTED]` grew by one bracket per pass
+ *     — the redactor is applied more than once on the same text, and a
+ *     non-idempotent arm made the evidence copy and the receipt copy of
+ *     one finding differ. The repetition also consumes a composite value
+ *     (a placeholder followed by more secret material, anywhere in the
+ *     value) whole.
  *   - A quoted value keeps its quotes.
  */
 const EVIDENCE_CREDENTIAL_KV_PATTERN =
-	/(^|[\s,;"'([{])([A-Za-z0-9_ -]{0,40}(?:token|secret|password|passwd|authorization|credential|bearer|api[-_ ]?key|access[-_ ]?key)[A-Za-z0-9_ -]{0,40}\s*[=:]\s*)(?:bearer|basic|digest|negotiate|apikey)?\s*(?!(?:"|')?<redacted)("[^"'\n]*"|'[^'\n]*'|(?:\[REDACTED[^\]]*\])?[^\s,;"'}\]]*)/gi;
+	/(^|[\s,;"'([{])([A-Za-z0-9_ -]{0,40}(?:token|secret|password|passwd|authorization|credential|bearer|api[-_ ]?key|access[-_ ]?key)[A-Za-z0-9_ -]{0,40}\s*[=:]\s*)(?:bearer|basic|digest|negotiate|apikey)?\s*("[^"'\n]*"|'[^'\n]*'|(?:\[REDACTED[^\]\s]*\]|<redacted[^>\s]*>|[^\s,;"'}\]])(?:\[REDACTED[^\]\s]*\]|<redacted[^>\s]*>|[^\s,;"'}\]])*)/gi;
 
 /** The quoted-JSON key form the loose key/value pattern cannot bridge. */
 const EVIDENCE_QUOTED_JSON_CREDENTIAL_PATTERN =
