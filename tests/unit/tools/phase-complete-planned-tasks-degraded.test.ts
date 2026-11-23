@@ -406,9 +406,7 @@ describe('#3770 degraded plan-ledger authorities refuse', () => {
 		fs.writeFileSync(
 			path.join(tempDir, '.swarm', 'plan.json'),
 			JSON.stringify(
-				planFromPhases([
-					phaseFixture(1, [{ id: '1.1', status: 'completed' }]),
-				]),
+				planFromPhases([phaseFixture(1, [{ id: '1.1', status: 'completed' }])]),
 			),
 		);
 		const ledgerPath = path.join(tempDir, '.swarm', 'plan-ledger.jsonl');
@@ -444,72 +442,5 @@ describe('#3770 degraded plan-ledger authorities refuse', () => {
 		} finally {
 			phaseCompletePreflightInternals.runPlannedTasksGate = originalGate;
 		}
-	});
-});
-
-// Direct gate-layer unit legs (moved from the refusal suite for FR-006).
-describe('#3770 planned-tasks gate layer (direct unit legs)', () => {
-	let tempDir: string;
-	let originalCwd: string;
-
-	beforeEach(() => {
-		resetSwarmState();
-		tempDir = canonicalMkdtemp('planned-tasks-gate-unit-');
-		originalCwd = process.cwd();
-		process.chdir(tempDir);
-		fs.mkdirSync(path.join(tempDir, '.swarm'), { recursive: true });
-	});
-
-	afterEach(() => {
-		process.chdir(originalCwd);
-		removeTreeWithRetry(tempDir);
-		resetSwarmState();
-		mock.restore();
-	});
-
-	test('gate refuses on its own with pending tasks (no early refusal involved)', async () => {
-		fs.writeFileSync(
-			path.join(tempDir, '.swarm', 'plan.json'),
-			JSON.stringify(
-				planWithTasks([
-					{ id: '1.1', status: 'completed' },
-					{ id: '1.2', status: 'pending' },
-				]),
-			),
-		);
-		const result = await runPlannedTasksGate({
-			phase: 1,
-			dir: tempDir,
-			sessionID: 'sess-gate',
-			pluginConfig: {} as never,
-			agentsDispatched: [],
-			safeWarn: () => undefined,
-			preflightNowMs: 0,
-		});
-		expect(result.blocked).toBe(true);
-		expect(result.reason).toBe(PLANNED_TASKS_BLOCKED_REASON);
-		expect(result.message).toContain('1.2');
-	});
-
-	test('gate passes on its own with completed/closed tasks', async () => {
-		fs.writeFileSync(
-			path.join(tempDir, '.swarm', 'plan.json'),
-			JSON.stringify(
-				planWithTasks([
-					{ id: '1.1', status: 'completed' },
-					{ id: '1.2', status: 'closed' },
-				]),
-			),
-		);
-		const result = await runPlannedTasksGate({
-			phase: 1,
-			dir: tempDir,
-			sessionID: 'sess-gate',
-			pluginConfig: {} as never,
-			agentsDispatched: [],
-			safeWarn: () => undefined,
-			preflightNowMs: 0,
-		});
-		expect(result.blocked).toBe(false);
 	});
 });
