@@ -222,6 +222,33 @@ describe('#3770 exactly-once completion events', () => {
 		expect(phaseCompleteEventLines(tempDir).length).toBe(1);
 	});
 
+	test('transient ledger-read failure fails closed: no fallback-namespace event (review F-002)', async () => {
+		expect((await execute()).success).toBe(true);
+		expect(phaseCompleteEventLines(tempDir).length).toBe(1);
+		// Sabotage ONLY the read authority: a directory in the ledger path
+		// makes readFileSync throw (the transient EBUSY/EPERM class). The
+		// committed transition stays in the (renamed-away) ledger bytes.
+		const ledgerPath = path.join(tempDir, '.swarm', 'plan-ledger.jsonl');
+		const ledgerBytes = fs.readFileSync(ledgerPath);
+		fs.rmSync(ledgerPath);
+		fs.mkdirSync(ledgerPath);
+		recordPhaseAgentDispatch('sess1', 'coder');
+		const duringOutage = await execute();
+		expect(duringOutage.success).toBe(true);
+		// Fail-closed: the outage call must NOT append a noledger-keyed core
+		// event (pre-fix it re-keyed into the fallback namespace and the
+		// healthy retry then recorded a second, duplicate event).
+		expect(phaseCompleteEventLines(tempDir).length).toBe(1);
+		// Restore the authority and retry: the healthy retry resolves the
+		// ledger identity and the dedupe keeps the total at exactly one.
+		fs.rmSync(ledgerPath, { recursive: true });
+		fs.writeFileSync(ledgerPath, ledgerBytes);
+		recordPhaseAgentDispatch('sess1', 'coder');
+		const healed = await execute();
+		expect(healed.success).toBe(true);
+		expect(phaseCompleteEventLines(tempDir).length).toBe(1);
+	});
+
 	test('crash between save and append heals on retry to exactly one event', async () => {
 		const first = await execute();
 		expect(first.success).toBe(true);

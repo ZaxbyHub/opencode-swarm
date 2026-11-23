@@ -444,18 +444,22 @@ interface PhaseCompleteEvent {
  * deduped, a crash between the plan save and this append heals on retry (same
  * committed seq), and a genuine reopen+re-complete records a new
  * `phase_completed` event (new seq) and therefore a distinct identity.
- * Falls back to a deterministic task-state digest only when no ledger
- * authority has events.
+ * Falls back to a deterministic task-state digest only when the ledger peek
+ * SUCCEEDS and no ledger authority has events. A peek that THROWS returns
+ * null so the caller skips the append entirely (review F-002): re-keying a
+ * read failure into the fallback namespace would let a transient peek error
+ * append a duplicate core event alongside the ledger-keyed record a healthy
+ * retry writes.
  */
 async function phaseCompletionIdentity(
 	dir: string,
 	phase: number,
-): Promise<string> {
-	let events: ReturnType<typeof peekLedgerEventsExact>['events'] = [];
+): Promise<string | null> {
+	let events: ReturnType<typeof peekLedgerEventsExact>['events'];
 	try {
 		events = peekLedgerEventsExact(dir).events;
 	} catch {
-		events = [];
+		return null;
 	}
 	if (events.length > 0) {
 		const rootDigest = computeLedgerEventHash(events[0]!);
@@ -2202,29 +2206,41 @@ export async function executePhaseComplete(
 	const durationMs = now - phaseReferenceTimestamp;
 
 	// Write event to .swarm/events.jsonl
+	const completedAt = new Date(now).toISOString();
 	const completionIdentity = await phaseCompletionIdentity(dir, phase);
-	const event: PhaseCompleteEvent = {
-		event: 'phase_complete',
-		phase,
-		timestamp: new Date(now).toISOString(),
-		agents_dispatched: agentsDispatched,
-		agents_missing: agentsMissing,
-		status,
-		summary: safeSummary ?? null,
-		completionIdentity,
-	};
-
-	try {
-		// #3770: authority-key dedupe — a repeated call (or a retry that healed
-		// a crash between the plan save and this append) resolves the SAME
-		// transition identity and the append is skipped; a genuine
-		// reopen+re-complete records a new `phase_completed` ledger event and
-		// therefore a distinct identity that appends.
-		appendCoreEventSync(dir, { ...event }, { dedupeOnAuthorityKey: true });
-	} catch (writeError) {
+	if (completionIdentity === null) {
+		// Review F-002: the ledger peek failed — recording now would re-key
+		// the event into the fallback namespace and duplicate it on the next
+		// healthy retry. Skip; the retry records under the ledger identity.
 		warnings.push(
-			`Warning: failed to write phase complete event: ${writeError instanceof Error ? writeError.message : String(writeError)}`,
+			`Warning: phase ${phase} completion event not recorded — the plan ledger could not be read; a later phase_complete call records it exactly once.`,
 		);
+	} else {
+		const event: PhaseCompleteEvent = {
+			event: 'phase_complete',
+			phase,
+			timestamp: completedAt,
+			agents_dispatched: agentsDispatched,
+			agents_missing: agentsMissing,
+			status,
+			summary: safeSummary ?? null,
+			completionIdentity,
+		};
+
+		try {
+			// #3770: authority-key dedupe — a repeated call (or a retry that
+			// healed a crash between the plan save and this append) resolves
+			// the SAME transition identity and the append is skipped; a
+			// genuine reopen+re-complete records a new `phase_completed`
+			// ledger event and therefore a distinct identity that appends.
+			appendCoreEventSync(dir, { ...event }, {
+				dedupeOnAuthorityKey: true,
+			});
+		} catch (writeError) {
+			warnings.push(
+				`Warning: failed to write phase complete event: ${writeError instanceof Error ? writeError.message : String(writeError)}`,
+			);
+		}
 	}
 
 	// Epic v2 C2: phases are iterations — `epic_next_wave` issues no wave of
@@ -2454,7 +2470,7 @@ export async function executePhaseComplete(
 
 	const outputData = {
 		...result,
-		timestamp: event.timestamp,
+		timestamp: completedAt,
 		duration_ms: durationMs,
 	};
 	return _buildOutputJson(outputData);

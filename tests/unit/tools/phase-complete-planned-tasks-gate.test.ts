@@ -10,6 +10,7 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { createHash } from 'node:crypto';
 import type { DriftReport } from '../../../src/hooks/curator-types';
 import {
 	appendLedgerEvent,
@@ -168,6 +169,9 @@ function writeCompletionVerify(directory: string): void {
 }
 
 function snapshotSwarmTree(directory: string): Map<string, string> {
+	// Review F-003: hash RAW BYTES, not utf-8-decoded text — invalid byte
+	// sequences all decode to U+FFFD, so a text comparison could call an
+	// in-place change to a binary .swarm artifact (e.g. swarm.db) equal.
 	const snapshot = new Map<string, string>();
 	const walk = (current: string): void => {
 		if (!fs.existsSync(current)) return;
@@ -175,7 +179,12 @@ function snapshotSwarmTree(directory: string): Map<string, string> {
 			const child = path.join(current, entry);
 			const stat = fs.statSync(child);
 			if (stat.isDirectory()) walk(child);
-			else snapshot.set(child, fs.readFileSync(child, 'utf-8'));
+			else {
+				snapshot.set(
+					child,
+					createHash('sha256').update(fs.readFileSync(child)).digest('hex'),
+				);
+			}
 		}
 	};
 	walk(path.join(directory, '.swarm'));

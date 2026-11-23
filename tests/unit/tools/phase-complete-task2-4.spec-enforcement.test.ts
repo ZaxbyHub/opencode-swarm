@@ -283,8 +283,10 @@ describe('Task 2.4: Tighten missing-spec enforcement in phase-complete', () => {
 			expect(parsed.success).toBe(false);
 			expect(parsed.status).toBe('blocked');
 			expect(parsed.reason).toBe('PLANNED_TASKS_PENDING');
+			// Review F-004: every unfinished ID must be named — the second
+			// 1.1 check was a typo for 1.2.
 			expect(String(parsed.message)).toContain('1.1');
-			expect(String(parsed.message)).toContain('1.1');
+			expect(String(parsed.message)).toContain('1.2');
 			expect(String(parsed.message)).toContain('1.3');
 		});
 
