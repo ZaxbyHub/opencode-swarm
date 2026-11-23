@@ -204,7 +204,7 @@ describe('Lean Turbo runtime conformance', () => {
 	});
 
 	describe('phase_complete lean gate — behavioral integration', () => {
-		test('executePhaseComplete blocks when verifyLeanTurboPhaseReady returns ok:false', async () => {
+		test('executePhaseComplete blocks when verifyLeanTurboPhaseReady returns ok:false (fixture task completed: #3770 planned-tasks early refusal fires first)', async () => {
 			const dir = mkdtemp();
 			try {
 				// Set up Lean Turbo session in memory
@@ -259,10 +259,6 @@ describe('Lean Turbo runtime conformance', () => {
 								{
 									id: '1.1',
 									phase: 1,
-									// #3770: the planned-tasks early refusal fires
-									// before the lean gate, so this fixture's task
-									// must be completed for the lean readiness
-									// refusal to remain the blocker under test.
 									status: 'completed',
 									size: 'small',
 									description: 'test task',
