@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.205.7",
+  "tagCommit": "fef0633b9fc4c3f871c0482599c0e766c6f3e893",
+  "targetCommitish": "fef0633b9fc4c3f871c0482599c0e766c6f3e893",
+  "releaseBodySha256": "8f297ceea30ff22a0d63e4055617937ab46b5b0436e2797ff85d8e98d757c21b",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/3770-3773-refuse-pending-tasks-newer-schema.md",
+      "sha256": "d3a87a03312fa2e942c9789df53d0dfbde7b71abec7818a46b3e6f8955810f44"
+    }
+  ]
+}
