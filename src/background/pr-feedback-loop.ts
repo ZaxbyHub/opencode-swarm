@@ -45,6 +45,7 @@ import {
 } from '../hooks/pr-workflow-gate';
 import { validateSwarmPath } from '../hooks/utils';
 import type { ForgeContext } from '../providers/forge-provider.js';
+import { redactEvidenceText } from '../security/evidence-redaction.js';
 import {
 	canonicalRootKeyFresh,
 	SESSION_KEY_SEPARATOR,
@@ -3054,11 +3055,11 @@ async function claimAndProcessPrFeedbackEventUnlocked(
 				freshCorrelation.terminal = outcome.permanent
 					? {
 							state: 'paused_for_human',
-							reason: `permanent action failure: ${outcome.error ?? 'unknown'} — no retry, paused for a human`,
+							reason: `permanent action failure: ${redactEvidenceText(String(outcome.error ?? 'unknown'))} — no retry, paused for a human`,
 						}
 					: {
 							state: 'degraded',
-							reason: `transient action failures exhausted the retry budget: ${outcome.error ?? 'unknown'} — circuit open, probe again after cooldown`,
+							reason: `transient action failures exhausted the retry budget: ${redactEvidenceText(String(outcome.error ?? 'unknown'))} — circuit open, probe again after cooldown`,
 						};
 				freshCorrelation.inFlight = null;
 			} else {

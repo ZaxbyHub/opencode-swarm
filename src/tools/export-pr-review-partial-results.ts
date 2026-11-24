@@ -14,6 +14,11 @@ import {
 	type RendererFinding,
 	renderPrReviewSubmissionBody,
 } from '../pr-review/render-review-body.js';
+import { redactFindingFileLine } from '../review/review-file-path.js';
+import {
+	clampRedactedText,
+	redactEvidenceText,
+} from '../security/evidence-redaction';
 import { atomicWriteSwarmFile } from '../utils/atomic-write.js';
 import { createSwarmTool } from './create-tool.js';
 
@@ -71,6 +76,17 @@ type ExportRefusalType =
 const POST_ABORT_EXPORT_MAX_BYTES =
 	PR_REVIEW_FINDINGS_MAX_BYTES + 24 * 1024 * 1024;
 const RESERVATION_MAX_BYTES = 16 * 1024;
+
+/**
+ * Bounds mirroring `PrReviewFindingObjectSchema`
+ * (src/background/pr-review-contract.ts) — a redaction placeholder can be
+ * LONGER than the secret it replaces, so the redacted value is clamped back
+ * inside its bound or the exported row fails its schema on read.
+ */
+const PR_REVIEW_FINDING_EVIDENCE_MAX = 20_000;
+const PR_REVIEW_FINDING_FILE_LINE_MAX = 1_000;
+const PR_REVIEW_FINDING_CATEGORY_MAX = 128;
+const PR_REVIEW_FINDING_PROVENANCE_MAX = 256;
 /** The disclosure writer caps the file at 4 KiB (src/pr-review/completion.ts). */
 const DISCLOSURE_MAX_BYTES = 4 * 1024;
 
@@ -421,6 +437,7 @@ function renderSummary(input: {
 	boundariesReached: string[];
 	baseCoverage: BaseCoverageState;
 	abortEvent: AbortEvent;
+	directory?: string;
 }): {
 	text: string;
 	bodyTruncated: boolean;
@@ -493,6 +510,7 @@ function renderSummary(input: {
 	const rendered = renderPrReviewSubmissionBody({
 		run_id: input.runId,
 		pr_head_sha: input.head,
+		directory: input.directory,
 		coverage,
 		findings: rendererFindings,
 		...(asString(input.receipt.base_verification) === 'bound_fallback'
@@ -850,6 +868,7 @@ export async function executeExportPrReviewPartialResults(
 	const boundariesReached = [...new Set(rows.map((row) => row.boundary))];
 	const silence = computeSilence(receipt, abortEvent, receiptVersion);
 	const renderedSummary = renderSummary({
+		directory,
 		runId,
 		head: declaredHead,
 		workflowInstanceId,
@@ -883,10 +902,43 @@ export async function executeExportPrReviewPartialResults(
 			receipt_run_id: receiptRunId ?? '',
 			receipt_pr_head_sha: receiptHead,
 		},
+		// #3844: post-fix rows are redacted at their own write boundary;
+		// pre-fix rows still on disk can be raw, so the exporter normalizes
+		// every row again at ITS write (idempotent over placeholders).
 		findings: rows.map((row) => {
 			const { boundary: lane, pr_head_sha: _boundHead, ...rest } = row;
 			return {
 				...rest,
+				evidence: clampRedactedText(
+					redactEvidenceText(row.evidence),
+					PR_REVIEW_FINDING_EVIDENCE_MAX,
+				),
+				...(typeof row.file_line === 'string'
+					? {
+							file_line: clampRedactedText(
+								redactFindingFileLine(directory, row.file_line),
+								PR_REVIEW_FINDING_FILE_LINE_MAX,
+							),
+						}
+					: {}),
+				...(typeof row.category === 'string'
+					? {
+							category: clampRedactedText(
+								redactEvidenceText(row.category),
+								PR_REVIEW_FINDING_CATEGORY_MAX,
+							),
+						}
+					: {}),
+				...(Array.isArray(row.provenance)
+					? {
+							provenance: row.provenance.map((entry) =>
+								clampRedactedText(
+									redactEvidenceText(entry),
+									PR_REVIEW_FINDING_PROVENANCE_MAX,
+								),
+							),
+						}
+					: {}),
 				severity: row.severity ?? 'NONE',
 				lane,
 			};
@@ -907,7 +959,7 @@ export async function executeExportPrReviewPartialResults(
 			body_truncated: renderedSummary.bodyTruncated,
 			truncated_inline_comments: renderedSummary.truncatedInlineComments,
 		},
-		summary: renderedSummary.text,
+		summary: redactEvidenceText(renderedSummary.text),
 	};
 	const serialized = `${JSON.stringify(artifact, null, 2)}\n`;
 	const serializedBytes = Buffer.byteLength(serialized, 'utf8');

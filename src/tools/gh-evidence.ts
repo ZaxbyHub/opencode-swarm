@@ -1,6 +1,27 @@
 import type { ToolDefinition } from '@opencode-ai/plugin/tool';
 import { z } from 'zod';
 import {
+	clampRedactedText,
+	redactEvidenceText,
+} from '../security/evidence-redaction.js';
+
+/**
+ * #3844: recursively redact every STRING inside a parsed gh JSON payload
+ * (arrays, objects, nested) — String(obj) would collapse the whole payload
+ * to "[object Object]". Non-string leaves pass through untouched.
+ */
+function redactEvidenceJson(value: unknown): unknown {
+	if (typeof value === 'string') return redactEvidenceText(value);
+	if (Array.isArray(value)) return value.map(redactEvidenceJson);
+	if (value && typeof value === 'object') {
+		const out: Record<string, unknown> = {};
+		for (const [k, v] of Object.entries(value)) out[k] = redactEvidenceJson(v);
+		return out;
+	}
+	return value;
+}
+
+import {
 	resolveExecutableFromPath,
 	runExternalTool,
 } from '../utils/external-tool-runner';
@@ -274,10 +295,15 @@ function sanitizeParsedJson(value: unknown): unknown {
 		const out: Record<string, unknown> = {};
 		for (const [key, entry] of Object.entries(value)) {
 			if (typeof entry === 'string') {
+				// Redact BEFORE bounding. Slicing first can cut a credential in
+				// half, and the surviving prefix can be shorter than the
+				// redactor's family minimum — so it would survive in the
+				// clear in exactly the 20 000-character boundary case.
+				const redacted = redactEvidenceText(entry);
 				const bounded =
-					entry.length > 20_000
-						? `${entry.slice(0, 20_000)}... [truncated]`
-						: entry;
+					redacted.length > 20_000
+						? `${clampRedactedText(redacted, 20_000)}... [truncated]`
+						: redacted;
 				out[key] =
 					key === 'body'
 						? neutralizeUntrustedMarkdown(bounded, 'GitHub body')
@@ -456,7 +482,9 @@ export const gh_evidence: ToolDefinition = createSwarmTool({
 				{
 					error: true,
 					type: 'unknown',
-					message: run.stderr.split('\n')[0] || `gh exited ${run.exitCode}`,
+					message: redactEvidenceText(
+						run.stderr.split('\n')[0] || `gh exited ${run.exitCode}`,
+					),
 				} satisfies GhEvidenceError,
 				null,
 				2,
@@ -472,9 +500,11 @@ export const gh_evidence: ToolDefinition = createSwarmTool({
 
 		if (isLogFailedMode) {
 			// For --log-failed, output is raw text (not JSON)
-			data = neutralizeUntrustedMarkdown(
-				run.stdout,
-				'GitHub Actions failed-job log',
+			data = redactEvidenceText(
+				neutralizeUntrustedMarkdown(
+					run.stdout,
+					'GitHub Actions failed-job log',
+				),
 			);
 		} else {
 			// Parse JSON output and extract run-specific metadata
@@ -492,7 +522,7 @@ export const gh_evidence: ToolDefinition = createSwarmTool({
 					2,
 				);
 			}
-			data = sanitizeParsedJson(parsed);
+			data = redactEvidenceJson(sanitizeParsedJson(parsed));
 			// Extract run metadata if available
 			if (
 				target === 'run' &&
@@ -513,22 +543,32 @@ export const gh_evidence: ToolDefinition = createSwarmTool({
 			}
 			if (target === 'run' && parsed && typeof parsed === 'object') {
 				const runData = parsed as Record<string, unknown>;
+				// The run metadata is copied from the RAW parsed object, so it
+				// must be redacted like `data` is: `htmlUrl` can carry an
+				// access token in its query string, and a branch name is
+				// model-authored free text.
 				runStatus =
-					typeof runData.status === 'string' ? runData.status : undefined;
+					typeof runData.status === 'string'
+						? redactEvidenceText(runData.status)
+						: undefined;
 				runConclusion =
 					runData.conclusion === null
 						? null
 						: typeof runData.conclusion === 'string'
-							? runData.conclusion
+							? redactEvidenceText(runData.conclusion)
 							: undefined;
 				runHtmlUrl =
-					typeof runData.htmlUrl === 'string' ? runData.htmlUrl : undefined;
+					typeof runData.htmlUrl === 'string'
+						? redactEvidenceText(runData.htmlUrl)
+						: undefined;
 				runHeadBranch =
 					typeof runData.headBranch === 'string'
-						? runData.headBranch
+						? redactEvidenceText(runData.headBranch)
 						: undefined;
 				runHeadSha =
-					typeof runData.headSha === 'string' ? runData.headSha : undefined;
+					typeof runData.headSha === 'string'
+						? redactEvidenceText(runData.headSha)
+						: undefined;
 			}
 		}
 

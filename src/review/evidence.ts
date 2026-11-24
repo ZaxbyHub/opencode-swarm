@@ -19,6 +19,13 @@ import {
 import { validateSwarmPath } from '../hooks/utils.js';
 import { ledgerExists, replayFromLedgerWithStatus } from '../plan/ledger.js';
 import { loadPlanJsonOnly } from '../plan/manager.js';
+import {
+	EVIDENCE_FINDING_BODY_MAX,
+	EVIDENCE_FINDING_TITLE_MAX,
+	EVIDENCE_VALIDATION_EVIDENCE_MAX,
+	redactEvidenceField,
+	redactEvidenceText,
+} from '../security/evidence-redaction.js';
 import type {
 	CostEvidence,
 	CostEvidenceReason,
@@ -162,6 +169,53 @@ export const _internals = {
 	renameSync: fs.renameSync,
 };
 
+/**
+ * #3844: redact credential material from the free-text fields of auto-review
+ * evidence BEFORE it reaches the durable `.swarm` artifact. Model-authored
+ * finding prose routinely quotes source lines; a credential in the reviewed
+ * diff must not land verbatim in durable evidence. Called at ASSEMBLY (the
+ * engine, after its raw-value classifiers — #3710 ordering, so quota/failover
+ * classification is unchanged) and re-applied idempotently at the PERSISTENCE
+ * boundary. Mutates the passed object in place and returns it.
+ */
+export function redactAutoReviewEvidenceForCapture(
+	evidence: AutoReviewEvidence,
+): AutoReviewEvidence {
+	// Mutates the passed object IN PLACE and returns it (the engine calls
+	// this as a statement at assembly; the persistence boundary uses the
+	// return value). No clone: the object is freshly built by the engine at
+	// this point, and the persistence pass re-applies idempotently.
+	// A redaction placeholder can be LONGER than the secret it replaces,
+	// so each field is clamped back inside the schema bound it is read
+	// back against (ReviewFindingSchema: title <= 200, body <= 2000;
+	// FindingValidationSchema: evidence <= 2000). Without the clamp a
+	// near-limit field that the redaction lengthens fails its schema on
+	// read-back and the finding is silently dropped.
+	for (const finding of evidence.findings) {
+		finding.body = redactEvidenceField(finding.body, EVIDENCE_FINDING_BODY_MAX);
+		finding.title = redactEvidenceField(
+			finding.title,
+			EVIDENCE_FINDING_TITLE_MAX,
+		);
+		if (finding.anchor_rejection !== undefined) {
+			finding.anchor_rejection = redactEvidenceText(finding.anchor_rejection);
+		}
+		if (finding.validation?.evidence !== undefined) {
+			finding.validation.evidence = redactEvidenceField(
+				finding.validation.evidence,
+				EVIDENCE_VALIDATION_EVIDENCE_MAX,
+			);
+		}
+	}
+	if (evidence.validation_error !== undefined) {
+		evidence.validation_error = redactEvidenceText(evidence.validation_error);
+	}
+	if (evidence.review.error !== undefined) {
+		evidence.review.error = redactEvidenceText(evidence.review.error);
+	}
+	return evidence;
+}
+
 export async function persistAutoReviewEvidence(
 	directory: string,
 	evidence: AutoReviewEvidence,
@@ -180,7 +234,7 @@ export async function persistAutoReviewEvidence(
 	try {
 		await _internals.bunWrite(
 			tempPath,
-			`${JSON.stringify(evidence, null, 2)}\n`,
+			`${JSON.stringify(redactAutoReviewEvidenceForCapture(evidence), null, 2)}\n`,
 		);
 		const safeTemp = validateSwarmPath(
 			directory,
@@ -680,11 +734,18 @@ export function validateAutoReviewEvidenceIntegrity(
 			}
 		}
 	} else {
+		// The caveat is COMPOSED from the finding's title and its anchor
+		// rejection, and the receipt persists the composed string after
+		// redacting it as a whole. Composing two redacted parts can create a
+		// NEW credential shape (`Session token never expires: <reason>` is a
+		// key/value match), so the expectation has to be built the same way
+		// the receipt builds it — compose, then redact the composition.
 		const expectedCaveats = evidence.findings
 			.filter((finding) => !finding.anchored)
-			.map(
-				(finding) =>
+			.map((finding) =>
+				redactEvidenceText(
 					`${finding.title}: ${finding.anchor_rejection ?? 'unanchored'}`,
+				),
 			)
 			.sort();
 		const receiptCaveats = [...(receipt.caveats ?? [])].sort();
