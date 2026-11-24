@@ -123,7 +123,7 @@ function setupBaseDir(dir: string, phaseType?: string): void {
 			{
 				id: '1.1',
 				phase: 1,
-				status: 'pending',
+				status: 'completed',
 				description: 'Test task',
 			},
 		],
@@ -259,7 +259,7 @@ describe('phase_complete — drift_check gate scenarios (Task 3.3)', () => {
 							{
 								id: '1.1',
 								phase: 1,
-								status: 'pending',
+								status: 'completed',
 								description: 'Test task',
 							},
 						],
@@ -318,7 +318,7 @@ describe('phase_complete — drift_check gate scenarios (Task 3.3)', () => {
 							{
 								id: '1.1',
 								phase: 1,
-								status: 'pending',
+								status: 'completed',
 								description: 'Test task',
 							},
 						],
@@ -362,7 +362,7 @@ describe('phase_complete — drift_check gate scenarios (Task 3.3)', () => {
 							{
 								id: '1.1',
 								phase: 1,
-								status: 'pending',
+								status: 'completed',
 								description: 'Test task',
 							},
 						],
@@ -412,7 +412,7 @@ describe('phase_complete — drift_check gate scenarios (Task 3.3)', () => {
 							{
 								id: '1.1',
 								phase: 1,
-								status: 'pending',
+								status: 'completed',
 								description: 'Test task',
 							},
 						],
@@ -426,7 +426,7 @@ describe('phase_complete — drift_check gate scenarios (Task 3.3)', () => {
 							{
 								id: '2.1',
 								phase: 2,
-								status: 'pending',
+								status: 'completed',
 								description: 'Phase 2 task',
 							},
 						],

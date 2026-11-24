@@ -143,7 +143,11 @@ function; the group-commit writer consults the same map per batch.
   transactions; pinned by `tests/unit/db/project-db-concurrency.test.ts`).
 - **disk-full / read-only / corrupt**: open-path failures throw typed
   `ProjectDbError`s (`mkdir_failed | driver_unavailable | open_failed |
-  migration_failed`, plus `invalid_root` for a blank project root); write failures classify into `DbWriteError` categories
+  migration_failed | schema_newer_than_supported`, plus `invalid_root` for a
+  blank project root; `schema_newer_than_supported` (#3773) refuses WRITABLE
+  open when the recorded `schema_migrations` version exceeds this client's
+  highest known migration, preserving schema and rows — the read-only open
+  stays available for diagnostics); write failures classify into `DbWriteError` categories
   (`disk_full | read_only | corrupt | busy | unknown`). The group-commit
   writer DROPS the failed batch on every category (#3772 truthful rejection),
   fires each op's `onDrop`, throws the typed error, and emits a

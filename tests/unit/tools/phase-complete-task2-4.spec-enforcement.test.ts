@@ -227,7 +227,7 @@ describe('Task 2.4: Tighten missing-spec enforcement in phase-complete', () => {
 	});
 
 	describe('1. Missing spec.md + missing drift evidence + plan.json with incomplete tasks', () => {
-		test('warning mentions "incomplete task(s)" and "consider running critic_drift_verifier", phase succeeds', async () => {
+		test('refusal names the incomplete task(s) (PLANNED_TASKS_PENDING)', async () => {
 			// Write plan.json with phase 1 having incomplete tasks
 			// No tasks are 'completed' to avoid triggering completion-verify blocks
 			const planJson = {
@@ -278,21 +278,19 @@ describe('Task 2.4: Tighten missing-spec enforcement in phase-complete', () => {
 			});
 			const parsed = JSON.parse(result);
 
-			// Phase should succeed (advisory-only mode)
-			expect(parsed.success).toBe(true);
-			expect(parsed.status).toBe('success');
-
-			// Warning should mention incomplete tasks and suggest running critic_drift_verifier
-			const warning = parsed.warnings.find((w: string) =>
-				w.includes('incomplete task'),
-			);
-			expect(warning).toBeDefined();
-			expect(warning).toContain('incomplete task(s)');
-			expect(warning).toContain('consider running critic_drift_verifier');
-			expect(warning).toContain('3 incomplete task(s)'); // all 3 tasks are non-completed
+			// #3770: completion with unfinished planned tasks is now REFUSED
+			// (the drift gate's advisory warning was the pinned defect).
+			expect(parsed.success).toBe(false);
+			expect(parsed.status).toBe('blocked');
+			expect(parsed.reason).toBe('PLANNED_TASKS_PENDING');
+			// Review F-004: every unfinished ID must be named — the second
+			// 1.1 check was a typo for 1.2.
+			expect(String(parsed.message)).toContain('1.1');
+			expect(String(parsed.message)).toContain('1.2');
+			expect(String(parsed.message)).toContain('1.3');
 		});
 
-		test('phase with incomplete tasks shows correct count', async () => {
+		test('phase with incomplete tasks names them in the refusal', async () => {
 			const planJson = {
 				schema_version: '1.0.0',
 				title: 'Test Plan',
@@ -325,12 +323,10 @@ describe('Task 2.4: Tighten missing-spec enforcement in phase-complete', () => {
 			});
 			const parsed = JSON.parse(result);
 
-			expect(parsed.success).toBe(true);
-
-			const warning = parsed.warnings.find((w: string) =>
-				w.includes('incomplete task'),
-			);
-			expect(warning).toContain('1 incomplete task(s)');
+			// #3770: refused with the unfinished task ID.
+			expect(parsed.success).toBe(false);
+			expect(parsed.reason).toBe('PLANNED_TASKS_PENDING');
+			expect(String(parsed.message)).toContain('1.1');
 		});
 	});
 

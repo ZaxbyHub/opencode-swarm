@@ -2458,6 +2458,16 @@ export class SQLiteMemoryProvider
 			)
 			.get();
 		const currentVersion = row?.version ?? 0;
+		// #3773 (same class as project-db): refuse writable open when the
+		// recorded schema is newer than this client's highest known migration —
+		// an older writer must not mutate a schema it does not understand. The
+		// provider's whole-post-open close guard handles the leaked handle.
+		const highestSupported = MIGRATIONS[MIGRATIONS.length - 1]?.version ?? 0;
+		if (currentVersion > highestSupported) {
+			throw new Error(
+				`memory.db schema version ${currentVersion} is newer than this client supports (${highestSupported}); writable open refused to preserve schema and rows — upgrade opencode-swarm before writing`,
+			);
+		}
 		// #1466: a database whose migrations start from version 0 is freshly
 		// created — its ONLY event rows are the migration events inserted
 		// below, which the hash-chain backfill can chain from the in-memory

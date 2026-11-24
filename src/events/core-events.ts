@@ -302,6 +302,21 @@ function redactCoreEventFreeText(
 /** The authority key for an event, or null when the event is not in the
  *  closed authority set (or lacks the identity fields the key needs). */
 function authorityKeyFor(event: Record<string, unknown>): string | null {
+	// #3770: phase_complete events use the legacy `event` field (not `type`)
+	// and carry their own transition-scoped identity (ledger root digest +
+	// phase_completed seq, minted by phase-complete.ts). Deduped on append so
+	// a repeated completion call — or a retry healing a crash between the
+	// plan save and the append — cannot write a second record, while a
+	// genuine reopen+re-complete gets a distinct identity and appends.
+	if (
+		event.event === 'phase_complete' &&
+		typeof event.phase === 'number' &&
+		Number.isFinite(event.phase) &&
+		typeof event.completionIdentity === 'string' &&
+		event.completionIdentity.length > 0
+	) {
+		return `phase_complete|${event.phase}|${event.completionIdentity}`;
+	}
 	switch (event.type) {
 		case AUTHORITY_RETRY: {
 			if (
