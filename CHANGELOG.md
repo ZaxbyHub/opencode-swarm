@@ -1,5 +1,14 @@
 # Changelog
 
+## [7.205.7](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.205.6...v7.205.7) (2026-11-24)
+
+
+### Bug Fixes
+
+* **tools,db:** refuse phase_complete with unfinished planned tasks and newer-schema sqlite opens ([#3770](https://github.com/ZaxbyHub/opencode-swarm/issues/3770), [#3773](https://github.com/ZaxbyHub/opencode-swarm/issues/3773)) ([64605a9](https://github.com/ZaxbyHub/opencode-swarm/commit/64605a9e174b035dd840a2ce12c7c08c2f327a2b))
+* **tools:** feedback round 3 — degraded ledger authorities refuse, duplicate phase ids refuse, normal flow records phase_completed ([5bb912f](https://github.com/ZaxbyHub/opencode-swarm/commit/5bb912f5d4dbab74321839ef56b31acea42d63d6))
+* **tools:** Stage B reviewer fixes — commit re-read before the close intent, fixture type, second stale name, fragment contract wording ([52fcf84](https://github.com/ZaxbyHub/opencode-swarm/commit/52fcf8465cdb95dac7405e0825a1edfaff0d60e8))
+
 ## [7.205.6](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.205.5...v7.205.6) (2026-11-22)
 
 
