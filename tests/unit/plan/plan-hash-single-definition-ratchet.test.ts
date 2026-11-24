@@ -52,6 +52,11 @@ describe('plan hash single-definition ratchet (#2523)', () => {
 			'computeCurrentPlanHash', // reader helper → ledger digest of plan.json
 			'derivePlanIdentityHash', // identity axis (swarm/title), not content
 			'normalizeExecutionProfileForHash', // field normalizer, not a digest
+			// #3770: ledger-EVENT content digest (sha256 of one serialized
+			// event), exported to scope completion identity to a ledger ROOT.
+			// Not a plan-structure hash and not a second plan digest — it
+			// digests a single ledger event, never a plan object.
+			'computeLedgerEventHash',
 		]);
 		const found = new Set<string>();
 		for (const file of listFiles(PLAN_DIR)) {

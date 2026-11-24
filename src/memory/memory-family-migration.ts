@@ -509,6 +509,57 @@ async function mergeStagedSqlite(
 	// unlink cycle (or two worktrees linking concurrently) merges rather than
 	// overwrites or fails. We open the destination DB directly (NOT via the
 	// pool — the pool was drained by the command handler before migration).
+	// #3773 (4.5 review finding 1): the merge destination is a durable memory
+	// store that a NEWER client may have upgraded before this (older) client
+	// relinks — refuse BEFORE opening the long-lived writable merge handle
+	// (the merge body's own close only arms inside its ATTACH try, so a
+	// pre-body throw would leak the handle). This pre-check uses its own
+	// short-lived connection, closed before the refusal propagates.
+	{
+		const { MIGRATIONS: memoryMigrations } = await import(
+			'./sqlite-provider.js'
+		);
+		const highestSupported =
+			memoryMigrations[memoryMigrations.length - 1]?.version ?? 0;
+		const { loadDatabaseCtor } = await import('../db/sqlite-loader.js');
+		const CheckDb = loadDatabaseCtor();
+		const checkDb = new CheckDb(destDbPath);
+		// A legacy destination predating schema_migrations reads as v0 (the
+		// table simply does not exist — probe its presence explicitly). Any
+		// OTHER read failure leaves the recorded version UNKNOWN and fails
+		// CLOSED: an unchecked merge into a store we cannot classify is the
+		// exact risk the guard exists to prevent. The pre-check handle is
+		// closed on EVERY exit path (try/finally) so a failed query can never
+		// leak it (R3 review: an untracked live handle on the refusal path
+		// obstructs repair/retry, especially on Windows).
+		let currentVersion = 0;
+		try {
+			const tablePresent = checkDb
+				.query<{ present: number }, []>(
+					"SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'",
+				)
+				.get();
+			if (tablePresent) {
+				const recorded = checkDb
+					.query<{ version: number | null }, []>(
+						'SELECT MAX(version) as version FROM schema_migrations',
+					)
+					.get();
+				currentVersion = recorded?.version ?? 0;
+			}
+		} finally {
+			try {
+				checkDb.close();
+			} catch {
+				// Preserve the query failure if close also fails.
+			}
+		}
+		if (currentVersion > highestSupported) {
+			throw new Error(
+				`memory.db schema version ${currentVersion} is newer than this client supports (${highestSupported}); merge into this destination refused to preserve schema and rows — upgrade opencode-swarm before linking`,
+			);
+		}
+	}
 	try {
 		const { loadDatabaseCtor } = await import('../db/sqlite-loader.js');
 		const Db = loadDatabaseCtor();
