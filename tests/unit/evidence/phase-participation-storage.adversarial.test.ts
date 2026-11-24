@@ -308,7 +308,13 @@ describe('phase participation storage adversaries', () => {
 		);
 	});
 
-	test('rejects a durable receipt after the Git HEAD changes', async () => {
+	test('rejects a durable receipt after the history diverges (forward commits stay fresh)', async () => {
+		// The 2026-11-23 swarm_communication_debug closing-window fix: a
+		// receipt whose head is an ANCESTOR of the current head (the docs
+		// agent's own committed deliverable, a sibling task's landing) stays
+		// fresh — the workspace only moved forward. The adversarial guarantee
+		// that remains is divergence: a receipt from a different history
+		// (orphan head) must never satisfy a gate for the current workspace.
 		git(directory, ['init']);
 		commitWorkspace(directory, 'head-a');
 		await reserveApprovedPhaseParticipation({
@@ -330,13 +336,22 @@ describe('phase participation storage adversaries', () => {
 			(await readPhaseParticipation(directory, plan(), 1, 'docs')).found,
 		).toBe(true);
 
-		commitWorkspace(directory, 'head-b');
+		// Forward movement (the closing window's delivery commits): fresh.
+		commitWorkspace(directory, 'head-b-forward');
+		expect(
+			(await readPhaseParticipation(directory, plan(), 1, 'docs')).found,
+		).toBe(true);
+
+		// Divergence (an orphan head shares no ancestry with the receipt):
+		// stale, exactly like the pre-ancestry strict check.
+		git(directory, ['checkout', '--orphan', 'divergent']);
+		commitWorkspace(directory, 'head-c-orphan');
 		expect(
 			(await readPhaseParticipation(directory, plan(), 1, 'docs')).found,
 		).toBe(false);
 	});
 
-	test('does not mint foreground proof after the Git HEAD changes', async () => {
+	test('does not mint foreground proof after the history diverges', async () => {
 		git(directory, ['init']);
 		commitWorkspace(directory, 'head-a');
 		await reserveApprovedPhaseParticipation({
@@ -347,7 +362,13 @@ describe('phase participation storage adversaries', () => {
 			args: { subagent_type: 'docs' },
 			policy: {},
 		});
-		commitWorkspace(directory, 'head-b');
+		// Diverge to an orphan head: the dispatch-time binding no longer
+		// describes this workspace, so the foreground completion must not
+		// mint a receipt. (A forward commit WOULD legitimately mint — that is
+		// the closing-window allowance, pinned in
+		// phase-participation-workspace-ancestry.test.ts.)
+		git(directory, ['checkout', '--orphan', 'divergent']);
+		commitWorkspace(directory, 'head-b-orphan');
 		await observePhaseParticipationToolResult({
 			directory,
 			tool: 'Task',

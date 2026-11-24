@@ -112,6 +112,26 @@ export async function reportToolSideStageA(
 				input.files ?? null,
 			);
 			if (fallback && 'taskId' in fallback) taskId = fallback.taskId;
+			// Terminal-settlement wedge (the 2026-11-23 swarm_communication_debug
+			// pattern): the durable fallback matched a task whose COMMITTED
+			// settlement settled terminal while its workflow sits at
+			// idle/blocked. The mechanical stage_a_passed write is fail-closed
+			// from those states, so mirror the guardrails toolBefore handling —
+			// no mechanical write, the wedge advisory with the sanctioned
+			// recover_stage_a_task remediation, and the wedge route event. On
+			// regressed hosts (nested Code Mode calls) this module is the ONLY
+			// producer, so without this arm the wedge is indistinguishable from
+			// an ad-hoc gate run.
+			if (fallback && 'awaitingStageA' in fallback) {
+				const wedge = fallback.awaitingStageA;
+				emitDurableAttributionAdvisory(
+					input.sessionID,
+					`${input.directory}\u0000stage-a-terminal-settlement\u0000${wedge}`,
+					`STAGE A WEDGE (TERMINAL SETTLEMENT): this gate run matches task ${wedge}'s declared settlement scope, but the task's workflow sits at idle/blocked behind its terminal COMMITTED coder settlement${fallback.acceptedSettlement ? '' : ' (no mutation attributed)'} — the mechanical Stage A write cannot fire from that state, so a passing pre_check_batch result will NOT be recorded as Stage A evidence. Remediation: run recover_stage_a_task({task_id:"${wedge}", reason:"…"}) when the settlement (or a chain-verified requirements receipt) still justifies Stage A — architect-only, audited; otherwise dispatch a coder round that performs a real in-scope mutation, then re-run pre_check_batch.`,
+				);
+				emitRoute(input, 'terminal_settlement_wedge', wedge);
+				return;
+			}
 			// ambiguous / unbound durable states stay unattributed here: the
 			// hook-side toolBefore advisories cover them on hosts where hooks
 			// fire; on regressed hosts the no-correlation advisory below still

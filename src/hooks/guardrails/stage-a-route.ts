@@ -29,7 +29,8 @@ export type StageAGateRoute =
 	| 'no_task_correlation'
 	| 'attribution_ambiguous'
 	| 'late_result'
-	| 'duplicate_result';
+	| 'duplicate_result'
+	| 'terminal_settlement_wedge';
 
 export const STAGE_A_ROUTES: readonly StageAGateRoute[] = [
 	'valid_pass',
@@ -39,6 +40,7 @@ export const STAGE_A_ROUTES: readonly StageAGateRoute[] = [
 	'attribution_ambiguous',
 	'late_result',
 	'duplicate_result',
+	'terminal_settlement_wedge',
 ] as const;
 
 export const STAGE_A_ROUTE_EVENT_TYPE = 'stage_a_gate_route';
@@ -82,7 +84,7 @@ function buildEvent(input: StageAGateRouteEventInput): Record<string, unknown> {
 /**
  * Route → execution-attempt class (issue #2676). Stage A route events fire at
  * gate-tool-call COMPLETION (toolAfter), so `valid_pass` is the completed
- * call's outcome record (`result`, success); the four refusal routes are
+ * call's outcome record (`result`, success); the five refusal routes are
  * `denial` (outcome unknown — the gate refused before a task outcome
  * existed); `late_result` is `late`; `duplicate_result` is `duplicate`.
  */
@@ -96,6 +98,7 @@ export function stageARouteAttemptClass(
 		case 'invalid_result':
 		case 'no_task_correlation':
 		case 'attribution_ambiguous':
+		case 'terminal_settlement_wedge':
 			return 'denial';
 		case 'late_result':
 			return 'late';

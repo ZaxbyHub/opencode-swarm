@@ -20,8 +20,8 @@ import {
 	transitionTaskWorkflowEvidence,
 } from '../../../src/gate-evidence';
 import { STAGE_A_ROUTE_EVENT_TYPE } from '../../../src/hooks/guardrails/stage-a-route';
-import { reportToolSideStageA } from '../../../src/tools/stage-a-self-report';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
+import { reportToolSideStageA } from '../../../src/tools/stage-a-self-report';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 const PASS_PAYLOAD = JSON.stringify({
@@ -228,11 +228,83 @@ describe('stage-a-self-report', () => {
 		await report('definitely not json {{{');
 		const session = ensureAgentSession('architect');
 		expect(
-			session.pendingAdvisoryMessages?.some((m) =>
-				m.includes('STAGE A'),
-			),
+			session.pendingAdvisoryMessages?.some((m) => m.includes('STAGE A')),
 		).toBeFalsy();
 		expect(routeEvents(directory)).toHaveLength(0);
+	});
+
+	test('uncorrelated pass over a terminal-settlement wedge routes terminal_settlement_wedge with the recover_stage_a_task remediation', async () => {
+		// The 2026-11-23 swarm_communication_debug incident shape: the resume
+		// session holds no currentTaskId, the task's COMMITTED settlement is
+		// already terminal (no mutation attributed), and the workflow sits at
+		// authoritative idle. On regressed hosts (nested Code Mode calls) this
+		// module is the ONLY Stage A producer, so the wedge must be
+		// distinguishable from an ad-hoc gate run here too.
+		await transitionTaskWorkflowEvidence(directory, '1.8', {
+			type: 'dispatch_no_mutation',
+			agentType: 'coder',
+			expectedGeneration: 0,
+			transitionId: 'coder:wal-1.8',
+		});
+		fs.mkdirSync(path.join(directory, '.swarm', 'coder-settlements'), {
+			recursive: true,
+		});
+		fs.writeFileSync(
+			path.join(directory, '.swarm', 'coder-settlements', '1.8.json'),
+			JSON.stringify({
+				version: 1,
+				state: 'COMMITTED',
+				taskId: '1.8',
+				transitionId: 'coder:wal-1.8',
+				actor: 'test',
+				processId: process.pid,
+				runtimeId: '00000000-0000-4000-8000-000000000000',
+				expectedGeneration: 1,
+				context: {
+					baseline: {
+						directory,
+						gitHead: null,
+						dirtyHash: null,
+						prHeadSha: null,
+						scope: null,
+						changedFiles: [],
+					},
+					declaredFiles: ['AGENTS.md'],
+				},
+				accepted: false,
+				recordedAt: new Date().toISOString(),
+			}),
+		);
+
+		// The session must exist before the report so the advisory has a live
+		// surface to land on (mirrors the report() helper's ensureAgentSession).
+		ensureAgentSession('architect');
+		await reportToolSideStageA({
+			sessionID: 'architect',
+			directory,
+			serializedResult: PASS_PAYLOAD,
+			files: ['AGENTS.md'],
+			toolCallId: 'self:wedge:1',
+		});
+
+		// No mechanical write from idle.
+		const snapshot = getTaskWorkflowSnapshot(
+			await readTaskEvidence(directory, '1.8'),
+		);
+		expect(snapshot.state).toBe('idle');
+		const session = ensureAgentSession('architect');
+		const advisory = session.pendingAdvisoryMessages?.find((m) =>
+			m.includes('STAGE A WEDGE (TERMINAL SETTLEMENT)'),
+		);
+		expect(advisory).toBeDefined();
+		expect(advisory).toContain('1.8');
+		expect(advisory).toContain('recover_stage_a_task');
+		const events = routeEvents(directory);
+		expect(events).toHaveLength(1);
+		expect(events[0]).toMatchObject({
+			route: 'terminal_settlement_wedge',
+			taskId: '1.8',
+		});
 	});
 
 	test('a mis-settled background no-mutation reconciles and records stage_a_passed in the same gate run', async () => {

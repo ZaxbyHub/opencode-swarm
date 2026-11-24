@@ -608,6 +608,45 @@ export const check_gate_status: ReturnType<typeof tool> = createSwarmTool({
 				`Run pre_check_batch on the task's changed files; if it passes without advancing this task, run /swarm recover ${taskIdInput}.`;
 			message += ` ${workflowAttributionHint}`;
 		}
+		// Terminal-settlement wedge (the 2026-11-23 swarm_communication_debug
+		// pattern): idle/blocked behind a COMMITTED settlement with Stage A
+		// still unrecorded. A green pre_check_batch cannot fire the mechanical
+		// stage_a_passed write from these states, so the sanctioned repair is
+		// the architect-only recover_stage_a_task — surface that instead of a
+		// bare missing-gate row. Bounded single-file read of the task's
+		// settlement WAL; any read/parse failure leaves the hint unset.
+		if (
+			status === 'incomplete' &&
+			(workflowMeta?.state === 'idle' || workflowMeta?.state === 'blocked') &&
+			!gatesMap.pre_check &&
+			isStrictTaskId(taskIdInput)
+		) {
+			let terminalSettlement = false;
+			try {
+				const walPath = path.join(
+					dirResult.directory,
+					'.swarm',
+					'coder-settlements',
+					`${taskIdInput}.json`,
+				);
+				const wal = JSON.parse(fs.readFileSync(walPath, 'utf8')) as {
+					state?: unknown;
+					taskId?: unknown;
+				};
+				terminalSettlement =
+					wal?.state === 'COMMITTED' && wal?.taskId === taskIdInput;
+			} catch {
+				// Missing/unreadable WAL: a never-started or non-settled task —
+				// no wedge hint.
+			}
+			if (terminalSettlement) {
+				workflowAttributionHint =
+					`Task sits at ${workflowMeta?.state} behind a COMMITTED coder settlement while Stage A (pre_check_batch) is unrecorded — ` +
+					`the mechanical stage_a_passed write is fail-closed from this state, so a green pre_check_batch will NOT advance the task (it routes as terminal_settlement_wedge). ` +
+					`Run recover_stage_a_task({task_id:"${taskIdInput}", reason:"…"}) when the settlement (or a chain-verified requirements receipt) still justifies Stage A — architect-only, audited; otherwise dispatch a coder round with a real in-scope mutation, then re-run pre_check_batch.`;
+				message += ` ${workflowAttributionHint}`;
+			}
+		}
 
 		const result: GateStatusResult = {
 			taskId: taskIdInput,

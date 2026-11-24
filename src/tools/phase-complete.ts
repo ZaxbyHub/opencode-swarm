@@ -295,8 +295,21 @@ const TASK_GATE_INFERABLE_AGENTS = new Set([
 	'test_engineer',
 ]);
 
-function canInferMissingAgentsFromTaskGates(agentsMissing: string[]): boolean {
-	return agentsMissing.every((agent) => TASK_GATE_INFERABLE_AGENTS.has(agent));
+/**
+ * The subset of missing required roles that durable per-task gate evidence
+ * can stand in for. Unlike the previous all-or-nothing form (which required
+ * EVERY missing role to be inferable), a non-inferable role — typically
+ * `docs`, which has its own durable participation store — no longer blocks
+ * inference for the roles the task evidence does cover (the 2026-11-23
+ * swarm_communication_debug phase_complete wedge: missing
+ * coder+reviewer+test_engineer+docs reported all four as absent although
+ * every phase task carried full gate evidence, because docs alone disabled
+ * the fallback for the other three).
+ */
+function inferableMissingAgentsFromTaskGates(
+	agentsMissing: string[],
+): string[] {
+	return agentsMissing.filter((agent) => TASK_GATE_INFERABLE_AGENTS.has(agent));
 }
 
 async function allCompletedTasksHavePassedGateEvidence(
@@ -1213,7 +1226,8 @@ export async function executePhaseComplete(
 				(role) => !crossSessionResult.agents.has(role),
 			);
 			let inferredFromTaskGates: string[] = [];
-			if (missing.length > 0) {
+			const inferableMissing = inferableMissingAgentsFromTaskGates(missing);
+			if (inferableMissing.length > 0) {
 				try {
 					// Use loadPlan's ledger-replayed authority. Reading plan.json here
 					// directly could validate the empty-scope proof against a stale
@@ -1224,11 +1238,14 @@ export async function executePhaseComplete(
 					if (
 						target &&
 						target.tasks.length > 0 &&
-						canInferMissingAgentsFromTaskGates(missing) &&
 						(await allCompletedTasksHavePassedGateEvidence(dir, target.tasks))
 					) {
-						inferredFromTaskGates = [...missing];
-						missing = [];
+						// Clear ONLY the task-gate-inferable roles; a non-inferable
+						// missing role (docs) keeps its own durable/session checks
+						// and stays reported as missing.
+						inferredFromTaskGates = [...inferableMissing];
+						const inferredSet = new Set(inferredFromTaskGates);
+						missing = missing.filter((role) => !inferredSet.has(role));
 					}
 				} catch {
 					// Fail closed through the unresolved missing set.
@@ -1243,6 +1260,26 @@ export async function executePhaseComplete(
 				policy: phaseCompleteConfig.policy,
 			});
 			const authoritativeAgents = [...crossSessionResult.agents].sort();
+			// Shared disclosure warnings: the inference note must also surface
+			// on the BLOCKED arm — with per-role inference the gate can clear
+			// coder/reviewer/test_engineer while docs still blocks, and the
+			// architect must see which roles the durable task evidence stood
+			// in for (the 2026-11-23 swarm_communication_debug wedge class).
+			const disclosureWarnings = [
+				...(durableDocsFound
+					? [`Recovered durable docs participation proof for phase ${phase}.`]
+					: []),
+				...(inferredFromTaskGates.length > 0
+					? [
+							`Agent dispatch fallback: all completed tasks in phase ${phase} have durable passing gate evidence. Clearing missing agents: ${inferredFromTaskGates.join(', ')}.`,
+						]
+					: []),
+				...(missing.length > 0 && phaseCompleteConfig.policy !== 'enforce'
+					? [
+							`Warning: phase ${phase} missing required agents: ${missing.join(', ')} (advisory because phase_complete.policy=warn).`,
+						]
+					: []),
+			];
 			return missing.length > 0 && phaseCompleteConfig.policy === 'enforce'
 				? {
 						...passGate(),
@@ -1252,6 +1289,7 @@ export async function executePhaseComplete(
 						agentsMissing: missing,
 						agentsDispatched: authoritativeAgents,
 						recovery_guidance: recoveryGuidance,
+						warnings: disclosureWarnings,
 						recovery: {
 							kind: 'user_action',
 							action: 'Task',
@@ -1264,23 +1302,7 @@ export async function executePhaseComplete(
 							: authoritativeAgents,
 						recovery_guidance: recoveryGuidance,
 						agentsMissing: missing,
-						warnings: [
-							...(durableDocsFound
-								? [
-										`Recovered durable docs participation proof for phase ${phase}.`,
-									]
-								: []),
-							...(inferredFromTaskGates.length > 0
-								? [
-										`Agent dispatch fallback: all completed tasks in phase ${phase} have durable passing gate evidence. Clearing missing agents: ${inferredFromTaskGates.join(', ')}.`,
-									]
-								: []),
-							...(missing.length > 0
-								? [
-										`Warning: phase ${phase} missing required agents: ${missing.join(', ')} (advisory because phase_complete.policy=warn).`,
-									]
-								: []),
-						],
+						warnings: disclosureWarnings,
 					});
 		},
 	});
