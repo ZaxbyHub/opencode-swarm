@@ -1241,7 +1241,10 @@ function coordinationRowsToDelegations(
 					// view. The skip is durably visible via the health
 					// artifact; write and destructive-cleanup paths keep
 					// reading strictly and refuse while any row is drifted.
-					if (lenient && skippedEntityKeys.length < MAX_COORDINATION_SCHEMA_SKIP_ROWS) {
+					if (
+						lenient &&
+						skippedEntityKeys.length < MAX_COORDINATION_SCHEMA_SKIP_ROWS
+					) {
 						skippedEntityKeys.push(row.entityKey);
 						logger.warn(
 							`[background] coordination row ${row.entityKey} failed schema validation; skipped by lenient read (${skippedEntityKeys.length}/${MAX_COORDINATION_SCHEMA_SKIP_ROWS})`,
@@ -1385,7 +1388,10 @@ function ensureDelegationCoordinationImported(
 	// re-import the legacy ledger over drifted-but-authoritative rows. This
 	// also keeps the shadow projection untouched (it must never be rewritten
 	// from partial truth).
-	if (readOptions?.lenientSchemaSkips === true && existing?.skippedEntityKeys.length) {
+	if (
+		readOptions?.lenientSchemaSkips === true &&
+		existing?.skippedEntityKeys.length
+	) {
 		return 'ready';
 	}
 	if (existingRecords && existingRecords.length > 0) {
@@ -6487,6 +6493,62 @@ export interface CompletionDelegationLookup {
 export type CompletionDelegationLookupResult =
 	| CompletionDelegationLookup
 	| { source: 'uncertain'; record: null; uncertain: string };
+
+/**
+ * Durable changed-files fallback for review routing (the 2026-11-24
+ * swarm_communication_debug agent-gate wedge).
+ *
+ * The dispatch-time review router reads the reviewed task's changed files from
+ * the PARENT SESSION's in-memory per-task attribution
+ * (`getModifiedFilesForTask`). A host restart wipes that map while the task's
+ * durable state survives, so every post-restart reviewer/test-engineer
+ * dispatch routed `NO_CHANGED_FILES` — the fail-open `review_route_router_error`
+ * receipt — and the completion-side enforcement (rightly) refuses that receipt
+ * terminally: the gate receipt never lands, the workflow rotates
+ * `stage_b_failed`, and the loop wedges (6 lost reviewer receipts across 3
+ * server instances in the debug log; the pre-restart 2.19 dispatch with a live
+ * in-memory map is the working counterexample).
+ *
+ * This helper reads the durable executed contract instead: the LATEST SETTLED
+ * coder delegation record for the task carries `coderSettlement.observedFiles`
+ * — the settled observed-file list the checkpoint contract calls "the
+ * executed-contract audit artifact — final and never recomputed". Selection
+ * mirrors the in-memory semantics EXACTLY (`recordModifiedFilesForTask`
+ * REPLACES the per-task list on every coder ingestion, so the latest settled
+ * leg's files — empty after a settled no-mutation leg — are what a live map
+ * would hold).
+ *
+ * Fail-closed by construction: an uncertain store read yields
+ * `{ status: 'uncertain' }` and the caller keeps today's behavior (never
+ * invents files). Bounded by the store's own read bounds — the same class as
+ * `findByCorrelationIdDetailed`.
+ */
+export function findLatestSettledCoderFilesForTask(
+	directory: string,
+	taskId: string,
+): { status: 'ok'; files: string[] } | { status: 'uncertain' } {
+	if (!taskId) return { status: 'ok', files: [] };
+	const read = readDelegationsDetailed(directory);
+	if (read.status === 'uncertain') return { status: 'uncertain' };
+	let latest: { files: string[]; updatedAt: number } | null = null;
+	for (const record of read.records) {
+		if (record.normalizedAgent !== 'coder') continue;
+		const recordTaskId = record.evidenceTaskId ?? record.planTaskId;
+		if (recordTaskId !== taskId) continue;
+		const settlement = record.coderSettlement;
+		if (settlement?.state !== 'settled') continue;
+		// >= : a same-tick tie resolves to the later record in store order
+		// (the fold's own last-write-wins), mirroring how a live in-memory
+		// map would hold the most recent leg's files.
+		if (latest === null || settlement.updatedAt >= latest.updatedAt) {
+			latest = {
+				files: [...(settlement.observedFiles ?? [])],
+				updatedAt: settlement.updatedAt,
+			};
+		}
+	}
+	return { status: 'ok', files: latest?.files ?? [] };
+}
 
 /**
  * Lookup used by terminal handling: primary ledger first, exact fallback
