@@ -472,11 +472,50 @@ describe('issue #2268 — /swarm recover command', () => {
 			expect(workflow.settlementRecovery).toBe(true);
 		});
 
-		test('a receipts-less idle task gets the pointed settlement-wedge refusal, not the conflated dead end', async () => {
+		test('an idle task with a chain-verified accepted_mutation history repairs without a settlement WAL (the 80802e0dc contract)', async () => {
+			// Background-dispatched coder rounds never write a settlement WAL;
+			// their durable settlement proof is the chain-verified
+			// accepted_mutation receipt in the requirements ledger. The
+			// pre-80802e0dc refusal rendered here asserted removed behavior.
 			await settleAt('4.3', 'idle');
 			await writeGreenPreCheck();
 
 			const out = await handleRecoverCommand(directory, ['4.3']);
+
+			expect(out).toContain('Task 4.3: Stage A repaired');
+			expect(out).toContain('Repaired 1 wedged task(s)');
+			expect(out).not.toContain(
+				'no Stage A repair is needed or provable here',
+			);
+			const workflow = getTaskWorkflowSnapshot(
+				await readTaskEvidence(directory, '4.3'),
+			);
+			expect(workflow.state).toBe('pre_check_passed');
+			expect(workflow.settlementRecovery).toBe(true);
+		});
+
+		test('a proof-less idle task still gets the pointed settlement-wedge refusal, not the conflated dead end', async () => {
+			// No settlement WAL, no accepted_mutation history, no requirements
+			// receipt — nothing chain-verifiable, so the mechanical repair must
+			// refuse and render the pointed remediation instead of repairing.
+			await withFrozenClockAsync(
+				async () => {
+					await transitionTaskWorkflowEvidence(directory, '4.4', {
+						type: 'task_blocked',
+						expectedGeneration: 0,
+						transitionId: 'terminal:setup-4.4',
+					});
+					await transitionTaskWorkflowEvidence(directory, '4.4', {
+						type: 'repair_idle',
+						expectedGeneration: 0,
+						transitionId: 'repair:setup-4.4',
+					});
+				},
+				{ isoNow: FIXED_NOW_ISO },
+			);
+			await writeGreenPreCheck();
+
+			const out = await handleRecoverCommand(directory, ['4.4']);
 
 			expect(out).toContain('no Stage A repair is needed or provable here');
 			expect(out).toContain('recover_stage_a_task');
@@ -485,7 +524,7 @@ describe('issue #2268 — /swarm recover command', () => {
 			);
 			expect(out).toContain('No wedged tasks repaired.');
 			const workflow = getTaskWorkflowSnapshot(
-				await readTaskEvidence(directory, '4.3'),
+				await readTaskEvidence(directory, '4.4'),
 			);
 			expect(workflow.state).toBe('idle');
 		});

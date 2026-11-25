@@ -182,6 +182,56 @@ describe('classifyFile - generated zone', () => {
 	});
 });
 
+describe('classifyFile - state zone (.swarm/ runtime state)', () => {
+	test('returns state zone for .swarm/loop run state files (not config)', () => {
+		// The 2026-11-23 swarm_communication_debug AUTHORITY_POLICY_DENY wedge:
+		// the loop skill instructs the architect to write this file after every
+		// gate transition. It must never classify as config (the architect's
+		// default blockedZones) — zone blocks cannot be overridden by allows.
+		const result = classifyFile(
+			'.swarm/loop/mainstream-model-20261121T1646Z/state.json',
+		);
+		expect(result.zone).toBe('state');
+		expect(result.confidence).toBe('high');
+	});
+
+	test('returns state zone for evidence bundles and ledgers', () => {
+		expect(classifyFile('.swarm/evidence/1.8.json').zone).toBe('state');
+		expect(classifyFile('.swarm/plan-ledger.jsonl').zone).toBe('state');
+		expect(classifyFile('/project/.swarm/lane-results/x.json').zone).toBe(
+			'state',
+		);
+	});
+
+	test('keeps .swarm/checkpoints/ in the generated zone (rule order)', () => {
+		expect(classifyFile('.swarm/checkpoints/snapshot.json').zone).toBe(
+			'generated',
+		);
+	});
+
+	test('plan projections classify as state; their architect block is exact-path, not zone', () => {
+		// .swarm/plan.md/.swarm/plan.json stay architect-blocked through
+		// blockedExact — the zone reclassification must not weaken that.
+		expect(classifyFile('.swarm/plan.json').zone).toBe('state');
+		expect(classifyFile('.swarm/plan.md').zone).toBe('state');
+	});
+
+	test('project config files outside .swarm/ still classify as config', () => {
+		expect(classifyFile('biome.json').zone).toBe('config');
+		expect(classifyFile('configs/app.yaml').zone).toBe('config');
+		expect(classifyFile('src/tsconfig.json').zone).toBe('config');
+	});
+
+	test('getZonePolicy exposes a skip-QA policy for the state zone', () => {
+		const policy = getZonePolicy('state');
+		expect(policy.qaDepth).toBe('skip');
+		expect(policy.lintRequired).toBe(false);
+		expect(policy.testRequired).toBe(false);
+		expect(policy.reviewRequired).toBe(false);
+		expect(policy.securityReviewRequired).toBe(false);
+	});
+});
+
 describe('classifyFile - docs zone', () => {
 	test('returns docs zone for docs/** files', () => {
 		const result = classifyFile('/project/docs/guide.md');

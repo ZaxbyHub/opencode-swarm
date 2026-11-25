@@ -1398,6 +1398,7 @@ store's 256 KiB per-line cap. The closed route vocabulary:
 | attribution_ambiguous | Durable fallback could not safely attribute (multiple candidates, or sole candidate unbound/unverifiable) | Run `/swarm recover` to repair Stage A attribution |
 | late_result | Correlation generation stale (task repaired/re-generated meanwhile); nothing written | Re-run the gate against the current generation |
 | duplicate_result | Idempotent replay of an already-applied receipt; no state change | None — the receipt already landed |
+| terminal_settlement_wedge | Scanned files match a task whose workflow sits at idle/blocked behind a COMMITTED (terminal) coder settlement — the mechanical Stage A write is state-blocked, so the result was not recorded | Run `recover_stage_a_task` (architect-only, audited) when the settlement still justifies Stage A; otherwise dispatch a coder round with a real in-scope mutation, then re-run the gate |
 
 Registered-host validation: `tests/integration/guardrails-registered-host-stage-a.test.ts`
 boots the real plugin `server()` (XDG-hermetic), executes `placeholder_scan`

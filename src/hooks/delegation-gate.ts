@@ -18,6 +18,7 @@ import type {
 import {
 	buildBackgroundCoderReservationId,
 	findLatestCoderTaskForParentSession,
+	findLatestSettledCoderFilesForTask,
 } from '../background/pending-delegations.js';
 import {
 	deleteStageBDispatchBindings,
@@ -3590,6 +3591,14 @@ export const _internals = {
 	 */
 	findLatestCoderTaskForParentSession,
 	/**
+	 * 2026-11-24 agent-gate wedge: the review-routing durable changed-files
+	 * fallback reads through this seam so tests can drive the empty-in-memory
+	 * + settled-coder shape, the uncertain-store fail-closed shape, and the
+	 * no-settlement refusal shape without hand-building the coordination store
+	 * for every case. Production never reassigns it.
+	 */
+	findLatestSettledCoderFilesForTask,
+	/**
 	 * #3403 (review round 3, AC2): the durable scope-claim is routed through this
 	 * seam so tests can drive a claim that THROWS and pin the throw-path lineage
 	 * rollback. Production code never reassigns it.
@@ -5044,9 +5053,37 @@ export function createDelegationGateHook(
 					);
 					// Route against the exact reviewed task. The singular projection is
 					// compatibility-only and may point at a different concurrent task.
-					const changedFiles = reviewTaskId
+					let changedFiles = reviewTaskId
 						? getModifiedFilesForTask(reviewSession, reviewTaskId)
 						: [];
+					if (reviewTaskId !== null && changedFiles.length === 0) {
+						// 2026-11-24 swarm_communication_debug agent-gate wedge: a
+						// host restart wipes the parent session's in-memory per-task
+						// attribution while the durable coder settlement still holds
+						// the executed contract's observed files. Routing
+						// NO_CHANGED_FILES on that state writes a fail-open
+						// review_route_router_error receipt whose completion the
+						// enforcement boundary terminally refuses — the gate receipt
+						// never lands and the workflow rotates stage_b_failed (6
+						// lost reviewer receipts across 3 server instances; the
+						// pre-restart 2.19 dispatch with a live in-memory map is the
+						// working counterexample). Fall back to the LATEST SETTLED
+						// coder record's observedFiles — the same list a live map
+						// would hold (recordModifiedFilesForTask replaces per leg).
+						// Fail-closed: an uncertain store or no settled mutation
+						// keeps today's NO_CHANGED_FILES refusal — files are never
+						// invented for the router.
+						const durable = await _internals.findLatestSettledCoderFilesForTask(
+							directory,
+							reviewTaskId,
+						);
+						if (durable.status === 'ok' && durable.files.length > 0) {
+							changedFiles = durable.files;
+							logger.warn(
+								`[delegation-gate] review routing for task ${reviewTaskId} used the durable settled-coder fallback (${durable.files.length} files): the in-memory per-task attribution was empty (post-restart shape)`,
+							);
+						}
+					}
 					const routeTaskId = reviewTaskId ?? `unresolved-${input.callID}`;
 					routedTaskId = routeTaskId;
 					markStageBRouteRequired(reviewSession, routeTaskId);

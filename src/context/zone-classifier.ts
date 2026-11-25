@@ -4,7 +4,8 @@ export type FileZone =
 	| 'config'
 	| 'generated'
 	| 'docs'
-	| 'build';
+	| 'build'
+	| 'state';
 
 export interface ZoneClassification {
 	filePath: string;
@@ -40,6 +41,26 @@ export function classifyFile(filePath: string): ZoneClassification {
 			zone: 'generated',
 			confidence: 'high',
 			reason: 'path matches generated file patterns',
+		};
+	}
+
+	// 1b. STATE - .swarm/ runtime state (the swarm's own durable store:
+	// evidence, ledgers, loop state, lane results, …). Checked BEFORE the
+	// config-extension rule so `.swarm/**/state.json`, evidence bundles, and
+	// friends are never misclassified as project configuration — the
+	// 2026-11-23 swarm_communication_debug AUTHORITY_POLICY_DENY wedge: the
+	// loop skill instructs the architect to write `.swarm/loop/<run>/state.json`
+	// after every gate transition, but the config-zone classification put that
+	// path in the architect's default `blockedZones`, and zone blocks cannot be
+	// overridden by allow rules. `.swarm/checkpoints/` stays `generated` (rule
+	// 1 above); `.swarm/plan.md`/`.swarm/plan.json` stay architect-blocked via
+	// their exact-path rules, not via a zone.
+	if (normalized.startsWith('.swarm/') || normalized.includes('/.swarm/')) {
+		return {
+			filePath,
+			zone: 'state',
+			confidence: 'high',
+			reason: 'path is opencode-swarm runtime state under .swarm/',
 		};
 	}
 
@@ -178,6 +199,17 @@ export function getZonePolicy(zone: FileZone): ZonePolicy {
 			lintRequired: false,
 			testRequired: false,
 			reviewRequired: true,
+			securityReviewRequired: false,
+		},
+		state: {
+			// .swarm/ runtime state is machine-written by the swarm itself
+			// (evidence receipts, ledgers, loop state). It is not project
+			// source: no lint, no tests, no code review — the durable ledger
+			// transitions and their audit events are the integrity mechanism.
+			qaDepth: 'skip',
+			lintRequired: false,
+			testRequired: false,
+			reviewRequired: false,
 			securityReviewRequired: false,
 		},
 	};

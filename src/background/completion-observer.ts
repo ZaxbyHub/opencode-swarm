@@ -29,6 +29,7 @@ import {
 import {
 	discardReviewerScopeGenerationClaim,
 	discardReviewerScopeGenerationForCoderCall,
+	recordPhaseAgentDispatch,
 	swarmState,
 } from '../state.js';
 import { pushAdvisory } from '../utils/advisory-queue';
@@ -714,6 +715,26 @@ export function createBackgroundCompletionObserver(opts: {
 					);
 				}
 			}
+
+			// Foreground Task dispatches register the dispatched role on the
+			// child session through the delegation tracker (chat.message); a
+			// background child never flows through those hooks, so the
+			// in-memory phase-aggregation surface stayed empty and phase_complete
+			// reported REQUIRED_AGENTS_MISSING with agentsDispatched: [] even
+			// though the role demonstrably ran and its gate receipts landed (the
+			// 2026-11-23 swarm_communication_debug pattern). Record the completed
+			// role on the dispatching parent session — the same surface
+			// recordPhaseAgentDispatch writes for foreground dispatches. This is
+			// the live-process surface only; durable cross-restart coverage for
+			// coder/reviewer/test_engineer stays with the per-task gate evidence
+			// (the phase_complete task-gate inference) and for docs with the
+			// durable participation store above. No-op when the parent session is
+			// not live in memory (post-restart replay); idempotent by set
+			// semantics on replay.
+			recordPhaseAgentDispatch(
+				record.parentSessionId,
+				record.swarmPrefixedAgent,
+			);
 
 			// Epic v2 C3 (X1) seam: a background non-coder writer that served
 			// a task of the open epic has its attributed main-tree writes

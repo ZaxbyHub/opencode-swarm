@@ -513,7 +513,52 @@ describe('skillPropagationGateBefore', () => {
 				prompt: 'SKILLS: writing-tests\ndo work',
 			},
 		});
+		// Present SKILLS value that matched a reference: no propagation warn
+		// and no inline trace — the happy path is silent.
 		expect(warnEventWritten).toHaveLength(0);
+	});
+
+	test('records the inline trace when a present SKILLS value carries no file references', async () => {
+		const warnEventWritten: Array<Record<string, unknown>> = [];
+		applyOverrides(_internals, {
+			parseDelegationArgs: () => ({
+				targetAgent: 'coder',
+				skillsField: 'inline skill body text',
+			}),
+			discoverAvailableSkills: () => ['.claude/skills/foo/SKILL.md'],
+			// The inline-body shape: nothing file-reference-shaped to extract.
+			extractFileSkillReferences: () => [],
+			writeWarnEvent: (_d: string, r: Record<string, unknown>) =>
+				warnEventWritten.push(r),
+		});
+
+		await runGate({
+			tool: 'task',
+			agent: 'architect',
+			args: {
+				subagent_type: 'mega_coder',
+				prompt: 'SKILLS: inline skill body text\ndo work',
+			},
+		});
+
+		// Not blocked, no propagation warn (the field is present) — but the
+		// distinguishable inline trace records the recovery path.
+		expect(
+			warnEventWritten.filter(
+				(event) => event.type === 'skill_propagation_warn',
+			),
+		).toHaveLength(0);
+		expect(
+			warnEventWritten.filter(
+				(event) => event.type === 'skill_propagation_inline',
+			),
+		).toHaveLength(1);
+		expect(warnEventWritten[0]).toMatchObject({
+			type: 'skill_propagation_inline',
+			target_agent: 'coder',
+			skills_field: 'inline_or_non_file',
+			inline_recovery: true,
+		});
 	});
 
 	test('logs warning when SKILLS field is none and skills exist', async () => {
@@ -542,6 +587,7 @@ describe('skillPropagationGateBefore', () => {
 			type: 'skill_propagation_warn',
 			target_agent: 'coder',
 			skills_missing: true,
+			skills_field: 'none',
 		});
 	});
 
@@ -571,6 +617,7 @@ describe('skillPropagationGateBefore', () => {
 			type: 'skill_propagation_warn',
 			target_agent: 'coder',
 			skills_missing: true,
+			skills_field: 'omitted',
 			available_skills: [
 				'.claude/skills/foo/SKILL.md',
 				'.claude/skills/bar/SKILL.md',

@@ -494,12 +494,12 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			'src/hooks/pr-workflow-gate.ts',
 		],
 		writerCitations: [
-			'src/background/pending-delegations.ts:3276 appendRecord — SQLite coordination event+state transaction with post-commit JSON projection',
-			'src/background/pending-delegations.ts:1545 writeDurableFileSync — fsync+rename-with-retry for legacy checkpoint/manifest/rolled-tail compatibility',
+			'src/background/pending-delegations.ts:3384 appendRecord — SQLite coordination event+state transaction with post-commit JSON projection',
+			'src/background/pending-delegations.ts:1627 writeDurableFileSync — fsync+rename-with-retry for legacy checkpoint/manifest/rolled-tail compatibility',
 		],
 		readerCitations: [
-			'src/background/pending-delegations.ts:3165 readDelegations — SQLite authority with bounded legacy compatibility, sync',
-			'src/background/pending-delegations.ts:3180 scanDelegationsForRecovery — strict, fails closed',
+			'src/background/pending-delegations.ts:3273 readDelegations — SQLite authority with bounded legacy compatibility, sync',
+			'src/background/pending-delegations.ts:3288 scanDelegationsForRecovery — strict, fails closed',
 			'pr-workflow-session-resolver / pr-workflow-gate / init-orphan-recovery / delegation-gate worktree-collision-ownership — via readDelegations',
 		],
 		schemaVersion:
@@ -547,13 +547,13 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		pathGrammar: '.swarm/background-delegations-health.json',
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/background/delegation-health.ts'],
-		writerCitations: ['src/background/delegation-health.ts:332 writeDelegationHealthArtifact — temp+rename-retry'],
-		readerCitations: ['src/background/delegation-health.ts:309 readDelegationHealthArtifact — single-file, sync; :539 collectDelegationLedgerHealth'],
+		writerCitations: ['src/background/delegation-health.ts:361 writeDelegationHealthArtifact — temp+rename-retry'],
+		readerCitations: ['src/background/delegation-health.ts:338 readDelegationHealthArtifact — single-file, sync; :573 collectDelegationLedgerHealth'],
 		schemaVersion: 'schemaVersion 1 (:250)',
 		stateClass: 'derived-rebuildable',
 		privacyClass: 'metadata',
 		writeLimits: { bound: 'bounded by described data (checkpoint/ledger bounds above)', scope: 'global', citation: 'src/background/delegation-health.ts:35' },
-		readBound: { pattern: 'indexed', bound: 'single small JSON artifact', sync: true, citation: 'src/background/delegation-health.ts:309' },
+		readBound: { pattern: 'indexed', bound: 'single small JSON artifact', sync: true, citation: 'src/background/delegation-health.ts:338' },
 		lockModel: 'written under the store lock (compaction/recovery) or best-effort',
 		crashBehavior: 'atomic rename with 5×15 ms Windows retry; best-effort, returns null on failure (:419)',
 		closePolicy: 'archived-only — ARCHIVE_ARTIFACTS (src/commands/close/constants.ts:78), not cleaned',
@@ -564,7 +564,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		legacyCompatibility: 'malformed/missing → null',
 		healthSignal: 'IS the health signal (recovery pressure, late terminals, uncertainty)',
 		owner: '#2034 (merged)',
-		disposition: { kind: 'not-a-defect', proof: 'Single rewritten bounded artifact describing already-bounded stores; atomic + fail-open (src/background/delegation-health.ts:332,420).' },
+		disposition: { kind: 'not-a-defect', proof: 'Single rewritten bounded artifact describing already-bounded stores; atomic + fail-open (src/background/delegation-health.ts:361,449).' },
 	},
 	{
 		id: 'learning-health-artifact',
@@ -609,12 +609,12 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/background/pending-delegations.ts'],
 		writerCitations: [
-			'src/background/pending-delegations.ts:6294 writeDelegationFallback / :6345 removeDelegationFallback',
-			'src/background/pending-delegations.ts:6808 writeBackgroundCoderReservations',
+			'src/background/pending-delegations.ts:6402 writeDelegationFallback / :6453 removeDelegationFallback',
+			'src/background/pending-delegations.ts:6972 writeBackgroundCoderReservations',
 		],
 		readerCitations: [
-			'src/background/pending-delegations.ts:6149 readDelegationFallback / :6161 listDelegationFallbacks / :6195 scanDelegationFallbacksForRecovery',
-			'src/background/pending-delegations.ts:6786 scanBackgroundCoderReservationsForAdmission',
+			'src/background/pending-delegations.ts:6257 readDelegationFallback / :6269 listDelegationFallbacks / :6303 scanDelegationFallbacksForRecovery',
+			'src/background/pending-delegations.ts:6950 scanBackgroundCoderReservationsForAdmission',
 		],
 		schemaVersion: 'fallback schemaVersion 1 (:1041)',
 		stateClass: 'authoritative',
@@ -996,11 +996,11 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/background/workspace-snapshot.ts'],
 		writerCitations: [
-			'src/background/workspace-snapshot.ts:2116 captureWorkspaceSnapshotAsync — async twin persist path: after a successful capture the content digest is written to the .swarm-contained marker (:2165-2176)',
-			'src/background/workspace-snapshot.ts:2168 atomicWriteSwarmFile — validateSwarmPath(SNAPSHOT_DIGEST_MARKER_FILENAME)-contained atomic temp+rename; advisory by contract, a containment rejection or write failure never fails the capture (:2168-2171)',
+			'src/background/workspace-snapshot.ts:2147 captureWorkspaceSnapshotAsync — async twin persist path: after a successful capture the content digest is written to the .swarm-contained marker (:2196-2207)',
+			'src/background/workspace-snapshot.ts:2199 atomicWriteSwarmFile — validateSwarmPath(SNAPSHOT_DIGEST_MARKER_FILENAME)-contained atomic temp+rename; advisory by contract, a containment rejection or write failure never fails the capture (:2199-2202)',
 		],
 		readerCitations: [
-			'src/background/workspace-snapshot.ts:2190 shouldSkipSnapshot — single readFileSync of the marker, trim + exact compare; missing/malformed marker or candidate digest fails open to false (a skip can never suppress a capture)',
+			'src/background/workspace-snapshot.ts:2221 shouldSkipSnapshot — single readFileSync of the marker, trim + exact compare; missing/malformed marker or candidate digest fails open to false (a skip can never suppress a capture)',
 		],
 		schemaVersion: 'none — single sha256 hex line (64 lowercase hex chars + trailing newline)',
 		stateClass: 'derived-rebuildable',
@@ -1008,9 +1008,9 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		writeLimits: {
 			bound: 'ONE fixed-shape advisory marker per project root — 65 bytes (64-char sha256 hex + newline), atomically overwritten per capture; the write is skipped entirely whenever the digest is unchanged, so footprint is constant regardless of capture frequency',
 			scope: 'global',
-			citation: 'src/background/workspace-snapshot.ts:2106-2117',
+			citation: 'src/background/workspace-snapshot.ts:2137-2148',
 		},
-		readBound: { pattern: 'line-bounded', bound: 'single 65-byte marker read once per capture', sync: true, citation: 'src/background/workspace-snapshot.ts:2190-2204' },
+		readBound: { pattern: 'line-bounded', bound: 'single 65-byte marker read once per capture', sync: true, citation: 'src/background/workspace-snapshot.ts:2221-2235' },
 		lockModel: 'none — advisory marker; atomic temp+rename makes concurrent captures last-writer-wins and a raced stale value costs one redundant capture at worst',
 		crashBehavior: 'atomic temp+rename; a torn or lost marker fails open (shouldSkipSnapshot false) and the next capture rewrites it — the marker is advisory, never authoritative state',
 		closePolicy: 'archived then cleaned by /swarm close — the marker is a member of both ARCHIVE_ARTIFACTS and ACTIVE_STATE_TO_CLEAN (close.ts), so close preserves a copy in the archive and removes the live file',
@@ -1023,7 +1023,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		owner: '#2472',
 		disposition: {
 			kind: 'not-a-defect',
-			proof: 'Single fixed-shape 65-byte advisory marker, atomically overwritten per capture and skipped entirely when the content digest is unchanged; a missing, torn, or stale marker costs exactly one redundant capture because shouldSkipSnapshot fails open — constant footprint, no accumulation vector (src/background/workspace-snapshot.ts:2165-2176,2190-2204).',
+			proof: 'Single fixed-shape 65-byte advisory marker, atomically overwritten per capture and skipped entirely when the content digest is unchanged; a missing, torn, or stale marker costs exactly one redundant capture because shouldSkipSnapshot fails open — constant footprint, no accumulation vector (src/background/workspace-snapshot.ts:2196-2207,2221-2235).',
 		},
 	},
 	{
@@ -2003,7 +2003,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/evidence/task-gate-repair.ts', 'src/evidence/task-gate-requirements.ts'],
 		writerCitations: [
-			'src/evidence/task-gate-requirements.ts:415 appendTaskGateRequirementsReceiptIfNeeded via atomicWriteFile (schemaVersion 1 records); :434 read-back before append',
+			'src/evidence/task-gate-requirements.ts:463 appendTaskGateRequirementsReceiptIfNeeded via atomicWriteFile (schemaVersion 1 records); :482 read-back before append',
 			'src/evidence/task-gate-repair.ts:498 fileHandle.writeFile repaired evidence under withTaskEvidenceLock; :968 atomicWriteFile; quarantine moves into task-gate-quarantine/ (:29-31)',
 		],
 		readerCitations: [
@@ -2263,7 +2263,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		pathGrammar: '.swarm/evidence/phase-participation.json (+ phase-participation-quarantine/{sha}.bin)',
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/evidence/phase-participation.ts'],
-		writerCitations: ['src/evidence/phase-participation.ts:494 writeStore — byte-limit trim evicting oldest pending/receipts; quarantine on corruption :376-446'],
+		writerCitations: ['src/evidence/phase-participation.ts:497 writeStore — byte-limit trim evicting oldest pending/receipts; quarantine on corruption :379-449'],
 		readerCitations: ['src/evidence/phase-participation.ts:845 readPhaseParticipation — bounded raw read (:215, ≤256 KiB, symlink guards), sync'],
 		schemaVersion: 'store schema with workspace freshness validation',
 		stateClass: 'authoritative',

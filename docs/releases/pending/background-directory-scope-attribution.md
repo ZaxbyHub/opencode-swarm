@@ -1,0 +1,20 @@
+# `fix(background)`: a directory-valued declared scope no longer settles background coder completions as `dispatch_no_mutation`
+
+## Summary
+
+- An architect may `declare_scope` with a **directory** (e.g. `files: ["context"]`); the coder write-scope guard treats such a scope as covering everything beneath it, so a directory-scoped background coder can legitimately edit `context/<file>`. The background completion attribution (`src/background/stage-b-gates.ts`, `ingestBackgroundStageBCompletion`) matched declared entries by **exact path** only: every file the coder changed fell out of `attributedFiles`, the completion settled as `dispatch_no_mutation` despite real mutations, and the task wedged at Stage A forever — no accepted mutation → `stage_a_passed` refused → every Stage B dispatch denied with `TASK_WORKFLOW_STAGE_A_REQUIRED`, with every recovery path refusing too.
+- Root cause of the observed task-1.13 loop: the settlement round's coder really modified `context/baseline-adoption.md` and `context/python-toolchain.md` under the declared directory scope `context`, yet the durable evidence shows `lastOutcome: "dispatch_no_mutation"` (twice — both real coder rounds mis-settled the same way), which is exactly why Stage A never passed regardless of the green gate runs.
+- Fix: scope-membership tests in the attribution filters are now directory-aware (`scopeSetContainsFile`: an entry matches itself or everything beneath `entry + '/'`). Applied at both the non-receipts and reviewer-receipts attribution filters and the scope-handoff membership checks. Directory-prefix matching cannot false-positive: a declared FILE entry has no children, so the prefix test is false for every other path; a coder with zero in-scope changes still settles truthfully as `dispatch_no_mutation` (pinned by test). Exact-file scopes behave exactly as before (pinned by test).
+
+## User-facing changes
+
+- Background coder rounds scoped to a directory now settle their real mutations (`accepted_mutation`), so the task workflow advances to `coder_delegated` and a green `pre_check_batch` can record `stage_a_passed` — the whole wedge class (retry-circuit repair → background coder round → settlement silently classified as no-mutation → Stage A refused) disappears.
+- Combined with the tool-side Stage A self-report (separate fragment), the architect loop can self-heal after a wedge: one fresh coder round settles correctly, the next gate run attributes, Stage B dispatches again.
+
+## Migration notes
+
+None. No on-disk format changes; only the in-flight attribution predicate changed. Already-mis-settled tasks keep their recorded `dispatch_no_mutation` outcome — a fresh coder round (or `/swarm recover` where a stale settlement exists) re-arms the chain.
+
+## Discovery context
+
+Found in the Wirtschaftssimulation loop (task 1.13, sessions `9b8ce452`/`1bab0cbd`): the settlement round's background delegation record shows `status: "consumed"` with the coder's real two-file change report, while `.swarm/evidence/1.13.json` shows `lastOutcome: "dispatch_no_mutation"` with `retryHistory: ["dispatch_no_mutation", "dispatch_no_mutation"]` — both real coder rounds (declared scope `context`) were silently classified as no-mutation. Pinned by `tests/unit/background/stage-b-directory-scope-attribution.test.ts`: directory-scope files attribute and settle `accepted_mutation`; an exact-file scope does not attribute siblings; zero in-scope changes still settle `dispatch_no_mutation`. All 6 pre-existing stage-b suites stay green (attribution, doc-only, redispatch-reclaim, ownership-history, 2491-route, skipped-verdict).

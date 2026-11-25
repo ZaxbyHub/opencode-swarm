@@ -192,31 +192,47 @@ describe('legacy deadline workflowLaneFailureClass read compatibility', () => {
 		expect(sqlitePayload(dir, LEGACY)).toBe(payloadBefore);
 	});
 
-	test('an unknown failure-class value still fails the namespace closed', async () => {
+	test('an unknown failure-class value is skipped by the lenient advisory read and stays durably visible', async () => {
 		const dir = project();
 		await seedSqliteStore(dir, 'bogus');
 
+		// The advisory read is schema-drift tolerant: one drifted row no
+		// longer poisons the whole namespace as uncertain. The row is skipped
+		// and NAMED on the ok outcome (never silently swallowed).
 		const detailed = readDelegationsDetailed(dir);
-		expect(detailed.status).toBe('uncertain');
+		expect(detailed.status).toBe('ok');
+		if (detailed.status !== 'ok') return;
+		expect(detailed.records.map((r) => r.correlationId)).toEqual([HEALTHY]);
+		expect(detailed.skippedCoordinationRows).toEqual([LEGACY]);
+
+		// The strict destructive-cleanup view still fails the namespace
+		// closed on the same row.
 		const scan = scanDelegationsForRecovery(dir);
 		expect(scan.status).toBe('uncertain');
 
 		// PRR-004: the operator-visible signal is the durable health
-		// artifact, not just the in-memory read outcome. The schema-
-		// validation predicate must be identifiable there, with the row key
-		// and the coordination-read source.
+		// artifact, not just the in-memory read outcome. The schema-drift
+		// skip must be identifiable there, with the row key and the lenient
+		// coordination-read source.
 		const health = JSON.parse(
 			fs.readFileSync(
 				path.join(dir, '.swarm', 'background-delegations-health.json'),
 				'utf-8',
 			),
 		) as {
-			lastUncertainty?: { reason?: string; source?: string };
+			lastCoordinationSkip?: {
+				reason?: string;
+				source?: string;
+				skippedEntityKeys?: string[];
+			};
 		};
-		expect(health.lastUncertainty?.reason).toContain(
-			`failed schema validation for ${LEGACY}`,
+		expect(health.lastCoordinationSkip?.skippedEntityKeys).toContain(LEGACY);
+		expect(health.lastCoordinationSkip?.source).toBe(
+			'coordination-read-lenient',
 		);
-		expect(health.lastUncertainty?.source).toBe('coordination-read');
+		expect(health.lastCoordinationSkip?.reason).toContain(
+			'failed schema validation',
+		);
 	});
 
 	test('an authority-binding mismatch reports its own distinct predicate', async () => {

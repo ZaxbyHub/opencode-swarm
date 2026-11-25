@@ -1,6 +1,7 @@
 import { readdir } from 'node:fs/promises';
 import { appendCoreEventSync } from '../events/core-events.js';
 import { isSecretscanEvidence, loadEvidence } from '../evidence/manager.js';
+import { latestAcceptedMutationReceipt } from '../evidence/task-gate-requirements.js';
 import {
 	getTaskWorkflowSnapshot,
 	readTaskEvidence,
@@ -281,6 +282,13 @@ type StageATaskScan =
 			green: boolean;
 			predecessorTransitionId: string | null;
 			evidence: TaskEvidence | null;
+			/**
+			 * Settlement-wedge only: which durable receipt justified the repair
+			 * (settlement WAL vs chain-verified requirements-ledger
+			 * accepted_mutation receipt — background coder rounds never write a
+			 * WAL). Null on the live_wedge path.
+			 */
+			justification: StageASettlementJustification | null;
 	  };
 
 /** Latest COMMITTED settlement facts for one task, from the shared WAL listing. */
@@ -299,6 +307,55 @@ export function latestCommittedAcceptedSettlementMs(
 		latest = latest === null ? parsed : Math.max(latest, parsed);
 	}
 	return latest;
+}
+
+/**
+ * Which durable receipt justifies a settlement-backed Stage A recovery, and
+ * the timestamp post-settlement pre-check bundles must beat.
+ *
+ * - `settlement_wal`: a COMMITTED accepted coder-settlement WAL (the original
+ *   #2828 bar; foreground coder rounds).
+ * - `requirements_receipt`: no settlement WAL exists, but the append-only
+ *   requirements ledger carries a chain-verified coder `accepted_mutation`
+ *   receipt. Background-dispatched coder rounds never write a settlement WAL,
+ *   so without this arm every task whose coder round was background-dispatched
+ *   is permanently locked out of the settlement wedge recovery — the wedge
+ *   then has NO sanctioned path at all (deliveries committed before a campaign
+ *   rebuild re-settle as `dispatch_no_mutation` forever, so neither a fresh
+ *   coder round nor pre_check attribution can open Stage A). The receipt is
+ *   the same audited fact the WAL path reads, recorded by the accepted
+ *   mutation itself.
+ *
+ * Null only when NEITHER durable receipt exists — the honest "not a settled
+ * task" answer. Corrupt requirements chains propagate their
+ * TASK_GATE_REQUIREMENTS_* errors (fail closed).
+ */
+export type StageASettlementJustification =
+	| { via: 'settlement_wal'; settledAfterMs: number }
+	| {
+			via: 'requirements_receipt';
+			settledAfterMs: number;
+			sourceTransitionId: string | null;
+			generation: number;
+	  };
+
+export async function resolveStageASettlementJustification(
+	directory: string,
+	taskId: string,
+	walStates: readonly CoderSettlementWalState[],
+): Promise<StageASettlementJustification | null> {
+	const walMs = latestCommittedAcceptedSettlementMs(taskId, walStates);
+	if (walMs !== null) {
+		return { via: 'settlement_wal', settledAfterMs: walMs };
+	}
+	const receipt = await latestAcceptedMutationReceipt(directory, taskId);
+	if (!receipt) return null;
+	return {
+		via: 'requirements_receipt',
+		settledAfterMs: receipt.recordedAtMs,
+		sourceTransitionId: receipt.sourceTransitionId,
+		generation: receipt.generation,
+	};
 }
 
 /**
@@ -339,6 +396,7 @@ async function scanStageATask(
 				green: true,
 				predecessorTransitionId: workflow.lastTransitionId ?? null,
 				evidence,
+				justification: null,
 			};
 		}
 		return { kind: 'not_wedged', state: workflow.state, evidence };
@@ -348,18 +406,22 @@ async function scanStageATask(
 		// decide. `idle` additionally requires the pre_check proof to be absent
 		// (the normal post-repair_idle shape); `blocked` admits a previously
 		// recorded proof too — the wedge there is the state regression, and
-		// re-recording Stage A is idempotent for the gate entry.
-		const settledAfterMs = latestCommittedAcceptedSettlementMs(
+		// re-recording Stage A is idempotent for the gate entry. The receipts
+		// are resolved WAL-first: background-dispatched coder rounds never
+		// write a settlement WAL, so their chain-verified accepted_mutation
+		// requirements receipt is the durable settlement proof instead.
+		const justification = await resolveStageASettlementJustification(
+			directory,
 			taskId,
 			walStates,
 		);
 		if (
-			settledAfterMs !== null &&
+			justification !== null &&
 			(workflow.state === 'blocked' || !evidence?.gates?.pre_check)
 		) {
 			const greenness = await hasGreenPostSettlementPreCheck(
 				directory,
-				settledAfterMs,
+				justification.settledAfterMs,
 			);
 			if (!greenness.green) {
 				return { kind: 'not_green', reason: greenness.reason, evidence };
@@ -371,6 +433,7 @@ async function scanStageATask(
 				green: true,
 				predecessorTransitionId: workflow.lastTransitionId ?? null,
 				evidence,
+				justification,
 			};
 		}
 		return { kind: 'not_wedged', state: workflow.state, evidence };
@@ -454,14 +517,21 @@ export async function scanWedgedStageA(
 					),
 				);
 			} else if (verdict.kind === 'not_green') {
+				const idleOrBlocked =
+					verdict.evidence !== null &&
+					['idle', 'blocked'].includes(
+						getTaskWorkflowSnapshot(verdict.evidence).state,
+					);
+				const settlementJustified =
+					idleOrBlocked &&
+					(await resolveStageASettlementJustification(
+						directory,
+						taskId,
+						walStates,
+					)) !== null;
 				results.push(
 					classifyEvidenceRecoveryTask(taskId, verdict.evidence, false, {
-						settlementCommittedAccepted:
-							verdict.evidence !== null &&
-							['idle', 'blocked'].includes(
-								getTaskWorkflowSnapshot(verdict.evidence).state,
-							) &&
-							latestCommittedAcceptedSettlementMs(taskId, walStates) !== null,
+						settlementCommittedAccepted: settlementJustified,
 					}),
 				);
 			} else {
@@ -588,7 +658,22 @@ export async function repairWedgedStageA(
 					transitionId,
 					generation: scan.generation,
 					...(scan.mode === 'settlement_wedge'
-						? { settlementRecovery: true }
+						? {
+								settlementRecovery: true,
+								// Which durable receipt admitted the repair:
+								// 'settlement_wal' | 'requirements_receipt'
+								// (background coder rounds never write a WAL).
+								justification:
+									scan.justification?.via ?? 'settlement_wal',
+								...(scan.justification?.via === 'requirements_receipt'
+									? {
+											justificationTransitionId:
+												scan.justification.sourceTransitionId,
+											justificationGeneration:
+												scan.justification.generation,
+										}
+									: {}),
+							}
 						: {}),
 					via: 'swarm-recover',
 					// Issue #2665: the new receipt names its predecessor — the
