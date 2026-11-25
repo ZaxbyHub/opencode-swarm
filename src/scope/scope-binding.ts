@@ -94,7 +94,10 @@ export type ScopeBindingAdmissionResult =
 	| { ok: true; binding: ScopeBinding }
 	| {
 			ok: false;
-			code: 'SCOPE_BINDING_CAPACITY' | 'SCOPE_BINDING_STALE';
+			code:
+				| 'SCOPE_BINDING_CAPACITY'
+				| 'SCOPE_BINDING_STALE'
+				| 'SCOPE_BINDING_EXPIRED';
 			message: string;
 	  };
 
@@ -219,6 +222,27 @@ function sweepExpired(now = Date.now()): void {
 			now - binding.declaredAt > MAX_SCOPE_BINDING_AGE_MS
 		) {
 			pendingScopeBindings.delete(key);
+			// Issue #3900: a deliberate tombstone (revoked/superseded, e.g. a
+			// failed-revocation overlay) must survive the sweep. Overwriting it
+			// with an 'expired' tombstone would flip the deny into a sweep
+			// signature that clearSweepTombstoneForRevival removes — fail-open.
+			// Preserve the deliberate state and ADVANCE its revision so the
+			// deny also covers the revived revision the sweep would have
+			// stamped.
+			const existing = scopeBindingTombstones.get(binding.generationId);
+			const deliberate =
+				existing &&
+				existing.bindingId === binding.bindingId &&
+				existing.lifecycleState !== 'live' &&
+				existing.lifecycleState !== 'expired';
+			if (deliberate && existing) {
+				scopeBindingTombstones.set(binding.generationId, {
+					...existing,
+					revision: Math.max(existing.revision, binding.revision + 1),
+					updatedAt: now,
+				});
+				continue;
+			}
 			const expired: ScopeBinding = {
 				...binding,
 				revision: binding.revision + 1,
@@ -244,7 +268,7 @@ export function registerScopeBinding(
 	if (binding.lifecycleState !== 'live' || binding.expiresAt <= Date.now()) {
 		return {
 			ok: false,
-			code: 'SCOPE_BINDING_CAPACITY',
+			code: 'SCOPE_BINDING_EXPIRED',
 			message: 'Only an unexpired live binding can be admitted.',
 		};
 	}

@@ -3411,4 +3411,27 @@ export const EVIDENCE_WRITE_BLIND_SPOTS: readonly EvidenceWriteBlindSpot[] = [
 			'filter matches this file only because the module also persists review ' +
 			'evidence and route receipts.',
 	},
+	{
+		file: 'src/scope/scope-persistence.ts',
+		rule: 'R',
+		target: 'archivedPath',
+		status: 'not-an-evidence-artifact',
+		reason:
+			'`archivedPath` is a rename destination for imported legacy binding ' +
+			'files moved into .swarm/scopes/archive/. It is a scope-binding ' +
+			'compatibility artifact, not a cached evidence file. The candidate ' +
+			'filter matches this module because its comments and string literals ' +
+			'contain the word "evidence".',
+	},
+	{
+		file: 'src/scope/scope-persistence.ts',
+		rule: 'S',
+		target: 'scopePath',
+		status: 'not-an-evidence-artifact',
+		reason:
+			'`scopePath` is the v1 scope projection .swarm/scopes/scope-{taskId}.json, ' +
+			'a scope-binding compatibility artifact, not a cached evidence file. ' +
+			'The candidate filter matches this module because its comments and ' +
+			'string literals contain the word "evidence".',
+	},
 ];
