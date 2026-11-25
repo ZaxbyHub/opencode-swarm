@@ -775,15 +775,34 @@ export async function tryAcquireLock(
 			// `.lck` wedging plan/save/close targets permanently. Probe the
 			// payload: a parsable dead-owner payload runs the fenced breaker
 			// once (never-break-live-pid holds; the cooldown bounds mutation to
-			// one attempt per target per LOCK_TIMEOUT_MS). Ownerless/foreign
-			// payloads keep TTL-only semantics here — 'ttl-cleanup' on the
-			// acquire path would let a plain mtime age break a lock whose
-			// holder is merely slow, so the aged sweep stays the only route.
+			// one attempt per target per LOCK_TIMEOUT_MS). An ownerless/invalid
+			// payload (empty or torn `.lck`) routes to 'ttl-cleanup' so a
+			// past-TTL ownerless lock recovers through the fenced protocol,
+			// matching the evidence/events stores (#3934). A valid payload with
+			// a live owner is never touched (never-break-live-pid holds); a
+			// merely-slow holder keeps its lock because ttl-cleanup only fires
+			// when there is no parsable owner at all.
 			const parsed = parseOwnerPayload(readOwnerPayload(ownerLockPath));
 			if (parsed !== null && !isPidAlive(parsed.ownerPid)) {
 				if (
 					breakStaleLockIfOwnerDead(ownerLockPath, {
 						class: 'dead-owner',
+						store: opts?.breakStore ?? 'generic',
+					}) === 'broken'
+				) {
+					brokeStale = true;
+				}
+			} else if (parsed === null) {
+				// Ownerless/invalid payload (empty or torn `.lck`): route to
+				// ttl-cleanup so a past-TTL ownerless lock recovers through the
+				// fenced protocol, matching the evidence/events stores. A fresh
+				// (within-TTL) ownerless lock stays 'unknown' and times out
+				// exactly as before (AC4 semantics). There is no live holder to
+				// be merely slow here, so the mtime-TTL gate is the only thing
+				// that can be broken.
+				if (
+					breakStaleLockIfOwnerDead(ownerLockPath, {
+						class: 'ttl-cleanup',
 						store: opts?.breakStore ?? 'generic',
 					}) === 'broken'
 				) {
