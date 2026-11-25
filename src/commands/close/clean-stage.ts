@@ -4,7 +4,10 @@ import { closeGroupCommitWriter } from '../../db/group-commit-writer';
 import { closeProjectDb } from '../../db/project-db';
 import { isLinked } from '../../hooks/knowledge-link';
 import { clearAllScopes } from '../../scope/scope-persistence';
-import { quarantineSwarmResidue } from '../../services/swarm-residue';
+import {
+	neutralizeResidueName,
+	quarantineSwarmResidue,
+} from '../../services/swarm-residue';
 import { REPO_MEMORY_FILENAME } from '../../tools/repo-graph/indexed-storage';
 import { atomicWriteSwarmFile } from '../../utils/atomic-write';
 import { log } from '../../utils/logger';
@@ -373,7 +376,7 @@ export async function runCleanStage(
 				} else {
 					const reason = err instanceof Error ? err.message : String(err);
 					ctx.warnings.push(
-						`Failed to clean config-backup ${backup} [${errno ?? 'unknown'}]: ${reason}`,
+						`Failed to clean config-backup ${neutralizeResidueName(backup)} [${errno ?? 'unknown'}]: ${reason}`,
 					);
 				}
 			}
@@ -394,7 +397,7 @@ export async function runCleanStage(
 				} else {
 					const reason = err instanceof Error ? err.message : String(err);
 					ctx.warnings.push(
-						`Failed to clean ledger sibling ${sibling} [${errno ?? 'unknown'}]: ${reason}`,
+						`Failed to clean ledger sibling ${neutralizeResidueName(sibling)} [${errno ?? 'unknown'}]: ${reason}`,
 					);
 				}
 			}
@@ -473,7 +476,7 @@ export async function runCleanStage(
 		if (residue.preserved.length > 0) {
 			const sample = residue.preserved
 				.slice(0, 5)
-				.map((p) => `\`${p.relPath}\``)
+				.map((p) => `\`${neutralizeResidueName(p.relPath)}\``)
 				.join(', ');
 			ctx.warnings.push(
 				`Preserved ${residue.preserved.length} residue candidate(s) in place (recent/active/tracked/ambiguous): ${sample}${residue.preserved.length > 5 ? ' …' : ''}.`,

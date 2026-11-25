@@ -4,6 +4,7 @@ import path from 'node:path';
 import type { PluginConfig } from '../../config/schema';
 import { observeCloseArchive } from '../../health/learning-health';
 import { isLinked } from '../../hooks/knowledge-link';
+import { neutralizeResidueName } from '../../services/swarm-residue';
 import { telemetry as telemetryEmit } from '../../telemetry';
 import { REPO_MEMORY_FILENAME } from '../../tools/repo-graph/indexed-storage';
 import { log } from '../../utils/logger';
@@ -392,7 +393,7 @@ export async function runArchiveStage(ctx: CloseStageContext): Promise<void> {
 						`${errno ?? 'unknown'}: ${reason}`,
 					);
 					ctx.warnings.push(
-						`Failed to archive ${artifact} [${errno ?? 'unknown'}]: ${reason}. File preserved (not cleaned up).`,
+						`Failed to archive ${neutralizeResidueName(artifact)} [${errno ?? 'unknown'}]: ${reason}. File preserved (not cleaned up).`,
 					);
 					ctx.archiveResults.push({
 						artifact,

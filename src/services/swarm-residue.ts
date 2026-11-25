@@ -407,13 +407,37 @@ export interface QuarantineResult {
 	preserved: readonly QuarantineOutcomeItem[];
 }
 
+/**
+ * Failure classes for a manifest/scan rel path. `traversal`, `empty-segment`
+ * and `absolute` indicate a MANIPULATED manifest (tamper class — the whole
+ * call must abort); `control-char` is a bad-filename DATA defect that the
+ * rollback path can skip-and-report (issue #3836 D1).
+ */
+type ResidueRelPathDefect =
+	| 'traversal'
+	| 'empty-segment'
+	| 'absolute'
+	| 'control-char';
+
+/**
+ * Non-throwing classifier sharing the exact predicate `validateRelPath`
+ * rejects on (so the two can never drift). Tamper classes take priority over
+ * `control-char` when a path mixes defects.
+ */
+function classifyRelPathDefect(rel: string): ResidueRelPathDefect | null {
+	if (!rel) return 'empty-segment';
+	if (path.isAbsolute(rel)) return 'absolute';
+	const segments = rel.split('/');
+	if (segments.some((s) => s === '..')) return 'traversal';
+	if (segments.some((s) => s === '')) return 'empty-segment';
+	// C0 + DEL + C1 (Unicode Cc) — aligned with the renderer's corpus
+	// (issue #3836 D2; previously C0 only, which let DEL/C1 pass).
+	if (segments.some((s) => /[\p{Cc}]/u.test(s))) return 'control-char';
+	return null;
+}
+
 function validateRelPath(rel: string, what: string): string {
-	if (
-		!rel ||
-		path.isAbsolute(rel) ||
-		// biome-ignore lint/suspicious/noControlCharactersInRegex: intentionally matching control chars to reject them (doctor.ts precedent)
-		rel.split('/').some((s) => s === '..' || s === '' || /[\0-\x1f]/.test(s))
-	) {
+	if (classifyRelPathDefect(rel) !== null) {
 		throw new Error(
 			`unsafe ${what} in quarantine manifest: ${JSON.stringify(rel)}`,
 		);
@@ -467,6 +491,22 @@ export async function quarantineSwarmResidue(
 	};
 	const moved: QuarantineOutcomeItem[] = [];
 	for (const entry of eligible) {
+		// Move-path name guard (issue #3836 D4): validate the residue name with
+		// the SAME grammar the rollback manifest trusts BEFORE any rename. An
+		// unsafe-named entry moved into the batch would be recorded raw in
+		// manifest.json — the exact stranding class the rollback containment
+		// (D1) has to repair. Such entries are NOT moved: they are preserved in
+		// place and reported (consistent with the #3542/#3542-adjacent stance
+		// that unverifiable names are never auto-mutated), so no manifest
+		// record exists for them.
+		if (classifyRelPathDefect(entry.relPath) !== null) {
+			preserved.push({
+				relPath: entry.relPath,
+				status: 'preserved',
+				reasons: ['unsafe-name'],
+			});
+			continue;
+		}
 		const abs = path.join(swarmRoot, ...entry.relPath.split('/'));
 		// TOCTOU re-check: still a regular file, same size and mtime as scanned.
 		try {
@@ -585,7 +625,19 @@ export async function quarantineSwarmResidue(
 
 export interface RollbackOutcomeItem {
 	relPath: string;
-	status: 'restored' | 'already-restored' | 'collision' | 'missing-copy';
+	status:
+		| 'restored'
+		| 'already-restored'
+		| 'collision'
+		| 'missing-copy'
+		| 'skipped';
+	/**
+	 * Present on `skipped` items only (mirrors `QuarantineOutcomeItem`).
+	 * Optional — the existing restored/collision/missing-copy item shape is
+	 * pinned by tests/unit/services/swarm-residue-quarantine.test.ts and must
+	 * stay key-identical.
+	 */
+	reasons?: readonly string[];
 }
 
 export interface RollbackResult {
@@ -613,6 +665,15 @@ function listQuarantineBatches(swarmRoot: string): string[] {
  * order-independent across batches: an occupied original is compared by
  * checksum — identical copies are dropped (already restored), differing
  * content is left in place and reported as a collision, never overwritten.
+ *
+ * Per-entry containment (issue #3836 D1): a manifest entry whose path fields
+ * carry ONLY control characters (C0/DEL/C1) is SKIPPED and reported once
+ * (`status: 'skipped'`, reason `unsafe-name`) instead of aborting the whole
+ * call — the batch is retained (`drained: false`) so the valid siblings
+ * still restore and the poisoned stored copy is left byte-unchanged. The
+ * tamper class (traversal / empty segment / absolute path / root escape) is
+ * still a HARD REJECT: those indicate a manipulated manifest, not a bad
+ * filename, and keep the whole-call abort contract.
  */
 export async function rollbackResidueQuarantine(
 	directory: string,
@@ -649,11 +710,40 @@ export async function rollbackResidueQuarantine(
 	const items: RollbackOutcomeItem[] = [];
 	let allResolved = true;
 	for (const entry of manifest.entries) {
-		const originalRel = validateRelPath(
-			entry.original_rel_path,
-			'original_rel_path',
-		);
-		const storedRel = validateRelPath(entry.stored_rel_path, 'stored_rel_path');
+		// Classify BOTH path fields BEFORE any per-entry action (mixed-poison
+		// rule: an entry combining a control-bearing original_rel_path with a
+		// traversal-bearing stored_rel_path is a hard reject, never a skip).
+		const defects = [
+			classifyRelPathDefect(entry.original_rel_path),
+			classifyRelPathDefect(entry.stored_rel_path),
+		];
+		if (defects.some((d) => d !== null && d !== 'control-char')) {
+			// Tamper class — re-run the throwing validators so the whole-call
+			// error is the canonical pre-#3836 message (pinned by
+			// tests/unit/services/swarm-residue-quarantine.test.ts). The
+			// classifier shares the validator's predicate, so one of these
+			// always throws; the trailing escape-guard throw keeps this branch
+			// total so a tamper entry can never fall through to a skip.
+			validateRelPath(entry.original_rel_path, 'original_rel_path');
+			validateRelPath(entry.stored_rel_path, 'stored_rel_path');
+			throw new Error(`Quarantine manifest path escapes its root: ${selected}`);
+		}
+		if (defects.some((d) => d !== null)) {
+			// Control-char-only data defect: skip-and-report. relPath is a
+			// JSON.stringify-style escaped SAFE rendering — the Cc-neutralized
+			// name, quoted and escaped, so no raw control byte ever reaches a
+			// downstream render sink while the report still identifies the
+			// entry. The poisoned stored copy is left byte-unchanged.
+			items.push({
+				relPath: JSON.stringify(neutralizeResidueName(entry.original_rel_path)),
+				status: 'skipped',
+				reasons: ['unsafe-name'],
+			});
+			allResolved = false;
+			continue;
+		}
+		const originalRel = entry.original_rel_path;
+		const storedRel = entry.stored_rel_path;
 		const originalAbs = path.join(swarmRoot, ...originalRel.split('/'));
 		const storedAbs = path.join(swarmRoot, ...storedRel.split('/'));
 		// Manifest paths must stay under their owning roots (tamper guard).
@@ -701,6 +791,19 @@ export async function rollbackResidueQuarantine(
 // Shared formatter (close dry-run + doctor render the SAME lines)
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * The ONE neutralizer for residue-derived names/relPaths interpolated into
+ * any render sink (issue #3836 D3): strips every Unicode Cc control char
+ * (C0 + DEL + C1 — issue #3542: injected rows and terminal-polluting escape
+ * sequences, the class PR #3533 fixed in doctor-store-integrity's safeName)
+ * and neutralizes backticks (markdown code-span breakout) the same way
+ * src/commands/doctor.ts sanitizes untrusted strings. Every mutation-path
+ * surface that interpolates `relPath`/readdir names routes through this.
+ */
+export function neutralizeResidueName(name: string): string {
+	return name.replace(/[\p{Cc}]/gu, '').replace(/`/g, "'");
+}
+
 function formatAge(ms: number): string {
 	if (ms <= 0) return '0s';
 	const minutes = Math.floor(ms / 60_000);
@@ -745,13 +848,9 @@ export function formatResidueInventoryLines(
 			...e.reasons,
 		].filter(Boolean);
 		// relPath comes from readdir and may contain adversarial characters —
-		// strip C0/C1 (Unicode Cc) control chars first (issue #3542:
-		// backtick-only neutralization let `\n`-injected forged rows and ESC
-		// terminal pollution through — the same class PR #3533 fixed in
-		// src/commands/doctor-store-integrity.ts's `safeName`), then
-		// neutralize backticks (markdown code-span breakout) the same way
-		// src/commands/doctor.ts sanitizes untrusted strings.
-		const safeRel = e.relPath.replace(/[\p{Cc}]/gu, '').replace(/`/g, "'");
+		// route through the shared neutralizer (issue #3542 semantics, pinned
+		// byte-identical by swarm-residue-control-char-names.test.ts).
+		const safeRel = neutralizeResidueName(e.relPath);
 		lines.push(
 			`  - \`${safeRel}\` [${e.grammarId}] → ${e.proposedAction === 'quarantine' ? 'would quarantine' : 'preserve'} (${flags.join(', ')})`,
 		);
