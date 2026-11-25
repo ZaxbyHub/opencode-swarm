@@ -16,10 +16,17 @@
  * Conservative application evidence (#1847 §2, AC5/AC6): the
  * `validated_terminal_applications` gate counts ONLY validated terminal receipts
  * tied to a real retrieval trace + result membership. Legacy records carry no
- * evidence and receive NO synthetic credit. Until #1849 produces real receipts,
- * the configured thresholds default to 0, so the gate is satisfied by absence
- * (it neither credits nor blocks) and current behavior is preserved. Operators
- * raise the thresholds to activate application-evidence gating.
+ * evidence and receive NO synthetic credit. Since #3820 (H1) the gate is ACTIVE
+ * by default: `promotion_min_terminal_applications` defaults to 1, so an entry
+ * needs at least one INDEPENDENT validated terminal application to promote.
+ * Independence is an ALLOWLIST (`INDEPENDENT_RECEIPT_SOURCES` in
+ * `./knowledge-receipt-ledger.js` — the taxonomy owner): only `reviewer`,
+ * `architect`, and `test_engineer` receipts count; `delegate` self-reports,
+ * `architect_marker` acknowledgments, gate-release escape hatches, and every
+ * legacy/ambiguous/absent source fail closed. `promotion_min_distinct_cohorts`
+ * defaults to 0 (the production evidence loader is cohort-scoped, so a >1
+ * default would be unsatisfiable today). Operators who want the legacy
+ * ungated behavior set `promotion_min_terminal_applications: 0` explicitly.
  *
  * Actionability floor (#1821 A3): the `actionability_floor` gate refuses to
  * promote a plain-prose lesson — a promotion candidate must carry at least one
@@ -37,6 +44,11 @@
  */
 
 import { validateActionability } from './actionability-predicate.js';
+// Value import from the receipt-taxonomy OWNER (issue #3820 H1(b)): the
+// independent-source allowlist must be derived from the same closed taxonomy
+// the ledger commits, not redeclared here. Import-time inert (declarations
+// only) — the no-I/O statement below stays true.
+import { INDEPENDENT_RECEIPT_SOURCES } from './knowledge-receipt-ledger.js';
 import type {
 	KnowledgeConfig,
 	PromotionEvidenceRecord,
@@ -102,14 +114,18 @@ export function evaluatePromotionPolicy(
 		detail: routeDetail.detail,
 	});
 
-	// Gate: validated terminal applications (NEW, conservative). Counts ONLY
-	// validated PromotionEvidenceRecords across the configured minimum number of
-	// DISTINCT canonical cohort ids. Defaults to 0 → satisfied by absence (no
-	// synthetic credit, no new blocking) until #1849 produces real receipts.
-	// (#2032 F-003) When the gate is active, only INDEPENDENT evidence counts:
-	// `receipt_source` must be present and not `'delegate'` (delegate
-	// self-report stays non-independent, per the shipped guarantee). Records
-	// without a source (pre-#2032) fail closed — they do not count.
+	// Gate: validated terminal applications (ACTIVE by default since #3820 H1).
+	// Counts ONLY validated PromotionEvidenceRecords across the configured
+	// minimum number of DISTINCT canonical cohort ids. `minApps` defaults to 1
+	// (schema default) — an entry with no independent application evidence is
+	// refused. (#3820 H1(b)) When the gate is active, only INDEPENDENT evidence
+	// counts: `receipt_source` must be a member of the explicit allowlist
+	// (`reviewer` / `architect` / `test_engineer` — the sources that represent a
+	// DIFFERENT ROLE applying the lesson than the one that authored it).
+	// Everything else fails closed: `delegate` self-report, `architect_marker`
+	// acknowledgments, the `application_gate_*_release` escape hatches, the
+	// legacy/ambiguous `manual` / `migration` / `phase_override` classes, and
+	// records without a source (pre-#2032) — none of them count.
 	const minApps = config.promotion_min_terminal_applications ?? 0;
 	const minCohorts = config.promotion_min_distinct_cohorts ?? 0;
 	const gateActive = minApps > 0 || minCohorts > 0;
@@ -117,7 +133,7 @@ export function evaluatePromotionPolicy(
 		? evidence.filter(
 				(e) =>
 					typeof e.receipt_source === 'string' &&
-					e.receipt_source !== 'delegate',
+					INDEPENDENT_RECEIPT_SOURCES.has(e.receipt_source),
 			)
 		: evidence;
 	const distinctCohorts = new Set(
@@ -129,8 +145,8 @@ export function evaluatePromotionPolicy(
 		name: 'validated_terminal_applications',
 		passed: appsOk && cohortsOk,
 		detail: !gateActive
-			? 'threshold 0 — no application-evidence gate active (until #1849)'
-			: `${countedEvidence.length} independent receipt(s) (source ≠ delegate) across ${distinctCohorts.size} cohort(s) (need ≥${minApps} app / ≥${minCohorts} cohort; ${evidence.length} total)`,
+			? 'threshold 0 — no application-evidence gate active (operator opt-out)'
+			: `${countedEvidence.length} independent receipt(s) (allowlist reviewer/architect/test_engineer) across ${distinctCohorts.size} cohort(s) (need ≥${minApps} app / ≥${minCohorts} cohort; ${evidence.length} total)`,
 	});
 
 	// Gate: not currently confidence-floor-demoted (a floor-clamped entry should
@@ -208,9 +224,20 @@ export function describeEligibilityRoute(
 		};
 	}
 
-	// Route 2: fast-track tag (privileged — only set by authorized tooling).
-	if ((entry.tags ?? []).includes('hive-fast-track')) {
-		return { passed: true, detail: 'route 2: hive-fast-track tag' };
+	// Route 2: fast-track authorization (privileged — issue #3820 H3). The
+	// authorization rides a DEDICATED field (`hive_fast_track_authorized`) that
+	// only the authorized manual stand-in path (`promoteToHive`) writes — it is
+	// NOT the caller-writable `tags` array. A persisted `hive-fast-track` tag
+	// alone never satisfies this route. The comparison is captured ONCE (before
+	// the early return) so the no-route diagnostic below can report it without
+	// a redundant re-check.
+	const fastTrackArmed = entry.hive_fast_track_authorized === true;
+	if (fastTrackArmed) {
+		return {
+			passed: true,
+			detail:
+				'route 2: authorized manual fast-track (hive_fast_track_authorized)',
+		};
 	}
 
 	// Route 3: age-based.
@@ -228,7 +255,7 @@ export function describeEligibilityRoute(
 		passed: false,
 		detail:
 			`no eligibility route: hive_eligible=${entry.hive_eligible === true} (${phaseNumbers.size} phases), ` +
-			`fast-track=${(entry.tags ?? []).includes('hive-fast-track')}, ` +
+			`fast-track=${fastTrackArmed}, ` +
 			`age=${Math.round(ageMs / 86_400_000)}d < ${autoPromoteDays}d`,
 	};
 }

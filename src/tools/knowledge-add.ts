@@ -47,6 +47,16 @@ const VALID_CATEGORIES: KnowledgeCategory[] = [
 const KNOWLEDGE_ADD_FIELD_CAP = 20;
 
 /**
+ * The privileged promotion fast-track tag (#3820 H3). Since route 2 moved onto
+ * the dedicated `hive_fast_track_authorized` field this tag is inert in the
+ * policy, but it is still stripped from CALLER-supplied tags at ingress as
+ * defense in depth: a persisted privileged tag must not look like an
+ * authorization mark to any consumer, present or future. `inferTags` never
+ * produces it.
+ */
+const PRIVILEGED_FAST_TRACK_TAG = 'hive-fast-track';
+
+/**
  * Merge caller-supplied tags with the tags inferred from the lesson.
  *
  * Caller tags come FIRST so that when the combined list exceeds the cap,
@@ -59,10 +69,13 @@ const KNOWLEDGE_ADD_FIELD_CAP = 20;
  * which would otherwise mask a regression here (issue #1821 Lane 0b).
  */
 function mergeLessonTags(tagsInput: unknown, lesson: string): string[] {
-	return dedupeCapped(
-		[...(Array.isArray(tagsInput) ? tagsInput : []), ...inferTags(lesson)],
-		{ cap: KNOWLEDGE_ADD_FIELD_CAP },
+	const callerTags = (Array.isArray(tagsInput) ? tagsInput : []).filter(
+		(t) =>
+			typeof t !== 'string' || t.toLowerCase() !== PRIVILEGED_FAST_TRACK_TAG,
 	);
+	return dedupeCapped([...callerTags, ...inferTags(lesson)], {
+		cap: KNOWLEDGE_ADD_FIELD_CAP,
+	});
 }
 
 /**

@@ -1753,12 +1753,16 @@ export const KnowledgeConfigSchema = z.object({
 		.max(1)
 		.default(OUTCOME_BLOCK_THRESHOLD),
 	/** #1847: minimum validated terminal-application receipts required for the
-	 * `validated_terminal_applications` promotion gate. Default 0 (conservative:
-	 * until #1849 produces real receipts, absence neither credits nor blocks).
-	 * Legacy records get NO synthetic credit. */
-	promotion_min_terminal_applications: z.number().min(0).max(100).default(0),
+	 * `validated_terminal_applications` promotion gate. Default 1 (#3820 H1):
+	 * the gate is ACTIVE by default and an entry needs at least one INDEPENDENT
+	 * validated terminal application to promote. Legacy records get NO
+	 * synthetic credit; absence fails closed. Operators who want the legacy
+	 * ungated behavior set this to 0 explicitly (documented opt-out). */
+	promotion_min_terminal_applications: z.number().min(0).max(100).default(1),
 	/** #1847: minimum DISTINCT canonical cohort ids among the validated
-	 * terminal-application receipts. Default 0 (conservative). */
+	 * terminal-application receipts. Default 0 (the production evidence loader
+	 * is cohort-scoped — it filters to the caller's canonical cohort — so a >1
+	 * default would be unsatisfiable in production today). */
 	promotion_min_distinct_cohorts: z.number().min(0).max(50).default(0),
 	/** #1821: require a promotion candidate to carry an actionable directive
 	 * (a concrete action, not a bare observation) before it may be promoted.

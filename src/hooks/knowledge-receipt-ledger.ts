@@ -99,6 +99,32 @@ export const CANONICAL_RECEIPT_SOURCES: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * Receipt sources that count as INDEPENDENT corroboration for shared-knowledge
+ * promotion evidence (#3820 H1(b)): only a source representing a DIFFERENT
+ * ROLE applying the lesson than the one that authored it may satisfy the
+ * `validated_terminal_applications` promotion gate.
+ *
+ * Everything outside this allowlist FAILS CLOSED:
+ *  - `delegate` — the author's own self-report, never independent;
+ *  - `architect_marker` — an architect ACKNOWLEDGMENT, not an application;
+ *  - the three `application_gate_*_release` classes — staleness /
+ *    denial-count escape hatches, stored as gate releases rather than
+ *    terminal applications;
+ *  - `manual`, `migration`, `phase_override` — legacy/ambiguous provenance,
+ *    not proof of independence;
+ *  - `unknown` / absent source — legacy ambiguity is not proof of
+ *    independence.
+ *
+ * The documented `promotion_min_terminal_applications: 0` operator opt-out is
+ * the compatibility escape, not a source on this list.
+ */
+export const INDEPENDENT_RECEIPT_SOURCES: ReadonlySet<string> = new Set([
+	'reviewer',
+	'architect',
+	'test_engineer',
+]);
+
+/**
  * Normalize a would-be terminal source to the canonical taxonomy (issue
  * #2032 review F-001): a canonical value passes through verbatim; anything
  * else (absent, whitespace, out-of-taxonomy string such as a legacy agent

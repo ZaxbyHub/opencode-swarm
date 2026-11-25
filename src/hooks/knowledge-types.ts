@@ -382,6 +382,16 @@ export interface SwarmKnowledgeEntry extends KnowledgeEntryBase {
 	tier: 'swarm';
 	confirmed_by: PhaseConfirmationRecord[];
 	project_name: string;
+	/**
+	 * Privileged fast-track authorization for promotion eligibility route 2
+	 * (issue #3820 H3). This is a DEDICATED field the ordinary caller cannot
+	 * write: only the authorized manual stand-in path (`promoteToHive`'s
+	 * synthetic entry) sets it. The legacy `hive-fast-track` TAG in `tags` no
+	 * longer satisfies route 2 — a caller-suppliable tag must never authorize
+	 * bypassing the phase-confirmation requirement. `knowledge_add` still
+	 * strips the tag from caller input as defense in depth.
+	 */
+	hive_fast_track_authorized?: boolean;
 }
 
 /**
