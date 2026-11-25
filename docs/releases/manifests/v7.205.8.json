@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.205.8",
+  "tagCommit": "813344070b296baf0c26379f6d2b8b83cec579eb",
+  "targetCommitish": "813344070b296baf0c26379f6d2b8b83cec579eb",
+  "releaseBodySha256": "24487f183f13a4efd1f789e83562516319f5f18936f0565c5e7905b2a294e325",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/3840-3844-persisted-redaction.md",
+      "sha256": "285a583bde037d7beb59433ec452748c3ca9a9d4a1469f541e2a44c3cc232ee9"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/trace-check-two-parent-merge-arm.md",
+      "sha256": "2668b8c7b935a98d270a97bd4249c910a5a60baca288545ddd04717b54b1f584"
+    }
+  ]
+}
