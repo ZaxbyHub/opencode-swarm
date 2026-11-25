@@ -676,7 +676,13 @@ export function breakStaleLockIfOwnerDead(
 		const payload = parseOwnerPayload(rawBefore);
 		const ageMs = payload
 			? Math.max(0, _internals.now() - payload.acquiredAtMs)
-			: Math.max(0, _internals.now() - fs.statSync(markerPath).mtimeMs);
+			: (() => {
+					try {
+						return Math.max(0, _internals.now() - fs.statSync(markerPath).mtimeMs);
+					} catch {
+						return 0;
+					}
+				})();
 		// One bounded telemetry event per actual break; identifier-free
 		// payload (operational privacy class — no paths, no pids).
 		emit('store_lock_stale_broken', {

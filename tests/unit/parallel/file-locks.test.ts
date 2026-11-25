@@ -85,6 +85,46 @@ describe('file-locks module tests', () => {
 			if (result.acquired) await result.lock._release?.();
 		});
 
+		it('recovers an ownerless (empty) past-TTL lock via ttl-cleanup (#3934)', async () => {
+			const { getOwnerLockPath } = await import(
+				'../../../src/parallel/file-locks'
+			);
+			const ownerLockPath = getOwnerLockPath(tmpDir, 'ownerless.ts');
+			fs.mkdirSync(path.dirname(ownerLockPath), { recursive: true });
+			fs.writeFileSync(ownerLockPath, '');
+			const sixMinAgo = new Date(Date.now() - 6 * 60 * 1000);
+			fs.utimesSync(ownerLockPath, sixMinAgo, sixMinAgo);
+
+			const result = await tryAcquireLock(
+				tmpDir,
+				'ownerless.ts',
+				'agent',
+				'task',
+			);
+			expect(result.acquired).toBe(true);
+			if (result.acquired) {
+				expect(result.brokeStale).toBe(true);
+				await result.lock._release?.();
+			}
+		});
+
+		it('does NOT break a fresh (within-TTL) ownerless lock (#3934 AC4)', async () => {
+			const { getOwnerLockPath } = await import(
+				'../../../src/parallel/file-locks'
+			);
+			const ownerLockPath = getOwnerLockPath(tmpDir, 'fresh-ownerless.ts');
+			fs.mkdirSync(path.dirname(ownerLockPath), { recursive: true });
+			fs.writeFileSync(ownerLockPath, '');
+
+			const result = await tryAcquireLock(
+				tmpDir,
+				'fresh-ownerless.ts',
+				'agent',
+				'task',
+			);
+			expect(result.acquired).toBe(false);
+		});
+
 		it('uses path hash for lock filename', async () => {
 			const result1 = await tryAcquireLock(
 				tmpDir,
