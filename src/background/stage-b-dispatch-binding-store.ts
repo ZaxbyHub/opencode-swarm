@@ -32,14 +32,17 @@ import {
 	fstatSync,
 	openSync,
 	readdirSync,
+	readFileSync,
 	readSync,
 	rmdirSync,
 	rmSync,
 	statSync,
+	writeFileSync,
 } from 'node:fs';
 import * as path from 'node:path';
 import { validateSwarmPath } from '../hooks/utils';
 import { atomicWriteSwarmFileSync } from '../utils/atomic-write';
+import * as logger from '../utils/logger.js';
 
 export const STAGE_B_BINDING_SCHEMA_VERSION = 1;
 export const STAGE_B_BINDINGS_DIR = 'stage-b-dispatch-bindings';
@@ -59,6 +62,61 @@ export const STAGE_B_BINDING_SWEEP_INTERVAL_MS = 60_000;
 export const MAX_STAGE_B_SWEEP_THROTTLE_ROOTS = 32;
 
 const lastSweepCompletedAtByRoot = new Map<string, number>();
+
+/**
+ * 2026-11-25 swarm_communication_debug (layer 3 diagnosis): bounded, project-
+ * visible write-failure trace for this store. The store's `catch { return
+ * false }` discarded the failure CAUSE entirely, and the gate's always-emitted
+ * criticalWarn goes to the host process's stderr — which `opencode serve
+ * --service` pipes into a supervisor socket (stdout to /dev/null), leaving the
+ * operator with zero diagnosable signal. Observed live: every Stage-B dispatch
+ * in the consumer project left an empty session dir (mkdir succeeded, the
+ * temp-write/rename phase failed) across days and server instances. The
+ * diagnostics file lives in the store's own root so the next failing dispatch
+ * leaves a durable trace the architect (and we) can read from the project.
+ */
+const WRITE_ERROR_DIAGNOSTICS_FILE = '.write-errors.jsonl';
+const MAX_WRITE_ERROR_DIAGNOSTIC_LINES = 16;
+
+function recordWriteDiagnostic(
+	directory: string,
+	sessionID: string,
+	callID: string,
+	error: unknown,
+): void {
+	try {
+		const message = (
+			error instanceof Error ? error.message : String(error)
+		).slice(0, 256);
+		const code = (error as NodeJS.ErrnoException | null)?.code;
+		const entry = JSON.stringify({
+			timestamp: new Date().toISOString(),
+			sessionID: sessionID.slice(0, 64),
+			callID: callID.slice(0, 128),
+			error: message,
+			...(typeof code === 'string' ? { code } : {}),
+		});
+		const root = validateSwarmPath(directory, STAGE_B_BINDINGS_DIR);
+		const diagPath = path.join(root, WRITE_ERROR_DIAGNOSTICS_FILE);
+		let lines: string[] = [];
+		try {
+			const existing = readFileSync(diagPath, 'utf8');
+			lines = existing.split('\n').filter((line) => line.trim().length > 0);
+		} catch {
+			// Missing diagnostics file — start fresh.
+		}
+		lines.push(entry);
+		while (lines.length > MAX_WRITE_ERROR_DIAGNOSTIC_LINES) lines.shift();
+		// Deliberately NOT atomicWriteSwarmFileSync: the atomic writer is the
+		// component whose failure is being diagnosed — a best-effort plain
+		// write keeps the trace independent of the failing path.
+		writeFileSync(diagPath, `${lines.join('\n')}\n`);
+	} catch {
+		// Best-effort by contract: a store root that cannot host the
+		// diagnostics file cannot host bindings either — the gate's
+		// criticalWarn remains the last resort.
+	}
+}
 
 function rememberSweepCompletedAt(storeRoot: string, now: number): void {
 	// delete-then-set refreshes recency (Map insertion order = FIFO order).
@@ -244,7 +302,18 @@ export function recordStageBDispatchBindings(
 			pruneStore(directory, now);
 		}
 		return true;
-	} catch {
+	} catch (error) {
+		// 2026-11-25 (layer 3): surface the write failure's CAUSE. The previous
+		// `catch { return false }` discarded the exception entirely — the gate's
+		// criticalWarn (stderr, invisible under `serve --service`) was the only
+		// signal, with no errno anywhere. Emit the always-visible warning WITH
+		// the error code and append the bounded project-visible diagnostic.
+		const message = error instanceof Error ? error.message : String(error);
+		const code = (error as NodeJS.ErrnoException | null)?.code;
+		logger.criticalWarn(
+			`[stage-b-binding-store] durable binding write FAILED for call ${callID}: ${message.slice(0, 180)}${typeof code === 'string' ? ` (code=${code})` : ''} — restart recovery for this dispatch is unavailable; recorded to ${WRITE_ERROR_DIAGNOSTICS_FILE} in the store root`,
+		);
+		recordWriteDiagnostic(directory, sessionID, callID, error);
 		return false;
 	}
 }
