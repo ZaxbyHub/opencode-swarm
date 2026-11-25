@@ -6662,6 +6662,11 @@ export function createDelegationGateHook(
 								directory,
 								evidenceTaskResolutionOptions(normalizedSubagentType),
 							);
+							// 2026-11-25 (layer D): workflow generation bound from
+							// durable task evidence when the in-memory generation
+							// map has no entry for this call/task (task-less SB
+							// dispatch resolved only here, in toolAfter).
+							let durableWorkflowGeneration: number | undefined;
 							if (
 								evidenceTaskId === null &&
 								normalizedSubagentType === 'critic_sounding_board'
@@ -6694,6 +6699,36 @@ export function createDelegationGateHook(
 									logger.warn(
 										`[delegation-gate] sounding-board dispatch (call ${input.callID}) bound task ${evidenceTaskId} via the durable latest-coder fallback: no task_id argument and no in-memory session task context (post-restart shape)`,
 									);
+									// 2026-11-25 (layer D): the in-memory generation
+									// map (stageBDispatchGenerationsByCallID) is filled
+									// in the dispatch-preparation path keyed by the
+									// RESOLVED task id — which was null for a task-less
+									// SB dispatch, so the record would carry NO
+									// workflowGeneration and the completion ingestion
+									// refuses with TASK_WORKFLOW_GENERATION_REQUIRED
+									// forever (live: ses_ded837dfdffe, status
+									// ingestion_error, retryable loop, gate receipt
+									// never lands). Bind the workflow generation from
+									// the durable task evidence at dispatch time —
+									// the same fence input the in-memory map would
+									// hold.
+									try {
+										const gateEvidenceModule =
+											await import('../gate-evidence');
+										const evidence =
+											await gateEvidenceModule.readTaskEvidence(
+												directory,
+												evidenceTaskId,
+											);
+										durableWorkflowGeneration =
+											gateEvidenceModule.getTaskWorkflowSnapshot(
+												evidence,
+											)?.generation;
+									} catch {
+										// Fail closed: no readable evidence → no
+										// generation → the ingestion keeps its
+										// refusal instead of binding a wrong fence.
+									}
 								}
 							}
 							const scope =
@@ -6730,10 +6765,21 @@ export function createDelegationGateHook(
 								evidenceTaskId,
 								workspace: fallbackWorkspace,
 								taskChangeContext,
-								workflowGeneration: TASK_GATE_AGENTS.has(normalizedSubagentType)
+								// 2026-11-25 (layer D): fall back to the durable
+								// workflow generation bound from task evidence for
+								// task-less SB dispatches (the in-memory map is keyed
+								// by the resolved task id, which was null at
+								// dispatch-preparation time).
+								workflowGeneration: TASK_GATE_AGENTS.has(
+									normalizedSubagentType,
+								)
 									? stageBDispatchGenerationsByCallID
 											.get(input.callID)
-											?.get(evidenceTaskId ?? '')
+											?.get(evidenceTaskId ?? '') ??
+										(normalizedSubagentType ===
+										'critic_sounding_board'
+											? durableWorkflowGeneration
+											: undefined)
 									: undefined,
 								worktree: standardDispatch
 									? {

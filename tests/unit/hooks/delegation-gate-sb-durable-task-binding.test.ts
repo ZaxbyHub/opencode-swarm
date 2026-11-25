@@ -243,5 +243,11 @@ describe('sounding-board dispatch task binding through the delegation gate', () 
 		expect(record?.normalizedAgent).toBe('critic_sounding_board');
 		expect(record?.planTaskId).toBe(TASK);
 		expect(record?.evidenceTaskId).toBe(TASK);
+		// Layer D: the durable task binding must also carry the workflow
+		// generation — without it the completion ingestion refuses with
+		// TASK_WORKFLOW_GENERATION_REQUIRED forever (live: ses_ded837dfdffe,
+		// status ingestion_error retryable loop). The fixture's task evidence
+		// sits at generation 1 (accepted_mutation rotated it past 0).
+		expect(record?.workflowGeneration).toBe(1);
 	});
 });
