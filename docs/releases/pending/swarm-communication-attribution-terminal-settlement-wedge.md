@@ -141,6 +141,40 @@ written at dispatch time).
   the delegation-gate `_internals` seam; the fallback is observable via a
   debug-gated warn line naming task and file count.
 
+### 6. The tests_run catch-22: required-gate counting + the missing-gate dispatch exemption
+
+With THREE required gates (sounding board + reviewer + test engineer, grown
+from the escalation history), whichever Stage-B gate bound second used to
+jump the workflow straight to `tests_run`: the `routeComplete === true`
+shortcut in the `stage_b_completed` reducer case bypassed the required-gate
+count, so a complete ROUTE receipt (an allocation statement, not a gate
+statement) fabricated "tests can run" while a required gate was still
+unbound. The completion guard then blocked the still-missing gate's dispatch
+in every order (live: task 2.20 — SB→reviewer→TE and SB→TE→reviewer both
+wedged; the task could neither complete honestly nor bind its last gate).
+
+Two halves, one invariant — "tests_run means EVERY required gate has bound
+evidence":
+
+- **Reducer** (`src/gate-evidence.ts`): the `routeComplete === true` arm now
+  counts `hasAllRequiredGatesPassed` like the plain arm — an incomplete
+  required set keeps the task honestly at `reviewer_run`; a task already at
+  `tests_run` never moves backwards. And a `gate_recorded` event that
+  COMPLETES the required set performs the same transition from
+  `pre_check_passed`/`reviewer_run`, so an advisory receipt binding LAST
+  (after reviewer+TE) can still finish the sequence instead of wedging the
+  task at `reviewer_run` forever — guarded by the presence of a Stage-B gate
+  in the required set, so a lone advisory receipt on a settlement-recovered
+  task keeps the state-preserving contract.
+- **Guard** (`src/hooks/delegation-gate.ts`): a host Task dispatch that can
+  still bind gate evidence for the awaiting task is finishing work on that
+  task, not new work. `canRunWhileTaskAwaitsCompletion` now permits a gate
+  agent dispatch (TASK_GATE_AGENTS) whose gate the awaiting task has NOT
+  bound yet, in the task-less prose shape (the sounding-board consult, bound
+  durably at settlement) or explicitly for the awaiting task. Already-bound
+  gates' re-dispatches, non-gate agents, other tools, and unreadable
+  evidence keep the block — the completion remedy stays first-class.
+
 ## Testing
 
 - New: `tests/unit/hooks/guardrails-stage-a-terminal-settlement-wedge.test.ts`
@@ -163,8 +197,20 @@ written at dispatch time).
   (helper: latest settled leg selection, no-mutation replace semantics,
   non-coder/other-task skips; gate: post-restart shape routes a REAL receipt
   instead of the router error, live in-memory attribution wins, no-settlement
-  and uncertain-store keep the pointed NO_CHANGED_FILES refusal).
+  and uncertain-store keep the pointed NO_CHANGED_FILES refusal),
+  `tests/unit/gate-evidence/tests-run-required-gates-count.test.ts`
+  (all three binding orders of a three-required-gate task: SB→reviewer→TE,
+  SB→TE→reviewer, reviewer→TE→SB with the late advisory receipt; exempt
+  single-gate regression pin; default-pair counting; advisory-only
+  state-preserving pin; no-backward pin),
+  `tests/unit/hooks/delegation-gate-completion-gate-missing-gate-dispatch.test.ts`
+  (guard: task-less SB dispatch permitted, explicitly-awaiting-task unbound
+  gate permitted, already-bound gate re-dispatch blocked, non-gate agents and
+  other tools blocked, corrupt evidence fail-closes).
 - Extended: `stage-a-self-report.test.ts` (uncorrelated wedge pass),
+  `tests/unit/gate-evidence/rework-recovery-supervised.test.ts` (the
+  tests_run seeding now binds the TE to earn the state the old
+  route-complete shortcut fabricated),
   `guardrails-stage-a-route-events.test.ts` (closed vocabulary),
   `zone-classifier.test.ts` (state-zone rules, checkpoints rule order,
   skip-QA policy), `phase-participation-storage.adversarial.test.ts`

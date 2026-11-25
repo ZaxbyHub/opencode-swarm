@@ -67,6 +67,28 @@ restart era began — workflow reached `tests_run`).
    evidence at dispatch time — the same fence input the in-memory map would
    hold; unreadable evidence keeps the refusal (fail closed).
 
+5. **`tests_run` requires every required gate** (the three-gate catch-22).
+   With three required gates (SB+reviewer+TE, grown from the escalation
+   history), whichever Stage-B gate bound second used to jump the workflow
+   straight to `tests_run`: the `routeComplete === true` shortcut in the
+   `stage_b_completed` reducer bypassed the required-gate count, so a
+   complete ROUTE receipt (an allocation statement, not a gate statement)
+   fabricated "tests can run" while a required gate was still unbound — and
+   the completion guard then blocked the still-missing gate's dispatch in
+   every order (live: task 2.20, SB→reviewer→TE and SB→TE→reviewer both
+   wedged). Two halves, one invariant — tests_run means EVERY required gate
+   has bound evidence. Reducer: the route-complete arm counts
+   `hasAllRequiredGatesPassed` like the plain arm (incomplete set stays
+   honestly at `reviewer_run`; `tests_run` never moves backwards), and a
+   `gate_recorded` event that completes the required set performs the same
+   transition so an advisory receipt binding LAST can still finish the
+   sequence — guarded by a Stage-B gate in the required set so a lone
+   advisory receipt on a settlement-recovered task stays state-preserving.
+   Guard: `canRunWhileTaskAwaitsCompletion` permits a Task dispatch of a
+   gate agent whose gate the awaiting task has NOT bound (task-less SB prose
+   shape or explicitly for the awaiting task); already-bound re-dispatches,
+   non-gate agents, other tools, and unreadable evidence keep the block.
+
 ## Testing
 
 - New: `tests/unit/background/completion-observer-stage-b-result-body-fallback.test.ts`
@@ -93,7 +115,7 @@ restart era began — workflow reached `tests_run`).
 - 4 (.swarm containment): not touched — the new diagnostics file lives inside the store's own `.swarm/stage-b-dispatch-bindings/` root.
 - 5 (plan durability):   not touched.
 - 6 (test_runner safety): not used — validation via explicit-file `bun test`.
-- 7 (test writing):      touched — three new bun:test files (under the FR-006 cap), no `mock.module`, seams restored in `afterEach`.
+- 7 (test writing):      touched — five new bun:test files (under the FR-006 cap; layers 1-4 plus the catch-22 suites `tests-run-required-gates-count` and `delegation-gate-completion-gate-missing-gate-dispatch`), no `mock.module`, seams restored in `afterEach`.
 - 8 (session state):     not touched — no new module-level maps.
 - 9 (guardrails/retry):  not touched — no retry/classification/circuit changes; the ingestion input selection changes only which result text the verdict parser sees.
 - 10 (chat/system msg):  not touched.

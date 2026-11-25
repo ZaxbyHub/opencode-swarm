@@ -1400,20 +1400,69 @@ export function reduceTaskWorkflowSnapshot(
 				};
 			}
 			if (event.routeComplete === true) {
-				return { ...base, state: 'tests_run' };
+				// 2026-11-25 (tests_run catch-22): a complete route receipt
+				// only proves the ROUTE allocation is covered — it says
+				// nothing about the required-gate set. Advancing to tests_run
+				// here while a required gate is still unbound stranded the
+				// LAST gate behind the completion guard (live: task 2.20,
+				// three required gates sounding-board+reviewer+TE —
+				// whichever Stage-B gate bound second jumped the workflow to
+				// tests_run and the guard then blocked the still-missing
+				// gate's dispatch in every order). Count instead: tests_run
+				// only when every required gate has bound evidence, otherwise
+				// the task is honestly at reviewer_run. A task already at
+				// tests_run never moves backwards.
+				return {
+					...base,
+					state: hasAllRequiredGatesPassed(context.requiredGates, context.gates)
+						? 'tests_run'
+						: current.state === 'tests_run'
+							? 'tests_run'
+							: 'reviewer_run',
+				};
 			}
 			return {
 				...base,
 				state: hasAllRequiredGatesPassed(context.requiredGates, context.gates)
 					? 'tests_run'
-					: 'reviewer_run',
+					: current.state === 'tests_run'
+						? 'tests_run'
+						: 'reviewer_run',
 			};
-		case 'gate_recorded':
+		case 'gate_recorded': {
+			// Advisory/non-Stage-B gates never advance the code QA lifecycle
+			// on their own — with one exception. When this event is the LAST
+			// required gate (recording it completes the required set) the
+			// task would otherwise wedge forever: the Stage-B events already
+			// fired, nothing else will push the workflow past reviewer_run,
+			// and completion refuses with TASK_WORKFLOW_QA_REQUIRED (the
+			// tests_run catch-22's other order — live: a three-required-gate
+			// task whose sounding-board receipt binds after reviewer and
+			// test_engineer). Completing the required set from a QA-eligible
+			// state IS the tests_run transition. Guarded by the presence of
+			// a Stage-B gate in the required set: a task whose required set
+			// is advisory-only (e.g. a lone sounding-board receipt on a
+			// settlement-recovered task that never expanded to the coder
+			// Stage-B pair) is not in the Stage-B completion regime and
+			// keeps the state-preserving contract.
+			const completesRequiredSet = hasAllRequiredGatesPassed(
+				context.requiredGates,
+				context.gates,
+			);
+			const qaEligible =
+				current.state === 'pre_check_passed' ||
+				current.state === 'reviewer_run';
+			const requiresStageB = context.requiredGates.some((gate) =>
+				shouldTreatGateAsStageB(gate),
+			);
 			return {
 				...base,
-				// Advisory/non-Stage-B gates never advance the code QA lifecycle.
-				state: current.state,
+				state:
+					completesRequiredSet && qaEligible && requiresStageB
+						? 'tests_run'
+						: current.state,
 			};
+		}
 		case 'external_evidence_attested': {
 			// Issue #3422: an external_git task never enters the coder QA
 			// lifecycle, so idle is the only state from which a bundle may be

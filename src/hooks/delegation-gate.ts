@@ -67,7 +67,10 @@ import {
 	readTaskGateRequirementsReceiptsSync,
 } from '../evidence/task-gate-requirements.js';
 import { isReadOnlyTool } from '../full-auto/policy';
-import { compareTaskWorkflowStateRank } from '../gate-evidence';
+import {
+	compareTaskWorkflowStateRank,
+	readTaskEvidenceRaw,
+} from '../gate-evidence';
 import { isMarkdownOnlyTaskChange } from '../gate-evidence-classification.js';
 import {
 	routeReviewForChanges,
@@ -3052,6 +3055,46 @@ export function canRunWhileTaskAwaitsCompletion(input: {
 		input.requestedTaskId === input.awaitingTaskId
 	) {
 		return true;
+	}
+
+	// 2026-11-25 (tests_run catch-22, guard half): a Task dispatch that can
+	// still BIND gate evidence for the awaiting task is finishing work on
+	// that task, not new work — the completion gate must not block it.
+	// Live: task 2.20 (three required gates sounding-board+reviewer+TE) —
+	// whichever Stage-B gate bound second used to jump the workflow to
+	// tests_run and the guard then blocked the still-missing gate's
+	// dispatch in every order. The reducer half of the fix now counts
+	// required gates, but an advisory gate that binds AFTER the Stage-B
+	// pair (e.g. the escalation-required sounding-board receipt, which
+	// grows required_gates only through its own event) still needs this
+	// dispatch path open. Narrow: only the host Task tool, only gate
+	// agents, only a gate the awaiting task has NOT bound yet, and only a
+	// dispatch that is task-less (the sounding-board prose shape, bound
+	// durably at settlement) or explicitly for the awaiting task.
+	// Everything else keeps the completion remedy first-class.
+	if (
+		isTaskToolId(normalizedTool) &&
+		typeof input.args.subagent_type === 'string' &&
+		input.directory
+	) {
+		const targetAgent = stripKnownSwarmPrefix(String(input.args.subagent_type));
+		if (
+			TASK_GATE_AGENTS.has(targetAgent) &&
+			(input.requestedTaskId === null ||
+				input.requestedTaskId === input.awaitingTaskId)
+		) {
+			try {
+				const evidence = readTaskEvidenceRaw(
+					input.directory,
+					input.awaitingTaskId,
+				);
+				if (evidence && evidence.gates[targetAgent] == null) {
+					return true;
+				}
+			} catch {
+				// Fail closed: unreadable evidence keeps the block.
+			}
+		}
 	}
 
 	if (
@@ -6750,13 +6793,11 @@ export function createDelegationGateHook(
 									// the same fence input the in-memory map would
 									// hold.
 									try {
-										const gateEvidenceModule =
-											await import('../gate-evidence');
-										const evidence =
-											await gateEvidenceModule.readTaskEvidence(
-												directory,
-												evidenceTaskId,
-											);
+										const gateEvidenceModule = await import('../gate-evidence');
+										const evidence = await gateEvidenceModule.readTaskEvidence(
+											directory,
+											evidenceTaskId,
+										);
 										durableWorkflowGeneration =
 											gateEvidenceModule.getTaskWorkflowSnapshot(
 												evidence,
@@ -6807,16 +6848,13 @@ export function createDelegationGateHook(
 								// task-less SB dispatches (the in-memory map is keyed
 								// by the resolved task id, which was null at
 								// dispatch-preparation time).
-								workflowGeneration: TASK_GATE_AGENTS.has(
-									normalizedSubagentType,
-								)
-									? stageBDispatchGenerationsByCallID
+								workflowGeneration: TASK_GATE_AGENTS.has(normalizedSubagentType)
+									? (stageBDispatchGenerationsByCallID
 											.get(input.callID)
 											?.get(evidenceTaskId ?? '') ??
-										(normalizedSubagentType ===
-										'critic_sounding_board'
+										(normalizedSubagentType === 'critic_sounding_board'
 											? durableWorkflowGeneration
-											: undefined)
+											: undefined))
 									: undefined,
 								worktree: standardDispatch
 									? {
