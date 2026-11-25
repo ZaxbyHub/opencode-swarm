@@ -15,6 +15,7 @@ import {
 	releaseLock,
 	tryAcquireLock,
 } from '../../../src/parallel/file-locks';
+import { withFrozenClockAsync } from '../../helpers/test-clock.js';
 
 describe('file-locks module tests', () => {
 	let tmpDir: string;
@@ -89,17 +90,17 @@ describe('file-locks module tests', () => {
 			const { getOwnerLockPath } = await import(
 				'../../../src/parallel/file-locks'
 			);
+			const FIXED_NOW = 1_700_000_000_000;
 			const ownerLockPath = getOwnerLockPath(tmpDir, 'ownerless.ts');
 			fs.mkdirSync(path.dirname(ownerLockPath), { recursive: true });
 			fs.writeFileSync(ownerLockPath, '');
-			const sixMinAgo = new Date(Date.now() - 6 * 60 * 1000);
+			// Seed an mtime 6 minutes before the frozen clock (#3934 TTL gate).
+			const sixMinAgo = new Date(FIXED_NOW - 6 * 60 * 1000);
 			fs.utimesSync(ownerLockPath, sixMinAgo, sixMinAgo);
 
-			const result = await tryAcquireLock(
-				tmpDir,
-				'ownerless.ts',
-				'agent',
-				'task',
+			const result = await withFrozenClockAsync(
+				() => tryAcquireLock(tmpDir, 'ownerless.ts', 'agent', 'task'),
+				{ fixedNow: FIXED_NOW },
 			);
 			expect(result.acquired).toBe(true);
 			if (result.acquired) {
@@ -112,15 +113,17 @@ describe('file-locks module tests', () => {
 			const { getOwnerLockPath } = await import(
 				'../../../src/parallel/file-locks'
 			);
+			const FIXED_NOW = 1_700_000_000_000;
 			const ownerLockPath = getOwnerLockPath(tmpDir, 'fresh-ownerless.ts');
 			fs.mkdirSync(path.dirname(ownerLockPath), { recursive: true });
 			fs.writeFileSync(ownerLockPath, '');
+			// Fresh mtime: within the TTL window relative to the frozen clock.
+			const now = new Date(FIXED_NOW);
+			fs.utimesSync(ownerLockPath, now, now);
 
-			const result = await tryAcquireLock(
-				tmpDir,
-				'fresh-ownerless.ts',
-				'agent',
-				'task',
+			const result = await withFrozenClockAsync(
+				() => tryAcquireLock(tmpDir, 'fresh-ownerless.ts', 'agent', 'task'),
+				{ fixedNow: FIXED_NOW },
 			);
 			expect(result.acquired).toBe(false);
 		});
