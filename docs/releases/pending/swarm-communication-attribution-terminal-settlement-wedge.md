@@ -175,6 +175,29 @@ evidence":
   gates' re-dispatches, non-gate agents, other tools, and unreadable
   evidence keep the block — the completion remedy stays first-class.
 
+### 12. The post-catch-22 accumulation wedge: same-identity re-settlements poison the in-memory route evidence
+
+The catch-22 fix (§11) exposed a latent accumulation defect: a task that
+legitimately re-settles the SAME gate identity twice in one serve instance
+(a `recover_*` opening → re-dispatch, with no restart and no completion
+clearing the session in between — exactly the shape the counting fix now
+produces, because completion stays refused until every required gate binds)
+APPENDED a second in-memory route-evidence entry for the same (role,
+identity). Every later Stage-B completion of the task then built its
+prospective route list with duplicate identities and was terminally
+consumed with outcome `rejected` (`ROUTE_RECEIPT_DUPLICATE`) — the gate
+could never bind, `tests_run` was unreachable (live: task 2.20 Gen 8/9 —
+reviewer settled twice in one serve, then every reviewer and
+test_engineer completion rejected; fresh single-dispatch tasks like 2.24
+completed normally, which is why the pattern hid behind the recover flow).
+
+`reserveStageBRouteEvidence` now REPLACES the existing entry for the same
+(role, identity) instead of appending — the one-entry-per-identity invariant
+the durable requirements chain already enforces on read and
+`enforceReviewRouteReceipt`'s duplicate check requires, now upheld at the
+source (the same replacement semantics the re-dispatch reclamation in
+`resolveBackgroundStageBRoute` applies to its prospective list).
+
 ## Testing
 
 - New: `tests/unit/hooks/guardrails-stage-a-terminal-settlement-wedge.test.ts`
@@ -206,7 +229,12 @@ evidence":
   `tests/unit/hooks/delegation-gate-completion-gate-missing-gate-dispatch.test.ts`
   (guard: task-less SB dispatch permitted, explicitly-awaiting-task unbound
   gate permitted, already-bound gate re-dispatch blocked, non-gate agents and
-  other tools blocked, corrupt evidence fail-closes).
+  other tools blocked, corrupt evidence fail-closes),
+  `tests/unit/background/stage-b-same-identity-resettlement.test.ts`
+  (accumulation wedge: a second same-identity reviewer settlement in one
+  serve must not poison the route evidence — the test_engineer completion
+  binds and the task reaches tests_run; in-memory list one entry per
+  identity; audit chain keeps both rows, read-side collapse intact).
 - Extended: `stage-a-self-report.test.ts` (uncorrelated wedge pass),
   `tests/unit/gate-evidence/rework-recovery-supervised.test.ts` (the
   tests_run seeding now binds the TE to earn the state the old

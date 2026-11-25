@@ -3935,32 +3935,25 @@ export function reserveStageBRouteEvidence(
 	if (!isValidTaskId(taskId)) return null;
 	if (!session.stageBRouteEvidence) session.stageBRouteEvidence = new Map();
 	const entries = session.stageBRouteEvidence.get(taskId) ?? [];
-	const dispatchIdentity = (entry: ReviewRouteEvidence): string | null => {
-		if (
-			!entry.callId ||
-			!entry.childSessionId ||
-			typeof entry.generation !== 'number'
-		) {
-			return null;
-		}
-		return [
-			entry.role,
-			entry.sessionId ?? '',
-			entry.taskId ?? '',
-			entry.callId,
-			entry.childSessionId,
-			String(entry.generation),
-		].join('\u0000');
-	};
-	const incomingDispatchIdentity = dispatchIdentity(evidence);
+	// 2026-11-25 (post-catch-22 accumulation wedge): the replacement key is
+	// the route IDENTITY, not the exact dispatch. The durable requirements
+	// chain collapses per (role, identity) on read and
+	// enforceReviewRouteReceipt's duplicate check admits at most ONE
+	// evidence entry per identity — but two DIFFERENT dispatches of the
+	// same identity (a sanctioned re-dispatch after a recover_* opening,
+	// with no restart or completion to clear the list in between) used to
+	// APPEND, so a second successful settlement of the same gate identity
+	// poisoned the in-memory list and every later Stage-B completion of
+	// the task died terminally on ROUTE_RECEIPT_DUPLICATE (live: task 2.20
+	// Gen 8/9 — reviewer settled twice in one serve, then every reviewer
+	// and test_engineer completion was consumed with outcome "rejected",
+	// tests_run unreachable). A newer binding for the same identity
+	// supersedes the obsolete one — the same replacement semantics the
+	// re-dispatch reclamation in resolveBackgroundStageBRoute applies to
+	// its prospective list, now upheld at the source.
 	const existingIndex = entries.findIndex(
 		(entry) =>
-			entry.role === evidence.role &&
-			((incomingDispatchIdentity !== null &&
-				dispatchIdentity(entry) === incomingDispatchIdentity) ||
-				(incomingDispatchIdentity === null &&
-					dispatchIdentity(entry) === null &&
-					entry.identity === evidence.identity)),
+			entry.role === evidence.role && entry.identity === evidence.identity,
 	);
 	if (existingIndex >= 0) {
 		// A retry replaces the same deterministic slot binding. Keeping one

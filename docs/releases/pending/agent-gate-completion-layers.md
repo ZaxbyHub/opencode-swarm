@@ -89,6 +89,26 @@ restart era began — workflow reached `tests_run`).
    shape or explicitly for the awaiting task); already-bound re-dispatches,
    non-gate agents, other tools, and unreadable evidence keep the block.
 
+6. **Same-identity gate re-settlements replace (not append) the in-memory
+   route evidence** (the post-catch-22 accumulation wedge). The catch-22
+   counting fix exposed a latent accumulation defect: a task that
+   legitimately re-settles the SAME gate identity twice in one serve
+   instance (a `recover_*` opening → re-dispatch, with no restart and no
+   completion clearing the session in between — exactly the shape the
+   counting fix now produces, because completion stays refused until every
+   required gate binds) APPENDED a second in-memory route-evidence entry
+   for the same (role, identity). Every later Stage-B completion then
+   built its prospective route list with duplicate identities and was
+   terminally consumed with outcome `rejected` (`ROUTE_RECEIPT_DUPLICATE`)
+   — the gate could never bind, `tests_run` unreachable (live: task 2.20
+   Gen 8/9 — reviewer settled twice in one serve, then every reviewer and
+   test_engineer completion rejected; fresh single-dispatch tasks like
+   2.24 completed normally, hiding the pattern behind the recover flow).
+   `reserveStageBRouteEvidence` now REPLACES the existing entry for the
+   same (role, identity) — the one-entry-per-identity invariant the durable
+   requirements chain already enforces on read and the route duplicate
+   check requires, upheld at the source.
+
 ## Testing
 
 - New: `tests/unit/background/completion-observer-stage-b-result-body-fallback.test.ts`
@@ -115,7 +135,7 @@ restart era began — workflow reached `tests_run`).
 - 4 (.swarm containment): not touched — the new diagnostics file lives inside the store's own `.swarm/stage-b-dispatch-bindings/` root.
 - 5 (plan durability):   not touched.
 - 6 (test_runner safety): not used — validation via explicit-file `bun test`.
-- 7 (test writing):      touched — five new bun:test files (under the FR-006 cap; layers 1-4 plus the catch-22 suites `tests-run-required-gates-count` and `delegation-gate-completion-gate-missing-gate-dispatch`), no `mock.module`, seams restored in `afterEach`.
+- 7 (test writing):      touched — six new bun:test files (under the FR-006 cap; layers 1-4, the catch-22 suites `tests-run-required-gates-count` / `delegation-gate-completion-gate-missing-gate-dispatch`, and the accumulation-wedge suite `stage-b-same-identity-resettlement`), no `mock.module`, seams restored in `afterEach`.
 - 8 (session state):     not touched — no new module-level maps.
 - 9 (guardrails/retry):  not touched — no retry/classification/circuit changes; the ingestion input selection changes only which result text the verdict parser sees.
 - 10 (chat/system msg):  not touched.
