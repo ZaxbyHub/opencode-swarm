@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.205.9",
+  "tagCommit": "cccc9dc37aab5cdc3e25037a62c42778b64277e7",
+  "targetCommitish": "cccc9dc37aab5cdc3e25037a62c42778b64277e7",
+  "releaseBodySha256": "d4bbbbfbf40d9c994f6c4079d1af5a1ada417cb3e1301f2115c3711c3d95ddf0",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/issue-3889-3900-scope-binding-store-lifecycle.md",
+      "sha256": "95f41c32c755adabdd2134e6ab94f4361216e37dc688d47b8696faee0189c608"
+    }
+  ]
+}
