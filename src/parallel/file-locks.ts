@@ -678,7 +678,10 @@ export function breakStaleLockIfOwnerDead(
 			? Math.max(0, _internals.now() - payload.acquiredAtMs)
 			: (() => {
 					try {
-						return Math.max(0, _internals.now() - fs.statSync(markerPath).mtimeMs);
+						return Math.max(
+							0,
+							_internals.now() - fs.statSync(markerPath).mtimeMs,
+						);
 					} catch {
 						return 0;
 					}
