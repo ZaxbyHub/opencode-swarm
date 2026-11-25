@@ -654,11 +654,13 @@ function resolveSafeScopeFileForUnlink(
 
 		const candidate = path.resolve(targetPath);
 		const resolvedCandidate = fs.realpathSync(candidate);
+		// On macOS, os.tmpdir() resolves through a symlink (/var -> /private/var),
+		// so compare realpaths consistently. The leaf-symlink check below (lstat)
+		// still rejects a symlinked file itself; only the parent-directory
+		// resolution is allowed to differ.
 		if (
-			normalizePathForComparison(path.dirname(candidate)) !==
-				normalizePathForComparison(scopesDir) ||
-			normalizePathForComparison(resolvedCandidate) !==
-				normalizePathForComparison(candidate)
+			normalizePathForComparison(path.dirname(resolvedCandidate)) !==
+			normalizePathForComparison(scopesDir)
 		)
 			return null;
 
@@ -679,8 +681,8 @@ function resolveSafeScopeFileForUnlink(
 		const finalResolvedCandidate = fs.realpathSync(candidate);
 		const finalLeafStat = fs.lstatSync(candidate);
 		if (
-			normalizePathForComparison(finalResolvedCandidate) !==
-				normalizePathForComparison(candidate) ||
+			normalizePathForComparison(path.dirname(finalResolvedCandidate)) !==
+				normalizePathForComparison(scopesDir) ||
 			!finalLeafStat.isFile() ||
 			finalLeafStat.isSymbolicLink() ||
 			finalLeafStat.dev !== leafStat.dev ||
