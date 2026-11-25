@@ -6672,6 +6672,7 @@ export function createDelegationGateHook(
 								: await captureWorkspaceSnapshotAsync(directory, {
 										prHeadSha,
 										scope,
+										captureChangedFileHashes: true,
 									});
 							const pendingInputDraft: RecordPendingInput = {
 								correlationId: subagentSessionId,

@@ -10,6 +10,7 @@ import {
 	recordReviewerScopeGenerationFile,
 	recordReviewerScopeGenerationFileFingerprint,
 	resetSwarmState,
+	reviewerScopeGenerationHasDeclaredOverlap,
 	startAgentSession,
 	startReviewerScopeGeneration,
 	swarmState,
@@ -21,11 +22,14 @@ function startGen(input: {
 	taskId: string;
 	coderCallID: string;
 	createdAt?: number;
+	workspaceIdentity?: string;
+	declaredFiles?: string[];
 }) {
 	return startReviewerScopeGeneration({
 		...input,
 		captureDirectory: '/workspace',
-		workspaceIdentity: 'ws:/workspace',
+		workspaceIdentity: input.workspaceIdentity ?? 'ws:/workspace',
+		declaredFiles: input.declaredFiles,
 	});
 }
 
@@ -372,6 +376,35 @@ describe('reviewer scope generation state', () => {
 				sessionIncarnation: first!.sessionIncarnation,
 			}),
 		).toBe(false);
+	});
+
+	test('directory/file overlap refuses only within the same or unknown checkout', () => {
+		startAgentSession('parent', 'architect');
+		startGen({
+			parentSessionID: 'parent',
+			taskId: '8.1',
+			coderCallID: 'coder-a',
+			workspaceIdentity: 'ws:/lane-a',
+			declaredFiles: ['context'],
+		});
+		startGen({
+			parentSessionID: 'parent',
+			taskId: '8.2',
+			coderCallID: 'coder-b',
+			workspaceIdentity: 'ws:/lane-b',
+			declaredFiles: ['context/entry.md'],
+		});
+		const overlap = (workspaceIdentity?: string) =>
+			reviewerScopeGenerationHasDeclaredOverlap({
+				parentSessionID: 'parent',
+				taskId: '8.3',
+				coderCallID: 'coder-c',
+				declaredFiles: ['context/other.md'],
+				workspaceIdentity,
+			});
+		expect(overlap('ws:/lane-a')).toBe(true);
+		expect(overlap('ws:/lane-b')).toBe(false);
+		expect(overlap()).toBe(true);
 	});
 
 	test('rejects callbacks from a prior session incarnation even when counters repeat', () => {
