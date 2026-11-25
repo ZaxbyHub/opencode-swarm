@@ -1,5 +1,16 @@
 # Changelog
 
+## [7.205.9](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.205.8...v7.205.9) (2026-11-25)
+
+
+### Bug Fixes
+
+* **ci:** macOS realpath containment in resolveSafeScopeFileForUnlink; register scope-persistence blind spots ([#3889](https://github.com/ZaxbyHub/opencode-swarm/issues/3889)) ([4699c65](https://github.com/ZaxbyHub/opencode-swarm/commit/4699c652940423b753b6c8b84e67c5f449c102eb))
+* **ci:** re-pin retention-registry citations after scope-persistence comment shift ([#3889](https://github.com/ZaxbyHub/opencode-swarm/issues/3889)) ([41050b7](https://github.com/ZaxbyHub/opencode-swarm/commit/41050b7f34bcb5d44528c2bd26fb34097f632b0a))
+* **ci:** re-pin retention-registry citations after scope-persistence line shifts ([#3889](https://github.com/ZaxbyHub/opencode-swarm/issues/3889)) ([fbb83d1](https://github.com/ZaxbyHub/opencode-swarm/commit/fbb83d1eec7ab321e6ded191b552fb2f1c6e89fc))
+* **scope:** scope-binding store lifecycle — deny ledger, class-faithful diagnostics, reset recovery, tombstone preservation ([#3889](https://github.com/ZaxbyHub/opencode-swarm/issues/3889), [#3900](https://github.com/ZaxbyHub/opencode-swarm/issues/3900)) ([106075e](https://github.com/ZaxbyHub/opencode-swarm/commit/106075e58e17a6e4e70399aa5254bc3f6ab3810e))
+* **scope:** scope-binding store lifecycle — deny ledger, class-faithful diagnostics, reset recovery, tombstone preservation ([#3889](https://github.com/ZaxbyHub/opencode-swarm/issues/3889), [#3900](https://github.com/ZaxbyHub/opencode-swarm/issues/3900)) ([cb4dcc8](https://github.com/ZaxbyHub/opencode-swarm/commit/cb4dcc8b415a3682e6c3537433404c83b9d855cc))
+
 ## [7.205.8](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.205.7...v7.205.8) (2026-11-24)
 
 
