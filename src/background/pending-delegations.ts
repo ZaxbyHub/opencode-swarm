@@ -6387,6 +6387,49 @@ export type CompletionDelegationLookupResult =
 	| { source: 'uncertain'; record: null; uncertain: string };
 
 /**
+ * Durable task-binding fallback for sounding-board dispatches (the
+ * 2026-11-25 restart-era agent-gate wedge, layer B).
+ *
+ * A critic_sounding_board dispatch carries NO `task_id` argument — the task
+ * id rides only in free prompt prose ("…für Task 2.20…"), which the strict
+ * attribution policy correctly refuses to treat as dispatch attribution.
+ * Before the host-restart era the in-memory session fallback (currentTaskId)
+ * supplied the binding; after a restart that map is empty and the delegation
+ * record was persisted with planTaskId/evidenceTaskId null — the completion
+ * ingestion is then a no-op BY DEFINITION (taskId null → no Stage-B evidence
+ * side effects), so the sounding-board gate receipt can never land.
+ *
+ * This helper is the durable substitute for the lost session context: the
+ * LATEST coder delegation of the SAME parent session — the sounding-board
+ * context is the retry escalation of exactly that coder chain. Mirrors the
+ * in-memory recency semantics (latest record wins; >= resolves same-tick
+ * ties to the later store order, the fold's own last-write-wins).
+ *
+ * Fail-closed by construction: an uncertain store read yields
+ * `{ status: 'uncertain' }` and the caller keeps null (a task binding is
+ * never invented from a partial read).
+ */
+export function findLatestCoderTaskForParentSession(
+	directory: string,
+	parentSessionId: string,
+): { status: 'ok'; taskId: string | null } | { status: 'uncertain' } {
+	if (!parentSessionId) return { status: 'ok', taskId: null };
+	const read = readDelegationsDetailed(directory);
+	if (read.status === 'uncertain') return { status: 'uncertain' };
+	let best: { taskId: string; updatedAt: number } | null = null;
+	for (const record of read.records) {
+		if (record.normalizedAgent !== 'coder') continue;
+		if (record.parentSessionId !== parentSessionId) continue;
+		const taskId = record.evidenceTaskId ?? record.planTaskId;
+		if (!taskId) continue;
+		if (best === null || record.updatedAt >= best.updatedAt) {
+			best = { taskId, updatedAt: record.updatedAt };
+		}
+	}
+	return { status: 'ok', taskId: best?.taskId ?? null };
+}
+
+/**
  * Lookup used by terminal handling: primary ledger first, exact fallback
  * second. Issue #2511: an uncertain primary read is returned typed — the
  * fallback file is deliberately NOT consulted then, because a durable primary
