@@ -610,11 +610,11 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		writerModules: ['src/background/pending-delegations.ts'],
 		writerCitations: [
 			'src/background/pending-delegations.ts:6402 writeDelegationFallback / :6453 removeDelegationFallback',
-			'src/background/pending-delegations.ts:6972 writeBackgroundCoderReservations',
+			'src/background/pending-delegations.ts:7015 writeBackgroundCoderReservations',
 		],
 		readerCitations: [
 			'src/background/pending-delegations.ts:6257 readDelegationFallback / :6269 listDelegationFallbacks / :6303 scanDelegationFallbacksForRecovery',
-			'src/background/pending-delegations.ts:6950 scanBackgroundCoderReservationsForAdmission',
+			'src/background/pending-delegations.ts:6993 scanBackgroundCoderReservationsForAdmission',
 		],
 		schemaVersion: 'fallback schemaVersion 1 (:1041)',
 		stateClass: 'authoritative',
