@@ -787,10 +787,14 @@ export async function tryAcquireLock(
 			// one attempt per target per LOCK_TIMEOUT_MS). An ownerless/invalid
 			// payload (empty or torn `.lck`) routes to 'ttl-cleanup' so a
 			// past-TTL ownerless lock recovers through the fenced protocol,
-			// matching the evidence/events stores (#3934). A valid payload with
-			// a live owner is never touched (never-break-live-pid holds); a
-			// merely-slow holder keeps its lock because ttl-cleanup only fires
-			// when there is no parsable owner at all.
+			// mirroring the evidence/events stores' ownerless-lock recovery
+			// (#3934). Class selection stays this module's strict
+			// `parseOwnerPayload` (a non-positive pid reads as ownerless,
+			// PRR-016), so a malformed pid<=0 payload is TTL-gated here rather
+			// than broken fresh. A valid payload with a live owner is never
+			// touched (never-break-live-pid holds); a merely-slow holder keeps
+			// its lock because ttl-cleanup only fires when there is no parsable
+			// owner at all.
 			const parsed = parseOwnerPayload(readOwnerPayload(ownerLockPath));
 			if (parsed !== null && !isPidAlive(parsed.ownerPid)) {
 				if (
@@ -804,11 +808,11 @@ export async function tryAcquireLock(
 			} else if (parsed === null) {
 				// Ownerless/invalid payload (empty or torn `.lck`): route to
 				// ttl-cleanup so a past-TTL ownerless lock recovers through the
-				// fenced protocol, matching the evidence/events stores. A fresh
-				// (within-TTL) ownerless lock stays 'unknown' and times out
-				// exactly as before (AC4 semantics). There is no live holder to
-				// be merely slow here, so the mtime-TTL gate is the only thing
-				// that can be broken.
+				// fenced protocol, mirroring the evidence/events stores' same
+				// ownerless branch. A fresh (within-TTL) ownerless lock stays
+				// 'unknown' and times out exactly as before (AC4 semantics).
+				// There is no live holder to be merely slow here, so the
+				// mtime-TTL gate is the only thing that can be broken.
 				if (
 					breakStaleLockIfOwnerDead(ownerLockPath, {
 						class: 'ttl-cleanup',
