@@ -107,7 +107,11 @@ restart era began — workflow reached `tests_run`).
    `reserveStageBRouteEvidence` now REPLACES the existing entry for the
    same (role, identity) — the one-entry-per-identity invariant the durable
    requirements chain already enforces on read and the route duplicate
-   check requires, upheld at the source.
+   check requires, upheld at the source. (The upstream-base branch does
+   not carry the Stage-B re-dispatch slot reclamation this fix pairs with
+   on the consumer line, so the invariant is pinned standalone here; the
+   end-to-end sequence stays pinned on the consumer line by the pipeline
+   variant of the suite.)
 
 ## Testing
 
