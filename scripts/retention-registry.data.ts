@@ -1766,11 +1766,11 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/scope/scope-persistence.ts'],
 		writerCitations: [
-		'src/scope/scope-persistence.ts:1658 writeScopeToDisk (v1 projection) / :1734 writeScopeBindingToDisk (v2) / :2373 claimScopeBindingForChildDurably / :2622 replaceExistingScopeDeclaration / :2183 tombstoneScopeBinding / :2262 refreshScopeBindingLease / :864 transitionScopeBindingState / :987 importScopeBindingStateRows',
+		'src/scope/scope-persistence.ts:1697 writeScopeToDisk (v1 projection) / :1773 writeScopeBindingToDisk (v2) / :2418 claimScopeBindingForChildDurably / :2667 replaceExistingScopeDeclaration / :2228 tombstoneScopeBinding / :2307 refreshScopeBindingLease / :864 transitionScopeBindingState / :987 importScopeBindingStateRows',
 	],
 	readerCitations: [
-		'src/scope/scope-persistence.ts:3696 readScopeFromDisk — bounded 2 MiB O_NOFOLLOW v1 compatibility, sync',
-		'src/scope/scope-persistence.ts:1299 readAllAuthoritativeScopeBindings — bounded indexed SQLite scan, sync',
+		'src/scope/scope-persistence.ts:3744 readScopeFromDisk — bounded 2 MiB O_NOFOLLOW v1 compatibility, sync',
+		'src/scope/scope-persistence.ts:1318 readAllAuthoritativeScopeBindings — bounded indexed SQLite scan, sync',
 		],
 		schemaVersion: 'v1 projection + v2 exact-generation bindings (v1 never authorizes: :916)',
 		stateClass: 'authoritative',
