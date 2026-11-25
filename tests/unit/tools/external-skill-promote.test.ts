@@ -7,6 +7,7 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { ExternalSkillCandidate } from '../../../src/config/schema.js';
+import { computeArtifactDigest } from '../../../src/services/external-skill-identity.js';
 import { createExternalSkillStore } from '../../../src/services/external-skill-store.js';
 import { _internals as validatorInternals } from '../../../src/services/external-skill-validator.js';
 import {
@@ -682,15 +683,17 @@ describe('external_skill_promote', () => {
 		expect(promotedEntry!.target_path).toContain('audit-rich-skill');
 		expect(promotedEntry!.target_path).toContain('SKILL.md');
 
-		// promoted_content_hash — SHA-256 of the actual skillMarkdown written
+		// promoted_content_hash — the CANONICAL artifact digest of the written
+		// markdown (#3822 K1, disclosed reshape): SHA-256 over the file with
+		// the artifact's own `content_digest:` frontmatter line replaced by a
+		// fixed placeholder. Re-derived through the production helper instead
+		// of a raw whole-file hash; the strength is unchanged (any byte edit
+		// outside the digest line still changes the digest).
 		expect(promotedEntry!.promoted_content_hash).toBeDefined();
 		expect(typeof promotedEntry!.promoted_content_hash).toBe('string');
 		expect(promotedEntry!.promoted_content_hash).toMatch(/^[a-f0-9]{64}$/);
-		// Verify the hash matches the actual written content
-		const { createHash } = await import('node:crypto');
-		const expectedHash = createHash('sha256')
-			.update(writtenFileContent!)
-			.digest('hex');
+		// Verify the hash matches the actual written content (canonical form)
+		const expectedHash = computeArtifactDigest(writtenFileContent!);
 		expect(promotedEntry!.promoted_content_hash).toBe(expectedHash);
 
 		// original_evaluation — the pre-promotion evaluation context

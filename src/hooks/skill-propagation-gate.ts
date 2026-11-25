@@ -24,6 +24,7 @@ import { bundledProjectSkillFileReference } from '../config/bundled-skills.js';
 import { stripKnownSwarmPrefix } from '../config/schema.js';
 import { appendCoreEventSync } from '../events/core-events.js';
 import { sanitizeDiagnosticText } from '../scope/path-identity.js';
+import { verifyPromotedExternalSkillSync } from '../services/external-skill-identity.js';
 import { criticalWarn, warn } from '../utils/logger.js';
 import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache.js';
 import type { MessageWithParts } from './knowledge-types.js';
@@ -843,6 +844,34 @@ export function validateSkillReference(
 						? 'skill audience metadata is invalid'
 						: 'skill audience does not match the active project and runner',
 			};
+		}
+
+		// #3822 K1: promoted external skills are digest-bound to their
+		// promotion record in the structured candidate store. The lookup is
+		// PATH-FIRST — an artifact under the generated-skill root resolves
+		// its record by canonical path, so deleting skill_origin/candidate_id
+		// frontmatter cannot disguise a promoted artifact as an ordinary
+		// generated skill. Artifacts with no record and no promoted-external
+		// provenance claim keep validating as ordinary generated skills; the
+		// legacy ASK-2 rule inside the verifier keeps pre-#3822 promotions
+		// loadable. See src/services/external-skill-identity.ts.
+		const generatedRoot = path.join(root, '.opencode', 'skills', 'generated');
+		let canonicalGeneratedRoot = generatedRoot;
+		try {
+			if (_internals.existsSync(generatedRoot)) {
+				canonicalGeneratedRoot = _internals.realpathSync(generatedRoot);
+			}
+		} catch {
+			// Keep the lexical root — the containment test below stays lexical.
+		}
+		if (
+			realPath !== canonicalGeneratedRoot &&
+			isWithinRoot(canonicalGeneratedRoot, realPath)
+		) {
+			const promoted = verifyPromotedExternalSkillSync(directory, realPath);
+			if (!promoted.ok) {
+				return { valid: false, reason: promoted.reason };
+			}
 		}
 
 		return {

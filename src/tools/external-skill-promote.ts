@@ -14,11 +14,13 @@ import { createHash } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { z } from 'zod';
+import { BUNDLED_PROJECT_SKILLS } from '../config/bundled-skills.js';
 import { loadPluginConfig } from '../config/loader.js';
 import type {
 	ExternalSkillCandidate,
 	ExternalSkillsConfig,
 } from '../config/schema.js';
+import { computeArtifactDigest } from '../services/external-skill-identity.js';
 import { createExternalSkillStore } from '../services/external-skill-store.js';
 import { evaluateCandidate } from '../services/external-skill-validator.js';
 import { createSwarmTool } from './create-tool.js';
@@ -64,6 +66,14 @@ const DISABLED_MESSAGE =
 // ---------------------------------------------------------------------------
 
 /**
+ * Slugs reserved by bundled project skills (#3822 K3) — promoting an external
+ * candidate under one of these names would produce a same-name skill in a
+ * different root, so the collision is refused the same way the generator
+ * path refuses it (skill-generator's RESERVED_ACTIVE_SKILL_SLUGS rule).
+ */
+const RESERVED_PROMOTION_SLUGS = new Set<string>(BUNDLED_PROJECT_SKILLS);
+
+/**
  * Sanitize a user-supplied slug for use as a directory name.
  *
  * - Lowercase
@@ -85,11 +95,18 @@ function sanitizeSlug(raw: string): string | null {
 
 /**
  * Build SKILL.md content with YAML provenance frontmatter.
+ *
+ * The `content_digest` line carries the canonical artifact digest
+ * (#3822 K1(a)). It is ADVISORY for humans — the authoritative binding lives
+ * in the structured candidate record; the propagation gate recomputes the
+ * canonical digest and compares it against the record, never against this
+ * line.
  */
 function buildSkillMarkdown(
 	candidate: ExternalSkillCandidate,
 	slug: string,
 	timestamp: string,
+	contentDigest: string,
 ): string {
 	return [
 		'---',
@@ -100,6 +117,7 @@ function buildSkillMarkdown(
 		`source_type: ${candidate.source_type}`,
 		`publisher: ${candidate.publisher}`,
 		`sha256: ${candidate.sha256}`,
+		`content_digest: ${contentDigest}`,
 		`promoted_at: ${timestamp}`,
 		`promoted_by: user`,
 		`skill_origin: promoted_external`,
@@ -117,7 +135,7 @@ function buildSkillMarkdown(
 export const external_skill_promote: ReturnType<typeof createSwarmTool> =
 	createSwarmTool({
 		description:
-			'Promote a validated external skill candidate to an active generated skill. Re-runs all validation gates (TOCTOU re-validation). Requires explicit user approval (approver="user"). Returns a disabled message when external_skills.curation_enabled is false.',
+			'Promote a validated external skill candidate to an active generated skill. Re-runs all validation gates (TOCTOU re-validation). Requires explicit user approval (approver="user"). Optionally accepts expected_sha256 — the SHA-256 of the reviewed candidate skill_body — and refuses as a stale base when the candidate changed since review. Returns a disabled message when external_skills.curation_enabled is false.',
 		args: {
 			candidate_id: z
 				.string()
@@ -135,12 +153,19 @@ export const external_skill_promote: ReturnType<typeof createSwarmTool> =
 				.describe(
 					'Who approved the promotion — must be "user" (no agent/auto approval)',
 				),
+			expected_sha256: z
+				.string()
+				.optional()
+				.describe(
+					'Optional SHA-256 (64-char hex) of the candidate skill_body as reviewed — binding promotion to the reviewed bytes; a mismatch refuses with a stale-candidate error',
+				),
 		},
 		execute: async (args: unknown, directory: string): Promise<string> => {
 			// Safe args extraction
 			let candidateId: unknown;
 			let slug: unknown;
 			let approver: unknown;
+			let expectedSha256: unknown;
 
 			try {
 				if (args && typeof args === 'object') {
@@ -148,6 +173,7 @@ export const external_skill_promote: ReturnType<typeof createSwarmTool> =
 					candidateId = obj.candidate_id;
 					slug = obj.slug;
 					approver = obj.approver;
+					expectedSha256 = obj.expected_sha256;
 				}
 			} catch {
 				// Malicious getter threw
@@ -209,6 +235,32 @@ export const external_skill_promote: ReturnType<typeof createSwarmTool> =
 				});
 			}
 
+			// #3822 K3 — refuse slugs reserved by bundled project skills so an
+			// external candidate cannot produce a same-name skill in a
+			// different root.
+			if (RESERVED_PROMOTION_SLUGS.has(sanitizedSlug)) {
+				return JSON.stringify({
+					success: false,
+					error: `slug "${sanitizedSlug}" is reserved by a bundled project skill — choose a different slug`,
+				});
+			}
+
+			// Optional expected_sha256 (#3822 ASK-3) — shape check before the
+			// candidate is loaded; value comparison happens once the candidate
+			// body is in hand.
+			if (expectedSha256 !== undefined) {
+				if (
+					typeof expectedSha256 !== 'string' ||
+					!/^[a-f0-9]{64}$/i.test(expectedSha256)
+				) {
+					return JSON.stringify({
+						success: false,
+						error: 'expected_sha256 must be a 64-character hex SHA-256 string',
+					});
+				}
+				expectedSha256 = expectedSha256.toLowerCase();
+			}
+
 			// Create store
 			const store = createExternalSkillStore(directory, {
 				max_candidates: config.max_candidates,
@@ -223,6 +275,24 @@ export const external_skill_promote: ReturnType<typeof createSwarmTool> =
 						success: false,
 						error: 'Candidate not found',
 					});
+				}
+
+				// Stale-base refusal (#3822 ASK-3, approved): when the caller
+				// supplies the digest of the bytes they reviewed, promotion is
+				// bound to exactly those bytes — a candidate whose skill_body
+				// changed since review is refused (the skill-opt
+				// --expected-content-hash precedent).
+				if (expectedSha256 !== undefined) {
+					const bodyHash = createHash('sha256')
+						.update(candidate.skill_body)
+						.digest('hex');
+					if (bodyHash !== expectedSha256) {
+						return JSON.stringify({
+							success: false,
+							error:
+								'stale candidate: content changed since review (expected_sha256 mismatch)',
+						});
+					}
 				}
 
 				// Only 'passed' or 'quarantined' candidates can be promoted
@@ -269,11 +339,29 @@ export const external_skill_promote: ReturnType<typeof createSwarmTool> =
 					});
 				}
 
-				// Build and write SKILL.md with provenance frontmatter
+				// Build and write SKILL.md with provenance frontmatter.
+				//
+				// #3822 K1: the canonical artifact digest is computed over a
+				// draft whose digest line carries a placeholder value —
+				// computeArtifactDigest replaces that whole line with a fixed
+				// placeholder before hashing, so the draft's value never
+				// influences the result. The same canonical digest is stamped
+				// into the frontmatter (advisory) and recorded in the
+				// structured candidate record (authoritative); the propagation
+				// gate recomputes it over the on-disk bytes and fails closed
+				// on mismatch.
+				const draftMarkdown = buildSkillMarkdown(
+					candidate,
+					sanitizedSlug,
+					timestamp,
+					'pending',
+				);
+				const promotedContentHash = computeArtifactDigest(draftMarkdown);
 				const skillMarkdown = buildSkillMarkdown(
 					candidate,
 					sanitizedSlug,
 					timestamp,
+					promotedContentHash,
 				);
 				try {
 					await _internals.writeSkillFile(targetPath, skillMarkdown);
@@ -287,12 +375,6 @@ export const external_skill_promote: ReturnType<typeof createSwarmTool> =
 					}
 					throw writeErr;
 				}
-
-				// Build audit record — includes gate results, risk assessment,
-				// provenance snapshot, and original validation context per FR-006.
-				const promotedContentHash = createHash('sha256')
-					.update(skillMarkdown)
-					.digest('hex');
 
 				// Retrieve the last pre-promotion evaluation history entry for
 				// original_validation context, falling back to the verdict string.
