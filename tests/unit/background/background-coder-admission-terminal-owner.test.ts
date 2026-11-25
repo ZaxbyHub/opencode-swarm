@@ -22,6 +22,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
+	type BackgroundWorktreeDescriptor,
 	bindBackgroundCoderReservation,
 	buildBackgroundCompletionEventId,
 	claimCoderSettlement,
@@ -156,6 +157,107 @@ async function seedTerminalChildOwner(
 		if (!committed) throw new Error('test setup failed to commit ingestion');
 	}
 	return claim.reservation.reservationId;
+}
+
+/**
+ * Minimal valid standard-worktree lane descriptor. The path never needs to
+ * exist on disk: the admission/release guards only inspect record shape.
+ */
+function worktreeDescriptor(dir: string): BackgroundWorktreeDescriptor {
+	const lanePath = path.join(dir, '.swarm', 'worktrees', 'lane-1');
+	return {
+		callID: 'call-1',
+		parentSessionId: 'parent-1',
+		taskId: '1.9',
+		planTaskId: '1.9',
+		worktreePath: lanePath,
+		branchName: 'swarm/lane-1',
+		worktreeId: 'wt-1',
+		worktreeSessionId: 'child-1',
+		mergeStrategy: 'merge',
+		laneIndex: 0,
+		worktreeDir: lanePath,
+	};
+}
+
+interface CompletedOwnerOptions {
+	/** Attach a standard-worktree lane to the pending record. */
+	worktree?: BackgroundWorktreeDescriptor;
+}
+
+/**
+ * Seed a coder owner that reached its trusted `completed` terminal event and
+ * stop there: the record is terminal, but its follow-up fate (settlement,
+ * ingestion) is whatever the caller layers on top. No ingestion is claimed.
+ */
+async function seedCompletedCoderOwner(
+	dir: string,
+	options: CompletedOwnerOptions = {},
+): Promise<string> {
+	const claim = await reserveBackgroundCoderSlot(dir, {
+		parentSessionId: 'parent-1',
+		planTaskId: '1.9',
+		callID: 'call-1',
+		maxConcurrent: 1,
+		now: NOW,
+	});
+	if (!claim.ok) throw new Error('test setup failed to reserve');
+	const bound = await bindBackgroundCoderReservation(dir, {
+		reservationId: claim.reservation.reservationId,
+		parentSessionId: 'parent-1',
+		planTaskId: '1.9',
+		callID: 'call-1',
+		correlationId: 'child-1',
+		now: NOW,
+	});
+	if (!bound) throw new Error('test setup failed to bind');
+	await recordPendingDelegation(
+		dir,
+		pendingInput({
+			coderReservationId: claim.reservation.reservationId,
+			worktree: options.worktree,
+		}),
+	);
+	const eventId = buildBackgroundCompletionEventId({
+		correlationId: 'child-1',
+		jobId: 'job-1',
+		status: 'completed',
+		resultDigest: 'digest',
+	});
+	const terminal = await claimTerminalResult(dir, 'child-1', {
+		eventId,
+		status: 'completed',
+		recordedAt: NOW,
+		result: { chars: 0, truncated: false, digest: 'digest' },
+	});
+	if (!terminal) throw new Error('test setup failed to claim terminal');
+	return claim.reservation.reservationId;
+}
+
+/**
+ * Seed a coder owner whose settlement was PRESERVED (partial shared-root
+ * outcome): trusted terminal `completed`, settlement `preserved`, no
+ * worktree. This is the exact shape the preserved guards must retain.
+ */
+async function seedPreservedSettlementOwner(dir: string): Promise<string> {
+	const reservationId = await seedCompletedCoderOwner(dir);
+	const eventId = buildBackgroundCompletionEventId({
+		correlationId: 'child-1',
+		jobId: 'job-1',
+		status: 'completed',
+		resultDigest: 'digest',
+	});
+	const settling = await claimCoderSettlement(dir, 'child-1', eventId);
+	if (!settling) throw new Error('test setup failed to claim settlement');
+	// `preserved` requires a partial/failed outcome on the update path.
+	const preserved = await updateCoderSettlement(dir, 'child-1', {
+		operationId: eventId,
+		state: 'preserved',
+		observedFiles: ['doc/report.md'],
+		outcome: { kind: 'shared-root', result: 'partial' },
+	});
+	if (!preserved) throw new Error('test setup failed to preserve settlement');
+	return reservationId;
 }
 
 function reservationIds(dir: string): string[] {
@@ -304,5 +406,93 @@ describe('terminal-child coder owners vs admission capacity (regression)', () =>
 			{ reservationId: claim.reservation.reservationId, generation: 1 },
 		]);
 		expect(maintenance.released).toEqual([]);
+	});
+
+	describe('fail-closed owners: preserved settlement / worktree holder (F-001)', () => {
+		it('a preserved-settlement owner still occupies admission capacity', async () => {
+			// A guard regression that treated a preserved settlement like a
+			// finished launch would reconcile its reservation away at
+			// admission and stop counting the record as active, letting a
+			// second dispatch in while recoverable settlement work is open.
+			const reservationId = await seedPreservedSettlementOwner(dir);
+
+			// Discriminating record shape: terminal completed, settlement
+			// preserved, NO worktree.
+			const record = readDelegations(dir).find(
+				(entry) => entry.correlationId === 'child-1',
+			);
+			expect(record?.coderSettlement?.state).toBe('preserved');
+			expect(record?.worktree).toBeUndefined();
+
+			const blocked = await reserveBackgroundCoderSlot(dir, {
+				parentSessionId: 'parent-1',
+				planTaskId: '1.10',
+				callID: 'call-next',
+				maxConcurrent: 1,
+				now: NOW + 60_000,
+			});
+			expect(blocked).toMatchObject({ ok: false, reason: 'capacity' });
+
+			// Not proven released: the durable reservation survives the
+			// admission attempt's reconciliation pass.
+			expect(reservationIds(dir)).toEqual([reservationId]);
+		});
+
+		it('maintenance renews — never proof-releases — a preserved-settlement owner', async () => {
+			const reservationId = await seedPreservedSettlementOwner(dir);
+
+			// Lease expired (15 min default, 16 min elapsed): a proof-release
+			// regression here would emit reason 'proven-terminal-owner'.
+			const maintenance = await maintainBackgroundDelegations(dir, {
+				now: NOW + 16 * 60_000,
+			});
+			expect(maintenance.status).toBe('ok');
+			expect(maintenance.renewed).toEqual([{ reservationId, generation: 1 }]);
+			expect(maintenance.released).toEqual([]);
+			expect(reservationIds(dir)).toEqual([reservationId]);
+		});
+
+		it('a worktree-holding owner still occupies admission capacity', async () => {
+			// Same negative case for the worktree guard: a terminal
+			// `completed` owner that still holds its standard-worktree lane
+			// owns a recoverable resource and must keep the slot.
+			const reservationId = await seedCompletedCoderOwner(dir, {
+				worktree: worktreeDescriptor(dir),
+			});
+
+			// Discriminating record shape: terminal completed, settlement
+			// still `pending` (not preserved), worktree present.
+			const record = readDelegations(dir).find(
+				(entry) => entry.correlationId === 'child-1',
+			);
+			expect(record?.status).toBe('completed');
+			expect(record?.terminalResult?.status).toBe('completed');
+			expect(record?.coderSettlement?.state).toBe('pending');
+			expect(record?.worktree).toBeDefined();
+
+			const blocked = await reserveBackgroundCoderSlot(dir, {
+				parentSessionId: 'parent-1',
+				planTaskId: '1.10',
+				callID: 'call-next',
+				maxConcurrent: 1,
+				now: NOW + 60_000,
+			});
+			expect(blocked).toMatchObject({ ok: false, reason: 'capacity' });
+			expect(reservationIds(dir)).toEqual([reservationId]);
+		});
+
+		it('maintenance renews — never proof-releases — a worktree-holding owner', async () => {
+			const reservationId = await seedCompletedCoderOwner(dir, {
+				worktree: worktreeDescriptor(dir),
+			});
+
+			const maintenance = await maintainBackgroundDelegations(dir, {
+				now: NOW + 16 * 60_000,
+			});
+			expect(maintenance.status).toBe('ok');
+			expect(maintenance.renewed).toEqual([{ reservationId, generation: 1 }]);
+			expect(maintenance.released).toEqual([]);
+			expect(reservationIds(dir)).toEqual([reservationId]);
+		});
 	});
 });
