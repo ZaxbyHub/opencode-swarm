@@ -9,6 +9,7 @@ import {
 import { loadPlanJsonOnly } from '../plan/manager.js';
 import { sanitizeDiagnosticText } from '../scope/path-identity.js';
 import { ensureAgentSession } from '../state.js';
+import { ensureRecoveryRouteReceipt } from './recovery-route-receipt.js';
 import {
 	appendStageARepairEvent,
 	hasGreenPostSettlementPreCheck,
@@ -27,6 +28,12 @@ export interface ReworkRecoverySummary {
 	 * audit record that may not exist (issue #2755 review, FB-001).
 	 */
 	auditEventRecorded: boolean;
+	/**
+	 * 2026-11-25 (2.26 wedge): whether a baseline v1 review route receipt
+	 * exists for the recovered Stage-B cycle (pre-existing or materialized by
+	 * this recovery). False keeps the pre-recovery completion behavior.
+	 */
+	routeReceiptEnsured: boolean;
 }
 
 /**
@@ -202,6 +209,17 @@ export async function forceRecoverReworkTask(
 		...(sanitizedReason ? { reason: sanitizedReason } : {}),
 	});
 
+	// 2026-11-25 (2.26 wedge): the recovered task enters a fresh Stage-B
+	// cycle — materialize the baseline route receipt so the cycle is
+	// route-satisfiable at completion even when the dispatch-time allocator
+	// never wrote one (the legacy-unrouted admission shape). Best-effort:
+	// the durable transition above is authoritative either way.
+	const routeReceiptEnsured = await ensureRecoveryRouteReceipt({
+		directory,
+		taskId,
+		sessionId: sessionID,
+	});
+
 	return {
 		taskId,
 		generation: updatedWorkflow.generation,
@@ -209,5 +227,6 @@ export async function forceRecoverReworkTask(
 		transitionId,
 		recordedAt,
 		auditEventRecorded,
+		routeReceiptEnsured,
 	};
 }

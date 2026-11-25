@@ -175,7 +175,7 @@ evidence":
   gates' re-dispatches, non-gate agents, other tools, and unreadable
   evidence keep the block — the completion remedy stays first-class.
 
-### 12. The post-catch-22 accumulation wedge: same-identity re-settlements poison the in-memory route evidence
+### 7. The post-catch-22 accumulation wedge: same-identity re-settlements poison the in-memory route evidence
 
 The catch-22 fix (§11) exposed a latent accumulation defect: a task that
 legitimately re-settles the SAME gate identity twice in one serve instance
@@ -197,6 +197,30 @@ the durable requirements chain already enforces on read and
 `enforceReviewRouteReceipt`'s duplicate check requires, now upheld at the
 source (the same replacement semantics the re-dispatch reclamation in
 `resolveBackgroundStageBRoute` applies to its prospective list).
+
+### 8. The recover_* openings materialize the baseline v1 review route receipt (the 2.26 completion wedge)
+
+A task opened through a recover_* path (`recover_rework_task` / the
+stage-a-repair settlement arm) can reach `tests_run` with every Stage-B gate
+bound and still wedge at completion: the v1 review route receipt is only
+ever written by the DISPATCH-time allocator, so a recovered cycle whose
+dispatches bound through the legacy-unrouted admission (or whose receipt
+later became unreadable) fails closed on "has not satisfied its exact v1
+review route receipt" — and `/swarm recover` is itself blocked by the
+completion guard at tests_run, leaving no agent-legal path to
+re-materialize the artifact (live: task 2.26 — reviewer APPROVED +
+TE PASS + tests_run, completion refused twice, parked as blocked).
+
+The recovery openings now materialize a BASELINE receipt themselves: the
+single-complexity slot floor (one reviewer identity, one test-engineer
+identity unless the durable evidence proves the exemption) — the same shape
+the dispatch allocator produces for a standard change. It is written only
+when no readable receipt exists: a valid receipt is never overwritten (the
+dispatch-time allocator owns real routing counts), an unreadable one is
+replaced precisely because it is the wedge, and a failed write keeps the
+pre-recovery behavior (best-effort; the durable recovery transition stays
+authoritative). A later Stage-B dispatch overwrites the baseline with its
+routed counts as usual.
 
 ## Testing
 
@@ -231,10 +255,19 @@ source (the same replacement semantics the re-dispatch reclamation in
   gate permitted, already-bound gate re-dispatch blocked, non-gate agents and
   other tools blocked, corrupt evidence fail-closes),
   `tests/unit/background/stage-b-same-identity-resettlement.test.ts`
-  (accumulation wedge: a second same-identity reviewer settlement in one
-  serve must not poison the route evidence — the test_engineer completion
-  binds and the task reaches tests_run; in-memory list one entry per
-  identity; audit chain keeps both rows, read-side collapse intact).
+  (accumulation wedge, pinned standalone on this branch — the upstream base
+  does not carry the Stage-B re-dispatch slot reclamation, so the second
+  same-identity settlement cannot bind here and the accumulation case is
+  unreachable through the pipeline: a second binding for the same
+  (role, identity) replaces the obsolete entry instead of appending, the
+  rollback restores it, distinct identities stay distinct; the end-to-end
+  sequence stays pinned on the consumer line),
+  `tests/unit/workflow/recovery-route-receipt.test.ts`
+  (the 2.26 completion wedge: all gates bound at tests_run with no receipt
+  fails closed — the recovery receipt unlocks completion; a readable
+  receipt is never overwritten; an unreadable one is replaced; the durable
+  TE exemption zeroes the TE slots; the forceRecoverReworkTask integration
+  materializes the receipt for the recovered cycle).
 - Extended: `stage-a-self-report.test.ts` (uncorrelated wedge pass),
   `tests/unit/gate-evidence/rework-recovery-supervised.test.ts` (the
   tests_run seeding now binds the TE to earn the state the old

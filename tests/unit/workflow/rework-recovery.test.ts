@@ -9,6 +9,7 @@ import {
 import * as path from 'node:path';
 import { resetSwarmState } from '../../../src/state';
 import { forceRecoverReworkTask } from '../../../src/workflow/rework-recovery';
+import { createIsolatedTestEnv } from '../../helpers/isolated-test-env.js';
 import { createSafeTestDir } from '../../helpers/safe-test-dir';
 
 /**
@@ -16,19 +17,28 @@ import { createSafeTestDir } from '../../helpers/safe-test-dir';
  * hatch from `rework_required`. Every precondition fails closed with a
  * distinct error; the success path writes a supervised stage_a_passed and a
  * distinguishable stage_a_repair audit event.
+ *
+ * Env isolation: the recovery now also materializes the baseline v1 review
+ * route receipt (the 2.26 wedge fix), whose MAC secret lives under the
+ * app-data roots — redirect them so the suite never touches the developer's
+ * real app-data.
  */
 describe('forceRecoverReworkTask (issue #2755)', () => {
 	let directory = '';
 	let cleanup = (): void => {};
+	let isolatedEnv: ReturnType<typeof createIsolatedTestEnv> | undefined;
 
 	beforeEach(() => {
 		resetSwarmState();
+		isolatedEnv = createIsolatedTestEnv();
 		({ dir: directory, cleanup } = createSafeTestDir('rework-recovery-'));
 	});
 
 	afterEach(() => {
 		resetSwarmState();
 		cleanup();
+		isolatedEnv?.cleanup();
+		isolatedEnv = undefined;
 	});
 
 	function writeMinimalPlan(taskId: string): void {

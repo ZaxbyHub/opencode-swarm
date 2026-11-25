@@ -17,6 +17,7 @@ import {
 	type CoderSettlementWalState,
 	listCoderSettlementWalStates,
 } from './coder-settlement.js';
+import { ensureRecoveryRouteReceipt } from './recovery-route-receipt.js';
 import {
 	applySessionWorkflowView,
 	isStageARecoveredState,
@@ -663,14 +664,12 @@ export async function repairWedgedStageA(
 								// Which durable receipt admitted the repair:
 								// 'settlement_wal' | 'requirements_receipt'
 								// (background coder rounds never write a WAL).
-								justification:
-									scan.justification?.via ?? 'settlement_wal',
+								justification: scan.justification?.via ?? 'settlement_wal',
 								...(scan.justification?.via === 'requirements_receipt'
 									? {
 											justificationTransitionId:
 												scan.justification.sourceTransitionId,
-											justificationGeneration:
-												scan.justification.generation,
+											justificationGeneration: scan.justification.generation,
 										}
 									: {}),
 							}
@@ -680,6 +679,20 @@ export async function repairWedgedStageA(
 					// transition that wedged the task (the accepted_mutation that
 					// left the workflow at coder_delegated without Stage A proof).
 					predecessorTransitionId: scan.predecessorTransitionId,
+				});
+			}
+			// 2026-11-25 (2.26 wedge): the repaired task re-enters the Stage-B
+			// cycle — materialize the baseline route receipt (idempotent: a
+			// pre-existing readable receipt is never overwritten) so the
+			// cycle is route-satisfiable at completion even when no
+			// dispatch-time allocator ever wrote one. Requires a session
+			// identity for the receipt; the CLI's empty shape keeps the
+			// pre-repair behavior.
+			if (options?.sessionId) {
+				await ensureRecoveryRouteReceipt({
+					directory,
+					taskId,
+					sessionId: options.sessionId,
 				});
 			}
 			results.push({
