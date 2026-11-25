@@ -1,5 +1,14 @@
 # Changelog
 
+## [7.205.8](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.205.7...v7.205.8) (2026-11-24)
+
+
+### Bug Fixes
+
+* **issue-tracer:** accept two-parent merge commits in merge_identity ([fbc4bba](https://github.com/ZaxbyHub/opencode-swarm/commit/fbc4bba20695083d51401c2a530bd192c84b884b))
+* **issue-tracer:** accept two-parent merge commits in merge_identity ([2fa0cc9](https://github.com/ZaxbyHub/opencode-swarm/commit/2fa0cc983fa602642b83105001feec987210274c))
+* **security:** redact credentials at the review, forge and training evidence boundaries ([#3840](https://github.com/ZaxbyHub/opencode-swarm/issues/3840)/[#3844](https://github.com/ZaxbyHub/opencode-swarm/issues/3844)/[#3899](https://github.com/ZaxbyHub/opencode-swarm/issues/3899)) ([8889183](https://github.com/ZaxbyHub/opencode-swarm/commit/88891837cf8cc6e02d6d71a09f364e799729f328))
+
 ## [7.205.7](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.205.6...v7.205.7) (2026-11-24)
 
 
