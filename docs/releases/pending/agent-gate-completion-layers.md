@@ -54,6 +54,19 @@ restart era began — workflow reached `tests_run`).
    (last 16 entries) inside the store root, so the next failing dispatch
    leaves a durable, project-visible trace.
 
+4. **Task-less SB dispatches bind their workflow generation durably** (the
+   `ingestion_error` loop). The in-memory generation map
+   (`stageBDispatchGenerationsByCallID`) is filled in the dispatch-preparation
+   path keyed by the RESOLVED task id — which was null for a task-less SB
+   dispatch even after the layer-2 binding (that resolves the task only in
+   toolAfter), so the record carried NO `workflowGeneration` and the
+   completion ingestion refused with `TASK_WORKFLOW_GENERATION_REQUIRED`
+   forever (live: `ses_ded837dfdffe`, status `ingestion_error`, retryable
+   loop, "ingestion failed" advisory while the verdict itself was APPROVED).
+   The SB arm now binds the workflow generation from the durable task
+   evidence at dispatch time — the same fence input the in-memory map would
+   hold; unreadable evidence keeps the refusal (fail closed).
+
 ## Testing
 
 - New: `tests/unit/background/completion-observer-stage-b-result-body-fallback.test.ts`
