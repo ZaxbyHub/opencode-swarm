@@ -3,6 +3,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { Plan } from '../../../src/config/plan-schema';
 import type { GuardrailsConfig } from '../../../src/config/schema';
+import { transitionCoordinationState } from '../../../src/db/coordination-store';
 import { createGuardrailsHooks } from '../../../src/hooks/guardrails';
 import {
 	clearScopeBindings,
@@ -10,9 +11,9 @@ import {
 } from '../../../src/scope/scope-binding';
 import {
 	claimScopeBindingForChildDurably,
+	flushScopeBindingMaintenance,
 	persistAndRegisterScopeBinding,
 	resolveAuthorizedScopeBinding,
-	tombstoneScopeBinding,
 } from '../../../src/scope/scope-persistence';
 import {
 	getAgentSession,
@@ -132,11 +133,32 @@ describe('scope lease renewal production wiring', () => {
 
 	test('shell guard reports an expired durable generation before generic denial', async () => {
 		const { directory, binding } = await fixture();
-		expect(
-			await tombstoneScopeBinding(directory, binding, 'expired'),
-		).toMatchObject({
-			ok: true,
+		// Issue #3889: an explicit terminal tombstone now collects the
+		// generation at once, so the durable expiry is produced the way
+		// production meets it — a live row whose lease lapsed beyond the
+		// idle-revival window (issue #2271). Drain the fixture's maintenance
+		// first so nothing can collect the row before the guard reads it.
+		await flushScopeBindingMaintenance(directory);
+		// A fixed past instant: the guard classifies expiry only by "lapsed
+		// beyond the revival window", never by how long ago.
+		const expiresAt = 1_700_000_000_000; // 2023-11-14T22:13:20Z
+		const lapsed = transitionCoordinationState(directory, {
+			namespace: 'scope-binding',
+			entityKey: binding.generationId,
+			expectedRevision: binding.revision,
+			generation: 1,
+			status: 'live',
+			payload: JSON.stringify({
+				...binding,
+				revision: binding.revision + 1,
+				declaredAt: expiresAt - 60 * 60 * 1000,
+				leaseStartedAt: expiresAt - 60 * 60 * 1000,
+				updatedAt: expiresAt,
+				expiresAt,
+			}),
 		});
+		if (lapsed.outcome !== 'applied')
+			throw new Error(`lapse fixture failed: ${lapsed.outcome}`);
 		const hooks = createGuardrailsHooks(directory, undefined, config);
 		await expect(
 			hooks.toolBefore(

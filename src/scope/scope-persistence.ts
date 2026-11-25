@@ -55,14 +55,17 @@ import lockfile from 'proper-lockfile';
 import { type Plan, PlanSchema } from '../config/plan-schema';
 import {
 	type CoordinationState,
-	deleteCoordinationState,
+	deleteCoordinationStateWithinTransaction,
 	getProjectDb,
 	importCoordinationOnce,
+	listCoordinationStateRowsRaw,
 	listCoordinationStates,
+	MAX_COORDINATION_STATE_LIST_ROWS,
 	transitionCoordinationState,
 	transitionCoordinationStateWithinTransaction,
 	withCoordinationTransaction,
 } from '../db';
+import { getCoordinationStateRaw } from '../db/coordination-store.js';
 import { appendCoreEventSync } from '../events/core-events.js';
 import { computePlanStructureHash } from '../plan/ledger';
 import { derivePlanId } from '../plan/utils';
@@ -78,6 +81,7 @@ import { assertProjectRoot } from '../utils/project-boundary';
 import {
 	canonicalWorkspaceIdentity,
 	clearExactScopeBinding,
+	clearScopeBindings,
 	clearSweepTombstoneForRevival,
 	createClaimedScopeBinding,
 	DEFAULT_SCOPE_BINDING_TTL_MS,
@@ -89,6 +93,7 @@ import {
 	installScopeBindingTombstone,
 	isScopeBindingIdentity,
 	MAX_PENDING_SCOPE_BINDINGS,
+	MAX_SCOPE_BINDING_AGE_MS,
 	normalizeScopeFiles,
 	registerScopeBinding,
 	type ScopeBinding,
@@ -113,6 +118,384 @@ let bindingFileScanCapacity = MAX_BINDING_FILES_TO_SCAN;
 let maintenanceFileScanCapacity = MAX_BINDING_FILES_TO_SCAN * 2;
 const MAX_MAINTENANCE_JOBS = 64;
 const maintenanceJobs = new Map<string, Promise<void>>();
+// ---- Compact exact-generation deny ledger (issues #3889/#3900, design C) ----
+// One coordination row per workspace holding a bounded map of per-generation
+// deny evidence, separated from the authoritative scope-binding scan so
+// terminal rows can be collected immediately while cross-runtime deny
+// evidence survives (plan v3/v4/v4b/v4c/v4d; critic rounds 1-7).
+const SCOPE_BINDING_DENY_NAMESPACE = 'scope-binding-deny';
+const DENY_LEDGER_ENTITY_KEY = 'deny-ledger';
+/** FIFO cap for TERMINAL entries only (disclosed bound; pending never evicted). */
+const MAX_DENY_LEDGER_TERMINAL_ENTRIES = 2048;
+/** Terminal entries prunable once no in-memory authority can remain alive. */
+const DENY_LEDGER_TERMINAL_TTL_MS = MAX_SCOPE_BINDING_AGE_MS;
+
+interface ScopeDenyLedgerEntry {
+	bindingId: string;
+	kind: 'terminal' | 'admission-pending';
+	revision: number;
+	at: number;
+	/** The retired/claimed row's own expiresAt — pending terminalization bound. */
+	rowExpiresAt: number;
+}
+
+interface ScopeDenyLedger {
+	version: 1;
+	entries: Record<string, ScopeDenyLedgerEntry>;
+}
+
+type DenyLedgerRead =
+	| { status: 'absent' }
+	| { status: 'valid'; ledger: ScopeDenyLedger }
+	| { status: 'unreadable'; reason: string };
+
+interface RawLedgerRow {
+	entityKey: string;
+	payload: string;
+	revision: number;
+	generation: number;
+}
+
+function parseDenyLedgerPayload(payload: string): ScopeDenyLedger | null {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(payload);
+	} catch {
+		return null;
+	}
+	if (typeof parsed !== 'object' || parsed === null) return null;
+	const record = parsed as { version?: unknown; entries?: unknown };
+	if (
+		record.version !== 1 ||
+		typeof record.entries !== 'object' ||
+		record.entries === null
+	)
+		return null;
+	const entries: Record<string, ScopeDenyLedgerEntry> = {};
+	for (const [key, value] of Object.entries(record.entries)) {
+		if (typeof value !== 'object' || value === null) return null;
+		const entry = value as Partial<ScopeDenyLedgerEntry>;
+		if (
+			typeof entry.bindingId !== 'string' ||
+			(entry.kind !== 'terminal' && entry.kind !== 'admission-pending') ||
+			!Number.isSafeInteger(entry.revision) ||
+			typeof entry.at !== 'number' ||
+			typeof entry.rowExpiresAt !== 'number'
+		)
+			return null;
+		entries[key] = {
+			bindingId: entry.bindingId,
+			kind: entry.kind as ScopeDenyLedgerEntry['kind'],
+			revision: entry.revision as number,
+			at: entry.at as number,
+			rowExpiresAt: entry.rowExpiresAt as number,
+		};
+	}
+	return { version: 1, entries };
+}
+
+/** Tri-state read (raw payload, own validation — rowToState never sees it). */
+function readDenyLedgerRaw(rawRows: readonly RawLedgerRow[]): {
+	read: DenyLedgerRead;
+	row?: RawLedgerRow;
+} {
+	const ledgerRow = rawRows.find(
+		(row) => row.entityKey === DENY_LEDGER_ENTITY_KEY,
+	);
+	if (!ledgerRow) return { read: { status: 'absent' } };
+	const ledger = parseDenyLedgerPayload(ledgerRow.payload);
+	if (!ledger)
+		return {
+			read: {
+				status: 'unreadable',
+				reason: 'The scope deny ledger payload is malformed.',
+			},
+			row: ledgerRow,
+		};
+	return { read: { status: 'valid', ledger }, row: ledgerRow };
+}
+
+/**
+ * The deny ledger is one fixed-key row, read by that key.
+ *
+ * The read is raw: the single-row reader validates nothing, so the ledger's
+ * own validation above is the only classifier and a database failure
+ * propagates unchanged. It also prepares no statement of its own. On Windows
+ * this Bun release keeps a closed connection's database file locked until
+ * garbage collection once more than a few dozen statements have been prepared,
+ * so one extra statement in a flow is enough to strand swarm.db at teardown;
+ * the by-key select is the one the ledger's own CAS transition reads with.
+ */
+function readDenyLedgerWithRow(directory: string): {
+	read: DenyLedgerRead;
+	row?: RawLedgerRow;
+} {
+	const state = getCoordinationStateRaw(
+		directory,
+		SCOPE_BINDING_DENY_NAMESPACE,
+		DENY_LEDGER_ENTITY_KEY,
+	);
+	const rawRows: RawLedgerRow[] = state
+		? [
+				{
+					entityKey: state.entityKey,
+					payload: state.payload,
+					revision: state.revision,
+					generation: state.generation,
+				},
+			]
+		: [];
+	return readDenyLedgerRaw(rawRows);
+}
+
+function readDenyLedger(directory: string): DenyLedgerRead {
+	return readDenyLedgerWithRow(directory).read;
+}
+
+/**
+ * Ledger maintenance, kind-aware (v4c R5-2 / v4d): TERMINAL entries are
+ * pruned past DENY_LEDGER_TERMINAL_TTL_MS and FIFO-capped at
+ * MAX_DENY_LEDGER_TERMINAL_ENTRIES; admission-pending entries are never
+ * evicted here — released only by compare-and-remove or the v4d
+ * revival-window terminalization.
+ */
+function pruneDenyLedgerEntries(
+	entries: Record<string, ScopeDenyLedgerEntry>,
+	now: number,
+): Record<string, ScopeDenyLedgerEntry> {
+	const kept: Record<string, ScopeDenyLedgerEntry> = {};
+	let terminalCount = 0;
+	// First pass keeps pending entries and unexpired terminal entries.
+	for (const [generationId, entry] of Object.entries(entries)) {
+		if (entry.kind === 'admission-pending') {
+			kept[generationId] = entry;
+			continue;
+		}
+		if (now - entry.at <= DENY_LEDGER_TERMINAL_TTL_MS) {
+			kept[generationId] = entry;
+			terminalCount += 1;
+		}
+	}
+	// Second pass applies the terminal FIFO cap (oldest first by `at`).
+	if (terminalCount > MAX_DENY_LEDGER_TERMINAL_ENTRIES) {
+		const terminalIds = Object.entries(kept)
+			.filter(([, entry]) => entry.kind === 'terminal')
+			.sort((left, right) => left[1].at - right[1].at)
+			.map(([generationId]) => generationId);
+		const overflow = terminalCount - MAX_DENY_LEDGER_TERMINAL_ENTRIES;
+		for (let index = 0; index < overflow; index += 1) {
+			delete kept[terminalIds[index]!];
+		}
+	}
+	return kept;
+}
+
+/**
+ * Upsert the deny ledger inside a caller-owned coordination transaction.
+ * The raw row is re-read INSIDE the transaction (optimistic concurrency via
+ * the coordination generation token), so concurrent ledger writers serialize.
+ */
+function writeDenyLedgerWithinTransaction(
+	directory: string,
+	mutate: (entries: Record<string, ScopeDenyLedgerEntry>) => void,
+): ScopePersistenceFailure | null {
+	const { read, row } = readDenyLedgerWithRow(directory);
+	if (read.status === 'unreadable')
+		return persistenceFailure(read.reason) as ScopePersistenceFailure;
+	const entries: Record<string, ScopeDenyLedgerEntry> =
+		read.status === 'valid' ? { ...read.ledger.entries } : {};
+	mutate(entries);
+	const pruned = pruneDenyLedgerEntries(entries, Date.now());
+	const payload = JSON.stringify({
+		version: 1,
+		entries: pruned,
+	} satisfies ScopeDenyLedger);
+	const transition = transitionCoordinationStateWithinTransaction(directory, {
+		namespace: SCOPE_BINDING_DENY_NAMESPACE,
+		entityKey: DENY_LEDGER_ENTITY_KEY,
+		generation: (row?.generation ?? 0) + 1,
+		expectedRevision: row ? row.revision : null,
+		status: 'ok',
+		payload,
+	});
+	if (transition.outcome !== 'applied')
+		return persistenceFailure(
+			`Scope deny ledger transition failed: ${transition.outcome}`,
+		) as ScopePersistenceFailure;
+	return null;
+}
+
+/** v4c R5-3: remove a pending entry only when it is still THE pending entry. */
+function compareAndRemovePendingWithinTransaction(
+	entries: Record<string, ScopeDenyLedgerEntry>,
+	generationId: string,
+	revision: number,
+): void {
+	const entry = entries[generationId];
+	if (
+		entry &&
+		entry.kind === 'admission-pending' &&
+		entry.revision === revision
+	) {
+		delete entries[generationId];
+	}
+}
+
+/** Post-admission pending release (own small transaction; failure = disclosed false deny). */
+function releaseAdmissionPending(
+	directory: string,
+	generationId: string,
+	revision: number,
+): void {
+	try {
+		withCoordinationTransaction(directory, () => {
+			const failure = writeDenyLedgerWithinTransaction(directory, (entries) => {
+				compareAndRemovePendingWithinTransaction(
+					entries,
+					generationId,
+					revision,
+				);
+			});
+			if (failure && !failure.ok) throw new Error(failure.message);
+		});
+	} catch {
+		// Fail-closed: the pending entry stays and denies this generation in
+		// every runtime until a fresh declare creates an unblocked generation.
+	}
+}
+
+/**
+ * True when the durable row at a binding's key and revision is not the row
+ * the caller is holding.
+ *
+ * The retirement delete matches namespace, key and revision only, and a
+ * fresh insert restarts the revision at 1. So a row that another process
+ * deletes and re-inserts under the same key between a caller's read and its
+ * retirement (the reset sweep reads a page, then acts on it) would be
+ * retired as if it were the row the caller read. Generation ids are random
+ * and the writer refuses a colliding identity while the row exists, so no
+ * production writer creates such a row; this is the fail-closed backstop.
+ *
+ * What it establishes depends on what the caller knows:
+ *   - A caller that passes the payload it observed (`expectedPayload`) is
+ *     refused anything but that exact content: key, revision and payload.
+ *     This holds whatever the row carries — a different binding id, no
+ *     binding id at all, or a payload that does not parse.
+ *   - A caller that passes no payload is refused only a row that NAMES a
+ *     different binding by its binding id. A row that carries no binding id
+ *     (a legacy row) or whose payload cannot be parsed has no identity to
+ *     compare and is left to the key-and-revision check, as before.
+ *
+ * Must run inside the caller's coordination transaction, so nothing can
+ * change the row between this read and the delete.
+ */
+function durableRowIsNotTheCallers(
+	directory: string,
+	binding: Pick<ScopeBinding, 'bindingId' | 'generationId' | 'revision'>,
+	expectedPayload: string | undefined,
+): boolean {
+	const row = getCoordinationStateRaw(
+		directory,
+		SCOPE_BINDING_COORDINATION_NAMESPACE,
+		binding.generationId,
+	);
+	// Absent, or at another revision: the delete's own revision check reports
+	// that, exactly as before.
+	if (!row || row.revision !== binding.revision) return false;
+	if (expectedPayload !== undefined) return row.payload !== expectedPayload;
+	if (typeof binding.bindingId !== 'string' || binding.bindingId.length === 0)
+		return false;
+	let payload: unknown;
+	try {
+		payload = JSON.parse(row.payload);
+	} catch {
+		return false;
+	}
+	if (payload === null || typeof payload !== 'object') return false;
+	const durableBindingId = (payload as Record<string, unknown>).bindingId;
+	return (
+		typeof durableBindingId === 'string' &&
+		durableBindingId.length > 0 &&
+		durableBindingId !== binding.bindingId
+	);
+}
+
+/**
+ * SHARED TRANSACTIONAL TERMINAL SINK (v4 item 5): ledger entry + row
+ * deletion + in-memory exact tombstone. Must run inside a caller-owned
+ * coordination transaction. Returns a failure to abort the transaction.
+ *
+ * A caller that passes `expectedPayload` — the payload it observed — retires
+ * that content exactly or nothing. Any caller is refused a row that names a
+ * different binding by its binding id. See `durableRowIsNotTheCallers` for
+ * what is and is not established without a payload.
+ */
+function retireScopeBindingGenerationWithinTransaction(
+	directory: string,
+	binding: Pick<
+		ScopeBinding,
+		'bindingId' | 'generationId' | 'revision' | 'expiresAt'
+	>,
+	_kind: 'revoked' | 'superseded' | 'expired',
+	expectedPayload?: string,
+): ScopePersistenceFailure | null {
+	if (durableRowIsNotTheCallers(directory, binding, expectedPayload))
+		return persistenceFailure(
+			'Terminal retirement refused: the durable row is not the row the caller named.',
+		) as ScopePersistenceFailure;
+	const now = Date.now();
+	const ledgerFailure = writeDenyLedgerWithinTransaction(
+		directory,
+		(entries) => {
+			entries[binding.generationId] = {
+				bindingId: binding.bindingId,
+				kind: 'terminal',
+				revision: binding.revision + 1,
+				at: now,
+				rowExpiresAt: binding.expiresAt,
+			};
+		},
+	);
+	if (ledgerFailure) return ledgerFailure;
+	const deleted = deleteCoordinationStateWithinTransaction(
+		directory,
+		SCOPE_BINDING_COORDINATION_NAMESPACE,
+		binding.generationId,
+		binding.revision,
+	);
+	if (!deleted)
+		return persistenceFailure(
+			'Terminal retirement delete did not match the exact coordination row.',
+		) as ScopePersistenceFailure;
+	return null;
+}
+
+/** Record admission-pending deny evidence for a freshly committed successor. */
+function markAdmissionPendingWithinTransaction(
+	directory: string,
+	binding: Pick<
+		ScopeBinding,
+		'bindingId' | 'generationId' | 'revision' | 'expiresAt'
+	>,
+): ScopePersistenceFailure | null {
+	const now = Date.now();
+	const ledgerFailure = writeDenyLedgerWithinTransaction(
+		directory,
+		(entries) => {
+			entries[binding.generationId] = {
+				bindingId: binding.bindingId,
+				kind: 'admission-pending',
+				revision: binding.revision,
+				at: now,
+				rowExpiresAt: binding.expiresAt,
+			};
+		},
+	);
+	if (ledgerFailure) return ledgerFailure;
+	return null;
+}
+// ---- end deny ledger ----
+
 const lockfileWithSync = lockfile as typeof lockfile & {
 	lockSync(
 		file: string,
@@ -154,6 +537,7 @@ export type DurableScopeBindingResolution =
 	| { status: 'expired'; candidates: ScopeBinding[]; totalCandidates: number }
 	| { status: 'ambiguous'; candidates: ScopeBinding[]; totalCandidates: number }
 	| { status: 'overloaded' }
+	| { status: 'store_unreadable' }
 	| { status: 'not_declared' };
 
 // Windows reserved device names. Defence-in-depth — declare-scope already
@@ -628,6 +1012,28 @@ function importScopeBindingStateRows(
 	}
 }
 
+/** Best-effort shadow removal for sink-retired generations (authority lives in the coordination row). */
+function removeScopeBindingShadow(
+	directory: string,
+	binding: Pick<ScopeBinding, 'taskId' | 'bindingId' | 'generationId'>,
+): void {
+	try {
+		const filePath = resolveSafeScopeFileForUnlink(
+			directory,
+			getBindingFilePath(directory, { ...binding } as ScopeBinding),
+		);
+		if (filePath) fs.unlinkSync(filePath);
+	} catch {
+		/* Shadow cleanup is best-effort: if the file delete fails (for
+		   example a Windows lock), the file can be re-imported as a live
+		   row by the next read. Two backstops prevent it from restoring
+		   authority: ensureScopeBindingAuthorityImported skips any
+		   generationId that carries a terminal deny-ledger entry, and
+		   readAllAuthoritativeScopeBindings drops such rows too. The
+		   leftover file is, however, never retried by the pruner. */
+	}
+}
+
 function writeScopeBindingShadow(
 	directory: string,
 	binding: ScopeBinding,
@@ -860,7 +1266,20 @@ function ensureScopeBindingAuthorityImported(
 		if (legacy.rowCount === 0 && legacy.authorityFiles.length === 0) {
 			return { ok: true, value: undefined };
 		}
-		const importedBindings = legacy.bindings.map((binding) => ({ ...binding }));
+		const denyLedgerForImport = readDenyLedger(directory);
+		const deniedForImport =
+			denyLedgerForImport.status === 'valid'
+				? denyLedgerForImport.ledger.entries
+				: null;
+		// Issue #3889/v4c: a generation that carries a terminal deny-ledger
+		// entry was retired. Never re-import it from a leftover binding file,
+		// even if the durable namespace is empty (the AC5 backstop).
+		const importedBindings = legacy.bindings
+			.filter(
+				(binding) =>
+					deniedForImport?.[binding.generationId]?.kind !== 'terminal',
+			)
+			.map((binding) => ({ ...binding }));
 		if (authorityExists) {
 			archiveImportedScopeAuthorityFiles(legacy.authorityFiles);
 			for (const binding of importedBindings) {
@@ -927,7 +1346,27 @@ function readAllAuthoritativeScopeBindings(
 			);
 		}
 		const complete = bindings as ScopeBinding[];
-		const liveCount = complete.filter(
+		// Issue #3889/v4c: a generation that carries a terminal deny-ledger
+		// entry was retired. A live row re-imported for it (for example from a
+		// leftover binding file after a failed shadow unlink) must not authorize
+		// writes through ANY reader — resolver, child claim, pr-feedback, lease
+		// refresh, parallel-verdict or epic readers all go through this function.
+		// Applied here (the shared choke point) so no individual caller needs
+		// its own copy. Maintenance scheduling still scans the full set (below);
+		// the filter only drops retired generations from authorization views,
+		// so the pruner never sees a row that is already retired.
+		const denyLedgerForFilter = readDenyLedger(directory);
+		const denyEntriesForFilter =
+			denyLedgerForFilter.status === 'valid'
+				? denyLedgerForFilter.ledger.entries
+				: null;
+		const authorized = denyEntriesForFilter
+			? complete.filter(
+					(binding) =>
+						denyEntriesForFilter[binding.generationId]?.kind !== 'terminal',
+				)
+			: complete;
+		const liveCount = authorized.filter(
 			(binding) =>
 				binding.lifecycleState === 'live' && binding.expiresAt > Date.now(),
 		).length;
@@ -941,7 +1380,24 @@ function readAllAuthoritativeScopeBindings(
 				message: 'The durable binding set exceeds the live binding capacity.',
 			};
 		}
-		return { ok: true, value: complete };
+		// Issue #3889: schedule maintenance when the scanned set contains rows
+		// collectable by the reworked pruner (decision from already-scanned
+		// data; the per-directory job dedup bounds concurrency). The deny
+		// ledger is consulted cheaply; an unreadable ledger schedules too (the
+		// pruner then reports the corruption fail-closed).
+		if (!options.maintenanceScan) {
+			const denyRead = readDenyLedger(directory);
+			const denyEntries =
+				denyRead.status === 'valid' ? denyRead.ledger.entries : null;
+			const now = Date.now();
+			const hasCollectable =
+				denyRead.status === 'unreadable' ||
+				complete.some((binding) =>
+					scopeRowCollectable(binding, denyEntries, now),
+				);
+			if (hasCollectable) scheduleScopeBindingMaintenance(directory);
+		}
+		return { ok: true, value: authorized };
 	} catch (error) {
 		return persistenceFailure(
 			`Authoritative scope binding read failed: ${
@@ -1427,10 +1883,34 @@ export async function persistAndRegisterScopeBinding(
 function rollbackAdmissionFailure(
 	directory: string,
 	persisted: ScopeBinding,
-	predecessors: readonly { original: ScopeBinding; superseded: ScopeBinding }[],
 	admission: Extract<ScopeBindingAdmissionResult, { ok: false }>,
 ): ScopePersistenceResult<never> {
+	// v4b item 3 (issues #3889/#3900): predecessors were retired through the
+	// shared sink (deleted + deny-ledgered) and are NOT restored — a
+	// re-declaration revokes the task's prior chain by definition. The
+	// committed successor is retired through the same sink so a failed
+	// admission can never leave an authorizable row. If this compensating
+	// transaction itself fails, the admission-pending ledger entry written
+	// with the successor's commit already denies it in every runtime.
 	const now = Date.now();
+	try {
+		withCoordinationTransaction(directory, () => {
+			const failure =
+				_scopePersistenceInternals.retireScopeBindingGenerationWithinTransaction(
+					directory,
+					persisted,
+					'revoked',
+				);
+			if (failure)
+				throw new Error(failure.ok ? 'unreachable' : failure.message);
+		});
+	} catch (error) {
+		return persistenceFailure(
+			`Memory admission failed and durable rollback failed: ${
+				error instanceof Error ? error.message : 'unknown coordination error'
+			} (the unadmitted generation stays deny-ledgered)`,
+		);
+	}
 	const revokedCandidate: ScopeBinding = {
 		...persisted,
 		revision: persisted.revision + 1,
@@ -1438,71 +1918,8 @@ function rollbackAdmissionFailure(
 		updatedAt: now,
 		expiresAt: Math.min(persisted.expiresAt, now),
 	};
-	const restoredCandidates = predecessors.map(({ original, superseded }) => ({
-		...original,
-		revision: superseded.revision + 1,
-		lifecycleState: 'live' as const,
-		updatedAt: now,
-	}));
-	let failureMessage: string | null = null;
-	try {
-		withCoordinationTransaction(directory, () => {
-			const revoked =
-				_scopePersistenceInternals.transitionScopeBindingStateWithinTransaction(
-					directory,
-					revokedCandidate,
-					persisted.revision,
-				);
-			if (!revoked.ok) {
-				failureMessage = revoked.message;
-				throw new Error('Scope rollback revocation transition failed.');
-			}
-			for (let index = 0; index < restoredCandidates.length; index += 1) {
-				const restored = restoredCandidates[index]!;
-				const superseded = predecessors[index]!.superseded;
-				const result =
-					_scopePersistenceInternals.transitionScopeBindingStateWithinTransaction(
-						directory,
-						restored,
-						superseded.revision,
-					);
-				if (!result.ok) {
-					failureMessage = result.message;
-					throw new Error('Scope rollback predecessor restore failed.');
-				}
-			}
-		});
-	} catch (error) {
-		return persistenceFailure(
-			`Memory admission failed and durable rollback failed: ${
-				failureMessage ??
-				(error instanceof Error ? error.message : 'unknown coordination error')
-			}`,
-		);
-	}
 	installScopeBindingTombstone(revokedCandidate);
 	writeScopeBindingShadow(directory, revokedCandidate);
-	const admitted: ScopeBinding[] = [];
-	for (const restored of restoredCandidates) {
-		writeScopeBindingShadow(directory, restored);
-		const memory = updateExactScopeBinding(restored);
-		const admissionResult = memory.ok ? memory : registerScopeBinding(restored);
-		if (!admissionResult.ok) {
-			for (const applied of admitted) {
-				installScopeBindingTombstone({
-					...applied,
-					revision: applied.revision + 1,
-					lifecycleState: 'revoked',
-					updatedAt: Date.now(),
-					expiresAt: Math.min(applied.expiresAt, Date.now()),
-				});
-			}
-			return persistenceFailure(
-				`Memory admission failed and predecessor re-admission failed: ${admissionResult.message}`,
-			);
-		}
-		admitted.push(restored);
-	}
 	return {
 		ok: false,
 		code: admission.code,
@@ -1614,11 +2031,22 @@ export function resolveScopeBindingFromDisk(input: {
 	if (!isSafeTaskId(input.taskId)) return { status: 'not_declared' };
 	const completeSet = readAllAuthoritativeScopeBindings(input.directory);
 	if (!completeSet.ok) {
-		if (completeSet.code === 'SCOPE_BINDING_STORE_OVERLOADED') {
-			scheduleScopeBindingMaintenance(input.directory);
+		scheduleScopeBindingMaintenance(input.directory);
+		// Issue #3889 RC1: only genuine capacity failures render as the
+		// capacity class. Every other durable-read failure (malformed or
+		// workspace-mismatched row, import error, thrown read) is its own
+		// fail-closed class so the capacity remedy stops hiding real causes.
+		if (completeSet.code !== 'SCOPE_BINDING_STORE_OVERLOADED') {
+			return { status: 'store_unreadable' };
 		}
 		return { status: 'overloaded' };
 	}
+	// Tri-state deny-ledger read: an unreadable/corrupt ledger fails closed
+	// BEFORE any candidate or in-memory fallback is trusted (plan v4 R3-1).
+	const denyLedger = readDenyLedger(input.directory);
+	if (denyLedger.status === 'unreadable') return { status: 'store_unreadable' };
+	const denyEntries =
+		denyLedger.status === 'valid' ? denyLedger.ledger.entries : null;
 	const candidates = completeSet.value.filter(
 		(parsed) =>
 			parsed.taskId === input.taskId &&
@@ -1633,9 +2061,20 @@ export function resolveScopeBindingFromDisk(input: {
 			(input.parentCallId === undefined ||
 				parsed.parentCallId === input.parentCallId),
 	);
+	// Issue #3889/v4b: an unadmitted successor carries durable
+	// admission-pending deny evidence (revision-ungated, per generationId)
+	// — it must never resolve as an authorizable live candidate.
+	// Issue #3889/v4c (final-critic r3): a generation that has a terminal
+	// deny-ledger entry was retired; a live row re-imported for it (for
+	// example from a leftover binding file) must not authorize writes.
+	// Terminal entries outlive the durable row by design, so this check is
+	// keyed on the ledger entry's existence, not on its revision.
 	const live = candidates.filter(
 		(candidate) =>
-			candidate.lifecycleState === 'live' && candidate.expiresAt > Date.now(),
+			candidate.lifecycleState === 'live' &&
+			candidate.expiresAt > Date.now() &&
+			denyEntries?.[candidate.generationId]?.kind !== 'admission-pending' &&
+			denyEntries?.[candidate.generationId]?.kind !== 'terminal',
 	);
 	if (live.length > 1)
 		return {
@@ -1646,7 +2085,9 @@ export function resolveScopeBindingFromDisk(input: {
 	if (live.length === 1) return { status: 'found', binding: live[0] };
 	const expired = candidates.filter(
 		(candidate) =>
-			candidate.lifecycleState !== 'live' || candidate.expiresAt <= Date.now(),
+			candidate.lifecycleState !== 'live' ||
+			candidate.expiresAt <= Date.now() ||
+			denyEntries?.[candidate.generationId]?.kind === 'admission-pending',
 	);
 	if (candidates.length > 0 && !input.includeExpired) {
 		return { status: 'not_declared' };
@@ -1676,7 +2117,11 @@ export function resolveScopeBindingFromDisk(input: {
 									(input.requireDispatchCorrelation !== true ||
 										isDispatchCorrelated(binding)) &&
 									(input.parentCallId === undefined ||
-										binding.parentCallId === input.parentCallId),
+										binding.parentCallId === input.parentCallId) &&
+									// Terminal deny-ledger evidence outlives the durable
+									// row: a stale in-memory copy of a retired generation
+									// must NOT authorize writes (issue #3889, plan D2).
+									!(denyEntries?.[binding.generationId]?.kind === 'terminal'),
 							);
 				if (inMemory.length > 1) {
 					return {
@@ -1752,16 +2197,32 @@ export function clearScopeBindingFromDisk(input: {
 		updatedAt: now,
 		expiresAt: Math.min(current.expiresAt, now),
 	};
-	const retired = transitionScopeBindingState(
-		input.directory,
-		tombstone,
-		current.revision,
-	);
-	if (!retired.ok) return retired;
-	installScopeBindingTombstone(retired.value);
-	writeScopeBindingShadow(input.directory, retired.value);
+	// Shared sink (v4 item 5): session-teardown revocation deletes the row and
+	// installs terminal deny evidence atomically, instead of leaving a
+	// tombstone row for the age-based pruner.
+	let sinkFailure: ScopePersistenceFailure | null = null;
+	try {
+		withCoordinationTransaction(input.directory, () => {
+			const failure = retireScopeBindingGenerationWithinTransaction(
+				input.directory,
+				current,
+				'revoked',
+			);
+			if (failure)
+				throw new Error(failure.ok ? 'unreachable' : failure.message);
+		});
+	} catch (error) {
+		sinkFailure = persistenceFailure(
+			`Session teardown retirement failed: ${
+				error instanceof Error ? error.message : 'unknown coordination error'
+			}`,
+		) as ScopePersistenceFailure;
+	}
+	if (sinkFailure) return sinkFailure;
+	installScopeBindingTombstone(tombstone);
+	removeScopeBindingShadow(input.directory, current);
 	scheduleScopeBindingMaintenance(input.directory);
-	return retired;
+	return { ok: true, value: tombstone };
 }
 
 export async function tombstoneScopeBinding(
@@ -1806,20 +2267,36 @@ export async function tombstoneScopeBinding(
 		updatedAt: now,
 		expiresAt: Math.min(current.expiresAt, now),
 	};
-	const persisted = transitionScopeBindingState(
-		directory,
-		tombstone,
-		current.revision,
-	);
-	if (!persisted.ok) {
+	// Shared sink: terminal transition deletes the row and installs durable
+	// deny evidence atomically. The failed-revocation overlay below still
+	// guards same-process admission when the sink cannot complete.
+	let sinkFailure: ScopePersistenceFailure | null = null;
+	try {
+		withCoordinationTransaction(directory, () => {
+			const failure = retireScopeBindingGenerationWithinTransaction(
+				directory,
+				current,
+				reason,
+			);
+			if (failure)
+				throw new Error(failure.ok ? 'unreachable' : failure.message);
+		});
+	} catch (error) {
+		sinkFailure = persistenceFailure(
+			`Scope tombstone sink failed: ${
+				error instanceof Error ? error.message : 'unknown coordination error'
+			}`,
+		) as ScopePersistenceFailure;
+	}
+	if (sinkFailure) {
 		installFailedRevocationOverlay(binding, reason);
-		return persisted;
+		return sinkFailure;
 	}
 	clearExactScopeBinding(binding);
-	installScopeBindingTombstone(persisted.value);
-	writeScopeBindingShadow(directory, persisted.value);
+	installScopeBindingTombstone(tombstone);
+	removeScopeBindingShadow(directory, current);
 	scheduleScopeBindingMaintenance(directory);
-	return persisted;
+	return { ok: true, value: tombstone };
 }
 
 async function ensureLockTarget(targetPath: string): Promise<boolean> {
@@ -1856,6 +2333,23 @@ export async function refreshScopeBindingLease(input: {
 			message:
 				'Refresh identity is not the exact current session/task generation.',
 		};
+	}
+	// v4c R5-1: lease renewal refuses while an admission-pending entry
+	// covers the exact generation (revision bumping must not escape it).
+	const renewalDeny = readDenyLedger(input.directory);
+	if (
+		renewalDeny.status === 'valid' &&
+		renewalDeny.ledger.entries[input.generationId]?.kind === 'admission-pending'
+	) {
+		return {
+			ok: false,
+			code: 'SCOPE_BINDING_STALE',
+			message:
+				'Refresh refused: the generation carries admission-pending deny evidence.',
+		};
+	}
+	if (renewalDeny.status === 'unreadable') {
+		return persistenceFailure(renewalDeny.reason);
 	}
 	if (
 		current.lifecycleState !== 'live' ||
@@ -2080,6 +2574,22 @@ export async function claimScopeBindingForChildDurably(input: {
 			if (!claimedWrite.ok) {
 				throw new ScopeCoordinationAbort(claimedWrite);
 			}
+			// v4b deny-first: the claimed successor is born with durable
+			// admission-pending evidence in the SAME transaction.
+			const pendingFailure = markAdmissionPendingWithinTransaction(
+				input.directory,
+				claimedWrite.value,
+			);
+			if (pendingFailure) throw new ScopeCoordinationAbort(pendingFailure);
+			// Shared sink: predecessor row deleted + terminal deny-ledger entry
+			// (immediate collection; deny evidence survives the deletion).
+			const predecessorFailure = retireScopeBindingGenerationWithinTransaction(
+				input.directory,
+				predecessor,
+				'superseded',
+			);
+			if (predecessorFailure)
+				throw new ScopeCoordinationAbort(predecessorFailure);
 			const superseded: ScopeBinding = {
 				...predecessor,
 				revision: predecessor.revision + 1,
@@ -2090,20 +2600,20 @@ export async function claimScopeBindingForChildDurably(input: {
 					claimedWrite.value.updatedAt,
 				),
 			};
-			const retiredWrite =
-				_scopePersistenceInternals.transitionScopeBindingStateWithinTransaction(
-					input.directory,
-					superseded,
-					predecessor.revision,
-				);
-			if (!retiredWrite.ok) {
-				throw new ScopeCoordinationAbort(retiredWrite);
-			}
 			claimed = claimedWrite.value;
-			retired = retiredWrite.value;
+			retired = superseded;
+			removeScopeBindingShadow(input.directory, predecessor);
 		});
 		if (alreadyClaimed) {
-			const admission = registerScopeBinding(alreadyClaimed);
+			const alreadyClaimedBinding: ScopeBinding = alreadyClaimed;
+			const admission = registerScopeBinding(alreadyClaimedBinding);
+			if (admission.ok) {
+				releaseAdmissionPending(
+					input.directory,
+					alreadyClaimedBinding.generationId,
+					alreadyClaimedBinding.revision,
+				);
+			}
 			return admission.ok
 				? {
 						ok: true,
@@ -2118,19 +2628,28 @@ export async function claimScopeBindingForChildDurably(input: {
 		if (!predecessor || !claimed || !retired) {
 			return persistenceFailure('Claim transaction did not settle a winner.');
 		}
-		writeScopeBindingShadow(input.directory, claimed);
-		writeScopeBindingShadow(input.directory, retired);
-		const admission = registerScopeBinding(claimed);
+		const claimedBinding: ScopeBinding = claimed;
+		const retiredBinding: ScopeBinding = retired;
+		writeScopeBindingShadow(input.directory, claimedBinding);
+		writeScopeBindingShadow(input.directory, retiredBinding);
+		const admission = registerScopeBinding(claimedBinding);
 		if (!admission.ok) {
 			return rollbackAdmissionFailure(
 				input.directory,
-				claimed,
-				[{ original: predecessor, superseded: retired }],
+				claimedBinding,
 				admission,
 			);
 		}
-		installScopeBindingTombstone(retired);
-		return { ok: true, value: { previous: predecessor, claimed } };
+		releaseAdmissionPending(
+			input.directory,
+			claimedBinding.generationId,
+			claimedBinding.revision,
+		);
+		installScopeBindingTombstone(retiredBinding);
+		return {
+			ok: true,
+			value: { previous: predecessor, claimed: claimedBinding },
+		};
 	} catch (error) {
 		if (error instanceof ScopeCoordinationAbort) return error.failure;
 		return persistenceFailure(
@@ -2192,6 +2711,31 @@ export async function replaceExistingScopeDeclaration(input: {
 		let persisted: ScopeBinding | null = null;
 		const retired: ScopeBinding[] = [];
 		withCoordinationTransaction(input.directory, () => {
+			// D2b (v3): re-read the authoritative set INSIDE the transaction so a
+			// child claimed between the pre-transaction read and this commit
+			// cannot escape retirement.
+			const inTx = readAllAuthoritativeScopeBindings(input.directory, {
+				enforceLiveCapacity: false,
+				maintenanceScan: true,
+			});
+			if (!inTx.ok) throw new ScopeCoordinationAbort(inTx);
+			const chain = inTx.value.filter(
+				(candidate) =>
+					candidate.lifecycleState === 'live' &&
+					candidate.workspaceIdentity === binding.workspaceIdentity &&
+					candidate.taskId === binding.taskId &&
+					candidate.generationId !== binding.generationId &&
+					(candidate.ownerSessionId === binding.ownerSessionId ||
+						candidate.parentOwnerSessionId === binding.ownerSessionId),
+			);
+			if (chain.length > 0 && !input.replaceExisting) {
+				throw new ScopeCoordinationAbort({
+					ok: false,
+					code: 'SCOPE_BINDING_AMBIGUOUS',
+					message:
+						'A live owned generation already exists; retry declare_scope with replace_existing=true to revoke it atomically.',
+				});
+			}
 			const create =
 				_scopePersistenceInternals.transitionScopeBindingStateWithinTransaction(
 					input.directory,
@@ -2202,24 +2746,29 @@ export async function replaceExistingScopeDeclaration(input: {
 				throw new ScopeCoordinationAbort(create);
 			}
 			persisted = create.value;
-			for (const prior of owned) {
-				const superseded: ScopeBinding = {
+			// v4b deny-first: the committed successor is born with durable
+			// admission-pending evidence in the SAME transaction, so a crash or
+			// compensation failure can never leave it authorizable.
+			const pendingFailure = markAdmissionPendingWithinTransaction(
+				input.directory,
+				create.value,
+			);
+			if (pendingFailure) throw new ScopeCoordinationAbort(pendingFailure);
+			for (const prior of chain) {
+				const retirement = retireScopeBindingGenerationWithinTransaction(
+					input.directory,
+					prior,
+					'superseded',
+				);
+				if (retirement) throw new ScopeCoordinationAbort(retirement);
+				const tombstone: ScopeBinding = {
 					...prior,
 					revision: prior.revision + 1,
 					lifecycleState: 'superseded',
 					updatedAt: create.value.updatedAt,
 					expiresAt: Math.min(prior.expiresAt, create.value.updatedAt),
 				};
-				const result =
-					_scopePersistenceInternals.transitionScopeBindingStateWithinTransaction(
-						input.directory,
-						superseded,
-						prior.revision,
-					);
-				if (!result.ok) {
-					throw new ScopeCoordinationAbort(result);
-				}
-				retired.push(result.value);
+				retired.push(tombstone);
 			}
 		});
 		if (!persisted) {
@@ -2227,29 +2776,29 @@ export async function replaceExistingScopeDeclaration(input: {
 				'Declaration transaction did not persist a generation.',
 			);
 		}
-		writeScopeBindingShadow(input.directory, persisted);
+		const persistedBinding: ScopeBinding = persisted;
+		writeScopeBindingShadow(input.directory, persistedBinding);
 		for (const prior of retired) {
-			writeScopeBindingShadow(input.directory, prior);
 			installScopeBindingTombstone(prior);
+			removeScopeBindingShadow(input.directory, prior);
 		}
-		const admission = registerScopeBinding(persisted);
+		const admission = registerScopeBinding(persistedBinding);
 		if (!admission.ok) {
-			if (retired.length !== owned.length) {
-				return persistenceFailure(
-					'Memory admission failed after an incomplete predecessor transition.',
-				);
-			}
 			return rollbackAdmissionFailure(
 				input.directory,
-				persisted,
-				owned.map((original, index) => ({
-					original,
-					superseded: retired[index]!,
-				})),
+				persistedBinding,
 				admission,
 			);
 		}
-		return { ok: true, value: persisted };
+		// Admission succeeded: release the pending deny evidence (fail-closed
+		// false-deny on release failure — a fresh declare recovers; v4b).
+		releaseAdmissionPending(
+			input.directory,
+			persistedBinding.generationId,
+			persistedBinding.revision,
+		);
+		scheduleScopeBindingMaintenance(input.directory);
+		return { ok: true, value: persistedBinding };
 	} catch (error) {
 		if (error instanceof ScopeCoordinationAbort) return error.failure;
 		return persistenceFailure(
@@ -2259,6 +2808,8 @@ export async function replaceExistingScopeDeclaration(input: {
 		);
 	}
 }
+
+const maintenanceContinuationPending = new Set<string>();
 
 function scheduleScopeBindingMaintenance(directory: string): void {
 	const key = canonicalExistingFilesystemPath(directory);
@@ -2273,7 +2824,17 @@ function scheduleScopeBindingMaintenance(directory: string): void {
 		.then(() => pruneScopeBindingTombstones(directory))
 		.then(() => undefined)
 		.catch(() => undefined)
-		.finally(() => maintenanceJobs.delete(key));
+		.finally(() => {
+			maintenanceJobs.delete(key);
+			// #3889 (4.5 review finding 1): a full batch reschedules its own
+			// continuation only AFTER leaving the dedup map — requesting it
+			// inside the prune body is discarded while this job still holds
+			// the key.
+			if (maintenanceContinuationPending.has(key)) {
+				maintenanceContinuationPending.delete(key);
+				scheduleScopeBindingMaintenance(directory);
+			}
+		});
 	maintenanceJobs.set(key, job);
 }
 
@@ -2284,8 +2845,69 @@ export async function flushScopeBindingMaintenance(
 		? canonicalExistingFilesystemPath(directory)
 		: undefined;
 	if (directory && key === null) return;
-	const job = key ? maintenanceJobs.get(key) : undefined;
-	await Promise.all(job ? [job] : [...maintenanceJobs.values()]);
+	// #3889 (4.5 round-2 finding 1): a drained batch may install a
+	// continuation job in its finally; keep awaiting until the directory (or
+	// the whole map) is quiet so ONE flush drains all batches. Bounded.
+	const maxRounds =
+		Math.ceil(maintenanceFileScanCapacity / MAX_MAINTENANCE_COLLECT_BATCH) + 2;
+	for (let round = 0; round < maxRounds; round += 1) {
+		const job = key ? maintenanceJobs.get(key) : undefined;
+		const jobs = job ? [job] : key ? [] : [...maintenanceJobs.values()];
+		if (jobs.length === 0) return;
+		await Promise.all(jobs);
+	}
+}
+
+/**
+ * Maintenance-owned collection (issues #3889/#3900, plan v3/v4/v4d):
+ *  - legacy terminal rows (pre-fix stores): deny-ledger backfill + delete;
+ *  - time-expired live-state rows PAST the 24h revival window: terminal
+ *    ledger entry + delete (also converts a pending entry for that row);
+ *  - deny-ledger housekeeping (kind-aware prune; terminal FIFO cap);
+ *  - settled claim receipts (unchanged).
+ * Every collection is authority-first: the coordination delete is the CAS
+ * exactness guard; shadow removal is best-effort secondary.
+ */
+const MAX_MAINTENANCE_COLLECT_BATCH = 128;
+
+function scopeRowCollectable(
+	binding: ScopeBinding,
+	denyEntries: Record<string, ScopeDenyLedgerEntry> | null,
+	now: number,
+): boolean {
+	if (binding.lifecycleState !== 'live') {
+		// Legacy terminal row: collectible unless already deny-ledgered
+		// (post-fix terminal rows are deleted at transition and never appear).
+		return denyEntries?.[binding.generationId] === undefined;
+	}
+	// Live-state row past the revival window: revival is impossible, so the
+	// row is collectible. Inside the window it stays (issue #2271 revival).
+	return now - binding.expiresAt > SCOPE_BINDING_AUTO_REVIVE_WINDOW_MS;
+}
+
+async function collectScopeRowsThroughSink(
+	directory: string,
+	rows: readonly ScopeBinding[],
+): Promise<number> {
+	let collected = 0;
+	for (const row of rows) {
+		try {
+			withCoordinationTransaction(directory, () => {
+				const failure = retireScopeBindingGenerationWithinTransaction(
+					directory,
+					row,
+					row.lifecycleState === 'live' ? 'expired' : 'superseded',
+				);
+				if (failure)
+					throw new Error(failure.ok ? 'unreachable' : failure.message);
+			});
+			collected += 1;
+			removeScopeBindingShadow(directory, row);
+		} catch {
+			/* row changed concurrently or delete raced; leave for the next run */
+		}
+	}
+	return collected;
 }
 
 /** Prune old non-authorizing generations and settled receipts under one lock. */
@@ -2311,79 +2933,29 @@ export async function pruneScopeBindingTombstones(
 		});
 		if (!readAll.ok) return readAll;
 		const all = readAll.value;
-		const tombstones = all
-			.filter((binding) => binding.lifecycleState !== 'live')
-			.sort((left, right) => left.updatedAt - right.updatedAt);
+		const denyRead = readDenyLedger(directory);
+		// Fail closed: while the deny ledger is unreadable, collect nothing —
+		// deleting rows without their deny evidence would fail open.
+		if (denyRead.status === 'unreadable')
+			return persistenceFailure(denyRead.reason);
+		const denyEntries =
+			denyRead.status === 'valid' ? denyRead.ledger.entries : null;
 		const now = Date.now();
-		const removable = tombstones.filter(
-			(binding, index) =>
-				now - binding.updatedAt > MAX_TOMBSTONE_AGE_MS ||
-				index < tombstones.length - MAX_DURABLE_TOMBSTONES,
-		);
-		let removed = 0;
-		for (const binding of removable) {
-			const filePath = resolveSafeScopeFileForUnlink(
-				directory,
-				getBindingFilePath(directory, binding),
-			);
-			if (!filePath) continue;
-			const exactLockPath = getGenerationLockPath(filePath);
-			if (!(await ensureLockTarget(exactLockPath))) continue;
-			let releaseExact: (() => Promise<void>) | undefined;
-			let removedExact = false;
-			try {
-				releaseExact = await lockfile.lock(exactLockPath, {
-					stale: LOCK_STALE_MS,
-					retries: { retries: 0 },
-					realpath: false,
-				});
-				const latestRaw = readBoundedFile(filePath);
-				const latest = latestRaw
-					? validateScopeBindingPayload(
-							directory,
-							JSON.parse(latestRaw) as Partial<ScopeBinding>,
-						)
-					: null;
-				if (
-					!latest ||
-					latest.generationId !== binding.generationId ||
-					latest.revision !== binding.revision ||
-					(latest.lifecycleState === 'live' &&
-						!hasDurableRetirementIntent(filePath, latest))
-				)
-					continue;
-				deleteCoordinationState(
-					directory,
-					SCOPE_BINDING_COORDINATION_NAMESPACE,
-					binding.generationId,
-					binding.revision,
-				);
-				fs.unlinkSync(filePath);
-				removedExact = true;
-				removed++;
-			} catch {
-				/* changed concurrently */
-			} finally {
-				if (releaseExact)
-					try {
-						await releaseExact();
-					} catch {
-						/* stale/released */
-					}
-			}
-			if (removedExact && !fs.existsSync(filePath)) {
-				try {
-					fs.unlinkSync(exactLockPath);
-				} catch {
-					/* another runtime adopted or removed the target */
-				}
-				try {
-					fs.unlinkSync(getRetirementIntentPath(filePath));
-				} catch {
-					/* settled intent already removed */
-				}
-			}
+		const collectable = all
+			.filter((binding) => scopeRowCollectable(binding, denyEntries, now))
+			.slice(0, MAX_MAINTENANCE_COLLECT_BATCH);
+		let collected = await collectScopeRowsThroughSink(directory, collectable);
+		// Ledger housekeeping pass (prunes terminal entries past TTL, applies
+		// the terminal FIFO cap; pending entries are never evicted here).
+		try {
+			withCoordinationTransaction(directory, () => {
+				const failure = writeDenyLedgerWithinTransaction(directory, () => {});
+				if (failure && !failure.ok) throw new Error(failure.message);
+			});
+		} catch {
+			/* ledger housekeeping is retried on the next maintenance run */
 		}
+		// Settled claim receipts (unchanged behavior).
 		let receiptNames: string[] = [];
 		try {
 			receiptNames = fs
@@ -2404,32 +2976,25 @@ export async function pruneScopeBindingTombstones(
 				});
 				const raw = readBoundedFile(receiptPath);
 				if (!raw) continue;
-				let receipt: ScopeClaimReceipt | null = null;
+				const stale =
+					Date.now() - fs.statSync(receiptPath).mtimeMs > MAX_TOMBSTONE_AGE_MS;
+				let winnerKnown = false;
 				try {
-					receipt = JSON.parse(raw) as ScopeClaimReceipt;
+					const receipt = JSON.parse(raw) as ScopeClaimReceipt;
+					winnerKnown = all.some(
+						(binding) =>
+							binding.bindingId === receipt.winnerGenerationId ||
+							binding.generationId === receipt.winnerGenerationId,
+					);
 				} catch {
 					/* malformed receipts are removable once old */
 				}
-				const winner = receipt
-					? all.find(
-							(binding) => binding.generationId === receipt?.winnerGenerationId,
-						)
-					: undefined;
-				const old =
-					Date.now() - fs.statSync(receiptPath).mtimeMs > MAX_TOMBSTONE_AGE_MS;
-				if (
-					old ||
-					Boolean(
-						winner &&
-							(winner.lifecycleState !== 'live' ||
-								winner.expiresAt <= Date.now()),
-					)
-				) {
+				if (stale && !winnerKnown) {
 					fs.unlinkSync(receiptPath);
-					removed++;
+					collected += 1;
 				}
 			} catch {
-				/* active or changed receipt */
+				/* receipt raced with a claim */
 			} finally {
 				if (releaseReceipt)
 					try {
@@ -2439,10 +3004,29 @@ export async function pruneScopeBindingTombstones(
 					}
 			}
 		}
-		return { ok: true, value: removed };
+		// Reschedule when more collectable rows remain AND this round made
+		// progress (bounded drain, zero-progress guard). The continuation is
+		// consumed by the job wrapper's finally (see
+		// scheduleScopeBindingMaintenance) so it survives the dedup map; gating
+		// on `collected > 0` stops a persistently faulted sink (every delete
+		// failing while reads still work) from re-arming a zero-progress loop
+		// — the next read/write trigger retries instead.
+		const remaining = all.length - collectable.length;
+		if (
+			collected > 0 &&
+			collectable.length === MAX_MAINTENANCE_COLLECT_BATCH &&
+			remaining > 0
+		) {
+			maintenanceContinuationPending.add(
+				canonicalExistingFilesystemPath(directory) ?? directory,
+			);
+		}
+		return { ok: true, value: collected };
 	} catch (error) {
 		return persistenceFailure(
-			`Scope maintenance failed: ${error instanceof Error ? error.message : 'unknown I/O error'}`,
+			`Scope maintenance failed: ${
+				error instanceof Error ? error.message : 'unknown coordination error'
+			}`,
 		);
 	} finally {
 		if (release)
@@ -2454,11 +3038,6 @@ export async function pruneScopeBindingTombstones(
 	}
 }
 
-/**
- * Resolve authorization against the current durable plan projection. This is
- * synchronous so guardrail paths can use one exact source without reviving the
- * legacy session/v1/plan fallback chain.
- */
 function readCurrentPlan(directory: string): Plan | null {
 	try {
 		const planPath = path.join(directory, '.swarm', 'plan.json');
@@ -2541,6 +3120,16 @@ function attemptIdleScopeBindingRevival(
 	if (candidate.expiresAt > now) return null;
 	if (now - candidate.expiresAt > SCOPE_BINDING_AUTO_REVIVE_WINDOW_MS)
 		return null;
+	// v4c R5-1: an admission-pending ledger entry denies by generationId,
+	// revision-ungated — revival must refuse while one covers the generation.
+	const revivalDeny = readDenyLedger(directory);
+	if (
+		revivalDeny.status === 'valid' &&
+		revivalDeny.ledger.entries[candidate.generationId]?.kind ===
+			'admission-pending'
+	)
+		return null;
+	if (revivalDeny.status === 'unreadable') return null;
 	// Sweep-signature tombstones ('expired' lifecycle from in-memory
 	// sweepExpired on any scope read) do not block revival — the durable CAS
 	// below re-verifies the on-disk generation. Deliberate revocation classes
@@ -2621,7 +3210,16 @@ function resolveAuthorizedScopeBindingForPlanDetailed(input: {
 				totalCandidates: 1,
 			};
 		const admission = registerScopeBinding(durable.binding);
-		return admission.ok ? durable : { status: 'overloaded' };
+		if (admission.ok) return durable;
+		// Issue #3889 RC1 (in-memory collapse): classify the admission failure
+		// truthfully — only map saturation is a capacity condition.
+		if (admission.code === 'SCOPE_BINDING_CAPACITY')
+			return { status: 'overloaded' };
+		return {
+			status: 'expired',
+			candidates: [durable.binding],
+			totalCandidates: 1,
+		};
 	}
 	// Issue #2271 bug 5: a single binding that merely expired while the owning
 	// session was idle is auto-revived here (serialized CAS, bounded window,
@@ -2688,6 +3286,7 @@ export function resolveAuthorizedScopeBindingForSessionDetailed(input: {
 			activeSessionId: input.activeSessionId,
 		});
 		if (resolution.status === 'overloaded') return resolution;
+		if (resolution.status === 'store_unreadable') return resolution;
 		if (resolution.status === 'ambiguous') return resolution;
 		if (resolution.status === 'found') matches.push(resolution.binding);
 		if (resolution.status === 'expired') {
@@ -2767,10 +3366,352 @@ function atomicWriteSync(targetPath: string, content: string): void {
 	atomicWriteSwarmFileSync(targetPath, content);
 }
 
+/** Hard bound on reset-sweep passes (defense in depth: every pass that
+ * continues removed at least one row, so the loop is already bound by the
+ * store size — a mis-set scan capacity must never spin the command). */
+const MAX_RESET_SWEEP_PASSES = 32;
+
+export interface ScopeResetSweepOutcome {
+	/** Distinct rows of the reset sessions that the sweep left cleared: its
+	 * latest word on each is a retirement it confirmed. A row that another
+	 * process re-inserts, where the sweep then cannot confirm a retirement or
+	 * sees it corrupt, is reported in that other bucket instead. */
+	removed: number;
+	/** Rows the sweep last saw with a payload no session can claim
+	 * (unparseable, or an object carrying no session id). Never removed on a
+	 * guess, and not read again: they are reported as seen, not as certainly
+	 * still present. A row that a later page can attribute again, or retires,
+	 * is not counted. */
+	unidentifiable: number;
+	/** The store could not be enumerated: nothing was swept past the point
+	 * the read failed. */
+	unreadable: boolean;
+	/** The sweep stopped before it could confirm the store was seen in full
+	 * — a full page removed nothing, or the pass limit was reached: rows of
+	 * the reset sessions may remain unswept. */
+	truncated: boolean;
+	/** Rows whose last retirement attempt by this sweep threw — so the sweep
+	 * has no confirmation, whichever the transaction did — and that were read
+	 * again and found still present and still the reset sessions'. */
+	failed: number;
+	/** Rows whose last retirement attempt by this sweep threw and that the
+	 * store then refused to read again: whether they remain is not known. */
+	unchecked: number;
+	/** Rows whose last retirement attempt by this sweep threw and that the
+	 * sweep then found gone, or no longer the reset sessions'. Every attempt
+	 * whose outcome is unknown ends in exactly one report: here, `unchecked`,
+	 * `failed` or `unidentifiable`. Whether the sweep's own transaction
+	 * committed is not known, so these rows are not counted as cleared. */
+	unconfirmedRelinquished: number;
+}
+
+/**
+ * Reset-session scope sweep (issue #3889 AC5, plan D3): raw-authoritative
+ * enumeration — rows are attributed by RAW payload fields (owner, parent, or
+ * workflow session) without full validation — and removed through the shared
+ * transactional sink, so another runtime stale in-memory copy stays denied
+ * after the durable row disappears. Unidentifiable rows (unparseable
+ * payloads) are left in place and counted for an operator-cleanup warning.
+ * In-memory bindings for the same lineage are cleared on every exit path so
+ * the reset cannot resurrect authority through the memory fallback.
+ *
+ * Reporting states only what the sweep established. A store that cannot be
+ * enumerated is reported `unreadable` — never as a silent zero — and the
+ * sweep pages while rows are being removed, reporting `truncated` when it
+ * stops before it could confirm the store was seen in full (a full page
+ * removed nothing, or the pass limit was reached). A row is reported ONE
+ * way: the sweep's latest word on each key decides its single bucket. A key
+ * is cleared only while that latest word is a retirement the sweep
+ * confirmed; a later observation replaces it — the row was last seen
+ * unidentifiable, or its last retirement attempt threw. A throw does not say
+ * whether the retirement committed — the transaction wrapper restores a
+ * pragma after COMMIT and lets that error propagate — and no such attempt is
+ * dropped silently: it ends in exactly one report. A row is read again
+ * unless a later listing already showed the key as someone else's. Read
+ * again, it is still the reset sessions' (`failed`), found corrupt
+ * (`unidentifiable`), refused by the store (`unchecked`), or gone or no
+ * longer theirs (`unconfirmedRelinquished`); a later listing as someone
+ * else's is `unconfirmedRelinquished` too.
+ */
+export async function clearSessionScopeBindingsFromDisk(
+	directory: string,
+	sessionIds: readonly string[],
+): Promise<ScopeResetSweepOutcome> {
+	const wanted = new Set(sessionIds);
+	const outcome: ScopeResetSweepOutcome = {
+		removed: 0,
+		unidentifiable: 0,
+		unreadable: false,
+		truncated: false,
+		failed: 0,
+		unchecked: 0,
+		unconfirmedRelinquished: 0,
+	};
+	// The sweep's latest word on a row it has not left cleared, in two places
+	// that never name the same key — so a row is never reported two ways:
+	//   pending 'unidentifiable' — last seen with a payload no session can
+	//                             claim;
+	//   pending 'unconfirmed'    — its last retirement attempt threw. That does
+	//                             not say whether the retirement committed
+	//                             (the transaction wrapper restores a pragma
+	//                             after COMMIT and lets that error propagate).
+	//                             It stays unresolved until the final read —
+	//                             unless a later listing shows the key as
+	//                             someone else's.
+	//   relinquishedKeys        — an attempt threw and the row is then known to
+	//                             be gone or no longer the reset sessions'.
+	// So a key reaches the final read only when the sweep's LAST listing of it
+	// was the reset sessions'.
+	const pending = new Map<string, 'unidentifiable' | 'unconfirmed'>();
+	const relinquishedKeys = new Set<string>();
+	// Keys the sweep left cleared. By key: a row that another process
+	// re-inserts and a later page retires again is one cleared row, not two.
+	const removedKeys = new Set<string>();
+	/** Record the sweep's latest word on a row (`null`: nothing unresolved).
+	 * It replaces every earlier word — an earlier cleared status, or an
+	 * earlier "gone or no longer theirs" — so a row that another process
+	 * re-inserts and the sweep sees again is reported one way. */
+	const classify = (
+		generationId: string,
+		mark: 'unidentifiable' | 'unconfirmed' | null,
+	): void => {
+		if (mark === null) pending.delete(generationId);
+		else pending.set(generationId, mark);
+		removedKeys.delete(generationId);
+		relinquishedKeys.delete(generationId);
+	};
+	/** Raw attribution of one row payload to the reset sessions. */
+	const attributionOf = (
+		payload: string,
+	): {
+		kind: 'unparseable' | 'unattributable' | 'other' | 'wanted';
+		parsed: Record<string, unknown> | null;
+	} => {
+		let candidate: unknown;
+		try {
+			candidate = JSON.parse(payload);
+		} catch {
+			return { kind: 'unparseable', parsed: null };
+		}
+		// A payload that parses but is not an object (null, numbers, strings,
+		// booleans, arrays) cannot be attributed either.
+		if (
+			candidate === null ||
+			typeof candidate !== 'object' ||
+			Array.isArray(candidate)
+		)
+			return { kind: 'unattributable', parsed: null };
+		const parsed = candidate as Record<string, unknown>;
+		const text = (key: string): string | null =>
+			typeof parsed[key] === 'string' ? (parsed[key] as string) : null;
+		const ids = [
+			text('ownerSessionId'),
+			text('parentOwnerSessionId'),
+			text('workflowSessionId'),
+		].filter(
+			(value): value is string => value !== null && value.trim().length > 0,
+		);
+		// No session can claim the row. Every well-formed binding carries a
+		// non-empty owner, so this is a malformed (or foreign-schema) row —
+		// the realistic corruption that renders the store unreadable. A blank
+		// session id never claims a row, on either side of the comparison.
+		if (ids.length === 0) return { kind: 'unattributable', parsed };
+		return {
+			kind: ids.some((value) => wanted.has(value)) ? 'wanted' : 'other',
+			parsed,
+		};
+	};
+	// In-memory authority for the same lineage must not survive the reset —
+	// on every exit path, whatever the durable sweep could read.
+	const clearLineage = (): void => {
+		clearScopeBindings(
+			(binding) =>
+				wanted.has(binding.ownerSessionId) ||
+				(binding.parentOwnerSessionId !== undefined &&
+					wanted.has(binding.parentOwnerSessionId)) ||
+				(binding.workflowSessionId !== undefined &&
+					wanted.has(binding.workflowSessionId)),
+		);
+	};
+	try {
+		assertProjectRoot(directory);
+	} catch {
+		outcome.unreadable = true;
+		clearLineage();
+		return outcome;
+	}
+	const listRows = (): ReturnType<
+		typeof listCoordinationStateRowsRaw
+	> | null => {
+		try {
+			return _scopePersistenceInternals.listResetSweepRows(directory);
+		} catch {
+			return null;
+		}
+	};
+	const pageSize = Math.min(
+		bindingFileScanCapacity,
+		MAX_COORDINATION_STATE_LIST_ROWS,
+	);
+	// Page while rows are being removed: every removal pulls rows past the
+	// scan capacity into the next page.
+	for (let pass = 0; ; pass += 1) {
+		const rows = listRows();
+		if (rows === null) {
+			outcome.unreadable = true;
+			break;
+		}
+		let passRemoved = 0;
+		for (const row of rows) {
+			const generationId = row.entityKey;
+			const { kind, parsed } = attributionOf(row.payload);
+			// Unparseable, or an object no session can claim: the realistic
+			// corruption (final-critic F2: the recovery command must survive
+			// corrupt rows). Counted for operator cleanup and never removed on
+			// a guess. Whatever the sweep established about this row before is
+			// replaced.
+			if (kind === 'unparseable' || kind === 'unattributable') {
+				classify(generationId, 'unidentifiable');
+				continue;
+			}
+			if (kind !== 'wanted' || parsed === null) {
+				// Someone else's row now. If an attempt on an earlier listing is
+				// unresolved, the row the sweep tried to retire is no longer the
+				// reset sessions' — reported as such, never silently dropped.
+				// Otherwise nothing of theirs is left for this key. An earlier
+				// cleared status stands.
+				if (pending.get(generationId) === 'unconfirmed')
+					relinquishedKeys.add(generationId);
+				pending.delete(generationId);
+				continue;
+			}
+			// Attributable to the reset sessions: whatever the sweep established
+			// before is replaced by the outcome of this attempt.
+			classify(generationId, null);
+			const bindingId =
+				typeof parsed.bindingId === 'string' ? parsed.bindingId : '';
+			const taskId = typeof parsed.taskId === 'string' ? parsed.taskId : '';
+			const expiresAt =
+				typeof parsed.expiresAt === 'number' ? parsed.expiresAt : 0;
+			// Only the retirement is allowed to leave a row unconfirmed. The
+			// bookkeeping and the shadow cleanup run once it has committed,
+			// outside the catch. The sink is given the payload this listing
+			// observed: the retirement is confirmed only of exactly that row.
+			let retired = false;
+			try {
+				withCoordinationTransaction(directory, () => {
+					const failure = retireScopeBindingGenerationWithinTransaction(
+						directory,
+						{ bindingId, generationId, revision: row.revision, expiresAt },
+						'revoked',
+						row.payload,
+					);
+					if (failure)
+						throw new Error(failure.ok ? 'unreachable' : failure.message);
+				});
+				retired = true;
+			} catch {
+				// Read again before it is reported: the attempt may have missed a
+				// row a concurrent writer had just changed, or committed and
+				// then thrown.
+				classify(generationId, 'unconfirmed');
+			}
+			if (retired) {
+				removedKeys.add(generationId);
+				passRemoved += 1;
+				removeScopeBindingShadow(directory, {
+					taskId,
+					bindingId,
+					generationId,
+				});
+			}
+		}
+		// A short page proves the store was seen in full. A full page never
+		// does: one that removed nothing may hide rows of the reset sessions
+		// past the capacity, and the pass limit ends a sweep that was still
+		// progressing. Both are reported as truncated, never claimed swept.
+		if (rows.length < pageSize) break;
+		if (passRemoved === 0 || pass + 1 >= MAX_RESET_SWEEP_PASSES) {
+			outcome.truncated = true;
+			break;
+		}
+	}
+	// Read again every row whose last attempt threw, before reporting it. A
+	// concurrent writer may have removed, re-attributed or corrupted it since,
+	// and an attempt that committed may still have thrown. No such attempt is
+	// dropped: the read places the row in exactly one report.
+	//   refused by the store -> unchecked (whether it remains is unknown);
+	//   still theirs         -> failed;
+	//   found corrupt        -> unidentifiable, as the page loop reports it;
+	//   gone, or no longer the reset sessions'
+	//                        -> relinquished: not cleared by this sweep's
+	//                           count, and reported in its own line.
+	// Each is the row's latest word, so an earlier cleared status goes with it.
+	// Every key here was last LISTED as the reset sessions' (a later listing as
+	// someone else's resolves it in the page loop), which is what the
+	// unchecked line says of it.
+	const failedKeys = new Set<string>();
+	const uncheckedKeys = new Set<string>();
+	for (const [generationId, mark] of [...pending]) {
+		if (mark !== 'unconfirmed') continue;
+		let row: ReturnType<typeof _scopePersistenceInternals.readResetSweepRow>;
+		try {
+			row = _scopePersistenceInternals.readResetSweepRow(
+				directory,
+				generationId,
+			);
+		} catch {
+			classify(generationId, null);
+			uncheckedKeys.add(generationId);
+			continue;
+		}
+		classify(generationId, null);
+		const kind = row === null ? 'gone' : attributionOf(row.payload).kind;
+		if (kind === 'wanted') failedKeys.add(generationId);
+		else if (kind === 'unparseable' || kind === 'unattributable')
+			classify(generationId, 'unidentifiable');
+		else relinquishedKeys.add(generationId);
+	}
+	// Every key is in at most one of these: an 'unconfirmed' entry was
+	// resolved above into exactly one line, what is left in `pending` is
+	// exactly the rows last seen unidentifiable, and a key the sweep saw again
+	// in any unresolved state left `removedKeys` and `relinquishedKeys` when
+	// it did.
+	outcome.removed = removedKeys.size;
+	outcome.unidentifiable = pending.size;
+	outcome.failed = failedKeys.size;
+	outcome.unchecked = uncheckedKeys.size;
+	outcome.unconfirmedRelinquished = relinquishedKeys.size;
+	clearLineage();
+	return outcome;
+}
+
 export const _scopePersistenceInternals = {
 	// Narrow DI seam for faulting one rollback transition in regression tests.
 	transitionScopeBindingState,
+	// Narrow DI seam for faulting the terminal sink in compensation-failure
+	// regression tests (#3889 plan obligation 5).
+	retireScopeBindingGenerationWithinTransaction,
 	transitionScopeBindingStateWithinTransaction,
+	// Narrow DI seam for exercising the compare-and-remove interleavings of
+	// obligation 7 (wrong revision / foreign kind must survive).
+	releaseAdmissionPending,
+	// Narrow DI seam for faulting the reset sweep's row enumeration (an
+	// unreadable store — final-critic round-2 N2).
+	listResetSweepRows: (directory: string) =>
+		listCoordinationStateRowsRaw(
+			directory,
+			SCOPE_BINDING_COORDINATION_NAMESPACE,
+			bindingFileScanCapacity,
+		),
+	// Narrow DI seam for faulting the reset sweep's final read of a row it
+	// could not retire (the store refusing that read).
+	readResetSweepRow: (directory: string, generationId: string) =>
+		getCoordinationStateRaw(
+			directory,
+			SCOPE_BINDING_COORDINATION_NAMESPACE,
+			generationId,
+		),
 	get liveBindingCapacity(): number {
 		return liveBindingCapacity;
 	},

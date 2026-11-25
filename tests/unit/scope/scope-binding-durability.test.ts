@@ -274,13 +274,17 @@ describe('generation-safe scope persistence', () => {
 			await tombstoneScopeBinding(directory, refreshed.value, 'expired'),
 		).toMatchObject({ ok: true });
 		clearScopeBindings();
+		// #3889 ledger contract: tombstoning deletes the row and installs
+		// terminal deny evidence; with no durable row and no in-memory copy the
+		// resolution is not_declared (the write gate still denies — the deny
+		// evidence lives in the ledger for any stale in-memory authority).
 		expect(
 			resolveAuthorizedScopeBindingDetailed({
 				directory,
 				taskId: '1.1',
 				activeSessionId: 'coder-session',
 			}),
-		).toMatchObject({ status: 'expired' });
+		).toMatchObject({ status: 'not_declared' });
 	});
 
 	test('exact cleanup cannot remove a sibling generation', async () => {
@@ -380,7 +384,9 @@ describe('generation-safe scope persistence', () => {
 				activeSessionId: active.ownerSessionId,
 				taskId: active.taskId,
 			}),
-		).toMatchObject({ ok: false, code: 'SCOPE_BINDING_EXPIRED' });
+			// #3889 ledger contract: retirement deletes the row, so the exact
+			// identity no longer resolves — stale (not expired-at-revision).
+		).toMatchObject({ ok: false, code: 'SCOPE_BINDING_STALE' });
 	});
 
 	test('refresh of a deleted generation leaves no data or lock-target orphan', async () => {
