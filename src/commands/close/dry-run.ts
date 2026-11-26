@@ -4,6 +4,7 @@ import path from 'node:path';
 import {
 	formatResidueInventoryLines,
 	inventorySwarmResidue,
+	neutralizeResidueName,
 } from '../../services/swarm-residue';
 import { readGitRepositoryStatusAsync } from '../git-status-read.js';
 import {
@@ -114,7 +115,8 @@ export async function runFinalizeDryRun(
 		wouldArchiveDirs.length > 0
 			? [
 					...wouldArchive.map((f) => `- ${f}`),
-					...dynamicArchive.map((f) => `- ${f}`),
+					// readdir-sourced names — neutralize before render (#3836 D3)
+					...dynamicArchive.map((f) => `- ${neutralizeResidueName(f)}`),
 					...wouldArchiveDirs.map((d) => `- ${d}/`),
 				].join('\n')
 			: '- (nothing present to archive)',

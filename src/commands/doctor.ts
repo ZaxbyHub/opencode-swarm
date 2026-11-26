@@ -10,6 +10,7 @@ import {
 import {
 	formatResidueInventoryLines,
 	inventorySwarmResidue,
+	neutralizeResidueName,
 	quarantineSwarmResidue,
 	rollbackResidueQuarantine,
 } from '../services/swarm-residue';
@@ -365,7 +366,7 @@ export async function handleDoctorCommand(
 					removed++;
 				} else {
 					failed++;
-					fixOutput += `- \`${finding.path}\`: ${cleanupResult.message}\n`;
+					fixOutput += `- \`${neutralizeResidueName(finding.path)}\`: ${cleanupResult.message}\n`;
 				}
 			}
 
@@ -382,7 +383,7 @@ export async function handleDoctorCommand(
 					finding.contents.length > 5
 						? `${finding.contents.slice(0, 5).join(', ')}, ...`
 						: finding.contents.join(', ');
-				output += `- \`${finding.path}\` (${finding.totalEntries} entries: ${contentsPreview})\n`;
+				output += `- \`${neutralizeResidueName(finding.path)}\` (${finding.totalEntries} entries: ${neutralizeResidueName(contentsPreview)})\n`;
 			}
 			output += '\nThese are likely from a prior bug (Issue #922). ';
 			output += 'Re-run with `--fix` to auto-clean.\n';
@@ -417,16 +418,31 @@ export async function handleDoctorCommand(
 			const collisions = rollback.items.filter(
 				(i) => i.status === 'collision',
 			).length;
+			const skipped = rollback.items.filter((i) => i.status === 'skipped');
 			output += '\n---\n\n## Residue Quarantine Rollback\n\n';
-			output += `Batch \`${rollback.batchRelDir}\`: ${restored} restored, ${already} already restored`;
+			output += `Batch \`${neutralizeResidueName(rollback.batchRelDir)}\`: ${restored} restored, ${already} already restored`;
 			if (collisions > 0) {
 				output += `, ${collisions} collision(s) left in place (original location holds different content — nothing was overwritten)`;
+			}
+			if (skipped.length > 0) {
+				output += `, ${skipped.length} skipped (unsafe manifest name — entry left untouched)`;
 			}
 			output += rollback.drained
 				? '. Batch fully drained and removed.\n'
 				: '. Batch retained (unresolved entries).\n';
+			// Skipped entries (#3836): one bounded line each, with the
+			// neutralized name and its reason, so the operator sees exactly
+			// what stayed behind and why the batch was retained.
+			for (const item of skipped.slice(0, 10)) {
+				output += `- \`${neutralizeResidueName(item.relPath)}\` — skipped (${(item.reasons ?? []).join(', ') || 'unsafe-name'})\n`;
+			}
+			if (skipped.length > 10) {
+				output += `- … ${skipped.length - 10} more skipped\n`;
+			}
 		} catch (err) {
-			output += `\n❌ Residue quarantine rollback failed: ${err instanceof Error ? err.message : String(err)}\n`;
+			// Error text can embed a manifest-derived path (validateRelPath's
+			// message) — neutralize before rendering (issue #3836 D3).
+			output += `\n❌ Residue quarantine rollback failed: ${neutralizeResidueName(err instanceof Error ? err.message : String(err))}\n`;
 		}
 	} else if (args.includes('--quarantine-residue')) {
 		try {
@@ -444,13 +460,13 @@ export async function handleDoctorCommand(
 			if (result.preserved.length > 0) {
 				output += `\nPreserved in place (${result.preserved.length}):\n`;
 				for (const item of result.preserved.slice(0, 10)) {
-					output += `- \`${item.relPath}\` (${item.reasons.join(', ') || 'ineligible'})\n`;
+					output += `- \`${neutralizeResidueName(item.relPath)}\` (${item.reasons.join(', ') || 'ineligible'})\n`;
 				}
 				if (result.preserved.length > 10)
 					output += `- … ${result.preserved.length - 10} more\n`;
 			}
 		} catch (err) {
-			output += `\n❌ Residue quarantine failed: ${err instanceof Error ? err.message : String(err)}\n`;
+			output += `\n❌ Residue quarantine failed: ${neutralizeResidueName(err instanceof Error ? err.message : String(err))}\n`;
 		}
 	} else {
 		try {
