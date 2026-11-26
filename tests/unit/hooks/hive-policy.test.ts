@@ -232,7 +232,7 @@ describe('evaluatePromotionPolicy — gates + diagnostics (#1847)', () => {
 
 	it('a confidence-floor-demoted entry fails the confidence_floor gate', () => {
 		const entry = makeEntry({
-			tags: ['hive-fast-track'],
+			hive_fast_track_authorized: true,
 			confidence_floor_demoted: true,
 		});
 		const decision = evaluatePromotionPolicy({
@@ -270,7 +270,7 @@ describe('evaluatePromotionPolicy — actionability_floor gate (#1821 A3)', () =
 	/** An otherwise-eligible entry stripped of every predicate/scope field. */
 	function proseOnly(): SwarmKnowledgeEntry {
 		return makeEntry({
-			tags: ['hive-fast-track'],
+			hive_fast_track_authorized: true,
 			applies_to_tools: undefined,
 			applies_to_agents: undefined,
 			required_actions: undefined,
@@ -291,8 +291,8 @@ describe('evaluatePromotionPolicy — actionability_floor gate (#1821 A3)', () =
 			evidence: [],
 		});
 		expect(decision.eligible).toBe(false);
-		// The fast-track tag satisfies eligibility_route ONLY — it is a separate
-		// gate and never bypasses the floor.
+		// The fast-track authorization satisfies eligibility_route ONLY — it is a
+		// separate gate and never bypasses the floor.
 		expect(
 			decision.gates.find((g) => g.name === 'eligibility_route')?.passed,
 		).toBe(true);
@@ -306,7 +306,7 @@ describe('evaluatePromotionPolicy — actionability_floor gate (#1821 A3)', () =
 	it('a predicate with no scope tag fails with missing_scope', () => {
 		const decision = evaluatePromotionPolicy({
 			entry: makeEntry({
-				tags: ['hive-fast-track'],
+				hive_fast_track_authorized: true,
 				applies_to_tools: undefined,
 				applies_to_agents: undefined,
 				required_actions: ['run the type checker'],
@@ -323,7 +323,7 @@ describe('evaluatePromotionPolicy — actionability_floor gate (#1821 A3)', () =
 	it('a scope tag with no predicate fails with missing_predicate', () => {
 		const decision = evaluatePromotionPolicy({
 			entry: makeEntry({
-				tags: ['hive-fast-track'],
+				hive_fast_track_authorized: true,
 				applies_to_tools: ['write'],
 				required_actions: undefined,
 			}),
@@ -378,13 +378,33 @@ describe('describeEligibilityRoute — preserved 3 routes (#1847 M1)', () => {
 		expect(r.detail).toContain('route 1');
 	});
 
-	it('route 2: hive-fast-track tag', () => {
+	// #3820 H3 reshape: route 2 is armed by the DEDICATED `hive_fast_track_authorized`
+	// field (only `promoteToHive`'s authorized stand-in writes it) — NOT by the
+	// caller-writable `hive-fast-track` tag. Assertion strength preserved (route
+	// 2 still fires) and a negative leg added proving the tag alone does NOT
+	// satisfy the route.
+	it('route 2: authorized manual fast-track (dedicated field)', () => {
 		const r = describeEligibilityRoute(
-			makeEntry({ tags: ['hive-fast-track'], hive_eligible: false }),
+			makeEntry({ hive_fast_track_authorized: true, hive_eligible: false }),
 			90,
 		);
 		expect(r.passed).toBe(true);
 		expect(r.detail).toContain('route 2');
+	});
+
+	it('route 2 negative: the caller-supplied hive-fast-track TAG alone does NOT arm the route', () => {
+		const r = describeEligibilityRoute(
+			makeEntry({
+				tags: ['hive-fast-track'],
+				hive_eligible: false,
+				// Young, so route 3 (age) cannot fire either — the tag alone must
+				// leave the entry with no eligibility route.
+				created_at: new Date(FROZEN_NOW).toISOString(),
+			}),
+			90,
+		);
+		expect(r.passed).toBe(false);
+		expect(r.detail).toContain('fast-track=false');
 	});
 
 	it('route 3: age', () => {

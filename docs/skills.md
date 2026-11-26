@@ -131,7 +131,7 @@ Knowledge enters the system through four routes:
 | Route | Source | Command | Tier | Scope |
 |-------|--------|---------|------|-------|
 | **Agent tool** | Active agent (coder, reviewer, test, SME, docs) during a phase | `knowledge_add` | Swarm | Project-specific |
-| **Manual promotion** | Human contributor | `/swarm promote "<lesson>"` | Hive | Cross-project |
+| **Manual promotion** | Human contributor | `/swarm promote "<lesson>" --force --reason "<why>"` | Hive | Cross-project |
 | **Curator recommendation** | Curator agent after phase analysis | Auto-generated via curator insights | Swarm/Hive | Project-specific or evergreen |
 | **Legacy migration** | v6 projects | `/swarm knowledge migrate` | Swarm | One-time import |
 
@@ -216,10 +216,12 @@ Swarm entries can be promoted to hive knowledge via three routes:
 | Route | Trigger | Speed |
 |-------|---------|-------|
 | **Explicit** | `hive_eligible=true` AND ≥3 distinct phase confirmations | Manual or curator |
-| **Fast-track** | Entry tagged `hive-fast-track` | Immediate (bypasses phase count) |
+| **Fast-track** | Authorized manual fast-track: requires `hive_fast_track_authorized`; a tag alone does not authorize it | Immediate (bypasses phase count) |
 | **Age-based** | Entry age ≥ `auto_promote_days` (default 90 days) | Automatic on next curator run |
 
-Manual promotion: `/swarm promote --from-swarm <id>`
+Every route also faces the application-evidence and policy gates (`knowledge.promotion_min_terminal_applications`, default 1 — at least one independent terminal receipt; set 0 to opt out).
+
+Manual promotion: `/swarm promote --from-swarm <id>` (promotes when the swarm entry has a qualifying independent receipt; otherwise it needs `--force --reason`)
 
 Promoted hive entries gain cross-project weight: `encounter_score` weighted by `same_project_weight` (1.0, same project) vs `cross_project_weight` (0.5, other projects).
 
@@ -405,7 +407,7 @@ When `curator.skill_generation_enabled: true` (default), the curator can emit `s
 | `/swarm knowledge migrate` | Import legacy `.swarm/context.md` |
 | `/swarm knowledge quarantine <id> [reason]` | Hide entry (preserved) |
 | `/swarm knowledge restore <id>` | Restore a quarantined or archived entry |
-| `/swarm promote <text>` | Create new hive entry |
+| `/swarm promote <text>` | Create new hive entry (needs `--force --reason` without an independent receipt) |
 | `/swarm promote --from-swarm <id>` | Promote existing swarm entry |
 | `/swarm curate` | Run curator review + hive promotion pass |
 | `/swarm learning [--json]` | Show aggregate metrics and ROI |

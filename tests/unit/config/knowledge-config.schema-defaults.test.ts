@@ -37,7 +37,10 @@ describe('KnowledgeConfigSchema — defaults and custom values', () => {
 				receipt_close_grace_days: 7,
 				promoted_demotion_min_negative_phases: 3,
 				promoted_demotion_signal_threshold: -0.3,
-				promotion_min_terminal_applications: 0,
+				// #3820 H1(a): the application-evidence gate is ACTIVE by default
+				// (min 1 independent terminal application). Distinct cohorts stays
+				// 0 (the production evidence loader is cohort-scoped).
+				promotion_min_terminal_applications: 1,
 				promotion_min_distinct_cohorts: 0,
 				promotion_require_actionable: true,
 				schema_version: 1,
