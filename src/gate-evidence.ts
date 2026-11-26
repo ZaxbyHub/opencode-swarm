@@ -2041,7 +2041,7 @@ export async function withTaskEvidenceTransaction<T>(
 					),
 				);
 			}
-						// #3844 fold-in (closes #3899 AC6): GateEvidenceSchema is
+			// #3844 fold-in (closes #3899 AC6): GateEvidenceSchema is
 			// deliberately .passthrough() so council-specific extras survive,
 			// but those extras are producer free text — every passthrough
 			// string (verdict notes, summaries, veto prose) crosses the
