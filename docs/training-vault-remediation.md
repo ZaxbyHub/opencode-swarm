@@ -1,6 +1,11 @@
 # Training vault remediation for already-stored v1 content
 
-> Applies from the #3840 redaction widening (`TRAINING_REDACTION_VERSION` 2).
+> Applies from the #3840 redaction widening (`TRAINING_REDACTION_VERSION` 2)
+> and the #3893/#3915 redaction-coverage cluster (`TRAINING_REDACTION_VERSION` 3
+> — the `redactSecrets` floor and extended fill classes joined the capture
+> path). Audience below talks in v1/v2 terms; v3 follows the same rules with
+> the numbers shifted by one (reader accepts 1..3; v3 consent stamps
+> `redaction_version: 3`).
 > Audience: operators of a project whose `.swarm/training/v1/` vault already
 > holds records captured under the v1 redactor.
 
@@ -62,7 +67,12 @@ without losing v2 records:
 Step 3 also covers the consent record itself: a v2 consent file stamps
 `redaction_version: 2`, and the downgraded v1 reader (a literal `1`) treats
 that consent as ABSENT — capture stays off until the consent is granted
-again. Withdrawing and re-granting after the downgrade restores it.
+again. Withdrawing and re-granting after the downgrade restores it. The same
+applies one level up after the v3 bump (#3893/#3915): a v3 consent file
+stamps `redaction_version: 3`, and a downgrade to the v2 reader treats it
+as absent — capture stops until consent is re-granted; v3 records are kept
+on disk but version-quarantined by the older reader (never deleted by the
+upgrade path; deletion is only the documented downgrade hazard above).
 
 The alternative is to **accept the loss**: skip steps 1-4 and let the next
 sweep delete the v2 records. The replay-identity sidecar and claim files

@@ -364,3 +364,59 @@ describe('#3844 redactEvidenceText superset contract', () => {
 		}
 	});
 });
+
+describe('#3915 AC6: a composite JWT-shaped query value redacts WHOLE, the = retained', () => {
+	// Previous behavior: the generic JWS candidate for `?token=eyJ….tail`
+	// started AT the `=` separator, so the span swallowed it and the emitted
+	// `?token[REDACTED:jwt].tail` had no anchor left for the URL-query arm —
+	// the glued tail survived in the clear on the evidence path. The span now
+	// starts at the base64 run (src/utils/jws-redaction.ts, #3915 AC6), the
+	// `=` stays in the output, and the query arm consumes the placeholder
+	// together with the tail into one generic placeholder.
+	const PAYLOAD = 'eyJzdWIiOiIxMjM0NTY3ODkwIn0';
+	const SIG = 'SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQ';
+
+	test('eyJ-anchored query: the whole value including the glued tail is redacted', () => {
+		const jwt = `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.${PAYLOAD}.${SIG}`;
+		const out = redactEvidenceText(
+			`https://api.example.com/cb?token=${jwt}.moretail`,
+		);
+		expect(out).toContain('token='); // the separator survives as the anchor
+		expect(out).not.toContain('eyJhbGciOiJIUzI1NiIs');
+		expect(out).not.toContain('SflKxwRJSMeKKF2');
+		expect(out).not.toContain('moretail'); // tail consumed with the placeholder
+		expect(out).toBe('https://api.example.com/cb?token=[REDACTED]');
+		expect(redactEvidenceText(out)).toBe(out); // fixed point
+	});
+
+	test('generic short-JSON-header query: the = is retained and the tail consumed', () => {
+		// eyJhbGciOiJIUzI1NiJ9 is the 20-char base64 of {"alg":"HS256"}: it
+		// enters the generic scanner through the interior-`=` candidate's
+		// short-JSON-header acceptance (13-39 chars, strict JSON-object
+		// decode), the same branch whose span used to swallow the `=`.
+		const header = 'eyJhbGciOiJIUzI1NiJ9';
+		const out = redactEvidenceText(
+			`https://api.example.com/cb?apikey=${header}.${'p'.repeat(24)}.${'s'.repeat(12)}.ab`,
+		);
+		expect(out).toContain('apikey=');
+		expect(out).not.toContain(header);
+		expect(out).not.toContain('pppp');
+		expect(out).not.toContain('.ab'); // the short glued tail is consumed too
+		expect(out).toBe('https://api.example.com/cb?apikey=[REDACTED]');
+		expect(redactEvidenceText(out)).toBe(out);
+	});
+
+	test('>=40-run generic candidate: the = is retained and the tail consumed', () => {
+		// A 45-char standard-base64 header run clears the generic 40-char
+		// floor with no JSON decode at all; the interior-`=` candidate owns
+		// the placement.
+		const out = redactEvidenceText(
+			`https://api.example.com/cb?token=${'A'.repeat(45)}.${'p'.repeat(24)}.${'s'.repeat(12)}.tail9`,
+		);
+		expect(out).toContain('token=');
+		expect(out).not.toContain('A'.repeat(45));
+		expect(out).not.toContain('tail9');
+		expect(out).toBe('https://api.example.com/cb?token=[REDACTED]');
+		expect(redactEvidenceText(out)).toBe(out);
+	});
+});

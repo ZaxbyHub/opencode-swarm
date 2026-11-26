@@ -13,6 +13,7 @@ import {
 	resolveHiveKnowledgePath as resolveHiveKnowledgePathImpl,
 	resolveHiveRejectedPath as resolveHiveRejectedPathImpl,
 } from '../knowledge/hive-paths.js';
+import { redactSecrets } from '../memory/redaction';
 import { resolveRetentionCap } from '../retention/caps.js';
 import { appendCappedJsonl, readTailJsonl } from '../retention/jsonl-cap.js';
 import * as logger from '../utils/logger.js';
@@ -343,7 +344,7 @@ export async function appendRetractionRecord(
 			retries: { retries: 5, minTimeout: 100, maxTimeout: 500 },
 			stale: 5000,
 		});
-		await appendCappedJsonl(filePath, JSON.stringify(record), {
+		await appendCappedJsonl(filePath, serializeKnowledgeLine(record), {
 			maxEntries: resolveRetentionCap(
 				'MAX_RETRACTION_RECORDS',
 				MAX_RETRACTION_RECORDS,
@@ -552,6 +553,35 @@ function normalizeEntryArraysForWrite<T>(entry: T): T {
 // Write Functions
 // ============================================================================
 
+/**
+ * #3893/#3915 owner-approved fix (option b): knowledge records (lessons,
+ * retractions) carry model-derived free text — compose the persisted-store
+ * floor (redactSecrets) on every persisted value. R-9 (4.5 round 9): the
+ * floor runs PER STRING VALUE before serialization — running it over the
+ * serialized JSON corrupted artifacts whenever a floor-matched value ended
+ * a JSON string (the env_secret arm's optional trailing quote consumes the
+ * JSON delimiter). Per-value flooring is JSON-safe by construction: each
+ * redacted string is re-escaped by JSON.stringify. Idempotent on its own
+ * output; caller-side content_hash CAS tokens compare raw copies on both
+ * sides, so store-time redaction does not disturb them.
+ */
+function floorJsonValues(value: unknown): unknown {
+	if (typeof value === 'string') return redactSecrets(value);
+	if (Array.isArray(value)) return value.map(floorJsonValues);
+	if (value !== null && typeof value === 'object') {
+		const out: Record<string, unknown> = {};
+		for (const [key, entry] of Object.entries(value)) {
+			out[key] = floorJsonValues(entry);
+		}
+		return out;
+	}
+	return value;
+}
+
+function serializeKnowledgeLine(entry: unknown): string {
+	return JSON.stringify(floorJsonValues(normalizeEntryArraysForWrite(entry)));
+}
+
 // Append a single entry to a JSONL file, creating the directory if needed.
 // Acquires the same directory-level lock as enforceKnowledgeCap and rewriteKnowledge
 // to prevent TOCTOU races: a concurrent cap enforcement must not interleave with
@@ -573,12 +603,9 @@ export async function appendKnowledge<T>(
 		});
 		// #1821 Lane 0b: normalize at the write boundary — see
 		// normalizeEntryArraysForWrite for the exact coverage this does and
-		// does not give.
-		await appendFile(
-			filePath,
-			`${JSON.stringify(normalizeEntryArraysForWrite(entry))}\n`,
-			'utf-8',
-		);
+		// does not give. #3893/#3915 (option b): the knowledge floor rides
+		// the same line via serializeKnowledgeLine.
+		await appendFile(filePath, `${serializeKnowledgeLine(entry)}\n`, 'utf-8');
 	} finally {
 		if (release) {
 			try {
@@ -612,9 +639,8 @@ export async function rewriteKnowledge<T>(
 		// (knowledge-migrator, knowledge-curator cap/sweep, system-enhancer) and
 		// would otherwise be a hole in the structural guardrail.
 		const content =
-			entries
-				.map((e) => JSON.stringify(normalizeEntryArraysForWrite(e)))
-				.join('\n') + (entries.length > 0 ? '\n' : '');
+			entries.map((e) => serializeKnowledgeLine(e)).join('\n') +
+			(entries.length > 0 ? '\n' : '');
 		await atomicWriteFile(filePath, content);
 	} finally {
 		if (release) {
@@ -692,9 +718,8 @@ export async function transactKnowledge<T>(
 			// #1821 Lane 0b: normalize at the write boundary — see
 			// normalizeEntryArraysForWrite for the exact coverage.
 			const content =
-				entries
-					.map((e) => JSON.stringify(normalizeEntryArraysForWrite(e)))
-					.join('\n') + (entries.length > 0 ? '\n' : '');
+				entries.map((e) => serializeKnowledgeLine(e)).join('\n') +
+				(entries.length > 0 ? '\n' : '');
 			await atomicWriteFile(fp, content);
 		},
 		mutate,
@@ -1695,8 +1720,10 @@ async function applyConfidenceDeltas(
 		}
 
 		if (mutated) {
+			// R-8a (4.5 round 8): route through serializeKnowledgeLine so
+			// re-persisted lines get the same floor as every other writer.
 			const content =
-				entries.map((e) => JSON.stringify(e)).join('\n') +
+				entries.map((e) => serializeKnowledgeLine(e)).join('\n') +
 				(entries.length > 0 ? '\n' : '');
 			await atomicWriteFile(filePath, content);
 		}

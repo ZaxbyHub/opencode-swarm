@@ -69,6 +69,6 @@ describe('each remaining pattern class keeps its own fixture', () => {
 	});
 });
 
-test('redaction version is 2 (#3840 bare-family widening; reads accept 1..2, no migration loss)', () => {
-	expect(TRAINING_REDACTION_VERSION).toBe(2);
+test('redaction version is 3 (#3893 AC4 floor composition; #3840 added the bare families; reads accept 1..3, no migration loss)', () => {
+	expect(TRAINING_REDACTION_VERSION).toBe(3);
 });

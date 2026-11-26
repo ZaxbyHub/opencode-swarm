@@ -19,6 +19,7 @@ import {
 	saveEvidence,
 } from '../evidence/manager';
 import { validateSwarmPath } from '../hooks/utils';
+import { redactSecrets } from '../memory/redaction';
 import { warn } from '../utils';
 import { atomicWriteSwarmFileSync } from '../utils/atomic-write';
 import {
@@ -39,9 +40,37 @@ const SUPERVISOR_ENTRY_TYPE = 'architecture-supervisor';
  * own-temp cleanup, and cache invalidation. The historical
  * `target.tmp-<ts>-<pid>` grammar stays registered for residue discovery.
  */
+/**
+ * R-9 (4.5 round 9): apply the persisted-store floor PER STRING VALUE —
+ * deep-walk the bundle, redactSecrets every string, leave numbers/booleans/
+ * keys untouched. JSON-safe by construction (each redacted string is
+ * re-escaped by JSON.stringify); gate-read fields are fixed points.
+ */
+function floorBundleValues(value: unknown): unknown {
+	if (typeof value === 'string') return redactSecrets(value);
+	if (Array.isArray(value)) return value.map(floorBundleValues);
+	if (value !== null && typeof value === 'object') {
+		const out: Record<string, unknown> = {};
+		for (const [key, entry] of Object.entries(value)) {
+			out[key] = floorBundleValues(entry);
+		}
+		return out;
+	}
+	return value;
+}
+
 function writeRawSidecar(absPath: string, bundle: unknown): void {
 	mkdirSync(path.dirname(absPath), { recursive: true });
-	atomicWriteSwarmFileSync(absPath, JSON.stringify(bundle, null, 2));
+	// R-8b (4.5 round 8, owner option b) + R-9 (round 9): the sidecar
+	// bundles carry model-authored prose (phase summary rollup, supervisor
+	// findings) — compose the persisted-store floor PER STRING VALUE before
+	// serialization (the floor over serialized JSON corrupted artifacts at
+	// string boundaries). Gate-read fields (verdict/phase_number/timestamp)
+	// are fixed points of the floor.
+	atomicWriteSwarmFileSync(
+		absPath,
+		JSON.stringify(floorBundleValues(bundle), null, 2),
+	);
 }
 
 // ---------------------------------------------------------------------------

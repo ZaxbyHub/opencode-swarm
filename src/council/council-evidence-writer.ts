@@ -28,6 +28,9 @@ import {
 	getTaskWorkflowSnapshot,
 	parseTaskEvidence,
 } from '../gate-evidence.js';
+// #3915 AC3: the council gate entry's sessionId mirrors the model-authored
+// synthesis swarmId, so it crosses the durable boundary redacted (below).
+import { redactEvidenceText } from '../security/evidence-redaction';
 import { assertProjectRoot } from '../utils/project-boundary.js';
 import type { CouncilReviewIdentity } from './council-review-identity';
 import { councilIdentityEvidenceFields } from './council-review-identity';
@@ -173,7 +176,17 @@ export async function writeCouncilEvidence(
 
 			mergedGates[COUNCIL_GATE_NAME] = {
 				// Standard GateInfo fields so check_gate_status / update_task_status see it.
-				sessionId: synthesis.swarmId,
+				// #3915 AC3 (pattern: write-hallucination-evidence.ts / PR #3905):
+				// unlike the structural session ids other gate writers record, this
+				// value is the model-authored synthesis swarmId — the ONLY
+				// model-authored string in the council gate entry — so it is
+				// redacted at the persisted boundary. Verified before wrapping:
+				// every reader of gates.council.sessionId consumes presence or
+				// other fields (verdict/quorumSize/workflowGeneration/
+				// identity_digest/attemptId/roundNumber) and NONE compares it by
+				// equality against a live session identity, so the redacted copy
+				// cannot break a gate decision (see the #3915 trace, F1 step 3).
+				sessionId: redactEvidenceText(synthesis.swarmId),
 				timestamp: synthesis.timestamp,
 				agent: COUNCIL_AGENT_ID,
 				// Council-specific extras — safe to carry; existing readers only check presence.

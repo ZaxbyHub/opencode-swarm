@@ -483,9 +483,9 @@ describe('phase_complete adversarial trailing groups', () => {
 			expect(pA.agentsDispatched).toEqual(['coder', 'reviewer']);
 			expect(pB.agentsDispatched).toEqual(['coder', 'reviewer']);
 			const failures = [pA, pB].filter((result) => !result.success);
-			// A concurrent loser must retry after the winner changes the evidence snapshot.
-			// It can also fail closed during initial directive preflight while the
-			// winner briefly owns the receipt-ledger lock.
+			// #3915 AC5: receipt-lock contention reports the retryable
+			// PHASE_COMMIT_LOCKED class; DIRECTIVE_GATE_FAILED_CLOSED stays
+			// valid only for NON-contention fail-closed causes (e.g. EBUSY).
 			expect(failures.length).toBeLessThan(2);
 			for (const failure of failures) {
 				expect([

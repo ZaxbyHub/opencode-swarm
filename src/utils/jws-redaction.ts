@@ -31,9 +31,11 @@
  *   whose header is 40+ chars of standard base64 with no eyJ prefix. Candidate
  *   headers are the WHOLE segment first (bare, incl. trailing `=` padding),
  *   then — only for interior `=` separators with non-empty prefix AND
- *   suffix — the suffix after the separator, with the span starting AT the
- *   separator so a `key`-style prefix stays visible and no re-matchable
- *   `key=[REDACTED:jwt]` residue survives. `/` inside base64 is material,
+ *   suffix — the suffix after the separator, with the span starting at the
+ *   base64 RUN (#3915 AC6: the separator itself stays in the output so the
+ *   URL-query / KV placement arms can re-anchor on the emitted placeholder
+ *   and consume a glued tail with it; a `key`-style prefix stays visible).
+ *   `/` inside base64 is material,
  *   never a boundary. Consumers push eyJ spans before generic spans so an
  *   equal-start overlap keeps the jwt label; the longest span wins
  *   overlaps (maximal non-overlapping coverage).
@@ -374,8 +376,11 @@ export function findJwsTokenSpans(text: string): JwsTokenSpan[] {
  * a >=10-char signature. Candidate headers are the WHOLE segment first (bare
  * placement, trailing `=` padding included), then the suffix after interior
  * `=` separators with non-empty prefix AND suffix (assignment placement: the
- * span starts AT the separator, so a `key`-style prefix stays visible and the
- * separator is consumed — no re-matchable `key=[REDACTED:jwt]` residue).
+ * span starts at the base64 RUN, so a `key`-style prefix AND the separator
+ * stay visible — #3915 AC6: the retained `=` is the anchor a placement arm
+ * (URL-query / KV) needs to re-match `key=[REDACTED:jwt]` and consume a
+ * glued tail together with the placeholder; consuming the `=` stranded the
+ * tail on the evidence path).
  * Earliest valid separator wins. This is the GREEDY base scan (accept and
  * advance past the consumed triple) whose output is pinned by suites; the
  * #3743 enumeration variant below reuses the same acceptance test.
@@ -429,7 +434,14 @@ function genericCandidateAt(
 			b64RunStart > 1 &&
 			(seg[b64RunStart - 1] as string) === '='
 		) {
-			candidateStart = (offsets[i] as number) + b64RunStart - 1;
+			// #3915 AC6: the span starts AT the base64 run. The previous
+			// `- 1` pulled the separator `=` into the span, which destroyed
+			// the anchor the placement arms need: `?token=eyJ….moretail`
+			// came back as `?token[REDACTED:jwt].moretail`, stranding the
+			// glued tail on the evidence path. The `=` stays in the output
+			// so the URL-query / KV arm re-anchors on `token=[REDACTED:jwt]`
+			// and consumes the placeholder together with the tail.
+			candidateStart = (offsets[i] as number) + b64RunStart;
 		}
 	}
 	if (candidateStart === -1) return null;
