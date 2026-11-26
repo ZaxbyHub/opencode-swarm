@@ -254,13 +254,6 @@
 			"note": "Pre-existing debt, not approved drift: \"replaceTruncatedLedgerWithRecoveryRoot\" exists in src/plan/ledger.ts but not inside :1695 (plan-ledger.writerCitations[1])."
 		},
 		{
-			"rowId": "plan-ledger",
-			"file": "src/plan/ledger.ts",
-			"identifier": "takeSnapshotEvent",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"takeSnapshotEvent\" exists in src/plan/ledger.ts but not inside src/plan/ledger.ts:1633 (plan-ledger.writerCitations[1])."
-		},
-		{
 			"rowId": "plan-projections",
 			"file": "src/plan/manager.ts",
 			"identifier": "closePlanTerminalState",
