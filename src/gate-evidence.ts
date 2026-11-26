@@ -2010,6 +2010,18 @@ export async function withTaskEvidenceTransaction<T>(
 	taskId: string,
 	agent: string,
 	callback: (transaction: TaskEvidenceTransaction) => Promise<T>,
+	options?: {
+		/**
+		 * Coder-settlement WAL commits (issue #2525) keep the committed
+		 * evidence when the receipt append fails: the settlement replay
+		 * re-publishes the missing receipt from the durable chain tip, so
+		 * compensating here would destroy the committed transition the
+		 * replay needs. Route-publication callers keep the default
+		 * compensating behavior (all-or-nothing with their live
+		 * reservations).
+		 */
+		preserveEvidenceOnReceiptAppendFailure?: boolean;
+	},
 ): Promise<T> {
 	assertValidTaskId(taskId);
 
@@ -2101,6 +2113,18 @@ export async function withTaskEvidenceTransaction<T>(
 						event,
 					);
 				} catch (error) {
+					if (options?.preserveEvidenceOnReceiptAppendFailure) {
+						// Issue #2525 coder-settlement replay: the WAL transition
+						// above already committed, and the settlement replay
+						// re-publishes the missing receipt from the durable chain
+						// tip (ensureTaskGateRequirementsReceiptForSettledTransition).
+						// Compensating here would destroy the committed transition
+						// the replay needs, so only the write-ahead marker drops —
+						// the replay must not be fenced. Route-publication callers
+						// keep the compensating behavior below.
+						await removeRepairMarkerBestEffort(markerPath);
+						throw error;
+					}
 					// Workflow evidence and its route receipt are one logical
 					// publication. Compensate a failed append so callers can roll
 					// back live reservations without leaving durable advancement.
