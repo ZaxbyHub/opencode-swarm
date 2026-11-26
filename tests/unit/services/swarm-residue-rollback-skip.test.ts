@@ -24,11 +24,11 @@ import {
 	writeFileSync,
 } from 'node:fs';
 import * as path from 'node:path';
-import { withFrozenClock } from '../../helpers/test-clock.js';
 import {
 	neutralizeResidueName,
 	rollbackResidueQuarantine,
 } from '../../../src/services/swarm-residue';
+import { withFrozenClock } from '../../helpers/test-clock.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 const CONTROL_BYTE = /[\u0000-\u001f\u007f-\u009f]/;

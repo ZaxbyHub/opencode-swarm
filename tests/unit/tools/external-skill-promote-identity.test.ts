@@ -16,7 +16,6 @@ import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { withFrozenClock } from '../../helpers/test-clock.js';
 import { BUNDLED_PROJECT_SKILLS } from '../../../src/config/bundled-skills.js';
 import type { ExternalSkillCandidate } from '../../../src/config/schema.js';
 import { computeArtifactDigest } from '../../../src/services/external-skill-identity.js';
@@ -25,6 +24,7 @@ import {
 	_internals,
 	external_skill_promote,
 } from '../../../src/tools/external-skill-promote.js';
+import { withFrozenClock } from '../../helpers/test-clock.js';
 
 const SKILL_BODY =
 	'This is a safe skill body with no dangerous patterns for promote identity tests.';

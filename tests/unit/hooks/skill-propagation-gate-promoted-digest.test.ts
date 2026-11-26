@@ -22,7 +22,6 @@ import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { withFrozenClock } from '../../helpers/test-clock.js';
 import type { ExternalSkillCandidate } from '../../../src/config/schema.js';
 import { validateSkillReference } from '../../../src/hooks/skill-propagation-gate.js';
 import {
@@ -34,6 +33,7 @@ import {
 	external_skill_promote,
 	_internals as promoteInternals,
 } from '../../../src/tools/external-skill-promote.js';
+import { withFrozenClock } from '../../helpers/test-clock.js';
 
 const SKILL_BODY =
 	'This is a safe skill body with no dangerous patterns for the digest gate tests.';

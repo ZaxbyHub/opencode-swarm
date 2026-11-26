@@ -20,7 +20,6 @@ import {
 	writeFileSync,
 } from 'node:fs';
 import * as path from 'node:path';
-import { withFrozenClock } from '../../helpers/test-clock.js';
 import { runFinalizeDryRun } from '../../../src/commands/close/dry-run';
 import { handleDoctorCommand } from '../../../src/commands/doctor';
 import { loadDatabaseCtor } from '../../../src/db/sqlite-loader.js';
@@ -28,6 +27,7 @@ import { initLedger } from '../../../src/plan/ledger.js';
 import { derivePlanId } from '../../../src/plan/utils.js';
 import { _internals as residueInternals } from '../../../src/services/swarm-residue';
 import { installCloseCommandMocks } from '../../helpers/close-command-mocks';
+import { withFrozenClock } from '../../helpers/test-clock.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 const DEL = String.fromCharCode(0x7f);

@@ -16,13 +16,13 @@ import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { withFrozenClock } from '../../helpers/test-clock.js';
 import type { ExternalSkillCandidate } from '../../../src/config/schema.js';
 import { createExternalSkillStore } from '../../../src/services/external-skill-store.js';
 import {
 	_internals,
 	external_skill_revoke,
 } from '../../../src/tools/external-skill-revoke.js';
+import { withFrozenClock } from '../../helpers/test-clock.js';
 
 function sha256(content: string): string {
 	return createHash('sha256').update(content).digest('hex');
