@@ -1297,6 +1297,46 @@ const PRESENCE_WALK_BUDGET = 2000;
  * state.exhausted marks a budget overrun, which the caller must treat as
  * UNKNOWN (retryable), never as absence.
  */
+/** Bounded search: does any subdirectory exist under dir? Shares the budget. */
+function hasAnySubdirUnder(
+	dir: string,
+	depth: number,
+	state: { visited: number; exhausted: boolean },
+): boolean {
+	if (depth > 2) return false;
+	let dirHandle: fs.Dir;
+	try {
+		dirHandle = fs.opendirSync(dir);
+	} catch {
+		return false;
+	}
+	try {
+		for (;;) {
+			const entry = dirHandle.readSync();
+			if (entry === null) break;
+			if (++state.visited > PRESENCE_WALK_BUDGET) {
+				state.exhausted = true;
+				return false;
+			}
+			if (entry.isDirectory() && !entry.isSymbolicLink()) return true;
+		}
+	} catch (error) {
+		// Bun defers the scandir to the first readSync, so a missing root
+		// surfaces here: ENOENT is genuine absence; any other read error is
+		// unverifiable and must read as UNKNOWN, never absence (F-018).
+		if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return false;
+		state.exhausted = true;
+		return false;
+	} finally {
+		try {
+			dirHandle.closeSync();
+		} catch {
+			// best effort
+		}
+	}
+	return false;
+}
+
 function hasAnyMdUnder(
 	dir: string,
 	depth: number,
@@ -1328,6 +1368,13 @@ function hasAnyMdUnder(
 				return true;
 			}
 		}
+	} catch (error) {
+		// Bun defers the scandir to the first readSync, so a missing root
+		// surfaces here: ENOENT is genuine absence; any other read error is
+		// unverifiable and must read as UNKNOWN, never absence (F-018).
+		if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return false;
+		state.exhausted = true;
+		return false;
 	} finally {
 		try {
 			dirHandle.closeSync();
@@ -1364,8 +1411,17 @@ export function sddProjectionSourcePresentSync(
 		if (foundSpec) return true;
 		// Budget exhausted without a find: presence is UNKNOWN, never absence.
 		if (walkState.exhausted) return 'unknown';
-		const changes = listOpenSpecChanges(root);
-		return changes.length > 0;
+		// The changes scan (listOpenSpecChanges) also materializes every entry, so
+		// presence here uses the same bounded incremental walk: any change directory
+		// under openspec/changes counts; an empty or absent layout is absence.
+		if (
+			hasAnySubdirUnder(path.join(root, OPENSPEC_ROOT, 'changes'), 0, walkState)
+		) {
+			return true;
+		}
+		// Budget exhausted without a find: presence is UNKNOWN, never absence.
+		if (walkState.exhausted) return 'unknown';
+		return false;
 	} catch {
 		return false;
 	}
