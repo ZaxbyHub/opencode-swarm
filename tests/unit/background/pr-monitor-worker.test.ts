@@ -724,6 +724,28 @@ describe('PrMonitorWorker — merge and close events', () => {
 		);
 	});
 
+	test('publishes pr.merged at most once across repeated poll cycles', async () => {
+		const sub = makeSubscription();
+		mockState.listActive.mockResolvedValue([sub]);
+		mockState.getPRStatus.mockResolvedValue(makePRStatus({ state: 'MERGED' }));
+		mockState.getPRComments.mockResolvedValue(makePRComments());
+		mockState.getMergeState.mockResolvedValue(makeMergeState());
+		mockState.updateSnapshot.mockResolvedValue(sub);
+
+		const worker = createWorker({
+			config: makeConfig({
+				auto_unsubscribe_on_merge: false,
+			}) as PrMonitorWorkerOptions['config'],
+		});
+		await worker.pollCycle();
+		await worker.pollCycle();
+
+		const mergedPublishes = mockState.busInstance.publish.mock.calls.filter(
+			(c) => c[0] === 'pr.merged',
+		);
+		expect(mergedPublishes).toHaveLength(1);
+	});
+
 	test('publishes pr.closed and auto-unsubscribes', async () => {
 		const sub = makeSubscription();
 		mockState.listActive.mockResolvedValueOnce([sub]);

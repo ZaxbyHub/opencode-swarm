@@ -202,6 +202,16 @@ export class PrMonitorWorker {
 	/** In-memory review decision per PR correlationId (not persisted). */
 	private readonly reviewStateMap = new Map<string, string>();
 
+	/** In-memory last-seen terminal state ('MERGED' | 'CLOSED') per PR
+	 *  correlationId (not persisted). Terminal PR states are monotonic: a
+	 *  PR cannot un-merge, and a closed PR stays closed, so an in-process
+	 *  latch suffices to emit pr.merged/pr.closed at most once per worker
+	 *  lifetime, even when snapshot writes are refused (store over
+	 *  capacity) and the subscription keeps being polled. A single re-emit
+	 *  after a worker restart is acceptable: it also retries the
+	 *  auto-unsubscribe that may have been refused earlier. */
+	private readonly lastTerminalStateMap = new Map<string, string>();
+
 	/** Accumulates merged/closed PR keys during the current poll cycle for sweep cleanup. */
 	private mergedOrClosedKeys: Set<string> = new Set();
 
@@ -968,7 +978,16 @@ export class PrMonitorWorker {
 		}
 
 		// ── PR merged ──
-		if (current.status.state === 'MERGED') {
+		// Gated on the in-memory last-seen terminal state: terminal PR
+		// states are monotonic, so a refused snapshot write (store over
+		// capacity) must not re-emit pr.merged on every poll cycle while
+		// the subscription lingers (7+ duplicate terminal deliveries
+		// observed 2026-11-24, PFPT-Internal/tapeng-nginx-terramake #8).
+		if (
+			current.status.state === 'MERGED' &&
+			this.lastTerminalStateMap.get(sub.correlationId) !== 'MERGED'
+		) {
+			this.lastTerminalStateMap.set(sub.correlationId, 'MERGED');
 			isMerged = true;
 			events.push({
 				type: 'pr.merged',
@@ -983,7 +1002,11 @@ export class PrMonitorWorker {
 		}
 
 		// ── PR closed ──
-		if (current.status.state === 'CLOSED') {
+		if (
+			current.status.state === 'CLOSED' &&
+			this.lastTerminalStateMap.get(sub.correlationId) !== 'CLOSED'
+		) {
+			this.lastTerminalStateMap.set(sub.correlationId, 'CLOSED');
 			isClosed = true;
 			events.push({
 				type: 'pr.closed',
@@ -1125,6 +1148,7 @@ export class PrMonitorWorker {
 		if (changes.isMerged && this.config.auto_unsubscribe_on_merge) {
 			await _internals.unsubscribe(this.directory, sub.correlationId);
 			this.reviewStateMap.delete(sub.correlationId);
+			this.lastTerminalStateMap.delete(sub.correlationId);
 			this.circuitBreakerMap.delete(sub.correlationId);
 			log('[PrMonitorWorker] Auto-unsubscribed merged PR', {
 				correlationId: sub.correlationId,
@@ -1136,6 +1160,7 @@ export class PrMonitorWorker {
 		if (changes.isClosed && this.config.auto_unsubscribe_on_close) {
 			await _internals.unsubscribe(this.directory, sub.correlationId);
 			this.reviewStateMap.delete(sub.correlationId);
+			this.lastTerminalStateMap.delete(sub.correlationId);
 			this.circuitBreakerMap.delete(sub.correlationId);
 			log('[PrMonitorWorker] Auto-unsubscribed closed PR', {
 				correlationId: sub.correlationId,
