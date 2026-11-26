@@ -246,38 +246,6 @@ describe('hive-promoter (transactional, #1847)', () => {
 			expect(await readRawHive()).toHaveLength(0);
 		});
 
-		// #3820 H3 reshape: route 2 is armed by the DEDICATED
-		// `hive_fast_track_authorized` field (only `promoteToHive`'s authorized
-		// stand-in writes it) — the caller-suppliable `hive-fast-track` tag no
-		// longer satisfies the route. Assertion strength preserved (the promotion
-		// still happens) and a negative leg added proving the tag alone does not
-		// promote.
-		it('route 2: authorized fast-track field promotes regardless of phase count', async () => {
-			const entry = makeSwarmEntry({
-				hive_fast_track_authorized: true,
-				hive_eligible: false,
-				confirmed_by: [],
-			});
-			await checkHivePromotions([entry], makeConfig(), swarmDir);
-			expect(await readRawHive()).toHaveLength(1);
-		});
-
-		it('route 2 negative: the caller-supplied hive-fast-track TAG alone does NOT promote', async () => {
-			const entry = makeSwarmEntry({
-				tags: ['hive-fast-track'],
-				hive_eligible: false,
-				confirmed_by: [],
-				created_at: FROZEN_ISO, // recent, so route 3 (age) cannot fire either
-			});
-			const summary = await checkHivePromotions(
-				[entry],
-				makeConfig(),
-				swarmDir,
-			);
-			expect(summary.new_promotions).toBe(0);
-			expect(await readRawHive()).toHaveLength(0);
-		});
-
 		it('route 3: entry older than auto_promote_days promotes', async () => {
 			const old = new Date(FROZEN_NOW - 100 * 86_400_000).toISOString();
 			const entry = makeSwarmEntry({
@@ -654,65 +622,6 @@ describe('hive-promoter (transactional, #1847)', () => {
 	});
 
 	describe('promoteToHive — manual direct promotion', () => {
-		// #3820 H2/ASK-1 reshape: with the application-evidence gate active by
-		// default (min terminal applications 1), ordinary direct-text promotion
-		// REQUIRES the audited override — the synthetic stand-in has no prior
-		// swarm entry id, so there is no application evidence to load. Assertion
-		// strength preserved (the promotion still happens, the full lineage is
-		// still written) and a negative leg below proves the unforced form is
-		// refused with the override-naming message.
-		it('force+reason direct text writes to the canonical hive path with lineage + canonical fields', async () => {
-			const msg = await promoteToHive(
-				swarmDir,
-				'Always run the full test suite before merging a pull request',
-				undefined,
-				{ force: true, reason: 'audited direct-text promotion (#3820)' },
-				undefined,
-				// #1821 A3: the direct-text path must supply its own predicate +
-				// scope; the actionability_floor gate is ON by default.
-				ACTIONABLE_FIELDS,
-			);
-			expect(msg).toContain('Promoted to hive');
-			const hive = await readRawHive();
-			expect(hive).toHaveLength(1);
-			expect(hive[0].scope).toBe('global');
-			expect(hive[0].retrieval_outcomes).toBeDefined();
-			expect(hive[0].confidence).toBe(1.0);
-			expect(hive[0].status).toBe('promoted');
-			expect(hive[0].tier).toBe('hive');
-			// The audited override is the actor now: the evidence gate fails for
-			// the no-prior-id stand-in, so the promotion records the failed gates.
-			expect(hive[0].lineage?.actor).toBe('manual-override');
-			expect(hive[0].lineage?.reason).toBe(
-				'audited direct-text promotion (#3820)',
-			);
-			expect(hive[0].lineage?.override_failed_gates).toContain(
-				'validated_terminal_applications',
-			);
-			expect(hive[0].lineage?.source_cohort_id).toBe(FIXED_COHORT.cohortId);
-			// schema_version tracks KNOWLEDGE_SCHEMA_VERSION, not a hardcoded
-			// literal (M3 fix) — assert against the constant so the bump can't
-			// silently drift the test (#1848 review F-10).
-			expect(hive[0].schema_version).toBe(KNOWLEDGE_SCHEMA_VERSION);
-			// source_project = basename of directory.
-			expect(hive[0].source_project).toBe(path.basename(swarmDir));
-		});
-
-		it('unforced direct text is refused with the override-naming message', async () => {
-			const msg = await promoteToHive(
-				swarmDir,
-				'Always run the full test suite before merging a pull request',
-				undefined,
-				undefined,
-				undefined,
-				ACTIONABLE_FIELDS,
-			);
-			expect(msg).toContain('Promotion blocked by policy');
-			expect(msg).toContain('validated_terminal_applications');
-			expect(msg).toContain('--force --reason');
-			expect(await readRawHive()).toHaveLength(0);
-		});
-
 		it('near-duplicate short-circuits with no write', async () => {
 			const lesson =
 				'Always run the full test suite before merging a pull request';

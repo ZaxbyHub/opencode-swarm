@@ -683,12 +683,8 @@ describe('external_skill_promote', () => {
 		expect(promotedEntry!.target_path).toContain('audit-rich-skill');
 		expect(promotedEntry!.target_path).toContain('SKILL.md');
 
-		// promoted_content_hash — the CANONICAL artifact digest of the written
-		// markdown (#3822 K1, disclosed reshape): SHA-256 over the file with
-		// the artifact's own `content_digest:` frontmatter line replaced by a
-		// fixed placeholder. Re-derived through the production helper instead
-		// of a raw whole-file hash; the strength is unchanged (any byte edit
-		// outside the digest line still changes the digest).
+		// promoted_content_hash — the CANONICAL artifact digest (#3822 K1
+		// disclosed reshape, via the production helper; strength unchanged).
 		expect(promotedEntry!.promoted_content_hash).toBeDefined();
 		expect(typeof promotedEntry!.promoted_content_hash).toBe('string');
 		expect(promotedEntry!.promoted_content_hash).toMatch(/^[a-f0-9]{64}$/);
