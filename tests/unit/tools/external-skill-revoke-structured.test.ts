@@ -23,6 +23,7 @@ import {
 	external_skill_revoke,
 } from '../../../src/tools/external-skill-revoke.js';
 import { withFrozenClock } from '../../helpers/test-clock.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 function sha256(content: string): string {
 	return createHash('sha256').update(content).digest('hex');
@@ -93,10 +94,7 @@ describe('external_skill_revoke — structured identity (#3822 K2)', () => {
 	const originalLoadConfig = _internals.loadConfig;
 
 	beforeEach(async () => {
-		projectDir = path.join(
-			os.tmpdir(),
-			`ext-skill-revoke-structured-${withFrozenClock(() => Date.now(), { fixedNow: Date.now() })}-${Math.random().toString(36).slice(2, 8)}`,
-		);
+		projectDir = canonicalMkdtemp('ext-skill-revoke-structured-');
 		fs.mkdirSync(projectDir, { recursive: true });
 		// Real config file (curation enabled) — no loadConfig stub needed.
 		const configDir = path.join(projectDir, '.opencode');
@@ -308,8 +306,12 @@ describe('external_skill_revoke — structured identity (#3822 K2)', () => {
 		process.platform === 'win32' ? ('junction' as const) : ('dir' as const);
 	let canCreateLink = true;
 	try {
-		const probeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'lnk-'));
-		const probeTarget = fs.mkdtempSync(path.join(os.tmpdir(), 'tgt-'));
+		const probeRoot = fs.mkdtempSync(
+			path.join(fs.realpathSync(os.tmpdir()), 'lnk-'),
+		);
+		const probeTarget = fs.mkdtempSync(
+			path.join(fs.realpathSync(os.tmpdir()), 'tgt-'),
+		);
 		fs.symlinkSync(probeTarget, path.join(probeRoot, 'link'), linkKind);
 		fs.rmSync(probeRoot, { recursive: true, force: true });
 		fs.rmSync(probeTarget, { recursive: true, force: true });

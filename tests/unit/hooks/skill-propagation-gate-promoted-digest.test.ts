@@ -34,6 +34,7 @@ import {
 	_internals as promoteInternals,
 } from '../../../src/tools/external-skill-promote.js';
 import { withFrozenClock } from '../../helpers/test-clock.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const SKILL_BODY =
 	'This is a safe skill body with no dangerous patterns for the digest gate tests.';
@@ -160,10 +161,7 @@ describe('skill propagation gate — promoted external skill digest binding (#38
 	const originalLoadConfig = promoteInternals.loadConfig;
 
 	beforeEach(() => {
-		projectDir = path.join(
-			os.tmpdir(),
-			`ext-skill-digest-gate-${withFrozenClock(() => Date.now(), { fixedNow: Date.now() })}-${Math.random().toString(36).slice(2, 8)}`,
-		);
+		projectDir = canonicalMkdtemp('ext-skill-digest-gate-');
 		fs.rmSync(projectDir, { recursive: true, force: true });
 		fs.mkdirSync(projectDir, { recursive: true });
 		promoteInternals.loadConfig = () =>

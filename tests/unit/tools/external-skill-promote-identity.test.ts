@@ -25,6 +25,7 @@ import {
 	external_skill_promote,
 } from '../../../src/tools/external-skill-promote.js';
 import { withFrozenClock } from '../../helpers/test-clock.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const SKILL_BODY =
 	'This is a safe skill body with no dangerous patterns for promote identity tests.';
@@ -74,10 +75,7 @@ describe('external_skill_promote — identity bindings (#3822 K3 / ASK-3)', () =
 	const originalLoadConfig = _internals.loadConfig;
 
 	beforeEach(() => {
-		projectDir = path.join(
-			os.tmpdir(),
-			`ext-skill-promote-identity-${withFrozenClock(() => Date.now(), { fixedNow: Date.now() })}-${Math.random().toString(36).slice(2, 8)}`,
-		);
+		projectDir = canonicalMkdtemp('ext-skill-promote-identity-');
 		fs.mkdirSync(projectDir, { recursive: true });
 		_internals.loadConfig = () =>
 			({
