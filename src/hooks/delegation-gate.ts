@@ -64,7 +64,10 @@ import {
 	routeEvidenceFromTaskGateRequirements,
 } from '../evidence/task-gate-requirements.js';
 import { isReadOnlyTool } from '../full-auto/policy';
-import { compareTaskWorkflowStateRank } from '../gate-evidence';
+import {
+	compareTaskWorkflowStateRank,
+	isTaskEvidenceReceiptRollbackFailure,
+} from '../gate-evidence';
 import { isMarkdownOnlyTaskChange } from '../gate-evidence-classification.js';
 import {
 	routeReviewForChanges,
@@ -100,6 +103,7 @@ import {
 	type ReviewRouteEvidence,
 	type ReviewRouteRecord,
 } from '../review/routing-enforcement.js';
+import { isStageBRouteCompleteAtSettlement } from '../review/stage-b-route-settlement.js';
 import { isPathWithinDeclaredScope } from '../scope/path-identity';
 import {
 	canonicalWorkspaceIdentity,
@@ -125,6 +129,7 @@ import {
 	advanceTaskState,
 	ensureAgentSession,
 	getModifiedFilesForTask,
+	getSettledStageBRouteEvidence,
 	getStageBRouteEvidence,
 	getTaskState,
 	hasActiveLeanTurbo,
@@ -133,6 +138,7 @@ import {
 	isCouncilGateActive,
 	isStageBRouteRequired,
 	markStageBRouteRequired,
+	mergeStageBRouteEvidence,
 	recordStageBCompletion,
 	reserveStageBRouteEvidence,
 	resolveDispatchParent,
@@ -7649,20 +7655,21 @@ export function createDelegationGateHook(
 												}
 											})();
 										const existingRouteEvidence = (() => {
-											// Post-restart durable fallback (the #2829 class): the
-											// in-memory route evidence is process-local; when it is
-											// empty but the durable requirements chain holds this
-											// task's route bindings, reconstruct from disk so the
-											// completeness barrier sees the sibling identities the
-											// same dispatch cycle already settled (mirrors
-											// resolveBackgroundStageBRoute).
-											const live = getStageBRouteEvidence(session, taskId);
-											if (live.length > 0) return live;
+											// Pending reservations own capacity but never satisfy
+											// completeness. Durable siblings remain visible even
+											// after the first post-restart live binding settles.
+											const live = getSettledStageBRouteEvidence(
+												session,
+												taskId,
+											);
 											try {
-												return routeEvidenceFromTaskGateRequirements(
-													readTaskGateRequirementsReceiptsSync(
-														directory,
-														taskId,
+												return mergeStageBRouteEvidence(
+													live,
+													routeEvidenceFromTaskGateRequirements(
+														readTaskGateRequirementsReceiptsSync(
+															directory,
+															taskId,
+														),
 													),
 												);
 											} catch {
@@ -7860,6 +7867,13 @@ export function createDelegationGateHook(
 											routeEnforcementEnabled && routeBinding
 												? (routeCompleteDecision?.canAdvance ?? false)
 												: routeDecision.canAdvance;
+										let settledRouteComplete = routeComplete;
+										// Same rollback-safe live-replacement contract as the
+										// background twin: the reserve REPLACES the obsolete
+										// same-identity live binding (one fresh entry per slot),
+										// so later live-read consumers (update_task_status,
+										// later settlements) never see the superseded entry
+										// beside the fresh one (ROUTE_RECEIPT_DUPLICATE).
 										const routeEvidenceRollback = routeBinding
 											? reserveStageBRouteEvidence(
 													session,
@@ -7877,6 +7891,22 @@ export function createDelegationGateHook(
 												callID: input.callID,
 												reasonClass: 'route_capacity',
 												detail: 'route evidence capacity exceeded',
+												drops: stageBSettlementDrops,
+											});
+											continue;
+										}
+										if (
+											routeEvidenceRollback &&
+											!routeEvidenceRollback.beginPublication()
+										) {
+											routeEvidenceRollback();
+											warnStageBSettlementDropped(session, {
+												taskId,
+												agent: targetAgent,
+												callID: input.callID,
+												reasonClass: 'evidence_rejected',
+												detail:
+													'route evidence publication already in progress',
 												drops: stageBSettlementDrops,
 											});
 											continue;
@@ -7900,10 +7930,46 @@ export function createDelegationGateHook(
 														routeEnforcementEnabled && routeBinding
 															? (routeCompleteDecision?.canAdvance ?? false)
 															: undefined,
+													resolveRouteComplete:
+														routeEnforcementEnabled && routeBinding
+															? async () => {
+																	const current = routeBinding;
+																	if (!current) return false;
+																	const currentEvidence =
+																		await readTaskEvidence(directory, taskId);
+																	return isStageBRouteCompleteAtSettlement({
+																		directory,
+																		session,
+																		sessionId: input.sessionID,
+																		taskId,
+																		current,
+																		legacyUnrouted: false,
+																		testEngineerExempt:
+																			isTestEngineerDurablyExempt(
+																				currentEvidence,
+																			),
+																	});
+																}
+															: undefined,
+													beforeCommit: routeEvidenceRollback
+														? () => {
+																if (!routeEvidenceRollback.isCurrent()) {
+																	throw new Error('STAGE_B_ROUTE_SUPERSEDED');
+																}
+															}
+														: undefined,
 												},
 											);
+											// The durable route-evidence write succeeded: commit
+											// the live reservation so its chain metadata
+											// (predecessor links) is pruned — settled slots must
+											// not retain the binding history of every
+											// re-dispatch (PR 3919 round-2 review finding; the
+											// same shared contract as the background twin).
+											routeEvidenceRollback?.settle();
 										} catch (err) {
-											routeEvidenceRollback?.();
+											if (!isTaskEvidenceReceiptRollbackFailure(err))
+												routeEvidenceRollback?.();
 											logger.warn(
 												`[delegation-gate] Stage B settlement rejected for ${taskId}: ${err instanceof Error ? err.message : String(err)}`,
 											);
@@ -7916,6 +7982,8 @@ export function createDelegationGateHook(
 												drops: stageBSettlementDrops,
 											});
 											continue;
+										} finally {
+											routeEvidenceRollback?.endPublication();
 										}
 										recordStageBCompletion(
 											session,
@@ -7926,19 +7994,43 @@ export function createDelegationGateHook(
 											directory,
 											taskId,
 										);
+										if (routeEnforcementEnabled && routeBinding) {
+											try {
+												settledRouteComplete =
+													isStageBRouteCompleteAtSettlement({
+														directory,
+														session,
+														sessionId: input.sessionID,
+														taskId,
+														current: routeBinding,
+														legacyUnrouted: false,
+														testEngineerExempt:
+															isTestEngineerDurablyExempt(taskEvidence),
+													});
+											} catch {
+												// Durable evidence already succeeded; fail closed only for
+												// the live advancement decision rather than undoing it.
+												settledRouteComplete = false;
+											}
+										}
 										const reviewerCompletesStageB =
 											targetAgent === 'reviewer' &&
 											isTestEngineerDurablyExempt(taskEvidence);
+										const durableStageBComplete =
+											taskEvidence?.workflow?.state === 'tests_run';
 										if (
-											routeComplete &&
+											settledRouteComplete &&
 											(hasBothStageBCompletions(session, taskId) ||
-												reviewerCompletesStageB)
+												reviewerCompletesStageB ||
+												durableStageBComplete)
 										) {
 											// Barrier reached: both reviewer and test_engineer have completed.
 											// Advance through reviewer_run → tests_run in a single compound
 											// step so the state machine stays consistent.
 											try {
-												if (eligibleState === 'pre_check_passed') {
+												if (
+													getTaskState(session, taskId) === 'pre_check_passed'
+												) {
 													advanceTaskState(session, taskId, 'reviewer_run', {
 														telemetrySessionId: input.sessionID,
 													});
@@ -7968,7 +8060,7 @@ export function createDelegationGateHook(
 														telemetrySessionId: input.sessionID,
 													});
 												} else if (
-													routeComplete &&
+													settledRouteComplete &&
 													targetAgent === 'test_engineer' &&
 													eligibleState === 'reviewer_run'
 												) {

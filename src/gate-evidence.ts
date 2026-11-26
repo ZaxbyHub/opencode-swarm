@@ -18,7 +18,14 @@
  */
 
 import { createHash } from 'node:crypto';
-import { mkdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import {
+	existsSync,
+	mkdirSync,
+	readFileSync,
+	realpathSync,
+	statSync,
+} from 'node:fs';
+import { appendFile, unlink } from 'node:fs/promises';
 import * as path from 'node:path';
 import { z } from 'zod';
 import {
@@ -35,8 +42,108 @@ import { telemetry } from './telemetry.js';
 import { assertStrictTaskId, isStrictTaskId } from './validation/task-id';
 import { readWorkflowWalFileSync } from './workflow/workflow-wal-file.js';
 
+/**
+ * Durable repair fence for an unrepaired route-receipt split (PR 3919 B-002).
+ * The marker is a sibling of the evidence file with a non-`.json` suffix, so
+ * evidence-directory scanners never parse it as evidence. While it exists,
+ * every evidence transaction for the task is refused, in this process or after
+ * a restart, until an operator clears it with an audit note.
+ */
+export class TaskEvidenceRepairPendingError extends Error {
+	readonly taskId: string;
+
+	constructor(taskId: string) {
+		super(
+			`TASK_EVIDENCE_REPAIR_PENDING: task ${taskId} has an unrepaired route-receipt split; clear it with clearTaskEvidenceRepairMarker after audit`,
+		);
+		this.name = 'TaskEvidenceRepairPendingError';
+		this.taskId = taskId;
+	}
+}
+
+function repairMarkerPathFor(
+	resolvedEvidenceDir: string,
+	taskId: string,
+): string {
+	return path.join(resolvedEvidenceDir, `${taskId}.receipt-repair-pending`);
+}
+
+/**
+ * Operator repair: clears the fence after the split has been audited. The note
+ * is required and appended to a sibling audit log, so a clear is never silent.
+ * Returns false when no marker existed.
+ */
+export async function clearTaskEvidenceRepairMarker(
+	directory: string,
+	taskId: string,
+	auditNote: string,
+): Promise<boolean> {
+	assertValidTaskId(taskId);
+	if (auditNote.trim() === '') {
+		throw new Error(
+			'clearTaskEvidenceRepairMarker requires a non-empty audit note',
+		);
+	}
+	// Serialized with evidence transactions: no writer can slip in between the
+	// audit record and the fence removal (PR 3919 B-005).
+	return withTaskEvidenceLock(directory, taskId, 'repair-clear', async () => {
+		const resolvedEvidenceDir = getEvidenceDir(directory);
+		const markerPath = repairMarkerPathFor(resolvedEvidenceDir, taskId);
+		if (!existsSync(markerPath)) return false;
+		// Audit first: if the append fails, the fence stays in place.
+		await appendFile(
+			path.join(resolvedEvidenceDir, `${taskId}.receipt-repair-audit.log`),
+			`${JSON.stringify({ at: new Date().toISOString(), auditNote })}\n`,
+		);
+		await unlink(markerPath);
+		return true;
+	});
+}
+
+/**
+ * Drops the write-ahead fence once the publication is settled either way.
+ * Never throws: the caller already has a settled outcome, and a marker that
+ * cannot be removed keeps refusing transactions, which is the fail-closed result.
+ */
+async function removeRepairMarkerBestEffort(markerPath: string): Promise<void> {
+	await unlink(markerPath).catch(() => undefined);
+}
+
+/**
+ * Compensating a failed route-receipt append could not restore the prior
+ * workflow evidence. The durable evidence may now be advanced without its
+ * receipt, so both causes are kept and callers must NOT roll back the live
+ * route reservation: the split stays fail-closed until it is repaired.
+ */
+export class TaskEvidenceReceiptRollbackError extends Error {
+	readonly appendError: unknown;
+	readonly rollbackError: unknown;
+
+	constructor(appendError: unknown, rollbackError: unknown) {
+		super(
+			'TASK_EVIDENCE_RECEIPT_ROLLBACK_FAILED: workflow evidence may be advanced without its route receipt',
+			{ cause: appendError },
+		);
+		this.name = 'TaskEvidenceReceiptRollbackError';
+		this.appendError = appendError;
+		this.rollbackError = rollbackError;
+	}
+}
+
+export function isTaskEvidenceReceiptRollbackFailure(
+	error: unknown,
+): error is TaskEvidenceReceiptRollbackError {
+	return error instanceof TaskEvidenceReceiptRollbackError;
+}
+
 export const _internals = {
 	appendTaskGateRequirementsReceiptIfNeeded,
+	/** Test seam: the compensating restore after a failed receipt append. */
+	restoreEvidenceFile: atomicWriteFile,
+	/** Test seam: the write-ahead PREPARED fence, written before evidence changes. */
+	writePreparedMarker: atomicWriteFile,
+	/** Test seam: the compensating unlink of a newly created evidence file. */
+	removeEvidenceFile: unlink,
 };
 
 export interface GateEvidence {
@@ -1775,11 +1882,15 @@ export async function transitionTaskWorkflowEvidence(
 	directory: string,
 	taskId: string,
 	event: TaskWorkflowTransitionEvent,
+	options: {
+		beforeCommit?: (event: TaskWorkflowTransitionEvent) => void | Promise<void>;
+	} = {},
 ): Promise<TaskEvidence> {
 	const { evidence } = await transitionTaskWorkflowEvidenceWithStatus(
 		directory,
 		taskId,
 		event,
+		options,
 	);
 	return evidence;
 }
@@ -1796,6 +1907,9 @@ export async function transitionTaskWorkflowEvidenceWithStatus(
 	directory: string,
 	taskId: string,
 	event: TaskWorkflowTransitionEvent,
+	options: {
+		beforeCommit?: (event: TaskWorkflowTransitionEvent) => void | Promise<void>;
+	} = {},
 ): Promise<{ evidence: TaskEvidence; duplicated: boolean }> {
 	assertValidTaskId(taskId);
 
@@ -1806,6 +1920,7 @@ export async function transitionTaskWorkflowEvidenceWithStatus(
 		taskId,
 		event.type,
 		async (transaction) => {
+			await options.beforeCommit?.(event);
 			if (transaction.transitionWithStatus) {
 				const result = await transaction.transitionWithStatus(event);
 				updatedEvidence = result.evidence;
@@ -1838,6 +1953,9 @@ export async function withTaskEvidenceTransaction<T>(
 	return withTaskEvidenceLock(directory, taskId, agent, async () => {
 		const resolvedEvidenceDir = getEvidenceDir(directory);
 		const evidencePath = path.join(resolvedEvidenceDir, `${taskId}.json`);
+		if (existsSync(repairMarkerPathFor(resolvedEvidenceDir, taskId))) {
+			throw new TaskEvidenceRepairPendingError(taskId);
+		}
 		let current: TaskEvidence | null = null;
 		try {
 			current = readExisting(evidencePath, taskId);
@@ -1863,15 +1981,86 @@ export async function withTaskEvidenceTransaction<T>(
 						nextEvidence !== current,
 				),
 			});
+			const markerPath = repairMarkerPathFor(resolvedEvidenceDir, taskId);
+			if (event) {
+				// Write-ahead fence (PR 3919 B-004): durable BEFORE the workflow
+				// evidence changes. If the evidence write or the receipt append is
+				// lost, the marker still refuses later transactions. A failure here
+				// aborts before any evidence changes.
+				await _internals.writePreparedMarker(
+					markerPath,
+					JSON.stringify(
+						{
+							taskId,
+							eventType: event.type,
+							state: 'PREPARED',
+							at: new Date().toISOString(),
+						},
+						null,
+						2,
+					),
+				);
+			}
 			await atomicWriteFile(evidencePath, JSON.stringify(validated, null, 2));
 			if (event) {
-				await _internals.appendTaskGateRequirementsReceiptIfNeeded(
-					directory,
-					taskId,
-					current,
-					validated,
-					event,
-				);
+				try {
+					await _internals.appendTaskGateRequirementsReceiptIfNeeded(
+						directory,
+						taskId,
+						current,
+						validated,
+						event,
+					);
+				} catch (error) {
+					// Workflow evidence and its route receipt are one logical
+					// publication. Compensate a failed append so callers can roll
+					// back live reservations without leaving durable advancement.
+					try {
+						if (current) {
+							await _internals.restoreEvidenceFile(
+								evidencePath,
+								JSON.stringify(current, null, 2),
+							);
+						} else {
+							await _internals.removeEvidenceFile(evidencePath);
+						}
+					} catch (rollbackError) {
+						// Durable fence first: the split must survive a restart.
+						let fenceError: unknown = null;
+						try {
+							await atomicWriteFile(
+								repairMarkerPathFor(resolvedEvidenceDir, taskId),
+								JSON.stringify(
+									{
+										taskId,
+										eventType: event.type,
+										appendError: String(error),
+										rollbackError: String(rollbackError),
+										at: new Date().toISOString(),
+									},
+									null,
+									2,
+								),
+							);
+						} catch (markerError) {
+							fenceError = markerError;
+						}
+						throw new TaskEvidenceReceiptRollbackError(
+							error,
+							fenceError
+								? new AggregateError(
+										[rollbackError, fenceError],
+										'rollback failed and the repair fence could not be written',
+									)
+								: rollbackError,
+						);
+					}
+					// Compensated: the durable state is the prior state again.
+					await removeRepairMarkerBestEffort(markerPath);
+					throw error;
+				}
+				// Receipt durable: the publication is complete, so the fence drops.
+				await removeRepairMarkerBestEffort(markerPath);
 			}
 			current = validated;
 			return validated;
@@ -1961,6 +2150,13 @@ export async function recordGateEvidence(
 		ensureDefaultStageB?: boolean;
 		routeBinding?: ReviewRouteEvidence;
 		routeComplete?: boolean;
+		beforeCommit?: (event: TaskWorkflowTransitionEvent) => void | Promise<void>;
+		/**
+		 * Recompute route completeness against durable siblings while the task
+		 * evidence lock is held. The pre-lock boolean remains a fallback for
+		 * callers that do not opt into the lock-scoped refresh.
+		 */
+		resolveRouteComplete?: () => boolean | Promise<boolean>;
 	} = {},
 ): Promise<void> {
 	assertValidTaskId(taskId);
@@ -1996,6 +2192,17 @@ export async function recordGateEvidence(
 					expectedGeneration: options.expectedGeneration,
 					transitionId: options.transitionId,
 				},
+		{
+			beforeCommit: async (event) => {
+				await options.beforeCommit?.(event);
+				if (
+					event.type === 'stage_b_completed' &&
+					options.resolveRouteComplete
+				) {
+					event.routeComplete = await options.resolveRouteComplete();
+				}
+			},
+		},
 	);
 
 	telemetry.gatePassed(sessionId, gate, taskId);

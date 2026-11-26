@@ -468,5 +468,4 @@ export async function appendTaskGateRequirementsReceiptIfNeeded(
 	const lines = [...receipts, receipt].map((entry) => JSON.stringify(entry));
 	assertSafeRequirementsParent(directory, false);
 	await atomicWriteFile(filePath, `${lines.join('\n')}\n`);
-	assertSafeRequirementsParent(directory, false);
 }

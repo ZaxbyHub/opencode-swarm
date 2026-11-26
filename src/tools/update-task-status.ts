@@ -49,11 +49,12 @@ import {
 	ensureAgentSession,
 	getAgentSession,
 	getModifiedFilesForTask,
-	getStageBRouteEvidence,
+	getSettledStageBRouteEvidence,
 	getTaskState,
 	hasBothStageBCompletions,
 	hasModifiedFilesForTask,
 	isStageBRouteRequired,
+	mergeStageBRouteEvidence,
 	recordStageBCompletion,
 	startAgentSession,
 	swarmState,
@@ -426,13 +427,13 @@ function routeGateAllowsTask(
 			return false;
 		}
 		const liveEvidence = candidateSession
-			? getStageBRouteEvidence(candidateSession, taskId)
+			? getSettledStageBRouteEvidence(candidateSession, taskId)
 			: [];
 		return enforcePersistedReviewRouteReceipt({
 			projectRoot: directory,
 			sessionId: candidateSessionID,
 			taskId,
-			receipts: liveEvidence.length > 0 ? liveEvidence : durableEvidence,
+			receipts: mergeStageBRouteEvidence(liveEvidence, durableEvidence),
 			enforcementEnabled: true,
 			legacyUnrouted: false,
 			requireEvidenceBindings: true,
@@ -1394,14 +1395,16 @@ export function recoverTaskStateFromDelegations(
 	for (const [sessionId, session] of swarmState.agentSessions) {
 		if (!(session.taskWorkflowStates instanceof Map)) continue;
 		const routeEvidence = (() => {
-			const live = getStageBRouteEvidence(session, taskId);
-			if (live.length > 0) return live;
+			const live = getSettledStageBRouteEvidence(session, taskId);
 			try {
-				return routeEvidenceFromTaskGateRequirements(
-					readTaskGateRequirementsReceiptsSync(directory!, taskId),
+				return mergeStageBRouteEvidence(
+					live,
+					routeEvidenceFromTaskGateRequirements(
+						readTaskGateRequirementsReceiptsSync(directory!, taskId),
+					),
 				);
 			} catch {
-				return [];
+				return live;
 			}
 		})();
 		const routeRequired =

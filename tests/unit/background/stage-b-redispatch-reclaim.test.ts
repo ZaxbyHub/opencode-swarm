@@ -29,6 +29,7 @@ import * as path from 'node:path';
 import type { BackgroundDelegationRecord } from '../../../src/background/pending-delegations';
 import { ingestBackgroundStageBCompletion } from '../../../src/background/stage-b-gates';
 import { captureWorkspaceSnapshot } from '../../../src/background/workspace-snapshot';
+import type { PluginConfig } from '../../../src/config';
 import {
 	readTaskGateRequirementsReceiptsSync,
 	routeEvidenceFromTaskGateRequirements,
@@ -38,17 +39,22 @@ import {
 	recordGateEvidence,
 	transitionTaskWorkflowEvidence,
 } from '../../../src/gate-evidence';
+import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
 import type { ReviewRouteEvidence } from '../../../src/review/routing-enforcement';
 import {
 	buildReviewRouteReceipt,
 	persistReviewRouteReceipt,
 } from '../../../src/review/routing-enforcement.js';
 import {
+	getStageBRouteEvidence,
+	getTaskState,
+	recordModifiedFilesForTask,
 	recordStageBRouteEvidence,
 	resetSwarmState,
 	startAgentSession,
 	swarmState,
 } from '../../../src/state';
+import { executeUpdateTaskStatus } from '../../../src/tools/update-task-status';
 import { createIsolatedTestEnv } from '../../helpers/isolated-test-env.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 import { ensureSessionDrained } from '../hooks/_session-rehydration-drain';
@@ -95,6 +101,12 @@ const approvedVerdict = (taskId: string) => ({
 	chars: 54,
 	truncated: false,
 	digest: 'reviewer',
+});
+
+/** Foreground reviewer dispatch args (resolveEvidenceTaskId parses the TASK line). */
+const foregroundReviewerArgs = (taskId: string) => ({
+	subagent_type: 'reviewer',
+	prompt: `TASK: ${taskId} review the change\nACCEPTANCE: FR-001 the diff satisfies the requirement`,
 });
 
 let testDirectory = '';
@@ -242,7 +254,10 @@ describe('background Stage-B re-dispatch slot reclamation', () => {
 
 		// The audit chain keeps BOTH reviewer rows, but the reconstructed
 		// route evidence collapses them to the latest dispatch for the
-		// identity — the superseded row must not read back as a duplicate.
+		// identity — the superseded row must not read back as a duplicate,
+		// and the reclaimed entry keeps the ORIGINAL identity and slot (F-004:
+		// a re-dispatch re-earns the same slot; it never rebinds identity or
+		// slotId onto a different route position).
 		const receipts = readTaskGateRequirementsReceiptsSync(testDirectory, '1.8');
 		const reviewerRows = receipts.filter(
 			(receipt) => receipt.routeBinding?.role === 'reviewer',
@@ -250,15 +265,21 @@ describe('background Stage-B re-dispatch slot reclamation', () => {
 		expect(reviewerRows.length).toBe(2);
 		const reconstructed = routeEvidenceFromTaskGateRequirements(receipts);
 		expect(reconstructed).toHaveLength(1);
-		expect(reconstructed[0]?.callId).toBe('call-fresh');
-		expect(reconstructed[0]?.childSessionId).toBe('child-fresh');
+		expect(reconstructed[0]).toMatchObject({
+			role: 'reviewer',
+			identity: '1.8:reviewer:1',
+			slotId: '1.8:reviewer:1',
+			callId: 'call-fresh',
+			childSessionId: 'child-fresh',
+		});
 	});
 
 	test('regression: the same-process wedge (in-memory route evidence occupied) also reclaims', async () => {
 		await seedWedgedReviewerRun('1.9');
 
 		// No restart: the old binding also lives in the parent session's
-		// in-memory route evidence (where the settlement reserved it).
+		// in-memory route evidence (where the settlement reserved it), and the
+		// in-memory workflow is pinned at reviewer_run exactly like the durable one.
 		const session = swarmState.agentSessions.get('parent-session');
 		expect(session).toBeDefined();
 		recordStageBRouteEvidence(session!, '1.9', {
@@ -271,6 +292,7 @@ describe('background Stage-B re-dispatch slot reclamation', () => {
 			childSessionId: 'child-old',
 			generation: 1,
 		});
+		session!.taskWorkflowStates?.set('1.9', 'reviewer_run');
 
 		await persistFreshExemptReceipt('1.9');
 
@@ -290,6 +312,28 @@ describe('background Stage-B re-dispatch slot reclamation', () => {
 		const evidence = await readTaskEvidence(testDirectory, '1.9');
 		expect(evidence?.workflow.state).toBe('tests_run');
 		expect(evidence?.gates.reviewer?.sessionId).toBe('child-fresh');
+		// F-003 (C1/C3): the reclaim must land on the LIVE array, not only the
+		// prospective one. Exactly one fresh reviewer binding survives — the
+		// obsolete same-identity entry is replaced, never appended beside (a
+		// second same-identity entry reads back as ROUTE_RECEIPT_DUPLICATE and
+		// re-wedges every live consumer) — keeping the original identity/slot.
+		const liveReviewerBindings = getStageBRouteEvidence(session!, '1.9').filter(
+			(entry) => entry.role === 'reviewer',
+		);
+		expect(liveReviewerBindings).toHaveLength(1);
+		expect(liveReviewerBindings[0]).toMatchObject({
+			role: 'reviewer',
+			identity: '1.9:reviewer:1',
+			slotId: '1.9:reviewer:1',
+			sessionId: 'parent-session',
+			taskId: '1.9',
+			callId: 'call-fresh',
+			childSessionId: 'child-fresh',
+		});
+		// F-003: the LIVE workflow advances to tests_run in the same process
+		// (pre-fix, the poisoned live array blocked this advancement while the
+		// durable workflow alone moved on).
+		expect(getTaskState(session!, '1.9')).toBe('tests_run');
 	});
 
 	test('control: an occupied slot whose identity is absent from the current receipt is not reclaimed', async () => {
@@ -338,5 +382,119 @@ describe('background Stage-B re-dispatch slot reclamation', () => {
 		expect(result.ok).toBe(false);
 		const evidence = await readTaskEvidence(testDirectory, '1.10');
 		expect(evidence?.workflow.state).toBe('reviewer_run');
+		// The foreign live binding is untouched (not rebadged, not duplicated).
+		const controlLive = getStageBRouteEvidence(session!, '1.10');
+		expect(controlLive).toHaveLength(1);
+		expect(controlLive[0]).toMatchObject({
+			identity: 'foreign-identity',
+			callId: 'call-old',
+		});
+	});
+
+	// F-002 (C2): the foreground settlement twin of the same-process reclaim.
+	// The settlement composes its prospective evidence correctly, but its live
+	// reserve APPENDed the fresh same-identity binding next to the obsolete
+	// one, poisoning the live array for every later live-read consumer.
+	test('regression: the foreground settlement twin reclaims the live slot and update_task_status completes without a restart', async () => {
+		const taskId = '1.11';
+		await seedWedgedReviewerRun(taskId);
+		// The dispatch resolves the task (and update_task_status completes it)
+		// through the plan projection.
+		fs.mkdirSync(path.join(testDirectory, '.swarm'), { recursive: true });
+		fs.writeFileSync(
+			path.join(testDirectory, '.swarm', 'plan.json'),
+			JSON.stringify({
+				schema_version: '1.0.0',
+				title: 'foreground reclaim settlement',
+				swarm: 'test',
+				current_phase: 1,
+				phases: [
+					{
+						id: 1,
+						name: 'Implementation',
+						status: 'in_progress',
+						tasks: [
+							{
+								id: taskId,
+								phase: 1,
+								status: 'in_progress',
+								size: 'small',
+								description: 'Exercise the foreground reclaim',
+								depends: [],
+								files_touched: ['AGENTS.md'],
+							},
+						],
+					},
+				],
+			}),
+		);
+		const session = swarmState.agentSessions.get('parent-session')!;
+		recordModifiedFilesForTask(session, taskId, ['AGENTS.md'], testDirectory);
+		// Same-process wedge state: obsolete live binding + reviewer_run pin.
+		recordStageBRouteEvidence(session, taskId, {
+			role: 'reviewer',
+			identity: `${taskId}:reviewer:1`,
+			sessionId: 'parent-session',
+			taskId,
+			slotId: `${taskId}:reviewer:1`,
+			callId: 'call-old',
+			childSessionId: 'child-old',
+			generation: 1,
+		});
+		session.taskWorkflowStates?.set(taskId, 'reviewer_run');
+
+		const hook = createDelegationGateHook(
+			{ hooks: { delegation_gate: true } } as unknown as PluginConfig,
+			testDirectory,
+		);
+		// The sanctioned unwedging path: re-dispatch the reviewer in the
+		// foreground. Dispatch time builds the fresh exemption-aware receipt
+		// and reclaims the occupied slot.
+		await hook.toolBefore(
+			{ tool: 'Task', sessionID: 'parent-session', callID: 'call-fresh' },
+			{ args: foregroundReviewerArgs(taskId) },
+		);
+		await hook.taskMetadata({
+			callID: 'call-fresh',
+			parentSessionID: 'parent-session',
+			childSessionID: 'child-fresh',
+		});
+		await hook.toolAfter(
+			{
+				tool: 'tool.execute.Task',
+				sessionID: 'parent-session',
+				callID: 'call-fresh',
+				args: foregroundReviewerArgs(taskId),
+			},
+			{
+				text: `[REVIEWED] | task-${taskId} | APPROVED | foreground reclaim fixture`,
+			},
+		);
+
+		// One fresh live binding for the reclaimed slot; the obsolete entry was
+		// replaced and identity/slot are preserved.
+		const live = getStageBRouteEvidence(session, taskId).filter(
+			(entry) => entry.role === 'reviewer',
+		);
+		expect(live).toHaveLength(1);
+		expect(live[0]).toMatchObject({
+			role: 'reviewer',
+			identity: `${taskId}:reviewer:1`,
+			slotId: `${taskId}:reviewer:1`,
+			callId: 'call-fresh',
+			childSessionId: 'child-fresh',
+		});
+		expect(getTaskState(session, taskId)).toBe('tests_run');
+		const evidence = await readTaskEvidence(testDirectory, taskId);
+		expect(evidence?.workflow.state).toBe('tests_run');
+
+		// The live-read completion gate finishes the task in the same process
+		// (pre-fix it read the poisoned [old, fresh] array and refused).
+		const completion = await executeUpdateTaskStatus({
+			task_id: taskId,
+			status: 'completed',
+			working_directory: testDirectory,
+		});
+		expect(completion.success).toBe(true);
 	});
 });
