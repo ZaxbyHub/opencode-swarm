@@ -33,6 +33,7 @@
  * convention (its awaits live in deferred-named helpers).
  */
 
+import { noteChildSessionEvent } from '../../background/child-activity';
 import { recordSessionChatAgent } from '../../models/task-model-routing';
 import { log } from '../../utils';
 import { withTimeout } from '../../utils/timeout';
@@ -102,6 +103,44 @@ function isBoundedId(value: string): boolean {
  */
 const MAX_TRACKED_TOOL_NAMES = 512;
 const toolNameByDispatchKey = new Map<string, string>();
+
+/**
+ * 2026-11-26 (task 2.15 liveness wedge): feed the child-activity registry
+ * from every session-scoped host event. Metadata only — the session id and
+ * the event type; never payload text. The registry is what the background
+ * delegation stale sweep consults before flipping a `pending`/`running`
+ * record to `stale`: a child with a recent event or an OPEN tool call (a
+ * single long execution emits `session.tool.called` at its start and nothing
+ * until it completes) is alive and must not be swept on store-write age.
+ */
+function noteChildActivityFromEnvelope(envelope: V2EventEnvelope): void {
+	try {
+		const type = typeof envelope?.type === 'string' ? envelope.type : undefined;
+		if (type === undefined) return;
+		const payload = envelopePayload(envelope);
+		const sessionID =
+			typeof payload.sessionID === 'string' ? payload.sessionID : undefined;
+		if (!sessionID) return;
+		switch (type) {
+			case 'session.tool.called':
+				noteChildSessionEvent(sessionID, 'tool_open');
+				return;
+			case 'session.tool.success':
+			case 'session.tool.failed':
+				noteChildSessionEvent(sessionID, 'tool_close');
+				return;
+			case 'session.execution.succeeded':
+			case 'session.execution.interrupted':
+			case 'session.execution.failed':
+				noteChildSessionEvent(sessionID, 'session_end');
+				return;
+			default:
+				noteChildSessionEvent(sessionID, 'event');
+		}
+	} catch {
+		/* best-effort only — the registry must never break the pump */
+	}
+}
 
 function rememberToolNameFromEnvelope(envelope: V2EventEnvelope): void {
 	if (envelope?.type !== 'session.tool.input.started') return;
@@ -377,6 +416,9 @@ export function startDeferredEventPump(
 			for await (const envelope of iterable as AsyncIterable<V2EventEnvelope>) {
 				if (stopped) break;
 				seedSessionIdentityFromEnvelope(envelope);
+				// 2026-11-26 (task 2.15): child-activity registry feed (metadata
+				// only) — the stale sweep's observed-liveness signal.
+				noteChildActivityFromEnvelope(envelope);
 				// #3169 Phase 2 (C4): v2 surfaces provider errors only via the
 				// event stream (no error text in context()); record them for the
 				// session-client shim's result translation. Sync, bounded, O(1).

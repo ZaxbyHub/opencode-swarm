@@ -75,6 +75,7 @@ import {
 	sameProjectRoot,
 } from '../utils/canonical-root.js';
 import * as logger from '../utils/logger.js';
+import { childBlocksStaleSweep } from './child-activity';
 import {
 	appendDelegationMaintenanceObservation,
 	DelegationCheckpointAuditSchema,
@@ -6076,6 +6077,23 @@ function sweepStaleLocked(
 		if (excludeCorrelationIds?.has(record.correlationId)) continue;
 		if (!statuses.has(record.status)) continue;
 		if (now - record.updatedAt <= timeoutMs) continue;
+		// 2026-11-26 (task 2.15 liveness wedge): the store's `updatedAt` only
+		// proves the absence of STORE writes — a live child running a long
+		// operation writes nothing in between (observed live: three consecutive
+		// coder rounds stale-swept at the 30-minute mark while actively
+		// committing). The child-activity registry (fed by the v2 event pump)
+		// holds the OBSERVED liveness: a recent host event or an open tool
+		// call blocks the flip. An operator-forced sweep (#2971 terminal
+		// stamping) bypasses the guard — the audited operator decision wins.
+		// Unknown/quiet sessions never block: the historical store-age
+		// semantics apply unchanged (fail-open to the pre-registry behavior,
+		// including hosts without an event pump).
+		if (
+			limits.failureClass === undefined &&
+			childBlocksStaleSweep(record.correlationId, timeoutMs)
+		) {
+			continue;
+		}
 		// Issue #2615: the presumed-stale flip must carry a typed failure
 		// class so PR-review partial-coverage admission can settle a
 		// stale-swept dimension without abort_pr_workflow. 'liveness' marks a
