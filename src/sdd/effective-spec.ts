@@ -1303,22 +1303,36 @@ function hasAnyMdUnder(
 	state: { visited: number; exhausted: boolean },
 ): boolean {
 	if (depth > 8) return false;
-	let entries: fs.Dirent[];
+	// Incremental enumeration (opendirSync): readdirSync would materialize the
+	// whole directory before the budget could bound it (SolCritic F-018).
+	let dirHandle: fs.Dir;
 	try {
-		entries = fs.readdirSync(dir, { withFileTypes: true });
+		dirHandle = fs.opendirSync(dir);
 	} catch {
 		return false;
 	}
-	for (const entry of entries) {
-		if (++state.visited > PRESENCE_WALK_BUDGET) state.exhausted = true;
-		if (state.exhausted) return false;
-		if (entry.isSymbolicLink()) continue;
-		if (entry.isFile() && entry.name.endsWith('.md')) return true;
-		if (
-			entry.isDirectory() &&
-			hasAnyMdUnder(path.join(dir, entry.name), depth + 1, state)
-		) {
-			return true;
+	try {
+		for (;;) {
+			const entry = dirHandle.readSync();
+			if (entry === null) break;
+			if (++state.visited > PRESENCE_WALK_BUDGET) {
+				state.exhausted = true;
+				return false;
+			}
+			if (entry.isSymbolicLink()) continue;
+			if (entry.isFile() && entry.name.endsWith('.md')) return true;
+			if (
+				entry.isDirectory() &&
+				hasAnyMdUnder(path.join(dir, entry.name), depth + 1, state)
+			) {
+				return true;
+			}
+		}
+	} finally {
+		try {
+			dirHandle.closeSync();
+		} catch {
+			// best effort
 		}
 	}
 	return false;
