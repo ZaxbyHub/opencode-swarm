@@ -21,6 +21,7 @@ import {
 	withSpecScanBudget,
 } from '../../../src/sdd/effective-spec';
 import { detectUnmarkedSpecDriftSync } from '../../../src/utils/spec-hash';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 const hashOf = (content: string): string =>
 	createHash('sha256').update(content, 'utf-8').digest('hex');
@@ -44,7 +45,7 @@ describe('changes-arm gate cases (PR 3920 closeout, SolCritic F-019/F-020)', () 
 	let pairDir: string;
 
 	beforeEach(async () => {
-		pairDir = await fs.mkdtemp(path.join(os.tmpdir(), 'spec-drift-chg-'));
+		pairDir = canonicalMkdtemp('spec-drift-chg-');
 		await fs.mkdir(path.join(pairDir, '.swarm'), { recursive: true });
 	});
 

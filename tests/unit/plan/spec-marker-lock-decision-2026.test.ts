@@ -19,6 +19,7 @@ import { _internals, loadPlan } from '../../../src/plan/manager';
 import { readEffectiveSpecSync } from '../../../src/sdd/effective-spec';
 import { resetSwarmState } from '../../../src/state';
 import { createIsolatedTestEnv } from '../../helpers/isolated-test-env.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 const ANCIENT_SECONDS = 1600000000; // 2020, well past the lock TTL
 
@@ -48,7 +49,7 @@ describe('loadPlan marker decision under the spec.md owner lock (PR 3920 closeou
 	beforeEach(() => {
 		isolatedEnv = createIsolatedTestEnv();
 		resetSwarmState();
-		dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'spec-lock-')));
+		dir = canonicalMkdtemp('spec-lock-');
 		fs.mkdirSync(path.join(dir, '.swarm'), { recursive: true });
 		fs.mkdirSync(path.join(dir, '.opencode'), { recursive: true });
 		fs.writeFileSync(

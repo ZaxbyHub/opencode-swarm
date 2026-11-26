@@ -11,6 +11,7 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { enforceSpecDriftGate } from '../../../src/hooks/guardrails';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 /**
  * PR 3920 closeout (SolCritic): the marker is not the only drift signal. With no
@@ -24,7 +25,7 @@ describe('markerless spec-pair gate (PR 3920 closeout)', () => {
 	let pairDir: string;
 
 	beforeEach(async () => {
-		pairDir = await fs.mkdtemp(path.join(os.tmpdir(), 'spec-drift-pair-'));
+		pairDir = canonicalMkdtemp('spec-drift-pair-');
 		await fs.mkdir(path.join(pairDir, '.swarm'), { recursive: true });
 	});
 
