@@ -241,7 +241,13 @@ function serializeLedgerEvent(event: LedgerEvent): string {
 	return JSON.stringify(event);
 }
 
-function computeLedgerEventHash(event: LedgerEvent): string {
+/**
+ * Stable content digest of one ledger event. Exported (issue #3770/#3773
+ * trace) so completion-event identity can be scoped to a ledger ROOT: a
+ * re-rooted plan (`replacePlanLedgerWithRoot`) restarts history at seq 1, so
+ * (phase, seq) alone is not unique across roots — the root event's digest is.
+ */
+export function computeLedgerEventHash(event: LedgerEvent): string {
 	return crypto
 		.createHash('sha256')
 		.update(serializeLedgerEvent(event), 'utf8')
@@ -2056,15 +2062,46 @@ export async function peekPlanFromLedger(
 	directory: string,
 	_options?: ReplayOptions,
 ): Promise<ReplayStatusResult> {
+	const peeked = peekLedgerEventsExact(directory);
+	if (peeked.events.length === 0) {
+		return {
+			plan: null,
+			truncated: peeked.truncated,
+			badSuffix: peeked.badSuffix,
+		};
+	}
+	return {
+		plan: reconstructPlanFromEvents(directory, peeked.events),
+		truncated: peeked.truncated,
+		badSuffix: peeked.badSuffix,
+	};
+}
+
+/**
+ * Authority-resolved READ-ONLY ledger event view (issue #3770/#3773 trace).
+ * Same selection semantics as {@link peekPlanFromLedger} — extracted so
+ * observational callers (the planned-tasks refusal, the completion-event
+ * identity) share one exact reader instead of duplicating the authority
+ * rules: fatal-UTF-8 exact-line JSONL via {@link readFileLedgerExact}, the
+ * SQLite ledger via {@link readSqliteLedgerEventsReadOnly} (creation-free),
+ * honoring `authorityMode` (SQLite authoritative only after cutover; in
+ * file-shadow mode the portable JSONL stays canonical unless absent) and the
+ * `.resetting` marker. Never repairs, quarantines, or writes anything.
+ */
+export function peekLedgerEventsExact(directory: string): {
+	events: LedgerEvent[];
+	truncated: boolean;
+	badSuffix: string | null;
+} {
 	if (fs.existsSync(path.join(directory, '.swarm', 'plan-ledger.resetting')))
-		return { plan: null, truncated: false, badSuffix: null };
+		return { events: [], truncated: false, badSuffix: null };
 	const file = readFileLedgerExact(directory);
 	let events = file.events;
 	let truncated = file.truncated;
 	let badSuffix = file.badSuffix;
 	const sqliteReadOnly = readSqliteLedgerEventsReadOnly(directory);
 	if (fs.existsSync(path.join(directory, '.swarm', 'plan-ledger.resetting')))
-		return { plan: null, truncated: false, badSuffix: null };
+		return { events: [], truncated: false, badSuffix: null };
 	if (sqliteReadOnly.events.length > 0) {
 		const sqlite = {
 			events: sqliteReadOnly.events.map((row) => row.event as LedgerEvent),
@@ -2080,15 +2117,7 @@ export async function peekPlanFromLedger(
 			badSuffix = null;
 		}
 	}
-
-	if (events.length === 0) {
-		return { plan: null, truncated, badSuffix };
-	}
-	return {
-		plan: reconstructPlanFromEvents(directory, events),
-		truncated,
-		badSuffix,
-	};
+	return { events, truncated, badSuffix };
 }
 
 /**

@@ -94,7 +94,7 @@ describe('AC2 metadata - contract constants', () => {
 			retentionDays: 30,
 		});
 		expect(TRAINING_VAULT_SCHEMA_VERSION).toBe(1);
-		expect(REDACTION_VERSION).toBe(1);
+		expect(REDACTION_VERSION).toBe(2);
 		expect(TRAINING_EXPORT_SCHEMA_VERSION).toBe(1);
 		expect(TRAINING_DISK_FLOOR_BYTES).toBe(2_147_483_648);
 	});
@@ -151,7 +151,7 @@ describe('AC2 metadata - granted consent record on disk', () => {
 				maxRecords: 500,
 				retentionDays: 7,
 			});
-			expect(raw.redaction_version).toBe(1);
+			expect(raw.redaction_version).toBe(2);
 			expect(raw.project_binding).toEqual(computeProjectBinding(dir));
 
 			// Round-trip: active before expiry, null after.
@@ -259,7 +259,7 @@ describe('AC2 metadata - vault record built by the contract builder', () => {
 				plugin_version: 'test-7.7.7',
 				source: 'chat',
 			});
-			expect(record.redaction.version).toBe(1);
+			expect(record.redaction.version).toBe(2);
 			expect(record.redaction.redactions).toBe(0);
 			expect(record.consent).toEqual({ id: consent.consent_id, version: 1 });
 			// retention = min(captured_at + retentionDays, consent.expires_at) —
@@ -316,7 +316,7 @@ describe('AC2 metadata - vault record built by the contract builder', () => {
 						'see https://internal.example.invalid/p?token=abc123def456 for details',
 				}),
 			);
-			expect(record.redaction.version).toBe(1);
+			expect(record.redaction.version).toBe(2);
 			expect(record.redaction.redactions).toBeGreaterThanOrEqual(1);
 			expect(record.content.includes('https://internal.example.invalid')).toBe(
 				false,

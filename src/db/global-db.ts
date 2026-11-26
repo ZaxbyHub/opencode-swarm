@@ -71,6 +71,16 @@ export function runGlobalMigrations(db: Database): void {
 		.get();
 	const currentVersion = row?.version ?? 0;
 
+	// #3773 (same class as project-db): refuse writable open when the
+	// recorded schema is newer than this client's highest known migration —
+	// an older writer must not mutate a schema it does not understand.
+	const highestSupported = MIGRATIONS[MIGRATIONS.length - 1]?.version ?? 0;
+	if (currentVersion > highestSupported) {
+		throw new Error(
+			`global-rules.db schema version ${currentVersion} is newer than this client supports (${highestSupported}); writable open refused to preserve schema and rows — upgrade opencode-swarm before writing`,
+		);
+	}
+
 	for (const migration of MIGRATIONS) {
 		if (migration.version <= currentVersion) continue;
 		const apply = db.transaction(() => {
@@ -94,10 +104,22 @@ export function getGlobalDb(): Database {
 	mkdirSync(configDir, { recursive: true });
 	const Db = loadDatabaseCtor();
 	const db = new Db(join(configDir, 'global-rules.db'));
-	db.run('PRAGMA journal_mode = WAL;');
-	db.run('PRAGMA synchronous = NORMAL;');
-	db.run('PRAGMA busy_timeout = 5000;');
-	runGlobalMigrations(db);
+	try {
+		db.run('PRAGMA journal_mode = WAL;');
+		db.run('PRAGMA synchronous = NORMAL;');
+		db.run('PRAGMA busy_timeout = 5000;');
+		runGlobalMigrations(db);
+	} catch (error) {
+		// The singleton is not assigned yet — without this close, a migration
+		// refusal (e.g. #3773 newer-schema) would leak an untracked writable
+		// native handle.
+		try {
+			db.close();
+		} catch {
+			// best-effort between the refusal and the rethrow
+		}
+		throw error;
+	}
 	_globalDb = db;
 	return db;
 }

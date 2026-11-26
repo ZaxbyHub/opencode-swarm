@@ -9,6 +9,7 @@ import * as path from 'node:path';
 import type { ToolContext, ToolDefinition } from '@opencode-ai/plugin';
 import { z } from 'zod';
 import { validateSwarmPath } from '../hooks/utils';
+import { redactEvidenceDeep } from '../security/evidence-redaction';
 import { hasActiveTurboMode } from '../state';
 import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache';
 import { createSwarmTool } from './create-tool';
@@ -493,7 +494,12 @@ export async function executeCompletionVerify(
 						tasks_checked: tasksChecked,
 						tasks_skipped: tasksSkipped,
 						tasks_blocked: tasksBlocked,
-						blocked_tasks: blockedTasks,
+						// #3844 fold-in (closes #3899 AC1): identifiers, file
+						// paths and reasons are parsed from MODEL-AUTHORED plan
+						// descriptions — the durable bundle crosses the
+						// boundary redacted (structural identity preserved;
+						// the in-memory tool result keeps the raw values).
+						blocked_tasks: redactEvidenceDeep(blockedTasks),
 					},
 				],
 			};

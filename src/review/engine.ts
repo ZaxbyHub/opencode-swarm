@@ -16,6 +16,12 @@ import {
 	removeReviewReceipt,
 } from '../hooks/review-receipt.js';
 import { parseReviewerOutput } from '../hooks/review-receipt-collector.js';
+import {
+	EVIDENCE_FINDING_BODY_MAX,
+	EVIDENCE_FINDING_FILE_MAX,
+	EVIDENCE_FINDING_TITLE_MAX,
+	redactEvidenceField,
+} from '../security/evidence-redaction.js';
 import { sumKnownAxis } from '../services/cost-accounting.js';
 import { telemetry } from '../telemetry.js';
 import type { ModelOverride } from '../utils/model-dispatch-fallback.js';
@@ -36,12 +42,18 @@ import {
 	materializeAutoReviewManifest,
 	persistAutoReviewEvidence,
 	readAutoReviewEvidenceForPhase,
+	redactAutoReviewEvidenceForCapture,
 	validateAutoReviewEvidenceIntegrity,
 } from './evidence.js';
 import {
 	canonicalizeValidationCandidates,
 	runFindingValidation,
 } from './finding-validator.js';
+import {
+	isWithinRoot,
+	normalizedRelativePath,
+	redactReviewFilePath,
+} from './review-file-path.js';
 
 export type ReviewEngineTrigger =
 	| 'task_completion'
@@ -413,47 +425,6 @@ export function buildReviewPrompt(input: BuildReviewPromptInput): string {
 	return buildReviewPromptRequest(input).prompt;
 }
 
-function hasControlCharacter(value: string): boolean {
-	for (let index = 0; index < value.length; index++) {
-		const code = value.charCodeAt(index);
-		if (code <= 0x1f || code === 0x7f) return true;
-	}
-	return false;
-}
-
-function normalizedRelativePath(file: string): string | null {
-	if (
-		file.length === 0 ||
-		file.length > 500 ||
-		hasControlCharacter(file) ||
-		/^[A-Za-z]:[\\/]/.test(file) ||
-		file.startsWith('\\\\') ||
-		file.startsWith('//') ||
-		path.isAbsolute(file)
-	) {
-		return null;
-	}
-	const normalized = file.replaceAll('\\', '/');
-	const segments = normalized.split('/');
-	if (
-		segments.some((segment) => segment === '..' || segment === '') ||
-		normalized.startsWith('/')
-	) {
-		return null;
-	}
-	return normalized.replace(/^\.\//, '');
-}
-
-function isWithinRoot(root: string, candidate: string): boolean {
-	const relative = path.relative(root, candidate);
-	return (
-		relative.length > 0 &&
-		relative !== '..' &&
-		!relative.startsWith(`..${path.sep}`) &&
-		!path.isAbsolute(relative)
-	);
-}
-
 function rangesOverlap(
 	start: number,
 	end: number,
@@ -490,6 +461,29 @@ function anchorExactRangeFinding(
 		return 'nonexistent_target_path';
 	}
 	return undefined;
+}
+
+/**
+ * The paths the review scope knows to be real.
+ *
+ * For a RANGE diff the paths come from the resolved TARGET commit, not from
+ * the current checkout — so a target-side path is real even when the
+ * checkout does not contain it (the anchoring must not depend on the
+ * checkout's state).
+ */
+function reviewScopePaths(
+	diff: Extract<ReviewDiffResult, { status: 'ok' }>,
+): ReadonlySet<string> {
+	const paths = new Set<string>();
+	for (const key of diff.changedLines.keys()) {
+		const normalized = normalizedRelativePath(key);
+		if (normalized) paths.add(normalized);
+	}
+	for (const key of diff.files.keys()) {
+		const normalized = normalizedRelativePath(key);
+		if (normalized) paths.add(normalized);
+	}
+	return paths;
 }
 
 function anchorFinding(
@@ -1107,9 +1101,38 @@ export async function runReviewEngine(
 		return result;
 	}
 
-	const candidates = canonicalizeValidationCandidates(
-		parsed.structuredFindings ?? [],
-	);
+	// #3844: redact the parsed findings ONCE, BEFORE the canonicalization
+	// that derives their `finding_id`.
+	//
+	// The finding_id is a hash of the finding's title and body, and the
+	// auto-review evidence integrity check RE-DERIVES it from the persisted
+	// copy. Redacting after the canonicalization therefore left the stored id
+	// describing content that no longer existed: a finding that quotes a
+	// credential (exactly what a security review produces) was reported as
+	// "finding IDs or duplicate counts are invalid", and the phase-completion
+	// gate failed closed on every such phase.
+	//
+	// Redacting first makes ONE redacted form the source of every copy —
+	// the canonical findings, the persisted evidence and the receipt's
+	// structured findings — so the id and the content agree.
+	const structuredFindings = parsed.structuredFindings?.map((finding) => ({
+		...finding,
+		title: redactEvidenceField(finding.title, EVIDENCE_FINDING_TITLE_MAX),
+		body: redactEvidenceField(finding.body, EVIDENCE_FINDING_BODY_MAX),
+		// The file is model-authored free text when it names no real file
+		// in the project, so THAT case is redacted here — before the
+		// identity is derived — so the evidence, the receipt and the
+		// identity all carry the same path. A path that resolves inside
+		// the project is kept verbatim: redacting it would break the
+		// anchoring (the redactor's base64 rule matches ordinary deep
+		// paths), and a real repository path is not a secret.
+		file: redactReviewFilePath(
+			input.directory,
+			finding.file,
+			reviewScopePaths(diff),
+		),
+	}));
+	const candidates = canonicalizeValidationCandidates(structuredFindings ?? []);
 	let findings = candidates.map((candidate) =>
 		anchorFinding(
 			input.directory,
@@ -1246,6 +1269,13 @@ export async function runReviewEngine(
 		(finding) => finding.finding_id,
 	);
 	addCost(evidence, allDispatches);
+	// #3844: redact the free-text fields AT ASSEMBLY so the in-memory
+	// evidence and the persisted artifact are byte-identical — downstream
+	// hash comparisons (phase-complete preflight staleness) must not see a
+	// pre-redaction in-memory form diverge from the post-redaction stored
+	// one. Runs after the engine's raw-value classifiers (#3710 ordering);
+	// idempotent, so the persistence-boundary pass is a no-op re-application.
+	redactAutoReviewEvidenceForCapture(evidence);
 
 	let receiptPath: string | undefined;
 	let receiptId: string | undefined;
@@ -1265,7 +1295,7 @@ export async function runReviewEngine(
 								(finding) =>
 									`${finding.title}: ${finding.anchor_rejection ?? 'unanchored'}`,
 							),
-						structuredFindings: parsed.structuredFindings,
+						structuredFindings: structuredFindings,
 						reviewOverallConfidence: parsed.overallConfidence,
 						findingValidations: findings
 							.map((finding) => finding.validation)
@@ -1302,7 +1332,7 @@ export async function runReviewEngine(
 						),
 						passConditions: parsed.fixes,
 						summary: `${input.trigger} review`,
-						structuredFindings: parsed.structuredFindings,
+						structuredFindings: structuredFindings,
 						reviewOverallConfidence: parsed.overallConfidence,
 						findingValidations: findings
 							.map((finding) => finding.validation)

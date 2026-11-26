@@ -128,6 +128,14 @@ function rowToState(
 	};
 }
 
+/**
+ * The by-key row select, shared by the strict and the raw single-row reader.
+ * Bun caches a prepared statement per SQL string, so one constant costs a
+ * connection ONE statement where two spellings of the same query cost two.
+ */
+const SELECT_COORDINATION_ROW_SQL = `SELECT namespace, entity_key, revision, generation, status, payload, updated_at
+ FROM coordination_state WHERE namespace = ? AND entity_key = ?`;
+
 function readState(
 	db: Database,
 	namespace: string,
@@ -136,8 +144,7 @@ function readState(
 	const row =
 		db
 			.query<CoordinationStateRow, [string, string]>(
-				`SELECT namespace, entity_key, revision, generation, status, payload, updated_at
-		 FROM coordination_state WHERE namespace = ? AND entity_key = ?`,
+				SELECT_COORDINATION_ROW_SQL,
 			)
 			.get(namespace, entityKey) ?? null;
 	return rowToState(row);
@@ -161,8 +168,7 @@ export function getCoordinationStateRaw(
 	const row =
 		getProjectDb(directory)
 			.query<CoordinationStateRow, [string, string]>(
-				`SELECT namespace, entity_key, revision, generation, status, payload, updated_at
-			 FROM coordination_state WHERE namespace = ? AND entity_key = ?`,
+				SELECT_COORDINATION_ROW_SQL,
 			)
 			.get(namespace, entityKey) ?? null;
 	if (!row) return null;
@@ -270,6 +276,56 @@ export function listCoordinationStateKeys(
 		)
 		.all(namespace, boundedLimit)
 		.map((row) => row.entity_key);
+}
+
+/**
+ * Raw entity-key + payload pairs of one namespace WITHOUT validation
+ * (bounded). Recovery code attributes rows by raw payload fields even when
+ * full validation would reject them. Returns [] without a database.
+ *
+ * Composed from the two readers above rather than a dedicated query, so a
+ * flow that lists raw rows prepares no statement the store did not already
+ * have. That matters on Windows, where this Bun release keeps a closed
+ * connection's database file locked until garbage collection once more than
+ * a few dozen statements have been prepared — one statement more in a long
+ * flow is enough to strand swarm.db at teardown. The key list reads no
+ * payload; the single-row reader returns raw bytes without validating them.
+ */
+export function listCoordinationStateRowsRaw(
+	directory: string,
+	namespace: string,
+	limit: number,
+): {
+	entityKey: string;
+	payload: string;
+	revision: number;
+	generation: number;
+}[] {
+	const boundedLimit = Number.isFinite(limit)
+		? Math.max(0, Math.min(MAX_COORDINATION_STATE_LIST_ROWS, Math.trunc(limit)))
+		: 0;
+	if (boundedLimit === 0) return [];
+	const rows: {
+		entityKey: string;
+		payload: string;
+		revision: number;
+		generation: number;
+	}[] = [];
+	for (const entityKey of listCoordinationStateKeys(
+		directory,
+		namespace,
+		boundedLimit,
+	)) {
+		const row = getCoordinationStateRaw(directory, namespace, entityKey);
+		if (!row) continue;
+		rows.push({
+			entityKey: row.entityKey,
+			payload: row.payload,
+			revision: row.revision,
+			generation: row.generation,
+		});
+	}
+	return rows;
 }
 
 /** Return the exact number of authoritative rows in one coordination namespace. */

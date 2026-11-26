@@ -2,7 +2,10 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { Plan } from '../../../src/config/plan-schema';
-import { listCoordinationStates } from '../../../src/db/coordination-store.js';
+import {
+	listCoordinationStateRowsRaw,
+	listCoordinationStates,
+} from '../../../src/db/coordination-store.js';
 import { closeAllProjectDbs } from '../../../src/db/project-db.js';
 import {
 	clearScopeBindings,
@@ -117,6 +120,10 @@ describe('scope admission rollback', () => {
 			dispatchCallId: 'task-call',
 		});
 		expect(result).toMatchObject({ ok: false, code: 'SCOPE_BINDING_CAPACITY' });
+		// #3889 v4b contract: a failed admission revokes the whole chain — the
+		// predecessor is NOT restored (retired through the deny-ledger sink) and
+		// the unadmitted successor is deleted + deny-ledgered. Neither row may
+		// authorize; recovery is a fresh declare (new generation unblocked).
 		expect(
 			readScopeBindingFromDisk({
 				directory,
@@ -125,10 +132,17 @@ describe('scope admission rollback', () => {
 				ownerSessionId: 'architect-session',
 				ownerMessageId: 'task-call',
 			}),
-		).toMatchObject({
-			generationId: predecessor.generationId,
-			lifecycleState: 'live',
-		});
+		).toBeNull();
+		const denyRows = listCoordinationStateRowsRaw(
+			directory,
+			'scope-binding-deny',
+			2,
+		);
+		const ledger = JSON.parse(
+			denyRows.find((row) => row.entityKey === 'deny-ledger')?.payload ??
+				'{"entries":{}}',
+		) as { entries: Record<string, { kind: string }> };
+		expect(ledger.entries[predecessor.generationId]?.kind).toBe('terminal');
 	});
 
 	test('failed declaration admission revokes the newly written generation', async () => {
@@ -181,13 +195,13 @@ describe('scope admission rollback', () => {
 	});
 
 	for (const scenario of ['child claim', 'declaration replacement'] as const) {
-		test(`a failed second ${scenario} transition rolls back the first write`, async () => {
+		test(`a failed ${scenario} successor write persists nothing (#3889 atomicity)`, async () => {
 			const { directory, plan } = fixture();
 			const predecessor = binding(
 				directory,
 				plan,
 				'architect-session',
-				'task-call',
+				scenario === 'child claim' ? 'task-call' : 'first',
 				scenario === 'child claim' ? 'pending_child' : 'declaration',
 			);
 			expect(
@@ -196,13 +210,17 @@ describe('scope admission rollback', () => {
 			const original =
 				_scopePersistenceInternals.transitionScopeBindingStateWithinTransaction;
 			let calls = 0;
+			// Fault the successor write itself: under the new flow the successor
+			// write, its admission-pending ledger entry, and the predecessor
+			// retirement all live in ONE transaction, so a failure at the first
+			// step must leave the store byte-identical.
 			_scopePersistenceInternals.transitionScopeBindingStateWithinTransaction =
 				(transitionDirectory, candidate, expectedRevision) =>
-					++calls === 2
+					++calls === 1
 						? {
 								ok: false,
 								code: 'SCOPE_BINDING_PERSISTENCE_FAILED',
-								message: 'injected second transition failure',
+								message: 'injected successor write failure',
 							}
 						: original(transitionDirectory, candidate, expectedRevision);
 			try {
@@ -241,9 +259,11 @@ describe('scope admission rollback', () => {
 		});
 	}
 
-	test('F9: a failed multi-predecessor rollback leaves every durable predecessor unchanged', async () => {
-		// Previous rollback wrote restored predecessors one at a time, so a fault
-		// on the second write committed a partial replacement of durable authority.
+	test('F9 (#3889 contract): a capacity-failed admission retires the whole prior chain', async () => {
+		// v4b: predecessors are retired through the shared sink in the same
+		// transaction as the successor write; a failed in-memory admission then
+		// revokes the successor too. Nothing stays authorizable and every
+		// retired generation carries terminal deny evidence.
 		const { directory, plan } = fixture();
 		const first = binding(directory, plan, 'architect-session', 'first');
 		const second = binding(directory, plan, 'architect-session', 'second');
@@ -261,61 +281,31 @@ describe('scope admission rollback', () => {
 				generationId: replacement.generationId,
 			}),
 		).toMatchObject({ ok: true });
-		const originalTransition =
-			_scopePersistenceInternals.transitionScopeBindingStateWithinTransaction;
-		let restoredPredecessors = 0;
-		// Only the second durable predecessor restore is faulted; all other
-		// transitions remain real. Non-rollback transition failures are covered by
-		// the existing scope durability suites.
-		_scopePersistenceInternals.transitionScopeBindingStateWithinTransaction = (
-			transitionDirectory,
-			candidate,
-			expectedRevision,
-		) => {
-			if (
-				candidate.lifecycleState === 'live' &&
-				(candidate.bindingId === first.bindingId ||
-					candidate.bindingId === second.bindingId) &&
-				++restoredPredecessors === 2
-			) {
-				return {
-					ok: false,
-					code: 'SCOPE_BINDING_PERSISTENCE_FAILED',
-					message: 'injected second predecessor restore failure',
-				};
-			}
-			return originalTransition(
-				transitionDirectory,
-				candidate,
-				expectedRevision,
-			);
-		};
-		try {
-			expect(
-				await replaceExistingScopeDeclaration({
-					directory,
-					binding: replacement,
-					replaceExisting: true,
-				}),
-			).toMatchObject({
-				ok: false,
-				code: 'SCOPE_BINDING_PERSISTENCE_FAILED',
-			});
-			const rows = listCoordinationStates(directory, 'scope-binding', 10);
-			// The original replacement is already a committed durable operation when
-			// memory admission fails. A failed compensation must therefore leave that
-			// pre-rollback authority intact, rather than persist a half-revoked
-			// successor and a partially restored predecessor set.
-			expect(rows.map((row) => [row.entityKey, row.status]).sort()).toEqual(
-				[
-					[first.generationId, 'superseded'],
-					[second.generationId, 'superseded'],
-					[replacement.generationId, 'live'],
-				].sort(),
-			);
-		} finally {
-			_scopePersistenceInternals.transitionScopeBindingStateWithinTransaction =
-				originalTransition;
-		}
+		fillMemory(directory, plan, MAX_PENDING_SCOPE_BINDINGS - 1);
+
+		// The colliding in-memory generation identity makes the successor
+		// admission fail STALE (the exact-identity check fires before the
+		// capacity check); either class drives the same sink compensation.
+		expect(
+			await replaceExistingScopeDeclaration({
+				directory,
+				binding: replacement,
+				replaceExisting: true,
+			}),
+		).toMatchObject({ ok: false, code: 'SCOPE_BINDING_STALE' });
+		const rows = listCoordinationStates(directory, 'scope-binding', 10);
+		expect(rows.map((row) => [row.entityKey, row.status])).toEqual([]);
+		const denyRows = listCoordinationStateRowsRaw(
+			directory,
+			'scope-binding-deny',
+			2,
+		);
+		const ledger = JSON.parse(
+			denyRows.find((row) => row.entityKey === 'deny-ledger')?.payload ??
+				'{"entries":{}}',
+		) as { entries: Record<string, { kind: string }> };
+		expect(ledger.entries[first.generationId]?.kind).toBe('terminal');
+		expect(ledger.entries[second.generationId]?.kind).toBe('terminal');
+		expect(ledger.entries[replacement.generationId]?.kind).toBe('terminal');
 	});
 });

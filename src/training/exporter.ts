@@ -16,9 +16,17 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { z } from 'zod';
 import { atomicWriteSwarmFileSync } from '../utils/atomic-write';
-import { TRAINING_EXPORT_QUOTA_CEILINGS } from './consent';
+import {
+	TRAINING_CONSENT_CURRENT_VERSION,
+	TRAINING_EXPORT_QUOTA_CEILINGS,
+} from './consent';
 import { trainingExportsDir, trainingPendingOpPath } from './paths';
 import {
+	TRAINING_REDACTION_FAILED_PLACEHOLDER,
+	TRAINING_REDACTION_VERSION,
+} from './redact';
+import {
+	applyCurrentRedactionToRecord,
 	listTrainingTombstones,
 	readTrainingVault,
 	type TrainingVaultRecord,
@@ -168,38 +176,63 @@ export function buildTrainingExportBundle(
 	options: { quarantinedExcluded?: number; expiredExcluded?: number } = {},
 ): ExportBundle {
 	const normalized = normalizeFilters(filters);
-	const filtered = records.filter((record) =>
-		recordMatchesFilters(record, normalized),
+	// AC5a (owner decision, 2026-11-22): every emitted record's CONTENT is
+	// re-redacted by the RUNNING redactor, so a record captured before the
+	// #3840 widening can no longer carry a bare token into the bundle. The
+	// AT-REST bytes are untouched. The SOURCE redaction version of each
+	// record is carried alongside, because the emitted record's own
+	// redaction.version is now the running one.
+	const current = records.map((record) => ({
+		record: applyCurrentRedactionToRecord(record),
+		sourceVersion: record.redaction.version,
+	}));
+	const filtered = current.filter((entry) =>
+		recordMatchesFilters(entry.record, normalized),
 	);
 	const sorted = [...filtered].sort(
 		(a, b) =>
-			codeUnitCmp(a.lineage.captured_at, b.lineage.captured_at) ||
-			codeUnitCmp(a.record_id, b.record_id),
+			codeUnitCmp(a.record.lineage.captured_at, b.record.lineage.captured_at) ||
+			codeUnitCmp(a.record.record_id, b.record.record_id),
 	);
 	const seenDigests = new Set<string>();
-	const kept: TrainingVaultRecord[] = [];
-	for (const record of sorted) {
-		if (seenDigests.has(record.content_digest)) continue;
-		seenDigests.add(record.content_digest);
-		kept.push(record);
+	const kept: Array<{ record: TrainingVaultRecord; sourceVersion: number }> =
+		[];
+	for (const entry of sorted) {
+		if (seenDigests.has(entry.record.content_digest)) continue;
+		seenDigests.add(entry.record.content_digest);
+		kept.push(entry);
 	}
-	const train = kept.filter(
+	const keptRecords = kept.map((entry) => entry.record);
+	// AC4c: a record the running redactor could NOT safely redact (its
+	// content carries the fail-closed withheld marker) fails the export
+	// BEFORE any output is published.
+	const withheld = keptRecords.find((record) =>
+		record.content.includes(TRAINING_REDACTION_FAILED_PLACEHOLDER),
+	);
+	if (withheld !== undefined) {
+		throw new Error(
+			`export aborted: record ${withheld.record_id} could not be safely redacted`,
+		);
+	}
+	const train = keptRecords.filter(
 		(record) =>
 			splitSideOf(record.lineage.session_id, normalized.validationRatio) ===
 			'train',
 	);
-	const validation = kept.filter(
+	const validation = keptRecords.filter(
 		(record) =>
 			splitSideOf(record.lineage.session_id, normalized.validationRatio) ===
 			'validation',
 	);
 	const toLine = (record: TrainingVaultRecord) => `${canonicalJson(record)}\n`;
-	const recordsFile = kept.map(toLine).join('');
+	const recordsFile = keptRecords.map(toLine).join('');
 	const trainFile = train.map(toLine).join('');
 	const validationFile = validation.map(toLine).join('');
-	const sessions = new Set(kept.map((record) => record.lineage.session_id));
+	const sessions = new Set(
+		keptRecords.map((record) => record.lineage.session_id),
+	);
 	const exportId = sha256(
-		`training-export-v1\0${TRAINING_EXPORT_SCHEMA_VERSION}\0${canonicalJson(normalized)}\0${kept
+		`training-export-v1\0${TRAINING_EXPORT_SCHEMA_VERSION}\0${canonicalJson(normalized)}\0${keptRecords
 			.map((record) => `${record.record_id}:${record.consent.id}`)
 			.join('\n')}`,
 	).slice(0, 16);
@@ -208,7 +241,7 @@ export function buildTrainingExportBundle(
 		export_id: exportId,
 		filters: normalized,
 		counts: {
-			total: kept.length,
+			total: keptRecords.length,
 			train: train.length,
 			validation: validation.length,
 			deduped: filtered.length - kept.length,
@@ -220,14 +253,30 @@ export function buildTrainingExportBundle(
 			'train.jsonl': sha256(trainFile),
 			'validation.jsonl': sha256(validationFile),
 		},
-		redaction_version: 1,
-		consent_version: 1,
+		// #3840 + AC4 (owner decision 2026-11-22): the manifest reports TWO
+		// separate facts. `redaction_versions_represented` lists the SOURCE
+		// redaction versions of the records included - the provenance of what
+		// was CAPTURED. `redaction_version` is the lowest redaction version
+		// VERIFIED across every emitted record: under AC5a every emitted
+		// record's content was re-redacted by the RUNNING redactor, so that
+		// floor is the running version, and an empty-after-filter export
+		// carries the same running version (no records, so the floor is the
+		// redactor that would have produced them).
+		redaction_versions_represented: [
+			...new Set(kept.map((entry) => entry.sourceVersion)),
+		].sort((a, b) => a - b),
+		redaction_version: TRAINING_REDACTION_VERSION,
+		// The consent TERMS version the writer runs (not per-record).
+		consent_version: TRAINING_CONSENT_CURRENT_VERSION,
 		split: { method: 'session-digest-v1', ratio: normalized.validationRatio },
 		lineage_summary: {
 			sessions: sessions.size,
-			first_captured_at: kept.length > 0 ? kept[0].lineage.captured_at : '',
+			first_captured_at:
+				keptRecords.length > 0 ? keptRecords[0].lineage.captured_at : '',
 			last_captured_at:
-				kept.length > 0 ? kept[kept.length - 1].lineage.captured_at : '',
+				keptRecords.length > 0
+					? keptRecords[keptRecords.length - 1].lineage.captured_at
+					: '',
 		},
 	};
 	return {

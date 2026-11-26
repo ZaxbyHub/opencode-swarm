@@ -132,7 +132,13 @@ export const ARCHITECT_MEMORY_OUTCOME_GUIDANCE = `After using recalled memory or
 // alone but not together; the merged prefixed feature-heavy cell measured
 // 164188, so the allowance grows by the same deliberate 1000-char step
 // (docs/configuration.md states the ceiling).
-export const ARCHITECT_PROMPT_BUDGET_CHARS = 165_000;
+// 165000 -> 165500 (#3914): the turbo still-enforced disclosure gained the
+// planned-tasks refusal (#3770), and the disclosure is embedded twice via the
+// turbo command help (standard + lean lines), so the prefixed feature-heavy
+// cell measured 165229 against the previous ~5-char headroom. The deliberate
+// 500-char step covers the disclosure; docs/configuration.md states the
+// ceiling.
+export const ARCHITECT_PROMPT_BUDGET_CHARS = 165_500;
 
 /**
  * Per-tool description cap for the architect prompt's AVAILABLE TOOLS line
