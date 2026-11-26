@@ -238,6 +238,20 @@ const DISABLED_MESSAGE =
 	'External skill curation is not enabled. Set external_skills.curation_enabled to true in your opencode config.';
 
 // ---------------------------------------------------------------------------
+// Frontmatter injection guard (FB-106)
+// ---------------------------------------------------------------------------
+
+/**
+ * Control characters (Unicode Cc: C0, DEL, C1 — includes CR and LF) forbidden
+ * in the fields that external_skill_promote later interpolates VERBATIM into
+ * the artifact frontmatter (publisher, source_url). A stored carrier field is
+ * a self-DoS at promote time at best and a forged-'content_digest:'-line
+ * injection vector at worst, so the import is refused before anything is
+ * stored.
+ */
+const CONTROL_CHAR_RE = /\p{Cc}/u;
+
+// ---------------------------------------------------------------------------
 // Tool definition
 // ---------------------------------------------------------------------------
 
@@ -349,6 +363,28 @@ export const external_skill_discover: ReturnType<typeof createSwarmTool> =
 				return JSON.stringify({
 					success: false,
 					error: `source_url is required for source_type '${sourceType as string}'`,
+				});
+			}
+
+			// FB-106 — fields later interpolated verbatim into promotion
+			// frontmatter must not carry CR/LF or any other control character.
+			// Refused here, before any fetch or store write.
+			if (CONTROL_CHAR_RE.test(publisher as string)) {
+				return JSON.stringify({
+					success: false,
+					error:
+						"Refusing to import: field 'publisher' contains a control character (CR/LF or other Cc) — frontmatter injection risk",
+				});
+			}
+			if (
+				typeof sourceUrl === 'string' &&
+				sourceUrl.length > 0 &&
+				CONTROL_CHAR_RE.test(sourceUrl)
+			) {
+				return JSON.stringify({
+					success: false,
+					error:
+						"Refusing to import: field 'source_url' contains a control character (CR/LF or other Cc) — frontmatter injection risk",
 				});
 			}
 

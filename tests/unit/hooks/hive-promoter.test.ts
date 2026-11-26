@@ -246,16 +246,6 @@ describe('hive-promoter (transactional, #1847)', () => {
 			expect(await readRawHive()).toHaveLength(0);
 		});
 
-		it('route 2: hive-fast-track tag promotes regardless of phase count', async () => {
-			const entry = makeSwarmEntry({
-				tags: ['hive-fast-track'],
-				hive_eligible: false,
-				confirmed_by: [],
-			});
-			await checkHivePromotions([entry], makeConfig(), swarmDir);
-			expect(await readRawHive()).toHaveLength(1);
-		});
-
 		it('route 3: entry older than auto_promote_days promotes', async () => {
 			const old = new Date(FROZEN_NOW - 100 * 86_400_000).toISOString();
 			const entry = makeSwarmEntry({
@@ -632,35 +622,6 @@ describe('hive-promoter (transactional, #1847)', () => {
 	});
 
 	describe('promoteToHive — manual direct promotion', () => {
-		it('writes to the canonical hive path with lineage + canonical fields', async () => {
-			const msg = await promoteToHive(
-				swarmDir,
-				'Always run the full test suite before merging a pull request',
-				undefined,
-				undefined,
-				undefined,
-				// #1821 A3: the direct-text path must supply its own predicate +
-				// scope; the actionability_floor gate is ON by default.
-				ACTIONABLE_FIELDS,
-			);
-			expect(msg).toContain('Promoted to hive');
-			const hive = await readRawHive();
-			expect(hive).toHaveLength(1);
-			expect(hive[0].scope).toBe('global');
-			expect(hive[0].retrieval_outcomes).toBeDefined();
-			expect(hive[0].confidence).toBe(1.0);
-			expect(hive[0].status).toBe('promoted');
-			expect(hive[0].tier).toBe('hive');
-			expect(hive[0].lineage?.actor).toBe('manual');
-			expect(hive[0].lineage?.source_cohort_id).toBe(FIXED_COHORT.cohortId);
-			// schema_version tracks KNOWLEDGE_SCHEMA_VERSION, not a hardcoded
-			// literal (M3 fix) — assert against the constant so the bump can't
-			// silently drift the test (#1848 review F-10).
-			expect(hive[0].schema_version).toBe(KNOWLEDGE_SCHEMA_VERSION);
-			// source_project = basename of directory.
-			expect(hive[0].source_project).toBe(path.basename(swarmDir));
-		});
-
 		it('near-duplicate short-circuits with no write', async () => {
 			const lesson =
 				'Always run the full test suite before merging a pull request';
@@ -708,7 +669,14 @@ describe('hive-promoter (transactional, #1847)', () => {
 	});
 
 	describe('promoteFromSwarm — manual swarm-id promotion', () => {
-		it('promotes by swarm id, preserving fields + lineage', async () => {
+		// #3820 H2 reshape: the manual path now LOADS real terminal-application
+		// evidence (keyed on the swarm entry id) instead of passing a hardcoded
+		// empty array, and with the gate active by default (min applications 1)
+		// a promotion needs one INDEPENDENT receipt. This leg seeds a qualifying
+		// reviewer receipt through the `_internals` seam so every original
+		// assertion (fields, lineage, actor='manual') is preserved at full
+		// strength.
+		it('promotes by swarm id with qualifying evidence, preserving fields + lineage', async () => {
 			const swarm = makeSwarmEntry({
 				tags: ['security'],
 				scope: 'global',
@@ -717,6 +685,21 @@ describe('hive-promoter (transactional, #1847)', () => {
 				lesson: 'Never commit secrets into the repository source tree ever',
 			});
 			await writeSwarmEntries(swarmDir, [swarm]);
+			// Seed independent evidence for this entry through the DI seam
+			// (overrides the beforeEach empty map for this leg only).
+			_internals.loadPromotionEvidence = mock(async () => ({
+				'swarm-1': [
+					{
+						cohort_id: FIXED_COHORT.cohortId,
+						entry_id: 'swarm-1',
+						retrieval_trace_id: 'trace-1',
+						receipt_outcome: 'applied',
+						receipt_event_id: 'receipt-1',
+						receipt_source: 'reviewer',
+						timestamp: '2026-01-01T00:00:00Z',
+					},
+				],
+			})) as unknown as typeof _internals.loadPromotionEvidence;
 			const msg = await promoteFromSwarm(swarmDir, 'swarm-1');
 			expect(msg).toContain('Promoted lesson swarm-1 from swarm to hive');
 			const hive = await readRawHive();

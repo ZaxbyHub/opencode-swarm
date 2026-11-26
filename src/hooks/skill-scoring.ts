@@ -71,7 +71,7 @@ const WORKFLOW_BOOST_MIN_CONTEXT = 0.05;
 const RECENCY_DECAY_MS = 30 * 24 * 60 * 60 * 1000;
 
 /** Maximum bytes read from a SKILL.md when extracting frontmatter metadata. */
-const SKILL_FRONTMATTER_READ_BYTES = 16 * 1024;
+export const SKILL_FRONTMATTER_READ_BYTES = 16 * 1024;
 
 // ============================================================================
 // Types
