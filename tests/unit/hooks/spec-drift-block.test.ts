@@ -330,9 +330,17 @@ describe('markerless spec-pair gate (PR 3920 closeout)', () => {
 	});
 
 	test('an auto-detected projection failure with no native spec blocks as retryable (F-012)', () => {
-		// No env/config binding, but the Spec-Kit marker is present: auto-detection
-		// runs and its failure must not read as deletion.
-		fsSync.mkdirSync(path.join(pairDir, '.specify'));
+		// No env/config binding, but Spec-Kit is detectable (.specify marker plus a
+		// specs/<feature>/spec.md layout): auto-detection runs and its failure must
+		// not read as deletion.
+		fsSync.mkdirSync(path.join(pairDir, '.specify'), { recursive: true });
+		fsSync.mkdirSync(path.join(pairDir, 'specs', 'my-feature'), {
+			recursive: true,
+		});
+		fsSync.writeFileSync(
+			path.join(pairDir, 'specs', 'my-feature', 'spec.md'),
+			'# Feature spec.\n',
+		);
 		fsSync.writeFileSync(
 			path.join(pairDir, '.swarm', 'plan.json'),
 			JSON.stringify({
@@ -349,6 +357,26 @@ describe('markerless spec-pair gate (PR 3920 closeout)', () => {
 		expect(() => enforceSpecDriftGate(pairDir, 'save_plan')).toThrow(
 			/retry or repair/,
 		);
+	});
+
+	test('an empty .specify marker does not mask a genuine deletion (F-013)', () => {
+		// The reader treats an empty marker as NOT a competing source, so a null
+		// here is a genuine deletion and must say so.
+		fsSync.mkdirSync(path.join(pairDir, '.specify'), { recursive: true });
+		fsSync.writeFileSync(
+			path.join(pairDir, '.swarm', 'plan.json'),
+			JSON.stringify({
+				schema_version: '1.0.0',
+				title: 'Pair Plan',
+				swarm: 'test-swarm',
+				current_phase: 1,
+				phases: [{ id: 1, name: 'Phase 1', status: 'in_progress', tasks: [] }],
+				migration_status: 'native',
+				specHash: hashOf('# Spec\n\nGone.\n'),
+			}),
+		);
+
+		expect(() => enforceSpecDriftGate(pairDir, 'save_plan')).toThrow(/deleted/);
 	});
 
 	test('a failed projection with no native spec blocks as retryable, not deletion (F-011)', () => {

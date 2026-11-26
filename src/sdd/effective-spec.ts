@@ -1291,7 +1291,8 @@ export function sddProjectionSourcePresentSync(directory: string): boolean {
 	try {
 		if (resolveSddSourceSelection(directory) !== undefined) return true;
 		const root = path.resolve(directory);
-		if (detectSpeckit(root).markerPresent) return true;
+		const speckit = detectSpeckit(root);
+		if (speckit.markerPresent && speckit.features.length > 0) return true;
 		return fs.existsSync(path.join(root, 'openspec'));
 	} catch {
 		return false;
