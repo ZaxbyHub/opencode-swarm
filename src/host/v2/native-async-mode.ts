@@ -8,7 +8,12 @@
  * mode while another live setup for the same project still owns it.
  */
 const ownersByDirectory = new Map<string, Set<string>>();
-const MAX_LIVE_PROJECTS = 128;
+// Bound (invariant 8). Each entry is one project directory key plus a small owner
+// token set, so 1024 live projects stays well under a megabyte. At the bound a
+// registration fails closed: a verified 2.3 host with the flag off would settle
+// async children as foreground (wrong dialect), so a loud refusal is safer than
+// a silent degrade.
+const MAX_LIVE_PROJECTS = 1024;
 
 export function isKnownNativeAsyncSubagentVersion(value: unknown): boolean {
 	if (typeof value !== 'string') return false;

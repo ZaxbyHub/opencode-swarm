@@ -174,7 +174,6 @@ import {
 	swarmState,
 } from '../../state';
 import { log } from '../../utils';
-import { criticalWarn } from '../../utils/logger';
 import { resolveProjectRootDecision } from '../../utils/project-boundary';
 import { withTimeout } from '../../utils/timeout';
 import {
@@ -390,19 +389,10 @@ export async function openCodeSwarmV2Setup(
 		// while constructing its dispatch/settlement hooks. Unknown host
 		// versions deliberately retain the legacy foreground semantics.
 		if (isKnownNativeAsyncSubagentVersion(ctx.app?.version)) {
-			try {
-				releaseNativeAsyncMode = registerNativeV2AsyncSubagents(
-					directory,
-					ownerToken,
-				);
-			} catch (error) {
-				// Invariant 1: optional init work fails open. At the live-project
-				// capacity the project still loads, with legacy foreground semantics
-				// and an always-visible advisory, instead of rejecting plugin setup.
-				criticalWarn(
-					`native async mode not enabled for ${directory}: ${error instanceof Error ? error.message : String(error)}. Background subagents use legacy foreground semantics for this project.`,
-				);
-			}
+			releaseNativeAsyncMode = registerNativeV2AsyncSubagents(
+				directory,
+				ownerToken,
+			);
 		}
 
 		// v1 PluginInput view — the init core consumes only `directory` and
