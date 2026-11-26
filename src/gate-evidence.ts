@@ -69,6 +69,18 @@ function repairMarkerPathFor(
 	return path.join(resolvedEvidenceDir, `${taskId}.receipt-repair-pending`);
 }
 
+/** Raw evidence bytes for the unchanged-file proof: null when absent, undefined when unreadable. */
+function readEvidenceBytesSync(
+	evidencePath: string,
+): string | null | undefined {
+	if (!existsSync(evidencePath)) return null;
+	try {
+		return readFileSync(evidencePath, 'utf8');
+	} catch {
+		return undefined;
+	}
+}
+
 /**
  * Operator repair: clears the fence after the split has been audited. The note
  * is required and appended to a sibling audit log, so a clear is never silent.
@@ -2057,7 +2069,23 @@ export async function withTaskEvidenceTransaction<T>(
 			// VALUE of an extra key; the in-memory evidence object is
 			// untouched.
 			const persisted = redactGateEvidenceExtrasForPersist(validated);
-			await atomicWriteFile(evidencePath, JSON.stringify(persisted, null, 2));
+			const priorBytes = readEvidenceBytesSync(evidencePath);
+			try {
+				await atomicWriteFile(evidencePath, JSON.stringify(persisted, null, 2));
+			} catch (error) {
+				// A write that left the evidence file byte-identical published
+				// nothing and appended no receipt, so the PREPARED fence has nothing
+				// to protect. Drop it only on that proof; anything unverifiable
+				// keeps the fence (PR 3919 F-001).
+				if (
+					event &&
+					priorBytes !== undefined &&
+					readEvidenceBytesSync(evidencePath) === priorBytes
+				) {
+					await removeRepairMarkerBestEffort(markerPath);
+				}
+				throw error;
+			}
 			if (event) {
 				try {
 					await _internals.appendTaskGateRequirementsReceiptIfNeeded(

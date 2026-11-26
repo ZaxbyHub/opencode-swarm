@@ -17,6 +17,7 @@ import {
 	transitionTaskWorkflowEvidence,
 } from '../../../src/gate-evidence';
 import { resetSwarmState } from '../../../src/state';
+import { _internals as taskFileInternals } from '../../../src/utils/atomic-write';
 import { createIsolatedTestEnv } from '../../helpers/isolated-test-env.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
@@ -247,5 +248,69 @@ describe('route-receipt append compensation fails closed (PR 3919 B-001..B-006)'
 			coderTransition('still-fenced', 1),
 		).catch((caught: unknown) => caught);
 		expect(stillFenced).toBeInstanceOf(TaskEvidenceRepairPendingError);
+	});
+
+	test('a clean evidence-write failure leaves the file unchanged and drops the fence (F-001)', async () => {
+		const realRename = taskFileInternals.renameSync;
+		taskFileInternals.renameSync = (source, target) => {
+			if (target.endsWith(`${path.sep}evidence${path.sep}${TASK}.json`)) {
+				throw new Error('FORCED_EVIDENCE_RENAME_FAILURE');
+			}
+			realRename(source, target);
+		};
+		try {
+			const failure = await transitionTaskWorkflowEvidence(
+				directory,
+				TASK,
+				coderTransition('clean-evidence-failure'),
+			).catch((caught: unknown) => caught);
+			expect((failure as Error).message).toBe('FORCED_EVIDENCE_RENAME_FAILURE');
+		} finally {
+			taskFileInternals.renameSync = realRename;
+		}
+		expect(await readTaskEvidence(directory, TASK)).toBeNull();
+		expect(
+			fs.existsSync(
+				path.join(
+					directory,
+					'.swarm',
+					'evidence',
+					`${TASK}.receipt-repair-pending`,
+				),
+			),
+		).toBe(false);
+
+		const next = await transitionTaskWorkflowEvidence(
+			directory,
+			TASK,
+			coderTransition('after-clean-failure'),
+		).catch((caught: unknown) => caught);
+		expect(next).not.toBeInstanceOf(TaskEvidenceRepairPendingError);
+	});
+
+	test('an evidence write that lands before it throws keeps the fence (F-001 boundary)', async () => {
+		const realRename = taskFileInternals.renameSync;
+		taskFileInternals.renameSync = (source, target) => {
+			realRename(source, target);
+			if (target.endsWith(`${path.sep}evidence${path.sep}${TASK}.json`)) {
+				throw new Error('FORCED_POST_RENAME_FAILURE');
+			}
+		};
+		try {
+			await transitionTaskWorkflowEvidence(
+				directory,
+				TASK,
+				coderTransition('landed-then-failed'),
+			).catch(() => undefined);
+		} finally {
+			taskFileInternals.renameSync = realRename;
+		}
+
+		const refused = await transitionTaskWorkflowEvidence(
+			directory,
+			TASK,
+			coderTransition('after-landed', 1),
+		).catch((caught: unknown) => caught);
+		expect(refused).toBeInstanceOf(TaskEvidenceRepairPendingError);
 	});
 });

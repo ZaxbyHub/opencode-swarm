@@ -9,6 +9,7 @@ import * as path from 'node:path';
 import { writeCouncilEvidence } from '../../../src/council/council-evidence-writer';
 import type { CouncilSynthesis } from '../../../src/council/types';
 import {
+	clearTaskEvidenceRepairMarker,
 	readTaskEvidence,
 	TaskEvidenceRepairPendingError,
 } from '../../../src/gate-evidence';
@@ -68,7 +69,13 @@ describe('council evidence writer honours the receipt repair fence (PR 3919)', (
 			writeCouncilEvidence(directory, synthesis, 'council-attempt-blocked'),
 		).rejects.toBeInstanceOf(TaskEvidenceRepairPendingError);
 
-		fs.rmSync(markerPath);
+		expect(
+			await clearTaskEvidenceRepairMarker(
+				directory,
+				TASK,
+				'audited: fence cleared by council writer control',
+			),
+		).toBe(true);
 		await writeCouncilEvidence(directory, synthesis, 'council-attempt-clear');
 
 		expect(
