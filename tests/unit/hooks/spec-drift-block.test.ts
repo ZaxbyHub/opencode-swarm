@@ -8,6 +8,7 @@
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { createHash } from 'node:crypto';
+import * as fsSync from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -193,5 +194,155 @@ describe('enforceSpecDriftGate', () => {
 
 	test('no-op when directory is undefined', () => {
 		expect(() => enforceSpecDriftGate(undefined, 'save_plan')).not.toThrow();
+	});
+});
+
+/**
+ * PR 3920 closeout (SolCritic): the marker is not the only drift signal. With no
+ * marker and no PREPARED/corrupt WAL, the gate compares plan.json's specHash to
+ * the current effective spec directly (loadPlan's semantics: hashless exemption,
+ * deletion, obligation-preserving exemption, bootstrap allow). A COMMITTED WAL
+ * must not suppress this check; only a marker or PREPARED/corrupt WAL has
+ * precedence.
+ */
+describe('markerless spec-pair gate (PR 3920 closeout)', () => {
+	let pairDir: string;
+
+	beforeEach(async () => {
+		pairDir = await fs.mkdtemp(path.join(os.tmpdir(), 'spec-drift-pair-'));
+		await fs.mkdir(path.join(pairDir, '.swarm'), { recursive: true });
+	});
+
+	afterEach(async () => {
+		try {
+			await fs.rm(pairDir, { recursive: true, force: true });
+		} catch {
+			// best effort
+		}
+	});
+
+	function writePair(specContent: string, planSpecHash: string): void {
+		fsSync.writeFileSync(path.join(pairDir, '.swarm', 'spec.md'), specContent);
+		fsSync.writeFileSync(
+			path.join(pairDir, '.swarm', 'plan.json'),
+			JSON.stringify({
+				schema_version: '1.0.0',
+				title: 'Pair Plan',
+				swarm: 'test-swarm',
+				current_phase: 1,
+				phases: [{ id: 1, name: 'Phase 1', status: 'in_progress', tasks: [] }],
+				migration_status: 'native',
+				specHash: planSpecHash,
+			}),
+		);
+	}
+
+	const hashOf = (content: string): string =>
+		createHash('sha256').update(content, 'utf-8').digest('hex');
+
+	test('markerless drift blocks with spec_write repair guidance, not acknowledgment', () => {
+		writePair('# Spec\n\nNew requirements.\n', hashOf('# Spec\n\nOld.\n'));
+
+		expect(() => enforceSpecDriftGate(pairDir, 'save_plan')).toThrow(
+			/canonical spec_write/,
+		);
+		expect(() => enforceSpecDriftGate(pairDir, 'save_plan')).toThrow(
+			/markerless/,
+		);
+	});
+
+	test('a markerless consistent pair admits', () => {
+		writePair('# Spec\n\nSame.\n', hashOf('# Spec\n\nSame.\n'));
+		expect(() => enforceSpecDriftGate(pairDir, 'save_plan')).not.toThrow();
+	});
+
+	test('bootstrap with no plan.json admits', () => {
+		fsSync.writeFileSync(path.join(pairDir, '.swarm', 'spec.md'), '# Spec\n');
+		expect(() => enforceSpecDriftGate(pairDir, 'save_plan')).not.toThrow();
+	});
+
+	test('a pre-feature hashless plan admits', () => {
+		writePair('# Spec\n\nChanged.\n', '');
+		expect(() => enforceSpecDriftGate(pairDir, 'save_plan')).not.toThrow();
+	});
+
+	test('an invalid plan.json blocks as retryable, not drift', () => {
+		fsSync.writeFileSync(path.join(pairDir, '.swarm', 'spec.md'), '# Spec\n');
+		// Parseable JSON that violates PlanSchema: reaches the schema-validation arm.
+		fsSync.writeFileSync(
+			path.join(pairDir, '.swarm', 'plan.json'),
+			JSON.stringify({ schema_version: '2.0.0', title: 'x' }),
+		);
+
+		expect(() => enforceSpecDriftGate(pairDir, 'save_plan')).toThrow(
+			/failed schema validation|not valid JSON/,
+		);
+	});
+
+	test('a COMMITTED recovery WAL does not suppress the markerless check', () => {
+		writePair('# Spec\n\nNew requirements.\n', hashOf('# Spec\n\nOld.\n'));
+		fsSync.writeFileSync(
+			path.join(pairDir, '.swarm', 'spec-drift-recovery.json'),
+			JSON.stringify({
+				version: 2,
+				mode: 'repair',
+				state: 'COMMITTED',
+				transitionId: 'committed-1',
+				markerHash: 'marker-hash',
+				planTitle: 'Pair Plan',
+				phase: 1,
+				previousHash: 'old',
+				newHash: hashOf('# Spec\n\nNew requirements.\n'),
+				specContent: '# Spec\n\nNew requirements.\n',
+				actor: 'spec_write',
+				recordedAt: '2026-11-26T00:00:00.000Z',
+			}),
+		);
+
+		expect(() => enforceSpecDriftGate(pairDir, 'save_plan')).toThrow(
+			/SPEC_DRIFT_BLOCK/,
+		);
+	});
+
+	test('an obligation-preserving edit admits despite a stale stored hash', () => {
+		// Snapshot and current spec are identical obligation-bearing content, so the
+		// edit is obligation-preserving even though the stored hash predates it.
+		const spec = '# Spec\n\nMUST keep this obligation FR-1.\n';
+		fsSync.writeFileSync(path.join(pairDir, '.swarm', 'spec.md'), spec);
+		fsSync.writeFileSync(
+			path.join(pairDir, '.swarm', 'spec-snapshot.md'),
+			spec,
+		);
+		fsSync.writeFileSync(
+			path.join(pairDir, '.swarm', 'plan.json'),
+			JSON.stringify({
+				schema_version: '1.0.0',
+				title: 'Pair Plan',
+				swarm: 'test-swarm',
+				current_phase: 1,
+				phases: [{ id: 1, name: 'Phase 1', status: 'in_progress', tasks: [] }],
+				migration_status: 'native',
+				specHash: hashOf('# Spec\n\nOld obligations.\n'),
+			}),
+		);
+
+		expect(() => enforceSpecDriftGate(pairDir, 'save_plan')).not.toThrow();
+	});
+
+	test('a deleted spec blocks as drift', () => {
+		fsSync.writeFileSync(
+			path.join(pairDir, '.swarm', 'plan.json'),
+			JSON.stringify({
+				schema_version: '1.0.0',
+				title: 'Pair Plan',
+				swarm: 'test-swarm',
+				current_phase: 1,
+				phases: [{ id: 1, name: 'Phase 1', status: 'in_progress', tasks: [] }],
+				migration_status: 'native',
+				specHash: hashOf('# Spec\n\nGone.\n'),
+			}),
+		);
+
+		expect(() => enforceSpecDriftGate(pairDir, 'save_plan')).toThrow(/deleted/);
 	});
 });

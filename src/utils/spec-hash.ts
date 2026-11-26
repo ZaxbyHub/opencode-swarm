@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import * as fsSync from 'node:fs';
 import { join } from 'node:path';
-import type { Plan } from '../config/plan-schema';
+import { type Plan, PlanSchema } from '../config/plan-schema';
 import { readEffectiveSpecSync } from '../sdd/effective-spec';
 
 /**
@@ -132,6 +132,106 @@ export function isObligationPreserving(directory: string): boolean {
 	}
 }
 
+/** Sync effective-spec hash for the markerless gate check. Null when the spec is absent. */
+function effectiveSpecHashSync(directory: string): string | null {
+	const spec = _internals.readEffectiveSpecSync(directory);
+	if (!spec) return null;
+	return createHash('sha256').update(spec.content, 'utf-8').digest('hex');
+}
+
+/** Byte cap for the gate's plan.json read; plan files are far smaller than this. */
+const MAX_PLAN_JSON_BYTES = 4 * 1024 * 1024;
+
+export type UnmarkedSpecDrift =
+	| { outcome: 'allow' }
+	| {
+			outcome: 'block-drift';
+			reason: string;
+			currentHash: string | null;
+			deletion: boolean;
+	  }
+	| { outcome: 'block-retry'; reason: string };
+
+/**
+ * PR 3920 closeout (SolCritic contract): the marker is not the only drift signal.
+ * When the marker is absent, the mutation gate independently compares plan.json's
+ * stored specHash against the current effective-spec hash, with the SAME semantics
+ * as loadPlan's marker decision: strict bounded plan.json decode + PlanSchema
+ * validation, pre-feature hashless exemption, deletion semantics, and the
+ * obligation-preserving exemption. Bootstrap (no plan.json) is allowed. An
+ * unreadable or invalid projection is block-retry (fail closed, not persistent
+ * drift). This closes the spec_write publish/rollback window without any
+ * unlocked marker write: the writer's window briefly blocks mutations, and the
+ * reconcile's rebind (or rollback) releases them.
+ */
+export function detectUnmarkedSpecDriftSync(
+	directory: string,
+): UnmarkedSpecDrift {
+	let raw: string;
+	try {
+		const planPath = join(directory, '.swarm', 'plan.json');
+		const stat = fsSync.statSync(planPath);
+		if (!stat.isFile() || stat.size > MAX_PLAN_JSON_BYTES) {
+			return {
+				outcome: 'block-retry',
+				reason: '.swarm/plan.json is unreadable or over the 4 MiB gate bound',
+			};
+		}
+		raw = fsSync.readFileSync(planPath, 'utf-8');
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') {
+			// Bootstrap / no plan: nothing to compare, and loadPlan writes no marker.
+			return { outcome: 'allow' };
+		}
+		return {
+			outcome: 'block-retry',
+			reason: `.swarm/plan.json could not be read: ${error instanceof Error ? error.message : String(error)}`,
+		};
+	}
+	let parsed: Plan;
+	try {
+		const json: unknown = JSON.parse(raw);
+		const validated = PlanSchema.safeParse(json);
+		if (!validated.success) {
+			return {
+				outcome: 'block-retry',
+				reason: '.swarm/plan.json failed schema validation; recover or retry',
+			};
+		}
+		parsed = validated.data;
+	} catch {
+		return {
+			outcome: 'block-retry',
+			reason: '.swarm/plan.json is not valid JSON; recover or retry',
+		};
+	}
+	// Pre-feature plan: no specHash means the pair is exempt (same as loadPlan).
+	if (!parsed.specHash) return { outcome: 'allow' };
+	let currentHash: string | null;
+	try {
+		currentHash = effectiveSpecHashSync(directory);
+	} catch {
+		return {
+			outcome: 'block-retry',
+			reason: 'the effective spec could not be read; retry',
+		};
+	}
+	if (currentHash === parsed.specHash) return { outcome: 'allow' };
+	const deletion = currentHash === null;
+	// Obligation-preserving edits keep the allowlist exemption (same as loadPlan).
+	if (deletion || !_internals.isObligationPreserving(directory)) {
+		return {
+			outcome: 'block-drift',
+			reason: deletion
+				? 'effective spec has been deleted since the plan was saved'
+				: 'effective spec has been modified since the plan was saved (no staleness marker present)',
+			currentHash,
+			deletion,
+		};
+	}
+	return { outcome: 'allow' };
+}
+
 /**
  * DI seam for testability. Contains all test-mocked exports.
  * Internal calls should use _internals.fn() instead of fn() directly.
@@ -142,12 +242,14 @@ export const _internals: {
 	isObligationPreserving: typeof isObligationPreserving;
 	isSpecStale: typeof isSpecStale;
 	readEffectiveSpecSync: typeof readEffectiveSpecSync;
+	detectUnmarkedSpecDriftSync: typeof detectUnmarkedSpecDriftSync;
 } = {
 	computeSpecDiff,
 	computeSpecHash,
 	isObligationPreserving,
 	isSpecStale,
 	readEffectiveSpecSync,
+	detectUnmarkedSpecDriftSync,
 } as const;
 
 /**

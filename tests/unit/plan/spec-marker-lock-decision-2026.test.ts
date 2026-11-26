@@ -1,15 +1,16 @@
 /**
- * PR 3920 closeout (F-001 follow-up): loadPlan decides the spec drift marker under
- * the spec.md owner lock. A lock younger than the TTL is in flight and suppresses
- * the marker (a live writer, or an owner that has created the file but not yet
- * published its payload). Suppression is bounded: an aged lock does not suppress.
- * A writer that completed inside the window leaves a consistent pair under the
- * lock, so no marker is written. With no lock, the marker is written.
+ * PR 3920 closeout (SolCritic contract): only a lock owner publishes a drift
+ * marker. A lock younger than the TTL is in flight and suppresses the marker
+ * (the holder reconciles or restores prior bytes). When the lock is aged or
+ * cannot be acquired, loadPlan skips — and the mutation gate independently
+ * blocks drift through detectUnmarkedSpecDriftSync (markerless pair check), so
+ * neither fail-open (F-005) nor an unlocked marker write (F-007) remains.
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { enforceSpecDriftGate } from '../../../src/hooks/guardrails';
 import {
 	acquireOwnerLockOnce,
 	getOwnerLockPath,
@@ -39,6 +40,10 @@ describe('loadPlan marker decision under the spec.md owner lock (PR 3920 closeou
 	const originalReread = _internals.readPlanSpecHashUnderLock;
 	const markerPath = () => path.join(dir, '.swarm', 'spec-staleness.json');
 	const lockPath = () => getOwnerLockPath(dir, 'spec.md');
+	const writeAgedLock = (contents: string): void => {
+		fs.writeFileSync(lockPath(), contents);
+		fs.utimesSync(lockPath(), ANCIENT_SECONDS, ANCIENT_SECONDS);
+	};
 
 	beforeEach(() => {
 		isolatedEnv = createIsolatedTestEnv();
@@ -89,9 +94,10 @@ describe('loadPlan marker decision under the spec.md owner lock (PR 3920 closeou
 		expect(fs.existsSync(markerPath())).toBe(false);
 	});
 
-	test('an aged owner lock does not suppress the marker (bounded suppression)', async () => {
-		fs.writeFileSync(
-			lockPath(),
+	test('an aged owner lock writes no marker and the gate blocks the drift', async () => {
+		// The dead-owner lock is unacquirable, so loadPlan skips. The markerless
+		// pair check carries the drift: the gate blocks while no marker exists.
+		writeAgedLock(
 			JSON.stringify({
 				v: 1,
 				nonce: 'aged-nonce',
@@ -102,51 +108,63 @@ describe('loadPlan marker decision under the spec.md owner lock (PR 3920 closeou
 				acquiredAtMs: 1700000000000,
 			}),
 		);
-		fs.utimesSync(lockPath(), ANCIENT_SECONDS, ANCIENT_SECONDS);
-
-		await loadPlan(dir);
-		expect(fs.existsSync(markerPath())).toBe(true);
-	});
-
-	test('a writer that completed inside the window leaves a consistent pair: no marker', async () => {
-		// The snapshot read saw the stale spec, but the writer has since rebound
-		// plan.json under the lock. The locked re-read sees the current hash.
-		_internals.readPlanSpecHashUnderLock = async () =>
-			readEffectiveSpecSync(dir)?.hash;
 
 		await loadPlan(dir);
 		expect(fs.existsSync(markerPath())).toBe(false);
+		expect(() => enforceSpecDriftGate(dir, 'save_plan')).toThrow(
+			/SPEC_DRIFT_BLOCK/,
+		);
 	});
 
-	test('an ownerless aged lock that cannot be acquired falls back to a fresh read and writes real drift', async () => {
-		// The aged ownerless file cannot be acquired (no sweep on this path), so the
-		// decision falls back to a fresh read. The spec is stale against plan.json, so
-		// the marker is written: the drift guard fails closed.
-		fs.writeFileSync(lockPath(), '{"v":1}');
-		fs.utimesSync(lockPath(), ANCIENT_SECONDS, ANCIENT_SECONDS);
-
-		await loadPlan(dir);
-		expect(fs.existsSync(markerPath())).toBe(true);
-	});
-
-	test('the fallback fresh read sees a rebound plan: an aged unacquirable lock writes no marker', async () => {
-		// Same unacquirable aged lock, but the fresh read sees the writer's rebind, so
-		// the pair is consistent and no marker is owed.
-		fs.writeFileSync(lockPath(), '{"v":1}');
-		fs.utimesSync(lockPath(), ANCIENT_SECONDS, ANCIENT_SECONDS);
-		_internals.readPlanSpecHashUnderLock = async () =>
-			readEffectiveSpecSync(dir)?.hash;
-
-		await loadPlan(dir);
-		expect(fs.existsSync(markerPath())).toBe(false);
-	});
-
-	test('an aged lock held by a live process does not suppress a real drift marker (fail closed)', async () => {
-		// The acquire keeps failing against the aged live holder. The decision then
-		// falls back to a fresh read, and real drift (the spec is stale) writes the
-		// marker, so the drift guard still blocks. Skipping here would be a fail-open.
+	test('a writer that completed inside the window leaves a consistent pair: no marker, gate admits', async () => {
+		// The writer rebound plan.json before releasing: the on-disk pair is now
+		// consistent, so neither loadPlan nor the gate owes a block.
 		fs.writeFileSync(
-			lockPath(),
+			path.join(dir, '.swarm', 'plan.json'),
+			JSON.stringify(
+				buildPlan(readEffectiveSpecSync(dir)?.hash ?? ''),
+				null,
+				2,
+			),
+		);
+
+		await loadPlan(dir);
+		expect(fs.existsSync(markerPath())).toBe(false);
+		expect(() => enforceSpecDriftGate(dir, 'save_plan')).not.toThrow();
+	});
+
+	test('an aged unacquirable lock with real drift writes no marker and the gate blocks', async () => {
+		writeAgedLock('{"v":1}');
+
+		await loadPlan(dir);
+		expect(fs.existsSync(markerPath())).toBe(false);
+		expect(() => enforceSpecDriftGate(dir, 'save_plan')).toThrow(
+			/SPEC_DRIFT_BLOCK/,
+		);
+	});
+
+	test('an aged unacquirable lock with a consistent pair writes no marker and the gate admits', async () => {
+		// The writer rebound plan.json before dying; the on-disk pair is consistent,
+		// so the markerless gate check admits despite the unacquirable lock.
+		writeAgedLock('{"v":1}');
+		fs.writeFileSync(
+			path.join(dir, '.swarm', 'plan.json'),
+			JSON.stringify(
+				buildPlan(readEffectiveSpecSync(dir)?.hash ?? ''),
+				null,
+				2,
+			),
+		);
+
+		await loadPlan(dir);
+		expect(fs.existsSync(markerPath())).toBe(false);
+		expect(() => enforceSpecDriftGate(dir, 'save_plan')).not.toThrow();
+	});
+
+	test('an aged lock held by a live process writes no marker and the gate blocks', async () => {
+		// A live-aged holder is never swept and never acquirable: loadPlan skips,
+		// and the gate's markerless check carries the drift (F-005 closure).
+		writeAgedLock(
 			JSON.stringify({
 				v: 1,
 				nonce: 'live-aged-nonce',
@@ -157,9 +175,11 @@ describe('loadPlan marker decision under the spec.md owner lock (PR 3920 closeou
 				acquiredAtMs: 1700000000000,
 			}),
 		);
-		fs.utimesSync(lockPath(), ANCIENT_SECONDS, ANCIENT_SECONDS);
 
 		await loadPlan(dir);
-		expect(fs.existsSync(markerPath())).toBe(true);
+		expect(fs.existsSync(markerPath())).toBe(false);
+		expect(() => enforceSpecDriftGate(dir, 'save_plan')).toThrow(
+			/SPEC_DRIFT_BLOCK/,
+		);
 	});
 });

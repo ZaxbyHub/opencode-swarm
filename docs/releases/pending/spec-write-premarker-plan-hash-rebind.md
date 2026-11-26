@@ -142,19 +142,23 @@ behavior is untouched (flag unset → marker-only semantics).
   mutations as corrupt, instead of passing as COMMITTED. Pinned by
   `tests/unit/services/spec-drift-wal-gate-integrity.test.ts`; removing the
   check fails the tampered-WAL case.
-- Closeout F-003 (counsel-adjudicated FIX-NOW): `loadPlan` decided the
-  spec-drift marker from an unlocked snapshot, so a `spec_write` inside its
-  publish or rollback window could leave a stranded `spec-staleness.json` that
-  blocks `save_plan` until someone acknowledges it. The decision runs under the
-  `spec.md` owner lock whenever the lock is acquirable. A lock younger than the
-  TTL suppresses the marker (a live writer, or an owner that has created its lock
-  file but not yet published it). When the lock is aged or cannot be acquired, the
-  decision falls back to a fresh read and fails closed: real drift writes the
-  marker, and a canonical `spec_write` or `/swarm acknowledge-spec-drift` clears
-  it. Known residual, intentional: a `spec.md` lock held past the five-minute TTL
-  is no longer trusted by `loadPlan`. A writer still active past that bound could
-  complete a reconcile between the fresh read and the marker write, which leaves a
-  recoverable block rather than a fail-open. The read path never sweeps or mutates
-  other lock targets. Pinned by
-  `tests/unit/plan/spec-marker-lock-decision-2026.test.ts`; the aged-skip mutant
-  fails it.
+- Closeout F-003 (SolCritic-adjudicated): `loadPlan` decided the spec-drift
+  marker from an unlocked snapshot, so a `spec_write` inside its publish or
+  rollback window could leave a stranded `spec-staleness.json` that blocks
+  `save_plan` until someone acknowledges it. Two changes close it structurally.
+  First, only a lock owner publishes a marker: a lock younger than the TTL
+  suppresses the marker (that writer reconciles or restores prior bytes), and an
+  aged or unacquirable lock skips — there is no unlocked marker write. Second,
+  the marker is no longer the only drift signal: with no marker and no
+  PREPARED/corrupt recovery WAL, `enforceSpecDriftGate` compares `plan.json`'s
+  stored specHash to the current effective-spec hash directly
+  (`detectUnmarkedSpecDriftSync`), with `loadPlan`'s exact semantics — bounded
+  strict decode, schema validation, pre-feature hashless exemption, deletion
+  semantics, obligation-preserving exemption, bootstrap allow; an unreadable or
+  invalid plan blocks as retryable recovery, not persistent drift. A `spec_write`
+  in flight therefore briefly blocks protected mutations, and its rebind or
+  rollback releases them; a COMMITTED recovery WAL does not suppress the check.
+  Pinned by `tests/unit/plan/spec-marker-lock-decision-2026.test.ts` and the
+  markerless cases in `tests/unit/hooks/spec-drift-block.test.ts`; the unlocked-
+  publication, visible-owner, schema-allow, obligation-exemption, and
+  WAL-precedence mutants each fail a test.

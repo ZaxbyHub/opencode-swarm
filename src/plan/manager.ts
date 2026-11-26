@@ -796,22 +796,12 @@ async function decideSpecMarker<P extends { specHash?: string | null }>(
 		if (await inFlight()) return { decision: 'skip' };
 		attempt = acquireOwnerLockOnce(lockPath, 'loadPlan', 'spec-marker');
 	}
-	if (!attempt.acquired) {
-		// Aged live holder, dead residue, or a contender that stays unacquirable.
-		// Fail closed: decide from a fresh read. A real drift writes the marker,
-		// and a canonical spec_write or acknowledge clears it. Skipping here would
-		// let stale-spec mutations run unblocked, a fail-open on the drift guard.
-		const hash = await _internals.readPlanSpecHashUnderLock(directory);
-		const fresh =
-			hash === undefined ? plan : ({ ...plan, specHash: hash } as unknown as P);
-		const stale = await isSpecStale(
-			directory,
-			fresh as unknown as Parameters<typeof isSpecStale>[1],
-		);
-		return stale.stale
-			? { decision: 'write', plan: fresh, stale, release: () => {} }
-			: { decision: 'skip' };
-	}
+	// Still unacquirable: skip, never write unlocked. Drift during this window is
+	// caught by the gate's markerless pair check (detectUnmarkedSpecDriftSync in
+	// spec-hash.ts, enforced by enforceSpecDriftGate), which blocks protected
+	// mutations until the writer's rebind or rollback lands. Only a lock owner
+	// publishes a marker (SolCritic contract, PR 3920 F-005/F-007).
+	if (!attempt.acquired) return { decision: 'skip' };
 	try {
 		const lockedSpecHash =
 			await _internals.readPlanSpecHashUnderLock(directory);

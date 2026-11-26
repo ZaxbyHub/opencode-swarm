@@ -47,7 +47,10 @@ import { telemetry } from '../../telemetry.js';
 import { log, warn } from '../../utils';
 import { pushAdvisory } from '../../utils/advisory-queue';
 import * as logger from '../../utils/logger';
-import { computeSpecDiff } from '../../utils/spec-hash';
+import {
+	computeSpecDiff,
+	detectUnmarkedSpecDriftSync,
+} from '../../utils/spec-hash';
 import { isStrictTaskId } from '../../validation/task-id.js';
 import { listCoderSettlementWalStates } from '../../workflow/coder-settlement.js';
 import { resolveAgentConflict } from '../conflict-resolution';
@@ -438,6 +441,42 @@ export function enforceSpecDriftGate(
 		}
 
 		throw new Error(message);
+	}
+
+	// PR 3920 closeout (SolCritic): the marker is not the only drift signal. While
+	// a spec_write holds the lock (publish/rollback window), loadPlan suppresses
+	// the marker, so an absent marker alone must not admit mutations. The pair is
+	// checked directly, with loadPlan's semantics. This runs even when a COMMITTED
+	// recovery WAL exists: only a marker or a PREPARED/corrupt WAL has precedence.
+	const unmarked = detectUnmarkedSpecDriftSync(directory);
+	if (unmarked.outcome === 'block-drift') {
+		let diffInfo: { diff: string; changedSections: string[] } | null = null;
+		try {
+			diffInfo = computeSpecDiff(directory);
+		} catch {
+			// Non-fatal: diff computation failure falls back to the bare message.
+		}
+		let message =
+			`SPEC_DRIFT_BLOCK: tool "${toolName}" is blocked because ${unmarked.reason}. ` +
+			'Repair: persist the accepted spec through the canonical spec_write tool (dispatch the spec_writer agent with the accepted content) — its drift recovery rebinds the plan hash; then retry. This block was detected without a staleness marker (a spec write is likely in flight); /swarm acknowledge-spec-drift does not apply to markerless drift.';
+		if (diffInfo) {
+			const sectionSummary =
+				diffInfo.changedSections.length > 0
+					? `\nChanged sections: ${diffInfo.changedSections.map((s) => `## ${s}`).join(', ')}`
+					: '';
+			message +=
+				'\n\n--- spec diff (recorded vs current) ---' +
+				sectionSummary +
+				'\n[Begin spec diff]\n' +
+				diffInfo.diff +
+				'\n[End spec diff]';
+		}
+		throw new Error(message);
+	}
+	if (unmarked.outcome === 'block-retry') {
+		throw new Error(
+			`SPEC_DRIFT_BLOCK: tool "${toolName}" is blocked because ${unmarked.reason}. This is not confirmed drift; retry the tool, and if it persists recover .swarm/plan.json (a valid plan restores admission).`,
+		);
 	}
 }
 
