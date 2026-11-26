@@ -15,8 +15,8 @@ import {
 import {
 	appendStageARepairEvent,
 	hasGreenPostSettlementPreCheck,
-	type StageASettlementJustification,
 	resolveStageASettlementJustification,
+	type StageASettlementJustification,
 } from './stage-a-repair.js';
 
 export interface SettlementRecoverySummary {
@@ -187,8 +187,8 @@ export async function recoverStageATaskSupervised(
 	);
 	if (justification === null) {
 		throw new Error(
-			`RECOVER_STAGE_A_SETTLEMENT_REQUIRED: refusing to recover task ${taskId} — no durable accepted coder settlement exists for it (no COMMITTED settlement WAL, and no chain-verified accepted_mutation receipt in the task-gate-requirements ledger). ` +
-				'The settlement receipt is what distinguishes this wedge from a not-yet-started or deliberately stopped task; recovery without it would fabricate Stage A justification.',
+			`RECOVER_STAGE_A_SETTLEMENT_REQUIRED: refusing to recover task ${taskId} — no durable accepted coder settlement exists for it (no COMMITTED settlement WAL, no chain-verified accepted_mutation receipt in the task-gate-requirements ledger, and no settled background coder settlement with an accepted ingestion outcome). ` +
+				'The settlement receipt is what distinguishes this wedge from a not-yet-started or deliberately stopped task; recovery without it would fabricate Stage A justification. For a verification-only background round whose deliverable landed outside the delegation lane, the settled+accepted background record itself is the receipt — if it exists this refusal is a bug.',
 		);
 	}
 
@@ -256,12 +256,22 @@ export async function recoverStageATaskSupervised(
 		generation: workflow.generation,
 		settlementRecovery: true,
 		// Which durable receipt admitted the repair: 'settlement_wal' |
-		// 'requirements_receipt' (background coder rounds never write a WAL).
+		// 'requirements_receipt' | 'background_settlement' (background coder
+		// rounds never write a WAL).
 		justification: justification.via,
 		...(justification.via === 'requirements_receipt'
 			? {
 					justificationTransitionId: justification.sourceTransitionId,
 					justificationGeneration: justification.generation,
+				}
+			: {}),
+		...(justification.via === 'background_settlement'
+			? {
+					// The verification-only shape must be visible in the audit:
+					// accepted=false means the settled round attributed no files
+					// and the repair rides on the architect's audited vouch.
+					justificationAccepted: justification.accepted,
+					justificationCorrelationId: justification.correlationId,
 				}
 			: {}),
 		predecessorTransitionId: workflow.lastTransitionId ?? null,

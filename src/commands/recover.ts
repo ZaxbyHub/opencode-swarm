@@ -137,7 +137,7 @@ function renderStageARepairOutcome(outcome: StageARepairOutcome): string {
 			// plainly that --force never overrides Stage A wedge-classification
 			// refusals.
 			if (outcome.state === 'idle' || outcome.state === 'blocked') {
-				return `⏭️ Task ${outcome.taskId}: workflow state is ${outcome.state} — no Stage A repair is needed or provable here (a mechanical repair requires a COMMITTED accepted coder settlement AND green post-settlement pre-check evidence AND no Stage A proof already recorded). When Stage A is already recorded the task needs nothing; when the receipts exist but the mechanical envelope excludes them, the architect can run the audited recover_stage_a_task tool. --force does not override Stage A wedge-classification refusals.`;
+				return `⏭️ Task ${outcome.taskId}: workflow state is ${outcome.state} — no Stage A repair is needed or provable here (a mechanical repair requires a durable coder settlement receipt — a COMMITTED accepted settlement WAL, a chain-verified accepted_mutation requirements receipt, or a settled background coder settlement with an accepted ingestion outcome — AND green post-settlement pre-check evidence AND no Stage A proof already recorded). When Stage A is already recorded the task needs nothing; when the receipts exist but the mechanical envelope excludes them, the architect can run the audited recover_stage_a_task tool. --force does not override Stage A wedge-classification refusals.`;
 			}
 			return `⏭️ Task ${outcome.taskId}: workflow state is ${outcome.state} with pre_check proof present or not settled — nothing to repair`;
 		case 'skipped_not_green':

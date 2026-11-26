@@ -600,12 +600,33 @@ export interface BackgroundAdvisoryInboxEntry {
 	deliveredAt?: number;
 }
 
+/**
+ * r14 audit repair (P0-1), backported from upstream 7.205.9 for this PR's
+ * background_settlement Stage-A justification: the durable semantic outcome
+ * of a consumed ingestion. Only meaningful (and only allowed) when
+ * `state === 'consumed'`. A terminal-negative drop (rejected/skipped
+ * verdict, stale workspace) commits consumed too; the outcome rides the
+ * SAME atomic commit as the consumed flip so a replay can route on the
+ * provable semantics instead of guessing from `consumed`.
+ */
+export type DurableIngestionOutcome =
+	| 'accepted'
+	| 'rejected'
+	| 'skipped'
+	| 'stale';
+
 export interface BackgroundDelegationIngestion {
 	state: 'claimed' | 'retryable' | 'consumed';
 	attempt: number;
 	updatedAt: number;
 	claimToken: string;
 	leaseExpiresAt?: number;
+	/**
+	 * r14 audit repair (P0-1): semantic outcome of the consumed ingestion.
+	 * Only meaningful (and only allowed) when `state === 'consumed'`.
+	 * Absent on legacy records written before r14.
+	 */
+	outcome?: DurableIngestionOutcome;
 }
 
 export interface BackgroundCoderReservation {
@@ -896,6 +917,7 @@ const DelegationIngestionSchema = z
 		updatedAt: z.number().int().nonnegative(),
 		claimToken: z.string().min(1).max(256),
 		leaseExpiresAt: z.number().int().nonnegative().optional(),
+		outcome: z.enum(['accepted', 'rejected', 'skipped', 'stale']).optional(),
 	})
 	.strict()
 	.superRefine((value, context) => {
@@ -5444,7 +5466,7 @@ export async function recordDelegationIngestionResult(
 	correlationId: string,
 	claimToken: string,
 	success: boolean,
-	options: { now?: number } = {},
+	options: { now?: number; outcome?: DurableIngestionOutcome } = {},
 ): Promise<BackgroundDelegationRecord | null> {
 	if (!correlationId || !claimToken) return null;
 	let result: BackgroundDelegationRecord | null = null;
@@ -5495,6 +5517,13 @@ export async function recordDelegationIngestionResult(
 						attempt: current.ingestion.attempt,
 						claimToken,
 						updatedAt,
+						// r14 audit repair (P0-1): the semantic outcome rides the
+						// SAME atomic commit as the consumed flip, so a crash can
+						// never leave a consumed record without its provable
+						// outcome (or vice versa).
+						...(success
+							? { outcome: options.outcome ?? ('accepted' as const) }
+							: {}),
 					},
 					updatedAt,
 				};
@@ -6593,6 +6622,71 @@ export function findLatestSettledCoderFilesForTask(
 	return { status: 'ok', files: latest?.files ?? [] };
 }
 
+/**
+ * Durable Stage-A settlement receipt for background-dispatched coder rounds
+ * (the 2026-11-26 task 2.14 wedge).
+ *
+ * A background coder round that reached a completed terminal, settled its
+ * coder settlement (state 'settled'), and had its completion durably
+ * consumed with ingestion outcome 'accepted' holds the same durable
+ * settlement fact the #2828 Stage-A recovery reads from a COMMITTED
+ * settlement WAL or a chain-verified accepted_mutation requirements
+ * receipt. For a verification-only round — the deliverable landed outside
+ * the delegation lane (e.g. user-committed after a liveness-stale
+ * predecessor, observed live: task 2.14, WAL ABORTED-by-transfer, zero
+ * observed files, ingestion accepted) — this settled record is the ONLY
+ * durable receipt that the round ran and completed. Without it the
+ * supervised recovery and the /swarm recover scan refuse with
+ * RECOVER_STAGE_A_SETTLEMENT_REQUIRED and the task wedges at idle with no
+ * agent-legal exit (recover_stage_a_task refuses, retry dispatches just
+ * re-settle no-mutation).
+ *
+ * Mirrors findLatestSettledCoderFilesForTask's read semantics: latest
+ * settlement by `updatedAt`, `>=` resolves same-tick ties to the later
+ * record in store order (the fold's own last-write-wins). Fail-closed: an
+ * uncertain store read yields `{ status: 'uncertain' }` and the caller
+ * keeps null — a justification is never invented from a partial read.
+ */
+export function findLatestSettledBackgroundCoderSettlement(
+	directory: string,
+	taskId: string,
+):
+	| {
+			status: 'ok';
+			settlement: {
+				correlationId: string;
+				settledAtMs: number;
+				observedFiles: string[];
+				ingestionOutcome: string | null;
+			} | null;
+	  }
+	| { status: 'uncertain' } {
+	if (!taskId) return { status: 'ok', settlement: null };
+	const read = readDelegationsDetailed(directory);
+	if (read.status === 'uncertain') return { status: 'uncertain' };
+	let latest: {
+		correlationId: string;
+		settledAtMs: number;
+		observedFiles: string[];
+		ingestionOutcome: string | null;
+	} | null = null;
+	for (const record of read.records) {
+		if (record.normalizedAgent !== 'coder') continue;
+		const recordTaskId = record.evidenceTaskId ?? record.planTaskId;
+		if (recordTaskId !== taskId) continue;
+		const settlement = record.coderSettlement;
+		if (settlement?.state !== 'settled') continue;
+		if (latest === null || settlement.updatedAt >= latest.settledAtMs) {
+			latest = {
+				correlationId: record.correlationId,
+				settledAtMs: settlement.updatedAt,
+				observedFiles: [...(settlement.observedFiles ?? [])],
+				ingestionOutcome: record.ingestion?.outcome ?? null,
+			};
+		}
+	}
+	return { status: 'ok', settlement: latest };
+}
 /**
  * Lookup used by terminal handling: primary ledger first, exact fallback
  * second. Issue #2511: an uncertain primary read is returned typed — the

@@ -1,4 +1,5 @@
 import { readdir } from 'node:fs/promises';
+import { findLatestSettledBackgroundCoderSettlement } from '../background/pending-delegations.js';
 import { appendCoreEventSync } from '../events/core-events.js';
 import { isSecretscanEvidence, loadEvidence } from '../evidence/manager.js';
 import { latestAcceptedMutationReceipt } from '../evidence/task-gate-requirements.js';
@@ -326,6 +327,16 @@ export function latestCommittedAcceptedSettlementMs(
  *   coder round nor pre_check attribution can open Stage A). The receipt is
  *   the same audited fact the WAL path reads, recorded by the accepted
  *   mutation itself.
+ * - `background_settlement` (2026-11-26, task 2.14): neither WAL nor
+ *   accepted_mutation exists, but the background delegation store carries a
+ *   SETTLED coder settlement whose completion was durably consumed with
+ *   ingestion outcome 'accepted'. The verification-only shape — the
+ *   deliverable landed outside the delegation lane (e.g. user-committed after
+ *   a liveness-stale predecessor) and the round attributed zero files — has
+ *   no other durable receipt at all; without this arm such a task wedges at
+ *   idle forever (recover_stage_a_task refuses, retry dispatches re-settle
+ *   no-mutation). `accepted: false` surfaces the shape so the audited
+ *   recovery vouch is informed.
  *
  * Null only when NEITHER durable receipt exists — the honest "not a settled
  * task" answer. Corrupt requirements chains propagate their
@@ -338,6 +349,13 @@ export type StageASettlementJustification =
 			settledAfterMs: number;
 			sourceTransitionId: string | null;
 			generation: number;
+	  }
+	| {
+			via: 'background_settlement';
+			settledAfterMs: number;
+			/** Whether the settled round attributed files (false = verification-only). */
+			accepted: boolean;
+			correlationId: string;
 	  };
 
 export async function resolveStageASettlementJustification(
@@ -350,13 +368,42 @@ export async function resolveStageASettlementJustification(
 		return { via: 'settlement_wal', settledAfterMs: walMs };
 	}
 	const receipt = await latestAcceptedMutationReceipt(directory, taskId);
-	if (!receipt) return null;
-	return {
-		via: 'requirements_receipt',
-		settledAfterMs: receipt.recordedAtMs,
-		sourceTransitionId: receipt.sourceTransitionId,
-		generation: receipt.generation,
-	};
+	if (receipt) {
+		return {
+			via: 'requirements_receipt',
+			settledAfterMs: receipt.recordedAtMs,
+			sourceTransitionId: receipt.sourceTransitionId,
+			generation: receipt.generation,
+		};
+	}
+	// The 2026-11-26 task 2.14 wedge: a background coder round can settle and
+	// be durably consumed as accepted while attributing ZERO files — the
+	// deliverable landed outside the delegation lane (user-committed after a
+	// liveness-stale predecessor). Neither receipt form above exists for such
+	// a round (no WAL — ABORTED-by-transfer; no accepted_mutation — nothing
+	// mutated), so the supervised recovery and the /swarm recover scan used
+	// to refuse forever. The settled+accepted background record is the same
+	// durable settlement fact: the round ran, completed, settled, and the
+	// platform accepted the completion. Only ingestion outcome 'accepted'
+	// justifies — rejected/skipped/stale are the platform's own refusals of
+	// that completion, and a still-pending ingestion (crash window) has not
+	// established the fact yet (the terminal-closeout reconciler will).
+	const background = findLatestSettledBackgroundCoderSettlement(
+		directory,
+		taskId,
+	);
+	if (
+		background.status === 'ok' &&
+		background.settlement?.ingestionOutcome === 'accepted'
+	) {
+		return {
+			via: 'background_settlement',
+			settledAfterMs: background.settlement.settledAtMs,
+			accepted: background.settlement.observedFiles.length > 0,
+			correlationId: background.settlement.correlationId,
+		};
+	}
+	return null;
 }
 
 /**
@@ -662,14 +709,26 @@ export async function repairWedgedStageA(
 						? {
 								settlementRecovery: true,
 								// Which durable receipt admitted the repair:
-								// 'settlement_wal' | 'requirements_receipt'
-								// (background coder rounds never write a WAL).
+								// 'settlement_wal' | 'requirements_receipt' |
+								// 'background_settlement' (background coder
+								// rounds never write a WAL).
 								justification: scan.justification?.via ?? 'settlement_wal',
 								...(scan.justification?.via === 'requirements_receipt'
 									? {
 											justificationTransitionId:
 												scan.justification.sourceTransitionId,
 											justificationGeneration: scan.justification.generation,
+										}
+									: {}),
+								...(scan.justification?.via === 'background_settlement'
+									? {
+											// The verification-only shape must be visible
+											// in the audit: accepted=false means the settled
+											// round attributed no files and the repair rides
+											// on the operator's/architect's audited vouch.
+											justificationAccepted: scan.justification.accepted,
+											justificationCorrelationId:
+												scan.justification.correlationId,
 										}
 									: {}),
 							}
