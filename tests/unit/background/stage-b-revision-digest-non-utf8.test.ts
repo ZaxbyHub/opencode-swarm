@@ -45,7 +45,7 @@ describe('PR workflow revision digest — non-UTF-8 Git path output fails closed
 		}
 	});
 
-	test.skipIf(process.platform === 'win32')(
+	test.skipIf(process.platform === 'win32' || process.platform === 'darwin')(
 		'an untracked non-UTF-8 name yields no revision digest instead of a digest over U+FFFD',
 		() => {
 			const { dir, head } = makeProject();

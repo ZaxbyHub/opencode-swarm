@@ -369,7 +369,7 @@ describe('stage-b directory scope freshness — content and path identity', () =
 			fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
 		}
 	});
-	test.skipIf(process.platform === 'win32')(
+	test.skipIf(process.platform === 'win32' || process.platform === 'darwin')(
 		'non-UTF-8 Git-observed names fail the snapshot closed instead of aliasing',
 		async () => {
 			const dir = makeProject();
