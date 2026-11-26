@@ -16,6 +16,7 @@ import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { withFrozenClock } from '../../helpers/test-clock.js';
 import { BUNDLED_PROJECT_SKILLS } from '../../../src/config/bundled-skills.js';
 import type { ExternalSkillCandidate } from '../../../src/config/schema.js';
 import { computeArtifactDigest } from '../../../src/services/external-skill-identity.js';
@@ -49,7 +50,10 @@ async function seedPassedCandidate(
 		source_type: 'github',
 		publisher: 'test-publisher',
 		sha256: sha256(SKILL_BODY),
-		fetched_at: new Date(Date.now() - 60_000).toISOString(),
+		fetched_at: withFrozenClock(
+			() => new Date(Date.now() - 60_000).toISOString(),
+			{ fixedNow: Date.now() },
+		),
 		skill_name: 'promote-identity-skill',
 		skill_body: SKILL_BODY,
 		risk_flags: [],
@@ -72,7 +76,7 @@ describe('external_skill_promote — identity bindings (#3822 K3 / ASK-3)', () =
 	beforeEach(() => {
 		projectDir = path.join(
 			os.tmpdir(),
-			`ext-skill-promote-identity-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+			`ext-skill-promote-identity-${withFrozenClock(() => Date.now(), { fixedNow: Date.now() })}-${Math.random().toString(36).slice(2, 8)}`,
 		);
 		fs.mkdirSync(projectDir, { recursive: true });
 		_internals.loadConfig = () =>

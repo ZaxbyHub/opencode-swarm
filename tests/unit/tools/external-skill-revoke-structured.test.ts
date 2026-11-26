@@ -16,6 +16,7 @@ import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { withFrozenClock } from '../../helpers/test-clock.js';
 import type { ExternalSkillCandidate } from '../../../src/config/schema.js';
 import { createExternalSkillStore } from '../../../src/services/external-skill-store.js';
 import {
@@ -94,7 +95,7 @@ describe('external_skill_revoke — structured identity (#3822 K2)', () => {
 	beforeEach(async () => {
 		projectDir = path.join(
 			os.tmpdir(),
-			`ext-skill-revoke-structured-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+			`ext-skill-revoke-structured-${withFrozenClock(() => Date.now(), { fixedNow: Date.now() })}-${Math.random().toString(36).slice(2, 8)}`,
 		);
 		fs.mkdirSync(projectDir, { recursive: true });
 		// Real config file (curation enabled) — no loadConfig stub needed.

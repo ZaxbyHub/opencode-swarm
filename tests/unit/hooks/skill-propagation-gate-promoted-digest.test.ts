@@ -22,6 +22,7 @@ import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { withFrozenClock } from '../../helpers/test-clock.js';
 import type { ExternalSkillCandidate } from '../../../src/config/schema.js';
 import { validateSkillReference } from '../../../src/hooks/skill-propagation-gate.js';
 import {
@@ -126,7 +127,10 @@ async function seedCandidateRecord(
 		source_type: 'github',
 		publisher: 'test-publisher',
 		sha256: overrides.sha256 ?? sha256(skillBody),
-		fetched_at: new Date(Date.now() - 60_000).toISOString(),
+		fetched_at: withFrozenClock(
+			() => new Date(Date.now() - 60_000).toISOString(),
+			{ fixedNow: Date.now() },
+		),
 		skill_name: 'digest-gate-skill',
 		skill_body: skillBody,
 		risk_flags: [],
@@ -158,7 +162,7 @@ describe('skill propagation gate — promoted external skill digest binding (#38
 	beforeEach(() => {
 		projectDir = path.join(
 			os.tmpdir(),
-			`ext-skill-digest-gate-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+			`ext-skill-digest-gate-${withFrozenClock(() => Date.now(), { fixedNow: Date.now() })}-${Math.random().toString(36).slice(2, 8)}`,
 		);
 		fs.rmSync(projectDir, { recursive: true, force: true });
 		fs.mkdirSync(projectDir, { recursive: true });

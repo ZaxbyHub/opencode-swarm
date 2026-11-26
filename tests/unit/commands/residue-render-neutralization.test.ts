@@ -20,6 +20,7 @@ import {
 	writeFileSync,
 } from 'node:fs';
 import * as path from 'node:path';
+import { withFrozenClock } from '../../helpers/test-clock.js';
 import { runFinalizeDryRun } from '../../../src/commands/close/dry-run';
 import { handleDoctorCommand } from '../../../src/commands/doctor';
 import { loadDatabaseCtor } from '../../../src/db/sqlite-loader.js';
@@ -102,7 +103,9 @@ describe('doctor rollback output reports skipped entries (#3836 command contract
 			const manifest = {
 				schema_version: 1,
 				batch_id: batchId,
-				created_at: new Date().toISOString(),
+				created_at: withFrozenClock(() => new Date().toISOString(), {
+					fixedNow: Date.now(),
+				}),
 				trigger: 'test',
 				entries: [
 					{

@@ -24,6 +24,7 @@ import {
 	writeFileSync,
 } from 'node:fs';
 import * as path from 'node:path';
+import { withFrozenClock } from '../../helpers/test-clock.js';
 import {
 	neutralizeResidueName,
 	rollbackResidueQuarantine,
@@ -66,7 +67,9 @@ function writeBatch(batchId: string, entries: readonly FixtureEntry[]): string {
 	const manifest = {
 		schema_version: 1,
 		batch_id: batchId,
-		created_at: new Date().toISOString(),
+		created_at: withFrozenClock(() => new Date().toISOString(), {
+			fixedNow: Date.now(),
+		}),
 		trigger: 'test',
 		entries: entries.map((e) => ({
 			original_rel_path: e.original_rel_path,
