@@ -93,6 +93,7 @@ import { appendCoreEventSync } from '../events/core-events.js';
 import { readSwarmFileAsync } from '../hooks/utils';
 import {
 	acquireOwnerLockOnce,
+	cleanupExpiredLocks,
 	getOwnerLockPath,
 	isLocked,
 	LOCK_TIMEOUT_MS,
@@ -789,27 +790,23 @@ async function decideSpecMarker<P extends { specHash?: string | null }>(
 	};
 	if (await inFlight()) return { decision: 'skip' };
 	await fsPromises.mkdir(path.dirname(lockPath), { recursive: true });
-	// A contender can release between a failed acquire and the in-flight probe.
-	// Re-acquire in that case rather than writing from a pre-lock read.
+	// Clear dead-owner residue first (a live pid is never swept). Without this an
+	// aged dead-owner lock would block every acquire and hide drift indefinitely.
+	try {
+		cleanupExpiredLocks(directory);
+	} catch {
+		// Best-effort: an unswept residue only defers the marker to a later load.
+	}
+	// Every marker write holds spec.md. A contender can release between a failed
+	// acquire and the in-flight probe, so retry while it is gone.
 	let attempt = acquireOwnerLockOnce(lockPath, 'loadPlan', 'spec-marker');
 	for (let retry = 0; !attempt.acquired && retry < 3; retry += 1) {
 		if (await inFlight()) return { decision: 'skip' };
 		attempt = acquireOwnerLockOnce(lockPath, 'loadPlan', 'spec-marker');
 	}
-	if (!attempt.acquired) {
-		// Still contended with no live holder after the retries: decide from a
-		// fresh read, never from the snapshot taken before the contention.
-		const hash = await _internals.readPlanSpecHashUnderLock(directory);
-		const fresh =
-			hash === undefined ? plan : ({ ...plan, specHash: hash } as unknown as P);
-		const stale = await isSpecStale(
-			directory,
-			fresh as unknown as Parameters<typeof isSpecStale>[1],
-		);
-		return stale.stale
-			? { decision: 'write', plan: fresh, stale, release: () => {} }
-			: { decision: 'skip' };
-	}
+	// Still unacquirable: skip, never write unlocked. A writer that holds the lock
+	// reconciles or restores prior bytes, so no marker is owed for its window.
+	if (!attempt.acquired) return { decision: 'skip' };
 	try {
 		const lockedSpecHash =
 			await _internals.readPlanSpecHashUnderLock(directory);

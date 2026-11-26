@@ -118,13 +118,34 @@ describe('loadPlan marker decision under the spec.md owner lock (PR 3920 closeou
 		expect(fs.existsSync(markerPath())).toBe(false);
 	});
 
-	test('an aged lock that cannot be acquired decides from a fresh read, not the snapshot', async () => {
-		// The aged lock file cannot be acquired and is not in flight, so the decision
-		// falls back to a fresh read. The writer has rebound plan.json: no marker.
+	test('an ownerless aged lock is swept, then the marker is decided under the lock', async () => {
+		// cleanupExpiredLocks clears an ownerless lock past the TTL, so the acquire
+		// succeeds. The writer has rebound plan.json, so the locked pair is consistent.
 		fs.writeFileSync(lockPath(), '{"v":1}');
 		fs.utimesSync(lockPath(), ANCIENT_SECONDS, ANCIENT_SECONDS);
 		_internals.readPlanSpecHashUnderLock = async () =>
 			readEffectiveSpecSync(dir)?.hash;
+
+		await loadPlan(dir);
+		expect(fs.existsSync(markerPath())).toBe(false);
+	});
+
+	test('an aged lock held by a live process is never swept and suppresses the marker', async () => {
+		// The sweep never removes a live pid, so the acquire keeps failing and the
+		// decision skips. Drift stays unmarked until that holder releases or dies.
+		fs.writeFileSync(
+			lockPath(),
+			JSON.stringify({
+				v: 1,
+				nonce: 'live-aged-nonce',
+				ownerPid: process.pid,
+				startBoundMs: 0,
+				agent: 'spec-write',
+				taskId: 'long-running-writer',
+				acquiredAtMs: 1700000000000,
+			}),
+		);
+		fs.utimesSync(lockPath(), ANCIENT_SECONDS, ANCIENT_SECONDS);
 
 		await loadPlan(dir);
 		expect(fs.existsSync(markerPath())).toBe(false);
