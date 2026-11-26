@@ -125,7 +125,7 @@ function criticResumeDispatch(sessionID: string | null = CHILD) {
 describe('delegation gate — native-async resume of a terminal child', () => {
 	beforeEach(async () => {
 		resetSwarmState();
-		dir = await mkdtemp(join(tmpdir(), 'resume-guard-'));
+		dir = realpathSync(await mkdtemp(join(tmpdir(), 'resume-guard-')));
 	});
 
 	afterEach(async () => {
@@ -155,7 +155,7 @@ describe('delegation gate — native-async resume of a terminal child', () => {
 	test('refuses the resume for every terminal status, with the status in the message', async () => {
 		for (const status of ['error', 'stale'] as const) {
 			resetSwarmState();
-			dir = await mkdtemp(join(tmpdir(), 'resume-guard-status-'));
+			dir = realpathSync(await mkdtemp(join(tmpdir(), 'resume-guard-status-')));
 			await seedDelegationRecord({ status });
 			const hook = createDelegationGateHook(
 				makeConfig({ hooks: { background_subagents: true } }),

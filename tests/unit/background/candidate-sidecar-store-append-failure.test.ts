@@ -33,7 +33,7 @@ const tmpDirs: string[] = [];
 /** Create a resolved temp directory under os.tmpdir() and register for cleanup. */
 function makeTempDir(): string {
 	const dir = fs.realpathSync(
-		fs.mkdtempSync(path.join(os.tmpdir(), 'sidecar-store-')),
+		fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'sidecar-store-'))),
 	);
 	tmpDirs.push(dir);
 	return dir;
