@@ -8,7 +8,7 @@
  */
 
 import { Buffer } from 'node:buffer';
-import { mkdir, rename, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import { z } from 'zod';
 import { loadPluginConfigWithMeta } from '../config';
@@ -18,6 +18,20 @@ import { reconcileSpecDrift } from '../services/spec-drift-recovery.js';
 import { createSwarmTool } from './create-tool.js';
 
 const MAX_SPEC_BYTES = 256 * 1024; // 256 KiB
+
+/** Puts back the bytes spec_write replaced; a null prior means the file did not exist. */
+async function restorePriorSpec(
+	target: string,
+	priorBytes: string | null,
+): Promise<void> {
+	if (priorBytes === null) {
+		await unlink(target);
+		return;
+	}
+	const tmp = `${target}.tmp-restore-${process.pid}-${Date.now()}`;
+	await writeFile(tmp, priorBytes, 'utf-8');
+	await rename(tmp, target);
+}
 
 export const spec_write: ReturnType<typeof createSwarmTool> = createSwarmTool({
 	description:
@@ -118,6 +132,13 @@ export const spec_write: ReturnType<typeof createSwarmTool> = createSwarmTool({
 					// no prior file; treat as replace
 				}
 			}
+			// Captured before publication so a lock-busy recovery can restore it (F-001).
+			const priorBytes = await readFile(target, 'utf-8').catch(
+				(error: NodeJS.ErrnoException) => {
+					if (error.code === 'ENOENT') return null;
+					throw error;
+				},
+			);
 			await writeFile(tmp, finalContent, 'utf-8');
 			await rename(tmp, target);
 
@@ -139,6 +160,43 @@ export const spec_write: ReturnType<typeof createSwarmTool> = createSwarmTool({
 						error instanceof Error ? error.message : String(error)
 					}`,
 				};
+			}
+
+			// F-001: a busy plan lock is reported before any WAL or plan change. Left
+			// published, the new spec stays bound to the old plan hash with no
+			// marker, and the next loadPlan would materialize one and wedge
+			// save_plan. Restore the prior bytes so the write fails closed as a whole.
+			if (specDriftRecovery.status === 'retry_later') {
+				try {
+					await restorePriorSpec(target, priorBytes);
+				} catch (error) {
+					return JSON.stringify(
+						{
+							written: true,
+							path: target,
+							bytes: Buffer.byteLength(finalContent, 'utf8'),
+							spec_drift_recovery: {
+								status: 'failed',
+								mode: 'repair',
+								message: `Plan lock was busy and the spec rollback failed (${
+									error instanceof Error ? error.message : String(error)
+								}); spec.md is published without a plan rebind. Retry spec_write.`,
+							},
+						},
+						null,
+						2,
+					);
+				}
+				return JSON.stringify(
+					{
+						written: false,
+						reason:
+							'plan lock busy; spec.md was not published. Retry spec_write.',
+						spec_drift_recovery: specDriftRecovery,
+					},
+					null,
+					2,
+				);
 			}
 
 			return JSON.stringify(

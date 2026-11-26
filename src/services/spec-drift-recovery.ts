@@ -203,7 +203,17 @@ export function inspectSpecDriftRecoveryWalSync(
 			? 'missing'
 			: 'corrupt';
 	}
-	return parseWal(raw)?.state ?? 'corrupt';
+	const wal = parseWal(raw);
+	// Same captured-content check the recovery run applies (F-002): a structurally
+	// valid WAL whose content no longer matches newHash is corrupt, not COMMITTED.
+	if (!wal || !capturedContentConsistent(wal)) return 'corrupt';
+	return wal.state;
+}
+
+/** Captured spec content must be present exactly when newHash is, and must hash to it. */
+function capturedContentConsistent(wal: SpecDriftRecoveryWal): boolean {
+	if ((wal.newHash === null) !== (wal.specContent === null)) return false;
+	return wal.specContent === null || sha256(wal.specContent) === wal.newHash;
 }
 
 async function readFileText(filePath: string): Promise<string | null> {
@@ -572,17 +582,9 @@ export async function reconcileSpecDrift(
 				// PREPARED replay already failed this check via the transaction
 				// path; hoisting it closes the shortcut hole. The integrity
 				// check on the selected transaction WAL further down remains —
-				// it also covers a freshly proposed WAL.
-				const capturedContentHash =
-					existingWal.specContent === null
-						? null
-						: sha256(existingWal.specContent);
-				if (
-					(existingWal.newHash === null) !==
-						(existingWal.specContent === null) ||
-					(capturedContentHash !== null &&
-						capturedContentHash !== existingWal.newHash)
-				) {
+				// it also covers a freshly proposed WAL. The mutation gate applies
+				// the same helper (inspectSpecDriftRecoveryWalSync).
+				if (!capturedContentConsistent(existingWal)) {
 					return {
 						status: 'failed',
 						mode: options.mode,

@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { handleAcknowledgeSpecDriftCommand } from '../../../src/commands/acknowledge-spec-drift';
 import { readLedgerEvents } from '../../../src/plan/ledger';
 import { readEffectiveSpecSync } from '../../../src/sdd/effective-spec';
+import { _internals as specDriftInternals } from '../../../src/services/spec-drift-recovery';
 import { spec_write } from '../../../src/tools/spec-write';
 import { isSpecStale } from '../../../src/utils/spec-hash';
 import { canonicalTmpDir } from '../../helpers/tmpdir.js';
@@ -336,6 +337,59 @@ describe('spec_write spec drift recovery', () => {
 				existsSync(join(tempDir, '.swarm', 'spec-drift-recovery.json')),
 			).toBe(false);
 			expect(existsSync(join(tempDir, '.swarm', 'events.jsonl'))).toBe(false);
+		});
+
+		test('F-001: a busy plan lock after publication restores the prior spec and reports written:false', async () => {
+			const priorSpec = '# Old Spec\n\nOld content.\n';
+			await writeFile(
+				join(tempDir, '.swarm', 'plan.json'),
+				JSON.stringify(buildPlan('oldhash123'), null, 2),
+			);
+			await writeFile(join(tempDir, '.swarm', 'spec.md'), priorSpec);
+
+			const realTryAcquireLock = specDriftInternals.tryAcquireLock;
+			specDriftInternals.tryAcquireLock = (async (
+				directory: string,
+				file: string,
+				agent: string,
+				id: string,
+			) =>
+				file === 'plan.json'
+					? { acquired: false }
+					: realTryAcquireLock(
+							directory,
+							file,
+							agent,
+							id,
+						)) as unknown as typeof realTryAcquireLock;
+			let result: {
+				written: boolean;
+				reason?: string;
+				spec_drift_recovery?: { status: string };
+			};
+			try {
+				result = JSON.parse(
+					await spec_write.execute(
+						{ content: '# Spec\n\nRebound requirements.\n' },
+						{ directory: tempDir } as any,
+					),
+				);
+			} finally {
+				specDriftInternals.tryAcquireLock = realTryAcquireLock;
+			}
+
+			expect(result.written).toBe(false);
+			expect(result.spec_drift_recovery?.status).toBe('retry_later');
+			expect(await readFile(join(tempDir, '.swarm', 'spec.md'), 'utf-8')).toBe(
+				priorSpec,
+			);
+			expect(existsSync(join(tempDir, '.swarm', 'spec-staleness.json'))).toBe(
+				false,
+			);
+			const plan = JSON.parse(
+				await readFile(join(tempDir, '.swarm', 'plan.json'), 'utf-8'),
+			) as { specHash?: string };
+			expect(plan.specHash).toBe('oldhash123');
 		});
 
 		test('plan without a specHash stays no_marker (pre-feature plans are exempt)', async () => {

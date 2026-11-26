@@ -127,3 +127,18 @@ behavior is untouched (flag unset → marker-only semantics).
   `plan-ledger.jsonl`), not just the events.jsonl audit line and the
   spec snapshot file. Falsified by disabling the snapshot append (test
   fails, then passes restored).
+- Closeout F-001: when the plan lock is busy, the canonical `spec_write`
+  reports `retry_later` before any WAL or plan change. The new spec used to
+  stay published while still bound to the old plan hash, so the next
+  `loadPlan` could materialize the drift marker and wedge `save_plan`. It now
+  restores the prior `spec.md` bytes and returns `written: false` with the
+  retry guidance. A failed restore is reported as `written: true` with a
+  `failed` recovery status. Pinned by the lock-busy test in
+  `tests/unit/tools/spec-write-spec-drift-recovery.test.ts`; removing the
+  restore fails it.
+- Closeout F-002: the synchronous mutation gate now applies the same
+  captured-content check as the recovery run. A structurally valid COMMITTED
+  WAL whose `specContent` no longer hashes to `newHash` blocks protected
+  mutations as corrupt, instead of passing as COMMITTED. Pinned by
+  `tests/unit/services/spec-drift-wal-gate-integrity.test.ts`; removing the
+  check fails the tampered-WAL case.

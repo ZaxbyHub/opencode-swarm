@@ -7,6 +7,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -49,6 +50,8 @@ async function removeStalenessFile(): Promise<void> {
 	}
 }
 
+const SPEC_CONTENT = '# Spec\n';
+
 async function writeRecoveryWal(
 	state: 'PREPARED' | 'COMMITTED' | 'corrupt',
 ): Promise<void> {
@@ -64,8 +67,12 @@ async function writeRecoveryWal(
 					planTitle: 'Plan',
 					phase: 1,
 					previousHash: 'old',
-					newHash: 'new',
-					specContent: '# Spec\n',
+					// newHash must be the hash of the captured content, as the
+					// recovery run requires (F-002); a mismatched pair is corrupt.
+					newHash: createHash('sha256')
+						.update(SPEC_CONTENT, 'utf-8')
+						.digest('hex'),
+					specContent: SPEC_CONTENT,
 					actor: 'spec_write',
 					recordedAt: '2026-11-25T00:00:00.000Z',
 				});
