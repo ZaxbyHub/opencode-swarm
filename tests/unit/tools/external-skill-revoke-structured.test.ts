@@ -301,65 +301,78 @@ describe('external_skill_revoke — structured identity (#3822 K2)', () => {
 
 	// Junction (win32) / symlink (POSIX) escape: lexically inside the
 	// generated root, resolving outside it. Skipped when the platform refuses
-	// link creation.
+	// link creation — with an EXPLICIT visible reason, so coverage gaps do
+	// not disappear silently from the run output.
 	const linkKind =
 		process.platform === 'win32' ? ('junction' as const) : ('dir' as const);
 	let canCreateLink = true;
+	const probeRoot = fs.mkdtempSync(
+		path.join(fs.realpathSync(os.tmpdir()), 'lnk-'),
+	);
+	const probeTarget = fs.mkdtempSync(
+		path.join(fs.realpathSync(os.tmpdir()), 'tgt-'),
+	);
 	try {
-		const probeRoot = fs.mkdtempSync(
-			path.join(fs.realpathSync(os.tmpdir()), 'lnk-'),
-		);
-		const probeTarget = fs.mkdtempSync(
-			path.join(fs.realpathSync(os.tmpdir()), 'tgt-'),
-		);
 		fs.symlinkSync(probeTarget, path.join(probeRoot, 'link'), linkKind);
-		fs.rmSync(probeRoot, { recursive: true, force: true });
-		fs.rmSync(probeTarget, { recursive: true, force: true });
 	} catch {
 		canCreateLink = false;
+		process.stdout.write(
+			'[SKIP] revoke symlink-escape test: link creation not permitted on this platform/filesystem\n',
+		);
+	} finally {
+		fs.rmSync(probeRoot, { recursive: true, force: true });
+		fs.rmSync(probeTarget, { recursive: true, force: true });
 	}
 
-	test.if(canCreateLink)(
+	test.skipIf(!canCreateLink)(
 		'symlink/junction escape inside the generated root is refused',
 		async () => {
 			const outsideDir = path.join(
 				path.dirname(projectDir),
 				`${path.basename(projectDir)}-linkdest`,
 			);
-			fs.mkdirSync(outsideDir, { recursive: true });
-			const escapedPath = writeSkillFile(
-				path.join(outsideDir, 'SKILL.md'),
-				'# escaped through a link\n',
-			);
-			const linkPath = path.join(
-				projectDir,
-				'.opencode',
-				'skills',
-				'generated',
-				'link-slug',
-			);
-			fs.mkdirSync(path.dirname(linkPath), { recursive: true });
-			fs.symlinkSync(outsideDir, linkPath, linkKind);
+			try {
+				fs.mkdirSync(outsideDir, { recursive: true });
+				const escapedPath = writeSkillFile(
+					path.join(outsideDir, 'SKILL.md'),
+					'# escaped through a link\n',
+				);
+				const linkPath = path.join(
+					projectDir,
+					'.opencode',
+					'skills',
+					'generated',
+					'link-slug',
+				);
+				fs.mkdirSync(path.dirname(linkPath), { recursive: true });
+				fs.symlinkSync(outsideDir, linkPath, linkKind);
 
-			const candidate = await seedPromotedCandidate(projectDir, {
-				historyEntry: {
-					reason: 'Promoted through a link',
-					target_path: path.join(linkPath, 'SKILL.md'),
-					promoted_content_hash: sha256('# escaped through a link\n'),
-				},
-			});
+				const candidate = await seedPromotedCandidate(projectDir, {
+					historyEntry: {
+						reason: 'Promoted through a link',
+						target_path: path.join(linkPath, 'SKILL.md'),
+						promoted_content_hash: sha256('# escaped through a link\n'),
+					},
+				});
 
-			const raw = await callRevoke(
-				{ candidate_id: candidate.id, reason: 'operator requested revoke' },
-				projectDir,
-			);
-			const parsed = JSON.parse(raw) as { success: boolean; error?: string };
-			expect(parsed.success, raw).toBe(false);
-			expect(parsed.error).toContain(
-				'resolves outside the generated-skill root',
-			);
-			expect(fs.existsSync(escapedPath)).toBe(true);
-			fs.rmSync(outsideDir, { recursive: true, force: true });
+				const raw = await callRevoke(
+					{ candidate_id: candidate.id, reason: 'operator requested revoke' },
+					projectDir,
+				);
+				const parsed = JSON.parse(raw) as {
+					success: boolean;
+					error?: string;
+				};
+				expect(parsed.success, raw).toBe(false);
+				expect(parsed.error).toContain(
+					'resolves outside the generated-skill root',
+				);
+				expect(fs.existsSync(escapedPath)).toBe(true);
+			} finally {
+				// The escaped fixture lives OUTSIDE projectDir — always remove
+				// it, even when an expectation above throws.
+				fs.rmSync(outsideDir, { recursive: true, force: true });
+			}
 		},
 	);
 });

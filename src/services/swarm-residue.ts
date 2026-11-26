@@ -711,8 +711,14 @@ export async function rollbackResidueQuarantine(
 	let allResolved = true;
 	for (const entry of manifest.entries) {
 		// Classify BOTH path fields BEFORE any per-entry action (mixed-poison
-		// rule: an entry combining a control-bearing original_rel_path with a
-		// traversal-bearing stored_rel_path is a hard reject, never a skip).
+		// rule, symmetric in BOTH directions: a tamper-class defect — traversal,
+		// empty segment, or absolute path — in EITHER field is a hard reject,
+		// never a skip, even when the OTHER field's only defect is a control
+		// char. So control-char original_rel_path + traversal stored_rel_path
+		// rejects, and traversal original_rel_path + control-char
+		// stored_rel_path rejects just the same. Control chars in BOTH fields
+		// stay a single skip-and-report below — neither direction of the mix
+		// upgrades or downgrades the other's class).
 		const defects = [
 			classifyRelPathDefect(entry.original_rel_path),
 			classifyRelPathDefect(entry.stored_rel_path),

@@ -24,7 +24,10 @@ import { bundledProjectSkillFileReference } from '../config/bundled-skills.js';
 import { stripKnownSwarmPrefix } from '../config/schema.js';
 import { appendCoreEventSync } from '../events/core-events.js';
 import { sanitizeDiagnosticText } from '../scope/path-identity.js';
-import { verifyPromotedExternalSkillSync } from '../services/external-skill-identity.js';
+import {
+	verifyPromotedExternalSkillSync,
+	withPromotionRecordIndex,
+} from '../services/external-skill-identity.js';
 import { criticalWarn, warn } from '../utils/logger.js';
 import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache.js';
 import type { MessageWithParts } from './knowledge-types.js';
@@ -862,13 +865,29 @@ export function validateSkillReference(
 				canonicalGeneratedRoot = _internals.realpathSync(generatedRoot);
 			}
 		} catch {
-			// Keep the lexical root — the containment test below stays lexical.
+			// Keep the lexical root — the containment tests below stay lexical.
 		}
-		if (
+		// Stage B review (gate lexical/real split, FB-112): verifying only the
+		// RESOLVED path let a lexical reference under the generated root whose
+		// SKILL.md was replaced by a symlink to a tampered in-project file
+		// OUTSIDE the root skip identity verification entirely. Verify when
+		// EITHER spelling is inside the generated root, and pass the in-root
+		// LEXICAL path: the promotion record's target_path is the in-root
+		// spelling, and pathIdentityKeys (external-skill-identity.ts) covers
+		// both the lexical and resolved identities of the artifact and the
+		// recorded target. Reads through the lexical path follow a replaced
+		// symlink, so the digest comparison runs on the bytes the gate will
+		// actually load.
+		const lexicalInGeneratedRoot =
+			lexicalPath !== generatedRoot && isWithinRoot(generatedRoot, lexicalPath);
+		const realInGeneratedRoot =
 			realPath !== canonicalGeneratedRoot &&
-			isWithinRoot(canonicalGeneratedRoot, realPath)
-		) {
-			const promoted = verifyPromotedExternalSkillSync(directory, realPath);
+			isWithinRoot(canonicalGeneratedRoot, realPath);
+		if (lexicalInGeneratedRoot || realInGeneratedRoot) {
+			const promoted = verifyPromotedExternalSkillSync(
+				directory,
+				lexicalInGeneratedRoot ? lexicalPath : realPath,
+			);
 			if (!promoted.ok) {
 				return { valid: false, reason: promoted.reason };
 			}
@@ -934,22 +953,29 @@ export async function validateExplicitSkillReferencesBefore(
 
 	const context = resolveSkillAudienceContext(config);
 	const validatedSkillPaths: string[] = [];
-	for (const reference of fileReferences) {
-		const result = _internals.validateSkillReference(
-			directory,
-			reference,
-			context,
-			{
-				enforceAudience: true,
-			},
-		);
-		if (!result.valid) {
-			return {
-				blocked: true,
-				reason: `Blocked invalid SKILLS reference "${reference}": ${result.reason}`,
-			};
+	let blockedReference: string | null = null;
+	// RP-002: every generated-root reference validated in this loop shares ONE
+	// bounded candidate-store scan (the promotion-record index is built lazily
+	// on the first lookup and discarded when the loop finishes).
+	withPromotionRecordIndex(directory, () => {
+		for (const reference of fileReferences) {
+			const result = _internals.validateSkillReference(
+				directory,
+				reference,
+				context,
+				{
+					enforceAudience: true,
+				},
+			);
+			if (!result.valid) {
+				blockedReference = `Blocked invalid SKILLS reference "${reference}": ${result.reason}`;
+				return;
+			}
+			if (result.skillPath) validatedSkillPaths.push(result.skillPath);
 		}
-		if (result.skillPath) validatedSkillPaths.push(result.skillPath);
+	});
+	if (blockedReference !== null) {
+		return { blocked: true, reason: blockedReference };
 	}
 
 	return { blocked: false, reason: null, validatedSkillPaths };
@@ -1049,19 +1075,23 @@ export async function skillPropagationGateBefore(
 	const audienceContext = resolveSkillAudienceContext(config);
 	const availableSkills: string[] = [];
 	const metadataBySkillPath = new Map<string, SkillMetadata>();
-	for (const skillPath of _internals.discoverAvailableSkills(directory)) {
-		const validation = _internals.validateSkillReference(
-			directory,
-			skillPath,
-			audienceContext,
-			{ enforceAudience: true, requireFilePrefix: false },
-		);
-		if (!validation.valid || !validation.skillPath) continue;
-		availableSkills.push(validation.skillPath);
-		if (validation.metadata) {
-			metadataBySkillPath.set(validation.skillPath, validation.metadata);
+	// RP-002: one bounded candidate-store scan for the whole discovery loop
+	// (lazily, only if a generated-root artifact is actually validated).
+	withPromotionRecordIndex(directory, () => {
+		for (const skillPath of _internals.discoverAvailableSkills(directory)) {
+			const validation = _internals.validateSkillReference(
+				directory,
+				skillPath,
+				audienceContext,
+				{ enforceAudience: true, requireFilePrefix: false },
+			);
+			if (!validation.valid || !validation.skillPath) continue;
+			availableSkills.push(validation.skillPath);
+			if (validation.metadata) {
+				metadataBySkillPath.set(validation.skillPath, validation.metadata);
+			}
 		}
-	}
+	});
 
 	// --- Record skill delegation usage (best-effort, never block) ---
 	const skillsValue = parsed.skillsField.trim();
@@ -1096,17 +1126,19 @@ export async function skillPropagationGateBefore(
 		}
 
 		// Combine and deduplicate all skill paths
-		const safeCoderSkillPaths = coderSkillPaths.flatMap((skillPath) => {
-			const validation = _internals.validateSkillReference(
-				directory,
-				skillPath,
-				audienceContext,
-				{ enforceAudience: false },
-			);
-			return validation.valid && validation.skillPath
-				? [validation.skillPath]
-				: [];
-		});
+		const safeCoderSkillPaths = withPromotionRecordIndex(directory, () =>
+			coderSkillPaths.flatMap((skillPath) => {
+				const validation = _internals.validateSkillReference(
+					directory,
+					skillPath,
+					audienceContext,
+					{ enforceAudience: false },
+				);
+				return validation.valid && validation.skillPath
+					? [validation.skillPath]
+					: [];
+			}),
+		);
 
 		// Primary SKILLS paths were already integrity/audience validated. Historical
 		// SKILLS_USED_BY_CODER is provenance only and is recorded only when safe.
@@ -1199,36 +1231,41 @@ export async function skillPropagationGateBefore(
 		if (routingPaths.length > 0) {
 			// Create a set of existing paths for fast lookup
 			const existingPaths = new Set(scored.map((s) => s.skillPath));
-			for (const routingPath of routingPaths) {
-				const validation = _internals.validateSkillReference(
-					directory,
-					routingPath,
-					audienceContext,
-					{ enforceAudience: true, requireFilePrefix: false },
-				);
-				if (!validation.valid || !validation.skillPath) continue;
-				const eligibleRoutingPath = validation.skillPath;
-				if (validation.metadata) {
-					metadataBySkillPath.set(eligibleRoutingPath, validation.metadata);
+			// RP-002: one bounded candidate-store scan for the routing merge.
+			withPromotionRecordIndex(directory, () => {
+				for (const routingPath of routingPaths) {
+					const validation = _internals.validateSkillReference(
+						directory,
+						routingPath,
+						audienceContext,
+						{ enforceAudience: true, requireFilePrefix: false },
+					);
+					if (!validation.valid || !validation.skillPath) continue;
+					const eligibleRoutingPath = validation.skillPath;
+					if (validation.metadata) {
+						metadataBySkillPath.set(eligibleRoutingPath, validation.metadata);
+					}
+					// Skip retired or stale skills (marker in containing directory)
+					const routedSkillDir = path.dirname(
+						path.join(directory, eligibleRoutingPath),
+					);
+					if (
+						_internals.existsSync(
+							path.join(routedSkillDir, 'retired.marker'),
+						) ||
+						_internals.existsSync(path.join(routedSkillDir, 'stale.marker'))
+					)
+						continue;
+					if (!existingPaths.has(eligibleRoutingPath)) {
+						scored.push({
+							skillPath: eligibleRoutingPath,
+							score: 0.9, // High score for explicitly routed skills
+							usageCount: 0,
+						});
+						existingPaths.add(eligibleRoutingPath);
+					}
 				}
-				// Skip retired or stale skills (marker in containing directory)
-				const routedSkillDir = path.dirname(
-					path.join(directory, eligibleRoutingPath),
-				);
-				if (
-					_internals.existsSync(path.join(routedSkillDir, 'retired.marker')) ||
-					_internals.existsSync(path.join(routedSkillDir, 'stale.marker'))
-				)
-					continue;
-				if (!existingPaths.has(eligibleRoutingPath)) {
-					scored.push({
-						skillPath: eligibleRoutingPath,
-						score: 0.9, // High score for explicitly routed skills
-						usageCount: 0,
-					});
-					existingPaths.add(eligibleRoutingPath);
-				}
-			}
+			});
 			// Re-sort by score descending
 			scored.sort((a, b) => b.score - a.score || b.usageCount - a.usageCount);
 		}
@@ -1500,129 +1537,136 @@ export async function skillPropagationTransformScan(
 	}
 
 	// --- Scan reviewer messages for SKILL_COMPLIANCE verdicts ---
-	for (let i = messages.length - 1; i >= 0; i--) {
-		const m = messages[i];
-		// Issue #2526: skip guidance carriers — injected directives must never
-		// be parsed as reviewer skill-compliance output.
-		if (isGuidanceCarrier(m)) continue;
-		const agent = m.info?.agent;
-		if (
-			typeof agent !== 'string' ||
-			stripKnownSwarmPrefix(agent) !== 'reviewer'
-		) {
-			continue;
-		}
-
-		const text = (m.parts ?? [])
-			.map((p) => (typeof p.text === 'string' ? p.text : ''))
-			.join('\n');
-		if (!text) continue;
-
-		// Extract SKILLS_USED_BY_CODER paths from the reviewer text
-		const skillPaths: string[] = [];
-		for (const line of text.split('\n')) {
-			const trimmed = line.trim();
-			const coderMatch = trimmed.match(CODER_SKILLS_PATTERN);
-			if (coderMatch) {
-				const parsed = validatedProvenancePaths(coderMatch[1]);
-				skillPaths.push(...parsed);
+	// RP-002: the whole synchronous reviewer scan shares ONE bounded
+	// candidate-store scan (built lazily on the first generated-root
+	// reference validated by validatedProvenancePaths).
+	withPromotionRecordIndex(directory, () => {
+		for (let i = messages.length - 1; i >= 0; i--) {
+			const m = messages[i];
+			// Issue #2526: skip guidance carriers — injected directives must never
+			// be parsed as reviewer skill-compliance output.
+			if (isGuidanceCarrier(m)) continue;
+			const agent = m.info?.agent;
+			if (
+				typeof agent !== 'string' ||
+				stripKnownSwarmPrefix(agent) !== 'reviewer'
+			) {
+				continue;
 			}
-		}
 
-		const taskResolution = resolveTaskId(
-			{ prompt: text },
-			{
-				policy: 'attribution',
-				...planTaskIdOptions,
-			},
-		);
-		const resolvedTaskID =
-			taskResolution.status === 'resolved' ? taskResolution.taskId : 'unknown';
-		if (existingEntries.length > 0) {
-			// Only populate skillPaths as fallback when reviewer didn't echo
-			// SKILLS_USED_BY_CODER. Prefer shared-resolver attribution when present.
-			if (skillPaths.length === 0 && resolvedTaskID !== 'unknown') {
-				const delegatedPaths = existingEntries
-					.filter(
-						(e) =>
-							e.agentName !== 'reviewer' &&
-							e.skillPath !== '__overall__' &&
-							e.taskID === resolvedTaskID,
-					)
-					.map((e) => e.skillPath);
-				if (delegatedPaths.length > 0) {
-					skillPaths.push(...new Set(delegatedPaths));
+			const text = (m.parts ?? [])
+				.map((p) => (typeof p.text === 'string' ? p.text : ''))
+				.join('\n');
+			if (!text) continue;
+
+			// Extract SKILLS_USED_BY_CODER paths from the reviewer text
+			const skillPaths: string[] = [];
+			for (const line of text.split('\n')) {
+				const trimmed = line.trim();
+				const coderMatch = trimmed.match(CODER_SKILLS_PATTERN);
+				if (coderMatch) {
+					const parsed = validatedProvenancePaths(coderMatch[1]);
+					skillPaths.push(...parsed);
 				}
 			}
-		}
 
-		// Extract SKILL_COMPLIANCE verdict
-		for (const line of text.split('\n')) {
-			const complianceMatch = line.trim().match(COMPLIANCE_PATTERN);
-			if (!complianceMatch) continue;
-
-			const verdict = complianceMatch[1].toLowerCase();
-			const notes = (complianceMatch[2] ?? '').trim();
-
-			// Record an entry per skill path; if no skill paths found,
-			// record a single entry with the verdict
-			const paths = skillPaths.length > 0 ? skillPaths : ['__overall__'];
-
-			// PR #2347 Stage-B review: each remaining skill path is still
-			// attempted independently (`continue`, never `break`) — a contended
-			// enqueue lock is not guaranteed to still be held by the time the
-			// NEXT path's own internal lock-retry runs (`appendSkillUsageEntry`
-			// retries the lock for ~40 ms per call), so an earlier failure must
-			// not preclude a later path's genuinely successful recording. The
-			// added latency is bounded by the number of skill paths on ONE
-			// message (small in practice), traded deliberately against
-			// correctness: dropping an attempt that would have succeeded is
-			// worse than a bounded extra stall. Per-path detail is debug-gated
-			// (`warn`); one ungated `criticalWarn` summary after the loop keeps
-			// total log volume O(1) per verdict regardless of how many paths
-			// failed, instead of the old `break`'s single silent-batch-loss.
-			let recordingFailureCount = 0;
-			for (const skillPath of paths) {
-				if (
-					isDuplicate(
-						skillPath,
-						'reviewer',
-						resolvedTaskID,
-						verdict,
-						notes || undefined,
-					)
-				) {
-					continue;
+			const taskResolution = resolveTaskId(
+				{ prompt: text },
+				{
+					policy: 'attribution',
+					...planTaskIdOptions,
+				},
+			);
+			const resolvedTaskID =
+				taskResolution.status === 'resolved'
+					? taskResolution.taskId
+					: 'unknown';
+			if (existingEntries.length > 0) {
+				// Only populate skillPaths as fallback when reviewer didn't echo
+				// SKILLS_USED_BY_CODER. Prefer shared-resolver attribution when present.
+				if (skillPaths.length === 0 && resolvedTaskID !== 'unknown') {
+					const delegatedPaths = existingEntries
+						.filter(
+							(e) =>
+								e.agentName !== 'reviewer' &&
+								e.skillPath !== '__overall__' &&
+								e.taskID === resolvedTaskID,
+						)
+						.map((e) => e.skillPath);
+					if (delegatedPaths.length > 0) {
+						skillPaths.push(...new Set(delegatedPaths));
+					}
 				}
-				try {
-					_internals.appendSkillUsageEntry(directory, {
-						skillPath,
-						agentName: 'reviewer',
-						taskID: resolvedTaskID,
-						complianceVerdict: verdict,
-						reviewerNotes: notes || undefined,
-						sessionID,
-						timestamp: new Date().toISOString(),
-					});
-				} catch (err) {
-					recordingFailureCount += 1;
-					warn(
-						`[skill-propagation-gate] transform-scan compliance recording failed for ${skillPath}: ${err instanceof Error ? err.message : String(err)}`,
+			}
+
+			// Extract SKILL_COMPLIANCE verdict
+			for (const line of text.split('\n')) {
+				const complianceMatch = line.trim().match(COMPLIANCE_PATTERN);
+				if (!complianceMatch) continue;
+
+				const verdict = complianceMatch[1].toLowerCase();
+				const notes = (complianceMatch[2] ?? '').trim();
+
+				// Record an entry per skill path; if no skill paths found,
+				// record a single entry with the verdict
+				const paths = skillPaths.length > 0 ? skillPaths : ['__overall__'];
+
+				// PR #2347 Stage-B review: each remaining skill path is still
+				// attempted independently (`continue`, never `break`) — a contended
+				// enqueue lock is not guaranteed to still be held by the time the
+				// NEXT path's own internal lock-retry runs (`appendSkillUsageEntry`
+				// retries the lock for ~40 ms per call), so an earlier failure must
+				// not preclude a later path's genuinely successful recording. The
+				// added latency is bounded by the number of skill paths on ONE
+				// message (small in practice), traded deliberately against
+				// correctness: dropping an attempt that would have succeeded is
+				// worse than a bounded extra stall. Per-path detail is debug-gated
+				// (`warn`); one ungated `criticalWarn` summary after the loop keeps
+				// total log volume O(1) per verdict regardless of how many paths
+				// failed, instead of the old `break`'s single silent-batch-loss.
+				let recordingFailureCount = 0;
+				for (const skillPath of paths) {
+					if (
+						isDuplicate(
+							skillPath,
+							'reviewer',
+							resolvedTaskID,
+							verdict,
+							notes || undefined,
+						)
+					) {
+						continue;
+					}
+					try {
+						_internals.appendSkillUsageEntry(directory, {
+							skillPath,
+							agentName: 'reviewer',
+							taskID: resolvedTaskID,
+							complianceVerdict: verdict,
+							reviewerNotes: notes || undefined,
+							sessionID,
+							timestamp: new Date().toISOString(),
+						});
+					} catch (err) {
+						recordingFailureCount += 1;
+						warn(
+							`[skill-propagation-gate] transform-scan compliance recording failed for ${skillPath}: ${err instanceof Error ? err.message : String(err)}`,
+						);
+					}
+				}
+				if (recordingFailureCount > 0) {
+					criticalWarn(
+						`[skill-propagation-gate] transform-scan: ${recordingFailureCount} of ${paths.length} skill path(s) failed compliance recording`,
 					);
 				}
-			}
-			if (recordingFailureCount > 0) {
-				criticalWarn(
-					`[skill-propagation-gate] transform-scan: ${recordingFailureCount} of ${paths.length} skill path(s) failed compliance recording`,
-				);
+
+				break; // only process the first compliance verdict per message
 			}
 
-			break; // only process the first compliance verdict per message
+			// Only scan the most recent reviewer message
+			break;
 		}
-
-		// Only scan the most recent reviewer message
-		break;
-	}
+	});
 
 	// --- Scan architect messages for skill delegation patterns ---
 	// PR #2347 Stage-B review, round 2: this used to `return` early whenever
@@ -1634,94 +1678,100 @@ export async function skillPropagationTransformScan(
 	// failure blocking the other's independent success). Removed: each loop
 	// is now genuinely independent, with its own local failure counter and
 	// its own bounded summary warning.
-	for (let i = messages.length - 1; i >= 0; i--) {
-		const m = messages[i];
-		// Issue #2526: skip guidance carriers — injected directives must never
-		// be parsed as reviewer skill-compliance output.
-		if (isGuidanceCarrier(m)) continue;
-		const agent = m.info?.agent;
-		if (
-			typeof agent !== 'string' ||
-			stripKnownSwarmPrefix(agent) !== 'architect'
-		) {
-			continue;
-		}
-
-		const text = (m.parts ?? [])
-			.map((p) => (typeof p.text === 'string' ? p.text : ''))
-			.join('\n');
-		if (!text) continue;
-
-		// Look for delegation patterns containing SKILLS: field
-		let currentTargetAgent = '';
-		let skillsField = '';
-
-		for (const line of text.split('\n')) {
-			const trimmed = line.trim();
-
-			// Detect delegation to a skill-capable agent
+	// RP-002: same one-scan-per-invocation scope for the architect delegation
+	// scan below (see the reviewer loop above).
+	withPromotionRecordIndex(directory, () => {
+		for (let i = messages.length - 1; i >= 0; i--) {
+			const m = messages[i];
+			// Issue #2526: skip guidance carriers — injected directives must never
+			// be parsed as reviewer skill-compliance output.
+			if (isGuidanceCarrier(m)) continue;
+			const agent = m.info?.agent;
 			if (
-				trimmed.match(/TO\s+(coder|reviewer|test_engineer|sme|docs|designer)/i)
+				typeof agent !== 'string' ||
+				stripKnownSwarmPrefix(agent) !== 'architect'
 			) {
-				const agentMatch = trimmed.match(
-					/TO\s+(coder|reviewer|test_engineer|sme|docs|designer)/i,
-				);
-				if (agentMatch) currentTargetAgent = agentMatch[1].toLowerCase();
+				continue;
 			}
 
-			if (trimmed.startsWith('SKILLS:')) {
-				skillsField = trimmed.slice('SKILLS:'.length).trim();
-			}
+			const text = (m.parts ?? [])
+				.map((p) => (typeof p.text === 'string' ? p.text : ''))
+				.join('\n');
+			if (!text) continue;
 
-			// When we have both, record and reset
-			if (
-				currentTargetAgent &&
-				skillsField &&
-				skillsField.toLowerCase() !== 'none'
-			) {
-				const skillPaths = validatedProvenancePaths(skillsField);
-				const taskId = _internals.extractTaskIdFromPrompt(
-					text,
-					planTaskIdOptions.knownPlanTaskIds,
-					planTaskIdOptions.planContextOverLimit,
-				);
+			// Look for delegation patterns containing SKILLS: field
+			let currentTargetAgent = '';
+			let skillsField = '';
 
-				// PR #2347 Stage-B review (same reasoning as the reviewer-verdict
-				// loop above): attempt every skillPath independently rather than
-				// `break`ing the batch on the first failure, and keep per-path
-				// log volume bounded to one ungated summary line.
-				let delegationFailureCount = 0;
-				for (const skillPath of skillPaths) {
-					if (isDuplicate(skillPath, currentTargetAgent, taskId)) continue;
-					try {
-						_internals.appendSkillUsageEntry(directory, {
-							skillPath,
-							agentName: currentTargetAgent,
-							taskID: taskId,
-							complianceVerdict: 'not_checked',
-							sessionID,
-							timestamp: new Date().toISOString(),
-						});
-					} catch (err) {
-						delegationFailureCount += 1;
-						warn(
-							`[skill-propagation-gate] transform-scan delegation recording failed for ${skillPath}: ${err instanceof Error ? err.message : String(err)}`,
+			for (const line of text.split('\n')) {
+				const trimmed = line.trim();
+
+				// Detect delegation to a skill-capable agent
+				if (
+					trimmed.match(
+						/TO\s+(coder|reviewer|test_engineer|sme|docs|designer)/i,
+					)
+				) {
+					const agentMatch = trimmed.match(
+						/TO\s+(coder|reviewer|test_engineer|sme|docs|designer)/i,
+					);
+					if (agentMatch) currentTargetAgent = agentMatch[1].toLowerCase();
+				}
+
+				if (trimmed.startsWith('SKILLS:')) {
+					skillsField = trimmed.slice('SKILLS:'.length).trim();
+				}
+
+				// When we have both, record and reset
+				if (
+					currentTargetAgent &&
+					skillsField &&
+					skillsField.toLowerCase() !== 'none'
+				) {
+					const skillPaths = validatedProvenancePaths(skillsField);
+					const taskId = _internals.extractTaskIdFromPrompt(
+						text,
+						planTaskIdOptions.knownPlanTaskIds,
+						planTaskIdOptions.planContextOverLimit,
+					);
+
+					// PR #2347 Stage-B review (same reasoning as the reviewer-verdict
+					// loop above): attempt every skillPath independently rather than
+					// `break`ing the batch on the first failure, and keep per-path
+					// log volume bounded to one ungated summary line.
+					let delegationFailureCount = 0;
+					for (const skillPath of skillPaths) {
+						if (isDuplicate(skillPath, currentTargetAgent, taskId)) continue;
+						try {
+							_internals.appendSkillUsageEntry(directory, {
+								skillPath,
+								agentName: currentTargetAgent,
+								taskID: taskId,
+								complianceVerdict: 'not_checked',
+								sessionID,
+								timestamp: new Date().toISOString(),
+							});
+						} catch (err) {
+							delegationFailureCount += 1;
+							warn(
+								`[skill-propagation-gate] transform-scan delegation recording failed for ${skillPath}: ${err instanceof Error ? err.message : String(err)}`,
+							);
+						}
+					}
+					if (delegationFailureCount > 0) {
+						criticalWarn(
+							`[skill-propagation-gate] transform-scan: ${delegationFailureCount} of ${skillPaths.length} delegation skill path(s) failed recording`,
 						);
 					}
+					currentTargetAgent = '';
+					skillsField = '';
 				}
-				if (delegationFailureCount > 0) {
-					criticalWarn(
-						`[skill-propagation-gate] transform-scan: ${delegationFailureCount} of ${skillPaths.length} delegation skill path(s) failed recording`,
-					);
-				}
-				currentTargetAgent = '';
-				skillsField = '';
 			}
-		}
 
-		// Only scan the most recent architect message
-		break;
-	}
+			// Only scan the most recent architect message
+			break;
+		}
+	});
 }
 
 // ============================================================================

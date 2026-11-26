@@ -361,6 +361,30 @@ export const INACTIVE_STATUSES: ReadonlySet<string> = new Set([
 export const OUTCOME_BLOCK_THRESHOLD = -0.3;
 
 /**
+ * Canonical default for the `promotion_min_terminal_applications` config
+ * field (#3820 H1 / MAS-001 single-source-of-truth). Since #3820 the
+ * promotion evidence gate is ACTIVE by default: an entry needs at least one
+ * INDEPENDENT validated terminal application to promote, and operators who
+ * want the legacy ungated behavior set the field to 0 explicitly.
+ *
+ * This leaf module is the canonical home for the value so BOTH consumers
+ * derive from one declaration with no import cycle and no zod dependency in
+ * the hooks layer (same pattern as `OUTCOME_BLOCK_THRESHOLD` above):
+ *  - `src/config/schema.ts` — `KnowledgeConfigSchema`'s
+ *    `.default(DEFAULT_PROMOTION_MIN_TERMINAL_APPLICATIONS)`;
+ *  - `src/hooks/hive-policy.ts` — the fallback the policy evaluator applies
+ *    when an UNPARSED config omits the field at runtime. The fallback used
+ *    to be a hand-written `?? 0`, which drifted from the schema default and
+ *    left the gate inert (fail-open) for unparsed configs.
+ *
+ * Absent-field semantics: `promotion_min_terminal_applications` missing →
+ * gate ACTIVE (fails closed). The sibling
+ * `promotion_min_distinct_cohorts` keeps its own 0 fallback (the production
+ * evidence loader is cohort-scoped, so a >1 default is unsatisfiable).
+ */
+export const DEFAULT_PROMOTION_MIN_TERMINAL_APPLICATIONS = 1;
+
+/**
  * Returns `true` for retrieval-active statuses. Returns `true` for
  * `undefined`/`null`/unknown strings (preserves the #828 deny-list intent:
  * entries with unexpected status values are not silently dropped). Returns
@@ -574,10 +598,11 @@ export interface KnowledgeConfig {
 	promoted_demotion_signal_threshold: number;
 	/** #1847: minimum number of validated terminal-application receipts
 	 * (PromotionEvidenceRecord) required for the `validated_terminal_applications`
-	 * promotion gate. Default 0 — conservative: until #1849 produces real
-	 * receipts, absence of evidence neither credits nor blocks. Raising this
-	 * activates application-evidence gating. Legacy records get NO synthetic
-	 * credit; they simply do not add to the count. */
+	 * promotion gate. Default 1 (#3820 H1) — the gate is ACTIVE by default;
+	 * the canonical value is `DEFAULT_PROMOTION_MIN_TERMINAL_APPLICATIONS`
+	 * (single source for the Zod default and the policy fallback). Legacy
+	 * records get NO synthetic credit; absence fails closed. Set 0 explicitly
+	 * for the legacy ungated behavior (documented operator opt-out). */
 	promotion_min_terminal_applications: number;
 	/** #1847: minimum number of DISTINCT canonical cohort ids that must appear
 	 * among the validated terminal-application receipts for the

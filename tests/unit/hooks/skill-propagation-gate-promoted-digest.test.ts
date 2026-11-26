@@ -25,6 +25,7 @@ import * as path from 'node:path';
 import type { ExternalSkillCandidate } from '../../../src/config/schema.js';
 import { validateSkillReference } from '../../../src/hooks/skill-propagation-gate.js';
 import {
+	ARTIFACT_DIGEST_PLACEHOLDER_LINE,
 	computeArtifactDigest,
 	PROMOTED_ARTIFACT_MAX_BYTES,
 } from '../../../src/services/external-skill-identity.js';
@@ -46,6 +47,27 @@ const AUDIENCE_CONTEXT = {
 
 function sha256(content: string): string {
 	return createHash('sha256').update(content).digest('hex');
+}
+
+/**
+ * Independent canonical-digest oracle (line-based replacement, structurally
+ * different from computeArtifactDigest's regex) and computed with
+ * node:crypto — the stamped digest is never verified against the same
+ * implementation that produced it (FB-112 self-oracle removal).
+ */
+function independentCanonicalDigest(content: string): string {
+	const lines = content.split('\n');
+	for (let i = 0; i < lines.length; i++) {
+		if (lines[i].startsWith('content_digest:')) {
+			const cr = lines[i].indexOf('\r');
+			lines[i] =
+				cr === -1
+					? ARTIFACT_DIGEST_PLACEHOLDER_LINE
+					: ARTIFACT_DIGEST_PLACEHOLDER_LINE + lines[i].slice(cr);
+			break;
+		}
+	}
+	return sha256(lines.join('\n'));
 }
 
 async function callPromote(args: unknown, directory: string): Promise<string> {
@@ -189,7 +211,7 @@ describe('skill propagation gate — promoted external skill digest binding (#38
 		const content = fs.readFileSync(artifactPath, 'utf-8');
 		const match = /^content_digest: ([0-9a-f]{64})$/m.exec(content);
 		expect(match, content).not.toBeNull();
-		expect(match?.[1]).toBe(computeArtifactDigest(content));
+		expect(match?.[1]).toBe(independentCanonicalDigest(content));
 
 		// The structured record carries the same canonical digest. Note the
 		// store also appends an automatic (actor 'system') verdict-change
@@ -220,7 +242,9 @@ describe('skill propagation gate — promoted external skill digest binding (#38
 		fs.appendFileSync(artifactPath, '\n<!-- injected after approval -->\n');
 		const result = validate(projectDir, skillReference('tampered-skill'));
 		expect(result.valid).toBe(false);
-		expect(result.reason).toContain('digest');
+		expect(result.reason).toBe(
+			'promoted external skill content digest does not match the recorded promotion hash',
+		);
 	});
 
 	test('rehash-after-tamper is still refused (the record wins)', async () => {

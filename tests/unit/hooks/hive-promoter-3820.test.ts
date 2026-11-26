@@ -41,6 +41,14 @@ const FIXED_COHORT = {
 	degraded: false,
 };
 
+// F-005/FB-208 (invariant 7): capture the PRISTINE seams before ANY override
+// so afterEach can restore them. `mock.restore()` resets the mock functions
+// but leaves the `_internals` properties pointing at them, which leaked the
+// mocks into sibling test files sharing this Bun process.
+const originalResolveCohortId = _internals.resolveCohortId;
+const originalValidateLesson = _internals.validateLesson;
+const originalLoadPromotionEvidence = _internals.loadPromotionEvidence;
+
 function makeSwarmEntry(
 	overrides: Partial<SwarmKnowledgeEntry> = {},
 ): SwarmKnowledgeEntry {
@@ -91,10 +99,18 @@ describe('hive-promoter #3820 reshapes (route 2 field + audited direct text)', (
 	});
 
 	afterEach(() => {
-		restoreHiveHome();
-		rmSync(tempHome, { recursive: true, force: true });
-		rmSync(swarmDir, { recursive: true, force: true });
-		mock.restore();
+		try {
+			restoreHiveHome();
+			rmSync(tempHome, { recursive: true, force: true });
+			rmSync(swarmDir, { recursive: true, force: true });
+		} finally {
+			// Restore ALL three overridden seams (F-005/FB-208) even when the
+			// cleanup above throws, so the leak never outlives this file.
+			_internals.resolveCohortId = originalResolveCohortId;
+			_internals.validateLesson = originalValidateLesson;
+			_internals.loadPromotionEvidence = originalLoadPromotionEvidence;
+			mock.restore();
+		}
 	});
 
 	it('route 2: authorized fast-track field promotes regardless of phase count', async () => {

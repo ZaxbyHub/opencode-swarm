@@ -54,7 +54,10 @@ import type {
 	PromotionEvidenceRecord,
 	SwarmKnowledgeEntry,
 } from './knowledge-types.js';
-import { isActiveStatus } from './knowledge-types.js';
+import {
+	DEFAULT_PROMOTION_MIN_TERMINAL_APPLICATIONS,
+	isActiveStatus,
+} from './knowledge-types.js';
 
 /** A single named policy gate and whether it passed. */
 export interface PromotionPolicyGate {
@@ -116,17 +119,23 @@ export function evaluatePromotionPolicy(
 
 	// Gate: validated terminal applications (ACTIVE by default since #3820 H1).
 	// Counts ONLY validated PromotionEvidenceRecords across the configured
-	// minimum number of DISTINCT canonical cohort ids. `minApps` defaults to 1
-	// (schema default) — an entry with no independent application evidence is
-	// refused. (#3820 H1(b)) When the gate is active, only INDEPENDENT evidence
-	// counts: `receipt_source` must be a member of the explicit allowlist
-	// (`reviewer` / `architect` / `test_engineer` — the sources that represent a
-	// DIFFERENT ROLE applying the lesson than the one that authored it).
-	// Everything else fails closed: `delegate` self-report, `architect_marker`
-	// acknowledgments, the `application_gate_*_release` escape hatches, the
-	// legacy/ambiguous `manual` / `migration` / `phase_override` classes, and
-	// records without a source (pre-#2032) — none of them count.
-	const minApps = config.promotion_min_terminal_applications ?? 0;
+	// minimum number of DISTINCT canonical cohort ids. `minApps` defaults to 1 —
+	// the SAME single-source constant as the Zod schema default
+	// (`DEFAULT_PROMOTION_MIN_TERMINAL_APPLICATIONS`, MAS-001) — so an UNPARSED
+	// config that omits the field at runtime also fails CLOSED (gate active),
+	// never the legacy inert `?? 0`. An entry with no independent application
+	// evidence is refused. (#3820 H1(b)) When the gate is active, only
+	// INDEPENDENT evidence counts: `receipt_source` must be a member of the
+	// explicit allowlist (`reviewer` / `architect` / `test_engineer` — the
+	// sources that represent a DIFFERENT ROLE applying the lesson than the one
+	// that authored it). Everything else fails closed: `delegate` self-report,
+	// `architect_marker` acknowledgments, the `application_gate_*_release`
+	// escape hatches, the legacy/ambiguous `manual` / `migration` /
+	// `phase_override` classes, and records without a source (pre-#2032) — none
+	// of them count.
+	const minApps =
+		config.promotion_min_terminal_applications ??
+		DEFAULT_PROMOTION_MIN_TERMINAL_APPLICATIONS;
 	const minCohorts = config.promotion_min_distinct_cohorts ?? 0;
 	const gateActive = minApps > 0 || minCohorts > 0;
 	const countedEvidence = gateActive

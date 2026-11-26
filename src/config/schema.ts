@@ -1,6 +1,9 @@
 import { z } from 'zod';
 import packageJson from '../../package.json' with { type: 'json' };
-import { OUTCOME_BLOCK_THRESHOLD } from '../hooks/knowledge-types.js';
+import {
+	DEFAULT_PROMOTION_MIN_TERMINAL_APPLICATIONS,
+	OUTCOME_BLOCK_THRESHOLD,
+} from '../hooks/knowledge-types.js';
 import {
 	type AgentName,
 	ALL_AGENT_NAMES,
@@ -1757,8 +1760,16 @@ export const KnowledgeConfigSchema = z.object({
 	 * the gate is ACTIVE by default and an entry needs at least one INDEPENDENT
 	 * validated terminal application to promote. Legacy records get NO
 	 * synthetic credit; absence fails closed. Operators who want the legacy
-	 * ungated behavior set this to 0 explicitly (documented opt-out). */
-	promotion_min_terminal_applications: z.number().min(0).max(100).default(1),
+	 * ungated behavior set this to 0 explicitly (documented opt-out).
+	 * MAS-001 single-source: the default is the shared
+	 * `DEFAULT_PROMOTION_MIN_TERMINAL_APPLICATIONS` constant (leaf
+	 * `src/hooks/knowledge-types.ts`) so the Zod default and the
+	 * `hive-policy.ts` unparsed-config fallback cannot drift apart. */
+	promotion_min_terminal_applications: z
+		.number()
+		.min(0)
+		.max(100)
+		.default(DEFAULT_PROMOTION_MIN_TERMINAL_APPLICATIONS),
 	/** #1847: minimum DISTINCT canonical cohort ids among the validated
 	 * terminal-application receipts. Default 0 (the production evidence loader
 	 * is cohort-scoped — it filters to the caller's canonical cohort — so a >1

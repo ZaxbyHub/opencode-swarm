@@ -18,7 +18,6 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { BUNDLED_PROJECT_SKILLS } from '../../../src/config/bundled-skills.js';
 import type { ExternalSkillCandidate } from '../../../src/config/schema.js';
-import { computeArtifactDigest } from '../../../src/services/external-skill-identity.js';
 import { createExternalSkillStore } from '../../../src/services/external-skill-store.js';
 import {
 	_internals,
@@ -226,7 +225,15 @@ describe('external_skill_promote — identity bindings (#3822 K3 / ASK-3)', () =
 		const content = fs.readFileSync(artifactPath, 'utf-8');
 		const match = /^content_digest: ([0-9a-f]{64})$/m.exec(content);
 		expect(match, content).not.toBeNull();
-		expect(match?.[1]).toBe(computeArtifactDigest(content));
+		// Independent oracle (FB-112): canonicalize the artifact INLINE per the
+		// identity spec — replace the FIRST content_digest line up to the first
+		// CR or LF — then hash with node:crypto. Never via computeArtifactDigest
+		// itself, which would make this a self-oracle.
+		const canonical = content.replace(
+			/^content_digest:[^\r\n]*/m,
+			'content_digest: <recorded>',
+		);
+		expect(match?.[1]).toBe(sha256(canonical));
 
 		const store = createExternalSkillStore(projectDir, {
 			max_candidates: 500,

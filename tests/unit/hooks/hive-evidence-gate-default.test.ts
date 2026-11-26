@@ -1,19 +1,16 @@
 /**
  * Evidence gate ACTIVE at shipped defaults + independence allowlist +
  * privileged fast-track field (issue #3820 H1/H2/H3).
- *
  *  - H1(a): `promotion_min_terminal_applications` defaults to 1 — zero
  *    independent application evidence (age-only, tag-only) is NOT promotable.
  *  - H1(b): independence is the explicit `INDEPENDENT_RECEIPT_SOURCES`
  *    allowlist; every other taxonomy source (and absent source) fails closed.
- *  - H2: the manual paths load real evidence — unforced direct-text
- *    `promoteToHive` is refused naming the override, `force` + `reason`
- *    promotes with audited lineage, `promoteFromSwarm` consults a REAL loaded
- *    independent receipt.
+ *  - H2: manual paths load real evidence — unforced direct-text `promoteToHive`
+ *    is refused naming the override; `force` + `reason` promotes with audited
+ *    lineage; `promoteFromSwarm` consults a REAL loaded independent receipt.
  *  - H3: the caller-suppliable `hive-fast-track` TAG no longer arms route 2 —
  *    only the dedicated `hive_fast_track_authorized` field does;
  *    `knowledge_add` strips the tag from caller tags at ingress.
- *
  * Real transactional contract via temp-dir I/O + the `_internals` DI seam
  * (invariant 7), never `mock.module`.
  */
@@ -61,9 +58,11 @@ const FROZEN_NOW = Date.parse('2026-07-01T00:00:00.000Z');
 const FROZEN_ISO = new Date(FROZEN_NOW).toISOString();
 const OLD_ISO = new Date(FROZEN_NOW - 200 * 86_400_000).toISOString();
 
-// The REAL evidence loader, bound to the production function directly — NOT
-// captured off `_internals`, which sibling suites may have mocked at this
-// file's import time (cross-file seam pollution, invariant 7).
+// F-005/FB-208 (invariant 7): capture the pristine seams before ANY override
+// so afterEach restores them. `realLoadEvidence` re-binds to the production
+// loader (a sibling suite may have polluted the seam at import time).
+const originalResolveCohortId = _internals.resolveCohortId;
+const originalValidateLesson = _internals.validateLesson;
 const realLoadEvidence: typeof _internals.loadPromotionEvidence = async (
 	directory,
 	canonicalCohortId,
@@ -276,12 +275,18 @@ describe('#3820 H2/H3 — promoter end-to-end behavior on the default config', (
 	});
 
 	afterEach(() => {
-		restoreHiveHome();
-		restoreClock?.();
-		_internals.loadPromotionEvidence = realLoadEvidence;
-		rmSync(tempHome, { recursive: true, force: true });
-		rmSync(swarmDir, { recursive: true, force: true });
-		mock.restore();
+		try {
+			restoreHiveHome();
+			restoreClock?.();
+			rmSync(tempHome, { recursive: true, force: true });
+			rmSync(swarmDir, { recursive: true, force: true });
+		} finally {
+			// Restore ALL three overridden seams (F-005/FB-208) even if cleanup throws.
+			_internals.resolveCohortId = originalResolveCohortId;
+			_internals.validateLesson = originalValidateLesson;
+			_internals.loadPromotionEvidence = realLoadEvidence;
+			mock.restore();
+		}
 	});
 
 	it('unforced direct-text promoteToHive is refused with the override-naming message', async () => {
@@ -319,8 +324,7 @@ describe('#3820 H2/H3 — promoter end-to-end behavior on the default config', (
 			'validated_terminal_applications',
 		);
 		expect(hive[0].lineage?.promotion_event_id).toBeTruthy();
-		// The written hive entry never inherits a privileged tag from the
-		// stand-in's route-2 arming.
+		// The written hive entry never inherits a privileged route-2 tag.
 		expect(hive[0].tags ?? []).not.toContain('hive-fast-track');
 	});
 
@@ -334,9 +338,8 @@ describe('#3820 H2/H3 — promoter end-to-end behavior on the default config', (
 		await fsPromises.mkdir(path.dirname(fp), { recursive: true });
 		await fsPromises.writeFile(fp, `${JSON.stringify(swarm)}\n`, 'utf-8');
 
-		// Restore the REAL evidence loader and seed the authoritative ledger seam
-		// beneath it (mirrors the frozen C11 check): the loader maps the ledger
-		// membership into a real PromotionEvidenceRecord keyed on the entry id.
+		// Restore the REAL evidence loader; the seeded ledger seam beneath it
+		// (frozen C11) maps membership into PromotionEvidenceRecords by entry id.
 		_internals.loadPromotionEvidence = realLoadEvidence;
 		const realQuery = evidenceStoreInternals.queryHistoricalOutcomes;
 		evidenceStoreInternals.queryHistoricalOutcomes = (async () => ({
@@ -454,10 +457,7 @@ describe('#3820 H3 — knowledge_add ingress strips the privileged tag', () => {
 		cleanupEnv();
 	});
 
-	async function add(args: Record<string, unknown>): Promise<{
-		success?: boolean;
-		error?: string;
-	}> {
+	async function add(args: Record<string, unknown>) {
 		return JSON.parse(
 			await knowledge_add.execute(args, { directory: tmpDir } as never),
 		);

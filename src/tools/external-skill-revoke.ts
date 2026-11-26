@@ -33,6 +33,32 @@ export const _internals = {
 		return pluginConfig.external_skills;
 	},
 	getTimestamp: (): string => new Date().toISOString(),
+	/**
+	 * Probe the promoted path with lstat (does NOT follow the final component).
+	 * FB-210 — only 'missing' (ENOENT) authorizes the idempotent-success path;
+	 * 'error' (any non-ENOENT inspection failure) and 'other' (non-regular
+	 * file) must refuse the revoke.
+	 */
+	lstatTarget: async (
+		filePath: string,
+	): Promise<
+		| { kind: 'file' }
+		| { kind: 'symlink' }
+		| { kind: 'other' }
+		| { kind: 'missing' }
+		| { kind: 'error'; code?: string }
+	> => {
+		try {
+			const st = await fsp.lstat(filePath);
+			if (st.isSymbolicLink()) return { kind: 'symlink' };
+			if (st.isFile()) return { kind: 'file' };
+			return { kind: 'other' };
+		} catch (err: unknown) {
+			const code = (err as NodeJS.ErrnoException)?.code;
+			if (code === 'ENOENT') return { kind: 'missing' };
+			return { kind: 'error', code };
+		}
+	},
 	retireSkillFile: async (filePath: string): Promise<boolean> => {
 		const { unlink } = await import('node:fs/promises');
 		try {
@@ -84,6 +110,53 @@ function generatedSkillRoot(directory: string): string {
 interface StructuredPromotionTarget {
 	targetPath: string;
 	promotedContentHash: string;
+}
+
+/** Result of the single bounded fd-based verification read (RP-003). */
+type BoundedRead =
+	| { ok: true; content: string }
+	| { ok: false; reason: 'oversize' | 'unreadable' };
+
+/**
+ * RP-003 — read the verification target through ONE file handle: open once,
+ * fstat the handle, read at most limit+1 bytes, and refuse anything longer.
+ * Reading the cap+1 byte detects a file that grew between the fstat and the
+ * read (the old stat-then-readFile pair could read an unbounded file in that
+ * window). The handle is always closed in finally.
+ */
+async function readTargetBounded(
+	filePath: string,
+	limit: number,
+): Promise<BoundedRead> {
+	let handle: fsp.FileHandle;
+	try {
+		handle = await fsp.open(filePath, 'r');
+	} catch {
+		return { ok: false, reason: 'unreadable' };
+	}
+	try {
+		const st = await handle.stat();
+		if (st.size > limit) return { ok: false, reason: 'oversize' };
+		const buffer = Buffer.alloc(limit + 1);
+		let offset = 0;
+		while (offset <= limit) {
+			const remaining = limit + 1 - offset;
+			const { bytesRead } = await handle.read(
+				buffer,
+				offset,
+				Math.min(65_536, remaining),
+				offset,
+			);
+			if (bytesRead === 0) break;
+			offset += bytesRead;
+		}
+		if (offset > limit) return { ok: false, reason: 'oversize' };
+		return { ok: true, content: buffer.toString('utf-8', 0, offset) };
+	} catch {
+		return { ok: false, reason: 'unreadable' };
+	} finally {
+		await handle.close();
+	}
 }
 
 /**
@@ -157,7 +230,7 @@ function extractSlugFromHistory(
 export const external_skill_revoke: ReturnType<typeof createSwarmTool> =
 	createSwarmTool({
 		description:
-			'Revoke a previously promoted external skill. Resolves the structured promotion identity (target_path + promoted_content_hash) from the candidate record, refuses targets outside .opencode/skills/generated/ or files that no longer match the recorded hash, retires the SKILL.md, and stamps the candidate as revoked. Returns a disabled message when external_skills.curation_enabled is false.',
+			'Revoke a previously promoted external skill. Resolves the structured promotion identity (target_path + promoted_content_hash) from the candidate record, refuses targets outside .opencode/skills/generated/ or whose final path component is a symlink, retires the SKILL.md, and stamps the candidate as revoked. Structured promotion records (with promoted_content_hash) are hash-verified before the unlink; legacy records without a structured hash are containment-checked only. Returns a disabled message when external_skills.curation_enabled is false.',
 		args: {
 			candidate_id: z
 				.string()
@@ -281,21 +354,38 @@ export const external_skill_revoke: ReturnType<typeof createSwarmTool> =
 					});
 				}
 
-				// Containment (canonical) + hash binding. A missing file is an
-				// idempotent success (nothing to remove).
-				let canonicalTarget = lexicalTarget;
-				let fileExists = false;
-				try {
-					const st = await fsp.stat(lexicalTarget);
-					fileExists = st.isFile();
-				} catch {
-					fileExists = false;
+				// Target inspection (F-003/FB-210). lstat does NOT follow the
+				// final component, so a symlink sitting at the promoted path is
+				// detected directly; only ENOENT authorizes the idempotent
+				// "missing file" success — any other inspection error or a
+				// non-regular file refuses the revoke (no unlink, verdict
+				// unchanged).
+				const targetProbe = await _internals.lstatTarget(lexicalTarget);
+				if (targetProbe.kind === 'symlink') {
+					return JSON.stringify({
+						success: false,
+						error: `Refusing to revoke: promotion target is a symlink (${lexicalTarget}). File and candidate left unchanged.`,
+					});
 				}
+				if (targetProbe.kind === 'other') {
+					return JSON.stringify({
+						success: false,
+						error: `Refusing to revoke: promotion target is not a regular file (${lexicalTarget}). File and candidate left unchanged.`,
+					});
+				}
+				if (targetProbe.kind === 'error') {
+					return JSON.stringify({
+						success: false,
+						error: `Refusing to revoke: promotion target could not be inspected (${targetProbe.code ?? 'unknown error'}). File and candidate left unchanged.`,
+					});
+				}
+				const fileExists = targetProbe.kind === 'file';
 
 				if (fileExists) {
 					const realRoot = await fsp
 						.realpath(rootLexical)
 						.catch(() => rootLexical);
+					let canonicalTarget: string;
 					try {
 						canonicalTarget = await fsp.realpath(lexicalTarget);
 					} catch {
@@ -315,24 +405,24 @@ export const external_skill_revoke: ReturnType<typeof createSwarmTool> =
 					// promotion hash — the artifact may have been modified after
 					// approval; the file AND the candidate verdict stay unchanged.
 					if (recordedHash !== null) {
-						let content: string;
-						try {
-							const st = await fsp.stat(canonicalTarget);
-							if (st.size > PROMOTED_ARTIFACT_MAX_BYTES) {
-								return JSON.stringify({
-									success: false,
-									error: `Refusing to revoke: promotion target exceeds the ${PROMOTED_ARTIFACT_MAX_BYTES}-byte verification bound`,
-								});
-							}
-							content = await fsp.readFile(canonicalTarget, 'utf-8');
-						} catch {
+						const read = await readTargetBounded(
+							lexicalTarget,
+							PROMOTED_ARTIFACT_MAX_BYTES,
+						);
+						if (!read.ok && read.reason === 'oversize') {
+							return JSON.stringify({
+								success: false,
+								error: `Refusing to revoke: promotion target exceeds the ${PROMOTED_ARTIFACT_MAX_BYTES}-byte verification bound`,
+							});
+						}
+						if (!read.ok) {
 							return JSON.stringify({
 								success: false,
 								error:
 									'Failed to revoke candidate: promotion target is unreadable',
 							});
 						}
-						const digest = computeArtifactDigest(content);
+						const digest = computeArtifactDigest(read.content);
 						if (digest !== recordedHash) {
 							return JSON.stringify({
 								success: false,
@@ -343,8 +433,19 @@ export const external_skill_revoke: ReturnType<typeof createSwarmTool> =
 					}
 				}
 
+				// Unlink the LEXICAL promoted path (MSP-001), not its
+				// canonicalized form: the final component is not a symlink
+				// (refused above) and canonical containment passed, so the
+				// lexical path names exactly the verified file.
+				//
+				// RESIDUAL WINDOW, honestly stated: the verify→unlink gap is
+				// NOT atomic. A writer that swaps the file between the digest
+				// check above and this unlink deletes the replacement. We do
+				// not claim atomicity we cannot provide on any supported
+				// platform; the generated-skill root is assumed single-writer
+				// during a revoke.
 				const skillFileRemoved =
-					await _internals.retireSkillFile(canonicalTarget);
+					await _internals.retireSkillFile(lexicalTarget);
 
 				// Build audit record
 				const timestamp = _internals.getTimestamp();

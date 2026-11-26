@@ -3,11 +3,11 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { ExternalSkillCandidate } from '../../../src/config/schema.js';
-import { computeArtifactDigest } from '../../../src/services/external-skill-identity.js';
 import { createExternalSkillStore } from '../../../src/services/external-skill-store.js';
 import { _internals as validatorInternals } from '../../../src/services/external-skill-validator.js';
 import {
@@ -105,7 +105,6 @@ async function seedCandidate(
 	// Compute correct SHA-256 if not overridden, so provenance_integrity gate passes
 	let sha256 = overrides.sha256;
 	if (sha256 === undefined) {
-		const { createHash } = await import('node:crypto');
 		sha256 = createHash('sha256').update(skillBody).digest('hex');
 	}
 
@@ -623,7 +622,6 @@ describe('external_skill_promote', () => {
 		expect(promotedEntry).toBeDefined();
 
 		// candidate_id — the promoted candidate's ID
-		expect(promotedEntry!.candidate_id).toBeDefined();
 		expect(promotedEntry!.candidate_id).toBe(candidate.id);
 
 		// original_verdict — what the original evaluation said before promotion
@@ -683,14 +681,16 @@ describe('external_skill_promote', () => {
 		expect(promotedEntry!.target_path).toContain('audit-rich-skill');
 		expect(promotedEntry!.target_path).toContain('SKILL.md');
 
-		// promoted_content_hash — the CANONICAL artifact digest (#3822 K1
-		// disclosed reshape, via the production helper; strength unchanged).
-		expect(promotedEntry!.promoted_content_hash).toBeDefined();
-		expect(typeof promotedEntry!.promoted_content_hash).toBe('string');
+		// promoted_content_hash — the CANONICAL artifact digest (#3822 K1).
 		expect(promotedEntry!.promoted_content_hash).toMatch(/^[a-f0-9]{64}$/);
-		// Verify the hash matches the actual written content (canonical form)
-		const expectedHash = computeArtifactDigest(writtenFileContent!);
-		expect(promotedEntry!.promoted_content_hash).toBe(expectedHash);
+		// Independent oracle (FB-112): inline canonicalization + node:crypto.
+		const canonical = writtenFileContent!.replace(
+			/^content_digest:[^\r\n]*/m,
+			'content_digest: <recorded>',
+		);
+		expect(promotedEntry!.promoted_content_hash).toBe(
+			createHash('sha256').update(canonical).digest('hex'),
+		);
 
 		// original_evaluation — the pre-promotion evaluation context
 		expect(promotedEntry!.original_evaluation).toBeDefined();
