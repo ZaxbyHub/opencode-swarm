@@ -69,15 +69,20 @@ function repairMarkerPathFor(
 	return path.join(resolvedEvidenceDir, `${taskId}.receipt-repair-pending`);
 }
 
-/** Raw evidence bytes for the unchanged-file proof: null when absent, undefined when unreadable. */
+/**
+ * Raw evidence bytes for the unchanged-file proof. Only a confirmed ENOENT is
+ * "absent" (null); every other read failure is unverifiable (undefined), so it
+ * can never prove the file unchanged (PR 3919 F-002).
+ */
 function readEvidenceBytesSync(
 	evidencePath: string,
 ): string | null | undefined {
-	if (!existsSync(evidencePath)) return null;
 	try {
 		return readFileSync(evidencePath, 'utf8');
-	} catch {
-		return undefined;
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code === 'ENOENT'
+			? null
+			: undefined;
 	}
 }
 

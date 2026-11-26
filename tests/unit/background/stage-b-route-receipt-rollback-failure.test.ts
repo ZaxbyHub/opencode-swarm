@@ -288,6 +288,36 @@ describe('route-receipt append compensation fails closed (PR 3919 B-001..B-006)'
 		expect(next).not.toBeInstanceOf(TaskEvidenceRepairPendingError);
 	});
 
+	test('an evidence path that becomes uninspectable keeps the fence (F-002)', async () => {
+		// The file is absent before the write. The write fails and leaves a
+		// directory at the evidence path, so the post-failure inspection is
+		// unreadable. Absence is not proven, so the fence must stay.
+		const realRename = taskFileInternals.renameSync;
+		taskFileInternals.renameSync = (source, target) => {
+			if (target.endsWith(`${path.sep}evidence${path.sep}${TASK}.json`)) {
+				fs.mkdirSync(target, { recursive: true });
+				throw new Error('FORCED_UNINSPECTABLE_EVIDENCE');
+			}
+			realRename(source, target);
+		};
+		try {
+			await transitionTaskWorkflowEvidence(
+				directory,
+				TASK,
+				coderTransition('uninspectable-evidence'),
+			).catch(() => undefined);
+		} finally {
+			taskFileInternals.renameSync = realRename;
+		}
+
+		const refused = await transitionTaskWorkflowEvidence(
+			directory,
+			TASK,
+			coderTransition('after-uninspectable', 1),
+		).catch((caught: unknown) => caught);
+		expect(refused).toBeInstanceOf(TaskEvidenceRepairPendingError);
+	});
+
 	test('an evidence write that lands before it throws keeps the fence (F-001 boundary)', async () => {
 		const realRename = taskFileInternals.renameSync;
 		taskFileInternals.renameSync = (source, target) => {
