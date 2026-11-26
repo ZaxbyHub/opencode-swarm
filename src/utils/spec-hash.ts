@@ -210,6 +210,54 @@ export function detectUnmarkedSpecDriftSync(
 			reason: '.swarm/plan.json is not valid JSON; recover or retry',
 		};
 	}
+	// SolCritic F-020: bound the COMPLETE gate path. The projection read routes
+	// through the reader's own scans, whose change-dir count is not itself
+	// capped, so the bounded presence walk runs FIRST and an over-budget layout
+	// blocks as retryable without ever entering the unbounded scan. Under the
+	// budget the read stays bounded (the reader caps per-change files and
+	// rejects oversized sources). OPENSPEC_ROOT is un-exported in
+	// effective-spec.ts; the path is mirrored here. On Bun the scandir error
+	// surfaces at the first readSync, so the whole enumeration is wrapped:
+	// ENOENT = changes dir absent = no unbounded scan risk (proceed); any other
+	// scan error = unverifiable = block-retry.
+	{
+		const state = { visited: 0, exhausted: false };
+		let scanError: NodeJS.ErrnoException | undefined;
+		try {
+			const handle = fsSync.opendirSync(join(directory, 'openspec', 'changes'));
+			try {
+				for (;;) {
+					const entry = handle.readSync();
+					if (entry === null) break;
+					if (++state.visited > 2000) {
+						state.exhausted = true;
+						break;
+					}
+				}
+			} finally {
+				try {
+					handle.closeSync();
+				} catch {
+					// best effort
+				}
+			}
+		} catch (error) {
+			scanError = error as NodeJS.ErrnoException;
+			if (scanError?.code !== 'ENOENT') {
+				return {
+					outcome: 'block-retry',
+					reason: 'the openspec projection source could not be scanned; retry',
+				};
+			}
+		}
+		if (state.exhausted) {
+			return {
+				outcome: 'block-retry',
+				reason: 'the openspec projection source could not be scanned; retry',
+			};
+		}
+		void scanError;
+	}
 	// Pre-feature plan: no specHash means the pair is exempt (same as loadPlan).
 	if (!parsed.specHash) return { outcome: 'allow' };
 	let currentHash: string | null;

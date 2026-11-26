@@ -48,6 +48,25 @@ describe('changes-arm gate cases (PR 3920 closeout, SolCritic F-019)', () => {
 		}
 	});
 
+	test('an over-budget change-dir layout blocks as retryable before the projection read (F-020)', () => {
+		// 2010 change DIRECTORIES exceed the pre-check budget: the gate must block
+		// as retryable BEFORE entering the reader's unbounded change scan.
+		for (let i = 0; i < 2010; i++) {
+			fsSync.mkdirSync(path.join(pairDir, 'openspec', 'changes', `c${i}`), {
+				recursive: true,
+			});
+			fsSync.writeFileSync(
+				path.join(pairDir, 'openspec', 'changes', `c${i}`, 'proposal.md'),
+				'# Proposal.\n',
+			);
+		}
+		writePlan(pairDir, hashOf('# Spec\n\nGone.\n'));
+
+		expect(() => enforceSpecDriftGate(pairDir, 'save_plan')).toThrow(
+			/could not be scanned/,
+		);
+	});
+
 	test('a walk-budget overrun in the changes tree blocks as retryable, not deletion', () => {
 		// 2010 change FILES (no subdirs) exhaust the changes walk budget with no
 		// source found: presence is UNKNOWN, which must block as retryable with the
