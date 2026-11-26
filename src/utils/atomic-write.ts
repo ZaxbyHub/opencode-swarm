@@ -187,7 +187,7 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 			'src/services/skill-improver.ts (pre-#2035; migrated-to=src/services/skill-improver.ts:atomicWrite)',
 			'src/services/skill-consolidation.ts (pre-#2035; migrated-to=src/services/skill-consolidation.ts:atomicWrite)',
 			'src/services/skill-generator.ts (pre-#2035; migrated-to=src/services/skill-generator.ts:atomicWrite)',
-			'src/tools/spec-write.ts:98',
+			'src/tools/spec-write.ts:99',
 			'src/sdd/effective-spec.ts:1509',
 			'src/background/lane-output-store.ts:353',
 			'src/background/pending-delegations.ts:writeDurableFileSync',
