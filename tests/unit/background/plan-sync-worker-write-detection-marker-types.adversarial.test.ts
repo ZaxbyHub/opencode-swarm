@@ -1,5 +1,55 @@
-			/** * ADVERSARIAL TESTS: checkForUnauthorizedWrite — marker type edge cases. * * Split from tests/unit/background/plan-sync-worker-write-detection.adversarial.test.ts * (FR-006 file cap). The ADDITIONAL EDGE CASES vectors (timestamp field * type-confusion attacks) run with the same r15 isolation contract: the * utils mock is installed per-test and the REAL utils module plus the * plan-manager seam's originals are restored after every test. */ import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'; import { randomUUID } from 'node:crypto'; import * as fs from 'node:fs'; import { tmpdir } from 'node:os'; import * as path from 'node:path'; import { PlanSyncWorker } from '../../../src/background/plan-sync-worker'; // Track log calls for testing const logCalls: { message: string; data?: unknown }[] = []; // Import _internals seam for plan/manager (within-module) import { _internals as planManagerInternals } from '../../../src/plan/manager'; // r15 audit repair (Phase 6 — test isolation): same defect and same fix as // plan-sync-worker-write-detection.test.ts — the previous top-level // mock.module('../../../src/utils') replaced the whole utils module with // ONLY log/warn/error (every other export undefined process-wide from // Bun's test-file preloading onward). The mock is now per-test // (beforeEach/afterEach) and the REAL module snapshot is re-installed after // each test (mock.restore() does NOT undo mock.module). import * as realUtilsModule from '../../../src/utils'; const utilsSnapshot = { ...realUtilsModule }; const planManagerSeamSnapshot = { ...planManagerInternals }; // Within-module DI seam: mock functions assigned to _internals const mockLoadPlan = mock(async () => null); // Helper to create temp directory structure function setupTempDir(): { tempDir: string; swarmDir: string; planJsonPath: string; markerPath: string; } { // F-010: clock-free unique name (same rationale as // plan-sync-worker-unref.test.ts). The wall-clock timestamp this replaced // was a uniqueness source, not a time-dependent assertion; `freezeClock` // would be the wrong tool because a frozen clock makes "unique" names // collide across tests, runs and processes. const tempDir = path.join( tmpdir(), `.test-unauthorized-write-adversarial-${randomUUID()}`, ));
+/**
+ * ADVERSARIAL TESTS: checkForUnauthorizedWrite — marker type edge cases.
+ *
+ * Split from tests/unit/background/plan-sync-worker-write-detection.adversarial.test.ts
+ * (FR-006 file cap). The ADDITIONAL EDGE CASES vectors (timestamp field
+ * type-confusion attacks) run with the same r15 isolation contract: the
+ * utils mock is installed per-test and the REAL utils module plus the
+ * plan-manager seam's originals are restored after every test.
+ */
+import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
+import { randomUUID } from 'node:crypto';
+import * as fs from 'node:fs';
+import { tmpdir } from 'node:os';
+import * as path from 'node:path';
+import { PlanSyncWorker } from '../../../src/background/plan-sync-worker';
 
+// Track log calls for testing
+const logCalls: { message: string; data?: unknown }[] = [];
+
+// Import _internals seam for plan/manager (within-module)
+import { _internals as planManagerInternals } from '../../../src/plan/manager';
+
+// r15 audit repair (Phase 6 — test isolation): same defect and same fix as
+// plan-sync-worker-write-detection.test.ts — the previous top-level
+// mock.module('../../../src/utils') replaced the whole utils module with
+// ONLY log/warn/error (every other export undefined process-wide from
+// Bun's test-file preloading onward). The mock is now per-test
+// (beforeEach/afterEach) and the REAL module snapshot is re-installed after
+// each test (mock.restore() does NOT undo mock.module).
+import * as realUtilsModule from '../../../src/utils';
+
+const utilsSnapshot = { ...realUtilsModule };
+const planManagerSeamSnapshot = { ...planManagerInternals };
+
+// Within-module DI seam: mock functions assigned to _internals
+const mockLoadPlan = mock(async () => null);
+
+// Helper to create temp directory structure
+function setupTempDir(): {
+	tempDir: string;
+	swarmDir: string;
+	planJsonPath: string;
+	markerPath: string;
+} {
+	// F-010: clock-free unique name (same rationale as
+	// plan-sync-worker-unref.test.ts). The wall-clock timestamp this replaced
+	// was a uniqueness source, not a time-dependent assertion; `freezeClock`
+	// would be the wrong tool because a frozen clock makes "unique" names
+	// collide across tests, runs and processes.
+	const tempDir = canonicalMkdtemp(
+		`.test-unauthorized-write-adversarial-${randomUUID()}`,
+	);
 	const swarmDir = path.join(tempDir, '.swarm');
 	const planJsonPath = path.join(swarmDir, 'plan.json');
 	const markerPath = path.join(swarmDir, '.plan-write-marker');

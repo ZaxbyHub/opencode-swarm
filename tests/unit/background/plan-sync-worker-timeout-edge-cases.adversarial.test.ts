@@ -57,9 +57,7 @@ describe.skipIf(process.platform !== 'linux')(
 			// replaced was a uniqueness source, not a time-dependent assertion;
 			// `freezeClock` would be the wrong tool because a frozen clock makes
 			// "unique" names collide across tests, runs and processes.
-			tempDir = fs.realpathSync(
-				path.join(os.tmpdir(), `.test-adversarial-${randomUUID()}`),
-			);
+			tempDir = canonicalMkdtemp(`.test-adversarial-${randomUUID()}`);
 			swarmDir = path.join(tempDir, '.swarm');
 			planJsonPath = path.join(swarmDir, 'plan.json');
 

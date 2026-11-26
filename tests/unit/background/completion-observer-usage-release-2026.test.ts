@@ -19,9 +19,7 @@ import { resetSwarmState } from '../../../src/state';
 import { createIsolatedTestEnv } from '../../helpers/isolated-test-env.js';
 
 function makeTempProject(): string {
-	const dir = fs.realpathSync(
-		fs.mkdtempSync(path.join(os.tmpdir(), 'swarm-usage-release-')),
-	);
+	const dir = canonicalMkdtemp('swarm-usage-release-');
 	const real = fs.realpathSync(dir);
 	fs.mkdirSync(path.join(real, '.swarm'), { recursive: true });
 	fs.mkdirSync(path.join(real, '.opencode'), { recursive: true });

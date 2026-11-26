@@ -71,7 +71,7 @@ function fixture(): void {
 	if (!existsSync(REPO_GITIGNORE)) {
 		throw new Error(`repo root .gitignore not found at ${REPO_GITIGNORE}`);
 	}
-	dir = realpathSync(mkdtempSync(join(tmpdir(), 'gitignore-root-scoped-')));
+	dir = canonicalMkdtemp('gitignore-root-scoped-');
 	git(['init', '-q']);
 	git(['config', 'user.email', 'test@example.invalid']);
 	git(['config', 'user.name', 'Fixture']);

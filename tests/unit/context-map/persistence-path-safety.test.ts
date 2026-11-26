@@ -68,9 +68,7 @@ function trySymlink(target: string, linkPath: string): boolean {
 }
 
 beforeEach(() => {
-	tempDir = fs.realpathSync(
-		fs.mkdtempSync(path.join(os.tmpdir(), 'ctxmap-state-test-')),
-	);
+	tempDir = canonicalMkdtemp('ctxmap-state-test-');
 	fs.mkdirSync(path.join(tempDir, '.swarm'), { recursive: true });
 	origInternals = { ..._internals };
 });

@@ -30,11 +30,9 @@ import type {
 /** Tracked temp directories for afterEach cleanup. */
 const tmpDirs: string[] = [];
 
-/** Create a resolved temp directory under os.tmpdir() and register for cleanup. */
+/** Create a canonical resolved temp directory and register for cleanup. */
 function makeTempDir(): string {
-	const dir = fs.realpathSync(
-		fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'sidecar-store-'))),
-	);
+	const dir = fs.realpathSync(canonicalMkdtemp('sidecar-store-'));
 	tmpDirs.push(dir);
 	return dir;
 }
