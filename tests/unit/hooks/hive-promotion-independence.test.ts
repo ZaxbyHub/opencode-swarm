@@ -10,6 +10,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import { KnowledgeConfigSchema } from '../../../src/config/schema.js';
 import { evaluatePromotionPolicy } from '../../../src/hooks/hive-policy.js';
 import type {
 	KnowledgeConfig,
@@ -32,7 +33,12 @@ function makeEntry(): SwarmKnowledgeEntry {
 		tier: 'swarm',
 		lesson: 'A canonical lesson about identity and policy gating here',
 		category: 'process',
-		tags: ['hive-fast-track'],
+		// #3820 H3 reshape: route 2 is armed by the DEDICATED
+		// `hive_fast_track_authorized` field (only `promoteToHive`'s authorized
+		// stand-in writes it) — the caller-writable `hive-fast-track` tag no
+		// longer satisfies the route. This fixture is otherwise policy-clean and
+		// every leg below asserts on the evidence gate, not the route.
+		hive_fast_track_authorized: true,
 		scope: 'global',
 		confidence: 0.7,
 		status: 'promoted',
@@ -177,7 +183,28 @@ describe('promotion evidence independence (#2032 F-003)', () => {
 		expect(g?.passed).toBe(true);
 	});
 
-	it('thresholds 0 keep the legacy behavior: delegate-only evidence neither credits nor blocks', () => {
+	// #3820 H1(a) reshape (disclosed inertia pin): the gate is ACTIVE at the
+	// SHIPPED DEFAULTS now — `promotion_min_terminal_applications` defaults to
+	// 1, so delegate-only evidence REFUSES at defaults instead of "neither
+	// crediting nor blocking".
+	it('shipped defaults activate the gate: delegate-only evidence is refused at the default threshold', () => {
+		const defaults = KnowledgeConfigSchema.parse({});
+		expect(defaults.promotion_min_terminal_applications).toBe(1);
+		expect(defaults.promotion_min_distinct_cohorts).toBe(0);
+		const g = evaluatePromotionPolicy({
+			entry: makeEntry(),
+			config: defaults,
+			evidence: [record({ receipt_source: 'delegate' })],
+		}).gates.find((g2) => g2.name === 'validated_terminal_applications');
+		expect(g?.passed).toBe(false);
+		// The gate is ACTIVE (not the operator opt-out "threshold 0" state).
+		expect(g?.detail).not.toContain('threshold 0');
+	});
+
+	// The documented compatibility escape survives: an operator who sets the
+	// threshold to 0 EXPLICITLY keeps the gate satisfied by absence (the same
+	// semantics the old inertia pin asserted, now scoped to explicit configs).
+	it('explicit 0/0 operator opt-out keeps the gate satisfied by absence', () => {
 		const g = evaluatePromotionPolicy({
 			entry: makeEntry(),
 			config: {

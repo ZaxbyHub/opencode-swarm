@@ -168,7 +168,13 @@ describe('actionability floor on promotion (#1821 A3)', () => {
 	});
 
 	describe('--force override', () => {
-		it('records override_failed_gates=[actionability_floor] durably (direct text)', async () => {
+		// #3820 H1(a)/H2 reshape: the application-evidence gate is ACTIVE by
+		// default (min terminal applications 1) and the direct-text stand-in has
+		// no prior swarm entry id to load evidence for, so an override now ALSO
+		// records `validated_terminal_applications` alongside the floor gate
+		// this file targets. Assertion strength preserved (full failed-gates
+		// array pinned, durable audit still asserted).
+		it('records override_failed_gates durably (direct text)', async () => {
 			const msg = await promoteToHive(swarmDir, PROSE_LESSON, undefined, {
 				force: true,
 				reason: 'legacy prose lesson migrated by an operator',
@@ -179,6 +185,7 @@ describe('actionability floor on promotion (#1821 A3)', () => {
 			expect(hive).toHaveLength(1);
 			expect(hive[0].lineage?.actor).toBe('manual-override');
 			expect(hive[0].lineage?.override_failed_gates).toEqual([
+				'validated_terminal_applications',
 				'actionability_floor',
 			]);
 
@@ -187,6 +194,7 @@ describe('actionability floor on promotion (#1821 A3)', () => {
 			);
 			expect(overrideEvents).toHaveLength(1);
 			expect(overrideEvents[0].override_failed_gates).toEqual([
+				'validated_terminal_applications',
 				'actionability_floor',
 			]);
 		});
@@ -200,6 +208,7 @@ describe('actionability floor on promotion (#1821 A3)', () => {
 			expect(msg).toContain('Promoted lesson');
 			const hive = await readRawHive();
 			expect(hive[0].lineage?.override_failed_gates).toEqual([
+				'validated_terminal_applications',
 				'actionability_floor',
 			]);
 		});
@@ -250,12 +259,18 @@ describe('actionability floor on promotion (#1821 A3)', () => {
 		// the three missing `...carryActionableFields(...)`, so fields that had
 		// just satisfied the policy gate were dropped on write and the promoted
 		// hive entry came back non-actionable.
+		//
+		// #3820 H2/ASK-1 reshape: with the application-evidence gate active by
+		// default, ordinary direct-text promotion carries the audited override
+		// (`force` + `reason`) — the stand-in has no prior swarm entry id to
+		// load evidence for. Assertion strength preserved (every persisted-field
+		// assertion kept; the actor assertion re-pinned to the new contract).
 		it('promoteToHive persists the supplied predicate + scope', async () => {
 			const msg = await promoteToHive(
 				swarmDir,
 				'Always run the type checker before opening a pull request',
 				undefined,
-				undefined,
+				{ force: true, reason: 'audited direct-text promotion (#3820)' },
 				undefined,
 				{
 					...ACTIONABLE_FIELDS,
@@ -276,10 +291,14 @@ describe('actionability floor on promotion (#1821 A3)', () => {
 			expect(hive[0].applies_to_agents).toEqual(['coder']);
 			expect(hive[0].forbidden_actions).toEqual(['skip the type checker']);
 			expect(hive[0].verification_checks).toEqual(['tsc --noEmit']);
-			// A satisfied floor is recorded as an ordinary manual promotion — no
-			// override audit, which is the whole point of making the path
-			// satisfiable rather than forcing everyone through --force.
-			expect(hive[0].lineage?.actor).toBe('manual');
+			// The floor was SATISFIED by the supplied fields (it is not among the
+			// recorded failed gates), but the evidence gate fails for the
+			// no-prior-id stand-in, so the promotion records the audited
+			// override actor with only the evidence gate failing.
+			expect(hive[0].lineage?.actor).toBe('manual-override');
+			expect(hive[0].lineage?.override_failed_gates).toEqual([
+				'validated_terminal_applications',
+			]);
 		});
 
 		it('normalizes supplied lists: dedupes case-insensitively and caps at 20', async () => {
@@ -288,7 +307,7 @@ describe('actionability floor on promotion (#1821 A3)', () => {
 				swarmDir,
 				'Bound every external subprocess with an explicit timeout value',
 				undefined,
-				undefined,
+				{ force: true, reason: 'audited direct-text promotion (#3820)' },
 				undefined,
 				{
 					applies_to_tools: ['Write', 'write', 'WRITE'],
@@ -308,7 +327,7 @@ describe('actionability floor on promotion (#1821 A3)', () => {
 				swarmDir,
 				'Keep the plan ledger authoritative for all plan state changes',
 				undefined,
-				undefined,
+				{ force: true, reason: 'audited direct-text promotion (#3820)' },
 				undefined,
 				{ ...ACTIONABLE_FIELDS, forbidden_actions: [] },
 			);

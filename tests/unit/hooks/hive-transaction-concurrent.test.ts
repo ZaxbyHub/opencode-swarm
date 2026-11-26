@@ -91,12 +91,17 @@ describe('hive transaction storage gate (#1847)', () => {
 			.replace(/\\/g, '/');
 		// #1821 A3: the direct-text path must supply its own predicate + scope or
 		// the default-ON actionability_floor gate blocks the promotion.
+		// #3820 H2/ASK-1 reshape: the application-evidence gate is also active by
+		// default and the direct-text stand-in has no prior entry id to load
+		// evidence for, so the audited override (`force` + `reason`) is required
+		// for the writes to land. Assertion strength preserved (both concurrent
+		// writes must still survive).
 		const loader = (
 			lesson: string,
 			cohortId: string,
 		) => `import { promoteToHive, _internals } from "${promoterPath}";
 _internals.resolveCohortId = async () => ({ cohortId: ${JSON.stringify(cohortId)}, source: 'remote', normalizedRemote: 'github.com/t/r', degraded: false });
-await promoteToHive(${JSON.stringify(tempHome)}, ${JSON.stringify(lesson)}, undefined, undefined, undefined, ${JSON.stringify(ACTIONABLE_FIELDS)});
+await promoteToHive(${JSON.stringify(tempHome)}, ${JSON.stringify(lesson)}, undefined, { force: true, reason: 'concurrent storage gate fixture' }, undefined, ${JSON.stringify(ACTIONABLE_FIELDS)});
 `;
 
 		await fsPromises.writeFile(scriptA, loader(entryA, 'c-a'), 'utf-8');
@@ -126,7 +131,7 @@ await promoteToHive(${JSON.stringify(tempHome)}, ${JSON.stringify(lesson)}, unde
 			.replace(/\\/g, '/');
 		const loader = `import { promoteToHive, _internals } from "${promoterPath}";
 _internals.resolveCohortId = async () => ({ cohortId: 'c-same', source: 'remote', normalizedRemote: 'github.com/t/r', degraded: false });
-await promoteToHive(${JSON.stringify(tempHome)}, ${JSON.stringify(lesson)}, undefined, undefined, undefined, ${JSON.stringify(ACTIONABLE_FIELDS)});
+await promoteToHive(${JSON.stringify(tempHome)}, ${JSON.stringify(lesson)}, undefined, { force: true, reason: 'concurrent storage gate fixture' }, undefined, ${JSON.stringify(ACTIONABLE_FIELDS)});
 `;
 		await fsPromises.writeFile(scriptA, loader, 'utf-8');
 		await fsPromises.writeFile(scriptB, loader, 'utf-8');

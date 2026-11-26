@@ -42,6 +42,10 @@ import {
 import { atomicWriteFileAnyRoot } from '../utils/atomic-write';
 import { warn } from '../utils/logger.js';
 import { withTimeoutSignal } from '../utils/timeout.js';
+import {
+	artifactCarriesPromotionClaim,
+	lookupPromotionRecordByPathSync,
+} from './external-skill-identity.js';
 import { appendSkillChangelog } from './skill-changelog.js';
 import {
 	appendRejectedSkillEdit,
@@ -2153,6 +2157,48 @@ export async function regenerateSkill(
 	}
 
 	const fm = parseDraftFrontmatter(existingContent);
+
+	// FB-103 (PR #3942 review): refuse promoted-external / record-bound
+	// artifacts BEFORE any retire, eval-stub write, rewrite, or source
+	// re-stamp. Regeneration rewrites the artifact in place while PRESERVING
+	// skill_origin (see the renderSkillMarkdown call below), which silently
+	// invalidates the digest binding to the structured promotion record: the
+	// propagation gate then refuses the skill, revoke refuses on mismatch,
+	// and re-promotion hits EEXIST. Retiring is equally wrong — removing a
+	// promoted artifact is the external-skill revoke path's job, because it
+	// also owns the record. The claimed check runs BEFORE the record lookup
+	// and refuses unconditionally, so an indeterminate lookup (over-cap /
+	// corrupt candidate store) can never downgrade a claimed artifact to
+	// "ordinary" (fail closed); an unclaimed artifact with an indeterminate
+	// scan still regenerates (an unrelated corrupt record must not block
+	// ordinary skills, FB-101). Stage B (FB-103): the SHARED claim predicate
+	// from external-skill-identity recognizes BOTH provenance markers
+	// (skill_origin AND promoted_from) with the same frontmatter-only logic
+	// the verifier uses — checking only skillOrigin missed promoted_from-only
+	// claims. NEVER re-stamp promoted_content_hash here: the record, not the
+	// artifact, owns the binding.
+	if (artifactCarriesPromotionClaim(existingContent)) {
+		return {
+			regenerated: false,
+			path: skillPath,
+			entryCount: 0,
+			reason:
+				'refused: promoted external skill is bound to an external-skill promotion record — use external-skill revoke to remove it',
+		};
+	}
+	const promotionRecord = lookupPromotionRecordByPathSync(directory, skillPath);
+	if (promotionRecord.status === 'found') {
+		// Path-first binding: the record matches this path even when the
+		// provenance frontmatter was stripped or lost.
+		return {
+			regenerated: false,
+			path: skillPath,
+			entryCount: 0,
+			reason:
+				'refused: skill path is bound to an external-skill promotion record — use external-skill revoke to remove it',
+		};
+	}
+
 	let matchedEntries: KnowledgeEntryBase[] = [];
 
 	if (fm && fm.sourceKnowledgeIds.length > 0) {
