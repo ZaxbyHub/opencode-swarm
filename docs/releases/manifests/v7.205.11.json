@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.205.11",
+  "tagCommit": "18c09e03eb4bea9d090580bc83bb0a7b7ddb2305",
+  "targetCommitish": "18c09e03eb4bea9d090580bc83bb0a7b7ddb2305",
+  "releaseBodySha256": "c667860cfd0a185d740024634ca5f31bfef8840b337c29be3f20db29c4a505f3",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/3820-3822-3836-guardrail-identity-binding.md",
+      "sha256": "08b1534d482df2867b0af20097475a5ceacdd8af8674c98da37eff29f3e50016"
+    }
+  ]
+}
