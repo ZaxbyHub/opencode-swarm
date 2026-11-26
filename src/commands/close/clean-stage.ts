@@ -376,7 +376,7 @@ export async function runCleanStage(
 				} else {
 					const reason = err instanceof Error ? err.message : String(err);
 					ctx.warnings.push(
-						`Failed to clean config-backup ${neutralizeResidueName(backup)} [${errno ?? 'unknown'}]: ${reason}`,
+						`Failed to clean config-backup ${neutralizeResidueName(backup)} [${errno ?? 'unknown'}]: ${neutralizeResidueName(reason)}`,
 					);
 				}
 			}
@@ -397,7 +397,7 @@ export async function runCleanStage(
 				} else {
 					const reason = err instanceof Error ? err.message : String(err);
 					ctx.warnings.push(
-						`Failed to clean ledger sibling ${neutralizeResidueName(sibling)} [${errno ?? 'unknown'}]: ${reason}`,
+						`Failed to clean ledger sibling ${neutralizeResidueName(sibling)} [${errno ?? 'unknown'}]: ${neutralizeResidueName(reason)}`,
 					);
 				}
 			}

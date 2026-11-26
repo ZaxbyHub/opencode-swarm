@@ -419,11 +419,14 @@ export interface PromotionEvidenceRecord {
 	receipt_outcome: 'applied' | 'violated' | 'contradicted';
 	/**
 	 * Provenance class of the terminal this evidence was derived from
-	 * (#2032 review F-003). `'delegate'` evidence is a self-report and stays
-	 * non-independent: the promotion gate only counts evidence whose source is
-	 * present and not `'delegate'` toward `promotion_min_terminal_applications`.
-	 * Absent on records written before #2032 — such records fail closed (they
-	 * do not count as independent).
+	 * (#2032 review F-003; independence allowlist tightened by #3820).
+	 * The promotion gate counts a receipt toward
+	 * `promotion_min_terminal_applications` only when its source is a member
+	 * of INDEPENDENT_RECEIPT_SOURCES (`reviewer`, `architect`,
+	 * `test_engineer`); `delegate` (self-report), `architect_marker`,
+	 * the application-gate release classes, `manual`, `migration`,
+	 * `phase_override` and `unknown` all fail closed, as does an absent
+	 * source (records written before #2032).
 	 */
 	receipt_source?: string;
 	/** Id of the ReceiptEvent this evidence was derived from. */

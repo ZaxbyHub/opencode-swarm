@@ -393,7 +393,7 @@ export async function runArchiveStage(ctx: CloseStageContext): Promise<void> {
 						`${errno ?? 'unknown'}: ${reason}`,
 					);
 					ctx.warnings.push(
-						`Failed to archive ${neutralizeResidueName(artifact)} [${errno ?? 'unknown'}]: ${reason}. File preserved (not cleaned up).`,
+						`Failed to archive ${neutralizeResidueName(artifact)} [${errno ?? 'unknown'}]: ${neutralizeResidueName(reason)}. File preserved (not cleaned up).`,
 					);
 					ctx.archiveResults.push({
 						artifact,

@@ -466,7 +466,7 @@ export async function handleDoctorCommand(
 					output += `- … ${result.preserved.length - 10} more\n`;
 			}
 		} catch (err) {
-			output += `\n❌ Residue quarantine failed: ${err instanceof Error ? err.message : String(err)}\n`;
+			output += `\n❌ Residue quarantine failed: ${neutralizeResidueName(err instanceof Error ? err.message : String(err))}\n`;
 		}
 	} else {
 		try {
