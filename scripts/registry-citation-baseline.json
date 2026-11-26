@@ -452,13 +452,6 @@
 		{
 			"rowId": "spec-drift-artifacts",
 			"file": "src/services/spec-drift-recovery.ts",
-			"identifier": "verifyEventPresence",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"verifyEventPresence\" exists in src/services/spec-drift-recovery.ts but not inside :303 (spec-drift-artifacts.readerCitations[0])."
-		},
-		{
-			"rowId": "spec-drift-artifacts",
-			"file": "src/services/spec-drift-recovery.ts",
 			"identifier": "writeWal",
 			"kind": "out-of-range",
 			"note": "Pre-existing debt, not approved drift: \"writeWal\" exists in src/services/spec-drift-recovery.ts but not inside src/services/spec-drift-recovery.ts:207 (spec-drift-artifacts.writerCitations[0])."
