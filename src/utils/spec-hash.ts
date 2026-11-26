@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { type Plan, PlanSchema } from '../config/plan-schema';
 import {
 	readEffectiveSpecSync,
-	resolveSddSourceSelection,
+	sddProjectionSourcePresentSync,
 } from '../sdd/effective-spec';
 
 /**
@@ -241,7 +241,7 @@ export function detectUnmarkedSpecDriftSync(
 		// projection FAILED also returns null — that is a projection error, not a
 		// deletion (SolCritic F-011). Only an unbound, genuinely absent spec is
 		// deletion.
-		if (resolveSddSourceSelection(directory) !== undefined) {
+		if (sddProjectionSourcePresentSync(directory)) {
 			return {
 				outcome: 'block-retry',
 				reason:

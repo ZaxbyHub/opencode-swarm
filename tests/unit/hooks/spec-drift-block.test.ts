@@ -329,6 +329,28 @@ describe('markerless spec-pair gate (PR 3920 closeout)', () => {
 		expect(() => enforceSpecDriftGate(pairDir, 'save_plan')).not.toThrow();
 	});
 
+	test('an auto-detected projection failure with no native spec blocks as retryable (F-012)', () => {
+		// No env/config binding, but the Spec-Kit marker is present: auto-detection
+		// runs and its failure must not read as deletion.
+		fsSync.mkdirSync(path.join(pairDir, '.specify'));
+		fsSync.writeFileSync(
+			path.join(pairDir, '.swarm', 'plan.json'),
+			JSON.stringify({
+				schema_version: '1.0.0',
+				title: 'Pair Plan',
+				swarm: 'test-swarm',
+				current_phase: 1,
+				phases: [{ id: 1, name: 'Phase 1', status: 'in_progress', tasks: [] }],
+				migration_status: 'native',
+				specHash: hashOf('# Spec\n\nGone.\n'),
+			}),
+		);
+
+		expect(() => enforceSpecDriftGate(pairDir, 'save_plan')).toThrow(
+			/retry or repair/,
+		);
+	});
+
 	test('a failed projection with no native spec blocks as retryable, not deletion (F-011)', () => {
 		// A bound projection source (env) whose projection fails returns null with no
 		// native file: retryable, not deletion.

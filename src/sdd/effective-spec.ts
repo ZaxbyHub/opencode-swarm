@@ -1281,6 +1281,23 @@ export function resolveSddSourceSelection(
  * symmetric with "OpenSpec present (yields a projection)" and makes empty
  * `.specify/` a non-competing source, matching both citations.
  */
+/**
+ * True when any SDD projection source is detectable for this project: an explicit
+ * env/config selection, a Spec-Kit marker, or an openspec layout. The drift
+ * gate's markerless check uses this to tell a failed projection (retryable)
+ * apart from a genuinely deleted spec (SolCritic F-011/F-012).
+ */
+export function sddProjectionSourcePresentSync(directory: string): boolean {
+	try {
+		if (resolveSddSourceSelection(directory) !== undefined) return true;
+		const root = path.resolve(directory);
+		if (detectSpeckit(root).markerPresent) return true;
+		return fs.existsSync(path.join(root, 'openspec'));
+	} catch {
+		return false;
+	}
+}
+
 export function readEffectiveSpecSync(
 	directory: string,
 	opts?: ReadEffectiveSpecOpts,
