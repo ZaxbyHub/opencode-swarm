@@ -303,41 +303,6 @@
 			"note": "Pre-existing debt, not approved drift: \"recordEmittedRecommendations\" exists in src/services/recommendation-ledger.ts but not inside src/services/recommendation-ledger.ts:623 (recommendation-ledger.writerCitations[0])."
 		},
 		{
-			"rowId": "scopes-family",
-			"file": "src/scope/scope-persistence.ts",
-			"identifier": "claimScopeBindingForChildDurably",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"claimScopeBindingForChildDurably\" exists in src/scope/scope-persistence.ts but not inside :1833 (scopes-family.writerCitations[0])."
-		},
-		{
-			"rowId": "scopes-family",
-			"file": "src/scope/scope-persistence.ts",
-			"identifier": "readScopeFromDisk",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"readScopeFromDisk\" exists in src/scope/scope-persistence.ts but not inside src/scope/scope-persistence.ts:2712 (scopes-family.readerCitations[0])."
-		},
-		{
-			"rowId": "scopes-family",
-			"file": "src/scope/scope-persistence.ts",
-			"identifier": "refreshScopeBindingLease",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"refreshScopeBindingLease\" exists in src/scope/scope-persistence.ts but not inside :1756 (scopes-family.writerCitations[0])."
-		},
-		{
-			"rowId": "scopes-family",
-			"file": "src/scope/scope-persistence.ts",
-			"identifier": "replaceExistingScopeDeclaration",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"replaceExistingScopeDeclaration\" exists in src/scope/scope-persistence.ts but not inside :2057 (scopes-family.writerCitations[0])."
-		},
-		{
-			"rowId": "scopes-family",
-			"file": "src/scope/scope-persistence.ts",
-			"identifier": "tombstoneScopeBinding",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"tombstoneScopeBinding\" exists in src/scope/scope-persistence.ts but not inside :1693 (scopes-family.writerCitations[0])."
-		},
-		{
 			"rowId": "session-state-snapshot",
 			"file": "src/session/snapshot-reader.ts",
 			"identifier": "readSnapshot",

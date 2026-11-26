@@ -40,5 +40,15 @@ export function formatScopeResolutionDiagnostic(input: {
 	if (input.resolution.status === 'overloaded') {
 		return 'SCOPE_BINDING_STORE_OVERLOADED: the complete live binding set exceeds the safe admission budget. ACTION[architect]: complete or expire terminal tasks, then retry declare_scope.';
 	}
+	if (input.resolution.status === 'store_unreadable') {
+		// Issue #3889 RC1: non-capacity durable-read failures (a malformed or
+		// workspace-mismatched row, an import or ledger read error) surface as
+		// their own fail-closed class — never the capacity remedy. The
+		// recovery text names the REAL store: the authoritative rows are
+		// scope-binding rows in the project coordination DB (.swarm/swarm.db);
+		// .swarm/scopes only holds the non-authorizing legacy v1 projection,
+		// so cleaning it recovers nothing.
+		return 'SCOPE_BINDING_STORE_UNREADABLE: the durable scope binding store could not be read (malformed or workspace-mismatched rows with namespace scope-binding in the coordination_state table of .swarm/swarm.db); resolution is fail-closed. ACTION[architect]: run /swarm reset-session for the session that owns the rows, or delete the offending scope-binding rows from .swarm/swarm.db manually, then retry.';
+	}
 	return null;
 }

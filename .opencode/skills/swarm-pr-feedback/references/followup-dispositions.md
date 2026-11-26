@@ -3,7 +3,7 @@
 This file is the routing rule for every closure-ledger item the PR does not fix. It is the swarm-pr-feedback form of `contributing.md` "Filing follow-up issues". Dispositions are planned in the closure ledger before the reviewer and critic closeout gate, which reviews them. They are executed during Publishing And Communication, after the push is verified.
 
 Nothing is silently dropped.
-- **Fix in this PR** anything this PR introduced: a `CONFIRMED` or `PARTIAL` item is fixed or disproved before Stage A and never reaches this table. A small pre-existing item inside the PR's files is fixed here only with the user's go-ahead (gate 4 below).
+- **Fix in this PR** anything this PR introduced: a `CONFIRMED` or `PARTIAL` item is fixed or disproved before Stage A and never reaches this table. The only exception is a round-2 checkpoint item (see "Round ledger"). A small pre-existing item inside the PR's files is fixed here only with the user's go-ahead (gate 4 below).
 - A `DISPROVED` item needs no disposition.
 - Every `PRE_EXISTING`, `NEEDS_MORE_EVIDENCE`, or `NEEDS_USER_DECISION` item gets exactly one disposition in the closure ledger.
 - A reviewer's severity label (`nit`, `non-blocking`, `suggestion`, `(blocking)`) is a claim like any other. It never replaces verification, and a non-blocking label never exempts a PR-introduced defect from being fixed.
@@ -19,6 +19,29 @@ Nothing is silently dropped.
 `ASK` takes precedence over fixing in the PR when the fix itself needs a product or compatibility decision. `ABSORB` takes precedence over `RECORD` when an open issue already covers the item.
 
 In practice `FILE` means Priority items plus items the user approved. Every other item that passes the gate is an Improvement, which is an `ASK`.
+
+## Open-issue corpus check before the closeout gate
+
+Check every disposition candidate against the repo's open issues while the
+dispositions are still planned, before the closeout gate reviews them. An
+`ABSORB` found then gets reviewed like any other row. Retrofitting it after
+the `RECORD` rows are published is expensive.
+
+- **Search first.** Search open issues for each item's distinctive terms, for
+  example `gh issue list --state open --search "<terms> in:title,body"`. You can
+  also query an existing ZaxbyGraph cache, per AGENTS.md "Repository-history
+  cache reuse". Do not page through the whole corpus.
+- **Read the bodies of the hits.** A title match is not coverage.
+- **Body covers the item:** plan it as `ABSORB`, and comment on that issue with
+  the new evidence during Publishing And Communication.
+- **No body covers it, and the item fails the necessity gate:** `RECORD` stands.
+
+Field evidence: the ragappv3 PR #1193 retrospective (2026-11-22). A pass after
+publishing found title-level matches on three ragappv3 workstream issues
+(ragappv3#1159, ragappv3#1166, ragappv3#1155). Their bodies did not cover the
+residuals, so those rows stayed `RECORD` and named the issues as
+re-evaluation triggers. The genuinely uncovered residuals were filed fresh as
+ragappv3#1201 and ragappv3#1202.
 
 ## Critic review before the user sees it
 
@@ -40,6 +63,19 @@ Before any `ASK` item, follow-up proposal, Improvement, or enhancement idea reac
 - **Priority items.**
   - A critic kill or downgrade of a Priority `FILE` item turns it into an `ASK` for the user.
   - When the critic is unavailable, the Priority item is still filed: it is already verified (gate 1), and holding it as an `ASK` that may go unanswered would drop a verified wedge, fail-open, security, or data-loss defect. State "not critic-reviewed" next to the item in the issue body and in its ledger row (a note, not a GitHub label), and list it in the final report for the user to review.
+
+## Round ledger
+
+Two rules keep multi-round gates bounded. The Feedback Ledger rules in `SKILL.md` point here.
+
+- **Verdict table.** The durable task-gates artifact, where the closeout gate in `SKILL.md` already records every verdict, has a `## Verdict table` section (ZCode: `.zcode/session/tasks/<slug>/gates.md`). Every gate verdict appends one row: `round | item | gate | verdict | evidence-ref`.
+  - The table is a navigation aid only. A re-dispatched gate starts from the rows added since the item's last verdict to find what changed.
+  - It still reviews the full current diff and reconciles the full closure ledger. A delta approval stays invalid.
+  - Field evidence: ragappv3 PR #1193 (2026-11-22) took four critic rounds, and each re-dispatch rebuilt the round history by re-reading the entire ledger.
+- **Round-2 checkpoint.** A critic round is one closeout-critic verdict on one feedback item. Count rounds per item from the verdict table. If an item's second closeout-critic verdict is `NEEDS_REVISION` or `BLOCKED`, stop before round 3. Set the item to `NEEDS_USER_DECISION`. Raise an `ASK` that lists the remaining edges and gives three options: fix the remaining edges, accept them as a documented limitation, or keep iterating.
+  - The checkpoint is a content-changing `ASK`. It gets its own adjudication first, under "Critic review before the user sees it", with the latest closeout-critic verdict attached. Until the user answers, the revision the critic rejected is never committed for publication or pushed. If the user's next turn does not answer it, follow `drive-to-merge.md` step 3 for an unanswered content-changing `ASK`. No approved revision exists yet, so stop and report the open `ASK` (the step-6 terminal); nothing is published.
+  - If the user accepts a documented limitation, the remaining edges close as `RECORD`, with the user's decision quoted, and the limitation is documented where the item lives. This is the only way a PR-introduced item reaches this table. It takes the user's decision, never the agent's own judgment.
+  - Field evidence: ragappv3 PR #1193, finding F-07, took four critic rounds on a LOW finding. Rounds 2 and 3 found genuine corruption bugs, but the last round was resolved only by documentation.
 
 ## Necessity gate
 

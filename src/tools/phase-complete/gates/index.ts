@@ -11,6 +11,13 @@ export { runFinalReviewGate } from './final-review-gate.js';
 export { runHallucinationGate } from './hallucination-gate.js';
 export { runMutationGate } from './mutation-gate.js';
 export { runPhaseCouncilGate } from './phase-council-gate.js';
+export {
+	PLANNED_TASKS_BLOCKED_REASON,
+	plannedTasksBlockedMessage,
+	readUnfinishedPlannedTasks,
+	runPlannedTasksGate,
+	unfinishedTaskIdsOf,
+} from './planned-tasks-gate.js';
 export { runTodoGateGate } from './todo-gate.js';
 
 export type { GateContext, GateResult } from './types.js';

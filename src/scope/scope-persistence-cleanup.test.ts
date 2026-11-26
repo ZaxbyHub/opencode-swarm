@@ -77,10 +77,11 @@ describe('clearScopeBindingFromDisk containment', () => {
 		});
 		expect(retired).toMatchObject({ ok: true });
 
-		expect(JSON.parse(fs.readFileSync(target, 'utf8'))).toMatchObject({
-			lifecycleState: 'revoked',
-			revision: 2,
-		});
+		// Issue #3889: retirement goes through the terminal sink — the
+		// authoritative row is deleted with its deny evidence, and the legacy
+		// projection file is removed with it instead of being rewritten as a
+		// revoked tombstone that lingers for every generation.
+		expect(fs.existsSync(target)).toBe(false);
 	});
 
 	test('fails closed when scopes is swapped to a symlink or junction', () => {

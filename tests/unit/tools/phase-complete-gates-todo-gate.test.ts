@@ -60,7 +60,7 @@ function writePlan(dir: string, taskIds: string[], phase = 1): void {
 				{
 					id: phase,
 					name: 'p1',
-					status: 'in_progress',
+					status: 'completed',
 					tasks: taskIds.map((id) => ({
 						id,
 						phase,
