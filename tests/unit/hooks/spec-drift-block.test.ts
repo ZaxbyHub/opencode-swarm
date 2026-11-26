@@ -329,6 +329,34 @@ describe('markerless spec-pair gate (PR 3920 closeout)', () => {
 		expect(() => enforceSpecDriftGate(pairDir, 'save_plan')).not.toThrow();
 	});
 
+	test('a failed projection with no native spec blocks as retryable, not deletion (F-011)', () => {
+		// A bound projection source (env) whose projection fails returns null with no
+		// native file: retryable, not deletion.
+		process.env.SWARM_SDD_SOURCE = 'speckit';
+		try {
+			fsSync.writeFileSync(
+				path.join(pairDir, '.swarm', 'plan.json'),
+				JSON.stringify({
+					schema_version: '1.0.0',
+					title: 'Pair Plan',
+					swarm: 'test-swarm',
+					current_phase: 1,
+					phases: [
+						{ id: 1, name: 'Phase 1', status: 'in_progress', tasks: [] },
+					],
+					migration_status: 'native',
+					specHash: hashOf('# Spec\n\nGone.\n'),
+				}),
+			);
+
+			expect(() => enforceSpecDriftGate(pairDir, 'save_plan')).toThrow(
+				/retry or repair/,
+			);
+		} finally {
+			delete process.env.SWARM_SDD_SOURCE;
+		}
+	});
+
 	test('a deleted spec blocks as drift', () => {
 		fsSync.writeFileSync(
 			path.join(pairDir, '.swarm', 'plan.json'),

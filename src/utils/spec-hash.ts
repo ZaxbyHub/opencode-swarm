@@ -2,7 +2,10 @@ import { createHash } from 'node:crypto';
 import * as fsSync from 'node:fs';
 import { join } from 'node:path';
 import { type Plan, PlanSchema } from '../config/plan-schema';
-import { readEffectiveSpecSync } from '../sdd/effective-spec';
+import {
+	readEffectiveSpecSync,
+	resolveSddSourceSelection,
+} from '../sdd/effective-spec';
 
 /**
  * Computes SHA-256 hex hash of `.swarm/spec.md` content in the given directory.
@@ -225,14 +228,27 @@ export function detectUnmarkedSpecDriftSync(
 	// retryable, not persistent drift (SolCritic F-010).
 	let deletion = false;
 	if (currentHash === null) {
-		deletion = !fsSync.existsSync(join(directory, '.swarm', 'spec.md'));
-		if (!deletion) {
+		if (fsSync.existsSync(join(directory, '.swarm', 'spec.md'))) {
+			// The native file exists but the reader returned null: permission error or
+			// oversize. Unreadability, not deletion (SolCritic F-010).
 			return {
 				outcome: 'block-retry',
 				reason:
 					'the effective spec could not be read (unreadable or oversize); retry or recover .swarm/spec.md',
 			};
 		}
+		// No native file. A bound projection source (env or sdd config) whose
+		// projection FAILED also returns null — that is a projection error, not a
+		// deletion (SolCritic F-011). Only an unbound, genuinely absent spec is
+		// deletion.
+		if (resolveSddSourceSelection(directory) !== undefined) {
+			return {
+				outcome: 'block-retry',
+				reason:
+					'the bound spec projection could not be produced; retry or repair the projection source',
+			};
+		}
+		deletion = true;
 	}
 	// Obligation-preserving edits keep the allowlist exemption (same as loadPlan).
 	if (deletion || !_internals.isObligationPreserving(directory)) {
