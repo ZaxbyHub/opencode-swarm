@@ -32,9 +32,14 @@ function cleanupDir(dir: string): void {
  * #1821 A3: the direct-text promote path must supply its own predicate + scope
  * or the default-ON `actionability_floor` policy gate blocks the promotion.
  * Prepends the minimum satisfying flags to a `/swarm promote` argv.
+ * #3820: direct-text promotion carries no independent terminal receipt, so
+ * the (now default-active) evidence gate needs the audited override.
  */
 function actionableArgs(...args: string[]): string[] {
 	return [
+		'--force',
+		'--reason',
+		'integration fixture: direct-text promotion has no independent receipt',
 		'--applies-to-tools',
 		'write',
 		'--required-actions',
