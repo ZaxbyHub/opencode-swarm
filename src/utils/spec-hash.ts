@@ -4,7 +4,10 @@ import { join } from 'node:path';
 import { type Plan, PlanSchema } from '../config/plan-schema';
 import {
 	readEffectiveSpecSync,
+	SPEC_SCAN_ENTRY_BUDGET,
+	SpecScanBudgetExceededError,
 	sddProjectionSourcePresentSync,
+	withSpecScanBudget,
 } from '../sdd/effective-spec';
 
 /**
@@ -130,7 +133,11 @@ export function isObligationPreserving(directory: string): boolean {
 		}
 
 		return true;
-	} catch {
+	} catch (error) {
+		// A shared-budget overrun must surface as a retryable block upstream —
+		// folding it into `false` would misclassify exhaustion as drift
+		// (SolCritic F-020).
+		if (error instanceof SpecScanBudgetExceededError) throw error;
 		return false;
 	}
 }
@@ -210,60 +217,50 @@ export function detectUnmarkedSpecDriftSync(
 			reason: '.swarm/plan.json is not valid JSON; recover or retry',
 		};
 	}
-	// SolCritic F-020: bound the COMPLETE gate path. The projection read routes
-	// through the reader's own scans, whose change-dir count is not itself
-	// capped, so the bounded presence walk runs FIRST and an over-budget layout
-	// blocks as retryable without ever entering the unbounded scan. Under the
-	// budget the read stays bounded (the reader caps per-change files and
-	// rejects oversized sources). OPENSPEC_ROOT is un-exported in
-	// effective-spec.ts; the path is mirrored here. On Bun the scandir error
-	// surfaces at the first readSync, so the whole enumeration is wrapped:
-	// ENOENT = changes dir absent = no unbounded scan risk (proceed); any other
-	// scan error = unverifiable = block-retry.
-	{
-		const state = { visited: 0, exhausted: false };
-		let scanError: NodeJS.ErrnoException | undefined;
-		try {
-			const handle = fsSync.opendirSync(join(directory, 'openspec', 'changes'));
-			try {
-				for (;;) {
-					const entry = handle.readSync();
-					if (entry === null) break;
-					if (++state.visited > 2000) {
-						state.exhausted = true;
-						break;
-					}
-				}
-			} finally {
-				try {
-					handle.closeSync();
-				} catch {
-					// best effort
-				}
-			}
-		} catch (error) {
-			scanError = error as NodeJS.ErrnoException;
-			if (scanError?.code !== 'ENOENT') {
-				return {
-					outcome: 'block-retry',
-					reason: 'the openspec projection source could not be scanned; retry',
-				};
-			}
-		}
-		if (state.exhausted) {
+	// Pre-feature plan: no specHash means the pair is exempt (same as loadPlan).
+	// The hashless fast path runs BEFORE any budgeted scan (SolCritic F-020).
+	if (!parsed.specHash) return { outcome: 'allow' };
+	// SolCritic F-020 (gate-owned budget): ONE budget of SPEC_SCAN_ENTRY_BUDGET
+	// directory-entry visits shared across EVERY scan on the markerless path —
+	// the projection read (openspec current-specs walk, changes listing, each
+	// change's nested specs scan, Spec-Kit detection) and the presence
+	// fallback. Entries are charged at every dirent read BEFORE filtering;
+	// exhaustion aborts as a typed retryable block — never a partial hash, a
+	// deletion, or an admission. When the guardrail wraps the whole gate, this
+	// nested call SHARES that outer budget (withSpecScanBudget never mints a
+	// second budget inside an active one), so the post-block diff draws from
+	// the same entry allowance too.
+	try {
+		return withSpecScanBudget(SPEC_SCAN_ENTRY_BUDGET, () =>
+			detectUnmarkedSpecDriftBudgeted(directory, parsed),
+		);
+	} catch (error) {
+		if (error instanceof SpecScanBudgetExceededError) {
 			return {
 				outcome: 'block-retry',
 				reason: 'the openspec projection source could not be scanned; retry',
 			};
 		}
-		void scanError;
+		throw error;
 	}
-	// Pre-feature plan: no specHash means the pair is exempt (same as loadPlan).
-	if (!parsed.specHash) return { outcome: 'allow' };
+}
+
+/**
+ * Budgeted tail of {@link detectUnmarkedSpecDriftSync}: the effective-spec
+ * hash read, the drift/deletion classification, and the presence fallback.
+ * Runs ONLY inside {@link withSpecScanBudget}; a
+ * {@link SpecScanBudgetExceededError} escaping this function is converted by
+ * the caller into a typed retryable block (SolCritic F-020).
+ */
+function detectUnmarkedSpecDriftBudgeted(
+	directory: string,
+	parsed: Plan,
+): UnmarkedSpecDrift {
 	let currentHash: string | null;
 	try {
 		currentHash = effectiveSpecHashSync(directory);
-	} catch {
+	} catch (error) {
+		if (error instanceof SpecScanBudgetExceededError) throw error;
 		return {
 			outcome: 'block-retry',
 			reason: 'the effective spec could not be read; retry',

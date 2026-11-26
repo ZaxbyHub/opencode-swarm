@@ -162,3 +162,8 @@ behavior is untouched (flag unset → marker-only semantics).
   markerless cases in `tests/unit/hooks/spec-drift-block.test.ts`; the unlocked-
   publication, visible-owner, schema-allow, obligation-exemption, and
   WAL-precedence mutants each fail a test.
+  Final hardening (SolCritic): the complete gate path is bounded by one
+  shared 2,000-directory-entry budget covering every SDD scan (current specs,
+  changes, nested change specs, Spec-Kit detection, presence fallbacks);
+  enumeration is incremental (opendirSync), charged before filtering, and
+  exhaustion blocks as retryable — never a partial hash, deletion, or admission.

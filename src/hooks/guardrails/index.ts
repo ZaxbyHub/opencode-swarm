@@ -31,6 +31,10 @@ import {
 	normalizeScopeFiles,
 } from '../../scope/scope-binding';
 import { createScopeLeaseRenewalTracker } from '../../scope/scope-lease-renewal';
+import {
+	SPEC_SCAN_ENTRY_BUDGET,
+	withSpecScanBudget,
+} from '../../sdd/effective-spec';
 import { inspectSpecDriftRecoveryWalSync } from '../../services/spec-drift-recovery';
 import {
 	advanceTaskState,
@@ -397,6 +401,24 @@ export function enforceSpecDriftGate(
 ): void {
 	if (!directory) return;
 	if (!SPEC_DRIFT_BLOCKED_TOOLS.has(toolName)) return;
+	// SolCritic F-020 (gate-owned budget): every directory enumeration on the
+	// gate path — the marker/WAL-arm diff, the markerless pair detect, and the
+	// markerless block-drift diff — shares ONE SPEC_SCAN_ENTRY_BUDGET budget.
+	// computeSpecDiff routes through readEffectiveSpecSync (an enumerating
+	// reader), so without this wrap its diff would launch an unbudgeted scan
+	// after the detect consumed its own budget. An exhausted budget omits the
+	// diff (a block may omit an unavailable diff) but never admits: detect
+	// converts exhaustion into a typed retryable block, and the diff's own
+	// exhaustion is swallowed by its per-arm try/catch below.
+	withSpecScanBudget(SPEC_SCAN_ENTRY_BUDGET, () => {
+		enforceSpecDriftGateBudgeted(directory, toolName);
+	});
+}
+
+function enforceSpecDriftGateBudgeted(
+	directory: string,
+	toolName: string,
+): void {
 	const stalePath = path.join(directory, '.swarm', 'spec-staleness.json');
 	const markerExists = fsSync.existsSync(stalePath);
 	const recoveryState = inspectSpecDriftRecoveryWalSync(directory);
