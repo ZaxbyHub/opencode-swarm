@@ -57,7 +57,7 @@ function git(directory: string, args: string[]): void {
 		stdin: 'ignore',
 		stdio: 'pipe',
 		encoding: 'utf8',
-		timeout: 5_000,
+		timeout: 30_000,
 		maxBuffer: 128 * 1024,
 	});
 	if (result.status !== 0) throw new Error(result.stderr || result.stdout);
