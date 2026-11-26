@@ -39,8 +39,8 @@ import { withTimeout } from '../../utils/timeout';
 import { noteDispatchRunning } from './delegation-trace';
 import { resolveV2ToolBeforeBudgetMs } from './hook-budget';
 import {
-	isNativeV2AsyncSubagentHost,
 	rememberVerifiedNativeChild,
+	type V2SubagentDialect,
 } from './native-async-mode';
 import { normalizeV2AgentRef, seedV1SessionState } from './setup';
 import { recordV2SessionTiming, recordV2ToolTiming } from './timing-trace';
@@ -302,6 +302,7 @@ async function onV2ToolBefore(
 	event: V2ToolHookInput,
 	hooks: V1HooksSubset,
 	directory: string,
+	dialect: V2SubagentDialect,
 ): Promise<void> {
 	recordV2ToolTiming(event, 'tool_before_begin');
 	let beforeSucceeded = false;
@@ -324,8 +325,9 @@ async function onV2ToolBefore(
 		recordCodeModeWrapperCall(event.sessionID, event.id);
 	}
 	try {
-		const nativeAsyncSubagent =
-			isSubagent && isNativeV2AsyncSubagentHost(directory);
+		// PR 3922: the dialect was resolved ONCE per plugin setup from the host
+		// version and closed over at registration — no per-directory registry.
+		const nativeAsyncSubagent = isSubagent && dialect === 'native-2.3';
 		const argsForV1 = isSubagent
 			? mapV2SubagentArgsToV1(event.input, nativeAsyncSubagent)
 			: event.input;
@@ -413,6 +415,7 @@ async function onV2ToolAfter(
 	event: V2ToolHookInput,
 	hooks: V1HooksSubset,
 	directory: string,
+	dialect: V2SubagentDialect,
 ): Promise<void> {
 	recordV2ToolTiming(event, 'tool_after_begin');
 	// The Code Mode wrapper mark is only read by the before chain; drop it now
@@ -425,8 +428,8 @@ async function onV2ToolAfter(
 	}
 	seedV1SessionState(event.sessionID, event.agent, directory);
 	const isSubagent = isV2SubagentToolId(event.tool);
-	const nativeAsyncSubagent =
-		isSubagent && isNativeV2AsyncSubagentHost(directory);
+	// Same per-setup closed-over dialect as the before adapter (PR 3922).
+	const nativeAsyncSubagent = isSubagent && dialect === 'native-2.3';
 	const v1AfterArgs = isSubagent
 		? mapV2SubagentArgsToV1(event.input, nativeAsyncSubagent)
 		: undefined;
@@ -786,6 +789,12 @@ function warnV2HookRegistrationFailure(label: string, err: unknown): void {
 /**
  * Register the tool hooks (execute.before/after).
  *
+ * PR 3922: `dialect` is this SETUP's resolved subagent dialect
+ * (`resolveV2SubagentDialect(ctx.app?.version)` in setup.ts), closed over by
+ * both adapter callbacks so a mid-flight registry mutation can never flip the
+ * mode. Optional for direct callers (tests); omission is the explicit legacy
+ * selection (foreground semantics).
+ *
  * #3352: BOTH registrations of the pair are attempted independently — a
  * rejection of the first never skips its sibling. Each failure records a
  * deferred warning naming the hook + error; the function resolves when at
@@ -797,10 +806,16 @@ export async function registerV2ToolHooks(
 	hooks: V1HooksSubset,
 	directory: string,
 	registrations: V2Registration[],
+	dialect: V2SubagentDialect = 'legacy',
 ): Promise<void> {
 	const before = await withTimeout(
 		ctx.tool.hook('execute.before', async (event: unknown) => {
-			return onV2ToolBefore(event as V2ToolHookInput, hooks, directory);
+			return onV2ToolBefore(
+				event as V2ToolHookInput,
+				hooks,
+				directory,
+				dialect,
+			);
 		}),
 		V2_HOOK_TIMEOUT_MS,
 		new Error(
@@ -813,7 +828,7 @@ export async function registerV2ToolHooks(
 	if (before !== undefined) registrations.push(before);
 	const after = await withTimeout(
 		ctx.tool.hook('execute.after', async (event: unknown) => {
-			return onV2ToolAfter(event as V2ToolHookInput, hooks, directory);
+			return onV2ToolAfter(event as V2ToolHookInput, hooks, directory, dialect);
 		}),
 		V2_HOOK_TIMEOUT_MS,
 		new Error(

@@ -2484,10 +2484,24 @@ async function initializeOpenCodeSwarm(
 		},
 		bootstrapRoot,
 	);
+	// PR 3922 dialect binding: the v2 adapter injects `subagentDialect` into
+	// the init input (src/host/v2/setup.ts, V2InitInput) so THIS setup's
+	// resolved dialect reaches the gate; the pure-v1 entry (OpenCodeSwarm.server)
+	// passes the host PluginInput, which has no such field, and explicitly
+	// selects the legacy dialect here. Validation is fail-closed: only the
+	// exact 'native-2.3' literal widens the gate — anything absent/unknown is
+	// legacy (foreground settlement semantics). The inferred 'native-2.3' |
+	// 'legacy' union is the V2SubagentDialect contract; the type import is
+	// deliberately omitted so this file's line-pinned citations do not shift.
+	const rawSubagentDialect = (ctx as { subagentDialect?: unknown })
+		.subagentDialect;
+	const subagentDialect: 'native-2.3' | 'legacy' =
+		rawSubagentDialect === 'native-2.3' ? 'native-2.3' : 'legacy';
 	const delegationGateHooks = createDelegationGateHook(
 		configWithResolvedAutoReview,
 		bootstrapRoot,
 		agents,
+		{ subagentDialect },
 	);
 	const advisoryInjector = (sessionId: string, message: string) => {
 		const session = swarmState.agentSessions.get(sessionId);

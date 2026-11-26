@@ -30,6 +30,8 @@
  * @opencode/client@2.3.0 (MIT, sst/opencode).
  */
 
+import type { V2SubagentDialect } from './native-async-mode';
+
 /** v2 `App` — host identity (dist/app.d.ts). */
 export interface V2App {
 	readonly name: string;
@@ -814,6 +816,24 @@ export interface V2PluginContext {
 
 /** v2 `Cleanup` — the return of `setup`. */
 export type V2Cleanup = () => Promise<void> | void;
+
+/**
+ * The v1-shaped `PluginInput` view the v2 adapter builds for the shared init
+ * core (`deps.runInit` → src/index.ts `runServerInit` /
+ * `initializeOpenCodeSwarm`). The core consumes only `directory` and `client`
+ * plus, since PR 3922, the per-setup subagent dialect. The v1 host type
+ * (`PluginInput` from @opencode-ai/plugin) has no `subagentDialect` field, so
+ * the pure-v1 entry omits it and the core validates + defaults to 'legacy'
+ * (explicit legacy selection for OpenCode 1 hosts).
+ */
+export interface V2InitInput {
+	readonly client: unknown;
+	readonly directory: string;
+	readonly worktree: string;
+	/** Per-setup subagent dialect resolved from the host version
+	 * (`resolveV2SubagentDialect(ctx.app?.version)` in setup.ts). */
+	readonly subagentDialect: V2SubagentDialect;
+}
 
 /** The v1-shaped hooks object the adapter consumes (structural subset). */
 export interface V1HooksSubset {

@@ -1,19 +1,20 @@
 /**
- * A project-scoped, host-verified compatibility flag for OpenCode 2.3.x.
+ * A per-setup, host-verified subagent dialect for OpenCode 2.3.x (PR 3922).
  * 2.3.x's native `subagent` tool is always asynchronous; it has no background
- * input field. Keep this opt-in to the *known* dialect and never turn it on for
- * the v1 Task tool, where foreground settlement remains valid.
+ * input field. The dialect stays opt-in to the *known* minor and is never
+ * turned on for the v1 Task tool, where foreground settlement remains valid.
  *
- * Ownership is per v2 plugin setup instance. One cleanup must not remove the
- * mode while another live setup for the same project still owns it.
+ * Binding (SolCritic contract): ONE immutable dialect is resolved per v2
+ * plugin setup from the host version (src/host/v2/setup.ts) and threaded to
+ * the boundaries that need it — the v2 tool-hook adapters (src/host/v2/
+ * hooks.ts) and the v1 delegation gate (src/hooks/delegation-gate.ts via the
+ * shared init core). There is no per-directory registry and no release
+ * lifecycle: resolution is pure, cannot fail, and nothing global remains, so
+ * neither plugin-init invariant 1 nor bounded-state invariant 8 needs an
+ * exception for this flag. The only mutable state in this module is the
+ * verified-child FIFO below (bounded, invariant 8), unchanged.
  */
-const ownersByDirectory = new Map<string, Set<string>>();
-// Bound (invariant 8). Each entry is one project directory key plus a small owner
-// token set, so 1024 live projects stays well under a megabyte. At the bound a
-// registration fails closed: a verified 2.3 host with the flag off would settle
-// async children as foreground (wrong dialect), so a loud refusal is safer than
-// a silent degrade.
-const MAX_LIVE_PROJECTS = 1024;
+export type V2SubagentDialect = 'legacy' | 'native-2.3';
 
 export function isKnownNativeAsyncSubagentVersion(value: unknown): boolean {
 	if (typeof value !== 'string') return false;
@@ -22,31 +23,18 @@ export function isKnownNativeAsyncSubagentVersion(value: unknown): boolean {
 	return version !== null && Number(version[1]) === 3;
 }
 
-export function registerNativeV2AsyncSubagents(
-	directory: string,
-	owner: string,
-): () => void {
-	if (!directory || !owner)
-		throw new Error('v2 native async mode: missing owner identity');
-	let owners = ownersByDirectory.get(directory);
-	if (!owners) {
-		if (ownersByDirectory.size >= MAX_LIVE_PROJECTS) {
-			throw new Error('v2 native async mode: project registry at capacity');
-		}
-		owners = new Set<string>();
-		ownersByDirectory.set(directory, owners);
-	}
-	owners.add(owner);
-	return () => {
-		const current = ownersByDirectory.get(directory);
-		if (!current) return;
-		current.delete(owner);
-		if (current.size === 0) ownersByDirectory.delete(directory);
-	};
-}
-
-export function isNativeV2AsyncSubagentHost(directory: string): boolean {
-	return (ownersByDirectory.get(directory)?.size ?? 0) > 0;
+/**
+ * Resolve ONE immutable dialect per plugin setup from the existing version
+ * check. Unknown host versions deliberately retain the legacy foreground
+ * semantics. Pure and total: no capacity path, no throw, no cleanup — a setup
+ * that resolves this can no longer fail at this step.
+ */
+export function resolveV2SubagentDialect(
+	hostVersion: unknown,
+): V2SubagentDialect {
+	return isKnownNativeAsyncSubagentVersion(hostVersion)
+		? 'native-2.3'
+		: 'legacy';
 }
 
 /** Host-confirmed child identity, used to distinguish a child's completed

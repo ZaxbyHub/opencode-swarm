@@ -68,7 +68,7 @@ import {
 import { isReadOnlyTool } from '../full-auto/policy';
 import { compareTaskWorkflowStateRank } from '../gate-evidence';
 import { isMarkdownOnlyTaskChange } from '../gate-evidence-classification.js';
-import { isNativeV2AsyncSubagentHost } from '../host/v2/native-async-mode';
+import type { V2SubagentDialect } from '../host/v2/native-async-mode';
 import {
 	routeReviewForChanges,
 	shouldParallelizeReview,
@@ -3843,11 +3843,19 @@ function boundedRedactedErrorDetail(error: unknown): string {
 /**
  * Creates the experimental.chat.messages.transform hook for delegation gating.
  * Inspects coder delegations and warns when tasks are oversized or batched.
+ *
+ * PR 3922: `options.subagentDialect` carries THIS setup's resolved v2 subagent
+ * dialect (resolved once from the host version in src/host/v2/setup.ts and
+ * threaded through the shared init core). The optional param defaults to the
+ * legacy dialect so every existing caller — and the pure-v1 entry, which
+ * explicitly selects legacy — compiles unchanged and keeps foreground
+ * semantics; there is no per-directory registry consulted here anymore.
  */
 export function createDelegationGateHook(
 	config: PluginConfig,
 	directory: string,
 	registeredAgents?: Record<string, { model?: unknown; mode?: unknown }>,
+	options?: { subagentDialect?: V2SubagentDialect },
 ): {
 	messagesTransform: (
 		input: Record<string, never>,
@@ -3897,7 +3905,10 @@ export function createDelegationGateHook(
 	// is explicitly true. The dispatch gate MUST use that exact condition too:
 	// inferring the flag from the v2 host would persist a pending delegation
 	// without ANY enabled observer to consume its terminal event.
-	const nativeV2AsyncSubagents = isNativeV2AsyncSubagentHost(directory);
+	// PR 3922: the v2 host mode is the captured, immutable per-setup dialect
+	// (bound once from the host version), not a per-directory registry read —
+	// unknown/omitted values stay legacy (foreground semantics).
+	const nativeV2AsyncSubagents = options?.subagentDialect === 'native-2.3';
 	const configuredBackgroundSubagents = (
 		config.hooks as Record<string, unknown> | undefined
 	)?.background_subagents;
