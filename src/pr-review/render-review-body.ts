@@ -2,11 +2,17 @@
  * Pure PR-review submission body renderer (issue #3096, Workstream C PR 1/2).
  *
  * Renders settled PR-review findings into the GitHub PR Review submission body
- * plus the inline-comment plan. STRICTLY pure: no filesystem, no network, no
- * clock — authorization and transport live in `src/tools/pr-review-submission.ts`
+ * plus the inline-comment plan. Pure over its INPUTS (no network, no clock,
+ * no ambient state); when the caller supplies a project directory it
+ * additionally resolves finding-location paths against that directory
+ * (read-only `fs.realpathSync` — #3844 round-9). Authorization and transport
+ * live in `src/tools/pr-review-submission.ts`
  * so any future preview surface (e.g. #3097 post-abort export) can reuse this
  * module without submission authority.
  */
+
+import { redactLocationPath } from '../review/review-file-path';
+import { redactEvidenceText } from '../security/evidence-redaction';
 
 export const PR_REVIEW_INLINE_COMMENT_CAP = 20;
 
@@ -46,6 +52,14 @@ export interface RendererCoverage {
 
 export interface RenderReviewBodyInput {
 	run_id: string;
+	/**
+	 * #3844 round-9: the project directory, when the caller knows it. The
+	 * finding LOCATION then follows the path-aware rule (a path that names
+	 * a file in the checkout is kept verbatim so the inline comment can
+	 * anchor; everything else is redacted). Without it the location is
+	 * redacted by the plain evidence rule.
+	 */
+	directory?: string;
 	pr_head_sha: string;
 	verdict?: string;
 	base_verification?: string;
@@ -146,6 +160,7 @@ function postedMarker(findingId: string): string {
 function selectSurvivors(
 	findings: readonly RendererFinding[],
 	existingComments: readonly string[],
+	directory?: string,
 ): { survivors: SurvivingFinding[]; skippedAsPosted: string[] } {
 	const skippedAsPosted: string[] = [];
 	const seenIds = new Set<string>();
@@ -161,11 +176,38 @@ function selectSurvivors(
 		}
 		if (seenIds.has(id)) continue;
 		seenIds.add(id);
-		const location = parseLocation(finding.file_line ?? '');
+		// #3844: the location is reviewer-authored free text ("path:line"
+		// plus prose), and the prose can quote a credential. It is redacted
+		// BEFORE it is parsed, so neither the published body line nor the
+		// inline-comment path can carry one.
+		const rawFileLine = finding.file_line ?? '';
+		const fileLine =
+			directory !== undefined
+				? redactLocationPath(directory, rawFileLine)
+				: redactEvidenceText(rawFileLine);
+		// An inline comment targets a REAL repository path. When the
+		// redaction CHANGED the path, the path itself carried a
+		// credential-shaped component, so the redacted path names a file
+		// that does not exist — publishing it would make the submission
+		// invalid (GitHub rejects a comment on a nonexistent path). The
+		// finding then stays a body-only entry: the body line shows the
+		// redacted location and no inline comment is emitted.
+		const rawLocation = parseLocation(rawFileLine);
+		const redactedLocation = parseLocation(fileLine);
+		const location =
+			rawLocation &&
+			redactedLocation &&
+			rawLocation.path === redactedLocation.path &&
+			rawLocation.line === redactedLocation.line
+				? rawLocation
+				: null;
 		const evidence = singleLine(finding.evidence ?? '', 400);
+		// The dedupe key is the RAW location (identity): two findings in
+		// different files whose paths redact to the same placeholder must
+		// not collapse into one. The redacted text is display-only.
 		const locationKey = location
 			? `${location.path}:${location.line}:${evidence}`
-			: `${finding.file_line ?? ''}:::${evidence}`;
+			: `${rawFileLine}:::${evidence}`;
 		if (seenLocations.has(locationKey)) continue;
 		seenLocations.add(locationKey);
 		survivors.push({ finding, location });
@@ -186,6 +228,7 @@ export function renderPrReviewSubmissionBody(
 	const { survivors, skippedAsPosted } = selectSurvivors(
 		liveFindings,
 		existingComments,
+		input.directory,
 	);
 
 	// Stable severity grouping: rank first, input order within a group.
@@ -217,7 +260,12 @@ export function renderPrReviewSubmissionBody(
 		lines.push(`### ${severity}`);
 		for (const entry of group) {
 			const id = singleLine(entry.finding.finding_id ?? '', 128);
-			const location = singleLine(entry.finding.file_line ?? '', 200);
+			const location = singleLine(
+				input.directory !== undefined
+					? redactLocationPath(input.directory, entry.finding.file_line ?? '')
+					: redactEvidenceText(entry.finding.file_line ?? ''),
+				200,
+			);
 			// status is findings.jsonl-derived like every other interpolated
 			// field, so it gets the same singleLine flattening/cap before it
 			// can reach the published body.
@@ -225,7 +273,7 @@ export function renderPrReviewSubmissionBody(
 				typeof entry.finding.status === 'string' &&
 				entry.finding.status !== '' &&
 				entry.finding.status.toUpperCase() !== 'CONFIRMED'
-					? ` (${singleLine(entry.finding.status, 64).toLowerCase()})`
+					? ` (${singleLine(redactEvidenceText(entry.finding.status), 64).toLowerCase()})`
 					: '';
 			// Issue #2906: only a flipping verdict (order_agreement 'disagree')
 			// renders the order-unstable marker; when nothing is unstable the
@@ -234,7 +282,7 @@ export function renderPrReviewSubmissionBody(
 				entry.finding.order_agreement === 'disagree' ? ' (order-unstable)' : '';
 			if (orderUnstable) orderUnstableCount += 1;
 			lines.push(
-				`- [${id}]${status}${orderUnstable} ${location} — ${singleLine(entry.finding.evidence ?? '', 400)}`,
+				`- [${id}]${status}${orderUnstable} ${location} — ${singleLine(redactEvidenceText(entry.finding.evidence ?? ''), 400)}`,
 			);
 		}
 	}
@@ -254,10 +302,18 @@ export function renderPrReviewSubmissionBody(
 		);
 		for (const finding of suppressedUnstable) {
 			const id = singleLine(finding.finding_id ?? '', 128);
-			const location = singleLine(finding.file_line ?? '', 200);
-			const status = singleLine(finding.status ?? '', 64).toLowerCase();
+			const location = singleLine(
+				input.directory !== undefined
+					? redactLocationPath(input.directory, finding.file_line ?? '')
+					: redactEvidenceText(finding.file_line ?? ''),
+				200,
+			);
+			const status = singleLine(
+				redactEvidenceText(finding.status ?? ''),
+				64,
+			).toLowerCase();
 			lines.push(
-				`- [${id}] (order-unstable, ${status}) ${location} — ${singleLine(finding.evidence ?? '', 400)}`,
+				`- [${id}] (order-unstable, ${status}) ${location} — ${singleLine(redactEvidenceText(finding.evidence ?? ''), 400)}`,
 			);
 		}
 	}
@@ -320,7 +376,7 @@ export function renderPrReviewSubmissionBody(
 	const inlineComments: RenderedInlineComment[] = capped.map((entry) => ({
 		path: singleLine(entry.location!.path, 300),
 		line: entry.location!.line,
-		body: `[${singleLine(entry.finding.finding_id ?? '', 128)}] ${singleLine(entry.finding.evidence ?? '', 400)}`,
+		body: `[${singleLine(entry.finding.finding_id ?? '', 128)}] ${singleLine(redactEvidenceText(entry.finding.evidence ?? ''), 400)}`,
 		finding_id: entry.finding.finding_id,
 	}));
 

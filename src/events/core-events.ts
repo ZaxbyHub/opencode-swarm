@@ -18,8 +18,12 @@
  *            CORE_EVENT_LIMITS.activeMaxBytes / activeMaxEntries / ageMaxMs.
  *
  * Lifetime totals = folded aggregate (header) + retained window (file). Event
- * lines are preserved byte-for-byte (both `event:` and `type:` discriminators
- * pass through untouched — the store never normalizes producer schemas).
+ * lines are preserved byte-for-byte for every field EXCEPT the designated
+ * string free-text carriers (#3844 fold-in: detail/message/summary/reason/
+ * description are redacted at both append writers — a forgetting producer
+ * cannot persist credential prose). Both `event:` and `type:` discriminators
+ * and every structural field pass through untouched — the store never
+ * normalizes producer schemas.
  *
  * AUTHORITATIVE PARTITION (issue #2039 requirement 2/5): the four
  * correctness-relevant event types (`coder_retry_circuit_breaker`,
@@ -56,6 +60,7 @@ import {
 	readOwnerLockPayload,
 	releaseOwnerLock,
 } from '../parallel/file-locks.js';
+import { redactEvidenceText } from '../security/evidence-redaction.js';
 import { telemetry } from '../telemetry.js';
 import { renameSyncWithRetry } from '../utils/atomic-write.js';
 import { warn } from '../utils/logger.js';
@@ -157,9 +162,161 @@ const RETRY_ACTIONS: ReadonlySet<string> = new Set([
 	'sounding_board_manual_approval',
 ]);
 
+/**
+ * #3844 fold-in (closes #3899 AC5): the string-valued free-text carrier
+ * fields every producer may put on an event. The writer redacts these BY
+ * DEFAULT before the durable append (appendCoreEventSync AND the batch
+ * appendCoreEventsSync — round-9 review finding: the batch writer initially
+ * bypassed the redaction); structural fields — ids, types, numbers, nested
+ * authority payloads — pass through unchanged, and authority-key/dedupe
+ * comparisons always run against the ORIGINAL event so at-most-once
+ * semantics stay byte-stable.
+ *
+ * Producer-carried prose audit (round-9): detail/message/summary/reason are
+ * the carrier names used across hooks/background producers; `description`
+ * is additionally carried by observation-shaped batch producers
+ * (src/hooks/curator.ts persists obs.description through the batch writer).
+ * This set is a deliberate, audited allowlist of FREE-TEXT CARRIERS — not
+ * an exhaustive description of every event field; a producer adding a NEW
+ * prose carrier should extend this set (the #3844 fold-in suite pins the
+ * current four+description contract).
+ */
+const CORE_EVENT_FREE_TEXT_FIELDS = new Set([
+	'detail',
+	'message',
+	'summary',
+	'reason',
+	'description',
+]);
+
+/**
+ * Fit a REDACTED event to the line bound.
+ *
+ * A redaction placeholder can be LONGER than the credential it replaces (a
+ * URL userinfo grows by ten characters), so an event whose free text sat
+ * exactly on the line bound can be pushed PAST it by the redaction — and
+ * the append would then refuse an event the un-redacted writer accepted.
+ * The redacted value is secret-free, so shortening it is safe: the
+ * free-text carriers are truncated (the clamp drops a half-written marker)
+ * until the serialized line fits.
+ *
+ * The refusal contract is unchanged: the caller checks the UN-redacted line
+ * first, so an event that was already over the bound is still refused. This
+ * only absorbs the growth the redaction itself caused.
+ */
+function fitRedactedEventToLineLimit(
+	event: Record<string, unknown>,
+	limit: number,
+): { event: Record<string, unknown>; line: string } | null {
+	const carriers = Object.keys(event).filter(
+		(key) =>
+			CORE_EVENT_FREE_TEXT_FIELDS.has(key) && typeof event[key] === 'string',
+	);
+	if (carriers.length === 0) {
+		const line = `${JSON.stringify(event)}\n`;
+		return Buffer.byteLength(line) - 1 <= limit ? { event, line } : null;
+	}
+	const emptied: Record<string, unknown> = { ...event };
+	for (const key of carriers) emptied[key] = '';
+	const overhead = Buffer.byteLength(`${JSON.stringify(emptied)}\n`) - 1;
+	if (overhead > limit) return null;
+	// The line is JSON, so a quote, a backslash or a control character costs
+	// 2-6 bytes in the SERIALIZED line and one byte in the text. The fit is
+	// therefore measured on the serialized line itself: the longest carrier
+	// is trimmed by the overflow until the line fits, and the serialized
+	// size is re-checked on every round.
+	const fitted: Record<string, unknown> = { ...event };
+	for (let round = 0; round < 64; round++) {
+		const line = `${JSON.stringify(fitted)}\n`;
+		const size = Buffer.byteLength(line) - 1;
+		if (size <= limit) return { event: fitted, line };
+		const overflow = size - limit;
+		let longestKey = carriers[0];
+		for (const key of carriers) {
+			if (
+				String(fitted[key] ?? '').length >
+				String(fitted[longestKey] ?? '').length
+			) {
+				longestKey = key;
+			}
+		}
+		const value = String(fitted[longestKey] ?? '');
+		if (value.length === 0) return null;
+		fitted[longestKey] = trimRedactedCarrier(
+			value,
+			Math.max(0, value.length - overflow),
+		);
+	}
+	return null;
+}
+
+/**
+ * Trim a redacted free-text carrier to a character budget.
+ *
+ * A trailing PARTIAL marker is dropped (a persisted `[REDACTED:git` is
+ * neither the secret nor a usable value). Unlike the schema-bound clamp, an
+ * event carrier may end up EMPTY: the event's free text has no minimum
+ * length, and an empty value is better than a half-written marker.
+ */
+function trimRedactedCarrier(value: string, maxChars: number): string {
+	if (maxChars <= 0) return '';
+	let cut = value.length <= maxChars ? value : value.slice(0, maxChars);
+	// A cut that lands INSIDE a marker's head ('[RED', '[REDACTE') leaves a
+	// fragment that is neither the secret nor a usable value: the tail is
+	// dropped when it is a PREFIX of a marker head and the marker was never
+	// closed.
+	const markerStart = Math.max(cut.lastIndexOf('['), cut.lastIndexOf('<'));
+	if (markerStart >= 0) {
+		const tail = cut.slice(markerStart);
+		const head = tail.startsWith('<') ? '<redacted' : '[REDACTED';
+		// The tail is a fragment when it is a prefix of a marker head OR it
+		// starts with one (a cut inside the head leaves '[RED', or — with a
+		// family suffix — '[REDACTED:git').
+		if (
+			(head.startsWith(tail) || tail.startsWith(head)) &&
+			!tail.includes(']') &&
+			!tail.includes('>')
+		) {
+			cut = cut.slice(0, markerStart);
+		}
+	}
+	return cut;
+}
+
+function redactCoreEventFreeText(
+	event: Record<string, unknown>,
+): Record<string, unknown> {
+	let mutated = false;
+	const clone: Record<string, unknown> = {};
+	for (const [key, value] of Object.entries(event)) {
+		if (CORE_EVENT_FREE_TEXT_FIELDS.has(key) && typeof value === 'string') {
+			clone[key] = redactEvidenceText(value);
+			mutated = true;
+		} else {
+			clone[key] = value;
+		}
+	}
+	return mutated ? clone : event;
+}
+
 /** The authority key for an event, or null when the event is not in the
  *  closed authority set (or lacks the identity fields the key needs). */
 function authorityKeyFor(event: Record<string, unknown>): string | null {
+	// #3770: phase_complete events use the legacy `event` field (not `type`)
+	// and carry their own transition-scoped identity (ledger root digest +
+	// phase_completed seq, minted by phase-complete.ts). Deduped on append so
+	// a repeated completion call — or a retry healing a crash between the
+	// plan save and the append — cannot write a second record, while a
+	// genuine reopen+re-complete gets a distinct identity and appends.
+	if (
+		event.event === 'phase_complete' &&
+		typeof event.phase === 'number' &&
+		Number.isFinite(event.phase) &&
+		typeof event.completionIdentity === 'string' &&
+		event.completionIdentity.length > 0
+	) {
+		return `phase_complete|${event.phase}|${event.completionIdentity}`;
+	}
 	switch (event.type) {
 		case AUTHORITY_RETRY: {
 			if (
@@ -1057,11 +1214,31 @@ export function appendCoreEventSync(
 	options?: { dedupeOnAuthorityKey?: boolean; ensureSwarmDir?: boolean },
 ): void {
 	assertCoreEventRoot(directory);
-	const line = `${JSON.stringify(event)}\n`;
-	const lineBytes = Buffer.byteLength(line);
-	if (lineBytes - 1 > _internals.limits.maxLineBytes) {
+	// #3844 fold-in (closes #3899 AC5): the events writer is the last durable
+	// boundary every producer funnels through, so string-valued FREE-TEXT
+	// carriers (detail/message/summary/reason) are redacted BY DEFAULT — a
+	// producer that forgets to sanitize its own prose cannot leak a
+	// credential into .swarm/events.jsonl. Structural fields (ids, types,
+	// numbers, nested authority payloads) pass through unchanged; the
+	// authority key and dedupe comparisons below still run against the
+	// ORIGINAL event so at-most-once semantics are byte-stable.
+	// The refusal contract is the UN-redacted line: an event that was
+	// already over the bound is refused exactly as before. The redacted
+	// line is then fitted, because a redaction placeholder can be longer
+	// than the credential it replaces (see fitRedactedEventToLineLimit).
+	const rawLine = `${JSON.stringify(event)}\n`;
+	if (Buffer.byteLength(rawLine) - 1 > _internals.limits.maxLineBytes) {
 		throw new Error(CORE_EVENT_LINE_TOO_LARGE);
 	}
+	const persisted = redactCoreEventFreeText(event);
+	const fitted = fitRedactedEventToLineLimit(
+		persisted,
+		_internals.limits.maxLineBytes,
+	);
+	if (!fitted) {
+		throw new Error(CORE_EVENT_LINE_TOO_LARGE);
+	}
+	const line = fitted.line;
 	const filePath = coreEventsFilePath(directory);
 	const swarmDir = path.join(directory, '.swarm');
 
@@ -1150,11 +1327,30 @@ export function appendCoreEventsSync(
 ): void {
 	if (events.length === 0) return;
 	assertCoreEventRoot(directory);
-	const lines = events.map((event) => `${JSON.stringify(event)}\n`);
-	for (const line of lines) {
-		if (Buffer.byteLength(line) - 1 > _internals.limits.maxLineBytes) {
+	// #3844 fold-in (closes #3899 AC5): the batch writer carries the SAME
+	// default free-text redaction as the single writer — identical semantics
+	// per event, as the docblock promises. Authority keys and dedupe
+	// comparisons below run against each ORIGINAL event.
+	const persistedEvents: Record<string, unknown>[] = [];
+	const lines: string[] = [];
+	for (const event of events) {
+		// The refusal contract is the UN-redacted line (unchanged); the
+		// redacted line is fitted, because a redaction placeholder can be
+		// longer than the credential it replaces.
+		const rawLine = `${JSON.stringify(event)}\n`;
+		if (Buffer.byteLength(rawLine) - 1 > _internals.limits.maxLineBytes) {
 			throw new Error(CORE_EVENT_LINE_TOO_LARGE);
 		}
+		const persisted = redactCoreEventFreeText(event);
+		const fitted = fitRedactedEventToLineLimit(
+			persisted,
+			_internals.limits.maxLineBytes,
+		);
+		if (!fitted) {
+			throw new Error(CORE_EVENT_LINE_TOO_LARGE);
+		}
+		persistedEvents.push(fitted.event);
+		lines.push(fitted.line);
 	}
 	const filePath = coreEventsFilePath(directory);
 	const swarmDir = path.join(directory, '.swarm');

@@ -335,7 +335,11 @@ export async function archiveSqliteSnapshot(
 
 	let snapshotDb: Database | null = null;
 	try {
-		snapshotDb = new Db(opts.sourcePath);
+		// #3773: open the archive SOURCE read-only — VACUUM INTO writes only
+		// the destination, and a diagnostic/archival path must never take a
+		// writable connection on a store (the same driver-option form
+		// withProjectDbReadOnly uses, which also replays an existing WAL).
+		snapshotDb = new Db(opts.sourcePath, { readonly: true });
 		try {
 			snapshotDb.run(`PRAGMA busy_timeout = ${busyTimeoutMs};`);
 			snapshotDb.run(buildVacuumIntoSql(destTemp));

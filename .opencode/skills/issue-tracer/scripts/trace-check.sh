@@ -1146,6 +1146,7 @@ merge_check() {
 
 merge_identity() {
   local base head squash parent reviewed actual commit
+  local parents parent_count second=""
   [ "$#" -eq 3 ] || usage
   base="$1"; head="$2"; squash="$3"
   for commit in "$base" "$head" "$squash"; do
@@ -1153,7 +1154,22 @@ merge_identity() {
       echo 'merge-identity: expected three full commit IDs' >&2; return 1;
     }
   done
-  parent="$(git show -s --format=%P "$squash")" || return 1
+  # A squash carries ONE parent; a merge commit carries TWO. Both are
+  # legitimate shapes for the same guarantee (the merged content IS the
+  # reviewed content), so the parent COUNT is read rather than assumed: the
+  # one-parent arm keeps its existing behaviour exactly, and the two-parent
+  # arm compares the FIRST parent's patch-id with the reviewed head's - a
+  # merge commit's diff against its first parent is exactly the change that
+  # was merged.
+  parents="$(git show -s --format=%P "$squash")" || return 1
+  parent_count="$(printf '%s' "$parents" | wc -w | tr -d ' ')"
+  case "$parent_count" in
+    1) parent="$(printf '%s' "$parents" | awk '{print $1}')" ;;
+    2) parent="$(printf '%s' "$parents" | awk '{print $1}')"
+       second="$(printf '%s' "$parents" | awk '{print $2}')"
+       is_hex "$second" || { echo 'merge-identity: second parent is not a commit id' >&2; return 1; } ;;
+    *) echo 'merge-identity: expected one or two parents' >&2; return 1 ;;
+  esac
   is_hex "$parent" || { echo 'merge-identity: expected a squash with one parent' >&2; return 1; }
   git merge-base --is-ancestor "$base" "$head" || return 1
   git merge-base --is-ancestor "$base" "$parent" || return 1
@@ -1162,6 +1178,7 @@ merge_identity() {
   reviewed="${reviewed%% *}"; actual="${actual%% *}"
   is_hex "$reviewed" && [ "$reviewed" = "$actual" ] || { echo 'merge-identity: stable patch IDs differ or are empty' >&2; return 1; }
   printf 'merge-identity-v1 base=%s head=%s squash=%s squash-parent=%s patch-id=%s\n' "$base" "$head" "$squash" "$parent" "$reviewed"
+  [ -z "$second" ] || printf 'merge-identity-second-parent=%s\n' "$second"
 }
 
 # Print (never write) the rebind gate row that re-binds a gate's existing

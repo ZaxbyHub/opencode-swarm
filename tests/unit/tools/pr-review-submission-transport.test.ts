@@ -234,6 +234,30 @@ describe('pr_review_submission transport (AC1)', () => {
 		);
 	});
 
+	test('a REAL deep path survives the live submission payload (round 10)', async () => {
+		// The artifact writer persists a real repository path verbatim
+		// (the path-aware rule); the submission renderer must NOT re-mangle
+		// it with the plain redactor — the round-9 renderer pins exercise
+		// renderPrReviewSubmissionBody directly, this leg exercises the
+		// production submission caller end to end (seeded rows -> POST
+		// payload -> inline comments).
+		const DEEP =
+			'src/main/java/org/springframework/security/oauth2/server/authorization/OAuth2AuthorizationCodeRequestAuthenticationProvider.java';
+		await fs.mkdir(join(directory, DEEP, '..'), { recursive: true });
+		await fs.writeFile(join(directory, DEEP), 'class X {}\\n', 'utf-8');
+		await seedRun(directory, [record('DP-1', 'HIGH', `${DEEP}:42`)]);
+		await execute(validArgs());
+		const payload = (await readPayload(calls[calls.length - 1])) as unknown as {
+			body: string;
+			comments: Array<{ path: string; line: number; body: string }>;
+		};
+		expect(payload.body).toContain(`${DEEP}:42`);
+		expect(payload.body).not.toContain('[REDACTED');
+		expect(payload.comments).toHaveLength(1);
+		expect(payload.comments[0]!.path).toBe(DEEP);
+		expect(payload.comments[0]!.line).toBe(42);
+	});
+
 	test('event is REQUEST_CHANGES for CRITICAL/HIGH findings, COMMENT otherwise', async () => {
 		await seedRun(directory, [record('E-1', 'HIGH', 'src/e1.ts:1')]);
 		await execute(validArgs());

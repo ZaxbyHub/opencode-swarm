@@ -13,7 +13,6 @@ import { executePhaseComplete } from '../../src/tools/phase-complete';
 
 describe('phase_complete integration — events.jsonl', () => {
 	let tempDir: string;
-
 	beforeEach(() => {
 		resetSwarmState();
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-int-test-'));
@@ -24,7 +23,6 @@ describe('phase_complete integration — events.jsonl', () => {
 		fs.rmSync(tempDir, { recursive: true, force: true });
 		resetSwarmState();
 	});
-
 	/**
 	 * Helper to read events.jsonl and parse all lines
 	 * @param eventType - Optional filter to only return events of this type
@@ -45,7 +43,6 @@ describe('phase_complete integration — events.jsonl', () => {
 		}
 		return events;
 	}
-
 	function writeConfig(config: Record<string, unknown>): void {
 		config.knowledge ??= { enabled: false, sweep_enabled: false };
 		config.curator ??= { enabled: false };
@@ -55,7 +52,6 @@ describe('phase_complete integration — events.jsonl', () => {
 			JSON.stringify(config, null, 2),
 		);
 	}
-
 	/**
 	 * Helper to write retrospective evidence bundle for retrospective gate
 	 */
@@ -96,7 +92,6 @@ describe('phase_complete integration — events.jsonl', () => {
 			JSON.stringify(evidence, null, 2),
 		);
 	}
-
 	/**
 	 * Helper to write gate evidence files for Phase 4 mandatory gates
 	 */
@@ -139,7 +134,6 @@ describe('phase_complete integration — events.jsonl', () => {
 			JSON.stringify(driftVerifier, null, 2),
 		);
 	}
-
 	describe('1. Full successful architect session', () => {
 		it('writes correct event with all agents dispatched', async () => {
 			writeConfig({
@@ -152,7 +146,6 @@ describe('phase_complete integration — events.jsonl', () => {
 			recordPhaseAgentDispatch(sessionID, 'coder');
 			recordPhaseAgentDispatch(sessionID, 'reviewer');
 			recordPhaseAgentDispatch(sessionID, 'test_engineer');
-
 			writeRetro(1);
 			writeGateEvidence(1);
 			const result = await executePhaseComplete(
@@ -176,7 +169,6 @@ describe('phase_complete integration — events.jsonl', () => {
 			// Assert: events.jsonl has exactly 1 phase_complete event
 			const events = readEvents('phase_complete');
 			expect(events.length).toBe(1);
-
 			const event = events[0];
 			expect(event.event).toBe('phase_complete');
 			expect(event.phase).toBe(1);
@@ -189,7 +181,6 @@ describe('phase_complete integration — events.jsonl', () => {
 			expect(event.timestamp).toBeDefined();
 		});
 	});
-
 	describe('2. Incomplete phase (missing agents in enforce mode)', () => {
 		it('blocks before writing an event when required agents are missing', async () => {
 			// Default config: required_agents: [coder, reviewer, test_engineer], require_docs: true, policy: enforce
@@ -500,7 +491,7 @@ describe('phase_complete integration — events.jsonl', () => {
 	});
 
 	describe('8. Multiple sessions write to same events.jsonl', () => {
-		it('appends events from different sessions', async () => {
+		it('appends events from different sessions (#3770: distinct phases — a same-phase second session dedupes to one event)', async () => {
 			writeConfig({
 				phase_complete: {
 					enabled: true,
@@ -517,16 +508,25 @@ describe('phase_complete integration — events.jsonl', () => {
 			writeGateEvidence(1);
 			await executePhaseComplete({ phase: 1, sessionID: session1 }, tempDir);
 
-			// Session 2
+			// Session 2 — distinct phase so each call is a distinct transition
+			// (the exactly-once dedupe collapses same-phase duplicates, pinned
+			// separately below)
 			const session2 = 'sess2';
 			ensureAgentSession(session2);
-			writeRetro(1);
-			writeGateEvidence(1);
-			await executePhaseComplete({ phase: 1, sessionID: session2 }, tempDir);
+			writeRetro(2);
+			writeGateEvidence(2);
+			await executePhaseComplete({ phase: 2, sessionID: session2 }, tempDir);
 
-			// Should have 2 phase_complete events
+			// Should have 2 phase_complete events (one per distinct transition)
 			const events = readEvents('phase_complete');
 			expect(events.length).toBe(2);
+			expect(events[0].phase).toBe(1);
+			expect(events[1].phase).toBe(2);
+
+			// #3770 exactly-once: session 2 replays phase 1 — the same
+			// transition dedupes to the existing event, still exactly 2.
+			await executePhaseComplete({ phase: 1, sessionID: session2 }, tempDir);
+			expect(readEvents('phase_complete').length).toBe(2);
 		});
 	});
 });

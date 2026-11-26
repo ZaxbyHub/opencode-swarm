@@ -74,12 +74,14 @@ import { validateSwarmPath } from '../hooks/utils';
 import { tryAcquireLock } from '../parallel/file-locks.js';
 import { writeCheckpoint } from '../plan/checkpoint';
 import {
+	computeLedgerEventHash,
 	computePlanStructureHash,
 	ledgerExists,
+	peekLedgerEventsExact,
 	replayFromLedger,
 	takeSnapshotEvent,
 } from '../plan/ledger';
-import { loadPlan, savePlan } from '../plan/manager';
+import { loadPlan, loadPlanJsonOnly, savePlan } from '../plan/manager';
 import type { ReviewModelDispatcher } from '../review/contracts.js';
 import type { ReviewAgentModelRegistry } from '../review/runtime.js';
 import { runMemoryConsolidationFireAndForget } from '../services/memory-consolidation.js';
@@ -106,8 +108,16 @@ import {
 	runHallucinationGate,
 	runMutationGate,
 	runPhaseCouncilGate,
+	runPlannedTasksGate,
 	runTodoGateGate,
 } from './phase-complete/gates/index.js';
+import {
+	PLANNED_TASKS_BLOCKED_REASON,
+	PLANNED_TASKS_UNKNOWN_REASON,
+	plannedTasksBlockedMessage,
+	plannedTasksUnknownMessage,
+	readUnfinishedPlannedTasks,
+} from './phase-complete/gates/planned-tasks-gate.js';
 import {
 	collectPhaseGateReport,
 	formatPhaseGateCompatibility,
@@ -140,6 +150,7 @@ export const phaseCompletePreflightInternals = {
 	runHallucinationGate,
 	runMutationGate,
 	runPhaseCouncilGate,
+	runPlannedTasksGate,
 	runArchitectureSupervisorGate,
 	runFinalReviewGate,
 	runFinalCouncilGate,
@@ -416,6 +427,65 @@ interface PhaseCompleteEvent {
 	agents_missing: string[];
 	status: PhaseCompleteResult['status'];
 	summary: string | null;
+	/**
+	 * #3770 exactly-once identity: `${ledgerRootEventDigest}:${seq}` of the
+	 * most recent `phase_completed` ledger event for this phase (read-only
+	 * peek, plan-root-scoped so re-roots that reuse seq values cannot
+	 * collide). Consumed by the core-events authority-key dedupe.
+	 */
+	completionIdentity: string;
+}
+
+/**
+ * #3770 exactly-once identity for the phase_complete core event:
+ * `${ledgerRootEventDigest}:${seq}` of the most recent `phase_completed`
+ * ledger event for the phase, read from the authority-resolved read-only
+ * peek. Plan-root-scoped — a re-rooted ledger restarts at seq 1 with a new
+ * root event, so a new plan cannot collide with the old plan's authority
+ * keys — and transition-scoped: a duplicate call resolves the same seq and is
+ * deduped, a crash between the plan save and this append heals on retry (same
+ * committed seq), and a genuine reopen+re-complete records a new
+ * `phase_completed` event (new seq) and therefore a distinct identity.
+ * Falls back to a deterministic task-state digest only when the ledger peek
+ * SUCCEEDS and no ledger authority has events. A peek that THROWS returns
+ * null so the caller skips the append entirely (review F-002): re-keying a
+ * read failure into the fallback namespace would let a transient peek error
+ * append a duplicate core event alongside the ledger-keyed record a healthy
+ * retry writes.
+ */
+async function phaseCompletionIdentity(
+	dir: string,
+	phase: number,
+): Promise<string | null> {
+	let events: ReturnType<typeof peekLedgerEventsExact>['events'];
+	try {
+		events = peekLedgerEventsExact(dir).events;
+	} catch {
+		return null;
+	}
+	if (events.length > 0) {
+		const rootDigest = computeLedgerEventHash(events[0]!);
+		for (let index = events.length - 1; index >= 0; index -= 1) {
+			const candidate = events[index]!;
+			if (
+				candidate.event_type === 'phase_completed' &&
+				candidate.phase_id === phase
+			) {
+				return `${rootDigest}:${candidate.seq}`;
+			}
+		}
+		return `${rootDigest}:none`;
+	}
+	// No ledger authority with events: deterministic task-state digest of the
+	// read-only projection (disclosed fallback — weaker than the ledger
+	// identity but stable for duplicates).
+	const projection = await loadPlanJsonOnly(dir).catch(() => null);
+	const target = projection?.phases.find((candidate) => candidate.id === phase);
+	const tasks = target?.tasks ?? [];
+	const digest = createHash('sha256')
+		.update(JSON.stringify(tasks.map((task) => [task.id, task.status])))
+		.digest('hex');
+	return `noledger:${digest}`;
 }
 
 /**
@@ -591,6 +661,7 @@ export async function executePhaseComplete(
 				'mutation',
 				'phase_council',
 				'todo_gate',
+				'planned_tasks',
 				'architecture_supervisor',
 				'final_review',
 				'final_council',
@@ -621,6 +692,62 @@ export async function executePhaseComplete(
 				agentsMissing: [],
 				warnings: [],
 				gate_report: disabledReport,
+			},
+			null,
+			2,
+		);
+	}
+
+	// #3770: refuse completion while planned tasks are unfinished — BEFORE any
+	// state-mutating step (the loadPlan below regenerates a missing plan.md, so
+	// a preflight-only refusal would already have mutated state). The view is
+	// read-only and authority-resolved (ledger peek when a ledger authority
+	// exists; plan.json only when none does). A ledger authority that exists
+	// but cannot be trusted (torn tail, resetting marker, unreadable, no plan,
+	// duplicate phase ids) is INDETERMINATE and refuses — completing over an
+	// unreadable authority is the #3770 symptom in a realistic crash state.
+	// The gate registered in preflightChecks re-checks the same predicate at
+	// the commit boundary. `phase_complete.enabled === false` above remains the
+	// documented operator bypass of completion enforcement.
+	const plannedTasksRead = await readUnfinishedPlannedTasks(dir, phase);
+	if (plannedTasksRead.kind === 'indeterminate') {
+		return JSON.stringify(
+			{
+				success: false,
+				phase,
+				status: 'blocked' as const,
+				reason: PLANNED_TASKS_UNKNOWN_REASON,
+				message: plannedTasksUnknownMessage(phase, plannedTasksRead.detail),
+				agentsDispatched,
+				agentsMissing: [],
+				warnings,
+				recovery: { kind: 'retry', action: 'phase_complete' },
+			},
+			null,
+			2,
+		);
+	}
+	const unfinishedPlannedTaskIds =
+		plannedTasksRead.kind === 'ok' ? plannedTasksRead.unfinishedIds : [];
+	if (unfinishedPlannedTaskIds.length > 0) {
+		return JSON.stringify(
+			{
+				success: false,
+				phase,
+				status: 'blocked' as const,
+				reason: PLANNED_TASKS_BLOCKED_REASON,
+				message: plannedTasksBlockedMessage(phase, unfinishedPlannedTaskIds),
+				agentsDispatched,
+				agentsMissing: [],
+				warnings,
+				recovery: {
+					kind: 'tool',
+					action: 'update_task_status',
+					args: {
+						task_id: unfinishedPlannedTaskIds[0],
+						status: 'completed',
+					},
+				},
 			},
 			null,
 			2,
@@ -908,6 +1035,14 @@ export async function executePhaseComplete(
 			run: spec.run,
 		});
 	}
+	// #3770: planned-tasks refusal is ALWAYS applicable — deliberately outside
+	// standardGateSpecs so no Turbo policy can bypass it (lean readiness has
+	// its own lane discipline but plain pending tasks must still refuse).
+	preflightChecks.push({
+		id: 'planned_tasks',
+		responsibleActor: 'architect',
+		run: () => phaseCompletePreflightInternals.runPlannedTasksGate(gateCtx),
+	});
 	preflightChecks.push({
 		id: 'architecture_supervisor',
 		responsibleActor: 'architecture_supervisor',
@@ -1329,6 +1464,55 @@ export async function executePhaseComplete(
 				gate_report: lockedPreflight,
 			});
 		}
+		// #3770 feedback round: an independent readiness re-read at the commit
+		// boundary, after the locked freshness checks and before ANY mutation
+		// (including the close intent). An indeterminate authority (torn tail,
+		// resetting marker, duplicate phase ids) or an unfinished task observed
+		// HERE refuses the whole completion with its own reason — the early
+		// check alone cannot, because state can change between the two reads
+		// and the mutating path does not reliably fail on a degraded authority.
+		const commitReadiness = await readUnfinishedPlannedTasks(dir, phase);
+		if (commitReadiness.kind === 'indeterminate') {
+			return JSON.stringify({
+				success: false,
+				phase,
+				status: 'blocked' as const,
+				reason: PLANNED_TASKS_UNKNOWN_REASON,
+				message: plannedTasksUnknownMessage(phase, commitReadiness.detail),
+				agentsDispatched,
+				agentsMissing: [],
+				warnings,
+				gate_report: lockedPreflight,
+				recovery: { kind: 'retry', action: 'phase_complete' },
+			});
+		}
+		if (
+			commitReadiness.kind === 'ok' &&
+			commitReadiness.unfinishedIds.length > 0
+		) {
+			return JSON.stringify({
+				success: false,
+				phase,
+				status: 'blocked' as const,
+				reason: PLANNED_TASKS_BLOCKED_REASON,
+				message: plannedTasksBlockedMessage(
+					phase,
+					commitReadiness.unfinishedIds,
+				),
+				agentsDispatched,
+				agentsMissing: [],
+				warnings,
+				gate_report: lockedPreflight,
+				recovery: {
+					kind: 'tool',
+					action: 'update_task_status',
+					args: {
+						task_id: commitReadiness.unfinishedIds[0],
+						status: 'completed',
+					},
+				},
+			});
+		}
 		// The close intent is the WAL record for the plan transition. Persist it
 		// only after the locked freshness and authoritative-plan validation, but
 		// before mutation, so rejected plans cannot publish misleading intents.
@@ -1417,6 +1601,11 @@ export async function executePhaseComplete(
 					{
 						preserveCompletedStatuses: true,
 						planLockAlreadyHeld: true,
+						// #3770: this save is the phase-status transition —
+						// record the durable `phase_completed` ledger event (and
+						// with it the transition identity the completion event's
+						// exactly-once dedupe keys on).
+						completedPhaseIds: [phase],
 						preCommitCheck: () => {
 							const currentPolicyHash = createHash('sha256')
 								.update(JSON.stringify(loadPluginConfigWithMeta(dir).config))
@@ -1481,6 +1670,72 @@ export async function executePhaseComplete(
 						? captureError.message
 						: String(captureError),
 				);
+			}
+		} else if (plan && phaseObject && (await ledgerExists(dir))) {
+			// #3770 feedback round (review F-2): a NORMAL flow reaches
+			// phase_complete with the phase already complete — the last task
+			// was completed through update_task_status/savePlan, whose
+			// projection derives the phase status, so the transition guard
+			// above never runs and the durable `phase_completed` event would
+			// never be recorded (the exactly-once identity would collapse to
+			// the no-event `:none` namespace the docs do not describe). When
+			// a ledger authority exists and the current root has no
+			// `phase_completed` event for this phase yet, record it through
+			// the same managed save. Repeat calls resolve the existing
+			// event's seq and skip; a fresh root after a re-open records its
+			// own event, exactly as the plan-durability docs describe.
+			const existingIdentity = await phaseCompletionIdentity(dir, phase);
+			if (existingIdentity?.endsWith(':none') === true) {
+				try {
+					const backfillDurability =
+						await phaseCompleteCommitInternals.savePlan(dir, plan, {
+							preserveCompletedStatuses: true,
+							planLockAlreadyHeld: true,
+							completedPhaseIds: [phase],
+							preCommitCheck: () => {
+								const currentPolicyHash = createHash('sha256')
+									.update(JSON.stringify(loadPluginConfigWithMeta(dir).config))
+									.digest('hex');
+								if (
+									computePhaseEvidenceSnapshot(dir) !==
+										expectedCommitEvidenceHash ||
+									currentPolicyHash !== expectedCommitPolicyHash
+								) {
+									throw new Error(
+										'PHASE_PREFLIGHT_STALE: evidence changed at the authoritative transition boundary',
+									);
+								}
+							},
+						});
+					if (backfillDurability.durability === 'incomplete') {
+						warnings.push(
+							`Plan saved with incomplete durability; degraded surfaces: ${backfillDurability.degraded_surfaces.join(', ')}` +
+								(backfillDurability.md_write_error
+									? ` (${backfillDurability.md_write_error})`
+									: ''),
+						);
+					}
+				} catch (error) {
+					if (
+						error instanceof Error &&
+						error.message.startsWith('PHASE_PREFLIGHT_STALE:')
+					) {
+						return JSON.stringify({
+							success: false,
+							phase,
+							status: 'blocked' as const,
+							reason: 'PHASE_PREFLIGHT_STALE',
+							message:
+								'Phase evidence changed at the authoritative completion boundary. No completion event was written.',
+							agentsDispatched,
+							agentsMissing: [],
+							warnings,
+							gate_report: commitPreflight,
+							recovery: { kind: 'retry', action: 'phase_complete' },
+						});
+					}
+					throw error;
+				}
 			}
 		}
 	} finally {
@@ -2089,22 +2344,45 @@ export async function executePhaseComplete(
 	const durationMs = now - phaseReferenceTimestamp;
 
 	// Write event to .swarm/events.jsonl
-	const event: PhaseCompleteEvent = {
-		event: 'phase_complete',
-		phase,
-		timestamp: new Date(now).toISOString(),
-		agents_dispatched: agentsDispatched,
-		agents_missing: agentsMissing,
-		status,
-		summary: safeSummary ?? null,
-	};
-
-	try {
-		appendCoreEventSync(dir, { ...event });
-	} catch (writeError) {
+	const completedAt = new Date(now).toISOString();
+	const completionIdentity = await phaseCompletionIdentity(dir, phase);
+	if (completionIdentity === null) {
+		// Review F-002: the ledger peek failed — recording now would re-key
+		// the event into the fallback namespace and duplicate it on the next
+		// healthy retry. Skip; the retry records under the ledger identity.
 		warnings.push(
-			`Warning: failed to write phase complete event: ${writeError instanceof Error ? writeError.message : String(writeError)}`,
+			`Warning: phase ${phase} completion event not recorded — the plan ledger could not be read; a later phase_complete call records it exactly once.`,
 		);
+	} else {
+		const event: PhaseCompleteEvent = {
+			event: 'phase_complete',
+			phase,
+			timestamp: completedAt,
+			agents_dispatched: agentsDispatched,
+			agents_missing: agentsMissing,
+			status,
+			summary: safeSummary ?? null,
+			completionIdentity,
+		};
+
+		try {
+			// #3770: authority-key dedupe — a repeated call (or a retry that
+			// healed a crash between the plan save and this append) resolves
+			// the SAME transition identity and the append is skipped; a
+			// genuine reopen+re-complete records a new `phase_completed`
+			// ledger event and therefore a distinct identity that appends.
+			appendCoreEventSync(
+				dir,
+				{ ...event },
+				{
+					dedupeOnAuthorityKey: true,
+				},
+			);
+		} catch (writeError) {
+			warnings.push(
+				`Warning: failed to write phase complete event: ${writeError instanceof Error ? writeError.message : String(writeError)}`,
+			);
+		}
 	}
 
 	// Epic v2 C2: phases are iterations — `epic_next_wave` issues no wave of
@@ -2334,7 +2612,7 @@ export async function executePhaseComplete(
 
 	const outputData = {
 		...result,
-		timestamp: event.timestamp,
+		timestamp: completedAt,
 		duration_ms: durationMs,
 	};
 	return _buildOutputJson(outputData);

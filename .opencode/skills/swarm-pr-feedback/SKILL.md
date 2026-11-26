@@ -13,7 +13,7 @@ description: >
   this process.
 metadata:
   audience: swarm-plugin
-  swarm-contract-digest: "b8dbb685e873"
+  swarm-contract-digest: "4f59be094d9b"
 ---
 
 # Swarm PR Feedback
@@ -332,13 +332,13 @@ Rules:
 - **Multi-round pattern continues to apply** (see "Multi-Round Bot Reviews"
   section): new bot-round findings get new `FB-###` items; prior items carry
   forward with the new evidence.
-- **Re-fetch at every round boundary (#3607).** Intake is not one-time:
-  re-fetch issue comments, inline review comments, and reviews at the start of
-  every fix round and again before the closeout gate — a critic NEEDS_REVISION
-  restart counts as a fix round. The fetch is a RECORDED obligation: append a
-  fetch receipt (surfaces, comment ids, timestamp) to the findings ledger at
-  every boundary. Commands, bot markers, field evidence:
-  `references/intake-surfaces.md` (## Round-boundary re-fetch).
+- **Re-fetch at every round boundary (#3607).** Intake is not one-time: re-fetch issue comments, inline
+  review comments, and reviews at the start of every fix round and again before the closeout gate — a
+  critic NEEDS_REVISION restart counts as a fix round. The fetch is a RECORDED obligation: append a fetch
+  receipt (surfaces, comment ids, timestamp) to the findings ledger at every boundary. Commands, bot
+  markers, field evidence: `references/intake-surfaces.md` (## Round-boundary re-fetch).
+- **Verdict table and round-2 checkpoint.** Append every gate verdict to the task-gates artifact's verdict
+  table, and before a third closeout-critic round on one item, ask the user: `references/followup-dispositions.md` (## Round ledger).
 
 Rationale: the closure summary is the only artifact the user/maintainer reads
 to confirm the PR is ready to merge; a review comment fixed or skipped without

@@ -34,10 +34,19 @@ import {
 	type ValidationCandidate,
 } from '../review/finding-validator.js';
 import {
+	redactLocationPath,
+	redactReviewFilePath,
+} from '../review/review-file-path.js';
+import {
 	optionalModelOverride,
 	type ReviewAgentModelRegistry,
 	resolveReviewFallbackModels,
 } from '../review/runtime.js';
+import {
+	EVIDENCE_FINDING_BODY_MAX,
+	EVIDENCE_FINDING_TITLE_MAX,
+	redactEvidenceField,
+} from '../security/evidence-redaction.js';
 import {
 	discardReviewerScopeGenerationClaim,
 	isReviewerScopeGenerationCurrent,
@@ -561,6 +570,24 @@ export async function collectReviewerReceiptFromTranscript(
 		}
 		const minConfidence = validationConfig.min_confidence;
 
+		// #3844: the finding's title, body and file path are model-authored
+		// free text. They are redacted HERE — before the receipt, the finding
+		// identity and the validation candidates are derived from them — so
+		// the persisted receipt and the identity describe the same content.
+		// The transform is in place: the parsed issues reference these very
+		// finding objects.
+		for (const finding of parsed.structuredFindings ?? []) {
+			finding.title = redactEvidenceField(
+				finding.title,
+				EVIDENCE_FINDING_TITLE_MAX,
+			);
+			finding.body = redactEvidenceField(
+				finding.body,
+				EVIDENCE_FINDING_BODY_MAX,
+			);
+			finding.file = redactReviewFilePath(directory, finding.file);
+		}
+
 		const receipt =
 			parsed.verdict === 'approved'
 				? buildApprovedReceipt({
@@ -581,9 +608,24 @@ export async function collectReviewerReceiptFromTranscript(
 						sessionId: sessionID,
 						scopeContent: scope.content,
 						scopeDescription: scope.description,
-						blockingFindings: parsed.issues.map(
-							(i): BlockingFinding => ({
-								location: i.location ?? 'unknown',
+						blockingFindings: parsed.issues.map((i): BlockingFinding => {
+							// The finding's file is model-authored free text:
+							// a path that names no real file inside the
+							// project is redacted before it is persisted.
+							const file =
+								typeof i.finding?.file === 'string'
+									? redactReviewFilePath(directory, i.finding.file)
+									: i.finding?.file;
+							return {
+								// A LEGACY (non-JSON) issue carries its
+								// location in the ISSUES line, so the path
+								// part of it is redacted by the same rule.
+								location:
+									file && typeof i.finding?.line_start === 'number'
+										? `${file}:${i.finding.line_start}`
+										: typeof i.location === 'string'
+											? redactLocationPath(directory, i.location)
+											: (i.location ?? 'unknown'),
 								summary: i.text,
 								severity: i.severity,
 								finding_id: findingId(i.finding),
@@ -591,16 +633,20 @@ export async function collectReviewerReceiptFromTranscript(
 								title: i.finding?.title,
 								body: i.finding?.body,
 								confidence: i.finding?.confidence,
-								file: i.finding?.file,
+								file,
 								line_start: i.finding?.line_start,
 								line_end: i.finding?.line_end,
 								effective_severity: i.finding
 									? effectiveSeverityForFinding(i.finding, minConfidence)
 									: undefined,
-							}),
-						),
+							};
+						}),
 						evidenceReferences: parsed.issues
-							.map((i) => i.location)
+							.map((i) =>
+								typeof i.location === 'string'
+									? redactLocationPath(directory, i.location)
+									: i.location,
+							)
 							.filter((loc): loc is string => Boolean(loc)),
 						passConditions: parsed.fixes,
 						summary: `Reviewer REJECTED${parsed.risk ? ` (risk ${parsed.risk})` : ''}`,

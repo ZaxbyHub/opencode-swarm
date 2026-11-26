@@ -82,6 +82,9 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 			// The any-root variant shares the same writeAtomicSync core and
 			// emits the identical grammar (PR review PRR-018):
 			'src/utils/atomic-write.ts:atomicWriteFileAnyRoot',
+			// The create-only variant emits the identical grammar and
+			// publishes it with link() instead of rename():
+			'src/utils/atomic-write.ts:createExclusiveSwarmFileSync',
 		],
 	},
 	{
@@ -132,9 +135,9 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 			'src/scope/scope-persistence.ts (pre-#2035; migrated-to=src/scope/scope-persistence.ts:atomicWrite)',
 			'src/scope/scope-persistence.ts (pre-#2035; migrated-to=src/scope/scope-persistence.ts:atomicWriteSync)',
 			'src/plan/manager.ts:694',
-			'src/plan/manager.ts:2121',
-			'src/plan/manager.ts:2181',
-			'src/review/evidence.ts:179',
+			'src/plan/manager.ts:2149',
+			'src/plan/manager.ts:2209',
+			'src/review/evidence.ts:233',
 			'src/turbo/lean/evidence.ts:188',
 			'src/summaries/manager.ts:163',
 			'src/evidence/manager.ts:291',
@@ -142,14 +145,14 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 			'src/tools/sast-baseline.ts:199',
 			'src/tools/repo-graph/storage.ts:543',
 			'src/memory/reflection-service.ts (pre-#2035; migrated-to=src/memory/reflection-service.ts:atomicWrite)',
-			'src/hooks/review-receipt.ts:609',
-			'src/hooks/review-receipt.ts:675',
-			'src/hooks/review-receipt.ts:894',
+			'src/hooks/review-receipt.ts:727',
+			'src/hooks/review-receipt.ts:793',
+			'src/hooks/review-receipt.ts:1025',
 			'src/knowledge/identity.ts:234',
 			'src/evidence/phase-participation.ts (pre-#2035; migrated-to=src/evidence/phase-participation.ts:atomicWriteBytes)',
 			'src/turbo/lean/integration.ts:427',
 			'src/turbo/lean/reviewer.ts:401',
-			'src/plan/ledger.ts:1486',
+			'src/plan/ledger.ts:1492',
 			'src/services/synonym-map.ts:389',
 			'src/services/skill-optimizer/store.ts:340',
 			'src/services/skill-optimizer/store.ts:503',
@@ -169,7 +172,7 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 			'src/turbo/lean/state.ts:129',
 			'src/turbo/lean/recovery.ts:175',
 			'src/hooks/delegation-gate/worktree-merge-status.ts:132',
-			'src/plan/ledger.ts:606',
+			'src/plan/ledger.ts:613',
 		],
 	},
 	{
@@ -237,8 +240,8 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 		quarantineEligible: true,
 		parsesTarget: true,
 		producers: [
-			'src/tools/write-pr-review-artifact.ts:159',
-			'src/tools/write-pr-review-artifact.ts:179',
+			'src/tools/write-pr-review-artifact.ts:172',
+			'src/tools/write-pr-review-artifact.ts:192',
 			// Symbol form: shift-proof against import-order drift in the writer
 			// (issue #3094 re-pin; the old line-form anchor pointed at :105).
 			'src/tools/write-pr-review-trigger-eval.ts:createTriggerReceipt',
@@ -264,7 +267,7 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 		token: 'instance',
 		quarantineEligible: true,
 		parsesTarget: true,
-		producers: ['src/plan/manager.ts:2380', 'src/plan/manager.ts:2442'],
+		producers: ['src/plan/manager.ts:2408', 'src/plan/manager.ts:2470'],
 		note: 'plan-durability (invariant 5) fd-write paths; grammars registered, writers unchanged in this PR',
 	},
 	{
@@ -298,9 +301,9 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 		quarantineEligible: false,
 		parsesTarget: false,
 		producers: [
-			'src/tools/write-drift-evidence.ts:275',
-			'src/tools/write-mutation-evidence.ts:169',
-			'src/tools/write-hallucination-evidence.ts:121',
+			'src/tools/write-drift-evidence.ts:286',
+			'src/tools/write-mutation-evidence.ts:173',
+			'src/tools/write-hallucination-evidence.ts:129',
 			'src/tools/write-final-council-evidence.ts:403',
 		],
 		note: 'constant-name temps: no per-invocation token — reported when stale, never auto-quarantined (may be an in-flight writer of any process)',
@@ -325,11 +328,10 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 			'src/hooks/skill-usage-log.ts:1165',
 			'src/hooks/skill-usage-log.ts:1675',
 			'src/hooks/skill-usage-pending.ts:817',
-			'src/parallel/file-locks.ts:1075',
-			'src/plan/ledger.ts:607',
-			'src/plan/ledger.ts:1808',
+			'src/parallel/file-locks.ts:1107',
+			'src/plan/ledger.ts:1814',
 		],
-		note: 'constant-name temps: reported when stale, never auto-quarantined. file-locks meta sidecars live under the scanner-skipped .swarm/locks/ subtree; the ledger reconcile temp embeds instance tokens but its .tmp-suffix shape maps here (conservatively report-only)',
+		note: 'constant-name temps: reported when stale, never auto-quarantined. file-locks meta sidecars live under the scanner-skipped .swarm/locks/ subtree; the ledger reconcile temp embeds instance tokens but its .tmp-suffix shape maps here (conservatively report-only). The ledger ARCHIVE temp (src/plan/ledger.ts:613) is NOT listed here — its shape is `<path>.tmp.<token>`, which belongs to the target-suffix-tmp-token grammar',
 	},
 ];
 
@@ -942,6 +944,79 @@ export function atomicWriteSwarmFileSync(
 	options?: AtomicWriteOptions,
 ): void {
 	writeAtomicSync(targetPath, content, options);
+}
+
+/**
+ * CREATE-ONLY atomic write for a durable identity artifact.
+ *
+ * `atomicWriteSwarmFileSync` REPLACES its target, which would break the
+ * first-writer-wins semantics a create-only artifact needs (a replay-identity
+ * salt or claim must never be overwritten by a later writer).
+ *
+ * This variant publishes the content with the SAME canonical temp grammar
+ * (`<target>.<hex32>.tmp`), the same fsync-before-publish discipline and the
+ * same own-temp cleanup — and then HARD-LINKS the temp into place instead of
+ * renaming it. `link()` fails with EEXIST when the target already exists, so
+ * the loser of a race observes the winner's file instead of replacing it, and
+ * a reader never observes a partially written target (the temp is complete and
+ * fsync'd before the link publishes it).
+ *
+ * Returns true when THIS caller created the target, false when the target
+ * already existed (the caller lost the race).
+ */
+export function createExclusiveSwarmFileSync(
+	targetPath: string,
+	content: string | Uint8Array,
+	options?: AtomicWriteOptions,
+): boolean {
+	assertSwarmContainedTarget(targetPath);
+	const resolvedTarget = path.resolve(targetPath);
+	noteRecentWriteActivity(resolvedTarget);
+	const buffer = toBuffer(content);
+	const maxBytes = options?.maxBytes ?? MAX_ATOMIC_WRITE_BYTES;
+	if (buffer.byteLength > maxBytes) {
+		throw new Error(
+			`atomic write exceeds ${maxBytes} byte bound: ${buffer.byteLength}`,
+		);
+	}
+	const tempPath = `${resolvedTarget}.${_internals.randomSuffix()}.tmp`;
+	fs.mkdirSync(path.dirname(tempPath), { recursive: true });
+	try {
+		const fd = fs.openSync(tempPath, 'wx', options?.mode);
+		try {
+			let written = 0;
+			while (written < buffer.byteLength) {
+				written += _internals.writeSync(
+					fd,
+					buffer,
+					written,
+					buffer.byteLength - written,
+				);
+			}
+			if (options?.skipFsync !== true) {
+				try {
+					_internals.fsyncSync(fd);
+				} catch {
+					// fsync unsupported on this FS — durability is best-effort
+				}
+			}
+		} finally {
+			fs.closeSync(fd);
+		}
+		try {
+			fs.linkSync(tempPath, resolvedTarget);
+			return true;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === 'EEXIST') return false;
+			throw error;
+		}
+	} finally {
+		try {
+			fs.rmSync(tempPath, { force: true });
+		} catch {
+			// best-effort own-temp cleanup
+		}
+	}
 }
 
 /**

@@ -142,7 +142,7 @@ even when two processes or background workers try to append at the same time.
 {"type":"task_updated","taskId":"1.1","status":"completed","ts":"ISO8601"}
 {"type":"task_status_changed","taskId":"1.1","status":"completed","ts":"ISO8601"}
 {"type":"task_reordered","taskId":"1.1","afterTaskId":"1.2","ts":"ISO8601"}
-{"type":"phase_completed","phase":1,"ts":"ISO8601"}
+{"type":"phase_completed","phase":1,"source":"phase_complete","ts":"ISO8601"}
 {"type":"snapshot","data":{"plan":{...},"payload_hash":"abc123"},"ts":"ISO8601"}
 {"type":"plan_rebuilt","source":"rebuildPlan","plan_id":"...","payload":{"reason":"ledger_replay_recovery | approved_snapshot_fallback | validation_failure_recovery | ...","phases_count":1,"tasks_count":3},"ts":"ISO8601"}
 {"type":"plan_exported","path":".swarm/plan-export/SWARM_PLAN.json","ts":"ISO8601"}
@@ -153,6 +153,14 @@ even when two processes or background workers try to append at the same time.
 {"type":"phase_completed","phase":1,"source":"close_terminal","ts":"ISO8601"}
 {"type":"snapshot","source":"close_terminal","data":{"plan":{...},"payload_hash":"abc123"},"ts":"ISO8601"}
 ```
+
+### phase_completed provenance (#3770)
+
+`phase_completed` events have two producers: the normal `phase_complete`
+transition (source `phase_complete`, appended by `savePlan` when the caller
+passes `completedPhaseIds` — the completion's exactly-once identity is the
+plan-root digest plus this event's seq) and the close-terminal path (source
+`close_terminal`, unchanged). Replay treats the two identically.
 
 ### Task removal contract (v7.19.0+)
 

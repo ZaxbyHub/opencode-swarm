@@ -37,6 +37,7 @@ import { appendTaskGateRequirementsReceiptIfNeeded } from './evidence/task-gate-
 import { validateSwarmPath } from './hooks/utils.js';
 import { derivePlanId, derivePlanIdentityHash } from './plan/utils.js';
 import type { ReviewRouteEvidence } from './review/routing-enforcement.js';
+import { redactEvidenceDeep } from './security/evidence-redaction.js';
 import type { TaskWorkflowState } from './state';
 import { telemetry } from './telemetry.js';
 import { assertStrictTaskId, isStrictTaskId } from './validation/task-id';
@@ -1942,6 +1943,45 @@ export async function transitionTaskWorkflowEvidenceWithStatus(
 	};
 }
 
+/**
+ * #3844 fold-in (closes #3899 AC6): redact the free-text passthrough extras
+ * of every gate entry before the durable write. GateEvidenceSchema declares
+ * three structural fields (sessionId/timestamp/agent — ids and machine
+ * timestamps, not free text); every OTHER string value inside a gates entry
+ * is producer prose and is passed through redactEvidenceDeep. Structural
+ * identity (keys, arrays, numbers, booleans, null) is preserved so schema
+ * re-parse and consumers keep working.
+ */
+function redactGateEvidenceExtrasForPersist<T extends TaskEvidence>(
+	evidence: T,
+): T {
+	if (
+		typeof evidence.gates !== 'object' ||
+		evidence.gates === null ||
+		Array.isArray(evidence.gates)
+	) {
+		return evidence;
+	}
+	const gates: Record<string, unknown> = {};
+	for (const [gateName, entry] of Object.entries(evidence.gates)) {
+		if (entry === null || typeof entry !== 'object') {
+			gates[gateName] = entry;
+			continue;
+		}
+		const redacted: Record<string, unknown> = {};
+		for (const [key, value] of Object.entries(
+			entry as unknown as Record<string, unknown>,
+		)) {
+			redacted[key] =
+				key === 'sessionId' || key === 'timestamp' || key === 'agent'
+					? value
+					: redactEvidenceDeep(value);
+		}
+		gates[gateName] = redacted;
+	}
+	return { ...evidence, gates };
+}
+
 export async function withTaskEvidenceTransaction<T>(
 	directory: string,
 	taskId: string,
@@ -2001,7 +2041,17 @@ export async function withTaskEvidenceTransaction<T>(
 					),
 				);
 			}
-			await atomicWriteFile(evidencePath, JSON.stringify(validated, null, 2));
+						// #3844 fold-in (closes #3899 AC6): GateEvidenceSchema is
+			// deliberately .passthrough() so council-specific extras survive,
+			// but those extras are producer free text — every passthrough
+			// string (verdict notes, summaries, veto prose) crosses the
+			// durable boundary redacted. The declared structural fields
+			// (sessionId/timestamp/agent) are not free text and pass as-is
+			// inside each entry's redaction pass only when they are the
+			// VALUE of an extra key; the in-memory evidence object is
+			// untouched.
+			const persisted = redactGateEvidenceExtrasForPersist(validated);
+			await atomicWriteFile(evidencePath, JSON.stringify(persisted, null, 2));
 			if (event) {
 				try {
 					await _internals.appendTaskGateRequirementsReceiptIfNeeded(

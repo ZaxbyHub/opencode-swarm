@@ -33,6 +33,7 @@ import {
 	canonicalForgePrUrl,
 	type ForgeContext,
 } from '../providers/forge-provider.js';
+import { redactEvidenceText } from '../security/evidence-redaction.js';
 import { getAgentSession } from '../state';
 import { log } from '../utils';
 import { pushAdvisory } from '../utils/advisory-queue';
@@ -223,8 +224,13 @@ async function handlePrEvent(
 
 	if (matching.length === 0) return;
 
-	const message = formatAdvisory(event.type, payload);
-	if (!message) return;
+	// #3844: redact ONCE at the single construction point — every downstream
+	// fan-out (durable queue write, prompt delivery, pushAdvisory advisory,
+	// session snapshots) inherits the redacted text, and pre-fix stored
+	// events are re-redacted by the queue's own write boundary.
+	const advisory = formatAdvisory(event.type, payload);
+	if (!advisory) return;
+	const message = redactEvidenceText(advisory);
 
 	const dedupToken = buildPrEventToken(event.type, payload);
 
