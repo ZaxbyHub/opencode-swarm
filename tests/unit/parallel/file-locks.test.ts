@@ -15,6 +15,7 @@ import {
 	releaseLock,
 	tryAcquireLock,
 } from '../../../src/parallel/file-locks';
+import { withFrozenClockAsync } from '../../helpers/test-clock.js';
 
 describe('file-locks module tests', () => {
 	let tmpDir: string;
@@ -83,6 +84,48 @@ describe('file-locks module tests', () => {
 			expect(result.acquired).toBe(true);
 			expect(fs.existsSync(path.join(tmpDir, '.swarm', 'locks'))).toBe(true);
 			if (result.acquired) await result.lock._release?.();
+		});
+
+		it('recovers an ownerless (empty) past-TTL lock via ttl-cleanup (#3934)', async () => {
+			const { getOwnerLockPath } = await import(
+				'../../../src/parallel/file-locks'
+			);
+			const FIXED_NOW = 1_700_000_000_000;
+			const ownerLockPath = getOwnerLockPath(tmpDir, 'ownerless.ts');
+			fs.mkdirSync(path.dirname(ownerLockPath), { recursive: true });
+			fs.writeFileSync(ownerLockPath, '');
+			// Seed an mtime 6 minutes before the frozen clock (#3934 TTL gate).
+			const sixMinAgo = new Date(FIXED_NOW - 6 * 60 * 1000);
+			fs.utimesSync(ownerLockPath, sixMinAgo, sixMinAgo);
+
+			const result = await withFrozenClockAsync(
+				() => tryAcquireLock(tmpDir, 'ownerless.ts', 'agent', 'task'),
+				{ fixedNow: FIXED_NOW },
+			);
+			expect(result.acquired).toBe(true);
+			if (result.acquired) {
+				expect(result.brokeStale).toBe(true);
+				await result.lock._release?.();
+			}
+		});
+
+		it('does NOT break a fresh (within-TTL) ownerless lock (#3934 AC4)', async () => {
+			const { getOwnerLockPath } = await import(
+				'../../../src/parallel/file-locks'
+			);
+			const FIXED_NOW = 1_700_000_000_000;
+			const ownerLockPath = getOwnerLockPath(tmpDir, 'fresh-ownerless.ts');
+			fs.mkdirSync(path.dirname(ownerLockPath), { recursive: true });
+			fs.writeFileSync(ownerLockPath, '');
+			// Fresh mtime: within the TTL window relative to the frozen clock.
+			const now = new Date(FIXED_NOW);
+			fs.utimesSync(ownerLockPath, now, now);
+
+			const result = await withFrozenClockAsync(
+				() => tryAcquireLock(tmpDir, 'fresh-ownerless.ts', 'agent', 'task'),
+				{ fixedNow: FIXED_NOW },
+			);
+			expect(result.acquired).toBe(false);
 		});
 
 		it('uses path hash for lock filename', async () => {
