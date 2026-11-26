@@ -480,27 +480,6 @@ export async function inspectPlanCriticApprovalSnapshotForCall(
 }
 
 /**
- * Whether the ledger already carries a `plan_critic_gate` approval snapshot
- * bound to the exact `callId` (verified-prefix scan; a quarantined suffix is
- * never trusted — see #2531). This is the durable replay fence: a terminal
- * event may be delivered more than once (duplicate completion, crash
- * recovery, maintenance replay), but it can only ever approve once.
- * Unreadable ledgers conservatively report `true` (cannot prove absence);
- * callers that need the distinction use
- * {@link inspectPlanCriticApprovalSnapshotForCall}.
- */
-export async function hasPlanCriticApprovalSnapshotForCall(
-	directory: string,
-	callId: string,
-): Promise<boolean> {
-	const presence = await inspectPlanCriticApprovalSnapshotForCall(
-		directory,
-		callId,
-	);
-	return presence.status !== 'absent';
-}
-
-/**
  * Typed pre-commit fence failures. Thrown INSIDE the ledger evidence lock
  * (via takeSnapshotEvent's preCommitCheck) so a concurrent writer can never
  * interleave a check-then-write cycle; the recorder maps each code to a

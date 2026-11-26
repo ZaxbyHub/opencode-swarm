@@ -55,6 +55,7 @@ import {
 	resetSwarmArtifactCache,
 } from '../../../src/utils/swarm-artifact-cache';
 import { createSafeTestDir } from '../../helpers/safe-test-dir';
+import { freezeClock } from '../../helpers/test-clock';
 
 function writeProject(directory: string, taskCount: number): void {
 	const tasks = Array.from({ length: taskCount }, (_, i) => ({
@@ -121,6 +122,7 @@ describe('context-map reconciliation — real plan.json I/O per pass (r17 §6)',
 	// and skips its own binding, so the test must own the real refs itself.
 	let realIdentity: typeof _planProofReaders.resolveCurrentPlanIdentitySync;
 	let realDeclared: typeof _planProofReaders.readCurrentTaskDeclaredFiles;
+	let restoreClock: () => void;
 
 	beforeAll(async () => {
 		const gate = await import('../../../src/gate-evidence.js');
@@ -129,6 +131,12 @@ describe('context-map reconciliation — real plan.json I/O per pass (r17 §6)',
 	});
 
 	beforeEach(() => {
+		restoreClock = freezeClock({
+			// The numeric clock and the ISO stamp are the SAME instant
+			// (2025-07-15T12:00:00Z): under a freeze they must not disagree.
+			fixedNow: 1_752_580_800_000,
+			isoNow: '2025-07-15T12:00:00.000Z',
+		});
 		resetSwarmState();
 		resetStartupLedgerCheck();
 		resetSwarmArtifactCache();
@@ -155,6 +163,7 @@ describe('context-map reconciliation — real plan.json I/O per pass (r17 §6)',
 	});
 
 	afterEach(() => {
+		restoreClock();
 		_planProofReaders.resolveCurrentPlanIdentitySync =
 			originalReaders.resolveCurrentPlanIdentitySync;
 		_planProofReaders.readCurrentTaskDeclaredFiles =
@@ -188,9 +197,9 @@ describe('context-map reconciliation — real plan.json I/O per pass (r17 §6)',
 			declaredFilesReads = 0;
 			const cacheBefore = getSwarmArtifactCacheStats();
 
-			const startedAt = Date.now();
+			const startedAt = performance.now();
 			await reconcileContextMapTaskReleases(directory);
-			const durationMs = Date.now() - startedAt;
+			const durationMs = performance.now() - startedAt;
 
 			const cacheAfter = getSwarmArtifactCacheStats();
 			const cachePlanLoads =
@@ -257,9 +266,9 @@ describe('context-map reconciliation — real plan.json I/O per pass (r17 §6)',
 		declaredFilesReads = 0;
 		const cacheBefore = getSwarmArtifactCacheStats();
 
-		const startedAt = Date.now();
+		const startedAt = performance.now();
 		await reconcileContextMapTaskReleases(directory);
-		const durationMs = Date.now() - startedAt;
+		const durationMs = performance.now() - startedAt;
 
 		const cacheAfter = getSwarmArtifactCacheStats();
 		const cachePlanLoads =

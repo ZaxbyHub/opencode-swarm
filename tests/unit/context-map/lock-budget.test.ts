@@ -186,13 +186,13 @@ describe('context-map — bounded lock waits for the optional write (r17 P1)', (
 		);
 
 		try {
-			const startedAt = Date.now();
+			const startedAt = performance.now();
 			// Must not throw — a skipped optional write is a value, not an error.
 			await updateContextMapAfterAgentLocked(
 				childParams(directory),
 				TEST_BUDGET_MS,
 			);
-			const elapsed = Date.now() - startedAt;
+			const elapsed = performance.now() - startedAt;
 
 			// The acquisition wait was bounded by the injected budget (+ slack
 			// for the backoff iteration), NOT the 60 s default: pre-fix, the
@@ -220,12 +220,12 @@ describe('context-map — bounded lock waits for the optional write (r17 P1)', (
 	});
 
 	test('a free lock performs the write immediately within the budget', async () => {
-		const startedAt = Date.now();
+		const startedAt = performance.now();
 		await updateContextMapAfterAgentLocked(
 			childParams(directory),
 			TEST_BUDGET_MS,
 		);
-		expect(Date.now() - startedAt).toBeLessThan(BUDGET_EXPIRY_SLACK_MS);
+		expect(performance.now() - startedAt).toBeLessThan(BUDGET_EXPIRY_SLACK_MS);
 		expect(loadContextMap(directory)?.task_history[TASK_ID]?.final_status).toBe(
 			'pending',
 		);
@@ -285,12 +285,12 @@ describe('context-map — bounded lock waits for the optional write (r17 P1)', (
 		try {
 			// Task B's OPTIONAL update skips within its own budget instead of
 			// queueing behind A's write for the 60 s default.
-			const startedAt = Date.now();
+			const startedAt = performance.now();
 			await updateContextMapAfterAgentLocked(
 				childParams(directory, '3.1'),
 				TEST_BUDGET_MS,
 			);
-			const elapsed = Date.now() - startedAt;
+			const elapsed = performance.now() - startedAt;
 			expect(elapsed).toBeLessThan(BUDGET_EXPIRY_SLACK_MS);
 			expect(loadContextMap(directory)?.task_history['3.1']).toBeUndefined();
 		} finally {
@@ -342,9 +342,9 @@ describe('context-map — bounded lock waits for the optional write (r17 P1)', (
 			10_000,
 		);
 
-		const startedAt = Date.now();
+		const startedAt = performance.now();
 		await outerDone;
-		const elapsed = Date.now() - startedAt;
+		const elapsed = performance.now() - startedAt;
 		// No 60 s hang: the outer cycle finished shortly after the inner
 		// budget expired.
 		expect(elapsed).toBeLessThan(BUDGET_EXPIRY_SLACK_MS + 10_000);

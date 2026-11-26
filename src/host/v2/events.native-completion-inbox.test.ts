@@ -166,7 +166,7 @@ describe('OpenCode 2.3 native subagent synthetic terminal delivery', () => {
 			} as unknown as V2EventEnvelope),
 		).toEqual({ type: 'session.idle', properties: { sessionID: child } });
 	});
-	test('two identical enqueued inbox events map identically (durable claim handles replay)', () => {
+	test('two identical enqueued inbox events map identically (pure mapping only; durable claim replay is not exercised here)', () => {
 		rememberVerifiedNativeChild(child, parent);
 		expect(mapV2EventToV1(notice())).toEqual(mapV2EventToV1(notice()));
 	});

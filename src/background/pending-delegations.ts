@@ -5461,6 +5461,40 @@ export function hasPendingTerminalCloseout(
  * pending record is eventually examined even with a stuck head.
  */
 const terminalCloseoutRecoveryCursors = new Map<string, string>();
+// F-002 (PR 3922 review): the cursor map is module-level state keyed by
+// canonical root, so it must have an explicit eviction strategy (AGENTS.md
+// invariant 8) — long-lived host processes serving many repos/worktrees
+// would otherwise accumulate one entry per distinct root forever. The bound
+// mirrors the sibling reconciler registries above (FIFO eviction on
+// insertion, most-recently-updated roots refreshed). Eviction is safe: a
+// lost cursor only resets that root's rotation to the head of its next
+// recovery pass — the r14 fairness rotation re-converges from there.
+const MAX_TERMINAL_CLOSEOUT_RECOVERY_CURSORS = 32;
+const terminalCloseoutRecoveryCursorOrder: string[] = [];
+
+function noteTerminalCloseoutRecoveryCursor(
+	key: string,
+	correlationId: string,
+): void {
+	if (terminalCloseoutRecoveryCursors.has(key)) {
+		const existingIndex = terminalCloseoutRecoveryCursorOrder.indexOf(key);
+		if (existingIndex >= 0) {
+			terminalCloseoutRecoveryCursorOrder.splice(existingIndex, 1);
+		}
+		terminalCloseoutRecoveryCursorOrder.push(key);
+		terminalCloseoutRecoveryCursors.set(key, correlationId);
+		return;
+	}
+	if (
+		terminalCloseoutRecoveryCursorOrder.length >=
+		MAX_TERMINAL_CLOSEOUT_RECOVERY_CURSORS
+	) {
+		const evicted = terminalCloseoutRecoveryCursorOrder.shift();
+		if (evicted) terminalCloseoutRecoveryCursors.delete(evicted);
+	}
+	terminalCloseoutRecoveryCursorOrder.push(key);
+	terminalCloseoutRecoveryCursors.set(key, correlationId);
+}
 
 function rotateCloseoutCandidates<T extends { correlationId: string }>(
 	directory: string,
@@ -5509,7 +5543,7 @@ async function reconcileTerminalCloseouts(
 	}
 	// Advance the rotation cursor to the LAST examined record: the next pass
 	// starts after it, so head-of-line starvation cannot pin later records.
-	terminalCloseoutRecoveryCursors.set(
+	noteTerminalCloseoutRecoveryCursor(
 		canonicalRootKeyFresh(directory),
 		candidates[candidates.length - 1].correlationId,
 	);
@@ -5539,6 +5573,17 @@ export const _internals = {
 	resetLegacyCoderSettlementReconcilers: () => {
 		legacyCoderSettlementReconcilers.clear();
 		legacyCoderSettlementReconcilerOrder.length = 0;
+	},
+	/** Test-only seam for the bounded terminal-closeout recovery cursor map. */
+	noteTerminalCloseoutRecoveryCursor,
+	terminalCloseoutRecoveryCursorSnapshot: () => ({
+		cursors: new Map(terminalCloseoutRecoveryCursors),
+		order: [...terminalCloseoutRecoveryCursorOrder],
+		maxCursors: MAX_TERMINAL_CLOSEOUT_RECOVERY_CURSORS,
+	}),
+	resetTerminalCloseoutRecoveryCursors: () => {
+		terminalCloseoutRecoveryCursors.clear();
+		terminalCloseoutRecoveryCursorOrder.length = 0;
 	},
 	reservationCoordinationRowLimit: MAX_COORDINATION_STATE_LIST_ROWS,
 	writeBackgroundCoderReservations,

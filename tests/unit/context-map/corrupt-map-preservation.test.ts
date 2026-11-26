@@ -34,6 +34,7 @@ import { closeAllProjectDbs } from '../../../src/db/project-db';
 import { resetStartupLedgerCheck } from '../../../src/plan/manager';
 import { resetSwarmState } from '../../../src/state';
 import { createSafeTestDir } from '../../helpers/safe-test-dir';
+import { freezeClock } from '../../helpers/test-clock';
 
 const TASK_ID = '1.1';
 
@@ -121,8 +122,15 @@ describe('context-map — corrupt map preservation during release reconciliation
 	let cleanup: () => void;
 	let warnSpy: ReturnType<typeof spyOn>;
 	let originalDebug: string | undefined;
+	let restoreClock: () => void;
 
 	beforeEach(() => {
+		restoreClock = freezeClock({
+			// The numeric clock and the ISO stamp are the SAME instant
+			// (2025-07-15T12:00:00Z): under a freeze they must not disagree.
+			fixedNow: 1_752_580_800_000,
+			isoNow: '2025-07-15T12:00:00.000Z',
+		});
 		resetSwarmState();
 		resetStartupLedgerCheck();
 		({ dir: directory, cleanup } = createSafeTestDir('ctxmap-corrupt-'));
@@ -143,6 +151,7 @@ describe('context-map — corrupt map preservation during release reconciliation
 	});
 
 	afterEach(() => {
+		restoreClock();
 		warnSpy.mockRestore();
 		if (originalDebug === undefined) {
 			delete process.env.OPENCODE_SWARM_DEBUG;

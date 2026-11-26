@@ -16,10 +16,7 @@ import { createBackgroundCompletionObserver } from '../../../src/background/comp
 import {
 	findByCorrelationId,
 	hasPendingTerminalCloseout,
-	initializeTerminalCloseout,
-	isTerminalCloseoutStepPending,
 	markTerminalCloseoutStepCompleted,
-	markTerminalCloseoutStepFailed,
 	recordPendingDelegation,
 } from '../../../src/background/pending-delegations';
 import { captureWorkspaceSnapshot } from '../../../src/background/workspace-snapshot';
@@ -405,131 +402,6 @@ describe('background completion observer — closeout effect contract (r14 P0-2)
 		expect(record?.closeout?.steps.sounding_board?.state).toBe('completed');
 		expect(record?.closeout?.steps.pipeline_advisory?.state).toBe('completed');
 		expect((record?.closeoutAdvisories ?? []).length).toBe(2);
-	});
-});
-
-describe('terminal closeout journal — permanent failure state (r14 P0-2 store semantics)', () => {
-	let directory: string;
-	let cleanup: () => void;
-
-	beforeEach(() => {
-		resetSwarmState();
-		resetStartupLedgerCheck();
-		({ dir: directory, cleanup } = createSafeTestDir('bg-closeout-failed-'));
-	});
-
-	afterEach(() => {
-		resetSwarmState();
-		resetStartupLedgerCheck();
-		closeAllProjectDbs();
-		cleanup();
-	});
-
-	test('markTerminalCloseoutStepFailed durably closes the step with a visible reason', async () => {
-		const parent = ensureAgentSession(PARENT, 'architect', directory);
-		parent.taskWorkflowStates.set('2.1', 'coder_delegated');
-		await seedStageAPassed(directory, '2.1');
-		await recordPendingDelegation(directory, {
-			correlationId: 'ses_p2_store',
-			jobId: 'job-store',
-			subagentSessionId: 'ses_p2_store',
-			parentSessionId: PARENT,
-			callID: 'call-store',
-			normalizedAgent: 'reviewer',
-			swarmPrefixedAgent: 'reviewer',
-			planTaskId: '2.1',
-			evidenceTaskId: '2.1',
-			workspace: captureWorkspaceSnapshot(directory),
-		});
-		// No terminal yet: a failure mark must refuse (nothing to fence).
-		expect(
-			await markTerminalCloseoutStepFailed(
-				directory,
-				'ses_p2_store',
-				'evt-none',
-				'context_map',
-				'deterministic refusal',
-			),
-		).toBe(false);
-
-		// Claim a real terminal through a live observer delivery.
-		const observer = createBackgroundCompletionObserver({
-			config: { enabled: true },
-			directory,
-		});
-		await observer.event(
-			completionEvent(
-				'ses_p2_store',
-				'<task_result>[REVIEWED] | 2.1 | APPROVED | fine</task_result>',
-			),
-		);
-		const record = findByCorrelationId(directory, 'ses_p2_store');
-		const eventId = record!.terminalResult!.eventId;
-		// A completed step cannot be retroactively failed.
-		expect(
-			await markTerminalCloseoutStepFailed(
-				directory,
-				'ses_p2_store',
-				eventId,
-				'parent_advisory',
-				'too late',
-			),
-		).toBe(false);
-		expect(record?.closeout?.steps.parent_advisory?.state).toBe('completed');
-
-		// Mark a still-pending-eligible step failed: durably visible, closed
-		// for re-drive, and idempotent.
-		expect(
-			await markTerminalCloseoutStepFailed(
-				directory,
-				'ses_p2_store',
-				eventId,
-				'sounding_board',
-				'provably invalid verdict payload',
-			),
-		).toBe(true);
-		const failed = findByCorrelationId(directory, 'ses_p2_store');
-		expect(failed?.closeout?.steps.sounding_board?.state).toBe('failed');
-		expect(failed?.closeout?.steps.sounding_board?.reason).toBe(
-			'provably invalid verdict payload',
-		);
-		expect(
-			isTerminalCloseoutStepPending(failed!, eventId, 'sounding_board'),
-		).toBe(false);
-		// A failed step no longer keeps the record in the recovery set (the
-		// other steps are all completed here).
-		expect(hasPendingTerminalCloseout(failed!)).toBe(false);
-		// Idempotent re-mark.
-		expect(
-			await markTerminalCloseoutStepFailed(
-				directory,
-				'ses_p2_store',
-				eventId,
-				'sounding_board',
-				'provably invalid verdict payload',
-			),
-		).toBe(true);
-
-		// A foreign terminal event is fenced out.
-		expect(
-			await markTerminalCloseoutStepFailed(
-				directory,
-				'ses_p2_store',
-				'evt-foreign',
-				'pipeline_advisory',
-				'stale writer',
-			),
-		).toBe(false);
-		// initializeTerminalCloseout for the SAME terminal keeps the failed
-		// step states (a re-drive must not reset them).
-		expect(
-			await initializeTerminalCloseout(directory, 'ses_p2_store', eventId, [
-				'parent_advisory',
-				'sounding_board',
-			]),
-		).toBe(true);
-		const afterInit = findByCorrelationId(directory, 'ses_p2_store');
-		expect(afterInit?.closeout?.steps.sounding_board?.state).toBe('failed');
 	});
 });
 

@@ -35,6 +35,7 @@ import { resetStartupLedgerCheck } from '../../../src/plan/manager';
 import { derivePlanId } from '../../../src/plan/utils';
 import { resetSwarmState } from '../../../src/state';
 import { createSafeTestDir } from '../../helpers/safe-test-dir';
+import { freezeClock } from '../../helpers/test-clock';
 
 const PARENT = 'ses_r14p3_parent';
 const CHILD = 'ses_p3_critic';
@@ -138,8 +139,10 @@ describe('background completion observer — recoverable plan critic approval cl
 	let directory: string;
 	let cleanup: () => void;
 	let plan: Plan;
+	let restoreClock: () => void;
 
 	beforeEach(() => {
+		restoreClock = freezeClock({ fixedNow: 1_758_000_000_000 });
 		resetSwarmState();
 		resetStartupLedgerCheck();
 		({ dir: directory, cleanup } = createSafeTestDir('bg-critic-p3-'));
@@ -148,6 +151,7 @@ describe('background completion observer — recoverable plan critic approval cl
 	});
 
 	afterEach(() => {
+		restoreClock();
 		resetSwarmState();
 		resetStartupLedgerCheck();
 		closeAllProjectDbs();

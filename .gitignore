@@ -81,8 +81,12 @@ graphify-out/
 .zvec-grep/
 .tmp-host-contract-*/
 
-# OpenCode session transcripts (conversation content — local only, never commit)
-session-*.json
+# OpenCode session transcripts (conversation content — local only, never commit).
+# Root-anchored (F-003): these are repo-root artifacts; an unscoped pattern
+# would silently ignore legitimate nested fixtures such as
+# tests/fixtures/session-replay.json.
+/session-*.json
 
-# Local build artifacts (release tarballs are built by CI from source)
-*.tgz
+# Local build artifacts (release tarballs are built by CI from source).
+# Root-anchored: tarballs only land at the repo root.
+/*.tgz

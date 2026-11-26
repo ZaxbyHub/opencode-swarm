@@ -236,7 +236,7 @@ describe('background completion observer — terminal verdict must not ack lost 
 						id: 'A1',
 						decision: DECISION_TEXT,
 						rationale: 'previously recorded',
-						timestamp: new Date().toISOString(),
+						timestamp: '2025-07-15T12:00:00.000Z',
 						task_id: '1.1',
 					},
 				],

@@ -23,6 +23,9 @@ import {
 	createKnowledgeProject,
 } from '../helpers/knowledge-real-host';
 import { safeRmRecursive } from '../helpers/safe-test-dir';
+import { freezeClock } from '../helpers/test-clock';
+
+let restoreClock: () => void;
 
 /**
  * r13 (async lifecycle F5): the `event` hook's consumers are isolated — a
@@ -31,11 +34,13 @@ import { safeRmRecursive } from '../helpers/safe-test-dir';
  */
 describe('event fan-out isolation (F5)', () => {
 	beforeEach(() => {
+		restoreClock = freezeClock({ fixedNow: 1_758_000_000_000 });
 		resetEventConsumerFailureRegistryForTests();
 		clearDeferredWarnings();
 	});
 
 	afterEach(() => {
+		restoreClock();
 		resetEventConsumerFailureRegistryForTests();
 		clearDeferredWarnings();
 	});
@@ -100,7 +105,7 @@ describe('event fan-out isolation (F5)', () => {
 
 	test('P1-4: a permanently hanging consumer cannot block the fan-out', async () => {
 		const ran: string[] = [];
-		const startedAt = Date.now();
+		const startedAt = performance.now();
 		await dispatchEventConsumerIsolated(
 			'hanging-consumer',
 			() =>
@@ -110,7 +115,7 @@ describe('event fan-out isolation (F5)', () => {
 				}),
 			50,
 		);
-		const elapsed = Date.now() - startedAt;
+		const elapsed = performance.now() - startedAt;
 		// The wait was bounded by the deadline (plus scheduling slack), not
 		// the hung promise.
 		expect(elapsed).toBeLessThan(2_000);
@@ -261,7 +266,7 @@ describe('event hook delivers trusted completions through the isolated fan-out (
 
 	test('r14 P1-7: stage-1 consumers run in parallel — a hanging sibling does not delay a same-stage consumer', async () => {
 		const events: string[] = [];
-		const startedAt = Date.now();
+		const startedAt = performance.now();
 		await dispatchEventFanoutStages([
 			[
 				{
@@ -285,7 +290,7 @@ describe('event hook delivers trusted completions through the isolated fan-out (
 				},
 			],
 		]);
-		const elapsed = Date.now() - startedAt;
+		const elapsed = performance.now() - startedAt;
 		// Both stage-1 consumers STARTED (parallel dispatch — the observer did
 		// not wait behind the hanging sibling's deadline).
 		expect(events).toContain('hanging-started');
@@ -334,7 +339,7 @@ describe('event hook delivers trusted completions through the isolated fan-out (
 	});
 
 	test('r14 P1-7: per-consumer deadline overrides are honored inside a stage', async () => {
-		const startedAt = Date.now();
+		const startedAt = performance.now();
 		await dispatchEventFanoutStages([
 			[
 				{
@@ -348,7 +353,7 @@ describe('event hook delivers trusted completions through the isolated fan-out (
 			],
 		]);
 		// Bounded by the 50 ms override (plus slack), not the default budget.
-		expect(Date.now() - startedAt).toBeLessThan(2_000);
+		expect(performance.now() - startedAt).toBeLessThan(2_000);
 		expect(
 			getDeferredWarnings().some((w) =>
 				w.includes("'short-budget-consumer' failed and was isolated"),

@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import type { Plan } from '../../../src/config/plan-schema';
 import { closeAllProjectDbs } from '../../../src/db/project-db';
 import {
-	hasPlanCriticApprovalSnapshotForCall,
+	inspectPlanCriticApprovalSnapshotForCall,
 	recordVerifiedPlanCriticApproval,
 } from '../../../src/plan/critic-approval';
 import {
@@ -17,6 +17,16 @@ import { resetStartupLedgerCheck } from '../../../src/plan/manager';
 import { derivePlanId } from '../../../src/plan/utils';
 import { resetSwarmState } from '../../../src/state';
 import { createSafeTestDir } from '../../helpers/safe-test-dir';
+
+/**
+ * Boolean replay-fence view of the tri-state snapshot presence. An unreadable
+ * ledger counts as present (it cannot prove absence), matching the fence the
+ * recorder relies on; callers that need the distinction inspect the status.
+ */
+async function hasApproval(dir: string, callId: string): Promise<boolean> {
+	const presence = await inspectPlanCriticApprovalSnapshotForCall(dir, callId);
+	return presence.status !== 'absent';
+}
 
 function makePlan(title = 'Async Critic Approval'): Plan {
 	return {
@@ -100,9 +110,7 @@ describe('plan-critic-approval shared recorder', () => {
 		// The snapshot's payload hash is the structural hash — the exact shape
 		// assertPlanCriticApprovedForExecution compares against.
 		expect(approved?.payloadHash).toBe(dispatchHash);
-		expect(
-			await hasPlanCriticApprovalSnapshotForCall(dir, 'call-critic-1'),
-		).toBe(true);
+		expect(await hasApproval(dir, 'call-critic-1')).toBe(true);
 	});
 
 	test('never records for a NEEDS_REVISION verdict (missing/not APPROVED)', async () => {
@@ -210,12 +218,7 @@ describe('plan-critic-approval shared recorder', () => {
 		expect(unbound.outcome === 'skipped' && unbound.reasonCode).toBe(
 			'unbound_dispatch',
 		);
-		expect(
-			await hasPlanCriticApprovalSnapshotForCall(
-				dir,
-				'call-critic-sync-unbound',
-			),
-		).toBe(false);
+		expect(await hasApproval(dir, 'call-critic-sync-unbound')).toBe(false);
 	});
 
 	test('reports failed (never records) when no ledger exists', async () => {
@@ -230,9 +233,7 @@ describe('plan-critic-approval shared recorder', () => {
 			transport: 'async_completion',
 		});
 		expect(result.outcome).toBe('failed');
-		expect(
-			await hasPlanCriticApprovalSnapshotForCall(dir, 'call-critic-5'),
-		).toBe(false);
+		expect(await hasApproval(dir, 'call-critic-5')).toBe(false);
 	});
 
 	test('verdict extraction rejects enumeration-only and fenced pseudo-verdicts', async () => {
@@ -264,9 +265,7 @@ describe('plan-critic-approval shared recorder', () => {
 			dispatchPlanStructureHash: dispatchHash,
 			transport: 'async_completion',
 		});
-		expect(
-			await hasPlanCriticApprovalSnapshotForCall(dir, 'call-critic-b'),
-		).toBe(false);
+		expect(await hasApproval(dir, 'call-critic-b')).toBe(false);
 		// A second, distinct critic dispatch may still record its own approval.
 		const second = await recordVerifiedPlanCriticApproval(dir, {
 			parentSessionId: 'ses_parent_1',

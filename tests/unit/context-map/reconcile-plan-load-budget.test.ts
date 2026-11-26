@@ -38,6 +38,7 @@ import {
 	resetSwarmArtifactCache,
 } from '../../../src/utils/swarm-artifact-cache';
 import { createSafeTestDir } from '../../helpers/safe-test-dir';
+import { freezeClock } from '../../helpers/test-clock';
 
 const HEALTHY = 150;
 const BROKEN = 5;
@@ -123,8 +124,15 @@ function planLoadsSince(
 describe('context-map reconciliation — one plan load per pass (r16 7.2)', () => {
 	let directory: string;
 	let cleanup: () => void;
+	let restoreClock: () => void;
 
 	beforeEach(() => {
+		restoreClock = freezeClock({
+			// The numeric clock and the ISO stamp are the SAME instant
+			// (2025-07-15T12:00:00Z): under a freeze they must not disagree.
+			fixedNow: 1_752_580_800_000,
+			isoNow: '2025-07-15T12:00:00.000Z',
+		});
 		resetSwarmState();
 		resetStartupLedgerCheck();
 		({ dir: directory, cleanup } = createSafeTestDir('ctxmap-loadbudget-'));
@@ -132,6 +140,7 @@ describe('context-map reconciliation — one plan load per pass (r16 7.2)', () =
 	});
 
 	afterEach(() => {
+		restoreClock();
 		resetSwarmState();
 		resetStartupLedgerCheck();
 		closeAllProjectDbs();

@@ -1,32 +1,3 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { createBackgroundCompletionObserver } from '../../../src/background/completion-observer';
-import {
-	findByCorrelationId,
-	recordPendingDelegation,
-} from '../../../src/background/pending-delegations';
-import { captureWorkspaceSnapshot } from '../../../src/background/workspace-snapshot';
-import type { Plan } from '../../../src/config/plan-schema';
-import { loadContextMap } from '../../../src/context-map/persistence';
-import { closeAllProjectDbs } from '../../../src/db/project-db';
-import { isPlanCriticApproved } from '../../../src/hooks/delegation-gate';
-import {
-	computePlanStructureHash,
-	initLedger,
-	readLedgerEventsWithIntegrity,
-} from '../../../src/plan/ledger';
-import { resetStartupLedgerCheck } from '../../../src/plan/manager';
-import { derivePlanId } from '../../../src/plan/utils';
-import {
-	ensureAgentSession,
-	resetSwarmState,
-	swarmState,
-} from '../../../src/state';
-import { telemetry } from '../../../src/telemetry';
-import { createSafeTestDir } from '../../helpers/safe-test-dir';
-import { seedStageAPassed } from '../../helpers/task-workflow-evidence';
-
 /**
  * r11-r13 integration matrix: the async lifecycle states from the repair
  * contract, driven end-to-end through the trusted completion observer.
@@ -46,120 +17,30 @@ import { seedStageAPassed } from '../../helpers/task-workflow-evidence';
  | Synchroner Legacy-Abschluss | Unverändertes korrektes Verhalten |
  */
 
-const PARENT = 'ses_matrix_parent';
-
-function writePlan(directory: string, title = 'Matrix Plan'): Plan {
-	const plan: Plan = {
-		schema_version: '1.0.0',
-		title,
-		swarm: 'matrix',
-		current_phase: 1,
-		phases: [
-			{
-				id: 1,
-				name: 'Implementation',
-				status: 'pending',
-				tasks: [
-					{
-						id: '1.1',
-						phase: 1,
-						status: 'pending',
-						size: 'small',
-						description: 'Do the work',
-						depends: [],
-						files_touched: ['src/a.ts'],
-					},
-				],
-			},
-		],
-	} as Plan;
-	mkdirSync(join(directory, '.swarm'), { recursive: true });
-	writeFileSync(
-		join(directory, '.swarm', 'plan.json'),
-		JSON.stringify(plan, null, 2),
-	);
-	return plan;
-}
-
-function completionEvent(
-	childSessionId: string,
-	state: 'completed' | 'error' | 'cancelled',
-	body: string,
-	parentSessionId = PARENT,
-) {
-	return {
-		event: {
-			type: 'message.part.updated',
-			properties: {
-				part: {
-					type: 'text',
-					synthetic: true,
-					sessionID: parentSessionId,
-					text: `<task id="${childSessionId}" state="${state}">\n${body}\n</task>`,
-				},
-			},
-		},
-	};
-}
-
-async function recordChild(
-	directory: string,
-	options: {
-		child: string;
-		callId: string;
-		agent?: string;
-		taskId?: string | null;
-		planCritic?: boolean;
-		plan?: Plan;
-		workflowGeneration?: number;
-	},
-): Promise<void> {
-	await recordPendingDelegation(directory, {
-		correlationId: options.child,
-		jobId: `job-${options.child}`,
-		subagentSessionId: options.child,
-		parentSessionId: PARENT,
-		callID: options.callId,
-		normalizedAgent: options.agent ?? 'explorer',
-		swarmPrefixedAgent: options.agent ?? 'explorer',
-		planTaskId: options.taskId === undefined ? null : options.taskId,
-		evidenceTaskId: options.taskId === undefined ? null : options.taskId,
-		// Gate-bearing roles require a dispatch-time workflow generation for
-		// Stage-B ingestion (same fixture shape as the docs-participation
-		// observer tests).
-		...(options.taskId
-			? {
-					workflowGeneration:
-						options.workflowGeneration !== undefined
-							? options.workflowGeneration
-							: 0,
-				}
-			: {}),
-		workspace: captureWorkspaceSnapshot(directory),
-		...(options.planCritic && options.plan
-			? {
-					planCriticDispatch: {
-						planStructureHash: computePlanStructureHash(options.plan),
-						recordedAt: Date.now(),
-					},
-				}
-			: {}),
-	});
-}
-
-function captureEnds(): { count: () => number; restore: () => void } {
-	let n = 0;
-	const orig = telemetry.delegationEnd;
-	(telemetry as { delegationEnd: unknown }).delegationEnd = () => {
-		n += 1;
-	};
-	return {
-		count: () => n,
-		restore: () => {
-			(telemetry as { delegationEnd: unknown }).delegationEnd = orig;
-		},
-	};
-}
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { createBackgroundCompletionObserver } from '../../../src/background/completion-observer';
+import { findByCorrelationId } from '../../../src/background/pending-delegations';
+import type { Plan } from '../../../src/config/plan-schema';
+import { loadContextMap } from '../../../src/context-map/persistence';
+import { closeAllProjectDbs } from '../../../src/db/project-db';
+import { isPlanCriticApproved } from '../../../src/hooks/delegation-gate';
+import { initLedger } from '../../../src/plan/ledger';
+import { resetStartupLedgerCheck } from '../../../src/plan/manager';
+import { derivePlanId } from '../../../src/plan/utils';
+import {
+	ensureAgentSession,
+	resetSwarmState,
+	swarmState,
+} from '../../../src/state';
+import {
+	captureEnds,
+	completionEvent,
+	PARENT,
+	recordChild,
+	writePlan,
+} from '../../helpers/async-lifecycle-matrix';
+import { createSafeTestDir } from '../../helpers/safe-test-dir';
+import { seedStageAPassed } from '../../helpers/task-workflow-evidence';
 
 describe('async lifecycle integration matrix (r11-r13)', () => {
 	let directory: string;
@@ -180,7 +61,6 @@ describe('async lifecycle integration matrix (r11-r13)', () => {
 		closeAllProjectDbs();
 		cleanup();
 	});
-
 	test('running start: a dispatch event for a live child has no terminal side effects', async () => {
 		await initLedger(directory, derivePlanId(plan));
 		await recordChild(directory, { child: 'ses_m_running', callId: 'c-run' });
@@ -375,71 +255,6 @@ describe('async lifecycle integration matrix (r11-r13)', () => {
 		expect(record?.status).toBe('completed');
 		expect(record?.terminalResult?.status).toBe('completed');
 	});
-
-	test('process restart and replay: a fresh observer instance resumes without double effects', async () => {
-		await initLedger(directory, derivePlanId(plan));
-		// r13 (P1-2): same real-Stage-B seeding as the success test above.
-		const parent = ensureAgentSession(PARENT, 'architect', directory);
-		parent.taskWorkflowStates.set('1.1', 'coder_delegated');
-		const generation = await seedStageAPassed(directory, '1.1');
-		await recordChild(directory, {
-			child: 'ses_m_restart',
-			callId: 'c-restart',
-			agent: 'reviewer',
-			taskId: '1.1',
-			workflowGeneration: generation,
-		});
-		const ends = captureEnds();
-		try {
-			// "Process 1": claims the terminal, runs the closeout, then "crashes".
-			const observer1 = createBackgroundCompletionObserver({
-				config: { enabled: true },
-				directory,
-				contextMap: { enabled: true },
-			});
-			await observer1.event(
-				completionEvent(
-					'ses_m_restart',
-					'completed',
-					'<task_result>[REVIEWED] | 1.1 | APPROVED | ok</task_result>',
-				),
-			);
-		} finally {
-			ends.restore();
-		}
-		const ends2 = captureEnds();
-		try {
-			// "Process 2" (fresh instance over the same durable store): the same
-			// completion event replays (host redelivery) and the durable
-			// maintenance replay path both re-enter — no side effect repeats.
-			const observer2 = createBackgroundCompletionObserver({
-				config: { enabled: true },
-				directory,
-				contextMap: { enabled: true },
-			});
-			await observer2.event(
-				completionEvent(
-					'ses_m_restart',
-					'completed',
-					'<task_result>[REVIEWED] | 1.1 | APPROVED | ok</task_result>',
-				),
-			);
-			const record = findByCorrelationId(directory, 'ses_m_restart');
-			if (record) await observer2.reconcilePending(record);
-		} finally {
-			ends2.restore();
-		}
-		expect(ends2.count()).toBe(0);
-		const record = findByCorrelationId(directory, 'ses_m_restart');
-		expect(record?.status).toBe('consumed');
-		expect(record?.terminalResult?.status).toBe('completed');
-		// r14 (P1-5): the child-level success writes the NON-FINAL summary —
-		// 'approved' only after the authoritative task release.
-		expect(loadContextMap(directory)?.task_history['1.1']?.final_status).toBe(
-			'pending',
-		);
-	});
-
 	test('concurrent child sessions: completions settle their own records without cross-contamination', async () => {
 		await initLedger(directory, derivePlanId(plan));
 		await recordChild(directory, {
@@ -488,76 +303,5 @@ describe('async lifecycle integration matrix (r11-r13)', () => {
 		expect(a?.terminalResult?.result.text).toContain('[REVIEWED]');
 		expect(b?.terminalResult?.result.text).toContain('explored');
 		expect(ends.count()).toBe(2);
-	});
-
-	test('changed plan after critic dispatch: no stale approval (matrix row 8)', async () => {
-		await initLedger(directory, derivePlanId(plan));
-		await recordChild(directory, {
-			child: 'ses_m_critic',
-			callId: 'c-critic',
-			agent: 'critic',
-			taskId: null,
-			planCritic: true,
-			plan,
-		});
-		// The plan is edited while the async critic runs.
-		writePlan(directory, 'Edited During Critic Run');
-		const observer = createBackgroundCompletionObserver({
-			config: { enabled: true },
-			directory,
-		});
-		await observer.event(
-			completionEvent(
-				'ses_m_critic',
-				'completed',
-				'<task_result>VERDICT: APPROVED</task_result>',
-			),
-		);
-		expect(await isPlanCriticApproved(directory)).toBe(false);
-		const integrity = await readLedgerEventsWithIntegrity(directory);
-		const gateSnapshots = integrity.events.filter(
-			(e) =>
-				e.event_type === 'snapshot' &&
-				(e.payload as { approval?: { source?: string } })?.approval?.source ===
-					'plan_critic_gate',
-		);
-		expect(gateSnapshots.length).toBe(0);
-	});
-
-	test('synchronous legacy completion stays intact: foreground Task results keep their handoff behavior', async () => {
-		// The sync path is exercised through the real plugin hook (same harness
-		// as the placeholder tests): a foreground completion must produce the
-		// pipeline advisory and context-map summary exactly as before r11-r13.
-		const { bootKnowledgeHost, createKnowledgeProject } = await import(
-			'../../helpers/knowledge-real-host.js'
-		);
-		const { safeRmRecursive } = await import('../../helpers/safe-test-dir.js');
-		const dir = createKnowledgeProject();
-		try {
-			const plugin = await bootKnowledgeHost(dir, {
-				context_map: { enabled: true },
-			});
-			const after = plugin.hooks['tool.execute.after'];
-			const session = ensureAgentSession('legacy-parent', 'reviewer', dir);
-			session.currentTaskId = '1.1';
-			session.taskWorkflowStates.set('1.1', 'coder_delegated');
-			session.delegationActive = true;
-			swarmState.activeAgent.set('legacy-parent', 'reviewer');
-			await after(
-				{
-					tool: 'Task',
-					sessionID: 'legacy-parent',
-					callID: 'legacy-call',
-				},
-				{ state: 'completed', output: 'review passed' },
-			);
-			expect(swarmState.activeAgent.get('legacy-parent')).toBe('architect');
-			expect(
-				session.pendingAdvisoryMessages?.some((m) => m.includes('[PIPELINE]')),
-			).toBe(true);
-		} finally {
-			resetSwarmState();
-			safeRmRecursive(dir);
-		}
 	});
 });

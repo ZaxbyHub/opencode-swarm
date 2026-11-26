@@ -42,7 +42,7 @@ baseline there is NO binding and an async APPROVED can never auto-approve
 
 ### P1-1 — plan-critic approval was not atomically deduplicated
 
-`hasPlanCriticApprovalSnapshotForCall` + `takeSnapshotEvent` were two
+The existence check and `takeSnapshotEvent` were two
 independent operations; two racing recorders could both pass the check and
 both write. The existence check and the commit now run under ONE
 serialization boundary — the ledger evidence lock — via
@@ -75,12 +75,13 @@ under a durable serialization boundary.
 
 ## Testing
 
-- tests/unit/plan/critic-approval.test.ts — strict parser matrix
+- tests/unit/plan/critic-approval-strict-verdict.test.ts — strict parser matrix
   (enumeration/fence/quote/table/contradiction/truncated/prose variants,
-  bold + CRLF + repeated identical verdicts still parse) and the atomic
-  dedup matrix (2 and 3 parallel attempts → exactly one snapshot,
-  in-fence plan edit → conflict, crash-replay → already_recorded,
-  broken ledger → ledger_unreadable).
+  bold + CRLF + repeated identical verdicts still parse).
+- tests/unit/plan/critic-approval-atomicity.test.ts — atomic dedup matrix
+  (2 and 3 parallel attempts → exactly one snapshot, plan edited between
+  the outer check and the in-lock commit → conflict, crash-replay →
+  already_recorded, broken ledger → ledger_unreadable).
 - tests/unit/hooks/delegation-gate-plan-critic-baseline.test.ts — the full
   dispatch path: pre-execution binding survives a between-child-start-and-
   after-hook plan edit, foreign-session and missing-capture shapes fail

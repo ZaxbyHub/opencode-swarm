@@ -34,8 +34,20 @@ import { ensureAgentSession, resetSwarmState } from '../../../src/state';
 import { telemetry } from '../../../src/telemetry';
 import { createSafeTestDir } from '../../helpers/safe-test-dir';
 import { seedStageAPassed } from '../../helpers/task-workflow-evidence';
+import { withFrozenClockAsync } from '../../helpers/test-clock';
 
 const PARENT = 'ses_r14p4_parent';
+
+/**
+ * F-010: the scenario clock for the expired-lease tests, driven through the
+ * `now` seam of claimTerminalCloseoutStep instead of the real clock. A dead
+ * worker claimed the step two minutes before this instant with a 30s lease,
+ * so a recovering worker observing AT this instant sees it expired by exactly
+ * 90s — the margin the test was written against. Observing on the real clock
+ * instead would make the lease look expired by years, and the test could no
+ * longer tell an expired lease from one that is still live.
+ */
+const SCENARIO_NOW = 1_758_000_000_000;
 
 function completionEvent(childSessionId: string, body: string) {
 	return {
@@ -234,19 +246,20 @@ describe('background completion observer — durable closeout step leases (r14 P
 			'parent_advisory',
 			{
 				claimantId: 'dead-worker',
-				now: Date.now() - 120_000,
+				now: SCENARIO_NOW - 120_000,
 				leaseMs: 30_000,
 			},
 		);
 		expect(dead?.disposition).toBe('claimed');
 
-		// A recovering worker steals the expired lease.
+		// A recovering worker steals the expired lease two minutes after the
+		// claim: it observes at the same scenario instant, never the real clock.
 		const thief = await claimTerminalCloseoutStep(
 			directory,
 			'ses_p4_expired',
 			eventId,
 			'parent_advisory',
-			{ claimantId: 'recovery-worker' },
+			{ claimantId: 'recovery-worker', now: SCENARIO_NOW },
 		);
 		expect(thief?.disposition).toBe('claimed');
 		expect(thief?.leaseToken).not.toBe(dead?.leaseToken);
@@ -301,29 +314,39 @@ describe('background completion observer — durable closeout step leases (r14 P
 			'parent_advisory',
 			{
 				claimantId: 'dead-worker',
-				now: Date.now() - 120_000,
+				now: SCENARIO_NOW - 120_000,
 				leaseMs: 30_000,
 			},
 		);
 		expect(dead?.disposition).toBe('claimed');
 
 		// "Restart": a fresh observer replays the terminal and completes the
-		// step by stealing the expired lease.
-		const observer = createBackgroundCompletionObserver({
-			config: { enabled: true },
-			directory,
-			contextMap: { enabled: true },
-		});
-		await observer.event(
-			completionEvent(
-				'ses_p4_recovery',
-				'<task_result>[REVIEWED] | 1.4 | APPROVED | fine</task_result>',
-			),
+		// step by stealing the expired lease. The observer has no `now` seam, so
+		// its clock is frozen at the scenario instant for the replay only: the
+		// lease is expired by the same 90s the direct thief sees above.
+		await withFrozenClockAsync(
+			async () => {
+				const observer = createBackgroundCompletionObserver({
+					config: { enabled: true },
+					directory,
+					contextMap: { enabled: true },
+				});
+				await observer.event(
+					completionEvent(
+						'ses_p4_recovery',
+						'<task_result>[REVIEWED] | 1.4 | APPROVED | fine</task_result>',
+					),
+				);
+				const record = findByCorrelationId(directory, 'ses_p4_recovery');
+				expect(record?.closeout?.steps.parent_advisory?.state).toBe(
+					'completed',
+				);
+				expect(record?.advisoryInbox?.state).toBe('pending');
+				expect(record?.advisoryInbox?.message).toContain('completed');
+			},
+			// Numeric clock and ISO stamp are the same instant (see SCENARIO_NOW).
+			{ fixedNow: SCENARIO_NOW, isoNow: '2025-09-16T05:20:00.000Z' },
 		);
-		const record = findByCorrelationId(directory, 'ses_p4_recovery');
-		expect(record?.closeout?.steps.parent_advisory?.state).toBe('completed');
-		expect(record?.advisoryInbox?.state).toBe('pending');
-		expect(record?.advisoryInbox?.message).toContain('completed');
 	});
 
 	test('recovery rotates through pending records instead of starving the tail', async () => {

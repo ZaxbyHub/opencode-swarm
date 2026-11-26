@@ -252,51 +252,57 @@ describe('stage-b-dispatch-binding-store — eviction order under IDENTICAL mtim
 		expect(newSeq).toBeGreaterThan(maxOldSeq);
 	});
 
-	it('a symlinked .json never leaks or damages the external target during pruning', () => {
-		const W = Date.now();
-		// A few genuine fresh records.
-		withFrozenClock(
-			() => {
-				for (let i = 0; i < 3; i++) {
-					expect(record(SESSION, `real-${i}`, () => W)).toBe(true);
-				}
-			},
-			{ fixedNow: W },
-		);
+	// Creating file symlinks on Windows requires Developer Mode or elevation;
+	// the pruning behavior under test is platform-independent and the other
+	// cases in this suite still run on Windows.
+	it.skipIf(process.platform === 'win32')(
+		'a symlinked .json never leaks or damages the external target during pruning',
+		() => {
+			const W = Date.now();
+			// A few genuine fresh records.
+			withFrozenClock(
+				() => {
+					for (let i = 0; i < 3; i++) {
+						expect(record(SESSION, `real-${i}`, () => W)).toBe(true);
+					}
+				},
+				{ fixedNow: W },
+			);
 
-		// An external file OUTSIDE the store with distinctive content and a
-		// stale mtime (beyond the 24 h TTL)...
-		const external = path.join(dir, 'external-target.txt');
-		const externalContent = 'EXTERNAL_SECRET_CONTENT_§$%& must survive';
-		fs.writeFileSync(external, externalContent, 'utf-8');
-		const staleAt = new Date(W - STAGE_B_BINDING_TTL_MS - 3_600_000);
-		fs.utimesSync(external, staleAt, staleAt);
+			// An external file OUTSIDE the store with distinctive content and a
+			// stale mtime (beyond the 24 h TTL)...
+			const external = path.join(dir, 'external-target.txt');
+			const externalContent = 'EXTERNAL_SECRET_CONTENT_§$%& must survive';
+			fs.writeFileSync(external, externalContent, 'utf-8');
+			const staleAt = new Date(W - STAGE_B_BINDING_TTL_MS - 3_600_000);
+			fs.utimesSync(external, staleAt, staleAt);
 
-		// ...planted as a .json symlink inside the session dir.
-		const sessionDir = path.dirname(recordPathFor(SESSION, 'real-0'));
-		const plantedLink = path.join(sessionDir, 'planted.json');
-		fs.symlinkSync(external, plantedLink);
+			// ...planted as a .json symlink inside the session dir.
+			const sessionDir = path.dirname(recordPathFor(SESSION, 'real-0'));
+			const plantedLink = path.join(sessionDir, 'planted.json');
+			fs.symlinkSync(external, plantedLink);
 
-		// A SECOND symlink whose external target is FRESH: statSync follows
-		// it for the TTL check (documented behavior), so it counts as a
-		// fresh candidate and is not TTL-pruned.
-		const externalFresh = path.join(dir, 'external-fresh.txt');
-		fs.writeFileSync(externalFresh, 'FRESH_EXTERNAL', 'utf-8');
-		const freshLink = path.join(sessionDir, 'planted-fresh.json');
-		fs.symlinkSync(externalFresh, freshLink);
+			// A SECOND symlink whose external target is FRESH: statSync follows
+			// it for the TTL check (documented behavior), so it counts as a
+			// fresh candidate and is not TTL-pruned.
+			const externalFresh = path.join(dir, 'external-fresh.txt');
+			fs.writeFileSync(externalFresh, 'FRESH_EXTERNAL', 'utf-8');
+			const freshLink = path.join(sessionDir, 'planted-fresh.json');
+			fs.symlinkSync(externalFresh, freshLink);
 
-		storeInternals.pruneSessionDir(dir, SESSION, W);
+			storeInternals.pruneSessionDir(dir, SESSION, W);
 
-		// The stale link was TTL-pruned — but only the LINK is unlinked.
-		expect(fs.existsSync(plantedLink)).toBe(false);
-		// The external files are untouched: same bytes, still present.
-		expect(fs.readFileSync(external, 'utf-8')).toBe(externalContent);
-		expect(fs.readFileSync(externalFresh, 'utf-8')).toBe('FRESH_EXTERNAL');
-		// The fresh link survived as a candidate (stat follows it).
-		expect(fs.existsSync(freshLink)).toBe(true);
-		// The genuine records survive.
-		for (let i = 0; i < 3; i++) {
-			expect(fs.existsSync(recordPathFor(SESSION, `real-${i}`))).toBe(true);
-		}
-	});
+			// The stale link was TTL-pruned — but only the LINK is unlinked.
+			expect(fs.existsSync(plantedLink)).toBe(false);
+			// The external files are untouched: same bytes, still present.
+			expect(fs.readFileSync(external, 'utf-8')).toBe(externalContent);
+			expect(fs.readFileSync(externalFresh, 'utf-8')).toBe('FRESH_EXTERNAL');
+			// The fresh link survived as a candidate (stat follows it).
+			expect(fs.existsSync(freshLink)).toBe(true);
+			// The genuine records survive.
+			for (let i = 0; i < 3; i++) {
+				expect(fs.existsSync(recordPathFor(SESSION, `real-${i}`))).toBe(true);
+			}
+		},
+	);
 });

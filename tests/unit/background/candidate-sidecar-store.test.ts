@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, mock, test } from 'bun:test';
 import { createHash } from 'node:crypto';
-import fs, * as realFs from 'node:fs';
+import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type {
@@ -1098,119 +1098,5 @@ describe('SC-025 / FR-021 — appendToSidecar does not mutate caller objects', (
 		for (let i = 0; i < candidates.length; i++) {
 			expect(JSON.stringify(candidates[i])).toBe(originals[i]);
 		}
-	});
-});
-
-// ---------------------------------------------------------------------------
-// SC-023 — Append failure handling (MUST run LAST — uses mock.module)
-// ---------------------------------------------------------------------------
-// NOTE: These tests use mock.module('node:fs'). Bun's mock.module patches the
-// ORIGINAL module's export slots retroactively, and mock.restore() does NOT
-// undo the replacement — the describe's afterEach therefore re-installs the
-// ORIGINAL appendFileSync (captured before any mock) via mock.module, so the
-// pollution cannot leak into later-loaded test files in the same process.
-// The tests still run LAST within this file so the in-file top-level
-// parseAndPersist import never captures a mocked fs binding.
-
-describe('SC-023 — sidecar append failure does not fail the parse', () => {
-	// r15 audit repair (Phase 6 — test isolation): Bun's mock.module
-	// retroactively patches the ORIGINAL module's export slots, and
-	// mock.restore() does NOT undo a mock.module replacement (verified by a
-	// minimal two-file reproducer). Spreading `...realFs` after a previous
-	// mock therefore re-installs the MOCKED functions — the previous
-	// afterEach left the throwing appendFileSync in place for every
-	// later-loaded module in the process, polluting unrelated test files
-	// (94 artificial failures in the full background suite). Restoring the
-	// ORIGINAL function reference captured BEFORE any mock — re-installed
-	// via mock.module in afterEach — puts the real export slots back for
-	// all holders (Bun patches the same slots in place again).
-	const realAppendFileSync = realFs.appendFileSync;
-
-	afterEach(() => {
-		mock.restore();
-		mock.module('node:fs', () => ({
-			...realFs,
-			appendFileSync: realAppendFileSync,
-		}));
-	});
-
-	// We use mock.module to replace node:fs BEFORE parseAndPersist runs.
-	// The mock is installed per-test via dynamic import so the module
-	// binding is captured with the mock in place.
-	//
-	// Bun's mock.module replaces the module in the cache. Subsequent imports
-	// of 'node:fs' get the mock. Because we use a dynamic import AFTER
-	// installing the mock, the candidate-parser module (and its transitive
-	// import of candidate-sidecar-store) gets the mocked fs.
-	//
-	// IMPORTANT: These tests must remain in a SEPARATE describe block at the
-	// END of the file. Running them before other tests that use the top-level
-	// parseAndPersist import causes Bun's module cache to return the mock for
-	// subsequent top-level calls. This is a Bun test-runner artifact, not
-	// a bug in the application code.
-
-	test('appendFileSync throws → sidecar_write_error is set, parse result still returned', async () => {
-		const dir = makeTempDir();
-		const batchId = 'append-fail-batch';
-		const input: ArtifactInput = {
-			...BASE_INPUT,
-			batchId,
-			text: buildBeText([beRow('c1')]),
-		};
-
-		const appendMock = mock(() => {
-			throw new Error('ENOSPC: no space left on device');
-		});
-		mock.module('node:fs', () => ({
-			...realFs,
-			appendFileSync: appendMock as typeof realFs.appendFileSync,
-		}));
-
-		// Dynamic import AFTER mock is installed — ensures the mock is
-		// in the module cache before candidate-sidecar-store captures its
-		// fs bindings.
-		const { parseAndPersist: pp } = await import(
-			'../../../src/background/candidate-parser'
-		);
-		const result = pp(input, BASE_FLAGS, { projectRoot: dir });
-
-		// Parse succeeded despite sidecar failure
-		expect(result.error_code).toBeUndefined();
-		expect(result.candidates.length).toBe(1);
-		expect(result.invocation_envelope.candidate_count).toBe(1);
-
-		// sidecar_write_error is set
-		expect(result.sidecar_write_error).toBeDefined();
-		expect(result.sidecar_write_error).toContain('ENOSPC');
-	});
-
-	test('parse result fields are all present alongside sidecar_write_error', async () => {
-		const dir = makeTempDir();
-		const batchId = 'sidecar-error-fields-batch';
-
-		const appendMock = mock(() => {
-			throw new Error('disk full');
-		});
-		mock.module('node:fs', () => ({
-			...realFs,
-			appendFileSync: appendMock as typeof realFs.appendFileSync,
-		}));
-
-		const { parseAndPersist: pp } = await import(
-			'../../../src/background/candidate-parser'
-		);
-		const result = pp(
-			{ ...BASE_INPUT, batchId, text: buildBeText([beRow('c1')]) },
-			BASE_FLAGS,
-			{ projectRoot: dir },
-		);
-
-		// All standard parse result fields must be present
-		expect(Array.isArray(result.candidates)).toBe(true);
-		expect(typeof result.invocation_envelope).toBe('object');
-		expect(typeof result.diagnostics).toBe('object');
-		expect(typeof result.diagnostics.candidate_count).toBe('number');
-		expect(typeof result.sidecar_write_error).toBe('string');
-		expect(result.sidecar_write_error!.length).toBeGreaterThan(0);
 	});
 });

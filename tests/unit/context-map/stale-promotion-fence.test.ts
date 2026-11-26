@@ -48,6 +48,7 @@ import {
 	resetTelemetryForTesting,
 } from '../../../src/telemetry';
 import { createSafeTestDir } from '../../helpers/safe-test-dir';
+import { freezeClock } from '../../helpers/test-clock';
 
 const TASK_ID = '1.1';
 
@@ -155,8 +156,15 @@ describe('context-map — stale task-release promotion fence (r17 P1)', () => {
 	let directory: string;
 	let warnSpy: ReturnType<typeof spyOn>;
 	let originalDebug: string | undefined;
+	let restoreClock: () => void;
 
 	beforeEach(() => {
+		restoreClock = freezeClock({
+			// The numeric clock and the ISO stamp are the SAME instant
+			// (2025-07-15T12:00:00Z): under a freeze they must not disagree.
+			fixedNow: 1_752_580_800_000,
+			isoNow: '2025-07-15T12:00:00.000Z',
+		});
 		resetSwarmState();
 		resetStartupLedgerCheck();
 		resetTelemetryForTesting();
@@ -167,6 +175,7 @@ describe('context-map — stale task-release promotion fence (r17 P1)', () => {
 	});
 
 	afterEach(() => {
+		restoreClock();
 		warnSpy.mockRestore();
 		if (originalDebug === undefined) {
 			delete process.env.OPENCODE_SWARM_DEBUG;

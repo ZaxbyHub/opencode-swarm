@@ -1712,7 +1712,13 @@ export async function takeSnapshotEvent(
 		snapshotPayload.approval = options.approvalMetadata;
 	}
 	const planId = derivePlanId(plan);
-	await options?.preCommitCheck?.();
+	// F-001 (PR 3922 review): the authority fence must run ONLY under the
+	// ledger evidence lock, via appendLedgerEvent's in-lock invocation below.
+	// A fence run here — outside the lock — observes plan/ledger state
+	// without serialization, so a transient plan read or a concurrent write
+	// could spuriously throw conflict/already_recorded/plan_unreadable
+	// before the authoritative locked check ran, skipping or failing an
+	// async plan-critic approval despite a valid APPROVED verdict.
 	return appendLedgerEvent(
 		directory,
 		{

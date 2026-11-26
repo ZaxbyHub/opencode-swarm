@@ -46,7 +46,7 @@
  */
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 export interface FloatingPromiseFinding {
 	file: string;
@@ -219,7 +219,7 @@ async function main(): Promise<void> {
 if (
 	process.argv[1] &&
 	fs.realpathSync(process.argv[1]) ===
-		fs.realpathSync(new URL(import.meta.url).pathname)
+		fs.realpathSync(fileURLToPath(import.meta.url))
 ) {
 	await main();
 }
