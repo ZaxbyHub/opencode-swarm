@@ -39,7 +39,7 @@ Flags:
   --rounds <N>            max iterative research rounds, 1..4
   --brief                 emit a short brief instead of a full cited report
 
-Requires council.general.enabled: true and either searchProvider "keenable" (no key needed) or a configured search API key (Tavily or Brave)
+Requires council.general.enabled: true and either searchProvider "keenable" (no key needed) or a configured search API key (Tavily, Brave or SpecStream)
 in the resolved config: global ~/.config/opencode/opencode-swarm.json, then project
 .opencode/opencode-swarm.json overrides.`;
 

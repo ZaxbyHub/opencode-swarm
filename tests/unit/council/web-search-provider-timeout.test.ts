@@ -3,6 +3,7 @@ import http from 'node:http';
 import {
 	BraveProvider,
 	KeenableProvider,
+	SpecStreamProvider,
 	TavilyProvider,
 	WebSearchError,
 } from '../../../src/council/web-search-provider';
@@ -68,6 +69,27 @@ describe('web-search provider fetch timeout (#2476 AC6)', () => {
 			const startedAt = performance.now();
 			await expect(provider.search('query', 1)).rejects.toThrow(
 				/Keenable search timed out after 6000ms/,
+			);
+			expect(performance.now() - startedAt).toBeLessThan(8_000);
+			expect(signals).toHaveLength(1);
+			expect(signals[0].aborted).toBe(true);
+		} finally {
+			globalThis.fetch = hangingFetch;
+		}
+	}, 9_000);
+
+	test('SpecStreamProvider rejects within 8s and aborts the fetch signal', async () => {
+		const signals: AbortSignal[] = [];
+		const hangingFetch = globalThis.fetch;
+		globalThis.fetch = ((url: string | URL | Request, init?: RequestInit) => {
+			if (init?.signal) signals.push(init.signal);
+			return hangingFetch(url, init);
+		}) as typeof fetch;
+		try {
+			const provider = new SpecStreamProvider('test-key');
+			const startedAt = performance.now();
+			await expect(provider.search('query', 1)).rejects.toThrow(
+				/SpecStream search timed out after 6000ms/,
 			);
 			expect(performance.now() - startedAt).toBeLessThan(8_000);
 			expect(signals).toHaveLength(1);

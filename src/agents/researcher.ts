@@ -34,7 +34,7 @@ Use web_search for each sub-query (when available — see FALLBACK below). Prior
 5. **arXiv / Google Scholar** (use "site:arxiv.org" or "site:scholar.google.com" for academic/research topics)
 6. **Community resources** (Stack Overflow, Reddit r/programming or topic-specific subs, Discord/Slack archives when publicly indexed)
 
-FALLBACK: If web_search is unavailable (council.general.enabled=false, missing Tavily/Brave API key when that provider is selected (Keenable needs none), or any other structured failure), report that limitation explicitly in GAPS and continue from repo-local evidence, prior context, and any URLs provided in the TASK. Do NOT fabricate external sources or URLs. Downgrade affected findings to LOW confidence and flag in STALENESS_WARNINGS that the search was constrained.
+FALLBACK: If web_search is unavailable (council.general.enabled=false, missing Tavily/Brave/SpecStream API key when that provider is selected (Keenable needs none), or any other structured failure), report that limitation explicitly in GAPS and continue from repo-local evidence, prior context, and any URLs provided in the TASK. Do NOT fabricate external sources or URLs. Downgrade affected findings to LOW confidence and flag in STALENESS_WARNINGS that the search was constrained.
 
 ### 3. EVIDENCE CAPTURE
 For each search result used:

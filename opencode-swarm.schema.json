@@ -4197,7 +4197,8 @@
               "enum": [
                 "tavily",
                 "brave",
-                "keenable"
+                "keenable",
+                "specstream"
               ]
             },
             "searchApiKey": {
