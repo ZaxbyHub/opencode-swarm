@@ -7,6 +7,7 @@
  * break the basic shape (must be markdown, must contain a top-level heading).
  */
 
+import { Buffer } from 'node:buffer';
 import { mkdir, rename, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import { z } from 'zod';
@@ -38,7 +39,7 @@ export const spec_write: ReturnType<typeof createSwarmTool> = createSwarmTool({
 				reason: 'content must be a string >=20 chars',
 			});
 		}
-		if (content.length > MAX_SPEC_BYTES) {
+		if (Buffer.byteLength(content, 'utf8') > MAX_SPEC_BYTES) {
 			return JSON.stringify({
 				written: false,
 				reason: `content exceeds ${MAX_SPEC_BYTES} bytes`,
@@ -102,7 +103,7 @@ export const spec_write: ReturnType<typeof createSwarmTool> = createSwarmTool({
 					const fs = await import('node:fs/promises');
 					const prior = await fs.readFile(target, 'utf-8');
 					finalContent = `${prior.replace(/\s+$/, '')}\n\n${content}\n`;
-					if (finalContent.length > MAX_SPEC_BYTES) {
+					if (Buffer.byteLength(finalContent, 'utf8') > MAX_SPEC_BYTES) {
 						return JSON.stringify(
 							{
 								written: false,
@@ -144,7 +145,7 @@ export const spec_write: ReturnType<typeof createSwarmTool> = createSwarmTool({
 				{
 					written: true,
 					path: target,
-					bytes: finalContent.length,
+					bytes: Buffer.byteLength(finalContent, 'utf8'),
 					spec_drift_recovery: specDriftRecovery,
 				},
 				null,

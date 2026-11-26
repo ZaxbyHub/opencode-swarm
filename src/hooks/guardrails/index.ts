@@ -31,6 +31,7 @@ import {
 	normalizeScopeFiles,
 } from '../../scope/scope-binding';
 import { createScopeLeaseRenewalTracker } from '../../scope/scope-lease-renewal';
+import { inspectSpecDriftRecoveryWalSync } from '../../services/spec-drift-recovery';
 import {
 	advanceTaskState,
 	ensureAgentSession,
@@ -394,7 +395,11 @@ export function enforceSpecDriftGate(
 	if (!directory) return;
 	if (!SPEC_DRIFT_BLOCKED_TOOLS.has(toolName)) return;
 	const stalePath = path.join(directory, '.swarm', 'spec-staleness.json');
-	if (fsSync.existsSync(stalePath)) {
+	const markerExists = fsSync.existsSync(stalePath);
+	const recoveryState = inspectSpecDriftRecoveryWalSync(directory);
+	const recoveryBlocked =
+		recoveryState === 'PREPARED' || recoveryState === 'corrupt';
+	if (markerExists || recoveryBlocked) {
 		let diffInfo: { diff: string; changedSections: string[] } | null = null;
 		try {
 			diffInfo = computeSpecDiff(directory);
@@ -402,10 +407,20 @@ export function enforceSpecDriftGate(
 			// Non-fatal: diff computation failure falls back to bare block message
 		}
 
+		const blockReason = markerExists
+			? '.swarm/spec-staleness.json exists'
+			: recoveryState === 'corrupt'
+				? '.swarm/spec-drift-recovery.json is corrupt or unreadable'
+				: 'a PREPARED spec-drift recovery transaction is incomplete';
+		const repairGuidance =
+			recoveryState === 'corrupt'
+				? 'Repair: an operator must restore a valid recovery WAL from backup or explicitly remove the corrupt .swarm/spec-drift-recovery.json through an authorized recovery path, then retry. Neither canonical spec_write nor /swarm acknowledge-spec-drift can clear a corrupt WAL.'
+				: recoveryState === 'PREPARED'
+					? 'Repair: persist the accepted spec through the canonical spec_write tool (dispatch the spec_writer agent with the accepted content) so recovery can complete the valid PREPARED transaction; then retry. /swarm acknowledge-spec-drift alone does not clear a WAL-only block.'
+					: 'Repair: persist the accepted spec through the canonical spec_write tool (dispatch the spec_writer agent with the accepted content) — its drift recovery clears the marker; then retry. The user may instead run /swarm clarify to enter spec repair mode (clarify alone does not clear drift) or /swarm acknowledge-spec-drift to dismiss marker-backed drift.';
 		let message =
-			`SPEC_DRIFT_BLOCK: tool "${toolName}" is blocked because .swarm/spec-staleness.json exists. ` +
-			'Repair: persist the accepted spec through the canonical spec_write tool (dispatch the spec_writer agent with the accepted content) — its drift recovery reconciles the plan hash and clears this marker; then retry. ' +
-			'The user may instead run /swarm clarify to enter spec repair mode (clarify alone does not clear drift) or /swarm acknowledge-spec-drift to dismiss the drift.';
+			`SPEC_DRIFT_BLOCK: tool "${toolName}" is blocked because ${blockReason}. ` +
+			repairGuidance;
 
 		if (diffInfo) {
 			const sectionSummary =

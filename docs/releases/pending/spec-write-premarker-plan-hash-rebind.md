@@ -37,9 +37,13 @@ state from `plan.json` itself (stored vs current effective-spec hash) and runs
 the same audited repair transaction as the marker path: WAL (PREPARED →
 COMMITTED), plan-hash rebind through `savePlan`, ledger snapshot event,
 `spec_drift_repaired` audit event, verified spec snapshot. With no plan, no
-stored `specHash`, or an already-consistent hash it still returns
-`no_marker` unchanged. `acknowledge-spec-drift` behavior is untouched
-(flag unset → marker-only semantics).
+stored `specHash`, or an already-consistent hash it still returns `no_marker`
+only when no pending or invalid WAL exists. A PREPARED/corrupt WAL fails closed,
+protected plan mutations stay blocked until canonical recovery completes, and
+`/swarm reset --confirm` clears the WAL with the plan epoch. Canonical repair
+also refuses to report success when the just-published spec is unreadable or
+over the native reader's 256 KiB UTF-8 byte limit. `acknowledge-spec-drift`
+behavior is untouched (flag unset → marker-only semantics).
 
 ## Verification
 
@@ -53,3 +57,73 @@ stored `specHash`, or an already-consistent hash it still returns
   spec-obligation-allowlist, status-service-spec-drift, spec-drift-block,
   spec-drift-advisory, plan manager staleness suites, close-cleanup/
   finalizer, guardrail-explain accuracy.
+
+## Review fixes (F-001..F-004, PR 3920 review round + closeout revision)
+
+- F-001: a crash-retry of the markerless reconciliation with a later clock
+  re-synthesized a different marker identity (the old hash folded
+  `timestamp: now()` in), so the PREPARED WAL replay misread it as an
+  on-disk marker replacement and fabricated a blocking
+  `.swarm/spec-staleness.json` that never existed — re-wedging the flow the
+  transaction had just repaired. The synthesized identity is now hashed from
+  the stable drift fields only, and a synthesized (no-on-disk-marker)
+  identity can never trigger the preserved-marker path. A same-content
+  later-clock retry replays the same transition and finishes `applied`
+  without creating a marker; genuine on-disk replacement markers and actual
+  newer drift keep their protection.
+  Closeout revision: the recovery WAL is now read BEFORE the markerless
+  matching-hash shortcut, and a pending PREPARED WAL bypasses that shortcut.
+  A crash after the plan rebind persisted but before the ledger snapshot /
+  audit event / WAL COMMITTED legs ran used to leave the incomplete
+  transaction stranded (retry reported "No spec drift detected."); the retry
+  now replays the PREPARED recovery idempotently to `applied` with the
+  snapshot and audit legs materialized exactly once, while a consistent plan
+  with no pending WAL stays a genuine no-op.
+  Stage B round 2 revision: the recovery WAL is also VALIDATED before the
+  matching-hash shortcut — `parseWal` maps a corrupt WAL to null, so a
+  present corrupt WAL used to slip past the `existingWal?.state !==
+  'PREPARED'` gate and return `no_marker` instead of failing closed. A
+  consistent plan with a corrupt WAL now fails with the corrupt-WAL repair
+  message, while no-WAL and COMMITTED-WAL consistent plans remain genuine
+  no-ops.
+  Stage B round 3 revision: captured-content integrity is validated before
+  any markerless shortcut, for PREPARED and COMMITTED WALs alike — a
+  structurally parseable WAL whose captured `specContent` no longer hashes
+  to its `newHash` used to slip past the corrupt-WAL check and, when
+  COMMITTED, return `no_marker` before the transaction integrity check ever
+  ran. Such a WAL now fails with the inconsistent-captured-content message;
+  the valid COMMITTED no-op control is unchanged.
+  Stage B round 4 revision: the missing-plan / missing-specHash shortcut no
+  longer reports no work when a PREPARED WAL is pending — a plan lost or
+  downgraded (no stored specHash) after the transaction was prepared used to
+  return `no_marker`, bypassing the unfinished recovery and the replay's
+  fail-closed plan checks. It now fails closed with the pending transition
+  context, while no-WAL missing-plan and hashless-plan runs keep their
+  genuine `no_marker` behavior. Falsified by the split regression suites:
+  `tests/unit/services/spec-drift-recovery-premarker-replay.test.ts` covers
+  stable retry identity and recurring-transition audit identity, while
+  `tests/unit/services/spec-drift-recovery-premarker-failclosed.test.ts`
+  covers corrupt/incomplete WAL failures. The recorded source mutants fail
+  those assertions (`cleanup_pending` / `no_marker` or reused audit identity)
+  and the restored suites pass.
+- F-002: the `[spec-drift]` advisory told the model to pause until "the user
+  runs /swarm acknowledge-spec-drift", conflicting with the
+  SPEC_DRIFT_BLOCK and `/swarm status` guidance that name canonical
+  `spec_write` as an agent-executable repair. The advisory now pauses the
+  listed operations until the drift is cleared by a successful canonical
+  `spec_write` or by user acknowledgment.
+  Closeout revision: the "cleared" verdict is conditioned on the recovery
+  actually succeeding — `spec_write` can return `written: true` while its
+  embedded drift recovery failed or is still pending, so the advisory now
+  says to treat the drift as cleared only when the result reports
+  `spec_drift_recovery` applied (or `no_marker` with the plan already
+  consistent), and to keep the block in force otherwise. Pinned by a new
+  test in `tests/unit/hooks/spec-drift-advisory.test.ts`.
+- F-003: added the negative control — `acknowledge-spec-drift` with a stale
+  plan hash and no marker keeps marker-only semantics (`no_marker`, nothing
+  rebound or created).
+- F-004: the pre-marker rebind test now also asserts the durable LEDGER
+  snapshot bound to the recovery transition (`ensureSnapshotEvent` →
+  `plan-ledger.jsonl`), not just the events.jsonl audit line and the
+  spec snapshot file. Falsified by disabling the snapshot append (test
+  fails, then passes restored).
