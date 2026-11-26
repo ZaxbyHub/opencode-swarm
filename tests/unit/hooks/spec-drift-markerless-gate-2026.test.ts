@@ -299,6 +299,32 @@ describe('markerless spec-pair gate (PR 3920 closeout)', () => {
 		);
 	});
 
+	test('a walk-budget overrun on a md-less openspec tree blocks as retryable (F-017)', () => {
+		// More entries than the walk budget with no .md anywhere: presence is
+		// UNKNOWN, which must block as retryable, never report deletion.
+		for (let i = 0; i < 2010; i++) {
+			fsSync.mkdirSync(path.join(pairDir, 'openspec', 'specs', `d${i}`), {
+				recursive: true,
+			});
+		}
+		fsSync.writeFileSync(
+			path.join(pairDir, '.swarm', 'plan.json'),
+			JSON.stringify({
+				schema_version: '1.0.0',
+				title: 'Pair Plan',
+				swarm: 'test-swarm',
+				current_phase: 1,
+				phases: [{ id: 1, name: 'Phase 1', status: 'in_progress', tasks: [] }],
+				migration_status: 'native',
+				specHash: hashOf('# Spec\n\nGone.\n'),
+			}),
+		);
+
+		expect(() => enforceSpecDriftGate(pairDir, 'save_plan')).toThrow(
+			/could not be scanned/,
+		);
+	});
+
 	test('a deleted spec blocks as drift', () => {
 		fsSync.writeFileSync(
 			path.join(pairDir, '.swarm', 'plan.json'),

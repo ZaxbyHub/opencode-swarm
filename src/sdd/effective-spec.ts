@@ -1288,8 +1288,20 @@ export function resolveSddSourceSelection(
  * apart from a genuinely deleted spec (SolCritic F-011/F-012).
  */
 
-/** Bounded size-agnostic search: does any *.md file exist under dir? (F-016) */
-function hasAnyMdUnder(dir: string, depth: number): boolean {
+/** Total-entry budget for the size-agnostic presence walk (SolCritic F-017). */
+const PRESENCE_WALK_BUDGET = 2000;
+
+/**
+ * Bounded size-agnostic search for any *.md under dir (F-016). Depth- and
+ * work-bounded: state.visited counts every entry across the whole walk and
+ * state.exhausted marks a budget overrun, which the caller must treat as
+ * UNKNOWN (retryable), never as absence.
+ */
+function hasAnyMdUnder(
+	dir: string,
+	depth: number,
+	state: { visited: number; exhausted: boolean },
+): boolean {
 	if (depth > 8) return false;
 	let entries: fs.Dirent[];
 	try {
@@ -1298,11 +1310,13 @@ function hasAnyMdUnder(dir: string, depth: number): boolean {
 		return false;
 	}
 	for (const entry of entries) {
+		if (++state.visited > PRESENCE_WALK_BUDGET) state.exhausted = true;
+		if (state.exhausted) return false;
 		if (entry.isSymbolicLink()) continue;
 		if (entry.isFile() && entry.name.endsWith('.md')) return true;
 		if (
 			entry.isDirectory() &&
-			hasAnyMdUnder(path.join(dir, entry.name), depth + 1)
+			hasAnyMdUnder(path.join(dir, entry.name), depth + 1, state)
 		) {
 			return true;
 		}
@@ -1310,7 +1324,9 @@ function hasAnyMdUnder(dir: string, depth: number): boolean {
 	return false;
 }
 
-export function sddProjectionSourcePresentSync(directory: string): boolean {
+export function sddProjectionSourcePresentSync(
+	directory: string,
+): boolean | 'unknown' {
 	try {
 		if (resolveSddSourceSelection(directory) !== undefined) return true;
 		const root = path.resolve(directory);
@@ -1325,7 +1341,15 @@ export function sddProjectionSourcePresentSync(directory: string): boolean {
 		// prove absence. Presence = any spec .md on disk under openspec/specs (bounded
 		// walk, size-agnostic) or any change entry; only a structurally empty layout
 		// is genuine absence (SolCritic F-014/F-015/F-016).
-		if (hasAnyMdUnder(path.join(root, OPENSPEC_ROOT, 'specs'), 0)) return true;
+		const walkState = { visited: 0, exhausted: false };
+		const foundSpec = hasAnyMdUnder(
+			path.join(root, OPENSPEC_ROOT, 'specs'),
+			0,
+			walkState,
+		);
+		if (foundSpec) return true;
+		// Budget exhausted without a find: presence is UNKNOWN, never absence.
+		if (walkState.exhausted) return 'unknown';
 		const changes = listOpenSpecChanges(root);
 		return changes.length > 0;
 	} catch {

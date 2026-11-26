@@ -241,7 +241,14 @@ export function detectUnmarkedSpecDriftSync(
 		// projection FAILED also returns null — that is a projection error, not a
 		// deletion (SolCritic F-011). Only an unbound, genuinely absent spec is
 		// deletion.
-		if (sddProjectionSourcePresentSync(directory)) {
+		const sourcePresent = sddProjectionSourcePresentSync(directory);
+		if (sourcePresent === 'unknown') {
+			return {
+				outcome: 'block-retry',
+				reason: 'the openspec projection source could not be scanned; retry',
+			};
+		}
+		if (sourcePresent) {
 			return {
 				outcome: 'block-retry',
 				reason:
