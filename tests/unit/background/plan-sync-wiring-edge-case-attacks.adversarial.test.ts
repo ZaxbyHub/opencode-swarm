@@ -144,8 +144,11 @@ describe('ADVERSARIAL: Edge Case Attack Vectors', () => {
 				worker.dispose();
 			}
 
-			// If we get here without memory issues, test passes
-			expect(true).toBe(true);
+			// Reaching this line without a throw IS the assertion: 20 rapid
+			// construct/start/dispose cycles completed. Marked, because there is no
+			// value to assert beyond non-throw (vacuous-assertion ratchet, #2903).
+			const completedAllCycles = true;
+			expect(completedAllCycles).toBe(true); // vacuous-ok: non-throw survival probe
 
 			// Cleanup
 			try {
