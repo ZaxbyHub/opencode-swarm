@@ -173,7 +173,7 @@ describe('external_skill_promote — store.update race handling (Stage B round 6
 
 	test('concurrent history append between read and update => promote fails, artifact cleaned, record unchanged', async () => {
 		// Pre-update record ~20 KB below the cap: promote's pre-write
-			// measurement passes, but the concurrent entry (~80 KB) plus the
+		// measurement passes, but the concurrent entry (~80 KB) plus the
 		// promotion delta (~19 KB long-metadata audit entry) pushes the
 		// ACTUAL merged record well over the cap inside store.update.
 		const candidate = await seedNearCap(
