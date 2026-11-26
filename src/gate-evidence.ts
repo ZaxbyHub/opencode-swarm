@@ -385,6 +385,12 @@ export function assertTaskEvidenceWriteAllowed(
 	event?: TaskWorkflowTransitionEvent,
 ): void {
 	assertValidTaskId(taskId);
+	// Every flat-evidence writer (transaction, council writer, repair) passes
+	// through here under the evidence lock, so the split-receipt fence is
+	// enforced once for all of them (PR 3919 council bypass).
+	if (existsSync(repairMarkerPathFor(getEvidenceDir(directory), taskId))) {
+		throw new TaskEvidenceRepairPendingError(taskId);
+	}
 	const coderWalPath = validateSwarmPath(
 		directory,
 		`coder-settlements/${taskId}.json`,
