@@ -145,12 +145,16 @@ behavior is untouched (flag unset → marker-only semantics).
 - Closeout F-003 (counsel-adjudicated FIX-NOW): `loadPlan` decided the
   spec-drift marker from an unlocked snapshot, so a `spec_write` inside its
   publish or rollback window could leave a stranded `spec-staleness.json` that
-  blocks `save_plan` until someone acknowledges it. The decision now runs only
-  while holding the `spec.md` owner lock, and the marker is never written
-  unlocked. A lock younger than the TTL suppresses the marker (a live writer, or
-  an owner that has created its lock file but not yet published it). Dead-owner
-  and ownerless residue past the TTL is swept before the acquire. Trade-off: an
-  aged lock held by a live process is never swept, so the marker is suppressed
-  until that holder releases or dies. Pinned by
-  `tests/unit/plan/spec-marker-lock-decision-2026.test.ts`; the live-aged and
-  unlocked-fallback mutants fail it.
+  blocks `save_plan` until someone acknowledges it. The decision runs under the
+  `spec.md` owner lock whenever the lock is acquirable. A lock younger than the
+  TTL suppresses the marker (a live writer, or an owner that has created its lock
+  file but not yet published it). When the lock is aged or cannot be acquired, the
+  decision falls back to a fresh read and fails closed: real drift writes the
+  marker, and a canonical `spec_write` or `/swarm acknowledge-spec-drift` clears
+  it. Known residual, intentional: a `spec.md` lock held past the five-minute TTL
+  is no longer trusted by `loadPlan`. A writer still active past that bound could
+  complete a reconcile between the fresh read and the marker write, which leaves a
+  recoverable block rather than a fail-open. The read path never sweeps or mutates
+  other lock targets. Pinned by
+  `tests/unit/plan/spec-marker-lock-decision-2026.test.ts`; the aged-skip mutant
+  fails it.

@@ -130,9 +130,10 @@ describe('loadPlan marker decision under the spec.md owner lock (PR 3920 closeou
 		expect(fs.existsSync(markerPath())).toBe(false);
 	});
 
-	test('an aged lock held by a live process is never swept and suppresses the marker', async () => {
-		// The sweep never removes a live pid, so the acquire keeps failing and the
-		// decision skips. Drift stays unmarked until that holder releases or dies.
+	test('an aged lock held by a live process does not suppress a real drift marker (fail closed)', async () => {
+		// The acquire keeps failing against the aged live holder. The decision then
+		// falls back to a fresh read, and real drift (the spec is stale) writes the
+		// marker, so the drift guard still blocks. Skipping here would be a fail-open.
 		fs.writeFileSync(
 			lockPath(),
 			JSON.stringify({
@@ -148,6 +149,6 @@ describe('loadPlan marker decision under the spec.md owner lock (PR 3920 closeou
 		fs.utimesSync(lockPath(), ANCIENT_SECONDS, ANCIENT_SECONDS);
 
 		await loadPlan(dir);
-		expect(fs.existsSync(markerPath())).toBe(false);
+		expect(fs.existsSync(markerPath())).toBe(true);
 	});
 });

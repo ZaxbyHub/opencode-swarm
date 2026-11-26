@@ -93,7 +93,6 @@ import { appendCoreEventSync } from '../events/core-events.js';
 import { readSwarmFileAsync } from '../hooks/utils';
 import {
 	acquireOwnerLockOnce,
-	cleanupExpiredLocks,
 	getOwnerLockPath,
 	isLocked,
 	LOCK_TIMEOUT_MS,
@@ -790,23 +789,29 @@ async function decideSpecMarker<P extends { specHash?: string | null }>(
 	};
 	if (await inFlight()) return { decision: 'skip' };
 	await fsPromises.mkdir(path.dirname(lockPath), { recursive: true });
-	// Clear dead-owner residue first (a live pid is never swept). Without this an
-	// aged dead-owner lock would block every acquire and hide drift indefinitely.
-	try {
-		cleanupExpiredLocks(directory);
-	} catch {
-		// Best-effort: an unswept residue only defers the marker to a later load.
-	}
-	// Every marker write holds spec.md. A contender can release between a failed
-	// acquire and the in-flight probe, so retry while it is gone.
+	// A contender can release between a failed acquire and the in-flight probe, so
+	// retry while it is gone. The read path never sweeps or mutates other locks.
 	let attempt = acquireOwnerLockOnce(lockPath, 'loadPlan', 'spec-marker');
 	for (let retry = 0; !attempt.acquired && retry < 3; retry += 1) {
 		if (await inFlight()) return { decision: 'skip' };
 		attempt = acquireOwnerLockOnce(lockPath, 'loadPlan', 'spec-marker');
 	}
-	// Still unacquirable: skip, never write unlocked. A writer that holds the lock
-	// reconciles or restores prior bytes, so no marker is owed for its window.
-	if (!attempt.acquired) return { decision: 'skip' };
+	if (!attempt.acquired) {
+		// Aged live holder, dead residue, or a contender that stays unacquirable.
+		// Fail closed: decide from a fresh read. A real drift writes the marker,
+		// and a canonical spec_write or acknowledge clears it. Skipping here would
+		// let stale-spec mutations run unblocked, a fail-open on the drift guard.
+		const hash = await _internals.readPlanSpecHashUnderLock(directory);
+		const fresh =
+			hash === undefined ? plan : ({ ...plan, specHash: hash } as unknown as P);
+		const stale = await isSpecStale(
+			directory,
+			fresh as unknown as Parameters<typeof isSpecStale>[1],
+		);
+		return stale.stale
+			? { decision: 'write', plan: fresh, stale, release: () => {} }
+			: { decision: 'skip' };
+	}
 	try {
 		const lockedSpecHash =
 			await _internals.readPlanSpecHashUnderLock(directory);
