@@ -22,6 +22,7 @@ import { takeSnapshotEvent } from '../plan/ledger';
 import { loadPlanJsonOnly } from '../plan/manager';
 import { derivePlanId } from '../plan/utils.js';
 import { formatLegacyQaBindingRecovery } from '../qa-gate/recovery.js';
+import { redactEvidenceText } from '../security/evidence-redaction';
 import * as logger from '../utils/logger.js';
 import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache.js';
 import { createSwarmTool } from './create-tool';
@@ -188,7 +189,9 @@ export async function executeWriteDriftEvidence(
 					approvalMetadata: {
 						phase,
 						verdict: 'APPROVED',
-						summary: summary.trim(),
+						// #3844 fold-in (closes #3899 AC2): the approval snapshot is
+						// durable ledger state — redact before persist.
+						summary: redactEvidenceText(summary.trim()),
 						approved_at: new Date().toISOString(),
 						locked_by_snapshot_seq: lockedBySnapshotSeq,
 					},
@@ -234,9 +237,17 @@ export async function executeWriteDriftEvidence(
 	const evidenceEntry = {
 		type: 'drift-verification',
 		verdict: normalizedVerdict,
-		summary: summary.trim(),
+		// #3844 fold-in (closes #3899 AC2): persisted summary is model free
+		// text — redact at the write boundary (the tool response keeps the
+		// raw verdict prose for the calling agent).
+		summary: redactEvidenceText(summary.trim()),
 		timestamp: new Date().toISOString(),
-		requirementCoverage: args.requirementCoverage,
+		// #3844 final-critic F2: requirementCoverage is model free text —
+		// redact at the write boundary alongside the summary.
+		requirementCoverage:
+			args.requirementCoverage !== undefined
+				? redactEvidenceText(args.requirementCoverage)
+				: undefined,
 		...(provenance ? { provenance } : {}),
 	};
 

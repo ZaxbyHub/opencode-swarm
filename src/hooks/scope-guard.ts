@@ -160,7 +160,13 @@ export function createScopeGuardHook(
 							activeSessionId: sessionId,
 						});
 			let binding = resolution.status === 'found' ? resolution.binding : null;
-			if (!binding) {
+			if (
+				!binding &&
+				// Issue #3889: an unreadable durable store fails closed BEFORE any
+				// fallback authorization surface is consulted (plan v4 R3-1 —
+				// the PR-feedback fallback must not paper over store corruption).
+				resolution.status !== 'store_unreadable'
+			) {
 				binding =
 					_internals.getAuthorizedPrFeedbackScopeBinding({
 						directory,

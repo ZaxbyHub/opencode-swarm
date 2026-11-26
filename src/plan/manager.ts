@@ -1671,6 +1671,15 @@ export async function savePlan(
 		 * between the final check and the atomic filesystem operation.
 		 */
 		preCommitCheck?: () => void;
+		/**
+		 * Phase IDs to record as durably completed in THIS save (issue
+		 * #3770; feedback round: caller decides when — one `phase_completed`
+		 * event per id appends unconditionally, transition or backfill) —
+		 * parity with the close-terminal path (closePlanTerminalState) — so
+		 * the completion is a durable, transition-scoped record the
+		 * completion event can key its exactly-once identity on.
+		 */
+		completedPhaseIds?: number[];
 	},
 ): Promise<PlanSaveDurability> {
 	// Fail-fast: reject blank or whitespace-only directory inputs before any I/O
@@ -2049,6 +2058,25 @@ export async function savePlan(
 			}
 			throw error;
 		}
+	}
+
+	// Phase-completion transition events (issue #3770): mirror the
+	// close-terminal path so a normal phase_complete save records a durable,
+	// transition-scoped `phase_completed` event inside the same managed write.
+	// Placed after the task diff loops and before the replay/projection step;
+	// reuses the already-computed hashAfter so the event chain stays correct.
+	for (const completedPhaseId of options?.completedPhaseIds ?? []) {
+		options?.preCommitCheck?.();
+		await appendLedgerEvent(
+			directory,
+			{
+				plan_id: planId,
+				event_type: 'phase_completed',
+				phase_id: completedPhaseId,
+				source: 'phase_complete',
+			},
+			{ planHashAfter: hashAfter, preCommitCheck: options?.preCommitCheck },
+		);
 	}
 
 	const ledgerStatusTaskIds = collectLedgerStatusTaskIds(

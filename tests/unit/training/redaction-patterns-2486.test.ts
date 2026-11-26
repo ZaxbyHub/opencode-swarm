@@ -69,6 +69,6 @@ describe('each remaining pattern class keeps its own fixture', () => {
 	});
 });
 
-test('redaction version stays 1 (pre-release pattern extension, no migration)', () => {
-	expect(TRAINING_REDACTION_VERSION).toBe(1);
+test('redaction version is 2 (#3840 bare-family widening; reads accept 1..2, no migration loss)', () => {
+	expect(TRAINING_REDACTION_VERSION).toBe(2);
 });

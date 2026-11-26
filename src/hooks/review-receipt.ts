@@ -37,6 +37,124 @@ import type {
 	ReviewFinding,
 } from '../agents/agent-output-schema.js';
 import { resolveRetentionCap } from '../retention/caps.js';
+import { redactLocationPath } from '../review/review-file-path.js';
+import {
+	EVIDENCE_FINDING_BODY_MAX,
+	EVIDENCE_FINDING_TITLE_MAX,
+	EVIDENCE_VALIDATION_EVIDENCE_MAX,
+	redactEvidenceField,
+	redactEvidenceText,
+} from '../security/evidence-redaction.js';
+
+/**
+ * #3844: redact credential material from the free-text fields of a review
+ * receipt BEFORE it reaches the durable store. Deep-clones; the caller's
+ * in-memory receipt is untouched.
+ *
+ * A redaction placeholder can be LONGER than the secret it replaces, so the
+ * redacted value is clamped back inside its schema bound — otherwise a field
+ * that sat exactly on the bound is pushed past it by the redaction itself
+ * and the persisted receipt fails its schema on read.
+ *
+ * The bounds and the redaction+clamp helper come from
+ * `src/security/evidence-redaction.ts`: the receipt and the auto-review
+ * evidence persist TWO copies of the same finding and the evidence-integrity
+ * check compares them byte-for-byte, so both sides must apply the SAME bound
+ * to the SAME text.
+ */
+function redactFindingValidationForPersistence(
+	validation: FindingValidation,
+): FindingValidation {
+	return {
+		...validation,
+		evidence: redactEvidenceField(
+			validation.evidence,
+			EVIDENCE_VALIDATION_EVIDENCE_MAX,
+		),
+	};
+}
+
+function redactStructuredFindingsForPersistence(
+	findings: ReviewFinding[] | undefined,
+): ReviewFinding[] | undefined {
+	if (findings === undefined) return undefined;
+	return findings.map((finding) => ({
+		...finding,
+		title: redactEvidenceField(finding.title, EVIDENCE_FINDING_TITLE_MAX),
+		body: redactEvidenceField(finding.body, EVIDENCE_FINDING_BODY_MAX),
+		// The file path is NOT redacted here: the engine already redacted a
+		// path that names no real file in the project, and the evidence copy
+		// of the same finding carries that form — redacting it again (the
+		// redactor's base64 rule matches ordinary deep paths) would make the
+		// two copies differ and the integrity check would reject the pair.
+	}));
+}
+
+export function redactReviewReceiptForPersistence<T extends ReviewReceipt>(
+	receipt: T,
+	directory?: string,
+): T {
+	const clone = structuredClone(receipt);
+	if (clone.receipt_type === 'rejected') {
+		const rejected = clone as RejectedReviewReceipt;
+		for (const finding of rejected.blocking_findings) {
+			finding.summary = redactEvidenceText(finding.summary);
+			if (finding.title !== undefined) {
+				finding.title = redactEvidenceText(finding.title);
+			}
+			if (finding.body !== undefined) {
+				finding.body = redactEvidenceText(finding.body);
+			}
+			if (finding.validator_evidence !== undefined) {
+				finding.validator_evidence = redactEvidenceText(
+					finding.validator_evidence,
+				);
+			}
+			if (finding.anchor_reason !== undefined) {
+				finding.anchor_reason = redactEvidenceText(finding.anchor_reason);
+			}
+		}
+		rejected.pass_conditions = rejected.pass_conditions.map((condition) =>
+			redactEvidenceText(condition),
+		);
+		// #3844: the evidence references are `path:line` strings whose PATH
+		// is model-authored free text. When the project directory is known
+		// the path part is redacted by the same rule the finding's file uses
+		// (a plain redaction would mangle a REAL deep path — the redactor's
+		// long mixed-class base64 rule matches one); without it the plain
+		// redaction still removes a credential from the reference.
+		if (rejected.evidence_references !== undefined) {
+			rejected.evidence_references = rejected.evidence_references.map((ref) =>
+				typeof directory === 'string'
+					? redactLocationPath(directory, ref)
+					: redactEvidenceText(ref),
+			);
+		}
+		if (rejected.summary !== undefined) {
+			rejected.summary = redactEvidenceText(rejected.summary);
+		}
+		rejected.structured_findings = redactStructuredFindingsForPersistence(
+			rejected.structured_findings,
+		);
+	} else {
+		const approved = clone as ApprovedReviewReceipt;
+		approved.validated_claims = approved.validated_claims.map((claim) =>
+			redactEvidenceText(claim),
+		);
+		if (approved.caveats !== undefined) {
+			approved.caveats = approved.caveats.map((caveat) =>
+				redactEvidenceText(caveat),
+			);
+		}
+		approved.structured_findings = redactStructuredFindingsForPersistence(
+			approved.structured_findings,
+		);
+	}
+	clone.finding_validations = clone.finding_validations?.map(
+		redactFindingValidationForPersistence,
+	);
+	return clone;
+}
 
 // ============================================================================
 // Types
@@ -678,7 +796,11 @@ export async function persistReviewReceipt(
 	try {
 		await fs.promises.writeFile(
 			tmpPath,
-			JSON.stringify(receipt, null, 2),
+			JSON.stringify(
+				redactReviewReceiptForPersistence(receipt, directory),
+				null,
+				2,
+			),
 			'utf-8',
 		);
 		assertDirectReceiptFile(context, tmpPath, true);
@@ -877,10 +999,19 @@ export async function updateReviewReceiptValidations(
 	) {
 		throw new Error('review receipt identity changed before validation update');
 	}
-	receipt.finding_validations = validations;
+	// #3844: the NEW validation content is redacted before persistence (the
+	// future-write contract — legacy pre-redaction content already on disk is
+	// left as-is; operators may delete stale receipts).
+	const redactedValidations = validations.map(
+		redactFindingValidationForPersistence,
+	);
+	receipt.finding_validations = redactedValidations;
 	if (receipt.receipt_type === 'rejected') {
 		const byId = new Map(
-			validations.map((validation) => [validation.finding_id, validation]),
+			redactedValidations.map((validation) => [
+				validation.finding_id,
+				validation,
+			]),
 		);
 		for (const finding of receipt.blocking_findings) {
 			if (!finding.finding_id) continue;

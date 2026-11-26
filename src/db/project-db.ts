@@ -756,6 +756,21 @@ export function runProjectMigrations(db: Database, markerDir?: string): void {
 		.get();
 	const currentVersion = row?.version ?? 0;
 
+	// #3773: a database recorded by a NEWER client (one migration above the
+	// highest this build knows) must never be opened writable — an older
+	// writer mutating a schema it does not understand risks downgrade
+	// corruption. Refuse before any migration write, naming both versions;
+	// rows and schema are preserved untouched. The read-only open
+	// (withProjectDbReadOnly) never migrates and stays available for
+	// diagnostics.
+	const highestSupported = MIGRATIONS[MIGRATIONS.length - 1]?.version ?? 0;
+	if (currentVersion > highestSupported) {
+		throw new ProjectDbError(
+			'schema_newer_than_supported',
+			`swarm.db schema version ${currentVersion} is newer than this client supports (${highestSupported}); writable open refused to preserve schema and rows — upgrade opencode-swarm before writing`,
+		);
+	}
+
 	for (const migration of MIGRATIONS) {
 		if (migration.version <= currentVersion) continue;
 		const apply = db.transaction(() => {

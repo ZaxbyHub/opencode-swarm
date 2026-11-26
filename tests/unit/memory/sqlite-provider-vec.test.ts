@@ -337,8 +337,8 @@ describe('ADVERSARIAL — migration v6 is idempotent (CREATE TABLE IF NOT EXISTS
 	});
 });
 
-describe('ADVERSARIAL — future schema_migrations version is skipped (linear skip)', () => {
-	test('schema_migrations with future version 99 — initialize() skips it without throwing', async () => {
+describe('ADVERSARIAL — future schema_migrations version refuses writable open (#3773)', () => {
+	test('schema_migrations with future version 99 — initialize() refuses naming both versions, rows preserved', async () => {
 		const root = await providerRoot();
 		const provider = track(
 			new SQLiteMemoryProvider(root, { enabled: true, provider: 'sqlite' }),
@@ -357,16 +357,30 @@ describe('ADVERSARIAL — future schema_migrations version is skipped (linear sk
 			db.close();
 		}
 
-		// Re-init — the future version 99 should be skipped (migration.version <= currentVersion)
-		// and the provider should still initialize without throwing
+		// Re-init — #3773: a recorded version this client does not know must
+		// REFUSE the writable open (fail closed, schema and rows preserved)
+		// instead of silently skipping forward. The old "linear skip" leg
+		// pinned the defect this PR fixes.
 		const provider2 = track(
 			new SQLiteMemoryProvider(root, { enabled: true, provider: 'sqlite' }),
 		);
-		await expect(provider2.initialize()).resolves.toBeUndefined();
-		provider2.close();
+		let refusal: unknown = null;
+		try {
+			await provider2.initialize();
+		} catch (error) {
+			refusal = error;
+		}
+		expect(refusal).toBeInstanceOf(Error);
+		const message = (refusal as Error).message;
+		expect(message).toContain('memory.db schema version 99');
+		expect(message).toContain('is newer than this client supports');
+		expect(message).toContain('writable open refused');
+		// The refused provider never opened its writable handle — close is a
+		// no-op-safe cleanup (initialize threw before any handle was kept).
+		provider2.close?.();
 
-		// Verify MAX(version) is still 99 (future row preserved, not rolled back),
-		// and no migration was re-run (no new entries beyond 99)
+		// Verify MAX(version) is still 99 (the future row survived the refusal
+		// untouched — preserved, not rolled back) and no migration was re-run
 		const db2 = new Database(dbPath, { readonly: true });
 		try {
 			const maxRow = db2

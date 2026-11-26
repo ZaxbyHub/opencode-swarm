@@ -32,6 +32,7 @@ import {
 	activatePrWorkflow,
 	readPrWorkflowGateState,
 } from '../hooks/pr-workflow-gate';
+import { redactEvidenceText } from '../security/evidence-redaction.js';
 import { log } from '../utils';
 import {
 	canonicalRootKeyFresh,
@@ -597,8 +598,8 @@ export function buildWakeMessage(events: FormattedPrEvent[]): string {
 		const lines = groupEvents
 			.map((event) => {
 				const withoutTrustedSignal = event.modeSignal
-					? event.message.split(event.modeSignal).join('')
-					: event.message;
+					? redactEvidenceText(event.message).split(event.modeSignal).join('')
+					: redactEvidenceText(event.message);
 				return sanitizeWakeBody(withoutTrustedSignal).trim();
 			})
 			.join('\n');

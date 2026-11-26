@@ -19,6 +19,7 @@ import { validateSwarmPath } from '../hooks/utils';
 import { listLiveLaneOwners } from '../parallel/lane-owners';
 import { resetPrmSessionState } from '../prm';
 import { sanitizeDiagnosticText } from '../scope/path-identity.js';
+import { clearSessionScopeBindingsFromDisk } from '../scope/scope-persistence';
 import { advisoryWarn } from '../services/warning-buffer.js';
 import {
 	beginSnapshotCoordinationReset,
@@ -396,6 +397,14 @@ export async function handleResetSessionCommand(
 
 	// Clear in-memory agent sessions
 	const sessionCount = swarmState.agentSessions.size;
+	const resetSessionIds = [
+		...new Set([
+			...swarmState.agentSessions.keys(),
+			// An explicitly named target session is swept even when it has no
+			// live in-memory registry entry (issue #3889 AC5).
+			...(sessionID ? [sessionID] : []),
+		]),
+	];
 	for (const [sessionId, session] of swarmState.agentSessions) {
 		resetPrmSessionState(session, sessionId);
 		clearTrajectoryStep(sessionId);
@@ -407,6 +416,84 @@ export async function handleResetSessionCommand(
 	swarmState.pendingDispatchAuthorizations = [];
 	clearSnapshotSessionOwnerships();
 	results.push(`✅ Cleared ${sessionCount} in-memory agent session(s)`);
+
+	// Issue #3889 (AC5): the cleared sessions' durable scope bindings are the
+	// write-authorization surface — sweep them through the deny-ledger sink so
+	// a fresh session is not blocked by stale rows and another runtime's
+	// stale in-memory copy stays denied. Unidentifiable rows are reported for
+	// operator cleanup (fail-closed). The authoritative rows live in the
+	// scope-binding namespace of .swarm/swarm.db — not under .swarm/scopes,
+	// which only holds the non-authorizing legacy v1 projection.
+	try {
+		const scopeSweep = await clearSessionScopeBindingsFromDisk(
+			directory,
+			resetSessionIds,
+		);
+		// A sweep that could not enumerate the store must never render as a
+		// successful "Cleared 0" (final-critic round-2 N2). The count is what
+		// the sweep confirmed before the read failed — a floor, not a total.
+		// Nothing is claimed about how later writes resolve: the sweep never
+		// read the store.
+		if (scopeSweep.unreadable) {
+			results.push(
+				`⚠️ Durable scope binding sweep could not read the scope binding store (.swarm/swarm.db) — ${scopeSweep.removed} row(s) swept before that; the rest was not checked. Run reset-session again from the project root once the store is readable.`,
+			);
+		} else {
+			// Rows this sweep left cleared by a retirement it confirmed, one per
+			// row. A row it saw again in an unresolved state is reported below
+			// instead, never both.
+			results.push(
+				`✅ Cleared ${scopeSweep.removed} durable scope binding row(s) for the reset session(s)`,
+			);
+		}
+		// Rows no session can claim, as the sweep last saw them. Never removed
+		// on a guess, so they outlive the reset unless someone removes them.
+		if (scopeSweep.unidentifiable > 0) {
+			results.push(
+				`⚠️ ${scopeSweep.unidentifiable} unidentifiable scope binding row(s) were seen in the scope binding store (.swarm/swarm.db, namespace scope-binding) and left in place (fail-closed); delete them manually, then retry.`,
+			);
+		}
+		// A retirement attempt that threw says nothing about whether the
+		// retirement committed: the transaction wrapper restores a pragma after
+		// COMMIT and lets that error propagate. So the sweep states only what it
+		// could not confirm and what it observed afterwards, and drops none of
+		// these rows. The sweep learns whose row it is when it LISTS it; a
+		// concurrent writer can hand the row to another session before the sweep
+		// acts on that listing (the retirement then fails its revision check).
+		// So the unchecked line attributes the row to the reset sessions as of
+		// its LAST listing — never as of the attempt. That holds because a row
+		// the sweep later listed as someone else's is not read again: it is
+		// reported in the relinquished line instead, which claims only that the
+		// sweep once listed the row as theirs.
+		if (scopeSweep.failed > 0) {
+			results.push(
+				`⚠️ This sweep could not confirm retiring ${scopeSweep.failed} durable scope binding row(s) of the reset session(s): they were read again and found still in place in the scope binding store (.swarm/swarm.db, namespace scope-binding). Run reset-session again.`,
+			);
+		}
+		if (scopeSweep.unchecked > 0) {
+			results.push(
+				`⚠️ This sweep could not confirm retiring ${scopeSweep.unchecked} durable scope binding row(s) that were the reset session(s)' when the sweep last listed them, and could not check afterwards whether they remain in the scope binding store (.swarm/swarm.db, namespace scope-binding). Run reset-session again once the store is readable.`,
+			);
+		}
+		// Gone or no longer the reset sessions', but not by a retirement this
+		// sweep confirmed: left out of the cleared count above, and never
+		// dropped from the report.
+		if (scopeSweep.unconfirmedRelinquished > 0) {
+			results.push(
+				`ℹ️ ${scopeSweep.unconfirmedRelinquished} durable scope binding row(s) that the sweep listed as the reset session(s)' are gone or are no longer the reset session(s)' after a retirement attempt this sweep could not confirm; whether this sweep or another process removed or replaced them is not known.`,
+			);
+		}
+		// Set two ways: a full page removed nothing, or the pass limit ended
+		// a sweep that was still removing rows. Neither confirms the store was
+		// seen in full; neither proves it was not.
+		if (scopeSweep.truncated) {
+			results.push(
+				'⚠️ The reset sweep filled its scan capacity or reached its pass limit before it could confirm the scope binding store was seen in full: rows of the reset session(s) may remain unswept in the scope binding store (.swarm/swarm.db, namespace scope-binding). Run reset-session again, or remove them manually.',
+			);
+		}
+	} catch (err) {
+		results.push(`⚠️ Durable scope binding sweep failed: ${errorMessage(err)}`);
+	}
 
 	// #2668: the cleared sessions' durable QA override rows are session-keyed
 	// policy — sweep them in the same reset so a later rehydrate can never

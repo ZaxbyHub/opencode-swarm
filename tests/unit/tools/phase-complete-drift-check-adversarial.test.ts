@@ -8,7 +8,6 @@ import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-
 import { closeAllProjectDbs } from '../../../src/db/project-db';
 import type { QaGateProfile } from '../../../src/db/qa-gate-profile';
 import {
@@ -20,7 +19,6 @@ import {
 import { executePhaseComplete } from '../../../src/tools/phase-complete';
 
 let mockProfileReturnValue: QaGateProfile | null = null;
-
 const PLAN_SWARM = 'test-swarm';
 const PLAN_TITLE = 'Test Plan';
 const PLAN_ID = `${PLAN_SWARM}-${PLAN_TITLE}`.replace(/[^a-zA-Z0-9-_]/g, '_');
@@ -78,7 +76,6 @@ mock.module('../../../src/db/qa-gate-profile.js', () => ({
 		drift_check: true,
 	},
 }));
-
 function createMockProfile(driftCheckValue: boolean): QaGateProfile {
 	return {
 		id: 1,
@@ -101,7 +98,6 @@ function createMockProfile(driftCheckValue: boolean): QaGateProfile {
 		locked_by_snapshot_seq: null,
 	};
 }
-
 function setupBaseDir(dir: string): void {
 	fs.mkdirSync(path.join(dir, '.swarm'), { recursive: true });
 	fs.mkdirSync(path.join(dir, '.swarm', 'evidence'), { recursive: true });
@@ -119,7 +115,12 @@ function setupBaseDir(dir: string): void {
 				status: 'in_progress',
 				type: 'code',
 				tasks: [
-					{ id: '1.1', phase: 1, status: 'pending', description: 'Test task' },
+					{
+						id: '1.1',
+						phase: 1,
+						status: 'completed',
+						description: 'Test task',
+					},
 				],
 			},
 		],
@@ -227,7 +228,6 @@ function writeDriftEvidence(
 describe('phase-complete drift_check adversarial tests', () => {
 	let tempDir: string;
 	let originalCwd: string;
-
 	beforeEach(() => {
 		resetSwarmState();
 		closeAllProjectDbs();
@@ -1031,7 +1031,7 @@ describe('phase-complete drift_check adversarial tests', () => {
 					{
 						id: 2,
 						name: 'Phase 2',
-						status: 'pending',
+						status: 'completed',
 						type: 'code',
 						tasks: [],
 					},

@@ -266,7 +266,7 @@ function setupIntermediatePhase(finalCouncilEnabled: boolean) {
 			id: 3,
 			name: 'Phase 3 (last)',
 			tasks: [
-				{ id: '3.1', phase: 3, status: 'in_progress', description: 'Task 3' },
+				{ id: '3.1', phase: 3, status: 'completed', description: 'Task 3' },
 			],
 		},
 	]);

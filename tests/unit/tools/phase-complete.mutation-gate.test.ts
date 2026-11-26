@@ -43,7 +43,7 @@ function setupSwarmDir(dir: string): void {
 					{
 						id: '1.1',
 						phase: 1,
-						status: 'pending',
+						status: 'completed',
 						description: 'Test task',
 					},
 				],
