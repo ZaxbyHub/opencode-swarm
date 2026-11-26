@@ -9,6 +9,7 @@ import {
 } from '../../../src/background/pending-delegations';
 import { closeAllProjectDbs } from '../../../src/db/project-db';
 import { resetSwarmState } from '../../../src/state';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 import {
 	createDelegationGateHook,
 	makeConfig,

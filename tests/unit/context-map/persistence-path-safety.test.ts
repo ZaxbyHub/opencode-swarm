@@ -34,6 +34,7 @@ import {
 	_internals,
 	readContextMapState,
 } from '../../../src/context-map/persistence';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 let tempDir: string;
 let origInternals: typeof _internals;

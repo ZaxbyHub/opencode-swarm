@@ -22,6 +22,7 @@ import type {
 	ArtifactInput,
 	ParseFlags,
 } from '../../../src/background/candidate-parser';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 // ---------------------------------------------------------------------------
 // Minimal local fixtures (duplicated from candidate-sidecar-store.test.ts)

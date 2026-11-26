@@ -17,6 +17,7 @@ import {
 } from '../../../src/host/v2/usage-bridge';
 import { resetSwarmState } from '../../../src/state';
 import { createIsolatedTestEnv } from '../../helpers/isolated-test-env.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 function makeTempProject(): string {
 	const dir = canonicalMkdtemp('swarm-usage-release-');

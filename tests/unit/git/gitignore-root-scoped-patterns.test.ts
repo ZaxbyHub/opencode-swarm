@@ -27,6 +27,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 const REPO_ROOT = resolve(import.meta.dir, '..', '..', '..');
 const REPO_GITIGNORE = join(REPO_ROOT, '.gitignore');

@@ -17,9 +17,9 @@ import { PlanSyncWorker } from '../../../src/background/plan-sync-worker';
 // Track log calls for testing
 const logCalls: { message: string; data?: unknown }[] = [];
 
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 // Import _internals seam for plan/manager (within-module)
 import { _internals as planManagerInternals } from '../../../src/plan/manager';
-
 // r15 audit repair (Phase 6 — test isolation): same defect and same fix as
 // plan-sync-worker-write-detection.test.ts — the previous top-level
 // mock.module('../../../src/utils') replaced the whole utils module with

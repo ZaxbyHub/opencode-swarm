@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 import {
 	PlanSyncWorker,
 	type PlanSyncWorkerOptions,
