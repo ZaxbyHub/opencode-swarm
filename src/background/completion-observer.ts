@@ -26,6 +26,7 @@ import {
 	standardWorktreeByCallID,
 } from '../hooks/delegation-gate/worktree-isolation.js';
 import { isInDeclaredScope } from '../hooks/guardrails/helpers.js';
+import { forgetV2StepUsage } from '../host/v2/usage-bridge.js';
 import {
 	flushRouteRetirementObligation,
 	retireRouteInvalidationsForCall,
@@ -1234,6 +1235,12 @@ export function createBackgroundCompletionObserver(opts: {
 					},
 				);
 			}
+			// Native-async children never reach the synchronous Task consumer
+			// (consumeAssistantUsageForTask in src/index.ts), so their usage-bridge
+			// totals are released here at the verified terminal. Without this the
+			// bridge's per-process session cap fills with async children and then
+			// refuses new sessions, starving sync delegation cost attribution.
+			forgetV2StepUsage(record.subagentSessionId);
 			// r12 (async lifecycle F2/F3/F4): the shared BUSINESS closeout for a
 			// verified native-async completion — the terminal-record twin of the
 			// synchronous Task handoff in src/index.ts. Everything here keys on the
