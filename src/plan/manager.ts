@@ -91,7 +91,12 @@ import {
 import { epicMergeFailureSkipsCheckpoint } from '../epic/merge-epoch.js';
 import { appendCoreEventSync } from '../events/core-events.js';
 import { readSwarmFileAsync } from '../hooks/utils';
-import { tryAcquireLock } from '../parallel/file-locks.js';
+import {
+	acquireOwnerLockOnce,
+	getOwnerLockPath,
+	isLocked,
+	tryAcquireLock,
+} from '../parallel/file-locks.js';
 import { recordTaskAttempt } from '../services/run-memory.js';
 import { emit } from '../telemetry.js';
 import type { SpecStaleDetectedEvent } from '../types/events';
@@ -723,6 +728,71 @@ export async function regeneratePlanMarkdown(
  * 3. .swarm/plan.md exists only -> migrate from plan.md, save both files, return Plan
  * 4. Neither exists -> return null
  */
+/**
+ * PR 3920 closeout (F-001 follow-up): loadPlan's markerless staleness check ran
+ * unlocked, so a spec_write inside its publish or rollback window could leave a
+ * stranded drift marker. The marker decision is taken under the spec.md owner
+ * lock. A live writer holding it reconciles or restores prior bytes, so no
+ * marker is written from its window. Otherwise the staleness pair is re-read
+ * under the lock. A lock file that is not live does not block the drift guard.
+ */
+async function decideSpecMarker<P extends { specHash?: string | null }>(
+	directory: string,
+	plan: P,
+	snapshot: Awaited<ReturnType<typeof isSpecStale>>,
+): Promise<
+	| { decision: 'skip' }
+	| {
+			decision: 'write';
+			plan: P;
+			stale: Awaited<ReturnType<typeof isSpecStale>>;
+			release: () => void;
+	  }
+> {
+	const liveWriter = (): boolean => {
+		const holder = isLocked(directory, 'spec.md');
+		return holder !== null && holder.expiresAt === Number.MAX_SAFE_INTEGER;
+	};
+	if (liveWriter()) return { decision: 'skip' };
+	const lockPath = getOwnerLockPath(directory, 'spec.md');
+	await fsPromises.mkdir(path.dirname(lockPath), { recursive: true });
+	const attempt = acquireOwnerLockOnce(lockPath, 'loadPlan', 'spec-marker');
+	if (!attempt.acquired) {
+		return liveWriter()
+			? { decision: 'skip' }
+			: { decision: 'write', plan, stale: snapshot, release: () => {} };
+	}
+	const raw = await fsPromises
+		.readFile(path.join(directory, '.swarm', 'plan.json'), 'utf-8')
+		.catch(() => null);
+	let lockedPlan: P = plan;
+	if (raw !== null) {
+		try {
+			const parsed = JSON.parse(raw) as { specHash?: string | null };
+			lockedPlan = {
+				...plan,
+				specHash: parsed.specHash ?? undefined,
+			} as unknown as P;
+		} catch {
+			// Unparseable plan.json under the lock: keep the snapshot pair.
+		}
+	}
+	const stale = await isSpecStale(
+		directory,
+		lockedPlan as unknown as Parameters<typeof isSpecStale>[1],
+	);
+	if (!stale.stale) {
+		attempt.release();
+		return { decision: 'skip' };
+	}
+	return {
+		decision: 'write',
+		plan: lockedPlan,
+		stale,
+		release: attempt.release,
+	};
+}
+
 export async function loadPlan(
 	directory: string,
 	cache?: Map<string, Promise<string | null>>,
@@ -957,7 +1027,10 @@ export async function loadPlan(
 
 							// Allowlist check: skip marker for obligation-preserving edits
 							const preserving = await isObligationPreserving(directory);
-							if (!preserving) {
+							const markerDecision = preserving
+								? null
+								: await decideSpecMarker(directory, validated, staleResult);
+							if (markerDecision?.decision === 'write') {
 								// Write spec-staleness.json (includes precomputed diff so
 								// system-enhancer can render the advisory without importing
 								// spec-hash at module-load time — avoids repro-704 T1 regression).
@@ -993,9 +1066,10 @@ export async function loadPlan(
 												type: 'spec_stale_detected',
 												timestamp: new Date().toISOString(),
 												phase: validated.current_phase ?? 1,
-												specHash_plan: validated.specHash,
-												specHash_current: staleResult.currentHash ?? null,
-												reason: staleResult.reason,
+												specHash_plan: markerDecision.plan.specHash as string,
+												specHash_current:
+													markerDecision.stale.currentHash ?? null,
+												reason: markerDecision.stale.reason,
 												planTitle: validated.title,
 												diff: diffInfo?.diff ?? null,
 												changedSections: diffInfo?.changedSections ?? [],
@@ -1008,7 +1082,9 @@ export async function loadPlan(
 									);
 									// #1619 F1 — see the rationale above the enclosing try.
 									invalidateCachedArtifact(specStalenessPath);
+									markerDecision.release();
 								} catch (error) {
+									markerDecision.release();
 									if (error instanceof PlanRecoverySupersededError) throw error;
 									// Non-fatal: spec-staleness.json write failure does not block plan loading
 								}
@@ -1020,9 +1096,9 @@ export async function loadPlan(
 										type: 'spec_stale_detected',
 										timestamp: new Date().toISOString(),
 										phase: validated.current_phase ?? 1,
-										specHash_plan: validated.specHash,
-										specHash_current: staleResult.currentHash ?? null,
-										reason: staleResult.reason ?? 'unknown',
+										specHash_plan: markerDecision.plan.specHash as string,
+										specHash_current: markerDecision.stale.currentHash ?? null,
+										reason: markerDecision.stale.reason ?? 'unknown',
 										planTitle: validated.title,
 									};
 									options?.preCommitCheck?.();

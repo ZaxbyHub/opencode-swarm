@@ -142,3 +142,12 @@ behavior is untouched (flag unset → marker-only semantics).
   mutations as corrupt, instead of passing as COMMITTED. Pinned by
   `tests/unit/services/spec-drift-wal-gate-integrity.test.ts`; removing the
   check fails the tampered-WAL case.
+- Closeout F-003 (counsel-adjudicated FIX-NOW): `loadPlan` decided the
+  spec-drift marker from an unlocked snapshot, so a `spec_write` inside its
+  publish or rollback window could leave a stranded `spec-staleness.json` that
+  blocks `save_plan` until someone acknowledges it. The decision now runs under
+  the `spec.md` owner lock: a live writer holding it suppresses the marker, and
+  otherwise the staleness pair is re-read under the lock. A dead-owner lock file
+  does not suppress the marker. Pinned by
+  `tests/unit/plan/spec-marker-lock-decision-2026.test.ts`; the committed
+  `loadPlan` fails the live-writer case.
