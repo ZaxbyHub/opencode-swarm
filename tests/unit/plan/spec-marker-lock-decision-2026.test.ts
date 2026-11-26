@@ -117,4 +117,16 @@ describe('loadPlan marker decision under the spec.md owner lock (PR 3920 closeou
 		await loadPlan(dir);
 		expect(fs.existsSync(markerPath())).toBe(false);
 	});
+
+	test('an aged lock that cannot be acquired decides from a fresh read, not the snapshot', async () => {
+		// The aged lock file cannot be acquired and is not in flight, so the decision
+		// falls back to a fresh read. The writer has rebound plan.json: no marker.
+		fs.writeFileSync(lockPath(), '{"v":1}');
+		fs.utimesSync(lockPath(), ANCIENT_SECONDS, ANCIENT_SECONDS);
+		_internals.readPlanSpecHashUnderLock = async () =>
+			readEffectiveSpecSync(dir)?.hash;
+
+		await loadPlan(dir);
+		expect(fs.existsSync(markerPath())).toBe(false);
+	});
 });

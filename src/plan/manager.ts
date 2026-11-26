@@ -768,7 +768,6 @@ async function readPlanSpecHashUnderLock(
 async function decideSpecMarker<P extends { specHash?: string | null }>(
 	directory: string,
 	plan: P,
-	snapshot: Awaited<ReturnType<typeof isSpecStale>>,
 ): Promise<
 	| { decision: 'skip' }
 	| {
@@ -790,11 +789,26 @@ async function decideSpecMarker<P extends { specHash?: string | null }>(
 	};
 	if (await inFlight()) return { decision: 'skip' };
 	await fsPromises.mkdir(path.dirname(lockPath), { recursive: true });
-	const attempt = acquireOwnerLockOnce(lockPath, 'loadPlan', 'spec-marker');
+	// A contender can release between a failed acquire and the in-flight probe.
+	// Re-acquire in that case rather than writing from a pre-lock read.
+	let attempt = acquireOwnerLockOnce(lockPath, 'loadPlan', 'spec-marker');
+	for (let retry = 0; !attempt.acquired && retry < 3; retry += 1) {
+		if (await inFlight()) return { decision: 'skip' };
+		attempt = acquireOwnerLockOnce(lockPath, 'loadPlan', 'spec-marker');
+	}
 	if (!attempt.acquired) {
-		return (await inFlight())
-			? { decision: 'skip' }
-			: { decision: 'write', plan, stale: snapshot, release: () => {} };
+		// Still contended with no live holder after the retries: decide from a
+		// fresh read, never from the snapshot taken before the contention.
+		const hash = await _internals.readPlanSpecHashUnderLock(directory);
+		const fresh =
+			hash === undefined ? plan : ({ ...plan, specHash: hash } as unknown as P);
+		const stale = await isSpecStale(
+			directory,
+			fresh as unknown as Parameters<typeof isSpecStale>[1],
+		);
+		return stale.stale
+			? { decision: 'write', plan: fresh, stale, release: () => {} }
+			: { decision: 'skip' };
 	}
 	try {
 		const lockedSpecHash =
@@ -1059,7 +1073,7 @@ export async function loadPlan(
 							const preserving = await isObligationPreserving(directory);
 							const markerDecision = preserving
 								? null
-								: await decideSpecMarker(directory, validated, staleResult);
+								: await decideSpecMarker(directory, validated);
 							if (markerDecision?.decision === 'write') {
 								// Write spec-staleness.json (includes precomputed diff so
 								// system-enhancer can render the advisory without importing
