@@ -13,6 +13,10 @@ import {
 	canonicalForgePrUrl,
 	type ForgeContext,
 } from '../providers/forge-provider.js';
+import {
+	clampRedactedText,
+	redactEvidenceText,
+} from '../security/evidence-redaction.js';
 import { canonicalRootKeyFresh } from '../utils/canonical-root.js';
 
 const PR_FEEDBACK_EVENT_QUEUE_DIR = 'pr-feedback-events';
@@ -82,6 +86,13 @@ const PrFeedbackMonitorEventSchema = z
  * metadata sidecar below. This lets a downgrade continue to read and clear a
  * queue without giving an older worker a new strict-schema record to parse.
  */
+/**
+ * The disk-schema bound for a queued event message
+ * (`PrFeedbackMonitorEventDiskSchema`). A redacted message is clamped to it,
+ * so the redaction can never push a valid message past its own schema.
+ */
+const QUEUE_MESSAGE_MAX = 20_000;
+
 const PrFeedbackMonitorEventDiskSchema = z
 	.object({
 		type: z.string().min(1).max(128),
@@ -463,8 +474,23 @@ async function writeQueueRecord(
 	);
 	const diskRecord = QueueRecordDiskSchema.parse({
 		...record,
+		// #3844: redact at the WRITE boundary so every queue mutation (enqueue,
+		// claim, clear, release — including rewrites of legacy pre-redaction
+		// events seeded on disk) stores a credential-free message.
 		events: record.events.map(
-			({ headRefOid: _, claimedOwnerPid: __, ...event }) => event,
+			({ headRefOid: _, claimedOwnerPid: __, ...event }) => ({
+				...event,
+				// A redaction placeholder can be LONGER than the secret
+				// it replaces, so a message that sat exactly on the
+				// disk-schema bound (20 000 characters) is pushed past
+				// it by the redaction itself and the schema parse
+				// throws before the queue write. Clamp the redacted
+				// value back inside the bound.
+				message: clampRedactedText(
+					redactEvidenceText(event.message),
+					QUEUE_MESSAGE_MAX,
+				),
+			}),
 		),
 	});
 	// Write the sidecar first. If the legacy-compatible primary write fails (or

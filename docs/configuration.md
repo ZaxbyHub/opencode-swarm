@@ -174,7 +174,7 @@ Sections marked `(strict)` reject unknown nested keys at config load time - a ty
 ## Architect prompt budget (characters and model tokens)
 
 The architect's built-in prompt composition is bounded by a published
-character ceiling, `ARCHITECT_PROMPT_BUDGET_CHARS` (165,000 chars in
+character ceiling, `ARCHITECT_PROMPT_BUDGET_CHARS` (165,500 chars in
 `src/agents/architect.ts`). Every supported feature combination — the default
 render, the work-complete council on or off, the advisory General Council
 (`council.general.enabled`) composed together with every documented opt-in

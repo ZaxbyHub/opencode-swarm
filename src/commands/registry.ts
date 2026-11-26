@@ -1220,7 +1220,7 @@ export const COMMAND_REGISTRY = {
 			'Human-only grant/revoke of the training-content consent record (two-step confirm token)',
 		args: '[--confirm=<token>] [--revoke] [--max-bytes N] [--max-records N] [--retention-days N]',
 		details:
-			'Issue #2486 (D7). Training-content capture is OFF by default and cannot be enabled by config, env, agents, or tools — only by this durable, project-bound consent record under .swarm/training/v1/consent.json. Bare invocation prints the consent terms (purpose, content classes, redaction, hard quota ceilings) and issues a 15-minute confirmation token; --confirm=<token> writes the grant (quotas clamp to the ceilings, never above); --revoke stops capture immediately (physical deletion is /swarm dataset withdraw).',
+			'Issue #2486 (D7). Training-content capture is OFF by default and cannot be enabled by config, env, agents, or tools — only by this durable, project-bound consent record under .swarm/training/v1/consent.json. Bare invocation prints the consent terms (purpose, content classes, redaction, hard quota ceilings) and issues a 15-minute confirmation token; --confirm=<token> writes the grant (quotas clamp to the ceilings, never above); --revoke stops capture immediately (physical deletion is /swarm dataset withdraw). Since #3840 the redaction version is informational redactor provenance, not a consent-terms boundary: the consent terms (purpose, content classes, quotas, retention, expiry) are the authorization surface, so a consent granted under an older redactor stays valid and capture continues — the running redactor only removes more content before storage. The preview prints the running version. Remediation for already-stored pre-v2 content: docs/training-vault-remediation.md.',
 		category: 'utility',
 		toolPolicy: 'human-only',
 	},
@@ -1240,7 +1240,7 @@ export const COMMAND_REGISTRY = {
 			'Human-only governed dataset export (deterministic bundle + manifest, two-step confirm token)',
 		args: '[--kind <k>[,<k>]] [--session <id>] [--task <id>] [--since <ISO>] [--validation-ratio <0..0.5>] [--confirm=<token>]',
 		details:
-			'Issue #2486 (D7). Side-effect-free preview by default: export id, record counts (train/validation split, quarantined excluded), estimated size, destination, and a 15-minute confirmation token. --confirm=<token> writes the deterministic bundle (records.jsonl, train.jsonl, validation.jsonl, manifest.json with sha256 checksums, schema version, echoed filters, and a session-coherent split) under .swarm/training/v1/exports/<export-id>/; identical re-exports are idempotent. The existing /swarm export (plan+context JSON) is unchanged.',
+			'Issue #2486 (D7). Side-effect-free preview by default: export id, record counts (train/validation split, quarantined excluded), estimated size, destination, and a 15-minute confirmation token. --confirm=<token> writes the deterministic bundle (records.jsonl, train.jsonl, validation.jsonl, manifest.json with sha256 checksums, schema version, echoed filters, and a session-coherent split) under .swarm/training/v1/exports/<export-id>/; identical re-exports are idempotent. Since #3840 every exported record is re-redacted by the running redactor, so the manifest reports the source redaction versions represented separately from the verified floor, and an export that cannot safely redact a record publishes nothing. The existing /swarm export (plan+context JSON) is unchanged.',
 		category: 'utility',
 		toolPolicy: 'human-only',
 	},

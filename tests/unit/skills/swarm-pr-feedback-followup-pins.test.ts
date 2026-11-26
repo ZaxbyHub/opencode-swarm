@@ -234,3 +234,172 @@ describe('round 6 closeout: exclusions on always-loaded surfaces and precedence'
 		expect(ciMonitor).not.toContain('git fetch origin <base-branch>');
 	});
 });
+
+// PR #3911: the open-issue corpus check, the per-round verdict table, and the
+// round-2 checkpoint. Anchored to their sections so a move or delete fails.
+// The pending release fragment is deliberately NOT read here: release cleanup
+// deletes consumed fragments, so a pin on it would break unit after the next
+// release (#3745 class). check:pending-fragment enforces its presence.
+describe('follow-up dispositions: corpus check and round ledger', () => {
+	const SKILL = '.opencode/skills/swarm-pr-feedback/SKILL.md';
+	const normalize = (text: string): string => text.replace(/\s+/g, ' ');
+
+	// The ragappv3 numbers cited as field evidence; each must carry its repo
+	// so a reader never resolves it against this repository's issues.
+	const RAGAPPV3_NUMBERS = ['1155', '1159', '1166', '1193', '1201', '1202'];
+
+	function unqualifiedRagappRefs(text: string): string[] {
+		return [...text.matchAll(/#(\d+)/g)]
+			.filter(([, n]) => RAGAPPV3_NUMBERS.includes(n))
+			.filter((match) => {
+				const before = text.slice(
+					Math.max(0, (match.index ?? 0) - 12),
+					match.index,
+				);
+				return !before.endsWith('ragappv3') && !before.endsWith('ragappv3 PR ');
+			})
+			.map(([full]) => full);
+	}
+
+	test('the corpus check runs before the closeout gate and reads bodies after a search', () => {
+		const corpus = normalize(
+			section(
+				read(DISPOSITIONS),
+				'## Open-issue corpus check before the closeout gate',
+			),
+		);
+		expect(corpus).toContain('before the closeout gate reviews them');
+		expect(corpus).toContain(
+			'`gh issue list --state open --search "<terms> in:title,body"`',
+		);
+		expect(corpus).toContain('Do not page through the whole corpus.');
+		expect(corpus).toContain('Read the bodies of the hits.');
+		expect(corpus).toContain('A title match is not coverage.');
+		expect(corpus).toContain('plan it as `ABSORB`');
+		expect(corpus).toContain('`RECORD` stands');
+		expect(corpus).toContain('Repository-history cache reuse');
+	});
+
+	test('the corpus check sits after the FILE explanation, not inside the table text', () => {
+		const text = read(DISPOSITIONS);
+		const inPractice = text.indexOf('In practice `FILE` means Priority items');
+		const heading = text.indexOf(
+			'## Open-issue corpus check before the closeout gate',
+		);
+		expect(inPractice).toBeGreaterThan(-1);
+		expect(heading).toBeGreaterThan(inPractice);
+	});
+
+	test('the verdict table lives in the task-gates artifact and is a navigation aid only', () => {
+		const ledger = normalize(section(read(DISPOSITIONS), '## Round ledger'));
+		expect(ledger).toContain(
+			'The durable task-gates artifact, where the closeout gate in `SKILL.md` already records every verdict, has a `## Verdict table` section',
+		);
+		expect(ledger).toContain('`round | item | gate | verdict | evidence-ref`');
+		expect(ledger).toContain('The table is a navigation aid only.');
+		expect(ledger).toContain(
+			'It still reviews the full current diff and reconciles the full closure ledger. A delta approval stays invalid.',
+		);
+	});
+
+	test('the round-2 checkpoint is a counted, critic-adjudicated, content-changing ASK', () => {
+		const ledger = normalize(section(read(DISPOSITIONS), '## Round ledger'));
+		expect(ledger).toContain(
+			'A critic round is one closeout-critic verdict on one feedback item.',
+		);
+		expect(ledger).toContain('Count rounds per item from the verdict table.');
+		expect(ledger).toContain(
+			'stop before round 3. Set the item to `NEEDS_USER_DECISION`',
+		);
+		expect(ledger).toContain('The checkpoint is a content-changing `ASK`');
+		expect(ledger).toContain(
+			'under "Critic review before the user sees it", with the latest closeout-critic verdict attached',
+		);
+		expect(ledger).toContain(
+			'Until the user answers, the revision the critic rejected is never committed for publication or pushed',
+		);
+		expect(ledger).toContain('follow `drive-to-merge.md` step 3');
+		expect(ledger).toContain(
+			"the remaining edges close as `RECORD`, with the user's decision quoted",
+		);
+		expect(ledger).toContain(
+			"It takes the user's decision, never the agent's own judgment.",
+		);
+	});
+
+	test('cross-repo citations are qualified in the skill', () => {
+		for (const file of [DISPOSITIONS, SKILL]) {
+			expect(unqualifiedRagappRefs(read(file))).toEqual([]);
+		}
+		// Positive control: the detector flags a bare number.
+		expect(unqualifiedRagappRefs('filed fresh as #1201')).toEqual(['#1201']);
+		expect(
+			unqualifiedRagappRefs('ragappv3#1201 and ragappv3 PR #1193'),
+		).toEqual([]);
+	});
+
+	test('the PR-introduced exception and the SKILL.md pointer are wired', () => {
+		expect(read(DISPOSITIONS)).toContain(
+			'The only exception is a round-2 checkpoint item (see "Round ledger").',
+		);
+		const skill = normalize(read(SKILL));
+		expect(skill).toContain('**Verdict table and round-2 checkpoint.**');
+		expect(skill).toContain("task-gates artifact's verdict table");
+		expect(skill).toContain(
+			'`references/followup-dispositions.md` (## Round ledger)',
+		);
+	});
+
+	test('pins every substantive round-ledger, corpus-check, and SKILL rule sentence', () => {
+		const ledger = normalize(section(read(DISPOSITIONS), '## Round ledger'));
+		const corpus = normalize(
+			section(
+				read(DISPOSITIONS),
+				'## Open-issue corpus check before the closeout gate',
+			),
+		);
+		expect(ledger).toContain(
+			"If an item's second closeout-critic verdict is `NEEDS_REVISION` or `BLOCKED`, stop before round 3.",
+		);
+		expect(ledger).toContain(
+			'gives three options: fix the remaining edges, accept them as a documented limitation, or keep iterating',
+		);
+		expect(ledger).toContain('Raise an `ASK` that lists the remaining edges');
+		expect(ledger).toContain('It gets its own adjudication first');
+		expect(ledger).toContain(
+			"If the user's next turn does not answer it, follow `drive-to-merge.md` step 3 for an unanswered content-changing `ASK`. No approved revision exists yet, so stop and report the open `ASK` (the step-6 terminal); nothing is published.",
+		);
+		expect(ledger).toContain(
+			"A re-dispatched gate starts from the rows added since the item's last verdict to find what changed.",
+		);
+		expect(ledger).toContain('(ZCode: `.zcode/session/tasks/<slug>/gates.md`)');
+		expect(ledger).toContain('Every gate verdict appends one row:');
+		expect(ledger).toContain(
+			'and the limitation is documented where the item lives',
+		);
+		expect(ledger).toContain(
+			'This is the only way a PR-introduced item reaches this table.',
+		);
+		expect(corpus).toContain(
+			'An `ABSORB` found then gets reviewed like any other row.',
+		);
+		expect(corpus).toContain(
+			'comment on that issue with the new evidence during Publishing And Communication',
+		);
+		expect(corpus).toContain('and the item fails the necessity gate');
+		expect(corpus).toContain('You can also query an existing ZaxbyGraph cache');
+		expect(corpus).toContain('**Search first.**');
+		expect(corpus).toContain(
+			'Retrofitting it after the `RECORD` rows are published is expensive.',
+		);
+		expect(ledger).toContain(
+			"If the user accepts a documented limitation, the remaining edges close as `RECORD`, with the user's decision quoted",
+		);
+		expect(normalize(read(SKILL))).toContain(
+			"Append every gate verdict to the task-gates artifact's verdict table",
+		);
+		expect(normalize(read(SKILL))).toContain(
+			'before a third closeout-critic round on one item, ask the user',
+		);
+	});
+});

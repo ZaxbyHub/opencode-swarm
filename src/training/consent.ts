@@ -21,6 +21,7 @@ import { z } from 'zod';
 import { pseudonymousRef, resolveLineageSalt } from '../observability/ids';
 import { atomicWriteSwarmFileSync } from '../utils/atomic-write';
 import { trainingConsentPath } from './paths';
+import { TRAINING_REDACTION_VERSION } from './redact.js';
 
 export const TRAINING_CONSENT_SCHEMA_VERSION = 1;
 /** Version of the consent TERMS presented to the human (bump when terms change). */
@@ -65,7 +66,14 @@ export const TrainingConsentSchema = z
 			maxRecords: z.number().int().positive(),
 			retentionDays: z.number().int().positive(),
 		}),
-		redaction_version: z.literal(1),
+		// #3840: redaction_version is INFORMATIONAL REDACTOR PROVENANCE, not a
+		// consent-terms boundary — the authorization surface (purpose, content
+		// classes, quotas, retention, expiry) is unchanged by a redactor bump,
+		// so a consent recorded under an older redactor stays valid while the
+		// running redactor only REMOVES more content before storage. Reads
+		// accept every version 1..TRAINING_REDACTION_VERSION; writes stamp the
+		// running version.
+		redaction_version: z.number().int().min(1).max(TRAINING_REDACTION_VERSION),
 		project_binding: TrainingProjectBindingSchema,
 	})
 	.strict();
@@ -172,7 +180,7 @@ export function grantTrainingConsent(
 			'tool_result',
 		],
 		quotas,
-		redaction_version: 1,
+		redaction_version: TRAINING_REDACTION_VERSION,
 		project_binding: computeProjectBinding(directory),
 	};
 	const target = trainingConsentPath(directory);
@@ -213,7 +221,7 @@ export function revokeTrainingConsent(
 				purpose: 'model-training-content-capture',
 				content_classes: ['user_message'],
 				quotas: { ...TRAINING_QUOTA_CEILINGS },
-				redaction_version: 1,
+				redaction_version: TRAINING_REDACTION_VERSION,
 				project_binding: computeProjectBinding(directory),
 			};
 	fs.mkdirSync(path.dirname(target), { recursive: true });

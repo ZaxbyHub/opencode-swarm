@@ -454,7 +454,11 @@ describe('nested project boundary writers — regression: parent .swarm poison (
 		clearScopeForTask(ordinary, '1.1');
 		clearAllScopes(ordinary);
 
-		expect(resolution.status).toBe('overloaded');
+		// Issue #3889 (AC4): a malformed legacy row is not a capacity
+		// failure, so it surfaces as its own fail-closed class instead of the
+		// catch-all capacity status. The containment property under test —
+		// the descendant store is neither migrated nor deleted — is unchanged.
+		expect(resolution.status).toBe('store_unreadable');
 		expect(fs.readFileSync(legacyPath, 'utf8')).toBe('{}');
 		expect(fs.readFileSync(legacyProjection, 'utf8')).toBe('{}');
 		expect(fs.existsSync(path.join(scopesDir, 'archive'))).toBe(false);

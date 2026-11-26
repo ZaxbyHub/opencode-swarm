@@ -135,6 +135,7 @@ describe('phase_complete aggregate observational preflight', () => {
 			'mutation',
 			'phase_council',
 			'todo_gate',
+			'planned_tasks',
 			'architecture_supervisor',
 			'final_review',
 			'final_council',

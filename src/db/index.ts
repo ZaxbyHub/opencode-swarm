@@ -23,6 +23,8 @@ export {
 	getCoordinationLease,
 	getCoordinationState,
 	importCoordinationOnce,
+	listCoordinationStateKeys,
+	listCoordinationStateRowsRaw,
 	listCoordinationStates,
 	MAX_COORDINATION_STATE_LIST_ROWS,
 	releaseCoordinationLease,

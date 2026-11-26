@@ -3202,6 +3202,23 @@ export const EVIDENCE_WRITE_BLIND_SPOTS: readonly EvidenceWriteBlindSpot[] = [
 			'point every migrated writer funnels through.',
 	},
 	{
+		file: 'src/utils/atomic-write.ts',
+		rule: 'C',
+		target: 'resolvedTarget',
+		status: 'not-an-evidence-artifact',
+		reason:
+			'PR #3905: renameSyncWithRetry(tempPath, resolvedTarget) inside the ' +
+			'SYNC atomic-write core (atomicWriteFileSync/atomicWriteSwarmFileSync/' +
+			'createExclusiveSwarmFileSync) is the same parameter-passed BY ' +
+			'CONTRACT shape as the async entry below — every .swarm writer ' +
+			'delegates here with its own already-validated target, and the core ' +
+			'unconditionally calls invalidateCachedArtifact(resolvedTarget) ' +
+			'after the successful rename (same function, machine-checkable). ' +
+			'This site entered the census when PR #3905 registered the ' +
+			'createExclusiveSwarmFileSync salt-publish writer as a canonical-v1 ' +
+			'producer, which pointed the scanner at the generic core itself.',
+	},
+	{
 		file: 'src/background/pending-delegations.ts',
 		rule: 'R',
 		target: 'to',
@@ -3393,5 +3410,28 @@ export const EVIDENCE_WRITE_BLIND_SPOTS: readonly EvidenceWriteBlindSpot[] = [
 			'not consumed by the swarm-artifact cache; the evidence-path candidate ' +
 			'filter matches this file only because the module also persists review ' +
 			'evidence and route receipts.',
+	},
+	{
+		file: 'src/scope/scope-persistence.ts',
+		rule: 'R',
+		target: 'archivedPath',
+		status: 'not-an-evidence-artifact',
+		reason:
+			'`archivedPath` is a rename destination for imported legacy binding ' +
+			'files moved into .swarm/scopes/archive/. It is a scope-binding ' +
+			'compatibility artifact, not a cached evidence file. The candidate ' +
+			'filter matches this module because its comments and string literals ' +
+			'contain the word "evidence".',
+	},
+	{
+		file: 'src/scope/scope-persistence.ts',
+		rule: 'S',
+		target: 'scopePath',
+		status: 'not-an-evidence-artifact',
+		reason:
+			'`scopePath` is the v1 scope projection .swarm/scopes/scope-{taskId}.json, ' +
+			'a scope-binding compatibility artifact, not a cached evidence file. ' +
+			'The candidate filter matches this module because its comments and ' +
+			'string literals contain the word "evidence".',
 	},
 ];

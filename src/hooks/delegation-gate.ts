@@ -509,7 +509,8 @@ async function prepareCoderScope(
 	if (
 		explicitResolution.status === 'ambiguous' ||
 		explicitResolution.status === 'expired' ||
-		explicitResolution.status === 'overloaded'
+		explicitResolution.status === 'overloaded' ||
+		explicitResolution.status === 'store_unreadable'
 	) {
 		throw new Error(
 			formatScopeResolutionDiagnostic({
