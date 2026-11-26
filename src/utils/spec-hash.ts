@@ -177,7 +177,9 @@ export function detectUnmarkedSpecDriftSync(
 				reason: '.swarm/plan.json is unreadable or over the 4 MiB gate bound',
 			};
 		}
-		raw = fsSync.readFileSync(planPath, 'utf-8');
+		raw = new TextDecoder('utf-8', { fatal: true }).decode(
+			fsSync.readFileSync(planPath),
+		);
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') {
 			// Bootstrap / no plan: nothing to compare, and loadPlan writes no marker.
@@ -217,7 +219,21 @@ export function detectUnmarkedSpecDriftSync(
 		};
 	}
 	if (currentHash === parsed.specHash) return { outcome: 'allow' };
-	const deletion = currentHash === null;
+	// A null effective spec is deletion only when the canonical spec.md is absent
+	// too. The reader also returns null on permission errors and oversize input
+	// (effective-spec.ts), which are unreadability, not deletion: those are
+	// retryable, not persistent drift (SolCritic F-010).
+	let deletion = false;
+	if (currentHash === null) {
+		deletion = !fsSync.existsSync(join(directory, '.swarm', 'spec.md'));
+		if (!deletion) {
+			return {
+				outcome: 'block-retry',
+				reason:
+					'the effective spec could not be read (unreadable or oversize); retry or recover .swarm/spec.md',
+			};
+		}
+	}
 	// Obligation-preserving edits keep the allowlist exemption (same as loadPlan).
 	if (deletion || !_internals.isObligationPreserving(directory)) {
 		return {

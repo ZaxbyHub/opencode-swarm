@@ -345,4 +345,48 @@ describe('markerless spec-pair gate (PR 3920 closeout)', () => {
 
 		expect(() => enforceSpecDriftGate(pairDir, 'save_plan')).toThrow(/deleted/);
 	});
+
+	test('malformed UTF-8 in plan.json blocks as retryable, not drift (F-009)', () => {
+		// The malformed byte sits INSIDE the title string, so a replacing decoder
+		// would still parse and schema-validate the file and misread it as drift.
+		fsSync.writeFileSync(path.join(pairDir, '.swarm', 'spec.md'), '# Spec\n');
+		const head = Buffer.from('{"schema_version":"1.0.0","title":"a', 'utf8');
+		const tail = Buffer.from(
+			'","swarm":"x","current_phase":1,"phases":[{"id":1,"name":"P","status":"in_progress","tasks":[]}],"migration_status":"native","specHash":"abc"}',
+			'utf8',
+		);
+		fsSync.writeFileSync(
+			path.join(pairDir, '.swarm', 'plan.json'),
+			Buffer.concat([head, Buffer.from([0xff]), tail]),
+		);
+
+		expect(() => enforceSpecDriftGate(pairDir, 'save_plan')).toThrow(
+			/could not be read/,
+		);
+	});
+
+	test('an unreadable-but-present spec blocks as retryable, not deletion (F-010)', () => {
+		// spec.md exists but exceeds the native reader's 512 KiB bound: the reader
+		// returns null, which is unreadability, not deletion.
+		fsSync.writeFileSync(
+			path.join(pairDir, '.swarm', 'spec.md'),
+			`# Spec\n\n${'x'.repeat(513 * 1024)}\n`,
+		);
+		fsSync.writeFileSync(
+			path.join(pairDir, '.swarm', 'plan.json'),
+			JSON.stringify({
+				schema_version: '1.0.0',
+				title: 'Pair Plan',
+				swarm: 'test-swarm',
+				current_phase: 1,
+				phases: [{ id: 1, name: 'Phase 1', status: 'in_progress', tasks: [] }],
+				migration_status: 'native',
+				specHash: hashOf('# Spec\n\nGone.\n'),
+			}),
+		);
+
+		expect(() => enforceSpecDriftGate(pairDir, 'save_plan')).toThrow(
+			/retry or recover/,
+		);
+	});
 });
