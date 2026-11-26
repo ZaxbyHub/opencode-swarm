@@ -1,8 +1,10 @@
 /**
  * PR 3920 closeout (F-001 follow-up): loadPlan decides the spec drift marker under
- * the spec.md owner lock. A live writer holding it suppresses the marker, because
- * that writer reconciles or restores prior bytes. A dead-owner lock file does not
- * suppress it (fail-closed on the drift guard). With no lock, the marker is written.
+ * the spec.md owner lock. A lock younger than the TTL is in flight and suppresses
+ * the marker (a live writer, or an owner that has created the file but not yet
+ * published its payload). Suppression is bounded: an aged lock does not suppress.
+ * A writer that completed inside the window leaves a consistent pair under the
+ * lock, so no marker is written. With no lock, the marker is written.
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
@@ -12,9 +14,12 @@ import {
 	acquireOwnerLockOnce,
 	getOwnerLockPath,
 } from '../../../src/parallel/file-locks';
-import { loadPlan } from '../../../src/plan/manager';
+import { _internals, loadPlan } from '../../../src/plan/manager';
+import { readEffectiveSpecSync } from '../../../src/sdd/effective-spec';
 import { resetSwarmState } from '../../../src/state';
 import { createIsolatedTestEnv } from '../../helpers/isolated-test-env.js';
+
+const ANCIENT_SECONDS = 1600000000; // 2020, well past the lock TTL
 
 function buildPlan(specHash: string) {
 	return {
@@ -31,7 +36,9 @@ function buildPlan(specHash: string) {
 describe('loadPlan marker decision under the spec.md owner lock (PR 3920 closeout)', () => {
 	let dir: string;
 	let isolatedEnv: ReturnType<typeof createIsolatedTestEnv> | undefined;
+	const originalReread = _internals.readPlanSpecHashUnderLock;
 	const markerPath = () => path.join(dir, '.swarm', 'spec-staleness.json');
+	const lockPath = () => getOwnerLockPath(dir, 'spec.md');
 
 	beforeEach(() => {
 		isolatedEnv = createIsolatedTestEnv();
@@ -47,9 +54,11 @@ describe('loadPlan marker decision under the spec.md owner lock (PR 3920 closeou
 			path.join(dir, '.swarm', 'spec.md'),
 			'# Spec\n\nCurrent.\n',
 		);
+		fs.mkdirSync(path.dirname(lockPath()), { recursive: true });
 	});
 
 	afterEach(() => {
+		_internals.readPlanSpecHashUnderLock = originalReread;
 		resetSwarmState();
 		fs.rmSync(dir, { recursive: true, force: true });
 		isolatedEnv?.cleanup();
@@ -62,9 +71,7 @@ describe('loadPlan marker decision under the spec.md owner lock (PR 3920 closeou
 	});
 
 	test('a live writer holding spec.md suppresses the marker, and it is written after release', async () => {
-		const lockPath = getOwnerLockPath(dir, 'spec.md');
-		fs.mkdirSync(path.dirname(lockPath), { recursive: true });
-		const held = acquireOwnerLockOnce(lockPath, 'spec-write', 'live-writer');
+		const held = acquireOwnerLockOnce(lockPath(), 'spec-write', 'live-writer');
 		expect(held.acquired).toBe(true);
 
 		await loadPlan(dir);
@@ -75,14 +82,19 @@ describe('loadPlan marker decision under the spec.md owner lock (PR 3920 closeou
 		expect(fs.existsSync(markerPath())).toBe(true);
 	});
 
-	test('a dead-owner lock file does not suppress the marker (fail-closed on drift)', async () => {
-		const lockPath = getOwnerLockPath(dir, 'spec.md');
-		fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+	test('an owner that created the lock file but has not published its payload is in flight', async () => {
+		fs.writeFileSync(lockPath(), '');
+
+		await loadPlan(dir);
+		expect(fs.existsSync(markerPath())).toBe(false);
+	});
+
+	test('an aged owner lock does not suppress the marker (bounded suppression)', async () => {
 		fs.writeFileSync(
-			lockPath,
+			lockPath(),
 			JSON.stringify({
 				v: 1,
-				nonce: 'dead-nonce',
+				nonce: 'aged-nonce',
 				ownerPid: 2147483646,
 				startBoundMs: 0,
 				agent: 'spec-write',
@@ -90,8 +102,19 @@ describe('loadPlan marker decision under the spec.md owner lock (PR 3920 closeou
 				acquiredAtMs: 1700000000000,
 			}),
 		);
+		fs.utimesSync(lockPath(), ANCIENT_SECONDS, ANCIENT_SECONDS);
 
 		await loadPlan(dir);
 		expect(fs.existsSync(markerPath())).toBe(true);
+	});
+
+	test('a writer that completed inside the window leaves a consistent pair: no marker', async () => {
+		// The snapshot read saw the stale spec, but the writer has since rebound
+		// plan.json under the lock. The locked re-read sees the current hash.
+		_internals.readPlanSpecHashUnderLock = async () =>
+			readEffectiveSpecSync(dir)?.hash;
+
+		await loadPlan(dir);
+		expect(fs.existsSync(markerPath())).toBe(false);
 	});
 });

@@ -147,7 +147,8 @@ behavior is untouched (flag unset → marker-only semantics).
   publish or rollback window could leave a stranded `spec-staleness.json` that
   blocks `save_plan` until someone acknowledges it. The decision now runs under
   the `spec.md` owner lock: a live writer holding it suppresses the marker, and
-  otherwise the staleness pair is re-read under the lock. A dead-owner lock file
-  does not suppress the marker. Pinned by
+  otherwise the staleness pair is re-read under the lock. Suppression is bounded
+  by the lock TTL: a lock older than the TTL does not suppress the marker, so a
+  leaked lock cannot hide drift indefinitely. Pinned by
   `tests/unit/plan/spec-marker-lock-decision-2026.test.ts`; the committed
   `loadPlan` fails the live-writer case.

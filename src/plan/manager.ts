@@ -95,6 +95,7 @@ import {
 	acquireOwnerLockOnce,
 	getOwnerLockPath,
 	isLocked,
+	LOCK_TIMEOUT_MS,
 	tryAcquireLock,
 } from '../parallel/file-locks.js';
 import { recordTaskAttempt } from '../services/run-memory.js';
@@ -187,6 +188,8 @@ export function resetStartupLedgerCheck(): void {
  */
 export const _internals: {
 	loadPlan: typeof loadPlan;
+	/** Spec hash of plan.json as read under the spec.md owner lock (marker decision). */
+	readPlanSpecHashUnderLock: (directory: string) => Promise<string | undefined>;
 	loadPlanJsonOnly: typeof loadPlanJsonOnly;
 	readPlanJsonUtf8: typeof readPlanJsonUtf8;
 	readPlanFileUtf8: typeof readPlanFileUtf8;
@@ -215,6 +218,7 @@ export const _internals: {
 	) => Promise<AutoCheckpointOutcome>;
 } = {
 	loadPlan,
+	readPlanSpecHashUnderLock,
 	loadPlanJsonOnly,
 	readPlanJsonUtf8,
 	readPlanFileUtf8,
@@ -729,12 +733,37 @@ export async function regeneratePlanMarkdown(
  * 4. Neither exists -> return null
  */
 /**
- * PR 3920 closeout (F-001 follow-up): loadPlan's markerless staleness check ran
- * unlocked, so a spec_write inside its publish or rollback window could leave a
- * stranded drift marker. The marker decision is taken under the spec.md owner
- * lock. A live writer holding it reconciles or restores prior bytes, so no
- * marker is written from its window. Otherwise the staleness pair is re-read
- * under the lock. A lock file that is not live does not block the drift guard.
+ * Spec hash of plan.json as read under the spec.md owner lock. undefined means no
+ * readable specHash, so the caller keeps the snapshot pair. Exposed through
+ * _internals so tests can model a writer that completed inside the window.
+ */
+async function readPlanSpecHashUnderLock(
+	directory: string,
+): Promise<string | undefined> {
+	try {
+		const raw = await fsPromises.readFile(
+			path.join(directory, '.swarm', 'plan.json'),
+			'utf-8',
+		);
+		const parsed = JSON.parse(raw) as { specHash?: unknown };
+		return typeof parsed.specHash === 'string' ? parsed.specHash : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * PR 3920 closeout (F-001 follow-up): the markerless staleness check in loadPlan
+ * ran unlocked, so a spec_write inside its publish or rollback window could leave
+ * a stranded drift marker that blocks save_plan until acknowledged. The decision
+ * is taken under the spec.md owner lock:
+ * - a lock younger than LOCK_TIMEOUT_MS is in flight. That covers a live holder
+ *   and an owner that has created the file but not yet published its payload.
+ *   The writer reconciles or restores prior bytes, so no marker is written from
+ *   its window;
+ * - an older lock is not in flight, so suppression is bounded by the lock TTL and
+ *   a leaked lock cannot hide drift indefinitely;
+ * - otherwise the lock is acquired and the staleness pair is re-read under it.
  */
 async function decideSpecMarker<P extends { specHash?: string | null }>(
 	directory: string,
@@ -749,48 +778,49 @@ async function decideSpecMarker<P extends { specHash?: string | null }>(
 			release: () => void;
 	  }
 > {
-	const liveWriter = (): boolean => {
-		const holder = isLocked(directory, 'spec.md');
-		return holder !== null && holder.expiresAt === Number.MAX_SAFE_INTEGER;
-	};
-	if (liveWriter()) return { decision: 'skip' };
 	const lockPath = getOwnerLockPath(directory, 'spec.md');
+	const inFlight = async (): Promise<boolean> => {
+		if (isLocked(directory, 'spec.md') === null) return false;
+		try {
+			const stat = await fsPromises.stat(lockPath);
+			return Date.now() - stat.mtimeMs < LOCK_TIMEOUT_MS;
+		} catch {
+			return false;
+		}
+	};
+	if (await inFlight()) return { decision: 'skip' };
 	await fsPromises.mkdir(path.dirname(lockPath), { recursive: true });
 	const attempt = acquireOwnerLockOnce(lockPath, 'loadPlan', 'spec-marker');
 	if (!attempt.acquired) {
-		return liveWriter()
+		return (await inFlight())
 			? { decision: 'skip' }
 			: { decision: 'write', plan, stale: snapshot, release: () => {} };
 	}
-	const raw = await fsPromises
-		.readFile(path.join(directory, '.swarm', 'plan.json'), 'utf-8')
-		.catch(() => null);
-	let lockedPlan: P = plan;
-	if (raw !== null) {
-		try {
-			const parsed = JSON.parse(raw) as { specHash?: string | null };
-			lockedPlan = {
-				...plan,
-				specHash: parsed.specHash ?? undefined,
-			} as unknown as P;
-		} catch {
-			// Unparseable plan.json under the lock: keep the snapshot pair.
+	try {
+		const lockedSpecHash =
+			await _internals.readPlanSpecHashUnderLock(directory);
+		const lockedPlan =
+			lockedSpecHash === undefined
+				? plan
+				: ({ ...plan, specHash: lockedSpecHash } as unknown as P);
+		const stale = await isSpecStale(
+			directory,
+			lockedPlan as unknown as Parameters<typeof isSpecStale>[1],
+		);
+		if (!stale.stale) {
+			attempt.release();
+			return { decision: 'skip' };
 		}
-	}
-	const stale = await isSpecStale(
-		directory,
-		lockedPlan as unknown as Parameters<typeof isSpecStale>[1],
-	);
-	if (!stale.stale) {
+		return {
+			decision: 'write',
+			plan: lockedPlan,
+			stale,
+			release: attempt.release,
+		};
+	} catch (error) {
 		attempt.release();
-		return { decision: 'skip' };
+		throw error;
 	}
-	return {
-		decision: 'write',
-		plan: lockedPlan,
-		stale,
-		release: attempt.release,
-	};
 }
 
 export async function loadPlan(
