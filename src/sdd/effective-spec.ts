@@ -1293,7 +1293,9 @@ export function sddProjectionSourcePresentSync(directory: string): boolean {
 		const root = path.resolve(directory);
 		const speckit = detectSpeckit(root);
 		if (speckit.markerPresent && speckit.features.length > 0) return true;
-		return fs.existsSync(path.join(root, 'openspec'));
+		// Mirror the reader: openspec counts only when its layout yields a
+		// non-null projection (an empty directory is not a source).
+		return buildOpenSpecProjectionSync(root) !== null;
 	} catch {
 		return false;
 	}
