@@ -1,5 +1,20 @@
 # Changelog
 
+## [7.205.10](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.205.9...v7.205.10) (2026-11-26)
+
+
+### Bug Fixes
+
+* **observability:** repoint store_lock_stale_broken citation to :691 ([e7c10f0](https://github.com/ZaxbyHub/opencode-swarm/commit/e7c10f006cfac1452d96b3af0b01e50b2f646303))
+* **observability:** repoint store_lock_stale_broken producer citation to :688 ([#3934](https://github.com/ZaxbyHub/opencode-swarm/issues/3934)) ([4134926](https://github.com/ZaxbyHub/opencode-swarm/commit/4134926ac8b10c3aa2b43973a3b62f72c3936e82))
+* **parallel:** guard statSync in ownerless ageMs fallback; add regression tests ([#3934](https://github.com/ZaxbyHub/opencode-swarm/issues/3934)) ([c1e8342](https://github.com/ZaxbyHub/opencode-swarm/commit/c1e8342f9da035f9d354fddbda4460c1bc1045aa))
+* **parallel:** recover ownerless plan locks past TTL on acquire path ([#3934](https://github.com/ZaxbyHub/opencode-swarm/issues/3934)) ([427da81](https://github.com/ZaxbyHub/opencode-swarm/commit/427da81bea0746b80a353f92b14774ca4b58e402))
+* **parallel:** recover ownerless plan locks past TTL on acquire path ([#3934](https://github.com/ZaxbyHub/opencode-swarm/issues/3934)) ([97928ce](https://github.com/ZaxbyHub/opencode-swarm/commit/97928cecb5a0ad9a4d39688d1a130caa1edbd638))
+* **ratchet:** repoint target-constant-tmp producer citation for file-locks temp ([#3934](https://github.com/ZaxbyHub/opencode-swarm/issues/3934)) ([da1341c](https://github.com/ZaxbyHub/opencode-swarm/commit/da1341c9faa8d23ce60d6bff840b02bf3d615fd2))
+* **registry:** repoint file-locks citations after comment reflow ([#3934](https://github.com/ZaxbyHub/opencode-swarm/issues/3934)) ([07163da](https://github.com/ZaxbyHub/opencode-swarm/commit/07163da36c624125b78e418cc9bce1bd5557afd7))
+* **registry:** repoint file-locks citations after line shifts ([#3934](https://github.com/ZaxbyHub/opencode-swarm/issues/3934)) ([5491b65](https://github.com/ZaxbyHub/opencode-swarm/commit/5491b654eb71897238ba726895b67a2b056279a9))
+* **security:** remove useless catch in replay-identity (biome noUselessCatch) ([f3bb2eb](https://github.com/ZaxbyHub/opencode-swarm/commit/f3bb2eb7fb47ab88d7abecb4d227f9bb9553f225))
+
 ## [7.205.9](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.205.8...v7.205.9) (2026-11-25)
 
 
