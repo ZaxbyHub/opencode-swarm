@@ -427,6 +427,34 @@ describe('markerless spec-pair gate (PR 3920 closeout)', () => {
 		expect(() => enforceSpecDriftGate(pairDir, 'save_plan')).toThrow(/deleted/);
 	});
 
+	test('an openspec layout with inputs but an empty projection blocks as retryable (F-015)', () => {
+		// openspec/ has a spec file, but its content parses to zero requirements, so
+		// the projection returns null: a projection FAILURE, not source absence.
+		fsSync.mkdirSync(path.join(pairDir, 'openspec', 'specs', 'x'), {
+			recursive: true,
+		});
+		fsSync.writeFileSync(
+			path.join(pairDir, 'openspec', 'specs', 'x', 'spec.md'),
+			'Plain notes with no requirement headings.\n',
+		);
+		fsSync.writeFileSync(
+			path.join(pairDir, '.swarm', 'plan.json'),
+			JSON.stringify({
+				schema_version: '1.0.0',
+				title: 'Pair Plan',
+				swarm: 'test-swarm',
+				current_phase: 1,
+				phases: [{ id: 1, name: 'Phase 1', status: 'in_progress', tasks: [] }],
+				migration_status: 'native',
+				specHash: hashOf('# Spec\n\nGone.\n'),
+			}),
+		);
+
+		expect(() => enforceSpecDriftGate(pairDir, 'save_plan')).toThrow(
+			/retry or repair/,
+		);
+	});
+
 	test('a deleted spec blocks as drift', () => {
 		fsSync.writeFileSync(
 			path.join(pairDir, '.swarm', 'plan.json'),

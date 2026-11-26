@@ -1293,9 +1293,13 @@ export function sddProjectionSourcePresentSync(directory: string): boolean {
 		const root = path.resolve(directory);
 		const speckit = detectSpeckit(root);
 		if (speckit.markerPresent && speckit.features.length > 0) return true;
-		// Mirror the reader: openspec counts only when its layout yields a
-		// non-null projection (an empty directory is not a source).
-		return buildOpenSpecProjectionSync(root) !== null;
+		// Mirror the build's own input scan: openspec counts as a source when its
+		// layout has at least one spec file or change. A layout with inputs whose
+		// projection still fails (no parsed requirements) is a projection FAILURE
+		// (retryable), not source absence (SolCritic F-015).
+		const currentSpecs = walkSpecFiles(root, path.join(OPENSPEC_ROOT, 'specs'));
+		const changes = listOpenSpecChanges(root);
+		return currentSpecs.length > 0 || changes.length > 0;
 	} catch {
 		return false;
 	}
