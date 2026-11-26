@@ -5867,7 +5867,6 @@ export function createDelegationGateHook(
 			preparedScope = await prepareCoderScope(directory, input, args);
 		} catch (error) {
 			if (preflightTaskId) {
-				const transitionId = `coder-preflight:${input.callID}`;
 				const emptyScopePreflightFailure =
 					error instanceof Error &&
 					error.message.includes(
@@ -5877,11 +5876,9 @@ export function createDelegationGateHook(
 					emptyScopePreflightFailure &&
 					!extractTaskFileDirectives(args).present &&
 					(await hasExplicitEmptyPlanScope(directory, preflightTaskId));
-				let settled: Awaited<ReturnType<typeof settleCoderDispatch>> | null =
-					null;
 				if (explicitEmptyPlanScope && preflightWorkflow.generation === 0) {
 					try {
-						settled = await settleRejectedEmptyPlanScope(
+						await settleRejectedEmptyPlanScope(
 							directory,
 							input,
 							preflightTaskId,
@@ -5893,25 +5890,22 @@ export function createDelegationGateHook(
 						);
 					}
 				}
-				const failedWorkflow = getTaskWorkflowSnapshot(
-					settled?.evidence ??
-						(await transitionTaskWorkflowEvidence(directory, preflightTaskId, {
-							type: 'dispatch_no_mutation',
-							agentType: 'coder',
-							expectedGeneration: preflightWorkflow.generation,
-							transitionId,
-						})),
-				);
-				if (failedWorkflow.retryCount >= 3) {
-					await emitCoderRetryEscalation(directory, {
-						taskId: preflightTaskId,
-						generation: failedWorkflow.generation,
-						retryEpoch: failedWorkflow.retryEpoch,
-						rejectionCount: failedWorkflow.retryCount,
-						rejectionHistory: failedWorkflow.retryHistory,
-						action: 'sounding_board_consultation',
-					});
-				}
+				// 2026-11-26 (task 2.16 retry-circuit wedge): a scope-prep
+				// REFUSAL means no coder dispatch ever ran — it must not count
+				// as a coder retry failure. The pre-fix fallback wrote a
+				// `dispatch_no_mutation` transition for EVERY prepareCoderScope
+				// error, so gate-side refusals (scope conflicts, malformed
+				// dispatch shapes) self-escalated the retry circuit: observed
+				// live, one real provider-budget abort plus two refused
+				// dispatches reached the bounded retry threshold, burned the
+				// critic-guided simplified retry with another refusal, and
+				// wedged the task at TASK_RETRY_USER_ESCALATION_REQUIRED with
+				// no coder attempt in between. Only the EXPLICIT empty-plan-
+				// scope settlement above writes — it is the designed read-only
+				// dispatch flow (#2763/#3560), not a failure count. The retry
+				// escalation ladder itself runs on every dispatch attempt in
+				// enforceCoderRetryEscalation BEFORE the scope preflight and
+				// keeps its exact semantics.
 			}
 			throw error;
 		}
