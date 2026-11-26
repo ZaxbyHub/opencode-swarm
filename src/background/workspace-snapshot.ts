@@ -103,7 +103,10 @@ async function readBoundedGitOutput(
 			joined.set(chunk, offset);
 			offset += chunk.byteLength;
 		}
-		return { text: new TextDecoder().decode(joined), truncated: false };
+		return {
+			text: new TextDecoder('utf-8', { fatal: true }).decode(joined),
+			truncated: false,
+		};
 	} finally {
 		try {
 			await reader.cancel();
@@ -141,14 +144,21 @@ function runGit(
 		['-C', directory, ...args],
 		{
 			cwd: directory,
-			encoding: 'utf-8',
 			timeout: timeoutMs,
 			maxBuffer: GIT_SNAPSHOT_MAX_BUFFER,
 			stdio: ['ignore', 'pipe', 'pipe'],
 		},
 	);
 	if (result.error || result.status !== 0) return null;
-	return typeof result.stdout === 'string' ? result.stdout.trimEnd() : null;
+	const stdout = result.stdout as Buffer | string;
+	if (typeof stdout === 'string') return stdout.trimEnd();
+	try {
+		return new TextDecoder('utf-8', { fatal: true }).decode(stdout).trimEnd();
+	} catch {
+		// Git paths are byte strings. A lossy decode could alias distinct
+		// filesystem objects, so degraded output must fail the snapshot closed.
+		return null;
+	}
 }
 
 /**
@@ -266,7 +276,6 @@ function runGitDetailed(
 		['-C', directory, ...args],
 		{
 			cwd: directory,
-			encoding: 'utf-8',
 			timeout: timeoutMs,
 			maxBuffer: _internals.gitSnapshotMaxBuffer,
 			stdio: ['ignore', 'pipe', 'pipe'],
@@ -275,14 +284,24 @@ function runGitDetailed(
 	const errorCode = (result.error as NodeJS.ErrnoException | undefined)?.code;
 	if (errorCode === 'ENOBUFS') return { ok: false, reason: 'buffer-truncated' };
 	if (errorCode === 'ETIMEDOUT') return { ok: false, reason: 'timeout' };
-	if (
-		result.error ||
-		result.status !== 0 ||
-		typeof result.stdout !== 'string'
-	) {
+	if (result.error || result.status !== 0) {
 		return { ok: false, reason: 'git-failed' };
 	}
-	return { ok: true, text: result.stdout.trimEnd() };
+	const stdout = result.stdout as Buffer | string;
+	if (typeof stdout === 'string') {
+		return { ok: true, text: stdout.trimEnd() };
+	}
+	try {
+		return {
+			ok: true,
+			text: new TextDecoder('utf-8', { fatal: true }).decode(stdout).trimEnd(),
+		};
+	} catch {
+		// Path output is bytes. A lossy decode rewrites a non-UTF-8 name to
+		// U+FFFD, so the digest would hash a path that does not exist on disk
+		// and could miss a content change to the real file. Fail closed instead.
+		return { ok: false, reason: 'git-failed' };
+	}
 }
 
 /**
@@ -2092,16 +2111,34 @@ function hashScopedDirtyFileSync(
 			fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0),
 		);
 		const stat = fs.fstatSync(fd);
-		const limit = Math.min(MAX_SCOPED_DIRTY_HASH_FILE_BYTES, remainingBytes);
+		const limit = Math.min(
+			_internals.scopedDirtyHashMaxFileBytes,
+			remainingBytes,
+		);
 		if (!stat.isFile() || stat.size > limit) return null;
-		const buffer = Buffer.allocUnsafe(limit + 1);
+		_internals.beforeScopedDirtyRead(filePath);
+		const buffer = Buffer.allocUnsafe(limit);
 		let offset = 0;
-		while (offset <= limit) {
-			const read = fs.readSync(fd, buffer, offset, limit + 1 - offset, null);
+		while (offset < limit) {
+			const read = _internals.readScopedDirtyFileSync(
+				fd,
+				buffer,
+				offset,
+				limit - offset,
+			);
 			if (read === 0) break;
 			offset += read;
-			if (offset > limit) return null;
 		}
+		// Do not read a detection byte beyond the budget. Re-stat the same open
+		// object instead: growth or shrinkage during the read cannot be certified.
+		const after = fs.fstatSync(fd);
+		if (
+			!after.isFile() ||
+			after.size !== stat.size ||
+			after.size !== offset ||
+			after.mode !== stat.mode
+		)
+			return null;
 		return {
 			hash: createHash('sha256')
 				.update(`file:${stat.mode.toString(16)}\n`)
@@ -2137,21 +2174,33 @@ async function hashScopedDirtyFileAsync(
 			fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0),
 		);
 		const stat = await handle.stat();
-		const limit = Math.min(MAX_SCOPED_DIRTY_HASH_FILE_BYTES, remainingBytes);
+		const limit = Math.min(
+			_internals.scopedDirtyHashMaxFileBytes,
+			remainingBytes,
+		);
 		if (!stat.isFile() || stat.size > limit) return null;
-		const buffer = Buffer.allocUnsafe(limit + 1);
+		await _internals.beforeScopedDirtyRead(filePath);
+		const buffer = Buffer.allocUnsafe(limit);
 		let offset = 0;
-		while (offset <= limit) {
-			const { bytesRead } = await handle.read(
+		while (offset < limit) {
+			const read = await _internals.readScopedDirtyFileAsync(
+				handle,
 				buffer,
 				offset,
-				limit + 1 - offset,
-				null,
+				limit - offset,
 			);
-			if (bytesRead === 0) break;
-			offset += bytesRead;
-			if (offset > limit) return null;
+			if (read === 0) break;
+			offset += read;
 		}
+		// The async twin applies the same exact-budget/post-read identity rule.
+		const after = await handle.stat();
+		if (
+			!after.isFile() ||
+			after.size !== stat.size ||
+			after.size !== offset ||
+			after.mode !== stat.mode
+		)
+			return null;
 		return {
 			hash: createHash('sha256')
 				.update(`file:${stat.mode.toString(16)}\n`)
@@ -2182,7 +2231,7 @@ function captureScopedDirtyHashesSync(
 	for (const file of scoped) {
 		const identity = hashScopedDirtyFileSync(
 			path.join(directory, file),
-			MAX_SCOPED_DIRTY_HASH_TOTAL_BYTES - totalBytes,
+			_internals.scopedDirtyHashMaxTotalBytes - totalBytes,
 		);
 		if (identity === null) return null;
 		totalBytes += identity.bytes;
@@ -2204,7 +2253,7 @@ async function captureScopedDirtyHashesAsync(
 	for (const file of scoped) {
 		const identity = await hashScopedDirtyFileAsync(
 			path.join(directory, file),
-			MAX_SCOPED_DIRTY_HASH_TOTAL_BYTES - totalBytes,
+			_internals.scopedDirtyHashMaxTotalBytes - totalBytes,
 		);
 		if (identity === null) return null;
 		totalBytes += identity.bytes;
@@ -2638,6 +2687,22 @@ export const _internals: {
 	 * drives via the existing `yieldControl` seam.
 	 */
 	readChangedFileSync: (filePath: string) => Buffer;
+	/** Exact scoped-dirty read budgets and race probes used by focused tests. */
+	scopedDirtyHashMaxFileBytes: number;
+	scopedDirtyHashMaxTotalBytes: number;
+	beforeScopedDirtyRead: (filePath: string) => void | Promise<void>;
+	readScopedDirtyFileSync: (
+		fd: number,
+		buffer: Buffer,
+		offset: number,
+		length: number,
+	) => number;
+	readScopedDirtyFileAsync: (
+		handle: fs.promises.FileHandle,
+		buffer: Buffer,
+		offset: number,
+		length: number,
+	) => Promise<number>;
 } = {
 	spawnSync: child_process.spawnSync,
 	bunSpawn,
@@ -2650,4 +2715,13 @@ export const _internals: {
 	gitSnapshotMaxBuffer: GIT_SNAPSHOT_MAX_BUFFER,
 	revisionEnumerationTimeoutMs: REVISION_ENUMERATION_TIMEOUT_MS,
 	readChangedFileSync: (filePath: string) => fs.readFileSync(filePath),
+	scopedDirtyHashMaxFileBytes: MAX_SCOPED_DIRTY_HASH_FILE_BYTES,
+	scopedDirtyHashMaxTotalBytes: MAX_SCOPED_DIRTY_HASH_TOTAL_BYTES,
+	beforeScopedDirtyRead: () => {},
+	readScopedDirtyFileSync: (fd, buffer, offset, length) =>
+		fs.readSync(fd, buffer, offset, length, null),
+	readScopedDirtyFileAsync: async (handle, buffer, offset, length) => {
+		const { bytesRead } = await handle.read(buffer, offset, length, null);
+		return bytesRead;
+	},
 };

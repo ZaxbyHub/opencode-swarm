@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, test } from 'bun:test';
 import { Buffer } from 'node:buffer';
 import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
@@ -10,11 +10,29 @@ import {
 } from '../../../src/background/pending-delegations';
 import { compareStageBWorkspace } from '../../../src/background/stage-b-gates';
 import {
+	_internals,
 	type BackgroundWorkspaceSnapshot,
 	captureWorkspaceSnapshot,
 	captureWorkspaceSnapshotAsync,
 } from '../../../src/background/workspace-snapshot';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
+
+const originalScopedDirtyRead = {
+	maxFileBytes: _internals.scopedDirtyHashMaxFileBytes,
+	maxTotalBytes: _internals.scopedDirtyHashMaxTotalBytes,
+	beforeRead: _internals.beforeScopedDirtyRead,
+	readSync: _internals.readScopedDirtyFileSync,
+	readAsync: _internals.readScopedDirtyFileAsync,
+};
+
+afterEach(() => {
+	_internals.scopedDirtyHashMaxFileBytes = originalScopedDirtyRead.maxFileBytes;
+	_internals.scopedDirtyHashMaxTotalBytes =
+		originalScopedDirtyRead.maxTotalBytes;
+	_internals.beforeScopedDirtyRead = originalScopedDirtyRead.beforeRead;
+	_internals.readScopedDirtyFileSync = originalScopedDirtyRead.readSync;
+	_internals.readScopedDirtyFileAsync = originalScopedDirtyRead.readAsync;
+});
 
 function git(dir: string, ...args: string[]): void {
 	execFileSync('git', ['-C', dir, ...args], { stdio: 'ignore' });
@@ -288,7 +306,117 @@ describe('stage-b directory scope freshness — content and path identity', () =
 			fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
 		}
 	});
-
+	test.each([
+		['sync', 'per-file'],
+		['async', 'per-file'],
+		['sync', 'aggregate'],
+		['async', 'aggregate'],
+		['sync', 'below-limit'],
+		['async', 'below-limit'],
+	] as const)('a %s reader never probes past the %s byte budget when a file grows after fstat', async (mode, budget) => {
+		const dir = makeProject();
+		try {
+			const aggregate = budget === 'aggregate';
+			const belowLimit = budget === 'below-limit';
+			const target = aggregate ? 'b.bin' : 'entry.bin';
+			const files = aggregate
+				? [
+						['a.bin', 8],
+						['b.bin', 2],
+					]
+				: [['entry.bin', belowLimit ? 4 : 8]];
+			for (const [name, size] of files) {
+				const file = path.join(dir, 'context', name);
+				fs.mkdirSync(path.dirname(file), { recursive: true });
+				fs.writeFileSync(file, Buffer.alloc(size, 1));
+			}
+			_internals.scopedDirtyHashMaxFileBytes = aggregate ? 64 : 8;
+			_internals.scopedDirtyHashMaxTotalBytes = aggregate ? 10 : 64;
+			let activeFile = '';
+			const requested: Array<{ offset: number; length: number }> = [];
+			_internals.beforeScopedDirtyRead = (filePath) => {
+				activeFile = path.basename(filePath);
+				if (activeFile === target) fs.appendFileSync(filePath, 'x');
+			};
+			_internals.readScopedDirtyFileSync = (fd, buffer, offset, length) => {
+				if (activeFile === target) requested.push({ offset, length });
+				return fs.readSync(fd, buffer, offset, length, null);
+			};
+			_internals.readScopedDirtyFileAsync = async (
+				handle,
+				buffer,
+				offset,
+				length,
+			) => {
+				if (activeFile === target) requested.push({ offset, length });
+				const { bytesRead } = await handle.read(buffer, offset, length, null);
+				return bytesRead;
+			};
+			const workspace =
+				mode === 'sync'
+					? capture(dir)
+					: await captureWorkspaceSnapshotAsync(dir, {
+							scope: 'context',
+							captureChangedFileHashes: true,
+						});
+			expect(workspace.changedFileHashes).toBeNull();
+			expect(requested.length).toBeGreaterThan(0);
+			const requestBudget = aggregate ? 2 : 8;
+			for (const { offset, length } of requested) {
+				expect(offset + length).toBeLessThanOrEqual(requestBudget);
+			}
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
+		}
+	});
+	test.skipIf(process.platform === 'win32')(
+		'non-UTF-8 Git-observed names fail the snapshot closed instead of aliasing',
+		async () => {
+			const dir = makeProject();
+			try {
+				const context = path.join(dir, 'context');
+				fs.mkdirSync(context, { recursive: true });
+				for (const byte of [0xff, 0xfe]) {
+					const file = Buffer.concat([
+						Buffer.from(`${context}${path.sep}byte-`),
+						Buffer.from([byte, 0x2e, 0x62, 0x69, 0x6e]),
+					]);
+					fs.writeFileSync(file, 'invalid UTF-8 path\n');
+				}
+				const sync = capture(dir);
+				const asyncCapture = await captureWorkspaceSnapshotAsync(dir, {
+					scope: 'context',
+					captureChangedFileHashes: true,
+				});
+				expect(sync.gitHead).toBeNull();
+				expect(asyncCapture.gitHead).toBeNull();
+				expect(sync.changedFileHashes).toBeNull();
+				expect(asyncCapture.changedFileHashes).toBeNull();
+			} finally {
+				fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
+			}
+		},
+	);
+	test.skipIf(process.platform !== 'win32')(
+		'Windows folded hash-key collisions fail closed instead of overwriting',
+		() => {
+			const files = ['context/A.ts', 'context/a.ts'];
+			const hashes = {
+				'context/A.ts': 'a'.repeat(64),
+				'context/a.ts': 'a'.repeat(64),
+			};
+			const expected = record('context');
+			const actual = current({ changedFiles: files });
+			if (expected.workspace) {
+				expected.workspace.changedFiles = files;
+				expected.workspace.changedFileHashes = hashes;
+			}
+			actual.changedFileHashes = hashes;
+			const check = compareStageBWorkspace(expected, actual, '/proj');
+			expect(check.stale).toBe(true);
+			expect(check.reason).toContain('content identities unavailable');
+		},
+	);
 	test('legacy snapshots with scoped dirt but no content identities fail closed', () => {
 		const expected = record('context');
 		if (expected.workspace)
@@ -301,7 +429,6 @@ describe('stage-b directory scope freshness — content and path identity', () =
 		expect(check.stale).toBe(true);
 		expect(check.reason).toContain('content identities unavailable');
 	});
-
 	test('sync and async captures persist identical scoped content identities', async () => {
 		const dir = makeProject();
 		try {
@@ -319,7 +446,6 @@ describe('stage-b directory scope freshness — content and path identity', () =
 			fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
 		}
 	});
-
 	test('scoped content identities survive the durable delegation schema', async () => {
 		const dir = makeProject();
 		try {
@@ -349,7 +475,6 @@ describe('stage-b directory scope freshness — content and path identity', () =
 			fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
 		}
 	});
-
 	test('a committed descendant invalidates the verdict', () => {
 		const dir = makeProject();
 		try {

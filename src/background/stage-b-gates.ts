@@ -408,7 +408,9 @@ function canonicalDirtyHashMap(
 		) {
 			return null;
 		}
-		canonical.set(scopeMatchKey(file), hash);
+		const key = scopeMatchKey(file);
+		if (canonical.has(key)) return null;
+		canonical.set(key, hash);
 	}
 	return canonical;
 }
