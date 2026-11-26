@@ -118,9 +118,20 @@ describe('loadPlan marker decision under the spec.md owner lock (PR 3920 closeou
 		expect(fs.existsSync(markerPath())).toBe(false);
 	});
 
-	test('an ownerless aged lock is swept, then the marker is decided under the lock', async () => {
-		// cleanupExpiredLocks clears an ownerless lock past the TTL, so the acquire
-		// succeeds. The writer has rebound plan.json, so the locked pair is consistent.
+	test('an ownerless aged lock that cannot be acquired falls back to a fresh read and writes real drift', async () => {
+		// The aged ownerless file cannot be acquired (no sweep on this path), so the
+		// decision falls back to a fresh read. The spec is stale against plan.json, so
+		// the marker is written: the drift guard fails closed.
+		fs.writeFileSync(lockPath(), '{"v":1}');
+		fs.utimesSync(lockPath(), ANCIENT_SECONDS, ANCIENT_SECONDS);
+
+		await loadPlan(dir);
+		expect(fs.existsSync(markerPath())).toBe(true);
+	});
+
+	test('the fallback fresh read sees a rebound plan: an aged unacquirable lock writes no marker', async () => {
+		// Same unacquirable aged lock, but the fresh read sees the writer's rebind, so
+		// the pair is consistent and no marker is owed.
 		fs.writeFileSync(lockPath(), '{"v":1}');
 		fs.utimesSync(lockPath(), ANCIENT_SECONDS, ANCIENT_SECONDS);
 		_internals.readPlanSpecHashUnderLock = async () =>
