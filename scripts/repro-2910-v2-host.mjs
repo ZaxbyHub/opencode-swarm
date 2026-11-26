@@ -553,6 +553,28 @@ async function main() {
 			console.log(
 				`[repro-2910-v2-host] host run: exit=${r.code} timedOut=${r.timedOut} captured=${full.length} bytes`,
 			);
+			if (runTimedOut) {
+				// 2026-11-26 (#3921 merge-queue kick-outs, two in a row): a
+				// timed-out host run printed only the SELECTED evidence lines,
+				// hiding where the run actually hung — the fd-backed capture is
+				// the only forensic artifact and the scratch dir is deleted
+				// right after. Dump a bounded, redacted tail of the FULL capture
+				// so the next timeout is diagnosable from the job log alone
+				// (the assertions themselves had already passed when the queue
+				// kicked these runs out).
+				const capturedLines = full
+					.split(/\r?\n/)
+					.filter((ln) => ln.trim() !== '');
+				const tail = capturedLines.slice(-60);
+				console.log(
+					`[repro-2910-v2-host] captured tail (redacted, last ${tail.length} of ${capturedLines.length} non-empty lines):`,
+				);
+				for (const line of tail) {
+					console.log(
+						`[repro-2910-v2-host]   tail: ${redact(line).slice(0, 300)}`,
+				);
+				}
+			}
 
 			// (e) AUTH-FREE evidence.
 			const loadingShimLines = full
