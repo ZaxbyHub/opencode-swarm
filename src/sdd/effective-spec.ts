@@ -1287,6 +1287,29 @@ export function resolveSddSourceSelection(
  * gate's markerless check uses this to tell a failed projection (retryable)
  * apart from a genuinely deleted spec (SolCritic F-011/F-012).
  */
+
+/** Bounded size-agnostic search: does any *.md file exist under dir? (F-016) */
+function hasAnyMdUnder(dir: string, depth: number): boolean {
+	if (depth > 8) return false;
+	let entries: fs.Dirent[];
+	try {
+		entries = fs.readdirSync(dir, { withFileTypes: true });
+	} catch {
+		return false;
+	}
+	for (const entry of entries) {
+		if (entry.isSymbolicLink()) continue;
+		if (entry.isFile() && entry.name.endsWith('.md')) return true;
+		if (
+			entry.isDirectory() &&
+			hasAnyMdUnder(path.join(dir, entry.name), depth + 1)
+		) {
+			return true;
+		}
+	}
+	return false;
+}
+
 export function sddProjectionSourcePresentSync(directory: string): boolean {
 	try {
 		if (resolveSddSourceSelection(directory) !== undefined) return true;
@@ -1297,9 +1320,14 @@ export function sddProjectionSourcePresentSync(directory: string): boolean {
 		// layout has at least one spec file or change. A layout with inputs whose
 		// projection still fails (no parsed requirements) is a projection FAILURE
 		// (retryable), not source absence (SolCritic F-015).
-		const currentSpecs = walkSpecFiles(root, path.join(OPENSPEC_ROOT, 'specs'));
+		// The build's scans filter inputs (oversized files are dropped by
+		// fileArtifact, unparseable content by the parser), so a scan miss does not
+		// prove absence. Presence = any spec .md on disk under openspec/specs (bounded
+		// walk, size-agnostic) or any change entry; only a structurally empty layout
+		// is genuine absence (SolCritic F-014/F-015/F-016).
+		if (hasAnyMdUnder(path.join(root, OPENSPEC_ROOT, 'specs'), 0)) return true;
 		const changes = listOpenSpecChanges(root);
-		return currentSpecs.length > 0 || changes.length > 0;
+		return changes.length > 0;
 	} catch {
 		return false;
 	}
