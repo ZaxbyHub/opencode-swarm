@@ -918,6 +918,13 @@ export function createBackgroundCompletionObserver(opts: {
 				}
 			}
 
+			// Native-async children never reach the synchronous Task consumer
+			// (consumeAssistantUsageForTask in src/index.ts), so their usage-bridge
+			// totals are released at every verified terminal, before the status
+			// branch below: error and cancelled children can record usage too
+			// (session.step.failed). Without this the bridge's per-process session
+			// cap fills and refuses new sessions, starving sync cost attribution.
+			forgetV2StepUsage(record.subagentSessionId);
 			let legacyTransferPending = false;
 			let legacyTransferRequiresManualRecovery = false;
 			if (terminal.status !== 'completed') {
@@ -1235,12 +1242,6 @@ export function createBackgroundCompletionObserver(opts: {
 					},
 				);
 			}
-			// Native-async children never reach the synchronous Task consumer
-			// (consumeAssistantUsageForTask in src/index.ts), so their usage-bridge
-			// totals are released here at the verified terminal. Without this the
-			// bridge's per-process session cap fills with async children and then
-			// refuses new sessions, starving sync delegation cost attribution.
-			forgetV2StepUsage(record.subagentSessionId);
 			// r12 (async lifecycle F2/F3/F4): the shared BUSINESS closeout for a
 			// verified native-async completion — the terminal-record twin of the
 			// synchronous Task handoff in src/index.ts. Everything here keys on the
