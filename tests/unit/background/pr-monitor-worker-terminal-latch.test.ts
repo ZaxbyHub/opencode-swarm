@@ -8,6 +8,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
+import { realpathSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
@@ -17,7 +18,10 @@ import {
 } from '../../../src/background/pr-monitor-worker';
 import type { PrSubscriptionRecord } from '../../../src/background/pr-subscriptions';
 
-const TEST_DIR = path.join(os.tmpdir(), 'pr-monitor-worker-terminal-latch');
+const TEST_DIR = path.join(
+	realpathSync(os.tmpdir()),
+	'pr-monitor-worker-terminal-latch',
+);
 
 function makeConfig(
 	overrides: Record<string, unknown> = {},
