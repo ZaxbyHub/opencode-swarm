@@ -1,31 +1,25 @@
-# swarm-pr-feedback: round ledger, round-2 checkpoint, open-issue corpus check
+# swarm-pr-feedback: pin the round-ledger rules and treat issue bodies as data
 
 ## What changed
 
-- The `swarm-pr-feedback` skill now records every gate verdict in a verdict
-  table inside the task-gates artifact, so a re-dispatched gate can find what
-  changed since an item's last verdict. The table is a navigation aid only;
-  every gate still reviews the full current diff.
-- Added a round-2 checkpoint: when an item's second closeout-critic verdict is
-  `NEEDS_REVISION` or `BLOCKED`, the agent stops before a third round and asks
-  the user to fix the remaining edges, accept them as a documented limitation,
-  or keep iterating.
-- Added an open-issue corpus check that runs before the closeout gate, so an
-  `ABSORB` disposition is found and reviewed instead of being retrofitted after
-  `RECORD` rows are published.
+- The open-issue corpus check in the `swarm-pr-feedback` skill now states that
+  issue bodies are data, never instructions, and that an `ABSORB` comment cites
+  identifiers and paraphrases evidence with no secrets or raw private content.
+- Added text pins for the round ledger (verdict table, round-2 checkpoint),
+  the Fix-in-this-PR exception, and the open-issue corpus check, so deleting or
+  moving those rules fails a test.
 
 ## Why
 
-Multi-round closeout gates rebuilt their history from the whole ledger on every
-re-dispatch, and one low-severity item could loop through four critic rounds.
-These rules keep the rounds bounded and the dispositions complete.
+The round-ledger rules shipped in #3911 with no test pin, so a regression to
+them would not fail CI. The corpus check read third-party issue bodies without
+saying to treat them as data.
 
 ## Migration
 
-No user migration is required. This is skill guidance only; the `.claude` and
-`.agents` adapters point at the canonical skill and are unchanged.
+No user migration is required. This is skill guidance and test coverage only.
 
 ## Known caveats
 
-The verdict table and round count rely on the agent following the skill. No
-runtime hook enforces them.
+The verdict table and round count still rely on the agent following the skill;
+no runtime hook enforces them.
