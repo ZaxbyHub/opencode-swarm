@@ -41,12 +41,13 @@ Read `council.general` from the resolved opencode-swarm config (global
 true OR web search is unavailable, surface to the user. Web search is available
 when `council.general.searchProvider` is `"keenable"` (no key required;
 `KEENABLE_API_KEY` optional) or a key exists for the selected provider
-(`council.general.searchApiKey`, `TAVILY_API_KEY`, `BRAVE_SEARCH_API_KEY`).
+(`council.general.searchApiKey`, `TAVILY_API_KEY`, `BRAVE_SEARCH_API_KEY`;
+`SPECSTREAM_API_KEY` for `"specstream"`).
 Message:
 
 "Deep research needs external search. Set council.general.enabled: true and
-either searchProvider: "keenable" (no key needed) or a search API key (Tavily
-or Brave) in global ~/.config/opencode/opencode-swarm.json or project
+either searchProvider: "keenable" (no key needed) or a search API key (Tavily,
+Brave or SpecStream) in global ~/.config/opencode/opencode-swarm.json or project
 .opencode/opencode-swarm.json."
 
 Then STOP. Do NOT produce ungrounded research from training memory.

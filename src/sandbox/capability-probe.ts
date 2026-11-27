@@ -51,6 +51,12 @@ export interface SandboxCapability {
 	platform: 'linux' | 'darwin' | 'win32';
 	/** Error message from the probe, if any. */
 	error?: string;
+	/**
+	 * #3893 AC12: probe-stage failure markers carried alongside `error` so a
+	 * transient spawn/setup failure stays classifiable after the capability is
+	 * upgraded to V1 (the marker strings feed hasProbeSetupFailureReason).
+	 */
+	reasons?: string[];
 }
 
 export interface SandboxCapabilityV1 extends SandboxCapability {
@@ -553,7 +559,13 @@ function detectBehavioralEvidence(
 			filesystem: 'none',
 			network: 'none',
 			process: 'none',
-			reasons: [capability.error ?? 'sandbox mechanism unavailable'],
+			// #3893 AC12: probe-stage failure markers (e.g. the win32
+			// 'probe spawn failed: …' reason) ride ahead of the plain error so
+			// they survive the V1 upgrade and stay classifiable as transient.
+			reasons: [
+				...(capability.reasons ?? []),
+				capability.error ?? 'sandbox mechanism unavailable',
+			],
 		};
 	}
 	if (capability.platform === 'linux') {
@@ -856,11 +868,18 @@ function probeWindows(): SandboxCapability {
 			stdio: ['ignore', 'pipe', 'ignore'],
 		});
 		if (result.error) {
+			const spawnErrorCode = (result.error as NodeJS.ErrnoException).code;
 			return {
 				status: 'disabled',
 				platform: 'win32',
 				mechanism: 'PowerShell wrapper',
-				error: `cmd.exe probe failed: ${(result.error as NodeJS.ErrnoException).code}`,
+				error: `cmd.exe probe failed: ${spawnErrorCode}`,
+				// #3893 AC12: a spawn error (EPERM/EACCES/EBUSY, …) is a
+				// TRANSIENT environment condition, not a permanent verdict —
+				// carry the marker so the upgraded capability is classified as
+				// a setup failure and detect() re-probes instead of memoizing
+				// the disabled answer for the process lifetime.
+				reasons: [`probe spawn failed: ${spawnErrorCode}`],
 			};
 		}
 		return result.status === 0
@@ -918,7 +937,10 @@ function syncVisibleCapability(
 	const probeSourceIdentity = _internals.currentProbeSourceIdentity(platform);
 	if (
 		_cached !== undefined &&
-		_cachedProbeSourceIdentity === probeSourceIdentity
+		_cachedProbeSourceIdentity === probeSourceIdentity &&
+		// SP-001: honour the degraded-fallback TTL so an expired enabled memo
+		// is not served as the authoritative answer between detect() calls.
+		(_cachedExpiresAt === 0 || Date.now() < _cachedExpiresAt)
 	) {
 		return _cached;
 	}
@@ -1027,17 +1049,23 @@ export class SandboxCapabilityProbe {
 }
 
 /**
- * True when a capability carries a probe temp-setup-failure reason. The linux
+ * True when a capability carries a transient probe-failure reason. The linux
  * bwrap arm (`bubblewrap probe temp setup failed (…)`) and the darwin
  * sandbox-exec arm (`sandbox-exec probe temp setup failed (…)`) share the
- * marker core; behavioral evidence passes reasons through upgradeCapability,
- * so the check runs on the final capability.
+ * temp-setup marker core; the win32 cmd.exe arm carries
+ * `probe spawn failed: <code>` (#3893 AC12 — a spawn EPERM/EACCES/EBUSY is a
+ * transient environment condition, so the disabled answer must take the
+ * transient slot and let detect() re-probe instead of pinning a permanent
+ * memo). Behavioral evidence passes reasons through upgradeCapability, so the
+ * check runs on the final capability.
  */
 function hasProbeSetupFailureReason(capability: SandboxCapabilityV1): boolean {
 	const reasons: unknown = (capability as { reasons?: unknown }).reasons;
 	if (!Array.isArray(reasons)) return false;
 	return reasons.some(
 		(reason) =>
-			typeof reason === 'string' && reason.includes('probe temp setup failed'),
+			typeof reason === 'string' &&
+			(reason.includes('probe temp setup failed') ||
+				reason.includes('probe spawn failed')),
 	);
 }

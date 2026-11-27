@@ -25,6 +25,10 @@ import { applyCouncilReward } from '../memory/reward-capture';
 import { computePlanLedgerHash } from '../plan/ledger.js';
 import { loadPlan } from '../plan/manager.js';
 import { derivePlanId, derivePlanIdentityHash } from '../plan/utils.js';
+import {
+	redactEvidenceDeep,
+	redactEvidenceText,
+} from '../security/evidence-redaction';
 import * as logger from '../utils/logger';
 import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache';
 import { createSwarmTool } from './create-tool';
@@ -305,15 +309,32 @@ export async function executeWriteFinalCouncilEvidence(
 				quorumSize: synthesis.quorumSize,
 				membersVoted,
 				membersAbsent,
-				requiredFixes: synthesis.requiredFixes,
-				advisoryFindings: synthesis.advisoryFindings,
-				advisoryNotes: synthesis.advisoryNotes,
-				unresolvedConflicts: synthesis.unresolvedConflicts,
+				// #3915 AC1 (pattern: write-hallucination-evidence.ts / PR #3905):
+				// the model-authored free text of the persisted entry crosses the
+				// DURABLE evidence boundary here — redact at the write boundary.
+				// Allowlisted field map: string free text (project summary, unified
+				// feedback markdown, advisory notes, conflict prose) via
+				// redactEvidenceText; nested finding/member object arrays
+				// (CouncilFinding[] / CouncilMemberVerdict[]) via redactEvidenceDeep.
+				// Enum/bool/digest fields (verdict, quorumSize, plan hashes, identity
+				// digests) and the derived member rosters are untouched. The tool
+				// RESPONSE above keeps the raw prose for the calling agent — this is
+				// the persisted copy only. redactEvidenceDeep preserves structural
+				// identity, and redactEvidenceText is a fixed point, so the entry's
+				// shape and its non-credential values are byte-stable.
+				requiredFixes: redactEvidenceDeep(synthesis.requiredFixes),
+				advisoryFindings: redactEvidenceDeep(synthesis.advisoryFindings),
+				advisoryNotes: synthesis.advisoryNotes.map((note) =>
+					redactEvidenceText(note),
+				),
+				unresolvedConflicts: synthesis.unresolvedConflicts.map((conflict) =>
+					redactEvidenceText(conflict),
+				),
 				roundNumber: synthesis.roundNumber,
 				allCriteriaMet: synthesis.allCriteriaMet,
-				memberVerdicts: synthesis.memberVerdicts,
-				unifiedFeedbackMd: synthesis.unifiedFeedbackMd,
-				projectSummary: synthesis.projectSummary,
+				memberVerdicts: redactEvidenceDeep(synthesis.memberVerdicts),
+				unifiedFeedbackMd: redactEvidenceText(synthesis.unifiedFeedbackMd),
+				projectSummary: redactEvidenceText(synthesis.projectSummary),
 				timestamp: synthesis.timestamp,
 			};
 

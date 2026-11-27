@@ -209,8 +209,13 @@ describe('#3701 AC4/AC5 export current-redaction contract', () => {
 
 		const bundle = buildTrainingExportBundle([legacy, current]);
 		const manifest = JSON.parse(bundle.files['manifest.json'] ?? '{}');
-		// The source versions of the records INCLUDED ...
-		expect(manifest.redaction_versions_represented).toEqual([1, 2]);
+		// The source versions of the records INCLUDED ... (the legacy leg is
+		// seeded at v1; the current record carries the RUNNING version — 3
+		// since the #3893 AC4 floor composition, was 2 under #3840).
+		expect(manifest.redaction_versions_represented).toEqual([
+			1,
+			TRAINING_REDACTION_VERSION,
+		]);
 		// ... and, separately, the floor every emitted record was verified at.
 		expect(manifest.redaction_version).toBe(TRAINING_REDACTION_VERSION);
 	});
