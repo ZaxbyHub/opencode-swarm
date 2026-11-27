@@ -1802,11 +1802,11 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/gate-evidence.ts', 'src/council/council-evidence-writer.ts'],
 		writerCitations: [
-			'src/gate-evidence.ts:1905 transitionTaskWorkflowEvidence / :2230 recordGateEvidence / :2343 recordAgentDispatch — locked read-modify-write, atomic write',
+			'src/gate-evidence.ts:1905 transitionTaskWorkflowEvidence / :2254 recordGateEvidence / :2367 recordAgentDispatch — locked read-modify-write, atomic write',
 			'src/council/council-evidence-writer.ts:96 writeCouncilEvidence — gates.council section under withTaskEvidenceLock',
 		],
 		readerCitations: [
-			'src/gate-evidence.ts:2387 readTaskEvidence — FULL-FILE fail-open, async; :2463 readTaskEvidenceRaw — strict, sync',
+			'src/gate-evidence.ts:2411 readTaskEvidence — FULL-FILE fail-open, async; :2463 readTaskEvidenceRaw — strict, sync',
 			'src/council/council-evidence-writer.ts:207 hasCouncilEvidenceAttempt',
 		],
 		schemaVersion: 'workflow WAL states; unrecognized states degrade to null (documented :1199-1204)',
