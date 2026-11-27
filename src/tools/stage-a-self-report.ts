@@ -104,14 +104,42 @@ export async function reportToolSideStageA(
 		const currentTaskId = swarmState.agentSessions.get(
 			input.sessionID,
 		)?.currentTaskId;
+		// 2026-11-27 (task 2.17): the session task binding outlives its task —
+		// nothing clears currentTaskId when the task completes, so a green gate
+		// run for a LATER task resolved the STALE id and the transition threw
+		// TASK_WORKFLOW_CODER_MUTATION_REQUIRED from the terminal state: an
+		// advisory nobody reads, no route event, no durable trace — the pass
+		// was silently dropped while the real task stayed wedged. A terminal
+		// session task (or one whose Stage A pass is already recorded) can
+		// never take this receipt, so the durable fallback gets the chance it
+		// would have had without the stale binding.
+		let staleCurrentTask = false;
 		if (currentTaskId && isStrictTaskId(currentTaskId)) {
 			taskId = currentTaskId;
-		} else {
+			const sessionTaskSnapshot = getTaskWorkflowSnapshot(
+				await readTaskEvidence(input.directory, currentTaskId),
+			);
+			if (
+				sessionTaskSnapshot.state === 'complete' ||
+				sessionTaskSnapshot.state === 'closed' ||
+				(sessionTaskSnapshot.state === 'pre_check_passed' &&
+					sessionTaskSnapshot.lastOutcome === 'stage_a_passed')
+			) {
+				staleCurrentTask = true;
+			}
+		}
+		if (!taskId || staleCurrentTask) {
 			const fallback = await guardrailsInternals.resolveDurableGateTaskId(
 				input.directory,
 				input.files ?? null,
 			);
-			if (fallback && 'taskId' in fallback) taskId = fallback.taskId;
+			if (
+				fallback &&
+				'taskId' in fallback &&
+				fallback.taskId !== currentTaskId
+			) {
+				taskId = fallback.taskId;
+			}
 			// Terminal-settlement wedge (the 2026-11-23 swarm_communication_debug
 			// pattern): the durable fallback matched a task whose COMMITTED
 			// settlement settled terminal while its workflow sits at

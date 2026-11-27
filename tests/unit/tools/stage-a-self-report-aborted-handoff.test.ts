@@ -172,6 +172,87 @@ describe('stage-a-self-report — ABORTED background-handoff live wedge', () => 
 		});
 	});
 
+	test('a stale session task binding (its task already complete) falls back to the durable live-wedge candidate', async () => {
+		// The 2026-11-27 field shape: the architect session's currentTaskId
+		// still named 2.16 (nothing clears the binding when a task completes),
+		// so the green pre_check for 2.17 resolved 2.16 and the transition
+		// threw CODER_MUTATION_REQUIRED from `complete` — advisory-only, no
+		// route event, no durable trace, the pass silently dropped. The
+		// report must recognize the terminal binding and let the durable
+		// fallback resolve the real live-wedge task instead.
+		await settleBackgroundAccepted('2.17', 'background-coder:child-1');
+		writeAbortedHandoffWal('2.17', ['tools/native_reference']);
+		fs.writeFileSync(
+			path.join(directory, '.swarm', 'evidence', '2.16.json'),
+			JSON.stringify({
+				taskId: '2.16',
+				required_gates: ['reviewer', 'test_engineer'],
+				gates: {
+					pre_check: {
+						sessionId: 'system',
+						timestamp: '2026-01-01T00:00:00.000Z',
+						agent: 'pre_check',
+					},
+				},
+				requirements_state: 'unknown',
+				workflow: {
+					schema: 'exact-task-v1',
+					generation: 3,
+					state: 'complete',
+					retryCount: 0,
+					retryHistory: [],
+					retryEpoch: 0,
+					lastOutcome: 'task_completed',
+					lastTransitionId: 'plan-status:2.16:completed:1795721790352',
+					updatedAt: '2026-01-01T00:00:00.000Z',
+				},
+			}),
+		);
+		const session = ensureAgentSession('architect');
+		session.currentTaskId = '2.16';
+
+		await reportPass(
+			['tools/native_reference/imported_profile.py'],
+			'self:aborted:7',
+		);
+
+		const healed = getTaskWorkflowSnapshot(
+			await readTaskEvidence(directory, '2.17'),
+		);
+		expect(healed.state).toBe('pre_check_passed');
+		expect(healed.lastOutcome).toBe('stage_a_passed');
+		const stale = getTaskWorkflowSnapshot(
+			await readTaskEvidence(directory, '2.16'),
+		);
+		expect(stale.state).toBe('complete');
+		expect(stale.lastOutcome).toBe('task_completed');
+		const events = routeEvents(directory);
+		expect(events).toHaveLength(1);
+		expect(events[0]).toMatchObject({ route: 'valid_pass', taskId: '2.17' });
+	});
+
+	test('a fresh session binding to the live-wedge task heals directly through currentTaskId', async () => {
+		await settleBackgroundAccepted('2.17', 'background-coder:child-1');
+		writeAbortedHandoffWal('2.17', ['tools/native_reference']);
+		const session = ensureAgentSession('architect');
+		session.currentTaskId = '2.17';
+
+		await reportPass(
+			['tools/native_reference/imported_profile.py'],
+			'self:aborted:8',
+		);
+
+		const snapshot = getTaskWorkflowSnapshot(
+			await readTaskEvidence(directory, '2.17'),
+		);
+		expect(snapshot.state).toBe('pre_check_passed');
+		expect(snapshot.lastOutcome).toBe('stage_a_passed');
+		expect(routeEvents(directory)[0]).toMatchObject({
+			route: 'valid_pass',
+			taskId: '2.17',
+		});
+	});
+
 	test('an aborted handoff without an accepted mutation stays unattributed', async () => {
 		await transitionTaskWorkflowEvidence(directory, '2.17', {
 			type: 'dispatch_no_mutation',
