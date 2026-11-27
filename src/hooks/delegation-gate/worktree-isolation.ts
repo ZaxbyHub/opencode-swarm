@@ -211,6 +211,8 @@ export const MAX_TRACKED_STANDARD_WORKTREE_CALLS = 256;
 export interface StandardWorktreeDispatch {
 	callID: string;
 	parentSessionID: string;
+	/** Host-created child session that MUST be resumed by the native v2 subagent. */
+	childSessionId?: string;
 	taskId: string;
 	planTaskId?: string;
 	reservationId?: string;
@@ -309,6 +311,38 @@ export const standardWorktreeByCallID = new Map<
 	StandardWorktreeDispatch
 >();
 export const standardWorktreeSerializationSessions = new Set<string>();
+
+/**
+ * Return a worktree child resume ID only when it was created by THIS exact
+ * parent/call and is owned by the coder lane. Never infer an OpenCode resume
+ * ID from the model's plan task_id (e.g. "1.1") or an uncorrelated ses_ token.
+ *
+ * The v2 bridge needs this after the v1 gate has provisioned the lane: the
+ * precreated session is the ONLY session that owns the derived write scope.
+ */
+export function verifiedWorktreeChildForV2Call(input: {
+	callID: string;
+	parentSessionID: string;
+	agent: unknown;
+}): string | null {
+	const dispatch = standardWorktreeByCallID.get(input.callID);
+	if (!dispatch || dispatch.parentSessionID !== input.parentSessionID)
+		return null;
+	if (
+		typeof input.agent !== 'string' ||
+		stripKnownSwarmPrefix(input.agent).toLowerCase() !== 'coder'
+	)
+		return null;
+	const id = dispatch.childSessionId;
+	if (
+		typeof id !== 'string' ||
+		!/^ses_[A-Za-z0-9_-]{1,252}$/.test(id) ||
+		id === input.parentSessionID ||
+		laneChildSessionAgents.get(id) !== 'coder'
+	)
+		return null;
+	return id;
+}
 
 /**
  * Child sessions this plugin created for isolated coder lanes, by agent.
@@ -2191,6 +2225,7 @@ export async function precreateStandardWorktreeSession(args: {
 	rememberStandardWorktreeDispatch({
 		callID: args.callID,
 		parentSessionID: args.parentSessionID,
+		childSessionId,
 		taskId: args.taskId,
 		planTaskId: args.planTaskId,
 		reservationId,

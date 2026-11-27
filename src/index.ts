@@ -13,10 +13,19 @@ import {
 	resetArchitectPromptBudgetAdvisories,
 } from './agents';
 import {
-	applyAlwaysSurfacePolicy,
-	parseSoundingBoardResponse,
-	type SoundingBoardResponse,
-} from './agents/critic.js';
+	applySoundingBoardResponsePolicy,
+	validSoundingBoardCallerCategory,
+} from './agents/sounding-board-policy.js';
+import {
+	clearV2StepUsage,
+	forgetV2StepUsage,
+	ingestV2StepUsage,
+} from './host/v2/usage-bridge.js';
+// r12 (async lifecycle F3): re-exported for existing consumers (the policy was
+// extracted from this module so the background completion observer applies
+// the EXACT same contract to native-async completions).
+export { applySoundingBoardResponsePolicy, validSoundingBoardCallerCategory };
+
 import {
 	type BackgroundAutomationManager,
 	createAutomationManager,
@@ -83,8 +92,10 @@ import {
 } from './config/schema';
 import { createRoleFilterSystemHook } from './context/role-filter.js';
 import {
+	CONTEXT_MAP_LOCK_BUDGET_MS,
 	extractContextDecisionsFromContextMd,
-	updateContextMapAfterAgent,
+	resolveContextMapTaskReleaseStatus,
+	updateContextMapAfterAgentLocked,
 } from './context-map/post-agent-update.js';
 import {
 	closeDashboardServerForRootIfOwner,
@@ -418,53 +429,162 @@ export function capSessionMap<K, V>(
 	}
 }
 
+// ---------------------------------------------------------------------------
+// r13 (async lifecycle F5): event fan-out isolation
+// ---------------------------------------------------------------------------
+//
+// Defect class being closed: the `event` hook ran every independent consumer
+// (PR-workflow session resolver, PR-workflow response gate, PR idle delivery,
+// the durable background completion observer) inside ONE try/catch. A
+// throwing sibling consumer aborted the rest of the fan-out — in particular a
+// throwing prWorkflowResponseGate.event() starved backgroundCompletionObserver
+// .event(), so a trusted subagent completion was never durably processed.
+//
+// Every consumer now runs through dispatchEventConsumerIsolated: a failure is
+// contained to that consumer, surfaced through the deferred warning buffer
+// (advisoryWarn — operator-visible, not silently swallowed), and rate-limited
+// per consumer name so a persistently failing consumer cannot spam the buffer
+// on every event. The observer's own durable replay (maintenance points,
+// reconcilePending) remains the crash-recovery net for a completion whose
+// processing died mid-flight.
+
+/** Per-consumer failure-report cooldown (AGENTS.md invariant 8 convention). */
+const EVENT_CONSUMER_FAILURE_COOLDOWN_MS = 60_000;
+/** Bounded consumer-failure registry (FIFO eviction at the cap). */
+const MAX_TRACKED_EVENT_CONSUMERS = 32;
+const eventConsumerFailureAtByName = new Map<string, number>();
+
 /**
- * Resolve a category from the architect-owned sounding-board dispatch packet.
- * Only the explicit `category` field is caller metadata.  Prompt, description,
- * task, and context are model-controlled/free-text surfaces and must never be
- * scanned for a protocol category (issue #2491 F-004).
+ * Report an event-consumer failure visibly (deferred warning buffer) with a
+ * per-consumer cooldown. Exported for unit testing of the isolation contract.
  */
-function resolveSoundingBoardCallerCategory(args: unknown): {
-	supplied: boolean;
-	value?: unknown;
-} {
-	if (!args || typeof args !== 'object' || Array.isArray(args)) {
-		return { supplied: false };
+export function reportEventConsumerFailure(
+	consumer: string,
+	error: unknown,
+): void {
+	const now = Date.now();
+	const last = eventConsumerFailureAtByName.get(consumer);
+	if (last !== undefined && now - last < EVENT_CONSUMER_FAILURE_COOLDOWN_MS) {
+		return;
 	}
-	const record = args as Record<string, unknown>;
-	if (Object.hasOwn(record, 'category')) {
-		return { supplied: true, value: record.category };
+	eventConsumerFailureAtByName.delete(consumer);
+	while (eventConsumerFailureAtByName.size >= MAX_TRACKED_EVENT_CONSUMERS) {
+		const oldest = eventConsumerFailureAtByName.keys().next().value;
+		if (oldest === undefined) break;
+		eventConsumerFailureAtByName.delete(oldest);
 	}
-	return { supplied: false };
+	eventConsumerFailureAtByName.set(consumer, now);
+	advisoryWarn(
+		`[swarm] event consumer '${consumer}' failed and was isolated; downstream event consumers still ran: ${
+			error instanceof Error ? error.message : String(error)
+		}`,
+	);
 }
 
 /**
- * Apply the sounding-board response contract at the host handoff boundary.
- * Missing/malformed category metadata may never preserve UNNECESSARY: the
- * response is surfaced as APPROVED with an observable warning. A caller-owned
- * category is passed separately so a model cannot relabel a sticky decision.
+ * Execution budget for one independent event consumer (audit P1-4): a
+ * consumer that neither settles nor throws within this bound cannot starve
+ * the remaining fan-out — most importantly the durable background completion
+ * observer. The abandoned consumer keeps running in the background; its
+ * eventual outcome is observed (a late rejection is reported, never an
+ * unhandled rejection).
+ *
+ * r16: deliberately NOT exported — a number-valued top-level export breaks
+ * OpenCode's getLegacyPlugins (TypeError, silently dropped plugin, issue
+ * #675 / invariant 2, pinned by bundle-plugin-shape.test.ts).
  */
-export function applySoundingBoardResponsePolicy(
-	rawResponse: string,
-	args?: unknown,
-): SoundingBoardResponse | null {
-	const callerCategory = resolveSoundingBoardCallerCategory(args);
-	const parsed = parseSoundingBoardResponse(
-		rawResponse,
-		callerCategory.supplied ? { category: callerCategory.value } : undefined,
-	);
-	if (!parsed) return null;
-	const guarded = applyAlwaysSurfacePolicy(parsed);
-	if (guarded.protocolError && guarded.verdict === 'UNNECESSARY') {
-		return {
-			...guarded,
-			verdict: 'APPROVED',
-			warning:
-				guarded.warning ??
-				'Invalid or missing Category metadata; verdict was surfaced as APPROVED.',
-		};
+const EVENT_CONSUMER_DEADLINE_MS = 10_000;
+
+/**
+ * The durable completion observer gets a larger budget than advisory
+ * siblings: its settlement/ingestion chain performs real durable work, and
+ * its own replay machinery recovers anything the budget abandons. Not
+ * exported for the same legacy-shape reason as EVENT_CONSUMER_DEADLINE_MS.
+ */
+const BACKGROUND_COMPLETION_CONSUMER_DEADLINE_MS = 60_000;
+
+/**
+ * Run one independent event consumer so its failure can neither abort the
+ * remaining fan-out nor disappear silently, and so a HANGING consumer cannot
+ * block the consumers behind it (audit P1-4): the wait is bounded by
+ * {@link EVENT_CONSUMER_DEADLINE_MS} (or the per-consumer override). Exported
+ * for unit testing.
+ */
+export async function dispatchEventConsumerIsolated(
+	consumer: string,
+	run: () => Promise<void> | void,
+	deadlineMs: number = EVENT_CONSUMER_DEADLINE_MS,
+): Promise<void> {
+	// Normalize to a promise that NEVER rejects — the outcome travels as a
+	// value — so an abandoned consumer can never surface as an unhandled
+	// rejection after the fan-out has moved on.
+	const outcome = (async (): Promise<
+		{ kind: 'ok' } | { kind: 'error'; error: unknown }
+	> => {
+		try {
+			await run();
+			return { kind: 'ok' };
+		} catch (error) {
+			return { kind: 'error', error };
+		}
+	})();
+	try {
+		const result = await withTimeout(
+			outcome,
+			deadlineMs,
+			new Error(
+				`event consumer '${consumer}' did not settle within ${deadlineMs}ms; the fan-out continues (the consumer may still be running)`,
+			),
+		);
+		if (result.kind === 'error') {
+			reportEventConsumerFailure(consumer, result.error);
+		}
+	} catch (error) {
+		reportEventConsumerFailure(consumer, error);
+		// Late settlement of the abandoned consumer: visible through the same
+		// bounded reporting path, never silent, never unhandled.
+		void outcome.then((result) => {
+			if (result.kind === 'error') {
+				reportEventConsumerFailure(`${consumer} (late)`, result.error);
+			}
+		});
 	}
-	return guarded;
+}
+
+/** Test seam: clear the per-consumer failure cooldown registry. */
+export function resetEventConsumerFailureRegistryForTests(): void {
+	eventConsumerFailureAtByName.clear();
+}
+
+/**
+ * r14 audit repair (P1-7): staged event fan-out. Each stage runs its
+ * consumers in PARALLEL (each still individually isolated and
+ * deadline-bounded by {@link dispatchEventConsumerIsolated}); stages run
+ * sequentially. Exported for unit testing of the staging contract.
+ */
+export interface EventFanoutConsumer {
+	name: string;
+	run: () => Promise<void> | void;
+	/** Per-consumer override of the execution budget. */
+	deadlineMs?: number;
+}
+
+export async function dispatchEventFanoutStages(
+	stages: readonly (readonly EventFanoutConsumer[])[],
+): Promise<void> {
+	for (const stage of stages) {
+		// dispatchEventConsumerIsolated never throws (every failure path is
+		// contained and reported), so Promise.all cannot reject.
+		await Promise.all(
+			stage.map((consumer) =>
+				dispatchEventConsumerIsolated(
+					consumer.name,
+					consumer.run,
+					consumer.deadlineMs ?? EVENT_CONSUMER_DEADLINE_MS,
+				),
+			),
+		);
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -579,6 +699,7 @@ export function _resetDelegationTelemetryPairingForTesting(): void {
 	pendingCostCorrectionByChildSession.clear();
 	scheduledCostCorrectionRecoveryBySession.clear();
 	latestAssistantUsageBySession.clear();
+	clearV2StepUsage();
 }
 
 import { applyLanePermissions } from './config/lane-permissions.js';
@@ -1138,6 +1259,15 @@ function rememberAssistantUsageEvent(
 			: undefined;
 		const part = isPlainRecord(properties?.part) ? properties.part : undefined;
 		if (part?.type === 'step-finish') {
+			// Native v2 steps are INDIVIDUAL durable model executions. Accumulate
+			// by verified session and event ID; a last-step-wins Map.set loses
+			// multi-step usage, and replay must not bill a step twice.
+			if (part.swarmV2UsageStep === true) {
+				const aggregate = ingestV2StepUsage(part);
+				if (!aggregate) return undefined;
+				rememberAssistantUsage(aggregate.sessionID, aggregate);
+				return { sessionId: aggregate.sessionID, raw: aggregate };
+			}
 			rememberAssistantUsage(part.sessionID, part);
 			return typeof part.sessionID === 'string'
 				? { sessionId: part.sessionID, raw: part }
@@ -1171,6 +1301,7 @@ function consumeAssistantUsageForTask(
 		const usage = latestAssistantUsageBySession.get(sessionID);
 		if (usage !== undefined) {
 			latestAssistantUsageBySession.delete(sessionID);
+			forgetV2StepUsage(sessionID);
 			return usage;
 		}
 	}
@@ -1801,16 +1932,26 @@ async function initializeOpenCodeSwarm(
 			// the post-resolution queue can observe completion. The scheduler
 			// already treats tasks as void | Promise<void>.
 			return withTimeout(
-				import('./background/pending-delegations.js').then((m) =>
-					m.maintainBackgroundDelegations(bootstrapRoot, {
-						lockTimeoutMs: 5_000,
-						reason: 'post-init',
-						onLegacyCoderSettlementReconciled:
-							backgroundCompletionObserver.reconcilePending,
-						onLegacyCoderSettlementAdvisoryReplaced:
-							backgroundCompletionObserver.notifyLegacyCoderSettlementAdvisoryReplaced,
-					}),
-				),
+				import('./background/pending-delegations.js')
+					.then((m) =>
+						m.maintainBackgroundDelegations(bootstrapRoot, {
+							lockTimeoutMs: 5_000,
+							reason: 'post-init',
+							onLegacyCoderSettlementReconciled:
+								backgroundCompletionObserver.reconcilePending,
+							onLegacyCoderSettlementAdvisoryReplaced:
+								backgroundCompletionObserver.notifyLegacyCoderSettlementAdvisoryReplaced,
+						}),
+					)
+					.then(() =>
+						// r15 audit repair (P3): recover context-map task-release
+						// promotions lost to a best-effort promotion failure at
+						// update_task_status. Idempotent, config-gated, fail-closed
+						// on QA proof; best-effort like the maintenance above.
+						import('./context-map/post-agent-update.js').then((m) =>
+							m.reconcileContextMapTaskReleases(bootstrapRoot),
+						),
+					),
 				BACKGROUND_MAINTENANCE_INIT_TIMEOUT_MS,
 				new Error(
 					`background maintenance exceeded ${BACKGROUND_MAINTENANCE_INIT_TIMEOUT_MS}ms post-init budget; continuing without it (other maintenance points remain)`,
@@ -2343,10 +2484,24 @@ async function initializeOpenCodeSwarm(
 		},
 		bootstrapRoot,
 	);
+	// PR 3922 dialect binding: the v2 adapter injects `subagentDialect` into
+	// the init input (src/host/v2/setup.ts, V2InitInput) so THIS setup's
+	// resolved dialect reaches the gate; the pure-v1 entry (OpenCodeSwarm.server)
+	// passes the host PluginInput, which has no such field, and explicitly
+	// selects the legacy dialect here. Validation is fail-closed: only the
+	// exact 'native-2.3' literal widens the gate — anything absent/unknown is
+	// legacy (foreground settlement semantics). The inferred 'native-2.3' |
+	// 'legacy' union is the V2SubagentDialect contract; the type import is
+	// deliberately omitted so this file's line-pinned citations do not shift.
+	const rawSubagentDialect = (ctx as { subagentDialect?: unknown })
+		.subagentDialect;
+	const subagentDialect: 'native-2.3' | 'legacy' =
+		rawSubagentDialect === 'native-2.3' ? 'native-2.3' : 'legacy';
 	const delegationGateHooks = createDelegationGateHook(
 		configWithResolvedAutoReview,
 		bootstrapRoot,
 		agents,
+		{ subagentDialect },
 	);
 	const advisoryInjector = (sessionId: string, message: string) => {
 		const session = swarmState.agentSessions.get(sessionId);
@@ -2363,6 +2518,12 @@ async function initializeOpenCodeSwarm(
 					?.background_subagents === true,
 		},
 		directory: bootstrapRoot,
+		// r12 (F2): the async completion path writes the SAME context-map
+		// post-agent summary the sync Task handoff writes — gated on the same
+		// feature flag, never more often.
+		contextMap: {
+			enabled: config.context_map?.enabled === true,
+		},
 		reviewerReceiptOptions: {
 			dispatcher: reviewModelDispatcher,
 			config: autoReviewConfig,
@@ -4216,127 +4377,210 @@ async function initializeOpenCodeSwarm(
 							(typeof lifecycleStatus === 'object' &&
 								(lifecycleStatus.type === 'idle' ||
 									lifecycleStatus.type === 'error'))));
-				if (isTerminalSessionEvent) {
-					const properties = lifecycleEvent.properties;
-					const sessionID =
-						properties?.sessionID ??
-						properties?.sessionId ??
-						properties?.info?.sessionID ??
-						properties?.info?.id ??
-						properties?.id;
-					if (sessionID) {
-						delegationGateHooks.sessionEnded(
-							sessionID,
-							lifecycleEvent.type === 'session.deleted' ||
-								lifecycleEvent.type === 'session.removed',
-						);
-						if (
-							lifecycleEvent.type === 'session.deleted' ||
-							lifecycleEvent.type === 'session.removed'
-						) {
-							// Exact-owner cleanup: a deleted session can never consume the
-							// one-shot bridge marker, so release it at the terminal event.
-							_architectCompactionPending.delete(sessionID);
-							// Session deletion is an exact-owner terminal boundary. Keep gate
-							// terminalization and receipt cleanup independent and fail-open so a
-							// foreign active gate or unavailable stash inventory cannot undo the
-							// durable owner-state cleanup.
-							try {
-								await terminalizePrWorkflowGateForSession(
-									bootstrapRoot,
-									sessionID,
-								);
-							} catch {
-								warn(
-									'PR workflow gate terminalization on session deletion failed (non-fatal)',
-								);
-							}
-							try {
-								const reconciliation = reconcilePrWorkflowCheckoutReceipts(
-									bootstrapRoot,
-									sessionID,
-								);
-								const summary = await withTimeout(
-									reconciliation,
-									SESSION_DELETION_RECEIPT_RECONCILIATION_EVENT_DEADLINE_MS,
-									new Error(
-										'PR workflow checkout receipt reconciliation exceeded the session-deletion event budget',
-									),
-								);
-								log(
-									'PR workflow checkout receipts reconciled on session deletion',
-									{
-										inspected: summary.inspectedReceiptCount,
-										collected: summary.collectedStashOids.length,
-										retiredMissing: summary.retiredMissingStashOids.length,
-										preserved: summary.preservedStashOids.length,
-										failures: summary.failures.length,
-									},
-								);
-							} catch {
-								warn(
-									'PR workflow checkout receipt reconciliation on session deletion failed or exceeded its event budget (non-fatal)',
-								);
-							}
-							if (bootstrapStateWritesEnabled) {
-								deleteSnapshotSessionRows(bootstrapRoot, sessionID);
-							}
-							clearPendingTaskModelRoutesForSession(sessionID);
-							clearSessionActionCircuits(sessionID);
-							clearFullAutoSevereSession(sessionID);
-						}
-						// Issue #2104 — maintenance point P3: a closed/idle
-						// session is a listed runtime maintenance trigger (a
-						// parent that dies without a later dispatch must not
-						// strand reservations). Opt-in only; bounded by the
-						// maintenance service's own tight lock bound and
-						// fail-open — failures are recorded in the durable
-						// facts ring, never fatal to the event hook.
-						if (backgroundSubagentsEnabled && bootstrapStateWritesEnabled) {
-							try {
-								await maintainBackgroundDelegationsOnSessionEvent();
-							} catch {
-								// observation only; the facts ring records it
-							}
-						}
-						// Issue #2045 crash recovery (blocking lanes): NOT gated
-						// on backgroundSubagentsEnabled — blocking dispatch_lanes
-						// runs regardless of that flag, so its only terminal-receipt
-						// recovery path must too. Bounded (64-record cap + 5s
-						// admission budget), fail-open, near-zero cost on an empty
-						// or fully-recovered ledger.
-						try {
-							const { recoverTerminalLaneReceipts } = await import(
-								'./background/delegation-lifecycle.js'
-							);
-							await recoverTerminalLaneReceipts(bootstrapRoot);
-						} catch {
-							// fail-open — recovery must never break the event hook
-						}
-					}
-				}
-				prWorkflowSessionResolver.observeEvent(input);
-				await prWorkflowResponseGate.event(input);
-				// PR wake delivery: session.idle flushes that session's queued PR
-				// events. No-op unless prompt-mode delivery is registered.
-				if (prEventDelivery) {
-					const evt = input.event as
-						| {
-								type?: string;
-								properties?: { sessionID?: string };
-								data?: { sessionID?: string };
-						  }
-						| undefined;
-					const idleSessionID =
-						evt?.properties?.sessionID ?? evt?.data?.sessionID;
-					if (
-						evt?.type === 'session.idle' &&
-						typeof idleSessionID === 'string'
-					) {
-						prEventDelivery.noteSessionIdle(idleSessionID, ctx.directory);
-					}
-				}
-				await backgroundCompletionObserver.event(input);
+				// r13 (F5): each independent event consumer is isolated — a throwing
+				// sibling must never starve the durable completion observer (or any
+				// other consumer) of this event. Failures surface through the
+				// deferred warning buffer with a per-consumer cooldown.
+				//
+				// r14 audit repair (P1-7): the fan-out is STAGED, and the durable
+				// completion observer is PRIORITIZED into the first stage.
+				//
+				// Ordering-dependency analysis (the reason this is a staged fan-out
+				// and not one parallel pool):
+				//  - background-completion-observer acts ONLY on
+				//    `message.part.updated` synthetic task envelopes.
+				//  - terminal-session-event acts ONLY on `session.*` lifecycle
+				//    events — event-type-DISJOINT from the observer, so the two can
+				//    never act on the same event (its maintenance pass touches the
+				//    same durable delegation store, but only on session events,
+				//    where the observer is a no-op — and the store's CAS/leases
+				//    fence even cross-event concurrency).
+				//  - pr-workflow-session-resolver mutates ONLY its private
+				//    child→parent map (session.created/updated observation).
+				//  - pr-event-idle-delivery acts ONLY on `session.idle` (also
+				//    event-type-disjoint from the observer).
+				//  These four run in PARALLEL in stage 1 — no shared mutation
+				//  surface on any single event.
+				//  - pr-workflow-response-gate is the ONE consumer with a potential
+				//  shared surface (PR-workflow session/advisory state) relative to
+				//  the observer, so it stays SEQUENTIAL — in stage 2, AFTER the
+				//  observer, so it now observes post-settlement state (previously
+				//  it ran before the observer and could act on stale lane state).
+				//
+				// Timing effect: a hanging sibling can no longer delay the durable
+				// observer at all (worst case was 4 × 10 s of sequential advisory
+				// siblings ahead of it; now it starts immediately and the gate adds
+				// at most one 10 s stage after). A promise abandoned by a deadline
+				// keeps running (documented on dispatchEventConsumerIsolated); its
+				// late durable effects are fenced by the closeout-step leases and
+				// the idempotent sinks (r14 P1-4).
+				await dispatchEventFanoutStages([
+					[
+						{
+							// The durable completion consumer — isolated like every
+							// sibling so a failure here is contained and VISIBLE (its
+							// own replay machinery recovers the completion later). It
+							// runs FIRST and on a LARGER budget: its
+							// settlement/ingestion chain performs real durable work.
+							name: 'background-completion-observer',
+							run: () => backgroundCompletionObserver.event(input),
+							deadlineMs: BACKGROUND_COMPLETION_CONSUMER_DEADLINE_MS,
+						},
+						{
+							name: 'terminal-session-event',
+							run: async () => {
+								if (isTerminalSessionEvent) {
+									const properties = lifecycleEvent.properties;
+									const sessionID =
+										properties?.sessionID ??
+										properties?.sessionId ??
+										properties?.info?.sessionID ??
+										properties?.info?.id ??
+										properties?.id;
+									if (sessionID) {
+										delegationGateHooks.sessionEnded(
+											sessionID,
+											lifecycleEvent.type === 'session.deleted' ||
+												lifecycleEvent.type === 'session.removed',
+										);
+										if (
+											lifecycleEvent.type === 'session.deleted' ||
+											lifecycleEvent.type === 'session.removed'
+										) {
+											// Exact-owner cleanup: a deleted session can never consume the
+											// one-shot bridge marker, so release it at the terminal event.
+											_architectCompactionPending.delete(sessionID);
+											// Session deletion is an exact-owner terminal boundary. Keep gate
+											// terminalization and receipt cleanup independent and fail-open so a
+											// foreign active gate or unavailable stash inventory cannot undo the
+											// durable owner-state cleanup.
+											try {
+												await terminalizePrWorkflowGateForSession(
+													bootstrapRoot,
+													sessionID,
+												);
+											} catch {
+												warn(
+													'PR workflow gate terminalization on session deletion failed (non-fatal)',
+												);
+											}
+											try {
+												const reconciliation =
+													reconcilePrWorkflowCheckoutReceipts(
+														bootstrapRoot,
+														sessionID,
+													);
+												const summary = await withTimeout(
+													reconciliation,
+													SESSION_DELETION_RECEIPT_RECONCILIATION_EVENT_DEADLINE_MS,
+													new Error(
+														'PR workflow checkout receipt reconciliation exceeded the session-deletion event budget',
+													),
+												);
+												log(
+													'PR workflow checkout receipts reconciled on session deletion',
+													{
+														inspected: summary.inspectedReceiptCount,
+														collected: summary.collectedStashOids.length,
+														retiredMissing:
+															summary.retiredMissingStashOids.length,
+														preserved: summary.preservedStashOids.length,
+														failures: summary.failures.length,
+													},
+												);
+											} catch {
+												warn(
+													'PR workflow checkout receipt reconciliation on session deletion failed or exceeded its event budget (non-fatal)',
+												);
+											}
+											if (bootstrapStateWritesEnabled) {
+												deleteSnapshotSessionRows(bootstrapRoot, sessionID);
+											}
+											clearPendingTaskModelRoutesForSession(sessionID);
+											clearSessionActionCircuits(sessionID);
+											clearFullAutoSevereSession(sessionID);
+										}
+										// Issue #2104 — maintenance point P3: a closed/idle
+										// session is a listed runtime maintenance trigger (a
+										// parent that dies without a later dispatch must not
+										// strand reservations). Opt-in only; bounded by the
+										// maintenance service's own tight lock bound and
+										// fail-open — failures are recorded in the durable
+										// facts ring, never fatal to the event hook.
+										if (
+											backgroundSubagentsEnabled &&
+											bootstrapStateWritesEnabled
+										) {
+											try {
+												await maintainBackgroundDelegationsOnSessionEvent();
+											} catch {
+												// observation only; the facts ring records it
+											}
+										}
+										// Issue #2045 crash recovery (blocking lanes): NOT gated
+										// on backgroundSubagentsEnabled — blocking dispatch_lanes
+										// runs regardless of that flag, so its only terminal-receipt
+										// recovery path must too. Bounded (64-record cap + 5s
+										// admission budget), fail-open, near-zero cost on an empty
+										// or fully-recovered ledger.
+										try {
+											const { recoverTerminalLaneReceipts } = await import(
+												'./background/delegation-lifecycle.js'
+											);
+											await recoverTerminalLaneReceipts(bootstrapRoot);
+										} catch {
+											// fail-open — recovery must never break the event hook
+										}
+									}
+								}
+							},
+						},
+						{
+							name: 'pr-workflow-session-resolver',
+							run: () => prWorkflowSessionResolver.observeEvent(input),
+						},
+						{
+							// PR wake delivery: session.idle flushes that session's
+							// queued PR events. No-op unless prompt-mode delivery is
+							// registered.
+							name: 'pr-event-idle-delivery',
+							run: async () => {
+								if (prEventDelivery) {
+									const evt = input.event as
+										| {
+												type?: string;
+												properties?: { sessionID?: string };
+												data?: { sessionID?: string };
+										  }
+										| undefined;
+									const idleSessionID =
+										evt?.properties?.sessionID ?? evt?.data?.sessionID;
+									if (
+										evt?.type === 'session.idle' &&
+										typeof idleSessionID === 'string'
+									) {
+										prEventDelivery.noteSessionIdle(
+											idleSessionID,
+											ctx.directory,
+										);
+									}
+								}
+							},
+						},
+					],
+					[
+						{
+							// r13 (F5): a throwing PR-workflow gate must never starve the
+							// durable completion observer — isolate it. r14 (P1-7): it
+							// runs AFTER the observer (stage 2) so it observes
+							// post-settlement state; it stays sequential because it is
+							// the one consumer with a potential shared session-state
+							// surface relative to the observer.
+							name: 'pr-workflow-response-gate',
+							run: () => prWorkflowResponseGate.event(input),
+						},
+					],
+				]);
 			} catch (err) {
 				warn(
 					`[swarm] event hook error: ${err instanceof Error ? err.message : String(err)}`,
@@ -5099,6 +5343,13 @@ async function initializeOpenCodeSwarm(
 				);
 
 			const isTaskTool = isTaskToolId(input.tool);
+			// r12 (async lifecycle F2): a native-async Task dispatch returns a
+			// running placeholder, not a terminal result. Classify it ONCE here,
+			// before the hook chain, so terminal-only side effects (the context-map
+			// post-agent update below and the Task-handoff telemetry) gate on it —
+			// the child has not finished, so nothing may record a final status yet.
+			const taskOutputIsRunningPlaceholder =
+				isTaskTool && outputLooksLikeBackgroundRunning(output);
 			// (#1849) Resolve tool.execute.after args ONCE from the callID snapshot
 			// (the SDK toolAfter input has NO args). Reused by the knowledge ack/
 			// verdict/receipt collectors below so they see the delegation prompt +
@@ -5493,6 +5744,11 @@ async function initializeOpenCodeSwarm(
 				// Context Map: post-agent update after Task tool completes
 				if (
 					isTaskTool &&
+					// r12 (F2): a native-async running placeholder is a dispatch
+					// boundary, not a completion — writing final_status here would
+					// mark the task completed the moment the child STARTS. The real
+					// completion is processed by the background completion observer.
+					!taskOutputIsRunningPlaceholder &&
 					config.context_map?.enabled === true &&
 					input.sessionID
 				) {
@@ -5504,22 +5760,49 @@ async function initializeOpenCodeSwarm(
 						if (contextMapTaskId) {
 							const agentOutput =
 								typeof output.output === 'string' ? output.output : '';
-							updateContextMapAfterAgent({
-								task_id: contextMapTaskId,
-								agent_role:
-									swarmState.activeAgent.get(input.sessionID) ?? 'unknown',
-								files_touched: [],
-								implementation_summary: agentOutput.slice(0, 500),
-								task_goal: '',
-								final_status: 'completed',
-								decisions: extractContextDecisionsFromContextMd(bootstrapRoot, {
+							// r14 audit repair (P1-5): a child completion is not a task
+							// release. The sync handoff writes the same NON-FINAL status
+							// as the async observer until the authoritative release
+							// (update_task_status) promotes the summary.
+							const syncReleaseStatus =
+								await resolveContextMapTaskReleaseStatus(
+									bootstrapRoot,
+									contextMapTaskId,
+								);
+							// r16 (P2): the COORDINATED write — the whole
+							// load→update→save cycle runs under the cross-process
+							// context-map lock. Awaited so the hook chain (and the
+							// test hosts that drive it) observe the completed write;
+							// the surrounding try/catch keeps it non-blocking.
+							// r17 (P1): the acquisition wait is BOUNDED to the hook
+							// budget — an optional context-map write must not delay
+							// a delegation's completion signal by the evidence
+							// lock's 60 s default. On budget timeout the update is
+							// skipped whole (the callback never started — no
+							// partial write) and the background observer's journaled
+							// closeout re-drives it.
+							await updateContextMapAfterAgentLocked(
+								{
+									task_id: contextMapTaskId,
 									agent_role:
-										resolveSessionChatAgent(input.sessionID) ??
-										swarmState.activeAgent.get(input.sessionID) ??
-										'unknown',
-								}),
-								directory: bootstrapRoot,
-							});
+										swarmState.activeAgent.get(input.sessionID) ?? 'unknown',
+									files_touched: [],
+									implementation_summary: agentOutput.slice(0, 500),
+									task_goal: '',
+									final_status: syncReleaseStatus,
+									decisions: extractContextDecisionsFromContextMd(
+										bootstrapRoot,
+										{
+											agent_role:
+												resolveSessionChatAgent(input.sessionID) ??
+												swarmState.activeAgent.get(input.sessionID) ??
+												'unknown',
+										},
+									),
+									directory: bootstrapRoot,
+								},
+								CONTEXT_MAP_LOCK_BUDGET_MS.hook,
+							);
 						}
 					} catch {
 						// Post-agent update must never block the hook chain
@@ -5582,8 +5865,9 @@ async function initializeOpenCodeSwarm(
 			// Hooks must see the original subagent identity to record evidence
 			// correctly. The handoff restores architect identity afterward.
 			if (isTaskTool) {
-				const backgroundResultIsRunning =
-					outputLooksLikeBackgroundRunning(output);
+				// r12: reuse the pre-hook-chain classification (same pure
+				// predicate) instead of recomputing it after the hooks.
+				const backgroundResultIsRunning = taskOutputIsRunningPlaceholder;
 				const sessionId = input.sessionID;
 				// Delegated-agent identity for this whole handoff (model resolution for
 				// cost fields, pipeline advisories, and the delegation_end emit).

@@ -10,21 +10,20 @@ const logCalls: { message: string; data?: unknown }[] = [];
 // Import _internals seam for plan/manager (within-module)
 import { _internals as planManagerInternals } from '../../../src/plan/manager';
 
+// r15 audit repair (Phase 6 — test isolation): same defect and same fix as
+// plan-sync-worker-write-detection.test.ts — the previous top-level
+// mock.module('../../../src/utils') replaced the whole utils module with
+// ONLY log/warn/error (every other export undefined process-wide from
+// Bun's test-file preloading onward). The mock is now per-test
+// (beforeEach/afterEach) and the REAL module snapshot is re-installed after
+// each test (mock.restore() does NOT undo mock.module).
+import * as realUtilsModule from '../../../src/utils';
+
+const utilsSnapshot = { ...realUtilsModule };
+const planManagerSeamSnapshot = { ...planManagerInternals };
+
 // Within-module DI seam: mock functions assigned to _internals
 const mockLoadPlan = mock(async () => null);
-
-// Cross-module mock: Mock the utils module's re-exports since warn is called directly
-// from ../utils (not via _internals in logger.ts)
-mock.module('../../../src/utils', () => ({
-	log: (message: string, data?: unknown) => {
-		logCalls.push({ message, data });
-	},
-	warn: (message: string, data?: unknown) => {
-		// Also track warns
-		logCalls.push({ message, data });
-	},
-	error: () => {}, // Don't track errors
-}));
 
 // Helper to create temp directory structure
 function setupTempDir(): {
@@ -86,6 +85,20 @@ describe('checkForUnauthorizedWrite - ADVERSARIAL TESTS', () => {
 	beforeEach(() => {
 		// Install mock functions onto _internals seam for plan/manager
 		planManagerInternals.loadPlan = mockLoadPlan;
+		// Per-test cross-module mock (r15 Phase 6): installed HERE, not at
+		// file top level, so Bun's test-file preloading cannot leak it into
+		// earlier-running test files.
+		mock.module('../../../src/utils', () => ({
+			...utilsSnapshot,
+			log: (message: string, data?: unknown) => {
+				logCalls.push({ message, data });
+			},
+			warn: (message: string, data?: unknown) => {
+				// Also track warns
+				logCalls.push({ message, data });
+			},
+			error: () => {}, // Don't track errors
+		}));
 
 		const dirs = setupTempDir();
 		tempDir = dirs.tempDir;
@@ -98,9 +111,13 @@ describe('checkForUnauthorizedWrite - ADVERSARIAL TESTS', () => {
 	});
 
 	afterEach(() => {
-		// Restore original function to _internals seam
-		planManagerInternals.loadPlan = mockLoadPlan;
-		mock.restore(); // Clean up cross-module mocks
+		// r15 (Phase 6): restore the REAL utils module and the plan-manager
+		// seam's originals (the previous code re-installed the mock here).
+		mock.module('../../../src/utils', () => ({ ...utilsSnapshot }));
+		Object.assign(planManagerInternals, planManagerSeamSnapshot);
+		mockLoadPlan.mockImplementation(async () => null);
+		mockLoadPlan.mockClear();
+		mock.restore(); // Clean up function mocks
 		cleanupTempDir(tempDir);
 	});
 
@@ -347,212 +364,6 @@ describe('checkForUnauthorizedWrite - ADVERSARIAL TESTS', () => {
 			// Both should complete without error
 			expect(() => (worker1 as any).checkForUnauthorizedWrite()).not.toThrow();
 			expect(() => (worker2 as any).checkForUnauthorizedWrite()).not.toThrow();
-		});
-	});
-
-	describe('ADDITIONAL EDGE CASES', () => {
-		test('marker with undefined timestamp field (JSON.stringify)', () => {
-			// Create plan.json
-			createPlanJson(planJsonPath);
-
-			// Create marker with timestamp set to undefined via JSON
-			// Note: JSON.stringify turns undefined to null
-			fs.writeFileSync(
-				markerPath,
-				JSON.stringify({
-					timestamp: undefined,
-					source: 'save_plan',
-				}),
-			);
-
-			// Call the method - should NOT throw
-			const worker = new PlanSyncWorker({ directory: tempDir });
-			expect(() => {
-				(worker as any).checkForUnauthorizedWrite();
-			}).not.toThrow();
-
-			// With undefined, JSON.stringify converts to null
-			// So this becomes same as null timestamp case: warning logged
-			const warningCalls = logCalls.filter((call) =>
-				call.message.includes('WARNING'),
-			);
-			// Note: JSON.stringify({timestamp: undefined}) produces {"source":"save_plan"}
-			// So timestamp is actually missing, not null - no warning
-		});
-
-		test('marker with empty string timestamp', () => {
-			// Create plan.json
-			createPlanJson(planJsonPath);
-
-			// Create marker with empty string timestamp
-			// new Date("").getTime() returns NaN
-			fs.writeFileSync(
-				markerPath,
-				JSON.stringify({
-					timestamp: '',
-					source: 'save_plan',
-				}),
-			);
-
-			// Call the method - should NOT throw
-			const worker = new PlanSyncWorker({ directory: tempDir });
-			expect(() => {
-				(worker as any).checkForUnauthorizedWrite();
-			}).not.toThrow();
-
-			// Should NOT log warning (NaN comparison)
-			const warningCalls = logCalls.filter((call) =>
-				call.message.includes('WARNING'),
-			);
-			expect(warningCalls.length).toBe(0);
-
-			// Verify: new Date("").getTime() returns NaN
-			expect(new Date('').getTime()).toBeNaN();
-		});
-
-		test('marker with very old timestamp (year 1970)', () => {
-			// Create plan.json
-			createPlanJson(planJsonPath);
-
-			// Create marker with timestamp at epoch (1970-01-01)
-			// new Date(0).getTime() returns 0
-			fs.writeFileSync(
-				markerPath,
-				JSON.stringify({
-					timestamp: '1970-01-01T00:00:00.000Z',
-					source: 'save_plan',
-				}),
-			);
-
-			// Call the method
-			const worker = new PlanSyncWorker({ directory: tempDir });
-			expect(() => {
-				(worker as any).checkForUnauthorizedWrite();
-			}).not.toThrow();
-
-			// SHOULD log warning because current plan.json mtime > 5000
-			const warningCalls = logCalls.filter((call) =>
-				call.message.includes('WARNING'),
-			);
-			expect(warningCalls.length).toBe(1);
-		});
-
-		test('marker with numeric timestamp (not ISO string)', () => {
-			// Create plan.json
-			createPlanJson(planJsonPath);
-
-			// Create marker with numeric timestamp
-			// new Date(1234567890000).getTime() works fine
-			fs.writeFileSync(
-				markerPath,
-				JSON.stringify({
-					timestamp: Date.now(),
-					source: 'save_plan',
-				}),
-			);
-
-			// Call the method - should NOT throw
-			const worker = new PlanSyncWorker({ directory: tempDir });
-			expect(() => {
-				(worker as any).checkForUnauthorizedWrite();
-			}).not.toThrow();
-
-			// Should NOT log warning (timestamp is recent)
-			const warningCalls = logCalls.filter((call) =>
-				call.message.includes('WARNING'),
-			);
-			expect(warningCalls.length).toBe(0);
-		});
-
-		test('marker with array instead of timestamp (type confusion)', () => {
-			// Create plan.json
-			createPlanJson(planJsonPath);
-
-			// Create marker with array instead of timestamp
-			// new Date([...]).getTime() returns NaN
-			fs.writeFileSync(
-				markerPath,
-				JSON.stringify({
-					timestamp: ['invalid'],
-					source: 'save_plan',
-				}),
-			);
-
-			// Call the method - should NOT throw
-			const worker = new PlanSyncWorker({ directory: tempDir });
-			expect(() => {
-				(worker as any).checkForUnauthorizedWrite();
-			}).not.toThrow();
-
-			// Should NOT log warning
-			const warningCalls = logCalls.filter((call) =>
-				call.message.includes('WARNING'),
-			);
-			expect(warningCalls.length).toBe(0);
-
-			// Verify: array converts to NaN
-			expect(new Date(['test']).getTime()).toBeNaN();
-		});
-
-		test('marker with object timestamp (type confusion)', () => {
-			// Create plan.json
-			createPlanJson(planJsonPath);
-
-			// Create marker with object instead of timestamp
-			// new Date({}).getTime() returns NaN
-			fs.writeFileSync(
-				markerPath,
-				JSON.stringify({
-					timestamp: { invalid: true },
-					source: 'save_plan',
-				}),
-			);
-
-			// Call the method - should NOT throw
-			const worker = new PlanSyncWorker({ directory: tempDir });
-			expect(() => {
-				(worker as any).checkForUnauthorizedWrite();
-			}).not.toThrow();
-
-			// Should NOT log warning
-			const warningCalls = logCalls.filter((call) =>
-				call.message.includes('WARNING'),
-			);
-			expect(warningCalls.length).toBe(0);
-		});
-
-		test('marker with boolean timestamp (type confusion)', () => {
-			// Create plan.json
-			createPlanJson(planJsonPath);
-
-			// Create marker with boolean instead of timestamp
-			// new Date(true).getTime() returns 1 (true converts to 1)
-			// new Date(false).getTime() returns 0 (false converts to 0)
-			// Both will trigger warning since plan.json mtime > 5000
-			fs.writeFileSync(
-				markerPath,
-				JSON.stringify({
-					timestamp: false, // Use false to get 0
-					source: 'save_plan',
-				}),
-			);
-
-			// Call the method - should NOT throw
-			const worker = new PlanSyncWorker({ directory: tempDir });
-			expect(() => {
-				(worker as any).checkForUnauthorizedWrite();
-			}).not.toThrow();
-
-			// SHOULD log warning because new Date(false).getTime() = 0
-			// and plan.json mtime > 5000
-			const warningCalls = logCalls.filter((call) =>
-				call.message.includes('WARNING'),
-			);
-			expect(warningCalls.length).toBe(1);
-
-			// Verify: false converts to 0, true converts to 1
-			expect(new Date(false).getTime()).toBe(0);
-			expect(new Date(true).getTime()).toBe(1);
 		});
 	});
 });

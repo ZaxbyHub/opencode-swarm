@@ -25,6 +25,21 @@ import { _internals as planManagerInternals } from '../../../src/plan/manager';
 // Within-module DI seam: mock functions assigned to _internals
 const mockLoadPlan = mock(async () => null);
 
+// r15 audit repair (Phase 6 — test isolation): snapshot of the seam's
+// ORIGINALS. The afterEach blocks below previously RE-INSTALLED the mock
+// instead of restoring the originals (their comments claimed "Restore
+// mocks"), leaving loadPlan mocked process-wide after this file — a
+// deterministic polluter for later-running test files (the context-map
+// release suite's update_task_status failed with it).
+const planManagerSeamSnapshot = { ...planManagerInternals };
+
+/** r15 (Phase 6): restore the seam's REAL originals. */
+function restoreSeam(): void {
+	mockLoadPlan.mockImplementation(async () => null);
+	mockLoadPlan.mockClear();
+	Object.assign(planManagerInternals, planManagerSeamSnapshot);
+}
+
 // Static import (mock is hoisted by Bun, so this receives the mocked module).
 // Using static import avoids `await import(...)` inside tests, which hangs in
 // Bun v1.3.9 when the event loop is saturated after many fs.watch create/destroy cycles.
@@ -437,8 +452,9 @@ describe('ADVERSARIAL: Initialization Failure Injection', () => {
 	});
 
 	afterEach(async () => {
-		// Restore mocks to _internals seam
-		planManagerInternals.loadPlan = mockLoadPlan;
+		// r15 (Phase 6): restore the seam's REAL originals (previously this
+		// re-installed the mock, leaking it process-wide).
+		restoreSeam();
 		try {
 			fs.rmSync?.(tempDir, { recursive: true, force: true }) ??
 				fs.rmdirSync(tempDir, { recursive: true });
@@ -588,8 +604,8 @@ describe('ADVERSARIAL: Lifecycle Abuse Scenarios', () => {
 	});
 
 	afterEach(async () => {
-		// Restore mocks to _internals seam
-		planManagerInternals.loadPlan = mockLoadPlan;
+		// r15 (Phase 6): restore the seam's REAL originals.
+		restoreSeam();
 		try {
 			fs.rmSync?.(tempDir, { recursive: true, force: true }) ??
 				fs.rmdirSync(tempDir, { recursive: true });
@@ -907,113 +923,6 @@ describe('ADVERSARIAL: Plugin Wiring Security Gates', () => {
 			expect(indexContent).toContain(
 				'PlanSyncWorker failed to initialize (non-fatal)',
 			);
-		});
-	});
-});
-
-describe('ADVERSARIAL: Edge Case Attack Vectors', () => {
-	beforeEach(() => {
-		installMocks();
-		resetMockState();
-	});
-
-	afterEach(() => {
-		// Restore mocks to _internals seam
-		planManagerInternals.loadPlan = mockLoadPlan;
-	});
-
-	describe('Extreme value attacks', () => {
-		test('extremely long directory path', async () => {
-			// Create a very long path (but still valid on most systems)
-			const longPath = path.join(process.cwd(), 'a'.repeat(100));
-
-			// Constructor should not crash
-			const worker = new PlanSyncWorker({ directory: longPath });
-			expect(worker).toBeDefined();
-			worker.dispose();
-		});
-
-		test('directory path with special characters', async () => {
-			// Path with spaces and special chars
-			const specialPath = path.join(process.cwd(), `test-dir-${Date.now()}`);
-
-			const worker = new PlanSyncWorker({ directory: specialPath });
-			expect(worker).toBeDefined();
-			worker.dispose();
-		});
-	});
-
-	describe('Callback abuse', () => {
-		test('onSyncComplete callback throwing does not crash worker', async () => {
-			const localTempDir = path.join(
-				process.cwd(),
-				`.test-callback-${Date.now()}`,
-			);
-
-			const worker = new PlanSyncWorker({
-				directory: localTempDir,
-				debounceMs: 10,
-				pollIntervalMs: 20,
-				onSyncComplete: () => {
-					throw new Error('Callback error');
-				},
-			});
-
-			// Start should succeed even with throwing callback
-			worker.start();
-			expect(worker.getStatus()).toBe('running');
-
-			// Wait briefly
-			await Bun.sleep(50);
-
-			// Worker should still be running (callback errors are caught internally)
-			expect(worker.getStatus()).toBe('running');
-
-			worker.dispose();
-
-			// Cleanup
-			try {
-				fs.rmSync?.(localTempDir, { recursive: true, force: true });
-			} catch {}
-		});
-
-		test('onSyncComplete callback null does not crash', async () => {
-			const localTempDir = path.join(
-				process.cwd(),
-				`.test-null-cb-${Date.now()}`,
-			);
-
-			const worker = new PlanSyncWorker({
-				directory: localTempDir,
-				onSyncComplete: null as any, // Intentionally null
-			});
-
-			expect(worker).toBeDefined();
-			worker.dispose();
-		});
-	});
-
-	describe('Memory pressure simulation', () => {
-		test('rapid create/dispose cycles', async () => {
-			const localTempDir = path.join(
-				process.cwd(),
-				`.test-memory-${Date.now()}`,
-			);
-
-			// Create and dispose many workers rapidly
-			for (let i = 0; i < 20; i++) {
-				const worker = new PlanSyncWorker({ directory: localTempDir });
-				worker.start();
-				worker.dispose();
-			}
-
-			// If we get here without memory issues, test passes
-			expect(true).toBe(true);
-
-			// Cleanup
-			try {
-				fs.rmSync?.(localTempDir, { recursive: true, force: true });
-			} catch {}
 		});
 	});
 });

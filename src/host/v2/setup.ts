@@ -117,10 +117,11 @@ async function deferredV2RegisterToolHooks(
 	hooks: V1HooksSubset,
 	directory: string,
 	registrations: V2Registration[],
+	subagentDialect: V2InitInput['subagentDialect'],
 ): Promise<void> {
 	await Promise.all([
 		deferredV2ConfigureToolBeforeBudget(directory),
-		registerV2ToolHooks(ctx, hooks, directory, registrations),
+		registerV2ToolHooks(ctx, hooks, directory, registrations, subagentDialect),
 	]);
 }
 
@@ -199,12 +200,18 @@ import {
 	clearV2AgentTransformSurface,
 	registerV2AgentTransformSurface,
 } from './model-apply';
+import { resolveV2SubagentDialect } from './native-async-mode';
 import {
 	clearV2SessionClientState,
 	createV2SessionClient,
 } from './session-client';
 import { registerV2Tools } from './tools';
-import type { V1HooksSubset, V2PluginContext, V2Registration } from './types';
+import type {
+	V1HooksSubset,
+	V2InitInput,
+	V2PluginContext,
+	V2Registration,
+} from './types';
 
 /**
  * Bounds setup() init, the tail preflight and cleanup (the v1 repro-704 class
@@ -247,8 +254,17 @@ export const _internals = {
 
 /** Dependencies injected from src/index.ts (avoids an index↔host cycle). */
 export interface V2SetupDependencies {
-	/** The shared server-initialization wrapper (begin-interval → init core → schedule deferred → end-interval). */
-	runInit: (input: unknown) => Promise<V1HooksSubset>;
+	/**
+	 * The shared server-initialization wrapper (begin-interval → init core →
+	 * schedule deferred → end-interval). Takes the V2InitInput view; the
+	 * injected implementation in src/index.ts consumes it through the v1
+	 * PluginInput parameter type, so the cast at the injection site bridges
+	 * the two views (the adapter's view adds `subagentDialect`, the host's
+	 * adds the client/server fields it never reads).
+	 * `subagentDialect` rides the input so the shared init core binds
+	 * THIS setup's dialect to the delegation gate (PR 3922).
+	 */
+	runInit: (input: V2InitInput) => Promise<V1HooksSubset>;
 	/**
 	 * Fresh registration-table builder (#2910 W3): a FRESH config read plus
 	 * `getAgentConfigs` + the shared command-table builder — no
@@ -380,17 +396,27 @@ export async function openCodeSwarmV2Setup(
 					? rootDecision.directory
 					: rawDirectory;
 		const state: CollectedState = createRegistrationSink();
+		// PR 3922 dialect binding: ONE immutable dialect per setup, resolved
+		// from the host version BEFORE runInit (the shared v1 gate binds it to
+		// the delegation gate while constructing its dispatch/settlement hooks)
+		// and closed over by the tool-hook adapters below. Resolution is pure
+		// and cannot fail — no registration, no capacity path, no release —
+		// so unknown host versions simply retain the legacy foreground
+		// semantics and setup no longer has a failure arm for this flag.
+		const subagentDialect = resolveV2SubagentDialect(ctx.app?.version);
 
 		// v1 PluginInput view — the init core consumes only `directory` and
-		// `client`. #3169 Phase 2: the session-client shim bridges the v2
-		// `ctx.session` domain into the v1 client subset Epic's dispatch paths use
-		// (feature-detected; a host lacking the required surface keeps
-		// `undefined`, preserving every client-absent path).
-		const input = {
+		// `client` (plus the subagent dialect, PR 3922). #3169 Phase 2: the
+		// session-client shim bridges the v2 `ctx.session` domain into the v1
+		// client subset Epic's dispatch paths use (feature-detected; a host
+		// lacking the required surface keeps `undefined`, preserving every
+		// client-absent path).
+		const input: V2InitInput = {
 			client: createV2SessionClient(ctx),
 			directory,
 			worktree: directory,
-		} as unknown as Parameters<V2SetupDependencies['runInit']>[0];
+			subagentDialect,
+		};
 
 		const hooks = await withTimeout(
 			deps.runInit(input),
@@ -453,6 +479,7 @@ export async function openCodeSwarmV2Setup(
 						hooks,
 						directory,
 						state.registrations,
+						subagentDialect,
 					),
 				),
 				runRegistration('prompt-hook', () =>

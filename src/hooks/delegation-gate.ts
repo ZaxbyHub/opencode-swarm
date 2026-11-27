@@ -5,12 +5,15 @@
  * Uses experimental.chat.messages.transform to provide non-blocking guidance.
  */
 
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { ZodError, z } from 'zod';
+import { validSoundingBoardCallerCategory } from '../agents/sounding-board-policy.js';
 import type {
 	BackgroundCoderReservation,
 	BackgroundDelegationRecord,
+	BackgroundPlanCriticDispatch,
 	BackgroundTaskChangeContext,
 	BackgroundWorktreeDescriptor,
 	RecordPendingInput,
@@ -69,10 +72,18 @@ import {
 	isTaskEvidenceReceiptRollbackFailure,
 } from '../gate-evidence';
 import { isMarkdownOnlyTaskChange } from '../gate-evidence-classification.js';
+import type { V2SubagentDialect } from '../host/v2/native-async-mode';
 import {
 	routeReviewForChanges,
 	shouldParallelizeReview,
 } from '../parallel/review-router.js';
+import {
+	extractPlanCriticVerdict,
+	PLAN_CRITIC_GATE_INTENT_SIGNALS,
+	PLAN_CRITIC_TASK_SIGNALS,
+	recordVerifiedPlanCriticApproval,
+	taskIsExplicitPlanCriticGate,
+} from '../plan/critic-approval.js';
 import {
 	approvedSnapshotCoversPlan,
 	computePlanStructureHash,
@@ -1763,131 +1774,6 @@ function outputText(output: unknown): string {
 	return '';
 }
 
-function extractPlanCriticVerdict(
-	output: unknown,
-): 'APPROVED' | 'NEEDS_REVISION' | 'REJECTED' | null {
-	const text = outputText(output);
-	if (!text) return null;
-
-	// Primary signal (highest confidence): a `VERDICT: <TOKEN>` line. The critic
-	// system prompt (src/agents/critic.ts) instructs this exact shape, so a
-	// conforming critic always matches here. Also tolerates markdown-bold labels
-	// (`**VERDICT**:`) which LLMs frequently emit despite the plain instruction.
-	const primary =
-		/^\s*(?:\*\*)?VERDICT(?:\*\*)?\s*:\s*(APPROVED|NEEDS_REVISION|REJECTED)\b/im.exec(
-			text,
-		);
-	if (primary) {
-		return primary[1].toUpperCase() as
-			| 'APPROVED'
-			| 'NEEDS_REVISION'
-			| 'REJECTED';
-	}
-
-	// Fallback 1: a `## Verdict` (or `### Verdict`, …) heading followed (within
-	// 2 lines) by a line whose only non-whitespace content is the verdict token.
-	// Matches critics that emit the verdict under a markdown heading instead of
-	// the `VERDICT:` label. The heading must be the verdict section specifically
-	// (not e.g. `## PLAN REVIEW`), so the `Verdict` word is required.
-	const heading = /^(#{1,6})\s*Verdict\s*$/im.exec(text);
-	if (heading && heading.index !== undefined) {
-		const after = text.slice(heading.index + heading[0].length);
-		const nextLines = after.split('\n').slice(0, 3).join('\n');
-		const headingMatch = /^\s*(APPROVED|NEEDS_REVISION|REJECTED)\s*$/im.exec(
-			nextLines,
-		);
-		if (headingMatch) {
-			return headingMatch[1].toUpperCase() as
-				| 'APPROVED'
-				| 'NEEDS_REVISION'
-				| 'REJECTED';
-		}
-	}
-
-	// Fallback 2: a BARE verdict token on its own line — but ONLY in the final
-	// few lines of output (so a mid-review mention like "this is approved for
-	// execution" cannot trigger it) and ONLY when the line does not contain a
-	// `|` separator (which marks the critic-rubric template line
-	// `VERDICT: APPROVED | NEEDS_REVISION | REJECTED`, an enumeration rather
-	// than a real verdict) and is not inside a fenced code block.
-	//
-	// Issue #2012: real critics do not always emit the `VERDICT:` label, and a
-	// missing snapshot here permanently wedges every coder delegation because
-	// the gate is ratchet-tighter with no escape hatch. The tail-only + no-pipe
-	// + no-code-fence guards keep false positives out while recovering the
-	// common "the critic just wrote APPROVED at the end" case.
-	const lines = text.split('\n');
-	const tailStart = Math.max(0, lines.length - 6);
-	let inFence = false;
-	for (let i = 0; i < lines.length; i++) {
-		// Match 3+ backticks so a 4-backtick fenced block (common for nested
-		// code blocks) also toggles the fence state, not just exactly ```.
-		// The regex is "3 or more backtick characters" — the {3,} quantifier
-		// applies to the single preceding backtick literal.
-		if (/^\s*(?:`{3,})/.test(lines[i])) inFence = !inFence;
-		if (i < tailStart) continue;
-		if (inFence) continue;
-		const line = lines[i];
-		if (line.includes('|')) continue;
-		const bare = /^\s*(APPROVED|NEEDS_REVISION|REJECTED)\s*$/i.exec(line);
-		if (bare) {
-			return bare[1].toUpperCase() as
-				| 'APPROVED'
-				| 'NEEDS_REVISION'
-				| 'REJECTED';
-		}
-	}
-
-	return null;
-}
-
-function taskLooksLikePlanCritic(args: Record<string, unknown>): boolean {
-	const text = [
-		args.prompt,
-		args.task,
-		args.description,
-		args.message,
-		args.input,
-	]
-		.filter((value): value is string => typeof value === 'string')
-		.join('\n')
-		.toLowerCase();
-	if (!text) return false;
-	// Broad-recall-biased on purpose: the caller already narrows to
-	// `subagent_type === 'critic'` (a target the trusted architect controls), so
-	// a false positive is low-risk, while a false negative silently blocks ALL
-	// EXECUTE-phase coder work with no auto-recovery. Any single signal below —
-	// drawn from the phrasings the critic-gate/plan skills tell the architect to
-	// send — is therefore sufficient; no AND-pairing.
-	return PLAN_CRITIC_TASK_SIGNALS.some((signal) => text.includes(signal));
-}
-
-// Substrings that, in a dispatch to `subagent_type: 'critic'`, mark it as a
-// plan critic-gate review. Kept lowercase (text is lowercased before matching).
-const PLAN_CRITIC_TASK_SIGNALS = [
-	'critic-gate', // "MODE: CRITIC-GATE", "critic-gate protocol/review"
-	'plan critic',
-	'review plan',
-	'review the plan',
-	'plan.md', // critic-gate/SKILL.md: "Send the full plan.md content"
-	'approve the plan',
-	'plan approval',
-	// Issue #2012: realistic architect phrasings that the original 7 signals
-	// silently missed, wedging the ratchet-tighter critic_pre_plan gate with
-	// no recovery. These are safe to add: the caller already narrows to
-	// `subagent_type === 'critic'` (a target the trusted architect controls),
-	// so a false positive is low-risk, while a false negative silently blocks
-	// ALL EXECUTE-phase coder work with no auto-recovery.
-	'pre-implementation review',
-	'evaluate this plan',
-	'evaluate the plan',
-	'assess this plan',
-	'assess the plan',
-	'plan soundness',
-	'before implementation',
-	'review the plan below',
-] as const;
-
 /**
  * Returns whether the plan in the given directory has a valid plan-critic
  * approval. Does not throw — returns `false` for any failure (fail-closed).
@@ -2032,57 +1918,84 @@ async function recordPlanCriticApprovalSnapshotIfApplicable(
 	input: { sessionID: string; callID: string },
 	args: Record<string, unknown>,
 	output: unknown,
+	/**
+	 * The PRE-EXECUTION plan baseline captured by this gate's toolBefore hook
+	 * (audit P0-2): the structural hash of the plan as it stood BEFORE the
+	 * critic child started. When present it is passed to the shared recorder
+	 * so a plan edited while the critic ran can no longer be approved by the
+	 * now-stale verdict.
+	 *
+	 * r14 audit repair (P1-6.3): when ABSENT (legacy replays, tests without
+	 * a toolBefore pass) the recorder now REFUSES to record — no unproven
+	 * automatic approval. The audited manual escape hatch
+	 * (approve_plan_critic) remains.
+	 */
+	baseline?: {
+		planStructureHash: string;
+		planId?: string;
+		promptContentDigest?: string | null;
+	},
 ): Promise<void> {
 	const targetAgent =
 		typeof args.subagent_type === 'string'
 			? stripKnownSwarmPrefix(args.subagent_type)
 			: null;
 	if (targetAgent !== 'critic') return;
-	if (!taskLooksLikePlanCritic(args)) return;
+	// Audit P2-1: only an EXPLICIT plan-gate dispatch (`MODE: CRITIC-GATE`)
+	// may auto-record a plan-critic approval. Ordinary critic reviews that
+	// merely mention plan.md / "review the plan" never release the gate —
+	// the audited manual escape hatch (approve_plan_critic) remains.
+	if (!taskIsExplicitPlanCriticGate(args)) return;
 	if (extractPlanCriticVerdict(output) !== 'APPROVED') return;
 
-	// Issue #2012: a critic APPROVED verdict that fails to record a snapshot
-	// permanently wedges the ratchet-tighter critic_pre_plan gate (no escape
-	// hatch). loadPlanJsonOnly can transiently return null if the critic
-	// dispatch landed microseconds before a concurrent save_plan flush. The
-	// architect skill ordering (save_plan → CRITIC-GATE) is the primary
-	// guarantee; this bounded retry is cheap insurance against the race so a
-	// legitimate APPROVED is not silently dropped. Keep attempts tiny — the
-	// common path resolves on the first read.
-	let plan = await loadPlanJsonOnly(directory);
-	if (!plan) {
-		for (let attempt = 0; attempt < 2 && !plan; attempt++) {
-			await new Promise((resolve) => setTimeout(resolve, 150));
-			plan = await loadPlanJsonOnly(directory);
-		}
-	}
-	if (!plan) {
-		logger.warn(
-			`[delegation-gate] plan critic APPROVED verdict could not be recorded: ` +
-				`plan.json not readable after retry. The critic_pre_plan gate will ` +
-				`block coder delegation until a snapshot exists. Call ` +
-				`approve_plan_critic (or /swarm approve-plan-critic) with a reason ` +
-				`to record a manual approval if the critic genuinely approved.`,
+	// r14 audit repair (P1-6.2): re-observe the dispatch prompt at approval
+	// time and hand both digests to the recorder — the payload bound at
+	// dispatch must be the payload observed at approval.
+	const observedPromptDigest =
+		typeof args.prompt === 'string'
+			? createHash('sha256').update(args.prompt).digest('hex')
+			: null;
+
+	// Single shared approval implementation (src/plan/critic-approval.ts):
+	// the native-async completion observer calls the exact same recorder with
+	// the dispatch-time plan-structure hash, so both transports write the
+	// identical ledger snapshot shape and share the replay fence.
+	const recording = await recordVerifiedPlanCriticApproval(directory, {
+		parentSessionId: input.sessionID,
+		callId: input.callID,
+		verdictText: output,
+		...(baseline
+			? { dispatchPlanStructureHash: baseline.planStructureHash }
+			: {}),
+		...(baseline?.planId !== undefined
+			? { dispatchPlanId: baseline.planId }
+			: {}),
+		...(baseline
+			? {
+					dispatchPromptDigest: baseline.promptContentDigest ?? null,
+					observedPromptDigest,
+				}
+			: {}),
+		transport: 'sync_task',
+	});
+	if (recording.outcome === 'recorded') return;
+	if (recording.outcome === 'skipped') {
+		// A prior approval for this exact dispatch already exists (replay), or
+		// the plan changed since the dispatch. Neither records a new snapshot;
+		// the skip is diagnostic only.
+		logger.log(
+			`[delegation-gate] plan critic APPROVED verdict not re-recorded for call ${input.callID}: ${recording.reason}`,
 		);
 		return;
 	}
-
-	// Store the STRUCTURAL hash (status-excluded) as the snapshot's payload_hash
-	// so `assertPlanCriticApprovedForExecution` can match this approval after the
-	// architect flips the current task to `in_progress` before delegating its
-	// coder. This MUST be the same hash function the gate compares against
-	// (`computePlanStructureHash`), or the staleness check would never match.
-	await takeSnapshotEvent(directory, plan, {
-		source: 'critic_approved',
-		approvalMetadata: {
-			verdict: 'APPROVED',
-			source: 'plan_critic_gate',
-			session_id: input.sessionID,
-			call_id: input.callID,
-			approved_at: new Date().toISOString(),
-		},
-		payloadHashOverride: computePlanStructureHash(plan),
-	});
+	if (recording.outcome === 'not_approved') return;
+	logger.warn(
+		`[delegation-gate] plan critic APPROVED verdict could not be recorded: ` +
+			`${recording.reason}. The critic_pre_plan gate will ` +
+			`block coder delegation until a snapshot exists. Call ` +
+			`approve_plan_critic (or /swarm approve-plan-critic) with a reason ` +
+			`to record a manual approval if the critic genuinely approved.`,
+	);
 }
 
 /**
@@ -3541,6 +3454,13 @@ function hydrateBackgroundReplayInput(
 		worktree: existing.worktree,
 		coderReservationId: existing.coderReservationId,
 		prompt: existing.prompt,
+		// r11: preserve the ORIGINAL dispatch-time plan-critic binding. A
+		// replay recomputes the draft against the CURRENT plan; if the plan
+		// changed since the first launch, the replayed draft's hash would
+		// differ and the completion-time approval verification would compare
+		// against the wrong baseline. The existing record's binding is the
+		// authoritative one for this immutable launch.
+		planCriticDispatch: existing.planCriticDispatch,
 		generation: existing.generation ?? 1,
 	};
 }
@@ -3655,6 +3575,8 @@ export const _internals = {
 	maintainBackgroundDelegationsForDispatch,
 	resetStandardWorktreeIsolationState,
 	PLAN_CRITIC_TASK_SIGNALS,
+	PLAN_CRITIC_GATE_INTENT_SIGNALS,
+	taskIsExplicitPlanCriticGate,
 	extractPlanCriticVerdict,
 	extractPlanTaskId,
 	forceRecordPlanCriticApproval,
@@ -3928,11 +3850,19 @@ function boundedRedactedErrorDetail(error: unknown): string {
 /**
  * Creates the experimental.chat.messages.transform hook for delegation gating.
  * Inspects coder delegations and warns when tasks are oversized or batched.
+ *
+ * PR 3922: `options.subagentDialect` carries THIS setup's resolved v2 subagent
+ * dialect (resolved once from the host version in src/host/v2/setup.ts and
+ * threaded through the shared init core). The optional param defaults to the
+ * legacy dialect so every existing caller — and the pure-v1 entry, which
+ * explicitly selects legacy — compiles unchanged and keeps foreground
+ * semantics; there is no per-directory registry consulted here anymore.
  */
 export function createDelegationGateHook(
 	config: PluginConfig,
 	directory: string,
 	registeredAgents?: Record<string, { model?: unknown; mode?: unknown }>,
+	options?: { subagentDialect?: V2SubagentDialect },
 ): {
 	messagesTransform: (
 		input: Record<string, never>,
@@ -3977,12 +3907,19 @@ export function createDelegationGateHook(
 		((config.hooks as Record<string, unknown> | undefined)
 			?.delegation_max_chars as number | undefined) ?? 4000;
 
-	// Opt-in background-subagent support. When false (default), background swarm
-	// Task dispatches remain fail-closed-blocked. When true, running placeholders
-	// are durably tracked for later trusted completion settlement.
-	const backgroundSubagentsEnabled =
-		(config.hooks as Record<string, unknown> | undefined)
-			?.background_subagents === true;
+	// Opt-in background-subagent support. The core initializes the separate
+	// backgroundCompletionObserver only when config.hooks.background_subagents
+	// is explicitly true. The dispatch gate MUST use that exact condition too:
+	// inferring the flag from the v2 host would persist a pending delegation
+	// without ANY enabled observer to consume its terminal event.
+	// PR 3922: the v2 host mode is the captured, immutable per-setup dialect
+	// (bound once from the host version), not a per-directory registry read —
+	// unknown/omitted values stay legacy (foreground semantics).
+	const nativeV2AsyncSubagents = options?.subagentDialect === 'native-2.3';
+	const configuredBackgroundSubagents = (
+		config.hooks as Record<string, unknown> | undefined
+	)?.background_subagents;
+	const backgroundSubagentsEnabled = configuredBackgroundSubagents === true;
 	const backgroundPendingTimeoutMs =
 		(((config.hooks as Record<string, unknown> | undefined)
 			?.background_pending_timeout_minutes as number | undefined) ?? 30) *
@@ -3992,6 +3929,42 @@ export function createDelegationGateHook(
 		string,
 		BackgroundTaskChangeContext
 	>();
+	// r13 repair (audit P0-2): the authoritative plan baseline for a plan
+	// critic-gate dispatch, captured in toolBefore — BEFORE the critic child
+	// starts. The after-hook (which builds the durable background record)
+	// consumes this baseline instead of re-reading plan.json, so the hash on
+	// the record provably describes the plan that existed before the child
+	// could have received anything else. Fail-closed bounded map: silent FIFO
+	// eviction would drop a binding and silently wedge the async approval;
+	// a loud capacity error rejects the dispatch instead (sibling pattern:
+	// begunCoderSettlementsByCallID / PRR-002).
+	interface PlanCriticDispatchBaseline {
+		parentSessionId: string;
+		planId: string;
+		planStructureHash: string;
+		promptContentDigest: string | null;
+		capturedAt: number;
+	}
+	const MAX_PLAN_CRITIC_DISPATCH_BASELINES = 64;
+	const planCriticDispatchBaselinesByCallID = new Map<
+		string,
+		PlanCriticDispatchBaseline
+	>();
+	const capturePlanCriticDispatchBaseline = (
+		callID: string,
+		baseline: PlanCriticDispatchBaseline,
+	): void => {
+		if (
+			!planCriticDispatchBaselinesByCallID.has(callID) &&
+			planCriticDispatchBaselinesByCallID.size >=
+				MAX_PLAN_CRITIC_DISPATCH_BASELINES
+		) {
+			throw new Error(
+				`PLAN_CRITIC_BASELINE_CAPACITY: refusing plan-critic dispatch because ${MAX_PLAN_CRITIC_DISPATCH_BASELINES} live dispatch baselines are already tracked`,
+			);
+		}
+		planCriticDispatchBaselinesByCallID.set(callID, baseline);
+	};
 	// Issue #2214: callID → the settlement this dispatch durably began. Used by
 	// (a) the toolBefore denial rollback when a LATER fail-closed hook rejects
 	// the Task call after the delegation gate already wrote the DISPATCHED WAL
@@ -4260,6 +4233,28 @@ export function createDelegationGateHook(
 	};
 	const clearPublishedScopeBindings = (callID: string): void => {
 		const entries = publishedScopeBindingsByCallID.get(callID) ?? [];
+		if (process.env.SWARM_SCOPE_REVOKE_TRACE === '1') {
+			for (const entry of entries) {
+				if (entry.binding.activation !== 'active') continue;
+				process.stderr.write(
+					'[SWARM_SCOPE_REVOKE_TRACE] ' +
+						JSON.stringify({
+							at: new Date().toISOString(),
+							origin: 'clearPublishedScopeBindings',
+							callID,
+							sessionID: entry.binding.ownerSessionId,
+							worktree: entry.directory !== directory,
+							leaseAgeMs: Date.now() - entry.binding.leaseStartedAt,
+							remainingTtlMs: entry.binding.expiresAt - Date.now(),
+							stack: new Error().stack
+								?.split('\n')
+								.slice(2, 6)
+								.map((x) => x.trim()),
+						}) +
+						'\n',
+				);
+			}
+		}
 		publishedScopeBindingsByCallID.delete(callID);
 		for (const entry of entries) {
 			clearScopeBindingFromDisk({
@@ -4451,6 +4446,33 @@ export function createDelegationGateHook(
 		includeOwnedChildren = false,
 	): void => {
 		if (!sessionID) return;
+		if (process.env.SWARM_SCOPE_REVOKE_TRACE === '1') {
+			const matching = [...publishedScopeBindingsByCallID.entries()]
+				.filter(([, entries]) =>
+					entries.some(
+						(entry) =>
+							entry.binding.ownerSessionId === sessionID ||
+							(includeOwnedChildren &&
+								entry.binding.parentOwnerSessionId === sessionID),
+					),
+				)
+				.map(([callID]) => callID);
+			process.stderr.write(
+				'[SWARM_SCOPE_REVOKE_TRACE] ' +
+					JSON.stringify({
+						at: new Date().toISOString(),
+						origin: 'sessionEnded',
+						sessionID,
+						includeOwnedChildren,
+						matchingCallIDs: matching.slice(0, 8),
+						stack: new Error().stack
+							?.split('\n')
+							.slice(2, 6)
+							.map((x) => x.trim()),
+					}) +
+					'\n',
+			);
+		}
 		clearReviewRouteStateForSession(sessionID);
 		const removed = clearScopeBindings(
 			(binding) =>
@@ -4611,7 +4633,20 @@ export function createDelegationGateHook(
 		background: unknown,
 		worktree?: BackgroundWorktreeDescriptor,
 	): Promise<void> => {
-		if (backgroundSubagentsEnabled && isBackgroundTrue(background)) return;
+		// The native 2.3 bridge uses background settlement, but it must NOT
+		// silently lose the clean-baseline guarantee that this exact task had
+		// before the protocol adaptation. Other explicitly opted-in v1 background
+		// tasks retain their existing (separate) background admission policy.
+		const nativeBackground =
+			nativeV2AsyncSubagents &&
+			backgroundSubagentsEnabled &&
+			isBackgroundTrue(background);
+		if (
+			backgroundSubagentsEnabled &&
+			isBackgroundTrue(background) &&
+			!nativeBackground
+		)
+			return;
 		const context = coderTaskChangeContextByCallID.get(input.callID);
 		if (!context || context.workflowGeneration === undefined) {
 			throw new Error(
@@ -4664,6 +4699,7 @@ export function createDelegationGateHook(
 		stageBRouteSlotByCallID.delete(callID);
 		gateDispatchPrimaryTaskByCallID.delete(callID);
 		stageBDispatchContextByCallID.delete(callID);
+		planCriticDispatchBaselinesByCallID.delete(callID);
 		deleteStoredInputArgs(callID);
 	};
 
@@ -5039,7 +5075,96 @@ export function createDelegationGateHook(
 			isBackgroundTrue(args.background) &&
 			isKnownCanonicalRole(targetAgent)
 		) {
+			if (nativeV2AsyncSubagents) {
+				throw new Error(
+					'SWARM_V2_NATIVE_ASYNC_REQUIRES_TRACKING: OpenCode 2.3.x always launches native subagents in the background. ' +
+						'Explicit hooks.background_subagents=false disables durable completion tracking. ' +
+						'Set hooks.background_subagents=true in the effective Swarm configuration, ' +
+						'then restart OpenCode so BOTH the gate and backgroundCompletionObserver are initialized; ' +
+						'the dispatch was not started.',
+				);
+			}
 			throw new Error(SWARM_BACKGROUND_TASK_BLOCKED_MESSAGE);
+		}
+
+		// Native-async resume guard (issue #2012's silent-loss class, observed
+		// live on @opencode/cli 2.x): on a native v2 async host the model may
+		// pass `sessionID` to RESUME a prior child session — the host's own
+		// subagent tool invites exactly that ("call subagent again with this
+		// sessionID"), and a CRITIC-GATE re-review after NEEDS_REVISION is the
+		// natural moment to do it. The durable delegation store models ONE
+		// immutable launch per child session: once the record is terminal,
+		// the resumed round can never be re-tracked — toolAfter records a
+		// correlation `conflict` for the new callID, and the follow-up
+		// terminal is rejected as a late terminal (claimTerminalResult), so
+		// the resumed round's verdict is SILENTLY LOST. For a MODE:
+		// CRITIC-GATE re-review this wedges EXECUTE at
+		// `no_approved_snapshot`, and the approve_plan_critic escape hatch
+		// is architect-session-only — a non-architect orchestrator deadlocks.
+		// Fail loud BEFORE the child launches: a standard canonical-role
+		// dispatch that resumes a TERMINAL child is refused with an
+		// actionable message. Non-terminal (pending/running) records stay
+		// resumable — their single terminal is still consumable. Lane/batch
+		// and PR-review records (batchId/laneId/mode/workflowLane set) manage
+		// their own resume semantics and never block here; an uncertain store
+		// read degrades open (the toolAfter conflict advisory still applies).
+		const resumeChildSessionId =
+			typeof args.sessionID === 'string' && args.sessionID.trim() !== ''
+				? args.sessionID.trim()
+				: null;
+		if (resumeChildSessionId && isKnownCanonicalRole(targetAgent)) {
+			const { findByCorrelationIdDetailed, isTerminalDelegationStatus } =
+				await import('../background/pending-delegations.js');
+			const existingRead = findByCorrelationIdDetailed(
+				directory,
+				resumeChildSessionId,
+			);
+			const existingRecord =
+				existingRead.status === 'ok' ? existingRead.value : null;
+			if (
+				existingRecord &&
+				isTerminalDelegationStatus(existingRecord.status) &&
+				existingRecord.batchId === undefined &&
+				existingRecord.laneId === undefined &&
+				existingRecord.mode === undefined &&
+				existingRecord.workflowLane === undefined
+			) {
+				throw new Error(
+					`SWARM_CHILD_RESUME_UNTRACKABLE: this ${targetAgent} dispatch resumes child session ${resumeChildSessionId}, whose durable delegation record is already terminal (${existingRecord.status}). ` +
+						'A resumed round of a completed child can never be durably tracked: the completion verdict of the follow-up round would be silently lost (one terminal per launch), and for a plan-critic gate that wedges execution at no_approved_snapshot. ' +
+						'Launch a FRESH child for this round instead — omit the sessionID argument. Never resume a completed swarm child for a gate-bearing dispatch.',
+				);
+			}
+		}
+
+		// r13 repair (audit P0-2): capture the authoritative plan baseline for
+		// an explicit plan critic-gate dispatch BEFORE the child starts. The
+		// Task tool has NOT executed yet at this point — a later plan edit can
+		// no longer re-anchor the binding (the r11 bug: the after-hook hashed
+		// whatever plan.json contained AFTER the critic was already running).
+		// The prompt content digest binds WHAT the critic was sent (the full
+		// prompt string), not just what plan.json happened to contain.
+		// Fail closed: an unreadable plan records NO baseline, and without a
+		// pre-execution baseline an async APPROVED verdict can never
+		// auto-approve (the audited manual escape hatch remains).
+		if (targetAgent === 'critic' && taskIsExplicitPlanCriticGate(args)) {
+			const planAtDispatch = await loadPlanJsonOnly(directory);
+			if (planAtDispatch) {
+				capturePlanCriticDispatchBaseline(input.callID, {
+					parentSessionId: input.sessionID,
+					planId: derivePlanId(planAtDispatch),
+					planStructureHash: computePlanStructureHash(planAtDispatch),
+					promptContentDigest:
+						typeof args.prompt === 'string'
+							? createHash('sha256').update(args.prompt).digest('hex')
+							: null,
+					capturedAt: Date.now(),
+				});
+			} else {
+				logger.warn(
+					'[delegation-gate] plan critic-gate dispatch could not bind a pre-execution plan baseline (plan.json unreadable); a later APPROVED verdict will not auto-approve',
+				);
+			}
 		}
 
 		// Review routing: every Stage-B dispatch receives a durable route receipt.
@@ -6703,6 +6828,41 @@ export function createDelegationGateHook(
 										prHeadSha,
 										scope,
 									});
+							// r13 repair (audit P0-2): the binding is the PRE-EXECUTION
+							// baseline captured by this gate's toolBefore hook BEFORE
+							// the critic child started. The after-hook NEVER re-reads
+							// plan.json here — the r11 code did exactly that, so a plan
+							// edited between child start and this record write would
+							// have re-anchored the binding to the edited plan and let
+							// the critic's older APPROVED verdict release it. Fail
+							// closed: without a provable pre-execution baseline there
+							// is NO binding, and an async APPROVED verdict can never
+							// auto-approve (the audited manual escape hatch
+							// approve_plan_critic remains).
+							let planCriticDispatch: BackgroundPlanCriticDispatch | undefined;
+							if (
+								normalizedSubagentType === 'critic' &&
+								taskIsExplicitPlanCriticGate(mergedArgs)
+							) {
+								const baseline = planCriticDispatchBaselinesByCallID.get(
+									input.callID,
+								);
+								if (baseline && baseline.parentSessionId === input.sessionID) {
+									planCriticDispatch = {
+										planStructureHash: baseline.planStructureHash,
+										recordedAt: baseline.capturedAt,
+										planId: baseline.planId,
+										...(baseline.promptContentDigest
+											? { promptContentDigest: baseline.promptContentDigest }
+											: {}),
+									};
+								} else {
+									logger.warn(
+										'[delegation-gate] background plan-critic dispatch has no provable pre-execution plan baseline (missing or foreign baseline for this call); a later async APPROVED verdict will not auto-approve',
+									);
+								}
+								planCriticDispatchBaselinesByCallID.delete(input.callID);
+							}
 							const pendingInputDraft: RecordPendingInput = {
 								correlationId: subagentSessionId,
 								jobId,
@@ -6715,6 +6875,22 @@ export function createDelegationGateHook(
 								evidenceTaskId,
 								workspace: fallbackWorkspace,
 								taskChangeContext,
+								// r13 audit repair (P1-3): persist the VALIDATED
+								// caller-owned sounding-board category at dispatch,
+								// bound to this exact call/child identity, so the
+								// async completion path applies the SAME policy input
+								// as the sync transport (free text can never override
+								// architect metadata; invalid values fall back
+								// conservatively).
+								...(normalizedSubagentType === 'critic_sounding_board'
+									? (() => {
+											const category =
+												validSoundingBoardCallerCategory(mergedArgs);
+											return category
+												? { soundingBoardCategory: category }
+												: {};
+										})()
+									: {}),
 								workflowGeneration: TASK_GATE_AGENTS.has(normalizedSubagentType)
 									? stageBDispatchGenerationsByCallID
 											.get(input.callID)
@@ -6746,6 +6922,7 @@ export function createDelegationGateHook(
 									typeof mergedArgs.prompt === 'string'
 										? buildPromptSnapshot(mergedArgs.prompt, delegationMaxChars)
 										: undefined,
+								planCriticDispatch,
 								generation: 1,
 							};
 							// Issue #2511: owner-replay verification — an unreadable
@@ -6978,12 +7155,28 @@ export function createDelegationGateHook(
 				if (typeof subagentType === 'string') {
 					try {
 						const mergedArgs = { ...(storedArgs ?? {}), ...(directArgs ?? {}) };
+						// Audit P0-2: hand the PRE-EXECUTION baseline (captured by
+						// toolBefore for this exact call) to the sync recorder so a
+						// plan edited while the critic ran cannot be approved by
+						// the stale verdict.
+						const criticBaseline = planCriticDispatchBaselinesByCallID.get(
+							input.callID,
+						);
 						await recordPlanCriticApprovalSnapshotIfApplicable(
 							directory,
 							input,
 							mergedArgs,
 							_output,
+							criticBaseline &&
+								criticBaseline.parentSessionId === input.sessionID
+								? {
+										planStructureHash: criticBaseline.planStructureHash,
+										planId: criticBaseline.planId,
+										promptContentDigest: criticBaseline.promptContentDigest,
+									}
+								: undefined,
 						);
+						planCriticDispatchBaselinesByCallID.delete(input.callID);
 					} catch (err) {
 						logger.warn(
 							`[delegation-gate] plan critic approval snapshot failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -9090,6 +9283,7 @@ ${warningLines.join('\n')}`;
 				clearPublishedScopeBindings(callID);
 				stageBDispatchGenerationsByCallID.delete(callID);
 				gateDispatchPrimaryTaskByCallID.delete(callID);
+				planCriticDispatchBaselinesByCallID.delete(callID);
 				deleteStoredInputArgs(callID);
 			}
 		},
