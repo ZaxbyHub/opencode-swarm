@@ -79,6 +79,28 @@ describe('guardrails swarm state-zone authority', () => {
 		}
 	});
 
+	it('still denies the architect the gate-integrity .swarm/ surfaces (#2703-review F-004)', () => {
+		// The state zone is ONLY .swarm/loop/. Evidence bundles, route
+		// receipts, full-auto state, and session state keep their base
+		// config-zone classification, so the architect's default
+		// blockedZones (the #894 class) keeps blocking them — a blanket
+		// .swarm/ → state reclassification had re-opened architect writes to
+		// exactly the files gate-evidence integrity depends on.
+		for (const integrityPath of [
+			'.swarm/evidence/secretscan.json',
+			'.swarm/evidence/1.8/evidence.json',
+			'.swarm/pr-review/route-receipts/dispatch-1.json',
+			'.swarm/full-auto-state.json',
+			'.swarm/session/abc.json',
+		]) {
+			const result = checkFileAuthority('architect', integrityPath, tempDir);
+			expect(result.allowed).toBe(false);
+			if (isDenied(result)) {
+				expect(result.zone).toBe('config');
+			}
+		}
+	});
+
 	it('still denies the architect real config-zone files (the #894 lint-bypass protection)', () => {
 		for (const configPath of [
 			'biome.json',
