@@ -578,10 +578,36 @@ export async function quarantineSwarmResidue(
 	if (manifest.entries.length > 0) {
 		// Manifest via the canonical helper: its transient temp lives inside
 		// the skipped quarantine subtree, so the next scan cannot see it.
-		atomicWriteSwarmFileSync(
-			path.join(batchAbs, 'manifest.json'),
-			`${JSON.stringify(manifest, null, 2)}\n`,
-		);
+		//
+		// #3951 AC5 — a manifest persistence failure after the renames must
+		// not strand the moved payloads in a manifest-less batch that sorts
+		// LAST and poisons every DEFAULT rollback. On failure: compensate with
+		// collision-safe reverse moves (never overwrite a recreated original),
+		// publish a recovery manifest on two fallback surfaces (in-batch
+		// `manifest.recovery.json`, then parent-sibling
+		// `<batchId>.recovery.json`), and rethrow the ORIGINAL error with the
+		// compensation summary — the operator keeps the honest failure AND a
+		// normally-recoverable batch.
+		try {
+			atomicWriteSwarmFileSync(
+				path.join(batchAbs, 'manifest.json'),
+				`${JSON.stringify(manifest, null, 2)}\n`,
+			);
+		} catch (manifestErr) {
+			const summary = compensateQuarantineBatch(swarmRoot, manifest);
+			publishRecoveryManifest(swarmRoot, batchAbs, batchId, manifest, summary);
+			const strandedList =
+				summary.uncompensated.length > 0
+					? ` Stranded entries (retained in the batch for normal rollback): ${summary.uncompensated.join(', ')}.`
+					: '';
+			const collisionList =
+				summary.collisions.length > 0
+					? ` Collision-kept entries (stored copy retained, differing original preserved): ${summary.collisions.join(', ')}.`
+					: '';
+			throw new Error(
+				`${manifestErr instanceof Error ? manifestErr.message : String(manifestErr)} — quarantine batch ${batchId} compensated: ${summary.restored.length} restored, ${summary.uncompensated.length} uncompensated, ${summary.collisions.length} collision-kept (batch dir ${batchAbs}).${strandedList}${collisionList}`,
+			);
+		}
 		batchRelDir = path.posix.join('quarantine', batchId);
 	} else {
 		// Nothing qualified — remove the empty batch dir best-effort so a
@@ -645,6 +671,150 @@ export interface RollbackResult {
 	items: readonly RollbackOutcomeItem[];
 	/** True when every manifest entry resolved and the batch dir was removed. */
 	drained: boolean;
+	/**
+	 * #3951 — batches skipped by default selection because NO manifest
+	 * surface was readable (payload retained under .swarm/quarantine/<id>/
+	 * for manual recovery). Optional for backward compatibility.
+	 */
+	skippedBatches?: string[];
+}
+
+/** Manifest surface names (#3951 recovery design). */
+const BATCH_MANIFEST = 'manifest.json';
+const BATCH_RECOVERY_MANIFEST = 'manifest.recovery.json';
+const ROLLBACK_ATTEMPTED_MARKER = 'rollback.attempted';
+
+/** Parent-sibling recovery surface: `.swarm/quarantine/<batchId>.recovery.json`. */
+function parentSiblingRecoveryPath(swarmRoot: string, batchId: string): string {
+	return path.join(swarmRoot, 'quarantine', `${batchId}.recovery.json`);
+}
+
+/**
+ * #3951 AC5 — collision-safe compensation for a batch whose manifest write
+ * failed after the renames. Mirrors rollbackResidueQuarantine's per-entry
+ * semantics: absent original → reverse-rename; present original → sha-compare
+ * (identical = already-restored, stored copy dropped; differing = collision,
+ * stored copy KEPT and reported, never overwritten). A reverse-move failure
+ * records the entry as uncompensated (never aborts the loop).
+ */
+function compensateQuarantineBatch(
+	swarmRoot: string,
+	manifest: QuarantineManifest,
+): {
+	restored: string[];
+	uncompensated: string[];
+	collisions: string[];
+} {
+	const restored: string[] = [];
+	const uncompensated: string[] = [];
+	const collisions: string[] = [];
+	for (const entry of manifest.entries) {
+		const originalAbs = path.join(
+			swarmRoot,
+			...entry.original_rel_path.split('/'),
+		);
+		const storedAbs = path.join(swarmRoot, ...entry.stored_rel_path.split('/'));
+		let storedExists = false;
+		try {
+			storedExists = fs.lstatSync(storedAbs).isFile();
+		} catch {
+			storedExists = false;
+		}
+		let originalExists = false;
+		try {
+			originalExists = fs.lstatSync(originalAbs).isFile();
+		} catch {
+			originalExists = false;
+		}
+		if (!storedExists) {
+			// The stored copy is gone: either already moved back or lost
+			// elsewhere — classify by the original's presence.
+			if (originalExists) restored.push(entry.original_rel_path);
+			else uncompensated.push(entry.original_rel_path);
+			continue;
+		}
+		if (originalExists) {
+			const currentSha = sha256Bounded(originalAbs);
+			const storedSha = sha256Bounded(storedAbs);
+			if (
+				currentSha !== undefined &&
+				storedSha !== undefined &&
+				currentSha === storedSha
+			) {
+				// Identical content already at the original — drop the stored copy.
+				try {
+					fs.unlinkSync(storedAbs);
+					restored.push(entry.original_rel_path);
+				} catch {
+					uncompensated.push(entry.original_rel_path);
+				}
+			} else {
+				collisions.push(entry.original_rel_path); // never overwrite
+			}
+			continue;
+		}
+		try {
+			fs.mkdirSync(path.dirname(originalAbs), { recursive: true });
+			// Shared rename seam (raw-rename ratchet #2969): also the injection
+			// point for reverse-move-failure tests of this compensation.
+			_internals.renameResidueEntry(storedAbs, originalAbs);
+			restored.push(entry.original_rel_path);
+		} catch {
+			uncompensated.push(entry.original_rel_path);
+		}
+	}
+	return { restored, uncompensated, collisions };
+}
+
+/**
+ * #3951 AC5 — publish the in-memory manifest on the recovery surfaces when
+ * compensation leaves anything in the batch (uncompensated or collision-kept),
+ * so normal rollback can restore/report it. Two surfaces, tried in order:
+ * in-batch `manifest.recovery.json`, then the parent-sibling (the primary
+ * failure mode — an unwritable/blocking name INSIDE the batch dir — cannot
+ * also block the parent). Best-effort: a failure on both surfaces leaves the
+ * batch dir as-is; the rethrown quarantine error names the batch and entries.
+ * When NOTHING remains in the batch, remove the (now payload-free) batch dir
+ * best-effort instead — never a recursive delete with payload present.
+ */
+function publishRecoveryManifest(
+	swarmRoot: string,
+	batchAbs: string,
+	batchId: string,
+	manifest: QuarantineManifest,
+	summary: {
+		restored: string[];
+		uncompensated: string[];
+		collisions: string[];
+	},
+): void {
+	const remaining = summary.uncompensated.length + summary.collisions.length;
+	const serialized = `${JSON.stringify(manifest, null, 2)}\n`;
+	if (remaining === 0) {
+		try {
+			fs.rmSync(batchAbs, { recursive: true, force: true });
+		} catch {
+			/* best-effort removal of the now payload-free batch dir */
+		}
+		return;
+	}
+	try {
+		atomicWriteSwarmFileSync(
+			path.join(batchAbs, BATCH_RECOVERY_MANIFEST),
+			serialized,
+		);
+		return;
+	} catch {
+		/* fall through to the parent-sibling surface */
+	}
+	try {
+		atomicWriteSwarmFileSync(
+			parentSiblingRecoveryPath(swarmRoot, batchId),
+			serialized,
+		);
+	} catch {
+		/* both recovery surfaces failed — the rethrown error names the batch */
+	}
 }
 
 function listQuarantineBatches(swarmRoot: string): string[] {
@@ -684,27 +854,80 @@ export async function rollbackResidueQuarantine(
 	if (batches.length === 0) {
 		throw new Error('No quarantine batches found under .swarm/quarantine/');
 	}
-	const selected = batchId
-		? (batches.find((b) => b === batchId || b.endsWith(`-${batchId}`)) ??
+	// #3951 AC5 — three-surface manifest resolution (primary, in-batch
+	// recovery, parent-sibling recovery) for BOTH default and explicit
+	// selection: a batch whose primary manifest write failed but whose
+	// recovery manifest published is a fully normal rollback target.
+	const skippedBatches: string[] = [];
+	const readManifest = (b: string): QuarantineManifest | null => {
+		const batchDir = path.join(swarmRoot, 'quarantine', b);
+		const surfaces = [
+			path.join(batchDir, BATCH_MANIFEST),
+			path.join(batchDir, BATCH_RECOVERY_MANIFEST),
+			parentSiblingRecoveryPath(swarmRoot, b),
+		];
+		for (const surface of surfaces) {
+			try {
+				const parsed = JSON.parse(
+					fs.readFileSync(surface, 'utf-8'),
+				) as QuarantineManifest;
+				if (parsed.schema_version !== 1 || !Array.isArray(parsed.entries)) {
+					throw new Error(`Quarantine manifest has an unsupported shape: ${b}`);
+				}
+				return parsed;
+			} catch {
+				// try the next surface
+			}
+		}
+		skippedBatches.push(b);
+		return null;
+	};
+	const hasAttemptMarker = (b: string): boolean => {
+		try {
+			fs.statSync(
+				path.join(swarmRoot, 'quarantine', b, ROLLBACK_ATTEMPTED_MARKER),
+			);
+			return true;
+		} catch {
+			return false;
+		}
+	};
+	let selected: string;
+	if (batchId) {
+		selected =
+			batches.find((b) => b === batchId || b.endsWith(`-${batchId}`)) ??
 			(() => {
 				throw new Error(`Quarantine batch not found: ${batchId}`);
-			})())
-		: batches[batches.length - 1]!;
-	const batchAbs = path.join(swarmRoot, 'quarantine', selected);
-	const manifestPath = path.join(batchAbs, 'manifest.json');
-	let manifest: QuarantineManifest;
-	try {
-		manifest = JSON.parse(
-			fs.readFileSync(manifestPath, 'utf-8'),
-		) as QuarantineManifest;
-	} catch {
-		throw new Error(
-			`Quarantine batch has no readable manifest.json: ${selected}`,
-		);
+			})();
+	} else {
+		// Collision-aware default advancement (#3951, plan v4 option (a)):
+		// prefer the newest readable batch WITHOUT an attempt marker so a
+		// collision-kept newest batch cannot starve older valid batches;
+		// when every readable batch is marked, fall back to the newest
+		// readable (today's behavior — a visible report, never a no-op).
+		const readable = batches
+			.slice()
+			.reverse()
+			.filter((b) => readManifest(b) !== null);
+		if (readable.length === 0) {
+			throw new Error(
+				`Quarantine batch has no readable manifest surface (manifest.json, ${BATCH_RECOVERY_MANIFEST}, <batchId>.recovery.json): ${batches.join(', ')}`,
+			);
+		}
+		selected = readable.find((b) => !hasAttemptMarker(b)) ?? readable[0]!;
+		// readManifest above pushed skipped entries for non-readable batches;
+		// reset so only the FINAL skipped set (recomputed below for accuracy)
+		// is reported when the selected batch also fails late.
+		skippedBatches.length = 0;
+		for (const b of batches) {
+			if (b !== selected) readManifest(b);
+		}
 	}
-	if (manifest.schema_version !== 1 || !Array.isArray(manifest.entries)) {
+	const batchAbs = path.join(swarmRoot, 'quarantine', selected);
+	const manifest = readManifest(selected);
+	if (manifest === null) {
 		throw new Error(
-			`Quarantine manifest has an unsupported shape: ${selected}`,
+			`Quarantine batch has no readable manifest surface (manifest.json, ${BATCH_RECOVERY_MANIFEST}, <batchId>.recovery.json): ${selected}`,
 		);
 	}
 	const items: RollbackOutcomeItem[] = [];
@@ -785,11 +1008,36 @@ export async function rollbackResidueQuarantine(
 		} catch {
 			// best-effort cleanup; payloads are already restored
 		}
+		// The drained batch's parent-sibling recovery manifest is orphaned
+		// metadata once the batch dir is gone — remove it too (#3951).
+		try {
+			fs.rmSync(parentSiblingRecoveryPath(swarmRoot, selected), {
+				force: true,
+			});
+		} catch {
+			/* best-effort */
+		}
+	} else if (batchId === undefined) {
+		// Default-path advancement marker (#3951 plan v4): record that THIS
+		// default attempt left the batch unresolved, so the NEXT default
+		// selects a different readable batch instead of re-reporting the same
+		// collision forever. Explicit batchId calls ignore the marker.
+		// Marker-write failure degrades to today's re-selection behavior.
+		try {
+			fs.writeFileSync(
+				path.join(batchAbs, ROLLBACK_ATTEMPTED_MARKER),
+				`${JSON.stringify({ at: new Date().toISOString(), batchId: selected, unresolved: items.filter((i) => i.status === 'collision' || i.status === 'skipped').length })}\n`,
+				'utf-8',
+			);
+		} catch {
+			/* best-effort advancement bookkeeping */
+		}
 	}
 	return {
 		batchRelDir: path.posix.join('quarantine', selected),
 		items,
 		drained: allResolved,
+		skippedBatches,
 	};
 }
 

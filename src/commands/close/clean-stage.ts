@@ -329,8 +329,12 @@ export async function runCleanStage(
 			const errno = (err as NodeJS.ErrnoException)?.code;
 			if (errno !== 'ENOENT') {
 				const reason = err instanceof Error ? err.message : String(err);
+				// Archive-sourced names and OS error text can both embed control
+				// bytes (the post-mortem gate's `[^/\\]+` admits them) — route
+				// both through the shared neutralizer before any render sink
+				// (#3943, same class as the config-backup/ledger siblings above).
 				ctx.warnings.push(
-					`Failed to clean active-state file ${artifact} [${errno ?? 'unknown'}]: ${reason}`,
+					`Failed to clean active-state file ${neutralizeResidueName(artifact)} [${errno ?? 'unknown'}]: ${neutralizeResidueName(reason)}`,
 				);
 			}
 		}
@@ -489,7 +493,10 @@ export async function runCleanStage(
 		// preserved. Quarantine itself now guards each entry's move, so this
 		// path only triggers on inventory/telemetry-level failures.
 		ctx.warnings.push(
-			`Atomic-write residue quarantine failed (status of individual candidates unknown — inspect .swarm/quarantine/): ${reason}`,
+			// Error text can embed residue-derived and manifest-derived paths
+			// — neutralize before rendering (#3943, mirroring doctor.ts's
+			// quarantine catches fixed by #3942).
+			`Atomic-write residue quarantine failed (status of individual candidates unknown — inspect .swarm/quarantine/): ${neutralizeResidueName(reason)}`,
 		);
 	}
 

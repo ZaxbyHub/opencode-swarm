@@ -439,6 +439,16 @@ export async function handleDoctorCommand(
 			if (skipped.length > 10) {
 				output += `- … ${skipped.length - 10} more skipped\n`;
 			}
+			// Wedged batches skipped by default selection (#3951): their
+			// payload stays on disk for manual recovery — say so, bounded and
+			// neutralized, so the operator knows where it is.
+			for (const batch of (rollback.skippedBatches ?? []).slice(0, 10)) {
+				output += `- skipped wedged batch \`${neutralizeResidueName(batch)}\`: no readable manifest surface (manifest.json, manifest.recovery.json, <id>.recovery.json) — payload retained under .swarm/quarantine/${neutralizeResidueName(batch)}/ for manual recovery\n`;
+			}
+			const skippedBatchCount = (rollback.skippedBatches ?? []).length;
+			if (skippedBatchCount > 10) {
+				output += `- … ${skippedBatchCount - 10} more wedged batches skipped\n`;
+			}
 		} catch (err) {
 			// Error text can embed a manifest-derived path (validateRelPath's
 			// message) — neutralize before rendering (issue #3836 D3).
