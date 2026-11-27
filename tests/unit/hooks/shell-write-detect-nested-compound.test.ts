@@ -13,7 +13,10 @@
  * fail-closed behavior for genuinely malformed keyword structures.
  */
 import { describe, expect, test } from 'bun:test';
-import { detectPosixWrites } from '../../../src/hooks/shell-write-detect';
+import {
+	detectPosixWrites,
+	resolveWriteTargets,
+} from '../../../src/hooks/shell-write-detect';
 
 describe('detectPosixWrites — nested compound decomposition', () => {
 	describe('read-only nested shapes parse clean with no writes', () => {
@@ -144,6 +147,116 @@ describe('detectPosixWrites — nested compound decomposition', () => {
 			);
 			expect(out).toBeDefined();
 			expect(out?.unresolvedContext).not.toBe(true);
+		});
+
+		test('a skeleton write after a cd-free block still resolves (no over-withdrawal)', () => {
+			const analysis = detectPosixWrites(
+				'for d in a b; do if true; then echo y; fi; done; echo x > /tmp/post.txt',
+			);
+			const post = analysis.writes.find(
+				(write) => write.operator === '>' && write.path === '/tmp/post.txt',
+			);
+			expect(post).toBeDefined();
+			expect(post?.unresolvedContext).not.toBe(true);
+		});
+	});
+
+	// #2703-review F-001 (resolver level): a directory-change word inside a
+	// nested BODY breaks the static ordering between the decomposed pieces —
+	// loop/if bodies run zero or more times between skeleton statements, so a
+	// skeleton write after the block, and a body write before its own cd,
+	// both land at the post-cd directory on later iterations. Every write of
+	// the decomposed command must be withdrawn (resolvedPath null, resolved
+	// false) so the live gate denies fail-closed — never resolved against the
+	// workspace/lane cwd.
+	describe('cd in a nested body withdraws everything (resolver level)', () => {
+		const shapes: Array<{ command: string; writePath: string; label: string }> =
+			[
+				{
+					command:
+						'for i in 1; do if true; then cd /etc; fi; done; echo x > hosts',
+					writePath: 'hosts',
+					label: 'cd in an if body; write after the loop',
+				},
+				{
+					command:
+						'for i in 1; do case $i in 1) cd /etc;; esac; done; echo x > hosts',
+					writePath: 'hosts',
+					label: 'cd in a case arm; write after the loop',
+				},
+				{
+					command:
+						'for i in 1; do while true; do pushd /etc; break; done; done; echo x > hosts',
+					writePath: 'hosts',
+					label: 'pushd in a nested loop; write after the outer loop',
+				},
+				{
+					command:
+						'for i in 1; do if true; then echo x > hosts; cd /etc; fi; done',
+					writePath: 'hosts',
+					label: 'write before the cd inside the same body (iteration 2 lands post-cd)',
+				},
+				{
+					command:
+						'for i in 1; do if true; then cd /etc; echo x > hosts; fi; done',
+					writePath: 'hosts',
+					label: 'cd and write both inside the body',
+				},
+				{
+					command:
+						'for d in packages/a packages/b; do if [ -d "$d" ]; then cd "$d"; npm test > out.txt; cd -; fi; done',
+					writePath: 'out.txt',
+					label: 'honest-agent per-package test run (dynamic cd target)',
+				},
+				{
+					command:
+						'for i in 1; do if true; then cd ..; fi; done; echo x > file.txt',
+					writePath: 'file.txt',
+					label: 'cd .. in a body (lane-relative landing)',
+				},
+			];
+
+		for (const { command, writePath, label } of shapes) {
+			test(`denied, never resolved at the starting cwd: ${label}`, () => {
+				const analysis = detectPosixWrites(command);
+				expect(analysis.parseError).not.toBe(true);
+				const write = analysis.writes.find(
+					(candidate) => candidate.path === writePath,
+				);
+				expect(write).toBeDefined();
+				expect(write?.unresolvedContext).toBe(true);
+
+				const cwd = '/tmp/ws-probe';
+				const resolvedTargets = resolveWriteTargets(
+					command,
+					analysis.writes,
+					cwd,
+				);
+				const target = resolvedTargets.find(
+					(entry) => entry.original === write,
+				);
+				expect(target).toBeDefined();
+				expect(target?.resolved).toBe(false);
+				expect(target?.resolvedPath).toBeNull();
+			});
+		}
+
+		test('the skeleton-cd shape keeps its body-write withdrawal at the resolver too', () => {
+			const command =
+				'cd /tmp && for d in a b; do if true; then echo x > out.txt; fi; done';
+			const analysis = detectPosixWrites(command);
+			const out = analysis.writes.find(
+				(write) => write.operator === '>' && write.path === 'out.txt',
+			);
+			expect(out).toBeDefined();
+			const resolvedTargets = resolveWriteTargets(
+				command,
+				analysis.writes,
+				'/tmp/ws-probe',
+			);
+			const target = resolvedTargets.find((entry) => entry.original === out);
+			expect(target?.resolved).toBe(false);
+			expect(target?.resolvedPath).toBeNull();
 		});
 	});
 

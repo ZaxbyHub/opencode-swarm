@@ -9846,14 +9846,38 @@ export function detectPosixWrites(
 				const allAnalyses = [skeletonAnalysis, ...fragmentAnalyses];
 				if (allAnalyses.every((analysis) => analysis.parseError !== true)) {
 					parseFailed = false;
-					// A directory-selection word outside the bodies (skeleton)
-					// moves the loop/if execution context; body writes cannot
-					// be statically resolved then — withdraw them exactly the
-					// way the procsub span scan does (#3518 P-3). The local
-					// cwdNeutral stays false for the decomposed path, so the
-					// empty-directory-removal tag is stripped from every
-					// decomposed write below (conservative, fail-closed).
-					const cdContext = PROCSUB_CD_CONTEXT.test(split.skeleton);
+					// Directory-change withdrawal for the DECOMPOSED command
+					// (#2703-review F-001, mirroring procsubContextWithdraws'
+					// prefix-or-body rule). Two distinct orderings matter:
+					//
+					// 1. A directory-selection word in a BODY withdraws EVERY
+					//    write of the whole decomposed command — skeleton and
+					//    bodies alike. A loop/if body runs zero or more times,
+					//    possibly across several iterations, BETWEEN skeleton
+					//    statements, so no write has a statically provable
+					//    landing: a skeleton write after the block may land at
+					//    the post-body cwd (`for i in 1; do cd /etc; done;
+					//    echo x > hosts` writes /etc/hosts), and a body write
+					//    before its own cd still lands post-cd on the SECOND
+					//    iteration (`for i in 1 2; do echo x > f; cd /etc;
+					//    done`). The old skeleton-only check admitted both.
+					//
+					// 2. A directory-selection word in the SKELETON withdraws
+					//    only BODY writes: skeleton-internal cd→write order is
+					//    already handled by the skeleton analysis' own
+					//    recursive directory-state walk, but the bodies execute
+					//    inside that moved context and their analyses cannot
+					//    see it (the #3518 P-3 semantics).
+					//
+					// The local cwdNeutral stays false for the decomposed
+					// path, so the empty-directory-removal tag is stripped
+					// from every decomposed write below (conservative,
+					// fail-closed).
+					const skeletonCdContext =
+						PROCSUB_CD_CONTEXT.test(split.skeleton);
+					const bodyCdContext = split.bodies.some((body) =>
+						PROCSUB_CD_CONTEXT.test(body),
+					);
 					for (const analysis of allAnalyses) {
 						unwrapDepthExceeded =
 							unwrapDepthExceeded || analysis.unwrapDepthExceeded === true;
@@ -9861,9 +9885,10 @@ export function detectPosixWrites(
 					for (let a = 0; a < allAnalyses.length; a += 1) {
 						const analysis = allAnalyses[a];
 						const isBody = a > 0;
+						const withdraw = bodyCdContext || (skeletonCdContext && isBody);
 						for (const write of analysis.writes) {
 							allWrites.push(
-								isBody && cdContext && write.unresolvedContext !== true
+								withdraw && write.unresolvedContext !== true
 									? { ...write, unresolvedContext: true }
 									: write,
 							);
