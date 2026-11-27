@@ -17,7 +17,6 @@ import { PlanSyncWorker } from '../../../src/background/plan-sync-worker';
 // Track log calls for testing
 const logCalls: { message: string; data?: unknown }[] = [];
 
-import { canonicalMkdtemp } from '../../helpers/tmpdir';
 // Import _internals seam for plan/manager (within-module)
 import { _internals as planManagerInternals } from '../../../src/plan/manager';
 // r15 audit repair (Phase 6 — test isolation): same defect and same fix as
@@ -28,6 +27,7 @@ import { _internals as planManagerInternals } from '../../../src/plan/manager';
 // (beforeEach/afterEach) and the REAL module snapshot is re-installed after
 // each test (mock.restore() does NOT undo mock.module).
 import * as realUtilsModule from '../../../src/utils';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 const utilsSnapshot = { ...realUtilsModule };
 const planManagerSeamSnapshot = { ...planManagerInternals };
