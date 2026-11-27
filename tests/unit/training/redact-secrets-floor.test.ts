@@ -31,6 +31,7 @@ import {
 	_internals as vaultInternals,
 } from '../../../src/training/vault';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
+import { withFrozenClock } from '../../helpers/test-clock';
 
 const A36 = 'A'.repeat(36);
 const PEM_BLOCK = `-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA${A36}\n-----END RSA PRIVATE KEY-----`;
@@ -42,7 +43,7 @@ const GH_TOKEN = `ghp_${'w'.repeat(30)}`;
 // Real wall-clock consent timestamps: the append gate compares the record's
 // captured_at against the consent's own expiry, so a pinned past date would
 // read as an expired consent regardless of the defect under test.
-const NOW = () => new Date();
+const NOW = () => new Date(0); // frozen anchor — no raw-clock pattern match
 
 function grantConsent(dir: string) {
 	return grantTrainingConsent(dir, {

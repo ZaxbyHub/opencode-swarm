@@ -41,6 +41,7 @@ import { resetSwarmState, swarmState } from '../../../src/state';
 import { executePhaseComplete } from '../../../src/tools/phase-complete';
 import { safeRmRecursive } from '../../helpers/safe-test-dir';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
+import { withFrozenClock } from '../../helpers/test-clock';
 
 // -----------------------------------------------------------------------
 // Module-level mocks — MUST be before any import of the mocked modules.
@@ -355,7 +356,9 @@ describe('phase_complete contention classification (#3915 AC5)', () => {
 		}));
 		// Hold the receipt ledger lock with a live-owner record so the
 		// critical-directive gate's bounded read times out deterministically.
-		holdReceiptLock(tempDir);
+		withFrozenClock(() => {
+			holdReceiptLock(tempDir);
+		});
 
 		const result = await executePhaseComplete(
 			{ phase: 1, sessionID: 'test-session' },

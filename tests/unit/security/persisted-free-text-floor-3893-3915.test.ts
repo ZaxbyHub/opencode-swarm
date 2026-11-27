@@ -8,6 +8,7 @@
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import * as path from 'node:path';
+import { withFrozenClock } from '../../helpers/test-clock';
 import { writeCuratorSummary } from '../../../src/hooks/curator';
 import type { CuratorSummary } from '../../../src/hooks/curator-types';
 import {
@@ -125,10 +126,11 @@ describe('persisted free-text floor (option b surfaces)', () => {
 		const dir = canonicalMkdtemp('optb-evidence-');
 		// project-root guard: canonicalMkdtemp roots are accepted as-is by the
 		// evidence manager's own suite (manager.test.ts drives the same helper)
+		const timestamp = withFrozenClock(() => new Date().toISOString());
 		const bundle = await saveEvidence(dir, '1.1', {
 			task_id: '1.1',
 			type: 'note',
-			timestamp: new Date().toISOString(),
+			timestamp,
 			agent: 'test-agent',
 			verdict: 'info',
 			summary: `note evidence quoting ${GH} and ${STRIPE}`,

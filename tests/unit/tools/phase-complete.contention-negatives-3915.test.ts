@@ -30,6 +30,7 @@ import { resetSwarmState, swarmState } from '../../../src/state';
 import { executePhaseComplete } from '../../../src/tools/phase-complete';
 import { safeRmRecursive } from '../../helpers/safe-test-dir';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
+import { withFrozenClock } from '../../helpers/test-clock';
 
 // -----------------------------------------------------------------------
 // Module-level mocks — MUST be before any import of the mocked modules.
@@ -319,7 +320,9 @@ describe('phase_complete contention classification negatives (#3915 AC5)', () =>
 			'corrupt\n',
 		);
 		// Plan lock FREE — the blocked classification cannot be plan contention.
-		acquireAllLocks();
+		withFrozenClock(() => {
+			acquireAllLocks();
+		});
 
 		const parsed = JSON.parse(
 			await executePhaseComplete(
@@ -345,8 +348,10 @@ describe('phase_complete contention classification negatives (#3915 AC5)', () =>
 	}, 120_000);
 
 	test('receipt-lock timeout WITHOUT plan-lock contention still reports the retryable incomplete class', async () => {
-		acquireAllLocks();
-		holdReceiptLock(tempDir);
+		withFrozenClock(() => {
+			acquireAllLocks();
+			holdReceiptLock(tempDir);
+		});
 
 		const parsed = JSON.parse(
 			await executePhaseComplete(
@@ -376,19 +381,21 @@ describe('phase_complete contention classification negatives (#3915 AC5)', () =>
 		// The receipt lock is taken over BETWEEN the initial (healthy)
 		// preflight and the locked re-run: the plan-lock acquisition call is
 		// the deterministic interleaving point.
-		mockTryAcquireLock.mockImplementation((_dir: string, filePath: string) => {
-			if (filePath === 'plan.json') holdReceiptLock(tempDir);
-			return {
-				acquired: true,
-				lock: {
-					filePath,
-					agent: 'phase-complete',
-					taskId: 'phase-complete-plan-test',
-					timestamp: new Date().toISOString(),
-					expiresAt: Date.now() + 300_000,
-					_release: vi.fn().mockResolvedValue(undefined),
-				},
-			};
+		withFrozenClock(() => {
+			mockTryAcquireLock.mockImplementation((_dir: string, filePath: string) => {
+				if (filePath === 'plan.json') holdReceiptLock(tempDir);
+				return {
+					acquired: true,
+					lock: {
+						filePath,
+						agent: 'phase-complete',
+						taskId: 'phase-complete-plan-test',
+						timestamp: new Date().toISOString(),
+						expiresAt: Date.now() + 300_000,
+						_release: vi.fn().mockResolvedValue(undefined),
+					},
+				};
+			});
 		});
 
 		const parsed = JSON.parse(
@@ -418,7 +425,9 @@ describe('phase_complete contention classification negatives (#3915 AC5)', () =>
 		// through the receipt internals seam.
 		const originalIntent = phaseCompleteReceiptInternals.recordPhaseCloseIntent;
 		phaseCompleteReceiptInternals.recordPhaseCloseIntent = (async () => {
-			holdReceiptLock(tempDir);
+			withFrozenClock(() => {
+				holdReceiptLock(tempDir);
+			});
 			return { ok: true, event_id: 'intent-event' };
 		}) as typeof originalIntent;
 		try {
