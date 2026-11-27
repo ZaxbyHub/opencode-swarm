@@ -503,7 +503,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			'pr-workflow-session-resolver / pr-workflow-gate / init-orphan-recovery / delegation-gate worktree-collision-ownership — via readDelegations',
 		],
 		schemaVersion:
-			'RecordSchema schemaVersion 1|2|3|4; checkpoint/manifest literal 1 (:1713,:1734,:1744)',
+			'RecordSchema schemaVersion 1|2|3|4; checkpoint/manifest literal 1 (:1716,:1737,:1747)',
 		stateClass: 'authoritative',
 		privacyClass: 'metadata',
 		directFileExemption: {
@@ -519,11 +519,11 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			pattern: 'indexed (checkpoint+tail) with full-fold fallback',
 			bound: 'legacy/tail reads hard-bounded at 4 MiB (MAX_RECOVERY_LEDGER_BYTES)',
 			sync: true,
-			citation: 'src/background/pending-delegations.ts:119-124,2267',
+			citation: 'src/background/pending-delegations.ts:119-124,2270',
 		},
 		lockModel: 'withEvidenceLock agent=background on every mutation (:177-180); reads lock-free',
 		crashBehavior:
-			'torn append tolerated by lenient fold, strict recovery fails closed; manifest-gated checkpoint publication — checkpoint without manifest ignored (:1995-2007)',
+			'torn append tolerated by lenient fold, strict recovery fails closed; manifest-gated checkpoint publication — checkpoint without manifest ignored (:1998-2010)',
 		closePolicy: 'archived-only — ARCHIVE_ARTIFACTS (src/commands/close/constants.ts:75-77); deliberately NOT cleaned (cross-session store; compaction is the bounded-retention mechanism, src/commands/close/constants.ts:70-78 docblock)',
 		closeArrayMembership: {
 			'background-delegations.jsonl': 'archive-only',
@@ -532,7 +532,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		},
 		resetPolicy: 'reset/reset-session do not delete',
 		legacyCompatibility:
-			'legacy checkpoint/ledger is validated and imported once into SQLite, then cold-archived with JSON retained as a compatibility projection (:2267)',
+			'legacy checkpoint/ledger is validated and imported once into SQLite, then cold-archived with JSON retained as a compatibility projection (:2270)',
 		issue2487Legacy: { path: '.swarm/background-delegations.jsonl (+ checkpoint and manifest)', sourceFile: 'src/background/pending-delegations.ts', tokens: ['BACKGROUND_DELEGATIONS_FILE', 'loadLegacyLedger', 'ensureDelegationCoordinationImported'], readers: ['src/background/pending-delegations.ts:loadLegacyLedger', 'src/background/pending-delegations.ts:ensureDelegationCoordinationImported'], writers: ['src/background/pending-delegations.ts:BACKGROUND_DELEGATIONS_FILE'] },
 		healthSignal: 'delegation-health artifact + #2034 recovery observations',
 		owner: '#2034 (merged)',

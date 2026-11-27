@@ -18,7 +18,6 @@ import {
 import { parseReviewerOutput } from '../hooks/review-receipt-collector.js';
 import {
 	EVIDENCE_FINDING_BODY_MAX,
-	EVIDENCE_FINDING_FILE_MAX,
 	EVIDENCE_FINDING_TITLE_MAX,
 	redactEvidenceField,
 } from '../security/evidence-redaction.js';
