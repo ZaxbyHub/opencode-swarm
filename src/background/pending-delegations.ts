@@ -6958,6 +6958,34 @@ function isActiveCoderOwner(record: BackgroundDelegationRecord): boolean {
 	return record.worktree !== undefined;
 }
 
+/**
+ * Admission- and renewal-scoped liveness for coder owners.
+ *
+ * Unlike {@link isActiveCoderOwner} — which additionally keeps checkpoint
+ * compaction from stripping the bodies of unconsumed terminal records — this
+ * predicate answers exactly one question: does the record still occupy a LIVE
+ * background-coder launch slot? A child that already produced its trusted
+ * terminal event does not: a `completed` result awaiting ingestion, and an
+ * `ingestion_error` whose result stays durably claimable in the delegations
+ * store, are finished work. Counting them as admission-active wedges every
+ * later coder dispatch in a `maxConcurrent = 1` parent after a single failed
+ * ingestion (the launch is dead, nothing but the 30-minute stale sweep ever
+ * frees the slot, and the reservation lease keeps renewing on the same
+ * "active" record) — a full work stoppage observed in the wild. Preserved
+ * settlements and worktree-holding records still count: they own recoverable
+ * resources, not just unconsumed results.
+ */
+function isAdmissionActiveCoderOwner(
+	record: BackgroundDelegationRecord,
+): boolean {
+	if (record.normalizedAgent !== 'coder' || record.status === 'consumed') {
+		return false;
+	}
+	if (record.status === 'pending' || record.status === 'running') return true;
+	if (record.coderSettlement?.state === 'preserved') return true;
+	return record.worktree !== undefined;
+}
+
 type DurableCoderOwnerScan =
 	| {
 			status: 'ok';
@@ -7051,8 +7079,22 @@ function hasProvenReleasedReservationOwner(
 	record: BackgroundDelegationRecord,
 ): boolean {
 	if (record.status === 'consumed') return true;
+	// A worktree-holding owner still owns a recoverable resource: not proven.
+	if (record.worktree !== undefined) return false;
+	// A preserved settlement still owns recoverable work: not proven.
+	if (record.coderSettlement?.state === 'preserved') return false;
+	// The child produced its immutable trusted terminal event, but the parent
+	// has not ingested the result yet (`completed`), or one ingestion attempt
+	// failed and the result stays durably claimable in the delegations store
+	// (`ingestion_error`). Either way the launch is finished: its reservation
+	// is provably idle, and releasing it never drops the result — only the
+	// capacity claim goes away. Without this proof the reservation lease keeps
+	// renewing on the terminal record forever and, with maxConcurrent = 1,
+	// blocks every later coder dispatch of that parent session.
+	if (record.status === 'completed' || record.status === 'ingestion_error') {
+		return record.terminalResult !== undefined;
+	}
 	return (
-		record.worktree === undefined &&
 		(record.status === 'error' || record.status === 'cancelled') &&
 		record.terminalResult?.status === record.status
 	);
@@ -7210,7 +7252,7 @@ export async function reserveBackgroundCoderSlot(
 				for (const record of ownerScan.recordsByCorrelation.values()) {
 					if (
 						record.parentSessionId === input.parentSessionId &&
-						isActiveCoderOwner(record)
+						isAdmissionActiveCoderOwner(record)
 					) {
 						activeOwnerKeys.add(
 							reservationOwnerKey({
@@ -7933,9 +7975,11 @@ export async function maintainBackgroundDelegations(
 							});
 							continue;
 						}
-						if (isActiveCoderOwner(primary)) {
+						if (isAdmissionActiveCoderOwner(primary)) {
 							// Fresh durable owner activity: verified evidence of live
 							// work — renew the lease for the same generation only.
+							// Terminal-child states (completed / ingestion_error)
+							// never reach here: they prove release above instead.
 							mutated = true;
 							result.renewed.push({
 								reservationId: reservation.reservationId,
