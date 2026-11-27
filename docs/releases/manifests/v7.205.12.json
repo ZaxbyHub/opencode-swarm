@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.205.12",
+  "tagCommit": "7f04b07ffe40c11dddc4b613a0d00305ab482358",
+  "targetCommitish": "7f04b07ffe40c11dddc4b613a0d00305ab482358",
+  "releaseBodySha256": "88b9b82fdfe8698befb5b6c622c0910950040650e9ebc8667e9d3a9219ed3164",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 3,
+      "path": "docs/releases/pending/2012-resume-terminal-child-untrackable.md",
+      "sha256": "211d7a265c774fc0ffa4cff4f409bbfbe610cb06a875c85a4f7c668ff7012768"
+    },
+    {
+      "prNumber": null,
+      "order": 8,
+      "path": "docs/releases/pending/3947-pr-monitor-terminal-event-once.md",
+      "sha256": "a4b57554756d151aa4713919e479af285b1b157ddb5e7cdf9543b4a8b890bcfe"
+    },
+    {
+      "prNumber": null,
+      "order": 4,
+      "path": "docs/releases/pending/async-lifecycle-audit-approval-safety.md",
+      "sha256": "d97a0368a07d3670ae1777490e44fdf86539f150bab5f0b6f8c4915caedb4c85"
+    },
+    {
+      "prNumber": null,
+      "order": 5,
+      "path": "docs/releases/pending/async-lifecycle-audit-crash-safe-closeout.md",
+      "sha256": "3bbf2791590e254e1846776e0067991e41bf746cca4d305175275354bfeb6d6a"
+    },
+    {
+      "prNumber": null,
+      "order": 6,
+      "path": "docs/releases/pending/async-lifecycle-audit-policy-parity.md",
+      "sha256": "a13ee53155cf19e58fa7f701348c5267da506e7962f27d78989ec97830865cc8"
+    },
+    {
+      "prNumber": null,
+      "order": 2,
+      "path": "docs/releases/pending/background-coder-terminal-owner-admission-wedge.md",
+      "sha256": "d9997a277f2e4be20ff27fa7381ad8e5815a21f95cc20a7484ecb166432f1944"
+    },
+    {
+      "prNumber": null,
+      "order": 7,
+      "path": "docs/releases/pending/opencode23-async-lifecycle-f1-f6.md",
+      "sha256": "dbd59607c9a51583c59364813513a8394194100c797071427af5c5d5f4d28f5e"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/spec-write-premarker-plan-hash-rebind.md",
+      "sha256": "36eef5c1d34efb248a7c4068b5c5b7d780be714467eb92107206a68d097aeded"
+    },
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/stage-b-redispatch-route-slot-reclaim.md",
+      "sha256": "5b21e6de1a4d93787e19c213e23e1f3584620c984b583fcb7ed3d9deb155fc87"
+    }
+  ]
+}
