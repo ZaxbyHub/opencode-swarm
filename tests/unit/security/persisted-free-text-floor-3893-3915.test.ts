@@ -8,7 +8,6 @@
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import * as path from 'node:path';
-import { withFrozenClock } from '../../helpers/test-clock';
 import { writeCuratorSummary } from '../../../src/hooks/curator';
 import type { CuratorSummary } from '../../../src/hooks/curator-types';
 import {
@@ -23,6 +22,7 @@ import {
 	writePhaseArchitectureSummary,
 	writeSupervisorReport,
 } from '../../../src/summaries/store';
+import { withFrozenClock } from '../../helpers/test-clock';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 const GH = `ghp_${'w'.repeat(30)}`;
