@@ -290,8 +290,12 @@ export async function runCleanStage(
 					// File already absent — expected after archive-first cleanup; silent skip.
 				} else {
 					const reason = err instanceof Error ? err.message : String(err);
+					// Same #3943 class as the post-mortem gate below — archive-sourced
+					// names and OS error text route through the shared neutralizer
+					// (found by the Phase 4.2 recurrence sweep; sibling of the two
+					// issue-named sites).
 					ctx.warnings.push(
-						`Failed to clean active-state file ${artifact} [${errno ?? 'unknown'}]: ${reason}`,
+						`Failed to clean active-state file ${neutralizeResidueName(artifact)} [${errno ?? 'unknown'}]: ${neutralizeResidueName(reason)}`,
 					);
 				}
 			}
