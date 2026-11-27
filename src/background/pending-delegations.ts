@@ -75,6 +75,7 @@ import {
 	sameProjectRoot,
 } from '../utils/canonical-root.js';
 import * as logger from '../utils/logger.js';
+import { isCommittedAcceptedSettlementForLaunch } from '../workflow/coder-settlement-launch-proof.js';
 import { childBlocksStaleSweep } from './child-activity';
 import {
 	appendDelegationMaintenanceObservation,
@@ -8563,6 +8564,59 @@ function hasProvenReleasedReservationOwner(
 	);
 }
 
+/**
+ * Workflow-settlement release proof for one background coder reservation
+ * (the 2026-11-27 task 2.18 stale-reservation wedge): the launch this
+ * reservation was minted for (task + callID) is durably finished on the
+ * WORKFLOW side — the architect settled its coder settlement
+ * (`state: 'COMMITTED'`, `accepted: true`) for exactly
+ * `coder:<reservation.callID>` — even though the delegation record never
+ * observed the child terminal (observer gap, restart, host event loss; the
+ * record stays `pending` and the sweep would renew the lease forever).
+ *
+ * The launch identity is exact: a settlement for any other dispatch of the
+ * task never proves this reservation idle, and a call-keyed reservation
+ * (`planTaskId === null`) has no settlement-WAL identity at all. Fail-closed:
+ * missing, unreadable, non-terminal, unaccepted, or foreign-transition WAL →
+ * not proven, the reservation stays.
+ */
+async function isReservationProvenReleasedByWorkflowSettlement(
+	directory: string,
+	reservation: BackgroundCoderReservation,
+): Promise<boolean> {
+	if (reservation.planTaskId === null) return false;
+	return isCommittedAcceptedSettlementForLaunch(
+		directory,
+		reservation.planTaskId,
+		`coder:${reservation.callID}`,
+	);
+}
+
+/**
+ * Record-level twin of the reservation proof above: the delegation record's
+ * OWN launch (planTaskId + callID) is durably settled on the workflow side.
+ * Used by admission capacity accounting so a `pending` record that never
+ * observed its child terminal (but whose launch the architect durably
+ * settled) no longer occupies the task's admission slot — the second
+ * duplicate_task source of the 2026-11-27 task 2.18 wedge (the reservation
+ * was reconciled away, the owner record still matched the task-keyed
+ * owner key). Same fail-closed identity bar: exact launch, COMMITTED,
+ * accepted.
+ */
+async function isRecordLaunchProvenSettledByWorkflow(
+	directory: string,
+	record: BackgroundDelegationRecord,
+): Promise<boolean> {
+	if (record.normalizedAgent !== 'coder' || record.planTaskId === null) {
+		return false;
+	}
+	return isCommittedAcceptedSettlementForLaunch(
+		directory,
+		record.planTaskId,
+		`coder:${record.callID}`,
+	);
+}
+
 function validateReservationIdentity(input: {
 	parentSessionId: string;
 	planTaskId: string | null;
@@ -8676,15 +8730,29 @@ export async function reserveBackgroundCoderSlot(
 				// finished. The reservation may still be unbound when a crash occurs
 				// after primary persistence, so reservation id + parent/task/call are
 				// the recovery identity. Ambiguous matches remain fail-closed.
-				const reservations = reservationScan.reservations.filter(
-					(reservation) => {
-						const primary = findExactPrimaryReservationOwner(
+				// The workflow-settlement arm (2026-11-27 task 2.18 wedge) adds the
+				// second durable proof: a COMMITTED accepted coder settlement for
+				// exactly this reservation's launch finishes the slot even when the
+				// delegation record never observed the child terminal.
+				const reservations: BackgroundCoderReservation[] = [];
+				for (const reservation of reservationScan.reservations) {
+					const primary = findExactPrimaryReservationOwner(
+						reservation,
+						ownerScan,
+					);
+					if (primary && hasProvenReleasedReservationOwner(primary)) {
+						continue;
+					}
+					if (
+						await isReservationProvenReleasedByWorkflowSettlement(
+							directory,
 							reservation,
-							ownerScan,
-						);
-						return !(primary && hasProvenReleasedReservationOwner(primary));
-					},
-				);
+						)
+					) {
+						continue;
+					}
+					reservations.push(reservation);
+				}
 				if (
 					reservations.length !== reservationScan.reservations.length &&
 					!(await writeBackgroundCoderReservations(directory, reservations))
@@ -8714,17 +8782,26 @@ export async function reserveBackgroundCoderSlot(
 				}
 				for (const record of ownerScan.recordsByCorrelation.values()) {
 					if (
-						record.parentSessionId === input.parentSessionId &&
-						isAdmissionActiveCoderOwner(record)
+						record.parentSessionId !== input.parentSessionId ||
+						!isAdmissionActiveCoderOwner(record)
 					) {
-						activeOwnerKeys.add(
-							reservationOwnerKey({
-								parentSessionId: record.parentSessionId,
-								planTaskId: record.planTaskId,
-								callID: record.callID,
-							}),
-						);
+						continue;
 					}
+					if (await isRecordLaunchProvenSettledByWorkflow(directory, record)) {
+						// Workflow-settled launch (2026-11-27 task 2.18 wedge): a
+						// pending record whose exact launch the architect durably
+						// settled (COMMITTED + accepted) does not occupy a live
+						// admission slot, even though it never observed its child
+						// terminal.
+						continue;
+					}
+					activeOwnerKeys.add(
+						reservationOwnerKey({
+							parentSessionId: record.parentSessionId,
+							planTaskId: record.planTaskId,
+							callID: record.callID,
+						}),
+					);
 				}
 
 				const reservationId = buildBackgroundCoderReservationId(input);
@@ -9384,6 +9461,38 @@ export async function maintainBackgroundDelegations(
 							correlationId: reservation.correlationId ?? undefined,
 							generation,
 							reason: 'proven-terminal-owner',
+						});
+						continue;
+					}
+					if (
+						await isReservationProvenReleasedByWorkflowSettlement(
+							directory,
+							reservation,
+						)
+					) {
+						// Workflow-settlement proof (2026-11-27 task 2.18 wedge): the
+						// architect durably settled the exact launch this reservation
+						// was minted for (COMMITTED + accepted, transitionId
+						// `coder:<callID>`), so the capacity claim is provably idle
+						// even though the delegation record never observed the child
+						// terminal. Proof-based release — same no-age class as the
+						// arm above; the exact-launch identity (task + callID)
+						// subsumes the #2104 generation guard because a newer launch
+						// mints a new callID and therefore never matches this WAL
+						// entry.
+						mutated = true;
+						result.released.push({
+							reservationId: reservation.reservationId,
+							generation,
+							reason: 'workflow-settlement-committed',
+						});
+						facts.push({
+							at: now,
+							kind: 'release',
+							reservationId: reservation.reservationId,
+							correlationId: reservation.correlationId ?? undefined,
+							generation,
+							reason: 'workflow settlement COMMITTED+accepted for this launch',
 						});
 						continue;
 					}
