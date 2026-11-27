@@ -226,9 +226,17 @@ describe('hive-promoter adversarial tests (transactional, #1847)', () => {
 	});
 
 	describe('SCENARIO 5: Repeated hive-fast-track tag', () => {
+		// #3820 H3 reshape: route 2 is armed by the DEDICATED
+		// `hive_fast_track_authorized` field (only `promoteToHive`'s stand-in
+		// writes it); the caller-suppliable tag is inert in the policy. The
+		// repeated-tag payload is kept to prove repeated privileged-looking tags
+		// still cannot produce multiple promotions; the field provides the
+		// eligibility route so the "promote only once" assertion is preserved at
+		// full strength.
 		it('should promote only once even with repeated hive-fast-track tag', async () => {
 			const entry = makeSwarmEntry({
 				tags: ['hive-fast-track', 'hive-fast-track', 'hive-fast-track'],
+				hive_fast_track_authorized: true,
 				hive_eligible: false,
 				confirmed_by: [],
 			});
@@ -363,6 +371,10 @@ describe('hive-promoter adversarial tests (transactional, #1847)', () => {
 	});
 
 	describe('SCENARIO 10: Large swarm entries array', () => {
+		// #3820 H3 reshape: the sole eligibility route here was the fast-track
+		// TAG, which no longer satisfies route 2 — the dedicated
+		// `hive_fast_track_authorized` field does. The bulk-throughput assertion
+		// (1000 promotions) is preserved at full strength.
 		it('should process 1000 entries without hanging or error', async () => {
 			const entries: SwarmKnowledgeEntry[] = [];
 			for (let i = 0; i < 1000; i++) {
@@ -371,7 +383,7 @@ describe('hive-promoter adversarial tests (transactional, #1847)', () => {
 						id: `swarm-${i}`,
 						lesson: `Unique lesson number ${i} about a distinct topic`,
 						hive_eligible: false,
-						tags: ['hive-fast-track'],
+						hive_fast_track_authorized: true,
 						confirmed_by: [],
 					}),
 				);
