@@ -134,7 +134,10 @@ export function readRepairEvents(directory: string): Record<string, unknown>[] {
  * receipt alone justifies the settlement-wedge recovery, so those pins must
  * strip the ledger to stay receipt-less.
  */
-export function stripRequirementsLedger(directory: string, taskId: string): void {
+export function stripRequirementsLedger(
+	directory: string,
+	taskId: string,
+): void {
 	const ledgerPath = path.join(
 		directory,
 		'.swarm',

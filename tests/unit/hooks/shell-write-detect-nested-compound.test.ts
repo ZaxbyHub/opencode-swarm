@@ -58,9 +58,9 @@ describe('detectPosixWrites — nested compound decomposition', () => {
 				'for f in *.log; do if [ -f "$f" ]; then rm "$f"; fi; done',
 			);
 			expect(analysis.parseError).not.toBe(true);
-			expect(
-				analysis.writes.some((write) => write.operator === 'rm'),
-			).toBe(true);
+			expect(analysis.writes.some((write) => write.operator === 'rm')).toBe(
+				true,
+			);
 		});
 
 		test('in-place edit inside a nested loop body', () => {
@@ -68,9 +68,9 @@ describe('detectPosixWrites — nested compound decomposition', () => {
 				'for f in a b; do if [ -f "$f" ]; then sed -i s/x/y/ "$f"; fi; done',
 			);
 			expect(analysis.parseError).not.toBe(true);
-			expect(
-				analysis.writes.some((write) => write.operator === 'sed -i'),
-			).toBe(true);
+			expect(analysis.writes.some((write) => write.operator === 'sed -i')).toBe(
+				true,
+			);
 		});
 
 		test('loop redirect on done stays visible in the skeleton', () => {
@@ -105,7 +105,8 @@ describe('detectPosixWrites — nested compound decomposition', () => {
 			expect(analysis.parseError).not.toBe(true);
 			expect(
 				analysis.writes.some(
-					(write) => write.operator.includes('$(') && write.path === '/tmp/head.txt',
+					(write) =>
+						write.operator.includes('$(') && write.path === '/tmp/head.txt',
 				),
 			).toBe(true);
 		});

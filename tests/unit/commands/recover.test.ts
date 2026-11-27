@@ -484,9 +484,7 @@ describe('issue #2268 — /swarm recover command', () => {
 
 			expect(out).toContain('Task 4.3: Stage A repaired');
 			expect(out).toContain('Repaired 1 wedged task(s)');
-			expect(out).not.toContain(
-				'no Stage A repair is needed or provable here',
-			);
+			expect(out).not.toContain('no Stage A repair is needed or provable here');
 			const workflow = getTaskWorkflowSnapshot(
 				await readTaskEvidence(directory, '4.3'),
 			);

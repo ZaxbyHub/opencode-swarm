@@ -340,8 +340,6 @@ describe('status background-work section (coordination schema drift)', () => {
 				'utf-8',
 			),
 		) as { lastCoordinationSkip?: { skippedEntityKeys: string[] } };
-		expect(health.lastCoordinationSkip?.skippedEntityKeys).toEqual([
-			poisonKey,
-		]);
+		expect(health.lastCoordinationSkip?.skippedEntityKeys).toEqual([poisonKey]);
 	});
 });

@@ -365,7 +365,9 @@ export function writeDelegationHealthArtifact(
 		checkpoint?: DelegationLedgerHealth['checkpoint'] | null;
 		recovery?: DelegationLedgerHealth['recovery'] | null;
 		lastUncertainty?: DelegationLedgerHealth['lastUncertainty'] | null;
-		lastCoordinationSkip?: DelegationLedgerHealth['lastCoordinationSkip'] | null;
+		lastCoordinationSkip?:
+			| DelegationLedgerHealth['lastCoordinationSkip']
+			| null;
 		counts?: DelegationLedgerHealth['counts'];
 		uncertainty?: DelegationHealthUncertaintySection;
 		maintenance?: DelegationLedgerHealth['maintenance'];

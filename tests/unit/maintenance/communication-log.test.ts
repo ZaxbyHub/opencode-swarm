@@ -12,11 +12,11 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
 	_internals,
+	_test_exports,
 	parseCommunicationLog,
 	pruneCommunicationLog,
 	releaseCommunicationLogEntry,
 	reportCommunicationLogWorklist,
-	_test_exports,
 } from '../../../src/maintenance/communication-log';
 import { executePruneCommunicationLog } from '../../../src/tools/prune-communication-log';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';

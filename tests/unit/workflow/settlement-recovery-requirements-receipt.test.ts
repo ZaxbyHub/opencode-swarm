@@ -24,13 +24,16 @@ import {
 	transitionTaskWorkflowEvidence,
 } from '../../../src/gate-evidence';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
+import { recoverStageATaskSupervised } from '../../../src/workflow/settlement-recovery';
 import {
 	repairWedgedStageA,
 	scanWedgedStageA,
 } from '../../../src/workflow/stage-a-repair';
-import { recoverStageATaskSupervised } from '../../../src/workflow/settlement-recovery';
 import { createSafeTestDir } from '../../helpers/safe-test-dir';
-import { readRepairEvents, writeCommittedWal } from './_settlement-recovery-2828-helpers';
+import {
+	readRepairEvents,
+	writeCommittedWal,
+} from './_settlement-recovery-2828-helpers';
 
 let directory = '';
 let cleanup = (): void => {};
@@ -226,7 +229,10 @@ describe('recoverStageATaskSupervised (requirements-receipt justification)', () 
 		const receiptPath = taskGateRequirementsReceiptPath(directory, '9.5');
 		const tampered = fs
 			.readFileSync(receiptPath, 'utf-8')
-			.replace('"sourceEvent":"accepted_mutation"', '"sourceEvent":"accepted_mutation "');
+			.replace(
+				'"sourceEvent":"accepted_mutation"',
+				'"sourceEvent":"accepted_mutation "',
+			);
 		fs.writeFileSync(receiptPath, tampered);
 
 		let message = '';

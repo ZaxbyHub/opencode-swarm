@@ -16,15 +16,15 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import type { PluginConfig } from '../../../src/config';
-import { closeAllProjectDbs } from '../../../src/db/project-db';
-import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
 import {
 	findByCorrelationId,
 	findLatestCoderTaskForParentSession,
 	recordPendingDelegation,
 } from '../../../src/background/pending-delegations';
+import type { PluginConfig } from '../../../src/config';
+import { closeAllProjectDbs } from '../../../src/db/project-db';
 import { transitionTaskWorkflowEvidence } from '../../../src/gate-evidence';
+import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
 import {
 	advanceTaskState,
 	resetSwarmState,
@@ -78,7 +78,10 @@ function makeProject(): string {
 	fs.mkdirSync(path.join(dir, '.swarm'), { recursive: true });
 	fs.mkdirSync(path.join(dir, '.opencode'), { recursive: true });
 	fs.mkdirSync(path.join(dir, 'src'), { recursive: true });
-	fs.writeFileSync(path.join(dir, 'src', 'foo.ts'), 'export const value = 1;\n');
+	fs.writeFileSync(
+		path.join(dir, 'src', 'foo.ts'),
+		'export const value = 1;\n',
+	);
 	git(dir, 'init');
 	git(dir, 'config', 'user.email', 'test@example.com');
 	git(dir, 'config', 'user.name', 'Test');
@@ -234,7 +237,8 @@ describe('sounding-board dispatch task binding through the delegation gate', () 
 			},
 			{
 				state: 'running',
-				output: '<task id="ses_sb_child" state="running"><task_result>running</task_result></task>',
+				output:
+					'<task id="ses_sb_child" state="running"><task_result>running</task_result></task>',
 				metadata: { jobId: 'job_sb_child', background: true },
 			},
 		);

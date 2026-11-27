@@ -9307,7 +9307,13 @@ interface NestedCompoundBlockSplit {
 }
 
 /** Compound-body keywords that make a block qualify for decomposition. */
-const NESTED_COMPOUND_KEYWORDS = ['if', 'for', 'while', 'until', 'case'] as const;
+const NESTED_COMPOUND_KEYWORDS = [
+	'if',
+	'for',
+	'while',
+	'until',
+	'case',
+] as const;
 
 /** Recursion bound for decomposed fragments that themselves need splitting. */
 const NESTED_COMPOUND_SPLIT_DEPTH_MAX = 2;
@@ -9510,7 +9516,9 @@ function splitNestedCompoundBlocks(
 		([start, end]) =>
 			!qualifying.some(
 				([otherStart, otherEnd]) =>
-					otherStart < start && otherEnd >= end && !(otherStart === start && otherEnd === end),
+					otherStart < start &&
+					otherEnd >= end &&
+					!(otherStart === start && otherEnd === end),
 			),
 	);
 
@@ -9523,7 +9531,9 @@ function splitNestedCompoundBlocks(
 	for (const [start, end] of sorted) {
 		skeleton = `${skeleton.slice(0, start)} : ; ${skeleton.slice(end)}`;
 	}
-	const bodies = outermost.map(([start, end]) => command.slice(start, end).trim());
+	const bodies = outermost.map(([start, end]) =>
+		command.slice(start, end).trim(),
+	);
 	return { skeleton, bodies };
 }
 
@@ -9834,9 +9844,7 @@ export function detectPosixWrites(
 					),
 				);
 				const allAnalyses = [skeletonAnalysis, ...fragmentAnalyses];
-				if (
-					allAnalyses.every((analysis) => analysis.parseError !== true)
-				) {
+				if (allAnalyses.every((analysis) => analysis.parseError !== true)) {
 					parseFailed = false;
 					// A directory-selection word outside the bodies (skeleton)
 					// moves the loop/if execution context; body writes cannot
@@ -9848,17 +9856,14 @@ export function detectPosixWrites(
 					const cdContext = PROCSUB_CD_CONTEXT.test(split.skeleton);
 					for (const analysis of allAnalyses) {
 						unwrapDepthExceeded =
-							unwrapDepthExceeded ||
-							analysis.unwrapDepthExceeded === true;
+							unwrapDepthExceeded || analysis.unwrapDepthExceeded === true;
 					}
 					for (let a = 0; a < allAnalyses.length; a += 1) {
 						const analysis = allAnalyses[a];
 						const isBody = a > 0;
 						for (const write of analysis.writes) {
 							allWrites.push(
-								isBody &&
-									cdContext &&
-									write.unresolvedContext !== true
+								isBody && cdContext && write.unresolvedContext !== true
 									? { ...write, unresolvedContext: true }
 									: write,
 							);

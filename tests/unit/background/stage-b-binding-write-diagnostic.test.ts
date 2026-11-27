@@ -36,8 +36,9 @@ afterEach(() => {
 
 function failRenamesWith(code: string): void {
 	atomicInternals.renameSync = (() => {
-		const err = new Error(`EACCES: permission denied, rename '${code}'`) as Error &
-			{ code?: string };
+		const err = new Error(
+			`EACCES: permission denied, rename '${code}'`,
+		) as Error & { code?: string };
 		err.code = code;
 		throw err;
 	}) as unknown as typeof fs.renameSync;
