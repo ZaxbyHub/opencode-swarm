@@ -390,7 +390,6 @@ function projectRootPrefix(directory: string): string {
 	const posixRel = raw.replace(/\/+$/, '');
 	// A directory name containing pathspec magic would corrupt the
 	// exclusion patterns — refuse rather than mis-scope.
-	// biome-ignore lint/suspicious/noControlCharactersInRegex: intentional pathspec-metachar containment guard
 	if (/[\\[\]?*]|\.\.|:\(/.test(posixRel)) {
 		throw new Error(
 			'checkpoint refused: the project directory path contains git-pathspec metacharacters — move the project to a plain path',

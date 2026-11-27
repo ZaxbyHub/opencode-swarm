@@ -29,6 +29,7 @@ import {
 	type EvaluationRetentionResult,
 } from '../evaluation/retention.js';
 import { readSwarmFileAsync, validateSwarmPath } from '../hooks/utils';
+import { redactEvidenceDeep } from '../security/evidence-redaction';
 import { SNAPSHOT_EXCLUDED_EVIDENCE_ENTRIES } from '../tools/phase-complete/snapshot-identity';
 import { log, warn } from '../utils';
 import { bunWrite } from '../utils/bun-compat';
@@ -287,7 +288,12 @@ export async function saveEvidence(
 			// the save with the bundle untouched), and a single entry that
 			// alone exceeds the cap still fails honestly — the caller must
 			// bound its own payload.
-			let persistedBundle = updatedBundle;
+			// #3893/#3915 owner-approved fix (option b, merged): evidence
+			// bundles carry finding/model free text — redact at the write
+			// boundary (the #3844 evidence-boundary pattern) BEFORE compaction,
+			// so the persisted bundle AND every archived entry are redacted and
+			// the byte cap measures the redacted payload that actually lands.
+			let persistedBundle = redactEvidenceDeep(updatedBundle);
 			let bundleJson = JSON.stringify(persistedBundle);
 			if (bundleJson.length > EVIDENCE_MAX_JSON_BYTES) {
 				const kept = [...persistedBundle.entries];
@@ -544,7 +550,7 @@ export async function loadEvidence(
 					sanitizedTaskId,
 					async () => {
 						const evidenceDir = path.dirname(evidencePath);
-						const bundleJson = JSON.stringify(validated);
+						const bundleJson = JSON.stringify(redactEvidenceDeep(validated));
 						const tempPath = path.join(
 							evidenceDir,
 							`evidence.json.tmp.${Date.now()}.${process.pid}`,

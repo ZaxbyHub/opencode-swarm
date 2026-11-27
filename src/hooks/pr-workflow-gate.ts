@@ -3428,14 +3428,14 @@ export async function clearPrWorkflowGateState(
 				}
 				await atomicWriteSwarmFile(
 					releaseReceipt,
-					JSON.stringify({
+					`${JSON.stringify({
 						run_id: runId,
 						head: release.head,
 						url: release.url,
 						session_id: current.sessionID,
 						coverage: 'COMPLETE',
 						verdict: 'APPROVE',
-					}) + '\n',
+					})}\n`,
 				);
 				await _test_exports.afterNativeReleaseReceiptWrite?.();
 			} else if (releaseReceipt) {

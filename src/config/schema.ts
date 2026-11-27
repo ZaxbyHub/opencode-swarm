@@ -2899,7 +2899,9 @@ const GeneralCouncilMemberConfigSchema = z
 export const GeneralCouncilConfigSchema = z
 	.object({
 		enabled: z.boolean().default(false),
-		searchProvider: z.enum(['tavily', 'brave', 'keenable']).default('tavily'),
+		searchProvider: z
+			.enum(['tavily', 'brave', 'keenable', 'specstream'])
+			.default('tavily'),
 		searchApiKey: z.string().optional(),
 		members: z.array(GeneralCouncilMemberConfigSchema).default([]),
 		presets: z

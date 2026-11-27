@@ -593,7 +593,7 @@ Built-in tools verify every task before it ships:
 - **quality_budget** — Complexity, duplication, test ratio limits
 - **epic_phase_review** — Epic Mode only: an APPROVED phase reviewer, then an APPROVED phase critic, before `phase_complete`
 
-These quality gates run locally. No Docker is required. Config-gated features such as General Council web search can make external API calls only when you enable them and provide a Tavily or Brave Search key (or select the keyless Keenable provider).
+These quality gates run locally. No Docker is required. Config-gated features such as General Council web search can make external API calls only when you enable them and provide a Tavily, Brave Search or SpecStream key (or select the keyless Keenable provider).
 
 ### Context Budget Guard
 

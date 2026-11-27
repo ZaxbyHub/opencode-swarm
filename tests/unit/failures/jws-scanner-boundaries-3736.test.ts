@@ -95,12 +95,16 @@ describe('#3736 D2-rev2 adjacent-token + dir-JWE compositions', () => {
 });
 
 describe('#3736 D4-rev3 standard-base64 placements', () => {
-	test('key= assignment: key prefix visible, separator consumed (exact)', () => {
+	test('key= assignment: key prefix and separator stay visible (exact)', () => {
 		const header = `${'A'.repeat(40)}+/${'B'.repeat(40)}`;
 		const input = `key=${header}.${PAYLOAD}.${SIG}`;
-		// Shell site: the D4 generic span owns it (key prefix visible,
-		// separator consumed).
-		expect(redactShellCommand(input)).toBe('key[REDACTED:jwt]');
+		// Shell site: the D4 generic span owns it (key prefix visible).
+		// #3915 AC6: the span now starts at the base64 run, so the `=`
+		// separator is RETAINED in the output (was: consumed, producing
+		// `key[REDACTED:jwt]`). The retained separator is the anchor the
+		// evidence path's URL-query / KV arms need to re-match
+		// `key=[REDACTED:jwt]` and consume a glued tail whole.
+		expect(redactShellCommand(input)).toBe('key=[REDACTED:jwt]');
 		// Display site: the earlier KV arm (step 4) claims key=value shapes
 		// before the bare sweep — the credential is fully eliminated as
 		// `key=<redacted>`; parity here is "no cleartext", not byte-equality.
@@ -109,11 +113,13 @@ describe('#3736 D4-rev3 standard-base64 placements', () => {
 		expect(display.includes(SIG)).toBe(false);
 		expect(display.startsWith('key=')).toBe(true);
 	});
-	test('key= with = and == padded headers still anchors at the separator', () => {
+	test('key= with = and == padded headers still anchors at the trailing run', () => {
 		const one = `key=${'A'.repeat(40)}=.${PAYLOAD}.${SIG}`;
 		const two = `key=${'A'.repeat(40)}==.${PAYLOAD}.${SIG}`;
-		expect(redactShellCommand(one)).toBe('key[REDACTED:jwt]');
-		expect(redactShellCommand(two)).toBe('key[REDACTED:jwt]');
+		// #3915 AC6: the separator `=` is retained (was consumed); padding
+		// `=`s still strip correctly for the trailing-run candidate.
+		expect(redactShellCommand(one)).toBe('key=[REDACTED:jwt]');
+		expect(redactShellCommand(two)).toBe('key=[REDACTED:jwt]');
 	});
 	test('path-adjacent short segments stay visible', () => {
 		const input = `src/utils/jws-redaction.${'a'.repeat(20)}.${'b'.repeat(10)}`;
@@ -161,7 +167,9 @@ describe('#3736 D4-rev3 standard-base64 placements', () => {
 		const prefix = 'a=b=c=d=e=f=g=h=i=';
 		const header = 'Q'.repeat(42);
 		const input = `${prefix}${header}.${'e'.repeat(20)}.${'f'.repeat(12)}`;
-		expect(redactShellCommand(input)).toBe('a=b=c=d=e=f=g=h=i[REDACTED:jwt]');
+		// #3915 AC6: the FINAL `=` (the candidate's own separator) is
+		// retained; the interior chain is untouched.
+		expect(redactShellCommand(input)).toBe('a=b=c=d=e=f=g=h=i=[REDACTED:jwt]');
 		expect(sanitizeFailureEvidenceDisplay(input).includes(header)).toBe(false);
 	});
 	test('r3-D: an assignment candidate in a NON-first segment keeps the dotted prefix intact (exact)', () => {
@@ -170,7 +178,9 @@ describe('#3736 D4-rev3 standard-base64 placements', () => {
 		// (round-3 finding: `foo.key` was being swallowed with the token).
 		const header = 'Q'.repeat(42);
 		const input = `foo.key=${header}.${'e'.repeat(20)}.${'f'.repeat(12)}`;
-		expect(redactShellCommand(input)).toBe('foo.key[REDACTED:jwt]');
+		// #3915 AC6: the separator `=` is retained (was consumed —
+		// `foo.key[REDACTED:jwt]`); the dotted prefix stays intact.
+		expect(redactShellCommand(input)).toBe('foo.key=[REDACTED:jwt]');
 		expect(sanitizeFailureEvidenceDisplay(input).includes(header)).toBe(false);
 		expect(sanitizeFailureEvidenceDisplay(input).startsWith('foo.key')).toBe(
 			true,

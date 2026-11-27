@@ -176,3 +176,54 @@ describe('#3844 the shared redactor is idempotent and covers the training famili
 		expect(redactEvidenceText(out)).toBe(out);
 	});
 });
+
+describe('#3915 AC7/AC8: whole-value KV consumption — stepped tail and oversized pre-scan', () => {
+	test('AC7: a placeholder-shaped label plus a glued secret tail is consumed whole', () => {
+		// Previous behavior: the value repetition treats `]` as a hard
+		// terminator, so `password=[LLL…(65)]SECRETTAIL` consumed `[LLL…`
+		// and stopped — the real secret tail after the bracket survived in
+		// the clear. The stepped tail (src/security/evidence-redaction.ts,
+		// #3915 AC7) continues the value past the dangling closer.
+		const input = `password=[${'L'.repeat(65)}]SECRETTAIL end`;
+		const out = redactEvidenceText(input);
+		expect(out).not.toContain('SECRETTAIL'); // absent, not merely changed
+		expect(out).toContain('password=[REDACTED]');
+		expect(out.endsWith(' end')).toBe(true); // the exact trailing prose survives
+		expect(redactEvidenceText(out)).toBe(out); // still a fixed point
+	});
+
+	test('AC7 class: a SHORT bracketed label with a glued tail is consumed whole too', () => {
+		// The split is length-independent (any dangling `]` ends the value),
+		// so the stepped tail closes the class, not just the >=65 repro.
+		const out = redactEvidenceText('password=[abc]SECRETTAIL end');
+		expect(out).not.toContain('SECRETTAIL');
+		expect(out).not.toContain('abc');
+		expect(out).toBe('password=[REDACTED] end');
+	});
+
+	test('AC8: a 300k-char value is redacted whole, in bounded time, tail prose preserved', () => {
+		// Previous behavior: the engine silently declines the KV value match
+		// past a few hundred thousand code units, so `password=hunterzzz…`
+		// survived verbatim. The bounded pre-scan redacts the span directly.
+		const input = `password=hunter${'z'.repeat(300_000)} tail`;
+		const started = performance.now();
+		const out = redactEvidenceText(input);
+		const elapsed = performance.now() - started;
+		expect(out).not.toContain('hunter');
+		expect(out).not.toContain('z'.repeat(50));
+		expect(out).toBe('password=[REDACTED] tail'); // ` tail` prose preserved
+		expect(elapsed).toBeLessThan(2000); // linear, not engine-declined
+		expect(redactEvidenceText(out)).toBe(out);
+	});
+
+	test('AC8 threshold: a just-below-threshold value is still redacted by the regular arm', () => {
+		// 6 + 99_993 = 99_999 code units — one below the 100_000 pre-scan
+		// threshold, so the regular KV arm must own the value (the pre-scan
+		// is a no-op here; measured: the regex still matches at this size).
+		const input = `password=hunter${'z'.repeat(99_993)} tail`;
+		const out = redactEvidenceText(input);
+		expect(out).not.toContain('hunter');
+		expect(out).not.toContain('zzzz');
+		expect(out).toBe('password=[REDACTED] tail');
+	});
+});

@@ -22,6 +22,12 @@ import { redactShellCommand } from '../../../src/hooks/guardrails/helpers';
  * mixed-class base64 arm at the DISPLAY site (the shell site already has
  * it).
  *
+ * Families added by #3893 (AC13 / F11): stripe sk_/rk_ live/test keys,
+ * gitlab glpat-/glptt-, npm_, hf_ (huggingface), xai- — added to BOTH the
+ * shell array (SHELL_BARE_TOKEN_VALUE_PATTERNS) and the display twin
+ * (BARE_TOKEN_VALUE_PATTERNS) in lockstep; these rows were RED at base at
+ * both sites (the families predated the arrays).
+ *
  * RED at base (groq/GOCSPX/ya29./JWT/base64-at-display shipped in cleartext;
  * sk-ant-/sk-or- resolved to the WRONG [REDACTED:openai] placeholder; azure
  * AccountKey material survived in cleartext at the shell site and as a
@@ -37,6 +43,16 @@ interface Sample {
 }
 
 const LONG_MIXED_BASE64 = 'Ab1Cd2Ef3'.repeat(10);
+
+// #3893 vendor tokens, CONSTRUCTED at runtime (never literal in source —
+// GitHub push protection rejects literal sk_live_-shaped strings).
+const STRIPE_LIVE = ['sk_live_', 'SynthA1b2c3d4e5f6g7h8i9j0k1l2z9'].join('');
+const STRIPE_RK = ['rk_test_', 'SynthZ9y8x7w6v5u4t3s2r1q0p3o4'].join('');
+const GITLAB_PAT = ['glpat-', 'Synth0123456789AbCd'].join('');
+const GITLAB_PTT = ['glptt-', 'Synth9876543210ZaYxWv'].join('');
+const NPM_TOKEN = ['npm_', 'SynthA1B2c3D4e5F6g7H8i9J0k1L2m3N4o5'].join('');
+const HF_TOKEN = ['hf_', 'SynthQ9w8E7r6T5y4U3i2O1p0L5k4J3h2'].join('');
+const XAI_TOKEN = ['xai-', 'SynthM1n2b3v4c5x6z7a8s9d0f1'].join('');
 
 const CORPUS: Sample[] = [
 	{
@@ -103,6 +119,49 @@ const CORPUS: Sample[] = [
 		input: `payload ${LONG_MIXED_BASE64} rejected`,
 		needle: LONG_MIXED_BASE64,
 		family: 'base64',
+	},
+	// ---- #3893 AC13 (F11) vendor families: RED at base at BOTH sites. ----
+	{
+		id: 'stripe-sk-live',
+		input: `charge failed for ${STRIPE_LIVE} now`,
+		needle: STRIPE_LIVE,
+		family: 'stripe',
+	},
+	{
+		id: 'stripe-rk-test',
+		input: `rotate the restricted key ${STRIPE_RK} expired`,
+		needle: STRIPE_RK,
+		family: 'stripe',
+	},
+	{
+		id: 'gitlab-glpat',
+		input: `push rejected for ${GITLAB_PAT}`,
+		needle: GITLAB_PAT,
+		family: 'gitlab',
+	},
+	{
+		id: 'gitlab-glptt',
+		input: `trigger failed with ${GITLAB_PTT}`,
+		needle: GITLAB_PTT,
+		family: 'gitlab',
+	},
+	{
+		id: 'npm-granular',
+		input: `publish failed for ${NPM_TOKEN}`,
+		needle: NPM_TOKEN,
+		family: 'npm',
+	},
+	{
+		id: 'huggingface-hf',
+		input: `model download denied for ${HF_TOKEN}`,
+		needle: HF_TOKEN,
+		family: 'huggingface',
+	},
+	{
+		id: 'xai-key',
+		input: `grok quota exceeded on ${XAI_TOKEN}`,
+		needle: XAI_TOKEN,
+		family: 'xai',
 	},
 ];
 

@@ -352,6 +352,29 @@ const BARE_TOKEN_VALUE_PATTERNS: ReadonlyArray<{
 	{ family: 'google', re: /\bya29\.[A-Za-z0-9_-]{20,}/g },
 	// #3712 F-006: Groq service keys.
 	{ family: 'groq', re: /\bgsk_[A-Za-z0-9]{20,}/g },
+	// #3893 AC13 (F11): additional vendor families, mirrored at the shell
+	// site (SHELL_BARE_TOKEN_VALUE_PATTERNS) and pinned by the shared parity
+	// corpus. Bounds are conservative minimums per vendor so digests, hashes,
+	// and ordinary prose stay visible.
+	// Stripe secret/restricted keys: mirrors memory's stripe arm verbatim;
+	// \b-anchored both ends (bare `sk_`/`rk_` collides with prose like
+	// "risk_live_…").
+	{
+		family: 'stripe',
+		re: /\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{24,}\b/g,
+	},
+	// GitLab PAT/trigger tokens: sub-15 `glpat-` fragments are not real
+	// tokens and stay visible.
+	{ family: 'gitlab', re: /\bgl(?:pat|ptt)-[A-Za-z0-9_-]{15,}/g },
+	// npm granular access tokens: npm's shortest issued shapes are well past
+	// 30 alnum body chars.
+	{ family: 'npm', re: /\bnpm_[A-Za-z0-9]{30,}/g },
+	// Hugging Face access tokens: real tokens are 34+; short `hf_`
+	// fragments in prose stay visible.
+	{ family: 'huggingface', re: /\bhf_[A-Za-z0-9]{30,}/g },
+	// xAI (Grok) API keys: real keys are far longer than the 20-char
+	// conservative minimum; hyphenated prose stays visible.
+	{ family: 'xai', re: /\bxai-[A-Za-z0-9]{20,}/g },
 	// #3712 F-006: JWTs (the HEADER segment is base64url of `{"…`, so it
 	// starts with eyJ; the signature closes the token). Matches the WHOLE
 	// three-segment token as one span.
@@ -387,6 +410,117 @@ const BARE_TOKEN_ZERO_WIDTH_FILL_RE =
 	/\p{Cf}|\p{Default_Ignorable_Code_Point}/u;
 
 /**
+ * #3893 AC14 (F12): quote-aware dash-flag redaction for the display site —
+ * mirrors `redactDashFlags` at the shell site
+ * (src/hooks/guardrails/helpers.ts). Deliberately a mirror, not a shared
+ * module, per the BARE_TOKEN_VALUE_PATTERNS precedent: the failure-display
+ * path keeps its small import graph and bounded pipeline, and the parity
+ * corpus (invocation-failure-bare-tokens-3165 + the #3710/#3893 suites) pins
+ * both sites against the same fixtures so they cannot drift. Until this arm,
+ * dash-flag values were left wholly raw at the display site while the shell
+ * site redacted them (the #3893 lockstep gap).
+ *
+ * Manual left-to-right scan (same O(n) shape and rationale as the shell
+ * site): the flag name is `[a-zA-Z_-]+` with zero-width fill bytes
+ * (Cf/DI/Mn/U+2800 — the shell site's extended class) TRANSPARENT to the
+ * continuation and to the keyword probe but kept in the emitted bytes;
+ * `--name=value` redacts the non-space value run; `--name<ws>value` redacts
+ * the next token, or — when the value opens with a quote — the whole span
+ * through the MATCHING close quote (or input end). Only the VALUE is
+ * replaced (with `[REDACTED]`); flag names, separators, whitespace, and
+ * non-keyword flags are emitted unchanged.
+ */
+const DASH_FLAG_KEYWORD_RE =
+	/token|secret|password|passwd|api[_-]?key|apikey|auth|credential|private[_-]?key|access[_-]?key/i;
+const DASH_FLAG_FILL_RE =
+	/\p{Cf}|\p{Default_Ignorable_Code_Point}|\p{Mn}|\u2800/u;
+const DASH_FLAG_FILL_GLOBAL_RE = new RegExp(DASH_FLAG_FILL_RE.source, 'gu');
+
+function isDashFlagNameChar(c: string): boolean {
+	return (
+		(c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c === '-' || c === '_'
+	);
+}
+
+function redactDashFlagsDisplay(input: string): string {
+	// #3893 AC13 fill-split pre-check, mirrored: when the raw text has no
+	// keyword, re-test a fill-condensed copy (cheap; miss path only) so a
+	// zero-width byte inside `--pass\u200Bword` cannot skip the whole scan.
+	if (
+		!DASH_FLAG_KEYWORD_RE.test(input) &&
+		!DASH_FLAG_KEYWORD_RE.test(input.replace(DASH_FLAG_FILL_GLOBAL_RE, ''))
+	) {
+		return input;
+	}
+	let out = '';
+	let i = 0;
+	while (i < input.length) {
+		const dash = input.indexOf('--', i);
+		if (dash < 0) {
+			out += input.slice(i);
+			break;
+		}
+		out += input.slice(i, dash);
+		let k = dash + 2;
+		let keywordName = '';
+		while (k < input.length) {
+			const c = input[k];
+			if (isDashFlagNameChar(c)) {
+				keywordName += c;
+				k += 1;
+			} else if (DASH_FLAG_FILL_RE.test(c)) {
+				k += 1;
+			} else {
+				break;
+			}
+		}
+		const name = input.slice(dash + 2, k);
+		if (keywordName.length > 0 && DASH_FLAG_KEYWORD_RE.test(keywordName)) {
+			if (input[k] === '=') {
+				let v = k + 1;
+				while (v < input.length && !/\s/.test(input[v])) v++;
+				out += v > k + 1 ? `--${name}=[REDACTED]` : `--${name}=`;
+				i = v;
+				continue;
+			}
+			if (k < input.length && /\s/.test(input[k])) {
+				let wsEnd = k;
+				while (wsEnd < input.length && /\s/.test(input[wsEnd])) wsEnd++;
+				if (
+					wsEnd < input.length &&
+					!(input[wsEnd] === '-' && input[wsEnd + 1] === '-')
+				) {
+					// Quote-aware value (#3893 AC14): consume through the MATCHING
+					// close quote (or input end) so a multi-word quoted secret
+					// redacts whole; each quote type respects its own closer.
+					const quote = input[wsEnd];
+					let v = wsEnd;
+					if (quote === '"' || quote === "'") {
+						v = wsEnd + 1;
+						while (v < input.length && input[v] !== quote) v++;
+						if (v < input.length) v += 1; // include the close quote
+					} else {
+						while (v < input.length && !/\s/.test(input[v])) v++;
+					}
+					out += `--${name}${input.slice(k, wsEnd)}[REDACTED]`;
+					i = v;
+					continue;
+				}
+				out += `--${name}${input.slice(k, wsEnd)}`;
+				i = wsEnd;
+				continue;
+			}
+			out += `--${name}`;
+			i = k;
+			continue;
+		}
+		out += `--${name}`;
+		i = k;
+	}
+	return out;
+}
+
+/**
  * Redacts secrets/URLs and strips control chars for terminal/display safety.
  * Order of operations (each step exists to keep a prior fix closed):
  *   1. slice to MAX_SANITIZE_INPUT_CHARS (regex-work bound)
@@ -394,29 +528,36 @@ const BARE_TOKEN_ZERO_WIDTH_FILL_RE =
  *      final byte `m` is a word character and defeated `\b`; substituting a
  *      separator can only create boundaries, never remove one, so the #2363
  *      split/join fixes stay closed)
- *   3. redact URLs (against the CSI-neutralized view)
- *   4. redact credential KV pairs — keyword match is UNANCHORED and tolerant
+ *   3. redact dash-flag values (`--password "multi word"` / `--token=x`),
+ *      quote-aware and mirrored from the shell site's redactDashFlags
+ *      (#3893 AC14 — before this step the display site left dash flags
+ *      wholly raw while the shell site redacted them)
+ *   4. redact URLs (against the CSI-neutralized view)
+ *   5. redact credential KV pairs — keyword match is UNANCHORED and tolerant
  *      of glued key names and identifier suffixes (#2369 Gap 1), and the
  *      value matcher tolerates a fill-tolerant auth scheme word (Basic,
  *      Digest, …) between separator and credential so `Authorization: Basic
  *      <base64>` redacts the credential, not just the scheme
- *   5. redact SCREAMING_CASE KV pairs (unchanged shape)
- *   6. redact bare well-known credential VALUE shapes wherever they appear,
+ *   6. redact SCREAMING_CASE KV pairs (unchanged shape)
+ *   7. redact bare well-known credential VALUE shapes wherever they appear,
  *      no key=value span needed (#3165 F-1 — see BARE_TOKEN_VALUE_PATTERNS),
  *      matching on a Cf/DI-deletion condensed view UNIONED with the
  *      uncondensed matches so an invisible byte can neither split a token
  *      past the arm NOR regress head behavior when it was itself the \b
  *      boundary provider (visible fill inside a bare token stays a
  *      documented residual — see the FILL note above)
- *   7. strip residual control/format/DI runs to spaces
- *   8. sweep residual over-long bare `[<params>m` SGR bodies (the >32-char
+ *   8. strip residual control/format/DI runs to spaces
+ *   9. sweep residual over-long bare `[<params>m` SGR bodies (the >32-char
  *      CSI tail the bounded pre-pass cannot match)
- *   9. trim + 512-byte UTF-8 bound
+ *   10. trim + 512-byte UTF-8 bound
  *
  * Best-effort defense-in-depth for a log-display string, NOT a security
- * boundary: combining marks (U+0300 class) still defeat keyword matching and
- * are deliberately not fixed (#2369 Gap 3 — sweeping `\p{Mn}` would over-redact
- * every legitimate combining accent in non-Latin diagnostics). Glued-key
+ * boundary: combining marks (U+0300 class) still defeat the KV keyword
+ * matching above and are deliberately not fixed there (#2369 Gap 3 —
+ * sweeping `\p{Mn}` through the KV arms would over-redact every legitimate
+ * combining accent in non-Latin diagnostics; the #3893 dash-flag arm skips
+ * fill bytes — Cf/DI/Mn/U+2800 — in its keyword CLASSIFICATION view only,
+ * leaving its emitted bytes untouched). Glued-key
  * matching (Gap 1) and the CSI pre-pass (Gap 2) were added by #2485; the
  * bare-token arm gained the Cf/DI deletion sweep in the PR #3705 review
  * round (F-1), with visible splits (whitespace/Cc) disclosed above as its
@@ -425,7 +566,12 @@ const BARE_TOKEN_ZERO_WIDTH_FILL_RE =
 export function sanitizeFailureEvidenceDisplay(value: string): string {
 	const bounded = value.slice(0, MAX_SANITIZE_INPUT_CHARS);
 	const neutralized = bounded.replace(CSI_SEQUENCE, ' ');
-	const redacted = neutralized
+	// #3893 AC14 (F12): quote-aware dash-flag values, mirrored from the shell
+	// site's redactDashFlags — runs on the CSI-neutralized view so a residual
+	// SGR body cannot shield the flag name, and BEFORE the KV/bare arms so the
+	// emitted [REDACTED] spans are final for the flag-value surface.
+	const dashRedacted = redactDashFlagsDisplay(neutralized);
+	const redacted = dashRedacted
 		.replace(/\bhttps?:\/\/[^\s'"<>]+/gi, (match) => redactUrl(match))
 		// #3712 azure CONTEXTUAL arm: connection-string `AccountKey=<base64>`
 		// material. The WHOLE `key=value` span collapses to the BARE

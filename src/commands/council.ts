@@ -75,7 +75,7 @@ const USAGE = [
 	'  question         The question to put to the council',
 	'  --spec-review    Use spec_review mode (single advisory pass on a draft spec)',
 	'',
-	'Requires council.general.enabled: true and either searchProvider "keenable" (no key needed) or a configured search API key in the resolved config: global ~/.config/opencode/opencode-swarm.json, then project .opencode/opencode-swarm.json overrides.',
+	'Requires council.general.enabled: true and either searchProvider "keenable" (no key needed), searchProvider "specstream" with SPECSTREAM_API_KEY set (council.general.searchApiKey is not used for it), or a configured Tavily or Brave search API key in the resolved config: global ~/.config/opencode/opencode-swarm.json, then project .opencode/opencode-swarm.json overrides.',
 ].join('\n');
 
 export async function handleCouncilCommand(

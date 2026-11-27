@@ -120,6 +120,7 @@ import {
 } from './phase-complete/gates/planned-tasks-gate.js';
 import {
 	collectPhaseGateReport,
+	findPhaseCommitLockContention,
 	formatPhaseGateCompatibility,
 	type PhaseGateCheck,
 	type PhaseGateReport,
@@ -892,11 +893,23 @@ export async function executePhaseComplete(
 						? `\nPhase identity note for phase ${skew.phase_id}: an unresolved obligation was recorded under phase id ${skew.stored_phase_id} (label "${stored}") and matched this phase via its label — base-parity matching keeps it visible here. Resolve it or record its outcome to proceed.`
 						: `\nPhase label skew detected for phase ${skew.phase_id}: gate queried "${queried}" but obligations were recorded under "${stored}". Matching used the stable phase id.`;
 			}
+			// #3915 AC5: a receipt-lock timeout means another writer holds the
+			// SHARED knowledge-receipt lock — the same concurrent-commit
+			// contention the plan-lock branch classifies as PHASE_COMMIT_LOCKED.
+			// The losing caller has written nothing and the recovery is the
+			// identical retry, so classify the entry as retryable contention
+			// (the gate-report detail and its recovery are kept unchanged);
+			// every other fail-closed cause stays DIRECTIVE_GATE_FAILED_CLOSED.
+			const receiptLockTimeout =
+				directiveGate.failedClosed &&
+				directiveGate.failure?.code === 'RECEIPT_LOCK_TIMEOUT';
 			return {
 				...passGate(),
 				blocked: true,
 				reason: directiveGate.failedClosed
-					? 'DIRECTIVE_GATE_FAILED_CLOSED'
+					? receiptLockTimeout
+						? 'PHASE_COMMIT_LOCKED'
+						: 'DIRECTIVE_GATE_FAILED_CLOSED'
 					: 'UNRESOLVED_CRITICAL_DIRECTIVES',
 				message: directiveGate.failedClosed
 					? 'Critical-directive gate could not read authoritative receipt state; failing closed.'
@@ -1418,6 +1431,34 @@ export async function executePhaseComplete(
 			lockedPreflight.outcome !== 'pass' ||
 			lockedPreflight.reportHash !== preflightReport.reportHash
 		) {
+			// #3915 AC5: when the failing entry is the directive gate's
+			// receipt-lock timeout, the locked re-run saw concurrent-commit
+			// contention on the SHARED knowledge-receipt lock — the retryable
+			// PHASE_COMMIT_LOCKED class, not a stale-evidence block. The losing
+			// caller has written nothing (this branch precedes the close-intent
+			// write), so the recovery is the same retry as the plan-lock branch.
+			const contention = findPhaseCommitLockContention(lockedPreflight);
+			if (contention) {
+				return JSON.stringify({
+					success: false,
+					phase,
+					status: 'incomplete' as const,
+					reason: 'PHASE_COMMIT_LOCKED',
+					message:
+						'Plan write is locked by concurrent knowledge-receipt ledger writers (directive-gate bounded read timed out).',
+					agentsDispatched,
+					agentsMissing: [],
+					warnings,
+					gate_report: lockedPreflight,
+					errors: [
+						'Concurrent knowledge-receipt write detected; critical-directive gate read timed out.',
+					],
+					recovery: contention.recovery ?? {
+						kind: 'retry',
+						action: 'phase_complete',
+					},
+				});
+			}
 			return JSON.stringify({
 				success: false,
 				phase,
@@ -1569,6 +1610,34 @@ export async function executePhaseComplete(
 			checks: preflightChecks,
 		});
 		if (commitPreflight.outcome !== 'pass') {
+			// #3915 AC5: same contention class as the locked-region re-run —
+			// when the failing entry is the directive gate's receipt-lock
+			// timeout, the commit boundary observed concurrent knowledge-receipt
+			// writers, which is retryable PHASE_COMMIT_LOCKED, not a stale
+			// evidence block. No plan transition or completion event was
+			// written either way.
+			const contention = findPhaseCommitLockContention(commitPreflight);
+			if (contention) {
+				return JSON.stringify({
+					success: false,
+					phase,
+					status: 'incomplete' as const,
+					reason: 'PHASE_COMMIT_LOCKED',
+					message:
+						'Plan write is locked by concurrent knowledge-receipt ledger writers (directive-gate bounded read timed out).',
+					agentsDispatched,
+					agentsMissing: [],
+					warnings,
+					gate_report: commitPreflight,
+					errors: [
+						'Concurrent knowledge-receipt write detected; critical-directive gate read timed out.',
+					],
+					recovery: contention.recovery ?? {
+						kind: 'retry',
+						action: 'phase_complete',
+					},
+				});
+			}
 			return JSON.stringify({
 				success: false,
 				phase,

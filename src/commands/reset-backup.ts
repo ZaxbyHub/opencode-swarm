@@ -498,7 +498,7 @@ export function backupTrackedChangesBeforeRollback(
 		// absent (ENOENT/ENOTDIR) — an unreadable existing entry (EACCES, etc.)
 		// is NOT "absent" and must never take the shortcut unbacked.
 		const worktreeIsDirLike =
-			absent || (stat !== null && stat.isDirectory() && !stat.isSymbolicLink());
+			absent || (stat?.isDirectory() && !stat.isSymbolicLink());
 		if (captured?.gitlink && worktreeIsDirLike) {
 			// A dirty submodule pointer has no worktree bytes to back up (the
 			// reset only moves the pointer and never recurses into the

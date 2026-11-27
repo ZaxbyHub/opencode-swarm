@@ -145,7 +145,8 @@ export function isInDeclaredScope(
  * Covers env-var assignments (POSIX/PowerShell `$env:`/cmd `set`), CLI flags
  * (sensitive names, both `=`-joined and space-separated), Bearer/Basic auth,
  * `-H` header flags, URL credentials (`scheme://user:pass@host`), well-known
- * token VALUE shapes (OpenAI/GitHub/AWS/Slack/Google — content-based, so they
+ * token VALUE shapes (OpenAI/GitHub/AWS/Slack/Google/Stripe/GitLab/npm/
+ * Hugging Face/xAI — content-based, so they
  * fire regardless of the surrounding flag name), and long base64-like payload
  * runs (≥80 chars with mixed case + digit — the encoded-wrapper/heredoc
  * minimization class from issue #2040; plain hex SHAs and short payloads are
@@ -159,15 +160,24 @@ export function isInDeclaredScope(
  * secret material.
  */
 /**
- * Cf (format) and Default_Ignorable code points: bytes that render as
- * NOTHING. A byte from either class inside a bare credential token splits it
- * past every `\b`-anchored bare shape (#3730 — the display site gained this
- * deletion view in the #3165/#3705 work; the shell mirror mirrors it here).
+ * Cf (format), Default_Ignorable code points, non-spacing marks (\p{Mn}),
+ * and U+2800 (BRAILLE PATTERN BLANK): bytes that render as NOTHING (a
+ * combining mark renders as part of its base character, the braille blank as
+ * empty space). A byte from any of these classes inside a bare credential
+ * token splits it past every `\b`-anchored bare shape (#3730 — the display
+ * site gained this deletion view in the #3165/#3705 work; the shell mirror
+ * mirrors it here; #3893 AC11 extends the class set with \p{Mn} + U+2800 in
+ * lockstep with the memory site). Braille is restricted to U+2800 (the
+ * invisible blank) — other braille patterns are visible glyphs and broadening
+ * the class to all of them would over-redact legitimate braille content.
  * Deletion is the correct transform for this class: unlike visible bytes,
  * removing an invisible byte cannot change what the reader sees — and the
  * deletion happens only in the MATCHING view, never in the output.
  */
-const ZERO_WIDTH_FILL_RE = /\p{Cf}|\p{Default_Ignorable_Code_Point}/u;
+const ZERO_WIDTH_FILL_RE =
+	/\p{Cf}|\p{Default_Ignorable_Code_Point}|\p{Mn}|\u2800/u;
+/** Global twin of {@link ZERO_WIDTH_FILL_RE} for whole-string condensation. */
+const ZERO_WIDTH_FILL_GLOBAL_RE = new RegExp(ZERO_WIDTH_FILL_RE.source, 'gu');
 
 /** Sensitive dash-flag keyword set (lockstep with the KV/`$env`/`set` name arms). */
 const DASH_FLAG_KEYWORD_RE =
@@ -198,11 +208,28 @@ function isDashFlagNameChar(c: string): boolean {
  * The flag name is `[a-zA-Z_-]+` read to its delimiter (`=`, whitespace, or a
  * non-name char) with no length cap, so a keyword anywhere in the name is found
  * and a non-keyword flag never re-scans its own name. A digit between the
- * keyword and the value (`--token2=x`) stops the name, so it is not treated as a
- * `token` flag — exactly as the base arms did.
+ * keyword and the value (`--token2=x`) stops the name, so it is not treated as
+ * a `token` flag — exactly as the base arms did. #3893 AC13: zero-width fill
+ * bytes (Cf/DI/Mn/U+2800) inside the name are transparent to the continuation
+ * and to the keyword probe (`--pass\u200Bword` classifies as `password`) but
+ * stay in the emitted bytes; the keyword pre-check likewise re-tests a
+ * fill-condensed copy when the raw text misses. #3893 AC14: a space-form value
+ * that opens with a quote is consumed through its MATCHING close quote (or
+ * input end) so a quoted multi-word secret redacts whole.
  */
 function redactDashFlags(input: string): string {
-	if (!DASH_FLAG_KEYWORD_RE.test(input)) return input;
+	// #3893 AC13: the pre-check must survive a fill byte inside the flag NAME —
+	// raw `--pass\u200Bword=…` contains no contiguous keyword, so a raw-only
+	// test returned early and the whole command escaped the scan. When the raw
+	// test misses, re-test a fill-condensed copy (cheap; only on the miss
+	// path). The condensed copy is for the PRE-CHECK only — the scan below
+	// always runs on the raw input so emitted bytes are unchanged.
+	if (
+		!DASH_FLAG_KEYWORD_RE.test(input) &&
+		!DASH_FLAG_KEYWORD_RE.test(input.replace(ZERO_WIDTH_FILL_GLOBAL_RE, ''))
+	) {
+		return input;
+	}
 	let out = '';
 	let i = 0;
 	while (i < input.length) {
@@ -212,11 +239,26 @@ function redactDashFlags(input: string): string {
 			break;
 		}
 		out += input.slice(i, dash);
-		// Read the full flag name [a-zA-Z_-]+ (to its delimiter or the end).
+		// Read the full flag name: [a-zA-Z_-]+ name chars (the SHAPE test) with
+		// zero-width fill bytes TRANSPARENT to the continuation (#3893 AC13) —
+		// a fill byte neither terminates the name nor reaches the keyword probe,
+		// so `--pass\u200Bword` classifies as `password`. The fill bytes stay in
+		// the EMITTED name (raw slice below); only classification sees them gone.
 		let k = dash + 2;
-		while (k < input.length && isDashFlagNameChar(input[k])) k++;
+		let keywordName = '';
+		while (k < input.length) {
+			const c = input[k];
+			if (isDashFlagNameChar(c)) {
+				keywordName += c;
+				k += 1;
+			} else if (ZERO_WIDTH_FILL_RE.test(c)) {
+				k += 1;
+			} else {
+				break;
+			}
+		}
 		const name = input.slice(dash + 2, k);
-		if (name.length > 0 && DASH_FLAG_KEYWORD_RE.test(name)) {
+		if (keywordName.length > 0 && DASH_FLAG_KEYWORD_RE.test(keywordName)) {
 			if (input[k] === '=') {
 				// `--name=value`: the value is the non-space run; redact it whole.
 				let v = k + 1;
@@ -244,6 +286,20 @@ function redactDashFlags(input: string): string {
 					wsEnd < input.length &&
 					!(input[wsEnd] === '-' && input[wsEnd + 1] === '-')
 				) {
+					// #3893 AC14 (F12): a value that opens with a quote is consumed
+					// through the MATCHING close quote (or input end) so the WHOLE
+					// quoted span redacts — `--password "first second"` must not
+					// leak `second`. Each quote type respects its own closer; the
+					// equals form is unchanged.
+					const quote = input[wsEnd];
+					if (quote === '"' || quote === "'") {
+						let v = wsEnd + 1;
+						while (v < input.length && input[v] !== quote) v++;
+						if (v < input.length) v += 1; // include the close quote
+						out += `--${name}${input.slice(k, wsEnd)}[REDACTED]`;
+						i = v;
+						continue;
+					}
 					let v = wsEnd;
 					while (v < input.length && !/\s/.test(input[v])) v++;
 					out += `--${name}${input.slice(k, wsEnd)}[REDACTED]`;
@@ -303,6 +359,29 @@ const SHELL_BARE_TOKEN_VALUE_PATTERNS: ReadonlyArray<{
 	{ label: '[REDACTED:google]', re: /\bGOCSPX-[A-Za-z0-9_-]{20,}/g },
 	{ label: '[REDACTED:google]', re: /\bya29\.[A-Za-z0-9_-]{20,}/g },
 	{ label: '[REDACTED:groq]', re: /\bgsk_[A-Za-z0-9]{20,}/g },
+	// #3893 AC13 (F11): additional vendor families, mirrored at the display
+	// site and in memory's family table. Bounds are conservative minimums per
+	// vendor so digests, hashes, and ordinary prose stay visible.
+	// Stripe secret/restricted keys: `sk_`/`rk_` + live/test + >=24 alnum
+	// (mirrors memory's stripe arm verbatim; \b-anchored both ends because
+	// the bare `sk_`/`rk_` prefix collides with prose like "risk_live_…").
+	{
+		label: '[REDACTED:stripe]',
+		re: /\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{24,}\b/g,
+	},
+	// GitLab PAT/trigger tokens: glpat-/glptt- + >=15 of [A-Za-z0-9_-]
+	// (sub-15 `glpat-` fragments are not real tokens; keeps prose like
+	// "glpat-1" visible).
+	{ label: '[REDACTED:gitlab]', re: /\bgl(?:pat|ptt)-[A-Za-z0-9_-]{15,}/g },
+	// npm granular access tokens: npm_ + >=30 alnum (npm's shortest issued
+	// shapes are well past 30; benign `npm_`-prefixed identifiers are short).
+	{ label: '[REDACTED:npm]', re: /\bnpm_[A-Za-z0-9]{30,}/g },
+	// Hugging Face access tokens: hf_ + >=30 alnum (real tokens are 34+;
+	// short `hf_` fragments in prose stay visible).
+	{ label: '[REDACTED:huggingface]', re: /\bhf_[A-Za-z0-9]{30,}/g },
+	// xAI (Grok) API keys: xai- + >=20 alnum (real keys are far longer;
+	// prose like "xai-1" or hyphenated words stay visible).
+	{ label: '[REDACTED:xai]', re: /\bxai-[A-Za-z0-9]{20,}/g },
 	// #3710 review: the PAYLOAD segment is any base64url run, not only a JSON
 	// object — an empty claims object encodes as `e30`, not `eyJ`.
 	{

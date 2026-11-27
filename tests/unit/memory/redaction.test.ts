@@ -92,8 +92,16 @@ describe('memory redaction', () => {
 			'-----END PRIVATE KEY-----',
 		].join('\n');
 
+		// #3893/#3915 F11: the no-END fallback arm (private_key_block_nogap)
+		// also reports the BEGIN+material prefix of a COMPLETE block at the
+		// DETECTION level — the same multi-type double-report the
+		// openssh_private_key_block arm has always had below. Redaction output
+		// is unchanged: sequential priority redacts the whole block with the
+		// END-delimited private_key_block arm first, and the fallback then
+		// finds no BEGIN marker left to match.
 		expect(findSecrets(text).map((finding) => finding.type)).toEqual([
 			'private_key_block',
+			'private_key_block_nogap',
 		]);
 		expect(redactSecrets(text)).toBe('[REDACTED:private_key_block]');
 	});

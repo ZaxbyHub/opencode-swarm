@@ -31,12 +31,15 @@
  *   over the raw spans is preserved by the two-view fix).
  * - The policy row pins the POST-fix literals 4_000_029/4_000_028 (R1 bumps
  *   REDACTION_POLICY_SALT 3 -> 4): RED at base (salt 3 computes 3_000_029),
- *   GREEN after the fix.
+ *   GREEN after the fix. (#3893/#3915 update: salt is now 5 and the family
+ *   count is 15 — the PEM no-END fallback joined — so the row pins
+ *   5_000_031/5_000_030.)
  *
- * Family-count freeze: SECRET_PATTERNS stays at 14 families — the
- * computeRedactionPolicyVersion pin below (mirroring
+ * Family-count freeze: SECRET_PATTERNS stays at 15 families (14 through
+ * #3743; #3893/#3915 added the private_key_block_nogap no-END PEM fallback) —
+ * the computeRedactionPolicyVersion pin below (mirroring
  * tests/unit/memory/redaction-policy-version-bump.test.ts:60-67) fails if a
- * family is added or removed while riding this fix.
+ * family is added or removed while riding a fix.
  *
  * Round-2 amendments (plan v3 R13, critic-round-2.md "Test Gaps"):
  * - redactSecrets SPLIT-FORM assertions for EVERY family (previously only
@@ -462,12 +465,12 @@ describe('memory secret scanner: Cf/DI zero-width split tolerance (#3743 AC1)', 
 		);
 	}, 30_000);
 
-	test('policy version bumps to salt 4 with 14 families (RED at base: salt 3 computes 3_000_029; GREEN after the fix — R1)', () => {
+	test('policy version bumps to salt 5 with 15 families (#3893/#3915: PEM nogap fallback; salt 4/14 families computed 4_000_029 — R1)', () => {
 		expect(computeRedactionPolicyVersion({ rejectDurableSecrets: true })).toBe(
-			4_000_029,
+			5_000_031,
 		);
 		expect(computeRedactionPolicyVersion({ rejectDurableSecrets: false })).toBe(
-			4_000_028,
+			5_000_030,
 		);
 	});
 });

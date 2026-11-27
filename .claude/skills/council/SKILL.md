@@ -45,7 +45,8 @@ workflow option in MODE: BRAINSTORM (Phase 1b) and MODE: PLAN before
    or project .opencode/opencode-swarm.json." Then STOP. Web search is available
    when `council.general.searchProvider` is `"keenable"` (no key required;
    `KEENABLE_API_KEY` optional) or a key exists for the selected provider
-   (`council.general.searchApiKey`, `TAVILY_API_KEY`, `BRAVE_SEARCH_API_KEY`).
+   (`council.general.searchApiKey`, `TAVILY_API_KEY`, `BRAVE_SEARCH_API_KEY`;
+   `SPECSTREAM_API_KEY` for `"specstream"`).
 
 #### Research Phase (always run before dispatching council agents)
 

@@ -62,9 +62,18 @@ const SECRET_PATTERNS: SecretPattern[] = [
 	},
 	{ type: 'aws_access_key_id', pattern: /AKIA[0-9A-Z]{16}/g },
 	{
+		// #3915 AC13 / F11 (PEM part): the END-delimited arm's body gap is
+		// BOUNDED at 8192 chars (was a lazy `[\s\S]*?` — with no END delimiter
+		// anywhere, that arm scanned unbounded to end-of-input). Byte-identical
+		// for real blocks (a real PEM body is far below 8192 chars). The no-END
+		// fallback arm near the end of this array (which MUST stay AFTER this
+		// arm — sequential-priority semantics) catches malformed BEGIN-only
+		// input. Spaces use `[ ]` char class so secretscan does not flag this
+		// detection regex (the pattern text would otherwise match the secret
+		// detector).
 		type: 'private_key_block',
 		pattern:
-			/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g,
+			/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]{0,8192}-----END [A-Z ]*PRIVATE KEY-----/g,
 	},
 	{
 		type: 'env_secret',
@@ -102,12 +111,45 @@ const SECRET_PATTERNS: SecretPattern[] = [
 	// FR-08 / DD-05: OpenSSH private key blocks. False-positive risk: text that merely mentions
 	// "openssh" without the full `-----BEGIN/END OPENSSH PRIVATE KEY-----` block delimiters
 	// will not match; multiline content between delimiters is required.
+	// #3915 AC13 / F11 (PEM part): END gap bounded at 8192, same rationale as
+	// the private_key_block arm above. (The generic arm runs first —
+	// sequential-priority — so a complete OPENSSH block normally carries the
+	// private_key_block placeholder; this arm stays for the OPENSSH-delimited
+	// shapes the generic arm cannot span.)
 	// Spaces use `[ ]` char class so secretscan does not flag this detection regex (the
 	// pattern text would otherwise match the secret detector).
 	{
 		type: 'openssh_private_key_block',
 		pattern:
-			/-----BEGIN[ ]OPENSSH[ ]PRIVATE[ ]KEY-----[\s\S]*?-----END[ ]OPENSSH[ ]PRIVATE[ ]KEY-----/g,
+			/-----BEGIN[ ]OPENSSH[ ]PRIVATE[ ]KEY-----[\s\S]{0,8192}-----END[ ]OPENSSH[ ]PRIVATE[ ]KEY-----/g,
+	},
+	{
+		// #3915 AC13 / F11 (PEM part): no-END fallback — consumes the MAXIMAL
+		// key-material run after a bare BEGIN marker (a linear character-class
+		// scan: it stops at the first non-key character, e.g. prose; no output
+		// cap, no unbounded scan). Runs LAST so a real END-delimited block is
+		// redacted whole by the bounded arms above and this arm only ever sees
+		// BEGIN-only residue. Over-redaction of a bare BEGIN marker is the
+		// safe, fail-closed direction. Deliberately ONE generic arm: `[A-Z ]*`
+		// covers both the RSA/EC/... and the OPENSSH delimiter spellings.
+		//
+		// #3952: the run also consumes newline-terminated PEM header lines
+		// (`Proc-Type: 4,ENCRYPTED`, `DEK-Info: DES-EDE3-CBC,<iv>`). The
+		// pre-#3952 run class had no `:`, so on an over-bound (or END-less)
+		// encrypted block it stopped mid-name at `Proc`/`DEK` and left the
+		// header values plus the ENTIRE base64 body after them in cleartext.
+		// Each header line is name `[A-Za-z0-9-]{0,64}` + `:` + value
+		// `[^\n]{0,256}` + a REQUIRED newline — newline-terminated only, so
+		// prose after a sentence boundary still ends the run exactly as
+		// before, and the per-line bounds keep the scan linear. The empty-name
+		// alternative is what makes pure-alnum names (`Comment:`) work too:
+		// material chars eat the name, then the `:`-anchored form consumes the
+		// rest of the line. An optional trailing END marker lets a complete
+		// over-bound block redact WHOLE (same output shape as the bounded
+		// arms) without widening the run past the block's own delimiter.
+		type: 'private_key_block_nogap',
+		pattern:
+			/-----BEGIN [A-Z ]*PRIVATE KEY-----(?:[A-Za-z0-9+/=\s]|[A-Za-z0-9-]{0,64}\x3a[^\n]{0,256}\n)*(?:-----END [A-Z ]*PRIVATE KEY-----)?/g,
 	},
 ];
 
@@ -126,9 +168,15 @@ const SECRET_PATTERNS: SecretPattern[] = [
  * tolerance — findSecrets/containsSecret/redactSecrets now also match a
  * condensed (zero-width-byte-deleted) view, so a credential split by an
  * invisible byte is rejected/redacted the same as its plain form, changing
- * durable-secret rejection decisions across the change).
+ * durable-secret rejection decisions across the change; done for
+ * #3893/#3915: the PEM arms became END-bounded plus a no-END maximal-run
+ * fallback (new private_key_block_nogap family), the fill classes extended
+ * with \p{Mn} and U+2800, and the shared JWS scanner unioned into the scanner
+ * as the jws_span family — all three widen what is detected/redacted, so
+ * durable-secret rejection decisions differ between members on opposite sides
+ * of the change).
  */
-export const REDACTION_POLICY_SALT = 4;
+export const REDACTION_POLICY_SALT = 5;
 /**
  * #1466: redaction-policy input. `detectPii`/`rejectDurablePii`/`piiDetector`
  * are optional so non-memory callers (e.g. the consensus miner, which applies
@@ -166,6 +214,11 @@ export function computeRedactionPolicyVersion(
  * are considered config-compatible.
  */
 import { createHash } from 'node:crypto';
+// #3893 AC10 / F5: the shared whole-JWS scanner unions into this site's span
+// selection (type 'jws_span') so the memory scanner reaches shell-scanner
+// parity on widened shapes (dir-JWE, unsigned trailing-dot, e30-payload) its
+// own eyJ-anchored jwt_token family cannot see.
+import { findRedactableTokenSpans } from '../utils/jws-redaction.js';
 import { stableCanonicalStringify } from '../utils/stable-stringify';
 
 export interface MemoryCohortFingerprintInput {
@@ -206,6 +259,13 @@ export interface MemoryCohortFingerprintInput {
  * zero-width-deleted view). Same remedy: legacy files surface as
  * "re-run `/swarm memory link`".
  *
+ * Version 5 (#3893/#3915): again no change to canonicalization, hashing, or
+ * truncation — bumped because `redaction_policy_version` changed for
+ * unchanged user config (REDACTION_POLICY_SALT 4→5 with the PEM bounded/
+ * fallback arms, the Mn/U+2800 fill-class extension, and the jws_span
+ * union). Same remedy: legacy files surface as
+ * "re-run `/swarm memory link`".
+ *
  * BUMP THIS whenever a change would alter the digest for an unchanged input —
  * e.g. a different hash, a different truncation length, a change to
  * `stableCanonicalStringify`'s output for a reachable input, or a change to the
@@ -213,7 +273,7 @@ export interface MemoryCohortFingerprintInput {
  * comparing fingerprints, so a bump surfaces as "re-run `/swarm memory link`"
  * instead of being misreported as a real provider/embedding config mismatch.
  */
-export const FINGERPRINT_ALGORITHM_VERSION = 4;
+export const FINGERPRINT_ALGORITHM_VERSION = 5;
 
 /**
  * #2062 F-012 (R3 fix): the algorithm version implied by a persisted cohort
@@ -357,9 +417,10 @@ export function buildMemoryCohortFingerprintInput(config: {
 
 export function findSecrets(text: string): SecretFinding[] {
 	const findings: SecretFinding[] = [];
-	// #3882 perf: build the Cf/DI condensed view ONCE per call (this function
-	// never mutates `text`, so all 14 patterns share it), and skip it entirely
-	// when the text has no zero-width/default-ignorable byte — the common case.
+	// #3882 perf: build the fill-class condensed view ONCE per call (this
+	// function never mutates `text`, so all patterns plus the JWS sweep share
+	// it), and skip it entirely when the text has no fill-class byte — the
+	// common case.
 	const condensed = SECRET_ZERO_WIDTH_FILL_RE.test(text)
 		? condenseSecretView(text)
 		: null;
@@ -369,6 +430,15 @@ export function findSecrets(text: string): SecretFinding[] {
 			findings.push({ type, match: text.slice(span.start, span.end) });
 		}
 	}
+	// #3893 AC10 / F5: union the shared JWS scanner's spans (raw + condensed
+	// views, same machinery as the patterns) as type 'jws_span' — appended
+	// after the family findings.
+	for (const span of jwsSpanSelection(text, condensed)) {
+		findings.push({
+			type: 'jws_span',
+			match: text.slice(span.start, span.end),
+		});
+	}
 	return findings;
 }
 
@@ -377,11 +447,12 @@ export function containsSecret(text: string): boolean {
 }
 
 export function redactSecrets(text: string): string {
-	// #3882 perf: the presence of a Cf/DI byte is invariant across the per-
-	// pattern iterations (placeholders contain no such byte), so decide once.
-	// When absent, every iteration skips the condensed view — this is the
-	// no-secret / no-fill common case that previously paid 14× O(n) builds.
-	const hasCfDi = SECRET_ZERO_WIDTH_FILL_RE.test(text);
+	// #3882 perf: the presence of a fill-class byte is invariant across the
+	// per-pattern iterations (placeholders contain no such byte), so decide
+	// once. When absent, every iteration skips the condensed view — this is
+	// the no-secret / no-fill common case that previously paid a full O(n)
+	// build per pattern.
+	const hasFill = SECRET_ZERO_WIDTH_FILL_RE.test(text);
 	let work = text;
 	for (const { type, pattern } of SECRET_PATTERNS) {
 		// #3743: each pattern operates on the CURRENT (already rewritten) string
@@ -394,24 +465,45 @@ export function redactSecrets(text: string): string {
 		const spans = selectedSecretSpans(
 			work,
 			pattern,
-			hasCfDi ? condenseSecretView(work) : null,
+			hasFill ? condenseSecretView(work) : null,
 		);
 		if (spans.length === 0) continue;
-		// #3882 perf: build the rewritten string with a single join instead of
-		// one full-string splice per span (was O(n·spans), ~18 s on a dense
-		// 1.4 MB blob); this is O(n) per pattern and produces byte-identical
-		// output.
-		const parts: string[] = [];
-		let last = 0;
-		for (const { start, end } of spans) {
-			parts.push(work.slice(last, start));
-			parts.push(`[REDACTED:${type}]`);
-			last = end;
-		}
-		parts.push(work.slice(last));
-		work = parts.join('');
+		work = replaceSpans(work, spans, `[REDACTED:${type}]`);
+	}
+	// #3893 AC10 / F5: the JWS sweep runs LAST, on the fully pattern-rewritten
+	// string — the family placeholders contain `[`/`:`/`_`-runs with no dots,
+	// outside every JWS run class, so the sweep can never match inside them
+	// (same sequential-priority argument as the pattern loop above).
+	const jwsSpans = jwsSpanSelection(
+		work,
+		hasFill ? condenseSecretView(work) : null,
+	);
+	if (jwsSpans.length > 0) {
+		work = replaceSpans(work, jwsSpans, '[REDACTED:jws_span]');
 	}
 	return work;
+}
+
+/**
+ * #3882 perf (extracted for the F5 JWS sweep): build the rewritten string
+ * with a single join instead of one full-string splice per span (was
+ * O(n·spans), ~18 s on a dense 1.4 MB blob); this is O(n) per call and
+ * produces byte-identical output. Spans must be non-overlapping and ordered.
+ */
+function replaceSpans(
+	text: string,
+	spans: SecretSpan[],
+	label: string,
+): string {
+	const parts: string[] = [];
+	let last = 0;
+	for (const { start, end } of spans) {
+		parts.push(text.slice(last, start));
+		parts.push(label);
+		last = end;
+	}
+	parts.push(text.slice(last));
+	return parts.join('');
 }
 
 // #3743: Cf/DI fill tolerance for the memory secret scanner. A zero-width or
@@ -422,7 +514,26 @@ export function redactSecrets(text: string): string {
 // deliberately an inline mirror per that precedent, not a shared module: this
 // scanner keeps its small import graph, and the parity discipline lives in the
 // per-family test suites.
-const SECRET_ZERO_WIDTH_FILL_RE = /\p{Cf}|\p{Default_Ignorable_Code_Point}/u;
+//
+// #3915 AC11 / F4: ONE module-level SOURCE for the fill class. Until now this
+// file carried TWO copies — the named non-global constant below (used by the
+// `.test()` fast paths) and a separate local global literal inside
+// condenseSecretView's matchAll — so extending only one would have silently
+// left condensation behind. Both a `/…/u` master (fast-path `.test()`) and a
+// `/…/gu` twin (condenseSecretView's matchAll requires `g`) are built from the
+// single source string, so they cannot drift.
+//
+// Extended set (#3915 AC11): adds `\p{Mn}` (combining marks — U+0301 splits)
+// and `\u2800` (the Braille blank). Braille is deliberately restricted to
+// U+2800, the INVISIBLE blank pattern: the other Braille code points are
+// visible glyphs, and broadening them would redact legitimate Braille content
+// (recorded as a deliberate bound, plan critic R1).
+const SECRET_ZERO_WIDTH_FILL_SOURCE =
+	'\\p{Cf}|\\p{Default_Ignorable_Code_Point}|\\p{Mn}|\\u2800';
+const SECRET_ZERO_WIDTH_FILL_RE = new RegExp(
+	SECRET_ZERO_WIDTH_FILL_SOURCE,
+	'u',
+);
 
 interface SecretSpan {
 	start: number;
@@ -431,19 +542,16 @@ interface SecretSpan {
 
 /**
  * #3743: per-pattern two-view span selection. Collects the pattern's matches
- * on the raw text AND on a Cf/DI-deleted condensed view (mapped back to
+ * on the raw text AND on the fill-deleted condensed view (mapped back to
  * original offsets — a mapped-back span INCLUDES the invisible bytes inside
- * it), deduplicates byte-identical spans, then selects non-overlapping
- * leftmost-longest (sort start asc / end desc; overlapping later spans extend
- * the kept span's end). One span per selected match: a plain token identical
- * in both views yields exactly one finding.
+ * it), then hands the union to selectNonOverlappingSpans.
  */
 /**
- * #3882 perf: `condensed` is the caller-prebuilt Cf/DI-deleted view (and its
- * offset map) when the text has zero-width/default-ignorable bytes, or `null`
- * when it does not. Passing it in lets `findSecrets` build it once for all 14
- * patterns and lets the no-fill common case skip the build entirely; the
- * `condensed === text` guard below keeps the raw-only path exact.
+ * #3882 perf: `condensed` is the caller-prebuilt fill-deleted view (and its
+ * offset map) when the text carries fill-class bytes, or `null` when it does
+ * not. Passing it in lets `findSecrets` build it once for all patterns (and
+ * the F5 JWS sweep) and lets the no-fill common case skip the build entirely;
+ * the `condensed === text` guard below keeps the raw-only path exact.
  */
 function selectedSecretSpans(
 	text: string,
@@ -468,6 +576,17 @@ function selectedSecretSpans(
 			spans.push({ start, end: Math.min(last + 1, text.length) });
 		}
 	}
+	return selectNonOverlappingSpans(spans);
+}
+
+/**
+ * #3743 (selection core, extracted for the #3893 F5 JWS sweep): deduplicate
+ * byte-identical spans, then select non-overlapping leftmost-longest
+ * (sort start asc / end desc; overlapping later spans extend the kept span's
+ * end). One span per selected match: a plain token identical in both views
+ * yields exactly one span.
+ */
+function selectNonOverlappingSpans(spans: SecretSpan[]): SecretSpan[] {
 	spans.sort((a, b) => a.start - b.start || b.end - a.end);
 	const selected: SecretSpan[] = [];
 	for (const span of spans) {
@@ -484,22 +603,57 @@ function selectedSecretSpans(
 	return selected;
 }
 
-/** #3743: build the Cf/DI-deleted view plus its code-unit offset map. */
+/**
+ * #3893 AC10 / F5: the shared JWS scanner's spans over the raw text AND (when
+ * the text carries fill bytes) over the fill-deleted condensed view, mapped
+ * back to original offsets — a mapped-back span INCLUDES the invisible bytes
+ * inside it, exactly like a pattern's condensed match. The result goes through
+ * the same leftmost-longest selection as every pattern's two-view span set, so
+ * a plain token identical in both views yields exactly one span.
+ */
+function jwsSpanSelection(
+	text: string,
+	condensed: ReturnType<typeof condenseSecretView> | null,
+): SecretSpan[] {
+	const spans: SecretSpan[] = [];
+	for (const span of findRedactableTokenSpans(text)) {
+		spans.push({ start: span.start, end: span.end });
+	}
+	if (condensed && condensed.condensed !== text) {
+		for (const span of findRedactableTokenSpans(condensed.condensed)) {
+			const last = condensed.condensedToOriginal[span.end - 1];
+			const start = condensed.condensedToOriginal[span.start];
+			if (start === undefined || last === undefined) continue;
+			spans.push({ start, end: Math.min(last + 1, text.length) });
+		}
+	}
+	return selectNonOverlappingSpans(spans);
+}
+
+// #3743: global twin for condenseSecretView's matchAll (which requires `g`),
+// built from the SAME SECRET_ZERO_WIDTH_FILL_SOURCE as the non-global
+// fast-path regex above (#3915 AC11 / F4: one source, two flaggings — the
+// pre-F4 code carried a second local literal here, which is exactly the
+// two-copies drift this unification closes).
+const SECRET_ZERO_WIDTH_FILL_RE_GLOBAL = new RegExp(
+	SECRET_ZERO_WIDTH_FILL_SOURCE,
+	'gu',
+);
+
+/** #3743: build the fill-deleted view plus its code-unit offset map. */
 function condenseSecretView(text: string): {
 	condensed: string;
 	condensedToOriginal: number[];
 } {
-	// One matchAll scan finds every Cf/DI run (the `u` flag keeps this correct
-	// for astral code points too — a few Cf chars live above the BMP), and the
-	// verbatim runs between them are copied with their per-code-unit offset map.
-	// This avoids a per-code-point regex test over long fill-dense text.
+	// One matchAll scan finds every fill-class run (the `u` flag keeps this
+	// correct for astral code points too — a few Cf chars live above the BMP),
+	// and the verbatim runs between them are copied with their per-code-unit
+	// offset map. This avoids a per-code-point regex test over long fill-dense
+	// text.
 	const condensedChars: string[] = [];
 	const condensedToOriginal: number[] = [];
 	let cursor = 0;
-	// Local global regex: matchAll requires `g`, and the shared
-	// SECRET_ZERO_WIDTH_FILL_RE stays non-global so the `.test()` fast paths
-	// above never trip over a mutated lastIndex.
-	for (const m of text.matchAll(/\p{Cf}|\p{Default_Ignorable_Code_Point}/gu)) {
+	for (const m of text.matchAll(SECRET_ZERO_WIDTH_FILL_RE_GLOBAL)) {
 		const run = text.slice(cursor, m.index);
 		for (let k = 0; k < run.length; k++) {
 			condensedChars.push(run[k]);
