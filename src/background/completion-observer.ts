@@ -66,9 +66,11 @@ import {
 	type DurableIngestionOutcome,
 	findDelegationForCompletion,
 	initializeTerminalCloseout,
+	isIngestionRedriveExhausted,
 	isTerminalCloseoutStepPending,
 	LEGACY_CODER_SETTLEMENT_PENDING_ADVISORY_MARKER,
 	type LegacyCoderSettlementTransfer,
+	MAX_INGESTION_REDRIVE_ATTEMPTS,
 	maintainBackgroundDelegations,
 	markLegacyCoderSettlementTransferPending,
 	markTerminalCloseoutStepCompleted,
@@ -1528,6 +1530,43 @@ export function createBackgroundCompletionObserver(opts: {
 				record.normalizedAgent === 'coder' ||
 				isBackgroundGateBearingRecord(record)
 			) {
+				if (isIngestionRedriveExhausted(record)) {
+					// F-002: the bounded re-drive is spent (deterministic ingestion
+					// failure). Give up VISIBLY: mark ingestion_commit failed
+					// (r14 P0-2: terminally closed with a reason, so the record
+					// drops out of the recovery set), close the same steps the
+					// failed-apply arm below closes, and stop claiming — the record
+					// then ages and the stale sweep regains authority over it.
+					// Journal-gated: without a journal this pass the give-up is
+					// deferred to recovery instead of forging a fragment journal.
+					const exhaustedReason = `ingestion abandoned after ${MAX_INGESTION_REDRIVE_ATTEMPTS} failed attempts; re-dispatch the task if its result is still needed`;
+					logger.warn(
+						`[background] ingestion for ${record.correlationId} exhausted its re-drive budget; marking ingestion_commit failed`,
+					);
+					if (closeoutJournalReady) {
+						await markStepFailed(
+							directory,
+							record.correlationId,
+							terminal.eventId,
+							'ingestion_commit',
+							exhaustedReason,
+						);
+						await runCloseoutStep(
+							record,
+							terminal.eventId,
+							'parent_advisory',
+							parentAdvisoryEffect(
+								directory,
+								record,
+								terminal.eventId,
+								exhaustedReason,
+								putAdvisory,
+							),
+						);
+						await ackCloseoutStep(record, terminal.eventId, 'context_map');
+					}
+					return;
+				}
 				const ingestion = await claimDelegationIngestion(
 					directory,
 					record.correlationId,

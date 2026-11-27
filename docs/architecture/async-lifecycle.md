@@ -172,7 +172,8 @@ closeout: {
   terminalEventId: <the exact terminal event this journal acks>,
   steps: {
     delegation_end | context_map | sounding_board | pipeline_advisory |
-      parent_advisory: { state: 'pending' | 'completed', completedAt?, updatedAt }
+      parent_advisory | plan_critic_approval | ingestion_commit:
+      { state: 'pending' | 'completed' | 'failed', completedAt?, updatedAt }
   }
 }
 ```
@@ -219,6 +220,18 @@ closeout: {
    at the journal, not at the status.
 4. The record currently being processed live is excluded (in-flight guard),
    so recovery can never re-enter itself.
+5. `ingestion_commit` (coder and gate-bearing records only) is acked ONLY when
+   the Stage-B ingestion commits durably (`consumed`). Every failure arm leaves
+   it pending so recovery replays the trusted terminal and re-drives the
+   ingestion, and the automatic stale sweep skips records with a live or
+   retryable ingestion. The re-drive is bounded by
+   `MAX_INGESTION_REDRIVE_ATTEMPTS` claims (a transient failure is recovered
+   only if it clears within that budget): past it the observer marks the step
+   `failed` (visible reason), stops claiming, and the sweep immunity ends, so
+   the stale sweep flips the record after its timeout. The record leaves the
+   recovery set only once its other closeout steps are closed too, and a
+   sweep-flipped record (new terminal event id) remains an inert recovery
+   candidate, exactly as before this change.
 
 **Behavior on corrupted stores**
 

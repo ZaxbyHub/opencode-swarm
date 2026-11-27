@@ -37,9 +37,27 @@ closeout step:
 - The journal-gate contract (r14 P0-2) is preserved: when journal
   initialization fails, every journal-gated ack — including `ingestion_commit`
   — is deferred to recovery instead of forging a fragment journal.
-- A pending `ingestion_commit` step on a flipped (non-completed) terminal
-  drops out of the recovery set (it can never progress); a step durably marked
-  `failed` (r14 terminally-closed semantics) also drops out.
+- The re-drive is bounded. A deterministic ingestion failure (for example a
+  stale workspace on replay) can never commit, so after
+  `MAX_INGESTION_REDRIVE_ATTEMPTS` (5) failed claims the observer stops
+  claiming, marks `ingestion_commit` failed with a visible reason (r14
+  terminally-closed semantics), closes the same parent-advisory/context-map
+  steps the failed-apply arm closes, and the sweep immunity ends: once the
+  record ages, the stale sweep flips it exactly as it did before this change.
+  A transient failure is recovered only if it clears within that budget; the
+  re-dispatch of the task is the exit for an abandoned ingestion. The record
+  leaves the recovery set only once its other closeout steps are closed, and a
+  sweep-flipped record (new terminal event id) stays an inert recovery
+  candidate, which is existing behavior this change does not alter.
+- Compatibility: `ingestion_commit` is a new key in the strict closeout step
+  schema, and every coder or gate-bearing record written by this release
+  carries it. A plugin older than this release (7.205.12 or earlier) that reads
+  such a delegation journal rejects the record, which makes the whole
+  delegation store read as uncertain on the SQLite authority path: its
+  delegation reads return nothing and its delegation writes do nothing (fails
+  closed, no data loss). Roll back only together with a drained/closed
+  delegation store; this matches the earlier additive `closeout` field, which
+  also shipped without a schema bump.
 
 ## Why
 
@@ -51,11 +69,13 @@ round's result.
 
 ## Verification
 
-- New suite
-  `tests/unit/background/background-delegation-ingestion-commit-closeout.test.ts`
-  (8 tests) pins all surfaces: fresh-completion ack, wedge state + sweep
-  immunity, duplicate-delivery re-drive, legacy-journal upsert + candidate,
-  crash-between-commit-and-ack healing, sweep scoping (#2971 operator
-  override), and the pure recovery-set predicate boundaries.
-- Both new-behavior surfaces were falsified (guard removed → sweep test
-  fails; required step removed → four ack tests fail) and restored.
+- New suites `tests/unit/background/background-delegation-ingestion-commit-closeout.test.ts`
+  (observer ack and recovery paths, including an observer-driven commit-failure
+  arm, the crash-heal replay asserting no re-apply, and a negative test that a
+  non-coder non-gate record gets no step) and
+  `tests/unit/background/background-delegation-ingestion-commit-sweep.test.ts`
+  (sweep immunity, #2971 operator-override scoping, the bounded give-up and the
+  recovery-set predicate boundaries). Shared fixtures live in
+  `tests/helpers/ingestion-commit-fixtures.ts`.
+- The suites are designed to fail if the sweep guard, the required step, the
+  ack, or the attempt budget is removed.

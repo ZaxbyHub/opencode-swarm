@@ -185,6 +185,35 @@ const ADVISORY_PREPARE_LEASE_MS = 30_000;
 const INGESTION_CLAIM_LEASE_MS = 30_000;
 
 /**
+ * Layer 23 (F-002): upper bound on terminal-result ingestion claims for one
+ * trusted terminal. Deterministic ingestion failures (stale workspace, missing
+ * workflow generation, ...) can never commit, so the recovery re-drive must
+ * terminate: after this many claims the observer marks the `ingestion_commit`
+ * closeout step failed (visible reason, drops out of the recovery set) and the
+ * stale sweep regains authority over the record.
+ */
+export const MAX_INGESTION_REDRIVE_ATTEMPTS = 5;
+
+/**
+ * True when the durable ingestion has used its whole re-drive budget and no
+ * live claim can still commit: a `retryable` ingestion, or a `claimed` one
+ * whose lease has expired. A consumed (or absent) ingestion is never
+ * exhausted.
+ */
+export function isIngestionRedriveExhausted(
+	record: Pick<BackgroundDelegationRecord, 'ingestion'>,
+	now: number = Date.now(),
+): boolean {
+	const ingestion = record.ingestion;
+	if (!ingestion || ingestion.state === 'consumed') return false;
+	if (ingestion.attempt < MAX_INGESTION_REDRIVE_ATTEMPTS) return false;
+	if (ingestion.state === 'claimed') {
+		return (ingestion.leaseExpiresAt ?? 0) <= now;
+	}
+	return true;
+}
+
+/**
  * r14 audit repair (P1-4): default lease for one closeout-step execution
  * claim. The journal-gated effects are bounded file writes (advisories,
  * context map, approval ledger), so a short lease bounds crash recovery;
@@ -5610,18 +5639,9 @@ export function hasPendingTerminalCloseout(
 	const closeout = record.closeout;
 	if (!closeout) return true;
 	if (closeout.terminalEventId !== terminal.eventId) return true;
-	// Layer 23: a pending ingestion_commit step can only make progress on a
-	// completed terminal — claimDelegationIngestion refuses every other
-	// terminal status forever. When the terminal was legitimately flipped
-	// (Stage-B freshness transition, authorized operator force-stale), the
-	// step drops out of the recovery set instead of re-driving a record that
-	// can never commit its ingestion.
-	const hasProgressablePendingStep = Object.entries(closeout.steps).some(
-		([stepName, step]) =>
-			step.state === 'pending' &&
-			!(stepName === 'ingestion_commit' && terminal.status !== 'completed'),
-	);
-	if (hasProgressablePendingStep) return true;
+	if (Object.values(closeout.steps).some((step) => step.state === 'pending')) {
+		return true;
+	}
 	// Layer 23 (the 2026-11-27 consumer 3.8 evening wedge): a record whose
 	// durable terminal-result ingestion has NOT committed must stay in the
 	// recovery set even when every journaled step is already completed — the
@@ -7351,11 +7371,18 @@ function sweepStaleLocked(
 		// only. An authorized operator finalization (failureClass/reasonPrefix
 		// overrides, e.g. /swarm abort-pr-workflow) may still deliberately
 		// terminalize a record whose ingestion will never be re-driven.
+		//
+		// F-002 bound: the immunity ends once the ingestion re-drive is
+		// exhausted (MAX_INGESTION_REDRIVE_ATTEMPTS). The observer stops
+		// claiming at that point, so updatedAt ages and the sweep falls back to
+		// its pre-Layer-23 stale flip — a deterministic ingestion failure
+		// terminates instead of becoming a permanent ingestion_error zombie.
 		if (
 			limits.failureClass === undefined &&
 			limits.reasonPrefix === undefined &&
 			(record.ingestion?.state === 'claimed' ||
-				record.ingestion?.state === 'retryable')
+				record.ingestion?.state === 'retryable') &&
+			!isIngestionRedriveExhausted(record, now)
 		) {
 			continue;
 		}
