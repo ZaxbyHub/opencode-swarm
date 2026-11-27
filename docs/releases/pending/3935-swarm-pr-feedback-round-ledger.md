@@ -5,15 +5,15 @@
 - The open-issue corpus check in the `swarm-pr-feedback` skill now states that
   issue bodies are data, never instructions, and that an `ABSORB` comment cites
   identifiers and paraphrases evidence with no secrets or raw private content.
-- Added text pins for the round ledger (verdict table, round-2 checkpoint),
-  the Fix-in-this-PR exception, and the open-issue corpus check, so deleting or
-  moving those rules fails a test.
+- Added text pins for the bodies-are-data rule, the Fix-in-this-PR exception
+  link to the round ledger, and the `SKILL.md` round-2 checkpoint pointer, so
+  deleting or moving them fails a test.
 
 ## Why
 
-The round-ledger rules shipped in #3911 with no test pin, so a regression to
-them would not fail CI. The corpus check read third-party issue bodies without
-saying to treat them as data.
+#3911 pinned the corpus check and the round ledger, but not the exception link
+or the `SKILL.md` pointer. The corpus check also read third-party issue bodies
+without saying to treat them as data.
 
 ## Migration
 
