@@ -121,8 +121,15 @@ export function buildSpecDriftAdvisory(args: {
 		'Action: surface this warning to the user at your next user-facing reply. ' +
 			'Do NOT proceed with destructive plan operations (save_plan with removals, ' +
 			'update_task_status, phase_complete, lean_turbo_run_phase, ' +
-			'lean_turbo_acquire_locks) until the user runs ' +
-			'/swarm acknowledge-spec-drift.',
+			'lean_turbo_acquire_locks) until the drift is cleared — either by a ' +
+			'successful canonical spec_write (dispatch the spec_writer agent with the ' +
+			'accepted content; its drift recovery reconciles the plan hash and clears ' +
+			'the marker) or by the user running /swarm acknowledge-spec-drift. ' +
+			'Treat the drift as cleared only when the spec_write result reports ' +
+			'spec_drift_recovery applied (or no_marker because the plan already ' +
+			'matches the spec); a failed or still-pending recovery means the drift ' +
+			'is NOT cleared — surface that status and retry the canonical spec_write ' +
+			'or wait for user acknowledgment.',
 	];
 	if (args.midLoadRemovals) {
 		lines.push(
