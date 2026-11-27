@@ -49,12 +49,12 @@ function makeSubscription(): PrSubscriptionRecord {
 		prNumber: 42,
 		repoFullName: 'owner/repo',
 		prUrl: 'https://github.com/owner/repo/pull/42',
-		lastCheckedAt: Date.now() - 60_000,
+		lastCheckedAt: 1_700_000_000_000,
 		isWatching: true,
 		hasUnaddressedEvents: false,
 		status: 'active',
-		createdAt: Date.now() - 120_000,
-		updatedAt: Date.now() - 60_000,
+		createdAt: 1_699_999_940_000,
+		updatedAt: 1_700_000_000_000,
 		errorCount: 0,
 	};
 }
