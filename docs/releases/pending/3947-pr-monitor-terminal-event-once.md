@@ -8,12 +8,12 @@ subscription store refused writes because it was over capacity). One merged PR
 produced 7+ duplicate `pr.merged` deliveries.
 
 The PR monitor worker now dedupes the terminal event with an in-memory latch,
-so each terminal event is emitted at most once per worker lifetime. The latch
-only gates the event: sweep tracking and the auto-unsubscribe retry still run
+so each terminal event is emitted once per subscription while the PR stays
+terminal. The latch only gates the event: sweep tracking and the auto-unsubscribe retry still run
 every cycle while the PR is terminal, so a refused or timed-out cleanup is
 retried without re-emitting. The latch is cleared when the PR is seen open
-again (reopen), after a successful auto-unsubscribe, and on worker stop. A
-single re-emit after a worker restart is expected.
+again (reopen), after a successful auto-unsubscribe, and on worker stop. The
+event can repeat after a reopen, a re-subscribe, or a worker restart.
 
 ## Compatibility
 
