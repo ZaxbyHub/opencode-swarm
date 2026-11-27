@@ -85,7 +85,7 @@ describe('Keenable wiring surfaces (PR #3753)', () => {
 		);
 	});
 
-	test('every command help line that says "Requires council.general.enabled" mentions Keenable', () => {
+	test('every command help line that says "Requires council.general.enabled" mentions Keenable and SpecStream', () => {
 		let checked = 0;
 		for (const rel of [
 			'src/commands/registry.ts',
@@ -97,6 +97,7 @@ describe('Keenable wiring surfaces (PR #3753)', () => {
 				.filter((l) => l.includes('Requires council.general.enabled'));
 			for (const line of lines) {
 				expect(line.toLowerCase()).toContain('keenable');
+				expect(line.toLowerCase()).toContain('specstream');
 				checked++;
 			}
 		}
