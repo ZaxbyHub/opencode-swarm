@@ -1,5 +1,18 @@
 # Changelog
 
+## [7.205.12](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.205.11...v7.205.12) (2026-11-27)
+
+
+### Bug Fixes
+
+* **background:** a finished background coder no longer blocks every later dispatch ([963eae1](https://github.com/ZaxbyHub/opencode-swarm/commit/963eae1ee617e9cf7f8324470b5f3b2226817ee3))
+* **pr-monitor:** decouple terminal-event latch from cleanup retry ([fef114c](https://github.com/ZaxbyHub/opencode-swarm/commit/fef114cab4654419d72da972b5cb62dc0d621464))
+* **pr-monitor:** emit terminal PR events at most once per worker lifetime ([78f6e45](https://github.com/ZaxbyHub/opencode-swarm/commit/78f6e45440f1db73ad5b51068935cef77c130e54))
+* **spec-drift:** canonical spec_write rebinds the plan specHash before the marker materializes ([e2d0f27](https://github.com/ZaxbyHub/opencode-swarm/commit/e2d0f2751c6bfe914cefffef2ccdfa67a9f7b6a8))
+* **swarm:** async subagent lifecycle repairs (native v2 async, context-map closeout, plan-critic approvals) ([b4b41db](https://github.com/ZaxbyHub/opencode-swarm/commit/b4b41db8e668550f1d6d488260c39c97e980d147))
+* **workflow:** a coder-settlement WAL commit survives its receipt-append failure ([#2525](https://github.com/ZaxbyHub/opencode-swarm/issues/2525) replay) ([9feb6f4](https://github.com/ZaxbyHub/opencode-swarm/commit/9feb6f4dd365ceae20335471d2f0ac232384031f))
+* **workflow:** a Stage-B re-dispatch reclaims its route slot instead of wedging forever ([02f0a26](https://github.com/ZaxbyHub/opencode-swarm/commit/02f0a2664014bc95f2a21b597b44da87f29c426b))
+
 ## [7.205.11](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.205.10...v7.205.11) (2026-11-26)
 
 
