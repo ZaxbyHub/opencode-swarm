@@ -104,6 +104,7 @@ import { pre_check_batch } from './pre-check-batch';
 import { prepare_pr_feedback_commit_message } from './prepare-pr-feedback-commit-message';
 import { prepare_pr_feedback_scope } from './prepare-pr-feedback-scope';
 import { prepare_pr_workflow_checkout } from './prepare-pr-workflow-checkout';
+import { prune_communication_log } from './prune-communication-log';
 import { quality_budget } from './quality-budget';
 import { rebind_pr_feedback_head } from './rebind-pr-feedback-head';
 import { receipt } from './receipt';
@@ -214,6 +215,7 @@ export const TOOL_MANIFEST = defineHandlers({
 	recover_rework_task: () => recover_rework_task,
 	recover_stage_a_task: () => recover_stage_a_task,
 	prepare_pr_workflow_checkout: () => prepare_pr_workflow_checkout,
+	prune_communication_log: () => prune_communication_log,
 	record_implementation_review: () => record_implementation_review,
 	record_issue_publication: () => record_issue_publication,
 	record_issue_reproduction: () => record_issue_reproduction,

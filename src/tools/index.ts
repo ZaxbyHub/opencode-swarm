@@ -286,6 +286,10 @@ export {
 	executeRunPrFeedbackStageA,
 	run_pr_feedback_stage_a,
 } from './run-pr-feedback-stage-a';
+export {
+	executePruneCommunicationLog,
+	prune_communication_log,
+} from './prune-communication-log';
 export { symbols } from './symbols';
 export {
 	type SyntaxCheckFileResult,
