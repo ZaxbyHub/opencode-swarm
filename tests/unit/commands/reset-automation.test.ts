@@ -160,6 +160,18 @@ describe('handleResetCommand - Background Automation Reset', () => {
 		expect(result).toContain('⏭️ context.md not found (skipped)');
 	});
 
+	it('Reset clears a pending spec-drift recovery WAL with the plan epoch', async () => {
+		await writeFile(
+			join(tempDir, '.swarm', 'spec-drift-recovery.json'),
+			JSON.stringify({ version: 2, state: 'PREPARED' }),
+		);
+		const result = await handleResetCommand(tempDir, ['--confirm']);
+		expect(result).toContain('✅ Deleted spec-drift-recovery.json');
+		expect(
+			existsSync(join(tempDir, '.swarm', 'spec-drift-recovery.json')),
+		).toBe(false);
+	});
+
 	it('Reset preserves summaries directory cleanup', async () => {
 		// Create test files and summaries directory
 		await writeFile(join(tempDir, '.swarm', 'plan.md'), '## Test Plan\n');

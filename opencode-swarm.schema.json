@@ -2323,7 +2323,7 @@
           "maximum": 1
         },
         "promotion_min_terminal_applications": {
-          "default": 0,
+          "default": 1,
           "type": "number",
           "minimum": 0,
           "maximum": 100

@@ -6,10 +6,14 @@ import {
 	readTaskEvidence,
 	transitionTaskWorkflowEvidence,
 } from '../../../src/gate-evidence.js';
-import { createDelegationGateHook } from '../../../src/hooks/delegation-gate.js';
+import {
+	createDelegationGateHook,
+	_internals as delegationGateInternals,
+} from '../../../src/hooks/delegation-gate.js';
 import { routeReceiptPathForTask } from '../../../src/review/routing-enforcement.js';
 import {
 	advanceTaskState,
+	getStageBRouteEvidence,
 	getTaskState,
 	recordModifiedFilesForTask,
 	recordStageBRouteEvidence,
@@ -24,6 +28,8 @@ import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 const config = {
 	hooks: { delegation_gate: true },
 } as PluginConfig;
+const originalSettlementRouteEnforcer =
+	delegationGateInternals.enforcePersistedReviewRouteReceiptAtSettlement;
 
 let directory = '';
 let isolatedEnv: ReturnType<typeof createIsolatedTestEnv> | undefined;
@@ -56,6 +62,8 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
+	delegationGateInternals.enforcePersistedReviewRouteReceiptAtSettlement =
+		originalSettlementRouteEnforcer;
 	resetSwarmState();
 	fs.rmSync(directory, { recursive: true, force: true });
 	isolatedEnv?.cleanup();
@@ -225,6 +233,92 @@ describe('issue #2491 direct delegation-gate route authorization', () => {
 		expect(removeRollback).not.toBeNull();
 		removeRollback?.();
 		expect(session.stageBRouteEvidence?.get(taskId)).toHaveLength(1);
+	});
+
+	// PR 3919 F-001: the same-identity re-dispatch supersede path. A fresh
+	// dispatch (different call/child/generation) that re-earns a route identity
+	// REPLACES the obsolete same-slot binding in the live array — it never
+	// appends a duplicate identity — and a failed durable write rolls the
+	// obsolete binding back without disturbing sibling slots or a newer
+	// settlement that already took the slot over.
+	test('a same-identity re-dispatch supersedes the obsolete live binding and its rollback restores it (F-001)', () => {
+		const session = swarmState.agentSessions.get('parent-2491')!;
+		const taskId = '1.1';
+		const obsolete = {
+			role: 'reviewer' as const,
+			identity: 'reviewer-a',
+			sessionId: 'parent-2491',
+			taskId,
+			slotId: `${taskId}:reviewer:1`,
+			callId: 'review-call-old',
+			childSessionId: 'review-child-old',
+			generation: 1,
+		};
+		const sibling = {
+			...obsolete,
+			identity: 'reviewer-b',
+			slotId: `${taskId}:reviewer:2`,
+			callId: 'review-call-b',
+			childSessionId: 'review-child-b',
+		};
+		recordStageBRouteEvidence(session, taskId, obsolete);
+		recordStageBRouteEvidence(session, taskId, sibling);
+
+		// Fresh dispatch re-earning reviewer-a's identity: replaces the obsolete
+		// binding in place; the sibling slot is preserved untouched.
+		const rollback = reserveStageBRouteEvidence(session, taskId, {
+			...obsolete,
+			callId: 'review-call-fresh',
+			childSessionId: 'review-child-fresh',
+			generation: 2,
+		});
+		expect(rollback).not.toBeNull();
+		expect(getStageBRouteEvidence(session, taskId)).toHaveLength(2);
+		expect(
+			getStageBRouteEvidence(session, taskId).find(
+				(entry) => entry.identity === 'reviewer-a',
+			),
+		).toMatchObject({
+			callId: 'review-call-fresh',
+			childSessionId: 'review-child-fresh',
+			generation: 2,
+		});
+
+		// Durable-write failure: the rollback restores the obsolete binding
+		// exactly, without touching the sibling slot.
+		rollback?.();
+		const restored = getStageBRouteEvidence(session, taskId);
+		expect(restored).toHaveLength(2);
+		expect(restored.find((entry) => entry.identity === 'reviewer-a')).toEqual(
+			obsolete,
+		);
+		expect(restored.find((entry) => entry.identity === 'reviewer-b')).toEqual(
+			sibling,
+		);
+
+		// A late rollback whose reservation a NEWER settlement already replaced
+		// is a no-op — it never overwrites the newer settlement.
+		const superseded = reserveStageBRouteEvidence(session, taskId, {
+			...obsolete,
+			callId: 'review-call-1',
+			childSessionId: 'review-child-1',
+			generation: 3,
+		});
+		const newest = reserveStageBRouteEvidence(session, taskId, {
+			...obsolete,
+			callId: 'review-call-2',
+			childSessionId: 'review-child-2',
+			generation: 4,
+		});
+		expect(superseded).not.toBeNull();
+		expect(newest).not.toBeNull();
+		superseded?.();
+		expect(
+			getStageBRouteEvidence(session, taskId).find(
+				(entry) => entry.identity === 'reviewer-a',
+			),
+		).toMatchObject({ callId: 'review-call-2', generation: 4 });
+		newest?.();
 	});
 
 	test('holds reversed 2+2 completions at the full-route barrier', async () => {

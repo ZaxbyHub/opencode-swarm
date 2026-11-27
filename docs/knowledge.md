@@ -154,7 +154,7 @@ Swarm entries add `project_name` and a `PhaseConfirmationRecord[]`. Hive entries
 Entries can be created four ways:
 
 1. **Agents write via `knowledge_add` tool** — normal flow during a phase.
-2. **Manual: `/swarm promote "<lesson>"`** — write directly to hive.
+2. **Manual: `/swarm promote "<lesson>" --force --reason "<why>"`** — write directly to hive. Direct text without a qualifying independent receipt is refused by the default-on application-evidence gate unless the audited `--force --reason` override is given.
 3. **Curator recommends** — LLM-driven promotions from the curator agent.
 4. **Migration: `/swarm knowledge migrate`** — one-time import from legacy `.swarm/context.md`.
 
@@ -181,10 +181,12 @@ Three routes in `checkHivePromotions()`:
 | Route | Trigger |
 |-------|---------|
 | Explicit | `hive_eligible=true` AND ≥3 distinct phases confirmed |
-| Fast-track | Entry tagged `hive-fast-track` (bypasses phase count) |
+| Fast-track | Authorized manual fast-track: requires `hive_fast_track_authorized`; a tag alone does not authorize it |
 | Age-based | Entry age ≥ `auto_promote_days` (default 90) |
 
-Manual: `/swarm promote --from-swarm <id>`.
+Every route also faces the application-evidence and policy gates (`knowledge.promotion_min_terminal_applications`, default 1 — at least one independent terminal receipt; set 0 to opt out).
+
+Manual: `/swarm promote --from-swarm <id>` (promotes when the swarm entry has a qualifying independent receipt; otherwise it needs `--force --reason`).
 
 ### Quarantine / Restore
 
@@ -336,7 +338,7 @@ This prevents one noisy project from dominating hive promotions.
 | `/swarm knowledge migrate` | Import legacy `.swarm/context.md` |
 | `/swarm knowledge quarantine <id> [reason]` | Hide entry from queries |
 | `/swarm knowledge restore <id>` | Restore a quarantined or archived entry |
-| `/swarm promote <text>` | Write new hive entry |
+| `/swarm promote <text>` | Write new hive entry (needs `--force --reason` without an independent receipt) |
 | `/swarm promote --from-swarm <id>` | Promote existing swarm entry |
 | `/swarm curate` | Run curator review, apply gated recommendations when session context exists, and review hive promotion candidates |
 

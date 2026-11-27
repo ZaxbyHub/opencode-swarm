@@ -3918,76 +3918,286 @@ export function recordStageBCompletion(
 }
 
 /**
+ * Per-reservation chain record for `reserveStageBRouteEvidence` rollbacks.
+ *
+ * Each reservation installs its own entry object (a "token") into the live
+ * array. Replacing reservations form a chain token → prev → prev… rooted
+ * either at the binding that occupied the slot before the first reservation
+ * (`replace`) or at nothing (`append`). A record is marked `failed` exactly
+ * when its rollback fires; an unmarked record belongs to a reservation that
+ * is still in flight or settled (its rollback was discarded).
+ */
+type StageBRouteReservation =
+	| {
+			kind: 'replace';
+			prev: ReviewRouteEvidence;
+			failed: boolean;
+			publishing: boolean;
+	  }
+	| { kind: 'append'; failed: boolean; publishing: boolean };
+
+/**
+ * Tokens are in-memory-only entry objects, never serialized, so a module-level
+ * WeakMap keyed by the token keeps the chains without touching the session
+ * state shape and lets the records be collected with their tokens.
+ */
+const stageBRouteReservations = new WeakMap<
+	ReviewRouteEvidence,
+	StageBRouteReservation
+>();
+
+/**
+ * Resolve what a slot should show after the given reservation chain link
+ * failed: the LAST VALID binding — the most recent predecessor whose own
+ * reservation did not fail — or `'deleted'` when the whole chain roots at a
+ * failed append (the slot only ever existed because of failed reservations).
+ * The walk is finite: a chain's predecessor always existed before its token.
+ * A record-less entry (a plain binding, or a token whose reservation SETTLED
+ * and pruned its metadata) is a valid stop: settled means the corresponding
+ * durable evidence write succeeded.
+ */
+function resolveLastValidStageBBinding(
+	start: ReviewRouteEvidence,
+): ReviewRouteEvidence | 'deleted' {
+	let cursor: ReviewRouteEvidence = start;
+	while (true) {
+		const record = stageBRouteReservations.get(cursor);
+		if (!record || !record.failed) return cursor;
+		if (record.kind === 'append') return 'deleted';
+		cursor = record.prev;
+	}
+}
+
+/**
+ * Rollback handle for a Stage-B route-evidence reservation.
+ *
+ * Invoking the function rolls the reservation back after the corresponding
+ * durable evidence write FAILED. Calling `settle()` commits it after that
+ * write SUCCEEDED: the token's chain metadata is pruned (no predecessor
+ * links, no WeakMap record), so a long-lived slot does not retain the binding
+ * history of every settled re-dispatch. The two are mutually exclusive and
+ * each is idempotent — in particular, settling after a rollback must not
+ * un-fail the chain link for later rollbacks walking past it.
+ */
+export type StageBRouteEvidenceRollback = (() => void) & {
+	settle: () => void;
+	/** True only while this reservation still owns its live slot. */
+	isCurrent: () => boolean;
+	/** Block replacement of this token until its durable publication ends. */
+	beginPublication: () => boolean;
+	endPublication: () => void;
+};
+
+/**
+ * Build the public rollback/settle handle around one reservation token. The
+ * `finalized` flag makes the handle single-shot: rollback-then-settle and
+ * settle-then-rollback are both no-ops, so a settled reservation can never be
+ * rolled back onto the live array and a failed link can never be pruned.
+ */
+function makeStageBRouteReservationHandle(
+	token: ReviewRouteEvidence,
+	onRollback: () => void,
+	isCurrent: () => boolean,
+): StageBRouteEvidenceRollback {
+	let finalized = false;
+	let publishing = false;
+	const endPublication = () => {
+		if (!publishing) return;
+		publishing = false;
+		const record = stageBRouteReservations.get(token);
+		if (record) record.publishing = false;
+	};
+	return Object.assign(
+		() => {
+			if (finalized) return;
+			finalized = true;
+			endPublication();
+			onRollback();
+		},
+		{
+			settle: () => {
+				if (finalized) return;
+				finalized = true;
+				endPublication();
+				// Prune the chain metadata: a settled slot must not retain its
+				// predecessor links (the round-2 unbounded-retention finding), and
+				// the resolve walk already treats a record-less token as a valid
+				// binding, so overlapping rollbacks still stop here correctly.
+				stageBRouteReservations.delete(token);
+			},
+			isCurrent: () => finalized === false && isCurrent(),
+			beginPublication: () => {
+				if (finalized || publishing || !isCurrent()) return false;
+				const record = stageBRouteReservations.get(token);
+				if (!record || record.failed) return false;
+				record.publishing = true;
+				publishing = true;
+				return true;
+			},
+			endPublication,
+		},
+	);
+}
+
+/**
  * Reserve a bounded in-memory route-evidence slot and return a rollback for
  * callers that still have to publish the corresponding durable evidence.
  *
  * The reservation remains visible while the caller awaits its durable write,
  * which prevents concurrent completions from oversubscribing the 32-entry
- * projection. If that write fails, invoking the rollback restores the exact
- * prior slot (or removes a newly-added slot), so a retry is not poisoned by a
- * failed attempt.
+ * projection. If that write fails, invoking the rollback restores the LAST
+ * VALID binding of the slot (or removes a newly-added slot), so a retry is not
+ * poisoned by a failed attempt. Overlapping reservations are safe in every
+ * failure order: reservations on one slot form a chain, each rollback marks
+ * its own token failed, and the restore walks past failed tokens to the most
+ * recent predecessor that did NOT fail — B replacing A, then A and B both
+ * failing (in either order), lands back on the binding that was valid before
+ * A, never on A's failed token.
+ *
+ * A fully-bound reservation (callId/childSessionId/generation present) does not
+ * only replace an exact replay of the same dispatch tuple: it also replaces the
+ * obsolete LIVE binding of the SAME route slot (role + identity) when a fresh
+ * Stage-B re-dispatch re-earns that identity — the same-process twin of the
+ * durable latest-row-wins collapse in routeEvidenceFromTaskGateRequirements.
+ * Keeping exactly one entry per (role, identity) is what every downstream
+ * barrier relies on: two same-identity entries read back as
+ * ROUTE_RECEIPT_DUPLICATE. Sibling slots (same role, different identity) are
+ * preserved untouched, and a foreign identity is never rebadged — the incoming
+ * binding's identity is always the one the CURRENT route receipt sanctioned.
+ * A rollback whose token a NEWER reservation already took over never touches
+ * the live array (the newer reservation owns the slot until it settles or its
+ * own rollback runs). Callers that successfully published the durable evidence
+ * invoke `settle()` on the returned handle: settling prunes the reservation's
+ * chain metadata so settled slots retain no predecessor links, while a failed
+ * predecessor's later rollback still cannot overwrite the settled state (the
+ * resolve walk stops at the record-less settled token).
  */
 export function reserveStageBRouteEvidence(
 	session: AgentSessionState,
 	taskId: string,
 	evidence: ReviewRouteEvidence,
-): (() => void) | null {
+): StageBRouteEvidenceRollback | null {
 	if (!isValidTaskId(taskId)) return null;
 	if (!session.stageBRouteEvidence) session.stageBRouteEvidence = new Map();
 	const entries = session.stageBRouteEvidence.get(taskId) ?? [];
 	// 2026-11-25 (post-catch-22 accumulation wedge): the replacement key is
-	// the route IDENTITY, not the exact dispatch. The durable requirements
-	// chain collapses per (role, identity) on read and
-	// enforceReviewRouteReceipt's duplicate check admits at most ONE
-	// evidence entry per identity — but two DIFFERENT dispatches of the
-	// same identity (a sanctioned re-dispatch after a recover_* opening,
-	// with no restart or completion to clear the list in between) used to
-	// APPEND, so a second successful settlement of the same gate identity
-	// poisoned the in-memory list and every later Stage-B completion of
-	// the task died terminally on ROUTE_RECEIPT_DUPLICATE (live: task 2.20
-	// Gen 8/9 — reviewer settled twice in one serve, then every reviewer
-	// and test_engineer completion was consumed with outcome "rejected",
-	// tests_run unreachable). A newer binding for the same identity
-	// supersedes the obsolete one — the same replacement semantics the
-	// re-dispatch reclamation in resolveBackgroundStageBRoute applies to
-	// its prospective list, now upheld at the source.
-	const existingIndex = entries.findIndex(
-		(entry) =>
-			entry.role === evidence.role && entry.identity === evidence.identity,
-	);
+	// the route IDENTITY, not the exact dispatch — a sanctioned re-dispatch
+	// (a recover_* opening) or an exact replay of the same deterministic
+	// dispatch tuple both re-earn the slot, and a legacy partial binding
+	// (no dispatch tuple) can only match another partial, never strip a
+	// dispatch-bound settlement of its tuple. See the merged #3919 for the
+	// fenced publication path this source now feeds.
+	const dispatchIdentity = (entry: ReviewRouteEvidence): string | null => {
+		if (
+			!entry.callId ||
+			!entry.childSessionId ||
+			typeof entry.generation !== 'number'
+		) {
+			return null;
+		}
+		return [
+			entry.role,
+			entry.sessionId ?? '',
+			entry.taskId ?? '',
+			entry.callId,
+			entry.childSessionId,
+			String(entry.generation),
+		].join('\u0000');
+	};
+	const incomingDispatchIdentity = dispatchIdentity(evidence);
+	const existingIndex = entries.findIndex((entry) => {
+		if (entry.role !== evidence.role) return false;
+		if (incomingDispatchIdentity !== null) {
+			// An exact replay of the same deterministic dispatch tuple, OR a fresh
+			// re-dispatch of the same gate cycle re-earning this route identity
+			// (the obsolete binding occupies the slot): both take over the slot.
+			return (
+				dispatchIdentity(entry) === incomingDispatchIdentity ||
+				entry.identity === evidence.identity
+			);
+		}
+		// Legacy partial evidence (no dispatch tuple) keeps matching only legacy
+		// entries of the same slot, so a partial binding cannot strip a
+		// dispatch-bound settlement of its tuple.
+		return (
+			dispatchIdentity(entry) === null && entry.identity === evidence.identity
+		);
+	});
 	if (existingIndex >= 0) {
-		// A retry replaces the same deterministic slot binding. Keeping one
-		// entry prevents a later successful retry from counting twice.
+		// A retry replaces the same deterministic slot binding, and a validated
+		// reclaim replaces the obsolete binding of the same route slot. Keeping
+		// one entry per (role, identity) prevents a later successful retry from
+		// counting twice and never presents a duplicate identity downstream.
 		const previousEntry = entries[existingIndex];
+		const previousReservation = stageBRouteReservations.get(previousEntry);
+		if (previousReservation?.publishing) return null;
 		const reservedEntry = { ...evidence };
+		stageBRouteReservations.set(reservedEntry, {
+			kind: 'replace',
+			prev: previousEntry,
+			failed: false,
+			publishing: false,
+		});
 		entries[existingIndex] = reservedEntry;
 		session.stageBRouteEvidence.set(taskId, entries);
-		return () => {
-			// Another completion may have reserved or settled a slot while the
-			// durable evidence write was in flight. Locate our exact token instead
-			// of relying on the original index, and never overwrite that newer
-			// completion when it has already replaced us.
-			if (session.stageBRouteEvidence?.get(taskId) !== entries) return;
-			const reservedIndex = entries.indexOf(reservedEntry);
-			if (reservedIndex < 0) return;
-			entries[reservedIndex] = previousEntry;
-		};
+		return makeStageBRouteReservationHandle(
+			reservedEntry,
+			() => {
+				// Mark the chain link failed FIRST: even when a newer reservation has
+				// already taken the slot (our token is gone — never overwrite that
+				// newer completion), its own rollback must be able to walk past our
+				// failed token to the last valid binding.
+				const record = stageBRouteReservations.get(reservedEntry);
+				if (record && record.kind === 'replace') record.failed = true;
+				if (session.stageBRouteEvidence?.get(taskId) !== entries) return;
+				const reservedIndex = entries.indexOf(reservedEntry);
+				if (reservedIndex < 0) return;
+				// Restore the LAST VALID binding: skip predecessors whose own
+				// reservation failed (any failure order converges here), never a
+				// failed reservation's token. A SETTLED (record-less) predecessor is
+				// a valid stop.
+				const restore = resolveLastValidStageBBinding(previousEntry);
+				if (restore === 'deleted') {
+					// Defensive only: reachable when a failed append's token lingered
+					// in the slot (its own rollback could not splice it). Release the
+					// slot instead of restoring a failed reservation's binding.
+					entries.splice(reservedIndex, 1);
+					if (entries.length === 0) session.stageBRouteEvidence?.delete(taskId);
+					return;
+				}
+				entries[reservedIndex] = restore;
+			},
+			() => entries.includes(reservedEntry),
+		);
 	}
 	if (entries.length >= 32) return null;
 	const reservedEntry = { ...evidence };
 	entries.push(reservedEntry);
+	stageBRouteReservations.set(reservedEntry, {
+		kind: 'append',
+		failed: false,
+		publishing: false,
+	});
 	session.stageBRouteEvidence.set(taskId, entries);
-	return () => {
-		// Do not require this reservation to remain the last entry. A concurrent
-		// completion can append its own slot before the durable write settles;
-		// removing by identity releases only the failed dispatch and preserves
-		// that later completion.
-		if (session.stageBRouteEvidence?.get(taskId) !== entries) return;
-		const reservedIndex = entries.indexOf(reservedEntry);
-		if (reservedIndex < 0) return;
-		entries.splice(reservedIndex, 1);
-		if (entries.length === 0) session.stageBRouteEvidence?.delete(taskId);
-	};
+	return makeStageBRouteReservationHandle(
+		reservedEntry,
+		() => {
+			// Mark the chain root failed FIRST: a later reservation that replaced
+			// this appended token must resolve to slot-release when it rolls back.
+			const record = stageBRouteReservations.get(reservedEntry);
+			if (record) record.failed = true;
+			if (session.stageBRouteEvidence?.get(taskId) !== entries) return;
+			const reservedIndex = entries.indexOf(reservedEntry);
+			if (reservedIndex < 0) return;
+			// Do not require this reservation to remain the last entry. A concurrent
+			// completion can append its own slot before the durable write settles;
+			// removing by token releases only the failed dispatch and preserves
+			// that later completion.
+			entries.splice(reservedIndex, 1);
+			if (entries.length === 0) session.stageBRouteEvidence?.delete(taskId);
+		},
+		() => entries.includes(reservedEntry),
+	);
 }
 
 export function recordStageBRouteEvidence(
@@ -3995,8 +4205,35 @@ export function recordStageBRouteEvidence(
 	taskId: string,
 	evidence: ReviewRouteEvidence,
 ): boolean {
-	return reserveStageBRouteEvidence(session, taskId, evidence) !== null;
+	const reservation = reserveStageBRouteEvidence(session, taskId, evidence);
+	if (!reservation) return false;
+	// The fire-and-forget recorder commits immediately: no durable write is
+	// pending for it, so the reservation settles and its chain metadata is
+	// pruned like every successfully published binding.
+	reservation.settle();
+	return true;
 }
+
+/**
+ * Test-only introspection of the live reservation-chain metadata (the
+ * production walk is `resolveLastValidStageBBinding`; this mirror never
+ * drives it). `undefined` means the slot's live entry carries NO reservation
+ * record — a plain binding, or a token whose reservation settled and pruned
+ * its predecessor links.
+ */
+export const _test_exports = {
+	liveStageBRouteReservation: (
+		session: AgentSessionState,
+		taskId: string,
+		identity: string,
+	): { kind: 'replace' | 'append'; failed: boolean } | undefined => {
+		const entries = session.stageBRouteEvidence?.get(taskId) ?? [];
+		const entry = entries.find((candidate) => candidate.identity === identity);
+		if (!entry) return undefined;
+		const record = stageBRouteReservations.get(entry);
+		return record ? { kind: record.kind, failed: record.failed } : undefined;
+	},
+};
 
 export function getStageBRouteEvidence(
 	session: AgentSessionState,
@@ -4005,6 +4242,62 @@ export function getStageBRouteEvidence(
 	return (session.stageBRouteEvidence?.get(taskId) ?? []).map((entry) => ({
 		...entry,
 	}));
+}
+
+/** Live bindings whose durable write has settled; pending reservations are excluded. */
+export function getSettledStageBRouteEvidence(
+	session: AgentSessionState,
+	taskId: string,
+): ReviewRouteEvidence[] {
+	return (session.stageBRouteEvidence?.get(taskId) ?? [])
+		.filter((entry) => !stageBRouteReservations.has(entry))
+		.map((entry) => ({ ...entry }));
+}
+
+/**
+ * Complete route view for barriers: durable bindings supply siblings and win
+ * same-identity conflicts; settled live bindings fill identities not yet present
+ * in the durable projection. Pending reservations never satisfy completeness.
+ */
+export function mergeStageBRouteEvidence(
+	live: readonly ReviewRouteEvidence[],
+	durable: readonly ReviewRouteEvidence[],
+): ReviewRouteEvidence[] {
+	const merged = durable.map((entry) => ({ ...entry }));
+	const identities = new Set(merged.map((entry) => entry.identity));
+	for (const entry of live) {
+		if (identities.has(entry.identity)) continue;
+		identities.add(entry.identity);
+		merged.push({ ...entry });
+	}
+	return merged;
+}
+
+/**
+ * Route view for one completion while its evidence lock is held. Durable
+ * siblings win generally, but the completion currently being persisted must
+ * replace an older same-identity durable row so completeness is evaluated over
+ * the exact fresh dispatch tuple rather than its superseded predecessor.
+ */
+export function stageBRouteEvidenceForSettlement(
+	session: AgentSessionState,
+	taskId: string,
+	durable: readonly ReviewRouteEvidence[],
+	current: ReviewRouteEvidence,
+): ReviewRouteEvidence[] {
+	const merged = mergeStageBRouteEvidence(
+		getSettledStageBRouteEvidence(session, taskId),
+		durable,
+	);
+	const index = merged.findIndex(
+		(entry) => entry.identity === current.identity,
+	);
+	if (index < 0) {
+		merged.push({ ...current });
+	} else {
+		merged[index] = { ...current };
+	}
+	return merged;
 }
 
 export function clearStageBRouteEvidence(

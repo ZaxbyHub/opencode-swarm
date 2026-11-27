@@ -183,6 +183,14 @@ const RESERVATION_LOCK_TASK = 'background-coder-reservations';
 const ADVISORY_PREPARE_LEASE_MS = 30_000;
 const INGESTION_CLAIM_LEASE_MS = 30_000;
 
+/**
+ * r14 audit repair (P1-4): default lease for one closeout-step execution
+ * claim. The journal-gated effects are bounded file writes (advisories,
+ * context map, approval ledger), so a short lease bounds crash recovery;
+ * an abandoned lease is stolen after this interval.
+ */
+export const TERMINAL_CLOSEOUT_LEASE_MS = 30_000;
+
 /** An abandoned ingestion lease may be reclaimed after this bounded interval. */
 export const BACKGROUND_INGESTION_LEASE_MS = 30_000;
 
@@ -326,6 +334,17 @@ export interface BackgroundDelegationRecord {
 	/** Stable pre-launch background-coder capacity reservation. */
 	coderReservationId?: string;
 	prompt?: BackgroundPromptSnapshot;
+	/** Dispatch-time plan-critic binding; see {@link BackgroundPlanCriticDispatch}. */
+	planCriticDispatch?: BackgroundPlanCriticDispatch;
+	/**
+	 * r13 audit repair (P1-3): the VALIDATED caller-owned sounding-board
+	 * category captured at dispatch time (the explicit `category` field of
+	 * the architect's Task call). Bound to the exact call/child identity this
+	 * record carries; the async completion path feeds it to the SAME policy
+	 * parser as the sync transport, so an architect-owned category can never
+	 * be lost or overwritten by model free text.
+	 */
+	soundingBoardCategory?: string;
 	generation?: number;
 	/** Immutable trusted terminal event. Established exactly once. */
 	terminalResult?: BackgroundTerminalResult;
@@ -333,6 +352,22 @@ export interface BackgroundDelegationRecord {
 	coderSettlement?: BackgroundCoderSettlement;
 	/** Durable parent advisory keyed by terminalResult.eventId. */
 	advisoryInbox?: BackgroundAdvisoryInboxEntry;
+	/**
+	 * r13 audit repair (P2-2): durable closeout advisories (sounding-board
+	 * verdict, pipeline continuation) that must NOT depend on the parent
+	 * session being live in memory, and must NOT clobber the single
+	 * {@link advisoryInbox} slot (one terminal can legitimately carry several
+	 * distinct messages). Deduplicated by eventId; bounded.
+	 */
+	closeoutAdvisories?: BackgroundAdvisoryInboxEntry[];
+	/**
+	 * r13 audit repair (P0-3): versioned closeout journal for the terminal's
+	 * business side effects. The immutable terminal claim
+	 * ({@link terminalResult}) proves the terminal; this journal separately
+	 * acks each closeout effect so a crash between claim and effect can never
+	 * permanently lose it — recovery re-drives only the pending steps.
+	 */
+	closeout?: BackgroundDelegationCloseout;
 	/** Exact legacy coder WAL transfer that still needs durable reconciliation. */
 	legacyCoderSettlementTransfer?: {
 		taskId: string;
@@ -389,6 +424,105 @@ export interface BackgroundPromptSnapshot {
 	chars: number;
 	truncated: boolean;
 	digest: string;
+}
+
+/**
+ * Dispatch-time plan-critic binding (async lifecycle repair r11, finding F1).
+ * Present ONLY on launches that were classified AT DISPATCH as a plan-critic
+ * review (critic agent + `taskLooksLikePlanCritic` args). Carries the plan's
+ * structural hash at dispatch time so a completion-time APPROVED verdict can
+ * be verified against the plan the critic actually reviewed — a plan edited
+ * after the dispatch must not be approvable by the old verdict.
+ *
+ * Deliberately NOT part of `pendingLaunchIdentity`: it is completion-path
+ * provenance, not launch identity, and its absence on a replayed or
+ * summary-compacted record must not turn a host replay into a conflict.
+ */
+export interface BackgroundPlanCriticDispatch {
+	/** `computePlanStructureHash` of the plan at dispatch time (sha256 hex). */
+	planStructureHash: string;
+	/**
+	 * Dispatch-time epoch (ms) — audit only. NOTE (audit P0-2): for records
+	 * written since the r13 repair this is the epoch of the PRE-EXECUTION
+	 * capture in the delegation gate's `tool.execute.before` hook, taken
+	 * BEFORE the critic child started; legacy r11–r12 records captured it in
+	 * the after-hook (after the child had already started) — those records
+	 * still verify their hash at completion time, but the capture point is
+	 * not provably pre-execution.
+	 */
+	recordedAt: number;
+	/**
+	 * `derivePlanId` of the plan bound at dispatch time (audit P0-2 binding:
+	 * parent session, call id, child session, critic role live on the record
+	 * itself; the plan identity lives here). Optional for r11–r12 record
+	 * compatibility; its absence never weakens the hash fence.
+	 */
+	planId?: string;
+	/**
+	 * sha256 of the FULL dispatch prompt captured pre-execution (audit P0-2:
+	 * the binding must describe what the critic was actually sent, not just
+	 * what plan.json contained). Optional for r11–r12 record compatibility.
+	 */
+	promptContentDigest?: string;
+}
+
+/**
+ * r13 audit repair (P0-3): the individually-acknowledged closeout effects of
+ * a trusted terminal. Each entry is a durable idempotency slot keyed by
+ * `${correlationId}:${terminalEventId}:${step}` — the step is only marked
+ * completed AFTER its business effect was durably established, so a crash
+ * at any point leaves the step re-drivable by recovery.
+ */
+export const TERMINAL_CLOSEOUT_STEPS = [
+	'delegation_end',
+	'context_map',
+	'sounding_board',
+	'pipeline_advisory',
+	'parent_advisory',
+	/**
+	 * r14 audit repair (P0-3): the plan-critic approval snapshot is its own
+	 * recoverable closeout step. A transient ledger/plan read failure used to
+	 * log-and-lose a legitimate APPROVED verdict (restoring the original
+	 * PLAN_CRITIC_GATE_VIOLATION wedge). Only a host-verified critic record
+	 * with a dispatch-time plan binding (planCriticDispatch) may carry this
+	 * step; every replay re-applies the same authorization checks inside the
+	 * shared recorder.
+	 */
+	'plan_critic_approval',
+] as const;
+
+export type TerminalCloseoutStep = (typeof TERMINAL_CLOSEOUT_STEPS)[number];
+
+export interface BackgroundDelegationCloseoutStepState {
+	state: 'pending' | 'completed' | 'failed';
+	completedAt?: number;
+	/**
+	 * r14 audit repair (P1-4): durable execution lease for a pending step.
+	 * A worker must CAS-claim the step (claimTerminalCloseoutStep) before
+	 * running its effect; the ack must carry the lease token, so a stale
+	 * worker whose lease expired (or was stolen) can never ack a step a live
+	 * worker owns. Absent on completed/failed steps and on legacy steps.
+	 */
+	leaseClaimant?: string;
+	leaseToken?: string;
+	leaseExpiresAt?: number;
+	/**
+	 * r14 audit repair (P0-2): durable failure reason when
+	 * `state === 'failed'` — a permanent effect failure is terminally visible
+	 * in the journal instead of being silently re-driven forever.
+	 */
+	reason?: string;
+	updatedAt: number;
+}
+
+export interface BackgroundDelegationCloseout {
+	schemaVersion: 1;
+	/** The exact terminal event this journal acks (event fence). */
+	terminalEventId: string;
+	steps: Partial<
+		Record<TerminalCloseoutStep, BackgroundDelegationCloseoutStepState>
+	>;
+	updatedAt: number;
 }
 
 export type BackgroundDelegationRecoveryKind =
@@ -602,19 +736,32 @@ export interface BackgroundAdvisoryInboxEntry {
 }
 
 /**
- * r14 audit repair (P0-1), backported from upstream 7.205.9 for this PR's
- * background_settlement Stage-A justification: the durable semantic outcome
- * of a consumed ingestion. Only meaningful (and only allowed) when
- * `state === 'consumed'`. A terminal-negative drop (rejected/skipped
- * verdict, stale workspace) commits consumed too; the outcome rides the
- * SAME atomic commit as the consumed flip so a replay can route on the
- * provable semantics instead of guessing from `consumed`.
+ * r14 audit repair (P0-1): the durable semantic outcome of a consumed
+ * stage-B ingestion. `consumed` alone never proves success — a
+ * terminal-negative drop (rejected/skipped verdict, stale workspace)
+ * commits consumed too. The outcome is stored ATOMICALLY with the
+ * `consumed` flip (same persistence boundary) so a replay can route on
+ * the provable semantics instead of guessing from `consumed`.
  */
 export type DurableIngestionOutcome =
 	| 'accepted'
 	| 'rejected'
 	| 'skipped'
 	| 'stale';
+
+/**
+ * The provable outcome of a consumed ingestion as read back from the
+ * ledger. `unverifiable` = a legacy consumed record (pre-r14) without a
+ * stored semantic outcome — fail-closed: it must NEVER be interpreted as
+ * success (audit P0-1: "Legacy-Records ohne beweisbares Ergebnis dürfen
+ * nicht als Erfolg interpretiert werden").
+ */
+export type PersistedIngestionOutcome =
+	| { kind: 'accepted' }
+	| { kind: 'rejected' }
+	| { kind: 'skipped' }
+	| { kind: 'stale' }
+	| { kind: 'unverifiable' };
 
 export interface BackgroundDelegationIngestion {
 	state: 'claimed' | 'retryable' | 'consumed';
@@ -628,6 +775,31 @@ export interface BackgroundDelegationIngestion {
 	 * Absent on legacy records written before r14.
 	 */
 	outcome?: DurableIngestionOutcome;
+}
+
+/**
+ * Read the provable semantic outcome of a consumed ingestion (r14 audit
+ * repair P0-1). Anything other than `{ kind: 'accepted' }` — including a
+ * legacy record without a stored outcome — is NOT success.
+ */
+export function readDurableIngestionOutcome(
+	record: BackgroundDelegationRecord,
+): PersistedIngestionOutcome {
+	if (record.status !== 'consumed') return { kind: 'unverifiable' };
+	const ingestion = record.ingestion;
+	if (!ingestion || ingestion.state !== 'consumed') {
+		return { kind: 'unverifiable' };
+	}
+	switch (ingestion.outcome) {
+		case 'accepted':
+		case 'rejected':
+		case 'skipped':
+		case 'stale':
+			return { kind: ingestion.outcome };
+		default:
+			// Legacy consumed record without a provable semantic outcome.
+			return { kind: 'unverifiable' };
+	}
 }
 
 export interface BackgroundCoderReservation {
@@ -777,6 +949,18 @@ const TaskChangeContextSchema = z
 		declaredFiles: z.array(z.string()).nullable(),
 		baseline: WorkspaceSchema,
 		workflowGeneration: z.number().int().nonnegative().optional(),
+	})
+	.strict();
+
+const PlanCriticDispatchSchema = z
+	.object({
+		planStructureHash: z.string().regex(/^[0-9a-f]{64}$/),
+		recordedAt: z.number().int().nonnegative(),
+		planId: z.string().min(1).max(256).optional(),
+		promptContentDigest: z
+			.string()
+			.regex(/^[0-9a-f]{64}$/)
+			.optional(),
 	})
 	.strict();
 
@@ -934,6 +1118,14 @@ const DelegationIngestionSchema = z
 				message: 'completed ingestion cannot retain a claim lease',
 			});
 		}
+		// r14 audit repair (P0-1): the semantic outcome is a property of the
+		// CONSUMED commit only — a claim or a retryable error has no outcome.
+		if (value.state !== 'consumed' && value.outcome !== undefined) {
+			context.addIssue({
+				code: z.ZodIssueCode.custom,
+				message: 'ingestion outcome is only allowed on a consumed state',
+			});
+		}
 	});
 
 const BackgroundCoderReservationSchema = z
@@ -1059,6 +1251,13 @@ const RecordSchema = z
 		promptHash: z.string().optional(),
 		workspace: WorkspaceSchema.optional(),
 		taskChangeContext: TaskChangeContextSchema.optional(),
+		planCriticDispatch: PlanCriticDispatchSchema.optional(),
+		soundingBoardCategory: z
+			.string()
+			.min(1)
+			.max(64)
+			.regex(/^[a-z0-9_]+$/)
+			.optional(),
 		workflowGeneration: z.number().int().nonnegative().optional(),
 		worktree: WorktreeDescriptorSchema.optional(),
 		coderReservationId: z.string().min(1).max(256).optional(),
@@ -1072,6 +1271,63 @@ const RecordSchema = z
 		terminalResult: TerminalResultSchema.optional(),
 		coderSettlement: CoderSettlementSchema.optional(),
 		advisoryInbox: AdvisoryInboxSchema.optional(),
+		closeoutAdvisories: z.array(AdvisoryInboxSchema).max(4).optional(),
+		closeout: z
+			.object({
+				schemaVersion: z.literal(1),
+				terminalEventId: z.string().min(1).max(256),
+				// zod v4: z.record requires a COMPLETE key set; the journal is
+				// intentionally partial (only the applicable steps), so use
+				// partialRecord.
+				steps: z.partialRecord(
+					z.enum(TERMINAL_CLOSEOUT_STEPS),
+					z
+						.object({
+							state: z.enum(['pending', 'completed', 'failed']),
+							completedAt: z.number().int().nonnegative().optional(),
+							leaseClaimant: z.string().min(1).max(256).optional(),
+							leaseToken: z.string().min(1).max(256).optional(),
+							leaseExpiresAt: z.number().int().nonnegative().optional(),
+							reason: z.string().min(1).max(512).optional(),
+							updatedAt: z.number().int().nonnegative(),
+						})
+						.strict()
+						.superRefine((value, context) => {
+							// r14 audit repair (P0-2): a failure reason belongs to a
+							// failed step; a completed step never carries one.
+							if (value.state === 'failed' && value.reason === undefined) {
+								context.addIssue({
+									code: z.ZodIssueCode.custom,
+									message: 'failed closeout step requires a reason',
+								});
+							}
+							if (value.state !== 'failed' && value.reason !== undefined) {
+								context.addIssue({
+									code: z.ZodIssueCode.custom,
+									message:
+										'closeout step reason is only allowed on a failed step',
+								});
+							}
+							// r14 audit repair (P1-4): a lease belongs to a pending
+							// step; terminal steps never carry one.
+							if (
+								value.state !== 'pending' &&
+								(value.leaseClaimant !== undefined ||
+									value.leaseToken !== undefined ||
+									value.leaseExpiresAt !== undefined)
+							) {
+								context.addIssue({
+									code: z.ZodIssueCode.custom,
+									message:
+										'closeout step lease is only allowed on a pending step',
+								});
+							}
+						}),
+				),
+				updatedAt: z.number().int().nonnegative(),
+			})
+			.strict()
+			.optional(),
 		legacyCoderSettlementTransfer: z
 			.object({
 				taskId: z.string().min(1).max(256),
@@ -3473,6 +3729,10 @@ export interface RecordPendingInput {
 	promptHash?: string;
 	workspace?: BackgroundWorkspaceSnapshot;
 	taskChangeContext?: BackgroundTaskChangeContext;
+	/** Dispatch-time plan-critic binding; see {@link BackgroundPlanCriticDispatch}. */
+	planCriticDispatch?: BackgroundPlanCriticDispatch;
+	/** Validated caller-owned sounding-board category (r13 audit P1-3). */
+	soundingBoardCategory?: string;
 	workflowGeneration?: number;
 	worktree?: BackgroundWorktreeDescriptor;
 	coderReservationId?: string;
@@ -3515,6 +3775,12 @@ function buildPendingRecord(
 		...(input.workspace ? { workspace: input.workspace } : {}),
 		...(input.taskChangeContext
 			? { taskChangeContext: input.taskChangeContext }
+			: {}),
+		...(input.planCriticDispatch
+			? { planCriticDispatch: input.planCriticDispatch }
+			: {}),
+		...(input.soundingBoardCategory
+			? { soundingBoardCategory: input.soundingBoardCategory }
 			: {}),
 		...(input.workflowGeneration !== undefined
 			? { workflowGeneration: input.workflowGeneration }
@@ -5229,6 +5495,170 @@ function getLegacyCoderSettlementReconciler(
 	return legacyCoderSettlementReconcilers.get(canonicalRootKeyFresh(directory));
 }
 
+// r13 audit repair (P0-3): per-directory terminal-closeout reconcilers. The
+// live completion observer registers itself so maintenance passes can re-drive
+// crashed closeouts WITHOUT depending on a new host completion event arriving.
+type TerminalCloseoutReconciler = (
+	record: BackgroundDelegationRecord,
+) => Promise<void>;
+const terminalCloseoutReconcilers = new Map<
+	string,
+	TerminalCloseoutReconciler
+>();
+const terminalCloseoutReconcilerOrder: string[] = [];
+const MAX_TERMINAL_CLOSEOUT_RECONCILERS = 8;
+
+export function registerTerminalCloseoutReconciler(
+	directory: string,
+	reconciler: TerminalCloseoutReconciler,
+): void {
+	const key = canonicalRootKeyFresh(directory);
+	if (terminalCloseoutReconcilers.has(key)) {
+		const existingIndex = terminalCloseoutReconcilerOrder.indexOf(key);
+		if (existingIndex >= 0) {
+			terminalCloseoutReconcilerOrder.splice(existingIndex, 1);
+		}
+		terminalCloseoutReconcilerOrder.push(key);
+		terminalCloseoutReconcilers.set(key, reconciler);
+		return;
+	}
+	if (
+		terminalCloseoutReconcilerOrder.length >= MAX_TERMINAL_CLOSEOUT_RECONCILERS
+	) {
+		const evicted = terminalCloseoutReconcilerOrder.shift();
+		if (evicted) terminalCloseoutReconcilers.delete(evicted);
+	}
+	terminalCloseoutReconcilerOrder.push(key);
+	terminalCloseoutReconcilers.set(key, reconciler);
+}
+
+function getTerminalCloseoutReconciler(
+	directory: string,
+): TerminalCloseoutReconciler | undefined {
+	return terminalCloseoutReconcilers.get(canonicalRootKeyFresh(directory));
+}
+
+/**
+ * Whether the record's terminal closeout still has un-acked steps (or has a
+ * trusted terminal but no journal yet — the crash-between-claim-and-initialize
+ * shape, and every pre-repair legacy record). r14 (P0-2): a step durably
+ * marked `failed` is terminally closed — it does not keep the record in the
+ * recovery set.
+ */
+export function hasPendingTerminalCloseout(
+	record: BackgroundDelegationRecord,
+): boolean {
+	if (record.batchId !== undefined) return false; // lanes settle elsewhere
+	const terminal = record.terminalResult;
+	if (!terminal) return false;
+	const closeout = record.closeout;
+	if (!closeout) return true;
+	if (closeout.terminalEventId !== terminal.eventId) return true;
+	return Object.values(closeout.steps).some((step) => step.state === 'pending');
+}
+
+/**
+ * Bounded recovery pass: re-drive the closeout of terminal records with
+ * pending steps. Runs OUTSIDE the store locks (the reconciler takes its own
+ * locks), bounded by maxRecords — no O(all-records) work per ordinary event.
+ */
+/**
+ * r14 audit repair (P1-4): per-directory recovery rotation cursor. The naive
+ * `slice(0, maxRecords)` selection starves later records forever when the
+ * head records cannot complete (persistently failing effects). The cursor
+ * rotates the start position through the candidate list each pass, so every
+ * pending record is eventually examined even with a stuck head.
+ */
+const terminalCloseoutRecoveryCursors = new Map<string, string>();
+// F-002 (PR 3922 review): the cursor map is module-level state keyed by
+// canonical root, so it must have an explicit eviction strategy (AGENTS.md
+// invariant 8) — long-lived host processes serving many repos/worktrees
+// would otherwise accumulate one entry per distinct root forever. The bound
+// mirrors the sibling reconciler registries above (FIFO eviction on
+// insertion, most-recently-updated roots refreshed). Eviction is safe: a
+// lost cursor only resets that root's rotation to the head of its next
+// recovery pass — the r14 fairness rotation re-converges from there.
+const MAX_TERMINAL_CLOSEOUT_RECOVERY_CURSORS = 32;
+const terminalCloseoutRecoveryCursorOrder: string[] = [];
+
+function noteTerminalCloseoutRecoveryCursor(
+	key: string,
+	correlationId: string,
+): void {
+	if (terminalCloseoutRecoveryCursors.has(key)) {
+		const existingIndex = terminalCloseoutRecoveryCursorOrder.indexOf(key);
+		if (existingIndex >= 0) {
+			terminalCloseoutRecoveryCursorOrder.splice(existingIndex, 1);
+		}
+		terminalCloseoutRecoveryCursorOrder.push(key);
+		terminalCloseoutRecoveryCursors.set(key, correlationId);
+		return;
+	}
+	if (
+		terminalCloseoutRecoveryCursorOrder.length >=
+		MAX_TERMINAL_CLOSEOUT_RECOVERY_CURSORS
+	) {
+		const evicted = terminalCloseoutRecoveryCursorOrder.shift();
+		if (evicted) terminalCloseoutRecoveryCursors.delete(evicted);
+	}
+	terminalCloseoutRecoveryCursorOrder.push(key);
+	terminalCloseoutRecoveryCursors.set(key, correlationId);
+}
+
+function rotateCloseoutCandidates<T extends { correlationId: string }>(
+	directory: string,
+	candidates: T[],
+): T[] {
+	if (candidates.length <= 1) return candidates;
+	const cursor = terminalCloseoutRecoveryCursors.get(
+		canonicalRootKeyFresh(directory),
+	);
+	if (!cursor) return candidates;
+	const startIndex = candidates.findIndex(
+		(record) => record.correlationId === cursor,
+	);
+	if (startIndex < 0) return candidates;
+	const rotated = [
+		...candidates.slice(startIndex + 1),
+		...candidates.slice(0, startIndex + 1),
+	];
+	return rotated;
+}
+
+async function reconcileTerminalCloseouts(
+	directory: string,
+	maxRecords: number,
+	onRecord?: MaintainBackgroundDelegationsOptions['onTerminalCloseoutPending'],
+): Promise<number> {
+	const reconciler = onRecord ?? getTerminalCloseoutReconciler(directory);
+	if (!reconciler) return 0;
+	const candidates = rotateCloseoutCandidates(
+		directory,
+		readDelegations(directory).filter(hasPendingTerminalCloseout),
+	).slice(0, maxRecords);
+	if (candidates.length === 0) return 0;
+	let reDriven = 0;
+	for (const record of candidates) {
+		try {
+			await reconciler(record);
+			reDriven += 1;
+		} catch (error) {
+			logger.warn(
+				`[background] terminal closeout recovery failed for ${record.correlationId}: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			);
+		}
+	}
+	// Advance the rotation cursor to the LAST examined record: the next pass
+	// starts after it, so head-of-line starvation cannot pin later records.
+	noteTerminalCloseoutRecoveryCursor(
+		canonicalRootKeyFresh(directory),
+		candidates[candidates.length - 1].correlationId,
+	);
+	return reDriven;
+}
+
 /** Test-only seam for the bounded legacy-settlement reconciler registry. */
 export const _internals = {
 	readRetryDelayMs: DELEGATION_READ_RETRY_DELAY_MS,
@@ -5252,6 +5682,17 @@ export const _internals = {
 	resetLegacyCoderSettlementReconcilers: () => {
 		legacyCoderSettlementReconcilers.clear();
 		legacyCoderSettlementReconcilerOrder.length = 0;
+	},
+	/** Test-only seam for the bounded terminal-closeout recovery cursor map. */
+	noteTerminalCloseoutRecoveryCursor,
+	terminalCloseoutRecoveryCursorSnapshot: () => ({
+		cursors: new Map(terminalCloseoutRecoveryCursors),
+		order: [...terminalCloseoutRecoveryCursorOrder],
+		maxCursors: MAX_TERMINAL_CLOSEOUT_RECOVERY_CURSORS,
+	}),
+	resetTerminalCloseoutRecoveryCursors: () => {
+		terminalCloseoutRecoveryCursors.clear();
+		terminalCloseoutRecoveryCursorOrder.length = 0;
 	},
 	reservationCoordinationRowLimit: MAX_COORDINATION_STATE_LIST_ROWS,
 	writeBackgroundCoderReservations,
@@ -5461,7 +5902,15 @@ export async function claimDelegationIngestion(
 	}
 }
 
-/** Commit an ingestion claim to consumed or retryable ingestion_error. */
+/** Commit an ingestion claim to consumed or retryable ingestion_error.
+ *
+ * r14 audit repair (P0-1): the semantic outcome of the consumed commit is
+ * stored under the SAME atomic persistence boundary as the `consumed`
+ * flip — never in a second write. A `success` commit without an explicit
+ * outcome is recorded as `accepted` (the caller asserts success); a
+ * retryable commit never carries an outcome. Replays route on the stored
+ * outcome via {@link readDurableIngestionOutcome}, never on `consumed`
+ * alone. */
 export async function recordDelegationIngestionResult(
 	directory: string,
 	correlationId: string,
@@ -5690,6 +6139,586 @@ export async function replacePendingBackgroundAdvisory(
 	}
 }
 
+/**
+ * r13 audit repair (P0-3): initialize the terminal closeout journal with the
+ * exact set of required steps for this terminal (role/applicability decided
+ * by the observer). Event-fenced CAS under the store lock: only succeeds
+ * when the record's durable terminal eventId matches. Idempotent — an
+ * existing journal for the SAME terminal is kept (its step states are
+ * preserved); a journal for a DIFFERENT terminal is refused (stale writer).
+ */
+export async function initializeTerminalCloseout(
+	directory: string,
+	correlationId: string,
+	terminalEventId: string,
+	requiredSteps: readonly TerminalCloseoutStep[],
+): Promise<boolean> {
+	if (!correlationId || !terminalEventId) return false;
+	const now = Date.now();
+	let ok = false;
+	try {
+		await withEvidenceLock(
+			directory,
+			BACKGROUND_DELEGATIONS_FILE,
+			STORE_LOCK_AGENT,
+			STORE_LOCK_TASK,
+			async () => {
+				const records = loadRecordsForWrite(directory);
+				if (records === null) return;
+				const current = findRecordForWrite(records, correlationId);
+				if (
+					!current?.terminalResult ||
+					current.terminalResult.eventId !== terminalEventId
+				) {
+					return;
+				}
+				if (current.closeout) {
+					// Same terminal: keep existing step states (a re-drive must not
+					// reset completed steps). Different terminal: refuse.
+					ok = current.closeout.terminalEventId === terminalEventId;
+					return;
+				}
+				const steps: BackgroundDelegationCloseout['steps'] = {};
+				for (const step of requiredSteps) {
+					steps[step] = { state: 'pending', updatedAt: now };
+				}
+				const next: BackgroundDelegationRecord = {
+					...current,
+					schemaVersion: current.schemaVersion === 4 ? 4 : 3,
+					closeout: {
+						schemaVersion: 1,
+						terminalEventId,
+						steps,
+						updatedAt: now,
+					},
+					updatedAt: now,
+				};
+				appendRecord(directory, next);
+				maybeCompactDelegationsLocked(directory);
+				ok = true;
+			},
+		);
+	} catch (err) {
+		logger.warn(
+			`[background] initializeTerminalCloseout failed: ${
+				err instanceof Error ? err.message : String(err)
+			}`,
+		);
+	}
+	return ok;
+}
+
+/**
+ * Mark one closeout step completed. Event-fenced CAS under the store lock:
+ * the step is ONLY acked for the exact terminal event the caller processed.
+ * A crash between the business effect and this ack leaves the step pending
+ * (re-drivable); a late mark for a superseded terminal is refused.
+ *
+ * r14 audit repair (P1-4): when `options.leaseToken` is provided, the ack is
+ * ADDITIONALLY fenced on the step's durable execution lease — a stale worker
+ * whose lease was stolen (or whose step is leased by a live worker) can
+ * never ack. Without a token (pure acks that ran no effect, and legacy
+ * callers), a step carrying a live foreign lease is refused (busy); a step
+ * without a lease keeps the pre-r14 eventId-fenced behavior.
+ */
+export async function markTerminalCloseoutStepCompleted(
+	directory: string,
+	correlationId: string,
+	terminalEventId: string,
+	step: TerminalCloseoutStep,
+	options: { leaseToken?: string } = {},
+): Promise<boolean> {
+	if (!correlationId || !terminalEventId) return false;
+	const now = Date.now();
+	let ok = false;
+	try {
+		await withEvidenceLock(
+			directory,
+			BACKGROUND_DELEGATIONS_FILE,
+			STORE_LOCK_AGENT,
+			STORE_LOCK_TASK,
+			async () => {
+				const records = loadRecordsForWrite(directory);
+				if (records === null) return;
+				const current = findRecordForWrite(records, correlationId);
+				if (
+					!current?.terminalResult ||
+					current.terminalResult.eventId !== terminalEventId
+				) {
+					return;
+				}
+				const closeout: BackgroundDelegationCloseout =
+					current.closeout &&
+					current.closeout.terminalEventId === terminalEventId
+						? current.closeout
+						: {
+								schemaVersion: 1,
+								terminalEventId,
+								steps: {},
+								updatedAt: now,
+							};
+				const existing = closeout.steps[step];
+				if (existing?.state === 'completed') {
+					ok = true;
+					return;
+				}
+				if (existing?.state === 'failed') {
+					// A durably failed step is terminally closed — it cannot be
+					// retroactively completed (r14 P0-2).
+					return;
+				}
+				if (options.leaseToken !== undefined) {
+					// Lease-fenced ack (r14 P1-4): only the current lease holder
+					// may complete the step it claimed.
+					if (existing?.leaseToken !== options.leaseToken) {
+						return;
+					}
+				} else if (
+					existing?.leaseToken !== undefined &&
+					(existing.leaseExpiresAt ?? 0) > now
+				) {
+					// A pure ack (no effect ran) must not complete a step a live
+					// worker currently owns; the lease owner resolves it.
+					return;
+				}
+				const next: BackgroundDelegationRecord = {
+					...current,
+					schemaVersion: current.schemaVersion === 4 ? 4 : 3,
+					closeout: {
+						...closeout,
+						steps: {
+							...closeout.steps,
+							[step]: {
+								state: 'completed',
+								completedAt: now,
+								updatedAt: now,
+							},
+						},
+						updatedAt: now,
+					},
+					updatedAt: now,
+				};
+				appendRecord(directory, next);
+				maybeCompactDelegationsLocked(directory);
+				ok = true;
+			},
+		);
+	} catch (err) {
+		logger.warn(
+			`[background] markTerminalCloseoutStepCompleted failed: ${
+				err instanceof Error ? err.message : String(err)
+			}`,
+		);
+	}
+	return ok;
+}
+
+/**
+ * r14 audit repair (P0-2): mark one closeout step as PERMANENTLY failed.
+ * Event-fenced CAS under the store lock, mirroring
+ * {@link markTerminalCloseoutStepCompleted}. A failed step is terminally
+ * visible in the journal (with its reason) and is NOT re-driven by recovery —
+ * the durable failure state is the recovery record. Returns false when the
+ * failure state itself could not be persisted (the step then stays pending,
+ * which is the conservative fallback: recovery keeps re-driving it).
+ */
+export async function markTerminalCloseoutStepFailed(
+	directory: string,
+	correlationId: string,
+	terminalEventId: string,
+	step: TerminalCloseoutStep,
+	reason: string,
+	options: { leaseToken?: string } = {},
+): Promise<boolean> {
+	if (!correlationId || !terminalEventId || !reason) return false;
+	const now = Date.now();
+	let ok = false;
+	try {
+		await withEvidenceLock(
+			directory,
+			BACKGROUND_DELEGATIONS_FILE,
+			STORE_LOCK_AGENT,
+			STORE_LOCK_TASK,
+			async () => {
+				const records = loadRecordsForWrite(directory);
+				if (records === null) return;
+				const current = findRecordForWrite(records, correlationId);
+				if (
+					!current?.terminalResult ||
+					current.terminalResult.eventId !== terminalEventId
+				) {
+					return;
+				}
+				const closeout: BackgroundDelegationCloseout =
+					current.closeout &&
+					current.closeout.terminalEventId === terminalEventId
+						? current.closeout
+						: {
+								schemaVersion: 1,
+								terminalEventId,
+								steps: {},
+								updatedAt: now,
+							};
+				const existing = closeout.steps[step];
+				if (existing?.state === 'failed') {
+					ok = true;
+					return;
+				}
+				if (existing?.state === 'completed') {
+					// A completed step cannot be retroactively failed.
+					return;
+				}
+				// r14 (P1-4): a lease-fenced failure mark — only the current
+				// lease holder may terminally fail the step it claimed.
+				if (
+					options.leaseToken !== undefined &&
+					existing?.leaseToken !== options.leaseToken
+				) {
+					return;
+				}
+				const next: BackgroundDelegationRecord = {
+					...current,
+					schemaVersion: current.schemaVersion === 4 ? 4 : 3,
+					closeout: {
+						...closeout,
+						steps: {
+							...closeout.steps,
+							[step]: {
+								state: 'failed',
+								reason: reason.slice(0, 512),
+								updatedAt: now,
+							},
+						},
+						updatedAt: now,
+					},
+					updatedAt: now,
+				};
+				appendRecord(directory, next);
+				maybeCompactDelegationsLocked(directory);
+				ok = true;
+			},
+		);
+	} catch (err) {
+		logger.warn(
+			`[background] markTerminalCloseoutStepFailed failed: ${
+				err instanceof Error ? err.message : String(err)
+			}`,
+		);
+	}
+	return ok;
+}
+
+/** Disposition of a closeout-step lease claim (r14 audit repair P1-4). */
+export interface TerminalCloseoutStepClaim {
+	disposition:
+		| 'claimed'
+		/** Another live worker holds an unexpired lease on this step. */
+		| 'busy'
+		/** The step is terminally closed (completed or durably failed). */
+		| 'closed'
+		/** The record's terminal no longer matches — the caller is stale. */
+		| 'stale';
+	/** The CAS token for the acquired lease (disposition 'claimed' only). */
+	leaseToken?: string;
+}
+
+/**
+ * r14 audit repair (P1-4): durably claim the execution lease of ONE pending
+ * closeout step before its effect runs. Event-fenced CAS under the store
+ * lock: the record's terminal must match exactly (a stale worker is
+ * refused), a terminally closed step is not claimable, and an unexpired
+ * foreign lease is busy. An expired lease is stolen (crash recovery): the
+ * previous holder's later ack fails its token CAS and can never complete a
+ * step the new holder owns. The same claimant re-claiming its own unexpired
+ * lease is idempotent (same token returned).
+ *
+ * GUARANTEE CLASS (documented, not exactly-once): the lease prevents
+ * DUPLICATE ACKS and stale-worker writes; duplicate effect EXECUTION across
+ * a lease steal remains possible in the crash window (claim expired → new
+ * worker runs the effect while the old one still does) — every journal-gated
+ * effect is therefore required to be idempotent with a stable idempotency
+ * key (advisories dedupe by eventId, the context map upserts by task id,
+ * telemetry dedupes by record id, the critic-approval ledger dedupes by call
+ * id). Exactly-once execution against non-transactional sinks is impossible;
+ * the documented guarantee is at-least-once-execution + exactly-once-ack.
+ */
+export async function claimTerminalCloseoutStep(
+	directory: string,
+	correlationId: string,
+	terminalEventId: string,
+	step: TerminalCloseoutStep,
+	options: { claimantId: string; now?: number; leaseMs?: number },
+): Promise<TerminalCloseoutStepClaim | null> {
+	if (!correlationId || !terminalEventId || !step || !options.claimantId) {
+		return null;
+	}
+	const now = options.now ?? Date.now();
+	const leaseMs = Math.max(
+		1_000,
+		Math.min(options.leaseMs ?? TERMINAL_CLOSEOUT_LEASE_MS, 5 * 60_000),
+	);
+	let claim: TerminalCloseoutStepClaim | null = null;
+	try {
+		await withEvidenceLock(
+			directory,
+			BACKGROUND_DELEGATIONS_FILE,
+			STORE_LOCK_AGENT,
+			STORE_LOCK_TASK,
+			async () => {
+				const records = loadRecordsForWrite(directory);
+				if (records === null) return;
+				const current = findRecordForWrite(records, correlationId);
+				if (
+					!current?.terminalResult ||
+					current.terminalResult.eventId !== terminalEventId
+				) {
+					claim = { disposition: 'stale' };
+					return;
+				}
+				const closeout: BackgroundDelegationCloseout =
+					current.closeout &&
+					current.closeout.terminalEventId === terminalEventId
+						? current.closeout
+						: {
+								schemaVersion: 1,
+								terminalEventId,
+								steps: {},
+								updatedAt: now,
+							};
+				const existing = closeout.steps[step];
+				if (existing?.state === 'completed' || existing?.state === 'failed') {
+					claim = { disposition: 'closed' };
+					return;
+				}
+				if (
+					existing?.leaseToken !== undefined &&
+					existing.leaseClaimant !== options.claimantId &&
+					(existing.leaseExpiresAt ?? 0) > now
+				) {
+					claim = { disposition: 'busy' };
+					return;
+				}
+				if (
+					existing?.leaseToken !== undefined &&
+					existing.leaseClaimant === options.claimantId &&
+					(existing.leaseExpiresAt ?? 0) > now
+				) {
+					// Idempotent re-claim by the same live worker.
+					claim = {
+						disposition: 'claimed',
+						leaseToken: existing.leaseToken,
+					};
+					return;
+				}
+				// No lease, an expired lease, or a foreign expired lease: claim
+				// (or steal) it with a fresh token.
+				const leaseToken = createHash('sha256')
+					.update(
+						JSON.stringify([
+							correlationId,
+							terminalEventId,
+							step,
+							options.claimantId,
+							now,
+						]),
+					)
+					.digest('hex');
+				const next: BackgroundDelegationRecord = {
+					...current,
+					schemaVersion: current.schemaVersion === 4 ? 4 : 3,
+					closeout: {
+						...closeout,
+						steps: {
+							...closeout.steps,
+							[step]: {
+								state: 'pending',
+								leaseClaimant: options.claimantId,
+								leaseToken,
+								leaseExpiresAt: now + leaseMs,
+								updatedAt: now,
+							},
+						},
+						updatedAt: now,
+					},
+					updatedAt: now,
+				};
+				appendRecord(directory, next);
+				maybeCompactDelegationsLocked(directory);
+				claim = { disposition: 'claimed', leaseToken };
+			},
+		);
+		return claim;
+	} catch (err) {
+		logger.warn(
+			`[background] claimTerminalCloseoutStep failed: ${
+				err instanceof Error ? err.message : String(err)
+			}`,
+		);
+		return null;
+	}
+}
+
+/**
+ * r14 audit repair (P1-4): release a step's execution lease after a
+ * retryable failure so recovery can retry immediately instead of waiting
+ * for the lease to expire. Token-fenced CAS: a stale worker cannot release a
+ * lease another worker owns.
+ */
+export async function releaseTerminalCloseoutStepLease(
+	directory: string,
+	correlationId: string,
+	terminalEventId: string,
+	step: TerminalCloseoutStep,
+	leaseToken: string,
+): Promise<boolean> {
+	if (!correlationId || !terminalEventId || !step || !leaseToken) {
+		return false;
+	}
+	const now = Date.now();
+	let ok = false;
+	try {
+		await withEvidenceLock(
+			directory,
+			BACKGROUND_DELEGATIONS_FILE,
+			STORE_LOCK_AGENT,
+			STORE_LOCK_TASK,
+			async () => {
+				const records = loadRecordsForWrite(directory);
+				if (records === null) return;
+				const current = findRecordForWrite(records, correlationId);
+				if (
+					!current?.terminalResult ||
+					current.terminalResult.eventId !== terminalEventId
+				) {
+					return;
+				}
+				const closeout = current.closeout;
+				if (!closeout || closeout.terminalEventId !== terminalEventId) return;
+				const existing = closeout.steps[step];
+				if (
+					existing?.state !== 'pending' ||
+					existing.leaseToken !== leaseToken
+				) {
+					return;
+				}
+				const next: BackgroundDelegationRecord = {
+					...current,
+					schemaVersion: current.schemaVersion === 4 ? 4 : 3,
+					closeout: {
+						...closeout,
+						steps: {
+							...closeout.steps,
+							[step]: {
+								state: 'pending',
+								updatedAt: now,
+							},
+						},
+						updatedAt: now,
+					},
+					updatedAt: now,
+				};
+				appendRecord(directory, next);
+				maybeCompactDelegationsLocked(directory);
+				ok = true;
+			},
+		);
+	} catch (err) {
+		logger.warn(
+			`[background] releaseTerminalCloseoutStepLease failed: ${
+				err instanceof Error ? err.message : String(err)
+			}`,
+		);
+	}
+	return ok;
+}
+
+/**
+ * Pure check: is this closeout step still pending for the exact terminal
+ * event? True when the durable journal has not acked it (crash-safety: a
+ * missing journal, a foreign terminal event, or an unacked step all
+ * re-drive). A step marked `failed` (r14 P0-2) is terminally closed — it is
+ * NOT re-driven; its durable failure state is the recovery record.
+ */
+export function isTerminalCloseoutStepPending(
+	record: BackgroundDelegationRecord,
+	terminalEventId: string,
+	step: TerminalCloseoutStep,
+): boolean {
+	if (record.batchId !== undefined) return false; // lane records never journal here
+	const closeout = record.closeout;
+	if (!closeout || closeout.terminalEventId !== terminalEventId) return true;
+	const state = closeout.steps[step]?.state;
+	return state === undefined || state === 'pending';
+}
+
+/**
+ * r13 audit repair (P2-2): durably store a closeout advisory (sounding-board
+ * verdict, pipeline continuation) in the record's bounded closeout advisory
+ * list — independent of the single {@link advisoryInbox} slot and of the
+ * parent session being live in memory. Deduplicated by eventId; a repeated
+ * delivery (replay/crash recovery) is a no-op.
+ */
+export async function putTerminalCloseoutAdvisory(
+	directory: string,
+	correlationId: string,
+	input: PutPendingBackgroundAdvisoryInput,
+): Promise<BackgroundAdvisoryInboxEntry | null> {
+	const createdAt = input.createdAt ?? Date.now();
+	const parsed = AdvisoryInboxSchema.safeParse({
+		eventId: input.eventId,
+		parentSessionId: input.parentSessionId,
+		state: 'pending',
+		message: input.message,
+		createdAt,
+	});
+	if (!correlationId || !parsed.success) return null;
+	let result: BackgroundAdvisoryInboxEntry | null = null;
+	try {
+		await withEvidenceLock(
+			directory,
+			BACKGROUND_DELEGATIONS_FILE,
+			STORE_LOCK_AGENT,
+			STORE_LOCK_TASK,
+			async () => {
+				const records = loadRecordsForWrite(directory);
+				if (records === null) return;
+				const current = findRecordForWrite(records, correlationId);
+				if (
+					!current?.terminalResult ||
+					current.parentSessionId !== parsed.data.parentSessionId
+				) {
+					return;
+				}
+				const existing = current.closeoutAdvisories ?? [];
+				const duplicate = existing.find(
+					(entry) => entry.eventId === parsed.data?.eventId,
+				);
+				if (duplicate) {
+					result = duplicate;
+					return;
+				}
+				if (existing.length >= 4) return;
+				const next: BackgroundDelegationRecord = {
+					...current,
+					schemaVersion: current.schemaVersion === 4 ? 4 : 3,
+					closeoutAdvisories: [...existing, parsed.data],
+					updatedAt: createdAt,
+				};
+				appendRecord(directory, next);
+				maybeCompactDelegationsLocked(directory);
+				result = parsed.data;
+			},
+		);
+	} catch (err) {
+		logger.warn(
+			`[background] putTerminalCloseoutAdvisory failed: ${
+				err instanceof Error ? err.message : String(err)
+			}`,
+		);
+	}
+	return result;
+}
+
 export interface PreparePendingBackgroundAdvisoriesOptions {
 	preparationId: string;
 	now?: number;
@@ -5726,38 +6755,72 @@ export async function preparePendingBackgroundAdvisories(
 					// One entry per transaction keeps acknowledgement atomic in the
 					// append-only ledger; subsequent turns drain subsequent entries.
 					if (prepared.length >= 1) break;
-					const advisory = current.advisoryInbox;
-					if (
-						!advisory ||
-						advisory.parentSessionId !== parentSessionId ||
-						advisory.state !== 'pending'
-					) {
-						continue;
+					// r13 (P2-2): candidates include the single-slot terminal
+					// advisory AND the bounded closeout advisory list — one
+					// terminal may carry several distinct durable messages.
+					const candidates: Array<{
+						entry: BackgroundAdvisoryInboxEntry;
+						slot: 'advisoryInbox' | 'closeoutAdvisories';
+						index: number;
+					}> = [];
+					if (current.advisoryInbox) {
+						candidates.push({
+							entry: current.advisoryInbox,
+							slot: 'advisoryInbox',
+							index: 0,
+						});
 					}
-					if (
-						advisory.preparation &&
-						advisory.preparation.id !== options.preparationId &&
-						advisory.preparation.leaseExpiresAt > now
+					for (
+						let index = 0;
+						index < (current.closeoutAdvisories ?? []).length;
+						index++
 					) {
-						continue;
+						const entry = current.closeoutAdvisories?.[index];
+						if (entry) {
+							candidates.push({ entry, slot: 'closeoutAdvisories', index });
+						}
 					}
-					const nextAdvisory: BackgroundAdvisoryInboxEntry = {
-						...advisory,
-						preparation: {
-							id: options.preparationId,
-							preparedAt: now,
-							leaseExpiresAt: now + leaseMs,
-						},
-					};
-					const next: BackgroundDelegationRecord = {
-						...current,
-						schemaVersion: current.schemaVersion === 4 ? 4 : 3,
-						advisoryInbox: nextAdvisory,
-						updatedAt: now,
-					};
-					appendRecord(directory, next);
-					maybeCompactDelegationsLocked(directory);
-					prepared.push(nextAdvisory);
+					for (const candidate of candidates) {
+						const advisory = candidate.entry;
+						if (
+							advisory.parentSessionId !== parentSessionId ||
+							advisory.state !== 'pending'
+						) {
+							continue;
+						}
+						if (
+							advisory.preparation &&
+							advisory.preparation.id !== options.preparationId &&
+							advisory.preparation.leaseExpiresAt > now
+						) {
+							continue;
+						}
+						const nextAdvisory: BackgroundAdvisoryInboxEntry = {
+							...advisory,
+							preparation: {
+								id: options.preparationId,
+								preparedAt: now,
+								leaseExpiresAt: now + leaseMs,
+							},
+						};
+						const next: BackgroundDelegationRecord = {
+							...current,
+							schemaVersion: current.schemaVersion === 4 ? 4 : 3,
+							updatedAt: now,
+							...(candidate.slot === 'advisoryInbox'
+								? { advisoryInbox: nextAdvisory }
+								: {
+										closeoutAdvisories: (current.closeoutAdvisories ?? []).map(
+											(entry, index) =>
+												index === candidate.index ? nextAdvisory : entry,
+										),
+									}),
+						};
+						appendRecord(directory, next);
+						maybeCompactDelegationsLocked(directory);
+						prepared.push(nextAdvisory);
+						break;
+					}
 				}
 			},
 		);
@@ -5789,38 +6852,85 @@ async function releaseBackgroundAdvisoryPreparation(
 			async () => {
 				const records = loadRecordsForWrite(directory);
 				if (records === null) return false;
-				const byEvent = new Map<string, BackgroundDelegationRecord>();
+				// r13 (P2-2): release covers both advisory slots.
+				const byEvent = new Map<
+					string,
+					{
+						record: BackgroundDelegationRecord;
+						entry: BackgroundAdvisoryInboxEntry;
+						slot: 'advisoryInbox' | 'closeoutAdvisories';
+						index: number;
+					}
+				>();
 				for (const current of records) {
-					const advisory = current.advisoryInbox;
-					if (
-						advisory?.parentSessionId === parentSessionId &&
-						uniqueEventIds.includes(advisory.eventId)
+					if (current.advisoryInbox) {
+						const advisory = current.advisoryInbox;
+						if (
+							advisory?.parentSessionId === parentSessionId &&
+							uniqueEventIds.includes(advisory.eventId)
+						) {
+							byEvent.set(advisory.eventId, {
+								record: current,
+								entry: advisory,
+								slot: 'advisoryInbox',
+								index: 0,
+							});
+						}
+					}
+					for (
+						let index = 0;
+						index < (current.closeoutAdvisories ?? []).length;
+						index++
 					) {
-						byEvent.set(advisory.eventId, current);
+						const entry = current.closeoutAdvisories?.[index];
+						if (
+							entry &&
+							entry.parentSessionId === parentSessionId &&
+							uniqueEventIds.includes(entry.eventId)
+						) {
+							byEvent.set(entry.eventId, {
+								record: current,
+								entry,
+								slot: 'closeoutAdvisories',
+								index,
+							});
+						}
 					}
 				}
 				for (const eventId of uniqueEventIds) {
-					const advisory = byEvent.get(eventId)?.advisoryInbox;
+					const found = byEvent.get(eventId);
 					if (
-						!advisory ||
-						advisory.state !== 'pending' ||
-						advisory.preparation?.id !== preparationId
+						!found ||
+						found.entry.state !== 'pending' ||
+						found.entry.preparation?.id !== preparationId
 					) {
 						return false;
 					}
 				}
 				for (const eventId of uniqueEventIds) {
-					const current = byEvent.get(eventId);
-					if (!current?.advisoryInbox) return false;
+					const found = byEvent.get(eventId);
+					if (!found) return false;
 					const now = Date.now();
 					const next: BackgroundDelegationRecord = {
-						...current,
-						schemaVersion: current.schemaVersion === 4 ? 4 : 3,
-						advisoryInbox: {
-							...current.advisoryInbox,
-							preparation: undefined,
-						},
+						...found.record,
+						schemaVersion: found.record.schemaVersion === 4 ? 4 : 3,
 						updatedAt: now,
+						...(found.slot === 'advisoryInbox'
+							? {
+									advisoryInbox: {
+										...found.entry,
+										preparation: undefined,
+									},
+								}
+							: {
+									closeoutAdvisories: (
+										found.record.closeoutAdvisories ?? []
+									).map((entry, index) =>
+										index === found.index
+											? { ...entry, preparation: undefined }
+											: entry,
+									),
+								}),
 					};
 					appendRecord(directory, next);
 				}
@@ -5858,45 +6968,79 @@ export async function acknowledgeObservedBackgroundAdvisories(
 				const records = loadRecordsForWrite(directory);
 				if (records === null) return;
 				const now = Date.now();
+				const observed = (message: string) =>
+					observedTexts.some((text) => {
+						// Prefer exact advisory-block parsing when the host
+						// transform wraps advisories in [ADVISORIES] tags.
+						const advisoryBlock = text.match(
+							/\[ADVISORIES\]([\s\S]*?)\[\/ADVISORIES\]/,
+						);
+						if (advisoryBlock) {
+							return advisoryBlock[1]
+								.split('\n---\n')
+								.some((entry) => entry.trim() === message);
+						}
+						// Fall back to substring match for host-reflected text
+						// that embeds the advisory message naturally (e.g.
+						// "host history: <message>"). Advisory messages are
+						// full sentences, so false-positive collision risk is low.
+						return text.includes(message);
+					});
 				for (const current of records) {
-					const advisory = current.advisoryInbox;
-					if (
-						!advisory ||
-						advisory.parentSessionId !== parentSessionId ||
-						advisory.state !== 'pending' ||
-						!observedTexts.some((text) => {
-							// Prefer exact advisory-block parsing when the host
-							// transform wraps advisories in [ADVISORIES] tags.
-							const advisoryBlock = text.match(
-								/\[ADVISORIES\]([\s\S]*?)\[\/ADVISORIES\]/,
-							);
-							if (advisoryBlock) {
-								return advisoryBlock[1]
-									.split('\n---\n')
-									.some((entry) => entry.trim() === advisory.message);
-							}
-							// Fall back to substring match for host-reflected text
-							// that embeds the advisory message naturally (e.g.
-							// "host history: <message>"). Advisory messages are
-							// full sentences, so false-positive collision risk is low.
-							return text.includes(advisory.message);
-						})
-					) {
-						continue;
+					// r13 (P2-2): acknowledgement covers both advisory slots; the
+					// delivered flag is written back to the entry's own slot.
+					const slots: Array<{
+						entry: BackgroundAdvisoryInboxEntry;
+						slot: 'advisoryInbox' | 'closeoutAdvisories';
+						index: number;
+					}> = [];
+					if (current.advisoryInbox) {
+						slots.push({
+							entry: current.advisoryInbox,
+							slot: 'advisoryInbox',
+							index: 0,
+						});
 					}
-					const next: BackgroundDelegationRecord = {
+					for (
+						let index = 0;
+						index < (current.closeoutAdvisories ?? []).length;
+						index++
+					) {
+						const entry = current.closeoutAdvisories?.[index];
+						if (entry) slots.push({ entry, slot: 'closeoutAdvisories', index });
+					}
+					const toDeliver = slots.filter(
+						(candidate) =>
+							candidate.entry.parentSessionId === parentSessionId &&
+							candidate.entry.state === 'pending' &&
+							observed(candidate.entry.message),
+					);
+					if (toDeliver.length === 0) continue;
+					let next: BackgroundDelegationRecord = {
 						...current,
 						schemaVersion: current.schemaVersion === 4 ? 4 : 3,
-						advisoryInbox: {
-							...advisory,
+						updatedAt: now,
+					};
+					for (const candidate of toDeliver) {
+						const delivered: BackgroundAdvisoryInboxEntry = {
+							...candidate.entry,
 							state: 'delivered',
 							deliveredAt: now,
 							preparation: undefined,
-						},
-						updatedAt: now,
-					};
+						};
+						next =
+							candidate.slot === 'advisoryInbox'
+								? { ...next, advisoryInbox: delivered }
+								: {
+										...next,
+										closeoutAdvisories: (next.closeoutAdvisories ?? []).map(
+											(entry, index) =>
+												index === candidate.index ? delivered : entry,
+										),
+									};
+						acknowledged += 1;
+					}
 					appendRecord(directory, next);
-					acknowledged += 1;
 				}
 				if (acknowledged > 0) maybeCompactDelegationsLocked(directory);
 			},
@@ -7277,6 +8421,34 @@ function isActiveCoderOwner(record: BackgroundDelegationRecord): boolean {
 	return record.worktree !== undefined;
 }
 
+/**
+ * Admission- and renewal-scoped liveness for coder owners.
+ *
+ * Unlike {@link isActiveCoderOwner} — which additionally keeps checkpoint
+ * compaction from stripping the bodies of unconsumed terminal records — this
+ * predicate answers exactly one question: does the record still occupy a LIVE
+ * background-coder launch slot? A child that already produced its trusted
+ * terminal event does not: a `completed` result awaiting ingestion, and an
+ * `ingestion_error` whose result stays durably claimable in the delegations
+ * store, are finished work. Counting them as admission-active wedges every
+ * later coder dispatch in a `maxConcurrent = 1` parent after a single failed
+ * ingestion (the launch is dead, nothing but the 30-minute stale sweep ever
+ * frees the slot, and the reservation lease keeps renewing on the same
+ * "active" record) — a full work stoppage observed in the wild. Preserved
+ * settlements and worktree-holding records still count: they own recoverable
+ * resources, not just unconsumed results.
+ */
+function isAdmissionActiveCoderOwner(
+	record: BackgroundDelegationRecord,
+): boolean {
+	if (record.normalizedAgent !== 'coder' || record.status === 'consumed') {
+		return false;
+	}
+	if (record.status === 'pending' || record.status === 'running') return true;
+	if (record.coderSettlement?.state === 'preserved') return true;
+	return record.worktree !== undefined;
+}
+
 type DurableCoderOwnerScan =
 	| {
 			status: 'ok';
@@ -7370,8 +8542,22 @@ function hasProvenReleasedReservationOwner(
 	record: BackgroundDelegationRecord,
 ): boolean {
 	if (record.status === 'consumed') return true;
+	// A worktree-holding owner still owns a recoverable resource: not proven.
+	if (record.worktree !== undefined) return false;
+	// A preserved settlement still owns recoverable work: not proven.
+	if (record.coderSettlement?.state === 'preserved') return false;
+	// The child produced its immutable trusted terminal event, but the parent
+	// has not ingested the result yet (`completed`), or one ingestion attempt
+	// failed and the result stays durably claimable in the delegations store
+	// (`ingestion_error`). Either way the launch is finished: its reservation
+	// is provably idle, and releasing it never drops the result — only the
+	// capacity claim goes away. Without this proof the reservation lease keeps
+	// renewing on the terminal record forever and, with maxConcurrent = 1,
+	// blocks every later coder dispatch of that parent session.
+	if (record.status === 'completed' || record.status === 'ingestion_error') {
+		return record.terminalResult !== undefined;
+	}
 	return (
-		record.worktree === undefined &&
 		(record.status === 'error' || record.status === 'cancelled') &&
 		record.terminalResult?.status === record.status
 	);
@@ -7529,7 +8715,7 @@ export async function reserveBackgroundCoderSlot(
 				for (const record of ownerScan.recordsByCorrelation.values()) {
 					if (
 						record.parentSessionId === input.parentSessionId &&
-						isActiveCoderOwner(record)
+						isAdmissionActiveCoderOwner(record)
 					) {
 						activeOwnerKeys.add(
 							reservationOwnerKey({
@@ -7862,6 +9048,15 @@ export interface MaintainBackgroundDelegationsOptions {
 	) => void | Promise<void>;
 	/** Skip legacy coder WAL replay when this pass is already handling that path. */
 	skipLegacyCoderSettlementReconciliation?: boolean;
+	/**
+	 * r13 audit repair (P0-3): re-drive the terminal closeout of records whose
+	 * closeout journal still has pending steps (crash between the terminal
+	 * claim and a business side effect). Falls back to the directory's
+	 * registered terminal-closeout reconciler (the live completion observer).
+	 */
+	onTerminalCloseoutPending?: (
+		record: BackgroundDelegationRecord,
+	) => Promise<void>;
 }
 
 export interface MaintainBackgroundDelegationsResult {
@@ -8252,9 +9447,11 @@ export async function maintainBackgroundDelegations(
 							});
 							continue;
 						}
-						if (isActiveCoderOwner(primary)) {
+						if (isAdmissionActiveCoderOwner(primary)) {
 							// Fresh durable owner activity: verified evidence of live
 							// work — renew the lease for the same generation only.
+							// Terminal-child states (completed / ingestion_error)
+							// never reach here: they prove release above instead.
 							mutated = true;
 							result.renewed.push({
 								reservationId: reservation.reservationId,
@@ -8408,6 +9605,22 @@ export async function maintainBackgroundDelegations(
 				`[background] legacy coder settlement reconciliation pass failed: ${error instanceof Error ? error.message : String(error)}`,
 			);
 		}
+	}
+
+	// r13 audit repair (P0-3): re-drive closeouts whose journal still has
+	// pending steps — a crash between the terminal claim and a business side
+	// effect must never permanently lose that effect. Bounded by the same
+	// maintenance batch; the reconciler runs outside the store locks.
+	try {
+		await reconcileTerminalCloseouts(
+			directory,
+			maxRecords,
+			options.onTerminalCloseoutPending,
+		);
+	} catch (error) {
+		logger.warn(
+			`[background] terminal closeout reconciliation pass failed: ${error instanceof Error ? error.message : String(error)}`,
+		);
 	}
 	if (result.status === 'failure') {
 		return emitObservation('failure', result.reason);

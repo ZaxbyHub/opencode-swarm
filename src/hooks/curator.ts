@@ -70,6 +70,7 @@ import {
 	reviseSkill,
 	type ViolationContext,
 } from '../services/skill-reviser.js';
+import { neutralizeResidueName } from '../services/swarm-residue';
 import { swarmState } from '../state.js';
 import { bunWrite } from '../utils/bun-compat';
 import { extractContextDecisions } from '../utils/context-decisions';
@@ -922,7 +923,9 @@ function readLatestPostMortemDigest(directory: string): string | null {
 			0,
 			1500,
 		);
-		return `${latest.name}\n${body}`;
+		// The readdir-sourced name is interpolated into the agent-facing
+		// briefing — neutralize the name segment (issue #3836 D3).
+		return `${neutralizeResidueName(latest.name)}\n${body}`;
 	} catch {
 		return null;
 	}

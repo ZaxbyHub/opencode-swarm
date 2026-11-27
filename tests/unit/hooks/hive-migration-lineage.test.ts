@@ -109,7 +109,10 @@ describe('hive migration & lineage gate (#1847)', () => {
 				tier: 'swarm',
 				lesson: 'A traceable lesson about preserving promotion lineage now',
 				category: 'process',
-				tags: ['hive-fast-track'],
+				// #3820 H3 reshape: the fast-track TAG no longer satisfies route 2 —
+				// the dedicated `hive_fast_track_authorized` field does. The
+				// lineage assertions below are preserved at full strength.
+				hive_fast_track_authorized: true,
 				scope: 'global',
 				confidence: 0.7,
 				status: 'promoted',
@@ -323,7 +326,10 @@ describe('hive migration & lineage gate (#1847)', () => {
 				tier: 'swarm',
 				lesson: 'Use bun for fast test execution across the project',
 				category: 'process',
-				tags: ['hive-fast-track'],
+				// #3820 H3 reshape: the fast-track TAG no longer satisfies route 2 —
+				// the dedicated `hive_fast_track_authorized` field does. The
+				// merged_from assertion below is preserved at full strength.
+				hive_fast_track_authorized: true,
 				scope: 'global',
 				confidence: 0.7,
 				status: 'promoted',

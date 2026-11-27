@@ -5,6 +5,7 @@ import {
 } from '../evidence/task-gate-requirements.js';
 import {
 	getTaskWorkflowSnapshot,
+	isTaskEvidenceReceiptRollbackFailure,
 	isTestEngineerDurablyExempt,
 	readTaskEvidence,
 	recordGateEvidence,
@@ -27,12 +28,14 @@ import {
 	type ReviewRouteEvidence,
 	readReviewRouteReceiptSync,
 } from '../review/routing-enforcement.js';
+import { isStageBRouteCompleteAtSettlement } from '../review/stage-b-route-settlement.js';
 import { canonicalWorkspaceIdentity } from '../scope/scope-binding.js';
 import {
 	type AgentSessionState,
 	advanceTaskState,
 	getReviewerScopeGenerationForCoderCall,
 	getReviewerScopeOwnershipHistory,
+	getSettledStageBRouteEvidence,
 	getStageBRouteEvidence,
 	getTaskState,
 	hasActiveTurboMode,
@@ -41,6 +44,7 @@ import {
 	markReviewerScopeGenerationMergebackPending,
 	markReviewerScopeGenerationNoChange,
 	markReviewerScopeGenerationReady,
+	mergeStageBRouteEvidence,
 	type ReviewerScopeGeneration,
 	recordModifiedFilesForTask,
 	recordReviewerScopeGenerationFileFingerprint,
@@ -48,6 +52,7 @@ import {
 	recordStageBRouteEvidence,
 	reserveStageBRouteEvidence,
 	reviewerScopeGenerationHasDeclaredOverlap,
+	type StageBRouteEvidenceRollback,
 	swarmState,
 	updateTaskWorkflowCache,
 } from '../state.js';
@@ -1018,7 +1023,7 @@ export async function ingestBackgroundStageBCompletion(args: {
 				}
 			}
 		}
-		let routeEvidenceRollback: (() => void) | null = null;
+		let routeEvidenceRollback: StageBRouteEvidenceRollback | null = null;
 		if (preparedRoute?.binding) {
 			const parentSession = swarmState.agentSessions.get(
 				args.record.parentSessionId,
@@ -1034,6 +1039,11 @@ export async function ingestBackgroundStageBCompletion(args: {
 						'route receipt blocked before Stage-B evidence publication: parent session unavailable',
 				};
 			}
+			// The reserve lands the reclaim on the LIVE array too: a fully-bound
+			// reservation replaces the obsolete same-identity binding (see
+			// reserveStageBRouteEvidence), so the live evidence a later
+			// advancement or update_task_status reads never carries the
+			// superseded entry beside the fresh one (ROUTE_RECEIPT_DUPLICATE).
 			routeEvidenceRollback = reserveStageBRouteEvidence(
 				parentSession,
 				taskId,
@@ -1051,6 +1061,10 @@ export async function ingestBackgroundStageBCompletion(args: {
 				};
 			}
 		}
+		if (routeEvidenceRollback && !routeEvidenceRollback.beginPublication()) {
+			routeEvidenceRollback();
+			throw new Error('STAGE_B_ROUTE_PUBLISHING');
+		}
 		try {
 			await recordGateEvidence(
 				args.directory,
@@ -1066,11 +1080,48 @@ export async function ingestBackgroundStageBCompletion(args: {
 					ensureDefaultStageB: !isTestEngineerDurablyExempt(existingEvidence),
 					routeBinding: preparedRoute?.binding,
 					routeComplete: routeCompleteForPersistence,
+					resolveRouteComplete:
+						preparedRoute?.route?.kind === 'review_route_receipt' &&
+						preparedRoute.binding
+							? () => {
+									const current = preparedRoute?.binding;
+									const session = current
+										? swarmState.agentSessions.get(args.record.parentSessionId)
+										: undefined;
+									if (!current || !session) return false;
+									return isStageBRouteCompleteAtSettlement({
+										directory: args.directory,
+										session,
+										sessionId: args.record.parentSessionId,
+										taskId,
+										current,
+										legacyUnrouted: preparedRoute.legacyUnrouted,
+										testEngineerExempt:
+											isTestEngineerDurablyExempt(existingEvidence),
+									});
+								}
+							: undefined,
+					beforeCommit: routeEvidenceRollback
+						? () => {
+								if (!routeEvidenceRollback.isCurrent()) {
+									throw new Error('STAGE_B_ROUTE_SUPERSEDED');
+								}
+							}
+						: undefined,
 				},
 			);
+			// The durable route-evidence write succeeded: commit the live
+			// reservation so its chain metadata (predecessor links) is pruned —
+			// settled slots must not retain the binding history of every
+			// re-dispatch (PR 3919 round-2 review finding).
+			routeEvidenceRollback?.settle();
 		} catch (err) {
-			routeEvidenceRollback?.();
+			// A rollback failure leaves durable evidence possibly advanced: keep
+			// the live reservation fail-closed instead of rolling it back.
+			if (!isTaskEvidenceReceiptRollbackFailure(err)) routeEvidenceRollback?.();
 			throw err;
+		} finally {
+			routeEvidenceRollback?.endPublication();
 		}
 
 		if (args.record.normalizedAgent === 'reviewer') {
@@ -1163,16 +1214,19 @@ function resolveBackgroundStageBRoute(input: {
 		sessionId: input.parentSessionId,
 		taskId: input.taskId,
 	});
-	let evidence = getStageBRouteEvidence(input.session, input.taskId);
-	if (evidence.length === 0) {
-		try {
-			evidence = routeEvidenceFromTaskGateRequirements(
-				readTaskGateRequirementsReceiptsSync(input.directory, input.taskId),
-			);
-		} catch {
-			// The durable evidence read will fail closed in the route predicate below.
-		}
+	const liveEvidence = getSettledStageBRouteEvidence(
+		input.session,
+		input.taskId,
+	);
+	let durableEvidence: ReviewRouteEvidence[] = [];
+	try {
+		durableEvidence = routeEvidenceFromTaskGateRequirements(
+			readTaskGateRequirementsReceiptsSync(input.directory, input.taskId),
+		);
+	} catch {
+		// The durable evidence read will fail closed in the route predicate below.
 	}
+	const evidence = mergeStageBRouteEvidence(liveEvidence, durableEvidence);
 	const legacyUnrouted =
 		route === null &&
 		!isStageBRouteRequired(input.session, input.taskId) &&
@@ -1221,9 +1275,37 @@ function resolveBackgroundStageBRoute(input: {
 				)
 				.map((entry) => entry.slotId as string),
 		);
-		const slotIndex = retry
+		let slotIndex = retry
 			? slots.indexOf(retry.slotId ?? '')
 			: slots.findIndex((slot) => !usedSlots.has(slot));
+		// Stage-B re-dispatch slot reclamation (the reviewer_run wedge class):
+		// when every slot of this role is already occupied by a DIFFERENT
+		// dispatch, the prior attempt is an obsolete review of the same gate
+		// cycle — either its settlement never advanced the workflow (the
+		// pre-exemption wedge: all proof recorded, state pinned at
+		// reviewer_run) or the generation rotated past it (rework). The
+		// sanctioned unwedging path is to re-dispatch the Stage-B agent, so the
+		// fresh dispatch must be able to re-earn the identity: it REPLACES the
+		// obsolete binding instead of finding the slot occupied forever. The
+		// replacement preserves the exact identity count (no extra identity is
+		// invented) and tightens the binding to the dispatch actually being
+		// verified; the durable requirements chain keeps both rows for audit
+		// and collapses them per identity on read.
+		let superseded: ReviewRouteEvidence | undefined;
+		if (!retry && slotIndex < 0) {
+			for (const entry of evidence) {
+				if (entry.role !== input.role || entry === retry || !entry.slotId) {
+					continue;
+				}
+				if (!identities.includes(entry.identity)) continue;
+				const candidateIndex = slots.indexOf(entry.slotId);
+				if (candidateIndex >= 0 && candidateIndex < identities.length) {
+					superseded = entry;
+					slotIndex = candidateIndex;
+					break;
+				}
+			}
+		}
 		if (slotIndex >= 0 && slotIndex < identities.length) {
 			const slotId = slots[slotIndex];
 			const identity = identities[slotIndex];
@@ -1239,7 +1321,9 @@ function resolveBackgroundStageBRoute(input: {
 			};
 			prospective = retry
 				? evidence.map((entry) => (entry === retry ? binding! : entry))
-				: [...evidence, binding];
+				: superseded
+					? evidence.map((entry) => (entry === superseded ? binding! : entry))
+					: [...evidence, binding];
 		}
 	}
 	return { route, binding, prospective, legacyUnrouted };
@@ -1324,7 +1408,46 @@ function applyStageBStateCompletion(
 			);
 			continue;
 		}
-		if (binding && !recordStageBRouteEvidence(session, taskId, binding)) {
+		if (binding && preparedRoute !== undefined) {
+			// PR 3919 closeout fence (stale re-record): through the prepared
+			// (post-await) path this binding was installed and settled BEFORE
+			// collectReviewerReceiptFromTranscript awaited. A NEWER settlement
+			// of the same gate cycle can replace the slot's live binding during
+			// that await; re-recording the captured binding would then clobber
+			// that settlement with a stale write. The newer settlement owns the
+			// slot — skip only this re-record (this dispatch's durable evidence
+			// is already published, and the advancement decision below reads the
+			// LIVE array). Direct recovery callers (no preparedRoute) resolve the
+			// binding synchronously against the current live state, so the
+			// fence never applies to them.
+			const liveEntry = getStageBRouteEvidence(session, taskId).find(
+				(entry) =>
+					entry.role === binding.role && entry.identity === binding.identity,
+			);
+			const newerSettlementOwnsSlot =
+				liveEntry !== undefined &&
+				typeof liveEntry.callId === 'string' &&
+				liveEntry.callId.length > 0 &&
+				typeof liveEntry.childSessionId === 'string' &&
+				liveEntry.childSessionId.length > 0 &&
+				typeof liveEntry.generation === 'number' &&
+				(liveEntry.callId !== binding.callId ||
+					liveEntry.childSessionId !== binding.childSessionId ||
+					liveEntry.generation !== binding.generation);
+			if (newerSettlementOwnsSlot) {
+				logger.warn(
+					`[background-stage-b] skipped stale route-evidence re-record for ${taskId}: a newer settlement owns the slot (live call ${liveEntry.callId} vs completed call ${binding.callId ?? 'unknown'})`,
+				);
+			} else if (!recordStageBRouteEvidence(session, taskId, binding)) {
+				logger.warn(
+					`[background-stage-b] route receipt blocked before Stage-B evidence publication for ${taskId}: bounded route evidence capacity exceeded`,
+				);
+				continue;
+			}
+		} else if (
+			binding &&
+			!recordStageBRouteEvidence(session, taskId, binding)
+		) {
 			logger.warn(
 				`[background-stage-b] route receipt blocked before Stage-B evidence publication for ${taskId}: bounded route evidence capacity exceeded`,
 			);
@@ -1347,11 +1470,23 @@ function applyStageBStateCompletion(
 			);
 			continue;
 		}
+		const advancementEvidence = (() => {
+			try {
+				return mergeStageBRouteEvidence(
+					getSettledStageBRouteEvidence(session, taskId),
+					routeEvidenceFromTaskGateRequirements(
+						readTaskGateRequirementsReceiptsSync(directory, taskId),
+					),
+				);
+			} catch {
+				return getSettledStageBRouteEvidence(session, taskId);
+			}
+		})();
 		const advancementDecision = enforcePersistedReviewRouteReceipt({
 			projectRoot: directory,
 			sessionId: parentSessionId,
 			taskId,
-			receipts: getStageBRouteEvidence(session, taskId),
+			receipts: advancementEvidence,
 			enforcementEnabled: routeEnabled,
 			legacyUnrouted,
 			requireEvidenceBindings: true,

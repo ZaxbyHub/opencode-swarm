@@ -48,6 +48,10 @@ import { atomicWriteSwarmFile } from '../utils/atomic-write';
 import { warn } from '../utils/logger.js';
 import { validateTargetWithinRoot } from '../utils/path-security.js';
 import {
+	artifactCarriesPromotionClaim,
+	lookupPromotionRecordByPathSync,
+} from './external-skill-identity.js';
+import {
 	type AutoApplyResult,
 	autoApplyProposals,
 	DEFAULT_SKILL_MIN_CONFIDENCE,
@@ -943,7 +947,10 @@ export interface StaleSkillReconciliationResult {
  * skills that are stale — no parseable frontmatter, or no `source_knowledge_ids`
  * anchoring them to live knowledge — and either regenerates them from their
  * source entries or retires them when no live source remains. Hand-authored
- * shims (`skill_origin: shim`) are skipped. Deterministic: no LLM, no quota draw;
+ * shims (`skill_origin: shim`) are skipped, as are promoted-external /
+ * promotion-record-bound artifacts (FB-103 — regeneration or retirement would
+ * invalidate the record's digest binding; removal belongs to external-skill
+ * revoke). Deterministic: no LLM, no quota draw;
  * intended to run on the skill_improver cadence. Fail-open per skill — one bad
  * skill never aborts the sweep.
  */
@@ -976,6 +983,23 @@ export async function reconcileStaleActiveSkills(
 			result.skipped.push(skill.slug);
 			continue;
 		}
+		// FB-103 (PR #3942 review): promoted-external artifacts are exempt
+		// from reconciliation. Promoted artifacts carry no
+		// source_knowledge_ids, so without this guard the sweep classified
+		// them stale and either regenerated them in place (rewriting bytes
+		// that are digest-bound to a structured promotion record while
+		// keeping skill_origin: promoted_external) or retired them. Refusing
+		// unconditionally here also fail-closes the indeterminate-lookup case
+		// for a claimed artifact. Stage B (FB-103): the SHARED claim predicate
+		// from external-skill-identity recognizes BOTH provenance markers
+		// (skill_origin AND promoted_from) with the same frontmatter-only
+		// logic the verifier uses — checking only skillOrigin missed
+		// promoted_from-only claims. Removal is the external-skill revoke
+		// path's job; NEVER re-stamp promoted_content_hash from this sweep.
+		if (artifactCarriesPromotionClaim(content)) {
+			result.skipped.push(skill.slug);
+			continue;
+		}
 		// Stale = unparseable frontmatter (the closed blind spot), no source ids
 		// to anchor the skill to live knowledge, or no generated_at timestamp
 		// (gatherInventory flags missing_generated_at; reconcile must match).
@@ -985,6 +1009,24 @@ export async function reconcileStaleActiveSkills(
 		// is deferred to a future pass that loads the store.
 		const stale = !fm || fm.sourceKnowledgeIds.length === 0 || !fm.generatedAt;
 		if (!stale) continue;
+		// FB-103 record-bound check: the provenance frontmatter may be absent
+		// or stripped, but the path-first promotion-record binding still
+		// applies — a readable record matching this path makes the artifact
+		// record-bound and it must be skipped before any mutation (including
+		// the dry-run retire-candidate report). 'not-found' and
+		// 'indeterminate' both fall through to normal reconciliation: an
+		// ordinary stale skill must still be reconciled even when an
+		// UNRELATED record is corrupt or over-cap (FB-101), and a CLAIMED
+		// artifact was already skipped above, so an indeterminate scan can
+		// never reach a claimed artifact here.
+		const promotionRecord = lookupPromotionRecordByPathSync(
+			directory,
+			skill.path,
+		);
+		if (promotionRecord.status === 'found') {
+			result.skipped.push(skill.slug);
+			continue;
+		}
 		result.checked += 1;
 		if (options.dryRun) {
 			// Report-only: surface the slug without mutating anything.

@@ -184,9 +184,16 @@ export async function expectDropsVsControl(
 	const controlRun = await pumpEnvelopes(control);
 	expect(controlRun.drained).toBe(true);
 	expect(qualifyingParts(controlRun.received).length).toBe(1);
-	// Raw-part assertion (not predicate-filtered): a deleted production guard
-	// delivers a part the predicate copy would still reject, which would mask
-	// the mutation.
-	expect(deliveredParts(negativeRun.received).length).toBe(0);
+	// Raw task-part assertion (not predicate-filtered): a deleted production
+	// guard delivers a task part the predicate copy would still reject, which
+	// would mask the mutation. A non-subagent name may still deliver its own
+	// tool-state part (session.tool.called, PR 3922), which is not a
+	// scope-activation part, so only task-tool parts are counted here.
+	expect(
+		deliveredParts(negativeRun.received).filter((part) => {
+			const tool = (part as { tool?: unknown }).tool;
+			return typeof tool === 'string' && isTaskToolId(tool);
+		}).length,
+	).toBe(0);
 	expect(qualifyingParts(negativeRun.received).length).toBe(0);
 }

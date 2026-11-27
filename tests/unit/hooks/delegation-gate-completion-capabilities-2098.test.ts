@@ -124,3 +124,70 @@ describe('issue #2098 completion recovery capabilities', () => {
 		expect(decide('Task', { task_id: '1.3' }, '1.3')).toBe(false);
 	});
 });
+
+describe('issue #2098 completion recovery — Code Mode wrapper pass-through', () => {
+	// Regression (live session, 2026-11-22, Wirtschaftssimulation): the
+	// completion gate judged the outer Code Mode `execute` wrapper as an
+	// opaque non-read-only tool, so once a task reached tests_run it denied
+	// every plugin call — including the update_task_status remedy its own
+	// violation message prescribes — and the task could never leave the
+	// gate. Fixed upstream (a31927667, "let the Code Mode execute wrapper
+	// through the completion gate"): the adapter-marked wrapper is admitted,
+	// while nested tools.<name>() calls re-enter tool.execute.before under
+	// their own names and stay gated. These tests pin that contract.
+	const decideCodeMode = (code: unknown, hostMarked: boolean) =>
+		canRunWhileTaskAwaitsCompletion({
+			directory: undefined,
+			normalizedTool: 'execute',
+			args: { code },
+			awaitingTaskId: '1.1',
+			requestedTaskId: null,
+			codeModeWrapper: hostMarked,
+		});
+
+	const LITERAL_COMPLETION_CALL =
+		'return await tools.update_task_status({ task_id: "1.1", status: "completed", working_directory: "/workspace/project" })';
+
+	test('regression: adapter-marked literal recovery call passes the outer gate', () => {
+		expect(decideCodeMode(LITERAL_COMPLETION_CALL, true)).toBe(true);
+	});
+
+	test('marked save_plan reconciliation wrapper passes the outer gate', () => {
+		expect(
+			decideCodeMode(
+				'return await tools.save_plan({ reconcile_ledger_projection: true, working_directory: "/workspace/project" })',
+				true,
+			),
+		).toBe(true);
+	});
+
+	test('marked multi-call program also passes: nested calls re-enter the gate individually', () => {
+		// The wrapper only carries a program; the nested tool calls are
+		// dispatched under their own names and judged there. The outer
+		// wrapper itself grants nothing.
+		const multiCall =
+			'const res = await tools.todo_extract({ paths: ["pyproject.toml"] });\nreturn JSON.stringify(res);';
+		expect(decideCodeMode(multiCall, true)).toBe(true);
+	});
+
+	test('unmarked execute never passes, even for the literal recovery form', () => {
+		expect(decideCodeMode(LITERAL_COMPLETION_CALL, false)).toBe(false);
+	});
+
+	test('marked wrapper with a non-string program stays denied', () => {
+		expect(decideCodeMode({ script: 'not-a-string' }, true)).toBe(false);
+	});
+
+	test('the mark does not bypass the gate for non-execute tools', () => {
+		expect(
+			canRunWhileTaskAwaitsCompletion({
+				directory: undefined,
+				normalizedTool: 'write',
+				args: { path: '/etc/evil', content: 'x' },
+				awaitingTaskId: '1.1',
+				requestedTaskId: null,
+				codeModeWrapper: true,
+			}),
+		).toBe(false);
+	});
+});

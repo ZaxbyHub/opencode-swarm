@@ -440,6 +440,55 @@ export function emitDelegationEventlessTerminalEnd(
 	emitDelegationCostObservation(record, {}, terminalStatus, true);
 }
 
+/**
+ * r12 (async lifecycle F4): emit the terminal `delegation_end` pairing
+ * observation for a NATIVE-ASYNC TASK delegation whose trusted terminal was
+ * claimed by the background completion observer.
+ *
+ * The observer claims terminals through `claimTerminalResult` directly (it
+ * must — the claim precedes and drives settlement), which bypasses
+ * {@link settleDelegationTerminal}'s observation half. This wrapper exposes
+ * exactly that observation half so the Task transport produces the SAME
+ * lifecycle facts a lane terminal produces: the `delegation_end` cost
+ * observation (deterministic `record_id` — Task shape `${parentSessionId}\0${callID}`,
+ * the identical material the foreground handoff hashes, so rollups dedupe)
+ * plus the execution-attempt record.
+ *
+ * Durability class: exactly-once-at-emit — the caller (the observer) invokes
+ * it only on a FRESH terminal claim, never on duplicate/replay processing.
+ * No cost raw is available on this path (the r8 usage bridge remains the
+ * usage authority; its step accounting is neither bypassed nor double-billed
+ * — the emitted record is unknown-honest about cost axes).
+ */
+export function emitTaskDelegationTerminalEnd(
+	record: TerminalEmitRecord,
+	terminalStatus: string,
+): void {
+	emitDelegationCostObservation(record, {}, terminalStatus);
+}
+
+/**
+ * r12 (async lifecycle F4): reconcile knowledge receipts for a native-async
+ * Task delegation terminal — the Task-transport twin of the lane collector's
+ * reconciliation. Ledger-idempotent (same-outcome replays are idempotent
+ * skips), so it is SAFE on replay; pass `replay: true` for duplicate
+ * processing to suppress the audit-only non-critical unacknowledged
+ * observation (exactly-once-at-emit, same contract as the lane path).
+ */
+export async function reconcileDelegationKnowledgeReceipts(
+	directory: string,
+	record: BackgroundDelegationRecord,
+	transcript: string,
+	replay = false,
+): Promise<void> {
+	await reconcileLaneKnowledgeReceipts(
+		directory,
+		record,
+		{ transcript },
+		replay,
+	);
+}
+
 // #2482: wire the stale sweep's recovered-end emission through this module so
 // both halves of the delegation pair live beside each other (the sweep runs
 // under the pending-delegations store lock and calls this observer

@@ -449,24 +449,34 @@ describe('loadContextMap structural validation', () => {
 		expect(loadContextMap(dir)).toEqual(map);
 	});
 
-	test('a decisions-bearing update recovers on a corrupt map via fresh map', () => {
+	test('a decisions-bearing update PRESERVES a corrupt map instead of recovering via fresh map (r17 P1)', () => {
 		const dir = makeProject();
+		const corruptBytes = JSON.stringify({
+			...validMap([]),
+			decisions: { oops: true },
+		});
 		writeMap(dir, { ...validMap([]), decisions: { oops: true } });
 		updateContextMapAfterAgent({
 			task_id: '9.1',
 			agent_role: 'critic',
 			files_touched: [],
-			implementation_summary: 'recovery',
+			implementation_summary: 'attempted update on a corrupt map',
 			task_goal: '',
 			final_status: 'completed',
 			decisions: [{ decision: 'Recover', rationale: 'from corrupt map' }],
 			directory: dir,
 		});
-		const persisted = JSON.parse(
-			fs.readFileSync(path.join(dir, '.swarm', 'context-map.json'), 'utf-8'),
+		// r17: an existing-but-corrupt map is preserved byte-for-byte — the
+		// previous "recover via fresh map" behavior REPLACED the damaged file
+		// and destroyed the operator's recovery path. No silent rebuild, no
+		// fake task history, no new decisions.
+		const after = fs.readFileSync(
+			path.join(dir, '.swarm', 'context-map.json'),
+			'utf-8',
 		);
-		expect(persisted.task_history['9.1']).toBeDefined();
-		expect(persisted.decisions).toHaveLength(1);
-		expect(persisted.decisions[0].decision).toBe('Recover');
+		expect(after).toBe(corruptBytes);
+		const persisted = JSON.parse(after);
+		expect(persisted.task_history['9.1']).toBeUndefined();
+		expect(persisted.decisions).toEqual({ oops: true });
 	});
 });

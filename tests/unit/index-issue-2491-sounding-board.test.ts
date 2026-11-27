@@ -1,6 +1,9 @@
 import { describe, expect, test } from 'bun:test';
 
-import { applySoundingBoardResponsePolicy } from '../../src/index.js';
+import {
+	applySoundingBoardResponsePolicy,
+	validSoundingBoardCallerCategory,
+} from '../../src/index.js';
 
 describe('issue #2491 — live sounding-board handoff boundary', () => {
 	test('uses the decision-packet category even when the model echoes another one', () => {
@@ -63,5 +66,26 @@ describe('issue #2491 — live sounding-board handoff boundary', () => {
 			protocolError: 'CALLER_CATEGORY_INVALID',
 		});
 		expect(result?.category).toBeUndefined();
+	});
+
+	test('P1-3: validSoundingBoardCallerCategory validates and normalizes for persistence', () => {
+		expect(validSoundingBoardCallerCategory({ category: 'scope' })).toBe(
+			'scope',
+		);
+		expect(
+			validSoundingBoardCallerCategory({ category: '  Routine_Feedback ' }),
+		).toBe('routine_feedback');
+		// Missing / malformed / free-text surfaces never persist a category.
+		expect(validSoundingBoardCallerCategory({})).toBeNull();
+		expect(
+			validSoundingBoardCallerCategory({ category: 'not-a-protocol-category' }),
+		).toBeNull();
+		expect(validSoundingBoardCallerCategory({ category: 42 })).toBeNull();
+		expect(validSoundingBoardCallerCategory(undefined)).toBeNull();
+		// The category is ONLY the explicit field — never scavenged from the
+		// prompt or other free-text surfaces.
+		expect(
+			validSoundingBoardCallerCategory({ prompt: 'Category: scope' }),
+		).toBeNull();
 	});
 });

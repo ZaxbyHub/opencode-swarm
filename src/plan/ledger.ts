@@ -1373,8 +1373,13 @@ export async function appendLedgerEvent(
 		 */
 		expectedLedgerHash?: string;
 		planHashAfter?: string;
-		/** Synchronous authority fence inside the evidence lock. */
-		preCommitCheck?: () => void;
+		/**
+		 * Authority fence immediately before the ledger append, INSIDE the
+		 * ledger evidence lock. May be async; the append awaits it, so a
+		 * check-then-write cycle is serialized against every other ledger
+		 * writer under the same lock.
+		 */
+		preCommitCheck?: () => void | Promise<void>;
 	},
 ): Promise<LedgerEvent> {
 	assertProjectRoot(directory);
@@ -1460,7 +1465,7 @@ export async function appendLedgerEvent(
 			const authorityMode = state?.authorityMode ?? 'file_shadow';
 
 			if (authorityMode === 'sqlite') {
-				options?.preCommitCheck?.();
+				await options?.preCommitCheck?.();
 				try {
 					const existing = sqliteEventsAsLedger(directory);
 					appendSqliteLedger(directory, {
@@ -1494,7 +1499,7 @@ export async function appendLedgerEvent(
 					throw new Error('Ledger not initialized. Call initLedger() first.');
 				}
 				const existingContent = fs.readFileSync(ledgerPath);
-				options?.preCommitCheck?.();
+				await options?.preCommitCheck?.();
 				writeFileFsyncedThenRename(
 					tempPath,
 					ledgerPath,
@@ -1570,7 +1575,7 @@ export async function appendLedgerEventWithRetry(
 		maxRetries?: number;
 		backoffMs?: number;
 		verifyValid?: () => Promise<boolean> | boolean;
-		preCommitCheck?: () => void;
+		preCommitCheck?: () => void | Promise<void>;
 	},
 ): Promise<LedgerEvent | null> {
 	const maxRetries = options.maxRetries ?? 3;
@@ -1689,8 +1694,13 @@ export async function takeSnapshotEvent(
 		expectedSeq?: number;
 		/** Previous durable hash used to preserve the ledger hash chain. */
 		expectedLedgerHash?: string;
-		/** Synchronous authority fence immediately before ledger append. */
-		preCommitCheck?: () => void;
+		/**
+		 * Authority fence immediately before ledger append, INSIDE the ledger
+		 * evidence lock. May be async; the append awaits it, so a check-then-
+		 * write cycle (e.g. the plan-critic approval dedup) is serialized
+		 * against every other ledger writer under the same lock.
+		 */
+		preCommitCheck?: () => void | Promise<void>;
 	},
 ): Promise<LedgerEvent> {
 	const payloadHash =
@@ -1708,7 +1718,13 @@ export async function takeSnapshotEvent(
 		snapshotPayload.approval = options.approvalMetadata;
 	}
 	const planId = derivePlanId(plan);
-	options?.preCommitCheck?.();
+	// F-001 (PR 3922 review): the authority fence must run ONLY under the
+	// ledger evidence lock, via appendLedgerEvent's in-lock invocation below.
+	// A fence run here — outside the lock — observes plan/ledger state
+	// without serialization, so a transient plan read or a concurrent write
+	// could spuriously throw conflict/already_recorded/plan_unreadable
+	// before the authoritative locked check ran, skipping or failing an
+	// async plan-critic approval despite a valid APPROVED verdict.
 	return appendLedgerEvent(
 		directory,
 		{

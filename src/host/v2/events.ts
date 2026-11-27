@@ -11,13 +11,17 @@
  *   v2 event                → v1 handler input
  *   ------------------------+-------------------------------------------
  *   session.idle            → { type: 'session.idle', properties }
- *   session.status.updated  → { type: 'session.idle', properties } (state watch)
+ *   session.status.updated  → { type: 'session.status', properties } (type-preserving)
  *   session.status          → { type: 'session.status', properties } (type-preserving; #3022)
- *   session.text.delta      → { type: 'message.part.updated', properties }
- *   session.text.ended      → { type: 'message.updated', properties }
- *   session.tool.called     → { type: 'message.part.updated', properties }
- *   session.tool.success    → { type: 'message.updated', properties }
- *   session.tool.failed     → { type: 'message.updated', properties }
+ *   session.inbox.enqueued (verified subagent synthetic) → { type: 'message.part.updated', properties: {part} }
+ *   session.synthetic (verified subagent synthetic) → same (SDK fallback)
+ *   session.text.delta      → ignored (ephemeral fragment)
+ *   session.text.ended      → { type: 'message.part.updated', properties.part: text }
+ *   session.tool.called     → { type: 'message.part.updated', properties.part: tool running }
+ *   session.tool.success    → { type: 'message.part.updated', properties.part: tool completed }
+ *   session.tool.failed     → { type: 'message.part.updated', properties.part: tool error }
+ *   session.execution.succeeded (verified child) → { type: 'session.idle', properties }
+ *   session.execution.interrupted (user/inactivity, verified child) → { type: 'session.status', status idle }
  *   session.execution.failed → { type: 'session.error', properties }
  *   session.error           → { type: 'session.error', properties } (SDK dialect; #3022)
  *   session.deleted / session.created → same-name v1 types
@@ -37,8 +41,22 @@ import { noteChildSessionEvent } from '../../background/child-activity';
 import { recordSessionChatAgent } from '../../models/task-model-routing';
 import { log } from '../../utils';
 import { withTimeout } from '../../utils/timeout';
-import { isPlainObject, isV2SubagentToolId } from './hooks.js';
+import {
+	noteDelegationHostEvent,
+	noteDelegationToolEvent,
+} from './delegation-trace';
+import {
+	isPlainObject,
+	isV2SubagentToolId,
+	renderV1TaskEnvelopeFromV2,
+} from './hooks.js';
+import {
+	isTrackedNativeChildSession,
+	rememberVerifiedNativeChild,
+	verifiedNativeChildParent,
+} from './native-async-mode';
 import { recordV2SessionErrorFromEnvelope } from './session-client';
+import { recordV2SessionTiming } from './timing-trace';
 import type { V1HooksSubset, V2EventEnvelope, V2PluginContext } from './types';
 
 const V2_EVENT_BATCH_TIMEOUT_MS = 60_000;
@@ -97,9 +115,9 @@ function isBoundedId(value: string): boolean {
  * gated on the call actually being the subagent tool. Bounded per AGENTS.md
  * invariant 8: FIFO eviction, per-(session,call) keys so sessions never mix;
  * an evicted or never-recorded name degrades to today's fail-closed drop.
- * Only subagent names are stored (PR #3402 Copilot review): non-subagent
- * names are never usable at the gate, so storing them would only consume
- * eviction budget.
+ * All bounded tool names are recorded for v1 tool-state translation. Scope
+ * activation still explicitly rejects every non-subagent name and happens
+ * ONLY via the host's trusted session.tool.progress identity path.
  */
 const MAX_TRACKED_TOOL_NAMES = 512;
 const toolNameByDispatchKey = new Map<string, string>();
@@ -142,12 +160,86 @@ function noteChildActivityFromEnvelope(envelope: V2EventEnvelope): void {
 	}
 }
 
+/**
+ * r17 §8: feed host session events into the opt-in delegation tracer.
+ * Metadata only — sessionID, event type, and (for tool events) the tool
+ * NAME resolved through the same bounded lookup the dispatch synthesis
+ * uses. Never payload text, arguments, results, or model output.
+ */
+function noteDelegationTraceEnvelope(
+	envelope: V2EventEnvelope,
+	lookupToolName: (sessionID: string, callID: string) => string | undefined,
+): void {
+	if (process.env.SWARM_DELEGATION_TRACE !== '1') return;
+	try {
+		const type = typeof envelope?.type === 'string' ? envelope.type : undefined;
+		if (type === undefined) return;
+		const payload = envelopePayload(envelope);
+		const sessionID =
+			typeof payload.sessionID === 'string' ? payload.sessionID : undefined;
+		if (!sessionID) return;
+		switch (type) {
+			case 'session.created':
+			case 'session.text.delta':
+			case 'session.step.ended':
+			case 'session.inbox.enqueued':
+			case 'session.execution.succeeded':
+			case 'session.execution.interrupted':
+			case 'session.execution.failed':
+			case 'session.error':
+				noteDelegationHostEvent(
+					sessionID,
+					type as Parameters<typeof noteDelegationHostEvent>[1],
+				);
+				return;
+			case 'session.tool.called':
+			case 'session.tool.success':
+			case 'session.tool.failed': {
+				const callID = typeof payload.id === 'string' ? payload.id : undefined;
+				const tool =
+					(callID !== undefined
+						? lookupToolName(sessionID, callID)
+						: undefined) ??
+					(typeof payload.name === 'string' ? payload.name : 'unknown');
+				noteDelegationToolEvent(
+					sessionID,
+					tool,
+					type === 'session.tool.called'
+						? 'called'
+						: type === 'session.tool.success'
+							? 'success'
+							: 'failed',
+				);
+				return;
+			}
+			default:
+				return;
+		}
+	} catch {
+		/* the tracer must never alter the event pump */
+	}
+}
+
+/**
+ * The tool-name gate is checked before this mapping is produced. Only the
+ * emitted trusted tool-progress shape can register a child identity.
+ */
+function rememberNativeChildFromProgress(mapped: MappedEvent): void {
+	const part = mapped.properties.part;
+	if (!isPlainObject(part) || part.tool !== 'task') return;
+	const state = part.state;
+	if (!isPlainObject(state) || !isPlainObject(state.metadata)) return;
+	const child = state.metadata.sessionId;
+	const parent = part.sessionID;
+	if (typeof child !== 'string' || typeof parent !== 'string') return;
+	rememberVerifiedNativeChild(child, parent);
+}
+
 function rememberToolNameFromEnvelope(envelope: V2EventEnvelope): void {
 	if (envelope?.type !== 'session.tool.input.started') return;
 	const payload = envelopePayload(envelope);
 	const name = typeof payload.name === 'string' ? payload.name : undefined;
 	if (!name || name.length > MAX_TRACKED_TOOL_NAME_CHARS) return;
-	if (!isV2SubagentToolId(name)) return;
 	const sessionID =
 		typeof payload.sessionID === 'string' ? payload.sessionID : undefined;
 	const callID = typeof payload.id === 'string' ? payload.id : undefined;
@@ -216,10 +308,106 @@ function readProgressChildSessionID(
 	}
 }
 
+/**
+ * OpenCode 2.3 sends a completed subagent's output to its parent through
+ * `session.inbox.enqueued` (a durable synthetic item), followed by
+ * `session.inbox.delivered` when the parent consumes it. Only the enqueued
+ * event contains the synthetic item and can be translated without a lookup;
+ * delivered has only inboxID and is intentionally not interpreted as terminal.
+ * Observe enqueued so a parent that never wakes cannot strand a completed coder. Older SDKs may
+ * expose the same notification as `session.synthetic` instead. Neither event
+ * is a v1 `message.part.updated`, so the background completion observer never
+ * saw it and left both the coder and critic on pending forever.
+ *
+ * Convert ONLY host-labelled, structurally consistent subagent notices for a
+ * host-verified child of the exact receiving parent. The downstream observer
+ * additionally checks the durable (parent, child) dispatch record and claims
+ * the terminal event idempotently before touching settlement or gates.
+ * Model text, ordinary synthetic messages and wrong-parent notices do not
+ * produce a terminal result. Do not use session.execution.succeeded itself as
+ * completion evidence: it has no final agent result/verdict text.
+ */
+export function mapV2NativeSubagentCompletion(
+	envelope: V2EventEnvelope,
+	getVerifiedParent: (
+		child: string,
+	) => string | undefined = verifiedNativeChildParent,
+): MappedEvent | undefined {
+	const type = envelope?.type;
+	if (type !== 'session.inbox.enqueued' && type !== 'session.synthetic')
+		return undefined;
+	// A throwing metadata/text accessor must not terminate the detached
+	// event pump; fail closed for this notification and continue the stream.
+	try {
+		const data = envelopePayload(envelope);
+		const parent = data.sessionID;
+		if (typeof parent !== 'string' || !isBoundedId(parent)) return undefined;
+
+		let message: Record<string, unknown>;
+		if (type === 'session.inbox.enqueued') {
+			const item = data.item;
+			if (
+				!isPlainObject(item) ||
+				item.type !== 'synthetic' ||
+				!isPlainObject(item.payload)
+			)
+				return undefined;
+			message = item.payload;
+		} else {
+			message = data;
+		}
+		const metadata = message.metadata;
+		if (!isPlainObject(metadata) || metadata.source !== 'subagent')
+			return undefined;
+		const child = metadata.childID;
+		const state = metadata.state;
+		const text = message.text;
+		if (typeof child !== 'string' || !/^ses_[A-Za-z0-9_-]{1,252}$/.test(child))
+			return undefined;
+		if (state !== 'completed' && state !== 'error' && state !== 'cancelled')
+			return undefined;
+		if (typeof text !== 'string' || text.length > 131_072) return undefined;
+		if (getVerifiedParent(child) !== parent) return undefined;
+
+		// The host's notification has ordered sessionID/state attributes and an
+		// optional description; its body is result text, not status evidence.
+		const wrapper =
+			/^<subagent sessionID="(ses_[A-Za-z0-9_-]{1,252})" state="(completed|error|cancelled)"(?: [a-zA-Z][\w-]*="[^"<>\r\n]*")*>\r?\n?([\s\S]*?)\r?\n?<\/subagent>\s*$/.exec(
+				text,
+			);
+		if (!wrapper || wrapper[1] !== child || wrapper[2] !== state)
+			return undefined;
+
+		// Reuse the EXACT legacy renderer, including truncation and escaping of
+		// structural task_result/task_error/summary tokens from model output.
+		const normalized = renderV1TaskEnvelopeFromV2({
+			sessionID: child,
+			state,
+			inner: wrapper[3],
+		});
+		return {
+			type: 'message.part.updated',
+			properties: {
+				part: {
+					type: 'text',
+					synthetic: true,
+					sessionID: parent,
+					text: normalized,
+				},
+			},
+		};
+	} catch {
+		return undefined;
+	}
+}
+
 /** Map a v2 event envelope onto the v1 handler input (or undefined). */
 export function mapV2EventToV1(
 	envelope: V2EventEnvelope,
 	lookupToolName?: (sessionID: string, callID: string) => string | undefined,
+	isTrackedNativeChild: (
+		sessionID: string,
+	) => boolean = isTrackedNativeChildSession,
 ): MappedEvent | undefined {
 	const type = typeof envelope?.type === 'string' ? envelope.type : undefined;
 	if (type === undefined) return undefined;
@@ -229,14 +417,100 @@ export function mapV2EventToV1(
 	const sessionID =
 		typeof data.sessionID === 'string' ? data.sessionID : undefined;
 	switch (type) {
+		case 'session.inbox.enqueued':
+		case 'session.synthetic':
+			return mapV2NativeSubagentCompletion(envelope);
+		case 'session.execution.succeeded':
+			if (!sessionID || !isTrackedNativeChild(sessionID)) return undefined;
+			// OpenCode 2.3.x emits this durable terminal event, but not always
+			// session.idle. Do not treat a tool-launch success as child completion;
+			// only the CHILD execution-succeeded event may terminalize the child.
+			return sessionID && isBoundedId(sessionID)
+				? { type: 'session.idle', properties: { sessionID } }
+				: undefined;
+		case 'session.execution.interrupted':
+			if (!sessionID || !isTrackedNativeChild(sessionID)) return undefined;
+			// OpenCode keeps an execution claim on `shutdown`, to be resumed
+			// after restart. `superseded` means a replacement turn is running.
+			// Neither is a terminal child result: revocation here would strand
+			// an authorized task and reintroduce SCOPE_BINDING_EXPIRED.
+			if (data.reason === 'superseded' || data.reason === 'shutdown')
+				return undefined;
+			return sessionID &&
+				isBoundedId(sessionID) &&
+				(data.reason === 'user' || data.reason === 'inactivity')
+				? {
+						type: 'session.status',
+						properties: {
+							sessionID,
+							status: { type: 'idle' },
+							interrupted: true,
+							reason: data.reason,
+						},
+					}
+				: undefined;
+		case 'session.step.ended':
+		case 'session.step.failed': {
+			// Durable per-step usage. Never translate session.usage.updated (an
+			// ephemeral SESSION total) or session.usage.recorded (an internal
+			// accounting record), since either could double-count these steps.
+			// Reject partial failed steps lacking both cost and tokens.
+			try {
+				if (!sessionID || !isBoundedId(sessionID)) return undefined;
+				const stepID = envelope.id;
+				const assistantMessageID = data.assistantMessageID;
+				const tokens = data.tokens;
+				const good = (v: unknown): v is number =>
+					typeof v === 'number' && Number.isFinite(v) && v >= 0;
+				if (
+					typeof stepID !== 'string' ||
+					!isBoundedId(stepID) ||
+					typeof assistantMessageID !== 'string' ||
+					!isBoundedId(assistantMessageID) ||
+					!isPlainObject(tokens) ||
+					!isPlainObject(tokens.cache) ||
+					!good(data.cost) ||
+					!good(tokens.input) ||
+					!good(tokens.output) ||
+					!good(tokens.reasoning) ||
+					!good(tokens.cache.read) ||
+					!good(tokens.cache.write)
+				)
+					return undefined;
+				return {
+					type: 'message.part.updated',
+					properties: {
+						part: {
+							type: 'step-finish',
+							sessionID,
+							assistantMessageID,
+							swarmV2UsageStep: true,
+							swarmV2EventId: stepID,
+							cost: data.cost,
+							tokens: {
+								input: tokens.input,
+								output: tokens.output,
+								reasoning: tokens.reasoning,
+								cache: { read: tokens.cache.read, write: tokens.cache.write },
+							},
+						},
+					},
+				};
+			} catch {
+				return undefined;
+			}
+		}
 		case 'session.idle':
-		case 'session.status.updated':
 			return {
 				type: 'session.idle',
 				properties: { ...(sessionID ? { sessionID } : {}), ...data },
 			};
+		case 'session.status.updated':
 		case 'session.status':
 			// #3022 plan-critic blocker 1: type-preserving. The v1 handler's
+			// #scope-fix: status.updated is also a status transition, NOT an
+			// idle event. Mapping busy/retry to session.idle prematurely runs
+			// terminal session cleanup and revokes an active coder scope lease.
 			// terminalization predicate filters `session.status` on
 			// status === 'idle' or status.type === 'idle'|'error'
 			// (src/index.ts isTerminalSessionEvent), so live `busy`/`retry`
@@ -270,12 +544,85 @@ export function mapV2EventToV1(
 				properties: { ...(sessionID ? { sessionID } : {}), ...data },
 			};
 		case 'session.text.delta':
-		case 'session.tool.called':
 		case 'session.tool.input.delta':
-			return {
-				type: 'message.part.updated',
-				properties: { ...(sessionID ? { sessionID } : {}), ...data },
-			};
+			// Ephemeral fragments have no full part; forwarding them as v1
+			// message.part.updated merely queues expensive no-op dispatches.
+			// The durable text.ended and tool.called/success/failed boundaries
+			// below provide the complete payloads a v1 consumer can use.
+			return undefined;
+		case 'session.text.ended': {
+			try {
+				const msg = data.assistantMessageID;
+				const ordinal = data.ordinal;
+				const text = data.text;
+				if (
+					!sessionID ||
+					!isBoundedId(sessionID) ||
+					typeof msg !== 'string' ||
+					!isBoundedId(msg) ||
+					typeof ordinal !== 'number' ||
+					!Number.isSafeInteger(ordinal) ||
+					ordinal < 0 ||
+					typeof text !== 'string' ||
+					text.length > 131_072
+				)
+					return undefined;
+				return {
+					type: 'message.part.updated',
+					properties: {
+						part: {
+							type: 'text',
+							sessionID,
+							id: `${msg}:${ordinal}`,
+							text,
+							synthetic: false,
+						},
+					},
+				};
+			} catch {
+				return undefined;
+			}
+		}
+		case 'session.tool.called':
+		case 'session.tool.success':
+		case 'session.tool.failed': {
+			// OpenCode 2.3's called/success/failed omit the tool name; it
+			// originates at session.tool.input.started for the same session/call.
+			// Missing/evicted names fail closed. Never use these TOOL events to
+			// synthesize an agent completion or child scope activation.
+			try {
+				const callID = data.id;
+				if (
+					!sessionID ||
+					!isBoundedId(sessionID) ||
+					typeof callID !== 'string' ||
+					!isBoundedId(callID) ||
+					!lookupToolName
+				)
+					return undefined;
+				const tool = lookupToolName(sessionID, callID);
+				if (
+					!tool ||
+					tool.length > MAX_TRACKED_TOOL_NAME_CHARS ||
+					isV2SubagentToolId(tool)
+				)
+					return undefined;
+				const status =
+					type === 'session.tool.called'
+						? 'running'
+						: type === 'session.tool.success'
+							? 'completed'
+							: 'error';
+				return {
+					type: 'message.part.updated',
+					properties: {
+						part: { type: 'tool', tool, callID, sessionID, state: { status } },
+					},
+				};
+			} catch {
+				return undefined;
+			}
+		}
 		case 'session.tool.progress': {
 			// Issue #3401: the v2 subagent tool publishes the CHILD session id
 			// as live progress metadata (`metadata.sessionID`, emitted right
@@ -322,13 +669,6 @@ export function mapV2EventToV1(
 				},
 			};
 		}
-		case 'session.text.ended':
-		case 'session.tool.success':
-		case 'session.tool.failed':
-			return {
-				type: 'message.updated',
-				properties: { ...(sessionID ? { sessionID } : {}), ...data },
-			};
 		default:
 			return undefined;
 	}
@@ -419,6 +759,9 @@ export function startDeferredEventPump(
 				// 2026-11-26 (task 2.15): child-activity registry feed (metadata
 				// only) — the stale sweep's observed-liveness signal.
 				noteChildActivityFromEnvelope(envelope);
+				// r17 §8: opt-in delegation critical-path tracer (metadata only:
+				// sessionID + event type + tool NAME; never payload text).
+				noteDelegationTraceEnvelope(envelope, lookupToolNameForDispatch);
 				// #3169 Phase 2 (C4): v2 surfaces provider errors only via the
 				// event stream (no error text in context()); record them for the
 				// session-client shim's result translation. Sync, bounded, O(1).
@@ -426,6 +769,32 @@ export function startDeferredEventPump(
 				// #3401: remember tool names for dispatch-gated synthesis below.
 				rememberToolNameFromEnvelope(envelope);
 				const mapped = mapV2EventToV1(envelope, lookupToolNameForDispatch);
+				// Host event timestamps: distinguish a slow child from a slow host
+				// tool hook. No prompts, results, filenames, or child content logged.
+				const hostType = envelope.type;
+				if (
+					typeof hostType === 'string' &&
+					hostType.startsWith('session.execution.')
+				) {
+					const payload = envelopePayload(envelope);
+					if (typeof payload.sessionID === 'string') {
+						const kind =
+							hostType === 'session.execution.succeeded'
+								? 'execution_succeeded'
+								: hostType === 'session.execution.interrupted'
+									? 'execution_interrupted'
+									: hostType === 'session.execution.failed'
+										? 'execution_failed'
+										: 'execution_ignored';
+						recordV2SessionTiming(
+							payload.sessionID,
+							mapped ? kind : 'execution_ignored',
+						);
+					}
+				}
+				if (envelope.type === 'session.tool.progress' && mapped !== undefined) {
+					rememberNativeChildFromProgress(mapped);
+				}
 				if (mapped === undefined) {
 					const t =
 						typeof envelope?.type === 'string' ? envelope.type : '(no type)';

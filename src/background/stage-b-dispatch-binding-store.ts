@@ -30,6 +30,7 @@ import {
 	constants,
 	existsSync,
 	fstatSync,
+	lstatSync,
 	openSync,
 	readdirSync,
 	readFileSync,
@@ -118,6 +119,90 @@ function recordWriteDiagnostic(
 	}
 }
 
+/**
+ * r14 audit repair (P1-8): per-session-dir monotonic write-order counter
+ * backing the persisted `seq`. FIFO-bounded per AGENTS.md invariant 8
+ * (realistic processes see a handful of active session dirs).
+ */
+const MAX_SEQ_TRACKED_SESSION_DIRS = 512;
+const lastSeqBySessionDir = new Map<string, number>();
+
+/**
+ * Defensive bound for the one-time seq-floor reconstruction scan (r16): the
+ * per-session cap the pruner enforces is 128 files, so 1024 is 8x headroom
+ * for foreign/hand-mangled dirs. A dir exceeding this bound is skipped
+ * (reconstruction is best-effort; the caller falls back to the wall-clock
+ * floor, which is today's behavior).
+ */
+const MAX_SEQ_RECONSTRUCTION_SCAN_ENTRIES = 1024;
+
+/**
+ * r16 audit repair (P1/P2): reconstruct the seq floor for a session dir from
+ * the records already persisted in it — the durable write-order evidence.
+ *
+ * `allocateSeq` floors a restarted process's first seq at `Date.now()`, but a
+ * pre-restart same-tick burst can outrun the wall clock (seqs W..W+127 while
+ * the clock is still ~W). Post-restart records then carried LOWER seqs than
+ * surviving pre-restart records, and on a coarse-mtime filesystem (old and
+ * new records sharing one timestamp tick) the cap eviction's seq tie-break
+ * deleted NEWER records while retaining older ones.
+ *
+ * Bounded and best-effort by contract: at most the per-session cap of tiny
+ * reads (64 KiB each), once per session dir per process (only when the
+ * in-memory map has no entry). Symlinked `.json` entries are skipped by
+ * `readRecordSeq`'s lstat (never followed into external content). Legacy
+ * records without a seq contribute nothing (conservative). Any anomaly
+ * (missing dir, unparsable record, oversized dir) degrades to 0 — the
+ * wall-clock floor, i.e. the pre-r16 behavior.
+ */
+function reconstructMaxSeq(sessionDir: string): number {
+	try {
+		const entries = readdirSync(sessionDir);
+		if (entries.length > MAX_SEQ_RECONSTRUCTION_SCAN_ENTRIES) {
+			return 0;
+		}
+		let max = 0;
+		for (const entry of entries) {
+			if (!entry.endsWith('.json')) continue;
+			const seq = readRecordSeq(path.join(sessionDir, entry));
+			if (seq !== undefined && seq > max) {
+				max = seq;
+			}
+		}
+		return max;
+	} catch {
+		return 0;
+	}
+}
+
+function allocateSeq(sessionDir: string): number {
+	let last = lastSeqBySessionDir.get(sessionDir);
+	if (last === undefined) {
+		// r16: first allocation for this dir in THIS process — continue the
+		// counter from the dir's persisted records so a restarted writer's
+		// seqs stay above every surviving record's seq. (Bounded one-time
+		// reconstruction; see reconstructMaxSeq.)
+		last = reconstructMaxSeq(sessionDir);
+	}
+	// The counter is strictly increasing WITHIN a process (the increment
+	// covers same-tick bursts where Date.now() is constant and mtimes
+	// collide) and, since r16, across restarts whenever the persisted
+	// records are readable (best-effort: two processes making their FIRST
+	// concurrent write to the same dir can still tie — the eviction sort
+	// resolves a tie deterministically by path, and mtime remains the
+	// primary recency signal). The wall-clock floor keeps a fresh store's
+	// seqs anchored to real time.
+	const next = Math.max(last + 1, Date.now());
+	lastSeqBySessionDir.delete(sessionDir);
+	lastSeqBySessionDir.set(sessionDir, next);
+	while (lastSeqBySessionDir.size > MAX_SEQ_TRACKED_SESSION_DIRS) {
+		const oldest = lastSeqBySessionDir.keys().next().value;
+		if (oldest === undefined) break;
+		lastSeqBySessionDir.delete(oldest);
+	}
+	return next;
+}
+
 function rememberSweepCompletedAt(storeRoot: string, now: number): void {
 	// delete-then-set refreshes recency (Map insertion order = FIFO order).
 	lastSweepCompletedAtByRoot.delete(storeRoot);
@@ -164,6 +249,24 @@ interface PersistedStageBBindings {
 	sessionID: string;
 	callID: string;
 	recordedAt: number;
+	/**
+	 * r14 audit repair (P1-8, baseline defect) — corrected by r15 (P5),
+	 * continued by r16: per-session-dir write-order key. On coarse-granularity
+	 * filesystems a burst of writes lands within one mtime tick, so the
+	 * eviction sort needs a deterministic tie-break. `seq` is allocated per
+	 * session dir as max(lastSeq + 1, Date.now()) — strictly increasing
+	 * WITHIN a process (bursts included). Across restarts it continues from
+	 * the dir's persisted records (r16 bounded reconstruction at the first
+	 * allocation per dir per process), so a restarted writer's seqs stay
+	 * above every surviving record's seq; a reconstruction that cannot read
+	 * the records (missing dir, anomaly, oversized dir) falls back to the
+	 * wall-clock floor, and two processes making their first CONCURRENT
+	 * write to the same dir can still tie (resolved deterministically by
+	 * path). The eviction sort therefore orders by mtime FIRST and uses
+	 * `seq` only as the tie-break WITHIN one mtime tick. Optional on read
+	 * for legacy records; such records sort oldest within their tick.
+	 */
+	seq?: number;
 	bindings: StageBDispatchBinding[];
 }
 
@@ -256,24 +359,29 @@ export function recordStageBDispatchBindings(
 	);
 	if (bindings.length === 0) return false;
 	const nowMs = options.nowMs ?? Date.now;
+	const target = recordPath(directory, sessionID, callID);
 	const record: PersistedStageBBindings = {
 		schemaVersion: STAGE_B_BINDING_SCHEMA_VERSION,
 		sessionID,
 		callID,
 		recordedAt: nowMs(),
+		// r14 (P1-8): true write-order key — mtime bursts collide on coarse
+		// filesystems; seq keeps the cap eviction's LRU correct.
+		seq: allocateSeq(path.dirname(target)),
 		bindings: bindings.map((b) => ({
 			taskId: b.taskId,
 			generation: b.generation,
 		})),
 	};
 	try {
-		const target = recordPath(directory, sessionID, callID);
 		atomicWriteSwarmFileSync(target, JSON.stringify(record));
 		// Per-dispatch cost stays bounded (review finding 3): only the OWNING
 		// session's directory is stat'd/pruned on every write; the
 		// cross-session sweep is throttled to at most one pass per sweep
 		// interval. Both are injectable via nowMs for deterministic tests.
-		pruneSessionDir(directory, sessionID, nowMs());
+		// r14 (P1-8): the just-written record is PROTECTED from cap eviction —
+		// with colliding mtimes the old sort could evict it immediately.
+		pruneSessionDir(directory, sessionID, nowMs(), { protectPath: target });
 		// Final-critic round-1 finding 2: the session-dir cap must be
 		// enforced on EVERY write — the 60 s sweep throttle alone let new
 		// session dirs accumulate unbounded between sweeps. One cheap
@@ -473,6 +581,7 @@ export function pruneSessionDir(
 	directory: string,
 	sessionID: string,
 	nowMs: number,
+	options: { protectPath?: string } = {},
 ): { dirPath: string; newest: number } | null {
 	let dirPath: string;
 	try {
@@ -480,20 +589,54 @@ export function pruneSessionDir(
 	} catch {
 		return null;
 	}
-	return pruneDirEntries(dirPath, nowMs);
+	return pruneDirEntries(dirPath, nowMs, options);
+}
+
+/**
+ * r14 audit repair (P1-8): best-effort read of a record's persisted
+ * write-order `seq` for the cap-eviction sort (and, since r16, the one-time
+ * seq-floor reconstruction). Any anomaly (missing, unparsable, no seq —
+ * legacy records) yields undefined; such records sort oldest within their
+ * mtime tick, never newest. Never throws.
+ *
+ * r15 (P5): lstat — THIS READ never follows a symlinked `.json` into content
+ * outside the store; a symlink is not a regular file and yields no seq
+ * (legacy). SCOPE (r16 correction): this lstat guarantee covers only the seq
+ * read. The TTL/mtime inspection in `pruneDirEntries` still uses `statSync`,
+ * which DOES follow symlinks — a planted symlink's TARGET mtime drives its
+ * TTL classification (a stale target TTL-prunes the LINK, a fresh target
+ * keeps it as a candidate). The eviction itself only ever unlinks the LINK
+ * (`rmSync` never follows), so external target content is never opened,
+ * modified, or deleted by the pruning path.
+ */
+function readRecordSeq(filePath: string): number | undefined {
+	try {
+		const stats = lstatSync(filePath);
+		if (!stats.isFile() || stats.size > STAGE_B_BINDING_MAX_BYTES) {
+			return undefined;
+		}
+		const parsed = JSON.parse(
+			readFileSync(filePath, 'utf-8'),
+		) as PersistedStageBBindings;
+		return typeof parsed.seq === 'number' && Number.isFinite(parsed.seq)
+			? parsed.seq
+			: undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 function pruneDirEntries(
 	dirPath: string,
 	nowMs: number,
+	options: { protectPath?: string } = {},
 ): { dirPath: string; newest: number } | null {
 	let entries: string[];
 	try {
 		entries = readdirSync(dirPath);
 	} catch {
 		return null;
-	}
-	// Atomic-write temp files (target + suffix, always carrying `.tmp`) are
+	} // Atomic-write temp files (target + suffix, always carrying `.tmp`) are
 	// crash leftovers: TTL-prune them so they cannot accumulate outside every
 	// bound, but NEVER while fresh — a fresh temp is an in-flight write and the
 	// dir must be left alone for it.
@@ -531,8 +674,36 @@ function pruneDirEntries(
 		}
 	}
 	if (fresh.length > MAX_STAGE_B_BINDING_FILES_PER_SESSION_DIR) {
-		const ordered = fresh.sort((a, b) => a.mtime - b.mtime);
-		for (const old of ordered.slice(
+		// r15 audit repair (P5): order by MTIME first (the real recency
+		// signal), with the persisted write-order `seq` demoted to a
+		// coarse-mtime TIE-BREAKER. seq is not a global order across
+		// processes (two processes' first concurrent write to one dir can
+		// tie; the path comparison resolves it deterministically) — a
+		// seq-primary sort evicted newer records while retaining older
+		// ones. r16 strengthens the tie-break's foundation: allocateSeq
+		// continues the counter from the dir's persisted records at a
+		// writer's first allocation, so a RESTARTED writer's seqs stay above
+		// every surviving record's seq even when old and new records share
+		// one coarse mtime tick (the pre-r16 wall-clock floor could restart
+		// BELOW a same-tick burst that had outrun the clock). Bounded: at
+		// most cap+1 tiny reads, only when the cap is actually exceeded.
+		// Legacy records without a seq sort oldest within their mtime tick.
+		// The just-written record (protectPath) is never evicted by the cap.
+		const stampedWithSeq = fresh.map((entry) => ({
+			...entry,
+			seq: readRecordSeq(entry.file),
+		}));
+		const ordered = stampedWithSeq.sort((a, b) => {
+			if (a.mtime !== b.mtime) return a.mtime - b.mtime;
+			const seqA = a.seq ?? Number.NEGATIVE_INFINITY;
+			const seqB = b.seq ?? Number.NEGATIVE_INFINITY;
+			if (seqA !== seqB) return seqA - seqB;
+			return a.file < b.file ? -1 : a.file > b.file ? 1 : 0;
+		});
+		const evictable = ordered.filter(
+			(entry) => entry.file !== options.protectPath,
+		);
+		for (const old of evictable.slice(
 			0,
 			fresh.length - MAX_STAGE_B_BINDING_FILES_PER_SESSION_DIR,
 		)) {
