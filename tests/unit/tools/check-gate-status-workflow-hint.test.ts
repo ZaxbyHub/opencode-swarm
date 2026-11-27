@@ -122,7 +122,7 @@ describe('check_gate_status workflow diagnostics', () => {
 
 		const result = await execute('3.1');
 
-		expect(result.workflow).toEqual({ state: "idle", generation: 2 });
+		expect(result.workflow).toEqual({ state: 'idle', generation: 2 });
 		expect(String(result.workflow_attribution_hint)).toContain(
 			'COMMITTED coder settlement',
 		);
@@ -156,7 +156,7 @@ describe('check_gate_status workflow diagnostics', () => {
 
 		const result = await execute('3.2');
 
-		expect(result.workflow).toEqual({ state: "idle", generation: 2 });
+		expect(result.workflow).toEqual({ state: 'idle', generation: 2 });
 		// Missing WAL: a never-settled task — the fail-open read leaves the
 		// terminal-settlement hint unset (no coder_delegated hint either).
 		expect(result.workflow_attribution_hint).toBeUndefined();

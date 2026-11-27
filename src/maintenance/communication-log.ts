@@ -35,10 +35,7 @@
 import * as fsSync from 'node:fs';
 import * as path from 'node:path';
 import { appendCoreEventSync } from '../events/core-events';
-import {
-	EvidenceLockTimeoutError,
-	withEvidenceLock,
-} from '../evidence/lock';
+import { EvidenceLockTimeoutError, withEvidenceLock } from '../evidence/lock';
 import { getTaskWorkflowSnapshot, readTaskEvidence } from '../gate-evidence';
 import { validateSwarmPath } from '../hooks/utils';
 import { warn } from '../utils';
@@ -446,10 +443,19 @@ export async function releaseCommunicationLogEntry(options: {
 				}
 				const target = matches[0];
 				if (target.status === 'open') {
-					return { outcome: 'refused_open', headline: target.headline } as const;
+					return {
+						outcome: 'refused_open',
+						headline: target.headline,
+					} as const;
 				}
 				_internals.writeFileSync(file, spliceOutAll(raw, [target]));
-				emitPruneEvent(directory, target, 'ai_released', reason, actorSessionID);
+				emitPruneEvent(
+					directory,
+					target,
+					'ai_released',
+					reason,
+					actorSessionID,
+				);
 				return {
 					outcome: 'released',
 					headline: target.headline,
