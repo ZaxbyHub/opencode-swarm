@@ -129,6 +129,19 @@ describe('#3915 AC4a — redactTrainingContent composes the redactSecrets floor'
 		expect(out.content).not.toContain(GH_TOKEN);
 		expect(out.redactions).toBeGreaterThan(0);
 	}, 60_000);
+
+	// F-001 (critic recommendation): the training bare pass must redact the
+	// AKIA access-key ID + adjacent 40-char secret as a composite span, not
+	// leave the secret behind after the bare AKIA arm consumes the anchor.
+	test('AC4: an AWS AKIA + adjacent 40-char secret does not survive training redaction', () => {
+		const secret = 'AbCdEfGhIjKlMnOpQrStUvWxYz012345';
+		const out = redactTrainingContent(
+			`AWS_ACCESS_KEY_ID=AKIAIOSFODNN7${secret}`,
+		);
+		expect(out.content).not.toContain('AKIAIOSFODNN7');
+		expect(out.content).not.toContain(secret);
+		expect(out.redactions).toBeGreaterThan(0);
+	}, 60_000);
 });
 
 describe('#3915 AC4b — vault persistence carries no PEM floor family', () => {

@@ -149,6 +149,15 @@ const TRAINING_BARE_TOKEN_VALUE_PATTERNS: ReadonlyArray<{
 		re: /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}/g,
 	},
 	{ label: '<redacted:github>', re: /\bgithub_pat_[A-Za-z0-9_]{22,}/g },
+	{
+		// Contextual AWS arm: AKIA access-key ID + up to 200 chars of interposed
+		// text + adjacent 40-char secret. Placed before the bare AKIA arm so the
+		// composite span is redacted whole (F-001 / critic recommendation: the
+		// bare pass must not destroy the AKIA anchor before the floor's own
+		// contextual arm can use it).
+		label: '<redacted:aws>',
+		re: /\bAKIA[0-9A-Z]{16}[^\n]{0,200}?\b[A-Za-z0-9/+=]{40}\b/g,
+	},
 	{ label: '<redacted:aws>', re: /\bAKIA[0-9A-Z]{16}\b/g },
 	{ label: '<redacted:slack>', re: /\bxox[baprs]-[A-Za-z0-9-]{10,}/g },
 	{ label: '<redacted:google>', re: /\bAIza[A-Za-z0-9_-]{30,}/g },

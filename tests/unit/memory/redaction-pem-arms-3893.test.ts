@@ -5,11 +5,15 @@
  * 1. END-delimited with a bounded gap `[\s\S]{0,8192}` (byte-identical
  *    behavior for real blocks — a real PEM body is far below the bound).
  * 2. A no-END fallback consuming the MAXIMAL key-material run
- *    `-----BEGIN [A-Z ]*PRIVATE KEY-----[A-Za-z0-9+/=\s]*` (linear
- *    character-class scan; stops at the first character OUTSIDE the class —
- *    letters, digits, the base64 symbols and whitespace are all key material,
- *    so glued words are consumed and punctuation ends the run; no output
- *    cap; runs LAST under sequential priority).
+ *    `-----BEGIN [A-Z ]*PRIVATE KEY-----(?:[A-Za-z0-9+/=\s]|[A-Za-z0-9-]{0,64}\x3a[^\n]{0,256}\n)*(?:-----END [A-Z ]*PRIVATE KEY-----)?`
+ *    (linear character-class scan; stops at the first character OUTSIDE the
+ *    class — letters, digits, the base64 symbols and whitespace are all key
+ *    material, so glued words are consumed and punctuation ends the run; no
+ *    output cap; runs LAST under sequential priority). #3952: the run also
+ *    consumes newline-terminated PEM header lines (`Proc-Type: 4,ENCRYPTED`,
+ *    `DEK-Info: …`) — the pre-#3952 class had no `:` and stopped mid-header,
+ *    leaking the body after it — plus an optional trailing END marker so a
+ *    complete over-bound block redacts whole.
  *
  * Base defect (plan v3 F11): the lazy `[\s\S]*?` arm scanned unbounded when
  * no END delimiter existed (quadratic across multiple BEGIN markers), and
@@ -128,5 +132,54 @@ describe('#3893/#3915 PEM arms — no-END fallback (F11)', () => {
 		expect(out).toContain(', afterwards, nothing followed it');
 		expect(out).toContain('[REDACTED:private_key_block_nogap]');
 		expect(out).not.toContain('BEGIN PRIVATE KEY');
+	});
+});
+
+// #3952 regression (PR #3952 critic probe): the bounded END arm's 8192-char
+// gap cannot span an over-bound body, and the no-END fallback's key-material
+// class had no `:` — it stopped mid-name at `Proc`/`DEK` (residue
+// `[REDACTED:private_key_block_nogap]-Type: 4,ENCRYPTED\nDEK-Info: …\n\nMIIEvQ…`)
+// and left the header values plus the ENTIRE base64 body after them in
+// cleartext. Base redacted the same input whole; head must too. All bodies
+// are 'A'-filled synthetic material; no real keys.
+describe('#3952 regression — PEM header lines before an over-bound body', () => {
+	const HEADER_LINES =
+		'Proc-Type: 4,ENCRYPTED\nDEK-Info: DES-EDE3-CBC,0123456789ABCDEF\n';
+	// 10714 chars — beyond the bounded arm's 8192-char gap (the critic
+	// probe's over-bound RSA body size).
+	const OVER_BOUND_BODY = `${'A1b2C3d4E5f6'.repeat(892)}A1b2C3d4E5`;
+
+	test('an over-bound COMPLETE block with Proc-Type/DEK-Info headers redacts with NO body material', () => {
+		const input = `-----BEGIN RSA PRIVATE KEY-----\n${HEADER_LINES}\n${OVER_BOUND_BODY}\n-----END RSA PRIVATE KEY-----`;
+		expect(containsSecret(input)).toBe(true);
+		const out = redactSecrets(input);
+		// Header lines are key material too: name, value, and the encryption
+		// IV must all be gone, not just the base64 body.
+		expect(out).not.toContain('A1b2C3d4E5f6');
+		expect(out).not.toContain('Proc-Type');
+		expect(out).not.toContain('DEK-Info');
+		expect(out).not.toContain('DES-EDE3-CBC');
+		expect(out).not.toContain('0123456789ABCDEF');
+		expect(out).toBe('[REDACTED:private_key_block_nogap]');
+	});
+
+	test('an over-bound BEGIN-only block with headers still redacts ALL material when END is missing', () => {
+		const input = `-----BEGIN RSA PRIVATE KEY-----\n${HEADER_LINES}\n${OVER_BOUND_BODY}`;
+		const out = redactSecrets(input);
+		expect(out).toBe('[REDACTED:private_key_block_nogap]');
+		expect(out).not.toContain('A1b2C3d4E5f6');
+		expect(out).not.toContain('Proc-Type');
+		expect(out).not.toContain('DEK-Info');
+		expect(out).not.toContain('DES-EDE3-CBC');
+	});
+
+	test('findSecrets reports exactly the nogap family for the over-bound header-bearing block', () => {
+		const input = `-----BEGIN RSA PRIVATE KEY-----\n${HEADER_LINES}\n${OVER_BOUND_BODY}\n-----END RSA PRIVATE KEY-----`;
+		// The bounded END arm cannot span the ~10.7k-char gap, so the
+		// whole-block family must NOT fire here — the nogap fallback is the
+		// arm that carries this input.
+		expect(findSecrets(input).map((f) => f.type)).toEqual([
+			'private_key_block_nogap',
+		]);
 	});
 });

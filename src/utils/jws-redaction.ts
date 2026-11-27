@@ -547,33 +547,46 @@ export function findRedactableTokenSpans(text: string): JwsTokenSpan[] {
 	// and the enumerated additions (an eyJ span's absorption can overreach
 	// into a glued header the greedy scan DID discover — dropping it as a
 	// mid-token artifact is what leaked the tail).
-	const isClampEligible = (c: RichCandidate): boolean =>
-		eyJ.some(
-			(head) =>
-				head.start < c.end &&
-				c.start < head.end &&
-				c.start > head.start &&
-				Math.min(head.end, c.end) <= c.headerEnd,
-		);
+	//
+	// #3952 F-009 (quadratic arbitration bound): the four-term predicate
+	// reduces EXACTLY to `head.start < c.start < head.end <= c.headerEnd`.
+	// `head.start < c.end` is implied (every candidate ends >= 44 chars past
+	// its start: header >= 13, payload >= 20, signature >= 10), and because
+	// `headerEnd < c.end` always holds (the payload and signature segments
+	// follow the header segment), `Math.min(head.end, c.end) <= c.headerEnd`
+	// can only be satisfied by `head.end <= c.headerEnd`. The reduced form
+	// says the head must strictly CONTAIN c.start — and eyJ spans are
+	// pairwise DISJOINT and start-sorted (the scanner advances past every
+	// span it pushes), so at most ONE head can ever be eligible per
+	// candidate: the unique span containing c.start. Candidates are
+	// enumerated with strictly increasing starts, so a single monotonic
+	// pointer over eyJ replaces the former per-candidate `eyJ.some(...)`
+	// eligibility scan plus the inner eyJ rescan — O(candidates × eyJ) on
+	// token-dense input (the F-009 quadratic; measured 2.2 s on a 1.4 MB
+	// adversarial blob, growing ~4x per doubling) becomes one
+	// O(candidates + eyJ) sweep with byte-identical output. Pointer safety:
+	// a head is skipped only when its CURRENT end <= c.start — it fails the
+	// containment term for this and every later candidate (ends only ever
+	// shrink: clamping writes `head.end = c.start`), and a clamped head's
+	// new end equals the clamping candidate's start, so the sweep advances
+	// past it exactly when the old re-check-against-CURRENT-end rule would
+	// have rejected it.
 	const clampedKeys = new Set<string>();
-	// Apply clamps: each clamp candidate yields its prefix from the FIRST eyJ
-	// span it overreaches. Candidates are enumerated left-to-right, so the
-	// earliest candidate per head wins (re-check the overlap against the
-	// CURRENT end — a later candidate clamps an already-clamped head only if
-	// it still overreaches).
+	let headIdx = 0;
 	for (const c of enumerated) {
-		if (!isClampEligible(c)) continue;
-		for (const head of eyJ) {
-			if (
-				head.start < c.end &&
-				c.start < head.end &&
-				c.start > head.start &&
-				Math.min(head.end, c.end) <= c.headerEnd
-			) {
-				head.end = c.start;
-				clampedKeys.add(`${c.start}:${c.end}`);
-				break;
-			}
+		while (headIdx < eyJ.length && eyJ[headIdx].end <= c.start) {
+			headIdx += 1;
+		}
+		if (headIdx >= eyJ.length) break; // every head ends at/before this candidate's start — none can contain a later start
+		// Apply clamps: each clamp candidate yields its prefix from the FIRST
+		// (unique containing) eyJ span it overreaches. Candidates are
+		// enumerated left-to-right, so the earliest candidate per head wins
+		// (the head's CURRENT end is re-checked — a later candidate clamps an
+		// already-clamped head only if it still overreaches).
+		const head = eyJ[headIdx];
+		if (head.start < c.start && head.end <= c.headerEnd) {
+			head.end = c.start;
+			clampedKeys.add(`${c.start}:${c.end}`);
 		}
 	}
 

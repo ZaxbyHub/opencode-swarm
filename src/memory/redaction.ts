@@ -132,8 +132,24 @@ const SECRET_PATTERNS: SecretPattern[] = [
 		// BEGIN-only residue. Over-redaction of a bare BEGIN marker is the
 		// safe, fail-closed direction. Deliberately ONE generic arm: `[A-Z ]*`
 		// covers both the RSA/EC/... and the OPENSSH delimiter spellings.
+		//
+		// #3952: the run also consumes newline-terminated PEM header lines
+		// (`Proc-Type: 4,ENCRYPTED`, `DEK-Info: DES-EDE3-CBC,<iv>`). The
+		// pre-#3952 run class had no `:`, so on an over-bound (or END-less)
+		// encrypted block it stopped mid-name at `Proc`/`DEK` and left the
+		// header values plus the ENTIRE base64 body after them in cleartext.
+		// Each header line is name `[A-Za-z0-9-]{0,64}` + `:` + value
+		// `[^\n]{0,256}` + a REQUIRED newline — newline-terminated only, so
+		// prose after a sentence boundary still ends the run exactly as
+		// before, and the per-line bounds keep the scan linear. The empty-name
+		// alternative is what makes pure-alnum names (`Comment:`) work too:
+		// material chars eat the name, then the `:`-anchored form consumes the
+		// rest of the line. An optional trailing END marker lets a complete
+		// over-bound block redact WHOLE (same output shape as the bounded
+		// arms) without widening the run past the block's own delimiter.
 		type: 'private_key_block_nogap',
-		pattern: /-----BEGIN [A-Z ]*PRIVATE KEY-----[A-Za-z0-9+/=\s]*/g,
+		pattern:
+			/-----BEGIN [A-Z ]*PRIVATE KEY-----(?:[A-Za-z0-9+/=\s]|[A-Za-z0-9-]{0,64}\x3a[^\n]{0,256}\n)*(?:-----END [A-Z ]*PRIVATE KEY-----)?/g,
 	},
 ];
 

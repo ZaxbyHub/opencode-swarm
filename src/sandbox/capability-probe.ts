@@ -937,7 +937,10 @@ function syncVisibleCapability(
 	const probeSourceIdentity = _internals.currentProbeSourceIdentity(platform);
 	if (
 		_cached !== undefined &&
-		_cachedProbeSourceIdentity === probeSourceIdentity
+		_cachedProbeSourceIdentity === probeSourceIdentity &&
+		// SP-001: honour the degraded-fallback TTL so an expired enabled memo
+		// is not served as the authoritative answer between detect() calls.
+		(_cachedExpiresAt === 0 || Date.now() < _cachedExpiresAt)
 	) {
 		return _cached;
 	}

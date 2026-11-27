@@ -10,7 +10,13 @@ import { readFileSync } from 'node:fs';
 import * as path from 'node:path';
 import { writeCuratorSummary } from '../../../src/hooks/curator';
 import type { CuratorSummary } from '../../../src/hooks/curator-types';
-import { appendKnowledge } from '../../../src/hooks/knowledge-store';
+import {
+	appendKnowledge,
+	appendRetractionRecord,
+	normalize,
+	readKnowledge,
+	readRetractionRecords,
+} from '../../../src/hooks/knowledge-store';
 import { storeSummary } from '../../../src/summaries/manager';
 import {
 	writePhaseArchitectureSummary,
@@ -275,5 +281,86 @@ describe('persisted free-text floor (option b surfaces)', () => {
 		) as { entries: Array<{ verdict?: string; phase_number?: number }> };
 		expect(parsed.entries[0]?.verdict).toBe('CONCERNS');
 		expect(parsed.entries[0]?.phase_number).toBe(2);
+	});
+});
+
+describe('retraction suppression key — regression: floored normalized_lesson must match the floored lesson (F-002)', () => {
+	test('a secret-bearing retraction suppresses the floored on-disk lesson', async () => {
+		// Previous behavior (PR #3952 review F-002): the curator computed
+		// normalized_lesson from the RAW retraction text and the store persisted
+		// that caller-supplied key verbatim. normalize() strips punctuation
+		// (the underscore in ghp_…) BEFORE the secret patterns can match the
+		// normalized copy, so the stored key kept raw token material while the
+		// floored lesson on disk carried the [REDACTED:github_token]
+		// placeholder — the suppression check
+		// `suppressedLessons.has(normalize(entry.lesson))` could never match
+		// and the retracted knowledge remained visible (with the token body
+		// leaking into knowledge-retractions.jsonl).
+		const dir = canonicalMkdtemp('f002-retract-');
+		const knowledgeFile = path.join(dir, '.swarm', 'knowledge.jsonl');
+		const retractionFile = path.join(
+			dir,
+			'.swarm',
+			'knowledge-retractions.jsonl',
+		);
+		const rawLesson = `never commit the ${GH} token raw`;
+
+		// The knowledge writer floors the lesson on disk…
+		await appendKnowledge(knowledgeFile, {
+			lesson: rawLesson,
+			tags: ['t'],
+			revision: 0,
+		});
+		// …and the curator appends a retraction whose normalized_lesson is
+		// computed from the RAW text (the pre-fix caller contract).
+		await appendRetractionRecord(dir, {
+			id: 'r-f002',
+			retracted_lesson: rawLesson,
+			normalized_lesson: normalize(rawLesson),
+			recorded_at: '2026-11-26T00:00:00.000Z',
+			reported_by: 'architect',
+			matched_swarm_ids: [],
+			matched_hive_ids: [],
+		});
+
+		const persistedLesson = (
+			await readKnowledge<{ lesson: string }>(knowledgeFile)
+		)[0]?.lesson;
+		expect(persistedLesson?.includes('[REDACTED:github_token]')).toBe(true);
+
+		const records = await readRetractionRecords(dir);
+		expect(records).toHaveLength(1);
+
+		// The exact consumer predicate (knowledge-curator.ts,
+		// knowledge-reader.ts, tools/knowledge-query.ts):
+		// suppressedLessons.has(normalize(entry.lesson)) — evaluated against
+		// the FLOORED on-disk lesson.
+		const suppressed = new Set(records.map((r) => r.normalized_lesson));
+		expect(suppressed.has(normalize(persistedLesson ?? ''))).toBe(true);
+
+		// The token body (with or without the normalize-stripped underscore)
+		// must not leak into the retractions file via the key.
+		const persisted = readFileSync(retractionFile, 'utf-8');
+		expect(persisted.includes(GH)).toBe(false);
+		expect(persisted.includes(`ghp ${'w'.repeat(30)}`)).toBe(false);
+	});
+
+	test('secret-free retraction keys are byte-identical to the caller-supplied form', async () => {
+		// The recomputation must be a no-op for secret-free text so existing
+		// dedup/suppression behavior is unchanged: redactSecrets is identity on
+		// clean text, so the store persists the caller's key verbatim.
+		const dir = canonicalMkdtemp('f002-clean-');
+		await appendRetractionRecord(dir, {
+			id: 'r-f002-clean',
+			retracted_lesson: 'Always use strict mode',
+			normalized_lesson: 'always use strict mode',
+			recorded_at: '2026-11-26T00:00:00.000Z',
+			reported_by: 'architect',
+			matched_swarm_ids: [],
+			matched_hive_ids: [],
+		});
+		const records = await readRetractionRecords(dir);
+		expect(records).toHaveLength(1);
+		expect(records[0]?.normalized_lesson).toBe('always use strict mode');
 	});
 });

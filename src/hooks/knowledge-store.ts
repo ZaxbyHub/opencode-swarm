@@ -334,6 +334,33 @@ export async function appendRetractionRecord(
 	const dir = path.dirname(filePath);
 	await mkdir(dir, { recursive: true });
 
+	// F-002 (PR #3952 review): `normalized_lesson` is a suppression KEY, not
+	// free text. Every knowledge writer persists lessons through
+	// serializeKnowledgeLine, whose floor (redactSecrets) runs per string
+	// value, so the on-disk lesson this record must suppress is the FLOORED
+	// text — and every suppression consumer checks
+	// `suppressedLessons.has(normalize(entry.lesson))` against it. A key
+	// computed by the caller from the RAW retraction text diverges whenever a
+	// secret was redacted: normalize() strips punctuation (e.g. the underscore
+	// in ghp_…) BEFORE the secret patterns can match the normalized copy, so
+	// the caller-side key keeps raw token material while the floored lesson
+	// carries the `[REDACTED:<family>]` placeholder — the two normalized forms
+	// differ and the retracted knowledge remains visible (and the token body
+	// leaks into the retractions file). Recompute the key from the floored
+	// `retracted_lesson` — the exact text this store persists — so both sides
+	// of the check normalize identical input. redactSecrets is idempotent on
+	// its own output, so serializeKnowledgeLine's floor pass below leaves the
+	// recomputed key unchanged, and for secret-free text the recomputation is
+	// byte-identical to the caller's value.
+	const retractedLesson =
+		typeof record.retracted_lesson === 'string'
+			? record.retracted_lesson
+			: String(record.retracted_lesson ?? '');
+	const keyedRecord: KnowledgeRetractionRecord = {
+		...record,
+		normalized_lesson: normalize(redactSecrets(retractedLesson)),
+	};
+
 	// Same directory-level proper-lockfile discipline as appendKnowledge: a
 	// concurrent cap enforcement must not interleave with this append, and
 	// vice versa. The cap itself is enforced inside the lock via
@@ -344,7 +371,7 @@ export async function appendRetractionRecord(
 			retries: { retries: 5, minTimeout: 100, maxTimeout: 500 },
 			stale: 5000,
 		});
-		await appendCappedJsonl(filePath, serializeKnowledgeLine(record), {
+		await appendCappedJsonl(filePath, serializeKnowledgeLine(keyedRecord), {
 			maxEntries: resolveRetentionCap(
 				'MAX_RETRACTION_RECORDS',
 				MAX_RETRACTION_RECORDS,

@@ -36,6 +36,7 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import * as realFileLocks from '../../../src/parallel/file-locks';
 import { resetSwarmState, swarmState } from '../../../src/state';
 import { executePhaseComplete } from '../../../src/tools/phase-complete';
 import { safeRmRecursive } from '../../helpers/safe-test-dir';
@@ -44,8 +45,11 @@ import { canonicalMkdtemp } from '../../helpers/tmpdir';
 // -----------------------------------------------------------------------
 // Module-level mocks — MUST be before any import of the mocked modules.
 // Same seam set as phase-complete.lock-adversarial.test.ts.
+// F-006: spread real exports so mock isolation does not drop sibling
+// exports that other tests in the shared Bun process may need.
 // -----------------------------------------------------------------------
 vi.mock('../../../src/parallel/file-locks', () => ({
+	...realFileLocks,
 	tryAcquireLock: vi.fn(),
 }));
 vi.mock('../../../src/evidence/manager', () => ({
