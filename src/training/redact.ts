@@ -11,12 +11,16 @@
  * labels restyled to this site's angle-bracket form) PLUS the shared JWS
  * scanner (`src/utils/jws-redaction.ts`), whose spans win over any overlapping
  * bare arm (whole-span union — a bare arm only fires on spans disjoint from
- * scanner spans). Deliberately NOT mirrored here: the display site's
- * Cf/DI condensed-view sweep and its 512-byte display bounding — vault records
- * keep the contracted 4096-char content budget. This is defense-in-depth, not
- * a security boundary (same honest framing as #2369): the human consenting to
- * capture is trusting the redactor class, and the recorded
- * `redaction.version` pins which revision produced each stored record.
+ * scanner spans). Since #3893 (AC4) the persisted-store floor
+ * (`redactSecrets`, `src/memory/redaction.ts`) is composed AFTER the bare pass,
+ * so the memory families (PEM blocks, Stripe, GitLab, ...) and the memory
+ * site's fill-class condensed-view re-link reach this path too. Deliberately
+ * NOT mirrored here: the display site's 512-byte display bounding — vault
+ * records keep the contracted 4096-char content budget. This is
+ * defense-in-depth, not a security boundary (same honest framing as #2369):
+ * the human consenting to capture is trusting the redactor class, and the
+ * recorded `redaction.version` pins which revision produced each stored
+ * record.
  */
 
 /**
@@ -25,10 +29,18 @@
  * openrouter, openai, github, aws, slack, google, groq, jwt, base64, azure)
  * plus the shared JWS scanner. Reads accept every version 1..CURRENT so
  * pre-v2 records stay valid, exportable, and survive the expiry sweep.
+ * v3 (#3893 AC4): composed the persisted-store floor (`redactSecrets` from
+ * `src/memory/redaction.ts` — the PEM private-key blocks, Stripe, GitLab,
+ * AWS, and the remaining memory families, with the memory site's
+ * fill-class condensed-view re-link and jws_span union) into the capture
+ * path AFTER the bare-value pass. Pre-v3 records (1..2) stay valid,
+ * exportable, and survive the expiry sweep — the consent/vault schemas
+ * read `min(1)..max(CURRENT)`, so no migration is needed.
  */
+import { redactSecrets } from '../memory/redaction.js';
 import { findRedactableTokenSpans } from '../utils/jws-redaction.js';
 
-export const TRAINING_REDACTION_VERSION = 2;
+export const TRAINING_REDACTION_VERSION = 3;
 
 const URL_PATTERN = /\bhttps?:\/\/[^\s'"<>]+/g;
 
@@ -73,6 +85,36 @@ function isPlaceholderOnly(value: string): boolean {
 	return value.replace(PLACEHOLDER_OR_QUOTE, '') === '';
 }
 
+/**
+ * #3893 AC4 (F2): run the persisted-store floor (`redactSecrets`) on the
+ * segments BETWEEN complete placeholders (either vocabulary) only. An
+ * already-redacted value is never re-consumed by the floor, so every stored
+ * placeholder — and therefore every exported record — is a fixed point of the
+ * composed redactor. PLACEHOLDER_OR_QUOTE matches are short and bounded, so
+ * the split is linear and the per-segment floor scans never span a
+ * placeholder boundary (a placeholder already removed the secret it marked;
+ * re-bridging it would re-consume it).
+ */
+function applyFloorAroundPlaceholders(text: string): string {
+	const parts: string[] = [];
+	let last = 0;
+	let changed = false;
+	PLACEHOLDER_OR_QUOTE.lastIndex = 0;
+	for (const m of text.matchAll(PLACEHOLDER_OR_QUOTE)) {
+		const start = m.index ?? 0;
+		const segment = text.slice(last, start);
+		const floored = redactSecrets(segment);
+		if (floored !== segment) changed = true;
+		parts.push(floored, m[0]);
+		last = start + m[0].length;
+	}
+	const tail = text.slice(last);
+	const flooredTail = redactSecrets(tail);
+	if (flooredTail !== tail) changed = true;
+	parts.push(flooredTail);
+	return changed ? parts.join('') : text;
+}
+
 // JSON-quoted key form the loose pattern cannot bridge: `"api_key": "v"` —
 // the closing quote of the key and the opening quote of the value fall
 // outside the loose key/value classes, so this needs its own pass. The
@@ -107,6 +149,15 @@ const TRAINING_BARE_TOKEN_VALUE_PATTERNS: ReadonlyArray<{
 		re: /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}/g,
 	},
 	{ label: '<redacted:github>', re: /\bgithub_pat_[A-Za-z0-9_]{22,}/g },
+	{
+		// Contextual AWS arm: AKIA access-key ID + up to 200 chars of interposed
+		// text + adjacent 40-char secret. Placed before the bare AKIA arm so the
+		// composite span is redacted whole (F-001 / critic recommendation: the
+		// bare pass must not destroy the AKIA anchor before the floor's own
+		// contextual arm can use it).
+		label: '<redacted:aws>',
+		re: /\bAKIA[0-9A-Z]{16}[^\n]{0,200}?\b[A-Za-z0-9/+=]{40}\b/g,
+	},
 	{ label: '<redacted:aws>', re: /\bAKIA[0-9A-Z]{16}\b/g },
 	{ label: '<redacted:slack>', re: /\bxox[baprs]-[A-Za-z0-9-]{10,}/g },
 	{ label: '<redacted:google>', re: /\bAIza[A-Za-z0-9_-]{30,}/g },
@@ -297,6 +348,26 @@ export function redactTrainingContent(content: string): RedactionResult {
 		const bare = _internals.redactBareValueShapes(working);
 		working = bare.text;
 		redactions += bare.redactions;
+		// #3893 AC4 (F2): compose the persisted-store floor. The placement
+		// classes and bare families above cover SHAPES; `redactSecrets` is the
+		// persisted-store corpus (memory redaction families: PEM private-key
+		// blocks, Stripe, GitLab, AWS, ...) plus the memory site's fill-class
+		// condensed-view re-link and jws_span union — the same floor the
+		// evidence path composes. Composed LAST so its families operate on the
+		// already-placement-redacted text; counted as ONE floor redaction
+		// (the floor is one pass, matching the evidence-path counting). The
+		// floor carries the SAME placeholder guard as the arms above (it runs
+		// only on segments OUTSIDE complete placeholders — either vocabulary):
+		// the memory env_secret arm is case-insensitive over `…_key=`-shaped
+		// assignments, so an unguarded floor would re-consume the training
+		// arm's own `api_key=<redacted>` output and break the export
+		// re-redaction fixed point. Masking keeps every stored placeholder a
+		// fixed point of the composed redactor.
+		const floored = applyFloorAroundPlaceholders(working);
+		if (floored !== working) {
+			redactions += 1;
+			working = floored;
+		}
 	} catch {
 		return {
 			content: TRAINING_REDACTION_FAILED_PLACEHOLDER,

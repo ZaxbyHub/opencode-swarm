@@ -485,7 +485,7 @@ async function fetchExistingCommentBodies(
 				};
 			}
 			reviewPage++;
-			endpoints.push(endpoints[1] + '&page=' + reviewPage);
+			endpoints.push(`${endpoints[1]}&page=${reviewPage}`);
 		}
 	}
 	return { bodies, reviews };
@@ -817,7 +817,7 @@ export async function executePrReviewSubmission(
 								directory,
 								path.join('pr-review', runId, 'native-submission.json'),
 							),
-							JSON.stringify({
+							`${JSON.stringify({
 								run_id: runId,
 								head: headSha,
 								repo: repoSlug.toLowerCase(),
@@ -826,7 +826,7 @@ export async function executePrReviewSubmission(
 								body_sha256: createHash('sha256')
 									.update(body.trimEnd())
 									.digest('hex'),
-							}) + '\n',
+							})}\n`,
 						);
 					} catch {
 						return 'write-failed';

@@ -82,9 +82,141 @@ const URL_CREDENTIALS_PATTERN =
  *     characters so a run of unclosed openers stays linear (the labels
  *     the arms emit are far shorter).
  *   - A quoted value keeps its quotes.
+ *
+ * #3915 AC7 (stepped tail): `]` must stay a hard terminator so the arm's
+ * own `[REDACTED]` output is a fixed point, but that also splits a composite
+ * value at a dangling closer — `password=[LLLL…]SECRETTAIL` consumed
+ * `[LLLL…` and stopped, stranding `]SECRETTAIL` in the clear. When the
+ * matched value ends at a `]` that is NOT part of a complete placeholder
+ * unit and non-delimiter value content follows, the value CONTINUES past
+ * the closer in bounded steps (consumeSteppedValueTail below), so the whole
+ * credential is consumed while a delimiter-delimited boundary still ends the
+ * value.
  */
 const EVIDENCE_CREDENTIAL_KV_PATTERN =
 	/(^|[\s,;"'([{])([A-Za-z0-9_ -]{0,40}(?:token|secret|password|passwd|authorization|credential|bearer|api[-_ ]?key|access[-_ ]?key)[A-Za-z0-9_ -]{0,40}\s*[=:]\s*)(?:bearer|basic|digest|negotiate|apikey)?\s*("[^"'\n]*"|'[^'\n]*'|(?:\[REDACTED[^\]\s]{0,64}\]|<redacted[^>\s]{0,64}>|[^\s,;"'}\]])(?:\[REDACTED[^\]\s]{0,64}\]|<redacted[^>\s]{0,64}>|[^\s,;"'}\]])*)/gi;
+
+/**
+ * One character of plain KV value content — the exact class the value
+ * repetition above accepts for a non-placeholder, non-quoted character
+ * (everything except the value delimiters `\s , ; " ' } ]`). Kept in sync
+ * with the pattern's `[^\s,;"'}\]]` alternatives; tested per UTF-16 code
+ * unit, matching the pattern's own non-`u` code-unit semantics.
+ */
+const KV_VALUE_CHAR_RE = /[^\s,;"'}\]]/;
+
+/**
+ * #3915 AC7: stepped tail consumption after a dangling placeholder-close
+ * bound. The value repetition treats `]` as a hard terminator, so a value
+ * that opens a bracket-shaped label (`password=[LLLL…`) stops before the
+ * closer and any secret material glued after the `]` survived in the clear.
+ * When the matched value ends at such a dangling `]` run and NON-delimiter
+ * value content follows it, the value continues: consume the closer run plus
+ * the following value run, then look again. Each step advances at least two
+ * characters, so the walk stays LINEAR; it stops at the first
+ * delimiter-delimited boundary — exactly where the arm itself stops — so a
+ * complete `password=[REDACTED]` followed by prose or whitespace is still a
+ * fixed point (a `]` that belongs to a complete `[REDACTED…]` unit is
+ * already inside the match and never reaches this walk).
+ */
+function consumeSteppedValueTail(text: string, end: number): number {
+	for (;;) {
+		let closer = end;
+		while (closer < text.length && text[closer] === ']') closer += 1;
+		if (closer === end) return end; // the value did not end at a `]` bound
+		let run = closer;
+		while (run < text.length && KV_VALUE_CHAR_RE.test(text[run])) run += 1;
+		if (run === closer) return end; // only delimiters follow: not value content
+		end = run;
+	}
+}
+
+/**
+ * #3915 AC8: the value repetition above relies on ONE regex match, and past
+ * a few hundred thousand code units the engine SILENTLY declines to match it
+ * — no error, no match, the value survives verbatim (measured on this
+ * stack: a ~250k-code-unit value still matches; ~300k does not). Real
+ * credentials are orders of magnitude shorter, so any `key=`-anchored value
+ * longer than this many code units is redacted directly by slicing the value
+ * span, bypassing the regex. The pre-scan is LINEAR: one small anchor match
+ * per credential key plus one forward walk per value, and it is a no-op on
+ * every input at or below the threshold.
+ */
+const OVERSIZED_KV_VALUE_THRESHOLD = 100_000;
+
+/**
+ * The ANCHOR half of EVIDENCE_CREDENTIAL_KV_PATTERN (separator + key +
+ * `=`/`:` + the optional scheme word): identical key semantics, no value
+ * group, so the oversized pre-scan only ever redacts values the KV arm
+ * itself would claim.
+ */
+const EVIDENCE_CREDENTIAL_KV_ANCHOR_PATTERN =
+	/(^|[\s,;"'([{])([A-Za-z0-9_ -]{0,40}(?:token|secret|password|passwd|authorization|credential|bearer|api[-_ ]?key|access[-_ ]?key)[A-Za-z0-9_ -]{0,40}\s*[=:]\s*)(?:bearer|basic|digest|negotiate|apikey)?\s*/gi;
+
+/**
+ * #3915 AC8 pre-scan: redact `key=`-anchored values longer than
+ * OVERSIZED_KV_VALUE_THRESHOLD code units by direct slice splicing. The
+ * value span uses the same consumption semantics as the regular arm (the
+ * plain value run, then the #3915 AC7 stepped tail), so both arms agree on
+ * where a value ends.
+ */
+function redactOversizedCredentialValues(text: string): string {
+	if (text.length <= OVERSIZED_KV_VALUE_THRESHOLD) return text;
+	EVIDENCE_CREDENTIAL_KV_ANCHOR_PATTERN.lastIndex = 0;
+	let out = '';
+	let cursor = 0;
+	let replaced = false;
+	for (const match of text.matchAll(EVIDENCE_CREDENTIAL_KV_ANCHOR_PATTERN)) {
+		const start = match.index ?? 0;
+		if (start < cursor) continue; // inside an earlier oversized value
+		const anchorEnd = start + match[0].length;
+		let end = anchorEnd;
+		while (end < text.length && KV_VALUE_CHAR_RE.test(text[end])) end += 1;
+		end = consumeSteppedValueTail(text, end);
+		if (end - anchorEnd <= OVERSIZED_KV_VALUE_THRESHOLD) continue;
+		out += `${text.slice(cursor, start)}${match[0]}[REDACTED]`;
+		cursor = end;
+		replaced = true;
+	}
+	if (!replaced) return text;
+	out += text.slice(cursor);
+	return out;
+}
+
+/**
+ * The key/value placement arm, applied with manual span arithmetic instead
+ * of `String.replace` so the #3915 AC7 stepped tail can consume value
+ * content BEYOND the regex match end (a replace callback can only rewrite
+ * the matched span). Byte-identical to the previous replace for every value
+ * that does not end at a dangling `]`.
+ */
+function redactCredentialKvPlacements(text: string): string {
+	EVIDENCE_CREDENTIAL_KV_PATTERN.lastIndex = 0;
+	let out = '';
+	let cursor = 0;
+	let replaced = false;
+	for (const match of text.matchAll(EVIDENCE_CREDENTIAL_KV_PATTERN)) {
+		const start = match.index ?? 0;
+		if (start < cursor) continue; // inside a previously extended value
+		const separator = match[1];
+		const prefix = match[2];
+		const value = match[3];
+		const end = consumeSteppedValueTail(text, start + match[0].length);
+		const quoted =
+			value.length >= 2 &&
+			(value.startsWith('"') || value.startsWith("'")) &&
+			value.endsWith(value[0]);
+		const placeholder = quoted
+			? `${value[0]}[REDACTED]${value[0]}`
+			: '[REDACTED]';
+		out += `${text.slice(cursor, start)}${separator}${prefix}${placeholder}`;
+		cursor = end;
+		replaced = true;
+	}
+	if (!replaced) return text;
+	out += text.slice(cursor);
+	return out;
+}
 
 /** The quoted-JSON key form the loose key/value pattern cannot bridge. */
 const EVIDENCE_QUOTED_JSON_CREDENTIAL_PATTERN =
@@ -379,23 +511,19 @@ function redactEvidenceOnce(text: string): string {
 	// block needs both delimiters in ONE match) and a placeholder in
 	// the middle of such a span must not break the match.
 	working = _internals.redactSecrets(working);
+	// #3915 AC8: oversized-value pre-scan FIRST — past a few hundred
+	// thousand code units the engine silently declines the KV value match,
+	// so a `key=`-anchored value over the threshold is redacted by direct
+	// slice splicing before the regex arm runs (linear; a no-op at or below
+	// the threshold).
+	working = redactOversizedCredentialValues(working);
 	// Credential PLACEMENT shapes (key/value, quoted-JSON, scheme) — the
 	// persisted-store corpus only matches a PREFIXED key, so these are
 	// ported from the training redactor to keep the evidence path a
-	// superset of the surface the training vault already covers.
-	working = working.replace(
-		EVIDENCE_CREDENTIAL_KV_PATTERN,
-		(_m: string, separator: string, prefix: string, value: string) => {
-			const quoted =
-				value.length >= 2 &&
-				(value.startsWith('"') || value.startsWith("'")) &&
-				value.endsWith(value[0]);
-			const placeholder = quoted
-				? `${value[0]}[REDACTED]${value[0]}`
-				: '[REDACTED]';
-			return `${separator}${prefix}${placeholder}`;
-		},
-	);
+	// superset of the surface the training vault already covers. The KV arm
+	// carries the #3915 AC7 stepped tail (whole-value consumption past a
+	// dangling placeholder-close bound).
+	working = redactCredentialKvPlacements(working);
 	working = working.replace(
 		EVIDENCE_QUOTED_JSON_CREDENTIAL_PATTERN,
 		(_m, openQuote: string, key: string, sep: string) =>

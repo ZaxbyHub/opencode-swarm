@@ -34,6 +34,7 @@ import type {
 	GeneralCouncilDeliberationResponse,
 	GeneralCouncilMemberResponse,
 } from '../council/general-council-types';
+import { redactEvidenceDeep } from '../security/evidence-redaction';
 import { getAgentSession } from '../state';
 import * as logger from '../utils/logger.js';
 import { createSwarmTool } from './create-tool';
@@ -271,6 +272,11 @@ export const convene_general_council: ReturnType<typeof tool> = createSwarmTool(
 			);
 
 			// ── Evidence write to .swarm/council/general/ ─────────────────────
+			// #3915 final-critic R6: the persisted council result carries
+			// model-authored free text (member responses, deliberation,
+			// web-search snippets/queries) — redact at the write boundary
+			// like the other council evidence writers; the tool RESPONSE
+			// keeps the raw result for the calling agent.
 			const evidenceDir = path.join(workingDir, '.swarm', 'council', 'general');
 			const safeTimestamp = result.timestamp.replace(/[:.]/g, '-');
 			const evidenceFile = `${safeTimestamp}-${input.mode}.json`;
@@ -279,7 +285,7 @@ export const convene_general_council: ReturnType<typeof tool> = createSwarmTool(
 				await fs.promises.mkdir(evidenceDir, { recursive: true });
 				await fs.promises.writeFile(
 					evidencePath,
-					JSON.stringify(result, null, 2),
+					JSON.stringify(redactEvidenceDeep(result), null, 2),
 				);
 			} catch (err) {
 				// Evidence write is best-effort; surface but do not abort.

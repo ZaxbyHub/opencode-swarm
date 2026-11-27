@@ -8,6 +8,7 @@ import {
 } from 'node:fs';
 import * as path from 'node:path';
 import { readSwarmFileAsync, validateSwarmPath } from '../hooks/utils';
+import { redactSecrets } from '../memory/redaction';
 import { resolveRetentionCap } from '../retention/caps';
 import { warn } from '../utils';
 import { bunWrite } from '../utils/bun-compat';
@@ -100,12 +101,20 @@ interface SummaryEntry {
 export async function storeSummary(
 	directory: string,
 	id: string,
-	fullOutput: string,
-	summaryText: string,
+	rawFullOutput: string,
+	rawSummaryText: string,
 	maxStoredBytes: number,
 ): Promise<void> {
 	// Validate summary ID
 	const sanitizedId = sanitizeSummaryId(id);
+
+	// #3893/#3915 owner-approved fix (option b): summaryText/fullOutput are
+	// model output persisted to disk — compose the persisted-store floor
+	// (redactSecrets) BEFORE entry construction so the size check and the
+	// stored bytes both reflect the redacted content. Content-preserving for
+	// clean text; idempotent on its own output.
+	const fullOutput = redactSecrets(rawFullOutput);
+	const summaryText = redactSecrets(rawSummaryText);
 
 	// Check size limit against the serialized JSON entry (not just raw input)
 	// to ensure the wrapper doesn't push the total beyond maxStoredBytes

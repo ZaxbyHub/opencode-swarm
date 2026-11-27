@@ -31,9 +31,11 @@
  *   whose header is 40+ chars of standard base64 with no eyJ prefix. Candidate
  *   headers are the WHOLE segment first (bare, incl. trailing `=` padding),
  *   then — only for interior `=` separators with non-empty prefix AND
- *   suffix — the suffix after the separator, with the span starting AT the
- *   separator so a `key`-style prefix stays visible and no re-matchable
- *   `key=[REDACTED:jwt]` residue survives. `/` inside base64 is material,
+ *   suffix — the suffix after the separator, with the span starting at the
+ *   base64 RUN (#3915 AC6: the separator itself stays in the output so the
+ *   URL-query / KV placement arms can re-anchor on the emitted placeholder
+ *   and consume a glued tail with it; a `key`-style prefix stays visible).
+ *   `/` inside base64 is material,
  *   never a boundary. Consumers push eyJ spans before generic spans so an
  *   equal-start overlap keeps the jwt label; the longest span wins
  *   overlaps (maximal non-overlapping coverage).
@@ -374,8 +376,11 @@ export function findJwsTokenSpans(text: string): JwsTokenSpan[] {
  * a >=10-char signature. Candidate headers are the WHOLE segment first (bare
  * placement, trailing `=` padding included), then the suffix after interior
  * `=` separators with non-empty prefix AND suffix (assignment placement: the
- * span starts AT the separator, so a `key`-style prefix stays visible and the
- * separator is consumed — no re-matchable `key=[REDACTED:jwt]` residue).
+ * span starts at the base64 RUN, so a `key`-style prefix AND the separator
+ * stay visible — #3915 AC6: the retained `=` is the anchor a placement arm
+ * (URL-query / KV) needs to re-match `key=[REDACTED:jwt]` and consume a
+ * glued tail together with the placeholder; consuming the `=` stranded the
+ * tail on the evidence path).
  * Earliest valid separator wins. This is the GREEDY base scan (accept and
  * advance past the consumed triple) whose output is pinned by suites; the
  * #3743 enumeration variant below reuses the same acceptance test.
@@ -429,7 +434,14 @@ function genericCandidateAt(
 			b64RunStart > 1 &&
 			(seg[b64RunStart - 1] as string) === '='
 		) {
-			candidateStart = (offsets[i] as number) + b64RunStart - 1;
+			// #3915 AC6: the span starts AT the base64 run. The previous
+			// `- 1` pulled the separator `=` into the span, which destroyed
+			// the anchor the placement arms need: `?token=eyJ….moretail`
+			// came back as `?token[REDACTED:jwt].moretail`, stranding the
+			// glued tail on the evidence path. The `=` stays in the output
+			// so the URL-query / KV arm re-anchors on `token=[REDACTED:jwt]`
+			// and consumes the placeholder together with the tail.
+			candidateStart = (offsets[i] as number) + b64RunStart;
 		}
 	}
 	if (candidateStart === -1) return null;
@@ -535,33 +547,46 @@ export function findRedactableTokenSpans(text: string): JwsTokenSpan[] {
 	// and the enumerated additions (an eyJ span's absorption can overreach
 	// into a glued header the greedy scan DID discover — dropping it as a
 	// mid-token artifact is what leaked the tail).
-	const isClampEligible = (c: RichCandidate): boolean =>
-		eyJ.some(
-			(head) =>
-				head.start < c.end &&
-				c.start < head.end &&
-				c.start > head.start &&
-				Math.min(head.end, c.end) <= c.headerEnd,
-		);
+	//
+	// #3952 F-009 (quadratic arbitration bound): the four-term predicate
+	// reduces EXACTLY to `head.start < c.start < head.end <= c.headerEnd`.
+	// `head.start < c.end` is implied (every candidate ends >= 44 chars past
+	// its start: header >= 13, payload >= 20, signature >= 10), and because
+	// `headerEnd < c.end` always holds (the payload and signature segments
+	// follow the header segment), `Math.min(head.end, c.end) <= c.headerEnd`
+	// can only be satisfied by `head.end <= c.headerEnd`. The reduced form
+	// says the head must strictly CONTAIN c.start — and eyJ spans are
+	// pairwise DISJOINT and start-sorted (the scanner advances past every
+	// span it pushes), so at most ONE head can ever be eligible per
+	// candidate: the unique span containing c.start. Candidates are
+	// enumerated with strictly increasing starts, so a single monotonic
+	// pointer over eyJ replaces the former per-candidate `eyJ.some(...)`
+	// eligibility scan plus the inner eyJ rescan — O(candidates × eyJ) on
+	// token-dense input (the F-009 quadratic; measured 2.2 s on a 1.4 MB
+	// adversarial blob, growing ~4x per doubling) becomes one
+	// O(candidates + eyJ) sweep with byte-identical output. Pointer safety:
+	// a head is skipped only when its CURRENT end <= c.start — it fails the
+	// containment term for this and every later candidate (ends only ever
+	// shrink: clamping writes `head.end = c.start`), and a clamped head's
+	// new end equals the clamping candidate's start, so the sweep advances
+	// past it exactly when the old re-check-against-CURRENT-end rule would
+	// have rejected it.
 	const clampedKeys = new Set<string>();
-	// Apply clamps: each clamp candidate yields its prefix from the FIRST eyJ
-	// span it overreaches. Candidates are enumerated left-to-right, so the
-	// earliest candidate per head wins (re-check the overlap against the
-	// CURRENT end — a later candidate clamps an already-clamped head only if
-	// it still overreaches).
+	let headIdx = 0;
 	for (const c of enumerated) {
-		if (!isClampEligible(c)) continue;
-		for (const head of eyJ) {
-			if (
-				head.start < c.end &&
-				c.start < head.end &&
-				c.start > head.start &&
-				Math.min(head.end, c.end) <= c.headerEnd
-			) {
-				head.end = c.start;
-				clampedKeys.add(`${c.start}:${c.end}`);
-				break;
-			}
+		while (headIdx < eyJ.length && eyJ[headIdx].end <= c.start) {
+			headIdx += 1;
+		}
+		if (headIdx >= eyJ.length) break; // every head ends at/before this candidate's start — none can contain a later start
+		// Apply clamps: each clamp candidate yields its prefix from the FIRST
+		// (unique containing) eyJ span it overreaches. Candidates are
+		// enumerated left-to-right, so the earliest candidate per head wins
+		// (the head's CURRENT end is re-checked — a later candidate clamps an
+		// already-clamped head only if it still overreaches).
+		const head = eyJ[headIdx];
+		if (head.start < c.start && head.end <= c.headerEnd) {
+			head.end = c.start;
+			clampedKeys.add(`${c.start}:${c.end}`);
 		}
 	}
 

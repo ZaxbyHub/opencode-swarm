@@ -15,8 +15,8 @@ function needle(run: string, n: number): string {
 }
 
 describe('#3840 training redaction families', () => {
-	test('version is 2', () => {
-		expect(TRAINING_REDACTION_VERSION).toBe(2);
+	test('version is 3 (#3893 AC4 added the redactSecrets floor; #3840 added the bare families)', () => {
+		expect(TRAINING_REDACTION_VERSION).toBe(3);
 	});
 
 	const families: Array<[string, (i: number) => string]> = [
@@ -161,5 +161,38 @@ describe('#3840 training redaction families', () => {
 		expect(result.content.includes(token)).toBe(false);
 		expect(result.content).not.toMatch(/<redacted:[a-z0-9]+>/);
 		expect(result.content).toContain('<redacted>');
+	});
+
+	// ── #3893 AC9 (F2 fill-split re-link at the training site) ────────────
+	// Zero-width fill SPLITS of well-known credential families were invisible
+	// to the training arms at base (they match raw text only). The F2 floor
+	// composition (redactSecrets after the bare pass) re-links them through
+	// the memory site's fill-class condensed view. Methodology matches the
+	// frozen check-ac9: fill code units are stripped from BOTH the secret
+	// projection and the output before the substring check, so the assertion
+	// tests RE-LINKING, not raw byte survival — and the SPECIFIC synthetic
+	// secret must be absent (never just output-changed). All tokens synthetic.
+	test('AC9: a ghp_ token split by ZWSP after "gh" does not survive', () => {
+		const token = `gh${String.fromCharCode(0x200b)}p_${'A'.repeat(36)}`;
+		const result = redactTrainingContent(`ci log carried ${token}`);
+		const stripped = result.content.replace(/\u200b|\u200c|\u0301|\u2800/g, '');
+		expect(stripped.includes(`ghp_${'A'.repeat(36)}`)).toBe(false);
+		expect(result.redactions).toBeGreaterThan(0);
+	});
+
+	test('AC9: an sk-ant- token split by ZWSP inside the prefix does not survive', () => {
+		const token = `sk-a${String.fromCharCode(0x200b)}nt-${'B'.repeat(24)}`;
+		const result = redactTrainingContent(`trace showed ${token}`);
+		const stripped = result.content.replace(/\u200b|\u200c|\u0301|\u2800/g, '');
+		expect(stripped.includes(`sk-ant-${'B'.repeat(24)}`)).toBe(false);
+		expect(result.redactions).toBeGreaterThan(0);
+	});
+
+	test('AC9: an AKIA key split by ZWNJ inside the prefix does not survive', () => {
+		const token = `AK${String.fromCharCode(0x200c)}IA${'ABCDEFGHIJKLMNOP'}`;
+		const result = redactTrainingContent(`env dump had ${token}`);
+		const stripped = result.content.replace(/\u200b|\u200c|\u0301|\u2800/g, '');
+		expect(stripped.includes('AKIAABCDEFGHIJKLMNOP')).toBe(false);
+		expect(result.redactions).toBeGreaterThan(0);
 	});
 });

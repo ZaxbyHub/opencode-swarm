@@ -29,6 +29,7 @@ import {
 	type EvaluationRetentionResult,
 } from '../evaluation/retention.js';
 import { readSwarmFileAsync, validateSwarmPath } from '../hooks/utils';
+import { redactEvidenceDeep } from '../security/evidence-redaction';
 import { SNAPSHOT_EXCLUDED_EVIDENCE_ENTRIES } from '../tools/phase-complete/snapshot-identity';
 import { warn } from '../utils';
 import { bunWrite } from '../utils/bun-compat';
@@ -275,7 +276,10 @@ export async function saveEvidence(
 			};
 
 			// Check size limit
-			const bundleJson = JSON.stringify(updatedBundle);
+			// #3893/#3915 owner-approved fix (option b): evidence bundles carry
+			// finding/model free text — redact at the write boundary (the
+			// #3844 evidence-boundary pattern).
+			const bundleJson = JSON.stringify(redactEvidenceDeep(updatedBundle));
 			if (bundleJson.length > EVIDENCE_MAX_JSON_BYTES) {
 				throw new Error(
 					`Evidence bundle size (${bundleJson.length} bytes) exceeds maximum (${EVIDENCE_MAX_JSON_BYTES} bytes)`,
@@ -453,7 +457,7 @@ export async function loadEvidence(
 					sanitizedTaskId,
 					async () => {
 						const evidenceDir = path.dirname(evidencePath);
-						const bundleJson = JSON.stringify(validated);
+						const bundleJson = JSON.stringify(redactEvidenceDeep(validated));
 						const tempPath = path.join(
 							evidenceDir,
 							`evidence.json.tmp.${Date.now()}.${process.pid}`,

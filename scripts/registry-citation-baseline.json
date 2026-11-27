@@ -114,13 +114,6 @@
 			"note": "Pre-existing debt, not approved drift: \"persistReportJson\" exists in src/commands/coupling.ts but not inside src/commands/coupling.ts:153 (epic-turbo-state.writerCitations[2])."
 		},
 		{
-			"rowId": "evidence-bundles",
-			"file": "src/summaries/manager.ts",
-			"identifier": "storeSummary",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"storeSummary\" exists in src/summaries/manager.ts but not inside src/summaries/manager.ts:132 (evidence-bundles.writerCitations[2])."
-		},
-		{
 			"rowId": "knowledge-application-legacy",
 			"file": "src/hooks/knowledge-application-gate.ts",
 			"identifier": "knowledgeApplicationTransformScan",
