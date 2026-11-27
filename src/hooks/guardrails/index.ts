@@ -1533,46 +1533,81 @@ export function createGuardrailsHooks(
 									isStrictTaskId(taskId) ? taskId : null,
 								);
 							}
-							if (verdict.kind === 'fail' && isStrictTaskId(taskId))
-								try {
-									const updated = await transitionTaskWorkflowEvidence(
-										effectiveDirectory,
-										taskId,
-										{
-											type: 'stage_a_failed',
-											expectedGeneration: pendingGateTask.generation,
-											transitionId: `pre-check:${input.callID}`,
-										},
+							if (verdict.kind === 'fail' && isStrictTaskId(taskId)) {
+								// 2026-11-27 (task 2.18 retry-circuit wedge): an
+								// infrastructure-only pre_check failure (gate
+								// execution/persistence error — the durable stock
+								// or the environment failed, nothing about the
+								// coder's content was rejected) must not consume
+								// the task's retry budget or wedge its workflow
+								// state. Observed live: the sast_scan evidence
+								// bundle crossed its byte cap, EVERY further gate
+								// run's save threw, each run recorded
+								// stage_a_failed, and the task burned its full
+								// retry contingency on infrastructure alone —
+								// TASK_RETRY_USER_ESCALATION_REQUIRED with no
+								// coder attempt ever failing on content. The
+								// transition is therefore not written at all
+								// (same writer-level pattern as the scope-prep
+								// refusal fix): retryCount, retryHistory,
+								// lastOutcome, and the state stay untouched; the
+								// architect sees a bounded route event plus an
+								// always-visible advisory and simply re-runs the
+								// gate once the environment is repaired.
+								if (verdict.cause === 'infrastructure') {
+									emitStageARoute('pre_check_infra_failed', taskId);
+									pushAdvisory(
+										session,
+										`STAGE A FAILED ON INFRASTRUCTURE for task ${taskId}: pre_check_batch failed on a gate execution/persistence error (e.g. a missing tool, a scan-process failure, or an evidence-bundle write error), not on the code under gate. The task's retry budget and workflow state are UNTOUCHED — do not re-dispatch a coder for this. Remediation: repair the environment or the reported storage condition, then re-run pre_check_batch.`,
 									);
-									const next = getTaskWorkflowSnapshot(updated);
-									session.taskWorkflowStates.set(taskId, next.state);
-									updateTaskWorkflowCache(session, taskId, next);
-									emitStageARoute('pre_check_failed', taskId);
-								} catch (err) {
-									const code = stageAWriteErrorCode(err);
-									if (code && STAGE_A_CODER_MUTATION_REQUIRED_CODES.has(code)) {
-										logger.criticalWarn(
-											`[guardrails] Stage A failure write failed for task ${taskId}: ${code}. An accepted coder mutation is required before Stage A can be recorded again. If the task is rework_required because Stage B did not require a code change, the architect-only recover_rework_task path is valid after fresh green pre_check_batch proof; for a genuine defect, dispatch a coder for a real code change, and mark the task blocked only when neither path applies.`,
-										);
-										pushAdvisory(
-											session,
-											`STAGE A WRITE FAILED (${code}) for task ${taskId}: pre_check_batch failed but an accepted coder mutation is required before Stage A can be recorded again. If the task is rework_required because Stage B did not require a code change, the architect-only recover_rework_task path is valid after fresh green pre_check_batch proof; for a genuine defect, dispatch a coder for a real code change, and mark the task blocked only when neither path applies.`,
-										);
-									} else if (code && STAGE_A_ATTRIBUTION_MISS_CODES.has(code)) {
-										logger.criticalWarn(
-											`[guardrails] Stage A failure write failed for task ${taskId}: ${code}. Run /swarm recover ${taskId}.`,
-										);
-										pushAdvisory(
-											session,
-											`STAGE A WRITE FAILED (${code}) for task ${taskId}: pre_check_batch failed but the rework transition was rejected. Run /swarm recover ${taskId} to repair attribution.`,
-										);
-									} else {
-										warn('Failed to persist Stage A failure', {
+								} else {
+									try {
+										const updated = await transitionTaskWorkflowEvidence(
+											effectiveDirectory,
 											taskId,
-											error: String(err),
-										});
+											{
+												type: 'stage_a_failed',
+												expectedGeneration: pendingGateTask.generation,
+												transitionId: `pre-check:${input.callID}`,
+											},
+										);
+										const next = getTaskWorkflowSnapshot(updated);
+										session.taskWorkflowStates.set(taskId, next.state);
+										updateTaskWorkflowCache(session, taskId, next);
+										emitStageARoute('pre_check_failed', taskId);
+									} catch (err) {
+										const code = stageAWriteErrorCode(err);
+										if (
+											code &&
+											STAGE_A_CODER_MUTATION_REQUIRED_CODES.has(code)
+										) {
+											logger.criticalWarn(
+												`[guardrails] Stage A failure write failed for task ${taskId}: ${code}. An accepted coder mutation is required before Stage A can be recorded again. If the task is rework_required because Stage B did not require a code change, the architect-only recover_rework_task path is valid after fresh green pre_check_batch proof; for a genuine defect, dispatch a coder for a real code change, and mark the task blocked only when neither path applies.`,
+											);
+											pushAdvisory(
+												session,
+												`STAGE A WRITE FAILED (${code}) for task ${taskId}: pre_check_batch failed but an accepted coder mutation is required before Stage A can be recorded again. If the task is rework_required because Stage B did not require a code change, the architect-only recover_rework_task path is valid after fresh green pre_check_batch proof; for a genuine defect, dispatch a coder for a real code change, and mark the task blocked only when neither path applies.`,
+											);
+										} else if (
+											code &&
+											STAGE_A_ATTRIBUTION_MISS_CODES.has(code)
+										) {
+											logger.criticalWarn(
+												`[guardrails] Stage A failure write failed for task ${taskId}: ${code}. Run /swarm recover ${taskId}.`,
+											);
+											pushAdvisory(
+												session,
+												`STAGE A WRITE FAILED (${code}) for task ${taskId}: pre_check_batch failed but the rework transition was rejected. Run /swarm recover ${taskId} to repair attribution.`,
+											);
+										} else {
+											warn('Failed to persist Stage A failure', {
+												taskId,
+												error: String(err),
+											});
+										}
 									}
 								}
+							}
 						} else if (verdict.kind === 'pass') {
 							if (
 								session.lastGateFailure?.taskId === taskId &&

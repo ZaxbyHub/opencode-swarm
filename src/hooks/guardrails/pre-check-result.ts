@@ -2,7 +2,22 @@ const MAX_PRE_CHECK_RESULT_BYTES = 512_000;
 
 export type PreCheckVerdict =
 	| { kind: 'pass' }
-	| { kind: 'fail'; code: 'PRE_CHECK_FAILED' | 'PRE_CHECK_INPUT_INVALID' }
+	| {
+			kind: 'fail';
+			code: 'PRE_CHECK_FAILED' | 'PRE_CHECK_INPUT_INVALID';
+			/**
+			 * 2026-11-27 (task 2.18 retry-circuit wedge): what the failure says
+			 * about the CODE under gate. `'infrastructure'` means every failing
+			 * gate signal is positively an execution/persistence error (a gate
+			 * wrapper error, a scan-process error, an evidence-save throw —
+			 * nothing about the coder's content was rejected); `'content'` is
+			 * everything else, including every unprovable shape (findings,
+			 * fail verdicts, truncation, contradictions). Conservative by
+			 * construction: only a positively proven execution-only failure is
+			 * infrastructure.
+			 */
+			cause: 'content' | 'infrastructure';
+	  }
 	| { kind: 'skip' }
 	| { kind: 'invalid'; code: 'PRE_CHECK_RESULT_INVALID' };
 
@@ -306,6 +321,98 @@ function hardGateExplicitlyFailed(
 }
 
 /**
+ * 2026-11-27 (task 2.18 retry-circuit wedge): classify what a FAILING batch
+ * says about the code under gate. Only `secretscan` and `sast_scan` can fail
+ * the batch (lint and quality_budget are informational in the producer), so
+ * the classifier walks exactly the two hard gates.
+ *
+ * A gate's failure is INFRASTRUCTURE only when it is positively an
+ * execution/persistence error and positively nothing else:
+ *  - a wrapper-level `error` string (scan tool missing, process failure,
+ *    evidence-save throw — the 2.18 shape: "Failed to persist sast evidence:
+ *    Evidence bundle size ... exceeds maximum ...") with no findings in the
+ *    result, or
+ *  - a result-level `error` string with zero findings and a non-degraded
+ *    failure kind (the producer marks execution failures with BOTH a fail
+ *    verdict and an error — the verdict alone is ambiguous and never proves
+ *    content).
+ * Everything else — findings, an error-free fail verdict, baseline mismatch,
+ * truncation, the compact-omitted shape, contradictory shapes (failed with
+ * neither an error nor content) — is CONTENT (or unprovable, which counts as
+ * content). The batch is infrastructure iff at least one gate contributed an
+ * infrastructure failure and NO gate contributed a content failure.
+ */
+function classifyPreCheckFailureCause(
+	parsed: Record<string, unknown>,
+): 'content' | 'infrastructure' {
+	let sawInfrastructureSignal = false;
+	for (const key of HARD_GATE_KEYS) {
+		const toolResult = parsed[key];
+		if (!isRecord(toolResult)) return 'content';
+		const result = toolResult.result;
+		const resultRecord = isRecord(result)
+			? (result as Record<string, unknown>)
+			: null;
+		const wrapperError =
+			typeof toolResult.error === 'string' &&
+			toolResult.error !== COMPACT_OUTPUT_OMITTED_MESSAGE
+				? toolResult.error
+				: null;
+		const resultError =
+			resultRecord !== null &&
+			typeof resultRecord.error === 'string' &&
+			resultRecord.error !== COMPACT_OUTPUT_OMITTED_MESSAGE
+				? resultRecord.error
+				: null;
+		if (!hardGateExplicitlyFailed(key, toolResult, parsed)) continue;
+		// Truncated/omitted shapes are unprovable — never infrastructure.
+		if (
+			toolResult.result_omitted !== undefined ||
+			toolResult.error === COMPACT_OUTPUT_OMITTED_MESSAGE
+		) {
+			return 'content';
+		}
+		// Content payload: findings on the code under gate, a fail verdict the
+		// ERROR did not drive (the producer marks execution failures with
+		// verdict 'fail' AND an error — a verdict alone is ambiguous), or a
+		// baseline mismatch (always definitive).
+		const findingsPresent =
+			resultRecord !== null &&
+			((Array.isArray(resultRecord.findings) &&
+				resultRecord.findings.length > 0) ||
+				(typeof resultRecord.count === 'number' && resultRecord.count > 0));
+		const verdictFailWithoutError =
+			resultRecord !== null &&
+			resultRecord.verdict === 'fail' &&
+			wrapperError === null &&
+			resultError === null;
+		const baselineUsed = resultRecord?.baseline_used === true;
+		if (findingsPresent || verdictFailWithoutError || baselineUsed) {
+			return 'content';
+		}
+		// The designed semgrep degradation shape (process exit, zero findings)
+		// never fails the batch on its own; a FAILED batch carrying it without
+		// the sast_degraded flag is contradictory — unprovable, therefore
+		// content.
+		if (
+			key === 'sast_scan' &&
+			resultRecord?.failure_kind === 'semgrep_process_exit'
+		) {
+			return 'content';
+		}
+		if (wrapperError !== null || resultError !== null) {
+			sawInfrastructureSignal = true;
+			continue;
+		}
+		// Failed with neither an execution error nor a content payload —
+		// contradictory shape (e.g. ran:false with no error). Unprovable,
+		// therefore content.
+		return 'content';
+	}
+	return sawInfrastructureSignal ? 'infrastructure' : 'content';
+}
+
+/**
  * Decode the public pre_check_batch result without treating nested text as
  * control data. Unknown, oversized, truncated, or contradictory shapes are
  * non-passing and receive one bounded diagnostic code.
@@ -398,7 +505,14 @@ export function decodePreCheckResult(output: unknown): PreCheckVerdict {
 	}
 	if (batchStatus === 'invalid') {
 		return allSkipped && parsed.gates_passed === false
-			? { kind: 'fail', code: 'PRE_CHECK_INPUT_INVALID' }
+			? {
+					kind: 'fail',
+					code: 'PRE_CHECK_INPUT_INVALID',
+					// A malformed batch INPUT (no files, oversize input, bad
+					// directory) rejected the CALL, not the coder's content —
+					// every gate in this shape carries only the input error.
+					cause: 'infrastructure',
+				}
 			: { kind: 'invalid', code: 'PRE_CHECK_RESULT_INVALID' };
 	}
 	if (batchStatus === 'completed' && !anyRan) {
@@ -428,7 +542,11 @@ export function decodePreCheckResult(output: unknown): PreCheckVerdict {
 
 	return parsed.gates_passed
 		? { kind: 'pass' }
-		: { kind: 'fail', code: 'PRE_CHECK_FAILED' };
+		: {
+				kind: 'fail',
+				code: 'PRE_CHECK_FAILED',
+				cause: classifyPreCheckFailureCause(parsed),
+			};
 }
 
 export const _internals = {

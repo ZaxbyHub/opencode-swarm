@@ -226,6 +226,25 @@ export async function reportToolSideStageA(
 			return;
 		}
 
+		// 2026-11-27 (task 2.18 retry-circuit wedge): an infrastructure-only
+		// pre_check failure (gate execution/persistence error — nothing about
+		// the coder's content was rejected) must not consume the task's retry
+		// budget or wedge its workflow state. The tool-side writer applies
+		// the same rule as the guardrails hook writer: no stage_a_failed
+		// transition at all; retryCount, retryHistory, lastOutcome, and the
+		// state stay untouched; the architect sees a bounded route event plus
+		// an always-visible advisory and re-runs the gate once the
+		// environment is repaired.
+		if (verdict.kind === 'fail' && verdict.cause === 'infrastructure') {
+			emitRoute(input, 'pre_check_infra_failed', taskId);
+			emitDurableAttributionAdvisory(
+				input.sessionID,
+				`${input.directory}\u0000stage-a-infra-failed`,
+				`STAGE A FAILED ON INFRASTRUCTURE for task ${taskId}: pre_check_batch failed on a gate execution/persistence error (e.g. a missing tool, a scan-process failure, or an evidence-bundle write error), not on the code under gate. The task's retry budget and workflow state are UNTOUCHED — do not re-dispatch a coder for this. Remediation: repair the environment or the reported storage condition, then re-run pre_check_batch.`,
+			);
+			return;
+		}
+
 		try {
 			await transitionTaskWorkflowEvidence(input.directory, taskId, {
 				type: verdict.kind === 'pass' ? 'stage_a_passed' : 'stage_a_failed',

@@ -1393,6 +1393,7 @@ store's 256 KiB per-line cap. The closed route vocabulary:
 |---|---|---|
 | valid_pass | Correlated PASS applied; task advanced to pre_check_passed | None — proceed to Stage B |
 | pre_check_failed | Correlated FAIL applied; task moved to rework_required | Re-dispatch the coder with the findings |
+| pre_check_infra_failed | Correlated FAIL classified as infrastructure-only (a gate execution/persistence error — e.g. a missing tool, a scan-process failure, or an evidence-bundle write error — with no findings on the code under gate); NO transition written, the task's retry budget and workflow state are untouched | Do NOT re-dispatch a coder — repair the environment or the reported storage condition, then re-run the gate |
 | invalid_result | Result not decodable as a valid pre_check_batch outcome; no transition | Re-run the gate; check the tool output contract |
 | no_task_correlation | Completed gate call with no attributable task | Run `/swarm recover` to repair attribution, then re-run the gate |
 | attribution_ambiguous | Durable fallback could not safely attribute (multiple candidates, or sole candidate unbound/unverifiable) | Run `/swarm recover` to repair Stage A attribution |

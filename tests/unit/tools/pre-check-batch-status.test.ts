@@ -96,6 +96,9 @@ test('serializer compacts combined diagnostics while preserving a failed verdict
 	expect(decodePreCheckResult(serialized)).toEqual({
 		kind: 'fail',
 		code: 'PRE_CHECK_FAILED',
+		// Truncated/omitted gate results are unprovable — the conservative
+		// content classification (never infrastructure on truncation).
+		cause: 'content',
 	});
 });
 

@@ -129,7 +129,7 @@ async function drive(
 }
 
 describe('stage-a-route-events', () => {
-	test('vocabulary is closed with exactly the eight frozen routes', () => {
+	test('vocabulary is closed with exactly the nine frozen routes', () => {
 		expect([...STAGE_A_ROUTES].sort()).toEqual([
 			'attribution_ambiguous',
 			'duplicate_result',
@@ -137,6 +137,7 @@ describe('stage-a-route-events', () => {
 			'late_result',
 			'no_task_correlation',
 			'pre_check_failed',
+			'pre_check_infra_failed',
 			'terminal_settlement_wedge',
 			'valid_pass',
 		]);

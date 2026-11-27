@@ -224,6 +224,97 @@ describe('stage-a-self-report', () => {
 		});
 	});
 
+	test('2026-11-27 (task 2.18): an infrastructure-only fail records NO transition — retry budget untouched, infra route emitted', async () => {
+		await settle('1.2');
+		const infraPayload = JSON.stringify({
+			gates_passed: false,
+			total_duration_ms: 1,
+			batch_status: 'completed',
+			lint: { ran: true, duration_ms: 1 },
+			secretscan: {
+				ran: true,
+				duration_ms: 1,
+				result: {
+					count: 0,
+					findings: [],
+					files_scanned: 5,
+					incomplete_files: 0,
+					incomplete_paths: [],
+				},
+			},
+			sast_scan: {
+				ran: true,
+				duration_ms: 1,
+				result: { verdict: 'pass', findings: [] },
+				error:
+					'Failed to persist sast evidence: Evidence bundle size (528522 bytes) exceeds maximum (512000 bytes)',
+			},
+			quality_budget: { ran: false, duration_ms: 0 },
+		});
+		await report(infraPayload, {
+			sessionTaskId: '1.2',
+			callId: 'self:infra:1',
+		});
+		const snapshot = getTaskWorkflowSnapshot(
+			await readTaskEvidence(directory, '1.2'),
+		);
+		expect(snapshot.state).toBe('coder_delegated');
+		expect(snapshot.retryCount).toBe(0);
+		expect(snapshot.retryHistory).toEqual([]);
+		expect(snapshot.lastOutcome).toBe('accepted_mutation');
+		const events = routeEvents(directory);
+		expect(events).toHaveLength(1);
+		expect(events[0]).toMatchObject({
+			route: 'pre_check_infra_failed',
+			taskId: '1.2',
+		});
+	});
+
+	test('2026-11-27 (task 2.18): repeated infra fails never spiral the retry counter', async () => {
+		await settle('1.3');
+		const infraPayload = JSON.stringify({
+			gates_passed: false,
+			total_duration_ms: 1,
+			batch_status: 'completed',
+			lint: { ran: true, duration_ms: 1 },
+			secretscan: {
+				ran: true,
+				duration_ms: 1,
+				result: {
+					count: 0,
+					findings: [],
+					files_scanned: 5,
+					incomplete_files: 0,
+					incomplete_paths: [],
+				},
+			},
+			sast_scan: {
+				ran: true,
+				duration_ms: 1,
+				result: { verdict: 'pass', findings: [] },
+				error: 'Semgrep execution failed: spawn ENOENT',
+			},
+			quality_budget: { ran: false, duration_ms: 0 },
+		});
+		for (let i = 1; i <= 5; i++) {
+			await report(infraPayload, {
+				sessionTaskId: '1.3',
+				callId: `self:infra:x${i}`,
+			});
+		}
+		const snapshot = getTaskWorkflowSnapshot(
+			await readTaskEvidence(directory, '1.3'),
+		);
+		expect(snapshot.state).toBe('coder_delegated');
+		expect(snapshot.retryCount).toBe(0);
+		expect(snapshot.retryHistory).toEqual([]);
+		expect(
+			routeEvents(directory).filter(
+				(event) => event.route === 'pre_check_infra_failed',
+			),
+		).toHaveLength(5);
+	});
+
 	test('fail-open: a decode-skipped (invalid) result reports nothing', async () => {
 		await report('definitely not json {{{');
 		const session = ensureAgentSession('architect');
